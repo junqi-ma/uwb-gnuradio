@@ -115,6 +115,32 @@ BOOST_AUTO_TEST_CASE(test_detector_silence_no_packet)
     BOOST_CHECK_EQUAL(dbg->num_messages(), 0);
 }
 
+// work() instrumentation is used by layered benchmarks for buffer attribution.
+// Drive the real UwbDetector work() path and assert stats are filled (not
+// hard-coded expectations for chunk sizes — only that the shipped counters run).
+BOOST_AUTO_TEST_CASE(test_detector_work_chunk_stats)
+{
+    std::vector<gr_complex> x(100000, gr_complex(0.0f, 0.0f));
+    std::vector<gr_complex> tmpl(128, gr_complex(0.125f, 0.0f));
+    auto det = gr::uwb::UwbDetector::make(tmpl, 64, 2000, 1e30f, 4, 4, 1, 8);
+    det->reset_work_stats();
+    BOOST_CHECK_EQUAL(det->work_calls(), 0);
+
+    auto dbg = gr::blocks::message_debug::make();
+    run_detector(x, det, dbg);
+
+    BOOST_CHECK_EQUAL(dbg->num_messages(), 0);
+    BOOST_CHECK_GT(det->work_calls(), 0);
+    BOOST_CHECK_GT(det->work_items_total(), 0);
+    BOOST_CHECK_GT(det->work_min_noutput_items(), 0);
+    BOOST_CHECK_GE(det->work_max_noutput_items(), det->work_min_noutput_items());
+    BOOST_CHECK_GT(det->work_mean_noutput_items(), 0.0);
+    uint64_t hist[5] = {};
+    det->work_noutput_histogram(hist);
+    uint64_t hist_sum = hist[0] + hist[1] + hist[2] + hist[3] + hist[4];
+    BOOST_CHECK_EQUAL(hist_sum, det->work_calls());
+}
+
 // Long trailing payload after a short synthetic preamble must still detect.
 // Exercises the production preamble-horizon clamp: coarse scans only the
 // SYNC+SFD prefix, not the full multi-100k region (publish_packet P0).

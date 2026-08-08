@@ -52,7 +52,10 @@ UwbDetector::UwbDetector(
       d_fir(std::vector<gr_complex>())
 {
     // Larger chunks -> fewer work() calls, less per-call flowgraph overhead.
-    set_max_noutput_items(65536);
+    // Buffer scan (benchmark_detector source-search / detector-sparse) knees
+    // near 512k–1M items; 64k was a hard self-cap that kept GR work() in the
+    // ~4k default regime when only upstream min_output_buffer was enlarged.
+    set_max_noutput_items(1048576);
     message_port_register_out(pmt::mp("packet"));
 
     // Matched-filter taps: the stateless kernel convolves, so use the reversed
@@ -156,11 +159,57 @@ uint64_t UwbDetector::dropped_regions() const
     return sm_.dropped_regions() + d_dropped_jobs_;
 }
 
+uint64_t UwbDetector::work_calls() const { return d_work_calls_; }
+uint64_t UwbDetector::work_items_total() const { return d_work_items_total_; }
+int UwbDetector::work_min_noutput_items() const { return d_work_min_n_; }
+int UwbDetector::work_max_noutput_items() const { return d_work_max_n_; }
+double UwbDetector::work_mean_noutput_items() const
+{
+    return d_work_calls_ > 0
+               ? static_cast<double>(d_work_items_total_) /
+                     static_cast<double>(d_work_calls_)
+               : 0.0;
+}
+void UwbDetector::work_noutput_histogram(uint64_t out[5]) const
+{
+    for (int i = 0; i < 5; ++i)
+        out[i] = d_work_hist_[i];
+}
+void UwbDetector::reset_work_stats()
+{
+    d_work_calls_ = 0;
+    d_work_items_total_ = 0;
+    d_work_min_n_ = 0;
+    d_work_max_n_ = 0;
+    for (int i = 0; i < 5; ++i)
+        d_work_hist_[i] = 0;
+}
+
 int
 UwbDetector::work(int noutput_items,
                   gr_vector_const_void_star& input_items,
                   gr_vector_void_star& /*output_items*/)
 {
+    // Record requested chunk size (scheduler grant) for buffer/chunk attribution.
+    if (noutput_items > 0) {
+        ++d_work_calls_;
+        d_work_items_total_ += static_cast<uint64_t>(noutput_items);
+        if (d_work_min_n_ == 0 || noutput_items < d_work_min_n_)
+            d_work_min_n_ = noutput_items;
+        if (noutput_items > d_work_max_n_)
+            d_work_max_n_ = noutput_items;
+        if (noutput_items <= 8192)
+            ++d_work_hist_[0];
+        else if (noutput_items <= 32768)
+            ++d_work_hist_[1];
+        else if (noutput_items <= 131072)
+            ++d_work_hist_[2];
+        else if (noutput_items <= 524288)
+            ++d_work_hist_[3];
+        else
+            ++d_work_hist_[4];
+    }
+
     const auto* in = reinterpret_cast<const gr_complex*>(input_items[0]);
 
     const int consumed = (noutput_items > 1) ? noutput_items - 1 : noutput_items;

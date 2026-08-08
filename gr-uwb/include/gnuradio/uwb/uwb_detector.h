@@ -109,6 +109,16 @@ public:
     uint64_t dropped_regions() const;
     void set_coarse_stride(size_t stride);
 
+    // Low-overhead work-chunk stats (filled by work(); read after top_block::run).
+    uint64_t work_calls() const;
+    uint64_t work_items_total() const;
+    int work_min_noutput_items() const;
+    int work_max_noutput_items() const;
+    double work_mean_noutput_items() const;
+    // Histogram buckets: ≤8k, 8k–32k, 32k–128k, 128k–512k, >512k
+    void work_noutput_histogram(uint64_t out[5]) const;
+    void reset_work_stats();
+
 protected:
     UwbDetector(const std::vector<std::complex<float>>& known_preamble,
                 size_t pre_trigger,
@@ -174,6 +184,13 @@ private:
     size_t d_jobs_in_flight_ = 0;
     bool d_worker_stop_ = false;
     uint64_t d_dropped_jobs_ = 0;
+
+    // work() instrumentation (single consumer thread; no atomics needed)
+    uint64_t d_work_calls_ = 0;
+    uint64_t d_work_items_total_ = 0;
+    int d_work_min_n_ = 0;
+    int d_work_max_n_ = 0;
+    uint64_t d_work_hist_[5] = {};
 };
 
 } // namespace uwb
