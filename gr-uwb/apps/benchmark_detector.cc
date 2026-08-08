@@ -15,12 +15,16 @@
  *   benchmark_detector <cfile> <mode> [options]
  *     mode:
  *       reference | fast | coarse
+ *       source-null             — PatternSource → null_sink (GR plumbing baseline)
+ *       source-search           — PatternSource → UwbDetector (never-trigger thr)
  *       detector-gate | detector-sparse | detector-dense
  *       detector-region         — continuous Region IQ → coarse/fine (core)
  *       detector-region-stream  — min-gap packet stream → full UwbDetector
  *       detector-profile        — per-stage wall-time breakdown + advice
  *     options: --reps N --energy-dec D --coarse-dec D --target N --gap G
  *              --regions N  (detector-region/profile, default 200)
+ *              --buffer-items N --max-noutput-items N
+ *              --source pattern|vector --threshold VALUE --repeat N
  */
 
 #ifdef HAVE_CONFIG_H
@@ -36,12 +40,18 @@
 #include <gnuradio/uwb/uwb_preamble_detector.h>
 #include <pmt/pmt.h>
 
+#include <algorithm>
 #include <chrono>
+#include <climits>
+#include <cmath>
 #include <complex>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <memory>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -62,9 +72,73 @@ constexpr size_t kCoarseReps = 1;
 constexpr size_t kCoarseMargin = 16;
 constexpr size_t kCoarseStride = 1;
 
+// Forward decls (definitions later in this TU).
+bool load_packet_and_template(const std::string& cfile,
+                              std::vector<gr_complex>& pkt,
+                              std::vector<gr_complex>& tmpl);
+
+// ---------------------------------------------------------------------------
+// Low-overhead work-chunk instrumentation (single work thread; no atomics).
+// Histogram: ≤8k | 8k–32k | 32k–128k | 128k–512k | >512k
+// ---------------------------------------------------------------------------
+struct WorkChunkStats {
+    uint64_t work_calls = 0;
+    uint64_t items_total = 0;
+    int min_n = 0;
+    int max_n = 0;
+    uint64_t hist[5] = {};
+
+    void record(int n)
+    {
+        if (n <= 0)
+            return;
+        ++work_calls;
+        items_total += static_cast<uint64_t>(n);
+        if (min_n == 0 || n < min_n)
+            min_n = n;
+        if (n > max_n)
+            max_n = n;
+        if (n <= 8192)
+            ++hist[0];
+        else if (n <= 32768)
+            ++hist[1];
+        else if (n <= 131072)
+            ++hist[2];
+        else if (n <= 524288)
+            ++hist[3];
+        else
+            ++hist[4];
+    }
+
+    double mean() const
+    {
+        return work_calls > 0 ? static_cast<double>(items_total) /
+                                    static_cast<double>(work_calls)
+                              : 0.0;
+    }
+
+    void print(const char* label) const
+    {
+        std::printf("%s work_calls       : %llu\n", label,
+                    static_cast<unsigned long long>(work_calls));
+        std::printf("%s items_total      : %llu\n", label,
+                    static_cast<unsigned long long>(items_total));
+        std::printf("%s noutput min/mean/max : %d / %.1f / %d\n", label, min_n,
+                    mean(), max_n);
+        std::printf("%s hist ≤8k|8-32k|32-128k|128-512k|>512k : "
+                    "%llu %llu %llu %llu %llu\n",
+                    label, static_cast<unsigned long long>(hist[0]),
+                    static_cast<unsigned long long>(hist[1]),
+                    static_cast<unsigned long long>(hist[2]),
+                    static_cast<unsigned long long>(hist[3]),
+                    static_cast<unsigned long long>(hist[4]));
+    }
+};
+
 // ---------------------------------------------------------------------------
 // PatternSource: streams [packet, gap-silence, packet, ...] up to `target`
 // samples without storing the whole stream (so ~1e9-sample runs fit in memory).
+// Exact-target: never produces past d_target (fixes last-chunk overshoot).
 // ---------------------------------------------------------------------------
 class PatternSource : public gr::sync_block
 {
@@ -85,18 +159,26 @@ public:
     {
         auto* out = reinterpret_cast<gr_complex*>(output_items[0]);
         int produced = 0;
-        while (produced < noutput_items && d_total < d_target) {
+        while (produced < noutput_items &&
+               (d_total + static_cast<uint64_t>(produced)) < d_target) {
+            const uint64_t remaining_target =
+                d_target - d_total - static_cast<uint64_t>(produced);
+            const size_t room = static_cast<size_t>(noutput_items - produced);
+            const size_t limit =
+                static_cast<size_t>(std::min<uint64_t>(remaining_target, room));
+            if (limit == 0)
+                break;
+
             if (d_cycle_pos < d_pkt.size()) {
-                const size_t n = std::min(d_pkt.size() - d_cycle_pos,
-                                          static_cast<size_t>(noutput_items - produced));
+                const size_t n =
+                    std::min(d_pkt.size() - d_cycle_pos, limit);
                 std::memcpy(out + produced, d_pkt.data() + d_cycle_pos,
                             n * sizeof(gr_complex));
                 d_cycle_pos += n;
                 produced += static_cast<int>(n);
             } else {
                 const size_t gap_left = d_gap - (d_cycle_pos - d_pkt.size());
-                const size_t n = std::min(gap_left,
-                                          static_cast<size_t>(noutput_items - produced));
+                const size_t n = std::min(gap_left, limit);
                 std::memset(out + produced, 0, n * sizeof(gr_complex));
                 d_cycle_pos += n;
                 produced += static_cast<int>(n);
@@ -105,10 +187,14 @@ public:
                 d_cycle_pos = 0;
         }
         d_total += static_cast<uint64_t>(produced);
+        d_stats.record(produced);
         if (produced == 0)
             return -1; // done
         return produced;
     }
+
+    uint64_t total_produced() const { return d_total; }
+    const WorkChunkStats& stats() const { return d_stats; }
 
 private:
     std::vector<gr_complex> d_pkt;
@@ -116,7 +202,48 @@ private:
     uint64_t d_target;
     uint64_t d_total = 0;
     size_t d_cycle_pos = 0;
+    WorkChunkStats d_stats;
 };
+
+// Correct GR 3.10 buffer request: max=-1 so min is honored (not min(default,max)).
+void apply_source_buffer(const std::shared_ptr<gr::block>& src,
+                         long buffer_items,
+                         int max_noutput_items)
+{
+    if (buffer_items > 0) {
+        src->set_max_output_buffer(0, -1);
+        src->set_min_output_buffer(0, buffer_items);
+    }
+    if (max_noutput_items > 0)
+        src->set_max_noutput_items(max_noutput_items);
+}
+
+// Build [pkt + gap silence] stream of exactly `target` samples (for vector_source).
+std::vector<gr_complex> build_pattern_stream(const std::vector<gr_complex>& pkt,
+                                             size_t gap,
+                                             uint64_t target)
+{
+    std::vector<gr_complex> stream;
+    stream.reserve(static_cast<size_t>(target));
+    size_t cycle_pos = 0;
+    while (stream.size() < target) {
+        const size_t remain = static_cast<size_t>(target - stream.size());
+        if (cycle_pos < pkt.size()) {
+            const size_t n = std::min(pkt.size() - cycle_pos, remain);
+            stream.insert(stream.end(), pkt.begin() + static_cast<std::ptrdiff_t>(cycle_pos),
+                          pkt.begin() + static_cast<std::ptrdiff_t>(cycle_pos + n));
+            cycle_pos += n;
+        } else {
+            const size_t gap_left = gap - (cycle_pos - pkt.size());
+            const size_t n = std::min(gap_left, remain);
+            stream.insert(stream.end(), n, gr_complex(0.0f, 0.0f));
+            cycle_pos += n;
+        }
+        if (cycle_pos >= pkt.size() + gap)
+            cycle_pos = 0;
+    }
+    return stream;
+}
 
 // ---------------------------------------------------------------------------
 // PduCounter: message sink that counts PDUs without storing payloads.
@@ -228,83 +355,240 @@ int run_gate_bench(const std::string& cfile, uint64_t target, size_t gap)
     return 0;
 }
 
-int run_detector_bench(const std::string& cfile,
-                       uint64_t target,
-                       size_t gap,
-                       const std::string& label)
+// Layered GR modes share PatternSource (default), target, gap, buffer config.
+//   source-null     : PatternSource → null_sink
+//   source-search   : PatternSource → UwbDetector (threshold never fires)
+//   detector-sparse : PatternSource → UwbDetector → PduCounter (normal thr)
+//   detector-dense  : same as sparse with small gap
+struct LayeredBenchConfig {
+    std::string mode; // source-null | source-search | detector-sparse | detector-dense
+    uint64_t target = 500000000ULL;
+    size_t gap = 998143552; // ~1 pkt/s at 1 GS/s scale (scheme primary plumbing gap)
+    long buffer_items = 0;  // 0 = GR default
+    int max_noutput_items = 0; // 0 = leave defaults (detector keeps 65536)
+    std::string source_type = "pattern"; // pattern | vector
+    float energy_threshold = 1e-3f; // source-search overrides to never-fire unless set
+    bool threshold_override = false;
+    int repeat = 1;
+};
+
+struct LayeredRunResult {
+    double wall_s = 0;
+    double cpu_s = 0;
+    double ms_per_s = 0;
+    double gb_per_s = 0;
+    uint64_t processed = 0;
+    size_t detections = 0;
+    uint64_t dropped = 0;
+    uint64_t captured_iq = 0;
+    WorkChunkStats src_stats;
+    WorkChunkStats det_stats;
+    bool has_det_stats = false;
+};
+
+int run_layered_once(const std::string& cfile,
+                     const LayeredBenchConfig& cfg,
+                     LayeredRunResult& out)
 {
-    std::ifstream f(cfile, std::ios::binary);
-    if (!f) {
-        std::cerr << "cannot open " << cfile << "\n";
+    std::vector<gr_complex> pkt, tmpl;
+    if (!load_packet_and_template(cfile, pkt, tmpl))
+        return 1;
+
+    const bool is_null = (cfg.mode == "source-null");
+    const bool is_search = (cfg.mode == "source-search");
+    const bool is_detect = (cfg.mode == "detector-sparse" ||
+                            cfg.mode == "detector-dense" ||
+                            cfg.mode == "detector" ||
+                            cfg.mode == "detector-region-stream");
+
+    float thr = cfg.energy_threshold;
+    if (is_search && !cfg.threshold_override)
+        thr = 1e30f; // never leave SEARCH / never close a region
+
+    size_t gap = cfg.gap;
+    if (cfg.mode == "detector-dense" && gap == 0)
+        gap = 6000;
+
+    // --- source construction (stream build time NOT in wall clock for vector) ---
+    std::shared_ptr<gr::block> src_blk;
+    std::shared_ptr<PatternSource> pattern_src;
+    std::vector<gr_complex> vector_stream; // keep alive for vector_source
+
+    if (cfg.source_type == "vector") {
+        if (cfg.target > 250000000ULL) {
+            std::cerr << "vector source refused for target > 250M "
+                         "(use --source pattern or smaller --target)\n";
+            return 1;
+        }
+        vector_stream = build_pattern_stream(pkt, gap, cfg.target);
+        auto vs = gr::blocks::vector_source_c::make(vector_stream);
+        apply_source_buffer(vs, cfg.buffer_items, cfg.max_noutput_items);
+        src_blk = vs;
+    } else {
+        pattern_src = std::make_shared<PatternSource>(pkt, gap, cfg.target);
+        apply_source_buffer(pattern_src, cfg.buffer_items, cfg.max_noutput_items);
+        src_blk = pattern_src;
+    }
+
+    auto tb = gr::make_top_block("bench_layered");
+    if (cfg.max_noutput_items > 0)
+        tb->set_max_noutput_items(cfg.max_noutput_items);
+
+    gr::uwb::UwbDetector::sptr det;
+    std::shared_ptr<PduCounter> cnt;
+
+    if (is_null) {
+        auto ns = gr::blocks::null_sink::make(sizeof(gr_complex));
+        tb->connect(src_blk, 0, ns, 0);
+    } else if (is_search || is_detect) {
+        det = gr::uwb::UwbDetector::make(tmpl, 2032, 200000, thr, 100, 4, 1, 16);
+        det->reset_work_stats();
+        // Allow large work chunks when scanning buffers (constructor caps at 65536).
+        if (cfg.max_noutput_items > 0)
+            det->set_max_noutput_items(cfg.max_noutput_items);
+        else if (cfg.buffer_items > 65536)
+            det->unset_max_noutput_items();
+        tb->connect(src_blk, 0, det, 0);
+        if (is_detect) {
+            cnt = std::make_shared<PduCounter>();
+            tb->msg_connect(det, "packet", cnt, "packet");
+        }
+    } else {
+        std::cerr << "unknown layered mode: " << cfg.mode << "\n";
         return 1;
     }
-    f.seekg(0, std::ios::end);
-    size_t bytes = static_cast<size_t>(f.tellg());
-    f.seekg(0, std::ios::beg);
-    std::vector<gr_complex> base(bytes / sizeof(gr_complex));
-    f.read(reinterpret_cast<char*>(base.data()), static_cast<std::streamsize>(bytes));
-
-    std::vector<gr_complex> tmpl(base.begin() + kPacketStart,
-                                 base.begin() + kPacketStart + kSymbolLen);
-    std::vector<gr_complex> pkt(base.begin() + kPacketStart,
-                                base.begin() + kPacketStart + kPacketLen);
-
-    auto det = gr::uwb::UwbDetector::make(tmpl, 2032, 200000, 1e-3f, 100, 4, 1, 16);
-    std::shared_ptr<gr::block> src;
-    if (target <= 300000000ULL) {
-        // Pre-built in-memory stream: gaps are zeroed once, so the source only
-        // memcpys (no per-cycle memset generation) — isolates the detector's
-        // own cost from source-generation overhead.
-        std::vector<gr_complex> stream;
-        stream.reserve(static_cast<size_t>(target));
-        while (stream.size() < target) {
-            const size_t remain = static_cast<size_t>(target - stream.size());
-            const size_t pkt_n = std::min(pkt.size(), remain);
-            stream.insert(stream.end(), pkt.begin(), pkt.begin() + pkt_n);
-            if (stream.size() >= target)
-                break;
-            const size_t gap_n = std::min(gap, remain - pkt_n);
-            stream.insert(stream.end(), gap_n, gr_complex(0.0f, 0.0f));
-        }
-        auto vs = gr::blocks::vector_source_c::make(stream);
-        vs->set_max_output_buffer(0, 1 << 22); // ~4M complex = 32 MB
-        src = vs;
-    } else {
-        auto ps = std::make_shared<PatternSource>(pkt, gap, target);
-        ps->set_max_output_buffer(0, 1 << 22);
-        src = ps;
-    }
-    auto cnt = std::make_shared<PduCounter>();
-    auto tb = gr::make_top_block("bench_detector");
-    tb->connect(src, 0, det, 0);
-    tb->msg_connect(det, "packet", cnt, "packet");
 
     const auto w0 = std::chrono::steady_clock::now();
     const auto c0 = std::clock();
     tb->run();
     const auto c1 = std::clock();
     const auto w1 = std::chrono::steady_clock::now();
-    const double wall = std::chrono::duration<double>(w1 - w0).count();
-    const double cpu = static_cast<double>(c1 - c0) / CLOCKS_PER_SEC;
-    const double n = static_cast<double>(target);
 
-    std::printf("== UwbDetector sparse pipeline: %s ==\n", label.c_str());
-    std::printf("processed samples : %llu\n", static_cast<unsigned long long>(target));
-    std::printf("elapsed time      : %.3f s\n", wall);
-    std::printf("CPU time          : %.3f s  (utilization %.0f%%)\n", cpu,
-                wall > 0 ? 100.0 * cpu / wall : 0.0);
-    std::printf("throughput        : %.1f MS/s\n", n / wall / 1e6);
-    std::printf("throughput        : %.2f GB/s\n", n * 8.0 / wall / 1e9);
-    std::printf("dropped regions   : %llu\n", static_cast<unsigned long long>(det->dropped_regions()));
-    std::printf("detections        : %zu\n", cnt->count());
-    const double captured = static_cast<double>(cnt->total_samples());
-    std::printf("captured IQ       : %.0f samples (%.2f%% of input)\n", captured,
-                100.0 * captured / n);
-    std::printf("output stream     : %.3f MS/s (%.2f GB/s)\n",
-                captured / wall / 1e6, captured * 8.0 / wall / 1e9);
-    std::printf("1 GS/s target     : %s\n", (n / wall / 1e6) >= 1000.0 ? "MET" : "not yet");
-    std::printf("\n");
+    out.wall_s = std::chrono::duration<double>(w1 - w0).count();
+    out.cpu_s = static_cast<double>(c1 - c0) / CLOCKS_PER_SEC;
+
+    if (pattern_src) {
+        out.processed = pattern_src->total_produced();
+        out.src_stats = pattern_src->stats();
+    } else {
+        out.processed = cfg.target; // vector_source drains exactly the vector
+        out.src_stats = WorkChunkStats{}; // not instrumented
+    }
+
+    if (out.processed != cfg.target) {
+        std::cerr << "WARNING: processed (" << out.processed
+                  << ") != target (" << cfg.target << ")\n";
+    }
+
+    const double n = static_cast<double>(out.processed);
+    out.ms_per_s = out.wall_s > 0 ? n / out.wall_s / 1e6 : 0.0;
+    out.gb_per_s = out.wall_s > 0 ? n * 8.0 / out.wall_s / 1e9 : 0.0;
+
+    if (det) {
+        out.has_det_stats = true;
+        out.det_stats.work_calls = det->work_calls();
+        out.det_stats.items_total = det->work_items_total();
+        out.det_stats.min_n = det->work_min_noutput_items();
+        out.det_stats.max_n = det->work_max_noutput_items();
+        det->work_noutput_histogram(out.det_stats.hist);
+        out.dropped = det->dropped_regions();
+    }
+    if (cnt) {
+        out.detections = cnt->count();
+        out.captured_iq = cnt->total_samples();
+    }
     return 0;
+}
+
+void print_layered_result(const LayeredBenchConfig& cfg, const LayeredRunResult& r)
+{
+    std::printf("== layered %s ==\n", cfg.mode.c_str());
+    std::printf("source            : %s\n", cfg.source_type.c_str());
+    std::printf("target            : %llu\n",
+                static_cast<unsigned long long>(cfg.target));
+    std::printf("gap               : %zu\n", cfg.gap);
+    std::printf("buffer_items      : %ld  max_noutput_items : %d\n",
+                cfg.buffer_items, cfg.max_noutput_items);
+    std::printf("threshold         : %g\n",
+                (cfg.mode == "source-search" && !cfg.threshold_override)
+                    ? 1e30
+                    : static_cast<double>(cfg.energy_threshold));
+    std::printf("processed samples : %llu  (target %llu)\n",
+                static_cast<unsigned long long>(r.processed),
+                static_cast<unsigned long long>(cfg.target));
+    std::printf("elapsed time      : %.3f s\n", r.wall_s);
+    std::printf("CPU time          : %.3f s  (utilization %.0f%%)\n", r.cpu_s,
+                r.wall_s > 0 ? 100.0 * r.cpu_s / r.wall_s : 0.0);
+    std::printf("throughput        : %.1f MS/s\n", r.ms_per_s);
+    std::printf("throughput        : %.2f GB/s\n", r.gb_per_s);
+    if (cfg.source_type == "pattern")
+        r.src_stats.print("src");
+    if (r.has_det_stats)
+        r.det_stats.print("det");
+    std::printf("dropped regions   : %llu\n",
+                static_cast<unsigned long long>(r.dropped));
+    std::printf("detections        : %zu\n", r.detections);
+    if (r.captured_iq > 0) {
+        const double n = static_cast<double>(r.processed);
+        std::printf("captured IQ       : %llu samples (%.2f%% of input)\n",
+                    static_cast<unsigned long long>(r.captured_iq),
+                    n > 0 ? 100.0 * r.captured_iq / n : 0.0);
+        std::printf("output stream     : %.3f MS/s (%.2f GB/s)\n",
+                    r.wall_s > 0 ? r.captured_iq / r.wall_s / 1e6 : 0.0,
+                    r.wall_s > 0 ? r.captured_iq * 8.0 / r.wall_s / 1e9 : 0.0);
+    }
+    std::printf("1 GS/s target     : %s\n",
+                r.ms_per_s >= 1000.0 ? "MET" : "not yet");
+    std::printf("\n");
+}
+
+int run_layered_bench(const std::string& cfile, LayeredBenchConfig cfg)
+{
+    if (cfg.mode == "detector-dense" && cfg.gap == 998143552)
+        cfg.gap = 6000; // dense default unless user overrode gap earlier... handled in main
+
+    std::vector<double> rates;
+    rates.reserve(static_cast<size_t>(cfg.repeat));
+    LayeredRunResult last{};
+
+    for (int rep = 0; rep < cfg.repeat; ++rep) {
+        LayeredRunResult r{};
+        if (run_layered_once(cfile, cfg, r) != 0)
+            return 1;
+        if (cfg.repeat > 1)
+            std::printf("--- repeat %d/%d ---\n", rep + 1, cfg.repeat);
+        print_layered_result(cfg, r);
+        rates.push_back(r.ms_per_s);
+        last = r;
+    }
+
+    if (cfg.repeat > 1 && !rates.empty()) {
+        std::sort(rates.begin(), rates.end());
+        const double med = rates[rates.size() / 2];
+        std::printf("== summary %s  n=%d  min=%.1f med=%.1f max=%.1f MS/s ==\n\n",
+                    cfg.mode.c_str(), cfg.repeat, rates.front(), med, rates.back());
+    }
+    (void)last;
+    return 0;
+}
+
+// Backward-compatible wrapper used by detector-region-stream path.
+int run_detector_bench(const std::string& cfile,
+                       uint64_t target,
+                       size_t gap,
+                       const std::string& label)
+{
+    LayeredBenchConfig cfg;
+    cfg.mode = "detector-sparse";
+    cfg.target = target;
+    cfg.gap = gap;
+    cfg.buffer_items = 0;
+    cfg.max_noutput_items = 0;
+    cfg.source_type = "pattern";
+    cfg.energy_threshold = 1e-3f;
+    cfg.repeat = 1;
+    (void)label;
+    return run_layered_bench(cfile, cfg);
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,8 +1428,16 @@ int main(int argc, char** argv)
     size_t ed = 100;          // energy gate decimation
     size_t cd = 8;            // coarse decimation
     uint64_t target = 500000000ULL; // detector-mode samples to process
-    size_t det_gap = 2'300'000;     // detector-mode inter-packet gap (sparse)
+    // Default sparse gap ≈ 1 pkt/s for plumbing-primary runs (scheme Phase B).
+    size_t det_gap = 998143552;
+    bool gap_set = false;
     size_t n_regions = 200;         // detector-region continuous block count
+    long buffer_items = 0;
+    int max_noutput_items = 0;
+    std::string source_type = "pattern";
+    float energy_threshold = 1e-3f;
+    bool threshold_set = false;
+    int repeat = 1;
 
     for (int i = 3; i + 1 < argc; i += 2) {
         std::string k = argv[i];
@@ -1153,14 +1445,37 @@ int main(int argc, char** argv)
         else if (k == "--energy-dec") ed = std::stoul(argv[i + 1]);
         else if (k == "--coarse-dec") cd = std::stoul(argv[i + 1]);
         else if (k == "--target") target = std::stoull(argv[i + 1]);
-        else if (k == "--gap") det_gap = std::stoul(argv[i + 1]);
-        else if (k == "--regions") n_regions = std::stoul(argv[i + 1]);
+        else if (k == "--gap") {
+            det_gap = std::stoul(argv[i + 1]);
+            gap_set = true;
+        } else if (k == "--regions") n_regions = std::stoul(argv[i + 1]);
+        else if (k == "--buffer-items") buffer_items = std::stol(argv[i + 1]);
+        else if (k == "--max-noutput-items")
+            max_noutput_items = std::stoi(argv[i + 1]);
+        else if (k == "--source") source_type = argv[i + 1];
+        else if (k == "--threshold") {
+            energy_threshold = std::stof(argv[i + 1]);
+            threshold_set = true;
+        } else if (k == "--repeat") repeat = std::stoi(argv[i + 1]);
     }
 
-    if (mode == "detector" || mode == "detector-sparse" || mode == "detector-dense") {
-        // UwbDetector sparse/PDU pipeline (开发需求参考.md §10, production path).
-        const size_t gap = (mode == "detector-dense") ? 6000 : det_gap;
-        return run_detector_bench(cfile, target, gap, mode);
+    // Layered GR modes: same source/target/gap/buffer surface.
+    if (mode == "source-null" || mode == "source-search" || mode == "detector" ||
+        mode == "detector-sparse" || mode == "detector-dense") {
+        LayeredBenchConfig cfg;
+        cfg.mode = (mode == "detector") ? "detector-sparse" : mode;
+        cfg.target = target;
+        if (mode == "detector-dense")
+            cfg.gap = gap_set ? det_gap : 6000;
+        else
+            cfg.gap = det_gap;
+        cfg.buffer_items = buffer_items;
+        cfg.max_noutput_items = max_noutput_items;
+        cfg.source_type = source_type;
+        cfg.energy_threshold = energy_threshold;
+        cfg.threshold_override = threshold_set;
+        cfg.repeat = repeat > 0 ? repeat : 1;
+        return run_layered_bench(cfile, cfg);
     }
 
     if (mode == "detector-region") {
@@ -1169,8 +1484,18 @@ int main(int argc, char** argv)
 
     if (mode == "detector-region-stream") {
         // Continuous region pressure via min-gap stream (default gap 6000).
-        const size_t gap = (det_gap == 2'300'000) ? 6000 : det_gap;
-        return run_region_stream_bench(cfile, target, gap);
+        const size_t gap = gap_set ? det_gap : 6000;
+        LayeredBenchConfig cfg;
+        cfg.mode = "detector-sparse";
+        cfg.target = target;
+        cfg.gap = gap;
+        cfg.buffer_items = buffer_items;
+        cfg.max_noutput_items = max_noutput_items;
+        cfg.source_type = source_type;
+        cfg.energy_threshold = energy_threshold;
+        cfg.threshold_override = threshold_set;
+        cfg.repeat = repeat > 0 ? repeat : 1;
+        return run_layered_bench(cfile, cfg);
     }
 
     if (mode == "detector-profile") {
