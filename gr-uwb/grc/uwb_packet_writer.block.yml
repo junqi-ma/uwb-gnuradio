@@ -1,0 +1,33 @@
+id: uwb_packet_writer
+label: UWB Packet Writer
+category: '[UWB]'
+
+parameters:
+-   id: directory
+    label: Output directory
+    dtype: file_save
+    default: '.'
+-   id: base_name
+    label: Base name
+    dtype: string
+    default: 'capture'
+-   id: one_file_per_packet
+    label: One file per packet
+    dtype: bool
+    default: 'False'
+
+inputs:
+-   domain: message
+    id: packet
+    optional: true
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.packet_writer(${directory}, ${base_name}, ${one_file_per_packet})
+
+cpp_templates:
+    includes: ['#include <gnuradio/uwb/uwb_packet_writer.h>']
+    make: 'this->${id} = gr::uwb::UwbPacketWriter::make(${directory}, ${base_name}, ${one_file_per_packet});'
+    link: ['gnuradio::gnuradio-uwb']
+
+file_format: 1

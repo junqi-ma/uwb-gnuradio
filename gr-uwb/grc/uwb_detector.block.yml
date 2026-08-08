@@ -1,0 +1,49 @@
+id: uwb_detector
+label: UWB Detector (PDU)
+category: '[UWB]'
+
+parameters:
+-   id: template_file
+    label: Template file (complex float I/Q)
+    dtype: file_open
+    default: ''
+-   id: pre_trigger
+    label: Pre-trigger samples
+    dtype: int
+    default: '2032'
+-   id: capture
+    label: Capture samples
+    dtype: int
+    default: '200000'
+-   id: energy_threshold
+    label: Energy threshold
+    dtype: real
+    default: '0.001'
+-   id: energy_gate_decimation
+    label: Energy gate decimation
+    dtype: int
+    default: '100'
+-   id: coarse_decimation
+    label: Coarse decimation
+    dtype: int
+    default: '4'
+
+inputs:
+-   domain: stream
+    dtype: complex
+
+outputs:
+-   domain: message
+    id: packet
+    optional: true
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.detector.make_from_file(${template_file}, ${pre_trigger}, ${capture}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation})
+
+cpp_templates:
+    includes: ['#include <gnuradio/uwb/uwb_detector.h>']
+    make: 'this->${id} = gr::uwb::UwbDetector::make_from_file(${template_file}, ${pre_trigger}, ${capture}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation});'
+    link: ['gnuradio::gnuradio-uwb']
+
+file_format: 1

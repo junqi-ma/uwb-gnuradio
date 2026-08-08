@@ -1,0 +1,48 @@
+# MATLAB full demodulation pipeline (out of scope for this repo)
+UWB_demodulation/
+
+# Build trees
+gr-uwb/build/
+**/build/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/Makefile
+**/compile_commands.json
+**/CTestTestfile.cmake
+**/Testing/
+**/install_manifest.txt
+**/_deps/
+
+# Compiled / generated binaries
+*.so
+*.so.*
+*.a
+*.o
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+*.py[cod]
+
+# Local install staging
+gr-uwb-stage/
+**/DESTDIR*/
+
+# Runtime / test outputs
+testdata/capture_out/
+qa_writer_out/
+qa_writer_pkt/
+*.log
+
+# Editor / tool local state
+.claude/
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Python virtualenvs
+.venv/
+venv/

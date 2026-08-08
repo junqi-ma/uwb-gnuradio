@@ -1,0 +1,42 @@
+id: uwb_energy_detector
+label: UWB Energy Detector
+category: '[UWB]'
+
+parameters:
+-   id: threshold
+    label: Threshold
+    dtype: real
+    default: '0.5'
+-   id: window
+    label: Window (samples)
+    dtype: int
+    default: '16'
+
+inputs:
+-   domain: stream
+    dtype: complex
+
+outputs:
+-   domain: stream
+    dtype: float
+    label: metric
+-   domain: stream
+    dtype: byte
+    label: flag
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.energy_detector(${threshold}, ${window})
+    callbacks:
+    - set_threshold(${threshold})
+    - set_window(${window})
+
+cpp_templates:
+    includes: ['#include <gnuradio/uwb/uwb_energy_detector.h>']
+    make: 'this->${id} = gr::uwb::UwbEnergyDetector::make(${threshold}, ${window});'
+    callbacks:
+    - set_threshold(${threshold})
+    - set_window(${window})
+    link: ['gnuradio::gnuradio-uwb']
+
+file_format: 1
