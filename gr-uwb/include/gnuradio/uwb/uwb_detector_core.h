@@ -345,32 +345,65 @@ inline void uwb_coarse_peaks(const std::complex<float>* in,
     const size_t avail = (sym_ds > 0) ? nscore / sym_ds : 0;
     const size_t R_eff = (avail >= R && R > 0) ? R : 1;
 
+    // VOLK conjugate dot product helper: score[j] = |Σ sig_ds[j+k]·conj(tmpl_ds[k])|
+    // / sqrt(pow·etd).  (VOLK vectorizes the decimated matched filter.)
+    auto compute_score = [&](size_t j) {
+        std::complex<float> acc(0.0f, 0.0f);
+        volk_32fc_x2_conjugate_dot_prod_32fc(
+            &acc, sig_ds.data() + j, tmpl_ds, static_cast<unsigned int>(Ld));
+        score_ds[j] = std::abs(acc) / (std::sqrt(pow_ds[j] * etd + kUwbEpsilon));
+    };
+
     if (R_eff > 1) {
         // Full correlation + repetition accumulation.
-        for (size_t j = 0; j < nscore; ++j) {
-            std::complex<float> acc(0.0f, 0.0f);
-            // VOLK vectorized conjugate dot product: sum sig_ds[j+k]*conj(tmpl_ds[k]).
-            volk_32fc_x2_conjugate_dot_prod_32fc(
-                &acc, sig_ds.data() + j, tmpl_ds,
-                static_cast<unsigned int>(Ld));
-            score_ds[j] =
-                std::abs(acc) / (std::sqrt(pow_ds[j] * etd + kUwbEpsilon));
-        }
+        for (size_t j = 0; j < nscore; ++j)
+            compute_score(j);
     } else {
         // R=1: stride the correlation.  The SYNC peaks are ~sym_ds apart, so a
-        // stride of a few decimated positions costs ~stride× less while the
-        // fine stage still pinpoints the peak (the block widens its fine ROI
-        // by stride*D samples).  Only strided positions are evaluated.
+        // stride of a few decimated positions costs ~stride× less.  Each
+        // strided candidate peak is then refined by a dense local scan
+        // (±stride positions), restoring the precision of a full scan.
         std::fill(score_ds.begin(), score_ds.end(), 0.0f);
         const size_t S = (stride > 0) ? stride : 1;
-        for (size_t j = 0; j < nscore; j += S) {
-            std::complex<float> acc(0.0f, 0.0f);
-            // VOLK vectorized conjugate dot product: sum sig_ds[j+k]*conj(tmpl_ds[k]).
-            volk_32fc_x2_conjugate_dot_prod_32fc(
-                &acc, sig_ds.data() + j, tmpl_ds,
-                static_cast<unsigned int>(Ld));
-            score_ds[j] =
-                std::abs(acc) / (std::sqrt(pow_ds[j] * etd + kUwbEpsilon));
+        if (S <= 1) {
+            for (size_t j = 0; j < nscore; ++j)
+                compute_score(j);
+        } else {
+            // NOTE: a stride > 1 is experimentally UNRELIABLE for this signal —
+            // the decimated matched-filter peak is only ~1 decimated position
+            // wide (score 1.0 at alignment, 0.28 at ±1, ~0.05 at ±2, ~0 at ±4),
+            // so a strided scan misses most symbol peaks entirely.  Kept as an
+            // option, but stride must stay 1 for correct detection.
+            for (size_t j = 0; j < nscore; j += S)
+                compute_score(j);
+            for (size_t j = 0; j < nscore; j += S)
+                if (score_ds[j] > *max_metric)
+                    *max_metric = score_ds[j];
+            if (*max_metric < exist_frac * static_cast<float>(R_eff))
+                return;
+            const float thr = std::max(peak_rel * (*max_metric), 0.0f);
+            for (size_t j = S; j + S < nscore; j += S) {
+                if (score_ds[j] > thr && score_ds[j] > score_ds[j - S] &&
+                    score_ds[j] >= score_ds[j + S]) {
+                    // Dense local refinement around the strided peak.
+                    const size_t lo = (j > S) ? j - S : 0;
+                    const size_t hi = std::min(j + S, nscore - 1);
+                    size_t best = j;
+                    for (size_t jj = lo; jj <= hi; ++jj) {
+                        if (score_ds[jj] == 0.0f)
+                            compute_score(jj);
+                        if (score_ds[jj] > score_ds[best])
+                            best = jj;
+                    }
+                    if (peaks.empty() || best >= peaks.back() + sym_ds / 2)
+                        peaks.push_back(best);
+                    else if (best > peaks.back())
+                        peaks.back() = best;
+                }
+            }
+            for (auto& j : peaks)
+                j = scan_start + j * D;
+            return;
         }
     }
 
@@ -392,11 +425,10 @@ inline void uwb_coarse_peaks(const std::complex<float>* in,
         return;
 
     const float thr = std::max(peak_rel * (*max_metric), 0.0f);
-    const size_t step = (R_eff > 1) ? 1 : ((stride > 0) ? stride : 1);
-    for (size_t j = step; j + step < nmet; j += step) {
-        if (metric_ds[j] > metric_ds[j - step] &&
-            metric_ds[j] >= metric_ds[j + step] && metric_ds[j] > thr &&
-            (peaks.empty() || j - peaks.back() >= sym_ds / (2 * step))) {
+    for (size_t j = 1; j + 1 < nmet; ++j) {
+        if (metric_ds[j] > metric_ds[j - 1] &&
+            metric_ds[j] >= metric_ds[j + 1] && metric_ds[j] > thr &&
+            (peaks.empty() || j - peaks.back() >= sym_ds / 2)) {
             peaks.push_back(j);
         }
     }

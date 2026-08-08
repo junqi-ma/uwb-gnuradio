@@ -111,14 +111,93 @@ public:
                     gr::io_signature::make(0, 0, 0))
     {
         message_port_register_in(pmt::mp("packet"));
-        set_msg_handler(pmt::mp("packet"), [this](pmt::pmt_t) { ++d_count; });
+        set_msg_handler(pmt::mp("packet"), [this](pmt::pmt_t msg) {
+            ++d_count;
+            pmt::pmt_t data = pmt::cdr(msg);
+            if (pmt::is_c32vector(data))
+                d_total_samples += pmt::length(data);
+        });
     }
 
     size_t count() const { return d_count; }
+    size_t total_samples() const { return d_total_samples; }
 
 private:
     size_t d_count = 0;
+    size_t d_total_samples = 0;
 };
+
+// ---------------------------------------------------------------------------
+// Energy-gate-only benchmark: runs UwbDetectorStateMachine (decimated gate +
+// cross-chunk region buffering) directly, WITHOUT the coarse/fine preamble
+// confirmation and PDU emission.  This isolates the energy-gate stage cost.
+// ---------------------------------------------------------------------------
+int run_gate_bench(const std::string& cfile, uint64_t target, size_t gap)
+{
+    std::ifstream f(cfile, std::ios::binary);
+    if (!f) {
+        std::cerr << "cannot open " << cfile << "\n";
+        return 1;
+    }
+    f.seekg(0, std::ios::end);
+    size_t bytes = static_cast<size_t>(f.tellg());
+    f.seekg(0, std::ios::beg);
+    std::vector<gr_complex> base(bytes / sizeof(gr_complex));
+    f.read(reinterpret_cast<char*>(base.data()), static_cast<std::streamsize>(bytes));
+
+    std::vector<gr_complex> pkt(base.begin() + kPacketStart,
+                                base.begin() + kPacketStart + kPacketLen);
+
+    // Sparse stream [packet + gap] in memory, matching the full-detector bench.
+    std::vector<gr_complex> stream;
+    stream.reserve(static_cast<size_t>(target));
+    while (stream.size() < target) {
+        const size_t remain = static_cast<size_t>(target - stream.size());
+        const size_t pkt_n = std::min(pkt.size(), remain);
+        stream.insert(stream.end(), pkt.begin(), pkt.begin() + pkt_n);
+        if (stream.size() >= target)
+            break;
+        const size_t gap_n = std::min(gap, remain - pkt_n);
+        stream.insert(stream.end(), gap_n, gr_complex(0.0f, 0.0f));
+    }
+
+    gr::uwb::UwbDetectorStateMachine sm(4216, 1e-3f, 100, 32, 8);
+    size_t regions = 0;
+
+    const auto w0 = std::chrono::steady_clock::now();
+    const auto c0 = std::clock();
+    const size_t CH = 8192;
+    for (size_t off = 0; off < stream.size(); off += CH) {
+        const size_t n = std::min(CH, stream.size() - off);
+        sm.process(stream.data() + off, n, off);
+        while (sm.region_ready()) {
+            sm.take_region();
+            ++regions;
+        }
+    }
+    const auto c1 = std::clock();
+    const auto w1 = std::chrono::steady_clock::now();
+
+    const double wall = std::chrono::duration<double>(w1 - w0).count();
+    const double cpu = static_cast<double>(c1 - c0) / CLOCKS_PER_SEC;
+    const double n = static_cast<double>(stream.size());
+
+    std::printf("== Energy gate (state machine only, no coarse/fine) ==\n");
+    std::printf("processed samples : %zu\n", stream.size());
+    std::printf("elapsed time      : %.3f s\n", wall);
+    std::printf("CPU time          : %.3f s  (utilization %.0f%%)\n", cpu,
+                wall > 0 ? 100.0 * cpu / wall : 0.0);
+    std::printf("throughput        : %.1f MS/s\n", n / wall / 1e6);
+    std::printf("throughput        : %.2f GB/s\n", n * 8.0 / wall / 1e9);
+    // Output of the energy-gate stage: one decimated energy value per D input
+    // samples (D = energy_gate_decimation = 100), so its output stream rate is
+    // the input throughput divided by D.
+    std::printf("output stream     : %.1f MS/s (decimated energy, D=100)\n",
+                n / wall / 100.0 / 1e6);
+    std::printf("regions           : %zu\n", regions);
+    std::printf("\n");
+    return 0;
+}
 
 int run_detector_bench(const std::string& cfile,
                        uint64_t target,
@@ -142,7 +221,30 @@ int run_detector_bench(const std::string& cfile,
                                 base.begin() + kPacketStart + kPacketLen);
 
     auto det = gr::uwb::UwbDetector::make(tmpl, 2032, 200000, 1e-3f, 100, 4, 1, 16);
-    auto src = std::make_shared<PatternSource>(pkt, gap, target);
+    std::shared_ptr<gr::block> src;
+    if (target <= 300000000ULL) {
+        // Pre-built in-memory stream: gaps are zeroed once, so the source only
+        // memcpys (no per-cycle memset generation) — isolates the detector's
+        // own cost from source-generation overhead.
+        std::vector<gr_complex> stream;
+        stream.reserve(static_cast<size_t>(target));
+        while (stream.size() < target) {
+            const size_t remain = static_cast<size_t>(target - stream.size());
+            const size_t pkt_n = std::min(pkt.size(), remain);
+            stream.insert(stream.end(), pkt.begin(), pkt.begin() + pkt_n);
+            if (stream.size() >= target)
+                break;
+            const size_t gap_n = std::min(gap, remain - pkt_n);
+            stream.insert(stream.end(), gap_n, gr_complex(0.0f, 0.0f));
+        }
+        auto vs = gr::blocks::vector_source_c::make(stream);
+        vs->set_max_output_buffer(0, 1 << 22); // ~4M complex = 32 MB
+        src = vs;
+    } else {
+        auto ps = std::make_shared<PatternSource>(pkt, gap, target);
+        ps->set_max_output_buffer(0, 1 << 22);
+        src = ps;
+    }
     auto cnt = std::make_shared<PduCounter>();
     auto tb = gr::make_top_block("bench_detector");
     tb->connect(src, 0, det, 0);
@@ -165,6 +267,11 @@ int run_detector_bench(const std::string& cfile,
     std::printf("throughput        : %.1f MS/s\n", n / wall / 1e6);
     std::printf("throughput        : %.2f GB/s\n", n * 8.0 / wall / 1e9);
     std::printf("detections        : %zu\n", cnt->count());
+    const double captured = static_cast<double>(cnt->total_samples());
+    std::printf("captured IQ       : %.0f samples (%.2f%% of input)\n", captured,
+                100.0 * captured / n);
+    std::printf("output stream     : %.3f MS/s (%.2f GB/s)\n",
+                captured / wall / 1e6, captured * 8.0 / wall / 1e9);
     std::printf("1 GS/s target     : %s\n", (n / wall / 1e6) >= 1000.0 ? "MET" : "not yet");
     std::printf("\n");
     return 0;
@@ -195,6 +302,11 @@ int main(int argc, char** argv)
         // UwbDetector sparse/PDU pipeline (开发需求参考.md §10, production path).
         const size_t gap = (mode == "detector-dense") ? 6000 : det_gap;
         return run_detector_bench(cfile, target, gap, mode);
+    }
+
+    if (mode == "detector-gate") {
+        // Energy-gate stage only (state machine, no coarse/fine/PDU).
+        return run_gate_bench(cfile, target, det_gap);
     }
 
     std::ifstream f(cfile, std::ios::binary);

@@ -50,6 +50,8 @@ UwbDetector::UwbDetector(
       d_coarse_margin_(coarse_margin),
       d_fir(std::vector<gr_complex>())
 {
+    // Larger chunks -> fewer work() calls, less per-call flowgraph overhead.
+    set_max_noutput_items(65536);
     message_port_register_out(pmt::mp("packet"));
 
     // Matched-filter taps: the stateless kernel convolves, so use the reversed
