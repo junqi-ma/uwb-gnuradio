@@ -14,6 +14,7 @@
 #include <gnuradio/io_signature.h>
 
 #include <algorithm>
+#include <exception>
 #include <fstream>
 #include <stdexcept>
 #include <utility>
@@ -77,6 +78,8 @@ UwbDetector::UwbDetector(
     d_fine_metric.resize(2 * half + 1);
     d_coarse_peaks.reserve(256);
 }
+
+UwbDetector::~UwbDetector() { shutdown_worker(); }
 
 void UwbDetector::rebuild_decimated_template()
 {
@@ -148,6 +151,11 @@ void UwbDetector::set_coarse_stride(size_t v)
     d_coarse_stride_ = (v > 0) ? v : 1;
 }
 
+uint64_t UwbDetector::dropped_regions() const
+{
+    return sm_.dropped_regions() + d_dropped_jobs_;
+}
+
 int
 UwbDetector::work(int noutput_items,
                   gr_vector_const_void_star& input_items,
@@ -155,15 +163,107 @@ UwbDetector::work(int noutput_items,
 {
     const auto* in = reinterpret_cast<const gr_complex*>(input_items[0]);
 
-    sm_.process(in, noutput_items, d_current_sample_);
-    d_current_sample_ += static_cast<uint64_t>(noutput_items);
+    const int consumed = (noutput_items > 1) ? noutput_items - 1 : noutput_items;
+    sm_.process(in, consumed, d_current_sample_);
+    d_current_sample_ += static_cast<uint64_t>(consumed);
 
-    while (sm_.region_ready())
-        publish_packet(sm_.take_region());
+    enqueue_ready_regions();
+    if (noutput_items == 1)
+        wait_for_worker_idle();
 
     // sync_block with zero outputs: consuming noutput_items and producing
     // nothing on the (empty) output is the tag_debug / null_sink idiom.
-    return noutput_items;
+    return consumed;
+}
+
+bool
+UwbDetector::start()
+{
+    std::lock_guard<std::mutex> lock(d_job_mutex_);
+    d_job_head_ = 0;
+    d_job_tail_ = 0;
+    d_job_count_ = 0;
+    d_jobs_in_flight_ = 0;
+    d_worker_stop_ = false;
+    d_worker = std::thread(&UwbDetector::worker_loop, this);
+    return true;
+}
+
+void
+UwbDetector::enqueue_ready_regions()
+{
+    while (sm_.region_ready()) {
+        const auto handle = sm_.take_region();
+        bool queued = false;
+        {
+            std::lock_guard<std::mutex> lock(d_job_mutex_);
+            if (d_job_count_ < d_job_queue.size()) {
+                d_job_queue[d_job_tail_] = handle;
+                d_job_tail_ = (d_job_tail_ + 1) % d_job_queue.size();
+                ++d_job_count_;
+                queued = true;
+            }
+        }
+        if (queued) {
+            d_job_cv_.notify_one();
+        } else {
+            sm_.release_region(handle);
+            ++d_dropped_jobs_;
+        }
+    }
+}
+
+void
+UwbDetector::worker_loop()
+{
+    for (;;) {
+        UwbDetectorStateMachine::RegionHandle handle;
+        {
+            std::unique_lock<std::mutex> lock(d_job_mutex_);
+            d_job_cv_.wait(lock, [this] { return d_worker_stop_ || d_job_count_ > 0; });
+            if (d_job_count_ == 0 && d_worker_stop_)
+                return;
+            handle = d_job_queue[d_job_head_];
+            d_job_head_ = (d_job_head_ + 1) % d_job_queue.size();
+            --d_job_count_;
+            ++d_jobs_in_flight_;
+        }
+
+        try {
+            publish_packet(sm_.region(handle));
+        } catch (const std::exception& error) {
+            d_logger->error("UwbDetector worker failed: {}",
+                            std::string(error.what()));
+        } catch (...) {
+            d_logger->error("UwbDetector worker failed with an unknown exception");
+        }
+        sm_.release_region(handle);
+        {
+            std::lock_guard<std::mutex> lock(d_job_mutex_);
+            --d_jobs_in_flight_;
+        }
+        d_job_cv_.notify_all();
+    }
+}
+
+void
+UwbDetector::shutdown_worker()
+{
+    if (!d_worker.joinable())
+        return;
+    {
+        std::lock_guard<std::mutex> lock(d_job_mutex_);
+        d_worker_stop_ = true;
+    }
+    d_job_cv_.notify_one();
+    d_worker.join();
+}
+
+void
+UwbDetector::wait_for_worker_idle()
+{
+    std::unique_lock<std::mutex> lock(d_job_mutex_);
+    d_job_cv_.wait(lock, [this] { return d_job_count_ == 0 && d_jobs_in_flight_ == 0; });
 }
 
 bool
@@ -174,8 +274,8 @@ UwbDetector::stop()
     // end exactly at a packet tail should be padded with trailing silence (as
     // real captures are).
     sm_.flush_region();
-    while (sm_.region_ready())
-        publish_packet(sm_.take_region());
+    enqueue_ready_regions();
+    shutdown_worker();
     return true;
 }
 

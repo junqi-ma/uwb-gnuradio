@@ -16,6 +16,7 @@
 #include <pmt/pmt.h>
 
 #include <cmath>
+#include <complex>
 #include <vector>
 
 namespace {
@@ -32,6 +33,22 @@ void run_detector(const std::vector<gr_complex>& x,
 }
 
 } // namespace
+
+BOOST_AUTO_TEST_CASE(test_ring_buffer_bulk_wrap_keeps_latest)
+{
+    gr::uwb::RingBuffer ring(5);
+    std::vector<gr_complex> x(13);
+    for (size_t i = 0; i < x.size(); ++i)
+        x[i] = gr_complex(static_cast<float>(i + 1), -static_cast<float>(i + 1));
+
+    ring.push(x.data(), 3);
+    ring.push(x.data() + 3, x.size() - 3);
+    const auto got = ring.to_vector();
+
+    BOOST_REQUIRE_EQUAL(got.size(), 5);
+    for (size_t i = 0; i < got.size(); ++i)
+        BOOST_CHECK_EQUAL(got[i], x[x.size() - got.size() + i]);
+}
 
 BOOST_AUTO_TEST_CASE(test_detector_preamble_pdu)
 {
@@ -66,6 +83,7 @@ BOOST_AUTO_TEST_CASE(test_detector_preamble_pdu)
 
     auto dbg = gr::blocks::message_debug::make();
     run_detector(sig, det, dbg);
+    BOOST_CHECK_EQUAL(det->dropped_regions(), 0);
 
     BOOST_REQUIRE_EQUAL(dbg->num_messages(), 1);
     pmt::pmt_t meta = pmt::car(dbg->get_message(0));
@@ -95,4 +113,59 @@ BOOST_AUTO_TEST_CASE(test_detector_silence_no_packet)
     run_detector(x, det, dbg);
 
     BOOST_CHECK_EQUAL(dbg->num_messages(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(test_detector_two_packets_payload_matches_input)
+{
+    const size_t L = 128;
+    const size_t pre = 64;
+    const size_t capture = 640;
+    std::vector<gr_complex> tmpl(L);
+    for (size_t k = 0; k < L; ++k)
+        tmpl[k] = gr_complex(std::cos(0.21f * k), 0.4f * std::sin(0.13f * k));
+    gr::uwb::core::uwb_l2_normalize(tmpl);
+
+    const size_t first = 1024;
+    const size_t second = 8192;
+    const size_t reps = 10;
+    std::vector<gr_complex> x(20000, gr_complex(0.0f, 0.0f));
+    for (const size_t start : { first, second }) {
+        for (size_t r = 0; r < reps; ++r)
+            for (size_t k = 0; k < L; ++k)
+                x[start + r * L + k] = tmpl[k];
+    }
+
+    auto det = gr::uwb::UwbDetector::make(tmpl,
+                                          pre,
+                                          capture,
+                                          /*energy_threshold=*/1e-3f,
+                                          /*energy_gate_decimation=*/4,
+                                          /*coarse_decimation=*/4,
+                                          /*coarse_repetitions=*/1,
+                                          /*coarse_margin=*/8);
+    auto dbg = gr::blocks::message_debug::make();
+    run_detector(x, det, dbg);
+    BOOST_CHECK_EQUAL(det->dropped_regions(), 0);
+
+    BOOST_REQUIRE_EQUAL(dbg->num_messages(), 2);
+    uint64_t previous_start = 0;
+    for (size_t message_index = 0; message_index < 2; ++message_index) {
+        const pmt::pmt_t msg = dbg->get_message(message_index);
+        const pmt::pmt_t meta = pmt::car(msg);
+        const pmt::pmt_t data = pmt::cdr(msg);
+        const uint64_t start = pmt::to_uint64(
+            pmt::dict_ref(meta, pmt::mp("start_sample"), pmt::PMT_NIL));
+        const auto iq = pmt::c32vector_elements(data);
+
+        BOOST_REQUIRE_GE(start, pre);
+        BOOST_REQUIRE_EQUAL(iq.size(), pre + capture);
+        if (message_index > 0)
+            BOOST_CHECK_GT(start, previous_start);
+        previous_start = start;
+
+        const size_t input_begin = static_cast<size_t>(start) - pre;
+        BOOST_REQUIRE_LE(input_begin + iq.size(), x.size());
+        for (size_t i = 0; i < iq.size(); ++i)
+            BOOST_CHECK_EQUAL(iq[i], x[input_begin + i]);
+    }
 }

@@ -27,6 +27,12 @@
  * "packet" message port.  PDU payload = captured CF32 IQ; metadata:
  *   packet_id, start_sample, trigger_sample, sample_rate, sample_count,
  *   detection_metric.
+ *
+ * Scheduler semantics: work() scans and consumes the input stream, then puts
+ * completed region handles into a bounded FIFO.  One background worker owns
+ * coarse/fine correlation and PDU publication.  Region handles remain valid
+ * until that worker releases their preallocated pool slots, preserving order.
+ * Finite streams leave a one-sample sentinel so the worker drains before EOS.
  */
 
 #pragma once
@@ -39,8 +45,12 @@
 #include <gnuradio/uwb/uwb_detector_core.h>
 #include <pmt/pmt.h>
 
+#include <array>
+#include <condition_variable>
 #include <complex>
 #include <cstdint>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 namespace gr {
@@ -50,6 +60,7 @@ class UWB_API UwbDetector : public gr::sync_block
 {
 public:
     using sptr = std::shared_ptr<UwbDetector>;
+    ~UwbDetector() override;
 
     /**
      * Make a new UwbDetector block.
@@ -95,6 +106,7 @@ public:
     size_t capture() const;
     void set_capture(size_t capture);
     size_t coarse_stride() const;
+    uint64_t dropped_regions() const;
     void set_coarse_stride(size_t stride);
 
 protected:
@@ -111,11 +123,16 @@ protected:
              gr_vector_const_void_star& input_items,
              gr_vector_void_star& output_items) override;
 
+    bool start() override;
     bool stop() override;
 
 private:
     void rebuild_decimated_template();
     void publish_packet(const UwbDetectorStateMachine::Region& region);
+    void enqueue_ready_regions();
+    void worker_loop();
+    void shutdown_worker();
+    void wait_for_worker_idle();
 
     UwbDetectorStateMachine sm_;
     uint64_t d_current_sample_ = 0;
@@ -145,6 +162,18 @@ private:
     std::vector<gr_complex> d_corr;
     std::vector<float> d_winpow;
     std::vector<float> d_fine_metric;
+
+    std::thread d_worker;
+    std::mutex d_job_mutex_;
+    std::condition_variable d_job_cv_;
+    std::array<UwbDetectorStateMachine::RegionHandle,
+               UwbDetectorStateMachine::kRegionPoolSize> d_job_queue{};
+    size_t d_job_head_ = 0;
+    size_t d_job_tail_ = 0;
+    size_t d_job_count_ = 0;
+    size_t d_jobs_in_flight_ = 0;
+    bool d_worker_stop_ = false;
+    uint64_t d_dropped_jobs_ = 0;
 };
 
 } // namespace uwb

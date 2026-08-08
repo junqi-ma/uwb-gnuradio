@@ -124,7 +124,8 @@ void bind_detector(py::module& m)
         .def("capture", &gr::uwb::UwbDetector::capture)
         .def("set_capture",
              &gr::uwb::UwbDetector::set_capture,
-             py::arg("capture"));
+             py::arg("capture"))
+        .def("dropped_regions", &gr::uwb::UwbDetector::dropped_regions);
 }
 
 void bind_packet_writer(py::module& m)

@@ -28,11 +28,14 @@
 #include <volk/volk.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
+#include <cstring>
+#include <limits>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -478,12 +481,19 @@ struct RingBuffer {
 
     void push(const std::complex<float>* src, size_t n)
     {
-        if (n > capacity)
+        if (n == 0)
+            return;
+        if (n >= capacity) {
+            src += n - capacity;
             n = capacity;
-        for (size_t i = 0; i < n; ++i) {
-            buffer[write_pos] = src[i];
-            write_pos = (write_pos + 1) & mask;
         }
+
+        const size_t first = std::min(n, capacity - write_pos);
+        std::memcpy(buffer.data() + write_pos, src, first * sizeof(*src));
+        const size_t second = n - first;
+        if (second > 0)
+            std::memcpy(buffer.data(), src + first, second * sizeof(*src));
+        write_pos = (write_pos + n) & mask;
     }
 
     inline void push_one(const std::complex<float>& v)
@@ -498,14 +508,24 @@ struct RingBuffer {
         return buffer[idx];
     }
 
-    // The most recent `logical_size` samples, oldest .. newest.
+    // Copy the most recent `logical_size` samples, oldest .. newest, into a
+    // caller-owned preallocated destination.
+    void copy_to(std::complex<float>* out) const
+    {
+        if (logical_size == 0)
+            return;
+        const size_t start = (write_pos + capacity - logical_size) & mask;
+        const size_t first = std::min(logical_size, capacity - start);
+        std::memcpy(out, buffer.data() + start, first * sizeof(*out));
+        const size_t second = logical_size - first;
+        if (second > 0)
+            std::memcpy(out + first, buffer.data(), second * sizeof(*out));
+    }
+
     std::vector<std::complex<float>> to_vector() const
     {
-        std::vector<std::complex<float>> out;
-        out.reserve(logical_size);
-        const size_t start = (write_pos + capacity - logical_size) & mask;
-        for (size_t i = 0; i < logical_size; ++i)
-            out.push_back(buffer[(start + i) & mask]);
+        std::vector<std::complex<float>> out(logical_size);
+        copy_to(out.data());
         return out;
     }
 
@@ -580,6 +600,10 @@ public:
         std::vector<std::complex<float>> samples;
     };
 
+    using RegionHandle = size_t;
+    static constexpr size_t kRegionPoolSize = 8;
+    static constexpr RegionHandle kInvalidRegion = std::numeric_limits<size_t>::max();
+
     UwbDetectorStateMachine(size_t pre_trigger = 2032,
                             float energy_threshold = 1e-3f,
                             size_t gate_decimation = 100,
@@ -592,75 +616,51 @@ public:
           holdoff_decimated_(holdoff_decimated > 0 ? holdoff_decimated : 1),
           neigh_len_(16),
           gate_(gate_window_),
-          pre_ring_(pre_trigger_)
+          pre_ring_(pre_trigger_),
+          max_region_samples_(std::max<size_t>(pre_trigger_ + 300000, 524288))
     {
-        region_.samples.reserve(pre_trigger_ + 300000);
+        for (size_t i = 0; i < kRegionPoolSize; ++i) {
+            d_region_pool_[i].samples.reserve(max_region_samples_);
+            d_free_regions_[i] = kRegionPoolSize - 1 - i;
+        }
+        d_free_count_ = kRegionPoolSize;
     }
 
     void process(const std::complex<float>* in, size_t n, uint64_t abs_sample)
     {
-        for (size_t i = 0; i < n; ++i) {
-            const uint64_t sample = abs_sample + i;
-            pre_ring_.push_one(in[i]);
-
-            if (state_ == IN_REGION)
-                region_.samples.push_back(in[i]);
-
-            // Decimated energy gate: accumulate |x|^2 over the first
-            // `neigh_len_` samples of each D-sample block (a 16-sample
-            // neighborhood reliably catches the sparse UWB pulses at any
-            // phase; a single strided point does not — see the phase-sweep
-            // measurement).  The gate decision updates once per block.
-            // (A bulk VOLK |x|^2 pass over the whole chunk measured SLOWER:
-            // the extra memory traffic outweighs the 16%-sparse scalar norm.)
-            if (d_block_phase_ < neigh_len_)
-                d_block_acc_ += std::norm(in[i]);
-            if (++d_block_phase_ >= gate_decimation_) {
-                d_block_phase_ = 0;
-                const float e = gate_.push(d_block_acc_);
-                d_block_acc_ = 0.0f;
-
-                if (state_ == SEARCH) {
-                    if (e >= energy_threshold_) {
-                        state_ = IN_REGION;
-                        // The pre-trigger ring already ends at the current
-                        // sample, so samples[0..candidate_offset-1] are the
-                        // pre-trigger and samples[candidate_offset] is the
-                        // first candidate sample.
-                        region_ = Region{};
-                        region_.samples = pre_ring_.to_vector();
-                        region_.candidate_offset =
-                            region_.samples.size() - 1;
-                        region_.start_abs =
-                            (sample >= region_.candidate_offset)
-                                ? sample - region_.candidate_offset
-                                : 0;
-                        low_count_ = 0;
-                    }
-                } else { // IN_REGION
-                    if (e >= energy_threshold_) {
-                        low_count_ = 0;
-                    } else if (++low_count_ >= holdoff_decimated_) {
-                        // A region ended; queue it so the block can consume it
-                        // while a new region may start in the same chunk.
-                        d_regions_.push_back(std::move(region_));
-                        region_ = Region{};
-                        state_ = SEARCH;
-                        low_count_ = 0;
-                    }
-                }
-            }
+        size_t consumed = 0;
+        while (consumed < n) {
+            if (state_ == SEARCH)
+                consumed += process_search(in + consumed, n - consumed,
+                                           abs_sample + consumed);
+            else
+                consumed += process_region(in + consumed, n - consumed,
+                                           abs_sample + consumed);
         }
     }
 
-    bool region_ready() const { return !d_regions_.empty(); }
+    bool region_ready() const { return d_ready_count_ != 0; }
 
-    Region take_region()
+    RegionHandle take_region()
     {
-        Region r = std::move(d_regions_.front());
-        d_regions_.pop_front();
-        return r;
+        const RegionHandle handle = d_ready_regions_[d_ready_head_];
+        d_ready_head_ = (d_ready_head_ + 1) % kRegionPoolSize;
+        --d_ready_count_;
+        return handle;
     }
+
+    const Region& region(RegionHandle handle) const { return d_region_pool_[handle]; }
+
+    void release_region(RegionHandle handle)
+    {
+        if (handle == kInvalidRegion)
+            return;
+        d_region_pool_[handle].samples.clear();
+        std::lock_guard<std::mutex> lock(d_pool_mutex_);
+        d_free_regions_[d_free_count_++] = handle;
+    }
+
+    uint64_t dropped_regions() const { return d_dropped_regions_; }
 
     /**
      * Force-close an in-progress region.  Called when the input stream ends so
@@ -669,9 +669,9 @@ public:
     void flush_region()
     {
         if (state_ == IN_REGION) {
-            d_regions_.push_back(std::move(region_));
-            region_ = Region{};
+            finish_region();
             state_ = SEARCH;
+            low_count_ = 0;
         }
     }
 
@@ -680,20 +680,161 @@ public:
     {
         pre_trigger_ = v;
         pre_ring_ = RingBuffer(pre_trigger_);
+        max_region_samples_ = std::max<size_t>(pre_trigger_ + 300000, 524288);
+        for (auto& region : d_region_pool_) {
+            if (region.samples.capacity() < max_region_samples_)
+                region.samples.reserve(max_region_samples_);
+        }
         reset();
     }
 
     void reset()
     {
         state_ = SEARCH;
-        d_regions_.clear();
         low_count_ = 0;
         gate_.reset();
         pre_ring_.clear();
-        region_.samples.clear();
+        d_block_phase_ = 0;
+        d_block_acc_ = 0.0f;
+        d_ready_head_ = 0;
+        d_ready_tail_ = 0;
+        d_ready_count_ = 0;
+        d_active_region_ = kInvalidRegion;
+        d_dropped_regions_ = 0;
+        std::lock_guard<std::mutex> lock(d_pool_mutex_);
+        d_free_count_ = 0;
+        for (size_t i = 0; i < kRegionPoolSize; ++i) {
+            d_region_pool_[i].samples.clear();
+            d_free_regions_[d_free_count_++] = kRegionPoolSize - 1 - i;
+        }
     }
 
 private:
+    // SEARCH is block-oriented: one iteration handles up to a complete
+    // D-sample gate block.  Ring maintenance is a bulk memcpy and only the
+    // first `neigh_len_` samples of each block enter the energy sum.
+    size_t process_search(const std::complex<float>* in,
+                          size_t n,
+                          uint64_t abs_sample)
+    {
+        size_t consumed = 0;
+        while (consumed < n && state_ == SEARCH) {
+            const size_t block_left = gate_decimation_ - d_block_phase_;
+            const size_t take = std::min(block_left, n - consumed);
+            const size_t energy_count =
+                (d_block_phase_ < neigh_len_)
+                    ? std::min(take, neigh_len_ - d_block_phase_)
+                    : 0;
+            for (size_t j = 0; j < energy_count; ++j)
+                d_block_acc_ += std::norm(in[consumed + j]);
+
+            pre_ring_.push(in + consumed, take);
+            d_block_phase_ += take;
+            consumed += take;
+            if (d_block_phase_ == gate_decimation_) {
+                d_block_phase_ = 0;
+                update_gate(abs_sample + consumed - 1);
+            }
+        }
+        return consumed;
+    }
+
+    // IN_REGION retains raw IQ in block-sized inserts until the gate remains
+    // low for the configured holdoff.
+    size_t process_region(const std::complex<float>* in,
+                          size_t n,
+                          uint64_t abs_sample)
+    {
+        size_t consumed = 0;
+        while (consumed < n && state_ == IN_REGION) {
+            const size_t block_left = gate_decimation_ - d_block_phase_;
+            const size_t take = std::min(block_left, n - consumed);
+            const size_t energy_count =
+                (d_block_phase_ < neigh_len_)
+                    ? std::min(take, neigh_len_ - d_block_phase_)
+                    : 0;
+            for (size_t j = 0; j < energy_count; ++j)
+                d_block_acc_ += std::norm(in[consumed + j]);
+
+            pre_ring_.push(in + consumed, take);
+            if (d_active_region_ != kInvalidRegion) {
+                auto& samples = d_region_pool_[d_active_region_].samples;
+                if (samples.size() + take <= max_region_samples_) {
+                    samples.insert(samples.end(), in + consumed, in + consumed + take);
+                } else {
+                    const RegionHandle overflow = d_active_region_;
+                    d_active_region_ = kInvalidRegion;
+                    release_region(overflow);
+                    ++d_dropped_regions_;
+                }
+            }
+            d_block_phase_ += take;
+            consumed += take;
+            if (d_block_phase_ == gate_decimation_) {
+                d_block_phase_ = 0;
+                update_gate(abs_sample + consumed - 1);
+            }
+        }
+        return consumed;
+    }
+
+    void update_gate(uint64_t sample)
+    {
+        const float energy = gate_.push(d_block_acc_);
+        d_block_acc_ = 0.0f;
+        if (state_ == SEARCH) {
+            if (energy < energy_threshold_)
+                return;
+
+            state_ = IN_REGION;
+            d_active_region_ = acquire_region();
+            if (d_active_region_ != kInvalidRegion) {
+                Region& region = d_region_pool_[d_active_region_];
+                region.samples.resize(pre_ring_.logical_size);
+                pre_ring_.copy_to(region.samples.data());
+                region.candidate_offset = region.samples.size() - 1;
+                region.start_abs = (sample >= region.candidate_offset)
+                                       ? sample - region.candidate_offset
+                                       : 0;
+            } else {
+                ++d_dropped_regions_;
+            }
+            low_count_ = 0;
+            return;
+        }
+
+        if (energy >= energy_threshold_) {
+            low_count_ = 0;
+        } else if (++low_count_ >= holdoff_decimated_) {
+            finish_region();
+            state_ = SEARCH;
+            low_count_ = 0;
+        }
+    }
+
+    RegionHandle acquire_region()
+    {
+        std::lock_guard<std::mutex> lock(d_pool_mutex_);
+        if (d_free_count_ == 0)
+            return kInvalidRegion;
+        return d_free_regions_[--d_free_count_];
+    }
+
+    void finish_region()
+    {
+        if (d_active_region_ == kInvalidRegion)
+            return;
+        if (d_ready_count_ < kRegionPoolSize) {
+            d_ready_regions_[d_ready_tail_] = d_active_region_;
+            d_ready_tail_ = (d_ready_tail_ + 1) % kRegionPoolSize;
+            ++d_ready_count_;
+        } else {
+            release_region(d_active_region_);
+            ++d_dropped_regions_;
+        }
+        d_active_region_ = kInvalidRegion;
+    }
+
     enum State { SEARCH, IN_REGION };
     size_t pre_trigger_;
     float energy_threshold_;
@@ -703,9 +844,18 @@ private:
     size_t neigh_len_;   // |x|^2 samples summed per decimated block (16)
     SlidingEnergy gate_;
     RingBuffer pre_ring_;
+    size_t max_region_samples_;
     State state_ = SEARCH;
-    Region region_;
-    std::deque<Region> d_regions_; // completed regions awaiting the block
+    std::array<Region, kRegionPoolSize> d_region_pool_;
+    std::array<RegionHandle, kRegionPoolSize> d_free_regions_{};
+    std::array<RegionHandle, kRegionPoolSize> d_ready_regions_{};
+    mutable std::mutex d_pool_mutex_;
+    size_t d_free_count_ = 0;
+    size_t d_ready_head_ = 0;
+    size_t d_ready_tail_ = 0;
+    size_t d_ready_count_ = 0;
+    RegionHandle d_active_region_ = kInvalidRegion;
+    uint64_t d_dropped_regions_ = 0;
     size_t d_block_phase_ = 0;
     float d_block_acc_ = 0.0f;
     size_t low_count_ = 0;

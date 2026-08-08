@@ -86,7 +86,7 @@ public:
                 d_cycle_pos = 0;
         }
         d_total += static_cast<uint64_t>(produced);
-        if (d_total >= d_target)
+        if (produced == 0)
             return -1; // done
         return produced;
     }
@@ -171,8 +171,9 @@ int run_gate_bench(const std::string& cfile, uint64_t target, size_t gap)
         const size_t n = std::min(CH, stream.size() - off);
         sm.process(stream.data() + off, n, off);
         while (sm.region_ready()) {
-            sm.take_region();
+            const auto handle = sm.take_region();
             ++regions;
+            sm.release_region(handle);
         }
     }
     const auto c1 = std::clock();
@@ -266,6 +267,7 @@ int run_detector_bench(const std::string& cfile,
                 wall > 0 ? 100.0 * cpu / wall : 0.0);
     std::printf("throughput        : %.1f MS/s\n", n / wall / 1e6);
     std::printf("throughput        : %.2f GB/s\n", n * 8.0 / wall / 1e9);
+    std::printf("dropped regions   : %llu\n", static_cast<unsigned long long>(det->dropped_regions()));
     std::printf("detections        : %zu\n", cnt->count());
     const double captured = static_cast<double>(cnt->total_samples());
     std::printf("captured IQ       : %.0f samples (%.2f%% of input)\n", captured,
