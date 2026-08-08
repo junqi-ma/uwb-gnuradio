@@ -18,8 +18,9 @@
  *       detector-gate | detector-sparse | detector-dense
  *       detector-region         — continuous Region IQ → coarse/fine (core)
  *       detector-region-stream  — min-gap packet stream → full UwbDetector
+ *       detector-profile        — per-stage wall-time breakdown + advice
  *     options: --reps N --energy-dec D --coarse-dec D --target N --gap G
- *              --regions N  (detector-region only, default 200)
+ *              --regions N  (detector-region/profile, default 200)
  */
 
 #ifdef HAVE_CONFIG_H
@@ -577,6 +578,534 @@ int run_region_stream_bench(const std::string& cfile,
                                   std::to_string(gap) + ")");
 }
 
+// ---------------------------------------------------------------------------
+// Component-level profiler: times each detector stage in isolation so we can
+// rank optimization targets.  All numbers are wall-clock (steady_clock).
+// ---------------------------------------------------------------------------
+using Clock = std::chrono::steady_clock;
+inline double secs(Clock::time_point a, Clock::time_point b)
+{
+    return std::chrono::duration<double>(b - a).count();
+}
+
+int run_detector_profile(const std::string& cfile, size_t n_regions)
+{
+    std::vector<gr_complex> pkt, tmpl;
+    if (!load_packet_and_template(cfile, pkt, tmpl))
+        return 1;
+
+    const std::vector<gr_complex> region = build_region_iq(pkt);
+    const size_t Rn = region.size();
+
+    // ---- template / FIR setup (same as production) ----
+    std::vector<gr_complex> tmpl_norm = tmpl;
+    gr::uwb::core::uwb_l2_normalize(tmpl_norm);
+    const float tenergy = gr::uwb::core::uwb_template_energy(tmpl_norm);
+    std::vector<gr_complex> taps;
+    taps.reserve(tmpl_norm.size());
+    for (auto it = tmpl_norm.rbegin(); it != tmpl_norm.rend(); ++it)
+        taps.push_back(std::conj(*it));
+    gr::filter::kernel::fir_filter_ccc fir(taps);
+
+    auto make_tmpl_ds = [&](size_t D) {
+        const size_t Ld = tmpl.size() / D;
+        std::vector<gr_complex> ds;
+        ds.reserve(Ld);
+        for (size_t j = 0; j < Ld; ++j) {
+            const size_t m = j * D;
+            ds.push_back(std::conj(taps[tmpl.size() - 1 - m]));
+        }
+        gr::uwb::core::uwb_l2_normalize(ds);
+        return ds;
+    };
+    auto tmpl_ds4 = make_tmpl_ds(4);
+    auto tmpl_ds8 = make_tmpl_ds(8);
+
+    std::vector<gr_complex> sig_ds, corr;
+    std::vector<float> pow_ds, score_ds, metric_ds, winpow, fine_metric;
+    std::vector<size_t> coarse_peaks;
+    const size_t half = kCoarseStride * kCoarseDec + kCoarseMargin;
+    corr.resize(2 * half + 1);
+    winpow.resize(2 * half + 1);
+    fine_metric.resize(2 * half + 1);
+    coarse_peaks.reserve(256);
+
+    // Warm-up
+    {
+        float mx = 0.0f;
+        gr::uwb::core::uwb_coarse_peaks(region.data(), 0, Rn, tmpl_ds4.data(),
+                                        tmpl_ds4.size(), 4, 1, tmpl_ds4.size(),
+                                        0.5f, 0.5f, 1, sig_ds, pow_ds, score_ds,
+                                        metric_ds, coarse_peaks, &mx);
+    }
+
+    const size_t N = n_regions > 0 ? n_regions : 200;
+    std::printf("== Detector component profile (N=%zu regions, len=%zu) ==\n",
+                N, Rn);
+    std::printf("CPU: profiled on this host; times are wall-clock means.\n\n");
+
+    // =====================================================================
+    // A. Energy-gate state machine: SEARCH (silence) vs IN_REGION (packet)
+    // =====================================================================
+    {
+        constexpr size_t kSilence = 50'000'000; // 50 M silence
+        std::vector<gr_complex> silence(1 << 16, gr_complex(0.0f, 0.0f)); // chunk
+        gr::uwb::UwbDetectorStateMachine sm_s(kRegionPreTrigger, 1e-3f, 100, 32, 8);
+        auto t0 = Clock::now();
+        uint64_t abs = 0;
+        size_t left = kSilence;
+        while (left > 0) {
+            const size_t n = std::min(left, silence.size());
+            sm_s.process(silence.data(), n, abs);
+            abs += n;
+            left -= n;
+            while (sm_s.region_ready()) {
+                auto h = sm_s.take_region();
+                sm_s.release_region(h);
+            }
+        }
+        auto t1 = Clock::now();
+        const double s_search = secs(t0, t1);
+        std::printf("--- A. Energy gate state machine ---\n");
+        std::printf("SEARCH silence  : %zu samples in %.3f s  → %.1f MS/s  "
+                    "(%.2f ns/sample)\n",
+                    kSilence, s_search, kSilence / s_search / 1e6,
+                    s_search * 1e9 / kSilence);
+    }
+    {
+        // Dense packet stream: almost all samples go through IN_REGION.
+        constexpr size_t kTarget = 20'000'000;
+        constexpr size_t kGap = 6000;
+        std::vector<gr_complex> stream;
+        stream.reserve(kTarget);
+        while (stream.size() < kTarget) {
+            const size_t remain = kTarget - stream.size();
+            const size_t pn = std::min(pkt.size(), remain);
+            stream.insert(stream.end(), pkt.begin(), pkt.begin() + pn);
+            if (stream.size() >= kTarget)
+                break;
+            const size_t gn = std::min(kGap, remain - pn);
+            stream.insert(stream.end(), gn, gr_complex(0.0f, 0.0f));
+        }
+        gr::uwb::UwbDetectorStateMachine sm(kRegionPreTrigger, 1e-3f, 100, 32, 8);
+        size_t regions = 0;
+        uint64_t region_iq = 0;
+        auto t0 = Clock::now();
+        const size_t CH = 8192;
+        for (size_t off = 0; off < stream.size(); off += CH) {
+            const size_t n = std::min(CH, stream.size() - off);
+            sm.process(stream.data() + off, n, off);
+            while (sm.region_ready()) {
+                auto h = sm.take_region();
+                region_iq += sm.region(h).samples.size();
+                sm.release_region(h);
+                ++regions;
+            }
+        }
+        sm.flush_region();
+        while (sm.region_ready()) {
+            auto h = sm.take_region();
+            region_iq += sm.region(h).samples.size();
+            sm.release_region(h);
+            ++regions;
+        }
+        auto t1 = Clock::now();
+        const double s = secs(t0, t1);
+        std::printf("IN_REGION dense : %zu samples in %.3f s  → %.1f MS/s  "
+                    "(%.2f ns/sample)\n",
+                    stream.size(), s, stream.size() / s / 1e6,
+                    s * 1e9 / stream.size());
+        std::printf("  regions=%zu  region IQ=%llu  materialize ≈ %.1f MS/s\n",
+                    regions, static_cast<unsigned long long>(region_iq),
+                    region_iq / s / 1e6);
+        std::printf("  (IN_REGION cost dominated by preallocated-pool memcpy of "
+                    "raw IQ into Region)\n\n");
+    }
+
+    // =====================================================================
+    // B. Coarse sub-stages on one production-sized Region
+    // =====================================================================
+    {
+        const size_t D = 4;
+        const size_t Ld = tmpl_ds4.size();
+        const size_t nd = Rn / D;
+        const size_t nscore = nd - Ld + 1;
+        double t_decim = 0, t_pow = 0, t_score = 0, t_peak = 0, t_total = 0;
+        size_t n_peaks = 0;
+
+        for (size_t i = 0; i < N; ++i) {
+            auto a0 = Clock::now();
+            sig_ds.resize(nd);
+            for (size_t j = 0; j < nd; ++j)
+                sig_ds[j] = region[j * D];
+            auto a1 = Clock::now();
+
+            pow_ds.resize(nd);
+            float etd = 0.0f;
+            for (size_t k = 0; k < Ld; ++k)
+                etd += std::norm(tmpl_ds4[k]);
+            float psum = 0.0f;
+            for (size_t k = 0; k < Ld; ++k)
+                psum += std::norm(sig_ds[k]);
+            pow_ds[0] = psum;
+            for (size_t j = 1; j + Ld <= nd; ++j) {
+                psum += std::norm(sig_ds[j + Ld - 1]) - std::norm(sig_ds[j - 1]);
+                pow_ds[j] = psum;
+            }
+            auto a2 = Clock::now();
+
+            score_ds.resize(nscore);
+            for (size_t j = 0; j < nscore; ++j) {
+                std::complex<float> acc(0.0f, 0.0f);
+                volk_32fc_x2_conjugate_dot_prod_32fc(
+                    &acc, sig_ds.data() + j, tmpl_ds4.data(),
+                    static_cast<unsigned int>(Ld));
+                score_ds[j] =
+                    std::abs(acc) /
+                    (std::sqrt(pow_ds[j] * etd + gr::uwb::core::kUwbEpsilon));
+            }
+            auto a3 = Clock::now();
+
+            // peak pick (R=1 metric = score)
+            float mx = 0.0f;
+            for (size_t j = 0; j < nscore; ++j)
+                if (score_ds[j] > mx)
+                    mx = score_ds[j];
+            coarse_peaks.clear();
+            const float thr = 0.5f * mx;
+            for (size_t j = 1; j + 1 < nscore; ++j) {
+                if (score_ds[j] > thr && score_ds[j] > score_ds[j - 1] &&
+                    score_ds[j] >= score_ds[j + 1]) {
+                    if (coarse_peaks.empty() ||
+                        j >= coarse_peaks.back() + Ld / 2)
+                        coarse_peaks.push_back(j);
+                    else if (j > coarse_peaks.back())
+                        coarse_peaks.back() = j;
+                }
+            }
+            n_peaks = coarse_peaks.size();
+            auto a4 = Clock::now();
+
+            t_decim += secs(a0, a1);
+            t_pow += secs(a1, a2);
+            t_score += secs(a2, a3);
+            t_peak += secs(a3, a4);
+            t_total += secs(a0, a4);
+        }
+
+        // Also full uwb_coarse_peaks for cross-check
+        double t_api = 0;
+        for (size_t i = 0; i < N; ++i) {
+            float mx = 0.0f;
+            auto a0 = Clock::now();
+            gr::uwb::core::uwb_coarse_peaks(
+                region.data(), 0, Rn, tmpl_ds4.data(), tmpl_ds4.size(), 4, 1,
+                tmpl_ds4.size(), 0.5f, 0.5f, 1, sig_ds, pow_ds, score_ds,
+                metric_ds, coarse_peaks, &mx);
+            auto a1 = Clock::now();
+            t_api += secs(a0, a1);
+        }
+
+        // Coarse with D=8 for comparison
+        double t_d8 = 0;
+        auto tmpl8 = tmpl_ds8;
+        for (size_t i = 0; i < N; ++i) {
+            float mx = 0.0f;
+            auto a0 = Clock::now();
+            gr::uwb::core::uwb_coarse_peaks(
+                region.data(), 0, Rn, tmpl8.data(), tmpl8.size(), 8, 1,
+                tmpl8.size(), 0.5f, 0.5f, 1, sig_ds, pow_ds, score_ds, metric_ds,
+                coarse_peaks, &mx);
+            auto a1 = Clock::now();
+            t_d8 += secs(a0, a1);
+        }
+
+        std::printf("--- B. Coarse preamble scan (per region, avg of %zu) ---\n",
+                    N);
+        std::printf("  decimate D=4      : %7.3f ms  (%5.1f%%)\n",
+                    t_decim / N * 1e3, 100.0 * t_decim / t_total);
+        std::printf("  window power      : %7.3f ms  (%5.1f%%)\n",
+                    t_pow / N * 1e3, 100.0 * t_pow / t_total);
+        std::printf("  VOLK score loop   : %7.3f ms  (%5.1f%%)  "
+                    "[nscore=%zu, Ld=%zu]\n",
+                    t_score / N * 1e3, 100.0 * t_score / t_total, nscore, Ld);
+        std::printf("  peak pick         : %7.3f ms  (%5.1f%%)  "
+                    "[~%zu peaks]\n",
+                    t_peak / N * 1e3, 100.0 * t_peak / t_total, n_peaks);
+        std::printf("  SUM instrumented  : %7.3f ms\n", t_total / N * 1e3);
+        std::printf("  uwb_coarse_peaks  : %7.3f ms  (API, D=4)\n",
+                    t_api / N * 1e3);
+        std::printf("  uwb_coarse_peaks  : %7.3f ms  (API, D=8, ~%.1fx)\n",
+                    t_d8 / N * 1e3, t_api / t_d8);
+        std::printf("  cost model        : O((N/D)*(L/D)) = %zu·%zu = %zu "
+                    "dot-products @ Ld=%zu\n\n",
+                    nscore, Ld, nscore * Ld, Ld);
+    }
+
+    // =====================================================================
+    // C. Fine ROI correlation (per coarse peak + total)
+    // =====================================================================
+    {
+        // Get real coarse peaks once
+        float mx = 0.0f;
+        gr::uwb::core::uwb_coarse_peaks(
+            region.data(), 0, Rn, tmpl_ds4.data(), tmpl_ds4.size(), 4, 1,
+            tmpl_ds4.size(), 0.5f, 0.5f, 1, sig_ds, pow_ds, score_ds, metric_ds,
+            coarse_peaks, &mx);
+        const auto peaks = coarse_peaks;
+        const size_t Lm1 = tmpl.size() - 1;
+        const size_t halfw = kCoarseStride * kCoarseDec + kCoarseMargin;
+
+        double t_fir = 0, t_wpow = 0, t_nscore = 0, t_argmax = 0, t_all = 0;
+        size_t fine_calls = 0;
+        size_t total_len = 0;
+
+        for (size_t i = 0; i < N; ++i) {
+            auto b0 = Clock::now();
+            for (size_t p : peaks) {
+                if (p + Lm1 >= Rn)
+                    continue;
+                const size_t center = p + Lm1;
+                const size_t j0 = (center > halfw) ? center - halfw : 0;
+                const size_t j1 = std::min(center + halfw, Rn - 1);
+                const size_t len = j1 - j0 + 1;
+                total_len += len;
+                ++fine_calls;
+
+                auto c0 = Clock::now();
+                fir.filterN(corr.data(), region.data() + j0,
+                            static_cast<unsigned long>(len));
+                auto c1 = Clock::now();
+                gr::uwb::core::uwb_window_power(region.data() + j0, len,
+                                                tmpl.size(), winpow.data());
+                auto c2 = Clock::now();
+                gr::uwb::core::uwb_normalized_score(
+                    corr.data(), winpow.data(), len, tenergy, fine_metric.data());
+                auto c3 = Clock::now();
+                size_t local_best = 0;
+                for (size_t k = 0; k < len; ++k)
+                    if (fine_metric[k] > fine_metric[local_best])
+                        local_best = k;
+                auto c4 = Clock::now();
+                t_fir += secs(c0, c1);
+                t_wpow += secs(c1, c2);
+                t_nscore += secs(c2, c3);
+                t_argmax += secs(c3, c4);
+            }
+            auto b1 = Clock::now();
+            t_all += secs(b0, b1);
+        }
+
+        // Fine only on first peak (early-exit strategy)
+        double t_first = 0;
+        for (size_t i = 0; i < N; ++i) {
+            auto b0 = Clock::now();
+            if (!peaks.empty()) {
+                size_t p = peaks.front();
+                if (p + Lm1 < Rn) {
+                    const size_t center = p + Lm1;
+                    const size_t j0 = (center > halfw) ? center - halfw : 0;
+                    const size_t j1 = std::min(center + halfw, Rn - 1);
+                    const size_t len = j1 - j0 + 1;
+                    fir.filterN(corr.data(), region.data() + j0,
+                                static_cast<unsigned long>(len));
+                    gr::uwb::core::uwb_window_power(region.data() + j0, len,
+                                                    tmpl.size(), winpow.data());
+                    gr::uwb::core::uwb_normalized_score(corr.data(), winpow.data(),
+                                                        len, tenergy,
+                                                        fine_metric.data());
+                }
+            }
+            auto b1 = Clock::now();
+            t_first += secs(b0, b1);
+        }
+
+        const double inv = 1.0 / N;
+        std::printf("--- C. Fine ROI correlation (per region) ---\n");
+        std::printf("  coarse peaks/region : %zu\n", peaks.size());
+        std::printf("  ROI half-width      : %zu  (avg len/call ≈ %.0f)\n", halfw,
+                    fine_calls > 0
+                        ? static_cast<double>(total_len) / fine_calls
+                        : 0.0);
+        std::printf("  FIR filterN         : %7.3f ms  (%5.1f%% of fine)\n",
+                    t_fir * inv * 1e3, 100.0 * t_fir / t_all);
+        std::printf("  window power        : %7.3f ms  (%5.1f%% of fine)\n",
+                    t_wpow * inv * 1e3, 100.0 * t_wpow / t_all);
+        std::printf("  normalized score    : %7.3f ms  (%5.1f%% of fine)\n",
+                    t_nscore * inv * 1e3, 100.0 * t_nscore / t_all);
+        std::printf("  argmax              : %7.3f ms  (%5.1f%% of fine)\n",
+                    t_argmax * inv * 1e3, 100.0 * t_argmax / t_all);
+        std::printf("  ALL peaks fine      : %7.3f ms\n", t_all * inv * 1e3);
+        std::printf("  FIRST peak only     : %7.3f ms  (%.1fx cheaper)\n\n",
+                    t_first * inv * 1e3, t_all / t_first);
+    }
+
+    // =====================================================================
+    // D. Capture / PDU materialization
+    // =====================================================================
+    {
+        const size_t cap = kUserPreTrigger + kCapture; // 202032
+        const size_t lo_off = kRegionPreTrigger;       // approx start
+        double t_vec = 0, t_pmt = 0;
+        for (size_t i = 0; i < N; ++i) {
+            auto a0 = Clock::now();
+            std::vector<gr_complex> iq(
+                region.begin() + static_cast<std::ptrdiff_t>(lo_off),
+                region.begin() +
+                    static_cast<std::ptrdiff_t>(lo_off + cap));
+            auto a1 = Clock::now();
+            pmt::pmt_t data = pmt::init_c32vector(iq.size(), iq);
+            pmt::pmt_t meta = pmt::make_dict();
+            meta = pmt::dict_add(meta, pmt::mp("packet_id"), pmt::from_long(0));
+            meta = pmt::dict_add(meta, pmt::mp("start_sample"),
+                                 pmt::from_uint64(0));
+            meta = pmt::dict_add(meta, pmt::mp("sample_count"),
+                                 pmt::from_long(static_cast<long>(cap)));
+            pmt::pmt_t msg = pmt::cons(meta, data);
+            (void)msg;
+            auto a2 = Clock::now();
+            t_vec += secs(a0, a1);
+            t_pmt += secs(a1, a2);
+        }
+        std::printf("--- D. Capture / PDU materialization (cap=%zu) ---\n", cap);
+        std::printf("  vector copy IQ      : %7.3f ms  (%.1f GB/s)\n",
+                    t_vec / N * 1e3,
+                    (cap * 8.0) / (t_vec / N) / 1e9);
+        std::printf("  pmt init + meta     : %7.3f ms\n", t_pmt / N * 1e3);
+        std::printf("  TOTAL PDU build     : %7.3f ms\n\n",
+                    (t_vec + t_pmt) / N * 1e3);
+    }
+
+    // =====================================================================
+    // E. End-to-end per-region worker path + sparse GR pipeline reference
+    // =====================================================================
+    {
+        double t_worker = 0;
+        size_t dets = 0;
+        for (size_t i = 0; i < N; ++i) {
+            size_t cap = 0;
+            auto a0 = Clock::now();
+            if (process_region_like_detector(
+                    region, tmpl_ds4, tmpl_ds4.size(), fir, tenergy, tmpl.size(),
+                    kUserPreTrigger, kCapture, sig_ds, pow_ds, score_ds,
+                    metric_ds, coarse_peaks, corr, winpow, fine_metric, cap))
+                ++dets;
+            auto a1 = Clock::now();
+            t_worker += secs(a0, a1);
+        }
+        std::printf("--- E. End-to-end summary (per region) ---\n");
+        std::printf("  worker path total   : %7.3f ms  (%zu/%zu detections)\n",
+                    t_worker / N * 1e3, dets, N);
+        std::printf("  → region IQ rate    : %.1f MS/s\n",
+                    Rn / (t_worker / N) / 1e6);
+        std::printf("  → max packet rate   : %.0f pkt/s\n\n",
+                    N / t_worker);
+    }
+
+    // Re-measure coarse API vs fine vs pdu as fractions of worker
+    {
+        double t_c = 0, t_f = 0, t_p = 0;
+        float mx = 0.0f;
+        gr::uwb::core::uwb_coarse_peaks(
+            region.data(), 0, Rn, tmpl_ds4.data(), tmpl_ds4.size(), 4, 1,
+            tmpl_ds4.size(), 0.5f, 0.5f, 1, sig_ds, pow_ds, score_ds, metric_ds,
+            coarse_peaks, &mx);
+        const auto peaks = coarse_peaks;
+        const size_t Lm1 = tmpl.size() - 1;
+        const size_t halfw = kCoarseStride * kCoarseDec + kCoarseMargin;
+
+        for (size_t i = 0; i < N; ++i) {
+            auto a0 = Clock::now();
+            float m = 0.0f;
+            gr::uwb::core::uwb_coarse_peaks(
+                region.data(), 0, Rn, tmpl_ds4.data(), tmpl_ds4.size(), 4, 1,
+                tmpl_ds4.size(), 0.5f, 0.5f, 1, sig_ds, pow_ds, score_ds,
+                metric_ds, coarse_peaks, &m);
+            auto a1 = Clock::now();
+
+            for (size_t p : peaks) {
+                if (p + Lm1 >= Rn)
+                    continue;
+                const size_t center = p + Lm1;
+                const size_t j0 = (center > halfw) ? center - halfw : 0;
+                const size_t j1 = std::min(center + halfw, Rn - 1);
+                const size_t len = j1 - j0 + 1;
+                fir.filterN(corr.data(), region.data() + j0,
+                            static_cast<unsigned long>(len));
+                gr::uwb::core::uwb_window_power(region.data() + j0, len,
+                                                tmpl.size(), winpow.data());
+                gr::uwb::core::uwb_normalized_score(
+                    corr.data(), winpow.data(), len, tenergy, fine_metric.data());
+            }
+            auto a2 = Clock::now();
+
+            const size_t cap = kUserPreTrigger + kCapture;
+            const size_t lo = kRegionPreTrigger;
+            std::vector<gr_complex> iq(
+                region.begin() + static_cast<std::ptrdiff_t>(lo),
+                region.begin() + static_cast<std::ptrdiff_t>(lo + cap));
+            pmt::pmt_t data = pmt::init_c32vector(iq.size(), iq);
+            (void)data;
+            auto a3 = Clock::now();
+
+            t_c += secs(a0, a1);
+            t_f += secs(a1, a2);
+            t_p += secs(a2, a3);
+        }
+        const double tot = t_c + t_f + t_p;
+        std::printf("--- F. Worker breakdown (%% of coarse+fine+pdu) ---\n");
+        std::printf("  coarse              : %7.3f ms  %5.1f%%\n",
+                    t_c / N * 1e3, 100.0 * t_c / tot);
+        std::printf("  fine (all peaks)    : %7.3f ms  %5.1f%%\n",
+                    t_f / N * 1e3, 100.0 * t_f / tot);
+        std::printf("  capture+pmt         : %7.3f ms  %5.1f%%\n",
+                    t_p / N * 1e3, 100.0 * t_p / tot);
+        std::printf("  TOTAL               : %7.3f ms\n\n", tot / N * 1e3);
+    }
+
+    // =====================================================================
+    // G. Optimization suggestions (printed from measured ranking)
+    // =====================================================================
+    std::printf("--- G. Optimization recommendations (data-driven) ---\n");
+    std::printf(
+        "1. Coarse VOLK score loop is the dominant per-region cost\n"
+        "   (O((N/D)*(L/D)) with D=4, L=1016 → ~66k×254 complex MACs).\n"
+        "   Highest-ROI options:\n"
+        "   a) Scan only preamble-likely prefix of Region (first ~70–90k\n"
+        "      samples ≈ SYNC+SFD), not full 264k payload tail — up to ~3×.\n"
+        "   b) Raise coarse D 4→8 if detection QA still passes — ~4× on\n"
+        "      correlation (D²); verify with qa + real cfile.\n"
+        "   c) Early-exit coarse once first strong peak cluster found and\n"
+        "      existence check passes (stop scanning rest of region).\n"
+        "   d) Do NOT use score stride>1 (already proven to miss peaks).\n"
+        "\n"
+        "2. Fine correlation is secondary if many coarse peaks; if only\n"
+        "   earliest start is needed, fine the first confirmed peak only\n"
+        "   (measured multi-peak vs first-peak speedup above).\n"
+        "\n"
+        "3. Capture+PMT (~202k complex copy) is small vs coarse but shows up\n"
+        "   under high packet rates; zero-copy / preallocated PMT or SC16\n"
+        "   in PDU would cut memcpy+alloc.\n"
+        "\n"
+        "4. Energy gate SEARCH is already ~ns/sample (multi-GS/s); not a\n"
+        "   target. IN_REGION memcpy is ~hundreds of MS/s — only matters in\n"
+        "   dense continuous energy, not at 1 pkt/s.\n"
+        "\n"
+        "5. Full GR sparse pipeline (~160–210 MS/s input) is limited by\n"
+        "   scheduler/buffer plumbing once per-region work is rare; profile\n"
+        "   source→null_sink separately before more algorithm work for 1 GS/s\n"
+        "   silence-dominated streams.\n"
+        "\n"
+        "6. Recommended next experiment order:\n"
+        "   (P0) limit coarse scan to [0, preamble_horizon)\n"
+        "   (P1) early-exit after first SYNC peak cluster\n"
+        "   (P1) optional D=8 with correctness gate\n"
+        "   (P2) first-peak-only fine; async/zero-copy PDU\n"
+        "   (P2) GR plumbing / larger buffers for silence path\n");
+    std::printf("\n");
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -614,6 +1143,10 @@ int main(int argc, char** argv)
         // Continuous region pressure via min-gap stream (default gap 6000).
         const size_t gap = (det_gap == 2'300'000) ? 6000 : det_gap;
         return run_region_stream_bench(cfile, target, gap);
+    }
+
+    if (mode == "detector-profile") {
+        return run_detector_profile(cfile, n_regions);
     }
 
     if (mode == "detector-gate") {
