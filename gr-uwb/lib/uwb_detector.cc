@@ -285,15 +285,25 @@ void UwbDetector::publish_packet(const UwbDetectorStateMachine::Region& region)
     if (n == 0)
         return;
 
-    // 1. Decimated coarse scan over the WHOLE buffered region (including the
-    //    pre-buffer, which holds the gate-response samples before the crossing
-    //    and therefore the first SYNC symbol) confirms a real preamble and
-    //    locates the symbol starts.  In silence the correlation is ~0, so no
-    //    spurious peaks arise from the pre-buffer.
+    // 1. Decimated coarse scan over a preamble-horizon prefix of the buffered
+    //    region (incl. pre-buffer holding the first SYNC symbol).  Regions from
+    //    real packets are ~264k samples (preamble + full payload); correlating
+    //    the payload tail is wasted.  Horizon covers SYNC+SFD (+margin) past
+    //    the gate-crossing offset; short regions are scanned in full.
+    //
+    //    Cost: O((scan_len/D)*(L/D)).  Cutting scan_len from ~264k to ~80k
+    //    yields ~3× on the dominant VOLK score loop.
+    const size_t preamble_span =
+        d_template_len_ *
+        (core::kUwbSyncSymbols + core::kUwbSfdSymbols + /*margin_syms=*/4);
+    const size_t horizon =
+        std::max(preamble_span, region.candidate_offset + preamble_span);
+    const size_t coarse_scan_end = std::min(n, horizon);
+
     float mx = 0.0f;
     core::uwb_coarse_peaks(region.samples.data(),
-                           0, // scan the whole region, incl. pre-buffer
-                           n,
+                           0, // scan from region start (incl. pre-buffer)
+                           coarse_scan_end,
                            d_tmpl_ds.data(),
                            d_tmpl_ds.size(),
                            d_coarse_decimation_,
@@ -311,10 +321,10 @@ void UwbDetector::publish_packet(const UwbDetectorStateMachine::Region& region)
     if (d_coarse_peaks.empty())
         return; // not a preamble — drop (existence check)
 
-    // 2. Full-rate fine correlation in a small ROI around each coarse peak.
-    //    A coarse peak at region-relative p is the symbol START; the full-rate
-    //    metric peaks at the symbol END, p + (L-1).  Track the earliest end
-    //    (first SYNC symbol) and the strongest correlation.
+    // 2. Full-rate fine correlation in a small ROI around coarse peaks.
+    //    Peaks are produced in ascending position order.  Packet start needs
+    //    only the earliest fine-confirmed symbol END, so stop at the first
+    //    peak whose fine metric is >= 0.5 (P1: first-peak fine).
     const size_t Lm1 = d_template_len_ - 1;
     // The coarse stride places each peak within stride*D samples of the true
     // symbol start, so the fine search window around (start + L - 1) must be
@@ -338,19 +348,17 @@ void UwbDetector::publish_packet(const UwbDetectorStateMachine::Region& region)
                                    d_template_energy_, d_fine_metric.data());
 
         size_t local_best = 0;
-        for (size_t k = 0; k < len; ++k) {
-            if (d_fine_metric[k] > best_metric)
-                best_metric = d_fine_metric[k];
+        for (size_t k = 1; k < len; ++k) {
             if (d_fine_metric[k] > d_fine_metric[local_best])
                 local_best = k;
         }
         // Only accept a coarse peak whose fine argmax is a real correlation
         // (>= 0.5) — weak partial alignments near the region start are
-        // ignored.  The earliest such symbol END is the first SYNC symbol end.
+        // ignored.  First such peak (peaks ascending) = earliest SYNC end.
         if (d_fine_metric[local_best] >= 0.5f) {
-            const size_t end = j0 + local_best;
-            if (end < earliest_end)
-                earliest_end = end;
+            earliest_end = j0 + local_best;
+            best_metric = d_fine_metric[local_best];
+            break;
         }
     }
     if (earliest_end >= n || best_metric < 0.5f)

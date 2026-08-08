@@ -347,8 +347,23 @@ std::vector<gr_complex> build_region_iq(const std::vector<gr_complex>& pkt)
     return region;
 }
 
-// Run the same coarse → fine → capture path as UwbDetector::publish_packet.
-// Returns true if a preamble was confirmed (would emit a PDU).
+// Production-equivalent coarse scan end: preamble-horizon prefix (P0).
+// candidate_offset=0 here (synthetic region); matches publish_packet when
+// candidate_offset is 0 or when horizon already covers pre+SYNC+SFD.
+inline size_t production_coarse_scan_end(size_t region_len,
+                                         size_t template_len,
+                                         size_t candidate_offset = 0)
+{
+    const size_t preamble_span =
+        template_len * (gr::uwb::core::kUwbSyncSymbols +
+                        gr::uwb::core::kUwbSfdSymbols + 4);
+    const size_t horizon = std::max(preamble_span, candidate_offset + preamble_span);
+    return std::min(region_len, horizon);
+}
+
+// Run the same coarse → fine → capture path as UwbDetector::publish_packet
+// (P0 preamble-horizon + P1 first-peak fine).  Returns true if a preamble
+// was confirmed (would emit a PDU).
 bool process_region_like_detector(
     const std::vector<gr_complex>& region,
     const std::vector<gr_complex>& tmpl_ds,
@@ -374,10 +389,13 @@ bool process_region_like_detector(
     if (n == 0)
         return false;
 
+    const size_t coarse_scan_end =
+        production_coarse_scan_end(n, template_len, /*candidate_offset=*/0);
+
     float mx = 0.0f;
     gr::uwb::core::uwb_coarse_peaks(region.data(),
                                     0,
-                                    n,
+                                    coarse_scan_end,
                                     tmpl_ds.data(),
                                     tmpl_ds.size(),
                                     kCoarseDec,
@@ -415,16 +433,15 @@ bool process_region_like_detector(
                                             template_energy, fine_metric.data());
 
         size_t local_best = 0;
-        for (size_t k = 0; k < len; ++k) {
-            if (fine_metric[k] > best_metric)
-                best_metric = fine_metric[k];
+        for (size_t k = 1; k < len; ++k) {
             if (fine_metric[k] > fine_metric[local_best])
                 local_best = k;
         }
+        // P1: first fine-confirmed peak (ascending) is the earliest start.
         if (fine_metric[local_best] >= 0.5f) {
-            const size_t end = j0 + local_best;
-            if (end < earliest_end)
-                earliest_end = end;
+            earliest_end = j0 + local_best;
+            best_metric = fine_metric[local_best];
+            break;
         }
     }
     if (earliest_end >= n || best_metric < 0.5f)
@@ -1002,12 +1019,14 @@ int run_detector_profile(const std::string& cfile, size_t n_regions)
                     N / t_worker);
     }
 
-    // Re-measure coarse API vs fine vs pdu as fractions of worker
+    // Re-measure coarse/fine/pdu with PRODUCTION bounds (horizon + first peak)
     {
         double t_c = 0, t_f = 0, t_p = 0;
+        const size_t scan_end =
+            production_coarse_scan_end(Rn, tmpl.size(), /*candidate_offset=*/0);
         float mx = 0.0f;
         gr::uwb::core::uwb_coarse_peaks(
-            region.data(), 0, Rn, tmpl_ds4.data(), tmpl_ds4.size(), 4, 1,
+            region.data(), 0, scan_end, tmpl_ds4.data(), tmpl_ds4.size(), 4, 1,
             tmpl_ds4.size(), 0.5f, 0.5f, 1, sig_ds, pow_ds, score_ds, metric_ds,
             coarse_peaks, &mx);
         const auto peaks = coarse_peaks;
@@ -1018,11 +1037,12 @@ int run_detector_profile(const std::string& cfile, size_t n_regions)
             auto a0 = Clock::now();
             float m = 0.0f;
             gr::uwb::core::uwb_coarse_peaks(
-                region.data(), 0, Rn, tmpl_ds4.data(), tmpl_ds4.size(), 4, 1,
-                tmpl_ds4.size(), 0.5f, 0.5f, 1, sig_ds, pow_ds, score_ds,
+                region.data(), 0, scan_end, tmpl_ds4.data(), tmpl_ds4.size(), 4,
+                1, tmpl_ds4.size(), 0.5f, 0.5f, 1, sig_ds, pow_ds, score_ds,
                 metric_ds, coarse_peaks, &m);
             auto a1 = Clock::now();
 
+            // P1 first-peak fine
             for (size_t p : peaks) {
                 if (p + Lm1 >= Rn)
                     continue;
@@ -1036,6 +1056,12 @@ int run_detector_profile(const std::string& cfile, size_t n_regions)
                                                 tmpl.size(), winpow.data());
                 gr::uwb::core::uwb_normalized_score(
                     corr.data(), winpow.data(), len, tenergy, fine_metric.data());
+                size_t local_best = 0;
+                for (size_t k = 1; k < len; ++k)
+                    if (fine_metric[k] > fine_metric[local_best])
+                        local_best = k;
+                if (fine_metric[local_best] >= 0.5f)
+                    break;
             }
             auto a2 = Clock::now();
 
@@ -1053,10 +1079,12 @@ int run_detector_profile(const std::string& cfile, size_t n_regions)
             t_p += secs(a2, a3);
         }
         const double tot = t_c + t_f + t_p;
-        std::printf("--- F. Worker breakdown (%% of coarse+fine+pdu) ---\n");
+        std::printf("--- F. Worker breakdown PRODUCTION (horizon+first-peak) ---\n");
+        std::printf("  coarse_scan_end     : %zu / %zu (%.1f%% of region)\n",
+                    scan_end, Rn, 100.0 * scan_end / Rn);
         std::printf("  coarse              : %7.3f ms  %5.1f%%\n",
                     t_c / N * 1e3, 100.0 * t_c / tot);
-        std::printf("  fine (all peaks)    : %7.3f ms  %5.1f%%\n",
+        std::printf("  fine (first peak)   : %7.3f ms  %5.1f%%\n",
                     t_f / N * 1e3, 100.0 * t_f / tot);
         std::printf("  capture+pmt         : %7.3f ms  %5.1f%%\n",
                     t_p / N * 1e3, 100.0 * t_p / tot);

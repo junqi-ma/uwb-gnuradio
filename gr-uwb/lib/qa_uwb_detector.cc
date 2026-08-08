@@ -115,6 +115,55 @@ BOOST_AUTO_TEST_CASE(test_detector_silence_no_packet)
     BOOST_CHECK_EQUAL(dbg->num_messages(), 0);
 }
 
+// Long trailing payload after a short synthetic preamble must still detect.
+// Exercises the production preamble-horizon clamp: coarse scans only the
+// SYNC+SFD prefix, not the full multi-100k region (publish_packet P0).
+BOOST_AUTO_TEST_CASE(test_detector_long_region_horizon_still_detects)
+{
+    const size_t L = 128;
+    std::vector<gr_complex> tmpl(L);
+    for (size_t k = 0; k < L; ++k)
+        tmpl[k] = gr_complex(std::cos(0.21f * k), 0.4f * std::sin(0.13f * k));
+    gr::uwb::core::uwb_l2_normalize(tmpl);
+
+    const size_t lead = 1024;
+    const size_t reps = 16; // enough SYNC-like symbols for coarse existence
+    const size_t payload = 200000; // long payload tail (would dominate full scan)
+    const size_t tail = 4096;
+    std::vector<gr_complex> x(lead + reps * L + payload + tail,
+                              gr_complex(0.0f, 0.0f));
+    for (size_t r = 0; r < reps; ++r)
+        for (size_t k = 0; k < L; ++k)
+            x[lead + r * L + k] = tmpl[k];
+    // Non-zero but non-preamble payload so energy gate stays up longer.
+    for (size_t i = 0; i < payload; ++i)
+        x[lead + reps * L + i] =
+            gr_complex(0.05f * std::sin(0.03f * static_cast<float>(i)),
+                       0.05f * std::cos(0.02f * static_cast<float>(i)));
+
+    auto det = gr::uwb::UwbDetector::make(tmpl,
+                                          /*pre_trigger=*/64,
+                                          /*capture=*/500,
+                                          /*energy_threshold=*/1e-3f,
+                                          /*energy_gate_decimation=*/4,
+                                          /*coarse_decimation=*/4,
+                                          /*coarse_repetitions=*/1,
+                                          /*coarse_margin=*/8);
+    auto dbg = gr::blocks::message_debug::make();
+    run_detector(x, det, dbg);
+    BOOST_CHECK_EQUAL(det->dropped_regions(), 0);
+    BOOST_REQUIRE_EQUAL(dbg->num_messages(), 1);
+
+    const pmt::pmt_t meta = pmt::car(dbg->get_message(0));
+    const uint64_t start = pmt::to_uint64(
+        pmt::dict_ref(meta, pmt::mp("start_sample"), pmt::PMT_NIL));
+    const double metric = pmt::to_double(
+        pmt::dict_ref(meta, pmt::mp("detection_metric"), pmt::PMT_NIL));
+    BOOST_CHECK_GE(start, static_cast<uint64_t>(lead));
+    BOOST_CHECK_LT(start, static_cast<uint64_t>(lead + 2 * L));
+    BOOST_CHECK_GT(metric, 0.5);
+}
+
 BOOST_AUTO_TEST_CASE(test_detector_two_packets_payload_matches_input)
 {
     const size_t L = 128;
