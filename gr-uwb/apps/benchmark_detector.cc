@@ -28,6 +28,8 @@
  *       detector-region-stream  — min-gap packet stream → full UwbDetector
  *       detector-profile        — per-stage wall-time breakdown + advice
  *       demod-async             — UwbRealtimeDemodulator worker-pool throughput
+ *       demod-soak              — sustained-rate soak (R6: queue/latency/drop)
+ *       scheduled-demod-e2e     — extractor → raw-capture ∥ demod flowgraph
  *     options: --reps N --energy-dec D --coarse-dec D --target N --gap G
  *              --regions N  (detector-region/profile, default 200)
  *              --buffer-items N --max-noutput-items N
@@ -2002,8 +2004,240 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    if (mode == "demod-soak") {
+        // R6: sustained-rate soak through the async demodulator block.
+        // Feeds golden-window PDUs paced at `--rate` (default 100 pkt/s) for
+        // `--duration` seconds and reports queue stability, drops, latency
+        // p50/p95/p99 and worker utilization — the R6 acceptance metrics.
+        const std::string gw = "testdata/realtime_demod_golden/window.cfile";
+        std::ifstream f(gw, std::ios::binary);
+        if (!f) {
+            std::printf("NOTE: %s not found (run from repo root); "
+                        "skeleton only.\n",
+                        gw.c_str());
+            return 0;
+        }
+        f.seekg(0, std::ios::end);
+        const size_t bytes = static_cast<size_t>(f.tellg());
+        f.seekg(0, std::ios::beg);
+        std::vector<std::complex<float>> rx(bytes /
+                                            sizeof(std::complex<float>));
+        f.read(reinterpret_cast<char*>(rx.data()),
+               static_cast<std::streamsize>(bytes));
+
+        std::vector<std::complex<float>> tmpl;
+        std::ifstream tf("testdata/reference_preamble.bin", std::ios::binary);
+        tf.seekg(0, std::ios::end);
+        tmpl.resize(static_cast<size_t>(tf.tellg()) /
+                    sizeof(std::complex<float>));
+        tf.seekg(0, std::ios::beg);
+        tf.read(reinterpret_cast<char*>(tmpl.data()),
+                static_cast<std::streamsize>(tmpl.size() *
+                                             sizeof(std::complex<float>)));
+
+        double rate = 100.0;
+        double duration = 3.0;
+        size_t nworkers = 4;
+        size_t qcap = 64;
+        for (int i = 3; i + 1 < argc; i += 2) {
+            std::string k = argv[i];
+            if (k == "--rate")
+                rate = std::stod(argv[i + 1]);
+            else if (k == "--duration")
+                duration = std::stod(argv[i + 1]);
+            else if (k == "--workers")
+                nworkers = std::stoul(argv[i + 1]);
+            else if (k == "--queue")
+                qcap = std::stoul(argv[i + 1]);
+        }
+        const uint64_t N =
+            static_cast<uint64_t>(std::max(1.0, rate * duration));
+        const auto feed_period_us = std::chrono::microseconds(
+            static_cast<long>(1e6 / std::max(0.1, rate)));
+
+        auto demod = gr::uwb::UwbRealtimeDemodulator::make_from_template(
+            tmpl, nworkers, qcap, "ieee" /* golden window uses IEEE SFD */);
+        auto dbg = gr::blocks::message_debug::make();
+        auto tb = gr::make_top_block("bench_demod_soak");
+        tb->msg_connect(demod, "result", dbg, "store");
+
+        pmt::pmt_t meta = pmt::make_dict();
+        meta = pmt::dict_add(meta, pmt::mp("packet_id"), pmt::from_uint64(0));
+        meta = pmt::dict_add(meta, pmt::mp("schedule_index"),
+                             pmt::from_uint64(0));
+        meta = pmt::dict_add(meta, pmt::mp("predicted_start_sample"),
+                             pmt::from_long(9984));
+        meta = pmt::dict_add(meta, pmt::mp("window_start_sample"),
+                             pmt::from_long(0));
+        meta = pmt::dict_add(
+            meta, pmt::mp("sample_count"),
+            pmt::from_long(static_cast<long>(rx.size())));
+        pmt::pmt_t pdu =
+            pmt::cons(meta, pmt::init_c32vector(rx.size(), rx.data()));
+
+        std::printf("== demod-soak ==\n");
+        std::printf("rate=%.0f pkt/s duration=%.1fs jobs=%llu workers=%zu "
+                    "queue_cap=%zu\n",
+                    rate, duration, static_cast<unsigned long long>(N),
+                    nworkers, qcap);
+
+        tb->start();
+        const auto t0 = std::chrono::steady_clock::now();
+        for (uint64_t i = 0; i < N; ++i) {
+            demod->_post(pmt::mp("samples"), pdu);
+            std::this_thread::sleep_for(feed_period_us);
+        }
+        // Drain: every fed job is accounted for (completed + failed +
+        // dropped == fed), so stop waiting once the counters are consistent.
+        const auto t_feed = std::chrono::steady_clock::now();
+        while (demod->jobs_completed() + demod->jobs_failed() +
+                       demod->jobs_dropped() <
+                       N &&
+               std::chrono::duration_cast<std::chrono::seconds>(
+                   std::chrono::steady_clock::now() - t_feed)
+                       .count() < static_cast<long>(duration * 4 + 10))
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        const double wall_s = std::chrono::duration<double>(
+                                  std::chrono::steady_clock::now() - t0)
+                                  .count();
+        tb->stop();
+        tb->wait();
+
+        const uint64_t done = demod->jobs_completed() + demod->jobs_failed();
+        std::printf("fed=%llu completed=%llu failed=%llu dropped=%llu "
+                    "invalid=%llu\n",
+                    static_cast<unsigned long long>(N),
+                    static_cast<unsigned long long>(demod->jobs_completed()),
+                    static_cast<unsigned long long>(demod->jobs_failed()),
+                    static_cast<unsigned long long>(demod->jobs_dropped()),
+                    static_cast<unsigned long long>(demod->invalid_inputs()));
+        std::printf("wall=%.2fs  sustained=%.1f pkt/s  done=%llu\n", wall_s,
+                    wall_s > 0.0 ? done / wall_s : 0.0,
+                    static_cast<unsigned long long>(done));
+        std::printf("queue             : high_watermark=%zu depth=%zu\n",
+                    demod->queue_high_watermark(), demod->queue_depth());
+        std::printf("latency(us)       : p50=%llu p95=%llu p99=%llu max=%llu\n",
+                    static_cast<unsigned long long>(demod->latency_p50_us()),
+                    static_cast<unsigned long long>(demod->latency_p95_us()),
+                    static_cast<unsigned long long>(demod->latency_p99_us()),
+                    static_cast<unsigned long long>(demod->latency_max_us()));
+        std::printf("utilization       : %.1f%%\n",
+                    demod->worker_utilization_pct());
+        std::printf("drops             : %s\n",
+                    demod->jobs_dropped() == 0 ? "NONE (target met)" : "YES");
+        return 0;
+    }
+
+    if (mode == "scheduled-demod-e2e") {
+        // R6: full flowgraph — synthetic radar-slot stream →
+        // UwbScheduledExtractor → { raw capture sink ∥ UwbRealtimeDemodulator }.
+        // Validates decoupling: the raw capture path receives every emitted
+        // window regardless of demod backpressure, and every window yields a
+        // result.  (Options: --rate --slots --workers.)
+        const std::string gw = "testdata/realtime_demod_golden/window.cfile";
+        std::ifstream f(gw, std::ios::binary);
+        if (!f) {
+            std::printf("NOTE: %s not found (run from repo root); "
+                        "skeleton only.\n",
+                        gw.c_str());
+            return 0;
+        }
+        f.seekg(0, std::ios::end);
+        const size_t bytes = static_cast<size_t>(f.tellg());
+        f.seekg(0, std::ios::beg);
+        std::vector<gr_complex> rx(bytes / sizeof(gr_complex));
+        f.read(reinterpret_cast<char*>(rx.data()),
+               static_cast<std::streamsize>(bytes));
+
+        std::vector<std::complex<float>> tmpl;
+        std::ifstream tf("testdata/reference_preamble.bin", std::ios::binary);
+        tf.seekg(0, std::ios::end);
+        tmpl.resize(static_cast<size_t>(tf.tellg()) /
+                    sizeof(std::complex<float>));
+        tf.seekg(0, std::ios::beg);
+        tf.read(reinterpret_cast<char*>(tmpl.data()),
+                static_cast<std::streamsize>(tmpl.size() *
+                                             sizeof(std::complex<float>)));
+
+        double rate = 200.0;
+        size_t n_slots = 3;
+        size_t nworkers = 4;
+        for (int i = 3; i + 1 < argc; i += 2) {
+            std::string k = argv[i];
+            if (k == "--rate")
+                rate = std::stod(argv[i + 1]);
+            else if (k == "--slots")
+                n_slots = std::stoul(argv[i + 1]);
+            else if (k == "--workers")
+                nworkers = std::stoul(argv[i + 1]);
+        }
+
+        const double fs = 998.4e6;
+        const size_t period = static_cast<size_t>(std::llround(fs / rate));
+        const size_t pre = 9984;
+        const size_t post = 4096;
+        const size_t capture = 270000; // covers the full golden packet + payload
+        const uint64_t t0 = pre;
+
+        // Stream: golden packet stamped so its preamble (rx[9984]) lands at
+        // the extractor's predicted start for each slot.
+        //   predicted(k) = t0 + k*period          (t0 == pre == 9984)
+        //   stamp at k*period  =>  preamble at k*period + 9984 == predicted(k)
+        std::vector<gr_complex> stream(static_cast<size_t>(n_slots) * period,
+                                       gr_complex(0.0f, 0.0f));
+        for (size_t k = 0; k < n_slots; ++k) {
+            const size_t at = k * period;
+            for (size_t i = 0; i < rx.size() && at + i < stream.size(); ++i)
+                stream[at + i] = rx[i];
+        }
+
+        auto ext = gr::uwb::UwbScheduledExtractor::make(
+            fs, 1.0 / rate, t0, pre, capture, post, /*pool*/ 8,
+            gr::uwb::UwbScheduledExtractor::EmitPolicy::EverySlot);
+        auto demod = gr::uwb::UwbRealtimeDemodulator::make_from_template(
+            tmpl, nworkers, 64, "ieee");
+        auto raw = gr::blocks::message_debug::make(); // raw capture sink
+        auto results = gr::blocks::message_debug::make();
+        auto tb = gr::make_top_block("bench_e2e");
+        auto src = gr::blocks::vector_source_c::make(stream);
+        tb->connect(src, 0, ext, 0);
+        tb->msg_connect(ext, "packet", raw, "store"); // independent raw capture
+        tb->msg_connect(ext, "packet", demod, "samples");
+        tb->msg_connect(demod, "result", results, "store");
+
+        const auto t0w = std::chrono::steady_clock::now();
+        tb->run();
+        const double wall = std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - t0w)
+                                .count();
+
+        const uint64_t emitted = ext->emitted_windows();
+        const uint64_t raw_n = raw->num_messages();
+        const uint64_t done =
+            demod->jobs_completed() + demod->jobs_failed();
+        const uint64_t dropped = demod->jobs_dropped();
+        std::printf("== scheduled-demod-e2e ==\n");
+        std::printf("rate=%.0f slots=%zu wall=%.2fs\n", rate, n_slots, wall);
+        std::printf("extractor emitted  = %llu  (raw capture received %llu)\n",
+                    static_cast<unsigned long long>(emitted),
+                    static_cast<unsigned long long>(raw_n));
+        std::printf("demod completed=%llu failed=%llu dropped=%llu "
+                    "(received %llu)\n",
+                    static_cast<unsigned long long>(demod->jobs_completed()),
+                    static_cast<unsigned long long>(demod->jobs_failed()),
+                    static_cast<unsigned long long>(dropped),
+                    static_cast<unsigned long long>(demod->jobs_received()));
+        std::printf("result count      = %llu\n",
+                    static_cast<unsigned long long>(results->num_messages()));
+        std::printf("raw capture == emitted : %s\n",
+                    raw_n == emitted ? "YES (decoupled)" : "NO");
+        std::printf("every slot -> result   : %s\n",
+                    done == emitted ? "YES" : "NO");
+        return (raw_n == emitted && done == emitted) ? 0 : 1;
+    }
+
     if (mode == "demod-core" || mode == "demod-stage-profile" ||
-        mode == "demod-pdu" || mode == "scheduled-demod-e2e") {
+        mode == "demod-pdu") {
         // UWB realtime-demodulator benchmark (开发方案_UWB实时解调.md §9).
         auto prof = gr::uwb::demod::Qm35825Profile::Default();
         std::printf("=== UWB realtime demod bench ===\n");
@@ -2163,8 +2397,9 @@ int main(int argc, char** argv)
             std::printf("NOTE: 7/7 demod stages complete (R0-R4).\n");
             return all_ok ? 0 : 1;
         }
-        std::printf("NOTE: demod-core / demod-pdu / scheduled-demod-e2e land "
-                    "in R5-R6; skeleton only.\n");
+        std::printf("NOTE: demod-core / demod-pdu are per-stage/schema "
+                    "exercisers; see demod-async/demod-soak/scheduled-demod-e2e "
+                    "for the async-block benchmarks.\n");
         return 0;
     }
 

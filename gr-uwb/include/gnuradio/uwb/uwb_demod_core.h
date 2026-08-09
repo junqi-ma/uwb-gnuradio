@@ -1333,16 +1333,42 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     res.predicted_start_sample = predicted_start;
     res.window_start_sample = window_start;
 
-    // Stage 1: timing (seed = predicted_start if inside this window, else -1)
-    const bool t_ok = stage_timing(rx, n, profile, template_wf,
-                                   predicted_start, res.timing, scratch);
+    // predicted_start is ABSOLUTE.  The core stages index rx as a 0-based
+    // window buffer, so seed with the window-relative position.  All stage
+    // outputs are window-relative; `rebase` re-bases the absolute sample
+    // fields (timing / SFD sample positions / CIR first path) by window_start
+    // before each return, so result coordinates match the schema (absolute).
+    const int64_t rel_seed =
+        (predicted_start >= 0) ? predicted_start - window_start : -1;
+    auto rebase = [&]() {
+        if (window_start == 0)
+            return;
+        if (res.timing.ok) {
+            res.timing.preamble_start_sample += window_start;
+            res.timing.preamble_start_uncropped += window_start;
+            for (auto& p : res.timing.peak_samples)
+                p += window_start;
+        }
+        if (res.sfd.ok) {
+            res.sfd.sfd_start_sample += window_start;
+            res.sfd.sfd_end_sample += window_start;
+        }
+        if (res.cir.ok)
+            res.cir.first_path_sample += window_start;
+    };
+
+    // Stage 1: timing (seed = rel_seed if inside this window, else -1)
+    const bool t_ok = stage_timing(rx, n, profile, template_wf, rel_seed,
+                                   res.timing, scratch);
     if (!t_ok) {
         res.status = DemodStatus::TimingFailed;
+        rebase();
         return res;
     }
     // Stage 2: CFO
     if (!stage_cfo(rx, n, profile, res.timing, res.cfo, scratch)) {
         res.status = DemodStatus::CfoFailed;
+        rebase();
         return res;
     }
     // Stage 3: SFD (profile sfd_mode)
@@ -1350,6 +1376,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     if (!stage_sfd(rx, n, profile, res.timing, sfd_seq, template_wf, res.sfd,
                    scratch)) {
         res.status = DemodStatus::SfdFailed;
+        rebase();
         return res;
     }
     // Stage 4: CIR + soft chips on the CFO-compensated frame.
@@ -1358,6 +1385,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     if (!stage_cir_softchips(scratch.derotated.data(), n, profile, res.timing,
                              pcode, res.cir, scratch)) {
         res.status = DemodStatus::CirFailed;
+        rebase();
         return res;
     }
     // Stage 5: NS-SFD location in the soft-chip stream.
@@ -1365,23 +1393,27 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     if (!stage_ns_sfd(scratch.soft_chips, profile, nsfd_seq, kQm35ChipsPerSymbol,
                       res.ns_sfd, scratch)) {
         res.status = DemodStatus::SfdFailed;
+        rebase();
         return res;
     }
     // Stage 6: BPRF PHR demod + conv decode + SECDED.
     if (!stage_phr(scratch.soft_chips, profile, res.ns_sfd, kQm35ChipsPerSymbol,
                    res.phr, scratch)) {
         res.status = DemodStatus::PhrFailed;
+        rebase();
         return res;
     }
     // Stage 7: payload BPM-BPSK + RS + FCS.
     if (!stage_payload_fcs(scratch.soft_chips, profile, res.phr, res.ns_sfd,
                            kQm35ChipsPerSymbol, res.payload, scratch)) {
         res.status = DemodStatus::PayloadFailed;
+        rebase();
         return res;
     }
     res.status = (res.payload.ok && res.payload.fcs_pass)
                      ? DemodStatus::Success
                      : DemodStatus::FcsFailed;
+    rebase();
     return res;
 }
 

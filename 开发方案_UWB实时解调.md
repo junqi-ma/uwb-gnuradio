@@ -537,6 +537,14 @@ X410/ScheduledExtractor
 - raw capture不受demod影响；
 - MATLAB抽样复核。
 
+> **✅ R6 完成（2026-08-09）**
+> - **先优化 sfd stage**（commit 7e188b8）：**coarse-to-fine 抽稀搜索**（stride 8 + 滑动窗口 pwr + 全速率细化），sfd **22.6ms→2.0ms（11×）**，总耗时 **36.4→16.3ms（2.2×）**；cir chip FIR 拆分无分支版（~2%）。golden 输出不变（15/15 demod-core QA + CTest 7/7 过）。单 job ~16ms（golden 窗）/ ~13ms（203776 调度窗）。
+> - **坐标修复（关键）**：`demodulate_one` 原来把 `predicted_start` 当 rx 索引用（隐含 window_start=0）。对任意偏移窗口（window_start=k·period）会失败。修复：**内部用窗口相对坐标跑流水线，末尾 `rebase` 把绝对 sample 字段（timing/SFD/CIR first_path）加回 window_start**，结果 schema 保持绝对坐标。golden（window_start=0）不受影响。
+> - **benchmark `demod-soak`**（`--rate --duration --workers --queue`）：按目标速率节流持续投喂，报 queue/latency/drop。**100 pkt/s（2 workers）：200/200、0 drop、queue 水位 1、p95 26.8ms、util 84%**；**200 pkt/s（4 workers）：400/400、0 drop、水位 1、p95 24.4ms**。反压验证：200/s 配 2 workers 超载 → queue 满 64、drop 104、`fed==completed+dropped` 不变量成立（不丢失，仅按策略丢弃）。
+> - **benchmark `scheduled-demod-e2e`**（`--rate --slots --workers`）：**完整 flowgraph**——合成雷达槽流（golden packet stamp 到每 slot）→ `UwbScheduledExtractor` → { raw capture sink ∥ `UwbRealtimeDemodulator` }。验证：**raw capture == emitted（解耦，raw 不受 demod 影响）**；**每 slot → 一个 result（10/10 全 Success、FCS 0x584b）**。坑：golden window.cfile 内含 9984 前导偏移，stamp 到 predicted 会 off-by-9984 → 应 stamp 到 `k·period`。
+> - **MATLAB 抽样复核**：e2e 解码 payload == golden（同 MATLAB 生成信号 + R4 逐字节对照），FCS 0x584b，隐含满足。
+> - **CTest 7/7**。commits：7e188b8（perf sfd）、（e2e+坐标修复待 commit）。
+
 ### R7：鲁棒性与扩展
 
 - AWGN/CFO/multipath/collision统计；
