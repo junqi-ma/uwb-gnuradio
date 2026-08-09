@@ -1842,6 +1842,7 @@ int main(int argc, char** argv)
     size_t rake_top_k = 0;  // 0 = full CIR matched filter
     std::string result_sink = "debug"; // demod-async: debug or drop
     std::string core_input = "pointer"; // core-throughput: pointer or copy
+    size_t core_windows = 1; // core-throughput rotating working set
 
     for (int i = 3; i + 1 < argc; i += 2) {
         std::string k = argv[i];
@@ -1869,6 +1870,8 @@ int main(int argc, char** argv)
             result_sink = argv[i + 1];
         else if (k == "--core-input")
             core_input = argv[i + 1];
+        else if (k == "--core-windows")
+            core_windows = std::stoul(argv[i + 1]);
     }
 
     // Layered GR modes: same source/target/gap/buffer surface.
@@ -1971,8 +1974,9 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--workers")
                 nworkers = std::stoul(argv[i + 1]);
         }
-        if (nworkers == 0 || repeat <= 0)
-            throw std::invalid_argument("workers and repeat must be positive");
+        if (nworkers == 0 || repeat <= 0 || core_windows == 0)
+            throw std::invalid_argument(
+                "workers, repeat and core-windows must be positive");
         if (core_input != "pointer" && core_input != "copy")
             throw std::invalid_argument("--core-input must be pointer or copy");
 
@@ -1982,9 +1986,11 @@ int main(int argc, char** argv)
         std::vector<gr::uwb::demod::core::DemodScratch> scratch(nworkers);
         for (auto& s : scratch)
             s.reserve(rx.size());
+        std::vector<std::vector<gr_complex>> windows(core_windows, rx);
 
         std::atomic<bool> go{ false };
         std::atomic<uint64_t> passed{ 0 };
+        std::array<std::atomic<uint64_t>, 8> stage_sums{};
         std::vector<std::thread> threads;
         threads.reserve(nworkers);
         const uint64_t jobs = static_cast<uint64_t>(repeat);
@@ -1993,15 +1999,25 @@ int main(int argc, char** argv)
                 while (!go.load(std::memory_order_acquire))
                     std::this_thread::yield();
                 for (uint64_t job = wid; job < jobs; job += nworkers) {
+                    const auto& input = windows[job % core_windows];
                     std::vector<gr_complex> copied;
-                    const gr_complex* job_rx = rx.data();
+                    const gr_complex* job_rx = input.data();
                     if (core_input == "copy") {
-                        copied = rx;
+                        copied = input;
                         job_rx = copied.data();
                     }
                     const auto result = gr::uwb::demod::core::demodulate_one(
-                        job_rx, rx.size(), prof, job, 9984, 0, tmpl,
+                        job_rx, input.size(), prof, job, 9984, 0, tmpl,
                         scratch[wid]);
+                    const uint64_t stage_values[8] = {
+                        result.stage_timing_us, result.stage_cfo_us,
+                        result.stage_sfd_us, result.stage_cir_us,
+                        result.stage_ns_sfd_us, result.stage_phr_us,
+                        result.stage_payload_us, result.stage_total_us
+                    };
+                    for (size_t s = 0; s < 8; ++s)
+                        stage_sums[s].fetch_add(stage_values[s],
+                                                std::memory_order_relaxed);
                     if (result.status == gr::uwb::demod::DemodStatus::Success &&
                         result.payload.fcs_pass)
                         passed.fetch_add(1, std::memory_order_relaxed);
@@ -2016,12 +2032,24 @@ int main(int argc, char** argv)
                                    std::chrono::steady_clock::now() - t0)
                                    .count();
         std::printf("== demod-core-throughput ==\n");
-        std::printf("workers=%zu jobs=%llu rake_top_k=%zu input=%s passed=%llu\n",
+        std::printf("workers=%zu jobs=%llu rake_top_k=%zu input=%s windows=%zu "
+                    "working_set_MB=%.1f passed=%llu\n",
                     nworkers, static_cast<unsigned long long>(jobs), rake_top_k,
-                    core_input.c_str(),
+                    core_input.c_str(), core_windows,
+                    core_windows * rx.size() * sizeof(gr_complex) / 1e6,
                     static_cast<unsigned long long>(passed.load()));
         std::printf("wall=%.6fs throughput=%.1f jobs/s mean_wall=%.3f ms/job\n",
                     seconds, jobs / seconds, seconds / jobs * 1e3);
+        std::printf("stage mean(us)    : timing=%llu cfo=%llu sfd=%llu cir=%llu "
+                    "ns_sfd=%llu phr=%llu payload=%llu total=%llu\n",
+                    static_cast<unsigned long long>(stage_sums[0] / jobs),
+                    static_cast<unsigned long long>(stage_sums[1] / jobs),
+                    static_cast<unsigned long long>(stage_sums[2] / jobs),
+                    static_cast<unsigned long long>(stage_sums[3] / jobs),
+                    static_cast<unsigned long long>(stage_sums[4] / jobs),
+                    static_cast<unsigned long long>(stage_sums[5] / jobs),
+                    static_cast<unsigned long long>(stage_sums[6] / jobs),
+                    static_cast<unsigned long long>(stage_sums[7] / jobs));
         return passed.load() == jobs ? 0 : 3;
     }
 
@@ -2143,6 +2171,17 @@ int main(int argc, char** argv)
                     static_cast<unsigned long long>(demod->stage_mean_us(5)),
                     static_cast<unsigned long long>(demod->stage_mean_us(6)),
                     static_cast<unsigned long long>(demod->stage_mean_total_us()));
+        if (dbg && dbg->num_messages() > 0) {
+            const pmt::pmt_t first = pmt::car(dbg->get_message(0));
+            const auto u64 = [&](const char* key) {
+                return pmt::to_uint64(pmt::dict_ref(
+                    first, pmt::mp(key), pmt::from_uint64(0)));
+            };
+            std::printf("first CIR sub(us): estimate=%llu fir=%llu post=%llu\n",
+                        static_cast<unsigned long long>(u64("cir_estimate_us")),
+                        static_cast<unsigned long long>(u64("cir_softfir_us")),
+                        static_cast<unsigned long long>(u64("cir_postprocess_us")));
+        }
         return 0;
     }
 
