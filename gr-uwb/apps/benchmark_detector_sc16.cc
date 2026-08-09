@@ -222,7 +222,7 @@ int main(int argc, char** argv)
     if (argc < 2) {
         std::cerr << "usage: benchmark_detector_sc16 CFILE [target_samples] "
                      "[buffer_items] [cf32-first|sc16-first] [sc16_coarse_D] "
-                     "[demod_workers]\n";
+                     "[demod_workers] [e2e_packet_rate]\n";
         return 2;
     }
     const uint64_t target = argc > 2 ? std::stoull(argv[2]) : 100000000ULL;
@@ -231,6 +231,7 @@ int main(int argc, char** argv)
     const bool sc16_first = argc > 4 && std::string(argv[4]) == "sc16-first";
     const size_t sc16_coarse_D = argc > 5 ? std::stoull(argv[5]) : 4;
     const size_t demod_workers = argc > 6 ? std::stoull(argv[6]) : 4;
+    const double e2e_packet_rate = argc > 7 ? std::stod(argv[7]) : 0.0;
     auto x = load(argv[1]);
     if (x.size() <= kPacketStart + kSymbolLen)
         throw std::runtime_error("reference cfile is too short");
@@ -281,9 +282,15 @@ int main(int argc, char** argv)
     constexpr size_t demod_capture = 309184;
     const auto golden_window = load("testdata/realtime_demod_golden/window.cfile");
     auto demod_tmpl = load("testdata/reference_preamble.bin");
-    if (golden_window.size() > x.size())
+    const size_t e2e_cycle_samples = e2e_packet_rate > 0.0
+        ? static_cast<size_t>(std::llround(
+              gr::uwb::core::kUwbSampleRateHz / e2e_packet_rate))
+        : x.size();
+    if (e2e_cycle_samples == 0 || golden_window.size() > e2e_cycle_samples)
         throw std::runtime_error("demod golden window exceeds benchmark cycle");
-    std::vector<gr_complex> e2e_x(x.size(), gr_complex(0.0f, 0.0f));
+    const double actual_e2e_packet_rate =
+        gr::uwb::core::kUwbSampleRateHz / e2e_cycle_samples;
+    std::vector<gr_complex> e2e_x(e2e_cycle_samples, gr_complex(0.0f, 0.0f));
     std::copy(golden_window.begin(), golden_window.end(), e2e_x.begin());
     std::vector<std::complex<int16_t>> e2e_sc16(e2e_x.size());
     for (size_t i = 0; i < e2e_x.size(); ++i) {
@@ -343,6 +350,8 @@ int main(int argc, char** argv)
     const auto print_e2e = [target](const char* format, const E2eResult& result) {
         std::cout << format << "_e2e_seconds=" << result.seconds
                   << " input_MSps=" << target / result.seconds / 1e6
+                  << " processing_packets_per_second="
+                  << result.received / result.seconds
                   << " result_packets=" << result.packets
                   << " received=" << result.received
                   << " completed=" << result.completed
@@ -357,7 +366,10 @@ int main(int argc, char** argv)
                   << " input_samples=" << result.first_input_samples << "\n";
     };
     std::cout << "demod_workers=" << demod_workers
-              << " demod_queue_capacity=" << queue_capacity << "\n";
+              << " demod_queue_capacity=" << queue_capacity
+              << " e2e_cycle_samples=" << e2e_cycle_samples
+              << " realtime_packets_per_second=" << actual_e2e_packet_rate
+              << "\n";
     print_e2e("cf32", e2e_f);
     print_e2e("sc16", e2e_s);
     const bool detector_ok = n_f == n_s && n_f > 0;
