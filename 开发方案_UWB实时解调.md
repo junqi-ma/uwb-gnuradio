@@ -553,9 +553,13 @@ X410/ScheduledExtractor
 - 必要时评估GPU/FPGA；
 - 在线SIC单独立项。
 
-> **⏳ R7 状态（2026-08-09）**：**指定由 Grok Build 代做**（grok-build:delegate），Claude 负责集成、golden 对照与验收。尚未开始。
+> **✅ R7 完成（2026-08-09，commit 516819b，Grok Build run-mslni95m-worrwu）**
+> - **鲁棒性统计套件**（benchmark `demod-robust`，`--robust-reps N`）：AWGN SNR 30→10 dB 全 100% pass（CFO err 0.6→8.4 Hz）；CFO ±50 kHz 全 100%；multipath gain{0.2-0.8}×delay{20-400} 20/20；碰撞（B 包插入 A 的 SFD/payload，偏移 0/0.5/1 symbol）A 包仍 FCS 0x584b + graceful。QA 28 用例。
+> - **code-10/DW1000 profile**：`kPreambleCode10`（IEEE 15-05-0737-01，127 ternary，shift-73 相位对齐，nnz/energy 64）+ `Dw1000Profile` + `GetPreambleCode(10)`。**诚实标注：仅 profile+自一致性，MATLAB golden 待导出**（流程已注释）。code-9 路径不变。
+> - **SC16 输入**：block 接受 `cons(meta,s16vector)` 与裸 `s16vector`（交错 I/Q，1/32767 缩放）+ 原 c32vector；QA 验证 s16 golden 窗口解出 FCS 0x584b。
+> - GPU/FPGA 评估 + 在线 SIC 记为独立项（评估见 commit 日志）。
 >
-> **前置完成（P0-P3 性能优化）**：单 job 串行耗时 **17.2 → 3.9 ms（4.4×）**，200 pkt/s + 2 workers 零丢包。详见 [`性能分析_解调分阶段耗时报告.md`](性能分析_解调分阶段耗时报告.md)。
+> **前置（P0-P3 性能优化）**：单 job 17.2 → 3.9 ms（4.4×），200 pkt/s + 2 workers 零丢包。详见 [`性能分析_解调分阶段耗时报告.md`](性能分析_解调分阶段耗时报告.md)。
 
 ---
 
