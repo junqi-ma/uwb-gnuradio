@@ -27,6 +27,7 @@
  *       detector-region         — continuous Region IQ → coarse/fine (core)
  *       detector-region-stream  — min-gap packet stream → full UwbDetector
  *       detector-profile        — per-stage wall-time breakdown + advice
+ *       demod-core-throughput   — direct demodulate_one threaded throughput
  *       demod-async             — UwbRealtimeDemodulator worker-pool throughput
  *       demod-soak              — sustained-rate soak (R6: queue/latency/drop)
  *       demod-robust            — R7 AWGN/CFO/multipath/collision stats
@@ -58,6 +59,7 @@
 #include <pmt/pmt.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <climits>
 #include <cmath>
@@ -75,6 +77,30 @@
 #include <vector>
 
 namespace {
+
+class MessageDropSink : public gr::block
+{
+public:
+    using sptr = std::shared_ptr<MessageDropSink>;
+    static sptr make()
+    {
+        return gnuradio::get_initial_sptr(new MessageDropSink());
+    }
+    uint64_t count() const { return d_count.load(std::memory_order_relaxed); }
+
+private:
+    MessageDropSink()
+        : gr::block("message_drop_sink",
+                    gr::io_signature::make(0, 0, 0),
+                    gr::io_signature::make(0, 0, 0))
+    {
+        message_port_register_in(pmt::mp("in"));
+        set_msg_handler(pmt::mp("in"), [this](pmt::pmt_t) {
+            d_count.fetch_add(1, std::memory_order_relaxed);
+        });
+    }
+    std::atomic<uint64_t> d_count{ 0 };
+};
 
 constexpr size_t kPacketStart = 4992000;
 constexpr size_t kSymbolLen = 1016;
@@ -1814,6 +1840,8 @@ int main(int argc, char** argv)
     int repeat = 1;
     size_t robust_reps = 0; // 0 → use per-axis defaults (50/20/…)
     size_t rake_top_k = 0;  // 0 = full CIR matched filter
+    std::string result_sink = "debug"; // demod-async: debug or drop
+    std::string core_input = "pointer"; // core-throughput: pointer or copy
 
     for (int i = 3; i + 1 < argc; i += 2) {
         std::string k = argv[i];
@@ -1837,6 +1865,10 @@ int main(int argc, char** argv)
             robust_reps = std::stoul(argv[i + 1]);
         else if (k == "--rake-top-k")
             rake_top_k = std::stoul(argv[i + 1]);
+        else if (k == "--result-sink")
+            result_sink = argv[i + 1];
+        else if (k == "--core-input")
+            core_input = argv[i + 1];
     }
 
     // Layered GR modes: same source/target/gap/buffer surface.
@@ -1912,6 +1944,87 @@ int main(int argc, char** argv)
                                    cfile, comm_cfile, comm_amp);
     }
 
+    if (mode == "demod-core-throughput") {
+        const std::string gw = "testdata/realtime_demod_golden/window.cfile";
+        std::ifstream f(gw, std::ios::binary);
+        if (!f)
+            throw std::runtime_error("cannot open " + gw);
+        f.seekg(0, std::ios::end);
+        const size_t bytes = static_cast<size_t>(f.tellg());
+        f.seekg(0, std::ios::beg);
+        std::vector<gr_complex> rx(bytes / sizeof(gr_complex));
+        f.read(reinterpret_cast<char*>(rx.data()),
+               static_cast<std::streamsize>(bytes));
+
+        std::ifstream tf("testdata/reference_preamble.bin", std::ios::binary);
+        if (!tf)
+            throw std::runtime_error("cannot open reference preamble");
+        tf.seekg(0, std::ios::end);
+        std::vector<gr_complex> tmpl(static_cast<size_t>(tf.tellg()) /
+                                     sizeof(gr_complex));
+        tf.seekg(0, std::ios::beg);
+        tf.read(reinterpret_cast<char*>(tmpl.data()),
+                static_cast<std::streamsize>(tmpl.size() * sizeof(gr_complex)));
+
+        size_t nworkers = 1;
+        for (int i = 3; i + 1 < argc; i += 2) {
+            if (std::string(argv[i]) == "--workers")
+                nworkers = std::stoul(argv[i + 1]);
+        }
+        if (nworkers == 0 || repeat <= 0)
+            throw std::invalid_argument("workers and repeat must be positive");
+        if (core_input != "pointer" && core_input != "copy")
+            throw std::invalid_argument("--core-input must be pointer or copy");
+
+        auto prof = gr::uwb::demod::Qm35825Profile::Default();
+        prof.sfd_mode = "ieee";
+        prof.cir_rake_top_k = rake_top_k;
+        std::vector<gr::uwb::demod::core::DemodScratch> scratch(nworkers);
+        for (auto& s : scratch)
+            s.reserve(rx.size());
+
+        std::atomic<bool> go{ false };
+        std::atomic<uint64_t> passed{ 0 };
+        std::vector<std::thread> threads;
+        threads.reserve(nworkers);
+        const uint64_t jobs = static_cast<uint64_t>(repeat);
+        for (size_t wid = 0; wid < nworkers; ++wid) {
+            threads.emplace_back([&, wid]() {
+                while (!go.load(std::memory_order_acquire))
+                    std::this_thread::yield();
+                for (uint64_t job = wid; job < jobs; job += nworkers) {
+                    std::vector<gr_complex> copied;
+                    const gr_complex* job_rx = rx.data();
+                    if (core_input == "copy") {
+                        copied = rx;
+                        job_rx = copied.data();
+                    }
+                    const auto result = gr::uwb::demod::core::demodulate_one(
+                        job_rx, rx.size(), prof, job, 9984, 0, tmpl,
+                        scratch[wid]);
+                    if (result.status == gr::uwb::demod::DemodStatus::Success &&
+                        result.payload.fcs_pass)
+                        passed.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        go.store(true, std::memory_order_release);
+        for (auto& thread : threads)
+            thread.join();
+        const double seconds = std::chrono::duration<double>(
+                                   std::chrono::steady_clock::now() - t0)
+                                   .count();
+        std::printf("== demod-core-throughput ==\n");
+        std::printf("workers=%zu jobs=%llu rake_top_k=%zu input=%s passed=%llu\n",
+                    nworkers, static_cast<unsigned long long>(jobs), rake_top_k,
+                    core_input.c_str(),
+                    static_cast<unsigned long long>(passed.load()));
+        std::printf("wall=%.6fs throughput=%.1f jobs/s mean_wall=%.3f ms/job\n",
+                    seconds, jobs / seconds, seconds / jobs * 1e3);
+        return passed.load() == jobs ? 0 : 3;
+    }
+
     if (mode == "demod-async") {
         // R5: async message block throughput/latency over the golden window.
         // Feeds `--repeat` identical window PDUs through the
@@ -1957,9 +2070,18 @@ int main(int argc, char** argv)
         auto demod = gr::uwb::UwbRealtimeDemodulator::make_from_template(
             tmpl, nworkers, qcap, "ieee" /* golden window uses IEEE SFD */,
             rake_top_k);
-        auto dbg = gr::blocks::message_debug::make();
         auto tb = gr::make_top_block("bench_demod_async");
-        tb->msg_connect(demod, "result", dbg, "store");
+        gr::blocks::message_debug::sptr dbg;
+        MessageDropSink::sptr drop;
+        if (result_sink == "debug") {
+            dbg = gr::blocks::message_debug::make();
+            tb->msg_connect(demod, "result", dbg, "store");
+        } else if (result_sink == "drop") {
+            drop = MessageDropSink::make();
+            tb->msg_connect(demod, "result", drop, "in");
+        } else {
+            throw std::invalid_argument("--result-sink must be debug or drop");
+        }
 
         pmt::pmt_t meta = pmt::make_dict();
         meta = pmt::dict_add(meta, pmt::mp("packet_id"), pmt::from_uint64(0));
@@ -1993,9 +2115,9 @@ int main(int argc, char** argv)
 
         const uint64_t done = demod->jobs_completed() + demod->jobs_failed();
         std::printf("== demod-async ==\n");
-        std::printf("workers=%zu queue_cap=%zu jobs=%llu done=%llu "
+        std::printf("workers=%zu queue_cap=%zu result_sink=%s jobs=%llu done=%llu "
                     "dropped=%llu\n",
-                    nworkers, qcap,
+                    nworkers, qcap, result_sink.c_str(),
                     static_cast<unsigned long long>(N),
                     static_cast<unsigned long long>(done),
                     static_cast<unsigned long long>(demod->jobs_dropped()));
@@ -2011,6 +2133,16 @@ int main(int argc, char** argv)
                     static_cast<unsigned long long>(demod->latency_max_us()));
         std::printf("utilization       : %.1f%%\n",
                     demod->worker_utilization_pct());
+        std::printf("stage mean(us)    : timing=%llu cfo=%llu sfd=%llu cir=%llu "
+                    "ns_sfd=%llu phr=%llu payload=%llu total=%llu\n",
+                    static_cast<unsigned long long>(demod->stage_mean_us(0)),
+                    static_cast<unsigned long long>(demod->stage_mean_us(1)),
+                    static_cast<unsigned long long>(demod->stage_mean_us(2)),
+                    static_cast<unsigned long long>(demod->stage_mean_us(3)),
+                    static_cast<unsigned long long>(demod->stage_mean_us(4)),
+                    static_cast<unsigned long long>(demod->stage_mean_us(5)),
+                    static_cast<unsigned long long>(demod->stage_mean_us(6)),
+                    static_cast<unsigned long long>(demod->stage_mean_total_us()));
         return 0;
     }
 
