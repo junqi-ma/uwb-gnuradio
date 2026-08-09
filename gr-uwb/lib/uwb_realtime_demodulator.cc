@@ -28,6 +28,12 @@ namespace uwb {
 
 namespace {
 
+// Detector/scheduled-extractor production window: 9,984 pre-trigger plus
+// 309,184 capture samples. Reserve every worker before start() so the normal
+// hot path never grows its scratch vectors. Larger diagnostic PDUs still work
+// and fall back to the core's existing capacity growth.
+constexpr size_t kDefaultScratchSamples = 319168;
+
 inline uint64_t
 elapsed_us(std::chrono::steady_clock::time_point t0,
            std::chrono::steady_clock::time_point t1)
@@ -154,6 +160,9 @@ UwbRealtimeDemodulator::UwbRealtimeDemodulator(
             "UwbRealtimeDemodulator: cir_rake_top_k must be <= 64");
     }
     d_profile_.cir_rake_top_k = cir_rake_top_k;
+
+    for (auto& scratch : d_scratch_)
+        scratch.reserve(kDefaultScratchSamples);
 
     message_port_register_in(pmt::mp("samples"));
     message_port_register_in(pmt::mp("control"));
@@ -592,10 +601,11 @@ UwbRealtimeDemodulator::worker_loop(size_t wid)
             d_queue_depth_.store(d_queue_.size(), std::memory_order_relaxed);
         }
 
-        const std::vector<gr_complex>& elems =
-            pmt::c32vector_elements(job.samples);
-        const size_t n = elems.size();
-        const gr_complex* rx = elems.data();
+        // Keep job.samples alive for the entire decode and borrow its uniform
+        // vector storage directly. The vector-returning overload copies the
+        // full PDU (2.55 MB for the standard 319,168-sample window) per job.
+        size_t n = 0;
+        const gr_complex* rx = pmt::c32vector_elements(job.samples, n);
 
         const auto t0 = std::chrono::steady_clock::now();
         gr::uwb::demod::DemodResult r;
