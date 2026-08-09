@@ -593,6 +593,106 @@ private:
     float sum_ = 0.0f;
 };
 
+// Gate-domain policy.  FC32 retains the MATLAB-compatible floating-point
+// energy calculation.  SC16 stays entirely in the ADC integer domain: I^2+Q^2
+// is accumulated in uint64_t and compared with thresholds scaled once during
+// construction.  This avoids a per-sample int->float conversion and
+// normalization while preserving the same normalized threshold semantics.
+template <typename Sample>
+class DetectorEnergyGate {
+public:
+    DetectorEnergyGate(size_t window, float threshold)
+        : gate_(window), threshold_(threshold)
+    {
+    }
+
+    void accumulate(const Sample& sample)
+    {
+        block_acc_ += detector_sample_power(sample);
+    }
+
+    bool finish_block()
+    {
+        const float energy = gate_.push(block_acc_);
+        block_acc_ = 0.0f;
+        return energy >= threshold_;
+    }
+
+    void reset()
+    {
+        gate_.reset();
+        block_acc_ = 0.0f;
+    }
+
+private:
+    SlidingEnergy gate_;
+    float threshold_;
+    float block_acc_ = 0.0f;
+};
+
+template <>
+class DetectorEnergyGate<std::complex<int16_t>> {
+public:
+    DetectorEnergyGate(size_t window, float threshold)
+        : window_(window > 0 ? window : 1),
+          ring_(window_, 0),
+          thresholds_(window_)
+    {
+        constexpr double full_scale_squared = 32768.0 * 32768.0;
+        for (size_t count = 1; count <= window_; ++count) {
+            const double scaled = static_cast<double>(threshold) *
+                                  full_scale_squared * static_cast<double>(count);
+            if (scaled <= 0.0) {
+                thresholds_[count - 1] = 0;
+            } else if (scaled >= static_cast<double>(
+                                     std::numeric_limits<uint64_t>::max())) {
+                thresholds_[count - 1] = std::numeric_limits<uint64_t>::max();
+            } else {
+                thresholds_[count - 1] =
+                    static_cast<uint64_t>(std::ceil(scaled));
+            }
+        }
+    }
+
+    void accumulate(const std::complex<int16_t>& sample)
+    {
+        const int64_t re = sample.real();
+        const int64_t im = sample.imag();
+        block_acc_ += static_cast<uint64_t>(re * re) +
+                      static_cast<uint64_t>(im * im);
+    }
+
+    bool finish_block()
+    {
+        window_sum_ -= ring_[pos_];
+        ring_[pos_] = block_acc_;
+        window_sum_ += block_acc_;
+        block_acc_ = 0;
+        pos_ = (pos_ + 1) % window_;
+        if (count_ < window_)
+            ++count_;
+        return window_sum_ >= thresholds_[count_ - 1];
+    }
+
+    void reset()
+    {
+        std::fill(ring_.begin(), ring_.end(), uint64_t{ 0 });
+        pos_ = 0;
+        count_ = 0;
+        window_sum_ = 0;
+        block_acc_ = 0;
+    }
+
+private:
+    size_t window_;
+    std::vector<uint64_t> ring_;
+    std::vector<uint64_t> thresholds_;
+    size_t pos_ = 0;
+    size_t count_ = 0;
+    uint64_t window_sum_ = 0;
+    uint64_t block_acc_ = 0;
+};
+
 // ---------------------------------------------------------------------------
 // UwbDetectorStateMachine: SEARCH → IN_REGION → CAPTURE cross-chunk buffering.
 // GNU Radio independent; the caller drives process() per input chunk and owns
@@ -633,13 +733,12 @@ public:
                             size_t holdoff_decimated = 8,
                             size_t post_trigger_capture = 0)
         : pre_trigger_(pre_trigger),
-          energy_threshold_(energy_threshold),
           gate_decimation_(gate_decimation > 0 ? gate_decimation : 1),
           gate_window_(gate_window > 0 ? gate_window : 1),
           holdoff_decimated_(holdoff_decimated > 0 ? holdoff_decimated : 1),
           post_trigger_capture_(post_trigger_capture),
           neigh_len_(16),
-          gate_(gate_window_),
+          gate_(gate_window_, energy_threshold),
           pre_ring_(pre_trigger_),
           max_region_samples_(std::max<size_t>(
               pre_trigger_ + std::max<size_t>(post_trigger_capture_, 300000),
@@ -726,7 +825,6 @@ public:
         gate_.reset();
         pre_ring_.clear();
         d_block_phase_ = 0;
-        d_block_acc_ = 0.0f;
         d_ready_head_ = 0;
         d_ready_tail_ = 0;
         d_ready_count_ = 0;
@@ -758,7 +856,7 @@ private:
                     ? std::min(take, neigh_len_ - d_block_phase_)
                     : 0;
             for (size_t j = 0; j < energy_count; ++j)
-                d_block_acc_ += detector_sample_power(in[consumed + j]);
+                gate_.accumulate(in[consumed + j]);
 
             pre_ring_.push(in + consumed, take);
             d_block_phase_ += take;
@@ -786,7 +884,7 @@ private:
                     ? std::min(take, neigh_len_ - d_block_phase_)
                     : 0;
             for (size_t j = 0; j < energy_count; ++j)
-                d_block_acc_ += detector_sample_power(in[consumed + j]);
+                gate_.accumulate(in[consumed + j]);
 
             pre_ring_.push(in + consumed, take);
             if (d_active_region_ != kInvalidRegion) {
@@ -846,10 +944,9 @@ private:
 
     void update_gate(uint64_t sample)
     {
-        const float energy = gate_.push(d_block_acc_);
-        d_block_acc_ = 0.0f;
+        const bool above_threshold = gate_.finish_block();
         if (state_ == SEARCH) {
-            if (energy < energy_threshold_)
+            if (!above_threshold)
                 return;
 
             state_ = IN_REGION;
@@ -870,7 +967,7 @@ private:
             return;
         }
 
-        if (energy >= energy_threshold_) {
+        if (above_threshold) {
             low_count_ = 0;
         } else if (++low_count_ >= holdoff_decimated_) {
             if (post_trigger_capture_ > 0 && sample + 1 < capture_end_abs_) {
@@ -908,13 +1005,12 @@ private:
 
     enum State { SEARCH, IN_REGION, CAPTURE };
     size_t pre_trigger_;
-    float energy_threshold_;
     size_t gate_decimation_;
     size_t gate_window_;
     size_t holdoff_decimated_;
     size_t post_trigger_capture_;
     size_t neigh_len_;   // |x|^2 samples summed per decimated block (16)
-    SlidingEnergy gate_;
+    DetectorEnergyGate<Sample> gate_;
     RingBufferT<Sample> pre_ring_;
     size_t max_region_samples_;
     State state_ = SEARCH;
@@ -929,7 +1025,6 @@ private:
     RegionHandle d_active_region_ = kInvalidRegion;
     uint64_t d_dropped_regions_ = 0;
     size_t d_block_phase_ = 0;
-    float d_block_acc_ = 0.0f;
     size_t low_count_ = 0;
     uint64_t capture_end_abs_ = 0;
 };

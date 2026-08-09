@@ -31,3 +31,9 @@ target_link_libraries(benchmark_detector_sc16
     gnuradio::gnuradio-blocks
     gnuradio::gnuradio-runtime
 )
+
+add_executable(benchmark_energy_gate_formats benchmark_energy_gate_formats.cc)
+target_link_libraries(benchmark_energy_gate_formats
+    gnuradio-uwb
+    gnuradio::gnuradio-runtime
+)
