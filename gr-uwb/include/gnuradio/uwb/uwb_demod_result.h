@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -54,6 +55,10 @@ struct TimingResult {
     size_t expected_peaks = 0;             // from profile
     std::vector<int64_t> peak_samples;    // absolute position of each SYNC peak
     std::vector<float> peak_metrics;       // per-peak correlation metric
+    // Per-peak SYNC matched-filter complex value (phase = CFO-bearing carrier
+    // phase at that peak).  Same length as peak_samples; the CFO stage uses
+    // arg() of these rather than the raw rx[peak] sample.
+    std::vector<std::complex<float>> peak_corr;
 };
 
 // ---------------------------------------------------------------------------
@@ -92,6 +97,12 @@ struct CirResult {
     std::vector<float> cir_values;      // CIR tap magnitudes (diagnostics only)
     size_t soft_chip_count = 0;         // number of soft chips produced
     double samples_per_chip = 0.0;      // measured chip period
+
+    // Sub-stage wall-clock timing (µs), so CIR estimate vs soft-chip FIR vs
+    // postprocess can be ranked separately (P0 diagnostics).
+    uint64_t cir_estimate_us = 0;       // spread build + SYNC average + taps
+    uint64_t soft_fir_us = 0;           // chip-grid matched-filter FIR
+    uint64_t postprocess_us = 0;        // phase align + rotate + real/max/norm
 };
 
 // ---------------------------------------------------------------------------

@@ -2402,6 +2402,23 @@ int main(int argc, char** argv)
                         "total=%.1f\n",
                         d_timing, d_cfo, d_sfd, d_cir, d_ns, d_phr, d_pay,
                         d_total);
+            std::printf("cir sub(us)           : estimate=%.1f fir=%.1f "
+                        "post=%.1f  (%.1f%% / %.1f%% / %.1f%% of cir)\n",
+                        static_cast<double>(cir.cir_estimate_us),
+                        static_cast<double>(cir.soft_fir_us),
+                        static_cast<double>(cir.postprocess_us),
+                        100.0 * cir.cir_estimate_us /
+                            std::max<double>(1.0, cir.cir_estimate_us +
+                                                      cir.soft_fir_us +
+                                                      cir.postprocess_us),
+                        100.0 * cir.soft_fir_us /
+                            std::max<double>(1.0, cir.cir_estimate_us +
+                                                      cir.soft_fir_us +
+                                                      cir.postprocess_us),
+                        100.0 * cir.postprocess_us /
+                            std::max<double>(1.0, cir.cir_estimate_us +
+                                                      cir.soft_fir_us +
+                                                      cir.postprocess_us));
             std::printf("soft-chip rate        : %.2f Mchips/s\n",
                         cir.soft_chip_count / (d_cir / 1e6) / 1e6);
             std::printf("NOTE: 7/7 demod stages complete (R0-R4).\n");

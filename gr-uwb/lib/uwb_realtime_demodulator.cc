@@ -773,6 +773,13 @@ UwbRealtimeDemodulator::publish_result(const Job& job,
                          pmt::from_uint64(r.stage_payload_us));
     meta = pmt::dict_add(meta, pmt::mp("stage_total_us"),
                          pmt::from_uint64(r.stage_total_us));
+    // CIR sub-stage breakdown (P0 diagnostics)
+    meta = pmt::dict_add(meta, pmt::mp("cir_estimate_us"),
+                         pmt::from_uint64(r.cir.cir_estimate_us));
+    meta = pmt::dict_add(meta, pmt::mp("cir_softfir_us"),
+                         pmt::from_uint64(r.cir.soft_fir_us));
+    meta = pmt::dict_add(meta, pmt::mp("cir_postprocess_us"),
+                         pmt::from_uint64(r.cir.postprocess_us));
     meta = pmt::dict_add(
         meta, pmt::mp("worker_id"),
         pmt::from_uint64(static_cast<uint64_t>(r.worker_id)));

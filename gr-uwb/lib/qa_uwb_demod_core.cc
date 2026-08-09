@@ -26,6 +26,7 @@
 #include <complex>
 #include <cstdint>
 #include <fstream>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -516,4 +517,99 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r4_bad_input_fails_cleanly)
     PayloadResult pay;
     BOOST_CHECK(!core::stage_payload_fcs(short_soft, prof, phr, ns,
                                          kQm35ChipsPerSymbol, pay, scratch));
+}
+
+// ---------------------------------------------------------------------------
+// P0: CFO sweep — estimate + full demod across 0/±1/±5/±10/±25/±50 kHz.
+// The full chain (timing → cfo → sfd(derotated) → cir → ns_sfd → phr →
+// payload) must still decode the golden payload at every CFO.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Inject a carrier rotation of +f Hz (e^{+j2π f n/fs}) into the golden window
+// and run the full demod chain (IEEE SFD, seeded at the golden preamble).
+DemodResult demod_window_with_cfo(const std::vector<gr_complex>& iq, double f_hz)
+{
+    auto prof = Qm35825Profile::Default();
+    prof.sfd_mode = "ieee";
+    const double w = 2.0 * M_PI * f_hz / prof.sample_rate;
+    std::vector<gr_complex> iqc(iq.size());
+    for (size_t i = 0; i < iq.size(); ++i) {
+        const double ph = w * static_cast<double>(i);
+        iqc[i] = iq[i] * gr_complex(static_cast<float>(std::cos(ph)),
+                                    static_cast<float>(std::sin(ph)));
+    }
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto tmpl = load_reference_template();
+    return core::demodulate_one(iqc.data(), iqc.size(), prof, 1, 9984, 0, tmpl,
+                                scratch);
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(test_demod_core_p0_cfo_sweep_clean)
+{
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    const double kfreqs[] = { -50000.0, -25000.0, -10000.0, -5000.0, -1000.0,
+                              0.0,      1000.0,   5000.0,   10000.0, 25000.0,
+                              50000.0 };
+    for (double f : kfreqs) {
+        auto res = demod_window_with_cfo(iq, f);
+        BOOST_TEST_MESSAGE("CFO sweep f=" << f << " est=" << res.cfo.cfo_hz
+                                          << " status=" << (int)res.status
+                                          << " sfd_metric=" << res.sfd.metric
+                                          << " fcs=" << res.payload.fcs_pass);
+        // CFO estimate within 5% + 50 Hz of the injected value.
+        if (f == 0.0)
+            BOOST_CHECK_LT(std::abs(res.cfo.cfo_hz), 50.0);
+        else
+            BOOST_CHECK_CLOSE(res.cfo.cfo_hz, f, 5.0);
+        // The full chain must still decode the golden payload.
+        BOOST_CHECK(res.status == DemodStatus::Success);
+        BOOST_CHECK(res.payload.fcs_pass);
+        BOOST_CHECK_EQUAL(res.payload.received_fcs, uint16_t(0x584b));
+        // SFD position must be stable across the sweep (golden: 75008).
+        BOOST_CHECK_CLOSE(static_cast<double>(res.sfd.sfd_start_sample), 75008.0,
+                          0.2);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_p0_cfo_sweep_awgn)
+{
+    // Same sweep on a 20 dB-SNR AWGN version of the golden window: CFO
+    // estimate must stay accurate and the payload must still decode.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    const double snr_db = 20.0;
+    double sp = 0.0;
+    for (size_t i = 0; i < iq.size(); ++i)
+        sp += static_cast<double>(std::norm(iq[i]));
+    sp /= static_cast<double>(iq.size());
+    const double sigma =
+        std::sqrt(sp / std::pow(10.0, snr_db / 10.0) / 2.0);
+    std::mt19937 rng(12345);
+    std::normal_distribution<float> g(0.0f, static_cast<float>(sigma));
+    std::vector<gr_complex> iqn(iq.size());
+    for (size_t i = 0; i < iq.size(); ++i)
+        iqn[i] = iq[i] + gr_complex(g(rng), g(rng));
+
+    const double kfreqs[] = { -10000.0, 0.0, 10000.0 };
+    for (double f : kfreqs) {
+        auto res = demod_window_with_cfo(iqn, f);
+        BOOST_TEST_MESSAGE("CFO sweep AWGN f=" << f
+                                               << " est=" << res.cfo.cfo_hz
+                                               << " status=" << (int)res.status
+                                               << " fcs=" << res.payload.fcs_pass);
+        // Wider tolerance under noise: 10% + 200 Hz.
+        if (f == 0.0)
+            BOOST_CHECK_LT(std::abs(res.cfo.cfo_hz), 200.0);
+        else
+            BOOST_CHECK_CLOSE(res.cfo.cfo_hz, f, 10.0);
+        BOOST_CHECK(res.status == DemodStatus::Success);
+        BOOST_CHECK(res.payload.fcs_pass);
+        BOOST_CHECK_EQUAL(res.payload.received_fcs, uint16_t(0x584b));
+    }
 }

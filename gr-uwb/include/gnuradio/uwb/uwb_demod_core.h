@@ -161,9 +161,11 @@ inline bool stage_timing(const std::complex<float>* rx,
     }
 
     // Local normalized-correlation helper over a small window around `want`:
-    // finds the SYNC START that best matches the template, returns position+metric.
-    auto local_best = [&](int64_t want, int64_t radius, int64_t* pos,
-                          float* met) -> bool {
+    // finds the SYNC START that best matches the template, returns position,
+    // metric, and the complex matched-filter value at the best position (the
+    // CFO stage uses its phase).
+    auto local_best = [&](int64_t want, int64_t radius, int64_t* pos, float* met,
+                          std::complex<float>* corr_out) -> bool {
         const int64_t w0 = std::max<int64_t>(0, want - radius);
         const int64_t w1 =
             std::min<int64_t>(static_cast<int64_t>(n) - static_cast<int64_t>(L),
@@ -172,6 +174,7 @@ inline bool stage_timing(const std::complex<float>* rx,
             return false;
         float bm = -1.0f;
         int64_t bp = w0;
+        std::complex<float> best_acc(0.0f, 0.0f);
         for (int64_t j = w0; j < w1; ++j) {
             std::complex<float> acc(0.0f, 0.0f);
             float pw = 0.0f;
@@ -183,24 +186,27 @@ inline bool stage_timing(const std::complex<float>* rx,
             if (m > bm) {
                 bm = m;
                 bp = j;
+                best_acc = acc;
             }
         }
         if (bm < profile.radar_verification_threshold)
             return false;
         *pos = bp;
         *met = bm;
+        *corr_out = best_acc;
         return true;
     };
 
     // Locate the first SYNC start near the seed (narrow ROI).
     int64_t first_start = -1;
     float first_metric = 0.0f;
+    std::complex<float> first_corr(0.0f, 0.0f);
     {
         const int64_t seed =
             (seed_start >= 0) ? seed_start
                               : (int64_t)(roi_start + (roi_end - roi_start) / 2);
         const int64_t radius = 64; // seed is already coarse
-        if (!local_best(seed, radius, &first_start, &first_metric))
+        if (!local_best(seed, radius, &first_start, &first_metric, &first_corr))
             return false;
     }
     const int64_t start = first_start;
@@ -212,16 +218,20 @@ inline bool stage_timing(const std::complex<float>* rx,
     // symbol-END convention (start + L - 1) to match the detector / MATLAB.
     out.peak_samples.clear();
     out.peak_metrics.clear();
+    out.peak_corr.clear();
     out.peak_samples.push_back(start + static_cast<int64_t>(L - 1));
     out.peak_metrics.push_back(first_metric);
+    out.peak_corr.push_back(first_corr);
     for (size_t k = 1; k < profile.preamble_repetitions; ++k) {
         const int64_t want = start + static_cast<int64_t>(k * period);
         int64_t pk = -1;
         float pm = 0.0f;
-        if (!local_best(want, 8, &pk, &pm))
+        std::complex<float> pk_corr(0.0f, 0.0f);
+        if (!local_best(want, 8, &pk, &pm, &pk_corr))
             break; // lost the train
         out.peak_samples.push_back(pk + static_cast<int64_t>(L - 1));
         out.peak_metrics.push_back(pm);
+        out.peak_corr.push_back(pk_corr);
     }
 
     out.detected_peaks = out.peak_samples.size();
@@ -284,12 +294,35 @@ inline bool stage_cfo(const std::complex<float>* rx,
     if (nfit < 2)
         return false;
 
+    // Gather per-peak carrier phases from the SYNC matched-filter values (the
+    // noise-averaged correlation phase, NOT the raw rx[peak] sample).  Falls
+    // back to the raw sample if the timing stage did not populate peak_corr.
+    const bool have_corr = timing.peak_corr.size() >= np;
+    scratch.metric.resize(nfit);
+    for (size_t k = 0; k < nfit; ++k) {
+        const size_t idx = skip + k;
+        scratch.metric[k] =
+            have_corr ? std::arg(timing.peak_corr[idx])
+                      : std::arg(rx[timing.peak_samples[idx]]);
+    }
+    // Unwrap: adjacent SYNC phases must stay within ±π.  The per-symbol CFO
+    // advance (2π·f·period/fs) stays well under π for |f| ≲ 150 kHz.
+    for (size_t k = 1; k < nfit; ++k) {
+        while (scratch.metric[k] - scratch.metric[k - 1] > (float)M_PI)
+            scratch.metric[k] -= 2.0f * (float)M_PI;
+        while (scratch.metric[k] - scratch.metric[k - 1] < -(float)M_PI)
+            scratch.metric[k] += 2.0f * (float)M_PI;
+    }
+
+    // Linear fit of phase vs RELATIVE time (the slope is offset-invariant, so
+    // subtracting t0 only improves conditioning).
+    const double t0 = (double)timing.peak_samples[skip] / profile.sample_rate;
     double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
     for (size_t k = 0; k < nfit; ++k) {
         const size_t idx = skip + k;
-        const double t = (double)timing.peak_samples[idx] / profile.sample_rate;
-        const double ph =
-            std::arg(rx[timing.peak_samples[idx]]); // complex at peak
+        const double t =
+            (double)timing.peak_samples[idx] / profile.sample_rate - t0;
+        const double ph = (double)scratch.metric[k];
         sx += t;
         sy += ph;
         sxx += t * t;
@@ -464,6 +497,7 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
                                 DemodScratch& scratch)
 {
     out = CirResult{};
+    auto t_cir0 = std::chrono::steady_clock::now();
     const size_t pre = profile.cir_pre_samples;
     const size_t post = profile.cir_post_samples;
     const size_t tap_count = pre + post;
@@ -546,6 +580,11 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     out.cir_values.resize(tap_count);
     for (size_t i = 0; i < tap_count; ++i)
         out.cir_values[i] = values[i].real(); // golden CIR is real (Q=0 channel)
+    out.cir_estimate_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - t_cir0)
+            .count());
+    auto t_fir0 = std::chrono::steady_clock::now();
 
     // ---- Soft-chip matched filter on the chip grid. ----
     const double spc = period / static_cast<double>(kQm35ChipsPerSymbol);
@@ -604,6 +643,11 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         }
         scratch.corr[i] = acc;
     }
+    out.soft_fir_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - t_fir0)
+            .count());
+    auto t_post0 = std::chrono::steady_clock::now();
 
     // ---- Phase-align against the last min(32, preamble) SYNCs' spread code. ----
     const size_t phase_reps = std::min<size_t>(32, profile.preamble_repetitions);
@@ -629,6 +673,10 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     scratch.soft_chips.resize(num_chips);
     for (size_t i = 0; i < num_chips; ++i)
         scratch.soft_chips[i] = scratch.corr[i].real() / denom;
+    out.postprocess_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - t_post0)
+            .count());
 
     out.soft_chip_count = num_chips;
     out.samples_per_chip = spc;
@@ -1388,10 +1436,14 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         return res;
     }
     lap(res.stage_cfo_us);
-    // Stage 3: SFD (profile sfd_mode)
+    // Stage 3: SFD (profile sfd_mode).  Run on the CFO-derotated frame so the
+    // template correlation is not degraded by residual rotation at large CFO
+    // (golden CFO=0 ⇒ derotated ≈ rx, so the reference result is unchanged).
     const auto sfd_seq = gr::uwb::demod::GetSfdSequence(profile.sfd_mode);
-    if (!stage_sfd(rx, n, profile, res.timing, sfd_seq, template_wf, res.sfd,
-                   scratch)) {
+    const std::complex<float>* sfd_rx =
+        scratch.derotated.empty() ? rx : scratch.derotated.data();
+    if (!stage_sfd(sfd_rx, n, profile, res.timing, sfd_seq, template_wf,
+                   res.sfd, scratch)) {
         lap(res.stage_sfd_us);
         res.status = DemodStatus::SfdFailed;
         rebase();
