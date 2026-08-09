@@ -2,6 +2,12 @@
 
 更新时间：2026-08-09
 
+> **Phase-2 交接（2026-08-10）**：本文描述的固定 profile 实时解调现作为
+> SIC 的 Phase-1 基础。后续在线 DW1000 消除、cleaned slot 与 post-SIC 复数
+> CIR 设计见 [`开发方案_GNURadio实时SIC.md`](开发方案_GNURadio实时SIC.md)。
+> 第 14 节“不在线执行完整 SIC”仅冻结本文 Phase-1 的交付边界，不是项目永久
+> 非目标。
+
 ## 1. 目标
 
 在现有 `UwbDetector` 和 `UwbScheduledExtractor` 输出的 packet/window PDU 基础上，尝试实现 QM35825 UWB 包的 CPU 实时解调。
@@ -618,6 +624,11 @@ MATLAB逐阶段对照报告
 - 不用解调成功与否决定是否保存原始radar slot；
 - 不依赖MATLAB runtime作为生产组件；
 - 不在正确性对齐前做激进近似。
+
+以上“不在线执行完整 SIC”仅指本文实时解调 Phase-1。Phase-2 不修改 raw 保存
+语义，而是在 scheduled 扩展上下文 PDU 上新增有界异步 SIC；其 profile、安全门、
+golden 和性能验收以 [`开发方案_GNURadio实时SIC.md`](开发方案_GNURadio实时SIC.md)
+为准。
 
 ---
 

@@ -18,5 +18,6 @@ install(FILES
     uwb_preamble_detector.h
     uwb_scheduled_extractor_core.h
     uwb_scheduled_extractor.h
+    uwb_sic_core.h
     DESTINATION include/gnuradio/uwb
 )

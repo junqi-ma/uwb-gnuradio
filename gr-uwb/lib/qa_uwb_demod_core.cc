@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <fstream>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -88,6 +89,31 @@ bool load_i8(const std::string& path, std::vector<int8_t>& out)
     out.resize(bytes);
     f.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(bytes));
     return true;
+}
+
+// Load one comma-separated row of signed integer PHY constants.
+bool load_i8_csv(const std::string& path, std::vector<int8_t>& out)
+{
+    std::ifstream f(path);
+    if (!f)
+        return false;
+    std::string line;
+    if (!std::getline(f, line))
+        return false;
+    std::stringstream ss(line);
+    std::string field;
+    out.clear();
+    while (std::getline(ss, field, ',')) {
+        try {
+            const int v = std::stoi(field);
+            if (v < -1 || v > 1)
+                return false;
+            out.push_back(static_cast<int8_t>(v));
+        } catch (...) {
+            return false;
+        }
+    }
+    return !out.empty();
 }
 
 // Load a raw uint8 file.
@@ -266,6 +292,43 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r2_cir_matches_golden)
         l2 += d * d;
     }
     BOOST_CHECK_SMALL(std::sqrt(l2), 0.01f); // actual ~6e-8
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r2_preserves_complex_cir_phase)
+{
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+
+    // Add a quadrature multipath echo.  Global carrier phase is intentionally
+    // resolved by stage_cfo, but relative channel-path phase must survive in
+    // the CIR used for reconstruction.
+    constexpr size_t delay = 5;
+    const gr_complex echo(0.0f, 0.35f);
+    std::vector<gr_complex> multipath = iq;
+    for (size_t i = delay; i < iq.size(); ++i)
+        multipath[i] += echo * iq[i - delay];
+
+    core::DemodScratch scratch;
+    scratch.reserve(multipath.size());
+    auto prof = Qm35825Profile::Default();
+    TimingResult tr;
+    CfoResult cf;
+    CirResult cir;
+    BOOST_REQUIRE(run_cir_softchips(multipath, scratch, prof, tr, cf, cir));
+
+    BOOST_REQUIRE_EQUAL(cir.cir_complex_values.size(), size_t(38));
+    BOOST_REQUIRE_EQUAL(cir.cir_values.size(), cir.cir_complex_values.size());
+
+    float complex_norm = 0.0f;
+    float imaginary_energy = 0.0f;
+    for (size_t i = 0; i < cir.cir_complex_values.size(); ++i) {
+        const gr_complex value = cir.cir_complex_values[i];
+        complex_norm += std::norm(value);
+        imaginary_energy += value.imag() * value.imag();
+        BOOST_CHECK_SMALL(cir.cir_values[i] - value.real(), 1e-7f);
+    }
+    BOOST_CHECK_CLOSE(complex_norm, 1.0f, 0.01f);
+    BOOST_CHECK_GT(imaginary_energy, 0.02f);
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r2_softchips_match_golden)
@@ -964,35 +1027,85 @@ BOOST_AUTO_TEST_CASE(test_demod_core_p2_cir_fir_microbench)
 }
 
 // ---------------------------------------------------------------------------
-// R7: code-10 / DW1000 profile self-consistency + representative robustness.
-// Full code-10 golden is MATLAB-pending (see kPreambleCode10 comment).
+// R7/S1: synthetic code-10 fixture and production code-11 DW1000 profile.
 // ---------------------------------------------------------------------------
 
-BOOST_AUTO_TEST_CASE(test_demod_core_r7_code10_self_consistency)
+BOOST_AUTO_TEST_CASE(test_demod_core_s1_dw1000_profiles_match_matlab_constants)
 {
-    // code-10: ternary {-1,0,+1}, length 127, 64 non-zeros, energy 64.
-    // code-9 path must be UNCHANGED (same pointer content as before R7).
+    // The complete production code-11 vector is exported directly from
+    // MATLAB lrwpan.internal.HRPCodes(11), not inferred from code-10.
+    std::vector<int8_t> golden11;
+    BOOST_REQUIRE(load_i8_csv(
+        "../../../testdata/sic_profile_golden/dw1000_code11.csv", golden11));
+    BOOST_REQUIRE_EQUAL(golden11.size(), kQm35CodeLength);
+
     const int8_t* c9 = GetPreambleCode(9);
     const int8_t* c10 = GetPreambleCode(10);
+    const int8_t* c11 = GetPreambleCode(11);
     BOOST_REQUIRE(c9 != nullptr);
     BOOST_REQUIRE(c10 != nullptr);
+    BOOST_REQUIRE(c11 != nullptr);
     BOOST_CHECK(c9 != c10);
+    BOOST_CHECK(c10 != c11);
 
-    size_t nnz9 = 0, nnz10 = 0, e9 = 0, e10 = 0;
+    size_t nnz9 = 0, nnz10 = 0, nnz11 = 0;
+    size_t e9 = 0, e10 = 0, e11 = 0;
     for (size_t i = 0; i < kQm35CodeLength; ++i) {
         BOOST_CHECK(c9[i] == -1 || c9[i] == 0 || c9[i] == 1);
         BOOST_CHECK(c10[i] == -1 || c10[i] == 0 || c10[i] == 1);
+        BOOST_CHECK_EQUAL(c11[i], golden11[i]);
         if (c9[i] != 0)
             ++nnz9;
         if (c10[i] != 0)
             ++nnz10;
+        if (c11[i] != 0)
+            ++nnz11;
         e9 += static_cast<size_t>(std::abs(c9[i]));
         e10 += static_cast<size_t>(std::abs(c10[i]));
+        e11 += static_cast<size_t>(std::abs(c11[i]));
     }
     BOOST_CHECK_EQUAL(nnz9, size_t(64));
     BOOST_CHECK_EQUAL(e9, size_t(64));
     BOOST_CHECK_EQUAL(nnz10, size_t(64));
     BOOST_CHECK_EQUAL(e10, size_t(64));
+    BOOST_CHECK_EQUAL(nnz11, size_t(64));
+    BOOST_CHECK_EQUAL(e11, size_t(64));
+
+    // MATLAB sampled_code is the 508-chip spread code upsampled by two.
+    std::vector<int8_t> golden_sampled11;
+    BOOST_REQUIRE(load_i8_csv(
+        "../../../testdata/sic_profile_golden/dw1000_sampled_code11.csv",
+        golden_sampled11));
+    BOOST_REQUIRE_EQUAL(golden_sampled11.size(), size_t(1016));
+    const auto sampled11 = BuildSampledCode(c11, kQm35CodeLength);
+    BOOST_REQUIRE_EQUAL(sampled11.size(), kQm35ChipsPerSymbol);
+    for (size_t i = 0; i < sampled11.size(); ++i) {
+        BOOST_CHECK_EQUAL(sampled11[i], golden_sampled11[2 * i]);
+        BOOST_CHECK_EQUAL(golden_sampled11[2 * i + 1], int8_t(0));
+    }
+
+    std::vector<int8_t> golden_sfd;
+    BOOST_REQUIRE(load_i8_csv(
+        "../../../testdata/sic_profile_golden/dw1000_sfd_decawave.csv",
+        golden_sfd));
+    BOOST_CHECK(golden_sfd ==
+                std::vector<int8_t>(kSfdDecawave.begin(), kSfdDecawave.end()));
+
+    for (size_t code_index : { size_t(9), size_t(10), size_t(11) }) {
+        std::vector<int8_t> golden_scrambler;
+        BOOST_REQUIRE(load_i8_csv(
+            "../../../testdata/sic_profile_golden/bprf_scrambler_code" +
+                std::to_string(code_index) + ".csv",
+            golden_scrambler));
+        BOOST_REQUIRE_EQUAL(golden_scrambler.size(), size_t(64));
+        std::vector<int8_t> spreading;
+        core::detail::bprf_spreading(spreading, code_index, 0,
+                                     golden_scrambler.size());
+        BOOST_REQUIRE_EQUAL(spreading.size(), golden_scrambler.size());
+        for (size_t i = 0; i < spreading.size(); ++i)
+            BOOST_CHECK_EQUAL(spreading[i],
+                              golden_scrambler[i] ? int8_t(-1) : int8_t(1));
+    }
 
     // Sampled code for code-10: non-zeros placed every SpreadingFactor chips.
     auto samp10 = BuildSampledCode(c10, kQm35CodeLength);
@@ -1012,14 +1125,127 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r7_code10_self_consistency)
     BOOST_CHECK_EQUAL(static_cast<int>(c9[0]), 1);
     BOOST_CHECK_EQUAL(static_cast<int>(c9[7]), -1);
 
-    // Dw1000Profile factory: code_index=10, 64 SYNC, converts to Qm35825 layout.
+    // Keep the old code-10 profile explicitly synthetic.
+    auto synthetic = SyntheticCode10Profile::Default();
+    BOOST_CHECK_EQUAL(synthetic.code_index, size_t(10));
+    BOOST_CHECK_EQUAL(synthetic.preamble_repetitions, size_t(64));
+    BOOST_CHECK_EQUAL(std::string(synthetic.sfd_mode), "4z2");
+
+    // Production DW1000 identity is code-11 / 128 SYNC / Decawave DW-8.
     auto dw = Dw1000Profile::Default();
-    BOOST_CHECK_EQUAL(dw.code_index, size_t(10));
-    BOOST_CHECK_EQUAL(dw.preamble_repetitions, size_t(64));
+    BOOST_CHECK_EQUAL(dw.code_index, size_t(11));
+    BOOST_CHECK_EQUAL(dw.preamble_repetitions, size_t(128));
+    BOOST_CHECK_EQUAL(std::string(dw.sfd_mode), "decawave");
+    BOOST_CHECK_EQUAL(dw.cir_skip_initial_repetitions, size_t(10));
+    BOOST_CHECK_EQUAL(dw.cir_repetitions, size_t(118));
+    BOOST_CHECK(GetSfdSequence(dw.sfd_mode) ==
+                std::vector<int8_t>(kSfdDecawave.begin(), kSfdDecawave.end()));
     auto qm = dw.as_qm35825();
-    BOOST_CHECK_EQUAL(qm.code_index, size_t(10));
-    BOOST_CHECK_EQUAL(qm.preamble_repetitions, size_t(64));
+    BOOST_CHECK_EQUAL(qm.code_index, size_t(11));
+    BOOST_CHECK_EQUAL(qm.preamble_repetitions, size_t(128));
+    BOOST_CHECK_EQUAL(std::string(qm.sfd_mode), "decawave");
+    BOOST_CHECK_EQUAL(qm.cir_repetitions, size_t(118));
     BOOST_CHECK_CLOSE(qm.sample_rate, kQm35SampleRate, 1e-9);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_s1_real_dw1000_frontend_matches_matlab)
+{
+    const std::string dir = "../../../testdata/dw1000_realtime_golden";
+    std::vector<gr_complex> iq, tmpl, golden_cir;
+    BOOST_REQUIRE(load_cf32(dir + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32(dir + "/reference_preamble.cfile", tmpl));
+    BOOST_REQUIRE(load_cf32(dir + "/stage_cir.cfile", golden_cir));
+    BOOST_REQUIRE_EQUAL(iq.size(), size_t(198140));
+    BOOST_REQUIRE_EQUAL(tmpl.size(), kQm35SamplesPerSymbol);
+    BOOST_REQUIRE_EQUAL(golden_cir.size(), size_t(38));
+
+    auto profile = Dw1000Profile::Default().as_qm35825();
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+
+    TimingResult timing;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), profile, tmpl,
+                                     10000, timing, scratch));
+    BOOST_CHECK_LE(std::abs(timing.preamble_start_sample - int64_t(10000)),
+                   int64_t(3));
+    BOOST_CHECK_CLOSE(timing.measured_period, 1016.0, 0.1);
+
+    CfoResult cfo;
+    BOOST_REQUIRE(core::stage_cfo(iq.data(), iq.size(), profile, timing, cfo,
+                                  scratch));
+    BOOST_CHECK_CLOSE(cfo.cfo_hz, -2682.506542032, 5.0);
+
+    SfdResult sfd;
+    const auto sfd_sequence = GetSfdSequence(profile.sfd_mode);
+    BOOST_REQUIRE(core::stage_sfd(scratch.derotated.data(), iq.size(), profile,
+                                  timing, sfd_sequence, tmpl, sfd, scratch));
+
+    CirResult cir;
+    const std::vector<int8_t> code11(kPreambleCode11.begin(),
+                                     kPreambleCode11.end());
+    BOOST_REQUIRE(core::stage_cir_softchips(scratch.derotated.data(), iq.size(),
+                                            profile, timing, code11, cir,
+                                            scratch));
+    BOOST_REQUIRE_EQUAL(cir.cir_complex_values.size(), golden_cir.size());
+    float max_cir_error = 0.0f;
+    gr_complex dot(0.0f, 0.0f);
+    float cpp_energy = 0.0f;
+    float golden_energy = 0.0f;
+    for (size_t i = 0; i < golden_cir.size(); ++i) {
+        max_cir_error = std::max(
+            max_cir_error,
+            std::abs(cir.cir_complex_values[i] - golden_cir[i]));
+        dot += cir.cir_complex_values[i] * std::conj(golden_cir[i]);
+        cpp_energy += std::norm(cir.cir_complex_values[i]);
+        golden_energy += std::norm(golden_cir[i]);
+    }
+    const float normalized_correlation =
+        std::abs(dot) / std::sqrt(cpp_energy * golden_energy);
+    const gr_complex global_gain = dot / golden_energy;
+    float aligned_max_error = 0.0f;
+    for (size_t i = 0; i < golden_cir.size(); ++i)
+        aligned_max_error = std::max(
+            aligned_max_error,
+            std::abs(cir.cir_complex_values[i] - global_gain * golden_cir[i]));
+    BOOST_TEST_MESSAGE("real DW1000 CIR raw_max_error=" << max_cir_error
+                       << " aligned_max_error=" << aligned_max_error
+                       << " normalized_correlation=" << normalized_correlation
+                       << " global_phase=" << std::arg(global_gain));
+    BOOST_CHECK_LT(max_cir_error, 0.02f);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_s1_real_dw1000_payload_fcs_matches_matlab)
+{
+    const std::string dir = "../../../testdata/dw1000_realtime_golden";
+    std::vector<gr_complex> iq, tmpl;
+    std::vector<uint8_t> golden_payload;
+    BOOST_REQUIRE(load_cf32(dir + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32(dir + "/reference_preamble.cfile", tmpl));
+    BOOST_REQUIRE(load_u8(dir + "/payload.bin", golden_payload));
+
+    const auto profile = Dw1000Profile::Default().as_qm35825();
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    const auto result = core::demodulate_one(
+        iq.data(), iq.size(), profile, 1,
+        333687 /* absolute predicted start */,
+        323687 /* absolute window start */, tmpl, scratch);
+
+    BOOST_TEST_MESSAGE("real DW1000 full status="
+                       << static_cast<int>(result.status)
+                       << " ns_sfd=" << result.ns_sfd.sfd_start_chip
+                       << " phr_ok=" << result.phr.ok
+                       << " psdu=" << result.phr.psdu_length
+                       << " uncorrectable=" << result.phr.secded_uncorrectable);
+    BOOST_REQUIRE(result.status == DemodStatus::Success);
+    BOOST_CHECK(result.phr.ok);
+    BOOST_CHECK(!result.phr.secded_uncorrectable);
+    BOOST_CHECK_EQUAL(result.phr.psdu_length, uint32_t(12));
+    BOOST_CHECK(result.payload.ok);
+    BOOST_CHECK(result.payload.bytes == golden_payload);
+    BOOST_CHECK(result.payload.fcs_pass);
+    BOOST_CHECK_EQUAL(result.payload.received_fcs, uint16_t(0x4440));
+    BOOST_CHECK_EQUAL(result.payload.calculated_fcs, uint16_t(0x4440));
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r7_robust_awgn_representative)

@@ -74,6 +74,7 @@ list(APPEND test_uwb_sources
     qa_uwb_scheduled_extractor.cc
     qa_uwb_demod_core.cc
     qa_uwb_realtime_demodulator.cc
+    qa_uwb_sic_core.cc
 )
 # Anything we need to link to for the unit tests go here
 list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks)

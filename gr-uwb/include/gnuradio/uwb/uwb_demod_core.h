@@ -104,7 +104,7 @@ struct DemodScratch {
     std::vector<float> metric;                  // correlation metric buffer
     std::vector<std::complex<float>> corr;      // matched-filter output
     std::vector<float> soft_chips;              // soft-chip stream
-    std::vector<float> cir_taps;                // CIR estimate
+    std::vector<std::complex<float>> cir_taps;  // complex CIR estimate
     std::vector<int64_t> peaks;                 // SYNC peak positions
     std::vector<float> peak_values;             // per-peak complex correlation
 
@@ -287,10 +287,9 @@ inline bool stage_cfo(const std::complex<float>* rx,
     if (np < 4)
         return false;
 
-    // Skip the first `skip` peaks (front-end startup transient) but keep at
-    // least a few for the fit.
-    const size_t skip =
-        std::min(profile.cir_skip_initial_repetitions, np - 2);
+    // Match MATLAB compensateCarrierOffset: reject up to the first 24 peaks
+    // affected by front-end startup while retaining at least 32 repetitions.
+    const size_t skip = std::min<size_t>(24, (np > 32) ? np - 32 : 0);
     const size_t nfit = np - skip;
     if (nfit < 2)
         return false;
@@ -333,9 +332,19 @@ inline bool stage_cfo(const std::complex<float>* rx,
     if (std::abs(denom) < 1e-30)
         return false;
     const double slope = ((double)nfit * sxy - sx * sy) / denom;
+    const double intercept = (sy - slope * sx) / static_cast<double>(nfit);
     out.cfo_hz = slope / (2.0 * M_PI);
     out.peaks_used = nfit;
-    out.ok = true;
+    double residual_sq = 0.0;
+    for (size_t k = 0; k < nfit; ++k) {
+        const size_t idx = skip + k;
+        const double t =
+            (double)timing.peak_samples[idx] / profile.sample_rate - t0;
+        const double error = (double)scratch.metric[k] - (intercept + slope * t);
+        residual_sq += error * error;
+    }
+    out.fit_residual = static_cast<float>(
+        std::sqrt(residual_sq / static_cast<double>(nfit)));
 
     // Derotate a copy: out[i] = rx[i] * e^{-j w i}.  A naive per-sample sin/cos
     // (2 transcendentals / sample), a recursion rot *= e^{-j w}, or an
@@ -377,6 +386,22 @@ inline bool stage_cfo(const std::complex<float>* rx,
                 rx[i] * std::complex<float>(std::cos(ph), std::sin(ph));
         }
     }
+
+    // The phase fit used relative time for conditioning.  Convert its
+    // intercept back to absolute sample time, then remove the remaining
+    // constant carrier phase.  MATLAB performs the equivalent known-preamble
+    // phase alignment after CFO derotation.  Relative multipath phases remain
+    // intact and are therefore preserved by the complex CIR.
+    const double residual_phase = std::remainder(intercept - slope * t0,
+                                                  2.0 * M_PI);
+    out.residual_phase = residual_phase;
+    const std::complex<float> phase_rotation(
+        static_cast<float>(std::cos(-residual_phase)),
+        static_cast<float>(std::sin(-residual_phase)));
+    for (size_t i = 0; i < n; ++i)
+        scratch.derotated[i] *= phase_rotation;
+
+    out.ok = true;
     return true;
 }
 
@@ -623,9 +648,10 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     out.pre_samples = pre;
     out.post_samples = post;
     out.cir_peak_metric = peak_mag;
+    out.cir_complex_values = values;
     out.cir_values.resize(tap_count);
     for (size_t i = 0; i < tap_count; ++i)
-        out.cir_values[i] = values[i].real(); // golden CIR is real (Q=0 channel)
+        out.cir_values[i] = values[i].real(); // legacy real-component diagnostic
     out.cir_estimate_us = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - t_cir0)
@@ -790,17 +816,31 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
 namespace detail {
 
 // IEEE 802.15.4a BPRF data-scrambler spreading (lrwpan.internal.createScrambler):
-// a 15-bit LFSR with s[i] = s[i-14] ^ s[i-15] and initial state 010000100111101.
+// a 15-bit LFSR with s[i] = s[i-14] ^ s[i-15].  Its initial state depends on
+// code_index; MATLAB-exported prefixes live in sic_profile_golden/.
 // Returns the +/-1 spreading stream over [start_bit, start_bit+nbits).
 // The PHR field uses offset 0; the payload field is offset by the number of
 // PHR active chips (21 symbols x 64 chips/burst = 1344).
-inline void bprf_spreading(std::vector<int8_t>& out, size_t start_bit,
-                           size_t nbits)
+inline void bprf_spreading(std::vector<int8_t>& out, size_t code_index,
+                           size_t start_bit, size_t nbits)
 {
-    static const int8_t kInit[15] = { 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1 };
+    static const int8_t kInit9[15] = {
+        0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1
+    };
+    static const int8_t kInit10[15] = {
+        0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1
+    };
+    static const int8_t kInit11[15] = {
+        1, 1, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1
+    };
+    const int8_t* init = kInit9;
+    if (code_index == 10)
+        init = kInit10;
+    else if (code_index == 11)
+        init = kInit11;
     std::vector<int8_t> s(start_bit + nbits);
     for (size_t i = 0; i < 15 && i < s.size(); ++i)
-        s[i] = kInit[i];
+        s[i] = init[i];
     for (size_t i = 15; i < s.size(); ++i)
         s[i] = static_cast<int8_t>(s[i - 14] ^ s[i - 15]);
     out.resize(nbits);
@@ -889,8 +929,8 @@ inline void hrp_secded(const std::vector<int8_t>& sys13,
 // g1 (BPSK polarity bit), each nsym entries.  Mirrors helperUWBBPRFDemodKernel.
 // ---------------------------------------------------------------------------
 inline bool bprf_demod(const std::vector<float>& soft, int64_t start,
-                       size_t nsym, size_t cpb, size_t cps, size_t scram_offset,
-                       int8_t pol, std::vector<int8_t>& g0,
+                       size_t nsym, size_t cpb, size_t cps, size_t code_index,
+                       size_t scram_offset, int8_t pol, std::vector<int8_t>& g0,
                        std::vector<int8_t>& g1)
 {
     if (start < 0 ||
@@ -898,7 +938,7 @@ inline bool bprf_demod(const std::vector<float>& soft, int64_t start,
             soft.size())
         return false;
     std::vector<int8_t> spread;
-    bprf_spreading(spread, scram_offset, cpb * nsym);
+    bprf_spreading(spread, code_index, scram_offset, cpb * nsym);
     g0.resize(nsym);
     g1.resize(nsym);
     const size_t third = cps / 2;
@@ -1318,8 +1358,8 @@ inline bool stage_phr(const std::vector<float>& soft_chips,
     const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
 
     std::vector<int8_t> g0, g1;
-    if (!detail::bprf_demod(soft_chips, phr_start, nsym, cpb, cps, 0, pol, g0,
-                            g1))
+    if (!detail::bprf_demod(soft_chips, phr_start, nsym, cpb, cps,
+                            profile.code_index, 0, pol, g0, g1))
         return false;
 
     std::vector<int8_t> rx(2 * nsym);
@@ -1409,11 +1449,11 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
 
     // PHR + payload coded bits (joint Viterbi decode, as in MATLAB).
     std::vector<int8_t> g0p, g1p, g0, g1;
-    if (!detail::bprf_demod(soft_chips, phr_start, 21, 64, 512, 0, pol, g0p,
-                            g1p))
+    if (!detail::bprf_demod(soft_chips, phr_start, 21, 64, 512,
+                            profile.code_index, 0, pol, g0p, g1p))
         return false;
-    if (!detail::bprf_demod(soft_chips, payload_start, nsym, 8, 64, 1344, pol,
-                            g0, g1))
+    if (!detail::bprf_demod(soft_chips, payload_start, nsym, 8, 64,
+                            profile.code_index, 1344, pol, g0, g1))
         return false;
 
     const size_t total = 21 + nsym;

@@ -151,10 +151,23 @@ inline constexpr std::array<int8_t, kQm35CodeLength> kPreambleCode10 = { {
     0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, -1, 0, 0
 } };
 
-// DW1000-mode BPRF profile (code-10, 64 SYNC).  Same sample-rate / timing
-// geometry as Qm35825Profile::Default(); only code_index and documentation
-// differ.  Reuses BuildSampledCode / GetSfdSequence.
-struct Dw1000Profile {
+// Production DW1000 HRP code index 11, exported directly from MATLAB
+// Communications Toolbox lrwpan.internal.HRPCodes(11).  The versioned source
+// fixture is testdata/sic_profile_golden/dw1000_code11.csv.  Ternary length
+// 127, non-zero count 64, energy 64.
+inline constexpr std::array<int8_t, kQm35CodeLength> kPreambleCode11 = { {
+    -1, 1, -1, 0, 0, 0, 0, 1, 0, 0, -1, -1, 0, 0, 0, 0, 0, -1, 0, 1, 0, 1,
+    0, 1, -1, 0, 1, 0, 0, 1, 0, 0, 1, 0, -1, 0, 0, -1, 1, 1, 1, 0, 0, 1, 0,
+    0, 0, -1, 1, 0, 1, 0, -1, 0, 0, 0, 0, 1, 1, 1, 1, 1, -1, 1, 0, 1, -1,
+    -1, 0, 1, -1, 0, 1, 1, -1, -1, 0, -1, 0, 0, 0, 1, 0, -1, 1, 0, 0, 1, 0,
+    1, -1, -1, -1, -1, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, -1, 1, 0, 0, 1, -1,
+    0, 1, 1, 0, 0, 0, 1, 1, -1, 0, 0, 1, 1, -1, 0, -1, 0
+} };
+
+// Historical code-10/64-SYNC/4z2 communication fixture.  This is useful for
+// synthetic collision QA only and must never be selected as production
+// DW1000 SIC configuration.
+struct SyntheticCode10Profile {
     double sample_rate = kQm35SampleRate;
     double mean_prf_mhz = kQm35MeanPrfMHz;
     size_t code_index = 10;
@@ -179,7 +192,7 @@ struct Dw1000Profile {
     size_t timing_search_margin = 9984;
     size_t post_guard_samples = 4096;
 
-    static Dw1000Profile Default() { return Dw1000Profile{}; }
+    static SyntheticCode10Profile Default() { return SyntheticCode10Profile{}; }
 
     // Convert to the Qm35825Profile layout used by demodulate_one / stages.
     Qm35825Profile as_qm35825() const
@@ -208,13 +221,33 @@ struct Dw1000Profile {
     }
 };
 
+// Production DW1000 BPRF profile used by Phase-2 SIC.  It shares the BPRF
+// geometry/configuration adapter with the synthetic fixture, but replaces the
+// PHY identity with the MATLAB-verified code-11 / 128-SYNC / Decawave DW-8
+// values.  CIR repetitions begin at SYNC 11, matching the MATLAB pipeline.
+struct Dw1000Profile : SyntheticCode10Profile {
+    Dw1000Profile()
+    {
+        code_index = 11;
+        preamble_repetitions = 128;
+        sfd_mode = "decawave";
+        cir_skip_initial_repetitions = 10;
+        cir_repetitions = 118;
+    }
+
+    static Dw1000Profile Default() { return Dw1000Profile{}; }
+};
+
 // Returns the ternary Ipatov code for the given HRP code index.
-// Supported: 9 (QM35825 golden), 10 (DW1000 BPRF).  Unknown indices fall
+// Supported: 9 (QM35825 golden), 10 (synthetic fixture), 11 (production
+// DW1000).  Unknown indices fall
 // back to code-9 with a stable pointer (callers that care must check).
 inline const int8_t* GetPreambleCode(size_t code_index)
 {
     if (code_index == 10)
         return kPreambleCode10.data();
+    if (code_index == 11)
+        return kPreambleCode11.data();
     return kPreambleCode9.data();
 }
 

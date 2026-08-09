@@ -1,0 +1,16 @@
+key,value
+profile,dw1000-production
+generator,lrwpan.internal.HRPCodes
+matlab_release,2025b
+sample_rate,998400000
+mean_prf_mhz,62.4
+code_index,11
+preamble_repetitions,128
+sfd_mode,decawave
+data_rate_mbps,6.81
+code_length,127
+code_nonzero,64
+code_energy,64
+spreading_factor,4
+samples_per_pulse,2
+samples_per_symbol,1016

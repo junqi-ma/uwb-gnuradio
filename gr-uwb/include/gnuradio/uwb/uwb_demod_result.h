@@ -94,7 +94,11 @@ struct CirResult {
     size_t pre_samples = 0;             // CIR window before first path
     size_t post_samples = 0;            // CIR window after first path
     float cir_peak_metric = 0.0f;       // peak CIR magnitude
-    std::vector<float> cir_values;      // CIR tap magnitudes (diagnostics only)
+    // Full normalized complex taps are the authoritative CIR for waveform
+    // reconstruction/SIC.  cir_values remains the real component for
+    // backward-compatible Phase-1 diagnostics and existing golden QA.
+    std::vector<std::complex<float>> cir_complex_values;
+    std::vector<float> cir_values;
     size_t soft_chip_count = 0;         // number of soft chips produced
     double samples_per_chip = 0.0;      // measured chip period
 
