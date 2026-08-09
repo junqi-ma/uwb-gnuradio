@@ -336,13 +336,45 @@ inline bool stage_cfo(const std::complex<float>* rx,
     out.peaks_used = nfit;
     out.ok = true;
 
-    // Optional: derotate a copy (scratch.derotated).  The R1 stage reports
-    // CFO; the block applies the rotation when chaining stages.
+    // Derotate a copy: out[i] = rx[i] * e^{-j w i}.  A naive per-sample sin/cos
+    // (2 transcendentals / sample), a recursion rot *= e^{-j w}, or an
+    // elementwise table multiply all leave the loop scalar (serial chain, or
+    // std::complex mul that GCC won't SIMD).  Instead use 4 INDEPENDENT float
+    // rotation chains, each advancing by step^4 — the chains have no data
+    // dependency, so the compiler interleaves them (4x ILP) instead of stalling
+    // on one serial accumulator.  Re-anchor every kB samples to the exact
+    // absolute phase, so float precision drift never accumulates.
     scratch.derotated.resize(n);
     const double w = 2.0 * M_PI * out.cfo_hz / profile.sample_rate;
-    for (size_t i = 0; i < n; ++i) {
-        const double ph = w * (double)i;
-        scratch.derotated[i] = rx[i] * std::complex<float>(std::cos(ph), -std::sin(ph));
+    const float cw = static_cast<float>(w);
+    constexpr size_t kB = 1024;
+    const float s4r = std::cos(-4.0f * cw); // e^{-j w*4}: chain advance
+    const float s4i = std::sin(-4.0f * cw);
+    for (size_t b0 = 0; b0 < n; b0 += kB) {
+        const size_t b1 = std::min(n, b0 + kB);
+        const float ph0 = cw * static_cast<float>(b0);
+        float cr[4], ci[4];
+        for (int c = 0; c < 4; ++c) {
+            const float ph = -ph0 - cw * static_cast<float>(c);
+            cr[c] = std::cos(ph);
+            ci[c] = std::sin(ph);
+        }
+        size_t i = b0;
+        for (; i + 4 <= b1; i += 4) {
+            for (int c = 0; c < 4; ++c) {
+                scratch.derotated[i + c] =
+                    rx[i + c] * std::complex<float>(cr[c], ci[c]);
+                const float nr = cr[c] * s4r - ci[c] * s4i;
+                const float ni = cr[c] * s4i + ci[c] * s4r;
+                cr[c] = nr;
+                ci[c] = ni;
+            }
+        }
+        for (; i < b1; ++i) { // tail (1..3 samples): exact phase
+            const float ph = -ph0 - cw * static_cast<float>(i - b0);
+            scratch.derotated[i] =
+                rx[i] * std::complex<float>(std::cos(ph), std::sin(ph));
+        }
     }
     return true;
 }
