@@ -13,5 +13,13 @@ install(FILES
     uwb_packet_writer.block.yml
     uwb_scheduled_extractor.block.yml
     uwb_realtime_demodulator.block.yml
+    uwb_rfnoc_upsampler.block.yml
     DESTINATION share/gnuradio/grc/blocks
+)
+
+install(FILES
+    ../examples/uwb_detector_to_writer.grc
+    ../examples/uwb_scheduled_file_capture.grc
+    ../examples/x410_rfnoc_uwb_scheduled.grc
+    DESTINATION share/gnuradio/examples/uwb
 )

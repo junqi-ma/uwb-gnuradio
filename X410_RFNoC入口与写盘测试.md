@@ -44,6 +44,10 @@ UHD coercion，并打印完整速率契约。
 重映射仍是下一阶段，未完成前发生 overflow 必须停止采集并重新 seed，不能
 继续信任旧 schedule。
 
+也可直接打开 `gr-uwb/examples/x410_rfnoc_uwb_scheduled.grc` 组合或修改。
+另有通用 detector 和 scheduled file replay 示例，说明见
+`gr-uwb/examples/README.md`。
+
 ## 30 秒持续写盘仿真
 
 测试不生成 30 秒全速原始 IQ，而以真实时间节拍向 Writer 发送 scheduled

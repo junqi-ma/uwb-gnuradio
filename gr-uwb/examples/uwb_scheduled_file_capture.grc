@@ -1,0 +1,58 @@
+options:
+  parameters:
+    author: UWB GNU Radio Project
+    category: UWB
+    cmake_opt: ''
+    comment: File replay through fixed-period scheduled extractor
+    copyright: ''
+    description: Extract every predicted radar slot from a CF32 file.
+    gen_cmake: 'On'
+    gen_linking: dynamic
+    generate_options: no_gui
+    hier_block_src_path: '.:'
+    id: uwb_scheduled_file_capture
+    max_nouts: '0'
+    output_language: python
+    placement: (0,0)
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: run
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: UWB Scheduled File Capture
+    window_size: ''
+  states: {coordinate: [8, 8], rotation: 0, state: enabled}
+blocks:
+- name: samp_rate
+  id: variable
+  parameters: {comment: '', value: '998.4e6'}
+  states: {coordinate: [16, 80], rotation: 0, state: enabled}
+- name: first_packet_sample
+  id: variable
+  parameters: {comment: 0-based in input file, value: '4992000'}
+  states: {coordinate: [16, 144], rotation: 0, state: enabled}
+- name: input_file
+  id: parameter
+  parameters: {alias: '', comment: '', hide: none, label: Input CF32 file, short_id: '', type: str, value: "'testdata/uwb_code9_preamble64_payload128_standard_sfd.cfile'"}
+  states: {coordinate: [16, 208], rotation: 0, state: enabled}
+- name: output_dir
+  id: parameter
+  parameters: {alias: '', comment: '', hide: none, label: Output directory, short_id: '', type: str, value: "'/tmp/uwb-scheduled-capture'"}
+  states: {coordinate: [16, 272], rotation: 0, state: enabled}
+- name: blocks_file_source_0
+  id: blocks_file_source
+  parameters: {begin_tag: pmt.PMT_NIL, file: input_file, length: '0', offset: '0', repeat: 'False', type: complex, vlen: '1'}
+  states: {coordinate: [256, 112], rotation: 0, state: enabled}
+- name: uwb_scheduled_extractor_0
+  id: uwb_scheduled_extractor
+  parameters: {capture_samples: '189696', first_packet_sample: first_packet_sample, packet_interval_s: '0.005', pool_size: '16', post_guard_samples: '4096', pre_guard_samples: '9984', sample_rate: samp_rate, verification_enabled: 'False'}
+  states: {coordinate: [496, 112], rotation: 0, state: enabled}
+- name: uwb_packet_writer_0
+  id: uwb_packet_writer
+  parameters: {base_name: capture, directory: output_dir, one_file_per_packet: 'False'}
+  states: {coordinate: [800, 112], rotation: 0, state: enabled}
+connections:
+- [blocks_file_source_0, '0', uwb_scheduled_extractor_0, '0']
+- [uwb_scheduled_extractor_0, packet, uwb_packet_writer_0, packet]
+metadata: {file_format: 1}

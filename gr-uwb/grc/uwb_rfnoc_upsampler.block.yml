@@ -1,0 +1,59 @@
+id: uwb_rfnoc_upsampler
+label: UWB RFNoC Upsampler 65/48
+category: '[UWB]'
+flags: [python]
+
+templates:
+  imports: from gnuradio import uhd
+  make: |-
+    uhd.rfnoc_block_generic(
+        self.rfnoc_graph,
+        uhd.device_addr(${block_args}),
+        ${block_type},
+        ${device_select},
+        ${instance_index})
+
+parameters:
+- id: block_type
+  label: FPGA block type
+  dtype: string
+  default: 'Upsampler'
+- id: block_args
+  label: Block args
+  dtype: string
+  default: ''
+- id: device_select
+  label: Device select
+  dtype: int
+  default: '0'
+- id: instance_index
+  label: Instance select
+  dtype: int
+  default: '0'
+- id: input_rate
+  label: Input rate (documentation)
+  dtype: real
+  default: '737.28e6'
+- id: output_rate
+  label: Output rate (documentation)
+  dtype: real
+  default: '998.4e6'
+
+asserts:
+- ${ abs(input_rate * 65.0 / 48.0 - output_rate) < 0.5 }
+
+inputs:
+- domain: rfnoc
+  dtype: sc16
+
+outputs:
+- domain: rfnoc
+  dtype: sc16
+
+documentation: |-
+  Wrapper for a custom RFNoC block whose UHD block type is "Upsampler".
+  Required fixed contract: 737.28 MS/s * 65 / 48 = 998.4 MS/s.
+  This wrapper does not program FPGA interpolation registers; configure those
+  in the image/block controller and confirm the block type with uhd_usrp_probe.
+
+file_format: 1

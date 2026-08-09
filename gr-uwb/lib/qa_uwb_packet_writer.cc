@@ -119,3 +119,25 @@ BOOST_AUTO_TEST_CASE(test_packet_writer_one_file_per_packet_sc16)
 
     std::filesystem::remove_all(dir);
 }
+
+BOOST_AUTO_TEST_CASE(test_packet_writer_accepts_scheduled_metadata)
+{
+    const std::string dir = "qa_writer_scheduled";
+    std::filesystem::remove_all(dir);
+    auto w = gr::uwb::UwbPacketWriter::make(dir, "capture", false);
+    std::vector<gr_complex> iq(8, gr_complex(0.25f, -0.125f));
+    pmt::pmt_t meta = pmt::make_dict();
+    meta = pmt::dict_add(meta, pmt::mp("packet_id"), pmt::from_uint64(42));
+    meta = pmt::dict_add(meta, pmt::mp("window_start_sample"),
+                         pmt::from_long(100000));
+    meta = pmt::dict_add(meta, pmt::mp("predicted_start_sample"),
+                         pmt::from_long(109984));
+    meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
+                         pmt::from_double(998.4e6));
+    run_strobe(pmt::cons(meta, pmt::init_c32vector(iq.size(), iq)), w);
+    const std::string jsonl = read_file(dir + "/capture.jsonl");
+    BOOST_CHECK(jsonl.find("\"packet_id\":42") != std::string::npos);
+    BOOST_CHECK(jsonl.find("\"start_sample\":100000") != std::string::npos);
+    BOOST_CHECK(jsonl.find("\"trigger_sample\":109984") != std::string::npos);
+    std::filesystem::remove_all(dir);
+}

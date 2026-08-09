@@ -20,6 +20,19 @@
 namespace gr {
 namespace uwb {
 
+namespace {
+uint64_t dict_u64(const pmt::pmt_t& dict, const char* key, uint64_t fallback)
+{
+    const pmt::pmt_t value =
+        pmt::dict_ref(dict, pmt::mp(key), pmt::from_uint64(fallback));
+    if (pmt::is_uint64(value))
+        return pmt::to_uint64(value);
+    if (pmt::is_integer(value))
+        return static_cast<uint64_t>(pmt::to_long(value));
+    return fallback;
+}
+} // namespace
+
 UwbPacketWriter::UwbPacketWriter(const std::string& directory,
                                  const std::string& base_name,
                                  bool one_file_per_packet)
@@ -175,13 +188,13 @@ void UwbPacketWriter::write_packet(pmt::pmt_t msg)
     pmt::pmt_t meta = pmt::car(msg);
     pmt::pmt_t data = pmt::cdr(msg);
 
-    const long id = pmt::to_long(
-        pmt::dict_ref(meta, pmt::mp("packet_id"),
-                      pmt::from_long(static_cast<long>(d_packets_.load()))));
-    const uint64_t start = pmt::to_uint64(
-        pmt::dict_ref(meta, pmt::mp("start_sample"), pmt::from_uint64(0)));
-    const uint64_t trigger = pmt::to_uint64(
-        pmt::dict_ref(meta, pmt::mp("trigger_sample"), pmt::from_uint64(0)));
+    const uint64_t id = dict_u64(meta, "packet_id", d_packets_.load());
+    // Generic detector metadata uses start/trigger; scheduled extractor uses
+    // window_start/predicted_start.  Preserve one Writer for both PDU sources.
+    const uint64_t scheduled_start = dict_u64(meta, "window_start_sample", 0);
+    const uint64_t start = dict_u64(meta, "start_sample", scheduled_start);
+    const uint64_t predicted = dict_u64(meta, "predicted_start_sample", start);
+    const uint64_t trigger = dict_u64(meta, "trigger_sample", predicted);
     const double rate = pmt::to_double(
         pmt::dict_ref(meta, pmt::mp("sample_rate"), pmt::from_double(0)));
     const double metric = pmt::to_double(
@@ -206,12 +219,12 @@ void UwbPacketWriter::write_packet(pmt::pmt_t msg)
         std::snprintf(
             line,
             sizeof(line),
-            "{\"packet_id\":%ld,\"file\":\"%s\",\"start_sample\":%llu,"
+            "{\"packet_id\":%llu,\"file\":\"%s\",\"start_sample\":%llu,"
             "\"trigger_sample\":%llu,\"sample_rate\":%.0f,"
             "\"sample_count\":%zu,\"file_offset_samples\":0,"
             "\"detection_metric\":%.6f,\"pre_trigger_samples\":%ld,"
             "\"sample_format\":\"sc16\",\"iq_scale\":%.9g}\n",
-            id,
+            static_cast<unsigned long long>(id),
             fname.c_str(),
             static_cast<unsigned long long>(start),
             static_cast<unsigned long long>(trigger),
@@ -225,12 +238,12 @@ void UwbPacketWriter::write_packet(pmt::pmt_t msg)
         std::snprintf(
             line,
             sizeof(line),
-            "{\"packet_id\":%ld,\"start_sample\":%llu,"
+            "{\"packet_id\":%llu,\"start_sample\":%llu,"
             "\"trigger_sample\":%llu,\"sample_rate\":%.0f,"
             "\"sample_count\":%zu,\"file_offset_samples\":%llu,"
             "\"detection_metric\":%.6f,\"pre_trigger_samples\":%ld,"
             "\"sample_format\":\"sc16\",\"iq_scale\":%.9g}\n",
-            id,
+            static_cast<unsigned long long>(id),
             static_cast<unsigned long long>(start),
             static_cast<unsigned long long>(trigger),
             rate,
