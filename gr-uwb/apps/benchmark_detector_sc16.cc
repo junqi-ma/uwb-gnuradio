@@ -1,6 +1,8 @@
 #include <gnuradio/blocks/head.h>
 #include <gnuradio/blocks/message_debug.h>
-#include <gnuradio/blocks/vector_source.h>
+#include <gnuradio/blocks/null_sink.h>
+#include <gnuradio/io_signature.h>
+#include <gnuradio/sync_block.h>
 #include <gnuradio/top_block.h>
 #include <gnuradio/uwb/uwb_detector.h>
 #include <gnuradio/uwb/uwb_detector_core.h>
@@ -10,14 +12,66 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace {
 constexpr size_t kPacketStart = 4992000;
 constexpr size_t kSymbolLen = 1016;
+
+// Benchmark-only sync source. One scheduler item is one complex sample for
+// both formats; work() fills the granted output span with bulk memcpy and
+// carries only the repeat offset across calls. No allocation occurs in work().
+template <typename Sample>
+class BulkRepeatSource : public gr::sync_block
+{
+public:
+    using sptr = std::shared_ptr<BulkRepeatSource<Sample>>;
+
+    static sptr make(const std::vector<Sample>& data)
+    {
+        return gnuradio::make_block_sptr<BulkRepeatSource<Sample>>(data);
+    }
+
+    explicit BulkRepeatSource(const std::vector<Sample>& data)
+        : gr::sync_block("bulk_repeat_source",
+                         gr::io_signature::make(0, 0, 0),
+                         gr::io_signature::make(1, 1, sizeof(Sample))),
+          data_(data)
+    {
+        if (data_.empty())
+            throw std::invalid_argument("BulkRepeatSource data must not be empty");
+    }
+
+    int work(int noutput_items,
+             gr_vector_const_void_star&,
+             gr_vector_void_star& output_items) override
+    {
+        auto* out = static_cast<Sample*>(output_items[0]);
+        size_t produced = 0;
+        const size_t requested = static_cast<size_t>(noutput_items);
+        while (produced < requested) {
+            const size_t count =
+                std::min(requested - produced, data_.size() - offset_);
+            std::memcpy(out + produced, data_.data() + offset_,
+                        count * sizeof(Sample));
+            produced += count;
+            offset_ += count;
+            if (offset_ == data_.size())
+                offset_ = 0;
+        }
+        return noutput_items;
+    }
+
+private:
+    std::vector<Sample> data_;
+    size_t offset_ = 0;
+};
 
 std::vector<gr_complex> load(const std::string& path)
 {
@@ -58,6 +112,33 @@ double run(const Source& src, const Detector& det, size_t item_size,
     *messages = dbg->num_messages();
     return sec;
 }
+
+template <typename Source>
+double run_source_only(const Source& src,
+                       size_t item_size,
+                       uint64_t target,
+                       size_t buffer_items)
+{
+    auto head = gr::blocks::head::make(item_size, target);
+    auto sink = gr::blocks::null_sink::make(item_size);
+    auto tb = gr::make_top_block("format_source_benchmark");
+    tb->connect(src, 0, head, 0);
+    tb->connect(head, 0, sink, 0);
+    if (buffer_items > 0) {
+        src->set_max_output_buffer(0, -1);
+        src->set_min_output_buffer(0, static_cast<long>(buffer_items));
+        head->set_max_output_buffer(0, -1);
+        head->set_min_output_buffer(0, static_cast<long>(buffer_items));
+        src->set_max_noutput_items(static_cast<int>(buffer_items));
+        head->set_max_noutput_items(static_cast<int>(buffer_items));
+        tb->set_max_noutput_items(static_cast<int>(buffer_items));
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    tb->run();
+    return std::chrono::duration<double>(
+               std::chrono::steady_clock::now() - t0)
+        .count();
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -79,21 +160,27 @@ int main(int argc, char** argv)
                                  x.begin() + kPacketStart + kSymbolLen);
     gr::uwb::core::uwb_l2_normalize(tmpl);
 
-    std::vector<int16_t> sc16(x.size() * 2);
+    std::vector<std::complex<int16_t>> sc16(x.size());
     for (size_t i = 0; i < x.size(); ++i) {
         const float re = std::max(-32768.0f, std::min(32767.0f,
             std::round(x[i].real() * 32768.0f)));
         const float im = std::max(-32768.0f, std::min(32767.0f,
             std::round(x[i].imag() * 32768.0f)));
-        sc16[2 * i] = static_cast<int16_t>(re);
-        sc16[2 * i + 1] = static_cast<int16_t>(im);
+        sc16[i] = { static_cast<int16_t>(re), static_cast<int16_t>(im) };
     }
+
+    const double source_sec_f = run_source_only(
+        BulkRepeatSource<gr_complex>::make(x), sizeof(gr_complex), target,
+        buffer_items);
+    const double source_sec_s = run_source_only(
+        BulkRepeatSource<std::complex<int16_t>>::make(sc16),
+        sizeof(std::complex<int16_t>), target, buffer_items);
 
     size_t n_f = 0;
     size_t n_s = 0;
-    auto src_f = gr::blocks::vector_source_c::make(x, true);
+    auto src_f = BulkRepeatSource<gr_complex>::make(x);
     auto det_f = gr::uwb::UwbDetector::make(tmpl);
-    auto src_s = gr::blocks::vector_source_s::make(sc16, true, 2);
+    auto src_s = BulkRepeatSource<std::complex<int16_t>>::make(sc16);
     auto det_s = gr::uwb::UwbDetectorSc16::make(
         tmpl, 2032, 200000, 1e-3f, 100, sc16_coarse_D);
     double sec_f = 0.0;
@@ -116,6 +203,8 @@ int main(int argc, char** argv)
               << " order=" << (sc16_first ? "sc16-first" : "cf32-first")
               << " sc16_coarse_D=" << sc16_coarse_D
               << "\n"
+              << "cf32_source_MSps=" << target / source_sec_f / 1e6
+              << " sc16_source_MSps=" << target / source_sec_s / 1e6 << "\n"
               << "cf32_seconds=" << sec_f << " cf32_MSps=" << rate_f
               << " packets=" << n_f
               << " chunk_min_mean_max=" << det_f->work_min_noutput_items()
