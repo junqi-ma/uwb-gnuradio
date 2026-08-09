@@ -580,8 +580,296 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
 }
 
 // ---------------------------------------------------------------------------
-// Full pipeline (R1+R2 subset): timing + CFO + SFD + CIR/soft chips.  Later
-// stages (NS-SFD/PHR/payload) are R3-R4 and return "not implemented".
+// R3 helpers: BPRF spreading LFSR, CL-3 Viterbi, and SECDED parity.
+// All verified against the MATLAB golden reference (phr_ref2.mat / decode_uwb).
+// ---------------------------------------------------------------------------
+namespace detail {
+
+// IEEE 802.15.4a BPRF data-scrambler spreading (lrwpan.internal.createScrambler):
+// a 15-bit LFSR with s[i] = s[i-14] ^ s[i-15] and initial state 010000100111101.
+// Returns the +/-1 spreading stream over [start_bit, start_bit+nbits).
+// The PHR field uses offset 0; the payload field is offset by the number of
+// PHR active chips (21 symbols x 64 chips/burst = 1344).
+inline void bprf_spreading(std::vector<int8_t>& out, size_t start_bit,
+                           size_t nbits)
+{
+    static const int8_t kInit[15] = { 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1 };
+    std::vector<int8_t> s(start_bit + nbits);
+    for (size_t i = 0; i < 15 && i < s.size(); ++i)
+        s[i] = kInit[i];
+    for (size_t i = 15; i < s.size(); ++i)
+        s[i] = static_cast<int8_t>(s[i - 14] ^ s[i - 15]);
+    out.resize(nbits);
+    for (size_t i = 0; i < nbits; ++i)
+        out[i] = s[start_bit + i] ? int8_t(-1) : int8_t(1); // bit 1 -> -1
+}
+
+// Rate-1/2 constraint-length-3 Viterbi decoder for poly2trellis(3,[2 5])
+// (IEEE 802.15.4a PHR).  Hard decision, 'trunc' mode.  `rx` is the interleaved
+// received code bits (length 2*N); output is the N decoded systematic bits.
+inline void vitdec_cl3(const int8_t* rx, size_t N, std::vector<int8_t>& out)
+{
+    // octal 2 = 010 -> g0 = [0 1 0]; octal 5 = 101 -> g1 = [1 0 1].
+    int o0[4][2], o1[4][2], nxt[4][2];
+    for (int st = 0; st < 4; ++st) {
+        const int s1 = st >> 1, s0 = st & 1;
+        for (int u = 0; u < 2; ++u) {
+            o0[st][u] = s1;
+            o1[st][u] = u ^ s0;
+            nxt[st][u] = (u << 1) | s1;
+        }
+    }
+    const int INF = 1000000;
+    int surf[4] = { 0, INF, INF, INF };
+    std::vector<int8_t> back(N * 4);
+    for (size_t t = 0; t < N; ++t) {
+        int ns[4] = { INF, INF, INF, INF };
+        for (int st = 0; st < 4; ++st) {
+            for (int u = 0; u < 2; ++u) {
+                const int d = (rx[2 * t] ^ o0[st][u]) + (rx[2 * t + 1] ^ o1[st][u]);
+                const int m = surf[st] + d;
+                const int nst = nxt[st][u];
+                if (m < ns[nst]) {
+                    ns[nst] = m;
+                    back[t * 4 + nst] = static_cast<int8_t>((u << 2) | st);
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i)
+            surf[i] = ns[i];
+    }
+    int best = 0;
+    for (int i = 1; i < 4; ++i)
+        if (surf[i] < surf[best])
+            best = i;
+    out.resize(N);
+    int cur = best;
+    for (size_t t = N; t-- > 0;) {
+        const int v = back[t * 4 + cur];
+        out[t] = static_cast<int8_t>(v >> 2);
+        cur = v & 3;
+    }
+}
+
+// SECDED encode: 13 systematic bits -> 19-bit codeword (13 data + 6 parity).
+// Parity matrix rows from lrwpan.internal.hrpSECDED (verified against golden).
+inline void hrp_secded(const std::vector<int8_t>& sys13,
+                       std::vector<int8_t>& phr19)
+{
+    static const uint16_t kParity[6] = {
+        0b1110110100111, // p1
+        0b0000000000011, // p2
+        0b0000111111100, // p3
+        0b0111000111100, // p4
+        0b1011011001101, // p5
+        0b1101101010110, // p6
+    };
+    phr19.resize(19);
+    for (int i = 0; i < 13; ++i)
+        phr19[i] = sys13[i];
+    for (int r = 0; r < 6; ++r) {
+        int p = 0;
+        for (int i = 0; i < 13; ++i)
+            if (kParity[r] & (1u << (12 - i)))
+                p ^= sys13[i];
+        phr19[13 + r] = static_cast<int8_t>(p);
+    }
+}
+
+} // namespace detail
+
+// ---------------------------------------------------------------------------
+// Stage 5 — NS-SFD location in the soft-chip stream (R3).
+// Matches MATLAB locateNsSfd: spread = kron(sfd_sequence, spread_code), search
+// a +/-8-chip window around expected = preamble_repetitions*chips_per_symbol
+// for the best normalized correlation.  Golden: start_chip=32512,
+// end_chip=36575, polarity=1, correlation=1.0 (chip coordinates, 0-based).
+// ---------------------------------------------------------------------------
+inline bool stage_ns_sfd(const std::vector<float>& soft_chips,
+                         const Qm35825Profile& profile,
+                         const std::vector<int8_t>& sfd_sequence,
+                         size_t chips_per_symbol,
+                         NsSfdResult& out,
+                         DemodScratch& scratch)
+{
+    out = NsSfdResult{};
+    if (soft_chips.empty() || sfd_sequence.empty() || chips_per_symbol == 0)
+        return false;
+
+    // spread = kron(sfd_sequence, spread_code); both real ternary -> real.
+    const int8_t* pc = GetPreambleCode(profile.code_index);
+    const std::vector<int8_t> spread_code = BuildSampledCode(pc, kQm35CodeLength);
+    const size_t sfd_len = sfd_sequence.size() * spread_code.size();
+    scratch.work.assign(sfd_len, std::complex<float>(0.0f, 0.0f));
+    for (size_t i = 0; i < sfd_sequence.size(); ++i)
+        for (size_t j = 0; j < spread_code.size(); ++j)
+            scratch.work[i * spread_code.size() + j] = std::complex<float>(
+                static_cast<float>(sfd_sequence[i] * spread_code[j]), 0.0f);
+    float spread_norm = 0.0f;
+    for (size_t i = 0; i < sfd_len; ++i)
+        spread_norm += std::norm(scratch.work[i]);
+    spread_norm = std::sqrt(spread_norm);
+
+    const int64_t expected =
+        static_cast<int64_t>(profile.preamble_repetitions) *
+        static_cast<int64_t>(chips_per_symbol);
+    const int64_t half = 8;
+    const int64_t lo = std::max<int64_t>(0, expected - half);
+    const int64_t hi = std::min<int64_t>(
+        static_cast<int64_t>(soft_chips.size()) - static_cast<int64_t>(sfd_len),
+        expected + half);
+    if (hi < lo)
+        return false;
+
+    float best = -1.0f;
+    int64_t best_k = lo;
+    int pol = 1;
+    for (int64_t k = lo; k <= hi; ++k) {
+        float seg_norm = 0.0f, corr = 0.0f;
+        for (size_t i = 0; i < sfd_len; ++i) {
+            const float v = soft_chips[static_cast<size_t>(k + (int64_t)i)];
+            seg_norm += v * v;
+            corr += scratch.work[i].real() * v;
+        }
+        seg_norm = std::sqrt(seg_norm);
+        const float m = std::abs(corr) / (spread_norm * seg_norm + 1e-12f);
+        if (m > best) {
+            best = m;
+            best_k = k;
+            pol = (corr >= 0.0f) ? 1 : -1;
+        }
+    }
+    if (best < profile.sfd_detection_threshold)
+        return false;
+
+    out.ok = true;
+    out.sfd_start_chip = best_k;
+    out.sfd_end_chip = best_k + static_cast<int64_t>(sfd_len) - 1;
+    out.polarity = pol;
+    out.metric = best;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Stage 6 — BPRF PHR demod + convolutional decode + SECDED (R3).
+// Matches helperUWBBPRFDemod + helperUWBConvDec + helperUWBPHRDecode:
+//   * 21 BPM-BPSK symbols (0.85 Mbps PHR: 64 chips/burst, 512 chips/symbol),
+//     de-spread with the scrambler LFSR (offset 0).
+//   * rate-1/2 CL-3 Viterbi (trunc), keep the 19 PHR bits.
+//   * SECDED single-bit correction / double-bit detection -> PSDU length.
+// Golden: coded/decoded PHR match MATLAB, psdu_length=127, secded_pass=1.
+// ---------------------------------------------------------------------------
+inline bool stage_phr(const std::vector<float>& soft_chips,
+                      const Qm35825Profile& profile,
+                      const NsSfdResult& ns_sfd,
+                      size_t chips_per_symbol,
+                      PhrResult& out,
+                      DemodScratch& scratch)
+{
+    out = PhrResult{};
+    if (soft_chips.empty() || !ns_sfd.ok || ns_sfd.sfd_end_chip < 0)
+        return false;
+    const size_t cpb = 64, cps = 512, nsym = 21;
+    const int64_t phr_start = ns_sfd.sfd_end_chip + 1;
+    if (phr_start < 0 ||
+        static_cast<size_t>(phr_start + static_cast<int64_t>(cps * nsym)) >
+            soft_chips.size())
+        return false;
+    const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
+
+    std::vector<int8_t> spread;
+    detail::bprf_spreading(spread, 0, cpb * nsym);
+
+    std::vector<int8_t> g0(nsym), g1(nsym);
+    for (size_t s = 0; s < nsym; ++s) {
+        const size_t base = static_cast<size_t>(phr_start) + s * cps;
+        const int8_t* spreading = &spread[s * cpb];
+        float b0 = -1e30f, b1 = -1e30f, m0 = 0.0f, m1 = 0.0f;
+        for (size_t hop = 0; hop < 2; ++hop) {
+            const size_t f0 = hop * cpb;
+            float metric0 = 0.0f, metric1 = 0.0f;
+            for (size_t c = 0; c < cpb; ++c) {
+                metric0 +=
+                    pol * soft_chips[base + f0 + c] * static_cast<float>(spreading[c]);
+                metric1 += pol * soft_chips[base + cps / 2 + f0 + c] *
+                           static_cast<float>(spreading[c]);
+            }
+            if (std::abs(metric0) > b0) {
+                b0 = std::abs(metric0);
+                m0 = metric0;
+            }
+            if (std::abs(metric1) > b1) {
+                b1 = std::abs(metric1);
+                m1 = metric1;
+            }
+        }
+        float best;
+        if (b0 >= b1) {
+            g0[s] = 0;
+            best = m0;
+        } else {
+            g0[s] = 1;
+            best = m1;
+        }
+        g1[s] = (best < 0.0f) ? 1 : 0;
+    }
+
+    std::vector<int8_t> rx(2 * nsym);
+    for (size_t s = 0; s < nsym; ++s) {
+        rx[2 * s] = g0[s];
+        rx[2 * s + 1] = g1[s];
+    }
+    std::vector<int8_t> decoded;
+    detail::vitdec_cl3(rx.data(), nsym, decoded);
+    if (decoded.size() < 19)
+        return false;
+
+    std::vector<int8_t> sys13(decoded.begin(), decoded.begin() + 13);
+    std::vector<int8_t> recv_par(decoded.begin() + 13, decoded.begin() + 19);
+    std::vector<int8_t> phr19;
+    detail::hrp_secded(sys13, phr19);
+    int8_t synd[6];
+    for (int i = 0; i < 6; ++i)
+        synd[i] = static_cast<int8_t>(recv_par[i] ^ phr19[13 + i]);
+
+    bool secded_pass = true;
+    int idx = 0;
+    for (int i = 1; i < 6; ++i)
+        idx |= (synd[i] << (i - 1));
+    if (idx > 0) {
+        static const int kAddresses[13] = { 3, 5, 6, 7, 9, 10, 11,
+                                            12, 13, 14, 15, 17, 18 };
+        for (int j = 0; j < 13; ++j) {
+            if (kAddresses[j] == idx) {
+                phr19[j] ^= 1;
+                out.secded_corrected = true;
+                break;
+            }
+        }
+        if (!synd[0])
+            secded_pass = false; // DED: second error cannot be corrected
+    }
+    out.secded_uncorrectable = !secded_pass;
+
+    // MATLAB bit2int default is MSB-first (bit2int(x,n)); phr(1:2) -> data
+    // rate, phr(3:9) -> PSDU length.
+    const int dr = (phr19[0] << 1) | phr19[1];
+    static const float kDataRates[4] = { 0.11f, 0.85f, 6.81f, 27.24f };
+    out.data_rate_mbps = kDataRates[dr & 3];
+    uint32_t psdu = 0;
+    for (int i = 0; i < 7; ++i)
+        psdu |= (static_cast<uint32_t>(phr19[2 + i]) << (6 - i)); // MSB-first
+    out.psdu_length = psdu;
+    out.phr_bits.reserve(19);
+    for (int i = 0; i < 19; ++i)
+        out.phr_bits.push_back(static_cast<uint8_t>(phr19[i]));
+    out.ok = true;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Full pipeline (R1+R2+R3 subset): timing + CFO + SFD + CIR/soft chips +
+// NS-SFD + PHR.  Payload/FCS is R4 and returns "not implemented".
 // ---------------------------------------------------------------------------
 inline DemodResult demodulate_one(const std::complex<float>* rx,
                                   size_t n,
@@ -622,6 +910,19 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     if (!stage_cir_softchips(scratch.derotated.data(), n, profile, res.timing,
                              pcode, res.cir, scratch)) {
         res.status = DemodStatus::CirFailed;
+        return res;
+    }
+    // Stage 5: NS-SFD location in the soft-chip stream.
+    const auto nsfd_seq = gr::uwb::demod::GetSfdSequence(profile.sfd_mode);
+    if (!stage_ns_sfd(scratch.soft_chips, profile, nsfd_seq, kQm35ChipsPerSymbol,
+                      res.ns_sfd, scratch)) {
+        res.status = DemodStatus::SfdFailed;
+        return res;
+    }
+    // Stage 6: BPRF PHR demod + conv decode + SECDED.
+    if (!stage_phr(scratch.soft_chips, profile, res.ns_sfd, kQm35ChipsPerSymbol,
+                   res.phr, scratch)) {
+        res.status = DemodStatus::PhrFailed;
         return res;
     }
     res.status = DemodStatus::Success;

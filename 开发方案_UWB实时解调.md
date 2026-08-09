@@ -473,6 +473,18 @@ MATLAB Coder/MEX可用于验证数值kernel和估算上限，但生产C++不能�
 
 完成标准：PHR bits和MATLAB逐bit一致。
 
+> **✅ R3 完成（2026-08-09）**
+> - **stage_ns_sfd**（`uwb_demod_core.h`）移植 `locateNsSfd`：`spread = kron(sfd序列, spread_code)`，在 `64×508` 附近 ±8 chip 窗内归一化相关。对照 golden：start_chip=**32512**、end_chip=**36575**、polarity=1、corr≈1.0。
+> - **stage_phr** 移植 `helperUWBBPRFDemod` + `helperUWBConvDec` + `helperUWBPHRDecode`：
+>   - **PHR 是 0.85 Mbps**（非 6.81！）→ chipsPerBurst=64、chipsPerSymbol=512、21 symbols。
+>   - **BPRF demod**：BPM 位置（g0）+ BPSK 极性（g1），用 **15-bit LFSR scrambler**（`s[i]=s[i-14]^s[i-15]`，初态 010000100111101，Berlekamp-Massey 反推自 MATLAB createScrambler）生成扩频序列。对照 golden：cw 逐位一致。
+>   - **Viterbi**：rate-1/2 K=3（poly2trellis(3,[2 5])，octal 2=010→g0、5=101→g1），4 态 trunc。解码 19 位 PHR 与 golden 逐位一致。
+>   - **SECDED**：`hrpSECDED` 校验矩阵从 MATLAB 单位向量导出（6×13），syndrome 纠错/检双错。psdu=**127**、secded_pass=1、data_rate=6.81。
+> - **关键排坑**：① PHR 起点 = `sfd.end_chip + 1`（1-based）→ 0-based **36576**（差 1 chip 会错）；② `bit2int` 默认 **MSB-first**（dataRate/psdu），只有 preamble 字段显式 LSB；③ payload scrambler offset = 21×64 = **1344**（R4 用）。
+> - **golden 导出**：`stage_phr_coded.bin`（42）+ `stage_phr_decoded.bin`（19）。
+> - **QA**：`qa_uwb_demod_core.cc` 新增 4 用例（NS-SFD 对照 / PHR 对照 / **full demodulate_one 链** / bad-input），共 12 用例。**CTest 6/6**。
+> - **stage profile**：ns_sfd **54µs**、phr **7.5µs**（快），6/7 阶段实现。
+
 ### R4：Payload + FCS
 
 - payload BPM-BPSK；
