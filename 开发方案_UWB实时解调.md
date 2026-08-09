@@ -438,6 +438,13 @@ MATLAB Coder/MEX可用于验证数值kernel和估算上限，但生产C++不能�
 - CFO补偿；
 - 4z2 SFD；
 
+> **✅ R1 完成（2026-08-09）**
+> - **stage_timing**（`uwb_demod_core.h`）：seeded 全速模板相关定位首 SYNC，逐符号局部相关追踪 64 个峰，线性拟合 period。对照 golden：start=9984、period=1016.000、metric=1.0、64 峰（首峰 10999，符号结束约定）全对齐。
+> - **stage_cfo**：用稳定峰（跳过前 10 个 repetition）线性拟合相位-时间，斜率/2π = CFO；输出 derotated 副本。对照 golden：CFO=0 Hz。
+> - **stage_sfd**：`kron(SFD序列, preamble_waveform)` 构造 SFD 模板（同 MATLAB `refineTimingWithNsSfd`），在 `start + 64×period` 附近全速相关。对照 golden（IEEE legacy）：metric=0.9999、SFD 起点=75008。
+> - **坐标修正**：golden 改为**绝对坐标**（start=9984，原 cropped 3049 弃用）；`uwb_phy_profile.h` 的 `chips_per_symbol=508`、`HRPCodes(9)=127 长`。
+> - **QA**：`qa_uwb_demod_core.cc` 4 用例（timing/CFO/SFD/bad-input）全过；**CTest 6/6**。
+
 - MATLAB逐阶段QA。
 
 完成标准：clean样本全部对齐，失败有明确状态。
