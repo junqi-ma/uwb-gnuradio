@@ -364,20 +364,57 @@ inline bool stage_sfd(const std::complex<float>* rx,
                           expected + (int64_t)sym + (int64_t)sfd_len);
 
     // Full-rate correlation (normalized) over the search window.
+    // The signal is 2x oversampled and the SFD template is kron(sfd, preamble)
+    // (8 symbols), so the correlation peak is broad: a decimated coarse pass
+    // (stride D) localizes the region, then a small full-rate refinement
+    // recovers the exact sample.  Window power is a sliding sum so the inner
+    // loop only accumulates the correlation.  The result (best_j, metric) is
+    // identical to the exhaustive search for a unique peak.
+    constexpr size_t kSfdStride = 8;
+    const size_t j_lo = static_cast<size_t>(search_lo);
+    const size_t j_end = static_cast<size_t>(search_hi) - sfd_len;
     float best = -1.0f;
-    size_t best_j = 0;
-    for (size_t j = static_cast<size_t>(search_lo);
-         j + sfd_len <= static_cast<size_t>(search_hi); ++j) {
-        std::complex<float> acc(0.0f, 0.0f);
+    size_t best_j = j_lo;
+
+    if (j_end >= j_lo) {
         float pwr = 0.0f;
-        for (size_t k = 0; k < sfd_len; ++k) {
-            acc += rx[j + k] * std::conj(scratch.corr[k]);
-            pwr += std::norm(rx[j + k]);
+        for (size_t k = 0; k < sfd_len; ++k)
+            pwr += std::norm(rx[j_lo + k]);
+        // Coarse pass.
+        for (size_t j = j_lo; j <= j_end; j += kSfdStride) {
+            if (j > j_lo) {
+                for (size_t k = 0; k < kSfdStride; ++k)
+                    pwr += std::norm(rx[j + sfd_len - 1 - k]) -
+                           std::norm(rx[j - 1 - k]);
+            }
+            std::complex<float> acc(0.0f, 0.0f);
+            for (size_t k = 0; k < sfd_len; ++k)
+                acc += rx[j + k] * std::conj(scratch.corr[k]);
+            const float m = std::norm(acc) / (pwr + 1e-12f);
+            if (m > best) {
+                best = m;
+                best_j = j;
+            }
         }
-        const float m = std::norm(acc) / (pwr + 1e-12f);
-        if (m > best) {
-            best = m;
-            best_j = j;
+        // Full-rate refinement around the coarse peak.
+        const size_t r_lo = (best_j > kSfdStride) ? best_j - kSfdStride + 1
+                                                  : j_lo;
+        const size_t r_hi = std::min(j_end, best_j + kSfdStride - 1);
+        pwr = 0.0f;
+        for (size_t k = 0; k < sfd_len; ++k)
+            pwr += std::norm(rx[r_lo + k]);
+        for (size_t j = r_lo; j <= r_hi; ++j) {
+            if (j > r_lo)
+                pwr += std::norm(rx[j + sfd_len - 1]) -
+                       std::norm(rx[j - 1]);
+            std::complex<float> acc(0.0f, 0.0f);
+            for (size_t k = 0; k < sfd_len; ++k)
+                acc += rx[j + k] * std::conj(scratch.corr[k]);
+            const float m = std::norm(acc) / (pwr + 1e-12f);
+            if (m > best) {
+                best = m;
+                best_j = j;
+            }
         }
     }
     if (best < profile.sfd_detection_threshold)
@@ -535,8 +572,18 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         static_cast<size_t>((last_pos - chip_start) / spc_i) + 1;
 
     // Causal FIR: chip[p] = sum_k conj(values[tap-1-k]) * rx[p-k].
+    // Chips whose FIR window reaches below sample 0 keep a bounds check;
+    // the (usually dominant) rest run an identical branch-free loop so the
+    // compiler can pipeline the accumulation.
     scratch.corr.resize(num_chips);
-    for (size_t i = 0; i < num_chips; ++i) {
+    const int64_t fwd = static_cast<int64_t>(tap_count) - 1;
+    size_t checked = 0;
+    if (chip_start < fwd) {
+        const int64_t gap = fwd - chip_start;
+        checked = std::min(num_chips,
+                           static_cast<size_t>((gap + spc_i - 1) / spc_i));
+    }
+    for (size_t i = 0; i < checked; ++i) {
         const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
         std::complex<float> acc(0.0f, 0.0f);
         for (size_t k = 0; k < tap_count; ++k) {
@@ -544,6 +591,15 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
             if (idx < 0)
                 break;
             acc += std::conj(values[tap_count - 1 - k]) * rx[static_cast<size_t>(idx)];
+        }
+        scratch.corr[i] = acc;
+    }
+    for (size_t i = checked; i < num_chips; ++i) {
+        const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
+        const size_t base = static_cast<size_t>(p);
+        std::complex<float> acc(0.0f, 0.0f);
+        for (size_t k = 0; k < tap_count; ++k) {
+            acc += std::conj(values[tap_count - 1 - k]) * rx[base - k];
         }
         scratch.corr[i] = acc;
     }
