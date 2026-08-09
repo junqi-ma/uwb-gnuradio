@@ -34,11 +34,10 @@ UwbDetector::UwbDetector(
     : gr::sync_block("uwb_detector",
                      gr::io_signature::make(1, 1, sizeof(gr_complex)),
                      gr::io_signature::make(0, 0, 0)),
-      // The region pre-buffer must span the gate-response delay (gate_window ×
-      // gate_decimation samples) plus one SYNC symbol, so the first symbol is
-      // always inside the buffered region even though the gate crosses ~3.2k
-      // samples into the packet.  The user-facing PDU pre-trigger is smaller.
-      sm_(std::max(pre_trigger, 32 * energy_gate_decimation + known_preamble.size()),
+      // Region history must contain both the requested samples before packet
+      // start and the delayed gate response; max() silently truncates long
+      // user pre-triggers by the response delay.
+      sm_(pre_trigger + 32 * energy_gate_decimation + known_preamble.size(),
           energy_threshold,
           energy_gate_decimation,
           /*gate_window=*/32,
@@ -441,6 +440,10 @@ void UwbDetector::publish_packet(const UwbDetectorStateMachine::Region& region)
                          pmt::from_long(static_cast<long>(d_packet_id_++)));
     meta = pmt::dict_add(meta, pmt::mp("start_sample"),
                          pmt::from_uint64(packet_start));
+    meta = pmt::dict_add(meta, pmt::mp("predicted_start_sample"),
+                         pmt::from_uint64(packet_start));
+    meta = pmt::dict_add(meta, pmt::mp("window_start_sample"),
+                         pmt::from_uint64(lo));
     meta = pmt::dict_add(meta, pmt::mp("trigger_sample"),
                          pmt::from_uint64(trigger));
     meta = pmt::dict_add(meta, pmt::mp("sample_rate"),

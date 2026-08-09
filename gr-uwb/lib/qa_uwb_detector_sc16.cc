@@ -160,9 +160,11 @@ BOOST_AUTO_TEST_CASE(test_sc16_q15_coarse_peaks_match_fc32)
 BOOST_AUTO_TEST_CASE(test_sc16_fixed_capture_and_bit_exact_pdu)
 {
     constexpr size_t L = 128;
-    constexpr size_t pre = 64;
+    // pre exceeds the gate-response history so QA catches max(pre, delay)
+    // truncation; the Region ring must retain pre + delay.
+    constexpr size_t pre = 5000;
     constexpr size_t capture = 5000;
-    constexpr size_t packet_start = 2048;
+    constexpr size_t packet_start = 7000;
     std::vector<gr_complex> tmpl(L);
     for (size_t k = 0; k < L; ++k)
         tmpl[k] = gr_complex(std::cos(0.21f * k), 0.4f * std::sin(0.13f * k));
@@ -196,6 +198,14 @@ BOOST_AUTO_TEST_CASE(test_sc16_fixed_capture_and_bit_exact_pdu)
     const uint64_t start = pmt::to_uint64(
         pmt::dict_ref(meta, pmt::mp("start_sample"), pmt::PMT_NIL));
     BOOST_CHECK_EQUAL(start, packet_start);
+    BOOST_CHECK_EQUAL(
+        pmt::to_uint64(pmt::dict_ref(meta, pmt::mp("predicted_start_sample"),
+                                    pmt::PMT_NIL)),
+        packet_start);
+    BOOST_CHECK_EQUAL(
+        pmt::to_uint64(pmt::dict_ref(meta, pmt::mp("window_start_sample"),
+                                    pmt::PMT_NIL)),
+        packet_start - pre);
     const auto iq = pmt::s16vector_elements(data);
     BOOST_REQUIRE_EQUAL(iq.size(), (pre + capture) * 2);
     const size_t begin = static_cast<size_t>(start - pre) * 2;

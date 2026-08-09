@@ -90,6 +90,14 @@ BOOST_AUTO_TEST_CASE(test_detector_preamble_pdu)
 
     const uint64_t start = pmt::to_uint64(
         pmt::dict_ref(meta, pmt::mp("start_sample"), pmt::PMT_NIL));
+    BOOST_CHECK_EQUAL(
+        pmt::to_uint64(pmt::dict_ref(meta, pmt::mp("predicted_start_sample"),
+                                    pmt::PMT_NIL)),
+        start);
+    BOOST_CHECK_EQUAL(
+        pmt::to_uint64(pmt::dict_ref(meta, pmt::mp("window_start_sample"),
+                                    pmt::PMT_NIL)),
+        start - 64);
     const long n = pmt::to_long(
         pmt::dict_ref(meta, pmt::mp("sample_count"), pmt::PMT_NIL));
     const double metric = pmt::to_double(
