@@ -53,6 +53,18 @@ def async_once(binary, rake_k, jobs, workers, queue):
     return number(output, r"throughput\s*:\s*([0-9.]+) jobs/s", "throughput")
 
 
+def robust_top4(binary, repetitions):
+    output = run([binary, "unused", "demod-robust", "--rake-top-k", "4",
+                  "--robust-reps", str(repetitions)])
+    all_pass_rows = output.count("100.0%")
+    collisions = len(re.findall(
+        r"^\s+[0-9.]+\s+\d+\s+PASS\s+", output, re.MULTILINE))
+    if all_pass_rows < 17 or "20/20 pass" not in output or collisions != 3:
+        raise RuntimeError(
+            "Top-4 robustness failed: expected all AWGN/CFO/multipath/"
+            "collision cases to pass")
+
+
 def med(values):
     return statistics.median(values)
 
@@ -70,6 +82,8 @@ def main():
     parser.add_argument("--jobs", type=int, default=3000)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--queue", type=int, default=4096)
+    parser.add_argument("--robust-reps", type=int, default=5,
+                        help="AWGN/CFO repetitions for Top-4; 0 skips")
     args = parser.parse_args()
 
     binary = str(Path(args.binary))
@@ -90,6 +104,8 @@ def main():
         for k in order:
             peak[k].append(async_once(
                 binary, k, args.jobs, args.workers, args.queue))
+    if args.robust_reps > 0:
+        robust_top4(binary, args.robust_reps)
 
     full_total = med([x["total"] for x in stage[0]])
     full_fir = med([x["fir"] for x in stage[0]])
@@ -113,7 +129,9 @@ def main():
     if min(med(peak[k]) for k in MODES) < 300.0:
         print("FAIL: at least one mode is below 300 pkt/s", file=sys.stderr)
         return 4
-    print("PASS: golden FCS, Top-4 FIR speedup, and 300 pkt/s peak capacity")
+    robust_text = "robustness" if args.robust_reps > 0 else "robustness skipped"
+    print("PASS: golden FCS, Top-4 FIR speedup, 300 pkt/s peak capacity, "
+          f"and {robust_text}")
     return 0
 
 
