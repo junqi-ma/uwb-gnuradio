@@ -553,6 +553,10 @@ X410/ScheduledExtractor
 - 必要时评估GPU/FPGA；
 - 在线SIC单独立项。
 
+> **⏳ R7 状态（2026-08-09）**：**指定由 Grok Build 代做**（grok-build:delegate），Claude 负责集成、golden 对照与验收。尚未开始。
+>
+> **前置完成（P0-P3 性能优化）**：单 job 串行耗时 **17.2 → 3.9 ms（4.4×）**，200 pkt/s + 2 workers 零丢包。详见 [`性能分析_解调分阶段耗时报告.md`](性能分析_解调分阶段耗时报告.md)。
+
 ---
 
 ## 12. 协作方式
