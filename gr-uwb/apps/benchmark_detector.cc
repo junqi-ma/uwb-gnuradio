@@ -46,6 +46,7 @@
 #include <gnuradio/uwb/uwb_preamble_detector.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor_core.h>
+#include <gnuradio/uwb/uwb_phy_profile.h>
 #include <pmt/pmt.h>
 
 #include <algorithm>
@@ -1893,6 +1894,27 @@ int main(int argc, char** argv)
         return run_scheduled_bench(target, radar_rate, comm_rate, buffer_items,
                                    max_noutput_items, repeat > 0 ? repeat : 1,
                                    cfile, comm_cfile, comm_amp);
+    }
+
+    if (mode == "demod-core" || mode == "demod-stage-profile" ||
+        mode == "demod-pdu" || mode == "scheduled-demod-e2e") {
+        // UWB realtime-demodulator benchmark (开发方案_UWB实时解调.md §9).
+        // R0 skeleton: stages are not implemented yet — report the frozen
+        // PHY profile and expected input so the framework is in place.
+        std::printf("=== UWB realtime demod bench (R0 skeleton) ===\n");
+        auto prof = gr::uwb::demod::Qm35825Profile::Default();
+        std::printf("mode                  : %s\n", mode.c_str());
+        std::printf("profile               : fs=%.0f code=%zu preamble=%zu "
+                    "sfd=%s data_rate=%.2f\n",
+                    prof.sample_rate, prof.code_index, prof.preamble_repetitions,
+                    prof.sfd_mode, prof.data_rate_mbps);
+        std::printf("chips_per_symbol      : %zu\n",
+                    gr::uwb::demod::kQm35ChipsPerSymbol);
+        std::printf("golden vectors        : testdata/realtime_demod_golden/\n");
+        std::printf("implemented stages    : 0/7 (timing/cfo/sfd/cir/ns_sfd/phr/"
+                    "payload)\n");
+        std::printf("NOTE: R1 stage implementations land here; skeleton only.\n");
+        return 0;
     }
 
     std::ifstream f(cfile, std::ios::binary);

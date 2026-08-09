@@ -1,0 +1,158 @@
+/* -*- c++ -*- */
+/*
+ * Copyright 2026
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * Fixed QM35825 PHY profile for the first-stage realtime demodulator.
+ * Phase-1 supports ONLY this profile: fs 998.4 MHz, Mean PRF 62.4 MHz BPRF,
+ * code index 9, 64 SYNC repetitions, SFD mode 4z2, 6.81 Mb/s.
+ *
+ * Matches UWB_demodulation/run_decode_uwb_radar.m + defaultOptions + the
+ * verified golden reference (testdata/realtime_demod_golden/manifest.csv):
+ *   preamble_repetitions = 64, cir_skip_initial_repetitions = 10
+ *   cir_repetitions = preamble - skip = 54
+ *   samples_per_symbol = 1016, samples_per_chip = 2
+ *   chips_per_symbol = 508   (= 127-chip Ipatov code x 4 spreading)
+ *   HRPCodes(9) is the 127-long ternary IEEE 802.15.4a code-9 sequence.
+ */
+
+#pragma once
+
+#include <array>
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace gr {
+namespace uwb {
+namespace demod {
+
+// ---------------------------------------------------------------------------
+// IEEE 802.15.4a/z HRP constants (QM35825 radar, BPRF 62.4 MHz)
+// ---------------------------------------------------------------------------
+inline constexpr double kQm35SampleRate = 998400000.0;
+inline constexpr double kQm35MeanPrfMHz = 62.4;
+inline constexpr size_t kQm35SamplesPerSymbol = 1016;
+inline constexpr size_t kQm35SamplesPerChip = 2;   // SamplesPerPulse = 2
+inline constexpr size_t kQm35ChipsPerSymbol = 508; // 1016 / 2
+inline constexpr size_t kQm35SpreadingFactor = 4;  // PreambleSpreadingFactor
+inline constexpr size_t kQm35CodeLength = 127;     // HRP code-9 Ipatov length
+
+// ---------------------------------------------------------------------------
+// Fixed QM35825 radar profile (Phase-1 only).
+// ---------------------------------------------------------------------------
+struct Qm35825Profile {
+    double sample_rate = kQm35SampleRate;
+    double mean_prf_mhz = kQm35MeanPrfMHz;
+    size_t code_index = 9;
+    size_t preamble_repetitions = 64;
+    const char* sfd_mode = "4z2";
+    double data_rate_mbps = 6.81;
+    size_t max_psdu_bytes = 127;
+
+    // CIR estimation window (from defaultOptions)
+    size_t cir_pre_samples = 8;
+    size_t cir_post_samples = 30;
+    size_t cir_skip_initial_repetitions = 10; // skip the first N SYNC for CFO/CIR
+    size_t cir_repetitions = 54;              // preamble - skip
+
+    // timing validation
+    double period_tolerance_pct = 2.0; // SYNC period deviation tolerance
+    size_t min_valid_peaks = 8;        // min SYNC peaks to accept timing
+
+    // SFD search window (half-width in chips around expected start)
+    size_t sfd_search_half_width = 8;
+
+    // soft-chip / CIR threshold
+    float cir_detection_threshold = 0.3f;
+    float sfd_detection_threshold = 0.3f;
+    float radar_verification_threshold = 0.3f;
+
+    // timing
+    size_t timing_search_margin = 9984; // ~10 us @ 998.4e6
+    size_t post_guard_samples = 4096;
+
+    static Qm35825Profile Default() { return Qm35825Profile{}; }
+};
+
+// ---------------------------------------------------------------------------
+// SFD sequences (from +uwbdecoder/defaultOptions.m). Each is a ternary vector
+// in {-1, 0, +1}. Phase-1 uses kSfd4z2; the others are kept for completeness.
+// ---------------------------------------------------------------------------
+inline const std::array<int8_t, 8> kSfdDecawave = { -1, -1, -1, -1, 1, -1, 0, 0 };
+inline const std::array<int8_t, 8> kSfdIeee = { 0, 1, 0, -1, 1, 0, 0, -1 };
+inline const std::array<int8_t, 4> kSfd4z1 = { -1, -1, 1, -1 };
+inline const std::array<int8_t, 8> kSfd4z2 = { -1, -1, -1, 1, -1, -1, 1, -1 };
+inline const std::array<int8_t, 16> kSfd4z3 = { -1, -1, -1, -1, -1, 1, 1, -1,
+                                                -1, 1, -1, 1, -1, -1, 1, -1 };
+inline const std::array<int8_t, 32> kSfd4z4 = { -1, -1, -1, -1, -1, -1, -1, 1,
+                                                -1, -1, 1, -1, -1, 1, -1, 1,
+                                                -1, 1, -1, -1, -1, 1, 1, -1,
+                                                -1, -1, 1, -1, 1, 1, -1, -1 };
+
+inline std::vector<int8_t> GetSfdSequence(const char* sfd_mode)
+{
+    if (!sfd_mode)
+        return {};
+    if (std::string(sfd_mode) == "decawave")
+        return { kSfdDecawave.begin(), kSfdDecawave.end() };
+    if (std::string(sfd_mode) == "ieee")
+        return { kSfdIeee.begin(), kSfdIeee.end() };
+    if (std::string(sfd_mode) == "4z1")
+        return { kSfd4z1.begin(), kSfd4z1.end() };
+    if (std::string(sfd_mode) == "4z2")
+        return { kSfd4z2.begin(), kSfd4z2.end() };
+    if (std::string(sfd_mode) == "4z3")
+        return { kSfd4z3.begin(), kSfd4z3.end() };
+    if (std::string(sfd_mode) == "4z4")
+        return { kSfd4z4.begin(), kSfd4z4.end() };
+    return {};
+}
+
+// ---------------------------------------------------------------------------
+// IEEE 802.15.4a HRP code-9 spreading sequence (Ipatov 127, from MATLAB
+// lrwpan.internal.HRPCodes(9)).  Ternary {-1,0,+1}.  The de-spread chip
+// stream is built by spreading this code by kQm35SpreadingFactor=4 then
+// kQm35SamplesPerChip=2, giving kQm35ChipsPerSymbol=508 sampled chips and
+// kQm35SamplesPerSymbol=1016 waveform samples.
+// ---------------------------------------------------------------------------
+inline constexpr std::array<int8_t, kQm35CodeLength> kPreambleCode9 = { {
+    1, 0, 0, 1, 0, 0, 0, -1, 0, -1, -1, 0, 0, -1, -1, 1, 0, 1, 0, 1, 0, 0,
+    -1, 1, -1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, -1, 0, 0, 0, 1, 0, 0, -1, 0,
+    0, -1, -1, 0, -1, 1, 0, 1, 0, -1, -1, 0, -1, 1, 1, 1, 0, 1, 1, 0, 0, 0,
+    1, -1, 0, 1, 0, 0, -1, 0, 1, 1, -1, 0, 1, 1, 1, 0, 0, -1, 1, 0, 0, 1,
+    0, 1, 0, -1, 0, 1, 1, -1, 1, -1, -1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+    0, 0, -1, 1, 0, 0, 0, 0, -1, 0, -1, 0, 0, 0, -1, -1, 1
+} };
+
+// Other code indices (DW1000 etc.) are out of Phase-1 scope.
+inline const int8_t* GetPreambleCode(size_t code_index)
+{
+    return (code_index == 9) ? kPreambleCode9.data() : kPreambleCode9.data();
+}
+
+// ---------------------------------------------------------------------------
+// Build the sampled chip stream for a preamble code: spread by
+// kQm35SpreadingFactor, then upsample by kQm35SamplesPerChip.  Returns
+// kQm35ChipsPerSymbol (508) entries, matching MATLAB buildUwbReference's
+// `sampled_code`.  Used by CIR estimation / de-spreading.
+// ---------------------------------------------------------------------------
+inline std::vector<int8_t> BuildSampledCode(const int8_t* code, size_t code_len)
+{
+    std::vector<int8_t> sampled(kQm35ChipsPerSymbol, 0);
+    // spread code: non-zero every kQm35SpreadingFactor-th chip
+    // sampled: place each spread chip at kQm35SamplesPerChip grid
+    for (size_t c = 0; c < code_len; ++c) {
+        const size_t spread_pos = c * kQm35SpreadingFactor; // 0..507
+        if (spread_pos < kQm35ChipsPerSymbol)
+            sampled[spread_pos] = code[c];
+    }
+    return sampled;
+}
+
+} // namespace demod
+} // namespace uwb
+} // namespace gr
