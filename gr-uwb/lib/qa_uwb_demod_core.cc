@@ -727,3 +727,238 @@ BOOST_AUTO_TEST_CASE(test_demod_core_p3_sfd_multipath)
     BOOST_CHECK_CLOSE(static_cast<double>(sr.sfd_start_sample), 75008.0, 2.0);
     BOOST_CHECK_GE(sr.metric, 0.5f);
 }
+
+// ---------------------------------------------------------------------------
+// P2: CIR soft-chip FIR SIMD — kernel consistency vs multi-acc reference,
+// golden soft-chip / CIR tolerances, and a small microbench of the three
+// candidates (a=MultiAcc8, b=VOLK, c=AVX2 fixed-38).
+// ---------------------------------------------------------------------------
+
+#include <gnuradio/uwb/uwb_cir_fir_simd.h>
+#include <chrono>
+#include <iostream>
+
+namespace {
+
+// Serial scalar reference: sum_q conj(values[q]) * rx[win+q]  (forward form).
+std::complex<float> cir_fir_serial_ref(const std::complex<float>* rx_win,
+                                       const std::complex<float>* values,
+                                       size_t tap_count)
+{
+    std::complex<float> acc(0.0f, 0.0f);
+    for (size_t q = 0; q < tap_count; ++q)
+        acc += std::conj(values[q]) * rx_win[q];
+    return acc;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(test_demod_core_p2_cir_fir_kernels_agree)
+{
+    // Synthetic random taps + window: all three kernels must match the serial
+    // forward-form reference within a tight abs tolerance (FP reassociation).
+    constexpr size_t T = 38;
+    std::mt19937 rng(0xC1F12u);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    std::vector<std::complex<float>> values(T), rx(T + 8);
+    for (size_t i = 0; i < T; ++i)
+        values[i] = { dist(rng), dist(rng) };
+    for (size_t i = 0; i < rx.size(); ++i)
+        rx[i] = { dist(rng), dist(rng) };
+
+    alignas(32) std::complex<float> h_conj[64];
+    alignas(32) std::complex<float> values_nat[64];
+    for (size_t q = 0; q < T; ++q) {
+        values_nat[q] = values[q];
+        h_conj[q] = std::conj(values[q]);
+    }
+
+    // Probe several base offsets so unaligned AVX loads are exercised.
+    for (size_t off = 0; off < 4; ++off) {
+        const std::complex<float>* win = rx.data() + off;
+        const auto ref = cir_fir_serial_ref(win, values.data(), T);
+
+        const auto a = cir_fir::dot_multi_acc8(win, h_conj, T);
+        const auto b = cir_fir::dot_volk(win, values_nat, T);
+        const auto c = cir_fir::dot_avx2_fixed38(win, h_conj, T);
+
+        auto check_close = [&](std::complex<float> x, const char* name) {
+            const float d = std::abs(x - ref);
+            BOOST_CHECK_MESSAGE(d < 1e-4f,
+                                name << " vs serial ref abs-diff=" << d
+                                     << " off=" << off);
+        };
+        check_close(a, "MultiAcc8");
+        check_close(b, "VOLK");
+        check_close(c, "Avx2Fixed38");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_p2_cir_softchips_still_golden)
+{
+    // Full CIR stage must keep the existing golden tolerances after the FIR
+    // rewrite (L2 CIR < 0.01, soft max-diff < 1e-3, first_path / peak / count).
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE_EQUAL(iq.size(), size_t(319168));
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+    TimingResult tr;
+    CfoResult cf;
+    CirResult cir;
+    BOOST_REQUIRE(run_cir_softchips(iq, scratch, prof, tr, cf, cir));
+
+    BOOST_CHECK_EQUAL(cir.first_path_sample, size_t(9986));
+    BOOST_CHECK_CLOSE(cir.cir_peak_metric, 0.732856f, 1.0);
+    BOOST_CHECK_EQUAL(cir.soft_chip_count, size_t(154578));
+    BOOST_CHECK_CLOSE(cir.samples_per_chip, 2.0, 0.5);
+    BOOST_CHECK_EQUAL(tr.preamble_start_sample + (int64_t)cir.post_samples - 1,
+                      int64_t(10013));
+
+    std::vector<float> gcir;
+    BOOST_REQUIRE(load_f32(golden_dir() + "/stage_cir.f32", gcir));
+    float l2 = 0.0f;
+    for (size_t i = 0; i < gcir.size(); ++i) {
+        const float d = cir.cir_values[i] - gcir[i];
+        l2 += d * d;
+    }
+    BOOST_CHECK_SMALL(std::sqrt(l2), 0.01f);
+
+    std::vector<float> gsoft;
+    BOOST_REQUIRE(load_f32(golden_dir() + "/stage_softchips.f32", gsoft));
+    BOOST_REQUIRE_EQUAL(scratch.soft_chips.size(), gsoft.size());
+    float mx = 0.0f;
+    for (size_t i = 0; i < gsoft.size(); ++i)
+        mx = std::max(mx, std::abs(scratch.soft_chips[i] - gsoft[i]));
+    BOOST_CHECK_LT(mx, 1e-3f);
+
+    // Full pipeline still yields PHR/payload FCS 0x584b.
+    auto prof2 = Qm35825Profile::Default();
+    prof2.sfd_mode = "ieee";
+    core::DemodScratch scratch2;
+    scratch2.reserve(iq.size());
+    const auto res = core::demodulate_one(iq.data(), iq.size(), prof2, 1, 9984,
+                                          0, load_reference_template(),
+                                          scratch2);
+    BOOST_REQUIRE(res.status == DemodStatus::Success);
+    BOOST_CHECK_EQUAL(res.payload.received_fcs, uint16_t(0x584b));
+    BOOST_CHECK_EQUAL(res.payload.calculated_fcs, uint16_t(0x584b));
+    BOOST_CHECK(res.payload.fcs_pass);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_p2_cir_fir_microbench)
+{
+    // Microbench the three FIR candidates over the golden chip grid using the
+    // real CIR taps.  Prints wall µs so the P2 report can compare a/b/c
+    // without touching benchmark_detector.cc.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+    TimingResult tr;
+    CfoResult cf;
+    CirResult cir;
+    BOOST_REQUIRE(run_cir_softchips(iq, scratch, prof, tr, cf, cir));
+    BOOST_REQUIRE_EQUAL(cir.cir_values.size(), size_t(38));
+
+    // Rebuild complex CIR taps by re-running the estimate portion is heavy;
+    // soft chips already passed golden, so for the microbench re-derive h
+    // from the real-valued CIR taps (Q≈0 golden channel) as complex.
+    constexpr size_t T = 38;
+    alignas(32) std::complex<float> values_nat[64];
+    alignas(32) std::complex<float> h_conj[64];
+    for (size_t q = 0; q < T; ++q) {
+        values_nat[q] = std::complex<float>(cir.cir_values[q], 0.0f);
+        h_conj[q] = std::conj(values_nat[q]);
+    }
+
+    // Use the CFO-compensated buffer the stage already filled.
+    const std::complex<float>* rx = scratch.derotated.data();
+    const size_t n = iq.size();
+    const int64_t chip_start =
+        tr.preamble_start_sample + static_cast<int64_t>(cir.post_samples) - 1;
+    const int64_t spc_i = 2;
+    const int64_t fwd = static_cast<int64_t>(T) - 1;
+    const size_t num_chips = cir.soft_chip_count;
+    BOOST_REQUIRE(chip_start >= fwd);
+    BOOST_REQUIRE(static_cast<size_t>(chip_start + (int64_t)(num_chips - 1) * spc_i) <
+                  n);
+
+    auto time_kernel = [&](cir_fir::Kernel k, const char* name) {
+        std::vector<std::complex<float>> out(num_chips);
+        // Warmup
+        for (size_t i = 0; i < num_chips; i += 1024) {
+            const size_t win =
+                static_cast<size_t>(chip_start + (int64_t)i * spc_i - fwd);
+            out[i] = cir_fir::dot(k, rx + win, h_conj, values_nat, T);
+        }
+        auto t0 = std::chrono::steady_clock::now();
+        for (size_t i = 0; i < num_chips; ++i) {
+            const size_t win =
+                static_cast<size_t>(chip_start + (int64_t)i * spc_i - fwd);
+            out[i] = cir_fir::dot(k, rx + win, h_conj, values_nat, T);
+        }
+        auto t1 = std::chrono::steady_clock::now();
+        const double us =
+            std::chrono::duration<double, std::micro>(t1 - t0).count();
+        std::cout << "[P2 FIR microbench] " << name << " chips=" << num_chips
+                  << " fir_us=" << us << "  ("
+                  << (1e-6 * num_chips / (us * 1e-6)) << " Mchips/s)\n";
+
+        // Spot-check vs serial on a few chips (reassociation ok within 1e-3).
+        for (size_t i : { size_t(0), size_t(1000), num_chips / 2,
+                          num_chips - 1 }) {
+            const size_t win =
+                static_cast<size_t>(chip_start + (int64_t)i * spc_i - fwd);
+            const auto ref = cir_fir_serial_ref(rx + win, values_nat, T);
+            BOOST_CHECK_LT(std::abs(out[i] - ref), 1e-3f);
+        }
+        return us;
+    };
+
+    const double ua = time_kernel(cir_fir::Kernel::MultiAcc8, "a_MultiAcc8");
+    const double ub = time_kernel(cir_fir::Kernel::Volk, "b_VOLK");
+    const double uc = time_kernel(cir_fir::Kernel::Avx2Fixed, "c_Avx2Fixed38");
+    std::cout << "[P2 FIR microbench] summary a=" << ua << " b=" << ub
+              << " c=" << uc << " us (default kernel="
+              << static_cast<int>(cir_fir::kDefaultKernel) << ")\n";
+    BOOST_CHECK_GT(ua, 0.0);
+    BOOST_CHECK_GT(ub, 0.0);
+    BOOST_CHECK_GT(uc, 0.0);
+
+    // 203776-sample scheduling window: re-run full CIR stage on a truncated
+    // view of the golden buffer and report estimate/fir/post (O(num_chips)).
+    {
+        constexpr size_t n_sched = 203776;
+        BOOST_REQUIRE(iq.size() >= n_sched);
+        core::DemodScratch scr2;
+        scr2.reserve(n_sched);
+        // Reuse timing/cfo from the full window where possible, but CIR stage
+        // needs derotated of length n_sched: re-run stages on the prefix.
+        TimingResult tr2;
+        CfoResult cf2;
+        CirResult cir2;
+        std::vector<gr_complex> prefix(iq.begin(), iq.begin() + (long)n_sched);
+        BOOST_REQUIRE(run_cir_softchips(prefix, scr2, prof, tr2, cf2, cir2));
+        std::cout << "[P2 CIR window] n=319168 chips=" << cir.soft_chip_count
+                  << " estimate=" << cir.cir_estimate_us
+                  << " fir=" << cir.soft_fir_us
+                  << " post=" << cir.postprocess_us
+                  << " total="
+                  << (cir.cir_estimate_us + cir.soft_fir_us + cir.postprocess_us)
+                  << " us\n";
+        std::cout << "[P2 CIR window] n=" << n_sched
+                  << " chips=" << cir2.soft_chip_count
+                  << " estimate=" << cir2.cir_estimate_us
+                  << " fir=" << cir2.soft_fir_us
+                  << " post=" << cir2.postprocess_us
+                  << " total="
+                  << (cir2.cir_estimate_us + cir2.soft_fir_us +
+                      cir2.postprocess_us)
+                  << " us\n";
+        BOOST_CHECK_LT(cir2.soft_chip_count, cir.soft_chip_count);
+    }
+}

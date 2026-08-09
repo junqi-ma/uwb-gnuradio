@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <gnuradio/uwb/uwb_cir_fir_simd.h>
 #include <gnuradio/uwb/uwb_demod_result.h>
 #include <gnuradio/uwb/uwb_demod_result.h>
 #include <gnuradio/uwb/uwb_detector_core.h>
@@ -656,37 +657,71 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     const size_t num_chips =
         static_cast<size_t>((last_pos - chip_start) / spc_i) + 1;
 
-    // Causal FIR: chip[p] = sum_k conj(values[tap-1-k]) * rx[p-k].
-    // Chips whose FIR window reaches below sample 0 keep a bounds check;
-    // the (usually dominant) rest run an identical branch-free loop so the
-    // compiler can pipeline the accumulation.
+    // Causal FIR on the chip grid, rewritten for contiguous forward access:
+    //   chip = sum_k conj(values[T-1-k]) * rx[base-k]
+    //        = sum_q conj(values[q])     * rx[base-(T-1)+q]
+    // Pre-conjugated taps h[q]=conj(values[q]) once outside the chip loop.
+    // Kernels: multi-acc / VOLK / fixed-38 AVX2 (see uwb_cir_fir_simd.h).
     scratch.corr.resize(num_chips);
     const int64_t fwd = static_cast<int64_t>(tap_count) - 1;
+
+    // Stack buffers — no heap alloc in the FIR hot path.
+    // h_conj[q] = conj(values[q]) for multi-acc / AVX2; values_nat for VOLK.
+    alignas(32) std::complex<float> h_conj[64];
+    alignas(32) std::complex<float> values_nat[64];
+    if (tap_count > 64)
+        return false;
+    for (size_t q = 0; q < tap_count; ++q) {
+        values_nat[q] = values[q];
+        h_conj[q] = std::conj(values[q]);
+    }
+
     size_t checked = 0;
     if (chip_start < fwd) {
         const int64_t gap = fwd - chip_start;
         checked = std::min(num_chips,
                            static_cast<size_t>((gap + spc_i - 1) / spc_i));
     }
+    // Edge chips: FIR window may clip below sample 0 (bounds-checked scalar).
     for (size_t i = 0; i < checked; ++i) {
         const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
         std::complex<float> acc(0.0f, 0.0f);
-        for (size_t k = 0; k < tap_count; ++k) {
-            const int64_t idx = p - static_cast<int64_t>(k);
+        for (size_t q = 0; q < tap_count; ++q) {
+            const int64_t idx = p - fwd + static_cast<int64_t>(q);
             if (idx < 0)
-                break;
-            acc += std::conj(values[tap_count - 1 - k]) * rx[static_cast<size_t>(idx)];
+                continue;
+            acc += h_conj[q] * rx[static_cast<size_t>(idx)];
         }
         scratch.corr[i] = acc;
     }
-    for (size_t i = checked; i < num_chips; ++i) {
-        const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
-        const size_t base = static_cast<size_t>(p);
-        std::complex<float> acc(0.0f, 0.0f);
-        for (size_t k = 0; k < tap_count; ++k) {
-            acc += std::conj(values[tap_count - 1 - k]) * rx[base - k];
+    // Main body: full tap window is in-bounds.  Call the selected kernel
+    // directly (no per-chip switch) so the fixed-38 AVX2 path fully inlines.
+    {
+        const cir_fir::Kernel fir_k = cir_fir::kDefaultKernel;
+        const std::complex<float>* rx0 = rx;
+        if (fir_k == cir_fir::Kernel::Avx2Fixed &&
+            tap_count == cir_fir::kDefaultTapCount) {
+            for (size_t i = checked; i < num_chips; ++i) {
+                const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
+                const size_t win = static_cast<size_t>(p - fwd);
+                scratch.corr[i] =
+                    cir_fir::dot_avx2_fixed38(rx0 + win, h_conj, tap_count);
+            }
+        } else if (fir_k == cir_fir::Kernel::Volk) {
+            for (size_t i = checked; i < num_chips; ++i) {
+                const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
+                const size_t win = static_cast<size_t>(p - fwd);
+                scratch.corr[i] =
+                    cir_fir::dot_volk(rx0 + win, values_nat, tap_count);
+            }
+        } else {
+            for (size_t i = checked; i < num_chips; ++i) {
+                const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
+                const size_t win = static_cast<size_t>(p - fwd);
+                scratch.corr[i] =
+                    cir_fir::dot_multi_acc8(rx0 + win, h_conj, tap_count);
+            }
         }
-        scratch.corr[i] = acc;
     }
     out.soft_fir_us = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
@@ -701,23 +736,42 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     const size_t phase_len = phase_reps * kQm35ChipsPerSymbol;
     if (phase_first + phase_len > num_chips)
         return false; // chip stream shorter than the configured preamble
+    // spread[] is real ±1/0, so conj(spread)*corr = spread*corr.  Avoid % by
+    // walking the 508-chip period with a running index.
     std::complex<float> gain(0.0f, 0.0f);
-    for (size_t i = 0; i < phase_len; ++i)
-        gain += std::conj(std::complex<float>((float)spread[i % kQm35ChipsPerSymbol], 0.0f)) *
-                scratch.corr[phase_first + i];
+    {
+        size_t s = 0;
+        for (size_t i = 0; i < phase_len; ++i) {
+            gain += static_cast<float>(spread[s]) *
+                    scratch.corr[phase_first + i];
+            if (++s == kQm35ChipsPerSymbol)
+                s = 0;
+        }
+    }
     const float ang = std::arg(gain);
-    const std::complex<float> rot(std::cos(-ang), std::sin(-ang));
-    for (size_t i = 0; i < num_chips; ++i)
-        scratch.corr[i] *= rot;
+    const float rr = std::cos(-ang);
+    const float ri = std::sin(-ang);
+    const std::complex<float> rot(rr, ri);
 
-    // ---- soft = real part, normalized by max|real|. ----
-    float mx = 0.0f;
-    for (size_t i = 0; i < num_chips; ++i)
-        mx = std::max(mx, std::abs(scratch.corr[i].real()));
-    const float denom = mx + 1e-12f;
+    // Merged postprocess: rotate corr, extract real, track max|real|; then
+    // one normalize pass into soft_chips.
     scratch.soft_chips.resize(num_chips);
+    float mx = 0.0f;
+    for (size_t i = 0; i < num_chips; ++i) {
+        // (cr+j ci)*(rr+j ri) → real = cr*rr - ci*ri
+        const float cr = scratch.corr[i].real();
+        const float ci = scratch.corr[i].imag();
+        const float r = cr * rr - ci * ri;
+        const float im = cr * ri + ci * rr;
+        scratch.corr[i] = std::complex<float>(r, im); // corr[i] *= rot
+        scratch.soft_chips[i] = r;                    // temp; normalized below
+        const float ar = (r >= 0.0f) ? r : -r;
+        if (ar > mx)
+            mx = ar;
+    }
+    const float inv_denom = 1.0f / (mx + 1e-12f);
     for (size_t i = 0; i < num_chips; ++i)
-        scratch.soft_chips[i] = scratch.corr[i].real() / denom;
+        scratch.soft_chips[i] *= inv_denom;
     out.postprocess_us = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - t_post0)
