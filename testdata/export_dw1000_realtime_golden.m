@@ -9,7 +9,15 @@ clear; clc;
 
 testdata_dir = fileparts(mfilename('fullpath'));
 project_dir = fileparts(testdata_dir);
-addpath(fullfile(project_dir, 'UWB_demodulation'));
+algorithm_dir = fullfile(project_dir, 'UWB_demodulation');
+if ~isfolder(algorithm_dir)
+    % The SIC worktree intentionally does not track the ignored MATLAB tree.
+    algorithm_dir = fullfile(fileparts(project_dir), ...
+        'uwb-gnuradio', 'UWB_demodulation');
+end
+assert(isfolder(algorithm_dir), ...
+    'Cannot locate the UWB_demodulation MATLAB algorithm source.');
+addpath(algorithm_dir);
 
 capture_file = 'F:\UWB基带数据\dw1000_new_processed_1.dat';
 results_file = ['F:\USRP数据解调\decoded_results\', ...
@@ -43,6 +51,68 @@ write_complex_f32(fullfile(outdir, 'reference_preamble.cfile'), ...
     reference.preamble_waveform);
 write_complex_f32(fullfile(outdir, 'stage_cir.cfile'), frame.cir.values);
 
+% Reconstruct the exact production DW1000 pulse train and apply the decoded
+% complex CIR. This is the direct-first, integer-alignment S2 baseline; the
+% offline fractional/PLL/CIR-slow/CFO2/SFO enhancements are intentionally
+% excluded.
+decoded = struct();
+decoded.payload = struct('bytes', uint8(frame.payload_bytes(:)), ...
+    'fcs_pass', logical(frame.fcs_pass));
+decoded.sfd = struct('name', frame.sfd_name);
+decoded.cir = frame.cir;
+tx_options = struct( ...
+    'fs_tx', params.fs_rx, ...
+    'phy_mode', '802.15.4a', ...
+    'ranging', true, ...
+    'preamble_repetitions', params.preamble_repetitions, ...
+    'code_index', params.code_index, ...
+    'sfd_number', 0, ...
+    'sfd_sequence', [-1; -1; -1; -1; 1; -1; 0; 0], ...
+    'peak_amplitude', 1, ...
+    'guard_samples', 0, ...
+    'require_fcs_pass', true);
+tx = generate_uwb_tx_from_decode(decoded, tx_options);
+channel = apply_estimated_cir_to_uwb(tx, decoded.cir);
+replica = channel.waveform_x410(:);
+assert(numel(replica) == numel(tx.pulse_impulses_work));
+
+fit_options = struct( ...
+    'search_radius', 128, ...
+    'alignment_first_repetition_0based', 24, ...
+    'alignment_repetitions', 32, ...
+    'cfo_first_repetition_0based', 24, ...
+    'cfo_last_repetition_exclusive', 128, ...
+    'gain_first_repetition_0based', 24, ...
+    'gain_last_repetition_exclusive', 128, ...
+    'min_alignment_correlation', 0.70, ...
+    'min_suppression_db', 0.20, ...
+    'max_abs_cfo_hz', 100e3);
+nominal_start_0based = frame.abs_start_sample - window_start_0based;
+trial = fitIntegerTrial(rx, replica, nominal_start_0based, ...
+    round(frame.samples_per_repetition), params.fs_rx, fit_options);
+assert(trial.alignment_correlation >= fit_options.min_alignment_correlation);
+assert(abs(trial.fitted_cfo_hz) <= fit_options.max_abs_cfo_hz);
+assert(trial.suppression_db >= fit_options.min_suppression_db);
+
+write_real_f32(fullfile(outdir, 'tx_pulse_impulses.f32'), ...
+    tx.pulse_impulses_work);
+write_complex_f32(fullfile(outdir, 'tx_cir_replica.cfile'), replica);
+write_complex_f32(fullfile(outdir, 'trial_received.cfile'), trial.received);
+write_complex_f32(fullfile(outdir, 'trial_model.cfile'), trial.model);
+write_complex_f32(fullfile(outdir, 'trial_residual.cfile'), trial.residual);
+
+fid_fields = fopen(fullfile(outdir, 'field_bounds.csv'), 'w');
+assert(fid_fields >= 0);
+fields_cleanup = onCleanup(@() fclose(fid_fields));
+fprintf(fid_fields, 'field,begin_0based,end_exclusive_0based\n');
+field_names = {'SYNC', 'SFD', 'PHR', 'Payload'};
+for k = 1:numel(field_names)
+    bounds = tx.field_indices_work.(field_names{k});
+    fprintf(fid_fields, '%s,%d,%d\n', field_names{k}, ...
+        bounds(1) - 1, bounds(2));
+end
+clear fields_cleanup;
+
 fid_payload = fopen(fullfile(outdir, 'payload.bin'), 'wb');
 assert(fid_payload >= 0);
 payload_cleanup = onCleanup(@() fclose(fid_payload));
@@ -54,6 +124,9 @@ assert(fid >= 0);
 manifest_cleanup = onCleanup(@() fclose(fid));
 fprintf(fid, 'key,value\n');
 fprintf(fid, 'profile,dw1000-production\n');
+fprintf(fid, 'golden_schema,dw1000-tx-replica-v1\n');
+fprintf(fid, ['preprocessing_contract,', ...
+    'cf32-998.4mhz-tone-removed-10mhz-shift-v1\n']);
 fprintf(fid, 'matlab_release,%s\n', version('-release'));
 fprintf(fid, 'source_capture,%s\n', capture_file);
 fprintf(fid, 'source_results,%s\n', results_file);
@@ -82,6 +155,46 @@ fprintf(fid, 'cir_tap_count,%d\n', numel(frame.cir.values));
 fprintf(fid, 'cir_pre_samples,%d\n', frame.cir.pre_samples);
 fprintf(fid, 'cir_post_samples,%d\n', frame.cir.post_samples);
 fprintf(fid, 'cir_repetition_count,%d\n', frame.cir.repetition_count);
+fprintf(fid, 'tx_phy_mode,802.15.4a\n');
+fprintf(fid, 'tx_ranging,1\n');
+fprintf(fid, 'tx_sfd_number,0\n');
+fprintf(fid, 'tx_pulse_impulse_count,%d\n', ...
+    numel(tx.pulse_impulses_work));
+fprintf(fid, 'tx_replica_sample_count,%d\n', numel(replica));
+fprintf(fid, 'tx_cir_zero_delay_index_0based,%d\n', ...
+    channel.zero_delay_index - 1);
+fprintf(fid, 'trial_nominal_start_window_0based,%d\n', ...
+    nominal_start_0based);
+fprintf(fid, 'trial_fitted_start_window_0based,%d\n', ...
+    trial.fitted_start_0based);
+fprintf(fid, 'trial_sample_count,%d\n', numel(trial.received));
+fprintf(fid, 'trial_search_radius,%d\n', fit_options.search_radius);
+fprintf(fid, 'trial_alignment_first_repetition_0based,%d\n', ...
+    fit_options.alignment_first_repetition_0based);
+fprintf(fid, 'trial_alignment_repetitions,%d\n', ...
+    fit_options.alignment_repetitions);
+fprintf(fid, 'trial_alignment_correlation,%.12g\n', ...
+    trial.alignment_correlation);
+fprintf(fid, 'trial_cfo_first_repetition_0based,%d\n', ...
+    fit_options.cfo_first_repetition_0based);
+fprintf(fid, 'trial_cfo_last_repetition_exclusive,%d\n', ...
+    fit_options.cfo_last_repetition_exclusive);
+fprintf(fid, 'trial_fitted_cfo_hz,%.12g\n', trial.fitted_cfo_hz);
+fprintf(fid, 'trial_gain_first_repetition_0based,%d\n', ...
+    fit_options.gain_first_repetition_0based);
+fprintf(fid, 'trial_gain_last_repetition_exclusive,%d\n', ...
+    fit_options.gain_last_repetition_exclusive);
+fprintf(fid, 'trial_global_gain_real,%.12g\n', real(trial.global_gain));
+fprintf(fid, 'trial_global_gain_imag,%.12g\n', imag(trial.global_gain));
+fprintf(fid, 'trial_power_before,%.12g\n', trial.power_before);
+fprintf(fid, 'trial_power_after,%.12g\n', trial.power_after);
+fprintf(fid, 'trial_suppression_db,%.12g\n', trial.suppression_db);
+fprintf(fid, 'trial_min_alignment_correlation,%.12g\n', ...
+    fit_options.min_alignment_correlation);
+fprintf(fid, 'trial_min_suppression_db,%.12g\n', ...
+    fit_options.min_suppression_db);
+fprintf(fid, 'trial_max_abs_cfo_hz,%.12g\n', ...
+    fit_options.max_abs_cfo_hz);
 
 fprintf('DW1000 realtime golden written to %s\n', outdir);
 
@@ -94,4 +207,72 @@ function write_complex_f32(path, values)
     if fid < 0, error('Cannot open %s', path); end
     cleanup = onCleanup(@() fclose(fid));
     fwrite(fid, interleaved, 'single');
+end
+
+function write_real_f32(path, values)
+    fid = fopen(path, 'wb');
+    if fid < 0, error('Cannot open %s', path); end
+    cleanup = onCleanup(@() fclose(fid));
+    fwrite(fid, single(values(:)), 'single');
+end
+
+function trial = fitIntegerTrial(rx, replica, nominalStart0, period, fs, o)
+    templateFirst = o.alignment_first_repetition_0based * period + 1;
+    templateLast = min(numel(replica), templateFirst + ...
+        o.alignment_repetitions * period - 1);
+    template = replica(templateFirst:templateLast);
+    candidates = nominalStart0 + (-o.search_radius:o.search_radius);
+    scores = -inf(size(candidates));
+    for k = 1:numel(candidates)
+        first = candidates(k) + templateFirst;
+        last = first + numel(template) - 1;
+        if first < 1 || last > numel(rx), continue; end
+        segment = rx(first:last);
+        scores(k) = abs(template' * segment) / ...
+            (norm(template) * norm(segment) + eps);
+    end
+    [correlation, best] = max(scores);
+    fittedStart0 = candidates(best);
+    available = min(numel(replica), numel(rx) - fittedStart0);
+    replica = replica(1:available);
+    received = rx(fittedStart0 + (1:available));
+
+    firstRep = o.cfo_first_repetition_0based;
+    lastRep = min(o.cfo_last_repetition_exclusive, ...
+        floor(available / period));
+    repetitions = firstRep:lastRep-1;
+    correlations = complex(zeros(numel(repetitions), 1));
+    times = zeros(numel(repetitions), 1);
+    for q = 1:numel(repetitions)
+        first = repetitions(q) * period + 1;
+        last = min((repetitions(q) + 1) * period, available);
+        idx = first:last;
+        correlations(q) = replica(idx)' * received(idx);
+        times(q) = ((first + last) / 2 - 1) / fs;
+    end
+    phase = unwrap(angle(correlations));
+    lineFit = polyfit(times, phase, 1);
+    cfoHz = lineFit(1) / (2 * pi);
+    n = (0:available-1).';
+    replicaCfo = replica .* exp(1j * 2 * pi * cfoHz * n / fs);
+
+    gainFirst = o.gain_first_repetition_0based * period + 1;
+    gainLast = min(o.gain_last_repetition_exclusive * period, available);
+    gainIdx = gainFirst:gainLast;
+    gain = (replicaCfo(gainIdx)' * received(gainIdx)) / ...
+        (replicaCfo(gainIdx)' * replicaCfo(gainIdx) + eps);
+    model = gain * replicaCfo;
+    residual = received - model;
+    powerBefore = mean(abs(received).^2);
+    powerAfter = mean(abs(residual).^2);
+
+    trial = struct( ...
+        'fitted_start_0based', fittedStart0, ...
+        'alignment_correlation', correlation, ...
+        'fitted_cfo_hz', cfoHz, ...
+        'global_gain', gain, ...
+        'power_before', powerBefore, ...
+        'power_after', powerAfter, ...
+        'suppression_db', 10 * log10(powerBefore / (powerAfter + eps)), ...
+        'received', received, 'model', model, 'residual', residual);
 end

@@ -1,0 +1,5 @@
+field,begin_0based,end_exclusive_0based
+SYNC,0,130048
+SFD,130048,138176
+PHR,138176,159680
+Payload,159680,178112

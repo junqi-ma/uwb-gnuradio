@@ -220,11 +220,12 @@ S0 的兼容性改动（profile/schema 部分已落地）：
 | S5 实时验收 | 端到端 benchmark、10 分钟 soak、硬件预处理闭环 | 250 slot/s 容量；200 slot/s p99 <20 ms；规定场景 0 drop |
 
 当前进度：S0 的 production profile、复数 CIR schema、真实 DW1000 解调窗口及
-manifest 已完成；S1 的真实 complex CIR、payload/FCS 对照已闭环，TX pulse
-impulse 尚未导出。S2 已新增独立的 `uwb_sic_core.h` trial/commit 基础：整数对齐、
-逐 SYNC CFO 拟合、全局复增益和 0.70/0.20 dB 安全门均有 bypass QA；它接收已
-重构 replica，尚不包含从 PSDU 生成 TX impulse/CIR 波形，也尚无真实相减 golden，
-因此 S1/S2 均不得标记为整体完成。
+manifest 已完成；S1 的 complex CIR、payload/FCS、178112-sample TX pulse
+impulse、字段边界和 complex-CIR replica 均已闭环。S2 的 `uwb_sic_core.h` 已用
+真实 trial received/model/residual 验证整数对齐、逐 SYNC CFO、全局复增益及
+0.70/0.20 dB 安全门：C++/MATLAB model 相对 L2 误差 `1.55e-7`，相减区间外
+误差为 0，真实 FCS/相关度/抑制度拒绝路径均逐样本旁路。当前缺口是从 PSDU 在
+C++ 内生成同一 TX impulse/replica，因此 S2 尚未整体完成。
 
 不得以 synthetic code-10 或仅合成 trial/commit 结果宣称真实 SIC 正确。
 
