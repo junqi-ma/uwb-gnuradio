@@ -11,5 +11,6 @@ install(FILES
     uwb_preamble_detector.block.yml
     uwb_detector.block.yml
     uwb_packet_writer.block.yml
+    uwb_scheduled_extractor.block.yml
     DESTINATION share/gnuradio/grc/blocks
 )

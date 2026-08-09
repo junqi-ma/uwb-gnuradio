@@ -1,0 +1,63 @@
+id: uwb_scheduled_extractor
+label: UWB Scheduled Extractor
+category: '[UWB]'
+
+parameters:
+-   id: sample_rate
+    label: Sample rate
+    dtype: real
+    default: '998.4e6'
+-   id: packet_interval_s
+    label: Packet interval (s)
+    dtype: real
+    default: '0.01'
+-   id: first_packet_sample
+    label: First packet sample (t0)
+    dtype: int
+    default: '0'
+-   id: pre_guard_samples
+    label: Pre-guard samples
+    dtype: int
+    default: '9984'
+-   id: capture_samples
+    label: Capture samples
+    dtype: int
+    default: '189696'
+-   id: post_guard_samples
+    label: Post-guard samples
+    dtype: int
+    default: '4096'
+-   id: pool_size
+    label: Pool size
+    dtype: int
+    default: '8'
+-   id: verification_enabled
+    label: Verification enabled
+    dtype: bool
+    default: 'False'
+
+inputs:
+-   domain: stream
+    dtype: complex
+-   domain: message
+    id: schedule
+    optional: true
+
+outputs:
+-   domain: message
+    id: packet
+    optional: true
+-   domain: message
+    id: status
+    optional: true
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.scheduled_extractor(${sample_rate}, ${packet_interval_s}, ${first_packet_sample}, ${pre_guard_samples}, ${capture_samples}, ${post_guard_samples}, ${pool_size}, uwb.scheduled_extractor.EmitPolicy.EverySlot, ${verification_enabled})
+
+cpp_templates:
+    includes: ['#include <gnuradio/uwb/uwb_scheduled_extractor.h>']
+    make: 'this->${id} = gr::uwb::UwbScheduledExtractor::make(${sample_rate}, ${packet_interval_s}, ${first_packet_sample}, ${pre_guard_samples}, ${capture_samples}, ${post_guard_samples}, ${pool_size});'
+    link: ['gnuradio::gnuradio-uwb']
+
+file_format: 1

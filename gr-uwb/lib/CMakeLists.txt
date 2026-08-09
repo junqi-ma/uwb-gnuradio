@@ -18,6 +18,7 @@ list(APPEND uwb_sources
     uwb_preamble_detector.cc
     uwb_detector.cc
     uwb_packet_writer.cc
+    uwb_scheduled_extractor.cc
 )
 
 set(uwb_sources "${uwb_sources}" PARENT_SCOPE)
@@ -67,6 +68,7 @@ list(APPEND test_uwb_sources
     qa_uwb_preamble_detector.cc
     qa_uwb_detector.cc
     qa_uwb_packet_writer.cc
+    qa_uwb_scheduled_extractor.cc
 )
 # Anything we need to link to for the unit tests go here
 list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks)

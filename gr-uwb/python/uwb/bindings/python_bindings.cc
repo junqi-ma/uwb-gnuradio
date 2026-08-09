@@ -18,6 +18,7 @@
 #include <gnuradio/uwb/uwb_preamble_detector.h>
 #include <gnuradio/uwb/uwb_detector.h>
 #include <gnuradio/uwb/uwb_packet_writer.h>
+#include <gnuradio/uwb/uwb_scheduled_extractor.h>
 
 namespace py = pybind11;
 
@@ -144,6 +145,49 @@ void bind_packet_writer(py::module& m)
         .def("samples_written", &gr::uwb::UwbPacketWriter::samples_written);
 }
 
+void bind_scheduled_extractor(py::module& m)
+{
+    py::class_<gr::uwb::UwbScheduledExtractor,
+               gr::sync_block,
+               std::shared_ptr<gr::uwb::UwbScheduledExtractor>>
+        se(m, "scheduled_extractor");
+    py::enum_<gr::uwb::UwbScheduledExtractor::EmitPolicy>(se, "EmitPolicy")
+        .value("EverySlot", gr::uwb::UwbScheduledExtractor::EmitPolicy::EverySlot)
+        .value("VerifiedOnly",
+               gr::uwb::UwbScheduledExtractor::EmitPolicy::VerifiedOnly)
+        .export_values();
+    se.def(py::init(&gr::uwb::UwbScheduledExtractor::make),
+           py::arg("sample_rate"),
+           py::arg("packet_interval_s"),
+           py::arg("first_packet_sample"),
+           py::arg("pre_guard_samples") = size_t(9984),
+           py::arg("capture_samples") = size_t(189696),
+           py::arg("post_guard_samples") = size_t(4096),
+           py::arg("pool_size") = size_t(8),
+           py::arg("emit_policy") =
+               gr::uwb::UwbScheduledExtractor::EmitPolicy::EverySlot,
+           py::arg("verification_enabled") = false,
+           py::arg("radar_template") = std::vector<std::complex<float>>(),
+           py::arg("radar_threshold") = 0.5f,
+           py::arg("comm_template") = std::vector<std::complex<float>>(),
+           py::arg("comm_threshold") = 0.5f)
+        .def("set_schedule",
+             &gr::uwb::UwbScheduledExtractor::set_schedule,
+             py::arg("first_packet_sample"),
+             py::arg("packet_interval_s"))
+        .def("pause_schedule", &gr::uwb::UwbScheduledExtractor::pause_schedule)
+        .def("resume_schedule", &gr::uwb::UwbScheduledExtractor::resume_schedule)
+        .def("reset_schedule", &gr::uwb::UwbScheduledExtractor::reset_schedule)
+        .def("scheduled_windows",
+             &gr::uwb::UwbScheduledExtractor::scheduled_windows)
+        .def("completed_windows",
+             &gr::uwb::UwbScheduledExtractor::completed_windows)
+        .def("emitted_windows", &gr::uwb::UwbScheduledExtractor::emitted_windows)
+        .def("dropped_windows", &gr::uwb::UwbScheduledExtractor::dropped_windows)
+        .def("queue_high_watermark",
+             &gr::uwb::UwbScheduledExtractor::queue_high_watermark);
+}
+
 // We need this hack because import_array() returns NULL
 // for newer Python versions.
 // This function is also necessary because it ensures access to the C API
@@ -167,4 +211,5 @@ PYBIND11_MODULE(uwb_python, m)
     bind_preamble_detector(m);
     bind_detector(m);
     bind_packet_writer(m);
+    bind_scheduled_extractor(m);
 }

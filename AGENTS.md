@@ -8,6 +8,10 @@
 ### 当前开发状态
 请参考同目录下的 **开发状态.md**（已完成的模块、算法参数、测试结果、构建运行方法与下一步计划）。
 
+### 周期旁路雷达截取（Phase-1 已完成）
+请参考 **开发总结_QM35825周期旁路雷达截取.md** 与 **GROK_X410_QM35825周期旁路开发方案.md**。
+已知 `t0/T` 时使用 `UwbScheduledExtractor`，不要用能量门对每个通信包建 Region。
+
 ### UWB 算法与验证
 - UWB 检测算法（能量门限、粗检测、细相关、preamble 匹配等）**必须**参考 `UWB_demodulation/` 目录下的 MATLAB 实现（包括 `buildUwbReference.m`、`decode_uwb.m`、`analyze_*` 等文件）。
 - 算法正确性验证优先：使用 `testdata/` 下的已知 UWB 测试信号（`.cfile`、`*.dat`、`*_metadata.mat`、`UWB_test_signal_description.md`）进行 MATLAB 对照。
