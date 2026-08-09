@@ -141,3 +141,24 @@ BOOST_AUTO_TEST_CASE(test_packet_writer_accepts_scheduled_metadata)
     BOOST_CHECK(jsonl.find("\"trigger_sample\":109984") != std::string::npos);
     std::filesystem::remove_all(dir);
 }
+
+BOOST_AUTO_TEST_CASE(test_packet_writer_sc16_is_bit_exact)
+{
+    const std::string dir = "qa_writer_sc16_direct";
+    std::filesystem::remove_all(dir);
+    auto w = gr::uwb::UwbPacketWriter::make(dir, "capture", false);
+    const std::vector<int16_t> iq = { -32768, 32767, -7, 9, 1234, -4321 };
+    pmt::pmt_t meta = pmt::make_dict();
+    meta = pmt::dict_add(meta, pmt::mp("packet_id"), pmt::from_uint64(3));
+    meta = pmt::dict_add(meta, pmt::mp("start_sample"), pmt::from_uint64(99));
+    meta = pmt::dict_add(meta, pmt::mp("iq_scale"), pmt::from_double(32768));
+    run_strobe(pmt::cons(meta, pmt::init_s16vector(iq.size(), iq)), w);
+    const std::string raw = read_file(dir + "/capture.iq");
+    BOOST_REQUIRE_GE(raw.size(), iq.size() * sizeof(int16_t));
+    BOOST_REQUIRE_EQUAL(raw.size() % (iq.size() * sizeof(int16_t)), 0);
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        reinterpret_cast<const int16_t*>(raw.data()),
+        reinterpret_cast<const int16_t*>(raw.data()) + iq.size(),
+        iq.begin(), iq.end());
+    std::filesystem::remove_all(dir);
+}

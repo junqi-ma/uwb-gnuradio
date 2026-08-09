@@ -17,6 +17,7 @@ list(APPEND uwb_sources
     uwb_energy_detector.cc
     uwb_preamble_detector.cc
     uwb_detector.cc
+    uwb_detector_sc16.cc
     uwb_packet_writer.cc
     uwb_scheduled_extractor.cc
     uwb_realtime_demodulator.cc
@@ -68,6 +69,7 @@ list(APPEND test_uwb_sources
     qa_uwb_energy_detector.cc
     qa_uwb_preamble_detector.cc
     qa_uwb_detector.cc
+    qa_uwb_detector_sc16.cc
     qa_uwb_packet_writer.cc
     qa_uwb_scheduled_extractor.cc
     qa_uwb_demod_core.cc

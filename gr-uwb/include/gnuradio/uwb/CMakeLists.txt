@@ -12,6 +12,7 @@ install(FILES
     api.h
     uwb_detector_core.h
     uwb_detector.h
+    uwb_detector_sc16.h
     uwb_energy_detector.h
     uwb_packet_writer.h
     uwb_preamble_detector.h

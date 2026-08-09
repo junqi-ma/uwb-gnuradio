@@ -10,6 +10,7 @@ install(FILES
     uwb_energy_detector.block.yml
     uwb_preamble_detector.block.yml
     uwb_detector.block.yml
+    uwb_detector_sc16.block.yml
     uwb_packet_writer.block.yml
     uwb_scheduled_extractor.block.yml
     uwb_realtime_demodulator.block.yml
@@ -21,5 +22,6 @@ install(FILES
     ../examples/uwb_detector_to_writer.grc
     ../examples/uwb_scheduled_file_capture.grc
     ../examples/x410_rfnoc_uwb_scheduled.grc
+    ../examples/x410_rfnoc_uwb_detector_sc16.grc
     DESTINATION share/gnuradio/examples/uwb
 )

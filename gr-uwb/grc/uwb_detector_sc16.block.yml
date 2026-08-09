@@ -1,0 +1,30 @@
+id: uwb_detector_sc16
+label: UWB Detector SC16 (PDU)
+category: '[UWB]'
+
+parameters:
+- {id: template_file, label: Template file (CF32), dtype: file_open, default: ''}
+- {id: pre_trigger, label: Pre-trigger samples, dtype: int, default: '2032'}
+- {id: capture_samples, label: Capture samples, dtype: int, default: '200000'}
+- {id: energy_threshold, label: Normalized energy threshold, dtype: real, default: '0.001'}
+- {id: energy_gate_decimation, label: Energy gate decimation, dtype: int, default: '100'}
+- {id: coarse_decimation, label: Coarse decimation, dtype: int, default: '4'}
+
+inputs:
+- domain: stream
+  dtype: sc16
+
+outputs:
+- {domain: message, id: packet, optional: true}
+
+templates:
+  imports: from gnuradio import uwb
+  make: uwb.detector_sc16.make_from_file(${template_file}, ${pre_trigger}, ${capture_samples}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation})
+
+documentation: |-
+  Input is one packed complex SC16 sample per item (short vector length 2,
+  interleaved I/Q). Full-rate work is integer energy gating and SC16 copying.
+  Candidate Regions are converted once to CF32 in the background worker;
+  output is a bit-exact interleaved-I/Q PMT s16vector.
+
+file_format: 1

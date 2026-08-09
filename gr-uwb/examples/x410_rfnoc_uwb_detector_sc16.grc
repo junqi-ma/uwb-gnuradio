@@ -1,0 +1,68 @@
+options:
+  parameters:
+    author: UWB GNU Radio Project
+    category: UWB
+    cmake_opt: ''
+    comment: X410 737.28M -> RFNoC 65/48 -> host 998.4M
+    copyright: ''
+    description: X410 RFNoC SC16 energy-gated packet detector.
+    gen_cmake: 'On'
+    gen_linking: dynamic
+    generate_options: no_gui
+    hier_block_src_path: '.:'
+    id: x410_rfnoc_uwb_detector_sc16
+    max_nouts: '0'
+    output_language: python
+    placement: (0,0)
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: prompt
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: X410 RFNoC UWB SC16 Detector
+    window_size: ''
+  states: {coordinate: [8, 8], rotation: 0, state: enabled}
+blocks:
+- name: radio_rate
+  id: variable
+  parameters: {comment: X410 FPGA radio rate, value: '737.28e6'}
+  states: {coordinate: [16, 80], rotation: 0, state: enabled}
+- name: samp_rate
+  id: variable
+  parameters: {comment: RFNoC upsampler output / host rate, value: '998.4e6'}
+  states: {coordinate: [16, 144], rotation: 0, state: enabled}
+- name: output_dir
+  id: parameter
+  parameters: {alias: '', comment: '', hide: none, label: Output directory, short_id: '', type: str, value: "'/data/uwb_capture'"}
+  states: {coordinate: [16, 272], rotation: 0, state: enabled}
+- name: uhd_rfnoc_graph_0
+  id: uhd_rfnoc_graph
+  parameters: {clock_source_0: internal, dev_addr: '"addr=192.168.10.2"', dev_args: '""', num_mboards: '1', time_source_0: ''}
+  states: {coordinate: [240, 32], rotation: 0, state: enabled}
+- name: uhd_rfnoc_rx_radio_0
+  id: uhd_rfnoc_rx_radio
+  parameters: {agc: Default, antenna: RX2, bandwidth: '0', block_args: '""', dc_offset: 'False', device_select: '0', frequency: '6.5e9', gain: '20', instance_index: '0', iq_balance: 'False', num_chans: '1', rate: radio_rate}
+  states: {coordinate: [240, 128], rotation: 0, state: enabled}
+- name: uwb_rfnoc_upsampler_0
+  id: uwb_rfnoc_upsampler
+  parameters: {block_args: '""', block_type: '"Upsampler"', device_select: '0', input_rate: radio_rate, instance_index: '0', output_rate: samp_rate}
+  states: {coordinate: [496, 128], rotation: 0, state: enabled}
+- name: uhd_rfnoc_rx_streamer_0
+  id: uhd_rfnoc_rx_streamer
+  parameters: {num_chans: '1', otw: sc16, output_type: sc16}
+  states: {coordinate: [736, 128], rotation: 0, state: enabled}
+- name: uwb_detector_sc16_0
+  id: uwb_detector_sc16
+  parameters: {capture_samples: '200000', coarse_decimation: '4', energy_gate_decimation: '100', energy_threshold: '0.001', pre_trigger: '2032', template_file: '"testdata/reference_preamble.bin"'}
+  states: {coordinate: [976, 128], rotation: 0, state: enabled}
+- name: uwb_packet_writer_0
+  id: uwb_packet_writer
+  parameters: {base_name: capture, directory: output_dir, one_file_per_packet: 'False'}
+  states: {coordinate: [1248, 128], rotation: 0, state: enabled}
+connections:
+- [uhd_rfnoc_rx_radio_0, '0', uwb_rfnoc_upsampler_0, '0']
+- [uwb_rfnoc_upsampler_0, '0', uhd_rfnoc_rx_streamer_0, '0']
+- [uhd_rfnoc_rx_streamer_0, '0', uwb_detector_sc16_0, '0']
+- [uwb_detector_sc16_0, packet, uwb_packet_writer_0, packet]
+metadata: {file_format: 1}

@@ -24,3 +24,10 @@ target_link_libraries(benchmark_detector
     gnuradio::gnuradio-blocks
     gnuradio::gnuradio-runtime
 )
+
+add_executable(benchmark_detector_sc16 benchmark_detector_sc16.cc)
+target_link_libraries(benchmark_detector_sc16
+    gnuradio-uwb
+    gnuradio::gnuradio-blocks
+    gnuradio::gnuradio-runtime
+)

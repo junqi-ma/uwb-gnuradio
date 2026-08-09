@@ -17,6 +17,7 @@
 #include <gnuradio/uwb/uwb_energy_detector.h>
 #include <gnuradio/uwb/uwb_preamble_detector.h>
 #include <gnuradio/uwb/uwb_detector.h>
+#include <gnuradio/uwb/uwb_detector_sc16.h>
 #include <gnuradio/uwb/uwb_packet_writer.h>
 #include <gnuradio/uwb/uwb_realtime_demodulator.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor.h>
@@ -128,6 +129,34 @@ void bind_detector(py::module& m)
              &gr::uwb::UwbDetector::set_capture,
              py::arg("capture"))
         .def("dropped_regions", &gr::uwb::UwbDetector::dropped_regions);
+}
+
+void bind_detector_sc16(py::module& m)
+{
+    py::class_<gr::uwb::UwbDetectorSc16,
+               gr::sync_block,
+               std::shared_ptr<gr::uwb::UwbDetectorSc16>>(m, "detector_sc16")
+        .def(py::init(&gr::uwb::UwbDetectorSc16::make),
+             py::arg("known_preamble"), py::arg("pre_trigger") = size_t(2032),
+             py::arg("capture") = size_t(200000),
+             py::arg("energy_threshold") = 1e-3f,
+             py::arg("energy_gate_decimation") = size_t(100),
+             py::arg("coarse_decimation") = size_t(4),
+             py::arg("coarse_repetitions") = size_t(1),
+             py::arg("coarse_margin") = size_t(16))
+        .def_static("make_from_file", &gr::uwb::UwbDetectorSc16::make_from_file,
+                    py::arg("template_file"),
+                    py::arg("pre_trigger") = size_t(2032),
+                    py::arg("capture") = size_t(200000),
+                    py::arg("energy_threshold") = 1e-3f,
+                    py::arg("energy_gate_decimation") = size_t(100),
+                    py::arg("coarse_decimation") = size_t(4),
+                    py::arg("coarse_repetitions") = size_t(1),
+                    py::arg("coarse_margin") = size_t(16))
+        .def("dropped_regions", &gr::uwb::UwbDetectorSc16::dropped_regions)
+        .def("work_calls", &gr::uwb::UwbDetectorSc16::work_calls)
+        .def("work_mean_noutput_items",
+             &gr::uwb::UwbDetectorSc16::work_mean_noutput_items);
 }
 
 void bind_packet_writer(py::module& m)
@@ -255,6 +284,7 @@ PYBIND11_MODULE(uwb_python, m)
     bind_energy_detector(m);
     bind_preamble_detector(m);
     bind_detector(m);
+    bind_detector_sc16(m);
     bind_packet_writer(m);
     bind_scheduled_extractor(m);
     bind_realtime_demodulator(m);

@@ -29,6 +29,13 @@ X410 RFNoC Radio 737.28M (SC16)
 输出目录，以及 FPGA block type/instance。包装块默认查找 UHD block type
 `Upsampler`；若 `uhd_usrp_probe` 显示不同名称，应修改对应参数。
 
+## `x410_rfnoc_uwb_detector_sc16.grc`
+
+未知 packet 时刻的 SC16 生产路径。RFNoC RxStreamer 保持 SC16 host
+output，全速率只运行整数能量门；候选 Region 在后台转换一次 CF32 做相关，
+最终原始 SC16 PDU 直接写盘。与 scheduled 图不同，它会处理所有通过能量门的
+通信/雷达候选，因此密集通信环境下仍优先使用已知 `t0/T` 的 scheduled 路径。
+
 ## 编译校验
 
 从源码树使用自定义 block YAML：

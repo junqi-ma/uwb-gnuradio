@@ -145,7 +145,8 @@ UwbPacketWriter::handle_packet(pmt::pmt_t msg)
         return;
     const pmt::pmt_t meta = pmt::car(msg);
     const pmt::pmt_t data = pmt::cdr(msg);
-    if (!pmt::is_dict(meta) || !pmt::is_c32vector(data))
+    if (!pmt::is_dict(meta) ||
+        (!pmt::is_c32vector(data) && !pmt::is_s16vector(data)))
         return;
 
     d_received_.fetch_add(1);
@@ -202,13 +203,28 @@ void UwbPacketWriter::write_packet(pmt::pmt_t msg)
     const long pre = pmt::to_long(
         pmt::dict_ref(meta, pmt::mp("pre_trigger_samples"), pmt::from_long(0)));
 
-    const std::vector<std::complex<float>>& elems =
-        pmt::c32vector_elements(data);
-    const size_t n = elems.size();
-    const float iq_scale = convert_to_sc16(elems.data(), n, d_sc16_);
-    const char* sc16_bytes = reinterpret_cast<const char*>(d_sc16_.data());
+    size_t n = 0;
+    float iq_scale = 32768.0f;
+    const int16_t* sc16_data = nullptr;
+    if (pmt::is_s16vector(data)) {
+        size_t element_count = 0;
+        sc16_data = pmt::s16vector_elements(data, element_count);
+        if ((element_count & 1u) != 0)
+            return;
+        n = element_count / 2;
+        const pmt::pmt_t scale_p = pmt::dict_ref(
+            meta, pmt::mp("iq_scale"), pmt::from_double(32768.0));
+        if (pmt::is_real(scale_p))
+            iq_scale = static_cast<float>(pmt::to_double(scale_p));
+    } else {
+        const auto& elems = pmt::c32vector_elements(data);
+        n = elems.size();
+        iq_scale = convert_to_sc16(elems.data(), n, d_sc16_);
+        sc16_data = d_sc16_.data();
+    }
+    const char* sc16_bytes = reinterpret_cast<const char*>(sc16_data);
     const std::streamsize nbytes =
-        static_cast<std::streamsize>(d_sc16_.size() * sizeof(int16_t));
+        static_cast<std::streamsize>(n * 2 * sizeof(int16_t));
 
     char line[640];
     if (d_one_file_per_packet_) {

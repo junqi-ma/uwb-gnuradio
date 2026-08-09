@@ -452,7 +452,8 @@ inline void uwb_coarse_peaks(const std::complex<float>* in,
 // can recover the samples that arrived before the trigger.
 // ---------------------------------------------------------------------------
 
-struct RingBuffer {
+template <typename Sample>
+struct RingBufferT {
     // Physical capacity is rounded up to a power of two so the write index
     // wraps with a bit-mask (hot path: one push per input sample).  The
     // *logical* size is the caller-requested capacity and is what to_vector()
@@ -461,13 +462,13 @@ struct RingBuffer {
     size_t mask;
     size_t logical_size;
     size_t write_pos = 0;
-    std::vector<std::complex<float>> buffer;
+    std::vector<Sample> buffer;
 
-    explicit RingBuffer(size_t cap)
+    explicit RingBufferT(size_t cap)
         : capacity(round_up_pow2(cap)),
           mask(capacity - 1),
           logical_size(cap),
-          buffer(capacity, std::complex<float>(0.0f, 0.0f))
+          buffer(capacity, Sample{})
     {
     }
 
@@ -479,7 +480,7 @@ struct RingBuffer {
         return p;
     }
 
-    void push(const std::complex<float>* src, size_t n)
+    void push(const Sample* src, size_t n)
     {
         if (n == 0)
             return;
@@ -496,13 +497,13 @@ struct RingBuffer {
         write_pos = (write_pos + n) & mask;
     }
 
-    inline void push_one(const std::complex<float>& v)
+    inline void push_one(const Sample& v)
     {
         buffer[write_pos] = v;
         write_pos = (write_pos + 1) & mask;
     }
 
-    std::complex<float> get(size_t offset) const // offset=0 = most recent sample
+    Sample get(size_t offset) const // offset=0 = most recent sample
     {
         size_t idx = (write_pos + capacity - offset - 1) & mask;
         return buffer[idx];
@@ -510,7 +511,7 @@ struct RingBuffer {
 
     // Copy the most recent `logical_size` samples, oldest .. newest, into a
     // caller-owned preallocated destination.
-    void copy_to(std::complex<float>* out) const
+    void copy_to(Sample* out) const
     {
         if (logical_size == 0)
             return;
@@ -522,9 +523,9 @@ struct RingBuffer {
             std::memcpy(out + first, buffer.data(), second * sizeof(*out));
     }
 
-    std::vector<std::complex<float>> to_vector() const
+    std::vector<Sample> to_vector() const
     {
-        std::vector<std::complex<float>> out(logical_size);
+        std::vector<Sample> out(logical_size);
         copy_to(out.data());
         return out;
     }
@@ -532,9 +533,26 @@ struct RingBuffer {
     void clear()
     {
         write_pos = 0;
-        std::fill(buffer.begin(), buffer.end(), std::complex<float>(0.0f, 0.0f));
+        std::fill(buffer.begin(), buffer.end(), Sample{});
     }
 };
+
+using RingBuffer = RingBufferT<std::complex<float>>;
+
+inline float detector_sample_power(const std::complex<float>& v)
+{
+    return std::norm(v);
+}
+
+inline float detector_sample_power(const std::complex<int16_t>& v)
+{
+    constexpr float kInvFullScale2 = 1.0f / (32768.0f * 32768.0f);
+    const int32_t re = v.real();
+    const int32_t im = v.imag();
+    const uint64_t raw = static_cast<uint64_t>(static_cast<int64_t>(re) * re) +
+                         static_cast<uint64_t>(static_cast<int64_t>(im) * im);
+    return static_cast<float>(raw) * kInvFullScale2;
+}
 
 // ---------------------------------------------------------------------------
 // Sliding-window energy: running mean of |x|^2 over the last `window` samples.
@@ -595,19 +613,20 @@ private:
 // scan on all symbols at once — no chunk-boundary artifacts.
 // ---------------------------------------------------------------------------
 
-class UwbDetectorStateMachine {
+template <typename Sample>
+class UwbDetectorStateMachineT {
 public:
     struct Region {
         uint64_t start_abs = 0;      // absolute index of samples[0] (incl. pre-trigger)
         size_t candidate_offset = 0; // offset into samples where the gate first crossed
-        std::vector<std::complex<float>> samples;
+        std::vector<Sample> samples;
     };
 
     using RegionHandle = size_t;
     static constexpr size_t kRegionPoolSize = 8;
     static constexpr RegionHandle kInvalidRegion = std::numeric_limits<size_t>::max();
 
-    UwbDetectorStateMachine(size_t pre_trigger = 2032,
+    UwbDetectorStateMachineT(size_t pre_trigger = 2032,
                             float energy_threshold = 1e-3f,
                             size_t gate_decimation = 100,
                             size_t gate_window = 32,
@@ -633,7 +652,7 @@ public:
         d_free_count_ = kRegionPoolSize;
     }
 
-    void process(const std::complex<float>* in, size_t n, uint64_t abs_sample)
+    void process(const Sample* in, size_t n, uint64_t abs_sample)
     {
         size_t consumed = 0;
         while (consumed < n) {
@@ -689,7 +708,7 @@ public:
     void set_pre_trigger(size_t v)
     {
         pre_trigger_ = v;
-        pre_ring_ = RingBuffer(pre_trigger_);
+        pre_ring_ = RingBufferT<Sample>(pre_trigger_);
         max_region_samples_ = std::max<size_t>(
             pre_trigger_ + std::max<size_t>(post_trigger_capture_, 300000),
             524288);
@@ -726,7 +745,7 @@ private:
     // SEARCH is block-oriented: one iteration handles up to a complete
     // D-sample gate block.  Ring maintenance is a bulk memcpy and only the
     // first `neigh_len_` samples of each block enter the energy sum.
-    size_t process_search(const std::complex<float>* in,
+    size_t process_search(const Sample* in,
                           size_t n,
                           uint64_t abs_sample)
     {
@@ -739,7 +758,7 @@ private:
                     ? std::min(take, neigh_len_ - d_block_phase_)
                     : 0;
             for (size_t j = 0; j < energy_count; ++j)
-                d_block_acc_ += std::norm(in[consumed + j]);
+                d_block_acc_ += detector_sample_power(in[consumed + j]);
 
             pre_ring_.push(in + consumed, take);
             d_block_phase_ += take;
@@ -754,7 +773,7 @@ private:
 
     // IN_REGION retains raw IQ in block-sized inserts until the gate remains
     // low for the configured holdoff.
-    size_t process_region(const std::complex<float>* in,
+    size_t process_region(const Sample* in,
                           size_t n,
                           uint64_t abs_sample)
     {
@@ -767,7 +786,7 @@ private:
                     ? std::min(take, neigh_len_ - d_block_phase_)
                     : 0;
             for (size_t j = 0; j < energy_count; ++j)
-                d_block_acc_ += std::norm(in[consumed + j]);
+                d_block_acc_ += detector_sample_power(in[consumed + j]);
 
             pre_ring_.push(in + consumed, take);
             if (d_active_region_ != kInvalidRegion) {
@@ -795,7 +814,7 @@ private:
     // bulk until the conservative trigger-relative horizon is present.  Since
     // packet_start is at or before the delayed energy trigger, this contains
     // every sample through packet_start + post_trigger_capture_.
-    size_t process_capture(const std::complex<float>* in,
+    size_t process_capture(const Sample* in,
                            size_t n,
                            uint64_t abs_sample)
     {
@@ -896,7 +915,7 @@ private:
     size_t post_trigger_capture_;
     size_t neigh_len_;   // |x|^2 samples summed per decimated block (16)
     SlidingEnergy gate_;
-    RingBuffer pre_ring_;
+    RingBufferT<Sample> pre_ring_;
     size_t max_region_samples_;
     State state_ = SEARCH;
     std::array<Region, kRegionPoolSize> d_region_pool_;
@@ -914,6 +933,10 @@ private:
     size_t low_count_ = 0;
     uint64_t capture_end_abs_ = 0;
 };
+
+using UwbDetectorStateMachine = UwbDetectorStateMachineT<std::complex<float>>;
+using UwbDetectorStateMachineSc16 =
+    UwbDetectorStateMachineT<std::complex<int16_t>>;
 
 } // namespace uwb
 } // namespace gr
