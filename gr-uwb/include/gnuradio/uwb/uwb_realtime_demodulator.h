@@ -91,6 +91,12 @@ public:
     void drain();
     void reset_stats();
 
+    // Per-stage mean demod time (µs) over jobs published so far.
+    // stage index: 0..6 = timing/cfo/sfd/cir/ns_sfd/phr/payload, 7 = total.
+    // Returns 0 when no job has been published for that stage yet.
+    uint64_t stage_mean_us(size_t stage) const;
+    uint64_t stage_mean_total_us() const;
+
 protected:
     UwbRealtimeDemodulator(const std::vector<gr_complex>& template_wf,
                            size_t num_workers,
@@ -164,6 +170,11 @@ private:
     mutable std::mutex d_worker_stats_mutex_;
     std::vector<uint64_t> d_worker_busy_us_;
     std::vector<uint64_t> d_worker_total_us_;
+
+    // Per-stage timing accumulation (own mutex): stage 0..6 + total (index 7).
+    mutable std::mutex d_stage_mutex_;
+    uint64_t d_stage_sums_[8] = {};
+    uint64_t d_stage_n_ = 0;
 
     // TEST-ONLY fault injection: throw in worker for matching packet_id.
     mutable std::mutex d_fail_mutex_;

@@ -336,6 +336,11 @@ UwbRealtimeDemodulator::reset_stats()
         std::fill(d_worker_busy_us_.begin(), d_worker_busy_us_.end(), 0);
         std::fill(d_worker_total_us_.begin(), d_worker_total_us_.end(), 0);
     }
+    {
+        std::lock_guard<std::mutex> lock(d_stage_mutex_);
+        std::fill(std::begin(d_stage_sums_), std::end(d_stage_sums_), 0);
+        d_stage_n_ = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -751,9 +756,40 @@ UwbRealtimeDemodulator::publish_result(const Job& job,
                          pmt::from_uint64(r.demod_latency_us));
     meta = pmt::dict_add(meta, pmt::mp("wall_latency_us"),
                          pmt::from_uint64(r.wall_latency_us));
+    // per-stage demod timing (µs) — recorded by demodulate_one
+    meta = pmt::dict_add(meta, pmt::mp("stage_timing_us"),
+                         pmt::from_uint64(r.stage_timing_us));
+    meta = pmt::dict_add(meta, pmt::mp("stage_cfo_us"),
+                         pmt::from_uint64(r.stage_cfo_us));
+    meta = pmt::dict_add(meta, pmt::mp("stage_sfd_us"),
+                         pmt::from_uint64(r.stage_sfd_us));
+    meta = pmt::dict_add(meta, pmt::mp("stage_cir_us"),
+                         pmt::from_uint64(r.stage_cir_us));
+    meta = pmt::dict_add(meta, pmt::mp("stage_ns_sfd_us"),
+                         pmt::from_uint64(r.stage_ns_sfd_us));
+    meta = pmt::dict_add(meta, pmt::mp("stage_phr_us"),
+                         pmt::from_uint64(r.stage_phr_us));
+    meta = pmt::dict_add(meta, pmt::mp("stage_payload_us"),
+                         pmt::from_uint64(r.stage_payload_us));
+    meta = pmt::dict_add(meta, pmt::mp("stage_total_us"),
+                         pmt::from_uint64(r.stage_total_us));
     meta = pmt::dict_add(
         meta, pmt::mp("worker_id"),
         pmt::from_uint64(static_cast<uint64_t>(r.worker_id)));
+
+    // Accumulate per-stage means (index 7 = total).
+    {
+        std::lock_guard<std::mutex> lock(d_stage_mutex_);
+        d_stage_sums_[0] += r.stage_timing_us;
+        d_stage_sums_[1] += r.stage_cfo_us;
+        d_stage_sums_[2] += r.stage_sfd_us;
+        d_stage_sums_[3] += r.stage_cir_us;
+        d_stage_sums_[4] += r.stage_ns_sfd_us;
+        d_stage_sums_[5] += r.stage_phr_us;
+        d_stage_sums_[6] += r.stage_payload_us;
+        d_stage_sums_[7] += r.stage_total_us;
+        ++d_stage_n_;
+    }
 
     pmt::pmt_t vec;
     if (r.payload.ok && !r.payload.bytes.empty()) {
@@ -764,6 +800,22 @@ UwbRealtimeDemodulator::publish_result(const Job& job,
     }
 
     message_port_pub(pmt::mp("result"), pmt::cons(meta, vec));
+}
+
+uint64_t
+UwbRealtimeDemodulator::stage_mean_us(size_t stage) const
+{
+    if (stage >= 8)
+        return 0;
+    std::lock_guard<std::mutex> lock(d_stage_mutex_);
+    return d_stage_n_ ? d_stage_sums_[stage] / d_stage_n_ : 0;
+}
+
+uint64_t
+UwbRealtimeDemodulator::stage_mean_total_us() const
+{
+    std::lock_guard<std::mutex> lock(d_stage_mutex_);
+    return d_stage_n_ ? d_stage_sums_[7] / d_stage_n_ : 0;
 }
 
 void
@@ -797,6 +849,20 @@ UwbRealtimeDemodulator::snapshot_stats(pmt::pmt_t& meta)
                          pmt::from_uint64(latency_max_us()));
     meta = pmt::dict_add(meta, pmt::mp("worker_utilization_pct"),
                          pmt::from_double(worker_utilization_pct()));
+
+    // per-stage mean demod time (µs) over published jobs
+    const char* stage_names[8] = { "timing", "cfo", "sfd", "cir",
+                                   "ns_sfd", "phr", "payload", "total" };
+    {
+        std::lock_guard<std::mutex> lock(d_stage_mutex_);
+        for (size_t s = 0; s < 8; ++s) {
+            const uint64_t mean =
+                d_stage_n_ ? d_stage_sums_[s] / d_stage_n_ : 0;
+            meta = pmt::dict_add(
+                meta, pmt::mp("stage_mean_" + std::string(stage_names[s]) + "_us"),
+                pmt::from_uint64(mean));
+        }
+    }
 }
 
 void

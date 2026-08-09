@@ -158,6 +158,18 @@ struct DemodResult {
     uint64_t queue_delay_us = 0;        // time spent waiting in job queue
     uint64_t demod_latency_us = 0;      // total worker processing time
     uint64_t wall_latency_us = 0;       // end-to-end from PDU arrival
+
+    // per-stage wall-clock timings (µs), recorded by demodulate_one.
+    // Only stages actually run are non-zero; on early failure the failing
+    // stage gets the elapsed time since the previous completed stage.
+    uint64_t stage_timing_us = 0;
+    uint64_t stage_cfo_us = 0;
+    uint64_t stage_sfd_us = 0;
+    uint64_t stage_cir_us = 0;
+    uint64_t stage_ns_sfd_us = 0;
+    uint64_t stage_phr_us = 0;
+    uint64_t stage_payload_us = 0;
+    uint64_t stage_total_us = 0;        // sum of the above (== demod_latency_us)
 };
 
 // ---------------------------------------------------------------------------

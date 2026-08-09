@@ -23,6 +23,7 @@
 #include <gnuradio/uwb/uwb_phy_profile.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -1357,9 +1358,23 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             res.cir.first_path_sample += window_start;
     };
 
+    // Per-stage wall-clock timing.  `tick` advances a lap clock; each lap
+    // records the elapsed µs into the stage field AND accumulates the running
+    // total, so early-failure paths still attribute the failed stage's time.
+    auto t_prev = std::chrono::steady_clock::now();
+    auto lap = [&](uint64_t& dst) {
+        const auto now = std::chrono::steady_clock::now();
+        dst = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(now - t_prev)
+                .count());
+        res.stage_total_us += dst;
+        t_prev = now;
+    };
+
     // Stage 1: timing (seed = rel_seed if inside this window, else -1)
     const bool t_ok = stage_timing(rx, n, profile, template_wf, rel_seed,
                                    res.timing, scratch);
+    lap(res.stage_timing_us);
     if (!t_ok) {
         res.status = DemodStatus::TimingFailed;
         rebase();
@@ -1367,49 +1382,61 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     }
     // Stage 2: CFO
     if (!stage_cfo(rx, n, profile, res.timing, res.cfo, scratch)) {
+        lap(res.stage_cfo_us);
         res.status = DemodStatus::CfoFailed;
         rebase();
         return res;
     }
+    lap(res.stage_cfo_us);
     // Stage 3: SFD (profile sfd_mode)
     const auto sfd_seq = gr::uwb::demod::GetSfdSequence(profile.sfd_mode);
     if (!stage_sfd(rx, n, profile, res.timing, sfd_seq, template_wf, res.sfd,
                    scratch)) {
+        lap(res.stage_sfd_us);
         res.status = DemodStatus::SfdFailed;
         rebase();
         return res;
     }
+    lap(res.stage_sfd_us);
     // Stage 4: CIR + soft chips on the CFO-compensated frame.
     const int8_t* pc = GetPreambleCode(profile.code_index);
     std::vector<int8_t> pcode(pc, pc + kQm35CodeLength);
     if (!stage_cir_softchips(scratch.derotated.data(), n, profile, res.timing,
                              pcode, res.cir, scratch)) {
+        lap(res.stage_cir_us);
         res.status = DemodStatus::CirFailed;
         rebase();
         return res;
     }
+    lap(res.stage_cir_us);
     // Stage 5: NS-SFD location in the soft-chip stream.
     const auto nsfd_seq = gr::uwb::demod::GetSfdSequence(profile.sfd_mode);
     if (!stage_ns_sfd(scratch.soft_chips, profile, nsfd_seq, kQm35ChipsPerSymbol,
                       res.ns_sfd, scratch)) {
+        lap(res.stage_ns_sfd_us);
         res.status = DemodStatus::SfdFailed;
         rebase();
         return res;
     }
+    lap(res.stage_ns_sfd_us);
     // Stage 6: BPRF PHR demod + conv decode + SECDED.
     if (!stage_phr(scratch.soft_chips, profile, res.ns_sfd, kQm35ChipsPerSymbol,
                    res.phr, scratch)) {
+        lap(res.stage_phr_us);
         res.status = DemodStatus::PhrFailed;
         rebase();
         return res;
     }
+    lap(res.stage_phr_us);
     // Stage 7: payload BPM-BPSK + RS + FCS.
     if (!stage_payload_fcs(scratch.soft_chips, profile, res.phr, res.ns_sfd,
                            kQm35ChipsPerSymbol, res.payload, scratch)) {
+        lap(res.stage_payload_us);
         res.status = DemodStatus::PayloadFailed;
         rebase();
         return res;
     }
+    lap(res.stage_payload_us);
     res.status = (res.payload.ok && res.payload.fcs_pass)
                      ? DemodStatus::Success
                      : DemodStatus::FcsFailed;

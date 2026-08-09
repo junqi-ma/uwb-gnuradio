@@ -2125,6 +2125,16 @@ int main(int argc, char** argv)
                     demod->worker_utilization_pct());
         std::printf("drops             : %s\n",
                     demod->jobs_dropped() == 0 ? "NONE (target met)" : "YES");
+        std::printf("stage mean(us)    : timing=%llu cfo=%llu sfd=%llu cir=%llu "
+                    "ns_sfd=%llu phr=%llu payload=%llu total=%llu\n",
+                    static_cast<unsigned long long>(demod->stage_mean_us(0)),
+                    static_cast<unsigned long long>(demod->stage_mean_us(1)),
+                    static_cast<unsigned long long>(demod->stage_mean_us(2)),
+                    static_cast<unsigned long long>(demod->stage_mean_us(3)),
+                    static_cast<unsigned long long>(demod->stage_mean_us(4)),
+                    static_cast<unsigned long long>(demod->stage_mean_us(5)),
+                    static_cast<unsigned long long>(demod->stage_mean_us(6)),
+                    static_cast<unsigned long long>(demod->stage_mean_total_us()));
         return 0;
     }
 
