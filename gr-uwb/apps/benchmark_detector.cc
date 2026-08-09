@@ -1910,8 +1910,8 @@ int main(int argc, char** argv)
         std::printf("chips_per_symbol      : %zu\n",
                     gr::uwb::demod::kQm35ChipsPerSymbol);
         std::printf("golden vectors        : testdata/realtime_demod_golden/\n");
-        std::printf("implemented stages    : 6/7 (timing/cfo/sfd/cir/"
-                    "ns_sfd/phr done; payload pending)\n");
+        std::printf("implemented stages    : 7/7 (timing/cfo/sfd/cir/"
+                    "ns_sfd/phr/payload done)\n");
 
         if (mode == "demod-stage-profile") {
             // Per-stage latency over the clean golden window (R2).
@@ -1953,8 +1953,10 @@ int main(int argc, char** argv)
             gr::uwb::demod::CirResult cir;
             gr::uwb::demod::NsSfdResult ns;
             gr::uwb::demod::PhrResult phr;
+            gr::uwb::demod::PayloadResult pay;
             auto chain = [&](bool measure, double* d_t, double* d_c, double* d_s,
-                             double* d_r, double* d_n, double* d_p) {
+                             double* d_r, double* d_n, double* d_p,
+                             double* d_pay) {
                 bool ok = true;
                 auto t_ref = std::chrono::steady_clock::now();
                 auto el = [&]() {
@@ -1997,22 +1999,30 @@ int main(int argc, char** argv)
                 ok &= gr::uwb::demod::core::stage_phr(
                     scratch.soft_chips, prof, ns,
                     gr::uwb::demod::kQm35ChipsPerSymbol, phr, scratch);
-                if (measure)
+                if (measure) {
                     *d_p = el();
+                    t_ref = std::chrono::steady_clock::now();
+                }
+                ok &= gr::uwb::demod::core::stage_payload_fcs(
+                    scratch.soft_chips, prof, phr, ns,
+                    gr::uwb::demod::kQm35ChipsPerSymbol, pay, scratch);
+                if (measure)
+                    *d_pay = el();
                 return ok;
             };
             // Warm-up pass (allocations / cold cache), then measured pass.
-            chain(false, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+            chain(false, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                  nullptr);
             double d_timing = 0, d_cfo = 0, d_sfd = 0, d_cir = 0, d_ns = 0,
-                   d_phr = 0;
-            const bool all_ok =
-                chain(true, &d_timing, &d_cfo, &d_sfd, &d_cir, &d_ns, &d_phr);
-            const double d_total =
-                d_timing + d_cfo + d_sfd + d_cir + d_ns + d_phr;
+                   d_phr = 0, d_pay = 0;
+            const bool all_ok = chain(true, &d_timing, &d_cfo, &d_sfd, &d_cir,
+                                      &d_ns, &d_phr, &d_pay);
+            const double d_total = d_timing + d_cfo + d_sfd + d_cir + d_ns +
+                                   d_phr + d_pay;
 
             std::printf("stages                : %s\n",
                         all_ok ? "timing[ok] cfo[ok] sfd[ok] cir[ok] "
-                                "ns_sfd[ok] phr[ok]"
+                                "ns_sfd[ok] phr[ok] payload[ok]"
                                : "ONE OR MORE STAGES FAILED");
             std::printf("timing start=%lld period=%.3f peaks=%zu metric=%.3f\n",
                         static_cast<long long>(tr.preamble_start_sample),
@@ -2034,12 +2044,18 @@ int main(int argc, char** argv)
             std::printf("phr   psdu=%u rate=%.2f secded_ok=%d\n",
                         phr.psdu_length, phr.data_rate_mbps,
                         phr.secded_uncorrectable ? 0 : 1);
+            std::printf("payload bytes=%zu fcs_pass=%d recv=0x%04x "
+                        "calc=0x%04x\n",
+                        pay.bytes.size(), pay.fcs_pass ? 1 : 0,
+                        pay.received_fcs, pay.calculated_fcs);
             std::printf("latency(us)           : timing=%.1f cfo=%.1f "
-                        "sfd=%.1f cir=%.1f ns_sfd=%.1f phr=%.1f total=%.1f\n",
-                        d_timing, d_cfo, d_sfd, d_cir, d_ns, d_phr, d_total);
+                        "sfd=%.1f cir=%.1f ns_sfd=%.1f phr=%.1f payload=%.1f "
+                        "total=%.1f\n",
+                        d_timing, d_cfo, d_sfd, d_cir, d_ns, d_phr, d_pay,
+                        d_total);
             std::printf("soft-chip rate        : %.2f Mchips/s\n",
                         cir.soft_chip_count / (d_cir / 1e6) / 1e6);
-            std::printf("NOTE: payload/FCS stage pending (R4).\n");
+            std::printf("NOTE: 7/7 demod stages complete (R0-R4).\n");
             return all_ok ? 0 : 1;
         }
         std::printf("NOTE: demod-core / demod-pdu / scheduled-demod-e2e land "

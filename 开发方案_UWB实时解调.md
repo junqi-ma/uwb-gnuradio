@@ -494,6 +494,17 @@ MATLAB Coder/MEX可用于验证数值kernel和估算上限，但生产C++不能�
 
 完成标准：clean样本payload/FCS完全一致。
 
+> **✅ R4 完成（2026-08-09）**
+> - **stage_payload_fcs**（`uwb_demod_core.h`）移植 `helperUWBPayloadDecode` + `lrwpan.internal.hrpRS` + `ieee802154CRC16`：
+>   - **Payload BPRF demod**：6.81 Mbps（cpb=8、cpSym=64），scrambler LFSR offset = 21×64 = **1344**，numSymbols = `psdu_bits + 48×ceil(psdu_bits/330)`（RS 编码后位数，golden 1208）。
+>   - **Joint Viterbi**：`[cwPHR | cwPayload]` 一起 CL-3 译码（同 MATLAB），`rsCW = decoded[19 : total-2]`。
+>   - **RS(63,55) 译码**：GF(2⁶) 本原多项式 **x⁶+x⁵+1 (0x61)**（非 x⁶+x+1！），根 α¹..α⁸，MSB-first 打包，4 blocks（330/330/330/26 data + 各 48 parity），partial block **leading-pad**。**由 Grok Build 实现**（rs_gf_mul/pow/inv + Berlekamp-Massey + Chien + Forney + rs_decode_stream），独立测试 0/1016 位错误。
+>   - **Bytes + FCS**：bit→byte LSB-first，IEEE 802.15.4 CRC16（反射 0x8408）。
+> - **关键排坑**：① RS 场是 **x⁶+x⁵+1**（初试 x⁶+x+1 全错，暴力枚举 6 个本原多项式找到）；② payload scrambler offset=1344；③ partial block 数据在 systematic 域 **leading-pad**（Grok 验证）；④ `payloadStart = phrStart + 512×21`；⑤ bit→byte 用 LSB-first（`bit2int(...,8,false)`）。
+> - **golden 导出**：`stage_rs_coded.bin`（1208）+ `stage_rs_data.bin`（1016）+ `stage_payload_bytes.bin`（127）+ `stage_payload_bits.bin`。
+> - **QA**：`qa_uwb_demod_core.cc` 新增 3 用例（CRC16 对照 / **完整链路 payload+FCS 对照** / bad-input），共 **15 用例**。**CTest 6/6**。
+> - **stage profile**：payload **248µs**，**7/7 阶段全实现**，golden 全对齐（127 bytes、FCS 0x584b）。
+
 ### R5：GNU Radio异步block
 
 - message/PDU接口；

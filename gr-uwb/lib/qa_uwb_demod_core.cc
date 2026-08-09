@@ -88,6 +88,30 @@ bool load_i8(const std::string& path, std::vector<int8_t>& out)
     return true;
 }
 
+// Load a raw uint8 file.
+bool load_u8(const std::string& path, std::vector<uint8_t>& out)
+{
+    std::ifstream f(path, std::ios::binary);
+    if (!f)
+        return false;
+    f.seekg(0, std::ios::end);
+    const size_t bytes = static_cast<size_t>(f.tellg());
+    f.seekg(0, std::ios::beg);
+    if (bytes == 0)
+        return false;
+    out.resize(bytes);
+    f.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(bytes));
+    return true;
+}
+
+// The 1016-sample code-9 SYNC waveform template (reference_preamble.bin).
+std::vector<gr_complex> load_reference_template()
+{
+    std::vector<gr_complex> tmpl;
+    load_cf32("../../../testdata/reference_preamble.bin", tmpl);
+    return tmpl;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_timing_matches_golden)
@@ -432,4 +456,64 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r3_bad_input_fails_cleanly)
     PhrResult phr;
     BOOST_CHECK(!core::stage_phr(short_soft, prof, bad_ns, kQm35ChipsPerSymbol,
                                  phr, scratch));
+}
+
+// ---------------------------------------------------------------------------
+// R4: payload BPM-BPSK + RS + FCS (helperUWBPayloadDecode / hrpRS / CRC16).
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r4_crc16_matches_golden)
+{
+    // IEEE 802.15.4 CRC-16 (reflected 0x8408): golden FCS of the 125 data
+    // bytes = 0x584b.
+    std::vector<uint8_t> data;
+    BOOST_REQUIRE(load_u8(golden_dir() + "/stage_payload_bytes.bin", data));
+    BOOST_REQUIRE_EQUAL(data.size(), size_t(127));
+    const uint16_t crc = core::detail::crc16_802154(data.data(), 125);
+    BOOST_CHECK_EQUAL(crc, uint16_t(0x584b));
+    // The received FCS in the last two bytes (little-endian) must match.
+    const uint16_t recv = static_cast<uint16_t>(data[125]) |
+                          (static_cast<uint16_t>(data[126]) << 8);
+    BOOST_CHECK_EQUAL(recv, uint16_t(0x584b));
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r4_payload_fcs_matches_golden)
+{
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+    prof.sfd_mode = "ieee";
+    const auto res = core::demodulate_one(iq.data(), iq.size(), prof, 1, 9984, 0,
+                                          load_reference_template(), scratch);
+    BOOST_REQUIRE(res.status == DemodStatus::Success);
+    BOOST_REQUIRE(res.phr.ok);
+    BOOST_REQUIRE(res.payload.ok);
+    // Golden: 127 payload bytes, FCS pass, received == calculated == 0x584b.
+    std::vector<uint8_t> gbytes;
+    BOOST_REQUIRE(load_u8(golden_dir() + "/stage_payload_bytes.bin", gbytes));
+    BOOST_REQUIRE_EQUAL(res.payload.bytes.size(), gbytes.size());
+    for (size_t i = 0; i < gbytes.size(); ++i)
+        BOOST_CHECK_EQUAL(res.payload.bytes[i], gbytes[i]);
+    BOOST_CHECK(res.payload.fcs_pass);
+    BOOST_CHECK_EQUAL(res.payload.received_fcs, uint16_t(0x584b));
+    BOOST_CHECK_EQUAL(res.payload.calculated_fcs, uint16_t(0x584b));
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r4_bad_input_fails_cleanly)
+{
+    std::vector<float> short_soft(5000, 0.0f);
+    auto prof = Qm35825Profile::Default();
+    core::DemodScratch scratch;
+    scratch.reserve(8192);
+    PhrResult phr;
+    phr.ok = true;
+    phr.psdu_length = 127;
+    NsSfdResult ns;
+    ns.ok = true;
+    ns.sfd_end_chip = 100000; // PHR end beyond the buffer
+    PayloadResult pay;
+    BOOST_CHECK(!core::stage_payload_fcs(short_soft, prof, phr, ns,
+                                         kQm35ChipsPerSymbol, pay, scratch));
 }

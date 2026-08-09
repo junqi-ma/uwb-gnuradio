@@ -676,6 +676,342 @@ inline void hrp_secded(const std::vector<int8_t>& sys13,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared BPM-BPSK BPRF demod kernel (used by both the PHR and payload fields).
+// soft: chip-rate soft chips (0-based absolute).  start: field start chip.
+// nsym: number of BPM-BPSK symbols.  cpb: chips per burst.  cps: chips per
+// symbol (BPM half-symbol offset = cps/2).  scram_offset: LFSR start bit
+// (PHR=0, payload=1344).  pol: sfd polarity.  Fills g0 (BPM position bit) and
+// g1 (BPSK polarity bit), each nsym entries.  Mirrors helperUWBBPRFDemodKernel.
+// ---------------------------------------------------------------------------
+inline bool bprf_demod(const std::vector<float>& soft, int64_t start,
+                       size_t nsym, size_t cpb, size_t cps, size_t scram_offset,
+                       int8_t pol, std::vector<int8_t>& g0,
+                       std::vector<int8_t>& g1)
+{
+    if (start < 0 ||
+        static_cast<size_t>(start + static_cast<int64_t>(cps * nsym)) >
+            soft.size())
+        return false;
+    std::vector<int8_t> spread;
+    bprf_spreading(spread, scram_offset, cpb * nsym);
+    g0.resize(nsym);
+    g1.resize(nsym);
+    const size_t third = cps / 2;
+    for (size_t s = 0; s < nsym; ++s) {
+        const size_t base = static_cast<size_t>(start) + s * cps;
+        const int8_t* sp = &spread[s * cpb];
+        float b0 = -1e30f, b1 = -1e30f, m0 = 0.0f, m1 = 0.0f;
+        for (size_t hop = 0; hop < 2; ++hop) {
+            const size_t f0 = hop * cpb;
+            float metric0 = 0.0f, metric1 = 0.0f;
+            for (size_t c = 0; c < cpb; ++c) {
+                metric0 += pol * soft[base + f0 + c] * static_cast<float>(sp[c]);
+                metric1 += pol * soft[base + third + f0 + c] *
+                           static_cast<float>(sp[c]);
+            }
+            if (std::abs(metric0) > b0) {
+                b0 = std::abs(metric0);
+                m0 = metric0;
+            }
+            if (std::abs(metric1) > b1) {
+                b1 = std::abs(metric1);
+                m1 = metric1;
+            }
+        }
+        float best;
+        if (b0 >= b1) {
+            g0[s] = 0;
+            best = m0;
+        } else {
+            g0[s] = 1;
+            best = m1;
+        }
+        g1[s] = (best < 0.0f) ? 1 : 0;
+    }
+    return true;
+}
+
+// IEEE 802.15.4 CRC-16 (reflected polynomial 0x8408, init 0).  FCS algorithm
+// used by DW1000 / QM35 frames (matches uwbdecoder.ieee802154CRC16).
+inline uint16_t crc16_802154(const uint8_t* data, size_t len)
+{
+    uint16_t crc = 0;
+    const uint16_t poly = 0x8408;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            if (crc & 1)
+                crc = static_cast<uint16_t>((crc >> 1) ^ poly);
+            else
+                crc = static_cast<uint16_t>(crc >> 1);
+        }
+    }
+    return crc;
+}
+
+// ---------------------------------------------------------------------------
+// IEEE 802.15.4a RS(63,55) over GF(2^6) — matches lrwpan.internal.hrpRS.
+// Field primitive poly: x^6 + x^5 + 1 (0x61).  Generator roots alpha^1..alpha^8
+// with alpha = 2 (the element x).  Symbols are 6-bit, packed MSB-first.
+// Systematic codeword layout (low-first poly): [55 data][8 parity] symbols =
+// 330 data bits + 48 parity bits = 378 bits.  Partial blocks are formed by
+// LEADING zero-padding the data field to 330 bits (verified on golden vectors).
+// ---------------------------------------------------------------------------
+
+// GF(2^6) multiply (poly 0x61).
+inline int rs_gf_mul(int a, int b)
+{
+    int p = 0;
+    a &= 0x3f;
+    b &= 0x3f;
+    for (int i = 0; i < 6; ++i) {
+        if (b & 1)
+            p ^= a;
+        const bool carry = (a & 0x20) != 0;
+        a = (a << 1) & 0x3f;
+        if (carry)
+            a ^= 0x21; // lower 6 bits of 0x61 (x^6 = x^5 + 1)
+        b >>= 1;
+    }
+    return p & 0x3f;
+}
+
+// GF(2^6) power a^n (n may be negative via modular reduction mod 63).
+inline int rs_gf_pow(int a, int n)
+{
+    int r = 1;
+    a &= 0x3f;
+    n %= 63;
+    if (n < 0)
+        n += 63;
+    while (n) {
+        if (n & 1)
+            r = rs_gf_mul(r, a);
+        a = rs_gf_mul(a, a);
+        n >>= 1;
+    }
+    return r;
+}
+
+inline int rs_gf_inv(int a)
+{
+    return a ? rs_gf_pow(a, 62) : 0;
+}
+
+// Pack 378 MSB-first bits -> 63 GF(2^6) symbols.
+inline void rs_bits_to_syms(const int8_t* bits378, int* syms63)
+{
+    for (int i = 0; i < 63; ++i) {
+        int s = 0;
+        for (int b = 0; b < 6; ++b)
+            s = (s << 1) | (bits378[i * 6 + b] & 1);
+        syms63[i] = s;
+    }
+}
+
+// Unpack nsym symbols -> 6*nsym MSB-first bits.
+inline void rs_syms_to_bits(const int* syms, int nsym, int8_t* bits)
+{
+    for (int i = 0; i < nsym; ++i) {
+        for (int b = 0; b < 6; ++b)
+            bits[i * 6 + b] =
+                static_cast<int8_t>((syms[i] >> (5 - b)) & 1);
+    }
+}
+
+// Syndromes S_i = r(alpha^i), i=1..8.  Low-first: r(x) = sum_j r[j] x^j.
+inline void rs_syndromes(const int* r63, int* S8)
+{
+    for (int i = 1; i <= 8; ++i) {
+        const int ai = rs_gf_pow(2, i);
+        int s = 0;
+        int ap = 1;
+        for (int j = 0; j < 63; ++j) {
+            s ^= rs_gf_mul(r63[j], ap);
+            ap = rs_gf_mul(ap, ai);
+        }
+        S8[i - 1] = s;
+    }
+}
+
+// Berlekamp-Massey on S1..S8.  Returns L; Lambda[0..L] with Lambda[0]=1.
+inline int rs_berlekamp_massey(const int* S8, int* Lambda /* len >= 9 */)
+{
+    int C[9] = { 1, 0, 0, 0, 0, 0, 0, 0, 0 };
+    int B[9] = { 1, 0, 0, 0, 0, 0, 0, 0, 0 };
+    int L = 0;
+    int m = 1;
+    int b = 1;
+    for (int n = 0; n < 8; ++n) {
+        int delta = S8[n];
+        for (int i = 1; i <= L; ++i)
+            delta ^= rs_gf_mul(C[i], S8[n - i]);
+        if (delta == 0) {
+            ++m;
+        } else {
+            int T[9];
+            for (int i = 0; i < 9; ++i)
+                T[i] = C[i];
+            const int scale = rs_gf_mul(delta, rs_gf_inv(b));
+            for (int i = 0; i < 9 - m; ++i)
+                C[i + m] ^= rs_gf_mul(scale, B[i]);
+            if (2 * L <= n) {
+                L = n + 1 - L;
+                for (int i = 0; i < 9; ++i)
+                    B[i] = T[i];
+                b = delta;
+                m = 1;
+            } else {
+                ++m;
+            }
+        }
+    }
+    for (int i = 0; i < 9; ++i)
+        Lambda[i] = C[i];
+    return L;
+}
+
+// Chien search: roots of Lambda at alpha^{-j} => error at position j.
+// Returns number of roots (may exceed L if uncorrectable).
+inline int rs_chien_search(const int* Lambda, int L, int* err_pos /* <=4 */)
+{
+    int nerr = 0;
+    for (int j = 0; j < 63; ++j) {
+        const int xinv = rs_gf_pow(2, (63 - j) % 63); // alpha^{-j}
+        int v = 0;
+        int xp = 1;
+        for (int i = 0; i <= L; ++i) {
+            v ^= rs_gf_mul(Lambda[i], xp);
+            xp = rs_gf_mul(xp, xinv);
+        }
+        if (v == 0) {
+            if (nerr < 4)
+                err_pos[nerr] = j;
+            ++nerr;
+        }
+    }
+    return nerr;
+}
+
+// Forney (b=1, roots alpha^1..): e_j = Omega(X^{-1}) / Lambda'(X^{-1}).
+inline void rs_forney(const int* S8, const int* Lambda, int L,
+                      const int* err_pos, int nerr, int* err_val)
+{
+    int Omega[8] = {};
+    for (int i = 0; i < 8; ++i) {
+        int o = 0;
+        for (int j = 0; j <= L && j <= i; ++j)
+            o ^= rs_gf_mul(Lambda[j], S8[i - j]);
+        Omega[i] = o;
+    }
+    for (int k = 0; k < nerr; ++k) {
+        const int j = err_pos[k];
+        const int Xinv = rs_gf_pow(2, (63 - j) % 63);
+        int num = 0;
+        int xp = 1;
+        for (int i = 0; i < 8; ++i) {
+            num ^= rs_gf_mul(Omega[i], xp);
+            xp = rs_gf_mul(xp, Xinv);
+        }
+        // Lambda' in char 2: only odd powers, Lambda_i * x^{i-1}
+        int den = 0;
+        xp = 1; // Xinv^0 for i=1
+        for (int i = 1; i <= L; i += 2) {
+            den ^= rs_gf_mul(Lambda[i], xp);
+            xp = rs_gf_mul(xp, rs_gf_mul(Xinv, Xinv));
+        }
+        err_val[k] = den ? rs_gf_mul(num, rs_gf_inv(den)) : 0;
+    }
+}
+
+// Decode one RS(63,55) block: 378 coded bits -> 330 data bits (MSB-first).
+// Returns false if the block is uncorrectable (more than t=4 symbol errors).
+inline bool rs_decode_block(const int8_t* coded378, int8_t* data330)
+{
+    int r[63];
+    rs_bits_to_syms(coded378, r);
+
+    int S[8];
+    rs_syndromes(r, S);
+    bool all0 = true;
+    for (int i = 0; i < 8; ++i)
+        if (S[i])
+            all0 = false;
+
+    if (!all0) {
+        int Lambda[9] = {};
+        const int L = rs_berlekamp_massey(S, Lambda);
+        if (L <= 0 || L > 4)
+            return false;
+        int err_pos[4] = {};
+        const int nerr = rs_chien_search(Lambda, L, err_pos);
+        if (nerr != L)
+            return false;
+        int err_val[4] = {};
+        rs_forney(S, Lambda, L, err_pos, nerr, err_val);
+        for (int k = 0; k < nerr; ++k)
+            r[err_pos[k]] ^= err_val[k];
+        // Verify correction
+        rs_syndromes(r, S);
+        for (int i = 0; i < 8; ++i)
+            if (S[i])
+                return false;
+    }
+
+    rs_syms_to_bits(r, 55, data330);
+    return true;
+}
+
+// Full-stream RS decoder for a PSDU of `data_bits` bits (e.g. 8*L).
+// Splits the coded bit stream into num_blocks = ceil(data_bits/330) blocks,
+// each carrying min(330, remaining) data bits + 48 parity bits.  Partial
+// blocks are leading-zero-padded to 330 data bits before decode.
+inline bool rs_decode_stream(const std::vector<int8_t>& coded,
+                             size_t data_bits,
+                             std::vector<int8_t>& data_out)
+{
+    data_out.clear();
+    data_out.reserve(data_bits);
+    if (data_bits == 0)
+        return true;
+
+    const size_t num_blocks = (data_bits + 329) / 330;
+    size_t coded_off = 0;
+    size_t data_off = 0;
+    for (size_t b = 0; b < num_blocks; ++b) {
+        const size_t this_data =
+            std::min<size_t>(330, data_bits - data_off);
+        const size_t this_coded = this_data + 48;
+        if (coded_off + this_coded > coded.size())
+            return false;
+
+        int8_t block378[378];
+        for (int i = 0; i < 378; ++i)
+            block378[i] = 0;
+        // Leading-zero pad: real data occupies the last this_data bits of
+        // the 330-bit systematic data field (MATLAB hrpRS convention).
+        const size_t data_start = 330 - this_data;
+        for (size_t i = 0; i < this_data; ++i)
+            block378[data_start + i] =
+                static_cast<int8_t>(coded[coded_off + i] & 1);
+        for (size_t i = 0; i < 48; ++i)
+            block378[330 + i] = static_cast<int8_t>(
+                coded[coded_off + this_data + i] & 1);
+
+        int8_t data330[330];
+        if (!rs_decode_block(block378, data330))
+            return false;
+
+        for (size_t i = 0; i < this_data; ++i)
+            data_out.push_back(data330[data_start + i]);
+
+        coded_off += this_coded;
+        data_off += this_data;
+    }
+    return data_out.size() == data_bits;
+}
+
 } // namespace detail
 
 // ---------------------------------------------------------------------------
@@ -777,42 +1113,10 @@ inline bool stage_phr(const std::vector<float>& soft_chips,
         return false;
     const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
 
-    std::vector<int8_t> spread;
-    detail::bprf_spreading(spread, 0, cpb * nsym);
-
-    std::vector<int8_t> g0(nsym), g1(nsym);
-    for (size_t s = 0; s < nsym; ++s) {
-        const size_t base = static_cast<size_t>(phr_start) + s * cps;
-        const int8_t* spreading = &spread[s * cpb];
-        float b0 = -1e30f, b1 = -1e30f, m0 = 0.0f, m1 = 0.0f;
-        for (size_t hop = 0; hop < 2; ++hop) {
-            const size_t f0 = hop * cpb;
-            float metric0 = 0.0f, metric1 = 0.0f;
-            for (size_t c = 0; c < cpb; ++c) {
-                metric0 +=
-                    pol * soft_chips[base + f0 + c] * static_cast<float>(spreading[c]);
-                metric1 += pol * soft_chips[base + cps / 2 + f0 + c] *
-                           static_cast<float>(spreading[c]);
-            }
-            if (std::abs(metric0) > b0) {
-                b0 = std::abs(metric0);
-                m0 = metric0;
-            }
-            if (std::abs(metric1) > b1) {
-                b1 = std::abs(metric1);
-                m1 = metric1;
-            }
-        }
-        float best;
-        if (b0 >= b1) {
-            g0[s] = 0;
-            best = m0;
-        } else {
-            g0[s] = 1;
-            best = m1;
-        }
-        g1[s] = (best < 0.0f) ? 1 : 0;
-    }
+    std::vector<int8_t> g0, g1;
+    if (!detail::bprf_demod(soft_chips, phr_start, nsym, cpb, cps, 0, pol, g0,
+                            g1))
+        return false;
 
     std::vector<int8_t> rx(2 * nsym);
     for (size_t s = 0; s < nsym; ++s) {
@@ -868,8 +1172,96 @@ inline bool stage_phr(const std::vector<float>& soft_chips,
 }
 
 // ---------------------------------------------------------------------------
-// Full pipeline (R1+R2+R3 subset): timing + CFO + SFD + CIR/soft chips +
-// NS-SFD + PHR.  Payload/FCS is R4 and returns "not implemented".
+// Stage 7 — payload BPM-BPSK + RS + FCS (R4).
+// Mirrors helperUWBPayloadDecode + lrwpan.internal.hrpRS + ieee802154CRC16:
+//   * payload field at 6.81 Mbps (8 chips/burst, 64 chips/symbol), scrambler
+//     LFSR offset = 21 PHR symbols * 64 = 1344.
+//   * joint rate-1/2 CL-3 Viterbi decode of [PHR | payload] codewords, then
+//     slice out the RS-coded stream (drop the first 19 PHR bits + 2 tails).
+//   * RS(63,55) decode (detail::rs_decode_stream) -> PSDU bits.
+//   * pack bits to bytes LSB-first, compute IEEE 802.15.4 CRC-16 FCS.
+// Golden: 127 payload bytes, fcs_pass=1, received==calculated==0x584b.
+// ---------------------------------------------------------------------------
+inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
+                              const Qm35825Profile& profile,
+                              const PhrResult& phr,
+                              const NsSfdResult& ns_sfd,
+                              size_t chips_per_symbol,
+                              PayloadResult& out,
+                              DemodScratch& scratch)
+{
+    out = PayloadResult{};
+    if (soft_chips.empty() || !phr.ok || !ns_sfd.ok || phr.psdu_length == 0)
+        return false;
+    const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
+    const int64_t phr_start = ns_sfd.sfd_end_chip + 1;
+    if (phr_start < 0)
+        return false;
+    // The payload field begins right after the 21 PHR symbols (512 chips each).
+    const int64_t payload_start = phr_start + static_cast<int64_t>(512 * 21);
+    const size_t psdu_bits = static_cast<size_t>(phr.psdu_length) * 8;
+    const size_t num_blocks = (psdu_bits + 329) / 330;
+    const size_t nsym = psdu_bits + 48 * num_blocks;
+
+    // PHR + payload coded bits (joint Viterbi decode, as in MATLAB).
+    std::vector<int8_t> g0p, g1p, g0, g1;
+    if (!detail::bprf_demod(soft_chips, phr_start, 21, 64, 512, 0, pol, g0p,
+                            g1p))
+        return false;
+    if (!detail::bprf_demod(soft_chips, payload_start, nsym, 8, 64, 1344, pol,
+                            g0, g1))
+        return false;
+
+    const size_t total = 21 + nsym;
+    std::vector<int8_t> rx(2 * total);
+    for (size_t s = 0; s < 21; ++s) {
+        rx[2 * s] = g0p[s];
+        rx[2 * s + 1] = g1p[s];
+    }
+    for (size_t s = 0; s < nsym; ++s) {
+        rx[2 * (s + 21)] = g0[s];
+        rx[2 * (s + 21) + 1] = g1[s];
+    }
+    std::vector<int8_t> decoded;
+    detail::vitdec_cl3(rx.data(), total, decoded);
+    if (decoded.size() < total)
+        return false;
+
+    // RS-coded stream = decoded[19 : total-2) (skip PHR bits + 2 tail bits).
+    std::vector<int8_t> rs_cw(decoded.begin() + 19,
+                              decoded.begin() + (total - 2));
+    if (rs_cw.size() != nsym)
+        return false;
+
+    std::vector<int8_t> psdu_bits_out;
+    if (!detail::rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out))
+        return false;
+
+    // Bits -> bytes, LSB-first (bit2int(..., 8, false)).
+    const size_t nbytes = psdu_bits_out.size() / 8;
+    out.bytes.resize(nbytes);
+    for (size_t i = 0; i < nbytes; ++i) {
+        uint8_t b = 0;
+        for (int bit = 0; bit < 8; ++bit)
+            b |= static_cast<uint8_t>(psdu_bits_out[8 * i + bit]) << bit;
+        out.bytes[i] = b;
+    }
+    out.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
+
+    // FCS (little-endian in the last two bytes).
+    if (nbytes >= 2) {
+        out.calculated_fcs = detail::crc16_802154(out.bytes.data(), nbytes - 2);
+        out.received_fcs = static_cast<uint16_t>(out.bytes[nbytes - 2]) |
+                           (static_cast<uint16_t>(out.bytes[nbytes - 1]) << 8);
+        out.fcs_pass = (out.received_fcs == out.calculated_fcs);
+    }
+    out.ok = true;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Full pipeline (R1-R4): timing + CFO + SFD + CIR/soft chips + NS-SFD + PHR +
+// payload/FCS.
 // ---------------------------------------------------------------------------
 inline DemodResult demodulate_one(const std::complex<float>* rx,
                                   size_t n,
@@ -925,7 +1317,15 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         res.status = DemodStatus::PhrFailed;
         return res;
     }
-    res.status = DemodStatus::Success;
+    // Stage 7: payload BPM-BPSK + RS + FCS.
+    if (!stage_payload_fcs(scratch.soft_chips, profile, res.phr, res.ns_sfd,
+                           kQm35ChipsPerSymbol, res.payload, scratch)) {
+        res.status = DemodStatus::PayloadFailed;
+        return res;
+    }
+    res.status = (res.payload.ok && res.payload.fcs_pass)
+                     ? DemodStatus::Success
+                     : DemodStatus::FcsFailed;
     return res;
 }
 
