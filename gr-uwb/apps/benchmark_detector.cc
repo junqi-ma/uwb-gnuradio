@@ -29,11 +29,13 @@
  *       detector-profile        — per-stage wall-time breakdown + advice
  *       demod-async             — UwbRealtimeDemodulator worker-pool throughput
  *       demod-soak              — sustained-rate soak (R6: queue/latency/drop)
+ *       demod-robust            — R7 AWGN/CFO/multipath/collision stats
  *       scheduled-demod-e2e     — extractor → raw-capture ∥ demod flowgraph
  *     options: --reps N --energy-dec D --coarse-dec D --target N --gap G
  *              --regions N  (detector-region/profile, default 200)
  *              --buffer-items N --max-noutput-items N
  *              --source pattern|vector --threshold VALUE --repeat N
+ *              --robust-reps N  (demod-robust realization count scale)
  */
 
 #ifdef HAVE_CONFIG_H
@@ -67,6 +69,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1809,6 +1812,7 @@ int main(int argc, char** argv)
     float energy_threshold = 1e-3f;
     bool threshold_set = false;
     int repeat = 1;
+    size_t robust_reps = 0; // 0 → use per-axis defaults (50/20/…)
 
     for (int i = 3; i + 1 < argc; i += 2) {
         std::string k = argv[i];
@@ -1828,6 +1832,8 @@ int main(int argc, char** argv)
             energy_threshold = std::stof(argv[i + 1]);
             threshold_set = true;
         } else if (k == "--repeat") repeat = std::stoi(argv[i + 1]);
+        else if (k == "--robust-reps")
+            robust_reps = std::stoul(argv[i + 1]);
     }
 
     // Layered GR modes: same source/target/gap/buffer surface.
@@ -2244,6 +2250,225 @@ int main(int argc, char** argv)
         std::printf("every slot -> result   : %s\n",
                     done == emitted ? "YES" : "NO");
         return (raw_n == emitted && done == emitted) ? 0 : 1;
+    }
+
+    if (mode == "demod-robust") {
+        // R7: statistical robustness suite over the golden window.
+        // Axes: AWGN / CFO / multipath / collision.  Prints tables only
+        // (nothing written to disk).  --robust-reps N scales realizations.
+        const std::string gw = "testdata/realtime_demod_golden/window.cfile";
+        std::ifstream f(gw, std::ios::binary);
+        if (!f) {
+            std::printf("NOTE: %s not found (run from repo root).\n",
+                        gw.c_str());
+            return 1;
+        }
+        f.seekg(0, std::ios::end);
+        const size_t bytes = static_cast<size_t>(f.tellg());
+        f.seekg(0, std::ios::beg);
+        std::vector<std::complex<float>> iq(
+            bytes / sizeof(std::complex<float>));
+        f.read(reinterpret_cast<char*>(iq.data()),
+               static_cast<std::streamsize>(bytes));
+
+        std::vector<std::complex<float>> tmpl;
+        {
+            std::ifstream tf("testdata/reference_preamble.bin",
+                             std::ios::binary);
+            tf.seekg(0, std::ios::end);
+            tmpl.resize(static_cast<size_t>(tf.tellg()) /
+                        sizeof(std::complex<float>));
+            tf.seekg(0, std::ios::beg);
+            tf.read(reinterpret_cast<char*>(tmpl.data()),
+                    static_cast<std::streamsize>(
+                        tmpl.size() * sizeof(std::complex<float>)));
+        }
+
+        auto make_prof = []() {
+            auto p = gr::uwb::demod::Qm35825Profile::Default();
+            p.sfd_mode = "ieee"; // golden window uses IEEE legacy SFD
+            return p;
+        };
+
+        auto is_pass = [](const gr::uwb::demod::DemodResult& r) {
+            return r.status == gr::uwb::demod::DemodStatus::Success &&
+                   r.payload.fcs_pass &&
+                   r.payload.received_fcs == uint16_t(0x584b);
+        };
+
+        auto demod_one = [&](const std::vector<std::complex<float>>& rx,
+                             double cfo_hz = 0.0) {
+            auto prof = make_prof();
+            std::vector<std::complex<float>> buf = rx;
+            if (cfo_hz != 0.0) {
+                const double w =
+                    2.0 * M_PI * cfo_hz / prof.sample_rate;
+                for (size_t i = 0; i < buf.size(); ++i) {
+                    const double ph = w * static_cast<double>(i);
+                    buf[i] *= std::complex<float>(
+                        static_cast<float>(std::cos(ph)),
+                        static_cast<float>(std::sin(ph)));
+                }
+            }
+            gr::uwb::demod::core::DemodScratch scratch;
+            scratch.reserve(buf.size());
+            return gr::uwb::demod::core::demodulate_one(
+                buf.data(), buf.size(), prof, 1, 9984, 0, tmpl, scratch);
+        };
+
+        double sig_power = 0.0;
+        for (const auto& z : iq)
+            sig_power += static_cast<double>(std::norm(z));
+        sig_power /= static_cast<double>(iq.size());
+
+        const size_t n_awgn =
+            robust_reps > 0 ? robust_reps : 50;
+        const size_t n_cfo =
+            robust_reps > 0 ? robust_reps : 20;
+
+        std::printf("== demod-robust ==\n");
+        std::printf("golden                : %s (%zu samples)\n", gw.c_str(),
+                    iq.size());
+        std::printf("robust-reps scale     : awgn N=%zu  cfo N=%zu\n", n_awgn,
+                    n_cfo);
+        std::printf("pass criterion        : status=Success && FCS=0x584b\n\n");
+
+        // ----- AWGN -----
+        const double snr_list[] = { 30, 25, 20, 15, 12, 10 };
+        std::printf("--- AWGN (N=%zu seeded realizations) ---\n", n_awgn);
+        std::printf("%8s  %8s  %12s  %12s\n", "SNR_dB", "pass%",
+                    "mean|CFOerr|", "mean_ms");
+        for (double snr_db : snr_list) {
+            const double sigma =
+                std::sqrt(sig_power / std::pow(10.0, snr_db / 10.0) / 2.0);
+            size_t pass = 0;
+            double sum_abs_cfo = 0.0;
+            double sum_ms = 0.0;
+            for (size_t r = 0; r < n_awgn; ++r) {
+                std::mt19937 rng(static_cast<unsigned>(9000 + r * 17 +
+                                                       static_cast<int>(snr_db)));
+                std::normal_distribution<float> g(
+                    0.0f, static_cast<float>(sigma));
+                std::vector<std::complex<float>> iqn(iq.size());
+                for (size_t i = 0; i < iq.size(); ++i)
+                    iqn[i] = iq[i] + std::complex<float>(g(rng), g(rng));
+                const auto t0 = std::chrono::steady_clock::now();
+                auto res = demod_one(iqn, 0.0);
+                const double ms =
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+                sum_ms += ms;
+                sum_abs_cfo += std::abs(res.cfo.cfo_hz);
+                if (is_pass(res))
+                    ++pass;
+            }
+            std::printf("%8.0f  %7.1f%%  %12.1f  %12.2f\n", snr_db,
+                        100.0 * pass / n_awgn, sum_abs_cfo / n_awgn,
+                        sum_ms / n_awgn);
+        }
+
+        // ----- CFO -----
+        const double cfo_list[] = { -50000, -25000, -10000, -5000, -1000,
+                                    1000,   5000,   10000,  25000, 50000 };
+        std::printf("\n--- CFO (N=%zu realizations, clean) ---\n", n_cfo);
+        std::printf("%10s  %8s  %12s  %12s\n", "CFO_Hz", "pass%",
+                    "mean|err|", "mean_ms");
+        for (double f : cfo_list) {
+            size_t pass = 0;
+            double sum_abs_err = 0.0;
+            double sum_ms = 0.0;
+            for (size_t r = 0; r < n_cfo; ++r) {
+                // Statistical: tiny AWGN so N realizations are not identical
+                // bit-for-bit (clean CFO alone is deterministic).
+                std::mt19937 rng(static_cast<unsigned>(
+                    50000 + r * 31 + static_cast<int>(std::abs(f))));
+                const double sigma =
+                    std::sqrt(sig_power / std::pow(10.0, 40.0 / 10.0) / 2.0);
+                std::normal_distribution<float> g(
+                    0.0f, static_cast<float>(sigma));
+                std::vector<std::complex<float>> iqn(iq.size());
+                for (size_t i = 0; i < iq.size(); ++i)
+                    iqn[i] = iq[i] + std::complex<float>(g(rng), g(rng));
+                const auto t0 = std::chrono::steady_clock::now();
+                auto res = demod_one(iqn, f);
+                const double ms =
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+                sum_ms += ms;
+                sum_abs_err += std::abs(res.cfo.cfo_hz - f);
+                if (is_pass(res))
+                    ++pass;
+            }
+            std::printf("%10.0f  %7.1f%%  %12.1f  %12.2f\n", f,
+                        100.0 * pass / n_cfo, sum_abs_err / n_cfo,
+                        sum_ms / n_cfo);
+        }
+
+        // ----- Multipath -----
+        const float gains[] = { 0.2f, 0.4f, 0.6f, 0.8f };
+        const size_t delays[] = { 20, 60, 120, 240, 400 };
+        std::printf("\n--- Multipath (single-shot per gain×delay) ---\n");
+        std::printf("%8s  %8s  %8s  %10s  %10s\n", "gain", "delay", "pass",
+                    "FCS", "ms");
+        size_t mp_pass = 0, mp_total = 0;
+        for (float g : gains) {
+            for (size_t d : delays) {
+                std::vector<std::complex<float>> m(iq.size() + d,
+                                                   { 0.0f, 0.0f });
+                std::copy(iq.begin(), iq.end(), m.begin());
+                for (size_t i = 0; i < iq.size(); ++i)
+                    m[i + d] += g * iq[i];
+                const auto t0 = std::chrono::steady_clock::now();
+                auto res = demod_one(m, 0.0);
+                const double ms =
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+                const bool ok = is_pass(res);
+                if (ok)
+                    ++mp_pass;
+                ++mp_total;
+                std::printf("%8.1f  %8zu  %8s  0x%04x  %10.2f\n", g, d,
+                            ok ? "YES" : "NO", res.payload.received_fcs, ms);
+            }
+        }
+        std::printf("multipath summary     : %zu/%zu pass (%.1f%%)\n", mp_pass,
+                    mp_total, 100.0 * mp_pass / mp_total);
+
+        // ----- Collision -----
+        // Late packet B preamble collides into A's SFD/payload at
+        // offsets {0, 1/2, 1} symbols (symbol = 1016 samples).
+        const size_t sfd_a = 75008;
+        const size_t sym = 1016;
+        const double coll_offs[] = { 0.0, 0.5, 1.0 };
+        std::printf("\n--- Collision (A=golden, B=copy into SFD/payload) ---\n");
+        std::printf("%10s  %12s  %8s  %10s  %10s  %s\n", "off_sym",
+                    "B_start", "A_FCS", "status", "ms", "graceful");
+        for (double off : coll_offs) {
+            const size_t b_start =
+                sfd_a + static_cast<size_t>(std::llround(off * sym));
+            const size_t total = b_start + iq.size();
+            std::vector<std::complex<float>> mix(total, { 0.0f, 0.0f });
+            std::copy(iq.begin(), iq.end(), mix.begin());
+            for (size_t i = 0; i < iq.size(); ++i)
+                mix[b_start + i] += iq[i];
+
+            const auto t0 = std::chrono::steady_clock::now();
+            auto res = demod_one(mix, 0.0);
+            const double ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0)
+                    .count();
+            const bool a_ok = is_pass(res);
+            const bool graceful = ms < 100.0; // bounded latency, no hang
+            std::printf("%10.1f  %12zu  %8s  %10d  %10.2f  %s\n", off, b_start,
+                        a_ok ? "PASS" : "FAIL", static_cast<int>(res.status),
+                        ms, graceful ? "YES" : "NO");
+        }
+        std::printf("\nNOTE: tables only — nothing saved to disk.\n");
+        return 0;
     }
 
     if (mode == "demod-core" || mode == "demod-stage-profile" ||

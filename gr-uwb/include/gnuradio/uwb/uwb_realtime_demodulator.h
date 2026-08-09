@@ -6,10 +6,18 @@
  *
  * UwbRealtimeDemodulator — asynchronous message-only UWB demodulator (R5).
  *
- * Accepts window PDUs (meta + c32vector) on "samples", runs the frozen
- * header-only demod core (demodulate_one) on a bounded worker pool, and
- * publishes one result PDU (meta + u8vector payload bytes) per accepted job
- * on "result".  Status/events and a stats snapshot go out on "status".
+ * Accepts window PDUs on "samples", runs the frozen header-only demod core
+ * (demodulate_one) on a bounded worker pool, and publishes one result PDU
+ * (meta + u8vector payload bytes) per accepted job on "result".  Status /
+ * events and a stats snapshot go out on "status".
+ *
+ * Samples port payload conventions (R7 SC16):
+ *   1. pmt::cons(meta, c32vector)     — primary CF32 path (zero-copy into job)
+ *   2. pmt::cons(meta, s16vector)     — interleaved int16 I/Q (I0,Q0,I1,Q1,…)
+ *                                      converted to CF32 with scale 1/32767
+ *   3. plain pmt::s16vector           — same interleaved I/Q, empty meta dict
+ * Length of an s16vector must be even (2 * n_complex).  After conversion the
+ * job always holds a c32vector so the worker hot path is unchanged.
  *
  * Block type: gr::block, zero stream ports.  Message handlers only validate
  * and enqueue; the hot demod path runs on worker threads with per-worker

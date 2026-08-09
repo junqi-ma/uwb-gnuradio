@@ -962,3 +962,147 @@ BOOST_AUTO_TEST_CASE(test_demod_core_p2_cir_fir_microbench)
         BOOST_CHECK_LT(cir2.soft_chip_count, cir.soft_chip_count);
     }
 }
+
+// ---------------------------------------------------------------------------
+// R7: code-10 / DW1000 profile self-consistency + representative robustness.
+// Full code-10 golden is MATLAB-pending (see kPreambleCode10 comment).
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r7_code10_self_consistency)
+{
+    // code-10: ternary {-1,0,+1}, length 127, 64 non-zeros, energy 64.
+    // code-9 path must be UNCHANGED (same pointer content as before R7).
+    const int8_t* c9 = GetPreambleCode(9);
+    const int8_t* c10 = GetPreambleCode(10);
+    BOOST_REQUIRE(c9 != nullptr);
+    BOOST_REQUIRE(c10 != nullptr);
+    BOOST_CHECK(c9 != c10);
+
+    size_t nnz9 = 0, nnz10 = 0, e9 = 0, e10 = 0;
+    for (size_t i = 0; i < kQm35CodeLength; ++i) {
+        BOOST_CHECK(c9[i] == -1 || c9[i] == 0 || c9[i] == 1);
+        BOOST_CHECK(c10[i] == -1 || c10[i] == 0 || c10[i] == 1);
+        if (c9[i] != 0)
+            ++nnz9;
+        if (c10[i] != 0)
+            ++nnz10;
+        e9 += static_cast<size_t>(std::abs(c9[i]));
+        e10 += static_cast<size_t>(std::abs(c10[i]));
+    }
+    BOOST_CHECK_EQUAL(nnz9, size_t(64));
+    BOOST_CHECK_EQUAL(e9, size_t(64));
+    BOOST_CHECK_EQUAL(nnz10, size_t(64));
+    BOOST_CHECK_EQUAL(e10, size_t(64));
+
+    // Sampled code for code-10: non-zeros placed every SpreadingFactor chips.
+    auto samp10 = BuildSampledCode(c10, kQm35CodeLength);
+    BOOST_REQUIRE_EQUAL(samp10.size(), kQm35ChipsPerSymbol);
+    size_t snz = 0, se = 0;
+    for (int8_t v : samp10) {
+        if (v != 0)
+            ++snz;
+        se += static_cast<size_t>(std::abs(v));
+    }
+    BOOST_CHECK_EQUAL(snz, size_t(64));
+    BOOST_CHECK_EQUAL(se, size_t(64));
+
+    // code-9 sampled path unchanged: first non-zero is +1 at index 0.
+    auto samp9 = BuildSampledCode(c9, kQm35CodeLength);
+    BOOST_CHECK_EQUAL(samp9[0], int8_t(1));
+    BOOST_CHECK_EQUAL(static_cast<int>(c9[0]), 1);
+    BOOST_CHECK_EQUAL(static_cast<int>(c9[7]), -1);
+
+    // Dw1000Profile factory: code_index=10, 64 SYNC, converts to Qm35825 layout.
+    auto dw = Dw1000Profile::Default();
+    BOOST_CHECK_EQUAL(dw.code_index, size_t(10));
+    BOOST_CHECK_EQUAL(dw.preamble_repetitions, size_t(64));
+    auto qm = dw.as_qm35825();
+    BOOST_CHECK_EQUAL(qm.code_index, size_t(10));
+    BOOST_CHECK_EQUAL(qm.preamble_repetitions, size_t(64));
+    BOOST_CHECK_CLOSE(qm.sample_rate, kQm35SampleRate, 1e-9);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r7_robust_awgn_representative)
+{
+    // One representative AWGN point (20 dB, N=3 seeds) — full sweep lives in
+    // benchmark_detector demod-robust.  Pass = Success + FCS 0x584b.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    double sp = 0.0;
+    for (size_t i = 0; i < iq.size(); ++i)
+        sp += static_cast<double>(std::norm(iq[i]));
+    sp /= static_cast<double>(iq.size());
+    const double snr_db = 20.0;
+    const double sigma = std::sqrt(sp / std::pow(10.0, snr_db / 10.0) / 2.0);
+
+    int pass = 0;
+    for (unsigned seed = 0; seed < 3; ++seed) {
+        std::mt19937 rng(1000u + seed);
+        std::normal_distribution<float> g(0.0f, static_cast<float>(sigma));
+        std::vector<gr_complex> iqn(iq.size());
+        for (size_t i = 0; i < iq.size(); ++i)
+            iqn[i] = iq[i] + gr_complex(g(rng), g(rng));
+        auto res = demod_window_with_cfo(iqn, 0.0);
+        if (res.status == DemodStatus::Success && res.payload.fcs_pass &&
+            res.payload.received_fcs == uint16_t(0x584b))
+            ++pass;
+    }
+    BOOST_CHECK_GE(pass, 2); // at least 2/3 at 20 dB
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r7_robust_multipath_representative)
+{
+    // One multipath point: gain 0.4, delay 120 samples — first packet must
+    // still decode (FCS 0x584b).
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    const float gain = 0.4f;
+    const size_t delay = 120;
+    std::vector<gr_complex> m(iq.size() + delay, gr_complex(0.0f, 0.0f));
+    std::copy(iq.begin(), iq.end(), m.begin());
+    for (size_t i = 0; i < iq.size(); ++i)
+        m[i + delay] += gain * iq[i];
+
+    auto prof = Qm35825Profile::Default();
+    prof.sfd_mode = "ieee";
+    core::DemodScratch scratch;
+    scratch.reserve(m.size());
+    auto res = core::demodulate_one(m.data(), m.size(), prof, 1, 9984, 0,
+                                    load_reference_template(), scratch);
+    BOOST_CHECK(res.status == DemodStatus::Success);
+    BOOST_CHECK(res.payload.fcs_pass);
+    BOOST_CHECK_EQUAL(res.payload.received_fcs, uint16_t(0x584b));
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r7_robust_collision_representative)
+{
+    // Late packet B preamble lands on A's SFD start (offset 0 symbols).
+    // Demod of A must not crash; report FCS of A (may pass or fail).
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    const size_t sfd_start = 75008;
+    const size_t total = sfd_start + iq.size();
+    std::vector<gr_complex> mix(total, gr_complex(0.0f, 0.0f));
+    std::copy(iq.begin(), iq.end(), mix.begin());
+    for (size_t i = 0; i < iq.size(); ++i)
+        mix[sfd_start + i] += iq[i];
+
+    auto prof = Qm35825Profile::Default();
+    prof.sfd_mode = "ieee";
+    core::DemodScratch scratch;
+    scratch.reserve(mix.size());
+    auto t0 = std::chrono::steady_clock::now();
+    auto res = core::demodulate_one(mix.data(), mix.size(), prof, 1, 9984, 0,
+                                    load_reference_template(), scratch);
+    auto t1 = std::chrono::steady_clock::now();
+    const double ms =
+        std::chrono::duration<double, std::milli>(t1 - t0).count();
+    // Graceful: no exception (we got here), bounded latency (< 100 ms).
+    BOOST_CHECK_LT(ms, 100.0);
+    // Status is one of the defined enum values (no crash / no hang).
+    BOOST_CHECK(static_cast<int>(res.status) >= 0);
+    BOOST_TEST_MESSAGE("collision offset0: status="
+                       << static_cast<int>(res.status)
+                       << " fcs=" << res.payload.fcs_pass << " latency_ms="
+                       << ms);
+}

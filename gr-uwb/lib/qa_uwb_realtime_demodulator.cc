@@ -22,6 +22,7 @@
 #include <pmt/pmt.h>
 
 #include <chrono>
+#include <cmath>
 #include <complex>
 #include <cstdint>
 #include <cstdio>
@@ -373,4 +374,79 @@ BOOST_AUTO_TEST_CASE(test_invalid_input_rejected)
     BOOST_CHECK_EQUAL(demod->invalid_inputs(), 2u);
     BOOST_CHECK_EQUAL(demod->jobs_received(), 0u);
     BOOST_CHECK(status_contains(dbg_status, "invalid_input"));
+}
+
+// ---------------------------------------------------------------------------
+// R7: SC16 input path — golden window quantized to interleaved int16 I/Q
+// must decode to the same FCS 0x584b payload as the CF32 path.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_sc16_golden_round_trip)
+{
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+
+    // Quantize CF32 → interleaved s16 with scale 32767.  Golden peak ≈ 0.8
+    // so samples fit in int16; round-trip error is ~1/32767.
+    float peak = 0.0f;
+    for (const auto& z : iq)
+        peak = std::max(peak, std::abs(z));
+    BOOST_REQUIRE_GT(peak, 0.0f);
+    BOOST_REQUIRE_LE(peak, 1.0f); // fits in int16 at scale 32767
+
+    std::vector<int16_t> s16(iq.size() * 2);
+    for (size_t i = 0; i < iq.size(); ++i) {
+        s16[2 * i] = static_cast<int16_t>(
+            std::lround(static_cast<double>(iq[i].real()) * 32767.0));
+        s16[2 * i + 1] = static_cast<int16_t>(
+            std::lround(static_cast<double>(iq[i].imag()) * 32767.0));
+    }
+
+    auto demod =
+        gr::uwb::UwbRealtimeDemodulator::make_from_template(tmpl, 2, 64,
+                                                            "ieee");
+    auto dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_realtime_sc16");
+    tb->msg_connect(demod, "result", dbg, "store");
+
+    pmt::pmt_t meta = pmt::make_dict();
+    meta = pmt::dict_add(meta, pmt::mp("packet_id"), pmt::from_uint64(42));
+    meta = pmt::dict_add(meta, pmt::mp("predicted_start_sample"),
+                         pmt::from_long(9984));
+    meta = pmt::dict_add(meta, pmt::mp("window_start_sample"),
+                         pmt::from_long(0));
+    meta = pmt::dict_add(meta, pmt::mp("sample_count"),
+                         pmt::from_long(static_cast<long>(iq.size())));
+    meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
+                         pmt::from_double(998.4e6));
+    pmt::pmt_t pdu =
+        pmt::cons(meta, pmt::init_s16vector(s16.size(), s16.data()));
+
+    tb->start();
+    demod->_post(pmt::mp("samples"), pdu);
+    BOOST_REQUIRE(wait_until(demod, 1));
+    tb->stop();
+    tb->wait();
+
+    BOOST_CHECK_EQUAL(demod->jobs_received(), 1u);
+    BOOST_CHECK_EQUAL(demod->jobs_completed(), 1u);
+    BOOST_CHECK_EQUAL(demod->invalid_inputs(), 0u);
+    BOOST_REQUIRE_EQUAL(dbg->num_messages(), 1u);
+
+    pmt::pmt_t result = dbg->get_message(0);
+    BOOST_REQUIRE(pmt::is_pair(result));
+    pmt::pmt_t rmeta = pmt::car(result);
+    BOOST_CHECK_EQUAL(pmt::to_long(pmt::dict_ref(
+                          rmeta, pmt::mp("status_code"), pmt::from_long(-1))),
+                      0);
+    BOOST_CHECK(pmt::to_bool(
+        pmt::dict_ref(rmeta, pmt::mp("fcs_pass"), pmt::PMT_F)));
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          rmeta, pmt::mp("fcs_received"),
+                          pmt::from_uint64(0))),
+                      0x584b);
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          rmeta, pmt::mp("payload_nbytes"),
+                          pmt::from_uint64(0))),
+                      127);
 }

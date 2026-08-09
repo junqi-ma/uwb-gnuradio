@@ -396,17 +396,75 @@ UwbRealtimeDemodulator::stop()
 // Message handlers
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// Convert interleaved s16 I/Q (I0,Q0,I1,Q1,…) to a c32vector with scale
+// 1/32767.  Returns PMT_NIL on odd length / empty input.
+pmt::pmt_t s16_interleaved_to_c32(pmt::pmt_t s16v)
+{
+    if (!pmt::is_s16vector(s16v))
+        return pmt::PMT_NIL;
+    const size_t n16 = pmt::length(s16v);
+    if (n16 == 0 || (n16 & 1u) != 0)
+        return pmt::PMT_NIL;
+    const size_t n = n16 / 2;
+    const std::vector<int16_t>& elems = pmt::s16vector_elements(s16v);
+    // Build CF32 in a temporary; pmt::init_c32vector copies into the PMT.
+    std::vector<gr_complex> cf(n);
+    constexpr float kScale = 1.0f / 32767.0f;
+    for (size_t i = 0; i < n; ++i) {
+        cf[i] = gr_complex(static_cast<float>(elems[2 * i]) * kScale,
+                           static_cast<float>(elems[2 * i + 1]) * kScale);
+    }
+    return pmt::init_c32vector(n, cf.data());
+}
+
+} // namespace
+
 void
 UwbRealtimeDemodulator::handle_samples(pmt::pmt_t msg)
 {
-    if (!pmt::is_pair(msg) || !pmt::is_c32vector(pmt::cdr(msg))) {
+    // Accept:
+    //   cons(meta, c32vector)  — primary CF32 path
+    //   cons(meta, s16vector)  — interleaved int16 I/Q → CF32
+    //   plain s16vector        — interleaved int16 I/Q, empty meta
+    pmt::pmt_t meta = pmt::PMT_NIL;
+    pmt::pmt_t samples = pmt::PMT_NIL;
+
+    if (pmt::is_pair(msg)) {
+        meta = pmt::car(msg);
+        pmt::pmt_t payload = pmt::cdr(msg);
+        if (pmt::is_c32vector(payload)) {
+            samples = payload;
+        } else if (pmt::is_s16vector(payload)) {
+            samples = s16_interleaved_to_c32(payload);
+            if (pmt::is_null(samples)) {
+                d_invalid_inputs_.fetch_add(1, std::memory_order_relaxed);
+                publish_status("invalid_input");
+                return;
+            }
+        } else {
+            d_invalid_inputs_.fetch_add(1, std::memory_order_relaxed);
+            publish_status("invalid_input");
+            return;
+        }
+    } else if (pmt::is_s16vector(msg)) {
+        meta = pmt::make_dict();
+        samples = s16_interleaved_to_c32(msg);
+        if (pmt::is_null(samples)) {
+            d_invalid_inputs_.fetch_add(1, std::memory_order_relaxed);
+            publish_status("invalid_input");
+            return;
+        }
+    } else {
         d_invalid_inputs_.fetch_add(1, std::memory_order_relaxed);
         publish_status("invalid_input");
         return;
     }
 
-    pmt::pmt_t meta = pmt::car(msg);
-    pmt::pmt_t samples = pmt::cdr(msg);
+    if (!pmt::is_dict(meta))
+        meta = pmt::make_dict();
+
     const size_t n = pmt::length(samples);
     if (n == 0) {
         d_invalid_inputs_.fetch_add(1, std::memory_order_relaxed);
@@ -423,7 +481,7 @@ UwbRealtimeDemodulator::handle_samples(pmt::pmt_t msg)
     job.sample_count =
         dict_i64(meta, "sample_count", static_cast<int64_t>(n));
     job.sample_rate = dict_f64(meta, "sample_rate", 0.0);
-    job.samples = samples;
+    job.samples = samples; // always c32vector after optional s16 conversion
     job.enqueued_at = std::chrono::steady_clock::now();
 
     d_jobs_received_.fetch_add(1, std::memory_order_relaxed);

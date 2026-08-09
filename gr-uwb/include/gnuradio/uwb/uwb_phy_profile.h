@@ -128,10 +128,94 @@ inline constexpr std::array<int8_t, kQm35CodeLength> kPreambleCode9 = { {
     0, 0, -1, 1, 0, 0, 0, 0, -1, 0, -1, 0, 0, 0, -1, -1, 1
 } };
 
-// Other code indices (DW1000 etc.) are out of Phase-1 scope.
+// ---------------------------------------------------------------------------
+// IEEE 802.15.4a-2007 HRP code index 10 (Ipatov length 127, ternary {-1,0,+1}).
+// Source: IEEE 802.15 contrib 15-05-0737-01-004a (length-127 preamble set for
+// 500 MHz bands; sequence S10), phase-aligned to the same cyclic origin that
+// MATLAB lrwpan.internal.HRPCodes(9) / kPreambleCode9 use (shift 73 on the
+// published table so code-9 matches bit-for-bit).  Non-zero count = 64,
+// energy = 64 — same as code-9.
+//
+// STATUS: profile + self-consistency only.  Full golden cross-check against
+// MATLAB UWB_demodulation requires exporting a code-10 window the same way
+// as code-9 (see testdata/generate_and_export_golden.m with CodeIndex=10 on
+// Windows MATLAB F:\MATLAB\bin\matlab.exe).  Do NOT claim code-10 is
+// golden-verified until that export + stage-by-stage QA lands.
+// ---------------------------------------------------------------------------
+inline constexpr std::array<int8_t, kQm35CodeLength> kPreambleCode10 = { {
+    0, -1, 0, 0, -1, -1, 0, 0, 0, -1, 0, 1, -1, 1, 0, -1, 0, 1, -1, 0, -1, 1,
+    0, 0, 0, 0, 0, 1, -1, 0, 0, 1, 1, 0, -1, 0, 1, 0, 0, -1, -1, 1, 0, 0, 1,
+    1, -1, 1, 0, 1, -1, 0, 1, 0, 0, 0, 0, -1, 0, -1, 0, -1, 0, -1, 1, 1, -1,
+    1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, -1, 1, 0, 1, 1, 1, 0, 0, 0, -1, -1, -1,
+    -1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, -1, -1, 1, 1, 0, 0, 1, 0, -1, 1, 0,
+    0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, -1, 0, 0
+} };
+
+// DW1000-mode BPRF profile (code-10, 64 SYNC).  Same sample-rate / timing
+// geometry as Qm35825Profile::Default(); only code_index and documentation
+// differ.  Reuses BuildSampledCode / GetSfdSequence.
+struct Dw1000Profile {
+    double sample_rate = kQm35SampleRate;
+    double mean_prf_mhz = kQm35MeanPrfMHz;
+    size_t code_index = 10;
+    size_t preamble_repetitions = 64;
+    const char* sfd_mode = "4z2";
+    double data_rate_mbps = 6.81;
+    size_t max_psdu_bytes = 127;
+
+    size_t cir_pre_samples = 8;
+    size_t cir_post_samples = 30;
+    size_t cir_skip_initial_repetitions = 10;
+    size_t cir_repetitions = 54;
+
+    double period_tolerance_pct = 2.0;
+    size_t min_valid_peaks = 8;
+    size_t sfd_search_half_width = 8;
+
+    float cir_detection_threshold = 0.3f;
+    float sfd_detection_threshold = 0.3f;
+    float radar_verification_threshold = 0.3f;
+
+    size_t timing_search_margin = 9984;
+    size_t post_guard_samples = 4096;
+
+    static Dw1000Profile Default() { return Dw1000Profile{}; }
+
+    // Convert to the Qm35825Profile layout used by demodulate_one / stages.
+    Qm35825Profile as_qm35825() const
+    {
+        Qm35825Profile p;
+        p.sample_rate = sample_rate;
+        p.mean_prf_mhz = mean_prf_mhz;
+        p.code_index = code_index;
+        p.preamble_repetitions = preamble_repetitions;
+        p.sfd_mode = sfd_mode;
+        p.data_rate_mbps = data_rate_mbps;
+        p.max_psdu_bytes = max_psdu_bytes;
+        p.cir_pre_samples = cir_pre_samples;
+        p.cir_post_samples = cir_post_samples;
+        p.cir_skip_initial_repetitions = cir_skip_initial_repetitions;
+        p.cir_repetitions = cir_repetitions;
+        p.period_tolerance_pct = period_tolerance_pct;
+        p.min_valid_peaks = min_valid_peaks;
+        p.sfd_search_half_width = sfd_search_half_width;
+        p.cir_detection_threshold = cir_detection_threshold;
+        p.sfd_detection_threshold = sfd_detection_threshold;
+        p.radar_verification_threshold = radar_verification_threshold;
+        p.timing_search_margin = timing_search_margin;
+        p.post_guard_samples = post_guard_samples;
+        return p;
+    }
+};
+
+// Returns the ternary Ipatov code for the given HRP code index.
+// Supported: 9 (QM35825 golden), 10 (DW1000 BPRF).  Unknown indices fall
+// back to code-9 with a stable pointer (callers that care must check).
 inline const int8_t* GetPreambleCode(size_t code_index)
 {
-    return (code_index == 9) ? kPreambleCode9.data() : kPreambleCode9.data();
+    if (code_index == 10)
+        return kPreambleCode10.data();
+    return kPreambleCode9.data();
 }
 
 // ---------------------------------------------------------------------------
