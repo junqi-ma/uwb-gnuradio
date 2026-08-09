@@ -833,8 +833,9 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     const float ri = std::sin(-ang);
     const std::complex<float> rot(rr, ri);
 
-    // Merged postprocess: rotate corr, extract real, track max|real|; then
-    // one normalize pass into soft_chips.
+    // Merged postprocess: compute only the rotated real component and track
+    // max|real|, then normalize into soft_chips. No later stage consumes the
+    // rotated complex corr stream, so writing it back wastes ~1.2 MB/packet.
     scratch.soft_chips.resize(num_chips);
     float mx = 0.0f;
     for (size_t i = 0; i < num_chips; ++i) {
@@ -842,8 +843,6 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         const float cr = scratch.corr[i].real();
         const float ci = scratch.corr[i].imag();
         const float r = cr * rr - ci * ri;
-        const float im = cr * ri + ci * rr;
-        scratch.corr[i] = std::complex<float>(r, im); // corr[i] *= rot
         scratch.soft_chips[i] = r;                    // temp; normalized below
         const float ar = (r >= 0.0f) ? r : -r;
         if (ar > mx)
