@@ -37,7 +37,8 @@ enum class DemodStatus : int {
     PayloadFailed = 6,  // payload decode error
     FcsFailed = 7,      // CRC mismatch (valid decode, bad FCS)
     QueueFull = 8,      // job dropped: demod queue saturated
-    InternalError = 9   // unexpected exception in worker
+    InternalError = 9,  // unexpected exception in worker
+    CirFailed = 10      // CIR / soft-chip generation failed
 };
 
 // ---------------------------------------------------------------------------

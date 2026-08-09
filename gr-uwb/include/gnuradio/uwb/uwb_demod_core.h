@@ -394,8 +394,194 @@ inline bool stage_sfd(const std::complex<float>* rx,
 }
 
 // ---------------------------------------------------------------------------
-// Full pipeline (R1 subset): timing + CFO + SFD.  Later stages (CIR/soft
-// chips/PHR/payload) are R2-R4 and return "not implemented" (ok=false).
+// Stage 4 — CIR estimation + soft-chip generation (R2).
+// Mirrors MATLAB estimateCir + estimateCirAndSoftChips:
+//
+//   * CIR: coherently average the aligned raw SYNC windows of the LAST
+//     cir_repetitions repetitions (skipping the first
+//     cir_skip_initial_repetitions), then correlate each of the
+//     (pre+post) taps against the code in NATURAL order:
+//       values[n] = sum_m avg[n+m] * conj(sampled_code[m]) / code_energy
+//     and L2-normalize.  (The template is the sparse sampled code, NOT the
+//     pulse-shaped preamble waveform — forward order, not time-reversed.)
+//
+//   * Soft chips: causal FIR with cirMf = conj(flip(values)) evaluated on the
+//     chip grid chipStart = start + (pre+post) - pre - 1, spaced
+//     measured_period/chips_per_symbol apart, up to the frame-span budget
+//     bounded by the buffer length.  The complex chips are then phase-aligned
+//     against the last min(32, preamble_repetitions) SYNCs' spread code, and
+//     the real part is normalized by max|real|.
+//
+// Coordinate convention: rx uses 0-based ABSOLUTE sample indices (the full
+// scheduled window / captured PDU), so chipStart and the CIR first-path are
+// absolute.  Verified against the MATLAB golden reference: CIR max diff
+// ~6e-8, soft-chip stream max diff ~6e-7 (stage_cir.mat / stage_softchips.mat).
+// ---------------------------------------------------------------------------
+inline bool stage_cir_softchips(const std::complex<float>* rx,
+                                size_t n,
+                                const Qm35825Profile& profile,
+                                const TimingResult& timing,
+                                const std::vector<int8_t>& preamble_code,
+                                CirResult& out,
+                                DemodScratch& scratch)
+{
+    out = CirResult{};
+    const size_t pre = profile.cir_pre_samples;
+    const size_t post = profile.cir_post_samples;
+    const size_t tap_count = pre + post;
+    const double period = timing.measured_period;
+    const int64_t start = timing.preamble_start_sample;
+    if (period <= 0.0 || start < 0 || preamble_code.empty() || tap_count == 0)
+        return false;
+
+    // ---- Build the sparse sampled code (508 spread x2 -> 1016, zeros on the
+    //      odd samples), matching MATLAB buildUwbReference.sampled_code. ----
+    const std::vector<int8_t> spread =
+        BuildSampledCode(preamble_code.data(), preamble_code.size());
+    scratch.work.assign(2 * kQm35ChipsPerSymbol, std::complex<float>(0.0f, 0.0f));
+    for (size_t j = 0; j < spread.size(); ++j)
+        scratch.work[2 * j] = std::complex<float>((float)spread[j], 0.0f);
+    const size_t code_len = scratch.work.size(); // 1016
+    float code_energy = 0.0f;
+    for (size_t m = 0; m < code_len; ++m)
+        code_energy += std::norm(scratch.work[m]);
+
+    // ---- Coherently average the aligned SYNC windows. ----
+    const size_t available = std::min(timing.detected_peaks, profile.preamble_repetitions);
+    const size_t skip = std::min(profile.cir_skip_initial_repetitions, available);
+    if (available == 0 || skip >= available)
+        return false;
+    const size_t rep_count = std::min(profile.cir_repetitions, available - skip);
+    if (rep_count == 0)
+        return false;
+
+    const size_t wlen = code_len + tap_count - 1; // 1053
+    scratch.corr.assign(wlen, std::complex<float>(0.0f, 0.0f));
+    size_t valid = 0;
+    for (size_t k = skip; k < skip + rep_count; ++k) {
+        const int64_t rs = start + static_cast<int64_t>(std::llround((double)k * period));
+        const int64_t lo = rs - static_cast<int64_t>(pre);
+        const int64_t hi = lo + static_cast<int64_t>(wlen);
+        if (lo < 0 || hi > static_cast<int64_t>(n))
+            continue; // drop SYNCs clipped by the buffer edge (like MATLAB)
+        for (size_t m = 0; m < wlen; ++m)
+            scratch.corr[m] += rx[static_cast<size_t>(lo + (int64_t)m)];
+        ++valid;
+    }
+    if (valid == 0)
+        return false;
+    const float inv = 1.0f / static_cast<float>(valid);
+    for (size_t m = 0; m < wlen; ++m)
+        scratch.corr[m] *= inv;
+
+    // ---- CIR taps: forward-order code correlation (NOT time-reversed). ----
+    std::vector<std::complex<float>> values(tap_count);
+    for (size_t nn = 0; nn < tap_count; ++nn) {
+        std::complex<float> acc(0.0f, 0.0f);
+        for (size_t m = 0; m < code_len; ++m)
+            acc += std::conj(scratch.work[m]) * scratch.corr[nn + m];
+        values[nn] = acc / code_energy;
+    }
+    float nrm = 0.0f;
+    for (size_t i = 0; i < tap_count; ++i)
+        nrm += std::norm(values[i]);
+    nrm = std::sqrt(nrm);
+    if (!(nrm > 0.0f))
+        return false;
+    for (size_t i = 0; i < tap_count; ++i)
+        values[i] /= (nrm + 1e-12f);
+
+    size_t peak_idx = 0;
+    float peak_mag = -1.0f;
+    for (size_t i = 0; i < tap_count; ++i) {
+        const float m = std::abs(values[i]);
+        if (m > peak_mag) {
+            peak_mag = m;
+            peak_idx = i;
+        }
+    }
+    out.first_path_sample =
+        static_cast<size_t>(std::max<int64_t>(0, start + (int64_t)peak_idx - (int64_t)pre));
+    out.pre_samples = pre;
+    out.post_samples = post;
+    out.cir_peak_metric = peak_mag;
+    out.cir_values.resize(tap_count);
+    for (size_t i = 0; i < tap_count; ++i)
+        out.cir_values[i] = values[i].real(); // golden CIR is real (Q=0 channel)
+
+    // ---- Soft-chip matched filter on the chip grid. ----
+    const double spc = period / static_cast<double>(kQm35ChipsPerSymbol);
+    // Frame-span chip budget (estimateFrameSampleSpan): 4z2 SFD = 8 symbols.
+    const size_t sfd_symbols = 8;
+    const size_t n_shr = (profile.preamble_repetitions + sfd_symbols) * kQm35ChipsPerSymbol;
+    const size_t n_phr_head = 40 * kQm35ChipsPerSymbol;
+    const size_t extra_bytes =
+        (profile.max_psdu_bytes > 12) ? (profile.max_psdu_bytes - 12) : 0;
+    const size_t n_extra = static_cast<size_t>(std::ceil((double)extra_bytes * 1000.0));
+    const size_t n_guard = 8 * kQm35ChipsPerSymbol;
+    size_t n_chips = n_shr + n_phr_head + n_extra + n_guard;
+    n_chips = static_cast<size_t>(std::ceil((double)n_chips * 1.05));
+
+    const int64_t chip_start = start + static_cast<int64_t>(tap_count) -
+                               static_cast<int64_t>(pre) - 1; // = start + post - 1
+    const int64_t last_by_budget =
+        chip_start + static_cast<int64_t>(std::ceil((double)(n_chips - 1) * spc));
+    const int64_t last_chip_sample = std::min<int64_t>(static_cast<int64_t>(n), last_by_budget);
+    const int64_t last_pos = last_chip_sample - 1; // inclusive, 0-based
+    if (last_pos < chip_start)
+        return false;
+    const int64_t spc_i = std::max<int64_t>(1, std::llround(spc));
+    const size_t num_chips =
+        static_cast<size_t>((last_pos - chip_start) / spc_i) + 1;
+
+    // Causal FIR: chip[p] = sum_k conj(values[tap-1-k]) * rx[p-k].
+    scratch.corr.resize(num_chips);
+    for (size_t i = 0; i < num_chips; ++i) {
+        const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
+        std::complex<float> acc(0.0f, 0.0f);
+        for (size_t k = 0; k < tap_count; ++k) {
+            const int64_t idx = p - static_cast<int64_t>(k);
+            if (idx < 0)
+                break;
+            acc += std::conj(values[tap_count - 1 - k]) * rx[static_cast<size_t>(idx)];
+        }
+        scratch.corr[i] = acc;
+    }
+
+    // ---- Phase-align against the last min(32, preamble) SYNCs' spread code. ----
+    const size_t phase_reps = std::min<size_t>(32, profile.preamble_repetitions);
+    const size_t phase_first =
+        (profile.preamble_repetitions - phase_reps) * kQm35ChipsPerSymbol;
+    const size_t phase_len = phase_reps * kQm35ChipsPerSymbol;
+    if (phase_first + phase_len > num_chips)
+        return false; // chip stream shorter than the configured preamble
+    std::complex<float> gain(0.0f, 0.0f);
+    for (size_t i = 0; i < phase_len; ++i)
+        gain += std::conj(std::complex<float>((float)spread[i % kQm35ChipsPerSymbol], 0.0f)) *
+                scratch.corr[phase_first + i];
+    const float ang = std::arg(gain);
+    const std::complex<float> rot(std::cos(-ang), std::sin(-ang));
+    for (size_t i = 0; i < num_chips; ++i)
+        scratch.corr[i] *= rot;
+
+    // ---- soft = real part, normalized by max|real|. ----
+    float mx = 0.0f;
+    for (size_t i = 0; i < num_chips; ++i)
+        mx = std::max(mx, std::abs(scratch.corr[i].real()));
+    const float denom = mx + 1e-12f;
+    scratch.soft_chips.resize(num_chips);
+    for (size_t i = 0; i < num_chips; ++i)
+        scratch.soft_chips[i] = scratch.corr[i].real() / denom;
+
+    out.soft_chip_count = num_chips;
+    out.samples_per_chip = spc;
+    out.ok = true;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Full pipeline (R1+R2 subset): timing + CFO + SFD + CIR/soft chips.  Later
+// stages (NS-SFD/PHR/payload) are R3-R4 and return "not implemented".
 // ---------------------------------------------------------------------------
 inline DemodResult demodulate_one(const std::complex<float>* rx,
                                   size_t n,
@@ -428,6 +614,14 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     if (!stage_sfd(rx, n, profile, res.timing, sfd_seq, template_wf, res.sfd,
                    scratch)) {
         res.status = DemodStatus::SfdFailed;
+        return res;
+    }
+    // Stage 4: CIR + soft chips on the CFO-compensated frame.
+    const int8_t* pc = GetPreambleCode(profile.code_index);
+    std::vector<int8_t> pcode(pc, pc + kQm35CodeLength);
+    if (!stage_cir_softchips(scratch.derotated.data(), n, profile, res.timing,
+                             pcode, res.cir, scratch)) {
+        res.status = DemodStatus::CirFailed;
         return res;
     }
     res.status = DemodStatus::Success;

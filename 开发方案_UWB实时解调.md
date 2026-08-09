@@ -444,7 +444,6 @@ MATLAB Coder/MEX可用于验证数值kernel和估算上限，但生产C++不能�
 > - **stage_sfd**：`kron(SFD序列, preamble_waveform)` 构造 SFD 模板（同 MATLAB `refineTimingWithNsSfd`），在 `start + 64×period` 附近全速相关。对照 golden（IEEE legacy）：metric=0.9999、SFD 起点=75008。
 > - **坐标修正**：golden 改为**绝对坐标**（start=9984，原 cropped 3049 弃用）；`uwb_phy_profile.h` 的 `chips_per_symbol=508`、`HRPCodes(9)=127 长`。
 > - **QA**：`qa_uwb_demod_core.cc` 4 用例（timing/CFO/SFD/bad-input）全过；**CTest 6/6**。
-
 - MATLAB逐阶段QA。
 
 完成标准：clean样本全部对齐，失败有明确状态。
@@ -455,6 +454,15 @@ MATLAB Coder/MEX可用于验证数值kernel和估算上限，但生产C++不能�
 - soft-chip生成；
 - 不同SNR/CFO/multipath QA；
 - stage profile。
+
+> **✅ R2 完成（2026-08-09）**
+> - **stage_cir_softchips**（`uwb_demod_core.h`）移植 MATLAB `estimateCir` + `estimateCirAndSoftChips`：
+>   - **CIR**：对最后 `cir_repetitions` 个 SYNC（跳过前 10）相干平均后做 **forward-order code 相关**（`sum avg[n+m]·conj(sampled_code[m])`，非时间反转！），38 taps（pre=8/post=30），L2 归一化。对照 golden：max diff **6.2e-8**，峰值 tap 10（offset +2），first_path=9986。
+>   - **Soft chips**：`cirMf=conj(flip(values))` 因果 FIR，chip grid `chipStart = start + post - 1 = 10013`，步长 `period/508=2` 直到窗口边界（budget 截断），共 **154578 chips**；用最后 32 个 SYNC 的 spread_code 做相位对齐（`gain = Σ conj(spread[i%508])·chips[...]`），`soft = real/max|real|`。对照 golden：max diff **5.9e-7**。
+> - **关键排坑**：① MATLAB `conv(avg, codeMf,'valid')` 展开后是 forward code（初版 numpy `vdot(codeMf,...)` 变成 reversed，错）；② `sampled_code` 是稀疏码（每 8 采样一个非零，energy=64），**不是**平滑 preamble_waveform；③ `cir.start_sample` 为 crop 后坐标，换算 absolute 后 chip grid 恰好到窗口末（154578 chips）；④ CIR 阶段输入是 CFO-compensated（derotated）rx。
+> - **golden 导出**：`stage_cir.f32`（38）+ `stage_softchips.f32`（154578）从 .mat 提取提交。
+> - **QA**：`qa_uwb_demod_core.cc` 新增 4 用例（CIR 对照 / soft chips 对照 / **+1kHz CFO 注入后 CIR+soft 仍与 golden 一致** / bad-input 干净失败）。**CTest 6/6**。
+> - **stage profile**：`benchmark_detector demod-stage-profile` 真实跑 4 阶段（warm-up + 测量）：timing 0.97ms / cfo 3.3ms / **sfd 22ms**（全速率相关，瓶颈，留待优化）/ cir 9.1ms，总 35ms，soft-chip 17 Mchips/s。4/7 阶段实现。
 
 ### R3：PHR
 

@@ -56,6 +56,22 @@ std::string golden_dir()
     return "../../../testdata/realtime_demod_golden";
 }
 
+// Load a raw float32 (f32) file.
+bool load_f32(const std::string& path, std::vector<float>& out)
+{
+    std::ifstream f(path, std::ios::binary);
+    if (!f)
+        return false;
+    f.seekg(0, std::ios::end);
+    const size_t bytes = static_cast<size_t>(f.tellg());
+    f.seekg(0, std::ios::beg);
+    if (bytes == 0 || bytes % 4 != 0)
+        return false;
+    out.resize(bytes / 4);
+    f.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(bytes));
+    return true;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_timing_matches_golden)
@@ -145,3 +161,159 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_bad_input_fails_cleanly)
                                     tr, scratch));
 }
 
+// ---------------------------------------------------------------------------
+// R2: CIR estimation + soft-chip generation (MATLAB estimateCirAndSoftChips).
+// ---------------------------------------------------------------------------
+
+// Run timing + CFO + CIR/soft chips on `iq` and return the CIR + soft chips.
+static bool run_cir_softchips(const std::vector<gr_complex>& iq,
+                              core::DemodScratch& scratch,
+                              Qm35825Profile& prof,
+                              TimingResult& tr,
+                              CfoResult& cf,
+                              CirResult& cir)
+{
+    std::vector<gr_complex> tmpl;
+    if (!load_cf32("../../../testdata/reference_preamble.bin", tmpl))
+        return false;
+    if (!core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984, tr, scratch))
+        return false;
+    if (!core::stage_cfo(iq.data(), iq.size(), prof, tr, cf, scratch))
+        return false;
+    std::vector<int8_t> code9(kPreambleCode9.begin(), kPreambleCode9.end());
+    return core::stage_cir_softchips(scratch.derotated.data(), iq.size(), prof,
+                                     tr, code9, cir, scratch);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r2_cir_matches_golden)
+{
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+    TimingResult tr;
+    CfoResult cf;
+    CirResult cir;
+    BOOST_REQUIRE(run_cir_softchips(iq, scratch, prof, tr, cf, cir));
+
+    // Golden CIR: 38 normalized taps, pre=8, post=30, first path = 9986.
+    std::vector<float> gcir;
+    BOOST_REQUIRE(load_f32(golden_dir() + "/stage_cir.f32", gcir));
+    BOOST_REQUIRE_EQUAL(gcir.size(), size_t(38));
+    BOOST_REQUIRE_EQUAL(cir.cir_values.size(), gcir.size());
+    BOOST_CHECK_EQUAL(cir.pre_samples, size_t(8));
+    BOOST_CHECK_EQUAL(cir.post_samples, size_t(30));
+    BOOST_CHECK_EQUAL(cir.first_path_sample, size_t(9986));
+
+    size_t pk = 0;
+    float pm = -1.0f;
+    for (size_t i = 0; i < cir.cir_values.size(); ++i) {
+        const float a = std::abs(cir.cir_values[i]);
+        if (a > pm) {
+            pm = a;
+            pk = i;
+        }
+    }
+    BOOST_CHECK_EQUAL(pk, size_t(10)); // offset +2
+    BOOST_CHECK_CLOSE(cir.cir_peak_metric, 0.732856f, 1.0);
+
+    float l2 = 0.0f;
+    for (size_t i = 0; i < gcir.size(); ++i) {
+        const float d = cir.cir_values[i] - gcir[i];
+        l2 += d * d;
+    }
+    BOOST_CHECK_SMALL(std::sqrt(l2), 0.01f); // actual ~6e-8
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r2_softchips_match_golden)
+{
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+    TimingResult tr;
+    CfoResult cf;
+    CirResult cir;
+    BOOST_REQUIRE(run_cir_softchips(iq, scratch, prof, tr, cf, cir));
+
+    // Golden soft-chip stream: 154578 chips, samples_per_chip = 2, first chip
+    // at absolute sample 10013 (= start + post - 1).
+    std::vector<float> gsoft;
+    BOOST_REQUIRE(load_f32(golden_dir() + "/stage_softchips.f32", gsoft));
+    BOOST_REQUIRE_EQUAL(gsoft.size(), size_t(154578));
+    BOOST_REQUIRE_EQUAL(scratch.soft_chips.size(), gsoft.size());
+    BOOST_CHECK_EQUAL(cir.soft_chip_count, size_t(154578));
+    BOOST_CHECK_CLOSE(cir.samples_per_chip, 2.0, 0.5);
+    BOOST_CHECK_EQUAL(tr.preamble_start_sample + (int64_t)cir.post_samples - 1,
+                      int64_t(10013));
+
+    float mx = 0.0f;
+    for (size_t i = 0; i < gsoft.size(); ++i)
+        mx = std::max(mx, std::abs(scratch.soft_chips[i] - gsoft[i]));
+    BOOST_CHECK_LT(mx, 1e-3f); // actual ~6e-7
+    // First soft chip is near the normalized max (preamble present).
+    BOOST_CHECK_GT(std::abs(scratch.soft_chips[0]), 0.9f);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r2_cfo_compensated_matches_golden)
+{
+    // Inject +1 kHz CFO into the golden window; after stage_cfo derotation the
+    // CIR and soft chips must still match the (CFO-free) golden reference.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    auto prof = Qm35825Profile::Default();
+    const double w = 2.0 * M_PI * 1000.0 / prof.sample_rate;
+    std::vector<gr_complex> iqc(iq.size());
+    for (size_t i = 0; i < iq.size(); ++i) {
+        const double ph = w * static_cast<double>(i);
+        iqc[i] = iq[i] * gr_complex(static_cast<float>(std::cos(ph)),
+                                    static_cast<float>(std::sin(ph)));
+    }
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    TimingResult tr;
+    CfoResult cf;
+    CirResult cir;
+    BOOST_REQUIRE(run_cir_softchips(iqc, scratch, prof, tr, cf, cir));
+
+    // Estimated CFO should be near the injected +1 kHz.
+    BOOST_CHECK_CLOSE(cf.cfo_hz, 1000.0, 10.0);
+
+    std::vector<float> gcir;
+    BOOST_REQUIRE(load_f32(golden_dir() + "/stage_cir.f32", gcir));
+    float l2 = 0.0f;
+    for (size_t i = 0; i < gcir.size(); ++i) {
+        const float d = cir.cir_values[i] - gcir[i];
+        l2 += d * d;
+    }
+    BOOST_CHECK_SMALL(std::sqrt(l2), 0.05f);
+
+    std::vector<float> gsoft;
+    BOOST_REQUIRE(load_f32(golden_dir() + "/stage_softchips.f32", gsoft));
+    float mx = 0.0f;
+    for (size_t i = 0; i < gsoft.size(); ++i)
+        mx = std::max(mx, std::abs(scratch.soft_chips[i] - gsoft[i]));
+    BOOST_CHECK_LT(mx, 0.05f);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r2_bad_input_fails_cleanly)
+{
+    std::vector<gr_complex> noise(4000);
+    for (size_t i = 0; i < noise.size(); ++i)
+        noise[i] = gr_complex(static_cast<float>(i % 17) / 17.0f, 0.0f);
+    core::DemodScratch scratch;
+    scratch.reserve(4096);
+    auto prof = Qm35825Profile::Default();
+    // A too-short / silent buffer must fail cleanly (no CIR / no soft chips).
+    std::vector<int8_t> code9(kPreambleCode9.begin(), kPreambleCode9.end());
+    TimingResult tr;
+    tr.preamble_start_sample = 0;
+    tr.measured_period = 1016.0;
+    tr.detected_peaks = 1; // too few repetitions
+    CirResult cir;
+    BOOST_CHECK(!core::stage_cir_softchips(noise.data(), noise.size(), prof, tr,
+                                           code9, cir, scratch));
+}

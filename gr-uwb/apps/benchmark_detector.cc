@@ -47,6 +47,7 @@
 #include <gnuradio/uwb/uwb_scheduled_extractor.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor_core.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
+#include <gnuradio/uwb/uwb_demod_core.h>
 #include <pmt/pmt.h>
 
 #include <algorithm>
@@ -1899,10 +1900,8 @@ int main(int argc, char** argv)
     if (mode == "demod-core" || mode == "demod-stage-profile" ||
         mode == "demod-pdu" || mode == "scheduled-demod-e2e") {
         // UWB realtime-demodulator benchmark (开发方案_UWB实时解调.md §9).
-        // R0 skeleton: stages are not implemented yet — report the frozen
-        // PHY profile and expected input so the framework is in place.
-        std::printf("=== UWB realtime demod bench (R0 skeleton) ===\n");
         auto prof = gr::uwb::demod::Qm35825Profile::Default();
+        std::printf("=== UWB realtime demod bench ===\n");
         std::printf("mode                  : %s\n", mode.c_str());
         std::printf("profile               : fs=%.0f code=%zu preamble=%zu "
                     "sfd=%s data_rate=%.2f\n",
@@ -1911,9 +1910,112 @@ int main(int argc, char** argv)
         std::printf("chips_per_symbol      : %zu\n",
                     gr::uwb::demod::kQm35ChipsPerSymbol);
         std::printf("golden vectors        : testdata/realtime_demod_golden/\n");
-        std::printf("implemented stages    : 0/7 (timing/cfo/sfd/cir/ns_sfd/phr/"
-                    "payload)\n");
-        std::printf("NOTE: R1 stage implementations land here; skeleton only.\n");
+        std::printf("implemented stages    : 4/7 (timing/cfo/sfd/cir done; "
+                    "ns_sfd/phr/payload pending)\n");
+
+        if (mode == "demod-stage-profile") {
+            // Per-stage latency over the clean golden window (R2).
+            const std::string gw = "testdata/realtime_demod_golden/window.cfile";
+            std::ifstream f(gw, std::ios::binary);
+            if (!f) {
+                std::printf("NOTE: %s not found (run from repo root); "
+                            "skeleton only.\n", gw.c_str());
+                return 0;
+            }
+            f.seekg(0, std::ios::end);
+            const size_t bytes = static_cast<size_t>(f.tellg());
+            f.seekg(0, std::ios::beg);
+            std::vector<std::complex<float>> rx(bytes / sizeof(std::complex<float>));
+            f.read(reinterpret_cast<char*>(rx.data()),
+                   static_cast<std::streamsize>(bytes));
+
+            gr::uwb::demod::core::DemodScratch scratch;
+            scratch.reserve(rx.size());
+
+            std::vector<std::complex<float>> tmpl;
+            std::ifstream tf("testdata/reference_preamble.bin", std::ios::binary);
+            tf.seekg(0, std::ios::end);
+            tmpl.resize(static_cast<size_t>(tf.tellg()) /
+                        sizeof(std::complex<float>));
+            tf.seekg(0, std::ios::beg);
+            tf.read(reinterpret_cast<char*>(tmpl.data()),
+                    static_cast<std::streamsize>(tmpl.size() *
+                                                 sizeof(std::complex<float>)));
+            // The golden window was generated with the lrwpan generator's
+            // default (IEEE legacy) SFD, not the profile's 4z2 — match it.
+            const auto sfd_seq = gr::uwb::demod::GetSfdSequence("ieee");
+            const int8_t* pc = gr::uwb::demod::GetPreambleCode(prof.code_index);
+            std::vector<int8_t> pcode(pc, pc + gr::uwb::demod::kQm35CodeLength);
+
+            gr::uwb::demod::TimingResult tr;
+            gr::uwb::demod::CfoResult cf;
+            gr::uwb::demod::SfdResult sr;
+            gr::uwb::demod::CirResult cir;
+            auto chain = [&](bool measure, double* d_t, double* d_c, double* d_s,
+                             double* d_r) {
+                bool ok = true;
+                auto t_ref = std::chrono::steady_clock::now();
+                auto el = [&]() {
+                    return std::chrono::duration<double, std::micro>(
+                               std::chrono::steady_clock::now() - t_ref)
+                        .count();
+                };
+                ok &= gr::uwb::demod::core::stage_timing(
+                    rx.data(), rx.size(), prof, tmpl, 9984, tr, scratch);
+                if (measure) {
+                    *d_t = el();
+                    t_ref = std::chrono::steady_clock::now();
+                }
+                ok &= gr::uwb::demod::core::stage_cfo(
+                    rx.data(), rx.size(), prof, tr, cf, scratch);
+                if (measure) {
+                    *d_c = el();
+                    t_ref = std::chrono::steady_clock::now();
+                }
+                ok &= gr::uwb::demod::core::stage_sfd(
+                    rx.data(), rx.size(), prof, tr, sfd_seq, tmpl, sr, scratch);
+                if (measure) {
+                    *d_s = el();
+                    t_ref = std::chrono::steady_clock::now();
+                }
+                ok &= gr::uwb::demod::core::stage_cir_softchips(
+                    scratch.derotated.data(), rx.size(), prof, tr, pcode, cir,
+                    scratch);
+                if (measure)
+                    *d_r = el();
+                return ok;
+            };
+            // Warm-up pass (allocations / cold cache), then measured pass.
+            chain(false, nullptr, nullptr, nullptr, nullptr);
+            double d_timing = 0, d_cfo = 0, d_sfd = 0, d_cir = 0;
+            const bool all_ok = chain(true, &d_timing, &d_cfo, &d_sfd, &d_cir);
+            const double d_total = d_timing + d_cfo + d_sfd + d_cir;
+
+            std::printf("stages                : %s\n",
+                        all_ok ? "timing[ok] cfo[ok] sfd[ok] cir[ok]"
+                               : "ONE OR MORE STAGES FAILED");
+            std::printf("timing start=%lld period=%.3f peaks=%zu metric=%.3f\n",
+                        static_cast<long long>(tr.preamble_start_sample),
+                        tr.measured_period, tr.detected_peaks, tr.metric);
+            std::printf("cfo   hz=%.1f peaks_used=%zu\n", cf.cfo_hz,
+                        cf.peaks_used);
+            std::printf("sfd   start=%lld metric=%.4f\n",
+                        static_cast<long long>(sr.sfd_start_sample), sr.metric);
+            std::printf("cir   first_path=%zu peak=%.4f taps=%zu "
+                        "soft_chips=%zu spc=%.2f\n",
+                        cir.first_path_sample, cir.cir_peak_metric,
+                        cir.cir_values.size(), cir.soft_chip_count,
+                        cir.samples_per_chip);
+            std::printf("latency(us)           : timing=%.1f cfo=%.1f "
+                        "sfd=%.1f cir=%.1f total=%.1f\n",
+                        d_timing, d_cfo, d_sfd, d_cir, d_total);
+            std::printf("soft-chip rate        : %.2f Mchips/s\n",
+                        cir.soft_chip_count / (d_cir / 1e6) / 1e6);
+            std::printf("NOTE: ns_sfd/phr/payload stages pending (R3-R4).\n");
+            return all_ok ? 0 : 1;
+        }
+        std::printf("NOTE: demod-core / demod-pdu / scheduled-demod-e2e land "
+                    "in R5-R6; skeleton only.\n");
         return 0;
     }
 
