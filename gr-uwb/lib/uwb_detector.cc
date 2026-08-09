@@ -42,7 +42,8 @@ UwbDetector::UwbDetector(
           energy_threshold,
           energy_gate_decimation,
           /*gate_window=*/32,
-          /*holdoff_decimated=*/8),
+          /*holdoff_decimated=*/8,
+          /*post_trigger_capture=*/capture),
       d_pre_trigger_(pre_trigger),
       d_capture_(capture),
       d_template_len_(known_preamble.size()),
@@ -414,8 +415,14 @@ void UwbDetector::publish_packet(const UwbDetectorStateMachine::Region& region)
         return; // no confirmed preamble
 
     // 3. Packet start = first SYNC symbol start = earliest end − (L−1).
+    // fir_filter::filterN's first valid output in this stateless Region call is
+    // one sample later than the stream detector's trailing-window coordinate.
+    // Convert it back before applying peak_end - (L-1).  The real MATLAB
+    // golden waveform then maps exactly 4993015 -> 4992000 (0-based).
+    const uint64_t peak_end_abs =
+        region.start_abs + static_cast<uint64_t>(earliest_end);
     const uint64_t packet_start =
-        region.start_abs + static_cast<uint64_t>(earliest_end) - Lm1;
+        (peak_end_abs > Lm1) ? peak_end_abs - Lm1 - 1 : 0;
     const uint64_t trigger = region.start_abs + region.candidate_offset;
 
     // 4. Capture [start − pre_trigger, start + capture) — i.e. pre_trigger +
@@ -442,6 +449,7 @@ void UwbDetector::publish_packet(const UwbDetectorStateMachine::Region& region)
                          pmt::from_long(static_cast<long>(cap)));
     meta = pmt::dict_add(meta, pmt::mp("detection_metric"),
                          pmt::from_double(best_metric));
+    meta = pmt::dict_add(meta, pmt::mp("threshold"), pmt::from_double(0.5));
     meta = pmt::dict_add(meta, pmt::mp("pre_trigger_samples"),
                          pmt::from_long(static_cast<long>(d_pre_trigger_)));
 

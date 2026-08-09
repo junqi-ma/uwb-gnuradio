@@ -244,3 +244,52 @@ BOOST_AUTO_TEST_CASE(test_detector_two_packets_payload_matches_input)
             BOOST_CHECK_EQUAL(iq[i], x[input_begin + i]);
     }
 }
+
+// A short energetic preamble followed by silence must not truncate a configured
+// capture.  Detection currently happens only after the energy Region closes,
+// so this also exercises collection of the post-detection tail across scheduler
+// chunks.
+BOOST_AUTO_TEST_CASE(test_detector_short_region_emits_fixed_capture)
+{
+    const size_t L = 128;
+    const size_t pre = 64;
+    const size_t capture = 5000;
+    const size_t start_expected = 2048;
+    const size_t reps = 10;
+
+    std::vector<gr_complex> tmpl(L);
+    for (size_t k = 0; k < L; ++k)
+        tmpl[k] = gr_complex(std::cos(0.21f * k), 0.4f * std::sin(0.13f * k));
+    gr::uwb::core::uwb_l2_normalize(tmpl);
+
+    std::vector<gr_complex> x(start_expected + capture + 4096,
+                              gr_complex(0.0f, 0.0f));
+    for (size_t r = 0; r < reps; ++r)
+        for (size_t k = 0; k < L; ++k)
+            x[start_expected + r * L + k] = tmpl[k];
+
+    auto det = gr::uwb::UwbDetector::make(tmpl,
+                                          pre,
+                                          capture,
+                                          /*energy_threshold=*/1e-3f,
+                                          /*energy_gate_decimation=*/4,
+                                          /*coarse_decimation=*/4,
+                                          /*coarse_repetitions=*/1,
+                                          /*coarse_margin=*/8);
+    auto dbg = gr::blocks::message_debug::make();
+    run_detector(x, det, dbg);
+
+    BOOST_REQUIRE_EQUAL(dbg->num_messages(), 1);
+    const pmt::pmt_t msg = dbg->get_message(0);
+    const pmt::pmt_t meta = pmt::car(msg);
+    const auto iq = pmt::c32vector_elements(pmt::cdr(msg));
+    const uint64_t start = pmt::to_uint64(
+        pmt::dict_ref(meta, pmt::mp("start_sample"), pmt::PMT_NIL));
+
+    BOOST_REQUIRE_EQUAL(iq.size(), pre + capture);
+    BOOST_REQUIRE_GE(start, pre);
+    const size_t input_begin = static_cast<size_t>(start) - pre;
+    BOOST_REQUIRE_LE(input_begin + iq.size(), x.size());
+    for (size_t i = 0; i < iq.size(); ++i)
+        BOOST_CHECK_EQUAL(iq[i], x[input_begin + i]);
+}

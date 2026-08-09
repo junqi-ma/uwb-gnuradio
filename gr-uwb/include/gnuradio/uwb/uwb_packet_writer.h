@@ -26,8 +26,10 @@
  * Debug mode `one_file_per_packet = true` writes `packet_<id>.iq` instead and
  * records a "file" field in the JSONL line.
  *
- * Block type: gr::block with no stream I/O (message-driven).  File I/O and
- * CF32→SC16 conversion happen once per packet in the message handler.
+ * Block type: gr::block with no stream I/O (message-driven).  The message
+ * handler only enqueues an immutable PDU into a bounded FIFO; CF32→SC16
+ * conversion and file I/O run on a dedicated worker.  Queue saturation is
+ * explicit through packets_dropped()/queue_high_watermark().
  */
 
 #pragma once
@@ -38,8 +40,13 @@
 #include <pmt/pmt.h>
 
 #include <cstdint>
+#include <array>
+#include <atomic>
+#include <condition_variable>
 #include <fstream>
+#include <mutex>
 #include <string>
+#include <thread>
 
 namespace gr {
 namespace uwb {
@@ -67,6 +74,9 @@ public:
     bool one_file_per_packet() const;
     size_t packets_written() const;
     uint64_t samples_written() const;
+    uint64_t packets_received() const;
+    uint64_t packets_dropped() const;
+    size_t queue_high_watermark() const;
 
     bool start() override;
     bool stop() override;
@@ -78,6 +88,8 @@ protected:
 
 private:
     void handle_packet(pmt::pmt_t msg);
+    void write_packet(pmt::pmt_t msg);
+    void writer_loop();
 
     /** Convert CF32 → interleaved SC16; returns iq_scale (float = sc16/scale). */
     static float convert_to_sc16(const gr_complex* in,
@@ -89,9 +101,22 @@ private:
     bool d_one_file_per_packet_;
     std::ofstream d_iq_;   // shared capture.iq (only when not per-packet)
     std::ofstream d_jsonl_;
-    uint64_t d_sample_offset_ = 0; // samples appended to capture.iq
-    size_t d_packets_ = 0;
+    std::atomic<uint64_t> d_sample_offset_{ 0 }; // samples appended to capture.iq
+    std::atomic<size_t> d_packets_{ 0 };
+    std::atomic<uint64_t> d_received_{ 0 };
+    std::atomic<uint64_t> d_dropped_{ 0 };
+    std::atomic<size_t> d_high_watermark_{ 0 };
     std::vector<int16_t> d_sc16_; // scratch, reused per packet
+
+    static constexpr size_t kQueueCapacity = 16;
+    std::array<pmt::pmt_t, kQueueCapacity> d_queue_{};
+    size_t d_queue_head_ = 0;
+    size_t d_queue_tail_ = 0;
+    size_t d_queue_count_ = 0;
+    bool d_stop_ = false;
+    std::mutex d_mutex_;
+    std::condition_variable d_cv_;
+    std::thread d_thread_;
 };
 
 } // namespace uwb

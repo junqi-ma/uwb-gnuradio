@@ -50,8 +50,11 @@ bool UwbPacketWriter::one_file_per_packet() const
 {
     return d_one_file_per_packet_;
 }
-size_t UwbPacketWriter::packets_written() const { return d_packets_; }
-uint64_t UwbPacketWriter::samples_written() const { return d_sample_offset_; }
+size_t UwbPacketWriter::packets_written() const { return d_packets_.load(); }
+uint64_t UwbPacketWriter::samples_written() const { return d_sample_offset_.load(); }
+uint64_t UwbPacketWriter::packets_received() const { return d_received_.load(); }
+uint64_t UwbPacketWriter::packets_dropped() const { return d_dropped_.load(); }
+size_t UwbPacketWriter::queue_high_watermark() const { return d_high_watermark_.load(); }
 
 float
 UwbPacketWriter::convert_to_sc16(const gr_complex* in,
@@ -86,14 +89,33 @@ UwbPacketWriter::start()
     if (!d_one_file_per_packet_)
         d_iq_.open(pre + ".iq", std::ios::binary | std::ios::trunc);
     d_jsonl_.open(pre + ".jsonl", std::ios::trunc);
-    d_sample_offset_ = 0;
-    d_packets_ = 0;
-    return d_jsonl_.is_open();
+    d_sample_offset_.store(0);
+    d_packets_.store(0);
+    d_received_.store(0);
+    d_dropped_.store(0);
+    d_high_watermark_.store(0);
+    {
+        std::lock_guard<std::mutex> lock(d_mutex_);
+        d_queue_head_ = d_queue_tail_ = d_queue_count_ = 0;
+        d_stop_ = false;
+    }
+    const bool ok = d_jsonl_.is_open() &&
+                    (d_one_file_per_packet_ || d_iq_.is_open());
+    if (ok)
+        d_thread_ = std::thread(&UwbPacketWriter::writer_loop, this);
+    return ok;
 }
 
 bool
 UwbPacketWriter::stop()
 {
+    {
+        std::lock_guard<std::mutex> lock(d_mutex_);
+        d_stop_ = true;
+    }
+    d_cv_.notify_one();
+    if (d_thread_.joinable())
+        d_thread_.join();
     d_iq_.flush();
     d_jsonl_.flush();
     if (d_iq_.is_open())
@@ -108,13 +130,54 @@ UwbPacketWriter::handle_packet(pmt::pmt_t msg)
 {
     if (!pmt::is_pair(msg))
         return;
-    pmt::pmt_t meta = pmt::car(msg);
-    pmt::pmt_t data = pmt::cdr(msg);
+    const pmt::pmt_t meta = pmt::car(msg);
+    const pmt::pmt_t data = pmt::cdr(msg);
     if (!pmt::is_dict(meta) || !pmt::is_c32vector(data))
         return;
 
+    d_received_.fetch_add(1);
+    {
+        std::lock_guard<std::mutex> lock(d_mutex_);
+        if (d_queue_count_ == kQueueCapacity) {
+            d_dropped_.fetch_add(1);
+            return;
+        }
+        d_queue_[d_queue_tail_] = msg;
+        d_queue_tail_ = (d_queue_tail_ + 1) % kQueueCapacity;
+        ++d_queue_count_;
+        size_t old = d_high_watermark_.load();
+        while (old < d_queue_count_ &&
+               !d_high_watermark_.compare_exchange_weak(old, d_queue_count_)) {}
+    }
+    d_cv_.notify_one();
+}
+
+void UwbPacketWriter::writer_loop()
+{
+    for (;;) {
+        pmt::pmt_t msg;
+        {
+            std::unique_lock<std::mutex> lock(d_mutex_);
+            d_cv_.wait(lock, [this] { return d_stop_ || d_queue_count_ != 0; });
+            if (d_queue_count_ == 0 && d_stop_)
+                return;
+            msg = d_queue_[d_queue_head_];
+            d_queue_[d_queue_head_] = pmt::PMT_NIL;
+            d_queue_head_ = (d_queue_head_ + 1) % kQueueCapacity;
+            --d_queue_count_;
+        }
+        write_packet(msg);
+    }
+}
+
+void UwbPacketWriter::write_packet(pmt::pmt_t msg)
+{
+    pmt::pmt_t meta = pmt::car(msg);
+    pmt::pmt_t data = pmt::cdr(msg);
+
     const long id = pmt::to_long(
-        pmt::dict_ref(meta, pmt::mp("packet_id"), pmt::from_long(d_packets_)));
+        pmt::dict_ref(meta, pmt::mp("packet_id"),
+                      pmt::from_long(static_cast<long>(d_packets_.load()))));
     const uint64_t start = pmt::to_uint64(
         pmt::dict_ref(meta, pmt::mp("start_sample"), pmt::from_uint64(0)));
     const uint64_t trigger = pmt::to_uint64(
@@ -172,16 +235,16 @@ UwbPacketWriter::handle_packet(pmt::pmt_t msg)
             static_cast<unsigned long long>(trigger),
             rate,
             n,
-            static_cast<unsigned long long>(d_sample_offset_),
+            static_cast<unsigned long long>(d_sample_offset_.load()),
             metric,
             pre,
             static_cast<double>(iq_scale));
-        d_sample_offset_ += n;
+        d_sample_offset_.fetch_add(n);
     }
 
     d_jsonl_ << line;
     d_jsonl_.flush();
-    ++d_packets_;
+    d_packets_.fetch_add(1);
 }
 
 } // namespace uwb

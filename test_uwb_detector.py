@@ -170,8 +170,10 @@ def main():
         pre = 2032
         gt = x[lo - pre:lo - pre + n]
         diff = float(np.mean(np.abs(iq - gt)))
-        check(abs(lo - PACKET_START) < 2000,
-              f"packet start {lo} ~= ground truth {PACKET_START}")
+        check(lo == PACKET_START,
+              f"packet start {lo} == MATLAB ground truth {PACKET_START} (0-based)")
+        check(meta.get("threshold") == 0.5,
+              f"metadata threshold={meta.get('threshold')} (expected 0.5)")
         check(meta["detection_metric"] > 0.9,
               f"detection metric {meta['detection_metric']:.3f} (> 0.9)")
         check(n == pre + 200000,

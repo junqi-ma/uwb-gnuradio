@@ -576,7 +576,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// UwbDetectorStateMachine: SEARCH → IN_REGION cross-chunk region buffering.
+// UwbDetectorStateMachine: SEARCH → IN_REGION → CAPTURE cross-chunk buffering.
 // GNU Radio independent; the caller drives process() per input chunk and owns
 // the absolute sample counter (uint64_t).
 //
@@ -585,8 +585,11 @@ private:
 //   IN_REGION : every raw sample of the candidate region is appended to a
 //               buffer (plus `pre_trigger` samples before the crossing, kept
 //               in a ring).  When the gate stays below the threshold for
-//               `holdoff_decimated` consecutive decimated points, the region
-//               ends and region_ready() turns true.
+//               `holdoff_decimated` consecutive decimated points, the energy
+//               Region ends.
+//   CAPTURE    : if configured, bulk-copy silence/tail samples until the
+//               trigger-relative capture horizon is complete.  This guarantees
+//               that a later preamble confirmation can emit a fixed-size PDU.
 //
 // Buffering the WHOLE region lets the block run the coarse-to-fine preamble
 // scan on all symbols at once — no chunk-boundary artifacts.
@@ -608,16 +611,20 @@ public:
                             float energy_threshold = 1e-3f,
                             size_t gate_decimation = 100,
                             size_t gate_window = 32,
-                            size_t holdoff_decimated = 8)
+                            size_t holdoff_decimated = 8,
+                            size_t post_trigger_capture = 0)
         : pre_trigger_(pre_trigger),
           energy_threshold_(energy_threshold),
           gate_decimation_(gate_decimation > 0 ? gate_decimation : 1),
           gate_window_(gate_window > 0 ? gate_window : 1),
           holdoff_decimated_(holdoff_decimated > 0 ? holdoff_decimated : 1),
+          post_trigger_capture_(post_trigger_capture),
           neigh_len_(16),
           gate_(gate_window_),
           pre_ring_(pre_trigger_),
-          max_region_samples_(std::max<size_t>(pre_trigger_ + 300000, 524288))
+          max_region_samples_(std::max<size_t>(
+              pre_trigger_ + std::max<size_t>(post_trigger_capture_, 300000),
+              524288))
     {
         for (size_t i = 0; i < kRegionPoolSize; ++i) {
             d_region_pool_[i].samples.reserve(max_region_samples_);
@@ -633,9 +640,12 @@ public:
             if (state_ == SEARCH)
                 consumed += process_search(in + consumed, n - consumed,
                                            abs_sample + consumed);
-            else
+            else if (state_ == IN_REGION)
                 consumed += process_region(in + consumed, n - consumed,
                                            abs_sample + consumed);
+            else
+                consumed += process_capture(in + consumed, n - consumed,
+                                            abs_sample + consumed);
         }
     }
 
@@ -680,7 +690,9 @@ public:
     {
         pre_trigger_ = v;
         pre_ring_ = RingBuffer(pre_trigger_);
-        max_region_samples_ = std::max<size_t>(pre_trigger_ + 300000, 524288);
+        max_region_samples_ = std::max<size_t>(
+            pre_trigger_ + std::max<size_t>(post_trigger_capture_, 300000),
+            524288);
         for (auto& region : d_region_pool_) {
             if (region.samples.capacity() < max_region_samples_)
                 region.samples.reserve(max_region_samples_);
@@ -700,6 +712,7 @@ public:
         d_ready_tail_ = 0;
         d_ready_count_ = 0;
         d_active_region_ = kInvalidRegion;
+        capture_end_abs_ = 0;
         d_dropped_regions_ = 0;
         std::lock_guard<std::mutex> lock(d_pool_mutex_);
         d_free_count_ = 0;
@@ -778,6 +791,40 @@ private:
         return consumed;
     }
 
+    // Once the energy gate closes, no more detection math is needed.  Copy in
+    // bulk until the conservative trigger-relative horizon is present.  Since
+    // packet_start is at or before the delayed energy trigger, this contains
+    // every sample through packet_start + post_trigger_capture_.
+    size_t process_capture(const std::complex<float>* in,
+                           size_t n,
+                           uint64_t abs_sample)
+    {
+        if (abs_sample >= capture_end_abs_) {
+            finish_region();
+            state_ = SEARCH;
+            return 0;
+        }
+        const uint64_t remaining64 = capture_end_abs_ - abs_sample;
+        const size_t take = static_cast<size_t>(
+            std::min<uint64_t>(remaining64, static_cast<uint64_t>(n)));
+        if (d_active_region_ != kInvalidRegion) {
+            auto& samples = d_region_pool_[d_active_region_].samples;
+            if (samples.size() + take <= max_region_samples_) {
+                samples.insert(samples.end(), in, in + take);
+            } else {
+                const RegionHandle overflow = d_active_region_;
+                d_active_region_ = kInvalidRegion;
+                release_region(overflow);
+                ++d_dropped_regions_;
+            }
+        }
+        if (abs_sample + take >= capture_end_abs_) {
+            finish_region();
+            state_ = SEARCH;
+        }
+        return take;
+    }
+
     void update_gate(uint64_t sample)
     {
         const float energy = gate_.push(d_block_acc_);
@@ -796,6 +843,7 @@ private:
                 region.start_abs = (sample >= region.candidate_offset)
                                        ? sample - region.candidate_offset
                                        : 0;
+                capture_end_abs_ = sample + 1 + post_trigger_capture_;
             } else {
                 ++d_dropped_regions_;
             }
@@ -806,8 +854,12 @@ private:
         if (energy >= energy_threshold_) {
             low_count_ = 0;
         } else if (++low_count_ >= holdoff_decimated_) {
-            finish_region();
-            state_ = SEARCH;
+            if (post_trigger_capture_ > 0 && sample + 1 < capture_end_abs_) {
+                state_ = CAPTURE;
+            } else {
+                finish_region();
+                state_ = SEARCH;
+            }
             low_count_ = 0;
         }
     }
@@ -835,12 +887,13 @@ private:
         d_active_region_ = kInvalidRegion;
     }
 
-    enum State { SEARCH, IN_REGION };
+    enum State { SEARCH, IN_REGION, CAPTURE };
     size_t pre_trigger_;
     float energy_threshold_;
     size_t gate_decimation_;
     size_t gate_window_;
     size_t holdoff_decimated_;
+    size_t post_trigger_capture_;
     size_t neigh_len_;   // |x|^2 samples summed per decimated block (16)
     SlidingEnergy gate_;
     RingBuffer pre_ring_;
@@ -859,6 +912,7 @@ private:
     size_t d_block_phase_ = 0;
     float d_block_acc_ = 0.0f;
     size_t low_count_ = 0;
+    uint64_t capture_end_abs_ = 0;
 };
 
 } // namespace uwb

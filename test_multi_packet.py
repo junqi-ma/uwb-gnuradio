@@ -39,8 +39,8 @@ def build_stream(packets, positions, gap):
         s[p:p+len(pkt)] = pkt
     return s
 
-def run_detector(stream, tmpl):
-    det = uwb.detector(tmpl.tolist())
+def run_detector(stream, tmpl, capture=200000):
+    det = uwb.detector(tmpl.tolist(), PRE, capture)
     src = blocks.vector_source_c(stream.tolist(), False)
     dbg = blocks.message_debug()
     tb = gr.top_block(); tb.connect(src, det); tb.msg_connect(det, "packet", dbg, "store")
@@ -92,7 +92,11 @@ def test_multi_100():
     positions = [5000]
     for g in gaps: positions.append(positions[-1] + len(comp) + g)
     stream = build_stream([comp]*n, positions, 0)
-    verify_packets(run_detector(stream, tmpl), positions, stream, f"multi-100")
+    # Keep the requested capture shorter than the minimum packet spacing.
+    # Overlapping fixed capture windows require a separate multi-active-capture
+    # design; this case validates detector/holdoff behavior, not overlap fanout.
+    verify_packets(run_detector(stream, tmpl, capture=10000), positions, stream,
+                   f"multi-100")
 
 def test_adjacent():
     x, pkt, tmpl = load()

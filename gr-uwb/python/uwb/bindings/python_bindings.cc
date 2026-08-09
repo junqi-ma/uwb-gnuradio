@@ -143,7 +143,11 @@ void bind_packet_writer(py::module& m)
         .def("base_name", &gr::uwb::UwbPacketWriter::base_name)
         .def("one_file_per_packet", &gr::uwb::UwbPacketWriter::one_file_per_packet)
         .def("packets_written", &gr::uwb::UwbPacketWriter::packets_written)
-        .def("samples_written", &gr::uwb::UwbPacketWriter::samples_written);
+        .def("samples_written", &gr::uwb::UwbPacketWriter::samples_written)
+        .def("packets_received", &gr::uwb::UwbPacketWriter::packets_received)
+        .def("packets_dropped", &gr::uwb::UwbPacketWriter::packets_dropped)
+        .def("queue_high_watermark",
+             &gr::uwb::UwbPacketWriter::queue_high_watermark);
 }
 
 void bind_scheduled_extractor(py::module& m)
