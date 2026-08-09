@@ -1,0 +1,48 @@
+id: uwb_realtime_demodulator
+label: UWB Realtime Demodulator
+category: '[UWB]'
+
+parameters:
+-   id: template_path
+    label: Preamble template (CF32 file)
+    dtype: string
+    default: 'reference_preamble.bin'
+-   id: num_workers
+    label: Num workers
+    dtype: int
+    default: '2'
+-   id: queue_capacity
+    label: Queue capacity
+    dtype: int
+    default: '64'
+-   id: sfd_mode
+    label: SFD mode (4z2 / ieee)
+    dtype: string
+    default: '4z2'
+
+inputs:
+-   domain: message
+    id: samples
+    optional: false
+-   domain: message
+    id: control
+    optional: true
+
+outputs:
+-   domain: message
+    id: result
+    optional: true
+-   domain: message
+    id: status
+    optional: true
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.realtime_demodulator(${template_path}, ${num_workers}, ${queue_capacity}, ${sfd_mode})
+
+cpp_templates:
+    includes: ['#include <gnuradio/uwb/uwb_realtime_demodulator.h>']
+    make: 'this->${id} = gr::uwb::UwbRealtimeDemodulator::make(${template_path}, ${num_workers}, ${queue_capacity}, ${sfd_mode});'
+    link: ['gnuradio::gnuradio-uwb']
+
+file_format: 1

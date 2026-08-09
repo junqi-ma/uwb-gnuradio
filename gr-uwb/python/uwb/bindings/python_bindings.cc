@@ -18,6 +18,7 @@
 #include <gnuradio/uwb/uwb_preamble_detector.h>
 #include <gnuradio/uwb/uwb_detector.h>
 #include <gnuradio/uwb/uwb_packet_writer.h>
+#include <gnuradio/uwb/uwb_realtime_demodulator.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor.h>
 
 namespace py = pybind11;
@@ -188,6 +189,46 @@ void bind_scheduled_extractor(py::module& m)
              &gr::uwb::UwbScheduledExtractor::queue_high_watermark);
 }
 
+void bind_realtime_demodulator(py::module& m)
+{
+    py::class_<gr::uwb::UwbRealtimeDemodulator,
+               gr::block,
+               std::shared_ptr<gr::uwb::UwbRealtimeDemodulator>>(
+        m, "realtime_demodulator")
+        .def(py::init(&gr::uwb::UwbRealtimeDemodulator::make),
+             py::arg("template_path"),
+             py::arg("num_workers") = size_t(2),
+             py::arg("queue_capacity") = size_t(64),
+             py::arg("sfd_mode") = std::string("4z2"))
+        .def_static("make_from_template",
+                    &gr::uwb::UwbRealtimeDemodulator::make_from_template,
+                    py::arg("template_wf"),
+                    py::arg("num_workers") = size_t(2),
+                    py::arg("queue_capacity") = size_t(64),
+                    py::arg("sfd_mode") = std::string("4z2"))
+        .def("jobs_received", &gr::uwb::UwbRealtimeDemodulator::jobs_received)
+        .def("jobs_completed", &gr::uwb::UwbRealtimeDemodulator::jobs_completed)
+        .def("jobs_failed", &gr::uwb::UwbRealtimeDemodulator::jobs_failed)
+        .def("jobs_dropped", &gr::uwb::UwbRealtimeDemodulator::jobs_dropped)
+        .def("invalid_inputs",
+             &gr::uwb::UwbRealtimeDemodulator::invalid_inputs)
+        .def("worker_exceptions",
+             &gr::uwb::UwbRealtimeDemodulator::worker_exceptions)
+        .def("queue_depth", &gr::uwb::UwbRealtimeDemodulator::queue_depth)
+        .def("queue_high_watermark",
+             &gr::uwb::UwbRealtimeDemodulator::queue_high_watermark)
+        .def("num_workers", &gr::uwb::UwbRealtimeDemodulator::num_workers)
+        .def("latency_p50_us", &gr::uwb::UwbRealtimeDemodulator::latency_p50_us)
+        .def("latency_p95_us", &gr::uwb::UwbRealtimeDemodulator::latency_p95_us)
+        .def("latency_p99_us", &gr::uwb::UwbRealtimeDemodulator::latency_p99_us)
+        .def("latency_max_us", &gr::uwb::UwbRealtimeDemodulator::latency_max_us)
+        .def("worker_utilization_pct",
+             &gr::uwb::UwbRealtimeDemodulator::worker_utilization_pct)
+        .def("drained", &gr::uwb::UwbRealtimeDemodulator::drained)
+        .def("drain", &gr::uwb::UwbRealtimeDemodulator::drain)
+        .def("reset_stats", &gr::uwb::UwbRealtimeDemodulator::reset_stats);
+}
+
 // We need this hack because import_array() returns NULL
 // for newer Python versions.
 // This function is also necessary because it ensures access to the C API
@@ -212,4 +253,5 @@ PYBIND11_MODULE(uwb_python, m)
     bind_detector(m);
     bind_packet_writer(m);
     bind_scheduled_extractor(m);
+    bind_realtime_demodulator(m);
 }

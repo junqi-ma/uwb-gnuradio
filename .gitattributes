@@ -1,0 +1,8 @@
+# Binary data files: never apply text / line-ending conversion.
+# core.autocrlf=true would otherwise flag these as modified whenever a
+# byte sequence looks like CRLF (false positives in git status).
+*.cfile binary
+*.mat binary
+*.bin binary
+*.c32 binary
+*.iq binary

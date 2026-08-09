@@ -27,6 +27,7 @@
  *       detector-region         — continuous Region IQ → coarse/fine (core)
  *       detector-region-stream  — min-gap packet stream → full UwbDetector
  *       detector-profile        — per-stage wall-time breakdown + advice
+ *       demod-async             — UwbRealtimeDemodulator worker-pool throughput
  *     options: --reps N --energy-dec D --coarse-dec D --target N --gap G
  *              --regions N  (detector-region/profile, default 200)
  *              --buffer-items N --max-noutput-items N
@@ -37,6 +38,7 @@
 #include "config.h"
 #endif
 
+#include <gnuradio/blocks/message_debug.h>
 #include <gnuradio/blocks/null_sink.h>
 #include <gnuradio/blocks/vector_source.h>
 #include <gnuradio/filter/fir_filter.h>
@@ -44,6 +46,7 @@
 #include <gnuradio/uwb/uwb_detector.h>
 #include <gnuradio/uwb/uwb_detector_core.h>
 #include <gnuradio/uwb/uwb_preamble_detector.h>
+#include <gnuradio/uwb/uwb_realtime_demodulator.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor_core.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
@@ -63,6 +66,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -1895,6 +1899,107 @@ int main(int argc, char** argv)
         return run_scheduled_bench(target, radar_rate, comm_rate, buffer_items,
                                    max_noutput_items, repeat > 0 ? repeat : 1,
                                    cfile, comm_cfile, comm_amp);
+    }
+
+    if (mode == "demod-async") {
+        // R5: async message block throughput/latency over the golden window.
+        // Feeds `--repeat` identical window PDUs through the
+        // UwbRealtimeDemodulator worker pool and reports jobs/s, queue stats
+        // and p50/p95/p99 end-to-end latency.  Options: --workers --queue.
+        const std::string gw = "testdata/realtime_demod_golden/window.cfile";
+        std::ifstream f(gw, std::ios::binary);
+        if (!f) {
+            std::printf("NOTE: %s not found (run from repo root); "
+                        "skeleton only.\n",
+                        gw.c_str());
+            return 0;
+        }
+        f.seekg(0, std::ios::end);
+        const size_t bytes = static_cast<size_t>(f.tellg());
+        f.seekg(0, std::ios::beg);
+        std::vector<std::complex<float>> rx(bytes /
+                                            sizeof(std::complex<float>));
+        f.read(reinterpret_cast<char*>(rx.data()),
+               static_cast<std::streamsize>(bytes));
+
+        std::vector<std::complex<float>> tmpl;
+        std::ifstream tf("testdata/reference_preamble.bin", std::ios::binary);
+        tf.seekg(0, std::ios::end);
+        tmpl.resize(static_cast<size_t>(tf.tellg()) /
+                    sizeof(std::complex<float>));
+        tf.seekg(0, std::ios::beg);
+        tf.read(reinterpret_cast<char*>(tmpl.data()),
+                static_cast<std::streamsize>(tmpl.size() *
+                                             sizeof(std::complex<float>)));
+
+        size_t nworkers = 2;
+        size_t qcap = 64;
+        for (int i = 3; i + 1 < argc; i += 2) {
+            std::string k = argv[i];
+            if (k == "--workers")
+                nworkers = std::stoul(argv[i + 1]);
+            else if (k == "--queue")
+                qcap = std::stoul(argv[i + 1]);
+        }
+        const uint64_t N = static_cast<uint64_t>(std::max(1, repeat));
+
+        auto demod = gr::uwb::UwbRealtimeDemodulator::make_from_template(
+            tmpl, nworkers, qcap, "ieee" /* golden window uses IEEE SFD */);
+        auto dbg = gr::blocks::message_debug::make();
+        auto tb = gr::make_top_block("bench_demod_async");
+        tb->msg_connect(demod, "result", dbg, "store");
+
+        pmt::pmt_t meta = pmt::make_dict();
+        meta = pmt::dict_add(meta, pmt::mp("packet_id"), pmt::from_uint64(0));
+        meta = pmt::dict_add(meta, pmt::mp("schedule_index"),
+                             pmt::from_uint64(0));
+        meta = pmt::dict_add(meta, pmt::mp("predicted_start_sample"),
+                             pmt::from_long(9984));
+        meta = pmt::dict_add(meta, pmt::mp("window_start_sample"),
+                             pmt::from_long(0));
+        meta = pmt::dict_add(meta, pmt::mp("sample_count"),
+                             pmt::from_long(static_cast<long>(rx.size())));
+        pmt::pmt_t pdu =
+            pmt::cons(meta, pmt::init_c32vector(rx.size(), rx.data()));
+
+        tb->start();
+        const auto t0 = std::chrono::steady_clock::now();
+        for (uint64_t i = 0; i < N; ++i)
+            demod->_post(pmt::mp("samples"), pdu);
+        while (demod->jobs_completed() + demod->jobs_failed() < N) {
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - t0)
+                    .count() > 120000)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        const double wall_s = std::chrono::duration<double>(
+                                  std::chrono::steady_clock::now() - t0)
+                                  .count();
+        tb->stop();
+        tb->wait();
+
+        const uint64_t done = demod->jobs_completed() + demod->jobs_failed();
+        std::printf("== demod-async ==\n");
+        std::printf("workers=%zu queue_cap=%zu jobs=%llu done=%llu "
+                    "dropped=%llu\n",
+                    nworkers, qcap,
+                    static_cast<unsigned long long>(N),
+                    static_cast<unsigned long long>(done),
+                    static_cast<unsigned long long>(demod->jobs_dropped()));
+        if (wall_s > 0.0)
+            std::printf("throughput        : %.1f jobs/s  (%.2f ms/job wall)\n",
+                        N / wall_s, wall_s / N * 1e3);
+        std::printf("queue             : high_watermark=%zu depth=%zu\n",
+                    demod->queue_high_watermark(), demod->queue_depth());
+        std::printf("latency(us)       : p50=%llu p95=%llu p99=%llu max=%llu\n",
+                    static_cast<unsigned long long>(demod->latency_p50_us()),
+                    static_cast<unsigned long long>(demod->latency_p95_us()),
+                    static_cast<unsigned long long>(demod->latency_p99_us()),
+                    static_cast<unsigned long long>(demod->latency_max_us()));
+        std::printf("utilization       : %.1f%%\n",
+                    demod->worker_utilization_pct());
+        return 0;
     }
 
     if (mode == "demod-core" || mode == "demod-stage-profile" ||

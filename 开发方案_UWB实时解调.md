@@ -512,6 +512,18 @@ MATLAB Coder/MEX可用于验证数值kernel和估算上限，但生产C++不能�
 - stop/drain、异常和queue-full QA；
 - GRC/Python bindings。
 
+> **✅ R5 完成（2026-08-09）**
+> - **`UwbRealtimeDemodulator`**（`uwb_realtime_demodulator.h/.cc`，gr::block、纯 message）——**由 Grok Build 实现**（后台委托 run-msliwp4v-jerwav，9m49s），Claude 集成/审查/补齐绑定与 QA：
+>   - 端口：in `samples`（PDU `(meta,c32vector)`，可接 UwbScheduledExtractor "packet"）、in `control`；out `result`（PDU `(meta,u8vector payload bytes)`）、out `status`（事件+stats 快照）。
+>   - 有界 worker 池：`make(template_path, num_workers, queue_capacity, sfd_mode)`；`Job` 持 pmt c32vector 不可变引用（无拷贝）；queue-full **不阻塞**，`jobs_dropped++` + status `queue_full`；`stop()` **先 drain 再 join**；`start()` 先 join 旧 worker 再 spawn（**不在持锁下 join，否则死锁**——Grok 自修）。
+>   - stats：received/completed/failed/dropped/invalid_inputs/worker_exceptions、queue_depth/high_watermark、p50/p95/p99/max 延迟（64×64µs 直方图）、worker_utilization_pct、`drained()`/`drain()`/`reset_stats()`；status PDU 每次带完整快照。
+>   - 异常路径：worker try/catch → status `worker_exception` + result `InternalError`（空 bytes），**且计入 jobs_failed**（保持 `received == completed+failed+dropped` 无丢失不变量）。**TEST-ONLY 故障注入**：control `("cmd","fail_packet","packet_id",N)` 使 worker 对匹配 job 抛异常。
+>   - **关键排坑**：① `demodulate_one`/`DemodScratch` 在 `gr::uwb::demod::core`（嵌套 namespace，Grok 确认）；② **golden 用 `ieee` SFD、profile Default 是 `4z2`** → block 加 `sfd_mode` 构造参数（默认 4z2 生产、golden QA 传 "ieee"）；③ profile 的 `sfd_mode` 是 `const char*`，直接赋 ctor 的 `std::string.c_str()` 会**悬垂** → 需存 `d_sfd_mode_` 成员再取 c_str()；④ GR 3.10 `pmt::u8vector_elements`/`c32vector_elements` **返回 vector 引用**（非指针）；⑤ `pmt::init_c32vector(0,nullptr)` 有 float*/complex* **重载歧义**，需 cast；⑥ **从 WSL 内部跑 git**（UNC/SMB 视图报错误 file mode，导致 100755 提交的数据文件显示 modified）。
+> - **GRC/Python**：`uwb_realtime_demodulator.block.yml`（template_path/num_workers/queue_capacity/sfd_mode）+ `bind_realtime_demodulator`（make/make_from_template + 全部 stats accessor），Python 冒烟测试过。
+> - **QA**：`qa_uwb_realtime_demodulator.cc` **5 用例**（golden round-trip 127B+FCS 0x584b / queue-full 无丢失不变量 / stop-drain / 异常注入 / invalid-input），驱动方式 `demod->_post("samples", pdu)`（GR 3.10 `basic_block::_post` public）。**CTest 7/7**。
+> - **benchmark** `demod-async`（`--workers --queue --repeat`）：50 突发 job、2 workers → **50.4 jobs/s**、util 98.9%、无丢失、p50 墙钟 ~991ms（突发排队，非稳态）。单 job ~39ms（sfd 22ms 瓶颈）。
+> - **R6 规划**：100-200 packet/s 需 **4+ workers** 或先优化 sfd stage（22ms 占 56%）；稳态（非突发）墙钟延迟 ≈ 单 job 39ms。
+
 ### R6：端到端实时
 
 ```text
