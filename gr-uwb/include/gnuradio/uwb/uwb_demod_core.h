@@ -420,14 +420,27 @@ inline bool stage_sfd(const std::complex<float>* rx,
     gr::uwb::core::uwb_l2_normalize(scratch.corr);
     const size_t sfd_len = scratch.corr.size();
 
-    // Search window around expected = start + preamble_repetitions * period.
-    const int64_t expected = timing.preamble_start_sample +
-                             static_cast<int64_t>(profile.preamble_repetitions) *
-                                 static_cast<int64_t>(sym);
-    const int64_t search_lo = std::max<int64_t>(0, expected - (int64_t)sym);
+    // Search center = one measured period after the last tracked SYNC START
+    // (NOT the fixed preamble_repetitions * period extrapolation), so SFO and
+    // a partial SYNC train are handled.  Half-width scales with how trustworthy
+    // the tracking is: full train -> sfd_search_half_width chips (8*2=16
+    // samples), partial train -> 64 samples, nearly untracked -> full symbol.
+    const size_t np = timing.peak_samples.size();
+    int64_t half = static_cast<int64_t>(sym); // untrustworthy fallback
+    if (np >= profile.preamble_repetitions)
+        half = static_cast<int64_t>(profile.sfd_search_half_width) * 2;
+    else if (np >= 2)
+        half = 64;
+    const int64_t last_peak = timing.peak_samples.back();
+    const int64_t last_start =
+        last_peak - static_cast<int64_t>(template_wf.size() - 1);
+    const int64_t expected =
+        last_start +
+        static_cast<int64_t>(std::llround(timing.measured_period));
+    const int64_t search_lo = std::max<int64_t>(0, expected - half);
     const int64_t search_hi =
         std::min<int64_t>((int64_t)n,
-                          expected + (int64_t)sym + (int64_t)sfd_len);
+                          expected + half + (int64_t)sfd_len);
 
     // Full-rate correlation (normalized) over the search window.
     // The signal is 2x oversampled and the SFD template is kron(sfd, preamble)

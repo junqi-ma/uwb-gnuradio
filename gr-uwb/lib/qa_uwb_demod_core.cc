@@ -22,6 +22,7 @@
 #include <gnuradio/uwb/uwb_demod_core.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
 
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -612,4 +613,117 @@ BOOST_AUTO_TEST_CASE(test_demod_core_p0_cfo_sweep_awgn)
         BOOST_CHECK(res.payload.fcs_pass);
         BOOST_CHECK_EQUAL(res.payload.received_fcs, uint16_t(0x584b));
     }
+}
+
+// ---------------------------------------------------------------------------
+// P3: SFD ROI compression robustness — the search center adapts to the last
+// tracked SYNC + measured_period with a narrow ±half-width window, so SFD must
+// still be located under timing offset, SFO, AWGN and a multipath echo.
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(test_demod_core_p3_sfd_offset)
+{
+    // Shift the whole golden window right by +7 samples; through the full chain
+    // the SFD must be found at 75008 + 7.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    auto prof = Qm35825Profile::Default();
+    prof.sfd_mode = "ieee";
+    std::vector<gr_complex> iq2(iq.size() + 7, gr_complex(0.0f, 0.0f));
+    std::copy(iq.begin(), iq.end(), iq2.begin() + 7);
+    core::DemodScratch scratch;
+    scratch.reserve(iq2.size());
+    auto tmpl = load_reference_template();
+    auto res = core::demodulate_one(iq2.data(), iq2.size(), prof, 1, 9984 + 7, 0,
+                                    tmpl, scratch);
+    BOOST_CHECK(res.status == DemodStatus::Success);
+    BOOST_CHECK_CLOSE(static_cast<double>(res.sfd.sfd_start_sample), 75015.0,
+                      0.1);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_p3_sfd_sfo_adaptation)
+{
+    // measured_period 200 ppm high (1016.2): the search center uses
+    // last_start + round(measured_period), still inside the ±16-sample window.
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+    TimingResult tr;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984, tr,
+                                     scratch));
+    tr.measured_period = 1016.0 * (1.0 + 200e-6); // ~13-sample drift over 64 SYNCs
+    const auto sfd_seq = GetSfdSequence("ieee");
+    SfdResult sr;
+    const std::complex<float>* sfd_rx =
+        scratch.derotated.empty() ? iq.data() : scratch.derotated.data();
+    BOOST_REQUIRE(core::stage_sfd(sfd_rx, iq.size(), prof, tr, sfd_seq, tmpl, sr,
+                                  scratch));
+    BOOST_CHECK_CLOSE(static_cast<double>(sr.sfd_start_sample), 75008.0, 0.5);
+    BOOST_CHECK_GE(sr.metric, 0.9f);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_p3_sfd_awgn)
+{
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    const double snr_db = 20.0;
+    double sp = 0.0;
+    for (size_t i = 0; i < iq.size(); ++i)
+        sp += static_cast<double>(std::norm(iq[i]));
+    sp /= static_cast<double>(iq.size());
+    const double sigma = std::sqrt(sp / std::pow(10.0, snr_db / 10.0) / 2.0);
+    std::mt19937 rng(7);
+    std::normal_distribution<float> g(0.0f, static_cast<float>(sigma));
+    std::vector<gr_complex> iqn(iq.size());
+    for (size_t i = 0; i < iq.size(); ++i)
+        iqn[i] = iq[i] + gr_complex(g(rng), g(rng));
+
+    core::DemodScratch scratch;
+    scratch.reserve(iqn.size());
+    auto prof = Qm35825Profile::Default();
+    TimingResult tr;
+    SfdResult sr;
+    std::vector<gr_complex> tmpl;
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+    BOOST_REQUIRE(core::stage_timing(iqn.data(), iqn.size(), prof, tmpl, 9984,
+                                     tr, scratch));
+    const auto sfd_seq = GetSfdSequence("ieee");
+    const std::complex<float>* sfd_rx =
+        scratch.derotated.empty() ? iqn.data() : scratch.derotated.data();
+    BOOST_REQUIRE(core::stage_sfd(sfd_rx, iqn.size(), prof, tr, sfd_seq, tmpl,
+                                  sr, scratch));
+    BOOST_CHECK_CLOSE(static_cast<double>(sr.sfd_start_sample), 75008.0, 2.0);
+    BOOST_CHECK_GE(sr.metric, 0.5f);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_p3_sfd_multipath)
+{
+    // First path + a 0.4x echo delayed by 150 samples (≈1.5 chips): the SFD
+    // must still lock onto the first-path peak.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    std::vector<gr_complex> m(iq.size() + 150, gr_complex(0.0f, 0.0f));
+    std::copy(iq.begin(), iq.end(), m.begin());
+    for (size_t i = 0; i + 150 < m.size() && i < iq.size(); ++i)
+        m[i + 150] += 0.4f * iq[i];
+
+    core::DemodScratch scratch;
+    scratch.reserve(m.size());
+    auto prof = Qm35825Profile::Default();
+    TimingResult tr;
+    SfdResult sr;
+    std::vector<gr_complex> tmpl;
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+    BOOST_REQUIRE(core::stage_timing(m.data(), m.size(), prof, tmpl, 9984, tr,
+                                     scratch));
+    const auto sfd_seq = GetSfdSequence("ieee");
+    const std::complex<float>* sfd_rx =
+        scratch.derotated.empty() ? m.data() : scratch.derotated.data();
+    BOOST_REQUIRE(core::stage_sfd(sfd_rx, m.size(), prof, tr, sfd_seq, tmpl, sr,
+                                  scratch));
+    BOOST_CHECK_CLOSE(static_cast<double>(sr.sfd_start_sample), 75008.0, 2.0);
+    BOOST_CHECK_GE(sr.metric, 0.5f);
 }
