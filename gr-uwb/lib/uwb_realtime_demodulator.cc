@@ -34,6 +34,26 @@ namespace {
 // and fall back to the core's existing capacity growth.
 constexpr size_t kDefaultScratchSamples = 319168;
 
+gr::uwb::demod::CirSoftChipMode parse_cir_filter_mode(
+    const std::string& mode, size_t rake_top_k)
+{
+    using Mode = gr::uwb::demod::CirSoftChipMode;
+    if (mode == "auto")
+        return Mode::Auto;
+    if (mode == "full")
+        return Mode::Full;
+    if (mode == "bypass")
+        return Mode::Bypass;
+    if (mode == "rake") {
+        if (rake_top_k == 0 || rake_top_k >= 38)
+            throw std::invalid_argument(
+                "UwbRealtimeDemodulator: rake mode requires Top-K in [1,37]");
+        return Mode::Rake;
+    }
+    throw std::invalid_argument(
+        "UwbRealtimeDemodulator: cir_filter_mode must be auto, full, rake, or bypass");
+}
+
 inline uint64_t
 elapsed_us(std::chrono::steady_clock::time_point t0,
            std::chrono::steady_clock::time_point t1)
@@ -121,7 +141,8 @@ UwbRealtimeDemodulator::UwbRealtimeDemodulator(
     size_t num_workers,
     size_t queue_capacity,
     const std::string& sfd_mode,
-    size_t cir_rake_top_k)
+    size_t cir_rake_top_k,
+    const std::string& cir_filter_mode)
     : gr::block("uwb_realtime_demodulator",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
@@ -160,6 +181,8 @@ UwbRealtimeDemodulator::UwbRealtimeDemodulator(
             "UwbRealtimeDemodulator: cir_rake_top_k must be <= 64");
     }
     d_profile_.cir_rake_top_k = cir_rake_top_k;
+    d_profile_.cir_soft_chip_mode =
+        parse_cir_filter_mode(cir_filter_mode, cir_rake_top_k);
 
     for (auto& scratch : d_scratch_)
         scratch.reserve(kDefaultScratchSamples);
@@ -195,11 +218,13 @@ UwbRealtimeDemodulator::make(const std::string& template_path,
                              size_t num_workers,
                              size_t queue_capacity,
                              const std::string& sfd_mode,
-                             size_t cir_rake_top_k)
+                             size_t cir_rake_top_k,
+                             const std::string& cir_filter_mode)
 {
     auto tmpl = load_cf32_file(template_path);
     return gnuradio::get_initial_sptr(new UwbRealtimeDemodulator(
-        tmpl, num_workers, queue_capacity, sfd_mode, cir_rake_top_k));
+        tmpl, num_workers, queue_capacity, sfd_mode, cir_rake_top_k,
+        cir_filter_mode));
 }
 
 std::shared_ptr<UwbRealtimeDemodulator>
@@ -208,10 +233,12 @@ UwbRealtimeDemodulator::make_from_template(
     size_t num_workers,
     size_t queue_capacity,
     const std::string& sfd_mode,
-    size_t cir_rake_top_k)
+    size_t cir_rake_top_k,
+    const std::string& cir_filter_mode)
 {
     return gnuradio::get_initial_sptr(new UwbRealtimeDemodulator(
-        template_wf, num_workers, queue_capacity, sfd_mode, cir_rake_top_k));
+        template_wf, num_workers, queue_capacity, sfd_mode, cir_rake_top_k,
+        cir_filter_mode));
 }
 
 // ---------------------------------------------------------------------------

@@ -223,6 +223,37 @@ BOOST_AUTO_TEST_CASE(test_golden_round_trip)
                           static_cast<int>(golden_bytes[i]));
 }
 
+BOOST_AUTO_TEST_CASE(test_bypass_filter_round_trip_and_mode_validation)
+{
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+
+    auto demod = gr::uwb::UwbRealtimeDemodulator::make_from_template(
+        tmpl, 1, 8, "ieee", 0, "bypass");
+    auto dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_realtime_bypass");
+    tb->msg_connect(demod, "result", dbg, "store");
+    tb->start();
+    demod->_post(pmt::mp("samples"), make_samples_pdu(iq, 8, 9984));
+    BOOST_REQUIRE(wait_until(demod, 1));
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE_EQUAL(dbg->num_messages(), 1u);
+    const auto meta = pmt::car(dbg->get_message(0));
+    BOOST_CHECK(pmt::to_bool(
+        pmt::dict_ref(meta, pmt::mp("fcs_pass"), pmt::PMT_F)));
+
+    BOOST_CHECK_THROW(
+        gr::uwb::UwbRealtimeDemodulator::make_from_template(
+            tmpl, 1, 8, "ieee", 0, "rake"),
+        std::invalid_argument);
+    BOOST_CHECK_THROW(
+        gr::uwb::UwbRealtimeDemodulator::make_from_template(
+            tmpl, 1, 8, "ieee", 4, "unknown"),
+        std::invalid_argument);
+}
+
 // ---------------------------------------------------------------------------
 // Bounded queue backpressure: a capacity-2 queue fed a 40-PDU burst must drop
 // jobs (publishing queue_full) while preserving received == completed +

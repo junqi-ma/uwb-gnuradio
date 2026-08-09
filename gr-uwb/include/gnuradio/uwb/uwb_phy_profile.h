@@ -30,6 +30,13 @@ namespace gr {
 namespace uwb {
 namespace demod {
 
+enum class CirSoftChipMode : uint8_t {
+    Auto = 0,   // full for K=0, sparse RAKE for K>0 (legacy behavior)
+    Full = 1,   // complete CIR matched filter
+    Rake = 2,   // sparse Top-K coherent combining
+    Bypass = 3, // strongest-path chip sampling, no channel matched filter
+};
+
 // ---------------------------------------------------------------------------
 // IEEE 802.15.4a/z HRP constants (QM35825 radar, BPRF 62.4 MHz)
 // ---------------------------------------------------------------------------
@@ -61,6 +68,7 @@ struct Qm35825Profile {
     // Sparse RAKE policy: 0 keeps the full CIR matched filter; otherwise use
     // only the K strongest complex CIR taps (clamped to the tap count).
     size_t cir_rake_top_k = 0;
+    CirSoftChipMode cir_soft_chip_mode = CirSoftChipMode::Auto;
 
     // timing validation
     double period_tolerance_pct = 2.0; // SYNC period deviation tolerance
@@ -171,6 +179,7 @@ struct Dw1000Profile {
     size_t cir_skip_initial_repetitions = 10;
     size_t cir_repetitions = 54;
     size_t cir_rake_top_k = 0;
+    CirSoftChipMode cir_soft_chip_mode = CirSoftChipMode::Auto;
 
     double period_tolerance_pct = 2.0;
     size_t min_valid_peaks = 8;

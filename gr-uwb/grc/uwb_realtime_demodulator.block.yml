@@ -20,9 +20,15 @@ parameters:
     dtype: string
     default: '4z2'
 -   id: cir_rake_top_k
-    label: CIR RAKE Top-K (0 = full)
+    label: CIR RAKE Top-K (used by Auto/RAKE)
     dtype: int
     default: '0'
+-   id: cir_filter_mode
+    label: CIR soft-chip mode
+    dtype: enum
+    default: '"auto"'
+    options: ['"auto"', '"full"', '"rake"', '"bypass"']
+    option_labels: [Auto (legacy), Full FIR, Top-K RAKE, Bypass FIR]
 
 inputs:
 -   domain: message
@@ -42,11 +48,11 @@ outputs:
 
 templates:
     imports: from gnuradio import uwb
-    make: uwb.realtime_demodulator(${template_path}, ${num_workers}, ${queue_capacity}, ${sfd_mode}, ${cir_rake_top_k})
+    make: uwb.realtime_demodulator(${template_path}, ${num_workers}, ${queue_capacity}, ${sfd_mode}, ${cir_rake_top_k}, ${cir_filter_mode})
 
 cpp_templates:
     includes: ['#include <gnuradio/uwb/uwb_realtime_demodulator.h>']
-    make: 'this->${id} = gr::uwb::UwbRealtimeDemodulator::make(${template_path}, ${num_workers}, ${queue_capacity}, ${sfd_mode}, ${cir_rake_top_k});'
+    make: 'this->${id} = gr::uwb::UwbRealtimeDemodulator::make(${template_path}, ${num_workers}, ${queue_capacity}, ${sfd_mode}, ${cir_rake_top_k}, ${cir_filter_mode});'
     link: ['gnuradio::gnuradio-uwb']
 
 file_format: 1

@@ -67,12 +67,14 @@ public:
      *                        golden generator).
      * \param cir_rake_top_k  0 for the full CIR filter; otherwise use the K
      *                        strongest CIR taps for sparse RAKE combining.
+     * \param cir_filter_mode "auto", "full", "rake", or "bypass".
      */
     static sptr make(const std::string& template_path,
                      size_t num_workers = 2,
                      size_t queue_capacity = 64,
                      const std::string& sfd_mode = "4z2",
-                     size_t cir_rake_top_k = 0);
+                     size_t cir_rake_top_k = 0,
+                     const std::string& cir_filter_mode = "auto");
 
     /**
      * Same as make(), but takes an in-memory CF32 template waveform.
@@ -81,7 +83,8 @@ public:
                                    size_t num_workers = 2,
                                    size_t queue_capacity = 64,
                                    const std::string& sfd_mode = "4z2",
-                                   size_t cir_rake_top_k = 0);
+                                   size_t cir_rake_top_k = 0,
+                                   const std::string& cir_filter_mode = "auto");
 
     // Counters / stats (thread-safe snapshots).
     uint64_t jobs_received() const;
@@ -114,7 +117,8 @@ protected:
                            size_t num_workers,
                            size_t queue_capacity,
                            const std::string& sfd_mode,
-                           size_t cir_rake_top_k);
+                           size_t cir_rake_top_k,
+                           const std::string& cir_filter_mode);
 
     bool start() override;
     bool stop() override;

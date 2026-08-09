@@ -1843,6 +1843,7 @@ int main(int argc, char** argv)
     std::string result_sink = "debug"; // demod-async: debug or drop
     std::string core_input = "pointer"; // core-throughput: pointer or copy
     size_t core_windows = 1; // core-throughput rotating working set
+    std::string cir_filter_mode = "auto";
 
     for (int i = 3; i + 1 < argc; i += 2) {
         std::string k = argv[i];
@@ -1872,7 +1873,24 @@ int main(int argc, char** argv)
             core_input = argv[i + 1];
         else if (k == "--core-windows")
             core_windows = std::stoul(argv[i + 1]);
+        else if (k == "--cir-filter-mode")
+            cir_filter_mode = argv[i + 1];
     }
+
+    const auto apply_cir_filter_mode = [&](auto& profile) {
+        using Mode = gr::uwb::demod::CirSoftChipMode;
+        if (cir_filter_mode == "auto")
+            profile.cir_soft_chip_mode = Mode::Auto;
+        else if (cir_filter_mode == "full")
+            profile.cir_soft_chip_mode = Mode::Full;
+        else if (cir_filter_mode == "rake")
+            profile.cir_soft_chip_mode = Mode::Rake;
+        else if (cir_filter_mode == "bypass")
+            profile.cir_soft_chip_mode = Mode::Bypass;
+        else
+            throw std::invalid_argument(
+                "--cir-filter-mode must be auto, full, rake, or bypass");
+    };
 
     // Layered GR modes: same source/target/gap/buffer surface.
     if (mode == "source-null" || mode == "source-search" || mode == "detector" ||
@@ -1983,6 +2001,7 @@ int main(int argc, char** argv)
         auto prof = gr::uwb::demod::Qm35825Profile::Default();
         prof.sfd_mode = "ieee";
         prof.cir_rake_top_k = rake_top_k;
+        apply_cir_filter_mode(prof);
         std::vector<gr::uwb::demod::core::DemodScratch> scratch(nworkers);
         for (auto& s : scratch)
             s.reserve(rx.size());
@@ -2097,7 +2116,7 @@ int main(int argc, char** argv)
 
         auto demod = gr::uwb::UwbRealtimeDemodulator::make_from_template(
             tmpl, nworkers, qcap, "ieee" /* golden window uses IEEE SFD */,
-            rake_top_k);
+            rake_top_k, cir_filter_mode);
         auto tb = gr::make_top_block("bench_demod_async");
         gr::blocks::message_debug::sptr dbg;
         MessageDropSink::sptr drop;
@@ -2238,7 +2257,7 @@ int main(int argc, char** argv)
 
         auto demod = gr::uwb::UwbRealtimeDemodulator::make_from_template(
             tmpl, nworkers, qcap, "ieee" /* golden window uses IEEE SFD */,
-            rake_top_k);
+            rake_top_k, cir_filter_mode);
         auto dbg = gr::blocks::message_debug::make();
         auto tb = gr::make_top_block("bench_demod_soak");
         tb->msg_connect(demod, "result", dbg, "store");
@@ -2460,10 +2479,11 @@ int main(int argc, char** argv)
                         tmpl.size() * sizeof(std::complex<float>)));
         }
 
-        auto make_prof = [rake_top_k]() {
+        auto make_prof = [rake_top_k, &apply_cir_filter_mode]() {
             auto p = gr::uwb::demod::Qm35825Profile::Default();
             p.sfd_mode = "ieee"; // golden window uses IEEE legacy SFD
             p.cir_rake_top_k = rake_top_k;
+            apply_cir_filter_mode(p);
             return p;
         };
 
@@ -2653,6 +2673,7 @@ int main(int argc, char** argv)
         // UWB realtime-demodulator benchmark (开发方案_UWB实时解调.md §9).
         auto prof = gr::uwb::demod::Qm35825Profile::Default();
         prof.cir_rake_top_k = rake_top_k;
+        apply_cir_filter_mode(prof);
         std::printf("=== UWB realtime demod bench ===\n");
         std::printf("mode                  : %s\n", mode.c_str());
         std::printf("profile               : fs=%.0f code=%zu preamble=%zu "
@@ -2663,6 +2684,7 @@ int main(int argc, char** argv)
                     gr::uwb::demod::kQm35ChipsPerSymbol);
         std::printf("cir_rake_top_k        : %zu (%s)\n", rake_top_k,
                     rake_top_k == 0 ? "full" : "sparse");
+        std::printf("cir_filter_mode       : %s\n", cir_filter_mode.c_str());
         std::printf("golden vectors        : testdata/realtime_demod_golden/\n");
         std::printf("implemented stages    : 7/7 (timing/cfo/sfd/cir/"
                     "ns_sfd/phr/payload done)\n");

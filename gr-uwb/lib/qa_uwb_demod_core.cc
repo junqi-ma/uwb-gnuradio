@@ -834,6 +834,23 @@ BOOST_AUTO_TEST_CASE(test_demod_core_topk_rake_golden_fcs)
     }
 }
 
+BOOST_AUTO_TEST_CASE(test_demod_core_bypass_filter_golden_fcs)
+{
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    const auto tmpl = load_reference_template();
+    auto prof = Qm35825Profile::Default();
+    prof.sfd_mode = "ieee";
+    prof.cir_soft_chip_mode = CirSoftChipMode::Bypass;
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    const auto res = core::demodulate_one(
+        iq.data(), iq.size(), prof, 1, 9984, 0, tmpl, scratch);
+    BOOST_REQUIRE(res.status == DemodStatus::Success);
+    BOOST_CHECK(res.payload.fcs_pass);
+    BOOST_CHECK_EQUAL(res.payload.received_fcs, uint16_t(0x584b));
+}
+
 BOOST_AUTO_TEST_CASE(test_demod_core_p2_cir_fir_kernels_agree)
 {
     // Synthetic random taps + window: all three kernels must match the serial

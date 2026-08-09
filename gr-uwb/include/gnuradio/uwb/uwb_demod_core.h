@@ -705,7 +705,15 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     // weights retain their estimated complex phases for coherent combining.
     alignas(32) uint8_t rake_indices[64];
     alignas(32) std::complex<float> rake_weights[64];
-    const size_t rake_k = std::min(profile.cir_rake_top_k, tap_count);
+    const bool bypass_filter =
+        profile.cir_soft_chip_mode == CirSoftChipMode::Bypass;
+    const bool use_rake =
+        profile.cir_soft_chip_mode == CirSoftChipMode::Rake ||
+        (profile.cir_soft_chip_mode == CirSoftChipMode::Auto &&
+         profile.cir_rake_top_k > 0);
+    const size_t rake_k = use_rake
+        ? std::min(profile.cir_rake_top_k, tap_count)
+        : size_t(0);
     if (rake_k > 0 && rake_k < tap_count) {
         std::array<uint8_t, 64> order{};
         for (size_t q = 0; q < tap_count; ++q)
@@ -731,6 +739,14 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     // Edge chips: FIR window may clip below sample 0 (bounds-checked scalar).
     for (size_t i = 0; i < checked; ++i) {
         const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
+        if (bypass_filter) {
+            const int64_t idx =
+                p - fwd + static_cast<int64_t>(peak_idx);
+            scratch.corr[i] = idx >= 0 && idx < static_cast<int64_t>(n)
+                ? rx[static_cast<size_t>(idx)]
+                : std::complex<float>(0.0f, 0.0f);
+            continue;
+        }
         std::complex<float> acc(0.0f, 0.0f);
         const size_t edge_k =
             (rake_k > 0 && rake_k < tap_count) ? rake_k : tap_count;
@@ -748,7 +764,15 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     {
         const cir_fir::Kernel fir_k = cir_fir::kDefaultKernel;
         const std::complex<float>* rx0 = rx;
-        if (rake_k > 0 && rake_k < tap_count) {
+        if (bypass_filter) {
+            for (size_t i = checked; i < num_chips; ++i) {
+                const int64_t p =
+                    chip_start + static_cast<int64_t>(i) * spc_i;
+                const size_t idx = static_cast<size_t>(
+                    p - fwd + static_cast<int64_t>(peak_idx));
+                scratch.corr[i] = rx0[idx];
+            }
+        } else if (rake_k > 0 && rake_k < tap_count) {
             size_t i = checked;
 #if UWB_CIR_FIR_HAVE_AVX2
             // Fixed Top-4/Top-8 fast path: vectorize across four outputs. The
