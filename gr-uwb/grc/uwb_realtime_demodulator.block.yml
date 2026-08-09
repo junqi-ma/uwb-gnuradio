@@ -19,6 +19,10 @@ parameters:
     label: SFD mode (4z2 / ieee)
     dtype: string
     default: '4z2'
+-   id: cir_rake_top_k
+    label: CIR RAKE Top-K (0 = full)
+    dtype: int
+    default: '0'
 
 inputs:
 -   domain: message
@@ -38,11 +42,11 @@ outputs:
 
 templates:
     imports: from gnuradio import uwb
-    make: uwb.realtime_demodulator(${template_path}, ${num_workers}, ${queue_capacity}, ${sfd_mode})
+    make: uwb.realtime_demodulator(${template_path}, ${num_workers}, ${queue_capacity}, ${sfd_mode}, ${cir_rake_top_k})
 
 cpp_templates:
     includes: ['#include <gnuradio/uwb/uwb_realtime_demodulator.h>']
-    make: 'this->${id} = gr::uwb::UwbRealtimeDemodulator::make(${template_path}, ${num_workers}, ${queue_capacity}, ${sfd_mode});'
+    make: 'this->${id} = gr::uwb::UwbRealtimeDemodulator::make(${template_path}, ${num_workers}, ${queue_capacity}, ${sfd_mode}, ${cir_rake_top_k});'
     link: ['gnuradio::gnuradio-uwb']
 
 file_format: 1

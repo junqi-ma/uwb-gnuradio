@@ -58,6 +58,9 @@ struct Qm35825Profile {
     size_t cir_post_samples = 30;
     size_t cir_skip_initial_repetitions = 10; // skip the first N SYNC for CFO/CIR
     size_t cir_repetitions = 54;              // preamble - skip
+    // Sparse RAKE policy: 0 keeps the full CIR matched filter; otherwise use
+    // only the K strongest complex CIR taps (clamped to the tap count).
+    size_t cir_rake_top_k = 0;
 
     // timing validation
     double period_tolerance_pct = 2.0; // SYNC period deviation tolerance
@@ -167,6 +170,7 @@ struct Dw1000Profile {
     size_t cir_post_samples = 30;
     size_t cir_skip_initial_repetitions = 10;
     size_t cir_repetitions = 54;
+    size_t cir_rake_top_k = 0;
 
     double period_tolerance_pct = 2.0;
     size_t min_valid_peaks = 8;

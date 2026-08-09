@@ -1813,6 +1813,7 @@ int main(int argc, char** argv)
     bool threshold_set = false;
     int repeat = 1;
     size_t robust_reps = 0; // 0 → use per-axis defaults (50/20/…)
+    size_t rake_top_k = 0;  // 0 = full CIR matched filter
 
     for (int i = 3; i + 1 < argc; i += 2) {
         std::string k = argv[i];
@@ -1834,6 +1835,8 @@ int main(int argc, char** argv)
         } else if (k == "--repeat") repeat = std::stoi(argv[i + 1]);
         else if (k == "--robust-reps")
             robust_reps = std::stoul(argv[i + 1]);
+        else if (k == "--rake-top-k")
+            rake_top_k = std::stoul(argv[i + 1]);
     }
 
     // Layered GR modes: same source/target/gap/buffer surface.
@@ -1952,7 +1955,8 @@ int main(int argc, char** argv)
         const uint64_t N = static_cast<uint64_t>(std::max(1, repeat));
 
         auto demod = gr::uwb::UwbRealtimeDemodulator::make_from_template(
-            tmpl, nworkers, qcap, "ieee" /* golden window uses IEEE SFD */);
+            tmpl, nworkers, qcap, "ieee" /* golden window uses IEEE SFD */,
+            rake_top_k);
         auto dbg = gr::blocks::message_debug::make();
         auto tb = gr::make_top_block("bench_demod_async");
         tb->msg_connect(demod, "result", dbg, "store");
@@ -2062,7 +2066,8 @@ int main(int argc, char** argv)
             static_cast<long>(1e6 / std::max(0.1, rate)));
 
         auto demod = gr::uwb::UwbRealtimeDemodulator::make_from_template(
-            tmpl, nworkers, qcap, "ieee" /* golden window uses IEEE SFD */);
+            tmpl, nworkers, qcap, "ieee" /* golden window uses IEEE SFD */,
+            rake_top_k);
         auto dbg = gr::blocks::message_debug::make();
         auto tb = gr::make_top_block("bench_demod_soak");
         tb->msg_connect(demod, "result", dbg, "store");
@@ -2284,9 +2289,10 @@ int main(int argc, char** argv)
                         tmpl.size() * sizeof(std::complex<float>)));
         }
 
-        auto make_prof = []() {
+        auto make_prof = [rake_top_k]() {
             auto p = gr::uwb::demod::Qm35825Profile::Default();
             p.sfd_mode = "ieee"; // golden window uses IEEE legacy SFD
+            p.cir_rake_top_k = rake_top_k;
             return p;
         };
 
@@ -2475,6 +2481,7 @@ int main(int argc, char** argv)
         mode == "demod-pdu") {
         // UWB realtime-demodulator benchmark (开发方案_UWB实时解调.md §9).
         auto prof = gr::uwb::demod::Qm35825Profile::Default();
+        prof.cir_rake_top_k = rake_top_k;
         std::printf("=== UWB realtime demod bench ===\n");
         std::printf("mode                  : %s\n", mode.c_str());
         std::printf("profile               : fs=%.0f code=%zu preamble=%zu "
@@ -2483,6 +2490,8 @@ int main(int argc, char** argv)
                     prof.sfd_mode, prof.data_rate_mbps);
         std::printf("chips_per_symbol      : %zu\n",
                     gr::uwb::demod::kQm35ChipsPerSymbol);
+        std::printf("cir_rake_top_k        : %zu (%s)\n", rake_top_k,
+                    rake_top_k == 0 ? "full" : "sparse");
         std::printf("golden vectors        : testdata/realtime_demod_golden/\n");
         std::printf("implemented stages    : 7/7 (timing/cfo/sfd/cir/"
                     "ns_sfd/phr/payload done)\n");

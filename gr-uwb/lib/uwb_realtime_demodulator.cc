@@ -114,7 +114,8 @@ UwbRealtimeDemodulator::UwbRealtimeDemodulator(
     const std::vector<gr_complex>& template_wf,
     size_t num_workers,
     size_t queue_capacity,
-    const std::string& sfd_mode)
+    const std::string& sfd_mode,
+    size_t cir_rake_top_k)
     : gr::block("uwb_realtime_demodulator",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
@@ -148,6 +149,11 @@ UwbRealtimeDemodulator::UwbRealtimeDemodulator(
             "UwbRealtimeDemodulator: unknown sfd_mode '" + d_sfd_mode_ + "'");
     }
     d_profile_.sfd_mode = d_sfd_mode_.c_str();
+    if (cir_rake_top_k > 64) {
+        throw std::invalid_argument(
+            "UwbRealtimeDemodulator: cir_rake_top_k must be <= 64");
+    }
+    d_profile_.cir_rake_top_k = cir_rake_top_k;
 
     message_port_register_in(pmt::mp("samples"));
     message_port_register_in(pmt::mp("control"));
@@ -179,11 +185,12 @@ std::shared_ptr<UwbRealtimeDemodulator>
 UwbRealtimeDemodulator::make(const std::string& template_path,
                              size_t num_workers,
                              size_t queue_capacity,
-                             const std::string& sfd_mode)
+                             const std::string& sfd_mode,
+                             size_t cir_rake_top_k)
 {
     auto tmpl = load_cf32_file(template_path);
     return gnuradio::get_initial_sptr(new UwbRealtimeDemodulator(
-        tmpl, num_workers, queue_capacity, sfd_mode));
+        tmpl, num_workers, queue_capacity, sfd_mode, cir_rake_top_k));
 }
 
 std::shared_ptr<UwbRealtimeDemodulator>
@@ -191,10 +198,11 @@ UwbRealtimeDemodulator::make_from_template(
     const std::vector<gr_complex>& template_wf,
     size_t num_workers,
     size_t queue_capacity,
-    const std::string& sfd_mode)
+    const std::string& sfd_mode,
+    size_t cir_rake_top_k)
 {
     return gnuradio::get_initial_sptr(new UwbRealtimeDemodulator(
-        template_wf, num_workers, queue_capacity, sfd_mode));
+        template_wf, num_workers, queue_capacity, sfd_mode, cir_rake_top_k));
 }
 
 // ---------------------------------------------------------------------------

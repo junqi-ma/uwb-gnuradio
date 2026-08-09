@@ -24,6 +24,7 @@
 #include <gnuradio/uwb/uwb_phy_profile.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -45,6 +46,24 @@ namespace core {
 // ---------------------------------------------------------------------------
 
 namespace detail {
+
+// Long complex matched-filter dot product used by timing acquisition/tracking.
+// VOLK computes sum(input[k] * conj(taps[k])) and runtime-dispatches to the
+// fastest implementation available on the host.  Timing uses 1016-point dots,
+// so dispatch overhead is amortized (unlike the 38-tap CIR hot loop).
+inline std::complex<float>
+timing_conjugate_dot(const std::complex<float>* input,
+                     const std::complex<float>* taps,
+                     size_t count)
+{
+    std::complex<float> acc(0.0f, 0.0f);
+    volk_32fc_x2_conjugate_dot_prod_32fc(
+        &acc,
+        reinterpret_cast<const lv_32fc_t*>(input),
+        reinterpret_cast<const lv_32fc_t*>(taps),
+        static_cast<unsigned int>(count));
+    return acc;
+}
 
 // Full-rate normalized matched filter over [roi_start, roi_end).  Fills
 // metric[j] for j in [roi_start, roi_end-L), with
@@ -176,19 +195,24 @@ inline bool stage_timing(const std::complex<float>* rx,
         float bm = -1.0f;
         int64_t bp = w0;
         std::complex<float> best_acc(0.0f, 0.0f);
+        // Adjacent candidate windows overlap by L-1 samples.  Compute power
+        // once, then update it in O(1); correlation remains an exact long dot
+        // product handled by VOLK.  No allocation occurs in this hot loop.
+        float pw = 0.0f;
+        for (size_t k = 0; k < L; ++k)
+            pw += std::norm(rx[w0 + static_cast<int64_t>(k)]);
         for (int64_t j = w0; j < w1; ++j) {
-            std::complex<float> acc(0.0f, 0.0f);
-            float pw = 0.0f;
-            for (size_t k = 0; k < L; ++k) {
-                acc += rx[j + k] * std::conj(scratch.work[k]);
-                pw += std::norm(rx[j + k]);
-            }
+            const std::complex<float> acc =
+                detail::timing_conjugate_dot(rx + j, scratch.work.data(), L);
             const float m = std::norm(acc) / (pw * Et + 1e-12f);
             if (m > bm) {
                 bm = m;
                 bp = j;
                 best_acc = acc;
             }
+            if (j + 1 < w1)
+                pw += std::norm(rx[j + static_cast<int64_t>(L)]) -
+                      std::norm(rx[j]);
         }
         if (bm < profile.radar_verification_threshold)
             return false;
@@ -676,6 +700,28 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         h_conj[q] = std::conj(values[q]);
     }
 
+    // Optional sparse RAKE: choose the strongest complex CIR taps once per
+    // packet. Keep indices in ascending delay order for predictable loads;
+    // weights retain their estimated complex phases for coherent combining.
+    alignas(32) uint8_t rake_indices[64];
+    alignas(32) std::complex<float> rake_weights[64];
+    const size_t rake_k = std::min(profile.cir_rake_top_k, tap_count);
+    if (rake_k > 0 && rake_k < tap_count) {
+        std::array<uint8_t, 64> order{};
+        for (size_t q = 0; q < tap_count; ++q)
+            order[q] = static_cast<uint8_t>(q);
+        std::partial_sort(order.begin(), order.begin() + rake_k,
+                          order.begin() + tap_count,
+                          [&](uint8_t a, uint8_t b) {
+                              return std::norm(values[a]) > std::norm(values[b]);
+                          });
+        std::sort(order.begin(), order.begin() + rake_k);
+        for (size_t i = 0; i < rake_k; ++i) {
+            rake_indices[i] = order[i];
+            rake_weights[i] = h_conj[order[i]];
+        }
+    }
+
     size_t checked = 0;
     if (chip_start < fwd) {
         const int64_t gap = fwd - chip_start;
@@ -686,7 +732,10 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     for (size_t i = 0; i < checked; ++i) {
         const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
         std::complex<float> acc(0.0f, 0.0f);
-        for (size_t q = 0; q < tap_count; ++q) {
+        const size_t edge_k =
+            (rake_k > 0 && rake_k < tap_count) ? rake_k : tap_count;
+        for (size_t j = 0; j < edge_k; ++j) {
+            const size_t q = (edge_k == tap_count) ? j : rake_indices[j];
             const int64_t idx = p - fwd + static_cast<int64_t>(q);
             if (idx < 0)
                 continue;
@@ -699,7 +748,38 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     {
         const cir_fir::Kernel fir_k = cir_fir::kDefaultKernel;
         const std::complex<float>* rx0 = rx;
-        if (fir_k == cir_fir::Kernel::Avx2Fixed &&
+        if (rake_k > 0 && rake_k < tap_count) {
+            size_t i = checked;
+#if UWB_CIR_FIR_HAVE_AVX2
+            // Fixed Top-4/Top-8 fast path: vectorize across four outputs. The
+            // load helper reads through max_q+7; keep the final boundary on
+            // the scalar path when that speculative contiguous load is unsafe.
+            if ((rake_k == 4 || rake_k == 8) && spc_i == 2) {
+                const size_t max_q = rake_indices[rake_k - 1];
+                for (; i + 4 <= num_chips; i += 4) {
+                    const int64_t p =
+                        chip_start + static_cast<int64_t>(i) * spc_i;
+                    const size_t win = static_cast<size_t>(p - fwd);
+                    if (win + max_q + 7 >= n)
+                        break;
+                    if (rake_k == 4)
+                        cir_fir::dot_topk_x4_avx2<4>(
+                            rx0 + win, rake_indices, rake_weights,
+                            scratch.corr.data() + i);
+                    else
+                        cir_fir::dot_topk_x4_avx2<8>(
+                            rx0 + win, rake_indices, rake_weights,
+                            scratch.corr.data() + i);
+                }
+            }
+#endif
+            for (; i < num_chips; ++i) {
+                const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
+                const size_t win = static_cast<size_t>(p - fwd);
+                scratch.corr[i] = cir_fir::dot_topk(
+                    rx0 + win, rake_indices, rake_weights, rake_k);
+            }
+        } else if (fir_k == cir_fir::Kernel::Avx2Fixed &&
             tap_count == cir_fir::kDefaultTapCount) {
             for (size_t i = checked; i < num_chips; ++i) {
                 const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;

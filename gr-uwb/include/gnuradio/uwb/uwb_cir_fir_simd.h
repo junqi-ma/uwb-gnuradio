@@ -54,6 +54,82 @@ namespace cir_fir {
 // differs.
 static constexpr size_t kDefaultTapCount = 38;
 
+// Sparse Top-K RAKE. Indices refer to the natural-order CIR tap array and
+// weights are pre-conjugated. Eight independent accumulators avoid one long
+// dependency chain; K=0 is not a valid call.
+inline std::complex<float>
+dot_topk(const std::complex<float>* rx_win,
+         const uint8_t* indices,
+         const std::complex<float>* weights,
+         size_t k)
+{
+    std::complex<float> a0(0.0f, 0.0f), a1(0.0f, 0.0f),
+        a2(0.0f, 0.0f), a3(0.0f, 0.0f), a4(0.0f, 0.0f),
+        a5(0.0f, 0.0f), a6(0.0f, 0.0f), a7(0.0f, 0.0f);
+    size_t i = 0;
+    for (; i + 8 <= k; i += 8) {
+        a0 += weights[i + 0] * rx_win[indices[i + 0]];
+        a1 += weights[i + 1] * rx_win[indices[i + 1]];
+        a2 += weights[i + 2] * rx_win[indices[i + 2]];
+        a3 += weights[i + 3] * rx_win[indices[i + 3]];
+        a4 += weights[i + 4] * rx_win[indices[i + 4]];
+        a5 += weights[i + 5] * rx_win[indices[i + 5]];
+        a6 += weights[i + 6] * rx_win[indices[i + 6]];
+        a7 += weights[i + 7] * rx_win[indices[i + 7]];
+    }
+    for (; i + 4 <= k; i += 4) {
+        a0 += weights[i + 0] * rx_win[indices[i + 0]];
+        a1 += weights[i + 1] * rx_win[indices[i + 1]];
+        a2 += weights[i + 2] * rx_win[indices[i + 2]];
+        a3 += weights[i + 3] * rx_win[indices[i + 3]];
+    }
+    std::complex<float> acc =
+        (a0 + a1) + (a2 + a3) + (a4 + a5) + (a6 + a7);
+    for (; i < k; ++i)
+        acc += weights[i] * rx_win[indices[i]];
+    return acc;
+}
+
+// Fixed Top-4/Top-8 sparse RAKE across four adjacent decimated outputs.
+// For one tap q, outputs use complex samples q+{0,2,4,6}. Two contiguous
+// AVX2 loads plus shuffles form that vector without a slow hardware gather.
+// The caller guarantees that q+7 is readable for every selected tap.
+#if UWB_CIR_FIR_HAVE_AVX2
+inline __m256 load_decim2_complex4(const std::complex<float>* rx_win, uint8_t q)
+{
+    const float* p = reinterpret_cast<const float*>(rx_win + q);
+    const __m256 a = _mm256_loadu_ps(p);     // q .. q+3
+    const __m256 b = _mm256_loadu_ps(p + 8); // q+4 .. q+7
+    const __m256i pick = _mm256_setr_epi32(0, 1, 4, 5, 0, 1, 4, 5);
+    const __m256 ae = _mm256_permutevar8x32_ps(a, pick);
+    const __m256 be = _mm256_permutevar8x32_ps(b, pick);
+    return _mm256_permute2f128_ps(ae, be, 0x20);
+}
+
+template <size_t K>
+inline void dot_topk_x4_avx2(const std::complex<float>* rx_win,
+                             const uint8_t* indices,
+                             const std::complex<float>* weights,
+                             std::complex<float>* out)
+{
+    static_assert(K == 4 || K == 8, "only fixed Top-4/Top-8 are supported");
+    __m256 acc = _mm256_setzero_ps();
+    for (size_t i = 0; i < K; ++i) {
+        const __m256 x = load_decim2_complex4(rx_win, indices[i]);
+        const float hr = weights[i].real();
+        const float hi = weights[i].imag();
+        const __m256 h = _mm256_setr_ps(hr, hi, hr, hi, hr, hi, hr, hi);
+        const __m256 xre = _mm256_moveldup_ps(x);
+        const __m256 xim = _mm256_movehdup_ps(x);
+        const __m256 hsw = _mm256_permute_ps(h, 0xB1);
+        const __m256 prod =
+            _mm256_fmaddsub_ps(xre, h, _mm256_mul_ps(xim, hsw));
+        acc = _mm256_add_ps(acc, prod);
+    }
+    _mm256_storeu_ps(reinterpret_cast<float*>(out), acc);
+}
+#endif
+
 enum class Kernel : int {
     MultiAcc8 = 0, // (a)
     Volk = 1,      // (b)

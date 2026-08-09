@@ -232,13 +232,15 @@ void bind_realtime_demodulator(py::module& m)
              py::arg("template_path"),
              py::arg("num_workers") = size_t(2),
              py::arg("queue_capacity") = size_t(64),
-             py::arg("sfd_mode") = std::string("4z2"))
+             py::arg("sfd_mode") = std::string("4z2"),
+             py::arg("cir_rake_top_k") = size_t(0))
         .def_static("make_from_template",
                     &gr::uwb::UwbRealtimeDemodulator::make_from_template,
                     py::arg("template_wf"),
                     py::arg("num_workers") = size_t(2),
                     py::arg("queue_capacity") = size_t(64),
-                    py::arg("sfd_mode") = std::string("4z2"))
+                    py::arg("sfd_mode") = std::string("4z2"),
+                    py::arg("cir_rake_top_k") = size_t(0))
         .def("jobs_received", &gr::uwb::UwbRealtimeDemodulator::jobs_received)
         .def("jobs_completed", &gr::uwb::UwbRealtimeDemodulator::jobs_completed)
         .def("jobs_failed", &gr::uwb::UwbRealtimeDemodulator::jobs_failed)

@@ -753,6 +753,87 @@ std::complex<float> cir_fir_serial_ref(const std::complex<float>* rx_win,
 
 } // namespace
 
+BOOST_AUTO_TEST_CASE(test_demod_core_timing_volk_dot_agrees_with_scalar)
+{
+    constexpr size_t N = 1016;
+    std::mt19937 rng(0x71A11u);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    std::vector<std::complex<float>> input(N + 3), taps(N);
+    for (auto& x : input)
+        x = { dist(rng), dist(rng) };
+    for (auto& x : taps)
+        x = { dist(rng), dist(rng) };
+
+    for (size_t off = 0; off < 3; ++off) {
+        std::complex<float> ref(0.0f, 0.0f);
+        for (size_t k = 0; k < N; ++k)
+            ref += input[off + k] * std::conj(taps[k]);
+        const auto got = core::detail::timing_conjugate_dot(
+            input.data() + off, taps.data(), N);
+        BOOST_CHECK_LT(std::abs(got - ref), 2e-3f);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_topk_rake_kernel_agrees_with_scalar)
+{
+    constexpr size_t N = 48;
+    constexpr size_t K = 8;
+    std::mt19937 rng(0x70A4u);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    std::vector<std::complex<float>> input(N), weights(K);
+    const uint8_t indices[K] = { 1, 4, 9, 15, 23, 31, 36, 37 };
+    for (auto& x : input)
+        x = { dist(rng), dist(rng) };
+    for (auto& x : weights)
+        x = { dist(rng), dist(rng) };
+
+    std::complex<float> ref(0.0f, 0.0f);
+    for (size_t i = 0; i < K; ++i)
+        ref += weights[i] * input[indices[i]];
+    const auto got = cir_fir::dot_topk(
+        input.data(), indices, weights.data(), K);
+    BOOST_CHECK_LT(std::abs(got - ref), 1e-5f);
+
+#if UWB_CIR_FIR_HAVE_AVX2
+    // Four outputs at decimation 2, including deliberately unaligned input.
+    for (size_t k : { size_t(4), size_t(8) }) {
+        std::complex<float> out[4];
+        if (k == 4)
+            cir_fir::dot_topk_x4_avx2<4>(
+                input.data() + 1, indices, weights.data(), out);
+        else
+            cir_fir::dot_topk_x4_avx2<8>(
+                input.data() + 1, indices, weights.data(), out);
+        for (size_t o = 0; o < 4; ++o) {
+            const auto scalar = cir_fir::dot_topk(
+                input.data() + 1 + 2 * o, indices, weights.data(), k);
+            BOOST_CHECK_LT(std::abs(out[o] - scalar), 1e-5f);
+        }
+    }
+#endif
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_topk_rake_golden_fcs)
+{
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    const auto tmpl = load_reference_template();
+    for (size_t k : { size_t(4), size_t(8) }) {
+        auto prof = Qm35825Profile::Default();
+        prof.sfd_mode = "ieee";
+        prof.cir_rake_top_k = k;
+        core::DemodScratch scratch;
+        scratch.reserve(iq.size());
+        const auto res = core::demodulate_one(
+            iq.data(), iq.size(), prof, 1, 9984, 0, tmpl, scratch);
+        BOOST_TEST_CONTEXT("Top-K=" << k) {
+            BOOST_REQUIRE(res.status == DemodStatus::Success);
+            BOOST_CHECK(res.payload.fcs_pass);
+            BOOST_CHECK_EQUAL(res.payload.received_fcs, uint16_t(0x584b));
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(test_demod_core_p2_cir_fir_kernels_agree)
 {
     // Synthetic random taps + window: all three kernels must match the serial

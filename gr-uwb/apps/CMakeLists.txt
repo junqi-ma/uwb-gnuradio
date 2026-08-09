@@ -12,6 +12,7 @@ GR_PYTHON_INSTALL(
     PROGRAMS
     x410_scheduled_capture.py
     simulate_scheduled_write.py
+    benchmark_rake_modes.py
     DESTINATION bin
 )
 

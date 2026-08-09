@@ -65,11 +65,14 @@ public:
      * \param sfd_mode        SFD sequence mode used by stages 3/5
      *                        ("4z2" for QM35825, "ieee" for the MATLAB lrwpan
      *                        golden generator).
+     * \param cir_rake_top_k  0 for the full CIR filter; otherwise use the K
+     *                        strongest CIR taps for sparse RAKE combining.
      */
     static sptr make(const std::string& template_path,
                      size_t num_workers = 2,
                      size_t queue_capacity = 64,
-                     const std::string& sfd_mode = "4z2");
+                     const std::string& sfd_mode = "4z2",
+                     size_t cir_rake_top_k = 0);
 
     /**
      * Same as make(), but takes an in-memory CF32 template waveform.
@@ -77,7 +80,8 @@ public:
     static sptr make_from_template(const std::vector<gr_complex>& template_wf,
                                    size_t num_workers = 2,
                                    size_t queue_capacity = 64,
-                                   const std::string& sfd_mode = "4z2");
+                                   const std::string& sfd_mode = "4z2",
+                                   size_t cir_rake_top_k = 0);
 
     // Counters / stats (thread-safe snapshots).
     uint64_t jobs_received() const;
@@ -109,7 +113,8 @@ protected:
     UwbRealtimeDemodulator(const std::vector<gr_complex>& template_wf,
                            size_t num_workers,
                            size_t queue_capacity,
-                           const std::string& sfd_mode);
+                           const std::string& sfd_mode,
+                           size_t cir_rake_top_k);
 
     bool start() override;
     bool stop() override;
