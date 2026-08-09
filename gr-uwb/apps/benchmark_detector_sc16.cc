@@ -64,13 +64,14 @@ int main(int argc, char** argv)
 {
     if (argc < 2) {
         std::cerr << "usage: benchmark_detector_sc16 CFILE [target_samples] "
-                     "[buffer_items] [cf32-first|sc16-first]\n";
+                     "[buffer_items] [cf32-first|sc16-first] [sc16_coarse_D]\n";
         return 2;
     }
     const uint64_t target = argc > 2 ? std::stoull(argv[2]) : 100000000ULL;
     const size_t buffer_items =
         argc > 3 ? static_cast<size_t>(std::stoull(argv[3])) : 1048576;
     const bool sc16_first = argc > 4 && std::string(argv[4]) == "sc16-first";
+    const size_t sc16_coarse_D = argc > 5 ? std::stoull(argv[5]) : 4;
     auto x = load(argv[1]);
     if (x.size() <= kPacketStart + kSymbolLen)
         throw std::runtime_error("reference cfile is too short");
@@ -93,7 +94,8 @@ int main(int argc, char** argv)
     auto src_f = gr::blocks::vector_source_c::make(x, true);
     auto det_f = gr::uwb::UwbDetector::make(tmpl);
     auto src_s = gr::blocks::vector_source_s::make(sc16, true, 2);
-    auto det_s = gr::uwb::UwbDetectorSc16::make(tmpl);
+    auto det_s = gr::uwb::UwbDetectorSc16::make(
+        tmpl, 2032, 200000, 1e-3f, 100, sc16_coarse_D);
     double sec_f = 0.0;
     double sec_s = 0.0;
     if (sc16_first) {
@@ -112,6 +114,7 @@ int main(int argc, char** argv)
     std::cout << "target_samples=" << target
               << " buffer_items=" << buffer_items
               << " order=" << (sc16_first ? "sc16-first" : "cf32-first")
+              << " sc16_coarse_D=" << sc16_coarse_D
               << "\n"
               << "cf32_seconds=" << sec_f << " cf32_MSps=" << rate_f
               << " packets=" << n_f

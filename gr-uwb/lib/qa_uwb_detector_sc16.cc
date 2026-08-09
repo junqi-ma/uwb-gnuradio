@@ -90,6 +90,73 @@ BOOST_AUTO_TEST_CASE(test_sc16_integer_gate_matches_fc32_across_chunks)
     }
 }
 
+BOOST_AUTO_TEST_CASE(test_sc16_q15_coarse_peaks_match_fc32)
+{
+    constexpr size_t L = 128;
+    constexpr size_t D = 4;
+    constexpr size_t repetitions = 8;
+    constexpr size_t prefix = 311;
+    std::vector<gr_complex> tmpl(L);
+    for (size_t k = 0; k < L; ++k)
+        tmpl[k] = { std::cos(0.17f * k), 0.7f * std::sin(0.11f * k) };
+    gr::uwb::core::uwb_l2_normalize(tmpl);
+
+    std::vector<std::complex<int16_t>> signal_s(
+        prefix + repetitions * L + 600, { 0, 0 });
+    for (size_t r = 0; r < repetitions; ++r) {
+        for (size_t k = 0; k < L; ++k) {
+            const size_t i = prefix + r * L + k;
+            signal_s[i] = {
+                static_cast<int16_t>(std::lround(tmpl[k].real() * 22000.0f)),
+                static_cast<int16_t>(std::lround(tmpl[k].imag() * 22000.0f))
+            };
+        }
+    }
+    std::vector<gr_complex> signal_f(signal_s.size());
+    constexpr float inv = 1.0f / 32768.0f;
+    for (size_t i = 0; i < signal_s.size(); ++i)
+        signal_f[i] = { signal_s[i].real() * inv, signal_s[i].imag() * inv };
+
+    std::vector<gr_complex> tmpl_f_ds;
+    std::vector<std::complex<int16_t>> tmpl_s_ds;
+    std::vector<std::complex<int16_t>> tmpl_s_imag_ds;
+    for (size_t k = 0; k < L; k += D)
+        tmpl_f_ds.push_back(tmpl[k]);
+    gr::uwb::core::uwb_l2_normalize(tmpl_f_ds);
+    for (const auto& sample : tmpl_f_ds) {
+        tmpl_s_ds.emplace_back(
+            static_cast<int16_t>(std::lround(sample.real() * 32767.0f)),
+            static_cast<int16_t>(std::lround(sample.imag() * 32767.0f)));
+    }
+    for (const auto& sample : tmpl_s_ds)
+        tmpl_s_imag_ds.emplace_back(static_cast<int16_t>(-sample.imag()),
+                                    sample.real());
+
+    std::vector<gr_complex> sig_f;
+    std::vector<float> pow_f, score_f, metric_f;
+    std::vector<std::complex<int16_t>> sig_s;
+    std::vector<uint64_t> pow_s;
+    std::vector<float> score_s, metric_s;
+    std::vector<size_t> peaks_f, peaks_s;
+    float max_f = 0.0f;
+    float max_s = 0.0f;
+    gr::uwb::core::uwb_coarse_peaks(
+        signal_f.data(), 0, signal_f.size(), tmpl_f_ds.data(), tmpl_f_ds.size(),
+        D, 1, L / D, 0.5f, 0.5f, 1, sig_f, pow_f, score_f, metric_f,
+        peaks_f, &max_f);
+    gr::uwb::core::uwb_coarse_peaks_sc16(
+        signal_s.data(), 0, signal_s.size(), tmpl_s_ds.data(),
+        tmpl_s_imag_ds.data(), tmpl_s_ds.size(), D, 1, L / D, 0.5f, 0.5f, 1,
+        sig_s, pow_s, score_s, metric_s,
+        peaks_s, &max_s);
+
+    BOOST_REQUIRE(!peaks_f.empty());
+    BOOST_REQUIRE_EQUAL(peaks_s.size(), peaks_f.size());
+    for (size_t i = 0; i < peaks_f.size(); ++i)
+        BOOST_CHECK_EQUAL(peaks_s[i], peaks_f[i]);
+    BOOST_CHECK_CLOSE(std::sqrt(max_s), max_f, 0.2f);
+}
+
 BOOST_AUTO_TEST_CASE(test_sc16_fixed_capture_and_bit_exact_pdu)
 {
     constexpr size_t L = 128;

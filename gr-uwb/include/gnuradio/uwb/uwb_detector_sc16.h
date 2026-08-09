@@ -25,7 +25,8 @@
  * Block type: gr::sync_block with zero stream outputs (the tag_debug /
  * null_sink idiom); it consumes every input item and publishes PDUs on the
  * "packet" message port. PDU payload = interleaved-I/Q PMT s16vector;
- * correlation uses a worker-owned CF32 view of candidate Regions only.
+ * coarse correlation stays SC16/Q15; only fine-correlation ROIs are converted
+ * to a worker-owned FC32 scratch buffer.
  *   packet_id, start_sample, trigger_sample, sample_rate, sample_count,
  *   detection_metric.
  *
@@ -161,10 +162,11 @@ private:
     float d_coarse_exist_frac_ = 0.5f;
     float d_template_energy_ = 0.0f;
     gr::filter::kernel::fir_filter_ccc d_fir;
-    std::vector<std::complex<float>> d_tmpl_ds;
+    std::vector<std::complex<int16_t>> d_tmpl_ds_q15;
+    std::vector<std::complex<int16_t>> d_tmpl_imag_ds_q15;
     size_t d_sym_ds_ = 0;
-    std::vector<std::complex<float>> d_sig_ds;
-    std::vector<float> d_pow_ds;
+    std::vector<std::complex<int16_t>> d_sig_ds_sc16;
+    std::vector<uint64_t> d_pow_ds_sc16;
     std::vector<float> d_score_ds;
     std::vector<float> d_metric_ds;
     std::vector<size_t> d_coarse_peaks;
@@ -173,9 +175,9 @@ private:
     std::vector<gr_complex> d_corr;
     std::vector<float> d_winpow;
     std::vector<float> d_fine_metric;
-    // Worker-only conversion scratch. Reserved before streaming; no work()
-    // allocation and no CF32 -> SC16 conversion on the output path.
-    std::vector<gr_complex> d_region_fc32;
+    // Worker-only fine-ROI conversion scratch. Reserved before streaming; no
+    // full-Region conversion and no FC32 -> SC16 conversion on output.
+    std::vector<gr_complex> d_fine_input_fc32;
 
     std::thread d_worker;
     std::mutex d_job_mutex_;

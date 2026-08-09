@@ -82,10 +82,19 @@ UwbDetectorSc16::UwbDetectorSc16(
     d_winpow.resize(2 * half + 1);
     d_fine_metric.resize(2 * half + 1);
     d_coarse_peaks.reserve(256);
-    d_region_fc32.reserve(std::max<size_t>(
-        std::max(pre_trigger, 32 * energy_gate_decimation + known_preamble.size()) +
-            std::max<size_t>(capture, 300000),
-        524288));
+    const size_t region_prebuffer = std::max(
+        pre_trigger, 32 * energy_gate_decimation + known_preamble.size());
+    const size_t max_coarse_samples =
+        region_prebuffer + known_preamble.size() *
+                               (core::kUwbSyncSymbols +
+                                core::kUwbSfdSymbols + 4);
+    const size_t max_coarse_decimated =
+        max_coarse_samples / d_coarse_decimation_ + 1;
+    d_sig_ds_sc16.reserve(max_coarse_decimated);
+    d_pow_ds_sc16.reserve(max_coarse_decimated);
+    d_score_ds.reserve(max_coarse_decimated);
+    d_metric_ds.reserve(max_coarse_decimated);
+    d_fine_input_fc32.reserve(2 * half + known_preamble.size());
 }
 
 UwbDetectorSc16::~UwbDetectorSc16() { shutdown_worker(); }
@@ -96,13 +105,26 @@ void UwbDetectorSc16::rebuild_decimated_template()
     const size_t Ld = d_template_len_ / D;
     d_sym_ds_ = Ld;
     const auto& taps = d_fir.taps(); // taps[k] = conj(template[L-1-k])
-    d_tmpl_ds.clear();
-    d_tmpl_ds.reserve(Ld);
+    std::vector<std::complex<float>> tmpl_ds;
+    tmpl_ds.reserve(Ld);
     for (size_t j = 0; j < Ld; ++j) {
         const size_t m = j * D;
-        d_tmpl_ds.push_back(std::conj(taps[d_template_len_ - 1 - m]));
+        tmpl_ds.push_back(std::conj(taps[d_template_len_ - 1 - m]));
     }
-    core::uwb_l2_normalize(d_tmpl_ds);
+    core::uwb_l2_normalize(tmpl_ds);
+    d_tmpl_ds_q15.resize(Ld);
+    d_tmpl_imag_ds_q15.resize(Ld);
+    for (size_t j = 0; j < Ld; ++j) {
+        const auto q15 = [](float value) {
+            return static_cast<int16_t>(std::max(
+                -32767.0f, std::min(32767.0f, std::round(value * 32767.0f))));
+        };
+        d_tmpl_ds_q15[j] = { q15(tmpl_ds[j].real()), q15(tmpl_ds[j].imag()) };
+        d_tmpl_imag_ds_q15[j] = {
+            static_cast<int16_t>(-d_tmpl_ds_q15[j].imag()),
+            d_tmpl_ds_q15[j].real()
+        };
+    }
 }
 
 std::shared_ptr<UwbDetectorSc16>
@@ -341,16 +363,6 @@ void UwbDetectorSc16::publish_packet(const UwbDetectorStateMachineSc16::Region& 
     if (n == 0)
         return;
 
-    // Convert each candidate once in the background worker. Full-rate work()
-    // remains integer-only and the final payload comes from the original SC16.
-    d_region_fc32.resize(n);
-    constexpr float kInvFullScale = 1.0f / 32768.0f;
-    for (size_t i = 0; i < n; ++i) {
-        d_region_fc32[i] = gr_complex(
-            static_cast<float>(region.samples[i].real()) * kInvFullScale,
-            static_cast<float>(region.samples[i].imag()) * kInvFullScale);
-    }
-
     // 1. Decimated coarse scan over a preamble-horizon prefix of the buffered
     //    region (incl. pre-buffer holding the first SYNC symbol).  Regions from
     //    real packets are ~264k samples (preamble + full payload); correlating
@@ -358,7 +370,7 @@ void UwbDetectorSc16::publish_packet(const UwbDetectorStateMachineSc16::Region& 
     //    the gate-crossing offset; short regions are scanned in full.
     //
     //    Cost: O((scan_len/D)*(L/D)).  Cutting scan_len from ~264k to ~80k
-    //    yields ~3× on the dominant VOLK score loop.
+    //    avoids scanning the payload tail in the Q15 score loop.
     const size_t preamble_span =
         d_template_len_ *
         (core::kUwbSyncSymbols + core::kUwbSfdSymbols + /*margin_syms=*/4);
@@ -367,23 +379,25 @@ void UwbDetectorSc16::publish_packet(const UwbDetectorStateMachineSc16::Region& 
     const size_t coarse_scan_end = std::min(n, horizon);
 
     float mx = 0.0f;
-    core::uwb_coarse_peaks(d_region_fc32.data(),
-                           0, // scan from region start (incl. pre-buffer)
-                           coarse_scan_end,
-                           d_tmpl_ds.data(),
-                           d_tmpl_ds.size(),
-                           d_coarse_decimation_,
-                           d_coarse_repetitions_,
-                           d_sym_ds_,
-                           d_coarse_peak_rel_,
-                           d_coarse_exist_frac_,
-                           d_coarse_stride_,
-                           d_sig_ds,
-                           d_pow_ds,
-                           d_score_ds,
-                           d_metric_ds,
-                           d_coarse_peaks,
-                           &mx);
+    core::uwb_coarse_peaks_sc16(
+        region.samples.data(),
+        0, // scan from region start (incl. pre-buffer)
+        coarse_scan_end,
+        d_tmpl_ds_q15.data(),
+        d_tmpl_imag_ds_q15.data(),
+        d_tmpl_ds_q15.size(),
+        d_coarse_decimation_,
+        d_coarse_repetitions_,
+        d_sym_ds_,
+        d_coarse_peak_rel_,
+        d_coarse_exist_frac_,
+        d_coarse_stride_,
+        d_sig_ds_sc16,
+        d_pow_ds_sc16,
+        d_score_ds,
+        d_metric_ds,
+        d_coarse_peaks,
+        &mx);
     if (d_coarse_peaks.empty())
         return; // not a preamble — drop (existence check)
 
@@ -406,9 +420,23 @@ void UwbDetectorSc16::publish_packet(const UwbDetectorStateMachineSc16::Region& 
         const size_t j1 = std::min(center + half, n - 1);
         const size_t len = j1 - j0 + 1;
 
-        d_fir.filterN(d_corr.data(), d_region_fc32.data() + j0,
+        const size_t convert_count =
+            std::min(n - j0, len + d_template_len_ - 1);
+        if (convert_count < len + d_template_len_ - 1)
+            continue;
+        d_fine_input_fc32.resize(convert_count);
+        constexpr float kInvFullScale = 1.0f / 32768.0f;
+        for (size_t i = 0; i < convert_count; ++i) {
+            const auto sample = region.samples[j0 + i];
+            d_fine_input_fc32[i] = {
+                static_cast<float>(sample.real()) * kInvFullScale,
+                static_cast<float>(sample.imag()) * kInvFullScale
+            };
+        }
+
+        d_fir.filterN(d_corr.data(), d_fine_input_fc32.data(),
                       static_cast<unsigned long>(len));
-        core::uwb_window_power(d_region_fc32.data() + j0, len, d_template_len_,
+        core::uwb_window_power(d_fine_input_fc32.data(), len, d_template_len_,
                                d_winpow.data());
         core::uwb_normalized_score(d_corr.data(), d_winpow.data(), len,
                                    d_template_energy_, d_fine_metric.data());
