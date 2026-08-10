@@ -559,7 +559,7 @@ X410/ScheduledExtractor
 > - **SC16 输入**：block 接受 `cons(meta,s16vector)` 与裸 `s16vector`（交错 I/Q，1/32767 缩放）+ 原 c32vector；QA 验证 s16 golden 窗口解出 FCS 0x584b。
 > - GPU/FPGA 评估 + 在线 SIC 记为独立项（评估见 commit 日志）。
 >
-> **前置（P0-P3 性能优化）**：单 job 17.2 → 3.9 ms（4.4×），200 pkt/s + 2 workers 零丢包。详见 [`性能分析_解调分阶段耗时报告.md`](性能分析_解调分阶段耗时报告.md)。
+> **前置（P0-P3 性能优化）**：单 job 17.2 → 3.9 ms（4.4×），200 pkt/s + 2 workers 零丢包。详见 [`docs/performance/性能分析_解调分阶段耗时报告.md`](docs/performance/性能分析_解调分阶段耗时报告.md)。
 
 ---
 

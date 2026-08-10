@@ -30,7 +30,8 @@ UwbDetectorSc16::UwbDetectorSc16(
     size_t energy_gate_decimation,
     size_t coarse_decimation,
     size_t coarse_repetitions,
-    size_t coarse_margin)
+    size_t coarse_margin,
+    double sample_rate)
     : gr::sync_block("uwb_detector_sc16",
                      gr::io_signature::make(
                          1, 1, sizeof(std::complex<int16_t>)),
@@ -46,6 +47,7 @@ UwbDetectorSc16::UwbDetectorSc16(
           /*post_trigger_capture=*/capture),
       d_pre_trigger_(pre_trigger),
       d_capture_(capture),
+      d_sample_rate_(sample_rate),
       d_template_len_(known_preamble.size()),
       d_coarse_decimation_(coarse_decimation > 0 ? coarse_decimation : 4),
       d_coarse_repetitions_(coarse_repetitions > 0 ? coarse_repetitions : 1),
@@ -134,12 +136,13 @@ UwbDetectorSc16::make(const std::vector<std::complex<float>>& known_preamble,
                   size_t energy_gate_decimation,
                   size_t coarse_decimation,
                   size_t coarse_repetitions,
-                  size_t coarse_margin)
+                  size_t coarse_margin,
+                  double sample_rate)
 {
     return gnuradio::get_initial_sptr(new UwbDetectorSc16(
         known_preamble, pre_trigger, capture, energy_threshold,
         energy_gate_decimation, coarse_decimation, coarse_repetitions,
-        coarse_margin));
+        coarse_margin, sample_rate));
 }
 
 std::shared_ptr<UwbDetectorSc16>
@@ -150,7 +153,8 @@ UwbDetectorSc16::make_from_file(const std::string& template_file,
                             size_t energy_gate_decimation,
                             size_t coarse_decimation,
                             size_t coarse_repetitions,
-                            size_t coarse_margin)
+                            size_t coarse_margin,
+                            double sample_rate)
 {
     std::ifstream f(template_file, std::ios::binary);
     if (!f) {
@@ -168,13 +172,15 @@ UwbDetectorSc16::make_from_file(const std::string& template_file,
     f.read(reinterpret_cast<char*>(tmpl.data()), bytes);
     return make(tmpl, pre_trigger, capture, energy_threshold,
                 energy_gate_decimation, coarse_decimation, coarse_repetitions,
-                coarse_margin);
+                coarse_margin, sample_rate);
 }
 
 size_t UwbDetectorSc16::pre_trigger() const { return d_pre_trigger_; }
 void UwbDetectorSc16::set_pre_trigger(size_t v) { d_pre_trigger_ = v; }
 size_t UwbDetectorSc16::capture() const { return d_capture_; }
 void UwbDetectorSc16::set_capture(size_t v) { d_capture_ = v; }
+double UwbDetectorSc16::sample_rate() const { return d_sample_rate_; }
+void UwbDetectorSc16::set_sample_rate(double v) { d_sample_rate_ = v; }
 size_t UwbDetectorSc16::coarse_stride() const { return d_coarse_stride_; }
 void UwbDetectorSc16::set_coarse_stride(size_t v)
 {
@@ -491,7 +497,7 @@ void UwbDetectorSc16::publish_packet(const UwbDetectorStateMachineSc16::Region& 
     meta = pmt::dict_add(meta, pmt::mp("trigger_sample"),
                          pmt::from_uint64(trigger));
     meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
-                         pmt::from_double(core::kUwbSampleRateHz));
+                         pmt::from_double(d_sample_rate_));
     meta = pmt::dict_add(meta, pmt::mp("sample_count"),
                          pmt::from_long(static_cast<long>(cap)));
     meta = pmt::dict_add(meta, pmt::mp("detection_metric"),

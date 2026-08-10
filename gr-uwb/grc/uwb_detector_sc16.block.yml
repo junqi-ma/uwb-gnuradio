@@ -4,11 +4,15 @@ category: '[UWB]'
 
 parameters:
 - {id: template_file, label: Template file (CF32), dtype: file_open, default: ''}
+# Production geometry defaults match gr::uwb::defaults::*
 - {id: pre_trigger, label: Pre-trigger samples, dtype: int, default: '2032'}
 - {id: capture_samples, label: Capture samples, dtype: int, default: '200000'}
 - {id: energy_threshold, label: Normalized energy threshold, dtype: real, default: '0.001'}
 - {id: energy_gate_decimation, label: Energy gate decimation, dtype: int, default: '100'}
 - {id: coarse_decimation, label: Coarse decimation, dtype: int, default: '4'}
+- {id: coarse_repetitions, label: Coarse repetitions, dtype: int, default: '1'}
+- {id: coarse_margin, label: Coarse margin (samples), dtype: int, default: '16'}
+- {id: sample_rate, label: Sample rate (Hz), dtype: real, default: '998.4e6'}
 
 inputs:
 - domain: stream
@@ -19,12 +23,20 @@ outputs:
 
 templates:
   imports: from gnuradio import uwb
-  make: uwb.detector_sc16.make_from_file(${template_file}, ${pre_trigger}, ${capture_samples}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation})
+  make: uwb.detector_sc16.make_from_file(${template_file}, ${pre_trigger}, ${capture_samples}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation}, ${coarse_repetitions}, ${coarse_margin}, ${sample_rate})
+
+cpp_templates:
+  includes: ['#include <gnuradio/uwb/uwb_detector_sc16.h>']
+  make: 'this->${id} = gr::uwb::UwbDetectorSc16::make_from_file(${template_file}, ${pre_trigger}, ${capture_samples}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation}, ${coarse_repetitions}, ${coarse_margin}, ${sample_rate});'
+  link: ['gnuradio::gnuradio-uwb']
 
 documentation: |-
   Input is one packed complex SC16 sample per item (short vector length 2,
   interleaved I/Q). Full-rate work is integer energy gating and SC16 copying.
   Candidate Regions are converted once to CF32 in the background worker;
   output is a bit-exact interleaved-I/Q PMT s16vector.
+
+  Defaults for pre_trigger/capture/coarse_* / sample_rate match
+  gr::uwb::defaults in uwb_defaults.h.
 
 file_format: 1

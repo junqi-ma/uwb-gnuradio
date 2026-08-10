@@ -44,6 +44,7 @@
 #include <gnuradio/io_signature.h>
 #include <gnuradio/sync_block.h>
 #include <gnuradio/uwb/api.h>
+#include <gnuradio/uwb/uwb_defaults.h>
 #include <gnuradio/uwb/uwb_detector_core.h>
 #include <pmt/pmt.h>
 
@@ -80,33 +81,47 @@ public:
      *                            (default 1).
      * \param coarse_margin       fine-correlation half-width around each coarse
      *                            peak (samples).
+     * \param sample_rate         host sample rate written into PDU metadata
+     *                            (default 998.4e6 production host rate).
      */
     static sptr make(const std::vector<std::complex<float>>& known_preamble,
-                     size_t pre_trigger = 2032,
-                     size_t capture = 200000,
-                     float energy_threshold = 1e-3f,
-                     size_t energy_gate_decimation = 100,
-                     size_t coarse_decimation = 4,
-                     size_t coarse_repetitions = 1,
-                     size_t coarse_margin = 16);
+                     size_t pre_trigger = defaults::kDetectorPreTrigger,
+                     size_t capture = defaults::kDetectorCapture,
+                     float energy_threshold = defaults::kDetectorEnergyThreshold,
+                     size_t energy_gate_decimation =
+                         defaults::kDetectorEnergyGateDecimation,
+                     size_t coarse_decimation =
+                         defaults::kDetectorCoarseDecimation,
+                     size_t coarse_repetitions =
+                         defaults::kDetectorCoarseRepetitions,
+                     size_t coarse_margin = defaults::kDetectorCoarseMargin,
+                     double sample_rate = defaults::kSampleRateHz);
 
     /**
      * Same as make(), but loads the template from a binary file of interleaved
      * complex<float> (I/Q/I/Q) samples.
      */
     static sptr make_from_file(const std::string& template_file,
-                               size_t pre_trigger = 2032,
-                               size_t capture = 200000,
-                               float energy_threshold = 1e-3f,
-                               size_t energy_gate_decimation = 100,
-                               size_t coarse_decimation = 4,
-                               size_t coarse_repetitions = 1,
-                               size_t coarse_margin = 16);
+                               size_t pre_trigger = defaults::kDetectorPreTrigger,
+                               size_t capture = defaults::kDetectorCapture,
+                               float energy_threshold =
+                                   defaults::kDetectorEnergyThreshold,
+                               size_t energy_gate_decimation =
+                                   defaults::kDetectorEnergyGateDecimation,
+                               size_t coarse_decimation =
+                                   defaults::kDetectorCoarseDecimation,
+                               size_t coarse_repetitions =
+                                   defaults::kDetectorCoarseRepetitions,
+                               size_t coarse_margin =
+                                   defaults::kDetectorCoarseMargin,
+                               double sample_rate = defaults::kSampleRateHz);
 
     size_t pre_trigger() const;
     void set_pre_trigger(size_t pre_trigger);
     size_t capture() const;
     void set_capture(size_t capture);
+    double sample_rate() const;
+    void set_sample_rate(double sample_rate);
     size_t coarse_stride() const;
     uint64_t dropped_regions() const;
     void set_coarse_stride(size_t stride);
@@ -129,7 +144,8 @@ protected:
                 size_t energy_gate_decimation,
                 size_t coarse_decimation,
                 size_t coarse_repetitions,
-                size_t coarse_margin);
+                size_t coarse_margin,
+                double sample_rate);
 
     int work(int noutput_items,
              gr_vector_const_void_star& input_items,
@@ -151,6 +167,7 @@ private:
     uint64_t d_packet_id_ = 0;
     size_t d_pre_trigger_;
     size_t d_capture_;
+    double d_sample_rate_;
 
     // Coarse-to-fine state (preamble confirmation + precise start)
     size_t d_template_len_;

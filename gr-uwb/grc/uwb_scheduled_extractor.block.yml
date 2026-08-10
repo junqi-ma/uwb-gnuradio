@@ -6,10 +6,12 @@ parameters:
 -   id: sample_rate
     label: Sample rate
     dtype: real
+    # matches gr::uwb::defaults::kSampleRateHz
     default: '998.4e6'
 -   id: packet_interval_s
     label: Packet interval (s)
     dtype: real
+    # matches gr::uwb::defaults::kScheduledPacketIntervalS
     default: '0.01'
 -   id: first_packet_sample
     label: First packet sample (t0)
@@ -18,19 +20,29 @@ parameters:
 -   id: pre_guard_samples
     label: Pre-guard samples
     dtype: int
+    # matches gr::uwb::defaults::kScheduledPreGuard
     default: '9984'
 -   id: capture_samples
     label: Capture samples
     dtype: int
+    # matches gr::uwb::defaults::kScheduledCapture
     default: '189696'
 -   id: post_guard_samples
     label: Post-guard samples
     dtype: int
+    # matches gr::uwb::defaults::kScheduledPostGuard
     default: '4096'
 -   id: pool_size
     label: Pool size
     dtype: int
+    # matches gr::uwb::defaults::kScheduledPoolSize
     default: '8'
+-   id: emit_policy
+    label: Emit policy
+    dtype: enum
+    default: 'EverySlot'
+    options: ['EverySlot', 'VerifiedOnly']
+    option_labels: ['Every slot', 'Verified only']
 -   id: verification_enabled
     label: Verification enabled
     dtype: bool
@@ -53,11 +65,11 @@ outputs:
 
 templates:
     imports: from gnuradio import uwb
-    make: uwb.scheduled_extractor(${sample_rate}, ${packet_interval_s}, ${first_packet_sample}, ${pre_guard_samples}, ${capture_samples}, ${post_guard_samples}, ${pool_size}, uwb.scheduled_extractor.EmitPolicy.EverySlot, ${verification_enabled})
+    make: uwb.scheduled_extractor(${sample_rate}, ${packet_interval_s}, ${first_packet_sample}, ${pre_guard_samples}, ${capture_samples}, ${post_guard_samples}, ${pool_size}, uwb.scheduled_extractor.EmitPolicy.${emit_policy}, ${verification_enabled})
 
 cpp_templates:
     includes: ['#include <gnuradio/uwb/uwb_scheduled_extractor.h>']
-    make: 'this->${id} = gr::uwb::UwbScheduledExtractor::make(${sample_rate}, ${packet_interval_s}, ${first_packet_sample}, ${pre_guard_samples}, ${capture_samples}, ${post_guard_samples}, ${pool_size});'
+    make: 'this->${id} = gr::uwb::UwbScheduledExtractor::make(${sample_rate}, ${packet_interval_s}, ${first_packet_sample}, ${pre_guard_samples}, ${capture_samples}, ${post_guard_samples}, ${pool_size}, gr::uwb::UwbScheduledExtractor::EmitPolicy::${emit_policy}, ${verification_enabled});'
     link: ['gnuradio::gnuradio-uwb']
 
 file_format: 1

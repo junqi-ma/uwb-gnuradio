@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include <gnuradio/uwb/uwb_defaults.h>
 #include <volk/volk.h>
 
 #include <algorithm>
@@ -52,7 +53,8 @@ namespace core {
 // 998.4 MHz, SamplesPerPulse = 2).  The 1016-sample SYNC symbol period was
 // confirmed by autocorrelation of the reference .cfile.
 // ---------------------------------------------------------------------------
-inline constexpr double kUwbSampleRateHz = 998400000.0;
+// Alias of defaults::kSampleRateHz (single production host-rate source).
+inline constexpr double kUwbSampleRateHz = defaults::kSampleRateHz;
 inline constexpr size_t kUwbSamplesPerSymbol = 1016;
 inline constexpr size_t kUwbSyncSymbols = 64;
 inline constexpr size_t kUwbSfdSymbols = 8;
@@ -945,8 +947,9 @@ public:
     static constexpr size_t kRegionPoolSize = 8;
     static constexpr RegionHandle kInvalidRegion = std::numeric_limits<size_t>::max();
 
-    UwbDetectorStateMachineT(size_t pre_trigger = 2032,
-                            float energy_threshold = 1e-3f,
+    UwbDetectorStateMachineT(size_t pre_trigger = defaults::kDetectorPreTrigger,
+                            float energy_threshold =
+                                defaults::kDetectorEnergyThreshold,
                             size_t gate_decimation = 100,
                             size_t gate_window = 32,
                             size_t holdoff_decimated = 8,

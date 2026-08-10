@@ -10,23 +10,43 @@ parameters:
 -   id: pre_trigger
     label: Pre-trigger samples
     dtype: int
+    # matches gr::uwb::defaults::kDetectorPreTrigger
     default: '2032'
 -   id: capture_samples
     label: Capture samples
     dtype: int
+    # matches gr::uwb::defaults::kDetectorCapture
     default: '200000'
 -   id: energy_threshold
     label: Energy threshold
     dtype: real
+    # matches gr::uwb::defaults::kDetectorEnergyThreshold
     default: '0.001'
 -   id: energy_gate_decimation
     label: Energy gate decimation
     dtype: int
+    # matches gr::uwb::defaults::kDetectorEnergyGateDecimation
     default: '100'
 -   id: coarse_decimation
     label: Coarse decimation
     dtype: int
+    # matches gr::uwb::defaults::kDetectorCoarseDecimation
     default: '4'
+-   id: coarse_repetitions
+    label: Coarse repetitions
+    dtype: int
+    # matches gr::uwb::defaults::kDetectorCoarseRepetitions
+    default: '1'
+-   id: coarse_margin
+    label: Coarse margin (samples)
+    dtype: int
+    # matches gr::uwb::defaults::kDetectorCoarseMargin
+    default: '16'
+-   id: sample_rate
+    label: Sample rate (Hz)
+    dtype: real
+    # matches gr::uwb::defaults::kSampleRateHz
+    default: '998.4e6'
 
 inputs:
 -   domain: stream
@@ -39,11 +59,11 @@ outputs:
 
 templates:
     imports: from gnuradio import uwb
-    make: uwb.detector.make_from_file(${template_file}, ${pre_trigger}, ${capture_samples}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation})
+    make: uwb.detector.make_from_file(${template_file}, ${pre_trigger}, ${capture_samples}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation}, ${coarse_repetitions}, ${coarse_margin}, ${sample_rate})
 
 cpp_templates:
     includes: ['#include <gnuradio/uwb/uwb_detector.h>']
-    make: 'this->${id} = gr::uwb::UwbDetector::make_from_file(${template_file}, ${pre_trigger}, ${capture_samples}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation});'
+    make: 'this->${id} = gr::uwb::UwbDetector::make_from_file(${template_file}, ${pre_trigger}, ${capture_samples}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation}, ${coarse_repetitions}, ${coarse_margin}, ${sample_rate});'
     link: ['gnuradio::gnuradio-uwb']
 
 file_format: 1

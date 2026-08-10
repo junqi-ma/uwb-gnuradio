@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include <gnuradio/uwb/uwb_defaults.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -119,15 +121,15 @@ enum class ScheduleMachineState : int {
 };
 
 struct ScheduleConfig {
-    double sample_rate = 998400000.0;
-    double packet_interval_s = 0.01; // 100 radar/s
+    double sample_rate = defaults::kSampleRateHz;
+    double packet_interval_s = defaults::kScheduledPacketIntervalS;
     double first_packet_sample_exact = 0.0;
-    size_t pre_guard_samples = 9984;   // ~10 us @ 998.4e6
-    size_t capture_samples = 189696;   // ~190 us
-    size_t post_guard_samples = 4096;
+    size_t pre_guard_samples = defaults::kScheduledPreGuard;
+    size_t capture_samples = defaults::kScheduledCapture;
+    size_t post_guard_samples = defaults::kScheduledPostGuard;
     EmitPolicy emit_policy = EmitPolicy::EverySlot;
     PartialEosPolicy partial_eos_policy = PartialEosPolicy::Drop;
-    size_t pool_size = 8;
+    size_t pool_size = defaults::kScheduledPoolSize;
 
     size_t window_capacity() const
     {

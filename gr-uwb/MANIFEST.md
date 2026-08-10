@@ -1,17 +1,20 @@
-title: The UWB OOT Module
-brief: Short description of gr-uwb
-tags: # Tags are arbitrary, but look at CGRAN what other authors are using
+title: gr-uwb
+brief: High-rate IEEE 802.15.4a/z UWB packet detect, schedule extract, and capture
+tags:
   - sdr
+  - uwb
+  - 802.15.4
+  - rfnoc
 author:
-  - Author Name <authors@email.address>
+  - uwb-gnuradio contributors
 copyright_owner:
-  - Copyright Owner 1
-license:
-gr_supported_version: # Put a comma separated list of supported GR versions here
-#repo: # Put the URL of the repository here, or leave blank for default
-#website: <module_website> # If you have a separate project website, put it here
-#icon: <icon_url> # Put a URL to a square image here that will be used as an icon on CGRAN
+  - uwb-gnuradio contributors
+license: GPL-3.0-or-later
+gr_supported_version: 3.10
+#repo:
+#website:
+#icon:
 ---
-A longer, multi-line description of gr-uwb.
-You may use some *basic* Markdown here.
-If left empty, it will try to find a README file instead.
+GNU Radio out-of-tree module for ~1 GS/s UWB IQ: energy/coarse/fine detection,
+QM35825-style scheduled radar slots, SC16 packet writer, and realtime demod.
+See README.md for build and usage.

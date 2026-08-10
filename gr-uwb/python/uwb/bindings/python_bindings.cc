@@ -14,6 +14,7 @@
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
 
+#include <gnuradio/uwb/uwb_defaults.h>
 #include <gnuradio/uwb/uwb_energy_detector.h>
 #include <gnuradio/uwb/uwb_preamble_detector.h>
 #include <gnuradio/uwb/uwb_detector.h>
@@ -98,28 +99,40 @@ void bind_preamble_detector(py::module& m)
 
 void bind_detector(py::module& m)
 {
+    using gr::uwb::defaults::kDetectorCapture;
+    using gr::uwb::defaults::kDetectorCoarseDecimation;
+    using gr::uwb::defaults::kDetectorCoarseMargin;
+    using gr::uwb::defaults::kDetectorCoarseRepetitions;
+    using gr::uwb::defaults::kDetectorEnergyGateDecimation;
+    using gr::uwb::defaults::kDetectorEnergyThreshold;
+    using gr::uwb::defaults::kDetectorPreTrigger;
+    using gr::uwb::defaults::kSampleRateHz;
+
     py::class_<gr::uwb::UwbDetector,
                gr::sync_block,
                std::shared_ptr<gr::uwb::UwbDetector>>(m, "detector")
         .def(py::init(&gr::uwb::UwbDetector::make),
              py::arg("known_preamble"),
-             py::arg("pre_trigger") = size_t(2032),
-             py::arg("capture") = size_t(200000),
-             py::arg("energy_threshold") = 1e-3f,
-             py::arg("energy_gate_decimation") = size_t(100),
-             py::arg("coarse_decimation") = size_t(4),
-             py::arg("coarse_repetitions") = size_t(1),
-             py::arg("coarse_margin") = size_t(16))
+             py::arg("pre_trigger") = kDetectorPreTrigger,
+             py::arg("capture") = kDetectorCapture,
+             py::arg("energy_threshold") = kDetectorEnergyThreshold,
+             py::arg("energy_gate_decimation") = kDetectorEnergyGateDecimation,
+             py::arg("coarse_decimation") = kDetectorCoarseDecimation,
+             py::arg("coarse_repetitions") = kDetectorCoarseRepetitions,
+             py::arg("coarse_margin") = kDetectorCoarseMargin,
+             py::arg("sample_rate") = kSampleRateHz)
         .def_static("make_from_file",
                     &gr::uwb::UwbDetector::make_from_file,
                     py::arg("template_file"),
-                    py::arg("pre_trigger") = size_t(2032),
-                    py::arg("capture") = size_t(200000),
-                    py::arg("energy_threshold") = 1e-3f,
-                    py::arg("energy_gate_decimation") = size_t(100),
-                    py::arg("coarse_decimation") = size_t(4),
-                    py::arg("coarse_repetitions") = size_t(1),
-                    py::arg("coarse_margin") = size_t(16))
+                    py::arg("pre_trigger") = kDetectorPreTrigger,
+                    py::arg("capture") = kDetectorCapture,
+                    py::arg("energy_threshold") = kDetectorEnergyThreshold,
+                    py::arg("energy_gate_decimation") =
+                        kDetectorEnergyGateDecimation,
+                    py::arg("coarse_decimation") = kDetectorCoarseDecimation,
+                    py::arg("coarse_repetitions") = kDetectorCoarseRepetitions,
+                    py::arg("coarse_margin") = kDetectorCoarseMargin,
+                    py::arg("sample_rate") = kSampleRateHz)
         .def("pre_trigger", &gr::uwb::UwbDetector::pre_trigger)
         .def("set_pre_trigger",
              &gr::uwb::UwbDetector::set_pre_trigger,
@@ -128,31 +141,52 @@ void bind_detector(py::module& m)
         .def("set_capture",
              &gr::uwb::UwbDetector::set_capture,
              py::arg("capture"))
+        .def("sample_rate", &gr::uwb::UwbDetector::sample_rate)
+        .def("set_sample_rate",
+             &gr::uwb::UwbDetector::set_sample_rate,
+             py::arg("sample_rate"))
         .def("dropped_regions", &gr::uwb::UwbDetector::dropped_regions);
 }
 
 void bind_detector_sc16(py::module& m)
 {
+    using gr::uwb::defaults::kDetectorCapture;
+    using gr::uwb::defaults::kDetectorCoarseDecimation;
+    using gr::uwb::defaults::kDetectorCoarseMargin;
+    using gr::uwb::defaults::kDetectorCoarseRepetitions;
+    using gr::uwb::defaults::kDetectorEnergyGateDecimation;
+    using gr::uwb::defaults::kDetectorEnergyThreshold;
+    using gr::uwb::defaults::kDetectorPreTrigger;
+    using gr::uwb::defaults::kSampleRateHz;
+
     py::class_<gr::uwb::UwbDetectorSc16,
                gr::sync_block,
                std::shared_ptr<gr::uwb::UwbDetectorSc16>>(m, "detector_sc16")
         .def(py::init(&gr::uwb::UwbDetectorSc16::make),
-             py::arg("known_preamble"), py::arg("pre_trigger") = size_t(2032),
-             py::arg("capture") = size_t(200000),
-             py::arg("energy_threshold") = 1e-3f,
-             py::arg("energy_gate_decimation") = size_t(100),
-             py::arg("coarse_decimation") = size_t(4),
-             py::arg("coarse_repetitions") = size_t(1),
-             py::arg("coarse_margin") = size_t(16))
+             py::arg("known_preamble"),
+             py::arg("pre_trigger") = kDetectorPreTrigger,
+             py::arg("capture") = kDetectorCapture,
+             py::arg("energy_threshold") = kDetectorEnergyThreshold,
+             py::arg("energy_gate_decimation") = kDetectorEnergyGateDecimation,
+             py::arg("coarse_decimation") = kDetectorCoarseDecimation,
+             py::arg("coarse_repetitions") = kDetectorCoarseRepetitions,
+             py::arg("coarse_margin") = kDetectorCoarseMargin,
+             py::arg("sample_rate") = kSampleRateHz)
         .def_static("make_from_file", &gr::uwb::UwbDetectorSc16::make_from_file,
                     py::arg("template_file"),
-                    py::arg("pre_trigger") = size_t(2032),
-                    py::arg("capture") = size_t(200000),
-                    py::arg("energy_threshold") = 1e-3f,
-                    py::arg("energy_gate_decimation") = size_t(100),
-                    py::arg("coarse_decimation") = size_t(4),
-                    py::arg("coarse_repetitions") = size_t(1),
-                    py::arg("coarse_margin") = size_t(16))
+                    py::arg("pre_trigger") = kDetectorPreTrigger,
+                    py::arg("capture") = kDetectorCapture,
+                    py::arg("energy_threshold") = kDetectorEnergyThreshold,
+                    py::arg("energy_gate_decimation") =
+                        kDetectorEnergyGateDecimation,
+                    py::arg("coarse_decimation") = kDetectorCoarseDecimation,
+                    py::arg("coarse_repetitions") = kDetectorCoarseRepetitions,
+                    py::arg("coarse_margin") = kDetectorCoarseMargin,
+                    py::arg("sample_rate") = kSampleRateHz)
+        .def("sample_rate", &gr::uwb::UwbDetectorSc16::sample_rate)
+        .def("set_sample_rate",
+             &gr::uwb::UwbDetectorSc16::set_sample_rate,
+             py::arg("sample_rate"))
         .def("dropped_regions", &gr::uwb::UwbDetectorSc16::dropped_regions)
         .def("work_calls", &gr::uwb::UwbDetectorSc16::work_calls)
         .def("work_mean_noutput_items",
@@ -194,10 +228,12 @@ void bind_scheduled_extractor(py::module& m)
            py::arg("sample_rate"),
            py::arg("packet_interval_s"),
            py::arg("first_packet_sample"),
-           py::arg("pre_guard_samples") = size_t(9984),
-           py::arg("capture_samples") = size_t(189696),
-           py::arg("post_guard_samples") = size_t(4096),
-           py::arg("pool_size") = size_t(8),
+           py::arg("pre_guard_samples") =
+               gr::uwb::defaults::kScheduledPreGuard,
+           py::arg("capture_samples") = gr::uwb::defaults::kScheduledCapture,
+           py::arg("post_guard_samples") =
+               gr::uwb::defaults::kScheduledPostGuard,
+           py::arg("pool_size") = gr::uwb::defaults::kScheduledPoolSize,
            py::arg("emit_policy") =
                gr::uwb::UwbScheduledExtractor::EmitPolicy::EverySlot,
            py::arg("verification_enabled") = false,

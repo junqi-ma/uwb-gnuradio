@@ -32,6 +32,7 @@
 #include <gnuradio/io_signature.h>
 #include <gnuradio/sync_block.h>
 #include <gnuradio/uwb/api.h>
+#include <gnuradio/uwb/uwb_defaults.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor_core.h>
 #include <pmt/pmt.h>
 
@@ -74,10 +75,10 @@ public:
     static sptr make(double sample_rate,
                      double packet_interval_s,
                      uint64_t first_packet_sample,
-                     size_t pre_guard_samples = 9984,
-                     size_t capture_samples = 189696,
-                     size_t post_guard_samples = 4096,
-                     size_t pool_size = 8,
+                     size_t pre_guard_samples = defaults::kScheduledPreGuard,
+                     size_t capture_samples = defaults::kScheduledCapture,
+                     size_t post_guard_samples = defaults::kScheduledPostGuard,
+                     size_t pool_size = defaults::kScheduledPoolSize,
                      EmitPolicy emit_policy = EmitPolicy::EverySlot,
                      bool verification_enabled = false,
                      const std::vector<std::complex<float>>& radar_template =

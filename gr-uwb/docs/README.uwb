@@ -1,11 +1,16 @@
-This is the uwb-write-a-block package meant as a guide to building
-out-of-tree packages. To use the uwb blocks, the Python namespaces
-is in 'uwb', which is imported as:
+gr-uwb — high-rate UWB packet detection and capture for GNU Radio 3.10+.
 
-    import uwb
+Python namespace (GNU Radio 3.10 style):
 
-See the Doxygen documentation for details about the blocks available
-in this package. A quick listing of the details can be found in Python
-after importing by using:
+    from gnuradio import uwb
+
+C++ headers:
+
+    #include <gnuradio/uwb/uwb_detector.h>
+
+See the repository root README.md and gr-uwb/README.md for build, install,
+block list, and examples. After install:
 
     help(uwb)
+
+Doxygen may be generated from this docs/ tree when Doxygen is available.

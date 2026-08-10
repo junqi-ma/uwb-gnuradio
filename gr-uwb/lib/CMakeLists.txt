@@ -74,6 +74,7 @@ list(APPEND test_uwb_sources
     qa_uwb_scheduled_extractor.cc
     qa_uwb_demod_core.cc
     qa_uwb_realtime_demodulator.cc
+    qa_uwb_defaults.cc
 )
 # Anything we need to link to for the unit tests go here
 list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks)
@@ -88,3 +89,7 @@ foreach(qa_file ${test_uwb_sources})
         ${CMAKE_CURRENT_SOURCE_DIR}/${qa_file}
     )
 endforeach(qa_file)
+
+# qa_uwb_defaults reads GRC YAML next to the source tree.
+target_compile_definitions(uwb_qa_uwb_defaults.cc PRIVATE
+    "UWB_GRC_DIR=\"${CMAKE_SOURCE_DIR}/grc\"")

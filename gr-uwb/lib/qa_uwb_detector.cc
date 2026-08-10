@@ -11,6 +11,7 @@
 #include <gnuradio/blocks/vector_source.h>
 #include <gnuradio/gr_complex.h>
 #include <gnuradio/top_block.h>
+#include <gnuradio/uwb/uwb_defaults.h>
 #include <gnuradio/uwb/uwb_detector.h>
 #include <gnuradio/uwb/uwb_detector_core.h>
 #include <pmt/pmt.h>
@@ -107,6 +108,54 @@ BOOST_AUTO_TEST_CASE(test_detector_preamble_pdu)
     BOOST_CHECK_LT(start, static_cast<uint64_t>(lead + 2 * L));
     BOOST_CHECK_EQUAL(n, 64 + 500); // capture = pre_trigger + capture samples
     BOOST_CHECK_GT(metric, 0.5f);
+    // Default production host rate is still written when sample_rate is omitted.
+    BOOST_CHECK_CLOSE(
+        pmt::to_double(pmt::dict_ref(meta, pmt::mp("sample_rate"), pmt::PMT_NIL)),
+        gr::uwb::defaults::kSampleRateHz,
+        1e-9);
+}
+
+// Regression lock: constructor sample_rate must appear in PDU metadata (not
+// only the compile-time production constant).
+BOOST_AUTO_TEST_CASE(test_detector_sample_rate_metadata)
+{
+    const size_t L = 128;
+    std::vector<gr_complex> tmpl(L);
+    for (size_t k = 0; k < L; ++k)
+        tmpl[k] = gr_complex(std::cos(0.21f * k), 0.4f * std::sin(0.13f * k));
+    gr::uwb::core::uwb_l2_normalize(tmpl);
+
+    const int lead = 512;
+    const int reps = 10;
+    const int tail = 2048;
+    const int N = lead + reps * static_cast<int>(L) + tail;
+    std::vector<gr_complex> sig(static_cast<size_t>(N), gr_complex(0.0f, 0.0f));
+    for (int r = 0; r < reps; ++r)
+        for (size_t k = 0; k < L; ++k)
+            sig[static_cast<size_t>(lead + r * static_cast<int>(L) + k)] = tmpl[k];
+
+    constexpr double kCustomRate = 123456789.0;
+    auto det = gr::uwb::UwbDetector::make(tmpl,
+                                          /*pre_trigger=*/64,
+                                          /*capture=*/500,
+                                          /*energy_threshold=*/1e-3f,
+                                          /*energy_gate_decimation=*/4,
+                                          /*coarse_decimation=*/4,
+                                          /*coarse_repetitions=*/1,
+                                          /*coarse_margin=*/8,
+                                          /*sample_rate=*/kCustomRate);
+    BOOST_CHECK_CLOSE(det->sample_rate(), kCustomRate, 1e-12);
+    BOOST_CHECK(std::abs(kCustomRate - gr::uwb::defaults::kSampleRateHz) > 1.0);
+
+    auto dbg = gr::blocks::message_debug::make();
+    run_detector(sig, det, dbg);
+    BOOST_REQUIRE_EQUAL(dbg->num_messages(), 1);
+    pmt::pmt_t meta = pmt::car(dbg->get_message(0));
+    const double got = pmt::to_double(
+        pmt::dict_ref(meta, pmt::mp("sample_rate"), pmt::PMT_NIL));
+    BOOST_CHECK_CLOSE(got, kCustomRate, 1e-9);
+    // Explicitly not the production default alone.
+    BOOST_CHECK(std::abs(got - gr::uwb::defaults::kSampleRateHz) > 1.0);
 }
 
 BOOST_AUTO_TEST_CASE(test_detector_silence_no_packet)

@@ -23,8 +23,8 @@ gr-uwb/include/gnuradio/uwb/uwb_detector.h
 gr-uwb/include/gnuradio/uwb/uwb_detector_core.h
 gr-uwb/lib/qa_uwb_detector.cc
 gr-uwb/lib/uwb_detector.cc
-开发状态.md
-测试报告_发包率扫描.md
+../../开发状态.md
+../performance/测试报告_发包率扫描.md
 ```
 
 另有补丁工具产生的临时文件，提交前应在确认其内容不再需要后删除：
@@ -33,8 +33,8 @@ gr-uwb/lib/uwb_detector.cc
 gr-uwb/include/gnuradio/uwb/uwb_detector.h.orig
 gr-uwb/include/gnuradio/uwb/uwb_detector.h.rej
 gr-uwb/lib/uwb_detector.cc.orig
-开发状态.md.orig
-测试报告_发包率扫描.md.orig
+../../开发状态.md.orig
+../performance/测试报告_发包率扫描.md.orig
 ```
 
 ## 3. 已实现修改
@@ -111,9 +111,9 @@ gr-uwb/build/apps/benchmark_detector testdata/uwb_code9_preamble64_payload128_st
 ## 6. 已知未收尾事项
 
 1. 方向 1/2 和方向 3/4 目前混在同一个未提交 diff 中；若要严格保留“方向 2 完成点”，请用交互式暂存或重新构造 patch 拆分，禁止粗暴重置。
-2. 检查 `uwb_detector.h`、`开发状态.md` 中新加行是否混入 CRLF；执行 `git diff --check` 并清除尾随 `CR`/空白。
+2. 检查 `uwb_detector.h`、`../../开发状态.md` 中新加行是否混入 CRLF；执行 `git diff --check` 并清除尾随 `CR`/空白。
 3. 删除上述 `.orig`、`.rej` 前先确认其中没有主文件缺失的修改。
-4. 核对 `测试报告_发包率扫描.md` 的章节顺序应为第 6 节、第 7 节、第 8 节。
+4. 核对 `../performance/测试报告_发包率扫描.md` 的章节顺序应为第 6 节、第 7 节、第 8 节。
 5. 审查 8 槽 region 池满时的策略。目前是丢弃并计数；需要确认生产环境希望丢包、阻塞还是扩大池。
 6. 审查最大 region 容量 524288 是否覆盖实际最大 burst；超过后当前会丢弃。
 7. 审查 sentinel 方案对持续 UHD source、有限文件源、异常 stop 和无尾部静默四种情况的行为。
@@ -121,7 +121,7 @@ gr-uwb/build/apps/benchmark_detector testdata/uwb_code9_preamble64_payload128_st
 
 ## 7. 建议 Grok 的执行顺序
 
-1. 阅读 `AGENTS.md`、`开发需求参考.md`、`开发状态.md` 和本文件。
+1. 阅读 `../../AGENTS.md`、`../../开发需求参考.md`、`../../开发状态.md` 和本文件。
 2. 用 `git diff 67609b0` 审查当前修改；重点看 core 的所有权、容量边界和线程生命周期。
 3. 先修复临时文件、CRLF、尾随空白和文档章节，再运行 `git diff --check`。
 4. 重新构建并执行全部 CTest。
