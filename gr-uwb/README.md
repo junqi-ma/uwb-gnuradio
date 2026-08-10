@@ -45,4 +45,4 @@ See `examples/` and `examples/README.md`. CLI capture helper:
 
 ## License
 
-GPL-3.0-or-later
+GPL-3.0-or-later — see [`../LICENSE`](../LICENSE) for the full text.
