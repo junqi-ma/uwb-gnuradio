@@ -224,8 +224,10 @@ manifest 已完成；S1 的 complex CIR、payload/FCS、178112-sample TX pulse
 impulse、字段边界和 complex-CIR replica 均已闭环。S2 的 `uwb_sic_core.h` 已用
 真实 trial received/model/residual 验证整数对齐、逐 SYNC CFO、全局复增益及
 0.70/0.20 dB 安全门：C++/MATLAB model 相对 L2 误差 `1.55e-7`，相减区间外
-误差为 0，真实 FCS/相关度/抑制度拒绝路径均逐样本旁路。当前缺口是从 PSDU 在
-C++ 内生成同一 TX impulse/replica，因此 S2 尚未整体完成。
+误差为 0，真实 FCS/相关度/抑制度拒绝路径均逐样本旁路。新增
+`uwb_tx_reconstructor.h` 后，C++ TX impulse 与 MATLAB 全向量一致，同 CIR
+replica 相对 L2 `5.19e-8`；完整 C++ decode/reconstruct/cancel 抑制度 16.2894 dB。
+S2 已完成，下一阶段为 S3 自适应 slot core。
 
 不得以 synthetic code-10 或仅合成 trial/commit 结果宣称真实 SIC 正确。
 

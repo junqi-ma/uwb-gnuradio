@@ -9,5 +9,10 @@ SFD, payload/FCS, TX pulse impulses, CIR-shaped replica, integer alignment,
 replica-fitted CFO, global complex gain and trial subtraction residual.
 
 The S2 trial intentionally excludes fractional delay, PLL transient,
-CIR-slow/CFO2, SFO and field-independent gain enhancements. `field_bounds.csv`
+CIR-slow/CFO2, SFO and field-specific gain enhancements. `field_bounds.csv`
 uses zero-based, end-exclusive coordinates on the 998.4 MHz replica grid.
+
+`uwb_tx_reconstructor.h` regenerates the full pulse impulse vector exactly
+from the decoded PHR/PSDU and reproduces the MATLAB-CIR replica with relative
+L2 error below `6e-8`. The same fixture also exercises the complete C++
+decode/reconstruct/trial-cancel path.

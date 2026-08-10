@@ -2,7 +2,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #define BOOST_TEST_MODULE qa_uwb_sic_core
 #include <boost/test/included/unit_test.hpp>
+#include <gnuradio/uwb/uwb_demod_core.h>
 #include <gnuradio/uwb/uwb_sic_core.h>
+#include <gnuradio/uwb/uwb_tx_reconstructor.h>
 #include <cmath>
 #include <complex>
 #include <fstream>
@@ -13,6 +15,9 @@ namespace {
 using gr::uwb::sic::CancelOptions;
 using gr::uwb::sic::CancelScratch;
 using gr::uwb::sic::CancelStatus;
+using gr::uwb::sic::ReconstructStatus;
+using gr::uwb::sic::TxReconstruction;
+using gr::uwb::sic::TxReconstructionScratch;
 
 bool load_cf32(const std::string& path,
                std::vector<std::complex<float>>& out)
@@ -180,17 +185,35 @@ BOOST_AUTO_TEST_CASE(short_context_is_exact_bypass)
     BOOST_TEST(work == before);
 }
 
+BOOST_AUTO_TEST_CASE(dw1000_rs_encoder_roundtrips_partial_and_multiple_blocks)
+{
+    for (size_t byte_count : { size_t(2), size_t(12), size_t(42), size_t(128) }) {
+        std::vector<uint8_t> psdu(byte_count);
+        for (size_t i = 0; i < psdu.size(); ++i)
+            psdu[i] = static_cast<uint8_t>((i * 73 + byte_count * 11) & 0xff);
+        std::vector<int8_t> coded, source_bits, decoded_bits;
+        BOOST_REQUIRE(gr::uwb::sic::tx_detail::rs_encode_stream(
+            psdu, coded, source_bits));
+        BOOST_REQUIRE(gr::uwb::demod::core::detail::rs_decode_stream(
+            coded, psdu.size() * 8, decoded_bits));
+        BOOST_CHECK(decoded_bits == source_bits);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(real_dw1000_replica_and_trial_match_matlab)
 {
     const std::string dir = "../../../testdata/dw1000_realtime_golden";
     std::vector<std::complex<float>> window, replica, golden_received;
     std::vector<std::complex<float>> golden_model, golden_residual;
+    std::vector<std::complex<float>> reference, golden_cir;
     std::vector<float> impulses;
     BOOST_REQUIRE(load_cf32(dir + "/window.cfile", window));
     BOOST_REQUIRE(load_cf32(dir + "/tx_cir_replica.cfile", replica));
     BOOST_REQUIRE(load_cf32(dir + "/trial_received.cfile", golden_received));
     BOOST_REQUIRE(load_cf32(dir + "/trial_model.cfile", golden_model));
     BOOST_REQUIRE(load_cf32(dir + "/trial_residual.cfile", golden_residual));
+    BOOST_REQUIRE(load_cf32(dir + "/reference_preamble.cfile", reference));
+    BOOST_REQUIRE(load_cf32(dir + "/stage_cir.cfile", golden_cir));
     BOOST_REQUIRE(load_f32(dir + "/tx_pulse_impulses.f32", impulses));
     BOOST_REQUIRE_EQUAL(window.size(), size_t(198140));
     BOOST_REQUIRE_EQUAL(replica.size(), size_t(178112));
@@ -223,6 +246,94 @@ BOOST_AUTO_TEST_CASE(real_dw1000_replica_and_trial_match_matlab)
         nonzero_impulses += value != 0.0f;
     }
     BOOST_CHECK_GT(nonzero_impulses, size_t(8000));
+
+    auto profile = gr::uwb::demod::Dw1000Profile::Default().as_qm35825();
+    gr::uwb::demod::core::DemodScratch demod_scratch;
+    demod_scratch.reserve(window.size());
+    const auto decoded = gr::uwb::demod::core::demodulate_one(
+        window.data(), window.size(), profile, 1,
+        333687 /* absolute predicted start */,
+        323687 /* absolute window start */, reference, demod_scratch);
+    BOOST_REQUIRE(decoded.status == gr::uwb::demod::DemodStatus::Success);
+    BOOST_REQUIRE(decoded.payload.fcs_pass);
+
+    TxReconstruction matlab_channel;
+    matlab_channel.reserve(replica.size());
+    TxReconstructionScratch tx_scratch;
+    tx_scratch.reserve(128);
+    BOOST_REQUIRE(gr::uwb::sic::reconstruct_dw1000(
+        decoded.phr.phr_bits, decoded.payload.bytes, decoded.payload.fcs_pass,
+        golden_cir, 8, matlab_channel, tx_scratch));
+    BOOST_CHECK(static_cast<int>(matlab_channel.status) ==
+                static_cast<int>(ReconstructStatus::Success));
+    BOOST_REQUIRE_EQUAL(matlab_channel.pulse_impulses.size(), impulses.size());
+    BOOST_REQUIRE_EQUAL(matlab_channel.replica.size(), replica.size());
+    BOOST_CHECK(matlab_channel.pulse_impulses == impulses);
+    BOOST_CHECK_EQUAL(matlab_channel.sync.begin, size_t(0));
+    BOOST_CHECK_EQUAL(matlab_channel.sync.end, size_t(130048));
+    BOOST_CHECK_EQUAL(matlab_channel.sfd.begin, size_t(130048));
+    BOOST_CHECK_EQUAL(matlab_channel.sfd.end, size_t(138176));
+    BOOST_CHECK_EQUAL(matlab_channel.phr.begin, size_t(138176));
+    BOOST_CHECK_EQUAL(matlab_channel.phr.end, size_t(159680));
+    BOOST_CHECK_EQUAL(matlab_channel.payload.begin, size_t(159680));
+    BOOST_CHECK_EQUAL(matlab_channel.payload.end, size_t(178112));
+
+    float reconstructed_replica_max_error = 0.0f;
+    double reconstructed_error_energy = 0.0;
+    double golden_replica_energy = 0.0;
+    for (size_t i = 0; i < replica.size(); ++i) {
+        const auto error = matlab_channel.replica[i] - replica[i];
+        reconstructed_replica_max_error = std::max(
+            reconstructed_replica_max_error, std::abs(error));
+        reconstructed_error_energy += std::norm(error);
+        golden_replica_energy += std::norm(replica[i]);
+    }
+    const double reconstructed_replica_relative_l2 =
+        std::sqrt(reconstructed_error_energy / golden_replica_energy);
+    BOOST_TEST_MESSAGE("C++ DW1000 reconstruction replica_max_error="
+                       << reconstructed_replica_max_error
+                       << " relative_l2=" << reconstructed_replica_relative_l2);
+    BOOST_CHECK_LT(reconstructed_replica_relative_l2, 2e-6);
+    BOOST_CHECK_LT(reconstructed_replica_max_error, 2e-6f);
+
+    TxReconstruction cpp_channel;
+    cpp_channel.reserve(replica.size());
+    BOOST_REQUIRE(gr::uwb::sic::reconstruct_dw1000(
+        decoded.phr.phr_bits, decoded.payload.bytes, decoded.payload.fcs_pass,
+        decoded.cir.cir_complex_values, decoded.cir.pre_samples, cpp_channel,
+        tx_scratch));
+    BOOST_CHECK(cpp_channel.pulse_impulses == impulses);
+
+    const size_t psdu_bits_capacity = tx_scratch.psdu_bits.capacity();
+    const size_t rs_capacity = tx_scratch.rs_bits.capacity();
+    const size_t encoder_capacity = tx_scratch.encoder_input.capacity();
+    const size_t spread_capacity = tx_scratch.spread.capacity();
+    const size_t lfsr_capacity = tx_scratch.lfsr_sequence.capacity();
+    TxReconstruction reused_channel;
+    reused_channel.reserve(replica.size());
+    BOOST_REQUIRE(gr::uwb::sic::reconstruct_dw1000(
+        decoded.phr.phr_bits, decoded.payload.bytes, decoded.payload.fcs_pass,
+        decoded.cir.cir_complex_values, decoded.cir.pre_samples,
+        reused_channel, tx_scratch));
+    BOOST_CHECK_EQUAL(tx_scratch.psdu_bits.capacity(), psdu_bits_capacity);
+    BOOST_CHECK_EQUAL(tx_scratch.rs_bits.capacity(), rs_capacity);
+    BOOST_CHECK_EQUAL(tx_scratch.encoder_input.capacity(), encoder_capacity);
+    BOOST_CHECK_EQUAL(tx_scratch.spread.capacity(), spread_capacity);
+    BOOST_CHECK_EQUAL(tx_scratch.lfsr_sequence.capacity(), lfsr_capacity);
+
+    auto corrupt_psdu = decoded.payload.bytes;
+    corrupt_psdu.front() ^= 1;
+    TxReconstruction rejected_tx;
+    TxReconstructionScratch rejected_tx_scratch;
+    rejected_tx_scratch.reserve(128);
+    BOOST_CHECK(!gr::uwb::sic::reconstruct_dw1000(
+        decoded.phr.phr_bits, corrupt_psdu, true,
+        decoded.cir.cir_complex_values, decoded.cir.pre_samples,
+        rejected_tx, rejected_tx_scratch));
+    BOOST_CHECK(static_cast<int>(rejected_tx.status) ==
+                static_cast<int>(ReconstructStatus::FcsFailed));
+    BOOST_CHECK(rejected_tx.pulse_impulses.empty());
+    BOOST_CHECK(rejected_tx.replica.empty());
 
     constexpr size_t start = 10000;
     float received_max_error = 0.0f;
@@ -331,4 +442,44 @@ BOOST_AUTO_TEST_CASE(real_dw1000_replica_and_trial_match_matlab)
     suppression_reject.min_suppression_db = 17.0f;
     require_exact_bypass(
         suppression_reject, true, CancelStatus::SuppressionFailed);
+
+    auto cpp_reconstructed_work = before_trial;
+    CancelScratch cpp_reconstructed_scratch;
+    cpp_reconstructed_scratch.reserve(cpp_channel.replica.size(), 128);
+    const auto cpp_reconstructed_trial = gr::uwb::sic::trial_cancel(
+        cpp_reconstructed_work, cpp_channel.replica.data(),
+        cpp_channel.replica.size(), start, decoded.payload.fcs_pass, options,
+        cpp_reconstructed_scratch);
+    BOOST_REQUIRE(static_cast<int>(cpp_reconstructed_trial.status) ==
+                  static_cast<int>(CancelStatus::Applied));
+    BOOST_CHECK_EQUAL(cpp_reconstructed_trial.fitted_start, start);
+    BOOST_CHECK_GT(cpp_reconstructed_trial.alignment_correlation, 0.97f);
+    BOOST_CHECK_SMALL(cpp_reconstructed_trial.fitted_cfo_hz - (-2667.70901808),
+                      5.0);
+    BOOST_CHECK_GT(cpp_reconstructed_trial.suppression_db, 10.0f);
+    float cpp_pipeline_residual_max_error = 0.0f;
+    double cpp_pipeline_residual_error_energy = 0.0;
+    double golden_residual_energy = 0.0;
+    for (size_t i = 0; i < cpp_channel.replica.size(); ++i) {
+        const auto error = cpp_reconstructed_work[start + i] -
+                           golden_residual[i];
+        cpp_pipeline_residual_max_error = std::max(
+            cpp_pipeline_residual_max_error, std::abs(error));
+        cpp_pipeline_residual_error_energy += std::norm(error);
+        golden_residual_energy += std::norm(golden_residual[i]);
+    }
+    const double cpp_pipeline_residual_relative_l2 =
+        std::sqrt(cpp_pipeline_residual_error_energy / golden_residual_energy);
+    BOOST_TEST_MESSAGE("C++ decode/reconstruct/cancel suppression="
+                       << cpp_reconstructed_trial.suppression_db
+                       << " residual_max_error="
+                       << cpp_pipeline_residual_max_error
+                       << " residual_relative_l2="
+                       << cpp_pipeline_residual_relative_l2);
+    // The exact-impulse and MATLAB-CIR tests above prevent profile/index
+    // errors from hiding here. This end-to-end branch uses the independently
+    // estimated C++ CIR (raw tap max error <0.02), whose error is amplified by
+    // the fitted ~13.7k complex gain; bound that propagation separately.
+    BOOST_CHECK_LT(cpp_pipeline_residual_max_error, 50.0f);
+    BOOST_CHECK_LT(cpp_pipeline_residual_relative_l2, 0.03);
 }

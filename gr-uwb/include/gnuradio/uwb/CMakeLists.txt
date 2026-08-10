@@ -19,5 +19,6 @@ install(FILES
     uwb_scheduled_extractor_core.h
     uwb_scheduled_extractor.h
     uwb_sic_core.h
+    uwb_tx_reconstructor.h
     DESTINATION include/gnuradio/uwb
 )
