@@ -146,6 +146,62 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_timing_matches_golden)
                           0.1);
 }
 
+BOOST_AUTO_TEST_CASE(test_demod_core_r1_backtracks_weak_qm35_first_sync)
+{
+    std::vector<gr_complex> tmpl;
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+    BOOST_REQUIRE_EQUAL(tmpl.size(), size_t(1016));
+
+    auto prof = Qm35825Profile::Default();
+    constexpr int64_t start = 2048;
+    const size_t sym = tmpl.size();
+    const auto sfd = GetSfdSequence("4z2");
+    std::vector<gr_complex> iq(
+        static_cast<size_t>(start) + (prof.preamble_repetitions + sfd.size()) * sym,
+        gr_complex(0.0f, 0.0f));
+
+    // The real QM35 startup transient can leave the first few SYNCs below the
+    // normal 0.3 threshold.  Make SYNC #1/#2 metric 0.25 and seed at strong
+    // SYNC #3; timing must lock strong first, then recover both predecessors.
+    std::vector<gr_complex> orth(sym);
+    for (size_t i = 0; i < sym; ++i)
+        orth[i] = gr_complex(std::sin(0.173f * static_cast<float>(i)),
+                             std::cos(0.119f * static_cast<float>(i)));
+    gr_complex projection(0.0f, 0.0f);
+    float et = 0.0f;
+    for (size_t i = 0; i < sym; ++i) {
+        projection += std::conj(tmpl[i]) * orth[i];
+        et += std::norm(tmpl[i]);
+    }
+    for (size_t i = 0; i < sym; ++i)
+        orth[i] -= (projection / et) * tmpl[i];
+    float eo = 0.0f;
+    for (const auto& v : orth)
+        eo += std::norm(v);
+    const float orth_scale = std::sqrt(et / eo);
+    for (size_t rep = 0; rep < 2; ++rep)
+        for (size_t i = 0; i < sym; ++i)
+            iq[static_cast<size_t>(start) + rep * sym + i] =
+                0.5f * tmpl[i] + std::sqrt(0.75f) * orth_scale * orth[i];
+    for (size_t rep = 2; rep < prof.preamble_repetitions; ++rep)
+        std::copy(tmpl.begin(), tmpl.end(),
+                  iq.begin() + start + static_cast<int64_t>(rep * sym));
+    for (size_t k = 0; k < sfd.size(); ++k)
+        for (size_t i = 0; i < sym; ++i)
+            iq[static_cast<size_t>(start) +
+               (prof.preamble_repetitions + k) * sym + i] =
+                static_cast<float>(sfd[k]) * tmpl[i];
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    TimingResult tr;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl,
+                                     start + static_cast<int64_t>(2 * sym), tr,
+                                     scratch));
+    BOOST_CHECK_EQUAL(tr.preamble_start_sample, start);
+    BOOST_CHECK_EQUAL(tr.detected_peaks, prof.preamble_repetitions);
+}
+
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_cfo_matches_golden)
 {
     std::vector<gr_complex> iq, tmpl;
@@ -186,6 +242,58 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_matches_golden)
                                   sr, scratch));
     // SFD begins right after the 64 SYNC symbols: start + 64*1016 = 75008.
     BOOST_CHECK_CLOSE(static_cast<double>(sr.sfd_start_sample), 75008.0, 0.1);
+    BOOST_CHECK_GE(sr.metric, 0.95f);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_checks_one_symbol_early)
+{
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+
+    TimingResult tr;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984, tr,
+                                     scratch));
+    // Reproduce the real QM35 failure: timing seeded SYNC #2 and counted the
+    // first SFD-like symbol as peak #64, so its last peak is one symbol late.
+    for (auto& peak : tr.peak_samples)
+        peak += static_cast<int64_t>(kQm35SamplesPerSymbol);
+    tr.preamble_start_sample += static_cast<int64_t>(kQm35SamplesPerSymbol);
+
+    const auto sfd_seq = GetSfdSequence("ieee");
+    SfdResult sr;
+    BOOST_REQUIRE(core::stage_sfd(iq.data(), iq.size(), prof, tr, sfd_seq, tmpl,
+                                  sr, scratch));
+    BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(75008));
+    BOOST_CHECK_GE(sr.metric, 0.95f);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_checks_three_symbols_early)
+{
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+    TimingResult tr;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984, tr,
+                                     scratch));
+    for (auto& peak : tr.peak_samples)
+        peak += static_cast<int64_t>(3 * kQm35SamplesPerSymbol);
+    tr.preamble_start_sample +=
+        static_cast<int64_t>(3 * kQm35SamplesPerSymbol);
+
+    const auto sfd_seq = GetSfdSequence("ieee");
+    SfdResult sr;
+    BOOST_REQUIRE(core::stage_sfd(iq.data(), iq.size(), prof, tr, sfd_seq, tmpl,
+                                  sr, scratch));
+    BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(75008));
     BOOST_CHECK_GE(sr.metric, 0.95f);
 }
 
@@ -1175,15 +1283,56 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r7_code10_self_consistency)
     BOOST_CHECK_CLOSE(qm.sample_rate, kQm35SampleRate, 1e-9);
 }
 
-BOOST_AUTO_TEST_CASE(test_demod_core_r7_long_preamble_cir_uses_final_syncs)
+BOOST_AUTO_TEST_CASE(test_demod_core_r7_code10_matlab_waveform_phr)
 {
-    // MATLAB estimateCirAndSoftChips averages the final configured SYNC
-    // repetitions.  This matters when a DW1000 uses a 256-symbol preamble:
-    // the legacy 64-SYNC implementation's [skip, skip+count) range otherwise
-    // estimates the channel from the beginning of the preamble.
+    // Full frame generated by testdata/generate_uwb_comm_sample.m with
+    // lrwpanWaveformGenerator: code 10, 16 SYNC, IEEE legacy SFD and an
+    // 8-byte PSDU.  This locks the code-index-dependent BPM scrambler, not
+    // merely the code-10 preamble cyclic origin.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(
+        "../../../testdata/uwb_code10_preamble16_payload8.cfile", iq));
+    BOOST_REQUIRE_GT(iq.size(), size_t(16 * kQm35SamplesPerSymbol));
+
+    std::vector<gr_complex> tmpl(
+        iq.begin(), iq.begin() + kQm35SamplesPerSymbol);
+    // The generator ends exactly on the final payload sample.  Supply the
+    // receive guard needed by the CIR matched filter, as a live PDU does.
+    iq.resize(iq.size() + 128, gr_complex(0.0f, 0.0f));
+    auto prof = Qm35825Profile::Default();
+    prof.code_index = 10;
+    prof.preamble_repetitions = 16;
+    prof.sfd_mode = "ieee";
+    prof.cir_skip_initial_repetitions = 0;
+    prof.cir_repetitions = 16;
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    const auto result = core::demodulate_one(
+        iq.data(), iq.size(), prof, 10, 0, 0, tmpl, scratch);
+    BOOST_REQUIRE(result.timing.ok);
+    BOOST_REQUIRE(result.sfd.ok);
+    BOOST_REQUIRE(result.ns_sfd.ok);
+    BOOST_REQUIRE(result.phr.ok);
+    BOOST_CHECK(!result.phr.secded_uncorrectable);
+    BOOST_CHECK_EQUAL(result.phr.psdu_length, uint32_t(8));
+    BOOST_CHECK_CLOSE(result.phr.data_rate_mbps, 6.81f, 0.5);
+    BOOST_REQUIRE(result.payload.ok);
+    BOOST_REQUIRE_EQUAL(result.payload.bytes.size(), size_t(8));
+    for (size_t i = 0; i < result.payload.bytes.size(); ++i)
+        BOOST_CHECK_EQUAL(result.payload.bytes[i], static_cast<uint8_t>(i + 1));
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r7_long_preamble_cir_honors_explicit_skip)
+{
+    // MATLAB acceleration estimateCir uses [skip, skip+count) when an
+    // explicit cir_skip_initial_repetitions is configured.  For a 256-SYNC
+    // DW1000 frame this must not silently change to the final `count` SYNCs.
     auto prof = Qm35825Profile::Default();
     prof.code_index = 10;
     prof.preamble_repetitions = 256;
+    prof.cir_skip_initial_repetitions = 10;
+    prof.cir_repetitions = 64;
     prof.max_psdu_bytes = 1;
 
     constexpr int64_t start = 128;
@@ -1196,7 +1345,7 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r7_long_preamble_cir_uses_final_syncs)
     const int8_t* code = GetPreambleCode(10);
     const auto spread = BuildSampledCode(code, kQm35CodeLength);
     for (size_t rep = 0; rep < prof.preamble_repetitions; ++rep) {
-        const size_t delay = (rep < 192) ? 0 : late_delay;
+        const size_t delay = (rep >= 10 && rep < 74) ? late_delay : 0;
         const size_t base = static_cast<size_t>(start) +
                             rep * kQm35SamplesPerSymbol + delay;
         for (size_t chip = 0; chip < spread.size(); ++chip) {

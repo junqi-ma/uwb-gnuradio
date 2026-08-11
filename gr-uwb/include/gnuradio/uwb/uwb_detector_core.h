@@ -161,6 +161,44 @@ inline void uwb_normalized_score(const std::complex<float>* corr,
 }
 
 /**
+ * Full-rate normalized correlation over inclusive SYNC-start candidates.
+ * Unlike fir_filter convolution coordinates, j is directly the first input
+ * sample aligned with tmpl[0], matching MATLAB's <rx(j:j+L-1), tmpl> scan.
+ * All scratch arrays are caller-owned and must hold j1-j0+1 elements.
+ */
+inline bool uwb_full_rate_peak(const std::complex<float>* in,
+                               size_t n,
+                               const std::complex<float>* tmpl,
+                               size_t L,
+                               float template_energy,
+                               size_t j0,
+                               size_t j1,
+                               std::complex<float>* corr,
+                               float* winpow,
+                               float* metric,
+                               size_t* best_start,
+                               float* best_metric)
+{
+    if (L == 0 || n < L || j0 > j1 || j1 > n - L)
+        return false;
+    const size_t len = j1 - j0 + 1;
+    uwb_window_power(in + j0, len, L, winpow);
+    for (size_t k = 0; k < len; ++k) {
+        volk_32fc_x2_conjugate_dot_prod_32fc(
+            corr + k, in + j0 + k, tmpl, static_cast<unsigned int>(L));
+    }
+    uwb_normalized_score(corr, winpow, len, template_energy, metric);
+    size_t best = 0;
+    for (size_t k = 1; k < len; ++k) {
+        if (metric[k] > metric[best])
+            best = k;
+    }
+    *best_start = j0 + best;
+    *best_metric = metric[best];
+    return true;
+}
+
+/**
  * Energy of a template waveform (sum of |x|^2). Used as the normalization
  * factor in uwb_normalized_score when the template is not unit-norm.
  */

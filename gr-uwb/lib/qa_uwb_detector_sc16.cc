@@ -220,6 +220,86 @@ BOOST_AUTO_TEST_CASE(test_sc16_fixed_capture_and_bit_exact_pdu)
         1e-9);
 }
 
+BOOST_AUTO_TEST_CASE(test_sc16_backtracks_weak_first_sync)
+{
+    constexpr size_t L = 1016;
+    constexpr size_t packet_start = 7000;
+    constexpr size_t reps = 10;
+    std::vector<gr_complex> tmpl(L);
+    uint32_t prng = 0x6d2b79f5U;
+    for (size_t k = 0; k < L; ++k) {
+        prng ^= prng << 13;
+        prng ^= prng >> 17;
+        prng ^= prng << 5;
+        tmpl[k] = gr_complex((prng & 1U) ? 1.0f : -1.0f,
+                             (prng & 2U) ? 1.0f : -1.0f);
+    }
+    gr::uwb::core::uwb_l2_normalize(tmpl);
+
+    std::vector<gr_complex> orth(L);
+    gr_complex projection(0.0f, 0.0f);
+    float et = 0.0f;
+    uint32_t noise_prng = 0xa341316cU;
+    for (size_t k = 0; k < L; ++k) {
+        noise_prng ^= noise_prng << 13;
+        noise_prng ^= noise_prng >> 17;
+        noise_prng ^= noise_prng << 5;
+        orth[k] = gr_complex((noise_prng & 1U) ? 1.0f : -1.0f,
+                             (noise_prng & 2U) ? 1.0f : -1.0f);
+        projection += std::conj(tmpl[k]) * orth[k];
+        et += std::norm(tmpl[k]);
+    }
+    for (size_t k = 0; k < L; ++k)
+        orth[k] -= (projection / et) * tmpl[k];
+    float eo = 0.0f;
+    for (const auto& v : orth)
+        eo += std::norm(v);
+    const float orth_scale = std::sqrt(et / eo);
+
+    std::vector<int16_t> interleaved((packet_start + reps * L + 4096) * 2, 0);
+    auto put = [&](size_t i, gr_complex v) {
+        interleaved[2 * i] =
+            static_cast<int16_t>(std::lround(v.real() * 20000.0f));
+        interleaved[2 * i + 1] =
+            static_cast<int16_t>(std::lround(v.imag() * 20000.0f));
+    };
+    for (size_t r = 0; r < 2; ++r)
+        for (size_t k = 0; k < L; ++k)
+            put(packet_start + r * L + k,
+                0.5f * tmpl[k] + std::sqrt(0.75f) * orth_scale * orth[k]);
+    for (size_t r = 2; r < reps; ++r)
+        for (size_t k = 0; k < L; ++k)
+            put(packet_start + r * L + k, tmpl[k]);
+
+    auto src = gr::blocks::vector_source_s::make(interleaved, false, 2);
+    auto det = gr::uwb::UwbDetectorSc16::make(
+        tmpl, 5000, 2000, 1e-5f, 4, 4, 1, 8);
+    auto dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_detector_sc16_weak_first");
+    tb->connect(src, 0, det, 0);
+    tb->msg_connect(det, "packet", dbg, "store");
+    tb->run();
+
+    BOOST_REQUIRE_EQUAL(dbg->num_messages(), 1);
+    const auto meta = pmt::car(dbg->get_message(0));
+    BOOST_CHECK_EQUAL(
+        pmt::to_uint64(pmt::dict_ref(meta, pmt::mp("start_sample"),
+                                    pmt::PMT_NIL)),
+        packet_start);
+    BOOST_CHECK_EQUAL(
+        pmt::to_uint64(pmt::dict_ref(meta, pmt::mp("predicted_start_sample"),
+                                    pmt::PMT_NIL)),
+        packet_start + 2 * L);
+    BOOST_CHECK_GT(
+        pmt::to_double(pmt::dict_ref(meta, pmt::mp("detection_metric"),
+                                    pmt::PMT_NIL)),
+        0.5);
+    BOOST_CHECK_EQUAL(
+        pmt::to_long(pmt::dict_ref(meta, pmt::mp("start_backtracked_symbols"),
+                                  pmt::from_long(0))),
+        2);
+}
+
 BOOST_AUTO_TEST_CASE(test_sc16_sample_rate_metadata)
 {
     constexpr size_t L = 128;

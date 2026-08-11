@@ -31,6 +31,13 @@ inline constexpr size_t kDetectorEnergyGateDecimation = 100;
 inline constexpr size_t kDetectorCoarseDecimation = 4;
 inline constexpr size_t kDetectorCoarseRepetitions = 1;
 inline constexpr size_t kDetectorCoarseMargin = 16;
+// A strong peak establishes preamble existence.  QM35 startup can attenuate
+// the first few SYNCs, so refine the start backwards on the known symbol grid
+// with a lower per-symbol threshold; stop at the first missing grid point.
+inline constexpr float kDetectorFineThreshold = 0.5f;
+inline constexpr float kDetectorBacktrackThreshold = 0.2f;
+inline constexpr size_t kDetectorBacktrackRadius = 8;
+inline constexpr size_t kDetectorMaxBacktrackSymbols = 3;
 
 // UwbScheduledExtractor production radar-slot geometry (QM35825).
 inline constexpr size_t kScheduledPreGuard = 9984;   // ~10 us @ 998.4e6

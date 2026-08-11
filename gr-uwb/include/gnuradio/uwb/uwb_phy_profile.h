@@ -84,6 +84,7 @@ struct Qm35825Profile {
 
     // timing
     size_t timing_search_margin = 9984; // ~10 us @ 998.4e6
+    size_t timing_max_backtrack_symbols = 3;
     size_t post_guard_samples = 4096;
 
     static Qm35825Profile Default() { return Qm35825Profile{}; }
@@ -189,6 +190,7 @@ struct Dw1000Profile {
     float radar_verification_threshold = 0.3f;
 
     size_t timing_search_margin = 9984;
+    size_t timing_max_backtrack_symbols = 3;
     size_t post_guard_samples = 4096;
 
     static Dw1000Profile Default() { return Dw1000Profile{}; }
@@ -215,6 +217,7 @@ struct Dw1000Profile {
         p.sfd_detection_threshold = sfd_detection_threshold;
         p.radar_verification_threshold = radar_verification_threshold;
         p.timing_search_margin = timing_search_margin;
+        p.timing_max_backtrack_symbols = timing_max_backtrack_symbols;
         p.post_guard_samples = post_guard_samples;
         return p;
     }

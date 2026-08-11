@@ -180,6 +180,16 @@ UwbRealtimeDemodulator::UwbRealtimeDemodulator(
     }
     d_profile_.code_index = code_index;
     d_profile_.preamble_repetitions = preamble_repetitions;
+    // Match UWB_demodulation/run_decode_uwb_all.m: explicitly skip the first
+    // ten settling SYNCs and estimate CIR from every remaining repetition.
+    // For unusually short preambles, retain all repetitions instead.
+    if (preamble_repetitions > d_profile_.cir_skip_initial_repetitions) {
+        d_profile_.cir_repetitions =
+            preamble_repetitions - d_profile_.cir_skip_initial_repetitions;
+    } else {
+        d_profile_.cir_skip_initial_repetitions = 0;
+        d_profile_.cir_repetitions = preamble_repetitions;
+    }
     // sfd_mode selects the SFD template used by stages 3/5.  The golden
     // MATLAB generator (lrwpan default) emits "ieee"; QM35825 uses "4z2".
     // Store the mode in the owned member so d_profile_.sfd_mode (a char*)

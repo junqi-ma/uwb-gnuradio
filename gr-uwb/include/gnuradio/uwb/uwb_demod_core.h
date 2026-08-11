@@ -186,7 +186,8 @@ inline bool stage_timing(const std::complex<float>* rx,
     // finds the SYNC START that best matches the template, returns position,
     // metric, and the complex matched-filter value at the best position (the
     // CFO stage uses its phase).
-    auto local_best = [&](int64_t want, int64_t radius, int64_t* pos, float* met,
+    auto local_best = [&](int64_t want, int64_t radius, float min_metric,
+                          int64_t* pos, float* met,
                           std::complex<float>* corr_out) -> bool {
         const int64_t w0 = std::max<int64_t>(0, want - radius);
         const int64_t w1 =
@@ -216,7 +217,7 @@ inline bool stage_timing(const std::complex<float>* rx,
                 pw += std::norm(rx[j + static_cast<int64_t>(L)]) -
                       std::norm(rx[j]);
         }
-        if (bm < profile.radar_verification_threshold)
+        if (bm < min_metric)
             return false;
         *pos = bp;
         *met = bm;
@@ -233,8 +234,29 @@ inline bool stage_timing(const std::complex<float>* rx,
             (seed_start >= 0) ? seed_start
                               : (int64_t)(roi_start + (roi_end - roi_start) / 2);
         const int64_t radius = 64; // seed is already coarse
-        if (!local_best(seed, radius, &first_start, &first_metric, &first_corr))
+        if (!local_best(seed, radius, profile.radar_verification_threshold,
+                        &first_start, &first_metric, &first_corr))
             return false;
+    }
+    // A real QM35825 has a repeatable startup transient: the first few SYNCs
+    // can score below the normal verification threshold, so the detector seeds
+    // the first strong SYNC.  Once locked, walk backwards on the known grid
+    // with a relaxed threshold, stopping at the first missing predecessor.
+    size_t backtracked_symbols = 0;
+    for (size_t back = 0; back < profile.timing_max_backtrack_symbols; ++back) {
+        int64_t previous_start = -1;
+        float previous_metric = 0.0f;
+        std::complex<float> previous_corr(0.0f, 0.0f);
+        const float relaxed = 0.7f * profile.radar_verification_threshold;
+        if (local_best(first_start - static_cast<int64_t>(kQm35SamplesPerSymbol),
+                       8, relaxed, &previous_start, &previous_metric,
+                       &previous_corr)) {
+            first_start = previous_start;
+            first_metric = previous_metric;
+            first_corr = previous_corr;
+            ++backtracked_symbols;
+        } else
+            break;
     }
     const int64_t start = first_start;
     if (start < 0)
@@ -254,7 +276,12 @@ inline bool stage_timing(const std::complex<float>* rx,
         int64_t pk = -1;
         float pm = 0.0f;
         std::complex<float> pk_corr(0.0f, 0.0f);
-        if (!local_best(want, 8, &pk, &pm, &pk_corr))
+        const float tracking_threshold =
+            (k < backtracked_symbols)
+                ? 0.7f * profile.radar_verification_threshold
+                : profile.radar_verification_threshold;
+        if (!local_best(want, 8, tracking_threshold,
+                        &pk, &pm, &pk_corr))
             break; // lost the train
         out.peak_samples.push_back(pk + static_cast<int64_t>(L - 1));
         out.peak_metrics.push_back(pm);
@@ -464,11 +491,6 @@ inline bool stage_sfd(const std::complex<float>* rx,
     const int64_t expected =
         last_start +
         static_cast<int64_t>(std::llround(timing.measured_period));
-    const int64_t search_lo = std::max<int64_t>(0, expected - half);
-    const int64_t search_hi =
-        std::min<int64_t>((int64_t)n,
-                          expected + half + (int64_t)sfd_len);
-
     // Full-rate correlation (normalized) over the search window.
     // The signal is 2x oversampled and the SFD template is kron(sfd, preamble)
     // (8 symbols), so the correlation peak is broad: a decimated coarse pass
@@ -477,12 +499,21 @@ inline bool stage_sfd(const std::complex<float>* rx,
     // loop only accumulates the correlation.  The result (best_j, metric) is
     // identical to the exhaustive search for a unique peak.
     constexpr size_t kSfdStride = 8;
-    const size_t j_lo = static_cast<size_t>(search_lo);
-    const size_t j_end = static_cast<size_t>(search_hi) - sfd_len;
     float best = -1.0f;
-    size_t best_j = j_lo;
+    size_t best_j = 0;
 
-    if (j_end >= j_lo) {
+    auto scan_window = [&](int64_t center) {
+        if (center < 0 || n < sfd_len)
+            return;
+        const int64_t lo = std::max<int64_t>(0, center - half);
+        const int64_t hi = std::min<int64_t>(
+            static_cast<int64_t>(n - sfd_len), center + half);
+        if (hi < lo)
+            return;
+        const size_t j_lo = static_cast<size_t>(lo);
+        const size_t j_end = static_cast<size_t>(hi);
+        float window_best = -1.0f;
+        size_t window_best_j = j_lo;
         float pwr = 0.0f;
         for (size_t k = 0; k < sfd_len; ++k)
             pwr += std::norm(rx[j_lo + k]);
@@ -497,15 +528,18 @@ inline bool stage_sfd(const std::complex<float>* rx,
             for (size_t k = 0; k < sfd_len; ++k)
                 acc += rx[j + k] * std::conj(scratch.corr[k]);
             const float m = std::norm(acc) / (pwr + 1e-12f);
-            if (m > best) {
-                best = m;
-                best_j = j;
+            if (m > window_best) {
+                window_best = m;
+                window_best_j = j;
             }
         }
         // Full-rate refinement around the coarse peak.
-        const size_t r_lo = (best_j > kSfdStride) ? best_j - kSfdStride + 1
-                                                  : j_lo;
-        const size_t r_hi = std::min(j_end, best_j + kSfdStride - 1);
+        const size_t r_lo =
+            (window_best_j >= j_lo + kSfdStride)
+                ? window_best_j - kSfdStride + 1
+                : j_lo;
+        const size_t r_hi =
+            std::min(j_end, window_best_j + kSfdStride - 1);
         pwr = 0.0f;
         for (size_t k = 0; k < sfd_len; ++k)
             pwr += std::norm(rx[r_lo + k]);
@@ -517,11 +551,29 @@ inline bool stage_sfd(const std::complex<float>* rx,
             for (size_t k = 0; k < sfd_len; ++k)
                 acc += rx[j + k] * std::conj(scratch.corr[k]);
             const float m = std::norm(acc) / (pwr + 1e-12f);
-            if (m > best) {
-                best = m;
-                best_j = j;
+            if (m > window_best) {
+                window_best = m;
+                window_best_j = j;
             }
         }
+        if (window_best > best) {
+            best = window_best;
+            best_j = window_best_j;
+        }
+    };
+
+    scan_window(expected);
+    // A full-looking train may actually start at SYNC #2/#3/#4 and end on
+    // the leading non-zero SFD symbols: timing uses |correlation|, so their
+    // negative sign is intentionally invisible.  Check three additional
+    // narrow windows one to three periods early and let the complete SFD
+    // metric choose the hypothesis.  This is four small disjoint searches,
+    // not one continuous +/-3-symbol window.
+    if (np >= profile.preamble_repetitions) {
+        const int64_t measured_period = static_cast<int64_t>(
+            std::llround(timing.measured_period));
+        for (int back = 1; back <= 3; ++back)
+            scan_window(expected - back * measured_period);
     }
     if (best < profile.sfd_detection_threshold)
         return false;
@@ -593,22 +645,22 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     // ---- Coherently average the aligned SYNC windows. ----
     const size_t available =
         std::min(timing.detected_peaks, profile.preamble_repetitions);
-    if (available == 0)
+    if (available == 0 || profile.cir_skip_initial_repetitions >= available)
         return false;
-    const size_t rep_count = std::min(profile.cir_repetitions, available);
+    const size_t first_rep = profile.cir_skip_initial_repetitions;
+    const size_t rep_count = std::min(profile.cir_repetitions,
+                                      available - first_rep);
     if (rep_count == 0)
         return false;
-    // Match MATLAB estimateCirAndSoftChips: estimate the channel from the
-    // final configured SYNC repetitions, immediately before the SFD/data.
-    // The old [skip, skip+count) range happened to be equivalent for the
-    // 64-SYNC golden (skip=10, count=54), but incorrectly used SYNC 10..63
-    // for a 256-SYNC DW1000 preamble instead of the final 54 repetitions.
-    const size_t first_rep = available - rep_count;
+    // Match acceleration/estimateCir.m's explicit-skip branch: begin after
+    // cir_skip_initial_repetitions and consume at most cir_repetitions.
+    // The runtime profile sets count=preamble-skip when all remaining SYNCs
+    // should participate.
 
     const size_t wlen = code_len + tap_count - 1; // 1053
     scratch.corr.assign(wlen, std::complex<float>(0.0f, 0.0f));
     size_t valid = 0;
-    for (size_t k = first_rep; k < available; ++k) {
+    for (size_t k = first_rep; k < first_rep + rep_count; ++k) {
         const int64_t rs = start + static_cast<int64_t>(std::llround((double)k * period));
         const int64_t lo = rs - static_cast<int64_t>(pre);
         const int64_t hi = lo + static_cast<int64_t>(wlen);
@@ -938,22 +990,37 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
 namespace detail {
 
 // IEEE 802.15.4a BPRF data-scrambler spreading (lrwpan.internal.createScrambler):
-// a 15-bit LFSR with s[i] = s[i-14] ^ s[i-15] and initial state 010000100111101.
+// a 15-bit LFSR with s[i] = s[i-14] ^ s[i-15].  The initial state depends
+// on the preamble code index; MathWorks' code-9 and code-10 states are listed
+// below.  This distinction is required for DW1000 code-10 PHR/payload data.
 // Returns the +/-1 spreading stream over [start_bit, start_bit+nbits).
 // The PHR field uses offset 0; the payload field is offset by the number of
 // PHR active chips (21 symbols x 64 chips/burst = 1344).
-inline void bprf_spreading(std::vector<int8_t>& out, size_t start_bit,
-                           size_t nbits)
+inline bool bprf_spreading(std::vector<int8_t>& out, size_t code_index,
+                           size_t start_bit, size_t nbits)
 {
-    static const int8_t kInit[15] = { 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1 };
+    static const int8_t kInit9[15] = {
+        0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1
+    };
+    static const int8_t kInit10[15] = {
+        0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1
+    };
+    const int8_t* init = nullptr;
+    if (code_index == 9)
+        init = kInit9;
+    else if (code_index == 10)
+        init = kInit10;
+    else
+        return false;
     std::vector<int8_t> s(start_bit + nbits);
     for (size_t i = 0; i < 15 && i < s.size(); ++i)
-        s[i] = kInit[i];
+        s[i] = init[i];
     for (size_t i = 15; i < s.size(); ++i)
         s[i] = static_cast<int8_t>(s[i - 14] ^ s[i - 15]);
     out.resize(nbits);
     for (size_t i = 0; i < nbits; ++i)
         out[i] = s[start_bit + i] ? int8_t(-1) : int8_t(1); // bit 1 -> -1
+    return true;
 }
 
 // Rate-1/2 constraint-length-3 Viterbi decoder for poly2trellis(3,[2 5])
@@ -1037,8 +1104,8 @@ inline void hrp_secded(const std::vector<int8_t>& sys13,
 // g1 (BPSK polarity bit), each nsym entries.  Mirrors helperUWBBPRFDemodKernel.
 // ---------------------------------------------------------------------------
 inline bool bprf_demod(const std::vector<float>& soft, int64_t start,
-                       size_t nsym, size_t cpb, size_t cps, size_t scram_offset,
-                       int8_t pol, std::vector<int8_t>& g0,
+                       size_t code_index, size_t nsym, size_t cpb, size_t cps,
+                       size_t scram_offset, int8_t pol, std::vector<int8_t>& g0,
                        std::vector<int8_t>& g1)
 {
     if (start < 0 ||
@@ -1046,7 +1113,8 @@ inline bool bprf_demod(const std::vector<float>& soft, int64_t start,
             soft.size())
         return false;
     std::vector<int8_t> spread;
-    bprf_spreading(spread, scram_offset, cpb * nsym);
+    if (!bprf_spreading(spread, code_index, scram_offset, cpb * nsym))
+        return false;
     g0.resize(nsym);
     g1.resize(nsym);
     const size_t third = cps / 2;
@@ -1089,7 +1157,7 @@ inline bool bprf_demod(const std::vector<float>& soft, int64_t start,
 //   llr_g1 = chosen_half_metric                 (BPSK polarity; + => bit 0)
 // Hard decisions still written to g0/g1 for callers that need them.
 inline bool bprf_demod_soft(const std::vector<float>& soft, int64_t start,
-                            size_t nsym, size_t cpb, size_t cps,
+                            size_t code_index, size_t nsym, size_t cpb, size_t cps,
                             size_t scram_offset, int8_t pol,
                             std::vector<int8_t>& g0, std::vector<int8_t>& g1,
                             std::vector<float>& llr_g0, std::vector<float>& llr_g1)
@@ -1099,7 +1167,8 @@ inline bool bprf_demod_soft(const std::vector<float>& soft, int64_t start,
             soft.size())
         return false;
     std::vector<int8_t> spread;
-    bprf_spreading(spread, scram_offset, cpb * nsym);
+    if (!bprf_spreading(spread, code_index, scram_offset, cpb * nsym))
+        return false;
     g0.resize(nsym);
     g1.resize(nsym);
     llr_g0.resize(nsym);
@@ -1573,8 +1642,8 @@ inline bool stage_phr(const std::vector<float>& soft_chips,
     const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
 
     std::vector<int8_t> g0, g1;
-    if (!detail::bprf_demod(soft_chips, phr_start, nsym, cpb, cps, 0, pol, g0,
-                            g1))
+    if (!detail::bprf_demod(soft_chips, phr_start, profile.code_index, nsym,
+                            cpb, cps, 0, pol, g0, g1))
         return false;
 
     std::vector<int8_t> rx(2 * nsym);
@@ -1724,10 +1793,10 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
         const size_t num_blocks = (psdu_bits + 329) / 330;
         const size_t nsym = psdu_bits + 48 * num_blocks;
         std::vector<int8_t> g0p, g1p, g0, g1;
-        if (detail::bprf_demod(soft_chips, phr_start, 21, 64, 512, 0, pol,
-                               g0p, g1p) &&
-            detail::bprf_demod(soft_chips, payload_start, nsym, 8, 64, 1344,
-                               pol, g0, g1)) {
+        if (detail::bprf_demod(soft_chips, phr_start, profile.code_index, 21,
+                               64, 512, 0, pol, g0p, g1p) &&
+            detail::bprf_demod(soft_chips, payload_start, profile.code_index,
+                               nsym, 8, 64, 1344, pol, g0, g1)) {
             const size_t total = 21 + nsym;
             std::vector<int8_t> rx_bits(2 * total);
             for (size_t s = 0; s < 21; ++s) {
@@ -1812,10 +1881,12 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
         for (int8_t pol : pols) {
             std::vector<int8_t> g0p, g1p, g0, g1;
             std::vector<float> llr0p, llr1p, llr0, llr1;
-            if (!detail::bprf_demod_soft(soft_chips, phr_start, 21, 64, 512, 0,
+            if (!detail::bprf_demod_soft(soft_chips, phr_start,
+                                         profile.code_index, 21, 64, 512, 0,
                                          pol, g0p, g1p, llr0p, llr1p))
                 continue;
-            if (!detail::bprf_demod_soft(soft_chips, payload_start, nsym, 8, 64,
+            if (!detail::bprf_demod_soft(soft_chips, payload_start,
+                                         profile.code_index, nsym, 8, 64,
                                          1344, pol, g0, g1, llr0, llr1))
                 continue;
 

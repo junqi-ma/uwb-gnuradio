@@ -12,9 +12,9 @@
  *            → candidate region buffered wholesale (cross-chunk)
  *            → decimated coarse preamble scan (D=4) confirms the region is a
  *              real preamble and locates symbol peaks
- *            → full-rate fine correlation in a small ROI around each coarse
- *              peak gives the precise symbol ends
- *            → packet start = first symbol end − (L−1); capture
+ *            → full-rate forward normalized correlation in a small ROI gives
+ *              precise symbol starts; weak startup SYNCs are grid-backtracked
+ *            → packet start = earliest verified SYNC start; capture
  *              [start − pre_trigger, start + capture) is emitted as a PDU.
  *
  * Because the whole candidate region is buffered before processing, there are
@@ -178,6 +178,7 @@ private:
     float d_coarse_peak_rel_ = 0.5f;
     float d_coarse_exist_frac_ = 0.5f;
     float d_template_energy_ = 0.0f;
+    std::vector<std::complex<float>> d_template_norm_;
     gr::filter::kernel::fir_filter_ccc d_fir;
     std::vector<std::complex<int16_t>> d_tmpl_ds_q15;
     std::vector<std::complex<int16_t>> d_tmpl_imag_ds_q15;

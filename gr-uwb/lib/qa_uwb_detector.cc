@@ -115,6 +115,79 @@ BOOST_AUTO_TEST_CASE(test_detector_preamble_pdu)
         1e-9);
 }
 
+BOOST_AUTO_TEST_CASE(test_detector_backtracks_weak_first_sync)
+{
+    const size_t L = 1016;
+    const size_t packet_start = 7000;
+    const size_t reps = 10;
+    std::vector<gr_complex> tmpl(L);
+    uint32_t prng = 0x6d2b79f5U;
+    for (size_t k = 0; k < L; ++k) {
+        prng ^= prng << 13;
+        prng ^= prng >> 17;
+        prng ^= prng << 5;
+        tmpl[k] = gr_complex((prng & 1U) ? 1.0f : -1.0f,
+                             (prng & 2U) ? 1.0f : -1.0f);
+    }
+    gr::uwb::core::uwb_l2_normalize(tmpl);
+
+    // Model a longer QM35 startup transient: SYNC #1 and #2 have normalized
+    // metric 0.25, below the normal 0.5 confirmation threshold, while SYNC #3
+    // onward is clean.  The strong train confirms the preamble; the weak
+    // preceding grid points must still define packet_start.
+    std::vector<gr_complex> orth(L);
+    gr_complex projection(0.0f, 0.0f);
+    float et = 0.0f;
+    uint32_t noise_prng = 0xa341316cU;
+    for (size_t k = 0; k < L; ++k) {
+        noise_prng ^= noise_prng << 13;
+        noise_prng ^= noise_prng >> 17;
+        noise_prng ^= noise_prng << 5;
+        orth[k] = gr_complex((noise_prng & 1U) ? 1.0f : -1.0f,
+                             (noise_prng & 2U) ? 1.0f : -1.0f);
+        projection += std::conj(tmpl[k]) * orth[k];
+        et += std::norm(tmpl[k]);
+    }
+    for (size_t k = 0; k < L; ++k)
+        orth[k] -= (projection / et) * tmpl[k];
+    float eo = 0.0f;
+    for (const auto& v : orth)
+        eo += std::norm(v);
+    const float orth_scale = std::sqrt(et / eo);
+
+    std::vector<gr_complex> x(packet_start + reps * L + 4096,
+                              gr_complex(0.0f, 0.0f));
+    for (size_t r = 0; r < 2; ++r)
+        for (size_t k = 0; k < L; ++k)
+            x[packet_start + r * L + k] =
+                0.5f * tmpl[k] + std::sqrt(0.75f) * orth_scale * orth[k];
+    for (size_t r = 2; r < reps; ++r)
+        std::copy(tmpl.begin(), tmpl.end(), x.begin() + packet_start + r * L);
+
+    auto det = gr::uwb::UwbDetector::make(tmpl, 5000, 2000, 1e-5f, 4, 4, 1, 8);
+    auto dbg = gr::blocks::message_debug::make();
+    run_detector(x, det, dbg);
+
+    BOOST_REQUIRE_EQUAL(dbg->num_messages(), 1);
+    const auto meta = pmt::car(dbg->get_message(0));
+    BOOST_CHECK_EQUAL(
+        pmt::to_uint64(pmt::dict_ref(meta, pmt::mp("start_sample"),
+                                    pmt::PMT_NIL)),
+        packet_start);
+    BOOST_CHECK_EQUAL(
+        pmt::to_uint64(pmt::dict_ref(meta, pmt::mp("predicted_start_sample"),
+                                    pmt::PMT_NIL)),
+        packet_start + 2 * L);
+    BOOST_CHECK_GT(
+        pmt::to_double(pmt::dict_ref(meta, pmt::mp("detection_metric"),
+                                    pmt::PMT_NIL)),
+        0.5);
+    BOOST_CHECK_EQUAL(
+        pmt::to_long(pmt::dict_ref(meta, pmt::mp("start_backtracked_symbols"),
+                                  pmt::from_long(0))),
+        2);
+}
+
 // Regression lock: constructor sample_rate must appear in PDU metadata (not
 // only the compile-time production constant).
 BOOST_AUTO_TEST_CASE(test_detector_sample_rate_metadata)

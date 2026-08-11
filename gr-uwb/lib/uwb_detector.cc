@@ -64,6 +64,7 @@ UwbDetector::UwbDetector(
     // conjugated template (see uwb_preamble_detector.cc for the rationale).
     std::vector<std::complex<float>> tmpl = known_preamble;
     core::uwb_l2_normalize(tmpl);
+    d_template_norm_ = tmpl;
     d_template_energy_ = core::uwb_template_energy(tmpl);
 
     std::vector<gr_complex> taps;
@@ -376,58 +377,65 @@ void UwbDetector::publish_packet(const UwbDetectorStateMachine::Region& region)
     if (d_coarse_peaks.empty())
         return; // not a preamble — drop (existence check)
 
-    // 2. Full-rate fine correlation in a small ROI around coarse peaks.
-    //    Peaks are produced in ascending position order.  Packet start needs
-    //    only the earliest fine-confirmed symbol END, so stop at the first
-    //    peak whose fine metric is >= 0.5 (P1: first-peak fine).
-    const size_t Lm1 = d_template_len_ - 1;
-    // The coarse stride places each peak within stride*D samples of the true
-    // symbol start, so the fine search window around (start + L - 1) must be
-    // at least that wide plus the margin.
+    // 2. Full-rate fine correlation in a small ROI around coarse symbol-start
+    //    candidates.  Use a forward normalized dot product so the returned
+    //    coordinate is directly the template start, matching MATLAB.
     const size_t half = d_coarse_stride_ * d_coarse_decimation_ + d_coarse_margin_;
-    size_t earliest_end = n;
+    size_t earliest_start = n;
     float best_metric = 0.0f;
     for (size_t p : d_coarse_peaks) {
-        if (p + Lm1 >= n)
+        if (p >= n || d_template_len_ > n)
             continue;
-        const size_t center = p + Lm1;
-        const size_t j0 = (center > half) ? center - half : 0;
-        const size_t j1 = std::min(center + half, n - 1);
-        const size_t len = j1 - j0 + 1;
-
-        d_fir.filterN(d_corr.data(), region.samples.data() + j0,
-                      static_cast<unsigned long>(len));
-        core::uwb_window_power(region.samples.data() + j0, len, d_template_len_,
-                               d_winpow.data());
-        core::uwb_normalized_score(d_corr.data(), d_winpow.data(), len,
-                                   d_template_energy_, d_fine_metric.data());
-
-        size_t local_best = 0;
-        for (size_t k = 1; k < len; ++k) {
-            if (d_fine_metric[k] > d_fine_metric[local_best])
-                local_best = k;
-        }
-        // Only accept a coarse peak whose fine argmax is a real correlation
-        // (>= 0.5) — weak partial alignments near the region start are
-        // ignored.  First such peak (peaks ascending) = earliest SYNC end.
-        if (d_fine_metric[local_best] >= 0.5f) {
-            earliest_end = j0 + local_best;
-            best_metric = d_fine_metric[local_best];
+        const size_t j0 = (p > half) ? p - half : 0;
+        const size_t j1 = std::min(p + half, n - d_template_len_);
+        size_t local_start = n;
+        float local_metric = 0.0f;
+        if (core::uwb_full_rate_peak(
+                region.samples.data(), n, d_template_norm_.data(), d_template_len_,
+                d_template_energy_, j0, j1, d_corr.data(), d_winpow.data(),
+                d_fine_metric.data(), &local_start, &local_metric) &&
+            local_metric >= defaults::kDetectorFineThreshold) {
+            earliest_start = local_start;
+            best_metric = local_metric;
             break;
         }
     }
-    if (earliest_end >= n || best_metric < 0.5f)
+    if (earliest_start >= n || best_metric < defaults::kDetectorFineThreshold)
         return; // no confirmed preamble
 
-    // 3. Packet start = first SYNC symbol start = earliest end − (L−1).
-    // fir_filter::filterN's first valid output in this stateless Region call is
-    // one sample later than the stream detector's trailing-window coordinate.
-    // Convert it back before applying peak_end - (L-1).  The real MATLAB
-    // golden waveform then maps exactly 4993015 -> 4992000 (0-based).
-    const uint64_t peak_end_abs =
-        region.start_abs + static_cast<uint64_t>(earliest_end);
+    // QM35's RF startup transient may leave the first one or more SYNCs below
+    // the normal 0.5 existence threshold.  Once a strong SYNC has confirmed
+    // the preamble, walk backwards on the known one-symbol grid and accept a
+    // bounded number of weaker predecessors.  Each predecessor is independently
+    // verified in a narrow ROI; one miss stops the walk, so noise before the
+    // packet cannot cause an unconditional start shift.
+    size_t backtracked_symbols = 0;
+    float start_metric = best_metric;
+    const size_t confirmed_start = earliest_start;
+    while (backtracked_symbols < defaults::kDetectorMaxBacktrackSymbols &&
+           earliest_start >= d_template_len_) {
+        const size_t center = earliest_start - d_template_len_;
+        const size_t radius = defaults::kDetectorBacktrackRadius;
+        const size_t j0 = (center > radius) ? center - radius : 0;
+        const size_t j1 = std::min(center + radius, n - d_template_len_);
+        size_t local_start = n;
+        float local_metric = 0.0f;
+        if (!core::uwb_full_rate_peak(
+                region.samples.data(), n, d_template_norm_.data(), d_template_len_,
+                d_template_energy_, j0, j1, d_corr.data(), d_winpow.data(),
+                d_fine_metric.data(), &local_start, &local_metric) ||
+            local_metric < defaults::kDetectorBacktrackThreshold)
+            break;
+        earliest_start = local_start;
+        start_metric = local_metric;
+        ++backtracked_symbols;
+    }
+
+    // 3. Fine coordinates are already SYNC-start coordinates.
     const uint64_t packet_start =
-        (peak_end_abs > Lm1) ? peak_end_abs - Lm1 - 1 : 0;
+        region.start_abs + static_cast<uint64_t>(earliest_start);
+    const uint64_t timing_seed =
+        region.start_abs + static_cast<uint64_t>(confirmed_start);
     const uint64_t trigger = region.start_abs + region.candidate_offset;
 
     // 4. Capture [start − pre_trigger, start + capture) — i.e. pre_trigger +
@@ -447,7 +455,7 @@ void UwbDetector::publish_packet(const UwbDetectorStateMachine::Region& region)
     meta = pmt::dict_add(meta, pmt::mp("start_sample"),
                          pmt::from_uint64(packet_start));
     meta = pmt::dict_add(meta, pmt::mp("predicted_start_sample"),
-                         pmt::from_uint64(packet_start));
+                         pmt::from_uint64(timing_seed));
     meta = pmt::dict_add(meta, pmt::mp("window_start_sample"),
                          pmt::from_uint64(lo));
     meta = pmt::dict_add(meta, pmt::mp("trigger_sample"),
@@ -458,7 +466,12 @@ void UwbDetector::publish_packet(const UwbDetectorStateMachine::Region& region)
                          pmt::from_long(static_cast<long>(cap)));
     meta = pmt::dict_add(meta, pmt::mp("detection_metric"),
                          pmt::from_double(best_metric));
-    meta = pmt::dict_add(meta, pmt::mp("threshold"), pmt::from_double(0.5));
+    meta = pmt::dict_add(meta, pmt::mp("start_metric"),
+                         pmt::from_double(start_metric));
+    meta = pmt::dict_add(meta, pmt::mp("start_backtracked_symbols"),
+                         pmt::from_long(static_cast<long>(backtracked_symbols)));
+    meta = pmt::dict_add(meta, pmt::mp("threshold"),
+                         pmt::from_double(defaults::kDetectorFineThreshold));
     meta = pmt::dict_add(meta, pmt::mp("pre_trigger_samples"),
                          pmt::from_long(static_cast<long>(d_pre_trigger_)));
 
