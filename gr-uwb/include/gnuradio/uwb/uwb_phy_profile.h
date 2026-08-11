@@ -142,24 +142,23 @@ inline constexpr std::array<int8_t, kQm35CodeLength> kPreambleCode9 = { {
 // ---------------------------------------------------------------------------
 // IEEE 802.15.4a-2007 HRP code index 10 (Ipatov length 127, ternary {-1,0,+1}).
 // Source: IEEE 802.15 contrib 15-05-0737-01-004a (length-127 preamble set for
-// 500 MHz bands; sequence S10), phase-aligned to the same cyclic origin that
-// MATLAB lrwpan.internal.HRPCodes(9) / kPreambleCode9 use (shift 73 on the
-// published table so code-9 matches bit-for-bit).  Non-zero count = 64,
-// energy = 64 — same as code-9.
+// 500 MHz bands; sequence S10), cyclic origin phase-aligned to MATLAB
+// lrwpan.internal.HRPCodes(10) / testdata/uwb_code10_preamble16_payload8.cfile.
 //
-// STATUS: profile + self-consistency only.  Full golden cross-check against
-// MATLAB UWB_demodulation requires exporting a code-10 window the same way
-// as code-9 (see testdata/generate_and_export_golden.m with CodeIndex=10 on
-// Windows MATLAB F:\MATLAB\bin\matlab.exe).  Do NOT claim code-10 is
-// golden-verified until that export + stage-by-stage QA lands.
+// History: an earlier draft used the same published-table shift that makes
+// code-9 match HRPCodes(9), but code-10 required an additional +23 cyclic
+// roll to match HRPCodes(10) and the MATLAB-generated code-10 waveform
+// (sparse-grid correlation ≈0.999 at sample phase 2; uncorrected origin
+// collapsed CIR/soft-chip NS-SFD to noise on real DW1000 captures).
+// Non-zero count = 64, energy = 64 — same as code-9.
 // ---------------------------------------------------------------------------
 inline constexpr std::array<int8_t, kQm35CodeLength> kPreambleCode10 = { {
-    0, -1, 0, 0, -1, -1, 0, 0, 0, -1, 0, 1, -1, 1, 0, -1, 0, 1, -1, 0, -1, 1,
-    0, 0, 0, 0, 0, 1, -1, 0, 0, 1, 1, 0, -1, 0, 1, 0, 0, -1, -1, 1, 0, 0, 1,
-    1, -1, 1, 0, 1, -1, 0, 1, 0, 0, 0, 0, -1, 0, -1, 0, -1, 0, -1, 1, 1, -1,
-    1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, -1, 1, 0, 1, 1, 1, 0, 0, 0, -1, -1, -1,
-    -1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, -1, -1, 1, 1, 0, 0, 1, 0, -1, 1, 0,
-    0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, -1, 0, 0
+    1, 1, 0, 0, 1, 0, -1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, -1, 0,
+    0, 0, -1, 0, 0, -1, -1, 0, 0, 0, -1, 0, 1, -1, 1, 0, -1, 0, 1, -1, 0, -1,
+    1, 0, 0, 0, 0, 0, 1, -1, 0, 0, 1, 1, 0, -1, 0, 1, 0, 0, -1, -1, 1, 0,
+    0, 1, 1, -1, 1, 0, 1, -1, 0, 1, 0, 0, 0, 0, -1, 0, -1, 0, -1, 0, -1, 1,
+    1, -1, 1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, -1, 1, 0, 1, 1, 1, 0, 0, 0,
+    -1, -1, -1, -1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, -1, -1
 } };
 
 // DW1000-mode BPRF profile (code-10, 64 SYNC).  Same sample-rate / timing

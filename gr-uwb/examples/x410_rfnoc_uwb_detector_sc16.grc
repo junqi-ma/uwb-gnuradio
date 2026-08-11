@@ -1,68 +1,242 @@
 options:
   parameters:
+    alias: ''
     author: UWB GNU Radio Project
-    category: UWB
-    cmake_opt: ''
+    catch_exceptions: 'True'
     comment: X410 737.28M -> RFNoC 65/48 -> host 998.4M
     copyright: ''
     description: X410 RFNoC SC16 energy-gated packet detector.
-    gen_cmake: 'On'
     gen_linking: dynamic
     generate_options: no_gui
+    generator_class_name: PythonNoGuiGenerator
+    generator_module: gnuradio.grc.workflows.python_nogui
     hier_block_src_path: '.:'
     id: x410_rfnoc_uwb_detector_sc16
     max_nouts: '0'
     output_language: python
-    placement: (0,0)
     realtime_scheduling: ''
-    run: 'True'
     run_command: '{python} -u {filename}'
     run_options: prompt
-    sizing_mode: fixed
     thread_safe_setters: ''
     title: X410 RFNoC UWB SC16 Detector
-    window_size: ''
-  states: {coordinate: [8, 8], rotation: 0, state: enabled}
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 8]
+    rotation: 0
+    state: enabled
+
 blocks:
 - name: radio_rate
   id: variable
-  parameters: {comment: X410 FPGA radio rate, value: '737.28e6'}
-  states: {coordinate: [16, 80], rotation: 0, state: enabled}
+  parameters:
+    comment: X410 FPGA radio rate
+    value: 737.28e6
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [456, 28.0]
+    rotation: 0
+    state: enabled
 - name: samp_rate
   id: variable
-  parameters: {comment: RFNoC upsampler output / host rate, value: '998.4e6'}
-  states: {coordinate: [16, 144], rotation: 0, state: enabled}
-- name: output_dir
-  id: parameter
-  parameters: {alias: '', comment: '', hide: none, label: Output directory, short_id: '', type: str, value: "'/data/uwb_capture'"}
-  states: {coordinate: [16, 272], rotation: 0, state: enabled}
+  parameters:
+    comment: RFNoC upsampler output / host rate
+    value: 998.4e6
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [616, 28.0]
+    rotation: 0
+    state: enabled
 - name: uhd_rfnoc_graph_0
   id: uhd_rfnoc_graph
-  parameters: {clock_source_0: internal, dev_addr: '"addr=192.168.10.2"', dev_args: '""', num_mboards: '1', time_source_0: ''}
-  states: {coordinate: [240, 32], rotation: 0, state: enabled}
+  parameters:
+    alias: ''
+    clock_source: ''
+    comment: ''
+    dev_addr: '"addr=192.168.10.2"'
+    dev_args: '""'
+    num_mboards: '1'
+    time_source: ''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [240, 32]
+    rotation: 0
+    state: enabled
+- name: output_dir
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Output directory
+    short_id: ''
+    type: str
+    value: '''/data/uwb_capture'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [824, 20.0]
+    rotation: 0
+    state: enabled
 - name: uhd_rfnoc_rx_radio_0
   id: uhd_rfnoc_rx_radio
-  parameters: {agc: Default, antenna: RX2, bandwidth: '0', block_args: '""', dc_offset: 'False', device_select: '0', frequency: '6.5e9', gain: '20', instance_index: '0', iq_balance: 'False', num_chans: '1', rate: radio_rate}
-  states: {coordinate: [240, 128], rotation: 0, state: enabled}
-- name: uwb_rfnoc_upsampler_0
-  id: uwb_rfnoc_upsampler
-  parameters: {block_args: '""', block_type: '"Upsampler"', device_select: '0', input_rate: radio_rate, instance_index: '0', output_rate: samp_rate}
-  states: {coordinate: [496, 128], rotation: 0, state: enabled}
+  parameters:
+    affinity: ''
+    alias: ''
+    antenna0: RX2
+    antenna1: RX2
+    antenna2: RX2
+    antenna3: RX2
+    bandwidth0: '0'
+    bandwidth1: '0'
+    bandwidth2: '0'
+    bandwidth3: '0'
+    block_args: '""'
+    comment: ''
+    dc_offset0: 'False'
+    dc_offset1: 'False'
+    dc_offset2: 'False'
+    dc_offset3: 'False'
+    device_select: '0'
+    enable_timestamps0: 'True'
+    enable_timestamps1: 'True'
+    enable_timestamps2: 'True'
+    enable_timestamps3: 'True'
+    frequency0: 1e9
+    frequency1: 1e9
+    frequency2: 1e9
+    frequency3: 1e9
+    gain0: '0'
+    gain1: '0'
+    gain2: '0'
+    gain3: '0'
+    instance_index: '0'
+    iq_balance0: 'False'
+    iq_balance1: 'False'
+    iq_balance2: 'False'
+    iq_balance3: 'False'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    num_chans: '1'
+    rate: radio_rate
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [104, 228.0]
+    rotation: 0
+    state: enabled
 - name: uhd_rfnoc_rx_streamer_0
   id: uhd_rfnoc_rx_streamer
-  parameters: {num_chans: '1', otw: sc16, output_type: sc16}
-  states: {coordinate: [736, 128], rotation: 0, state: enabled}
+  parameters:
+    adapter_id_list: '[0]'
+    affinity: ''
+    alias: ''
+    args: ''
+    comment: ''
+    issue_stream_cmd: 'True'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    num_chans: '1'
+    otw: sc16
+    output_type: sc16
+    start_time: '0'
+    start_time_set: 'False'
+    use_default_adapter_id: 'True'
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [712, 292.0]
+    rotation: 0
+    state: enabled
 - name: uwb_detector_sc16_0
   id: uwb_detector_sc16
-  parameters: {capture_samples: '200000', coarse_decimation: '4', energy_gate_decimation: '100', energy_threshold: '0.001', pre_trigger: '2032', template_file: '"testdata/reference_preamble.bin"'}
-  states: {coordinate: [976, 128], rotation: 0, state: enabled}
+  parameters:
+    affinity: ''
+    alias: ''
+    capture_samples: '200000'
+    coarse_decimation: '4'
+    coarse_margin: '16'
+    coarse_repetitions: '1'
+    comment: ''
+    energy_gate_decimation: '100'
+    energy_threshold: '0.001'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    pre_trigger: '2032'
+    sample_rate: 998.4e6
+    template_file: '"testdata/reference_preamble.bin"'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [928, 228.0]
+    rotation: 0
+    state: enabled
 - name: uwb_packet_writer_0
   id: uwb_packet_writer
-  parameters: {base_name: capture, directory: output_dir, one_file_per_packet: 'False'}
-  states: {coordinate: [1248, 128], rotation: 0, state: enabled}
+  parameters:
+    affinity: ''
+    alias: ''
+    base_name: capture
+    comment: ''
+    directory: output_dir
+    one_file_per_packet: 'False'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1272, 276.0]
+    rotation: 0
+    state: enabled
+- name: uwb_rfnoc_upsampler_0
+  id: uwb_rfnoc_upsampler
+  parameters:
+    affinity: ''
+    alias: ''
+    block_args: '""'
+    block_type: '"Upsampler"'
+    comment: ''
+    device_select: '0'
+    input_rate: radio_rate
+    instance_index: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    output_rate: samp_rate
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [384, 252.0]
+    rotation: 0
+    state: enabled
+
 connections:
-- [uhd_rfnoc_rx_radio_0, '0', uwb_rfnoc_upsampler_0, '0']
-- [uwb_rfnoc_upsampler_0, '0', uhd_rfnoc_rx_streamer_0, '0']
+- params:
+    is_back_edge: 'False'
+  snk_blk_id: uwb_rfnoc_upsampler_0
+  snk_port_id: '0'
+  src_blk_id: uhd_rfnoc_rx_radio_0
+  src_port_id: '0'
 - [uhd_rfnoc_rx_streamer_0, '0', uwb_detector_sc16_0, '0']
 - [uwb_detector_sc16_0, packet, uwb_packet_writer_0, packet]
-metadata: {file_format: 1}
+- params:
+    is_back_edge: 'False'
+  snk_blk_id: uhd_rfnoc_rx_streamer_0
+  snk_port_id: '0'
+  src_blk_id: uwb_rfnoc_upsampler_0
+  src_port_id: '0'
+
+metadata:
+  file_format: 2
+  grc_version: 3.10.12.0

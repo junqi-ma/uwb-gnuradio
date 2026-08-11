@@ -29,6 +29,8 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstdlib>
+#include <cstdio>
 #include <limits>
 #include <vector>
 
@@ -589,18 +591,24 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         code_energy += std::norm(scratch.work[m]);
 
     // ---- Coherently average the aligned SYNC windows. ----
-    const size_t available = std::min(timing.detected_peaks, profile.preamble_repetitions);
-    const size_t skip = std::min(profile.cir_skip_initial_repetitions, available);
-    if (available == 0 || skip >= available)
+    const size_t available =
+        std::min(timing.detected_peaks, profile.preamble_repetitions);
+    if (available == 0)
         return false;
-    const size_t rep_count = std::min(profile.cir_repetitions, available - skip);
+    const size_t rep_count = std::min(profile.cir_repetitions, available);
     if (rep_count == 0)
         return false;
+    // Match MATLAB estimateCirAndSoftChips: estimate the channel from the
+    // final configured SYNC repetitions, immediately before the SFD/data.
+    // The old [skip, skip+count) range happened to be equivalent for the
+    // 64-SYNC golden (skip=10, count=54), but incorrectly used SYNC 10..63
+    // for a 256-SYNC DW1000 preamble instead of the final 54 repetitions.
+    const size_t first_rep = available - rep_count;
 
     const size_t wlen = code_len + tap_count - 1; // 1053
     scratch.corr.assign(wlen, std::complex<float>(0.0f, 0.0f));
     size_t valid = 0;
-    for (size_t k = skip; k < skip + rep_count; ++k) {
+    for (size_t k = first_rep; k < available; ++k) {
         const int64_t rs = start + static_cast<int64_t>(std::llround((double)k * period));
         const int64_t lo = rs - static_cast<int64_t>(pre);
         const int64_t hi = lo + static_cast<int64_t>(wlen);
@@ -678,8 +686,11 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     if (last_pos < chip_start)
         return false;
     const int64_t spc_i = std::max<int64_t>(1, std::llround(spc));
+    const bool fractional_grid =
+        std::abs(spc - static_cast<double>(spc_i)) > 1e-9;
     const size_t num_chips =
-        static_cast<size_t>((last_pos - chip_start) / spc_i) + 1;
+        static_cast<size_t>(std::floor(
+            static_cast<double>(last_pos - chip_start) / spc)) + 1;
 
     // Causal FIR on the chip grid, rewritten for contiguous forward access:
     //   chip = sum_k conj(values[T-1-k]) * rx[base-k]
@@ -731,13 +742,47 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     }
 
     size_t checked = 0;
-    if (chip_start < fwd) {
+    if (fractional_grid) {
+        // MATLAB keeps measured_period/chips_per_symbol as a fractional
+        // position and linearly interpolates the CIR-filtered stream.  Keep
+        // the optimized integer-grid kernels below for the common exact-2
+        // case; use the scalar interpolation path only when SFO is present.
+        auto dot_at = [&](int64_t p) {
+            if (bypass_filter) {
+                const int64_t idx =
+                    p - fwd + static_cast<int64_t>(peak_idx);
+                return idx >= 0 && idx < static_cast<int64_t>(n)
+                    ? rx[static_cast<size_t>(idx)]
+                    : std::complex<float>(0.0f, 0.0f);
+            }
+            std::complex<float> acc(0.0f, 0.0f);
+            const size_t count =
+                (rake_k > 0 && rake_k < tap_count) ? rake_k : tap_count;
+            for (size_t j = 0; j < count; ++j) {
+                const size_t q = (count == tap_count) ? j : rake_indices[j];
+                const int64_t idx = p - fwd + static_cast<int64_t>(q);
+                if (idx >= 0 && idx < static_cast<int64_t>(n))
+                    acc += h_conj[q] * rx[static_cast<size_t>(idx)];
+            }
+            return acc;
+        };
+        for (size_t i = 0; i < num_chips; ++i) {
+            const double pd = static_cast<double>(chip_start) +
+                              static_cast<double>(i) * spc;
+            const int64_t p0 = static_cast<int64_t>(std::floor(pd));
+            const float frac = static_cast<float>(pd - std::floor(pd));
+            const std::complex<float> y0 = dot_at(p0);
+            const std::complex<float> y1 = dot_at(p0 + 1);
+            scratch.corr[i] = y0 + frac * (y1 - y0);
+        }
+        checked = num_chips; // fractional path completed the whole stream
+    } else if (chip_start < fwd) {
         const int64_t gap = fwd - chip_start;
         checked = std::min(num_chips,
                            static_cast<size_t>((gap + spc_i - 1) / spc_i));
     }
     // Edge chips: FIR window may clip below sample 0 (bounds-checked scalar).
-    for (size_t i = 0; i < checked; ++i) {
+    for (size_t i = 0; !fractional_grid && i < checked; ++i) {
         const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
         if (bypass_filter) {
             const int64_t idx =
@@ -1037,6 +1082,113 @@ inline bool bprf_demod(const std::vector<float>& soft, int64_t start,
         g1[s] = (best < 0.0f) ? 1 : 0;
     }
     return true;
+}
+
+// Soft-output variant of bprf_demod.  llr_g0 / llr_g1 > 0 favour bit value 0.
+//   llr_g0 = |metric_half0| - |metric_half1|   (BPM position)
+//   llr_g1 = chosen_half_metric                 (BPSK polarity; + => bit 0)
+// Hard decisions still written to g0/g1 for callers that need them.
+inline bool bprf_demod_soft(const std::vector<float>& soft, int64_t start,
+                            size_t nsym, size_t cpb, size_t cps,
+                            size_t scram_offset, int8_t pol,
+                            std::vector<int8_t>& g0, std::vector<int8_t>& g1,
+                            std::vector<float>& llr_g0, std::vector<float>& llr_g1)
+{
+    if (start < 0 ||
+        static_cast<size_t>(start + static_cast<int64_t>(cps * nsym)) >
+            soft.size())
+        return false;
+    std::vector<int8_t> spread;
+    bprf_spreading(spread, scram_offset, cpb * nsym);
+    g0.resize(nsym);
+    g1.resize(nsym);
+    llr_g0.resize(nsym);
+    llr_g1.resize(nsym);
+    const size_t third = cps / 2;
+    for (size_t s = 0; s < nsym; ++s) {
+        const size_t base = static_cast<size_t>(start) + s * cps;
+        const int8_t* sp = &spread[s * cpb];
+        float b0 = -1e30f, b1 = -1e30f, m0 = 0.0f, m1 = 0.0f;
+        for (size_t hop = 0; hop < 2; ++hop) {
+            const size_t f0 = hop * cpb;
+            float metric0 = 0.0f, metric1 = 0.0f;
+            for (size_t c = 0; c < cpb; ++c) {
+                metric0 += pol * soft[base + f0 + c] * static_cast<float>(sp[c]);
+                metric1 += pol * soft[base + third + f0 + c] *
+                           static_cast<float>(sp[c]);
+            }
+            if (std::abs(metric0) > b0) {
+                b0 = std::abs(metric0);
+                m0 = metric0;
+            }
+            if (std::abs(metric1) > b1) {
+                b1 = std::abs(metric1);
+                m1 = metric1;
+            }
+        }
+        float best;
+        if (b0 >= b1) {
+            g0[s] = 0;
+            best = m0;
+        } else {
+            g0[s] = 1;
+            best = m1;
+        }
+        g1[s] = (best < 0.0f) ? 1 : 0;
+        llr_g0[s] = b0 - b1; // >0 prefers g0=0
+        llr_g1[s] = best;    // >0 prefers g1=0
+    }
+    return true;
+}
+
+// Soft-decision rate-1/2 CL-3 Viterbi (same trellis as vitdec_cl3).
+// llr0/llr1: per-symbol LLRs for the two coded bits (positive favours bit 0).
+inline void vitdec_cl3_soft(const float* llr0, const float* llr1, size_t N,
+                            std::vector<int8_t>& out)
+{
+    int o0[4][2], o1[4][2], nxt[4][2];
+    for (int st = 0; st < 4; ++st) {
+        const int s1 = st >> 1, s0 = st & 1;
+        for (int u = 0; u < 2; ++u) {
+            o0[st][u] = s1;
+            o1[st][u] = u ^ s0;
+            nxt[st][u] = (u << 1) | s1;
+        }
+    }
+    const float INF = 1e30f;
+    float surf[4] = { 0.0f, INF, INF, INF };
+    std::vector<int8_t> back(N * 4);
+    for (size_t t = 0; t < N; ++t) {
+        float ns[4] = { INF, INF, INF, INF };
+        for (int st = 0; st < 4; ++st) {
+            for (int u = 0; u < 2; ++u) {
+                // cost = (2*o-1)*llr : o=0 gets -llr, o=1 gets +llr
+                const float c0 =
+                    (2.0f * static_cast<float>(o0[st][u]) - 1.0f) * llr0[t];
+                const float c1 =
+                    (2.0f * static_cast<float>(o1[st][u]) - 1.0f) * llr1[t];
+                const float m = surf[st] + c0 + c1;
+                const int nst = nxt[st][u];
+                if (m < ns[nst]) {
+                    ns[nst] = m;
+                    back[t * 4 + nst] = static_cast<int8_t>((u << 2) | st);
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i)
+            surf[i] = ns[i];
+    }
+    int best = 0;
+    for (int i = 1; i < 4; ++i)
+        if (surf[i] < surf[best])
+            best = i;
+    out.resize(N);
+    int cur = best;
+    for (size_t t = N; t-- > 0;) {
+        const int v = back[t * 4 + cur];
+        out[t] = static_cast<int8_t>(v >> 2);
+        cur = v & 3;
+    }
 }
 
 // IEEE 802.15.4 CRC-16 (reflected polynomial 0x8408, init 0).  FCS algorithm
@@ -1464,6 +1616,59 @@ inline bool stage_phr(const std::vector<float>& soft_chips,
 
     // MATLAB bit2int default is MSB-first (bit2int(x,n)); phr(1:2) -> data
     // rate, phr(3:9) -> PSDU length.
+    //
+    // Guard against SECDED mis-correction on real RF.  A false single-bit
+    // flip can inflate PSDU length (e.g. 13 → 45 on DW1000 captures) past
+    // the RF energy while the soft-chip *buffer* is still long enough.  If
+    // the corrected length needs a long tail whose soft-chip energy is near
+    // the noise floor relative to the uncorrected body, keep uncorrected.
+    auto length_of = [](const std::vector<int8_t>& b) -> uint32_t {
+        uint32_t psdu = 0;
+        for (int i = 0; i < 7; ++i)
+            psdu |= (static_cast<uint32_t>(b[2 + i]) << (6 - i));
+        return psdu;
+    };
+    auto chips_needed = [](uint32_t psdu_len) -> size_t {
+        const size_t psdu_bits = static_cast<size_t>(psdu_len) * 8;
+        const size_t num_blocks = (psdu_bits + 329) / 330;
+        const size_t nsym = psdu_bits + 48 * num_blocks;
+        // PHR 21*512 + payload nsym*64 (6.81 Mb/s) chips after SFD end.
+        return 21 * 512 + nsym * 64;
+    };
+    const uint32_t len_uncorr = length_of(sys13); // sys13 is never flipped
+    const uint32_t len_corr = length_of(phr19);
+    if (out.secded_corrected && len_corr > len_uncorr) {
+        const int64_t phr_start = ns_sfd.sfd_end_chip + 1;
+        const size_t need_c = chips_needed(len_corr);
+        const size_t need_u = chips_needed(len_uncorr);
+        if (phr_start >= 0 && need_c > need_u + 64) {
+            const size_t base = static_cast<size_t>(phr_start);
+            const size_t end_u = base + need_u;
+            const size_t end_c = base + need_c;
+            if (end_c <= soft_chips.size() && end_u < soft_chips.size()) {
+                double e_body = 0.0, e_tail = 0.0;
+                for (size_t i = base; i < end_u; ++i) {
+                    const double v = soft_chips[i];
+                    e_body += v * v;
+                }
+                for (size_t i = end_u; i < end_c; ++i) {
+                    const double v = soft_chips[i];
+                    e_tail += v * v;
+                }
+                const double n_body = static_cast<double>(end_u - base);
+                const double n_tail = static_cast<double>(end_c - end_u);
+                const double mean_body = e_body / (n_body + 1e-12);
+                const double mean_tail = e_tail / (n_tail + 1e-12);
+                // Tail is noise-like if its mean energy is << body.
+                if (mean_tail < 0.15 * mean_body) {
+                    for (int i = 0; i < 13; ++i)
+                        phr19[i] = sys13[i];
+                    out.secded_corrected = false;
+                }
+            }
+        }
+    }
+
     const int dr = (phr19[0] << 1) | phr19[1];
     static const float kDataRates[4] = { 0.11f, 0.85f, 6.81f, 27.24f };
     out.data_rate_mbps = kDataRates[dr & 3];
@@ -1500,70 +1705,174 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
     out = PayloadResult{};
     if (soft_chips.empty() || !phr.ok || !ns_sfd.ok || phr.psdu_length == 0)
         return false;
-    const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
     const int64_t phr_start = ns_sfd.sfd_end_chip + 1;
     if (phr_start < 0)
         return false;
     // The payload field begins right after the 21 PHR symbols (512 chips each).
     const int64_t payload_start = phr_start + static_cast<int64_t>(512 * 21);
-    const size_t psdu_bits = static_cast<size_t>(phr.psdu_length) * 8;
-    const size_t num_blocks = (psdu_bits + 329) / 330;
-    const size_t nsym = psdu_bits + 48 * num_blocks;
 
-    // PHR + payload coded bits (joint Viterbi decode, as in MATLAB).
-    std::vector<int8_t> g0p, g1p, g0, g1;
-    if (!detail::bprf_demod(soft_chips, phr_start, 21, 64, 512, 0, pol, g0p,
-                            g1p))
-        return false;
-    if (!detail::bprf_demod(soft_chips, payload_start, nsym, 8, 64, 1344, pol,
-                            g0, g1))
-        return false;
+    bool any_ok = false;
 
-    const size_t total = 21 + nsym;
-    std::vector<int8_t> rx(2 * total);
-    for (size_t s = 0; s < 21; ++s) {
-        rx[2 * s] = g0p[s];
-        rx[2 * s + 1] = g1p[s];
+    // First run the MATLAB-equivalent production path: reported PHR length,
+    // NS-SFD polarity, hard BPM decisions and hard truncated Viterbi.  The
+    // RF experiments below (length neighborhood, opposite polarity and soft
+    // Viterbi) are fallbacks; they must not hide a valid fixed-length decode
+    // or replace it with a shorter accidental RS codeword.
+    {
+        const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
+        const size_t psdu_bits = static_cast<size_t>(phr.psdu_length) * 8;
+        const size_t num_blocks = (psdu_bits + 329) / 330;
+        const size_t nsym = psdu_bits + 48 * num_blocks;
+        std::vector<int8_t> g0p, g1p, g0, g1;
+        if (detail::bprf_demod(soft_chips, phr_start, 21, 64, 512, 0, pol,
+                               g0p, g1p) &&
+            detail::bprf_demod(soft_chips, payload_start, nsym, 8, 64, 1344,
+                               pol, g0, g1)) {
+            const size_t total = 21 + nsym;
+            std::vector<int8_t> rx_bits(2 * total);
+            for (size_t s = 0; s < 21; ++s) {
+                rx_bits[2 * s] = g0p[s];
+                rx_bits[2 * s + 1] = g1p[s];
+            }
+            for (size_t s = 0; s < nsym; ++s) {
+                rx_bits[2 * (s + 21)] = g0[s];
+                rx_bits[2 * (s + 21) + 1] = g1[s];
+            }
+            std::vector<int8_t> decoded;
+            detail::vitdec_cl3(rx_bits.data(), total, decoded);
+            if (decoded.size() >= total) {
+                std::vector<int8_t> rs_cw(decoded.begin() + 19,
+                                          decoded.begin() + (total - 2));
+                std::vector<int8_t> psdu_bits_out;
+                if (rs_cw.size() == nsym &&
+                    detail::rs_decode_stream(rs_cw, psdu_bits,
+                                             psdu_bits_out)) {
+                    out.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
+                    out.bytes.resize(psdu_bits_out.size() / 8);
+                    for (size_t i = 0; i < out.bytes.size(); ++i) {
+                        uint8_t b = 0;
+                        for (int bit = 0; bit < 8; ++bit)
+                            b |= static_cast<uint8_t>(
+                                     psdu_bits_out[8 * i + bit])
+                                 << bit;
+                        out.bytes[i] = b;
+                    }
+                    if (out.bytes.size() >= 2) {
+                        out.calculated_fcs = detail::crc16_802154(
+                            out.bytes.data(), out.bytes.size() - 2);
+                        out.received_fcs =
+                            static_cast<uint16_t>(
+                                out.bytes[out.bytes.size() - 2]) |
+                            (static_cast<uint16_t>(
+                                 out.bytes[out.bytes.size() - 1])
+                             << 8);
+                        out.fcs_pass =
+                            (out.received_fcs == out.calculated_fcs);
+                    }
+                    out.ok = true;
+                    any_ok = true;
+                    if (out.fcs_pass)
+                        return true;
+                }
+            }
+        }
     }
-    for (size_t s = 0; s < nsym; ++s) {
-        rx[2 * (s + 21)] = g0[s];
-        rx[2 * (s + 21) + 1] = g1[s];
+
+    // Candidate PSDU lengths: reported PHR length, then a small neighborhood
+    // (±2) that covers common SECDED single-bit length slips on real RF.
+    uint32_t lens[5];
+    size_t n_lens = 0;
+    auto add_len = [&](uint32_t L) {
+        if (L == 0 || L > profile.max_psdu_bytes)
+            return;
+        for (size_t i = 0; i < n_lens; ++i)
+            if (lens[i] == L)
+                return;
+        if (n_lens < 5)
+            lens[n_lens++] = L;
+    };
+    add_len(phr.psdu_length);
+    if (phr.psdu_length > 2)
+        add_len(phr.psdu_length - 1);
+    add_len(phr.psdu_length + 1);
+    if (phr.psdu_length > 3)
+        add_len(phr.psdu_length - 2);
+    add_len(phr.psdu_length + 2);
+
+    // Try reported SFD polarity first, then the opposite.  On real RF the
+    // NS-SFD sign can flip relative to the payload field even when the
+    // magnitude metric is high; one polarity yields RS+FCS, the other fails.
+    const int8_t pol0 = (ns_sfd.polarity < 0) ? -1 : 1;
+    const int8_t pols[2] = { pol0, static_cast<int8_t>(-pol0) };
+    for (size_t li = 0; li < n_lens; ++li) {
+        const uint32_t L = lens[li];
+        const size_t psdu_bits = static_cast<size_t>(L) * 8;
+        const size_t num_blocks = (psdu_bits + 329) / 330;
+        const size_t nsym = psdu_bits + 48 * num_blocks;
+        for (int8_t pol : pols) {
+            std::vector<int8_t> g0p, g1p, g0, g1;
+            std::vector<float> llr0p, llr1p, llr0, llr1;
+            if (!detail::bprf_demod_soft(soft_chips, phr_start, 21, 64, 512, 0,
+                                         pol, g0p, g1p, llr0p, llr1p))
+                continue;
+            if (!detail::bprf_demod_soft(soft_chips, payload_start, nsym, 8, 64,
+                                         1344, pol, g0, g1, llr0, llr1))
+                continue;
+
+            const size_t total = 21 + nsym;
+            std::vector<float> llr0j(total), llr1j(total);
+            for (size_t s = 0; s < 21; ++s) {
+                llr0j[s] = llr0p[s];
+                llr1j[s] = llr1p[s];
+            }
+            for (size_t s = 0; s < nsym; ++s) {
+                llr0j[s + 21] = llr0[s];
+                llr1j[s + 21] = llr1[s];
+            }
+            std::vector<int8_t> decoded;
+            detail::vitdec_cl3_soft(llr0j.data(), llr1j.data(), total, decoded);
+            if (decoded.size() < total)
+                continue;
+
+            std::vector<int8_t> rs_cw(decoded.begin() + 19,
+                                      decoded.begin() + (total - 2));
+            if (rs_cw.size() != nsym)
+                continue;
+
+            std::vector<int8_t> psdu_bits_out;
+            if (!detail::rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out))
+                continue;
+
+            const size_t nbytes = psdu_bits_out.size() / 8;
+            PayloadResult cand;
+            cand.bytes.resize(nbytes);
+            for (size_t i = 0; i < nbytes; ++i) {
+                uint8_t b = 0;
+                for (int bit = 0; bit < 8; ++bit)
+                    b |= static_cast<uint8_t>(psdu_bits_out[8 * i + bit])
+                         << bit;
+                cand.bytes[i] = b;
+            }
+            cand.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
+            if (nbytes >= 2) {
+                cand.calculated_fcs =
+                    detail::crc16_802154(cand.bytes.data(), nbytes - 2);
+                cand.received_fcs =
+                    static_cast<uint16_t>(cand.bytes[nbytes - 2]) |
+                    (static_cast<uint16_t>(cand.bytes[nbytes - 1]) << 8);
+                cand.fcs_pass =
+                    (cand.received_fcs == cand.calculated_fcs);
+            }
+            cand.ok = true;
+            if (!any_ok || cand.fcs_pass) {
+                out = cand;
+                any_ok = true;
+            }
+            if (out.fcs_pass)
+                return true;
+        }
     }
-    std::vector<int8_t> decoded;
-    detail::vitdec_cl3(rx.data(), total, decoded);
-    if (decoded.size() < total)
-        return false;
-
-    // RS-coded stream = decoded[19 : total-2) (skip PHR bits + 2 tail bits).
-    std::vector<int8_t> rs_cw(decoded.begin() + 19,
-                              decoded.begin() + (total - 2));
-    if (rs_cw.size() != nsym)
-        return false;
-
-    std::vector<int8_t> psdu_bits_out;
-    if (!detail::rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out))
-        return false;
-
-    // Bits -> bytes, LSB-first (bit2int(..., 8, false)).
-    const size_t nbytes = psdu_bits_out.size() / 8;
-    out.bytes.resize(nbytes);
-    for (size_t i = 0; i < nbytes; ++i) {
-        uint8_t b = 0;
-        for (int bit = 0; bit < 8; ++bit)
-            b |= static_cast<uint8_t>(psdu_bits_out[8 * i + bit]) << bit;
-        out.bytes[i] = b;
-    }
-    out.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
-
-    // FCS (little-endian in the last two bytes).
-    if (nbytes >= 2) {
-        out.calculated_fcs = detail::crc16_802154(out.bytes.data(), nbytes - 2);
-        out.received_fcs = static_cast<uint16_t>(out.bytes[nbytes - 2]) |
-                           (static_cast<uint16_t>(out.bytes[nbytes - 1]) << 8);
-        out.fcs_pass = (out.received_fcs == out.calculated_fcs);
-    }
-    out.ok = true;
-    return true;
+    return any_ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -1651,6 +1960,14 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         rebase();
         return res;
     }
+    // MATLAB refineTimingWithNsSfd feeds the full-rate SFD result back into
+    // the preamble origin used by CIR/soft-chip extraction.  Keeping the
+    // earlier single-SYNC timing origin here discards that refinement and can
+    // leave a half-chip/sample grid error on real RF captures.
+    res.timing.preamble_start_sample =
+        res.sfd.sfd_start_sample - static_cast<int64_t>(std::llround(
+            static_cast<double>(profile.preamble_repetitions) *
+            res.timing.measured_period));
     lap(res.stage_sfd_us);
     // Stage 4: CIR + soft chips on the CFO-compensated frame.
     const int8_t* pc = GetPreambleCode(profile.code_index);

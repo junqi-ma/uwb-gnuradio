@@ -639,6 +639,11 @@ BOOST_AUTO_TEST_CASE(test_demod_core_p3_sfd_offset)
     BOOST_CHECK(res.status == DemodStatus::Success);
     BOOST_CHECK_CLOSE(static_cast<double>(res.sfd.sfd_start_sample), 75015.0,
                       0.1);
+    BOOST_CHECK_EQUAL(
+        res.timing.preamble_start_sample,
+        res.sfd.sfd_start_sample - static_cast<int64_t>(std::llround(
+            static_cast<double>(prof.preamble_repetitions) *
+            res.timing.measured_period)));
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_p3_sfd_sfo_adaptation)
@@ -1063,7 +1068,8 @@ BOOST_AUTO_TEST_CASE(test_demod_core_p2_cir_fir_microbench)
 
 // ---------------------------------------------------------------------------
 // R7: code-10 / DW1000 profile self-consistency + representative robustness.
-// Full code-10 golden is MATLAB-pending (see kPreambleCode10 comment).
+// Cyclic origin of kPreambleCode10 is locked to the MATLAB-generated
+// testdata/uwb_code10_preamble16_payload8.cfile single-symbol template.
 // ---------------------------------------------------------------------------
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r7_code10_self_consistency)
@@ -1110,6 +1116,55 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r7_code10_self_consistency)
     BOOST_CHECK_EQUAL(static_cast<int>(c9[0]), 1);
     BOOST_CHECK_EQUAL(static_cast<int>(c9[7]), -1);
 
+    // Cyclic origin lock: sparse-grid despread of the MATLAB code-10 SYNC
+    // template must match kPreambleCode10 (roll-23 origin).  Sample phase 2
+    // is the pulse peak of the lrwpan waveform at 998.4 MS/s.
+    {
+        std::vector<gr_complex> ref;
+        BOOST_REQUIRE(
+            load_cf32("../../../testdata/uwb_code10_preamble16_payload8.cfile",
+                      ref));
+        BOOST_REQUIRE_GE(ref.size(), kQm35SamplesPerSymbol);
+        // DC-remove first symbol (same as the capture driver).
+        gr_complex mean(0.0f, 0.0f);
+        for (size_t i = 0; i < kQm35SamplesPerSymbol; ++i)
+            mean += ref[i];
+        mean /= static_cast<float>(kQm35SamplesPerSymbol);
+        std::vector<float> chips(kQm35CodeLength, 0.0f);
+        float e_chips = 0.0f;
+        for (size_t c = 0; c < kQm35CodeLength; ++c) {
+            const size_t idx = 2 + c * 8; // sample phase 2, SF=4, 2 samp/chip
+            BOOST_REQUIRE_LT(idx, kQm35SamplesPerSymbol);
+            const gr_complex v = ref[idx] - mean;
+            chips[c] = v.real(); // waveform is essentially real after align
+            e_chips += chips[c] * chips[c];
+        }
+        // Project to real after a single global phase from the complex grid.
+        gr_complex gain(0.0f, 0.0f);
+        for (size_t c = 0; c < kQm35CodeLength; ++c) {
+            const size_t idx = 2 + c * 8;
+            gain += (ref[idx] - mean) * static_cast<float>(c10[c]);
+        }
+        // Normalized correlation of phase-aligned chips vs code.
+        float corr = 0.0f, e_code = 0.0f, e_rx = 0.0f;
+        const float ang = std::arg(gain);
+        const gr_complex rot(std::cos(-ang), std::sin(-ang));
+        for (size_t c = 0; c < kQm35CodeLength; ++c) {
+            const size_t idx = 2 + c * 8;
+            const gr_complex v = (ref[idx] - mean) * rot;
+            const float r = v.real();
+            corr += r * static_cast<float>(c10[c]);
+            e_rx += r * r;
+            e_code += static_cast<float>(c10[c] * c10[c]);
+        }
+        const float norm_corr =
+            corr / (std::sqrt(e_rx * e_code) + 1e-12f);
+        // Wrong cyclic origin (pre-fix draft) scored ~0.64; correct is ~0.999.
+        BOOST_CHECK_GT(norm_corr, 0.95f);
+        BOOST_CHECK_EQUAL(static_cast<int>(c10[0]), 1);
+        BOOST_CHECK_EQUAL(static_cast<int>(c10[1]), 1);
+    }
+
     // Dw1000Profile factory: code_index=10, 64 SYNC, converts to Qm35825 layout.
     auto dw = Dw1000Profile::Default();
     BOOST_CHECK_EQUAL(dw.code_index, size_t(10));
@@ -1118,6 +1173,109 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r7_code10_self_consistency)
     BOOST_CHECK_EQUAL(qm.code_index, size_t(10));
     BOOST_CHECK_EQUAL(qm.preamble_repetitions, size_t(64));
     BOOST_CHECK_CLOSE(qm.sample_rate, kQm35SampleRate, 1e-9);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r7_long_preamble_cir_uses_final_syncs)
+{
+    // MATLAB estimateCirAndSoftChips averages the final configured SYNC
+    // repetitions.  This matters when a DW1000 uses a 256-symbol preamble:
+    // the legacy 64-SYNC implementation's [skip, skip+count) range otherwise
+    // estimates the channel from the beginning of the preamble.
+    auto prof = Qm35825Profile::Default();
+    prof.code_index = 10;
+    prof.preamble_repetitions = 256;
+    prof.max_psdu_bytes = 1;
+
+    constexpr int64_t start = 128;
+    constexpr size_t late_delay = 12;
+    const size_t n = static_cast<size_t>(start) +
+                     prof.preamble_repetitions * kQm35SamplesPerSymbol +
+                     48 * kQm35SamplesPerSymbol;
+    std::vector<gr_complex> iq(n, gr_complex(0.0f, 0.0f));
+
+    const int8_t* code = GetPreambleCode(10);
+    const auto spread = BuildSampledCode(code, kQm35CodeLength);
+    for (size_t rep = 0; rep < prof.preamble_repetitions; ++rep) {
+        const size_t delay = (rep < 192) ? 0 : late_delay;
+        const size_t base = static_cast<size_t>(start) +
+                            rep * kQm35SamplesPerSymbol + delay;
+        for (size_t chip = 0; chip < spread.size(); ++chip) {
+            const size_t sample = base + 2 * chip;
+            BOOST_REQUIRE_LT(sample, iq.size());
+            iq[sample] += gr_complex(static_cast<float>(spread[chip]), 0.0f);
+        }
+    }
+
+    TimingResult timing;
+    timing.ok = true;
+    timing.preamble_start_sample = start;
+    timing.measured_period = static_cast<double>(kQm35SamplesPerSymbol);
+    timing.detected_peaks = prof.preamble_repetitions;
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    CirResult cir;
+    std::vector<int8_t> pcode(code, code + kQm35CodeLength);
+    BOOST_REQUIRE(core::stage_cir_softchips(iq.data(), iq.size(), prof, timing,
+                                            pcode, cir, scratch));
+    BOOST_CHECK_EQUAL(cir.first_path_sample,
+                      static_cast<size_t>(start) + late_delay);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r7_fractional_chip_grid_tracks_sfo)
+{
+    auto prof = Qm35825Profile::Default();
+    prof.code_index = 10;
+    prof.preamble_repetitions = 64;
+    prof.sfd_mode = "decawave";
+    prof.max_psdu_bytes = 1;
+
+    constexpr int64_t start = 128;
+    constexpr double period = 1016.25;
+    const auto sfd = GetSfdSequence("decawave");
+    const int8_t* code = GetPreambleCode(10);
+    const auto spread = BuildSampledCode(code, kQm35CodeLength);
+    const size_t symbol_count = prof.preamble_repetitions + sfd.size();
+    const size_t n = static_cast<size_t>(start +
+        std::ceil((symbol_count + 16) * period));
+    std::vector<gr_complex> iq(n, gr_complex(0.0f, 0.0f));
+
+    auto add_symbol = [&](size_t symbol, float sign) {
+        const double base = static_cast<double>(start) + symbol * period;
+        for (size_t chip = 0; chip < spread.size(); ++chip) {
+            const float value = sign * static_cast<float>(spread[chip]);
+            if (value == 0.0f)
+                continue;
+            const double pos = base + 2.0 * static_cast<double>(chip);
+            const size_t i0 = static_cast<size_t>(std::floor(pos));
+            const float frac = static_cast<float>(pos - std::floor(pos));
+            BOOST_REQUIRE_LT(i0 + 1, iq.size());
+            iq[i0] += gr_complex(value * (1.0f - frac), 0.0f);
+            iq[i0 + 1] += gr_complex(value * frac, 0.0f);
+        }
+    };
+    for (size_t rep = 0; rep < prof.preamble_repetitions; ++rep)
+        add_symbol(rep, 1.0f);
+    for (size_t k = 0; k < sfd.size(); ++k)
+        add_symbol(prof.preamble_repetitions + k,
+                   static_cast<float>(sfd[k]));
+
+    TimingResult timing;
+    timing.ok = true;
+    timing.preamble_start_sample = start;
+    timing.measured_period = period;
+    timing.detected_peaks = prof.preamble_repetitions;
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    CirResult cir;
+    std::vector<int8_t> pcode(code, code + kQm35CodeLength);
+    BOOST_REQUIRE(core::stage_cir_softchips(iq.data(), iq.size(), prof, timing,
+                                            pcode, cir, scratch));
+    NsSfdResult ns;
+    BOOST_REQUIRE(core::stage_ns_sfd(scratch.soft_chips, prof, sfd,
+                                     kQm35ChipsPerSymbol, ns, scratch));
+    BOOST_CHECK_GE(ns.metric, 0.75f);
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r7_robust_awgn_representative)

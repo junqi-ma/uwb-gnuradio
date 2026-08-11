@@ -68,13 +68,19 @@ public:
      * \param cir_rake_top_k  0 for the full CIR filter; otherwise use the K
      *                        strongest CIR taps for sparse RAKE combining.
      * \param cir_filter_mode "auto", "full", "rake", or "bypass".
+     * \param code_index      preamble code index (9 = QM35825, 10 = DW1000).
+     * \param preamble_repetitions number of preamble SYNC symbols the
+     *                        transmitter sends (drives NS-SFD search position
+     *                        and the CIR/phase-align window).
      */
     static sptr make(const std::string& template_path,
                      size_t num_workers = 2,
                      size_t queue_capacity = 64,
                      const std::string& sfd_mode = "4z2",
                      size_t cir_rake_top_k = 0,
-                     const std::string& cir_filter_mode = "auto");
+                     const std::string& cir_filter_mode = "auto",
+                     size_t code_index = 9,
+                     size_t preamble_repetitions = 64);
 
     /**
      * Same as make(), but takes an in-memory CF32 template waveform.
@@ -84,7 +90,9 @@ public:
                                    size_t queue_capacity = 64,
                                    const std::string& sfd_mode = "4z2",
                                    size_t cir_rake_top_k = 0,
-                                   const std::string& cir_filter_mode = "auto");
+                                   const std::string& cir_filter_mode = "auto",
+                                   size_t code_index = 9,
+                                   size_t preamble_repetitions = 64);
 
     // Counters / stats (thread-safe snapshots).
     uint64_t jobs_received() const;
@@ -118,7 +126,9 @@ protected:
                            size_t queue_capacity,
                            const std::string& sfd_mode,
                            size_t cir_rake_top_k,
-                           const std::string& cir_filter_mode);
+                           const std::string& cir_filter_mode,
+                           size_t code_index = 9,
+                           size_t preamble_repetitions = 64);
 
     bool start() override;
     bool stop() override;

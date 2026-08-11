@@ -142,7 +142,9 @@ UwbRealtimeDemodulator::UwbRealtimeDemodulator(
     size_t queue_capacity,
     const std::string& sfd_mode,
     size_t cir_rake_top_k,
-    const std::string& cir_filter_mode)
+    const std::string& cir_filter_mode,
+    size_t code_index,
+    size_t preamble_repetitions)
     : gr::block("uwb_realtime_demodulator",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
@@ -167,6 +169,17 @@ UwbRealtimeDemodulator::UwbRealtimeDemodulator(
         throw std::invalid_argument(
             "UwbRealtimeDemodulator: template waveform is empty");
     }
+    if (code_index != 9 && code_index != 10) {
+        throw std::invalid_argument(
+            "UwbRealtimeDemodulator: unsupported code_index " +
+            std::to_string(code_index) + " (supported: 9, 10)");
+    }
+    if (preamble_repetitions == 0) {
+        throw std::invalid_argument(
+            "UwbRealtimeDemodulator: preamble_repetitions must be > 0");
+    }
+    d_profile_.code_index = code_index;
+    d_profile_.preamble_repetitions = preamble_repetitions;
     // sfd_mode selects the SFD template used by stages 3/5.  The golden
     // MATLAB generator (lrwpan default) emits "ieee"; QM35825 uses "4z2".
     // Store the mode in the owned member so d_profile_.sfd_mode (a char*)
@@ -219,12 +232,14 @@ UwbRealtimeDemodulator::make(const std::string& template_path,
                              size_t queue_capacity,
                              const std::string& sfd_mode,
                              size_t cir_rake_top_k,
-                             const std::string& cir_filter_mode)
+                             const std::string& cir_filter_mode,
+                             size_t code_index,
+                             size_t preamble_repetitions)
 {
     auto tmpl = load_cf32_file(template_path);
     return gnuradio::get_initial_sptr(new UwbRealtimeDemodulator(
         tmpl, num_workers, queue_capacity, sfd_mode, cir_rake_top_k,
-        cir_filter_mode));
+        cir_filter_mode, code_index, preamble_repetitions));
 }
 
 std::shared_ptr<UwbRealtimeDemodulator>
@@ -234,11 +249,13 @@ UwbRealtimeDemodulator::make_from_template(
     size_t queue_capacity,
     const std::string& sfd_mode,
     size_t cir_rake_top_k,
-    const std::string& cir_filter_mode)
+    const std::string& cir_filter_mode,
+    size_t code_index,
+    size_t preamble_repetitions)
 {
     return gnuradio::get_initial_sptr(new UwbRealtimeDemodulator(
         template_wf, num_workers, queue_capacity, sfd_mode, cir_rake_top_k,
-        cir_filter_mode));
+        cir_filter_mode, code_index, preamble_repetitions));
 }
 
 // ---------------------------------------------------------------------------
