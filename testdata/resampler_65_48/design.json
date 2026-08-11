@@ -1,0 +1,35 @@
+{
+  "interpolation": 65,
+  "decimation": 48,
+  "input_rate_hz": 737280000.0,
+  "output_rate_hz": 998400000.0,
+  "virtual_rate_hz": 47923200000.0,
+  "passband_ripple_db_spec": 0.1,
+  "stopband_atten_db_spec": 70.0,
+  "profiles": [
+    {
+      "name": "quality",
+      "passband_mhz": 330.0,
+      "passband_ripple_db": 3.708941740399041e-06,
+      "stopband_atten_db": 96.96752357191023,
+      "taps": 5363,
+      "beta": 6.75526,
+      "dc_gain": 65.0,
+      "group_delay_virtual_samples": 2681.0,
+      "group_delay_input_samples": 41.246153846153845,
+      "group_delay_output_samples": 55.854166666666664
+    },
+    {
+      "name": "realtime",
+      "passband_mhz": 290.0,
+      "passband_ripple_db": 3.6117624091502876e-06,
+      "stopband_atten_db": 95.85045913703047,
+      "taps": 2635,
+      "beta": 6.75526,
+      "dc_gain": 65.00000000000001,
+      "group_delay_virtual_samples": 1317.0,
+      "group_delay_input_samples": 20.26153846153846,
+      "group_delay_output_samples": 27.4375
+    }
+  ]
+}

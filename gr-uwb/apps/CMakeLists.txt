@@ -38,3 +38,17 @@ target_link_libraries(benchmark_energy_gate_formats
     gnuradio-uwb
     gnuradio::gnuradio-runtime
 )
+
+########################################################################
+# Level-A resampler baseline: 65/48 rational_resampler_ccf (737.28→998.4)
+# Spec: 开发方案_GNURadio软件升采样_737.28M到998.4M.md §9
+########################################################################
+find_package(Threads REQUIRED)
+add_executable(benchmark_resampler_65_48 benchmark_resampler_65_48.cc)
+target_link_libraries(benchmark_resampler_65_48
+    gnuradio-uwb
+    gnuradio::gnuradio-blocks
+    gnuradio::gnuradio-runtime
+    gnuradio::gnuradio-filter
+    Threads::Threads
+)

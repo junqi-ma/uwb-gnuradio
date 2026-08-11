@@ -1,0 +1,72 @@
+options:
+  parameters:
+    author: UWB GNU Radio Project
+    category: UWB
+    cmake_opt: ''
+    comment: X410 737.28M -> host 65/48 software resampler -> 998.4M detector capture
+    copyright: ''
+    description: X410 software-resampler detector capture. Host-side 65/48 upsampling (737.28 -> 998.4 MS/s) with the fixed UwbRationalResamplerCcf65_48 block, then UwbDetector (CF32) -> UwbPacketWriter. Use UwbDetectorSc16 if the SC16 resampler path (Level C) replaces CF32.
+    gen_cmake: 'On'
+    gen_linking: dynamic
+    generate_options: no_gui
+    hier_block_src_path: '.:'
+    id: x410_software_resampler_uwb_detector
+    max_nouts: '0'
+    output_language: python
+    placement: (0,0)
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: prompt
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: X410 Software Resampler UWB Detector Capture
+    window_size: ''
+  states: {coordinate: [8, 8], rotation: 0, state: enabled}
+blocks:
+- name: radio_rate
+  id: variable
+  parameters: {comment: X410 FPGA / streamer input rate, value: '737.28e6'}
+  states: {coordinate: [16, 80], rotation: 0, state: enabled}
+- name: samp_rate
+  id: variable
+  parameters: {comment: Software resampler output / host rate, value: '998.4e6'}
+  states: {coordinate: [16, 144], rotation: 0, state: enabled}
+- name: preamble_file
+  id: parameter
+  parameters: {alias: '', comment: '', hide: none, label: Preamble template file, short_id: '', type: str, value: "'testdata/reference_preamble.bin'"}
+  states: {coordinate: [16, 208], rotation: 0, state: enabled}
+- name: output_dir
+  id: parameter
+  parameters: {alias: '', comment: '', hide: none, label: Output directory, short_id: '', type: str, value: "'/data/uwb_capture'"}
+  states: {coordinate: [16, 272], rotation: 0, state: enabled}
+- name: uhd_rfnoc_graph_0
+  id: uhd_rfnoc_graph
+  parameters: {clock_source_0: internal, dev_addr: '"addr=192.168.10.2"', dev_args: '""', num_mboards: '1', time_source_0: ''}
+  states: {coordinate: [240, 32], rotation: 0, state: enabled}
+- name: uhd_rfnoc_rx_radio_0
+  id: uhd_rfnoc_rx_radio
+  parameters: {agc: Default, antenna: RX2, bandwidth: '0', block_args: '""', dc_offset: 'False', device_select: '0', frequency: '6.5e9', gain: '20', instance_index: '0', iq_balance: 'False', num_chans: '1', rate: radio_rate}
+  states: {coordinate: [240, 128], rotation: 0, state: enabled}
+- name: uhd_rfnoc_rx_streamer_0
+  id: uhd_rfnoc_rx_streamer
+  parameters: {num_chans: '1', otw: sc16, output_type: fc32}
+  states: {coordinate: [496, 128], rotation: 0, state: enabled}
+- name: uwb_rational_resampler_ccf_65_48_0
+  id: uwb_rational_resampler_ccf_65_48
+  parameters: {reset_on_discontinuity: 'True', tag_propagation_enable: 'True', taps_file_or_profile: '"quality"'}
+  states: {coordinate: [736, 128], rotation: 0, state: enabled}
+- name: uwb_detector_0
+  id: uwb_detector
+  parameters: {capture_samples: '309184', template_file: preamble_file, pre_trigger: '9984', sample_rate: samp_rate}
+  states: {coordinate: [976, 128], rotation: 0, state: enabled}
+- name: uwb_packet_writer_0
+  id: uwb_packet_writer
+  parameters: {base_name: capture, directory: output_dir, one_file_per_packet: 'False'}
+  states: {coordinate: [1248, 128], rotation: 0, state: enabled}
+connections:
+- [uhd_rfnoc_rx_radio_0, '0', uhd_rfnoc_rx_streamer_0, '0']
+- [uhd_rfnoc_rx_streamer_0, '0', uwb_rational_resampler_ccf_65_48_0, '0']
+- [uwb_rational_resampler_ccf_65_48_0, '0', uwb_detector_0, '0']
+- [uwb_detector_0, packet, uwb_packet_writer_0, packet]
+metadata: {file_format: 1}

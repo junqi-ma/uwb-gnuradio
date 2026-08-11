@@ -1,0 +1,56 @@
+id: uwb_pdu_rational_resampler_ccf_65_48
+label: UWB PDU Rational Resampler 65/48 (CF32)
+category: '[UWB]'
+
+parameters:
+-   id: taps_file_or_profile
+    label: Taps file / profile
+    dtype: string
+    default: 'quality_minorder'
+    # "quality" | "realtime" | "quality_minorder" | "realtime_minorder" | path
+-   id: output_sample_rate
+    label: Output sample rate
+    dtype: real
+    default: '998.4e6'
+-   id: validate_input_rate
+    label: Validate input rate (737.28e6)
+    dtype: bool
+    default: 'True'
+
+inputs:
+-   domain: message
+    id: packet
+    optional: true
+
+outputs:
+-   domain: message
+    id: packet
+    optional: true
+-   domain: message
+    id: status
+    optional: true
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.pdu_rational_resampler_ccf_65_48(${taps_file_or_profile}, ${output_sample_rate}, ${validate_input_rate})
+
+cpp_templates:
+    includes: ['#include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>']
+    make: 'this->${id} = gr::uwb::UwbPduRationalResamplerCcf65_48::make(${taps_file_or_profile}, ${output_sample_rate}, ${validate_input_rate});'
+    link: ['gnuradio::gnuradio-uwb']
+
+documentation: |-
+    PDU-level fixed 65/48 CF32 rational resampler (737.28 MS/s → 998.4 MS/s).
+
+    Consumes window PDUs from UwbScheduledExtractor (native 737.28 MS/s),
+    resamples the whole window via RationalResampler65_48Core (one-shot
+    process+flush), and emits a 998.4 MS/s PDU with group-delay-aware
+    coordinate mapping:
+
+        map(p) = round((p*65 + (T-1)/2)/48)
+
+    Default taps profile is quality_minorder (2707 taps, relative −70 dB).
+    Continuous stream resampling is not real-time on host; use this block
+    after scheduled native-rate capture (see 分析与下阶段建议 §3.2).
+
+file_format: 1

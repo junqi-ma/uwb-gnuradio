@@ -1,0 +1,47 @@
+id: uwb_rational_resampler_ccf_65_48
+label: UWB Rational Resampler 65/48 (CF32)
+category: '[UWB]'
+
+parameters:
+-   id: taps_file_or_profile
+    label: Taps file / profile
+    dtype: string
+    default: 'quality'
+    # "quality" | "realtime" | absolute path to float32 binary taps
+-   id: tag_propagation_enable
+    label: Tag propagation enable
+    dtype: bool
+    default: 'True'
+-   id: reset_on_discontinuity
+    label: Reset on discontinuity
+    dtype: bool
+    default: 'True'
+
+inputs:
+-   domain: stream
+    dtype: complex
+
+outputs:
+-   domain: stream
+    dtype: complex
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.rational_resampler_ccf_65_48(${taps_file_or_profile}, ${tag_propagation_enable}, ${reset_on_discontinuity})
+
+cpp_templates:
+    includes: ['#include <gnuradio/uwb/uwb_rational_resampler_ccf_65_48.h>']
+    make: 'this->${id} = gr::uwb::UwbRationalResamplerCcf65_48::make(${taps_file_or_profile}, ${tag_propagation_enable}, ${reset_on_discontinuity});'
+    link: ['gnuradio::gnuradio-uwb']
+
+documentation: |-
+    Fixed 65/48 CF32 rational resampler (737.28 MS/s → 998.4 MS/s).
+
+    L=65, M=48 are a fixed contract (not runtime parameters).
+    taps_file_or_profile: "quality" (T=5363), "realtime" (T=2635), or path
+    to a float32 binary taps file (already scaled by L so DC sum ≈ 65).
+
+    Tag policy: TPP_DONT + manual map for rx_time / rx_rate / rx_freq /
+    overflow / discontinuity when tag_propagation_enable is true.
+
+file_format: 1

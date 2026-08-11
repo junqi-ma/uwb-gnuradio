@@ -22,6 +22,8 @@
 #include <gnuradio/uwb/uwb_packet_writer.h>
 #include <gnuradio/uwb/uwb_realtime_demodulator.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor.h>
+#include <gnuradio/uwb/uwb_rational_resampler_ccf_65_48.h>
+#include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>
 
 namespace py = pybind11;
 
@@ -302,6 +304,88 @@ void bind_realtime_demodulator(py::module& m)
         .def("reset_stats", &gr::uwb::UwbRealtimeDemodulator::reset_stats);
 }
 
+void bind_rational_resampler_ccf_65_48(py::module& m)
+{
+    py::class_<gr::uwb::UwbRationalResamplerCcf65_48,
+               gr::block,
+               std::shared_ptr<gr::uwb::UwbRationalResamplerCcf65_48>>(
+        m, "rational_resampler_ccf_65_48")
+        .def(py::init(&gr::uwb::UwbRationalResamplerCcf65_48::make),
+             py::arg("taps_file_or_profile") = std::string("quality"),
+             py::arg("tag_propagation_enable") = true,
+             py::arg("reset_on_discontinuity") = true,
+             py::arg("num_workers") = 1)
+        .def_static("make_from_taps",
+                    &gr::uwb::UwbRationalResamplerCcf65_48::make_from_taps,
+                    py::arg("taps"),
+                    py::arg("tag_propagation_enable") = true,
+                    py::arg("reset_on_discontinuity") = true,
+                    py::arg("num_workers") = 1)
+        .def("taps", &gr::uwb::UwbRationalResamplerCcf65_48::taps)
+        .def("tap_count", &gr::uwb::UwbRationalResamplerCcf65_48::tap_count)
+        .def("arm_length", &gr::uwb::UwbRationalResamplerCcf65_48::arm_length)
+        .def("kernel_name", &gr::uwb::UwbRationalResamplerCcf65_48::kernel_name)
+        .def("num_workers", &gr::uwb::UwbRationalResamplerCcf65_48::num_workers)
+        .def("set_num_workers",
+             &gr::uwb::UwbRationalResamplerCcf65_48::set_num_workers,
+             py::arg("n"))
+        .def("set_kernel",
+             &gr::uwb::UwbRationalResamplerCcf65_48::set_kernel,
+             py::arg("name"))
+        .def("input_items", &gr::uwb::UwbRationalResamplerCcf65_48::input_items)
+        .def("output_items",
+             &gr::uwb::UwbRationalResamplerCcf65_48::output_items)
+        .def("resets", &gr::uwb::UwbRationalResamplerCcf65_48::resets)
+        .def("discontinuities",
+             &gr::uwb::UwbRationalResamplerCcf65_48::discontinuities)
+        .def("tag_errors", &gr::uwb::UwbRationalResamplerCcf65_48::tag_errors)
+        .def("reset", &gr::uwb::UwbRationalResamplerCcf65_48::reset)
+        .def("map_input_offset_to_output",
+             &gr::uwb::UwbRationalResamplerCcf65_48::map_input_offset_to_output,
+             py::arg("p"));
+}
+
+void bind_pdu_rational_resampler_ccf_65_48(py::module& m)
+{
+    using Blk = gr::uwb::UwbPduRationalResamplerCcf65_48;
+
+    py::enum_<Blk::EmitPolicy>(m, "pdu_resampler_emit_policy")
+        .value("FullWindow", Blk::EmitPolicy::FullWindow)
+        .value("CaptureOnly", Blk::EmitPolicy::CaptureOnly)
+        .export_values();
+
+    py::class_<Blk, gr::block, std::shared_ptr<Blk>>(
+        m, "pdu_rational_resampler_ccf_65_48")
+        .def(py::init(&Blk::make),
+             py::arg("taps_file_or_profile") = std::string("quality_minorder"),
+             py::arg("output_sample_rate") = Blk::kOutputRateHz,
+             py::arg("validate_input_rate") = true,
+             py::arg("emit_policy") = Blk::EmitPolicy::FullWindow)
+        .def_static("make_from_taps",
+                    &Blk::make_from_taps,
+                    py::arg("taps"),
+                    py::arg("output_sample_rate") = Blk::kOutputRateHz,
+                    py::arg("validate_input_rate") = true,
+                    py::arg("emit_policy") = Blk::EmitPolicy::FullWindow)
+        .def("taps", &Blk::taps)
+        .def("tap_count", &Blk::tap_count)
+        .def("output_sample_rate", &Blk::output_sample_rate)
+        .def("validate_input_rate", &Blk::validate_input_rate)
+        .def("emit_policy", &Blk::emit_policy)
+        .def("set_emit_policy", &Blk::set_emit_policy, py::arg("p"))
+        .def("map_input_offset_to_output",
+             &Blk::map_input_offset_to_output,
+             py::arg("p"))
+        .def("pdus_received", &Blk::pdus_received)
+        .def("pdus_emitted", &Blk::pdus_emitted)
+        .def("pdus_dropped", &Blk::pdus_dropped)
+        .def("total_input_samples", &Blk::total_input_samples)
+        .def("total_output_samples", &Blk::total_output_samples)
+        .def("resets", &Blk::resets)
+        .def("short_guard_events", &Blk::short_guard_events)
+        .def("reset_stats", &Blk::reset_stats);
+}
+
 // We need this hack because import_array() returns NULL
 // for newer Python versions.
 // This function is also necessary because it ensures access to the C API
@@ -328,4 +412,6 @@ PYBIND11_MODULE(uwb_python, m)
     bind_packet_writer(m);
     bind_scheduled_extractor(m);
     bind_realtime_demodulator(m);
+    bind_rational_resampler_ccf_65_48(m);
+    bind_pdu_rational_resampler_ccf_65_48(m);
 }

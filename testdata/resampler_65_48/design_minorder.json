@@ -1,0 +1,27 @@
+{
+  "interpolation": 65,
+  "decimation": 48,
+  "input_rate_hz": 737280000.0,
+  "output_rate_hz": 998400000.0,
+  "criterion": "relative stopband |Hstop|/|Hpass| <= -70 dB, ripple <= 0.1 dB, same passband edges",
+  "profiles": [
+    {
+      "name": "quality",
+      "passband_mhz": 330.0,
+      "ripple_db": 0.0049722678131303155,
+      "rel_sb_db": -70.03393778427032,
+      "pb_gain_db": 36.260642682403336,
+      "dc": 64.99999999999999,
+      "taps": 2707
+    },
+    {
+      "name": "realtime",
+      "passband_mhz": 290.0,
+      "ripple_db": 0.005294222635882306,
+      "rel_sb_db": -70.07497840750199,
+      "pb_gain_db": 36.26197030168896,
+      "dc": 65.0,
+      "taps": 1319
+    }
+  ]
+}

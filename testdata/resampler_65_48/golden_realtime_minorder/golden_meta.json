@@ -1,0 +1,12 @@
+{
+  "interpolation": 65,
+  "decimation": 48,
+  "input_rate_hz": 737280000.0,
+  "output_rate_hz": 998400000.0,
+  "n_input_samples": 4096,
+  "profile": "realtime_minorder",
+  "tap_count": 1319,
+  "uwb_998p4_start_sample": 4992000,
+  "uwb_decimate_taps_profile": "realtime",
+  "uwb_input_len": 6090
+}

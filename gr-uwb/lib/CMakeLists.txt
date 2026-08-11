@@ -21,6 +21,8 @@ list(APPEND uwb_sources
     uwb_packet_writer.cc
     uwb_scheduled_extractor.cc
     uwb_realtime_demodulator.cc
+    uwb_rational_resampler_ccf_65_48.cc
+    uwb_pdu_rational_resampler_ccf_65_48.cc
 )
 
 set(uwb_sources "${uwb_sources}" PARENT_SCOPE)
@@ -31,8 +33,15 @@ if(NOT uwb_sources)
     return()
 endif(NOT uwb_sources)
 
+find_package(Threads REQUIRED)
+
 add_library(gnuradio-uwb SHARED ${uwb_sources})
-target_link_libraries(gnuradio-uwb gnuradio::gnuradio-runtime gnuradio::gnuradio-filter)
+target_link_libraries(gnuradio-uwb
+    gnuradio::gnuradio-runtime
+    gnuradio::gnuradio-filter
+    Volk::volk
+    Threads::Threads
+)
 target_include_directories(gnuradio-uwb
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
     PUBLIC $<INSTALL_INTERFACE:include>
@@ -75,6 +84,9 @@ list(APPEND test_uwb_sources
     qa_uwb_demod_core.cc
     qa_uwb_realtime_demodulator.cc
     qa_uwb_defaults.cc
+    qa_uwb_rational_resampler_core.cc
+    qa_uwb_rational_resampler.cc
+    qa_uwb_pdu_rational_resampler.cc
 )
 # Anything we need to link to for the unit tests go here
 list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks)
