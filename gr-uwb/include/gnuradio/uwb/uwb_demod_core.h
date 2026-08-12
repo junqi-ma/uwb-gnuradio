@@ -235,25 +235,19 @@ inline bool stage_timing(const std::complex<float>* rx,
         return true;
     };
 
-    // Locate the first SYNC start near the seed.
-    //
-    // Real QM35825 scheduled captures show two orthogonal seed errors:
-    //   1) sub-symbol offsets of tens–hundreds of samples (t0 bias + SFO)
-    //   2) whole-SYNC landings (detector seeds a strong later SYNC)
-    // A tight ±64 window only covers (tiny) residual after a good seed.  We
-    // therefore:
-    //   a) coarse-scan the full timing_search_margin at stride S (cheap),
-    //   b) fine-refine ±S around the best coarse hit,
-    //   c) also probe whole-SYNC grid offsets (legacy path for (2)),
-    // then backtrack with a relaxed threshold to recover weak leading SYNCs.
+    // Locate the first SYNC start near the seed.  MATLAB detectSeededPreamble
+    // searches only max(64, ceil(symbolLength/32)) samples around the seed at
+    // full rate and tracks from the strongest hit there; the wide stride-S
+    // coarse scan is retained only as a fallback when the seed-narrow search
+    // fails (a seed that lands a whole SYNC or more off the true start).
     int64_t first_start = -1;
     float first_metric = 0.0f;
     std::complex<float> first_corr(0.0f, 0.0f);
+    const float thr = profile.radar_verification_threshold;
     {
         const int64_t seed =
             (seed_start >= 0) ? seed_start
                               : (int64_t)(roi_start + (roi_end - roi_start) / 2);
-        const float thr = profile.radar_verification_threshold;
         const int64_t margin =
             static_cast<int64_t>(profile.timing_search_margin);
         const int64_t stride = std::max<int64_t>(
@@ -271,9 +265,30 @@ inline bool stage_timing(const std::complex<float>* rx,
             }
         };
 
-        // (a) Coarse scan — sliding power, VOLK-grade conjugate dots at stride.
+        // MATLAB detectSeededPreamble: prefer a narrow FULL-RATE search around
+        // the seed (max(64, ceil(symbolLength/32)) samples each side).  A wide
+        // stride-S coarse scan can miss a narrow symbol-0 peak (sub-symbol seed
+        // offset) and then prefer a later STRONGER SYNC -- exactly what made
+        // the DW1000 preamble_start land ~6 SYNCs late.  The seed-nearby
+        // result is authoritative; the wide scan is only a fallback.
+        bool seed_acquired = false;
+        {
+            int64_t pos = -1;
+            float met = 0.0f;
+            std::complex<float> corr(0.0f, 0.0f);
+            if (local_best(seed, std::max<int64_t>(64, stride), thr, &pos, &met,
+                           &corr)) {
+                first_start = pos;
+                first_metric = met;
+                first_corr = corr;
+                seed_acquired = true;
+            }
+        }
+
+        // (a) Coarse scan (fallback only) -- sliding power, VOLK-grade
+        // conjugate dots at stride.
         const auto coarse_begin = std::chrono::steady_clock::now();
-        if (j_hi > j_lo) {
+        if (!seed_acquired && j_hi > j_lo) {
             float pw = 0.0f;
             for (size_t k = 0; k < L; ++k)
                 pw += std::norm(rx[j_lo + static_cast<int64_t>(k)]);
@@ -299,7 +314,7 @@ inline bool stage_timing(const std::complex<float>* rx,
             out.coarse_search_us = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now() - coarse_begin).count());
-            // (b) Fine refine around the coarse peak (and the raw seed).
+            // (b) Fine refine around the coarse peak.
             int64_t pos = -1;
             float met = 0.0f;
             std::complex<float> corr(0.0f, 0.0f);
@@ -307,20 +322,15 @@ inline bool stage_timing(const std::complex<float>* rx,
                 consider(pos, met, corr);
             else if (best_coarse_m >= thr)
                 consider(best_coarse_j, best_coarse_m, best_coarse_c);
-            if (local_best(seed, std::max<int64_t>(64, stride), thr, &pos, &met,
-                           &corr))
-                consider(pos, met, corr);
         }
 
-        // (c) Whole-SYNC grid probes (covers seed landing mid-preamble).
-        {
+        // (c) Whole-SYNC grid probes (fallback only; covers a seed that lands
+        // mid-preamble and a sub-symbol confirmation that must not replace an
+        // SFD-refined anchor with a stronger neighbouring SYNC).
+        if (!seed_acquired) {
             int64_t pos = -1;
             float met = 0.0f;
             std::complex<float> corr(0.0f, 0.0f);
-            // A sub-symbol confirmation window must not probe a neighbouring
-            // full SYNC: that would let the stronger next repetition replace
-            // an SFD-refined anchor.  Wide acquisition still probes every
-            // whole-SYNC offset covered by its configured margin.
             const int64_t grid_half = margin / kQm35SamplesPerSymbol;
             for (int64_t n_sym = -grid_half; n_sym <= grid_half; ++n_sym) {
                 if (local_best(seed + n_sym * static_cast<int64_t>(
@@ -388,11 +398,14 @@ inline bool stage_timing(const std::complex<float>* rx,
 
     out.detected_peaks = out.peak_samples.size();
     out.expected_peaks = profile.preamble_repetitions;
-    out.preamble_start_sample = start;
     out.metric = first_metric;
 
-    // Linear fit of peak positions vs repetition index -> measured period.
-    // peak(k) = start + k*period  =>  least squares slope.
+    // Linear fit of peak positions vs repetition index -> measured period and
+    // the preamble start.  peak(k) = start + k*period  =>  least squares
+    // slope = period, intercept = the SYNC-start at index 0.  This matches
+    // MATLAB trackCandidatePreamble: startSample = round(polyfit(...,1).coef
+    // (2)), i.e. the start is derived from the WHOLE tracked train rather than
+    // the first peak, so a slightly-off first peak does not bias the origin.
     const size_t np = out.peak_samples.size();
     if (np >= 2) {
         double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
@@ -405,13 +418,22 @@ inline bool stage_timing(const std::complex<float>* rx,
             sxy += x * y;
         }
         const double denom = static_cast<double>(np) * sxx - sx * sx;
-        if (std::abs(denom) > 1e-12)
+        if (std::abs(denom) > 1e-12) {
             out.measured_period = (static_cast<double>(np) * sxy - sx * sy) /
                                   denom;
-        else
+            // peak_samples use the symbol-END convention (start + L - 1), so
+            // the intercept is also symbol-END; convert back to the SYNC start.
+            const double intercept_end = (sy - out.measured_period * sx) / np;
+            out.preamble_start_sample = std::max<int64_t>(
+                0, static_cast<int64_t>(std::llround(intercept_end)) -
+                       (static_cast<int64_t>(L) - 1));
+        } else {
             out.measured_period = static_cast<double>(period);
+            out.preamble_start_sample = start;
+        }
     } else {
         out.measured_period = static_cast<double>(period);
+        out.preamble_start_sample = start;
     }
 
     out.ok = true;
