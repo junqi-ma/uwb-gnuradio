@@ -80,15 +80,6 @@ struct Qm35825Profile {
     double period_tolerance_pct = 2.0; // SYNC period deviation tolerance
     size_t min_valid_peaks = 8;        // min SYNC peaks to accept timing
 
-    // SFD search window (half-width in chips around expected start)
-    size_t sfd_search_half_width = 8;
-    // SFD acquisition probes the nominal position (preamble start +
-    // preamble_repetitions × period), then walks this many symbols FORWARD
-    // and stops at the first threshold-qualified SFD.  Ten covers the case
-    // where the trailing preamble SYNCs are below the acquisition threshold
-    // (partial train) so the SFD sits later than the nominal position.
-    size_t sfd_max_forward_symbols = 10;
-
     // soft-chip / CIR threshold
     float cir_detection_threshold = 0.3f;
     float sfd_detection_threshold = 0.3f;
@@ -234,9 +225,6 @@ struct Dw1000Profile {
 
     double period_tolerance_pct = 2.0;
     size_t min_valid_peaks = 8;
-    size_t sfd_search_half_width = 8;
-    size_t sfd_max_forward_symbols = 10;
-
     float cir_detection_threshold = 0.3f;
     float sfd_detection_threshold = 0.3f;
     float radar_verification_threshold = 0.3f;
@@ -267,8 +255,6 @@ struct Dw1000Profile {
         p.cfo_min_fit_repetitions = cfo_min_fit_repetitions;
         p.period_tolerance_pct = period_tolerance_pct;
         p.min_valid_peaks = min_valid_peaks;
-        p.sfd_search_half_width = sfd_search_half_width;
-        p.sfd_max_forward_symbols = sfd_max_forward_symbols;
         p.cir_detection_threshold = cir_detection_threshold;
         p.sfd_detection_threshold = sfd_detection_threshold;
         p.radar_verification_threshold = radar_verification_threshold;

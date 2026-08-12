@@ -583,14 +583,12 @@ inline bool stage_sfd(const std::complex<float>* rx,
     // Search center = one measured period after the last tracked SYNC START
     // (NOT the fixed preamble_repetitions * period extrapolation), so SFO and
     // a partial SYNC train are handled.  Half-width scales with how trustworthy
-    // the tracking is: full train -> sfd_search_half_width chips (8*2=16
-    // samples), partial train -> 64 samples, nearly untracked -> full symbol.
-    const size_t np = timing.peak_samples.size();
-    int64_t half = static_cast<int64_t>(sym); // untrustworthy fallback
-    if (np >= profile.preamble_repetitions)
-        half = static_cast<int64_t>(profile.sfd_search_half_width) * 2;
-    else if (np >= 2)
-        half = 64;
+    // MATLAB strategy (refineTimingWithNsSfd): search a symmetric
+    // expected ± samples_per_symbol window and take the maximum.  A full
+    // samples_per_symbol half-width covers an SFD that sits up to one symbol
+    // earlier or later than the nominal position (e.g. a partial preamble
+    // train, or a preamble start a few SYNCs into the frame).
+    const int64_t half = static_cast<int64_t>(sym);
     // MATLAB strategy (refineTimingWithNsSfd): SFD start = preamble start +
     // preamble_repetitions × measured_period.  This is physically correct even
     // when the trailing preamble SYNC(s) score below the acquisition threshold
@@ -682,21 +680,10 @@ inline bool stage_sfd(const std::complex<float>* rx,
         return window_best >= profile.sfd_detection_threshold;
     };
 
-    // Fast path: preamble timing's prediction first, then step backwards one
-    // SYNC at a time.  On the QM35 reference capture the first qualifying
-    // candidate always agrees with the old global-best result, and the needed
-    // Probe the nominal SFD position, then step FORWARD up to
-    // sfd_max_forward_symbols symbols and stop at the first
-    // threshold-qualified SFD.  A partial preamble train (trailing SYNC below
-    // the acquisition threshold) can only push the SFD later than the nominal
-    // position, never earlier, so no backward search is performed.
-    bool sfd_found = scan_window(expected, 0);
-    for (size_t fwd = 1; fwd <= profile.sfd_max_forward_symbols && !sfd_found;
-         ++fwd) {
-        sfd_found = scan_window(
-            expected + static_cast<int64_t>(fwd) * period,
-            static_cast<int64_t>(fwd));
-    }
+    // MATLAB-style symmetric ±1-symbol search: one scan_window over
+    // [expected - samples_per_symbol, expected + samples_per_symbol], taking
+    // the maximum correlation (no symbol stepping in either direction).
+    scan_window(expected, 0);
     if (best < profile.sfd_detection_threshold)
         return false;
 
