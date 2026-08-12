@@ -19,6 +19,7 @@ install(FILES
     uwb_preamble_detector.h
     uwb_scheduled_extractor_core.h
     uwb_scheduled_extractor.h
+    uwb_scheduled_extractor_sc16.h
     uwb_rational_resampler_core.h
     uwb_rational_resampler_ccf_65_48.h
     uwb_pdu_rational_resampler_ccf_65_48.h

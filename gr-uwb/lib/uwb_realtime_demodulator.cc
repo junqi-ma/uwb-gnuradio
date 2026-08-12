@@ -144,7 +144,8 @@ UwbRealtimeDemodulator::UwbRealtimeDemodulator(
     size_t cir_rake_top_k,
     const std::string& cir_filter_mode,
     size_t code_index,
-    size_t preamble_repetitions)
+    size_t preamble_repetitions,
+    size_t timing_coarse_stride)
     : gr::block("uwb_realtime_demodulator",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
@@ -169,17 +170,22 @@ UwbRealtimeDemodulator::UwbRealtimeDemodulator(
         throw std::invalid_argument(
             "UwbRealtimeDemodulator: template waveform is empty");
     }
-    if (code_index != 9 && code_index != 10) {
+    if (code_index < 9 || code_index > 12) {
         throw std::invalid_argument(
             "UwbRealtimeDemodulator: unsupported code_index " +
-            std::to_string(code_index) + " (supported: 9, 10)");
+            std::to_string(code_index) + " (supported: 9, 10, 11, 12)");
     }
     if (preamble_repetitions == 0) {
         throw std::invalid_argument(
             "UwbRealtimeDemodulator: preamble_repetitions must be > 0");
     }
+    if (timing_coarse_stride == 0) {
+        throw std::invalid_argument(
+            "UwbRealtimeDemodulator: timing_coarse_stride must be > 0");
+    }
     d_profile_.code_index = code_index;
     d_profile_.preamble_repetitions = preamble_repetitions;
+    d_profile_.timing_coarse_stride = timing_coarse_stride;
     // Match UWB_demodulation/run_decode_uwb_all.m: explicitly skip the first
     // ten settling SYNCs and estimate CIR from every remaining repetition.
     // For unusually short preambles, retain all repetitions instead.
@@ -214,6 +220,8 @@ UwbRealtimeDemodulator::UwbRealtimeDemodulator(
     message_port_register_in(pmt::mp("control"));
     message_port_register_out(pmt::mp("result"));
     message_port_register_out(pmt::mp("status"));
+    // FCS-pass observations for UwbScheduledExtractor "lock_obs" (schedule lock).
+    message_port_register_out(pmt::mp("schedule_feedback"));
 
     set_msg_handler(pmt::mp("samples"),
                     [this](pmt::pmt_t msg) { handle_samples(msg); });
@@ -244,12 +252,14 @@ UwbRealtimeDemodulator::make(const std::string& template_path,
                              size_t cir_rake_top_k,
                              const std::string& cir_filter_mode,
                              size_t code_index,
-                             size_t preamble_repetitions)
+                             size_t preamble_repetitions,
+                             size_t timing_coarse_stride)
 {
     auto tmpl = load_cf32_file(template_path);
     return gnuradio::get_initial_sptr(new UwbRealtimeDemodulator(
         tmpl, num_workers, queue_capacity, sfd_mode, cir_rake_top_k,
-        cir_filter_mode, code_index, preamble_repetitions));
+        cir_filter_mode, code_index, preamble_repetitions,
+        timing_coarse_stride));
 }
 
 std::shared_ptr<UwbRealtimeDemodulator>
@@ -261,11 +271,13 @@ UwbRealtimeDemodulator::make_from_template(
     size_t cir_rake_top_k,
     const std::string& cir_filter_mode,
     size_t code_index,
-    size_t preamble_repetitions)
+    size_t preamble_repetitions,
+    size_t timing_coarse_stride)
 {
     return gnuradio::get_initial_sptr(new UwbRealtimeDemodulator(
         template_wf, num_workers, queue_capacity, sfd_mode, cir_rake_top_k,
-        cir_filter_mode, code_index, preamble_repetitions));
+        cir_filter_mode, code_index, preamble_repetitions,
+        timing_coarse_stride));
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +328,11 @@ size_t
 UwbRealtimeDemodulator::num_workers() const
 {
     return d_num_workers_;
+}
+size_t
+UwbRealtimeDemodulator::timing_coarse_stride() const
+{
+    return d_profile_.timing_coarse_stride;
 }
 uint64_t
 UwbRealtimeDemodulator::latency_p50_us() const
@@ -546,12 +563,23 @@ UwbRealtimeDemodulator::handle_samples(pmt::pmt_t msg)
     Job job;
     job.packet_id = dict_u64(meta, "packet_id", 0);
     job.schedule_index = dict_u64(meta, "schedule_index", 0);
+    // Seed stage_timing from the schedule prediction.  A large coarse search
+    // margin absorbs t0 bias and ppm-level SFO; optional detected_start is
+    // diagnostics-only (and can land on a strong mid-preamble SYNC).
     job.predicted_start_sample =
         dict_i64(meta, "predicted_start_sample", -1);
     job.window_start_sample = dict_i64(meta, "window_start_sample", 0);
     job.sample_count =
         dict_i64(meta, "sample_count", static_cast<int64_t>(n));
     job.sample_rate = dict_f64(meta, "sample_rate", 0.0);
+    // Provenance from the PDU 65/48 resampler (for schedule_feedback mapping).
+    job.native_sample_rate = dict_f64(meta, "input_sample_rate", 0.0);
+    if (job.native_sample_rate <= 0.0)
+        job.native_sample_rate =
+            dict_f64(meta, "native_sample_rate", 0.0);
+    job.resample_filter_delay =
+        dict_f64(meta, "resample_filter_delay", 0.0);
+    job.resample_us = dict_u64(meta, "resample_us", 0);
     job.samples = samples; // always c32vector after optional s16 conversion
     job.enqueued_at = std::chrono::steady_clock::now();
 
@@ -720,6 +748,7 @@ UwbRealtimeDemodulator::worker_loop(size_t wid)
             err.demod_latency_us = demod_us;
             err.wall_latency_us = wall_us;
             err.worker_id = static_cast<uint32_t>(wid);
+            err.resample_us = job.resample_us;
             record_latency(wall_us);
             publish_result(job, err);
             d_queue_cv_.notify_all();
@@ -732,6 +761,7 @@ UwbRealtimeDemodulator::worker_loop(size_t wid)
         r.demod_latency_us = demod_us;
         r.wall_latency_us = wall_us;
         r.worker_id = static_cast<uint32_t>(wid);
+        r.resample_us = job.resample_us;
 
         if (r.status == gr::uwb::demod::DemodStatus::Success)
             d_jobs_completed_.fetch_add(1, std::memory_order_relaxed);
@@ -829,6 +859,13 @@ UwbRealtimeDemodulator::publish_result(const Job& job,
     meta = pmt::dict_add(
         meta, pmt::mp("cfo_peaks_used"),
         pmt::from_uint64(static_cast<uint64_t>(r.cfo.peaks_used)));
+    meta = pmt::dict_add(
+        meta, pmt::mp("cfo_skipped_peaks"),
+        pmt::from_uint64(static_cast<uint64_t>(r.cfo.skipped_peaks)));
+    meta = pmt::dict_add(meta, pmt::mp("cfo_fit_first_peak_sample"),
+                         pmt::from_long(r.cfo.fit_first_peak_sample));
+    meta = pmt::dict_add(meta, pmt::mp("cfo_fit_last_peak_sample"),
+                         pmt::from_long(r.cfo.fit_last_peak_sample));
 
     meta = pmt::dict_add(meta, pmt::mp("sfd_start_sample"),
                          pmt::from_long(r.sfd.sfd_start_sample));
@@ -838,6 +875,13 @@ UwbRealtimeDemodulator::publish_result(const Job& job,
                          pmt::from_long(static_cast<long>(r.sfd.polarity)));
     meta = pmt::dict_add(meta, pmt::mp("sfd_metric"),
                          pmt::from_double(r.sfd.metric));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_initial_predicted_sample"),
+                         pmt::from_long(r.sfd_initial_predicted_sample));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_bootstrap_detected_sample"),
+                         pmt::from_long(r.sfd_bootstrap_detected_sample));
+    meta = pmt::dict_add(
+        meta, pmt::mp("sfd_bootstrap_first_threshold_backtrack_symbols"),
+        pmt::from_long(r.sfd_bootstrap_first_threshold_backtrack_symbols));
 
     meta = pmt::dict_add(
         meta, pmt::mp("cir_first_path_sample"),
@@ -880,6 +924,20 @@ UwbRealtimeDemodulator::publish_result(const Job& job,
         meta, pmt::mp("fcs_calculated"),
         pmt::from_uint64(static_cast<uint64_t>(r.payload.calculated_fcs)));
 
+    // Rate provenance for schedule lock mapping (998.4 → 737.28).
+    if (job.sample_rate > 0.0)
+        meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
+                             pmt::from_double(job.sample_rate));
+    if (job.native_sample_rate > 0.0) {
+        meta = pmt::dict_add(meta, pmt::mp("input_sample_rate"),
+                             pmt::from_double(job.native_sample_rate));
+        meta = pmt::dict_add(meta, pmt::mp("native_sample_rate"),
+                             pmt::from_double(job.native_sample_rate));
+    }
+    if (job.resample_filter_delay > 0.0)
+        meta = pmt::dict_add(meta, pmt::mp("resample_filter_delay"),
+                             pmt::from_double(job.resample_filter_delay));
+
     meta = pmt::dict_add(meta, pmt::mp("queue_delay_us"),
                          pmt::from_uint64(r.queue_delay_us));
     meta = pmt::dict_add(meta, pmt::mp("demod_latency_us"),
@@ -889,10 +947,26 @@ UwbRealtimeDemodulator::publish_result(const Job& job,
     // per-stage demod timing (µs) — recorded by demodulate_one
     meta = pmt::dict_add(meta, pmt::mp("stage_timing_us"),
                          pmt::from_uint64(r.stage_timing_us));
+    meta = pmt::dict_add(meta, pmt::mp("stage_timing_coarse_us"),
+                         pmt::from_uint64(r.stage_timing_coarse_us));
+    meta = pmt::dict_add(meta, pmt::mp("stage_timing_fine_track_us"),
+                         pmt::from_uint64(r.stage_timing_fine_track_us));
     meta = pmt::dict_add(meta, pmt::mp("stage_cfo_us"),
                          pmt::from_uint64(r.stage_cfo_us));
     meta = pmt::dict_add(meta, pmt::mp("stage_sfd_us"),
                          pmt::from_uint64(r.stage_sfd_us));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_bootstrap_windows"),
+                         pmt::from_uint64(r.sfd_bootstrap_windows));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_bootstrap_coarse_correlations"),
+                         pmt::from_uint64(r.sfd_bootstrap_coarse_correlations));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_bootstrap_fine_correlations"),
+                         pmt::from_uint64(r.sfd_bootstrap_fine_correlations));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_final_windows"),
+                         pmt::from_uint64(r.sfd_final_windows));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_final_coarse_correlations"),
+                         pmt::from_uint64(r.sfd_final_coarse_correlations));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_final_fine_correlations"),
+                         pmt::from_uint64(r.sfd_final_fine_correlations));
     meta = pmt::dict_add(meta, pmt::mp("stage_cir_us"),
                          pmt::from_uint64(r.stage_cir_us));
     meta = pmt::dict_add(meta, pmt::mp("stage_ns_sfd_us"),
@@ -903,6 +977,8 @@ UwbRealtimeDemodulator::publish_result(const Job& job,
                          pmt::from_uint64(r.stage_payload_us));
     meta = pmt::dict_add(meta, pmt::mp("stage_total_us"),
                          pmt::from_uint64(r.stage_total_us));
+    meta = pmt::dict_add(meta, pmt::mp("resample_us"),
+                         pmt::from_uint64(r.resample_us));
     // CIR sub-stage breakdown (P0 diagnostics)
     meta = pmt::dict_add(meta, pmt::mp("cir_estimate_us"),
                          pmt::from_uint64(r.cir.cir_estimate_us));
@@ -937,6 +1013,55 @@ UwbRealtimeDemodulator::publish_result(const Job& job,
     }
 
     message_port_pub(pmt::mp("result"), pmt::cons(meta, vec));
+
+    // Drive schedule lock from SYNC/preamble timing (learn-then-freeze).
+    // FCS is NOT the fast sensor: a good SYNC peak is enough to learn δ.
+    // Wide search covers residual until Hold freezes (b, δ).
+    if (r.timing.ok && r.timing.preamble_start_sample >= 0) {
+        publish_schedule_feedback(job, r);
+    }
+}
+
+void
+UwbRealtimeDemodulator::publish_schedule_feedback(
+    const Job& job, const gr::uwb::demod::DemodResult& r)
+{
+    pmt::pmt_t fb = pmt::make_dict();
+    fb = pmt::dict_add(fb, pmt::mp("command"), pmt::mp("observe"));
+    fb = pmt::dict_add(fb, pmt::mp("schedule_index"),
+                       pmt::from_uint64(job.schedule_index));
+    fb = pmt::dict_add(fb, pmt::mp("packet_id"),
+                       pmt::from_uint64(job.packet_id));
+    fb = pmt::dict_add(fb, pmt::mp("detected_start_sample"),
+                       pmt::from_long(r.timing.preamble_start_sample));
+    fb = pmt::dict_add(fb, pmt::mp("timing_start_sample"),
+                       pmt::from_long(r.timing.preamble_start_sample));
+    fb = pmt::dict_add(fb, pmt::mp("predicted_start_sample"),
+                       pmt::from_long(job.predicted_start_sample));
+    fb = pmt::dict_add(fb, pmt::mp("timing_ok"), pmt::PMT_T);
+    // Overall demod status / FCS are diagnostics only for the lock path.
+    fb = pmt::dict_add(fb, pmt::mp("status"),
+                       pmt::string_to_symbol(status_to_string(r.status)));
+    fb = pmt::dict_add(fb, pmt::mp("fcs_pass"),
+                       r.payload.fcs_pass ? pmt::PMT_T : pmt::PMT_F);
+    fb = pmt::dict_add(fb, pmt::mp("timing_metric"),
+                       pmt::from_double(r.timing.metric));
+    fb = pmt::dict_add(
+        fb, pmt::mp("timing_peaks"),
+        pmt::from_uint64(static_cast<uint64_t>(r.timing.detected_peaks)));
+    if (job.sample_rate > 0.0)
+        fb = pmt::dict_add(fb, pmt::mp("sample_rate"),
+                           pmt::from_double(job.sample_rate));
+    if (job.native_sample_rate > 0.0) {
+        fb = pmt::dict_add(fb, pmt::mp("input_sample_rate"),
+                           pmt::from_double(job.native_sample_rate));
+        fb = pmt::dict_add(fb, pmt::mp("native_sample_rate"),
+                           pmt::from_double(job.native_sample_rate));
+    }
+    if (job.resample_filter_delay > 0.0)
+        fb = pmt::dict_add(fb, pmt::mp("resample_filter_delay"),
+                           pmt::from_double(job.resample_filter_delay));
+    message_port_pub(pmt::mp("schedule_feedback"), fb);
 }
 
 uint64_t

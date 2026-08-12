@@ -59,6 +59,10 @@ struct TimingResult {
     // phase at that peak).  Same length as peak_samples; the CFO stage uses
     // arg() of these rather than the raw rx[peak] sample.
     std::vector<std::complex<float>> peak_corr;
+    // Initial seeded acquisition profile: stride-S coarse scan vs all other
+    // timing work (setup, local refine, grid probes and SYNC tracking).
+    uint64_t coarse_search_us = 0;
+    uint64_t fine_track_us = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -69,6 +73,13 @@ struct CfoResult {
     double cfo_hz = 0.0;            // estimated carrier frequency offset
     double residual_phase = 0.0;    // constant phase after derotation
     size_t peaks_used = 0;          // stable peaks used in the linear fit
+    size_t skipped_peaks = 0;       // unstable leading SYNCs excluded
+    // Peak coordinates used by the CFO fit.  These are retained separately
+    // from TimingResult because SFD refinement later updates the public
+    // preamble origin, whereas CFO must be diagnosable against its original
+    // matched-filter peak train.
+    int64_t fit_first_peak_sample = -1;
+    int64_t fit_last_peak_sample = -1;
     float fit_residual = 0.0f;      // residual of the phase linear fit
 };
 
@@ -80,9 +91,21 @@ struct SfdResult {
     const char* sfd_mode = nullptr;     // selected SFD mode (e.g. "4z2")
     int64_t sfd_start_sample = -1;      // absolute, full-rate refined
     int64_t sfd_end_sample = -1;        // absolute
+    // SFD start predicted directly from the timing stage's final tracked SYNC:
+    // last_sync_start + measured_period, before any SFD correlation/refinement.
+    int64_t expected_start_sample = -1;
     int64_t sfd_start_chip = -1;        // chip-index in soft-chip stream
     int polarity = 0;                   // +/-1 soft-chip polarity
     float metric = 0.0f;                // SFD correlation metric
+    // Exact count of normalized complex SFD correlations evaluated.  Coarse
+    // and fine count candidate positions (including any deliberate overlap).
+    uint64_t search_windows = 0;
+    uint64_t coarse_correlations = 0;
+    uint64_t fine_correlations = 0;
+    // First candidate window (0=initial prediction, 1=one-symbol backtrack)
+    // whose local maximum passes the SFD threshold. Diagnostic only: the
+    // current algorithm still evaluates all candidates and selects global max.
+    int64_t first_threshold_backtrack_symbols = -1;
 };
 
 // ---------------------------------------------------------------------------
@@ -174,6 +197,8 @@ struct DemodResult {
     // Only stages actually run are non-zero; on early failure the failing
     // stage gets the elapsed time since the previous completed stage.
     uint64_t stage_timing_us = 0;
+    uint64_t stage_timing_coarse_us = 0;
+    uint64_t stage_timing_fine_track_us = 0;
     uint64_t stage_cfo_us = 0;
     uint64_t stage_sfd_us = 0;
     uint64_t stage_cir_us = 0;
@@ -181,6 +206,22 @@ struct DemodResult {
     uint64_t stage_phr_us = 0;
     uint64_t stage_payload_us = 0;
     uint64_t stage_total_us = 0;        // sum of the above (== demod_latency_us)
+    // `stage_sfd` runs once for bootstrap CFO anchoring and once after the
+    // MATLAB-aligned CFO refit.  Preserve both actual search counts.
+    uint64_t sfd_bootstrap_windows = 0;
+    uint64_t sfd_bootstrap_coarse_correlations = 0;
+    uint64_t sfd_bootstrap_fine_correlations = 0;
+    uint64_t sfd_final_windows = 0;
+    uint64_t sfd_final_coarse_correlations = 0;
+    uint64_t sfd_final_fine_correlations = 0;
+    // Bootstrap preamble prediction vs final CFO-aligned SFD coordinates.
+    // Both are absolute after demodulate_one() rebases the cropped PDU.
+    int64_t sfd_initial_predicted_sample = -1;
+    int64_t sfd_bootstrap_detected_sample = -1;
+    int64_t sfd_bootstrap_first_threshold_backtrack_symbols = -1;
+    // 65/48 PDU resampler compute time, copied from upstream metadata.  This
+    // precedes the worker and is excluded from stage_total_us.
+    uint64_t resample_us = 0;
 };
 
 // ---------------------------------------------------------------------------

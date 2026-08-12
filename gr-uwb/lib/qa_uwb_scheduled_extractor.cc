@@ -30,6 +30,7 @@
 using gr::uwb::core::predicted_start_cumulative_integer;
 using gr::uwb::core::predicted_start_sample;
 using gr::uwb::core::ScheduleConfig;
+using gr::uwb::core::ScheduleLockTracker;
 using gr::uwb::core::ScheduledWindowCore;
 using gr::uwb::core::window_bounds_for_slot;
 
@@ -680,4 +681,213 @@ BOOST_AUTO_TEST_CASE(test_core_matlab_coordinate_rule)
         (void)pre;
         (void)win_samples;
     }
+}
+
+BOOST_AUTO_TEST_CASE(test_schedule_lock_learn_then_freeze)
+{
+    // Nominal T = 1e6 samples; true T = 1e6 + 32 (≈ 32 ppm fixed δ).
+    // True t0 is 200 samples earlier than the operator seed (fixed bias b).
+    const double T_nom = 1e6;
+    const double T_true = 1e6 + 32.0;
+    const double t0_true = 5000.0;
+    const double t0_seed = t0_true + 200.0;
+
+    ScheduleLockTracker lock;
+    lock.reset(t0_seed, T_nom);
+    BOOST_CHECK(lock.state == ScheduleLockTracker::State::Searching);
+
+    // First observation: enter Learning, not yet Hold.
+    BOOST_CHECK(!lock.observe(
+        0, static_cast<int64_t>(std::llround(t0_true)), T_nom));
+    BOOST_CHECK(lock.state == ScheduleLockTracker::State::Learning);
+
+    // Second: still Learning (need ≥ min_observations=3).
+    const int64_t det1 =
+        static_cast<int64_t>(std::llround(t0_true + 1.0 * T_true));
+    BOOST_CHECK(!lock.observe(1, det1, T_nom));
+    BOOST_CHECK(lock.state == ScheduleLockTracker::State::Learning);
+
+    // Third: converge → Hold, apply once.
+    const int64_t det2 =
+        static_cast<int64_t>(std::llround(t0_true + 2.0 * T_true));
+    BOOST_CHECK(lock.observe(2, det2, T_nom));
+    BOOST_CHECK(lock.state == ScheduleLockTracker::State::Hold);
+    BOOST_CHECK_CLOSE(lock.period_samples, T_true, 0.01);
+    BOOST_CHECK_CLOSE(lock.delta_period, T_true - T_nom, 0.01);
+    BOOST_CHECK_CLOSE(lock.bias_t0, t0_true - t0_seed, 0.5);
+    BOOST_CHECK_EQUAL(lock.lock_updates, 1u);
+
+    // Further observations must FREEZE — no continuous IIR tracking.
+    const double frozen_T = lock.period_samples;
+    const double frozen_t0 = lock.t0_exact;
+    for (uint64_t k = 3; k < 20; ++k) {
+        // Perfect grid + small noise that stays inside unlock threshold.
+        const int64_t det =
+            static_cast<int64_t>(std::llround(t0_true + k * T_true)) +
+            static_cast<int64_t>((k % 3) - 1); // ±1 sample
+        BOOST_CHECK(!lock.observe(k, det, frozen_T));
+    }
+    BOOST_CHECK(lock.state == ScheduleLockTracker::State::Hold);
+    BOOST_CHECK_EQUAL(lock.lock_updates, 1u);
+    BOOST_CHECK_EQUAL(lock.period_samples, frozen_T);
+    BOOST_CHECK_EQUAL(lock.t0_exact, frozen_t0);
+
+    // Predicted residual at k=19 should be within a few samples.
+    const double pred19 = lock.t0_exact + 19.0 * lock.period_samples;
+    const double true19 = t0_true + 19.0 * T_true;
+    BOOST_CHECK_SMALL(std::abs(pred19 - true19), 5.0);
+}
+
+BOOST_AUTO_TEST_CASE(test_schedule_lock_hold_ignores_noisy_period)
+{
+    // After Hold, a single outlier interval must NOT pull δ (no PLL).
+    const double T_nom = 3686400.0; // 5 ms @ 737.28e6
+    const double delta = 31.0;
+    const double T_true = T_nom + delta;
+    const double t0_true = 3543552.0;
+    const double t0_seed = t0_true + 64.0;
+
+    ScheduleLockTracker lock;
+    lock.reset(t0_seed, T_nom);
+    for (uint64_t k = 0; k < 3; ++k) {
+        const int64_t det =
+            static_cast<int64_t>(std::llround(t0_true + k * T_true));
+        lock.observe(k, det, T_nom);
+    }
+    BOOST_REQUIRE(lock.state == ScheduleLockTracker::State::Hold);
+    const double frozen_T = lock.period_samples;
+    const double frozen_delta = lock.delta_period;
+
+    // Inject a large single-sample jump that would have moved IIR T a lot,
+    // but residual vs frozen grid is still < unlock_residual (default 512).
+    BOOST_CHECK(!lock.observe(
+        3, static_cast<int64_t>(std::llround(t0_true + 3.0 * T_true + 40.0)),
+        T_nom));
+    BOOST_CHECK(lock.state == ScheduleLockTracker::State::Hold);
+    BOOST_CHECK_EQUAL(lock.period_samples, frozen_T);
+    BOOST_CHECK_EQUAL(lock.delta_period, frozen_delta);
+}
+
+BOOST_AUTO_TEST_CASE(test_update_locked_params_keeps_next_k)
+{
+    // Continuity-preserving soft update used when ScheduleLockTracker enters
+    // Hold: next_k must not jump; period becomes T_nom + δ.
+    ScheduleConfig cfg;
+    cfg.sample_rate = 1e6;
+    cfg.packet_interval_s = 0.001; // 1000 samples
+    cfg.first_packet_sample_exact = 10000.0;
+    cfg.pre_guard_samples = 100;
+    cfg.capture_samples = 500;
+    cfg.post_guard_samples = 50;
+    cfg.pool_size = 4;
+    ScheduledWindowCore core(cfg);
+    core.set_schedule(10000.0, 0.001, 1e6);
+    // Stream from 0 through end of slot k=0 window (pred=10000, end=10550)
+    // so next_k=1 and abs sits in the inter-slot gap (before k=1 window start
+    // 10900).  Margin check accepts the soft update here.
+    std::vector<gr_complex> zeros(10550, gr_complex(0.f, 0.f));
+    core.process_chunk(zeros.data(), zeros.size(), 0);
+    const uint64_t k_before = core.next_schedule_index();
+    BOOST_CHECK_EQUAL(k_before, 1u);
+    BOOST_CHECK_EQUAL(core.abs_cursor(), 10550u);
+
+    const double pred_before =
+        core.config().first_packet_sample_exact +
+        static_cast<double>(k_before) * core.config().period_samples_exact();
+
+    // Without force: continuity keeps pred(next_k) fixed.
+    BOOST_CHECK(core.update_locked_params(/*ignored t0*/ 9950.0, 0.001032,
+                                          /*force_t0=*/false));
+    BOOST_CHECK_EQUAL(core.next_schedule_index(), k_before);
+    BOOST_CHECK_CLOSE(core.config().packet_interval_s, 0.001032, 1e-6);
+    const double pred_after =
+        core.config().first_packet_sample_exact +
+        static_cast<double>(k_before) * core.config().period_samples_exact();
+    BOOST_CHECK_CLOSE(pred_after, pred_before, 1e-6);
+
+    // Absolute force_t0 early in stream (next window still ahead).
+    ScheduledWindowCore core2(cfg);
+    core2.set_schedule(10000.0, 0.001, 1e6);
+    core2.set_abs_cursor(0);
+    BOOST_CHECK(core2.update_locked_params(9800.0, 0.001032, /*force_t0=*/true));
+    BOOST_CHECK_CLOSE(core2.config().first_packet_sample_exact, 9800.0, 1e-6);
+    BOOST_CHECK_CLOSE(core2.config().packet_interval_s, 0.001032, 1e-6);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_feedback_lock_obs_via_message)
+{
+    // 1) Native-domain observe_detection path (learn-then-freeze).
+    const double fs737 = 737.28e6;
+    const double T_true_737 = 3686400.0 + 31.0; // ~8 ppm fixed δ
+    const double t0_true_737 = 3543552.0;
+    const double T_nom_s = 0.005; // 5000 us nominal
+
+    auto ext = gr::uwb::UwbScheduledExtractor::make(
+        fs737, T_nom_s, static_cast<uint64_t>(t0_true_737 + 200.0),
+        30000, 160000, 10000, 4,
+        gr::uwb::UwbScheduledExtractor::EmitPolicy::EverySlot, false);
+    ext->set_schedule_lock_enabled(true);
+    BOOST_CHECK_EQUAL(ext->schedule_lock_state(), 0); // Searching
+
+    ext->observe_detection(
+        0, static_cast<int64_t>(std::llround(t0_true_737)));
+    BOOST_CHECK_EQUAL(ext->schedule_lock_state(), 1); // Learning
+    ext->observe_detection(
+        1, static_cast<int64_t>(std::llround(t0_true_737 + T_true_737)));
+    BOOST_CHECK_EQUAL(ext->schedule_lock_state(), 1); // still Learning
+    ext->observe_detection(
+        2, static_cast<int64_t>(std::llround(t0_true_737 + 2.0 * T_true_737)));
+    BOOST_CHECK_EQUAL(ext->schedule_lock_state(), 2); // Hold
+    BOOST_CHECK_GE(ext->schedule_lock_updates(), 1u);
+    BOOST_CHECK_CLOSE(ext->locked_delta_period_samples(), 31.0, 0.5);
+
+    // Apply pending lock on the work path (silence before first window).
+    const size_t n_silence =
+        static_cast<size_t>(t0_true_737) > 40000
+            ? 4096
+            : 1024;
+    std::vector<gr_complex> zeros(n_silence, gr_complex(0.f, 0.f));
+    auto src = gr::blocks::vector_source_c::make(zeros);
+    auto tb = gr::make_top_block("qa_lock_obs");
+    tb->connect(src, 0, ext, 0);
+    tb->run();
+
+    const double T_locked = ext->locked_packet_interval_s() * fs737;
+    BOOST_CHECK_CLOSE(T_locked, T_true_737, 0.05);
+
+    // Hold freezes: further SYNC observations must not change δ.
+    const double frozen_delta = ext->locked_delta_period_samples();
+    ext->observe_detection(
+        5, static_cast<int64_t>(std::llround(t0_true_737 + 5.0 * T_true_737 + 20.0)));
+    BOOST_CHECK_EQUAL(ext->schedule_lock_state(), 2);
+    BOOST_CHECK_EQUAL(ext->locked_delta_period_samples(), frozen_delta);
+
+    // 2) Mapped 998.4-domain sample → native via inverse 65/48 (API path).
+    const double fs998 = 998.4e6;
+    const double gd = 1353.0;
+    auto map65_48 = [&](double p737) {
+        return static_cast<int64_t>(
+            std::llround((p737 * 65.0 + gd) / 48.0));
+    };
+    auto ext2 = gr::uwb::UwbScheduledExtractor::make(
+        fs737, T_nom_s, static_cast<uint64_t>(t0_true_737 + 200.0),
+        30000, 160000, 10000, 4,
+        gr::uwb::UwbScheduledExtractor::EmitPolicy::EverySlot, false);
+    ext2->set_schedule_lock_enabled(true);
+
+    auto post_obs = [&](uint64_t k) {
+        const double det737 = t0_true_737 + k * T_true_737;
+        const int64_t det998 = map65_48(det737);
+        // Direct API after the same map lock_obs would apply.
+        const int64_t native = static_cast<int64_t>(std::llround(
+            (static_cast<double>(det998) * 48.0 - gd) / 65.0));
+        ext2->observe_detection(k, native);
+        (void)fs998;
+    };
+    post_obs(0);
+    post_obs(1);
+    post_obs(2);
+    BOOST_CHECK_EQUAL(ext2->schedule_lock_state(), 2); // Hold
+    BOOST_CHECK_CLOSE(ext2->locked_packet_interval_s() * fs737, T_true_737,
+                      0.05);
 }

@@ -163,6 +163,31 @@ pmt::pmt_t make_window_pdu(const std::vector<gr_complex>& iq,
     return pmt::cons(meta, pmt::init_c32vector(iq.size(), iq.data()));
 }
 
+pmt::pmt_t make_window_pdu_sc16(const std::vector<int16_t>& iq,
+                                int64_t window_start,
+                                int64_t pre_guard,
+                                int64_t capture,
+                                int64_t post_guard,
+                                int64_t predicted_start)
+{
+    BOOST_REQUIRE_EQUAL(iq.size() % 2, 0u);
+    pmt::pmt_t meta = pmt::make_dict();
+    meta = pmt::dict_add(meta, pmt::mp("window_start_sample"),
+                         pmt::from_long(window_start));
+    meta = pmt::dict_add(meta, pmt::mp("pre_guard_samples"),
+                         pmt::from_long(pre_guard));
+    meta = pmt::dict_add(meta, pmt::mp("capture_samples"),
+                         pmt::from_long(capture));
+    meta = pmt::dict_add(meta, pmt::mp("post_guard_samples"),
+                         pmt::from_long(post_guard));
+    meta = pmt::dict_add(meta, pmt::mp("sample_count"),
+                         pmt::from_long(static_cast<long>(iq.size() / 2)));
+    meta = pmt::dict_add(meta, pmt::mp("sample_rate"), pmt::from_double(kInRate));
+    meta = pmt::dict_add(meta, pmt::mp("predicted_start_sample"),
+                         pmt::from_long(predicted_start));
+    return pmt::cons(meta, pmt::init_s16vector(iq.size(), iq.data()));
+}
+
 /** Run one PDU through the block in a real top_block; return emitted packet. */
 pmt::pmt_t run_one_pdu(UwbPduRationalResamplerCcf65_48::sptr blk,
                        pmt::pmt_t pdu,
@@ -386,6 +411,10 @@ BOOST_AUTO_TEST_CASE(test_pdu_coordinate_mapping)
         pmt::to_long(pmt::dict_ref(meta, pmt::mp("resample_decim"),
                                    pmt::from_long(0))),
         48);
+    // Timing provenance must be present even when a fast host rounds the
+    // measured duration down to 0 us for this small QA PDU.
+    BOOST_CHECK(pmt::is_uint64(
+        pmt::dict_ref(meta, pmt::mp("resample_us"), pmt::PMT_NIL)));
 
     // Direct formula check for predicted.
     const double d = 0.5 * static_cast<double>(taps.size() - 1);
@@ -398,6 +427,37 @@ BOOST_AUTO_TEST_CASE(test_pdu_coordinate_mapping)
               << " pre/cap/post " << expect_pre << "/" << expect_cap << "/"
               << expect_post << " pred " << pred << "->" << expect_pred
               << " Lout=" << Lout << std::endl;
+}
+
+BOOST_AUTO_TEST_CASE(test_pdu_sc16_input_matches_fc32)
+{
+    const auto& taps = quality_minorder_taps();
+    std::vector<int16_t> s16(512 * 2);
+    std::vector<gr_complex> c32(512);
+    for (size_t i = 0; i < c32.size(); ++i) {
+        s16[2 * i] = static_cast<int16_t>((37 * i) % 2000 - 1000);
+        s16[2 * i + 1] = static_cast<int16_t>((53 * i) % 2000 - 1000);
+        c32[i] = gr_complex(static_cast<float>(s16[2 * i]),
+                             static_cast<float>(s16[2 * i + 1]));
+    }
+    auto a = UwbPduRationalResamplerCcf65_48::make_from_taps(taps);
+    auto b = UwbPduRationalResamplerCcf65_48::make_from_taps(taps);
+    auto out_c = run_one_pdu(a, make_window_pdu(c32, 1000, 64, 384, 64, 1064));
+    auto out_s = run_one_pdu(b, make_window_pdu_sc16(s16, 1000, 64, 384, 64, 1064));
+    BOOST_REQUIRE(pmt::is_pair(out_c));
+    BOOST_REQUIRE(pmt::is_pair(out_s));
+    size_t nc = 0, ns = 0;
+    const auto* yc = pmt::c32vector_elements(pmt::cdr(out_c), nc);
+    const auto* ys = pmt::c32vector_elements(pmt::cdr(out_s), ns);
+    std::vector<gr_complex> vc(yc, yc + nc), vs(ys, ys + ns);
+    BOOST_CHECK_LT(max_abs_diff(vc, vs), 1e-5f);
+    const auto md = pmt::car(out_s);
+    BOOST_CHECK_EQUAL(pmt::symbol_to_string(pmt::dict_ref(
+                          md, pmt::mp("input_sample_format"), pmt::PMT_NIL)),
+                      "sc16");
+    BOOST_CHECK_GT(b->resample_total_us(), 0u);
+    BOOST_CHECK_GE(b->handler_total_us(), b->resample_total_us());
+    BOOST_CHECK_GT(b->input_convert_total_us(), 0u);
 }
 
 // ---------------------------------------------------------------------------

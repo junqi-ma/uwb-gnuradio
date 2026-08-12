@@ -12,9 +12,9 @@
  *   resampling is not real-time; PDU duty-cycle makes the FIR affordable.
  *
  * Block type: gr::block, message-driven, no stream ports.
- * Scheduler: no forecast / general_work; handlers only.  Synchronous
- * correct-first path (process+flush per PDU on the message thread) with a
- * preallocated scratch buffer that grows only when the window length increases.
+ * Scheduler: no forecast / general_work; handlers only.  Accepts CF32 PDU or
+ * interleaved SC16 PDU input and always emits FC32.  The SC16 conversion is
+ * performed only for the scheduled window, never for the continuous stream.
  *
  * Contract: docs/performance/规格_固定65_48重采样core契约.md
  *   Lout = ceil(((N-1)*65 + T)/48)
@@ -121,6 +121,30 @@ public:
     {
         return d_short_guard_.load(std::memory_order_relaxed);
     }
+    /** FIR process+flush time only; excludes PMT vector creation/publication. */
+    uint64_t resample_total_us() const
+    {
+        return d_resample_total_us_.load(std::memory_order_relaxed);
+    }
+    uint64_t resample_max_us() const
+    {
+        return d_resample_max_us_.load(std::memory_order_relaxed);
+    }
+    /** Successful PDU handler wall time, including metadata and publication. */
+    uint64_t handler_total_us() const
+    {
+        return d_handler_total_us_.load(std::memory_order_relaxed);
+    }
+    /** SC16→FC32 conversion immediately before FIR (0 for FC32 input). */
+    uint64_t input_convert_total_us() const
+    {
+        return d_input_convert_total_us_.load(std::memory_order_relaxed);
+    }
+    /** PMT vector creation plus message_port_pub, nested in handler_total_us. */
+    uint64_t publish_total_us() const
+    {
+        return d_publish_total_us_.load(std::memory_order_relaxed);
+    }
 
     void reset_stats();
 
@@ -148,6 +172,9 @@ private:
 
     // Preallocated FIR output scratch (grows only when needed).
     std::vector<gr_complex> d_scratch_;
+    // SC16 PDU input is expanded here immediately before FIR.  Fixed window
+    // geometry reserves this once; no steady-state handler allocation.
+    std::vector<gr_complex> d_input_scratch_;
 
     // short_guard status is published at most once (then counted silently).
     bool d_short_guard_logged_ = false;
@@ -159,6 +186,11 @@ private:
     std::atomic<uint64_t> d_total_out_{ 0 };
     std::atomic<uint64_t> d_resets_{ 0 };
     std::atomic<uint64_t> d_short_guard_{ 0 };
+    std::atomic<uint64_t> d_resample_total_us_{ 0 };
+    std::atomic<uint64_t> d_resample_max_us_{ 0 };
+    std::atomic<uint64_t> d_handler_total_us_{ 0 };
+    std::atomic<uint64_t> d_input_convert_total_us_{ 0 };
+    std::atomic<uint64_t> d_publish_total_us_{ 0 };
 };
 
 } // namespace uwb

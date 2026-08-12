@@ -4,9 +4,10 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Fixed QM35825 PHY profile for the first-stage realtime demodulator.
- * Phase-1 supports ONLY this profile: fs 998.4 MHz, Mean PRF 62.4 MHz BPRF,
- * code index 9, 64 SYNC repetitions, SFD mode 4z2, 6.81 Mb/s.
+ * Default QM35825 PHY profile for the first-stage realtime demodulator.
+ * The realtime path uses the same 998.4 MHz / 62.4 MHz BPRF geometry for
+ * selectable HRP code indices 9–12; the defaults remain code 9, 64 SYNC
+ * repetitions, SFD mode 4z2, and 6.81 Mb/s.
  *
  * Matches UWB_demodulation/run_decode_uwb_radar.m + defaultOptions + the
  * verified golden reference (testdata/realtime_demod_golden/manifest.csv):
@@ -63,8 +64,13 @@ struct Qm35825Profile {
     // CIR estimation window (from defaultOptions)
     size_t cir_pre_samples = 8;
     size_t cir_post_samples = 30;
-    size_t cir_skip_initial_repetitions = 10; // skip the first N SYNC for CFO/CIR
+    size_t cir_skip_initial_repetitions = 10; // skip the first N SYNC for CIR
     size_t cir_repetitions = 54;              // preamble - skip
+    // Match MATLAB compensateCarrierOffset: discard the startup transient in
+    // at most the first 24 SYNCs, while retaining at least 32 phase samples.
+    // This is intentionally separate from the CIR skip policy above.
+    size_t cfo_skip_initial_repetitions = 24;
+    size_t cfo_min_fit_repetitions = 32;
     // Sparse RAKE policy: 0 keeps the full CIR matched filter; otherwise use
     // only the K strongest complex CIR taps (clamped to the tap count).
     size_t cir_rake_top_k = 0;
@@ -76,6 +82,12 @@ struct Qm35825Profile {
 
     // SFD search window (half-width in chips around expected start)
     size_t sfd_search_half_width = 8;
+    // SFD acquisition probes the nominal position (preamble start +
+    // preamble_repetitions × period), then walks this many symbols FORWARD
+    // and stops at the first threshold-qualified SFD.  Ten covers the case
+    // where the trailing preamble SYNCs are below the acquisition threshold
+    // (partial train) so the SFD sits later than the nominal position.
+    size_t sfd_max_forward_symbols = 10;
 
     // soft-chip / CIR threshold
     float cir_detection_threshold = 0.3f;
@@ -83,8 +95,21 @@ struct Qm35825Profile {
     float radar_verification_threshold = 0.3f;
 
     // timing
-    size_t timing_search_margin = 9984; // ~10 us @ 998.4e6
-    size_t timing_max_backtrack_symbols = 3;
+    // Seed (schedule t0+kT or detector) can sit hundreds–thousands of samples
+    // off the true SYNC grid when the nominal period has ~ppm-level SFO.  A
+    // ±10 us margin is not enough for a 0.5 s capture; ~40 us (~40k samples)
+    // covers the residual after schedule lock and still fits typical pre_guard.
+    size_t timing_search_margin = 40960; // ~41 us @ 998.4e6
+    // Coarse preamble acquisition stride (samples).  Fine refine uses ±stride.
+    // QM35 SC16 stride sweep: 14 was the fastest tested zero-miss setting;
+    // 16 missed 13/99 scheduled packets due to phase aliasing.
+    size_t timing_coarse_stride = 14;
+    // Backtrack limit also bounds the SFD early-window scan (stage_sfd), so a
+    // seed landing anywhere within the first N preamble SYNCs still decodes.
+    // Real QM35825 captures seed from an energy/schedule detector that can land
+    // several SYNCs into the preamble (5-8 common); the previous 3 was too tight
+    // and made otherwise-valid packets fail SFD.
+    size_t timing_max_backtrack_symbols = 32;
     size_t post_guard_samples = 4096;
 
     static Qm35825Profile Default() { return Qm35825Profile{}; }
@@ -162,9 +187,33 @@ inline constexpr std::array<int8_t, kQm35CodeLength> kPreambleCode10 = { {
     -1, -1, -1, -1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, -1, -1
 } };
 
-// DW1000-mode BPRF profile (code-10, 64 SYNC).  Same sample-rate / timing
-// geometry as Qm35825Profile::Default(); only code_index and documentation
-// differ.  Reuses BuildSampledCode / GetSfdSequence.
+// MATLAB R2025b lrwpan.internal.HRPCodes(11), exported on 2026-08-12.
+inline constexpr std::array<int8_t, kQm35CodeLength> kPreambleCode11 = { {
+    -1, 1, -1, 0, 0, 0, 0, 1, 0, 0, -1, -1, 0, 0, 0, 0,
+    0, -1, 0, 1, 0, 1, 0, 1, -1, 0, 1, 0, 0, 1, 0, 0,
+    1, 0, -1, 0, 0, -1, 1, 1, 1, 0, 0, 1, 0, 0, 0, -1,
+    1, 0, 1, 0, -1, 0, 0, 0, 0, 1, 1, 1, 1, 1, -1, 1,
+    0, 1, -1, -1, 0, 1, -1, 0, 1, 1, -1, -1, 0, -1, 0, 0,
+    0, 1, 0, -1, 1, 0, 0, 1, 0, 1, -1, -1, -1, -1, 0, 0,
+    0, -1, 0, 0, 0, 0, 0, 0, -1, 1, 0, 0, 1, -1, 0, 1,
+    1, 0, 0, 0, 1, 1, -1, 0, 0, 1, 1, -1, 0, -1, 0
+} };
+
+// MATLAB R2025b lrwpan.internal.HRPCodes(12), exported on 2026-08-12.
+inline constexpr std::array<int8_t, kQm35CodeLength> kPreambleCode12 = { {
+    -1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, -1, 0, 1, 0, -1,
+    1, 0, -1, -1, -1, 1, -1, 1, 1, 0, 0, -1, 1, 0, 1, 1,
+    0, 1, 0, 1, 0, 1, 0, 0, 0, -1, 0, 0, -1, 0, 0, -1,
+    1, 0, 0, 1, -1, 1, 1, 0, 0, 0, -1, 1, -1, 0, -1, 1,
+    1, 0, -1, 0, 1, 1, 1, 1, 0, -1, 0, 0, -1, 0, 1, 1,
+    0, 0, 1, 0, 1, 0, 0, 1, 1, -1, 0, 0, 1, 0, 0, 0,
+    1, -1, 0, 0, 0, -1, 0, -1, -1, 1, 0, 0, 0, 0, -1, 0,
+    0, 0, 0, -1, -1, 0, 1, 0, 0, 0, 0, 0, 1, -1, -1
+} };
+
+// DW1000-mode BPRF profile (default code-10, 64 SYNC).  Same sample-rate /
+// timing geometry as Qm35825Profile::Default(); only code_index and
+// documentation differ. Reuses BuildSampledCode / GetSfdSequence.
 struct Dw1000Profile {
     double sample_rate = kQm35SampleRate;
     double mean_prf_mhz = kQm35MeanPrfMHz;
@@ -178,19 +227,23 @@ struct Dw1000Profile {
     size_t cir_post_samples = 30;
     size_t cir_skip_initial_repetitions = 10;
     size_t cir_repetitions = 54;
+    size_t cfo_skip_initial_repetitions = 24;
+    size_t cfo_min_fit_repetitions = 32;
     size_t cir_rake_top_k = 0;
     CirSoftChipMode cir_soft_chip_mode = CirSoftChipMode::Auto;
 
     double period_tolerance_pct = 2.0;
     size_t min_valid_peaks = 8;
     size_t sfd_search_half_width = 8;
+    size_t sfd_max_forward_symbols = 10;
 
     float cir_detection_threshold = 0.3f;
     float sfd_detection_threshold = 0.3f;
     float radar_verification_threshold = 0.3f;
 
-    size_t timing_search_margin = 9984;
-    size_t timing_max_backtrack_symbols = 3;
+    size_t timing_search_margin = 40960;
+    size_t timing_coarse_stride = 16;
+    size_t timing_max_backtrack_symbols = 32;
     size_t post_guard_samples = 4096;
 
     static Dw1000Profile Default() { return Dw1000Profile{}; }
@@ -210,13 +263,17 @@ struct Dw1000Profile {
         p.cir_post_samples = cir_post_samples;
         p.cir_skip_initial_repetitions = cir_skip_initial_repetitions;
         p.cir_repetitions = cir_repetitions;
+        p.cfo_skip_initial_repetitions = cfo_skip_initial_repetitions;
+        p.cfo_min_fit_repetitions = cfo_min_fit_repetitions;
         p.period_tolerance_pct = period_tolerance_pct;
         p.min_valid_peaks = min_valid_peaks;
         p.sfd_search_half_width = sfd_search_half_width;
+        p.sfd_max_forward_symbols = sfd_max_forward_symbols;
         p.cir_detection_threshold = cir_detection_threshold;
         p.sfd_detection_threshold = sfd_detection_threshold;
         p.radar_verification_threshold = radar_verification_threshold;
         p.timing_search_margin = timing_search_margin;
+        p.timing_coarse_stride = timing_coarse_stride;
         p.timing_max_backtrack_symbols = timing_max_backtrack_symbols;
         p.post_guard_samples = post_guard_samples;
         return p;
@@ -224,13 +281,16 @@ struct Dw1000Profile {
 };
 
 // Returns the ternary Ipatov code for the given HRP code index.
-// Supported: 9 (QM35825 golden), 10 (DW1000 BPRF).  Unknown indices fall
-// back to code-9 with a stable pointer (callers that care must check).
+// Supported: 9 (QM35825), 10–12 (common DW1000 HRP codes). Unknown indices
+// fall back to code-9 with a stable pointer (public construction validates).
 inline const int8_t* GetPreambleCode(size_t code_index)
 {
-    if (code_index == 10)
-        return kPreambleCode10.data();
-    return kPreambleCode9.data();
+    switch (code_index) {
+    case 10: return kPreambleCode10.data();
+    case 11: return kPreambleCode11.data();
+    case 12: return kPreambleCode12.data();
+    default: return kPreambleCode9.data();
+    }
 }
 
 // ---------------------------------------------------------------------------

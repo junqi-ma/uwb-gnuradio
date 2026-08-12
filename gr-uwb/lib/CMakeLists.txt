@@ -20,6 +20,7 @@ list(APPEND uwb_sources
     uwb_detector_sc16.cc
     uwb_packet_writer.cc
     uwb_scheduled_extractor.cc
+    uwb_scheduled_extractor_sc16.cc
     uwb_realtime_demodulator.cc
     uwb_rational_resampler_ccf_65_48.cc
     uwb_pdu_rational_resampler_ccf_65_48.cc
@@ -81,6 +82,7 @@ list(APPEND test_uwb_sources
     qa_uwb_detector_sc16.cc
     qa_uwb_packet_writer.cc
     qa_uwb_scheduled_extractor.cc
+    qa_uwb_scheduled_extractor_sc16.cc
     qa_uwb_demod_core.cc
     qa_uwb_realtime_demodulator.cc
     qa_uwb_defaults.cc

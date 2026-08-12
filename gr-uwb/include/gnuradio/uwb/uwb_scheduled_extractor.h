@@ -100,6 +100,43 @@ public:
     void set_partial_eos_policy(PartialEosPolicy p);
     void set_verification_enabled(bool en);
 
+    /**
+     * Schedule lock (learn-then-freeze):
+     *   Searching → Learning (b, δ from SYNC observations) → Hold (freeze).
+     *
+     * Nominal T is typically 5000 us; true period is T_nom + δ with nearly
+     * fixed δ (SFO).  Wide demod search covers residual during Learning;
+     * after converge, (t0, T) stay frozen until sustained residual outliers
+     * re-enter Learning.  Not a continuous PLL / not an FCS fast loop.
+     *
+     * Preferred observation: SYNC/preamble timing via "lock_obs" (demod
+     * schedule_feedback).  Optional radar verification peaks are secondary.
+     * Default OFF until set_schedule_lock_enabled(true).
+     *
+     * Message port "lock_obs" accepts a dict:
+     *   command="observe" (default),
+     *   schedule_index (uint),
+     *   detected_start_sample (absolute, observation domain),
+     *   sample_rate (Hz of detected_start; optional),
+     *   native_sample_rate / input_sample_rate (extractor domain; optional),
+     *   resample_filter_delay (group delay samples at obs rate; for 65/48).
+     *   timing_ok (optional; if present and false, observation is ignored),
+     *   fcs_pass (optional; ignored for lock — FCS is not the fast sensor).
+     */
+    void set_schedule_lock_enabled(bool en);
+    bool schedule_lock_enabled() const;
+    int schedule_lock_state() const; // 0=Searching, 1=Learning, 2=Hold
+    uint64_t schedule_lock_updates() const;
+    double locked_packet_interval_s() const;
+    double locked_first_packet_sample() const;
+    /** Learned period deviation in samples (period - nominal). 0 if not Hold. */
+    double locked_delta_period_samples() const;
+    /** Learned t0 bias in samples (t0 - seed). 0 if not Hold. */
+    double locked_bias_t0_samples() const;
+
+    /** Direct observation (same domain as the extractor sample_rate). */
+    void observe_detection(uint64_t schedule_index, int64_t detected_start_sample);
+
     // Counters (thread-safe snapshots via core stats + block emit counters).
     uint64_t scheduled_windows() const;
     uint64_t completed_windows() const;
@@ -144,6 +181,7 @@ protected:
 
 private:
     void handle_schedule_msg(pmt::pmt_t msg);
+    void handle_lock_obs_msg(pmt::pmt_t msg);
     void apply_pending_config();
     void enqueue_ready_windows();
     void worker_loop();
@@ -151,17 +189,29 @@ private:
     void wait_for_worker_idle();
     void publish_window(core::ScheduledWindowCore::WindowHandle handle);
     void publish_status(const std::string& event, pmt::pmt_t extra = pmt::PMT_NIL);
+    // Map an absolute sample index from obs_rate → native extractor rate.
+    // Handles the 998.4↔737.28 (65/48) group-delay map when rates match.
+    int64_t map_obs_sample_to_native(int64_t obs_sample,
+                                     double obs_rate,
+                                     double filter_delay) const;
+    // Thread-safe observe; queues a soft t0/T update for the work() path.
+    bool note_lock_observation(uint64_t schedule_index,
+                               int64_t detected_native);
 
     core::ScheduledWindowCore core_;
     uint64_t d_current_sample_ = 0;
 
     // Pending config from message port (swapped on chunk boundary).
-    std::mutex d_cfg_mutex_;
+    mutable std::mutex d_cfg_mutex_;
     bool d_pending_cfg_ = false;
     core::ScheduleConfig d_pending_;
     bool d_pending_pause_ = false;
     bool d_pending_resume_ = false;
     bool d_pending_reset_ = false;
+    bool d_pending_lock_ = false;
+    bool d_pending_lock_force_t0_ = false;
+    double d_pending_lock_t0_ = 0.0;
+    double d_pending_lock_period_s_ = 0.0;
 
     EmitPolicy d_emit_policy_;
     bool d_verification_enabled_ = false;
@@ -169,6 +219,9 @@ private:
     float d_comm_threshold_ = 0.5f;
     std::vector<std::complex<float>> d_radar_tmpl_;
     std::vector<std::complex<float>> d_comm_tmpl_;
+
+    // Schedule lock (guarded by d_cfg_mutex_).
+    core::ScheduleLockTracker d_lock_;
 
     std::thread d_worker_;
     std::mutex d_job_mutex_;

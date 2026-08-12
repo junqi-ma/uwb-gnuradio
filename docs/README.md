@@ -5,12 +5,14 @@
 
 ## Phase-1 与硬件入口
 
+- [`当前代码路径现状与后续开发基线.md`](当前代码路径现状与后续开发基线.md)
 - [`phase1/开发总结_QM35825周期旁路雷达截取.md`](phase1/开发总结_QM35825周期旁路雷达截取.md)
 - [`phase1/GROK_X410_QM35825周期旁路开发方案.md`](phase1/GROK_X410_QM35825周期旁路开发方案.md)
 - [`phase1/下一步开发计划_QM35825周期旁路.md`](phase1/下一步开发计划_QM35825周期旁路.md)
 - [`phase1/SC16检测器开发与性能.md`](phase1/SC16检测器开发与性能.md)
 - [`phase1/X410_RFNoC入口与写盘测试.md`](phase1/X410_RFNoC入口与写盘测试.md)
 - [`phase1/当前信号检测逻辑.md`](phase1/当前信号检测逻辑.md)
+- [`phase1/对照报告_QM35_MATLAB与GNURadio离线解调.md`](phase1/对照报告_QM35_MATLAB与GNURadio离线解调.md)
 
 ## 性能分析与实验记录
 
@@ -27,4 +29,3 @@
 - [`archive/开发状态_2026-08-09历史快照.md`](archive/开发状态_2026-08-09历史快照.md)
 - [`archive/Claude开发规划经验.md`](archive/Claude开发规划经验.md)
 - [`archive/GROK_接手说明.md`](archive/GROK_接手说明.md)
-

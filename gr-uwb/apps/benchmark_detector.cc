@@ -1843,7 +1843,7 @@ int main(int argc, char** argv)
     std::string result_sink = "debug"; // demod-async: debug or drop
     std::string core_input = "pointer"; // core-throughput: pointer or copy
     size_t core_windows = 1; // core-throughput rotating working set
-    std::string cir_filter_mode = "auto";
+    std::string cir_filter_mode = "bypass";
 
     for (int i = 3; i + 1 < argc; i += 2) {
         std::string k = argv[i];

@@ -14,6 +14,7 @@
 #include <gnuradio/io_signature.h>
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <utility>
 
@@ -66,8 +67,11 @@ UwbScheduledExtractor::UwbScheduledExtractor(
     message_port_register_out(pmt::mp("packet"));
     message_port_register_out(pmt::mp("status"));
     message_port_register_in(pmt::mp("schedule"));
+    message_port_register_in(pmt::mp("lock_obs"));
     set_msg_handler(pmt::mp("schedule"),
                     [this](pmt::pmt_t msg) { handle_schedule_msg(msg); });
+    set_msg_handler(pmt::mp("lock_obs"),
+                    [this](pmt::pmt_t msg) { handle_lock_obs_msg(msg); });
 
     normalize_tmpl(d_radar_tmpl_);
     normalize_tmpl(d_comm_tmpl_);
@@ -85,6 +89,11 @@ UwbScheduledExtractor::UwbScheduledExtractor(
     core_.configure(cfg);
     core_.set_schedule(cfg.first_packet_sample_exact, packet_interval_s,
                        sample_rate);
+    d_lock_.reset(cfg.first_packet_sample_exact,
+                  packet_interval_s * sample_rate);
+    // Default OFF; enable via set_schedule_lock_enabled(true) and feed
+    // SYNC/preamble timing into "lock_obs" (demod schedule_feedback preferred).
+    d_lock_.enabled = false;
 }
 
 UwbScheduledExtractor::~UwbScheduledExtractor() { shutdown_worker(); }
@@ -184,6 +193,134 @@ UwbScheduledExtractor::set_verification_enabled(bool en)
     d_verification_enabled_ = en;
 }
 
+void
+UwbScheduledExtractor::set_schedule_lock_enabled(bool en)
+{
+    std::lock_guard<std::mutex> lock(d_cfg_mutex_);
+    d_lock_.enabled = en;
+    if (!en) {
+        const auto cfg = core_.config();
+        d_lock_.reset(cfg.first_packet_sample_exact,
+                      cfg.period_samples_exact());
+        d_pending_lock_ = false;
+    }
+}
+
+bool
+UwbScheduledExtractor::schedule_lock_enabled() const
+{
+    std::lock_guard<std::mutex> lock(d_cfg_mutex_);
+    return d_lock_.enabled;
+}
+
+int
+UwbScheduledExtractor::schedule_lock_state() const
+{
+    std::lock_guard<std::mutex> lock(d_cfg_mutex_);
+    return static_cast<int>(d_lock_.state);
+}
+
+uint64_t
+UwbScheduledExtractor::schedule_lock_updates() const
+{
+    std::lock_guard<std::mutex> lock(d_cfg_mutex_);
+    return d_lock_.lock_updates;
+}
+
+double
+UwbScheduledExtractor::locked_packet_interval_s() const
+{
+    std::lock_guard<std::mutex> lock(d_cfg_mutex_);
+    const double fs = core_.config().sample_rate;
+    if (fs <= 0.0 || d_lock_.period_samples <= 0.0)
+        return core_.config().packet_interval_s;
+    return d_lock_.period_samples / fs;
+}
+
+double
+UwbScheduledExtractor::locked_first_packet_sample() const
+{
+    std::lock_guard<std::mutex> lock(d_cfg_mutex_);
+    return d_lock_.t0_exact;
+}
+
+double
+UwbScheduledExtractor::locked_delta_period_samples() const
+{
+    std::lock_guard<std::mutex> lock(d_cfg_mutex_);
+    return d_lock_.delta_period;
+}
+
+double
+UwbScheduledExtractor::locked_bias_t0_samples() const
+{
+    std::lock_guard<std::mutex> lock(d_cfg_mutex_);
+    return d_lock_.bias_t0;
+}
+
+void
+UwbScheduledExtractor::observe_detection(uint64_t schedule_index,
+                                         int64_t detected_start_sample)
+{
+    note_lock_observation(schedule_index, detected_start_sample);
+}
+
+int64_t
+UwbScheduledExtractor::map_obs_sample_to_native(int64_t obs_sample,
+                                                double obs_rate,
+                                                double filter_delay) const
+{
+    const double native = core_.config().sample_rate;
+    if (obs_sample < 0 || obs_rate <= 0.0 || native <= 0.0)
+        return obs_sample;
+    // Same domain.
+    if (std::abs(obs_rate - native) <= 1e-6 * std::max(obs_rate, native))
+        return obs_sample;
+
+    // Preferred path: inverse of PDU 65/48 map
+    //   out = round((in * 65 + gd) / 48)
+    //   in  = round((out * 48 - gd) / 65)
+    // when obs is 998.4e6 and native is 737.28e6 (ratio 65/48).
+    constexpr double k998 = 998.4e6;
+    constexpr double k737 = 737.28e6;
+    const bool obs_998 =
+        std::abs(obs_rate - k998) <= 1e-6 * k998;
+    const bool nat_737 =
+        std::abs(native - k737) <= 1e-6 * k737;
+    if (obs_998 && nat_737) {
+        const double gd = filter_delay; // samples at 998.4
+        return static_cast<int64_t>(std::llround(
+            (static_cast<double>(obs_sample) * 48.0 - gd) / 65.0));
+    }
+    // Generic fallback (no group-delay compensation).
+    return static_cast<int64_t>(
+        std::llround(static_cast<double>(obs_sample) * native / obs_rate));
+}
+
+bool
+UwbScheduledExtractor::note_lock_observation(uint64_t schedule_index,
+                                             int64_t detected_native)
+{
+    std::lock_guard<std::mutex> lock(d_cfg_mutex_);
+    if (!d_lock_.enabled || detected_native < 0)
+        return false;
+    const auto cfg = core_.config();
+    const auto prev_state = d_lock_.state;
+    if (!d_lock_.observe(schedule_index, detected_native,
+                         cfg.period_samples_exact()))
+        return false;
+    d_pending_lock_ = true;
+    d_pending_lock_t0_ = d_lock_.t0_exact;
+    d_pending_lock_period_s_ =
+        d_lock_.period_samples / std::max(cfg.sample_rate, 1.0);
+    // First Hold (and re-Hold after unlock): prefer absolute learned (b, δ).
+    // Core falls back to next_k continuity if the absolute window is too close.
+    d_pending_lock_force_t0_ =
+        (d_lock_.state == core::ScheduleLockTracker::State::Hold);
+    (void)prev_state;
+    return true;
+}
+
 uint64_t UwbScheduledExtractor::scheduled_windows() const
 {
     return core_.stats().scheduled_windows;
@@ -276,6 +413,12 @@ UwbScheduledExtractor::handle_schedule_msg(pmt::pmt_t msg)
         return;
     }
 
+    // command == "observe" → demod / external lock observation
+    if (cmd == "observe") {
+        handle_lock_obs_msg(dict);
+        return;
+    }
+
     // command == "set" (default)
     d_pending_ = core_.config();
     if (pmt::dict_has_key(dict, pmt::mp("first_packet_sample"))) {
@@ -307,6 +450,85 @@ UwbScheduledExtractor::handle_schedule_msg(pmt::pmt_t msg)
 }
 
 void
+UwbScheduledExtractor::handle_lock_obs_msg(pmt::pmt_t msg)
+{
+    pmt::pmt_t dict = msg;
+    if (pmt::is_pair(msg) && !pmt::is_dict(msg))
+        dict = pmt::cdr(msg);
+    // Also accept a result PDU: cons(meta, payload).
+    if (pmt::is_pair(dict) && pmt::is_dict(pmt::car(dict)))
+        dict = pmt::car(dict);
+    if (!pmt::is_dict(dict))
+        return;
+
+    // SYNC-primary lock: accept timing-ok observations.  FCS is not required
+    // (and is not a fast sensor).  Explicit timing_ok=false rejects the msg.
+    // Without timing_ok, a present detected_start_sample is enough.
+    if (pmt::dict_has_key(dict, pmt::mp("timing_ok"))) {
+        if (!pmt::to_bool(
+                pmt::dict_ref(dict, pmt::mp("timing_ok"), pmt::PMT_F)))
+            return;
+    }
+
+    auto as_u64 = [](pmt::pmt_t v, uint64_t def) -> uint64_t {
+        if (pmt::is_uint64(v))
+            return pmt::to_uint64(v);
+        if (pmt::is_integer(v))
+            return static_cast<uint64_t>(pmt::to_long(v));
+        return def;
+    };
+    auto as_i64 = [](pmt::pmt_t v, int64_t def) -> int64_t {
+        if (pmt::is_uint64(v))
+            return static_cast<int64_t>(pmt::to_uint64(v));
+        if (pmt::is_integer(v))
+            return pmt::to_long(v);
+        return def;
+    };
+    auto as_f64 = [](pmt::pmt_t v, double def) -> double {
+        if (pmt::is_real(v))
+            return pmt::to_double(v);
+        if (pmt::is_integer(v))
+            return static_cast<double>(pmt::to_long(v));
+        return def;
+    };
+
+    const uint64_t k = as_u64(
+        pmt::dict_ref(dict, pmt::mp("schedule_index"),
+                      pmt::dict_ref(dict, pmt::mp("packet_id"),
+                                    pmt::from_uint64(0))),
+        0);
+    int64_t det = as_i64(
+        pmt::dict_ref(dict, pmt::mp("detected_start_sample"),
+                      pmt::dict_ref(dict, pmt::mp("timing_start_sample"),
+                                    pmt::from_long(-1))),
+        -1);
+    if (det < 0)
+        return;
+
+    const double obs_rate = as_f64(
+        pmt::dict_ref(dict, pmt::mp("sample_rate"), pmt::from_double(0.0)),
+        0.0);
+    double filter_delay = as_f64(
+        pmt::dict_ref(dict, pmt::mp("resample_filter_delay"),
+                      pmt::from_double(0.0)),
+        0.0);
+    // Prefer explicit native rate; fall back to input_sample_rate from the
+    // PDU resampler provenance fields.
+    const double native_hint = as_f64(
+        pmt::dict_ref(
+            dict, pmt::mp("native_sample_rate"),
+            pmt::dict_ref(dict, pmt::mp("input_sample_rate"),
+                          pmt::from_double(core_.config().sample_rate))),
+        core_.config().sample_rate);
+    (void)native_hint;
+
+    if (obs_rate > 0.0)
+        det = map_obs_sample_to_native(det, obs_rate, filter_delay);
+
+    note_lock_observation(k, det);
+}
+
+void
 UwbScheduledExtractor::apply_pending_config()
 {
     // Snapshot pending flags under cfg mutex, then (if pool rebuild) drain
@@ -315,6 +537,9 @@ UwbScheduledExtractor::apply_pending_config()
     bool do_cfg = false;
     bool do_pause = false;
     bool do_resume = false;
+    bool do_lock = false;
+    double lock_t0 = 0.0;
+    double lock_period_s = 0.0;
     core::ScheduleConfig pending;
     {
         std::lock_guard<std::mutex> lock(d_cfg_mutex_);
@@ -322,6 +547,9 @@ UwbScheduledExtractor::apply_pending_config()
         do_cfg = d_pending_cfg_;
         do_pause = d_pending_pause_;
         do_resume = d_pending_resume_;
+        do_lock = d_pending_lock_;
+        lock_t0 = d_pending_lock_t0_;
+        lock_period_s = d_pending_lock_period_s_;
         pending = d_pending_;
     }
 
@@ -338,6 +566,7 @@ UwbScheduledExtractor::apply_pending_config()
             core_.reset();
             d_current_sample_ = 0;
             d_pending_reset_ = false;
+            d_pending_lock_ = false;
             publish_status("schedule_updated");
         }
         if (d_pending_cfg_) {
@@ -348,8 +577,43 @@ UwbScheduledExtractor::apply_pending_config()
             core_.set_schedule(d_pending_.first_packet_sample_exact,
                                d_pending_.packet_interval_s,
                                d_pending_.sample_rate);
+            d_lock_.reset(d_pending_.first_packet_sample_exact,
+                          d_pending_.packet_interval_s *
+                              d_pending_.sample_rate);
             d_pending_cfg_ = false;
+            d_pending_lock_ = false;
             publish_status("schedule_updated");
+        }
+        // Soft lock update: continuity-preserving at next_k (see core).
+        if (d_pending_lock_) {
+            const double t0 = d_pending_lock_t0_;
+            const double Ts = d_pending_lock_period_s_;
+            const bool force = d_pending_lock_force_t0_;
+            d_pending_lock_ = false;
+            d_pending_lock_force_t0_ = false;
+            if (core_.update_locked_params(t0, Ts, force)) {
+                // Keep tracker t0 aligned with what was actually applied
+                // (continuity re-anchor may differ from tracker t0).
+                d_lock_.t0_exact = core_.config().first_packet_sample_exact;
+                d_lock_.period_samples = core_.config().period_samples_exact();
+                pmt::pmt_t extra = pmt::make_dict();
+                extra = pmt::dict_add(extra, pmt::mp("lock_state"),
+                                      pmt::from_long(static_cast<long>(
+                                          d_lock_.state)));
+                extra = pmt::dict_add(
+                    extra, pmt::mp("locked_t0"),
+                    pmt::from_double(core_.config().first_packet_sample_exact));
+                extra = pmt::dict_add(extra, pmt::mp("locked_period_s"),
+                                      pmt::from_double(Ts));
+                extra = pmt::dict_add(
+                    extra, pmt::mp("locked_period_samples"),
+                    pmt::from_double(d_lock_.period_samples));
+                extra = pmt::dict_add(extra, pmt::mp("force_t0"),
+                                      pmt::from_bool(force));
+                publish_status("schedule_locked", extra);
+            } else {
+                publish_status("schedule_lock_rejected");
+            }
         }
         if (d_pending_pause_) {
             core_.pause();
@@ -365,6 +629,9 @@ UwbScheduledExtractor::apply_pending_config()
     (void)pending;
     (void)do_pause;
     (void)do_resume;
+    (void)do_lock;
+    (void)lock_t0;
+    (void)lock_period_s;
 }
 
 int
@@ -543,18 +810,22 @@ UwbScheduledExtractor::publish_window(
         return;
 
     // Optional post-copy verification (never gates every_slot emit).
+    // Search aggressively around the predicted start: real QM35 slots drift by
+    // thousands of samples over 0.5 s under a fixed nominal T.  Stride-16
+    // coarse + fine keeps cost bounded while covering ~2*pre_guard.
     if (d_verification_enabled_ && !d_radar_tmpl_.empty()) {
         const size_t L = d_radar_tmpl_.size();
         const size_t search_start = 0;
-        // Search only near predicted: pre_guard + small margin (not full window).
         const size_t pre = core_.config().pre_guard_samples;
+        const size_t max_align = n > L ? n - L + 1 : 0;
         const size_t search_len =
-            std::min(n > L ? n - L + 1 : 0, pre * 2 + 64);
+            std::min(max_align, std::max(pre * 2 + 1024, pre + 8192));
         float metric = 0.0f;
         size_t off = 0;
         const bool ok = core::verify_template_in_window(
             slot.samples.data(), n, d_radar_tmpl_.data(), L, search_start,
-            search_len, d_radar_threshold_, &metric, &off);
+            search_len, d_radar_threshold_, &metric, &off,
+            /*coarse_stride=*/16);
         meta.radar_metric = metric;
         meta.radar_verified = ok;
         if (ok) {
@@ -562,6 +833,12 @@ UwbScheduledExtractor::publish_window(
                 meta.window_start_sample + static_cast<int64_t>(off);
             meta.timing_error_samples =
                 meta.detected_start_sample - meta.predicted_start_sample;
+
+            // Secondary SYNC source for learn-then-freeze (prefer demod
+            // schedule_feedback).  Strong radar peaks only.
+            if (metric >= 0.6f)
+                note_lock_observation(meta.schedule_index,
+                                      meta.detected_start_sample);
         } else {
             core_.note_verification_failure();
         }
@@ -572,12 +849,12 @@ UwbScheduledExtractor::publish_window(
         float metric = 0.0f;
         size_t off = 0;
         const size_t search_len = n > L ? n - L + 1 : 0;
-        // Cap comm search to same short horizon as radar for cost control.
         const size_t pre = core_.config().pre_guard_samples;
-        const size_t capped = std::min(search_len, pre * 2 + 64);
+        const size_t capped =
+            std::min(search_len, std::max(pre * 2 + 1024, pre + 8192));
         const bool ok = core::verify_template_in_window(
             slot.samples.data(), n, d_comm_tmpl_.data(), L, 0, capped,
-            d_comm_threshold_, &metric, &off);
+            d_comm_threshold_, &metric, &off, /*coarse_stride=*/16);
         meta.comm_metric = metric;
         meta.comm_present = ok;
         meta.collision = meta.radar_verified && meta.comm_present;
@@ -595,6 +872,10 @@ UwbScheduledExtractor::publish_window(
                              pmt::from_uint64(meta.schedule_index));
     pmt_meta = pmt::dict_add(pmt_meta, pmt::mp("schedule_index"),
                              pmt::from_uint64(meta.schedule_index));
+    // Keep schedule predicted_start as the demod seed.  stage_timing now
+    // coarse-scans a large margin around it; substituting a mid-preamble
+    // verification peak (or a false lock) as the seed caused worse SFD/CIR
+    // failures than the plain schedule + wide search path.
     pmt_meta = pmt::dict_add(pmt_meta, pmt::mp("predicted_start_sample"),
                              pmt::from_long(meta.predicted_start_sample));
     pmt_meta = pmt::dict_add(pmt_meta, pmt::mp("window_start_sample"),

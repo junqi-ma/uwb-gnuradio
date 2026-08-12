@@ -20,6 +20,7 @@
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <stdexcept>
@@ -190,6 +191,7 @@ UwbPduRationalResamplerCcf65_48::UwbPduRationalResamplerCcf65_48(
         core::RationalResampler65_48Core::expected_output_length(
             typical_in, d_taps_.size());
     d_scratch_.reserve(typical_out + 256);
+    d_input_scratch_.reserve(typical_in);
 
     message_port_register_in(pmt::mp("packet"));
     message_port_register_out(pmt::mp("packet"));
@@ -210,6 +212,11 @@ UwbPduRationalResamplerCcf65_48::reset_stats()
     d_total_out_.store(0, std::memory_order_relaxed);
     d_resets_.store(0, std::memory_order_relaxed);
     d_short_guard_.store(0, std::memory_order_relaxed);
+    d_resample_total_us_.store(0, std::memory_order_relaxed);
+    d_resample_max_us_.store(0, std::memory_order_relaxed);
+    d_handler_total_us_.store(0, std::memory_order_relaxed);
+    d_input_convert_total_us_.store(0, std::memory_order_relaxed);
+    d_publish_total_us_.store(0, std::memory_order_relaxed);
     d_short_guard_logged_ = false;
 }
 
@@ -305,14 +312,16 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
     pmt::pmt_t data_in = pmt::cdr(msg);
     if (!pmt::is_dict(meta_in))
         meta_in = pmt::make_dict();
-    if (!pmt::is_c32vector(data_in)) {
+    if (!pmt::is_c32vector(data_in) && !pmt::is_s16vector(data_in)) {
         d_pdus_dropped_.fetch_add(1, std::memory_order_relaxed);
         publish_status("invalid_input");
         return;
     }
 
-    const size_t n_in = pmt::length(data_in);
-    if (n_in == 0) {
+    const bool input_sc16 = pmt::is_s16vector(data_in);
+    const auto handler_begin = std::chrono::steady_clock::now();
+    const size_t payload_items = pmt::length(data_in);
+    if (payload_items == 0 || (input_sc16 && (payload_items & 1u) != 0)) {
         d_pdus_dropped_.fetch_add(1, std::memory_order_relaxed);
         publish_status("invalid_input");
         return;
@@ -330,15 +339,48 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
         return;
     }
 
+    const size_t n_in = input_sc16 ? payload_items / 2 : payload_items;
     size_t n_out = 0;
     size_t n_elem = 0;
-    const gr_complex* in_ptr = pmt::c32vector_elements(data_in, n_elem);
+    const gr_complex* in_ptr = nullptr;
+    if (!input_sc16) {
+        in_ptr = pmt::c32vector_elements(data_in, n_elem);
+    } else {
+        const auto convert_begin = std::chrono::steady_clock::now();
+        const int16_t* s16 = pmt::s16vector_elements(data_in, n_elem);
+        if (s16 != nullptr && n_elem == payload_items) {
+            if (d_input_scratch_.size() < n_in)
+                d_input_scratch_.resize(n_in);
+            for (size_t i = 0; i < n_in; ++i) {
+                d_input_scratch_[i] = gr_complex(
+                    static_cast<float>(s16[2 * i]),
+                    static_cast<float>(s16[2 * i + 1]));
+            }
+            in_ptr = d_input_scratch_.data();
+            n_elem = n_in;
+        }
+        d_input_convert_total_us_.fetch_add(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - convert_begin).count()),
+            std::memory_order_relaxed);
+    }
     if (in_ptr == nullptr || n_elem != n_in) {
         d_pdus_dropped_.fetch_add(1, std::memory_order_relaxed);
         publish_status("invalid_input");
         return;
     }
+    const auto resample_begin = std::chrono::steady_clock::now();
     resample_oneshot(in_ptr, n_in, &n_out);
+    const uint64_t resample_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - resample_begin).count());
+    d_resample_total_us_.fetch_add(resample_us, std::memory_order_relaxed);
+    uint64_t prior_max = d_resample_max_us_.load(std::memory_order_relaxed);
+    while (prior_max < resample_us &&
+           !d_resample_max_us_.compare_exchange_weak(
+               prior_max, resample_us, std::memory_order_relaxed,
+               std::memory_order_relaxed)) {
+    }
     if (n_out == 0) {
         d_pdus_dropped_.fetch_add(1, std::memory_order_relaxed);
         publish_status("empty_output");
@@ -491,12 +533,27 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
                              pmt::from_double(d_output_rate_));
     meta_out = pmt::dict_add(meta_out, pmt::mp("input_sample_count"),
                              pmt::from_long(static_cast<long>(n_in)));
+    meta_out = pmt::dict_add(meta_out, pmt::mp("input_sample_format"),
+                             pmt::mp(input_sc16 ? "sc16" : "fc32"));
+    meta_out = pmt::dict_add(meta_out, pmt::mp("sample_format"),
+                             pmt::mp("fc32"));
     meta_out = pmt::dict_add(meta_out, pmt::mp("full_output_sample_count"),
                              pmt::from_long(static_cast<long>(n_out)));
+    meta_out = pmt::dict_add(meta_out, pmt::mp("resample_us"),
+                             pmt::from_uint64(resample_us));
 
+    const auto publish_begin = std::chrono::steady_clock::now();
     pmt::pmt_t vec = pmt::init_c32vector(
         emit_len, d_scratch_.data() + emit_off);
     message_port_pub(pmt::mp("packet"), pmt::cons(meta_out, vec));
+    d_publish_total_us_.fetch_add(static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - publish_begin).count()),
+        std::memory_order_relaxed);
+    d_handler_total_us_.fetch_add(static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - handler_begin).count()),
+        std::memory_order_relaxed);
 
     d_pdus_emitted_.fetch_add(1, std::memory_order_relaxed);
     d_total_out_.fetch_add(emit_len, std::memory_order_relaxed);

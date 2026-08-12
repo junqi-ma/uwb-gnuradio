@@ -160,9 +160,19 @@ inline bool stage_timing(const std::complex<float>* rx,
                          DemodScratch& scratch)
 {
     out = TimingResult{};
+    const auto timing_begin = std::chrono::steady_clock::now();
+    auto finish_timing_profile = [&]() {
+        const uint64_t total = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - timing_begin).count());
+        out.fine_track_us =
+            (total >= out.coarse_search_us) ? total - out.coarse_search_us : 0;
+    };
     const size_t L = template_wf.size();
-    if (L == 0 || n < L)
+    if (L == 0 || n < L) {
+        finish_timing_profile();
         return false;
+    }
 
     // Copy + L2-normalize the template (own copy so callers may pass raw).
     scratch.work.assign(template_wf.begin(), template_wf.end());
@@ -225,7 +235,17 @@ inline bool stage_timing(const std::complex<float>* rx,
         return true;
     };
 
-    // Locate the first SYNC start near the seed (narrow ROI).
+    // Locate the first SYNC start near the seed.
+    //
+    // Real QM35825 scheduled captures show two orthogonal seed errors:
+    //   1) sub-symbol offsets of tens–hundreds of samples (t0 bias + SFO)
+    //   2) whole-SYNC landings (detector seeds a strong later SYNC)
+    // A tight ±64 window only covers (tiny) residual after a good seed.  We
+    // therefore:
+    //   a) coarse-scan the full timing_search_margin at stride S (cheap),
+    //   b) fine-refine ±S around the best coarse hit,
+    //   c) also probe whole-SYNC grid offsets (legacy path for (2)),
+    // then backtrack with a relaxed threshold to recover weak leading SYNCs.
     int64_t first_start = -1;
     float first_metric = 0.0f;
     std::complex<float> first_corr(0.0f, 0.0f);
@@ -233,10 +253,86 @@ inline bool stage_timing(const std::complex<float>* rx,
         const int64_t seed =
             (seed_start >= 0) ? seed_start
                               : (int64_t)(roi_start + (roi_end - roi_start) / 2);
-        const int64_t radius = 64; // seed is already coarse
-        if (!local_best(seed, radius, profile.radar_verification_threshold,
-                        &first_start, &first_metric, &first_corr))
+        const float thr = profile.radar_verification_threshold;
+        const int64_t margin =
+            static_cast<int64_t>(profile.timing_search_margin);
+        const int64_t stride = std::max<int64_t>(
+            1, static_cast<int64_t>(profile.timing_coarse_stride));
+        const int64_t j_lo = std::max<int64_t>(0, seed - margin);
+        const int64_t j_hi =
+            std::min<int64_t>(static_cast<int64_t>(n) - static_cast<int64_t>(L),
+                              seed + margin);
+
+        auto consider = [&](int64_t pos, float met, std::complex<float> corr) {
+            if (met >= thr && met > first_metric) {
+                first_metric = met;
+                first_start = pos;
+                first_corr = corr;
+            }
+        };
+
+        // (a) Coarse scan — sliding power, VOLK-grade conjugate dots at stride.
+        const auto coarse_begin = std::chrono::steady_clock::now();
+        if (j_hi > j_lo) {
+            float pw = 0.0f;
+            for (size_t k = 0; k < L; ++k)
+                pw += std::norm(rx[j_lo + static_cast<int64_t>(k)]);
+            float best_coarse_m = -1.0f;
+            int64_t best_coarse_j = j_lo;
+            std::complex<float> best_coarse_c(0.0f, 0.0f);
+            for (int64_t j = j_lo; j <= j_hi; ++j) {
+                if (((j - j_lo) % stride) == 0) {
+                    const std::complex<float> acc =
+                        detail::timing_conjugate_dot(
+                            rx + j, scratch.work.data(), L);
+                    const float m = std::norm(acc) / (pw * Et + 1e-12f);
+                    if (m > best_coarse_m) {
+                        best_coarse_m = m;
+                        best_coarse_j = j;
+                        best_coarse_c = acc;
+                    }
+                }
+                if (j + 1 <= j_hi)
+                    pw += std::norm(rx[j + static_cast<int64_t>(L)]) -
+                          std::norm(rx[j]);
+            }
+            out.coarse_search_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - coarse_begin).count());
+            // (b) Fine refine around the coarse peak (and the raw seed).
+            int64_t pos = -1;
+            float met = 0.0f;
+            std::complex<float> corr(0.0f, 0.0f);
+            if (local_best(best_coarse_j, stride, thr, &pos, &met, &corr))
+                consider(pos, met, corr);
+            else if (best_coarse_m >= thr)
+                consider(best_coarse_j, best_coarse_m, best_coarse_c);
+            if (local_best(seed, std::max<int64_t>(64, stride), thr, &pos, &met,
+                           &corr))
+                consider(pos, met, corr);
+        }
+
+        // (c) Whole-SYNC grid probes (covers seed landing mid-preamble).
+        {
+            int64_t pos = -1;
+            float met = 0.0f;
+            std::complex<float> corr(0.0f, 0.0f);
+            // A sub-symbol confirmation window must not probe a neighbouring
+            // full SYNC: that would let the stronger next repetition replace
+            // an SFD-refined anchor.  Wide acquisition still probes every
+            // whole-SYNC offset covered by its configured margin.
+            const int64_t grid_half = margin / kQm35SamplesPerSymbol;
+            for (int64_t n_sym = -grid_half; n_sym <= grid_half; ++n_sym) {
+                if (local_best(seed + n_sym * static_cast<int64_t>(
+                                               kQm35SamplesPerSymbol),
+                               8, thr, &pos, &met, &corr))
+                    consider(pos, met, corr);
+            }
+        }
+        if (first_start < 0) {
+            finish_timing_profile();
             return false;
+        }
     }
     // A real QM35825 has a repeatable startup transient: the first few SYNCs
     // can score below the normal verification threshold, so the detector seeds
@@ -259,8 +355,10 @@ inline bool stage_timing(const std::complex<float>* rx,
             break;
     }
     const int64_t start = first_start;
-    if (start < 0)
+    if (start < 0) {
+        finish_timing_profile();
         return false;
+    }
     const int64_t period = static_cast<int64_t>(kQm35SamplesPerSymbol);
 
     // Track all SYNC starts: expected = start + k*period, then convert each to
@@ -317,16 +415,18 @@ inline bool stage_timing(const std::complex<float>* rx,
     }
 
     out.ok = true;
+    finish_timing_profile();
     return true;
 }
 
 // ---------------------------------------------------------------------------
 // Stage 2 — CFO estimation + compensation (R1).
-// Uses the stable SYNC peaks (skipping the first cir_skip_initial_repetitions)
-// to fit phase vs time linearly; the slope / 2pi is the CFO in Hz.  The frame
-// is then derotated by exp(-j2pi*f*n/fs) and phase-resolved against the
-// preamble waveform.  Golden reference: CFO = 0 Hz for the clean baseband
-// signal.
+// Uses the stable SYNC peaks after the startup transient to fit phase vs time
+// linearly; the slope / 2pi is the CFO in Hz.  MATLAB skips up to its first
+// 24 peaks while retaining at least 32, controlled here by the separate CFO
+// profile fields (not the CIR skip policy). The frame is then derotated by
+// exp(-j2pi*f*n/fs) and phase-resolved against the preamble waveform. Golden
+// reference: CFO = 0 Hz for the clean baseband signal.
 // ---------------------------------------------------------------------------
 inline bool stage_cfo(const std::complex<float>* rx,
                       size_t n,
@@ -340,13 +440,19 @@ inline bool stage_cfo(const std::complex<float>* rx,
     if (np < 4)
         return false;
 
-    // Skip the first `skip` peaks (front-end startup transient) but keep at
-    // least a few for the fit.
+    // Match MATLAB compensateCarrierOffset: discard up to the first 24 SYNC
+    // correlation phases, but retain at least 32 for the least-squares fit.
+    // For shorter preambles, keep all available peaks rather than failing.
+    const size_t min_fit = std::max<size_t>(2, profile.cfo_min_fit_repetitions);
+    const size_t available_to_skip = np > min_fit ? np - min_fit : 0;
     const size_t skip =
-        std::min(profile.cir_skip_initial_repetitions, np - 2);
+        std::min(profile.cfo_skip_initial_repetitions, available_to_skip);
     const size_t nfit = np - skip;
     if (nfit < 2)
         return false;
+    out.skipped_peaks = skip;
+    out.fit_first_peak_sample = timing.peak_samples[skip];
+    out.fit_last_peak_sample = timing.peak_samples[np - 1];
 
     // Gather per-peak carrier phases from the SYNC matched-filter values (the
     // noise-averaged correlation phase, NOT the raw rx[peak] sample).  Falls
@@ -485,12 +591,18 @@ inline bool stage_sfd(const std::complex<float>* rx,
         half = static_cast<int64_t>(profile.sfd_search_half_width) * 2;
     else if (np >= 2)
         half = 64;
-    const int64_t last_peak = timing.peak_samples.back();
-    const int64_t last_start =
-        last_peak - static_cast<int64_t>(template_wf.size() - 1);
-    const int64_t expected =
-        last_start +
-        static_cast<int64_t>(std::llround(timing.measured_period));
+    // MATLAB strategy (refineTimingWithNsSfd): SFD start = preamble start +
+    // preamble_repetitions × measured_period.  This is physically correct even
+    // when the trailing preamble SYNC(s) score below the acquisition threshold
+    // and are not tracked (partial train) — exactly the case where the old
+    // "last_tracked_peak + period" extrapolation landed one symbol early.
+    const int64_t period =
+        (timing.measured_period > 0.0)
+            ? static_cast<int64_t>(std::llround(timing.measured_period))
+            : static_cast<int64_t>(sym);
+    const int64_t expected = timing.preamble_start_sample +
+        static_cast<int64_t>(profile.preamble_repetitions) * period;
+    out.expected_start_sample = expected;
     // Full-rate correlation (normalized) over the search window.
     // The signal is 2x oversampled and the SFD template is kron(sfd, preamble)
     // (8 symbols), so the correlation peak is broad: a decimated coarse pass
@@ -502,14 +614,15 @@ inline bool stage_sfd(const std::complex<float>* rx,
     float best = -1.0f;
     size_t best_j = 0;
 
-    auto scan_window = [&](int64_t center) {
+    auto scan_window = [&](int64_t center, int64_t backtrack_symbols) {
         if (center < 0 || n < sfd_len)
-            return;
+            return false;
         const int64_t lo = std::max<int64_t>(0, center - half);
         const int64_t hi = std::min<int64_t>(
             static_cast<int64_t>(n - sfd_len), center + half);
         if (hi < lo)
-            return;
+            return false;
+        ++out.search_windows;
         const size_t j_lo = static_cast<size_t>(lo);
         const size_t j_end = static_cast<size_t>(hi);
         float window_best = -1.0f;
@@ -525,6 +638,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
                            std::norm(rx[j - 1 - k]);
             }
             std::complex<float> acc(0.0f, 0.0f);
+            ++out.coarse_correlations;
             for (size_t k = 0; k < sfd_len; ++k)
                 acc += rx[j + k] * std::conj(scratch.corr[k]);
             const float m = std::norm(acc) / (pwr + 1e-12f);
@@ -548,6 +662,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
                 pwr += std::norm(rx[j + sfd_len - 1]) -
                        std::norm(rx[j - 1]);
             std::complex<float> acc(0.0f, 0.0f);
+            ++out.fine_correlations;
             for (size_t k = 0; k < sfd_len; ++k)
                 acc += rx[j + k] * std::conj(scratch.corr[k]);
             const float m = std::norm(acc) / (pwr + 1e-12f);
@@ -560,20 +675,27 @@ inline bool stage_sfd(const std::complex<float>* rx,
             best = window_best;
             best_j = window_best_j;
         }
+        if (out.first_threshold_backtrack_symbols < 0 &&
+            window_best >= profile.sfd_detection_threshold) {
+            out.first_threshold_backtrack_symbols = backtrack_symbols;
+        }
+        return window_best >= profile.sfd_detection_threshold;
     };
 
-    scan_window(expected);
-    // A full-looking train may actually start at SYNC #2/#3/#4 and end on
-    // the leading non-zero SFD symbols: timing uses |correlation|, so their
-    // negative sign is intentionally invisible.  Check three additional
-    // narrow windows one to three periods early and let the complete SFD
-    // metric choose the hypothesis.  This is four small disjoint searches,
-    // not one continuous +/-3-symbol window.
-    if (np >= profile.preamble_repetitions) {
-        const int64_t measured_period = static_cast<int64_t>(
-            std::llround(timing.measured_period));
-        for (int back = 1; back <= 3; ++back)
-            scan_window(expected - back * measured_period);
+    // Fast path: preamble timing's prediction first, then step backwards one
+    // SYNC at a time.  On the QM35 reference capture the first qualifying
+    // candidate always agrees with the old global-best result, and the needed
+    // Probe the nominal SFD position, then step FORWARD up to
+    // sfd_max_forward_symbols symbols and stop at the first
+    // threshold-qualified SFD.  A partial preamble train (trailing SYNC below
+    // the acquisition threshold) can only push the SFD later than the nominal
+    // position, never earlier, so no backward search is performed.
+    bool sfd_found = scan_window(expected, 0);
+    for (size_t fwd = 1; fwd <= profile.sfd_max_forward_symbols && !sfd_found;
+         ++fwd) {
+        sfd_found = scan_window(
+            expected + static_cast<int64_t>(fwd) * period,
+            static_cast<int64_t>(fwd));
     }
     if (best < profile.sfd_detection_threshold)
         return false;
@@ -991,8 +1113,9 @@ namespace detail {
 
 // IEEE 802.15.4a BPRF data-scrambler spreading (lrwpan.internal.createScrambler):
 // a 15-bit LFSR with s[i] = s[i-14] ^ s[i-15].  The initial state depends
-// on the preamble code index; MathWorks' code-9 and code-10 states are listed
-// below.  This distinction is required for DW1000 code-10 PHR/payload data.
+// on the preamble code index; values below were exported from MATLAB R2025b
+// lrwpan.internal.createScrambler for codes 9–12. This distinction is required
+// for DW1000 PHR/payload data.
 // Returns the +/-1 spreading stream over [start_bit, start_bit+nbits).
 // The PHR field uses offset 0; the payload field is offset by the number of
 // PHR active chips (21 symbols x 64 chips/burst = 1344).
@@ -1005,11 +1128,21 @@ inline bool bprf_spreading(std::vector<int8_t>& out, size_t code_index,
     static const int8_t kInit10[15] = {
         0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1
     };
+    static const int8_t kInit11[15] = {
+        1, 1, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1
+    };
+    static const int8_t kInit12[15] = {
+        1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0
+    };
     const int8_t* init = nullptr;
     if (code_index == 9)
         init = kInit9;
     else if (code_index == 10)
         init = kInit10;
+    else if (code_index == 11)
+        init = kInit11;
+    else if (code_index == 12)
+        init = kInit12;
     else
         return false;
     std::vector<int8_t> s(start_bit + nbits);
@@ -1980,10 +2113,18 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             for (auto& p : res.timing.peak_samples)
                 p += window_start;
         }
+        if (res.cfo.ok) {
+            res.cfo.fit_first_peak_sample += window_start;
+            res.cfo.fit_last_peak_sample += window_start;
+        }
         if (res.sfd.ok) {
             res.sfd.sfd_start_sample += window_start;
             res.sfd.sfd_end_sample += window_start;
         }
+        if (res.sfd_initial_predicted_sample >= 0)
+            res.sfd_initial_predicted_sample += window_start;
+        if (res.sfd_bootstrap_detected_sample >= 0)
+            res.sfd_bootstrap_detected_sample += window_start;
         if (res.cir.ok)
             res.cir.first_path_sample += window_start;
     };
@@ -2005,6 +2146,8 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     const bool t_ok = stage_timing(rx, n, profile, template_wf, rel_seed,
                                    res.timing, scratch);
     lap(res.stage_timing_us);
+    res.stage_timing_coarse_us = res.timing.coarse_search_us;
+    res.stage_timing_fine_track_us = res.timing.fine_track_us;
     if (!t_ok) {
         res.status = DemodStatus::TimingFailed;
         rebase();
@@ -2018,23 +2161,78 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         return res;
     }
     lap(res.stage_cfo_us);
-    // Stage 3: SFD (profile sfd_mode).  Run on the CFO-derotated frame so the
-    // template correlation is not degraded by residual rotation at large CFO
-    // (golden CFO=0 ⇒ derotated ≈ rx, so the reference result is unchanged).
+    // Stage 3: bootstrap SFD timing.  Timing acquisition can start several
+    // SYNCs late when a weak leading repetition falls below its tracking
+    // threshold.  Its 64-point phase train would then spill into the SFD and
+    // corrupt a CFO fit, even though the SFD search can recover the true frame
+    // origin by testing earlier hypotheses.  Use this first SFD only to anchor
+    // the preamble; the final reported CFO is re-fitted below from that anchor.
     const auto sfd_seq = gr::uwb::demod::GetSfdSequence(profile.sfd_mode);
     const std::complex<float>* sfd_rx =
         scratch.derotated.empty() ? rx : scratch.derotated.data();
-    if (!stage_sfd(sfd_rx, n, profile, res.timing, sfd_seq, template_wf,
-                   res.sfd, scratch)) {
+    const bool bootstrap_sfd_ok = stage_sfd(
+        sfd_rx, n, profile, res.timing, sfd_seq, template_wf, res.sfd, scratch);
+    res.sfd_bootstrap_windows = res.sfd.search_windows;
+    res.sfd_bootstrap_coarse_correlations = res.sfd.coarse_correlations;
+    res.sfd_bootstrap_fine_correlations = res.sfd.fine_correlations;
+    res.sfd_initial_predicted_sample = res.sfd.expected_start_sample;
+    res.sfd_bootstrap_detected_sample = res.sfd.sfd_start_sample;
+    res.sfd_bootstrap_first_threshold_backtrack_symbols =
+        res.sfd.first_threshold_backtrack_symbols;
+    if (!bootstrap_sfd_ok) {
         lap(res.stage_sfd_us);
         res.status = DemodStatus::SfdFailed;
         rebase();
         return res;
     }
-    // MATLAB refineTimingWithNsSfd feeds the full-rate SFD result back into
-    // the preamble origin used by CIR/soft-chip extraction.  Keeping the
-    // earlier single-SYNC timing origin here discards that refinement and can
-    // leave a half-chip/sample grid error on real RF captures.
+
+    // Match MATLAB's CFO input: retrack exactly the SYNC train implied by the
+    // SFD-refined frame origin, then discard the first 24 of those peaks.  A
+    // tight one-SYNC search prevents the broad acquisition scan from selecting
+    // a later high-metric repetition again; no backwards probing is needed
+    // because the SFD has already supplied the preamble origin.
+    const int64_t refined_start =
+        res.sfd.sfd_start_sample - static_cast<int64_t>(std::llround(
+            static_cast<double>(profile.preamble_repetitions) *
+            res.timing.measured_period));
+    Qm35825Profile cfo_anchor_profile = profile;
+    // `stage_timing` always performs a local ±8 refinement around the seed;
+    // set the coarse/grid margin to zero so it cannot re-acquire another
+    // symbol when the SFD anchor itself is already sample-accurate.
+    cfo_anchor_profile.timing_search_margin = 0;
+    cfo_anchor_profile.timing_coarse_stride = 1;
+    cfo_anchor_profile.timing_max_backtrack_symbols = 0;
+    // MATLAB's per-SYNC floor is 0.20 of the candidate energy.  The ordinary
+    // acquisition threshold is intentionally stricter (0.30), but must not
+    // reject a known, SFD-anchored leading SYNC during CFO retracking.
+    cfo_anchor_profile.radar_verification_threshold = 0.20f;
+    TimingResult cfo_timing;
+    if (!stage_timing(rx, n, cfo_anchor_profile, template_wf, refined_start,
+                      cfo_timing, scratch) ||
+        !stage_cfo(rx, n, profile, cfo_timing, res.cfo, scratch)) {
+        lap(res.stage_sfd_us);
+        res.status = DemodStatus::CfoFailed;
+        rebase();
+        return res;
+    }
+    res.timing = std::move(cfo_timing);
+
+    // Re-run SFD on the final MATLAB-aligned CFO compensation.  This removes
+    // any bootstrap-CFO bias from the SFD/CIR path while retaining the same
+    // full-rate refinement contract as MATLAB refineTimingWithNsSfd.
+    sfd_rx = scratch.derotated.empty() ? rx : scratch.derotated.data();
+    const bool final_sfd_ok = stage_sfd(
+        sfd_rx, n, cfo_anchor_profile, res.timing, sfd_seq, template_wf,
+        res.sfd, scratch);
+    res.sfd_final_windows = res.sfd.search_windows;
+    res.sfd_final_coarse_correlations = res.sfd.coarse_correlations;
+    res.sfd_final_fine_correlations = res.sfd.fine_correlations;
+    if (!final_sfd_ok) {
+        lap(res.stage_sfd_us);
+        res.status = DemodStatus::SfdFailed;
+        rebase();
+        return res;
+    }
     res.timing.preamble_start_sample =
         res.sfd.sfd_start_sample - static_cast<int64_t>(std::llround(
             static_cast<double>(profile.preamble_repetitions) *
@@ -2100,8 +2298,8 @@ bool stage_timing(const std::complex<float>* rx,
 
 // ---------------------------------------------------------------------------
 // Stage 2 — CFO estimation + compensation.
-// Uses stable SYNC peaks (skipping the first cir_skip_initial_repetitions)
-// to fit phase vs time, then derotates the frame.
+// Uses stable SYNC peaks after the configured CFO startup skip to fit phase
+// vs time, then derotates the frame.
 // ---------------------------------------------------------------------------
 bool stage_cfo(const std::complex<float>* rx,
                size_t n,

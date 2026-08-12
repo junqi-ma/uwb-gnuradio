@@ -160,6 +160,7 @@ BOOST_AUTO_TEST_CASE(test_golden_round_trip)
     auto demod =
         gr::uwb::UwbRealtimeDemodulator::make_from_template(tmpl, 2, 64,
                                                             "ieee");
+    BOOST_CHECK_EQUAL(demod->timing_coarse_stride(), size_t(14));
     auto dbg = gr::blocks::message_debug::make();
     auto dbg_status = gr::blocks::message_debug::make();
     auto tb = gr::make_top_block("qa_realtime_roundtrip");
@@ -221,6 +222,19 @@ BOOST_AUTO_TEST_CASE(test_golden_round_trip)
     for (size_t i = 0; i < n; ++i)
         BOOST_CHECK_EQUAL(static_cast<int>(b[i]),
                           static_cast<int>(golden_bytes[i]));
+}
+
+BOOST_AUTO_TEST_CASE(test_timing_coarse_stride_configuration)
+{
+    const auto tmpl = load_template();
+    BOOST_REQUIRE(!tmpl.empty());
+    auto demod = gr::uwb::UwbRealtimeDemodulator::make_from_template(
+        tmpl, 1, 4, "4z2", 0, "auto", 9, 64, 1);
+    BOOST_CHECK_EQUAL(demod->timing_coarse_stride(), size_t(1));
+    BOOST_CHECK_THROW(
+        gr::uwb::UwbRealtimeDemodulator::make_from_template(
+            tmpl, 1, 4, "4z2", 0, "auto", 9, 64, 0),
+        std::invalid_argument);
 }
 
 BOOST_AUTO_TEST_CASE(test_bypass_filter_round_trip_and_mode_validation)

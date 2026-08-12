@@ -67,20 +67,25 @@ public:
      *                        golden generator).
      * \param cir_rake_top_k  0 for the full CIR filter; otherwise use the K
      *                        strongest CIR taps for sparse RAKE combining.
-     * \param cir_filter_mode "auto", "full", "rake", or "bypass".
-     * \param code_index      preamble code index (9 = QM35825, 10 = DW1000).
+     * \param cir_filter_mode "auto", "full", "rake", or "bypass";
+     *                        bypass is the realtime default.
+     * \param code_index      preamble code index (9 = QM35825; 10–12 =
+     *                        supported DW1000 HRP codes).
      * \param preamble_repetitions number of preamble SYNC symbols the
      *                        transmitter sends (drives NS-SFD search position
      *                        and the CIR/phase-align window).
+     * \param timing_coarse_stride full-rate samples between coarse timing
+     *                        probes; 1 disables coarse decimation.
      */
     static sptr make(const std::string& template_path,
                      size_t num_workers = 2,
                      size_t queue_capacity = 64,
                      const std::string& sfd_mode = "4z2",
                      size_t cir_rake_top_k = 0,
-                     const std::string& cir_filter_mode = "auto",
+                     const std::string& cir_filter_mode = "bypass",
                      size_t code_index = 9,
-                     size_t preamble_repetitions = 64);
+                     size_t preamble_repetitions = 64,
+                     size_t timing_coarse_stride = 14);
 
     /**
      * Same as make(), but takes an in-memory CF32 template waveform.
@@ -90,9 +95,10 @@ public:
                                    size_t queue_capacity = 64,
                                    const std::string& sfd_mode = "4z2",
                                    size_t cir_rake_top_k = 0,
-                                   const std::string& cir_filter_mode = "auto",
+                                   const std::string& cir_filter_mode = "bypass",
                                    size_t code_index = 9,
-                                   size_t preamble_repetitions = 64);
+                                   size_t preamble_repetitions = 64,
+                                   size_t timing_coarse_stride = 14);
 
     // Counters / stats (thread-safe snapshots).
     uint64_t jobs_received() const;
@@ -104,6 +110,7 @@ public:
     size_t queue_depth() const;
     size_t queue_high_watermark() const;
     size_t num_workers() const;
+    size_t timing_coarse_stride() const;
     uint64_t latency_p50_us() const;
     uint64_t latency_p95_us() const;
     uint64_t latency_p99_us() const;
@@ -128,7 +135,8 @@ protected:
                            size_t cir_rake_top_k,
                            const std::string& cir_filter_mode,
                            size_t code_index = 9,
-                           size_t preamble_repetitions = 64);
+                           size_t preamble_repetitions = 64,
+                           size_t timing_coarse_stride = 14);
 
     bool start() override;
     bool stop() override;
@@ -140,7 +148,10 @@ private:
         int64_t predicted_start_sample = -1;
         int64_t window_start_sample = 0;
         int64_t sample_count = 0;
-        double sample_rate = 0.0;
+        double sample_rate = 0.0;          // demod domain (usually 998.4e6)
+        double native_sample_rate = 0.0;   // extractor domain if resampled
+        double resample_filter_delay = 0.0; // group delay at demod domain
+        uint64_t resample_us = 0;          // upstream PDU FIR process+flush
         pmt::pmt_t samples; // c32vector (immutable shared ref)
         std::chrono::steady_clock::time_point enqueued_at;
     };
@@ -150,6 +161,8 @@ private:
     bool enqueue(Job&& job);
     void worker_loop(size_t wid);
     void publish_result(const Job& job, const gr::uwb::demod::DemodResult& r);
+    void publish_schedule_feedback(const Job& job,
+                                   const gr::uwb::demod::DemodResult& r);
     void publish_status(const std::string& event,
                         pmt::pmt_t extra = pmt::PMT_NIL);
     void record_latency(uint64_t us);

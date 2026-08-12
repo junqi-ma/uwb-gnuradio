@@ -221,6 +221,46 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_cfo_matches_golden)
     BOOST_CHECK_LT(std::abs(cf.cfo_hz), 50.0);
 }
 
+BOOST_AUTO_TEST_CASE(test_demod_core_r1_cfo_skips_24_startup_syncs)
+{
+    // Mirror MATLAB compensateCarrierOffset: the first 24 matched-filter
+    // phases can be a front-end transient; retain the later 40 clean peaks.
+    auto prof = Qm35825Profile::Default();
+    constexpr size_t kPeaks = 64;
+    constexpr size_t kTransient = 24;
+    constexpr double kCfoHz = 1900.0;
+
+    TimingResult tr;
+    tr.peak_samples.reserve(kPeaks);
+    tr.peak_corr.reserve(kPeaks);
+    for (size_t k = 0; k < kPeaks; ++k) {
+        const int64_t sample = 4096 + static_cast<int64_t>(k * kQm35SamplesPerSymbol);
+        tr.peak_samples.push_back(sample);
+        // Deliberately flat/invalid startup phase.  The clean segment starts
+        // at zero phase so phase unwrap across the discarded boundary is safe.
+        const double phase = k < kTransient
+                                 ? 0.0
+                                 : 2.0 * M_PI * kCfoHz *
+                                       static_cast<double>(sample -
+                                                           tr.peak_samples[kTransient]) /
+                                       prof.sample_rate;
+        tr.peak_corr.emplace_back(static_cast<float>(std::cos(phase)),
+                                  static_cast<float>(std::sin(phase)));
+    }
+
+    std::vector<gr_complex> iq(
+        static_cast<size_t>(tr.peak_samples.back()) + 1, gr_complex(0.0f, 0.0f));
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    CfoResult cf;
+    BOOST_REQUIRE(core::stage_cfo(iq.data(), iq.size(), prof, tr, cf, scratch));
+    BOOST_CHECK_EQUAL(cf.peaks_used, kPeaks - kTransient);
+    BOOST_CHECK_EQUAL(cf.skipped_peaks, kTransient);
+    BOOST_CHECK_EQUAL(cf.fit_first_peak_sample, tr.peak_samples[kTransient]);
+    BOOST_CHECK_EQUAL(cf.fit_last_peak_sample, tr.peak_samples.back());
+    BOOST_CHECK_CLOSE(cf.cfo_hz, kCfoHz, 0.1);
+}
+
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_matches_golden)
 {
     std::vector<gr_complex> iq, tmpl;
@@ -241,11 +281,15 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_matches_golden)
     BOOST_REQUIRE(core::stage_sfd(iq.data(), iq.size(), prof, tr, sfd_seq, tmpl,
                                   sr, scratch));
     // SFD begins right after the 64 SYNC symbols: start + 64*1016 = 75008.
+    BOOST_CHECK_CLOSE(static_cast<double>(sr.expected_start_sample), 75008.0, 0.1);
     BOOST_CHECK_CLOSE(static_cast<double>(sr.sfd_start_sample), 75008.0, 0.1);
     BOOST_CHECK_GE(sr.metric, 0.95f);
+    BOOST_CHECK_EQUAL(sr.search_windows, 1u);
+    BOOST_CHECK_GT(sr.coarse_correlations, 0u);
+    BOOST_CHECK_GT(sr.fine_correlations, 0u);
 }
 
-BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_checks_one_symbol_early)
+BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_forward_one_symbol)
 {
     std::vector<gr_complex> iq, tmpl;
     BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
@@ -258,11 +302,12 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_checks_one_symbol_early)
     TimingResult tr;
     BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984, tr,
                                      scratch));
-    // Reproduce the real QM35 failure: timing seeded SYNC #2 and counted the
-    // first SFD-like symbol as peak #64, so its last peak is one symbol late.
+    // Simulate a preamble timing that is one SYNC EARLY: the SFD then sits one
+    // symbol FORWARD of the nominal expected position, and the forward scan
+    // must recover it.
     for (auto& peak : tr.peak_samples)
-        peak += static_cast<int64_t>(kQm35SamplesPerSymbol);
-    tr.preamble_start_sample += static_cast<int64_t>(kQm35SamplesPerSymbol);
+        peak -= static_cast<int64_t>(kQm35SamplesPerSymbol);
+    tr.preamble_start_sample -= static_cast<int64_t>(kQm35SamplesPerSymbol);
 
     const auto sfd_seq = GetSfdSequence("ieee");
     SfdResult sr;
@@ -270,9 +315,45 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_checks_one_symbol_early)
                                   sr, scratch));
     BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(75008));
     BOOST_CHECK_GE(sr.metric, 0.95f);
+    BOOST_CHECK_EQUAL(sr.first_threshold_backtrack_symbols, int64_t(1));
+    BOOST_CHECK_EQUAL(sr.search_windows, 2u);
 }
 
-BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_checks_three_symbols_early)
+BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_forward_partial_train)
+{
+    // A trailing SYNC can be missed at the capture boundary or under a weak
+    // final repetition.  With the preamble start two SYNCs EARLY, the SFD is
+    // two symbols FORWARD of the nominal position; the forward scan must
+    // recover it even from a 63/64 tracked train.
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+    TimingResult tr;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984, tr,
+                                     scratch));
+    for (auto& peak : tr.peak_samples)
+        peak -= static_cast<int64_t>(2 * kQm35SamplesPerSymbol);
+    tr.preamble_start_sample -=
+        static_cast<int64_t>(2 * kQm35SamplesPerSymbol);
+    BOOST_REQUIRE_EQUAL(tr.peak_samples.size(), size_t(64));
+    tr.peak_samples.pop_back();
+    tr.detected_peaks = tr.peak_samples.size();
+
+    const auto sfd_seq = GetSfdSequence("ieee");
+    SfdResult sr;
+    BOOST_REQUIRE(core::stage_sfd(iq.data(), iq.size(), prof, tr, sfd_seq, tmpl,
+                                  sr, scratch));
+    BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(75008));
+    BOOST_CHECK_GE(sr.metric, 0.95f);
+    BOOST_CHECK_EQUAL(sr.first_threshold_backtrack_symbols, int64_t(2));
+    BOOST_CHECK_EQUAL(sr.search_windows, 3u);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_forward_three_symbols)
 {
     std::vector<gr_complex> iq, tmpl;
     BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
@@ -285,8 +366,8 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_checks_three_symbols_early)
     BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984, tr,
                                      scratch));
     for (auto& peak : tr.peak_samples)
-        peak += static_cast<int64_t>(3 * kQm35SamplesPerSymbol);
-    tr.preamble_start_sample +=
+        peak -= static_cast<int64_t>(3 * kQm35SamplesPerSymbol);
+    tr.preamble_start_sample -=
         static_cast<int64_t>(3 * kQm35SamplesPerSymbol);
 
     const auto sfd_seq = GetSfdSequence("ieee");
@@ -295,6 +376,40 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_checks_three_symbols_early)
                                   sr, scratch));
     BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(75008));
     BOOST_CHECK_GE(sr.metric, 0.95f);
+    BOOST_CHECK_EQUAL(sr.first_threshold_backtrack_symbols, int64_t(3));
+    BOOST_CHECK_EQUAL(sr.search_windows, 4u);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_forward_bounded_at_ten)
+{
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+    BOOST_CHECK_EQUAL(prof.sfd_max_forward_symbols, size_t(10));
+
+    TimingResult tr;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984, tr,
+                                     scratch));
+    // A preamble timing ten SYNCs early puts the SFD ten symbols FORWARD of
+    // the nominal position -- exactly the configured forward bound -- and the
+    // forward scan must still recover it.
+    for (auto& peak : tr.peak_samples)
+        peak -= static_cast<int64_t>(10 * kQm35SamplesPerSymbol);
+    tr.preamble_start_sample -=
+        static_cast<int64_t>(10 * kQm35SamplesPerSymbol);
+
+    const auto sfd_seq = GetSfdSequence("ieee");
+    SfdResult sr;
+    BOOST_REQUIRE(core::stage_sfd(iq.data(), iq.size(), prof, tr, sfd_seq, tmpl,
+                                  sr, scratch));
+    BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(75008));
+    BOOST_CHECK_GE(sr.metric, 0.95f);
+    BOOST_CHECK_EQUAL(sr.first_threshold_backtrack_symbols, int64_t(10));
+    BOOST_CHECK_EQUAL(sr.search_windows, size_t(11));
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_bad_input_fails_cleanly)
@@ -543,6 +658,14 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r3_full_pipeline_reaches_phr)
     auto res = core::demodulate_one(iq.data(), iq.size(), prof, 1, 9984, 0,
                                     tmpl, scratch);
     BOOST_CHECK(res.status == DemodStatus::Success);
+    // The complete path (including SFD-anchored CFO retracking) must keep
+    // MATLAB's 24-SYNC startup exclusion and 40-point LS fit.
+    BOOST_CHECK_EQUAL(res.cfo.skipped_peaks, size_t(24));
+    BOOST_CHECK_EQUAL(res.cfo.peaks_used, size_t(40));
+    BOOST_CHECK_EQUAL(res.cfo.fit_first_peak_sample,
+                      res.timing.peak_samples[24]);
+    BOOST_CHECK_EQUAL(res.cfo.fit_last_peak_sample,
+                      res.timing.peak_samples.back());
     BOOST_CHECK_EQUAL(res.ns_sfd.sfd_start_chip, int64_t(32512));
     BOOST_CHECK_EQUAL(res.phr.psdu_length, uint32_t(127));
     BOOST_CHECK(!res.phr.secded_uncorrectable);
@@ -1205,6 +1328,53 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r7_code10_self_consistency)
     BOOST_CHECK_EQUAL(e9, size_t(64));
     BOOST_CHECK_EQUAL(nnz10, size_t(64));
     BOOST_CHECK_EQUAL(e10, size_t(64));
+
+    // MATLAB R2025b lrwpan.internal.HRPCodes(9:12) lock.  FNV-1a over the
+    // exact ternary sequence catches a cyclic origin error as well as a wrong
+    // chip value, while keeping this QA compact.
+    const std::array<size_t, 4> code_indices = { 9, 10, 11, 12 };
+    const std::array<uint64_t, 4> matlab_hashes = {
+        UINT64_C(0xcba009f2c3a1660a), UINT64_C(0xb90c5ccecde2762c),
+        UINT64_C(0x5ca2e4c081cae608), UINT64_C(0xb95c6c21c2aecc56)
+    };
+    for (size_t code_i = 0; code_i < code_indices.size(); ++code_i) {
+        const int8_t* code = GetPreambleCode(code_indices[code_i]);
+        BOOST_REQUIRE(code != nullptr);
+        uint64_t hash = UINT64_C(1469598103934665603);
+        size_t nnz = 0;
+        for (size_t chip = 0; chip < kQm35CodeLength; ++chip) {
+            BOOST_CHECK(code[chip] == -1 || code[chip] == 0 || code[chip] == 1);
+            if (code[chip] != 0)
+                ++nnz;
+            hash ^= static_cast<uint8_t>(code[chip] + 1);
+            hash *= UINT64_C(1099511628211);
+        }
+        BOOST_CHECK_EQUAL(nnz, size_t(64));
+        BOOST_CHECK_EQUAL(hash, matlab_hashes[code_i]);
+    }
+
+    // First 30 output bits of MATLAB R2025b
+    // lrwpan.internal.createScrambler(code, 30, 0), mapped 0 -> +1 and
+    // 1 -> -1 by bprf_spreading. This validates code-11/12 data de-spreading,
+    // not just their preamble sequences.
+    const std::array<std::array<int8_t, 30>, 4> matlab_spreading = {{
+        {{ 1, -1, 1, 1, 1, 1, -1, 1, 1, -1, -1, -1, -1, 1, -1,
+           -1, -1, 1, 1, 1, -1, -1, 1, -1, 1, 1, 1, -1, -1, 1 }},
+        {{ 1, 1, -1, -1, 1, 1, -1, 1, 1, 1, 1, -1, -1, -1, -1,
+           1, -1, 1, -1, 1, -1, -1, 1, 1, 1, -1, 1, 1, 1, -1 }},
+        {{ -1, -1, -1, -1, 1, 1, -1, 1, 1, -1, -1, 1, 1, -1, -1,
+           1, 1, 1, -1, 1, -1, -1, 1, -1, 1, -1, 1, -1, 1, -1 }},
+        {{ -1, 1, 1, -1, -1, -1, -1, -1, 1, 1, -1, -1, -1, 1, 1,
+           -1, 1, -1, 1, 1, 1, 1, -1, 1, -1, 1, 1, -1, 1, -1 }}
+    }};
+    for (size_t code_i = 0; code_i < code_indices.size(); ++code_i) {
+        std::vector<int8_t> spreading;
+        BOOST_REQUIRE(core::detail::bprf_spreading(
+            spreading, code_indices[code_i], 0, matlab_spreading[code_i].size()));
+        BOOST_CHECK_EQUAL_COLLECTIONS(spreading.begin(), spreading.end(),
+                                      matlab_spreading[code_i].begin(),
+                                      matlab_spreading[code_i].end());
+    }
 
     // Sampled code for code-10: non-zeros placed every SpreadingFactor chips.
     auto samp10 = BuildSampledCode(c10, kQm35CodeLength);

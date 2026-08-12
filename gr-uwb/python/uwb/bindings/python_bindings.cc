@@ -22,6 +22,7 @@
 #include <gnuradio/uwb/uwb_packet_writer.h>
 #include <gnuradio/uwb/uwb_realtime_demodulator.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor.h>
+#include <gnuradio/uwb/uwb_scheduled_extractor_sc16.h>
 #include <gnuradio/uwb/uwb_rational_resampler_ccf_65_48.h>
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>
 
@@ -250,6 +251,30 @@ void bind_scheduled_extractor(py::module& m)
         .def("pause_schedule", &gr::uwb::UwbScheduledExtractor::pause_schedule)
         .def("resume_schedule", &gr::uwb::UwbScheduledExtractor::resume_schedule)
         .def("reset_schedule", &gr::uwb::UwbScheduledExtractor::reset_schedule)
+        .def("set_verification_enabled",
+             &gr::uwb::UwbScheduledExtractor::set_verification_enabled,
+             py::arg("en"))
+        .def("set_schedule_lock_enabled",
+             &gr::uwb::UwbScheduledExtractor::set_schedule_lock_enabled,
+             py::arg("en"))
+        .def("schedule_lock_enabled",
+             &gr::uwb::UwbScheduledExtractor::schedule_lock_enabled)
+        .def("schedule_lock_state",
+             &gr::uwb::UwbScheduledExtractor::schedule_lock_state)
+        .def("schedule_lock_updates",
+             &gr::uwb::UwbScheduledExtractor::schedule_lock_updates)
+        .def("locked_packet_interval_s",
+             &gr::uwb::UwbScheduledExtractor::locked_packet_interval_s)
+        .def("locked_first_packet_sample",
+             &gr::uwb::UwbScheduledExtractor::locked_first_packet_sample)
+        .def("locked_delta_period_samples",
+             &gr::uwb::UwbScheduledExtractor::locked_delta_period_samples)
+        .def("locked_bias_t0_samples",
+             &gr::uwb::UwbScheduledExtractor::locked_bias_t0_samples)
+        .def("observe_detection",
+             &gr::uwb::UwbScheduledExtractor::observe_detection,
+             py::arg("schedule_index"),
+             py::arg("detected_start_sample"))
         .def("scheduled_windows",
              &gr::uwb::UwbScheduledExtractor::scheduled_windows)
         .def("completed_windows",
@@ -258,6 +283,28 @@ void bind_scheduled_extractor(py::module& m)
         .def("dropped_windows", &gr::uwb::UwbScheduledExtractor::dropped_windows)
         .def("queue_high_watermark",
              &gr::uwb::UwbScheduledExtractor::queue_high_watermark);
+
+    py::class_<gr::uwb::UwbScheduledExtractorSc16,
+               gr::sync_block,
+               std::shared_ptr<gr::uwb::UwbScheduledExtractorSc16>>(
+        m, "scheduled_extractor_sc16")
+        .def(py::init(&gr::uwb::UwbScheduledExtractorSc16::make),
+             py::arg("sample_rate"),
+             py::arg("packet_interval_s"),
+             py::arg("first_packet_sample"),
+             py::arg("pre_guard_samples") = gr::uwb::defaults::kScheduledPreGuard,
+             py::arg("capture_samples") = gr::uwb::defaults::kScheduledCapture,
+             py::arg("post_guard_samples") = gr::uwb::defaults::kScheduledPostGuard,
+             py::arg("pool_size") = gr::uwb::defaults::kScheduledPoolSize,
+             py::arg("emit_policy") =
+                 gr::uwb::UwbScheduledExtractorSc16::EmitPolicy::EverySlot)
+        .def("scheduled_windows", &gr::uwb::UwbScheduledExtractorSc16::scheduled_windows)
+        .def("completed_windows", &gr::uwb::UwbScheduledExtractorSc16::completed_windows)
+        .def("emitted_windows", &gr::uwb::UwbScheduledExtractorSc16::emitted_windows)
+        .def("dropped_windows", &gr::uwb::UwbScheduledExtractorSc16::dropped_windows)
+        .def("process_total_us", &gr::uwb::UwbScheduledExtractorSc16::process_total_us)
+        .def("copy_total_us", &gr::uwb::UwbScheduledExtractorSc16::copy_total_us)
+        .def("publish_total_us", &gr::uwb::UwbScheduledExtractorSc16::publish_total_us);
 }
 
 void bind_realtime_demodulator(py::module& m)
@@ -272,9 +319,10 @@ void bind_realtime_demodulator(py::module& m)
              py::arg("queue_capacity") = size_t(64),
              py::arg("sfd_mode") = std::string("4z2"),
              py::arg("cir_rake_top_k") = size_t(0),
-             py::arg("cir_filter_mode") = std::string("auto"),
+             py::arg("cir_filter_mode") = std::string("bypass"),
              py::arg("code_index") = size_t(9),
-             py::arg("preamble_repetitions") = size_t(64))
+             py::arg("preamble_repetitions") = size_t(64),
+             py::arg("timing_coarse_stride") = size_t(14))
         .def_static("make_from_template",
                     &gr::uwb::UwbRealtimeDemodulator::make_from_template,
                     py::arg("template_wf"),
@@ -282,9 +330,10 @@ void bind_realtime_demodulator(py::module& m)
                     py::arg("queue_capacity") = size_t(64),
                     py::arg("sfd_mode") = std::string("4z2"),
                     py::arg("cir_rake_top_k") = size_t(0),
-                    py::arg("cir_filter_mode") = std::string("auto"),
+                    py::arg("cir_filter_mode") = std::string("bypass"),
                     py::arg("code_index") = size_t(9),
-                    py::arg("preamble_repetitions") = size_t(64))
+                    py::arg("preamble_repetitions") = size_t(64),
+                    py::arg("timing_coarse_stride") = size_t(14))
         .def("jobs_received", &gr::uwb::UwbRealtimeDemodulator::jobs_received)
         .def("jobs_completed", &gr::uwb::UwbRealtimeDemodulator::jobs_completed)
         .def("jobs_failed", &gr::uwb::UwbRealtimeDemodulator::jobs_failed)
@@ -297,6 +346,8 @@ void bind_realtime_demodulator(py::module& m)
         .def("queue_high_watermark",
              &gr::uwb::UwbRealtimeDemodulator::queue_high_watermark)
         .def("num_workers", &gr::uwb::UwbRealtimeDemodulator::num_workers)
+        .def("timing_coarse_stride",
+             &gr::uwb::UwbRealtimeDemodulator::timing_coarse_stride)
         .def("latency_p50_us", &gr::uwb::UwbRealtimeDemodulator::latency_p50_us)
         .def("latency_p95_us", &gr::uwb::UwbRealtimeDemodulator::latency_p95_us)
         .def("latency_p99_us", &gr::uwb::UwbRealtimeDemodulator::latency_p99_us)
@@ -387,6 +438,11 @@ void bind_pdu_rational_resampler_ccf_65_48(py::module& m)
         .def("total_output_samples", &Blk::total_output_samples)
         .def("resets", &Blk::resets)
         .def("short_guard_events", &Blk::short_guard_events)
+        .def("resample_total_us", &Blk::resample_total_us)
+        .def("resample_max_us", &Blk::resample_max_us)
+        .def("handler_total_us", &Blk::handler_total_us)
+        .def("input_convert_total_us", &Blk::input_convert_total_us)
+        .def("publish_total_us", &Blk::publish_total_us)
         .def("reset_stats", &Blk::reset_stats);
 }
 

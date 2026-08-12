@@ -274,6 +274,57 @@ public:
 
     void set_abs_cursor(uint64_t abs) { abs_cursor_ = abs; }
 
+    /**
+     * Soft-update (t0, T) from schedule lock after learn-then-freeze.
+     *
+     * force_t0=true (preferred on first Hold): apply absolute learned t0 when
+     * the next window is still safely in the future; else fall back to
+     * continuity at next_k so the imminent window does not jump:
+     *   new_t0 = old_pred(next_k) - next_k * new_period
+     *
+     * Continuity keeps δ in the period while absorbing residual phase into
+     * demod wide search when an absolute re-anchor would be too late.
+     */
+    bool update_locked_params(double first_packet_sample_exact,
+                              double packet_interval_s,
+                              bool force_t0 = false)
+    {
+        if (packet_interval_s <= 0.0 || cfg_.sample_rate <= 0.0)
+            return false;
+        const double new_period = packet_interval_s * cfg_.sample_rate;
+        if (new_period <= 0.0)
+            return false;
+
+        const double old_period = cfg_.period_samples_exact();
+        const double old_t0 = cfg_.first_packet_sample_exact;
+        const double old_pred_next =
+            old_t0 + static_cast<double>(next_k_) * old_period;
+        const int64_t abs = static_cast<int64_t>(abs_cursor_);
+        const int64_t margin =
+            static_cast<int64_t>(cfg_.pre_guard_samples / 8 + 64);
+
+        auto try_apply = [&](double new_t0) -> bool {
+            const WindowBounds nb = window_bounds_for_slot(
+                new_t0, new_period, next_k_, cfg_.pre_guard_samples,
+                cfg_.capture_samples, cfg_.post_guard_samples);
+            if (nb.window_start < abs + margin)
+                return false;
+            cfg_.first_packet_sample_exact = new_t0;
+            cfg_.packet_interval_s = packet_interval_s;
+            schedule_updates_.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        };
+
+        // Prefer absolute learned t0 (bias b) when requested and still safe.
+        if (force_t0 && try_apply(first_packet_sample_exact))
+            return true;
+
+        // Continuity at next_k: keep imminent predicted_start fixed.
+        const double new_t0_cont =
+            old_pred_next - static_cast<double>(next_k_) * new_period;
+        return try_apply(new_t0_cont);
+    }
+
     void set_guards(size_t pre_guard, size_t capture, size_t post_guard)
     {
         cfg_.pre_guard_samples = pre_guard;
@@ -796,20 +847,221 @@ private:
 };
 
 /**
- * Optional lightweight radar verification inside a completed window.
- * Searches normalized |corr|^2 metric near predicted offset for a peak.
- * Does not allocate; uses caller-provided scratch of size >= search_len.
+ * Schedule lock: learn a fixed interval deviation, then freeze.
  *
- * @param window_iq     captured window samples
- * @param n             sample count
- * @param template_iq   L2-normalized or raw template (normalized here if needed)
- * @param L             template length
- * @param search_start  offset in window to begin search
- * @param search_len    number of alignments to try
- * @param out_metric    peak metric [0,1]
- * @param out_offset    offset of peak in window
- * @return true if peak metric >= threshold
+ * Operator seeds a nominal radar schedule (t0_seed, T_nom) — for QM35 this is
+ * typically T_nom = 5000 us.  The true slot grid is approximately
+ *
+ *   predicted(k) = (t0_seed + b) + k * (T_nom + δ)
+ *
+ * where bias b and period deviation δ are nearly constant (SFO ≈ fixed ppm over
+ * a capture).  Wide demod search covers residual error during ACQUIRE/LEARN;
+ * once (b, δ) converge we HOLD them and stop continuous PLL-style updates.
+ *
+ * State machine:
+ *   Searching  — no observations yet
+ *   Learning   — buffer (k, detected_start); linear LS for t0 and T
+ *   Hold       — freeze learned (t0, T); only re-enter Learning on sustained
+ *                residual outliers (maintenance, not a fast loop)
+ *
+ * Preferred observation: SYNC/preamble timing from the demod (or radar
+ * verification peak).  FCS is NOT used as a fast lock loop.
+ *
+ * All arithmetic is in the extractor sample domain (e.g. 737.28 MS/s).
  */
+struct ScheduleLockTracker {
+    enum class State : int {
+        Searching = 0,
+        Learning = 1, // was "Acquiring"
+        Hold = 2      // was "Locked" — freeze after converge
+    };
+
+    bool enabled = true;
+    // Need ≥3 distinct slots so residual after a 2-param fit is meaningful.
+    size_t min_observations = 3;
+    size_t max_buffer = 12;
+    double max_period_rel_err = 0.02; // reject T more than 2% from nominal
+    // Max |det - pred| over the learning buffer to accept Hold (samples).
+    double converge_residual_samples = 128.0;
+    // Hold maintenance: re-learn only after this many consecutive large residuals.
+    double unlock_residual_samples = 512.0;
+    size_t unlock_outlier_count = 5;
+
+    State state = State::Searching;
+    double nominal_t0 = 0.0;     // operator seed (immutable until reset)
+    double nominal_period = 0.0; // T_nom in samples
+    double t0_exact = 0.0;       // learned = nominal_t0 + bias
+    double period_samples = 0.0; // learned = nominal_period + delta
+    double delta_period = 0.0;   // period_samples - nominal_period
+    double bias_t0 = 0.0;        // t0_exact - nominal_t0
+
+    static constexpr size_t kMaxBuf = 16;
+    std::array<uint64_t, kMaxBuf> buf_k_{};
+    std::array<int64_t, kMaxBuf> buf_det_{};
+    size_t n_buf = 0;
+    size_t n_obs = 0;
+    uint64_t last_k = 0;
+    int64_t last_det = -1;
+    size_t consecutive_outliers = 0;
+    uint64_t lock_updates = 0; // times we entered Hold with a new (t0,T)
+
+    void reset(double seed_t0, double seed_period_samples)
+    {
+        state = State::Searching;
+        nominal_t0 = seed_t0;
+        nominal_period = seed_period_samples;
+        t0_exact = seed_t0;
+        period_samples = seed_period_samples;
+        delta_period = 0.0;
+        bias_t0 = 0.0;
+        n_buf = 0;
+        n_obs = 0;
+        last_k = 0;
+        last_det = -1;
+        consecutive_outliers = 0;
+        lock_updates = 0;
+    }
+
+    /**
+     * Ingest one SYNC-quality detection.
+     * @return true only when (t0, period) should be applied to the schedule
+     *         (transition into Hold after converge / re-converge).
+     */
+    bool observe(uint64_t k, int64_t detected_start, double /*nominal_period_arg*/)
+    {
+        if (!enabled || detected_start < 0 || nominal_period <= 0.0)
+            return false;
+
+        // Hold: freeze.  Only monitor residual for rare re-learn.
+        if (state == State::Hold) {
+            const double pred =
+                t0_exact + static_cast<double>(k) * period_samples;
+            const double resid =
+                static_cast<double>(detected_start) - pred;
+            if (std::abs(resid) > unlock_residual_samples) {
+                ++consecutive_outliers;
+                if (consecutive_outliers >= unlock_outlier_count) {
+                    // Drop back to Learning; keep last freeze as warm start.
+                    state = State::Learning;
+                    n_buf = 0;
+                    consecutive_outliers = 0;
+                    // Fall through to buffer this observation.
+                } else {
+                    last_k = k;
+                    last_det = detected_start;
+                    ++n_obs;
+                    return false;
+                }
+            } else {
+                consecutive_outliers = 0;
+                last_k = k;
+                last_det = detected_start;
+                ++n_obs;
+                return false; // frozen — do not update
+            }
+        }
+
+        // Searching / Learning: buffer unique schedule indices.
+        if (state == State::Searching)
+            state = State::Learning;
+
+        // Reject duplicate k (keep latest det for that slot).
+        bool replaced = false;
+        for (size_t i = 0; i < n_buf; ++i) {
+            if (buf_k_[i] == k) {
+                buf_det_[i] = detected_start;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            if (n_buf >= kMaxBuf || n_buf >= max_buffer) {
+                // Drop oldest to keep a sliding learning window.
+                for (size_t i = 1; i < n_buf; ++i) {
+                    buf_k_[i - 1] = buf_k_[i];
+                    buf_det_[i - 1] = buf_det_[i];
+                }
+                if (n_buf > 0)
+                    --n_buf;
+            }
+            buf_k_[n_buf] = k;
+            buf_det_[n_buf] = detected_start;
+            ++n_buf;
+        }
+        last_k = k;
+        last_det = detected_start;
+        ++n_obs;
+
+        if (n_buf < 2)
+            return false;
+
+        double fit_t0 = 0.0;
+        double fit_T = 0.0;
+        if (!fit_linear(n_buf, fit_t0, fit_T))
+            return false;
+
+        const double rel =
+            std::abs(fit_T - nominal_period) / nominal_period;
+        if (rel > max_period_rel_err)
+            return false; // outlier fit; keep learning
+
+        // Always stage the latest good fit while learning (for diagnostics).
+        t0_exact = fit_t0;
+        period_samples = fit_T;
+        delta_period = fit_T - nominal_period;
+        bias_t0 = fit_t0 - nominal_t0;
+
+        if (n_buf < min_observations)
+            return false;
+
+        // Convergence: all buffer residuals small under the fit.
+        double max_resid = 0.0;
+        for (size_t i = 0; i < n_buf; ++i) {
+            const double pred =
+                fit_t0 + static_cast<double>(buf_k_[i]) * fit_T;
+            max_resid = std::max(
+                max_resid,
+                std::abs(static_cast<double>(buf_det_[i]) - pred));
+        }
+        if (max_resid > converge_residual_samples)
+            return false;
+
+        // Freeze.
+        state = State::Hold;
+        consecutive_outliers = 0;
+        ++lock_updates;
+        return true;
+    }
+
+private:
+    bool fit_linear(size_t n, double& out_t0, double& out_T) const
+    {
+        // det ≈ t0 + k * T  (ordinary least squares)
+        if (n < 2)
+            return false;
+        long double sk = 0, sd = 0, skk = 0, skd = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const long double kk = static_cast<long double>(buf_k_[i]);
+            const long double dd = static_cast<long double>(buf_det_[i]);
+            sk += kk;
+            sd += dd;
+            skk += kk * kk;
+            skd += kk * dd;
+        }
+        const long double nn = static_cast<long double>(n);
+        const long double den = nn * skk - sk * sk;
+        if (std::abs(den) < 1.0e-18L)
+            return false;
+        const long double T = (nn * skd - sk * sd) / den;
+        if (T <= 0.0L)
+            return false;
+        const long double t0 = (sd - T * sk) / nn;
+        out_T = static_cast<double>(T);
+        out_t0 = static_cast<double>(t0);
+        return true;
+    }
+};
+
 inline bool verify_template_in_window(const std::complex<float>* window_iq,
                                       size_t n,
                                       const std::complex<float>* template_iq,
@@ -818,7 +1070,8 @@ inline bool verify_template_in_window(const std::complex<float>* window_iq,
                                       size_t search_len,
                                       float threshold,
                                       float* out_metric,
-                                      size_t* out_offset)
+                                      size_t* out_offset,
+                                      size_t coarse_stride = 1)
 {
     if (out_metric)
         *out_metric = 0.0f;
@@ -840,10 +1093,12 @@ inline bool verify_template_in_window(const std::complex<float>* window_iq,
     const size_t end =
         std::min(search_start + (search_len > 0 ? search_len : max_align),
                  max_align);
+    const size_t stride = std::max<size_t>(1, coarse_stride);
 
     float best = 0.0f;
     size_t best_j = search_start;
-    for (size_t j = search_start; j < end; ++j) {
+    // Coarse (or full-rate when stride==1).
+    for (size_t j = search_start; j < end; j += stride) {
         std::complex<float> corr(0.0f, 0.0f);
         float pwr = 0.0f;
         for (size_t k = 0; k < L; ++k) {
@@ -851,10 +1106,30 @@ inline bool verify_template_in_window(const std::complex<float>* window_iq,
             pwr += std::norm(window_iq[j + k]);
         }
         const float denom = pwr * t_energy + 1e-12f;
-        const float metric = std::norm(corr) / denom;
-        if (metric > best) {
-            best = metric;
+        const float m = std::norm(corr) / denom;
+        if (m > best) {
+            best = m;
             best_j = j;
+        }
+    }
+    // Fine refine around the coarse peak when striding.
+    if (stride > 1 && end > search_start) {
+        const size_t fine_lo =
+            best_j > search_start + stride ? best_j - stride : search_start;
+        const size_t fine_hi = std::min(best_j + stride + 1, end);
+        for (size_t j = fine_lo; j < fine_hi; ++j) {
+            std::complex<float> corr(0.0f, 0.0f);
+            float pwr = 0.0f;
+            for (size_t k = 0; k < L; ++k) {
+                corr += window_iq[j + k] * std::conj(template_iq[k]);
+                pwr += std::norm(window_iq[j + k]);
+            }
+            const float denom = pwr * t_energy + 1e-12f;
+            const float m = std::norm(corr) / denom;
+            if (m > best) {
+                best = m;
+                best_j = j;
+            }
         }
     }
     if (out_metric)
@@ -863,6 +1138,12 @@ inline bool verify_template_in_window(const std::complex<float>* window_iq,
         *out_offset = best_j;
     return best >= threshold;
 }
+
+/**
+ * Optional lightweight radar verification inside a completed window.
+ * Searches normalized |corr|^2 metric near predicted offset for a peak.
+ * coarse_stride>1 does a strided coarse pass + fine refine (see above).
+ */
 
 } // namespace core
 } // namespace uwb
