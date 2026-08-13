@@ -683,7 +683,7 @@ BOOST_AUTO_TEST_CASE(test_core_matlab_coordinate_rule)
     }
 }
 
-BOOST_AUTO_TEST_CASE(test_schedule_lock_learn_then_freeze)
+BOOST_AUTO_TEST_CASE(test_schedule_lock_hold_tracks_slowly)
 {
     // Nominal T = 1e6 samples; true T = 1e6 + 32 (≈ 32 ppm fixed δ).
     // True t0 is 200 samples earlier than the operator seed (fixed bias b).
@@ -717,22 +717,26 @@ BOOST_AUTO_TEST_CASE(test_schedule_lock_learn_then_freeze)
     BOOST_CHECK_CLOSE(lock.bias_t0, t0_true - t0_seed, 0.5);
     BOOST_CHECK_EQUAL(lock.lock_updates, 1u);
 
-    // Further observations must FREEZE — no continuous IIR tracking.
+    // Hold now performs slow first-order phase (t0) tracking (not a freeze):
+    // every in-threshold observation is APPLIED (returns true) and nudges t0
+    // by a small gain, while the learned period T stays frozen.  The lock
+    // counter grows past 1 — but no re-learn into Learning.
     const double frozen_T = lock.period_samples;
-    const double frozen_t0 = lock.t0_exact;
     for (uint64_t k = 3; k < 20; ++k) {
         // Perfect grid + small noise that stays inside unlock threshold.
         const int64_t det =
             static_cast<int64_t>(std::llround(t0_true + k * T_true)) +
             static_cast<int64_t>((k % 3) - 1); // ±1 sample
-        BOOST_CHECK(!lock.observe(k, det, frozen_T));
+        BOOST_CHECK(lock.observe(k, det, T_nom));
     }
     BOOST_CHECK(lock.state == ScheduleLockTracker::State::Hold);
-    BOOST_CHECK_EQUAL(lock.lock_updates, 1u);
+    BOOST_CHECK(lock.lock_updates > 1u); // continuous tracking applied
+    // T is exactly frozen at the learned value; only t0 tracks (intercept
+    // within ~6 samples of the true grid).
     BOOST_CHECK_EQUAL(lock.period_samples, frozen_T);
-    BOOST_CHECK_EQUAL(lock.t0_exact, frozen_t0);
+    BOOST_CHECK_SMALL(std::abs(lock.t0_exact - t0_true), 6.0);
 
-    // Predicted residual at k=19 should be within a few samples.
+    // Predicted residual at k=19 stays on the true grid (no accumulated drift).
     const double pred19 = lock.t0_exact + 19.0 * lock.period_samples;
     const double true19 = t0_true + 19.0 * T_true;
     BOOST_CHECK_SMALL(std::abs(pred19 - true19), 5.0);
@@ -740,7 +744,9 @@ BOOST_AUTO_TEST_CASE(test_schedule_lock_learn_then_freeze)
 
 BOOST_AUTO_TEST_CASE(test_schedule_lock_hold_ignores_noisy_period)
 {
-    // After Hold, a single outlier interval must NOT pull δ (no PLL).
+    // After Hold, a single outlier interval must only NUDGE the tracked
+    // (t0, T): the small continuous-tracking gains bound the movement so one
+    // noisy observation cannot jump the period (no large PLL step).
     const double T_nom = 3686400.0; // 5 ms @ 737.28e6
     const double delta = 31.0;
     const double T_true = T_nom + delta;
@@ -757,15 +763,21 @@ BOOST_AUTO_TEST_CASE(test_schedule_lock_hold_ignores_noisy_period)
     BOOST_REQUIRE(lock.state == ScheduleLockTracker::State::Hold);
     const double frozen_T = lock.period_samples;
     const double frozen_delta = lock.delta_period;
+    const double frozen_t0 = lock.t0_exact;
 
-    // Inject a large single-sample jump that would have moved IIR T a lot,
-    // but residual vs frozen grid is still < unlock_residual (default 512).
-    BOOST_CHECK(!lock.observe(
+    // Inject a +40-sample jump that would have moved an IIR loop a lot; the
+    // residual vs grid is still < unlock_residual (default 512), so we stay in
+    // Hold and only nudge t0 by a small bounded amount.
+    BOOST_CHECK(lock.observe(
         3, static_cast<int64_t>(std::llround(t0_true + 3.0 * T_true + 40.0)),
         T_nom));
     BOOST_CHECK(lock.state == ScheduleLockTracker::State::Hold);
+    // T stays EXACTLY frozen at the learned value (only t0 tracks): the
+    // +40-sample residual with phase gain 0.10 moves t0 by ~4 samples.
     BOOST_CHECK_EQUAL(lock.period_samples, frozen_T);
     BOOST_CHECK_EQUAL(lock.delta_period, frozen_delta);
+    BOOST_CHECK_SMALL(std::abs(lock.t0_exact - frozen_t0), 8.0);
+    BOOST_CHECK(lock.lock_updates > 1u); // exactly one applied nudge
 }
 
 BOOST_AUTO_TEST_CASE(test_update_locked_params_keeps_next_k)
@@ -855,12 +867,17 @@ BOOST_AUTO_TEST_CASE(test_demod_feedback_lock_obs_via_message)
     const double T_locked = ext->locked_packet_interval_s() * fs737;
     BOOST_CHECK_CLOSE(T_locked, T_true_737, 0.05);
 
-    // Hold freezes: further SYNC observations must not change δ.
-    const double frozen_delta = ext->locked_delta_period_samples();
+    // Hold now tracks only t0 continuously: a +20-sample SYNC nudge moves the
+    // intercept by a small amount (phase gain 0.1 → +2 samples) while the
+    // period/delta stay frozen at the learned value — and the lock counter
+    // still grows past 1.
+    const double delta_before = ext->locked_delta_period_samples();
+    const uint64_t updates_before = ext->schedule_lock_updates();
     ext->observe_detection(
         5, static_cast<int64_t>(std::llround(t0_true_737 + 5.0 * T_true_737 + 20.0)));
     BOOST_CHECK_EQUAL(ext->schedule_lock_state(), 2);
-    BOOST_CHECK_EQUAL(ext->locked_delta_period_samples(), frozen_delta);
+    BOOST_CHECK_EQUAL(ext->locked_delta_period_samples(), delta_before);
+    BOOST_CHECK(ext->schedule_lock_updates() > updates_before);
 
     // 2) Mapped 998.4-domain sample → native via inverse 65/48 (API path).
     const double fs998 = 998.4e6;

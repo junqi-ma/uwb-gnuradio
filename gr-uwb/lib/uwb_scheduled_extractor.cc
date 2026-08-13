@@ -313,10 +313,12 @@ UwbScheduledExtractor::note_lock_observation(uint64_t schedule_index,
     d_pending_lock_t0_ = d_lock_.t0_exact;
     d_pending_lock_period_s_ =
         d_lock_.period_samples / std::max(cfg.sample_rate, 1.0);
-    // First Hold (and re-Hold after unlock): prefer absolute learned (b, δ).
-    // Core falls back to next_k continuity if the absolute window is too close.
+    // Force absolute learned (b, δ) only when transitioning INTO Hold (the big
+    // jump to the learned t0).  Continuous Hold updates apply softly so the
+    // imminent window does not jump under the slow tracking nudge.
     d_pending_lock_force_t0_ =
-        (d_lock_.state == core::ScheduleLockTracker::State::Hold);
+        (prev_state != core::ScheduleLockTracker::State::Hold &&
+         d_lock_.state == core::ScheduleLockTracker::State::Hold);
     (void)prev_state;
     return true;
 }

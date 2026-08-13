@@ -847,7 +847,8 @@ private:
 };
 
 /**
- * Schedule lock: learn a fixed interval deviation, then freeze.
+ * Schedule lock: learn a fixed interval deviation, then apply slow first-order
+ * phase (t0) tracking in Hold with the period T frozen.
  *
  * Operator seeds a nominal radar schedule (t0_seed, T_nom) — for QM35 this is
  * typically T_nom = 5000 us.  The true slot grid is approximately
@@ -856,13 +857,17 @@ private:
  *
  * where bias b and period deviation δ are nearly constant (SFO ≈ fixed ppm over
  * a capture).  Wide demod search covers residual error during ACQUIRE/LEARN;
- * once (b, δ) converge we HOLD them and stop continuous PLL-style updates.
+ * once (b, δ) converge we enter HOLD and apply a slow first-order phase (t0)
+ * PLL to absorb residual clock drift.  The period T stays frozen at the learned
+ * value — SFO is a fixed ppm over the capture, so the single learned T
+ * suffices; updating T in Hold is ill-conditioned at large schedule index k.
  *
  * State machine:
  *   Searching  — no observations yet
  *   Learning   — buffer (k, detected_start); linear LS for t0 and T
- *   Hold       — freeze learned (t0, T); only re-enter Learning on sustained
- *                residual outliers (maintenance, not a fast loop)
+ *   Hold       — apply slow first-order phase (t0) tracking with T frozen;
+ *                only re-enter Learning on sustained residual outliers
+ *                (maintenance, not a fast loop)
  *
  * Preferred observation: SYNC/preamble timing from the demod (or radar
  * verification peak).  FCS is NOT used as a fast lock loop.
@@ -886,6 +891,12 @@ struct ScheduleLockTracker {
     // Hold maintenance: re-learn only after this many consecutive large residuals.
     double unlock_residual_samples = 512.0;
     size_t unlock_outlier_count = 5;
+    // Continuous tracking gain in Hold (replaces full freeze): small enough
+    // that a single ±1-sample noisy observation barely moves the estimate, but
+    // fast enough to absorb residual phase drift.  First-order phase (t0)
+    // tracking only — the period T stays frozen at the learned value (SFO is a
+    // fixed ppm, so the single learned T suffices).
+    double hold_track_phase_gain = 0.10; // first-order t0 correction per residual
 
     State state = State::Searching;
     double nominal_t0 = 0.0;     // operator seed (immutable until reset)
@@ -903,7 +914,9 @@ struct ScheduleLockTracker {
     uint64_t last_k = 0;
     int64_t last_det = -1;
     size_t consecutive_outliers = 0;
-    uint64_t lock_updates = 0; // times we entered Hold with a new (t0,T)
+    // Times we applied a new (t0,T): one Hold entry plus every continuous
+    // Hold tracking nudge (so a live capture grows this well past 1).
+    uint64_t lock_updates = 0;
 
     void reset(double seed_t0, double seed_period_samples)
     {
@@ -932,7 +945,7 @@ struct ScheduleLockTracker {
         if (!enabled || detected_start < 0 || nominal_period <= 0.0)
             return false;
 
-        // Hold: freeze.  Only monitor residual for rare re-learn.
+        // Hold: slow continuous tracking.  Only re-learn on sustained outliers.
         if (state == State::Hold) {
             const double pred =
                 t0_exact + static_cast<double>(k) * period_samples;
@@ -954,10 +967,19 @@ struct ScheduleLockTracker {
                 }
             } else {
                 consecutive_outliers = 0;
+                // Slow first-order phase (t0) tracking (replaces full freeze):
+                // absorb slow clock drift without re-entering Learning.  Only
+                // the intercept t0 tracks (first-order PLL); the period T stays
+                // frozen at the learned value (SFO is a fixed ppm, so the
+                // learned T suffices).  The gain is small so a single noisy
+                // observation barely moves the estimate.
+                t0_exact += hold_track_phase_gain * resid;
+                bias_t0 = t0_exact - nominal_t0;
                 last_k = k;
                 last_det = detected_start;
                 ++n_obs;
-                return false; // frozen — do not update
+                ++lock_updates; // each applied Hold tracking nudge (updates>1)
+                return true; // apply the tracked schedule
             }
         }
 
