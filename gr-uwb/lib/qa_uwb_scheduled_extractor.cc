@@ -696,21 +696,17 @@ BOOST_AUTO_TEST_CASE(test_schedule_lock_hold_tracks_slowly)
     lock.reset(t0_seed, T_nom);
     BOOST_CHECK(lock.state == ScheduleLockTracker::State::Searching);
 
-    // First observation: enter Learning, not yet Hold.
-    BOOST_CHECK(!lock.observe(
-        0, static_cast<int64_t>(std::llround(t0_true)), T_nom));
-    BOOST_CHECK(lock.state == ScheduleLockTracker::State::Learning);
-
-    // Second: still Learning (need ≥ min_observations=3).
-    const int64_t det1 =
-        static_cast<int64_t>(std::llround(t0_true + 1.0 * T_true));
-    BOOST_CHECK(!lock.observe(1, det1, T_nom));
-    BOOST_CHECK(lock.state == ScheduleLockTracker::State::Learning);
-
-    // Third: converge → Hold, apply once.
-    const int64_t det2 =
-        static_cast<int64_t>(std::llround(t0_true + 2.0 * T_true));
-    BOOST_CHECK(lock.observe(2, det2, T_nom));
+    // Converge on min_observations (20) noiseless slots; the last observation
+    // applies the learned (t0, T) and enters Hold.
+    for (uint64_t k = 0; k < lock.min_observations; ++k) {
+        const int64_t det =
+            static_cast<int64_t>(std::llround(t0_true + k * T_true));
+        const bool applied = lock.observe(k, det, T_nom);
+        if (k + 1 == lock.min_observations)
+            BOOST_CHECK(applied); // 20th observation converges → Hold
+        else
+            BOOST_CHECK(!applied); // still Learning
+    }
     BOOST_CHECK(lock.state == ScheduleLockTracker::State::Hold);
     BOOST_CHECK_CLOSE(lock.period_samples, T_true, 0.01);
     BOOST_CHECK_CLOSE(lock.delta_period, T_true - T_nom, 0.01);
@@ -722,7 +718,7 @@ BOOST_AUTO_TEST_CASE(test_schedule_lock_hold_tracks_slowly)
     // by a small gain, while the learned period T stays frozen.  The lock
     // counter grows past 1 — but no re-learn into Learning.
     const double frozen_T = lock.period_samples;
-    for (uint64_t k = 3; k < 20; ++k) {
+    for (uint64_t k = 20; k < 36; ++k) {
         // Perfect grid + small noise that stays inside unlock threshold.
         const int64_t det =
             static_cast<int64_t>(std::llround(t0_true + k * T_true)) +
@@ -736,10 +732,10 @@ BOOST_AUTO_TEST_CASE(test_schedule_lock_hold_tracks_slowly)
     BOOST_CHECK_EQUAL(lock.period_samples, frozen_T);
     BOOST_CHECK_SMALL(std::abs(lock.t0_exact - t0_true), 6.0);
 
-    // Predicted residual at k=19 stays on the true grid (no accumulated drift).
-    const double pred19 = lock.t0_exact + 19.0 * lock.period_samples;
-    const double true19 = t0_true + 19.0 * T_true;
-    BOOST_CHECK_SMALL(std::abs(pred19 - true19), 5.0);
+    // Predicted residual at k=35 stays on the true grid (no accumulated drift).
+    const double pred35 = lock.t0_exact + 35.0 * lock.period_samples;
+    const double true35 = t0_true + 35.0 * T_true;
+    BOOST_CHECK_SMALL(std::abs(pred35 - true35), 5.0);
 }
 
 BOOST_AUTO_TEST_CASE(test_schedule_lock_hold_ignores_noisy_period)
@@ -755,7 +751,7 @@ BOOST_AUTO_TEST_CASE(test_schedule_lock_hold_ignores_noisy_period)
 
     ScheduleLockTracker lock;
     lock.reset(t0_seed, T_nom);
-    for (uint64_t k = 0; k < 3; ++k) {
+    for (uint64_t k = 0; k < lock.min_observations; ++k) {
         const int64_t det =
             static_cast<int64_t>(std::llround(t0_true + k * T_true));
         lock.observe(k, det, T_nom);
@@ -769,7 +765,9 @@ BOOST_AUTO_TEST_CASE(test_schedule_lock_hold_ignores_noisy_period)
     // residual vs grid is still < unlock_residual (default 512), so we stay in
     // Hold and only nudge t0 by a small bounded amount.
     BOOST_CHECK(lock.observe(
-        3, static_cast<int64_t>(std::llround(t0_true + 3.0 * T_true + 40.0)),
+        lock.min_observations,
+        static_cast<int64_t>(
+            std::llround(t0_true + lock.min_observations * T_true + 40.0)),
         T_nom));
     BOOST_CHECK(lock.state == ScheduleLockTracker::State::Hold);
     // T stays EXACTLY frozen at the learned value (only t0 tracks): the
@@ -778,6 +776,53 @@ BOOST_AUTO_TEST_CASE(test_schedule_lock_hold_ignores_noisy_period)
     BOOST_CHECK_EQUAL(lock.delta_period, frozen_delta);
     BOOST_CHECK_SMALL(std::abs(lock.t0_exact - frozen_t0), 8.0);
     BOOST_CHECK(lock.lock_updates > 1u); // exactly one applied nudge
+}
+
+BOOST_AUTO_TEST_CASE(test_schedule_lock_converges_with_noisy_observations)
+{
+    // QM35-like regression: preamble-timing jitter is ~±20 samples (vs ~±1 for
+    // DW1000).  With min_observations=3 the frozen period T was noisy, the
+    // frozen-T residual grew past unlock_residual_samples over later slots, and
+    // the lock re-learned (Learning↔Hold oscillation).  With min_observations=20
+    // the learned T is accurate enough that the lock reaches Hold and STAYS
+    // there — this test fails with the old min_observations=3 sizing.
+    const double T_nom = 3686400.0; // 5 ms @ 737.28e6
+    const double delta = 31.0;      // ~8.4 ppm, QM35-like
+    const double T_true = T_nom + delta;
+    const double t0_true = 3543552.0;
+    const double t0_seed = t0_true + 100.0;
+
+    ScheduleLockTracker lock;
+    lock.reset(t0_seed, T_nom);
+
+    constexpr uint64_t kEnd = 120;
+    bool ever_hold = false;
+    bool re_learned = false;
+    for (uint64_t k = 0; k <= kEnd; ++k) {
+        // Deterministic ±20-sample preamble-timing jitter.
+        const int64_t det =
+            static_cast<int64_t>(std::llround(t0_true + k * T_true)) +
+            (static_cast<int>(k * 7) % 41 - 20);
+        lock.observe(k, det, T_nom);
+        if (lock.state == ScheduleLockTracker::State::Hold)
+            ever_hold = true;
+        else if (ever_hold)
+            re_learned = true; // fell out of Hold — the oscillation
+    }
+
+    // (a) The lock reaches Hold ...
+    BOOST_CHECK(ever_hold);
+    // (b) ... and REMAINS Hold through the end (no gross-outlier re-learn;
+    //     this is the key regression check that failed with min_observations=3).
+    BOOST_CHECK(!re_learned);
+    BOOST_CHECK(lock.state == ScheduleLockTracker::State::Hold);
+    // (c) The frozen period is accurate despite the ±20-sample jitter.
+    BOOST_CHECK(std::abs(lock.period_samples - T_true) < 1.0);
+    // (d) Final predicted position stays on the true grid (within ~40 samples).
+    const double pred_final =
+        lock.t0_exact + static_cast<double>(kEnd) * lock.period_samples;
+    const double true_final = t0_true + static_cast<double>(kEnd) * T_true;
+    BOOST_CHECK_SMALL(std::abs(pred_final - true_final), 40.0);
 }
 
 BOOST_AUTO_TEST_CASE(test_update_locked_params_keeps_next_k)
@@ -841,14 +886,12 @@ BOOST_AUTO_TEST_CASE(test_demod_feedback_lock_obs_via_message)
     ext->set_schedule_lock_enabled(true);
     BOOST_CHECK_EQUAL(ext->schedule_lock_state(), 0); // Searching
 
-    ext->observe_detection(
-        0, static_cast<int64_t>(std::llround(t0_true_737)));
-    BOOST_CHECK_EQUAL(ext->schedule_lock_state(), 1); // Learning
-    ext->observe_detection(
-        1, static_cast<int64_t>(std::llround(t0_true_737 + T_true_737)));
-    BOOST_CHECK_EQUAL(ext->schedule_lock_state(), 1); // still Learning
-    ext->observe_detection(
-        2, static_cast<int64_t>(std::llround(t0_true_737 + 2.0 * T_true_737)));
+    for (uint64_t k = 0; k < 20; ++k) {
+        ext->observe_detection(
+            k, static_cast<int64_t>(std::llround(t0_true_737 + k * T_true_737)));
+        if (k < 19)
+            BOOST_CHECK_EQUAL(ext->schedule_lock_state(), 1); // Learning
+    }
     BOOST_CHECK_EQUAL(ext->schedule_lock_state(), 2); // Hold
     BOOST_CHECK_GE(ext->schedule_lock_updates(), 1u);
     BOOST_CHECK_CLOSE(ext->locked_delta_period_samples(), 31.0, 0.5);
@@ -901,9 +944,8 @@ BOOST_AUTO_TEST_CASE(test_demod_feedback_lock_obs_via_message)
         ext2->observe_detection(k, native);
         (void)fs998;
     };
-    post_obs(0);
-    post_obs(1);
-    post_obs(2);
+    for (uint64_t k = 0; k < 20; ++k)
+        post_obs(k);
     BOOST_CHECK_EQUAL(ext2->schedule_lock_state(), 2); // Hold
     BOOST_CHECK_CLOSE(ext2->locked_packet_interval_s() * fs737, T_true_737,
                       0.05);

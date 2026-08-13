@@ -882,9 +882,14 @@ struct ScheduleLockTracker {
     };
 
     bool enabled = true;
-    // Need ≥3 distinct slots so residual after a 2-param fit is meaningful.
-    size_t min_observations = 3;
-    size_t max_buffer = 12;
+    // Need enough distinct slots for the learned period T to be accurate even
+    // with preamble-timing jitter (~±20 samples on QM35 vs ~±1 on DW1000).
+    // With min_observations=20 the OLS slope (T) uncertainty drops to ~0.2 ppm,
+    // so the frozen-T residual over the remaining ~80 slots stays well under
+    // unlock_residual_samples.  (≥3 was only enough to make the 2-param fit
+    // residual meaningful when jitter was ~±1 sample.)
+    size_t min_observations = 20;
+    size_t max_buffer = 48;
     double max_period_rel_err = 0.02; // reject T more than 2% from nominal
     // Max |det - pred| over the learning buffer to accept Hold (samples).
     double converge_residual_samples = 128.0;
@@ -906,7 +911,7 @@ struct ScheduleLockTracker {
     double delta_period = 0.0;   // period_samples - nominal_period
     double bias_t0 = 0.0;        // t0_exact - nominal_t0
 
-    static constexpr size_t kMaxBuf = 16;
+    static constexpr size_t kMaxBuf = 64;
     std::array<uint64_t, kMaxBuf> buf_k_{};
     std::array<int64_t, kMaxBuf> buf_det_{};
     size_t n_buf = 0;
