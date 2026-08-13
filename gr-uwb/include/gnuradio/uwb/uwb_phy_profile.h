@@ -83,7 +83,7 @@ struct Qm35825Profile {
     // soft-chip / CIR threshold
     float cir_detection_threshold = 0.3f;
     float sfd_detection_threshold = 0.3f;
-    float radar_verification_threshold = 0.3f;
+    float radar_verification_threshold = 0.25f;
 
     // timing
     // Seed (schedule t0+kT or detector) can sit hundreds–thousands of samples
@@ -101,6 +101,8 @@ struct Qm35825Profile {
     // several SYNCs into the preamble (5-8 common); the previous 3 was too tight
     // and made otherwise-valid packets fail SFD.
     size_t timing_max_backtrack_symbols = 40;
+    // ±sample half-width of the per-SYNC local refine in the track loop.
+    size_t timing_track_radius = 8;
     size_t post_guard_samples = 4096;
 
     static Qm35825Profile Default() { return Qm35825Profile{}; }
@@ -227,11 +229,13 @@ struct Dw1000Profile {
     size_t min_valid_peaks = 8;
     float cir_detection_threshold = 0.3f;
     float sfd_detection_threshold = 0.3f;
-    float radar_verification_threshold = 0.3f;
+    float radar_verification_threshold = 0.25f;
 
     size_t timing_search_margin = 40960;
     size_t timing_coarse_stride = 16;
     size_t timing_max_backtrack_symbols = 40;
+    // ±sample half-width of the per-SYNC local refine in the track loop.
+    size_t timing_track_radius = 8;
     size_t post_guard_samples = 4096;
 
     static Dw1000Profile Default() { return Dw1000Profile{}; }
@@ -261,6 +265,7 @@ struct Dw1000Profile {
         p.timing_search_margin = timing_search_margin;
         p.timing_coarse_stride = timing_coarse_stride;
         p.timing_max_backtrack_symbols = timing_max_backtrack_symbols;
+        p.timing_track_radius = timing_track_radius;
         p.post_guard_samples = post_guard_samples;
         return p;
     }

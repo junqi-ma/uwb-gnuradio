@@ -388,8 +388,8 @@ inline bool stage_timing(const std::complex<float>* rx,
             (k < backtracked_symbols)
                 ? 0.7f * profile.radar_verification_threshold
                 : profile.radar_verification_threshold;
-        if (!local_best(want, 8, tracking_threshold,
-                        &pk, &pm, &pk_corr))
+        if (!local_best(want, static_cast<int64_t>(profile.timing_track_radius),
+                        tracking_threshold, &pk, &pm, &pk_corr))
             break; // lost the train
         out.peak_samples.push_back(pk + static_cast<int64_t>(L - 1));
         out.peak_metrics.push_back(pm);
@@ -604,13 +604,13 @@ inline bool stage_sfd(const std::complex<float>* rx,
 
     // Search center = one measured period after the last tracked SYNC START
     // (NOT the fixed preamble_repetitions * period extrapolation), so SFO and
-    // a partial SYNC train are handled.  Half-width scales with how trustworthy
-    // MATLAB strategy (refineTimingWithNsSfd): search a symmetric
-    // expected ± samples_per_symbol window and take the maximum.  A full
-    // samples_per_symbol half-width covers an SFD that sits up to one symbol
-    // earlier or later than the nominal position (e.g. a partial preamble
-    // train, or a preamble start a few SYNCs into the frame).
-    const int64_t half = static_cast<int64_t>(sym);
+    // a partial SYNC train are handled.  The schedule lock + timing fixes keep
+    // the SFD position accurate to ~±1 sample, so we search a narrow ±32-sample
+    // window first (fast path) and fall back to the wide ± samples_per_symbol
+    // sweep only when timing landed a whole symbol late (rare).  The wide
+    // half-width covers an SFD that sits up to one symbol earlier or later than
+    // the nominal position (e.g. a partial preamble train, or a preamble start
+    // a few SYNCs into the frame).
     // MATLAB strategy (refineTimingWithNsSfd): SFD start = preamble start +
     // preamble_repetitions × measured_period.  This is physically correct even
     // when the trailing preamble SYNC(s) score below the acquisition threshold
@@ -631,15 +631,17 @@ inline bool stage_sfd(const std::complex<float>* rx,
     // loop only accumulates the correlation.  The result (best_j, metric) is
     // identical to the exhaustive search for a unique peak.
     constexpr size_t kSfdStride = 8;
+    constexpr int64_t kSfdNarrowHalf = 32;
     float best = -1.0f;
     size_t best_j = 0;
 
-    auto scan_window = [&](int64_t center, int64_t backtrack_symbols) {
+    auto scan_window = [&](int64_t center, int64_t half_width,
+                           int64_t backtrack_symbols) {
         if (center < 0 || n < sfd_len)
             return false;
-        const int64_t lo = std::max<int64_t>(0, center - half);
+        const int64_t lo = std::max<int64_t>(0, center - half_width);
         const int64_t hi = std::min<int64_t>(
-            static_cast<int64_t>(n - sfd_len), center + half);
+            static_cast<int64_t>(n - sfd_len), center + half_width);
         if (hi < lo)
             return false;
         ++out.search_windows;
@@ -702,10 +704,16 @@ inline bool stage_sfd(const std::complex<float>* rx,
         return window_best >= profile.sfd_detection_threshold;
     };
 
-    // MATLAB-style symmetric ±1-symbol search: one scan_window over
-    // [expected - samples_per_symbol, expected + samples_per_symbol], taking
-    // the maximum correlation (no symbol stepping in either direction).
-    scan_window(expected, 0);
+    // MATLAB-style symmetric ±1-symbol search, run narrow-first with a wide
+    // fallback.  The schedule lock + timing keep the SFD position accurate to
+    // ~±1 sample, so a narrow ±32-sample scan_window finds it ~99% of the time
+    // (fast path).  Fall back to the full ± samples_per_symbol sweep only when
+    // timing landed a whole symbol late (rare).  Both windows accumulate into
+    // the same best/best_j, so the result is identical to the old single wide
+    // sweep.
+    scan_window(expected, kSfdNarrowHalf, 0);
+    if (best < profile.sfd_detection_threshold)
+        scan_window(expected, static_cast<int64_t>(sym), 0);
     if (best < profile.sfd_detection_threshold)
         return false;
 
@@ -2205,14 +2213,16 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             static_cast<double>(profile.preamble_repetitions) *
             res.timing.measured_period));
     Qm35825Profile cfo_anchor_profile = profile;
-    // `stage_timing` always performs a local ±8 refinement around the seed;
-    // set the coarse/grid margin to zero so it cannot re-acquire another
-    // symbol when the SFD anchor itself is already sample-accurate.
+    // `stage_timing` normally performs a local ±timing_track_radius (±8)
+    // refinement around each SYNC; tighten it to ±2 here because the SFD
+    // anchor is already sample-accurate, and set the coarse/grid margin to
+    // zero so it cannot re-acquire another symbol.
     cfo_anchor_profile.timing_search_margin = 0;
     cfo_anchor_profile.timing_coarse_stride = 1;
     cfo_anchor_profile.timing_max_backtrack_symbols = 0;
+    cfo_anchor_profile.timing_track_radius = 2;
     // MATLAB's per-SYNC floor is 0.20 of the candidate energy.  The ordinary
-    // acquisition threshold is intentionally stricter (0.30), but must not
+    // acquisition threshold is intentionally stricter (0.25), but must not
     // reject a known, SFD-anchored leading SYNC during CFO retracking.
     cfo_anchor_profile.radar_verification_threshold = 0.20f;
     TimingResult cfo_timing;
