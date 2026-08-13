@@ -266,7 +266,7 @@ inline bool stage_timing(const std::complex<float>* rx,
         };
 
         // MATLAB detectSeededPreamble: prefer a narrow FULL-RATE search around
-        // the seed (max(64, ceil(symbolLength/32)) samples each side).  A wide
+        // the seed (max(256, ceil(symbolLength/32)) samples each side).  A wide
         // stride-S coarse scan can miss a narrow symbol-0 peak (sub-symbol seed
         // offset) and then prefer a later STRONGER SYNC -- exactly what made
         // the DW1000 preamble_start land ~6 SYNCs late.  The seed-nearby
@@ -276,7 +276,7 @@ inline bool stage_timing(const std::complex<float>* rx,
             int64_t pos = -1;
             float met = 0.0f;
             std::complex<float> corr(0.0f, 0.0f);
-            if (local_best(seed, std::max<int64_t>(64, stride), thr, &pos, &met,
+            if (local_best(seed, std::max<int64_t>(256, stride), thr, &pos, &met,
                            &corr)) {
                 first_start = pos;
                 first_metric = met;

@@ -100,7 +100,7 @@ struct Qm35825Profile {
     // Real QM35825 captures seed from an energy/schedule detector that can land
     // several SYNCs into the preamble (5-8 common); the previous 3 was too tight
     // and made otherwise-valid packets fail SFD.
-    size_t timing_max_backtrack_symbols = 32;
+    size_t timing_max_backtrack_symbols = 40;
     size_t post_guard_samples = 4096;
 
     static Qm35825Profile Default() { return Qm35825Profile{}; }
@@ -231,7 +231,7 @@ struct Dw1000Profile {
 
     size_t timing_search_margin = 40960;
     size_t timing_coarse_stride = 16;
-    size_t timing_max_backtrack_symbols = 32;
+    size_t timing_max_backtrack_symbols = 40;
     size_t post_guard_samples = 4096;
 
     static Dw1000Profile Default() { return Dw1000Profile{}; }
