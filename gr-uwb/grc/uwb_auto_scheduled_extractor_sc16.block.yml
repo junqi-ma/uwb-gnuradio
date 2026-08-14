@@ -1,0 +1,113 @@
+id: uwb_auto_scheduled_extractor_sc16
+label: UWB Auto Scheduled Extractor SC16
+category: '[UWB]'
+
+parameters:
+-   id: template_file
+    label: Native template (CF32)
+    dtype: file_open
+    default: ''
+-   id: sample_rate
+    label: Sample rate
+    dtype: real
+    default: '737.28e6'
+-   id: packet_interval_s
+    label: Packet interval (s)
+    dtype: real
+    default: '0.005'
+-   id: pre_guard_samples
+    label: Pre-guard samples
+    dtype: int
+    default: '7373'
+-   id: capture_samples
+    label: Capture samples
+    dtype: int
+    default: '140083'
+-   id: post_guard_samples
+    label: Post-guard samples
+    dtype: int
+    default: '3023'
+-   id: energy_threshold
+    label: Energy threshold
+    dtype: real
+    default: '0.001'
+-   id: energy_gate_decimation
+    label: Energy gate decimation
+    dtype: int
+    default: '100'
+-   id: coarse_decimation
+    label: Coarse decimation
+    dtype: int
+    default: '4'
+-   id: coarse_repetitions
+    label: Coarse repetitions
+    dtype: int
+    default: '1'
+-   id: coarse_margin
+    label: Coarse margin
+    dtype: int
+    default: '16'
+-   id: lock_observations
+    label: Lock observations
+    dtype: int
+    default: '3'
+-   id: holdover_miss_count
+    label: Holdover miss count
+    dtype: int
+    default: '3'
+-   id: reacquire_miss_count
+    label: Reacquire miss count
+    dtype: int
+    default: '8'
+-   id: provisional_guard_us
+    label: Provisional guard (us)
+    dtype: real
+    default: '25.0'
+-   id: acquire_pre_trigger
+    label: Acquire pre-trigger
+    dtype: int
+    default: '2032'
+-   id: acquire_capture
+    label: Acquire capture
+    dtype: int
+    default: '200000'
+-   id: scheduled_pool_size
+    label: Scheduled pool size
+    dtype: int
+    default: '8'
+
+inputs:
+-   domain: stream
+    dtype: sc16
+-   domain: message
+    id: lock_obs
+    optional: true
+-   domain: message
+    id: control
+    optional: true
+
+outputs:
+-   domain: message
+    id: packet
+    optional: true
+-   domain: message
+    id: status
+    optional: true
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.auto_scheduled_extractor_sc16.make_from_file(${template_file}, ${sample_rate}, ${packet_interval_s}, ${pre_guard_samples}, ${capture_samples}, ${post_guard_samples}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation}, ${coarse_repetitions}, ${coarse_margin}, ${lock_observations}, ${holdover_miss_count}, ${reacquire_miss_count}, ${provisional_guard_us}, ${acquire_pre_trigger}, ${acquire_capture}, ${scheduled_pool_size})
+
+cpp_templates:
+    includes: ['#include <gnuradio/uwb/uwb_auto_scheduled_extractor_sc16.h>']
+    make: 'this->${id} = gr::uwb::UwbAutoScheduledExtractorSc16::make_from_file(${template_file}, ${sample_rate}, ${packet_interval_s}, ${pre_guard_samples}, ${capture_samples}, ${post_guard_samples}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation}, ${coarse_repetitions}, ${coarse_margin}, ${lock_observations}, ${holdover_miss_count}, ${reacquire_miss_count}, ${provisional_guard_us}, ${acquire_pre_trigger}, ${acquire_capture}, ${scheduled_pool_size});'
+    link: ['gnuradio::gnuradio-uwb']
+
+documentation: |-
+  Blind-acquire the first confirmable QM35 packet from a native 737.28 MS/s
+  SC16 stream and lock a 5 ms EverySlot schedule.  No first_packet_sample.
+
+  Defaults match gr::uwb::defaults native geometry (time-derived 10/190/4.1 us
+  at 737.28 MS/s).  Do not copy 9984/189696/4096 from the 998.4 MHz block.
+
+file_format: 1

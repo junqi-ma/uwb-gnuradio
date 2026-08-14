@@ -162,6 +162,7 @@ struct WindowMeta {
 struct WindowSlot {
     WindowMeta meta;
     std::vector<std::complex<float>> samples;
+    std::vector<std::complex<int16_t>> samples_sc16;
     size_t filled = 0; // samples written so far toward capacity
     bool active = false;
 };
@@ -214,7 +215,11 @@ public:
                         continue;
                     const size_t cap = cfg_.window_capacity();
                     pool_[i].samples.clear();
-                    pool_[i].samples.reserve(cap);
+                    pool_[i].samples_sc16.clear();
+                    if (sc16_mode_)
+                        pool_[i].samples_sc16.reserve(cap);
+                    else
+                        pool_[i].samples.reserve(cap);
                     pool_[i].filled = 0;
                     pool_[i].active = false;
                     pool_[i].meta = WindowMeta{};
@@ -228,7 +233,11 @@ public:
                 const size_t cap = cfg_.window_capacity();
                 for (size_t i = 0; i < kMaxPoolSize; ++i) {
                     pool_[i].samples.clear();
-                    pool_[i].samples.reserve(cap);
+                    pool_[i].samples_sc16.clear();
+                    if (sc16_mode_)
+                        pool_[i].samples_sc16.reserve(cap);
+                    else
+                        pool_[i].samples.reserve(cap);
                     pool_[i].filled = 0;
                     pool_[i].active = false;
                     pool_[i].meta = WindowMeta{};
@@ -273,6 +282,43 @@ public:
     }
 
     void set_abs_cursor(uint64_t abs) { abs_cursor_ = abs; }
+
+    /** Use the SC16 pool (native X410 path).  Call before configure(). */
+    void set_sc16_windows(bool en) { sc16_mode_ = en; }
+    bool sc16_windows() const { return sc16_mode_; }
+
+    /**
+     * Change guards without bumping schedule_generation (holdover widen /
+     * lock restore).  Aborts the active window and re-advances k.
+     */
+    void update_guards_keep_generation(size_t pre_guard,
+                                       size_t capture,
+                                       size_t post_guard)
+    {
+        cfg_.pre_guard_samples = pre_guard;
+        cfg_.capture_samples = capture;
+        cfg_.post_guard_samples = post_guard;
+        const size_t cap = cfg_.window_capacity();
+        {
+            std::lock_guard<std::mutex> lock(pool_mutex_);
+            for (size_t i = 0; i < kMaxPoolSize; ++i) {
+                if (checked_out_flags_[i])
+                    continue;
+                if (sc16_mode_) {
+                    if (pool_[i].samples_sc16.capacity() < cap)
+                        pool_[i].samples_sc16.reserve(cap);
+                } else if (pool_[i].samples.capacity() < cap) {
+                    pool_[i].samples.reserve(cap);
+                }
+            }
+        }
+        if (state_ != ScheduleMachineState::Unlocked) {
+            abort_active_window();
+            advance_k_to_abs(abs_cursor_);
+            state_ = paused_ ? ScheduleMachineState::Paused
+                             : ScheduleMachineState::WaitWindow;
+        }
+    }
 
     /**
      * Soft-update (t0, T) from schedule lock after learn-then-freeze.
@@ -513,6 +559,107 @@ public:
         return n;
     }
 
+    /**
+     * Native SC16 process_chunk.  Same skip/copy state machine as the CF32
+     * path; memcpy stays packed complex<int16_t> (no host conversion).
+     */
+    size_t process_chunk_sc16(const std::complex<int16_t>* in,
+                              size_t n,
+                              uint64_t abs_start)
+    {
+        sc16_mode_ = true;
+        if (n == 0)
+            return 0;
+        if (abs_cursor_ == 0 && abs_start > 0 &&
+            state_ == ScheduleMachineState::Unlocked) {
+            abs_cursor_ = abs_start;
+        }
+        if (abs_start != abs_cursor_) {
+            abort_active_window();
+            abs_cursor_ = abs_start;
+            if (state_ == ScheduleMachineState::WaitWindow ||
+                state_ == ScheduleMachineState::CopyWindow) {
+                advance_k_to_abs(abs_cursor_);
+                state_ = ScheduleMachineState::WaitWindow;
+            }
+        }
+
+        size_t offset = 0;
+        while (offset < n) {
+            if (state_ == ScheduleMachineState::Unlocked ||
+                state_ == ScheduleMachineState::Paused) {
+                const size_t take = n - offset;
+                abs_cursor_ += take;
+                offset += take;
+                continue;
+            }
+
+            const WindowBounds bounds = bounds_for(next_k_);
+            const int64_t abs = static_cast<int64_t>(abs_cursor_);
+
+            if (state_ == ScheduleMachineState::WaitWindow) {
+                if (abs >= bounds.window_end) {
+                    dropped_windows_.fetch_add(1, std::memory_order_relaxed);
+                    scheduled_windows_.fetch_add(1, std::memory_order_relaxed);
+                    ++next_k_;
+                    continue;
+                }
+                if (abs < bounds.window_start) {
+                    const int64_t gap = bounds.window_start - abs;
+                    const size_t take = static_cast<size_t>(std::min(
+                        gap, static_cast<int64_t>(n - offset)));
+                    abs_cursor_ += take;
+                    offset += take;
+                    continue;
+                }
+                if (!begin_window(bounds, abs)) {
+                    const int64_t remain = bounds.window_end - abs;
+                    const size_t take = static_cast<size_t>(std::min(
+                        remain, static_cast<int64_t>(n - offset)));
+                    abs_cursor_ += take;
+                    offset += take;
+                    if (static_cast<int64_t>(abs_cursor_) >= bounds.window_end) {
+                        scheduled_windows_.fetch_add(1,
+                                                     std::memory_order_relaxed);
+                        dropped_windows_.fetch_add(1, std::memory_order_relaxed);
+                        ++next_k_;
+                    }
+                    continue;
+                }
+                state_ = ScheduleMachineState::CopyWindow;
+            }
+
+            WindowSlot& slot = pool_[active_];
+            const int64_t win_end = slot.meta.window_end_sample;
+            const int64_t remain_abs =
+                win_end - static_cast<int64_t>(abs_cursor_);
+            const size_t need = slot.meta.sample_count > slot.filled
+                                    ? slot.meta.sample_count - slot.filled
+                                    : 0;
+            const size_t take = std::min(
+                { static_cast<size_t>(std::max(remain_abs, int64_t{ 0 })),
+                  need,
+                  n - offset });
+            if (take > 0) {
+                std::memcpy(slot.samples_sc16.data() + slot.filled,
+                            in + offset,
+                            take * sizeof(std::complex<int16_t>));
+                slot.filled += take;
+                abs_cursor_ += take;
+                offset += take;
+            }
+            if (slot.filled >= slot.meta.sample_count ||
+                static_cast<int64_t>(abs_cursor_) >= win_end) {
+                finish_active_window(/*partial=*/slot.filled <
+                                     slot.meta.sample_count);
+            } else if (take == 0) {
+                abs_cursor_ += 1;
+                offset += 1;
+            }
+        }
+        return n;
+    }
+
     void flush_eos()
     {
         if (active_ == kInvalid)
@@ -710,8 +857,12 @@ private:
         slot.meta.sample_count = remaining;
         slot.meta.partial = partial_start || remaining < bounds.capacity;
         slot.meta.schedule_generation = generation_;
-        if (slot.samples.size() < remaining)
+        if (sc16_mode_) {
+            if (slot.samples_sc16.size() < remaining)
+                slot.samples_sc16.resize(remaining);
+        } else if (slot.samples.size() < remaining) {
             slot.samples.resize(remaining);
+        }
         active_ = h;
         scheduled_windows_.fetch_add(1, std::memory_order_relaxed);
         if (slot.meta.partial)
@@ -833,6 +984,7 @@ private:
     uint64_t abs_cursor_ = 0;
     ScheduleMachineState state_ = ScheduleMachineState::Unlocked;
     bool paused_ = false;
+    bool sc16_mode_ = false;
     uint64_t generation_ = 0;
 
     std::atomic<uint64_t> scheduled_windows_{ 0 };

@@ -489,6 +489,12 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
             pmt::dict_ref(meta_in, pmt::mp("schedule_generation"),
                           pmt::from_uint64(0)));
     }
+    if (dict_has(meta_in, "acquisition_epoch")) {
+        meta_out = pmt::dict_add(
+            meta_out, pmt::mp("acquisition_epoch"),
+            pmt::dict_ref(meta_in, pmt::mp("acquisition_epoch"),
+                          pmt::from_uint64(0)));
+    }
 
     meta_out = pmt::dict_add(meta_out, pmt::mp("sample_rate"),
                              pmt::from_double(d_output_rate_));

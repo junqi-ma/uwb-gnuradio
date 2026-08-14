@@ -13,6 +13,7 @@ install(FILES
     uwb_detector_sc16.block.yml
     uwb_packet_writer.block.yml
     uwb_scheduled_extractor.block.yml
+    uwb_auto_scheduled_extractor_sc16.block.yml
     uwb_realtime_demodulator.block.yml
     uwb_rfnoc_upsampler.block.yml
     uwb_rational_resampler_ccf_65_48.block.yml

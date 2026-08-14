@@ -23,6 +23,7 @@
 #include <gnuradio/uwb/uwb_realtime_demodulator.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor_sc16.h>
+#include <gnuradio/uwb/uwb_auto_scheduled_extractor_sc16.h>
 #include <gnuradio/uwb/uwb_rational_resampler_ccf_65_48.h>
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>
 
@@ -307,6 +308,101 @@ void bind_scheduled_extractor(py::module& m)
         .def("publish_total_us", &gr::uwb::UwbScheduledExtractorSc16::publish_total_us);
 }
 
+void bind_auto_scheduled_extractor_sc16(py::module& m)
+{
+    using Blk = gr::uwb::UwbAutoScheduledExtractorSc16;
+    py::class_<Blk, gr::sync_block, std::shared_ptr<Blk>>(
+        m, "auto_scheduled_extractor_sc16")
+        .def(py::init(&Blk::make),
+             py::arg("known_preamble"),
+             py::arg("sample_rate") = gr::uwb::defaults::kNativeSampleRateHz,
+             py::arg("packet_interval_s") =
+                 gr::uwb::defaults::kQm35PacketIntervalS,
+             py::arg("pre_guard_samples") =
+                 gr::uwb::defaults::kNativeScheduledPreGuard,
+             py::arg("capture_samples") =
+                 gr::uwb::defaults::kNativeScheduledCapture,
+             py::arg("post_guard_samples") =
+                 gr::uwb::defaults::kNativeScheduledPostGuard,
+             py::arg("energy_threshold") =
+                 gr::uwb::defaults::kDetectorEnergyThreshold,
+             py::arg("energy_gate_decimation") =
+                 gr::uwb::defaults::kDetectorEnergyGateDecimation,
+             py::arg("coarse_decimation") =
+                 gr::uwb::defaults::kDetectorCoarseDecimation,
+             py::arg("coarse_repetitions") =
+                 gr::uwb::defaults::kDetectorCoarseRepetitions,
+             py::arg("coarse_margin") = gr::uwb::defaults::kDetectorCoarseMargin,
+             py::arg("lock_observations") = gr::uwb::defaults::kLockObservations,
+             py::arg("holdover_miss_count") =
+                 gr::uwb::defaults::kHoldoverMissCount,
+             py::arg("reacquire_miss_count") =
+                 gr::uwb::defaults::kReacquireMissCount,
+             py::arg("provisional_guard_us") =
+                 gr::uwb::defaults::kProvisionalGuardUs,
+             py::arg("acquire_pre_trigger") =
+                 gr::uwb::defaults::kDetectorPreTrigger,
+             py::arg("acquire_capture") = gr::uwb::defaults::kDetectorCapture,
+             py::arg("scheduled_pool_size") =
+                 gr::uwb::defaults::kAutoScheduledPoolSize)
+        .def_static("make_from_file",
+                    &Blk::make_from_file,
+                    py::arg("template_file"),
+                    py::arg("sample_rate") =
+                        gr::uwb::defaults::kNativeSampleRateHz,
+                    py::arg("packet_interval_s") =
+                        gr::uwb::defaults::kQm35PacketIntervalS,
+                    py::arg("pre_guard_samples") =
+                        gr::uwb::defaults::kNativeScheduledPreGuard,
+                    py::arg("capture_samples") =
+                        gr::uwb::defaults::kNativeScheduledCapture,
+                    py::arg("post_guard_samples") =
+                        gr::uwb::defaults::kNativeScheduledPostGuard,
+                    py::arg("energy_threshold") =
+                        gr::uwb::defaults::kDetectorEnergyThreshold,
+                    py::arg("energy_gate_decimation") =
+                        gr::uwb::defaults::kDetectorEnergyGateDecimation,
+                    py::arg("coarse_decimation") =
+                        gr::uwb::defaults::kDetectorCoarseDecimation,
+                    py::arg("coarse_repetitions") =
+                        gr::uwb::defaults::kDetectorCoarseRepetitions,
+                    py::arg("coarse_margin") =
+                        gr::uwb::defaults::kDetectorCoarseMargin,
+                    py::arg("lock_observations") =
+                        gr::uwb::defaults::kLockObservations,
+                    py::arg("holdover_miss_count") =
+                        gr::uwb::defaults::kHoldoverMissCount,
+                    py::arg("reacquire_miss_count") =
+                        gr::uwb::defaults::kReacquireMissCount,
+                    py::arg("provisional_guard_us") =
+                        gr::uwb::defaults::kProvisionalGuardUs,
+                    py::arg("acquire_pre_trigger") =
+                        gr::uwb::defaults::kDetectorPreTrigger,
+                    py::arg("acquire_capture") =
+                        gr::uwb::defaults::kDetectorCapture,
+                    py::arg("scheduled_pool_size") =
+                        gr::uwb::defaults::kAutoScheduledPoolSize)
+        .def("lock_state", &Blk::lock_state)
+        .def("lock_state_name", &Blk::lock_state_name)
+        .def("schedule_generation", &Blk::schedule_generation)
+        .def("acquisition_epoch", &Blk::acquisition_epoch)
+        .def("identity_confirmed", &Blk::identity_confirmed)
+        .def("locked_t0", &Blk::locked_t0)
+        .def("locked_period_s", &Blk::locked_period_s)
+        .def("energy_regions", &Blk::energy_regions)
+        .def("energy_regions_after_lock", &Blk::energy_regions_after_lock)
+        .def("candidates_emitted", &Blk::candidates_emitted)
+        .def("candidates_rejected", &Blk::candidates_rejected)
+        .def("scheduled_windows", &Blk::scheduled_windows)
+        .def("emitted_windows", &Blk::emitted_windows)
+        .def("dropped_windows", &Blk::dropped_windows)
+        .def("stale_feedback", &Blk::stale_feedback)
+        .def("unmapped_feedback", &Blk::unmapped_feedback)
+        .def("discontinuities", &Blk::discontinuities)
+        .def("post_lock_obs", &Blk::post_lock_obs, py::arg("msg"))
+        .def("post_control", &Blk::post_control, py::arg("msg"));
+}
+
 void bind_realtime_demodulator(py::module& m)
 {
     py::class_<gr::uwb::UwbRealtimeDemodulator,
@@ -471,6 +567,7 @@ PYBIND11_MODULE(uwb_python, m)
     bind_detector_sc16(m);
     bind_packet_writer(m);
     bind_scheduled_extractor(m);
+    bind_auto_scheduled_extractor_sc16(m);
     bind_realtime_demodulator(m);
     bind_rational_resampler_ccf_65_48(m);
     bind_pdu_rational_resampler_ccf_65_48(m);

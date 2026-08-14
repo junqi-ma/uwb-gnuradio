@@ -141,7 +141,9 @@ pmt::pmt_t make_window_pdu(const std::vector<gr_complex>& iq,
     meta = pmt::dict_add(meta, pmt::mp("schedule_index"),
                          pmt::from_uint64(packet_id));
     meta = pmt::dict_add(meta, pmt::mp("schedule_generation"),
-                         pmt::from_uint64(0));
+                         pmt::from_uint64(3));
+    meta = pmt::dict_add(meta, pmt::mp("acquisition_epoch"),
+                         pmt::from_uint64(5));
     meta = pmt::dict_add(meta, pmt::mp("window_start_sample"),
                          pmt::from_long(window_start));
     meta = pmt::dict_add(meta, pmt::mp("pre_guard_samples"),
@@ -415,6 +417,14 @@ BOOST_AUTO_TEST_CASE(test_pdu_coordinate_mapping)
     // measured duration down to 0 us for this small QA PDU.
     BOOST_CHECK(pmt::is_uint64(
         pmt::dict_ref(meta, pmt::mp("resample_us"), pmt::PMT_NIL)));
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          meta, pmt::mp("acquisition_epoch"),
+                          pmt::from_uint64(0))),
+                      5);
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          meta, pmt::mp("schedule_generation"),
+                          pmt::from_uint64(0))),
+                      3);
 
     // Direct formula check for predicted.
     const double d = 0.5 * static_cast<double>(taps.size() - 1);

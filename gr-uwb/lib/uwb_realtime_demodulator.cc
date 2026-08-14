@@ -580,6 +580,14 @@ UwbRealtimeDemodulator::handle_samples(pmt::pmt_t msg)
     job.resample_filter_delay =
         dict_f64(meta, "resample_filter_delay", 0.0);
     job.resample_us = dict_u64(meta, "resample_us", 0);
+    if (pmt::dict_has_key(meta, pmt::mp("acquisition_epoch"))) {
+        job.has_acquisition_epoch = true;
+        job.acquisition_epoch = dict_u64(meta, "acquisition_epoch", 0);
+    }
+    if (pmt::dict_has_key(meta, pmt::mp("schedule_generation"))) {
+        job.has_schedule_generation = true;
+        job.schedule_generation = dict_u64(meta, "schedule_generation", 0);
+    }
     job.samples = samples; // always c32vector after optional s16 conversion
     job.enqueued_at = std::chrono::steady_clock::now();
 
@@ -1061,6 +1069,20 @@ UwbRealtimeDemodulator::publish_schedule_feedback(
     if (job.resample_filter_delay > 0.0)
         fb = pmt::dict_add(fb, pmt::mp("resample_filter_delay"),
                            pmt::from_double(job.resample_filter_delay));
+    if (job.has_acquisition_epoch)
+        fb = pmt::dict_add(fb, pmt::mp("acquisition_epoch"),
+                           pmt::from_uint64(job.acquisition_epoch));
+    if (job.has_schedule_generation)
+        fb = pmt::dict_add(fb, pmt::mp("schedule_generation"),
+                           pmt::from_uint64(job.schedule_generation));
+    fb = pmt::dict_add(fb, pmt::mp("code_index"),
+                       pmt::from_long(static_cast<long>(d_profile_.code_index)));
+    fb = pmt::dict_add(fb, pmt::mp("preamble_repetitions"),
+                       pmt::from_long(static_cast<long>(
+                           d_profile_.preamble_repetitions)));
+    if (d_profile_.sfd_mode != nullptr)
+        fb = pmt::dict_add(fb, pmt::mp("sfd_mode"),
+                           pmt::string_to_symbol(d_profile_.sfd_mode));
     message_port_pub(pmt::mp("schedule_feedback"), fb);
 }
 

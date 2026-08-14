@@ -47,12 +47,7 @@ UwbDetectorSc16::UwbDetectorSc16(
           /*post_trigger_capture=*/capture),
       d_pre_trigger_(pre_trigger),
       d_capture_(capture),
-      d_sample_rate_(sample_rate),
-      d_template_len_(known_preamble.size()),
-      d_coarse_decimation_(coarse_decimation > 0 ? coarse_decimation : 4),
-      d_coarse_repetitions_(coarse_repetitions > 0 ? coarse_repetitions : 1),
-      d_coarse_margin_(coarse_margin),
-      d_fir(std::vector<gr_complex>())
+      d_sample_rate_(sample_rate)
 {
     // Larger chunks -> fewer work() calls, less per-call flowgraph overhead.
     // Buffer scan (benchmark_detector source-search / detector-sparse) knees
@@ -61,73 +56,19 @@ UwbDetectorSc16::UwbDetectorSc16(
     set_max_noutput_items(1048576);
     message_port_register_out(pmt::mp("packet"));
 
-    // Matched-filter taps: the stateless kernel convolves, so use the reversed
-    // conjugated template (see uwb_preamble_detector.cc for the rationale).
-    std::vector<std::complex<float>> tmpl = known_preamble;
-    core::uwb_l2_normalize(tmpl);
-    d_template_norm_ = tmpl;
-    d_template_energy_ = core::uwb_template_energy(tmpl);
-
-    std::vector<gr_complex> taps;
-    taps.reserve(tmpl.size());
-    for (auto it = tmpl.rbegin(); it != tmpl.rend(); ++it)
-        taps.push_back(std::conj(*it));
-    d_fir.set_taps(taps);
-
-    rebuild_decimated_template();
-
-    // Scratch for the fine ROI: 2*(stride*decimation + margin) + 1 samples,
-    // because the strided coarse peak is only within stride*D of the true
-    // symbol start.
-    const size_t half = d_coarse_stride_ * d_coarse_decimation_ + d_coarse_margin_;
-    d_corr.resize(2 * half + 1);
-    d_winpow.resize(2 * half + 1);
-    d_fine_metric.resize(2 * half + 1);
-    d_coarse_peaks.reserve(256);
+    core::UwbPreambleVerifierSc16::Config vcfg;
+    vcfg.coarse_decimation = coarse_decimation;
+    vcfg.coarse_repetitions = coarse_repetitions;
+    vcfg.coarse_margin = coarse_margin;
+    d_verifier_.configure(known_preamble, vcfg);
     const size_t region_prebuffer =
         pre_trigger + 32 * energy_gate_decimation + known_preamble.size();
-    const size_t max_coarse_samples =
-        region_prebuffer + known_preamble.size() *
-                               (core::kUwbSyncSymbols +
-                                core::kUwbSfdSymbols + 4);
-    const size_t max_coarse_decimated =
-        max_coarse_samples / d_coarse_decimation_ + 1;
-    d_sig_ds_sc16.reserve(max_coarse_decimated);
-    d_pow_ds_sc16.reserve(max_coarse_decimated);
-    d_score_ds.reserve(max_coarse_decimated);
-    d_metric_ds.reserve(max_coarse_decimated);
-    d_fine_input_fc32.reserve(2 * half + known_preamble.size());
+    d_verifier_.reserve_coarse(region_prebuffer + known_preamble.size() *
+                                                     (core::kUwbSyncSymbols +
+                                                      core::kUwbSfdSymbols + 4));
 }
 
 UwbDetectorSc16::~UwbDetectorSc16() { shutdown_worker(); }
-
-void UwbDetectorSc16::rebuild_decimated_template()
-{
-    const size_t D = d_coarse_decimation_;
-    const size_t Ld = d_template_len_ / D;
-    d_sym_ds_ = Ld;
-    const auto& taps = d_fir.taps(); // taps[k] = conj(template[L-1-k])
-    std::vector<std::complex<float>> tmpl_ds;
-    tmpl_ds.reserve(Ld);
-    for (size_t j = 0; j < Ld; ++j) {
-        const size_t m = j * D;
-        tmpl_ds.push_back(std::conj(taps[d_template_len_ - 1 - m]));
-    }
-    core::uwb_l2_normalize(tmpl_ds);
-    d_tmpl_ds_q15.resize(Ld);
-    d_tmpl_imag_ds_q15.resize(Ld);
-    for (size_t j = 0; j < Ld; ++j) {
-        const auto q15 = [](float value) {
-            return static_cast<int16_t>(std::max(
-                -32767.0f, std::min(32767.0f, std::round(value * 32767.0f))));
-        };
-        d_tmpl_ds_q15[j] = { q15(tmpl_ds[j].real()), q15(tmpl_ds[j].imag()) };
-        d_tmpl_imag_ds_q15[j] = {
-            static_cast<int16_t>(-d_tmpl_ds_q15[j].imag()),
-            d_tmpl_ds_q15[j].real()
-        };
-    }
-}
 
 std::shared_ptr<UwbDetectorSc16>
 UwbDetectorSc16::make(const std::vector<std::complex<float>>& known_preamble,
@@ -182,10 +123,13 @@ size_t UwbDetectorSc16::capture() const { return d_capture_; }
 void UwbDetectorSc16::set_capture(size_t v) { d_capture_ = v; }
 double UwbDetectorSc16::sample_rate() const { return d_sample_rate_; }
 void UwbDetectorSc16::set_sample_rate(double v) { d_sample_rate_ = v; }
-size_t UwbDetectorSc16::coarse_stride() const { return d_coarse_stride_; }
+size_t UwbDetectorSc16::coarse_stride() const
+{
+    return d_verifier_.coarse_stride();
+}
 void UwbDetectorSc16::set_coarse_stride(size_t v)
 {
-    d_coarse_stride_ = (v > 0) ? v : 1;
+    d_verifier_.set_coarse_stride(v);
 }
 
 uint64_t UwbDetectorSc16::dropped_regions() const
@@ -369,128 +313,19 @@ void UwbDetectorSc16::publish_packet(const UwbDetectorStateMachineSc16::Region& 
     if (n == 0)
         return;
 
-    // 1. Decimated coarse scan over a preamble-horizon prefix of the buffered
-    //    region (incl. pre-buffer holding the first SYNC symbol).  Regions from
-    //    real packets are ~264k samples (preamble + full payload); correlating
-    //    the payload tail is wasted.  Horizon covers SYNC+SFD (+margin) past
-    //    the gate-crossing offset; short regions are scanned in full.
-    //
-    //    Cost: O((scan_len/D)*(L/D)).  Cutting scan_len from ~264k to ~80k
-    //    avoids scanning the payload tail in the Q15 score loop.
-    const size_t preamble_span =
-        d_template_len_ *
-        (core::kUwbSyncSymbols + core::kUwbSfdSymbols + /*margin_syms=*/4);
-    const size_t horizon =
-        std::max(preamble_span, region.candidate_offset + preamble_span);
-    const size_t coarse_scan_end = std::min(n, horizon);
+    const auto vr = d_verifier_.verify(
+        region.samples.data(), n, region.candidate_offset);
+    if (!vr.confirmed)
+        return;
 
-    float mx = 0.0f;
-    core::uwb_coarse_peaks_sc16(
-        region.samples.data(),
-        0, // scan from region start (incl. pre-buffer)
-        coarse_scan_end,
-        d_tmpl_ds_q15.data(),
-        d_tmpl_imag_ds_q15.data(),
-        d_tmpl_ds_q15.size(),
-        d_coarse_decimation_,
-        d_coarse_repetitions_,
-        d_sym_ds_,
-        d_coarse_peak_rel_,
-        d_coarse_exist_frac_,
-        d_coarse_stride_,
-        d_sig_ds_sc16,
-        d_pow_ds_sc16,
-        d_score_ds,
-        d_metric_ds,
-        d_coarse_peaks,
-        &mx);
-    if (d_coarse_peaks.empty())
-        return; // not a preamble — drop (existence check)
-
-    // 2. Full-rate forward normalized correlation.  Candidate/result
-    // coordinates are direct SYNC starts, matching MATLAB.
-    const size_t half = d_coarse_stride_ * d_coarse_decimation_ + d_coarse_margin_;
-    size_t earliest_start = n;
-    float best_metric = 0.0f;
-    for (size_t p : d_coarse_peaks) {
-        if (p >= n || d_template_len_ > n)
-            continue;
-        const size_t j0 = (p > half) ? p - half : 0;
-        const size_t j1 = std::min(p + half, n - d_template_len_);
-        const size_t len = j1 - j0 + 1;
-        const size_t convert_count =
-            std::min(n - j0, len + d_template_len_ - 1);
-        if (convert_count < len + d_template_len_ - 1)
-            continue;
-        d_fine_input_fc32.resize(convert_count);
-        constexpr float kInvFullScale = 1.0f / 32768.0f;
-        for (size_t i = 0; i < convert_count; ++i) {
-            const auto sample = region.samples[j0 + i];
-            d_fine_input_fc32[i] = {
-                static_cast<float>(sample.real()) * kInvFullScale,
-                static_cast<float>(sample.imag()) * kInvFullScale
-            };
-        }
-
-        size_t local_start = n;
-        float local_metric = 0.0f;
-        if (core::uwb_full_rate_peak(
-                d_fine_input_fc32.data(), convert_count, d_template_norm_.data(),
-                d_template_len_, d_template_energy_, 0, len - 1, d_corr.data(),
-                d_winpow.data(), d_fine_metric.data(), &local_start,
-                &local_metric) &&
-            local_metric >= defaults::kDetectorFineThreshold) {
-            earliest_start = j0 + local_start;
-            best_metric = local_metric;
-            break;
-        }
-    }
-    if (earliest_start >= n || best_metric < defaults::kDetectorFineThreshold)
-        return; // no confirmed preamble
-
-    size_t backtracked_symbols = 0;
-    float start_metric = best_metric;
-    const size_t confirmed_start = earliest_start;
-    while (backtracked_symbols < defaults::kDetectorMaxBacktrackSymbols &&
-           earliest_start >= d_template_len_) {
-        const size_t center = earliest_start - d_template_len_;
-        const size_t radius = defaults::kDetectorBacktrackRadius;
-        const size_t j0 = (center > radius) ? center - radius : 0;
-        const size_t j1 = std::min(center + radius, n - d_template_len_);
-        const size_t len = j1 - j0 + 1;
-        const size_t convert_count =
-            std::min(n - j0, len + d_template_len_ - 1);
-        if (convert_count < len + d_template_len_ - 1)
-            break;
-        d_fine_input_fc32.resize(convert_count);
-        constexpr float kInvFullScale = 1.0f / 32768.0f;
-        for (size_t i = 0; i < convert_count; ++i) {
-            const auto sample = region.samples[j0 + i];
-            d_fine_input_fc32[i] = {
-                static_cast<float>(sample.real()) * kInvFullScale,
-                static_cast<float>(sample.imag()) * kInvFullScale
-            };
-        }
-        size_t local_start = convert_count;
-        float local_metric = 0.0f;
-        if (!core::uwb_full_rate_peak(
-                d_fine_input_fc32.data(), convert_count, d_template_norm_.data(),
-                d_template_len_, d_template_energy_, 0, len - 1, d_corr.data(),
-                d_winpow.data(), d_fine_metric.data(), &local_start,
-                &local_metric) ||
-            local_metric < defaults::kDetectorBacktrackThreshold)
-            break;
-        earliest_start = j0 + local_start;
-        start_metric = local_metric;
-        ++backtracked_symbols;
-    }
-
-    // 3. Fine coordinates are already SYNC-start coordinates.
     const uint64_t packet_start =
-        region.start_abs + static_cast<uint64_t>(earliest_start);
+        region.start_abs + static_cast<uint64_t>(vr.start_offset);
     const uint64_t timing_seed =
-        region.start_abs + static_cast<uint64_t>(confirmed_start);
+        region.start_abs + static_cast<uint64_t>(vr.confirmed_offset);
     const uint64_t trigger = region.start_abs + region.candidate_offset;
+    const float best_metric = vr.detection_metric;
+    const float start_metric = vr.start_metric;
+    const size_t backtracked_symbols = vr.backtracked_symbols;
 
     // 4. Capture [start − pre_trigger, start + capture) — i.e. pre_trigger +
     //    capture samples in total — clamped to the region.

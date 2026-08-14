@@ -94,6 +94,10 @@ pmt::pmt_t make_samples_pdu(const std::vector<gr_complex>& iq,
                          pmt::from_long(static_cast<long>(iq.size())));
     meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
                          pmt::from_double(998.4e6));
+    meta = pmt::dict_add(meta, pmt::mp("acquisition_epoch"),
+                         pmt::from_uint64(11));
+    meta = pmt::dict_add(meta, pmt::mp("schedule_generation"),
+                         pmt::from_uint64(22));
     return pmt::cons(meta, pmt::init_c32vector(iq.size(), iq.data()));
 }
 
@@ -163,9 +167,11 @@ BOOST_AUTO_TEST_CASE(test_golden_round_trip)
     BOOST_CHECK_EQUAL(demod->timing_coarse_stride(), size_t(14));
     auto dbg = gr::blocks::message_debug::make();
     auto dbg_status = gr::blocks::message_debug::make();
+    auto dbg_fb = gr::blocks::message_debug::make();
     auto tb = gr::make_top_block("qa_realtime_roundtrip");
     tb->msg_connect(demod, "result", dbg, "store");
     tb->msg_connect(demod, "status", dbg_status, "store");
+    tb->msg_connect(demod, "schedule_feedback", dbg_fb, "store");
 
     tb->start();
     demod->_post(pmt::mp("samples"), make_samples_pdu(iq, 7, 9984));
@@ -212,6 +218,17 @@ BOOST_AUTO_TEST_CASE(test_golden_round_trip)
     const int64_t det = pmt::to_long(pmt::dict_ref(
         meta, pmt::mp("detected_start_sample"), pmt::from_long(-1)));
     BOOST_CHECK(std::llabs(det - 9984) <= 2);
+    BOOST_REQUIRE_GE(dbg_fb->num_messages(), 1u);
+    pmt::pmt_t fb = dbg_fb->get_message(0);
+    BOOST_REQUIRE(pmt::is_dict(fb));
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          fb, pmt::mp("acquisition_epoch"),
+                          pmt::from_uint64(0))),
+                      11);
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          fb, pmt::mp("schedule_generation"),
+                          pmt::from_uint64(0))),
+                      22);
 
     // Payload bytes must match golden stage_payload_bytes.bin exactly.
     pmt::pmt_t vec = pmt::cdr(result);

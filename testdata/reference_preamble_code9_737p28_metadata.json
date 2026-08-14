@@ -1,0 +1,29 @@
+{
+  "code_index": 9,
+  "decim": 65,
+  "description": "One QM35 / IEEE 802.15.4a HRP code-9 SYNC symbol at the X410 native rate 737.28 MS/s. Derived from the 998.4 MS/s buildUwbReference.m template by polyphase 48/65 resample.",
+  "dtype": "complex64",
+  "energy": 1.0000008344650269,
+  "energy_before_normalize": 0.7391601800918579,
+  "filter_delay_tolerance_samples": 1,
+  "generator": "testdata/generate_qm35_reference_737p28.py",
+  "group_delay_domain": "native_737p28",
+  "group_delay_samples": 10.0,
+  "input_file": "reference_preamble.bin",
+  "input_rate_hz": 998400000.0,
+  "interp": 48,
+  "matlab_reference": "UWB_demodulation/+uwbdecoder/buildUwbReference.m",
+  "output_file": "reference_preamble_code9_737p28.cf32",
+  "output_rate_hz": 737280000.0,
+  "preamble_repetitions": 64,
+  "resample_half_length": 10,
+  "resample_window": [
+    "kaiser",
+    5.0
+  ],
+  "sample_index_base": 0,
+  "sfd_mode": "4z2",
+  "source_energy": 0.9999999403953552,
+  "source_length": 1016,
+  "template_length": 751
+}

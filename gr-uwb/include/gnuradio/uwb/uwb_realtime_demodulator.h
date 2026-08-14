@@ -152,6 +152,10 @@ private:
         double native_sample_rate = 0.0;   // extractor domain if resampled
         double resample_filter_delay = 0.0; // group delay at demod domain
         uint64_t resample_us = 0;          // upstream PDU FIR process+flush
+        uint64_t acquisition_epoch = 0;
+        uint64_t schedule_generation = 0;
+        bool has_acquisition_epoch = false;
+        bool has_schedule_generation = false;
         pmt::pmt_t samples; // c32vector (immutable shared ref)
         std::chrono::steady_clock::time_point enqueued_at;
     };

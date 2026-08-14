@@ -46,6 +46,25 @@ inline constexpr size_t kScheduledPostGuard = 4096;
 inline constexpr size_t kScheduledPoolSize = 8;
 inline constexpr double kScheduledPacketIntervalS = 0.01; // 100 radar/s
 
+// X410 native SC16 rate (no RFNoC / host 65/48).
+inline constexpr double kNativeSampleRateHz = 737280000.0;
+// QM35 radar slot period used by the auto-scheduled native capture path.
+inline constexpr double kQm35PacketIntervalS = 0.005; // 200 slot/s
+// Time-derived window geometry at 737.28 MS/s.  Do NOT copy the 998.4
+// sample counts 9984/189696/4096 without converting by 48/65.
+//   pre  = llround(10e-6  * 737.28e6) = 7373
+//   body = llround(190e-6 * 737.28e6) = 140083
+//   post = llround(4.1e-6 * 737.28e6) = 3023
+inline constexpr size_t kNativeScheduledPreGuard = 7373;
+inline constexpr size_t kNativeScheduledCapture = 140083;
+inline constexpr size_t kNativeScheduledPostGuard = 3023;
+inline constexpr size_t kAutoAcquirePoolSize = 8;
+inline constexpr size_t kAutoScheduledPoolSize = 8;
+inline constexpr size_t kLockObservations = 3;
+inline constexpr size_t kHoldoverMissCount = 3;
+inline constexpr size_t kReacquireMissCount = 8;
+inline constexpr double kProvisionalGuardUs = 25.0;
+
 } // namespace defaults
 } // namespace uwb
 } // namespace gr

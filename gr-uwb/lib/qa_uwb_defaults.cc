@@ -12,6 +12,7 @@
 
 #include <gnuradio/uwb/uwb_defaults.h>
 
+#include <cmath>
 #include <fstream>
 #include <regex>
 #include <sstream>
@@ -109,6 +110,23 @@ BOOST_AUTO_TEST_CASE(test_defaults_production_values)
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kScheduledPostGuard, size_t(4096));
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kScheduledPoolSize, size_t(8));
     BOOST_CHECK_CLOSE(gr::uwb::defaults::kScheduledPacketIntervalS, 0.01, 1e-12);
+    BOOST_CHECK_CLOSE(gr::uwb::defaults::kNativeSampleRateHz, 737280000.0, 1e-12);
+    BOOST_CHECK_CLOSE(gr::uwb::defaults::kQm35PacketIntervalS, 0.005, 1e-12);
+    BOOST_CHECK_EQUAL(gr::uwb::defaults::kNativeScheduledPreGuard, size_t(7373));
+    BOOST_CHECK_EQUAL(gr::uwb::defaults::kNativeScheduledCapture, size_t(140083));
+    BOOST_CHECK_EQUAL(gr::uwb::defaults::kNativeScheduledPostGuard, size_t(3023));
+    BOOST_CHECK_EQUAL(gr::uwb::defaults::kLockObservations, size_t(3));
+    BOOST_CHECK_EQUAL(gr::uwb::defaults::kHoldoverMissCount, size_t(3));
+    BOOST_CHECK_EQUAL(gr::uwb::defaults::kReacquireMissCount, size_t(8));
+    BOOST_CHECK_EQUAL(
+        static_cast<size_t>(std::llround(10e-6 * 737.28e6)),
+        gr::uwb::defaults::kNativeScheduledPreGuard);
+    BOOST_CHECK_EQUAL(
+        static_cast<size_t>(std::llround(190e-6 * 737.28e6)),
+        gr::uwb::defaults::kNativeScheduledCapture);
+    BOOST_CHECK_EQUAL(
+        static_cast<size_t>(std::llround(4.1e-6 * 737.28e6)),
+        gr::uwb::defaults::kNativeScheduledPostGuard);
 }
 
 BOOST_AUTO_TEST_CASE(test_grc_detector_defaults_match_header)
@@ -166,4 +184,22 @@ BOOST_AUTO_TEST_CASE(test_grc_scheduled_extractor_emit_policy_and_defaults)
                 std::string::npos);
     // C++ template aligned with Python.
     BOOST_CHECK(yaml.find("EmitPolicy::${emit_policy}") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(test_grc_auto_scheduled_extractor_sc16_native_defaults)
+{
+    const std::string yaml =
+        read_file(grc_path("uwb_auto_scheduled_extractor_sc16.block.yml"));
+    BOOST_CHECK(yaml_default_equals(yaml, "sample_rate", "737.28e6"));
+    BOOST_CHECK(yaml_default_equals(yaml, "packet_interval_s", "0.005"));
+    BOOST_CHECK(yaml_default_equals(yaml, "pre_guard_samples", "7373"));
+    BOOST_CHECK(yaml_default_equals(yaml, "capture_samples", "140083"));
+    BOOST_CHECK(yaml_default_equals(yaml, "post_guard_samples", "3023"));
+    BOOST_CHECK(yaml_default_equals(yaml, "lock_observations", "3"));
+    BOOST_CHECK(yaml_default_equals(yaml, "holdover_miss_count", "3"));
+    BOOST_CHECK(yaml_default_equals(yaml, "reacquire_miss_count", "8"));
+    BOOST_CHECK(!yaml_has_param(yaml, "first_packet_sample"));
+    BOOST_CHECK(yaml_make_contains(yaml, "make_from_file(${template_file}"));
+    BOOST_CHECK(yaml.find("UwbAutoScheduledExtractorSc16::make_from_file") !=
+                std::string::npos);
 }

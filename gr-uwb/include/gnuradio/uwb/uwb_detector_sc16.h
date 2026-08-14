@@ -39,13 +39,13 @@
 
 #pragma once
 
-#include <gnuradio/filter/fir_filter.h>
 #include <gnuradio/gr_complex.h>
 #include <gnuradio/io_signature.h>
 #include <gnuradio/sync_block.h>
 #include <gnuradio/uwb/api.h>
 #include <gnuradio/uwb/uwb_defaults.h>
 #include <gnuradio/uwb/uwb_detector_core.h>
+#include <gnuradio/uwb/uwb_preamble_verifier_sc16.h>
 #include <pmt/pmt.h>
 
 #include <array>
@@ -155,7 +155,6 @@ protected:
     bool stop() override;
 
 private:
-    void rebuild_decimated_template();
     void publish_packet(const UwbDetectorStateMachineSc16::Region& region);
     void enqueue_ready_regions();
     void worker_loop();
@@ -163,39 +162,12 @@ private:
     void wait_for_worker_idle();
 
     UwbDetectorStateMachineSc16 sm_;
+    core::UwbPreambleVerifierSc16 d_verifier_;
     uint64_t d_current_sample_ = 0;
     uint64_t d_packet_id_ = 0;
     size_t d_pre_trigger_;
     size_t d_capture_;
     double d_sample_rate_;
-
-    // Coarse-to-fine state (preamble confirmation + precise start)
-    size_t d_template_len_;
-    size_t d_coarse_decimation_;
-    size_t d_coarse_repetitions_;
-    size_t d_coarse_margin_;
-    size_t d_coarse_stride_ = 1; // coarse correlation stride (R=1)
-    float d_coarse_peak_rel_ = 0.5f;
-    float d_coarse_exist_frac_ = 0.5f;
-    float d_template_energy_ = 0.0f;
-    std::vector<std::complex<float>> d_template_norm_;
-    gr::filter::kernel::fir_filter_ccc d_fir;
-    std::vector<std::complex<int16_t>> d_tmpl_ds_q15;
-    std::vector<std::complex<int16_t>> d_tmpl_imag_ds_q15;
-    size_t d_sym_ds_ = 0;
-    std::vector<std::complex<int16_t>> d_sig_ds_sc16;
-    std::vector<uint64_t> d_pow_ds_sc16;
-    std::vector<float> d_score_ds;
-    std::vector<float> d_metric_ds;
-    std::vector<size_t> d_coarse_peaks;
-
-    // Fine-correlation scratch (ROI length is small: 2*coarse_margin+1)
-    std::vector<gr_complex> d_corr;
-    std::vector<float> d_winpow;
-    std::vector<float> d_fine_metric;
-    // Worker-only fine-ROI conversion scratch. Reserved before streaming; no
-    // full-Region conversion and no FC32 -> SC16 conversion on output.
-    std::vector<gr_complex> d_fine_input_fc32;
 
     std::thread d_worker;
     std::mutex d_job_mutex_;
