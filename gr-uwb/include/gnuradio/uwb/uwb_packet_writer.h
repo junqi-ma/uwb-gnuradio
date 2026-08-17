@@ -6,14 +6,18 @@
  *
  * UwbPacketWriter — writes detected UWB packet PDUs to disk (开发需求参考.md §8).
  *
- * Receives packet PDUs (CF32 payload) on the "packet" message port and appends
- * each packet as **SC16** (interleaved little-endian int16 I/Q) to `capture.iq`
- * plus one JSON metadata line to `capture.jsonl`:
+ * Receives packet PDUs (CF32 or packed SC16 `s16vector`) on the "packet"
+ * message port and appends each packet as **SC16** (interleaved little-endian
+ * int16 I/Q) to `capture.iq` plus one JSON metadata line to `capture.jsonl`.
+ * Native SC16 PDUs are written bit-exact; CF32 PDUs are quantized per packet.
  *
  *   {"packet_id":0,"start_sample":4992001,"trigger_sample":4992001,
- *    "sample_rate":998400000,"sample_count":202032,"file_offset_samples":0,
- *    "detection_metric":1.0,"pre_trigger_samples":2032,
- *    "sample_format":"sc16","iq_scale":2112.34}
+ *    "sample_rate":737280000,"sample_count":434995,"file_offset_samples":0,
+ *    "detection_metric":1.0,"pre_trigger_samples":221184,
+ *    "sample_format":"sc16","iq_scale":32768,
+ *    "window_start_sample":...,"predicted_start_sample":...,
+ *    "pre_guard_samples":221184,"capture_samples":140083,
+ *    "post_guard_samples":73728}
  *
  * Quantization: int16 = round(float * iq_scale), clipped to [-32768, 32767],
  * with iq_scale = 32767 / max(|I|,|Q|) per packet (1.0 if silent).

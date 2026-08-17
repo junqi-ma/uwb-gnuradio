@@ -109,3 +109,9 @@ endforeach(qa_file)
 # qa_uwb_defaults reads GRC YAML next to the source tree.
 target_compile_definitions(uwb_qa_uwb_defaults.cc PRIVATE
     "UWB_GRC_DIR=\"${CMAKE_SOURCE_DIR}/grc\"")
+
+# Keep auto-scheduled extractor QA independent of the developer's checkout
+# path while still allowing it to inspect the native template and X410 app.
+target_compile_definitions(uwb_qa_uwb_auto_scheduled_extractor_sc16.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\""
+    "UWB_APP_DIR=\"${CMAKE_SOURCE_DIR}/apps\"")

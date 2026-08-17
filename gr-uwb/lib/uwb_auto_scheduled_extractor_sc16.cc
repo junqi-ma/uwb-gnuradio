@@ -984,6 +984,17 @@ void UwbAutoScheduledExtractorSc16::publish_acquisition(
     meta = pmt::dict_add(meta, pmt::mp("sample_format"), pmt::mp("sc16"));
     meta = pmt::dict_add(meta, pmt::mp("sample_count"),
                          pmt::from_long(static_cast<long>(cap)));
+    const long acq_pre = static_cast<long>(packet_start - lo);
+    const long acq_body = static_cast<long>(cap) - acq_pre;
+    meta = pmt::dict_add(meta, pmt::mp("pre_guard_samples"),
+                         pmt::from_long(acq_pre));
+    meta = pmt::dict_add(meta, pmt::mp("capture_samples"),
+                         pmt::from_long(std::max<long>(0, acq_body)));
+    meta = pmt::dict_add(meta, pmt::mp("post_guard_samples"),
+                         pmt::from_long(0));
+    meta = pmt::dict_add(meta, pmt::mp("pre_trigger_samples"),
+                         pmt::from_long(acq_pre));
+    meta = pmt::dict_add(meta, pmt::mp("iq_scale"), pmt::from_double(32768.0));
     meta = pmt::dict_add(meta, pmt::mp("detection_metric"),
                          pmt::from_double(vr.detection_metric));
     meta = pmt::dict_add(meta, pmt::mp("start_metric"),
@@ -1041,11 +1052,26 @@ void UwbAutoScheduledExtractorSc16::publish_scheduled(
                          pmt::from_long(wmeta.predicted_start_sample));
     meta = pmt::dict_add(meta, pmt::mp("window_start_sample"),
                          pmt::from_long(wmeta.window_start_sample));
+    meta = pmt::dict_add(meta, pmt::mp("trigger_sample"),
+                         pmt::from_long(wmeta.predicted_start_sample));
     meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
                          pmt::from_double(d_sample_rate_));
     meta = pmt::dict_add(meta, pmt::mp("sample_format"), pmt::mp("sc16"));
     meta = pmt::dict_add(meta, pmt::mp("sample_count"),
                          pmt::from_long(static_cast<long>(n)));
+    const auto& scfg = sched_.config();
+    const long pred = wmeta.predicted_start_sample;
+    const long wstart = wmeta.window_start_sample;
+    const long actual_pre = pred >= wstart ? pred - wstart : 0;
+    meta = pmt::dict_add(meta, pmt::mp("pre_guard_samples"),
+                         pmt::from_long(static_cast<long>(scfg.pre_guard_samples)));
+    meta = pmt::dict_add(meta, pmt::mp("capture_samples"),
+                         pmt::from_long(static_cast<long>(scfg.capture_samples)));
+    meta = pmt::dict_add(meta, pmt::mp("post_guard_samples"),
+                         pmt::from_long(static_cast<long>(scfg.post_guard_samples)));
+    meta = pmt::dict_add(meta, pmt::mp("pre_trigger_samples"),
+                         pmt::from_long(actual_pre));
+    meta = pmt::dict_add(meta, pmt::mp("iq_scale"), pmt::from_double(32768.0));
     meta = pmt::dict_add(meta, pmt::mp("packet_interval_s"),
                          pmt::from_double(sched_.config().packet_interval_s));
     meta = pmt::dict_add(meta, pmt::mp("lock_state"),

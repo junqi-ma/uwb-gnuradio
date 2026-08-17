@@ -69,9 +69,12 @@ public:
      * \param known_preamble     native 737.28 MS/s one-SYNC template
      * \param sample_rate        native stream rate (default 737.28e6)
      * \param packet_interval_s  known QM35 period (default 0.005)
-     * \param pre_guard_samples  scheduled window pre-guard
+     * \param pre_guard_samples  scheduled window pre-guard (QM35 demod
+     *                           default 10 µs; dump overlapping DW1000 with
+     *                           defaults::kNativeInterferencePreGuard)
      * \param capture_samples    scheduled window body
-     * \param post_guard_samples scheduled window post-guard
+     * \param post_guard_samples scheduled window post-guard (dump: use
+     *                           defaults::kNativeInterferencePostGuard)
      * \param energy_threshold   acquire energy gate
      * \param energy_gate_decimation
      * \param coarse_decimation / repetitions / margin

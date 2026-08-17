@@ -10,6 +10,9 @@ function [x, meta] = read_uwb_packet(iqFile, jsonlFile, packetId)
 %     - capture.jsonl   one JSON object per packet with at least:
 %                       packet_id, sample_count, file_offset_samples,
 %                       sample_format ("sc16"), iq_scale
+%                       Scheduled dumps also carry window_start_sample,
+%                       predicted_start_sample, pre_guard_samples,
+%                       capture_samples, post_guard_samples.
 %
 %   Legacy CF32 files (no sample_format or sample_format=="cf32") are still
 %   readable for older captures.

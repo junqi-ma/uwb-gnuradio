@@ -139,6 +139,9 @@ BOOST_AUTO_TEST_CASE(test_packet_writer_accepts_scheduled_metadata)
     BOOST_CHECK(jsonl.find("\"packet_id\":42") != std::string::npos);
     BOOST_CHECK(jsonl.find("\"start_sample\":100000") != std::string::npos);
     BOOST_CHECK(jsonl.find("\"trigger_sample\":109984") != std::string::npos);
+    BOOST_CHECK(jsonl.find("\"window_start_sample\":100000") != std::string::npos);
+    BOOST_CHECK(jsonl.find("\"predicted_start_sample\":109984") !=
+                std::string::npos);
     std::filesystem::remove_all(dir);
 }
 
@@ -153,6 +156,55 @@ BOOST_AUTO_TEST_CASE(test_packet_writer_sc16_is_bit_exact)
     meta = pmt::dict_add(meta, pmt::mp("start_sample"), pmt::from_uint64(99));
     meta = pmt::dict_add(meta, pmt::mp("iq_scale"), pmt::from_double(32768));
     run_strobe(pmt::cons(meta, pmt::init_s16vector(iq.size(), iq)), w);
+    const std::string raw = read_file(dir + "/capture.iq");
+    BOOST_REQUIRE_GE(raw.size(), iq.size() * sizeof(int16_t));
+    BOOST_REQUIRE_EQUAL(raw.size() % (iq.size() * sizeof(int16_t)), 0);
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        reinterpret_cast<const int16_t*>(raw.data()),
+        reinterpret_cast<const int16_t*>(raw.data()) + iq.size(),
+        iq.begin(), iq.end());
+    std::filesystem::remove_all(dir);
+}
+
+BOOST_AUTO_TEST_CASE(test_packet_writer_persists_native_window_geometry)
+{
+    const std::string dir = "qa_writer_geom";
+    std::filesystem::remove_all(dir);
+    auto w = gr::uwb::UwbPacketWriter::make(dir, "capture", false);
+    const std::vector<int16_t> iq = { 1, -1, 2, -2, 3, -3, 4, -4 };
+    pmt::pmt_t meta = pmt::make_dict();
+    meta = pmt::dict_add(meta, pmt::mp("packet_id"), pmt::from_uint64(5));
+    meta = pmt::dict_add(meta, pmt::mp("window_start_sample"),
+                         pmt::from_long(1000));
+    meta = pmt::dict_add(meta, pmt::mp("predicted_start_sample"),
+                         pmt::from_long(1002));
+    meta = pmt::dict_add(meta, pmt::mp("pre_guard_samples"),
+                         pmt::from_long(2));
+    meta = pmt::dict_add(meta, pmt::mp("capture_samples"), pmt::from_long(1));
+    meta = pmt::dict_add(meta, pmt::mp("post_guard_samples"),
+                         pmt::from_long(1));
+    meta = pmt::dict_add(meta, pmt::mp("pre_trigger_samples"),
+                         pmt::from_long(2));
+    meta = pmt::dict_add(meta, pmt::mp("schedule_index"), pmt::from_uint64(7));
+    meta = pmt::dict_add(meta, pmt::mp("capture_mode"), pmt::mp("scheduled"));
+    meta = pmt::dict_add(meta, pmt::mp("lock_state"), pmt::mp("locked"));
+    meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
+                         pmt::from_double(737280000.0));
+    meta = pmt::dict_add(meta, pmt::mp("iq_scale"), pmt::from_double(32768.0));
+    run_strobe(pmt::cons(meta, pmt::init_s16vector(iq.size(), iq)), w);
+
+    BOOST_CHECK_EQUAL(w->packets_dropped(), 0);
+    const std::string jsonl = read_file(dir + "/capture.jsonl");
+    BOOST_CHECK(jsonl.find("\"window_start_sample\":1000") != std::string::npos);
+    BOOST_CHECK(jsonl.find("\"predicted_start_sample\":1002") !=
+                std::string::npos);
+    BOOST_CHECK(jsonl.find("\"pre_guard_samples\":2") != std::string::npos);
+    BOOST_CHECK(jsonl.find("\"capture_samples\":1") != std::string::npos);
+    BOOST_CHECK(jsonl.find("\"post_guard_samples\":1") != std::string::npos);
+    BOOST_CHECK(jsonl.find("\"schedule_index\":7") != std::string::npos);
+    BOOST_CHECK(jsonl.find("\"capture_mode\":\"scheduled\"") != std::string::npos);
+    BOOST_CHECK(jsonl.find("\"lock_state\":\"locked\"") != std::string::npos);
+    BOOST_CHECK(jsonl.find("\"sample_rate\":737280000") != std::string::npos);
     const std::string raw = read_file(dir + "/capture.iq");
     BOOST_REQUIRE_GE(raw.size(), iq.size() * sizeof(int16_t));
     BOOST_REQUIRE_EQUAL(raw.size() % (iq.size() * sizeof(int16_t)), 0);

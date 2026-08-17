@@ -13,6 +13,16 @@
 **docs/phase1/GROK_X410_QM35825周期旁路开发方案.md**。
 已知 `t0/T` 时使用 `UwbScheduledExtractor`，不要用能量门对每个通信包建 Region。
 
+### QM35 盲捕获与自动周期锁定（离线最小闭环已通）
+未知 `t0`、已知 T=5 ms 时使用 `UwbAutoScheduledExtractorSc16`，不要并联
+Detector + ScheduledExtractor。方案见
+**docs/phase1/GROK_X410_QM35盲捕获与自动周期锁定开发方案.md**；
+mixed 737.28 离线实测见
+**docs/phase1/测试报告_QM35盲捕获与自动周期锁定_mixed737p28.md**；
+无干扰 QM35 同一流程见
+**docs/phase1/测试报告_QM35盲捕获与自动周期锁定_clean737p28.md**。
+硬件 soak / overflow 重捕获未完成，不得写成 X410 盲捕获验收通过。
+
 ### UWB 算法与验证
 - UWB 检测算法（能量门限、粗检测、细相关、preamble 匹配等）**必须**参考 `UWB_demodulation/` 目录下的 MATLAB 实现（包括 `buildUwbReference.m`、`decode_uwb.m`、`analyze_*` 等文件）。
 - 算法正确性验证优先：使用 `testdata/` 下的已知 UWB 测试信号（`.cfile`、`*.dat`、`*_metadata.mat`、`UWB_test_signal_description.md`）进行 MATLAB 对照。

@@ -14,8 +14,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <sstream>
 
 namespace gr {
 namespace uwb {
@@ -30,6 +32,53 @@ uint64_t dict_u64(const pmt::pmt_t& dict, const char* key, uint64_t fallback)
     if (pmt::is_integer(value))
         return static_cast<uint64_t>(pmt::to_long(value));
     return fallback;
+}
+
+bool dict_has(const pmt::pmt_t& dict, const char* key)
+{
+    return !pmt::eq(pmt::dict_ref(dict, pmt::mp(key), pmt::PMT_NIL),
+                    pmt::PMT_NIL);
+}
+
+int64_t dict_i64(const pmt::pmt_t& dict, const char* key, int64_t fallback)
+{
+    const pmt::pmt_t value =
+        pmt::dict_ref(dict, pmt::mp(key), pmt::from_long(fallback));
+    if (pmt::is_uint64(value))
+        return static_cast<int64_t>(pmt::to_uint64(value));
+    if (pmt::is_integer(value))
+        return pmt::to_long(value);
+    return fallback;
+}
+
+std::string dict_ident(const pmt::pmt_t& dict, const char* key)
+{
+    const pmt::pmt_t value =
+        pmt::dict_ref(dict, pmt::mp(key), pmt::PMT_NIL);
+    if (pmt::is_symbol(value))
+        return pmt::symbol_to_string(value);
+    if (pmt::is_bool(value))
+        return pmt::to_bool(value) ? "true" : "false";
+    return {};
+}
+
+void append_opt_i64(std::ostringstream& os,
+                    const pmt::pmt_t& dict,
+                    const char* key)
+{
+    if (!dict_has(dict, key))
+        return;
+    os << ",\"" << key << "\":" << dict_i64(dict, key, 0);
+}
+
+void append_opt_ident(std::ostringstream& os,
+                      const pmt::pmt_t& dict,
+                      const char* key)
+{
+    const std::string s = dict_ident(dict, key);
+    if (s.empty())
+        return;
+    os << ",\"" << key << "\":\"" << s << "\"";
 }
 } // namespace
 
@@ -196,12 +245,15 @@ void UwbPacketWriter::write_packet(pmt::pmt_t msg)
     const uint64_t start = dict_u64(meta, "start_sample", scheduled_start);
     const uint64_t predicted = dict_u64(meta, "predicted_start_sample", start);
     const uint64_t trigger = dict_u64(meta, "trigger_sample", predicted);
+    const uint64_t window_start =
+        dict_has(meta, "window_start_sample") ? scheduled_start : start;
     const double rate = pmt::to_double(
         pmt::dict_ref(meta, pmt::mp("sample_rate"), pmt::from_double(0)));
     const double metric = pmt::to_double(
         pmt::dict_ref(meta, pmt::mp("detection_metric"), pmt::from_double(0)));
-    const long pre = pmt::to_long(
-        pmt::dict_ref(meta, pmt::mp("pre_trigger_samples"), pmt::from_long(0)));
+    const long pre = dict_has(meta, "pre_trigger_samples")
+                         ? dict_i64(meta, "pre_trigger_samples", 0)
+                         : dict_i64(meta, "pre_guard_samples", 0);
 
     size_t n = 0;
     float iq_scale = 32768.0f;
@@ -226,52 +278,49 @@ void UwbPacketWriter::write_packet(pmt::pmt_t msg)
     const std::streamsize nbytes =
         static_cast<std::streamsize>(n * 2 * sizeof(int16_t));
 
-    char line[640];
+    uint64_t file_offset = 0;
+    std::string fname;
     if (d_one_file_per_packet_) {
-        const std::string fname = "packet_" + std::to_string(id) + ".iq";
+        fname = "packet_" + std::to_string(id) + ".iq";
         std::ofstream f(d_directory_ + "/" + fname, std::ios::binary);
         if (f)
             f.write(sc16_bytes, nbytes);
-        std::snprintf(
-            line,
-            sizeof(line),
-            "{\"packet_id\":%llu,\"file\":\"%s\",\"start_sample\":%llu,"
-            "\"trigger_sample\":%llu,\"sample_rate\":%.0f,"
-            "\"sample_count\":%zu,\"file_offset_samples\":0,"
-            "\"detection_metric\":%.6f,\"pre_trigger_samples\":%ld,"
-            "\"sample_format\":\"sc16\",\"iq_scale\":%.9g}\n",
-            static_cast<unsigned long long>(id),
-            fname.c_str(),
-            static_cast<unsigned long long>(start),
-            static_cast<unsigned long long>(trigger),
-            rate,
-            n,
-            metric,
-            pre,
-            static_cast<double>(iq_scale));
     } else {
+        file_offset = d_sample_offset_.load();
         d_iq_.write(sc16_bytes, nbytes);
-        std::snprintf(
-            line,
-            sizeof(line),
-            "{\"packet_id\":%llu,\"start_sample\":%llu,"
-            "\"trigger_sample\":%llu,\"sample_rate\":%.0f,"
-            "\"sample_count\":%zu,\"file_offset_samples\":%llu,"
-            "\"detection_metric\":%.6f,\"pre_trigger_samples\":%ld,"
-            "\"sample_format\":\"sc16\",\"iq_scale\":%.9g}\n",
-            static_cast<unsigned long long>(id),
-            static_cast<unsigned long long>(start),
-            static_cast<unsigned long long>(trigger),
-            rate,
-            n,
-            static_cast<unsigned long long>(d_sample_offset_.load()),
-            metric,
-            pre,
-            static_cast<double>(iq_scale));
         d_sample_offset_.fetch_add(n);
     }
 
-    d_jsonl_ << line;
+    std::ostringstream line;
+    line << "{\"packet_id\":" << id;
+    if (!fname.empty())
+        line << ",\"file\":\"" << fname << "\"";
+    line << ",\"start_sample\":" << start
+         << ",\"trigger_sample\":" << trigger
+         << ",\"sample_rate\":" << static_cast<unsigned long long>(rate + 0.5)
+         << ",\"sample_count\":" << n
+         << ",\"file_offset_samples\":" << file_offset
+         << ",\"detection_metric\":";
+    char metric_buf[32];
+    std::snprintf(metric_buf, sizeof(metric_buf), "%.6f", metric);
+    line << metric_buf
+         << ",\"pre_trigger_samples\":" << pre
+         << ",\"sample_format\":\"sc16\",\"iq_scale\":";
+    char scale_buf[32];
+    std::snprintf(scale_buf, sizeof(scale_buf), "%.9g",
+                  static_cast<double>(iq_scale));
+    line << scale_buf
+         << ",\"window_start_sample\":" << window_start
+         << ",\"predicted_start_sample\":" << predicted;
+    append_opt_i64(line, meta, "pre_guard_samples");
+    append_opt_i64(line, meta, "capture_samples");
+    append_opt_i64(line, meta, "post_guard_samples");
+    append_opt_i64(line, meta, "schedule_index");
+    append_opt_ident(line, meta, "capture_mode");
+    append_opt_ident(line, meta, "lock_state");
+    line << "}\n";
+
+    d_jsonl_ << line.str();
     d_jsonl_.flush();
     d_packets_.fetch_add(1);
 }

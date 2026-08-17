@@ -115,6 +115,14 @@ BOOST_AUTO_TEST_CASE(test_defaults_production_values)
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kNativeScheduledPreGuard, size_t(7373));
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kNativeScheduledCapture, size_t(140083));
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kNativeScheduledPostGuard, size_t(3023));
+    BOOST_CHECK_CLOSE(gr::uwb::defaults::kNativeInterferencePreGuardS,
+                      300e-6, 1e-12);
+    BOOST_CHECK_CLOSE(gr::uwb::defaults::kNativeInterferencePostGuardS,
+                      100e-6, 1e-12);
+    BOOST_CHECK_EQUAL(gr::uwb::defaults::kNativeInterferencePreGuard,
+                      size_t(221184));
+    BOOST_CHECK_EQUAL(gr::uwb::defaults::kNativeInterferencePostGuard,
+                      size_t(73728));
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kLockObservations, size_t(3));
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kHoldoverMissCount, size_t(3));
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kReacquireMissCount, size_t(8));
@@ -127,6 +135,14 @@ BOOST_AUTO_TEST_CASE(test_defaults_production_values)
     BOOST_CHECK_EQUAL(
         static_cast<size_t>(std::llround(4.1e-6 * 737.28e6)),
         gr::uwb::defaults::kNativeScheduledPostGuard);
+    BOOST_CHECK_EQUAL(
+        static_cast<size_t>(std::llround(
+            gr::uwb::defaults::kNativeInterferencePreGuardS * 737.28e6)),
+        gr::uwb::defaults::kNativeInterferencePreGuard);
+    BOOST_CHECK_EQUAL(
+        static_cast<size_t>(std::llround(
+            gr::uwb::defaults::kNativeInterferencePostGuardS * 737.28e6)),
+        gr::uwb::defaults::kNativeInterferencePostGuard);
 }
 
 BOOST_AUTO_TEST_CASE(test_grc_detector_defaults_match_header)

@@ -58,6 +58,20 @@ inline constexpr double kQm35PacketIntervalS = 0.005; // 200 slot/s
 inline constexpr size_t kNativeScheduledPreGuard = 7373;
 inline constexpr size_t kNativeScheduledCapture = 140083;
 inline constexpr size_t kNativeScheduledPostGuard = 3023;
+// Native dump geometry.  CIR for QM35 is taken from the preamble
+// (~64 SYNC ≈ 65 µs), so a DW1000 that starts before / at predicted t0 is
+// the interferer that matters.  Keep a full DW1000 airtime in front so that
+// packet's preamble origin is in-window; the tail only has to finish that
+// same packet after the 190 µs QM35 body.
+//   256 SYNC + DW-8 + 12 B @ 6.81 Mbps ≈ 270–290 µs
+//   pre  = llround(300e-6 * 737.28e6) = 221184
+//   post = llround(100e-6 * 737.28e6) = 73728
+//     (covers a ≤290 µs DW1000 that starts at t0: 290 − 190 = 100 µs)
+// Do NOT replace the 10/190/4.1 µs demod defaults.
+inline constexpr double kNativeInterferencePreGuardS = 300e-6;
+inline constexpr double kNativeInterferencePostGuardS = 100e-6;
+inline constexpr size_t kNativeInterferencePreGuard = 221184;
+inline constexpr size_t kNativeInterferencePostGuard = 73728;
 inline constexpr size_t kAutoAcquirePoolSize = 8;
 inline constexpr size_t kAutoScheduledPoolSize = 8;
 inline constexpr size_t kLockObservations = 3;
