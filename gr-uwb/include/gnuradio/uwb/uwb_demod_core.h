@@ -704,16 +704,17 @@ inline bool stage_sfd(const std::complex<float>* rx,
         return window_best >= profile.sfd_detection_threshold;
     };
 
-    // MATLAB-style symmetric ±1-symbol search, run narrow-first with a wide
-    // fallback.  The schedule lock + timing keep the SFD position accurate to
-    // ~±1 sample, so a narrow ±32-sample scan_window finds it ~99% of the time
-    // (fast path).  Fall back to the full ± samples_per_symbol sweep only when
-    // timing landed a whole symbol late (rare).  Both windows accumulate into
-    // the same best/best_j, so the result is identical to the old single wide
-    // sweep.
+    // MATLAB-style symmetric ±1-symbol search, run narrow-first.  The schedule
+    // lock + timing keep the SFD position accurate to ~±1 sample, so a narrow
+    // ±32-sample scan_window finds it ~99% of the time (fast path).  If that
+    // window does not pass, probe the two possible one-symbol offsets with the
+    // same narrow search.  This avoids scanning the whole ±symbol interval.
     scan_window(expected, kSfdNarrowHalf, 0);
     if (best < profile.sfd_detection_threshold)
-        scan_window(expected, static_cast<int64_t>(sym), 0);
+    {
+        scan_window(expected + static_cast<int64_t>(sym), kSfdNarrowHalf, 1);
+        scan_window(expected - static_cast<int64_t>(sym), kSfdNarrowHalf, 1);
+    }
     if (best < profile.sfd_detection_threshold)
         return false;
 
@@ -2203,38 +2204,106 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         return res;
     }
 
-    // Match MATLAB's CFO input: retrack exactly the SYNC train implied by the
-    // SFD-refined frame origin, then discard the first 24 of those peaks.  A
-    // tight one-SYNC search prevents the broad acquisition scan from selecting
-    // a later high-metric repetition again; no backwards probing is needed
-    // because the SFD has already supplied the preamble origin.
-    const int64_t refined_start =
-        res.sfd.sfd_start_sample - static_cast<int64_t>(std::llround(
-            static_cast<double>(profile.preamble_repetitions) *
-            res.timing.measured_period));
+    // Use the SFD as the frame anchor.  The first SYNCs can be weak or can be
+    // missed by acquisition, so do not re-track the whole preamble from its
+    // reconstructed first repetition.  Track only the stable tail used by
+    // CIR/CFO, then rebuild the complete SYNC grid from the SFD coordinate.
+    const size_t full_repetitions = profile.preamble_repetitions;
+    const size_t tail_repetitions = std::min(
+        full_repetitions,
+        std::max<size_t>(profile.cfo_min_fit_repetitions, 40));
+    if (tail_repetitions < 2 || res.timing.measured_period <= 0.0) {
+        lap(res.stage_sfd_us);
+        res.status = DemodStatus::CfoFailed;
+        rebase();
+        return res;
+    }
+
     Qm35825Profile cfo_anchor_profile = profile;
-    // `stage_timing` normally performs a local ±timing_track_radius (±8)
-    // refinement around each SYNC; tighten it to ±2 here because the SFD
-    // anchor is already sample-accurate, and set the coarse/grid margin to
-    // zero so it cannot re-acquire another symbol.
+    cfo_anchor_profile.preamble_repetitions = tail_repetitions;
+    // The SFD anchor supplies the absolute tail origin.  Use a local ±8 sample
+    // refinement at each tail SYNC, but do not allow acquisition to jump to a
+    // different symbol or walk backwards toward weak leading repetitions.
     cfo_anchor_profile.timing_search_margin = 0;
     cfo_anchor_profile.timing_coarse_stride = 1;
     cfo_anchor_profile.timing_max_backtrack_symbols = 0;
-    cfo_anchor_profile.timing_track_radius = 2;
-    // MATLAB's per-SYNC floor is 0.20 of the candidate energy.  The ordinary
-    // acquisition threshold is intentionally stricter (0.25), but must not
-    // reject a known, SFD-anchored leading SYNC during CFO retracking.
+    cfo_anchor_profile.timing_track_radius = 8;
+    // MATLAB's per-SYNC floor is 0.20 of the candidate energy.
     cfo_anchor_profile.radar_verification_threshold = 0.20f;
+
+    const double period_hint = res.timing.measured_period;
+    const int64_t tail_start = res.sfd.sfd_start_sample -
+        static_cast<int64_t>(std::llround(
+            static_cast<double>(tail_repetitions) * period_hint));
+    TimingResult tail_timing;
+    if (!stage_timing(rx, n, cfo_anchor_profile, template_wf, tail_start,
+                      tail_timing, scratch) ||
+        tail_timing.detected_peaks != tail_repetitions) {
+        lap(res.stage_sfd_us);
+        res.status = DemodStatus::CfoFailed;
+        rebase();
+        return res;
+    }
+
+    const double tail_period = tail_timing.measured_period;
+    if (!(tail_period > 0.0)) {
+        lap(res.stage_sfd_us);
+        res.status = DemodStatus::CfoFailed;
+        rebase();
+        return res;
+    }
+
+    // Keep the SFD-anchored full-frame grid on the original timing estimate.
+    // The tail peak coordinates themselves remain the CFO fit input; using a
+    // short-tail period fit for the CIR grid can shift the payload chip grid
+    // on otherwise clean captures.
+    const double measured_period = period_hint;
+
+    // Keep the public timing geometry at the full-frame origin.  Only the
+    // tail peaks have matched-filter measurements; leading peaks are generated
+    // from the SFD-anchored grid and are skipped by the CFO fit / CIR warmup.
     TimingResult cfo_timing;
-    if (!stage_timing(rx, n, cfo_anchor_profile, template_wf, refined_start,
-                      cfo_timing, scratch) ||
-        !stage_cfo(rx, n, profile, cfo_timing, res.cfo, scratch)) {
+    const int64_t full_start = res.sfd.sfd_start_sample -
+        static_cast<int64_t>(std::llround(
+            static_cast<double>(full_repetitions) * measured_period));
+    const size_t tail_first = full_repetitions - tail_repetitions;
+    const size_t template_len = template_wf.size();
+    cfo_timing.ok = true;
+    cfo_timing.preamble_start_sample = full_start;
+    cfo_timing.preamble_start_uncropped = full_start;
+    cfo_timing.measured_period = measured_period;
+    cfo_timing.metric = tail_timing.metric;
+    cfo_timing.detected_peaks = full_repetitions;
+    cfo_timing.expected_peaks = full_repetitions;
+    cfo_timing.coarse_search_us = tail_timing.coarse_search_us;
+    cfo_timing.fine_track_us = tail_timing.fine_track_us;
+    cfo_timing.peak_samples.resize(full_repetitions);
+    cfo_timing.peak_metrics.assign(full_repetitions, 0.0f);
+    cfo_timing.peak_corr.assign(
+        full_repetitions, std::complex<float>(0.0f, 0.0f));
+    for (size_t k = 0; k < full_repetitions; ++k) {
+        cfo_timing.peak_samples[k] = full_start +
+            static_cast<int64_t>(std::llround(
+                static_cast<double>(k) * measured_period)) +
+            static_cast<int64_t>(template_len - 1);
+    }
+    for (size_t k = 0; k < tail_repetitions; ++k) {
+        const size_t dst = tail_first + k;
+        cfo_timing.peak_samples[dst] = tail_timing.peak_samples[k];
+        cfo_timing.peak_metrics[dst] = tail_timing.peak_metrics[k];
+        cfo_timing.peak_corr[dst] = tail_timing.peak_corr[k];
+    }
+
+    if (!stage_cfo(rx, n, profile, cfo_timing, res.cfo, scratch)) {
         lap(res.stage_sfd_us);
         res.status = DemodStatus::CfoFailed;
         rebase();
         return res;
     }
     res.timing = std::move(cfo_timing);
+
+    // Restore the full-preamble profile for the final SFD verification.
+    cfo_anchor_profile = profile;
 
     // Re-run SFD on the final MATLAB-aligned CFO compensation.  This removes
     // any bootstrap-CFO bias from the SFD/CIR path while retaining the same

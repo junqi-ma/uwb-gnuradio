@@ -315,9 +315,9 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_symmetric_one_symbol_forward)
                                   sr, scratch));
     BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(75008));
     BOOST_CHECK_GE(sr.metric, 0.95f);
-    // One symbol LATER than nominal: the narrow ±32 fast path misses, so the
-    // wide ±1-symbol fallback must run (2 windows total).
-    BOOST_CHECK_EQUAL(sr.search_windows, 2u);
+    // One symbol LATER than nominal: the narrow ±32 fast path misses, so both
+    // narrow ±1-symbol fallback windows are evaluated (3 windows total).
+    BOOST_CHECK_EQUAL(sr.search_windows, 3u);
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_symmetric_partial_train_backward)
@@ -348,9 +348,9 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_symmetric_partial_train_backward)
                                   sr, scratch));
     BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(75008));
     BOOST_CHECK_GE(sr.metric, 0.95f);
-    // One symbol EARLIER than nominal: the narrow ±32 fast path misses, so the
-    // wide ±1-symbol fallback must run (2 windows total).
-    BOOST_CHECK_EQUAL(sr.search_windows, 2u);
+    // One symbol EARLIER than nominal: the narrow ±32 fast path misses, so both
+    // narrow ±1-symbol fallback windows are evaluated (3 windows total).
+    BOOST_CHECK_EQUAL(sr.search_windows, 3u);
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_symmetric_bounded_forward)
