@@ -53,3 +53,13 @@ target_link_libraries(benchmark_resampler_65_48
     gnuradio::gnuradio-filter
     Threads::Threads
 )
+
+########################################################################
+# Offline dump postprocess: per-window notch + 65/48 (no UHD, no work())
+########################################################################
+add_executable(uwb_offline_postprocess_dump uwb_offline_postprocess_dump.cc)
+target_link_libraries(uwb_offline_postprocess_dump
+    gnuradio-uwb
+    Threads::Threads
+)
+install(TARGETS uwb_offline_postprocess_dump DESTINATION bin)

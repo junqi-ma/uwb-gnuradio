@@ -12,6 +12,12 @@ Sources:
 --dry-run prints the rate contract and exits 0.  --identity loopback posts
 demod-style lock_obs for file/synthetic runs so the shipped block can lock
 without a live UwbRealtimeDemodulator.
+
+--identity demod is not wired here yet (no 65/48 + realtime demod + writer).
+When that closed loop lands, dump vs demod geometry must stay split the
+same way as testdata/offline_qm35_auto_lock.py: extractor long window for
+native SC16 dump, UwbPduWindowCrop 10/190/4.1 before 65/48.  Do not send
+the 590 µs dump PDU into the FIR.
 """
 from __future__ import annotations
 
@@ -47,6 +53,8 @@ INTERVAL_S = 0.005
 PRE = 7373
 CAPTURE = 140083
 POST = 3023
+DUMP_PRE = 221184   # 300 µs @737.28 — DW1000 head for offline SIC
+DUMP_POST = 73728   # 100 µs
 
 
 def parser():
@@ -61,9 +69,15 @@ def parser():
     p.add_argument("--gain", type=float, default=60.0)
     p.add_argument("--antenna", default="TX/RX0")
     p.add_argument("--packet-interval", type=float, default=INTERVAL_S)
-    p.add_argument("--pre-guard", type=int, default=PRE)
+    p.add_argument("--pre-guard", type=int, default=PRE,
+                   help="scheduled / demod-crop pre-guard (default 7373)")
     p.add_argument("--capture", type=int, default=CAPTURE)
-    p.add_argument("--post-guard", type=int, default=POST)
+    p.add_argument("--post-guard", type=int, default=POST,
+                   help="scheduled / demod-crop post-guard (default 3023)")
+    p.add_argument("--dump-pre", type=int, default=DUMP_PRE,
+                   help="native dump pre-guard when writer is attached")
+    p.add_argument("--dump-post", type=int, default=DUMP_POST,
+                   help="native dump post-guard when writer is attached")
     p.add_argument("--output", default="")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--identity", choices=("loopback", "none", "demod"),

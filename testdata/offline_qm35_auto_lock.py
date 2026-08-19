@@ -7,9 +7,15 @@ No first_packet_sample / t0.  Flow:
 
   file_source SC16
     -> UwbAutoScheduledExtractorSc16   (energy + code-9 verify, then 5 ms schedule)
-    -> UwbPduRationalResamplerCcf65_48 (737.28 -> 998.4)
-    -> UwbRealtimeDemodulator          (code 9 / 64 SYNC / 4z2 / bypass)
+         --write-sc16: extractor emits the 590 µs dump window
+           -> Writer (native SC16, no 65/48)
+           -> UwbPduWindowCrop (10/190/4.1 µs) -> PDU 65/48 -> demod
+         default (no dump): extractor already emits the short demod window
+           -> PDU 65/48 -> demod
     -> schedule_feedback -> extractor.lock_obs
+
+After a 0-drop dump, uwb_offline_postprocess_dump notches each window and
+upsamples to 998.4 without overwriting capture.iq.
 
 Default input is the 0.5 s mixed DW1000+QM35 X410 capture.
 Pass the no-interference file to run the same flow on clean QM35:
@@ -22,6 +28,8 @@ import argparse
 import collections
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 
@@ -186,19 +194,111 @@ def parser():
     ap.add_argument("--cir-filter-mode", default="bypass")
     ap.add_argument(
         "--write-sc16", default="", metavar="DIR",
-        help="after lock, write native SC16 windows to DIR/capture.iq "
-             "(uses 300 µs head / 100 µs tail unless --pre/--post override)")
+        help="write native 737.28 SC16 dump windows to DIR/capture.iq; "
+             "does not enlarge the 65/48 FIR window")
+    ap.add_argument("--dump-pre", type=int, default=0,
+                    help="dump pre-guard samples (default 221184 = 300 µs)")
+    ap.add_argument("--dump-capture", type=int, default=0,
+                    help="dump QM35 body samples (default 140083 = 190 µs)")
+    ap.add_argument("--dump-post", type=int, default=0,
+                    help="dump post-guard samples (default 73728 = 100 µs)")
+    ap.add_argument("--demod-pre", type=int, default=0,
+                    help="demod crop pre-guard (default 7373 = 10 µs)")
+    ap.add_argument("--demod-capture", type=int, default=0,
+                    help="demod crop body (default 140083 = 190 µs)")
+    ap.add_argument("--demod-post", type=int, default=0,
+                    help="demod crop post-guard (default 3023 = 4.1 µs)")
     ap.add_argument("--pre", type=int, default=0,
-                    help="scheduled pre-guard samples; 0 = default "
-                         "(7373, or 221184 with --write-sc16)")
+                    help="alias: dump-pre with --write-sc16, else demod-pre")
     ap.add_argument("--post", type=int, default=0,
-                    help="scheduled post-guard samples; 0 = default "
-                         "(3023, or 73728 with --write-sc16)")
-    ap.add_argument("--capture", type=int, default=CAP,
-                    help="scheduled QM35 body samples")
+                    help="alias: dump-post with --write-sc16, else demod-post")
+    ap.add_argument("--capture", type=int, default=0,
+                    help="alias: dump/demod body (default 140083)")
+    ap.add_argument("--skip-postprocess", action="store_true",
+                    help="do not run uwb_offline_postprocess_dump after dump")
     ap.add_argument("--no-notch-tone", action="store_true",
-                    help="do not notch the ~6200 MHz CW after --write-sc16")
+                    help="pass --skip-notch to the C++ postprocess tool")
+    ap.add_argument("--postprocess-bin", default="",
+                    help="path to uwb_offline_postprocess_dump")
     return ap
+
+
+def resolve_geometry(args, write_dir):
+    demod_pre = args.demod_pre if args.demod_pre > 0 else PRE
+    demod_cap = args.demod_capture if args.demod_capture > 0 else CAP
+    demod_post = args.demod_post if args.demod_post > 0 else POST
+    dump_pre = args.dump_pre if args.dump_pre > 0 else PRE_DW
+    dump_cap = args.dump_capture if args.dump_capture > 0 else CAP
+    dump_post = args.dump_post if args.dump_post > 0 else POST_DW
+    if args.pre > 0:
+        if write_dir and args.dump_pre <= 0:
+            dump_pre = args.pre
+        elif not write_dir and args.demod_pre <= 0:
+            demod_pre = args.pre
+    if args.post > 0:
+        if write_dir and args.dump_post <= 0:
+            dump_post = args.post
+        elif not write_dir and args.demod_post <= 0:
+            demod_post = args.post
+    if args.capture > 0:
+        if write_dir and args.dump_capture <= 0:
+            dump_cap = args.capture
+        if (not write_dir or args.demod_capture <= 0) and args.dump_capture <= 0:
+            if not write_dir:
+                demod_cap = args.capture
+            else:
+                dump_cap = args.capture
+                if args.demod_capture <= 0:
+                    demod_cap = args.capture
+    return {
+        "demod_pre": int(demod_pre),
+        "demod_cap": int(demod_cap),
+        "demod_post": int(demod_post),
+        "dump_pre": int(dump_pre),
+        "dump_cap": int(dump_cap),
+        "dump_post": int(dump_post),
+    }
+
+
+def find_postprocess_bin(explicit):
+    if explicit:
+        return explicit
+    env = os.environ.get("UWB_OFFLINE_POSTPROCESS", "")
+    if env and os.path.isfile(env):
+        return env
+    cands = [
+        os.path.join(REPO, "gr-uwb", "build", "apps",
+                     "uwb_offline_postprocess_dump"),
+        os.path.join(REPO, "build", "apps", "uwb_offline_postprocess_dump"),
+    ]
+    for c in cands:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return shutil.which("uwb_offline_postprocess_dump") or ""
+
+
+def write_demod_results(path, packets, results):
+    by_id = {int(x.get("packet_id", -1)): x for x in packets}
+    with open(path, "w") as f:
+        for r in results:
+            src = by_id.get(int(r.get("packet_id", -1)), {})
+            rec = {
+                "packet_id": int(r.get("packet_id", -1)),
+                "schedule_index": int(src.get("schedule_index",
+                                              r.get("schedule_index", -1))),
+                "status": r.get("status", ""),
+                "fcs_pass": bool(r.get("fcs", False)),
+                "detected_start_sample": int(r.get("det_start", -1)),
+                "predicted_start_sample": int(r.get("pred_start", -1)),
+                "native_predicted_start": int(
+                    src.get("predicted_start_sample", -1)),
+                "native_window_start": int(
+                    src.get("window_start_sample", -1)),
+                "resample_us": r.get("t_resample_us", float("nan")),
+                "t_total_us": r.get("t_total_us", float("nan")),
+            }
+            f.write(json.dumps(rec) + "\n")
+    return path
 
 
 def main():
@@ -225,9 +325,14 @@ def main():
     stream_s = n_stream / FS737
 
     write_dir = args.write_sc16.strip()
-    pre = int(args.pre) if args.pre > 0 else (PRE_DW if write_dir else PRE)
-    post = int(args.post) if args.post > 0 else (POST_DW if write_dir else POST)
-    cap = int(args.capture)
+    geom = resolve_geometry(args, write_dir)
+    ext_pre = geom["dump_pre"] if write_dir else geom["demod_pre"]
+    ext_cap = geom["dump_cap"] if write_dir else geom["demod_cap"]
+    ext_post = geom["dump_post"] if write_dir else geom["demod_post"]
+    demod_pre = geom["demod_pre"]
+    demod_cap = geom["demod_cap"]
+    demod_post = geom["demod_post"]
+    demod_n = demod_pre + demod_cap + demod_post
 
     tmpl737 = np.fromfile(TMPL_737, np.complex64)
     tmpl998 = np.fromfile(TMPL_998, np.complex64)
@@ -237,13 +342,16 @@ def main():
           f"stream_samples={n_stream} stream_s={stream_s:.4f}")
     print("first_packet_sample: NOT PROVIDED")
     print(f"period={PERIOD_S*1e3:.1f} ms  "
-          f"window=[{pre},{cap},{post}]  "
+          f"extractor=[{ext_pre},{ext_cap},{ext_post}]  "
+          f"demod_crop=[{demod_pre},{demod_cap},{demod_post}]  "
           f"acquire=[{ACQ_PRE},{ACQ_CAP}]")
     if write_dir:
         print(f"write_sc16={write_dir}  "
-              f"head={pre/FS737*1e6:.1f} us  "
-              f"body={cap/FS737*1e6:.1f} us  "
-              f"tail={post/FS737*1e6:.1f} us")
+              f"dump_head={ext_pre/FS737*1e6:.1f} us  "
+              f"dump_body={ext_cap/FS737*1e6:.1f} us  "
+              f"dump_tail={ext_post/FS737*1e6:.1f} us  "
+              f"fir_in={demod_n} samples "
+              f"({demod_n/FS737*1e6:.1f} us)")
     print(f"template_737={len(tmpl737)}  template_998={len(tmpl998)}  "
           f"energy_th={args.energy_threshold}")
 
@@ -251,9 +359,9 @@ def main():
         [complex(x) for x in tmpl737],
         FS737,
         PERIOD_S,
-        pre,
-        cap,
-        post,
+        ext_pre,
+        ext_cap,
+        ext_post,
         float(args.energy_threshold),
         100,
         4,
@@ -302,8 +410,16 @@ def main():
     tb = gr.top_block("offline_qm35_auto_lock")
     clock = StatusClock(time.time())
     writer = None
+    crop = None
+    dbg_crop = blocks.message_debug()
     tb.connect(src, head, ext)
-    tb.msg_connect(ext, "packet", resampler, "packet")
+    if write_dir:
+        crop = uwb.pdu_window_crop(demod_pre, demod_cap, demod_post)
+        tb.msg_connect(ext, "packet", crop, "packet")
+        tb.msg_connect(crop, "packet", resampler, "packet")
+        tb.msg_connect(crop, "packet", dbg_crop, "store")
+    else:
+        tb.msg_connect(ext, "packet", resampler, "packet")
     tb.msg_connect(resampler, "packet", demod, "samples")
     tb.msg_connect(demod, "result", dbg_res, "store")
     tb.msg_connect(demod, "schedule_feedback", ext, "lock_obs")
@@ -422,6 +538,25 @@ def main():
           f"disc={ext.discontinuities()}")
     print(f"resampler emitted={resampler.pdus_emitted()} "
           f"dropped={resampler.pdus_dropped()}")
+    if resampler.pdus_emitted() > 0:
+        mean_in = resampler.total_input_samples() / resampler.pdus_emitted()
+        print(f"resampler mean_input_samples={mean_in:.1f} "
+              f"(demod_window={demod_n})")
+    if crop is not None:
+        print(f"crop received={crop.pdus_received()} "
+              f"emitted={crop.pdus_emitted()} "
+              f"cropped={crop.pdus_cropped()} "
+              f"passthrough={crop.pdus_passthrough()} "
+              f"clamped={crop.pdus_clamped()}")
+        crop_pkts = [parse_packet_meta(dbg_crop.get_message(i))
+                     for i in range(dbg_crop.num_messages())]
+        crop_sched = [x for x in crop_pkts
+                      if x.get("capture_mode") in ("scheduled", "provisional")]
+        if crop_sched:
+            ns = [int(x.get("sample_count", -1)) for x in crop_sched]
+            print(f"crop scheduled n min/max/mean="
+                  f"{min(ns)}/{max(ns)}/{sum(ns)/len(ns):.1f} "
+                  f"expect={demod_n}")
     print(f"demod rx={demod.jobs_received()} "
           f"completed={demod.jobs_completed()} "
           f"failed={demod.jobs_failed()} "
@@ -592,16 +727,23 @@ def main():
               f"sc16_convert={resampler.input_convert_total_us()/1000:.2f} ms")
 
     dump_ok = True
+    post_rc = 0
     if write_dir:
         dump_ok = verify_sc16_dump(
-            dat, write_dir, n_stream, writer, pre, cap, post)
-        if dump_ok and not args.no_notch_tone:
-            from cancel_capture_tone import process_dump
+            dat, write_dir, n_stream, writer,
+            geom["dump_pre"], geom["dump_cap"], geom["dump_post"])
+        if dump_ok and crop is not None:
+            dump_ok = verify_crop_to_demod(
+                dbg_crop, demod_n, demod_pre, demod_cap, demod_post)
+        demod_jsonl = os.path.join(write_dir, "demod_results.jsonl")
+        write_demod_results(demod_jsonl, packets, results)
+        print(f"  wrote {demod_jsonl} ({len(results)} rows)")
+        if dump_ok and not args.skip_postprocess:
+            post_rc = run_offline_postprocess(
+                write_dir, args.postprocess_bin, args.no_notch_tone)
+        elif dump_ok and args.skip_postprocess:
             print()
-            print("=== Notch ~6200 MHz CW on dump ===")
-            process_dump(write_dir, fs=FS737, fc=6489.6e6,
-                         rf_hint=6200e6, search_hz=80e6,
-                         auto=False)
+            print("=== Offline postprocess skipped (--skip-postprocess) ===")
 
     ok = (
         ext.identity_confirmed()
@@ -616,6 +758,10 @@ def main():
         print("SUCCESS: locked QM35 without first_packet_sample")
         if write_dir:
             print(f"SUCCESS: native SC16 dump in {write_dir}")
+        if post_rc != 0:
+            print("WARN: dump OK, offline postprocess failed "
+                  f"(exit {post_rc})")
+            return 4
         return 0
     print("FAIL: did not confirm QM35 identity and start scheduled capture")
     return 1
@@ -700,6 +846,76 @@ def verify_sc16_dump(dat, write_dir, n_stream, writer, pre, cap, post):
         ok = ok and geom_ok >= 1
     print("  PASS" if ok else "  FAIL")
     return ok
+
+
+def verify_crop_to_demod(dbg_crop, demod_n, demod_pre, demod_cap, demod_post):
+    print()
+    print("=== FIR input crop check ===")
+    pkts = [parse_packet_meta(dbg_crop.get_message(i))
+            for i in range(dbg_crop.num_messages())]
+    sched = [x for x in pkts
+             if x.get("capture_mode") in ("scheduled", "provisional")]
+    acq = [x for x in pkts if x.get("capture_mode") == "acquisition"]
+    bad = 0
+    for x in sched:
+        n = int(x.get("sample_count", -1))
+        # Near t=0 the pre-guard may shorten; otherwise exact demod window.
+        pred = int(x.get("predicted_start_sample", -1))
+        ws = int(x.get("window_start_sample", -1))
+        if pred >= demod_pre and n != demod_n:
+            bad += 1
+        elif pred >= 0 and ws == 0 and n > demod_n:
+            bad += 1
+        pre = int(x.get("pre_guard_samples", -1))
+        cap = int(x.get("capture_samples", -1))
+        if cap not in (-1, demod_cap) and pred >= demod_pre:
+            bad += 1
+        if pre > demod_pre:
+            bad += 1
+    print(f"  crop_pdus={len(pkts)} acq={len(acq)} scheduled={len(sched)} "
+          f"geom_mismatch={bad} demod_n={demod_n}")
+    if acq:
+        print(f"  acquisition n={acq[0].get('sample_count')} "
+              f"(must stay energy-gate short, not 300 µs dump head)")
+        acq_n = int(acq[0].get("sample_count", 0))
+        if acq_n >= PRE_DW:
+            print("  FAIL: acquisition was cropped/emitted as dump geometry")
+            return False
+    ok = bad == 0 and (not sched or len(sched) >= 1)
+    print("  PASS" if ok else "  FAIL")
+    return ok
+
+
+def run_offline_postprocess(write_dir, explicit_bin, skip_notch):
+    print()
+    print("=== Offline postprocess (notch + 65/48) ===")
+    bin_path = find_postprocess_bin(explicit_bin)
+    if not bin_path:
+        print("  FAIL: uwb_offline_postprocess_dump not found "
+              "(build gr-uwb/apps or pass --postprocess-bin)")
+        return 2
+    cmd = [bin_path, write_dir, "--tone-rf-hz", "6256.640e6"]
+    if skip_notch:
+        cmd.append("--skip-notch")
+    print("  " + " ".join(cmd), flush=True)
+    try:
+        rc = subprocess.call(cmd)
+    except OSError as e:
+        print(f"  FAIL: could not exec {bin_path}: {e}")
+        return 2
+    raw = os.path.join(write_dir, "capture.iq")
+    out = os.path.join(write_dir, "capture_998p4.cf32")
+    meta = os.path.join(write_dir, "capture_998p4.jsonl")
+    if rc != 0:
+        print(f"  FAIL: postprocess exit {rc}")
+        return rc
+    if not os.path.isfile(out) or not os.path.isfile(meta):
+        print(f"  FAIL: missing {out} or {meta}")
+        return 2
+    print(f"  raw unchanged: {raw}")
+    print(f"  wrote {out}")
+    print(f"  wrote {meta}")
+    return 0
 
 
 if __name__ == "__main__":

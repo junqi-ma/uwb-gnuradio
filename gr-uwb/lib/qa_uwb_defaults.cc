@@ -219,3 +219,15 @@ BOOST_AUTO_TEST_CASE(test_grc_auto_scheduled_extractor_sc16_native_defaults)
     BOOST_CHECK(yaml.find("UwbAutoScheduledExtractorSc16::make_from_file") !=
                 std::string::npos);
 }
+
+BOOST_AUTO_TEST_CASE(test_grc_pdu_window_crop_demod_defaults)
+{
+    const std::string yaml = read_file(grc_path("uwb_pdu_window_crop.block.yml"));
+    BOOST_CHECK(yaml_default_equals(yaml, "pre_samples", "7373"));
+    BOOST_CHECK(yaml_default_equals(yaml, "capture_samples", "140083"));
+    BOOST_CHECK(yaml_default_equals(yaml, "post_samples", "3023"));
+    BOOST_CHECK(yaml_make_contains(yaml, "${pre_samples}"));
+    BOOST_CHECK(yaml_make_contains(yaml, "${capture_samples}"));
+    BOOST_CHECK(yaml_make_contains(yaml, "${post_samples}"));
+    BOOST_CHECK(yaml.find("UwbPduWindowCrop::make") != std::string::npos);
+}
