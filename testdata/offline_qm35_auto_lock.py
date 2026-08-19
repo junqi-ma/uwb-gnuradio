@@ -15,7 +15,7 @@ No first_packet_sample / t0.  Flow:
     -> schedule_feedback -> extractor.lock_obs
 
 After a 0-drop dump, uwb_offline_postprocess_dump notches each window and
-upsamples to 998.4 without overwriting capture.iq.
+upsamples to 998.4 SC16 (capture_998p4.iq) without overwriting capture.iq.
 
 Default input is the 0.5 s mixed DW1000+QM35 X410 capture.
 Pass the no-interference file to run the same flow on clean QM35:
@@ -894,7 +894,8 @@ def run_offline_postprocess(write_dir, explicit_bin, skip_notch):
         print("  FAIL: uwb_offline_postprocess_dump not found "
               "(build gr-uwb/apps or pass --postprocess-bin)")
         return 2
-    cmd = [bin_path, write_dir, "--tone-rf-hz", "6256.640e6"]
+    cmd = [bin_path, write_dir, "--tone-rf-hz", "6256.640e6",
+           "--out-format", "sc16"]
     if skip_notch:
         cmd.append("--skip-notch")
     print("  " + " ".join(cmd), flush=True)
@@ -904,7 +905,7 @@ def run_offline_postprocess(write_dir, explicit_bin, skip_notch):
         print(f"  FAIL: could not exec {bin_path}: {e}")
         return 2
     raw = os.path.join(write_dir, "capture.iq")
-    out = os.path.join(write_dir, "capture_998p4.cf32")
+    out = os.path.join(write_dir, "capture_998p4.iq")
     meta = os.path.join(write_dir, "capture_998p4.jsonl")
     if rc != 0:
         print(f"  FAIL: postprocess exit {rc}")

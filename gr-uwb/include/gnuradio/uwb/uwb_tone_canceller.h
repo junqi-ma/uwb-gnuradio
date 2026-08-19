@@ -52,6 +52,61 @@ inline size_t next_pow2_at_least(size_t n)
     return p;
 }
 
+// s[n+1] = s[n] * exp(j w).  Refresh every 1024 samples so |s| cannot
+// walk off the unit circle on a 590 µs (≈4.3e5) window.
+constexpr size_t kTonePhasorRefresh = 1024;
+
+inline std::complex<double> tone_phasor(double w, size_t k)
+{
+    const double ph = w * static_cast<double>(k);
+    return { std::cos(ph), std::sin(ph) };
+}
+
+inline std::complex<double> tone_step(double w)
+{
+    return { std::cos(w), std::sin(w) };
+}
+
+template <typename Sample>
+inline std::complex<double> correlate_cis(const Sample* x, size_t n, double w)
+{
+    const auto step = tone_step(w);
+    auto s = tone_phasor(w, 0);
+    std::complex<double> acc(0.0, 0.0);
+    for (size_t k = 0; k < n; ++k) {
+        if ((k & (kTonePhasorRefresh - 1)) == 0)
+            s = tone_phasor(w, k);
+        acc += std::complex<double>(static_cast<double>(x[k].real()),
+                                    static_cast<double>(x[k].imag())) *
+               s;
+        s *= step;
+    }
+    return acc;
+}
+
+inline std::complex<double> correlate_cis_sc16(const int16_t* x,
+                                              size_t n,
+                                              double w,
+                                              double* power)
+{
+    const auto step = tone_step(w);
+    auto s = tone_phasor(w, 0);
+    std::complex<double> acc(0.0, 0.0);
+    double p0 = 0.0;
+    for (size_t k = 0; k < n; ++k) {
+        if ((k & (kTonePhasorRefresh - 1)) == 0)
+            s = tone_phasor(w, k);
+        const double re = static_cast<double>(x[2 * k]);
+        const double im = static_cast<double>(x[2 * k + 1]);
+        acc += std::complex<double>(re, im) * s;
+        p0 += re * re + im * im;
+        s *= step;
+    }
+    if (power)
+        *power = p0;
+    return acc;
+}
+
 inline void fft_radix2(std::vector<std::complex<double>>& a, bool inverse)
 {
     const size_t n = a.size();
@@ -174,16 +229,8 @@ inline double refine_tone_freq(const Sample* x,
         for (int i = 0; i < 21; ++i) {
             const double f =
                 best_f - span + (2.0 * span) * (static_cast<double>(i) / 20.0);
-            std::complex<double> acc(0.0, 0.0);
             const double w = -2.0 * M_PI * f / fs;
-            for (size_t k = 0; k < n; ++k) {
-                const double ph = w * static_cast<double>(k);
-                const std::complex<double> s_k(std::cos(ph), std::sin(ph));
-                acc += std::complex<double>(static_cast<double>(x[k].real()),
-                                            static_cast<double>(x[k].imag())) *
-                       s_k;
-            }
-            const double m = std::abs(acc);
+            const double m = std::abs(correlate_cis(x, n, w));
             if (m > best) {
                 best = m;
                 best_f = f;
@@ -215,16 +262,14 @@ inline ToneSubtractResult fit_tone(const Sample* x, size_t n, double fs,
     ToneSubtractResult r;
     if (x == nullptr || n == 0)
         return r;
-    std::complex<double> acc(0.0, 0.0);
     double p0 = 0.0;
     const double w = 2.0 * M_PI * f_hz / fs;
+    // ⟨x, exp(jωn)⟩ = correlate with exp(−jωn)
+    const auto acc = correlate_cis(x, n, -w);
     for (size_t k = 0; k < n; ++k) {
-        const double ph = w * static_cast<double>(k);
-        const std::complex<double> s(std::cos(ph), std::sin(ph));
-        const std::complex<double> z(static_cast<double>(x[k].real()),
-                                     static_cast<double>(x[k].imag()));
-        acc += z * std::conj(s);
-        p0 += std::norm(z);
+        const double re = static_cast<double>(x[k].real());
+        const double im = static_cast<double>(x[k].imag());
+        p0 += re * re + im * im;
     }
     r.coef = acc / static_cast<double>(n);
     r.power_before = p0 / static_cast<double>(n);
@@ -245,9 +290,11 @@ inline ToneSubtractResult subtract_tone(Sample* y,
     double p1 = 0.0;
     std::complex<double> resid(0.0, 0.0);
     const double w = 2.0 * M_PI * f_hz / fs;
+    const auto step = tone_step(w);
+    auto s = tone_phasor(w, 0);
     for (size_t k = 0; k < n; ++k) {
-        const double ph = w * static_cast<double>(k);
-        const std::complex<double> s(std::cos(ph), std::sin(ph));
+        if ((k & (kTonePhasorRefresh - 1)) == 0)
+            s = tone_phasor(w, k);
         const std::complex<double> z(static_cast<double>(x[k].real()),
                                      static_cast<double>(x[k].imag()));
         const std::complex<double> yn = z - r.coef * s;
@@ -255,6 +302,7 @@ inline ToneSubtractResult subtract_tone(Sample* y,
                       static_cast<decltype(x[0].imag())>(yn.imag()));
         p1 += std::norm(yn);
         resid += yn * std::conj(s);
+        s *= step;
     }
     r.power_after = p1 / static_cast<double>(n);
     r.bin_after = std::abs(resid / static_cast<double>(n));
@@ -286,19 +334,33 @@ inline ToneSubtractResult subtract_tone_sc16(int16_t* y_interleaved,
     ToneSubtractResult r;
     if (x_interleaved == nullptr || y_interleaved == nullptr || n == 0)
         return r;
-    std::vector<std::complex<double>> x(n);
-    for (size_t i = 0; i < n; ++i) {
-        x[i] = std::complex<double>(
-            static_cast<double>(x_interleaved[2 * i]),
-            static_cast<double>(x_interleaved[2 * i + 1]));
-    }
-    std::vector<std::complex<double>> y(n);
-    r = subtract_tone(y.data(), x.data(), n, fs, f_hz);
+    const double w = 2.0 * M_PI * f_hz / fs;
+    double p0 = 0.0;
+    const auto acc = correlate_cis_sc16(x_interleaved, n, -w, &p0);
+    r.coef = acc / static_cast<double>(n);
+    r.power_before = p0 / static_cast<double>(n);
+    r.bin_before = std::abs(r.coef);
+
+    double p1 = 0.0;
+    std::complex<double> resid(0.0, 0.0);
     r.clip_count = 0;
-    for (size_t i = 0; i < n; ++i) {
-        y_interleaved[2 * i] = clip_i16(y[i].real(), &r.clip_count);
-        y_interleaved[2 * i + 1] = clip_i16(y[i].imag(), &r.clip_count);
+    const auto step = tone_step(w);
+    auto s = tone_phasor(w, 0);
+    for (size_t k = 0; k < n; ++k) {
+        if ((k & (kTonePhasorRefresh - 1)) == 0)
+            s = tone_phasor(w, k);
+        const std::complex<double> z(
+            static_cast<double>(x_interleaved[2 * k]),
+            static_cast<double>(x_interleaved[2 * k + 1]));
+        const std::complex<double> yn = z - r.coef * s;
+        y_interleaved[2 * k] = clip_i16(yn.real(), &r.clip_count);
+        y_interleaved[2 * k + 1] = clip_i16(yn.imag(), &r.clip_count);
+        p1 += std::norm(yn);
+        resid += yn * std::conj(s);
+        s *= step;
     }
+    r.power_after = p1 / static_cast<double>(n);
+    r.bin_after = std::abs(resid / static_cast<double>(n));
     return r;
 }
 

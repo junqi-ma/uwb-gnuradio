@@ -17,6 +17,8 @@
 #include <gnuradio/uwb/uwb_window_crop_core.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -26,6 +28,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using gr::uwb::core::DemodResultMeta;
@@ -46,6 +49,7 @@ constexpr double kFs998 = 998.4e6;
 constexpr double kDefaultCenterHz = 6489.6e6;
 constexpr double kDefaultToneRfHz = 6256.640e6;
 constexpr double kDefaultSearchHz = 80e6;
+constexpr int kAutoWorkerCap = 8;
 
 struct Options {
     std::string dir;
@@ -55,10 +59,11 @@ struct Options {
     std::string select = "all";
     std::string emit = "full";
     std::string taps = "quality_minorder";
-    std::string out_format = "cf32";
+    std::string out_format = "sc16";
     bool skip_notch = false;
     bool keep_native_notch = false;
     bool dry_run = false;
+    int workers = 0; // 0 = min(windows, hardware_concurrency)
 };
 
 void usage(const char* argv0)
@@ -71,9 +76,11 @@ void usage(const char* argv0)
         << "  --select all|fcs_pass|scheduled\n"
         << "  --emit full|qm35\n"
         << "  --taps quality_minorder|PATH\n"
-        << "  --out-format cf32|sc16\n"
+        << "  --out-format sc16|cf32  default sc16 (Writer contract)\n"
         << "  --skip-notch\n"
         << "  --keep-native-notch     also write capture_notch.iq\n"
+        << "  --workers N             window-level pool (0=auto, cap "
+        << kAutoWorkerCap << ")\n"
         << "  --dry-run\n";
 }
 
@@ -114,6 +121,8 @@ bool parse_args(int argc, char** argv, Options& o)
             o.skip_notch = true;
         else if (a == "--keep-native-notch")
             o.keep_native_notch = true;
+        else if (a == "--workers")
+            o.workers = std::stoi(need("--workers"));
         else if (a == "--dry-run")
             o.dry_run = true;
         else if (a == "-h" || a == "--help") {
@@ -136,6 +145,10 @@ bool parse_args(int argc, char** argv, Options& o)
     }
     if (o.out_format != "cf32" && o.out_format != "sc16") {
         std::cerr << "--out-format must be cf32|sc16\n";
+        return false;
+    }
+    if (o.workers < 0) {
+        std::cerr << "--workers must be >= 0\n";
         return false;
     }
     return true;
@@ -287,6 +300,136 @@ const DumpWindowMeta* pick_probe(const std::vector<DumpWindowMeta>& wins)
     return fallback;
 }
 
+// Each worker owns a RationalResampler65_48Core (~13 MB scratch).
+// On the i7-12700 (8P+4E) 0.5 s mixed dump: 4 workers 0.78 s wall,
+// 8 workers 0.98 s, 20 workers 3.5 s (allocator / teardown).
+int resolve_workers(int requested, size_t nwin)
+{
+    unsigned hc = std::thread::hardware_concurrency();
+    if (hc == 0)
+        hc = 1;
+    int w;
+    if (requested > 0) {
+        w = requested;
+    } else {
+        w = static_cast<int>(hc);
+        if (w > kAutoWorkerCap)
+            w = kAutoWorkerCap;
+    }
+    if (w < 1)
+        w = 1;
+    if (nwin == 0)
+        return 1;
+    if (static_cast<size_t>(w) > nwin)
+        w = static_cast<int>(nwin);
+    return w;
+}
+
+struct WindowJob {
+    const DumpWindowMeta* w = nullptr;
+    const DemodResultMeta* d = nullptr;
+    std::vector<int16_t> raw;
+};
+
+struct WindowProduct {
+    std::vector<std::complex<float>> rs;
+    std::vector<int16_t> notch_native;
+    ToneSubtractResult sub;
+    size_t n_native = 0;
+    int64_t native_ws = 0;
+    int64_t native_pred = -1;
+    int64_t pre = 0;
+    int64_t cap = 0;
+    int64_t post = 0;
+    std::string error;
+};
+
+struct WorkerScratch {
+    std::vector<int16_t> notched;
+    std::vector<std::complex<float>> cf;
+};
+
+void process_window(const WindowJob& job,
+                    WindowProduct& out,
+                    RationalResampler65_48Core& core,
+                    WorkerScratch& scratch,
+                    const std::vector<float>& taps,
+                    const Options& opt,
+                    double tone_hz,
+                    const WindowCropGeom& demod_geom)
+{
+    const DumpWindowMeta& w = *job.w;
+    const DemodResultMeta* d = job.d;
+
+    const int16_t* src = job.raw.data();
+    size_t n_native = static_cast<size_t>(w.sample_count);
+    int64_t native_ws = w.window_start_sample;
+    int64_t native_pred = w.predicted_start_sample;
+    if (d && d->native_predicted_start >= 0)
+        native_pred = d->native_predicted_start;
+    int64_t pre = w.pre_guard_samples;
+    int64_t cap = w.capture_samples;
+    int64_t post = w.post_guard_samples;
+
+    if (!opt.skip_notch) {
+        scratch.notched.resize(job.raw.size());
+        out.sub = gr::uwb::core::subtract_tone_sc16(
+            scratch.notched.data(), job.raw.data(), n_native, kFs737, tone_hz);
+        src = scratch.notched.data();
+        if (opt.keep_native_notch)
+            out.notch_native.assign(scratch.notched.begin(),
+                                    scratch.notched.end());
+    }
+
+    if (opt.emit == "qm35") {
+        if (native_pred < 0) {
+            out.error = "emit qm35 needs predicted_start";
+            return;
+        }
+        const bool acq = (w.capture_mode == "acquisition");
+        const auto plan = gr::uwb::core::plan_window_crop(
+            native_ws, static_cast<int64_t>(n_native), native_pred, demod_geom,
+            acq);
+        if (plan.empty) {
+            out.error = "empty qm35 crop";
+            return;
+        }
+        if (!plan.passthrough) {
+            const size_t off = static_cast<size_t>(plan.in_offset);
+            const size_t nn = static_cast<size_t>(plan.out_count);
+            if (src == job.raw.data()) {
+                scratch.notched.assign(
+                    job.raw.begin() + static_cast<std::ptrdiff_t>(off * 2),
+                    job.raw.begin() +
+                        static_cast<std::ptrdiff_t>((off + nn) * 2));
+                src = scratch.notched.data();
+            } else {
+                std::memmove(scratch.notched.data(),
+                             scratch.notched.data() + off * 2,
+                             nn * 2 * sizeof(int16_t));
+                scratch.notched.resize(nn * 2);
+                src = scratch.notched.data();
+            }
+            n_native = nn;
+            native_ws = plan.window_start;
+            pre = plan.pre;
+            cap = plan.capture;
+            post = plan.post;
+        }
+    }
+
+    scratch.cf.resize(n_native);
+    gr::uwb::core::sc16_to_cf32(src, n_native, scratch.cf.data());
+    resample_oneshot(core, taps, scratch.cf.data(), n_native, out.rs);
+
+    out.n_native = n_native;
+    out.native_ws = native_ws;
+    out.native_pred = native_pred;
+    out.pre = pre;
+    out.cap = cap;
+    out.post = post;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -360,12 +503,18 @@ int main(int argc, char** argv)
         static_cast<int64_t>(kNativeScheduledPostGuard)
     };
 
+    const int nworkers = resolve_workers(opt.workers, selected.size());
+    const unsigned hc = std::thread::hardware_concurrency();
+
     std::cout << "dump: " << opt.dir << "\n";
     std::cout << "windows=" << windows.size() << " selected=" << selected.size()
               << " select=" << opt.select << " emit=" << opt.emit << "\n";
     std::cout << "taps=" << taps_path << " T=" << taps.size() << "\n";
     std::cout << "skip_notch=" << (opt.skip_notch ? "true" : "false")
-              << " out=" << opt.out_format << "\n";
+              << " out=" << opt.out_format
+              << " workers=" << nworkers
+              << (opt.workers <= 0 ? " (auto)" : "")
+              << " hc=" << hc << "\n";
 
     if (opt.dry_run) {
         std::cout << "dry-run: not writing output files\n";
@@ -437,11 +586,89 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    RationalResampler65_48Core core(taps);
-    std::vector<int16_t> raw;
-    std::vector<int16_t> notched;
-    std::vector<std::complex<float>> cf;
-    std::vector<std::complex<float>> rs;
+    using Clock = std::chrono::steady_clock;
+    const auto t_read0 = Clock::now();
+
+    std::vector<WindowJob> jobs(selected.size());
+    for (size_t i = 0; i < selected.size(); ++i) {
+        const DumpWindowMeta& w = windows[selected[i]];
+        jobs[i].w = &w;
+        auto it = demod_by_id.find(w.packet_id);
+        if (it != demod_by_id.end())
+            jobs[i].d = it->second;
+        if (!gr::uwb::core::read_sc16_window(
+                iq, w.file_offset_samples, static_cast<size_t>(w.sample_count),
+                jobs[i].raw)) {
+            std::cerr << "short IQ packet_id=" << w.packet_id << "\n";
+            return 2;
+        }
+    }
+    const double read_s =
+        std::chrono::duration<double>(Clock::now() - t_read0).count();
+
+    std::vector<WindowProduct> products(jobs.size());
+    const auto t_comp0 = Clock::now();
+    if (nworkers <= 1) {
+        RationalResampler65_48Core core(taps);
+        WorkerScratch scratch;
+        for (size_t i = 0; i < jobs.size(); ++i) {
+            process_window(jobs[i], products[i], core, scratch, taps, opt,
+                           tone.baseband_hz, demod_geom);
+            if (!products[i].error.empty()) {
+                std::cerr << products[i].error << " packet_id="
+                          << jobs[i].w->packet_id << "\n";
+                return 2;
+            }
+        }
+    } else {
+        std::atomic<size_t> next{ 0 };
+        std::vector<std::string> worker_err(static_cast<size_t>(nworkers));
+        std::vector<std::thread> pool;
+        pool.reserve(static_cast<size_t>(nworkers));
+        for (int t = 0; t < nworkers; ++t) {
+            pool.emplace_back([&, t]() {
+                try {
+                    // One core per worker.  process() is not safe to share.
+                    // Keep FIR nworkers=1 so we do not nest thread pools.
+                    RationalResampler65_48Core core(taps);
+                    WorkerScratch scratch;
+                    for (;;) {
+                        const size_t i =
+                            next.fetch_add(1, std::memory_order_relaxed);
+                        if (i >= jobs.size())
+                            break;
+                        process_window(jobs[i], products[i], core, scratch,
+                                       taps, opt, tone.baseband_hz,
+                                       demod_geom);
+                        if (!products[i].error.empty()) {
+                            worker_err[static_cast<size_t>(t)] =
+                                products[i].error + " packet_id=" +
+                                std::to_string(jobs[i].w->packet_id);
+                            return;
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    worker_err[static_cast<size_t>(t)] = e.what();
+                }
+            });
+        }
+        for (auto& th : pool)
+            th.join();
+        for (const auto& e : worker_err) {
+            if (!e.empty()) {
+                std::cerr << e << "\n";
+                return 2;
+            }
+        }
+    }
+    const double compute_s =
+        std::chrono::duration<double>(Clock::now() - t_comp0).count();
+    for (auto& job : jobs) {
+        job.raw.clear();
+        job.raw.shrink_to_fit();
+    }
+
+    const auto t_write0 = Clock::now();
     std::vector<int16_t> sc16_out;
     uint64_t out_off = 0;
     uint64_t total_clip = 0;
@@ -449,100 +676,43 @@ int main(int argc, char** argv)
     double bin_sum = 0.0;
     size_t notch_n = 0;
 
-    for (size_t idx : selected) {
-        const DumpWindowMeta& w = windows[idx];
-        const DemodResultMeta* d = nullptr;
-        auto it = demod_by_id.find(w.packet_id);
-        if (it != demod_by_id.end())
-            d = it->second;
-
-        if (!gr::uwb::core::read_sc16_window(
-                iq, w.file_offset_samples, static_cast<size_t>(w.sample_count),
-                raw)) {
-            std::cerr << "short IQ packet_id=" << w.packet_id << "\n";
-            return 2;
-        }
-
-        const int16_t* src = raw.data();
-        size_t n_native = static_cast<size_t>(w.sample_count);
-        int64_t native_ws = w.window_start_sample;
-        int64_t native_pred = w.predicted_start_sample;
-        if (d && d->native_predicted_start >= 0)
-            native_pred = d->native_predicted_start;
-        int64_t pre = w.pre_guard_samples;
-        int64_t cap = w.capture_samples;
-        int64_t post = w.post_guard_samples;
-        ToneSubtractResult sub;
+    for (size_t i = 0; i < jobs.size(); ++i) {
+        const DumpWindowMeta& w = *jobs[i].w;
+        const DemodResultMeta* d = jobs[i].d;
+        WindowProduct& prod = products[i];
+        const auto& rs = prod.rs;
 
         if (!opt.skip_notch) {
-            notched.resize(raw.size());
-            sub = gr::uwb::core::subtract_tone_sc16(
-                notched.data(), raw.data(), n_native, kFs737, tone.baseband_hz);
-            src = notched.data();
-            total_clip += sub.clip_count;
-            if (sub.power_after > 0.0)
-                power_sum += 10.0 * std::log10(sub.power_before / sub.power_after);
-            if (sub.bin_after > 0.0)
-                bin_sum += 20.0 * std::log10((sub.bin_before + 1e-18) /
-                                             (sub.bin_after + 1e-18));
+            total_clip += prod.sub.clip_count;
+            if (prod.sub.power_after > 0.0)
+                power_sum += 10.0 * std::log10(prod.sub.power_before /
+                                               prod.sub.power_after);
+            if (prod.sub.bin_after > 0.0)
+                bin_sum += 20.0 * std::log10((prod.sub.bin_before + 1e-18) /
+                                             (prod.sub.bin_after + 1e-18));
             ++notch_n;
             if (notch_out.is_open())
-                gr::uwb::core::write_sc16_window(notch_out, src, n_native);
+                gr::uwb::core::write_sc16_window(
+                    notch_out, prod.notch_native.data(),
+                    prod.notch_native.size() / 2);
         }
 
-        if (opt.emit == "qm35") {
-            if (native_pred < 0) {
-                std::cerr << "emit qm35 needs predicted_start packet_id="
-                          << w.packet_id << "\n";
-                return 2;
-            }
-            const bool acq = (w.capture_mode == "acquisition");
-            const auto plan = gr::uwb::core::plan_window_crop(
-                native_ws, static_cast<int64_t>(n_native), native_pred,
-                demod_geom, acq);
-            if (plan.empty) {
-                std::cerr << "empty qm35 crop packet_id=" << w.packet_id << "\n";
-                return 2;
-            }
-            if (!plan.passthrough) {
-                const size_t off = static_cast<size_t>(plan.in_offset);
-                const size_t nn = static_cast<size_t>(plan.out_count);
-                if (src == raw.data()) {
-                    notched.assign(raw.begin() + static_cast<std::ptrdiff_t>(off * 2),
-                                   raw.begin() + static_cast<std::ptrdiff_t>(
-                                                     (off + nn) * 2));
-                    src = notched.data();
-                } else {
-                    std::memmove(notched.data(),
-                                 notched.data() + off * 2,
-                                 nn * 2 * sizeof(int16_t));
-                    notched.resize(nn * 2);
-                    src = notched.data();
-                }
-                n_native = nn;
-                native_ws = plan.window_start;
-                pre = plan.pre;
-                cap = plan.capture;
-                post = plan.post;
-            }
-        }
-
-        cf.resize(n_native);
-        gr::uwb::core::sc16_to_cf32(src, n_native, cf.data());
-        resample_oneshot(core, taps, cf.data(), n_native, rs);
-
-        const int64_t ws_out = map_native(native_ws, taps.size());
+        const int64_t ws_out = map_native(prod.native_ws, taps.size());
         int64_t pre_out = 0;
         int64_t cap_out = static_cast<int64_t>(rs.size());
         int64_t post_out = 0;
-        if (pre >= 0 && cap >= 0) {
-            pre_out = map_native(native_ws + pre, taps.size()) - ws_out;
-            cap_out = map_native(native_ws + pre + cap, taps.size()) -
-                      map_native(native_ws + pre, taps.size());
-            if (post >= 0) {
-                post_out = map_native(native_ws + pre + cap + post,
+        if (prod.pre >= 0 && prod.cap >= 0) {
+            pre_out = map_native(prod.native_ws + prod.pre, taps.size()) -
+                      ws_out;
+            cap_out = map_native(prod.native_ws + prod.pre + prod.cap,
+                                 taps.size()) -
+                      map_native(prod.native_ws + prod.pre, taps.size());
+            if (prod.post >= 0) {
+                post_out = map_native(prod.native_ws + prod.pre + prod.cap +
+                                          prod.post,
                                       taps.size()) -
-                           map_native(native_ws + pre + cap, taps.size());
+                           map_native(prod.native_ws + prod.pre + prod.cap,
+                                      taps.size());
             }
             if (pre_out < 0)
                 pre_out = 0;
@@ -550,12 +720,15 @@ int main(int argc, char** argv)
                 cap_out = 0;
             if (post_out < 0)
                 post_out = 0;
-            const int64_t remain = static_cast<int64_t>(rs.size()) - pre_out - cap_out;
-            if (post < 0 || post_out > remain)
+            const int64_t remain =
+                static_cast<int64_t>(rs.size()) - pre_out - cap_out;
+            if (prod.post < 0 || post_out > remain)
                 post_out = remain > 0 ? remain : 0;
         }
         const int64_t pred_out =
-            (native_pred >= 0) ? map_native(native_pred, taps.size()) : -1;
+            (prod.native_pred >= 0)
+                ? map_native(prod.native_pred, taps.size())
+                : -1;
 
         float iq_scale = 1.0f;
         if (opt.out_format == "sc16") {
@@ -580,7 +753,7 @@ int main(int argc, char** argv)
             { "capture_samples", gr::uwb::core::json_i64(cap_out) },
             { "post_guard_samples", gr::uwb::core::json_i64(post_out) },
             { "input_native_sample_count",
-              gr::uwb::core::json_i64(static_cast<int64_t>(n_native)) },
+              gr::uwb::core::json_i64(static_cast<int64_t>(prod.n_native)) },
         };
         if (w.capture_mode.size())
             fields.push_back(
@@ -591,17 +764,24 @@ int main(int argc, char** argv)
         if (!opt.skip_notch) {
             fields.push_back({ "tone_baseband_hz",
                                gr::uwb::core::json_f64(tone.baseband_hz) });
-            fields.push_back(
-                { "tone_coef_re", gr::uwb::core::json_f64(sub.coef.real()) });
-            fields.push_back(
-                { "tone_coef_im", gr::uwb::core::json_f64(sub.coef.imag()) });
+            fields.push_back({ "tone_coef_re",
+                               gr::uwb::core::json_f64(prod.sub.coef.real()) });
+            fields.push_back({ "tone_coef_im",
+                               gr::uwb::core::json_f64(prod.sub.coef.imag()) });
         }
         if (opt.out_format == "sc16")
             fields.push_back(
                 { "iq_scale", gr::uwb::core::json_f64(iq_scale) });
         gr::uwb::core::write_json_object(out_meta, fields);
         out_off += rs.size();
+        // Drop resampled IQ now that it is on disk.
+        prod.rs.clear();
+        prod.rs.shrink_to_fit();
+        prod.notch_native.clear();
+        prod.notch_native.shrink_to_fit();
     }
+    const double write_s =
+        std::chrono::duration<double>(Clock::now() - t_write0).count();
 
     out.flush();
     out_meta.flush();
@@ -619,5 +799,8 @@ int main(int argc, char** argv)
     }
     if (opt.keep_native_notch && notch_out.is_open())
         std::cout << "wrote " << notch_path << "\n";
+    std::cout << "timing read=" << read_s << "s compute=" << compute_s
+              << "s write=" << write_s << "s total="
+              << (read_s + compute_s + write_s) << "s\n";
     return 0;
 }

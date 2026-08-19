@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+using gr::uwb::core::correlate_cis;
 using gr::uwb::core::estimate_tone;
 using gr::uwb::core::RationalResampler65_48Core;
 using gr::uwb::core::subtract_tone;
@@ -78,6 +79,21 @@ BOOST_AUTO_TEST_CASE(test_estimate_known_cw)
     const auto est = estimate_tone(x.data(), n, kFs, lo, hi);
     // Last refine grid is ~140 Hz at n=16384; 200 Hz is within that bin.
     BOOST_CHECK_SMALL(est.baseband_hz - kTone, 200.0);
+}
+
+BOOST_AUTO_TEST_CASE(test_phasor_recurrence_matches_sincos)
+{
+    const size_t n = 8192;
+    auto x = tone_vec(n, kFs, kTone, { 80.0, 20.0 });
+    const double w = -2.0 * M_PI * kTone / kFs;
+    std::complex<double> brute(0.0, 0.0);
+    for (size_t k = 0; k < n; ++k) {
+        const double ph = w * static_cast<double>(k);
+        brute += x[k] * std::complex<double>(std::cos(ph), std::sin(ph));
+    }
+    const auto rec = correlate_cis(x.data(), n, w);
+    BOOST_REQUIRE(std::abs(brute) > 1.0);
+    BOOST_CHECK_SMALL(std::abs(rec - brute) / std::abs(brute), 1e-9);
 }
 
 BOOST_AUTO_TEST_CASE(test_subtract_suppresses_bin)
