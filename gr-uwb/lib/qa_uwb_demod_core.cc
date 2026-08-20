@@ -315,9 +315,8 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_symmetric_one_symbol_forward)
                                   sr, scratch));
     BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(75008));
     BOOST_CHECK_GE(sr.metric, 0.95f);
-    // One symbol LATER than nominal: the narrow ±32 fast path misses, so both
-    // narrow ±1-symbol fallback windows are evaluated (3 windows total).
-    BOOST_CHECK_EQUAL(sr.search_windows, 3u);
+    // One symbol later: ±64 at nominal misses, then +1 symbol hits (2 windows).
+    BOOST_CHECK_EQUAL(sr.search_windows, 2u);
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_symmetric_partial_train_backward)
@@ -348,15 +347,12 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_symmetric_partial_train_backward)
                                   sr, scratch));
     BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(75008));
     BOOST_CHECK_GE(sr.metric, 0.95f);
-    // One symbol EARLIER than nominal: the narrow ±32 fast path misses, so both
-    // narrow ±1-symbol fallback windows are evaluated (3 windows total).
+    // One symbol earlier: nominal miss, +1 miss, then -1 hits (3 windows).
     BOOST_CHECK_EQUAL(sr.search_windows, 3u);
 }
 
-BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_symmetric_bounded_forward)
+BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_recovers_four_symbol_forward)
 {
-    // The symmetric search is bounded at +-1 symbol (like MATLAB): an SFD two
-    // symbols forward of the nominal position must NOT be recovered.
     std::vector<gr_complex> iq, tmpl;
     BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
     BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
@@ -374,14 +370,14 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_symmetric_bounded_forward)
 
     const auto sfd_seq = GetSfdSequence("ieee");
     SfdResult sr;
-    BOOST_CHECK(!core::stage_sfd(iq.data(), iq.size(), prof, tr, sfd_seq, tmpl,
-                                 sr, scratch));
+    BOOST_REQUIRE(core::stage_sfd(iq.data(), iq.size(), prof, tr, sfd_seq, tmpl,
+                                  sr, scratch));
+    BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(75008));
+    BOOST_CHECK_GE(sr.metric, 0.95f);
 }
 
-BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_symmetric_bounded_backward)
+BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_recovers_four_symbol_backward)
 {
-    // Same +-1 bound on the earlier side: an SFD two symbols before the
-    // nominal position must not be recovered either.
     std::vector<gr_complex> iq, tmpl;
     BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
     BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
@@ -396,6 +392,54 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_symmetric_bounded_backward)
         peak += static_cast<int64_t>(2 * kQm35SamplesPerSymbol);
     tr.preamble_start_sample +=
         static_cast<int64_t>(2 * kQm35SamplesPerSymbol);
+
+    const auto sfd_seq = GetSfdSequence("ieee");
+    SfdResult sr;
+    BOOST_REQUIRE(core::stage_sfd(iq.data(), iq.size(), prof, tr, sfd_seq, tmpl,
+                                  sr, scratch));
+    BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(75008));
+    BOOST_CHECK_GE(sr.metric, 0.95f);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_bounded_five_symbol_forward)
+{
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+    TimingResult tr;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984, tr,
+                                     scratch));
+    for (auto& peak : tr.peak_samples)
+        peak -= static_cast<int64_t>(5 * kQm35SamplesPerSymbol);
+    tr.preamble_start_sample -=
+        static_cast<int64_t>(5 * kQm35SamplesPerSymbol);
+
+    const auto sfd_seq = GetSfdSequence("ieee");
+    SfdResult sr;
+    BOOST_CHECK(!core::stage_sfd(iq.data(), iq.size(), prof, tr, sfd_seq, tmpl,
+                                 sr, scratch));
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_bounded_five_symbol_backward)
+{
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+    TimingResult tr;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984, tr,
+                                     scratch));
+    for (auto& peak : tr.peak_samples)
+        peak += static_cast<int64_t>(5 * kQm35SamplesPerSymbol);
+    tr.preamble_start_sample +=
+        static_cast<int64_t>(5 * kQm35SamplesPerSymbol);
 
     const auto sfd_seq = GetSfdSequence("ieee");
     SfdResult sr;

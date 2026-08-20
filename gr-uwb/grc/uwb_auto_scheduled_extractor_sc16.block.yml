@@ -30,7 +30,7 @@ parameters:
 -   id: energy_threshold
     label: Energy threshold
     dtype: real
-    default: '0.001'
+    default: '0.02'
 -   id: energy_gate_decimation
     label: Energy gate decimation
     dtype: int

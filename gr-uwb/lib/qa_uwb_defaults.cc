@@ -100,6 +100,7 @@ BOOST_AUTO_TEST_CASE(test_defaults_production_values)
     BOOST_CHECK_CLOSE(gr::uwb::defaults::kSampleRateHz, 998400000.0, 1e-12);
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kDetectorPreTrigger, size_t(2032));
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kDetectorCapture, size_t(200000));
+    BOOST_CHECK_CLOSE(gr::uwb::defaults::kDetectorEnergyThreshold, 0.02f, 1e-6);
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kDetectorEnergyGateDecimation,
                       size_t(100));
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kDetectorCoarseDecimation, size_t(4));
@@ -150,7 +151,7 @@ BOOST_AUTO_TEST_CASE(test_grc_detector_defaults_match_header)
     const std::string yaml = read_file(grc_path("uwb_detector.block.yml"));
     BOOST_CHECK(yaml_default_equals(yaml, "pre_trigger", "2032"));
     BOOST_CHECK(yaml_default_equals(yaml, "capture_samples", "200000"));
-    BOOST_CHECK(yaml_default_equals(yaml, "energy_threshold", "0.001"));
+    BOOST_CHECK(yaml_default_equals(yaml, "energy_threshold", "0.02"));
     BOOST_CHECK(yaml_default_equals(yaml, "energy_gate_decimation", "100"));
     BOOST_CHECK(yaml_default_equals(yaml, "coarse_decimation", "4"));
     BOOST_CHECK(yaml_default_equals(yaml, "coarse_repetitions", "1"));
@@ -214,8 +215,21 @@ BOOST_AUTO_TEST_CASE(test_grc_auto_scheduled_extractor_sc16_native_defaults)
     BOOST_CHECK(yaml_default_equals(yaml, "lock_observations", "3"));
     BOOST_CHECK(yaml_default_equals(yaml, "holdover_miss_count", "3"));
     BOOST_CHECK(yaml_default_equals(yaml, "reacquire_miss_count", "8"));
+    BOOST_CHECK(yaml_default_equals(yaml, "energy_threshold", "0.02"));
     BOOST_CHECK(!yaml_has_param(yaml, "first_packet_sample"));
     BOOST_CHECK(yaml_make_contains(yaml, "make_from_file(${template_file}"));
     BOOST_CHECK(yaml.find("UwbAutoScheduledExtractorSc16::make_from_file") !=
                 std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(test_grc_pdu_window_crop_demod_defaults)
+{
+    const std::string yaml = read_file(grc_path("uwb_pdu_window_crop.block.yml"));
+    BOOST_CHECK(yaml_default_equals(yaml, "pre_samples", "7373"));
+    BOOST_CHECK(yaml_default_equals(yaml, "capture_samples", "140083"));
+    BOOST_CHECK(yaml_default_equals(yaml, "post_samples", "3023"));
+    BOOST_CHECK(yaml_make_contains(yaml, "${pre_samples}"));
+    BOOST_CHECK(yaml_make_contains(yaml, "${capture_samples}"));
+    BOOST_CHECK(yaml_make_contains(yaml, "${post_samples}"));
+    BOOST_CHECK(yaml.find("UwbPduWindowCrop::make") != std::string::npos);
 }

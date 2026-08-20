@@ -1,0 +1,50 @@
+id: uwb_pdu_window_crop
+label: UWB PDU Window Crop
+category: '[UWB]'
+
+parameters:
+-   id: pre_samples
+    label: Demod pre-guard (native samples)
+    dtype: int
+    default: '7373'
+-   id: capture_samples
+    label: Demod capture (native samples)
+    dtype: int
+    default: '140083'
+-   id: post_samples
+    label: Demod post-guard (native samples)
+    dtype: int
+    default: '3023'
+
+inputs:
+-   domain: message
+    id: packet
+    optional: true
+
+outputs:
+-   domain: message
+    id: packet
+    optional: true
+-   domain: message
+    id: status
+    optional: true
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.pdu_window_crop(${pre_samples}, ${capture_samples}, ${post_samples})
+
+cpp_templates:
+    includes: ['#include <gnuradio/uwb/uwb_pdu_window_crop.h>']
+    make: 'this->${id} = gr::uwb::UwbPduWindowCrop::make(${pre_samples}, ${capture_samples}, ${post_samples});'
+    link: ['gnuradio::gnuradio-uwb']
+
+documentation: |-
+    Crop a native-rate SC16/CF32 PDU to the QM35 demod window before 65/48.
+
+    Cuts [predicted_start − pre, predicted_start + capture + post) in the
+    input sample-rate domain.  Acquisition PDUs pass through so they are
+    not rewritten as a 300 µs dump head.  predicted_start_sample is not
+    remapped.  This is not the same as resampler CaptureOnly, which still
+    runs FIR on the full input.
+
+file_format: 1

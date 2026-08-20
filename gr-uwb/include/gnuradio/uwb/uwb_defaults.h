@@ -26,7 +26,9 @@ inline constexpr double kSampleRateHz = 998400000.0;
 // UwbDetector / UwbDetectorSc16 production capture geometry.
 inline constexpr size_t kDetectorPreTrigger = 2032;
 inline constexpr size_t kDetectorCapture = 200000;
-inline constexpr float kDetectorEnergyThreshold = 1e-3f;
+// Normalized mean |x|^2 vs full-scale.  Live X410 @6489.6 MHz / 60 dB has a
+// CW floor around 1.2e-3, so 1e-3 never closes the acquire gate.
+inline constexpr float kDetectorEnergyThreshold = 0.02f;
 inline constexpr size_t kDetectorEnergyGateDecimation = 100;
 inline constexpr size_t kDetectorCoarseDecimation = 4;
 inline constexpr size_t kDetectorCoarseRepetitions = 1;

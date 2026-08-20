@@ -18,6 +18,7 @@ install(FILES
     uwb_rfnoc_upsampler.block.yml
     uwb_rational_resampler_ccf_65_48.block.yml
     uwb_pdu_rational_resampler_ccf_65_48.block.yml
+    uwb_pdu_window_crop.block.yml
     DESTINATION share/gnuradio/grc/blocks
 )
 

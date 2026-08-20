@@ -26,6 +26,7 @@
 #include <gnuradio/uwb/uwb_auto_scheduled_extractor_sc16.h>
 #include <gnuradio/uwb/uwb_rational_resampler_ccf_65_48.h>
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>
+#include <gnuradio/uwb/uwb_pdu_window_crop.h>
 
 namespace py = pybind11;
 
@@ -396,6 +397,8 @@ void bind_auto_scheduled_extractor_sc16(py::module& m)
         .def("scheduled_windows", &Blk::scheduled_windows)
         .def("emitted_windows", &Blk::emitted_windows)
         .def("dropped_windows", &Blk::dropped_windows)
+        .def("pool_drops", &Blk::pool_drops)
+        .def("queue_full_drops", &Blk::queue_full_drops)
         .def("stale_feedback", &Blk::stale_feedback)
         .def("unmapped_feedback", &Blk::unmapped_feedback)
         .def("discontinuities", &Blk::discontinuities)
@@ -542,6 +545,36 @@ void bind_pdu_rational_resampler_ccf_65_48(py::module& m)
         .def("reset_stats", &Blk::reset_stats);
 }
 
+void bind_pdu_window_crop(py::module& m)
+{
+    using Blk = gr::uwb::UwbPduWindowCrop;
+    py::class_<Blk, gr::block, std::shared_ptr<Blk>>(m, "pdu_window_crop")
+        .def(py::init(&Blk::make),
+             py::arg("pre_samples") =
+                 gr::uwb::defaults::kNativeScheduledPreGuard,
+             py::arg("capture_samples") =
+                 gr::uwb::defaults::kNativeScheduledCapture,
+             py::arg("post_samples") =
+                 gr::uwb::defaults::kNativeScheduledPostGuard)
+        .def("pre_samples", &Blk::pre_samples)
+        .def("capture_samples", &Blk::capture_samples)
+        .def("post_samples", &Blk::post_samples)
+        .def("set_geometry",
+             &Blk::set_geometry,
+             py::arg("pre"),
+             py::arg("capture"),
+             py::arg("post"))
+        .def("pdus_received", &Blk::pdus_received)
+        .def("pdus_emitted", &Blk::pdus_emitted)
+        .def("pdus_passthrough", &Blk::pdus_passthrough)
+        .def("pdus_cropped", &Blk::pdus_cropped)
+        .def("pdus_clamped", &Blk::pdus_clamped)
+        .def("pdus_dropped", &Blk::pdus_dropped)
+        .def("total_input_samples", &Blk::total_input_samples)
+        .def("total_output_samples", &Blk::total_output_samples)
+        .def("reset_stats", &Blk::reset_stats);
+}
+
 // We need this hack because import_array() returns NULL
 // for newer Python versions.
 // This function is also necessary because it ensures access to the C API
@@ -571,4 +604,5 @@ PYBIND11_MODULE(uwb_python, m)
     bind_realtime_demodulator(m);
     bind_rational_resampler_ccf_65_48(m);
     bind_pdu_rational_resampler_ccf_65_48(m);
+    bind_pdu_window_crop(m);
 }

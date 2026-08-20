@@ -602,20 +602,12 @@ inline bool stage_sfd(const std::complex<float>* rx,
     gr::uwb::core::uwb_l2_normalize(scratch.corr);
     const size_t sfd_len = scratch.corr.size();
 
-    // Search center = one measured period after the last tracked SYNC START
-    // (NOT the fixed preamble_repetitions * period extrapolation), so SFO and
-    // a partial SYNC train are handled.  The schedule lock + timing fixes keep
-    // the SFD position accurate to ~±1 sample, so we search a narrow ±32-sample
-    // window first (fast path) and fall back to the wide ± samples_per_symbol
-    // sweep only when timing landed a whole symbol late (rare).  The wide
-    // half-width covers an SFD that sits up to one symbol earlier or later than
-    // the nominal position (e.g. a partial preamble train, or a preamble start
-    // a few SYNCs into the frame).
     // MATLAB strategy (refineTimingWithNsSfd): SFD start = preamble start +
     // preamble_repetitions × measured_period.  This is physically correct even
     // when the trailing preamble SYNC(s) score below the acquisition threshold
-    // and are not tracked (partial train) — exactly the case where the old
-    // "last_tracked_peak + period" extrapolation landed one symbol early.
+    // and are not tracked (partial train).
+    // Live search: ±64-sample narrow window at that center, then the same
+    // narrow window at ±1..±4 symbol offsets if the nominal center misses.
     const int64_t period =
         (timing.measured_period > 0.0)
             ? static_cast<int64_t>(std::llround(timing.measured_period))
@@ -631,7 +623,8 @@ inline bool stage_sfd(const std::complex<float>* rx,
     // loop only accumulates the correlation.  The result (best_j, metric) is
     // identical to the exhaustive search for a unique peak.
     constexpr size_t kSfdStride = 8;
-    constexpr int64_t kSfdNarrowHalf = 32;
+    constexpr int64_t kSfdNarrowHalf = 64;
+    constexpr int kSfdSymbolOffsets = 4;
     float best = -1.0f;
     size_t best_j = 0;
 
@@ -704,16 +697,15 @@ inline bool stage_sfd(const std::complex<float>* rx,
         return window_best >= profile.sfd_detection_threshold;
     };
 
-    // MATLAB-style symmetric ±1-symbol search, run narrow-first.  The schedule
-    // lock + timing keep the SFD position accurate to ~±1 sample, so a narrow
-    // ±32-sample scan_window finds it ~99% of the time (fast path).  If that
-    // window does not pass, probe the two possible one-symbol offsets with the
-    // same narrow search.  This avoids scanning the whole ±symbol interval.
     scan_window(expected, kSfdNarrowHalf, 0);
-    if (best < profile.sfd_detection_threshold)
-    {
-        scan_window(expected + static_cast<int64_t>(sym), kSfdNarrowHalf, 1);
-        scan_window(expected - static_cast<int64_t>(sym), kSfdNarrowHalf, 1);
+    for (int k = 1; k <= kSfdSymbolOffsets &&
+                    best < profile.sfd_detection_threshold;
+         ++k) {
+        const int64_t step = static_cast<int64_t>(k) * static_cast<int64_t>(sym);
+        scan_window(expected + step, kSfdNarrowHalf, k);
+        if (best >= profile.sfd_detection_threshold)
+            break;
+        scan_window(expected - step, kSfdNarrowHalf, k);
     }
     if (best < profile.sfd_detection_threshold)
         return false;

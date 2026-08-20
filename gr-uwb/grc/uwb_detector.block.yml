@@ -21,7 +21,7 @@ parameters:
     label: Energy threshold
     dtype: real
     # matches gr::uwb::defaults::kDetectorEnergyThreshold
-    default: '0.001'
+    default: '0.02'
 -   id: energy_gate_decimation
     label: Energy gate decimation
     dtype: int

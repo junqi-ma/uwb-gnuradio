@@ -95,8 +95,8 @@ struct Qm35825Profile {
     // QM35 SC16 stride sweep: 14 was the fastest tested zero-miss setting;
     // 16 missed 13/99 scheduled packets due to phase aliasing.
     size_t timing_coarse_stride = 14;
-    // Backtrack limit also bounds the SFD early-window scan (stage_sfd), so a
-    // seed landing anywhere within the first N preamble SYNCs still decodes.
+    // Timing backtrack limit (SYNC grid).  SFD itself now probes ±4 symbols
+    // around preamble_start + 64×period with a ±64-sample narrow window.
     // Real QM35825 captures seed from an energy/schedule detector that can land
     // several SYNCs into the preamble (5-8 common); the previous 3 was too tight
     // and made otherwise-valid packets fail SFD.

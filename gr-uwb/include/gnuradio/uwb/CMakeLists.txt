@@ -26,5 +26,9 @@ install(FILES
     uwb_rational_resampler_core.h
     uwb_rational_resampler_ccf_65_48.h
     uwb_pdu_rational_resampler_ccf_65_48.h
+    uwb_window_crop_core.h
+    uwb_pdu_window_crop.h
+    uwb_tone_canceller.h
+    uwb_scheduled_dump_io.h
     DESTINATION include/gnuradio/uwb
 )

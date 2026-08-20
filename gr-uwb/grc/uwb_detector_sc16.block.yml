@@ -7,7 +7,7 @@ parameters:
 # Production geometry defaults match gr::uwb::defaults::*
 - {id: pre_trigger, label: Pre-trigger samples, dtype: int, default: '2032'}
 - {id: capture_samples, label: Capture samples, dtype: int, default: '200000'}
-- {id: energy_threshold, label: Normalized energy threshold, dtype: real, default: '0.001'}
+- {id: energy_threshold, label: Normalized energy threshold, dtype: real, default: '0.02'}
 - {id: energy_gate_decimation, label: Energy gate decimation, dtype: int, default: '100'}
 - {id: coarse_decimation, label: Coarse decimation, dtype: int, default: '4'}
 - {id: coarse_repetitions, label: Coarse repetitions, dtype: int, default: '1'}
