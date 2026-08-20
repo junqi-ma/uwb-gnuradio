@@ -414,7 +414,7 @@ void bind_realtime_demodulator(py::module& m)
         m, "realtime_demodulator")
         .def(py::init(&gr::uwb::UwbRealtimeDemodulator::make),
              py::arg("template_path"),
-             py::arg("num_workers") = size_t(2),
+             py::arg("num_workers") = size_t(4),
              py::arg("queue_capacity") = size_t(64),
              py::arg("sfd_mode") = std::string("4z2"),
              py::arg("cir_rake_top_k") = size_t(0),
@@ -425,7 +425,7 @@ void bind_realtime_demodulator(py::module& m)
         .def_static("make_from_template",
                     &gr::uwb::UwbRealtimeDemodulator::make_from_template,
                     py::arg("template_wf"),
-                    py::arg("num_workers") = size_t(2),
+                    py::arg("num_workers") = size_t(4),
                     py::arg("queue_capacity") = size_t(64),
                     py::arg("sfd_mode") = std::string("4z2"),
                     py::arg("cir_rake_top_k") = size_t(0),
@@ -511,7 +511,7 @@ void bind_pdu_rational_resampler_ccf_65_48(py::module& m)
     py::class_<Blk, gr::block, std::shared_ptr<Blk>>(
         m, "pdu_rational_resampler_ccf_65_48")
         .def(py::init(&Blk::make),
-             py::arg("taps_file_or_profile") = std::string("quality_minorder"),
+             py::arg("taps_file_or_profile") = std::string("realtime_minorder"),
              py::arg("output_sample_rate") = Blk::kOutputRateHz,
              py::arg("validate_input_rate") = true,
              py::arg("emit_policy") = Blk::EmitPolicy::FullWindow)

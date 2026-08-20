@@ -18,7 +18,7 @@ without a live UwbRealtimeDemodulator.
   usrp_source SC16 @737.28
     -> UwbAutoScheduledExtractorSc16
          --output: 590 µs native dump window
-           -> Writer (capture.iq, no 65/48)
+           -> Writer (DIR/<dump-name>.iq, no 65/48)
            -> UwbPduWindowCrop 10/190/4.1 µs
                 -> PDU 65/48 -> UwbRealtimeDemodulator
          no dump: extractor already emits the short demod window
@@ -27,7 +27,7 @@ without a live UwbRealtimeDemodulator.
 
 --output only opens the Writer.  It must not enlarge the FIR window.
 After a 0-drop dump, uwb_offline_postprocess_dump notches each window
-and upsamples to 998.4 SC16 without overwriting capture.iq.
+and upsamples to 998.4 SC16 without overwriting the raw dump IQ.
 """
 from __future__ import annotations
 
@@ -75,6 +75,13 @@ POST = 3023
 # to PRE/CAPTURE/POST before 65/48; do not send this window into the resampler.
 PRE_DW = 221184
 POST_DW = 73728
+# Stream slack at 737.28 MS/s SC16 (4 B/sample):
+#   GR min_output_buffer 4M items ≈ 5.7 ms / 16 MiB between usrp_source
+#   and the extractor.  Default GR buffer is ~8k items.
+#   UHD recv 512 MiB ≈ 183 ms of host UDP/kernel capture.
+GR_MIN_OUTPUT_ITEMS = 4 * 1048576
+GR_MAX_NOUTPUT_ITEMS = 1048576
+UHD_RECV_BUFF_SIZE = 512 * 1024 * 1024
 
 
 def parser():
@@ -109,8 +116,12 @@ def parser():
                    help="dump post-guard when --output is set (default 73728)")
     p.add_argument(
         "--output", default="",
-        help="write native 737.28 SC16 dump windows to DIR/capture.iq; "
-             "does not enlarge the 65/48 FIR window")
+        help="write native 737.28 SC16 dump windows to DIR/<dump-name>.iq; "
+             "a path ending in .iq sets both directory and name")
+    p.add_argument(
+        "--dump-name", "--base-name", default="", dest="dump_name",
+        help="dump file base name (default capture → capture.iq / "
+             "capture.jsonl).  Suffix .iq is stripped.")
     p.add_argument("--skip-postprocess", action="store_true",
                    help="do not run uwb_offline_postprocess_dump after dump")
     p.add_argument("--postprocess-bin", default="",
@@ -120,7 +131,7 @@ def parser():
                    default="loopback")
     p.add_argument("--seconds", type=float, default=0.0,
                    help="live capture duration; 0 = 15 s on x410, else until EOS")
-    p.add_argument("--workers", type=int, default=2,
+    p.add_argument("--workers", type=int, default=4,
                    help="UwbRealtimeDemodulator worker count")
     p.add_argument("--energy-threshold", type=float, default=0.02)
     p.add_argument("--cir-filter-mode", default="bypass")
@@ -165,6 +176,35 @@ def load_cf32(path):
     return x if n <= 0 else (x / n).astype(np.complex64)
 
 
+def dump_base_name(name, default="capture"):
+    text = (name or "").strip().replace("\\", "/")
+    text = os.path.basename(text)
+    lower = text.lower()
+    for ext in (".iq", ".jsonl", ".cf32", ".cfile"):
+        if lower.endswith(ext):
+            text = text[: -len(ext)]
+            break
+    text = text.strip()
+    if not text or text in (".", ".."):
+        text = default
+    if any(c in text for c in "/\\"):
+        raise ValueError(f"invalid dump name {name!r}")
+    return text
+
+
+def resolve_dump_output(output, dump_name):
+    """Return (directory, base_name).  Empty directory means no writer."""
+    output = (output or "").strip()
+    if not output:
+        return "", dump_base_name(dump_name)
+    lower = output.lower()
+    if lower.endswith(".iq") or lower.endswith(".jsonl"):
+        directory = os.path.dirname(os.path.abspath(output)) or os.getcwd()
+        stem = dump_base_name(dump_name or output)
+        return directory, stem
+    return os.path.abspath(output), dump_base_name(dump_name)
+
+
 def resolve_geometry(a, write_dir):
     demod_pre = a.demod_pre if a.demod_pre > 0 else a.pre_guard
     demod_cap = a.demod_capture if a.demod_capture > 0 else a.capture
@@ -201,7 +241,7 @@ def find_postprocess_bin(explicit):
     return shutil.which("uwb_offline_postprocess_dump") or ""
 
 
-def run_offline_postprocess(write_dir, explicit_bin):
+def run_offline_postprocess(write_dir, explicit_bin, dump_base="capture"):
     print()
     print("=== Offline postprocess (notch + 65/48) ===")
     bin_path = find_postprocess_bin(explicit_bin)
@@ -209,23 +249,24 @@ def run_offline_postprocess(write_dir, explicit_bin):
         print("  FAIL: uwb_offline_postprocess_dump not found "
               "(build gr-uwb/apps or pass --postprocess-bin)")
         return 2
+    base = dump_base_name(dump_base)
     cmd = [bin_path, write_dir, "--tone-rf-hz", "6256.640e6",
-           "--out-format", "sc16"]
+           "--out-format", "sc16", "--base-name", base]
     print("  " + " ".join(cmd), flush=True)
     try:
         rc = subprocess.call(cmd)
     except OSError as e:
         print(f"  FAIL: could not exec {bin_path}: {e}")
         return 2
-    out = os.path.join(write_dir, "capture_998p4.iq")
-    meta = os.path.join(write_dir, "capture_998p4.jsonl")
+    out = os.path.join(write_dir, f"{base}_998p4.iq")
+    meta = os.path.join(write_dir, f"{base}_998p4.jsonl")
     if rc != 0:
         print(f"  FAIL: postprocess exit {rc}")
         return rc
     if not os.path.isfile(out) or not os.path.isfile(meta):
         print(f"  FAIL: missing {out} or {meta}")
         return 2
-    print(f"  raw unchanged: {os.path.join(write_dir, 'capture.iq')}")
+    print(f"  raw unchanged: {os.path.join(write_dir, base + '.iq')}")
     print(f"  wrote {out}")
     print(f"  wrote {meta}")
     return 0
@@ -475,7 +516,7 @@ class PacketTap:
 
 
 class OverflowToControl:
-    """UHD 4.6 overflow is async-only; forward it as control disc."""
+    """UHD 4.6 overflow is async-only (uhd_async_msg); forward as control disc."""
 
     def __init__(self, extractor):
         from gnuradio import gr
@@ -585,8 +626,26 @@ def _normalize_x410_args(args):
     """
     text = (args or "addr=192.168.10.2").strip()
     if "recv_buff_size" not in text:
-        text = text + ",recv_buff_size=250000000"
+        text = text + f",recv_buff_size={UHD_RECV_BUFF_SIZE}"
     return text
+
+
+def apply_live_stream_buffers(src, tb):
+    """Enlarge the usrp_source → extractor ring; cap work() at 1M items."""
+    src.set_max_output_buffer(0, -1)
+    src.set_min_output_buffer(0, GR_MIN_OUTPUT_ITEMS)
+    src.set_max_noutput_items(GR_MAX_NOUTPUT_ITEMS)
+    tb.set_max_noutput_items(GR_MAX_NOUTPUT_ITEMS)
+    print(
+        f"gr min_output_buffer={GR_MIN_OUTPUT_ITEMS} items "
+        f"({GR_MIN_OUTPUT_ITEMS / RADIO_RATE * 1e3:.2f} ms, "
+        f"{GR_MIN_OUTPUT_ITEMS * 4 / (1024 * 1024):.1f} MiB SC16)  "
+        f"max_noutput={GR_MAX_NOUTPUT_ITEMS}  "
+        f"uhd recv_buff_size={UHD_RECV_BUFF_SIZE} "
+        f"({UHD_RECV_BUFF_SIZE / (1024 * 1024):.0f} MiB, "
+        f"{UHD_RECV_BUFF_SIZE / (RADIO_RATE * 4) * 1e3:.0f} ms)",
+        flush=True,
+    )
 
 
 def run_x410_live(a, tmpl_path):
@@ -599,7 +658,7 @@ def run_x410_live(a, tmpl_path):
     tmpl737 = load_cf32(tmpl_path)
     seconds = a.seconds if a.seconds > 0 else 15.0
     dev_args = _normalize_x410_args(a.args)
-    write_dir = (a.output or "").strip()
+    write_dir, dump_base = resolve_dump_output(a.output, a.dump_name)
 
     print(f"GNU Radio {gr.version()}")
     print(f"compiler={platform.python_compiler()} cpu={platform.processor() or platform.machine()}")
@@ -608,6 +667,8 @@ def run_x410_live(a, tmpl_path):
     print(f"rf freq={a.frequency:.1f} gain={a.gain} antenna={a.antenna}")
     print(f"identity={a.identity} duration_s={seconds:.1f} "
           f"{'(native SC16 dump)' if write_dir else '(no disk writer)'}")
+    if write_dir:
+        print(f"dump_iq={os.path.join(write_dir, dump_base + '.iq')}")
 
     src = uhd.usrp_source(
         dev_args,
@@ -642,7 +703,7 @@ def run_x410_live(a, tmpl_path):
     ext_post = geom["dump_post"] if write_dir else demod_post
     if write_dir:
         os.makedirs(write_dir, exist_ok=True)
-        print(f"write_sc16={write_dir}  "
+        print(f"write_sc16={os.path.join(write_dir, dump_base + '.iq')}  "
               f"dump_head={ext_pre/RADIO_RATE*1e6:.1f} us  "
               f"dump_body={ext_cap/RADIO_RATE*1e6:.1f} us  "
               f"dump_tail={ext_post/RADIO_RATE*1e6:.1f} us  "
@@ -658,12 +719,13 @@ def run_x410_live(a, tmpl_path):
     ovf = OverflowToControl(ext)
     tb = gr.top_block("x410_auto_live_demod")
     tb.connect(src, ext)
+    apply_live_stream_buffers(src, tb)
     tb.msg_connect(src, "async_msgs", ovf.blk, "async_msgs")
     writer = None
     pkt_tap = PacketTap()
     tb.msg_connect(ext, "packet", pkt_tap.blk, "packet")
     if write_dir:
-        writer = uwb.packet_writer(write_dir, "capture", False)
+        writer = uwb.packet_writer(write_dir, dump_base, False)
         tb.msg_connect(ext, "packet", writer, "packet")
 
     demod = None
@@ -677,7 +739,7 @@ def run_x410_live(a, tmpl_path):
         tmpl998 = load_cf32(tmpl998_path)
         print(f"template_998={tmpl998_path} n={tmpl998.size} "
               f"workers={a.workers} cir={a.cir_filter_mode}")
-        resampler = uwb.pdu_rational_resampler_ccf_65_48("quality_minorder")
+        resampler = uwb.pdu_rational_resampler_ccf_65_48("realtime_minorder")
         demod = uwb.realtime_demodulator.make_from_template(
             tmpl998.tolist(),
             max(1, int(a.workers)),
@@ -730,7 +792,7 @@ def run_x410_live(a, tmpl_path):
         return 0 if fn is None else fn
 
     t0 = time.time()
-    tb.start(1048576)
+    tb.start(GR_MAX_NOUTPUT_ITEMS)
     last = 0.0
     t_energy = t_cand = t_ident = t_prov = t_lock = None
     try:
@@ -833,7 +895,7 @@ def run_x410_live(a, tmpl_path):
           f"unmapped={ext.unmapped_feedback()} "
           f"disc={ext.discontinuities()} ovf_async={ovf.overflows}")
     if writer is not None:
-        print(f"writer dir={write_dir} "
+        print(f"writer dir={write_dir} base={dump_base} "
               f"recv={writer.packets_received()} "
               f"written={writer.packets_written()} "
               f"dropped={writer.packets_dropped()} "
@@ -940,7 +1002,8 @@ def run_x410_live(a, tmpl_path):
             write_demod_results(demod_jsonl, pkt_tap.rows, tap.rows)
             print(f"wrote {demod_jsonl} ({len(tap.rows)} rows)")
         if dump_ok and write_dir and not a.skip_postprocess:
-            post_rc = run_offline_postprocess(write_dir, a.postprocess_bin)
+            post_rc = run_offline_postprocess(
+                write_dir, a.postprocess_bin, dump_base)
         elif dump_ok and a.skip_postprocess:
             print("=== Offline postprocess skipped (--skip-postprocess) ===")
     if not dump_ok:

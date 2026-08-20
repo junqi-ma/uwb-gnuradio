@@ -28,7 +28,8 @@
  *   stream tag — the X410 app must forward async overflow on "control".
  *
  * Hot path: acquisition energy/core XOR scheduled bulk-skip/copy.  Never
- * nest another GNU Radio block's work().
+ * nest another GNU Radio block's work().  Live work() grants (>=64k) never
+ * wait for the acquire verifier; at most one verify is queued per QM35 slot.
  */
 
 #pragma once
@@ -192,9 +193,13 @@ private:
     void scan_rx_time_tags(int nitems);
     void handle_discontinuity(const char* reason);
     void enqueue_ready_jobs();
+    void skip_acquire_region(
+        UwbDetectorStateMachineSc16::RegionHandle handle);
     void worker_loop();
     void shutdown_worker();
     void wait_for_worker_idle();
+    void drain_pending_obs();
+    void reset_acquire_throttle();
     void publish_acquisition(UwbDetectorStateMachineSc16::RegionHandle handle);
     void publish_scheduled(core::ScheduledWindowCore::WindowHandle handle);
     void publish_status(const std::string& event, pmt::pmt_t extra = pmt::PMT_NIL);
@@ -213,6 +218,9 @@ private:
     size_t d_acq_pre_ = defaults::kDetectorPreTrigger;
     size_t d_acq_cap_ = defaults::kDetectorCapture;
     double d_prov_guard_us_ = defaults::kProvisionalGuardUs;
+    uint64_t d_period_samples_ = 0;
+    uint64_t d_next_acquire_abs_ = 0;
+    size_t d_acquire_outstanding_ = 0;
 
     uint64_t d_current_sample_ = 0;
     uint64_t d_packet_id_ = 0;

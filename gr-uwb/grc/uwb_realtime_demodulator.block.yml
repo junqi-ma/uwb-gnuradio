@@ -10,7 +10,7 @@ parameters:
 -   id: num_workers
     label: Num workers
     dtype: int
-    default: '2'
+    default: '4'
 -   id: queue_capacity
     label: Queue capacity
     dtype: int

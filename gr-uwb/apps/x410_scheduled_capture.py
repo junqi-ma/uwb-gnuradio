@@ -7,6 +7,7 @@ never performs this resampling: it receives fc32 at 998.4 MS/s from an RFNoC
 RxStreamer and immediately runs the scheduled extractor.
 """
 import argparse
+import os
 import signal
 import sys
 
@@ -36,7 +37,10 @@ def parser():
     p.add_argument("--pre-guard", type=int, default=9984)
     p.add_argument("--capture", type=int, default=189696)
     p.add_argument("--post-guard", type=int, default=4096)
-    p.add_argument("--output", required=True)
+    p.add_argument("--output", required=True,
+                   help="output directory, or path ending in .iq")
+    p.add_argument("--dump-name", "--base-name", default="", dest="dump_name",
+                   help="dump file base name (default capture)")
     p.add_argument("--dry-run", action="store_true")
     return p
 
@@ -86,7 +90,17 @@ def main():
         HOST_RATE, a.packet_interval, a.first_packet_sample,
         a.pre_guard, a.capture, a.post_guard, 16,
         uwb.scheduled_extractor.EmitPolicy.EverySlot, False)
-    writer = uwb.packet_writer(a.output, "capture", False)
+    out = a.output
+    dump_base = (a.dump_name or "capture").strip() or "capture"
+    if out.lower().endswith(".iq") or out.lower().endswith(".jsonl"):
+        dump_base = (a.dump_name or os.path.splitext(os.path.basename(out))[0]
+                     ).strip() or "capture"
+        if dump_base.lower().endswith(".iq"):
+            dump_base = dump_base[:-3]
+        out = os.path.dirname(os.path.abspath(out)) or os.getcwd()
+    os.makedirs(out, exist_ok=True)
+    writer = uwb.packet_writer(out, dump_base, False)
+    print(f"dump_iq={os.path.join(out, dump_base + '.iq')}")
     tb = gr.top_block("x410_uwb_scheduled_capture")
     tb.connect(streamer, ext)
     tb.msg_connect(ext, "packet", writer, "packet")

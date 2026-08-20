@@ -58,7 +58,7 @@ blocks:
   states: {coordinate: [736, 128], rotation: 0, state: enabled}
 - name: uwb_pdu_rational_resampler_ccf_65_48_0
   id: uwb_pdu_rational_resampler_ccf_65_48
-  parameters: {output_sample_rate: resampled_rate, taps_file_or_profile: '"quality_minorder"', validate_input_rate: 'True'}
+  parameters: {output_sample_rate: resampled_rate, taps_file_or_profile: '"realtime_minorder"', validate_input_rate: 'True'}
   states: {coordinate: [976, 128], rotation: 0, state: enabled}
 - name: uwb_packet_writer_0
   id: uwb_packet_writer

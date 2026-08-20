@@ -78,7 +78,7 @@ public:
      *                        probes; 1 disables coarse decimation.
      */
     static sptr make(const std::string& template_path,
-                     size_t num_workers = 2,
+                     size_t num_workers = 4,
                      size_t queue_capacity = 64,
                      const std::string& sfd_mode = "4z2",
                      size_t cir_rake_top_k = 0,
@@ -91,7 +91,7 @@ public:
      * Same as make(), but takes an in-memory CF32 template waveform.
      */
     static sptr make_from_template(const std::vector<gr_complex>& template_wf,
-                                   size_t num_workers = 2,
+                                   size_t num_workers = 4,
                                    size_t queue_capacity = 64,
                                    const std::string& sfd_mode = "4z2",
                                    size_t cir_rake_top_k = 0,

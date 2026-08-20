@@ -13,9 +13,11 @@
 #include <gnuradio/io_signature.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace gr {
@@ -115,7 +117,9 @@ UwbAutoScheduledExtractorSc16::UwbAutoScheduledExtractorSc16(
       d_post_(post_guard_samples),
       d_acq_pre_(acquire_pre_trigger),
       d_acq_cap_(acquire_capture),
-      d_prov_guard_us_(provisional_guard_us)
+      d_prov_guard_us_(provisional_guard_us),
+      d_period_samples_(static_cast<uint64_t>(
+          std::llround(packet_interval_s * sample_rate)))
 {
     if (sample_rate <= 0.0 || packet_interval_s <= 0.0) {
         throw std::invalid_argument(
@@ -130,6 +134,8 @@ UwbAutoScheduledExtractorSc16::UwbAutoScheduledExtractorSc16(
         throw std::invalid_argument(
             "UwbAutoScheduledExtractorSc16: known_preamble is empty");
     }
+    if (d_period_samples_ == 0)
+        d_period_samples_ = 1;
 
     set_max_noutput_items(1048576);
     message_port_register_out(pmt::mp("packet"));
@@ -518,6 +524,7 @@ void UwbAutoScheduledExtractorSc16::apply_pending()
     if (do_reset) {
         enqueue_ready_jobs();
         wait_for_worker_idle();
+        reset_acquire_throttle();
         sm_.reset();
         sched_.reset();
         {
@@ -704,6 +711,7 @@ void UwbAutoScheduledExtractorSc16::handle_discontinuity(const char* reason)
 {
     enqueue_ready_jobs();
     wait_for_worker_idle();
+    reset_acquire_throttle();
     {
         std::lock_guard<std::mutex> lock(d_cfg_mutex_);
         tracker_.note_discontinuity();
@@ -724,6 +732,20 @@ void UwbAutoScheduledExtractorSc16::handle_discontinuity(const char* reason)
     d_last_applied_state_ = LockState::Reacquire;
 }
 
+void UwbAutoScheduledExtractorSc16::reset_acquire_throttle()
+{
+    std::lock_guard<std::mutex> lock(d_job_mutex_);
+    d_acquire_outstanding_ = 0;
+    d_next_acquire_abs_ = 0;
+}
+
+void UwbAutoScheduledExtractorSc16::skip_acquire_region(
+    UwbDetectorStateMachineSc16::RegionHandle handle)
+{
+    sm_.release_region(handle);
+    d_rejected_.fetch_add(1, std::memory_order_relaxed);
+}
+
 void UwbAutoScheduledExtractorSc16::enqueue_ready_jobs()
 {
     while (sm_.region_ready()) {
@@ -733,18 +755,29 @@ void UwbAutoScheduledExtractorSc16::enqueue_ready_jobs()
             tracker_.state() == LockState::Locked) {
             d_energy_after_lock_.fetch_add(1, std::memory_order_relaxed);
         }
+        const uint64_t start_abs = sm_.region(handle).start_abs;
         bool queued = false;
+        bool rate_limited = false;
         {
             std::lock_guard<std::mutex> lock(d_job_mutex_);
-            if (d_job_count_ < kJobQueueSize) {
+            // At most one acquire verify in flight, and at most one per
+            // known QM35 slot, so work() can keep consuming 737.28 MS/s.
+            if (d_acquire_outstanding_ > 0 ||
+                start_abs < d_next_acquire_abs_) {
+                rate_limited = true;
+            } else if (d_job_count_ < kJobQueueSize) {
                 d_job_queue_[d_job_tail_] = { JobKind::Acquisition, handle };
                 d_job_tail_ = (d_job_tail_ + 1) % kJobQueueSize;
                 ++d_job_count_;
+                ++d_acquire_outstanding_;
+                d_next_acquire_abs_ = start_abs + d_period_samples_;
                 queued = true;
             }
         }
         if (queued) {
             d_job_cv_.notify_one();
+        } else if (rate_limited) {
+            skip_acquire_region(handle);
         } else {
             sm_.release_region(handle);
             d_queue_full_.fetch_add(1, std::memory_order_relaxed);
@@ -807,13 +840,10 @@ int UwbAutoScheduledExtractorSc16::work(int noutput_items,
     }
 
     enqueue_ready_jobs();
-    // While acquiring, let the worker publish the candidate so lock_obs can
-    // land before the next chunk.  Locked scheduled mode never waits.
-    if (tracker_.energy_path_active())
+    // Live X410 grants ~1M items; never stall usrp_source on verify.
+    // QA / tiny buffers (<< 64k) still wait so lock_obs can land mid-stream.
+    if (tracker_.energy_path_active() && consumed < 65536)
         wait_for_worker_idle();
-    // Apply obs/control posted by this chunk's PDUs on the chunk boundary.
-    // After a discontinuity this is what drops queued demod-shaped lock_obs
-    // before they can re-confirm the dead native t0.
     apply_pending();
     if (noutput_items == 1) {
         wait_for_worker_idle();
@@ -826,6 +856,8 @@ bool UwbAutoScheduledExtractorSc16::start()
 {
     std::lock_guard<std::mutex> lock(d_job_mutex_);
     d_job_head_ = d_job_tail_ = d_job_count_ = d_jobs_in_flight_ = 0;
+    d_acquire_outstanding_ = 0;
+    d_next_acquire_abs_ = 0;
     d_worker_stop_ = false;
     d_worker_ = std::thread(&UwbAutoScheduledExtractorSc16::worker_loop, this);
     publish_status("acquisition_started");
@@ -838,9 +870,7 @@ bool UwbAutoScheduledExtractorSc16::stop()
     sm_.flush_region();
     sched_.flush_eos();
     enqueue_ready_jobs();
-    wait_for_worker_idle();
-    // PDUs flushed above may have posted disc / demod-shaped lock_obs.
-    apply_pending();
+    drain_pending_obs();
     shutdown_worker();
     return true;
 }
@@ -881,6 +911,8 @@ void UwbAutoScheduledExtractorSc16::worker_loop()
         {
             std::lock_guard<std::mutex> lock(d_job_mutex_);
             --d_jobs_in_flight_;
+            if (job.kind == JobKind::Acquisition && d_acquire_outstanding_ > 0)
+                --d_acquire_outstanding_;
         }
         d_job_cv_.notify_all();
     }
@@ -904,6 +936,18 @@ void UwbAutoScheduledExtractorSc16::wait_for_worker_idle()
     d_job_cv_.wait(lock, [this] {
         return d_job_count_ == 0 && d_jobs_in_flight_ == 0;
     });
+}
+
+void UwbAutoScheduledExtractorSc16::drain_pending_obs()
+{
+    wait_for_worker_idle();
+    apply_pending();
+    // Demod / test loopback post lock_obs from a subscriber thread after
+    // message_port_pub returns; give those handlers a turn at EOS.
+    for (int i = 0; i < 16; ++i) {
+        std::this_thread::sleep_for(std::chrono::microseconds(250));
+        apply_pending();
+    }
 }
 
 void UwbAutoScheduledExtractorSc16::publish_status(const std::string& event,
@@ -935,12 +979,16 @@ void UwbAutoScheduledExtractorSc16::publish_acquisition(
 {
     const auto& region = sm_.region(handle);
     const size_t n = region.samples.size();
-    if (n == 0)
+    if (n == 0) {
+        d_rejected_.fetch_add(1, std::memory_order_relaxed);
         return;
+    }
     const auto vr = verifier_.verify(
         region.samples.data(), n, region.candidate_offset);
-    if (!vr.confirmed)
+    if (!vr.confirmed) {
+        d_rejected_.fetch_add(1, std::memory_order_relaxed);
         return;
+    }
 
     const uint64_t packet_start =
         region.start_abs + static_cast<uint64_t>(vr.start_offset);

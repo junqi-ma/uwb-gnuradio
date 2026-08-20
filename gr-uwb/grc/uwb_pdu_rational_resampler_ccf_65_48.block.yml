@@ -6,7 +6,7 @@ parameters:
 -   id: taps_file_or_profile
     label: Taps file / profile
     dtype: string
-    default: 'quality_minorder'
+    default: 'realtime_minorder'
     # "quality" | "realtime" | "quality_minorder" | "realtime_minorder" | path
 -   id: output_sample_rate
     label: Output sample rate
@@ -49,7 +49,7 @@ documentation: |-
 
         map(p) = round((p*65 + (T-1)/2)/48)
 
-    Default taps profile is quality_minorder (2707 taps, relative −70 dB).
+    Default taps profile is realtime_minorder (1319 taps, H=21, relative −70 dB).
     Continuous stream resampling is not real-time on host; use this block
     after scheduled native-rate capture (see 分析与下阶段建议 §3.2).
 

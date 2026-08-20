@@ -7,7 +7,7 @@
  * Offline process: scheduled SC16 dump → per-window notch → 65/48 @998.4.
  *
  * Not a GNU Radio block.  No UHD.  Reuses RationalResampler65_48Core.
- * Never overwrites DIR/capture.iq.
+ * Never overwrites DIR/<base>.iq.
  */
 
 #include <gnuradio/uwb/uwb_defaults.h>
@@ -60,6 +60,7 @@ struct Options {
     std::string emit = "full";
     std::string taps = "quality_minorder";
     std::string out_format = "sc16";
+    std::string base_name = "capture";
     bool skip_notch = false;
     bool keep_native_notch = false;
     bool dry_run = false;
@@ -77,8 +78,9 @@ void usage(const char* argv0)
         << "  --emit full|qm35\n"
         << "  --taps quality_minorder|PATH\n"
         << "  --out-format sc16|cf32  default sc16 (Writer contract)\n"
+        << "  --base-name NAME        dump stem (default capture → NAME.iq)\n"
         << "  --skip-notch\n"
-        << "  --keep-native-notch     also write capture_notch.iq\n"
+        << "  --keep-native-notch     also write NAME_notch.iq\n"
         << "  --workers N             window-level pool (0=auto, cap "
         << kAutoWorkerCap << ")\n"
         << "  --dry-run\n";
@@ -117,6 +119,8 @@ bool parse_args(int argc, char** argv, Options& o)
             o.taps = need("--taps");
         else if (a == "--out-format")
             o.out_format = need("--out-format");
+        else if (a == "--base-name" || a == "--dump-name")
+            o.base_name = need("--base-name");
         else if (a == "--skip-notch")
             o.skip_notch = true;
         else if (a == "--keep-native-notch")
@@ -161,6 +165,38 @@ std::string join_path(const std::string& dir, const std::string& name)
     if (dir.back() == '/')
         return dir + name;
     return dir + "/" + name;
+}
+
+std::string dump_base_name(std::string s)
+{
+    if (s.empty())
+        return "capture";
+    const auto slash = s.find_last_of("/\\");
+    if (slash != std::string::npos)
+        s = s.substr(slash + 1);
+    auto strip_ext = [&](const char* ext) {
+        const size_t n = std::strlen(ext);
+        if (s.size() < n)
+            return;
+        bool eq = true;
+        for (size_t i = 0; i < n; ++i) {
+            char c = s[s.size() - n + i];
+            if (c >= 'A' && c <= 'Z')
+                c = static_cast<char>(c - 'A' + 'a');
+            if (c != ext[i]) {
+                eq = false;
+                break;
+            }
+        }
+        if (eq)
+            s.resize(s.size() - n);
+    };
+    strip_ext(".jsonl");
+    strip_ext(".cf32");
+    strip_ext(".iq");
+    if (s.empty() || s == "." || s == "..")
+        return "capture";
+    return s;
 }
 
 bool file_ok(const std::string& path)
@@ -443,8 +479,9 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    const std::string iq_path = join_path(opt.dir, "capture.iq");
-    const std::string jsonl_path = join_path(opt.dir, "capture.jsonl");
+    opt.base_name = dump_base_name(opt.base_name);
+    const std::string iq_path = join_path(opt.dir, opt.base_name + ".iq");
+    const std::string jsonl_path = join_path(opt.dir, opt.base_name + ".jsonl");
     const std::string demod_path = join_path(opt.dir, "demod_results.jsonl");
     if (!file_ok(iq_path) || !file_ok(jsonl_path)) {
         std::cerr << "need " << iq_path << " and " << jsonl_path << "\n";
@@ -462,7 +499,7 @@ int main(int argc, char** argv)
         return 1;
     }
     if (windows.empty()) {
-        std::cerr << "empty capture.jsonl\n";
+        std::cerr << "empty " << jsonl_path << "\n";
         return 1;
     }
     if (opt.select == "fcs_pass" && demod.empty()) {
@@ -572,10 +609,12 @@ int main(int argc, char** argv)
 
     const std::string out_iq =
         join_path(opt.dir,
-                  opt.out_format == "sc16" ? "capture_998p4.iq"
-                                           : "capture_998p4.cf32");
-    const std::string out_jsonl = join_path(opt.dir, "capture_998p4.jsonl");
-    const std::string notch_path = join_path(opt.dir, "capture_notch.iq");
+                  opt.out_format == "sc16" ? opt.base_name + "_998p4.iq"
+                                           : opt.base_name + "_998p4.cf32");
+    const std::string out_jsonl =
+        join_path(opt.dir, opt.base_name + "_998p4.jsonl");
+    const std::string notch_path =
+        join_path(opt.dir, opt.base_name + "_notch.iq");
     std::ofstream out(out_iq, std::ios::binary | std::ios::trunc);
     std::ofstream out_meta(out_jsonl, std::ios::trunc);
     std::ofstream notch_out;

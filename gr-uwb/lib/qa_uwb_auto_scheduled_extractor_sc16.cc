@@ -802,6 +802,61 @@ BOOST_AUTO_TEST_CASE(test_pool_queue_full_does_not_block_stream)
     (void)ext->dropped_windows();
 }
 
+BOOST_AUTO_TEST_CASE(test_unconfirmed_region_counts_rejected)
+{
+    constexpr size_t n = 20000;
+    auto tmpl = make_tmpl(32, 0x11111111U);
+    std::vector<int16_t> iq(n * 2, 0);
+    for (size_t k = 0; k < 8; ++k)
+        put_comm(iq, 1500 + k * 1800, 400, 0xabcdef00U + static_cast<uint32_t>(k));
+
+    auto ext = gr::uwb::UwbAutoScheduledExtractorSc16::make(
+        tmpl, kFs, static_cast<double>(4000) / kFs,
+        32, 256, 16, 1e-5f, 4, 4, 1, 8, 2, 3, 8, 10.0, 32, 256, 4);
+    auto r = drive(ext, iq, 2048, {});
+    BOOST_CHECK(r.pdus.empty());
+    BOOST_CHECK_EQUAL(ext->candidates_emitted(), 0u);
+    BOOST_CHECK_GT(ext->energy_regions(), 0u);
+    BOOST_CHECK_GT(ext->candidates_rejected(), 0u);
+    BOOST_CHECK_GE(ext->current_sample(), n - 4);
+}
+
+BOOST_AUTO_TEST_CASE(test_acquire_one_verify_per_slot)
+{
+    constexpr size_t L = 32;
+    constexpr size_t t0 = 2000;
+    constexpr size_t period = 8000;
+    constexpr size_t n = t0 + 5 * period + 1000;
+    auto tmpl = make_tmpl(L, 0x22222222U);
+    std::vector<int16_t> iq(n * 2, 0);
+    for (size_t k = 0; k < 4; ++k) {
+        put_packet(iq, tmpl, t0 + k * period, 6);
+        put_comm(iq, t0 + k * period + 2000, 500,
+                 0xfeed0000U + static_cast<uint32_t>(k));
+    }
+
+    auto ext = gr::uwb::UwbAutoScheduledExtractorSc16::make(
+        tmpl, kFs, static_cast<double>(period) / kFs,
+        32, 256, 16, 1e-5f, 4, 4, 1, 8, 2, 3, 8, 10.0, 32, 256, 4);
+    auto on_pdu = [&](gr::uwb::UwbAutoScheduledExtractorSc16::sptr e,
+                      const PduView& v,
+                      const RunResult&) {
+        if (v.capture_mode == "acquisition") {
+            e->post_lock_obs(identity_obs(
+                v.start_sample, v.epoch, v.generation, true, "success"));
+        } else {
+            e->post_lock_obs(identity_obs(
+                v.predicted, v.epoch, v.generation, true, "success", kFs,
+                static_cast<int64_t>(v.predicted), v.schedule_index));
+        }
+    };
+    auto r = drive(ext, iq, 2048, on_pdu);
+    BOOST_CHECK(!r.pdus.empty());
+    BOOST_CHECK_GE(ext->current_sample(), n - 4);
+    BOOST_CHECK_GT(ext->energy_regions(), ext->candidates_emitted());
+    BOOST_CHECK_GT(ext->candidates_rejected(), 0u);
+}
+
 BOOST_AUTO_TEST_CASE(test_native_reference_template_detects_placed_start)
 {
     const std::string path =

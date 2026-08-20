@@ -65,7 +65,7 @@ public:
      *        is not ~737.28e6 and publish status "bad_input_rate".
      * \param emit_policy           FullWindow (default) or CaptureOnly.
      */
-    static sptr make(const std::string& taps_file_or_profile = "quality_minorder",
+    static sptr make(const std::string& taps_file_or_profile = "realtime_minorder",
                      double output_sample_rate = kOutputRateHz,
                      bool validate_input_rate = true,
                      EmitPolicy emit_policy = EmitPolicy::FullWindow);

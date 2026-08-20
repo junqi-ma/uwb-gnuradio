@@ -194,8 +194,11 @@ def parser():
     ap.add_argument("--cir-filter-mode", default="bypass")
     ap.add_argument(
         "--write-sc16", default="", metavar="DIR",
-        help="write native 737.28 SC16 dump windows to DIR/capture.iq; "
-             "does not enlarge the 65/48 FIR window")
+        help="write native 737.28 SC16 dump windows to DIR/<dump-name>.iq; "
+             "a path ending in .iq sets both directory and name")
+    ap.add_argument(
+        "--dump-name", "--base-name", default="", dest="dump_name",
+        help="dump file base name (default capture)")
     ap.add_argument("--dump-pre", type=int, default=0,
                     help="dump pre-guard samples (default 221184 = 300 µs)")
     ap.add_argument("--dump-capture", type=int, default=0,
@@ -221,6 +224,32 @@ def parser():
     ap.add_argument("--postprocess-bin", default="",
                     help="path to uwb_offline_postprocess_dump")
     return ap
+
+
+def dump_base_name(name, default="capture"):
+    text = (name or "").strip().replace("\\", "/")
+    text = os.path.basename(text)
+    lower = text.lower()
+    for ext in (".iq", ".jsonl", ".cf32", ".cfile"):
+        if lower.endswith(ext):
+            text = text[: -len(ext)]
+            break
+    text = text.strip()
+    if not text or text in (".", ".."):
+        text = default
+    return text
+
+
+def resolve_dump_output(output, dump_name):
+    output = (output or "").strip()
+    if not output:
+        return "", dump_base_name(dump_name)
+    lower = output.lower()
+    if lower.endswith(".iq") or lower.endswith(".jsonl"):
+        directory = os.path.dirname(os.path.abspath(output)) or os.getcwd()
+        stem = dump_base_name(dump_name or output)
+        return directory, stem
+    return os.path.abspath(output), dump_base_name(dump_name)
 
 
 def resolve_geometry(args, write_dir):
@@ -340,7 +369,7 @@ def main():
         n_stream = min(n_complex, int(round(args.max_seconds * FS737)))
     stream_s = n_stream / FS737
 
-    write_dir = args.write_sc16.strip()
+    write_dir, dump_base = resolve_dump_output(args.write_sc16, args.dump_name)
     geom = resolve_geometry(args, write_dir)
     ext_pre = geom["dump_pre"] if write_dir else geom["demod_pre"]
     ext_cap = geom["dump_cap"] if write_dir else geom["demod_cap"]
@@ -362,7 +391,7 @@ def main():
           f"demod_crop=[{demod_pre},{demod_cap},{demod_post}]  "
           f"acquire=[{ACQ_PRE},{ACQ_CAP}]")
     if write_dir:
-        print(f"write_sc16={write_dir}  "
+        print(f"write_sc16={os.path.join(write_dir, dump_base + '.iq')}  "
               f"dump_head={ext_pre/FS737*1e6:.1f} us  "
               f"dump_body={ext_cap/FS737*1e6:.1f} us  "
               f"dump_tail={ext_post/FS737*1e6:.1f} us  "
@@ -444,7 +473,7 @@ def main():
     tb.msg_connect(ext, "status", clock, "status")
     if write_dir:
         os.makedirs(write_dir, exist_ok=True)
-        writer = uwb.packet_writer(write_dir, "capture", False)
+        writer = uwb.packet_writer(write_dir, dump_base, False)
         tb.msg_connect(ext, "packet", writer, "packet")
 
     print("starting flowgraph (no t0 seed)...", flush=True)
@@ -747,7 +776,8 @@ def main():
     if write_dir:
         dump_ok = verify_sc16_dump(
             dat, write_dir, n_stream, writer,
-            geom["dump_pre"], geom["dump_cap"], geom["dump_post"])
+            geom["dump_pre"], geom["dump_cap"], geom["dump_post"],
+            dump_base)
         if dump_ok and crop is not None:
             dump_ok = verify_crop_to_demod(
                 dbg_crop, demod_n, demod_pre, demod_cap, demod_post)
@@ -756,7 +786,8 @@ def main():
         print(f"  wrote {demod_jsonl} ({len(results)} rows)")
         if dump_ok and not args.skip_postprocess:
             post_rc = run_offline_postprocess(
-                write_dir, args.postprocess_bin, args.no_notch_tone)
+                write_dir, args.postprocess_bin, args.no_notch_tone,
+                dump_base)
         elif dump_ok and args.skip_postprocess:
             print()
             print("=== Offline postprocess skipped (--skip-postprocess) ===")
@@ -783,9 +814,11 @@ def main():
     return 1
 
 
-def verify_sc16_dump(dat, write_dir, n_stream, writer, pre, cap, post):
-    iq_path = os.path.join(write_dir, "capture.iq")
-    jsonl_path = os.path.join(write_dir, "capture.jsonl")
+def verify_sc16_dump(dat, write_dir, n_stream, writer, pre, cap, post,
+                     dump_base="capture"):
+    base = dump_base_name(dump_base)
+    iq_path = os.path.join(write_dir, base + ".iq")
+    jsonl_path = os.path.join(write_dir, base + ".jsonl")
     print()
     print("=== Native SC16 dump check ===")
     if writer is not None:
@@ -902,7 +935,8 @@ def verify_crop_to_demod(dbg_crop, demod_n, demod_pre, demod_cap, demod_post):
     return ok
 
 
-def run_offline_postprocess(write_dir, explicit_bin, skip_notch):
+def run_offline_postprocess(write_dir, explicit_bin, skip_notch,
+                            dump_base="capture"):
     print()
     print("=== Offline postprocess (notch + 65/48) ===")
     bin_path = find_postprocess_bin(explicit_bin)
@@ -910,8 +944,9 @@ def run_offline_postprocess(write_dir, explicit_bin, skip_notch):
         print("  FAIL: uwb_offline_postprocess_dump not found "
               "(build gr-uwb/apps or pass --postprocess-bin)")
         return 2
+    base = dump_base_name(dump_base)
     cmd = [bin_path, write_dir, "--tone-rf-hz", "6256.640e6",
-           "--out-format", "sc16"]
+           "--out-format", "sc16", "--base-name", base]
     if skip_notch:
         cmd.append("--skip-notch")
     print("  " + " ".join(cmd), flush=True)
@@ -920,9 +955,9 @@ def run_offline_postprocess(write_dir, explicit_bin, skip_notch):
     except OSError as e:
         print(f"  FAIL: could not exec {bin_path}: {e}")
         return 2
-    raw = os.path.join(write_dir, "capture.iq")
-    out = os.path.join(write_dir, "capture_998p4.iq")
-    meta = os.path.join(write_dir, "capture_998p4.jsonl")
+    raw = os.path.join(write_dir, base + ".iq")
+    out = os.path.join(write_dir, base + "_998p4.iq")
+    meta = os.path.join(write_dir, base + "_998p4.jsonl")
     if rc != 0:
         print(f"  FAIL: postprocess exit {rc}")
         return rc
