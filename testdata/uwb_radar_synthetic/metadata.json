@@ -1,0 +1,127 @@
+{
+  "byte_order": "little-endian",
+  "cir": {
+    "algorithm": "estimateCir.m (skip, coherent average, forward sampled_code, /code_energy)",
+    "c_m_per_s": 299792458.0,
+    "code_energy": 64.0,
+    "demod_8_30": {
+      "note": "delay_int peak at pre+37 is outside post=30; 8/30 delay_int CIR is exported for demod-window comparison only",
+      "peak_tap_expected_clean": 8,
+      "peak_tap_measured_clean": 10,
+      "peak_tap_measured_delay_int": 7,
+      "post": 30,
+      "pre": 8,
+      "tap_count": 38
+    },
+    "radar": {
+      "peak_tap_expected_clean": 16,
+      "peak_tap_expected_delay_int": 53,
+      "peak_tap_measured_clean": 18,
+      "peak_tap_measured_delay_int": 55,
+      "post": 100,
+      "pre": 16,
+      "pulse_shape_offset_note": "sampled_code is unshaped; the HRP pulse peak is ~2 samples later, so measured clean peak is typically pre+2",
+      "tap_count": 116,
+      "valid_repetitions_clean": 54,
+      "valid_repetitions_delay_int": 54
+    },
+    "radar_max_range_m": 15.0,
+    "range_m_per_tap": 0.15013644731570513,
+    "repetitions_used": 54,
+    "sampled_code_length": 1016,
+    "skip_initial_repetitions": 10
+  },
+  "code_index": 9,
+  "coordinates_0based": {
+    "rx_clean_998p4": {
+      "sfd_start": 67021,
+      "sync_origin": 1997
+    },
+    "rx_delay_int_998p4": {
+      "sfd_start": 67058,
+      "sync_origin": 2034
+    },
+    "tx_998p4": {
+      "sfd_start": 65024,
+      "sync_origin": 0
+    }
+  },
+  "delay_frac": {
+    "gain_mag": 0.55,
+    "gain_phase_rad": -1.1,
+    "interpolation": "cubic_spline_ndimage_order3",
+    "samples": 12.4
+  },
+  "delay_int": {
+    "gain_mag": 0.4,
+    "gain_phase_rad": 0.7,
+    "samples": 37
+  },
+  "description": "UWB monostatic-radar golden: IEEE 802.15.4z BPRF / HRP code 9, 64 SYNC, 4z2 SFD, full packet at 998.4 MS/s and one-shot 48/65 native 737.28 MS/s. Python splices 4z2 onto the existing IEEE-SFD packet; MATLAB lrwpanWaveformGenerator is the generator of record.",
+  "dtype": "complex64",
+  "files": {
+    "cir_norm_clean_8_30.cf32": 38,
+    "cir_norm_clean_radar.cf32": 116,
+    "cir_norm_delay_int_8_30.cf32": 38,
+    "cir_norm_delay_int_radar.cf32": 116,
+    "cir_raw_clean_8_30.cf32": 38,
+    "cir_raw_clean_radar.cf32": 116,
+    "cir_raw_delay_int_8_30.cf32": 38,
+    "cir_raw_delay_int_radar.cf32": 116,
+    "rx_clean_998p4.cf32": 262541,
+    "rx_delay_frac_998p4.cf32": 262541,
+    "rx_delay_int_998p4.cf32": 262541,
+    "tx_737p28.cf32": 189377,
+    "tx_998p4.cf32": 256448
+  },
+  "generator": "generate_uwb_radar_golden.py",
+  "layout": "interleaved_iq",
+  "matlab_reference": "testdata/uwb_radar/export_uwb_radar_golden.m",
+  "note": "MATLAB lrwpanWaveformGenerator is the generator of record when Communications Toolbox is available. This Python fallback splices 4z2 (kron(sfd, first SYNC)) onto the existing IEEE-SFD packet and keeps the original PHR+PSDU. Native TX is resample_poly of the entire packet (48/65, Kaiser 5); do not repeat a 751-sample single-SYNC template. Native packet is not L2-normalized.",
+  "peak_amplitude": 0.8,
+  "python_source_cfile": "uwb_code9_preamble64_payload128_standard_sfd.cfile",
+  "python_source_packet_start_0based": 4992000,
+  "python_source_rng_seed": 20260807,
+  "rate_native_hz": 737280000.0,
+  "rate_work_hz": 998400000.0,
+  "resample": {
+    "decim": 65,
+    "group_delay_domain": "native_737p28",
+    "group_delay_samples": 10.0,
+    "half_length": 10,
+    "interp": 48,
+    "ntaps": 1301,
+    "window": [
+      "kaiser",
+      5.0
+    ]
+  },
+  "rng_seed": 20260904,
+  "rx_window": {
+    "cfo_hz": 0.0,
+    "length_998p4": 262541,
+    "pre_guard_s": 2e-06,
+    "pre_guard_samples": 1997,
+    "tail_samples": 4096
+  },
+  "sample_index_base": 0,
+  "samples_per_symbol": 1016,
+  "sfd_mode": "4z2",
+  "sfd_sequence": [
+    -1,
+    -1,
+    -1,
+    1,
+    -1,
+    -1,
+    1,
+    -1
+  ],
+  "sync_repetitions": 64,
+  "tx_737p28_energy": 4743.141728438256,
+  "tx_737p28_peak": 0.855924129486084,
+  "tx_998p4_energy": 6416.940927493574,
+  "tx_998p4_peak": 0.800000011920929,
+  "tx_length_737p28": 189377,
+  "tx_length_998p4": 256448
+}

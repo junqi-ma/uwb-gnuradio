@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Generate UWB monostatic-radar TX/RX/CIR golden files (Python fallback).
+"""Synthetic UWB radar fixture (NOT the canonical TX golden).
 
-MATLAB Communications Toolbox `lrwpanWaveformGenerator` (see
-export_uwb_radar_golden.m) is the generator of record.  This script is
-what this machine can actually run: it splices a 4z2 SFD onto the
-existing IEEE-SFD code-9 packet rather than synthesizing PHR/PSDU.
+Canonical goldens live in testdata/uwb_radar/ and are produced by
+export_uwb_radar_golden.m. This script writes only
+testdata/uwb_radar_synthetic/ and must never overwrite the MATLAB packet.
+
+It splices a 4z2 SFD onto the existing IEEE-SFD code-9 test cfile.
 
 Native TX is one-shot 48/65 resample of the *entire* packet.  Do not
 repeat the 751-sample native one-SYNC detector template — the true
