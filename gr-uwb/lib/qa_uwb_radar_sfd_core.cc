@@ -521,19 +521,41 @@ BOOST_AUTO_TEST_CASE(test_radar_sfd_optional_golden)
     const std::string json = oss.str();
 
     double fs = 998.4e6;
-    parse_json_number(json, "sample_rate", fs);
+    if (!parse_json_number(json, "rate_work_hz", fs))
+        parse_json_number(json, "sample_rate", fs);
     if (std::abs(fs - 998.4e6) > 1.0) {
-        BOOST_TEST_MESSAGE("skipping golden: sample_rate is not 998.4e6");
+        BOOST_TEST_MESSAGE("skipping golden: work rate is not 998.4e6");
         return;
     }
 
+    // Prefer the RX-window coordinate; a naive "sfd_start" scan can hit the
+    // TX-packet origin (0-based 65024) which is 1997 samples before the
+    // embedded SFD in rx_clean_998p4.cf32.
     double sfd_start_d = -1.0;
-    const bool got_start =
-        parse_json_number(json, "sfd_start_sample", sfd_start_d) ||
-        parse_json_number(json, "sfd_start_0based", sfd_start_d) ||
-        parse_json_number(json, "sfd_start", sfd_start_d);
+    bool got_start = false;
+    const auto rx_key = json.find("\"rx_clean_998p4\"");
+    if (rx_key != std::string::npos) {
+        const std::string pat = "\"sfd_start\"";
+        auto pos = json.find(pat, rx_key);
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos + pat.size());
+            if (pos != std::string::npos) {
+                try {
+                    size_t idx = 0;
+                    sfd_start_d = std::stod(json.substr(pos + 1), &idx);
+                    got_start = idx > 0;
+                } catch (...) {
+                    got_start = false;
+                }
+            }
+        }
+    }
+    if (!got_start) {
+        got_start = parse_json_number(json, "sfd_start_sample", sfd_start_d) ||
+                    parse_json_number(json, "sfd_start_0based", sfd_start_d);
+    }
     BOOST_REQUIRE_MESSAGE(got_start,
-                          "golden metadata.json has no SFD start field");
+                          "golden metadata.json has no rx_clean SFD start");
     const int64_t truth = static_cast<int64_t>(std::llround(sfd_start_d));
 
     std::vector<gr_complex> rx;
