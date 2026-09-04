@@ -17,6 +17,10 @@
 - [`phase1/X410_RFNoC入口与写盘测试.md`](phase1/X410_RFNoC入口与写盘测试.md)
 - [`phase1/当前信号检测逻辑.md`](phase1/当前信号检测逻辑.md)
 - [`phase1/对照报告_QM35_MATLAB与GNURadio离线解调.md`](phase1/对照报告_QM35_MATLAB与GNURadio离线解调.md)
+- [`phase1/开发需求_UWB自发自收Radar.md`](phase1/开发需求_UWB自发自收Radar.md)（`feature/uwb-monostatic-radar`，待审批）
+- [`phase1/开发计划_UWB自发自收Radar.md`](phase1/开发计划_UWB自发自收Radar.md)
+- [`phase1/开发报告_UWB自发自收Radar_Step1-2.md`](phase1/开发报告_UWB自发自收Radar_Step1-2.md)（Step 1–2，Codex 整改复验）
+- [`phase1/Review_UWB自发自收Radar_Step1-2.md`](phase1/Review_UWB自发自收Radar_Step1-2.md)
 
 ## 性能分析与实验记录
 
