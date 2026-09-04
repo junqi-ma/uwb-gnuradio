@@ -31,5 +31,8 @@ install(FILES
     uwb_tone_canceller.h
     uwb_scheduled_dump_io.h
     uwb_radar_sfd_core.h
+    uwb_radar_cir_estimator.h
+    uwb_radar_timing_core.h
+    uwb_radar_cir_core.h
     DESTINATION include/gnuradio/uwb
 )
