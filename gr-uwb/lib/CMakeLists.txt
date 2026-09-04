@@ -95,6 +95,7 @@ list(APPEND test_uwb_sources
     qa_uwb_pdu_window_crop.cc
     qa_uwb_tone_canceller.cc
     qa_uwb_scheduled_dump_io.cc
+    qa_uwb_radar_sfd_core.cc
 )
 # Anything we need to link to for the unit tests go here
 list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks)
@@ -119,3 +120,6 @@ target_compile_definitions(uwb_qa_uwb_defaults.cc PRIVATE
 target_compile_definitions(uwb_qa_uwb_auto_scheduled_extractor_sc16.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\""
     "UWB_APP_DIR=\"${CMAKE_SOURCE_DIR}/apps\"")
+
+target_compile_definitions(uwb_qa_uwb_radar_sfd_core.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")

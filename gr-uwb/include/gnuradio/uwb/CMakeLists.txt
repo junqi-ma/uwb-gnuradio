@@ -30,5 +30,6 @@ install(FILES
     uwb_pdu_window_crop.h
     uwb_tone_canceller.h
     uwb_scheduled_dump_io.h
+    uwb_radar_sfd_core.h
     DESTINATION include/gnuradio/uwb
 )
