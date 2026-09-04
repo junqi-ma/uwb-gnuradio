@@ -983,7 +983,7 @@ BOOST_AUTO_TEST_CASE(test_x410_app_forwards_uhd_overflow)
     const std::string src = ss.str();
     BOOST_CHECK(src.find("async_msgs") != std::string::npos);
     BOOST_CHECK(src.find("overflows") != std::string::npos);
-    BOOST_CHECK(src.find("uhd_async_msg") != std::string::npos);
+    BOOST_CHECK(src.find("uhd_overflow_to_control") != std::string::npos);
     BOOST_CHECK(src.find("discontinuity") != std::string::npos);
     BOOST_CHECK(src.find("post_control") != std::string::npos);
 }
