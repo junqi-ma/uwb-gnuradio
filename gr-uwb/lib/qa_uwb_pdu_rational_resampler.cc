@@ -21,6 +21,7 @@
 #include <gnuradio/blocks/vector_source.h>
 #include <gnuradio/top_block.h>
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>
+#include <gnuradio/uwb/uwb_radar_pdu_meta.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
 #include <gnuradio/uwb/uwb_realtime_demodulator.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor.h>
@@ -34,6 +35,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -840,4 +842,379 @@ BOOST_AUTO_TEST_CASE(test_pdu_resampler_throughput_sanity)
     BOOST_CHECK_GT(headroom_200, 2.0);
     // FIR sample throughput should be meaningful (tens of MS/s+).
     BOOST_CHECK_GT(in_msps, 50.0);
+}
+
+int64_t meta_i64(pmt::pmt_t d, const char* key, int64_t def = -1)
+{
+    return gr::uwb::radar_meta::to_i64(
+        pmt::dict_ref(d, pmt::mp(key), pmt::from_long(def)), def);
+}
+
+double meta_f64(pmt::pmt_t d, const char* key, double def = 0.0)
+{
+    return gr::uwb::radar_meta::to_f64(
+        pmt::dict_ref(d, pmt::mp(key), pmt::from_double(def)), def);
+}
+
+std::string meta_sym(pmt::pmt_t d, const char* key)
+{
+    pmt::pmt_t v = pmt::dict_ref(d, pmt::mp(key), pmt::PMT_NIL);
+    if (pmt::is_symbol(v))
+        return pmt::symbol_to_string(v);
+    return {};
+}
+
+pmt::pmt_t radar_window_meta(pmt::pmt_t base,
+                             size_t sync_reps,
+                             int64_t sync_native,
+                             int64_t sfd_native,
+                             int64_t pred_sfd)
+{
+    pmt::pmt_t meta = base;
+    meta = pmt::dict_add(meta, pmt::mp("pulse_id"), pmt::from_uint64(42));
+    meta = pmt::dict_add(meta, pmt::mp("schedule_index"), pmt::from_uint64(7));
+    meta = pmt::dict_add(meta, pmt::mp("tx_time_full"), pmt::from_uint64(3));
+    meta = pmt::dict_add(meta, pmt::mp("tx_time_frac"), pmt::from_double(0.25));
+    meta = pmt::dict_add(meta, pmt::mp("rx_time_full"), pmt::from_uint64(3));
+    meta = pmt::dict_add(meta, pmt::mp("rx_time_frac"), pmt::from_double(0.248));
+    meta = pmt::dict_add(meta, pmt::mp("num_delay_samps"), pmt::from_long(11));
+    meta = pmt::dict_add(meta, pmt::mp("calibration_delay_native_samples"),
+                         pmt::from_double(12.4));
+    meta = pmt::dict_add(meta, pmt::mp("calibration_id"), pmt::mp("cal0"));
+    meta = pmt::dict_add(meta, pmt::mp("sync_repetitions"),
+                         pmt::from_long(static_cast<long>(sync_reps)));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_mode"), pmt::mp("4z2"));
+    meta = pmt::dict_add(meta, pmt::mp("code_index"), pmt::from_long(9));
+    meta = pmt::dict_add(meta, pmt::mp("uhd_error"), pmt::mp("none"));
+    meta = pmt::dict_add(meta, pmt::mp("source"), pmt::mp("loopback"));
+    meta = pmt::dict_add(meta, pmt::mp("sync_samples"),
+                         pmt::from_long(sync_native));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_samples"),
+                         pmt::from_long(sfd_native));
+    meta = pmt::dict_add(meta, pmt::mp("range_guard_samples"),
+                         pmt::from_long(74));
+    meta = pmt::dict_add(meta, pmt::mp("tx_packet_samples"),
+                         pmt::from_long(140982));
+    meta = pmt::dict_add(meta, pmt::mp("rx_capture_samples"),
+                         pmt::from_long(55650));
+    meta = pmt::dict_add(meta, pmt::mp("predicted_sfd_start_sample"),
+                         pmt::from_long(pred_sfd));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_start_sample"),
+                         pmt::from_long(pred_sfd + 3));
+    meta = pmt::dict_add(meta, pmt::mp("preamble_start_sample"),
+                         pmt::from_long(pred_sfd - sync_native));
+    return meta;
+}
+
+void check_radar_whitelist(UwbPduRationalResamplerCcf65_48::sptr blk,
+                           pmt::pmt_t mo,
+                           int64_t sync_native,
+                           int64_t sfd_native,
+                           int64_t pred_sfd,
+                           size_t sync_reps)
+{
+    auto mapped_index = [&](int64_t p) {
+        return blk->map_input_offset_to_output(p);
+    };
+    auto mapped_len = [&](int64_t n) {
+        return blk->map_input_offset_to_output(n) -
+               blk->map_input_offset_to_output(0);
+    };
+
+    BOOST_CHECK_EQUAL(meta_i64(mo, "pulse_id"), 42);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "schedule_index"), 7);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "tx_time_full"), 3);
+    BOOST_CHECK_CLOSE(meta_f64(mo, "tx_time_frac"), 0.25, 1e-12);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "rx_time_full"), 3);
+    BOOST_CHECK_CLOSE(meta_f64(mo, "rx_time_frac"), 0.248, 1e-12);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "num_delay_samps"), 11);
+    BOOST_CHECK_CLOSE(meta_f64(mo, "calibration_delay_native_samples"),
+                      12.4, 1e-12);
+    BOOST_CHECK_CLOSE(meta_f64(mo, "calibration_delay_work_samples"),
+                      12.4 * 65.0 / 48.0, 1e-9);
+    BOOST_CHECK_EQUAL(meta_sym(mo, "calibration_id"), std::string("cal0"));
+    BOOST_CHECK_EQUAL(meta_i64(mo, "sync_repetitions"),
+                      static_cast<int64_t>(sync_reps));
+    BOOST_CHECK_EQUAL(meta_sym(mo, "sfd_mode"), std::string("4z2"));
+    BOOST_CHECK_EQUAL(meta_i64(mo, "code_index"), 9);
+    BOOST_CHECK_EQUAL(meta_sym(mo, "uhd_error"), std::string("none"));
+    BOOST_CHECK_EQUAL(meta_sym(mo, "source"), std::string("loopback"));
+
+    BOOST_CHECK_EQUAL(meta_i64(mo, "sync_samples_native"), sync_native);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "sync_samples"), mapped_len(sync_native));
+    BOOST_CHECK_EQUAL(meta_i64(mo, "sfd_samples_native"), sfd_native);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "sfd_samples"), mapped_len(sfd_native));
+    BOOST_CHECK_EQUAL(meta_i64(mo, "range_guard_samples_native"), 74);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "range_guard_samples"), mapped_len(74));
+    BOOST_CHECK_EQUAL(meta_i64(mo, "tx_packet_samples_native"), 140982);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "tx_packet_samples"), mapped_len(140982));
+    BOOST_CHECK_EQUAL(meta_i64(mo, "rx_capture_samples_native"), 55650);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "rx_capture_samples"), mapped_len(55650));
+
+    BOOST_CHECK_EQUAL(meta_i64(mo, "predicted_sfd_start_sample_native"),
+                      pred_sfd);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "predicted_sfd_start_sample"),
+                      mapped_index(pred_sfd));
+    BOOST_CHECK_EQUAL(meta_i64(mo, "sfd_start_sample_native"), pred_sfd + 3);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "sfd_start_sample"),
+                      mapped_index(pred_sfd + 3));
+    BOOST_CHECK_EQUAL(meta_i64(mo, "preamble_start_sample_native"),
+                      pred_sfd - sync_native);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "preamble_start_sample"),
+                      mapped_index(pred_sfd - sync_native));
+}
+
+BOOST_AUTO_TEST_CASE(test_pdu_radar_metadata_whitelist)
+{
+    const auto& taps = quality_minorder_taps();
+    const size_t N = 4096;
+    std::vector<gr_complex> iq(N, gr_complex(0.2f, -0.1f));
+    auto pdu = make_window_pdu(iq, 1000, 200, 3000, 896, 1200, kInRate, 9);
+    pdu = pmt::cons(radar_window_meta(pmt::car(pdu), 64, 48018, 6002, 50000),
+                    pmt::cdr(pdu));
+
+    auto blk = UwbPduRationalResamplerCcf65_48::make_from_taps(taps);
+    auto out = run_one_pdu(blk, pdu);
+    BOOST_REQUIRE(pmt::is_pair(out));
+    check_radar_whitelist(blk, pmt::car(out), 48018, 6002, 50000, 64);
+}
+
+BOOST_AUTO_TEST_CASE(test_pdu_radar_metadata_sync_32_64_128)
+{
+    const auto& taps = quality_minorder_taps();
+    const size_t N = 2048;
+    std::vector<gr_complex> iq(N, gr_complex(0.1f, 0.05f));
+    struct Case {
+        size_t reps;
+        int64_t sync_native;
+        int64_t sfd_native;
+        int64_t pred;
+    };
+    const Case cases[] = {
+        { 32, 24009, 6002, 25000 },
+        { 64, 48018, 6002, 50000 },
+        { 128, 96036, 6002, 100000 },
+    };
+    for (const auto& c : cases) {
+        auto blk = UwbPduRationalResamplerCcf65_48::make_from_taps(taps);
+        auto pdu = make_window_pdu(iq, 0, 64, 1920, 64, 64);
+        pdu = pmt::cons(
+            radar_window_meta(pmt::car(pdu), c.reps, c.sync_native,
+                              c.sfd_native, c.pred),
+            pmt::cdr(pdu));
+        auto out = run_one_pdu(blk, pdu);
+        BOOST_REQUIRE(pmt::is_pair(out));
+        check_radar_whitelist(blk, pmt::car(out), c.sync_native, c.sfd_native,
+                              c.pred, c.reps);
+        BOOST_CHECK_EQUAL(blk->pdus_emitted(), 1u);
+        BOOST_CHECK_EQUAL(blk->pdus_dropped(), 0u);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_pdu_sc16_extrema_and_empty)
+{
+    const auto& taps = quality_minorder_taps();
+    auto blk = UwbPduRationalResamplerCcf65_48::make_from_taps(taps);
+    auto st = gr::blocks::message_debug::make();
+    auto dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_sc16_ext");
+    tb->msg_connect(blk, "packet", dbg, "store");
+    tb->msg_connect(blk, "status", st, "store");
+    tb->start();
+
+    pmt::pmt_t empty_meta = pmt::make_dict();
+    empty_meta = pmt::dict_add(empty_meta, pmt::mp("sample_rate"),
+                               pmt::from_double(kInRate));
+    blk->_post(pmt::mp("packet"),
+               pmt::cons(empty_meta, pmt::make_c32vector(0, gr_complex(0, 0))));
+    for (int i = 0; i < 50 && blk->pdus_dropped() < 1; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    std::vector<int16_t> s16(256 * 2);
+    for (size_t i = 0; i < 256; ++i) {
+        s16[2 * i] = (i & 1) ? 32767 : -32768;
+        s16[2 * i + 1] = (i & 2) ? 32767 : -32768;
+    }
+    auto pdu = make_window_pdu_sc16(s16, 0, 32, 192, 32, 32);
+    blk->_post(pmt::mp("packet"), pdu);
+    for (int i = 0; i < 50 && blk->pdus_emitted() < 1; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    tb->stop();
+    tb->wait();
+
+    BOOST_CHECK_GE(blk->pdus_dropped(), 1u);
+    BOOST_REQUIRE_GE(blk->pdus_emitted(), 1u);
+    BOOST_REQUIRE_GE(dbg->num_messages(), 1);
+    pmt::pmt_t out = dbg->get_message(0);
+    size_t n = 0;
+    const gr_complex* y = pmt::c32vector_elements(pmt::cdr(out), n);
+    BOOST_REQUIRE(y != nullptr);
+    BOOST_CHECK_GT(n, 0u);
+    float peak = 0.f;
+    for (size_t i = 0; i < n; ++i)
+        peak = std::max(peak, std::abs(y[i]));
+    BOOST_CHECK_GT(peak, 1000.f);
+}
+
+BOOST_AUTO_TEST_CASE(test_pdu_radar_window_handler_time)
+{
+    const auto& taps = quality_minorder_taps();
+    // ~75.4 us native analysis window @737.28 MS/s.
+    const size_t N = 55650;
+    std::vector<gr_complex> iq(N, gr_complex(0.05f, 0.01f));
+    auto blk = UwbPduRationalResamplerCcf65_48::make_from_taps(taps);
+    auto dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_radar_win");
+    tb->msg_connect(blk, "packet", dbg, "store");
+    tb->start();
+
+    auto post_one = [&](uint64_t id) {
+        auto pdu = make_window_pdu(iq, 0, 1475, 48018, N - 1475 - 48018,
+                                   1475, kInRate, id);
+        const uint64_t before = blk->handler_total_us();
+        const uint64_t emitted = blk->pdus_emitted();
+        blk->_post(pmt::mp("packet"), pdu);
+        for (int i = 0; i < 50 && blk->pdus_emitted() < emitted + 1; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        return blk->handler_total_us() - before;
+    };
+
+    const uint64_t warmup_us = post_one(0);
+    blk->reset_stats();
+    const int n_pdus = 32;
+    std::vector<uint64_t> us;
+    us.reserve(n_pdus);
+    for (int k = 0; k < n_pdus; ++k)
+        us.push_back(post_one(static_cast<uint64_t>(k + 1)));
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE_EQUAL(blk->pdus_emitted(), static_cast<uint64_t>(n_pdus));
+    std::sort(us.begin(), us.end());
+    const double mean =
+        static_cast<double>(blk->handler_total_us()) / n_pdus;
+    const uint64_t p95 = us[static_cast<size_t>(0.95 * (n_pdus - 1))];
+    const uint64_t p99 = us[static_cast<size_t>(0.99 * (n_pdus - 1))];
+    std::cout << "radar_75us_pdu: warmup_us=" << warmup_us
+              << " steady_mean_handler_us=" << mean
+              << " p95_us=" << p95 << " p99_us=" << p99
+              << " n=" << n_pdus << std::endl;
+    BOOST_CHECK_GT(mean, 0.0);
+    BOOST_CHECK_GE(p99, p95);
+}
+
+BOOST_AUTO_TEST_CASE(test_pdu_fixed_scratch_no_growth)
+{
+    const auto& taps = quality_minorder_taps();
+    const size_t max_in = 1024;
+    auto blk = UwbPduRationalResamplerCcf65_48::make_from_taps(
+        taps, kOutRate, true,
+        UwbPduRationalResamplerCcf65_48::EmitPolicy::FullWindow, max_in);
+    BOOST_REQUIRE_EQUAL(blk->max_input_samples(), max_in);
+    BOOST_REQUIRE_EQUAL(blk->input_scratch_size(), max_in);
+    BOOST_REQUIRE_EQUAL(blk->scratch_size(), blk->max_output_samples());
+    BOOST_REQUIRE_GE(blk->scratch_capacity(), blk->scratch_size());
+    BOOST_REQUIRE_GE(blk->input_scratch_capacity(), max_in);
+
+    const gr_complex* s0 = blk->scratch_data();
+    const size_t sc0 = blk->scratch_capacity();
+    const size_t ss0 = blk->scratch_size();
+    const gr_complex* i0 = blk->input_scratch_data();
+    const size_t ic0 = blk->input_scratch_capacity();
+    const size_t is0 = blk->input_scratch_size();
+
+    auto dbg = gr::blocks::message_debug::make();
+    auto st = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_fixed_scratch");
+    tb->msg_connect(blk, "packet", dbg, "store");
+    tb->msg_connect(blk, "status", st, "store");
+    tb->start();
+
+    std::vector<gr_complex> fc32(max_in, gr_complex(0.2f, -0.1f));
+    std::vector<int16_t> s16(max_in * 2, 100);
+    for (int k = 0; k < 4; ++k) {
+        blk->_post(pmt::mp("packet"),
+                   make_window_pdu(fc32, 0, 64, 896, 64, 64));
+        blk->_post(pmt::mp("packet"),
+                   make_window_pdu_sc16(s16, 0, 64, 896, 64, 64));
+    }
+    for (int i = 0; i < 200 && blk->pdus_emitted() < 8; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    const uint64_t emitted = blk->pdus_emitted();
+    BOOST_REQUIRE_EQUAL(emitted, 8u);
+
+    std::vector<gr_complex> too_big_c(max_in + 1, gr_complex(0.1f, 0.0f));
+    std::vector<int16_t> too_big_s((max_in + 1) * 2, 3);
+    blk->_post(pmt::mp("packet"),
+               make_window_pdu(too_big_c, 0, 8, 1000, 8, 8));
+    blk->_post(pmt::mp("packet"),
+               make_window_pdu_sc16(too_big_s, 0, 8, 1000, 8, 8));
+    for (int i = 0; i < 100 && blk->pdus_dropped() < 2; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    tb->stop();
+    tb->wait();
+
+    BOOST_REQUIRE_EQUAL(blk->pdus_emitted(), emitted);
+    BOOST_REQUIRE_EQUAL(blk->pdus_dropped(), 2u);
+    BOOST_REQUIRE(status_has(st, "invalid_window"));
+    BOOST_CHECK_EQUAL(blk->scratch_data(), s0);
+    BOOST_CHECK_EQUAL(blk->scratch_capacity(), sc0);
+    BOOST_CHECK_EQUAL(blk->scratch_size(), ss0);
+    BOOST_CHECK_EQUAL(blk->input_scratch_data(), i0);
+    BOOST_CHECK_EQUAL(blk->input_scratch_capacity(), ic0);
+    BOOST_CHECK_EQUAL(blk->input_scratch_size(), is0);
+}
+
+BOOST_AUTO_TEST_CASE(test_pdu_invalid_metadata_extrema)
+{
+    const auto& taps = quality_minorder_taps();
+    std::vector<gr_complex> iq(256, gr_complex(0.3f, 0.0f));
+
+    struct Case {
+        const char* name;
+        pmt::pmt_t (*mut)(pmt::pmt_t);
+    };
+
+    auto set_i64 = [](pmt::pmt_t meta, const char* key, int64_t v) {
+        return pmt::dict_add(meta, pmt::mp(key), pmt::from_long(v));
+    };
+    auto set_u64 = [](pmt::pmt_t meta, const char* key, uint64_t v) {
+        return pmt::dict_add(meta, pmt::mp(key), pmt::from_uint64(v));
+    };
+
+    const int64_t imax = std::numeric_limits<int64_t>::max();
+    const int64_t imin = std::numeric_limits<int64_t>::min();
+    const uint64_t uoverflow =
+        static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1ull;
+
+    struct Row {
+        const char* name;
+        pmt::pmt_t meta_key;
+        pmt::pmt_t value;
+    };
+    const Row rows[] = {
+        { "int64_max_ws", pmt::mp("window_start_sample"), pmt::from_long(imax) },
+        { "int64_min_ws", pmt::mp("window_start_sample"), pmt::from_long(imin) },
+        { "neg_pre", pmt::mp("pre_guard_samples"), pmt::from_long(-1) },
+        { "short_sample_count", pmt::mp("sample_count"), pmt::from_long(10) },
+        { "uint64_overflow_ws", pmt::mp("window_start_sample"),
+          pmt::from_uint64(uoverflow) },
+        { "int64_max_pred_sfd", pmt::mp("predicted_sfd_start_sample"),
+          pmt::from_long(imax) },
+    };
+
+    for (const auto& row : rows) {
+        auto blk = UwbPduRationalResamplerCcf65_48::make_from_taps(taps);
+        auto pdu = make_window_pdu(iq, 100, 32, 192, 32, 132);
+        pmt::pmt_t meta = pmt::dict_add(pmt::car(pdu), row.meta_key, row.value);
+        gr::blocks::message_debug::sptr st;
+        auto out = run_one_pdu(blk, pmt::cons(meta, pmt::cdr(pdu)), &st);
+        BOOST_CHECK_MESSAGE(pmt::is_null(out) || !pmt::is_pair(out),
+                            row.name);
+        BOOST_CHECK_EQUAL(blk->pdus_emitted(), 0u);
+        BOOST_CHECK_EQUAL(blk->pdus_dropped(), 1u);
+        BOOST_CHECK_MESSAGE(status_has(st, "invalid_metadata"), row.name);
+    }
+    (void)set_i64;
+    (void)set_u64;
 }

@@ -19,6 +19,7 @@
 #pragma once
 
 #include <gnuradio/uwb/uwb_detector_core.h>
+#include <gnuradio/uwb/uwb_radar_checked_math.h>
 
 #include <algorithm>
 #include <cmath>
@@ -42,58 +43,6 @@ struct RadarTimingResult {
     float metric = 0.f;
     uint32_t refine_correlations = 0;
 };
-
-inline bool radar_i64_from_size(size_t v, int64_t& out)
-{
-    if (v > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
-        return false;
-    out = static_cast<int64_t>(v);
-    return true;
-}
-
-inline bool radar_i64_mul(int64_t a, int64_t b, int64_t& out)
-{
-    if (a == 0 || b == 0) {
-        out = 0;
-        return true;
-    }
-    if (a > 0 && b > 0) {
-        if (a > std::numeric_limits<int64_t>::max() / b)
-            return false;
-    } else if (a > 0 && b < 0) {
-        if (b < std::numeric_limits<int64_t>::min() / a)
-            return false;
-    } else if (a < 0 && b > 0) {
-        if (a < std::numeric_limits<int64_t>::min() / b)
-            return false;
-    } else {
-        if (a < 0 && b < 0 &&
-            a < std::numeric_limits<int64_t>::max() / b)
-            return false;
-    }
-    out = a * b;
-    return true;
-}
-
-inline bool radar_i64_add(int64_t a, int64_t b, int64_t& out)
-{
-    if (b > 0 && a > std::numeric_limits<int64_t>::max() - b)
-        return false;
-    if (b < 0 && a < std::numeric_limits<int64_t>::min() - b)
-        return false;
-    out = a + b;
-    return true;
-}
-
-inline bool radar_i64_sub(int64_t a, int64_t b, int64_t& out)
-{
-    if (b > 0 && a < std::numeric_limits<int64_t>::min() + b)
-        return false;
-    if (b < 0 && a > std::numeric_limits<int64_t>::max() + b)
-        return false;
-    out = a - b;
-    return true;
-}
 
 inline int64_t nominal_preamble_start(int64_t sfd_start,
                                       size_t sync_repetitions,
@@ -194,7 +143,7 @@ inline bool refine_sync_origin(const std::complex<float>* rx,
         for (size_t k = 0; k < sync_len; ++k)
             pwr += std::norm(rx[js + k]);
     }
-    for (int64_t j = lo; j <= hi; ++j) {
+    for (int64_t j = lo;; ++j) {
         if (j > lo) {
             const size_t js = static_cast<size_t>(j);
             pwr += std::norm(rx[js + sync_len - 1]) - std::norm(rx[js - 1]);
@@ -203,13 +152,18 @@ inline bool refine_sync_origin(const std::complex<float>* rx,
         const size_t js = static_cast<size_t>(j);
         for (size_t k = 0; k < sync_len; ++k)
             acc += rx[js + k] * std::conj(sync_template[k]);
-        ++out.refine_correlations;
+        if (out.refine_correlations <
+            std::numeric_limits<uint32_t>::max())
+            ++out.refine_correlations;
         const float m =
             std::norm(acc) / (pwr + gr::uwb::core::kUwbEpsilon);
         if (m > best) {
             best = m;
             best_j = j;
         }
+        // Do not increment INT64_MAX after scoring the final legal start.
+        if (j == hi)
+            break;
     }
 
     out.metric = best;

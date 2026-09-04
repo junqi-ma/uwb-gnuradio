@@ -16,6 +16,7 @@
 #pragma once
 
 #include <gnuradio/uwb/uwb_detector_core.h>
+#include <gnuradio/uwb/uwb_radar_checked_math.h>
 
 #include <algorithm>
 #include <cmath>
@@ -113,11 +114,24 @@ inline bool search_sfd(const std::complex<float>* rx,
     }
 
     const size_t sfd_len = scratch.sfd_template.size();
-    const int64_t max_start =
-        static_cast<int64_t>(n) - static_cast<int64_t>(sfd_len);
-    const int64_t lo = std::max<int64_t>(
-        0, predicted_start - margin_samples);
-    const int64_t hi = std::min(max_start, predicted_start + margin_samples);
+    int64_t n64 = 0;
+    int64_t sfd_len64 = 0;
+    int64_t max_start = 0;
+    int64_t lo_unclip = 0;
+    int64_t hi_unclip = 0;
+    const bool coords_ok = radar_i64_from_size(n, n64) &&
+                           radar_i64_from_size(sfd_len, sfd_len64) &&
+                           radar_i64_sub(n64, sfd_len64, max_start) &&
+                           radar_i64_sub(predicted_start, margin_samples,
+                                         lo_unclip) &&
+                           radar_i64_add(predicted_start, margin_samples,
+                                         hi_unclip);
+    if (!coords_ok) {
+        out.status = SfdStatus::InvalidInput;
+        return false;
+    }
+    const int64_t lo = std::max<int64_t>(0, lo_unclip);
+    const int64_t hi = std::min(max_start, hi_unclip);
     out.search_lo = lo;
     out.search_hi = hi;
 
@@ -142,7 +156,7 @@ inline bool search_sfd(const std::complex<float>* rx,
         for (size_t k = 0; k < sfd_len; ++k)
             pwr += std::norm(rx[js + k]);
     }
-    for (int64_t j = lo; j <= hi; ++j) {
+    for (int64_t j = lo;; ++j) {
         if (j > lo) {
             const size_t js = static_cast<size_t>(j);
             pwr += std::norm(rx[js + sfd_len - 1]) - std::norm(rx[js - 1]);
@@ -151,12 +165,16 @@ inline bool search_sfd(const std::complex<float>* rx,
         const size_t js = static_cast<size_t>(j);
         for (size_t k = 0; k < sfd_len; ++k)
             acc += rx[js + k] * std::conj(tmpl[k]);
-        ++out.fine_correlations;
+        if (out.fine_correlations < std::numeric_limits<uint32_t>::max())
+            ++out.fine_correlations;
         const float m = std::norm(acc) / (pwr + gr::uwb::core::kUwbEpsilon);
         if (m > best) {
             best = m;
             best_j = j;
         }
+        // Do not increment INT64_MAX after scoring the final legal start.
+        if (j == hi)
+            break;
     }
 
     out.metric = best;

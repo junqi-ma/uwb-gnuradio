@@ -424,6 +424,15 @@ BOOST_AUTO_TEST_CASE(test_radar_sfd_invalid_input)
                             scratch));
     BOOST_CHECK(out.status == SfdStatus::InvalidInput);
 
+    // Search coordinates must not wrap when the predicted start is near the
+    // signed sample-index limit. The result is a caller-contract error, not
+    // an empty search window or a wrapped scan.
+    BOOST_CHECK(!search_sfd(rx.data(), rx.size(),
+                            std::numeric_limits<int64_t>::max(), 1,
+                            kSfdThreshold, out, scratch));
+    BOOST_CHECK(out.status == SfdStatus::InvalidInput);
+    BOOST_CHECK_EQUAL(out.sfd_start_sample, int64_t(-1));
+
     std::vector<gr_complex> zeros(kQm35SamplesPerSymbol,
                                   gr_complex(0.0f, 0.0f));
     RadarSfdScratch zero_scratch;

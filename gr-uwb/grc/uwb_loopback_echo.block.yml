@@ -1,0 +1,79 @@
+id: uwb_loopback_echo
+label: UWB Loopback Echo
+category: '[UWB]'
+
+parameters:
+-   id: pre_guard_samples
+    label: Pre-guard samples
+    dtype: int
+    default: '1997'
+-   id: tail_samples
+    label: Tail samples
+    dtype: int
+    default: '4096'
+-   id: delay_samples
+    label: Delay samples
+    dtype: real_vector
+    default: '[]'
+-   id: gains
+    label: Complex gains
+    dtype: complex_vector
+    default: '[]'
+-   id: noise_std
+    label: AWGN std (I/Q)
+    dtype: real
+    default: '0'
+-   id: rng_seed
+    label: RNG seed
+    dtype: int
+    default: '1'
+-   id: max_tx_samples
+    label: Max TX samples
+    dtype: int
+    default: '262144'
+-   id: max_rx_samples
+    label: Max RX samples
+    dtype: int
+    default: '524288'
+-   id: num_delay_samps
+    label: num_delay_samps (left shift)
+    dtype: int
+    default: '0'
+-   id: t0_s
+    label: t0 (s)
+    dtype: real
+    default: '0'
+-   id: pri_s
+    label: PRI (s)
+    dtype: real
+    default: '0.005'
+
+inputs:
+-   domain: message
+    id: tx
+    optional: true
+
+outputs:
+-   domain: message
+    id: rx
+    optional: true
+-   domain: message
+    id: status
+    optional: true
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.loopback_echo(${pre_guard_samples}, ${tail_samples}, ${delay_samples}, ${gains}, ${noise_std}, ${rng_seed}, ${max_tx_samples}, ${max_rx_samples}, ${num_delay_samps}, ${t0_s}, ${pri_s})
+
+cpp_templates:
+    includes: ['#include <gnuradio/uwb/uwb_loopback_echo.h>']
+    make: 'this->${id} = gr::uwb::UwbLoopbackEcho::make(${pre_guard_samples}, ${tail_samples}, ${delay_samples}, ${gains}, ${noise_std}, ${rng_seed}, ${max_tx_samples}, ${max_rx_samples}, ${num_delay_samps}, ${t0_s}, ${pri_s});'
+    link: ['gnuradio::gnuradio-uwb']
+
+documentation: |-
+    Software channel for radar QA (no UHD).  Integer delay is an exact
+    sample shift; fractional delay is MATLAB interp1 pchip on I and Q.
+    Multipath is the sum of delayed scaled copies.  RX metadata uses the
+    EchoTimer schema with source=loopback.
+
+file_format: 1

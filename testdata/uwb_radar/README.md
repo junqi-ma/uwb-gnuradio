@@ -45,7 +45,10 @@ verify_uwb_radar_golden
 ## Coordinate conventions
 
 - Sample indices are **0-based**.
-- `dtype` is **complex64** interleaved little-endian.
+- CF32 descriptor: `sample_format=fc32`, `dtype=complex64`, 8 bytes per
+  complex sample, interleaved little-endian IQ.
+- SC16 descriptor: `sample_format=sc16`, `dtype=int16`, 4 bytes per complex
+  sample, interleaved little-endian IQ.
 - CIR is estimated at 998.4 against the **TX-time / predicted** SYNC origin,
   so an extra channel delay `D` samples shifts the peak by `D` taps relative
   to the clean CIR. The clean peak is typically `pre` plus a pulse-shape
@@ -59,3 +62,11 @@ TX/RX IQ, plus raw and L2-normalized CIR for clean, integer-delay, and
 fractional-delay radar windows (`pre=16`, `post=100`). See `metadata.json`
 (script-generated; do not hand-edit). `metadata.generator` must remain
 `export_uwb_radar_golden.m`.
+
+SC16 storage of the same TX packets (`tx_998p4.sc16`, `tx_737p28.sc16`) is
+little-endian interleaved int16 IQ, `round(clip(x * 32767, -32768, 32767))`.
+`tx_998p4_sc16_head16.i16` is the first 16 samples of `tx_998p4.sc16` for
+byte-order checks. Sample counts match the CF32 files / sidecar lengths.
+`metadata.json` describes the CF32 representation; `metadata.sc16.json`
+describes the SC16 representation. PacketSource automatically prefers the
+format-specific sidecar, or callers may pass it as `descriptor_path`.

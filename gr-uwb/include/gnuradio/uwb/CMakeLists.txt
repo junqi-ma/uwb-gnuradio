@@ -26,13 +26,17 @@ install(FILES
     uwb_rational_resampler_core.h
     uwb_rational_resampler_ccf_65_48.h
     uwb_pdu_rational_resampler_ccf_65_48.h
+    uwb_radar_pdu_meta.h
     uwb_window_crop_core.h
     uwb_pdu_window_crop.h
     uwb_tone_canceller.h
     uwb_scheduled_dump_io.h
+    uwb_radar_checked_math.h
     uwb_radar_sfd_core.h
     uwb_radar_cir_estimator.h
     uwb_radar_timing_core.h
     uwb_radar_cir_core.h
+    uwb_radar_packet_source.h
+    uwb_loopback_echo.h
     DESTINATION include/gnuradio/uwb
 )

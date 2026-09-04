@@ -1,8 +1,9 @@
 function meta = export_uwb_radar_golden(outDir)
 %EXPORT_UWB_RADAR_GOLDEN  Generator-of-record UWB radar TX/RX/CIR goldens.
 %
-%   META = EXPORT_UWB_RADAR_GOLDEN() writes testdata/uwb_radar/*.cf32 and
-%   metadata.json using Communications Toolbox lrwpanWaveformGenerator.
+%   META = EXPORT_UWB_RADAR_GOLDEN() writes testdata/uwb_radar/*.cf32,
+%   paired SC16 TX files, metadata.json and metadata.sc16.json using
+%   Communications Toolbox lrwpanWaveformGenerator.
 %
 %   Profile: BPRF (or 802.15.4a + SFDNumber=2), CodeIndex=9, 64 SYNC,
 %   SamplesPerPulse=2, MeanPRF=62.4, DataRate=6.81, 4z2 SFD, rng 20260904,
@@ -111,6 +112,9 @@ function meta = export_uwb_radar_golden(outDir)
     files = struct();
     files.tx_998p4 = write_cf32(fullfile(outDir, 'tx_998p4.cf32'), packet);
     files.tx_737p28 = write_cf32(fullfile(outDir, 'tx_737p28.cf32'), native);
+    files.tx_998p4_sc16 = write_sc16(fullfile(outDir, 'tx_998p4.sc16'), packet);
+    files.tx_737p28_sc16 = write_sc16(fullfile(outDir, 'tx_737p28.sc16'), native);
+    write_sc16(fullfile(outDir, 'tx_998p4_sc16_head16.i16'), packet(1:16));
     files.rx_clean_998p4 = write_cf32(fullfile(outDir, 'rx_clean_998p4.cf32'), rxClean);
     files.rx_delay_int_998p4 = write_cf32(fullfile(outDir, 'rx_delay_int_998p4.cf32'), rxDelayInt);
     files.rx_delay_frac_998p4 = write_cf32(fullfile(outDir, 'rx_delay_frac_998p4.cf32'), rxDelayFrac);
@@ -142,9 +146,11 @@ function meta = export_uwb_radar_golden(outDir)
     meta.psdu_data_bytes = nDataBytes;
     meta.psdu_fcs_bytes = 2;
     meta.payload_bytes_hex = sprintf('%02X', payloadBytes);
+    meta.sample_format = 'fc32';
     meta.dtype = 'complex64';
     meta.byte_order = 'little-endian';
     meta.layout = 'interleaved_iq';
+    meta.bytes_per_complex = 8;
     meta.sample_index_base = 0;
     meta.rate_work_hz = fs;
     meta.rate_native_hz = fsNative;
@@ -215,6 +221,8 @@ function meta = export_uwb_radar_golden(outDir)
     meta.files = struct( ...
         'tx_998p4_cf32', files.tx_998p4, ...
         'tx_737p28_cf32', files.tx_737p28, ...
+        'tx_998p4_sc16', files.tx_998p4_sc16, ...
+        'tx_737p28_sc16', files.tx_737p28_sc16, ...
         'rx_clean_998p4_cf32', files.rx_clean_998p4, ...
         'rx_delay_int_998p4_cf32', files.rx_delay_int_998p4, ...
         'rx_delay_frac_998p4_cf32', files.rx_delay_frac_998p4, ...
@@ -262,6 +270,18 @@ function meta = export_uwb_radar_golden(outDir)
         error('cannot write metadata.json');
     end
     fwrite(fid, txt);
+    fclose(fid);
+
+    sc16meta = meta;
+    sc16meta.description = [meta.description, ' SC16 packet representation.'];
+    sc16meta.sample_format = 'sc16';
+    sc16meta.dtype = 'int16';
+    sc16meta.bytes_per_complex = 4;
+    fid = fopen(fullfile(outDir, 'metadata.sc16.json'), 'w');
+    if fid < 0
+        error('cannot write metadata.sc16.json');
+    end
+    fwrite(fid, jsonencode(sc16meta));
     fclose(fid);
     fprintf('Wrote radar goldens to %s (tx=%d samples, native=%d)\n', ...
         outDir, numel(packet), numel(native));
@@ -324,6 +344,20 @@ function n = write_cf32(path, x)
         error('cannot write %s', path);
     end
     fwrite(fid, inter, 'float32');
+    fclose(fid);
+    n = numel(x);
+end
+
+function n = write_sc16(path, x)
+    x = x(:);
+    inter = zeros(2 * numel(x), 1, 'int16');
+    inter(1:2:end) = int16(round(min(max(real(x) * 32767, -32768), 32767)));
+    inter(2:2:end) = int16(round(min(max(imag(x) * 32767, -32768), 32767)));
+    fid = fopen(path, 'wb');
+    if fid < 0
+        error('cannot write %s', path);
+    end
+    fwrite(fid, inter, 'int16');
     fclose(fid);
     n = numel(x);
 end

@@ -55,6 +55,9 @@ public:
         CaptureOnly = 1,
     };
 
+    // Covers existing scheduled e2e (pre+cap+post = 252000) and Radar windows.
+    static constexpr size_t kDefaultMaxInputSamples = 262144;
+
     /**
      * \param taps_file_or_profile  "quality" / "realtime" / "quality_minorder"
      *        / "realtime_minorder" (resolves under testdata/resampler_65_48/)
@@ -64,17 +67,22 @@ public:
      * \param validate_input_rate   If true, drop PDUs whose meta sample_rate
      *        is not ~737.28e6 and publish status "bad_input_rate".
      * \param emit_policy           FullWindow (default) or CaptureOnly.
+     * \param max_input_samples     Fixed handler input bound. Scratch for
+     *        SC16→FC32 and process+flush is allocated at make(); the handler
+     *        never resizes. Oversized PDUs publish invalid_window.
      */
     static sptr make(const std::string& taps_file_or_profile = "quality_minorder",
                      double output_sample_rate = kOutputRateHz,
                      bool validate_input_rate = true,
-                     EmitPolicy emit_policy = EmitPolicy::FullWindow);
+                     EmitPolicy emit_policy = EmitPolicy::FullWindow,
+                     size_t max_input_samples = kDefaultMaxInputSamples);
 
     /** QA path: construct from an in-memory taps vector. */
     static sptr make_from_taps(const std::vector<float>& taps,
                                double output_sample_rate = kOutputRateHz,
                                bool validate_input_rate = true,
-                               EmitPolicy emit_policy = EmitPolicy::FullWindow);
+                               EmitPolicy emit_policy = EmitPolicy::FullWindow,
+                               size_t max_input_samples = kDefaultMaxInputSamples);
 
     ~UwbPduRationalResamplerCcf65_48() override;
 
@@ -85,12 +93,27 @@ public:
     bool validate_input_rate() const { return d_validate_rate_; }
     EmitPolicy emit_policy() const { return d_emit_policy_; }
     void set_emit_policy(EmitPolicy p) { d_emit_policy_ = p; }
+    size_t max_input_samples() const { return d_max_in_; }
+    size_t max_output_samples() const { return d_max_out_; }
+
+    const gr_complex* scratch_data() const { return d_scratch_.data(); }
+    size_t scratch_size() const { return d_scratch_.size(); }
+    size_t scratch_capacity() const { return d_scratch_.capacity(); }
+    const gr_complex* input_scratch_data() const
+    {
+        return d_input_scratch_.data();
+    }
+    size_t input_scratch_size() const { return d_input_scratch_.size(); }
+    size_t input_scratch_capacity() const { return d_input_scratch_.capacity(); }
 
     /** Group-delay-centered map: round((p*65 + (T-1)/2)/48). */
     int64_t map_input_offset_to_output(int64_t p) const
     {
         return d_core_->map_input_offset_to_output(p);
     }
+
+    /** Integer checked map used on the PDU handler path. */
+    bool try_map_input_offset_to_output(int64_t p, int64_t& out) const;
 
     // --- stats (atomic snapshots) ---
     uint64_t pdus_received() const
@@ -152,14 +175,15 @@ public:
     UwbPduRationalResamplerCcf65_48(const std::vector<float>& taps,
                                     double output_sample_rate,
                                     bool validate_input_rate,
-                                    EmitPolicy emit_policy);
+                                    EmitPolicy emit_policy,
+                                    size_t max_input_samples);
 
 private:
     void handle_packet(pmt::pmt_t msg);
     void publish_status(const std::string& event,
                         pmt::pmt_t extra = pmt::PMT_NIL);
-    void ensure_scratch(size_t n_out);
-    void resample_oneshot(const gr_complex* in, size_t n_in, size_t* n_out);
+    void drop_status(const std::string& event, pmt::pmt_t extra = pmt::PMT_NIL);
+    bool resample_oneshot(const gr_complex* in, size_t n_in, size_t* n_out);
 
     static std::vector<float>
     load_taps_from_profile_or_path(const std::string& taps_file_or_profile);
@@ -169,11 +193,11 @@ private:
     double d_output_rate_;
     bool d_validate_rate_;
     EmitPolicy d_emit_policy_;
+    size_t d_max_in_ = 0;
+    size_t d_max_out_ = 0;
 
-    // Preallocated FIR output scratch (grows only when needed).
+    // Sized once at make() to max_input / max_output. Handler never resizes.
     std::vector<gr_complex> d_scratch_;
-    // SC16 PDU input is expanded here immediately before FIR.  Fixed window
-    // geometry reserves this once; no steady-state handler allocation.
     std::vector<gr_complex> d_input_scratch_;
 
     // short_guard status is published at most once (then counted silently).

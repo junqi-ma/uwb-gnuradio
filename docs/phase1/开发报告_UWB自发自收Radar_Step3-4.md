@@ -38,7 +38,9 @@
 
 负向 QA：`ieee` vs `4z2`、code 10 vs 9、64 配 32/128、`samples_per_symbol`、`tx_profile_id`。
 
-坐标乘法/加法走 `radar_i64_*`，溢出 `InvalidInput`。
+SFD 搜索、SYNC refine 与 CIR 的坐标乘法/加法统一走
+`radar_i64_*`；`size_t`→`int64_t` 转换、搜索窗端点和循环上界均有
+检查，溢出返回 `InvalidInput`。相关次数计数饱和，不发生无符号回绕。
 
 ---
 
@@ -88,7 +90,8 @@ RX window + predicted SFD
   → CIR success ? Ok (raw+norm taps) : CirFailed
 ```
 
-- 失败：`tap_count=0`，失败阶段下标保持 `-1`，scratch taps 清零。
+- 失败：`tap_count=0`，未完成阶段的下标保持 `-1`，先前已成功阶段的
+  观测结果保留；scratch taps 清零。
 - `preamble_start_sample`：RX refine origin。
 - `cir_origin_sample`：TX-time origin（`predicted_sfd - N×sps`）。
 - 整数延时 37 → 峰 **55 = 18+37**。

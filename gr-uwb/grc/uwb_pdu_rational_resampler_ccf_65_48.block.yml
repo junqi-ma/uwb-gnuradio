@@ -16,6 +16,10 @@ parameters:
     label: Validate input rate (737.28e6)
     dtype: bool
     default: 'True'
+-   id: max_input_samples
+    label: Max input samples
+    dtype: int
+    default: '262144'
 
 inputs:
 -   domain: message
@@ -32,11 +36,11 @@ outputs:
 
 templates:
     imports: from gnuradio import uwb
-    make: uwb.pdu_rational_resampler_ccf_65_48(${taps_file_or_profile}, ${output_sample_rate}, ${validate_input_rate})
+    make: uwb.pdu_rational_resampler_ccf_65_48(${taps_file_or_profile}, ${output_sample_rate}, ${validate_input_rate}, uwb.pdu_resampler_emit_policy.FullWindow, ${max_input_samples})
 
 cpp_templates:
     includes: ['#include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>']
-    make: 'this->${id} = gr::uwb::UwbPduRationalResamplerCcf65_48::make(${taps_file_or_profile}, ${output_sample_rate}, ${validate_input_rate});'
+    make: 'this->${id} = gr::uwb::UwbPduRationalResamplerCcf65_48::make(${taps_file_or_profile}, ${output_sample_rate}, ${validate_input_rate}, gr::uwb::UwbPduRationalResamplerCcf65_48::EmitPolicy::FullWindow, ${max_input_samples});'
     link: ['gnuradio::gnuradio-uwb']
 
 documentation: |-
@@ -50,6 +54,10 @@ documentation: |-
         map(p) = round((p*65 + (T-1)/2)/48)
 
     Default taps profile is quality_minorder (2707 taps, relative −70 dB).
+    max_input_samples (default 262144) sizes SC16 and FIR scratch at make();
+    the handler never grows those buffers. Oversized PDUs publish
+    invalid_window and emit no packet.
+
     Continuous stream resampling is not real-time on host; use this block
     after scheduled native-rate capture (see 分析与下阶段建议 §3.2).
 

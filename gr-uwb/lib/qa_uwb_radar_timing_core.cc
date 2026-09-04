@@ -278,6 +278,25 @@ BOOST_AUTO_TEST_CASE(test_radar_timing_nominal_arithmetic)
     int64_t prod = 0;
     BOOST_CHECK(!gr::uwb::radar::radar_i64_mul(
         std::numeric_limits<int64_t>::max(), 2, prod));
+    int64_t sum = 0;
+    BOOST_CHECK(!gr::uwb::radar::radar_i64_add(
+        std::numeric_limits<int64_t>::max(), 1, sum));
+}
+
+BOOST_AUTO_TEST_CASE(test_radar_timing_extreme_coordinate_invalid_input)
+{
+    const auto tmpl = load_sync_template();
+    std::vector<gr_complex> rx(tmpl.size(), gr_complex(0.0f, 0.0f));
+    RadarTimingResult out;
+
+    // nominal = INT64_MAX - 1016; adding this margin would overflow the
+    // unclipped refine window. It must be rejected before any scan occurs.
+    BOOST_CHECK(!refine_sync_origin(
+        rx.data(), rx.size(), std::numeric_limits<int64_t>::max(), 1,
+        kQm35SamplesPerSymbol, 2048, kTimingThreshold, tmpl.data(),
+        tmpl.size(), out));
+    BOOST_CHECK(out.status == TimingStatus::InvalidInput);
+    BOOST_CHECK_EQUAL(out.preamble_start_sample, int64_t(-1));
 }
 
 BOOST_AUTO_TEST_CASE(test_radar_timing_synthetic_noiseless)

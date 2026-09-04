@@ -11,6 +11,8 @@
 #include <pybind11/complex.h>
 #include <pybind11/stl.h>
 
+#include <cstdint>
+
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
 
@@ -27,6 +29,8 @@
 #include <gnuradio/uwb/uwb_rational_resampler_ccf_65_48.h>
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>
 #include <gnuradio/uwb/uwb_pdu_window_crop.h>
+#include <gnuradio/uwb/uwb_radar_packet_source.h>
+#include <gnuradio/uwb/uwb_loopback_echo.h>
 
 namespace py = pybind11;
 
@@ -514,19 +518,23 @@ void bind_pdu_rational_resampler_ccf_65_48(py::module& m)
              py::arg("taps_file_or_profile") = std::string("quality_minorder"),
              py::arg("output_sample_rate") = Blk::kOutputRateHz,
              py::arg("validate_input_rate") = true,
-             py::arg("emit_policy") = Blk::EmitPolicy::FullWindow)
+             py::arg("emit_policy") = Blk::EmitPolicy::FullWindow,
+             py::arg("max_input_samples") = Blk::kDefaultMaxInputSamples)
         .def_static("make_from_taps",
                     &Blk::make_from_taps,
                     py::arg("taps"),
                     py::arg("output_sample_rate") = Blk::kOutputRateHz,
                     py::arg("validate_input_rate") = true,
-                    py::arg("emit_policy") = Blk::EmitPolicy::FullWindow)
+                    py::arg("emit_policy") = Blk::EmitPolicy::FullWindow,
+                    py::arg("max_input_samples") = Blk::kDefaultMaxInputSamples)
         .def("taps", &Blk::taps)
         .def("tap_count", &Blk::tap_count)
         .def("output_sample_rate", &Blk::output_sample_rate)
         .def("validate_input_rate", &Blk::validate_input_rate)
         .def("emit_policy", &Blk::emit_policy)
         .def("set_emit_policy", &Blk::set_emit_policy, py::arg("p"))
+        .def("max_input_samples", &Blk::max_input_samples)
+        .def("max_output_samples", &Blk::max_output_samples)
         .def("map_input_offset_to_output",
              &Blk::map_input_offset_to_output,
              py::arg("p"))
@@ -575,6 +583,69 @@ void bind_pdu_window_crop(py::module& m)
         .def("reset_stats", &Blk::reset_stats);
 }
 
+void bind_radar_packet_source(py::module& m)
+{
+    using Blk = gr::uwb::UwbRadarPacketSource;
+    py::class_<Blk, gr::block, std::shared_ptr<Blk>>(m, "radar_packet_source")
+        .def(py::init(&Blk::make),
+             py::arg("path"),
+             py::arg("sample_rate"),
+             py::arg("sample_format") = std::string("fc32"),
+             py::arg("sync_repetitions") = size_t(64),
+             py::arg("sfd_mode") = std::string("4z2"),
+             py::arg("code_index") = size_t(9),
+             py::arg("pri_s") = gr::uwb::defaults::kQm35PacketIntervalS,
+             py::arg("auto_emit") = false,
+             py::arg("descriptor_path") = std::string())
+        .def("path", &Blk::path)
+        .def("sample_rate", &Blk::sample_rate)
+        .def("sample_format", &Blk::sample_format)
+        .def("sync_repetitions", &Blk::sync_repetitions)
+        .def("sfd_mode", &Blk::sfd_mode)
+        .def("code_index", &Blk::code_index)
+        .def("pri_s", &Blk::pri_s)
+        .def("auto_emit", &Blk::auto_emit)
+        .def("descriptor_path", &Blk::descriptor_path)
+        .def("num_samples", &Blk::num_samples)
+        .def("samples", &Blk::samples)
+        .def("sc16_samples", &Blk::sc16_samples)
+        .def("emits_received", &Blk::emits_received)
+        .def("pdus_emitted", &Blk::pdus_emitted)
+        .def("pdus_dropped", &Blk::pdus_dropped);
+}
+
+void bind_loopback_echo(py::module& m)
+{
+    using Blk = gr::uwb::UwbLoopbackEcho;
+    py::class_<Blk, gr::block, std::shared_ptr<Blk>>(m, "loopback_echo")
+        .def(py::init(&Blk::make),
+             py::arg("pre_guard_samples"),
+             py::arg("tail_samples"),
+             py::arg("delay_samples") = std::vector<double>(),
+             py::arg("gains") = std::vector<std::complex<float>>(),
+             py::arg("noise_std") = 0.0f,
+             py::arg("rng_seed") = uint32_t(1),
+             py::arg("max_tx_samples") = size_t(262144),
+             py::arg("max_rx_samples") = size_t(524288),
+             py::arg("num_delay_samps") = size_t(0),
+             py::arg("t0_s") = 0.0,
+             py::arg("pri_s") = gr::uwb::defaults::kQm35PacketIntervalS)
+        .def("pre_guard_samples", &Blk::pre_guard_samples)
+        .def("tail_samples", &Blk::tail_samples)
+        .def("delay_samples", &Blk::delay_samples)
+        .def("gains", &Blk::gains)
+        .def("noise_std", &Blk::noise_std)
+        .def("rng_seed", &Blk::rng_seed)
+        .def("max_tx_samples", &Blk::max_tx_samples)
+        .def("max_rx_samples", &Blk::max_rx_samples)
+        .def("num_delay_samps", &Blk::num_delay_samps)
+        .def("t0_s", &Blk::t0_s)
+        .def("pri_s", &Blk::pri_s)
+        .def("pdus_received", &Blk::pdus_received)
+        .def("pdus_emitted", &Blk::pdus_emitted)
+        .def("pdus_dropped", &Blk::pdus_dropped);
+}
+
 // We need this hack because import_array() returns NULL
 // for newer Python versions.
 // This function is also necessary because it ensures access to the C API
@@ -605,4 +676,6 @@ PYBIND11_MODULE(uwb_python, m)
     bind_rational_resampler_ccf_65_48(m);
     bind_pdu_rational_resampler_ccf_65_48(m);
     bind_pdu_window_crop(m);
+    bind_radar_packet_source(m);
+    bind_loopback_echo(m);
 }

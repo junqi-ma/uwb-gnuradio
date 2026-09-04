@@ -18,11 +18,14 @@
 
 #include <gnuradio/io_signature.h>
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>
+#include <gnuradio/uwb/uwb_radar_checked_math.h>
+#include <gnuradio/uwb/uwb_radar_pdu_meta.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 
 namespace gr {
@@ -84,18 +87,6 @@ bool rates_close(double a, double b)
     return std::abs(a - b) <= kRateTolRel * std::max(std::abs(a), std::abs(b));
 }
 
-int64_t dict_i64(pmt::pmt_t dict, const char* key, int64_t def)
-{
-    if (!pmt::is_dict(dict))
-        return def;
-    pmt::pmt_t v = pmt::dict_ref(dict, pmt::mp(key), pmt::from_long(def));
-    if (pmt::is_uint64(v))
-        return static_cast<int64_t>(pmt::to_uint64(v));
-    if (pmt::is_integer(v))
-        return static_cast<int64_t>(pmt::to_long(v));
-    return def;
-}
-
 double dict_f64(pmt::pmt_t dict, const char* key, double def)
 {
     if (!pmt::is_dict(dict))
@@ -109,6 +100,20 @@ double dict_f64(pmt::pmt_t dict, const char* key, double def)
 bool dict_has(pmt::pmt_t dict, const char* key)
 {
     return pmt::is_dict(dict) && pmt::dict_has_key(dict, pmt::mp(key));
+}
+
+// Present-and-unconvertible → false. Missing → def and true.
+bool dict_i64_checked(pmt::pmt_t dict,
+                      const char* key,
+                      int64_t def,
+                      int64_t& out)
+{
+    if (!dict_has(dict, key)) {
+        out = def;
+        return true;
+    }
+    return radar_meta::try_to_i64(
+        pmt::dict_ref(dict, pmt::mp(key), pmt::from_long(def)), out);
 }
 
 } // namespace
@@ -144,28 +149,39 @@ UwbPduRationalResamplerCcf65_48::sptr
 UwbPduRationalResamplerCcf65_48::make(const std::string& taps_file_or_profile,
                                       double output_sample_rate,
                                       bool validate_input_rate,
-                                      EmitPolicy emit_policy)
+                                      EmitPolicy emit_policy,
+                                      size_t max_input_samples)
 {
     auto taps = load_taps_from_profile_or_path(taps_file_or_profile);
     return gnuradio::make_block_sptr<UwbPduRationalResamplerCcf65_48>(
-        taps, output_sample_rate, validate_input_rate, emit_policy);
+        taps,
+        output_sample_rate,
+        validate_input_rate,
+        emit_policy,
+        max_input_samples);
 }
 
 UwbPduRationalResamplerCcf65_48::sptr
 UwbPduRationalResamplerCcf65_48::make_from_taps(const std::vector<float>& taps,
                                                 double output_sample_rate,
                                                 bool validate_input_rate,
-                                                EmitPolicy emit_policy)
+                                                EmitPolicy emit_policy,
+                                                size_t max_input_samples)
 {
     return gnuradio::make_block_sptr<UwbPduRationalResamplerCcf65_48>(
-        taps, output_sample_rate, validate_input_rate, emit_policy);
+        taps,
+        output_sample_rate,
+        validate_input_rate,
+        emit_policy,
+        max_input_samples);
 }
 
 UwbPduRationalResamplerCcf65_48::UwbPduRationalResamplerCcf65_48(
     const std::vector<float>& taps,
     double output_sample_rate,
     bool validate_input_rate,
-    EmitPolicy emit_policy)
+    EmitPolicy emit_policy,
+    size_t max_input_samples)
     : gr::block("uwb_pdu_rational_resampler_ccf_65_48",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
@@ -173,7 +189,8 @@ UwbPduRationalResamplerCcf65_48::UwbPduRationalResamplerCcf65_48(
       d_core_(std::make_unique<core::RationalResampler65_48Core>(taps)),
       d_output_rate_(output_sample_rate),
       d_validate_rate_(validate_input_rate),
-      d_emit_policy_(emit_policy)
+      d_emit_policy_(emit_policy),
+      d_max_in_(max_input_samples)
 {
     if (d_taps_.empty()) {
         throw std::invalid_argument(
@@ -183,15 +200,20 @@ UwbPduRationalResamplerCcf65_48::UwbPduRationalResamplerCcf65_48(
         throw std::invalid_argument(
             "UwbPduRationalResamplerCcf65_48: output_sample_rate must be > 0");
     }
+    if (d_max_in_ == 0) {
+        throw std::invalid_argument(
+            "UwbPduRationalResamplerCcf65_48: max_input_samples must be > 0");
+    }
 
-    // Typical scheduled window at 737.28 (~pre+capture+post) → ~280k out.
-    // Reserve once so steady-state PDUs never reallocate.
-    const size_t typical_in = 220000;
-    const size_t typical_out =
-        core::RationalResampler65_48Core::expected_output_length(
-            typical_in, d_taps_.size());
-    d_scratch_.reserve(typical_out + 256);
-    d_input_scratch_.reserve(typical_in);
+    d_max_out_ = core::RationalResampler65_48Core::expected_output_length(
+        d_max_in_, d_taps_.size());
+    if (d_max_out_ == 0) {
+        throw std::invalid_argument(
+            "UwbPduRationalResamplerCcf65_48: max_output_samples computed 0");
+    }
+
+    d_input_scratch_.assign(d_max_in_, gr_complex(0.0f, 0.0f));
+    d_scratch_.assign(d_max_out_, gr_complex(0.0f, 0.0f));
 
     message_port_register_in(pmt::mp("packet"));
     message_port_register_out(pmt::mp("packet"));
@@ -221,46 +243,77 @@ UwbPduRationalResamplerCcf65_48::reset_stats()
 }
 
 // ---------------------------------------------------------------------------
-// Scratch / one-shot resample
+// Checked map / one-shot resample (scratch sized at make())
 // ---------------------------------------------------------------------------
 
-void
-UwbPduRationalResamplerCcf65_48::ensure_scratch(size_t n_out)
+bool
+UwbPduRationalResamplerCcf65_48::try_map_input_offset_to_output(int64_t p,
+                                                                int64_t& out) const
 {
-    if (d_scratch_.size() < n_out)
-        d_scratch_.resize(n_out);
+    using radar::radar_i64_add;
+    using radar::radar_i64_from_size;
+    using radar::radar_i64_mul;
+    if (p < 0) {
+        out = 0;
+        return true;
+    }
+    int64_t p65 = 0;
+    if (!radar_i64_mul(p, static_cast<int64_t>(kInterp), p65))
+        return false;
+    int64_t twice = 0;
+    if (!radar_i64_mul(p65, 2, twice))
+        return false;
+    int64_t t1 = 0;
+    if (d_taps_.size() > 0) {
+        if (!radar_i64_from_size(d_taps_.size() - 1, t1))
+            return false;
+    }
+    int64_t num = 0;
+    if (!radar_i64_add(twice, t1, num))
+        return false;
+    int64_t rounded = 0;
+    if (!radar_i64_add(num, static_cast<int64_t>(kDecim), rounded))
+        return false;
+    out = rounded / (2 * static_cast<int64_t>(kDecim));
+    if (out < 0)
+        out = 0;
+    return true;
 }
 
-void
+bool
 UwbPduRationalResamplerCcf65_48::resample_oneshot(const gr_complex* in,
-                                                   size_t n_in,
-                                                   size_t* n_out)
+                                                  size_t n_in,
+                                                  size_t* n_out)
 {
-    // Fresh FIR state per PDU (each window is an independent capture).
+    *n_out = 0;
     d_core_->reset();
     d_resets_.fetch_add(1, std::memory_order_relaxed);
 
     const size_t Lout =
         core::RationalResampler65_48Core::expected_output_length(
             n_in, d_taps_.size());
-    ensure_scratch(Lout + 64);
+    if (Lout > d_scratch_.size())
+        return false;
 
     size_t produced = 0;
     if (n_in > 0) {
         auto r = d_core_->process(in, n_in, d_scratch_.data(), d_scratch_.size());
         produced = r.produced;
+        if (produced > d_scratch_.size())
+            return false;
     }
     while (produced < Lout) {
-        if (produced >= d_scratch_.size())
-            d_scratch_.resize(produced + 256);
+        const size_t room = d_scratch_.size() - produced;
+        if (room == 0)
+            return false;
         const size_t n =
-            d_core_->flush(d_scratch_.data() + produced,
-                           d_scratch_.size() - produced);
+            d_core_->flush(d_scratch_.data() + produced, room);
         if (n == 0)
             break;
         produced += n;
     }
     *n_out = produced;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +346,14 @@ UwbPduRationalResamplerCcf65_48::publish_status(const std::string& event,
     message_port_pub(pmt::mp("status"), meta);
 }
 
+void
+UwbPduRationalResamplerCcf65_48::drop_status(const std::string& event,
+                                             pmt::pmt_t extra)
+{
+    d_pdus_dropped_.fetch_add(1, std::memory_order_relaxed);
+    publish_status(event, extra);
+}
+
 // ---------------------------------------------------------------------------
 // Message handler
 // ---------------------------------------------------------------------------
@@ -303,8 +364,7 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
     d_pdus_received_.fetch_add(1, std::memory_order_relaxed);
 
     if (!pmt::is_pair(msg)) {
-        d_pdus_dropped_.fetch_add(1, std::memory_order_relaxed);
-        publish_status("invalid_input");
+        drop_status("invalid_input");
         return;
     }
 
@@ -313,8 +373,7 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
     if (!pmt::is_dict(meta_in))
         meta_in = pmt::make_dict();
     if (!pmt::is_c32vector(data_in) && !pmt::is_s16vector(data_in)) {
-        d_pdus_dropped_.fetch_add(1, std::memory_order_relaxed);
-        publish_status("invalid_input");
+        drop_status("invalid_input");
         return;
     }
 
@@ -322,24 +381,32 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
     const auto handler_begin = std::chrono::steady_clock::now();
     const size_t payload_items = pmt::length(data_in);
     if (payload_items == 0 || (input_sc16 && (payload_items & 1u) != 0)) {
-        d_pdus_dropped_.fetch_add(1, std::memory_order_relaxed);
-        publish_status("invalid_input");
+        drop_status("invalid_input");
         return;
     }
 
     const double in_rate = dict_f64(meta_in, "sample_rate", 0.0);
     if (d_validate_rate_ && !rates_close(in_rate, kInputRateHz)) {
-        d_pdus_dropped_.fetch_add(1, std::memory_order_relaxed);
         pmt::pmt_t extra = pmt::make_dict();
         extra = pmt::dict_add(extra, pmt::mp("sample_rate"),
                               pmt::from_double(in_rate));
         extra = pmt::dict_add(extra, pmt::mp("expected_sample_rate"),
                               pmt::from_double(kInputRateHz));
-        publish_status("bad_input_rate", extra);
+        drop_status("bad_input_rate", extra);
         return;
     }
 
     const size_t n_in = input_sc16 ? payload_items / 2 : payload_items;
+    if (n_in > d_max_in_) {
+        pmt::pmt_t extra = pmt::make_dict();
+        extra = pmt::dict_add(extra, pmt::mp("n_in"),
+                              pmt::from_uint64(n_in));
+        extra = pmt::dict_add(extra, pmt::mp("max_input_samples"),
+                              pmt::from_uint64(d_max_in_));
+        drop_status("invalid_window", extra);
+        return;
+    }
+
     size_t n_out = 0;
     size_t n_elem = 0;
     const gr_complex* in_ptr = nullptr;
@@ -348,9 +415,7 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
     } else {
         const auto convert_begin = std::chrono::steady_clock::now();
         const int16_t* s16 = pmt::s16vector_elements(data_in, n_elem);
-        if (s16 != nullptr && n_elem == payload_items) {
-            if (d_input_scratch_.size() < n_in)
-                d_input_scratch_.resize(n_in);
+        if (s16 != nullptr && n_elem == payload_items && n_in <= d_max_in_) {
             for (size_t i = 0; i < n_in; ++i) {
                 d_input_scratch_[i] = gr_complex(
                     static_cast<float>(s16[2 * i]),
@@ -365,12 +430,11 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
             std::memory_order_relaxed);
     }
     if (in_ptr == nullptr || n_elem != n_in) {
-        d_pdus_dropped_.fetch_add(1, std::memory_order_relaxed);
-        publish_status("invalid_input");
+        drop_status("invalid_input");
         return;
     }
     const auto resample_begin = std::chrono::steady_clock::now();
-    resample_oneshot(in_ptr, n_in, &n_out);
+    const bool resample_ok = resample_oneshot(in_ptr, n_in, &n_out);
     const uint64_t resample_us = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - resample_begin).count());
@@ -381,32 +445,78 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
                prior_max, resample_us, std::memory_order_relaxed,
                std::memory_order_relaxed)) {
     }
+    if (!resample_ok) {
+        drop_status("internal_error");
+        return;
+    }
     if (n_out == 0) {
-        d_pdus_dropped_.fetch_add(1, std::memory_order_relaxed);
-        publish_status("empty_output");
+        drop_status("empty_output");
         return;
     }
 
     d_total_in_.fetch_add(n_in, std::memory_order_relaxed);
 
-    // ---- coordinate mapping (absolute sample domain) ----
-    const int64_t ws = dict_i64(meta_in, "window_start_sample", 0);
-    const int64_t pre_in = dict_i64(meta_in, "pre_guard_samples", 0);
-    const int64_t cap_in = dict_i64(meta_in, "capture_samples",
-                                    static_cast<int64_t>(n_in));
-    // post may be absent from extractor meta; recover from sample_count.
-    int64_t post_in = dict_i64(meta_in, "post_guard_samples", -1);
-    if (post_in < 0) {
-        const int64_t sc =
-            dict_i64(meta_in, "sample_count", static_cast<int64_t>(n_in));
-        post_in = std::max<int64_t>(0, sc - pre_in - cap_in);
+    using radar::radar_i64_add;
+    using radar::radar_i64_from_size;
+    using radar::radar_i64_sub;
+
+    int64_t n_in64 = 0;
+    if (!radar_i64_from_size(n_in, n_in64)) {
+        drop_status("invalid_metadata");
+        return;
     }
 
-    const int64_t ws_out = map_input_offset_to_output(ws);
-    int64_t pre_out =
-        map_input_offset_to_output(ws + pre_in) - map_input_offset_to_output(ws);
-    int64_t cap_out = map_input_offset_to_output(ws + pre_in + cap_in) -
-                      map_input_offset_to_output(ws + pre_in);
+    int64_t ws = 0, pre_in = 0, cap_in = 0, post_in = 0, sc = 0;
+    if (!dict_i64_checked(meta_in, "window_start_sample", 0, ws) ||
+        !dict_i64_checked(meta_in, "pre_guard_samples", 0, pre_in) ||
+        !dict_i64_checked(meta_in, "capture_samples", n_in64, cap_in) ||
+        !dict_i64_checked(meta_in, "sample_count", n_in64, sc)) {
+        drop_status("invalid_metadata");
+        return;
+    }
+    if (ws < 0 || pre_in < 0 || cap_in < 0 || sc < 0) {
+        drop_status("invalid_metadata");
+        return;
+    }
+
+    int64_t pre_plus_cap = 0;
+    if (!radar_i64_add(pre_in, cap_in, pre_plus_cap) || sc < pre_plus_cap) {
+        drop_status("invalid_metadata");
+        return;
+    }
+
+    const bool post_present = dict_has(meta_in, "post_guard_samples");
+    if (post_present) {
+        if (!dict_i64_checked(meta_in, "post_guard_samples", 0, post_in) ||
+            post_in < 0) {
+            drop_status("invalid_metadata");
+            return;
+        }
+    } else {
+        if (!radar_i64_sub(sc, pre_plus_cap, post_in) || post_in < 0)
+            post_in = 0;
+    }
+
+    int64_t ws_pre = 0, ws_pre_cap = 0;
+    if (!radar_i64_add(ws, pre_in, ws_pre) ||
+        !radar_i64_add(ws_pre, cap_in, ws_pre_cap)) {
+        drop_status("invalid_metadata");
+        return;
+    }
+
+    int64_t ws_out = 0, ws_pre_out = 0, ws_pre_cap_out = 0;
+    if (!try_map_input_offset_to_output(ws, ws_out) ||
+        !try_map_input_offset_to_output(ws_pre, ws_pre_out) ||
+        !try_map_input_offset_to_output(ws_pre_cap, ws_pre_cap_out)) {
+        drop_status("invalid_metadata");
+        return;
+    }
+    int64_t pre_out = 0, cap_out = 0;
+    if (!radar_i64_sub(ws_pre_out, ws_out, pre_out) ||
+        !radar_i64_sub(ws_pre_cap_out, ws_pre_out, cap_out)) {
+        drop_status("invalid_metadata");
+        return;
+    }
     if (pre_out < 0)
         pre_out = 0;
     if (cap_out < 0)
@@ -467,7 +577,10 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
         emit_pre = 0;
         emit_cap = static_cast<int64_t>(emit_len);
         emit_post = 0;
-        emit_ws = map_input_offset_to_output(ws + pre_in);
+        if (!try_map_input_offset_to_output(ws_pre, emit_ws)) {
+            drop_status("invalid_metadata");
+            return;
+        }
     }
 
     pmt::pmt_t meta_out = pmt::make_dict();
@@ -496,6 +609,15 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
                           pmt::from_uint64(0)));
     }
 
+    if (!radar_meta::apply_radar_whitelist(
+            meta_out, meta_in,
+            [this](int64_t p, int64_t& mapped) {
+                return try_map_input_offset_to_output(p, mapped);
+            })) {
+        drop_status("invalid_metadata");
+        return;
+    }
+
     meta_out = pmt::dict_add(meta_out, pmt::mp("sample_rate"),
                              pmt::from_double(d_output_rate_));
     meta_out = pmt::dict_add(meta_out, pmt::mp("window_start_sample"),
@@ -510,17 +632,35 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
                              pmt::from_long(static_cast<long>(emit_len)));
 
     if (dict_has(meta_in, "predicted_start_sample")) {
-        const int64_t p = dict_i64(meta_in, "predicted_start_sample", -1);
+        int64_t p = 0;
+        if (!dict_i64_checked(meta_in, "predicted_start_sample", -1, p)) {
+            drop_status("invalid_metadata");
+            return;
+        }
         if (p >= 0) {
+            int64_t mapped = 0;
+            if (!try_map_input_offset_to_output(p, mapped)) {
+                drop_status("invalid_metadata");
+                return;
+            }
             meta_out = pmt::dict_add(meta_out, pmt::mp("predicted_start_sample"),
-                                     pmt::from_long(map_input_offset_to_output(p)));
+                                     pmt::from_long(mapped));
         }
     }
     if (dict_has(meta_in, "detected_start_sample")) {
-        const int64_t p = dict_i64(meta_in, "detected_start_sample", -1);
+        int64_t p = 0;
+        if (!dict_i64_checked(meta_in, "detected_start_sample", -1, p)) {
+            drop_status("invalid_metadata");
+            return;
+        }
         if (p >= 0) {
+            int64_t mapped = 0;
+            if (!try_map_input_offset_to_output(p, mapped)) {
+                drop_status("invalid_metadata");
+                return;
+            }
             meta_out = pmt::dict_add(meta_out, pmt::mp("detected_start_sample"),
-                                     pmt::from_long(map_input_offset_to_output(p)));
+                                     pmt::from_long(mapped));
         }
     }
 

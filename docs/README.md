@@ -23,6 +23,7 @@
 - [`phase1/Review_UWB自发自收Radar_Step1-2.md`](phase1/Review_UWB自发自收Radar_Step1-2.md)
 - [`phase1/开发报告_UWB自发自收Radar_Step3-4.md`](phase1/开发报告_UWB自发自收Radar_Step3-4.md)（Step 3–4，Codex 整改复验）
 - [`phase1/Review_UWB自发自收Radar_Step3-4.md`](phase1/Review_UWB自发自收Radar_Step3-4.md)
+- [`phase1/开发报告_UWB自发自收Radar_Step5-6.md`](phase1/开发报告_UWB自发自收Radar_Step5-6.md)（Step 5–6，PDU metadata + loopback）
 
 ## 性能分析与实验记录
 
