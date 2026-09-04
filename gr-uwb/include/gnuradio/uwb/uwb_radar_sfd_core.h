@@ -18,6 +18,7 @@
 #include <gnuradio/uwb/uwb_detector_core.h>
 
 #include <algorithm>
+#include <cmath>
 #include <complex>
 #include <cstdint>
 #include <limits>
@@ -66,12 +67,25 @@ inline bool prepare_sfd_template(const int8_t* sfd_sequence,
     const size_t sfd_len = n_sfd_symbols * sync_len;
     scratch.reserve(sfd_len);
     scratch.sfd_template.resize(sfd_len);
+    double energy = 0.0;
     for (size_t i = 0; i < n_sfd_symbols; ++i) {
         const float s = static_cast<float>(sfd_sequence[i]);
         for (size_t k = 0; k < sync_len; ++k) {
-            scratch.sfd_template[i * sync_len + k] = std::complex<float>(
-                s * sync_template[k].real(), s * sync_template[k].imag());
+            const float re = s * sync_template[k].real();
+            const float im = s * sync_template[k].imag();
+            if (!std::isfinite(re) || !std::isfinite(im)) {
+                scratch.sfd_template.clear();
+                return false;
+            }
+            scratch.sfd_template[i * sync_len + k] =
+                std::complex<float>(re, im);
+            energy += static_cast<double>(re) * static_cast<double>(re) +
+                      static_cast<double>(im) * static_cast<double>(im);
         }
+    }
+    if (!(energy > 0.0) || !std::isfinite(energy)) {
+        scratch.sfd_template.clear();
+        return false;
     }
     gr::uwb::core::uwb_l2_normalize(scratch.sfd_template);
     return true;
@@ -92,7 +106,8 @@ inline bool search_sfd(const std::complex<float>* rx,
     out.predicted_start_sample = predicted_start;
 
     if (!rx || n == 0 || predicted_start < 0 || margin_samples < 0 ||
-        scratch.sfd_template.empty()) {
+        scratch.sfd_template.empty() || !std::isfinite(threshold) ||
+        !(threshold > 0.0f)) {
         out.status = SfdStatus::InvalidInput;
         return false;
     }
@@ -113,59 +128,31 @@ inline bool search_sfd(const std::complex<float>* rx,
         return false;
     }
 
-    // 2x-oversampled SFD peak is broad; stride-8 coarse + ±stride refine
-    // matches stage_sfd inside this single clipped window.
-    constexpr int64_t kSfdStride = 8;
+    // First version scores every integer start in the clipped window.
+    // A stride-8 coarse peak can sit on a near-zero sidelobe (metric at
+    // lag 2 is ~0) and the subsequent ±7 refine never reaches the true
+    // start; Codex R1 forbids that blind spot.
     const std::complex<float>* tmpl = scratch.sfd_template.data();
-
-    auto correlate = [&](int64_t j, float pwr) {
-        std::complex<float> acc(0.0f, 0.0f);
-        const size_t js = static_cast<size_t>(j);
-        for (size_t k = 0; k < sfd_len; ++k)
-            acc += rx[js + k] * std::conj(tmpl[k]);
-        return std::norm(acc) / (pwr + gr::uwb::core::kUwbEpsilon);
-    };
 
     float best = -1.0f;
     int64_t best_j = lo;
-
     float pwr = 0.0f;
     {
         const size_t js = static_cast<size_t>(lo);
         for (size_t k = 0; k < sfd_len; ++k)
             pwr += std::norm(rx[js + k]);
     }
-    for (int64_t j = lo; j <= hi; j += kSfdStride) {
+    for (int64_t j = lo; j <= hi; ++j) {
         if (j > lo) {
-            const size_t js = static_cast<size_t>(j);
-            for (int64_t k = 0; k < kSfdStride; ++k)
-                pwr += std::norm(rx[js + sfd_len - 1 - static_cast<size_t>(k)]) -
-                       std::norm(rx[js - 1 - static_cast<size_t>(k)]);
-        }
-        ++out.coarse_correlations;
-        const float m = correlate(j, pwr);
-        if (m > best) {
-            best = m;
-            best_j = j;
-        }
-    }
-
-    const int64_t r_lo =
-        (best_j >= lo + kSfdStride) ? best_j - kSfdStride + 1 : lo;
-    const int64_t r_hi = std::min(hi, best_j + kSfdStride - 1);
-    pwr = 0.0f;
-    {
-        const size_t js = static_cast<size_t>(r_lo);
-        for (size_t k = 0; k < sfd_len; ++k)
-            pwr += std::norm(rx[js + k]);
-    }
-    for (int64_t j = r_lo; j <= r_hi; ++j) {
-        if (j > r_lo) {
             const size_t js = static_cast<size_t>(j);
             pwr += std::norm(rx[js + sfd_len - 1]) - std::norm(rx[js - 1]);
         }
+        std::complex<float> acc(0.0f, 0.0f);
+        const size_t js = static_cast<size_t>(j);
+        for (size_t k = 0; k < sfd_len; ++k)
+            acc += rx[js + k] * std::conj(tmpl[k]);
         ++out.fine_correlations;
-        const float m = correlate(j, pwr);
+        const float m = std::norm(acc) / (pwr + gr::uwb::core::kUwbEpsilon);
         if (m > best) {
             best = m;
             best_j = j;

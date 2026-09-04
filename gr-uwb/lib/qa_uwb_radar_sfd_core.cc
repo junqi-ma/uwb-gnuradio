@@ -7,7 +7,8 @@
  * QA for header-only radar SFD narrow-window search (998.4 MS/s).
  *
  * Synthetic construction uses testdata/reference_preamble.bin (code-9 SYNC)
- * and demod::GetSfdSequence("4z2").  testdata/uwb_radar golden is optional.
+ * and demod::GetSfdSequence("4z2"). Canonical MATLAB golden in
+ * testdata/uwb_radar/ is required (generator=export_uwb_radar_golden.m).
  */
 
 #include <boost/test/unit_test.hpp>
@@ -19,9 +20,11 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <string>
@@ -173,6 +176,84 @@ bool parse_json_number(const std::string& json,
     }
 }
 
+bool parse_json_string(const std::string& json,
+                       const char* key,
+                       std::string& out)
+{
+    const std::string pat = std::string("\"") + key + "\"";
+    auto pos = json.find(pat);
+    if (pos == std::string::npos)
+        return false;
+    pos = json.find(':', pos + pat.size());
+    if (pos == std::string::npos)
+        return false;
+    pos = json.find('"', pos + 1);
+    if (pos == std::string::npos)
+        return false;
+    const auto end = json.find('"', pos + 1);
+    if (end == std::string::npos)
+        return false;
+    out = json.substr(pos + 1, end - pos - 1);
+    return true;
+}
+
+bool parse_nested_number(const std::string& json,
+                         const char* object_key,
+                         const char* field,
+                         double& out)
+{
+    const std::string obj = std::string("\"") + object_key + "\"";
+    auto rx = json.find(obj);
+    if (rx == std::string::npos)
+        return false;
+    const std::string pat = std::string("\"") + field + "\"";
+    auto pos = json.find(pat, rx);
+    if (pos == std::string::npos)
+        return false;
+    pos = json.find(':', pos + pat.size());
+    if (pos == std::string::npos)
+        return false;
+    try {
+        size_t idx = 0;
+        out = std::stod(json.substr(pos + 1), &idx);
+        return idx > 0;
+    } catch (...) {
+        return false;
+    }
+}
+
+void assert_exhaustive_offsets(const std::vector<gr_complex>& rx,
+                               int64_t true_start,
+                               int64_t margin,
+                               float threshold,
+                               const RadarSfdScratch& scratch)
+{
+    int misses = 0;
+    int64_t first_miss = 0;
+    for (int64_t off = -margin; off <= margin; ++off) {
+        const int64_t pred = true_start + off;
+        if (pred < 0)
+            continue;
+        RadarSfdResult out;
+        const bool ok = search_sfd(rx.data(), rx.size(), pred, margin,
+                                   threshold, out, scratch);
+        const bool hit =
+            ok && out.status == SfdStatus::Ok &&
+            std::llabs(out.sfd_start_sample - true_start) <= 1;
+        if (!hit) {
+            if (misses == 0)
+                first_miss = off;
+            ++misses;
+        }
+    }
+    BOOST_CHECK_MESSAGE(
+        misses == 0,
+        "exhaustive SFD search missed " + std::to_string(misses) +
+            " offsets in [-" + std::to_string(margin) + ",+" +
+            std::to_string(margin) + "]; first miss off=" +
+            std::to_string(first_miss));
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_CASE(test_radar_sfd_noiseless_hit)
@@ -198,8 +279,9 @@ BOOST_AUTO_TEST_CASE(test_radar_sfd_noiseless_hit)
     BOOST_CHECK_EQUAL(out.search_lo, frame.sfd_start - kMargin);
     BOOST_CHECK_EQUAL(out.search_hi, frame.sfd_start + kMargin);
     BOOST_CHECK_GE(out.metric, 0.95f);
-    BOOST_CHECK_GT(out.coarse_correlations, 0u);
-    BOOST_CHECK_GT(out.fine_correlations, 0u);
+    BOOST_CHECK_EQUAL(out.coarse_correlations, 0u);
+    BOOST_CHECK_EQUAL(out.fine_correlations,
+                      static_cast<uint32_t>(out.search_hi - out.search_lo + 1));
 }
 
 BOOST_AUTO_TEST_CASE(test_radar_sfd_predicted_offset_inside_margin)
@@ -326,6 +408,34 @@ BOOST_AUTO_TEST_CASE(test_radar_sfd_invalid_input)
                             out, empty));
     BOOST_CHECK(out.status == SfdStatus::InvalidInput);
     BOOST_CHECK_EQUAL(out.sfd_start_sample, int64_t(-1));
+
+    BOOST_CHECK(!search_sfd(rx.data(), rx.size(), 0, kMargin, 0.0f, out,
+                            scratch));
+    BOOST_CHECK(out.status == SfdStatus::InvalidInput);
+    BOOST_CHECK(!search_sfd(rx.data(), rx.size(), 0, kMargin, -0.1f, out,
+                            scratch));
+    BOOST_CHECK(out.status == SfdStatus::InvalidInput);
+    BOOST_CHECK(!search_sfd(rx.data(), rx.size(), 0, kMargin,
+                            std::numeric_limits<float>::quiet_NaN(), out,
+                            scratch));
+    BOOST_CHECK(out.status == SfdStatus::InvalidInput);
+    BOOST_CHECK(!search_sfd(rx.data(), rx.size(), 0, kMargin,
+                            std::numeric_limits<float>::infinity(), out,
+                            scratch));
+    BOOST_CHECK(out.status == SfdStatus::InvalidInput);
+
+    std::vector<gr_complex> zeros(kQm35SamplesPerSymbol,
+                                  gr_complex(0.0f, 0.0f));
+    RadarSfdScratch zero_scratch;
+    BOOST_CHECK(!prepare_seq(seq, zeros, zero_scratch));
+    BOOST_CHECK(zero_scratch.sfd_template.empty());
+
+    std::vector<gr_complex> nan_sync(kQm35SamplesPerSymbol,
+                                     gr_complex(std::numeric_limits<float>::quiet_NaN(),
+                                                0.0f));
+    RadarSfdScratch nan_scratch;
+    BOOST_CHECK(!prepare_seq(seq, nan_sync, nan_scratch));
+    BOOST_CHECK(nan_scratch.sfd_template.empty());
 }
 
 BOOST_AUTO_TEST_CASE(test_radar_sfd_delay_phase_amplitude)
@@ -351,7 +461,64 @@ BOOST_AUTO_TEST_CASE(test_radar_sfd_delay_phase_amplitude)
     }
 }
 
-BOOST_AUTO_TEST_CASE(test_radar_sfd_awgn)
+BOOST_AUTO_TEST_CASE(test_radar_sfd_awgn_detects)
+{
+    const auto sync = load_sync_template();
+    const auto seq = GetSfdSequence("4z2");
+    const auto sfd_wf = kron_sfd(seq, sync);
+    RadarSfdScratch scratch;
+    BOOST_REQUIRE(prepare_seq(seq, sync, scratch));
+
+    double energy = 0.0;
+    for (size_t k = 0; k < sfd_wf.size(); ++k)
+        energy += static_cast<double>(std::norm(sfd_wf[k]));
+    const float rms =
+        static_cast<float>(std::sqrt(energy / static_cast<double>(sfd_wf.size())));
+    const float noise_std = 0.05f * rms;
+    const uint32_t seeds[] = { 20260904u, 7u, 99u, 12345u };
+
+    for (uint32_t seed : seeds) {
+        auto frame = make_frame(sfd_wf);
+        place_waveform(frame.rx, frame.sfd_start, sfd_wf);
+        std::mt19937 rng(seed);
+        std::normal_distribution<float> g(0.0f, noise_std);
+        for (auto& v : frame.rx)
+            v += gr_complex(g(rng), g(rng));
+        RadarSfdResult out;
+        BOOST_REQUIRE(search_sfd(frame.rx.data(), frame.rx.size(),
+                                 frame.sfd_start, kMargin, kSfdThreshold, out,
+                                 scratch));
+        BOOST_CHECK_LE(std::llabs(out.sfd_start_sample - frame.sfd_start), 1);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_radar_sfd_pure_noise_false_alarm_zero)
+{
+    const auto sync = load_sync_template();
+    const auto seq = GetSfdSequence("4z2");
+    RadarSfdScratch scratch;
+    BOOST_REQUIRE(prepare_seq(seq, sync, scratch));
+
+    auto proto = make_frame(kron_sfd(seq, sync));
+    const int64_t pred = proto.sfd_start + 11;
+    const uint32_t seeds[] = { 20260904u, 7u, 99u, 12345u, 424242u };
+    for (uint32_t seed : seeds) {
+        std::vector<gr_complex> noise(proto.rx.size());
+        std::mt19937 rng(seed);
+        std::normal_distribution<float> g(0.0f, 1.0f);
+        for (auto& v : noise)
+            v = gr_complex(g(rng), g(rng));
+        RadarSfdResult buried;
+        const bool ok = search_sfd(noise.data(), noise.size(), pred, kMargin,
+                                   kSfdThreshold, buried, scratch);
+        BOOST_REQUIRE(!ok);
+        BOOST_CHECK(buried.status == SfdStatus::SfdFailed);
+        BOOST_CHECK_EQUAL(buried.sfd_start_sample, int64_t(-1));
+        BOOST_CHECK(buried.sfd_start_sample != pred);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_radar_sfd_exhaustive_synthetic_offsets)
 {
     const auto sync = load_sync_template();
     const auto seq = GetSfdSequence("4z2");
@@ -361,38 +528,12 @@ BOOST_AUTO_TEST_CASE(test_radar_sfd_awgn)
 
     auto frame = make_frame(sfd_wf);
     place_waveform(frame.rx, frame.sfd_start, sfd_wf);
-
-    double energy = 0.0;
-    for (size_t k = 0; k < sfd_wf.size(); ++k)
-        energy += static_cast<double>(std::norm(sfd_wf[k]));
-    const float rms =
-        static_cast<float>(std::sqrt(energy / static_cast<double>(sfd_wf.size())));
-    const float noise_std = 0.05f * rms;
-
-    std::mt19937 rng(20260904);
-    std::normal_distribution<float> g(0.0f, noise_std);
-    for (auto& v : frame.rx)
-        v += gr_complex(g(rng), g(rng));
-
-    RadarSfdResult out;
-    BOOST_REQUIRE(search_sfd(frame.rx.data(), frame.rx.size(), frame.sfd_start,
-                             kMargin, kSfdThreshold, out, scratch));
-    BOOST_CHECK_LE(std::llabs(out.sfd_start_sample - frame.sfd_start), 1);
-
-    // Strong noise with no SFD: must fail without substituting predicted.
-    std::vector<gr_complex> noise(frame.rx.size());
-    std::normal_distribution<float> g2(0.0f, 1.0f);
-    for (auto& v : noise)
-        v = gr_complex(g2(rng), g2(rng));
-    const int64_t pred = frame.sfd_start + 11;
-    RadarSfdResult buried;
-    const bool ok = search_sfd(noise.data(), noise.size(), pred, kMargin,
-                               kSfdThreshold, buried, scratch);
-    if (!ok) {
-        BOOST_CHECK(buried.status == SfdStatus::SfdFailed);
-        BOOST_CHECK_EQUAL(buried.sfd_start_sample, int64_t(-1));
-        BOOST_CHECK(buried.sfd_start_sample != pred);
-    }
+    BOOST_REQUIRE_GE(frame.sfd_start, kMargin);
+    BOOST_REQUIRE_GE(static_cast<int64_t>(frame.rx.size()) -
+                         static_cast<int64_t>(frame.sfd_len),
+                     frame.sfd_start + kMargin);
+    assert_exhaustive_offsets(frame.rx, frame.sfd_start, kMargin, kSfdThreshold,
+                              scratch);
 }
 
 BOOST_AUTO_TEST_CASE(test_radar_sfd_destroyed_must_not_return_predicted)
@@ -471,12 +612,10 @@ BOOST_AUTO_TEST_CASE(test_radar_sfd_wrong_sfd_mode)
     const bool ok =
         search_sfd(frame.rx.data(), frame.rx.size(), frame.sfd_start, kMargin,
                    kSfdThreshold, out, ieee_scratch);
-    BOOST_CHECK(!ok || out.metric < kSfdThreshold);
-    if (!ok) {
-        BOOST_CHECK(out.status == SfdStatus::SfdFailed);
-        BOOST_CHECK_EQUAL(out.sfd_start_sample, int64_t(-1));
-        BOOST_CHECK(out.sfd_start_sample != frame.sfd_start);
-    }
+    BOOST_REQUIRE(!ok);
+    BOOST_CHECK(out.status == SfdStatus::SfdFailed);
+    BOOST_CHECK_EQUAL(out.sfd_start_sample, int64_t(-1));
+    BOOST_CHECK(out.sfd_start_sample != frame.sfd_start);
 }
 
 BOOST_AUTO_TEST_CASE(test_radar_sfd_hot_path_no_growth)
@@ -502,66 +641,51 @@ BOOST_AUTO_TEST_CASE(test_radar_sfd_hot_path_no_growth)
     }
 }
 
-BOOST_AUTO_TEST_CASE(test_radar_sfd_optional_golden)
+BOOST_AUTO_TEST_CASE(test_radar_sfd_canonical_matlab_golden)
 {
     const std::string meta_path = testdata_path("uwb_radar/metadata.json");
     const std::string rx_path = testdata_path("uwb_radar/rx_clean_998p4.cf32");
+    const std::string tx_path = testdata_path("uwb_radar/tx_998p4.cf32");
     std::ifstream meta_f(meta_path);
-    std::ifstream rx_probe(rx_path, std::ios::binary);
-    if (!meta_f || !rx_probe) {
-        BOOST_TEST_MESSAGE(
-            "skipping golden: testdata/uwb_radar/{metadata.json,"
-            "rx_clean_998p4.cf32} not present");
-        return;
-    }
-    rx_probe.close();
-
+    BOOST_REQUIRE_MESSAGE(meta_f.good(),
+                          "canonical testdata/uwb_radar/metadata.json missing");
     std::ostringstream oss;
     oss << meta_f.rdbuf();
     const std::string json = oss.str();
 
-    double fs = 998.4e6;
-    if (!parse_json_number(json, "rate_work_hz", fs))
-        parse_json_number(json, "sample_rate", fs);
-    if (std::abs(fs - 998.4e6) > 1.0) {
-        BOOST_TEST_MESSAGE("skipping golden: work rate is not 998.4e6");
-        return;
-    }
+    std::string generator;
+    BOOST_REQUIRE(parse_json_string(json, "generator", generator));
+    BOOST_REQUIRE_MESSAGE(
+        generator.find("export_uwb_radar_golden.m") != std::string::npos,
+        "canonical generator must be export_uwb_radar_golden.m, got " +
+            generator);
 
-    // Prefer the RX-window coordinate; a naive "sfd_start" scan can hit the
-    // TX-packet origin (0-based 65024) which is 1997 samples before the
-    // embedded SFD in rx_clean_998p4.cf32.
+    std::string sfd_mode;
+    BOOST_REQUIRE(parse_json_string(json, "sfd_mode", sfd_mode));
+    BOOST_CHECK_EQUAL(sfd_mode, std::string("4z2"));
+
+    double reps = 0.0;
+    BOOST_REQUIRE(parse_json_number(json, "sync_repetitions", reps));
+    BOOST_CHECK_EQUAL(static_cast<int>(reps), 64);
+
+    double fs = 0.0;
+    BOOST_REQUIRE(parse_json_number(json, "rate_work_hz", fs));
+    BOOST_CHECK_LT(std::abs(fs - 998.4e6), 1.0);
+
     double sfd_start_d = -1.0;
-    bool got_start = false;
-    const auto rx_key = json.find("\"rx_clean_998p4\"");
-    if (rx_key != std::string::npos) {
-        const std::string pat = "\"sfd_start\"";
-        auto pos = json.find(pat, rx_key);
-        if (pos != std::string::npos) {
-            pos = json.find(':', pos + pat.size());
-            if (pos != std::string::npos) {
-                try {
-                    size_t idx = 0;
-                    sfd_start_d = std::stod(json.substr(pos + 1), &idx);
-                    got_start = idx > 0;
-                } catch (...) {
-                    got_start = false;
-                }
-            }
-        }
-    }
-    if (!got_start) {
-        got_start = parse_json_number(json, "sfd_start_sample", sfd_start_d) ||
-                    parse_json_number(json, "sfd_start_0based", sfd_start_d);
-    }
-    BOOST_REQUIRE_MESSAGE(got_start,
-                          "golden metadata.json has no rx_clean SFD start");
+    BOOST_REQUIRE(parse_nested_number(json, "rx_clean_998p4", "sfd_start",
+                                      sfd_start_d));
     const int64_t truth = static_cast<int64_t>(std::llround(sfd_start_d));
 
-    std::vector<gr_complex> rx;
+    std::vector<gr_complex> rx, tx;
     BOOST_REQUIRE(load_cf32(rx_path, rx));
+    BOOST_REQUIRE(load_cf32(tx_path, tx));
+    BOOST_REQUIRE_GE(tx.size(), kQm35SamplesPerSymbol);
+    std::vector<gr_complex> sync(tx.begin(),
+                                 tx.begin() +
+                                     static_cast<std::ptrdiff_t>(
+                                         kQm35SamplesPerSymbol));
 
-    const auto sync = load_sync_template();
     const auto seq = GetSfdSequence("4z2");
     RadarSfdScratch scratch;
     BOOST_REQUIRE(prepare_seq(seq, sync, scratch));
@@ -570,4 +694,7 @@ BOOST_AUTO_TEST_CASE(test_radar_sfd_optional_golden)
     BOOST_REQUIRE(search_sfd(rx.data(), rx.size(), truth, kMargin,
                              kSfdThreshold, out, scratch));
     BOOST_CHECK_LE(std::llabs(out.sfd_start_sample - truth), 1);
+    BOOST_CHECK_GE(out.metric, 0.5f);
+
+    assert_exhaustive_offsets(rx, truth, kMargin, kSfdThreshold, scratch);
 }
