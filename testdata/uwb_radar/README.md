@@ -15,6 +15,20 @@ Do **not** build native TX by repeating the 751-sample one-SYNC detector
 template. Do **not** overwrite these files with the Python splice fixture;
 that lives in `testdata/uwb_radar_synthetic/`.
 
+Complete 32/128-SYNC packets (same PHR/PSDU/FCS construction) live in
+`packets/sync32/` and `packets/sync128/`. BPRF `lrwpanHRPConfig` only
+allows preamble durations 16/64/1024/4096, so those two are **custom
+SYNC-length** profiles: MATLAB generates a 64-SYNC complete packet, then
+keeps the first 32 pulse-shaped SYNC symbols or concatenates the SYNC
+field twice, keeping the original SFD/PHR/PSDU/FCS. Native TX is still
+one-shot `resample(x,48,65)` of the **entire** reconstructed packet.
+`metadata.profile_kind` is `custom_sync_length`. Regenerate with:
+
+```matlab
+cd testdata/uwb_radar
+run_export_radar_packets
+```
+
 ## How to regenerate
 
 From the repo, with MATLAB + Communications Toolbox:
