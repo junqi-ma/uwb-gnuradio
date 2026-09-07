@@ -37,7 +37,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [768, 36.0]
+    coordinate: [16, 80]
     rotation: 0
     state: enabled
 - name: tail_samples
@@ -49,7 +49,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [1008, 36.0]
+    coordinate: [16, 144]
     rotation: 0
     state: enabled
 - name: blocks_file_source_0
@@ -71,7 +71,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [384, 188.0]
+    coordinate: [256, 128]
     rotation: 0
     state: enabled
 - name: blocks_stream_mux_0
@@ -90,7 +90,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [696, 248.0]
+    coordinate: [512, 128]
     rotation: 0
     state: enabled
 - name: blocks_vector_source_x_0
@@ -110,7 +110,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [352, 316.0]
+    coordinate: [256, 256]
     rotation: 0
     state: enabled
 - name: input_file
@@ -127,7 +127,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [224, 20.0]
+    coordinate: [16, 208]
     rotation: 0
     state: enabled
 - name: output_dir
@@ -144,7 +144,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [584, 20.0]
+    coordinate: [16, 336]
     rotation: 0
     state: enabled
 - name: template_file
@@ -161,7 +161,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [400, 20.0]
+    coordinate: [16, 272]
     rotation: 0
     state: enabled
 - name: uwb_detector_0
@@ -185,7 +185,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [920, 308.0]
+    coordinate: [768, 128]
     rotation: 0
     state: enabled
 - name: uwb_packet_writer_0
@@ -201,7 +201,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [1384, 348.0]
+    coordinate: [1024, 128]
     rotation: 0
     state: enabled
 

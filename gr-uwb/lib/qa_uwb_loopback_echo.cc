@@ -43,6 +43,7 @@ namespace {
 constexpr size_t kPreGuard = 1997;
 constexpr size_t kTail = 4096;
 constexpr double kFsWork = 998.4e6;
+constexpr double kFsNative = 737.28e6;
 
 std::string testdata_path(const std::string& rel)
 {
@@ -247,6 +248,12 @@ BOOST_AUTO_TEST_CASE(test_integer_delay_matches_golden)
     BOOST_CHECK_EQUAL(dict_str(meta, "uhd_error"), std::string("none"));
     BOOST_CHECK_EQUAL(dict_i64(meta, "pre_guard_samples", -1),
                       static_cast<int64_t>(kPreGuard));
+    // Scheduled-capture geometry (PDU 65/48 contract).
+    BOOST_CHECK_EQUAL(dict_i64(meta, "window_start_sample", -1), 0);
+    BOOST_CHECK_EQUAL(dict_i64(meta, "capture_samples", -1), 190912);
+    BOOST_CHECK_EQUAL(dict_i64(meta, "post_guard_samples", -1),
+                      static_cast<int64_t>(kTail));
+    BOOST_CHECK_EQUAL(dict_i64(meta, "sample_count", -1), 197005);
     BOOST_CHECK_EQUAL(dict_i64(meta, "range_guard_samples", -1),
                       static_cast<int64_t>(kTail));
     BOOST_CHECK_EQUAL(dict_i64(meta, "tx_packet_samples", -1), 190912);
@@ -497,4 +504,102 @@ BOOST_AUTO_TEST_CASE(test_invalid_profile_table)
                             std::string(row.name) + " expected " + row.event);
     }
     (void)drop_key;
+}
+
+// ---------------------------------------------------------------------------
+// Native 737.28 MS/s input (Step 9 production order: native packet ->
+// loopback -> PDU 65/48).  The loopback must accept the native grid, apply
+// delays on native sample indices and emit the scheduled-capture geometry
+// (window_start_sample / pre_guard / capture / post_guard) the 65/48
+// contract consumes.
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(test_native_rate_integer_delay)
+{
+    std::vector<gr_complex> tx(64);
+    for (size_t i = 0; i < tx.size(); ++i)
+        tx[i] = gr_complex(static_cast<float>(i) * 0.01f,
+                           static_cast<float>(i) * -0.005f);
+    constexpr size_t kPre = 8;
+    constexpr size_t kTail = 48; // must cover the 37-sample channel delay
+    const gr_complex gain = polar_gain(0.4, 0.7);
+
+    auto echo = UwbLoopbackEcho::make(kPre, kTail, { 37.0 }, { gain });
+    pmt::pmt_t pdu = run_one(echo, make_tx_pdu(tx, kFsNative));
+    BOOST_REQUIRE(pmt::is_pair(pdu));
+    auto rx = pdu_c32(pdu);
+    BOOST_REQUIRE_EQUAL(rx.size(), kPre + tx.size() + kTail);
+    // Delay applied on the native sample grid.
+    for (size_t k = 0; k < tx.size(); ++k)
+        BOOST_CHECK_SMALL(std::abs(rx[kPre + 37 + k] - gain * tx[k]), 1e-6f);
+
+    pmt::pmt_t meta = pmt::car(pdu);
+    BOOST_CHECK_CLOSE(dict_f64(meta, "sample_rate", 0.0), kFsNative, 1e-4);
+    BOOST_CHECK_EQUAL(dict_str(meta, "sample_format"), std::string("fc32"));
+    BOOST_CHECK_EQUAL(dict_i64(meta, "window_start_sample", -1), 0);
+    BOOST_CHECK_EQUAL(dict_i64(meta, "pre_guard_samples", -1), 8);
+    BOOST_CHECK_EQUAL(dict_i64(meta, "capture_samples", -1), 64);
+    BOOST_CHECK_EQUAL(dict_i64(meta, "post_guard_samples", -1), 48);
+    BOOST_CHECK_EQUAL(dict_i64(meta, "sample_count", -1), 120);
+    BOOST_CHECK_EQUAL(dict_i64(meta, "tx_packet_samples", -1), 64);
+    BOOST_CHECK_EQUAL(dict_i64(meta, "rx_capture_samples", -1), 120);
+    BOOST_CHECK_CLOSE(dict_f64(meta, "calibration_delay_native_samples", -1),
+                      37.0, 1e-9);
+    BOOST_CHECK_EQUAL(dict_str(meta, "source"), std::string("loopback"));
+    // RX window opened pre_guard before TX on the native grid.
+    const double rx_t =
+        static_cast<double>(dict_i64(meta, "rx_time_full", 0)) +
+        dict_f64(meta, "rx_time_frac", 0.0);
+    BOOST_CHECK_CLOSE(rx_t, -static_cast<double>(kPre) / kFsNative, 1e-6);
+}
+
+BOOST_AUTO_TEST_CASE(test_native_rate_frac_delay)
+{
+    std::vector<gr_complex> tx(16, gr_complex(0.3f, -0.1f));
+    auto echo = UwbLoopbackEcho::make(4, 8, { 12.4 }, { polar_gain(0.5, 0.2) });
+    pmt::pmt_t pdu = run_one(echo, make_tx_pdu(tx, kFsNative));
+    BOOST_REQUIRE(pmt::is_pair(pdu));
+    BOOST_CHECK_EQUAL(echo->pdus_emitted(), 1u);
+    BOOST_CHECK_EQUAL(echo->pdus_dropped(), 0u);
+    BOOST_CHECK_CLOSE(dict_f64(pmt::car(pdu),
+                               "calibration_delay_native_samples", -1),
+                      12.4, 1e-9);
+    BOOST_CHECK_EQUAL(dict_i64(pmt::car(pdu), "sample_count", -1), 28);
+}
+
+BOOST_AUTO_TEST_CASE(test_native_sync_span_validation)
+{
+    // Native grid validates provided SYNC/SFD spans with the ceil
+    // convention (canonical native SYNC spans 24009/48018/96036 for
+    // 32/64/128 repetitions); work-domain spans are rejected.
+    auto with_sync = [](double rate, int64_t sync_samples) {
+        std::vector<gr_complex> tx(8, gr_complex(0.2f, 0.0f));
+        pmt::pmt_t pdu = make_tx_pdu(tx, rate);
+        pmt::pmt_t meta = pmt::dict_add(pmt::car(pdu),
+                                        pmt::mp("sync_samples"),
+                                        pmt::from_long(sync_samples));
+        return pmt::cons(meta, pmt::cdr(pdu));
+    };
+
+    {
+        auto echo = UwbLoopbackEcho::make(0, 0);
+        BOOST_REQUIRE(pmt::is_pair(run_one(echo, with_sync(kFsNative, 48018))));
+        BOOST_CHECK_EQUAL(echo->pdus_emitted(), 1u);
+    }
+    {
+        auto echo = UwbLoopbackEcho::make(0, 0);
+        gr::blocks::message_debug::sptr st;
+        BOOST_CHECK(pmt::is_null(run_one(echo, with_sync(kFsNative, 65024), &st)));
+        BOOST_CHECK_EQUAL(echo->pdus_dropped(), 1u);
+        BOOST_REQUIRE(status_has(st, "invalid_profile"));
+    }
+    // Still rejected outright for rates that are neither grid.
+    {
+        auto echo = UwbLoopbackEcho::make(0, 0);
+        gr::blocks::message_debug::sptr st;
+        BOOST_CHECK(pmt::is_null(
+            run_one(echo, make_tx_pdu(std::vector<gr_complex>(8), 1.0e6), &st)));
+        BOOST_CHECK_EQUAL(echo->pdus_dropped(), 1u);
+        BOOST_REQUIRE(status_has(st, "bad_input_rate"));
+    }
 }

@@ -46,3 +46,7 @@ qa_writer_pkt/
 # Python virtualenvs
 .venv/
 venv/
+
+# Runtime artifacts from x410_uwb_radar_validate
+err.txt
+plan.json

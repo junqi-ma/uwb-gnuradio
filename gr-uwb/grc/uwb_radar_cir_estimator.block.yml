@@ -1,0 +1,100 @@
+id: uwb_radar_cir_estimator
+label: UWB Radar CIR Estimator
+category: '[UWB]'
+
+parameters:
+-   id: template_path
+    label: SYNC template (CF32, 1016 samples)
+    dtype: file_open
+    default: ''
+-   id: sync_repetitions
+    label: SYNC repetitions
+    dtype: int
+    default: '64'
+    options: ['32', '64', '128']
+    option_labels: ['32', '64', '128']
+-   id: sfd_mode
+    label: SFD mode
+    dtype: string
+    default: '4z2'
+-   id: code_index
+    label: Preamble code index
+    dtype: int
+    default: '9'
+-   id: cir_pre
+    label: CIR pre taps
+    dtype: int
+    default: '16'
+-   id: cir_post
+    label: CIR post taps
+    dtype: int
+    default: '100'
+-   id: cir_skip_initial
+    label: CIR skip initial SYNCs
+    dtype: int
+    default: '10'
+-   id: cir_repetitions
+    label: CIR repetitions (0 = auto)
+    dtype: int
+    default: '0'
+-   id: sfd_search_margin
+    label: SFD search margin (samples)
+    dtype: int
+    default: '64'
+-   id: sync_refine_margin
+    label: SYNC refine margin (samples)
+    dtype: int
+    default: '8'
+-   id: sfd_threshold
+    label: SFD threshold
+    dtype: real
+    default: '0.3'
+-   id: sync_refine_threshold
+    label: SYNC refine threshold
+    dtype: real
+    default: '0.3'
+-   id: emit_normalized
+    label: Emit normalized taps
+    dtype: bool
+    default: 'True'
+    options: ['True', 'False']
+    option_labels: ['True', 'False']
+-   id: queue_capacity
+    label: Queue capacity
+    dtype: int
+    default: '64'
+
+inputs:
+-   domain: message
+    id: rx
+    optional: true
+
+outputs:
+-   domain: message
+    id: cir
+    optional: true
+-   domain: message
+    id: status
+    optional: true
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.radar_cir_estimator(${template_path}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${cir_pre}, ${cir_post}, ${cir_skip_initial}, ${cir_repetitions}, ${sfd_search_margin}, ${sync_refine_margin}, ${sfd_threshold}, ${sync_refine_threshold}, ${emit_normalized}, ${queue_capacity})
+
+cpp_templates:
+    includes: ['#include <gnuradio/uwb/uwb_radar_cir_estimator_block.h>']
+    make: 'this->${id} = gr::uwb::UwbRadarCirEstimator::make(${template_path}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${cir_pre}, ${cir_post}, ${cir_skip_initial}, ${cir_repetitions}, ${sfd_search_margin}, ${sync_refine_margin}, ${sfd_threshold}, ${sync_refine_threshold}, ${emit_normalized}, ${queue_capacity});'
+    link: ['gnuradio::gnuradio-uwb']
+
+documentation: |-
+    Monostatic radar CIR estimator (998.4 MS/s work rate).  Input "rx" is a
+    CF32 PDU (cons(meta, c32vector)) after the 65/48 PDU resampler (or a
+    direct 998.4 loopback PDU).  The handler validates rate/profile/metadata,
+    predicts the SFD position from pre_guard + calibration delay + SYNC span
+    and enqueues; a single worker runs the header-only radar core
+    (narrow-window SFD search -> SYNC backtrack -> estimateCir-equivalent CIR,
+    no CFO).  Every enqueued pulse produces exactly one "cir" PDU; failed
+    stages (sfd_failed/timing_failed/cir_failed) carry an empty payload and
+    tap_count=0, never taps.  Invalid PDUs only produce a "status" message.
+
+file_format: 1

@@ -38,5 +38,13 @@ install(FILES
     uwb_radar_cir_core.h
     uwb_radar_packet_source.h
     uwb_loopback_echo.h
+    uwb_radar_cir_estimator_block.h
+    uwb_cir_writer.h
+    uwb_echo_scheduler_core.h
+    uwb_echo_burst_backend.h
+    uwb_fake_burst_backend.h
+    uwb_realtime_echo_timer.h
+    uwb_uhd_backend_config.h
+    uwb_uhd_burst_backend.h
     DESTINATION include/gnuradio/uwb
 )

@@ -11,8 +11,16 @@
  * scaled, optionally noisy RX window into scratch allocated at make()
  * (capacity max_rx_samples).  The handler never grows those buffers.
  *
- * Analog of gr-radar static_target_simulator_cc: EchoTimer metadata
- * schema with source="loopback" and fake tx/rx times.
+ * Input grid: both 737.28 MS/s native (production order: native packet ->
+ * loopback -> PDU 65/48) and 998.4 MS/s work (direct path) are accepted;
+ * delays/gains are sample-index domain on the input grid and the
+ * calibration delay is reported as calibration_delay_native_samples.
+ *
+ * Output metadata follows the EchoTimer / scheduled-capture schema:
+ * window_start_sample=0, pre_guard_samples, capture_samples (TX length),
+ * post_guard_samples (tail), sample_count=rx_len, source="loopback" and
+ * fake tx/rx times.  The capture geometry is what the PDU 65/48 contract
+ * requires (pre_guard + capture <= sample_count).
  */
 
 #pragma once

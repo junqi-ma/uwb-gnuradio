@@ -63,6 +63,16 @@ fractional-delay radar windows (`pre=16`, `post=100`). See `metadata.json`
 (script-generated; do not hand-edit). `metadata.generator` must remain
 `export_uwb_radar_golden.m`.
 
+`sync_template_998p4.cf32` is the first 1016 samples of `tx_998p4.cf32`
+(one SYNC symbol at 998.4 MS/s). It is the canonical `UwbRadarCirEstimator`
+template and matches the template written on the fly by the block QAs.
+Regenerate from the golden with:
+
+```python
+open("sync_template_998p4.cf32", "wb").write(
+    open("tx_998p4.cf32", "rb").read(1016 * 8))
+```
+
 SC16 storage of the same TX packets (`tx_998p4.sc16`, `tx_737p28.sc16`) is
 little-endian interleaved int16 IQ, `round(clip(x * 32767, -32768, 32767))`.
 `tx_998p4_sc16_head16.i16` is the first 16 samples of `tx_998p4.sc16` for

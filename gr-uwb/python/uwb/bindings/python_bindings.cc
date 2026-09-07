@@ -31,6 +31,8 @@
 #include <gnuradio/uwb/uwb_pdu_window_crop.h>
 #include <gnuradio/uwb/uwb_radar_packet_source.h>
 #include <gnuradio/uwb/uwb_loopback_echo.h>
+#include <gnuradio/uwb/uwb_radar_cir_estimator_block.h>
+#include <gnuradio/uwb/uwb_cir_writer.h>
 
 namespace py = pybind11;
 
@@ -646,6 +648,78 @@ void bind_loopback_echo(py::module& m)
         .def("pdus_dropped", &Blk::pdus_dropped);
 }
 
+void bind_radar_cir_estimator(py::module& m)
+{
+    using Blk = gr::uwb::UwbRadarCirEstimator;
+    py::class_<Blk, gr::block, std::shared_ptr<Blk>>(m,
+                                                     "radar_cir_estimator")
+        .def(py::init(&Blk::make),
+             py::arg("template_path"),
+             py::arg("sync_repetitions") = size_t(64),
+             py::arg("sfd_mode") = std::string("4z2"),
+             py::arg("code_index") = size_t(9),
+             py::arg("cir_pre") = size_t(16),
+             py::arg("cir_post") = size_t(100),
+             py::arg("cir_skip_initial") = size_t(10),
+             py::arg("cir_repetitions") = size_t(0),
+             py::arg("sfd_search_margin") = int64_t(64),
+             py::arg("sync_refine_margin") = int64_t(8),
+             py::arg("sfd_threshold") = 0.3f,
+             py::arg("sync_refine_threshold") = 0.3f,
+             py::arg("emit_normalized") = true,
+             py::arg("queue_capacity") = size_t(64))
+        .def("template_path", &Blk::template_path)
+        .def("sync_repetitions", &Blk::sync_repetitions)
+        .def("sfd_mode", &Blk::sfd_mode)
+        .def("code_index", &Blk::code_index)
+        .def("cir_pre", &Blk::cir_pre)
+        .def("cir_post", &Blk::cir_post)
+        .def("cir_skip_initial", &Blk::cir_skip_initial)
+        .def("cir_repetitions", &Blk::cir_repetitions)
+        .def("sfd_search_margin", &Blk::sfd_search_margin)
+        .def("sync_refine_margin", &Blk::sync_refine_margin)
+        .def("emit_normalized", &Blk::emit_normalized)
+        .def("queue_capacity", &Blk::queue_capacity)
+        .def("pdus_received", &Blk::pdus_received)
+        .def("pdus_enqueued", &Blk::pdus_enqueued)
+        .def("pdus_completed", &Blk::pdus_completed)
+        .def("pdus_failed", &Blk::pdus_failed)
+        .def("pdus_dropped", &Blk::pdus_dropped)
+        .def("invalid_inputs", &Blk::invalid_inputs)
+        .def("worker_exceptions", &Blk::worker_exceptions)
+        .def("queue_depth", &Blk::queue_depth)
+        .def("queue_high_watermark", &Blk::queue_high_watermark)
+        .def("service_mean_us", &Blk::service_mean_us)
+        .def("service_p95_us", &Blk::service_p95_us)
+        .def("service_p99_us", &Blk::service_p99_us)
+        .def("service_max_us", &Blk::service_max_us)
+        .def("drained", &Blk::drained)
+        .def("drain", &Blk::drain)
+        .def("reset_stats", &Blk::reset_stats);
+}
+
+void bind_cir_writer(py::module& m)
+{
+    using Blk = gr::uwb::UwbCirWriter;
+    py::class_<Blk, gr::block, std::shared_ptr<Blk>>(m, "cir_writer")
+        .def(py::init(&Blk::make),
+             py::arg("directory"),
+             py::arg("base_name") = std::string("cir"),
+             py::arg("write_normalized") = false,
+             py::arg("queue_capacity") = size_t(64))
+        .def("directory", &Blk::directory)
+        .def("base_name", &Blk::base_name)
+        .def("write_normalized", &Blk::write_normalized)
+        .def("queue_capacity", &Blk::queue_capacity)
+        .def("frames_received", &Blk::frames_received)
+        .def("frames_written", &Blk::frames_written)
+        .def("frames_failed", &Blk::frames_failed)
+        .def("frames_dropped", &Blk::frames_dropped)
+        .def("frames_invalid", &Blk::frames_invalid)
+        .def("taps_written", &Blk::taps_written)
+        .def("queue_high_watermark", &Blk::queue_high_watermark);
+}
+
 // We need this hack because import_array() returns NULL
 // for newer Python versions.
 // This function is also necessary because it ensures access to the C API
@@ -678,4 +752,6 @@ PYBIND11_MODULE(uwb_python, m)
     bind_pdu_window_crop(m);
     bind_radar_packet_source(m);
     bind_loopback_echo(m);
+    bind_radar_cir_estimator(m);
+    bind_cir_writer(m);
 }

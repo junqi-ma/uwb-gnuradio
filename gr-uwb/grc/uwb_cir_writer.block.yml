@@ -1,0 +1,54 @@
+id: uwb_cir_writer
+label: UWB CIR Writer
+category: '[UWB]'
+
+parameters:
+-   id: directory
+    label: Output directory
+    dtype: string
+    default: './cir_out'
+-   id: base_name
+    label: File base name
+    dtype: string
+    default: 'cir'
+-   id: write_normalized
+    label: Write normalized CIR
+    dtype: bool
+    default: 'False'
+    options: ['True', 'False']
+    option_labels: ['True', 'False']
+-   id: queue_capacity
+    label: Queue capacity
+    dtype: int
+    default: '64'
+
+inputs:
+-   domain: message
+    id: cir
+    optional: true
+
+outputs:
+-   domain: message
+    id: status
+    optional: true
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.cir_writer(${directory}, ${base_name}, ${write_normalized}, ${queue_capacity})
+
+cpp_templates:
+    includes: ['#include <gnuradio/uwb/uwb_cir_writer.h>']
+    make: 'this->${id} = gr::uwb::UwbCirWriter::make(${directory}, ${base_name}, ${write_normalized}, ${queue_capacity});'
+    link: ['gnuradio::gnuradio-uwb']
+
+documentation: |-
+    Per-pulse CIR disk writer.  Input "cir" is the UwbRadarCirEstimator
+    output PDU.  Files: <base>.cf32 (raw complex64 LE taps),
+    <base>_norm.cf32 (optional L2-normalized taps), <base>.jsonl (one line
+    per pulse) and run.json (static run configuration).  Only status=="ok"
+    frames append taps and advance file_offset_taps; failed frames
+    (sfd_failed/timing_failed/cir_failed) write a JSONL line with
+    tap_count=0 and leave the offsets unchanged.  MATLAB:
+    [cir, meta] = read_uwb_cir(dir, pulseId).
+
+file_format: 1

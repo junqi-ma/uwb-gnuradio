@@ -36,6 +36,23 @@ output，全速率只运行整数能量门；候选 Region 在后台转换一次
 最终原始 SC16 PDU 直接写盘。与 scheduled 图不同，它会处理所有通过能量门的
 通信/雷达候选，因此密集通信环境下仍优先使用已知 `t0/T` 的 scheduled 路径。
 
+## `uwb_radar_loopback_cir.grc`
+
+纯消息链路的单站雷达软件回环（无 UHD）：
+
+```text
+Message Strobe (每 PRI 一个 emit)
+→ Radar Packet Source（加载完整 TX packet，testdata/uwb_radar/tx_998p4.cf32）
+→ Loopback Echo（整数/分数时延、多径、AWGN）
+→ Radar CIR Estimator（998.4 MS/s，SYNC 模板 sync_template_998p4.cf32）
+→ CIR Writer（cir.cf32 / cir_norm.cf32 / cir.jsonl / run.json）
+```
+
+Estimator 的 `status` 接 Message Debug 便于观察失败帧。把 strobe 删掉并将
+Packet Source 的 `auto_emit` 置 True 即为单脉冲模式；`echo_delays` /
+`echo_gains` 变量控制回波信道。CIR 产物用
+`testdata/uwb_radar/read_uwb_cir.m` 读取。
+
 ## 编译校验
 
 从源码树使用自定义 block YAML：
@@ -44,7 +61,14 @@ output，全速率只运行整数能量门；候选 Region 在后台转换一次
 GRC_BLOCKS_PATH=$PWD/gr-uwb/grc grcc -o /tmp/uwb-grcc \
   gr-uwb/examples/uwb_detector_to_writer.grc \
   gr-uwb/examples/uwb_scheduled_file_capture.grc \
-  gr-uwb/examples/x410_rfnoc_uwb_scheduled.grc
+  gr-uwb/examples/x410_rfnoc_uwb_scheduled.grc \
+  gr-uwb/examples/uwb_radar_loopback_cir.grc
 ```
 
 安装 OOT module 后，GRC 会从标准 block path 自动发现这些块。
+
+运行 `uwb_radar_loopback_cir.grc` 生成的脚本（未安装 OOT 时）：
+
+```bash
+PYTHONPATH=$PWD/gr-uwb/build/test_modules python3 /tmp/uwb-grcc/uwb_radar_loopback_cir.py
+```

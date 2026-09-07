@@ -13,6 +13,50 @@ include(GrPlatform) #define LIB_SUFFIX
 
 include_directories(../include)
 
+########################################################################
+# Optional UHD backend (Radar Step 11)
+#
+# ENABLE_UHD_BACKEND: AUTO (default) = build the UhdBurstBackend when UHD
+# is found; ON = require UHD (configure error when missing); OFF = never.
+# Without UHD the whole library (Phase A, EchoTimer, fake backend, all
+# QA) builds and tests unchanged; the UHD-dependent TU is simply not
+# compiled and uwb_uhd_burst_backend.h #errors if included directly.
+########################################################################
+set(ENABLE_UHD_BACKEND "AUTO" CACHE STRING
+    "Build the UHD burst backend: AUTO (build when UHD found), ON (require UHD), OFF (never)")
+set_property(CACHE ENABLE_UHD_BACKEND PROPERTY STRINGS AUTO ON OFF)
+string(TOUPPER "${ENABLE_UHD_BACKEND}" ENABLE_UHD_BACKEND_UC)
+if(NOT ENABLE_UHD_BACKEND_UC MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR
+        "ENABLE_UHD_BACKEND must be AUTO, ON or OFF "
+        "(got '${ENABLE_UHD_BACKEND}')")
+endif()
+
+set(UWB_HAVE_UHD 0)
+if(NOT ENABLE_UHD_BACKEND_UC STREQUAL "OFF")
+    find_package(UHD CONFIG QUIET)
+    if(NOT UHD_FOUND)
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(UHD_PC QUIET uhd)
+        endif()
+    endif()
+    if(UHD_FOUND OR UHD_PC_FOUND)
+        set(UWB_HAVE_UHD 1)
+    elseif(ENABLE_UHD_BACKEND_UC STREQUAL "ON")
+        message(FATAL_ERROR
+            "ENABLE_UHD_BACKEND=ON but UHD was not found "
+            "(install libuhd-dev / UHD CMake or pkg-config support). "
+            "Use ENABLE_UHD_BACKEND=AUTO to skip the backend instead.")
+    else()
+        message(STATUS
+            "UHD not found: UhdBurstBackend disabled; the library, "
+            "EchoTimer fake-backend QA and dry-run build without UHD.")
+    endif()
+endif()
+message(STATUS "UHD burst backend (ENABLE_UHD_BACKEND=${ENABLE_UHD_BACKEND_UC}): "
+    "${UWB_HAVE_UHD}")
+
 list(APPEND uwb_sources
     uwb_energy_detector.cc
     uwb_preamble_detector.cc
@@ -28,7 +72,13 @@ list(APPEND uwb_sources
     uwb_pdu_window_crop.cc
     uwb_radar_packet_source.cc
     uwb_loopback_echo.cc
+    uwb_radar_cir_estimator_block.cc
+    uwb_cir_writer.cc
+    uwb_realtime_echo_timer.cc
 )
+if(UWB_HAVE_UHD)
+    list(APPEND uwb_sources uwb_uhd_burst_backend.cc)
+endif()
 
 set(uwb_sources "${uwb_sources}" PARENT_SCOPE)
 
@@ -47,6 +97,20 @@ target_link_libraries(gnuradio-uwb
     Volk::volk
     Threads::Threads
 )
+if(UWB_HAVE_UHD)
+    if(NOT TARGET UHD::UHD)
+        add_library(UHD::UHD INTERFACE IMPORTED GLOBAL)
+        if(UHD_INCLUDE_DIRS)
+            set_target_properties(UHD::UHD PROPERTIES
+                INTERFACE_INCLUDE_DIRECTORIES "${UHD_INCLUDE_DIRS}")
+        endif()
+        set_target_properties(UHD::UHD PROPERTIES
+            INTERFACE_LINK_LIBRARIES "${UHD_LIBRARIES};${UHD_PC_LIBRARIES}")
+    endif()
+    target_link_libraries(gnuradio-uwb UHD::UHD)
+    # Public so consumers including uwb_uhd_burst_backend.h see the guard.
+    target_compile_definitions(gnuradio-uwb PUBLIC UWB_HAVE_UHD=1)
+endif()
 target_include_directories(gnuradio-uwb
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
     PUBLIC $<INSTALL_INTERFACE:include>
@@ -103,6 +167,11 @@ list(APPEND test_uwb_sources
     qa_uwb_radar_cir_core.cc
     qa_uwb_radar_packet_source.cc
     qa_uwb_loopback_echo.cc
+    qa_uwb_radar_cir_estimator_block.cc
+    qa_uwb_cir_writer.cc
+    qa_uwb_echo_timer.cc
+    qa_uwb_radar_e2e.cc
+    qa_uwb_uhd_backend.cc
 )
 # Anything we need to link to for the unit tests go here
 list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks)
@@ -117,6 +186,17 @@ foreach(qa_file ${test_uwb_sources})
         ${CMAKE_CURRENT_SOURCE_DIR}/${qa_file}
     )
 endforeach(qa_file)
+
+# UHD-gated runtime QA: only compiled when UHD is available; verifies the
+# device-unavailable contract without any USRP (skips when one exists).
+if(UWB_HAVE_UHD)
+    GR_ADD_CPP_TEST("uwb_qa_uwb_uhd_backend_device.cc"
+        ${CMAKE_CURRENT_SOURCE_DIR}/qa_uwb_uhd_backend_device.cc
+    )
+    # Device discovery can take several seconds on transport timeouts.
+    set_tests_properties(uwb_qa_uwb_uhd_backend_device.cc PROPERTIES
+        TIMEOUT 300)
+endif()
 
 # qa_uwb_defaults reads GRC YAML next to the source tree.
 target_compile_definitions(uwb_qa_uwb_defaults.cc PRIVATE
@@ -145,3 +225,37 @@ target_compile_definitions(uwb_qa_uwb_radar_packet_source.cc PRIVATE
 
 target_compile_definitions(uwb_qa_uwb_loopback_echo.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
+target_compile_definitions(uwb_qa_uwb_radar_cir_estimator_block.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
+target_compile_definitions(uwb_qa_uwb_radar_e2e.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
+########################################################################
+# UHD backend dry-run CLI (Radar Step 11)
+#
+# Pure-contract printer: includes NO UHD header and links neither UHD nor
+# gnuradio-uwb, so it cannot open a device by construction.  Registered
+# in CTest in both build configurations (UHD ON and OFF).
+########################################################################
+add_executable(uwb_uhd_burst_dry_run uwb_uhd_dry_run.cc)
+target_compile_definitions(uwb_uhd_burst_dry_run PRIVATE UWB_NO_UHD_LINK=1)
+
+add_test(NAME uwb_uhd_burst_dry_run
+    COMMAND uwb_uhd_burst_dry_run
+        --device-args addr=192.168.10.2
+        --rate 737280000
+        --tx-channel 0 --rx-channel 1
+        --clock-source internal --time-source internal
+        --pri-num 3686400 --pri-den 1
+        --pre-guard-ticks 1475
+        --tx-samples 140982 --rx-samples 55591
+        --max-fragment-size 65536
+        --t0-ticks 36864000
+        --schedule-index 0)
+
+add_test(NAME uwb_uhd_burst_dry_run_rejects_invalid_config
+    COMMAND uwb_uhd_burst_dry_run --pri-num 0)
+set_tests_properties(uwb_uhd_burst_dry_run_rejects_invalid_config
+    PROPERTIES WILL_FAIL TRUE)

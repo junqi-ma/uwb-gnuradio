@@ -43,27 +43,27 @@ blocks:
 - name: uhd_rfnoc_graph_0
   id: uhd_rfnoc_graph
   parameters: {clock_source_0: internal, dev_addr: '"addr=192.168.10.2"', dev_args: '""', num_mboards: '1', time_source_0: ''}
-  states: {coordinate: [240, 32], rotation: 0, state: enabled}
+  states: {coordinate: [256, 32], rotation: 0, state: enabled}
 - name: uhd_rfnoc_rx_radio_0
   id: uhd_rfnoc_rx_radio
   parameters: {agc: Default, antenna: RX2, bandwidth: '0', block_args: '""', dc_offset: 'False', device_select: '0', frequency: '6.5e9', gain: '20', instance_index: '0', iq_balance: 'False', num_chans: '1', rate: radio_rate}
-  states: {coordinate: [240, 128], rotation: 0, state: enabled}
+  states: {coordinate: [256, 128], rotation: 0, state: enabled}
 - name: uhd_rfnoc_rx_streamer_0
   id: uhd_rfnoc_rx_streamer
   parameters: {num_chans: '1', otw: sc16, output_type: fc32}
-  states: {coordinate: [496, 128], rotation: 0, state: enabled}
+  states: {coordinate: [512, 128], rotation: 0, state: enabled}
 - name: uwb_rational_resampler_ccf_65_48_0
   id: uwb_rational_resampler_ccf_65_48
   parameters: {reset_on_discontinuity: 'True', tag_propagation_enable: 'True', taps_file_or_profile: '"quality"'}
-  states: {coordinate: [736, 128], rotation: 0, state: enabled}
+  states: {coordinate: [768, 128], rotation: 0, state: enabled}
 - name: uwb_scheduled_extractor_0
   id: uwb_scheduled_extractor
   parameters: {capture_samples: '189696', first_packet_sample: first_packet_sample, packet_interval_s: '0.005', pool_size: '16', post_guard_samples: '4096', pre_guard_samples: '9984', sample_rate: samp_rate, verification_enabled: 'False'}
-  states: {coordinate: [976, 128], rotation: 0, state: enabled}
+  states: {coordinate: [1024, 128], rotation: 0, state: enabled}
 - name: uwb_packet_writer_0
   id: uwb_packet_writer
   parameters: {base_name: capture, directory: output_dir, one_file_per_packet: 'False'}
-  states: {coordinate: [1248, 128], rotation: 0, state: enabled}
+  states: {coordinate: [1280, 128], rotation: 0, state: enabled}
 connections:
 - [uhd_rfnoc_rx_radio_0, '0', uhd_rfnoc_rx_streamer_0, '0']
 - [uhd_rfnoc_rx_streamer_0, '0', uwb_rational_resampler_ccf_65_48_0, '0']

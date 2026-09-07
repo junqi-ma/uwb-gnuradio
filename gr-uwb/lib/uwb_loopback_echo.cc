@@ -350,6 +350,7 @@ UwbLoopbackEcho::apply_frac_path(size_t rx_len, double delay, gr_complex gain)
 
 struct TxProfile {
     double sample_rate = 0.0;
+    bool native_rate = false;
     std::string sample_format;
     size_t sync_reps = 0;
     std::string sfd_mode;
@@ -357,6 +358,15 @@ struct TxProfile {
     int64_t sync_samples = -1;
     int64_t sfd_samples = -1;
 };
+
+// Native 737.28 grid length of a work-domain sample count: the 48/65
+// down-conversion convention used by the 65/48 contract (ceil, matching
+// the canonical native SYNC lengths 24009/48018/96036 for 32/64/128 reps).
+inline int64_t native_span(int64_t work_samples)
+{
+    const int64_t scaled = work_samples * 48;
+    return (scaled + 64) / 65;
+}
 
 // Returns status event name on failure, empty string on success.
 std::string validate_loopback_profile(pmt::pmt_t meta,
@@ -367,7 +377,13 @@ std::string validate_loopback_profile(pmt::pmt_t meta,
     if (!radar_meta::dict_has(meta, "sample_rate"))
         return "bad_input_rate";
     out.sample_rate = dict_f64(meta, "sample_rate", 0.0);
-    if (!radar_meta::is_work_rate(out.sample_rate))
+    // The loopback is the software stand-in for the EchoTimer RX window and
+    // must accept both the native 737.28 MS/s capture grid (production
+    // path: native packet -> loopback -> PDU 65/48) and the 998.4 MS/s
+    // work grid (direct path).  Delays are sample-index domain in the
+    // input grid either way.
+    out.native_rate = radar_meta::is_native_rate(out.sample_rate);
+    if (!out.native_rate && !radar_meta::is_work_rate(out.sample_rate))
         return "bad_input_rate";
 
     out.sample_format = dict_str(meta, "sample_format", "");
@@ -419,10 +435,21 @@ std::string validate_loopback_profile(pmt::pmt_t meta,
         dict_i64(meta, radar_meta::kRangeGuardSamples, 0) < 0)
         return "invalid_profile";
 
-    const int64_t expect_sync = static_cast<int64_t>(
-        out.sync_reps * demod::kQm35SamplesPerSymbol);
-    const int64_t expect_sfd = static_cast<int64_t>(
-        sfd.size() * demod::kQm35SamplesPerSymbol);
+    // Expected SYNC/SFD spans depend on the input grid: 1016 work samples
+    // per symbol at 998.4 MS/s, ceil(work*48/65) native samples per symbol
+    // at 737.28 MS/s.
+    const int64_t expect_sync =
+        out.native_rate
+            ? native_span(static_cast<int64_t>(out.sync_reps) *
+                          static_cast<int64_t>(demod::kQm35SamplesPerSymbol))
+            : static_cast<int64_t>(out.sync_reps *
+                                   demod::kQm35SamplesPerSymbol);
+    const int64_t expect_sfd =
+        out.native_rate
+            ? native_span(static_cast<int64_t>(sfd.size()) *
+                          static_cast<int64_t>(demod::kQm35SamplesPerSymbol))
+            : static_cast<int64_t>(sfd.size() *
+                                   demod::kQm35SamplesPerSymbol);
     out.sync_samples = expect_sync;
     out.sfd_samples = expect_sfd;
     if (radar_meta::dict_has(meta, radar_meta::kSyncSamples)) {
@@ -606,6 +633,19 @@ UwbLoopbackEcho::handle_tx(pmt::pmt_t msg)
                          pmt::mp(sample_format));
     meta = pmt::dict_add(meta, pmt::mp("pre_guard_samples"),
                          pmt::from_long(static_cast<long>(d_pre_guard_)));
+    // Scheduled-capture geometry (PDU 65/48 contract): the RX PDU is the
+    // window [0, rx_len) with the echoed packet as the capture body.
+    // window_start_sample = 0 (no absolute device grid in loopback),
+    // capture = TX length, post guard = tail.  The resampler maps these
+    // onto the work grid; without capture_samples a non-zero pre_guard
+    // cannot satisfy pre_guard + capture <= sample_count and would be
+    // dropped as invalid_metadata.
+    meta = pmt::dict_add(meta, pmt::mp("window_start_sample"),
+                         pmt::from_long(0));
+    meta = pmt::dict_add(meta, pmt::mp("capture_samples"),
+                         pmt::from_long(static_cast<long>(tx_len)));
+    meta = pmt::dict_add(meta, pmt::mp("post_guard_samples"),
+                         pmt::from_long(static_cast<long>(d_tail_)));
     if (sync_samples >= 0) {
         meta = pmt::dict_add(meta, pmt::mp(radar_meta::kSyncSamples),
                              pmt::from_long(sync_samples));
