@@ -503,4 +503,35 @@ BOOST_AUTO_TEST_CASE(test_unsupported_sync_reps_throws)
     const std::string path = testdata_path("uwb_radar/tx_998p4.cf32");
     BOOST_REQUIRE(throws_make(path, 998.4e6, "fc32", 16));
     BOOST_REQUIRE(throws_make(path, 998.4e6, "fc32", 0));
+    BOOST_REQUIRE(throws_make(path, 998.4e6, "fc32", 48));
+    BOOST_REQUIRE(throws_make(path, 998.4e6, "fc32", 4096));
+    BOOST_CHECK(gr::uwb::radar_meta::sync_reps_supported(32));
+    BOOST_CHECK(gr::uwb::radar_meta::sync_reps_supported(256));
+    BOOST_CHECK(gr::uwb::radar_meta::sync_reps_supported(512));
+    BOOST_CHECK(gr::uwb::radar_meta::sync_reps_supported(1024));
+    BOOST_CHECK(gr::uwb::radar_meta::sync_reps_supported(2048));
+    BOOST_CHECK(!gr::uwb::radar_meta::sync_reps_supported(4096));
+}
+
+BOOST_AUTO_TEST_CASE(test_sync256_min_length_work_packet)
+{
+    const size_t n_sync = 256;
+    const size_t n = n_sync * 1016 + 8 * 1016;
+    const std::string path = "/tmp/uwb_qa_sync256_min.cf32";
+    {
+        std::vector<gr_complex> z(n, gr_complex(0.01f, 0.0f));
+        std::ofstream f(path, std::ios::binary);
+        BOOST_REQUIRE(f);
+        f.write(reinterpret_cast<const char*>(z.data()),
+                static_cast<std::streamsize>(n * sizeof(gr_complex)));
+    }
+    auto blk = UwbRadarPacketSource::make(path, 998.4e6, "fc32", n_sync);
+    BOOST_CHECK_EQUAL(blk->num_samples(), n);
+    BOOST_CHECK_EQUAL(blk->sync_repetitions(), n_sync);
+    pmt::pmt_t pdu = run_emit(blk, pmt::make_dict());
+    BOOST_REQUIRE(pmt::is_pair(pdu));
+    BOOST_CHECK_EQUAL(dict_i64(pmt::car(pdu), "sync_repetitions", -1),
+                      static_cast<int64_t>(n_sync));
+    BOOST_CHECK_EQUAL(dict_i64(pmt::car(pdu), "sync_samples", -1),
+                      static_cast<int64_t>(n_sync * 1016));
 }

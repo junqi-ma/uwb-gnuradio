@@ -1,12 +1,25 @@
-function meta = export_uwb_radar_packet(outDir, preambleSymbols)
-%EXPORT_UWB_RADAR_PACKET  Complete pulse-shaped packet golden for one SYNC length.
+function meta = export_uwb_radar_packet(outDir, preambleSymbols, varargin)
+%EXPORT_UWB_RADAR_PACKET  Complete pulse-shaped packet for one SYNC / PSDU.
 %
-%   META = EXPORT_UWB_RADAR_PACKET(OUTDIR, NSYNC) writes a full
-%   lrwpanWaveformGenerator packet (SYNC+SFD+PHR+PSDU/FCS), one-shot
-%   resample(x,48,65) native TX, clean RX loopback, and radar CIR goldens.
+%   META = EXPORT_UWB_RADAR_PACKET(OUTDIR, NSYNC) writes SYNC+SFD+STS+PHR+PSDU
+%   at 998.4 MS/s, one-shot native TX at 737.28 (48/65) and 491.52 (32/65),
+%   plus a clean RX loopback and radar CIR goldens.
 %
-%   NSYNC is 32, 64, or 128. Does not overwrite testdata/uwb_radar/ canonical
-%   64-SYNC files unless OUTDIR points there.
+%   NSYNC is 32, 64, 128, 256, 512, 1024 or 2048.
+%   IEEE BPRF PreambleDuration native in MATLAB is 16/64/1024/4096.  Other
+%   lengths crop or tile the pulse-shaped SYNC field of a 64- or 1024-SYNC
+%   complete packet (never 751-sample template repeats).
+%
+%   Name-value:
+%     'PSDUBytes'   (default 0)  random data-byte count.  0 → PSDULength=0.
+%                                N>0 appends IEEE 802.15.4 FCS (PSDU=N+2)
+%                                unless 'AppendFCS' is false.
+%     'PSDUHex'     exact PSDU bytes (hex string).  Overrides PSDUBytes.
+%     'RandomSeed'  (default 20260904)
+%     'AppendFCS'   (default true when using PSDUBytes>0)
+%
+%   Does not overwrite testdata/uwb_radar/ canonical 64-SYNC 20-byte files
+%   unless OUTDIR points there.
 
     if nargin < 1 || isempty(outDir)
         error('export_uwb_radar_packet:Arg', 'outDir required');
@@ -14,9 +27,23 @@ function meta = export_uwb_radar_packet(outDir, preambleSymbols)
     if nargin < 2 || isempty(preambleSymbols)
         error('export_uwb_radar_packet:Arg', 'preambleSymbols required');
     end
-    if ~ismember(preambleSymbols, [32 64 128])
-        error('export_uwb_radar_packet:Sync', 'SYNC length must be 32, 64, or 128');
+    allowedSync = [32 64 128 256 512 1024 2048];
+    if ~ismember(preambleSymbols, allowedSync)
+        error('export_uwb_radar_packet:Sync', ...
+            'SYNC length must be 32, 64, 128, 256, 512, 1024 or 2048');
     end
+
+    p = inputParser;
+    addParameter(p, 'PSDUBytes', 0, @(x) isnumeric(x) && isscalar(x) && x >= 0);
+    addParameter(p, 'PSDUHex', '', @(x) ischar(x) || isstring(x));
+    addParameter(p, 'RandomSeed', 20260904, @(x) isnumeric(x) && isscalar(x));
+    addParameter(p, 'AppendFCS', true, @(x) islogical(x) && isscalar(x));
+    parse(p, varargin{:});
+    nDataBytes = double(p.Results.PSDUBytes);
+    psduHex = char(p.Results.PSDUHex);
+    rngSeed = double(p.Results.RandomSeed);
+    appendFcs = logical(p.Results.AppendFCS);
+
     if ~exist(outDir, 'dir')
         mkdir(outDir);
     end
@@ -28,13 +55,12 @@ function meta = export_uwb_radar_packet(outDir, preambleSymbols)
 
     fs = 998.4e6;
     fsNative = 737.28e6;
+    fsCg400 = 491.52e6;
     peakAmp = 0.8;
-    rngSeed = 20260904;
     codeIndex = 9;
     samplesPerPulse = 2;
     meanPrf = 62.4;
     dataRate = 6.81;
-    nDataBytes = 20;
     sfdSeq = [-1; -1; -1; 1; -1; -1; 1; -1];
     c = 299792458;
     radarRangeM = 15;
@@ -43,30 +69,17 @@ function meta = export_uwb_radar_packet(outDir, preambleSymbols)
     tailSamples = 4096;
     preGuard = round(2e-6 * fs);
     cirRadarPost = ceil(2 * radarRangeM / c * fs);
-    up = 48;
-    down = 65;
-    half = 10;
 
-    % BPRF / 802.15.4a PreambleDuration is 16/64/1024/4096. 32 and 128 are
-    % HPRF-only in lrwpanHRPConfig. Build those from a MATLAB 64-SYNC
-    % complete packet (SYNC+SFD+PHR+PSDU/FCS), then crop/repeat the
-    % pulse-shaped SYNC field. This is a custom profile, not a SYNC+SFD
-    % fragment and not HPRF.
-    baseSync = 64;
-    cfg = make_hrp_config(meanPrf, dataRate, baseSync, ...
-        codeIndex, samplesPerPulse, nDataBytes + 2);
-
-    rng(rngSeed, 'twister');
-    dataBytes = uint8(randi([0 255], nDataBytes, 1));
-    fcs = uwbdecoder.ieee802154CRC16(dataBytes);
-    fcsBytes = uint8([bitand(fcs, 255); bitshift(fcs, -8)]);
-    payloadBytes = [dataBytes; fcsBytes];
+    [payloadBytes, psduMode] = build_psdu(nDataBytes, psduHex, rngSeed, appendFcs);
     psduBytes = numel(payloadBytes);
-    payloadBits = zeros(psduBytes * 8, 1);
-    for i = 1:numel(payloadBits)
-        payloadBits(i) = bitand(bitshift(uint16(payloadBytes(floor((i-1)/8)+1)), ...
-            -(mod(i-1, 8))), 1);
+    if psduBytes > 127
+        error('export_uwb_radar_packet:PSDU', 'PSDULength %d exceeds 127', psduBytes);
     end
+    payloadBits = bytes_to_lsb_bits(payloadBytes);
+
+    nativeBase = pick_native_base(preambleSymbols);
+    cfg = make_hrp_config(meanPrf, dataRate, nativeBase, ...
+        codeIndex, samplesPerPulse, psduBytes);
 
     [basePkt, ~] = lrwpanWaveformGenerator(payloadBits, cfg);
     basePkt = complex(basePkt(:), zeros(numel(basePkt), 1));
@@ -78,33 +91,22 @@ function meta = export_uwb_radar_packet(outDir, preambleSymbols)
 
     idx = lrwpanHRPFieldIndices(cfg);
     samplesPerSymbol = (idx.SYNC(end) - idx.SYNC(1) + 1) / cfg.PreambleDuration;
-    syncField = basePkt(idx.SYNC(1):idx.SYNC(end));
-    sfdField = basePkt(idx.SFD(1):idx.SFD(end));
-    restField = basePkt(idx.SFD(end)+1:end);
-    if preambleSymbols == 64
-        packet = basePkt;
-        profileKind = 'standard';
-        construction = 'lrwpanWaveformGenerator BPRF 64-SYNC complete packet';
-    elseif preambleSymbols == 32
-        nKeep = 32 * samplesPerSymbol;
-        packet = [syncField(1:nKeep); sfdField; restField];
-        profileKind = 'custom_sync_length';
-        construction = ['MATLAB BPRF 64-SYNC complete packet; keep first 32 ', ...
-            'pulse-shaped SYNC symbols + original SFD/PHR/PSDU/FCS'];
-    else
-        packet = [syncField; syncField; sfdField; restField];
-        profileKind = 'custom_sync_length';
-        construction = ['MATLAB BPRF 64-SYNC complete packet; concatenate the ', ...
-            'pulse-shaped SYNC field twice + original SFD/PHR/PSDU/FCS'];
+    if samplesPerSymbol ~= 1016
+        error('export_uwb_radar_packet:Sps', 'expected 1016 samples/symbol, got %g', ...
+            samplesPerSymbol);
     end
+    syncField = basePkt(idx.SYNC(1):idx.SYNC(end));
+    restField = basePkt(idx.SYNC(end)+1:end); % SFD + STS + PHR + payload
+    [packet, profileKind, construction] = assemble_sync( ...
+        syncField, restField, preambleSymbols, nativeBase, samplesPerSymbol);
     packet = packet(:);
     syncOriginTx = 0;
     sfdStartTx = preambleSymbols * samplesPerSymbol;
 
-    native = resample(double(packet), up, down);
-    native = single(native(:));
-    ntaps = 2 * half * max(up, down) + 1;
-    gdScipy = (ntaps - 1) / 2 / down;
+    native737 = single(resample(double(packet), 48, 65));
+    native491 = single(resample(double(packet), 32, 65));
+    ntaps48 = 2 * 10 * max(48, 65) + 1;
+    ntaps32 = 2 * 10 * max(32, 65) + 1;
 
     rxClean = embed_tx(packet, preGuard, tailSamples, 0, 1);
     ref = local_reference(cfg, codeIndex, fs, samplesPerSymbol);
@@ -114,15 +116,16 @@ function meta = export_uwb_radar_packet(outDir, preambleSymbols)
 
     files = struct();
     files.tx_998p4 = write_cf32(fullfile(outDir, 'tx_998p4.cf32'), packet);
-    files.tx_737p28 = write_cf32(fullfile(outDir, 'tx_737p28.cf32'), native);
+    files.tx_737p28 = write_cf32(fullfile(outDir, 'tx_737p28.cf32'), native737);
+    files.tx_491p52 = write_cf32(fullfile(outDir, 'tx_491p52.cf32'), native491);
     files.rx_clean_998p4 = write_cf32(fullfile(outDir, 'rx_clean_998p4.cf32'), rxClean);
     files.cir_raw_clean_radar = write_cf32(fullfile(outDir, 'cir_raw_clean_radar.cf32'), cirClean.raw);
     files.cir_norm_clean_radar = write_cf32(fullfile(outDir, 'cir_norm_clean_radar.cf32'), cirClean.norm);
 
     meta = struct();
-    meta.description = sprintf(['Complete UWB radar packet golden: code 9, %d SYNC, ', ...
-        'SFDNumber=2 (4z2), 20 data bytes + IEEE 802.15.4 FCS, 998.4 MS/s + ', ...
-        'one-shot 48/65 native.'], preambleSymbols);
+    meta.description = sprintf(['Complete UWB radar packet: code 9, %d SYNC, ', ...
+        'SFDNumber=2 (4z2), PSDU %d bytes (%s), 998.4 MS/s + one-shot ', ...
+        '48/65 and 32/65 native.'], preambleSymbols, psduBytes, psduMode);
     meta.matlab_version = version;
     try
         meta.matlab_release = version('-release');
@@ -131,12 +134,18 @@ function meta = export_uwb_radar_packet(outDir, preambleSymbols)
     end
     meta.phy_mode = cfg.Mode;
     meta.profile_kind = profileKind;
-    meta.base_preamble_duration = baseSync;
+    meta.base_preamble_duration = nativeBase;
     meta.construction = construction;
     meta.sfd_number = 2;
+    meta.psdu_mode = psduMode;
     meta.psdu_data_bytes = nDataBytes;
-    meta.psdu_fcs_bytes = 2;
-    meta.payload_bytes_hex = sprintf('%02X', payloadBytes);
+    meta.psdu_fcs_bytes = double(appendFcs && isempty(psduHex) && nDataBytes > 0) * 2;
+    if isempty(payloadBytes)
+        meta.payload_bytes_hex = '';
+    else
+        meta.payload_bytes_hex = sprintf('%02X', payloadBytes);
+    end
+    meta.psdu_length_bytes = psduBytes;
     meta.sample_format = 'fc32';
     meta.dtype = 'complex64';
     meta.byte_order = 'little-endian';
@@ -145,6 +154,7 @@ function meta = export_uwb_radar_packet(outDir, preambleSymbols)
     meta.sample_index_base = 0;
     meta.rate_work_hz = fs;
     meta.rate_native_hz = fsNative;
+    meta.rate_native_cg400_hz = fsCg400;
     meta.code_index = codeIndex;
     meta.sync_repetitions = preambleSymbols;
     meta.sfd_mode = '4z2';
@@ -153,17 +163,16 @@ function meta = export_uwb_radar_packet(outDir, preambleSymbols)
     meta.peak_amplitude = peakAmp;
     meta.rng_seed = rngSeed;
     meta.tx_length_998p4 = numel(packet);
-    meta.tx_length_737p28 = numel(native);
+    meta.tx_length_737p28 = numel(native737);
+    meta.tx_length_491p52 = numel(native491);
     meta.coordinates_0based = struct( ...
         'tx_998p4', struct('sync_origin', syncOriginTx, 'sfd_start', sfdStartTx), ...
         'rx_clean_998p4', struct('sync_origin', preGuard + syncOriginTx, ...
             'sfd_start', preGuard + sfdStartTx));
-    meta.resample = struct('interp', up, 'decim', down, 'half_length', half, ...
-        'window', {{'kaiser', 5.0}}, ...
-        'group_delay_samples', 0, ...
-        'group_delay_domain', 'native_737p28_matlab_resample_compensated', ...
-        'ntaps', ntaps, ...
-        'scipy_equivalent_group_delay_samples', gdScipy);
+    meta.resample = struct('interp_uc200', 48, 'decim_uc200', 65, ...
+        'interp_cg400', 32, 'decim_cg400', 65, ...
+        'half_length', 10, 'window', {{'kaiser', 5.0}}, ...
+        'ntaps_48_65', ntaps48, 'ntaps_32_65', ntaps32);
     meta.rx_window = struct('pre_guard_samples', preGuard, 'pre_guard_s', 2e-6, ...
         'tail_samples', tailSamples, 'length_998p4', numel(rxClean), 'cfo_hz', 0);
     meta.cir = struct();
@@ -178,16 +187,14 @@ function meta = export_uwb_radar_packet(outDir, preambleSymbols)
         'valid_repetitions_clean', cirClean.valid);
     meta.files = struct('tx_998p4_cf32', files.tx_998p4, ...
         'tx_737p28_cf32', files.tx_737p28, ...
+        'tx_491p52_cf32', files.tx_491p52, ...
         'rx_clean_998p4_cf32', files.rx_clean_998p4, ...
         'cir_raw_clean_radar_cf32', files.cir_raw_clean_radar, ...
         'cir_norm_clean_radar_cf32', files.cir_norm_clean_radar);
     meta.generator = 'export_uwb_radar_packet.m';
-    meta.matlab_reference = 'testdata/uwb_radar/export_uwb_radar_packet.m';
     meta.cfg_mode = cfg.Mode;
-    meta.psdu_length_bytes = psduBytes;
-    meta.note = ['Complete pulse-shaped packet (SYNC+SFD+PHR+PSDU/FCS). ', ...
-        'Native is one-shot resample(x,48,65) of the entire packet. ', ...
-        construction];
+    meta.note = ['Complete pulse-shaped packet (SYNC+SFD+STS+PHR+PSDU). ', ...
+        'Native is one-shot resample of the entire packet. ', construction];
 
     fid = fopen(fullfile(outDir, 'metadata.json'), 'w');
     if fid < 0
@@ -195,9 +202,104 @@ function meta = export_uwb_radar_packet(outDir, preambleSymbols)
     end
     fwrite(fid, jsonencode(meta));
     fclose(fid);
-    fprintf('Wrote %d-SYNC packet to %s (tx=%d, native=%d, sfd=%d, peak=%d)\n', ...
-        preambleSymbols, outDir, numel(packet), numel(native), ...
-        preGuard + sfdStartTx, cirClean.peak_tap);
+    fprintf('Wrote %d-SYNC PSDU=%d to %s (tx=%d, 737=%d, 491=%d, sfd=%d)\n', ...
+        preambleSymbols, psduBytes, outDir, numel(packet), numel(native737), ...
+        numel(native491), preGuard + sfdStartTx);
+end
+
+function nativeBase = pick_native_base(nSync)
+    % MATLAB BPRF generator accepts 16/64/1024/4096.
+    if nSync <= 256
+        nativeBase = 64;
+    else
+        nativeBase = 1024;
+    end
+end
+
+function [packet, kind, construction] = assemble_sync(syncField, restField, ...
+        nWant, nBase, sps)
+    nHave = numel(syncField) / sps;
+    if abs(nHave - nBase) > 1e-9
+        error('export_uwb_radar_packet:SyncField', 'SYNC field length mismatch');
+    end
+    if nWant == nBase
+        packet = [syncField; restField];
+        kind = 'standard';
+        construction = sprintf('lrwpanWaveformGenerator BPRF %d-SYNC complete packet', nBase);
+        return;
+    end
+    kind = 'custom_sync_length';
+    one = syncField(1:sps);
+    if nWant < nBase && mod(nBase, nWant) == 0
+        packet = [syncField(1:nWant * sps); restField];
+        construction = sprintf(['MATLAB BPRF %d-SYNC complete packet; keep first %d ', ...
+            'pulse-shaped SYNC symbols + original SFD/STS/PHR/PSDU'], nBase, nWant);
+    elseif nWant > nBase && mod(nWant, nBase) == 0
+        reps = nWant / nBase;
+        tiled = repmat(syncField, reps, 1);
+        packet = [tiled; restField];
+        construction = sprintf(['MATLAB BPRF %d-SYNC complete packet; concatenate the ', ...
+            'pulse-shaped SYNC field %d times + original SFD/STS/PHR/PSDU'], nBase, reps);
+    else
+        % Generic: tile unit symbols from the base SYNC field.
+        nCopy = min(nWant, nBase);
+        head = syncField(1:nCopy * sps);
+        if nWant > nCopy
+            extra = repmat(one, nWant - nCopy, 1);
+            head = [head; extra];
+        end
+        packet = [head; restField];
+        construction = sprintf(['MATLAB BPRF %d-SYNC complete packet; rebuilt %d ', ...
+            'pulse-shaped SYNC symbols + original SFD/STS/PHR/PSDU'], nBase, nWant);
+    end
+end
+
+function [payloadBytes, mode] = build_psdu(nDataBytes, psduHex, rngSeed, appendFcs)
+    if ~isempty(psduHex)
+        payloadBytes = hex_to_bytes(psduHex);
+        mode = 'hex';
+        return;
+    end
+    if nDataBytes == 0
+        payloadBytes = uint8.empty(0, 1);
+        mode = 'empty';
+        return;
+    end
+    rng(rngSeed, 'twister');
+    dataBytes = uint8(randi([0 255], nDataBytes, 1));
+    if appendFcs
+        fcs = uwbdecoder.ieee802154CRC16(dataBytes);
+        fcsBytes = uint8([bitand(fcs, 255); bitshift(fcs, -8)]);
+        payloadBytes = [dataBytes; fcsBytes];
+        mode = 'random_data_plus_fcs';
+    else
+        payloadBytes = dataBytes;
+        mode = 'random_data';
+    end
+end
+
+function bytes = hex_to_bytes(s)
+    s = regexprep(upper(char(s)), '[^0-9A-F]', '');
+    if mod(numel(s), 2) ~= 0
+        error('export_uwb_radar_packet:Hex', 'PSDUHex must have an even number of hex digits');
+    end
+    if isempty(s)
+        bytes = uint8.empty(0, 1);
+        return;
+    end
+    bytes = uint8(zeros(numel(s) / 2, 1));
+    for i = 1:numel(bytes)
+        bytes(i) = uint8(hex2dec(s(2*i-1:2*i)));
+    end
+end
+
+function bits = bytes_to_lsb_bits(payloadBytes)
+    psduBytes = numel(payloadBytes);
+    bits = zeros(psduBytes * 8, 1);
+    for i = 1:numel(bits)
+        bits(i) = bitand(bitshift(uint16(payloadBytes(floor((i-1)/8)+1)), ...
+            -(mod(i-1, 8))), 1);
+    end
 end
 
 function cfg = make_hrp_config(meanPrf, dataRate, preambleSymbols, ...

@@ -19,6 +19,8 @@ parameters:
     label: SYNC repetitions
     dtype: int
     default: '64'
+    options: ['32', '64', '128', '256', '512', '1024', '2048']
+    option_labels: ['32', '64', '128', '256', '512', '1024', '2048']
 -   id: sfd_mode
     label: SFD mode
     dtype: string
