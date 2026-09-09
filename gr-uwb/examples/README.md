@@ -67,6 +67,44 @@ Message Strobe
 合成图的 `psdu_hex` / `sync_repetitions` / `insert_sts` 可改；改 SFD 时 CIR
 Estimator 的 `sfd_mode` 必须一起改。
 
+## `uwb_radar_cir_udp.grc`（CIR 经 UDP 送到另一台机器）
+
+同一条软件回环 CIR 链，估计器的 `cir` 口并联到 `network.socket_pdu`
+（`UDP_CLIENT`）。默认目的地 **133.133.133.132:12345**。
+
+```text
+Message Strobe
+→ HRP Packet Source
+→ Loopback Echo
+→ Radar CIR Estimator
+    → CIR Writer
+    → Socket PDU UDP_CLIENT  →  133.133.133.132:12345
+```
+
+`socket_pdu` 只发送 PDU 的 `c32vector` 原始字节，**不含** `pulse_id` / status
+等 meta。当前窗 16+100 tap = **928 字节 / 脉冲**，小于 1472，一帧一个 UDP 包。
+对端：
+
+```bash
+python3 gr-uwb/apps/cir_udp_recv.py --bind 0.0.0.0 --port 12345
+```
+
+源码树直接跑（不必先 `grcc`，会加载 `gr-uwb/build` 的 Python 绑定）：
+
+```bash
+python3 gr-uwb/apps/uwb_radar_cir_udp.py \
+  --udp-host 133.133.133.132 --udp-port 12345 --seconds 5
+```
+
+GRC 参数 `udp_host` / `udp_port` 可改。X410 实机路径用同一目的地：
+
+```bash
+python3 gr-uwb/apps/x410_cg400_hrp_echo_cir.py \
+  --udp-host 133.133.133.132 --udp-port 12345 ...
+```
+
+`--no-udp` 关闭发送。
+
 ## 编译校验
 
 从源码树使用自定义 block YAML：

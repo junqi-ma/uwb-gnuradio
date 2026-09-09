@@ -32,7 +32,7 @@ from scipy.signal import resample_poly
 import glob
 import importlib.util
 
-from gnuradio import gr
+from gnuradio import gr, network
 import pmt
 
 
@@ -459,6 +459,11 @@ def parse_args():
     p.add_argument("--dump-rx", action="store_true")
     p.add_argument("--min-lead-s", type=float, default=0.002)
     p.add_argument("--arm-delay-s", type=float, default=0.25)
+    p.add_argument("--udp-host", default="133.133.133.132",
+                   help="CIR taps UDP destination (empty disables)")
+    p.add_argument("--udp-port", default="12345")
+    p.add_argument("--no-udp", action="store_true",
+                   help="Do not send CIR taps over UDP")
     return p.parse_args()
 
 
@@ -609,11 +614,19 @@ def main():
     print("estimator sfd_search_margin=%d queue=%d" % (
         a.sfd_search_margin, est_q), flush=True)
     wr = uwb.cir_writer(a.output, "cir", True, 64)
+    sock = None
+    udp_on = (not a.no_udp) and bool(a.udp_host)
+    if udp_on:
+        sock = network.socket_pdu("UDP_CLIENT", a.udp_host, str(a.udp_port), 1472)
+        print("udp_cir %s:%s mtu=1472 taps_only" % (a.udp_host, a.udp_port),
+              flush=True)
 
     tb = gr.top_block("x410_cg400_hrp_echo_cir")
     tb.msg_connect((echo, "rx"), (res, "packet"))
     tb.msg_connect((res, "packet"), (est, "rx"))
     tb.msg_connect((est, "cir"), (wr, "cir"))
+    if sock is not None:
+        tb.msg_connect((est, "cir"), (sock, "pdus"))
     # Do not attach message_debug on a 100 Hz soak: queue_full status
     # PDUs would flood the print block and stall the message system.
 

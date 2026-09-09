@@ -1,0 +1,380 @@
+options:
+  parameters:
+    author: UWB GNU Radio Project
+    catch_exceptions: 'True'
+    category: '[GRC Hier Blocks]'
+    cmake_opt: ''
+    comment: Message-only monostatic radar chain (no UHD) with CIR UDP export.
+    copyright: ''
+    description: 'HrpPacketSource -> LoopbackEcho -> CirEstimator -> CirWriter and
+      Socket PDU UDP_CLIENT. Default dest 133.133.133.132:12345. Payload is raw CIR
+      taps (complex64), 116 taps / 928 bytes per pulse. Metadata is not sent.'
+    gen_cmake: 'On'
+    gen_linking: dynamic
+    generate_options: no_gui
+    hier_block_src_path: '.:'
+    id: uwb_radar_cir_udp
+    max_nouts: '0'
+    output_language: python
+    placement: (0,0)
+    qt_qss_theme: ''
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: run
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: UWB Radar CIR UDP export
+    window_size: (1000,1000)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 8]
+    rotation: 0
+    state: enabled
+
+blocks:
+- name: cir_post
+  id: variable
+  parameters:
+    comment: CIR taps after the predicted SYNC origin
+    value: '100'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [880, 36.0]
+    rotation: 0
+    state: enabled
+- name: cir_pre
+  id: variable
+  parameters:
+    comment: CIR taps before the predicted SYNC origin
+    value: '16'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [800, 36.0]
+    rotation: 0
+    state: enabled
+- name: code_index
+  id: variable
+  parameters:
+    comment: HRP preamble code 9-12
+    value: '9'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [184, 36.0]
+    rotation: 0
+    state: enabled
+- name: echo_delays
+  id: variable
+  parameters:
+    comment: Echo path delays in samples at 998.4 MS/s (fractional allowed)
+    value: (251.5, 1200.0)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [552, 36.0]
+    rotation: 0
+    state: enabled
+- name: echo_gains
+  id: variable
+  parameters:
+    comment: Complex gains, one per echo path
+    value: (0.8, 0.35)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [672, 36.0]
+    rotation: 0
+    state: enabled
+- name: pri_ms
+  id: variable
+  parameters:
+    comment: Message-strobe period; drives one emit per PRI
+    value: int(pri_s * 1000)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [472, 36.0]
+    rotation: 0
+    state: enabled
+- name: pri_s
+  id: variable
+  parameters:
+    comment: Radar PRI
+    value: '0.005'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [392, 36.0]
+    rotation: 0
+    state: enabled
+- name: sync_repetitions
+  id: variable
+  parameters:
+    comment: SYNC symbols (must match CirEstimator)
+    value: '64'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 116.0]
+    rotation: 0
+    state: enabled
+- name: work_rate
+  id: variable
+  parameters:
+    comment: CIR estimator work rate
+    value: 998.4e6
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [288, 36.0]
+    rotation: 0
+    state: enabled
+- name: blocks_message_debug_0
+  id: blocks_message_debug
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    en_uvec: 'True'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1176, 408.0]
+    rotation: 0
+    state: enabled
+- name: blocks_message_strobe_0
+  id: blocks_message_strobe
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: One emit per PRI; remove and set auto_emit=True for a single pulse
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    msg: pmt.make_dict()
+    period: pri_ms
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [152, 284.0]
+    rotation: 0
+    state: enabled
+- name: output_dir
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: CIR output directory
+    short_id: ''
+    type: str
+    value: '''/tmp/uwb-radar-cir-udp'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1344, 28.0]
+    rotation: 0
+    state: enabled
+- name: psdu_hex
+  id: parameter
+  parameters:
+    alias: ''
+    comment: Canonical radar 20 data + FCS; empty string is a 0-byte PSDU
+    hide: none
+    label: PSDU hex
+    short_id: ''
+    type: str
+    value: '''47261DF66F4C1BEF45C8F77CE77BD7D8C4D180FB1221'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [976, 28.0]
+    rotation: 0
+    state: enabled
+- name: udp_host
+  id: parameter
+  parameters:
+    alias: ''
+    comment: Destination IPv4 for CIR taps
+    hide: none
+    label: UDP host
+    short_id: ''
+    type: str
+    value: '''133.133.133.132'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1344, 148.0]
+    rotation: 0
+    state: enabled
+- name: udp_port
+  id: parameter
+  parameters:
+    alias: ''
+    comment: Destination UDP port
+    hide: none
+    label: UDP port
+    short_id: ''
+    type: str
+    value: '''12345'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1344, 268.0]
+    rotation: 0
+    state: enabled
+- name: template_file
+  id: parameter
+  parameters:
+    alias: ''
+    comment: Single 1016-sample SYNC symbol, CF32, at 998.4 MS/s
+    hide: none
+    label: SYNC template
+    short_id: ''
+    type: str
+    value: '''testdata/uwb_radar/sync_template_998p4.cf32'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1160, 28.0]
+    rotation: 0
+    state: enabled
+- name: uwb_cir_writer_0
+  id: uwb_cir_writer
+  parameters:
+    affinity: ''
+    alias: ''
+    base_name: cir
+    comment: ''
+    directory: output_dir
+    queue_capacity: '64'
+    write_normalized: 'True'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1176, 276.0]
+    rotation: 0
+    state: enabled
+- name: uwb_loopback_echo_0
+  id: uwb_loopback_echo
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: Software echo channel replaces UHD TX/RX
+    delay_samples: echo_delays
+    gains: echo_gains
+    max_rx_samples: '4194304'
+    max_tx_samples: '4194304'
+    noise_std: '0.0'
+    num_delay_samps: '0'
+    pre_guard_samples: '1997'
+    pri_s: pri_s
+    rng_seed: '1'
+    t0_s: '0'
+    tail_samples: '4096'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [664, 276.0]
+    rotation: 0
+    state: enabled
+- name: uwb_radar_cir_estimator_0
+  id: uwb_radar_cir_estimator
+  parameters:
+    affinity: ''
+    alias: ''
+    cir_post: cir_post
+    cir_pre: cir_pre
+    cir_repetitions: '0'
+    cir_skip_initial: '10'
+    code_index: code_index
+    comment: sfd_mode/SYNC must match HrpPacketSource
+    emit_normalized: 'True'
+    queue_capacity: '64'
+    sfd_mode: '"4z2"'
+    sfd_search_margin: '64'
+    sfd_threshold: '0.3'
+    sync_refine_margin: '8'
+    sync_refine_threshold: '0.3'
+    sync_repetitions: sync_repetitions
+    template_path: template_file
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [920, 280.0]
+    rotation: 0
+    state: enabled
+- name: network_socket_pdu_0
+  id: network_socket_pdu
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: 'UDP_CLIENT: sends cdr(c32vector) only; 116 taps fit one datagram'
+    host: udp_host
+    mtu: '1472'
+    port: udp_port
+    tcp_no_delay: 'False'
+    type: UDP_CLIENT
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1176, 520.0]
+    rotation: 0
+    state: enabled
+- name: uwb_hrp_packet_source_0
+  id: uwb_hrp_packet_source
+  parameters:
+    affinity: ''
+    alias: ''
+    append_fcs: 'False'
+    auto_emit: 'False'
+    code_index: code_index
+    comment: C++ HRP BPRF at 998.4 MS/s. insert_sts requires a 4z SFD.
+    insert_sts: 'True'
+    peak_amplitude: '0.8'
+    pri_s: pri_s
+    psdu_hex: psdu_hex
+    sfd_mode: '"4z2"'
+    sync_repetitions: sync_repetitions
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [408, 276.0]
+    rotation: 0
+    state: enabled
+
+connections:
+- [blocks_message_strobe_0, strobe, uwb_hrp_packet_source_0, emit]
+- [uwb_loopback_echo_0, rx, uwb_radar_cir_estimator_0, rx]
+- [uwb_radar_cir_estimator_0, cir, uwb_cir_writer_0, cir]
+- [uwb_radar_cir_estimator_0, cir, network_socket_pdu_0, pdus]
+- [uwb_radar_cir_estimator_0, status, blocks_message_debug_0, print]
+- [uwb_hrp_packet_source_0, tx, uwb_loopback_echo_0, tx]
+
+metadata:
+  file_format: 1
