@@ -33,5 +33,7 @@ install(FILES
     ../examples/uwb_scheduled_file_capture.grc
     ../examples/x410_rfnoc_uwb_scheduled.grc
     ../examples/x410_rfnoc_uwb_detector_sc16.grc
+    ../examples/uwb_radar_loopback_cir.grc
+    ../examples/uwb_radar_loopback_cir_synth.grc
     DESTINATION share/gnuradio/examples/uwb
 )

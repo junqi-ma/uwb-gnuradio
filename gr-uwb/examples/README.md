@@ -36,22 +36,36 @@ output，全速率只运行整数能量门；候选 Region 在后台转换一次
 最终原始 SC16 PDU 直接写盘。与 scheduled 图不同，它会处理所有通过能量门的
 通信/雷达候选，因此密集通信环境下仍优先使用已知 `t0/T` 的 scheduled 路径。
 
-## `uwb_radar_loopback_cir.grc`
+## `uwb_radar_loopback_cir.grc`（读文件 TX）
 
-纯消息链路的单站雷达软件回环（无 UHD）：
+纯消息链路的单站雷达软件回环（无 UHD）。发送端 **加载** 完整 packet 文件：
 
 ```text
 Message Strobe (每 PRI 一个 emit)
-→ Radar Packet Source（加载完整 TX packet，testdata/uwb_radar/tx_998p4.cf32）
+→ Radar Packet Source（testdata/uwb_radar/tx_998p4.cf32）
 → Loopback Echo（整数/分数时延、多径、AWGN）
 → Radar CIR Estimator（998.4 MS/s，SYNC 模板 sync_template_998p4.cf32）
 → CIR Writer（cir.cf32 / cir_norm.cf32 / cir.jsonl / run.json）
 ```
 
-Estimator 的 `status` 接 Message Debug 便于观察失败帧。把 strobe 删掉并将
-Packet Source 的 `auto_emit` 置 True 即为单脉冲模式；`echo_delays` /
-`echo_gains` 变量控制回波信道。CIR 产物用
-`testdata/uwb_radar/read_uwb_cir.m` 读取。
+## `uwb_radar_loopback_cir_synth.grc`（C++ 合成 TX）
+
+同一条 CIR 回环，发送端换成 `UwbHrpPacketSource` 实时组包。默认 PHY 对齐雷达
+golden：code 9、64 SYNC、4z2、STS SP1、22 B PSDU
+（`47261DF66F4C1BEF45C8F77CE77BD7D8C4D180FB1221`，已含 FCS）。
+
+```text
+Message Strobe
+→ HRP Packet Source（998.4 MS/s 合成）
+→ Loopback Echo → Radar CIR Estimator → CIR Writer
+```
+
+两张图不要合在一张里切换：读文件走 `uwb_radar_packet_source`，合走
+`uwb_hrp_packet_source`。Estimator 的 `status` 接 Message Debug。把 strobe
+删掉并将 Packet Source 的 `auto_emit` 置 True 即为单脉冲；`echo_delays` /
+`echo_gains` 控制回波。CIR 用 `testdata/uwb_radar/read_uwb_cir.m` 读取。
+合成图的 `psdu_hex` / `sync_repetitions` / `insert_sts` 可改；改 SFD 时 CIR
+Estimator 的 `sfd_mode` 必须一起改。
 
 ## 编译校验
 
@@ -62,13 +76,15 @@ GRC_BLOCKS_PATH=$PWD/gr-uwb/grc grcc -o /tmp/uwb-grcc \
   gr-uwb/examples/uwb_detector_to_writer.grc \
   gr-uwb/examples/uwb_scheduled_file_capture.grc \
   gr-uwb/examples/x410_rfnoc_uwb_scheduled.grc \
-  gr-uwb/examples/uwb_radar_loopback_cir.grc
+  gr-uwb/examples/uwb_radar_loopback_cir.grc \
+  gr-uwb/examples/uwb_radar_loopback_cir_synth.grc
 ```
 
 安装 OOT module 后，GRC 会从标准 block path 自动发现这些块。
 
-运行 `uwb_radar_loopback_cir.grc` 生成的脚本（未安装 OOT 时）：
+运行雷达回环图生成的脚本（未安装 OOT 时）：
 
 ```bash
 PYTHONPATH=$PWD/gr-uwb/build/test_modules python3 /tmp/uwb-grcc/uwb_radar_loopback_cir.py
+PYTHONPATH=$PWD/gr-uwb/build/test_modules python3 /tmp/uwb-grcc/uwb_radar_loopback_cir_synth.py
 ```

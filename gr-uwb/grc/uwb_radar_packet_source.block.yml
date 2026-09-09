@@ -66,6 +66,8 @@ cpp_templates:
 
 documentation: |-
     Load one complete UWB packet file and republish it as a TX PDU.
+    Radar loopback example: uwb_radar_loopback_cir.grc.  C++ synthesis is
+    uwb_hrp_packet_source / uwb_radar_loopback_cir_synth.grc.
 
     Message-only (no stream ports).  Does not generate a 5 ms PRI on the
     host; EchoTimer owns device-time scheduling.  emit copies pulse_id

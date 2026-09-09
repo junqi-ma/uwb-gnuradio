@@ -4,16 +4,16 @@ options:
     catch_exceptions: 'True'
     category: '[GRC Hier Blocks]'
     cmake_opt: ''
-    comment: Message-only monostatic radar chain (no UHD). TX = file load.
+    comment: Message-only monostatic radar chain (no UHD). TX = C++ HRP synth.
     copyright: ''
-    description: File-load TX. RadarPacketSource -> LoopbackEcho -> CirEstimator ->
-      CirWriter. Loads testdata/uwb_radar/tx_998p4.cf32. For C++ HRP synthesis use
-      uwb_radar_loopback_cir_synth.grc.
+    description: Synthesize TX. HrpPacketSource -> LoopbackEcho -> CirEstimator ->
+      CirWriter. Default PHY matches the radar golden (code 9, 64 SYNC, 4z2, STS,
+      22 B PSDU). File-load TX is uwb_radar_loopback_cir.grc.
     gen_cmake: 'On'
     gen_linking: dynamic
     generate_options: no_gui
     hier_block_src_path: '.:'
-    id: uwb_radar_loopback_cir
+    id: uwb_radar_loopback_cir_synth
     max_nouts: '0'
     output_language: python
     placement: (0,0)
@@ -24,7 +24,7 @@ options:
     run_options: run
     sizing_mode: fixed
     thread_safe_setters: ''
-    title: UWB Radar Loopback CIR (file load)
+    title: UWB Radar Loopback CIR (HRP synth)
     window_size: (1000,1000)
   states:
     bus_sink: false
@@ -57,6 +57,18 @@ blocks:
     bus_source: false
     bus_structure: null
     coordinate: [800, 36.0]
+    rotation: 0
+    state: enabled
+- name: code_index
+  id: variable
+  parameters:
+    comment: HRP preamble code 9-12
+    value: '9'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [184, 36.0]
     rotation: 0
     state: enabled
 - name: echo_delays
@@ -105,6 +117,18 @@ blocks:
     bus_source: false
     bus_structure: null
     coordinate: [392, 36.0]
+    rotation: 0
+    state: enabled
+- name: sync_repetitions
+  id: variable
+  parameters:
+    comment: SYNC symbols (must match CirEstimator)
+    value: '64'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 116.0]
     rotation: 0
     state: enabled
 - name: work_rate
@@ -159,7 +183,7 @@ blocks:
     label: CIR output directory
     short_id: ''
     type: str
-    value: '''/tmp/uwb-radar-cir'''
+    value: '''/tmp/uwb-radar-cir-synth'''
   states:
     bus_sink: false
     bus_source: false
@@ -167,16 +191,16 @@ blocks:
     coordinate: [1344, 28.0]
     rotation: 0
     state: enabled
-- name: packet_file
+- name: psdu_hex
   id: parameter
   parameters:
     alias: ''
-    comment: Needs metadata.json (or metadata.fc32.json) beside the packet
+    comment: Canonical radar 20 data + FCS; empty string is a 0-byte PSDU
     hide: none
-    label: TX packet file
+    label: PSDU hex
     short_id: ''
     type: str
-    value: '''testdata/uwb_radar/tx_998p4.cf32'''
+    value: '''47261DF66F4C1BEF45C8F77CE77BD7D8C4D180FB1221'''
   states:
     bus_sink: false
     bus_source: false
@@ -226,8 +250,8 @@ blocks:
     comment: Software echo channel replaces UHD TX/RX
     delay_samples: echo_delays
     gains: echo_gains
-    max_rx_samples: '524288'
-    max_tx_samples: '262144'
+    max_rx_samples: '4194304'
+    max_tx_samples: '4194304'
     noise_std: '0.0'
     num_delay_samps: '0'
     pre_guard_samples: '1997'
@@ -251,8 +275,8 @@ blocks:
     cir_pre: cir_pre
     cir_repetitions: '0'
     cir_skip_initial: '10'
-    code_index: '9'
-    comment: ''
+    code_index: code_index
+    comment: sfd_mode/SYNC must match HrpPacketSource
     emit_normalized: 'True'
     queue_capacity: '64'
     sfd_mode: '"4z2"'
@@ -260,7 +284,7 @@ blocks:
     sfd_threshold: '0.3'
     sync_refine_margin: '8'
     sync_refine_threshold: '0.3'
-    sync_repetitions: '64'
+    sync_repetitions: sync_repetitions
     template_path: template_file
   states:
     bus_sink: false
@@ -269,21 +293,21 @@ blocks:
     coordinate: [920, 280.0]
     rotation: 0
     state: enabled
-- name: uwb_radar_packet_source_0
-  id: uwb_radar_packet_source
+- name: uwb_hrp_packet_source_0
+  id: uwb_hrp_packet_source
   parameters:
     affinity: ''
     alias: ''
+    append_fcs: 'False'
     auto_emit: 'False'
-    code_index: '9'
-    comment: Load one complete TX packet (MATLAB golden). Synth TX is the sibling GRC.
-    descriptor_path: ''
-    path: packet_file
+    code_index: code_index
+    comment: C++ HRP BPRF at 998.4 MS/s. insert_sts requires a 4z SFD.
+    insert_sts: 'True'
+    peak_amplitude: '0.8'
     pri_s: pri_s
-    sample_format: '"fc32"'
-    sample_rate: work_rate
+    psdu_hex: psdu_hex
     sfd_mode: '"4z2"'
-    sync_repetitions: '64'
+    sync_repetitions: sync_repetitions
   states:
     bus_sink: false
     bus_source: false
@@ -293,11 +317,11 @@ blocks:
     state: enabled
 
 connections:
-- [blocks_message_strobe_0, strobe, uwb_radar_packet_source_0, emit]
+- [blocks_message_strobe_0, strobe, uwb_hrp_packet_source_0, emit]
 - [uwb_loopback_echo_0, rx, uwb_radar_cir_estimator_0, rx]
 - [uwb_radar_cir_estimator_0, cir, uwb_cir_writer_0, cir]
 - [uwb_radar_cir_estimator_0, status, blocks_message_debug_0, print]
-- [uwb_radar_packet_source_0, tx, uwb_loopback_echo_0, tx]
+- [uwb_hrp_packet_source_0, tx, uwb_loopback_echo_0, tx]
 
 metadata:
   file_format: 1
