@@ -1,0 +1,80 @@
+id: uwb_hrp_packet_source
+label: UWB HRP Packet Source
+category: '[UWB]'
+
+parameters:
+-   id: psdu_hex
+    label: PSDU hex
+    dtype: string
+    default: ''
+-   id: sync_repetitions
+    label: SYNC repetitions
+    dtype: int
+    default: '64'
+    options: ['32', '64', '128', '256', '512', '1024', '2048']
+    option_labels: ['32', '64', '128', '256', '512', '1024', '2048']
+-   id: sfd_mode
+    label: SFD mode
+    dtype: string
+    default: 'ieee'
+    options: ['ieee', 'decawave', '4z1', '4z2', '4z3', '4z4']
+    option_labels: ['ieee', 'decawave', '4z1', '4z2', '4z3', '4z4']
+-   id: code_index
+    label: Code index
+    dtype: int
+    default: '9'
+    options: ['9', '10', '11', '12']
+-   id: peak_amplitude
+    label: Peak amplitude
+    dtype: real
+    default: '0.8'
+-   id: pri_s
+    label: PRI (s)
+    dtype: real
+    default: '0.005'
+-   id: auto_emit
+    label: Auto emit on start
+    dtype: bool
+    default: 'False'
+-   id: insert_sts
+    label: Insert STS (4z SP1)
+    dtype: bool
+    default: 'False'
+-   id: append_fcs
+    label: Append IEEE FCS
+    dtype: bool
+    default: 'False'
+
+inputs:
+-   domain: message
+    id: emit
+    optional: true
+
+outputs:
+-   domain: message
+    id: tx
+    optional: true
+-   domain: message
+    id: status
+    optional: true
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.hrp_packet_source(list(bytes.fromhex(${psdu_hex})) if (${psdu_hex}) else [], ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${peak_amplitude}, ${pri_s}, ${auto_emit}, ${insert_sts}, ${append_fcs})
+
+cpp_templates:
+    includes: ['#include <gnuradio/uwb/uwb_hrp_packet_source.h>']
+    make: 'this->${id} = gr::uwb::UwbHrpPacketSource::make(std::vector<uint8_t>(), ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${peak_amplitude}, ${pri_s}, ${auto_emit}, ${insert_sts}, ${append_fcs});'
+    link: ['gnuradio::gnuradio-uwb']
+
+documentation: |-
+    Synthesize one IEEE 802.15.4a/z HRP BPRF packet at 998.4 MS/s and
+    publish it as a TX PDU.  insert_sts (SP1) is 4z-only.  emit may
+    carry a u8vector PSDU (exact bytes, no extra FCS).  Does not
+    generate a host PRI.
+
+    File-load TX remains uwb_radar_packet_source.  Radar loopback examples:
+    uwb_radar_loopback_cir.grc (file) and uwb_radar_loopback_cir_synth.grc
+    (this block).
+
+file_format: 1

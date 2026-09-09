@@ -21,6 +21,7 @@ install(FILES
     uwb_pdu_rational_resampler_ccf_65_32.block.yml
     uwb_pdu_window_crop.block.yml
     uwb_radar_packet_source.block.yml
+    uwb_hrp_packet_source.block.yml
     uwb_loopback_echo.block.yml
     uwb_radar_cir_estimator.block.yml
     uwb_cir_writer.block.yml

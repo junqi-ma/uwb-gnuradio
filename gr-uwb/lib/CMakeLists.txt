@@ -72,6 +72,7 @@ list(APPEND uwb_sources
     uwb_pdu_rational_resampler_ccf_65_32.cc
     uwb_pdu_window_crop.cc
     uwb_radar_packet_source.cc
+    uwb_hrp_packet_source.cc
     uwb_loopback_echo.cc
     uwb_radar_cir_estimator_block.cc
     uwb_cir_writer.cc
@@ -175,6 +176,8 @@ list(APPEND test_uwb_sources
     qa_uwb_echo_timer.cc
     qa_uwb_radar_e2e.cc
     qa_uwb_uhd_backend.cc
+    qa_uwb_hrp_mod_core.cc
+    qa_uwb_hrp_packet_source.cc
 )
 # Anything we need to link to for the unit tests go here
 list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks)
@@ -239,6 +242,12 @@ target_compile_definitions(uwb_qa_uwb_rational_resampler_core_65_32.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
 target_compile_definitions(uwb_qa_uwb_pdu_rational_resampler_65_32.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
+target_compile_definitions(uwb_qa_uwb_hrp_mod_core.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
+target_compile_definitions(uwb_qa_uwb_hrp_packet_source.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
 ########################################################################

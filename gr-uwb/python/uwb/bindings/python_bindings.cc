@@ -31,6 +31,7 @@
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_32.h>
 #include <gnuradio/uwb/uwb_pdu_window_crop.h>
 #include <gnuradio/uwb/uwb_radar_packet_source.h>
+#include <gnuradio/uwb/uwb_hrp_packet_source.h>
 #include <gnuradio/uwb/uwb_loopback_echo.h>
 #include <gnuradio/uwb/uwb_radar_cir_estimator_block.h>
 #include <gnuradio/uwb/uwb_cir_writer.h>
@@ -645,6 +646,36 @@ void bind_radar_packet_source(py::module& m)
         .def("pdus_dropped", &Blk::pdus_dropped);
 }
 
+void bind_hrp_packet_source(py::module& m)
+{
+    using Blk = gr::uwb::UwbHrpPacketSource;
+    py::class_<Blk, gr::block, std::shared_ptr<Blk>>(m, "hrp_packet_source")
+        .def(py::init(&Blk::make),
+             py::arg("psdu"),
+             py::arg("sync_repetitions") = size_t(64),
+             py::arg("sfd_mode") = std::string("ieee"),
+             py::arg("code_index") = size_t(9),
+             py::arg("peak_amplitude") = gr::uwb::mod::kDefaultPeakAmplitude,
+             py::arg("pri_s") = gr::uwb::defaults::kQm35PacketIntervalS,
+             py::arg("auto_emit") = false,
+             py::arg("insert_sts") = false,
+             py::arg("append_fcs") = false)
+        .def("sync_repetitions", &Blk::sync_repetitions)
+        .def("sfd_mode", &Blk::sfd_mode)
+        .def("code_index", &Blk::code_index)
+        .def("peak_amplitude", &Blk::peak_amplitude)
+        .def("pri_s", &Blk::pri_s)
+        .def("auto_emit", &Blk::auto_emit)
+        .def("insert_sts", &Blk::insert_sts)
+        .def("append_fcs", &Blk::append_fcs)
+        .def("num_samples", &Blk::num_samples)
+        .def("samples", &Blk::samples)
+        .def("psdu", &Blk::psdu)
+        .def("emits_received", &Blk::emits_received)
+        .def("pdus_emitted", &Blk::pdus_emitted)
+        .def("pdus_dropped", &Blk::pdus_dropped);
+}
+
 void bind_loopback_echo(py::module& m)
 {
     using Blk = gr::uwb::UwbLoopbackEcho;
@@ -781,6 +812,7 @@ PYBIND11_MODULE(uwb_python, m)
     bind_pdu_rational_resampler_ccf_65_32(m);
     bind_pdu_window_crop(m);
     bind_radar_packet_source(m);
+    bind_hrp_packet_source(m);
     bind_loopback_echo(m);
     bind_radar_cir_estimator(m);
     bind_cir_writer(m);

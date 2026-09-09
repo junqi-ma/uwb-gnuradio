@@ -47,5 +47,7 @@ install(FILES
     uwb_realtime_echo_timer.h
     uwb_uhd_backend_config.h
     uwb_uhd_burst_backend.h
+    uwb_hrp_mod_core.h
+    uwb_hrp_packet_source.h
     DESTINATION include/gnuradio/uwb
 )

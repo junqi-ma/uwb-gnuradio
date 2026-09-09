@@ -66,6 +66,19 @@ target_link_libraries(benchmark_radar_pipeline
 )
 
 ########################################################################
+# HRP TX modulator timing (P3: 64-SYNC PSDU<=127 B >= 1000 pkt/s)
+########################################################################
+add_executable(benchmark_hrp_mod benchmark_hrp_mod.cc)
+target_link_libraries(benchmark_hrp_mod
+    gnuradio-uwb
+    gnuradio::gnuradio-runtime
+    Volk::volk
+)
+add_test(NAME uwb_benchmark_hrp_mod
+    COMMAND benchmark_hrp_mod 4 32)
+set_tests_properties(uwb_benchmark_hrp_mod PROPERTIES TIMEOUT 120)
+
+########################################################################
 # Offline dump postprocess: per-window notch + 65/48 (no UHD, no work())
 ########################################################################
 add_executable(uwb_offline_postprocess_dump uwb_offline_postprocess_dump.cc)
