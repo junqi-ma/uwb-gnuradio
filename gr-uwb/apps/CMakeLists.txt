@@ -55,6 +55,17 @@ target_link_libraries(benchmark_resampler_65_48
 )
 
 ########################################################################
+# Radar sensing pipeline timing (host stages + max packet-rate estimate)
+########################################################################
+add_executable(benchmark_radar_pipeline benchmark_radar_pipeline.cc)
+target_link_libraries(benchmark_radar_pipeline
+    gnuradio-uwb
+    gnuradio::gnuradio-blocks
+    gnuradio::gnuradio-runtime
+    Threads::Threads
+)
+
+########################################################################
 # Offline dump postprocess: per-window notch + 65/48 (no UHD, no work())
 ########################################################################
 add_executable(uwb_offline_postprocess_dump uwb_offline_postprocess_dump.cc)
