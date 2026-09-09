@@ -51,12 +51,17 @@ SCHEMA_RUN = "x410_uwb_radar_validate.run.v1"
 SCHEMA_CALIBRATION = "x410_uwb_radar_validate.calibration.v1"
 SCHEMA_ADAPTER = "x410_uwb_radar_validate.adapter.v1"
 
-NATIVE_RATE_HZ = 737280000.0
+UC200_RATE_HZ = 737280000.0
+CG400_RATE_HZ = 491520000.0
+NATIVE_RATE_HZ = UC200_RATE_HZ  # argparse default (UC200)
+ALLOWED_NATIVE_RATES = (UC200_RATE_HZ, CG400_RATE_HZ)
 C_LIGHT_M_PER_S = 299792458.0
 SAMPLES_PER_SYMBOL = 1016
 SFD_SYMBOLS_4Z2 = 8
-INTERP, DECIM = 48, 65
-MAX_BURST_SAMPLES = 1 << 20
+WORK_INTERP = 65  # 998.4 / native = 65/M
+MAX_BURST_SAMPLES = 1 << 21  # 2048-SYNC RX @737.28 ≈ 1.55e6
+ALLOWED_SYNC_REPS = (32, 64, 128, 256, 512, 1024, 2048)
+MAX_PSDU_BYTES = 127
 MAX_FRAGMENTS = 64
 ENV_TEST_ADAPTER = "UWB_RADAR_VALIDATE_TEST_ADAPTER"
 
@@ -182,8 +187,16 @@ def build_parser():
     g.add_argument("--tx-window-samples", type=int, default=0)
     g.add_argument("--pri-s", type=float, default=0.005)
     g.add_argument("--pre-guard-us", type=float, default=2.0)
-    g.add_argument("--sync-reps", type=int, default=64, choices=(32, 64, 128))
+    g.add_argument("--sync-reps", type=int, default=64,
+                   choices=ALLOWED_SYNC_REPS)
     g.add_argument("--sfd-mode", choices=("4z2",), default="4z2")
+    g.add_argument("--psdu-bytes", type=int, default=0,
+                   help="random PSDU data-byte count (default 0 = empty PSDU)")
+    g.add_argument("--psdu-hex", default="",
+                   help="exact PSDU hex; overrides --psdu-bytes")
+    g.add_argument("--psdu-random-seed", type=int, default=20260904)
+    g.add_argument("--psdu-no-fcs", action="store_true",
+                   help="do not append IEEE FCS when using --psdu-bytes > 0")
     g.add_argument("--range-m", type=float, default=15.0)
     g.add_argument("--tail-guard-us", type=float, default=4.1)
     g.add_argument("--rx-window-samples", type=int, default=0)
@@ -211,39 +224,52 @@ def build_parser():
 # geometry / contract
 # ---------------------------------------------------------------------------
 
+def contract_rate(rate):
+    for allowed in ALLOWED_NATIVE_RATES:
+        if abs(rate - allowed) <= 0.5:
+            return allowed
+    raise CliError("rate_contract_fixed",
+                   "rate must be 737.28 MS/s (UC200) or 491.52 MS/s "
+                   "(CG400); got %r; UHD coercion is rejected" % (rate,))
+
+
+def native_decim(rate):
+    return 32 if contract_rate(rate) == CG400_RATE_HZ else 48
+
+
 def geometry(o):
-    if abs(o.rate - NATIVE_RATE_HZ) > 0.5:
-        raise CliError("rate_contract_fixed",
-                       "rate is contracted at exactly 737.28 MS/s; got %r; "
-                       "UHD coercion is rejected" % (o.rate,))
+    rate = contract_rate(o.rate)
+    o.rate = rate
+    decim = native_decim(rate)
     if o.frequency <= 0:
         raise CliError("cli_invalid_param", "--frequency must be > 0")
     if o.tx_channel < 0 or o.rx_channel < 0 or o.tx_channel == o.rx_channel:
         raise CliError("tx_rx_channel_overlap",
                        "TX and RX channels must differ and be >= 0")
-    pri_f = o.pri_s * NATIVE_RATE_HZ
+    pri_f = o.pri_s * rate
     pri_ticks = int(round(pri_f))
     if o.pri_s <= 0 or abs(pri_f - pri_ticks) > 1e-3:
         raise CliError(
             "pri_not_on_integer_tick_grid",
             "PRI %r s = %r ticks is not on the integer device-tick grid "
-            "(737.28e6 ticks/s)" % (o.pri_s, pri_f))
+            "(%r ticks/s)" % (o.pri_s, pri_f, rate))
     if o.arm_delay_s <= 0:
         raise CliError("cli_invalid_param", "--arm-delay-s must be > 0")
     if o.max_fragment_samples <= 0:
         raise CliError("cli_invalid_param",
                        "--max-fragment-samples must be > 0")
-    pre = llround(o.pre_guard_us * 1e-6 * NATIVE_RATE_HZ)
+    pre = llround(o.pre_guard_us * 1e-6 * rate)
     if o.pre_guard_us <= 0 or pre >= pri_ticks:
         raise CliError("pre_guard_out_of_range",
                        "pre-guard must be in (0 s, PRI)")
-    sync_native = ceildiv(o.sync_reps * SAMPLES_PER_SYMBOL * INTERP, DECIM)
-    sfd_native = ceildiv(SFD_SYMBOLS_4Z2 * SAMPLES_PER_SYMBOL * INTERP, DECIM)
+    sync_native = ceildiv(o.sync_reps * SAMPLES_PER_SYMBOL * decim,
+                          WORK_INTERP)
+    sfd_native = ceildiv(SFD_SYMBOLS_4Z2 * SAMPLES_PER_SYMBOL * decim,
+                         WORK_INTERP)
     if o.range_m <= 0:
         raise CliError("cli_invalid_param", "--range-m must be > 0")
-    range_native = int(math.ceil(2.0 * o.range_m / C_LIGHT_M_PER_S *
-                                 NATIVE_RATE_HZ))
-    tail_native = llround(o.tail_guard_us * 1e-6 * NATIVE_RATE_HZ)
+    range_native = int(math.ceil(2.0 * o.range_m / C_LIGHT_M_PER_S * rate))
+    tail_native = llround(o.tail_guard_us * 1e-6 * rate)
     if o.tail_guard_us < 0:
         raise CliError("cli_invalid_param", "--tail-guard-us must be >= 0")
     if o.rx_window_samples > 0:
@@ -280,12 +306,52 @@ def geometry(o):
         "resampler_tail_native": tail_native,
         "rx_window_native": rx,
         "rx_window_source": rx_source,
-        "rx_window_us": rx / NATIVE_RATE_HZ * 1e6,
+        "rx_window_us": rx / rate * 1e6,
         "num_delay_samps": o.num_delay_samps,
         "cal_delay_native_samples": o.cal_delay_native,
         "arm_delay_s": o.arm_delay_s,
         "max_fragment_samples": o.max_fragment_samples,
         "predicted_preamble_origin_native": pre + o.num_delay_samps,
+        "native_rate_hz": rate,
+        "resample_interp": WORK_INTERP,
+        "resample_decim": decim,
+    }
+
+
+def psdu_spec(o):
+    if o.psdu_bytes < 0:
+        raise CliError("cli_invalid_param", "--psdu-bytes must be >= 0")
+    hex_digits = "".join(c for c in o.psdu_hex
+                         if c in "0123456789abcdefABCDEF")
+    if o.psdu_hex and len(hex_digits) % 2 != 0:
+        raise CliError("cli_invalid_param",
+                       "--psdu-hex must have an even number of hex digits")
+    if hex_digits:
+        mode = "hex"
+        length = len(hex_digits) // 2
+        data_bytes = length
+        fcs_bytes = 0
+    elif o.psdu_bytes == 0:
+        mode = "empty"
+        length = 0
+        data_bytes = 0
+        fcs_bytes = 0
+    else:
+        mode = "random_data" if o.psdu_no_fcs else "random_data_plus_fcs"
+        data_bytes = o.psdu_bytes
+        fcs_bytes = 0 if o.psdu_no_fcs else 2
+        length = data_bytes + fcs_bytes
+    if length > MAX_PSDU_BYTES:
+        raise CliError("psdu_too_long",
+                       "PSDULength %d exceeds 127" % length)
+    return {
+        "mode": mode,
+        "data_bytes": data_bytes,
+        "fcs_bytes": fcs_bytes,
+        "psdu_length_bytes": length,
+        "hex": hex_digits.upper(),
+        "random_seed": o.psdu_random_seed,
+        "default_empty": mode == "empty",
     }
 
 
@@ -305,7 +371,7 @@ def tx_geometry(o):
     elif info["samples"]:
         info["source"] = "derived from --tx-file size"
     if info["samples"]:
-        info["airtime_us"] = info["samples"] / NATIVE_RATE_HZ * 1e6
+        info["airtime_us"] = info["samples"] / o.rate * 1e6
     return info
 
 
@@ -449,10 +515,11 @@ def check_gate(o, backend, evidence_class):
             "predecessor_stage_not_passed",
             "predecessor '%s' result=%r; fix the failing layer before "
             "advancing" % (pred, last.get("result")))
-    if last.get("rate_hz") not in (NATIVE_RATE_HZ, int(NATIVE_RATE_HZ)):
+    rate = contract_rate(o.rate)
+    if last.get("rate_hz") not in (rate, int(rate)):
         raise CliError("stage_record_rate_mismatch",
                        "record rate_hz=%r != contract %r"
-                       % (last.get("rate_hz"), NATIVE_RATE_HZ))
+                       % (last.get("rate_hz"), rate))
     if last.get("backend") != backend or \
             last.get("evidence_class") != evidence_class:
         if evidence_class == "hardware":
@@ -473,6 +540,7 @@ def check_gate(o, backend, evidence_class):
 
 def validate(o, for_hardware):
     geo = geometry(o)
+    psdu = psdu_spec(o)
     stage = o.stage
     burst_plan = stage_burst_plan(o, for_hardware)
     tx = tx_geometry(o)
@@ -535,7 +603,7 @@ def validate(o, for_hardware):
         gate = {"required": PREDECESSOR.get(stage) is not None,
                 "predecessor": PREDECESSOR.get(stage),
                 "note": "checked at stage time, before any device contact"}
-    return {"stage": stage, "geo": geo, "tx": tx,
+    return {"stage": stage, "geo": geo, "tx": tx, "psdu": psdu,
             "tx_samples": tx_samples, "burst_plan": burst_plan,
             "adapter": adapter, "gate": gate,
             "calibration_id": o.calibration_id or "cal-unspecified"}
@@ -577,8 +645,10 @@ def build_plan(o, cfg):
             "time_source": o.time_source,
             "probed": False,
         },
-        "rate": {"hz": NATIVE_RATE_HZ,
-                 "contract": "exact 737.28 MS/s; UHD coercion rejected"},
+        "rate": {"hz": o.rate,
+                 "contract": "737.28 MS/s (UC200) or 491.52 MS/s (CG400); "
+                             "UHD coercion rejected",
+                 "resample": "65/48" if o.rate == UC200_RATE_HZ else "65/32"},
         "sample_format": {"cpu": "sc16", "otw": "sc16"},
         "channels": {"tx": o.tx_channel, "tx_antenna": o.tx_antenna,
                      "rx": o.rx_channel,
@@ -588,6 +658,7 @@ def build_plan(o, cfg):
                   "policy": "explicit-only for transmitting stages"},
         "pri": {"s": o.pri_s, "ticks": geo["pri_ticks"]},
         "windows": geo,
+        "psdu": cfg["psdu"],
         "backend_mode": o.adapter,
         "adapter": {
             "mode": o.adapter,
@@ -781,8 +852,9 @@ class BuiltinUhdAdapter:
                                      "no num_samps_and_done stream mode")
 
     def _tspec(self, ticks):
-        full = ticks // 737280000
-        frac = (ticks % 737280000) / float(737280000)
+        rate = int(self.o.rate)
+        full = ticks // rate
+        frac = (ticks % rate) / float(rate)
         try:
             return self._ts_cls(full, frac)
         except Exception:
@@ -794,7 +866,7 @@ class BuiltinUhdAdapter:
             frac = float(ts.get_frac_secs())
         except Exception:
             return None
-        return llround(full * NATIVE_RATE_HZ + frac * NATIVE_RATE_HZ)
+        return llround(full * self.o.rate + frac * self.o.rate)
 
     def setup(self):
         self._import_uhd()
@@ -819,24 +891,24 @@ class BuiltinUhdAdapter:
             raise AdapterUnavailable("uhd_config_failed",
                                      "clock/time source: %s" % exc)
         try:
-            usrp.set_rx_rate(NATIVE_RATE_HZ, self.o.rx_channel)
+            usrp.set_rx_rate(self.o.rate, self.o.rx_channel)
             actual = float(usrp.get_rx_rate(self.o.rx_channel))
         except Exception as exc:
             raise AdapterUnavailable("uhd_config_failed",
                                      "rx rate: %s" % exc)
-        if abs(actual - NATIVE_RATE_HZ) > 1.0:
+        if abs(actual - self.o.rate) > 1.0:
             raise AdapterUnavailable(
                 "rate_coerced",
-                "device coerced RX rate to %r; the 737.28 MS/s contract is "
-                "not met" % (actual,))
+                "device coerced RX rate to %r; contracted rate %r is "
+                "not met" % (actual, self.o.rate))
         probe["rate_hz"] = actual
         try:
-            usrp.set_tx_rate(NATIVE_RATE_HZ, self.o.tx_channel)
+            usrp.set_tx_rate(self.o.rate, self.o.tx_channel)
             actual_tx = float(usrp.get_tx_rate(self.o.tx_channel))
         except Exception as exc:
             raise AdapterUnavailable("uhd_config_failed",
                                      "tx rate: %s" % exc)
-        if abs(actual_tx - NATIVE_RATE_HZ) > 1.0:
+        if abs(actual_tx - self.o.rate) > 1.0:
             raise AdapterUnavailable(
                 "rate_coerced",
                 "device coerced TX rate to %r" % (actual_tx,))
@@ -862,7 +934,7 @@ class BuiltinUhdAdapter:
         return [
             check("device_open", True, probe.get("device", "")),
             check("rate_exact_737p28",
-                  abs(float(probe.get("rate_hz", 0)) - NATIVE_RATE_HZ) <= 1.0,
+                  abs(float(probe.get("rate_hz", 0)) - self.o.rate) <= 1.0,
                   "rate_hz=%r" % (probe.get("rate_hz"),)),
             check("clock_source_applied",
                   probe.get("clock_source") == self.o.clock_source,
@@ -1072,7 +1144,7 @@ class ExternalAdapter:
         except OSError as exc:
             raise AdapterUnavailable("adapter_spawn_failed", str(exc))
         resp = self._request({"op": "setup", "stage": self.o.stage,
-                              "cfg": {"rate_hz": NATIVE_RATE_HZ,
+                              "cfg": {"rate_hz": self.o.rate,
                                       "otw": "sc16", "cpu": "sc16",
                                       "args": self.o.args,
                                       "tx_channel": self.o.tx_channel,
@@ -1146,7 +1218,7 @@ class ScriptedAdapter:
         self.o = o
         self.cfg = cfg
         self.scfg = scfg if isinstance(scfg, dict) else {}
-        self.base_ticks = 10 * int(NATIVE_RATE_HZ)
+        self.base_ticks = 10 * int(self.o.rate)
         self._issued = 0
         self._pending = None
         self._wave = b""
@@ -1193,8 +1265,8 @@ class ScriptedAdapter:
     def setup(self):
         self._load_wave()
         self.probe = {"device": "scripted-no-device",
-                      "rate_hz": NATIVE_RATE_HZ,
-                      "tx_rate_hz": NATIVE_RATE_HZ,
+                      "rate_hz": self.o.rate,
+                      "tx_rate_hz": self.o.rate,
                       "clock_source": self.o.clock_source,
                       "time_source": self.o.time_source,
                       "tx_channel": self.o.tx_channel,
@@ -1367,10 +1439,10 @@ def run_burst_stage(o, cfg, rep, adapter, stage):
     pre = cfg["geo"]["pre_guard_native"]
     rx_len = cfg["geo"]["rx_window_native"]
     planned = cfg["burst_plan"]["bursts"]
-    arm = llround(o.arm_delay_s * NATIVE_RATE_HZ)
+    arm = llround(o.arm_delay_s * o.rate)
     t0 = adapter.time_now_ticks() + arm
     frags = fragments_for(o, cfg["tx_samples"])
-    lead = int(0.002 * NATIVE_RATE_HZ)
+    lead = int(0.002 * o.rate)
     pacing = getattr(adapter, "wall_pacing", True)
     rows = []
     late = 0
@@ -1396,11 +1468,11 @@ def run_burst_stage(o, cfg, rep, adapter, stage):
                 now = adapter.time_now_ticks()
                 if t_rx - now <= lead:
                     break
-                time.sleep(min((t_rx - now - lead) / NATIVE_RATE_HZ, 0.005))
+                time.sleep(min((t_rx - now - lead) / o.rate, 0.005))
         adapter.issue_rx(t_rx, rx_len)
         tx_res = adapter.issue_tx(t_tx, frags)
-        timeout_s = max(0.05, (t_tx - now) / NATIVE_RATE_HZ
-                        + rx_len / NATIVE_RATE_HZ + 0.5)
+        timeout_s = max(0.05, (t_tx - now) / o.rate
+                        + rx_len / o.rate + 0.5)
         res = adapter.collect(timeout_s, rx_len)
         status = res["status"]
         row = {"pulse_id": k, "schedule_index": k, "t_tx_ticks": t_tx,
@@ -1589,7 +1661,7 @@ def run_stage(o, cfg):
                      evidence_class=adapter_info["evidence_class"],
                      hardware_verified=adapter_info["evidence_class"]
                      == "hardware",
-                     rate_hz=NATIVE_RATE_HZ, checks=checks,
+                     rate_hz=o.rate, checks=checks,
                      counters=counters, evidence=evidence, caveats=caveats,
                      deferred=deferred,
                      ota_observation_only=(stage == "ota"))

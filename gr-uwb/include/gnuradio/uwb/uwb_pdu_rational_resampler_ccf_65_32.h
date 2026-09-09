@@ -4,10 +4,10 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * UwbPduRationalResamplerCcf65_48 — PDU-level fixed 65/48 CF32 resampler.
+ * UwbPduRationalResamplerCcf65_32 — PDU-level fixed 65/32 CF32 resampler.
  *
- * Architecture (docs/performance/分析与下阶段建议_GNURadio软件升采样_65_48.md §3.2):
- *   Capture fixed windows at native 737.28 MS/s with UwbScheduledExtractor,
+ * Architecture (docs/phase1/开发方案_CG400_491p52雷达接收与65_32重采样.md):
+ *   Capture fixed windows at native 491.52 MS/s (X410 CG400 / EchoTimer),
  *   then upsample only the short window PDU to 998.4 MS/s.  Continuous host
  *   resampling is not real-time; PDU duty-cycle makes the FIR affordable.
  *
@@ -17,9 +17,9 @@
  * performed only for the scheduled window, never for the continuous stream.
  *
  * Contract: docs/performance/规格_固定65_48重采样core契约.md
- *   Lout = ceil(((N-1)*65 + T)/48)
- *   map(p) = round((p*65 + (T-1)/2)/48)   // group-delay-centered
- * Reuses core::RationalResampler65_48Core (one-shot process + flush per PDU).
+ *   Lout = ceil(((N-1)*65 + T)/32)
+ *   map(p) = round((p*65 + (T-1)/2)/32)   // group-delay-centered
+ * Reuses core::RationalResampler65_32Core (one-shot process + flush per PDU).
  */
 
 #pragma once
@@ -39,14 +39,14 @@
 namespace gr {
 namespace uwb {
 
-class UWB_API UwbPduRationalResamplerCcf65_48 : public gr::block
+class UWB_API UwbPduRationalResamplerCcf65_32 : public gr::block
 {
 public:
-    using sptr = std::shared_ptr<UwbPduRationalResamplerCcf65_48>;
+    using sptr = std::shared_ptr<UwbPduRationalResamplerCcf65_32>;
 
-    static constexpr uint32_t kInterp = core::RationalResampler65_48Core::kInterp;
-    static constexpr uint32_t kDecim = core::RationalResampler65_48Core::kDecim;
-    static constexpr double kInputRateHz = 737.28e6;
+    static constexpr uint32_t kInterp = core::RationalResampler65_32Core::kInterp;
+    static constexpr uint32_t kDecim = core::RationalResampler65_32Core::kDecim;
+    static constexpr double kInputRateHz = 491.52e6;
     static constexpr double kOutputRateHz = 998.4e6;
 
     /** Emit the full resampled window (default) or only the capture body. */
@@ -55,17 +55,17 @@ public:
         CaptureOnly = 1,
     };
 
-    // Covers scheduled e2e and 2048-SYNC radar RX windows (~1.55e6 @737.28).
+    // Covers existing scheduled e2e (pre+cap+post = 252000) and Radar windows.
     static constexpr size_t kDefaultMaxInputSamples = 2097152;
 
     /**
      * \param taps_file_or_profile  "quality" / "realtime" / "quality_minorder"
-     *        / "realtime_minorder" (resolves under testdata/resampler_65_48/)
+     *        / "realtime_minorder" (resolves under testdata/resampler_65_32/)
      *        or absolute path to a float32 binary taps file.
      * \param output_sample_rate    meta sample_rate written on emit (default
      *        998.4e6).
      * \param validate_input_rate   If true, drop PDUs whose meta sample_rate
-     *        is not ~737.28e6 and publish status "bad_input_rate".
+     *        is not ~491.52e6 and publish status "bad_input_rate".
      * \param emit_policy           FullWindow (default) or CaptureOnly.
      * \param max_input_samples     Fixed handler input bound. Scratch for
      *        SC16→FC32 and process+flush is allocated at make(); the handler
@@ -84,7 +84,7 @@ public:
                                EmitPolicy emit_policy = EmitPolicy::FullWindow,
                                size_t max_input_samples = kDefaultMaxInputSamples);
 
-    ~UwbPduRationalResamplerCcf65_48() override;
+    ~UwbPduRationalResamplerCcf65_32() override;
 
     // --- config ---
     const std::vector<float>& taps() const { return d_taps_; }
@@ -106,7 +106,7 @@ public:
     size_t input_scratch_size() const { return d_input_scratch_.size(); }
     size_t input_scratch_capacity() const { return d_input_scratch_.capacity(); }
 
-    /** Group-delay-centered map: round((p*65 + (T-1)/2)/48). */
+    /** Group-delay-centered map: round((p*65 + (T-1)/2)/32). */
     int64_t map_input_offset_to_output(int64_t p) const
     {
         return d_core_->map_input_offset_to_output(p);
@@ -172,7 +172,7 @@ public:
     void reset_stats();
 
     // Public for gnuradio::make_block_sptr; use make() / make_from_taps().
-    UwbPduRationalResamplerCcf65_48(const std::vector<float>& taps,
+    UwbPduRationalResamplerCcf65_32(const std::vector<float>& taps,
                                     double output_sample_rate,
                                     bool validate_input_rate,
                                     EmitPolicy emit_policy,
@@ -189,7 +189,7 @@ private:
     load_taps_from_profile_or_path(const std::string& taps_file_or_profile);
 
     std::vector<float> d_taps_;
-    std::unique_ptr<core::RationalResampler65_48Core> d_core_;
+    std::unique_ptr<core::RationalResampler65_32Core> d_core_;
     double d_output_rate_;
     bool d_validate_rate_;
     EmitPolicy d_emit_policy_;

@@ -11,9 +11,9 @@
  * scaled, optionally noisy RX window into scratch allocated at make()
  * (capacity max_rx_samples).  The handler never grows those buffers.
  *
- * Input grid: both 737.28 MS/s native (production order: native packet ->
- * loopback -> PDU 65/48) and 998.4 MS/s work (direct path) are accepted;
- * delays/gains are sample-index domain on the input grid and the
+ * Input grid: native 737.28 / 491.52 MS/s (production: native packet ->
+ * loopback -> PDU 65/48 or 65/32) and 998.4 MS/s work (direct path) are
+ * accepted; delays/gains are sample-index domain on the input grid and the
  * calibration delay is reported as calibration_delay_native_samples.
  *
  * Output metadata follows the EchoTimer / scheduled-capture schema:
@@ -53,8 +53,8 @@ public:
                      const std::vector<gr_complex>& gains = {},
                      float noise_std = 0.0f,
                      uint32_t rng_seed = 1,
-                     size_t max_tx_samples = 262144,
-                     size_t max_rx_samples = 524288,
+                     size_t max_tx_samples = 2097152,
+                     size_t max_rx_samples = 4194304,
                      size_t num_delay_samps = 0,
                      double t0_s = 0.0,
                      double pri_s = defaults::kQm35PacketIntervalS);

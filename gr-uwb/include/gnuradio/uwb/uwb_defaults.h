@@ -48,10 +48,14 @@ inline constexpr size_t kScheduledPostGuard = 4096;
 inline constexpr size_t kScheduledPoolSize = 8;
 inline constexpr double kScheduledPacketIntervalS = 0.01; // 100 radar/s
 
-// X410 native SC16 rate (no RFNoC / host 65/48).
+// X410 native SC16 rate (no RFNoC / host 65/48).  UC200 default.
 inline constexpr double kNativeSampleRateHz = 737280000.0;
+// X410 CG400 FPGA image: radio rate is 491.52 MS/s only (65/32 → 998.4).
+inline constexpr double kCg400NativeSampleRateHz = 491520000.0;
 // QM35 radar slot period used by the auto-scheduled native capture path.
 inline constexpr double kQm35PacketIntervalS = 0.005; // 200 slot/s
+// Host burst cap covering 2048-SYNC RX @737.28 (≈1.55e6 native samples).
+inline constexpr size_t kMaxRadarBurstSamples = 2097152;
 // Time-derived window geometry at 737.28 MS/s.  Do NOT copy the 998.4
 // sample counts 9984/189696/4096 without converting by 48/65.
 //   pre  = llround(10e-6  * 737.28e6) = 7373
@@ -60,6 +64,13 @@ inline constexpr double kQm35PacketIntervalS = 0.005; // 200 slot/s
 inline constexpr size_t kNativeScheduledPreGuard = 7373;
 inline constexpr size_t kNativeScheduledCapture = 140083;
 inline constexpr size_t kNativeScheduledPostGuard = 3023;
+// Same wall-clock window at CG400 491.52 MS/s (10 / 190 / 4.1 µs).
+//   pre  = llround(10e-6  * 491.52e6) = 4915
+//   body = llround(190e-6 * 491.52e6) = 93389
+//   post = llround(4.1e-6 * 491.52e6) = 2015
+inline constexpr size_t kCg400NativeScheduledPreGuard = 4915;
+inline constexpr size_t kCg400NativeScheduledCapture = 93389;
+inline constexpr size_t kCg400NativeScheduledPostGuard = 2015;
 // Native dump geometry.  CIR for QM35 is taken from the preamble
 // (~64 SYNC ≈ 65 µs), so a DW1000 that starts before / at predicted t0 is
 // the interferer that matters.  Keep a full DW1000 airtime in front so that

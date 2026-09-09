@@ -359,14 +359,8 @@ struct TxProfile {
     int64_t sfd_samples = -1;
 };
 
-// Native 737.28 grid length of a work-domain sample count: the 48/65
-// down-conversion convention used by the 65/48 contract (ceil, matching
-// the canonical native SYNC lengths 24009/48018/96036 for 32/64/128 reps).
-inline int64_t native_span(int64_t work_samples)
-{
-    const int64_t scaled = work_samples * 48;
-    return (scaled + 64) / 65;
-}
+// Native grid length of a work-domain sample count: ceil(work * M / 65).
+// UC200 M=48 → 24009/48018/96036; CG400 M=32 → 16006/32012/64024.
 
 // Returns status event name on failure, empty string on success.
 std::string validate_loopback_profile(pmt::pmt_t meta,
@@ -378,8 +372,8 @@ std::string validate_loopback_profile(pmt::pmt_t meta,
         return "bad_input_rate";
     out.sample_rate = dict_f64(meta, "sample_rate", 0.0);
     // The loopback is the software stand-in for the EchoTimer RX window and
-    // must accept both the native 737.28 MS/s capture grid (production
-    // path: native packet -> loopback -> PDU 65/48) and the 998.4 MS/s
+    // must accept native 737.28 / 491.52 MS/s capture grids (production:
+    // native packet -> loopback -> PDU 65/48 or 65/32) and the 998.4 MS/s
     // work grid (direct path).  Delays are sample-index domain in the
     // input grid either way.
     out.native_rate = radar_meta::is_native_rate(out.sample_rate);
@@ -436,18 +430,23 @@ std::string validate_loopback_profile(pmt::pmt_t meta,
         return "invalid_profile";
 
     // Expected SYNC/SFD spans depend on the input grid: 1016 work samples
-    // per symbol at 998.4 MS/s, ceil(work*48/65) native samples per symbol
-    // at 737.28 MS/s.
+    // per symbol at 998.4 MS/s; ceil(work*M/65) at native 737.28 (M=48) or
+    // 491.52 (M=32).
+    const uint32_t decim = radar_meta::native_decim(out.sample_rate);
     const int64_t expect_sync =
         out.native_rate
-            ? native_span(static_cast<int64_t>(out.sync_reps) *
-                          static_cast<int64_t>(demod::kQm35SamplesPerSymbol))
+            ? radar_meta::native_span(
+                  static_cast<int64_t>(out.sync_reps) *
+                      static_cast<int64_t>(demod::kQm35SamplesPerSymbol),
+                  decim)
             : static_cast<int64_t>(out.sync_reps *
                                    demod::kQm35SamplesPerSymbol);
     const int64_t expect_sfd =
         out.native_rate
-            ? native_span(static_cast<int64_t>(sfd.size()) *
-                          static_cast<int64_t>(demod::kQm35SamplesPerSymbol))
+            ? radar_meta::native_span(
+                  static_cast<int64_t>(sfd.size()) *
+                      static_cast<int64_t>(demod::kQm35SamplesPerSymbol),
+                  decim)
             : static_cast<int64_t>(sfd.size() *
                                    demod::kQm35SamplesPerSymbol);
     out.sync_samples = expect_sync;

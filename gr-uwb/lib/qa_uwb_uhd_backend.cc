@@ -196,6 +196,12 @@ BOOST_AUTO_TEST_CASE(test_uhd_backend_config_validation)
     expect_fail(cfg);
     cfg.sample_rate_hz = std::numeric_limits<double>::quiet_NaN();
     expect_fail(cfg);
+    cfg.sample_rate_hz = 750e6;
+    expect_fail(cfg);
+
+    cfg = radar_config();
+    cfg.sample_rate_hz = 491520000.0;
+    BOOST_CHECK(uhd_cfg::validate_uhd_burst_backend_config(cfg, &err));
 
     cfg = radar_config();
     cfg.rate_tolerance_rel = 0.0;

@@ -30,11 +30,11 @@ parameters:
 -   id: max_tx_samples
     label: Max TX samples
     dtype: int
-    default: '262144'
+    default: '2097152'
 -   id: max_rx_samples
     label: Max RX samples
     dtype: int
-    default: '524288'
+    default: '4194304'
 -   id: num_delay_samps
     label: num_delay_samps (left shift)
     dtype: int

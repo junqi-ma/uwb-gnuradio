@@ -28,6 +28,7 @@
 #include <gnuradio/uwb/uwb_auto_scheduled_extractor_sc16.h>
 #include <gnuradio/uwb/uwb_rational_resampler_ccf_65_48.h>
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>
+#include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_32.h>
 #include <gnuradio/uwb/uwb_pdu_window_crop.h>
 #include <gnuradio/uwb/uwb_radar_packet_source.h>
 #include <gnuradio/uwb/uwb_loopback_echo.h>
@@ -555,6 +556,34 @@ void bind_pdu_rational_resampler_ccf_65_48(py::module& m)
         .def("reset_stats", &Blk::reset_stats);
 }
 
+void bind_pdu_rational_resampler_ccf_65_32(py::module& m)
+{
+    using Blk = gr::uwb::UwbPduRationalResamplerCcf65_32;
+    py::class_<Blk, gr::block, std::shared_ptr<Blk>>(
+        m, "pdu_rational_resampler_ccf_65_32")
+        .def(py::init([](const std::string& taps,
+                         double output_sample_rate,
+                         bool validate_input_rate,
+                         size_t max_input_samples) {
+                 return Blk::make(taps,
+                                  output_sample_rate,
+                                  validate_input_rate,
+                                  Blk::EmitPolicy::FullWindow,
+                                  max_input_samples);
+             }),
+             py::arg("taps_file_or_profile") = std::string("quality_minorder"),
+             py::arg("output_sample_rate") = Blk::kOutputRateHz,
+             py::arg("validate_input_rate") = true,
+             py::arg("max_input_samples") = Blk::kDefaultMaxInputSamples)
+        .def("map_input_offset_to_output",
+             &Blk::map_input_offset_to_output,
+             py::arg("p"))
+        .def("pdus_received", &Blk::pdus_received)
+        .def("pdus_emitted", &Blk::pdus_emitted)
+        .def("pdus_dropped", &Blk::pdus_dropped)
+        .def("reset_stats", &Blk::reset_stats);
+}
+
 void bind_pdu_window_crop(py::module& m)
 {
     using Blk = gr::uwb::UwbPduWindowCrop;
@@ -627,8 +656,8 @@ void bind_loopback_echo(py::module& m)
              py::arg("gains") = std::vector<std::complex<float>>(),
              py::arg("noise_std") = 0.0f,
              py::arg("rng_seed") = uint32_t(1),
-             py::arg("max_tx_samples") = size_t(262144),
-             py::arg("max_rx_samples") = size_t(524288),
+             py::arg("max_tx_samples") = size_t(2097152),
+             py::arg("max_rx_samples") = size_t(4194304),
              py::arg("num_delay_samps") = size_t(0),
              py::arg("t0_s") = 0.0,
              py::arg("pri_s") = gr::uwb::defaults::kQm35PacketIntervalS)
@@ -749,6 +778,7 @@ PYBIND11_MODULE(uwb_python, m)
     bind_realtime_demodulator(m);
     bind_rational_resampler_ccf_65_48(m);
     bind_pdu_rational_resampler_ccf_65_48(m);
+    bind_pdu_rational_resampler_ccf_65_32(m);
     bind_pdu_window_crop(m);
     bind_radar_packet_source(m);
     bind_loopback_echo(m);

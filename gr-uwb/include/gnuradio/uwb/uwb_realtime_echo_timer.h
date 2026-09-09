@@ -124,8 +124,8 @@ public:
                      std::shared_ptr<echo::IRadioBurstBackend> backend,
                      size_t queue_capacity = 64,
                      uint64_t rx_collect_wait_ms = 1000,
-                     uint64_t max_tx_samples = 1u << 20,
-                     uint64_t max_rx_samples = 1u << 20);
+                     uint64_t max_tx_samples = 1u << 21,
+                     uint64_t max_rx_samples = 1u << 21);
 
     ~UwbRealtimeEchoTimer() override;
 

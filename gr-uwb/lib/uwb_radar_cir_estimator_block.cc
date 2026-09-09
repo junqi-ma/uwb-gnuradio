@@ -22,6 +22,7 @@
 #include <cmath>
 #include <fstream>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace gr {
@@ -263,7 +264,8 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
     }
     if (!radar_meta::sync_reps_supported(d_cfg_.sync_repetitions)) {
         throw std::invalid_argument(
-            "UwbRadarCirEstimator: sync_repetitions must be 32, 64 or 128");
+            std::string("UwbRadarCirEstimator: sync_repetitions must be ") +
+            radar_meta::sync_reps_supported_list());
     }
     if (!radar_meta::code_index_supported(d_cfg_.code_index)) {
         throw std::invalid_argument(

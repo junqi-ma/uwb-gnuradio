@@ -1,5 +1,5 @@
-id: uwb_pdu_rational_resampler_ccf_65_48
-label: UWB PDU Rational Resampler 65/48 (CF32)
+id: uwb_pdu_rational_resampler_ccf_65_32
+label: UWB PDU Rational Resampler 65/32 (CF32)
 category: '[UWB]'
 
 parameters:
@@ -13,7 +13,7 @@ parameters:
     dtype: real
     default: '998.4e6'
 -   id: validate_input_rate
-    label: Validate input rate (737.28e6)
+    label: Validate input rate (491.52e6)
     dtype: bool
     default: 'True'
 -   id: max_input_samples
@@ -36,24 +36,25 @@ outputs:
 
 templates:
     imports: from gnuradio import uwb
-    make: uwb.pdu_rational_resampler_ccf_65_48(${taps_file_or_profile}, ${output_sample_rate}, ${validate_input_rate}, uwb.pdu_resampler_emit_policy.FullWindow, ${max_input_samples})
+    make: uwb.pdu_rational_resampler_ccf_65_32(${taps_file_or_profile}, ${output_sample_rate}, ${validate_input_rate}, ${max_input_samples})
 
 cpp_templates:
-    includes: ['#include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>']
-    make: 'this->${id} = gr::uwb::UwbPduRationalResamplerCcf65_48::make(${taps_file_or_profile}, ${output_sample_rate}, ${validate_input_rate}, gr::uwb::UwbPduRationalResamplerCcf65_48::EmitPolicy::FullWindow, ${max_input_samples});'
+    includes: ['#include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_32.h>']
+    make: 'this->${id} = gr::uwb::UwbPduRationalResamplerCcf65_32::make(${taps_file_or_profile}, ${output_sample_rate}, ${validate_input_rate}, gr::uwb::UwbPduRationalResamplerCcf65_32::EmitPolicy::FullWindow, ${max_input_samples});'
     link: ['gnuradio::gnuradio-uwb']
 
 documentation: |-
-    PDU-level fixed 65/48 CF32 rational resampler (737.28 MS/s → 998.4 MS/s).
+    PDU-level fixed 65/32 CF32 rational resampler (491.52 MS/s → 998.4 MS/s).
 
-    Consumes window PDUs from UwbScheduledExtractor (native 737.28 MS/s),
-    resamples the whole window via RationalResampler65_48Core (one-shot
+    Consumes window PDUs from UwbScheduledExtractor (native 491.52 MS/s),
+    resamples the whole window via RationalResampler65_32Core (one-shot
     process+flush), and emits a 998.4 MS/s PDU with group-delay-aware
     coordinate mapping:
 
-        map(p) = round((p*65 + (T-1)/2)/48)
+        map(p) = round((p*65 + (T-1)/2)/32)
 
-    Default taps profile is quality_minorder (2707 taps, relative −70 dB).
+    Default taps profile is quality_minorder (relative −70 dB; see
+    testdata/resampler_65_32/design_minorder.json).
     max_input_samples (default 2097152) sizes SC16 and FIR scratch at make();
     the handler never grows those buffers. Oversized PDUs publish
     invalid_window and emit no packet.

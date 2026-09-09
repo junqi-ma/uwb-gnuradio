@@ -191,14 +191,31 @@ void apply_packet_descriptor(const std::string& desc_path,
     }
 
     const bool work = radar_meta::is_work_rate(sample_rate);
+    const bool cg400 = radar_meta::is_cg400_native_rate(sample_rate);
     double sidecar_rate = 0.0;
-    const char* rate_key = work ? "rate_work_hz" : "rate_native_hz";
-    const char* len_key = work ? "tx_length_998p4" : "tx_length_737p28";
-    if (!json_get_number(text, rate_key, sidecar_rate) ||
-        !json_get_int(text, len_key, len)) {
+    const char* rate_key = work ? "rate_work_hz"
+                                : (cg400 ? "rate_native_cg400_hz"
+                                         : "rate_native_hz");
+    const char* len_key = work ? "tx_length_998p4"
+                               : (cg400 ? "tx_length_491p52"
+                                        : "tx_length_737p28");
+    if (!json_get_number(text, rate_key, sidecar_rate)) {
+        // CG400 length may live in a combined sidecar that still names
+        // the UC200 rate as rate_native_hz; accept rate_native_hz if it
+        // actually matches 491.52.
+        if (cg400 && json_get_number(text, "rate_native_hz", sidecar_rate) &&
+            radar_meta::is_cg400_native_rate(sidecar_rate)) {
+            rate_key = "rate_native_hz";
+        } else {
+            throw std::invalid_argument(
+                std::string("UwbRadarPacketSource: descriptor missing ") +
+                rate_key + ": " + desc_path);
+        }
+    }
+    if (!json_get_int(text, len_key, len)) {
         throw std::invalid_argument(
             std::string("UwbRadarPacketSource: descriptor missing ") +
-            rate_key + "/" + len_key + ": " + desc_path);
+            len_key + ": " + desc_path);
     }
     if (!radar_meta::rates_close(sidecar_rate, sample_rate)) {
         throw std::invalid_argument(
@@ -266,7 +283,8 @@ UwbRadarPacketSource::UwbRadarPacketSource(const std::string& path,
     if (!radar_meta::is_work_rate(sample_rate) &&
         !radar_meta::is_native_rate(sample_rate)) {
         throw std::invalid_argument(
-            "UwbRadarPacketSource: sample_rate must be 998.4e6 or 737.28e6");
+            "UwbRadarPacketSource: sample_rate must be 998.4e6, 737.28e6, "
+            "or 491.52e6");
     }
     if (sample_format != "fc32" && sample_format != "sc16") {
         throw std::invalid_argument(
@@ -278,7 +296,8 @@ UwbRadarPacketSource::UwbRadarPacketSource(const std::string& path,
     }
     if (!radar_meta::sync_reps_supported(sync_repetitions)) {
         throw std::invalid_argument(
-            "UwbRadarPacketSource: sync_repetitions must be 32, 64, or 128");
+            std::string("UwbRadarPacketSource: sync_repetitions must be ") +
+            radar_meta::sync_reps_supported_list());
     }
     if (!(pri_s > 0.0)) {
         throw std::invalid_argument("UwbRadarPacketSource: pri_s must be > 0");
@@ -369,9 +388,9 @@ UwbRadarPacketSource::UwbRadarPacketSource(const std::string& path,
     }
     if (radar_meta::is_native_rate(sample_rate) && d_descriptor_path_.empty()) {
         throw std::invalid_argument(
-            "UwbRadarPacketSource: native 737.28e6 packets require a "
-            "metadata sidecar or descriptor_path (empty file is not a "
-            "complete packet)");
+            "UwbRadarPacketSource: native 737.28e6 / 491.52e6 packets "
+            "require a metadata sidecar or descriptor_path (empty file "
+            "is not a complete packet)");
     }
     if (!d_descriptor_path_.empty()) {
         apply_packet_descriptor(d_descriptor_path_,

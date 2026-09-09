@@ -69,10 +69,11 @@ documentation: |-
     host; EchoTimer owns device-time scheduling.  emit copies pulse_id
     onto stored IQ (not rebuilt).  auto_emit publishes once from start().
 
-    Native 737.28e6 files require metadata.json beside the packet (or an
-    explicit descriptor_path). A format-specific metadata.fc32.json or
-    metadata.sc16.json takes precedence. The descriptor must bind profile,
-    sample count, sample_format, dtype, byte order and interleaved-IQ layout.
-    sc16 is little-endian interleaved int16 IQ.
+    Native 737.28e6 (UC200) and 491.52e6 (CG400) files require metadata.json
+    beside the packet (or an explicit descriptor_path). A format-specific
+    metadata.fc32.json or metadata.sc16.json takes precedence. The descriptor
+    must bind profile, sample count, sample_format, dtype, byte order and
+    interleaved-IQ layout. CG400 sidecars use tx_length_491p52 and
+    rate_native_cg400_hz. sc16 is little-endian interleaved int16 IQ.
 
 file_format: 1

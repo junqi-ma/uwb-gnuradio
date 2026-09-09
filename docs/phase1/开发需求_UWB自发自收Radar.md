@@ -87,7 +87,7 @@ SYNC 估计 CIR，**不解码 PHR/payload/FCS**。
 |---|---|
 | RX 长度 = TX 长度 | 默认 RX 窗 = 预保护 + SYNC + SFD + 距离/滤波保护；不必接收不解码的 payload |
 | 两台 USRP + MIMO | 默认 **一台 X410**，TX/RX 分通道、共享内部 clock/time |
-| host CF32 连续/等长包 | 原生 **SC16 @737.28 MS/s** 突发；CIR 工作率 **998.4 MS/s** |
+| host CF32 连续/等长包 | 原生 **SC16 @737.28 MS/s（UC200）或 @491.52 MS/s（CG400）** 突发；CIR 工作率 **998.4 MS/s** |
 | `abs(x)` 后滑动相关 | 必须用 IEEE 802.15.4a/z **SYNC 相干 CIR**（`estimateCir`） |
 | tagged stream 穿过全速 PRI 填零 | PRI=5 ms @737.28 约 3.69e6 样点/脉冲；host 不能把静默段当流。TX 只含有效脉冲，RX 只含截窗 |
 | `gr-radar` 链 UHD | 现有 `libgnuradio-uwb` **不链 UHD**。Echo timer 对 UHD 可选编译；loopback 无 UHD 必须能测 |
@@ -103,7 +103,7 @@ GNU Radio 树中同类块：`uhd.usrp_sink` / `uhd.usrp_source`（SOB/EOB + `tx_
 | `UwbAutoScheduledExtractorSc16` / scheduled dump | **不**接主路径。那是听外部 QM35。自发自收的 t0 就是自己的 TX time_spec |
 | `UwbRealtimeDemodulator` + SFD/CIR stages | **复用算法，不复用整个解调块**。抽出 radar SFD + CIR core；保留 **复数 CIR**；不跑 PHR/payload |
 | `CirResult.cir_values` 现为 `vector<float>` 实部 | 解调诊断维持现状。雷达 CIR 用独立 `vector<complex<float>>`，禁止再写成实部 |
-| `UwbPduRationalResamplerCcf65_48` | RX 突发 SC16→CF32 后升到 998.4，再做 SFD/CIR；需补齐 radar metadata 传递并重测尾延迟 |
+| `UwbPduRationalResamplerCcf65_48` / `65_32` | RX 突发 SC16→CF32 后升到 998.4（UC200 65/48 或 CG400 65/32），再做 SFD/CIR |
 | `UwbPacketWriter`（IQ `capture.iq`+`jsonl`） | 契约风格对齐；**新写 `UwbCirWriter`**，主产物是 CIR 不是 IQ |
 | `testdata/reference_preamble_code9_737p28.cf32`（751 点） | 仅用于 native 检测/诊断模板，禁止直接重复 64 次当 TX |
 | MATLAB `estimateCir` / `generate_uwb_tx_from_decode` | CIR golden 与完整正常 UWB packet TX 波形 |
@@ -123,14 +123,15 @@ UwbRadarPacketSource          # 启动时加载/生成完整 TX packet，不掌�
     │  PDU: c32vector + meta(sync_reps, sfd_mode, tx_len, fs_tx)
     ▼
 UwbEchoTimer                  # 唯一调度者：timed TX + NUM_SAMPS_AND_DONE RX
-    │  原生 SC16 @737.28；RX 窗 = pre + SYNC/SFD + range + filter guard
+    │  原生 SC16 @737.28（UC200）或 @491.52（CG400）
+    │  RX 窗 = pre + SYNC/SFD + range + filter guard
     │  PDU: s16vector + meta(pulse_id, tx_time, rx_time, delay_samps, overflow)
     ▼
 UwbPduWindowCrop?             # 可选：去掉 TX 前保护中不参与 CIR 的段
     ▼
 SC16 → CF32（窗内）
     ▼
-UwbPduRationalResamplerCcf65_48     # 737.28 → 998.4，仅突发
+UwbPduRationalResamplerCcf65_48 或 65_32   # native → 998.4，仅突发
     ▼
 UwbRadarCirEstimator          # 已知 TX 窄窗搜 SFD → 回推 SYNC → estimateCir；无 CFO stage
     │  PDU: c32vector(CIR taps) + meta
@@ -231,9 +232,9 @@ IEEE 802.15.4z BPRF 正常 packet：
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | code | 9 | `HRPCodes(9)`，已在 `uwb_phy_profile.h` |
-| SYNC 重复 | 64 | **可配**；TX 生成器、SFD 回推和 CIR 可用 repetition 必须使用同一值 |
+| SYNC 重复 | 64 | **可配**：32/64/128/256/512/1024/2048。TX 生成器、SFD 回推和 CIR 必须用同一值。BPRF 原生 16/64/1024/4096；其余由脉冲成形 SYNC 字段裁剪/拼接，禁止 751 点模板重复 |
 | SFD | 必须有，默认 4z2 | RX 找到 SFD 即回溯 SYNC 估计 CIR |
-| PHR/PSDU/FCS | 固定合法内容 | 使 TX 保持正常 UWB packet；RX 不解码 |
+| PHR/PSDU/FCS | 默认 **0 Byte PSDU** | 两种输入：`--psdu-bytes N` 随机内容（N>0 默认加 IEEE FCS）；`--psdu-hex` 指定完整 PSDU。总长 ≤127。RX 不解码 |
 | 工作率生成 | 998.4 MS/s 下生成完整 packet | 64-SYNC 段为 64×1016 = 65024 样点（~65.1 µs） |
 | 上射频 | 对**完整 packet**一次性 48/65 到 737.28 | 启动前预生成 native SC16/CF32 golden，热路径不重采样 |
 | PRI | 5 ms | `defaults::kQm35PacketIntervalS` |
@@ -587,11 +588,11 @@ QA 用该函数对照 loopback 主峰。
 
 实现按上一节默认进行。若要改默认，在开写 Phase A 前定：
 
-1. **SYNC 长度变体**：第一期 CI 必须覆盖哪些 repetition？建议至少
-   32/64/128，并验证 SFD 回推与 CIR skip/count 不越界。
-2. **TX packet golden**：选定固定 PHR/PSDU/FCS 和完整 packet 生成器；
-   生产 TX 必须是整包一次性 48/65 后的 native 波形，不再提供
-   751 点单符号 repeat 选项。
+1. **SYNC 长度变体**：允许 32/64/128/256/512/1024/2048；CI 至少覆盖
+   32/64/128 完整包 + 全档位合成 CIR。SFD 回推与 CIR skip/count 不越界。
+2. **TX packet golden**：生成器默认 PSDU=0；canonical CIR golden 仍是
+   20 数据字节+FCS。生产 TX 必须是整包一次性 48/65 或 32/65 后的 native
+   波形，不再提供 751 点单符号 repeat 选项。
 3. **X410 TX/RX 通道**：同一 Radio 的 TX/RX0+RX2，还是 Radio0 TX + Radio1 RX？需 `uhd_usrp_probe` 后写进应用默认，需求层保持可配。
 4. **PRI**：默认 5 ms 是否过慢（相干积累/多普勒）？第一期保 5 ms 与现有雷达周期一致；更快 PRI 只改参数，不改架构。
 5. **SFD 搜索窗**：需由时延校准得到固定 TX/RX + 48/65 + 65/48

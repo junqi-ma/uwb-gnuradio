@@ -26,6 +26,7 @@ install(FILES
     uwb_rational_resampler_core.h
     uwb_rational_resampler_ccf_65_48.h
     uwb_pdu_rational_resampler_ccf_65_48.h
+    uwb_pdu_rational_resampler_ccf_65_32.h
     uwb_radar_pdu_meta.h
     uwb_window_crop_core.h
     uwb_pdu_window_crop.h

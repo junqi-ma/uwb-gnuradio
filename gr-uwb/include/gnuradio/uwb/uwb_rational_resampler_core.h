@@ -4,9 +4,11 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Pure fixed 65/48 rational resampler core (no GNU Radio / PMT deps).
+ * Pure rational resampler core (no GNU Radio / PMT deps).
+ * Instantiated as 65/48 (737.28→998.4) and 65/32 (491.52→998.4).
  *
  * Contract: docs/performance/规格_固定65_48重采样core契约.md
+ *           docs/phase1/开发方案_CG400_491p52雷达接收与65_32重采样.md
  * Reference: scipy/MATLAB upfirdn (zero-padded full convolution)
  *
  *   Lout = ceil(((N-1)*L + T) / M)
@@ -56,11 +58,14 @@ namespace gr {
 namespace uwb {
 namespace core {
 
-class RationalResampler65_48Core
+template <uint32_t Interp, uint32_t Decim>
+class RationalResamplerLmCore
 {
 public:
-    static constexpr uint32_t kInterp = 65;
-    static constexpr uint32_t kDecim = 48;
+    static constexpr uint32_t kInterp = Interp;
+    static constexpr uint32_t kDecim = Decim;
+    static_assert(Interp >= 1 && Decim >= 1, "interp/decim must be >= 1");
+    static_assert(Interp <= 255, "interp must fit schedule_arm_ uint8_t");
 
     using gr_complex = std::complex<float>;
 
@@ -81,7 +86,7 @@ public:
         void reset() { *this = ProfileStats{}; }
     };
 
-    RationalResampler65_48Core(const float* taps, size_t T)
+    RationalResamplerLmCore(const float* taps, size_t T)
         : T_(T),
           H_((T + kInterp - 1) / kInterp),
           input_items_(0),
@@ -96,11 +101,11 @@ public:
     {
         if (taps == nullptr || T == 0) {
             throw std::invalid_argument(
-                "RationalResampler65_48Core: taps must be non-empty");
+                "RationalResamplerLmCore: taps must be non-empty");
         }
         if (H_ == 0) {
             throw std::invalid_argument(
-                "RationalResampler65_48Core: invalid arm length");
+                "RationalResamplerLmCore: invalid arm length");
         }
 
         arms_.assign(static_cast<size_t>(kInterp) * H_, 0.0f);
@@ -146,16 +151,16 @@ public:
         select_default_kernel();
     }
 
-    explicit RationalResampler65_48Core(const std::vector<float>& taps)
-        : RationalResampler65_48Core(taps.data(), taps.size())
+    explicit RationalResamplerLmCore(const std::vector<float>& taps)
+        : RationalResamplerLmCore(taps.data(), taps.size())
     {
     }
 
-    ~RationalResampler65_48Core() { stop_pool(); }
+    ~RationalResamplerLmCore() { stop_pool(); }
 
-    RationalResampler65_48Core(const RationalResampler65_48Core&) = delete;
-    RationalResampler65_48Core&
-    operator=(const RationalResampler65_48Core&) = delete;
+    RationalResamplerLmCore(const RationalResamplerLmCore&) = delete;
+    RationalResamplerLmCore&
+    operator=(const RationalResamplerLmCore&) = delete;
 
     static size_t expected_output_length(uint64_t N, size_t T)
     {
@@ -213,7 +218,7 @@ public:
 #endif
         } else {
             throw std::invalid_argument(
-                "RationalResampler65_48Core::set_kernel: unknown " + name);
+                "RationalResamplerLmCore::set_kernel: unknown " + name);
         }
     }
 
@@ -252,7 +257,7 @@ public:
 
         if (flush_mode_) {
             throw std::logic_error(
-                "RationalResampler65_48Core: process() after flush without "
+                "RationalResamplerLmCore: process() after flush without "
                 "reset()");
         }
 
@@ -981,6 +986,9 @@ private:
         return r;
     }
 };
+
+using RationalResampler65_48Core = RationalResamplerLmCore<65, 48>;
+using RationalResampler65_32Core = RationalResamplerLmCore<65, 32>;
 
 } // namespace core
 } // namespace uwb

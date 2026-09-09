@@ -60,6 +60,7 @@
 #include <gnuradio/uwb/uwb_loopback_echo.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>
+#include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_32.h>
 #include <gnuradio/uwb/uwb_radar_cir_core.h>
 #include <gnuradio/uwb/uwb_radar_cir_estimator_block.h>
 #include <gnuradio/uwb/uwb_radar_packet_source.h>
@@ -84,6 +85,7 @@
 using gr::uwb::UwbCirWriter;
 using gr::uwb::UwbLoopbackEcho;
 using gr::uwb::UwbPduRationalResamplerCcf65_48;
+using gr::uwb::UwbPduRationalResamplerCcf65_32;
 using gr::uwb::UwbRadarCirEstimator;
 using gr::uwb::UwbRadarPacketSource;
 using gr::uwb::radar::prepare_radar_cir_core;
@@ -122,6 +124,11 @@ constexpr int64_t kPeakClean = 18;    // = 16 + pulse-shape offset 2
 // span convention: ceil(64*1016*48/65) = 48018.
 constexpr size_t kNativeTxLen = 140982;
 constexpr int64_t kSyncNative64 = 48018;
+constexpr double kFsCg400 = 491.52e6;
+constexpr size_t kPreGuardCg400 = 983; // 2 µs at 491.52 MS/s
+constexpr size_t kNativeTxLenCg400 = 93988;
+constexpr int64_t kSyncNative64Cg400 = 32012; // ceil(64*1016*32/65)
+constexpr double kDIntCg400 = 25.0;           // ~50.9 ns on the CG400 grid
 
 gr_complex
 polar_gain(double mag, double phase)
@@ -1034,6 +1041,93 @@ BOOST_AUTO_TEST_CASE(e2e_native_65_48)
     BOOST_CHECK_LE(std::llabs(j.peak_tap - kPeakClean), 2);
     BOOST_CHECK_LE(std::llabs((j.peak_tap - j.zero_delay) - 2), 2);
     BOOST_CHECK_EQUAL(j.file_offset, 0u);
+}
+
+BOOST_AUTO_TEST_CASE(e2e_native_65_32)
+{
+    std::vector<gr_complex> tx_work;
+    BOOST_REQUIRE(load_cf32(testdata_path("uwb_radar/tx_998p4.cf32"), tx_work));
+    const std::string tmpl = write_template_file(tx_work, "native_65_32");
+    const std::string dir = make_out_dir("native_65_32");
+
+    const auto taps = load_taps_f32(
+        testdata_path("resampler_65_32/taps_quality_minorder.txt"));
+    auto src = UwbRadarPacketSource::make(
+        testdata_path("uwb_radar/tx_491p52.cf32"), kFsCg400);
+    auto echo = UwbLoopbackEcho::make(
+        kPreGuardCg400, kTail, { kDIntCg400 }, { polar_gain(0.4, 0.7) });
+    auto resamp = UwbPduRationalResamplerCcf65_32::make_from_taps(
+        taps, UwbPduRationalResamplerCcf65_32::kOutputRateHz,
+        /*validate_input_rate=*/true);
+    auto est = UwbRadarCirEstimator::make(tmpl, 64, "4z2", 9, kCirPre,
+                                          kCirPost, 10, 0, 64, 8, 0.3f, 0.3f,
+                                          true, 16);
+    auto w = UwbCirWriter::make(dir, "cir", true, 64);
+    auto dbg_res = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_radar_e2e_native_65_32");
+    tb->msg_connect(src, "tx", echo, "tx");
+    tb->msg_connect(echo, "rx", resamp, "packet");
+    tb->msg_connect(resamp, "packet", est, "rx");
+    tb->msg_connect(est, "cir", w, "cir");
+    tb->msg_connect(resamp, "packet", dbg_res, "store");
+    tb->start();
+    src->_post(pmt::mp("emit"), pmt::make_dict());
+    BOOST_REQUIRE(wait_until([&] {
+        return w->frames_written() + w->frames_failed() >= 1 && est->drained();
+    }));
+    BOOST_REQUIRE_EQUAL(dbg_res->num_messages(), 1);
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(w->stop());
+
+    pmt::pmt_t mo = pmt::car(dbg_res->get_message(0));
+    BOOST_REQUIRE(pmt::is_dict(mo));
+    BOOST_CHECK_CLOSE(
+        pmt::to_double(pmt::dict_ref(mo, pmt::mp("sample_rate"),
+                                     pmt::from_double(0))),
+        kFsWork, 1e-9);
+    BOOST_CHECK_CLOSE(
+        pmt::to_double(pmt::dict_ref(
+            mo, pmt::mp("calibration_delay_work_samples"),
+            pmt::from_double(0))),
+        kDIntCg400 * 65.0 / 32.0, 1e-9);
+    BOOST_CHECK_EQUAL(
+        pmt::to_long(pmt::dict_ref(mo, pmt::mp("resample_decim"),
+                                   pmt::from_long(-1))),
+        32);
+    BOOST_CHECK_EQUAL(
+        pmt::to_long(pmt::dict_ref(mo, pmt::mp("capture_samples"),
+                                   pmt::from_long(-1))),
+        resamp->map_input_offset_to_output(
+            static_cast<int64_t>(kPreGuardCg400 + kNativeTxLenCg400)) -
+            resamp->map_input_offset_to_output(
+                static_cast<int64_t>(kPreGuardCg400)));
+
+    const int64_t map0 = resamp->map_input_offset_to_output(0);
+    const double cal_work = kDIntCg400 * 65.0 / 32.0;
+    const int64_t cal_round = static_cast<int64_t>(std::llround(cal_work));
+    const int64_t predicted =
+        map0 +
+        (resamp->map_input_offset_to_output(
+             static_cast<int64_t>(kPreGuardCg400)) -
+         map0) +
+        cal_round + static_cast<int64_t>(64 * kSps);
+    const int64_t sfd_truth = resamp->map_input_offset_to_output(
+        static_cast<int64_t>(kPreGuardCg400) +
+        static_cast<int64_t>(kDIntCg400) + kSyncNative64Cg400);
+
+    const auto lines = read_lines(dir + "/cir.jsonl");
+    BOOST_REQUIRE_EQUAL(lines.size(), 1u);
+    const JsonlLine j = parse_jsonl(lines[0]);
+    BOOST_CHECK_EQUAL(j.status, "ok");
+    BOOST_CHECK(j.sfd_ok);
+    BOOST_CHECK(j.timing_ok);
+    BOOST_CHECK_LE(std::llabs(sfd_truth - predicted), 2);
+    BOOST_CHECK_LE(std::llabs(j.sfd - predicted), 2);
+    BOOST_CHECK_LE(std::llabs(j.preamble - j.cir_origin), 2);
+    BOOST_CHECK_LE(std::llabs(j.peak_tap -
+                              expected_peak_tap(j.preamble, j.cir_origin)),
+                   2);
 }
 
 // ---------------------------------------------------------------------------

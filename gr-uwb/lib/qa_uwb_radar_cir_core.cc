@@ -734,10 +734,10 @@ BOOST_AUTO_TEST_CASE(test_radar_cir_bit_stable_repeat)
                 0);
 }
 
-BOOST_AUTO_TEST_CASE(test_radar_cir_sync_reps_32_64_128_synthetic)
+BOOST_AUTO_TEST_CASE(test_radar_cir_sync_reps_32_to_2048_synthetic)
 {
     const auto sync = load_sync_pulse();
-    const size_t ns[] = { 32, 64, 128 };
+    const size_t ns[] = { 32, 64, 128, 256, 512, 1024, 2048 };
     for (size_t n_sync : ns) {
         auto pkt = make_sync_sfd_packet(sync, n_sync);
         BOOST_CHECK_EQUAL(pkt.sfd_start,

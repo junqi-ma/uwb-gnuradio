@@ -182,7 +182,8 @@ inline bool validate_fragment_flags(const echo::BurstFragment* frags,
 // The required native rate is 737.28 MS/s exactly (double-representable);
 // a get_*_rate() readback that differs by more than rel_tol is a hard
 // prepare() failure — silent UHD coercion is rejected, never accepted.
-inline constexpr double kUhdRequiredRateHz = 737280000.0;
+inline constexpr double kUhdRequiredRateHz = 737280000.0;      // UC200 default
+inline constexpr double kUhdCg400RateHz = 491520000.0;         // CG400
 inline constexpr double kUhdDefaultRateTolRel = 1e-9;
 
 inline bool rate_matches_strict(double requested, double readback,
@@ -192,6 +193,12 @@ inline bool rate_matches_strict(double requested, double readback,
         return false;
     const double scale = requested > readback ? requested : readback;
     return std::fabs(readback - requested) <= rel_tol * scale;
+}
+
+inline bool is_allowed_uhd_native_rate(double hz)
+{
+    return rate_matches_strict(kUhdRequiredRateHz, hz, kUhdDefaultRateTolRel) ||
+           rate_matches_strict(kUhdCg400RateHz, hz, kUhdDefaultRateTolRel);
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +293,8 @@ inline bool validate_uhd_burst_backend_config(
     };
     if (!(cfg.sample_rate_hz > 0.0) || !std::isfinite(cfg.sample_rate_hz))
         return fail("sample_rate_hz must be > 0 and finite");
+    if (!is_allowed_uhd_native_rate(cfg.sample_rate_hz))
+        return fail("sample_rate_hz must be 737.28e6 or 491.52e6");
     if (!(cfg.rate_tolerance_rel > 0.0) ||
         !(cfg.rate_tolerance_rel < 1e-3) ||
         !std::isfinite(cfg.rate_tolerance_rel))

@@ -1,0 +1,31 @@
+{
+  "interpolation": 65,
+  "decimation": 32,
+  "input_rate_hz": 491520000.0,
+  "output_rate_hz": 998400000.0,
+  "virtual_rate_hz": 31948800000.0,
+  "nyquist_mhz": 245.76,
+  "uwb_occupancy_mhz": 249.6,
+  "nyquist_note": "491.52 MS/s Nyquist is 245.76 MHz; UWB occupancy is ~249.6 MHz. Band edges are a hardware limit of CG400, not recovered by 65/32.",
+  "criterion": "relative stopband |Hstop|/|Hpass| <= -70 dB, ripple <= 0.1 dB, passband inside 245.76 MHz Nyquist",
+  "profiles": [
+    {
+      "name": "quality",
+      "passband_mhz": 220.0,
+      "ripple_db": 0.0049722678131303155,
+      "rel_sb_db": -70.03400033008106,
+      "pb_gain_db": 36.260642682403336,
+      "dc": 64.99999999999999,
+      "taps": 2707
+    },
+    {
+      "name": "realtime",
+      "passband_mhz": 180.0,
+      "ripple_db": 0.005292046480121826,
+      "rel_sb_db": -70.01662510080352,
+      "pb_gain_db": 36.26202635110755,
+      "dc": 65.0,
+      "taps": 1055
+    }
+  ]
+}

@@ -69,6 +69,7 @@ list(APPEND uwb_sources
     uwb_realtime_demodulator.cc
     uwb_rational_resampler_ccf_65_48.cc
     uwb_pdu_rational_resampler_ccf_65_48.cc
+    uwb_pdu_rational_resampler_ccf_65_32.cc
     uwb_pdu_window_crop.cc
     uwb_radar_packet_source.cc
     uwb_loopback_echo.cc
@@ -158,6 +159,8 @@ list(APPEND test_uwb_sources
     qa_uwb_rational_resampler_core.cc
     qa_uwb_rational_resampler.cc
     qa_uwb_pdu_rational_resampler.cc
+    qa_uwb_pdu_rational_resampler_65_32.cc
+    qa_uwb_rational_resampler_core_65_32.cc
     qa_uwb_pdu_window_crop.cc
     qa_uwb_tone_canceller.cc
     qa_uwb_scheduled_dump_io.cc
@@ -230,6 +233,12 @@ target_compile_definitions(uwb_qa_uwb_radar_cir_estimator_block.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
 target_compile_definitions(uwb_qa_uwb_radar_e2e.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
+target_compile_definitions(uwb_qa_uwb_rational_resampler_core_65_32.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
+target_compile_definitions(uwb_qa_uwb_pdu_rational_resampler_65_32.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
 ########################################################################

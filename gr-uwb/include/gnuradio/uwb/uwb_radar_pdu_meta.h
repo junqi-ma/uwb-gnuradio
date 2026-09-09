@@ -30,7 +30,11 @@ namespace radar_meta {
 
 inline constexpr double kRateTolRel = 1e-6;
 inline constexpr double kWorkRateHz = 998400000.0;
-inline constexpr double kNativeRateHz = 737280000.0;
+inline constexpr double kNativeRateHz = 737280000.0;       // UC200
+inline constexpr double kCg400NativeRateHz = 491520000.0;  // CG400
+inline constexpr uint32_t kResampleInterp = 65;
+inline constexpr uint32_t kUc200NativeDecim = 48;
+inline constexpr uint32_t kCg400NativeDecim = 32;
 
 inline bool rates_close(double a, double b)
 {
@@ -44,14 +48,58 @@ inline bool is_work_rate(double fs)
     return rates_close(fs, kWorkRateHz) || rates_close(fs, 998.4e6);
 }
 
-inline bool is_native_rate(double fs)
+inline bool is_uc200_native_rate(double fs)
 {
     return rates_close(fs, kNativeRateHz) || rates_close(fs, 737.28e6);
 }
 
+inline bool is_cg400_native_rate(double fs)
+{
+    return rates_close(fs, kCg400NativeRateHz) || rates_close(fs, 491.52e6);
+}
+
+inline bool is_native_rate(double fs)
+{
+    return is_uc200_native_rate(fs) || is_cg400_native_rate(fs);
+}
+
+inline uint32_t native_decim(double fs)
+{
+    return is_cg400_native_rate(fs) ? kCg400NativeDecim : kUc200NativeDecim;
+}
+
+// ceil(work_samples * decim / 65).  64-SYNC native spans: 48018 @737.28
+// (M=48) and 32012 @491.52 (M=32).
+inline int64_t native_span(int64_t work_samples, uint32_t decim)
+{
+    if (work_samples <= 0 || decim == 0)
+        return 0;
+    const int64_t scaled = work_samples * static_cast<int64_t>(decim);
+    return (scaled + static_cast<int64_t>(kResampleInterp) - 1) /
+           static_cast<int64_t>(kResampleInterp);
+}
+
+// Radar TX SYNC lengths.  IEEE BPRF native PreambleDuration is
+// 16/64/1024/4096; 32/128/256/512/2048 are custom profiles built by
+// cropping/tiling a pulse-shaped SYNC field (not 751-sample repeats).
+inline constexpr size_t kRadarSyncRepetitions[] = {
+    32, 64, 128, 256, 512, 1024, 2048
+};
+inline constexpr size_t kMaxRadarBurstSamples = 2097152; // 1<<21, 2048-SYNC RX
+inline constexpr size_t kMaxPsduBytes = 127;
+
 inline bool sync_reps_supported(size_t n)
 {
-    return n == 32 || n == 64 || n == 128;
+    for (size_t v : kRadarSyncRepetitions) {
+        if (n == v)
+            return true;
+    }
+    return false;
+}
+
+inline const char* sync_reps_supported_list()
+{
+    return "32, 64, 128, 256, 512, 1024 or 2048";
 }
 
 inline bool code_index_supported(size_t n)
@@ -171,7 +219,9 @@ inline double to_f64(pmt::pmt_t v, double def)
 template <typename MapFn>
 inline bool apply_radar_whitelist(pmt::pmt_t& dst,
                                   pmt::pmt_t src,
-                                  MapFn map_index)
+                                  MapFn map_index,
+                                  uint32_t interp = kResampleInterp,
+                                  uint32_t decim = kUc200NativeDecim)
 {
     if (!pmt::is_dict(src))
         return true;
@@ -185,8 +235,11 @@ inline bool apply_radar_whitelist(pmt::pmt_t& dst,
             0.0);
         if (!std::isfinite(native))
             return false;
+        if (interp == 0 || decim == 0)
+            return false;
         dst = pmt::dict_add(dst, pmt::mp(kCalDelayWork),
-                            pmt::from_double(native * 65.0 / 48.0));
+                            pmt::from_double(native * static_cast<double>(interp) /
+                                             static_cast<double>(decim)));
     }
 
     auto add_native_alias = [&](const char* key, pmt::pmt_t value) {

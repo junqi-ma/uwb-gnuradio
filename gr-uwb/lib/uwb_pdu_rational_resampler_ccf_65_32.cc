@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * UwbPduRationalResamplerCcf65_48 — PDU-level fixed 65/48 CF32 resampler.
+ * UwbPduRationalResamplerCcf65_32 — PDU-level fixed 65/32 CF32 resampler.
  *
  * Block type: gr::block, no stream IO.
  * Scheduler: message-driven only; no forecast / general_work.
@@ -17,7 +17,7 @@
 #endif
 
 #include <gnuradio/io_signature.h>
-#include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>
+#include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_32.h>
 #include <gnuradio/uwb/uwb_radar_checked_math.h>
 #include <gnuradio/uwb/uwb_radar_pdu_meta.h>
 
@@ -38,11 +38,11 @@ constexpr double kRateTolRel = 1e-6; // relative tolerance on sample_rate check
 std::string find_testdata_taps(const char* filename)
 {
     const char* prefixes[] = {
-        "testdata/resampler_65_48/",
-        "../testdata/resampler_65_48/",
-        "../../testdata/resampler_65_48/",
-        "../../../testdata/resampler_65_48/",
-        "../../../../testdata/resampler_65_48/",
+        "testdata/resampler_65_32/",
+        "../testdata/resampler_65_32/",
+        "../../testdata/resampler_65_32/",
+        "../../../testdata/resampler_65_32/",
+        "../../../../testdata/resampler_65_32/",
     };
     for (const char* p : prefixes) {
         const std::string path = std::string(p) + filename;
@@ -51,8 +51,8 @@ std::string find_testdata_taps(const char* filename)
             return path;
     }
     throw std::runtime_error(
-        std::string("UwbPduRationalResamplerCcf65_48: cannot find ") +
-        filename + " under testdata/resampler_65_48/");
+        std::string("UwbPduRationalResamplerCcf65_32: cannot find ") +
+        filename + " under testdata/resampler_65_32/");
 }
 
 std::vector<float> load_taps_f32(const std::string& path)
@@ -60,12 +60,12 @@ std::vector<float> load_taps_f32(const std::string& path)
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) {
         throw std::runtime_error(
-            "UwbPduRationalResamplerCcf65_48: cannot open taps file: " + path);
+            "UwbPduRationalResamplerCcf65_32: cannot open taps file: " + path);
     }
     const auto bytes = static_cast<size_t>(f.tellg());
     if (bytes == 0 || bytes % sizeof(float) != 0) {
         throw std::runtime_error(
-            "UwbPduRationalResamplerCcf65_48: taps file size not a positive "
+            "UwbPduRationalResamplerCcf65_32: taps file size not a positive "
             "multiple of float32: " +
             path);
     }
@@ -75,7 +75,7 @@ std::vector<float> load_taps_f32(const std::string& path)
            static_cast<std::streamsize>(bytes));
     if (!f) {
         throw std::runtime_error(
-            "UwbPduRationalResamplerCcf65_48: failed reading taps: " + path);
+            "UwbPduRationalResamplerCcf65_32: failed reading taps: " + path);
     }
     return taps;
 }
@@ -123,7 +123,7 @@ bool dict_i64_checked(pmt::pmt_t dict,
 // ---------------------------------------------------------------------------
 
 std::vector<float>
-UwbPduRationalResamplerCcf65_48::load_taps_from_profile_or_path(
+UwbPduRationalResamplerCcf65_32::load_taps_from_profile_or_path(
     const std::string& taps_file_or_profile)
 {
     if (taps_file_or_profile.empty() || taps_file_or_profile == "quality") {
@@ -145,15 +145,15 @@ UwbPduRationalResamplerCcf65_48::load_taps_from_profile_or_path(
 // Factories / construction
 // ---------------------------------------------------------------------------
 
-UwbPduRationalResamplerCcf65_48::sptr
-UwbPduRationalResamplerCcf65_48::make(const std::string& taps_file_or_profile,
+UwbPduRationalResamplerCcf65_32::sptr
+UwbPduRationalResamplerCcf65_32::make(const std::string& taps_file_or_profile,
                                       double output_sample_rate,
                                       bool validate_input_rate,
                                       EmitPolicy emit_policy,
                                       size_t max_input_samples)
 {
     auto taps = load_taps_from_profile_or_path(taps_file_or_profile);
-    return gnuradio::make_block_sptr<UwbPduRationalResamplerCcf65_48>(
+    return gnuradio::make_block_sptr<UwbPduRationalResamplerCcf65_32>(
         taps,
         output_sample_rate,
         validate_input_rate,
@@ -161,14 +161,14 @@ UwbPduRationalResamplerCcf65_48::make(const std::string& taps_file_or_profile,
         max_input_samples);
 }
 
-UwbPduRationalResamplerCcf65_48::sptr
-UwbPduRationalResamplerCcf65_48::make_from_taps(const std::vector<float>& taps,
+UwbPduRationalResamplerCcf65_32::sptr
+UwbPduRationalResamplerCcf65_32::make_from_taps(const std::vector<float>& taps,
                                                 double output_sample_rate,
                                                 bool validate_input_rate,
                                                 EmitPolicy emit_policy,
                                                 size_t max_input_samples)
 {
-    return gnuradio::make_block_sptr<UwbPduRationalResamplerCcf65_48>(
+    return gnuradio::make_block_sptr<UwbPduRationalResamplerCcf65_32>(
         taps,
         output_sample_rate,
         validate_input_rate,
@@ -176,17 +176,17 @@ UwbPduRationalResamplerCcf65_48::make_from_taps(const std::vector<float>& taps,
         max_input_samples);
 }
 
-UwbPduRationalResamplerCcf65_48::UwbPduRationalResamplerCcf65_48(
+UwbPduRationalResamplerCcf65_32::UwbPduRationalResamplerCcf65_32(
     const std::vector<float>& taps,
     double output_sample_rate,
     bool validate_input_rate,
     EmitPolicy emit_policy,
     size_t max_input_samples)
-    : gr::block("uwb_pdu_rational_resampler_ccf_65_48",
+    : gr::block("uwb_pdu_rational_resampler_ccf_65_32",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
       d_taps_(taps),
-      d_core_(std::make_unique<core::RationalResampler65_48Core>(taps)),
+      d_core_(std::make_unique<core::RationalResampler65_32Core>(taps)),
       d_output_rate_(output_sample_rate),
       d_validate_rate_(validate_input_rate),
       d_emit_policy_(emit_policy),
@@ -194,22 +194,22 @@ UwbPduRationalResamplerCcf65_48::UwbPduRationalResamplerCcf65_48(
 {
     if (d_taps_.empty()) {
         throw std::invalid_argument(
-            "UwbPduRationalResamplerCcf65_48: taps must be non-empty");
+            "UwbPduRationalResamplerCcf65_32: taps must be non-empty");
     }
     if (d_output_rate_ <= 0.0) {
         throw std::invalid_argument(
-            "UwbPduRationalResamplerCcf65_48: output_sample_rate must be > 0");
+            "UwbPduRationalResamplerCcf65_32: output_sample_rate must be > 0");
     }
     if (d_max_in_ == 0) {
         throw std::invalid_argument(
-            "UwbPduRationalResamplerCcf65_48: max_input_samples must be > 0");
+            "UwbPduRationalResamplerCcf65_32: max_input_samples must be > 0");
     }
 
-    d_max_out_ = core::RationalResampler65_48Core::expected_output_length(
+    d_max_out_ = core::RationalResampler65_32Core::expected_output_length(
         d_max_in_, d_taps_.size());
     if (d_max_out_ == 0) {
         throw std::invalid_argument(
-            "UwbPduRationalResamplerCcf65_48: max_output_samples computed 0");
+            "UwbPduRationalResamplerCcf65_32: max_output_samples computed 0");
     }
 
     d_input_scratch_.assign(d_max_in_, gr_complex(0.0f, 0.0f));
@@ -222,10 +222,10 @@ UwbPduRationalResamplerCcf65_48::UwbPduRationalResamplerCcf65_48(
                     [this](pmt::pmt_t msg) { handle_packet(msg); });
 }
 
-UwbPduRationalResamplerCcf65_48::~UwbPduRationalResamplerCcf65_48() = default;
+UwbPduRationalResamplerCcf65_32::~UwbPduRationalResamplerCcf65_32() = default;
 
 void
-UwbPduRationalResamplerCcf65_48::reset_stats()
+UwbPduRationalResamplerCcf65_32::reset_stats()
 {
     d_pdus_received_.store(0, std::memory_order_relaxed);
     d_pdus_emitted_.store(0, std::memory_order_relaxed);
@@ -247,7 +247,7 @@ UwbPduRationalResamplerCcf65_48::reset_stats()
 // ---------------------------------------------------------------------------
 
 bool
-UwbPduRationalResamplerCcf65_48::try_map_input_offset_to_output(int64_t p,
+UwbPduRationalResamplerCcf65_32::try_map_input_offset_to_output(int64_t p,
                                                                 int64_t& out) const
 {
     using radar::radar_i64_add;
@@ -281,7 +281,7 @@ UwbPduRationalResamplerCcf65_48::try_map_input_offset_to_output(int64_t p,
 }
 
 bool
-UwbPduRationalResamplerCcf65_48::resample_oneshot(const gr_complex* in,
+UwbPduRationalResamplerCcf65_32::resample_oneshot(const gr_complex* in,
                                                   size_t n_in,
                                                   size_t* n_out)
 {
@@ -290,7 +290,7 @@ UwbPduRationalResamplerCcf65_48::resample_oneshot(const gr_complex* in,
     d_resets_.fetch_add(1, std::memory_order_relaxed);
 
     const size_t Lout =
-        core::RationalResampler65_48Core::expected_output_length(
+        core::RationalResampler65_32Core::expected_output_length(
             n_in, d_taps_.size());
     if (Lout > d_scratch_.size())
         return false;
@@ -321,7 +321,7 @@ UwbPduRationalResamplerCcf65_48::resample_oneshot(const gr_complex* in,
 // ---------------------------------------------------------------------------
 
 void
-UwbPduRationalResamplerCcf65_48::publish_status(const std::string& event,
+UwbPduRationalResamplerCcf65_32::publish_status(const std::string& event,
                                                  pmt::pmt_t extra)
 {
     pmt::pmt_t meta = pmt::make_dict();
@@ -347,7 +347,7 @@ UwbPduRationalResamplerCcf65_48::publish_status(const std::string& event,
 }
 
 void
-UwbPduRationalResamplerCcf65_48::drop_status(const std::string& event,
+UwbPduRationalResamplerCcf65_32::drop_status(const std::string& event,
                                              pmt::pmt_t extra)
 {
     d_pdus_dropped_.fetch_add(1, std::memory_order_relaxed);
@@ -359,7 +359,7 @@ UwbPduRationalResamplerCcf65_48::drop_status(const std::string& event,
 // ---------------------------------------------------------------------------
 
 void
-UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
+UwbPduRationalResamplerCcf65_32::handle_packet(pmt::pmt_t msg)
 {
     d_pdus_received_.fetch_add(1, std::memory_order_relaxed);
 
