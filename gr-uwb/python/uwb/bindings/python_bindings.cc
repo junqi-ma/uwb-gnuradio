@@ -737,7 +737,8 @@ void bind_radar_cir_estimator(py::module& m)
              py::arg("sfd_threshold") = 0.3f,
              py::arg("sync_refine_threshold") = 0.3f,
              py::arg("emit_normalized") = true,
-             py::arg("queue_capacity") = size_t(64))
+             py::arg("queue_capacity") = size_t(64),
+             py::arg("use_predicted_timing") = false)
         .def("template_path", &Blk::template_path)
         .def("sync_repetitions", &Blk::sync_repetitions)
         .def("sfd_mode", &Blk::sfd_mode)
@@ -750,6 +751,7 @@ void bind_radar_cir_estimator(py::module& m)
         .def("sync_refine_margin", &Blk::sync_refine_margin)
         .def("emit_normalized", &Blk::emit_normalized)
         .def("queue_capacity", &Blk::queue_capacity)
+        .def("use_predicted_timing", &Blk::use_predicted_timing)
         .def("pdus_received", &Blk::pdus_received)
         .def("pdus_enqueued", &Blk::pdus_enqueued)
         .def("pdus_completed", &Blk::pdus_completed)

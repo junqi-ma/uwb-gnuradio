@@ -213,7 +213,8 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
     float sfd_threshold,
     float sync_refine_threshold,
     bool emit_normalized,
-    size_t queue_capacity)
+    size_t queue_capacity,
+    bool use_predicted_timing)
     : gr::block("uwb_radar_cir_estimator",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
@@ -241,6 +242,7 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
     d_cfg_.sync_refine_margin = sync_refine_margin;
     d_cfg_.sfd_threshold = sfd_threshold;
     d_cfg_.sync_refine_threshold = sync_refine_threshold;
+    d_cfg_.use_predicted_timing = use_predicted_timing;
     // Match the demod convention: skip the first settling SYNCs and average
     // every remaining repetition.  For preambles shorter than the skip,
     // average all repetitions instead.
@@ -319,13 +321,14 @@ UwbRadarCirEstimator::make(const std::string& template_path,
                            float sfd_threshold,
                            float sync_refine_threshold,
                            bool emit_normalized,
-                           size_t queue_capacity)
+                           size_t queue_capacity,
+                           bool use_predicted_timing)
 {
     return gnuradio::get_initial_sptr(new UwbRadarCirEstimator(
         template_path, sync_repetitions, sfd_mode, code_index, cir_pre,
         cir_post, cir_skip_initial, cir_repetitions, sfd_search_margin,
         sync_refine_margin, sfd_threshold, sync_refine_threshold,
-        emit_normalized, queue_capacity));
+        emit_normalized, queue_capacity, use_predicted_timing));
 }
 
 // ---------------------------------------------------------------------------
@@ -847,6 +850,9 @@ UwbRadarCirEstimator::publish_frame(const Job& job,
         meta, pmt::mp("range_m_per_tap"),
         pmt::from_double(kSpeedOfLight /
                          (2.0 * radar_meta::kWorkRateHz)));
+    meta = pmt::dict_add(meta, pmt::mp("use_predicted_timing"),
+                         d_cfg_.use_predicted_timing ? pmt::PMT_T
+                                                     : pmt::PMT_F);
     meta = pmt::dict_add(meta, pmt::mp("sfd_ok"),
                          r.sfd_start_sample >= 0 ? pmt::PMT_T : pmt::PMT_F);
     meta = pmt::dict_add(

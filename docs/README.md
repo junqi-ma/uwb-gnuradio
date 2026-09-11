@@ -15,6 +15,8 @@
 - [`phase1/下一步开发计划_QM35825周期旁路.md`](phase1/下一步开发计划_QM35825周期旁路.md)
 - [`phase1/SC16检测器开发与性能.md`](phase1/SC16检测器开发与性能.md)
 - [`phase1/X410_RFNoC入口与写盘测试.md`](phase1/X410_RFNoC入口与写盘测试.md)
+- [`phase1/使用说明_X410_CG400自发自收雷达.md`](phase1/使用说明_X410_CG400自发自收雷达.md)
+- [`本机UHD_DPDK_AVX512问题与绕过.md`](本机UHD_DPDK_AVX512问题与绕过.md)
 - [`phase1/当前信号检测逻辑.md`](phase1/当前信号检测逻辑.md)
 - [`phase1/对照报告_QM35_MATLAB与GNURadio离线解调.md`](phase1/对照报告_QM35_MATLAB与GNURadio离线解调.md)
 - [`phase1/开发需求_UWB自发自收Radar.md`](phase1/开发需求_UWB自发自收Radar.md)（`feature/uwb-monostatic-radar`，待审批）

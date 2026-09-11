@@ -6,9 +6,9 @@
  *
  * Header-only monostatic-radar integrator at 998.4 MS/s:
  *   RX window + predicted SFD
- *     → search_sfd
- *     → SFD success ? refine_sync_origin : SfdFailed
- *     → timing success ? estimate_radar_cir : TimingFailed
+ *     → if use_predicted_timing: skip SFD/timing gates
+ *     → else search_sfd → refine_sync_origin
+ *     → estimate_radar_cir at predicted SYNC origin
  *     → CIR success ? Ok (raw+norm taps) : CirFailed
  *
  * Failure: tap_count=0. Do not return seed-only CIR. Failed-stage sample
@@ -61,6 +61,10 @@ struct RadarCirConfig {
     size_t cir_post = 100;
     size_t cir_skip_initial = 10;
     size_t cir_repetitions = 54; // used as min(this, reps-skip)
+    // Timed monostatic TX/RX: SFD is a constant offset from the scheduled
+    // echo.  When true, do not search SFD or refine SYNC; CIR uses the
+    // predicted origin.  Default false keeps the communication-style gate.
+    bool use_predicted_timing = false;
 };
 
 // Immutable identity captured at prepare(). radar_cir_one rejects any
@@ -269,8 +273,9 @@ inline bool radar_cir_one(const std::complex<float>* rx,
     out.predicted_sfd_start = predicted_sfd_start;
 
     const bool identity_ok = detail::profile_matches(scratch.prepared, cfg);
-    const bool thr_ok = detail::finite_positive(cfg.sfd_threshold) &&
-                        detail::finite_positive(cfg.sync_refine_threshold);
+    const bool thr_ok = cfg.use_predicted_timing ||
+                        (detail::finite_positive(cfg.sfd_threshold) &&
+                         detail::finite_positive(cfg.sync_refine_threshold));
     const bool taps_ok =
         cfg.cir_post <= std::numeric_limits<size_t>::max() - cfg.cir_pre &&
         (cfg.cir_pre + cfg.cir_post) > 0;
@@ -282,7 +287,8 @@ inline bool radar_cir_one(const std::complex<float>* rx,
         scratch.cir.raw_taps.size() >= want_taps &&
         scratch.cir.norm_taps.size() >= want_taps;
     const bool margin_ok =
-        cfg.sfd_search_margin >= 0 && cfg.sync_refine_margin >= 0;
+        cfg.use_predicted_timing ||
+        (cfg.sfd_search_margin >= 0 && cfg.sync_refine_margin >= 0);
 
     if (!rx || n == 0 || predicted_sfd_start < 0 || !identity_ok || !thr_ok ||
         !scratch_ok || !taps_ok || !margin_ok) {
@@ -295,34 +301,44 @@ inline bool radar_cir_one(const std::complex<float>* rx,
     const size_t sync_reps = scratch.prepared.sync_repetitions;
     const size_t sps = scratch.prepared.samples_per_symbol;
 
-    RadarSfdResult sfd;
-    if (!search_sfd(rx, n, predicted_sfd_start, cfg.sfd_search_margin,
-                    cfg.sfd_threshold, sfd, scratch.sfd)) {
+    if (cfg.use_predicted_timing) {
+        // Timed echo: arrival is the schedule, not a detected SFD.
+        out.sfd_start_sample = predicted_sfd_start;
+        out.sfd_metric = 0.f;
+        out.preamble_start_sample =
+            nominal_preamble_start(predicted_sfd_start, sync_reps, sps);
+        out.sync_metric = 0.f;
+    } else {
+        RadarSfdResult sfd;
+        if (!search_sfd(rx, n, predicted_sfd_start, cfg.sfd_search_margin,
+                        cfg.sfd_threshold, sfd, scratch.sfd)) {
+            out.sfd_metric = sfd.metric;
+            if (sfd.status == SfdStatus::InvalidInput)
+                out.status = RadarCirStatus::InvalidInput;
+            else
+                out.status = RadarCirStatus::SfdFailed;
+            detail::zero_cir_taps(scratch.cir);
+            return false;
+        }
+        out.sfd_start_sample = sfd.sfd_start_sample;
         out.sfd_metric = sfd.metric;
-        if (sfd.status == SfdStatus::InvalidInput)
-            out.status = RadarCirStatus::InvalidInput;
-        else
-            out.status = RadarCirStatus::SfdFailed;
-        detail::zero_cir_taps(scratch.cir);
-        return false;
-    }
-    out.sfd_start_sample = sfd.sfd_start_sample;
-    out.sfd_metric = sfd.metric;
 
-    RadarTimingResult timing;
-    if (!refine_sync_origin(rx, n, sfd.sfd_start_sample, sync_reps, sps,
-                            cfg.sync_refine_margin, cfg.sync_refine_threshold,
-                            scratch.sync_template.data(),
-                            scratch.sync_template.size(), timing)) {
+        RadarTimingResult timing;
+        if (!refine_sync_origin(rx, n, sfd.sfd_start_sample, sync_reps, sps,
+                                cfg.sync_refine_margin,
+                                cfg.sync_refine_threshold,
+                                scratch.sync_template.data(),
+                                scratch.sync_template.size(), timing)) {
+            out.sync_metric = timing.metric;
+            out.status = (timing.status == TimingStatus::InvalidInput)
+                             ? RadarCirStatus::InvalidInput
+                             : RadarCirStatus::TimingFailed;
+            detail::zero_cir_taps(scratch.cir);
+            return false;
+        }
+        out.preamble_start_sample = timing.preamble_start_sample;
         out.sync_metric = timing.metric;
-        out.status = (timing.status == TimingStatus::InvalidInput)
-                         ? RadarCirStatus::InvalidInput
-                         : RadarCirStatus::TimingFailed;
-        detail::zero_cir_taps(scratch.cir);
-        return false;
     }
-    out.preamble_start_sample = timing.preamble_start_sample;
-    out.sync_metric = timing.metric;
 
     // CIR delay axis is the TX-time / predicted SYNC origin so a channel
     // delay D appears as a tap shift. Timing refine is a validity gate and

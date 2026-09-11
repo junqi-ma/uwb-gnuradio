@@ -63,6 +63,12 @@ parameters:
     label: Queue capacity
     dtype: int
     default: '64'
+-   id: use_predicted_timing
+    label: Use predicted TX time (skip SFD)
+    dtype: bool
+    default: 'False'
+    options: ['True', 'False']
+    option_labels: ['True', 'False']
 
 inputs:
 -   domain: message
@@ -79,22 +85,25 @@ outputs:
 
 templates:
     imports: from gnuradio import uwb
-    make: uwb.radar_cir_estimator(${template_path}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${cir_pre}, ${cir_post}, ${cir_skip_initial}, ${cir_repetitions}, ${sfd_search_margin}, ${sync_refine_margin}, ${sfd_threshold}, ${sync_refine_threshold}, ${emit_normalized}, ${queue_capacity})
+    make: uwb.radar_cir_estimator(${template_path}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${cir_pre}, ${cir_post}, ${cir_skip_initial}, ${cir_repetitions}, ${sfd_search_margin}, ${sync_refine_margin}, ${sfd_threshold}, ${sync_refine_threshold}, ${emit_normalized}, ${queue_capacity}, ${use_predicted_timing})
 
 cpp_templates:
     includes: ['#include <gnuradio/uwb/uwb_radar_cir_estimator_block.h>']
-    make: 'this->${id} = gr::uwb::UwbRadarCirEstimator::make(${template_path}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${cir_pre}, ${cir_post}, ${cir_skip_initial}, ${cir_repetitions}, ${sfd_search_margin}, ${sync_refine_margin}, ${sfd_threshold}, ${sync_refine_threshold}, ${emit_normalized}, ${queue_capacity});'
+    make: 'this->${id} = gr::uwb::UwbRadarCirEstimator::make(${template_path}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${cir_pre}, ${cir_post}, ${cir_skip_initial}, ${cir_repetitions}, ${sfd_search_margin}, ${sync_refine_margin}, ${sfd_threshold}, ${sync_refine_threshold}, ${emit_normalized}, ${queue_capacity}, ${use_predicted_timing});'
     link: ['gnuradio::gnuradio-uwb']
 
 documentation: |-
     Monostatic radar CIR estimator (998.4 MS/s work rate).  Input "rx" is a
-    CF32 PDU (cons(meta, c32vector)) after the 65/48 PDU resampler (or a
-    direct 998.4 loopback PDU).  The handler validates rate/profile/metadata,
-    predicts the SFD position from pre_guard + calibration delay + SYNC span
-    and enqueues; a single worker runs the header-only radar core
-    (narrow-window SFD search -> SYNC backtrack -> estimateCir-equivalent CIR,
-    no CFO).  Every enqueued pulse produces exactly one "cir" PDU; failed
-    stages (sfd_failed/timing_failed/cir_failed) carry an empty payload and
-    tap_count=0, never taps.  Invalid PDUs only produce a "status" message.
+    CF32 PDU (cons(meta, c32vector)) after the 65/32 or 65/48 PDU resampler
+    (or a direct 998.4 loopback PDU).  The handler validates rate/profile/
+    metadata, predicts the SFD from pre_guard + calibration delay + SYNC
+    span and enqueues.
+
+    CIR delay axis is always the predicted SYNC origin (known TX time).
+    use_predicted_timing=True skips SFD search and SYNC refine; use that
+    for timed X410 echo under interferers.  False keeps the old gate
+    (sfd_failed / timing_failed drop the CIR).  Every enqueued pulse
+    produces one "cir" PDU; failed stages have empty taps.  Invalid PDUs
+    only produce a "status" message.
 
 file_format: 1

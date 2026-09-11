@@ -88,6 +88,9 @@ public:
      * \param sfd_threshold / sync_refine_threshold  detection thresholds.
      * \param emit_normalized  attach L2-normalized taps to ok frames.
      * \param queue_capacity   bounded job queue depth (must be > 0).
+     * \param use_predicted_timing  skip SFD search and SYNC refine; CIR
+     *                        uses the scheduled TX origin.  For timed
+     *                        monostatic echo (DW3000 must not gate CIR).
      */
     static sptr make(const std::string& template_path,
                      size_t sync_repetitions = 64,
@@ -102,7 +105,8 @@ public:
                      float sfd_threshold = 0.3f,
                      float sync_refine_threshold = 0.3f,
                      bool emit_normalized = true,
-                     size_t queue_capacity = 64);
+                     size_t queue_capacity = 64,
+                     bool use_predicted_timing = false);
 
     ~UwbRadarCirEstimator() override;
 
@@ -118,6 +122,7 @@ public:
     int64_t sync_refine_margin() const { return d_cfg_.sync_refine_margin; }
     bool emit_normalized() const { return d_emit_normalized_; }
     size_t queue_capacity() const { return d_queue_capacity_; }
+    bool use_predicted_timing() const { return d_cfg_.use_predicted_timing; }
 
     uint64_t pdus_received() const;
     uint64_t pdus_enqueued() const;
@@ -157,7 +162,8 @@ public:
                          float sfd_threshold,
                          float sync_refine_threshold,
                          bool emit_normalized,
-                         size_t queue_capacity);
+                         size_t queue_capacity,
+                         bool use_predicted_timing = false);
 
 private:
     struct Job {

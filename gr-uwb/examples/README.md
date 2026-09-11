@@ -67,6 +67,11 @@ Message Strobe
 合成图的 `psdu_hex` / `sync_repetitions` / `insert_sts` 可改；改 SFD 时 CIR
 Estimator 的 `sfd_mode` 必须一起改。
 
+X410 实机自发自收雷达用法见
+[`docs/phase1/使用说明_X410_CG400自发自收雷达.md`](../../docs/phase1/使用说明_X410_CG400自发自收雷达.md)。
+本机 UHD/DPDK SIGILL 见
+[`docs/本机UHD_DPDK_AVX512问题与绕过.md`](../../docs/本机UHD_DPDK_AVX512问题与绕过.md)。
+
 ## `uwb_sim_cg400_echo_cir.py`（无 UHD 复刻 CG400 X410 链路 + 原始落盘）
 
 与 `x410_cg400_hrp_echo_cir.py` 同一条链路，只把 UHD 定时收发换成 numpy
@@ -141,7 +146,8 @@ Message Strobe
 
 `socket_pdu` 只发送 PDU 的 `c32vector` 原始字节，**不含** `pulse_id` / status
 等 meta。当前窗 16+100 tap = **928 字节 / 脉冲**，小于 1472，一帧一个 UDP 包。
-对端：
+X410 实机脚本已改为 `UCR1` 头 + 116 tap，失败帧也发（taps 填 0），避免
+对端把 `sfd_failed` 的 0 字节包当成丢包。对端：
 
 ```bash
 python3 gr-uwb/apps/cir_udp_recv.py --bind 0.0.0.0 --port 12345

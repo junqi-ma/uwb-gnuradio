@@ -424,6 +424,47 @@ BOOST_AUTO_TEST_CASE(test_radar_cir_sfd_failed)
     assert_failed_stage_indices(out, false, false);
 }
 
+BOOST_AUTO_TEST_CASE(test_radar_cir_predicted_timing_ignores_zeroed_sfd)
+{
+    const auto sync = load_sync_pulse();
+    RadarCirCoreScratch scratch;
+    BOOST_REQUIRE(prepare_from_sync(sync, scratch));
+    auto pkt = make_sync_sfd_packet(sync, 64);
+
+    RadarCirResult clean;
+    BOOST_REQUIRE(radar_cir_one(pkt.rx.data(), pkt.rx.size(), pkt.sfd_start,
+                                make_cfg(64), scratch, clean));
+    BOOST_REQUIRE(clean.status == RadarCirStatus::Ok);
+    std::vector<gr_complex> raw_clean, nrm_clean;
+    copy_taps(scratch, clean.tap_count, raw_clean, nrm_clean);
+
+    const size_t sfd_len = GetSfdSequence("4z2").size() * sync.size();
+    std::fill(pkt.rx.begin() + pkt.sfd_start,
+              pkt.rx.begin() + pkt.sfd_start + static_cast<int64_t>(sfd_len),
+              gr_complex(0.0f, 0.0f));
+
+    RadarCirConfig cfg = make_cfg(64);
+    cfg.use_predicted_timing = true;
+    RadarCirResult out;
+    BOOST_REQUIRE(radar_cir_one(pkt.rx.data(), pkt.rx.size(), pkt.sfd_start,
+                                cfg, scratch, out));
+    BOOST_CHECK(out.status == RadarCirStatus::Ok);
+    BOOST_CHECK_EQUAL(out.sfd_start_sample, pkt.sfd_start);
+    BOOST_CHECK_EQUAL(out.preamble_start_sample, pkt.origin);
+    BOOST_CHECK_EQUAL(out.cir_origin_sample, pkt.origin);
+    BOOST_CHECK_EQUAL(out.tap_count, clean.tap_count);
+    BOOST_CHECK_LE(std::llabs(static_cast<int64_t>(out.peak_tap) -
+                              static_cast<int64_t>(clean.peak_tap)),
+                   1);
+    BOOST_CHECK_GT(out.peak_abs, 0.0f);
+    std::vector<gr_complex> raw, nrm;
+    copy_taps(scratch, out.tap_count, raw, nrm);
+    // Last SYNC's CIR window overlaps the SFD by ~100 samples, so wiping
+    // SFD is not bit-exact; it must still recover the same peak.
+    BOOST_CHECK_LT(rel_l2(raw, raw_clean), 1e-2);
+    BOOST_CHECK_LT(rel_l2(nrm, nrm_clean), 1e-2);
+}
+
 BOOST_AUTO_TEST_CASE(test_radar_cir_timing_failed_zeroed_sync)
 {
     const auto sync = load_sync_pulse();

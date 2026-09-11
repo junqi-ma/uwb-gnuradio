@@ -5,15 +5,20 @@ Pipeline:
   UwbHrpPacketSource.samples()     # 998.4 CF32, C++ IEEE 802.15.4a BPRF
     -> TimedUhdEcho                # 32/65 downsample once, SC16 timed burst
     -> PDU 65/32                   # 491.52 -> 998.4
-    -> UwbRadarCirEstimator
-    -> UwbCirWriter
+    -> UwbRadarCirEstimator        # default: predicted TX time, no SFD gate
+    -> UwbCirWriter + framed UDP
 
 TX: UHD ch0 / TX/RX0 (front-panel ch1)
 RX: UHD ch3 / RX1     (front-panel ch4)
 Rate: CG400 491.52 MS/s
 
-100 Hz soak uses a host schedule thread (UHD timed bursts) and an
-async PMT publisher so numpy->PMT conversion does not steal TX lead time.
+Timed echo locks SFD to a constant offset from the RX window
+(predicted_sfd is identical every burst).  CIR uses that schedule, not
+a detected SFD, so DW3000 collisions do not drop frames.  Pass
+--require-sfd to restore the old search gate.
+
+UDP is a non-blocking UCR1 header + 116 taps on every pulse.  Live
+lines report echo_ok_hz vs cir_ok_hz vs udp_hz; radio ok is not CIR ok.
 """
 from __future__ import annotations
 
@@ -22,6 +27,8 @@ import json
 import math
 import os
 import queue
+import socket
+import struct
 import sys
 import threading
 import time
@@ -32,7 +39,7 @@ from scipy.signal import resample_poly
 import glob
 import importlib.util
 
-from gnuradio import gr, network
+from gnuradio import gr
 import pmt
 
 
@@ -46,6 +53,41 @@ def find_repo_root():
             break
         cur = parent
     raise SystemExit("cannot find repo root from %s" % __file__)
+
+
+def bootstrap_uhd_env():
+    """Debian python3 skips site-packages; UHD 4.6 + DPDK AVX-512 SIGILL.
+
+    Re-exec once with PYTHONPATH and the patched rte libs so `import uhd`
+    works from a bare `python3` invocation.
+    """
+    if os.environ.get("UWB_UHD_BOOTSTRAPPED") == "1":
+        return
+    repo = find_repo_root()
+    site = "/usr/local/lib/python3.10/site-packages"
+    eal = "/tmp/uhd_eal_noret"
+    build_lib = os.path.join(repo, "gr-uwb", "build", "lib")
+    env = os.environ.copy()
+    changed = False
+
+    def prepend(key, path):
+        nonlocal changed
+        if not path or not os.path.isdir(path):
+            return
+        cur = env.get(key, "")
+        parts = [p for p in cur.split(":") if p]
+        if path in parts:
+            return
+        env[key] = path if not cur else (path + ":" + cur)
+        changed = True
+
+    prepend("LD_LIBRARY_PATH", build_lib)
+    prepend("LD_LIBRARY_PATH", eal)
+    prepend("PYTHONPATH", site)
+    if not changed:
+        return
+    env["UWB_UHD_BOOTSTRAPPED"] = "1"
+    os.execvpe(sys.executable, [sys.executable, "-u"] + sys.argv, env)
 
 
 def load_uwb():
@@ -62,6 +104,7 @@ def load_uwb():
     return mod
 
 
+bootstrap_uhd_env()
 uwb = load_uwb()
 
 C_LIGHT = 299792458.0
@@ -86,15 +129,178 @@ def hex_to_bytes(s):
     return list(bytes.fromhex(h))
 
 
-def rx_geometry(rate, pre_us, sync_reps, range_m, tail_us):
+IQ_SCALE = 32768.0
+
+# UDP CIR datagram: 28-byte header + 116 complex64 taps (always, zeros if fail).
+# socket_pdu only forwarded the c32vector, so sfd_failed became a 0-byte
+# datagram and the far end (expect 928) counted ~5 pkt/s while radio was 100 Hz.
+CIR_UDP_MAGIC = b"UCR1"
+CIR_UDP_TAPS = 116
+CIR_UDP_HDR = struct.Struct("<4sIHHffiI")
+CIR_UDP_STATUS = {
+    "ok": 0,
+    "sfd_failed": 1,
+    "timing_failed": 2,
+    "cir_failed": 3,
+}
+
+
+def fc32_to_sc16(iq):
+    """UHD-style host float → interleaved little-endian int16 I/Q."""
+    x = np.asarray(iq, dtype=np.complex64)
+    interleaved = np.empty(x.size * 2, dtype=np.float64)
+    interleaved[0::2] = np.real(x)
+    interleaved[1::2] = np.imag(x)
+    scaled = np.rint(interleaved * IQ_SCALE)
+    return np.clip(scaled, -32768, 32767).astype(np.int16)
+
+
+def _pmt_str(meta, key, default=""):
+    v = pmt.dict_ref(meta, pmt.intern(key), pmt.PMT_NIL)
+    if pmt.is_symbol(v):
+        return pmt.symbol_to_string(v)
+    return default
+
+
+def _pmt_int(meta, key, default=0):
+    v = pmt.dict_ref(meta, pmt.intern(key), pmt.PMT_NIL)
+    if pmt.is_uint64(v):
+        return int(pmt.to_uint64(v))
+    if pmt.is_integer(v):
+        return int(pmt.to_long(v))
+    return default
+
+
+def _pmt_float(meta, key, default=0.0):
+    v = pmt.dict_ref(meta, pmt.intern(key), pmt.PMT_NIL)
+    if pmt.is_real(v):
+        return float(pmt.to_double(v))
+    if pmt.is_uint64(v):
+        return float(pmt.to_uint64(v))
+    if pmt.is_integer(v):
+        return float(pmt.to_long(v))
+    return default
+
+
+class CirUdpSink(gr.basic_block):
+    """Non-blocking UDP sink for CIR PDUs. Always sends header+116 taps."""
+
+    def __init__(self, host, port, tap_count=CIR_UDP_TAPS):
+        gr.basic_block.__init__(self, name="cir_udp_sink",
+                                in_sig=None, out_sig=None)
+        self.tap_count = int(tap_count)
+        self._dst = (host, int(port))
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.setblocking(False)
+        self.sent = 0
+        self.sent_ok = 0
+        self.sent_fail = 0
+        self.dropped = 0
+        self.message_port_register_in(pmt.intern("cir"))
+        self.set_msg_handler(pmt.intern("cir"), self._on_cir)
+
+    def _on_cir(self, msg):
+        if not pmt.is_pair(msg):
+            self.dropped += 1
+            return
+        meta = pmt.car(msg)
+        vec = pmt.cdr(msg)
+        taps = np.zeros(self.tap_count, dtype=np.complex64)
+        if pmt.is_c32vector(vec):
+            raw = np.asarray(pmt.c32vector_elements(vec), dtype=np.complex64)
+            n = min(int(raw.size), self.tap_count)
+            if n:
+                taps[:n] = raw[:n]
+        status_s = _pmt_str(meta, "status", "other")
+        status = CIR_UDP_STATUS.get(status_s, 4)
+        hdr = CIR_UDP_HDR.pack(
+            CIR_UDP_MAGIC,
+            _pmt_int(meta, "pulse_id", 0) & 0xFFFFFFFF,
+            status,
+            self.tap_count,
+            _pmt_float(meta, "sfd_metric", 0.0),
+            _pmt_float(meta, "cir_peak_metric", 0.0),
+            _pmt_int(meta, "peak_tap", 0),
+            _pmt_int(meta, "estimator_us", 0) & 0xFFFFFFFF,
+        )
+        try:
+            self._sock.sendto(hdr + taps.tobytes(), self._dst)
+        except (BlockingIOError, InterruptedError, OSError):
+            self.dropped += 1
+            return
+        self.sent += 1
+        if status == 0:
+            self.sent_ok += 1
+        else:
+            self.sent_fail += 1
+
+
+def start_live_stats(echo, est, wr, udp, stop_evt, pri_s):
+    def loop():
+        t0 = time.monotonic()
+        prev = (t0, echo._ok, est.pdus_completed(), est.pdus_failed(),
+                est.pdus_dropped(), wr.frames_written(),
+                0 if udp is None else udp.sent,
+                0 if udp is None else udp.sent_ok)
+        while not stop_evt.wait(1.0):
+            t1 = time.monotonic()
+            dt = t1 - prev[0]
+            if dt <= 0:
+                continue
+            echo_ok = echo._ok
+            cir_ok = est.pdus_completed()
+            cir_fail = est.pdus_failed()
+            est_drop = est.pdus_dropped()
+            wr_ok = wr.frames_written()
+            udp_n = 0 if udp is None else udp.sent
+            udp_ok = 0 if udp is None else udp.sent_ok
+            udp_eagain = 0 if udp is None else udp.dropped
+            print(
+                "live dt=%.3f echo_ok_hz=%.1f cir_ok_hz=%.1f cir_fail_hz=%.1f "
+                "est_q=%d est_drop=%d wr_hz=%.1f udp_hz=%.1f udp_ok_hz=%.1f "
+                "udp_eagain=%d service_us_mean=%d max=%d pri_hz=%.1f" % (
+                    dt,
+                    (echo_ok - prev[1]) / dt,
+                    (cir_ok - prev[2]) / dt,
+                    (cir_fail - prev[3]) / dt,
+                    int(est.queue_depth()),
+                    est_drop,
+                    (wr_ok - prev[5]) / dt,
+                    (udp_n - prev[6]) / dt,
+                    (udp_ok - prev[7]) / dt,
+                    udp_eagain,
+                    int(est.service_mean_us()),
+                    int(est.service_max_us()),
+                    (1.0 / pri_s) if pri_s > 0 else 0.0),
+                flush=True)
+            if est_drop > prev[4]:
+                print("NOTE estimator dropped %d frames (queue_full); "
+                      "radio ok is not CIR/UDP ok" % (est_drop - prev[4]),
+                      flush=True)
+            prev = (t1, echo_ok, cir_ok, cir_fail, est_drop, wr_ok,
+                    udp_n, udp_ok)
+    th = threading.Thread(target=loop, name="cir_live", daemon=True)
+    th.start()
+    return th
+
+
+def rx_geometry(rate, pre_us, sync_reps, range_m, tail_us,
+                tx_native_samples=0, pad_us=8.0):
+    """RX window must cover the full native TX burst, not just SYNC+SFD.
+
+    With STS+PHR/PSDU the HRP packet is ~191 us; SYNC+SFD is only ~73 us.
+    FPGA RX length is rounded up to a multiple of 4.
+    """
     pre = llround(pre_us * 1e-6 * rate)
     sync = ceildiv(sync_reps * SPS * 32, 65)
     sfd = ceildiv(SFD_SYMS_4Z2 * SPS * 32, 65)
     rng = int(math.ceil(2.0 * range_m / C_LIGHT * rate))
     tail = llround(tail_us * 1e-6 * rate)
-    rx = pre + sync + sfd + rng + tail
+    pad = llround(float(pad_us) * 1e-6 * rate)
+    body = int(tx_native_samples) if tx_native_samples else (sync + sfd)
+    rx = pre + body + rng + pad + tail
     rx = (rx + 3) // 4 * 4
-    return pre, sync, sfd, rng, tail, rx
+    return pre, sync, sfd, rng, tail, pad, rx
 
 
 class TimedUhdEcho(gr.basic_block):
@@ -103,7 +309,8 @@ class TimedUhdEcho(gr.basic_block):
     def __init__(self, args, rate, freq, tx_ch, rx_ch, tx_ant, rx_ant,
                  gain_tx, gain_rx, pre_us, range_m, tail_us, sync_reps,
                  cal_delay_native, arm_delay_s, pri_s, max_pulses,
-                 rx_dump_dir="", min_lead_s=0.002, timing_path=""):
+                 rx_dump_dir="", min_lead_s=0.002, timing_path="",
+                 sc16_dump_dir="", rx_pad_us=8.0):
         gr.basic_block.__init__(self, name="timed_uhd_echo",
                                 in_sig=None, out_sig=None)
         self.rate = float(rate)
@@ -123,10 +330,12 @@ class TimedUhdEcho(gr.basic_block):
         self.pri_s = float(pri_s)
         self.max_pulses = int(max_pulses)
         self.rx_dump_dir = rx_dump_dir
+        self.sc16_dump_dir = sc16_dump_dir
         self.min_lead_s = float(min_lead_s)
         self.timing_path = timing_path
-        self.pre, self.sync_n, self.sfd_n, self.rng_n, self.tail, self.rx_len = \
-            rx_geometry(rate, pre_us, sync_reps, range_m, tail_us)
+        self.rx_pad_us = float(rx_pad_us)
+        self.pre, self.sync_n, self.sfd_n, self.rng_n, self.tail, self.pad_n, self.rx_len = \
+            rx_geometry(rate, pre_us, sync_reps, range_m, tail_us, 0, self.rx_pad_us)
 
         self.message_port_register_in(pmt.intern("tx"))
         self.message_port_register_out(pmt.intern("rx"))
@@ -169,17 +378,80 @@ class TimedUhdEcho(gr.basic_block):
         self._pub_q = queue.Queue(maxsize=64)
         self._pub_thread = None
         self._timing = []
+        self._sc16_iq = None
+        self._sc16_jsonl = None
+        self._sc16_offset = 0
+        self._sc16_written = 0
         self.status = {
             "tx_rate": tx_rate, "rx_rate": rx_rate,
             "tx_ant": self._usrp.get_tx_antenna(self.tx_ch),
             "rx_ant": self._usrp.get_rx_antenna(self.rx_ch),
             "rx_window": self.rx_len, "pre": self.pre,
             "pri_s": self.pri_s, "max_pulses": self.max_pulses,
+            "rx_pad_us": self.rx_pad_us,
         }
 
     def set_tx_native(self, wave):
         peak = float(np.max(np.abs(wave))) or 1.0
         self._native = (np.asarray(wave, dtype=np.complex64) / peak * 0.8).astype(np.complex64)
+        self.pre, self.sync_n, self.sfd_n, self.rng_n, self.tail, self.pad_n, self.rx_len = \
+            rx_geometry(self.rate, self.pre_us, self.sync_reps, self.range_m,
+                        self.tail_us, int(self._native.size), self.rx_pad_us)
+        self.status["rx_window"] = self.rx_len
+        self.status["tx_native"] = int(self._native.size)
+        self.status["rx_window_us"] = self.rx_len / self.rate * 1e6
+        self.status["tx_us"] = self._native.size / self.rate * 1e6
+        self.status["pad"] = self.pad_n
+
+    def open_sc16_dump(self):
+        if not self.sc16_dump_dir:
+            return
+        os.makedirs(self.sc16_dump_dir, exist_ok=True)
+        self._sc16_iq = open(os.path.join(self.sc16_dump_dir, "capture.iq"), "wb")
+        self._sc16_jsonl = open(os.path.join(self.sc16_dump_dir, "capture.jsonl"),
+                                "w", encoding="utf-8")
+        self._sc16_offset = 0
+        self._sc16_written = 0
+
+    def close_sc16_dump(self):
+        for fh in (self._sc16_iq, self._sc16_jsonl):
+            if fh is not None:
+                fh.flush()
+                fh.close()
+        self._sc16_iq = None
+        self._sc16_jsonl = None
+
+    def _write_sc16_packet(self, pulse_id, rx):
+        if self._sc16_iq is None or self._sc16_jsonl is None:
+            return
+        sc16 = fc32_to_sc16(rx)
+        n = int(rx.size)
+        self._sc16_iq.write(sc16.tobytes())
+        predicted = self._sc16_offset + self.pre
+        rec = {
+            "packet_id": int(pulse_id),
+            "start_sample": int(predicted),
+            "trigger_sample": int(predicted),
+            "sample_rate": int(round(self.rate)),
+            "sample_count": n,
+            "file_offset_samples": int(self._sc16_offset),
+            "detection_metric": 0.0,
+            "pre_trigger_samples": int(self.pre),
+            "sample_format": "sc16",
+            "iq_scale": IQ_SCALE,
+            "window_start_sample": int(self._sc16_offset),
+            "predicted_start_sample": int(predicted),
+            "pre_guard_samples": int(self.pre),
+            "capture_samples": int(self.rx_len - self.pre - self.tail),
+            "post_guard_samples": int(self.tail),
+            "schedule_index": int(pulse_id),
+            "capture_mode": "x410_echo",
+            "lock_state": "timed",
+        }
+        self._sc16_jsonl.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        self._sc16_jsonl.flush()
+        self._sc16_offset += n
+        self._sc16_written += 1
 
     def start_publisher(self):
         if self._pub_thread is not None:
@@ -275,6 +547,7 @@ class TimedUhdEcho(gr.basic_block):
             cap = self.rx_len
         meta = pmt.make_dict()
         meta = pmt.dict_add(meta, pmt.intern("pulse_id"), pmt.from_uint64(pulse_id))
+        meta = pmt.dict_add(meta, pmt.intern("packet_id"), pmt.from_uint64(pulse_id))
         meta = pmt.dict_add(meta, pmt.intern("schedule_index"),
                             pmt.from_uint64(pulse_id))
         meta = pmt.dict_add(meta, pmt.intern("sample_rate"),
@@ -328,6 +601,7 @@ class TimedUhdEcho(gr.basic_block):
                 break
             pulse_id, rx = item
             t0 = time.perf_counter()
+            rx = np.ascontiguousarray(rx, dtype=np.complex64)
             rx_pmt = pmt.init_c32vector(int(rx.size), rx.tolist())
             meta = self._make_rx_meta(pulse_id)
             self.message_port_pub(pmt.intern("rx"), pmt.cons(meta, rx_pmt))
@@ -386,6 +660,8 @@ class TimedUhdEcho(gr.basic_block):
             os.makedirs(self.rx_dump_dir, exist_ok=True)
             rx[:got].tofile(os.path.join(self.rx_dump_dir,
                                          "pulse_%04d.cf32" % pulse_id))
+        if status == "ok" and got == self.rx_len:
+            self._write_sc16_packet(pulse_id, rx)
         if status != "ok":
             self._fail += 1
             extra = pmt.make_dict()
@@ -404,16 +680,20 @@ class TimedUhdEcho(gr.basic_block):
     def run_schedule(self):
         if self._native is None:
             raise RuntimeError("TX waveform not set")
+        self.open_sc16_dump()
         self.start_publisher()
         t_host0 = time.perf_counter()
-        for pulse_id in range(self.max_pulses):
-            self._one_burst(pulse_id)
-            self._done = pulse_id + 1
-            if pulse_id == 0 or (pulse_id + 1) % 100 == 0 or pulse_id + 1 == self.max_pulses:
-                dt = time.perf_counter() - t_host0
-                print("sched %d/%d ok=%d fail=%d late=%d host_s=%.3f" % (
-                    pulse_id + 1, self.max_pulses, self._ok, self._fail,
-                    self._late, dt), flush=True)
+        try:
+            for pulse_id in range(self.max_pulses):
+                self._one_burst(pulse_id)
+                self._done = pulse_id + 1
+                if pulse_id == 0 or (pulse_id + 1) % 100 == 0 or pulse_id + 1 == self.max_pulses:
+                    dt = time.perf_counter() - t_host0
+                    print("sched %d/%d ok=%d fail=%d late=%d sc16=%d host_s=%.3f" % (
+                        pulse_id + 1, self.max_pulses, self._ok, self._fail,
+                        self._late, self._sc16_written, dt), flush=True)
+        finally:
+            self.close_sc16_dump()
         return self._ok, self._fail, self._late
 
     def _on_tx(self, msg):
@@ -442,12 +722,15 @@ def parse_args():
     p.add_argument("--rx-antenna", default="RX1")
     p.add_argument("--freq", type=float, default=6489.6e6)
     p.add_argument("--cal-delay-native", type=float, default=334.0)
-    p.add_argument("--sfd-search-margin", type=int, default=8192)
+    p.add_argument("--sfd-search-margin", type=int, default=128,
+                   help="SFD search half-window at 998.4 MS/s; 8192 is ~180 ms/frame")
     p.add_argument("--sfd-threshold", type=float, default=0.12)
     p.add_argument("--sync-refine-margin", type=int, default=32)
     p.add_argument("--sync-refine-threshold", type=float, default=0.02)
     p.add_argument("--tail-guard-us", type=float, default=20.0)
     p.add_argument("--pre-guard-us", type=float, default=2.0)
+    p.add_argument("--rx-pad-us", type=float, default=8.0,
+                   help="Extra native samples after TX burst before tail guard")
     p.add_argument("--psdu-hex",
                    default="47261DF66F4C1BEF45C8F77CE77BD7D8C4D180FB1221")
     p.add_argument("--sync-reps", type=int, default=64)
@@ -469,6 +752,8 @@ def parse_args():
     p.add_argument("--taps", default="")
     p.add_argument("--template", default="")
     p.add_argument("--dump-rx", action="store_true")
+    p.add_argument("--dump-sc16", action="store_true",
+                   help="Write native RX windows as capture.iq + capture.jsonl (SC16)")
     p.add_argument("--min-lead-s", type=float, default=0.002)
     p.add_argument("--arm-delay-s", type=float, default=0.25)
     p.add_argument("--udp-host", default="133.133.133.132",
@@ -476,6 +761,11 @@ def parse_args():
     p.add_argument("--udp-port", default="12345")
     p.add_argument("--no-udp", action="store_true",
                    help="Do not send CIR taps over UDP")
+    p.add_argument("--est-queue", type=int, default=64,
+                   help="CIR estimator job queue; overflow is a real drop. "
+                        "Do not set this to pulses — that hides lag as 'no loss'")
+    p.add_argument("--require-sfd", action="store_true",
+                   help="Gate CIR on SFD search (default: use scheduled echo time)")
     return p.parse_args()
 
 
@@ -581,6 +871,7 @@ def analyze_timing(path):
 
 
 def main():
+    bootstrap_uhd_env()
     a = parse_args()
     insert_sts = False if a.no_sts else True
     if a.rate_hz and a.rate_hz > 0:
@@ -625,45 +916,58 @@ def main():
         a.pulses, a.pri_s, (1.0 / a.pri_s), a.pulses * a.pri_s), flush=True)
 
     dump_dir = os.path.join(a.output, "rx_iq") if a.dump_rx else ""
+    sc16_dir = a.output if a.dump_sc16 else ""
     echo = TimedUhdEcho(
         a.args, CG400_HZ, a.freq, a.tx_channel, a.rx_channel,
         a.tx_antenna, a.rx_antenna, a.gain_tx, a.gain_rx,
         a.pre_guard_us, 15.0, a.tail_guard_us, a.sync_reps, a.cal_delay_native,
-        a.arm_delay_s, a.pri_s, a.pulses, dump_dir, a.min_lead_s, timing_path)
+        a.arm_delay_s, a.pri_s, a.pulses, dump_dir, a.min_lead_s, timing_path,
+        sc16_dir, a.rx_pad_us)
     echo.set_tx_native(native)
     print("uhd_probe", echo.status, flush=True)
+    if a.dump_sc16:
+        tx_sc16_path = os.path.join(a.output, "tx_491p52.sc16")
+        fc32_to_sc16(echo._native).tofile(tx_sc16_path)
+        print("wrote_tx_sc16", tx_sc16_path, "samples=%d" % echo._native.size,
+              flush=True)
 
     res = uwb.pdu_rational_resampler_ccf_65_32(taps, 998.4e6, True, 2097152)
-    est_q = max(64, min(1024, a.pulses + 8))
+    est_q = max(8, int(a.est_queue))
+    use_pred = not a.require_sfd
     est = uwb.radar_cir_estimator(
         tmpl_path, a.sync_reps, "4z2", 9, 16, 100, 10, 0,
         a.sfd_search_margin, a.sync_refine_margin, a.sfd_threshold,
-        a.sync_refine_threshold, True, est_q)
-    print("estimator sfd_search_margin=%d queue=%d" % (
-        a.sfd_search_margin, est_q), flush=True)
+        a.sync_refine_threshold, True, est_q, use_pred)
+    print("estimator sfd_search_margin=%d queue=%d use_predicted_timing=%s "
+          "(overflow=drop)" % (
+              a.sfd_search_margin, est_q, use_pred), flush=True)
     wr = uwb.cir_writer(a.output, "cir", True, 64)
-    sock = None
+    udp = None
     udp_on = (not a.no_udp) and bool(a.udp_host)
     if udp_on:
-        sock = network.socket_pdu("UDP_CLIENT", a.udp_host, str(a.udp_port), 1472)
-        print("udp_cir %s:%s mtu=1472 taps_only" % (a.udp_host, a.udp_port),
-              flush=True)
+        udp = CirUdpSink(a.udp_host, int(a.udp_port), CIR_UDP_TAPS)
+        print("udp_cir %s:%s framed=UCR1 always_send_taps=%d nonblock" % (
+            a.udp_host, a.udp_port, CIR_UDP_TAPS), flush=True)
 
     tb = gr.top_block("x410_cg400_hrp_echo_cir")
     tb.msg_connect((echo, "rx"), (res, "packet"))
     tb.msg_connect((res, "packet"), (est, "rx"))
     tb.msg_connect((est, "cir"), (wr, "cir"))
-    if sock is not None:
-        tb.msg_connect((est, "cir"), (sock, "pdus"))
+    if udp is not None:
+        tb.msg_connect((est, "cir"), (udp, "cir"))
     # Do not attach message_debug on a 100 Hz soak: queue_full status
     # PDUs would flood the print block and stall the message system.
 
     tb.start()
     echo.start_publisher()
+    live_stop = threading.Event()
+    live_th = start_live_stats(echo, est, wr, udp, live_stop, a.pri_s)
     t_run = time.perf_counter()
     echo.run_schedule()
     sched_s = time.perf_counter() - t_run
     print("schedule_wall_s=%.3f" % sched_s, flush=True)
+    live_stop.set()
+    live_th.join(timeout=1.5)
 
     deadline = time.time() + 8.0
     while time.time() < deadline:
@@ -705,14 +1009,95 @@ def main():
         "wr_ok": wr.frames_written(),
         "wr_fail": wr.frames_failed(),
         "wr_invalid": wr.frames_invalid(),
+        "use_predicted_timing": use_pred,
+        "est_queue_capacity": est_q,
+        "est_queue_hwm": int(est.queue_high_watermark()),
+        "est_service_us_mean": int(est.service_mean_us()),
+        "est_service_us_max": int(est.service_max_us()),
+        "udp_sent": 0 if udp is None else udp.sent,
+        "udp_sent_ok": 0 if udp is None else udp.sent_ok,
+        "udp_sent_fail": 0 if udp is None else udp.sent_fail,
+        "udp_eagain": 0 if udp is None else udp.dropped,
         "cir": cir_stats,
         "timing": timing_stats,
         "output": a.output,
+        "sc16_packets": echo._sc16_written,
+        "sc16_samples": echo._sc16_offset,
+        "dump_sc16": bool(a.dump_sc16),
+        "freq_hz": a.freq,
+        "native_rate_hz": CG400_HZ,
+        "gain_tx": a.gain_tx,
+        "gain_rx": a.gain_rx,
+        "tx_channel": a.tx_channel,
+        "rx_channel": a.rx_channel,
+        "tx_antenna": a.tx_antenna,
+        "rx_antenna": a.rx_antenna,
+        "iq_scale": IQ_SCALE,
+        "sample_format": "sc16",
+        "rx_window": echo.rx_len,
+        "rx_window_us": echo.rx_len / CG400_HZ * 1e6,
+        "rx_pad_us": a.rx_pad_us,
     }
     with open(os.path.join(a.output, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
         f.write("\n")
+    if a.dump_sc16:
+        meta_path = os.path.join(a.output, "metadata.json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "description": (
+                    "X410 CG400 monostatic HRP echo, native SC16 RX windows"
+                ),
+                "sample_format": "sc16",
+                "dtype": "int16",
+                "byte_order": "little-endian",
+                "layout": "interleaved_iq",
+                "bytes_per_complex": 4,
+                "iq_scale": IQ_SCALE,
+                "sample_index_base": 0,
+                "freq_hz": a.freq,
+                "rate_native_hz": CG400_HZ,
+                "rate_work_hz": WORK_HZ,
+                "code_index": 9,
+                "sync_repetitions": a.sync_reps,
+                "sfd_mode": "4z2",
+                "insert_sts": insert_sts,
+                "packets": a.pulses,
+                "pri_s": a.pri_s,
+                "gain_tx": a.gain_tx,
+                "gain_rx": a.gain_rx,
+                "tx_channel": a.tx_channel,
+                "rx_channel": a.rx_channel,
+                "tx_antenna": a.tx_antenna,
+                "rx_antenna": a.rx_antenna,
+                "cal_delay_native_samples": a.cal_delay_native,
+                "pre_guard_us": a.pre_guard_us,
+                "tail_guard_us": a.tail_guard_us,
+                "rx_pad_us": a.rx_pad_us,
+                "rx_window_samples": echo.rx_len,
+                "rx_window_us": echo.rx_len / CG400_HZ * 1e6,
+                "files": {
+                    "capture.iq": "concatenated native SC16 packets",
+                    "capture.jsonl": "one JSON object per packet",
+                    "tx_491p52.sc16": "timed TX burst (native 491.52 MS/s)",
+                },
+                "matlab": "[x, meta] = read_uwb_packet('capture.iq','capture.jsonl',id)",
+                "echo": echo.status,
+                "written_packets": echo._sc16_written,
+                "written_samples": echo._sc16_offset,
+            }, f, indent=2)
+            f.write("\n")
     print("SUMMARY", json.dumps(summary), flush=True)
+    print("radio_ok=%d cir_ok=%d cir_fail=%d est_drop=%d udp_sent=%d "
+          "udp_ok=%d udp_fail=%d (radio ok is not CIR/UDP ok)" % (
+              summary["echo_ok"],
+              cir_stats.get("ok", 0),
+              cir_stats.get("fail", 0),
+              summary["est_drop"],
+              summary["udp_sent"],
+              summary["udp_sent_ok"],
+              summary["udp_sent_fail"]),
+          flush=True)
     if os.path.isfile(jsonl):
         print("cir.jsonl_lines=%d" % cir_stats.get("lines", 0), flush=True)
         with open(jsonl, "r", encoding="utf-8") as f:
@@ -720,11 +1105,16 @@ def main():
         for ln in lines[:2] + lines[-2:]:
             print(ln, flush=True)
 
-    ok = (summary["wr_ok"] == a.pulses and
-          summary["echo_ok"] == a.pulses and
-          summary["echo_late"] == 0 and
-          cir_stats.get("ok") == a.pulses and
-          cir_stats.get("missing_count", 1) == 0)
+    if a.dump_sc16:
+        ok = (summary["echo_ok"] == a.pulses and
+              summary["echo_late"] == 0 and
+              summary["sc16_packets"] == a.pulses)
+    else:
+        ok = (summary["wr_ok"] == a.pulses and
+              summary["echo_ok"] == a.pulses and
+              summary["echo_late"] == 0 and
+              cir_stats.get("ok") == a.pulses and
+              cir_stats.get("missing_count", 1) == 0)
     raise SystemExit(0 if ok else 3)
 
 
