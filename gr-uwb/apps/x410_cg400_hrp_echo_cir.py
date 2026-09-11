@@ -112,6 +112,18 @@ CG400_HZ = 491520000.0
 WORK_HZ = 998400000.0
 SPS = 1016
 SFD_SYMS_4Z2 = 8
+SFD_MODE = "4z2"
+# HRP BPRF preamble profiles.  The C++ blocks accept sync_repetitions in
+# 32/64/128/256/512/1024/2048 and preamble code indices 9..12.  The app
+# exposes the standard selectable preamble lengths and all four codes; TX
+# waveform, CIR estimator and metadata must agree on both.
+DEFAULT_CODE_INDEX = 9
+CODE_INDEX_CHOICES = (9, 10, 11, 12)
+DEFAULT_PREAMBLE_LENGTH = 64
+PREAMBLE_LENGTH_CHOICES = (32, 64, 128, 256, 512, 1024)
+# Legacy alias also accepts 2048 (supported by the C++ blocks but not part
+# of the standard selectable preamble set exposed by --preamble-length).
+SYNC_REPS_ALIAS_CHOICES = PREAMBLE_LENGTH_CHOICES + (2048,)
 
 
 def llround(x):
@@ -310,11 +322,14 @@ class TimedUhdEcho(gr.basic_block):
                  gain_tx, gain_rx, pre_us, range_m, tail_us, sync_reps,
                  cal_delay_native, arm_delay_s, pri_s, max_pulses,
                  rx_dump_dir="", min_lead_s=0.002, timing_path="",
-                 sc16_dump_dir="", rx_pad_us=8.0):
+                 sc16_dump_dir="", rx_pad_us=8.0,
+                 code_index=DEFAULT_CODE_INDEX, sfd_mode=SFD_MODE):
         gr.basic_block.__init__(self, name="timed_uhd_echo",
                                 in_sig=None, out_sig=None)
         self.rate = float(rate)
         self.freq = float(freq)
+        self.code_index = int(code_index)
+        self.sfd_mode = sfd_mode
         self.tx_ch = int(tx_ch)
         self.rx_ch = int(rx_ch)
         self.tx_ant = tx_ant
@@ -389,6 +404,8 @@ class TimedUhdEcho(gr.basic_block):
             "rx_window": self.rx_len, "pre": self.pre,
             "pri_s": self.pri_s, "max_pulses": self.max_pulses,
             "rx_pad_us": self.rx_pad_us,
+            "code_index": self.code_index, "sfd_mode": self.sfd_mode,
+            "sync_reps": self.sync_reps,
         }
 
     def set_tx_native(self, wave):
@@ -563,8 +580,9 @@ class TimedUhdEcho(gr.basic_block):
                             pmt.from_long(self.rx_len))
         meta = pmt.dict_add(meta, pmt.intern("sync_repetitions"),
                             pmt.from_long(self.sync_reps))
-        meta = pmt.dict_add(meta, pmt.intern("sfd_mode"), pmt.intern("4z2"))
-        meta = pmt.dict_add(meta, pmt.intern("code_index"), pmt.from_long(9))
+        meta = pmt.dict_add(meta, pmt.intern("sfd_mode"), pmt.intern(self.sfd_mode))
+        meta = pmt.dict_add(meta, pmt.intern("code_index"),
+                            pmt.from_long(self.code_index))
         meta = pmt.dict_add(meta, pmt.intern("sync_samples"),
                             pmt.from_long(self.sync_n))
         meta = pmt.dict_add(meta, pmt.intern("sfd_samples"),
@@ -706,9 +724,9 @@ class TimedUhdEcho(gr.basic_block):
         self._done += 1
 
 
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--args", default="addr=192.168.20.2")
+def build_parser(add_help=True):
+    p = argparse.ArgumentParser(add_help=add_help)
+    p.add_argument("--args", default="addr=192.168.10.2")
     p.add_argument("--pulses", type=int, default=8)
     p.add_argument("--pri-s", type=float, default=0.05)
     p.add_argument("--rate-hz", type=float, default=0.0,
@@ -733,7 +751,19 @@ def parse_args():
                    help="Extra native samples after TX burst before tail guard")
     p.add_argument("--psdu-hex",
                    default="47261DF66F4C1BEF45C8F77CE77BD7D8C4D180FB1221")
-    p.add_argument("--sync-reps", type=int, default=64)
+    p.add_argument("--code-index", type=int, default=DEFAULT_CODE_INDEX,
+                   choices=list(CODE_INDEX_CHOICES),
+                   help="HRP BPRF preamble code index (9/10/11/12); must "
+                        "match TX waveform and CIR template")
+    p.add_argument("--preamble-length", type=int, default=None,
+                   choices=list(PREAMBLE_LENGTH_CHOICES),
+                   help="HRP SYNC preamble length in repetitions "
+                        "(32/64/128/256/512/1024, default %d)"
+                        % DEFAULT_PREAMBLE_LENGTH)
+    p.add_argument("--sync-reps", type=int, default=None,
+                   choices=list(SYNC_REPS_ALIAS_CHOICES),
+                   help="Deprecated alias for --preamble-length "
+                        "(also accepts 2048)")
     p.add_argument("--insert-sts", action="store_true", default=True)
     p.add_argument("--no-sts", action="store_true")
     p.add_argument("--pulse-shape", default="linear",
@@ -766,7 +796,11 @@ def parse_args():
                         "Do not set this to pulses — that hides lag as 'no loss'")
     p.add_argument("--require-sfd", action="store_true",
                    help="Gate CIR on SFD search (default: use scheduled echo time)")
-    return p.parse_args()
+    return p
+
+
+def parse_args():
+    return build_parser().parse_args()
 
 
 def analyze_cir(jsonl_path, pulses):
@@ -873,6 +907,16 @@ def analyze_timing(path):
 def main():
     bootstrap_uhd_env()
     a = parse_args()
+    # --preamble-length is the primary knob; --sync-reps stays as a
+    # backward-compatible alias.  Both must agree when given together.
+    if a.preamble_length is not None and a.sync_reps is not None \
+            and a.preamble_length != a.sync_reps:
+        raise SystemExit("--preamble-length=%d conflicts with --sync-reps=%d"
+                         % (a.preamble_length, a.sync_reps))
+    if a.preamble_length is not None:
+        a.sync_reps = a.preamble_length
+    elif a.sync_reps is None:
+        a.sync_reps = DEFAULT_PREAMBLE_LENGTH
     insert_sts = False if a.no_sts else True
     if a.rate_hz and a.rate_hz > 0:
         a.pri_s = 1.0 / a.rate_hz
@@ -897,9 +941,10 @@ def main():
                                   "pulse_minphase_rc160_240.f32")
     else:
         pulse_shape, pulse_taps = a.pulse_shape, ""
-    src = uwb.hrp_packet_source(psdu, a.sync_reps, "4z2", 9, 0.8, a.pri_s,
-                                False, insert_sts, False, pulse_shape,
-                                a.pulse_sigma_ns, a.pulse_bw_mhz, pulse_taps)
+    src = uwb.hrp_packet_source(psdu, a.sync_reps, SFD_MODE, a.code_index,
+                                0.8, a.pri_s, False, insert_sts, False,
+                                pulse_shape, a.pulse_sigma_ns,
+                                a.pulse_bw_mhz, pulse_taps)
     samples = np.array(src.samples(), dtype=np.complex64)
     if samples.size < SPS:
         raise SystemExit("HRP source produced %d samples" % samples.size)
@@ -908,10 +953,12 @@ def main():
     t_rs = time.perf_counter()
     native = resample_poly(samples.astype(np.complex128), 32, 65).astype(np.complex64)
     print("hrp_tx_998p4_samples=%d native_491p52=%d resample_ms=%.2f "
-          "insert_sts=%s pulse_shape=%s pulse_taps=%d pulse_center=%d"
+          "insert_sts=%s pulse_shape=%s pulse_taps=%d pulse_center=%d "
+          "code_index=%d preamble_length=%d sfd_mode=%s"
           % (samples.size, native.size, (time.perf_counter() - t_rs) * 1e3,
              insert_sts, src.pulse_shape(), src.pulse_taps(),
-             src.pulse_center_taps()), flush=True)
+             src.pulse_center_taps(), a.code_index, a.sync_reps, SFD_MODE),
+          flush=True)
     print("schedule pulses=%d pri_s=%.6f rate_hz=%.3f duration_s=%.3f" % (
         a.pulses, a.pri_s, (1.0 / a.pri_s), a.pulses * a.pri_s), flush=True)
 
@@ -922,7 +969,7 @@ def main():
         a.tx_antenna, a.rx_antenna, a.gain_tx, a.gain_rx,
         a.pre_guard_us, 15.0, a.tail_guard_us, a.sync_reps, a.cal_delay_native,
         a.arm_delay_s, a.pri_s, a.pulses, dump_dir, a.min_lead_s, timing_path,
-        sc16_dir, a.rx_pad_us)
+        sc16_dir, a.rx_pad_us, a.code_index, SFD_MODE)
     echo.set_tx_native(native)
     print("uhd_probe", echo.status, flush=True)
     if a.dump_sc16:
@@ -935,12 +982,13 @@ def main():
     est_q = max(8, int(a.est_queue))
     use_pred = not a.require_sfd
     est = uwb.radar_cir_estimator(
-        tmpl_path, a.sync_reps, "4z2", 9, 16, 100, 10, 0,
+        tmpl_path, a.sync_reps, SFD_MODE, a.code_index, 16, 100, 10, 0,
         a.sfd_search_margin, a.sync_refine_margin, a.sfd_threshold,
         a.sync_refine_threshold, True, est_q, use_pred)
-    print("estimator sfd_search_margin=%d queue=%d use_predicted_timing=%s "
-          "(overflow=drop)" % (
-              a.sfd_search_margin, est_q, use_pred), flush=True)
+    print("estimator code_index=%d preamble_length=%d sfd_search_margin=%d "
+          "queue=%d use_predicted_timing=%s (overflow=drop)" % (
+              a.code_index, a.sync_reps, a.sfd_search_margin, est_q, use_pred),
+          flush=True)
     wr = uwb.cir_writer(a.output, "cir", True, 64)
     udp = None
     udp_on = (not a.no_udp) and bool(a.udp_host)
@@ -1026,6 +1074,9 @@ def main():
         "dump_sc16": bool(a.dump_sc16),
         "freq_hz": a.freq,
         "native_rate_hz": CG400_HZ,
+        "code_index": a.code_index,
+        "preamble_length": a.sync_reps,
+        "sfd_mode": SFD_MODE,
         "gain_tx": a.gain_tx,
         "gain_rx": a.gain_rx,
         "tx_channel": a.tx_channel,
@@ -1058,9 +1109,9 @@ def main():
                 "freq_hz": a.freq,
                 "rate_native_hz": CG400_HZ,
                 "rate_work_hz": WORK_HZ,
-                "code_index": 9,
+                "code_index": a.code_index,
                 "sync_repetitions": a.sync_reps,
-                "sfd_mode": "4z2",
+                "sfd_mode": SFD_MODE,
                 "insert_sts": insert_sts,
                 "packets": a.pulses,
                 "pri_s": a.pri_s,
