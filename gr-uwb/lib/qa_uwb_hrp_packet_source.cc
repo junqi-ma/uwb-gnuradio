@@ -112,6 +112,38 @@ BOOST_AUTO_TEST_CASE(test_hrp_packet_source_sts_requires_4z)
                       gr::uwb::mod::packet_samples_998p4(64, 8, 2, true));
 }
 
+BOOST_AUTO_TEST_CASE(test_hrp_packet_source_pulse_shape)
+{
+    std::vector<uint8_t> b{ 1, 2 };
+    auto legacy = UwbHrpPacketSource::make(b, 64, "4z2", 9);
+    BOOST_CHECK_EQUAL(legacy->pulse_shape(), std::string("legacy"));
+    BOOST_CHECK_EQUAL(legacy->pulse_taps(), size_t(48));
+    const size_t n_legacy = legacy->num_samples();
+
+    auto gauss = UwbHrpPacketSource::make(b, 64, "4z2", 9, 0.8f, 0.005, false,
+                                          false, false, "gaussian");
+    BOOST_CHECK_EQUAL(gauss->pulse_shape(), std::string("gaussian"));
+    BOOST_CHECK_EQUAL(gauss->pulse_taps(), size_t(49));
+    BOOST_CHECK_EQUAL(gauss->pulse_center_taps(), size_t(12));
+    BOOST_CHECK_EQUAL(gauss->num_samples(), n_legacy + 47);
+
+    auto black = UwbHrpPacketSource::make(b, 64, "4z2", 9, 0.8f, 0.005, false,
+                                          false, false, "blackman", 2.5f,
+                                          200.0f);
+    BOOST_CHECK_EQUAL(black->pulse_shape(), std::string("blackman"));
+    BOOST_CHECK_EQUAL(black->pulse_taps(), size_t(129));
+    BOOST_CHECK_EQUAL(black->num_samples(), n_legacy + 127);
+
+    BOOST_CHECK_THROW(
+        UwbHrpPacketSource::make(b, 64, "4z2", 9, 0.8f, 0.005, false, false,
+                                 false, "triangle"),
+        std::invalid_argument);
+    BOOST_CHECK_THROW(
+        UwbHrpPacketSource::make(b, 64, "4z2", 9, 0.8f, 0.005, false, false,
+                                 false, "gaussian", 0.0f),
+        std::invalid_argument);
+}
+
 BOOST_AUTO_TEST_CASE(test_hrp_packet_source_append_fcs_and_emit_override)
 {
     std::vector<uint8_t> data(8, 0x11);
@@ -182,4 +214,50 @@ BOOST_AUTO_TEST_CASE(test_hrp_packet_source_radar_loopback_cir)
                                      pmt::from_uint64(0))),
         116u);
     BOOST_CHECK_GE(est->pdus_completed(), 1u);
+}
+
+BOOST_AUTO_TEST_CASE(test_hrp_packet_source_external_pulse)
+{
+    std::vector<uint8_t> b{ 1, 2 };
+    const std::string taps = std::string(kTestdata) +
+        "/uwb_hrp_tx/pulse_minphase_rc100_215.f32";
+
+    auto legacy = UwbHrpPacketSource::make(b, 64, "4z2", 9);
+    auto ext = UwbHrpPacketSource::make(b, 64, "4z2", 9, 0.8f, 0.005, false,
+                                        false, false, "gaussian", 2.5f,
+                                        200.0f, taps);
+    BOOST_CHECK_EQUAL(ext->pulse_shape(), std::string("external"));
+    BOOST_CHECK_EQUAL(ext->pulse_taps(), size_t(257));
+    BOOST_CHECK_EQUAL(ext->pulse_taps_file(), taps);
+    BOOST_CHECK_GE(ext->pulse_center_taps(), size_t(1));
+    BOOST_CHECK_EQUAL(ext->num_samples(), legacy->num_samples() + 255);
+    BOOST_CHECK_EQUAL(ext->num_samples(),
+                      gr::uwb::mod::packet_samples_998p4(64, 8, 2, false) + 255);
+
+    const std::string def = std::string(kTestdata) +
+        "/uwb_hrp_tx/pulse_minphase_rc160_240.f32";
+    auto ext2 = UwbHrpPacketSource::make(b, 64, "4z2", 9, 0.8f, 0.005, false,
+                                         false, false, "external", 2.5f,
+                                         200.0f, def);
+    BOOST_CHECK_EQUAL(ext2->pulse_taps(), size_t(1025));
+    BOOST_CHECK_EQUAL(ext2->num_samples(), legacy->num_samples() + 1023);
+
+    const std::string deflin = std::string(kTestdata) +
+        "/uwb_hrp_tx/pulse_trunc_linear_rc183_240.f32";
+    auto ext3 = UwbHrpPacketSource::make(b, 64, "4z2", 9, 0.8f, 0.005, false,
+                                         false, false, "external", 2.5f,
+                                         200.0f, deflin);
+    BOOST_CHECK_EQUAL(ext3->pulse_taps(), size_t(1025));
+    BOOST_CHECK_EQUAL(ext3->pulse_center_taps(), size_t(32));
+    BOOST_CHECK_EQUAL(ext3->num_samples(), legacy->num_samples() + 1023);
+
+    BOOST_CHECK_THROW(
+        UwbHrpPacketSource::make(b, 64, "4z2", 9, 0.8f, 0.005, false, false,
+                                 false, "external"),
+        std::invalid_argument);
+    BOOST_CHECK_THROW(
+        UwbHrpPacketSource::make(b, 64, "4z2", 9, 0.8f, 0.005, false, false,
+                                 false, "legacy", 2.5f, 200.0f,
+                                 "/nonexistent/pulse.f32"),
+        std::invalid_argument);
 }

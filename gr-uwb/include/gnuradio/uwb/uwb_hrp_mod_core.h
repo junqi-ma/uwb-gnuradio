@@ -123,6 +123,162 @@ inline constexpr float kPulse48[kPulseTaps] = {
     -2.305225122e-09f, -1.765908753e-09f,  1.236934999e-09f,  7.909589650e-10f,
 };
 
+// TX pulse shaping on the 998.4 MS/s work grid (2 samples/chip).
+// Legacy keeps the 48-tap core fitted to the 737.28 MS/s reference; the
+// 491.52 MS/s USRP cannot reproduce its spectrum near +/-245.76 MHz and
+// rings, so Gaussian/Blackman band-limited cores are offered instead.
+// See docs/固定491p52采样率_发射脉冲低拖尾方案.md.
+enum class PulseShape : int {
+    Legacy = 0,
+    Gaussian = 1,
+    Blackman = 2,
+    External = 3, // precomputed taps (see design_tx_pulse.py)
+};
+
+struct PulseSpec {
+    PulseShape shape = PulseShape::Legacy;
+    float gaussian_sigma_ns = 2.5f;  // -67 dB tails at 10..100 ns
+    float blackman_bw_mhz = 200.0f;  // target one-sided spectral edge
+    size_t external_n_taps = 0;      // valid when shape == External
+    size_t external_center = 0;      // peak tap, metadata only
+};
+
+inline const char* pulse_shape_name(PulseShape shape)
+{
+    switch (shape) {
+    case PulseShape::Gaussian:
+        return "gaussian";
+    case PulseShape::Blackman:
+        return "blackman";
+    case PulseShape::External:
+        return "external";
+    default:
+        return "legacy";
+    }
+}
+
+inline bool parse_pulse_shape(const std::string& name, PulseShape& out)
+{
+    if (name.empty() || name == "legacy" || name == "butter") {
+        out = PulseShape::Legacy;
+        return true;
+    }
+    if (name == "gaussian" || name == "gauss") {
+        out = PulseShape::Gaussian;
+        return true;
+    }
+    if (name == "blackman") {
+        out = PulseShape::Blackman;
+        return true;
+    }
+    if (name == "external" || name == "file") {
+        out = PulseShape::External;
+        return true;
+    }
+    return false;
+}
+
+inline constexpr size_t kGaussianPulseTaps = 49;
+inline constexpr size_t kGaussianPulseCenter = 12;
+inline constexpr size_t kBlackmanPulseTaps = 129;
+inline constexpr size_t kBlackmanPulseCenter = 64;
+inline constexpr size_t kMaxExternalPulseTaps = 4096;
+
+inline size_t pulse_n_taps(const PulseSpec& spec)
+{
+    switch (spec.shape) {
+    case PulseShape::Gaussian:
+        return kGaussianPulseTaps;
+    case PulseShape::Blackman:
+        return kBlackmanPulseTaps;
+    case PulseShape::External:
+        return spec.external_n_taps;
+    default:
+        return kPulseTaps;
+    }
+}
+
+inline size_t pulse_center_tap(const PulseSpec& spec)
+{
+    switch (spec.shape) {
+    case PulseShape::Gaussian:
+        return kGaussianPulseCenter;
+    case PulseShape::Blackman:
+        return kBlackmanPulseCenter;
+    case PulseShape::External:
+        return spec.external_center;
+    default:
+        return 2;
+    }
+}
+
+inline bool pulse_spec_valid(const PulseSpec& spec)
+{
+    switch (spec.shape) {
+    case PulseShape::Gaussian:
+        return std::isfinite(spec.gaussian_sigma_ns) &&
+               spec.gaussian_sigma_ns > 0.f;
+    case PulseShape::Blackman:
+        return std::isfinite(spec.blackman_bw_mhz) &&
+               spec.blackman_bw_mhz > 0.f &&
+               spec.blackman_bw_mhz < 499.2f; // work-grid Nyquist, MHz
+    case PulseShape::External:
+        return spec.external_n_taps >= 2 &&
+               spec.external_n_taps <= kMaxExternalPulseTaps;
+    default:
+        return true;
+    }
+}
+
+// Causal real taps at kWorkRateHz.  Empty vector on invalid spec.
+inline std::vector<float> make_pulse_taps(const PulseSpec& spec)
+{
+    if (!pulse_spec_valid(spec))
+        return {};
+    if (spec.shape == PulseShape::Legacy)
+        return std::vector<float>(kPulse48, kPulse48 + kPulseTaps);
+    if (spec.shape == PulseShape::External)
+        return {};
+    const double rate = radar_meta::kWorkRateHz;
+    const double dt = 1.0 / rate;
+    const size_t n = pulse_n_taps(spec);
+    const size_t center = pulse_center_tap(spec);
+    std::vector<float> taps(n, 0.f);
+    if (spec.shape == PulseShape::Gaussian) {
+        const double sigma = spec.gaussian_sigma_ns * 1e-9;
+        for (size_t i = 0; i < n; ++i) {
+            const double x = (static_cast<double>(i) -
+                              static_cast<double>(center)) * dt / sigma;
+            taps[i] = static_cast<float>(std::exp(-0.5 * x * x));
+        }
+        return taps;
+    }
+    const double B = spec.blackman_bw_mhz * 1e6;
+    auto sinc = [](double v) {
+        if (v == 0.0)
+            return 1.0;
+        const double p = M_PI * v;
+        return std::sin(p) / p;
+    };
+    double peak = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const double t = (static_cast<double>(i) -
+                          static_cast<double>(center)) * dt;
+        const double x = 2.0 * B * t;
+        const double h = 2.0 * B *
+                         (0.42 * sinc(x) +
+                          0.25 * (sinc(x - 0.5) + sinc(x + 0.5)) +
+                          0.04 * (sinc(x - 1.0) + sinc(x + 1.0)));
+        taps[i] = static_cast<float>(h);
+        peak = std::max(peak, std::fabs(h));
+    }
+    if (peak > 0.0) {
+        for (auto& v : taps)
+            v = static_cast<float>(v / peak);
+    }
+    return taps;
+}
+
 struct HrpModConfig {
     size_t code_index = 9;
     size_t sync_repetitions = 64;
@@ -130,6 +286,9 @@ struct HrpModConfig {
     bool insert_sts = false;
     float peak_amplitude = kDefaultPeakAmplitude;
     bool ranging = false;
+    PulseSpec pulse;
+    // Owned taps for PulseShape::External; must outlive modulate_one.
+    std::vector<float> external_taps;
 };
 
 struct HrpPrefixCache {
@@ -137,8 +296,10 @@ struct HrpPrefixCache {
     size_t code_index = 0;
     size_t sync_repetitions = 0;
     size_t n_sfd = 0;
-    size_t n_samples = 0; // includes 48-tap tail into PHR
+    size_t n_samples = 0; // includes pulse tail into PHR
     bool insert_sts = false;
+    PulseSpec pulse;
+    uint64_t pulse_generation = 0;
     char sfd_mode[16] = {};
     std::vector<float> samples;
 };
@@ -155,6 +316,22 @@ struct HrpModScratch {
     std::vector<float> iq_re;
     std::vector<float> iq_im; // zeros for VOLK interleave
     HrpPrefixCache prefix;
+
+    // Active pulse taps.  Empty for Legacy (uses static kPulse48).
+    std::vector<float> pulse_taps;
+    PulseSpec pulse_spec;
+    bool pulse_valid = false;
+    uint64_t pulse_generation = 0;
+    const float* external_src = nullptr;
+
+    const float* pulse_data() const
+    {
+        return pulse_taps.empty() ? kPulse48 : pulse_taps.data();
+    }
+    size_t pulse_len() const
+    {
+        return pulse_taps.empty() ? kPulseTaps : pulse_taps.size();
+    }
 
     void reserve(size_t max_psdu_bytes, size_t max_samples)
     {
@@ -177,6 +354,59 @@ struct HrpModScratch {
     }
 };
 
+inline bool ensure_pulse(const HrpModConfig& cfg, HrpModScratch& scratch)
+{
+    const PulseSpec& spec = cfg.pulse;
+    if (!pulse_spec_valid(spec)) {
+        scratch.pulse_valid = false;
+        return false;
+    }
+    if (spec.shape == PulseShape::External) {
+        const float* src = cfg.external_taps.data();
+        if (cfg.external_taps.size() != spec.external_n_taps || !src)
+            return false;
+        if (scratch.pulse_valid && scratch.pulse_spec.shape == spec.shape &&
+            scratch.external_src == src)
+            return true;
+        scratch.pulse_taps = cfg.external_taps;
+        scratch.pulse_spec = spec;
+        scratch.external_src = src;
+        scratch.pulse_valid = true;
+        ++scratch.pulse_generation;
+        return true;
+    }
+    if (scratch.pulse_valid && scratch.pulse_spec.shape == spec.shape &&
+        scratch.pulse_spec.gaussian_sigma_ns == spec.gaussian_sigma_ns &&
+        scratch.pulse_spec.blackman_bw_mhz == spec.blackman_bw_mhz)
+        return true;
+    if (spec.shape == PulseShape::Legacy) {
+        scratch.pulse_taps.clear();
+        scratch.external_src = nullptr;
+        scratch.pulse_spec = spec;
+        scratch.pulse_valid = true;
+        ++scratch.pulse_generation;
+        return true;
+    }
+    std::vector<float> taps = make_pulse_taps(spec);
+    if (taps.empty()) {
+        scratch.pulse_valid = false;
+        return false;
+    }
+    scratch.pulse_taps.swap(taps);
+    scratch.external_src = nullptr;
+    scratch.pulse_spec = spec;
+    scratch.pulse_valid = true;
+    ++scratch.pulse_generation;
+    return true;
+}
+
+inline size_t pulse_tail_extra(const PulseSpec& spec)
+{
+    if (spec.shape == PulseShape::Legacy)
+        return 0;
+    return pulse_n_taps(spec) - demod::kQm35SamplesPerChip;
+}
+
 inline size_t payload_bpm_symbols(size_t psdu_bytes)
 {
     if (psdu_bytes == 0)
@@ -189,14 +419,18 @@ inline size_t payload_bpm_symbols(size_t psdu_bytes)
 inline size_t packet_samples_998p4(size_t sync_repetitions,
                                    size_t n_sfd,
                                    size_t psdu_bytes,
-                                   bool insert_sts = false)
+                                   bool insert_sts = false,
+                                   const PulseSpec* pulse = nullptr)
 {
     const size_t nsym = payload_bpm_symbols(psdu_bytes);
     const size_t sts = insert_sts ? kStsSamplesBprf : 0;
-    return sync_repetitions * demod::kQm35SamplesPerSymbol +
-           n_sfd * demod::kQm35SamplesPerSymbol + sts +
-           kPhrSymbols * kPhrChipsPerSymbol * demod::kQm35SamplesPerChip +
-           nsym * kPayloadChipsPerSymbol * demod::kQm35SamplesPerChip;
+    size_t n = sync_repetitions * demod::kQm35SamplesPerSymbol +
+               n_sfd * demod::kQm35SamplesPerSymbol + sts +
+               kPhrSymbols * kPhrChipsPerSymbol * demod::kQm35SamplesPerChip +
+               nsym * kPayloadChipsPerSymbol * demod::kQm35SamplesPerChip;
+    if (pulse)
+        n += pulse_tail_extra(*pulse);
+    return n;
 }
 
 inline bool sfd_mode_is_4z(const char* sfd_mode)
@@ -404,15 +638,20 @@ inline void fill_sts_bprf(float* chips)
     }
 }
 
-inline void add_shaped_chip(float* y, size_t n_out, size_t chip, float amp)
+inline void add_shaped_chip(float* y,
+                            size_t n_out,
+                            size_t chip,
+                            float amp,
+                            const float* taps,
+                            size_t n_taps)
 {
     const size_t n0 = chip * demod::kQm35SamplesPerChip;
     if (n0 >= n_out || amp == 0.f)
         return;
-    const size_t nmax = std::min(n_out, n0 + kPulseTaps);
+    const size_t nmax = std::min(n_out, n0 + n_taps);
     float* dst = y + n0;
     for (size_t k = 0; k < nmax - n0; ++k)
-        dst[k] += amp * kPulse48[k];
+        dst[k] += amp * taps[k];
 }
 
 inline bool sfd_lookup(const char* mode, const int8_t*& data, size_t& n)
@@ -514,7 +753,11 @@ inline bool fill_bprf_spread(int8_t* out,
     return true;
 }
 
-inline void add_sts_pulses(float* y, size_t n_out, size_t chip0)
+inline void add_sts_pulses(float* y,
+                           size_t n_out,
+                           size_t chip0,
+                           const float* taps,
+                           size_t n_taps)
 {
     size_t off = chip0 + kStsGapChips;
     for (size_t blk = 0; blk < kStsDrbgBlocksBprf; ++blk) {
@@ -522,7 +765,7 @@ inline void add_sts_pulses(float* y, size_t n_out, size_t chip0)
             const uint8_t v = kStsDrbgBprf[blk][byte];
             for (int b = 7; b >= 0; --b) {
                 const float amp = ((v >> b) & 1) ? -1.f : 1.f;
-                add_shaped_chip(y, n_out, off, amp);
+                add_shaped_chip(y, n_out, off, amp, taps, n_taps);
                 off += kStsSpreadingBprf;
             }
         }
@@ -533,7 +776,9 @@ inline void add_sync_symbol(float* y,
                             size_t n_out,
                             size_t symbol_index,
                             int8_t polarity,
-                            const int8_t* pc)
+                            const int8_t* pc,
+                            const float* taps,
+                            size_t n_taps)
 {
     if (polarity == 0)
         return;
@@ -542,7 +787,7 @@ inline void add_sync_symbol(float* y,
         if (pc[c] == 0)
             continue;
         add_shaped_chip(y, n_out, chip0 + c * demod::kQm35SpreadingFactor,
-                        static_cast<float>(polarity * pc[c]));
+                        static_cast<float>(polarity * pc[c]), taps, n_taps);
     }
 }
 
@@ -554,7 +799,9 @@ inline void bpm_add_pulses(float* y,
                            size_t cps,
                            const int8_t* spread,
                            const int8_t* g0,
-                           const int8_t* g1)
+                           const int8_t* g1,
+                           const float* taps,
+                           size_t n_taps)
 {
     for (size_t s = 0; s < nsym; ++s) {
         const int8_t* sp = spread + s * cpb;
@@ -563,7 +810,8 @@ inline void bpm_add_pulses(float* y,
         const size_t pos = chip0 + s * cps + half + hop * cpb;
         const float pol = (g1[s] & 1) ? -1.f : 1.f;
         for (size_t c = 0; c < cpb; ++c)
-            add_shaped_chip(y, n_out, pos + c, pol * static_cast<float>(sp[c]));
+            add_shaped_chip(y, n_out, pos + c, pol * static_cast<float>(sp[c]),
+                            taps, n_taps);
     }
 }
 
@@ -592,6 +840,11 @@ inline bool prefix_matches(const HrpPrefixCache& p,
         p.sync_repetitions != cfg.sync_repetitions ||
         p.insert_sts != cfg.insert_sts || p.n_sfd != n_sfd)
         return false;
+    if (p.pulse.shape != cfg.pulse.shape ||
+        p.pulse.gaussian_sigma_ns != cfg.pulse.gaussian_sigma_ns ||
+        p.pulse.blackman_bw_mhz != cfg.pulse.blackman_bw_mhz ||
+        p.pulse.external_n_taps != cfg.pulse.external_n_taps)
+        return false;
     const char* mode = cfg.sfd_mode ? cfg.sfd_mode : "";
     return std::strcmp(p.sfd_mode, mode) == 0;
 }
@@ -599,9 +852,12 @@ inline bool prefix_matches(const HrpPrefixCache& p,
 inline bool ensure_prefix(const HrpModConfig& cfg,
                           const int8_t* sfd,
                           size_t n_sfd,
-                          HrpModScratch& scratch)
+                          HrpModScratch& scratch,
+                          const float* taps,
+                          size_t n_taps)
 {
-    if (prefix_matches(scratch.prefix, cfg, n_sfd))
+    if (prefix_matches(scratch.prefix, cfg, n_sfd) &&
+        scratch.prefix.pulse_generation == scratch.pulse_generation)
         return true;
     const int8_t* pc = demod::GetPreambleCode(cfg.code_index);
     const size_t sync_chips =
@@ -610,22 +866,25 @@ inline bool ensure_prefix(const HrpModConfig& cfg,
     const size_t sts_chips = cfg.insert_sts ? kStsChipsBprf : 0;
     const size_t prefix_samples =
         (sync_chips + sfd_chips + sts_chips) * demod::kQm35SamplesPerChip;
-    const size_t shaped = prefix_samples + kPulseTaps;
+    const size_t shaped = prefix_samples + n_taps;
     if (shaped == 0 || shaped > kMaxHrpTxSamples)
         return false;
     scratch.prefix.samples.resize(shaped);
     std::memset(scratch.prefix.samples.data(), 0, shaped * sizeof(float));
     float* y = scratch.prefix.samples.data();
     for (size_t r = 0; r < cfg.sync_repetitions; ++r)
-        add_sync_symbol(y, shaped, r, 1, pc);
+        add_sync_symbol(y, shaped, r, 1, pc, taps, n_taps);
     for (size_t s = 0; s < n_sfd; ++s)
-        add_sync_symbol(y, shaped, cfg.sync_repetitions + s, sfd[s], pc);
+        add_sync_symbol(y, shaped, cfg.sync_repetitions + s, sfd[s], pc,
+                        taps, n_taps);
     if (cfg.insert_sts)
-        add_sts_pulses(y, shaped, sync_chips + sfd_chips);
+        add_sts_pulses(y, shaped, sync_chips + sfd_chips, taps, n_taps);
     scratch.prefix.valid = true;
     scratch.prefix.code_index = cfg.code_index;
     scratch.prefix.sync_repetitions = cfg.sync_repetitions;
     scratch.prefix.insert_sts = cfg.insert_sts;
+    scratch.prefix.pulse = cfg.pulse;
+    scratch.prefix.pulse_generation = scratch.pulse_generation;
     scratch.prefix.n_sfd = n_sfd;
     scratch.prefix.n_samples = shaped;
     copy_sfd_key(scratch.prefix.sfd_mode, sizeof(scratch.prefix.sfd_mode),
@@ -656,15 +915,25 @@ inline bool modulate_one(const uint8_t* psdu,
         return false;
     if (!(cfg.peak_amplitude > 0.f) || !std::isfinite(cfg.peak_amplitude))
         return false;
+    if (!pulse_spec_valid(cfg.pulse))
+        return false;
 
     const int8_t* sfd = nullptr;
     size_t n_sfd = 0;
     if (!detail::sfd_lookup(cfg.sfd_mode, sfd, n_sfd) || n_sfd == 0)
         return false;
 
-    const size_t n_out = packet_samples_998p4(
+    if (!ensure_pulse(cfg, scratch))
+        return false;
+    const float* taps = scratch.pulse_data();
+    const size_t n_taps = scratch.pulse_len();
+
+    const size_t n_base = packet_samples_998p4(
         cfg.sync_repetitions, n_sfd, psdu_len, cfg.insert_sts);
-    if (n_out == 0 || n_out > out_cap || n_out > kMaxHrpTxSamples)
+    const size_t n_out = packet_samples_998p4(
+        cfg.sync_repetitions, n_sfd, psdu_len, cfg.insert_sts, &cfg.pulse);
+    if (n_base == 0 || n_out == 0 || n_out > out_cap ||
+        n_out > kMaxHrpTxSamples)
         return false;
 
     detail::bytes_to_lsb_bits(psdu, psdu_len, scratch.psdu_bits);
@@ -700,10 +969,12 @@ inline bool modulate_one(const uint8_t* psdu,
     const size_t pay_chips = nsym * kPayloadChipsPerSymbol;
     const size_t n_chips =
         sync_chips + sfd_chips + sts_chips + phr_chips + pay_chips;
-    if (n_chips * demod::kQm35SamplesPerChip != n_out)
+    if (n_chips * demod::kQm35SamplesPerChip != n_base)
+        return false;
+    if (n_base + pulse_tail_extra(cfg.pulse) != n_out)
         return false;
 
-    if (!detail::ensure_prefix(cfg, sfd, n_sfd, scratch))
+    if (!detail::ensure_prefix(cfg, sfd, n_sfd, scratch, taps, n_taps))
         return false;
     const size_t prefix_n =
         std::min(scratch.prefix.n_samples, n_out);
@@ -735,7 +1006,7 @@ inline bool modulate_one(const uint8_t* psdu,
     detail::bpm_add_pulses(y, n_out, phr_chip0, kPhrSymbols,
                            kPhrChipsPerBurst, kPhrChipsPerSymbol,
                            scratch.spread.data(), scratch.g0.data(),
-                           scratch.g1.data());
+                           scratch.g1.data(), taps, n_taps);
     if (nsym > 0) {
         const size_t n_spread = kPayloadChipsPerBurst * nsym;
         scratch.spread.resize(n_spread);
@@ -746,7 +1017,7 @@ inline bool modulate_one(const uint8_t* psdu,
                                kPayloadChipsPerBurst, kPayloadChipsPerSymbol,
                                scratch.spread.data(),
                                scratch.g0.data() + kPhrSymbols,
-                               scratch.g1.data() + kPhrSymbols);
+                               scratch.g1.data() + kPhrSymbols, taps, n_taps);
     }
 
     const float peak = detail::abs_peak(y, n_out);

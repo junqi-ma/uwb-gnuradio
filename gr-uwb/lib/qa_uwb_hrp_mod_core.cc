@@ -29,6 +29,8 @@ using gr::uwb::mod::HrpModConfig;
 using gr::uwb::mod::HrpModScratch;
 using gr::uwb::mod::modulate_one;
 using gr::uwb::mod::packet_samples_998p4;
+using gr::uwb::mod::PulseShape;
+using gr::uwb::mod::PulseSpec;
 
 #ifdef UWB_TESTDATA_DIR
 const char* kTestdata = UWB_TESTDATA_DIR;
@@ -85,6 +87,22 @@ bool load_i8(const std::string& path, std::vector<int8_t>& out)
     return static_cast<bool>(f);
 }
 
+bool load_f32(const std::string& path, std::vector<float>& out)
+{
+    std::ifstream f(path, std::ios::binary);
+    if (!f)
+        return false;
+    f.seekg(0, std::ios::end);
+    const auto bytes = static_cast<size_t>(f.tellg());
+    f.seekg(0);
+    if (bytes == 0 || bytes % sizeof(float) != 0)
+        return false;
+    out.resize(bytes / sizeof(float));
+    f.read(reinterpret_cast<char*>(out.data()),
+           static_cast<std::streamsize>(bytes));
+    return static_cast<bool>(f);
+}
+
 std::vector<gr_complex> load_template()
 {
     std::vector<gr_complex> tmpl;
@@ -111,6 +129,217 @@ double l2_rel(const std::vector<gr_complex>& a, const gr_complex* b, size_t n)
 BOOST_AUTO_TEST_CASE(test_hrp_mod_packet_length_p1)
 {
     BOOST_CHECK_EQUAL(packet_samples_998p4(64, 8, 127), size_t(249280));
+}
+
+BOOST_AUTO_TEST_CASE(test_hrp_mod_gaussian_live_template_demod)
+{
+    auto bytes = gr::uwb::mod::make_random_psdu(8, 4242u, true);
+    HrpModConfig cfg;
+    cfg.sfd_mode = "4z2";
+    cfg.pulse.shape = PulseShape::Gaussian;
+    cfg.pulse.gaussian_sigma_ns = 2.5f;
+    HrpModScratch scratch;
+    const size_t want = packet_samples_998p4(64, 8, bytes.size(), false,
+                                             &cfg.pulse);
+    scratch.reserve(bytes.size(), want);
+    std::vector<gr_complex> tx(want);
+    size_t n = 0;
+    BOOST_REQUIRE(modulate_one(bytes.data(), bytes.size(), cfg, scratch,
+                               tx.data(), tx.size(), n));
+
+    std::vector<gr_complex> tmpl(tx.begin(), tx.begin() + 1016);
+    double e = 0.0;
+    for (const auto& z : tmpl)
+        e += static_cast<double>(z.real()) * z.real() +
+             static_cast<double>(z.imag()) * z.imag();
+    const float inv = (e > 0.0) ? static_cast<float>(1.0 / std::sqrt(e)) : 1.f;
+    for (auto& z : tmpl)
+        z *= inv;
+
+    const size_t t0 = 9984;
+    std::vector<gr_complex> iq(t0 + n + 8192, gr_complex(0.f, 0.f));
+    std::copy(tx.begin(), tx.end(), iq.begin() + static_cast<std::ptrdiff_t>(t0));
+    auto prof = Qm35825Profile::Default();
+    prof.sfd_mode = "4z2";
+    gr::uwb::demod::core::DemodScratch dscratch;
+    dscratch.reserve(iq.size());
+    const auto res = demodulate_one(iq.data(), iq.size(), prof, 1,
+                                    static_cast<int64_t>(t0), 0, tmpl, dscratch);
+    BOOST_REQUIRE_MESSAGE(res.status == gr::uwb::demod::DemodStatus::Success,
+                          "gaussian live-template demod status=" +
+                              std::to_string(static_cast<int>(res.status)));
+    BOOST_CHECK(res.payload.fcs_pass);
+    BOOST_REQUIRE_EQUAL(res.payload.bytes.size(), bytes.size());
+    BOOST_CHECK_EQUAL_COLLECTIONS(res.payload.bytes.begin(),
+                                  res.payload.bytes.end(),
+                                  bytes.begin(), bytes.end());
+}
+
+void run_external_live_template_demod(const std::string& rel_path,
+                                      size_t n_taps, size_t center,
+                                      size_t tail_extra, uint32_t seed)
+{
+    std::vector<float> taps;
+    BOOST_REQUIRE(load_f32(std::string(kTestdata) + rel_path, taps));
+    BOOST_REQUIRE_EQUAL(taps.size(), n_taps);
+
+    auto bytes = gr::uwb::mod::make_random_psdu(8, seed, true);
+    HrpModConfig cfg;
+    cfg.sfd_mode = "4z2";
+    cfg.pulse.shape = PulseShape::External;
+    cfg.pulse.external_n_taps = taps.size();
+    cfg.pulse.external_center = center;
+    cfg.external_taps = taps;
+    HrpModScratch scratch;
+    const size_t want = packet_samples_998p4(64, 8, bytes.size(), false,
+                                             &cfg.pulse);
+    BOOST_CHECK_EQUAL(want,
+                      packet_samples_998p4(64, 8, bytes.size()) + tail_extra);
+    scratch.reserve(bytes.size(), want);
+    std::vector<gr_complex> tx(want);
+    size_t n = 0;
+    BOOST_REQUIRE(modulate_one(bytes.data(), bytes.size(), cfg, scratch,
+                               tx.data(), tx.size(), n));
+
+    std::vector<gr_complex> tmpl(tx.begin(), tx.begin() + 1016);
+    double e = 0.0;
+    for (const auto& z : tmpl)
+        e += static_cast<double>(z.real()) * z.real() +
+             static_cast<double>(z.imag()) * z.imag();
+    const float inv = (e > 0.0) ? static_cast<float>(1.0 / std::sqrt(e)) : 1.f;
+    for (auto& z : tmpl)
+        z *= inv;
+
+    const size_t t0 = 9984;
+    std::vector<gr_complex> iq(t0 + n + 8192, gr_complex(0.f, 0.f));
+    std::copy(tx.begin(), tx.end(), iq.begin() + static_cast<std::ptrdiff_t>(t0));
+    auto prof = Qm35825Profile::Default();
+    prof.sfd_mode = "4z2";
+    gr::uwb::demod::core::DemodScratch dscratch;
+    dscratch.reserve(iq.size());
+    const auto res = demodulate_one(iq.data(), iq.size(), prof, 1,
+                                    static_cast<int64_t>(t0), 0, tmpl, dscratch);
+    BOOST_REQUIRE_MESSAGE(res.status == gr::uwb::demod::DemodStatus::Success,
+                          "external live-template demod status=" +
+                              std::to_string(static_cast<int>(res.status)));
+    BOOST_CHECK(res.payload.fcs_pass);
+    BOOST_REQUIRE_EQUAL(res.payload.bytes.size(), bytes.size());
+    BOOST_CHECK_EQUAL_COLLECTIONS(res.payload.bytes.begin(),
+                                  res.payload.bytes.end(),
+                                  bytes.begin(), bytes.end());
+}
+
+BOOST_AUTO_TEST_CASE(test_hrp_mod_external_live_template_demod)
+{
+    run_external_live_template_demod(
+        "/uwb_hrp_tx/pulse_minphase_rc100_215.f32", 257, 4, 255, 777u);
+}
+
+BOOST_AUTO_TEST_CASE(test_hrp_mod_minphase_live_template_demod)
+{
+    run_external_live_template_demod(
+        "/uwb_hrp_tx/pulse_minphase_rc160_240.f32", 1025, 4, 1023, 778u);
+}
+
+BOOST_AUTO_TEST_CASE(test_hrp_mod_external_default_live_template_demod)
+{
+    run_external_live_template_demod(
+        "/uwb_hrp_tx/pulse_trunc_linear_rc183_240.f32", 1025, 32, 1023,
+        779u);
+}
+
+BOOST_AUTO_TEST_CASE(test_hrp_mod_pulse_shape_spectrum)
+{
+    auto db_at = [](const PulseSpec& spec, double f_hz) {
+        const std::vector<float> taps = gr::uwb::mod::make_pulse_taps(spec);
+        BOOST_REQUIRE(!taps.empty());
+        const double dt = 1.0 / 998.4e6;
+        double re = 0.0, im = 0.0, dc = 0.0;
+        for (size_t i = 0; i < taps.size(); ++i) {
+            const double ph = 2.0 * M_PI * f_hz * static_cast<double>(i) * dt;
+            re += taps[i] * std::cos(ph);
+            im += taps[i] * std::sin(ph);
+            dc += static_cast<double>(taps[i]);
+        }
+        return 20.0 * std::log10(std::sqrt(re * re + im * im) /
+                                 (std::fabs(dc) + 1e-30));
+    };
+
+    PulseSpec legacy;
+    PulseSpec gauss;
+    gauss.shape = PulseShape::Gaussian;
+    gauss.gaussian_sigma_ns = 2.5f;
+    PulseSpec black;
+    black.shape = PulseShape::Blackman;
+    black.blackman_bw_mhz = 200.f;
+
+    const double f_nyq_native = 245.76e6;
+    const double legacy_db = db_at(legacy, f_nyq_native);
+    const double gauss_db = db_at(gauss, f_nyq_native);
+    const double black_db = db_at(black, f_nyq_native);
+    BOOST_TEST_MESSAGE("spectrum at 245.76 MHz: legacy=" << legacy_db
+                       << " dB gaussian=" << gauss_db << " dB blackman="
+                       << black_db << " dB");
+    BOOST_CHECK_GT(legacy_db, -6.0);
+    BOOST_CHECK_LT(gauss_db, legacy_db - 40.0);
+    BOOST_CHECK_LT(black_db, legacy_db - 20.0);
+}
+
+BOOST_AUTO_TEST_CASE(test_hrp_mod_pulse_shape_packet_lengths)
+{
+    auto bytes = gr::uwb::mod::make_random_psdu(8, 5150u, true);
+    HrpModConfig cfg;
+    cfg.sfd_mode = "4z2";
+    const size_t base = packet_samples_998p4(64, 8, bytes.size());
+
+    cfg.pulse.shape = PulseShape::Gaussian;
+    const size_t want_g = packet_samples_998p4(64, 8, bytes.size(), false,
+                                               &cfg.pulse);
+    BOOST_CHECK_EQUAL(want_g, base + 47);
+    HrpModScratch scratch;
+    scratch.reserve(bytes.size(), want_g);
+    std::vector<gr_complex> tx(want_g);
+    size_t n = 0;
+    BOOST_REQUIRE(modulate_one(bytes.data(), bytes.size(), cfg, scratch,
+                               tx.data(), tx.size(), n));
+    BOOST_CHECK_EQUAL(n, want_g);
+    float peak = 0.f;
+    for (const auto& z : tx)
+        peak = std::max(peak, std::fabs(z.real()));
+    BOOST_CHECK_GT(peak, 0.79f);
+
+    cfg.pulse.shape = PulseShape::Blackman;
+    const size_t want_b = packet_samples_998p4(64, 8, bytes.size(), false,
+                                               &cfg.pulse);
+    BOOST_CHECK_EQUAL(want_b, base + 127);
+    scratch.reserve(bytes.size(), want_b);
+    std::vector<gr_complex> txb(want_b);
+    size_t nb = 0;
+    BOOST_REQUIRE(modulate_one(bytes.data(), bytes.size(), cfg, scratch,
+                               txb.data(), txb.size(), nb));
+    BOOST_CHECK_EQUAL(nb, want_b);
+}
+
+BOOST_AUTO_TEST_CASE(test_hrp_mod_pulse_spec_rejects_invalid)
+{
+    PulseSpec bad;
+    bad.shape = PulseShape::Gaussian;
+    bad.gaussian_sigma_ns = 0.f;
+    BOOST_CHECK(gr::uwb::mod::make_pulse_taps(bad).empty());
+    bad.gaussian_sigma_ns = 2.5f;
+    bad.shape = PulseShape::Blackman;
+    bad.blackman_bw_mhz = 600.f;
+    BOOST_CHECK(gr::uwb::mod::make_pulse_taps(bad).empty());
+
+    HrpModConfig cfg;
+    cfg.sfd_mode = "4z2";
+    cfg.pulse = bad;
+    HrpModScratch scratch;
+    scratch.reserve(2, 4096);
+    std::vector<gr_complex> tx(4096);
+    const uint8_t b[2] = { 1, 2 };
+    size_t n = 0;
+    BOOST_CHECK(!modulate_one(b, 2, cfg, scratch, tx.data(), tx.size(), n));
 }
 
 BOOST_AUTO_TEST_CASE(test_hrp_mod_rs_matches_golden)

@@ -43,7 +43,11 @@ public:
                      double pri_s = defaults::kQm35PacketIntervalS,
                      bool auto_emit = false,
                      bool insert_sts = false,
-                     bool append_fcs = false);
+                     bool append_fcs = false,
+                     const std::string& pulse_shape = "legacy",
+                     float pulse_sigma_ns = 2.5f,
+                     float pulse_bw_mhz = 200.0f,
+                     const std::string& pulse_taps_file = "");
 
     ~UwbHrpPacketSource() override;
 
@@ -55,6 +59,15 @@ public:
     bool auto_emit() const { return d_auto_emit_; }
     bool insert_sts() const { return d_cfg_.insert_sts; }
     bool append_fcs() const { return d_append_fcs_; }
+    const std::string& pulse_shape() const { return d_pulse_shape_; }
+    const std::string& pulse_taps_file() const { return d_pulse_taps_file_; }
+    float pulse_sigma_ns() const { return d_cfg_.pulse.gaussian_sigma_ns; }
+    float pulse_bw_mhz() const { return d_cfg_.pulse.blackman_bw_mhz; }
+    size_t pulse_taps() const { return mod::pulse_n_taps(d_cfg_.pulse); }
+    size_t pulse_center_taps() const
+    {
+        return mod::pulse_center_tap(d_cfg_.pulse);
+    }
     size_t num_samples() const { return d_num_samples_; }
     const std::vector<gr_complex>& samples() const { return d_fc32_; }
     const std::vector<uint8_t>& psdu() const { return d_psdu_; }
@@ -82,16 +95,23 @@ public:
                        double pri_s,
                        bool auto_emit,
                        bool insert_sts,
-                       bool append_fcs);
+                       bool append_fcs,
+                       const std::string& pulse_shape,
+                       float pulse_sigma_ns,
+                       float pulse_bw_mhz,
+                       const std::string& pulse_taps_file);
 
 private:
     void handle_emit(pmt::pmt_t msg);
     void publish_tx(uint64_t pulse_id);
     void publish_status(const std::string& event, pmt::pmt_t extra = pmt::PMT_NIL);
     bool rebuild();
+    void load_pulse_taps(const std::string& path);
 
     std::vector<uint8_t> d_psdu_;
     std::string d_sfd_mode_;
+    std::string d_pulse_shape_;
+    std::string d_pulse_taps_file_;
     mod::HrpModConfig d_cfg_;
     double d_pri_s_;
     bool d_auto_emit_;

@@ -659,7 +659,11 @@ void bind_hrp_packet_source(py::module& m)
              py::arg("pri_s") = gr::uwb::defaults::kQm35PacketIntervalS,
              py::arg("auto_emit") = false,
              py::arg("insert_sts") = false,
-             py::arg("append_fcs") = false)
+             py::arg("append_fcs") = false,
+             py::arg("pulse_shape") = std::string("legacy"),
+             py::arg("pulse_sigma_ns") = 2.5f,
+             py::arg("pulse_bw_mhz") = 200.0f,
+             py::arg("pulse_taps_file") = std::string(""))
         .def("sync_repetitions", &Blk::sync_repetitions)
         .def("sfd_mode", &Blk::sfd_mode)
         .def("code_index", &Blk::code_index)
@@ -668,6 +672,12 @@ void bind_hrp_packet_source(py::module& m)
         .def("auto_emit", &Blk::auto_emit)
         .def("insert_sts", &Blk::insert_sts)
         .def("append_fcs", &Blk::append_fcs)
+        .def("pulse_shape", &Blk::pulse_shape)
+        .def("pulse_taps_file", &Blk::pulse_taps_file)
+        .def("pulse_sigma_ns", &Blk::pulse_sigma_ns)
+        .def("pulse_bw_mhz", &Blk::pulse_bw_mhz)
+        .def("pulse_taps", &Blk::pulse_taps)
+        .def("pulse_center_taps", &Blk::pulse_center_taps)
         .def("num_samples", &Blk::num_samples)
         .def("samples", &Blk::samples)
         .def("psdu", &Blk::psdu)
@@ -816,4 +826,28 @@ PYBIND11_MODULE(uwb_python, m)
     bind_loopback_echo(m);
     bind_radar_cir_estimator(m);
     bind_cir_writer(m);
+
+    m.def(
+        "make_pulse_taps",
+        [](const std::string& shape, float sigma_ns, float bw_mhz) {
+            gr::uwb::mod::PulseSpec spec;
+            if (!gr::uwb::mod::parse_pulse_shape(shape, spec.shape))
+                throw std::invalid_argument(
+                    "pulse_shape must be legacy|gaussian|blackman");
+            spec.gaussian_sigma_ns = sigma_ns;
+            spec.blackman_bw_mhz = bw_mhz;
+            return gr::uwb::mod::make_pulse_taps(spec);
+        },
+        py::arg("pulse_shape") = std::string("gaussian"),
+        py::arg("pulse_sigma_ns") = 2.5f,
+        py::arg("pulse_bw_mhz") = 200.0f);
+    m.def("pulse_center_tap",
+          [](const std::string& shape) {
+              gr::uwb::mod::PulseSpec spec;
+              if (!gr::uwb::mod::parse_pulse_shape(shape, spec.shape))
+                  throw std::invalid_argument(
+                      "pulse_shape must be legacy|gaussian|blackman");
+              return gr::uwb::mod::pulse_center_tap(spec);
+          },
+          py::arg("pulse_shape"));
 }

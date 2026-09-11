@@ -14,6 +14,8 @@ import os
 import sys
 import time
 
+import numpy as np
+
 from gnuradio import blocks, gr, network
 import pmt
 
@@ -69,6 +71,16 @@ def parse_args():
     p.add_argument("--psdu-hex",
                    default="47261DF66F4C1BEF45C8F77CE77BD7D8C4D180FB1221")
     p.add_argument("--template", default="")
+    p.add_argument("--pulse-shape", default="legacy",
+                   choices=["legacy", "gaussian", "blackman", "external",
+                            "minphase", "linear"],
+                   help="legacy keeps the frozen testdata SYNC template; "
+                        "other shapes build a live template from the TX")
+    p.add_argument("--pulse-sigma-ns", type=float, default=2.5)
+    p.add_argument("--pulse-bw-mhz", type=float, default=200.0)
+    p.add_argument("--pulse-taps", default="",
+                   help="Raw float32 causal FIR taps at 998.4 MS/s; overrides "
+                        "--pulse-shape and builds a live SYNC template")
     return p.parse_args()
 
 
@@ -76,13 +88,40 @@ def main():
     a = parse_args()
     repo = find_repo_root()
     os.makedirs(a.output, exist_ok=True)
-    tmpl = a.template or os.path.join(
-        repo, "testdata", "uwb_radar", "sync_template_998p4.cf32")
+
+    if a.pulse_taps:
+        pulse_shape, pulse_taps = "external", a.pulse_taps
+    elif a.pulse_shape == "linear":
+        pulse_shape = "external"
+        pulse_taps = os.path.join(repo, "testdata", "uwb_hrp_tx",
+                                  "pulse_trunc_linear_rc183_240.f32")
+    elif a.pulse_shape == "minphase":
+        pulse_shape = "external"
+        pulse_taps = os.path.join(repo, "testdata", "uwb_hrp_tx",
+                                  "pulse_minphase_rc160_240.f32")
+    else:
+        pulse_shape, pulse_taps = a.pulse_shape, ""
+    src = uwb.hrp_packet_source(hex_to_bytes(a.psdu_hex), a.sync_reps, "4z2",
+                                9, 0.8, a.pri_s, False, True, False,
+                                pulse_shape, a.pulse_sigma_ns,
+                                a.pulse_bw_mhz, pulse_taps)
+    if a.template:
+        tmpl = a.template
+    elif src.pulse_shape() == "legacy":
+        tmpl = os.path.join(repo, "testdata", "uwb_radar",
+                            "sync_template_998p4.cf32")
+    else:
+        tmpl = os.path.join(a.output,
+                            "sync_template_live_%s.cf32" % src.pulse_shape())
+        _arr = np.array(src.samples(), dtype=np.complex64)
+        _off = max(0, int(src.pulse_center_taps()) - 4)
+        _arr[_off:_off + 1016].tofile(tmpl)
     if not os.path.isfile(tmpl):
         raise SystemExit("missing SYNC template %s" % tmpl)
 
-    src = uwb.hrp_packet_source(hex_to_bytes(a.psdu_hex), a.sync_reps, "4z2",
-                                9, 0.8, a.pri_s, False, True, False)
+    print("pulse_shape=%s pulse_taps=%d pulse_center=%d" % (
+        src.pulse_shape(), src.pulse_taps(), src.pulse_center_taps()),
+        flush=True)
     echo = uwb.loopback_echo(1997, 4096, (251.5, 1200.0),
                              (complex(0.8), complex(0.35)),
                              0.0, 1, 4194304, 4194304, 0, 0.0, a.pri_s)

@@ -14,6 +14,8 @@
 #include <gnuradio/uwb/uwb_phy_profile.h>
 #include <gnuradio/uwb/uwb_radar_pdu_meta.h>
 
+#include <cmath>
+#include <fstream>
 #include <stdexcept>
 
 namespace gr {
@@ -38,11 +40,16 @@ UwbHrpPacketSource::make(const std::vector<uint8_t>& psdu,
                          double pri_s,
                          bool auto_emit,
                          bool insert_sts,
-                         bool append_fcs)
+                         bool append_fcs,
+                         const std::string& pulse_shape,
+                         float pulse_sigma_ns,
+                         float pulse_bw_mhz,
+                         const std::string& pulse_taps_file)
 {
     return gnuradio::make_block_sptr<UwbHrpPacketSource>(
         psdu, sync_repetitions, sfd_mode, code_index, peak_amplitude, pri_s,
-        auto_emit, insert_sts, append_fcs);
+        auto_emit, insert_sts, append_fcs, pulse_shape, pulse_sigma_ns,
+        pulse_bw_mhz, pulse_taps_file);
 }
 
 UwbHrpPacketSource::UwbHrpPacketSource(const std::vector<uint8_t>& psdu,
@@ -53,12 +60,18 @@ UwbHrpPacketSource::UwbHrpPacketSource(const std::vector<uint8_t>& psdu,
                                        double pri_s,
                                        bool auto_emit,
                                        bool insert_sts,
-                                       bool append_fcs)
+                                       bool append_fcs,
+                                       const std::string& pulse_shape,
+                                       float pulse_sigma_ns,
+                                       float pulse_bw_mhz,
+                                       const std::string& pulse_taps_file)
     : gr::block("uwb_hrp_packet_source",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
       d_psdu_(psdu),
       d_sfd_mode_(sfd_mode),
+      d_pulse_shape_(pulse_shape),
+      d_pulse_taps_file_(pulse_taps_file),
       d_pri_s_(pri_s),
       d_auto_emit_(auto_emit),
       d_append_fcs_(append_fcs)
@@ -69,6 +82,31 @@ UwbHrpPacketSource::UwbHrpPacketSource(const std::vector<uint8_t>& psdu,
     d_cfg_.insert_sts = insert_sts;
     d_cfg_.peak_amplitude = peak_amplitude;
     d_cfg_.ranging = false;
+    d_cfg_.pulse.shape = mod::PulseShape::Legacy;
+    d_cfg_.pulse.gaussian_sigma_ns = pulse_sigma_ns;
+    d_cfg_.pulse.blackman_bw_mhz = pulse_bw_mhz;
+    if (!mod::parse_pulse_shape(d_pulse_shape_, d_cfg_.pulse.shape)) {
+        throw std::invalid_argument(
+            "UwbHrpPacketSource: pulse_shape must be "
+            "legacy|gaussian|blackman|external");
+    }
+    if (!pulse_taps_file.empty())
+        d_cfg_.pulse.shape = mod::PulseShape::External;
+    if (d_cfg_.pulse.shape == mod::PulseShape::External) {
+        if (pulse_taps_file.empty()) {
+            throw std::invalid_argument(
+                "UwbHrpPacketSource: external pulse requires a taps file");
+        }
+        load_pulse_taps(pulse_taps_file);
+        d_cfg_.pulse.shape = mod::PulseShape::External;
+        d_pulse_shape_ = "external";
+    } else {
+        d_pulse_shape_ = mod::pulse_shape_name(d_cfg_.pulse.shape);
+    }
+    if (!mod::pulse_spec_valid(d_cfg_.pulse)) {
+        throw std::invalid_argument(
+            "UwbHrpPacketSource: invalid pulse shaping parameters");
+    }
 
     if (append_fcs) {
         if (d_psdu_.size() + 2 > radar_meta::kMaxPsduBytes) {
@@ -124,6 +162,59 @@ UwbHrpPacketSource::UwbHrpPacketSource(const std::vector<uint8_t>& psdu,
 
 UwbHrpPacketSource::~UwbHrpPacketSource() = default;
 
+void
+UwbHrpPacketSource::load_pulse_taps(const std::string& path)
+{
+    namespace m = gr::uwb::mod;
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        throw std::invalid_argument(
+            "UwbHrpPacketSource: cannot open pulse taps file " + path);
+    }
+    f.seekg(0, std::ios::end);
+    const auto bytes = static_cast<std::streamsize>(f.tellg());
+    f.seekg(0);
+    if (bytes < 2 * static_cast<std::streamsize>(sizeof(float)) ||
+        bytes % static_cast<std::streamsize>(sizeof(float)) != 0 ||
+        bytes / static_cast<std::streamsize>(sizeof(float)) >
+            static_cast<std::streamsize>(m::kMaxExternalPulseTaps)) {
+        throw std::invalid_argument(
+            "UwbHrpPacketSource: pulse taps file must hold 2.." +
+            std::to_string(m::kMaxExternalPulseTaps) + " float32 taps: " +
+            path);
+    }
+    const size_t n = static_cast<size_t>(bytes / sizeof(float));
+    std::vector<float> taps(n, 0.f);
+    f.read(reinterpret_cast<char*>(taps.data()),
+           static_cast<std::streamsize>(n * sizeof(float)));
+    if (!f) {
+        throw std::invalid_argument(
+            "UwbHrpPacketSource: short read on pulse taps file " + path);
+    }
+    double energy = 0.0;
+    size_t center = 0;
+    float peak = 0.f;
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(taps[i])) {
+            throw std::invalid_argument(
+                "UwbHrpPacketSource: non-finite tap in " + path);
+        }
+        const float a = std::fabs(taps[i]);
+        if (a > peak) {
+            peak = a;
+            center = i;
+        }
+        energy += static_cast<double>(taps[i]) * taps[i];
+    }
+    if (!(peak > 0.f) || !(energy > 0.0)) {
+        throw std::invalid_argument(
+            "UwbHrpPacketSource: all-zero pulse taps in " + path);
+    }
+    d_cfg_.external_taps.swap(taps);
+    d_cfg_.pulse.external_n_taps = n;
+    d_cfg_.pulse.external_center = center;
+}
+
 bool
 UwbHrpPacketSource::rebuild()
 {
@@ -133,7 +224,7 @@ UwbHrpPacketSource::rebuild()
         return false;
     const size_t n_want = mod::packet_samples_998p4(
         d_cfg_.sync_repetitions, sfd.size(), d_psdu_.size(),
-        d_cfg_.insert_sts);
+        d_cfg_.insert_sts, &d_cfg_.pulse);
     d_fc32_.reserve(mod::kMaxHrpTxSamples);
     if (d_fc32_.size() < n_want)
         d_fc32_.resize(n_want);

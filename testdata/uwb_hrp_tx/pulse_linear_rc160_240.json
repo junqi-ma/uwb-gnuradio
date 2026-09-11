@@ -1,0 +1,16 @@
+{
+  "description": "HRP TX pulse core, raised-cosine spectrum",
+  "phase": "linear",
+  "f1_mhz": 160.0,
+  "f2_mhz": 240.0,
+  "prototype_taps": 2049,
+  "two_sided_bw_mhz": 480.0,
+  "pre_10_100_db": -38.8,
+  "post_10_100_db": -38.8,
+  "width_3db_ns": 2.42,
+  "alias_above_245p76_db": -137.1,
+  "file": "pulse_linear_rc160_240.f32",
+  "taps": 2049,
+  "center_tap": 1024,
+  "created": "2026-09-11T11:40:54"
+}

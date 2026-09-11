@@ -453,6 +453,18 @@ def parse_args():
     p.add_argument("--sync-reps", type=int, default=64)
     p.add_argument("--insert-sts", action="store_true", default=True)
     p.add_argument("--no-sts", action="store_true")
+    p.add_argument("--pulse-shape", default="linear",
+                   choices=["linear", "minphase", "legacy", "gaussian",
+                            "blackman", "external"],
+                   help="TX pulse shaping on the 998.4 work grid; gaussian "
+                        "(sigma=2.5 ns) removes the 491.52 MS/s band-edge "
+                        "ringing of the legacy Butterworth-fit pulse")
+    p.add_argument("--pulse-sigma-ns", type=float, default=2.5)
+    p.add_argument("--pulse-bw-mhz", type=float, default=200.0)
+    p.add_argument("--pulse-taps", default="",
+                   help="Raw float32 causal FIR taps at 998.4 MS/s; overrides "
+                        "--pulse-shape (external pulse), e.g. "
+                        "testdata/uwb_hrp_tx/pulse_minphase_rc160_240.f32")
     p.add_argument("--output", required=True)
     p.add_argument("--taps", default="")
     p.add_argument("--template", default="")
@@ -582,17 +594,33 @@ def main():
     timing_path = os.path.join(a.output, "echo_timing.jsonl")
 
     psdu = hex_to_bytes(a.psdu_hex)
+    if a.pulse_taps:
+        pulse_shape, pulse_taps = "external", a.pulse_taps
+    elif a.pulse_shape == "linear":
+        pulse_shape = "external"
+        pulse_taps = os.path.join(repo, "testdata", "uwb_hrp_tx",
+                                  "pulse_trunc_linear_rc183_240.f32")
+    elif a.pulse_shape == "minphase":
+        pulse_shape = "external"
+        pulse_taps = os.path.join(repo, "testdata", "uwb_hrp_tx",
+                                  "pulse_minphase_rc160_240.f32")
+    else:
+        pulse_shape, pulse_taps = a.pulse_shape, ""
     src = uwb.hrp_packet_source(psdu, a.sync_reps, "4z2", 9, 0.8, a.pri_s,
-                                False, insert_sts, False)
+                                False, insert_sts, False, pulse_shape,
+                                a.pulse_sigma_ns, a.pulse_bw_mhz, pulse_taps)
     samples = np.array(src.samples(), dtype=np.complex64)
     if samples.size < SPS:
         raise SystemExit("HRP source produced %d samples" % samples.size)
-    samples[:SPS].tofile(tmpl_path)
+    _tmpl_off = max(0, int(src.pulse_center_taps()) - 4)
+    samples[_tmpl_off:_tmpl_off + SPS].tofile(tmpl_path)
     t_rs = time.perf_counter()
     native = resample_poly(samples.astype(np.complex128), 32, 65).astype(np.complex64)
-    print("hrp_tx_998p4_samples=%d native_491p52=%d resample_ms=%.2f insert_sts=%s"
+    print("hrp_tx_998p4_samples=%d native_491p52=%d resample_ms=%.2f "
+          "insert_sts=%s pulse_shape=%s pulse_taps=%d pulse_center=%d"
           % (samples.size, native.size, (time.perf_counter() - t_rs) * 1e3,
-             insert_sts), flush=True)
+             insert_sts, src.pulse_shape(), src.pulse_taps(),
+             src.pulse_center_taps()), flush=True)
     print("schedule pulses=%d pri_s=%.6f rate_hz=%.3f duration_s=%.3f" % (
         a.pulses, a.pri_s, (1.0 / a.pri_s), a.pulses * a.pri_s), flush=True)
 

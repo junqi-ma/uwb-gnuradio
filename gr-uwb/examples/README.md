@@ -67,6 +67,64 @@ Message Strobe
 合成图的 `psdu_hex` / `sync_repetitions` / `insert_sts` 可改；改 SFD 时 CIR
 Estimator 的 `sfd_mode` 必须一起改。
 
+## `uwb_sim_cg400_echo_cir.py`（无 UHD 复刻 CG400 X410 链路 + 原始落盘）
+
+与 `x410_cg400_hrp_echo_cir.py` 同一条链路，只把 UHD 定时收发换成 numpy
+仿真回波，可把每脉冲原始 RX 窗按 X410 格式落盘，直接与实采对比：
+
+```text
+UwbHrpPacketSource (998.4, code 9, 64 SYNC, 4z2)
+  -> 32/65 下采样到 491.52 原生
+  -> SimTimedEcho（X410 rx_geometry 窗 + 时延/多径/复增益/AWGN）
+  -> PDU 65/32 -> UwbRadarCirEstimator -> UwbCirWriter
+```
+
+窗长与 X410 fullwin 一致：`pre_guard + tx_native + rx_pad(8 µs) +
+range_guard + tail_guard`，491.52 原生下为 110752 样点；回波默认放在
+`pre_guard + --cal-delay-native`（334）。`--dump-rx` 落盘为参考 dump 相同的
+三文件契约（复用 `UwbPacketWriter`）：
+
+```text
+<output>/capture.iq            # 100 包拼接的 native SC16（IQ 交织，小端）
+<output>/capture.jsonl         # 每包一行，字段与 X410 fullwin dump 逐字段一致
+<output>/capture_metadata.json # 运行级配置
+<output>/tx_491p52.sc16        # 仿真 TX 原生波形
+```
+
+```bash
+python3 gr-uwb/apps/uwb_sim_cg400_echo_cir.py \
+  --rate-hz 100 --duration-s 10 --dump-rx \
+  --echo-delays "334,600" --echo-gains "1.0,0.4+0.2j" \
+  --noise-std 0.01 --output <dir>
+```
+
+默认按 802.15.4z 插入 STS；加 `--no-sts` 生成不含 STS 的帧（linear
+核 native 61219 / 窗 77980）。
+
+发射成形脉冲默认 `--pulse-shape linear`（加载
+`testdata/uwb_hrp_tx/pulse_trunc_linear_rc183_240.f32`，1025 taps）：
+线性相位 RC 原型截断到峰位 tap 32，RC 通带 183 / 阻带 240 MHz，−3 dB
+单边 200 MHz（−6/−10 dB 220/232 MHz），99% 占用双边 226 MHz，
+245.76 MHz 以上 −59 dB。实测 CIR 10–100 ns 峰前/峰后 **−27.8/−27.7 dB**
+（min-phase 前代 −58.0/−17.4），近距 +5/+6 tap 从 −14/−13 提升到
+−29/−19。代价是峰前从 −58 抬到 −28（单站雷达负延迟无目标，且两侧对称）。
+脉冲群时延 32 work taps（16 native）：dump 流程加
+`--cal-delay-native 350 --echo-delays 334` 可使 CIR 峰回到 tap 16；
+live SYNC 模板取 `pulse_center_taps()` 附近。`legacy` 是拟合 737.28 MS/s
+参考的 48 点 Butterworth 核，频谱在 ±245.76 MHz 边缘只衰减约 3 dB，
+限带后振铃；`gaussian`（`--pulse-sigma-ns`，默认 2.5 ns）拖尾最低
+（−67 dB）但主瓣 4.3 ns、带宽只有 ±53 MHz。`--pulse-shape minphase`
+仍可选（−58/−17 的取舍）。`--pulse-taps <file.f32>` 可加载任意预计算
+核（覆盖 `--pulse-shape`）。设计脚本 `design_tx_pulse.py`，设计依据与
+复算见
+[`docs/固定491p52采样率_发射脉冲低拖尾方案.md`](../../docs/固定491p52采样率_发射脉冲低拖尾方案.md)、
+`analysis_outputs/fixed_rate_tx_pulse/`。
+
+产物：上述 raw 文件、`cir.cf32`、`cir_norm.cf32`、`cir.jsonl`、
+`run.json`、`summary.json`（含 raw/CIR 计数、pacing、窗口几何）。
+`--echo-delays` 超出 `--sfd-search-margin` 时须加大 margin，否则本脉冲
+`status=sfd_failed`。
+
 ## `uwb_radar_cir_udp.grc`（CIR 经 UDP 送到另一台机器）
 
 同一条软件回环 CIR 链，估计器的 `cir` 口并联到 `network.socket_pdu`
