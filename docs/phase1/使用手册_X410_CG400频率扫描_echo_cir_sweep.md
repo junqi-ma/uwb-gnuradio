@@ -338,15 +338,21 @@ metadata（`65/32` 映射回 work 域）。无需 C++ 改动，通常 1–2 个�
 ## 7. 实时 UDP
 
 - **默认开启**（除非 `--no-udp` 或 `--udp-host ""`）。每脉冲一帧，非阻塞。
-- 本脚本发 **`UCR2`**：在基础脚本的 28 字节头后追加两个 `f64`
-  —— **`freq_hz`（当前中心频率）+ `freq_offset_hz`（相对 `--freq` 的 CFO）**，
-  共 44 字节头 + 116×`complex64`。失败也发、taps 填 0。
-- 基础脚本 `x410_cg400_hrp_echo_cir.py` 仍发旧 **`UCR1`**（28 字节，
-  **不带频率**）。
+- **新旧脚本统一发 `UCR2`**（44 字节头 + 116×`complex64`，失败也发、taps 填 0）：
+
+  ```text
+  magic "UCR2" | pulse_id u32 | status u16 | tap_count u16
+  | sfd_metric f32 | cir_peak_metric f32 | peak_tap i32 | estimator_us u32
+  | freq_hz f64 | freq_offset_hz f64
+  ```
+
+- 基础脚本 `x410_cg400_hrp_echo_cir.py` 频率固定，发
+  `freq_hz=--freq`、`freq_offset_hz=0`；本脚本发当前中心频率与相对 `--freq`
+  的 CFO。
 - 频率用 `f64`：6.5 GHz 下 `f32` 分辨率约 512 Hz，会吃掉 kHz 级 CFO。
-- 每个脉冲的频率在发 CIR 之前就按 `pulse_id` 登记，正常每帧都是 UCR2；
-  查不到时回退 UCR1。
-- 对端 `cir_udp_recv.py` 同时支持 `UCR2`/`UCR1`/裸 taps：
+- 每个脉冲的频率在发 CIR 之前就按 `pulse_id` 登记；查不到时两项填 `NaN`
+  （接收端显示 `-`），格式不变。
+- 对端 `cir_udp_recv.py` 支持 `UCR2`/旧 `UCR1`/裸 taps：
 
 ```bash
 python3 gr-uwb/apps/cir_udp_recv.py --bind 0.0.0.0 --port 12345
@@ -378,7 +384,7 @@ live dt=1.001 echo_ok_hz=20.0 cir_ok_hz=20.0 cir_fail_hz=0.0 est_q=0
 | `service_us_mean/max` | 单帧 CIR 估计耗时 |
 
 **UDP 三列全 0 且 `udp_eagain=0` = UDP 被关闭**；若要确认看启动日志有没有
-`udp_cir <host>:<port> framed=UCR1 ...`。启用但发不出去会是
+`udp_cir <host>:<port> framed=UCR2 ...`。启用但发不出去会是
 `udp_eagain` 持续增长。
 
 `sched` 行：

@@ -17,8 +17,9 @@ Timed echo locks SFD to a constant offset from the RX window
 a detected SFD, so DW3000 collisions do not drop frames.  Pass
 --require-sfd to restore the old search gate.
 
-UDP is a non-blocking UCR1 header + 116 taps on every pulse.  Live
-lines report echo_ok_hz vs cir_ok_hz vs udp_hz; radio ok is not CIR ok.
+UDP is a non-blocking UCR2 header (28-byte base fields + freq_hz and
+freq_offset_hz f64) + 116 taps on every pulse.  Live lines report
+echo_ok_hz vs cir_ok_hz vs udp_hz; radio ok is not CIR ok.
 """
 from __future__ import annotations
 
@@ -143,17 +144,20 @@ def hex_to_bytes(s):
 
 IQ_SCALE = 32768.0
 
-# UDP CIR datagram: 28-byte header + 116 complex64 taps (always, zeros if fail).
-# socket_pdu only forwarded the c32vector, so sfd_failed became a 0-byte
-# datagram and the far end (expect 928) counted ~5 pkt/s while radio was 100 Hz.
-CIR_UDP_MAGIC = b"UCR1"
+# UDP CIR datagram, unified for both live scripts (base and sweep): a 44-byte
+# UCR2 header + 116 complex64 taps (always, zeros if fail).
+#   magic "UCR2" | pulse_id u32 | status u16 | tap_count u16
+#   | sfd_metric f32 | cir_peak_metric f32 | peak_tap i32 | estimator_us u32
+#   | freq_hz f64 | freq_offset_hz f64
+# f64 is required because f32 cannot resolve kHz-level CFO at 6.5 GHz.
+# UCR1 (28-byte header, no frequency) is kept only for the receiver's legacy
+# parse path.
+CIR_UDP_MAGIC = b"UCR1"                       # legacy parse-only
+CIR_UDP_HDR = struct.Struct("<4sIHHffiI")     # legacy parse-only
 CIR_UDP_TAPS = 116
-CIR_UDP_HDR = struct.Struct("<4sIHHffiI")
-# UCR2 appends the per-pulse centre frequency (f64 so kHz-level CFO is not
-# lost to f32 rounding at 6.5 GHz).  Sent only when the sink is given a
-# freq_lookup; otherwise the legacy UCR1 frame is unchanged.
 CIR_UDP_MAGIC_V2 = b"UCR2"
 CIR_UDP_HDR_V2 = struct.Struct("<4sIHHffiIdd")
+CIR_UDP_FREQ_UNKNOWN = float("nan")
 CIR_UDP_STATUS = {
     "ok": 0,
     "sfd_failed": 1,
@@ -200,11 +204,12 @@ def _pmt_float(meta, key, default=0.0):
 
 
 class CirUdpSink(gr.basic_block):
-    """Non-blocking UDP sink for CIR PDUs. Always sends header+116 taps.
+    """Non-blocking UDP sink for CIR PDUs. Always sends a UCR2 datagram.
 
-    ``freq_lookup(pulse_id) -> (freq_hz, freq_offset_hz) | None`` makes the
-    sink emit a UCR2 frame carrying the per-pulse centre frequency (used by
-    the frequency-sweep app).  Without it the legacy UCR1 frame is sent.
+    ``freq_lookup(pulse_id) -> (freq_hz, freq_offset_hz) | None`` supplies the
+    per-pulse centre frequency.  When it is missing or does not resolve, the
+    two frequency fields are NaN.  The wire format is identical for the base
+    and sweep apps.
     """
 
     def __init__(self, host, port, tap_count=CIR_UDP_TAPS, freq_lookup=None):
@@ -242,20 +247,16 @@ class CirUdpSink(gr.basic_block):
         peak_m = _pmt_float(meta, "cir_peak_metric", 0.0)
         peak_tap = _pmt_int(meta, "peak_tap", 0)
         est_us = _pmt_int(meta, "estimator_us", 0) & 0xFFFFFFFF
-        hdr = None
+        freq_hz = CIR_UDP_FREQ_UNKNOWN
+        freq_off = CIR_UDP_FREQ_UNKNOWN
         if self.freq_lookup is not None:
             fr = self.freq_lookup(pulse_id)
             if fr is not None:
                 freq_hz, freq_off = fr
-                hdr = CIR_UDP_HDR_V2.pack(
-                    CIR_UDP_MAGIC_V2, pulse_id, status, self.tap_count,
-                    sfd_m, peak_m, peak_tap, est_us, float(freq_hz),
-                    float(freq_off))
                 self.sent_freq += 1
-        if hdr is None:
-            hdr = CIR_UDP_HDR.pack(
-                CIR_UDP_MAGIC, pulse_id, status, self.tap_count, sfd_m,
-                peak_m, peak_tap, est_us)
+        hdr = CIR_UDP_HDR_V2.pack(
+            CIR_UDP_MAGIC_V2, pulse_id, status, self.tap_count, sfd_m,
+            peak_m, peak_tap, est_us, float(freq_hz), float(freq_off))
         try:
             self._sock.sendto(hdr + taps.tobytes(), self._dst)
         except (BlockingIOError, InterruptedError, OSError):
@@ -1014,9 +1015,12 @@ def main():
     udp = None
     udp_on = (not a.no_udp) and bool(a.udp_host)
     if udp_on:
-        udp = CirUdpSink(a.udp_host, int(a.udp_port), CIR_UDP_TAPS)
-        print("udp_cir %s:%s framed=UCR1 always_send_taps=%d nonblock" % (
-            a.udp_host, a.udp_port, CIR_UDP_TAPS), flush=True)
+        udp = CirUdpSink(
+            a.udp_host, int(a.udp_port), CIR_UDP_TAPS,
+            freq_lookup=lambda pid: (echo.freq, 0.0))
+        print("udp_cir %s:%s framed=UCR2(+freq_hz,freq_offset_hz) "
+              "always_send_taps=%d nonblock" % (
+                  a.udp_host, a.udp_port, CIR_UDP_TAPS), flush=True)
 
     tb = gr.top_block("x410_cg400_hrp_echo_cir")
     tb.msg_connect((echo, "rx"), (res, "packet"))
@@ -1086,6 +1090,7 @@ def main():
         "udp_sent": 0 if udp is None else udp.sent,
         "udp_sent_ok": 0 if udp is None else udp.sent_ok,
         "udp_sent_fail": 0 if udp is None else udp.sent_fail,
+        "udp_sent_freq": 0 if udp is None else udp.sent_freq,
         "udp_eagain": 0 if udp is None else udp.dropped,
         "cir": cir_stats,
         "timing": timing_stats,

@@ -66,6 +66,14 @@ class UdpFormatTest(unittest.TestCase):
         rec = rx.parse_datagram(hdr + b"")
         self.assertEqual(rec["freq_hz"] - 6489.6e6, 1.0e3)
 
+    def test_ucr2_unknown_freq_is_nan(self):
+        nan = float("nan")
+        hdr = rx.HDR_V2.pack(rx.MAGIC_V2, 5, 0, 116, 0.0, 0.0, 22, 1,
+                             nan, nan)
+        rec = rx.parse_datagram(hdr + _taps(2).astype(np.complex64).tobytes())
+        self.assertEqual(rec["version"], 2)
+        self.assertNotEqual(rec["freq_hz"], rec["freq_hz"])   # NaN
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

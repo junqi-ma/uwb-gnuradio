@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Receive UWB radar CIR datagrams.
 
-x410_cg400_hrp_echo_cir.py sends a 28-byte UCR1 header plus 116
-little-endian complex64 taps on every pulse, including sfd_failed (taps
-are zeros).  The frequency-sweep app
-(x410_cg400_hrp_echo_cir_sweep.py) sends a 44-byte UCR2 header that adds
-the per-pulse centre frequency: two f64 fields ``freq_hz`` and
-``freq_offset_hz``.  UCR1/UCR2 and legacy socket_pdu payloads (928 bytes
-of taps, no header) are all accepted.
+Both live scripts (x410_cg400_hrp_echo_cir.py and
+x410_cg400_hrp_echo_cir_sweep.py) send the unified 44-byte UCR2 header
+followed by 116 little-endian complex64 taps on every pulse, including
+sfd_failed (taps are zeros).  UCR2 is the 28-byte UCR1 header plus two
+f64 fields: ``freq_hz`` (centre frequency, NaN if unknown) and
+``freq_offset_hz`` (relative to the nominal).  Legacy UCR1 and raw
+socket_pdu payloads (928 bytes of taps, no header) are still accepted.
 """
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def main():
     p.add_argument("--bind", default="0.0.0.0")
     p.add_argument("--port", type=int, default=12345)
     p.add_argument("--expect-bytes", type=int, default=0,
-                   help="0 accepts UCR1 or raw taps; >0 still checks length")
+                   help="0 accepts UCR2/UCR1/raw taps; >0 still checks length")
     p.add_argument("--seconds", type=float, default=0.0,
                    help="Stop after this many seconds (0 = until Ctrl-C)")
     args = p.parse_args()
@@ -104,8 +104,9 @@ def main():
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((args.bind, args.port))
     sock.settimeout(0.5)
-    print("listening %s:%d expect_bytes=%d hdr=%d" % (
-        args.bind, args.port, args.expect_bytes, HDR.size), flush=True)
+    print("listening %s:%d expect_bytes=%d hdr_ucr2=%d hdr_ucr1=%d" % (
+        args.bind, args.port, args.expect_bytes, HDR_V2.size, HDR.size),
+        flush=True)
 
     n = 0
     n_ok = 0
@@ -142,10 +143,12 @@ def main():
             else:
                 n_fail += 1
             if n <= 3 or n % 100 == 0:
-                freq_s = ("-" if rec["freq_hz"] is None
-                          else "%.6fMHz(off%+.3fkHz)"
-                          % (rec["freq_hz"] / 1e6,
-                             rec["freq_offset_hz"] / 1e3))
+                f_hz = rec["freq_hz"]
+                if f_hz is None or f_hz != f_hz:   # missing or NaN
+                    freq_s = "-"
+                else:
+                    freq_s = "%.6fMHz(off%+.3fkHz)" % (
+                        f_hz / 1e6, rec["freq_offset_hz"] / 1e3)
                 print("n=%d pulse=%d status=%s bytes=%d taps=%d peak_tap=%d "
                       "|peak|=%.6g sfd=%.4g freq=%s src=%s:%d framed=%s v=%d"
                       % (n, rec["pulse_id"], rec["status"], len(data),
