@@ -138,6 +138,26 @@ class ScanPlanTest(unittest.TestCase):
                            step_hz=5.0, dwell=1)
         self.assertEqual(plan.freqs, [100.0, 105.0, 110.0])
 
+    def test_descending_scan(self):
+        # stop < start sweeps down; the step argument is a magnitude.
+        plan = fp.FreqPlan("scan", NOMINAL, start_hz=NOMINAL + 3e6,
+                           stop_hz=NOMINAL, step_hz=1e6, dwell=1)
+        self.assertEqual(plan.freqs,
+                         [NOMINAL + 3e6, NOMINAL + 2e6, NOMINAL + 1e6, NOMINAL])
+        self.assertEqual(plan.step_hz, -1e6)
+        # A negative step sign is ignored (direction comes from start/stop).
+        signed = fp.FreqPlan("scan", NOMINAL, start_hz=NOMINAL + 3e6,
+                             stop_hz=NOMINAL, step_hz=-1e6, dwell=1)
+        self.assertEqual(signed.freqs, plan.freqs)
+
+    def test_descending_not_exact_or_inclusive(self):
+        plan = fp.FreqPlan("scan", 200.0, start_hz=210.0, stop_hz=200.0,
+                           step_hz=5.0, dwell=1)
+        self.assertEqual(plan.freqs, [210.0, 205.0, 200.0])
+        plan = fp.FreqPlan("scan", 200.0, start_hz=210.0, stop_hz=200.0,
+                           step_hz=3.0, dwell=1)
+        self.assertEqual(plan.freqs, [210.0, 207.0, 204.0, 201.0])
+
     def test_missing_stop_or_step(self):
         with self.assertRaises(SystemExit):
             fp.FreqPlan("scan", NOMINAL, start_hz=NOMINAL, stop_hz=None,
@@ -145,9 +165,6 @@ class ScanPlanTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             fp.FreqPlan("scan", NOMINAL, start_hz=NOMINAL, stop_hz=NOMINAL,
                         step_hz=0.0)
-        with self.assertRaises(SystemExit):
-            fp.FreqPlan("scan", NOMINAL, start_hz=NOMINAL + 1e6,
-                        stop_hz=NOMINAL, step_hz=1e6)
 
 
 class ManualPlanTest(unittest.TestCase):

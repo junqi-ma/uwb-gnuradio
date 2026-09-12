@@ -108,8 +108,12 @@ python3 gr-uwb/apps/x410_cg400_hrp_echo_cir_sweep.py \
 
 ### 4.1 `scan`
 
-- 频率序列：`start + i*step`，`i = 0..n-1`，`n = floor((stop-start)/step)+1`
+- 频率序列：`start + dir*i*step`，`i = 0..n-1`，`n = floor(|stop-start|/step)+1`
   （`stop` 恰好落在格点上时包含 `stop`）。
+- **方向由起止决定**：`dir = +1`（`stop > start`，升序）或 `-1`
+  （`stop < start`，**降序**）；`--freq-step` 只给幅值（正数即可），
+  负号会被忽略。例：`--freq-start 6491.014e6 --freq-stop 6489.623e6
+  --freq-step 1000` 从高往低扫（step 显示为 `-0.001 MHz`）。
 - 每个频点发 `--freq-dwell` 个脉冲。
 - `--freq-scan once`（默认）：**单次扫完即停**，总脉冲
   `pulses = n × dwell`，会覆盖 `--pulses`（只打印一条告警）；`--duration-s`
@@ -160,8 +164,8 @@ kHz 解释（`+50` = +50 kHz，`491` = 491 kHz）。带单位后缀
 |---|---|---|
 | `--freq-mode` | `fixed` | `fixed` / `scan` / `manual` |
 | `--freq-start` | `--freq` | scan 起点（Hz） |
-| `--freq-stop` | 无 | scan 终点（Hz，含落点）；scan 必填 |
-| `--freq-step` | `0` | scan 步进（Hz，>0）；scan 必填 |
+| `--freq-stop` | 无 | scan 终点（Hz，含落点）；scan 必填；可 `< start`（降序） |
+| `--freq-step` | `0` | scan 步进幅值（Hz，>0）；scan 必填；方向看起止 |
 | `--freq-dwell` | `20` | 每个频点脉冲数（≥1） |
 | `--freq-scan` | `once` | `once` 扫完即停 / `cycle` 循环 |
 | `--freq-settle-s` | `0.05` | 每次 retune 后到下个定时突发的间隔（s） |
@@ -462,8 +466,9 @@ for off in sorted(set(a[:, 0])):
 | `est_drop>0` | 估计器跟不上（队列 64）；参考基础脚本调 `--sfd-search-margin` |
 | `--freq-dwell 1` 且高频 | 每个 burst 都 retune，开销大易 `late`；建议 dwell ≥20 |
 
-**频率方向**：scan 默认从 `--freq-start`（默认标称）向 `--freq-stop` 递增；
-`--freq-start` 也可设得比标称低。步进/起止都用 Hz 写（如 `-2e6`、`0.5e6`）。
+**频率方向**：scan 的方向由起止决定——`--freq-stop > --freq-start` 递增，
+`--freq-stop < --freq-start` **递减**；`--freq-step` 只写正幅值。
+`--freq-start` 可高于或低于标称。步进/起止都用 Hz 写（如 `-2e6`、`0.5e6`）。
 
 ---
 

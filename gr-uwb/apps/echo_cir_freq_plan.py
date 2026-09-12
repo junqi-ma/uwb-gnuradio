@@ -130,14 +130,20 @@ class FreqPlan:
             self.start = self.nominal if start_hz is None else float(start_hz)
             if stop_hz is None:
                 raise SystemExit("--freq-mode scan requires --freq-stop")
-            if not (step_hz and float(step_hz) > 0.0):
-                raise SystemExit("--freq-mode scan requires --freq-step > 0")
+            if not step_hz or float(step_hz) == 0.0:
+                raise SystemExit("--freq-mode scan requires --freq-step != 0")
             self.stop = float(stop_hz)
-            if self.stop < self.start:
-                raise SystemExit("--freq-stop must be >= --freq-start")
-            n = int(math.floor((self.stop - self.start) / float(step_hz)
-                               + 1e-9)) + 1
-            self.freqs = [self.start + i * float(step_hz) for i in range(n)]
+            # Direction follows start/stop so a sweep can descend
+            # (--freq-stop < --freq-start); step is the magnitude.
+            step = abs(float(step_hz))
+            if self.stop == self.start:
+                self.freqs = [self.start]
+            else:
+                direction = 1.0 if self.stop > self.start else -1.0
+                span = abs(self.stop - self.start)
+                n = int(math.floor(span / step + 1e-9)) + 1
+                self.freqs = [self.start + direction * i * step
+                              for i in range(n)]
         elif self.mode == "manual":
             self.freqs = [self.nominal]
         else:
@@ -150,6 +156,13 @@ class FreqPlan:
     @property
     def n_points(self):
         return len(self.freqs)
+
+    @property
+    def step_hz(self):
+        """Signed step between consecutive points (0 for a single point)."""
+        if len(self.freqs) < 2:
+            return 0.0
+        return self.freqs[1] - self.freqs[0]
 
     def total_pulses(self):
         """Fixed length of a single scan sweep, else None."""

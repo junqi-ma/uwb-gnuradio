@@ -247,7 +247,8 @@ def parse_args():
     p.add_argument("--freq-stop", type=float, default=None,
                    help="scan stop in Hz (single sweep, inclusive)")
     p.add_argument("--freq-step", type=float, default=0.0,
-                   help="scan step in Hz (>0)")
+                   help="scan step magnitude in Hz (>0); direction follows "
+                        "--freq-start/--freq-stop, so stop < start sweeps down")
     p.add_argument("--freq-dwell", type=int, default=20,
                    help="pulses per scan frequency (>=1)")
     p.add_argument("--freq-scan", choices=["once", "cycle"], default="once",
@@ -335,9 +336,9 @@ def main():
           % (a.freq_mode, a.freq / 1e6, plan.n_points, plan.dwell, a.pulses),
           flush=True)
     if a.freq_mode == "scan":
-        print("[freq] sweep %.3f -> %.3f MHz step %.3f MHz"
+        print("[freq] sweep %.3f -> %.3f MHz step %+.3f MHz"
               % (plan.freqs[0] / 1e6, plan.freqs[-1] / 1e6,
-                 a.freq_step / 1e6), flush=True)
+                 plan.step_hz / 1e6), flush=True)
         for i, f in enumerate(plan.freqs):
             print("[freq]   #%03d %.6f MHz (offset %+.3f MHz)"
                   % (i, f / 1e6, (f - a.freq) / 1e6), flush=True)
@@ -538,7 +539,7 @@ def main():
         "freq_nominal_hz": a.freq,
         "freq_start_hz": plan.start,
         "freq_stop_hz": plan.stop,
-        "freq_step_hz": a.freq_step,
+        "freq_step_hz": plan.step_hz,
         "freq_dwell": a.freq_dwell,
         "freq_scan": a.freq_scan,
         "freq_settle_s": a.freq_settle_s,
