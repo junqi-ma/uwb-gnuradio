@@ -235,6 +235,110 @@ def start_manual_reader(q):
     return th
 
 
+class PeakAlignController:
+    """Servo the CIR delay axis so the first peak lands on a target tap.
+
+    The radar CIR grid is
+
+        tap = cir_pre + (path_delay_work - cal_work)
+
+    where ``cal_work`` is the calibration delay carried in each pulse's
+    metadata (mapped from ``calibration_delay_native_samples`` by the 65/32
+    resampler).  A path at a fixed hardware delay therefore moves -1 tap per
+    +1 work sample of calibration, so one feedback step
+
+        cal_work += (first_peak_tap - target_tap)
+
+    locks the first peak exactly.  The app sends the updated calibration in
+    the *next* pulse's metadata, so no C++ change is needed.
+
+    ``on_frame`` consumes the raw CIR taps (a sequence of complex) and returns
+    a small status dict, or None when disabled/undecidable.
+    """
+
+    def __init__(self, base_cal_native, target_tap=0, work_per_native=65.0 / 32.0,
+                 first_peak_rel=0.5, search_start=0, deadband=1.0,
+                 max_step=16.0, cal_min=1.0, cal_max=1.0e9):
+        if not (0.0 < float(first_peak_rel) <= 1.0):
+            raise SystemExit("--peak-first-rel must be in (0, 1]")
+        if int(target_tap) < 0:
+            raise SystemExit("--peak-target-tap must be >= 0")
+        if not (work_per_native > 0.0):
+            raise SystemExit("work_per_native must be > 0")
+        self.enabled = int(target_tap) > 0
+        self.target_tap = int(target_tap)
+        self.work_per_native = float(work_per_native)
+        self.first_peak_rel = float(first_peak_rel)
+        self.search_start = max(0, int(search_start))
+        self.deadband = float(deadband)
+        self.max_step = float(max_step)
+        self.cal_min = float(cal_min)
+        self.cal_max = float(cal_max)
+        self.base_cal_native = float(base_cal_native)
+        self.base_cal_work = self.base_cal_native * self.work_per_native
+        self.cal_work = self.base_cal_work
+        self.frames = 0
+        self.applied = 0
+        self.last_first_peak = None
+        self.last_peak_tap = None
+        self.last_error = 0.0
+
+    @property
+    def cal_delay_native(self):
+        v = self.cal_work / self.work_per_native
+        return min(self.cal_max, max(self.cal_min, v))
+
+    def first_peak_tap(self, taps):
+        """First tap at or above first_peak_rel * max(|taps|), or None."""
+        if not taps:
+            return None, None
+        mags = [abs(t) for t in taps]
+        mx = max(mags)
+        if not (mx > 0.0):
+            return None, None
+        n = len(mags)
+        start = min(self.search_start, n - 1)
+        best = start
+        first = None
+        thr = self.first_peak_rel * mx
+        for i in range(start, n):
+            if mags[i] > mags[best]:
+                best = i
+            if first is None and mags[i] >= thr:
+                first = i
+        return first, best
+
+    def on_frame(self, taps, zero_delay_tap=0):
+        if not self.enabled:
+            return None
+        first, best = self.first_peak_tap(taps)
+        if first is None:
+            return None
+        err = float(first - self.target_tap)
+        self.frames += 1
+        self.last_first_peak = int(first)
+        self.last_peak_tap = int(best)
+        self.last_error = err
+        if abs(err) >= self.deadband:
+            step = err
+            if self.max_step > 0.0:
+                step = max(-self.max_step, min(self.max_step, step))
+            self.cal_work += step
+            lo = self.cal_min * self.work_per_native
+            hi = self.cal_max * self.work_per_native
+            self.cal_work = min(hi, max(lo, self.cal_work))
+            self.applied += 1
+        return {
+            "first_peak_tap": int(first),
+            "peak_tap": int(best),
+            "zero_delay_tap": int(zero_delay_tap),
+            "error": err,
+            "cal_delay_native": self.cal_delay_native,
+            "applied": self.applied,
+            "frames": self.frames,
+        }
+
+
 def iter_jsonl(path):
     if not path or not os.path.isfile(path):
         return

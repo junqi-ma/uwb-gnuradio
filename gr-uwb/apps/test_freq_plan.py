@@ -188,6 +188,62 @@ class ManualPlanTest(unittest.TestCase):
             fp.FreqPlan("manual", NOMINAL, freq_unit="bogus")
 
 
+class PeakAlignTest(unittest.TestCase):
+    NOMINAL_CAL = 334.0
+    WORK_PER_NATIVE = 65.0 / 32.0
+
+    def _taps(self, peaks):
+        taps = [0j] * 116
+        for idx, mag in peaks.items():
+            taps[idx] = complex(mag, 0.0)
+        return taps
+
+    def test_disabled(self):
+        c = fp.PeakAlignController(self.NOMINAL_CAL, target_tap=0)
+        self.assertFalse(c.enabled)
+        self.assertIsNone(c.on_frame(self._taps({22: 1.0})))
+        self.assertAlmostEqual(c.cal_delay_native, self.NOMINAL_CAL)
+
+    def test_locks_first_peak_to_target(self):
+        c = fp.PeakAlignController(self.NOMINAL_CAL, target_tap=30,
+                                   work_per_native=self.WORK_PER_NATIVE)
+        info = c.on_frame(self._taps({22: 1.0}))
+        self.assertEqual(info["first_peak_tap"], 22)
+        self.assertEqual(info["error"], -8.0)
+        # +1 work sample of calibration moves the peak -1 tap.
+        expected = self.NOMINAL_CAL - 8.0 * 32.0 / 65.0
+        self.assertAlmostEqual(c.cal_delay_native, expected, places=6)
+        # A peak already at the target no longer moves the axis.
+        before = c.cal_delay_native
+        c.on_frame(self._taps({30: 1.0}))
+        self.assertAlmostEqual(c.cal_delay_native, before)
+        self.assertEqual(c.last_first_peak, 30)
+
+    def test_first_peak_is_first_above_relative_threshold(self):
+        c = fp.PeakAlignController(100.0, target_tap=20)
+        first, best = c.first_peak_tap(self._taps({5: 0.6, 10: 1.0}))
+        self.assertEqual(first, 5)
+        self.assertEqual(best, 10)
+
+    def test_search_start_skips_early_taps(self):
+        c = fp.PeakAlignController(100.0, target_tap=20, search_start=5)
+        first, _ = c.first_peak_tap(self._taps({2: 1.0, 8: 0.4, 20: 0.6}))
+        self.assertEqual(first, 20)
+
+    def test_deadband(self):
+        c = fp.PeakAlignController(100.0, target_tap=30, deadband=2.0)
+        before = c.cal_delay_native
+        c.on_frame(self._taps({29: 1.0}))  # err = -1 < deadband
+        self.assertAlmostEqual(c.cal_delay_native, before)
+        self.assertEqual(c.applied, 0)
+
+    def test_invalid_params(self):
+        with self.assertRaises(SystemExit):
+            fp.PeakAlignController(100.0, target_tap=30, first_peak_rel=0.0)
+        with self.assertRaises(SystemExit):
+            fp.PeakAlignController(100.0, target_tap=-1)
+
+
 class AnalyzeTest(unittest.TestCase):
     def test_group_by_freq(self):
         with tempfile.TemporaryDirectory() as d:

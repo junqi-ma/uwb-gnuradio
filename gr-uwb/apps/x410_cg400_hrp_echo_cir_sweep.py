@@ -41,13 +41,18 @@ if _HERE not in sys.path:
 import x410_cg400_hrp_echo_cir as base          # noqa: E402
 import echo_cir_freq_plan as fp                 # noqa: E402
 
+import pmt                                      # noqa: E402
+from gnuradio import gr                         # noqa: E402
+
 
 class SweepTimedUhdEcho(base.TimedUhdEcho):
     """TimedUhdEcho that can retune between bursts and log per-pulse freq."""
 
-    def __init__(self, *args, plan=None, freq_settle_s=0.05, **kwargs):
+    def __init__(self, *args, plan=None, align=None, freq_settle_s=0.05,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.plan = plan
+        self.align = align
         self.nominal = float(self.freq)
         self.freq_settle_s = float(freq_settle_s)
         self.tx_freq_actual = float(self.freq)
@@ -88,6 +93,9 @@ class SweepTimedUhdEcho(base.TimedUhdEcho):
         offset = self.freq - self.nominal
         dwell_index = (self.plan.dwell_index(pulse_id)
                        if self.plan is not None else 0)
+        align_first = self.align.last_first_peak if self.align is not None else None
+        align_err = self.align.last_error if self.align is not None else None
+        align_cal = self.align.cal_delay_native if self.align is not None else None
         # base._one_burst always appends its timing record last.
         if self._timing:
             rec = self._timing[-1]
@@ -96,14 +104,21 @@ class SweepTimedUhdEcho(base.TimedUhdEcho):
             rec["tx_freq_actual"] = self.tx_freq_actual
             rec["rx_freq_actual"] = self.rx_freq_actual
             rec["dwell_index"] = dwell_index
-        self.freq_records.append({
+            rec["cal_delay_native"] = self.cal_delay_native
+            rec["align_first_peak_tap"] = align_first
+            rec["align_error"] = align_err
+        rec = {
             "pulse_id": int(pulse_id),
             "freq_hz": self.freq,
             "freq_offset_hz": offset,
             "tx_freq_actual": self.tx_freq_actual,
             "rx_freq_actual": self.rx_freq_actual,
             "dwell_index": dwell_index,
-        })
+            "cal_delay_native": self.cal_delay_native,
+            "align_first_peak_tap": align_first,
+            "align_error": align_err,
+        }
+        self.freq_records.append(rec)
         return ok
 
     def _write_sc16_packet(self, pulse_id, rx):
@@ -172,6 +187,41 @@ class SweepTimedUhdEcho(base.TimedUhdEcho):
         return self._ok, self._fail, self._late
 
 
+class PeakAlignSink(gr.basic_block):
+    """Closed loop: read CIR taps, steer the calibration delay to the target tap.
+
+    Subscribes to ``est.cir`` (in addition to the writer / UDP) and updates
+    ``echo.cal_delay_native`` so the *next* pulse's metadata carries the new
+    calibration.  Message-only, no streaming ports.
+    """
+
+    def __init__(self, controller, echo):
+        gr.basic_block.__init__(self, name="peak_align_sink",
+                                in_sig=None, out_sig=None)
+        self.controller = controller
+        self.echo = echo
+        self.message_port_register_in(pmt.intern("cir"))
+        self.set_msg_handler(pmt.intern("cir"), self._on_cir)
+
+    def _on_cir(self, msg):
+        if not pmt.is_pair(msg):
+            return
+        meta = pmt.car(msg)
+        vec = pmt.cdr(msg)
+        if not pmt.is_dict(meta) or not pmt.is_c32vector(vec):
+            return
+        if base._pmt_str(meta, "status", "other") != "ok":
+            return
+        raw = pmt.c32vector_elements(vec)
+        if not raw:
+            return
+        info = self.controller.on_frame(
+            raw, base._pmt_int(meta, "zero_delay_tap", 0))
+        if info is None or not self.controller.enabled:
+            return
+        self.echo.cal_delay_native = self.controller.cal_delay_native
+
+
 def parse_args():
     p = argparse.ArgumentParser(
         parents=[base.build_parser(add_help=False)],
@@ -196,6 +246,13 @@ def parse_args():
                    help="default unit for bare manual-mode numbers "
                         "(default %s); explicit units/scientific notation win"
                         % fp.DEFAULT_FREQ_UNIT)
+    p.add_argument("--peak-target-tap", type=int, default=0,
+                   help="lock the first CIR peak to this tap via a calibration "
+                        "servo (0 = disabled, keep the fixed --cal-delay-native)")
+    p.add_argument("--peak-first-rel", type=float, default=0.5,
+                   help="first peak = first tap >= this fraction of max(|CIR|)")
+    p.add_argument("--peak-search-start", type=int, default=0,
+                   help="ignore CIR taps below this index when finding the first peak")
     p.add_argument("--dry-run", action="store_true",
                    help="print the frequency plan and exit without touching UHD")
     return p.parse_args()
@@ -259,6 +316,12 @@ def main():
             print("[freq]   #%03d %.6f MHz (offset %+.3f MHz)"
                   % (i, f / 1e6, (f - a.freq) / 1e6), flush=True)
 
+    if a.peak_target_tap > 0:
+        print("[align] first peak -> tap %d (base cal_delay_native=%.3f, "
+              "first_rel=%.2f, search_start=%d)"
+              % (a.peak_target_tap, a.cal_delay_native, a.peak_first_rel,
+                 a.peak_search_start), flush=True)
+
     if a.dry_run:
         print("[freq] dry-run complete", flush=True)
         raise SystemExit(0)
@@ -308,13 +371,18 @@ def main():
 
     dump_dir = os.path.join(a.output, "rx_iq") if a.dump_rx else ""
     sc16_dir = a.output if a.dump_sc16 else ""
+    align = fp.PeakAlignController(
+        a.cal_delay_native, a.peak_target_tap,
+        work_per_native=(65.0 / 32.0),
+        first_peak_rel=a.peak_first_rel,
+        search_start=a.peak_search_start)
     echo = SweepTimedUhdEcho(
         a.args, base.CG400_HZ, a.freq, a.tx_channel, a.rx_channel,
         a.tx_antenna, a.rx_antenna, a.gain_tx, a.gain_rx,
         a.pre_guard_us, 15.0, a.tail_guard_us, a.sync_reps,
         a.cal_delay_native, a.arm_delay_s, a.pri_s, a.pulses, dump_dir,
         a.min_lead_s, timing_path, sc16_dir, a.rx_pad_us, a.code_index,
-        base.SFD_MODE, plan=plan, freq_settle_s=a.freq_settle_s)
+        base.SFD_MODE, plan=plan, align=align, freq_settle_s=a.freq_settle_s)
     echo.set_tx_native(native)
     print("uhd_probe", echo.status, flush=True)
     if a.dump_sc16:
@@ -343,12 +411,15 @@ def main():
         print("udp_cir %s:%s framed=UCR1 always_send_taps=%d nonblock" % (
             a.udp_host, a.udp_port, base.CIR_UDP_TAPS), flush=True)
 
+    align_sink = PeakAlignSink(align, echo) if align.enabled else None
     tb = base.gr.top_block("x410_cg400_hrp_echo_cir_sweep")
     tb.msg_connect((echo, "rx"), (res, "packet"))
     tb.msg_connect((res, "packet"), (est, "rx"))
     tb.msg_connect((est, "cir"), (wr, "cir"))
     if udp is not None:
         tb.msg_connect((est, "cir"), (udp, "cir"))
+    if align_sink is not None:
+        tb.msg_connect((est, "cir"), (align_sink, "cir"))
 
     tb.start()
     echo.start_publisher()
@@ -439,6 +510,17 @@ def main():
         "freq_plan_hz": plan.freqs,
         "freq_retune_count": echo.retune_count,
         "freq_retune_fail": echo.retune_fail,
+        "peak_target_tap": a.peak_target_tap,
+        "peak_first_rel": a.peak_first_rel,
+        "peak_search_start": a.peak_search_start,
+        "align_enabled": align.enabled,
+        "align_frames": align.frames,
+        "align_applied": align.applied,
+        "align_last_first_peak_tap": align.last_first_peak,
+        "align_last_peak_tap": align.last_peak_tap,
+        "align_last_error": align.last_error,
+        "align_cal_delay_native": align.cal_delay_native,
+        "align_cal_delay_base_native": align.base_cal_native,
         "cir_by_freq": freq_stats,
         "native_rate_hz": base.CG400_HZ,
         "work_rate_hz": base.WORK_HZ,
@@ -533,6 +615,12 @@ def main():
                 else "-",
                 ("%.5f" % g["metric_max"]) if g["metric_max"] else "-",
             ), flush=True)
+    if align.enabled:
+        print("[align] target=%d frames=%d applied=%d last_first_peak=%s "
+              "last_error=%s cal_delay_native=%.3f"
+              % (align.target_tap, align.frames, align.applied,
+                 align.last_first_peak, align.last_error,
+                 align.cal_delay_native), flush=True)
     if os.path.isfile(jsonl):
         print("cir.jsonl_lines=%d" % cir_stats.get("lines", 0), flush=True)
 

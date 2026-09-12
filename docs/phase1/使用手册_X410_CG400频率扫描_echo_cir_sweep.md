@@ -166,6 +166,9 @@ kHz 解释（`+50` = +50 kHz，`491` = 491 kHz）。带单位后缀
 | `--freq-scan` | `once` | `once` 扫完即停 / `cycle` 循环 |
 | `--freq-settle-s` | `0.05` | 每次 retune 后到下个定时突发的间隔（s） |
 | `--freq-unit` | `khz` | manual 裸数字默认单位（`hz/khz/mhz/ghz`）；显式单位/科学计数法优先 |
+| `--peak-target-tap` | `0` | 把首峰锁到该 tap（0=关闭，用固定 `--cal-delay-native`） |
+| `--peak-first-rel` | `0.5` | 首峰判定：第一个 `≥ 该比例 × max(|CIR|)` 的 tap |
+| `--peak-search-start` | `0` | 从该 tap 起才找首峰 |
 | `--dry-run` | 关 | 只打印频率序列，不打开 UHD |
 
 ### 5.2 继承参数（与基础脚本相同）
@@ -278,6 +281,57 @@ kHz 解释（`+50` = +50 kHz，`491` = 491 kHz）。带单位后缀
 `cir.jsonl` 里 `zero_delay_tap`（默认 16）、`peak_tap`；每 tap 距离
 `range_m_per_tap = c/(2×998.4e6) ≈ 0.150 m`，峰相对校准时延
 `peak_delay_from_calibration_ns = (peak_tap - zero_delay_tap)/998.4e6 × 1e9`。
+
+### 6.4 CIR 首峰对齐（`--peak-target-tap`）
+
+**默认 CIR 不是对齐到首峰的**：CIR 轴锚在“预测 TX 时刻 + 标定延迟”，
+`zero_delay_tap = cir_pre = 16` 只是标定参考；实际首峰落在硬件给出的
+`peak_tap`（本机约 22）。想让首峰固定在第 N 个 tap，用：
+
+```bash
+python3 gr-uwb/apps/x410_cg400_hrp_echo_cir_sweep.py \
+  --args addr=192.168.10.2 --freq-mode fixed \
+  --peak-target-tap 30 \
+  --gain-tx 40 --gain-rx 50 --no-udp --output /tmp/x410_align30
+```
+
+原理：CIR 网格满足
+
+```text
+tap = cir_pre + (path_delay_work - cal_work)
+```
+
+所以 `cal_work` 每 +1 work sample，首峰就 −1 tap。脚本在每个脉冲后读回
+CIR taps，按
+
+```text
+cal_work += (first_peak_tap - target_tap)
+```
+
+修正，并把新的 `calibration_delay_native_samples` 放进**下一个脉冲**的
+metadata（`65/32` 映射回 work 域）。无需 C++ 改动，通常 1–2 个脉冲收敛。
+
+- 首峰定义：从 `--peak-search-start` 起，第一个
+  `≥ --peak-first-rel × max(|CIR|)` 的 tap。
+- 日志：启动打印 `[align] first peak -> tap 30 ...`，结束打印
+  `[align] target=30 frames=... applied=... last_first_peak=30 ...`。
+- 产物：`summary.json` 增 `align_*` 与 `peak_*`；`freq_sweep.jsonl` /
+  `echo_timing.jsonl` 每脉冲记录 `align_first_peak_tap`、`align_error`、
+  `cal_delay_native`。
+- **与扫频配合**：retune 引起群时延漂移时，servo 会自动跟随，使跨频点首峰
+  落在同一 tap，便于逐频比较。这正是做 CFO 扫描时想要的效果。
+- `--peak-target-tap 0`（默认）关闭，保持固定 `--cal-delay-native`。
+
+**注意**：
+
+- 若强干扰（如 DW3000）先于自泄漏出现且幅度更大，`first_rel` 可能选中它；
+  用 `--peak-search-start` 跳过前方、或调 `--peak-first-rel`。
+- 目标 tap 要小于 `cir_pre+cir_post=116`，并给后续多径留空间。
+- servo 只改每个脉冲 metadata 里的校准值，不覆写命令行 `--cal-delay-native`；
+  `summary.json` 同时记录 `align_cal_delay_base_native` 与最终值。
+
+**想手调**：`cal_delay_native += (peak_tap - target_tap) × 32/65`。
+例如从 `peak_tap=22` 到 30：`334 + (22-30)×32/65 ≈ 330.06`。
 
 ---
 
@@ -398,6 +452,8 @@ for off in sorted(set(a[:, 0])):
 - 需要运行时改频（CFO 研究）：用本脚本；`--freq-mode fixed` 即等价基础脚本。
 - 基础脚本的 `parse_args()` 已拆出 `build_parser()`，本脚本通过
   `argparse parents` 继承其全部选项，二者参数不会漂移。
+- 首峰对齐 servo（`--peak-target-tap`）目前只在本脚本；基础脚本仍用固定的
+  `--cal-delay-native`。
 
 **未声称**：扫频实机 soak（retune 抖动/`late` 统计）、跨频点群时延校准、
 DW3000 逐频干扰结论。首次实机使用请按第 9 节从小范围做起。
