@@ -226,9 +226,12 @@ class PeakAlignTest(unittest.TestCase):
         self.assertEqual(best, 10)
 
     def test_search_start_skips_early_taps(self):
+        # Tap 2 is the strongest but is before search_start; the threshold is
+        # the in-window max (tap 20), so the in-window first path is tap 8.
         c = fp.PeakAlignController(100.0, target_tap=20, search_start=5)
-        first, _ = c.first_peak_tap(self._taps({2: 1.0, 8: 0.4, 20: 0.6}))
-        self.assertEqual(first, 20)
+        first, best = c.first_peak_tap(self._taps({2: 1.0, 8: 0.7, 20: 1.0}))
+        self.assertEqual(first, 8)
+        self.assertEqual(best, 20)
 
     def test_deadband(self):
         c = fp.PeakAlignController(100.0, target_tap=30, deadband=2.0)
@@ -237,11 +240,88 @@ class PeakAlignTest(unittest.TestCase):
         self.assertAlmostEqual(c.cal_delay_native, before)
         self.assertEqual(c.applied, 0)
 
+    def test_cal_pulses_freezes_axis_after_n(self):
+        c = fp.PeakAlignController(
+            self.NOMINAL_CAL, target_tap=30, work_per_native=self.WORK_PER_NATIVE,
+            cal_pulses=2, lock_frames=0)
+        c.on_frame(self._taps({22: 1.0}))     # err -8, adapts
+        c.on_frame(self._taps({30: 1.0}))     # err 0, adapt_frames=2 -> lock
+        self.assertTrue(c.locked)
+        locked_cal = c.cal_delay_native
+        self.assertEqual(c.adapt_frames, 2)
+        # A wild post-lock peak (e.g. interference) must not move the axis.
+        info = c.on_frame(self._taps({5: 1.0}))
+        self.assertTrue(info["locked"])
+        self.assertEqual(info["first_peak_tap"], 5)
+        self.assertAlmostEqual(c.cal_delay_native, locked_cal)
+        self.assertEqual(c.applied, 1)
+
+    def test_cal_skip_ignores_settle_transient(self):
+        c = fp.PeakAlignController(
+            self.NOMINAL_CAL, target_tap=30, work_per_native=self.WORK_PER_NATIVE,
+            cal_skip=3, cal_pulses=2, lock_frames=0)
+        # Transient bursts are measured but never adapt or lock.
+        for _ in range(3):
+            info = c.on_frame(self._taps({55: 1.0}))
+            self.assertFalse(info["locked"])
+        self.assertEqual(c.skipped, 3)
+        self.assertEqual(c.adapt_frames, 0)
+        self.assertEqual(c.applied, 0)
+        self.assertAlmostEqual(c.cal_delay_native, self.NOMINAL_CAL)
+        # Now the real calibration window opens.
+        c.on_frame(self._taps({22: 1.0}))     # err -8 -> adapt
+        self.assertEqual(c.adapt_frames, 1)
+        c.on_frame(self._taps({30: 1.0}))     # err 0, adapt_frames=2 -> lock
+        self.assertTrue(c.locked)
+
+    def test_lock_frames_locks_early(self):
+        c = fp.PeakAlignController(
+            self.NOMINAL_CAL, target_tap=30, work_per_native=self.WORK_PER_NATIVE,
+            cal_pulses=5, lock_frames=2)
+        c.on_frame(self._taps({30: 1.0}))
+        self.assertFalse(c.locked)
+        c.on_frame(self._taps({30: 1.0}))
+        self.assertTrue(c.locked)
+        before = c.cal_delay_native
+        c.on_frame(self._taps({10: 1.0}))
+        self.assertAlmostEqual(c.cal_delay_native, before)
+
+    def test_zero_limits_never_lock(self):
+        c = fp.PeakAlignController(
+            self.NOMINAL_CAL, target_tap=30, work_per_native=self.WORK_PER_NATIVE,
+            cal_pulses=0, lock_frames=0)
+        for _ in range(20):
+            c.on_frame(self._taps({22: 1.0}))
+        self.assertFalse(c.locked)
+        self.assertGreater(c.applied, 0)
+
+    def test_search_stop_ignores_out_of_window_interference(self):
+        # A strong late interferer would otherwise dominate the threshold and
+        # be reported as the "first peak"; gating the window keeps the true
+        # in-window first path.
+        taps = self._taps({20: 0.6, 40: 1.0})
+        gated = fp.PeakAlignController(100.0, target_tap=20, first_peak_rel=0.8,
+                                       search_stop=25)
+        first, best = gated.first_peak_tap(taps)
+        self.assertEqual(first, 20)
+        self.assertEqual(best, 20)
+        ungated = fp.PeakAlignController(100.0, target_tap=20, first_peak_rel=0.8)
+        self.assertEqual(ungated.first_peak_tap(taps)[0], 40)
+
+    def test_search_stop_before_start_invalid(self):
+        with self.assertRaises(SystemExit):
+            fp.PeakAlignController(100.0, target_tap=20, search_start=10,
+                                   search_stop=5)
+
     def test_invalid_params(self):
         with self.assertRaises(SystemExit):
             fp.PeakAlignController(100.0, target_tap=30, first_peak_rel=0.0)
         with self.assertRaises(SystemExit):
             fp.PeakAlignController(100.0, target_tap=-1)
+        with self.assertRaises(SystemExit):
+            fp.PeakAlignController(100.0, target_tap=30, cal_pulses=-1)
+        with self.assertRaises(SystemExit):
+            fp.PeakAlignController(100.0, target_tap=30, lock_frames=-1)
 
 
 class AnalyzeTest(unittest.TestCase):

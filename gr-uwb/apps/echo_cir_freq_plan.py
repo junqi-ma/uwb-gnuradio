@@ -252,33 +252,73 @@ class PeakAlignController:
     locks the first peak exactly.  The app sends the updated calibration in
     the *next* pulse's metadata, so no C++ change is needed.
 
+    Lock-and-hold
+    -------------
+    The hardware delay is constant for the whole acquisition, so the servo
+    only needs the first few bursts.  ``cal_skip`` ignores the first N
+    frames entirely (the first burst(s) after a retune show a several-tap
+    settle transient, so calibrating on them locks the wrong tap).
+    ``cal_pulses`` then caps how many following frames may adjust the axis;
+    ``lock_frames`` locks early once that many consecutive frames land
+    within ``deadband``.  After locking the axis is frozen: later frames are
+    still measured (for reporting) but never move ``cal_work``, so strong
+    interference after lock cannot pull the CIR off target.
+    ``cal_skip=0``, ``cal_pulses=0`` and ``lock_frames=0`` recover the old
+    never-locking behaviour.
+
+    Gated search
+    ------------
+    ``search_start``/``search_stop`` restrict both the first-peak search and
+    the relative-threshold peak to a tap window, so a strong interferer
+    outside the expected first path cannot raise the threshold or capture
+    ``first``.
+
     ``on_frame`` consumes the raw CIR taps (a sequence of complex) and returns
     a small status dict, or None when disabled/undecidable.
     """
 
     def __init__(self, base_cal_native, target_tap=0, work_per_native=65.0 / 32.0,
-                 first_peak_rel=0.5, search_start=0, deadband=1.0,
-                 max_step=16.0, cal_min=1.0, cal_max=1.0e9):
+                 first_peak_rel=0.5, search_start=0, search_stop=None,
+                 deadband=1.0, max_step=16.0, cal_min=1.0, cal_max=1.0e9,
+                 cal_skip=0, cal_pulses=0, lock_frames=0):
         if not (0.0 < float(first_peak_rel) <= 1.0):
             raise SystemExit("--peak-first-rel must be in (0, 1]")
         if int(target_tap) < 0:
             raise SystemExit("--peak-target-tap must be >= 0")
         if not (work_per_native > 0.0):
             raise SystemExit("work_per_native must be > 0")
+        if int(search_start) < 0:
+            raise SystemExit("--peak-search-start must be >= 0")
+        if search_stop is not None and int(search_stop) < int(search_start):
+            raise SystemExit("--peak-search-stop must be >= --peak-search-start")
+        if int(cal_skip) < 0:
+            raise SystemExit("--peak-cal-skip must be >= 0")
+        if int(cal_pulses) < 0:
+            raise SystemExit("--peak-cal-pulses must be >= 0")
+        if int(lock_frames) < 0:
+            raise SystemExit("--peak-lock-frames must be >= 0")
         self.enabled = int(target_tap) > 0
         self.target_tap = int(target_tap)
         self.work_per_native = float(work_per_native)
         self.first_peak_rel = float(first_peak_rel)
         self.search_start = max(0, int(search_start))
+        self.search_stop = None if search_stop is None else max(0, int(search_stop))
         self.deadband = float(deadband)
         self.max_step = float(max_step)
         self.cal_min = float(cal_min)
         self.cal_max = float(cal_max)
+        self.cal_skip = int(cal_skip)
+        self.cal_pulses = int(cal_pulses)
+        self.lock_frames = int(lock_frames)
         self.base_cal_native = float(base_cal_native)
         self.base_cal_work = self.base_cal_native * self.work_per_native
         self.cal_work = self.base_cal_work
         self.frames = 0
+        self.skipped = 0
+        self.adapt_frames = 0
         self.applied = 0
+        self.locked = False
+        self.lock_streak = 0
         self.last_first_peak = None
         self.last_peak_tap = None
         self.last_error = 0.0
@@ -289,23 +329,30 @@ class PeakAlignController:
         return min(self.cal_max, max(self.cal_min, v))
 
     def first_peak_tap(self, taps):
-        """First tap at or above first_peak_rel * max(|taps|), or None."""
+        """First tap in the search window at or above first_peak_rel * window
+        max(|taps|), plus the window argmax.  None when the window is empty
+        or all-zero."""
         if not taps:
             return None, None
         mags = [abs(t) for t in taps]
-        mx = max(mags)
-        if not (mx > 0.0):
-            return None, None
         n = len(mags)
         start = min(self.search_start, n - 1)
+        stop = n - 1 if self.search_stop is None else min(self.search_stop, n - 1)
+        if stop < start:
+            return None, None
         best = start
-        first = None
-        thr = self.first_peak_rel * mx
-        for i in range(start, n):
+        for i in range(start + 1, stop + 1):
             if mags[i] > mags[best]:
                 best = i
-            if first is None and mags[i] >= thr:
+        mx = mags[best]
+        if not (mx > 0.0):
+            return None, None
+        thr = self.first_peak_rel * mx
+        first = None
+        for i in range(start, stop + 1):
+            if mags[i] >= thr:
                 first = i
+                break
         return first, best
 
     def on_frame(self, taps, zero_delay_tap=0):
@@ -319,15 +366,28 @@ class PeakAlignController:
         self.last_first_peak = int(first)
         self.last_peak_tap = int(best)
         self.last_error = err
-        if abs(err) >= self.deadband:
-            step = err
-            if self.max_step > 0.0:
-                step = max(-self.max_step, min(self.max_step, step))
-            self.cal_work += step
-            lo = self.cal_min * self.work_per_native
-            hi = self.cal_max * self.work_per_native
-            self.cal_work = min(hi, max(lo, self.cal_work))
-            self.applied += 1
+        if not self.locked:
+            if self.skipped < self.cal_skip:
+                # Retune/settle transient: report but never adapt or lock.
+                self.skipped += 1
+            else:
+                self.adapt_frames += 1
+                if abs(err) >= self.deadband:
+                    step = err
+                    if self.max_step > 0.0:
+                        step = max(-self.max_step, min(self.max_step, step))
+                    self.cal_work += step
+                    lo = self.cal_min * self.work_per_native
+                    hi = self.cal_max * self.work_per_native
+                    self.cal_work = min(hi, max(lo, self.cal_work))
+                    self.applied += 1
+                    self.lock_streak = 0
+                else:
+                    self.lock_streak += 1
+                if self.lock_frames > 0 and self.lock_streak >= self.lock_frames:
+                    self.locked = True
+                elif self.cal_pulses > 0 and self.adapt_frames >= self.cal_pulses:
+                    self.locked = True
         return {
             "first_peak_tap": int(first),
             "peak_tap": int(best),
@@ -336,6 +396,9 @@ class PeakAlignController:
             "cal_delay_native": self.cal_delay_native,
             "applied": self.applied,
             "frames": self.frames,
+            "skipped": self.skipped,
+            "adapt_frames": self.adapt_frames,
+            "locked": self.locked,
         }
 
 

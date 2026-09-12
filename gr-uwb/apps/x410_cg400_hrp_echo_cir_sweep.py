@@ -100,7 +100,9 @@ class SweepTimedUhdEcho(base.TimedUhdEcho):
                        if self.plan is not None else 0)
         align_first = self.align.last_first_peak if self.align is not None else None
         align_err = self.align.last_error if self.align is not None else None
-        align_cal = self.align.cal_delay_native if self.align is not None else None
+        align_locked = self.align.locked if self.align is not None else None
+        align_adapt = self.align.adapt_frames if self.align is not None else None
+        align_skipped = self.align.skipped if self.align is not None else None
         # base._one_burst always appends its timing record last.
         if self._timing:
             rec = self._timing[-1]
@@ -112,6 +114,9 @@ class SweepTimedUhdEcho(base.TimedUhdEcho):
             rec["cal_delay_native"] = self.cal_delay_native
             rec["align_first_peak_tap"] = align_first
             rec["align_error"] = align_err
+            rec["align_locked"] = align_locked
+            rec["align_adapt_frames"] = align_adapt
+            rec["align_skipped"] = align_skipped
         rec = {
             "pulse_id": int(pulse_id),
             "freq_hz": self.freq,
@@ -122,6 +127,9 @@ class SweepTimedUhdEcho(base.TimedUhdEcho):
             "cal_delay_native": self.cal_delay_native,
             "align_first_peak_tap": align_first,
             "align_error": align_err,
+            "align_locked": align_locked,
+            "align_adapt_frames": align_adapt,
+            "align_skipped": align_skipped,
         }
         self.freq_records.append(rec)
         return ok
@@ -258,6 +266,19 @@ def parse_args():
                    help="first peak = first tap >= this fraction of max(|CIR|)")
     p.add_argument("--peak-search-start", type=int, default=0,
                    help="ignore CIR taps below this index when finding the first peak")
+    p.add_argument("--peak-search-stop", type=int, default=None,
+                   help="ignore CIR taps above this index (default: last tap); "
+                        "gate the search so out-of-window interference is ignored")
+    p.add_argument("--peak-cal-skip", type=int, default=5,
+                   help="ignore the first N bursts before calibrating; covers "
+                        "the several-tap settle transient after a retune "
+                        "(set 0 to calibrate from the very first burst)")
+    p.add_argument("--peak-cal-pulses", type=int, default=5,
+                   help="calibrate only on the first N bursts after the skip, "
+                        "then freeze the axis (0 = never lock, old servo)")
+    p.add_argument("--peak-lock-frames", type=int, default=2,
+                   help="lock early once this many consecutive bursts land "
+                        "within deadband (0 = only the --peak-cal-pulses cap)")
     p.add_argument("--dry-run", action="store_true",
                    help="print the frequency plan and exit without touching UHD")
     return p.parse_args()
@@ -322,10 +343,13 @@ def main():
                   % (i, f / 1e6, (f - a.freq) / 1e6), flush=True)
 
     if a.peak_target_tap > 0:
+        stop_s = "-" if a.peak_search_stop is None else str(a.peak_search_stop)
         print("[align] first peak -> tap %d (base cal_delay_native=%.3f, "
-              "first_rel=%.2f, search_start=%d)"
+              "first_rel=%.2f, search=%d..%s, cal_skip=%d, cal_pulses=%d, "
+              "lock_frames=%d)"
               % (a.peak_target_tap, a.cal_delay_native, a.peak_first_rel,
-                 a.peak_search_start), flush=True)
+                 a.peak_search_start, stop_s, a.peak_cal_skip,
+                 a.peak_cal_pulses, a.peak_lock_frames), flush=True)
 
     if a.dry_run:
         print("[freq] dry-run complete", flush=True)
@@ -380,7 +404,11 @@ def main():
         a.cal_delay_native, a.peak_target_tap,
         work_per_native=(65.0 / 32.0),
         first_peak_rel=a.peak_first_rel,
-        search_start=a.peak_search_start)
+        search_start=a.peak_search_start,
+        search_stop=a.peak_search_stop,
+        cal_skip=a.peak_cal_skip,
+        cal_pulses=a.peak_cal_pulses,
+        lock_frames=a.peak_lock_frames)
     echo = SweepTimedUhdEcho(
         a.args, base.CG400_HZ, a.freq, a.tx_channel, a.rx_channel,
         a.tx_antenna, a.rx_antenna, a.gain_tx, a.gain_rx,
@@ -522,9 +550,16 @@ def main():
         "peak_target_tap": a.peak_target_tap,
         "peak_first_rel": a.peak_first_rel,
         "peak_search_start": a.peak_search_start,
+        "peak_search_stop": a.peak_search_stop,
+        "peak_cal_skip": a.peak_cal_skip,
+        "peak_cal_pulses": a.peak_cal_pulses,
+        "peak_lock_frames": a.peak_lock_frames,
         "align_enabled": align.enabled,
         "align_frames": align.frames,
+        "align_skipped": align.skipped,
+        "align_adapt_frames": align.adapt_frames,
         "align_applied": align.applied,
+        "align_locked": align.locked,
         "align_last_first_peak_tap": align.last_first_peak,
         "align_last_peak_tap": align.last_peak_tap,
         "align_last_error": align.last_error,
@@ -614,6 +649,15 @@ def main():
               summary["udp_sent_fail"], echo.retune_count,
               echo.retune_fail),
           flush=True)
+    if align.enabled:
+        print("[align] locked=%s skipped=%d adapt_frames=%d applied=%d "
+              "cal_delay_native=%.3f last_first_peak=%s last_error=%+.1f "
+              "search=%d..%s" % (
+                  align.locked, align.skipped, align.adapt_frames,
+                  align.applied, align.cal_delay_native,
+                  align.last_first_peak, align.last_error, align.search_start,
+                  "-" if align.search_stop is None else align.search_stop),
+              flush=True)
     if freq_stats:
         print("CIR_BY_FREQ freq_MHz n ok fail metric_mean metric_max",
               flush=True)

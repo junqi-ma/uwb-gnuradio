@@ -167,8 +167,12 @@ kHz 解释（`+50` = +50 kHz，`491` = 491 kHz）。带单位后缀
 | `--freq-settle-s` | `0.05` | 每次 retune 后到下个定时突发的间隔（s） |
 | `--freq-unit` | `khz` | manual 裸数字默认单位（`hz/khz/mhz/ghz`）；显式单位/科学计数法优先 |
 | `--peak-target-tap` | `0` | 把首峰锁到该 tap（0=关闭，用固定 `--cal-delay-native`） |
-| `--peak-first-rel` | `0.5` | 首峰判定：第一个 `≥ 该比例 × max(|CIR|)` 的 tap |
-| `--peak-search-start` | `0` | 从该 tap 起才找首峰 |
+| `--peak-first-rel` | `0.5` | 首峰判定：窗口内第一个 `≥ 该比例 × 窗口 max(|CIR|)` 的 tap |
+| `--peak-search-start` | `0` | 搜索窗下界（含） |
+| `--peak-search-stop` | `-` | 搜索窗上界（含）；默认末 tap |
+| `--peak-cal-skip` | `5` | 开头 N 个脉冲只测量不修正（覆盖 retune settling） |
+| `--peak-cal-pulses` | `5` | skip 后修正 N 个脉冲即锁定（0=不锁定） |
+| `--peak-lock-frames` | `2` | 连续 N 个脉冲在 deadband 内即提前锁定（0=只按 cal-pulses） |
 | `--dry-run` | 关 | 只打印频率序列，不打开 UHD |
 
 ### 5.2 继承参数（与基础脚本相同）
@@ -301,34 +305,48 @@ python3 gr-uwb/apps/x410_cg400_hrp_echo_cir_sweep.py \
 tap = cir_pre + (path_delay_work - cal_work)
 ```
 
-所以 `cal_work` 每 +1 work sample，首峰就 −1 tap。脚本在每个脉冲后读回
-CIR taps，按
+所以 `cal_work` 每 +1 work sample，首峰就 −1 tap。脚本读回 CIR taps，按
 
 ```text
 cal_work += (first_peak_tap - target_tap)
 ```
 
 修正，并把新的 `calibration_delay_native_samples` 放进**下一个脉冲**的
-metadata（`65/32` 映射回 work 域）。无需 C++ 改动，通常 1–2 个脉冲收敛。
+metadata（`65/32` 映射回 work 域）。无需 C++ 改动。
 
-- 首峰定义：从 `--peak-search-start` 起，第一个
-  `≥ --peak-first-rel × max(|CIR|)` 的 tap。
-- 日志：启动打印 `[align] first peak -> tap 30 ...`，结束打印
-  `[align] target=30 frames=... applied=... last_first_peak=30 ...`。
-- 产物：`summary.json` 增 `align_*` 与 `peak_*`；`freq_sweep.jsonl` /
+### 6.4.1 锁定后冻结（lock-and-hold，默认行为）
+
+实测：**一次采集内硬件时延是常数**，跨频点（±3 MHz）首峰一个 tap 都不动；
+但**每次进程重启**会带一个 0–6 tap 的固定偏置（流启动相位）。所以 servo
+只在采集开头用几个脉冲标定一次，锁定后冻结，干扰再大也动不了 delay 轴：
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `--peak-cal-skip` | `5` | 前 N 个脉冲只测量、**不修正也不锁定**。覆盖 retune 后几拍的群时延 settling（实测前 4 拍会漂 ~30 tap） |
+| `--peak-cal-pulses` | `5` | skip 之后再修正 N 个脉冲，然后锁定 |
+| `--peak-lock-frames` | `2` | 连续 N 个脉冲落在 `deadband` 内就提前锁定 |
+| `--peak-search-stop` | `-` | 搜索窗上界（默认末 tap）；与 `--peak-search-start` 一起门控 |
+
+- 首峰定义：在 `[--peak-search-start, --peak-search-stop]` 窗口内，第一个
+  `≥ --peak-first-rel × 窗口内 max(|CIR|)` 的 tap。**门限用窗口内最大值**，
+  所以窗外的强干扰既抬不高门限、也抢不走 `first`。
+- 日志：启动 `[align] first peak -> tap 30 (... search=.., cal_skip=.., ...)`；
+  结束 `[align] locked=True skipped=5 adapt_frames=5 applied=4 cal_delay_native=... last_first_peak=30 ...`。
+- 产物：`summary.json` 增 `peak_*` / `align_*`（含 `align_locked`、
+  `align_skipped`、`align_adapt_frames`）；`freq_sweep.jsonl` /
   `echo_timing.jsonl` 每脉冲记录 `align_first_peak_tap`、`align_error`、
-  `cal_delay_native`。
-- **与扫频配合**：retune 引起群时延漂移时，servo 会自动跟随，使跨频点首峰
-  落在同一 tap，便于逐频比较。这正是做 CFO 扫描时想要的效果。
+  `align_locked`、`cal_delay_native`。
+- **恢复旧的持续闭环**：`--peak-cal-pulses 0 --peak-lock-frames 0`。
 - `--peak-target-tap 0`（默认）关闭，保持固定 `--cal-delay-native`。
 
 **注意**：
 
-- 若强干扰（如 DW3000）先于自泄漏出现且幅度更大，`first_rel` 可能选中它；
-  用 `--peak-search-start` 跳过前方、或调 `--peak-first-rel`。
+- 强干扰若落在**窗口内**且幅度更大，仍会抬门限；把窗口收紧到期望首峰附近
+  （如 `--peak-search-start 45 --peak-search-stop 75`）。
 - 目标 tap 要小于 `cir_pre+cir_post=116`，并给后续多径留空间。
 - servo 只改每个脉冲 metadata 里的校准值，不覆写命令行 `--cal-delay-native`；
-  `summary.json` 同时记录 `align_cal_delay_base_native` 与最终值。
+  `summary.json` 同时记录 `align_cal_delay_base_native` 与锁定后的值。
+- **跨进程不复用**同一个 `cal_delay_native`：每次运行开头重新锁定（默认就会）。
 
 **想手调**：`cal_delay_native += (peak_tap - target_tap) × 32/65`。
 例如从 `peak_tap=22` 到 30：`334 + (22-30)×32/65 ≈ 330.06`。
