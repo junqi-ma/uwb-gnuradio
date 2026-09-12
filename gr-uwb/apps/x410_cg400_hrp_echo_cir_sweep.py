@@ -191,6 +191,11 @@ def parse_args():
                    help="scan once then stop, or cycle until pulses")
     p.add_argument("--freq-settle-s", type=float, default=0.05,
                    help="delay after each retune before the next timed burst")
+    p.add_argument("--freq-unit", choices=list(fp.FREQ_UNIT_CHOICES),
+                   default=fp.DEFAULT_FREQ_UNIT,
+                   help="default unit for bare manual-mode numbers "
+                        "(default %s); explicit units/scientific notation win"
+                        % fp.DEFAULT_FREQ_UNIT)
     p.add_argument("--dry-run", action="store_true",
                    help="print the frequency plan and exit without touching UHD")
     return p.parse_args()
@@ -205,7 +210,8 @@ def build_freq_plan(a):
     return fp.FreqPlan(
         a.freq_mode, a.freq, start_hz=a.freq_start, stop_hz=a.freq_stop,
         step_hz=a.freq_step, dwell=a.freq_dwell,
-        once=(a.freq_scan == "once"), manual_q=manual_q)
+        once=(a.freq_scan == "once"), manual_q=manual_q,
+        freq_unit=a.freq_unit)
 
 
 def main():
@@ -237,6 +243,10 @@ def main():
     elif a.freq_mode == "manual" and a.pulses <= 0:
         a.pulses = 1 << 31
         print("[freq] manual: run until 'q'", flush=True)
+    if a.freq_mode == "manual":
+        print("[freq] manual: bare numbers are %s (e.g. +50 = +50 %s); "
+              "explicit units (5MHz) and scientific notation (10e6) win; "
+              "'q'+Enter stops" % (a.freq_unit, a.freq_unit), flush=True)
 
     print("[freq] mode=%s nominal=%.6fMHz points=%d dwell=%d total_pulses=%d"
           % (a.freq_mode, a.freq / 1e6, plan.n_points, plan.dwell, a.pulses),
@@ -424,6 +434,7 @@ def main():
         "freq_dwell": a.freq_dwell,
         "freq_scan": a.freq_scan,
         "freq_settle_s": a.freq_settle_s,
+        "freq_unit": a.freq_unit,
         "freq_points": plan.n_points,
         "freq_plan_hz": plan.freqs,
         "freq_retune_count": echo.retune_count,

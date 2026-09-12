@@ -125,17 +125,23 @@ python3 gr-uwb/apps/x410_cg400_hrp_echo_cir_sweep.py \
 
 | 输入 | 含义 |
 |---|---|
-| `6489.6MHz` | 绝对频率 |
-| `6489.6` | 绝对频率（裸数字 < 1e6 视为 MHz） |
-| `+5MHz` / `+5` | 相对标称的偏移（CFO = +5 MHz） |
-| `-2.5MHz` / `-10e6` | 负偏移（科学计数法按 Hz） |
+| `+50` | 相对标称 **+50 kHz**（裸数字默认按 kHz） |
+| `491` | 相对标称 +491 kHz |
+| `-2.5` | 相对标称 −2.5 kHz |
+| `+5MHz` | 相对标称 +5 MHz（显式单位覆盖默认） |
+| `-10e6` | 相对标称 −10 MHz（科学计数法按 Hz） |
+| `6489600kHz` | 绝对频率 6.4896 GHz |
+| `6489.6MHz` | 绝对频率 6.4896 GHz |
 | `f 6.5e9` | 绝对频率（显式） |
 | `off +1MHz` / `offset -1MHz` | 显式偏移 |
-| `status` / `?` | 打印当前目标频率与偏移 |
+| `status` / `?` | 打印当前目标频率与偏移（kHz） |
 | `q` / `quit` / `exit` | 结束运行 |
 | 空行 | 等同 `status` |
 
-单位 `GHz/MHz/kHz/Hz` 大小写不敏感。运行长度：
+**裸数字默认单位 = `--freq-unit`（默认 `khz`）**：无后缀、无指数的数字按
+kHz 解释（`+50` = +50 kHz，`491` = 491 kHz）。带单位后缀
+（`GHz/MHz/kHz/Hz`，大小写不敏感）或科学计数法（`10e6` = 10 MHz，按 Hz）
+时以显式为准。运行长度：
 
 - `--pulses 0` 或 `--rate-hz N --duration-s 0` → 跑到 `q`；
 - 否则跑给定脉冲数（默认 8）。
@@ -159,6 +165,7 @@ python3 gr-uwb/apps/x410_cg400_hrp_echo_cir_sweep.py \
 | `--freq-dwell` | `20` | 每个频点脉冲数（≥1） |
 | `--freq-scan` | `once` | `once` 扫完即停 / `cycle` 循环 |
 | `--freq-settle-s` | `0.05` | 每次 retune 后到下个定时突发的间隔（s） |
+| `--freq-unit` | `khz` | manual 裸数字默认单位（`hz/khz/mhz/ghz`）；显式单位/科学计数法优先 |
 | `--dry-run` | 关 | 只打印频率序列，不打开 UHD |
 
 ### 5.2 继承参数（与基础脚本相同）

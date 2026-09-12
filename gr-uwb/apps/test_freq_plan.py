@@ -28,12 +28,21 @@ class ParseValueTest(unittest.TestCase):
         self.assertAlmostEqual(fp.parse_freq_value("500kHz"), 5.0e5)
         self.assertAlmostEqual(fp.parse_freq_value("123Hz"), 123.0)
 
-    def test_bare_mhz_and_hz(self):
-        self.assertAlmostEqual(fp.parse_freq_value("6489.6"), 6.4896e9)
-        self.assertAlmostEqual(fp.parse_freq_value("+5"), 5.0e6)
+    def test_bare_defaults_to_khz(self):
+        # Bare numbers (no suffix, no exponent) use the default unit = kHz.
+        self.assertAlmostEqual(fp.parse_freq_value("+50"), 50.0e3)
+        self.assertAlmostEqual(fp.parse_freq_value("491"), 491.0e3)
+        # Scientific notation is always Hz.
         self.assertAlmostEqual(fp.parse_freq_value("10e6"), 10.0e6)
         self.assertAlmostEqual(fp.parse_freq_value("-10e6"), -10.0e6)
         self.assertAlmostEqual(fp.parse_freq_value("500e3"), 5.0e5)
+
+    def test_default_unit_override(self):
+        self.assertAlmostEqual(fp.parse_freq_value("5", "mhz"), 5.0e6)
+        self.assertAlmostEqual(fp.parse_freq_value("5", "hz"), 5.0)
+        self.assertAlmostEqual(fp.parse_freq_value("6489.6", "mhz"), 6.4896e9)
+        with self.assertRaises(ValueError):
+            fp.parse_freq_value("5", "bogus")
 
     def test_bad(self):
         for bad in ["", "abc", "MHz", "1.2.3MHz", "10GHzx"]:
@@ -64,6 +73,11 @@ class ParseCommandTest(unittest.TestCase):
                          ("delta", 1.0e6))
         self.assertEqual(fp.parse_freq_command("offset -1MHz", NOMINAL),
                          ("delta", -1.0e6))
+        # Bare delta uses the default unit (kHz) unless overridden.
+        self.assertEqual(fp.parse_freq_command("+50", NOMINAL),
+                         ("delta", 50.0e3))
+        self.assertEqual(fp.parse_freq_command("+50", NOMINAL, "mhz"),
+                         ("delta", 50.0e6))
 
     def test_bad(self):
         with self.assertRaises(ValueError):
@@ -157,6 +171,21 @@ class ManualPlanTest(unittest.TestCase):
         q.put("q")
         plan.freq_for(1)
         self.assertTrue(plan.stop_requested)
+
+    def test_manual_freq_unit(self):
+        q = queue.Queue()
+        plan = fp.FreqPlan("manual", NOMINAL, manual_q=q, freq_unit="khz")
+        q.put("+50")
+        self.assertAlmostEqual(plan.freq_for(0), NOMINAL + 50.0e3)
+
+        q2 = queue.Queue()
+        plan2 = fp.FreqPlan("manual", NOMINAL, manual_q=q2, freq_unit="mhz")
+        q2.put("+50")
+        self.assertAlmostEqual(plan2.freq_for(0), NOMINAL + 50.0e6)
+
+    def test_manual_invalid_unit(self):
+        with self.assertRaises(SystemExit):
+            fp.FreqPlan("manual", NOMINAL, freq_unit="bogus")
 
 
 class AnalyzeTest(unittest.TestCase):

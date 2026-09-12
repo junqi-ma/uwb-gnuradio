@@ -18,17 +18,18 @@ manual
 
 Command grammar (manual mode)
 -----------------------------
+    +50              offset from nominal in the default unit (kHz by default)
+    6489600kHz       absolute
     6489.6MHz        absolute
-    +5MHz            offset from nominal (CFO = +5 MHz)
-    -10e6            offset; bare numbers >= 1e6 are Hz
     f 6489.6e6       absolute (explicit)
     off +2.5MHz      offset (explicit)
     status | ?       print current target
     q | quit | exit  stop the run
 
-Bare numbers below 1e6 are interpreted as MHz (``6489.6`` -> 6.4896 GHz,
-``+5`` -> +5 MHz); this matches how the frequencies are talked about on this
-link.  Units ``GHz/MHz/kHz/Hz`` are accepted case-insensitively.
+Bare numbers (no unit suffix, no exponent) use ``--freq-unit`` (default
+``khz``): ``+50`` -> +50 kHz, ``491`` -> 491 kHz.  Scientific notation is
+always Hz (``-10e6`` -> -10 MHz).  Units ``GHz/MHz/kHz/Hz`` are accepted
+case-insensitively and override the default.
 """
 from __future__ import annotations
 
@@ -44,37 +45,38 @@ import threading
 _FREQ_RE = re.compile(
     r"^([+-]?)(\d+(?:\.\d*)?|\.\d+)(?:[eE]([+-]?\d+))?\s*([a-zA-Z]*)$")
 
+# Unit used for a bare manual-mode number (no suffix, no exponent).
+DEFAULT_FREQ_UNIT = "khz"
+FREQ_UNIT_CHOICES = ("hz", "khz", "mhz", "ghz")
+_UNIT_SCALE = {"hz": 1.0, "khz": 1e3, "mhz": 1e6, "ghz": 1e9}
 
-def parse_freq_value(token):
+
+def parse_freq_value(token, default_unit=DEFAULT_FREQ_UNIT):
     """Parse a bare/token number with an optional unit into Hz.
 
-    Raises ValueError on anything that is not a number(+unit).
+    ``default_unit`` applies only when the token has no unit suffix and no
+    exponent (scientific notation is always Hz).  Raises ValueError on
+    anything that is not a number(+unit).
     """
     m = _FREQ_RE.match(str(token).strip())
     if not m:
         raise ValueError("cannot parse frequency %r" % (token,))
+    if default_unit not in _UNIT_SCALE:
+        raise ValueError("unknown default unit %r" % (default_unit,))
     sign, mant, exp, unit = m.groups()
     val = float(mant + ("e" + exp if exp else ""))
     if sign == "-":
         val = -val
     u = unit.lower()
-    if u in ("ghz",):
-        val *= 1e9
-    elif u in ("mhz",):
-        val *= 1e6
-    elif u in ("khz",):
-        val *= 1e3
-    elif u in ("hz", ""):
-        # Bare small numbers are MHz; explicit "hz" and scientific notation
-        # (e.g. 500e3 = 500 kHz) are already Hz.
-        if u == "" and exp is None and abs(val) < 1e6:
-            val *= 1e6
-    else:
+    if u == "":
+        # No suffix: scientific notation is Hz, otherwise the default unit.
+        u = "hz" if exp is not None else default_unit
+    if u not in _UNIT_SCALE:
         raise ValueError("unknown frequency unit %r" % (unit,))
-    return val
+    return val * _UNIT_SCALE[u]
 
 
-def parse_freq_command(line, nominal_hz):
+def parse_freq_command(line, nominal_hz, default_unit=DEFAULT_FREQ_UNIT):
     """Parse one manual-mode line.
 
     Returns ``(action, value)`` where action is ``set`` (value = absolute Hz),
@@ -90,29 +92,33 @@ def parse_freq_command(line, nominal_hz):
     if low in ("status", "?", "s", "freq", "f?"):
         return ("status", None)
     if low.startswith("f "):
-        return ("set", parse_freq_value(s[2:].strip()))
+        return ("set", parse_freq_value(s[2:].strip(), default_unit))
     if low.startswith("freq "):
-        return ("set", parse_freq_value(s[5:].strip()))
+        return ("set", parse_freq_value(s[5:].strip(), default_unit))
     if low.startswith("off "):
-        return ("delta", parse_freq_value(s[4:].strip()))
+        return ("delta", parse_freq_value(s[4:].strip(), default_unit))
     if low.startswith("offset "):
-        return ("delta", parse_freq_value(s[7:].strip()))
+        return ("delta", parse_freq_value(s[7:].strip(), default_unit))
     if s[0] in "+-":
-        return ("delta", parse_freq_value(s))
-    return ("set", parse_freq_value(s))
+        return ("delta", parse_freq_value(s, default_unit))
+    return ("set", parse_freq_value(s, default_unit))
 
 
 class FreqPlan:
     """Decide the centre frequency for every pulse id."""
 
     def __init__(self, mode, nominal_hz, start_hz=None, stop_hz=None,
-                 step_hz=0.0, dwell=1, once=True, manual_q=None):
+                 step_hz=0.0, dwell=1, once=True, manual_q=None,
+                 freq_unit=DEFAULT_FREQ_UNIT):
+        if freq_unit not in _UNIT_SCALE:
+            raise SystemExit("unknown --freq-unit %r" % (freq_unit,))
         self.mode = str(mode)
         self.nominal = float(nominal_hz)
         self.dwell = max(1, int(dwell))
         self.once = bool(once)
         self._manual_q = manual_q
         self._manual_freq = float(nominal_hz)
+        self.freq_unit = str(freq_unit)
         self.stop_requested = False
         self.freqs = []
         self.start = None
@@ -186,7 +192,8 @@ class FreqPlan:
                 self.stop_requested = True
                 break
             try:
-                action, val = parse_freq_command(line, self.nominal)
+                action, val = parse_freq_command(
+                    line, self.nominal, self.freq_unit)
             except ValueError as exc:
                 print("[freq] %s" % exc, flush=True)
                 continue
@@ -195,19 +202,20 @@ class FreqPlan:
                 print("[freq] stop requested", flush=True)
                 break
             if action == "status":
-                print("[freq] current=%.6f MHz offset=%+.3f MHz"
-                      % (self._manual_freq / 1e6,
-                         (self._manual_freq - self.nominal) / 1e6),
+                print("[freq] current=%.3f kHz offset=%+.3f kHz (unit=%s)"
+                      % (self._manual_freq / 1e3,
+                         (self._manual_freq - self.nominal) / 1e3,
+                         self.freq_unit),
                       flush=True)
                 continue
             new = self.nominal + val if action == "delta" else val
             if not (new > 0.0):
-                print("[freq] ignore non-positive target %.3f MHz"
-                      % (new / 1e6), flush=True)
+                print("[freq] ignore non-positive target %.3f kHz"
+                      % (new / 1e3), flush=True)
                 continue
             self._manual_freq = new
-            print("[freq] manual -> %.6f MHz (offset %+.3f MHz)"
-                  % (new / 1e6, (new - self.nominal) / 1e6), flush=True)
+            print("[freq] manual -> %.3f kHz (offset %+.3f kHz)"
+                  % (new / 1e3, (new - self.nominal) / 1e3), flush=True)
 
 
 def start_manual_reader(q):
