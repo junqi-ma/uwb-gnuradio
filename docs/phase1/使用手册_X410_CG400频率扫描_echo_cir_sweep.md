@@ -338,11 +338,22 @@ metadata（`65/32` 映射回 work 域）。无需 C++ 改动，通常 1–2 个�
 ## 7. 实时 UDP
 
 - **默认开启**（除非 `--no-udp` 或 `--udp-host ""`）。每脉冲一帧，非阻塞。
-- 格式与基础脚本**完全一致**：28 字节 `UCR1` 头
-  （`magic,pulse_id,status,tap_count,sfd_metric,cir_peak_metric,peak_tap,
-  estimator_us`）+ 116×`complex64`；失败也发、taps 填 0。
-- **帧里不带频率**。按 `pulse_id` 对应本地 `freq_sweep.jsonl` 才能知道频点。
-- 对端：`python3 gr-uwb/apps/cir_udp_recv.py --bind 0.0.0.0 --port 12345`。
+- 本脚本发 **`UCR2`**：在基础脚本的 28 字节头后追加两个 `f64`
+  —— **`freq_hz`（当前中心频率）+ `freq_offset_hz`（相对 `--freq` 的 CFO）**，
+  共 44 字节头 + 116×`complex64`。失败也发、taps 填 0。
+- 基础脚本 `x410_cg400_hrp_echo_cir.py` 仍发旧 **`UCR1`**（28 字节，
+  **不带频率**）。
+- 频率用 `f64`：6.5 GHz 下 `f32` 分辨率约 512 Hz，会吃掉 kHz 级 CFO。
+- 每个脉冲的频率在发 CIR 之前就按 `pulse_id` 登记，正常每帧都是 UCR2；
+  查不到时回退 UCR1。
+- 对端 `cir_udp_recv.py` 同时支持 `UCR2`/`UCR1`/裸 taps：
+
+```bash
+python3 gr-uwb/apps/cir_udp_recv.py --bind 0.0.0.0 --port 12345
+```
+
+对端日志会打印当前帧的频率，例如
+`... freq=6494.600000MHz(off+5000.000kHz) ... v=2`。
 
 ---
 

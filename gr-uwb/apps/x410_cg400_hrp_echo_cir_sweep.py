@@ -58,6 +58,7 @@ class SweepTimedUhdEcho(base.TimedUhdEcho):
         self.tx_freq_actual = float(self.freq)
         self.rx_freq_actual = float(self.freq)
         self.freq_records = []
+        self.freq_by_pulse = {}
         self.retune_count = 0
         self.retune_fail = 0
 
@@ -89,6 +90,10 @@ class SweepTimedUhdEcho(base.TimedUhdEcho):
                 self.retune_fail += 1
                 print("[freq] retune to %.3f MHz failed, keep %.3f MHz: %s"
                       % (float(target) / 1e6, self.freq / 1e6, exc), flush=True)
+        # Publish this pulse's frequency before the CIR can be produced so the
+        # UDP sink can attach it to the matching UCR2 frame.
+        self.freq_by_pulse[int(pulse_id)] = (
+            self.freq, self.freq - self.nominal)
         ok = super()._one_burst(pulse_id)
         offset = self.freq - self.nominal
         dwell_index = (self.plan.dwell_index(pulse_id)
@@ -407,9 +412,12 @@ def main():
     udp = None
     udp_on = (not a.no_udp) and bool(a.udp_host)
     if udp_on:
-        udp = base.CirUdpSink(a.udp_host, int(a.udp_port), base.CIR_UDP_TAPS)
-        print("udp_cir %s:%s framed=UCR1 always_send_taps=%d nonblock" % (
-            a.udp_host, a.udp_port, base.CIR_UDP_TAPS), flush=True)
+        udp = base.CirUdpSink(
+            a.udp_host, int(a.udp_port), base.CIR_UDP_TAPS,
+            freq_lookup=lambda pid: echo.freq_by_pulse.get(int(pid)))
+        print("udp_cir %s:%s framed=UCR2(+freq_hz,freq_offset_hz) "
+              "always_send_taps=%d nonblock" % (
+                  a.udp_host, a.udp_port, base.CIR_UDP_TAPS), flush=True)
 
     align_sink = PeakAlignSink(align, echo) if align.enabled else None
     tb = base.gr.top_block("x410_cg400_hrp_echo_cir_sweep")
@@ -489,6 +497,7 @@ def main():
         "udp_sent": 0 if udp is None else udp.sent,
         "udp_sent_ok": 0 if udp is None else udp.sent_ok,
         "udp_sent_fail": 0 if udp is None else udp.sent_fail,
+        "udp_sent_freq": 0 if udp is None else udp.sent_freq,
         "udp_eagain": 0 if udp is None else udp.dropped,
         "cir": cir_stats,
         "timing": timing_stats,

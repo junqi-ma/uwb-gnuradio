@@ -149,6 +149,11 @@ IQ_SCALE = 32768.0
 CIR_UDP_MAGIC = b"UCR1"
 CIR_UDP_TAPS = 116
 CIR_UDP_HDR = struct.Struct("<4sIHHffiI")
+# UCR2 appends the per-pulse centre frequency (f64 so kHz-level CFO is not
+# lost to f32 rounding at 6.5 GHz).  Sent only when the sink is given a
+# freq_lookup; otherwise the legacy UCR1 frame is unchanged.
+CIR_UDP_MAGIC_V2 = b"UCR2"
+CIR_UDP_HDR_V2 = struct.Struct("<4sIHHffiIdd")
 CIR_UDP_STATUS = {
     "ok": 0,
     "sfd_failed": 1,
@@ -195,18 +200,25 @@ def _pmt_float(meta, key, default=0.0):
 
 
 class CirUdpSink(gr.basic_block):
-    """Non-blocking UDP sink for CIR PDUs. Always sends header+116 taps."""
+    """Non-blocking UDP sink for CIR PDUs. Always sends header+116 taps.
 
-    def __init__(self, host, port, tap_count=CIR_UDP_TAPS):
+    ``freq_lookup(pulse_id) -> (freq_hz, freq_offset_hz) | None`` makes the
+    sink emit a UCR2 frame carrying the per-pulse centre frequency (used by
+    the frequency-sweep app).  Without it the legacy UCR1 frame is sent.
+    """
+
+    def __init__(self, host, port, tap_count=CIR_UDP_TAPS, freq_lookup=None):
         gr.basic_block.__init__(self, name="cir_udp_sink",
                                 in_sig=None, out_sig=None)
         self.tap_count = int(tap_count)
+        self.freq_lookup = freq_lookup
         self._dst = (host, int(port))
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setblocking(False)
         self.sent = 0
         self.sent_ok = 0
         self.sent_fail = 0
+        self.sent_freq = 0
         self.dropped = 0
         self.message_port_register_in(pmt.intern("cir"))
         self.set_msg_handler(pmt.intern("cir"), self._on_cir)
@@ -225,16 +237,25 @@ class CirUdpSink(gr.basic_block):
                 taps[:n] = raw[:n]
         status_s = _pmt_str(meta, "status", "other")
         status = CIR_UDP_STATUS.get(status_s, 4)
-        hdr = CIR_UDP_HDR.pack(
-            CIR_UDP_MAGIC,
-            _pmt_int(meta, "pulse_id", 0) & 0xFFFFFFFF,
-            status,
-            self.tap_count,
-            _pmt_float(meta, "sfd_metric", 0.0),
-            _pmt_float(meta, "cir_peak_metric", 0.0),
-            _pmt_int(meta, "peak_tap", 0),
-            _pmt_int(meta, "estimator_us", 0) & 0xFFFFFFFF,
-        )
+        pulse_id = _pmt_int(meta, "pulse_id", 0) & 0xFFFFFFFF
+        sfd_m = _pmt_float(meta, "sfd_metric", 0.0)
+        peak_m = _pmt_float(meta, "cir_peak_metric", 0.0)
+        peak_tap = _pmt_int(meta, "peak_tap", 0)
+        est_us = _pmt_int(meta, "estimator_us", 0) & 0xFFFFFFFF
+        hdr = None
+        if self.freq_lookup is not None:
+            fr = self.freq_lookup(pulse_id)
+            if fr is not None:
+                freq_hz, freq_off = fr
+                hdr = CIR_UDP_HDR_V2.pack(
+                    CIR_UDP_MAGIC_V2, pulse_id, status, self.tap_count,
+                    sfd_m, peak_m, peak_tap, est_us, float(freq_hz),
+                    float(freq_off))
+                self.sent_freq += 1
+        if hdr is None:
+            hdr = CIR_UDP_HDR.pack(
+                CIR_UDP_MAGIC, pulse_id, status, self.tap_count, sfd_m,
+                peak_m, peak_tap, est_us)
         try:
             self._sock.sendto(hdr + taps.tobytes(), self._dst)
         except (BlockingIOError, InterruptedError, OSError):
