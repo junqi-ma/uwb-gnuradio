@@ -182,6 +182,21 @@ EchoTimer 与 CIR）。
 - 物理 RX 缩窗/UHD 事务优化（M6）：未做。
 - `uwb_qa_uwb_pdu_rational_resampler.cc` 吞吐阈值：环境阻塞。
 
+## 9b. 默认后端变更（cpp-pdu）
+
+自本轮起 `x410_cg400_hrp_echo_cir.py` 与 `x410_cg400_hrp_echo_cir_sweep.py`
+的 `--echo-backend` **默认改为 `cpp-pdu`**（Python 保留为 fallback）。动机：
+scan retune + peak servo 会放大 Python 定时路径的 TX underflow。实测同一
+300 kHz 降序 scan：
+
+| 后端 | UHD `U`（TX underflow） | 结果 |
+|---|---:|---|
+| python | 5656（大量 `UUUU`） | late=22 / 21000 |
+| **cpp-pdu（默认）** | **0** | 200/200 ok、late=0、retune=2、servo 锁 tap 30 |
+
+注意：`--dump-rx/--dump-sc16` 仅 python 后端支持；cpp-pdu 下会告警并禁用。
+scan 的 `--freq-step` 单位是 **Hz**（不是 kHz）；300 kHz 写 `300e3`。
+
 ## 10. 改动文件（本轮）
 
 - `gr-uwb/include/gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_32.h`、

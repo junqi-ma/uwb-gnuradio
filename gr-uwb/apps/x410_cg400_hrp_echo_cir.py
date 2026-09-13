@@ -1126,11 +1126,15 @@ def build_parser(add_help=True):
                         "testdata/uwb_hrp_tx/pulse_minphase_rc160_240.f32")
     p.add_argument("--output", required=True)
     p.add_argument("--taps", default="")
-    p.add_argument("--echo-backend", default="python",
+    p.add_argument("--echo-backend", default=None,
                    choices=["python", "cpp-pdu"],
-                   help="python = TimedUhdEcho (per-pulse PMT publisher); "
-                        "cpp-pdu = C++ UwbRealtimeEchoTimer message-only "
-                        "grid (no Python timed path). Default python.")
+                   help="cpp-pdu (default) = C++ UwbRealtimeEchoTimer "
+                        "message-only grid: no Python timed path, no per-pulse "
+                        "PMT/GIL, retune at burst boundaries; python = legacy "
+                        "TimedUhdEcho per-pulse PMT publisher (fallback, "
+                        "emits TX underflow 'U' when retuning/servoed). "
+                        "When unset and --dump-rx/--dump-sc16 is given, it "
+                        "auto-selects python (cpp-pdu has no dump sink yet).")
     p.add_argument("--res-workers", type=int, default=1,
                    help="PDU 65/32 FIR persistent worker threads; 1 keeps "
                         "single-thread results. 200 Hz downstream headroom "
@@ -1172,6 +1176,26 @@ def build_parser(add_help=True):
 
 def parse_args():
     return build_parser().parse_args()
+
+
+def resolve_echo_backend(a):
+    """Resolve an unset --echo-backend.
+
+    cpp-pdu is the default (no Python timed path).  --dump-rx/--dump-sc16
+    are only implemented by the python backend, so an unset backend with a
+    dump request falls back to python with a note, keeping the documented
+    dump commands working.  An explicitly requested cpp-pdu + dump still
+    warns and disables the dump in main().
+    """
+    if a.echo_backend is None:
+        if a.dump_rx or a.dump_sc16:
+            a.echo_backend = "python"
+            print("NOTE --echo-backend unset with --dump-rx/--dump-sc16: "
+                  "using the python backend (cpp-pdu has no dump sink yet)",
+                  flush=True)
+        else:
+            a.echo_backend = "cpp-pdu"
+    return a.echo_backend
 
 
 def analyze_cir(jsonl_path, pulses):
@@ -1278,6 +1302,7 @@ def analyze_timing(path):
 def main():
     bootstrap_uhd_env()
     a = parse_args()
+    resolve_echo_backend(a)
     # --preamble-length is the primary knob; --sync-reps stays as a
     # backward-compatible alias.  Both must agree when given together.
     if a.preamble_length is not None and a.sync_reps is not None \

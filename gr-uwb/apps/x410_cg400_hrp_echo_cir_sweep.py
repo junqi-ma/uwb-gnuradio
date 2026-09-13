@@ -7,14 +7,16 @@ the 65/32 resampler and the 998.4 MS/s CIR estimator are unchanged.
 
 Echo backends (``--echo-backend``, inherited from the base parser)
 -----------------------------------------------------------------
-python  ``SweepTimedUhdEcho`` -- per-pulse Python PMT publisher (unchanged).
-cpp-pdu ``SweepCppPduEcho``  -- the C++ UwbRealtimeEchoTimer message-only
+cpp-pdu ``SweepCppPduEcho``  -- **default**.  The C++ UwbRealtimeEchoTimer
+        message-only
         grid.  Retune is queued with ``blk.set_freq`` (the radio worker tunes
         at a burst boundary); calibration is pushed with
         ``blk.set_cal_delay_native``.  Python never calls a UHD tune on this
         path.  The grid is armed per constant-frequency dwell so
         ``freq_hz``/``freq_offset_hz`` stay keyed by ``pulse_id`` for the same
         JSONL join as the Python path.
+python  ``SweepTimedUhdEcho`` -- legacy per-pulse Python PMT publisher
+        (fallback; retuning/servo can starve the timed TX and emit 'U').
 
 Modes (``--freq-mode``)
 -----------------------
@@ -526,6 +528,7 @@ def build_freq_plan(a):
 def main():
     base.bootstrap_uhd_env()
     a = parse_args()
+    base.resolve_echo_backend(a)
     if a.preamble_length is not None and a.sync_reps is not None \
             and a.preamble_length != a.sync_reps:
         raise SystemExit("--preamble-length=%d conflicts with --sync-reps=%d"
