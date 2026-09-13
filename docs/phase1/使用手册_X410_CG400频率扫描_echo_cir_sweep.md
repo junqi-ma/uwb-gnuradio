@@ -194,6 +194,7 @@ kHz 解释（`+50` = +50 kHz，`491` = 491 kHz）。带单位后缀
 | `--pre-guard-us` | `2.0` | RX 窗在 TX 前的保护 |
 | `--tail-guard-us` | `20.0` | RX 窗尾部保护 |
 | `--rx-pad-us` | `8.0` | TX 突发后额外 native 采样 |
+| `--publish-native` | `-1` | 每脉冲发给 CIR 估计器的 native 采样数：`-1`=自动（前导+CIR 跨度）、`0`=完整 RX 窗、`>0`=显式。调小可显著降低宿主 GIL 占用与定时 TX underflow（`U`） |
 
 **RF**
 
@@ -464,6 +465,7 @@ for off in sorted(set(a[:, 0])):
 | 主峰位置随频率漂 | `--cal-delay-native` 是定频校准；必要时 `--require-sfd` |
 | DW3000 在时大量 `sfd_failed` | 默认用预测时刻估 CIR；只有 `--require-sfd` 才会被 SFD 门控打掉 |
 | `est_drop>0` | 估计器跟不上（队列 64）；参考基础脚本调 `--sfd-search-margin` |
+| 控制台刷 `U`（UHD TX underflow） | 宿主每脉冲把整个 RX 窗转成 PMT 占 GIL ~ms，定时 TX 喂不上；默认 `--publish-native -1` 已只发 CIR 需要的段。若仍偶发，再调小 `--publish-native`、降 `--rate-hz`、加大 `--freq-settle-s`。注意 pyuhd 的 `TXMetadata` 无 `error_code`，脚本无法计数 `U` |
 | `--freq-dwell 1` 且高频 | 每个 burst 都 retune，开销大易 `late`；建议 dwell ≥20 |
 
 **频率方向**：scan 的方向由起止决定——`--freq-stop > --freq-start` 递增，

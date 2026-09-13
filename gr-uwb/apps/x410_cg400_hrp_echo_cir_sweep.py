@@ -416,7 +416,8 @@ def main():
         a.pre_guard_us, 15.0, a.tail_guard_us, a.sync_reps,
         a.cal_delay_native, a.arm_delay_s, a.pri_s, a.pulses, dump_dir,
         a.min_lead_s, timing_path, sc16_dir, a.rx_pad_us, a.code_index,
-        base.SFD_MODE, plan=plan, align=align, freq_settle_s=a.freq_settle_s)
+        base.SFD_MODE, publish_native=a.publish_native, plan=plan, align=align,
+        freq_settle_s=a.freq_settle_s)
     echo.set_tx_native(native)
     print("uhd_probe", echo.status, flush=True)
     if a.dump_sc16:
@@ -506,6 +507,8 @@ def main():
         "echo_fail": echo._fail,
         "echo_late": echo._late,
         "echo_pub": echo._pub_ok,
+        "tx_send_error": echo._tx_send_error,
+        "publish_native": echo.publish_native,
         "res_rx": res.pdus_received(),
         "res_tx": res.pdus_emitted(),
         "res_drop": res.pdus_dropped(),

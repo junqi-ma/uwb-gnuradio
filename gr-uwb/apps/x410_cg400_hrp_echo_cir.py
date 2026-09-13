@@ -291,14 +291,16 @@ def start_live_stats(echo, est, wr, udp, stop_evt, pri_s):
             udp_eagain = 0 if udp is None else udp.dropped
             print(
                 "live dt=%.3f echo_ok_hz=%.1f cir_ok_hz=%.1f cir_fail_hz=%.1f "
-                "est_q=%d est_drop=%d wr_hz=%.1f udp_hz=%.1f udp_ok_hz=%.1f "
-                "udp_eagain=%d service_us_mean=%d max=%d pri_hz=%.1f" % (
+                "est_q=%d est_drop=%d tx_err=%d wr_hz=%.1f udp_hz=%.1f "
+                "udp_ok_hz=%.1f udp_eagain=%d service_us_mean=%d max=%d "
+                "pri_hz=%.1f" % (
                     dt,
                     (echo_ok - prev[1]) / dt,
                     (cir_ok - prev[2]) / dt,
                     (cir_fail - prev[3]) / dt,
                     int(est.queue_depth()),
                     est_drop,
+                    echo._tx_send_error,
                     (wr_ok - prev[5]) / dt,
                     (udp_n - prev[6]) / dt,
                     (udp_ok - prev[7]) / dt,
@@ -337,6 +339,27 @@ def rx_geometry(rate, pre_us, sync_reps, range_m, tail_us,
     return pre, sync, sfd, rng, tail, pad, rx
 
 
+def cir_publish_native(pre_native, sync_reps, cal_native,
+                       cir_pre=16, cir_post=100, cir_skip=10,
+                       margin_native=4096):
+    """Upper bound on the native samples the CIR estimator can read.
+
+    ``estimate_radar_cir`` reads windows of ``SPS + pre + post - 1`` work
+    samples at repetition offsets ``k*sps`` for ``k = skip .. reps-1``,
+    starting at ``origin = pre_guard + cal``.  The full RX window is sized
+    for the whole TX burst (hundreds of us); publishing all of it to a PMT
+    every pulse costs milliseconds of GIL time and can starve the timed TX
+    loop.  This returns a conservative publish length covering every read
+    the estimator can make, plus a native-sample margin.
+    """
+    ratio = WORK_HZ / CG400_HZ
+    count = max(0, int(sync_reps) - int(cir_skip))
+    wlen = SPS + int(cir_pre) + int(cir_post) - 1
+    need_work = ((float(pre_native) + float(cal_native)) * ratio
+                 + count * SPS + wlen)
+    return int(math.ceil(need_work / ratio)) + int(margin_native)
+
+
 class TimedUhdEcho(gr.basic_block):
     """Downsample 998.4 TX PDU to 491.52, timed USRP burst, emit native RX PDU."""
 
@@ -345,7 +368,8 @@ class TimedUhdEcho(gr.basic_block):
                  cal_delay_native, arm_delay_s, pri_s, max_pulses,
                  rx_dump_dir="", min_lead_s=0.002, timing_path="",
                  sc16_dump_dir="", rx_pad_us=8.0,
-                 code_index=DEFAULT_CODE_INDEX, sfd_mode=SFD_MODE):
+                 code_index=DEFAULT_CODE_INDEX, sfd_mode=SFD_MODE,
+                 publish_native=0):
         gr.basic_block.__init__(self, name="timed_uhd_echo",
                                 in_sig=None, out_sig=None)
         self.rate = float(rate)
@@ -373,6 +397,10 @@ class TimedUhdEcho(gr.basic_block):
         self.rx_pad_us = float(rx_pad_us)
         self.pre, self.sync_n, self.sfd_n, self.rng_n, self.tail, self.pad_n, self.rx_len = \
             rx_geometry(rate, pre_us, sync_reps, range_m, tail_us, 0, self.rx_pad_us)
+        if int(publish_native) < 0:
+            publish_native = cir_publish_native(
+                self.pre, self.sync_reps, self.cal_delay_native)
+        self.publish_native = int(publish_native)
 
         self.message_port_register_in(pmt.intern("tx"))
         self.message_port_register_out(pmt.intern("rx"))
@@ -419,11 +447,13 @@ class TimedUhdEcho(gr.basic_block):
         self._sc16_jsonl = None
         self._sc16_offset = 0
         self._sc16_written = 0
+        self._tx_send_error = 0
         self.status = {
             "tx_rate": tx_rate, "rx_rate": rx_rate,
             "tx_ant": self._usrp.get_tx_antenna(self.tx_ch),
             "rx_ant": self._usrp.get_rx_antenna(self.rx_ch),
             "rx_window": self.rx_len, "pre": self.pre,
+            "publish_native": self.publish_native,
             "pri_s": self.pri_s, "max_pulses": self.max_pulses,
             "rx_pad_us": self.rx_pad_us,
             "code_index": self.code_index, "sfd_mode": self.sfd_mode,
@@ -526,17 +556,24 @@ class TimedUhdEcho(gr.basic_block):
         n = wave.size
         maxp = int(self._tx_stream.get_max_num_samps())
         buf = wave.reshape(1, -1)
+        problems = []
         while sent < n:
             chunk = min(maxp, n - sent)
             if sent + chunk >= n:
                 md.end_of_burst = True
             nsent = self._tx_stream.send(buf[:, sent:sent + chunk], md, timeout)
             if nsent <= 0:
-                return sent, "send_stalled"
+                problems.append("send_stalled")
+                break
+            if nsent < chunk:
+                # Short send: the radio drained the FIFO before we refilled
+                # it (TX underflow shows up here; uhd's TXMetadata binding
+                # does not expose error_code).
+                problems.append("short_send")
             sent += nsent
             md.has_time_spec = False
             md.start_of_burst = False
-        return sent, ""
+        return sent, ";".join(problems)
 
     def _recv(self, n, timeout):
         maxp = int(self._rx_stream.get_max_num_samps())
@@ -642,6 +679,11 @@ class TimedUhdEcho(gr.basic_block):
             pulse_id, rx = item
             t0 = time.perf_counter()
             rx = np.ascontiguousarray(rx, dtype=np.complex64)
+            # The CIR estimator only reads the preamble region; publishing
+            # the whole TX-burst-sized window costs ~ms of GIL time per pulse
+            # and can starve the timed TX loop (uhd reports TX underflow).
+            if 0 < self.publish_native < rx.size:
+                rx = rx[:self.publish_native]
             rx_pmt = pmt.init_c32vector(int(rx.size), rx.tolist())
             meta = self._make_rx_meta(pulse_id)
             self.message_port_pub(pmt.intern("rx"), pmt.cons(meta, rx_pmt))
@@ -686,10 +728,13 @@ class TimedUhdEcho(gr.basic_block):
         t_issue = time.perf_counter()
         self._rx_stream.issue_stream_cmd(cmd)
         sent, send_err = self._send(self._native, t_tx, timeout=2.0)
+        if send_err:
+            self._tx_send_error += 1
         timeout = max(0.5, (t_tx - now) + self.rx_len / self.rate + 0.25)
         rx, got, first, status, err = self._recv(self.rx_len, timeout)
         rec["uhd_ms"] = (time.perf_counter() - t_issue) * 1e3
         rec["tx_sent"] = sent
+        rec["tx_error"] = send_err
         rec["rx_got"] = got
         rec["rx_first"] = first
         rec["status"] = status
@@ -803,6 +848,11 @@ def build_parser(add_help=True):
     p.add_argument("--output", required=True)
     p.add_argument("--taps", default="")
     p.add_argument("--template", default="")
+    p.add_argument("--publish-native", type=int, default=-1,
+                   help="native samples published to the CIR estimator each "
+                        "pulse: -1 auto (preamble + CIR span), 0 = full RX "
+                        "window, >0 explicit; smaller cuts host GIL time and "
+                        "timed-TX underflow")
     p.add_argument("--dump-rx", action="store_true")
     p.add_argument("--dump-sc16", action="store_true",
                    help="Write native RX windows as capture.iq + capture.jsonl (SC16)")
@@ -991,7 +1041,8 @@ def main():
         a.tx_antenna, a.rx_antenna, a.gain_tx, a.gain_rx,
         a.pre_guard_us, 15.0, a.tail_guard_us, a.sync_reps, a.cal_delay_native,
         a.arm_delay_s, a.pri_s, a.pulses, dump_dir, a.min_lead_s, timing_path,
-        sc16_dir, a.rx_pad_us, a.code_index, SFD_MODE)
+        sc16_dir, a.rx_pad_us, a.code_index, SFD_MODE,
+        publish_native=a.publish_native)
     echo.set_tx_native(native)
     print("uhd_probe", echo.status, flush=True)
     if a.dump_sc16:
@@ -1070,6 +1121,8 @@ def main():
         "echo_fail": echo._fail,
         "echo_late": echo._late,
         "echo_pub": echo._pub_ok,
+        "tx_send_error": echo._tx_send_error,
+        "publish_native": echo.publish_native,
         "res_rx": res.pdus_received(),
         "res_tx": res.pdus_emitted(),
         "res_drop": res.pdus_dropped(),
