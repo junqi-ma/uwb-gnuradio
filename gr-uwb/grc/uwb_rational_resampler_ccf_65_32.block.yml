@@ -1,0 +1,54 @@
+id: uwb_rational_resampler_ccf_65_32
+label: UWB Rational Resampler 65/32 (CF32, tagged stream)
+category: '[UWB]'
+
+parameters:
+-   id: taps_file_or_profile
+    label: Taps file / profile
+    dtype: string
+    default: 'quality_minorder'
+    # "quality" | "realtime" | "quality_minorder" | "realtime_minorder" | path
+-   id: map_radar_tags
+    label: Map radar metadata tags
+    dtype: bool
+    default: 'True'
+-   id: num_workers
+    label: FIR worker threads
+    dtype: int
+    default: '1'
+-   id: lengthtagname
+    label: Length tag name
+    dtype: string
+    default: 'packet_len'
+
+inputs:
+-   domain: stream
+    dtype: complex
+
+outputs:
+-   domain: stream
+    dtype: complex
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.rational_resampler_ccf_65_32(${taps_file_or_profile}, ${map_radar_tags}, ${num_workers}, ${lengthtagname})
+
+cpp_templates:
+    includes: ['#include <gnuradio/uwb/uwb_rational_resampler_ccf_65_32.h>']
+    make: 'this->${id} = gr::uwb::UwbRationalResamplerCcf65_32::make(${taps_file_or_profile}, ${map_radar_tags}, ${num_workers}, ${lengthtagname});'
+    link: ['gnuradio::gnuradio-uwb']
+
+documentation: |-
+    Fixed 65/32 CF32 tagged-stream rational resampler
+    (491.52 MS/s CG400 native -> 998.4 MS/s work).
+
+    One "packet_len"-delimited window per work() call; the core is reset and
+    flushed per window so the result matches the one-shot PDU resampler and
+    does not depend on the pulse repetition interval.
+
+    When map_radar_tags is true the native radar metadata tags
+    (window_start_sample, pre_guard_samples, capture_samples,
+    post_guard_samples, calibration_delay_*) are mapped to the work domain
+    with the same map_input_offset_to_output law as the PDU resampler.
+
+file_format: 1

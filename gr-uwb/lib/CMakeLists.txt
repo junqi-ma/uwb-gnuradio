@@ -68,6 +68,7 @@ list(APPEND uwb_sources
     uwb_auto_scheduled_extractor_sc16.cc
     uwb_realtime_demodulator.cc
     uwb_rational_resampler_ccf_65_48.cc
+    uwb_rational_resampler_ccf_65_32.cc
     uwb_pdu_rational_resampler_ccf_65_48.cc
     uwb_pdu_rational_resampler_ccf_65_32.cc
     uwb_pdu_window_crop.cc
@@ -162,6 +163,7 @@ list(APPEND test_uwb_sources
     qa_uwb_pdu_rational_resampler.cc
     qa_uwb_pdu_rational_resampler_65_32.cc
     qa_uwb_rational_resampler_core_65_32.cc
+    qa_uwb_rational_resampler_65_32_stream.cc
     qa_uwb_pdu_window_crop.cc
     qa_uwb_tone_canceller.cc
     qa_uwb_scheduled_dump_io.cc

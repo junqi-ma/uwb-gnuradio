@@ -27,6 +27,7 @@
 #include <gnuradio/uwb/uwb_scheduled_extractor_sc16.h>
 #include <gnuradio/uwb/uwb_auto_scheduled_extractor_sc16.h>
 #include <gnuradio/uwb/uwb_rational_resampler_ccf_65_48.h>
+#include <gnuradio/uwb/uwb_rational_resampler_ccf_65_32.h>
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_32.h>
 #include <gnuradio/uwb/uwb_pdu_window_crop.h>
@@ -507,6 +508,39 @@ void bind_rational_resampler_ccf_65_48(py::module& m)
              py::arg("p"));
 }
 
+void bind_rational_resampler_ccf_65_32(py::module& m)
+{
+    using Blk = gr::uwb::UwbRationalResamplerCcf65_32;
+
+    py::class_<Blk, gr::block, std::shared_ptr<Blk>>(
+        m, "rational_resampler_ccf_65_32")
+        .def(py::init(&Blk::make),
+             py::arg("taps_file_or_profile") = std::string("quality_minorder"),
+             py::arg("map_radar_tags") = true,
+             py::arg("num_workers") = 1,
+             py::arg("lengthtagname") = std::string("packet_len"))
+        .def_static("make_from_taps",
+                    &Blk::make_from_taps,
+                    py::arg("taps"),
+                    py::arg("map_radar_tags") = true,
+                    py::arg("num_workers") = 1,
+                    py::arg("lengthtagname") = std::string("packet_len"))
+        .def("taps", &Blk::taps)
+        .def("tap_count", &Blk::tap_count)
+        .def("map_radar_tags", &Blk::map_radar_tags)
+        .def("kernel_name", &Blk::kernel_name)
+        .def("num_workers", &Blk::num_workers)
+        .def("set_num_workers", &Blk::set_num_workers, py::arg("n"))
+        .def("set_kernel", &Blk::set_kernel, py::arg("name"))
+        .def("windows", &Blk::windows)
+        .def("input_items", &Blk::input_items)
+        .def("output_items", &Blk::output_items)
+        .def("tag_errors", &Blk::tag_errors)
+        .def("map_input_offset_to_output",
+             &Blk::map_input_offset_to_output,
+             py::arg("p"));
+}
+
 void bind_pdu_rational_resampler_ccf_65_48(py::module& m)
 {
     using Blk = gr::uwb::UwbPduRationalResamplerCcf65_48;
@@ -576,12 +610,57 @@ void bind_pdu_rational_resampler_ccf_65_32(py::module& m)
              py::arg("output_sample_rate") = Blk::kOutputRateHz,
              py::arg("validate_input_rate") = true,
              py::arg("max_input_samples") = Blk::kDefaultMaxInputSamples)
+        .def_static(
+            "make_from_taps",
+            [](const std::vector<float>& taps,
+               double output_sample_rate,
+               bool validate_input_rate,
+               int emit_policy,
+               size_t max_input_samples) {
+                return Blk::make_from_taps(
+                    taps,
+                    output_sample_rate,
+                    validate_input_rate,
+                    static_cast<Blk::EmitPolicy>(emit_policy),
+                    max_input_samples);
+            },
+            py::arg("taps"),
+            py::arg("output_sample_rate") = Blk::kOutputRateHz,
+            py::arg("validate_input_rate") = true,
+            py::arg("emit_policy") =
+                static_cast<int>(Blk::EmitPolicy::FullWindow),
+            py::arg("max_input_samples") = Blk::kDefaultMaxInputSamples)
+        .def("taps", &Blk::taps)
+        .def("tap_count", &Blk::tap_count)
+        .def("output_sample_rate", &Blk::output_sample_rate)
+        .def("validate_input_rate", &Blk::validate_input_rate)
+        .def("emit_policy",
+             [](const Blk& self) {
+                 return static_cast<int>(self.emit_policy());
+             })
+        .def(
+            "set_emit_policy",
+            [](Blk& self, int p) {
+                self.set_emit_policy(static_cast<Blk::EmitPolicy>(p));
+            },
+            py::arg("p"))
+        .def("max_input_samples", &Blk::max_input_samples)
+        .def("max_output_samples", &Blk::max_output_samples)
         .def("map_input_offset_to_output",
              &Blk::map_input_offset_to_output,
              py::arg("p"))
         .def("pdus_received", &Blk::pdus_received)
         .def("pdus_emitted", &Blk::pdus_emitted)
         .def("pdus_dropped", &Blk::pdus_dropped)
+        .def("total_input_samples", &Blk::total_input_samples)
+        .def("total_output_samples", &Blk::total_output_samples)
+        .def("resets", &Blk::resets)
+        .def("short_guard_events", &Blk::short_guard_events)
+        .def("resample_total_us", &Blk::resample_total_us)
+        .def("resample_max_us", &Blk::resample_max_us)
+        .def("handler_total_us", &Blk::handler_total_us)
+        .def("input_convert_total_us", &Blk::input_convert_total_us)
+        .def("publish_total_us", &Blk::publish_total_us)
         .def("reset_stats", &Blk::reset_stats);
 }
 
@@ -820,6 +899,7 @@ PYBIND11_MODULE(uwb_python, m)
     bind_auto_scheduled_extractor_sc16(m);
     bind_realtime_demodulator(m);
     bind_rational_resampler_ccf_65_48(m);
+    bind_rational_resampler_ccf_65_32(m);
     bind_pdu_rational_resampler_ccf_65_48(m);
     bind_pdu_rational_resampler_ccf_65_32(m);
     bind_pdu_window_crop(m);
