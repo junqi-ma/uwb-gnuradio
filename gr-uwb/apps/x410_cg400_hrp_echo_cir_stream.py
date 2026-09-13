@@ -542,6 +542,11 @@ def parse_args():
                    help="calibrate on the first N bursts after the skip")
     p.add_argument("--peak-lock-frames", type=int, default=2,
                    help="lock early after this many in-deadband bursts")
+    p.add_argument("--res-workers", type=int, default=4,
+                   help="65/32 resampler FIR worker threads (1 = single; "
+                        "spread the per-window FIR over cores). The stream "
+                        "chain is FIR-bound: 1 thread caps it near 100 Hz, "
+                        "4-16 match the PDU chain at 200 Hz")
     p.add_argument("--dry-run", action="store_true",
                    help="print the plan and exit without touching UHD")
     return p.parse_args()
@@ -718,7 +723,7 @@ def main():
         a.sync_reps, base.SFD_MODE, a.code_index, a.cal_delay_native,
         max_frames, 1000, 1 << 21, 1 << 21, "packet_len")
     res = base.uwb.rational_resampler_ccf_65_32(
-        taps, True, 1, "packet_len")
+        taps, True, int(getattr(a, "res_workers", 1) or 1), "packet_len")
     bridge = blocks.tagged_stream_to_pdu(gr.types.complex_t, "packet_len")
     est = base.uwb.radar_cir_estimator(
         tmpl_path, a.sync_reps, base.SFD_MODE, a.code_index, 16, 100, 10, 0,

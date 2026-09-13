@@ -202,6 +202,34 @@ python3 gr-uwb/apps/x410_cg400_hrp_echo_cir_stream.py \
   外，**37/37 全过**；`test_echo_stream_buffers` 8/8、`test_freq_plan` 35/35、
   `test_cir_udp_format` 5/5。
 
+### 5.1 处理速度：stream vs 旧 PDU 链
+
+同一配置（preamble 128、minphase、gain 50/60、`--no-udp`），看 `late`（错过
+调度槽数）与 `schedule_wall_s`（墙钟，接近 `帧数×PRI` 为达标）：
+
+| 速率 | 旧 PDU 链 | 流式链（res-workers=1） | 流式链（res-workers=16） |
+|---|---|---|---|
+| 100 Hz | 0 late，实时 | 0 late，实时 | — |
+| 200 Hz | **1** late，1.247 s | **196** late，2.253 s | **0** late，1.252 s |
+| 500 Hz | 102 late，0.651 s | 871 late，2.303 s | 939 late，2.955 s |
+
+结论：
+
+- **低速（≤100 Hz）**：两条链都能实时，CPU 相当；流式链去掉了 Python
+  `tolist()+init_c32vector`（GIL 热点），但 C++ SC16↔fc32 与 tag 机制抵消了。
+- **中速（200 Hz）**：流式链默认 1 个 FIR worker 时被 **65/32 重采样 FIR**
+  卡住，回压到 echo 的调度 → 大量 `late`；把重采样器配置成多 worker
+  （`--res-workers 4…16`）后 **与 PDU 链持平（late=0，1.252 s）**。
+  单 worker 是本链真正的吞吐瓶颈：每窗 109288→222k 点的多相 FIR。
+- **高速（500 Hz）**：两条链都跟不上（每 burst UHD I/O ~3–7 ms）；
+  流式链的 C++ `UhdBurstBackend` 每 burst 开销更大，暂不如 PDU 链。
+
+**所以：目前流式版并没有提升处理速度**——它解决了原 PDU 链的 Python/GIL
+`U` underflow 隐患并更接近 gr-radar 结构，但把瓶颈暴露成「每窗 FIR」与
+「每 burst C++ UHD 后端开销」。已加 `--res-workers`（默认 4）让中速达标；
+要进一步提升需要：优化 65/32 FIR（更小 `realtime_minorder` taps / 更多
+worker / AVX）、以及精简 `UhdBurstBackend` 的每 burst 路径。
+
 ## 6. 验收与风险
 
 **验收**
