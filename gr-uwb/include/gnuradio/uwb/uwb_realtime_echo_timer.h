@@ -33,6 +33,12 @@
  *                                         (default 0)
  *   pulse_id          (u64, optional)     passthrough id on burst results
  *                                         (default schedule_index)
+ *   pulse_id_increment(u64, optional)     when != 0, emit
+ *                                         pulse_id + (schedule_index -
+ *                                         schedule_index_of_this_PDU) per
+ *                                         burst so a single multi-burst
+ *                                         schedule yields unique ids (0 =
+ *                                         constant passthrough, default)
  *   burst_count       (u64, optional)     produce this many bursts, then
  *                                         publish "grid_complete"
  *                                         (default 0 = unlimited)
@@ -80,6 +86,11 @@
 #include <gnuradio/uwb/api.h>
 #include <gnuradio/uwb/uwb_echo_burst_backend.h>
 #include <gnuradio/uwb/uwb_echo_scheduler_core.h>
+
+#ifdef UWB_HAVE_UHD
+#include <gnuradio/uwb/uwb_uhd_backend_config.h>
+#endif
+
 #include <pmt/pmt.h>
 
 #include <atomic>
@@ -127,6 +138,19 @@ public:
                      uint64_t max_tx_samples = 1u << 21,
                      uint64_t max_rx_samples = 1u << 21);
 
+#ifdef UWB_HAVE_UHD
+    /**
+     * UHD convenience factory: builds a UhdBurstBackend from uhd_cfg and
+     * forwards to make().  Block type stays message-only gr::block.
+     */
+    static sptr make_uhd(const uhd::UhdBurstBackendConfig& uhd_cfg,
+                         const echo::EchoSchedulerConfig& sched_cfg,
+                         size_t queue_capacity = 64,
+                         uint64_t rx_collect_wait_ms = 1000,
+                         uint64_t max_tx_samples = 1u << 21,
+                         uint64_t max_rx_samples = 1u << 21);
+#endif
+
     ~UwbRealtimeEchoTimer() override;
 
     const echo::EchoSchedulerPrepared& sched_config() const
@@ -165,6 +189,35 @@ public:
     bool drained() const;
     void drain();
 
+    // --- runtime control (thread-safe; applied by the radio worker) ---
+    // set_freq stores a pending tune; the worker calls backend->tune() at the
+    // next burst boundary (serialized with all UHD I/O).  freq() returns the
+    // last successfully applied centre frequency (0 before the first apply).
+    void set_freq(double hz);
+    double freq() const;
+    // Pending calibration delay (native samples) read when a burst PDU is
+    // published; never touched from the worker's I/O path.
+    void set_cal_delay_native(double native_samples);
+    double cal_delay_native() const;
+
+    // --- publish ROI (M2) ---
+    // 0 = publish the whole physical RX window (golden/fallback);
+    // >0 = publish only this many leading native SC16 sample pairs.
+    // Resolution of "-1 auto" is done by the caller (Python), which passes an
+    // explicit >0 value here.  Values >= rx_samples_received are a no-op.
+    void set_publish_native(uint64_t n);
+    uint64_t publish_native() const;
+    uint64_t published_samples_total() const;   // sum of published sample pairs
+
+    // --- radio-deadline timing (M0/M1) ---
+    int64_t device_time_ticks() const;          // backend clock, 0 if unarmed
+    uint64_t last_worker_us() const;            // last burst worker wall time
+    uint64_t max_worker_us() const;
+    uint64_t mean_worker_us() const;            // total_worker_us / bursts_published
+
+    // Last per-burst backend error string (diagnostics).
+    std::string last_error() const;
+
     bool start() override;
     bool stop() override;
 
@@ -185,6 +238,8 @@ private:
         uint64_t rx_samples = 0;
         uint64_t max_fragment_size = 0; // 0 = prepared default
         uint64_t burst_count = 0;       // 0 = unlimited
+        uint64_t publish_native = 0;    // 0 = block-level setting (M2 ROI)
+        uint64_t pulse_id_increment = 0; // != 0 → per-burst unique ids
         double sample_rate = 0.0;
         pmt::pmt_t meta = pmt::PMT_NIL;    // input dict (passthrough)
         pmt::pmt_t payload = pmt::PMT_NIL; // s16vector TX burst (immutable)
@@ -224,6 +279,13 @@ private:
     pmt::pmt_t d_tx_payload_ = pmt::PMT_NIL;
     pmt::pmt_t d_sched_meta_ = pmt::PMT_NIL;
     const int16_t* d_tx_ptr_ = nullptr;
+    // Per-burst publish ROI override from the schedule PDU (0 = use the
+    // block-level d_publish_native_).  Worker-owned; read in publish_burst.
+    uint64_t d_burst_publish_native_ = 0;
+    // Per-burst pulse_id: when the schedule requests incrementing, the
+    // emitted id is d_pulse_id_ + (schedule_index - d_sched_index_start_).
+    uint64_t d_pulse_id_increment_ = 0;
+    uint64_t d_sched_index_start_ = 0;
     std::vector<int16_t> d_rx_buf_; // fixed: max_rx_samples * 2 int16
     echo::BurstFragment d_txf_[echo::kEchoMaxFragmentsPerBurst] = {};
     echo::BurstFragment d_rxf_[echo::kEchoMaxFragmentsPerBurst] = {};
@@ -252,6 +314,21 @@ private:
     std::atomic<uint64_t> d_grid_errors_{ 0 };
     std::atomic<size_t> d_queue_depth_{ 0 };
     std::atomic<size_t> d_queue_high_watermark_{ 0 };
+
+    // Runtime control / ROI / worker timing (atomics: set from Python or
+    // message threads, read in the worker / publish path).
+    std::atomic<double> d_freq_hz_{ 0.0 };            // last applied centre freq
+    std::atomic<double> d_cal_delay_native_{ 0.0 };
+    std::atomic<uint64_t> d_publish_native_{ 0 };     // 0 = full window
+    std::atomic<uint64_t> d_published_samples_{ 0 };
+    std::atomic<uint64_t> d_worker_us_total_{ 0 };
+    std::atomic<uint64_t> d_worker_us_max_{ 0 };
+    std::atomic<uint64_t> d_worker_us_last_{ 0 };
+    // pending tune request (worker consumes at burst boundary)
+    std::atomic<bool> d_tune_pending_{ false };
+    std::atomic<double> d_tune_hz_{ 0.0 };
+    mutable std::mutex d_err_mutex_;
+    std::string d_last_error_;
 };
 
 } // namespace uwb

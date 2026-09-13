@@ -88,7 +88,9 @@ make_schedule_pdu(int64_t t0,
                   uint64_t index,
                   uint64_t pulse_id,
                   const std::vector<int16_t>& payload,
-                  bool with_rate = false)
+                  bool with_rate = false,
+                  uint64_t publish_native = 0,
+                  pmt::pmt_t extra_meta = pmt::PMT_NIL)
 {
     pmt::pmt_t meta = pmt::make_dict();
     meta = pmt::dict_add(meta, pmt::mp("t0_ticks"), pmt::from_long(t0));
@@ -105,6 +107,17 @@ make_schedule_pdu(int64_t t0,
     if (with_rate)
         meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
                              pmt::from_double(737280000.0));
+    if (publish_native != 0)
+        meta = pmt::dict_add(meta, pmt::mp("publish_native"),
+                             pmt::from_uint64(publish_native));
+    // Merge additional (radar metadata passthrough) keys supplied by QA.
+    if (pmt::is_dict(extra_meta)) {
+        pmt::pmt_t items = pmt::dict_items(extra_meta);
+        for (size_t i = 0; i < pmt::length(items); ++i) {
+            pmt::pmt_t kv = pmt::nth(i, items);
+            meta = pmt::dict_add(meta, pmt::car(kv), pmt::cdr(kv));
+        }
+    }
     return pmt::cons(meta,
                      pmt::init_s16vector(payload.size(), payload.data()));
 }
@@ -147,6 +160,15 @@ meta_str(pmt::pmt_t meta, const char* key)
     if (pmt::is_symbol(v))
         return pmt::symbol_to_string(v);
     return {};
+}
+
+double
+meta_f64(pmt::pmt_t meta, const char* key, double def = 0.0)
+{
+    pmt::pmt_t v = pmt::dict_ref(meta, pmt::mp(key), pmt::PMT_NIL);
+    if (pmt::is_real(v) || pmt::is_integer(v) || pmt::is_uint64(v))
+        return pmt::to_double(v);
+    return def;
 }
 
 // Read burst message i and unpack it.
@@ -400,6 +422,8 @@ BOOST_AUTO_TEST_CASE(test_echo_timer_ok_bursts)
         // Device-time metadata derived from the whole-tick grid.
         BOOST_CHECK_EQUAL(meta_u64(meta, "tx_time_full"),
                           static_cast<uint64_t>(expect_tx / 737280000));
+        // Native sample rate is required by the PDU 65/32 input check.
+        BOOST_CHECK_CLOSE(meta_f64(meta, "sample_rate"), 737280000.0, 1e-6);
     }
 
     // Backend-seen fragment flag sequences: single fragment per burst is
@@ -430,6 +454,45 @@ BOOST_AUTO_TEST_CASE(test_echo_timer_ok_bursts)
     BOOST_CHECK(status_seen(status_dbg, "schedule_armed"));
     BOOST_CHECK(status_seen(status_dbg, "grid_complete"));
 
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+// ---------------------------------------------------------------------------
+// 2b. pulse_id_increment: one multi-burst schedule yields unique ids
+//     base + (schedule_index - start_index) so the CIR writer sees 0..N-1.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_echo_timer_pulse_id_increment)
+{
+    auto fake = std::make_shared<FakeBurstBackend>(
+        FakeBurstBackend::Config{});
+    auto blk = UwbRealtimeEchoTimer::make(base_grid_cfg(), fake, 16, 1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_pid_incr");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+
+    const uint64_t tx_samples = 64;
+    const uint64_t rx_samples = 32;
+    const auto payload = make_payload(tx_samples);
+    pmt::pmt_t extra = pmt::make_dict();
+    extra = pmt::dict_add(extra, pmt::mp("pulse_id_increment"),
+                          pmt::from_uint64(1));
+    blk->_post(pmt::mp("schedule"),
+               make_schedule_pdu(1000000, tx_samples, rx_samples,
+                                 /*count=*/4, /*index=*/0, /*pulse=*/100,
+                                 payload, false, 0, extra));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 4));
+    for (uint64_t k = 0; k < 4; ++k) {
+        pmt::pmt_t meta;
+        std::vector<int16_t> rx;
+        get_burst(burst_dbg, k, meta, rx);
+        BOOST_CHECK_EQUAL(meta_u64(meta, "schedule_index"), k);
+        BOOST_CHECK_EQUAL(meta_u64(meta, "pulse_id"), 100u + k);
+        BOOST_CHECK_EQUAL(meta_u64(meta, "packet_id"), 100u + k);
+    }
     tb->stop();
     tb->wait();
     BOOST_REQUIRE(blk->stop());
@@ -898,6 +961,298 @@ BOOST_AUTO_TEST_CASE(test_echo_timer_bounded_scratch)
     get_burst(burst_dbg, 2, meta, rx);
     BOOST_CHECK_EQUAL(meta_str(meta, "status"), "ok");
     BOOST_CHECK_EQUAL(blk->rx_scratch_data(), scratch0);
+
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+// ---------------------------------------------------------------------------
+// 9. Publish ROI (M2): schedule / block-level publish_native truncate the
+//    PDU payload while sample_count and rx_samples_received stay PHYSICAL
+//    (downstream geometry parity), and published_samples_total accumulates
+//    only the published pairs.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_echo_timer_publish_roi)
+{
+    auto fake = std::make_shared<FakeBurstBackend>(FakeBurstBackend::Config{});
+    auto blk = UwbRealtimeEchoTimer::make(base_grid_cfg(), fake, 16, 1000,
+                                          4096, 2048);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_roi");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+
+    const uint64_t rx = 800;
+    const auto payload = make_payload(64);
+    pmt::pmt_t meta;
+    std::vector<int16_t> samples;
+
+    // 1) Schedule publish_native=100 → PDU payload 2*100 elements, but
+    //    sample_count / rx_samples_received remain the physical window.
+    blk->_post(pmt::mp("schedule"),
+               make_schedule_pdu(1000000, 64, rx, 1, 0, 0, payload,
+                                 /*with_rate=*/false, /*publish_native=*/100));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 1));
+    get_burst(burst_dbg, 0, meta, samples);
+    BOOST_CHECK_EQUAL(meta_str(meta, "status"), "ok");
+    BOOST_CHECK_EQUAL(meta_u64(meta, "published_samples"), 100u);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "sample_count"), rx);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "rx_samples_received"), rx);
+    BOOST_REQUIRE_EQUAL(samples.size(), 200u);
+    for (uint64_t p = 0; p < 200; ++p)
+        BOOST_CHECK_EQUAL(samples[p],
+                          FakeBurstBackend::expected_rx_sample(0, p));
+    BOOST_CHECK_EQUAL(blk->published_samples_total(), 100u);
+
+    // 2) Block-level set_publish_native applies when the schedule omits it.
+    blk->set_publish_native(120);
+    blk->_post(pmt::mp("schedule"),
+               make_schedule_pdu(2000000, 64, rx, 1, 1, 1, payload));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 2));
+    get_burst(burst_dbg, 1, meta, samples);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "published_samples"), 120u);
+    BOOST_REQUIRE_EQUAL(samples.size(), 240u);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "sample_count"), rx);
+    BOOST_CHECK_EQUAL(blk->published_samples_total(), 220u);
+
+    // 3) An explicit schedule value overrides the block-level setting.
+    blk->set_publish_native(120);
+    blk->_post(pmt::mp("schedule"),
+               make_schedule_pdu(3000000, 64, rx, 1, 2, 2, payload,
+                                 /*with_rate=*/false, /*publish_native=*/50));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 3));
+    get_burst(burst_dbg, 2, meta, samples);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "published_samples"), 50u);
+    BOOST_REQUIRE_EQUAL(samples.size(), 100u);
+    BOOST_CHECK_EQUAL(blk->published_samples_total(), 270u);
+
+    // 4) publish_native >= physical is a no-op: full physical window.
+    blk->set_publish_native(0);
+    blk->_post(pmt::mp("schedule"),
+               make_schedule_pdu(4000000, 64, rx, 1, 3, 3, payload,
+                                 /*with_rate=*/false,
+                                 /*publish_native=*/100000));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 4));
+    get_burst(burst_dbg, 3, meta, samples);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "published_samples"), rx);
+    BOOST_REQUIRE_EQUAL(samples.size(), rx * 2);
+    BOOST_CHECK_EQUAL(blk->published_samples_total(), 270u + rx);
+
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+// ---------------------------------------------------------------------------
+// 10. set_freq(): the request is stored pending and applied by the radio
+//     worker at the next burst boundary (serialized with UHD I/O); freq()
+//     reflects the last successfully applied value.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_echo_timer_set_freq_pending)
+{
+    auto fake = std::make_shared<FakeBurstBackend>(FakeBurstBackend::Config{});
+    auto blk = UwbRealtimeEchoTimer::make(base_grid_cfg(), fake, 16, 1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_freq");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+
+    BOOST_CHECK_EQUAL(blk->freq(), 0.0);
+    // Invalid requests never arm a pending tune.
+    blk->set_freq(-1.0);
+    blk->set_freq(std::numeric_limits<double>::quiet_NaN());
+    const auto payload = make_payload(64);
+
+    blk->set_freq(7.5e9);
+    blk->_post(pmt::mp("schedule"),
+               make_schedule_pdu(1000000, 64, 64, 1, 0, 0, payload));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 1));
+    BOOST_REQUIRE(wait_until([&] {
+        return fake->center_freq_hz() == 7.5e9 && blk->freq() == 7.5e9;
+    }));
+    pmt::pmt_t meta;
+    std::vector<int16_t> samples;
+    get_burst(burst_dbg, 0, meta, samples);
+    BOOST_CHECK_EQUAL(meta_str(meta, "status"), "ok");
+
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+// ---------------------------------------------------------------------------
+// 11. Calibration delay: set_cal_delay_native() appears in the next burst
+//     meta together with the 65/32 work-grid alias; a schedule-provided
+//     default seeds the block value when the setter was not used.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_echo_timer_cal_delay_meta)
+{
+    auto fake = std::make_shared<FakeBurstBackend>(FakeBurstBackend::Config{});
+    auto blk = UwbRealtimeEchoTimer::make(base_grid_cfg(), fake, 16, 1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_cal");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+
+    const auto payload = make_payload(64);
+    pmt::pmt_t meta;
+    std::vector<int16_t> samples;
+
+    blk->set_cal_delay_native(1234.5);
+    blk->_post(pmt::mp("schedule"),
+               make_schedule_pdu(1000000, 64, 64, 1, 0, 0, payload));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 1));
+    get_burst(burst_dbg, 0, meta, samples);
+    BOOST_CHECK_EQUAL(meta_f64(meta, "calibration_delay_native_samples"),
+                      1234.5);
+    BOOST_CHECK_EQUAL(meta_f64(meta, "calibration_delay_work_samples"),
+                      1234.5 * 65.0 / 32.0);
+    BOOST_CHECK_EQUAL(blk->cal_delay_native(), 1234.5);
+
+    // Schedule-provided default seeds the block value.
+    pmt::pmt_t extra = pmt::make_dict();
+    extra = pmt::dict_add(extra, pmt::mp("calibration_delay_native_samples"),
+                          pmt::from_double(64.0));
+    blk->_post(pmt::mp("schedule"),
+               make_schedule_pdu(2000000, 64, 64, 1, 1, 1, payload,
+                                 /*with_rate=*/false, /*publish_native=*/0,
+                                 extra));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 2));
+    get_burst(burst_dbg, 1, meta, samples);
+    BOOST_CHECK_EQUAL(meta_f64(meta, "calibration_delay_native_samples"),
+                      64.0);
+    BOOST_CHECK_EQUAL(meta_f64(meta, "calibration_delay_work_samples"),
+                      64.0 * 65.0 / 32.0);
+    BOOST_CHECK_EQUAL(blk->cal_delay_native(), 64.0);
+
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+// ---------------------------------------------------------------------------
+// 12. Radar metadata pass-through: schedule PDU whitelist keys reach the
+//     burst meta; sample_count falls back to the physical window when the
+//     schedule does not provide it; legacy keys are preserved.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_echo_timer_meta_passthrough)
+{
+    auto fake = std::make_shared<FakeBurstBackend>(FakeBurstBackend::Config{});
+    auto blk = UwbRealtimeEchoTimer::make(base_grid_cfg(), fake, 16, 1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_meta");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+
+    const uint64_t rx = 800;
+    const auto payload = make_payload(64);
+    pmt::pmt_t extra = pmt::make_dict();
+    auto add_u = [&](const char* k, uint64_t v) {
+        extra = pmt::dict_add(extra, pmt::mp(k), pmt::from_uint64(v));
+    };
+    auto add_s = [&](const char* k, const char* v) {
+        extra = pmt::dict_add(extra, pmt::mp(k), pmt::mp(v));
+    };
+    add_u("packet_id", 42);
+    add_u("window_start_sample", 111);
+    add_u("pre_guard_samples", 1475);
+    add_u("capture_samples", 320);
+    add_u("post_guard_samples", 200);
+    add_u("sample_count", rx);
+    add_u("rx_capture_samples", rx);
+    add_u("sync_samples", 64);
+    add_u("sfd_samples", 8);
+    add_u("tx_packet_samples", 200);
+    add_u("num_delay_samps", 5);
+    add_u("sync_repetitions", 128);
+    add_s("sfd_mode", "ieee");
+    add_u("code_index", 9);
+    add_s("source", "qa");
+    extra = pmt::dict_add(extra, pmt::mp("freq_hz"), pmt::from_double(7.4e9));
+    extra = pmt::dict_add(extra, pmt::mp("freq_offset_hz"),
+                          pmt::from_double(1.0e3));
+    add_u("calibration_id", 3);
+    add_u("schedule_generation", 2);
+    add_u("acquisition_epoch", 1);
+
+    blk->_post(pmt::mp("schedule"),
+               make_schedule_pdu(1000000, 64, rx, 1, 0, 0, payload,
+                                 /*with_rate=*/false, /*publish_native=*/0,
+                                 extra));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 1));
+    pmt::pmt_t meta;
+    std::vector<int16_t> samples;
+    get_burst(burst_dbg, 0, meta, samples);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "packet_id"), 42u);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "window_start_sample"), 111u);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "pre_guard_samples"), 1475u);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "capture_samples"), 320u);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "post_guard_samples"), 200u);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "sample_count"), rx);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "rx_capture_samples"), rx);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "sync_samples"), 64u);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "sfd_samples"), 8u);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "tx_packet_samples"), 200u);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "num_delay_samps"), 5u);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "sync_repetitions"), 128u);
+    BOOST_CHECK_EQUAL(meta_str(meta, "sfd_mode"), "ieee");
+    BOOST_CHECK_EQUAL(meta_u64(meta, "code_index"), 9u);
+    BOOST_CHECK_EQUAL(meta_str(meta, "source"), "qa");
+    BOOST_CHECK_EQUAL(meta_f64(meta, "freq_hz"), 7.4e9);
+    BOOST_CHECK_EQUAL(meta_f64(meta, "freq_offset_hz"), 1.0e3);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "calibration_id"), 3u);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "schedule_generation"), 2u);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "acquisition_epoch"), 1u);
+
+    // Legacy keys preserved.
+    BOOST_CHECK_EQUAL(meta_str(meta, "status"), "ok");
+    BOOST_CHECK_EQUAL(meta_u64(meta, "schedule_index"), 0u);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "pulse_id"), 0u);
+    BOOST_CHECK_EQUAL(meta_str(meta, "sample_format"), "sc16");
+
+    // sample_count falls back to the PHYSICAL RX window when absent.
+    blk->_post(pmt::mp("schedule"),
+               make_schedule_pdu(2000000, 64, rx, 1, 1, 1, payload));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 2));
+    get_burst(burst_dbg, 1, meta, samples);
+    BOOST_CHECK_EQUAL(meta_u64(meta, "sample_count"), rx);
+
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+// ---------------------------------------------------------------------------
+// 13. Per-burst worker wall-time counters and published_samples_total are
+//     monotone / internally consistent across a finite grid.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_echo_timer_worker_counters)
+{
+    auto fake = std::make_shared<FakeBurstBackend>(FakeBurstBackend::Config{});
+    auto blk = UwbRealtimeEchoTimer::make(base_grid_cfg(), fake, 16, 1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_counters");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+
+    const uint64_t rx = 100;
+    const uint64_t n = 4;
+    const auto payload = make_payload(64);
+    blk->_post(pmt::mp("schedule"),
+               make_schedule_pdu(1000000, 64, rx, n, 0, 0, payload));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, n));
+    BOOST_CHECK_EQUAL(blk->bursts_published(), n);
+    BOOST_CHECK_EQUAL(blk->published_samples_total(), n * rx);
+    BOOST_CHECK_EQUAL(blk->last_error(), "");
+    BOOST_CHECK(blk->max_worker_us() >= blk->last_worker_us());
+    BOOST_CHECK(blk->mean_worker_us() <= blk->max_worker_us());
+    BOOST_CHECK(blk->max_worker_us() > 0u);
 
     tb->stop();
     tb->wait();

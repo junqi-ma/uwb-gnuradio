@@ -20,7 +20,12 @@
 #include <gnuradio/uwb/uwb_radar_pdu_meta.h>
 #include <gnuradio/io_signature.h>
 
+#ifdef UWB_HAVE_UHD
+#include <gnuradio/uwb/uwb_uhd_burst_backend.h>
+#endif
+
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -155,6 +160,21 @@ UwbRealtimeEchoTimer::make(const echo::EchoSchedulerConfig& sched_cfg,
                                  max_tx_samples, max_rx_samples));
 }
 
+#ifdef UWB_HAVE_UHD
+std::shared_ptr<UwbRealtimeEchoTimer>
+UwbRealtimeEchoTimer::make_uhd(const uhd::UhdBurstBackendConfig& uhd_cfg,
+                               const echo::EchoSchedulerConfig& sched_cfg,
+                               size_t queue_capacity,
+                               uint64_t rx_collect_wait_ms,
+                               uint64_t max_tx_samples,
+                               uint64_t max_rx_samples)
+{
+    auto backend = std::make_shared<uhd::UhdBurstBackend>(uhd_cfg);
+    return make(sched_cfg, std::move(backend), queue_capacity,
+                rx_collect_wait_ms, max_tx_samples, max_rx_samples);
+}
+#endif
+
 // ---------------------------------------------------------------------------
 // Stats accessors
 // ---------------------------------------------------------------------------
@@ -214,6 +234,83 @@ size_t UwbRealtimeEchoTimer::queue_depth() const
 size_t UwbRealtimeEchoTimer::queue_high_watermark() const
 {
     return d_queue_high_watermark_.load(std::memory_order_relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// Runtime control / publish ROI / worker timing (M0/M1/M2)
+// ---------------------------------------------------------------------------
+
+void UwbRealtimeEchoTimer::set_freq(double hz)
+{
+    // Store a pending tune only; the radio worker applies it at the next
+    // burst boundary so it is serialized with all UHD I/O (never a
+    // concurrent tune from a Python/message thread).
+    if (hz > 0.0 && std::isfinite(hz)) {
+        d_tune_hz_.store(hz, std::memory_order_relaxed);
+        d_tune_pending_.store(true, std::memory_order_relaxed);
+    }
+}
+
+double UwbRealtimeEchoTimer::freq() const
+{
+    return d_freq_hz_.load(std::memory_order_relaxed);
+}
+
+void UwbRealtimeEchoTimer::set_cal_delay_native(double native_samples)
+{
+    d_cal_delay_native_.store(native_samples, std::memory_order_relaxed);
+}
+
+double UwbRealtimeEchoTimer::cal_delay_native() const
+{
+    return d_cal_delay_native_.load(std::memory_order_relaxed);
+}
+
+void UwbRealtimeEchoTimer::set_publish_native(uint64_t n)
+{
+    d_publish_native_.store(n, std::memory_order_relaxed);
+}
+
+uint64_t UwbRealtimeEchoTimer::publish_native() const
+{
+    return d_publish_native_.load(std::memory_order_relaxed);
+}
+
+uint64_t UwbRealtimeEchoTimer::published_samples_total() const
+{
+    return d_published_samples_.load(std::memory_order_relaxed);
+}
+
+int64_t UwbRealtimeEchoTimer::device_time_ticks() const
+{
+    // Backend clock; the caller reads this BEFORE arming a schedule to
+    // compute the first future t0.  Returns 0 when the backend is not
+    // prepared (device unavailable), never throws.
+    return d_backend_ ? d_backend_->device_time_ticks() : 0;
+}
+
+uint64_t UwbRealtimeEchoTimer::last_worker_us() const
+{
+    return d_worker_us_last_.load(std::memory_order_relaxed);
+}
+
+uint64_t UwbRealtimeEchoTimer::max_worker_us() const
+{
+    return d_worker_us_max_.load(std::memory_order_relaxed);
+}
+
+uint64_t UwbRealtimeEchoTimer::mean_worker_us() const
+{
+    const uint64_t n = d_bursts_published_.load(std::memory_order_relaxed);
+    if (n == 0)
+        return 0;
+    return d_worker_us_total_.load(std::memory_order_relaxed) / n;
+}
+
+std::string UwbRealtimeEchoTimer::last_error() const
+{
+    std::lock_guard<std::mutex> lock(d_err_mutex_);
+    return d_last_error_;
 }
 
 bool UwbRealtimeEchoTimer::drained() const
@@ -290,11 +387,26 @@ UwbRealtimeEchoTimer::start()
     d_rx_reissues_.store(0, std::memory_order_relaxed);
     d_grid_errors_.store(0, std::memory_order_relaxed);
     d_queue_high_watermark_.store(0, std::memory_order_relaxed);
+    d_published_samples_.store(0, std::memory_order_relaxed);
+    d_worker_us_total_.store(0, std::memory_order_relaxed);
+    d_worker_us_max_.store(0, std::memory_order_relaxed);
+    d_worker_us_last_.store(0, std::memory_order_relaxed);
+    // Tuning restarts disarmed (cal delay is retained across start()).
+    d_freq_hz_.store(0.0, std::memory_order_relaxed);
+    d_tune_pending_.store(false, std::memory_order_relaxed);
+    d_tune_hz_.store(0.0, std::memory_order_relaxed);
     d_grid_ = echo::EchoGrid(d_sched_);
     d_tx_samples_ = d_rx_samples_ = 0;
     d_tx_ptr_ = nullptr;
     d_tx_payload_ = pmt::PMT_NIL;
     d_sched_meta_ = pmt::PMT_NIL;
+    d_burst_publish_native_ = 0;
+    d_pulse_id_increment_ = 0;
+    d_sched_index_start_ = 0;
+    {
+        std::lock_guard<std::mutex> lock(d_err_mutex_);
+        d_last_error_.clear();
+    }
 
     d_worker_ = std::thread(&UwbRealtimeEchoTimer::worker_loop, this);
     publish_status("started");
@@ -388,6 +500,10 @@ UwbRealtimeEchoTimer::handle_schedule(pmt::pmt_t msg)
     job.pulse_id = dict_u64(meta, "pulse_id", job.schedule_index);
     job.burst_count = dict_u64(meta, "burst_count", 0);
     job.max_fragment_size = max_frag_in;
+    // Optional per-burst publish ROI (M2): 0/absent = use the block-level
+    // set_publish_native(); an explicit value overrides it for this burst.
+    job.publish_native = dict_u64(meta, "publish_native", 0);
+    job.pulse_id_increment = dict_u64(meta, "pulse_id_increment", 0);
     job.sample_rate = dict_f64(meta, "sample_rate", 0.0);
     job.meta = meta;
     job.payload = payload;
@@ -526,6 +642,25 @@ UwbRealtimeEchoTimer::apply_schedule(const Job& job)
     d_sample_rate_ = job.sample_rate;
     d_tx_payload_ = job.payload;
     d_sched_meta_ = job.meta;
+    // Per-burst ROI override (0 = block-level set_publish_native()).
+    d_burst_publish_native_ = job.publish_native;
+    // Per-burst pulse_id lineage (single multi-burst schedule → unique ids).
+    d_pulse_id_increment_ = job.pulse_id_increment;
+    d_sched_index_start_ = job.schedule_index;
+    // The schedule PDU carries the calibration-delay default; a later
+    // set_cal_delay_native() overrides it and is never touched by the I/O
+    // path.  Only seed when the schedule actually provides the key so a
+    // restart preserves a runtime value.
+    if (radar_meta::dict_has(job.meta,
+                             "calibration_delay_native_samples")) {
+        const double v = radar_meta::to_f64(
+            pmt::dict_ref(job.meta,
+                          pmt::mp("calibration_delay_native_samples"),
+                          pmt::from_double(0.0)),
+            0.0);
+        if (std::isfinite(v))
+            d_cal_delay_native_.store(v, std::memory_order_relaxed);
+    }
     size_t len = 0;
     d_tx_ptr_ = pmt::s16vector_elements(job.payload, len);
     // Fixed scratch: zero the used prefix only; capacity/address stable.
@@ -551,6 +686,30 @@ UwbRealtimeEchoTimer::apply_schedule(const Job& job)
 void
 UwbRealtimeEchoTimer::run_one_burst()
 {
+    // Pending retune (M1.1): applied at a burst boundary, i.e. serialized
+    // with all UHD I/O and never concurrently with issue_*/collect.  On
+    // failure the request stays pending and is retried on the next burst.
+    if (d_tune_pending_.load(std::memory_order_relaxed)) {
+        const double hz = d_tune_hz_.load(std::memory_order_relaxed);
+        std::string tune_err;
+        const echo::BurstStatus ts = d_backend_->tune(hz, tune_err);
+        if (ts == echo::BurstStatus::Ok) {
+            d_freq_hz_.store(hz, std::memory_order_relaxed);
+            d_tune_pending_.store(false, std::memory_order_relaxed);
+        } else {
+            {
+                std::lock_guard<std::mutex> lock(d_err_mutex_);
+                d_last_error_ = tune_err;
+            }
+            pmt::pmt_t extra = pmt::make_dict();
+            extra = pmt::dict_add(extra, pmt::mp("hz"),
+                                  pmt::from_double(hz));
+            extra = pmt::dict_add(extra, pmt::mp("error"),
+                                  pmt::string_to_symbol(tune_err));
+            publish_status("tune_failed", extra);
+        }
+    }
+
     // Grid slot: skip expired slots (no catch-up), take the first future
     // one.  The grid advances past the returned slot, so every valid
     // schedule index is produced exactly once, in order.
@@ -590,6 +749,23 @@ UwbRealtimeEchoTimer::run_one_burst()
     r.tx_samples_requested = d_tx_samples_;
     r.rx_samples_requested = d_rx_samples_;
 
+    // Whole-burst worker wall time (M0/M1): fragment planning → issue RX →
+    // issue TX → collect → publish.  No printing on the hot path.
+    const auto burst_t0 = std::chrono::steady_clock::now();
+    const auto record_worker_us = [&]() {
+        const uint64_t us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - burst_t0)
+                .count());
+        d_worker_us_last_.store(us, std::memory_order_relaxed);
+        d_worker_us_total_.fetch_add(us, std::memory_order_relaxed);
+        uint64_t cur = d_worker_us_max_.load(std::memory_order_relaxed);
+        while (us > cur &&
+               !d_worker_us_max_.compare_exchange_weak(
+                   cur, us, std::memory_order_relaxed)) {
+        }
+    };
+
     // Burst budget (finite grids publish "grid_complete" after the last
     // burst; unlimited grids run until re-armed or stopped).  Every
     // produced burst — ok or failed — counts toward the budget and the
@@ -604,10 +780,15 @@ UwbRealtimeEchoTimer::run_one_burst()
     const auto fail_burst = [&](echo::BurstStatus st, const std::string& e) {
         r.status = st;
         r.error = e;
+        {
+            std::lock_guard<std::mutex> lock(d_err_mutex_);
+            d_last_error_ = e;
+        }
         d_bursts_published_.fetch_add(1, std::memory_order_relaxed);
         d_bursts_failed_.fetch_add(1, std::memory_order_relaxed);
         d_backend_->abort_rx();
         publish_burst(r, /*with_samples=*/false);
+        record_worker_us();
         if (end_after)
             finish_grid();
     };
@@ -706,12 +887,17 @@ UwbRealtimeEchoTimer::run_one_burst()
                                  std::memory_order_relaxed);
         const bool ok = r.status == echo::BurstStatus::Ok ||
                         r.status == echo::BurstStatus::PartialHandled;
+        {
+            std::lock_guard<std::mutex> lock(d_err_mutex_);
+            d_last_error_ = ok ? std::string() : r.error;
+        }
         if (ok)
             d_bursts_ok_.fetch_add(1, std::memory_order_relaxed);
         else
             d_bursts_failed_.fetch_add(1, std::memory_order_relaxed);
         d_bursts_published_.fetch_add(1, std::memory_order_relaxed);
         publish_burst(r, /*with_samples=*/ok);
+        record_worker_us();
     } else if (d_stop_.load(std::memory_order_relaxed)) {
         fail_burst(echo::BurstStatus::StopDuringIo,
                    "stop while RX I/O in flight");
@@ -752,8 +938,21 @@ UwbRealtimeEchoTimer::publish_burst(const echo::BurstResult& r,
                          pmt::from_long(static_cast<long>(r.status)));
     meta = pmt::dict_add(meta, pmt::mp("schedule_index"),
                          pmt::from_uint64(r.schedule_index));
+    // One multi-burst schedule can request per-burst unique ids so the
+    // downstream CIR writer/analyzer sees 0..N-1 exactly once.
+    const uint64_t burst_pulse_id =
+        d_pulse_id_increment_ != 0
+            ? d_pulse_id_ +
+                  (r.schedule_index - d_sched_index_start_)
+            : d_pulse_id_;
     meta = pmt::dict_add(meta, pmt::mp("pulse_id"),
-                         pmt::from_uint64(d_pulse_id_));
+                         pmt::from_uint64(burst_pulse_id));
+    // Only when incrementing do we own packet_id; otherwise it stays the
+    // schedule passthrough value copied by the whitelist below.
+    if (d_pulse_id_increment_ != 0) {
+        meta = pmt::dict_add(meta, pmt::mp("packet_id"),
+                             pmt::from_uint64(burst_pulse_id));
+    }
     meta = pmt::dict_add(meta, pmt::mp("tx_ticks"),
                          pmt::from_long(r.tx_ticks));
     meta = pmt::dict_add(meta, pmt::mp("rx_ticks"),
@@ -778,6 +977,10 @@ UwbRealtimeEchoTimer::publish_burst(const echo::BurstResult& r,
                          pmt::string_to_symbol(r.error));
     meta = pmt::dict_add(meta, pmt::mp("sample_format"), pmt::mp("sc16"));
     if (d_sample_rate_ > 0.0) {
+        // Native sample rate: required by the PDU 65/32 resampler's
+        // validate_input_rate contract.
+        meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
+                             pmt::from_double(d_sample_rate_));
         // Whole-tick → (full, frac) device time; the fractional tick part
         // (rem/den) is ignored in this metadata convenience only.
         const double fs = d_sample_rate_;
@@ -800,18 +1003,66 @@ UwbRealtimeEchoTimer::publish_burst(const echo::BurstResult& r,
                               static_cast<double>(rx_full) * fs) /
                              fs));
     }
-    if (pmt::is_dict(d_sched_meta_))
-        radar_meta::copy_if_present(meta, d_sched_meta_, "source");
+    // M1.2: whitelisted radar metadata pass-through from the schedule PDU.
+    // copy_if_present keeps any key already emitted above and only copies
+    // keys the schedule actually provides.
+    static const char* const kScheduleMetaKeys[] = {
+        "packet_id",           "window_start_sample", "pre_guard_samples",
+        "capture_samples",     "post_guard_samples",  "sample_count",
+        "rx_capture_samples",  "sync_samples",        "sfd_samples",
+        "tx_packet_samples",   "num_delay_samps",     "sync_repetitions",
+        "sfd_mode",            "code_index",          "source",
+        "freq_hz",             "freq_offset_hz",      "calibration_id",
+        "schedule_generation", "acquisition_epoch"
+    };
+    if (pmt::is_dict(d_sched_meta_)) {
+        for (const char* key : kScheduleMetaKeys)
+            radar_meta::copy_if_present(meta, d_sched_meta_, key);
+    }
+    // sample_count is the PHYSICAL RX window length: the schedule value is
+    // authoritative when present, else r.rx_samples_received.  It is NOT
+    // the truncated publish length — downstream derives post_guard from it.
+    if (!radar_meta::dict_has(meta, "sample_count"))
+        meta = pmt::dict_add(meta, pmt::mp("sample_count"),
+                             pmt::from_uint64(r.rx_samples_received));
 
+    // Calibration delay is block-owned (seeded from the schedule default in
+    // apply_schedule, overridable via set_cal_delay_native()); the 65/32
+    // work-grid alias is derived with the shared resampler constants.
+    const double cal_native =
+        d_cal_delay_native_.load(std::memory_order_relaxed);
+    meta = pmt::dict_add(meta, pmt::mp("calibration_delay_native_samples"),
+                         pmt::from_double(cal_native));
+    meta = pmt::dict_add(
+        meta, pmt::mp("calibration_delay_work_samples"),
+        pmt::from_double(cal_native *
+                         static_cast<double>(radar_meta::kResampleInterp) /
+                         static_cast<double>(radar_meta::kCg400NativeDecim)));
+
+    // M2 publish ROI: UHD still captures the full physical RX window; the
+    // PDU payload only carries the leading native SC16 pairs the CIR reads.
+    // rx_samples_received / sample_count stay PHYSICAL so geometry parity
+    // with the golden chain is preserved.
     pmt::pmt_t vec;
+    uint64_t published = 0;
     if (with_samples && r.rx_samples_received > 0 &&
         r.rx_samples_received <= d_rx_samples_) {
-        vec = pmt::init_s16vector(
-            static_cast<size_t>(r.rx_samples_received) * 2,
-            d_rx_buf_.data());
+        const uint64_t physical = r.rx_samples_received;
+        const uint64_t want = d_burst_publish_native_ != 0
+                                  ? d_burst_publish_native_
+                                  : d_publish_native_.load(
+                                        std::memory_order_relaxed);
+        published = (want > 0 && want < physical) ? want : physical;
+        vec = pmt::init_s16vector(static_cast<size_t>(published) * 2,
+                                  d_rx_buf_.data());
     } else {
         vec = pmt::init_s16vector(0, static_cast<const int16_t*>(nullptr));
     }
+    meta = pmt::dict_add(meta, pmt::mp("published_samples"),
+                         pmt::from_uint64(published));
+    if (published > 0)
+        d_published_samples_.fetch_add(published,
+                                       std::memory_order_relaxed);
     message_port_pub(pmt::mp("burst"), pmt::cons(meta, vec));
 }
 
