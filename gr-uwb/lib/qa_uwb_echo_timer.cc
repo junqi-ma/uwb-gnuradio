@@ -1258,3 +1258,177 @@ BOOST_AUTO_TEST_CASE(test_echo_timer_worker_counters)
     tb->wait();
     BOOST_REQUIRE(blk->stop());
 }
+
+// ---------------------------------------------------------------------------
+// 14. Bounded queue overflow + in-order results (Section C).  With queue
+//     capacity one and the worker blocked on an injected Timeout at index 0
+//     (rx_collect_wait_ms = 1000), handler posts must never block; exactly
+//     one schedule is dropped with a "queue_full" status and the high
+//     watermark records the single queued job.  The dropped index 2 is then
+//     re-posted (the spec asserts schedules_received()==3 while the worker is
+//     still busy, before that re-post) so the published results are exactly
+//     index 0 (timeout), 1 (ok), 2 (ok) in order, no duplicates.
+//
+//     Note: with capacity 1 and a first job that blocks ~1 s, the three
+//     rapid posts can never all be enqueued (that is the point of the drop).
+//     The schedule is therefore synchronized once — post 0, wait until the
+//     worker has popped it and is parked in collect_result(), then post 1
+//     (enqueued) and post 2 (deterministically dropped).  This keeps the
+//     drop/queue-full assertions deterministic instead of racing the worker.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_echo_timer_queue_full_and_order)
+{
+    auto cfg = base_grid_cfg();
+    FakeBurstBackend::Config fcfg;
+    fcfg.faults = { { 0, BurstStatus::Timeout } }; // worker blocked ~1 s
+    auto fake = std::make_shared<FakeBurstBackend>(fcfg);
+    auto blk = UwbRealtimeEchoTimer::make(cfg, fake,
+                                          /*queue_capacity=*/1,
+                                          /*rx_collect_wait_ms=*/1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto status_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_qfull_order");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    tb->msg_connect(blk, "status", status_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+
+    const uint64_t tx = 64;
+    const uint64_t rx = 64;
+    const auto payload = make_payload(tx);
+    // Handler must never block: each _post returns well under 50 ms even
+    // with the worker busy and the bounded queue full.
+    const auto timed_post = [&](int64_t t0, uint64_t idx, uint64_t pulse) {
+        const auto t_start = std::chrono::steady_clock::now();
+        blk->_post(pmt::mp("schedule"),
+                   make_schedule_pdu(t0, tx, rx, /*count=*/1, idx, pulse,
+                                     payload));
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::steady_clock::now() - t_start)
+            .count();
+    };
+
+    // Job 0: the worker pops it and parks inside collect_result() for the
+    // injected Timeout (no result is ever queued), so the single queue slot
+    // is now free for exactly one more schedule.
+    BOOST_CHECK_LT(timed_post(1000000, 0, 0), 50000);
+    BOOST_REQUIRE(wait_until([&] { return fake->collect_waiters() == 1; }));
+
+    // Job 1 is enqueued (queue empty); job 2 sees the full queue and is
+    // dropped.  The worker cannot drain job 1 until the ~1 s timeout.
+    BOOST_CHECK_LT(timed_post(2000000, 1, 1), 50000);
+    BOOST_CHECK_LT(timed_post(3000000, 2, 2), 50000);
+
+    // Asserted while the worker is still busy in the index-0 timeout.
+    // schedules_received is bumped before the drop counter is, so wait for
+    // both (the handler thread publishes the queue_full status last).
+    BOOST_REQUIRE(wait_until([&] {
+        return blk->schedules_received() == 3 &&
+               blk->schedules_dropped() == 1;
+    }));
+    BOOST_CHECK_EQUAL(blk->schedules_received(), 3u);
+    BOOST_CHECK_EQUAL(blk->schedules_dropped(), 1u); // queue_capacity == 1
+    BOOST_CHECK_GE(blk->queue_high_watermark(), 1u);
+    BOOST_REQUIRE(wait_until(
+        [&] { return status_seen(status_dbg, "queue_full"); }));
+    BOOST_CHECK(status_seen(status_dbg, "queue_full"));
+
+    // Busy worker publishes index 0 (timeout), then drains index 1 (ok).
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 2));
+
+    // Re-post only the schedule that was dropped (index 2).  The worker is
+    // idle after burst 1, so it is enqueued and run without further drops.
+    BOOST_CHECK_LT(timed_post(3000000, 2, 2), 50000);
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 3));
+    BOOST_CHECK_EQUAL(burst_dbg->num_messages(), 3u);
+
+    // Exactly one result per index, in order, with the expected outcomes.
+    const char* expect_status[] = { "timeout", "ok", "ok" };
+    for (uint64_t k = 0; k < 3; ++k) {
+        pmt::pmt_t meta;
+        std::vector<int16_t> rx_samples;
+        get_burst(burst_dbg, k, meta, rx_samples);
+        BOOST_CHECK_EQUAL(meta_u64(meta, "schedule_index"), k);
+        BOOST_CHECK_EQUAL(meta_u64(meta, "pulse_id"), k);
+        BOOST_CHECK_EQUAL(meta_str(meta, "status"), expect_status[k]);
+        if (k == 0) {
+            BOOST_CHECK(!meta_str(meta, "uhd_error").empty());
+            BOOST_CHECK_EQUAL(rx_samples.size(), 0u);
+        } else {
+            BOOST_CHECK(meta_str(meta, "uhd_error").empty());
+            BOOST_REQUIRE_EQUAL(rx_samples.size(), rx * 2);
+            for (uint64_t p = 0; p < rx * 2; ++p)
+                BOOST_CHECK_EQUAL(
+                    rx_samples[p],
+                    FakeBurstBackend::expected_rx_sample(k, p));
+        }
+    }
+    BOOST_CHECK_EQUAL(blk->bursts_published(), 3u);
+    BOOST_CHECK_EQUAL(blk->bursts_ok(), 2u);
+    BOOST_CHECK_EQUAL(blk->bursts_failed(), 1u);
+
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+// ---------------------------------------------------------------------------
+// 15. Queue full while the worker is busy, then stop() (Section C): the
+//     bounded queue holds one job behind the worker blocked in
+//     collect_result() on an injected Timeout, a third post is dropped, and
+//     stop() must join the worker (woken through backend request_stop())
+//     without deadlock.  Confirms the drop accounting survives the stop.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_echo_timer_queue_full_no_deadlock_on_stop)
+{
+    auto cfg = base_grid_cfg();
+    FakeBurstBackend::Config fcfg;
+    fcfg.faults = { { 0, BurstStatus::Timeout } };
+    auto fake = std::make_shared<FakeBurstBackend>(fcfg);
+    auto blk = UwbRealtimeEchoTimer::make(cfg, fake,
+                                          /*queue_capacity=*/1,
+                                          /*rx_collect_wait_ms=*/60000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto status_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_qfull_stop");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    tb->msg_connect(blk, "status", status_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+
+    const auto payload = make_payload(64);
+    blk->_post(pmt::mp("schedule"),
+               make_schedule_pdu(1000000, 64, 64, 1, 0, 0, payload));
+    // Worker is now parked in collect_result() for index 0.
+    BOOST_REQUIRE(wait_until([&] { return fake->collect_waiters() == 1; }));
+    // One queued job behind the busy worker; the next post is dropped.
+    blk->_post(pmt::mp("schedule"),
+               make_schedule_pdu(2000000, 64, 64, 1, 1, 1, payload));
+    blk->_post(pmt::mp("schedule"),
+               make_schedule_pdu(3000000, 64, 64, 1, 2, 2, payload));
+    BOOST_REQUIRE(wait_until([&] {
+        return blk->schedules_received() == 3 &&
+               blk->schedules_dropped() >= 1;
+    }));
+    BOOST_CHECK_GE(blk->schedules_dropped(), 1u);
+    BOOST_REQUIRE(wait_until(
+        [&] { return status_seen(status_dbg, "queue_full"); }));
+
+    // stop() while the worker is blocked in collect_result(): request_stop()
+    // wakes the collect and the join must complete without deadlock.
+    std::atomic<bool> stopped{ false };
+    auto fut = std::async(std::launch::async, [&] {
+        stopped = blk->stop();
+        return true;
+    });
+    BOOST_CHECK(fut.wait_for(std::chrono::seconds(10)) ==
+                std::future_status::ready);
+    BOOST_CHECK(fut.get());
+    BOOST_CHECK(stopped.load());
+    // The join leaves the bounded queue drained.
+    BOOST_CHECK(blk->drained());
+    BOOST_CHECK_EQUAL(blk->queue_depth(), 0u);
+
+    tb->stop();
+    tb->wait();
+}

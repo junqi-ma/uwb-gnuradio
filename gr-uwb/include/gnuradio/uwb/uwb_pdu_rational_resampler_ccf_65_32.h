@@ -55,6 +55,16 @@ public:
         CaptureOnly = 1,
     };
 
+    /** SC16 input amplitude contract.
+     *  RawInteger: fc32 = float(int16)  (legacy scheduled-capture chain).
+     *  UnitRange : fc32 = float(int16) / 32768  (matches UHD Python FC32 and
+     *              the legacy radar chain; required by cpp-pdu).
+     */
+    enum class Sc16ScalePolicy {
+        RawInteger = 0,
+        UnitRange = 1,
+    };
+
     // Covers existing scheduled e2e (pre+cap+post = 252000) and Radar windows.
     static constexpr size_t kDefaultMaxInputSamples = 2097152;
 
@@ -72,13 +82,16 @@ public:
      *        never resizes. Oversized PDUs publish invalid_window.
      * \param num_workers           Persistent 65/32 FIR worker count (>= 1).
      *        Built at construction; default 1 keeps single-thread results.
+     * \param sc16_scale            SC16→FC32 amplitude contract (default
+     *        RawInteger: fc32 = float(int16), unchanged legacy behaviour).
      */
     static sptr make(const std::string& taps_file_or_profile = "quality_minorder",
                      double output_sample_rate = kOutputRateHz,
                      bool validate_input_rate = true,
                      EmitPolicy emit_policy = EmitPolicy::FullWindow,
                      size_t max_input_samples = kDefaultMaxInputSamples,
-                     int num_workers = 1);
+                     int num_workers = 1,
+                     Sc16ScalePolicy sc16_scale = Sc16ScalePolicy::RawInteger);
 
     /** QA path: construct from an in-memory taps vector. */
     static sptr make_from_taps(const std::vector<float>& taps,
@@ -86,7 +99,8 @@ public:
                                bool validate_input_rate = true,
                                EmitPolicy emit_policy = EmitPolicy::FullWindow,
                                size_t max_input_samples = kDefaultMaxInputSamples,
-                               int num_workers = 1);
+                               int num_workers = 1,
+                               Sc16ScalePolicy sc16_scale = Sc16ScalePolicy::RawInteger);
 
     ~UwbPduRationalResamplerCcf65_32() override;
 
@@ -107,6 +121,10 @@ public:
      */
     void set_num_workers(int n);
     int num_workers() const { return d_num_workers_; }
+
+    void set_sc16_scale(Sc16ScalePolicy p);
+    Sc16ScalePolicy sc16_scale() const { return d_sc16_scale_; }
+
     /** Active FIR kernel name (diagnostics), e.g. "avx2_fma_macroblock". */
     const char* resampler_kernel() const;
 
@@ -191,7 +209,9 @@ public:
                                     bool validate_input_rate,
                                     EmitPolicy emit_policy,
                                     size_t max_input_samples,
-                                    int num_workers = 1);
+                                    int num_workers = 1,
+                                    Sc16ScalePolicy sc16_scale =
+                                        Sc16ScalePolicy::RawInteger);
 
 private:
     void handle_packet(pmt::pmt_t msg);
@@ -211,6 +231,7 @@ private:
     size_t d_max_in_ = 0;
     size_t d_max_out_ = 0;
     int d_num_workers_ = 1;
+    Sc16ScalePolicy d_sc16_scale_ = Sc16ScalePolicy::RawInteger;
 
     // Sized once at make() to max_input / max_output. Handler never resizes.
     std::vector<gr_complex> d_scratch_;
