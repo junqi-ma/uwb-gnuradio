@@ -17,7 +17,7 @@
 - [`phase1/X410_RFNoC入口与写盘测试.md`](phase1/X410_RFNoC入口与写盘测试.md)
 - [`phase1/使用说明_X410_CG400自发自收雷达.md`](phase1/使用说明_X410_CG400自发自收雷达.md)
 - [`phase1/使用手册_X410_CG400频率扫描_echo_cir_sweep.md`](phase1/使用手册_X410_CG400频率扫描_echo_cir_sweep.md)
-- [`phase1/开发方案_UWB_Radar流式echo与CIR改造.md`](phase1/开发方案_UWB_Radar流式echo与CIR改造.md)（进行中：M1 完成，M2/M3 未开始）
+- [`phase1/开发方案_UWB_Radar流式echo与CIR改造.md`](phase1/开发方案_UWB_Radar流式echo与CIR改造.md)（M1/M2/M3 完成，已上板验证）
 - [`本机UHD_DPDK_AVX512问题与绕过.md`](本机UHD_DPDK_AVX512问题与绕过.md)
 - [`phase1/当前信号检测逻辑.md`](phase1/当前信号检测逻辑.md)
 - [`phase1/对照报告_QM35_MATLAB与GNURadio离线解调.md`](phase1/对照报告_QM35_MATLAB与GNURadio离线解调.md)

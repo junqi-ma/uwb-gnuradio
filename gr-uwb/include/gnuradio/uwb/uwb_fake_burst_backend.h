@@ -359,7 +359,22 @@ public:
         return d_device_ticks;
     }
 
+    BurstStatus tune(double freq_hz, std::string& error) override
+    {
+        std::lock_guard<std::mutex> lock(d_mutex);
+        (void)error;
+        d_center_freq_hz = freq_hz;
+        return BurstStatus::Ok;
+    }
+
     // --- QA introspection ---------------------------------------------------
+
+    // Last frequency applied through tune() (0 = never tuned).
+    double center_freq_hz() const
+    {
+        std::lock_guard<std::mutex> lock(d_mutex);
+        return d_center_freq_hz;
+    }
 
     // Deterministic RX sample the fake device produces for one int16_t
     // element (`element` = 2 * sample_pos + {0,1}).
@@ -423,6 +438,7 @@ private:
         d_armed_index = 0;
         d_active_fault = BurstStatus::Ok;
         d_device_ticks = d_cfg.device_time_start;
+        d_center_freq_hz = 0.0;
         d_results.clear();
         d_records.clear();
         d_collect_waiters = 0;
@@ -490,6 +506,7 @@ private:
     uint64_t d_armed_index = 0;
     BurstStatus d_active_fault = BurstStatus::Ok;
     int64_t d_device_ticks = 0;
+    double d_center_freq_hz = 0.0;
     uint64_t d_collect_waiters = 0;
     uint64_t d_abort_count = 0;
     std::map<uint64_t, BurstResult> d_results;

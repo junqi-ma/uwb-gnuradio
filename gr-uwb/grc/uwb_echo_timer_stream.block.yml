@@ -1,0 +1,158 @@
+id: uwb_echo_timer_stream
+label: UWB Echo Timer (tagged stream, UHD)
+category: '[UWB]'
+flags: [python]
+
+parameters:
+-   id: device_args
+    label: UHD device args
+    dtype: string
+    default: ''
+-   id: sample_rate_hz
+    label: Sample rate (Hz)
+    dtype: real
+    default: '737.28e6'
+-   id: tx_channel
+    label: TX channel
+    dtype: int
+    default: '0'
+-   id: rx_channel
+    label: RX channel
+    dtype: int
+    default: '1'
+-   id: tx_antenna
+    label: TX antenna
+    dtype: string
+    default: 'TX/RX'
+-   id: rx_antenna
+    label: RX antenna
+    dtype: string
+    default: 'RX2'
+-   id: tx_gain_db
+    label: TX gain (dB, negative = leave)
+    dtype: real
+    default: '-1'
+-   id: rx_gain_db
+    label: RX gain (dB, negative = leave)
+    dtype: real
+    default: '-1'
+-   id: center_freq_hz
+    label: Center frequency (Hz, 0 = leave)
+    dtype: real
+    default: '0'
+-   id: clock_source
+    label: Clock source
+    dtype: string
+    default: 'internal'
+-   id: time_source
+    label: Time source
+    dtype: string
+    default: 'internal'
+-   id: pri_num
+    label: PRI numerator (ticks)
+    dtype: int
+    default: '3686400'
+-   id: pri_den
+    label: PRI denominator
+    dtype: int
+    default: '1'
+-   id: pre_guard_ticks
+    label: RX pre-guard (ticks)
+    dtype: int
+    default: '1475'
+-   id: t0_ticks
+    label: First TX tick (0 = lazy arm)
+    dtype: int
+    default: '0'
+-   id: arm_margin_s
+    label: Lazy-arm margin (s)
+    dtype: real
+    default: '0.05'
+-   id: tx_samples
+    label: TX burst samples (complex)
+    dtype: int
+    default: '140982'
+-   id: rx_samples
+    label: RX window samples (complex)
+    dtype: int
+    default: '55591'
+-   id: pre_guard_samples
+    label: Reported pre-guard samples
+    dtype: int
+    default: '1475'
+-   id: capture_samples
+    label: Reported capture samples
+    dtype: int
+    default: '54116'
+-   id: post_guard_samples
+    label: Reported post-guard samples
+    dtype: int
+    default: '0'
+-   id: sync_repetitions
+    label: Sync repetitions
+    dtype: int
+    default: '64'
+-   id: sfd_mode
+    label: SFD mode
+    dtype: string
+    default: '4z2'
+-   id: code_index
+    label: Code index
+    dtype: int
+    default: '9'
+-   id: calibration_delay_native_samples
+    label: Calibration delay (native samples)
+    dtype: real
+    default: '0'
+-   id: max_frames
+    label: Max frames (0 = unlimited)
+    dtype: int
+    default: '0'
+-   id: collect_wait_ms
+    label: RX collect wait (ms)
+    dtype: int
+    default: '1000'
+-   id: max_tx_samples
+    label: Max TX scratch samples
+    dtype: int
+    default: '2097152'
+-   id: max_rx_samples
+    label: Max RX scratch samples
+    dtype: int
+    default: '4194304'
+-   id: lengthtagname
+    label: Length tag name
+    dtype: string
+    default: 'packet_len'
+
+inputs:
+-   domain: stream
+    dtype: complex
+
+outputs:
+-   domain: stream
+    dtype: complex
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.echo_timer_stream_uhd(${device_args}, ${sample_rate_hz}, ${tx_channel}, ${rx_channel}, ${tx_antenna}, ${rx_antenna}, ${tx_gain_db}, ${rx_gain_db}, ${center_freq_hz}, ${clock_source}, ${time_source}, ${pri_num}, ${pri_den}, ${pre_guard_ticks}, ${t0_ticks}, ${arm_margin_s}, ${tx_samples}, ${rx_samples}, ${pre_guard_samples}, ${capture_samples}, ${post_guard_samples}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${calibration_delay_native_samples}, ${max_frames}, ${collect_wait_ms}, ${max_tx_samples}, ${max_rx_samples}, ${lengthtagname})
+
+documentation: |-
+    Tagged-stream monostatic UWB echo timer (Radar Stage 2).  One
+    "packet_len"-delimited complex64 input packet is one TX burst; the
+    block emits exactly one complex64 RX window of rx_samples per input
+    packet, blocking until the timed RX capture completes.
+
+    Reuses the EchoTimer scheduling core and the UHD burst backend: the RX
+    command is issued before the TX burst, expired grid slots are skipped
+    (never caught up), and every output window carries the radar metadata
+    tags (sample_rate, pre_guard/capture/post_guard_samples, pulse_id,
+    schedule_index, calibration_delay_native_samples, sync_repetitions,
+    sfd_mode, code_index, rx_time).  A failed burst still emits a
+    zero-filled window tagged with burst_status so the stream keeps
+    flowing.
+
+    Requires a build with UHD (ENABLE_UHD_BACKEND); in UHD-free builds the
+    Python factory uwb.echo_timer_stream_uhd is not bound.
+
+file_format: 1

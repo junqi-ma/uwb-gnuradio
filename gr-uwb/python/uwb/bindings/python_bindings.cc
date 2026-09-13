@@ -36,6 +36,9 @@
 #include <gnuradio/uwb/uwb_loopback_echo.h>
 #include <gnuradio/uwb/uwb_radar_cir_estimator_block.h>
 #include <gnuradio/uwb/uwb_cir_writer.h>
+#include <gnuradio/uwb/uwb_echo_burst_backend.h>
+#include <gnuradio/uwb/uwb_echo_timer_stream.h>
+#include <gnuradio/uwb/uwb_fake_burst_backend.h>
 
 namespace py = pybind11;
 
@@ -835,6 +838,7 @@ void bind_radar_cir_estimator(py::module& m)
         .def("pdus_enqueued", &Blk::pdus_enqueued)
         .def("pdus_completed", &Blk::pdus_completed)
         .def("pdus_failed", &Blk::pdus_failed)
+        .def("pdus_published", &Blk::pdus_published)
         .def("pdus_dropped", &Blk::pdus_dropped)
         .def("invalid_inputs", &Blk::invalid_inputs)
         .def("worker_exceptions", &Blk::worker_exceptions)
@@ -869,6 +873,225 @@ void bind_cir_writer(py::module& m)
         .def("frames_invalid", &Blk::frames_invalid)
         .def("taps_written", &Blk::taps_written)
         .def("queue_high_watermark", &Blk::queue_high_watermark);
+}
+
+void bind_echo_timer_stream(py::module& m)
+{
+    using Backend = gr::uwb::echo::IRadioBurstBackend;
+    using Fake = gr::uwb::echo::FakeBurstBackend;
+    using Blk = gr::uwb::UwbEchoTimerStream;
+
+    // Abstract backend (allows Python to pass a concrete backend into the
+    // generic factory below).
+    py::class_<Backend, std::shared_ptr<Backend>>(m, "echo_burst_backend");
+
+    py::class_<Fake, Backend, std::shared_ptr<Fake>>(m, "fake_burst_backend")
+        .def(py::init([](uint64_t max_io_chunk,
+                         int64_t device_time_start,
+                         int64_t device_time_auto_advance) {
+                 Fake::Config cfg;
+                 cfg.max_io_chunk = max_io_chunk;
+                 cfg.device_time_start = device_time_start;
+                 cfg.device_time_auto_advance = device_time_auto_advance;
+                 return std::make_shared<Fake>(cfg);
+             }),
+             py::arg("max_io_chunk") = 0,
+             py::arg("device_time_start") = 0,
+             py::arg("device_time_auto_advance") = 0)
+        .def("center_freq_hz", &Fake::center_freq_hz)
+        .def("burst_count", &Fake::burst_count)
+        .def("set_device_time", &Fake::set_device_time, py::arg("ticks"));
+
+    // Generic factory: any injected IRadioBurstBackend (Python can pass a
+    // fake_burst_backend).  The scheduler config is given as scalars.
+    py::class_<Blk, gr::block, std::shared_ptr<Blk>>(m, "echo_timer_stream")
+        .def(py::init([](int64_t pri_num,
+                         int64_t pri_den,
+                         int64_t pre_guard_ticks,
+                         uint64_t max_fragment_size,
+                         uint64_t max_catchup_slots,
+                         std::shared_ptr<Backend> backend,
+                         uint64_t tx_samples,
+                         uint64_t rx_samples,
+                         double sample_rate_hz,
+                         uint64_t pre_guard_samples,
+                         uint64_t capture_samples,
+                         uint64_t post_guard_samples,
+                         size_t sync_repetitions,
+                         const std::string& sfd_mode,
+                         size_t code_index,
+                         double calibration_delay_native_samples,
+                         int64_t t0_ticks,
+                         double arm_margin_s,
+                         uint64_t max_frames,
+                         uint64_t collect_wait_ms,
+                         size_t max_tx_samples,
+                         size_t max_rx_samples,
+                         const std::string& lengthtagname) {
+                 gr::uwb::echo::EchoSchedulerConfig cfg;
+                 cfg.pri_num = pri_num;
+                 cfg.pri_den = pri_den;
+                 cfg.pre_guard_ticks = pre_guard_ticks;
+                 cfg.max_fragment_size = max_fragment_size;
+                 cfg.max_catchup_slots = max_catchup_slots;
+                 return Blk::make(cfg,
+                                  std::move(backend),
+                                  tx_samples,
+                                  rx_samples,
+                                  sample_rate_hz,
+                                  pre_guard_samples,
+                                  capture_samples,
+                                  post_guard_samples,
+                                  sync_repetitions,
+                                  sfd_mode,
+                                  code_index,
+                                  calibration_delay_native_samples,
+                                  t0_ticks,
+                                  arm_margin_s,
+                                  max_frames,
+                                  collect_wait_ms,
+                                  max_tx_samples,
+                                  max_rx_samples,
+                                  lengthtagname);
+             }),
+             py::arg("pri_num") = int64_t(3686400),
+             py::arg("pri_den") = int64_t(1),
+             py::arg("pre_guard_ticks") = int64_t(1475),
+             py::arg("max_fragment_size") = uint64_t(65536),
+             py::arg("max_catchup_slots") = uint64_t(1) << 20,
+             py::arg("backend"),
+             py::arg("tx_samples"),
+             py::arg("rx_samples"),
+             py::arg("sample_rate_hz") = 737280000.0,
+             py::arg("pre_guard_samples") = uint64_t(0),
+             py::arg("capture_samples") = uint64_t(0),
+             py::arg("post_guard_samples") = uint64_t(0),
+             py::arg("sync_repetitions") = size_t(64),
+             py::arg("sfd_mode") = std::string("4z2"),
+             py::arg("code_index") = size_t(9),
+             py::arg("calibration_delay_native_samples") = 0.0,
+             py::arg("t0_ticks") = int64_t(0),
+             py::arg("arm_margin_s") = 0.05,
+             py::arg("max_frames") = uint64_t(0),
+             py::arg("collect_wait_ms") = uint64_t(1000),
+             py::arg("max_tx_samples") = size_t(1) << 21,
+             py::arg("max_rx_samples") = size_t(1) << 21,
+             py::arg("lengthtagname") = std::string("packet_len"))
+        .def("set_freq", &Blk::set_freq, py::arg("hz"))
+        .def("freq", &Blk::freq)
+        .def("set_cal_delay_native", &Blk::set_cal_delay_native, py::arg("v"))
+        .def("cal_delay_native", &Blk::cal_delay_native)
+        .def("bursts_ok", &Blk::bursts_ok)
+        .def("bursts_failed", &Blk::bursts_failed)
+        .def("late_slot_skips", &Blk::late_slot_skips)
+        .def("grid_errors", &Blk::grid_errors)
+        .def("rx_samples", &Blk::rx_samples)
+        .def("tx_samples", &Blk::tx_samples)
+        .def("frames", &Blk::frames)
+        .def("last_error", &Blk::last_error);
+
+#ifdef UWB_HAVE_UHD
+    // UHD convenience factory: builds the UhdBurstBackend internally from
+    // scalar args.  Only available when the build has UHD.
+    m.def(
+        "echo_timer_stream_uhd",
+        [](const std::string& device_args,
+           double sample_rate_hz,
+           size_t tx_channel,
+           size_t rx_channel,
+           const std::string& tx_antenna,
+           const std::string& rx_antenna,
+           double tx_gain_db,
+           double rx_gain_db,
+           double center_freq_hz,
+           const std::string& clock_source,
+           const std::string& time_source,
+           int64_t pri_num,
+           int64_t pri_den,
+           int64_t pre_guard_ticks,
+           int64_t t0_ticks,
+           double arm_margin_s,
+           uint64_t tx_samples,
+           uint64_t rx_samples,
+           uint64_t pre_guard_samples,
+           uint64_t capture_samples,
+           uint64_t post_guard_samples,
+           size_t sync_repetitions,
+           const std::string& sfd_mode,
+           size_t code_index,
+           double calibration_delay_native_samples,
+           uint64_t max_frames,
+           uint64_t collect_wait_ms,
+           size_t max_tx_samples,
+           size_t max_rx_samples,
+           const std::string& lengthtagname) {
+            gr::uwb::uhd::UhdBurstBackendConfig ucfg;
+            ucfg.device_args = device_args;
+            ucfg.sample_rate_hz = sample_rate_hz;
+            ucfg.tx_channel = tx_channel;
+            ucfg.rx_channel = rx_channel;
+            ucfg.tx_antenna = tx_antenna;
+            ucfg.rx_antenna = rx_antenna;
+            ucfg.tx_gain_db = tx_gain_db;
+            ucfg.rx_gain_db = rx_gain_db;
+            ucfg.center_freq_hz = center_freq_hz;
+            ucfg.clock_source = clock_source;
+            ucfg.time_source = time_source;
+            gr::uwb::echo::EchoSchedulerConfig scfg;
+            scfg.pri_num = pri_num;
+            scfg.pri_den = pri_den;
+            scfg.pre_guard_ticks = pre_guard_ticks;
+            return Blk::make_uhd(ucfg,
+                                 scfg,
+                                 tx_samples,
+                                 rx_samples,
+                                 sample_rate_hz,
+                                 pre_guard_samples,
+                                 capture_samples,
+                                 post_guard_samples,
+                                 sync_repetitions,
+                                 sfd_mode,
+                                 code_index,
+                                 calibration_delay_native_samples,
+                                 t0_ticks,
+                                 arm_margin_s,
+                                 max_frames,
+                                 collect_wait_ms,
+                                 max_tx_samples,
+                                 max_rx_samples,
+                                 lengthtagname);
+        },
+        py::arg("device_args") = std::string(),
+        py::arg("sample_rate_hz") = 737280000.0,
+        py::arg("tx_channel") = size_t(0),
+        py::arg("rx_channel") = size_t(1),
+        py::arg("tx_antenna") = std::string(),
+        py::arg("rx_antenna") = std::string(),
+        py::arg("tx_gain_db") = -1.0,
+        py::arg("rx_gain_db") = -1.0,
+        py::arg("center_freq_hz") = 0.0,
+        py::arg("clock_source") = std::string("internal"),
+        py::arg("time_source") = std::string("internal"),
+        py::arg("pri_num") = int64_t(3686400),
+        py::arg("pri_den") = int64_t(1),
+        py::arg("pre_guard_ticks") = int64_t(1475),
+        py::arg("t0_ticks") = int64_t(0),
+        py::arg("arm_margin_s") = 0.05,
+        py::arg("tx_samples"),
+        py::arg("rx_samples"),
+        py::arg("pre_guard_samples") = uint64_t(0),
+        py::arg("capture_samples") = uint64_t(0),
+        py::arg("post_guard_samples") = uint64_t(0),
+        py::arg("sync_repetitions") = size_t(64),
+        py::arg("sfd_mode") = std::string("4z2"),
+        py::arg("code_index") = size_t(9),
+        py::arg("calibration_delay_native_samples") = 0.0,
+        py::arg("max_frames") = uint64_t(0),
+        py::arg("collect_wait_ms") = uint64_t(1000),
+        py::arg("max_tx_samples") = size_t(1) << 21,
+        py::arg("max_rx_samples") = size_t(1) << 21,
+        py::arg("lengthtagname") = std::string("packet_len"));
+#endif
 }
 
 // We need this hack because import_array() returns NULL
@@ -908,6 +1131,7 @@ PYBIND11_MODULE(uwb_python, m)
     bind_loopback_echo(m);
     bind_radar_cir_estimator(m);
     bind_cir_writer(m);
+    bind_echo_timer_stream(m);
 
     m.def(
         "make_pulse_taps",

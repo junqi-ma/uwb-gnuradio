@@ -128,6 +128,7 @@ public:
     uint64_t pdus_enqueued() const;
     uint64_t pdus_completed() const;   // core status ok
     uint64_t pdus_failed() const;      // core status not ok (still published)
+    uint64_t pdus_published() const;   // frames actually posted on "cir"
     uint64_t pdus_dropped() const;     // queue full
     uint64_t invalid_inputs() const;   // rejected in handler, not enqueued
     uint64_t worker_exceptions() const;
@@ -212,6 +213,7 @@ private:
     std::atomic<uint64_t> d_received_{ 0 };
     std::atomic<uint64_t> d_enqueued_{ 0 };
     std::atomic<uint64_t> d_completed_{ 0 };
+    std::atomic<uint64_t> d_published_{ 0 };
     std::atomic<uint64_t> d_failed_{ 0 };
     std::atomic<uint64_t> d_dropped_{ 0 };
     std::atomic<uint64_t> d_invalid_{ 0 };

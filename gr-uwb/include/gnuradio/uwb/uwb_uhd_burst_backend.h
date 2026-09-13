@@ -94,6 +94,10 @@ public:
     void request_stop() override;
     bool stop_requested() const override;
     int64_t device_time_ticks() const override;
+    echo::BurstStatus tune(double freq_hz, std::string& error) override;
+
+    // Last frequency read back from the device by tune()/prepare().
+    double center_freq_hz() const;
 
     const UhdBurstBackendConfig& config() const { return d_cfg_; }
 

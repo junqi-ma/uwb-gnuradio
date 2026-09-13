@@ -26,6 +26,7 @@ install(FILES
     uwb_loopback_echo.block.yml
     uwb_radar_cir_estimator.block.yml
     uwb_cir_writer.block.yml
+    uwb_echo_timer_stream.block.yml
     DESTINATION share/gnuradio/grc/blocks
 )
 

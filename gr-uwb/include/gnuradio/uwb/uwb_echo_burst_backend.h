@@ -159,6 +159,13 @@ public:
 
     // Current device time in ticks (the grid `now` used for expiry).
     virtual int64_t device_time_ticks() const = 0;
+
+    // Retune BOTH the TX and RX chain to freq_hz (Hz).  The caller issues
+    // this at a burst boundary (never concurrently with issue_*/collect);
+    // the backend applies the UHD tune request and reads the frequency
+    // back.  Returns Ok on success, else the failure status with a
+    // UHD-like error string — never throws across this interface.
+    virtual BurstStatus tune(double freq_hz, std::string& error) = 0;
 };
 
 inline const char* burst_status_to_string(BurstStatus s)

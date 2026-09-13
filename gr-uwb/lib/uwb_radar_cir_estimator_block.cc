@@ -347,6 +347,11 @@ uint64_t UwbRadarCirEstimator::pdus_completed() const
 {
     return d_completed_.load(std::memory_order_relaxed);
 }
+uint64_t UwbRadarCirEstimator::pdus_published() const
+{
+    return d_published_.load(std::memory_order_relaxed);
+}
+
 uint64_t UwbRadarCirEstimator::pdus_failed() const
 {
     return d_failed_.load(std::memory_order_relaxed);
@@ -446,6 +451,7 @@ void UwbRadarCirEstimator::reset_stats()
     d_received_.store(0, std::memory_order_relaxed);
     d_enqueued_.store(0, std::memory_order_relaxed);
     d_completed_.store(0, std::memory_order_relaxed);
+    d_published_.store(0, std::memory_order_relaxed);
     d_failed_.store(0, std::memory_order_relaxed);
     d_dropped_.store(0, std::memory_order_relaxed);
     d_invalid_.store(0, std::memory_order_relaxed);
@@ -878,6 +884,7 @@ UwbRadarCirEstimator::publish_frame(const Job& job,
     }
 
     message_port_pub(pmt::mp("cir"), pmt::cons(meta, vec));
+    d_published_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void

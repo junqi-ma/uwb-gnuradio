@@ -1,6 +1,6 @@
 # 开发方案：UWB Radar 流式 echo / CIR 改造（gr-radar 风格）
 
-> 状态：**进行中（M1 完成，M2/M3 未开始）**
+> 状态：**M1/M2/M3 完成，已上板验证**
 > 分支：`feature/uwb-monostatic-radar`
 > 日期：2026-09-13
 > 范围：只改造 **UWB radar echo-CIR 链**（`x410_cg400_hrp_echo_cir*.py` 对应的链路），
@@ -114,47 +114,95 @@ stream tag 发出，现有 `UwbRadarCirEstimator` 无需改动即可继续发 `c
   `cal_native 334 → cal_work 678.438`、`sample_rate=998.4e6`、`packet_len=8403`。
 - `ctest -R uwb_qa_uwb_rational_resampler_65_32_stream` **Passed**。
 
-### M2（未开始）C++ 流式 echo
+### M2（完成）C++ 流式 echo
 
-新增 `UwbEchoTimerStream`（`gr::block` 或 `tagged_stream_block`）：
+新增 `gr-uwb/include/gnuradio/uwb/uwb_echo_timer_stream.h` +
+`gr-uwb/lib/uwb_echo_timer_stream.cc`：
 
-- **输入**：TX native tagged stream（每包一个 burst）。
-- **输出**：RX tagged stream（SC16→fc32），带 M1 需要的 native tag（见第 3 节）。
-- `work()` 内驱动 `EchoGrid` + `IRadioBurstBackend`：`issue_rx()` →
-  `issue_tx()` → `collect_result()`，每调用一个 burst（阻塞到该 burst 完成，
-  与 gr-radar `usrp_echotimer_cc::work()` 一致）。
-- **sweep 相关接口**：需要 `set_freq(hz)`（运行时 retune）与
-  `set_cal_delay_native(v)`（首峰 servo 回写）；都要做成线程安全（原子/短锁），
-  由 Python app 在 burst 边界调用。
-- 复用现有 `UwbRealtimeEchoTimer` 的调度/转发语义（`apply_schedule`/
-  `run_one_burst`）与 `UwbBurstToStream`（若选择先做桥接方案）。
+- `UwbEchoTimerStream`：`gr::tagged_stream_block`，1 入 TX complex64 tagged
+  stream（每包一个 burst）/ 1 出 RX complex64 tagged stream（每窗一个）。
+- `work()` 每调用一个 burst，阻塞到 `collect_result()`；**复用**
+  `EchoGrid`/`plan_fragments`（`uwb_echo_scheduler_core.h`）与
+  `IRadioBurstBackend`（`uwb_echo_burst_backend.h`），逻辑对齐
+  `UwbRealtimeEchoTimer::apply_schedule/run_one_burst`（RX 命令先于 TX）。
+- TX complex64→SC16（×32768 截断）固定 scratch；RX SC16→complex64（÷32768）；
+  固定 fragment 数组，work 热路径无分配。
+- 输出 tag：`pulse_id`、`schedule_index`、`sample_rate`、
+  `window_start_sample=0`、`pre_guard_samples`、`capture/post_guard_samples`、
+  `sample_count`、`calibration_delay_native_samples`、`sync_repetitions`、
+  `sfd_mode`、`code_index`、成功时 `rx_time`（`packet_len` 由基类加）；
+  失败窗补零并发 `burst_status` tag，流不中断。
+- 线程安全 `set_freq(hz)` / `set_cal_delay_native(v)`（原子），供 sweep 与
+  首峰 servo；`bursts_ok/failed`、`late_slot_skips`、`last_error()` 等计数。
+- `make_uhd(...)` 便捷工厂（`#ifdef UWB_HAVE_UHD`）内部构造
+  `UhdBurstBackend`；Python 绑定 `uwb.echo_timer_stream_uhd(...)`。
+- `IRadioBurstBackend` 新增纯虚 `tune(freq, err)`，`FakeBurstBackend` 与
+  `UhdBurstBackend`（`set_tx_freq`/`set_rx_freq` + 回读）实现。
+- QA：`gr-uwb/lib/qa_uwb_echo_timer_stream.cc`（`FakeBurstBackend` 流图，
+  校验输出长度/tag/计数），CTest 通过。
 
-> 决策点：是否先做 **桥接方案** `UwbRealtimeEchoTimer`（消息、现有）→
-> `UwbBurstToStream`（PDU→tagged stream，新）→ M1 → `tagged_stream_to_pdu` →
-> 现有 estimator。桥接改动小、复用现成 UHD 引擎，但 TX 仍走 schedule PDU，
-> 不完全满足「TX 如 gr-radar」。全流式 `UwbEchoTimerStream` 更贴合需求但改动大。
+### M3（完成）接线 + buffer
 
-### M3（未开始）接线 + buffer
+新增 `gr-uwb/apps/x410_cg400_hrp_echo_cir_stream.py`（+ 纯 Python 单测
+`test_echo_stream_buffers.py`）：
 
-- app flowgraph：
-  `vector_source(TX) → UwbEchoTimerStream → UwbRationalResamplerCcf65_32 →
-   blocks.tagged_stream_to_pdu → UwbRadarCirEstimator → writer/UDP/servo`。
-- 去掉 Python 发布线程与 `_pub_q`（不再有 `tolist()/init_c32vector`）。
-- buffer（`set_min_output_buffer(port, items)`，单位是 **items**）：
+```
+vector_source_c(TX, repeat) → stream_to_tagged_stream("packet_len")
+  → uwb.echo_timer_stream_uhd → uwb.rational_resampler_ccf_65_32
+  → blocks.tagged_stream_to_pdu(complex, "packet_len")
+  → uwb.radar_cir_estimator → cir_writer / CirUdpSink / PeakAlignSink
+```
 
-| 位置 | 建议 | preamble 128 示例 |
+- 没有 Python 发布线程/`_pub_q`，不再 `tolist()/init_c32vector`。
+- `--freq-mode fixed|scan|manual`：后台线程按 dwell 调 `echo.set_freq(hz)`；
+  首峰 servo 订阅 `est.cir`，回写 `echo.set_cal_delay_native(...)`。
+- buffer（`set_min_output_buffer(port, items)`，单位 items）：
+
+| 位置 | 取值 | tx=94492, rx=109288 |
 |---|---|---|
-| echo TX 输入 | `2·tx_native` | 253k items ≈ 2 MB (sc16) |
-| echo RX 输出 | `4·rx_len` | 565k items ≈ 4.5 MB |
-| resampler 输入 | `2·rx_len` | 283k items |
-| resampler 输出 | `2·map(rx_len)` | ~574k items ≈ 4.6 MB |
-| `tagged_stream_to_pdu` 输入 | `1·map(rx_len)` | ~287k items |
-| estimator job 队列 | 保持 64 | — |
+| `stream_to_tagged_stream` 输出 | `2·tx` | 188984 |
+| echo 输出 | `4·rx` | 437152 |
+| resampler 输出 | `2·ceil(rx·65/32)` | 443984 |
+| `tagged_stream_to_pdu` 输入 | 随 resampler 输出（同一连接取大） | 443984 |
 
-  必要时 `set_max_output_buffer`；若使用 vmcircbuf，按 gr-radar 文档调整
-  `kernel.shmmax` / `net.core.rmem_max`。
+- **关键修正 1（UHD）**：`UhdBurstBackend` 的 streamer CPU 格式写成了
+  `"s16"`，UHD 实际 token 是 **`"sc16"`**（否则 prepare 报
+  `Cannot find a conversion routine`）。已改为 `("sc16","sc16")`。
+- **关键修正 2（收尾丢帧）**：echo `work()` 返回 `WORK_DONE` 后 GNU Radio
+  会拆掉消息端口，最后一帧 CIR 在投递前丢失。因此 echo 跑
+  `target_frames + 8` 个 burst（保持流图存活），app 在 `target_frames` 处
+  退出并把多余的 slack 帧从 `cir.jsonl`/`cir.cf32` 截掉。
 
-## 5. 验收与风险
+## 5. 实测结果（2026-09-13，X410 CG400，491.52 MS/s）
+
+命令示例：
+
+```bash
+python3 gr-uwb/apps/x410_cg400_hrp_echo_cir_stream.py \
+  --args addr=192.168.10.2 --freq-mode fixed --pulses 8 --pri-s 0.05 \
+  --gain-tx 50 --gain-rx 60 --no-udp --output /tmp/x410_stream
+```
+
+| 项目 | 流式链 | 旧 PMT/PDU 链（同参数） |
+|---|---|---|
+| 突发 | 8/8 ok，late=0 | 12/12 ok，late=0 |
+| resampler tag_errors | 0 | — |
+| CIR | 8/8 ok | 12/12 ok |
+| `peak_tap` | 45–46 | 45–46 |
+| `cir_peak_metric` mean | 0.0727 | 0.0716 |
+| 估计器 service | ~380 µs | ~354 µs |
+
+- **CIR 与旧链一致**（peak_tap 同、metric 同量级），说明流式重采样 + tag 映射
+  数值正确。
+- 首峰 servo（`--peak-target-tap 30`）在流式链上工作：`align_locked=true`，
+  `last_first_peak=30`，`cal_delay_native 334 → 342.37`。
+- scan（`--freq-start 6489.0e6 --freq-stop 6489.8e6 --freq-step 0.4e6
+  --freq-dwell 10`）：`retune=2`，每频点 10 帧，`cir_ok=30`。
+- CTest：除已知的 `uwb_qa_uwb_pdu_rational_resampler.cc` 吞吐阈值（本机慢）
+  外，**37/37 全过**；`test_echo_stream_buffers` 8/8、`test_freq_plan` 35/35、
+  `test_cir_udp_format` 5/5。
+
+## 6. 验收与风险
 
 **验收**
 
@@ -172,7 +220,7 @@ stream tag 发出，现有 `UwbRadarCirEstimator` 无需改动即可继续发 `c
   独立；代价是每窗多一次 reset/flush（可接受）。
 - retune 后前 ~4 拍群时延 settling（见首峰对齐文档）在 M2 仍要处理。
 
-## 6. 相关文档
+## 7. 相关文档
 
 - 使用手册（频率扫描 + 首峰对齐）：
   [`使用手册_X410_CG400频率扫描_echo_cir_sweep.md`](使用手册_X410_CG400频率扫描_echo_cir_sweep.md)

@@ -149,6 +149,11 @@ struct UhdBurstBackend::Impl
     uint64_t pending_tx_ticks = 0;
     uint64_t pending_tx_sent = 0;
 
+    // Last frequency applied through tune()/prepare() (read back from the
+    // device); atomic because the setter runs on the caller thread while
+    // the scheduler worker runs the bursts.
+    std::atomic<double> center_freq_hz{ 0.0 };
+
     // Async events (async thread producer, worker consumer).
     struct AsyncEvent {
         uint32_t event_code = 0;
@@ -307,6 +312,9 @@ bool UhdBurstBackend::prepare(std::string& error)
             impl->dev->set_rx_freq(
                 ::uhd::tune_request_t(d_cfg_.center_freq_hz),
                 d_cfg_.rx_channel);
+            impl->center_freq_hz.store(
+                0.5 * (impl->dev->get_tx_freq(d_cfg_.tx_channel) +
+                       impl->dev->get_rx_freq(d_cfg_.rx_channel)));
         }
         if (d_cfg_.tx_gain_db >= 0.0)
             impl->dev->set_tx_gain(d_cfg_.tx_gain_db, d_cfg_.tx_channel);
@@ -319,10 +327,10 @@ bool UhdBurstBackend::prepare(std::string& error)
 
         // Same device, two SC16 streamers (cpu s16 / otw sc16 — the
         // production native wire format).
-        ::uhd::stream_args_t tx_args("s16", "sc16");
+        ::uhd::stream_args_t tx_args("sc16", "sc16");
         tx_args.channels = std::vector<size_t>{ d_cfg_.tx_channel };
         impl->tx_stream = impl->dev->get_tx_stream(tx_args);
-        ::uhd::stream_args_t rx_args("s16", "sc16");
+        ::uhd::stream_args_t rx_args("sc16", "sc16");
         rx_args.channels = std::vector<size_t>{ d_cfg_.rx_channel };
         impl->rx_stream = impl->dev->get_rx_stream(rx_args);
         if (!impl->tx_stream || !impl->rx_stream) {
@@ -719,6 +727,41 @@ int64_t UhdBurstBackend::device_time_ticks() const
     } catch (const std::exception&) {
         return 0; // device gone: the worker skips expired grid slots
     }
+}
+
+echo::BurstStatus UhdBurstBackend::tune(double freq_hz, std::string& error)
+{
+    if (!d_impl_ || !d_impl_->dev) {
+        error = "backend not prepared";
+        return echo::BurstStatus::BackendError;
+    }
+    if (stop_requested()) {
+        error = "backend stopped";
+        return echo::BurstStatus::StopDuringIo;
+    }
+    if (!(freq_hz > 0.0) || !std::isfinite(freq_hz)) {
+        error = "tune: freq_hz must be > 0 and finite";
+        return echo::BurstStatus::BackendError;
+    }
+    try {
+        // Same multi_usrp device: retune BOTH directions, then read back.
+        d_impl_->dev->set_tx_freq(::uhd::tune_request_t(freq_hz),
+                                  d_cfg_.tx_channel);
+        d_impl_->dev->set_rx_freq(::uhd::tune_request_t(freq_hz),
+                                  d_cfg_.rx_channel);
+        const double tx = d_impl_->dev->get_tx_freq(d_cfg_.tx_channel);
+        const double rx = d_impl_->dev->get_rx_freq(d_cfg_.rx_channel);
+        d_impl_->center_freq_hz.store(0.5 * (tx + rx));
+    } catch (const std::exception& e) {
+        error = uhd_error_string("tune", e);
+        return echo::BurstStatus::BackendError;
+    }
+    return echo::BurstStatus::Ok;
+}
+
+double UhdBurstBackend::center_freq_hz() const
+{
+    return d_impl_ ? d_impl_->center_freq_hz.load() : 0.0;
 }
 
 } // namespace uhd

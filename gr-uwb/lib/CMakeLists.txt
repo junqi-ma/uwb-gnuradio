@@ -78,6 +78,7 @@ list(APPEND uwb_sources
     uwb_radar_cir_estimator_block.cc
     uwb_cir_writer.cc
     uwb_realtime_echo_timer.cc
+    uwb_echo_timer_stream.cc
 )
 if(UWB_HAVE_UHD)
     list(APPEND uwb_sources uwb_uhd_burst_backend.cc)
@@ -176,6 +177,7 @@ list(APPEND test_uwb_sources
     qa_uwb_radar_cir_estimator_block.cc
     qa_uwb_cir_writer.cc
     qa_uwb_echo_timer.cc
+    qa_uwb_echo_timer_stream.cc
     qa_uwb_radar_e2e.cc
     qa_uwb_uhd_backend.cc
     qa_uwb_hrp_mod_core.cc
