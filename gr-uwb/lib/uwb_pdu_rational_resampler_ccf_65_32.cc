@@ -150,7 +150,8 @@ UwbPduRationalResamplerCcf65_32::make(const std::string& taps_file_or_profile,
                                       double output_sample_rate,
                                       bool validate_input_rate,
                                       EmitPolicy emit_policy,
-                                      size_t max_input_samples)
+                                      size_t max_input_samples,
+                                      int num_workers)
 {
     auto taps = load_taps_from_profile_or_path(taps_file_or_profile);
     return gnuradio::make_block_sptr<UwbPduRationalResamplerCcf65_32>(
@@ -158,7 +159,8 @@ UwbPduRationalResamplerCcf65_32::make(const std::string& taps_file_or_profile,
         output_sample_rate,
         validate_input_rate,
         emit_policy,
-        max_input_samples);
+        max_input_samples,
+        num_workers);
 }
 
 UwbPduRationalResamplerCcf65_32::sptr
@@ -166,14 +168,16 @@ UwbPduRationalResamplerCcf65_32::make_from_taps(const std::vector<float>& taps,
                                                 double output_sample_rate,
                                                 bool validate_input_rate,
                                                 EmitPolicy emit_policy,
-                                                size_t max_input_samples)
+                                                size_t max_input_samples,
+                                                int num_workers)
 {
     return gnuradio::make_block_sptr<UwbPduRationalResamplerCcf65_32>(
         taps,
         output_sample_rate,
         validate_input_rate,
         emit_policy,
-        max_input_samples);
+        max_input_samples,
+        num_workers);
 }
 
 UwbPduRationalResamplerCcf65_32::UwbPduRationalResamplerCcf65_32(
@@ -181,7 +185,8 @@ UwbPduRationalResamplerCcf65_32::UwbPduRationalResamplerCcf65_32(
     double output_sample_rate,
     bool validate_input_rate,
     EmitPolicy emit_policy,
-    size_t max_input_samples)
+    size_t max_input_samples,
+    int num_workers)
     : gr::block("uwb_pdu_rational_resampler_ccf_65_32",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
@@ -190,7 +195,8 @@ UwbPduRationalResamplerCcf65_32::UwbPduRationalResamplerCcf65_32(
       d_output_rate_(output_sample_rate),
       d_validate_rate_(validate_input_rate),
       d_emit_policy_(emit_policy),
-      d_max_in_(max_input_samples)
+      d_max_in_(max_input_samples),
+      d_num_workers_(num_workers < 1 ? 1 : num_workers)
 {
     if (d_taps_.empty()) {
         throw std::invalid_argument(
@@ -204,6 +210,9 @@ UwbPduRationalResamplerCcf65_32::UwbPduRationalResamplerCcf65_32(
         throw std::invalid_argument(
             "UwbPduRationalResamplerCcf65_32: max_input_samples must be > 0");
     }
+
+    // Build the persistent FIR pool once, at construction.
+    d_core_->set_num_workers(d_num_workers_);
 
     d_max_out_ = core::RationalResampler65_32Core::expected_output_length(
         d_max_in_, d_taps_.size());
@@ -223,6 +232,21 @@ UwbPduRationalResamplerCcf65_32::UwbPduRationalResamplerCcf65_32(
 }
 
 UwbPduRationalResamplerCcf65_32::~UwbPduRationalResamplerCcf65_32() = default;
+
+void
+UwbPduRationalResamplerCcf65_32::set_num_workers(int n)
+{
+    if (n < 1)
+        n = 1;
+    d_num_workers_ = n;
+    d_core_->set_num_workers(n);
+}
+
+const char*
+UwbPduRationalResamplerCcf65_32::resampler_kernel() const
+{
+    return d_core_->kernel_name();
+}
 
 void
 UwbPduRationalResamplerCcf65_32::reset_stats()

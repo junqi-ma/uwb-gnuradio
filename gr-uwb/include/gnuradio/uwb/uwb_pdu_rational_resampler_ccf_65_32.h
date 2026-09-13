@@ -70,19 +70,23 @@ public:
      * \param max_input_samples     Fixed handler input bound. Scratch for
      *        SC16→FC32 and process+flush is allocated at make(); the handler
      *        never resizes. Oversized PDUs publish invalid_window.
+     * \param num_workers           Persistent 65/32 FIR worker count (>= 1).
+     *        Built at construction; default 1 keeps single-thread results.
      */
     static sptr make(const std::string& taps_file_or_profile = "quality_minorder",
                      double output_sample_rate = kOutputRateHz,
                      bool validate_input_rate = true,
                      EmitPolicy emit_policy = EmitPolicy::FullWindow,
-                     size_t max_input_samples = kDefaultMaxInputSamples);
+                     size_t max_input_samples = kDefaultMaxInputSamples,
+                     int num_workers = 1);
 
     /** QA path: construct from an in-memory taps vector. */
     static sptr make_from_taps(const std::vector<float>& taps,
                                double output_sample_rate = kOutputRateHz,
                                bool validate_input_rate = true,
                                EmitPolicy emit_policy = EmitPolicy::FullWindow,
-                               size_t max_input_samples = kDefaultMaxInputSamples);
+                               size_t max_input_samples = kDefaultMaxInputSamples,
+                               int num_workers = 1);
 
     ~UwbPduRationalResamplerCcf65_32() override;
 
@@ -95,6 +99,16 @@ public:
     void set_emit_policy(EmitPolicy p) { d_emit_policy_ = p; }
     size_t max_input_samples() const { return d_max_in_; }
     size_t max_output_samples() const { return d_max_out_; }
+
+    /**
+     * Persistent FIR worker count for the 65/32 core.  Must be called while
+     * the block is quiescent (before start / between bursts) because it
+     * rebuilds the core's persistent thread pool.  Clamped to >= 1.
+     */
+    void set_num_workers(int n);
+    int num_workers() const { return d_num_workers_; }
+    /** Active FIR kernel name (diagnostics), e.g. "avx2_fma_macroblock". */
+    const char* resampler_kernel() const;
 
     const gr_complex* scratch_data() const { return d_scratch_.data(); }
     size_t scratch_size() const { return d_scratch_.size(); }
@@ -176,7 +190,8 @@ public:
                                     double output_sample_rate,
                                     bool validate_input_rate,
                                     EmitPolicy emit_policy,
-                                    size_t max_input_samples);
+                                    size_t max_input_samples,
+                                    int num_workers = 1);
 
 private:
     void handle_packet(pmt::pmt_t msg);
@@ -195,6 +210,7 @@ private:
     EmitPolicy d_emit_policy_;
     size_t d_max_in_ = 0;
     size_t d_max_out_ = 0;
+    int d_num_workers_ = 1;
 
     // Sized once at make() to max_input / max_output. Handler never resizes.
     std::vector<gr_complex> d_scratch_;
