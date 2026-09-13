@@ -1,0 +1,55 @@
+{
+  "commit": "d197466fae177024d8b9543bcb99f6a28ad1735d",
+  "case": "200hz_scalecheck",
+  "rate_hz": 200.0,
+  "pri_s": 0.005,
+  "pulses": 100,
+  "argv": [
+    "python3",
+    "gr-uwb/apps/x410_cg400_hrp_echo_cir.py",
+    "--echo-backend",
+    "cpp-pdu",
+    "--pulses",
+    "100",
+    "--pri-s",
+    "0.005",
+    "--preamble-length",
+    "128",
+    "--pulse-shape",
+    "minphase",
+    "--gain-tx",
+    "50",
+    "--gain-rx",
+    "60",
+    "--no-udp"
+  ],
+  "returncode": 0,
+  "wall_s": null,
+  "device": {
+    "model": "Ettus/NI X410",
+    "fpga_image": "CG_400",
+    "sample_rate_hz": 491520000.0,
+    "device_args": "addr=192.168.10.2",
+    "tx_chain": "ch0 TX/RX0",
+    "rx_chain": "ch3 RX1",
+    "uhd": "4.6.0"
+  },
+  "host": {
+    "cpu": "x86_64",
+    "governor": [
+      "performance"
+    ],
+    "nproc": 17
+  },
+  "env": {
+    "LD_LIBRARY_PATH": "/usr/local/lib:",
+    "PYTHONPATH": ""
+  },
+  "artifacts": {
+    "summary": "analysis_outputs/cpp_pdu_ab/round2/200hz_scalecheck/summary.json",
+    "summary_sha256": "1ccfee3ecb7ae872f41fba0aa9cfd224c4967c3ce0753f9829f3efd508ceb476",
+    "stdout": "analysis_outputs/cpp_pdu_ab/round2/200hz_scalecheck/stdout.log",
+    "stdout_sha256": "cd1d34ab520c02ad4961ebc2d52437509c589cd67ea2142d9bdf85fd4cec5740"
+  },
+  "raw_output_dir": "/tmp/opencode/scale_check"
+}

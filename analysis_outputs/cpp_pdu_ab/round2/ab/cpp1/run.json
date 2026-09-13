@@ -1,0 +1,23 @@
+{
+  "code_commit_current": "d197466fae177024d8b9543bcb99f6a28ad1735d",
+  "case": "cpp1",
+  "backend": "cpp-pdu@d197466fae177024d8b9543bcb99f6a28ad1735d",
+  "rate_hz": 200.0,
+  "pri_s": 0.005,
+  "pulses": 1000,
+  "device": {
+    "model": "Ettus/NI X410",
+    "fpga_image": "CG_400",
+    "sample_rate_hz": 491520000.0,
+    "device_args": "addr=192.168.10.2",
+    "tx_chain": "ch0 TX/RX0",
+    "rx_chain": "ch3 RX1"
+  },
+  "artifacts": {
+    "summary": "analysis_outputs/cpp_pdu_ab/round2/ab/cpp1/summary.json",
+    "summary_sha256": "b9e29533d42f19d364279d3ce48ece54cc2cb2bdf7e7638675e61917401a14bf",
+    "stdout": "analysis_outputs/cpp_pdu_ab/round2/ab/cpp1/stdout.log",
+    "stdout_sha256": "d8470c5c7b9a50a9c475b8245317841631600e4c9761f17da5e60ae1bf5f68be"
+  },
+  "raw_output_dir": "/tmp/opencode/ab_cpp1"
+}

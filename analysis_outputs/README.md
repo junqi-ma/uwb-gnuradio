@@ -147,3 +147,13 @@ python3 gr-uwb/apps/bench_pdu_throughput.py --parse-only \
 脚本输出 `bench_summary.md` + `bench_summary.json`，统计每项
 count/mean/p50/p95/p99/max；stdout 中的 `pub pulse=` 行即使与 `sched` 行粘连
 也能被正确解析。默认 `--run` rates 为 `100,200,500`，可复现 spec §D 的三档。
+
+## 整改轮补充证据（round 2）
+
+- `m0_baseline_500hz/`、`m0_baseline_1000hz/`：**基线 commit `0dbfda5`** 的
+  Python PDU 压力测试（worktree），含 `run.json`（argv/commit/设备/环境/hash）。
+- `cpp_pdu_ab/round2/`：整改后 cpp-pdu 的 200 Hz scalecheck / 60 s soak /
+  **10 min soak** 与 **3 轮 Python/C++ A/B**，每个 case 含 `summary.json` +
+  `stdout.log` + `run.json`（backlog 统计）。
+- `pdu_copy_audit.md`：M4 大数组复制审计。
+- 结论见 `docs/phase1/测试报告_UWB_Radar_PDU速率优化.md`。

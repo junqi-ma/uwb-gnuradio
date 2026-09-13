@@ -1,0 +1,56 @@
+{
+  "code_commit_current": "d197466fae177024d8b9543bcb99f6a28ad1735d",
+  "case": "200hz_soak600",
+  "device": {
+    "model": "Ettus/NI X410",
+    "fpga_image": "CG_400",
+    "sample_rate_hz": 491520000.0,
+    "device_args": "addr=192.168.10.2",
+    "tx_chain": "ch0 TX/RX0",
+    "rx_chain": "ch3 RX1"
+  },
+  "artifacts": {
+    "summary": "analysis_outputs/cpp_pdu_ab/round2/200hz_soak600/summary.json",
+    "summary_sha256": "cbeef100f56a47de1a3baf0af0308a37f8894c0d6a734d7139346f82c3d09d5c",
+    "stdout": "analysis_outputs/cpp_pdu_ab/round2/200hz_soak600/stdout.log",
+    "stdout_sha256": "89809902833082b448f443ce29d8a884c88e24400127515e0bb2cd651df670b6"
+  },
+  "raw_output_dir": "/tmp/opencode/soak600",
+  "rate_hz": 200.0,
+  "pri_s": 0.005,
+  "pulses": 120000,
+  "argv": [
+    "python3",
+    "gr-uwb/apps/x410_cg400_hrp_echo_cir.py",
+    "--echo-backend",
+    "cpp-pdu",
+    "--pulses",
+    "120000",
+    "--pri-s",
+    "0.005",
+    "--preamble-length",
+    "128",
+    "--pulse-shape",
+    "minphase",
+    "--gain-tx",
+    "50",
+    "--gain-rx",
+    "60",
+    "--no-udp"
+  ],
+  "backlog": {
+    "samples": 120,
+    "res_min": 0,
+    "res_max": 1,
+    "res_first": 1,
+    "res_last": 1,
+    "est_min": 0,
+    "est_max": 1,
+    "est_first": 0,
+    "est_last": 0,
+    "res_mean_1st": 0.567,
+    "res_mean_2nd": 0.583,
+    "est_mean_1st": 0.067,
+    "est_mean_2nd": 0.083
+  }
+}

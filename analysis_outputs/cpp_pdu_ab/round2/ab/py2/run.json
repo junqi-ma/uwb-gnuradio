@@ -1,0 +1,23 @@
+{
+  "code_commit_current": "d197466fae177024d8b9543bcb99f6a28ad1735d",
+  "case": "py2",
+  "backend": "python@0dbfda5",
+  "rate_hz": 200.0,
+  "pri_s": 0.005,
+  "pulses": 1000,
+  "device": {
+    "model": "Ettus/NI X410",
+    "fpga_image": "CG_400",
+    "sample_rate_hz": 491520000.0,
+    "device_args": "addr=192.168.10.2",
+    "tx_chain": "ch0 TX/RX0",
+    "rx_chain": "ch3 RX1"
+  },
+  "artifacts": {
+    "summary": "analysis_outputs/cpp_pdu_ab/round2/ab/py2/summary.json",
+    "summary_sha256": "71e2abd5d3807679644915f2507a82d27c4707a80e2f4be0176626040f71ceae",
+    "stdout": "analysis_outputs/cpp_pdu_ab/round2/ab/py2/stdout.log",
+    "stdout_sha256": "e3f1a6cf24932eb1bf148d66c5bf28f36251d8a0d66e6b53b3c8dc54bcacfd7f"
+  },
+  "raw_output_dir": "/tmp/opencode/ab_py2"
+}

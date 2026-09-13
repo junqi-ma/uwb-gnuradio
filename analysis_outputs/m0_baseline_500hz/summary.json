@@ -1,0 +1,176 @@
+{
+  "hrp_samples": 256959,
+  "native_samples": 126503,
+  "pulses": 2500,
+  "pri_s": 0.002,
+  "rate_hz": 500.0,
+  "schedule_wall_s": 5.248939572018571,
+  "echo_ok": 1227,
+  "echo_fail": 1273,
+  "echo_late": 1273,
+  "echo_pub": 1227,
+  "tx_send_error": 0,
+  "publish_native": 64992,
+  "res_rx": 1227,
+  "res_tx": 1227,
+  "res_drop": 0,
+  "est_rx": 1227,
+  "est_enq": 1227,
+  "est_done": 1227,
+  "est_fail": 0,
+  "est_drop": 0,
+  "est_invalid": 0,
+  "wr_ok": 1227,
+  "wr_fail": 0,
+  "wr_invalid": 0,
+  "use_predicted_timing": true,
+  "est_queue_capacity": 64,
+  "est_queue_hwm": 1,
+  "est_service_us_mean": 409,
+  "est_service_us_max": 875,
+  "udp_sent": 0,
+  "udp_sent_ok": 0,
+  "udp_sent_fail": 0,
+  "udp_sent_freq": 0,
+  "udp_eagain": 0,
+  "cir": {
+    "exists": true,
+    "lines": 1227,
+    "ok": 1227,
+    "fail": 0,
+    "status_hist": {
+      "ok": 1227
+    },
+    "unique_ids": 1227,
+    "missing_count": 1273,
+    "missing_head": [
+      1,
+      2,
+      3,
+      5,
+      7,
+      9,
+      11,
+      13,
+      15,
+      17,
+      19,
+      21,
+      23,
+      25,
+      27,
+      29
+    ],
+    "dup_count": 0,
+    "id_gaps": [
+      [
+        0,
+        4
+      ],
+      [
+        4,
+        6
+      ],
+      [
+        6,
+        8
+      ],
+      [
+        8,
+        10
+      ],
+      [
+        10,
+        12
+      ],
+      [
+        12,
+        14
+      ],
+      [
+        14,
+        16
+      ],
+      [
+        16,
+        18
+      ],
+      [
+        18,
+        20
+      ],
+      [
+        20,
+        22
+      ],
+      [
+        22,
+        24
+      ],
+      [
+        24,
+        26
+      ],
+      [
+        26,
+        28
+      ],
+      [
+        28,
+        30
+      ],
+      [
+        30,
+        32
+      ],
+      [
+        32,
+        34
+      ]
+    ],
+    "id_min": 0,
+    "id_max": 2498,
+    "peak_tap_min": 5,
+    "peak_tap_max": 114,
+    "metric_min": 0.00238805846,
+    "metric_max": 0.0615319945,
+    "metric_mean": 0.05122075512940511,
+    "estimator_us_min": 366,
+    "estimator_us_max": 875,
+    "estimator_us_mean": 409.3439282803586
+  },
+  "timing": {
+    "n": 2500,
+    "ok": 1227,
+    "late": 1273,
+    "dt_tx_min": 0.0039999999999995595,
+    "dt_tx_max": 0.008000000000000007,
+    "dt_tx_mean": 0.004075040783034259,
+    "lead_min": -0.002896596354166614,
+    "lead_max": 0.249998,
+    "uhd_ms_min": 3.042369004106149,
+    "uhd_ms_max": 251.0118079953827,
+    "uhd_ms_mean": 3.9187670851292538,
+    "span_s": 4.996
+  },
+  "output": "/tmp/opencode/wt-base-out-500",
+  "sc16_packets": 0,
+  "sc16_samples": 0,
+  "dump_sc16": false,
+  "freq_hz": 6489600000.0,
+  "native_rate_hz": 491520000.0,
+  "code_index": 9,
+  "preamble_length": 128,
+  "sfd_mode": "4z2",
+  "gain_tx": 50.0,
+  "gain_rx": 60.0,
+  "tx_channel": 0,
+  "rx_channel": 3,
+  "tx_antenna": "TX/RX0",
+  "rx_antenna": "RX1",
+  "iq_scale": 32768.0,
+  "sample_format": "sc16",
+  "rx_window": 141300,
+  "rx_window_us": 287.4755859375,
+  "rx_pad_us": 8.0
+}
