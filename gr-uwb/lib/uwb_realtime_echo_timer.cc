@@ -75,6 +75,28 @@ bool dict_has(pmt::pmt_t dict, const char* key)
     return pmt::is_dict(dict) && pmt::dict_has_key(dict, pmt::mp(key));
 }
 
+// Steady-clock delta in whole microseconds, clamped at 0 (diagnostics).
+uint64_t elapsed_us(const std::chrono::steady_clock::time_point& a,
+                    const std::chrono::steady_clock::time_point& b)
+{
+    const auto us =
+        std::chrono::duration_cast<std::chrono::microseconds>(b - a).count();
+    return us > 0 ? static_cast<uint64_t>(us) : uint64_t{ 0 };
+}
+
+// Accumulate a segment duration into its atomic total and running max.
+// Relaxed ordering, no allocation, never throws; diagnostics only.
+void accumulate_us(std::atomic<uint64_t>& total,
+                   std::atomic<uint64_t>& max,
+                   uint64_t us)
+{
+    total.fetch_add(us, std::memory_order_relaxed);
+    uint64_t cur = max.load(std::memory_order_relaxed);
+    while (us > cur &&
+           !max.compare_exchange_weak(cur, us, std::memory_order_relaxed)) {
+    }
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -307,6 +329,60 @@ uint64_t UwbRealtimeEchoTimer::mean_worker_us() const
     return d_worker_us_total_.load(std::memory_order_relaxed) / n;
 }
 
+// --- per-burst segment timing (D; diagnostics only) ---
+
+uint64_t UwbRealtimeEchoTimer::slot_lead_us_last() const
+{
+    return d_slot_lead_us_last_.load(std::memory_order_relaxed);
+}
+
+uint64_t UwbRealtimeEchoTimer::issue_rx_us_mean() const
+{
+    const uint64_t n = d_bursts_published_.load(std::memory_order_relaxed);
+    if (n == 0)
+        return 0;
+    return d_issue_rx_us_total_.load(std::memory_order_relaxed) / n;
+}
+
+uint64_t UwbRealtimeEchoTimer::tx_send_us_mean() const
+{
+    const uint64_t n = d_bursts_published_.load(std::memory_order_relaxed);
+    if (n == 0)
+        return 0;
+    return d_tx_send_us_total_.load(std::memory_order_relaxed) / n;
+}
+
+uint64_t UwbRealtimeEchoTimer::rx_collect_us_mean() const
+{
+    const uint64_t n = d_bursts_published_.load(std::memory_order_relaxed);
+    if (n == 0)
+        return 0;
+    return d_rx_collect_us_total_.load(std::memory_order_relaxed) / n;
+}
+
+uint64_t UwbRealtimeEchoTimer::pdu_build_us_mean() const
+{
+    const uint64_t n = d_bursts_published_.load(std::memory_order_relaxed);
+    if (n == 0)
+        return 0;
+    return d_pdu_build_us_total_.load(std::memory_order_relaxed) / n;
+}
+
+uint64_t UwbRealtimeEchoTimer::pdu_publish_us_mean() const
+{
+    const uint64_t n = d_bursts_published_.load(std::memory_order_relaxed);
+    if (n == 0)
+        return 0;
+    return d_pdu_publish_us_total_.load(std::memory_order_relaxed) / n;
+}
+
+uint64_t UwbRealtimeEchoTimer::worker_total_us_mean() const
+{
+    // Alias: the whole-burst wall time already includes both publish
+    // segments plus all backend I/O.
+    return mean_worker_us();
+}
+
 std::string UwbRealtimeEchoTimer::last_error() const
 {
     std::lock_guard<std::mutex> lock(d_err_mutex_);
@@ -391,6 +467,19 @@ UwbRealtimeEchoTimer::start()
     d_worker_us_total_.store(0, std::memory_order_relaxed);
     d_worker_us_max_.store(0, std::memory_order_relaxed);
     d_worker_us_last_.store(0, std::memory_order_relaxed);
+    d_slot_lead_us_last_.store(0, std::memory_order_relaxed);
+    d_slot_lead_us_total_.store(0, std::memory_order_relaxed);
+    d_slot_lead_us_max_.store(0, std::memory_order_relaxed);
+    d_issue_rx_us_total_.store(0, std::memory_order_relaxed);
+    d_issue_rx_us_max_.store(0, std::memory_order_relaxed);
+    d_tx_send_us_total_.store(0, std::memory_order_relaxed);
+    d_tx_send_us_max_.store(0, std::memory_order_relaxed);
+    d_rx_collect_us_total_.store(0, std::memory_order_relaxed);
+    d_rx_collect_us_max_.store(0, std::memory_order_relaxed);
+    d_pdu_build_us_total_.store(0, std::memory_order_relaxed);
+    d_pdu_build_us_max_.store(0, std::memory_order_relaxed);
+    d_pdu_publish_us_total_.store(0, std::memory_order_relaxed);
+    d_pdu_publish_us_max_.store(0, std::memory_order_relaxed);
     // Tuning restarts disarmed (cal delay is retained across start()).
     d_freq_hz_.store(0.0, std::memory_order_relaxed);
     d_tune_pending_.store(false, std::memory_order_relaxed);
@@ -741,6 +830,24 @@ UwbRealtimeEchoTimer::run_one_burst()
         publish_status("late_slot_skip", extra);
     }
 
+    // D: planned lead time of this slot at burst start, i.e. how far in the
+    // future the TX tick was when the worker picked the slot.  Diagnostics
+    // only; with no device sample rate we report 0 (never a divide).
+    uint64_t slot_lead_us = 0;
+    if (d_sample_rate_ > 0.0) {
+        const int64_t lead_ticks = slot.t_tx_whole - now;
+        if (lead_ticks > 0) {
+            const double us = static_cast<double>(lead_ticks) /
+                              d_sample_rate_ * 1.0e6;
+            if (std::isfinite(us) && us > 0.0 &&
+                us <= static_cast<double>(
+                          std::numeric_limits<uint64_t>::max()))
+                slot_lead_us = static_cast<uint64_t>(us);
+        }
+    }
+    d_slot_lead_us_last_.store(slot_lead_us, std::memory_order_relaxed);
+    accumulate_us(d_slot_lead_us_total_, d_slot_lead_us_max_, slot_lead_us);
+
     echo::BurstResult r;
     r.schedule_index = slot.index;
     r.tx_ticks = slot.t_tx_whole;
@@ -848,7 +955,10 @@ UwbRealtimeEchoTimer::run_one_burst()
     std::string err;
 
     // The RX command is always issued BEFORE the TX burst.
+    const auto issue_rx_t0 = std::chrono::steady_clock::now();
     const echo::BurstStatus rx_st = d_backend_->issue_rx(rx_cmd, err);
+    accumulate_us(d_issue_rx_us_total_, d_issue_rx_us_max_,
+                  elapsed_us(issue_rx_t0, std::chrono::steady_clock::now()));
     if (rx_st != echo::BurstStatus::Ok) {
         fail_burst(rx_st, err);
         return;
@@ -858,7 +968,10 @@ UwbRealtimeEchoTimer::run_one_burst()
                    "stop after RX command, before TX");
         return;
     }
+    const auto issue_tx_t0 = std::chrono::steady_clock::now();
     const echo::BurstStatus tx_st = d_backend_->issue_tx(tx_cmd, err);
+    accumulate_us(d_tx_send_us_total_, d_tx_send_us_max_,
+                  elapsed_us(issue_tx_t0, std::chrono::steady_clock::now()));
     if (tx_st != echo::BurstStatus::Ok) {
         fail_burst(tx_st, err);
         return;
@@ -872,8 +985,12 @@ UwbRealtimeEchoTimer::run_one_burst()
     // Asynchronous RX-completion wait (backend event / UHD recv) — never
     // a busy wait.  Exactly one result per schedule index either way.
     echo::BurstResult done;
-    if (d_backend_->collect_result(r.schedule_index, d_collect_wait_ms_,
-                                   done)) {
+    const auto collect_t0 = std::chrono::steady_clock::now();
+    const bool collected = d_backend_->collect_result(
+        r.schedule_index, d_collect_wait_ms_, done);
+    accumulate_us(d_rx_collect_us_total_, d_rx_collect_us_max_,
+                  elapsed_us(collect_t0, std::chrono::steady_clock::now()));
+    if (collected) {
         r.status = done.status;
         r.rx_time_ticks = done.rx_time_ticks;
         r.tx_samples_sent = done.tx_samples_sent;
@@ -931,6 +1048,9 @@ void
 UwbRealtimeEchoTimer::publish_burst(const echo::BurstResult& r,
                                     bool with_samples)
 {
+    // D: split the publish path into metadata/PMT build vs the actual
+    // message_port_pub.  Diagnostics only; the code below is unchanged.
+    const auto pdu_build_t0 = std::chrono::steady_clock::now();
     pmt::pmt_t meta = pmt::make_dict();
     meta = pmt::dict_add(meta, pmt::mp("status"),
                          pmt::mp(echo::burst_status_to_string(r.status)));
@@ -1063,7 +1183,12 @@ UwbRealtimeEchoTimer::publish_burst(const echo::BurstResult& r,
     if (published > 0)
         d_published_samples_.fetch_add(published,
                                        std::memory_order_relaxed);
+    const auto pdu_publish_t0 = std::chrono::steady_clock::now();
+    accumulate_us(d_pdu_build_us_total_, d_pdu_build_us_max_,
+                  elapsed_us(pdu_build_t0, pdu_publish_t0));
     message_port_pub(pmt::mp("burst"), pmt::cons(meta, vec));
+    accumulate_us(d_pdu_publish_us_total_, d_pdu_publish_us_max_,
+                  elapsed_us(pdu_publish_t0, std::chrono::steady_clock::now()));
 }
 
 void

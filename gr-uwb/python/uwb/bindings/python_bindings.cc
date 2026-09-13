@@ -598,25 +598,31 @@ void bind_pdu_rational_resampler_ccf_65_48(py::module& m)
 void bind_pdu_rational_resampler_ccf_65_32(py::module& m)
 {
     using Blk = gr::uwb::UwbPduRationalResamplerCcf65_32;
+    py::enum_<Blk::Sc16ScalePolicy>(m, "Sc16ScalePolicy")
+        .value("RawInteger", Blk::Sc16ScalePolicy::RawInteger)
+        .value("UnitRange", Blk::Sc16ScalePolicy::UnitRange);
     py::class_<Blk, gr::block, std::shared_ptr<Blk>>(
         m, "pdu_rational_resampler_ccf_65_32")
         .def(py::init([](const std::string& taps,
                          double output_sample_rate,
                          bool validate_input_rate,
                          size_t max_input_samples,
-                         int num_workers) {
+                         int num_workers,
+                         Blk::Sc16ScalePolicy sc16_scale) {
                  return Blk::make(taps,
                                   output_sample_rate,
                                   validate_input_rate,
                                   Blk::EmitPolicy::FullWindow,
                                   max_input_samples,
-                                  num_workers);
+                                  num_workers,
+                                  sc16_scale);
              }),
              py::arg("taps_file_or_profile") = std::string("quality_minorder"),
              py::arg("output_sample_rate") = Blk::kOutputRateHz,
              py::arg("validate_input_rate") = true,
              py::arg("max_input_samples") = Blk::kDefaultMaxInputSamples,
-             py::arg("num_workers") = 1)
+             py::arg("num_workers") = 1,
+             py::arg("sc16_scale") = Blk::Sc16ScalePolicy::RawInteger)
         .def_static(
             "make_from_taps",
             [](const std::vector<float>& taps,
@@ -624,14 +630,16 @@ void bind_pdu_rational_resampler_ccf_65_32(py::module& m)
                bool validate_input_rate,
                int emit_policy,
                size_t max_input_samples,
-               int num_workers) {
+               int num_workers,
+               Blk::Sc16ScalePolicy sc16_scale) {
                 return Blk::make_from_taps(
                     taps,
                     output_sample_rate,
                     validate_input_rate,
                     static_cast<Blk::EmitPolicy>(emit_policy),
                     max_input_samples,
-                    num_workers);
+                    num_workers,
+                    sc16_scale);
             },
             py::arg("taps"),
             py::arg("output_sample_rate") = Blk::kOutputRateHz,
@@ -639,7 +647,8 @@ void bind_pdu_rational_resampler_ccf_65_32(py::module& m)
             py::arg("emit_policy") =
                 static_cast<int>(Blk::EmitPolicy::FullWindow),
             py::arg("max_input_samples") = Blk::kDefaultMaxInputSamples,
-            py::arg("num_workers") = 1)
+            py::arg("num_workers") = 1,
+            py::arg("sc16_scale") = Blk::Sc16ScalePolicy::RawInteger)
         .def("taps", &Blk::taps)
         .def("tap_count", &Blk::tap_count)
         .def("output_sample_rate", &Blk::output_sample_rate)
@@ -674,6 +683,8 @@ void bind_pdu_rational_resampler_ccf_65_32(py::module& m)
         .def("set_num_workers", &Blk::set_num_workers, py::arg("n"))
         .def("num_workers", &Blk::num_workers)
         .def("resampler_kernel", &Blk::resampler_kernel)
+        .def("set_sc16_scale", &Blk::set_sc16_scale, py::arg("p"))
+        .def("sc16_scale", &Blk::sc16_scale)
         .def("reset_stats", &Blk::reset_stats);
 }
 
@@ -1179,6 +1190,13 @@ void bind_realtime_echo_timer(py::module& m)
         .def("last_worker_us", &Blk::last_worker_us)
         .def("max_worker_us", &Blk::max_worker_us)
         .def("mean_worker_us", &Blk::mean_worker_us)
+        .def("slot_lead_us_last", &Blk::slot_lead_us_last)
+        .def("issue_rx_us_mean", &Blk::issue_rx_us_mean)
+        .def("tx_send_us_mean", &Blk::tx_send_us_mean)
+        .def("rx_collect_us_mean", &Blk::rx_collect_us_mean)
+        .def("pdu_build_us_mean", &Blk::pdu_build_us_mean)
+        .def("pdu_publish_us_mean", &Blk::pdu_publish_us_mean)
+        .def("worker_total_us_mean", &Blk::worker_total_us_mean)
         .def("last_error", &Blk::last_error);
 
 #ifdef UWB_HAVE_UHD

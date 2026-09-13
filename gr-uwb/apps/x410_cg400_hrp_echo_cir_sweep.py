@@ -5,6 +5,17 @@ Built on the validated chain in ``x410_cg400_hrp_echo_cir.py`` (imported as
 ``base``).  Only the RF centre frequency is made dynamic; the TX waveform,
 the 65/32 resampler and the 998.4 MS/s CIR estimator are unchanged.
 
+Echo backends (``--echo-backend``, inherited from the base parser)
+-----------------------------------------------------------------
+python  ``SweepTimedUhdEcho`` -- per-pulse Python PMT publisher (unchanged).
+cpp-pdu ``SweepCppPduEcho``  -- the C++ UwbRealtimeEchoTimer message-only
+        grid.  Retune is queued with ``blk.set_freq`` (the radio worker tunes
+        at a burst boundary); calibration is pushed with
+        ``blk.set_cal_delay_native``.  Python never calls a UHD tune on this
+        path.  The grid is armed per constant-frequency dwell so
+        ``freq_hz``/``freq_offset_hz`` stay keyed by ``pulse_id`` for the same
+        JSONL join as the Python path.
+
 Modes (``--freq-mode``)
 -----------------------
 fixed   Identical to the base app: drive the nominal ``--freq`` only.
@@ -200,19 +211,228 @@ class SweepTimedUhdEcho(base.TimedUhdEcho):
         return self._ok, self._fail, self._late
 
 
+class SweepCppPduEcho(base.CppPduEcho):
+    """CppPduEcho + the sweep app's retune / per-pulse frequency log.
+
+    The C++ ``UwbRealtimeEchoTimer`` worker owns all UHD I/O, so a retune is
+    a pending request (``blk.set_freq``) applied by the worker at the next
+    burst boundary -- Python never calls a UHD tune on this path.  One grid
+    is armed per constant-frequency dwell (a single PDU for
+    ``--freq-mode fixed``, one PDU per dwell for ``scan``/``manual``); each
+    PDU keeps the base app's ``pulse_id_increment``/``burst_count``/
+    ``publish_native``/full-radar-geometry contract.  ``freq_hz`` and
+    ``freq_offset_hz`` are recorded per ``pulse_id`` app-side with the same
+    keys and the same ``analyze_cir_by_freq`` join as the Python path.
+
+    Servo / settling policy is unchanged: ``PeakAlignController`` still owns
+    skip/cal/lock, and ``PeakAlignSink`` pushes the updated calibration with
+    ``blk.set_cal_delay_native`` (the worker reads it when it publishes the
+    next burst), mirroring how the Python chain carried ``cal_delay_native``
+    in the next pulse's metadata.
+
+    Known limitation: the C++ grid consumes a ``pulse_id`` for every skipped
+    (expired) slot, and ``set_freq`` is asynchronous, so a retune cannot be
+    confirmed synchronously.  The re-anchor margin below (``max(arm_delay_s,
+    freq_settle_s)``) keeps the first slot of every dwell comfortably in the
+    future so skips do not occur in normal operation.
+    """
+
+    def __init__(self, a, native, rate, plan=None, align=None,
+                 freq_settle_s=0.05):
+        super().__init__(a, native, rate)
+        self.plan = plan
+        self.align = align
+        self.nominal = float(self.freq)
+        self.freq_settle_s = float(freq_settle_s)
+        self.tx_freq_actual = float(self.freq)
+        self.rx_freq_actual = float(self.freq)
+        self.freq_records = []
+        self.freq_by_pulse = {}
+        self.retune_count = 0
+        self.retune_fail = 0
+        self._done = 0
+
+    def retune(self, freq_hz, next_pulse_id):
+        """Queue a TX+RX retune on the C++ worker (burst-boundary tune)."""
+        freq_hz = float(freq_hz)
+        if abs(freq_hz - self.freq) < 1.0:
+            return False
+        self.blk.set_freq(freq_hz)
+        self.freq = freq_hz
+        # Async: the worker applies the pending tune at the next burst
+        # boundary, so a synchronous get_tx_freq()/get_rx_freq() is not
+        # available here.  Record the requested centre (what the UDP/JSONL
+        # join needs); blk.freq() holds the last actually-applied value.
+        self.tx_freq_actual = freq_hz
+        self.rx_freq_actual = freq_hz
+        self.retune_count += 1
+        return True
+
+    def _segment_len(self, pulse_id):
+        """Pulses that may share one grid at the current target frequency."""
+        if self.plan is None or self.plan.mode == "fixed":
+            return max(0, self.max_pulses - pulse_id)
+        if self.plan.mode == "manual":
+            return 1  # a command can change the target on any pulse
+        f0 = float(self.plan.freq_for(pulse_id))
+        n = 1
+        while n < self.plan.dwell and pulse_id + n < self.max_pulses:
+            if abs(float(self.plan.freq_for(pulse_id + n)) - f0) >= 1.0:
+                break
+            n += 1
+        return max(1, n)
+
+    def _record_pulse(self, pulse_id):
+        """Append the per-pulse frequency record (Python-path keys)."""
+        offset = self.freq - self.nominal
+        dwell_index = (self.plan.dwell_index(pulse_id)
+                       if self.plan is not None else 0)
+        align_first = self.align.last_first_peak if self.align is not None else None
+        align_err = self.align.last_error if self.align is not None else None
+        align_locked = self.align.locked if self.align is not None else None
+        align_adapt = self.align.adapt_frames if self.align is not None else None
+        align_skipped = self.align.skipped if self.align is not None else None
+        rec = {
+            "pulse_id": int(pulse_id),
+            "freq_hz": self.freq,
+            "freq_offset_hz": offset,
+            "tx_freq_actual": self.tx_freq_actual,
+            "rx_freq_actual": self.rx_freq_actual,
+            "dwell_index": dwell_index,
+            "cal_delay_native": self.cal_delay_native,
+            "align_first_peak_tap": align_first,
+            "align_error": align_err,
+            "align_locked": align_locked,
+            "align_adapt_frames": align_adapt,
+            "align_skipped": align_skipped,
+        }
+        self.freq_records.append(rec)
+        self.freq_by_pulse[int(pulse_id)] = (self.freq, offset)
+
+    def _schedule_meta(self, first_pulse_id, burst_count):
+        """base._schedule_meta() with this dwell's schedule keys override."""
+        src = super()._schedule_meta()
+        meta = pmt.make_dict()
+        items = pmt.dict_items(src)
+        for i in range(pmt.length(items)):
+            kv = pmt.nth(i, items)
+            k = pmt.car(kv)
+            ks = pmt.symbol_to_string(k) if pmt.is_symbol(k) else None
+            if ks in ("pulse_id", "schedule_index", "burst_count",
+                      "pulse_id_increment"):
+                continue
+            meta = pmt.dict_add(meta, k, pmt.cdr(kv))
+        meta = pmt.dict_add(meta, pmt.intern("schedule_index"),
+                            pmt.from_uint64(0))
+        meta = pmt.dict_add(meta, pmt.intern("pulse_id"),
+                            pmt.from_uint64(first_pulse_id))
+        meta = pmt.dict_add(meta, pmt.intern("pulse_id_increment"),
+                            pmt.from_uint64(1))
+        meta = pmt.dict_add(meta, pmt.intern("burst_count"),
+                            pmt.from_uint64(burst_count))
+        # App-recorded frequency is also visible on the burst PDU (the C++
+        # whitelist copies these keys) for downstream inspection.
+        meta = pmt.dict_add(meta, pmt.intern("freq_hz"),
+                            pmt.from_double(self.freq))
+        meta = pmt.dict_add(meta, pmt.intern("freq_offset_hz"),
+                            pmt.from_double(self.freq - self.nominal))
+        return meta
+
+    def _post_segment(self, first_pulse_id, burst_count):
+        # Re-anchor at now + max(arm_delay, freq_settle): the worker applies
+        # the pending tune before the first slot, and the margin is never
+        # shorter than the base app's arm delay.  This is the cpp-pdu
+        # counterpart of the Python chain's "t0 = now + settle" re-anchor.
+        margin_s = max(self.arm_delay_s, self.freq_settle_s)
+        t0 = self.blk.device_time_ticks() + int(round(margin_s * self.rate))
+        meta = self._schedule_meta(first_pulse_id, burst_count)
+        meta = pmt.dict_add(meta, pmt.intern("t0_ticks"), pmt.from_long(t0))
+        payload = base.fc32_to_sc16(self._native)
+        sched = pmt.cons(
+            meta, pmt.init_s16vector(int(payload.size), payload.tolist()))
+        self.blk._post(pmt.intern("schedule"), sched)
+        return t0
+
+    def _wait_published(self, target, timeout_s):
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.blk.bursts_published() >= target:
+                return True
+            time.sleep(0.005)
+        return False
+
+    def run_schedule(self):
+        if self._native is None:
+            raise RuntimeError("TX waveform not set")
+        t_host0 = time.perf_counter()
+        pulse_id = 0
+        while pulse_id < self.max_pulses:
+            if self.plan is not None and self.plan.stop_requested:
+                print("[freq] stop requested at pulse %d" % pulse_id,
+                      flush=True)
+                break
+            target = (self.plan.freq_for(pulse_id)
+                      if self.plan is not None else self.freq)
+            if target is not None and abs(float(target) - self.freq) >= 1.0:
+                try:
+                    self.retune(target, pulse_id)
+                except Exception as exc:
+                    self.retune_fail += 1
+                    print("[freq] retune to %.3f MHz failed, keep %.3f MHz: %s"
+                          % (float(target) / 1e6, self.freq / 1e6, exc),
+                          flush=True)
+            count = min(self._segment_len(pulse_id),
+                        self.max_pulses - pulse_id)
+            for k in range(count):
+                self._record_pulse(pulse_id + k)
+            before = int(self.blk.bursts_published())
+            t0 = self._post_segment(pulse_id, count)
+            seg_ok = self._wait_published(before + count,
+                                          count * self.pri_s + 15.0)
+            pulse_id += count
+            self._done = pulse_id
+            dt = time.perf_counter() - t_host0
+            print("sched %d/%d ok=%d fail=%d late=%d sc16=%d host_s=%.3f "
+                  "freq=%.3fMHz off=%+.3fMHz retune=%d t0_ticks=%d "
+                  "bursts=%d" % (
+                      pulse_id, self.max_pulses, self._ok, self._fail,
+                      self._late, self._sc16_written, dt, self.freq / 1e6,
+                      (self.freq - self.nominal) / 1e6, self.retune_count,
+                      t0, count), flush=True)
+            if not seg_ok:
+                print("WARN cpp_pdu segment timeout at pulse %d "
+                      "(published=%d last_error=%s)"
+                      % (pulse_id, self.blk.bursts_published(),
+                         self.blk.last_error()), flush=True)
+                break
+        if self.blk.bursts_published() < self.max_pulses:
+            print("WARN cpp_pdu sweep published=%d/%d last_error=%s"
+                  % (self.blk.bursts_published(), self.max_pulses,
+                     self.blk.last_error()), flush=True)
+        return (int(self.blk.bursts_ok()), int(self.blk.bursts_failed()),
+                int(self.blk.late_slot_skips()))
+
+
 class PeakAlignSink(gr.basic_block):
     """Closed loop: read CIR taps, steer the calibration delay to the target tap.
 
-    Subscribes to ``est.cir`` (in addition to the writer / UDP) and updates
-    ``echo.cal_delay_native`` so the *next* pulse's metadata carries the new
-    calibration.  Message-only, no streaming ports.
+    Subscribes to ``est.cir`` (in addition to the writer / UDP).  For the
+    Python backend it updates ``echo.cal_delay_native`` so the *next* pulse's
+    metadata carries the new calibration; for cpp-pdu it pushes the same value
+    with ``backend.set_cal_delay_native`` (the C++ worker applies it when it
+    publishes the next burst).  Message-only, no streaming ports.
     """
 
-    def __init__(self, controller, echo):
+    def __init__(self, controller, echo, backend=None):
         gr.basic_block.__init__(self, name="peak_align_sink",
                                 in_sig=None, out_sig=None)
         self.controller = controller
         self.echo = echo
+        # cpp-pdu: the C++ radio worker owns UHD, so calibration must be
+        # pushed with set_cal_delay_native (applied at the next published
+        # burst).  None for the Python backend, whose next pulse metadata
+        # carries echo.cal_delay_native.
+        self.backend = backend
         self.message_port_register_in(pmt.intern("cir"))
         self.set_msg_handler(pmt.intern("cir"), self._on_cir)
 
@@ -233,9 +453,14 @@ class PeakAlignSink(gr.basic_block):
         if info is None or not self.controller.enabled:
             return
         self.echo.cal_delay_native = self.controller.cal_delay_native
+        if self.backend is not None:
+            self.backend.set_cal_delay_native(
+                self.controller.cal_delay_native)
 
 
 def parse_args():
+    # --echo-backend/--res-workers/--publish-native come from the base parser
+    # (parents=...), so they are not re-declared here (that would conflict).
     p = argparse.ArgumentParser(
         parents=[base.build_parser(add_help=False)],
         description="X410 CG400 HRP echo CIR with runtime frequency tuning")
@@ -399,8 +624,16 @@ def main():
     print("schedule pulses=%d pri_s=%.6f rate_hz=%.3f duration_s=%.3f" % (
         a.pulses, a.pri_s, (1.0 / a.pri_s), a.pulses * a.pri_s), flush=True)
 
+    if a.echo_backend == "cpp-pdu" and (a.dump_rx or a.dump_sc16):
+        print("WARN --dump-rx/--dump-sc16 are unsupported with "
+              "--echo-backend cpp-pdu; disabling dumps", flush=True)
+        a.dump_rx = False
+        a.dump_sc16 = False
     dump_dir = os.path.join(a.output, "rx_iq") if a.dump_rx else ""
     sc16_dir = a.output if a.dump_sc16 else ""
+    # PeakAlignController owns the skip/cal/lock policy for BOTH backends
+    # (identical to the old Python chain); only the cal delivery path differs
+    # (next-pulse metadata vs blk.set_cal_delay_native).
     align = fp.PeakAlignController(
         a.cal_delay_native, a.peak_target_tap,
         work_per_native=(65.0 / 32.0),
@@ -410,14 +643,24 @@ def main():
         cal_skip=a.peak_cal_skip,
         cal_pulses=a.peak_cal_pulses,
         lock_frames=a.peak_lock_frames)
-    echo = SweepTimedUhdEcho(
-        a.args, base.CG400_HZ, a.freq, a.tx_channel, a.rx_channel,
-        a.tx_antenna, a.rx_antenna, a.gain_tx, a.gain_rx,
-        a.pre_guard_us, 15.0, a.tail_guard_us, a.sync_reps,
-        a.cal_delay_native, a.arm_delay_s, a.pri_s, a.pulses, dump_dir,
-        a.min_lead_s, timing_path, sc16_dir, a.rx_pad_us, a.code_index,
-        base.SFD_MODE, publish_native=a.publish_native, plan=plan, align=align,
-        freq_settle_s=a.freq_settle_s)
+    if a.echo_backend == "cpp-pdu":
+        echo = SweepCppPduEcho(
+            a, native, base.CG400_HZ, plan=plan, align=align,
+            freq_settle_s=a.freq_settle_s)
+        echo_out_port = "burst"
+        echo_block = echo.blk
+    else:
+        echo = SweepTimedUhdEcho(
+            a.args, base.CG400_HZ, a.freq, a.tx_channel, a.rx_channel,
+            a.tx_antenna, a.rx_antenna, a.gain_tx, a.gain_rx,
+            a.pre_guard_us, 15.0, a.tail_guard_us, a.sync_reps,
+            a.cal_delay_native, a.arm_delay_s, a.pri_s, a.pulses, dump_dir,
+            a.min_lead_s, timing_path, sc16_dir, a.rx_pad_us, a.code_index,
+            base.SFD_MODE, publish_native=a.publish_native, plan=plan,
+            align=align, freq_settle_s=a.freq_settle_s)
+        echo_out_port = "rx"
+        echo_block = echo
+    print("echo_backend=%s" % a.echo_backend, flush=True)
     echo.set_tx_native(native)
     print("uhd_probe", echo.status, flush=True)
     if a.dump_sc16:
@@ -426,8 +669,17 @@ def main():
         print("wrote_tx_sc16", tx_sc16_path, "samples=%d" % echo._native.size,
               flush=True)
 
-    res = base.uwb.pdu_rational_resampler_ccf_65_32(
-        taps, 998.4e6, True, 2097152)
+    # cpp-pdu feeds raw UHD SC16 into the 65/32 block; UnitRange maps int16
+    # to +/-1 exactly like the UHD Python FC32 source.  The Python backend
+    # feeds fc32 (policy-independent) and keeps the default RawInteger, so
+    # its result is byte-identical.  The tail argument exists only after the
+    # Round-2 resampler exposes Sc16ScalePolicy (main agent's bindings).
+    res_args = [taps, 998.4e6, True, 2097152, int(a.res_workers)]
+    if a.echo_backend == "cpp-pdu":
+        sc16_scale = getattr(base.uwb, "Sc16ScalePolicy", None)
+        if sc16_scale is not None:
+            res_args.append(sc16_scale.UnitRange)
+    res = base.uwb.pdu_rational_resampler_ccf_65_32(*res_args)
     est_q = max(8, int(a.est_queue))
     use_pred = not a.require_sfd
     est = base.uwb.radar_cir_estimator(
@@ -449,9 +701,11 @@ def main():
               "always_send_taps=%d nonblock" % (
                   a.udp_host, a.udp_port, base.CIR_UDP_TAPS), flush=True)
 
-    align_sink = PeakAlignSink(align, echo) if align.enabled else None
+    align_backend = echo.blk if a.echo_backend == "cpp-pdu" else None
+    align_sink = (PeakAlignSink(align, echo, align_backend)
+                  if align.enabled else None)
     tb = base.gr.top_block("x410_cg400_hrp_echo_cir_sweep")
-    tb.msg_connect((echo, "rx"), (res, "packet"))
+    tb.msg_connect((echo_block, echo_out_port), (res, "packet"))
     tb.msg_connect((res, "packet"), (est, "rx"))
     tb.msg_connect((est, "cir"), (wr, "cir"))
     if udp is not None:
@@ -512,6 +766,8 @@ def main():
         "echo_pub": echo._pub_ok,
         "tx_send_error": echo._tx_send_error,
         "publish_native": echo.publish_native,
+        "echo_backend": a.echo_backend,
+        "res_workers": int(a.res_workers),
         "res_rx": res.pdus_received(),
         "res_tx": res.pdus_emitted(),
         "res_drop": res.pdus_dropped(),
@@ -540,6 +796,12 @@ def main():
         "sc16_packets": echo._sc16_written,
         "sc16_samples": echo._sc16_offset,
         "dump_sc16": bool(a.dump_sc16),
+        "echo_queue_hwm": (int(echo.blk.queue_high_watermark())
+                           if a.echo_backend == "cpp-pdu" else 0),
+        "echo_worker_us_mean": (int(echo.blk.mean_worker_us())
+                                if a.echo_backend == "cpp-pdu" else 0),
+        "echo_worker_us_max": (int(echo.blk.max_worker_us())
+                               if a.echo_backend == "cpp-pdu" else 0),
         "freq_hz": a.freq,
         "freq_mode": a.freq_mode,
         "freq_nominal_hz": a.freq,

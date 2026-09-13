@@ -215,6 +215,17 @@ public:
     uint64_t max_worker_us() const;
     uint64_t mean_worker_us() const;            // total_worker_us / bursts_published
 
+    // Per-burst worker segment timing (D; diagnostics only — never changes
+    // scheduling or publishing).  Means are total / bursts_published();
+    // every counter below is reset in start().
+    uint64_t slot_lead_us_last() const;    // planned t_tx - now at burst start
+    uint64_t issue_rx_us_mean() const;     // backend issue_rx() wall
+    uint64_t tx_send_us_mean() const;      // backend issue_tx() wall
+    uint64_t rx_collect_us_mean() const;   // backend collect_result() wall
+    uint64_t pdu_build_us_mean() const;    // meta+PMT build in publish_burst
+    uint64_t pdu_publish_us_mean() const;  // message_port_pub in publish_burst
+    uint64_t worker_total_us_mean() const; // alias of mean_worker_us()
+
     // Last per-burst backend error string (diagnostics).
     std::string last_error() const;
 
@@ -324,6 +335,22 @@ private:
     std::atomic<uint64_t> d_worker_us_total_{ 0 };
     std::atomic<uint64_t> d_worker_us_max_{ 0 };
     std::atomic<uint64_t> d_worker_us_last_{ 0 };
+    // Per-burst segment timing (D): atomic totals + maxima, reset in
+    // start().  Diagnostics only (relaxed atomics, no print/allocation);
+    // they never feed back into the scheduler or the publish path.
+    std::atomic<uint64_t> d_slot_lead_us_last_{ 0 };
+    std::atomic<uint64_t> d_slot_lead_us_total_{ 0 };
+    std::atomic<uint64_t> d_slot_lead_us_max_{ 0 };
+    std::atomic<uint64_t> d_issue_rx_us_total_{ 0 };
+    std::atomic<uint64_t> d_issue_rx_us_max_{ 0 };
+    std::atomic<uint64_t> d_tx_send_us_total_{ 0 };
+    std::atomic<uint64_t> d_tx_send_us_max_{ 0 };
+    std::atomic<uint64_t> d_rx_collect_us_total_{ 0 };
+    std::atomic<uint64_t> d_rx_collect_us_max_{ 0 };
+    std::atomic<uint64_t> d_pdu_build_us_total_{ 0 };
+    std::atomic<uint64_t> d_pdu_build_us_max_{ 0 };
+    std::atomic<uint64_t> d_pdu_publish_us_total_{ 0 };
+    std::atomic<uint64_t> d_pdu_publish_us_max_{ 0 };
     // pending tune request (worker consumes at burst boundary)
     std::atomic<bool> d_tune_pending_{ false };
     std::atomic<double> d_tune_hz_{ 0.0 };

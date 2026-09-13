@@ -305,9 +305,10 @@ def print_timing_detail(echo, est):
         "est service", est.service_mean_us(), est.service_max_us()), flush=True)
 
 
-def start_live_stats(echo, est, wr, udp, stop_evt, pri_s):
+def start_live_stats(echo, est, wr, udp, stop_evt, pri_s, res=None):
     def loop():
         t0 = time.monotonic()
+        n_iter = 0
         prev = (t0, echo._ok, est.pdus_completed(), est.pdus_failed(),
                 est.pdus_dropped(), wr.frames_written(),
                 0 if udp is None else udp.sent,
@@ -349,6 +350,17 @@ def start_live_stats(echo, est, wr, udp, stop_evt, pri_s):
                 print("NOTE estimator dropped %d frames (queue_full); "
                       "radio ok is not CIR/UDP ok" % (est_drop - prev[4]),
                       flush=True)
+            # Backlog time series (rectification section 6.3): every 5 s
+            # record the producer-consumer depth of each stage so a soak can
+            # prove there is no long-term positive slope.
+            n_iter += 1
+            if res is not None and n_iter % 5 == 0:
+                print("backlog res_in=%d res_out=%d est_in=%d est_done=%d "
+                      "est_drop=%d est_q=%d wr=%d echo_pub=%d" % (
+                          res.pdus_received(), res.pdus_emitted(),
+                          est.pdus_received(), est.pdus_completed(),
+                          est_drop, int(est.queue_depth()), wr_ok,
+                          echo._pub_ok), flush=True)
             prev = (t1, echo_ok, cir_ok, cir_fail, est_drop, wr_ok,
                     udp_n, udp_ok)
     th = threading.Thread(target=loop, name="cir_live", daemon=True)
@@ -1123,6 +1135,13 @@ def build_parser(add_help=True):
                    help="PDU 65/32 FIR persistent worker threads; 1 keeps "
                         "single-thread results. 200 Hz downstream headroom "
                         "needs >1 (M3).")
+    p.add_argument("--res-sc16-scale", choices=["auto", "raw", "unit"],
+                   default="auto",
+                   help="PDU 65/32 SC16 input amplitude contract: 'unit' = "
+                        "float(int16)/32768 (matches the legacy Python FC32 "
+                        "radar chain), 'raw' = float(int16) (legacy "
+                        "scheduled-capture chain), 'auto' = unit for "
+                        "cpp-pdu and raw otherwise")
     p.add_argument("--template", default="")
     p.add_argument("--publish-native", type=int, default=-1,
                    help="native samples published to the CIR estimator each "
@@ -1319,6 +1338,15 @@ def main():
               "--echo-backend cpp-pdu; disabling dumps", flush=True)
         a.dump_rx = False
         a.dump_sc16 = False
+    # require-SFD searches a window around the predicted origin; the auto
+    # ROI formula only bounds the predicted-timing CIR reads.  Until a
+    # proven SFD-search upper bound exists, fall back to the full physical
+    # window for auto ROI.
+    if a.require_sfd and a.publish_native < 0:
+        print("WARN --require-sfd with --publish-native -1 (auto ROI): no "
+              "proven SFD-search upper bound -> falling back to full window "
+              "(0)", flush=True)
+        a.publish_native = 0
     dump_dir = os.path.join(a.output, "rx_iq") if a.dump_rx else ""
     sc16_dir = a.output if a.dump_sc16 else ""
     if a.echo_backend == "cpp-pdu":
@@ -1342,8 +1370,18 @@ def main():
         print("wrote_tx_sc16", tx_sc16_path, "samples=%d" % echo._native.size,
               flush=True)
 
+    if a.res_sc16_scale == "unit":
+        sc16_scale = uwb.Sc16ScalePolicy.UnitRange
+    elif a.res_sc16_scale == "raw":
+        sc16_scale = uwb.Sc16ScalePolicy.RawInteger
+    else:  # auto: cpp-pdu publishes native SC16 -> normalize like UHD FC32
+        sc16_scale = (uwb.Sc16ScalePolicy.UnitRange
+                      if a.echo_backend == "cpp-pdu"
+                      else uwb.Sc16ScalePolicy.RawInteger)
     res = uwb.pdu_rational_resampler_ccf_65_32(
-        taps, 998.4e6, True, 2097152, int(a.res_workers))
+        taps, 998.4e6, True, 2097152, int(a.res_workers), sc16_scale)
+    print("resampler workers=%d sc16_scale=%s" % (
+        int(a.res_workers), a.res_sc16_scale), flush=True)
     est_q = max(8, int(a.est_queue))
     use_pred = not a.require_sfd
     est = uwb.radar_cir_estimator(
@@ -1380,7 +1418,7 @@ def main():
     tb.start()
     echo.start_publisher()
     live_stop = threading.Event()
-    live_th = start_live_stats(echo, est, wr, udp, live_stop, a.pri_s)
+    live_th = start_live_stats(echo, est, wr, udp, live_stop, a.pri_s, res)
     t_run = time.perf_counter()
     echo.run_schedule()
     sched_s = time.perf_counter() - t_run
@@ -1470,6 +1508,18 @@ def main():
                                 if a.echo_backend == "cpp-pdu" else 0),
         "echo_worker_us_max": (int(echo.blk.max_worker_us())
                                if a.echo_backend == "cpp-pdu" else 0),
+        "echo_slot_lead_us_last": (int(echo.blk.slot_lead_us_last())
+                                   if a.echo_backend == "cpp-pdu" else 0),
+        "echo_issue_rx_us_mean": (int(echo.blk.issue_rx_us_mean())
+                                  if a.echo_backend == "cpp-pdu" else 0),
+        "echo_tx_send_us_mean": (int(echo.blk.tx_send_us_mean())
+                                 if a.echo_backend == "cpp-pdu" else 0),
+        "echo_rx_collect_us_mean": (int(echo.blk.rx_collect_us_mean())
+                                    if a.echo_backend == "cpp-pdu" else 0),
+        "echo_pdu_build_us_mean": (int(echo.blk.pdu_build_us_mean())
+                                   if a.echo_backend == "cpp-pdu" else 0),
+        "echo_pdu_publish_us_mean": (int(echo.blk.pdu_publish_us_mean())
+                                     if a.echo_backend == "cpp-pdu" else 0),
         "rx_window": echo.rx_len,
         "rx_window_us": echo.rx_len / CG400_HZ * 1e6,
         "rx_pad_us": a.rx_pad_us,
