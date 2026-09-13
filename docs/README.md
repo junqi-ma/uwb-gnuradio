@@ -18,6 +18,8 @@
 - [`phase1/使用说明_X410_CG400自发自收雷达.md`](phase1/使用说明_X410_CG400自发自收雷达.md)
 - [`phase1/使用手册_X410_CG400频率扫描_echo_cir_sweep.md`](phase1/使用手册_X410_CG400频率扫描_echo_cir_sweep.md)
 - [`phase1/开发方案_UWB_Radar流式echo与CIR改造.md`](phase1/开发方案_UWB_Radar流式echo与CIR改造.md)（M1/M2/M3 完成，已上板验证）
+- [`phase1/开发指南_UWB_Radar_PDU模式速率优化.md`](phase1/开发指南_UWB_Radar_PDU模式速率优化.md)（PDU 模式优化 M0–M4 指南）
+- [`phase1/测试报告_UWB_Radar_PDU速率优化.md`](phase1/测试报告_UWB_Radar_PDU速率优化.md)（M1–M3 上板 A/B，200 Hz 0 late）
 - [`本机UHD_DPDK_AVX512问题与绕过.md`](本机UHD_DPDK_AVX512问题与绕过.md)
 - [`phase1/当前信号检测逻辑.md`](phase1/当前信号检测逻辑.md)
 - [`phase1/对照报告_QM35_MATLAB与GNURadio离线解调.md`](phase1/对照报告_QM35_MATLAB与GNURadio离线解调.md)

@@ -1,0 +1,789 @@
+{
+  "created": "2026-09-13T19:07:51",
+  "meta": {
+    "created": "2026-09-13T19:06:33",
+    "git_commit": "0dbfda5089cf33e0a124db1de95dc1e4abda3f9e",
+    "git_commit_oneline": "0dbfda5 perf(radar): multi-worker 65/32 FIR for the stream chain (--res-workers)",
+    "python": "3.10.12 (main, Jun 22 2026, 18:55:27) [GCC 11.4.0]",
+    "device_args": "addr=192.168.10.2",
+    "tx_channel": 0,
+    "rx_channel": 3,
+    "tx_antenna": "TX/RX0",
+    "rx_antenna": "RX1",
+    "pulses": 1000,
+    "preamble_length": 128,
+    "pulse_shape": "minphase",
+    "gain_tx": 50.0,
+    "gain_rx": 60.0,
+    "cal_delay_native": 334.0,
+    "no_udp": true,
+    "rates": [
+      100.0,
+      200.0
+    ],
+    "runs": [
+      {
+        "rate_hz": 100.0,
+        "out_dir": "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/100hz",
+        "stdout": "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/100hz.stdout.log",
+        "cmd": [
+          "/usr/bin/python3",
+          "/home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/x410_cg400_hrp_echo_cir.py",
+          "--args",
+          "addr=192.168.10.2",
+          "--output",
+          "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/100hz",
+          "--pri-s",
+          "0.01",
+          "--pulses",
+          "1000",
+          "--preamble-length",
+          "128",
+          "--pulse-shape",
+          "minphase",
+          "--gain-tx",
+          "50.0",
+          "--gain-rx",
+          "60.0",
+          "--tx-channel",
+          "0",
+          "--rx-channel",
+          "3",
+          "--tx-antenna",
+          "TX/RX0",
+          "--rx-antenna",
+          "RX1",
+          "--cal-delay-native",
+          "334.0",
+          "--timing-detail",
+          "--no-udp"
+        ],
+        "rc": 0,
+        "wall_s": null
+      },
+      {
+        "rate_hz": 200.0,
+        "out_dir": "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/200hz",
+        "stdout": "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/200hz.stdout.log",
+        "cmd": [
+          "/usr/bin/python3",
+          "/home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/x410_cg400_hrp_echo_cir.py",
+          "--args",
+          "addr=192.168.10.2",
+          "--output",
+          "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/200hz",
+          "--pri-s",
+          "0.005",
+          "--pulses",
+          "1000",
+          "--preamble-length",
+          "128",
+          "--pulse-shape",
+          "minphase",
+          "--gain-tx",
+          "50.0",
+          "--gain-rx",
+          "60.0",
+          "--tx-channel",
+          "0",
+          "--rx-channel",
+          "3",
+          "--tx-antenna",
+          "TX/RX0",
+          "--rx-antenna",
+          "RX1",
+          "--cal-delay-native",
+          "334.0",
+          "--timing-detail",
+          "--no-udp"
+        ],
+        "rc": 3,
+        "wall_s": 9.5
+      }
+    ]
+  },
+  "cases": [
+    {
+      "label": "100hz",
+      "run_dir": "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/100hz",
+      "timing_file": "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/100hz/echo_timing.jsonl",
+      "stdout_file": "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/100hz.stdout.log",
+      "summary_file": "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/100hz/summary.json",
+      "rate_hz": 100.0,
+      "steps": {
+        "get_time_ms": {
+          "count": 1000,
+          "mean": 0.14412714162608609,
+          "min": 0.06503300392068923,
+          "p50": 0.1464395027142018,
+          "p95": 0.17896913923323152,
+          "p99": 0.1870828453684225,
+          "max": 0.7097460038494319
+        },
+        "issue_ms": {
+          "count": 1000,
+          "mean": 0.020195107877952978,
+          "min": 0.01462499494664371,
+          "p50": 0.018771985196508467,
+          "p95": 0.027332667377777398,
+          "p99": 0.0352345363353379,
+          "max": 0.059371988754719496
+        },
+        "send_ms": {
+          "count": 1000,
+          "mean": 6.513947577768704,
+          "min": 0.453358021331951,
+          "p50": 8.924005000153556,
+          "p95": 9.073931111197453,
+          "p99": 9.12375511805294,
+          "max": 9.253664989955723
+        },
+        "recv_ms": {
+          "count": 1000,
+          "mean": 3.5082390420429874,
+          "min": 0.6471409869845957,
+          "p50": 0.8662074978929013,
+          "p95": 7.722132794151548,
+          "p99": 7.85181701707188,
+          "max": 250.4136479983572
+        },
+        "uhd_ms": {
+          "count": 1000,
+          "mean": 10.042381727689644,
+          "min": 5.26187100331299,
+          "p50": 9.824063497944735,
+          "p95": 9.905992622952908,
+          "p99": 10.032413485459983,
+          "max": 250.89936499716714
+        },
+        "enqueue_ms": {
+          "count": 1000,
+          "mean": 0.013122439791914076,
+          "min": 0.007274007657542825,
+          "p50": 0.011552998330444098,
+          "p95": 0.02146101032849401,
+          "p99": 0.02615034522023052,
+          "max": 0.037788995541632175
+        },
+        "sc16_ms": {
+          "count": 1000,
+          "mean": 0.0013676720263902098,
+          "min": 0.000700005330145359,
+          "p50": 0.0011279917089268565,
+          "p95": 0.002382225648034364,
+          "p99": 0.005443021364044394,
+          "max": 0.009293988114222884
+        }
+      },
+      "publisher": {
+        "contig_ms": {
+          "count": 13,
+          "mean": 0.0033076923076923084,
+          "min": 0.002,
+          "p50": 0.002,
+          "p95": 0.007199999999999989,
+          "p99": 0.011039999999999993,
+          "max": 0.012
+        },
+        "tolist_ms": {
+          "count": 13,
+          "mean": 1.076153846153846,
+          "min": 0.75,
+          "p50": 1.03,
+          "p95": 1.604,
+          "p99": 1.6088,
+          "max": 1.61
+        },
+        "pmt_ms": {
+          "count": 13,
+          "mean": 0.7915384615384615,
+          "min": 0.5,
+          "p50": 0.67,
+          "p95": 1.4859999999999973,
+          "p99": 2.369199999999998,
+          "max": 2.59
+        },
+        "pub_ms": {
+          "count": 13,
+          "mean": 0.11323076923076923,
+          "min": 0.095,
+          "p50": 0.108,
+          "p95": 0.13539999999999996,
+          "p99": 0.14547999999999997,
+          "max": 0.148
+        },
+        "total_ms": {
+          "count": 13,
+          "mean": 1.9838461538461538,
+          "min": 1.38,
+          "p50": 1.86,
+          "p95": 3.1659999999999977,
+          "p99": 4.121199999999998,
+          "max": 4.36
+        }
+      },
+      "publisher_source": {
+        "contig_ms": "stdout_pub_lines",
+        "tolist_ms": "stdout_pub_lines",
+        "pmt_ms": "stdout_pub_lines",
+        "pub_ms": "stdout_pub_lines",
+        "total_ms": "stdout_pub_lines"
+      },
+      "publisher_n_lines": 13,
+      "publisher_samples": {
+        "count": 13,
+        "mean": 64992.0,
+        "min": 64992.0,
+        "p50": 64992.0,
+        "p95": 64992.0,
+        "p99": 64992.0,
+        "max": 64992.0
+      },
+      "service": {
+        "resampler": null,
+        "resampler_per_pulse_us": null,
+        "estimator": {
+          "summary_mean_us": 381,
+          "summary_max_us": 538,
+          "stdout_mean_us": 381.0,
+          "stdout_max_us": 538.0,
+          "per_pulse_estimator_us": {
+            "count": 1000,
+            "mean": 381.395,
+            "min": 342.0,
+            "p50": 380.0,
+            "p95": 420.0,
+            "p99": 467.02,
+            "max": 538.0
+          },
+          "per_pulse_queue_delay_us": null
+        }
+      },
+      "counts": {
+        "pulses": 1000,
+        "echo_ok": 1000,
+        "echo_fail": 0,
+        "echo_late": 0,
+        "echo_pub": 1000,
+        "res_rx": 1000,
+        "res_tx": 1000,
+        "res_drop": 0,
+        "est_rx": 1000,
+        "est_enq": 1000,
+        "est_done": 1000,
+        "est_fail": 0,
+        "est_drop": 0,
+        "wr_ok": 1000,
+        "wr_fail": 0,
+        "cir_ok": 1000,
+        "cir_fail": 0,
+        "tx_send_error": 0
+      },
+      "schedule_wall_s": 10.242350846005138,
+      "throughput": {
+        "echo_ok_per_s": 97.63383573118213,
+        "cir_ok_per_s": 97.63383573118213,
+        "wr_ok_per_s": 97.63383573118213,
+        "est_done_per_s": 97.63383573118213
+      },
+      "timing": {
+        "n": 1000,
+        "ok": 1000,
+        "late": 0,
+        "status_hist": {
+          "ok": 1000
+        },
+        "span_s": 9.99,
+        "lead_s": {
+          "count": 1000,
+          "mean": 0.009286354622395753,
+          "min": 0.004398179036458338,
+          "p50": 0.009082855143229152,
+          "p95": 0.00914239453124961,
+          "p99": 0.00923647395833336,
+          "max": 0.249998
+        },
+        "dt_tx_s": {
+          "count": 999,
+          "mean": 0.009999999999999998,
+          "min": 0.009999999999998899,
+          "p50": 0.009999999999999787,
+          "p95": 0.010000000000000675,
+          "p99": 0.010000000000001563,
+          "max": 0.010000000000001563
+        }
+      },
+      "stdout_live_last": {
+        "dt": 1.0,
+        "echo_ok_hz": 100.0,
+        "cir_ok_hz": 100.0,
+        "cir_fail_hz": 0.0,
+        "est_q": 0.0,
+        "est_drop": 0.0,
+        "tx_err": 0.0,
+        "wr_hz": 100.0,
+        "udp_hz": 0.0,
+        "udp_ok_hz": 0.0,
+        "udp_eagain": 0.0,
+        "service_us_mean": 381.0,
+        "max": 538.0,
+        "pri_hz": 100.0
+      },
+      "stdout_sched_last": {
+        "ok": 1000.0,
+        "fail": 0.0,
+        "late": 0.0,
+        "sc16": 0.0,
+        "host_s": 10.241
+      },
+      "stdout_radio_ok": {
+        "radio_ok": 1000.0,
+        "cir_ok": 1000.0,
+        "cir_fail": 0.0,
+        "est_drop": 0.0,
+        "udp_sent": 0.0,
+        "udp_ok": 0.0,
+        "udp_fail": 0.0
+      },
+      "summary": {
+        "hrp_samples": 256959,
+        "native_samples": 126503,
+        "pulses": 1000,
+        "pri_s": 0.01,
+        "rate_hz": 100.0,
+        "schedule_wall_s": 10.242350846005138,
+        "echo_ok": 1000,
+        "echo_fail": 0,
+        "echo_late": 0,
+        "echo_pub": 1000,
+        "tx_send_error": 0,
+        "publish_native": 64992,
+        "res_rx": 1000,
+        "res_tx": 1000,
+        "res_drop": 0,
+        "est_rx": 1000,
+        "est_enq": 1000,
+        "est_done": 1000,
+        "est_fail": 0,
+        "est_drop": 0,
+        "est_invalid": 0,
+        "wr_ok": 1000,
+        "wr_fail": 0,
+        "wr_invalid": 0,
+        "use_predicted_timing": true,
+        "est_queue_capacity": 64,
+        "est_queue_hwm": 1,
+        "est_service_us_mean": 381,
+        "est_service_us_max": 538,
+        "udp_sent": 0,
+        "udp_sent_ok": 0,
+        "udp_sent_fail": 0,
+        "udp_sent_freq": 0,
+        "udp_eagain": 0,
+        "cir": {
+          "exists": true,
+          "lines": 1000,
+          "ok": 1000,
+          "fail": 0,
+          "status_hist": {
+            "ok": 1000
+          },
+          "unique_ids": 1000,
+          "missing_count": 0,
+          "missing_head": [],
+          "dup_count": 0,
+          "id_gaps": [],
+          "id_min": 0,
+          "id_max": 999,
+          "peak_tap_min": 17,
+          "peak_tap_max": 18,
+          "metric_min": 0.0449530743,
+          "metric_max": 0.0619934872,
+          "metric_mean": 0.05292431412249992,
+          "estimator_us_min": 342,
+          "estimator_us_max": 538,
+          "estimator_us_mean": 381.395
+        },
+        "timing": {
+          "n": 1000,
+          "ok": 1000,
+          "late": 0,
+          "dt_tx_min": 0.009999999999998899,
+          "dt_tx_max": 0.010000000000001563,
+          "dt_tx_mean": 0.009999999999999998,
+          "lead_min": 0.004398179036458338,
+          "lead_max": 0.249998,
+          "uhd_ms_min": 5.26187100331299,
+          "uhd_ms_max": 250.89936499716714,
+          "uhd_ms_mean": 10.042381727689644,
+          "span_s": 9.99
+        },
+        "output": "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/100hz",
+        "sc16_packets": 0,
+        "sc16_samples": 0,
+        "dump_sc16": false,
+        "freq_hz": 6489600000.0,
+        "native_rate_hz": 491520000.0,
+        "code_index": 9,
+        "preamble_length": 128,
+        "sfd_mode": "4z2",
+        "gain_tx": 50.0,
+        "gain_rx": 60.0,
+        "tx_channel": 0,
+        "rx_channel": 3,
+        "tx_antenna": "TX/RX0",
+        "rx_antenna": "RX1",
+        "iq_scale": 32768.0,
+        "sample_format": "sc16",
+        "rx_window": 141300,
+        "rx_window_us": 287.4755859375,
+        "rx_pad_us": 8.0
+      }
+    },
+    {
+      "label": "200hz",
+      "run_dir": "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/200hz",
+      "timing_file": "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/200hz/echo_timing.jsonl",
+      "stdout_file": "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/200hz.stdout.log",
+      "summary_file": "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/200hz/summary.json",
+      "rate_hz": 200.0,
+      "steps": {
+        "get_time_ms": {
+          "count": 999,
+          "mean": 0.11542068909852765,
+          "min": 0.07765600457787514,
+          "p50": 0.11267600348219275,
+          "p95": 0.1493234914960339,
+          "p99": 0.16796962881926447,
+          "max": 0.19043899374082685
+        },
+        "issue_ms": {
+          "count": 999,
+          "mean": 0.018960298268586858,
+          "min": 0.014210003428161144,
+          "p50": 0.017659011064097285,
+          "p95": 0.02493530919309705,
+          "p99": 0.04765275458339602,
+          "max": 0.058953999541699886
+        },
+        "send_ms": {
+          "count": 999,
+          "mean": 3.3437741172916673,
+          "min": 0.4342170141171664,
+          "p50": 3.925396013073623,
+          "p95": 4.031820400268771,
+          "p99": 4.08715829893481,
+          "max": 5.333429988240823
+        },
+        "recv_ms": {
+          "count": 999,
+          "mean": 1.7216057961261753,
+          "min": 0.7069809944368899,
+          "p50": 0.8973220246843994,
+          "p95": 2.757129594101569,
+          "p99": 2.907288305577822,
+          "max": 250.4405830113683
+        },
+        "uhd_ms": {
+          "count": 999,
+          "mean": 5.084340211686429,
+          "min": 2.842460002284497,
+          "p50": 4.858033993514255,
+          "p95": 4.917333796038292,
+          "p99": 5.041541895479894,
+          "max": 250.9820540144574
+        },
+        "enqueue_ms": {
+          "count": 999,
+          "mean": 0.01217213405009072,
+          "min": 0.0081690086517483,
+          "p50": 0.011225987691432238,
+          "p95": 0.018467192421667278,
+          "p99": 0.021228404948487878,
+          "max": 0.03592000575736165
+        },
+        "sc16_ms": {
+          "count": 999,
+          "mean": 0.0012378280647229534,
+          "min": 0.000700994860380888,
+          "p50": 0.0011429947335273027,
+          "p95": 0.001976112253032624,
+          "p99": 0.0023729418171569683,
+          "max": 0.0048670044634491205
+        }
+      },
+      "publisher": {
+        "contig_ms": {
+          "count": 12,
+          "mean": 0.0026666666666666674,
+          "min": 0.001,
+          "p50": 0.002,
+          "p95": 0.006699999999999996,
+          "p99": 0.009340000000000003,
+          "max": 0.01
+        },
+        "tolist_ms": {
+          "count": 12,
+          "mean": 1.0775,
+          "min": 0.83,
+          "p50": 1.06,
+          "p95": 1.536,
+          "p99": 1.5712000000000002,
+          "max": 1.58
+        },
+        "pmt_ms": {
+          "count": 12,
+          "mean": 0.8183333333333334,
+          "min": 0.55,
+          "p50": 0.67,
+          "p95": 1.5599999999999987,
+          "p99": 2.3520000000000008,
+          "max": 2.55
+        },
+        "pub_ms": {
+          "count": 12,
+          "mean": 0.11308333333333336,
+          "min": 0.096,
+          "p50": 0.1115,
+          "p95": 0.14034999999999997,
+          "p99": 0.14167,
+          "max": 0.142
+        },
+        "total_ms": {
+          "count": 12,
+          "mean": 2.0116666666666667,
+          "min": 1.54,
+          "p50": 1.85,
+          "p95": 3.1714999999999987,
+          "p99": 3.9943000000000013,
+          "max": 4.2
+        }
+      },
+      "publisher_source": {
+        "contig_ms": "stdout_pub_lines",
+        "tolist_ms": "stdout_pub_lines",
+        "pmt_ms": "stdout_pub_lines",
+        "pub_ms": "stdout_pub_lines",
+        "total_ms": "stdout_pub_lines"
+      },
+      "publisher_n_lines": 12,
+      "publisher_samples": {
+        "count": 12,
+        "mean": 64992.0,
+        "min": 64992.0,
+        "p50": 64992.0,
+        "p95": 64992.0,
+        "p99": 64992.0,
+        "max": 64992.0
+      },
+      "service": {
+        "resampler": null,
+        "resampler_per_pulse_us": null,
+        "estimator": {
+          "summary_mean_us": 379,
+          "summary_max_us": 531,
+          "stdout_mean_us": 379.0,
+          "stdout_max_us": 531.0,
+          "per_pulse_estimator_us": {
+            "count": 999,
+            "mean": 379.8988988988989,
+            "min": 334.0,
+            "p50": 369.0,
+            "p95": 435.0,
+            "p99": 479.15999999999985,
+            "max": 531.0
+          },
+          "per_pulse_queue_delay_us": null
+        }
+      },
+      "counts": {
+        "pulses": 1000,
+        "echo_ok": 999,
+        "echo_fail": 1,
+        "echo_late": 1,
+        "echo_pub": 999,
+        "res_rx": 999,
+        "res_tx": 999,
+        "res_drop": 0,
+        "est_rx": 999,
+        "est_enq": 999,
+        "est_done": 999,
+        "est_fail": 0,
+        "est_drop": 0,
+        "wr_ok": 999,
+        "wr_fail": 0,
+        "cir_ok": 999,
+        "cir_fail": 0,
+        "tx_send_error": 0
+      },
+      "schedule_wall_s": 5.247862717020325,
+      "throughput": {
+        "echo_ok_per_s": 190.36321143843116,
+        "cir_ok_per_s": 190.36321143843116,
+        "wr_ok_per_s": 190.36321143843116,
+        "est_done_per_s": 190.36321143843116
+      },
+      "timing": {
+        "n": 1000,
+        "ok": 999,
+        "late": 1,
+        "status_hist": {
+          "ok": 999,
+          "late": 1
+        },
+        "span_s": 4.995,
+        "lead_s": {
+          "count": 1000,
+          "mean": 0.004276442220052055,
+          "min": -0.0005070374348958295,
+          "p50": 0.004072344889323176,
+          "p95": 0.004109263834635596,
+          "p99": 0.004125086995442655,
+          "max": 0.24999799999999997
+        },
+        "dt_tx_s": {
+          "count": 998,
+          "mean": 0.00500501002004008,
+          "min": 0.004999999999999893,
+          "p50": 0.004999999999999893,
+          "p95": 0.0050000000000003375,
+          "p99": 0.005000000000000782,
+          "max": 0.010000000000000009
+        }
+      },
+      "stdout_live_last": {
+        "dt": 1.0,
+        "echo_ok_hz": 200.0,
+        "cir_ok_hz": 200.0,
+        "cir_fail_hz": 0.0,
+        "est_q": 0.0,
+        "est_drop": 0.0,
+        "tx_err": 0.0,
+        "wr_hz": 200.0,
+        "udp_hz": 0.0,
+        "udp_ok_hz": 0.0,
+        "udp_eagain": 0.0,
+        "service_us_mean": 384.0,
+        "max": 531.0,
+        "pri_hz": 200.0
+      },
+      "stdout_sched_last": {
+        "ok": 999.0,
+        "fail": 1.0,
+        "late": 1.0,
+        "sc16": 0.0,
+        "host_s": 5.246
+      },
+      "stdout_radio_ok": {
+        "radio_ok": 999.0,
+        "cir_ok": 999.0,
+        "cir_fail": 0.0,
+        "est_drop": 0.0,
+        "udp_sent": 0.0,
+        "udp_ok": 0.0,
+        "udp_fail": 0.0
+      },
+      "summary": {
+        "hrp_samples": 256959,
+        "native_samples": 126503,
+        "pulses": 1000,
+        "pri_s": 0.005,
+        "rate_hz": 200.0,
+        "schedule_wall_s": 5.247862717020325,
+        "echo_ok": 999,
+        "echo_fail": 1,
+        "echo_late": 1,
+        "echo_pub": 999,
+        "tx_send_error": 0,
+        "publish_native": 64992,
+        "res_rx": 999,
+        "res_tx": 999,
+        "res_drop": 0,
+        "est_rx": 999,
+        "est_enq": 999,
+        "est_done": 999,
+        "est_fail": 0,
+        "est_drop": 0,
+        "est_invalid": 0,
+        "wr_ok": 999,
+        "wr_fail": 0,
+        "wr_invalid": 0,
+        "use_predicted_timing": true,
+        "est_queue_capacity": 64,
+        "est_queue_hwm": 1,
+        "est_service_us_mean": 379,
+        "est_service_us_max": 531,
+        "udp_sent": 0,
+        "udp_sent_ok": 0,
+        "udp_sent_fail": 0,
+        "udp_sent_freq": 0,
+        "udp_eagain": 0,
+        "cir": {
+          "exists": true,
+          "lines": 999,
+          "ok": 999,
+          "fail": 0,
+          "status_hist": {
+            "ok": 999
+          },
+          "unique_ids": 999,
+          "missing_count": 1,
+          "missing_head": [
+            1
+          ],
+          "dup_count": 0,
+          "id_gaps": [
+            [
+              0,
+              2
+            ]
+          ],
+          "id_min": 0,
+          "id_max": 999,
+          "peak_tap_min": 17,
+          "peak_tap_max": 73,
+          "metric_min": 0.00864968356,
+          "metric_max": 0.0622293204,
+          "metric_mean": 0.0525668749418619,
+          "estimator_us_min": 334,
+          "estimator_us_max": 531,
+          "estimator_us_mean": 379.8988988988989
+        },
+        "timing": {
+          "n": 1000,
+          "ok": 999,
+          "late": 1,
+          "dt_tx_min": 0.004999999999999893,
+          "dt_tx_max": 0.010000000000000009,
+          "dt_tx_mean": 0.00500501002004008,
+          "lead_min": -0.0005070374348958295,
+          "lead_max": 0.24999799999999997,
+          "uhd_ms_min": 2.842460002284497,
+          "uhd_ms_max": 250.9820540144574,
+          "uhd_ms_mean": 5.084340211686429,
+          "span_s": 4.995
+        },
+        "output": "/home/oi/Desktop/uwb-gnuradio/analysis_outputs/m0_baseline/200hz",
+        "sc16_packets": 0,
+        "sc16_samples": 0,
+        "dump_sc16": false,
+        "freq_hz": 6489600000.0,
+        "native_rate_hz": 491520000.0,
+        "code_index": 9,
+        "preamble_length": 128,
+        "sfd_mode": "4z2",
+        "gain_tx": 50.0,
+        "gain_rx": 60.0,
+        "tx_channel": 0,
+        "rx_channel": 3,
+        "tx_antenna": "TX/RX0",
+        "rx_antenna": "RX1",
+        "iq_scale": 32768.0,
+        "sample_format": "sc16",
+        "rx_window": 141300,
+        "rx_window_us": 287.4755859375,
+        "rx_pad_us": 8.0
+      }
+    }
+  ]
+}
