@@ -485,6 +485,9 @@ def main():
     except Exception:
         pass
 
+    if a.timing_detail:
+        base.print_timing_detail(echo, est)
+
     jsonl = os.path.join(a.output, "cir.jsonl")
     cir_stats = base.analyze_cir(jsonl, expected)
     timing_stats = base.analyze_timing(timing_path)

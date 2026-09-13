@@ -510,6 +510,7 @@ UwbCirWriter::write_frame(pmt::pmt_t msg)
     append_bool(os, "sfd_ok", dict_i64(meta, "sfd_start_sample", -1) >= 0);
     append_bool(os, "timing_ok",
                 dict_i64(meta, "preamble_start_sample", -1) >= 0);
+    append_u64(os, "estimator_us", dict_u64(meta, "estimator_us", 0));
     append_opt_str(os, meta, "source");
     os << "}\n";
 

@@ -269,6 +269,42 @@ class CirUdpSink(gr.basic_block):
             self.sent_fail += 1
 
 
+def _mean_min_max(vals):
+    if not vals:
+        return 0.0, 0.0, 0.0
+    return sum(vals) / len(vals), min(vals), max(vals)
+
+
+def print_timing_detail(echo, est):
+    """Per-burst host-side step times (ms) for the bursts just run."""
+    tim = [r for r in echo._timing if r.get("status") == "ok"]
+    pub = list(echo._pub_timing)
+    print("[timing] step                 mean_ms   min_ms   max_ms   n", flush=True)
+    rows = [
+        ("get_time_ms", "usrp get_time_now"),
+        ("issue_ms", "rx issue_stream_cmd"),
+        ("send_ms", "tx send (fifo)"),
+        ("recv_ms", "rx recv (rf+wait)"),
+        ("sc16_ms", "sc16 dump"),
+        ("enqueue_ms", "enqueue to publisher"),
+        ("uhd_ms", "one burst uhd total"),
+    ]
+    for key, label in rows:
+        m, lo, hi = _mean_min_max([r[key] for r in tim if key in r])
+        print("[timing] %-20s %8.3f %8.3f %8.3f  %d" % (
+            label, m, lo, hi, sum(key in r for r in tim)), flush=True)
+    print("[timing] publisher (samples=%s)" % (
+        pub[0]["samples"] if pub else "-"), flush=True)
+    for key, label in (("contig_ms", "ascontiguousarray"), ("tolist_ms", "rx.tolist()"),
+                       ("pmt_ms", "init_c32vector"), ("pub_ms", "message_port_pub"),
+                       ("total_ms", "publisher total")):
+        m, lo, hi = _mean_min_max([r[key] for r in pub])
+        print("[timing] %-20s %8.3f %8.3f %8.3f  %d" % (
+            label, m, lo, hi, len(pub)), flush=True)
+    print("[timing] %-20s mean=%.1f us max=%.1f us (c++ resampler+estimator)" % (
+        "est service", est.service_mean_us(), est.service_max_us()), flush=True)
+
+
 def start_live_stats(echo, est, wr, udp, stop_evt, pri_s):
     def loop():
         t0 = time.monotonic()
@@ -443,6 +479,7 @@ class TimedUhdEcho(gr.basic_block):
         self._pub_q = queue.Queue(maxsize=64)
         self._pub_thread = None
         self._timing = []
+        self._pub_timing = []
         self._sc16_iq = None
         self._sc16_jsonl = None
         self._sc16_offset = 0
@@ -679,22 +716,41 @@ class TimedUhdEcho(gr.basic_block):
             pulse_id, rx = item
             t0 = time.perf_counter()
             rx = np.ascontiguousarray(rx, dtype=np.complex64)
+            t_contig = time.perf_counter()
             # The CIR estimator only reads the preamble region; publishing
             # the whole TX-burst-sized window costs ~ms of GIL time per pulse
             # and can starve the timed TX loop (uhd reports TX underflow).
             if 0 < self.publish_native < rx.size:
                 rx = rx[:self.publish_native]
-            rx_pmt = pmt.init_c32vector(int(rx.size), rx.tolist())
+            lst = rx.tolist()
+            t_tolist = time.perf_counter()
+            rx_pmt = pmt.init_c32vector(int(rx.size), lst)
+            t_pmt = time.perf_counter()
             meta = self._make_rx_meta(pulse_id)
             self.message_port_pub(pmt.intern("rx"), pmt.cons(meta, rx_pmt))
+            t_pub = time.perf_counter()
             self._pub_ok += 1
-            dt = (time.perf_counter() - t0) * 1e3
+            self._pub_timing.append({
+                "pulse_id": int(pulse_id),
+                "samples": int(rx.size),
+                "contig_ms": (t_contig - t0) * 1e3,
+                "tolist_ms": (t_tolist - t_contig) * 1e3,
+                "pmt_ms": (t_pmt - t_tolist) * 1e3,
+                "pub_ms": (t_pub - t_pmt) * 1e3,
+                "total_ms": (t_pub - t0) * 1e3,
+            })
             if pulse_id < 3 or pulse_id % 100 == 99:
-                print("pub pulse=%d pmt_ms=%.2f q=%d" % (
-                    pulse_id, dt, self._pub_q.qsize()), flush=True)
+                r = self._pub_timing[-1]
+                print("pub pulse=%d samples=%d contig=%.3fms tolist=%.2fms "
+                      "pmt=%.2fms pub=%.3fms total=%.2fms q=%d" % (
+                          pulse_id, r["samples"], r["contig_ms"],
+                          r["tolist_ms"], r["pmt_ms"], r["pub_ms"],
+                          r["total_ms"], self._pub_q.qsize()), flush=True)
 
     def _one_burst(self, pulse_id):
+        t_in = time.perf_counter()
         now = self._usrp.get_time_now().get_real_secs()
+        t_now = time.perf_counter()
         if self._t0 is None:
             self._t0 = now + self.arm_delay_s
         t_tx = self._t0 + pulse_id * self.pri_s
@@ -706,6 +762,7 @@ class TimedUhdEcho(gr.basic_block):
             "t_tx": t_tx,
             "t_rx": t_rx,
             "lead_s": lead,
+            "get_time_ms": (t_now - t_in) * 1e3,
         }
         if lead < self.min_lead_s:
             self._late += 1
@@ -727,12 +784,18 @@ class TimedUhdEcho(gr.basic_block):
         cmd.time_spec = self._tspec(t_rx)
         t_issue = time.perf_counter()
         self._rx_stream.issue_stream_cmd(cmd)
+        t_after_issue = time.perf_counter()
         sent, send_err = self._send(self._native, t_tx, timeout=2.0)
+        t_after_send = time.perf_counter()
         if send_err:
             self._tx_send_error += 1
         timeout = max(0.5, (t_tx - now) + self.rx_len / self.rate + 0.25)
         rx, got, first, status, err = self._recv(self.rx_len, timeout)
-        rec["uhd_ms"] = (time.perf_counter() - t_issue) * 1e3
+        t_after_recv = time.perf_counter()
+        rec["issue_ms"] = (t_after_issue - t_issue) * 1e3
+        rec["send_ms"] = (t_after_send - t_after_issue) * 1e3
+        rec["recv_ms"] = (t_after_recv - t_after_send) * 1e3
+        rec["uhd_ms"] = (t_after_recv - t_issue) * 1e3
         rec["tx_sent"] = sent
         rec["tx_error"] = send_err
         rec["rx_got"] = got
@@ -745,8 +808,10 @@ class TimedUhdEcho(gr.basic_block):
             os.makedirs(self.rx_dump_dir, exist_ok=True)
             rx[:got].tofile(os.path.join(self.rx_dump_dir,
                                          "pulse_%04d.cf32" % pulse_id))
+        t_sc16 = time.perf_counter()
         if status == "ok" and got == self.rx_len:
             self._write_sc16_packet(pulse_id, rx)
+        rec["sc16_ms"] = (time.perf_counter() - t_sc16) * 1e3
         if status != "ok":
             self._fail += 1
             extra = pmt.make_dict()
@@ -760,7 +825,10 @@ class TimedUhdEcho(gr.basic_block):
             self.message_port_pub(pmt.intern("status"), extra)
             return False
         self._ok += 1
-        return self._enqueue_rx(pulse_id, rx)
+        t_enq = time.perf_counter()
+        ok = self._enqueue_rx(pulse_id, rx)
+        rec["enqueue_ms"] = (time.perf_counter() - t_enq) * 1e3
+        return ok
 
     def run_schedule(self):
         if self._native is None:
@@ -853,6 +921,10 @@ def build_parser(add_help=True):
                         "pulse: -1 auto (preamble + CIR span), 0 = full RX "
                         "window, >0 explicit; smaller cuts host GIL time and "
                         "timed-TX underflow")
+    p.add_argument("--timing-detail", action="store_true",
+                   help="after the run, print per-burst host step times "
+                        "(get_time, issue, tx send, rx recv, sc16, publisher, "
+                        "estimator); run with --pulses 1..3 for one packet")
     p.add_argument("--dump-rx", action="store_true")
     p.add_argument("--dump-sc16", action="store_true",
                    help="Write native RX windows as capture.iq + capture.jsonl (SC16)")
@@ -1106,6 +1178,9 @@ def main():
         wr.stop()
     except Exception:
         pass
+
+    if a.timing_detail:
+        print_timing_detail(echo, est)
 
     jsonl = os.path.join(a.output, "cir.jsonl")
     cir_stats = analyze_cir(jsonl, a.pulses)

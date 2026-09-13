@@ -232,6 +232,7 @@ kHz 解释（`+50` = +50 kHz，`491` = 491 kHz）。带单位后缀
 |---|---|---|
 | `--output` | 必填 | 输出目录 |
 | `--dump-rx` | 关 | 每脉冲存 `rx_iq/pulse_XXXX.cf32` |
+| `--timing-detail` | 关 | 运行结束打印每步耗时（`get_time`/issue/TX send/RX recv/sc16/发布/估计器）；测 1 包用 `--pulses 1..3`。`cir.jsonl` 每包也有 `estimator_us` |
 | `--dump-sc16` | 关 | 存原生 SC16：`capture.iq`/`capture.jsonl`/`metadata.json`/`tx_491p52.sc16` |
 | `--require-sfd` | 关 | 恢复 SFD 门控（默认按预测时刻估 CIR） |
 
