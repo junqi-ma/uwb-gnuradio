@@ -27,6 +27,7 @@ install(FILES
     uwb_radar_cir_estimator.block.yml
     uwb_cir_writer.block.yml
     uwb_echo_timer_stream.block.yml
+    uwb_realtime_echo_timer.block.yml
     DESTINATION share/gnuradio/grc/blocks
 )
 

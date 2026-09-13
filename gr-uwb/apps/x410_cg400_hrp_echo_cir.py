@@ -859,6 +859,205 @@ class TimedUhdEcho(gr.basic_block):
         self._done += 1
 
 
+class _EmptyQueue:
+    """Stands in for TimedUhdEcho._pub_q when there is no Python publisher."""
+
+    def empty(self):
+        return True
+
+
+class CppPduEcho:
+    """Adapter exposing the TimedUhdEcho attribute surface over the C++
+    UwbRealtimeEchoTimer PDU block (``--echo-backend cpp-pdu``).
+
+    The C++ block is message-only: ONE native SC16 schedule PDU arms a
+    device-time grid and the dedicated radio worker produces one RX burst
+    PDU per slot.  All UHD I/O and PMT construction happen in C++/on the
+    worker, so there is no Python timed path and no per-pulse
+    ``tolist()/init_c32vector`` GIL cost on the critical path.  Retune and
+    calibration are pushed through ``set_freq``/``set_cal_delay_native``
+    and applied at a burst boundary by the worker.
+    """
+
+    def __init__(self, a, native, rate):
+        self.rate = float(rate)
+        self.freq = float(a.freq)
+        self.code_index = int(a.code_index)
+        self.sfd_mode = SFD_MODE
+        self.tx_ch = int(a.tx_channel)
+        self.rx_ch = int(a.rx_channel)
+        self.pri_s = float(a.pri_s)
+        self.sync_reps = int(a.sync_reps)
+        self.cal_delay_native = float(a.cal_delay_native)
+        self.pre_us = float(a.pre_guard_us)
+        self.range_m = 15.0
+        self.tail_us = float(a.tail_guard_us)
+        self.rx_pad_us = float(a.rx_pad_us)
+        self.arm_delay_s = float(a.arm_delay_s)
+        self.max_pulses = int(a.pulses)
+
+        # Same peak-normalisation + native geometry as TimedUhdEcho.
+        wave = np.asarray(native, dtype=np.complex64)
+        peak = float(np.max(np.abs(wave))) or 1.0
+        self._native = (wave / peak * 0.8).astype(np.complex64)
+        (self.pre, self.sync_n, self.sfd_n, self.rng_n, self.tail,
+         self.pad_n, self.rx_len) = rx_geometry(
+            self.rate, self.pre_us, self.sync_reps, self.range_m,
+            self.tail_us, int(self._native.size), self.rx_pad_us)
+        if int(a.publish_native) < 0:
+            pub = cir_publish_native(self.pre, self.sync_reps,
+                                     self.cal_delay_native)
+        else:
+            pub = int(a.publish_native)
+        self.publish_native = int(pub)
+
+        # Python-compat attributes read by main()/live stats.
+        self._pub_q = _EmptyQueue()
+        self._timing = []
+        self._pub_timing = []
+        self._sc16_written = 0
+        self._sc16_offset = 0
+
+        self._arm_ticks = int(round(self.arm_delay_s * self.rate))
+        self._tx_samples = int(self._native.size)
+        pri_num = int(round(self.pri_s * self.rate))
+        if pri_num <= 0:
+            raise SystemExit("pri_s too small for the device tick grid")
+        pre_guard_ticks = int(round(self.pre_us * 1e-6 * self.rate))
+
+        self.blk = uwb.realtime_echo_timer_uhd(
+            a.args, self.rate, a.tx_channel, a.rx_channel,
+            a.tx_antenna, a.rx_antenna, a.gain_tx, a.gain_rx, self.freq,
+            "internal", "internal",
+            pri_num, 1, pre_guard_ticks, 65536, 1 << 20,
+            4, 1000, 1 << 21, 1 << 21)
+        self.status = {
+            "backend": "cpp-pdu",
+            "tx_rate": self.rate, "rx_rate": self.rate,
+            "tx_ant": a.tx_antenna, "rx_ant": a.rx_antenna,
+            "rx_window": self.rx_len, "pre": self.pre,
+            "publish_native": self.publish_native,
+            "pri_s": self.pri_s, "max_pulses": self.max_pulses,
+            "rx_pad_us": self.rx_pad_us,
+            "code_index": self.code_index, "sfd_mode": self.sfd_mode,
+            "sync_reps": self.sync_reps,
+            "tx_native": self._tx_samples,
+            "rx_window_us": self.rx_len / self.rate * 1e6,
+            "tx_us": self._tx_samples / self.rate * 1e6,
+            "pad": self.pad_n,
+        }
+
+    # Live counters (properties so start_live_stats sees fresh values).
+    @property
+    def _ok(self):
+        return int(self.blk.bursts_ok())
+
+    @property
+    def _fail(self):
+        return int(self.blk.bursts_failed())
+
+    @property
+    def _late(self):
+        return int(self.blk.late_slot_skips())
+
+    @property
+    def _pub_ok(self):
+        return int(self.blk.bursts_published())
+
+    @property
+    def _tx_send_error(self):
+        return 0
+
+    def set_tx_native(self, wave):  # native is captured in __init__
+        pass
+
+    def start_publisher(self):
+        pass
+
+    def stop_publisher(self):
+        pass
+
+    def _schedule_meta(self):
+        meta = pmt.make_dict()
+        meta = pmt.dict_add(meta, pmt.intern("tx_samples"),
+                            pmt.from_uint64(self._tx_samples))
+        meta = pmt.dict_add(meta, pmt.intern("rx_samples"),
+                            pmt.from_uint64(self.rx_len))
+        meta = pmt.dict_add(meta, pmt.intern("schedule_index"),
+                            pmt.from_uint64(0))
+        meta = pmt.dict_add(meta, pmt.intern("pulse_id"), pmt.from_uint64(0))
+        meta = pmt.dict_add(meta, pmt.intern("pulse_id_increment"),
+                            pmt.from_uint64(1))
+        meta = pmt.dict_add(meta, pmt.intern("burst_count"),
+                            pmt.from_uint64(self.max_pulses))
+        meta = pmt.dict_add(meta, pmt.intern("publish_native"),
+                            pmt.from_uint64(self.publish_native))
+        meta = pmt.dict_add(meta, pmt.intern("sample_rate"),
+                            pmt.from_double(self.rate))
+        # Same radar geometry the Python _make_rx_meta() sends.
+        cap = self.rx_len - self.pre - self.tail
+        if cap < 0:
+            cap = self.rx_len
+        meta = pmt.dict_add(meta, pmt.intern("window_start_sample"),
+                            pmt.from_long(0))
+        meta = pmt.dict_add(meta, pmt.intern("pre_guard_samples"),
+                            pmt.from_long(self.pre))
+        meta = pmt.dict_add(meta, pmt.intern("capture_samples"),
+                            pmt.from_long(cap))
+        meta = pmt.dict_add(meta, pmt.intern("post_guard_samples"),
+                            pmt.from_long(self.tail))
+        # sample_count is the PHYSICAL window (ROI only truncates payload).
+        meta = pmt.dict_add(meta, pmt.intern("sample_count"),
+                            pmt.from_long(self.rx_len))
+        meta = pmt.dict_add(meta, pmt.intern("rx_capture_samples"),
+                            pmt.from_long(self.rx_len))
+        meta = pmt.dict_add(meta, pmt.intern("sync_repetitions"),
+                            pmt.from_long(self.sync_reps))
+        meta = pmt.dict_add(meta, pmt.intern("sfd_mode"),
+                            pmt.intern(self.sfd_mode))
+        meta = pmt.dict_add(meta, pmt.intern("code_index"),
+                            pmt.from_long(self.code_index))
+        meta = pmt.dict_add(meta, pmt.intern("sync_samples"),
+                            pmt.from_long(self.sync_n))
+        meta = pmt.dict_add(meta, pmt.intern("sfd_samples"),
+                            pmt.from_long(self.sfd_n))
+        meta = pmt.dict_add(meta, pmt.intern("tx_packet_samples"),
+                            pmt.from_long(self._tx_samples))
+        meta = pmt.dict_add(meta, pmt.intern("calibration_delay_native_samples"),
+                            pmt.from_double(self.cal_delay_native))
+        meta = pmt.dict_add(meta, pmt.intern("num_delay_samps"),
+                            pmt.from_long(int(round(self.cal_delay_native))))
+        meta = pmt.dict_add(meta, pmt.intern("source"),
+                            pmt.intern("x410_echo"))
+        return meta
+
+    def run_schedule(self):
+        # Must be called AFTER tb.start(): the block's start() prepares the
+        # UHD backend, after which the device clock is readable.
+        t0 = self.blk.device_time_ticks() + self._arm_ticks
+        meta = self._schedule_meta()
+        meta = pmt.dict_add(meta, pmt.intern("t0_ticks"), pmt.from_long(t0))
+        payload = fc32_to_sc16(self._native)
+        sched = pmt.cons(
+            meta, pmt.init_s16vector(int(payload.size), payload.tolist()))
+        self.blk._post(pmt.intern("schedule"), sched)
+        print("cpp_pdu schedule t0_ticks=%d tx_samples=%d rx_samples=%d "
+              "publish_native=%d bursts=%d" % (
+                  t0, self._tx_samples, self.rx_len, self.publish_native,
+                  self.max_pulses), flush=True)
+        deadline = time.monotonic() + self.max_pulses * self.pri_s + 15.0
+        while time.monotonic() < deadline:
+            if self.blk.bursts_published() >= self.max_pulses:
+                break
+            time.sleep(0.02)
+        if self.blk.bursts_published() < self.max_pulses:
+            print("WARN cpp_pdu schedule timeout published=%d/%d last_error=%s"
+                  % (self.blk.bursts_published(), self.max_pulses,
+                     self.blk.last_error()), flush=True)
+        return (int(self.blk.bursts_ok()), int(self.blk.bursts_failed()),
+                int(self.blk.late_slot_skips()))
+
+
 def build_parser(add_help=True):
     p = argparse.ArgumentParser(add_help=add_help)
     p.add_argument("--args", default="addr=192.168.10.2")
@@ -915,6 +1114,15 @@ def build_parser(add_help=True):
                         "testdata/uwb_hrp_tx/pulse_minphase_rc160_240.f32")
     p.add_argument("--output", required=True)
     p.add_argument("--taps", default="")
+    p.add_argument("--echo-backend", default="python",
+                   choices=["python", "cpp-pdu"],
+                   help="python = TimedUhdEcho (per-pulse PMT publisher); "
+                        "cpp-pdu = C++ UwbRealtimeEchoTimer message-only "
+                        "grid (no Python timed path). Default python.")
+    p.add_argument("--res-workers", type=int, default=1,
+                   help="PDU 65/32 FIR persistent worker threads; 1 keeps "
+                        "single-thread results. 200 Hz downstream headroom "
+                        "needs >1 (M3).")
     p.add_argument("--template", default="")
     p.add_argument("--publish-native", type=int, default=-1,
                    help="native samples published to the CIR estimator each "
@@ -1106,16 +1314,27 @@ def main():
     print("schedule pulses=%d pri_s=%.6f rate_hz=%.3f duration_s=%.3f" % (
         a.pulses, a.pri_s, (1.0 / a.pri_s), a.pulses * a.pri_s), flush=True)
 
+    if a.echo_backend == "cpp-pdu" and (a.dump_rx or a.dump_sc16):
+        print("WARN --dump-rx/--dump-sc16 are unsupported with "
+              "--echo-backend cpp-pdu; disabling dumps", flush=True)
+        a.dump_rx = False
+        a.dump_sc16 = False
     dump_dir = os.path.join(a.output, "rx_iq") if a.dump_rx else ""
     sc16_dir = a.output if a.dump_sc16 else ""
-    echo = TimedUhdEcho(
-        a.args, CG400_HZ, a.freq, a.tx_channel, a.rx_channel,
-        a.tx_antenna, a.rx_antenna, a.gain_tx, a.gain_rx,
-        a.pre_guard_us, 15.0, a.tail_guard_us, a.sync_reps, a.cal_delay_native,
-        a.arm_delay_s, a.pri_s, a.pulses, dump_dir, a.min_lead_s, timing_path,
-        sc16_dir, a.rx_pad_us, a.code_index, SFD_MODE,
-        publish_native=a.publish_native)
-    echo.set_tx_native(native)
+    if a.echo_backend == "cpp-pdu":
+        echo = CppPduEcho(a, native, CG400_HZ)
+        echo_out_port = "burst"
+    else:
+        echo = TimedUhdEcho(
+            a.args, CG400_HZ, a.freq, a.tx_channel, a.rx_channel,
+            a.tx_antenna, a.rx_antenna, a.gain_tx, a.gain_rx,
+            a.pre_guard_us, 15.0, a.tail_guard_us, a.sync_reps,
+            a.cal_delay_native, a.arm_delay_s, a.pri_s, a.pulses, dump_dir,
+            a.min_lead_s, timing_path, sc16_dir, a.rx_pad_us, a.code_index,
+            SFD_MODE, publish_native=a.publish_native)
+        echo.set_tx_native(native)
+        echo_out_port = "rx"
+    print("echo_backend=%s" % a.echo_backend, flush=True)
     print("uhd_probe", echo.status, flush=True)
     if a.dump_sc16:
         tx_sc16_path = os.path.join(a.output, "tx_491p52.sc16")
@@ -1123,7 +1342,8 @@ def main():
         print("wrote_tx_sc16", tx_sc16_path, "samples=%d" % echo._native.size,
               flush=True)
 
-    res = uwb.pdu_rational_resampler_ccf_65_32(taps, 998.4e6, True, 2097152)
+    res = uwb.pdu_rational_resampler_ccf_65_32(
+        taps, 998.4e6, True, 2097152, int(a.res_workers))
     est_q = max(8, int(a.est_queue))
     use_pred = not a.require_sfd
     est = uwb.radar_cir_estimator(
@@ -1146,7 +1366,10 @@ def main():
                   a.udp_host, a.udp_port, CIR_UDP_TAPS), flush=True)
 
     tb = gr.top_block("x410_cg400_hrp_echo_cir")
-    tb.msg_connect((echo, "rx"), (res, "packet"))
+    # The cpp-pdu path is the C++ block itself; the wrapper only carries the
+    # Python-compat attribute surface.
+    echo_block = echo if a.echo_backend == "python" else echo.blk
+    tb.msg_connect((echo_block, echo_out_port), (res, "packet"))
     tb.msg_connect((res, "packet"), (est, "rx"))
     tb.msg_connect((est, "cir"), (wr, "cir"))
     if udp is not None:
@@ -1239,6 +1462,14 @@ def main():
         "rx_antenna": a.rx_antenna,
         "iq_scale": IQ_SCALE,
         "sample_format": "sc16",
+        "echo_backend": a.echo_backend,
+        "res_workers": int(a.res_workers),
+        "echo_queue_hwm": (int(echo.blk.queue_high_watermark())
+                           if a.echo_backend == "cpp-pdu" else 0),
+        "echo_worker_us_mean": (int(echo.blk.mean_worker_us())
+                                if a.echo_backend == "cpp-pdu" else 0),
+        "echo_worker_us_max": (int(echo.blk.max_worker_us())
+                               if a.echo_backend == "cpp-pdu" else 0),
         "rx_window": echo.rx_len,
         "rx_window_us": echo.rx_len / CG400_HZ * 1e6,
         "rx_pad_us": a.rx_pad_us,

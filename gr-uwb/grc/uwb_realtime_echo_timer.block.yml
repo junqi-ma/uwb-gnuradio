@@ -1,0 +1,122 @@
+id: uwb_realtime_echo_timer
+label: UWB Realtime Echo Timer (message PDU, UHD)
+category: '[UWB]'
+flags: [python]
+
+parameters:
+-   id: device_args
+    label: UHD device args
+    dtype: string
+    default: ''
+-   id: sample_rate_hz
+    label: Sample rate (Hz)
+    dtype: real
+    default: '737.28e6'
+-   id: tx_channel
+    label: TX channel
+    dtype: int
+    default: '0'
+-   id: rx_channel
+    label: RX channel
+    dtype: int
+    default: '1'
+-   id: tx_antenna
+    label: TX antenna
+    dtype: string
+    default: 'TX/RX'
+-   id: rx_antenna
+    label: RX antenna
+    dtype: string
+    default: 'RX2'
+-   id: tx_gain_db
+    label: TX gain (dB, negative = leave)
+    dtype: real
+    default: '-1'
+-   id: rx_gain_db
+    label: RX gain (dB, negative = leave)
+    dtype: real
+    default: '-1'
+-   id: center_freq_hz
+    label: Center frequency (Hz, 0 = leave)
+    dtype: real
+    default: '0'
+-   id: clock_source
+    label: Clock source
+    dtype: string
+    default: 'internal'
+-   id: time_source
+    label: Time source
+    dtype: string
+    default: 'internal'
+-   id: pri_num
+    label: PRI numerator (ticks)
+    dtype: int
+    default: '3686400'
+-   id: pri_den
+    label: PRI denominator
+    dtype: int
+    default: '1'
+-   id: pre_guard_ticks
+    label: RX pre-guard (ticks)
+    dtype: int
+    default: '1475'
+-   id: max_fragment_size
+    label: Max fragment size (samples)
+    dtype: int
+    default: '65536'
+-   id: max_catchup_slots
+    label: Max catch-up slots
+    dtype: int
+    default: '1048576'
+-   id: queue_capacity
+    label: Schedule queue capacity
+    dtype: int
+    default: '64'
+-   id: collect_wait_ms
+    label: RX collect wait (ms)
+    dtype: int
+    default: '1000'
+-   id: max_tx_samples
+    label: Max TX scratch samples
+    dtype: int
+    default: '2097152'
+-   id: max_rx_samples
+    label: Max RX scratch samples
+    dtype: int
+    default: '2097152'
+
+inputs:
+-   domain: message
+    id: schedule
+    optional: true
+
+outputs:
+-   domain: message
+    id: burst
+    optional: true
+-   domain: message
+    id: status
+    optional: true
+
+templates:
+    imports: from gnuradio import uwb
+    make: uwb.realtime_echo_timer_uhd(${device_args}, ${sample_rate_hz}, ${tx_channel}, ${rx_channel}, ${tx_antenna}, ${rx_antenna}, ${tx_gain_db}, ${rx_gain_db}, ${center_freq_hz}, ${clock_source}, ${time_source}, ${pri_num}, ${pri_den}, ${pre_guard_ticks}, ${max_fragment_size}, ${max_catchup_slots}, ${queue_capacity}, ${collect_wait_ms}, ${max_tx_samples}, ${max_rx_samples})
+
+documentation: |-
+    Message-only timed burst radio scheduler (Radar Step 10/11), UHD
+    factory.  This is a PDU echo block: it has NO stream ports.
+
+    Input message port "schedule" consumes cons(meta_dict, s16vector TX
+    payload) PDUs; each accepted schedule publishes exactly one message on
+    "burst" (cons(meta, s16vector RX window)) and lifecycle/drop events on
+    "status".  A single dedicated worker thread owns the device-time
+    scheduler core and the UHD burst backend; the message handler only
+    validates and enqueues into a bounded FIFO (overflow → drop + status,
+    never blocks).  No UHD I/O ever runs in a GNU Radio handler.
+
+    Requires a build with UHD (ENABLE_UHD_BACKEND); in UHD-free builds the
+    Python factory uwb.realtime_echo_timer_uhd is not bound.  Use the
+    generic uwb.realtime_echo_timer(...) constructor to inject an arbitrary
+    backend (e.g. fake_burst_backend) for off-hardware QA.
+
+file_format: 1
