@@ -28,6 +28,7 @@
 #include <gnuradio/gr_complex.h>
 #include <gnuradio/uwb/api.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
+#include <gnuradio/uwb/uwb_sc16_scale.h>
 #include <pmt/pmt.h>
 
 #include <atomic>
@@ -55,6 +56,9 @@ public:
         CaptureOnly = 1,
     };
 
+    /** SC16 input amplitude contract (shared with 65/32; one Python enum). */
+    using Sc16ScalePolicy = ::gr::uwb::Sc16ScalePolicy;
+
     // Covers scheduled e2e and 2048-SYNC radar RX windows (~1.55e6 @737.28).
     static constexpr size_t kDefaultMaxInputSamples = 2097152;
 
@@ -70,19 +74,24 @@ public:
      * \param max_input_samples     Fixed handler input bound. Scratch for
      *        SC16→FC32 and process+flush is allocated at make(); the handler
      *        never resizes. Oversized PDUs publish invalid_window.
+     * \param sc16_scale            SC16→FC32 amplitude contract (default
+     *        RawInteger: fc32 = float(int16); UnitRange normalizes by 32768
+     *        to match the cpp-pdu / UHD Python FC32 chain).
      */
     static sptr make(const std::string& taps_file_or_profile = "quality_minorder",
                      double output_sample_rate = kOutputRateHz,
                      bool validate_input_rate = true,
                      EmitPolicy emit_policy = EmitPolicy::FullWindow,
-                     size_t max_input_samples = kDefaultMaxInputSamples);
+                     size_t max_input_samples = kDefaultMaxInputSamples,
+                     Sc16ScalePolicy sc16_scale = Sc16ScalePolicy::RawInteger);
 
     /** QA path: construct from an in-memory taps vector. */
     static sptr make_from_taps(const std::vector<float>& taps,
                                double output_sample_rate = kOutputRateHz,
                                bool validate_input_rate = true,
                                EmitPolicy emit_policy = EmitPolicy::FullWindow,
-                               size_t max_input_samples = kDefaultMaxInputSamples);
+                               size_t max_input_samples = kDefaultMaxInputSamples,
+                               Sc16ScalePolicy sc16_scale = Sc16ScalePolicy::RawInteger);
 
     ~UwbPduRationalResamplerCcf65_48() override;
 
@@ -95,6 +104,9 @@ public:
     void set_emit_policy(EmitPolicy p) { d_emit_policy_ = p; }
     size_t max_input_samples() const { return d_max_in_; }
     size_t max_output_samples() const { return d_max_out_; }
+
+    void set_sc16_scale(Sc16ScalePolicy p) { d_sc16_scale_ = p; }
+    Sc16ScalePolicy sc16_scale() const { return d_sc16_scale_; }
 
     const gr_complex* scratch_data() const { return d_scratch_.data(); }
     size_t scratch_size() const { return d_scratch_.size(); }
@@ -176,7 +188,8 @@ public:
                                     double output_sample_rate,
                                     bool validate_input_rate,
                                     EmitPolicy emit_policy,
-                                    size_t max_input_samples);
+                                    size_t max_input_samples,
+                                    Sc16ScalePolicy sc16_scale);
 
 private:
     void handle_packet(pmt::pmt_t msg);
@@ -193,6 +206,7 @@ private:
     double d_output_rate_;
     bool d_validate_rate_;
     EmitPolicy d_emit_policy_;
+    Sc16ScalePolicy d_sc16_scale_ = Sc16ScalePolicy::RawInteger;
     size_t d_max_in_ = 0;
     size_t d_max_out_ = 0;
 

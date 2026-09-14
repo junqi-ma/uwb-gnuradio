@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Live HRP synth + timed X410 TX/RX + PDU 65/32 + radar CIR.
+"""Live HRP synth + timed X410 TX/RX + PDU resample + radar CIR.
 
 Pipeline:
   UwbHrpPacketSource.samples()     # 998.4 CF32, C++ IEEE 802.15.4a BPRF
-    -> TimedUhdEcho                # 32/65 downsample once, SC16 timed burst
-    -> PDU 65/32                   # 491.52 -> 998.4
+    -> TimedUhdEcho                # work->native downsample once, SC16 burst
+    -> PDU resampler               # 491.52/65-32 or 737.28/65-48 -> 998.4
     -> UwbRadarCirEstimator        # default: predicted TX time, no SFD gate
     -> UwbCirWriter + framed UDP
 
 TX: UHD ch0 / TX/RX0 (front-panel ch1)
 RX: UHD ch3 / RX1     (front-panel ch4)
-Rate: CG400 491.52 MS/s
+Rate: --native-rate, default CG600 737.28 MS/s (CG400 491.52 still selectable)
+Pulse: --pulse-shape, default 'legacy' standard full-band BPRF (CG600)
 
 Timed echo locks SFD to a constant offset from the RX window
 (predicted_sfd is identical every burst).  CIR uses that schedule, not
@@ -110,6 +111,8 @@ uwb = load_uwb()
 
 C_LIGHT = 299792458.0
 CG400_HZ = 491520000.0
+CG600_HZ = 737280000.0
+DEFAULT_NATIVE_HZ = CG600_HZ
 WORK_HZ = 998400000.0
 SPS = 1016
 SFD_SYMS_4Z2 = 8
@@ -143,6 +146,54 @@ def hex_to_bytes(s):
 
 
 IQ_SCALE = 32768.0
+
+
+class NativeRateProfile:
+    """Native radio-rate contract for the two shipped X410 FPGA images.
+
+    TX: the 998.4 MS/s work-grid waveform is resampled to the native device
+    rate with ``resample_poly(work, tx_interp, tx_decim)``.
+    RX: the native SC16 window is resampled back to 998.4 MS/s by the matching
+    PDU block (65/32 for CG400, 65/48 for CG600).  Both ratios are exact:
+
+        491.52e6 * 65/32 = 737.28e6 * 65/48 = 998.4e6
+
+    Only these two images are accepted; anything else is a hard error so a
+    wrong rate can never silently produce a mis-scaled CIR.
+    """
+
+    def __init__(self, native_hz):
+        hz = float(native_hz)
+        if abs(hz - CG600_HZ) < 1.0:
+            self.name, self.label = "cg600", "737p28"
+            self.tx_interp, self.tx_decim = 48, 65
+            self.pdu, self.taps_dir = "65_48", "resampler_65_48"
+        elif abs(hz - CG400_HZ) < 1.0:
+            self.name, self.label = "cg400", "491p52"
+            self.tx_interp, self.tx_decim = 32, 65
+            self.pdu, self.taps_dir = "65_32", "resampler_65_32"
+        else:
+            raise SystemExit(
+                "--native-rate must be 737.28e6 (CG600) or 491.52e6 (CG400); "
+                "got %r" % native_hz)
+        self.hz = hz
+        self.work_per_native = WORK_HZ / hz
+
+    def tx_native(self, work_iq):
+        """998.4 MS/s CF32 work grid -> native CF32 (one-shot TX)."""
+        return resample_poly(np.asarray(work_iq, dtype=np.complex128),
+                             self.tx_interp, self.tx_decim).astype(np.complex64)
+
+    def make_pdu_resampler(self, taps, res_workers, sc16_scale):
+        """Build the native->998.4 PDU resampler matching this profile."""
+        if self.pdu == "65_48":
+            # The 65/48 PDU block exposes Sc16ScalePolicy but (yet) no
+            # persistent worker pool; one-shot process per PDU.
+            return uwb.pdu_rational_resampler_ccf_65_48(
+                taps, WORK_HZ, True,
+                uwb.pdu_resampler_emit_policy.FullWindow, 2097152, sc16_scale)
+        return uwb.pdu_rational_resampler_ccf_65_32(
+            taps, WORK_HZ, True, 2097152, int(res_workers), sc16_scale)
 
 # UDP CIR datagram, unified for both live scripts (base and sweep): a 44-byte
 # UCR2 header + 116 complex64 taps (always, zeros if fail).
@@ -369,15 +420,18 @@ def start_live_stats(echo, est, wr, udp, stop_evt, pri_s, res=None):
 
 
 def rx_geometry(rate, pre_us, sync_reps, range_m, tail_us,
-                tx_native_samples=0, pad_us=8.0):
+                tx_native_samples=0, pad_us=8.0,
+                tx_interp=32, tx_decim=65):
     """RX window must cover the full native TX burst, not just SYNC+SFD.
 
     With STS+PHR/PSDU the HRP packet is ~191 us; SYNC+SFD is only ~73 us.
-    FPGA RX length is rounded up to a multiple of 4.
+    FPGA RX length is rounded up to a multiple of 4.  ``tx_interp/tx_decim``
+    convert work-grid counts (998.4 MS/s) to native samples: 32/65 for CG400,
+    48/65 for CG600.
     """
     pre = llround(pre_us * 1e-6 * rate)
-    sync = ceildiv(sync_reps * SPS * 32, 65)
-    sfd = ceildiv(SFD_SYMS_4Z2 * SPS * 32, 65)
+    sync = ceildiv(sync_reps * SPS * int(tx_interp), int(tx_decim))
+    sfd = ceildiv(SFD_SYMS_4Z2 * SPS * int(tx_interp), int(tx_decim))
     rng = int(math.ceil(2.0 * range_m / C_LIGHT * rate))
     tail = llround(tail_us * 1e-6 * rate)
     pad = llround(float(pad_us) * 1e-6 * rate)
@@ -387,7 +441,7 @@ def rx_geometry(rate, pre_us, sync_reps, range_m, tail_us,
     return pre, sync, sfd, rng, tail, pad, rx
 
 
-def cir_publish_native(pre_native, sync_reps, cal_native,
+def cir_publish_native(pre_native, sync_reps, cal_native, native_hz=CG600_HZ,
                        cir_pre=16, cir_post=100, cir_skip=10,
                        margin_native=4096):
     """Upper bound on the native samples the CIR estimator can read.
@@ -400,7 +454,7 @@ def cir_publish_native(pre_native, sync_reps, cal_native,
     loop.  This returns a conservative publish length covering every read
     the estimator can make, plus a native-sample margin.
     """
-    ratio = WORK_HZ / CG400_HZ
+    ratio = WORK_HZ / float(native_hz)
     count = max(0, int(sync_reps) - int(cir_skip))
     wlen = SPS + int(cir_pre) + int(cir_post) - 1
     need_work = ((float(pre_native) + float(cal_native)) * ratio
@@ -408,10 +462,23 @@ def cir_publish_native(pre_native, sync_reps, cal_native,
     return int(math.ceil(need_work / ratio)) + int(margin_native)
 
 
-class TimedUhdEcho(gr.basic_block):
-    """Downsample 998.4 TX PDU to 491.52, timed USRP burst, emit native RX PDU."""
+def default_cal_delay_native(native_hz):
+    """Rate-scaled starting calibration delay.
 
-    def __init__(self, args, rate, freq, tx_ch, rx_ch, tx_ant, rx_ant,
+    334 native @491.52 MS/s was measured on CG400; the same physical loopback
+    delay scales linearly with the device rate.  The peak servo (sweep app)
+    refines it from the first CIR.
+    """
+    return float(round(334.0 * float(native_hz) / CG400_HZ))
+
+
+class TimedUhdEcho(gr.basic_block):
+    """Downsample 998.4 TX PDU to the native rate, timed USRP burst, emit
+    native RX PDU.  The native rate (CG400 491.52 / CG600 737.28 MS/s) comes
+    from the ``NativeRateProfile`` so the TX/RX ratios and window geometry
+    cannot drift apart."""
+
+    def __init__(self, args, profile, freq, tx_ch, rx_ch, tx_ant, rx_ant,
                  gain_tx, gain_rx, pre_us, range_m, tail_us, sync_reps,
                  cal_delay_native, arm_delay_s, pri_s, max_pulses,
                  rx_dump_dir="", min_lead_s=0.002, timing_path="",
@@ -420,7 +487,11 @@ class TimedUhdEcho(gr.basic_block):
                  publish_native=0):
         gr.basic_block.__init__(self, name="timed_uhd_echo",
                                 in_sig=None, out_sig=None)
-        self.rate = float(rate)
+        self._profile = profile
+        self.rate = float(profile.hz)
+        self.tx_interp = int(profile.tx_interp)
+        self.tx_decim = int(profile.tx_decim)
+        self.native_label = profile.label
         self.freq = float(freq)
         self.code_index = int(code_index)
         self.sfd_mode = sfd_mode
@@ -444,10 +515,11 @@ class TimedUhdEcho(gr.basic_block):
         self.timing_path = timing_path
         self.rx_pad_us = float(rx_pad_us)
         self.pre, self.sync_n, self.sfd_n, self.rng_n, self.tail, self.pad_n, self.rx_len = \
-            rx_geometry(rate, pre_us, sync_reps, range_m, tail_us, 0, self.rx_pad_us)
+            rx_geometry(self.rate, pre_us, sync_reps, range_m, tail_us, 0,
+                        self.rx_pad_us, self.tx_interp, self.tx_decim)
         if int(publish_native) < 0:
             publish_native = cir_publish_native(
-                self.pre, self.sync_reps, self.cal_delay_native)
+                self.pre, self.sync_reps, self.cal_delay_native, self.rate)
         self.publish_native = int(publish_native)
 
         self.message_port_register_in(pmt.intern("tx"))
@@ -514,7 +586,8 @@ class TimedUhdEcho(gr.basic_block):
         self._native = (np.asarray(wave, dtype=np.complex64) / peak * 0.8).astype(np.complex64)
         self.pre, self.sync_n, self.sfd_n, self.rng_n, self.tail, self.pad_n, self.rx_len = \
             rx_geometry(self.rate, self.pre_us, self.sync_reps, self.range_m,
-                        self.tail_us, int(self._native.size), self.rx_pad_us)
+                        self.tail_us, int(self._native.size), self.rx_pad_us,
+                        self.tx_interp, self.tx_decim)
         self.status["rx_window"] = self.rx_len
         self.status["tx_native"] = int(self._native.size)
         self.status["rx_window_us"] = self.rx_len / self.rate * 1e6
@@ -662,7 +735,7 @@ class TimedUhdEcho(gr.basic_block):
         tx_work = np.asarray(raw, dtype=np.complex64)
         if tx_work.size == 0:
             return False
-        native = resample_poly(tx_work.astype(np.complex128), 32, 65)
+        native = self._profile.tx_native(tx_work)
         self.set_tx_native(native.astype(np.complex64))
         return True
 
@@ -891,8 +964,12 @@ class CppPduEcho:
     and applied at a burst boundary by the worker.
     """
 
-    def __init__(self, a, native, rate):
-        self.rate = float(rate)
+    def __init__(self, a, native, profile):
+        self._profile = profile
+        self.rate = float(profile.hz)
+        self.tx_interp = int(profile.tx_interp)
+        self.tx_decim = int(profile.tx_decim)
+        self.native_label = profile.label
         self.freq = float(a.freq)
         self.code_index = int(a.code_index)
         self.sfd_mode = SFD_MODE
@@ -915,10 +992,11 @@ class CppPduEcho:
         (self.pre, self.sync_n, self.sfd_n, self.rng_n, self.tail,
          self.pad_n, self.rx_len) = rx_geometry(
             self.rate, self.pre_us, self.sync_reps, self.range_m,
-            self.tail_us, int(self._native.size), self.rx_pad_us)
+            self.tail_us, int(self._native.size), self.rx_pad_us,
+            self.tx_interp, self.tx_decim)
         if int(a.publish_native) < 0:
             pub = cir_publish_native(self.pre, self.sync_reps,
-                                     self.cal_delay_native)
+                                     self.cal_delay_native, self.rate)
         else:
             pub = int(a.publish_native)
         self.publish_native = int(pub)
@@ -1073,6 +1151,11 @@ class CppPduEcho:
 def build_parser(add_help=True):
     p = argparse.ArgumentParser(add_help=add_help)
     p.add_argument("--args", default="addr=192.168.10.2")
+    p.add_argument("--native-rate", type=float, default=DEFAULT_NATIVE_HZ,
+                   help="X410 native sample rate: 737.28e6 (CG600, default) or "
+                        "491.52e6 (CG400). Selects the TX work->native ratio "
+                        "(48/65 or 32/65) and the RX PDU resampler (65/48 or "
+                        "65/32); both are exact (x65/.. = 998.4e6).")
     p.add_argument("--pulses", type=int, default=8)
     p.add_argument("--pri-s", type=float, default=0.05)
     p.add_argument("--rate-hz", type=float, default=0.0,
@@ -1085,7 +1168,11 @@ def build_parser(add_help=True):
     p.add_argument("--tx-antenna", default="TX/RX0")
     p.add_argument("--rx-antenna", default="RX1")
     p.add_argument("--freq", type=float, default=6489.6e6)
-    p.add_argument("--cal-delay-native", type=float, default=334.0)
+    p.add_argument("--cal-delay-native", type=float, default=None,
+                   help="Native-sample calibration delay (CIR origin). Default "
+                        "None scales the measured CG400 value 334 by the native "
+                        "rate (CG600 -> ~501 native @737.28); the sweep app's "
+                        "peak servo refines it at runtime.")
     p.add_argument("--sfd-search-margin", type=int, default=128,
                    help="SFD search half-window at 998.4 MS/s; 8192 is ~180 ms/frame")
     p.add_argument("--sfd-threshold", type=float, default=0.12)
@@ -1112,12 +1199,16 @@ def build_parser(add_help=True):
                         "(also accepts 2048)")
     p.add_argument("--insert-sts", action="store_true", default=True)
     p.add_argument("--no-sts", action="store_true")
-    p.add_argument("--pulse-shape", default="linear",
-                   choices=["linear", "minphase", "legacy", "gaussian",
+    p.add_argument("--pulse-shape", default="legacy",
+                   choices=["legacy", "linear", "minphase", "gaussian",
                             "blackman", "external"],
-                   help="TX pulse shaping on the 998.4 work grid; gaussian "
-                        "(sigma=2.5 ns) removes the 491.52 MS/s band-edge "
-                        "ringing of the legacy Butterworth-fit pulse")
+                   help="TX pulse shaping on the 998.4 work grid.  Default "
+                        "'legacy' is the standard full-band BPRF pulse (the "
+                        "48-tap core fitted to the 737.28 MS/s reference); it "
+                        "needs the CG600 737.28 MS/s front end -- the CG400 "
+                        "491.52 limit rings near +/-245.76 MHz, for which the "
+                        "narrowband 'linear'/'minphase'/'gaussian'/'blackman' "
+                        "low-tail shapes exist.")
     p.add_argument("--pulse-sigma-ns", type=float, default=2.5)
     p.add_argument("--pulse-bw-mhz", type=float, default=200.0)
     p.add_argument("--pulse-taps", default="",
@@ -1136,12 +1227,13 @@ def build_parser(add_help=True):
                         "When unset and --dump-rx/--dump-sc16 is given, it "
                         "auto-selects python (cpp-pdu has no dump sink yet).")
     p.add_argument("--res-workers", type=int, default=1,
-                   help="PDU 65/32 FIR persistent worker threads; 1 keeps "
-                        "single-thread results. 200 Hz downstream headroom "
-                        "needs >1 (M3).")
+                   help="Native->998.4 PDU resampler persistent FIR worker "
+                        "threads (65/32 CG400 only; 1 keeps single-thread "
+                        "results).  The 65/48 CG600 block has no worker pool "
+                        "yet and ignores this.")
     p.add_argument("--res-sc16-scale", choices=["auto", "raw", "unit"],
                    default="auto",
-                   help="PDU 65/32 SC16 input amplitude contract: 'unit' = "
+                   help="PDU resampler SC16 input amplitude contract: 'unit' = "
                         "float(int16)/32768 (matches the legacy Python FC32 "
                         "radar chain), 'raw' = float(int16) (legacy "
                         "scheduled-capture chain), 'auto' = unit for "
@@ -1319,8 +1411,16 @@ def main():
         a.pulses = int(round(a.rate_hz * a.duration_s))
     repo = find_repo_root()
     os.makedirs(a.output, exist_ok=True)
+    profile = NativeRateProfile(a.native_rate)
+    if a.cal_delay_native is None:
+        a.cal_delay_native = default_cal_delay_native(profile.hz)
+    print("native_rate=%.1f MS/s (%s) tx=%d/%d pdu=%s work_per_native=%.6f "
+          "cal_delay_native=%.1f" % (
+              profile.hz / 1e6, profile.name, profile.tx_interp,
+              profile.tx_decim, profile.pdu, profile.work_per_native,
+              a.cal_delay_native), flush=True)
     taps = a.taps or os.path.join(
-        repo, "testdata", "resampler_65_32", "taps_quality_minorder.txt")
+        repo, "testdata", profile.taps_dir, "taps_quality_minorder.txt")
     tmpl_path = a.template or os.path.join(a.output, "sync_template_live.cf32")
     timing_path = os.path.join(a.output, "echo_timing.jsonl")
 
@@ -1347,11 +1447,12 @@ def main():
     _tmpl_off = max(0, int(src.pulse_center_taps()) - 4)
     samples[_tmpl_off:_tmpl_off + SPS].tofile(tmpl_path)
     t_rs = time.perf_counter()
-    native = resample_poly(samples.astype(np.complex128), 32, 65).astype(np.complex64)
-    print("hrp_tx_998p4_samples=%d native_491p52=%d resample_ms=%.2f "
+    native = profile.tx_native(samples)
+    print("hrp_tx_998p4_samples=%d native_%s=%d resample_ms=%.2f "
           "insert_sts=%s pulse_shape=%s pulse_taps=%d pulse_center=%d "
           "code_index=%d preamble_length=%d sfd_mode=%s"
-          % (samples.size, native.size, (time.perf_counter() - t_rs) * 1e3,
+          % (samples.size, profile.label, native.size,
+             (time.perf_counter() - t_rs) * 1e3,
              insert_sts, src.pulse_shape(), src.pulse_taps(),
              src.pulse_center_taps(), a.code_index, a.sync_reps, SFD_MODE),
           flush=True)
@@ -1375,11 +1476,11 @@ def main():
     dump_dir = os.path.join(a.output, "rx_iq") if a.dump_rx else ""
     sc16_dir = a.output if a.dump_sc16 else ""
     if a.echo_backend == "cpp-pdu":
-        echo = CppPduEcho(a, native, CG400_HZ)
+        echo = CppPduEcho(a, native, profile)
         echo_out_port = "burst"
     else:
         echo = TimedUhdEcho(
-            a.args, CG400_HZ, a.freq, a.tx_channel, a.rx_channel,
+            a.args, profile, a.freq, a.tx_channel, a.rx_channel,
             a.tx_antenna, a.rx_antenna, a.gain_tx, a.gain_rx,
             a.pre_guard_us, 15.0, a.tail_guard_us, a.sync_reps,
             a.cal_delay_native, a.arm_delay_s, a.pri_s, a.pulses, dump_dir,
@@ -1390,7 +1491,7 @@ def main():
     print("echo_backend=%s" % a.echo_backend, flush=True)
     print("uhd_probe", echo.status, flush=True)
     if a.dump_sc16:
-        tx_sc16_path = os.path.join(a.output, "tx_491p52.sc16")
+        tx_sc16_path = os.path.join(a.output, "tx_%s.sc16" % profile.label)
         fc32_to_sc16(echo._native).tofile(tx_sc16_path)
         print("wrote_tx_sc16", tx_sc16_path, "samples=%d" % echo._native.size,
               flush=True)
@@ -1403,10 +1504,9 @@ def main():
         sc16_scale = (uwb.Sc16ScalePolicy.UnitRange
                       if a.echo_backend == "cpp-pdu"
                       else uwb.Sc16ScalePolicy.RawInteger)
-    res = uwb.pdu_rational_resampler_ccf_65_32(
-        taps, 998.4e6, True, 2097152, int(a.res_workers), sc16_scale)
-    print("resampler workers=%d sc16_scale=%s" % (
-        int(a.res_workers), a.res_sc16_scale), flush=True)
+    res = profile.make_pdu_resampler(taps, a.res_workers, sc16_scale)
+    print("resampler pdu=%s workers=%d sc16_scale=%s" % (
+        profile.pdu, int(a.res_workers), a.res_sc16_scale), flush=True)
     est_q = max(8, int(a.est_queue))
     use_pred = not a.require_sfd
     est = uwb.radar_cir_estimator(
@@ -1513,7 +1613,7 @@ def main():
         "sc16_samples": echo._sc16_offset,
         "dump_sc16": bool(a.dump_sc16),
         "freq_hz": a.freq,
-        "native_rate_hz": CG400_HZ,
+        "native_rate_hz": profile.hz,
         "code_index": a.code_index,
         "preamble_length": a.sync_reps,
         "sfd_mode": SFD_MODE,
@@ -1546,7 +1646,7 @@ def main():
         "echo_pdu_publish_us_mean": (int(echo.blk.pdu_publish_us_mean())
                                      if a.echo_backend == "cpp-pdu" else 0),
         "rx_window": echo.rx_len,
-        "rx_window_us": echo.rx_len / CG400_HZ * 1e6,
+        "rx_window_us": echo.rx_len / profile.hz * 1e6,
         "rx_pad_us": a.rx_pad_us,
     }
     with open(os.path.join(a.output, "summary.json"), "w", encoding="utf-8") as f:
@@ -1557,7 +1657,8 @@ def main():
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump({
                 "description": (
-                    "X410 CG400 monostatic HRP echo, native SC16 RX windows"
+                    "X410 monostatic HRP echo, native SC16 RX windows "
+                    "(%s)" % profile.name
                 ),
                 "sample_format": "sc16",
                 "dtype": "int16",
@@ -1567,7 +1668,7 @@ def main():
                 "iq_scale": IQ_SCALE,
                 "sample_index_base": 0,
                 "freq_hz": a.freq,
-                "rate_native_hz": CG400_HZ,
+                "rate_native_hz": profile.hz,
                 "rate_work_hz": WORK_HZ,
                 "code_index": a.code_index,
                 "sync_repetitions": a.sync_reps,
@@ -1586,11 +1687,13 @@ def main():
                 "tail_guard_us": a.tail_guard_us,
                 "rx_pad_us": a.rx_pad_us,
                 "rx_window_samples": echo.rx_len,
-                "rx_window_us": echo.rx_len / CG400_HZ * 1e6,
+                "rx_window_us": echo.rx_len / profile.hz * 1e6,
                 "files": {
                     "capture.iq": "concatenated native SC16 packets",
                     "capture.jsonl": "one JSON object per packet",
-                    "tx_491p52.sc16": "timed TX burst (native 491.52 MS/s)",
+                    "tx_%s.sc16" % profile.label:
+                        "timed TX burst (native %.2f MS/s)"
+                        % (profile.hz / 1e6),
                 },
                 "matlab": "[x, meta] = read_uwb_packet('capture.iq','capture.jsonl',id)",
                 "echo": echo.status,

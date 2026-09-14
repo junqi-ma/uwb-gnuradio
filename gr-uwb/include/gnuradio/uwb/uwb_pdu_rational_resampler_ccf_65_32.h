@@ -28,6 +28,7 @@
 #include <gnuradio/gr_complex.h>
 #include <gnuradio/uwb/api.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
+#include <gnuradio/uwb/uwb_sc16_scale.h>
 #include <pmt/pmt.h>
 
 #include <atomic>
@@ -55,15 +56,8 @@ public:
         CaptureOnly = 1,
     };
 
-    /** SC16 input amplitude contract.
-     *  RawInteger: fc32 = float(int16)  (legacy scheduled-capture chain).
-     *  UnitRange : fc32 = float(int16) / 32768  (matches UHD Python FC32 and
-     *              the legacy radar chain; required by cpp-pdu).
-     */
-    enum class Sc16ScalePolicy {
-        RawInteger = 0,
-        UnitRange = 1,
-    };
+    /** SC16 input amplitude contract (shared with 65/48; one Python enum). */
+    using Sc16ScalePolicy = ::gr::uwb::Sc16ScalePolicy;
 
     // Covers existing scheduled e2e (pre+cap+post = 252000) and Radar windows.
     static constexpr size_t kDefaultMaxInputSamples = 2097152;

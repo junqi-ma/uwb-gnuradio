@@ -554,6 +554,12 @@ void bind_pdu_rational_resampler_ccf_65_48(py::module& m)
         .value("CaptureOnly", Blk::EmitPolicy::CaptureOnly)
         .export_values();
 
+    // Shared with 65/32 (see uwb_sc16_scale.h).  Registered once here because
+    // this binder runs before bind_pdu_rational_resampler_ccf_65_32().
+    py::enum_<Blk::Sc16ScalePolicy>(m, "Sc16ScalePolicy")
+        .value("RawInteger", Blk::Sc16ScalePolicy::RawInteger)
+        .value("UnitRange", Blk::Sc16ScalePolicy::UnitRange);
+
     py::class_<Blk, gr::block, std::shared_ptr<Blk>>(
         m, "pdu_rational_resampler_ccf_65_48")
         .def(py::init(&Blk::make),
@@ -561,14 +567,16 @@ void bind_pdu_rational_resampler_ccf_65_48(py::module& m)
              py::arg("output_sample_rate") = Blk::kOutputRateHz,
              py::arg("validate_input_rate") = true,
              py::arg("emit_policy") = Blk::EmitPolicy::FullWindow,
-             py::arg("max_input_samples") = Blk::kDefaultMaxInputSamples)
+             py::arg("max_input_samples") = Blk::kDefaultMaxInputSamples,
+             py::arg("sc16_scale") = Blk::Sc16ScalePolicy::RawInteger)
         .def_static("make_from_taps",
                     &Blk::make_from_taps,
                     py::arg("taps"),
                     py::arg("output_sample_rate") = Blk::kOutputRateHz,
                     py::arg("validate_input_rate") = true,
                     py::arg("emit_policy") = Blk::EmitPolicy::FullWindow,
-                    py::arg("max_input_samples") = Blk::kDefaultMaxInputSamples)
+                    py::arg("max_input_samples") = Blk::kDefaultMaxInputSamples,
+                    py::arg("sc16_scale") = Blk::Sc16ScalePolicy::RawInteger)
         .def("taps", &Blk::taps)
         .def("tap_count", &Blk::tap_count)
         .def("output_sample_rate", &Blk::output_sample_rate)
@@ -577,6 +585,8 @@ void bind_pdu_rational_resampler_ccf_65_48(py::module& m)
         .def("set_emit_policy", &Blk::set_emit_policy, py::arg("p"))
         .def("max_input_samples", &Blk::max_input_samples)
         .def("max_output_samples", &Blk::max_output_samples)
+        .def("set_sc16_scale", &Blk::set_sc16_scale, py::arg("p"))
+        .def("sc16_scale", &Blk::sc16_scale)
         .def("map_input_offset_to_output",
              &Blk::map_input_offset_to_output,
              py::arg("p"))
@@ -598,9 +608,7 @@ void bind_pdu_rational_resampler_ccf_65_48(py::module& m)
 void bind_pdu_rational_resampler_ccf_65_32(py::module& m)
 {
     using Blk = gr::uwb::UwbPduRationalResamplerCcf65_32;
-    py::enum_<Blk::Sc16ScalePolicy>(m, "Sc16ScalePolicy")
-        .value("RawInteger", Blk::Sc16ScalePolicy::RawInteger)
-        .value("UnitRange", Blk::Sc16ScalePolicy::UnitRange);
+    // Sc16ScalePolicy is registered once by the 65/48 binder (shared type).
     py::class_<Blk, gr::block, std::shared_ptr<Blk>>(
         m, "pdu_rational_resampler_ccf_65_32")
         .def(py::init([](const std::string& taps,

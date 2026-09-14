@@ -150,7 +150,8 @@ UwbPduRationalResamplerCcf65_48::make(const std::string& taps_file_or_profile,
                                       double output_sample_rate,
                                       bool validate_input_rate,
                                       EmitPolicy emit_policy,
-                                      size_t max_input_samples)
+                                      size_t max_input_samples,
+                                      Sc16ScalePolicy sc16_scale)
 {
     auto taps = load_taps_from_profile_or_path(taps_file_or_profile);
     return gnuradio::make_block_sptr<UwbPduRationalResamplerCcf65_48>(
@@ -158,7 +159,8 @@ UwbPduRationalResamplerCcf65_48::make(const std::string& taps_file_or_profile,
         output_sample_rate,
         validate_input_rate,
         emit_policy,
-        max_input_samples);
+        max_input_samples,
+        sc16_scale);
 }
 
 UwbPduRationalResamplerCcf65_48::sptr
@@ -166,14 +168,16 @@ UwbPduRationalResamplerCcf65_48::make_from_taps(const std::vector<float>& taps,
                                                 double output_sample_rate,
                                                 bool validate_input_rate,
                                                 EmitPolicy emit_policy,
-                                                size_t max_input_samples)
+                                                size_t max_input_samples,
+                                                Sc16ScalePolicy sc16_scale)
 {
     return gnuradio::make_block_sptr<UwbPduRationalResamplerCcf65_48>(
         taps,
         output_sample_rate,
         validate_input_rate,
         emit_policy,
-        max_input_samples);
+        max_input_samples,
+        sc16_scale);
 }
 
 UwbPduRationalResamplerCcf65_48::UwbPduRationalResamplerCcf65_48(
@@ -181,7 +185,8 @@ UwbPduRationalResamplerCcf65_48::UwbPduRationalResamplerCcf65_48(
     double output_sample_rate,
     bool validate_input_rate,
     EmitPolicy emit_policy,
-    size_t max_input_samples)
+    size_t max_input_samples,
+    Sc16ScalePolicy sc16_scale)
     : gr::block("uwb_pdu_rational_resampler_ccf_65_48",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
@@ -190,6 +195,7 @@ UwbPduRationalResamplerCcf65_48::UwbPduRationalResamplerCcf65_48(
       d_output_rate_(output_sample_rate),
       d_validate_rate_(validate_input_rate),
       d_emit_policy_(emit_policy),
+      d_sc16_scale_(sc16_scale),
       d_max_in_(max_input_samples)
 {
     if (d_taps_.empty()) {
@@ -416,10 +422,13 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
         const auto convert_begin = std::chrono::steady_clock::now();
         const int16_t* s16 = pmt::s16vector_elements(data_in, n_elem);
         if (s16 != nullptr && n_elem == payload_items && n_in <= d_max_in_) {
+            const float g = (d_sc16_scale_ == Sc16ScalePolicy::UnitRange)
+                                ? (1.0f / 32768.0f)
+                                : 1.0f;
             for (size_t i = 0; i < n_in; ++i) {
-                d_input_scratch_[i] = gr_complex(
-                    static_cast<float>(s16[2 * i]),
-                    static_cast<float>(s16[2 * i + 1]));
+                d_input_scratch_[i] =
+                    gr_complex(static_cast<float>(s16[2 * i]) * g,
+                               static_cast<float>(s16[2 * i + 1]) * g);
             }
             in_ptr = d_input_scratch_.data();
             n_elem = n_in;
@@ -683,10 +692,29 @@ UwbPduRationalResamplerCcf65_48::handle_packet(pmt::pmt_t msg)
                              pmt::from_long(static_cast<long>(n_in)));
     meta_out = pmt::dict_add(meta_out, pmt::mp("input_sample_format"),
                              pmt::mp(input_sc16 ? "sc16" : "fc32"));
+    // Input amplitude contract: RawInteger keeps the legacy integer
+    // amplitudes (scale 32768); UnitRange normalizes SC16 to [-1, 1]
+    // (scale 1).  FC32 input is already in the block's working scale.
+    const long input_iq_scale =
+        input_sc16 ? ((d_sc16_scale_ == Sc16ScalePolicy::UnitRange) ? 1L
+                                                                    : 32768L)
+                   : 1L;
+    meta_out = pmt::dict_add(meta_out, pmt::mp("input_iq_scale"),
+                             pmt::from_long(input_iq_scale));
+    meta_out = pmt::dict_add(meta_out, pmt::mp("output_iq_scale"),
+                             pmt::from_long(1));
     meta_out = pmt::dict_add(meta_out, pmt::mp("sample_format"),
                              pmt::mp("fc32"));
     meta_out = pmt::dict_add(meta_out, pmt::mp("full_output_sample_count"),
                              pmt::from_long(static_cast<long>(n_out)));
+    // ROI visibility: copy through the physical-window payload prefix length
+    // unchanged when the producer supplied it; do not invent the key.
+    if (dict_has(meta_in, "published_samples")) {
+        meta_out =
+            pmt::dict_add(meta_out, pmt::mp("published_samples"),
+                          pmt::dict_ref(meta_in, pmt::mp("published_samples"),
+                                        pmt::PMT_NIL));
+    }
     meta_out = pmt::dict_add(meta_out, pmt::mp("resample_us"),
                              pmt::from_uint64(resample_us));
 

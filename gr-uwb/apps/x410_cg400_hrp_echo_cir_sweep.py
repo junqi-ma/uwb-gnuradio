@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""X410 CG400 HRP echo CIR with runtime frequency tuning.
+"""X410 CG600 / CG400 HRP echo CIR with runtime frequency tuning.
 
 Built on the validated chain in ``x410_cg400_hrp_echo_cir.py`` (imported as
 ``base``).  Only the RF centre frequency is made dynamic; the TX waveform,
-the 65/32 resampler and the 998.4 MS/s CIR estimator are unchanged.
+the PDU resampler and the 998.4 MS/s CIR estimator are unchanged.  Native
+rate and pulse shape default to the CG600 chain (``--native-rate 737.28e6``,
+``--pulse-shape legacy``); both are inherited from the base parser.
 
 Echo backends (``--echo-backend``, inherited from the base parser)
 -----------------------------------------------------------------
@@ -542,6 +544,17 @@ def main():
         a.pri_s = 1.0 / a.rate_hz
         a.pulses = int(round(a.rate_hz * a.duration_s))
 
+    # Profile must be resolved before the [align] banner and the peak servo,
+    # both of which read a.cal_delay_native.
+    profile = base.NativeRateProfile(a.native_rate)
+    if a.cal_delay_native is None:
+        a.cal_delay_native = base.default_cal_delay_native(profile.hz)
+    print("native_rate=%.1f MS/s (%s) tx=%d/%d pdu=%s work_per_native=%.6f "
+          "cal_delay_native=%.1f" % (
+              profile.hz / 1e6, profile.name, profile.tx_interp,
+              profile.tx_decim, profile.pdu, profile.work_per_native,
+              a.cal_delay_native), flush=True)
+
     plan = build_freq_plan(a)
     if a.freq_mode == "scan":
         total = plan.total_pulses()
@@ -587,7 +600,7 @@ def main():
     repo = base.find_repo_root()
     os.makedirs(a.output, exist_ok=True)
     taps = a.taps or os.path.join(
-        repo, "testdata", "resampler_65_32", "taps_quality_minorder.txt")
+        repo, "testdata", profile.taps_dir, "taps_quality_minorder.txt")
     tmpl_path = a.template or os.path.join(a.output, "sync_template_live.cf32")
     timing_path = os.path.join(a.output, "echo_timing.jsonl")
 
@@ -614,12 +627,12 @@ def main():
     _tmpl_off = max(0, int(src.pulse_center_taps()) - 4)
     samples[_tmpl_off:_tmpl_off + base.SPS].tofile(tmpl_path)
     t_rs = time.perf_counter()
-    native = base.resample_poly(samples.astype(np.complex128),
-                                32, 65).astype(np.complex64)
-    print("hrp_tx_998p4_samples=%d native_491p52=%d resample_ms=%.2f "
+    native = profile.tx_native(samples)
+    print("hrp_tx_998p4_samples=%d native_%s=%d resample_ms=%.2f "
           "insert_sts=%s pulse_shape=%s pulse_taps=%d pulse_center=%d "
           "code_index=%d preamble_length=%d sfd_mode=%s"
-          % (samples.size, native.size, (time.perf_counter() - t_rs) * 1e3,
+          % (samples.size, profile.label, native.size,
+             (time.perf_counter() - t_rs) * 1e3,
              insert_sts, src.pulse_shape(), src.pulse_taps(),
              src.pulse_center_taps(), a.code_index, a.sync_reps,
              base.SFD_MODE),
@@ -639,7 +652,7 @@ def main():
     # (next-pulse metadata vs blk.set_cal_delay_native).
     align = fp.PeakAlignController(
         a.cal_delay_native, a.peak_target_tap,
-        work_per_native=(65.0 / 32.0),
+        work_per_native=profile.work_per_native,
         first_peak_rel=a.peak_first_rel,
         search_start=a.peak_search_start,
         search_stop=a.peak_search_stop,
@@ -648,13 +661,13 @@ def main():
         lock_frames=a.peak_lock_frames)
     if a.echo_backend == "cpp-pdu":
         echo = SweepCppPduEcho(
-            a, native, base.CG400_HZ, plan=plan, align=align,
+            a, native, profile, plan=plan, align=align,
             freq_settle_s=a.freq_settle_s)
         echo_out_port = "burst"
         echo_block = echo.blk
     else:
         echo = SweepTimedUhdEcho(
-            a.args, base.CG400_HZ, a.freq, a.tx_channel, a.rx_channel,
+            a.args, profile, a.freq, a.tx_channel, a.rx_channel,
             a.tx_antenna, a.rx_antenna, a.gain_tx, a.gain_rx,
             a.pre_guard_us, 15.0, a.tail_guard_us, a.sync_reps,
             a.cal_delay_native, a.arm_delay_s, a.pri_s, a.pulses, dump_dir,
@@ -667,22 +680,22 @@ def main():
     echo.set_tx_native(native)
     print("uhd_probe", echo.status, flush=True)
     if a.dump_sc16:
-        tx_sc16_path = os.path.join(a.output, "tx_491p52.sc16")
+        tx_sc16_path = os.path.join(a.output, "tx_%s.sc16" % profile.label)
         base.fc32_to_sc16(echo._native).tofile(tx_sc16_path)
         print("wrote_tx_sc16", tx_sc16_path, "samples=%d" % echo._native.size,
               flush=True)
 
-    # cpp-pdu feeds raw UHD SC16 into the 65/32 block; UnitRange maps int16
-    # to +/-1 exactly like the UHD Python FC32 source.  The Python backend
-    # feeds fc32 (policy-independent) and keeps the default RawInteger, so
-    # its result is byte-identical.  The tail argument exists only after the
-    # Round-2 resampler exposes Sc16ScalePolicy (main agent's bindings).
-    res_args = [taps, 998.4e6, True, 2097152, int(a.res_workers)]
-    if a.echo_backend == "cpp-pdu":
-        sc16_scale = getattr(base.uwb, "Sc16ScalePolicy", None)
-        if sc16_scale is not None:
-            res_args.append(sc16_scale.UnitRange)
-    res = base.uwb.pdu_rational_resampler_ccf_65_32(*res_args)
+    if a.res_sc16_scale == "unit":
+        sc16_scale = base.uwb.Sc16ScalePolicy.UnitRange
+    elif a.res_sc16_scale == "raw":
+        sc16_scale = base.uwb.Sc16ScalePolicy.RawInteger
+    else:  # auto: cpp-pdu publishes raw UHD SC16 -> UnitRange matches FC32
+        sc16_scale = (base.uwb.Sc16ScalePolicy.UnitRange
+                      if a.echo_backend == "cpp-pdu"
+                      else base.uwb.Sc16ScalePolicy.RawInteger)
+    res = profile.make_pdu_resampler(taps, a.res_workers, sc16_scale)
+    print("resampler pdu=%s sc16_scale=%s" % (profile.pdu, a.res_sc16_scale),
+          flush=True)
     est_q = max(8, int(a.est_queue))
     use_pred = not a.require_sfd
     est = base.uwb.radar_cir_estimator(
@@ -838,7 +851,7 @@ def main():
         "align_cal_delay_native": align.cal_delay_native,
         "align_cal_delay_base_native": align.base_cal_native,
         "cir_by_freq": freq_stats,
-        "native_rate_hz": base.CG400_HZ,
+        "native_rate_hz": profile.hz,
         "work_rate_hz": base.WORK_HZ,
         "code_index": a.code_index,
         "preamble_length": a.sync_reps,
@@ -852,7 +865,7 @@ def main():
         "iq_scale": base.IQ_SCALE,
         "sample_format": "sc16",
         "rx_window": echo.rx_len,
-        "rx_window_us": echo.rx_len / base.CG400_HZ * 1e6,
+        "rx_window_us": echo.rx_len / profile.hz * 1e6,
         "rx_pad_us": a.rx_pad_us,
     }
     with open(os.path.join(a.output, "summary.json"), "w",
@@ -879,7 +892,7 @@ def main():
                 "freq_plan_hz": plan.freqs,
                 "freq_step_hz": a.freq_step,
                 "freq_dwell": a.freq_dwell,
-                "rate_native_hz": base.CG400_HZ,
+                "rate_native_hz": profile.hz,
                 "rate_work_hz": base.WORK_HZ,
                 "code_index": a.code_index,
                 "sync_repetitions": a.sync_reps,
@@ -898,12 +911,14 @@ def main():
                 "tail_guard_us": a.tail_guard_us,
                 "rx_pad_us": a.rx_pad_us,
                 "rx_window_samples": echo.rx_len,
-                "rx_window_us": echo.rx_len / base.CG400_HZ * 1e6,
+                "rx_window_us": echo.rx_len / profile.hz * 1e6,
                 "files": {
                     "capture.iq": "concatenated native SC16 packets",
                     "capture.jsonl": "one JSON object per packet (has freq)",
                     "freq_sweep.jsonl": "one JSON object per packet (freq)",
-                    "tx_491p52.sc16": "timed TX burst (native 491.52 MS/s)",
+                    "tx_%s.sc16" % profile.label:
+                        "timed TX burst (native %.2f MS/s)"
+                        % (profile.hz / 1e6),
                 },
                 "matlab": "[x, meta] = read_uwb_packet('capture.iq','capture.jsonl',id)",
                 "echo": echo.status,
