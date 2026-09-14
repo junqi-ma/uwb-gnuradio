@@ -306,15 +306,21 @@ bool UhdBurstBackend::prepare(std::string& error)
         }
 
         if (d_cfg_.center_freq_hz > 0.0) {
+            // TX is the co-tuned reference; the RX is deliberately offset
+            // by rx_freq_offset_hz (see UhdBurstBackendConfig).
             impl->dev->set_tx_freq(
                 ::uhd::tune_request_t(d_cfg_.center_freq_hz),
                 d_cfg_.tx_channel);
             impl->dev->set_rx_freq(
-                ::uhd::tune_request_t(d_cfg_.center_freq_hz),
+                ::uhd::tune_request_t(d_cfg_.center_freq_hz +
+                                      d_cfg_.rx_freq_offset_hz),
                 d_cfg_.rx_channel);
+            // "Center" is the co-tuned reference: strip the deliberate RX
+            // offset back out of the readback average.
             impl->center_freq_hz.store(
                 0.5 * (impl->dev->get_tx_freq(d_cfg_.tx_channel) +
-                       impl->dev->get_rx_freq(d_cfg_.rx_channel)));
+                       impl->dev->get_rx_freq(d_cfg_.rx_channel) -
+                       d_cfg_.rx_freq_offset_hz));
         }
         if (d_cfg_.tx_gain_db >= 0.0)
             impl->dev->set_tx_gain(d_cfg_.tx_gain_db, d_cfg_.tx_channel);
@@ -744,14 +750,17 @@ echo::BurstStatus UhdBurstBackend::tune(double freq_hz, std::string& error)
         return echo::BurstStatus::BackendError;
     }
     try {
-        // Same multi_usrp device: retune BOTH directions, then read back.
+        // Same multi_usrp device: retune BOTH directions (the RX keeps the
+        // deliberate rx_freq_offset_hz), then read back.
         d_impl_->dev->set_tx_freq(::uhd::tune_request_t(freq_hz),
                                   d_cfg_.tx_channel);
-        d_impl_->dev->set_rx_freq(::uhd::tune_request_t(freq_hz),
-                                  d_cfg_.rx_channel);
+        d_impl_->dev->set_rx_freq(
+            ::uhd::tune_request_t(freq_hz + d_cfg_.rx_freq_offset_hz),
+            d_cfg_.rx_channel);
         const double tx = d_impl_->dev->get_tx_freq(d_cfg_.tx_channel);
         const double rx = d_impl_->dev->get_rx_freq(d_cfg_.rx_channel);
-        d_impl_->center_freq_hz.store(0.5 * (tx + rx));
+        d_impl_->center_freq_hz.store(
+            0.5 * (tx + rx - d_cfg_.rx_freq_offset_hz));
     } catch (const std::exception& e) {
         error = uhd_error_string("tune", e);
         return echo::BurstStatus::BackendError;

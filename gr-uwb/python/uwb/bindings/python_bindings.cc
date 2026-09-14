@@ -1231,7 +1231,8 @@ void bind_realtime_echo_timer(py::module& m)
            size_t queue_capacity,
            uint64_t collect_wait_ms,
            size_t max_tx_samples,
-           size_t max_rx_samples) {
+           size_t max_rx_samples,
+           double rx_freq_offset_hz) {
             gr::uwb::uhd::UhdBurstBackendConfig ucfg;
             ucfg.device_args = device_args;
             ucfg.sample_rate_hz = sample_rate_hz;
@@ -1242,6 +1243,7 @@ void bind_realtime_echo_timer(py::module& m)
             ucfg.tx_gain_db = tx_gain_db;
             ucfg.rx_gain_db = rx_gain_db;
             ucfg.center_freq_hz = center_freq_hz;
+            ucfg.rx_freq_offset_hz = rx_freq_offset_hz;
             ucfg.clock_source = clock_source;
             ucfg.time_source = time_source;
             gr::uwb::echo::EchoSchedulerConfig scfg;
@@ -1272,7 +1274,8 @@ void bind_realtime_echo_timer(py::module& m)
         py::arg("queue_capacity") = size_t(64),
         py::arg("collect_wait_ms") = uint64_t(1000),
         py::arg("max_tx_samples") = size_t(1u << 21),
-        py::arg("max_rx_samples") = size_t(1u << 21));
+        py::arg("max_rx_samples") = size_t(1u << 21),
+        py::arg("rx_freq_offset_hz") = 0.0);
 #endif
 }
 

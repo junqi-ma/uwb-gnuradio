@@ -71,7 +71,7 @@ class SweepTimedUhdEcho(base.TimedUhdEcho):
         self.nominal = float(self.freq)
         self.freq_settle_s = float(freq_settle_s)
         self.tx_freq_actual = float(self.freq)
-        self.rx_freq_actual = float(self.freq)
+        self.rx_freq_actual = float(self.freq) + self.rx_freq_offset
         self.freq_records = []
         self.freq_by_pulse = {}
         self.retune_count = 0
@@ -84,10 +84,12 @@ class SweepTimedUhdEcho(base.TimedUhdEcho):
             return False
         uhd = self._uhd
         self._usrp.set_tx_freq(uhd.types.TuneRequest(freq_hz), self.tx_ch)
-        self._usrp.set_rx_freq(uhd.types.TuneRequest(freq_hz), self.rx_ch)
+        self._usrp.set_rx_freq(
+            uhd.types.TuneRequest(freq_hz + self.rx_freq_offset), self.rx_ch)
         self.tx_freq_actual = float(self._usrp.get_tx_freq(self.tx_ch))
         self.rx_freq_actual = float(self._usrp.get_rx_freq(self.rx_ch))
-        self.freq = 0.5 * (self.tx_freq_actual + self.rx_freq_actual)
+        self.freq = 0.5 * (self.tx_freq_actual + self.rx_freq_actual
+                           - self.rx_freq_offset)
         # Re-anchor the absolute schedule so the next burst arms at
         # now + settle, independent of the global pulse id.
         now = self._usrp.get_time_now().get_real_secs()
@@ -249,7 +251,7 @@ class SweepCppPduEcho(base.CppPduEcho):
         self.nominal = float(self.freq)
         self.freq_settle_s = float(freq_settle_s)
         self.tx_freq_actual = float(self.freq)
-        self.rx_freq_actual = float(self.freq)
+        self.rx_freq_actual = float(self.freq) + self.rx_freq_offset
         self.freq_records = []
         self.freq_by_pulse = {}
         self.retune_count = 0
@@ -268,7 +270,7 @@ class SweepCppPduEcho(base.CppPduEcho):
         # available here.  Record the requested centre (what the UDP/JSONL
         # join needs); blk.freq() holds the last actually-applied value.
         self.tx_freq_actual = freq_hz
-        self.rx_freq_actual = freq_hz
+        self.rx_freq_actual = freq_hz + self.rx_freq_offset
         self.retune_count += 1
         return True
 
@@ -678,7 +680,8 @@ def main():
             a.cal_delay_native, a.arm_delay_s, a.pri_s, a.pulses, dump_dir,
             a.min_lead_s, timing_path, sc16_dir, a.rx_pad_us, a.code_index,
             base.SFD_MODE, publish_native=a.publish_native, plan=plan,
-            align=align, freq_settle_s=a.freq_settle_s)
+            align=align, freq_settle_s=a.freq_settle_s,
+            rx_freq_offset=a.rx_freq_offset)
         echo_out_port = "rx"
         echo_block = echo
     print("echo_backend=%s" % a.echo_backend, flush=True)

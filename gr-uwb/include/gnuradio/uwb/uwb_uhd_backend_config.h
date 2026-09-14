@@ -270,8 +270,18 @@ struct UhdBurstBackendConfig {
     // Optional antennas ("TX/RX", "RX2", ...); empty = leave untouched.
     std::string tx_antenna;
     std::string rx_antenna;
-    // Optional center frequency; 0 = leave untouched.
+    // Optional center frequency; 0 = leave untouched.  TX is tuned here.
     double center_freq_hz = 0.0;
+    // Deliberate RX-only tune offset (Hz): the RX LO is programmed to
+    // center_freq_hz + rx_freq_offset_hz.  The X410 synthesizes TX and RX on
+    // independent LO2 + RFDC-NCO paths but they share the reference: the
+    // measured per-repetition phase drift with both co-tuned is ~5e-4
+    // rad/rep, i.e. there is NO TX-RX CFO to cancel and the CIR repetition
+    // average is already coherent.  A NONZERO value INJECTS a real CFO
+    // (verified: -23900 Hz -> -23.8 kHz baseband, the coherent gain collapses
+    // and the CIR metric drops ~13x), so it is a diagnostic/compensation
+    // knob, not a fix.  0 = TX and RX both at center_freq_hz.
+    double rx_freq_offset_hz = 0.0;
     // Optional gains; NEGATIVE = leave untouched (an explicit 0 dB is a
     // real setting and must not collide with the sentinel).
     double tx_gain_db = -1.0;
@@ -307,6 +317,9 @@ inline bool validate_uhd_burst_backend_config(
         return fail("recv_timeout_s must be in (0, 10]");
     if (!std::isfinite(cfg.center_freq_hz) || cfg.center_freq_hz < 0.0)
         return fail("center_freq_hz must be >= 0 and finite");
+    if (!std::isfinite(cfg.rx_freq_offset_hz) ||
+        std::fabs(cfg.rx_freq_offset_hz) > 1.0e6)
+        return fail("rx_freq_offset_hz must be finite and |offset| <= 1e6");
     if (!std::isfinite(cfg.tx_gain_db))
         return fail("tx_gain_db must be finite (negative = not set)");
     if (!std::isfinite(cfg.rx_gain_db))
@@ -334,6 +347,7 @@ struct UhdDryRunPlan {
     std::string tx_antenna;
     std::string rx_antenna;
     double center_freq_hz = 0.0;
+    double rx_freq_offset_hz = 0.0;
     double tx_gain_db = 0.0;
     double rx_gain_db = 0.0;
     double send_timeout_s = 0.0;
@@ -415,6 +429,7 @@ inline bool build_uhd_dry_run_plan(const UhdBurstBackendConfig& cfg,
     plan.tx_antenna = cfg.tx_antenna;
     plan.rx_antenna = cfg.rx_antenna;
     plan.center_freq_hz = cfg.center_freq_hz;
+    plan.rx_freq_offset_hz = cfg.rx_freq_offset_hz;
     plan.tx_gain_db = cfg.tx_gain_db;
     plan.rx_gain_db = cfg.rx_gain_db;
     plan.send_timeout_s = cfg.send_timeout_s;
@@ -475,6 +490,9 @@ inline std::string print_uhd_dry_run_plan(const UhdDryRunPlan& p)
     os << "center_freq_hz           = "
        << (p.center_freq_hz > 0.0 ? d(p.center_freq_hz)
                                   : std::string("(untouched)"))
+       << "\n";
+    os << "rx_freq_offset_hz        = " << d(p.rx_freq_offset_hz)
+       << (p.rx_freq_offset_hz == 0.0 ? " (TX/RX co-tuned)" : " (RX-only tune offset)")
        << "\n";
     os << "tx_gain_db               = "
        << (p.tx_gain_db >= 0.0 ? d(p.tx_gain_db)

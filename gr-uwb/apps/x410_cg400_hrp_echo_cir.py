@@ -497,7 +497,7 @@ class TimedUhdEcho(gr.basic_block):
                  rx_dump_dir="", min_lead_s=0.002, timing_path="",
                  sc16_dump_dir="", rx_pad_us=8.0,
                  code_index=DEFAULT_CODE_INDEX, sfd_mode=SFD_MODE,
-                 publish_native=0):
+                 publish_native=0, rx_freq_offset=0.0):
         gr.basic_block.__init__(self, name="timed_uhd_echo",
                                 in_sig=None, out_sig=None)
         self._profile = profile
@@ -506,6 +506,7 @@ class TimedUhdEcho(gr.basic_block):
         self.tx_decim = int(profile.tx_decim)
         self.native_label = profile.label
         self.freq = float(freq)
+        self.rx_freq_offset = float(rx_freq_offset)
         self.code_index = int(code_index)
         self.sfd_mode = sfd_mode
         self.tx_ch = int(tx_ch)
@@ -553,7 +554,9 @@ class TimedUhdEcho(gr.basic_block):
         if abs(tx_rate - self.rate) > 1.0 or abs(rx_rate - self.rate) > 1.0:
             raise RuntimeError("rate coerced tx=%r rx=%r" % (tx_rate, rx_rate))
         self._usrp.set_tx_freq(uhd.types.TuneRequest(self.freq), self.tx_ch)
-        self._usrp.set_rx_freq(uhd.types.TuneRequest(self.freq), self.rx_ch)
+        self._usrp.set_rx_freq(
+            uhd.types.TuneRequest(self.freq + self.rx_freq_offset),
+            self.rx_ch)
         self._usrp.set_tx_gain(self.gain_tx, self.tx_ch)
         self._usrp.set_rx_gain(self.gain_rx, self.rx_ch)
         self._usrp.set_tx_antenna(self.tx_ant, self.tx_ch)
@@ -984,6 +987,7 @@ class CppPduEcho:
         self.tx_decim = int(profile.tx_decim)
         self.native_label = profile.label
         self.freq = float(a.freq)
+        self.rx_freq_offset = float(a.rx_freq_offset)
         self.code_index = int(a.code_index)
         self.sfd_mode = SFD_MODE
         self.tx_ch = int(a.tx_channel)
@@ -1033,7 +1037,7 @@ class CppPduEcho:
             a.tx_antenna, a.rx_antenna, a.gain_tx, a.gain_rx, self.freq,
             "internal", "internal",
             pri_num, 1, pre_guard_ticks, 65536, 1 << 20,
-            4, 1000, 1 << 21, 1 << 21)
+            4, 1000, 1 << 21, 1 << 21, self.rx_freq_offset)
         self.status = {
             "backend": "cpp-pdu",
             "tx_rate": self.rate, "rx_rate": self.rate,
@@ -1196,6 +1200,19 @@ def build_parser(add_help=True):
     p.add_argument("--tx-antenna", default="TX/RX0")
     p.add_argument("--rx-antenna", default="RX1")
     p.add_argument("--freq", type=float, default=6489.6e6)
+    p.add_argument("--rx-freq-offset", type=float, default=0.0,
+                   help="RX-only tune offset in Hz (TX stays at --freq); "
+                        "0 = TX/RX co-tuned (the default, and correct for "
+                        "this hardware).  The X410 synthesizes TX and RX on "
+                        "separate LO2 + RFDC-NCO paths but shares the "
+                        "reference: the measured per-repetition phase drift at "
+                        "0 is ~5e-4 rad/rep, i.e. there is NO TX-RX CFO and "
+                        "the CIR repetition average is already coherent.  A "
+                        "NONZERO value *injects* a real CFO (verified: "
+                        "-23900 Hz produces -23.8 kHz of baseband CFO, the "
+                        "coherent gain collapses and the CIR metric drops "
+                        "~13x), so use it only to add a known CFO for testing "
+                        "or to cancel a real offset that was measured.")
     p.add_argument("--cal-delay-native", type=float, default=None,
                    help="Native-sample calibration delay (CIR zero-delay "
                         "anchor). Default None picks the firmware default: 334 "
@@ -1597,7 +1614,8 @@ def main():
             a.pre_guard_us, 15.0, a.tail_guard_us, a.sync_reps,
             a.cal_delay_native, a.arm_delay_s, a.pri_s, a.pulses, dump_dir,
             a.min_lead_s, timing_path, sc16_dir, a.rx_pad_us, a.code_index,
-            SFD_MODE, publish_native=a.publish_native)
+            SFD_MODE, publish_native=a.publish_native,
+            rx_freq_offset=a.rx_freq_offset)
         echo.set_tx_native(native)
         echo_out_port = "rx"
     print("echo_backend=%s" % a.echo_backend, flush=True)

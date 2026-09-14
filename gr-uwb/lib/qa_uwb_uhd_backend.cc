@@ -225,6 +225,20 @@ BOOST_AUTO_TEST_CASE(test_uhd_backend_config_validation)
     cfg.center_freq_hz = std::numeric_limits<double>::quiet_NaN();
     expect_fail(cfg);
 
+    // RX-only tune offset: finite and |offset| <= 1e6; the realistic CFO
+    // correction and the 0 sentinel stay valid.
+    cfg = radar_config();
+    cfg.rx_freq_offset_hz = std::numeric_limits<double>::quiet_NaN();
+    expect_fail(cfg);
+    cfg.rx_freq_offset_hz = 2.0e6;
+    expect_fail(cfg);
+    cfg.rx_freq_offset_hz = -2.0e6;
+    expect_fail(cfg);
+    cfg.rx_freq_offset_hz = -23.9e3;
+    BOOST_CHECK(uhd_cfg::validate_uhd_burst_backend_config(cfg, &err));
+    cfg.rx_freq_offset_hz = 0.0;
+    BOOST_CHECK(uhd_cfg::validate_uhd_burst_backend_config(cfg, &err));
+
     cfg = radar_config();
     cfg.tx_gain_db = std::numeric_limits<double>::quiet_NaN();
     expect_fail(cfg);
