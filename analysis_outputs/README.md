@@ -14,17 +14,17 @@ X410 100/200 Hz 实测日志与 A/B 对比表。不放原始大 IQ。
 
 ```bash
 cd /home/oi/Desktop/uwb-gnuradio
-python3 gr-uwb/apps/prepare_uhd_eal_noret.py
-export LD_LIBRARY_PATH=/tmp/opencode/uhd_eal_noret:$PWD/gr-uwb/build/lib
 export PYTHONPATH=/usr/local/lib/python3.10/site-packages:/tmp/opencode/uwbshim:$PWD/gr-uwb/build/test_modules
+export LD_LIBRARY_PATH=$PWD/gr-uwb/build/lib
 ```
 
-`prepare_uhd_eal_noret.py` 写入的是 `/tmp/uhd_eal_noret`；本机做了
-`/tmp/opencode/uhd_eal_noret -> /tmp/uhd_eal_noret` 的软链接，两条路径等价
-（app 自带的 bootstrap 也只找 `/tmp/uhd_eal_noret`）。
+旧的 `/tmp/uhd_eal_noret` AVX-512 补丁库**已废弃**：本机 DPDK 库与 libuhd
+都已按 AVX2 重编，`bootstrap_uhd_env()` 不再加载它，见
+[`../docs/DPDK_X410_CG600启用.md`](../docs/DPDK_X410_CG600启用.md)。
 
-设备：`addr=192.168.10.2`，TX/RX0 ch0，RX1 ch3，`--no-udp`。同一时刻只允许
-一个进程使用 X410。
+设备：kernel UDP `addr=192.168.10.2`，TX/RX0 ch0，RX1 ch3，`--no-udp`；要更高
+TX 吞吐可加 `--use-dpdk --mgmt-addr 192.168.20.133`（需 root）。同一时刻只
+允许一个进程使用 X410。
 
 ## 3. M0 baseline 命令
 

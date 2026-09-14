@@ -58,16 +58,18 @@ def find_repo_root():
 
 
 def bootstrap_uhd_env():
-    """Debian python3 skips site-packages; UHD 4.6 + DPDK AVX-512 SIGILL.
+    """Debian python3 does not add /usr/local site-packages by default.
 
-    Re-exec once with PYTHONPATH and the patched rte libs so `import uhd`
-    works from a bare `python3` invocation.
+    Re-exec once with PYTHONPATH (and the gr-uwb build lib) so `import uhd`
+    works from a bare `python3` invocation.  The old /tmp/uhd_eal_noret
+    patched-rte workaround is gone: the host DPDK libs and libuhd were
+    rebuilt for this AVX2-only CPU, so no LD_LIBRARY_PATH override (and no
+    DPDK AVX-512 SIGILL) remains.
     """
     if os.environ.get("UWB_UHD_BOOTSTRAPPED") == "1":
         return
     repo = find_repo_root()
     site = "/usr/local/lib/python3.10/site-packages"
-    eal = "/tmp/uhd_eal_noret"
     build_lib = os.path.join(repo, "gr-uwb", "build", "lib")
     env = os.environ.copy()
     changed = False
@@ -84,7 +86,6 @@ def bootstrap_uhd_env():
         changed = True
 
     prepend("LD_LIBRARY_PATH", build_lib)
-    prepend("LD_LIBRARY_PATH", eal)
     prepend("PYTHONPATH", site)
     if not changed:
         return
@@ -1156,6 +1157,16 @@ def build_parser(add_help=True):
                     "default to the CG600 chain (--native-rate 737.28e6, "
                     "--pulse-shape legacy); the sweep app reuses this parser.")
     p.add_argument("--args", default="addr=192.168.10.2")
+    p.add_argument("--use-dpdk", action="store_true",
+                   help="Use the DPDK transport for the QSFP data link "
+                        "(adds use_dpdk=1 to --args).  Requires root (mlx5 "
+                        "DevX + hugetlbfs) and a separate management link via "
+                        "--mgmt-addr; without it the kernel-UDP path is used.")
+    p.add_argument("--mgmt-addr", default=None,
+                   help="X410 management (RJ45) IP for DPDK runs, e.g. "
+                        "--mgmt-addr=192.168.20.133.  UHD's MPM RPC cannot "
+                        "ride the DPDK link, so this must be a link DPDK does "
+                        "not occupy.")
     p.add_argument("--native-rate", type=float, default=DEFAULT_NATIVE_HZ,
                    help="X410 native sample rate: 737.28e6 (CG600, default) or "
                         "491.52e6 (CG400). Selects the TX work->native ratio "
@@ -1295,6 +1306,86 @@ def resolve_echo_backend(a):
     return a.echo_backend
 
 
+def _split_device_args(text):
+    """Parse a UHD device-args string into an ordered list of (key, value)."""
+    pairs = []
+    for item in (text or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        key, sep, value = item.partition("=")
+        pairs.append((key.strip() if sep else item, value.strip() if sep else ""))
+    return pairs
+
+
+def _join_device_args(pairs):
+    return ",".join(k if v == "" else "%s=%s" % (k, v) for k, v in pairs)
+
+
+def resolve_dpdk_args(a):
+    """Fold --use-dpdk / --mgmt-addr into a.args (before the USRP is built).
+
+    UHD's MPM control (RPC) is kernel-UDP only -- there is no RPC-over-DPDK
+    path -- so mgmt_addr must name a link DPDK does not occupy, while addr is
+    the QSFP link that DPDK takes over.  This host routes management over the
+    X410 RJ45 and data over the ConnectX QSFP.
+    """
+    if not getattr(a, "use_dpdk", False):
+        return a.args
+    pairs = _split_device_args(a.args)
+    keys = dict(pairs)
+    if getattr(a, "mgmt_addr", None):
+        keys["mgmt_addr"] = a.mgmt_addr
+    if not keys.get("mgmt_addr"):
+        raise SystemExit(
+            "--use-dpdk needs the X410 management link: pass "
+            "--mgmt-addr=<RJ45 IP>, or put mgmt_addr=<IP> in --args.  It "
+            "must be a link DPDK does not use (UHD has no RPC-over-DPDK).")
+    if not keys.get("addr"):
+        raise SystemExit(
+            "--use-dpdk needs the QSFP data address: --args must contain "
+            "addr=<IP> (default addr=192.168.10.2).")
+    keys["use_dpdk"] = "1"
+    head = [(k, keys[k]) for k in ("mgmt_addr", "addr", "use_dpdk")]
+    rest = [(k, v) for k, v in pairs
+            if k not in ("mgmt_addr", "addr", "use_dpdk")]
+    a.args = _join_device_args(head + rest)
+    return a.args
+
+
+def dpdk_preflight(a):
+    """Fail early, with guidance, if the host cannot do a DPDK run.
+
+    The mlx5 PMD needs DevX (CAP_NET_ADMIN) and DPDK needs hugetlbfs, so a
+    DPDK run must be root; report it before the GNU Radio graph is built.
+    """
+    if not getattr(a, "use_dpdk", False):
+        return
+    if os.geteuid() != 0:
+        script = os.path.relpath(sys.argv[0]) if sys.argv and sys.argv[0] \
+            else "x410_cg400_hrp_echo_cir.py"
+        raise SystemExit(
+            "--use-dpdk requires root (mlx5 DevX + hugetlbfs).  Re-run as:\n"
+            "  sudo -E python3 %s <same args>\n"
+            "  (add -E so the user env/PYTHONPATH survives sudo)" % script)
+    free = None
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("HugePages_Free:"):
+                    free = int(line.split()[1])
+                    break
+    except OSError:
+        free = None
+    if free is not None and free <= 0:
+        raise SystemExit(
+            "--use-dpdk found no free hugepages (/proc/meminfo "
+            "HugePages_Free=0); reserve 2M pages, e.g. add "
+            "vm.nr_hugepages=512 to /etc/sysctl.d and reboot.")
+    print("dpdk_transport args=[%s] root=yes hugepages_free=%s" % (
+        a.args, "?" if free is None else free), flush=True)
+
+
 def analyze_cir(jsonl_path, pulses):
     if not os.path.isfile(jsonl_path):
         return {"exists": False, "lines": 0}
@@ -1400,6 +1491,8 @@ def main():
     bootstrap_uhd_env()
     a = parse_args()
     resolve_echo_backend(a)
+    resolve_dpdk_args(a)
+    dpdk_preflight(a)
     # --preamble-length is the primary knob; --sync-reps stays as a
     # backward-compatible alias.  Both must agree when given together.
     if a.preamble_length is not None and a.sync_reps is not None \

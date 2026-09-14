@@ -241,9 +241,10 @@ worker / AVX）、以及精简 `UhdBurstBackend` 的每 burst 路径。
 
 **风险**
 
-- C++ echo 需要链接 UHD（`ENABLE_UHD_BACKEND`）；本机有 DPDK/AVX-512 的坑，
-  可用 `/tmp/uhd_eal_noret` 绕过。现有 `UhdBurstBackend` 已经把 timed
-  burst、partial send/recv、error 映射做好，优先复用。
+- C++ echo 需要链接 UHD（`ENABLE_UHD_BACKEND`）；本机曾用
+  `/tmp/uhd_eal_noret` 绕过 DPDK/AVX-512（现已废弃，DPDK 库与 libuhd 已按
+  AVX2 重编，见 `docs/DPDK_X410_CG600启用.md`）。现有 `UhdBurstBackend`
+  已经把 timed burst、partial send/recv、error 映射做好，优先复用。
 - 流式重采样若连续（不逐窗 reset）会带来 FIR 相位/窗间串扰，故 M1 选择逐窗
   独立；代价是每窗多一次 reset/flush（可接受）。
 - retune 后前 ~4 拍群时延 settling（见首峰对齐文档）在 M2 仍要处理。

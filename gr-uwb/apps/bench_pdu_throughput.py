@@ -708,7 +708,7 @@ def child_env():
     env = os.environ.copy()
     build_lib = os.path.join(repo, "gr-uwb", "build", "lib")
     build_test = os.path.join(repo, "gr-uwb", "build", "test_modules")
-    ld = ["/tmp/opencode/uhd_eal_noret", build_lib]
+    ld = [build_lib]
     py = ["/usr/local/lib/python3.10/site-packages", "/tmp/opencode/uwbshim",
           build_test]
     for key, paths in (("LD_LIBRARY_PATH", ld), ("PYTHONPATH", py)):

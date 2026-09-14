@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Rebuild /tmp/uhd_eal_noret so PyUHD can load on this AVX2-only host.
+"""OBSOLETE: historical AVX-512 workaround for /tmp/uhd_eal_noret.
 
-UHD 4.6 is linked against DPDK 21. Those .so files contain AVX-512
-constructors. The i7-12700 has no AVX-512, so `import uhd` SIGILLs
-even when /etc/uhd/uhd.conf uses kernel UDP.
+Superseded on 2025-09-14 by rebuilding the host DPDK libs and libuhd for
+this AVX2-only CPU.  `bootstrap_uhd_env()` no longer loads this directory,
+and the radar/DPDK path uses the system libs directly.  Kept only as a
+record of the old diagnosis.
 
-This copies the DPDK libs UHD needs and patches two load-time
-functions to `endbr64; ret`. Radar app bootstrap then puts this
-directory first on LD_LIBRARY_PATH.
+Old behavior: UHD 4.6 is linked against DPDK 21. Those .so files contained
+AVX-512 constructors. The i7-12700 has no AVX-512, so `import uhd` SIGILLed
+even when /etc/uhd/uhd.conf used kernel UDP.  This copied the DPDK libs UHD
+needed and patched two load-time functions to `endbr64; ret`, and the radar
+app bootstrap put the directory first on LD_LIBRARY_PATH.
 
-See docs/本机UHD_DPDK_AVX512问题与绕过.md.
+See docs/DPDK_X410_CG600启用.md (current) and
+docs/本机UHD_DPDK_AVX512问题与绕过.md (history).
 """
 from __future__ import annotations
 

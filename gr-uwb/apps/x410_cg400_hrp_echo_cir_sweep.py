@@ -533,6 +533,7 @@ def main():
     base.bootstrap_uhd_env()
     a = parse_args()
     base.resolve_echo_backend(a)
+    base.resolve_dpdk_args(a)
     if a.preamble_length is not None and a.sync_reps is not None \
             and a.preamble_length != a.sync_reps:
         raise SystemExit("--preamble-length=%d conflicts with --sync-reps=%d"
@@ -598,6 +599,8 @@ def main():
     if a.dry_run:
         print("[freq] dry-run complete", flush=True)
         raise SystemExit(0)
+
+    base.dpdk_preflight(a)
 
     repo = base.find_repo_root()
     os.makedirs(a.output, exist_ok=True)

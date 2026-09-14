@@ -46,12 +46,9 @@ UwbHrpPacketSource (998.4, code 9, 64 SYNC, 4z2)
 | 默认增益 | TX 40 dB / RX 50 dB |
 
 本机构建 **`ENABLE_UHD_BACKEND=OFF`**：C++ 不链 UHD，射频只走 PyUHD。脚本会
-自动补 `PYTHONPATH` 和 DPDK 绕过目录。每次开机后先准备 UHD 绕过（`/tmp`
-重启即丢）：
-
-```bash
-python3 gr-uwb/apps/prepare_uhd_eal_noret.py
-```
+自动补 `PYTHONPATH`。（旧的开机后 `prepare_uhd_eal_noret.py` DPDK/AVX-512
+绕过步骤 **已废弃**：DPDK 库与 libuhd 已按本机 AVX2 重编，见
+`docs/DPDK_X410_CG600启用.md`。）
 
 需要已构建的绑定：
 
