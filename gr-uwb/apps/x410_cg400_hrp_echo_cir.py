@@ -464,12 +464,24 @@ def cir_publish_native(pre_native, sync_reps, cal_native, native_hz=CG600_HZ,
 
 
 def default_cal_delay_native(native_hz):
-    """Rate-scaled starting calibration delay.
+    """Firmware/rate starting calibration delay (the CIR zero-delay anchor).
 
-    334 native @491.52 MS/s was measured on CG400; the same physical loopback
-    delay scales linearly with the device rate.  The peak servo (sweep app)
-    refines it from the first CIR.
+    CG400: 334 native @491.52 MS/s measured on that image.
+
+    CG600: the naive rate scale of that CG400 value is 501 native, but that
+    is WRONG by +591.5 native (0.80 us).  The CG600 DDC/decimation front end
+    (the CG400 image has no DDC; the CG600 is a /4 DDC at 2949.12 MS/s) delays
+    the TX->RX loopback by that much, so the scaled default placed the entire
+    SYNC preamble outside the 116-tap CIR window and every live CIR was noise
+    (peak_tap uniform-random 0..115, metric ~1e-3; the CIR origin sat ~801
+    work samples before the preamble).  Measured 1092.5 native by aligning
+    the code phase of a captured 737.28 RX burst: with it, peak_tap pins to
+    cir_pre (16) and metric_mean rises ~90x to ~0.07 (> the CG400 baseline).
+
+    The sweep app's peak servo still refines this anchor at runtime.
     """
+    if abs(float(native_hz) - CG600_HZ) < 1.0:
+        return 1092.5
     return float(round(334.0 * float(native_hz) / CG400_HZ))
 
 
@@ -1185,10 +1197,12 @@ def build_parser(add_help=True):
     p.add_argument("--rx-antenna", default="RX1")
     p.add_argument("--freq", type=float, default=6489.6e6)
     p.add_argument("--cal-delay-native", type=float, default=None,
-                   help="Native-sample calibration delay (CIR origin). Default "
-                        "None scales the measured CG400 value 334 by the native "
-                        "rate (CG600 -> ~501 native @737.28); the sweep app's "
-                        "peak servo refines it at runtime.")
+                   help="Native-sample calibration delay (CIR zero-delay "
+                        "anchor). Default None picks the firmware default: 334 "
+                        "native @491.52 (CG400) or 1092.5 native @737.28 "
+                        "(CG600, which has a DDC; a naive rate scale of 501 is "
+                        "off by ~0.80 us and puts the SYNC outside the CIR "
+                        "window). The sweep app's peak servo refines it.")
     p.add_argument("--sfd-search-margin", type=int, default=128,
                    help="SFD search half-window at 998.4 MS/s; 8192 is ~180 ms/frame")
     p.add_argument("--sfd-threshold", type=float, default=0.12)

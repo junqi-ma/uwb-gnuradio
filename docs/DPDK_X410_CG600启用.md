@@ -137,8 +137,8 @@ UHD kernel-UDP，不是 DUC/固件。
 
 ## 8. 注意
 
-- **DPDK 并没有修复 CG600 的 CIR 锁定问题**：`--pulses 200` 对比
-  kernel-UDP（`metric_mean=2.46e-3`）与 DPDK（`1.79e-3`），
-  `peak_tap` 都在 0..114 游走。CIR 未锁定与 TX underflow 无关，是独立问题。
+- **CIR 锁定问题是独立的，并已另行解决**：DPDK 只解决 TX 吞吐；
+  CG600 的 CIR 未锁定是校准延迟默认值少了 ~0.80 µs，见
+  [`phase1/测试报告_CG600_737p28_CIR锁定.md`](phase1/测试报告_CG600_737p28_CIR锁定.md)。
 - 以 root 运行时 `--output` 下的文件属 root，必要时事后 `chown`。
 - 不要提交 `libuhd`/DPDK 的二进制。
