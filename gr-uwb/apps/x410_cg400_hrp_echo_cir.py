@@ -497,7 +497,7 @@ class TimedUhdEcho(gr.basic_block):
                  rx_dump_dir="", min_lead_s=0.002, timing_path="",
                  sc16_dump_dir="", rx_pad_us=8.0,
                  code_index=DEFAULT_CODE_INDEX, sfd_mode=SFD_MODE,
-                 publish_native=0, rx_freq_offset=0.0):
+                 publish_native=0, rx_freq_offset=0.0, tx_channels=None):
         gr.basic_block.__init__(self, name="timed_uhd_echo",
                                 in_sig=None, out_sig=None)
         self._profile = profile
@@ -511,6 +511,7 @@ class TimedUhdEcho(gr.basic_block):
         self.sfd_mode = sfd_mode
         self.tx_ch = int(tx_ch)
         self.rx_ch = int(rx_ch)
+        self.tx_channels = list(tx_channels) if tx_channels else [self.tx_ch]
         self.tx_ant = tx_ant
         self.rx_ant = rx_ant
         self.gain_tx = float(gain_tx)
@@ -547,12 +548,19 @@ class TimedUhdEcho(gr.basic_block):
         self._usrp.set_clock_source("internal")
         self._usrp.set_time_source("internal")
         self._usrp.set_time_now(uhd.types.TimeSpec(0.0))
-        self._usrp.set_tx_rate(self.rate, self.tx_ch)
+        for ch in self.tx_channels:
+            self._usrp.set_tx_rate(self.rate, ch)
         self._usrp.set_rx_rate(self.rate, self.rx_ch)
-        tx_rate = float(self._usrp.get_tx_rate(self.tx_ch))
+        tx_rates = [float(self._usrp.get_tx_rate(ch))
+                    for ch in self.tx_channels]
         rx_rate = float(self._usrp.get_rx_rate(self.rx_ch))
-        if abs(tx_rate - self.rate) > 1.0 or abs(rx_rate - self.rate) > 1.0:
-            raise RuntimeError("rate coerced tx=%r rx=%r" % (tx_rate, rx_rate))
+        for ch, ch_rate in zip(self.tx_channels, tx_rates):
+            if abs(ch_rate - self.rate) > 1.0:
+                raise RuntimeError("rate coerced tx_ch=%d tx=%r"
+                                   % (ch, ch_rate))
+        if abs(rx_rate - self.rate) > 1.0:
+            raise RuntimeError("rate coerced rx=%r" % (rx_rate,))
+        tx_rate = tx_rates[0]
         self._usrp.set_tx_freq(uhd.types.TuneRequest(self.freq), self.tx_ch)
         self._usrp.set_rx_freq(
             uhd.types.TuneRequest(self.freq + self.rx_freq_offset),
@@ -564,7 +572,7 @@ class TimedUhdEcho(gr.basic_block):
         sa_rx = uhd.usrp.StreamArgs("fc32", "sc16")
         sa_rx.channels = [self.rx_ch]
         sa_tx = uhd.usrp.StreamArgs("fc32", "sc16")
-        sa_tx.channels = [self.tx_ch]
+        sa_tx.channels = self.tx_channels
         self._rx_stream = self._usrp.get_rx_stream(sa_rx)
         self._tx_stream = self._usrp.get_tx_stream(sa_tx)
         time.sleep(0.15)
@@ -575,6 +583,8 @@ class TimedUhdEcho(gr.basic_block):
         self._pub_ok = 0
         self._t0 = None
         self._native = None
+        self.tx_geometry_native = 0      # 0 = derive from len(self._native)
+        self._tx_payload = self._native  # what _send() transmits; 1-D or (C, N)
         self._stop_pub = threading.Event()
         self._pub_q = queue.Queue(maxsize=64)
         self._pub_thread = None
@@ -595,15 +605,19 @@ class TimedUhdEcho(gr.basic_block):
             "rx_pad_us": self.rx_pad_us,
             "code_index": self.code_index, "sfd_mode": self.sfd_mode,
             "sync_reps": self.sync_reps,
+            "tx_channels": self.tx_channels,
         }
 
-    def set_tx_native(self, wave):
+    def set_tx_native(self, wave, keep_payload=False):
         peak = float(np.max(np.abs(wave))) or 1.0
         self._native = (np.asarray(wave, dtype=np.complex64) / peak * 0.8).astype(np.complex64)
+        geom_native = int(self.tx_geometry_native) or int(self._native.size)
         self.pre, self.sync_n, self.sfd_n, self.rng_n, self.tail, self.pad_n, self.rx_len = \
             rx_geometry(self.rate, self.pre_us, self.sync_reps, self.range_m,
-                        self.tail_us, int(self._native.size), self.rx_pad_us,
+                        self.tail_us, geom_native, self.rx_pad_us,
                         self.tx_interp, self.tx_decim)
+        if not keep_payload:
+            self._tx_payload = self._native
         self.status["rx_window"] = self.rx_len
         self.status["tx_native"] = int(self._native.size)
         self.status["rx_window_us"] = self.rx_len / self.rate * 1e6
@@ -691,9 +705,13 @@ class TimedUhdEcho(gr.basic_block):
         md.end_of_burst = False
         md.time_spec = self._tspec(t_tx)
         sent = 0
-        n = wave.size
+        buf = np.ascontiguousarray(wave)
+        if buf.ndim == 1:
+            buf = buf.reshape(1, -1)
+        elif buf.ndim != 2:
+            raise ValueError("TX payload must be 1-D or (channels, samples)")
+        n = buf.shape[1]
         maxp = int(self._tx_stream.get_max_num_samps())
-        buf = wave.reshape(1, -1)
         problems = []
         while sent < n:
             chunk = min(maxp, n - sent)
@@ -886,7 +904,7 @@ class TimedUhdEcho(gr.basic_block):
         t_issue = time.perf_counter()
         self._rx_stream.issue_stream_cmd(cmd)
         t_after_issue = time.perf_counter()
-        sent, send_err = self._send(self._native, t_tx, timeout=2.0)
+        sent, send_err = self._send(self._tx_payload, t_tx, timeout=2.0)
         t_after_send = time.perf_counter()
         if send_err:
             self._tx_send_error += 1

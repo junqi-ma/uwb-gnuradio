@@ -14,7 +14,10 @@ GR_PYTHON_INSTALL(
     x410_auto_scheduled_capture.py
     x410_cg400_hrp_echo_cir.py
     x410_cg400_hrp_echo_cir_sweep.py
+    x410_cg400_hrp_echo_cir_jam.py
     echo_cir_freq_plan.py
+    echo_cir_jam_plan.py
+    jam_offline_inject.py
     prepare_uhd_eal_noret.py
     uwb_sim_cg400_echo_cir.py
     uwb_radar_cir_udp.py
