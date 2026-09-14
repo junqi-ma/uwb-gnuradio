@@ -467,7 +467,9 @@ def parse_args():
     # (parents=...), so they are not re-declared here (that would conflict).
     p = argparse.ArgumentParser(
         parents=[base.build_parser(add_help=False)],
-        description="X410 CG400 HRP echo CIR with runtime frequency tuning")
+        description="X410 CG600/CG400 HRP echo CIR with runtime frequency "
+                    "tuning (defaults inherited from the base app: "
+                    "--native-rate 737.28e6, --pulse-shape legacy)")
     p.add_argument("--freq-mode", choices=["fixed", "scan", "manual"],
                    default="fixed",
                    help="fixed = base app; scan = step sweep; manual = stdin")
@@ -877,8 +879,8 @@ def main():
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump({
                 "description": (
-                    "X410 CG400 monostatic HRP echo, native SC16 RX windows, "
-                    "runtime frequency sweep"
+                    "X410 CG600/CG400 monostatic HRP echo, native SC16 RX "
+                    "windows, runtime frequency sweep"
                 ),
                 "sample_format": "sc16",
                 "dtype": "int16",

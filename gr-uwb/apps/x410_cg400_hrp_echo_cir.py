@@ -1149,7 +1149,12 @@ class CppPduEcho:
 
 
 def build_parser(add_help=True):
-    p = argparse.ArgumentParser(add_help=add_help)
+    p = argparse.ArgumentParser(
+        add_help=add_help,
+        description="X410 CG600 (737.28 MS/s, default) / CG400 (491.52 MS/s) "
+                    "monostatic HRP echo CIR.  Native rate and pulse shape "
+                    "default to the CG600 chain (--native-rate 737.28e6, "
+                    "--pulse-shape legacy); the sweep app reuses this parser.")
     p.add_argument("--args", default="addr=192.168.10.2")
     p.add_argument("--native-rate", type=float, default=DEFAULT_NATIVE_HZ,
                    help="X410 native sample rate: 737.28e6 (CG600, default) or "
