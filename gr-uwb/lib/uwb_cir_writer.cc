@@ -198,6 +198,7 @@ UwbCirWriter::UwbCirWriter(const std::string& directory,
         throw std::invalid_argument("UwbCirWriter: queue_capacity must be > 0");
     }
     d_queue_.assign(queue_capacity, pmt::PMT_NIL);
+    d_repetition_records_.reserve(256);
 
     message_port_register_in(pmt::mp("cir"));
     message_port_register_out(pmt::mp("status"));
@@ -267,6 +268,7 @@ UwbCirWriter::write_run_json()
     append_str(os, "tap_format", "complex64");
     append_str(os, "byte_order", "little-endian");
     append_u64(os, "bytes_per_tap", 8);
+    append_str(os, "json_layout", "one-line-per-pulse-columnar-repetitions");
     append_f64(os, "range_m_per_tap", kSpeedOfLight / (2.0 * 998.4e6));
     os << "}\n";
     const std::string path = d_directory_ + "/run.json";
@@ -319,6 +321,9 @@ UwbCirWriter::start()
     d_invalid_.store(0);
     d_high_watermark_.store(0);
     d_since_flush_ = 0;
+    d_repetition_group_active_ = false;
+    d_repetition_common_meta_ = pmt::PMT_NIL;
+    d_repetition_records_.clear();
     {
         std::lock_guard<std::mutex> lock(d_mutex_);
         d_queue_head_ = d_queue_tail_ = d_queue_count_ = 0;
@@ -397,8 +402,10 @@ UwbCirWriter::writer_loop()
             d_cv_.wait(lock, [this] {
                 return d_stop_ || d_queue_count_ != 0;
             });
-            if (d_queue_count_ == 0 && d_stop_)
+            if (d_queue_count_ == 0 && d_stop_) {
+                flush_repetition_group();
                 return;
+            }
             msg = d_queue_[d_queue_head_];
             d_queue_[d_queue_head_] = pmt::PMT_NIL;
             d_queue_head_ = (d_queue_head_ + 1) % d_queue_.size();
@@ -462,7 +469,8 @@ UwbCirWriter::write_frame(pmt::pmt_t msg)
         d_frames_failed_.fetch_add(1);
     }
 
-    // JSONL line: one per received frame, ok or failed.
+    // JSON metadata.  Average/legacy input stays one line per message.
+    // Individual repetitions are grouped below into one line per pulse.
     const double fs = dict_f64(meta, "sample_rate", 998.4e6);
     const double range_per_tap = kSpeedOfLight / (2.0 * fs);
     const int64_t zero_tap = dict_i64(meta, "zero_delay_tap", 0);
@@ -473,6 +481,21 @@ UwbCirWriter::write_frame(pmt::pmt_t msg)
                             static_cast<double>(zero_tap);
         peak_delay_ns = taps / fs * 1.0e9;
     }
+
+    const bool is_repetition =
+        dict_has(meta, "repetition_index") &&
+        dict_u64(meta, "repetition_count", 0) > 0;
+    if (is_repetition) {
+        append_repetition_record(meta, pulse_id, schedule_index, status, ok,
+                                 tap_count, raw_offset, norm_offset, peak_tap,
+                                 peak_delay_ns);
+        flush_files_if_due();
+        return;
+    }
+
+    // A non-repetition record closes any incomplete packet group before its
+    // own legacy JSON line is emitted.
+    flush_repetition_group();
 
     std::ostringstream os;
     os << "{\"pulse_id\":" << pulse_id;
@@ -517,6 +540,179 @@ UwbCirWriter::write_frame(pmt::pmt_t msg)
     os << "}\n";
 
     d_jsonl_ << os.str();
+    flush_files_if_due();
+}
+
+void
+UwbCirWriter::append_repetition_record(const pmt::pmt_t& meta,
+                                       uint64_t pulse_id,
+                                       uint64_t schedule_index,
+                                       const std::string& status,
+                                       bool ok,
+                                       uint64_t tap_count,
+                                       uint64_t raw_offset,
+                                       uint64_t norm_offset,
+                                       uint64_t peak_tap,
+                                       double peak_delay_ns)
+{
+    const uint64_t expected = dict_u64(meta, "repetition_count", 0);
+    if (d_repetition_group_active_ &&
+        pulse_id != d_repetition_pulse_id_) {
+        flush_repetition_group();
+    }
+    if (!d_repetition_group_active_) {
+        d_repetition_group_active_ = true;
+        d_repetition_pulse_id_ = pulse_id;
+        d_repetition_schedule_index_ = schedule_index;
+        d_repetition_expected_ = expected;
+        d_repetition_common_meta_ = meta;
+        d_repetition_records_.clear();
+    }
+
+    RepetitionJsonRecord rec;
+    rec.index = dict_u64(meta, "repetition_index", 0);
+    rec.status = status.empty() ? std::string("unknown") : status;
+    rec.tap_count = tap_count;
+    rec.raw_offset = raw_offset;
+    rec.norm_offset = norm_offset;
+    rec.peak_tap = peak_tap;
+    rec.peak_metric = ok ? dict_f64(meta, "cir_peak_metric", 0.0) : 0.0;
+    rec.peak_delay_ns = peak_delay_ns;
+    rec.raw_l2_norm = ok ? dict_f64(meta, "raw_l2_norm", 0.0) : 0.0;
+    rec.estimator_us = dict_u64(meta, "estimator_us", 0);
+    d_repetition_records_.push_back(std::move(rec));
+
+    if (d_repetition_expected_ > 0 &&
+        d_repetition_records_.size() >= d_repetition_expected_) {
+        flush_repetition_group();
+    }
+}
+
+void
+UwbCirWriter::flush_repetition_group()
+{
+    if (!d_repetition_group_active_)
+        return;
+
+    const pmt::pmt_t& meta = d_repetition_common_meta_;
+    const double fs = dict_f64(meta, "sample_rate", 998.4e6);
+    const bool complete = d_repetition_expected_ > 0 &&
+                          d_repetition_records_.size() ==
+                              d_repetition_expected_;
+    const bool all_ok = !d_repetition_records_.empty() &&
+                        std::all_of(d_repetition_records_.begin(),
+                                    d_repetition_records_.end(),
+                                    [](const RepetitionJsonRecord& r) {
+                                        return r.status == "ok";
+                                    });
+
+    std::ostringstream os;
+    os << "{\"pulse_id\":" << d_repetition_pulse_id_;
+    append_u64(os, "schedule_index", d_repetition_schedule_index_);
+    append_str(os, "cir_output", "repetitions");
+    append_str(os, "status", !complete ? "incomplete"
+                                         : (all_ok ? "ok" : "partial_failure"));
+    append_f64(os, "sample_rate", fs);
+    append_opt_u64(os, meta, "cir_pre_samples");
+    append_opt_u64(os, meta, "cir_post_samples");
+    append_i64(os, "zero_delay_tap", dict_i64(meta, "zero_delay_tap", 0));
+    append_f64(os, "range_m_per_tap", kSpeedOfLight / (2.0 * fs));
+    append_opt_i64(os, meta, "preamble_start_sample");
+    append_opt_i64(os, meta, "sfd_start_sample");
+    append_opt_i64(os, meta, "cir_origin_sample");
+    append_opt_i64(os, meta, "predicted_sfd_start_sample");
+    append_opt_i64(os, meta, "tx_time_full");
+    append_opt_f64(os, meta, "tx_time_frac");
+    append_opt_i64(os, meta, "rx_time_full");
+    append_opt_f64(os, meta, "rx_time_frac");
+    append_opt_i64(os, meta, "num_delay_samps");
+    append_opt_f64(os, meta, "calibration_delay_work_samples");
+    append_opt_str(os, meta, "calibration_id");
+    append_bool(os, "sfd_ok", dict_i64(meta, "sfd_start_sample", -1) >= 0);
+    append_bool(os, "timing_ok",
+                dict_i64(meta, "preamble_start_sample", -1) >= 0);
+    append_opt_str(os, meta, "source");
+    append_u64(os, "repetition_count", d_repetition_expected_);
+    append_u64(os, "repetition_records", d_repetition_records_.size());
+    append_bool(os, "repetition_complete", complete);
+    os << ",\"repetitions\":{";
+
+    auto append_u64_column = [&os, this](const char* key, auto getter) {
+        os << "\"" << key << "\":[";
+        for (size_t i = 0; i < d_repetition_records_.size(); ++i) {
+            if (i)
+                os << ',';
+            os << getter(d_repetition_records_[i]);
+        }
+        os << ']';
+    };
+    auto append_f64_column = [&os, this](const char* key, auto getter) {
+        os << ",\"" << key << "\":[";
+        char buf[64];
+        for (size_t i = 0; i < d_repetition_records_.size(); ++i) {
+            if (i)
+                os << ',';
+            const double value = getter(d_repetition_records_[i]);
+            if (std::isfinite(value))
+                std::snprintf(buf, sizeof(buf), "%.9g", value);
+            else
+                std::snprintf(buf, sizeof(buf), "null");
+            os << buf;
+        }
+        os << ']';
+    };
+
+    append_u64_column("repetition_index",
+                      [](const RepetitionJsonRecord& r) { return r.index; });
+    os << ",\"status\":[";
+    for (size_t i = 0; i < d_repetition_records_.size(); ++i) {
+        if (i)
+            os << ',';
+        os << '\"' << json_escape(d_repetition_records_[i].status) << '\"';
+    }
+    os << ']';
+    os << ',';
+    append_u64_column("tap_count",
+                      [](const RepetitionJsonRecord& r) { return r.tap_count; });
+    os << ',';
+    append_u64_column("file_offset_taps", [](const RepetitionJsonRecord& r) {
+        return r.raw_offset;
+    });
+    if (d_write_normalized_) {
+        os << ',';
+        append_u64_column("file_offset_norm_taps",
+                          [](const RepetitionJsonRecord& r) {
+                              return r.norm_offset;
+                          });
+    }
+    os << ',';
+    append_u64_column("peak_tap",
+                      [](const RepetitionJsonRecord& r) { return r.peak_tap; });
+    append_f64_column("cir_peak_metric", [](const RepetitionJsonRecord& r) {
+        return r.peak_metric;
+    });
+    append_f64_column("peak_delay_from_calibration_ns",
+                      [](const RepetitionJsonRecord& r) {
+                          return r.peak_delay_ns;
+                      });
+    append_f64_column("raw_l2_norm", [](const RepetitionJsonRecord& r) {
+        return r.raw_l2_norm;
+    });
+    os << ',';
+    append_u64_column("estimator_us", [](const RepetitionJsonRecord& r) {
+        return r.estimator_us;
+    });
+    os << "}}\n";
+    d_jsonl_ << os.str();
+
+    d_repetition_group_active_ = false;
+    d_repetition_common_meta_ = pmt::PMT_NIL;
+    d_repetition_records_.clear();
+}
+
+void
+UwbCirWriter::flush_files_if_due()
+{
     // Per-repetition output can exceed 20k records/s.  Flushing three files
     // after every record serialises the hot path on syscalls; bounded batch
     // flushing preserves observability while stop() still performs a final

@@ -193,6 +193,29 @@ make_frame(uint64_t pulse_id,
     return pmt::cons(meta, data);
 }
 
+pmt::pmt_t
+make_repetition_frame(uint64_t pulse_id,
+                      uint64_t repetition_index,
+                      uint64_t repetition_ordinal,
+                      uint64_t repetition_count,
+                      const std::string& status,
+                      const std::vector<gr_complex>& taps)
+{
+    pmt::pmt_t frame = make_frame(pulse_id, status, taps);
+    pmt::pmt_t meta = pmt::car(frame);
+    meta = pmt::dict_add(meta, pmt::mp("cir_output"),
+                         pmt::mp("repetition"));
+    meta = pmt::dict_add(meta, pmt::mp("repetition_index"),
+                         pmt::from_uint64(repetition_index));
+    meta = pmt::dict_add(meta, pmt::mp("repetition_ordinal"),
+                         pmt::from_uint64(repetition_ordinal));
+    meta = pmt::dict_add(meta, pmt::mp("repetition_count"),
+                         pmt::from_uint64(repetition_count));
+    meta = pmt::dict_add(meta, pmt::mp("estimator_us"),
+                         pmt::from_uint64(300 + repetition_ordinal));
+    return pmt::cons(meta, pmt::cdr(frame));
+}
+
 std::vector<gr_complex>
 make_taps(uint64_t pulse_id)
 {
@@ -437,6 +460,70 @@ BOOST_AUTO_TEST_CASE(test_writer_normalized)
         BOOST_CHECK_EQUAL(static_cast<uint64_t>(std::llround(norm_off)),
                           expect_noff[i]);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-repetition input: one compact JSON line per pulse.  A complete packet
+// flushes as soon as repetition_count records arrive; stop() preserves an
+// incomplete final packet and marks it observable.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_writer_groups_repetitions_per_pulse)
+{
+    const std::string dir = make_temp_dir("repetition_group");
+    auto w = UwbCirWriter::make(dir, "cir", false, 16);
+    auto dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_cir_writer_repetition_group");
+    tb->msg_connect(w, "status", dbg, "store");
+    BOOST_REQUIRE(w->start());
+    tb->start();
+
+    for (uint64_t ordinal = 0; ordinal < 3; ++ordinal) {
+        w->_post(pmt::mp("cir"),
+                 make_repetition_frame(7, 10 + ordinal, ordinal, 3, "ok",
+                                       make_taps(ordinal)));
+    }
+    // Deliberately omit ordinal 2 for pulse 8.  Its line must be emitted by
+    // the worker drain during stop(), with repetition_complete=false.
+    for (uint64_t ordinal = 0; ordinal < 2; ++ordinal) {
+        w->_post(pmt::mp("cir"),
+                 make_repetition_frame(8, 10 + ordinal, ordinal, 3, "ok",
+                                       make_taps(10 + ordinal)));
+    }
+
+    BOOST_REQUIRE(wait_written(w, 5));
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(w->stop());
+
+    const auto lines = read_lines(dir + "/cir.jsonl");
+    BOOST_REQUIRE_EQUAL(lines.size(), 2u);
+    BOOST_CHECK(lines[0].find("\"pulse_id\":7") != std::string::npos);
+    BOOST_CHECK(lines[0].find("\"repetition_count\":3") !=
+                std::string::npos);
+    BOOST_CHECK(lines[0].find("\"repetition_records\":3") !=
+                std::string::npos);
+    BOOST_CHECK(lines[0].find("\"repetition_complete\":true") !=
+                std::string::npos);
+    BOOST_CHECK(lines[0].find("\"repetition_index\":[10,11,12]") !=
+                std::string::npos);
+    BOOST_CHECK(lines[0].find("\"tap_count\":[116,116,116]") !=
+                std::string::npos);
+    BOOST_CHECK(lines[0].find("\"file_offset_taps\":[0,116,232]") !=
+                std::string::npos);
+    BOOST_CHECK(lines[0].find("\"estimator_us\":[300,301,302]") !=
+                std::string::npos);
+
+    BOOST_CHECK(lines[1].find("\"pulse_id\":8") != std::string::npos);
+    BOOST_CHECK(lines[1].find("\"repetition_records\":2") !=
+                std::string::npos);
+    BOOST_CHECK(lines[1].find("\"repetition_complete\":false") !=
+                std::string::npos);
+    BOOST_CHECK(lines[1].find("\"file_offset_taps\":[348,464]") !=
+                std::string::npos);
+
+    std::vector<uint8_t> raw;
+    BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw));
+    BOOST_CHECK_EQUAL(raw.size(), 5u * kTaps * 8);
 }
 
 // ---------------------------------------------------------------------------

@@ -14,7 +14,8 @@
  * Files (in `directory`):
  *   <base>.cf32        raw complex CIR taps (complex64, little-endian)
  *   <base>_norm.cf32   L2-normalized taps (only when write_normalized)
- *   <base>.jsonl       one JSON line per CIR record (pulse or repetition)
+ *   <base>.jsonl       one JSON line per pulse.  Per-repetition output is
+ *                      represented by compact column arrays in that line.
  *   run.json           static run configuration, written at start()
  *
  * Contract:
@@ -22,8 +23,9 @@
  *     files (normalized file only if enabled) and advance
  *     file_offset_taps.
  *   - failed frames (sfd_failed/timing_failed/cir_failed/invalid_input/
- *     internal_error) write a JSONL line with tap_count=0 and leave the
- *     file offsets unchanged.  No taps are ever written for them.
+ *     internal_error) have tap_count=0 and leave the file offsets unchanged.
+ *     In repetition mode they remain observable in the packet's status and
+ *     tap_count columns.  No taps are ever written for them.
  *   - stop() drains the queue before closing, so JSONL and binary files
  *     never disagree about a half-written frame.
  */
@@ -93,8 +95,33 @@ protected:
 private:
     void handle_cir(pmt::pmt_t msg);
     void write_frame(pmt::pmt_t msg);
+    void append_repetition_record(const pmt::pmt_t& meta,
+                                  uint64_t pulse_id,
+                                  uint64_t schedule_index,
+                                  const std::string& status,
+                                  bool ok,
+                                  uint64_t tap_count,
+                                  uint64_t raw_offset,
+                                  uint64_t norm_offset,
+                                  uint64_t peak_tap,
+                                  double peak_delay_ns);
+    void flush_repetition_group();
+    void flush_files_if_due();
     void writer_loop();
     void write_run_json();
+
+    struct RepetitionJsonRecord {
+        uint64_t index = 0;
+        std::string status;
+        uint64_t tap_count = 0;
+        uint64_t raw_offset = 0;
+        uint64_t norm_offset = 0;
+        uint64_t peak_tap = 0;
+        double peak_metric = 0.0;
+        double peak_delay_ns = 0.0;
+        double raw_l2_norm = 0.0;
+        uint64_t estimator_us = 0;
+    };
 
     std::string d_directory_;
     std::string d_base_name_;
@@ -123,6 +150,16 @@ private:
     std::condition_variable d_cv_;
     std::thread d_thread_;
     uint64_t d_since_flush_ = 0;
+
+    // Writer-thread-only packet aggregation state.  The estimator publishes
+    // repetitions in pulse/ordinal order; retaining only the first metadata
+    // dictionary plus compact changing columns avoids repeating common JSON.
+    bool d_repetition_group_active_ = false;
+    uint64_t d_repetition_pulse_id_ = 0;
+    uint64_t d_repetition_schedule_index_ = 0;
+    uint64_t d_repetition_expected_ = 0;
+    pmt::pmt_t d_repetition_common_meta_ = pmt::PMT_NIL;
+    std::vector<RepetitionJsonRecord> d_repetition_records_;
 };
 
 } // namespace uwb

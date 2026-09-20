@@ -16,15 +16,17 @@ function [cir, meta] = read_uwb_cir(outDir, pulseId, wantNorm, repetitionIndex)
 %   cir_failed / length-mismatch frames) tap_count is 0 and CIR is empty;
 %   the metadata line is still returned so failures stay observable.
 %
-%   META is the cir.jsonl line for the pulse as a struct, including
+%   META is a legacy-shaped CIR record struct, including
 %   file_offset_taps, tap_count, status, zero_delay_tap, peak_tap and
-%   range_m_per_tap.  With an empty PULSEID, META returns all lines as a
-%   struct array and CIR is empty.
+%   range_m_per_tap.  Packet-grouped repetition JSON is expanded in memory,
+%   so callers see one META element per repetition without the disk file
+%   repeating common metadata.  With an empty PULSEID, META returns all
+%   expanded records as a struct array and CIR is empty.
 %
 %   Files (UwbCirWriter contract):
 %     cir.cf32      concatenated raw complex CIR taps (complex64 LE, 8 B/tap)
 %     cir_norm.cf32 concatenated normalized taps (optional)
-%     cir.jsonl     one JSON object per pulse
+%     cir.jsonl     one JSON object per pulse (repetitions use column arrays)
 %     run.json      static run configuration
 %
 %   Example:
@@ -134,7 +136,9 @@ function meta = readAllJsonl(jsonlFile)
     while ~feof(fid)
         line = fgetl(fid);
         if ischar(line) && ~isempty(strtrim(line))
-            rows{end+1, 1} = jsondecode(line); %#ok<AGROW>
+            decoded = jsondecode(line);
+            expanded = expandPacketRow(decoded);
+            rows = [rows; expanded]; %#ok<AGROW>
         end
     end
     fclose(fid);
@@ -160,4 +164,40 @@ function meta = readAllJsonl(jsonlFile)
     end
     meta = [rows{:}]; %#ok<AGROW>
     meta = meta(:);
+end
+
+function rows = expandPacketRow(row)
+%EXPANDPACKETROW Convert compact repetition columns to legacy row structs.
+    if ~isfield(row, 'repetitions') || ~isstruct(row.repetitions) || ...
+            ~isfield(row.repetitions, 'repetition_index')
+        rows = {row};
+        return;
+    end
+    columns = row.repetitions;
+    indices = columns.repetition_index;
+    n = numel(indices);
+    common = rmfield(row, 'repetitions');
+    names = fieldnames(columns);
+    rows = cell(n, 1);
+    for k = 1:n
+        item = common;
+        item.repetition_ordinal = k - 1;
+        for f = 1:numel(names)
+            name = names{f};
+            item.(name) = columnElement(columns.(name), k);
+        end
+        rows{k} = item;
+    end
+end
+
+function value = columnElement(column, k)
+    if iscell(column)
+        value = column{k};
+    elseif isstring(column)
+        value = column(k);
+    elseif ischar(column)
+        value = column;
+    else
+        value = column(k);
+    end
 end

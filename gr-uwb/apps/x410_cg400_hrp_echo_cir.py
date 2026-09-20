@@ -1478,6 +1478,32 @@ def dpdk_preflight(a):
         a.args, "?" if free is None else free), flush=True)
 
 
+def expand_cir_json_record(rec):
+    """Yield legacy-shaped records from a packet-grouped CIR JSON object.
+
+    Average/legacy lines pass through unchanged.  New repetition lines keep
+    common pulse metadata at the top level and changing fields as equal-length
+    columns under ``repetitions``; expanding here keeps summary logic and
+    downstream callers compatible without duplicating data on disk.
+    """
+    columns = rec.get("repetitions")
+    if not isinstance(columns, dict):
+        yield rec
+        return
+    indices = columns.get("repetition_index", [])
+    common = {k: v for k, v in rec.items() if k != "repetitions"}
+    for ordinal, rep_index in enumerate(indices):
+        row = dict(common)
+        row["repetition_index"] = rep_index
+        row["repetition_ordinal"] = ordinal
+        for key, values in columns.items():
+            if key == "repetition_index":
+                continue
+            if isinstance(values, list) and ordinal < len(values):
+                row[key] = values[ordinal]
+        yield row
+
+
 def analyze_cir(jsonl_path, pulses):
     if not os.path.isfile(jsonl_path):
         return {"exists": False, "lines": 0}
@@ -1490,33 +1516,36 @@ def analyze_cir(jsonl_path, pulses):
     statuses = {}
     record_keys = []
     repetitions_by_pulse = {}
+    jsonl_lines = 0
     with open(jsonl_path, "r", encoding="utf-8") as f:
         for ln in f:
             ln = ln.strip()
             if not ln:
                 continue
-            rec = json.loads(ln)
-            st = rec.get("status", "")
-            statuses[st] = statuses.get(st, 0) + 1
-            pid = rec.get("pulse_id")
-            if pid is not None:
-                pid = int(pid)
-                ids.append(pid)
-                rep = rec.get("repetition_index")
-                record_keys.append(
-                    (pid, None if rep is None else int(rep)))
-                if rep is not None:
-                    repetitions_by_pulse.setdefault(pid, set()).add(int(rep))
-            if st == "ok":
-                ok += 1
-                if "peak_tap" in rec:
-                    peak_taps.append(int(rec["peak_tap"]))
-                if "cir_peak_metric" in rec:
-                    metrics.append(float(rec["cir_peak_metric"]))
-                if "estimator_us" in rec:
-                    est_us.append(int(rec["estimator_us"]))
-            else:
-                fail += 1
+            jsonl_lines += 1
+            packet = json.loads(ln)
+            for rec in expand_cir_json_record(packet):
+                st = rec.get("status", "")
+                statuses[st] = statuses.get(st, 0) + 1
+                pid = rec.get("pulse_id")
+                if pid is not None:
+                    pid = int(pid)
+                    ids.append(pid)
+                    rep = rec.get("repetition_index")
+                    record_keys.append(
+                        (pid, None if rep is None else int(rep)))
+                    if rep is not None:
+                        repetitions_by_pulse.setdefault(pid, set()).add(int(rep))
+                if st == "ok":
+                    ok += 1
+                    if "peak_tap" in rec:
+                        peak_taps.append(int(rec["peak_tap"]))
+                    if "cir_peak_metric" in rec:
+                        metrics.append(float(rec["cir_peak_metric"]))
+                    if "estimator_us" in rec:
+                        est_us.append(int(rec["estimator_us"]))
+                else:
+                    fail += 1
     missing = []
     if ids:
         seen = set(ids)
@@ -1532,7 +1561,8 @@ def analyze_cir(jsonl_path, pulses):
                 gaps.append((a, b))
     return {
         "exists": True,
-        "lines": ok + fail,
+        "lines": jsonl_lines,
+        "records": ok + fail,
         "ok": ok,
         "fail": fail,
         "status_hist": statuses,

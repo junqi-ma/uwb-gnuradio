@@ -334,14 +334,30 @@ def _parse_cir_service(cir_path):
                 rec = json.loads(ln)
             except ValueError:
                 continue
-            if rec.get("status") not in (None, "ok"):
-                continue
-            for k in CIR_SERVICE_KEYS:
-                if k in rec:
-                    try:
-                        cols[k].append(float(rec[k]))
-                    except (TypeError, ValueError):
-                        pass
+            reps = rec.get("repetitions")
+            if isinstance(reps, dict) and isinstance(
+                    reps.get("repetition_index"), list):
+                # New packet-grouped layout: service columns are arrays and
+                # must be reduced to the same per-record sample population
+                # used by the legacy one-line-per-CIR layout.
+                n = len(reps["repetition_index"])
+                records = []
+                for i in range(n):
+                    records.append({
+                        k: v[i] for k, v in reps.items()
+                        if isinstance(v, list) and i < len(v)
+                    })
+            else:
+                records = [rec]
+            for item in records:
+                if item.get("status") not in (None, "ok"):
+                    continue
+                for k in CIR_SERVICE_KEYS:
+                    if k in item:
+                        try:
+                            cols[k].append(float(item[k]))
+                        except (TypeError, ValueError):
+                            pass
     for k, vals in cols.items():
         if vals:
             out[k] = stat_block(vals)

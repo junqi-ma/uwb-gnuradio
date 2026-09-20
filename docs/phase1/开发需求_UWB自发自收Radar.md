@@ -414,7 +414,7 @@ Phase-1 保留 PDU 65/48，原因是可直接对齐 MATLAB 且现有吞吐高于
 ```text
 <out>/cir.cf32          # raw complex CIR：除以 code_energy，不做 L2 归一化
 <out>/cir_norm.cf32     # 可选：L2-normalized CIR，用于 MATLAB 算法对照
-<out>/cir.jsonl         # 每脉冲一行
+<out>/cir.jsonl         # 每脉冲一行；逐 repetition 时用列数组聚合
 <out>/run.json          # 一次运行的静态配置（PHY、PRI、频率、窗）
 ```
 
@@ -451,6 +451,13 @@ Phase-1 保留 PDU 65/48，原因是可直接对齐 MATLAB 且现有吞吐高于
 `file_offset_taps` 是 `cir.cf32` 里的复样点偏移（每 tap 8 字节）。
 目标距离按 `(tap-zero_delay_tap)*range_m_per_tap` 计算。`peak_tap`
 在实机上可能是 TX→RX 直泄漏，不得无校准地称为目标首径。
+
+逐 repetition 模式下，公共字段仍位于行顶层，`repetitions` 对象包含等长的
+`repetition_index`、`status`、`tap_count`、`file_offset_taps`、`peak_tap`、
+`cir_peak_metric`、`raw_l2_norm` 和 `estimator_us` 数组；数组位置就是
+`repetition_ordinal`。`repetition_records`/`repetition_complete` 标记实际收到的
+数量和是否完整。MATLAB/Python reader 会在内存中展开这些列，保持逐 repetition
+查询接口。
 
 SFD 未检测成功时仍写一行 JSONL：`status="sfd_failed"`、
 `sfd_ok=false`、`tap_count=0`；不向 `cir.cf32`/`cir_norm.cf32` 写 tap，

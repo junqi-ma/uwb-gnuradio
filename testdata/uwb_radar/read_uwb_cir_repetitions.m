@@ -2,7 +2,8 @@ function [cirMatrix, meta] = read_uwb_cir_repetitions(outDir, pulseId, wantNorm)
 %READ_UWB_CIR_REPETITIONS Read every landed repetition CIR for one pulse.
 %   [X,META] = READ_UWB_CIR_REPETITIONS(OUTDIR,PULSEID) returns a
 %   tap_count-by-repetition_count complex-single matrix ordered by
-%   repetition_ordinal. META is the matching JSONL struct array.
+%   repetition_ordinal. META is the matching expanded metadata struct array;
+%   on disk, all repetitions for the pulse occupy one compact JSONL line.
 %
 %   Pass WANTNORM=true to read cir_norm.cf32 instead of cir.cf32.
 

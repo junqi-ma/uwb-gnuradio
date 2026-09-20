@@ -32,15 +32,21 @@ GNU Radio stream scheduler 的 `consume/produce`。一个输入 RX PDU 在 repet
   sweep/stream 的 peak/frequency servo 仍固定使用 average，避免把一个 pulse 的
   多个 repetition 误当成多次 servo 观测；这两个入口显式请求 repetitions 会拒绝。
 - writer 仍输出 `cir.cf32`、`cir_norm.cf32`、`cir.jsonl`。二进制按
-  `(pulse_id, repetition_ordinal)` 顺序连续排列，JSONL 提供逐记录 offset 和上述索引。
-  writer 改为每 256 条批量 flush，app 队列至少 256 条。
+  `(pulse_id, repetition_ordinal)` 顺序连续排列；JSONL 改为每个 UWB pulse
+  一行，公共时间/标定字段只写一次，`repetitions` 对象用等长列数组保存
+  `repetition_index/status/tap_count/file_offset/peak/metric/norm/estimator_us`。
+  `repetition_records` 和 `repetition_complete` 使 queue drop 或停止时不完整的
+  pulse 仍可观测。writer 每 256 条 CIR record 批量 flush，app 队列至少 256 条。
+  128-SYNC、116 tap 的典型聚合 JSON 行约 9 kB，即 200 pulse/s 约 1.8 MB/s，
+  相比逐 repetition JSONL 的约 20 MB/s 显著下降；二进制 CIR 仍是 FC32。
 - UDP 协议升级为 UCR4：每个 datagram 仍只承载一个 repetition CIR。52-byte
   header 增加 `repetition_index/count` 和 `cir_scale f32`，payload 为 116 个交错
   little-endian SC16 tap（464 bytes），总长 516 bytes。量化采用每 CIR
   block-floating scale：`FC32 = SC16 × cir_scale`，因此保留 raw CIR 绝对幅度。
   `cir_udp_recv.py` 解码后仍向调用者提供重建的 complex64 `taps`，并继续兼容
   UCR3/UCR2/UCR1/raw。磁盘 `cir.cf32/cir_norm.cf32` 不量化、保持 FC32。
-- MATLAB 可用 `read_uwb_cir(..., repetitionIndex)` 读取指定 repetition，或用
+- MATLAB reader 在内存中把列数组展开为兼容的逐 repetition metadata；仍可用
+  `read_uwb_cir(..., repetitionIndex)` 读取指定 repetition，或用
   `read_uwb_cir_repetitions()` 一次得到 `tap_count × repetition_count` 矩阵。
 
 128-SYNC 默认 repetition 模式 `skip=0, cir_repetitions=auto`，所以每个 pulse
