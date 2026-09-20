@@ -45,6 +45,10 @@ GNU Radio stream scheduler 的 `consume/produce`。一个输入 RX PDU 在 repet
   block-floating scale：`FC32 = SC16 × cir_scale`，因此保留 raw CIR 绝对幅度。
   `cir_udp_recv.py` 解码后仍向调用者提供重建的 complex64 `taps`，并继续兼容
   UCR3/UCR2/UCR1/raw。磁盘 `cir.cf32/cir_norm.cf32` 不量化、保持 FC32。
+  接收端新增实时绘图（`--plot`，默认开）与原始 UCR4 datagram 落盘
+  （`--save-ucr4 PREFIX`：`PREFIX.ucr4` 定长 516 B/条 + `PREFIX.jsonl` 索引）；
+  MATLAB `parse_cir_sweep.m` 现在直接解析 `.ucr4`（`FC32 = SC16 × cir_scale`），
+  不再依赖 JSONL。非 UCR4 datagram 跳过并计数，不污染流。
 - MATLAB reader 在内存中把列数组展开为兼容的逐 repetition metadata；仍可用
   `read_uwb_cir(..., repetitionIndex)` 读取指定 repetition，或用
   `read_uwb_cir_repetitions()` 一次得到 `tap_count × repetition_count` 矩阵。

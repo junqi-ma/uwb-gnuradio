@@ -380,8 +380,16 @@ metadata（`65/32` 映射回 work 域）。无需 C++ 改动。
 - 对端 `cir_udp_recv.py` 支持 `UCR4`/UCR3/UCR2/旧 UCR1/裸 taps：
 
 ```bash
-python3 gr-uwb/apps/cir_udp_recv.py --bind 0.0.0.0 --port 12345
+# 实时绘图（默认三子图）+ 原始 UCR4 落盘
+python3 gr-uwb/apps/cir_udp_recv.py --bind 0.0.0.0 --port 12345 \
+  --save-ucr4 logs/sweep/cir
+# 无显示环境只落盘
+python3 gr-uwb/apps/cir_udp_recv.py --no-plot --save-ucr4 logs/sweep/cir
 ```
+
+`PREFIX.ucr4` 是逐字节的 UCR4 datagram 流（516 B/条）；MATLAB
+`parse_cir_sweep.m` 直接读它（`FC32 = SC16 × cir_scale`），不再依赖
+`PREFIX.jsonl`（该文件仅作索引/审计）。
 
 对端日志会打印当前帧的频率，例如
 `... freq=6494.600000MHz(off+5000.000kHz) ... v=2`。
