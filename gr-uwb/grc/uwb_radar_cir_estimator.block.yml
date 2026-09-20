@@ -69,6 +69,12 @@ parameters:
     default: 'False'
     options: ['True', 'False']
     option_labels: ['True', 'False']
+-   id: emit_individual_repetitions
+    label: Emit each CIR repetition
+    dtype: bool
+    default: 'False'
+    options: ['True', 'False']
+    option_labels: ['True', 'False']
 
 inputs:
 -   domain: message
@@ -85,11 +91,11 @@ outputs:
 
 templates:
     imports: from gnuradio import uwb
-    make: uwb.radar_cir_estimator(${template_path}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${cir_pre}, ${cir_post}, ${cir_skip_initial}, ${cir_repetitions}, ${sfd_search_margin}, ${sync_refine_margin}, ${sfd_threshold}, ${sync_refine_threshold}, ${emit_normalized}, ${queue_capacity}, ${use_predicted_timing})
+    make: uwb.radar_cir_estimator(${template_path}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${cir_pre}, ${cir_post}, ${cir_skip_initial}, ${cir_repetitions}, ${sfd_search_margin}, ${sync_refine_margin}, ${sfd_threshold}, ${sync_refine_threshold}, ${emit_normalized}, ${queue_capacity}, ${use_predicted_timing}, ${emit_individual_repetitions})
 
 cpp_templates:
     includes: ['#include <gnuradio/uwb/uwb_radar_cir_estimator_block.h>']
-    make: 'this->${id} = gr::uwb::UwbRadarCirEstimator::make(${template_path}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${cir_pre}, ${cir_post}, ${cir_skip_initial}, ${cir_repetitions}, ${sfd_search_margin}, ${sync_refine_margin}, ${sfd_threshold}, ${sync_refine_threshold}, ${emit_normalized}, ${queue_capacity}, ${use_predicted_timing});'
+    make: 'this->${id} = gr::uwb::UwbRadarCirEstimator::make(${template_path}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${cir_pre}, ${cir_post}, ${cir_skip_initial}, ${cir_repetitions}, ${sfd_search_margin}, ${sync_refine_margin}, ${sfd_threshold}, ${sync_refine_threshold}, ${emit_normalized}, ${queue_capacity}, ${use_predicted_timing}, ${emit_individual_repetitions});'
     link: ['gnuradio::gnuradio-uwb']
 
 documentation: |-
@@ -103,7 +109,10 @@ documentation: |-
     use_predicted_timing=True skips SFD search and SYNC refine; use that
     for timed X410 echo under interferers.  False keeps the old gate
     (sfd_failed / timing_failed drop the CIR).  Every enqueued pulse
-    produces one "cir" PDU; failed stages have empty taps.  Invalid PDUs
+    produces one averaged "cir" PDU by default.  With
+    emit_individual_repetitions=True it produces one PDU for each selected
+    SYNC repetition and adds repetition_index/repetition_ordinal/
+    repetition_count metadata.  Failed stages have empty taps.  Invalid PDUs
     only produce a "status" message.
 
 file_format: 1

@@ -2,9 +2,10 @@
 """Receive UWB radar CIR datagrams.
 
 Both live scripts (x410_cg400_hrp_echo_cir.py and
-x410_cg400_hrp_echo_cir_sweep.py) send the unified 44-byte UCR2 header
-followed by 116 little-endian complex64 taps on every pulse, including
-sfd_failed (taps are zeros).  UCR2 is the 28-byte UCR1 header plus two
+x410_cg400_hrp_echo_cir_jam.py) send the unified UCR3 header
+followed by 116 little-endian complex64 taps on every CIR record, including
+sfd_failed (taps are zeros). UCR3 adds repetition_index/repetition_count;
+UCR2 is the 28-byte UCR1 header plus two
 f64 fields: ``freq_hz`` (centre frequency, NaN if unknown) and
 ``freq_offset_hz`` (relative to the nominal).  Legacy UCR1 and raw
 socket_pdu payloads (928 bytes of taps, no header) are still accepted.
@@ -22,6 +23,8 @@ MAGIC = b"UCR1"
 HDR = struct.Struct("<4sIHHffiI")
 MAGIC_V2 = b"UCR2"
 HDR_V2 = struct.Struct("<4sIHHffiIdd")
+MAGIC_V3 = b"UCR3"
+HDR_V3 = struct.Struct("<4sIHHHHffiIdd")
 STATUS_NAME = {
     0: "ok",
     1: "sfd_failed",
@@ -32,6 +35,20 @@ STATUS_NAME = {
 
 
 def parse_datagram(data):
+    if len(data) >= HDR_V3.size and data[:4] == MAGIC_V3:
+        (magic, pulse_id, status, tap_count, rep_index, rep_count, sfd,
+         peak, peak_tap, est_us, freq_hz, freq_off) = HDR_V3.unpack_from(data)
+        taps = np.frombuffer(data[HDR_V3.size:], dtype=np.complex64)
+        return {
+            "framed": True, "version": 3, "pulse_id": int(pulse_id),
+            "status": STATUS_NAME.get(int(status), "other"),
+            "status_code": int(status), "tap_count": int(tap_count),
+            "repetition_index": (None if rep_index == 0xFFFF else int(rep_index)),
+            "repetition_count": int(rep_count), "sfd_metric": float(sfd),
+            "peak_abs": float(peak), "peak_tap": int(peak_tap),
+            "estimator_us": int(est_us), "freq_hz": float(freq_hz),
+            "freq_offset_hz": float(freq_off), "taps": taps,
+        }
     if len(data) >= HDR_V2.size and data[:4] == MAGIC_V2:
         (magic, pulse_id, status, tap_count, sfd, peak, peak_tap, est_us,
          freq_hz, freq_off) = HDR_V2.unpack_from(data)
@@ -43,6 +60,8 @@ def parse_datagram(data):
             "status": STATUS_NAME.get(int(status), "other"),
             "status_code": int(status),
             "tap_count": int(tap_count),
+            "repetition_index": None,
+            "repetition_count": 0,
             "sfd_metric": float(sfd),
             "peak_abs": float(peak),
             "peak_tap": int(peak_tap),
@@ -62,6 +81,8 @@ def parse_datagram(data):
             "status": STATUS_NAME.get(int(status), "other"),
             "status_code": int(status),
             "tap_count": int(tap_count),
+            "repetition_index": None,
+            "repetition_count": 0,
             "sfd_metric": float(sfd),
             "peak_abs": float(peak),
             "peak_tap": int(peak_tap),
@@ -80,6 +101,8 @@ def parse_datagram(data):
         "status": "ok" if taps.size else "empty",
         "status_code": 0 if taps.size else 4,
         "tap_count": int(taps.size),
+        "repetition_index": None,
+        "repetition_count": 0,
         "sfd_metric": 0.0,
         "peak_abs": metric,
         "peak_tap": peak,
@@ -95,7 +118,7 @@ def main():
     p.add_argument("--bind", default="0.0.0.0")
     p.add_argument("--port", type=int, default=12345)
     p.add_argument("--expect-bytes", type=int, default=0,
-                   help="0 accepts UCR2/UCR1/raw taps; >0 still checks length")
+                   help="0 accepts UCR3/UCR2/UCR1/raw taps; >0 still checks length")
     p.add_argument("--seconds", type=float, default=0.0,
                    help="Stop after this many seconds (0 = until Ctrl-C)")
     args = p.parse_args()
@@ -104,8 +127,8 @@ def main():
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((args.bind, args.port))
     sock.settimeout(0.5)
-    print("listening %s:%d expect_bytes=%d hdr_ucr2=%d hdr_ucr1=%d" % (
-        args.bind, args.port, args.expect_bytes, HDR_V2.size, HDR.size),
+    print("listening %s:%d expect_bytes=%d hdr_ucr3=%d hdr_ucr2=%d hdr_ucr1=%d" % (
+        args.bind, args.port, args.expect_bytes, HDR_V3.size, HDR_V2.size, HDR.size),
         flush=True)
 
     n = 0
@@ -149,9 +172,10 @@ def main():
                 else:
                     freq_s = "%.6fMHz(off%+.3fkHz)" % (
                         f_hz / 1e6, rec["freq_offset_hz"] / 1e3)
-                print("n=%d pulse=%d status=%s bytes=%d taps=%d peak_tap=%d "
+                print("n=%d pulse=%d rep=%s/%d status=%s bytes=%d taps=%d peak_tap=%d "
                       "|peak|=%.6g sfd=%.4g freq=%s src=%s:%d framed=%s v=%d"
-                      % (n, rec["pulse_id"], rec["status"], len(data),
+                      % (n, rec["pulse_id"], rec["repetition_index"],
+                         rec["repetition_count"], rec["status"], len(data),
                          rec["taps"].size, rec["peak_tap"], rec["peak_abs"],
                          rec["sfd_metric"], freq_s, src[0], src[1],
                          rec["framed"], rec["version"]),

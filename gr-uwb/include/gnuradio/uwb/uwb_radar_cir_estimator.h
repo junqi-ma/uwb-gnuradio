@@ -278,6 +278,102 @@ inline bool estimate_radar_cir(const std::complex<float>* rx,
     return true;
 }
 
+// HOT PATH: estimate one absolute SYNC repetition without averaging.  This
+// shares the prepared code and fixed scratch buffers with estimate_radar_cir;
+// callers must consume/copy the taps before the next call.  No allocation or
+// vector growth occurs here.
+inline bool estimate_radar_cir_repetition(
+    const std::complex<float>* rx,
+    size_t n,
+    int64_t preamble_start,
+    size_t samples_per_symbol,
+    size_t pre,
+    size_t post,
+    size_t repetition_index,
+    size_t preamble_repetitions,
+    RadarCirEstimate& out,
+    RadarCirScratch& scratch)
+{
+    detail::cir_fail(out, CirStatus::InvalidInput);
+    if (!rx || n == 0 || preamble_start < 0 || samples_per_symbol == 0 ||
+        repetition_index >= preamble_repetitions ||
+        scratch.sampled_code.empty() || !(scratch.code_energy > 0.f) ||
+        !std::isfinite(scratch.code_energy) || detail::cir_add_overflow(pre, post))
+        return false;
+
+    const size_t tap_count = pre + post;
+    const size_t code_len = scratch.sampled_code.size();
+    if (tap_count == 0 || tap_count > scratch.raw_taps.size() ||
+        tap_count > scratch.norm_taps.size() ||
+        code_len > std::numeric_limits<size_t>::max() - (tap_count - 1))
+        return false;
+    const size_t wlen = code_len + tap_count - 1;
+
+    int64_t rep64 = 0, period64 = 0, offset = 0, rep_start = 0, pre64 = 0;
+    int64_t lo = 0, n64 = 0, wlen64 = 0, last_ok = 0;
+    if (!radar_i64_from_size(repetition_index, rep64) ||
+        !radar_i64_from_size(samples_per_symbol, period64) ||
+        !radar_i64_mul(rep64, period64, offset) ||
+        !radar_i64_add(preamble_start, offset, rep_start) ||
+        !radar_i64_from_size(pre, pre64) ||
+        !radar_i64_sub(rep_start, pre64, lo) ||
+        !radar_i64_from_size(n, n64) || !radar_i64_from_size(wlen, wlen64) ||
+        !radar_i64_sub(n64, wlen64, last_ok) || lo < 0 || lo > last_ok)
+        return detail::cir_fail_status(out, CirStatus::CirFailed);
+
+    const std::complex<float>* src = rx + static_cast<size_t>(lo);
+    const double energy = static_cast<double>(scratch.code_energy);
+    size_t peak_tap = 0;
+    float peak_abs = -1.f;
+    double nrm2 = 0.0;
+    for (size_t nn = 0; nn < tap_count; ++nn) {
+        double acc_re = 0.0;
+        double acc_im = 0.0;
+        for (size_t m = 0; m < code_len; ++m) {
+            const auto c = scratch.sampled_code[m];
+            // The sampled HRP code is sparse.  Skipping exact zero entries
+            // preserves the MATLAB sum while avoiding about 7/8 of the MACs.
+            if (c.real() == 0.f && c.imag() == 0.f)
+                continue;
+            const auto a = src[nn + m];
+            // HRP sampled_code is real {-1,0,+1}; keep the general complex
+            // form for correctness, but avoid constructing complex<double>
+            // temporaries in the 118 x tap_count inner loop.
+            const double cr = static_cast<double>(c.real());
+            const double ci = static_cast<double>(c.imag());
+            acc_re += static_cast<double>(a.real()) * cr +
+                      static_cast<double>(a.imag()) * ci;
+            acc_im += static_cast<double>(a.imag()) * cr -
+                      static_cast<double>(a.real()) * ci;
+        }
+        const std::complex<float> raw(
+            static_cast<float>(acc_re / energy),
+            static_cast<float>(acc_im / energy));
+        scratch.raw_taps[nn] = raw;
+        nrm2 += static_cast<double>(std::norm(raw));
+        const float mag = std::abs(raw);
+        if (mag > peak_abs) {
+            peak_abs = mag;
+            peak_tap = nn;
+        }
+    }
+    const float nrm = static_cast<float>(std::sqrt(nrm2));
+    if (!std::isfinite(nrm) || !(nrm > 0.f) || !std::isfinite(peak_abs))
+        return detail::cir_fail_status(out, CirStatus::CirFailed);
+    const float inv_n = 1.f / (nrm + 1e-12f);
+    for (size_t i = 0; i < tap_count; ++i)
+        scratch.norm_taps[i] = scratch.raw_taps[i] * inv_n;
+
+    out.status = CirStatus::Ok;
+    out.tap_count = tap_count;
+    out.peak_tap = peak_tap;
+    out.peak_abs = peak_abs;
+    out.raw_l2_norm = nrm;
+    out.valid_repetitions = 1;
+    out.first_repetition = repetition_index;
+    return true;
+}
+
 } // namespace radar
 } // namespace uwb
 } // namespace gr

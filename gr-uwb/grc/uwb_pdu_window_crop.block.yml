@@ -47,4 +47,9 @@ documentation: |-
     remapped.  This is not the same as resampler CaptureOnly, which still
     runs FIR on the full input.
 
+    CG400 (491.52 MS/s) equivalent of the same 10/190/4.1 us window is
+    4915/93389/2015 (kCg400NativeScheduled*); interference-dump geometry is
+    147456/49152 for the 300/100 us window (kCg400Interference*).
+    Defaults below stay at 737.28-native values (see uwb_defaults.h).
+
 file_format: 1

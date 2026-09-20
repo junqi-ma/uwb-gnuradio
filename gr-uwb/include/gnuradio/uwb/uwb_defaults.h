@@ -8,7 +8,9 @@
  * block factory defaults.  GRC YAML defaults must match these literals
  * (see qa_uwb_defaults / defaults_sources checks).
  *
- * Host rate 998.4e6 is the post-RFNoC (65/48) rate after X410 radio 737.28e6.
+ * Host rate 998.4e6 is post-RFNoC: 737.28e6 * 65/48 (UC200/X410) or
+ * 491.52e6 * 65/32 (CG400 image).  Native defaults exist for both
+ * radio rates; wall-clock windows are shared, only sample counts rescale.
  */
 
 #pragma once
@@ -44,7 +46,7 @@ inline constexpr size_t kDetectorMaxBacktrackSymbols = 3;
 // UwbScheduledExtractor production radar-slot geometry (QM35825).
 inline constexpr size_t kScheduledPreGuard = 9984;   // ~10 us @ 998.4e6
 inline constexpr size_t kScheduledCapture = 189696;  // ~190 us
-inline constexpr size_t kScheduledPostGuard = 4096;
+inline constexpr size_t kScheduledPostGuard = 4096; // historic 2^12 rounding, NOT llround(4.1us*998.4e6)=4093; keep value for regression
 inline constexpr size_t kScheduledPoolSize = 8;
 inline constexpr double kScheduledPacketIntervalS = 0.01; // 100 radar/s
 
@@ -85,6 +87,23 @@ inline constexpr double kNativeInterferencePreGuardS = 300e-6;
 inline constexpr double kNativeInterferencePostGuardS = 100e-6;
 inline constexpr size_t kNativeInterferencePreGuard = 221184;
 inline constexpr size_t kNativeInterferencePostGuard = 73728;
+// CG400 (491.52 MS/s) interference dump: same 300/100 us wall-clock window
+// (T1: rate-independent, per PacketInterval geometry).  Seconds shared with
+// kNativeInterference* so only sample counts rescale by 32/48.
+//   pre  = llround(300e-6 * 491.52e6) = 147456
+//   post = llround(100e-6 * 491.52e6) = 49152
+inline constexpr double kCg400InterferencePreGuardS = 300e-6;
+inline constexpr double kCg400InterferencePostGuardS = 100e-6;
+inline constexpr size_t kCg400InterferencePreGuard = 147456;
+inline constexpr size_t kCg400InterferencePostGuard = 49152;
+// CG400 acquire geometry: 737.28-native 2032/200000/16 rescaled by 32/48
+// (T1 rate-independent conclusion; sample counts only).
+//   pre-trigger = llround(2032 * 32/48)   = 1355
+//   capture     = llround(200000 * 32/48) = 133333
+//   margin      = llround(16 * 32/48)     = 11 (conservative callers may keep 16)
+inline constexpr size_t kCg400AcquirePreTrigger = 1355;
+inline constexpr size_t kCg400AcquireCapture = 133333;
+inline constexpr size_t kCg400CoarseMargin = 11;
 inline constexpr size_t kAutoAcquirePoolSize = 8;
 inline constexpr size_t kAutoScheduledPoolSize = 8;
 inline constexpr size_t kLockObservations = 3;

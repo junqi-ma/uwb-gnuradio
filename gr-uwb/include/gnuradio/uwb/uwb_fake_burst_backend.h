@@ -45,9 +45,11 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <array>
 #include <map>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace gr {
@@ -76,8 +78,8 @@ public:
     struct FakeBurstRecord {
         uint64_t schedule_index = 0;
         BurstStatus status = BurstStatus::BackendError;
-        uint64_t tx_samples_requested = 0;
-        uint64_t tx_samples_sent = 0;
+        uint64_t tx_samples_requested = 0; // per channel (== L)
+        uint64_t tx_samples_sent = 0; // per channel
         uint64_t rx_samples_requested = 0;
         uint64_t rx_samples_received = 0;
         uint64_t tx_calls = 0;
@@ -86,8 +88,13 @@ public:
         uint64_t rx_reissues = 0;
         std::vector<uint8_t> tx_flags; // per-call flag bytes, issue order
         std::vector<uint8_t> rx_flags;
-        std::vector<int16_t> tx_stitched; // SC16 pairs, point-for-point
+        std::vector<int16_t> tx_stitched; // ch0 (single-TX: the burst)
         std::vector<int16_t> rx_stitched;
+        // Multi-TX (§5.2): per-channel stitched SC16 pairs; size ==
+        // tx_channel_count.  Single-TX bursts keep tx_channel_count == 1
+        // with tx_stitched_ch[0] == tx_stitched.
+        size_t tx_channel_count = 1;
+        std::vector<std::vector<int16_t>> tx_stitched_ch;
         int64_t rx_time_ticks = -1;
         std::string error;
     };
@@ -154,6 +161,8 @@ public:
             error = "backend stopped";
             return BurstStatus::StopDuringIo;
         }
+        if (cmd.tx_channel_count > 1)
+            return issue_tx_multi_locked(cmd, error);
         if (d_active_fault == BurstStatus::BrokenChain) {
             error = "broken chain (injected): fragment flags corrupted";
             return BurstStatus::BrokenChain;
@@ -206,12 +215,16 @@ public:
                     rec.tx_samples_sent = sent_total;
                     rec.status = BurstStatus::StopDuringIo;
                     rec.error = "stop during TX send (in flight)";
+                    rec.tx_channel_count = 1;
+                    rec.tx_stitched_ch.assign(1, rec.tx_stitched);
                     d_records[rec.schedule_index] = std::move(rec);
                     return BurstStatus::StopDuringIo;
                 }
             }
         }
         rec.tx_samples_sent = sent_total;
+        rec.tx_channel_count = 1;
+        rec.tx_stitched_ch.assign(1, rec.tx_stitched);
 
         BurstResult res;
         res.schedule_index = cmd.schedule_index;
@@ -219,6 +232,9 @@ public:
         res.rx_ticks = d_pending_rx.rx_ticks;
         res.tx_samples_requested = cmd.total_samples;
         res.tx_samples_sent = sent_total;
+        res.tx_channel_count = 1;
+        res.tx_wire_samples_requested = cmd.total_samples;
+        res.tx_wire_samples_sent = sent_total;
         res.rx_samples_requested = d_pending_rx.total_samples;
 
         if (d_active_fault == BurstStatus::Overflow ||
@@ -236,11 +252,18 @@ public:
             // The RX stream NEVER completes: no result is queued, so the
             // worker blocks in collect_result() for the full wait and
             // then synthesizes the Timeout result (or StopDuringIo if a
-            // stop was requested first).
+            // stop was requested first).  The orphaned command counts as
+            // unmatched (bounded).
             res.status = BurstStatus::Timeout;
             res.error = fault_error_locked(BurstStatus::Timeout);
             d_records[rec.schedule_index] = std::move(rec);
             d_rx_armed = false;
+            if (d_unmatched_kept < kAsyncUnmatchedCap) {
+                ++d_async.unmatched;
+                ++d_unmatched_kept;
+            } else {
+                ++d_async.dropped;
+            }
             d_cv.notify_all();
             return BurstStatus::Ok; // completion never arrives
         }
@@ -298,6 +321,7 @@ public:
         res.tx_reissues = rec.tx_reissues;
         res.rx_reissues = rec.rx_reissues;
         res.status = rec.status;
+        ++d_async.ack;
         d_records[rec.schedule_index] = std::move(rec);
         d_results.emplace(cmd.schedule_index, res);
         d_rx_armed = false;
@@ -367,6 +391,32 @@ public:
         return BurstStatus::Ok;
     }
 
+    // Jammer-only retune (§5.5): records call order and the readback per
+    // logical channel; sense/RX untouched.  Rejects out-of-range channels.
+    BurstStatus tune_tx_channel(size_t logical_channel,
+                                double hz,
+                                double& actual_hz,
+                                std::string& error) override
+    {
+        std::lock_guard<std::mutex> lock(d_mutex);
+        if (logical_channel >= kEchoMaxTxChannels) {
+            error = "tune_tx_channel: logical channel out of range";
+            return BurstStatus::BackendError;
+        }
+        d_tx_tune_calls.emplace_back(logical_channel, hz);
+        d_tx_freqs_hz[logical_channel] = hz;
+        actual_hz = hz;
+        return BurstStatus::Ok;
+    }
+
+    // Synthetic async counts (§5.6): ack per completed burst; unmatched
+    // via the inject hook (bounded) or RX-never-completes timeouts.
+    TxAsyncCounts tx_async_counts() const override
+    {
+        std::lock_guard<std::mutex> lock(d_mutex);
+        return d_async;
+    }
+
     // --- QA introspection ---------------------------------------------------
 
     // Last frequency applied through tune() (0 = never tuned).
@@ -374,6 +424,38 @@ public:
     {
         std::lock_guard<std::mutex> lock(d_mutex);
         return d_center_freq_hz;
+    }
+
+    // tune_tx_channel call log (order preserved) and per-logical-channel
+    // readback (0 = never tuned).
+    std::vector<std::pair<size_t, double>> tx_tune_calls() const
+    {
+        std::lock_guard<std::mutex> lock(d_mutex);
+        return d_tx_tune_calls;
+    }
+
+    double tx_channel_freq_hz(size_t logical_channel) const
+    {
+        std::lock_guard<std::mutex> lock(d_mutex);
+        if (logical_channel >= kEchoMaxTxChannels)
+            return 0.0;
+        return d_tx_freqs_hz[logical_channel];
+    }
+
+    // Inject unmatched async events (no time spec / startup); beyond the
+    // bounded queue they count as dropped, never silently lost.
+    static constexpr size_t kAsyncUnmatchedCap = 32;
+    void inject_tx_async_unmatched(uint64_t n = 1)
+    {
+        std::lock_guard<std::mutex> lock(d_mutex);
+        for (uint64_t i = 0; i < n; ++i) {
+            if (d_unmatched_kept < kAsyncUnmatchedCap) {
+                ++d_async.unmatched;
+                ++d_unmatched_kept;
+            } else {
+                ++d_async.dropped;
+            }
+        }
     }
 
     // Deterministic RX sample the fake device produces for one int16_t
@@ -444,6 +526,10 @@ private:
         d_collect_waiters = 0;
         d_abort_count = 0;
         d_pending_rx = PendingRx{};
+        d_tx_tune_calls.clear();
+        d_tx_freqs_hz.fill(0.0);
+        d_async = TxAsyncCounts{};
+        d_unmatched_kept = 0;
     }
 
     // One-shot fault lookup (consumed on read).
@@ -471,8 +557,214 @@ private:
         }
     }
 
-    static bool valid_fragment_list(const BurstFragment* frags, size_t count)
+    // Multi-TX fragment contract (§5.2): N equal-length pointers per
+    // fragment (shared count), SOB/time-spec only on the first fragment,
+    // EOB only on the last, every channel pointer non-null.
+    static bool valid_multitx_fragment_list(const TxBurstFragment* frags,
+                                            size_t count,
+                                            size_t nch)
     {
+        if (frags == nullptr || count == 0 ||
+            count > kEchoMaxFragmentsPerBurst)
+            return false;
+        if (nch < 2 || nch > kEchoMaxTxChannels)
+            return false;
+        for (size_t i = 0; i < count; ++i) {
+            const unsigned f = frags[i].flags;
+            if (frags[i].count == 0)
+                return false;
+            for (size_t c = 0; c < nch; ++c)
+                if (frags[i].tx_data[c] == nullptr)
+                    return false;
+            if (i == 0) {
+                if (!(f & kFlagTimeSpec) || !(f & kFlagStartOfBurst))
+                    return false;
+            } else if (f & (kFlagTimeSpec | kFlagStartOfBurst)) {
+                return false;
+            }
+            if (i + 1 == count) {
+                if (!(f & kFlagEndOfBurst))
+                    return false;
+            } else if (f & kFlagEndOfBurst) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Multi-channel TX (mutex already held).  All channels share one
+    // sample offset: each send call moves every channel by the same chunk,
+    // SOB/time-spec only on the first call, EOB only on last-fragment
+    // calls.  Mirrors the legacy RX completion tail (faults, recv loop).
+    BurstStatus issue_tx_multi_locked(const TxCommand& cmd, std::string& error)
+    {
+        const size_t nch = cmd.tx_channel_count;
+        if (!valid_multitx_fragment_list(cmd.tx_multi_fragments,
+                                         cmd.fragment_count, nch)) {
+            error = "broken chain: invalid multi-TX fragment list "
+                    "(count/flags/null channel/EOB/SOB)";
+            return BurstStatus::BrokenChain;
+        }
+        if (d_active_fault == BurstStatus::BrokenChain) {
+            error = "broken chain (injected): fragment flags corrupted";
+            return BurstStatus::BrokenChain;
+        }
+        if (!d_rx_armed || d_armed_index != cmd.schedule_index) {
+            error = "broken chain: TX issued without armed RX for the "
+                    "same schedule index";
+            return BurstStatus::BrokenChain;
+        }
+        if (cmd.tx_ticks <= d_device_ticks) {
+            error = "late command: tx_ticks <= device time";
+            return BurstStatus::LateCommand;
+        }
+
+        FakeBurstRecord rec;
+        rec.schedule_index = cmd.schedule_index;
+        rec.tx_channel_count = nch;
+        rec.tx_samples_requested = cmd.total_samples;
+        rec.tx_stitched_ch.assign(nch, std::vector<int16_t>{});
+        bool first_call = true;
+        uint64_t sent_total = 0;
+        for (size_t i = 0; i < cmd.fragment_count; ++i) {
+            const TxBurstFragment& f = cmd.tx_multi_fragments[i];
+            uint64_t done = 0;
+            while (done < f.count) {
+                const uint64_t remaining = f.count - done;
+                uint64_t chunk = remaining;
+                if (d_cfg.max_io_chunk != 0 && chunk > d_cfg.max_io_chunk)
+                    chunk = d_cfg.max_io_chunk;
+                unsigned call_flags = f.flags;
+                if (!first_call)
+                    call_flags &= ~(kFlagTimeSpec | kFlagStartOfBurst);
+                rec.tx_flags.push_back(static_cast<uint8_t>(call_flags));
+                ++rec.tx_calls;
+                if (chunk < remaining)
+                    ++rec.tx_reissues;
+                for (size_t c = 0; c < nch; ++c) {
+                    const int16_t* base = f.tx_data[c];
+                    rec.tx_stitched_ch[c].insert(
+                        rec.tx_stitched_ch[c].end(), base + done * 2,
+                        base + (done + chunk) * 2);
+                }
+                done += chunk;
+                sent_total += chunk;
+                first_call = false;
+                if (d_stop) {
+                    rec.tx_samples_sent = sent_total;
+                    rec.status = BurstStatus::StopDuringIo;
+                    rec.error = "stop during TX send (in flight)";
+                    rec.tx_stitched = rec.tx_stitched_ch[0];
+                    d_records[rec.schedule_index] = std::move(rec);
+                    return BurstStatus::StopDuringIo;
+                }
+            }
+        }
+        rec.tx_samples_sent = sent_total;
+        rec.tx_stitched = rec.tx_stitched_ch[0]; // ch0 compat mirror
+
+        BurstResult res;
+        res.schedule_index = cmd.schedule_index;
+        res.tx_ticks = cmd.tx_ticks;
+        res.rx_ticks = d_pending_rx.rx_ticks;
+        res.tx_samples_requested = cmd.total_samples;
+        res.tx_samples_sent = sent_total;
+        res.tx_channel_count = nch;
+        res.tx_wire_samples_requested =
+            cmd.total_samples * static_cast<uint64_t>(nch);
+        res.tx_wire_samples_sent = sent_total * static_cast<uint64_t>(nch);
+        res.rx_samples_requested = d_pending_rx.total_samples;
+
+        if (d_active_fault == BurstStatus::Overflow ||
+            d_active_fault == BurstStatus::StopDuringIo) {
+            res.status = d_active_fault;
+            res.error = fault_error_locked(d_active_fault);
+            d_records[rec.schedule_index] = std::move(rec);
+            d_results.emplace(cmd.schedule_index, res);
+            d_rx_armed = false;
+            d_cv.notify_all();
+            return BurstStatus::Ok;
+        }
+        if (d_active_fault == BurstStatus::Timeout) {
+            // RX never completes: no result queued; count the orphaned
+            // command as unmatched (bounded).
+            res.status = BurstStatus::Timeout;
+            res.error = fault_error_locked(BurstStatus::Timeout);
+            d_records[rec.schedule_index] = std::move(rec);
+            d_rx_armed = false;
+            if (d_unmatched_kept < kAsyncUnmatchedCap) {
+                ++d_async.unmatched;
+                ++d_unmatched_kept;
+            } else {
+                ++d_async.dropped;
+            }
+            d_cv.notify_all();
+            return BurstStatus::Ok;
+        }
+
+        // Timed RX stream (same single-channel recv loop as legacy).
+        bool rx_first_call = true;
+        uint64_t received_total = 0;
+        for (size_t i = 0; i < d_pending_rx.fragment_count; ++i) {
+            const BurstFragment& f = d_pending_rx.fragments[i];
+            uint64_t done = 0;
+            while (done < f.count) {
+                const uint64_t remaining = f.count - done;
+                uint64_t chunk = remaining;
+                if (d_cfg.max_io_chunk != 0 && chunk > d_cfg.max_io_chunk)
+                    chunk = d_cfg.max_io_chunk;
+                unsigned call_flags = f.flags;
+                if (!rx_first_call)
+                    call_flags &= ~(kFlagTimeSpec | kFlagStartOfBurst);
+                rec.rx_flags.push_back(static_cast<uint8_t>(call_flags));
+                ++rec.rx_calls;
+                if (chunk < remaining)
+                    ++rec.rx_reissues;
+                if (f.rx_data != nullptr) {
+                    for (uint64_t e = 0; e < chunk; ++e) {
+                        const uint64_t pos = f.offset + done + e;
+                        f.rx_data[(done + e) * 2] =
+                            expected_rx_sample(cmd.schedule_index, pos * 2);
+                        f.rx_data[(done + e) * 2 + 1] =
+                            expected_rx_sample(cmd.schedule_index,
+                                               pos * 2 + 1);
+                    }
+                    rec.rx_stitched.insert(
+                        rec.rx_stitched.end(), f.rx_data + done * 2,
+                        f.rx_data + (done + chunk) * 2);
+                }
+                done += chunk;
+                received_total += chunk;
+                rx_first_call = false;
+                if (d_stop) {
+                    rec.rx_samples_received = received_total;
+                    rec.status = BurstStatus::StopDuringIo;
+                    rec.error = "stop during RX recv (in flight)";
+                    d_records[rec.schedule_index] = std::move(rec);
+                    return BurstStatus::StopDuringIo;
+                }
+            }
+        }
+        rec.rx_samples_received = received_total;
+        rec.rx_time_ticks = d_pending_rx.rx_ticks;
+        rec.status = (rec.tx_reissues + rec.rx_reissues) > 0
+                         ? BurstStatus::PartialHandled
+                         : BurstStatus::Ok;
+        res.rx_time_ticks = d_pending_rx.rx_ticks;
+        res.rx_samples_received = received_total;
+        res.tx_reissues = rec.tx_reissues;
+        res.rx_reissues = rec.rx_reissues;
+        res.status = rec.status;
+        ++d_async.ack;
+        d_records[rec.schedule_index] = std::move(rec);
+        d_results.emplace(cmd.schedule_index, res);
+        d_rx_armed = false;
+        d_device_ticks += d_cfg.device_time_auto_advance;
+        d_cv.notify_all();
+        return BurstStatus::Ok;
+    }
+
+    static bool valid_fragment_list(const BurstFragment* frags, size_t count)    {
         if (frags == nullptr || count == 0 ||
             count > kEchoMaxFragmentsPerBurst)
             return false;
@@ -512,6 +804,11 @@ private:
     std::map<uint64_t, BurstResult> d_results;
     std::map<uint64_t, FakeBurstRecord> d_records;
     PendingRx d_pending_rx;
+    // §5.5/5.6 state: per-logical-channel tune log + async counters.
+    std::vector<std::pair<size_t, double>> d_tx_tune_calls;
+    std::array<double, kEchoMaxTxChannels> d_tx_freqs_hz = {};
+    TxAsyncCounts d_async;
+    size_t d_unmatched_kept = 0; // bounded unmatched queue depth model
 };
 
 } // namespace echo

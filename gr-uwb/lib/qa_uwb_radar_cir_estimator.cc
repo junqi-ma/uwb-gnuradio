@@ -36,6 +36,7 @@ using gr::uwb::demod::kQm35CodeLength;
 using gr::uwb::demod::kQm35SamplesPerSymbol;
 using gr::uwb::radar::CirStatus;
 using gr::uwb::radar::estimate_radar_cir;
+using gr::uwb::radar::estimate_radar_cir_repetition;
 using gr::uwb::radar::prepare_radar_cir_code;
 using gr::uwb::radar::RadarCirEstimate;
 using gr::uwb::radar::RadarCirScratch;
@@ -386,6 +387,37 @@ BOOST_AUTO_TEST_CASE(test_radar_cir_clean_16_100)
                         "clean raw relative L2=" + std::to_string(e_raw));
     BOOST_CHECK_MESSAGE(e_norm < 1e-5,
                         "clean norm relative L2=" + std::to_string(e_norm));
+}
+
+BOOST_AUTO_TEST_CASE(test_individual_repetitions_mean_matches_average)
+{
+    const auto meta = load_canonical_meta();
+    const auto rx = load_radar_cf32("rx_clean_998p4.cf32", meta.rx_len);
+    RadarCirScratch scratch;
+    BOOST_REQUIRE(prepare_code9(scratch));
+
+    RadarCirEstimate avg_out;
+    BOOST_REQUIRE(run_cir(rx, meta.origin_clean, kRadarPre, kRadarPost,
+                          kSkip, kMaxRep, kNSync, avg_out, scratch));
+    std::vector<gr_complex> average(scratch.raw_taps.begin(),
+                                    scratch.raw_taps.begin() + kRadarTaps);
+    std::vector<gr_complex> sum(kRadarTaps, gr_complex(0.f, 0.f));
+    for (size_t rep = kSkip; rep < kSkip + kMaxRep; ++rep) {
+        RadarCirEstimate one;
+        BOOST_REQUIRE(estimate_radar_cir_repetition(
+            rx.data(), rx.size(), meta.origin_clean, kQm35SamplesPerSymbol,
+            kRadarPre, kRadarPost, rep, kNSync, one, scratch));
+        BOOST_CHECK_EQUAL(one.first_repetition, rep);
+        BOOST_CHECK_EQUAL(one.valid_repetitions, 1u);
+        for (size_t tap = 0; tap < kRadarTaps; ++tap)
+            sum[tap] += scratch.raw_taps[tap];
+    }
+    for (auto& v : sum)
+        v /= static_cast<float>(kMaxRep);
+    const double err = relative_l2(sum.data(), average.data(), kRadarTaps);
+    BOOST_CHECK_MESSAGE(err < 2e-6,
+                        "mean(individual) vs average relative L2=" +
+                            std::to_string(err));
 }
 
 BOOST_AUTO_TEST_CASE(test_radar_cir_integer_delay)

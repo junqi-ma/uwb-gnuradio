@@ -4,9 +4,13 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Offline process: scheduled SC16 dump → per-window notch → 65/48 @998.4.
+ * Offline process: scheduled SC16 dump → per-window notch → 65/L @998.4.
  *
- * Not a GNU Radio block.  No UHD.  Reuses RationalResampler65_48Core.
+ * Not a GNU Radio block.  No UHD.  Reuses RationalResampler65_48Core
+ * (737.28 MHz native) and RationalResampler65_32Core (491.52 MHz CG400).
+ * No GR scheduler/forecast/work semantics: window-level thread pool over
+ * dump windows; each worker owns one resampler core plus reused scratch
+ * (WorkerScratch) so the per-window loop performs no new/vector-resize.
  * Never overwrites DIR/capture.iq.
  */
 
@@ -34,10 +38,14 @@
 using gr::uwb::core::DemodResultMeta;
 using gr::uwb::core::DumpWindowMeta;
 using gr::uwb::core::JsonField;
+using gr::uwb::core::RationalResampler65_32Core;
 using gr::uwb::core::RationalResampler65_48Core;
 using gr::uwb::core::ToneEstimate;
 using gr::uwb::core::ToneSubtractResult;
 using gr::uwb::core::WindowCropGeom;
+using gr::uwb::defaults::kCg400NativeScheduledCapture;
+using gr::uwb::defaults::kCg400NativeScheduledPostGuard;
+using gr::uwb::defaults::kCg400NativeScheduledPreGuard;
 using gr::uwb::defaults::kNativeScheduledCapture;
 using gr::uwb::defaults::kNativeScheduledPostGuard;
 using gr::uwb::defaults::kNativeScheduledPreGuard;
@@ -45,14 +53,19 @@ using gr::uwb::defaults::kNativeScheduledPreGuard;
 namespace {
 
 constexpr double kFs737 = 737.28e6;
+constexpr double kFs491 = 491.52e6;
 constexpr double kFs998 = 998.4e6;
 constexpr double kDefaultCenterHz = 6489.6e6;
 constexpr double kDefaultToneRfHz = 6256.640e6;
 constexpr double kDefaultSearchHz = 80e6;
 constexpr int kAutoWorkerCap = 8;
 
+inline bool is_cg400_rate(double fs) { return fs == kFs491; }
+inline uint32_t resamp_decim(double fs) { return is_cg400_rate(fs) ? 32 : 48; }
+
 struct Options {
     std::string dir;
+    double native_rate_hz = kFs737;
     double center_hz = kDefaultCenterHz;
     double tone_rf_hz = 0.0;
     double tone_search_hz = kDefaultSearchHz;
@@ -70,6 +83,7 @@ void usage(const char* argv0)
 {
     std::cerr
         << "Usage: " << argv0 << " DIR [options]\n"
+        << "  --native-rate HZ        737280000 (default) | 491520000 (CG400)\n"
         << "  --center-hz HZ          LO used at capture (default 6489.6e6)\n"
         << "  --tone-rf-hz HZ         known CW RF; skip coarse FFT search\n"
         << "  --tone-search-hz HZ     half-width around hint (default 80e6)\n"
@@ -103,7 +117,15 @@ bool parse_args(int argc, char** argv, Options& o)
                                          name);
             return argv[++i];
         };
-        if (a == "--center-hz")
+        if (a == "--native-rate") {
+            const long long v =
+                std::llround(std::stod(need("--native-rate")));
+            if (v != 737280000LL && v != 491520000LL) {
+                std::cerr << "--native-rate must be 737280000|491520000\n";
+                return false;
+            }
+            o.native_rate_hz = static_cast<double>(v);
+        } else if (a == "--center-hz")
             o.center_hz = std::stod(need("--center-hz"));
         else if (a == "--tone-rf-hz")
             o.tone_rf_hz = std::stod(need("--tone-rf-hz"));
@@ -169,7 +191,8 @@ bool file_ok(const std::string& path)
     return static_cast<bool>(f);
 }
 
-std::string find_taps_file(const std::string& taps_or_profile)
+std::string find_taps_file(const std::string& taps_or_profile,
+                           double native_rate_hz)
 {
     if (taps_or_profile != "quality" && taps_or_profile != "realtime" &&
         taps_or_profile != "quality_minorder" &&
@@ -179,25 +202,28 @@ std::string find_taps_file(const std::string& taps_or_profile)
         throw std::runtime_error("cannot open taps: " + taps_or_profile);
     }
     const std::string fname = "taps_" + taps_or_profile + ".txt";
+    const std::string subdir = is_cg400_rate(native_rate_hz)
+                                   ? "resampler_65_32/"
+                                   : "resampler_65_48/";
     const char* env = std::getenv("UWB_TESTDATA");
     std::vector<std::string> cands;
     if (env && *env)
-        cands.push_back(std::string(env) + "/resampler_65_48/" + fname);
+        cands.push_back(std::string(env) + "/" + subdir + fname);
     const char* prefixes[] = {
-        "testdata/resampler_65_48/",
-        "../testdata/resampler_65_48/",
-        "../../testdata/resampler_65_48/",
-        "../../../testdata/resampler_65_48/",
-        "../../../../testdata/resampler_65_48/",
+        "testdata/",
+        "../testdata/",
+        "../../testdata/",
+        "../../../testdata/",
+        "../../../../testdata/",
     };
     for (const char* p : prefixes)
-        cands.push_back(std::string(p) + fname);
+        cands.push_back(std::string(p) + subdir + fname);
     for (const auto& c : cands) {
         if (file_ok(c))
             return c;
     }
-    throw std::runtime_error("cannot find " + fname +
-                             " under testdata/resampler_65_48/");
+    throw std::runtime_error("cannot find " + fname + " under testdata/" +
+                             subdir);
 }
 
 std::vector<float> load_taps_f32(const std::string& path)
@@ -217,23 +243,24 @@ std::vector<float> load_taps_f32(const std::string& path)
     return taps;
 }
 
-int64_t map_native(int64_t p, size_t T)
+int64_t map_native(int64_t p, size_t T, uint32_t decim = 48)
 {
     const double d = 0.5 * static_cast<double>(T > 0 ? T - 1 : 0);
-    const double m = (static_cast<double>(p) * 65.0 + d) / 48.0;
+    const double m = (static_cast<double>(p) * 65.0 + d) /
+                     static_cast<double>(decim);
     const int64_t r = static_cast<int64_t>(std::llround(m));
     return r < 0 ? 0 : r;
 }
 
-void resample_oneshot(RationalResampler65_48Core& core,
+template <typename Core>
+void resample_oneshot(Core& core,
                       const std::vector<float>& taps,
                       const std::complex<float>* in,
                       size_t n_in,
                       std::vector<std::complex<float>>& out)
 {
     core.reset();
-    const size_t Lout =
-        RationalResampler65_48Core::expected_output_length(n_in, taps.size());
+    const size_t Lout = Core::expected_output_length(n_in, taps.size());
     out.resize(Lout + 64);
     size_t produced = 0;
     if (n_in > 0) {
@@ -300,7 +327,7 @@ const DumpWindowMeta* pick_probe(const std::vector<DumpWindowMeta>& wins)
     return fallback;
 }
 
-// Each worker owns a RationalResampler65_48Core (~13 MB scratch).
+// Each worker owns a resampler core (~13 MB scratch).
 // On the i7-12700 (8P+4E) 0.5 s mixed dump: 4 workers 0.78 s wall,
 // 8 workers 0.98 s, 20 workers 3.5 s (allocator / teardown).
 int resolve_workers(int requested, size_t nwin)
@@ -349,9 +376,10 @@ struct WorkerScratch {
     std::vector<std::complex<float>> cf;
 };
 
+template <typename Core>
 void process_window(const WindowJob& job,
                     WindowProduct& out,
-                    RationalResampler65_48Core& core,
+                    Core& core,
                     WorkerScratch& scratch,
                     const std::vector<float>& taps,
                     const Options& opt,
@@ -374,7 +402,8 @@ void process_window(const WindowJob& job,
     if (!opt.skip_notch) {
         scratch.notched.resize(job.raw.size());
         out.sub = gr::uwb::core::subtract_tone_sc16(
-            scratch.notched.data(), job.raw.data(), n_native, kFs737, tone_hz);
+            scratch.notched.data(), job.raw.data(), n_native,
+            opt.native_rate_hz, tone_hz);
         src = scratch.notched.data();
         if (opt.keep_native_notch)
             out.notch_native.assign(scratch.notched.begin(),
@@ -428,6 +457,73 @@ void process_window(const WindowJob& job,
     out.pre = pre;
     out.cap = cap;
     out.post = post;
+}
+
+// Window-level thread pool over dump windows (no GR scheduler here).
+// Each worker owns one Core plus reused WorkerScratch; the per-window loop
+// performs no new/vector-resize beyond the pre-sized scratch buffers.
+template <typename Core>
+bool run_compute(const std::vector<WindowJob>& jobs,
+                 std::vector<WindowProduct>& products,
+                 const std::vector<float>& taps,
+                 const Options& opt,
+                 double tone_hz,
+                 const WindowCropGeom& demod_geom,
+                 int nworkers)
+{
+    if (nworkers <= 1) {
+        Core core(taps);
+        WorkerScratch scratch;
+        for (size_t i = 0; i < jobs.size(); ++i) {
+            process_window(jobs[i], products[i], core, scratch, taps, opt,
+                           tone_hz, demod_geom);
+            if (!products[i].error.empty()) {
+                std::cerr << products[i].error << " packet_id="
+                          << jobs[i].w->packet_id << "\n";
+                return false;
+            }
+        }
+        return true;
+    }
+    std::atomic<size_t> next{ 0 };
+    std::vector<std::string> worker_err(static_cast<size_t>(nworkers));
+    std::vector<std::thread> pool;
+    pool.reserve(static_cast<size_t>(nworkers));
+    for (int t = 0; t < nworkers; ++t) {
+        pool.emplace_back([&, t]() {
+            try {
+                // One core per worker.  process() is not safe to share.
+                // Keep FIR nworkers=1 so we do not nest thread pools.
+                Core core(taps);
+                WorkerScratch scratch;
+                for (;;) {
+                    const size_t i =
+                        next.fetch_add(1, std::memory_order_relaxed);
+                    if (i >= jobs.size())
+                        break;
+                    process_window(jobs[i], products[i], core, scratch, taps,
+                                   opt, tone_hz, demod_geom);
+                    if (!products[i].error.empty()) {
+                        worker_err[static_cast<size_t>(t)] =
+                            products[i].error + " packet_id=" +
+                            std::to_string(jobs[i].w->packet_id);
+                        return;
+                    }
+                }
+            } catch (const std::exception& e) {
+                worker_err[static_cast<size_t>(t)] = e.what();
+            }
+        });
+    }
+    for (auto& th : pool)
+        th.join();
+    for (const auto& e : worker_err) {
+        if (!e.empty()) {
+            std::cerr << e << "\n";
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -490,23 +586,35 @@ int main(int argc, char** argv)
     std::string taps_path;
     std::vector<float> taps;
     try {
-        taps_path = find_taps_file(opt.taps);
+        taps_path = find_taps_file(opt.taps, opt.native_rate_hz);
         taps = load_taps_f32(taps_path);
     } catch (const std::exception& e) {
         std::cerr << e.what() << "\n";
         return 1;
     }
 
+    const bool is491 = is_cg400_rate(opt.native_rate_hz);
+    const uint32_t decim = resamp_decim(opt.native_rate_hz);
     const WindowCropGeom demod_geom{
-        static_cast<int64_t>(kNativeScheduledPreGuard),
-        static_cast<int64_t>(kNativeScheduledCapture),
-        static_cast<int64_t>(kNativeScheduledPostGuard)
+        static_cast<int64_t>(is491 ? kCg400NativeScheduledPreGuard
+                                   : kNativeScheduledPreGuard),
+        static_cast<int64_t>(is491 ? kCg400NativeScheduledCapture
+                                   : kNativeScheduledCapture),
+        static_cast<int64_t>(is491 ? kCg400NativeScheduledPostGuard
+                                   : kNativeScheduledPostGuard)
     };
+    // NOTE: no kNativeInterference* geometry is referenced in this tool.
+    // CG400 dump pre/post (147456/49152 native @491.52 MHz) will land in
+    // T8's kCg400Interference* constants (300/100 us); T7 keeps this file
+    // free of that geometry.  TODO(T8): emit kCg400Interference* here if
+    // dump pre/post metadata is added.
 
     const int nworkers = resolve_workers(opt.workers, selected.size());
     const unsigned hc = std::thread::hardware_concurrency();
 
     std::cout << "dump: " << opt.dir << "\n";
+    std::cout << "native_rate=" << static_cast<long long>(opt.native_rate_hz)
+              << " decim=" << decim << "\n";
     std::cout << "windows=" << windows.size() << " selected=" << selected.size()
               << " select=" << opt.select << " emit=" << opt.emit << "\n";
     std::cout << "taps=" << taps_path << " T=" << taps.size() << "\n";
@@ -551,17 +659,18 @@ int main(int argc, char** argv)
         if (opt.tone_rf_hz != 0.0) {
             const double f0 = opt.tone_rf_hz - opt.center_hz;
             const double span =
-                std::max(200.0, kFs737 / static_cast<double>(x.size()) * 8.0);
+                std::max(200.0,
+                         opt.native_rate_hz / static_cast<double>(x.size()) *
+                             8.0);
             tone.coarse_hz = f0;
-            tone.baseband_hz =
-                gr::uwb::core::refine_tone_freq(x.data(), x.size(), kFs737, f0,
-                                                span);
+            tone.baseband_hz = gr::uwb::core::refine_tone_freq(
+                x.data(), x.size(), opt.native_rate_hz, f0, span);
         } else {
             const double hint = kDefaultToneRfHz - opt.center_hz;
             const double lo = hint - opt.tone_search_hz;
             const double hi = hint + opt.tone_search_hz;
-            tone = gr::uwb::core::estimate_tone(x.data(), x.size(), kFs737, lo,
-                                                hi);
+            tone = gr::uwb::core::estimate_tone(
+                x.data(), x.size(), opt.native_rate_hz, lo, hi);
         }
         std::cout << "probe packet_id=" << probe->packet_id
                   << " n=" << probe->sample_count << "\n";
@@ -608,59 +717,15 @@ int main(int argc, char** argv)
 
     std::vector<WindowProduct> products(jobs.size());
     const auto t_comp0 = Clock::now();
-    if (nworkers <= 1) {
-        RationalResampler65_48Core core(taps);
-        WorkerScratch scratch;
-        for (size_t i = 0; i < jobs.size(); ++i) {
-            process_window(jobs[i], products[i], core, scratch, taps, opt,
-                           tone.baseband_hz, demod_geom);
-            if (!products[i].error.empty()) {
-                std::cerr << products[i].error << " packet_id="
-                          << jobs[i].w->packet_id << "\n";
-                return 2;
-            }
-        }
-    } else {
-        std::atomic<size_t> next{ 0 };
-        std::vector<std::string> worker_err(static_cast<size_t>(nworkers));
-        std::vector<std::thread> pool;
-        pool.reserve(static_cast<size_t>(nworkers));
-        for (int t = 0; t < nworkers; ++t) {
-            pool.emplace_back([&, t]() {
-                try {
-                    // One core per worker.  process() is not safe to share.
-                    // Keep FIR nworkers=1 so we do not nest thread pools.
-                    RationalResampler65_48Core core(taps);
-                    WorkerScratch scratch;
-                    for (;;) {
-                        const size_t i =
-                            next.fetch_add(1, std::memory_order_relaxed);
-                        if (i >= jobs.size())
-                            break;
-                        process_window(jobs[i], products[i], core, scratch,
-                                       taps, opt, tone.baseband_hz,
-                                       demod_geom);
-                        if (!products[i].error.empty()) {
-                            worker_err[static_cast<size_t>(t)] =
-                                products[i].error + " packet_id=" +
-                                std::to_string(jobs[i].w->packet_id);
-                            return;
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    worker_err[static_cast<size_t>(t)] = e.what();
-                }
-            });
-        }
-        for (auto& th : pool)
-            th.join();
-        for (const auto& e : worker_err) {
-            if (!e.empty()) {
-                std::cerr << e << "\n";
-                return 2;
-            }
-        }
-    }
+    bool compute_ok = false;
+    if (is491)
+        compute_ok = run_compute<RationalResampler65_32Core>(
+            jobs, products, taps, opt, tone.baseband_hz, demod_geom, nworkers);
+    else
+        compute_ok = run_compute<RationalResampler65_48Core>(
+            jobs, products, taps, opt, tone.baseband_hz, demod_geom, nworkers);
+    if (!compute_ok)
+        return 2;
     const double compute_s =
         std::chrono::duration<double>(Clock::now() - t_comp0).count();
     for (auto& job : jobs) {
@@ -697,22 +762,24 @@ int main(int argc, char** argv)
                     prod.notch_native.size() / 2);
         }
 
-        const int64_t ws_out = map_native(prod.native_ws, taps.size());
+        const int64_t ws_out = map_native(prod.native_ws, taps.size(), decim);
         int64_t pre_out = 0;
         int64_t cap_out = static_cast<int64_t>(rs.size());
         int64_t post_out = 0;
         if (prod.pre >= 0 && prod.cap >= 0) {
-            pre_out = map_native(prod.native_ws + prod.pre, taps.size()) -
-                      ws_out;
-            cap_out = map_native(prod.native_ws + prod.pre + prod.cap,
-                                 taps.size()) -
-                      map_native(prod.native_ws + prod.pre, taps.size());
+            pre_out =
+                map_native(prod.native_ws + prod.pre, taps.size(), decim) -
+                ws_out;
+            cap_out =
+                map_native(prod.native_ws + prod.pre + prod.cap, taps.size(),
+                           decim) -
+                map_native(prod.native_ws + prod.pre, taps.size(), decim);
             if (prod.post >= 0) {
-                post_out = map_native(prod.native_ws + prod.pre + prod.cap +
-                                          prod.post,
-                                      taps.size()) -
-                           map_native(prod.native_ws + prod.pre + prod.cap,
-                                      taps.size());
+                post_out =
+                    map_native(prod.native_ws + prod.pre + prod.cap + prod.post,
+                               taps.size(), decim) -
+                    map_native(prod.native_ws + prod.pre + prod.cap,
+                               taps.size(), decim);
             }
             if (pre_out < 0)
                 pre_out = 0;
@@ -727,7 +794,7 @@ int main(int argc, char** argv)
         }
         const int64_t pred_out =
             (prod.native_pred >= 0)
-                ? map_native(prod.native_pred, taps.size())
+                ? map_native(prod.native_pred, taps.size(), decim)
                 : -1;
 
         float iq_scale = 1.0f;

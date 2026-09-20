@@ -35,7 +35,9 @@
  * delay lands at cir_pre and the calibrated leakage peak reads
  * peak_tap - zero_delay_tap = +2 (the known pulse-shape offset).
  *
- * Output: every enqueued job produces exactly one PDU on "cir":
+ * Output: by default every enqueued job produces one averaged PDU on "cir".
+ * With emit_individual_repetitions enabled, a successful job produces one PDU
+ * per selected SYNC repetition instead:
  *   cons(meta, c32vector raw taps) — empty vector for failed frames.
  *   meta carries status ("ok"/"sfd_failed"/"timing_failed"/"cir_failed"/
  *   "internal_error"), full lineage and, when emit_normalized is set and the
@@ -106,7 +108,8 @@ public:
                      float sync_refine_threshold = 0.3f,
                      bool emit_normalized = true,
                      size_t queue_capacity = 64,
-                     bool use_predicted_timing = false);
+                     bool use_predicted_timing = false,
+                     bool emit_individual_repetitions = false);
 
     ~UwbRadarCirEstimator() override;
 
@@ -123,6 +126,10 @@ public:
     bool emit_normalized() const { return d_emit_normalized_; }
     size_t queue_capacity() const { return d_queue_capacity_; }
     bool use_predicted_timing() const { return d_cfg_.use_predicted_timing; }
+    bool emit_individual_repetitions() const
+    {
+        return d_emit_individual_repetitions_;
+    }
 
     uint64_t pdus_received() const;
     uint64_t pdus_enqueued() const;
@@ -164,7 +171,8 @@ public:
                          float sync_refine_threshold,
                          bool emit_normalized,
                          size_t queue_capacity,
-                         bool use_predicted_timing = false);
+                         bool use_predicted_timing = false,
+                         bool emit_individual_repetitions = false);
 
 private:
     struct Job {
@@ -184,7 +192,10 @@ private:
     void publish_frame(const Job& job,
                        const radar::RadarCirResult& r,
                        uint64_t queue_us,
-                       uint64_t service_us);
+                       uint64_t service_us,
+                       int64_t repetition_index = -1,
+                       size_t repetition_ordinal = 0,
+                       size_t repetition_count = 0);
     void publish_status(const std::string& event, pmt::pmt_t extra = pmt::PMT_NIL);
     void snapshot_stats(pmt::pmt_t& meta);
     void record_service_time(uint64_t us);
@@ -199,6 +210,7 @@ private:
     radar::RadarCirConfig d_cfg_;
     radar::RadarCirCoreScratch d_scratch_;
     bool d_emit_normalized_ = true;
+    bool d_emit_individual_repetitions_ = false;
     size_t d_queue_capacity_ = 0;
 
     // Job queue.

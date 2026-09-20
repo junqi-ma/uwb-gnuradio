@@ -657,4 +657,260 @@ BOOST_AUTO_TEST_CASE(test_uhd_backend_fake_adapter_geometry)
     BOOST_REQUIRE(blk->stop());
 }
 
+// ---------------------------------------------------------------------------
+// M1: multi-TX channel configuration (2/4 valid; dup/out-of-range/count
+// rejected; per-channel freq/gain validated).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_uhd_backend_multitx_config)
+{
+    std::string err;
+    auto two_ch = [] {
+        uhd_cfg::UhdBurstBackendConfig cfg;
+        uhd_cfg::UhdTxChannelConfig a, b;
+        a.channel = 0;
+        a.gain_db = 10.0;
+        a.center_freq_hz = 7.4e9;
+        b.channel = 1;
+        b.gain_db = 20.0;
+        b.center_freq_hz = 7.5e9;
+        cfg.tx_channels = { a, b };
+        return cfg;
+    };
+    BOOST_CHECK(uhd_cfg::validate_uhd_burst_backend_config(two_ch(), &err));
+
+    {
+        uhd_cfg::UhdBurstBackendConfig cfg;
+        for (size_t c = 0; c < 4; ++c) {
+            uhd_cfg::UhdTxChannelConfig e;
+            e.channel = c;
+            cfg.tx_channels.push_back(e);
+        }
+        BOOST_CHECK(
+            uhd_cfg::validate_uhd_burst_backend_config(cfg, &err));
+        BOOST_CHECK_EQUAL(uhd_cfg::effective_tx_channels(cfg).size(), 4u);
+    }
+
+    auto expect_fail = [](uhd_cfg::UhdBurstBackendConfig cfg) {
+        std::string e;
+        BOOST_CHECK(!uhd_cfg::validate_uhd_burst_backend_config(cfg, &e));
+        BOOST_CHECK(!e.empty());
+    };
+    { // duplicate physical channel
+        auto cfg = two_ch();
+        cfg.tx_channels[1].channel = 0;
+        expect_fail(cfg);
+    }
+    { // out of range (>= kEchoMaxTxChannels)
+        auto cfg = two_ch();
+        cfg.tx_channels[1].channel = echo::kEchoMaxTxChannels;
+        expect_fail(cfg);
+    }
+    { // too many entries
+        uhd_cfg::UhdBurstBackendConfig cfg;
+        for (size_t c = 0; c <= echo::kEchoMaxTxChannels; ++c) {
+            uhd_cfg::UhdTxChannelConfig e;
+            e.channel = c % echo::kEchoMaxTxChannels;
+            cfg.tx_channels.push_back(e);
+        }
+        expect_fail(cfg);
+    }
+    { // bad per-channel freq / gain
+        auto cfg = two_ch();
+        cfg.tx_channels[0].center_freq_hz = -1.0;
+        expect_fail(cfg);
+        cfg = two_ch();
+        cfg.tx_channels[0].center_freq_hz =
+            std::numeric_limits<double>::quiet_NaN();
+        expect_fail(cfg);
+        cfg = two_ch();
+        cfg.tx_channels[1].gain_db = 150.0;
+        expect_fail(cfg);
+        cfg = two_ch();
+        cfg.tx_channels[1].gain_db =
+            std::numeric_limits<double>::quiet_NaN();
+        expect_fail(cfg);
+    }
+    { // negative gain sentinel stays valid per channel
+        auto cfg = two_ch();
+        cfg.tx_channels[0].gain_db = -1.0;
+        cfg.tx_channels[1].gain_db = -1.0;
+        BOOST_CHECK(
+            uhd_cfg::validate_uhd_burst_backend_config(cfg, &err));
+    }
+    { // dry-run reserve follows the effective count, print frozen
+        auto cfg = two_ch();
+        uhd_cfg::UhdDryRunPlan plan;
+        BOOST_REQUIRE(uhd_cfg::build_uhd_dry_run_plan(
+            cfg, radar_grid(), 36864000, 0, 140982, 55591, plan, &err));
+        BOOST_CHECK_EQUAL(plan.tx_channel_count, 2u);
+        BOOST_REQUIRE_EQUAL(plan.tx_physical_channels.size(), 2u);
+        BOOST_CHECK_EQUAL(plan.tx_physical_channels[0], 0u);
+        BOOST_CHECK_EQUAL(plan.tx_physical_channels[1], 1u);
+        BOOST_CHECK_EQUAL(plan.tx_wire_bytes, plan.tx_bytes * 2);
+        const std::string text = uhd_cfg::print_uhd_dry_run_plan(plan);
+        BOOST_CHECK(text.find("dry-run complete: no device was opened") !=
+                    std::string::npos);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M1: legacy scalar → effective single-channel equivalence.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_uhd_backend_effective_single_equiv)
+{
+    auto cfg = radar_config();
+    cfg.tx_antenna = "TX/RX";
+    cfg.tx_gain_db = 12.5;
+    cfg.center_freq_hz = 7.4e9;
+    const auto eff = uhd_cfg::effective_tx_channels(cfg);
+    BOOST_REQUIRE_EQUAL(eff.size(), 1u);
+    BOOST_CHECK_EQUAL(eff[0].channel, cfg.tx_channel);
+    BOOST_CHECK_EQUAL(eff[0].antenna, "TX/RX");
+    BOOST_CHECK_EQUAL(eff[0].gain_db, 12.5);
+    BOOST_CHECK_EQUAL(eff[0].center_freq_hz, 7.4e9);
+    // Explicit vector wins verbatim over the scalars.
+    uhd_cfg::UhdTxChannelConfig e;
+    e.channel = 1;
+    e.antenna = "TX/RX";
+    e.gain_db = 3.0;
+    e.center_freq_hz = 7.6e9;
+    cfg.tx_channels = { e };
+    const auto eff2 = uhd_cfg::effective_tx_channels(cfg);
+    BOOST_REQUIRE_EQUAL(eff2.size(), 1u);
+    BOOST_CHECK_EQUAL(eff2[0].channel, 1u);
+    BOOST_CHECK_EQUAL(eff2[0].center_freq_hz, 7.6e9);
+    // Legacy dry-run still reports a single channel.
+    std::string err;
+    uhd_cfg::UhdDryRunPlan plan;
+    BOOST_REQUIRE(uhd_cfg::build_uhd_dry_run_plan(
+        radar_config(), radar_grid(), 36864000, 0, 140982, 55591, plan,
+        &err));
+    BOOST_CHECK_EQUAL(plan.tx_channel_count, 1u);
+    BOOST_CHECK_EQUAL(plan.tx_wire_bytes, plan.tx_bytes);
+}
+
+// ---------------------------------------------------------------------------
+// M1: JamDelayRng fixed-seed repeatability and inclusive-boundary mapping.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_multitx_rng_repeat_bounds)
+{
+    // Same seed → identical stream (fixed PCG, no STL distribution).
+    echo::JamDelayRng a(12345), b(12345);
+    for (int i = 0; i < 64; ++i)
+        BOOST_CHECK_EQUAL(a.next_u32(), b.next_u32());
+    // Different seeds diverge (sanity: not a constant stream).
+    echo::JamDelayRng c(1), d(2);
+    bool differ = false;
+    for (int i = 0; i < 8; ++i)
+        differ = differ || (c.next_u32() != d.next_u32());
+    BOOST_CHECK(differ);
+
+    echo::JamDelayRng rng(7);
+    BOOST_CHECK_EQUAL(rng.next_range_inclusive(5, 5), 5); // zero span
+    BOOST_CHECK_EQUAL(rng.next_range_inclusive(0, 0), 0);
+    BOOST_CHECK_EQUAL(rng.next_range_inclusive(9, 3), 9); // hi <= lo → lo
+    // Closed-interval containment, incl. negative spans and full [-D, +D].
+    for (int i = 0; i < 512; ++i) {
+        const int64_t v = rng.next_range_inclusive(-20, 20);
+        BOOST_CHECK(v >= -20 && v <= 20);
+    }
+    for (int i = 0; i < 256; ++i) {
+        const int64_t v = rng.next_range_inclusive(-100, -1);
+        BOOST_CHECK(v >= -100 && v <= -1);
+    }
+    // Endpoints reachable over a long draw (span 41, 4096 draws).
+    bool seen_lo = false, seen_hi = false;
+    for (int i = 0; i < 4096; ++i) {
+        const int64_t v = rng.next_range_inclusive(-20, 20);
+        seen_lo = seen_lo || (v == -20);
+        seen_hi = seen_hi || (v == 20);
+    }
+    BOOST_CHECK(seen_lo);
+    BOOST_CHECK(seen_hi);
+}
+
+// ---------------------------------------------------------------------------
+// M1: prepare_multitx_geometry L formula and multitx_burst_bounds edges.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_multitx_geometry_L_bounds)
+{
+    std::string err;
+    echo::MultiTxGeometry g;
+    // L = max(D + sense, 2D + jam).
+    BOOST_REQUIRE(
+        echo::prepare_multitx_geometry(100, 50, 20, g, &err));
+    BOOST_CHECK_EQUAL(g.phys_len_L, 120u); // max(120, 90)
+    BOOST_CHECK_EQUAL(g.sense_begin, 20u);
+    BOOST_REQUIRE(echo::prepare_multitx_geometry(50, 100, 20, g, &err));
+    BOOST_CHECK_EQUAL(g.phys_len_L, 140u); // max(70, 140)
+    // Silent jammer: legacy length when D == 0, parked at D otherwise.
+    BOOST_REQUIRE(echo::prepare_multitx_geometry(100, 0, 0, g, &err));
+    BOOST_CHECK_EQUAL(g.phys_len_L, 100u);
+    BOOST_REQUIRE(echo::prepare_multitx_geometry(100, 0, 20, g, &err));
+    BOOST_CHECK_EQUAL(g.phys_len_L, 120u);
+    BOOST_CHECK(!echo::prepare_multitx_geometry(0, 50, 20, g, &err));
+    BOOST_CHECK(!err.empty());
+
+    // Boundary set: sorted unique, [0, L], delay extremes pin jam edges.
+    BOOST_REQUIRE(
+        echo::prepare_multitx_geometry(100, 50, 20, g, &err)); // L = 120
+    uint64_t bounds[5] = {};
+    const int64_t D = 20;
+    for (const int64_t delay : { -D, int64_t(0), D }) {
+        const size_t n =
+            echo::multitx_burst_bounds(g, delay, bounds, 5);
+        BOOST_CHECK(n >= 2 && n <= 5);
+        BOOST_CHECK_EQUAL(bounds[0], 0u);
+        BOOST_CHECK_EQUAL(bounds[n - 1], g.phys_len_L);
+        for (size_t i = 1; i < n; ++i)
+            BOOST_CHECK_LT(bounds[i - 1], bounds[i]);
+        // Jammer window present and inside [0, L].
+        const uint64_t jb = static_cast<uint64_t>(D + delay);
+        bool has_jb = false, has_je = false;
+        for (size_t i = 0; i < n; ++i) {
+            has_jb = has_jb || (bounds[i] == jb);
+            has_je = has_je || (bounds[i] == jb + 50);
+        }
+        BOOST_CHECK(has_jb);
+        BOOST_CHECK(has_je);
+    }
+    // delay = -D parks jam at 0 (merges with origin); delay = +D ends at
+    // 2D + jam <= L.
+    BOOST_CHECK_EQUAL(
+        echo::multitx_burst_bounds(g, -D, bounds, 5) >= 2, true);
+    BOOST_CHECK_LE(2u * 20u + 50u, g.phys_len_L);
+}
+
+// ---------------------------------------------------------------------------
+// M1: multitx_channel_ptr zero-region / slice / null-count / straddle.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_multitx_channel_ptr_slices)
+{
+    const uint64_t L = 120;
+    std::vector<int16_t> wave(100 * 2, 0); // sense at [20, 120)
+    for (size_t i = 0; i < wave.size(); ++i)
+        wave[i] = static_cast<int16_t>(i % 1000);
+    std::vector<int16_t> zero(L * 2, 0);
+    // Inside the waveform: slice pointer with element-pair stride.
+    const int16_t* p =
+        echo::multitx_channel_ptr(wave.data(), 20, 100, zero.data(), 30, 10);
+    BOOST_CHECK_EQUAL(p, wave.data() + (30 - 20) * 2);
+    BOOST_CHECK_EQUAL(p[0], wave[(30 - 20) * 2]);
+    // Zero region: shared scratch at the same offset.
+    const int16_t* z =
+        echo::multitx_channel_ptr(wave.data(), 20, 100, zero.data(), 0, 20);
+    BOOST_CHECK_EQUAL(z, zero.data() + 0 * 2);
+    const int16_t* z2 =
+        echo::multitx_channel_ptr(wave.data(), 20, 100, zero.data(), 5, 5);
+    BOOST_CHECK_EQUAL(z2, zero.data() + 5 * 2);
+    // Empty fragment: nullptr (no pointer to resolve).
+    BOOST_CHECK(echo::multitx_channel_ptr(wave.data(), 20, 100, zero.data(),
+                                          30, 0) == nullptr);
+    // Straddling fragment: never OOB — falls back to zero scratch so a
+    // planner bug fails loudly in sample checks, not in memory.
+    const int16_t* s = echo::multitx_channel_ptr(wave.data(), 20, 100,
+                                                 zero.data(), 15, 10);
+    BOOST_CHECK_EQUAL(s, zero.data() + 15 * 2);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

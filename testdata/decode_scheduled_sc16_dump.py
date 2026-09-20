@@ -22,7 +22,8 @@ Usage (repo root):
   PYTHONPATH=$PWD/gr-uwb/build/test_modules \\
   LD_LIBRARY_PATH=$PWD/gr-uwb/build/lib \\
     python3 testdata/decode_scheduled_sc16_dump.py DIR \\
-      [--max-slots N] [--dw1000] [--csv OUT.csv]
+      [--max-slots N] [--dw1000] [--csv OUT.csv] \\
+      [--native-rate {737.28,491.52}]
 """
 from __future__ import annotations
 
@@ -42,8 +43,55 @@ REPO = os.path.abspath(os.path.join(HERE, ".."))
 TMPL_998 = os.path.join(HERE, "reference_preamble.bin")
 CODE10_CFILE = os.path.join(HERE, "uwb_code10_preamble16_payload8.cfile")
 FS737 = 737.28e6
+FS491 = 491.52e6
 FS998 = 998.4e6
 SYNC_LEN = 1016
+
+# Native capture rates accepted by --native-rate. Output is always 998.4.
+NATIVE_RATES = {
+    "737.28": FS737,
+    "491.52": FS491,
+}
+# Fixed resample geometry native -> 998.4 (interp/decim of the PDU FIR).
+GEOM = {
+    "737.28": {"input_rate": FS737, "interp": 65, "decim": 48},
+    "491.52": {"input_rate": FS491, "interp": 65, "decim": 32},
+}
+TAPS_65_32 = os.path.join(HERE, "resampler_65_32",
+                          "taps_quality_minorder.txt")
+
+
+def parse_native_rate(s):
+    """Normalize --native-rate to (canonical_key, rate_hz).
+
+    Accepts MHz ("737.28"/"491.52") or Hz (737280000.0/491520000.0).
+    """
+    norm = str(s).strip().lower().replace("_", "").replace("p", ".")
+    rate = NATIVE_RATES.get(norm)
+    if rate is None:
+        try:
+            v = float(norm)
+        except ValueError:
+            v = float("nan")
+        for known in (FS737, FS491):
+            if abs(v * 1e6 - known) <= 1e3 or abs(v - known) <= 1e3:
+                rate = known
+                break
+    if rate is None:
+        raise ValueError(
+            f"unsupported --native-rate {s!r}: want 737.28 or 491.52")
+    canon = "491.52" if abs(rate - FS491) < 1.0 else "737.28"
+    return canon, rate
+
+
+def make_pdu_resampler(native_rate_hz):
+    """Build the native -> 998.4 PDU resampler for the native rate."""
+    from gnuradio import uwb
+    if abs(native_rate_hz - FS491) <= 1e-6 * FS491:
+        # 65_32 Python binding exposes only the profile/path constructor
+        # (no make_from_taps / emit_policy); FullWindow is fixed in C++.
+        return uwb.pdu_rational_resampler_ccf_65_32(TAPS_65_32)
+    return uwb.pdu_rational_resampler_ccf_65_48("quality_minorder")
 
 
 def as_int(v, default=-1):
@@ -145,7 +193,7 @@ def add_sym(md, key, value):
     return p.dict_add(md, p.intern(key), p.intern(str(value)))
 
 
-def meta_to_pmt(meta, *, drop_predicted=False):
+def meta_to_pmt(meta, native_rate=FS737, *, drop_predicted=False):
     md = p.make_dict()
     md = add_u64(md, "packet_id", meta.get("packet_id", 0))
     md = add_u64(md, "schedule_index", meta.get("schedule_index", 0))
@@ -162,7 +210,8 @@ def meta_to_pmt(meta, *, drop_predicted=False):
     md = add_i64(md, "post_guard_samples", post)
     md = add_i64(md, "pre_trigger_samples", pre)
     md = add_i64(md, "sample_count", meta.get("sample_count", 0))
-    md = p.dict_add(md, p.intern("sample_rate"), p.from_double(FS737))
+    md = p.dict_add(md, p.intern("sample_rate"),
+                      p.from_double(float(native_rate)))
     md = p.dict_add(md, p.intern("sample_format"), p.intern("sc16"))
     md = add_sym(md, "capture_mode", meta.get("capture_mode"))
     md = add_sym(md, "lock_state", meta.get("lock_state"))
@@ -235,6 +284,19 @@ def parser():
                     help="also demod DW1000 (code 10 / 256 / decawave)")
     ap.add_argument("--csv", default="",
                     help="output CSV path (default: DUMP/scheduled_dump.csv)")
+    ap.add_argument("--native-rate", default="737.28",
+                    help="native capture rate in MHz: 737.28 (default) "
+                         "or 491.52 (65/32 PDU resampler to 998.4)")
+    ap.add_argument("--code-index", type=int, default=9,
+                    help="HRP preamble code for the primary demod "
+                         "(9 = QM35825 default, 10 = DW1000/3000; "
+                         "template auto-selected)")
+    ap.add_argument("--preamble-reps", type=int, default=64,
+                    help="SYNC repetitions TX sends (default 64 = QM35; "
+                         "use 512 for long DW3000 preamble)")
+    ap.add_argument("--sfd-mode", default="4z2",
+                    help="SFD sequence: 4z2 (default) or decawave "
+                         "(run both when unsure)")
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--cir-filter-mode", default="bypass")
     return ap
@@ -248,11 +310,16 @@ def main():
     if not os.path.isfile(iq_path) or not os.path.isfile(jsonl_path):
         print(f"ERROR: need {iq_path} and {jsonl_path}", file=sys.stderr)
         return 2
-    if not os.path.isfile(TMPL_998):
-        print(f"ERROR: missing {TMPL_998}", file=sys.stderr)
-        return 2
 
     from gnuradio import uwb
+
+    try:
+        native_key, native_rate = parse_native_rate(args.native_rate)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    geom = GEOM[native_key]
+    decim = geom["decim"]
 
     metas = load_jsonl(jsonl_path)
     if args.max_slots > 0:
@@ -266,22 +333,39 @@ def main():
             kept.append(m)
         metas = kept
 
-    tmpl = np.fromfile(TMPL_998, np.complex64)
+    tmpl = None
+    if args.code_index == 9:
+        if not os.path.isfile(TMPL_998):
+            print(f"ERROR: missing {TMPL_998}", file=sys.stderr)
+            return 2
+        tmpl = np.fromfile(TMPL_998, np.complex64)
+    elif args.code_index == 10:
+        try:
+            tmpl = load_code10_template()
+        except (FileNotFoundError, RuntimeError) as e:
+            print(f"ERROR: code-10 template: {e}", file=sys.stderr)
+            return 2
+    else:
+        print(f"ERROR: --code-index {args.code_index}: no 998.4 template "
+              f"(have code 9/10 only)", file=sys.stderr)
+        return 2
     print("=== Decode scheduled SC16 dump ===")
     print(f"dir: {dump}")
-    print(f"packets={len(metas)}  qm35=code9/64/4z2  "
+    print(f"packets={len(metas)}  native={native_key}MS/s  "
+          f"primary=code{args.code_index}/{args.preamble_reps}/"
+          f"{args.sfd_mode}  "
           f"dw1000={'on' if args.dw1000 else 'off'}")
 
-    resampler = uwb.pdu_rational_resampler_ccf_65_48("quality_minorder")
+    resampler = make_pdu_resampler(native_rate)
     demod = uwb.realtime_demodulator.make_from_template(
         tmpl.tolist(),
         max(1, args.workers),
         64,
-        "4z2",
+        args.sfd_mode,
         0,
         args.cir_filter_mode,
-        9,
-        64,
+        args.code_index,
+        args.preamble_reps,
         14,
     )
     dbg = blocks.message_debug()
@@ -354,7 +438,7 @@ def main():
             "post": post,
             "n": n,
         })
-        pdu = p.cons(meta_to_pmt(meta), p.init_s16vector(len(iq), iq))
+        pdu = p.cons(meta_to_pmt(meta, native_rate), p.init_s16vector(len(iq), iq))
         resampler._post(p.intern("packet"), pdu)
         posted += 1
 
@@ -468,7 +552,9 @@ def main():
         summary = {
             "decoder": "gnuradio_cpp",
             "block": "UwbRealtimeDemodulator",
-            "resampler": "UwbPduRationalResamplerCcf65_48 quality_minorder",
+            "resampler": ("UwbPduRationalResamplerCcf65_32 quality_minorder"
+                          if native_key == "491.52" else
+                          "UwbPduRationalResamplerCcf65_48 quality_minorder"),
             "phy": {
                 "code_index": 9,
                 "preamble_repetitions": 64,
@@ -476,14 +562,14 @@ def main():
                 "cir_filter_mode": args.cir_filter_mode,
                 "data_rate_mbps": 6.81,
             },
-            "input_rate_hz": FS737,
+            "input_rate_hz": native_rate,
             "demod_rate_hz": FS998,
             "dump_dir": dump,
             "n_windows": len(slices),
             "qm35_results": len(qm35),
             "qm35_fcs_pass": fcs_ok,
-            "seed_rule": "predicted_start mapped 65/48; "
-                         "seededStartOne = round(pre*65/48)+1",
+            "seed_rule": (f"predicted_start mapped 65/{decim}; "
+                          f"seededStartOne = round(pre*65/{decim})+1"),
         }
         js_path = os.path.splitext(csv_path)[0] + "_summary.json"
         with open(js_path, "w") as f:

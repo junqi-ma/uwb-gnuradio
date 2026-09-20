@@ -185,6 +185,12 @@ inline bool validate_fragment_flags(const echo::BurstFragment* frags,
 inline constexpr double kUhdRequiredRateHz = 737280000.0;      // UC200 default
 inline constexpr double kUhdCg400RateHz = 491520000.0;         // CG400
 inline constexpr double kUhdDefaultRateTolRel = 1e-9;
+// Per-TX-channel frequency readback tolerance (Hz).  The X410 NCO resolves
+// well below 1 Hz (memory: +491340.0 readback is exact), so this only
+// catches a genuinely wrong channel/solution, not quantization.  It must
+// stay far below the ~2 kHz half-power width of the CIR repetition-average
+// CFO null, which is why it is absolute rather than relative.
+inline constexpr double kUhdTxFreqReadbackTolHz = 100.0;
 
 inline bool rate_matches_strict(double requested, double readback,
                                 double rel_tol)
@@ -253,6 +259,18 @@ inline bool ticks_from_time_parts(int64_t full, double frac, double rate_hz,
 // the UHD-linked implementation re-freezes it in prepare())
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Multi-TX channel configuration (§5.1).  At most kEchoMaxTxChannels TX
+// channels; config stage may allocate, hot path never touches this.
+// ---------------------------------------------------------------------------
+
+struct UhdTxChannelConfig {
+    size_t channel = 0; // physical TX channel inside the multi_usrp device
+    std::string antenna; // empty = leave untouched
+    double gain_db = -1.0; // negative = leave untouched (0 dB is explicit)
+    double center_freq_hz = 0.0; // 0 = leave untouched
+};
+
 struct UhdBurstBackendConfig {
     // Device args for multi_usrp::make (e.g. "addr=192.168.10.2");
     // empty = UHD default discovery.
@@ -263,6 +281,9 @@ struct UhdBurstBackendConfig {
     // Channels inside the SAME multi_usrp device (SC16 streamers).
     size_t tx_channel = 0;
     size_t rx_channel = 1;
+    // Multi-TX (§5.1): empty = legacy single-TX scalar above.  Non-empty =
+    // 1..kEchoMaxTxChannels entries used verbatim (scalars ignored).
+    std::vector<UhdTxChannelConfig> tx_channels;
     // Optional clock/time source ("internal" for single-device radar).
     // Empty = leave the device configuration untouched.
     std::string clock_source;
@@ -292,6 +313,53 @@ struct UhdBurstBackendConfig {
     double send_timeout_s = 0.1;
     double recv_timeout_s = 0.1;
 };
+
+// Compat conversion: legacy scalars → one entry; non-empty tx_channels
+// used verbatim.  Config stage only (may allocate).
+inline std::vector<UhdTxChannelConfig>
+effective_tx_channels(const UhdBurstBackendConfig& cfg)
+{
+    if (!cfg.tx_channels.empty())
+        return cfg.tx_channels;
+    UhdTxChannelConfig single;
+    single.channel = cfg.tx_channel;
+    single.antenna = cfg.tx_antenna;
+    single.gain_db = cfg.tx_gain_db;
+    single.center_freq_hz = cfg.center_freq_hz;
+    return std::vector<UhdTxChannelConfig>{ single };
+}
+
+// Per-channel entries: 1..kEchoMaxTxChannels, physical channels unique
+// and < kEchoMaxTxChannels, frequency/gain finite (negative gain and
+// zero frequency are the "leave untouched" sentinels).
+inline bool validate_tx_channels(
+    const std::vector<UhdTxChannelConfig>& channels,
+    std::string* error = nullptr)
+{
+    auto fail = [&](const char* what) {
+        if (error)
+            *error = what;
+        return false;
+    };
+    if (channels.empty() ||
+        channels.size() > echo::kEchoMaxTxChannels)
+        return fail("tx_channels must hold 1..kEchoMaxTxChannels entries");
+    for (size_t i = 0; i < channels.size(); ++i) {
+        const auto& c = channels[i];
+        if (c.channel >= echo::kEchoMaxTxChannels)
+            return fail("tx channel index out of range");
+        for (size_t j = 0; j < i; ++j)
+            if (channels[j].channel == c.channel)
+                return fail("tx physical channels must be unique");
+        if (!std::isfinite(c.center_freq_hz) || c.center_freq_hz < 0.0)
+            return fail("tx center_freq_hz must be >= 0 and finite");
+        if (!std::isfinite(c.gain_db))
+            return fail("tx gain_db must be finite (negative = not set)");
+        if (c.gain_db >= 0.0 && c.gain_db > 120.0)
+            return fail("tx gain_db must be <= 120 when set");
+    }
+    return true;
+}
 
 inline bool validate_uhd_burst_backend_config(
     const UhdBurstBackendConfig& cfg, std::string* error = nullptr)
@@ -328,6 +396,11 @@ inline bool validate_uhd_burst_backend_config(
         return fail("tx_gain_db must be <= 120 when set");
     if (cfg.rx_gain_db >= 0.0 && cfg.rx_gain_db > 120.0)
         return fail("rx_gain_db must be <= 120 when set");
+    // Multi-TX entries validated only when present; empty keeps the
+    // legacy scalar path bit-exact (no new failure modes).
+    if (!cfg.tx_channels.empty() &&
+        !validate_tx_channels(cfg.tx_channels, error))
+        return false;
     return true;
 }
 
@@ -366,6 +439,12 @@ struct UhdDryRunPlan {
     uint64_t rx_samples = 0;
     int64_t tx_ticks = 0; // = t0_ticks
     int64_t rx_ticks = 0; // = t0_ticks - pre_guard (BEFORE tx)
+
+    // Multi-TX reserve (§5.1/5.2, M1): populated by the builder, print
+    // format frozen until M2.
+    size_t tx_channel_count = 1;
+    std::vector<size_t> tx_physical_channels;
+    uint64_t tx_wire_bytes = 0; // channels x per-channel (transport total)
 
     // Derived display values.
     double pri_s = 0.0;
@@ -461,6 +540,15 @@ inline bool build_uhd_dry_run_plan(const UhdBurstBackendConfig& cfg,
     plan.rx_bytes = rx_samples * 4;
     plan.tx_fragments = static_cast<uint64_t>(ntx);
     plan.rx_fragments = static_cast<uint64_t>(nrx);
+    // Multi-TX reserve (M1): effective channels without touching print.
+    {
+        const auto eff = effective_tx_channels(cfg);
+        plan.tx_channel_count = eff.size();
+        plan.tx_physical_channels.clear();
+        for (const auto& c : eff)
+            plan.tx_physical_channels.push_back(c.channel);
+        plan.tx_wire_bytes = plan.tx_bytes * static_cast<uint64_t>(eff.size());
+    }
     return true;
 }
 

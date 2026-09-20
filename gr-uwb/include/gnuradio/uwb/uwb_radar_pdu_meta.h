@@ -148,6 +148,23 @@ inline constexpr const char* kPassthrough[] = {
     "code_index",
     "uhd_error",
     "source",
+    // Dual-TX jammer diagnostics (native control quantities: do not scale
+    // jam_delay_native through 65/48).
+    "jam_delay_native",
+    "jam_delay_us",
+    "jam_delay_mode",
+    "jam_delay_seed",
+    "jam_freq_plan_hz",
+    "jam_freq_actual_hz",
+    "jam_freq_offset_hz",
+    "jam_scan_step",
+    "jam_dwell_target",
+    "jam_dwell_successes_before",
+    "jam_retune_seq",
+    "sense_offset_native",
+    "tx_fragment_count",
+    "sense_tx_ticks",
+    "jam_tx_ticks",
 };
 
 // Absolute native indices → map(p). Native value stored as key+"_native".

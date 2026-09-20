@@ -110,4 +110,10 @@ documentation: |-
   Defaults match gr::uwb::defaults native geometry (time-derived 10/190/4.1 us
   at 737.28 MS/s).  Do not copy 9984/189696/4096 from the 998.4 MHz block.
 
+  CG400 (491.52 MS/s) triplet for the same 10/190/4.1 us window is
+  4915/93389/2015 (kCg400NativeScheduled*); acquire 1355/133333 with
+  coarse_margin 11 (llround 32/48 rescale of 2032/200000/16); interference
+  dump 147456/49152 for the 300/100 us window (kCg400Interference*).
+  Defaults below stay at 737.28-native values (see uwb_defaults.h).
+
 file_format: 1

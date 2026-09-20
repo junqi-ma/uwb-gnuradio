@@ -16,6 +16,10 @@ parameters:
     label: TX channel
     dtype: int
     default: '0'
+-   id: tx_channels
+    label: TX channels multi (e.g. 0,1 or [0,1]; empty = single tx_channel)
+    dtype: string
+    default: ''
 -   id: rx_channel
     label: RX channel
     dtype: int
@@ -40,6 +44,18 @@ parameters:
     label: Center frequency (Hz, 0 = leave)
     dtype: real
     default: '0'
+-   id: tx_gains
+    label: TX gains multi (e.g. 20,20; empty = leave)
+    dtype: string
+    default: ''
+-   id: tx_antennas
+    label: TX antennas multi (e.g. TX/RX,RX2; empty = leave)
+    dtype: string
+    default: ''
+-   id: tx_freqs
+    label: TX freqs multi Hz (e.g. 6.4896e9,6.4896e9; empty = center_freq_hz)
+    dtype: string
+    default: ''
 -   id: clock_source
     label: Clock source
     dtype: string
@@ -100,7 +116,7 @@ outputs:
 
 templates:
     imports: from gnuradio import uwb
-    make: uwb.realtime_echo_timer_uhd(${device_args}, ${sample_rate_hz}, ${tx_channel}, ${rx_channel}, ${tx_antenna}, ${rx_antenna}, ${tx_gain_db}, ${rx_gain_db}, ${center_freq_hz}, ${clock_source}, ${time_source}, ${pri_num}, ${pri_den}, ${pre_guard_ticks}, ${max_fragment_size}, ${max_catchup_slots}, ${queue_capacity}, ${collect_wait_ms}, ${max_tx_samples}, ${max_rx_samples})
+    make: (uwb.realtime_echo_timer_uhd(${device_args}, ${sample_rate_hz}, ${tx_channel}, ${rx_channel}, ${tx_antenna}, ${rx_antenna}, ${tx_gain_db}, ${rx_gain_db}, ${center_freq_hz}, ${clock_source}, ${time_source}, ${pri_num}, ${pri_den}, ${pre_guard_ticks}, ${max_fragment_size}, ${max_catchup_slots}, ${queue_capacity}, ${collect_wait_ms}, ${max_tx_samples}, ${max_rx_samples}) if not "${tx_channels}".strip().strip("[]()").strip("\"'") else uwb.realtime_echo_timer_uhd(${device_args}, ${sample_rate_hz}, [int(c.strip()) for c in "${tx_channels}".strip().strip("[]()").strip("\"'").split(',') if c.strip()], ${rx_channel}, [a.strip().strip("\"'") for a in "${tx_antennas}".strip().strip("[]()").split(',') if a.strip().strip("\"'")], ${rx_antenna}, [float(g.strip().strip("\"'")) for g in "${tx_gains}".strip().strip("[]()").split(',') if g.strip().strip("\"'")], ${rx_gain_db}, [float(f.strip().strip("\"'")) for f in "${tx_freqs}".strip().strip("[]()").split(',') if f.strip().strip("\"'")], ${center_freq_hz}, ${clock_source}, ${time_source}, ${pri_num}, ${pri_den}, ${pre_guard_ticks}, ${max_fragment_size}, ${max_catchup_slots}, ${queue_capacity}, ${collect_wait_ms}, ${max_tx_samples}, ${max_rx_samples}))
 
 documentation: |-
     Message-only timed burst radio scheduler (Radar Step 10/11), UHD
@@ -118,5 +134,10 @@ documentation: |-
     Python factory uwb.realtime_echo_timer_uhd is not bound.  Use the
     generic uwb.realtime_echo_timer(...) constructor to inject an arbitrary
     backend (e.g. fake_burst_backend) for off-hardware QA.
+
+    Dual-TX (jammer) schedules use a contiguous window bank: each burst
+    is exactly one data fragment of length L.  max_fragment_size must be
+    >= L (typical L ~ 189003 at 737.28 MS/s; use 262144).  Random delay
+    only slides the jammer read pointer; TX0 sensing samples do not move.
 
 file_format: 1

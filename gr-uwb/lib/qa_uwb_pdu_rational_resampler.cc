@@ -903,6 +903,26 @@ pmt::pmt_t radar_window_meta(pmt::pmt_t base,
                          pmt::from_long(pred_sfd + 3));
     meta = pmt::dict_add(meta, pmt::mp("preamble_start_sample"),
                          pmt::from_long(pred_sfd - sync_native));
+    // Dual-TX jammer diagnostics: native control quantities, not scaled.
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_native"),
+                         pmt::from_long(-4));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_us"),
+                         pmt::from_double(0.005425347));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_mode"), pmt::mp("uniform"));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_seed"),
+                         pmt::from_uint64(7));
+    meta = pmt::dict_add(meta, pmt::mp("jam_freq_plan_hz"),
+                         pmt::from_double(6.4896e9));
+    meta = pmt::dict_add(meta, pmt::mp("jam_freq_actual_hz"),
+                         pmt::from_double(6.4896e9));
+    meta = pmt::dict_add(meta, pmt::mp("jam_freq_offset_hz"),
+                         pmt::from_double(0.0));
+    meta = pmt::dict_add(meta, pmt::mp("jam_retune_seq"),
+                         pmt::from_uint64(3));
+    meta = pmt::dict_add(meta, pmt::mp("sense_offset_native"),
+                         pmt::from_uint64(4));
+    meta = pmt::dict_add(meta, pmt::mp("tx_fragment_count"),
+                         pmt::from_uint64(1));
     return meta;
 }
 
@@ -962,6 +982,17 @@ void check_radar_whitelist(UwbPduRationalResamplerCcf65_48::sptr blk,
                       pred_sfd - sync_native);
     BOOST_CHECK_EQUAL(meta_i64(mo, "preamble_start_sample"),
                       mapped_index(pred_sfd - sync_native));
+
+    BOOST_CHECK_EQUAL(meta_i64(mo, "jam_delay_native"), -4);
+    BOOST_CHECK_CLOSE(meta_f64(mo, "jam_delay_us"), 0.005425347, 1e-12);
+    BOOST_CHECK_EQUAL(meta_sym(mo, "jam_delay_mode"), std::string("uniform"));
+    BOOST_CHECK_EQUAL(meta_i64(mo, "jam_delay_seed"), 7);
+    BOOST_CHECK_CLOSE(meta_f64(mo, "jam_freq_plan_hz"), 6.4896e9, 1e-9);
+    BOOST_CHECK_CLOSE(meta_f64(mo, "jam_freq_actual_hz"), 6.4896e9, 1e-9);
+    BOOST_CHECK_CLOSE(meta_f64(mo, "jam_freq_offset_hz"), 0.0, 1e-12);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "jam_retune_seq"), 3);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "sense_offset_native"), 4);
+    BOOST_CHECK_EQUAL(meta_i64(mo, "tx_fragment_count"), 1);
 }
 
 BOOST_AUTO_TEST_CASE(test_pdu_radar_metadata_whitelist)

@@ -497,7 +497,8 @@ class PeakAlignSink(gr.basic_block):
 # --------------------------------------------------------------------------
 def parse_args():
     p = argparse.ArgumentParser(
-        parents=[base.build_parser(add_help=False)],
+        parents=[base.build_parser(add_help=False,
+                                   cir_output_default="average")],
         description="Streaming (gr-radar-style) X410 CG400 HRP echo CIR radar")
     p.add_argument("--clock-source", default="internal")
     p.add_argument("--time-source", default="internal")
@@ -571,6 +572,10 @@ def build_freq_plan(a):
 def main():
     base.bootstrap_uhd_env()
     a = parse_args()
+    if a.cir_output != "average":
+        raise SystemExit("stream peak/frequency servo currently requires "
+                         "--cir-output average; use the base or jamming app "
+                         "for per-repetition CIR")
 
     # preamble length / legacy alias resolution (same as base/sweep)
     if a.preamble_length is not None and a.sync_reps is not None \
@@ -740,7 +745,7 @@ def main():
     if (not a.no_udp) and bool(a.udp_host):
         udp = base.CirUdpSink(a.udp_host, int(a.udp_port),
                               base.CIR_UDP_TAPS, freq_lookup=freq_lookup)
-        print("udp_cir %s:%s framed=UCR2(+freq_hz,freq_offset_hz) "
+        print("udp_cir %s:%s framed=UCR3(+repetition,+freq) "
               "always_send_taps=%d nonblock"
               % (a.udp_host, a.udp_port, base.CIR_UDP_TAPS), flush=True)
 

@@ -214,13 +214,15 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
     float sync_refine_threshold,
     bool emit_normalized,
     size_t queue_capacity,
-    bool use_predicted_timing)
+    bool use_predicted_timing,
+    bool emit_individual_repetitions)
     : gr::block("uwb_radar_cir_estimator",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
       d_template_path_(template_path),
       d_sfd_mode_(sfd_mode),
       d_emit_normalized_(emit_normalized),
+      d_emit_individual_repetitions_(emit_individual_repetitions),
       d_queue_capacity_(queue_capacity)
 {
     if (queue_capacity == 0) {
@@ -322,13 +324,15 @@ UwbRadarCirEstimator::make(const std::string& template_path,
                            float sync_refine_threshold,
                            bool emit_normalized,
                            size_t queue_capacity,
-                           bool use_predicted_timing)
+                           bool use_predicted_timing,
+                           bool emit_individual_repetitions)
 {
     return gnuradio::get_initial_sptr(new UwbRadarCirEstimator(
         template_path, sync_repetitions, sfd_mode, code_index, cir_pre,
         cir_post, cir_skip_initial, cir_repetitions, sfd_search_margin,
         sync_refine_margin, sfd_threshold, sync_refine_threshold,
-        emit_normalized, queue_capacity, use_predicted_timing));
+        emit_normalized, queue_capacity, use_predicted_timing,
+        emit_individual_repetitions));
 }
 
 // ---------------------------------------------------------------------------
@@ -745,12 +749,11 @@ UwbRadarCirEstimator::worker_loop()
             threw = true;
             what = "unknown exception";
         }
-        const auto t1 = std::chrono::steady_clock::now();
         const uint64_t queue_us = elapsed_us(job.enqueued_at, t0);
-        const uint64_t service_us = elapsed_us(t0, t1);
-        record_service_time(service_us);
 
         if (threw) {
+            const uint64_t service_us = elapsed_us(t0, std::chrono::steady_clock::now());
+            record_service_time(service_us);
             d_exceptions_.fetch_add(1, std::memory_order_relaxed);
             radar::RadarCirResult err;
             err.status = radar::RadarCirStatus::InvalidInput;
@@ -768,7 +771,39 @@ UwbRadarCirEstimator::worker_loop()
         else
             d_failed_.fetch_add(1, std::memory_order_relaxed);
 
-        publish_frame(job, r, queue_us, service_us);
+        if (d_emit_individual_repetitions_ &&
+            r.status == radar::RadarCirStatus::Ok) {
+            const size_t first = d_cfg_.cir_skip_initial;
+            const size_t count = std::min(d_cfg_.cir_repetitions,
+                                          d_cfg_.sync_repetitions - first);
+            for (size_t ordinal = 0; ordinal < count; ++ordinal) {
+                const size_t rep = first + ordinal;
+                radar::RadarCirEstimate one;
+                radar::RadarCirResult one_result = r;
+                if (!radar::estimate_radar_cir_repetition(
+                        rx, n, r.cir_origin_sample, d_cfg_.samples_per_symbol,
+                        d_cfg_.cir_pre, d_cfg_.cir_post, rep,
+                        d_cfg_.sync_repetitions, one, d_scratch_.cir)) {
+                    one_result.status = radar::RadarCirStatus::CirFailed;
+                    one_result.tap_count = 0;
+                    one_result.valid_repetitions = 0;
+                } else {
+                    one_result.tap_count = one.tap_count;
+                    one_result.peak_tap = one.peak_tap;
+                    one_result.peak_abs = one.peak_abs;
+                    one_result.raw_l2_norm = one.raw_l2_norm;
+                    one_result.valid_repetitions = 1;
+                }
+                publish_frame(job, one_result, queue_us,
+                              elapsed_us(t0, std::chrono::steady_clock::now()),
+                              static_cast<int64_t>(rep), ordinal, count);
+            }
+        } else {
+            publish_frame(job, r, queue_us,
+                          elapsed_us(t0, std::chrono::steady_clock::now()));
+        }
+        const uint64_t service_us = elapsed_us(t0, std::chrono::steady_clock::now());
+        record_service_time(service_us);
         d_queue_cv_.notify_all();
     }
 }
@@ -796,7 +831,10 @@ void
 UwbRadarCirEstimator::publish_frame(const Job& job,
                                     const radar::RadarCirResult& r,
                                     uint64_t queue_us,
-                                    uint64_t service_us)
+                                    uint64_t service_us,
+                                    int64_t repetition_index,
+                                    size_t repetition_ordinal,
+                                    size_t repetition_count)
 {
     const bool ok = r.status == radar::RadarCirStatus::Ok;
     pmt::pmt_t meta = pmt::make_dict();
@@ -847,6 +885,19 @@ UwbRadarCirEstimator::publish_frame(const Job& job,
                                               ? static_cast<uint64_t>(
                                                     r.valid_repetitions)
                                               : uint64_t(0)));
+    meta = pmt::dict_add(meta, pmt::mp("cir_output"),
+                         pmt::mp(d_emit_individual_repetitions_
+                                     ? "repetition"
+                                     : "average"));
+    if (repetition_index >= 0) {
+        meta = pmt::dict_add(meta, pmt::mp("repetition_index"),
+                             pmt::from_uint64(
+                                 static_cast<uint64_t>(repetition_index)));
+        meta = pmt::dict_add(meta, pmt::mp("repetition_ordinal"),
+                             pmt::from_uint64(repetition_ordinal));
+        meta = pmt::dict_add(meta, pmt::mp("repetition_count"),
+                             pmt::from_uint64(repetition_count));
+    }
 
     meta = pmt::dict_add(meta, pmt::mp("zero_delay_tap"),
                          pmt::from_long(job.zero_delay_tap));

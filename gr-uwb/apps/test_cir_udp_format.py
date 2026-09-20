@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the CIR UDP datagram wire format (UCR1/UCR2/raw taps).
+"""Unit tests for the CIR UDP datagram wire format (UCR1/UCR2/UCR3/raw).
 
 Run:
     python3 gr-uwb/apps/test_cir_udp_format.py
@@ -23,6 +23,19 @@ def _taps(n):
 
 
 class UdpFormatTest(unittest.TestCase):
+    def test_ucr3_roundtrip_with_repetition(self):
+        taps = _taps(4).astype(np.complex64)
+        hdr = rx.HDR_V3.pack(
+            rx.MAGIC_V3, 7, 0, 116, 10, 118, 0.31, 0.42, 30, 1234,
+            6494.6e6, 5.0e6)
+        rec = rx.parse_datagram(hdr + taps.tobytes())
+        self.assertEqual(rec["version"], 3)
+        self.assertEqual(rec["pulse_id"], 7)
+        self.assertEqual(rec["repetition_index"], 10)
+        self.assertEqual(rec["repetition_count"], 118)
+        np.testing.assert_allclose(rec["taps"], taps)
+        self.assertEqual(rx.HDR_V3.size, 48)
+
     def test_ucr2_roundtrip_with_frequency(self):
         taps = _taps(4).astype(np.complex64)
         hdr = rx.HDR_V2.pack(

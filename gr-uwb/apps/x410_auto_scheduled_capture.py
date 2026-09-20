@@ -2,12 +2,13 @@
 """X410 / file / synthetic entry for blind QM35 acquire + 5 ms scheduled capture.
 
 No first_packet_sample.  The auto extractor finds the first confirmable QM35
-packet on a native 737.28 MS/s SC16 stream and then locks EverySlot windows.
+packet on a native SC16 stream (--native-rate 737.28e6 UC200/X410 or
+491.52e6 CG400) and then locks EverySlot windows.
 
 Sources:
   --source synthetic   generate a short native SC16 QM35-like stream (no radio)
   --source file        read interleaved int16 I/Q from --input
-  --source x410        live UHD usrp_source (cpu=sc16, otw=sc16, 737.28 MS/s)
+  --source x410        live UHD usrp_source (cpu=sc16, otw=sc16, native rate)
 
 --dry-run prints the rate contract and exits 0.  --identity loopback posts
 demod-style lock_obs for file/synthetic runs so the shipped block can lock
@@ -15,14 +16,15 @@ without a live UwbRealtimeDemodulator.
 
 --source x410 --identity demod is the live host path:
 
-  usrp_source SC16 @737.28
+  usrp_source SC16 @native
     -> UwbAutoScheduledExtractorSc16
-         --output: 590 µs native dump window
-           -> Writer (capture.iq, no 65/48)
-           -> UwbPduWindowCrop 10/190/4.1 µs
-                -> PDU 65/48 -> UwbRealtimeDemodulator
+         --output: 590 us native dump window
+           -> Writer (capture.iq, no resampling)
+           -> UwbPduWindowCrop 10/190/4.1 us
+                -> PDU 65/48 (@737.28) or 65/32 (@491.52)
+                -> UwbRealtimeDemodulator
          no dump: extractor already emits the short demod window
-           -> PDU 65/48 -> UwbRealtimeDemodulator
+           -> PDU resampler -> UwbRealtimeDemodulator
     -> schedule_feedback -> lock_obs
 
 --output only opens the Writer.  It must not enlarge the FIR window.
@@ -66,15 +68,84 @@ def load_in_tree_uwb():
     return mod
 
 RADIO_RATE = 737.28e6
+CG400_RATE = 491.52e6
+NATIVE_RATES = (RADIO_RATE, CG400_RATE)
 HOST_RATE = 998.4e6
 INTERVAL_S = 0.005
 PRE = 7373
 CAPTURE = 140083
 POST = 3023
 # Native dump: 300 µs head / 190 µs body / 100 µs tail.  FIR must crop
-# to PRE/CAPTURE/POST before 65/48; do not send this window into the resampler.
+# to PRE/CAPTURE/POST before resampling; do not send this window into
+# the resampler.
 PRE_DW = 221184
 POST_DW = 73728
+
+# Wall-clock geometry shared by both native rates; only sample counts
+# rescale (see gr-uwb/include/gnuradio/uwb/uwb_defaults.h).
+#   737.28: demod 10/190/4.1 us, dump 300/100 us, acq 2032/200000/16
+#   491.52: same wall-clock, rescaled by 32/48.
+GEOM_737 = {
+    "native_rate": RADIO_RATE,
+    "demod_pre": 7373,
+    "demod_cap": 140083,
+    "demod_post": 3023,
+    "dump_pre": 221184,
+    "dump_post": 73728,
+    "acquire_pre": 2032,
+    "acquire_capture": 200000,
+    "coarse_margin": 16,
+    "resampler": "65_48",
+}
+GEOM_491 = {
+    "native_rate": CG400_RATE,
+    "demod_pre": 4915,
+    "demod_cap": 93389,
+    "demod_post": 2015,
+    "dump_pre": 147456,
+    "dump_post": 49152,
+    "acquire_pre": 1355,
+    "acquire_capture": 133333,
+    "coarse_margin": 11,
+    "resampler": "65_32",
+}
+
+
+def resolve_native_geom(native_rate):
+    """Return GEOM_737/GEOM_491 for a --native-rate value.
+
+    Accepts 737.28e6 (UC200/X410) or 491.52e6 (CG400); rejects anything
+    else so UHD coercion or a typo fails fast instead of silently
+    running with the wrong wall-clock geometry.
+    """
+    try:
+        rate = float(native_rate)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"unsupported --native-rate {native_rate!r}: "
+            f"expected {RADIO_RATE:.0f} or {CG400_RATE:.0f}")
+    for allowed, geom in ((RADIO_RATE, GEOM_737), (CG400_RATE, GEOM_491)):
+        if abs(rate - allowed) <= 1.0:
+            return geom
+    raise ValueError(
+        f"unsupported --native-rate {native_rate!r}: "
+        f"expected {RADIO_RATE:.0f} (737.28 MHz) or "
+        f"{CG400_RATE:.0f} (491.52 MHz)")
+
+
+def make_pdu_resampler(uwb, native_rate, taps_profile="quality_minorder"):
+    """Build the native->998.4 PDU resampler for the given native rate.
+
+    737.28 MS/s uses 65/48, 491.52 MS/s uses 65/32.  The Python bindings
+    are asymmetric -- 65_48 exposes (taps, out, validate, emit_policy,
+    max_in) while 65_32 exposes (taps, out, validate, max_in) with a
+    fixed FullWindow policy -- so only pass the taps profile and keep
+    the default policy on both sides.
+    """
+    geom = resolve_native_geom(native_rate)
+    if geom["native_rate"] == CG400_RATE:
+        return uwb.pdu_rational_resampler_ccf_65_32(taps_profile)
+    return uwb.pdu_rational_resampler_ccf_65_48(taps_profile)
 
 
 def parser():
@@ -82,19 +153,26 @@ def parser():
     p.add_argument("--source", choices=("synthetic", "file", "x410"),
                    default="synthetic")
     p.add_argument("--input", default="", help="SC16 interleaved int16 file")
+    p.add_argument("--native-rate", type=float, default=RADIO_RATE,
+                   help="native SC16 rate in S/s: 737.28e6 (UC200/X410, "
+                        "PDU 65/48) or 491.52e6 (CG400, PDU 65/32)")
     p.add_argument("--template", default="",
-                   help="native 737.28 CF32 one-SYNC template")
+                   help="native CF32 one-SYNC template; default selects "
+                        "per --native-rate (737p28 / 491p52)")
     p.add_argument("--args", default="addr=192.168.10.2")
     p.add_argument("--frequency", type=float, default=6489.6e6)
     p.add_argument("--gain", type=float, default=60.0)
     p.add_argument("--antenna", default="TX/RX0")
     p.add_argument("--packet-interval", type=float, default=INTERVAL_S)
-    p.add_argument("--pre-guard", type=int, default=PRE,
-                   help="demod-crop pre-guard (default 7373 = 10 µs)")
-    p.add_argument("--capture", type=int, default=CAPTURE,
-                   help="QM35 body samples (dump and demod, default 140083)")
-    p.add_argument("--post-guard", type=int, default=POST,
-                   help="demod-crop post-guard (default 3023 = 4.1 µs)")
+    p.add_argument("--pre-guard", type=int, default=0,
+                   help="demod-crop pre-guard (0 = native geom: "
+                        "7373 @737.28 / 4915 @491.52 = 10 us)")
+    p.add_argument("--capture", type=int, default=0,
+                   help="QM35 body samples, dump and demod "
+                        "(0 = native geom: 140083 @737.28 / 93389 @491.52)")
+    p.add_argument("--post-guard", type=int, default=0,
+                   help="demod-crop post-guard (0 = native geom: "
+                        "3023 @737.28 / 2015 @491.52 = 4.1 us)")
     p.add_argument("--demod-pre", type=int, default=0,
                    help="override demod crop pre-guard")
     p.add_argument("--demod-capture", type=int, default=0,
@@ -102,20 +180,37 @@ def parser():
     p.add_argument("--demod-post", type=int, default=0,
                    help="override demod crop post-guard")
     p.add_argument("--dump-pre", type=int, default=0,
-                   help="dump pre-guard when --output is set (default 221184)")
+                   help="dump pre-guard when --output is set "
+                        "(0 = native geom: 221184 @737.28 / 147456 @491.52)")
     p.add_argument("--dump-capture", type=int, default=0,
                    help="dump QM35 body when --output is set")
     p.add_argument("--dump-post", type=int, default=0,
-                   help="dump post-guard when --output is set (default 73728)")
+                   help="dump post-guard when --output is set "
+                        "(0 = native geom: 73728 @737.28 / 49152 @491.52)")
     p.add_argument(
         "--output", default="",
-        help="write native 737.28 SC16 dump windows to DIR/capture.iq; "
-             "does not enlarge the 65/48 FIR window")
+        help="write native SC16 dump windows to DIR/capture.iq (rate follows --native-rate); "
+             "does not enlarge the resampler FIR window")
     p.add_argument("--skip-postprocess", action="store_true",
                    help="do not run uwb_offline_postprocess_dump after dump")
     p.add_argument("--postprocess-bin", default="",
                    help="path to uwb_offline_postprocess_dump")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--capture-mode", choices=("auto", "detector"),
+                   default="auto",
+                   help="auto: blind-acquire the periodic signal once, then "
+                        "5 ms scheduled windows (energy gate off after lock; "
+                        "use for QM35); detector: per-packet energy-gated "
+                        "detection for unknown periods (e.g. DW3000)")
+    p.add_argument("--code-index", type=int, default=9,
+                   help="HRP preamble code 9..12 for native template and "
+                        "demodulator (default 9 = QM35825)")
+    p.add_argument("--preamble-reps", type=int, default=64,
+                   help="SYNC repetitions TX sends (default 64; 512 for the "
+                        "long DW3000 preamble)")
+    p.add_argument("--sfd-mode", default="4z2",
+                   help="SFD sequence: 4z2 (default) or decawave; run both "
+                        "when the TX SFD is unverified")
     p.add_argument("--identity", choices=("loopback", "none", "demod"),
                    default="loopback")
     p.add_argument("--seconds", type=float, default=0.0,
@@ -130,25 +225,38 @@ def parser():
     return p
 
 
-def default_template():
+def default_template(native_rate=RADIO_RATE, code_index=9):
+    geom = resolve_native_geom(native_rate)
+    if int(code_index) == 10:
+        name = ("reference_preamble_code10_491p52.cf32"
+                if geom["native_rate"] == CG400_RATE
+                else "reference_preamble_code10_737p28.cf32")
+    else:
+        name = ("reference_preamble_code9_491p52.cf32"
+                if geom["native_rate"] == CG400_RATE
+                else "reference_preamble_code9_737p28.cf32")
     here = os.path.dirname(os.path.abspath(__file__))
     cand = [
-        os.path.join(here, "..", "..", "testdata",
-                     "reference_preamble_code9_737p28.cf32"),
-        os.path.join(os.getcwd(), "testdata",
-                     "reference_preamble_code9_737p28.cf32"),
+        os.path.join(here, "..", "..", "testdata", name),
+        os.path.join(os.getcwd(), "testdata", name),
     ]
     for c in cand:
         if os.path.isfile(c):
             return os.path.normpath(c)
+    if geom["native_rate"] == CG400_RATE:
+        raise RuntimeError(
+            f"missing 491.52 native template {name}; searched "
+            f"{cand[0]} and {cand[1]}")
     return cand[0]
 
 
-def default_template_998():
+def default_template_998(code_index=9):
+    name = ("reference_preamble_code10_998p4.cf32"
+            if int(code_index) == 10 else "reference_preamble.bin")
     here = os.path.dirname(os.path.abspath(__file__))
     cand = [
-        os.path.join(here, "..", "..", "testdata", "reference_preamble.bin"),
-        os.path.join(os.getcwd(), "testdata", "reference_preamble.bin"),
+        os.path.join(here, "..", "..", "testdata", name),
+        os.path.join(os.getcwd(), "testdata", name),
     ]
     for c in cand:
         if os.path.isfile(c):
@@ -165,13 +273,18 @@ def load_cf32(path):
     return x if n <= 0 else (x / n).astype(np.complex64)
 
 
-def resolve_geometry(a, write_dir):
-    demod_pre = a.demod_pre if a.demod_pre > 0 else a.pre_guard
-    demod_cap = a.demod_capture if a.demod_capture > 0 else a.capture
-    demod_post = a.demod_post if a.demod_post > 0 else a.post_guard
-    dump_pre = a.dump_pre if a.dump_pre > 0 else PRE_DW
+def resolve_geometry(a, write_dir, geom=None):
+    if geom is None:
+        geom = resolve_native_geom(getattr(a, "native_rate", RADIO_RATE))
+    base_pre = a.pre_guard if a.pre_guard > 0 else geom["demod_pre"]
+    base_cap = a.capture if a.capture > 0 else geom["demod_cap"]
+    base_post = a.post_guard if a.post_guard > 0 else geom["demod_post"]
+    demod_pre = a.demod_pre if a.demod_pre > 0 else base_pre
+    demod_cap = a.demod_capture if a.demod_capture > 0 else base_cap
+    demod_post = a.demod_post if a.demod_post > 0 else base_post
+    dump_pre = a.dump_pre if a.dump_pre > 0 else geom["dump_pre"]
     dump_cap = a.dump_capture if a.dump_capture > 0 else demod_cap
-    dump_post = a.dump_post if a.dump_post > 0 else POST_DW
+    dump_post = a.dump_post if a.dump_post > 0 else geom["dump_post"]
     return {
         "demod_pre": int(demod_pre),
         "demod_cap": int(demod_cap),
@@ -203,7 +316,7 @@ def find_postprocess_bin(explicit):
 
 def run_offline_postprocess(write_dir, explicit_bin):
     print()
-    print("=== Offline postprocess (notch + 65/48) ===")
+    print("=== Offline postprocess (notch + resample to 998.4) ===")
     bin_path = find_postprocess_bin(explicit_bin)
     if not bin_path:
         print("  FAIL: uwb_offline_postprocess_dump not found "
@@ -327,8 +440,9 @@ def print_pdus(dbg):
 class IdentityLoopback:
     """Posts demod-style lock_obs so the shipped extractor can lock."""
 
-    def __init__(self, ext):
+    def __init__(self, ext, native_rate=RADIO_RATE):
         self.ext = ext
+        self.native_rate = float(native_rate)
         self.confirmed = False
 
     def __call__(self, msg):
@@ -348,9 +462,9 @@ class IdentityLoopback:
             d = pmt.dict_add(d, pmt.intern("sfd_mode"), pmt.intern("4z2"))
             d = pmt.dict_add(d, pmt.intern("timing_ok"), pmt.PMT_T)
             d = pmt.dict_add(d, pmt.intern("sample_rate"),
-                             pmt.from_double(RADIO_RATE))
+                             pmt.from_double(self.native_rate))
             d = pmt.dict_add(d, pmt.intern("native_sample_rate"),
-                             pmt.from_double(RADIO_RATE))
+                             pmt.from_double(self.native_rate))
             d = pmt.dict_add(d, pmt.intern("acquisition_epoch"),
                              pmt.from_uint64(int(get("acquisition_epoch", 0))))
             d = pmt.dict_add(d, pmt.intern("schedule_generation"),
@@ -391,9 +505,9 @@ class IdentityLoopback:
         d = pmt.dict_add(d, pmt.intern("preamble_repetitions"), pmt.from_long(64))
         d = pmt.dict_add(d, pmt.intern("sfd_mode"), pmt.intern("4z2"))
         d = pmt.dict_add(d, pmt.intern("timing_ok"), pmt.PMT_T)
-        d = pmt.dict_add(d, pmt.intern("sample_rate"), pmt.from_double(RADIO_RATE))
+        d = pmt.dict_add(d, pmt.intern("sample_rate"), pmt.from_double(self.native_rate))
         d = pmt.dict_add(d, pmt.intern("native_sample_rate"),
-                         pmt.from_double(RADIO_RATE))
+                         pmt.from_double(self.native_rate))
         d = pmt.dict_add(d, pmt.intern("acquisition_epoch"),
                          pmt.from_uint64(int(get("acquisition_epoch", 0))))
         d = pmt.dict_add(d, pmt.intern("schedule_generation"),
@@ -429,7 +543,7 @@ def _pmt_dict_get(meta, key, default=None):
 
 
 class PacketTap:
-    """Keep extractor PDU metadata (native 737.28 coordinates)."""
+    """Keep extractor PDU metadata (native-rate coordinates)."""
 
     def __init__(self):
         from gnuradio import gr
@@ -589,6 +703,129 @@ def _normalize_x410_args(args):
     return text
 
 
+def run_detector_live(a, uwb, gr, uhd, native_geom, native, tmpl_native):
+    """Live per-packet detection for unknown periods (e.g. DW3000).
+
+    Same resampler + demodulator as the auto path; only the capture
+    strategy differs (energy-gated UwbDetectorSc16 instead of the
+    blind-acquire + 5 ms schedule). Detector windows are always cropped
+    to the demod geometry before the FIR so long preambles do not pay
+    dump-sized resampling.
+    """
+    import time
+    import pmt
+
+    code = int(getattr(a, "code_index", 9))
+    reps = int(getattr(a, "preamble_reps", 64))
+    sfd = getattr(a, "sfd_mode", "4z2")
+    if code not in (9, 10, 11, 12):
+        raise RuntimeError(f"--code-index must be 9..12, got {code}")
+    seconds = a.seconds if a.seconds > 0 else 15.0
+    dev_args = _normalize_x410_args(a.args)
+    write_dir = (getattr(a, "output", "") or "").strip()
+
+    geom = resolve_geometry(a, write_dir, native_geom)
+    demod_pre, demod_cap, demod_post = (geom["demod_pre"], geom["demod_cap"],
+                                        geom["demod_post"])
+    demod_n = demod_pre + demod_cap + demod_post
+    det_pre = demod_pre
+    det_cap = demod_cap + demod_post
+    if write_dir:
+        os.makedirs(write_dir, exist_ok=True)
+
+    tmpl998_path = (a.template_998 or default_template_998(code))
+    if not os.path.isfile(tmpl998_path):
+        raise RuntimeError(f"missing 998.4 template {tmpl998_path}")
+    tmpl998 = load_cf32(tmpl998_path)
+    print(f"capture-mode=detector demod=code{code}/{reps}/{sfd} "
+          f"detector=[{det_pre},{det_cap}] thr={a.energy_threshold}")
+    print(f"template_998={tmpl998_path} n={tmpl998.size} "
+          f"workers={a.workers} cir={a.cir_filter_mode}")
+    print(f"device_args={dev_args}")
+    print(f"rf freq={a.frequency:.1f} gain={a.gain} antenna={a.antenna} "
+          f"duration_s={seconds:.1f}")
+
+    src = uhd.usrp_source(
+        dev_args,
+        uhd.stream_args(cpu_format="sc16", otw_format="sc16", channels=[0]))
+    try:
+        src.set_clock_source("internal")
+        src.set_time_source("internal")
+    except Exception as exc:
+        print(f"clock/time source warning: {exc}")
+    src.set_samp_rate(native)
+    actual = float(src.get_samp_rate())
+    print(f"usrp samp_rate requested={native:.0f} actual={actual:.0f}")
+    if abs(actual - native) > 1.0:
+        raise RuntimeError(
+            f"X410 coerced sample rate to {actual}, expected {native}")
+    src.set_center_freq(a.frequency, 0)
+    src.set_gain(a.gain, 0)
+    try:
+        src.set_antenna(a.antenna, 0)
+    except Exception as exc:
+        print(f"antenna {a.antenna!r} rejected ({exc}); leaving default")
+
+    det = uwb.detector_sc16(
+        list(tmpl_native), det_pre, det_cap, float(a.energy_threshold),
+        100, 4, 1, native_geom["coarse_margin"], native)
+    resampler = make_pdu_resampler(uwb, native)
+    demod = uwb.realtime_demodulator.make_from_template(
+        tmpl998.tolist(), max(1, int(a.workers)), 64, sfd, 0,
+        a.cir_filter_mode, code, reps, 14)
+    crop = uwb.pdu_window_crop(demod_pre, demod_cap, demod_post)
+    tap = ResultTap()
+    pkt_tap = PacketTap()
+    tb = gr.top_block("x410_detector_live_demod")
+    tb.connect(src, det)
+    tb.msg_connect(det, "packet", pkt_tap.blk, "packet")
+    tb.msg_connect(det, "packet", crop, "packet")
+    tb.msg_connect(crop, "packet", resampler, "packet")
+    tb.msg_connect(resampler, "packet", demod, "samples")
+    tb.msg_connect(demod, "result", tap.blk, "result")
+    writer = None
+    if write_dir:
+        writer = uwb.packet_writer(write_dir, "capture", False)
+        tb.msg_connect(det, "packet", writer, "packet")
+
+    print("starting live detector flowgraph...", flush=True)
+    t0 = time.time()
+    tb.start(1048576)
+    last = 0.0
+    try:
+        while time.time() - t0 < seconds:
+            now = time.time() - t0
+            if now - last >= 1.0:
+                last = now
+                msg = (f"  t={now:5.1f}s "
+                       f"det_calls={det.work_calls()} "
+                       f"det_drop={det.dropped_regions()} "
+                       f"res={resampler.pdus_received()}/"
+                       f"{resampler.pdus_emitted()}/"
+                       f"{resampler.pdus_dropped()} "
+                       f"demod={demod.jobs_received()}/"
+                       f"{demod.jobs_completed()}/"
+                       f"{demod.jobs_failed()}/"
+                       f"{demod.jobs_dropped()} "
+                       f"fcs={tap.fcs_ok}/{len(tap.rows)}")
+                if writer is not None:
+                    msg += (f" wr={writer.packets_written()} "
+                            f"wrdrop={writer.packets_dropped()}")
+                print(msg, flush=True)
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        print("interrupted", flush=True)
+    try:
+        demod.drain()
+    except Exception:
+        pass
+    time.sleep(0.2)
+    tb.stop()
+    tb.wait()
+    print(f"detector done: results={len(tap.rows)} fcs_pass={tap.fcs_ok}")
+    return 0 if tap.fcs_ok > 0 else 3
+
+
 def run_x410_live(a, tmpl_path):
     """Blind-acquire QM35 on live X410 SC16 and demodulate."""
     import platform
@@ -596,14 +833,20 @@ def run_x410_live(a, tmpl_path):
     from gnuradio import gr, uhd
 
     uwb = load_in_tree_uwb()
-    tmpl737 = load_cf32(tmpl_path)
+    native_geom = resolve_native_geom(getattr(a, "native_rate", RADIO_RATE))
+    native = float(native_geom["native_rate"])
+    tmpl_native = load_cf32(tmpl_path)
+    if getattr(a, "capture_mode", "auto") == "detector":
+        return run_detector_live(a, uwb, gr, uhd, native_geom, native,
+                                 tmpl_native)
     seconds = a.seconds if a.seconds > 0 else 15.0
     dev_args = _normalize_x410_args(a.args)
     write_dir = (a.output or "").strip()
 
     print(f"GNU Radio {gr.version()}")
     print(f"compiler={platform.python_compiler()} cpu={platform.processor() or platform.machine()}")
-    print("sample_format=sc16 sample_rate=737280000")
+    print(f"sample_format=sc16 sample_rate={native:.0f}")
+    print(f"native_rate={native:.0f} resampler={native_geom['resampler']}")
     print(f"device_args={dev_args}")
     print(f"rf freq={a.frequency:.1f} gain={a.gain} antenna={a.antenna}")
     print(f"identity={a.identity} duration_s={seconds:.1f} "
@@ -617,12 +860,12 @@ def run_x410_live(a, tmpl_path):
         src.set_time_source("internal")
     except Exception as exc:
         print(f"clock/time source warning: {exc}")
-    src.set_samp_rate(RADIO_RATE)
+    src.set_samp_rate(native)
     actual = float(src.get_samp_rate())
-    print(f"usrp samp_rate requested={RADIO_RATE:.0f} actual={actual:.0f}")
-    if abs(actual - RADIO_RATE) > 1.0:
+    print(f"usrp samp_rate requested={native:.0f} actual={actual:.0f}")
+    if abs(actual - native) > 1.0:
         raise RuntimeError(
-            f"X410 coerced sample rate to {actual}, expected {RADIO_RATE}")
+            f"X410 coerced sample rate to {actual}, expected {native}")
     src.set_center_freq(a.frequency, 0)
     src.set_gain(a.gain, 0)
     try:
@@ -632,7 +875,7 @@ def run_x410_live(a, tmpl_path):
     print(f"usrp tuned freq={src.get_center_freq(0):.1f} "
           f"gain={src.get_gain(0)} antenna={src.get_antenna(0)}")
 
-    geom = resolve_geometry(a, write_dir)
+    geom = resolve_geometry(a, write_dir, native_geom)
     demod_pre = geom["demod_pre"]
     demod_cap = geom["demod_cap"]
     demod_post = geom["demod_post"]
@@ -643,18 +886,21 @@ def run_x410_live(a, tmpl_path):
     if write_dir:
         os.makedirs(write_dir, exist_ok=True)
         print(f"write_sc16={write_dir}  "
-              f"dump_head={ext_pre/RADIO_RATE*1e6:.1f} us  "
-              f"dump_body={ext_cap/RADIO_RATE*1e6:.1f} us  "
-              f"dump_tail={ext_post/RADIO_RATE*1e6:.1f} us  "
+              f"dump_head={ext_pre/native*1e6:.1f} us  "
+              f"dump_body={ext_cap/native*1e6:.1f} us  "
+              f"dump_tail={ext_post/native*1e6:.1f} us  "
               f"fir_in={demod_n} samples "
-              f"({demod_n/RADIO_RATE*1e6:.1f} us)")
+              f"({demod_n/native*1e6:.1f} us)")
     print(f"extractor=[{ext_pre},{ext_cap},{ext_post}]  "
           f"demod_crop=[{demod_pre},{demod_cap},{demod_post}]")
 
     ext = uwb.auto_scheduled_extractor_sc16(
-        list(tmpl737), RADIO_RATE, a.packet_interval,
+        list(tmpl_native), native, a.packet_interval,
         ext_pre, ext_cap, ext_post,
-        float(a.energy_threshold))
+        float(a.energy_threshold),
+        coarse_margin=native_geom["coarse_margin"],
+        acquire_pre_trigger=native_geom["acquire_pre"],
+        acquire_capture=native_geom["acquire_capture"])
     ovf = OverflowToControl(ext)
     tb = gr.top_block("x410_auto_live_demod")
     tb.connect(src, ext)
@@ -671,22 +917,23 @@ def run_x410_live(a, tmpl_path):
     crop = None
     tap = None
     if a.identity == "demod":
-        tmpl998_path = a.template_998 or default_template_998()
+        tmpl998_path = (a.template_998 or
+                        default_template_998(getattr(a, "code_index", 9)))
         if not os.path.isfile(tmpl998_path):
             raise RuntimeError(f"missing 998.4 template {tmpl998_path}")
         tmpl998 = load_cf32(tmpl998_path)
         print(f"template_998={tmpl998_path} n={tmpl998.size} "
               f"workers={a.workers} cir={a.cir_filter_mode}")
-        resampler = uwb.pdu_rational_resampler_ccf_65_48("quality_minorder")
+        resampler = make_pdu_resampler(uwb, native)
         demod = uwb.realtime_demodulator.make_from_template(
             tmpl998.tolist(),
             max(1, int(a.workers)),
             64,
-            "4z2",
+            getattr(a, "sfd_mode", "4z2"),
             0,
             a.cir_filter_mode,
-            9,
-            64,
+            int(getattr(a, "code_index", 9)),
+            int(getattr(a, "preamble_reps", 64)),
             14,
         )
         tap = ResultTap()
@@ -700,7 +947,7 @@ def run_x410_live(a, tmpl_path):
         tb.msg_connect(demod, "schedule_feedback", ext, "lock_obs")
         tb.msg_connect(demod, "result", tap.blk, "result")
     elif a.identity == "loopback":
-        loop = IdentityLoopback(ext)
+        loop = IdentityLoopback(ext, native)
 
         class _Sink(gr.sync_block):
             def __init__(self, cb):
@@ -818,7 +1065,7 @@ def run_x410_live(a, tmpl_path):
     print(f"lock_state={ext.lock_state_name()}")
     print(f"identity_confirmed={ext.identity_confirmed()}")
     print(f"locked_t0_native={ext.locked_t0():.3f} "
-          f"({ext.locked_t0()/RADIO_RATE*1e3:.3f} ms)")
+          f"({ext.locked_t0()/native*1e3:.3f} ms)")
     print(f"locked_period_s={ext.locked_period_s():.9f}")
     print(f"energy_regions={_cnt(ext, 'energy_regions')} "
           f"after_lock={_cnt(ext, 'energy_regions_after_lock')}")
@@ -956,22 +1203,55 @@ def run_flow(a, tmpl_path, iq=None):
     from gnuradio import blocks, gr
     uwb = load_in_tree_uwb()
 
+    native_geom = resolve_native_geom(getattr(a, "native_rate", RADIO_RATE))
+    native = float(native_geom["native_rate"])
+    file_geom = resolve_geometry(a, "", native_geom)
     tmpl = load_cf32(tmpl_path)
     ext_kwargs = dict(
         known_preamble=[complex(x) for x in tmpl],
-        sample_rate=RADIO_RATE,
+        sample_rate=native,
         packet_interval_s=a.packet_interval,
-        pre_guard_samples=a.pre_guard,
-        capture_samples=a.capture,
-        post_guard_samples=a.post_guard,
+        pre_guard_samples=file_geom["demod_pre"],
+        capture_samples=file_geom["demod_cap"],
+        post_guard_samples=file_geom["demod_post"],
     )
     if a.source == "synthetic":
         ext_kwargs.update(
             energy_threshold=1e-6,
             energy_gate_decimation=4,
+            coarse_margin=native_geom["coarse_margin"],
             acquire_pre_trigger=128,
             acquire_capture=2048,
         )
+    else:
+        ext_kwargs.update(
+            coarse_margin=native_geom["coarse_margin"],
+            acquire_pre_trigger=native_geom["acquire_pre"],
+            acquire_capture=native_geom["acquire_capture"],
+        )
+    if getattr(a, "capture_mode", "auto") == "detector":
+        if a.source == "synthetic":
+            det_thr, det_egd = 1e-6, 4
+        else:
+            det_thr = float(getattr(a, "energy_threshold", 0.02))
+            det_egd = 100
+        det = uwb.detector_sc16(
+            [complex(x) for x in tmpl],
+            file_geom["demod_pre"],
+            file_geom["demod_cap"] + file_geom["demod_post"],
+            det_thr, det_egd, 4, 1, native_geom["coarse_margin"], native)
+        dbg = blocks.message_debug()
+        tb = gr.top_block("x410_detector_capture")
+        if a.source in ("synthetic", "file"):
+            src = blocks.vector_source_s(iq.tolist(), False, 2)
+            tb.connect(src, det)
+        else:
+            raise RuntimeError("x410 path is handled in main()")
+        tb.msg_connect(det, "packet", dbg, "store")
+        tb.run()
+        starts, preds, n, modes = print_pdus(dbg)
+        print(f"detector emitted={n}")
+        return starts, preds, n, modes, "detector"
     ext = uwb.auto_scheduled_extractor_sc16(**ext_kwargs)
     dbg = blocks.message_debug()
     tb = gr.top_block("x410_auto_scheduled_capture")
@@ -981,7 +1261,7 @@ def run_flow(a, tmpl_path, iq=None):
     else:
         raise RuntimeError("x410 path is handled in main()")
     tb.msg_connect(ext, "packet", dbg, "store")
-    loop = IdentityLoopback(ext) if a.identity == "loopback" else None
+    loop = IdentityLoopback(ext, native) if a.identity == "loopback" else None
     if loop is not None:
         class _Sink(gr.sync_block):
             def __init__(self, cb):
@@ -1006,11 +1286,35 @@ def run_flow(a, tmpl_path, iq=None):
 
 def main():
     a = parser().parse_args()
-    tmpl = a.template or default_template()
-    print(f"rate contract: X410 Radio {RADIO_RATE:.0f} S/s SC16 native "
-          f"(no RFNoC 65/48). host demod rate {HOST_RATE:.0f} S/s")
+    try:
+        native_geom = resolve_native_geom(a.native_rate)
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}")
+    native = float(native_geom["native_rate"])
+    try:
+        tmpl = a.template or default_template(
+            native, int(getattr(a, "code_index", 9)))
+    except RuntimeError as exc:
+        raise SystemExit(f"error: {exc}")
+    resampler_name = ("65/32" if native_geom["native_rate"] == CG400_RATE
+                      else "65/48")
+    print(f"rate contract: X410 Radio {native:.0f} S/s SC16 native "
+          f"(no RFNoC {resampler_name}). host demod rate {HOST_RATE:.0f} S/s")
+    print(f"native_rate={native:.0f} resampler={native_geom['resampler']} "
+          f"demod_geom=[{native_geom['demod_pre']},{native_geom['demod_cap']},"
+          f"{native_geom['demod_post']}] "
+          f"dump_guards=[{native_geom['dump_pre']},{native_geom['dump_post']}] "
+          f"acq=[{native_geom['acquire_pre']},{native_geom['acquire_capture']},"
+          f"margin={native_geom['coarse_margin']}]")
     print(f"template={tmpl}")
-    print("no first_packet_sample; acquire then lock T=5 ms")
+    print(f"capture-mode={getattr(a, 'capture_mode', 'auto')} "
+          f"waveform=code{int(getattr(a, 'code_index', 9))}/"
+          f"{int(getattr(a, 'preamble_reps', 64))}/"
+          f"{getattr(a, 'sfd_mode', '4z2')}")
+    if getattr(a, "capture_mode", "auto") == "detector":
+        print("detector mode: per-packet energy-gated capture, no schedule")
+    else:
+        print("no first_packet_sample; acquire then lock T=5 ms")
     if a.dry_run:
         print("dry-run ok")
         return 0
@@ -1032,14 +1336,20 @@ def main():
     else:
         tmpl_wf = load_cf32(tmpl)
         iq, t0, offset, period = make_synthetic(tmpl_wf, a.seed)
-        a.packet_interval = period / RADIO_RATE
+        a.packet_interval = period / native
         a.pre_guard = 128
         a.capture = 2048
         a.post_guard = 32
         print(f"synthetic t0={t0} offset={offset} period={period} n={iq.size//2} "
-              f"interval_s={a.packet_interval}")
+              f"interval_s={a.packet_interval} native_rate={native:.0f}")
 
     starts, preds, n, modes, state = run_flow(a, tmpl, iq)
+    if getattr(a, "capture_mode", "auto") == "detector":
+        if n == 0:
+            print("FAIL: detector emitted no PDU")
+            return 1
+        print(f"SUCCESS windows={n} mode=detector")
+        return 0
     if n == 0 or "acquisition" not in modes:
         print("FAIL: no acquisition PDU")
         return 1

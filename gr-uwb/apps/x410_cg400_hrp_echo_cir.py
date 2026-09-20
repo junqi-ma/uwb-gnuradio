@@ -18,8 +18,8 @@ Timed echo locks SFD to a constant offset from the RX window
 a detected SFD, so DW3000 collisions do not drop frames.  Pass
 --require-sfd to restore the old search gate.
 
-UDP is a non-blocking UCR2 header (28-byte base fields + freq_hz and
-freq_offset_hz f64) + 116 taps on every pulse.  Live lines report
+UDP is a non-blocking UCR3 header (pulse + repetition + frequency metadata)
++ 116 taps for every CIR record.  Live lines report
 echo_ok_hz vs cir_ok_hz vs udp_hz; radio ok is not CIR ok.
 """
 from __future__ import annotations
@@ -196,19 +196,21 @@ class NativeRateProfile:
         return uwb.pdu_rational_resampler_ccf_65_32(
             taps, WORK_HZ, True, 2097152, int(res_workers), sc16_scale)
 
-# UDP CIR datagram, unified for both live scripts (base and sweep): a 44-byte
-# UCR2 header + 116 complex64 taps (always, zeros if fail).
-#   magic "UCR2" | pulse_id u32 | status u16 | tap_count u16
-#   | sfd_metric f32 | cir_peak_metric f32 | peak_tap i32 | estimator_us u32
+# UDP CIR datagram: UCR3 + 116 complex64 taps (always, zeros if fail).
+#   magic "UCR3" | pulse_id u32 | status u16 | tap_count u16
+#   | repetition_index u16 | repetition_count u16 | sfd_metric f32
+#   | cir_peak_metric f32 | peak_tap i32 | estimator_us u32
 #   | freq_hz f64 | freq_offset_hz f64
 # f64 is required because f32 cannot resolve kHz-level CFO at 6.5 GHz.
-# UCR1 (28-byte header, no frequency) is kept only for the receiver's legacy
-# parse path.
+# UCR2/UCR1 are kept only for the receiver's legacy parse path.
 CIR_UDP_MAGIC = b"UCR1"                       # legacy parse-only
 CIR_UDP_HDR = struct.Struct("<4sIHHffiI")     # legacy parse-only
 CIR_UDP_TAPS = 116
 CIR_UDP_MAGIC_V2 = b"UCR2"
 CIR_UDP_HDR_V2 = struct.Struct("<4sIHHffiIdd")
+CIR_UDP_MAGIC_V3 = b"UCR3"
+# UCR3 adds the absolute SYNC repetition index and selected repetition count.
+CIR_UDP_HDR_V3 = struct.Struct("<4sIHHHHffiIdd")
 CIR_UDP_FREQ_UNKNOWN = float("nan")
 CIR_UDP_STATUS = {
     "ok": 0,
@@ -256,7 +258,7 @@ def _pmt_float(meta, key, default=0.0):
 
 
 class CirUdpSink(gr.basic_block):
-    """Non-blocking UDP sink for CIR PDUs. Always sends a UCR2 datagram.
+    """Non-blocking UDP sink for CIR PDUs. Always sends a UCR3 datagram.
 
     ``freq_lookup(pulse_id) -> (freq_hz, freq_offset_hz) | None`` supplies the
     per-pulse centre frequency.  When it is missing or does not resolve, the
@@ -272,6 +274,11 @@ class CirUdpSink(gr.basic_block):
         self._dst = (host, int(port))
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setblocking(False)
+        try:
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF,
+                                  4 * 1024 * 1024)
+        except OSError:
+            pass
         self.sent = 0
         self.sent_ok = 0
         self.sent_fail = 0
@@ -301,14 +308,26 @@ class CirUdpSink(gr.basic_block):
         est_us = _pmt_int(meta, "estimator_us", 0) & 0xFFFFFFFF
         freq_hz = CIR_UDP_FREQ_UNKNOWN
         freq_off = CIR_UDP_FREQ_UNKNOWN
-        if self.freq_lookup is not None:
+        # C++ success-counted scans can have gaps in pulse_id after retries
+        # or late slots.  Prefer the actual per-burst frequency propagated
+        # through the PDU chain; pulse-id arithmetic is only a legacy
+        # fallback for sources that do not provide jammer metadata.
+        meta_freq = _pmt_float(meta, "jam_freq_actual_hz", float("nan"))
+        meta_off = _pmt_float(meta, "jam_freq_offset_hz", float("nan"))
+        if np.isfinite(meta_freq) and np.isfinite(meta_off):
+            freq_hz, freq_off = meta_freq, meta_off
+            self.sent_freq += 1
+        elif self.freq_lookup is not None:
             fr = self.freq_lookup(pulse_id)
             if fr is not None:
                 freq_hz, freq_off = fr
                 self.sent_freq += 1
-        hdr = CIR_UDP_HDR_V2.pack(
-            CIR_UDP_MAGIC_V2, pulse_id, status, self.tap_count, sfd_m,
-            peak_m, peak_tap, est_us, float(freq_hz), float(freq_off))
+        rep_index = _pmt_int(meta, "repetition_index", 0xFFFF) & 0xFFFF
+        rep_count = _pmt_int(meta, "repetition_count", 0) & 0xFFFF
+        hdr = CIR_UDP_HDR_V3.pack(
+            CIR_UDP_MAGIC_V3, pulse_id, status, self.tap_count,
+            rep_index, rep_count, sfd_m, peak_m, peak_tap, est_us,
+            float(freq_hz), float(freq_off))
         try:
             self._sock.sendto(hdr + taps.tobytes(), self._dst)
         except (BlockingIOError, InterruptedError, OSError):
@@ -1183,7 +1202,7 @@ class CppPduEcho:
                 int(self.blk.late_slot_skips()))
 
 
-def build_parser(add_help=True):
+def build_parser(add_help=True, cir_output_default="repetitions"):
     p = argparse.ArgumentParser(
         add_help=add_help,
         description="X410 CG600 (737.28 MS/s, default) / CG400 (491.52 MS/s) "
@@ -1326,6 +1345,11 @@ def build_parser(add_help=True):
     p.add_argument("--est-queue", type=int, default=64,
                    help="CIR estimator job queue; overflow is a real drop. "
                         "Do not set this to pulses — that hides lag as 'no loss'")
+    p.add_argument("--cir-output", choices=["repetitions", "average"],
+                   default=cir_output_default,
+                   help="CIR records per pulse: every SYNC repetition from "
+                        "index 0 (default in base/jam), or one legacy "
+                        "coherent average with the first 10 skipped")
     p.add_argument("--require-sfd", action="store_true",
                    help="Gate CIR on SFD search (default: use scheduled echo time)")
     return p
@@ -1445,6 +1469,8 @@ def analyze_cir(jsonl_path, pulses):
     metrics = []
     est_us = []
     statuses = {}
+    record_keys = []
+    repetitions_by_pulse = {}
     with open(jsonl_path, "r", encoding="utf-8") as f:
         for ln in f:
             ln = ln.strip()
@@ -1455,7 +1481,13 @@ def analyze_cir(jsonl_path, pulses):
             statuses[st] = statuses.get(st, 0) + 1
             pid = rec.get("pulse_id")
             if pid is not None:
-                ids.append(int(pid))
+                pid = int(pid)
+                ids.append(pid)
+                rep = rec.get("repetition_index")
+                record_keys.append(
+                    (pid, None if rep is None else int(rep)))
+                if rep is not None:
+                    repetitions_by_pulse.setdefault(pid, set()).add(int(rep))
             if st == "ok":
                 ok += 1
                 if "peak_tap" in rec:
@@ -1470,12 +1502,12 @@ def analyze_cir(jsonl_path, pulses):
     if ids:
         seen = set(ids)
         missing = [i for i in range(pulses) if i not in seen]
-        dups = len(ids) - len(seen)
+        dups = len(record_keys) - len(set(record_keys))
     else:
         dups = 0
     gaps = []
     if ids:
-        s = sorted(ids)
+        s = sorted(set(ids))
         for a, b in zip(s, s[1:]):
             if b != a + 1:
                 gaps.append((a, b))
@@ -1489,6 +1521,8 @@ def analyze_cir(jsonl_path, pulses):
         "missing_count": len(missing),
         "missing_head": missing[:16],
         "dup_count": dups,
+        "repetition_records": sum(len(v) for v in repetitions_by_pulse.values()),
+        "pulses_with_repetitions": len(repetitions_by_pulse),
         "id_gaps": gaps[:16],
         "id_min": min(ids) if ids else None,
         "id_max": max(ids) if ids else None,
@@ -1657,22 +1691,28 @@ def main():
         profile.pdu, int(a.res_workers), a.res_sc16_scale), flush=True)
     est_q = max(8, int(a.est_queue))
     use_pred = not a.require_sfd
+    cir_skip_initial = 0 if a.cir_output == "repetitions" else 10
     est = uwb.radar_cir_estimator(
-        tmpl_path, a.sync_reps, SFD_MODE, a.code_index, 16, 100, 10, 0,
+        tmpl_path, a.sync_reps, SFD_MODE, a.code_index, 16, 100,
+        cir_skip_initial, 0,
         a.sfd_search_margin, a.sync_refine_margin, a.sfd_threshold,
-        a.sync_refine_threshold, True, est_q, use_pred)
+        a.sync_refine_threshold, True, est_q, use_pred,
+        a.cir_output == "repetitions")
     print("estimator code_index=%d preamble_length=%d sfd_search_margin=%d "
           "queue=%d use_predicted_timing=%s (overflow=drop)" % (
               a.code_index, a.sync_reps, a.sfd_search_margin, est_q, use_pred),
           flush=True)
-    wr = uwb.cir_writer(a.output, "cir", True, 64)
+    cir_records_per_pulse = (max(1, int(a.sync_reps) - cir_skip_initial)
+                             if a.cir_output == "repetitions" else 1)
+    wr = uwb.cir_writer(a.output, "cir", True,
+                        max(256, 4 * cir_records_per_pulse))
     udp = None
     udp_on = (not a.no_udp) and bool(a.udp_host)
     if udp_on:
         udp = CirUdpSink(
             a.udp_host, int(a.udp_port), CIR_UDP_TAPS,
             freq_lookup=lambda pid: (echo.freq, 0.0))
-        print("udp_cir %s:%s framed=UCR2(+freq_hz,freq_offset_hz) "
+        print("udp_cir %s:%s framed=UCR3(+repetition,+freq) "
               "always_send_taps=%d nonblock" % (
                   a.udp_host, a.udp_port, CIR_UDP_TAPS), flush=True)
 
@@ -1702,7 +1742,8 @@ def main():
     deadline = time.time() + 8.0
     while time.time() < deadline:
         written = wr.frames_written() + wr.frames_failed()
-        if written >= echo._ok and est.drained() and echo._pub_q.empty():
+        if (written >= echo._ok * cir_records_per_pulse and est.drained()
+                and echo._pub_q.empty()):
             break
         time.sleep(0.05)
     echo.stop_publisher()
@@ -1764,6 +1805,9 @@ def main():
         "native_rate_hz": profile.hz,
         "code_index": a.code_index,
         "preamble_length": a.sync_reps,
+        "cir_output": a.cir_output,
+        "cir_skip_initial": cir_skip_initial,
+        "cir_records_per_pulse": cir_records_per_pulse,
         "sfd_mode": SFD_MODE,
         "gain_tx": a.gain_tx,
         "gain_rx": a.gain_rx,
@@ -1872,10 +1916,11 @@ def main():
               summary["echo_late"] == 0 and
               summary["sc16_packets"] == a.pulses)
     else:
-        ok = (summary["wr_ok"] == a.pulses and
+        expected_cir_records = a.pulses * cir_records_per_pulse
+        ok = (summary["wr_ok"] == expected_cir_records and
               summary["echo_ok"] == a.pulses and
               summary["echo_late"] == 0 and
-              cir_stats.get("ok") == a.pulses and
+              cir_stats.get("ok") == expected_cir_records and
               cir_stats.get("missing_count", 1) == 0)
     raise SystemExit(0 if ok else 3)
 

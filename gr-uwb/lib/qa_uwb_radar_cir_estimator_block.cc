@@ -162,6 +162,25 @@ make_meta(uint64_t pulse_id,
     meta = pmt::dict_add(meta, pmt::mp("num_delay_samps"), pmt::from_long(0));
     meta = pmt::dict_add(meta, pmt::mp("calibration_id"), pmt::mp("qa-cal"));
     meta = pmt::dict_add(meta, pmt::mp("source"), pmt::mp("loopback"));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_native"),
+                         pmt::from_long(-4));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_us"),
+                         pmt::from_double(0.005));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_mode"), pmt::mp("uniform"));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_seed"),
+                         pmt::from_uint64(7));
+    meta = pmt::dict_add(meta, pmt::mp("jam_freq_plan_hz"),
+                         pmt::from_double(6.4896e9));
+    meta = pmt::dict_add(meta, pmt::mp("jam_freq_actual_hz"),
+                         pmt::from_double(6.4896e9));
+    meta = pmt::dict_add(meta, pmt::mp("jam_freq_offset_hz"),
+                         pmt::from_double(0.0));
+    meta = pmt::dict_add(meta, pmt::mp("jam_retune_seq"),
+                         pmt::from_uint64(1));
+    meta = pmt::dict_add(meta, pmt::mp("sense_offset_native"),
+                         pmt::from_uint64(4));
+    meta = pmt::dict_add(meta, pmt::mp("tx_fragment_count"),
+                         pmt::from_uint64(1));
     meta = pmt::dict_add(meta, pmt::mp("sample_format"), pmt::mp("fc32"));
     meta = pmt::dict_add(meta, pmt::mp("uhd_error"), pmt::mp("none"));
     return meta;
@@ -289,6 +308,23 @@ check_common(pmt::pmt_t msg, uint64_t pulse_id)
     BOOST_CHECK_EQUAL(meta_str(meta, "calibration_id"), "qa-cal");
     BOOST_CHECK_EQUAL(meta_str(meta, "source"), "loopback");
     BOOST_CHECK_EQUAL(meta_str(meta, "sfd_mode"), "4z2");
+    BOOST_CHECK_EQUAL(pmt::to_long(pmt::dict_ref(
+                          meta, pmt::mp("jam_delay_native"),
+                          pmt::from_long(0))),
+                      -4);
+    BOOST_CHECK_EQUAL(meta_str(meta, "jam_delay_mode"), "uniform");
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          meta, pmt::mp("jam_delay_seed"),
+                          pmt::from_uint64(0))),
+                      7u);
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          meta, pmt::mp("sense_offset_native"),
+                          pmt::from_uint64(0))),
+                      4u);
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          meta, pmt::mp("tx_fragment_count"),
+                          pmt::from_uint64(0))),
+                      1u);
 
     FrameCheck fc;
     fc.status = meta_str(meta, "status");
@@ -404,6 +440,57 @@ BOOST_AUTO_TEST_CASE(test_estimator_ok_matches_core_direct)
     BOOST_REQUIRE_EQUAL(nn, ref.tap_count);
     BOOST_CHECK(std::memcmp(norm, ref_norm.data(),
                             nn * sizeof(gr_complex)) == 0);
+}
+
+BOOST_AUTO_TEST_CASE(test_estimator_emits_each_selected_repetition)
+{
+    std::vector<gr_complex> rx, tx;
+    BOOST_REQUIRE(
+        load_cf32(testdata_path("uwb_radar/rx_clean_998p4.cf32"), rx));
+    BOOST_REQUIRE(load_cf32(testdata_path("uwb_radar/tx_998p4.cf32"), tx));
+    const std::string tmpl_path = write_template_file(tx);
+
+    auto est = UwbRadarCirEstimator::make(
+        tmpl_path, 64, "4z2", 9, kCirPre, kCirPost, 10, 0, 64, 8,
+        0.3f, 0.3f, true, 16, true, true);
+    auto dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_radar_estimator_individual");
+    tb->msg_connect(est, "cir", dbg, "store");
+    tb->start();
+    est->_post(pmt::mp("rx"), make_pdu(make_meta(9, kPreGuard), rx));
+    BOOST_REQUIRE(wait_frames(dbg, 54));
+    BOOST_REQUIRE(wait_drained(est));
+    tb->stop();
+    tb->wait();
+
+    BOOST_CHECK(est->emit_individual_repetitions());
+    BOOST_CHECK_EQUAL(est->pdus_completed(), 1u);
+    BOOST_CHECK_EQUAL(est->pdus_published(), 54u);
+    BOOST_REQUIRE_EQUAL(dbg->num_messages(), 54u);
+    for (size_t ordinal = 0; ordinal < 54; ++ordinal) {
+        const pmt::pmt_t msg = dbg->get_message(ordinal);
+        const FrameCheck fc = check_common(msg, 9);
+        BOOST_CHECK_EQUAL(fc.status, "ok");
+        BOOST_CHECK_EQUAL(fc.tap_count, kCirPre + kCirPost);
+        const pmt::pmt_t meta = pmt::car(msg);
+        BOOST_CHECK_EQUAL(meta_str(meta, "cir_output"), "repetition");
+        BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                              meta, pmt::mp("repetition_index"),
+                              pmt::from_uint64(0))),
+                          ordinal + 10);
+        BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                              meta, pmt::mp("repetition_ordinal"),
+                              pmt::from_uint64(99))),
+                          ordinal);
+        BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                              meta, pmt::mp("repetition_count"),
+                              pmt::from_uint64(0))),
+                          54u);
+        BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                              meta, pmt::mp("valid_repetitions"),
+                              pmt::from_uint64(0))),
+                          1u);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -27,6 +27,9 @@ REQUIRED_OPTIONS = (
     "--jam-gain-tx",
     "--jam-freq-offset",
     "--jam-freq-offsets",
+    "--jam-freq-start",
+    "--jam-freq-stop",
+    "--jam-freq-step",
     "--jam-dwell",
     "--jam-code-index",
     "--jam-preamble-length",
@@ -34,6 +37,7 @@ REQUIRED_OPTIONS = (
     "--jam-waveform",
     "--jam-pulse-shape",
     "--jam-delay-us",
+    "--jam-delay-random-us",
     "--jam-scale",
     "--jam-repeat-pri-us",
     "--jam-freq-settle-s",
@@ -106,10 +110,19 @@ class StaticContractTest(unittest.TestCase):
             self.assertIn('"%s"' % opt, src,
                           "missing CLI option %s" % opt)
 
-    def test_rejects_cpp_pdu(self):
+    def test_allows_cpp_pdu_align(self):
+        # M3: align + cpp-pdu builds a one-shot multi-TX schedule PDU; the
+        # old "cannot carry" hard reject is gone, while continuous + cpp-pdu
+        # is still explicitly refused (python-only independent streamer).
         src = _source()
-        self.assertIn("cpp-pdu", src)
-        self.assertIn("cannot carry", src)
+        self.assertNotIn("cannot carry", src)
+        self.assertIn(
+            "--echo-backend cpp-pdu does not support --jam-mode continuous",
+            src)
+        self.assertIn("JamCppPduEcho", src)
+        self.assertIn("tx_channel_count", src)
+        self.assertIn("pmt_vector", src)
+        self.assertIn("make_vector", src)
 
     def test_forces_python_backend(self):
         src = _source()
@@ -125,6 +138,15 @@ class StaticContractTest(unittest.TestCase):
         self.assertIn("jp.compose_tx_native(", src)
         self.assertIn("self._tx_payload = jp.compose_tx_native(", src)
 
+    def test_randomizes_delay_per_pulse(self):
+        src = _source()
+        self.assertIn("_randomize_jam_delay", src)
+        self.assertIn("jp.place_jam_row(", src)
+        self.assertIn("jp.draw_delay_native(", src)
+        self.assertIn("jp.parse_delay_random_us(", src)
+        self.assertIn("jp.compose_tx_native_at(", src)
+        self.assertIn("[-T, +T]", src)
+
     def test_plan_module_is_pure(self):
         plan = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             PLAN_NAME)
@@ -132,6 +154,23 @@ class StaticContractTest(unittest.TestCase):
             plan_src = f.read()
         for banned in ("import gnuradio", "import uhd", "import pmt"):
             self.assertNotIn(banned, plan_src)
+
+    def test_cpp_contiguous_window_dry_run(self):
+        src = _source()
+        self.assertIn("contiguous-window", src)
+        self.assertIn("data_fragments", src)
+        self.assertIn("backing_length", src)
+        self.assertIn("require_fragment_covers_L", src)
+
+    def test_cpp_pdu_carries_absolute_scan_base(self):
+        # A jam scan offset is ABSOLUTE base + offset: without the base the
+        # C++ worker would tune the jammer to the bare offset (measured on
+        # X410: coerced to 1 MHz, out of band).  The PDU must carry
+        # "freq_hz", and the caller must pass the real centre frequency.
+        src = _source()
+        self.assertIn("base_freq_hz", src)
+        self.assertIn('"freq_hz"', src)
+        self.assertIn("base_freq_hz=self.freq", src)
 
 
 if __name__ == "__main__":

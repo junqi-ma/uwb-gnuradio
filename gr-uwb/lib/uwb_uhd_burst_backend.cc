@@ -30,6 +30,7 @@
 #endif
 
 #include <gnuradio/uwb/uwb_uhd_burst_backend.h>
+#include <gnuradio/uwb/uwb_echo_multitx.h> // echo::kEchoMaxTxChannels (hot-path array bound)
 
 // UHD 4.1 header layout (pre-4.2): combined uhd/stream.hpp holds both
 // streamers, uhd/types/metadata.hpp holds rx_metadata_t/async_metadata_t.
@@ -42,8 +43,10 @@
 #include <uhd/usrp/multi_usrp.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <deque>
 #include <mutex>
 #include <sstream>
@@ -129,6 +132,117 @@ int64_t async_event_ticks(const ::uhd::async_metadata_t& md, double rate_hz)
     return ticks;
 }
 
+// --- M2 multi-TX channel resolution ---------------------------------------
+// Effective per-channel prepare truth (§5.1): M1's tx_channels vector when
+// present and non-empty, else the legacy single-TX scalars (exactly today's
+// prepare() semantics).  Only prepare() may allocate (std::vector); the
+// hot path uses the frozen Impl map below.
+struct ResolvedTxChannel {
+    size_t phys_channel = 0;
+    std::string antenna;
+    double gain_db = -1.0;
+    double freq_hz = 0.0;
+};
+
+bool resolve_tx_channels(const UhdBurstBackendConfig& cfg,
+                         std::vector<ResolvedTxChannel>& out,
+                         std::string& error)
+{
+    out.clear();
+    if constexpr (multitx_detail::has_tx_channels<
+                      UhdBurstBackendConfig>::value) {
+        const auto& v = cfg.tx_channels;
+        if (!v.empty()) {
+            if (v.size() > echo::kEchoMaxTxChannels) {
+                error = "too many TX channels";
+                return false;
+            }
+            for (const auto& e : v) {
+                ResolvedTxChannel r;
+                r.phys_channel = e.channel;
+                r.antenna = e.antenna;
+                r.gain_db = e.gain_db;
+                r.freq_hz = e.center_freq_hz;
+                out.push_back(r);
+            }
+        }
+    }
+    if (out.empty()) {
+        ResolvedTxChannel r;
+        r.phys_channel = cfg.tx_channel;
+        r.antenna = cfg.tx_antenna;
+        r.gain_db = cfg.tx_gain_db;
+        r.freq_hz = cfg.center_freq_hz;
+        out.push_back(r);
+    }
+    // Defensive re-check (M1's validate_* owns the full contract; prepare
+    // never trusts it blindly): physical channels unique, freq/gain sane.
+    for (size_t i = 0; i < out.size(); ++i) {
+        for (size_t j = i + 1; j < out.size(); ++j) {
+            if (out[i].phys_channel == out[j].phys_channel) {
+                error = "duplicate TX physical channel";
+                return false;
+            }
+        }
+        if (!std::isfinite(out[i].freq_hz) || out[i].freq_hz < 0.0) {
+            error = "TX channel frequency must be >= 0 and finite";
+            return false;
+        }
+        if (!std::isfinite(out[i].gain_db)) {
+            error = "TX channel gain must be finite (negative = not set)";
+            return false;
+        }
+        if (out[i].gain_db >= 0.0 && out[i].gain_db > 120.0) {
+            error = "TX channel gain must be <= 120 when set";
+            return false;
+        }
+    }
+    return true;
+}
+
+// TxBurstFragment flag contract (§5.2): the same SOB/time-spec/EOB
+// placement rules as validate_fragment_flags, plus one rule the single
+// path cannot express — every configured channel must carry a non-null
+// slice for every fragment (equal-length buffers per send).
+bool validate_tx_multi_flags(const echo::TxBurstFragment* frags,
+                             size_t count,
+                             size_t expect_channels,
+                             std::string& error)
+{
+    auto fail = [&](const char* what) {
+        error = what;
+        return false;
+    };
+    if (frags == nullptr || count == 0 ||
+        count > echo::kEchoMaxFragmentsPerBurst)
+        return fail("empty or oversized TX fragment list");
+    if (expect_channels == 0 ||
+        expect_channels > echo::kEchoMaxTxChannels)
+        return fail("TX channel count out of range");
+    for (size_t i = 0; i < count; ++i) {
+        const unsigned f = frags[i].flags;
+        if (frags[i].count == 0)
+            return fail("TX fragment with zero samples");
+        for (size_t c = 0; c < expect_channels; ++c) {
+            if (frags[i].tx_data[c] == nullptr)
+                return fail("TX fragment has null data on a channel");
+        }
+        if (i == 0) {
+            if (!(f & echo::kFlagTimeSpec) || !(f & echo::kFlagStartOfBurst))
+                return fail("first TX fragment lacks time spec + SOB");
+        } else if (f & (echo::kFlagTimeSpec | echo::kFlagStartOfBurst)) {
+            return fail("SOB / time spec outside the first TX fragment");
+        }
+        if (i + 1 == count) {
+            if (!(f & echo::kFlagEndOfBurst))
+                return fail("last TX fragment lacks EOB");
+        } else if (f & echo::kFlagEndOfBurst) {
+            return fail("EOB outside the last TX fragment");
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 struct UhdBurstBackend::Impl
@@ -136,6 +250,14 @@ struct UhdBurstBackend::Impl
     ::uhd::usrp::multi_usrp::sptr dev;
     ::uhd::tx_streamer::sptr tx_stream;
     ::uhd::rx_streamer::sptr rx_stream;
+
+    // Frozen TX channel map (prepare-time; worker read-only afterwards):
+    // logical index [0, tx_channel_count) → physical device channel.
+    std::array<size_t, echo::kEchoMaxTxChannels> tx_phys_channels = {};
+    size_t tx_channel_count = 0;
+    // Per-logical-channel TX frequency actually read back from the device
+    // by prepare()/tune_tx_channel() (0 = untouched).
+    std::array<double, echo::kEchoMaxTxChannels> tx_actual_freq_hz = {};
 
     // Armed RX state (issue_rx → collect_result, worker thread only).
     bool rx_armed = false;
@@ -145,54 +267,114 @@ struct UhdBurstBackend::Impl
     int16_t* rx_base = nullptr; // burst-linear write base (fixed scratch)
 
     // In-flight TX state for event attribution and result reporting
-    // (worker thread only).
+    // (worker thread only).  Requested/sent stay PER-CHANNEL (== L); the
+    // wire (transport) totals are channels × per-channel, folded in
+    // collect_result().
     uint64_t pending_tx_ticks = 0;
     uint64_t pending_tx_sent = 0;
+    uint64_t pending_tx_requested = 0;
+    size_t pending_tx_channels = 0;
 
     // Last frequency applied through tune()/prepare() (read back from the
     // device); atomic because the setter runs on the caller thread while
-    // the scheduler worker runs the bursts.
+    // the scheduler worker runs the bursts.  Jammer-only tune_tx_channel()
+    // deliberately leaves this co-tuned sense/RX reference untouched.
     std::atomic<double> center_freq_hz{ 0.0 };
 
-    // Async events (async thread producer, worker consumer).
+    // Async events (§5.6; async-thread producer, worker consumer).
     struct AsyncEvent {
         uint32_t event_code = 0;
-        int64_t tx_ticks = -1;
+        size_t channel = 0;    // UHD async channel (MIMO config index)
+        int64_t tx_ticks = -1; // device ticks from time_spec; -1 = none
     };
-    std::mutex async_mutex;
-    std::deque<AsyncEvent> async_events; // bounded, oldest dropped
-    uint64_t async_events_dropped = 0;
-
+    static constexpr size_t kMaxAsyncEvents = 128;
     // Lifecycle flag doubling as "stop requested" (async thread runs
     // while true; request_stop clears it, which stop_requested reports).
     std::atomic<bool> async_run{ false };
     std::thread async_thread;
-
-    static constexpr size_t kMaxAsyncEvents = 128;
+    // NOTE: the collect drain uses a worker-owned std::array (never
+    // std::vector); this ring only needs to be bounded, not array-shaped.
+    std::mutex async_mutex;
+    std::deque<AsyncEvent> async_events; // bounded, oldest dropped
+    // Cumulative §5.6 counters.  The async thread bumps dropped_; the
+    // worker folds ack/underflow/seq/time/unmatched at collect_result();
+    // tx_async_counts() snapshots all six (atomics: lock-free read).
+    std::atomic<uint64_t> async_ack_{ 0 };
+    std::atomic<uint64_t> async_underflow_{ 0 };
+    std::atomic<uint64_t> async_seq_error_{ 0 };
+    std::atomic<uint64_t> async_time_error_{ 0 };
+    std::atomic<uint64_t> async_unmatched_{ 0 };
+    std::atomic<uint64_t> async_dropped_{ 0 };
 
     void push_event(const AsyncEvent& ev)
     {
         std::lock_guard<std::mutex> lock(async_mutex);
         if (async_events.size() >= kMaxAsyncEvents) {
             async_events.pop_front();
-            ++async_events_dropped;
+            async_dropped_.fetch_add(1, std::memory_order_relaxed);
         }
         async_events.push_back(ev);
     }
 
-    // Consume events whose device ticks match this burst's TX ticks;
-    // unmatched events stay queued (their own burst will claim them).
-    void take_events_for(int64_t tx_ticks, std::vector<AsyncEvent>& matched)
+    // Drain for one collect_result(): EVERY drained event is classified by
+    // its event code FIRST (§5.6: a no-time-spec / foreign underflow must
+    // still be counted as an underflow — a full-length send() is never a
+    // substitute for "no U"), and events whose device ticks match this
+    // burst's TX ticks are additionally copied into the worker-owned
+    // fixed-capacity array for per-burst status mapping.  Events that could
+    // not be attributed to this burst (no time spec, or foreign ticks from
+    // startup/stale bursts) are counted as unmatched so the acceptance
+    // report can separate startup/unmatched from steady-state.  All drained
+    // events are erased: the cumulative counters ARE the record (§5.6).
+    size_t take_events_for(int64_t tx_ticks,
+                           AsyncEvent* out,
+                           size_t cap,
+                           uint64_t& ack,
+                           uint64_t& underflow,
+                           uint64_t& seq_error,
+                           uint64_t& time_error,
+                           uint64_t& unmatched)
     {
         std::lock_guard<std::mutex> lock(async_mutex);
+        size_t n = 0;
+        ack = underflow = seq_error = time_error = unmatched = 0;
         for (auto it = async_events.begin(); it != async_events.end();) {
-            if (it->tx_ticks == tx_ticks) {
-                matched.push_back(*it);
-                it = async_events.erase(it);
+            const uint32_t code = it->event_code;
+            if (code == 0 || code == kUhdAsyncBurstAck)
+                ++ack;
+            if (code & kUhdAsyncTimeError)
+                ++time_error;
+            if (code & (kUhdAsyncUnderflow | kUhdAsyncUnderflowInPacket))
+                ++underflow;
+            if (code & (kUhdAsyncSeqError | kUhdAsyncSeqErrorInBurst))
+                ++seq_error;
+            if (it->tx_ticks >= 0 && it->tx_ticks == tx_ticks) {
+                if (n < cap) {
+                    out[n++] = *it;
+                } else {
+                    async_dropped_.fetch_add(1, std::memory_order_relaxed);
+                }
             } else {
-                ++it;
+                ++unmatched;
             }
+            it = async_events.erase(it);
         }
+        async_ack_.fetch_add(ack, std::memory_order_relaxed);
+        async_underflow_.fetch_add(underflow, std::memory_order_relaxed);
+        async_seq_error_.fetch_add(seq_error, std::memory_order_relaxed);
+        async_time_error_.fetch_add(time_error, std::memory_order_relaxed);
+        async_unmatched_.fetch_add(unmatched, std::memory_order_relaxed);
+        return n;
+    }
+
+    void reset_async_counts()
+    {
+        async_ack_.store(0, std::memory_order_relaxed);
+        async_underflow_.store(0, std::memory_order_relaxed);
+        async_seq_error_.store(0, std::memory_order_relaxed);
+        async_time_error_.store(0, std::memory_order_relaxed);
+        async_unmatched_.store(0, std::memory_order_relaxed);
+        async_dropped_.store(0, std::memory_order_relaxed);
     }
 
     void start_async_thread(UhdBurstBackend* self)
@@ -206,7 +388,7 @@ struct UhdBurstBackend::Impl
                 if (!tx_stream || !tx_stream->recv_async_msg(md, 0.1))
                     continue;
                 push_event(AsyncEvent{
-                    static_cast<uint32_t>(md.event_code),
+                    static_cast<uint32_t>(md.event_code), md.channel,
                     async_event_ticks(md, rate) });
             }
         });
@@ -276,20 +458,35 @@ bool UhdBurstBackend::prepare(std::string& error)
         if (!d_cfg_.clock_source.empty())
             impl->dev->set_clock_source(d_cfg_.clock_source, mboard);
 
-        // Strict sample-rate contract on BOTH directions: set, then read
-        // back, then reject any silent coercion.
-        impl->dev->set_tx_rate(d_cfg_.sample_rate_hz, d_cfg_.tx_channel);
-        const double tx_rate = impl->dev->get_tx_rate(d_cfg_.tx_channel);
-        if (!rate_matches_strict(d_cfg_.sample_rate_hz, tx_rate,
-                                 d_cfg_.rate_tolerance_rel)) {
-            std::ostringstream os;
-            os << "strict rate readback failed on TX channel "
-               << d_cfg_.tx_channel << ": requested=" << d_cfg_.sample_rate_hz
-               << " readback=" << tx_rate
-               << " (silent coercion rejected; rel_tol="
-               << d_cfg_.rate_tolerance_rel << ")";
-            error = os.str();
-            return false;
+        // Resolve the effective TX channel list (§5.1; legacy single-TX
+        // scalars when M1's tx_channels is absent/empty).
+        std::vector<ResolvedTxChannel> txs;
+        {
+            std::string cfg_err;
+            if (!resolve_tx_channels(d_cfg_, txs, cfg_err)) {
+                error = std::string("invalid TX channel config: ") + cfg_err;
+                return false;
+            }
+        }
+        const size_t ntx = txs.size();
+
+        // Strict sample-rate contract on EVERY TX channel plus RX: set,
+        // then read back, then reject any silent coercion.
+        for (const auto& t : txs) {
+            impl->dev->set_tx_rate(d_cfg_.sample_rate_hz, t.phys_channel);
+            const double tx_rate =
+                impl->dev->get_tx_rate(t.phys_channel);
+            if (!rate_matches_strict(d_cfg_.sample_rate_hz, tx_rate,
+                                     d_cfg_.rate_tolerance_rel)) {
+                std::ostringstream os;
+                os << "strict rate readback failed on TX channel "
+                   << t.phys_channel << ": requested="
+                   << d_cfg_.sample_rate_hz << " readback=" << tx_rate
+                   << " (silent coercion rejected; rel_tol="
+                   << d_cfg_.rate_tolerance_rel << ")";
+                error = os.str();
+                return false;
+            }
         }
         impl->dev->set_rx_rate(d_cfg_.sample_rate_hz, d_cfg_.rx_channel);
         const double rx_rate = impl->dev->get_rx_rate(d_cfg_.rx_channel);
@@ -305,36 +502,47 @@ bool UhdBurstBackend::prepare(std::string& error)
             return false;
         }
 
-        if (d_cfg_.center_freq_hz > 0.0) {
-            // TX is the co-tuned reference; the RX is deliberately offset
-            // by rx_freq_offset_hz (see UhdBurstBackendConfig).
-            impl->dev->set_tx_freq(
-                ::uhd::tune_request_t(d_cfg_.center_freq_hz),
-                d_cfg_.tx_channel);
+        // Per-channel TX frequencies (0 = leave untouched, mirroring the
+        // legacy center_freq_hz == 0 sentinel).  The RX keeps the
+        // deliberate rx_freq_offset_hz off the SENSE (logical-0) reference
+        // (see UhdBurstBackendConfig); legacy single-TX resolves to exactly
+        // today's co-tuned behavior.
+        for (const auto& t : txs) {
+            if (t.freq_hz > 0.0) {
+                impl->dev->set_tx_freq(::uhd::tune_request_t(t.freq_hz),
+                                       t.phys_channel);
+            }
+        }
+        if (txs[0].freq_hz > 0.0) {
             impl->dev->set_rx_freq(
-                ::uhd::tune_request_t(d_cfg_.center_freq_hz +
+                ::uhd::tune_request_t(txs[0].freq_hz +
                                       d_cfg_.rx_freq_offset_hz),
                 d_cfg_.rx_channel);
-            // "Center" is the co-tuned reference: strip the deliberate RX
-            // offset back out of the readback average.
+            // "Center" is the co-tuned sense reference: strip the
+            // deliberate RX offset back out of the readback average.
             impl->center_freq_hz.store(
-                0.5 * (impl->dev->get_tx_freq(d_cfg_.tx_channel) +
+                0.5 * (impl->dev->get_tx_freq(txs[0].phys_channel) +
                        impl->dev->get_rx_freq(d_cfg_.rx_channel) -
                        d_cfg_.rx_freq_offset_hz));
         }
-        if (d_cfg_.tx_gain_db >= 0.0)
-            impl->dev->set_tx_gain(d_cfg_.tx_gain_db, d_cfg_.tx_channel);
+        for (const auto& t : txs) {
+            if (t.gain_db >= 0.0)
+                impl->dev->set_tx_gain(t.gain_db, t.phys_channel);
+            if (!t.antenna.empty())
+                impl->dev->set_tx_antenna(t.antenna, t.phys_channel);
+        }
         if (d_cfg_.rx_gain_db >= 0.0)
             impl->dev->set_rx_gain(d_cfg_.rx_gain_db, d_cfg_.rx_channel);
-        if (!d_cfg_.tx_antenna.empty())
-            impl->dev->set_tx_antenna(d_cfg_.tx_antenna, d_cfg_.tx_channel);
         if (!d_cfg_.rx_antenna.empty())
             impl->dev->set_rx_antenna(d_cfg_.rx_antenna, d_cfg_.rx_channel);
 
-        // Same device, two SC16 streamers (cpu s16 / otw sc16 — the
-        // production native wire format).
+        // Same device, one multi-channel TX SC16 streamer plus one RX SC16
+        // streamer (cpu s16 / otw sc16 — the production native wire
+        // format).  channels=[sense, jam, ...] in logical order.
         ::uhd::stream_args_t tx_args("sc16", "sc16");
-        tx_args.channels = std::vector<size_t>{ d_cfg_.tx_channel };
+        tx_args.channels.clear();
+        for (const auto& t : txs)
+            tx_args.channels.push_back(t.phys_channel);
         impl->tx_stream = impl->dev->get_tx_stream(tx_args);
         ::uhd::stream_args_t rx_args("sc16", "sc16");
         rx_args.channels = std::vector<size_t>{ d_cfg_.rx_channel };
@@ -342,6 +550,53 @@ bool UhdBurstBackend::prepare(std::string& error)
         if (!impl->tx_stream || !impl->rx_stream) {
             error = "failed to create SC16 TX/RX streamers";
             return false;
+        }
+        // The streamer must expose exactly the requested channel count —
+        // a coerced single-channel streamer under a dual-TX schedule
+        // would silently misdeliver the jammer row.
+        const size_t streamer_nch = impl->tx_stream->get_num_channels();
+        if (streamer_nch != ntx) {
+            std::ostringstream os;
+            os << "TX streamer channel count mismatch: requested=" << ntx
+               << " streamer=" << streamer_nch;
+            error = os.str();
+            return false;
+        }
+        for (size_t i = 0; i < ntx; ++i)
+            impl->tx_phys_channels[i] = txs[i].phys_channel;
+        impl->tx_channel_count = ntx;
+
+        // Re-assert every configured TX frequency AFTER the multi-channel
+        // streamer exists and verify each readback strictly (§5.1 per-TX
+        // frequency contract).  On the X410 the NCO/LO solution for a
+        // second TX channel is not fully committed by the prepare-time
+        // set_tx_freq alone: measured 2026-09-19, a fixed jammer CFO
+        // programmed only here misses the narrow repetition-average null
+        // (floor +7.9 dB) while the SAME frequency reached through a
+        // runtime tune_tx_channel reaches the full null (+0.1 dB), with
+        // identical get_tx_freq readbacks.  Re-applying after streamer
+        // creation makes the arm-time state match the retune state.
+        for (const auto& t : txs) {
+            if (t.freq_hz > 0.0) {
+                impl->dev->set_tx_freq(::uhd::tune_request_t(t.freq_hz),
+                                       t.phys_channel);
+            }
+        }
+        for (size_t i = 0; i < ntx; ++i) {
+            if (!(txs[i].freq_hz > 0.0))
+                continue; // 0 = leave untouched (legacy sentinel)
+            const double got = impl->dev->get_tx_freq(txs[i].phys_channel);
+            if (std::fabs(got - txs[i].freq_hz) > kUhdTxFreqReadbackTolHz) {
+                std::ostringstream os;
+                os << "strict TX frequency readback failed on logical "
+                      "channel " << i << " (phys " << txs[i].phys_channel
+                   << "): requested=" << txs[i].freq_hz
+                   << " readback=" << got << " (tol="
+                   << kUhdTxFreqReadbackTolHz << " Hz)";
+                error = os.str();
+                return false;
+            }
+            impl->tx_actual_freq_hz[i] = got;
         }
     } catch (const std::exception& e) {
         error = uhd_error_string("device configuration failed", e);
@@ -356,11 +611,13 @@ bool UhdBurstBackend::prepare(std::string& error)
     impl->rx_base = nullptr;
     impl->pending_tx_ticks = 0;
     impl->pending_tx_sent = 0;
+    impl->pending_tx_requested = 0;
+    impl->pending_tx_channels = 0;
     {
         std::lock_guard<std::mutex> lock(impl->async_mutex);
         impl->async_events.clear();
-        impl->async_events_dropped = 0;
     }
+    impl->reset_async_counts();
 
     d_impl_ = std::move(impl);
     d_impl_->start_async_thread(this);
@@ -446,12 +703,36 @@ echo::BurstStatus UhdBurstBackend::issue_tx(const echo::TxCommand& cmd,
         return echo::BurstStatus::StopDuringIo;
     }
     Impl& impl = *d_impl_;
+    const size_t nch = impl.tx_channel_count;
+    if (nch == 0 || nch > echo::kEchoMaxTxChannels) {
+        error = "backend not prepared";
+        return echo::BurstStatus::BackendError;
+    }
+    if (cmd.tx_channel_count == 0) {
+        error = "broken chain: TX command has zero channels";
+        return echo::BurstStatus::BackendError;
+    }
+    if (cmd.tx_channel_count != nch) {
+        std::ostringstream os;
+        os << "TX channel count mismatch: command=" << cmd.tx_channel_count
+           << " backend=" << nch;
+        error = os.str();
+        return echo::BurstStatus::BackendError;
+    }
 
-    if (cmd.fragment_count == 0 || cmd.fragments == nullptr) {
-        error = "broken chain: empty TX fragment list";
+    if (!impl.rx_armed || impl.armed_index != cmd.schedule_index) {
+        error = "broken chain: TX issued without armed RX for the same "
+                "schedule index";
         return echo::BurstStatus::BrokenChain;
     }
-    {
+
+    // Single-TX legacy path: validate the classic fragment list now so
+    // the multi-TX branch below owns the TxBurstFragment contract only.
+    if (nch == 1) {
+        if (cmd.fragment_count == 0 || cmd.fragments == nullptr) {
+            error = "broken chain: empty TX fragment list";
+            return echo::BurstStatus::BrokenChain;
+        }
         std::string flag_err;
         if (!validate_fragment_flags(cmd.fragments, cmd.fragment_count,
                                      &flag_err)) {
@@ -459,68 +740,125 @@ echo::BurstStatus UhdBurstBackend::issue_tx(const echo::TxCommand& cmd,
             return echo::BurstStatus::BrokenChain;
         }
     }
-    if (!impl.rx_armed || impl.armed_index != cmd.schedule_index) {
-        error = "broken chain: TX issued without armed RX for the same "
-                "schedule index";
-        return echo::BurstStatus::BrokenChain;
-    }
 
-    uint64_t sent_total = 0;
+    uint64_t sent_total = 0; // per-channel accepted samples (== L on Ok)
     bool first_send_call = true;
     bool saw_eob_flag = false;
     try {
-        for (size_t i = 0; i < cmd.fragment_count; ++i) {
-            const echo::BurstFragment& f = cmd.fragments[i];
-            if (f.tx_data == nullptr || f.count == 0) {
-                error = "broken chain: TX fragment has no data";
+        if (nch == 1) {
+            for (size_t i = 0; i < cmd.fragment_count; ++i) {
+                const echo::BurstFragment& f = cmd.fragments[i];
+                if (f.tx_data == nullptr || f.count == 0) {
+                    error = "broken chain: TX fragment has no data";
+                    return echo::BurstStatus::BrokenChain;
+                }
+                if (f.flags & echo::kFlagEndOfBurst)
+                    saw_eob_flag = true;
+                uint64_t done = 0;
+                while (done < f.count) {
+                    const uint64_t remaining = f.count - done;
+                    ::uhd::tx_metadata_t md;
+                    // gr-uhd usrp_sink mapping: time spec + SOB travel on
+                    // the FIRST send call of the burst only; data calls
+                    // NEVER carry EOB (a partial send must not have
+                    // declared one).
+                    if (first_send_call && (f.flags & echo::kFlagTimeSpec)) {
+                        int64_t full = 0;
+                        double frac = 0.0;
+                        if (!time_parts_from_ticks(cmd.tx_ticks,
+                                                   d_cfg_.sample_rate_hz,
+                                                   full, frac)) {
+                            error = "tx_ticks out of representable device "
+                                    "time range";
+                            return echo::BurstStatus::BackendError;
+                        }
+                        md.has_time_spec = true;
+                        md.time_spec = ::uhd::time_spec_t(full, frac);
+                    }
+                    if (first_send_call &&
+                        (f.flags & echo::kFlagStartOfBurst))
+                        md.start_of_burst = true;
+
+                    // No allocation: one stack pointer, viewed through
+                    // ref_vector (buffers.size() == 1).
+                    std::array<const void*, 1> buffs{
+                        static_cast<const void*>(f.tx_data + done * 2)
+                    };
+                    const size_t ntransfered = impl.tx_stream->send(
+                        ::uhd::ref_vector<const void*>(buffs.data(), 1),
+                        remaining, md, d_cfg_.send_timeout_s);
+                    first_send_call = false;
+                    done += ntransfered;
+                    sent_total += ntransfered;
+                    // ntransfered < remaining → partial send; the loop
+                    // re-issues the remainder without SOB/time spec.
+                }
+            }
+        } else {
+            // Multi-TX path (§5.2): every send carries buffers.size() ==
+            // tx_channel_count with IDENTICAL nsamps_per_buff; time_spec +
+            // SOB only on the burst's first send; NO data send carries
+            // EOB; a partial send re-issues ALL channels from the same
+            // sample offset (one send() transfers the same count on every
+            // channel, so a single `done` cursor stays exact).
+            std::string flag_err;
+            if (!validate_tx_multi_flags(cmd.tx_multi_fragments,
+                                         cmd.fragment_count, nch,
+                                         flag_err)) {
+                error = std::string("broken chain: ") + flag_err;
                 return echo::BurstStatus::BrokenChain;
             }
-            if (f.flags & echo::kFlagEndOfBurst)
-                saw_eob_flag = true;
-            uint64_t done = 0;
-            while (done < f.count) {
-                const uint64_t remaining = f.count - done;
-                ::uhd::tx_metadata_t md;
-                // gr-uhd usrp_sink mapping: time spec + SOB travel on the
-                // FIRST send call of the burst only; data calls NEVER
-                // carry EOB (a partial send must not have declared one).
-                if (first_send_call && (f.flags & echo::kFlagTimeSpec)) {
-                    int64_t full = 0;
-                    double frac = 0.0;
-                    if (!time_parts_from_ticks(cmd.tx_ticks,
-                                               d_cfg_.sample_rate_hz, full,
-                                               frac)) {
-                        error = "tx_ticks out of representable device "
-                                "time range";
-                        return echo::BurstStatus::BackendError;
+            for (size_t i = 0; i < cmd.fragment_count; ++i) {
+                const echo::TxBurstFragment& f = cmd.tx_multi_fragments[i];
+                if (f.flags & echo::kFlagEndOfBurst)
+                    saw_eob_flag = true;
+                uint64_t done = 0;
+                while (done < f.count) {
+                    const uint64_t remaining = f.count - done;
+                    ::uhd::tx_metadata_t md;
+                    if (first_send_call && (f.flags & echo::kFlagTimeSpec)) {
+                        int64_t full = 0;
+                        double frac = 0.0;
+                        if (!time_parts_from_ticks(cmd.tx_ticks,
+                                                   d_cfg_.sample_rate_hz,
+                                                   full, frac)) {
+                            error = "tx_ticks out of representable device "
+                                    "time range";
+                            return echo::BurstStatus::BackendError;
+                        }
+                        md.has_time_spec = true;
+                        md.time_spec = ::uhd::time_spec_t(full, frac);
                     }
-                    md.has_time_spec = true;
-                    md.time_spec = ::uhd::time_spec_t(full, frac);
-                }
-                if (first_send_call && (f.flags & echo::kFlagStartOfBurst))
-                    md.start_of_burst = true;
+                    if (first_send_call &&
+                        (f.flags & echo::kFlagStartOfBurst))
+                        md.start_of_burst = true;
 
-                const std::vector<const void*> buffs{
-                    static_cast<const void*>(f.tx_data + done * 2)
-                };
-                const size_t ntransfered = impl.tx_stream->send(
-                    buffs, remaining, md, d_cfg_.send_timeout_s);
-                first_send_call = false;
-                done += ntransfered;
-                sent_total += ntransfered;
-                // ntransfered < remaining → partial send; the loop
-                // re-issues the remainder without SOB/time spec.
+                    // No allocation: fixed stack array, viewed through
+                    // ref_vector(ptr, count) — buffers.size() == nch.
+                    std::array<const void*, echo::kEchoMaxTxChannels> buffs{};
+                    for (size_t c = 0; c < nch; ++c)
+                        buffs[c] = static_cast<const void*>(
+                            f.tx_data[c] + done * 2);
+                    const size_t ntransfered = impl.tx_stream->send(
+                        ::uhd::ref_vector<const void*>(buffs.data(), nch),
+                        remaining, md, d_cfg_.send_timeout_s);
+                    first_send_call = false;
+                    done += ntransfered;
+                    sent_total += ntransfered;
+                }
             }
         }
 
         // Burst termination: a dedicated zero-length send with EOB (the
         // gr-uhd usrp_sink stop() mechanism).  Exactly one EOB, after ALL
-        // data samples were accepted — immune to partial data sends.
+        // channels' data samples were accepted — immune to partial sends.
         if (saw_eob_flag) {
             ::uhd::tx_metadata_t md;
             md.end_of_burst = true;
-            const std::vector<const void*> buffs{ nullptr };
-            impl.tx_stream->send(buffs, 0, md, d_cfg_.send_timeout_s);
+            std::array<const void*, echo::kEchoMaxTxChannels> buffs{};
+            impl.tx_stream->send(
+                ::uhd::ref_vector<const void*>(buffs.data(), nch), 0, md,
+                d_cfg_.send_timeout_s);
         }
     } catch (const std::exception& e) {
         error = uhd_error_string("tx_streamer::send", e);
@@ -529,6 +867,8 @@ echo::BurstStatus UhdBurstBackend::issue_tx(const echo::TxCommand& cmd,
 
     impl.pending_tx_ticks = static_cast<uint64_t>(cmd.tx_ticks);
     impl.pending_tx_sent = sent_total;
+    impl.pending_tx_requested = cmd.total_samples;
+    impl.pending_tx_channels = nch;
 
     // Non-blocking async drain: pick up an event already queued (e.g. an
     // immediately-detected late command).  The async thread keeps
@@ -536,7 +876,7 @@ echo::BurstStatus UhdBurstBackend::issue_tx(const echo::TxCommand& cmd,
     ::uhd::async_metadata_t amd;
     if (impl.tx_stream->recv_async_msg(amd, 0.0)) {
         impl.push_event(Impl::AsyncEvent{
-            static_cast<uint32_t>(amd.event_code),
+            static_cast<uint32_t>(amd.event_code), amd.channel,
             async_event_ticks(amd, d_cfg_.sample_rate_hz) });
     }
 
@@ -569,6 +909,8 @@ bool UhdBurstBackend::collect_result(uint64_t schedule_index,
     const int64_t pending_tx_ticks =
         static_cast<int64_t>(impl.pending_tx_ticks);
     const uint64_t tx_sent = impl.pending_tx_sent;
+    const uint64_t tx_requested = impl.pending_tx_requested;
+    const size_t tx_channels = impl.pending_tx_channels;
 
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(wait_ms);
@@ -590,7 +932,12 @@ bool UhdBurstBackend::collect_result(uint64_t schedule_index,
         out.rx_time_ticks = rx_time_ticks;
         out.tx_ticks = pending_tx_ticks;
         out.rx_ticks = impl.armed_rx_ticks;
-        out.tx_samples_sent = tx_sent;
+        out.tx_samples_requested = tx_requested; // per-channel (== L)
+        out.tx_samples_sent = tx_sent;           // per-channel
+        out.tx_channel_count = tx_channels;
+        out.tx_wire_samples_requested = // channels × per-channel
+            tx_channels * tx_requested;
+        out.tx_wire_samples_sent = tx_channels * tx_sent;
         out.rx_samples_received = received;
         out.rx_reissues = rx_reissues;
         out.status = st;
@@ -658,11 +1005,30 @@ bool UhdBurstBackend::collect_result(uint64_t schedule_index,
             if (nrecvd < remaining_samples)
                 ++rx_reissues; // partial recv → loop re-issues
             if (received == impl.armed_total_samples) {
-                // Window complete.  Attribute the async TX events whose
-                // device ticks match this burst's TX ticks.
-                std::vector<Impl::AsyncEvent> events;
-                impl.take_events_for(pending_tx_ticks, events);
-                for (const auto& ev : events) {
+                // Window complete.  Attribute async TX events (§5.6):
+                // take_events_for classifies EVERY drained event by code
+                // (ack/underflow/seq/time) and additionally counts events it
+                // cannot tie to this burst as unmatched.  The drain target
+                // is a worker-owned FIXED array — no std::vector on the hot
+                // path; excess matches are counted as dropped.
+                std::array<Impl::AsyncEvent, Impl::kMaxAsyncEvents> events{};
+                uint64_t ev_ack = 0, ev_underflow = 0, ev_seq_error = 0;
+                uint64_t ev_time_error = 0, ev_unmatched = 0;
+                const size_t n_events = impl.take_events_for(
+                    pending_tx_ticks, events.data(), events.size(),
+                    ev_ack, ev_underflow, ev_seq_error, ev_time_error,
+                    ev_unmatched);
+                (void)ev_ack;
+                (void)ev_underflow;
+                (void)ev_seq_error;
+                (void)ev_time_error;
+                (void)ev_unmatched; // folded into tx_async_counts()
+                for (size_t k = 0; k < n_events; ++k) {
+                    const auto& ev = events[k];
+                    if (ev.event_code == 0 ||
+                        ev.event_code == kUhdAsyncBurstAck) {
+                        continue;
+                    }
                     std::string note;
                     const echo::BurstStatus st =
                         map_uhd_tx_async_event(ev.event_code, note);
@@ -751,13 +1117,20 @@ echo::BurstStatus UhdBurstBackend::tune(double freq_hz, std::string& error)
     }
     try {
         // Same multi_usrp device: retune BOTH directions (the RX keeps the
-        // deliberate rx_freq_offset_hz), then read back.
+        // deliberate rx_freq_offset_hz), then read back.  The TX leg uses
+        // the frozen sense (logical-0) physical channel — identical to the
+        // legacy scalar in single-TX, correct when a multi-TX config was
+        // built with a divergent scalar.
+        Impl& impl = *d_impl_;
+        const size_t sense_phys =
+            impl.tx_channel_count > 0 ? impl.tx_phys_channels[0]
+                                      : d_cfg_.tx_channel;
         d_impl_->dev->set_tx_freq(::uhd::tune_request_t(freq_hz),
-                                  d_cfg_.tx_channel);
+                                  sense_phys);
         d_impl_->dev->set_rx_freq(
             ::uhd::tune_request_t(freq_hz + d_cfg_.rx_freq_offset_hz),
             d_cfg_.rx_channel);
-        const double tx = d_impl_->dev->get_tx_freq(d_cfg_.tx_channel);
+        const double tx = d_impl_->dev->get_tx_freq(sense_phys);
         const double rx = d_impl_->dev->get_rx_freq(d_cfg_.rx_channel);
         d_impl_->center_freq_hz.store(
             0.5 * (tx + rx - d_cfg_.rx_freq_offset_hz));
@@ -771,6 +1144,85 @@ echo::BurstStatus UhdBurstBackend::tune(double freq_hz, std::string& error)
 double UhdBurstBackend::center_freq_hz() const
 {
     return d_impl_ ? d_impl_->center_freq_hz.load() : 0.0;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-TX (§5.1/§5.2/§5.5/§5.6)
+// ---------------------------------------------------------------------------
+
+size_t UhdBurstBackend::tx_channel_count() const
+{
+    return configured_tx_channel_count(d_cfg_);
+}
+
+echo::BurstStatus UhdBurstBackend::tune_tx_channel(size_t logical_channel,
+                                                  double hz,
+                                                  double& actual_hz,
+                                                  std::string& error)
+{
+    if (!d_impl_ || !d_impl_->dev) {
+        error = "backend not prepared";
+        return echo::BurstStatus::BackendError;
+    }
+    if (stop_requested()) {
+        error = "backend stopped";
+        return echo::BurstStatus::StopDuringIo;
+    }
+    if (!(hz > 0.0) || !std::isfinite(hz)) {
+        error = "tune_tx_channel: freq_hz must be > 0 and finite";
+        return echo::BurstStatus::BackendError;
+    }
+    Impl& impl = *d_impl_;
+    if (logical_channel >= impl.tx_channel_count) {
+        std::ostringstream os;
+        os << "tune_tx_channel: logical channel " << logical_channel
+           << " out of range (tx_channel_count=" << impl.tx_channel_count
+           << ")";
+        error = os.str();
+        return echo::BurstStatus::BackendError;
+    }
+    try {
+        // Jammer-only: exactly one physical TX channel moves; the sense
+        // TX and the RX (plus the co-tuned center_freq_hz_ reference)
+        // are untouched.  Burst-boundary serialization is the caller's
+        // contract (EchoTimer M5); this never runs concurrently with
+        // issue_*/collect_result.
+        const size_t phys = impl.tx_phys_channels[logical_channel];
+        impl.dev->set_tx_freq(::uhd::tune_request_t(hz), phys);
+        actual_hz = impl.dev->get_tx_freq(phys);
+        // A retune that does not actually land on the requested frequency
+        // must NOT be recorded as the new jammer frequency (§5.5): fail
+        // explicitly so the worker keeps the previous value and retries.
+        if (std::fabs(actual_hz - hz) > kUhdTxFreqReadbackTolHz) {
+            std::ostringstream os;
+            os << "tune_tx_channel readback mismatch on logical channel "
+               << logical_channel << " (phys " << phys << "): requested="
+               << hz << " actual=" << actual_hz << " (tol="
+               << kUhdTxFreqReadbackTolHz << " Hz)";
+            error = os.str();
+            return echo::BurstStatus::BackendError;
+        }
+        impl.tx_actual_freq_hz[logical_channel] = actual_hz;
+    } catch (const std::exception& e) {
+        error = uhd_error_string("tune_tx_channel", e);
+        return echo::BurstStatus::BackendError;
+    }
+    return echo::BurstStatus::Ok;
+}
+
+echo::TxAsyncCounts UhdBurstBackend::tx_async_counts() const
+{
+    echo::TxAsyncCounts c;
+    if (!d_impl_)
+        return c;
+    const Impl& impl = *d_impl_;
+    c.ack = impl.async_ack_.load(std::memory_order_relaxed);
+    c.underflow = impl.async_underflow_.load(std::memory_order_relaxed);
+    c.seq_error = impl.async_seq_error_.load(std::memory_order_relaxed);
+    c.time_error = impl.async_time_error_.load(std::memory_order_relaxed);
+    c.unmatched = impl.async_unmatched_.load(std::memory_order_relaxed);
+    c.dropped = impl.async_dropped_.load(std::memory_order_relaxed);
+    return c;
 }
 
 } // namespace uhd

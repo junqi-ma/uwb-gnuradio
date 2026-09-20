@@ -62,8 +62,11 @@
 #include <gnuradio/uwb/uwb_uhd_backend_config.h>
 
 #include <atomic>
+#include <cstddef>
 #include <memory>
 #include <string>
+#include <type_traits>
+#include <vector>
 
 namespace gr {
 namespace uwb {
@@ -96,6 +99,25 @@ public:
     int64_t device_time_ticks() const override;
     echo::BurstStatus tune(double freq_hz, std::string& error) override;
 
+    // --- Multi-TX (X410 dual-TX M2; planning §5.1/§5.2/§5.5/§5.6) -----------
+    //
+    // Number of configured TX channels (1 = legacy single-TX).  Resolved
+    // from the frozen config — no device needed, safe before prepare().
+    size_t tx_channel_count() const;
+
+    // Jammer-only retune (§5.5): tune logical TX channel [0, count),
+    // mapped onto the configured physical channel; the sense TX and RX
+    // are left untouched.  The caller (EchoTimer) serializes this at a
+    // burst boundary — never concurrent with issue_*/collect_result, and
+    // the radio worker keeps the single-threaded send contract.
+    echo::BurstStatus tune_tx_channel(size_t logical_channel,
+                                      double hz,
+                                      double& actual_hz,
+                                      std::string& error) override;
+
+    // Cumulative TX async counters (§5.6 snapshot; thread-safe).
+    echo::TxAsyncCounts tx_async_counts() const override;
+
     // Last frequency read back from the device by tune()/prepare().
     double center_freq_hz() const;
 
@@ -113,6 +135,66 @@ private:
     // and cleared by a fresh prepare()).
     std::atomic<bool> d_stop_requested_{ false };
 };
+
+// --- M2 transitional multi-TX config helpers (UHD-free) ----------------------
+//
+// Planning §5.1 extends UhdBurstBackendConfig with
+//   std::vector<UhdTxChannelConfig> tx_channels;   // {channel, antenna,
+//                                                  //  gain_db, center_freq_hz}
+// (empty = legacy single-TX truth from tx_channel/tx_antenna/tx_gain_db/
+// center_freq_hz).  That extension lands with M1 (Fake/config/QA owner);
+// until then these helpers resolve the legacy single channel, so every TU
+// using them compiles and behaves exactly like the single-TX baseline on
+// both sides of the M1 landing.  The member/field names below follow §5.1
+// verbatim; a renamed M1 landing fails LOUDLY here at compile time (never
+// a silent single-channel fallback).
+
+namespace multitx_detail {
+
+template <typename C, typename = void>
+struct has_tx_channels : std::false_type {};
+template <typename C>
+struct has_tx_channels<
+    C,
+    std::void_t<decltype(std::declval<const C&>().tx_channels)>>
+    : std::true_type {};
+
+} // namespace multitx_detail
+
+// Effective TX channel count: M1's tx_channels size when present and
+// non-empty, else the legacy 1.
+inline size_t configured_tx_channel_count(const UhdBurstBackendConfig& cfg)
+{
+    if constexpr (multitx_detail::has_tx_channels<
+                      UhdBurstBackendConfig>::value) {
+        if (!cfg.tx_channels.empty())
+            return cfg.tx_channels.size();
+    }
+    return 1;
+}
+
+// Fill M1's per-channel vector from parallel arrays (all four must share
+// one length; the caller validates).  No-op while the member is absent —
+// the legacy scalar fields then remain the single source of truth.
+inline void assign_tx_channels(UhdBurstBackendConfig& cfg,
+                               const std::vector<size_t>& channels,
+                               const std::vector<std::string>& antennas,
+                               const std::vector<double>& gains_db,
+                               const std::vector<double>& freqs_hz)
+{
+    if constexpr (multitx_detail::has_tx_channels<
+                      UhdBurstBackendConfig>::value) {
+        cfg.tx_channels.clear();
+        for (size_t i = 0; i < channels.size(); ++i) {
+            typename std::decay_t<decltype(cfg.tx_channels)>::value_type e;
+            e.channel = channels[i];
+            e.antenna = antennas[i];
+            e.gain_db = gains_db[i];
+            e.center_freq_hz = freqs_hz[i];
+            cfg.tx_channels.push_back(e);
+        }
+    }
+}
 
 } // namespace uhd
 } // namespace uwb

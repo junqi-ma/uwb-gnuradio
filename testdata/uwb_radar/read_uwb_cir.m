@@ -1,4 +1,4 @@
-function [cir, meta] = read_uwb_cir(outDir, pulseId, wantNorm)
+function [cir, meta] = read_uwb_cir(outDir, pulseId, wantNorm, repetitionIndex)
 %READ_UWB_CIR Read one pulse's CIR from a UwbCirWriter output directory.
 %   [CIR, META] = READ_UWB_CIR(OUTDIR, PULSEID) reads the CIR frame whose
 %   pulse_id == PULSEID from OUTDIR/cir.cf32 + OUTDIR/cir.jsonl.
@@ -6,6 +6,10 @@ function [cir, meta] = read_uwb_cir(outDir, pulseId, wantNorm)
 %   [CIR, META] = READ_UWB_CIR(OUTDIR, PULSEID, TRUE) instead reads the
 %   L2-normalized CIR from OUTDIR/cir_norm.cf32 (UwbCirWriter must have been
 %   started with write_normalized=true).
+%   [CIR, META] = READ_UWB_CIR(OUTDIR, PULSEID, WANTNORM, REPETITIONINDEX)
+%   selects one per-repetition record by its absolute 0-based SYNC index.
+%   Without REPETITIONINDEX, legacy files and averaged output behave as
+%   before; a per-repetition file returns the first record for that pulse.
 %
 %   CIR is tap_count x 1 complex single (raw CIR: divided by code_energy,
 %   NOT L2-normalized).  For failed frames (sfd_failed / timing_failed /
@@ -34,6 +38,9 @@ function [cir, meta] = read_uwb_cir(outDir, pulseId, wantNorm)
     if nargin < 3
         wantNorm = false;
     end
+    if nargin < 4
+        repetitionIndex = [];
+    end
 
     jsonlFile = fullfile(outDir, 'cir.jsonl');
     metaAll = readAllJsonl(jsonlFile);
@@ -44,10 +51,27 @@ function [cir, meta] = read_uwb_cir(outDir, pulseId, wantNorm)
         return;
     end
 
-    idx = find([metaAll.pulse_id] == pulseId, 1);
+    candidates = find([metaAll.pulse_id] == pulseId);
+    if ~isempty(repetitionIndex) && ~isempty(candidates)
+        hasRep = arrayfun(@(x) isfield(x, 'repetition_index') && ...
+                         ~isempty(x.repetition_index), metaAll(candidates));
+        repValues = nan(size(candidates));
+        repValues(hasRep) = [metaAll(candidates(hasRep)).repetition_index];
+        candidates = candidates(repValues == repetitionIndex);
+    end
+    idx = [];
+    if ~isempty(candidates)
+        idx = candidates(1);
+    end
     if isempty(idx)
-        error('read_uwb_cir:noPulse', ...
-              'pulse %d not found in %s', pulseId, jsonlFile);
+        if isempty(repetitionIndex)
+            error('read_uwb_cir:noPulse', ...
+                  'pulse %d not found in %s', pulseId, jsonlFile);
+        else
+            error('read_uwb_cir:noRepetition', ...
+                  'pulse %d repetition %d not found in %s', ...
+                  pulseId, repetitionIndex, jsonlFile);
+        end
     end
     meta = metaAll(idx);
 

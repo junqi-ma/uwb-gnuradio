@@ -318,6 +318,7 @@ UwbCirWriter::start()
     d_dropped_.store(0);
     d_invalid_.store(0);
     d_high_watermark_.store(0);
+    d_since_flush_ = 0;
     {
         std::lock_guard<std::mutex> lock(d_mutex_);
         d_queue_head_ = d_queue_tail_ = d_queue_count_ = 0;
@@ -452,9 +453,6 @@ UwbCirWriter::write_frame(pmt::pmt_t msg)
         if (d_write_normalized_ && norm != nullptr) {
             d_norm_.write(reinterpret_cast<const char*>(norm), nbytes);
         }
-        d_raw_.flush();
-        if (d_norm_.is_open())
-            d_norm_.flush();
         raw_offset = d_raw_offset_.fetch_add(tap_count);
         if (d_write_normalized_)
             norm_offset = d_norm_offset_.fetch_add(tap_count);
@@ -479,6 +477,10 @@ UwbCirWriter::write_frame(pmt::pmt_t msg)
     std::ostringstream os;
     os << "{\"pulse_id\":" << pulse_id;
     append_u64(os, "schedule_index", schedule_index);
+    append_opt_str(os, meta, "cir_output");
+    append_opt_u64(os, meta, "repetition_index");
+    append_opt_u64(os, meta, "repetition_ordinal");
+    append_opt_u64(os, meta, "repetition_count");
     append_str(os, "status",
                status.empty() ? std::string("unknown") : status);
     append_f64(os, "sample_rate", fs);
@@ -515,7 +517,17 @@ UwbCirWriter::write_frame(pmt::pmt_t msg)
     os << "}\n";
 
     d_jsonl_ << os.str();
-    d_jsonl_.flush();
+    // Per-repetition output can exceed 20k records/s.  Flushing three files
+    // after every record serialises the hot path on syscalls; bounded batch
+    // flushing preserves observability while stop() still performs a final
+    // drain + flush before close.
+    if (++d_since_flush_ >= 256) {
+        d_raw_.flush();
+        if (d_norm_.is_open())
+            d_norm_.flush();
+        d_jsonl_.flush();
+        d_since_flush_ = 0;
+    }
 }
 
 } // namespace uwb

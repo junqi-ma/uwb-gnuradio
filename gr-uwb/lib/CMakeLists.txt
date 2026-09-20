@@ -181,6 +181,7 @@ list(APPEND test_uwb_sources
     qa_uwb_radar_cir_estimator_block.cc
     qa_uwb_cir_writer.cc
     qa_uwb_echo_timer.cc
+    qa_uwb_echo_multitx_layout.cc
     qa_uwb_echo_timer_stream.cc
     qa_uwb_radar_e2e.cc
     qa_uwb_uhd_backend.cc

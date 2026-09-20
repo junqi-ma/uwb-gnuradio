@@ -27,6 +27,7 @@
 #include <gnuradio/blocks/message_debug.h>
 #include <gnuradio/top_block.h>
 #include <gnuradio/uwb/uwb_echo_burst_backend.h>
+#include <gnuradio/uwb/uwb_echo_multitx.h>
 #include <gnuradio/uwb/uwb_echo_scheduler_core.h>
 #include <gnuradio/uwb/uwb_fake_burst_backend.h>
 #include <gnuradio/uwb/uwb_realtime_echo_timer.h>
@@ -1379,6 +1380,144 @@ BOOST_AUTO_TEST_CASE(test_echo_timer_queue_full_and_order)
 //     stop() must join the worker (woken through backend request_stop())
 //     without deadlock.  Confirms the drop accounting survives the stop.
 // ---------------------------------------------------------------------------
+// (M1 multitx Fake-backend cases: one inline here, the rest at EOF.)
+
+// ---------------------------------------------------------------------------
+// M1: Fake multi-channel — two fixed payloads, different lengths, zero
+// padded front/back, stitched point-for-point per channel.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct MultiTxRig {
+    // Geometry: D=20, sense 100 @20, jam 50 @30 (delay +10) → L=120.
+    static constexpr uint64_t kD = 20;
+    static constexpr uint64_t kSenseLen = 100;
+    static constexpr uint64_t kJamLen = 50;
+    static constexpr uint64_t kDelay = 10;
+    static constexpr uint64_t kL = 120;
+    static constexpr size_t kNfrags = 4;
+
+    std::vector<int16_t> sense;
+    std::vector<int16_t> jam;
+    std::vector<int16_t> zero;
+    std::vector<int16_t> phys0;
+    std::vector<int16_t> phys1;
+    TxBurstFragment frags[kNfrags] = {};
+    BurstFragment rxf[1] = {};
+    std::vector<int16_t> rxbuf;
+
+    MultiTxRig()
+    {
+        sense.resize(kSenseLen * 2);
+        jam.resize(kJamLen * 2);
+        zero.assign(kL * 2, 0);
+        for (size_t i = 0; i < sense.size(); ++i)
+            sense[i] = static_cast<int16_t>(1000 + (i * 13 % 20000));
+        for (size_t i = 0; i < jam.size(); ++i)
+            jam[i] = static_cast<int16_t>(-8000 + (i * 29 % 16000));
+        // Physical burst per channel (what the planner lays out).
+        phys0.assign(zero.begin(), zero.end());
+        phys1.assign(zero.begin(), zero.end());
+        for (uint64_t s = 0; s < kSenseLen; ++s) {
+            phys0[(kD + s) * 2] = sense[s * 2];
+            phys0[(kD + s) * 2 + 1] = sense[s * 2 + 1];
+        }
+        const uint64_t jb = kD + kDelay;
+        for (uint64_t s = 0; s < kJamLen; ++s) {
+            phys1[(jb + s) * 2] = jam[s * 2];
+            phys1[(jb + s) * 2 + 1] = jam[s * 2 + 1];
+        }
+        // Sorted unique boundaries {0,20,30,80,120}.
+        const uint64_t b[5] = { 0, 20, 30, 80, 120 };
+        for (size_t i = 0; i < kNfrags; ++i) {
+            const uint64_t off = b[i], cnt = b[i + 1] - b[i];
+            frags[i].offset = off;
+            frags[i].count = cnt;
+            frags[i].tx_data[0] =
+                multitx_channel_ptr(sense.data(), kD, kSenseLen,
+                                    zero.data(), off, cnt);
+            frags[i].tx_data[1] =
+                multitx_channel_ptr(jam.data(), jb, kJamLen, zero.data(),
+                                    off, cnt);
+            frags[i].flags = 0;
+        }
+        frags[0].flags = kFlagTimeSpec | kFlagStartOfBurst;
+        frags[kNfrags - 1].flags = kFlagEndOfBurst;
+        // Single-channel RX window.
+        rxbuf.assign(64 * 2, 0);
+        rxf[0].rx_data = rxbuf.data();
+        rxf[0].offset = 0;
+        rxf[0].count = 64;
+        rxf[0].flags =
+            kFlagTimeSpec | kFlagStartOfBurst | kFlagEndOfBurst;
+    }
+
+    TxCommand tx_cmd(uint64_t idx = 0) const
+    {
+        TxCommand cmd;
+        cmd.schedule_index = idx;
+        cmd.tx_ticks = 1000000;
+        cmd.total_samples = kL;
+        cmd.tx_channel_count = 2;
+        cmd.tx_multi_fragments = frags;
+        cmd.fragment_count = kNfrags;
+        return cmd;
+    }
+
+    RxCommand rx_cmd(uint64_t idx = 0)
+    {
+        RxCommand cmd;
+        cmd.schedule_index = idx;
+        cmd.rx_ticks = 999000;
+        cmd.total_samples = 64;
+        cmd.fragments = rxf;
+        cmd.fragment_count = 1;
+        return cmd;
+    }
+};
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(test_fake_multitx_two_channel_stitch)
+{
+    FakeBurstBackend fake(FakeBurstBackend::Config{});
+    std::string err;
+    BOOST_REQUIRE(fake.prepare(err));
+    MultiTxRig rig;
+    BOOST_REQUIRE(fake.issue_rx(rig.rx_cmd(), err) == BurstStatus::Ok);
+    BOOST_REQUIRE(fake.issue_tx(rig.tx_cmd(), err) == BurstStatus::Ok);
+    BurstResult res;
+    BOOST_REQUIRE(fake.collect_result(0, 1000, res));
+    BOOST_CHECK(res.status == BurstStatus::Ok);
+    BOOST_CHECK_EQUAL(res.tx_channel_count, 2u);
+    BOOST_CHECK_EQUAL(res.tx_samples_requested, 120u); // per channel
+    BOOST_CHECK_EQUAL(res.tx_samples_sent, 120u);
+    BOOST_CHECK_EQUAL(res.tx_wire_samples_requested, 240u);
+    BOOST_CHECK_EQUAL(res.tx_wire_samples_sent, 240u);
+
+    FakeBurstBackend::FakeBurstRecord rec;
+    BOOST_REQUIRE(fake.find_record(0, rec));
+    BOOST_CHECK_EQUAL(rec.tx_channel_count, 2u);
+    BOOST_REQUIRE_EQUAL(rec.tx_stitched_ch.size(), 2u);
+    BOOST_CHECK(rec.tx_stitched_ch[0] == rig.phys0); // point-for-point
+    BOOST_CHECK(rec.tx_stitched_ch[1] == rig.phys1);
+    BOOST_CHECK(rec.tx_stitched == rig.phys0); // ch0 compat mirror
+    // Zero padding front/back on both rows (different payload lengths).
+    for (uint64_t s = 0; s < 20; ++s) {
+        BOOST_CHECK_EQUAL(rec.tx_stitched_ch[0][s * 2], 0);
+        BOOST_CHECK_EQUAL(rec.tx_stitched_ch[0][s * 2 + 1], 0);
+    }
+    for (uint64_t s = 0; s < 30; ++s)
+        BOOST_CHECK_EQUAL(rec.tx_stitched_ch[1][s * 2], 0);
+    for (uint64_t s = 80; s < 120; ++s)
+        BOOST_CHECK_EQUAL(rec.tx_stitched_ch[1][s * 2], 0);
+    // Waveform bodies land at their planner offsets.
+    BOOST_CHECK_EQUAL(rec.tx_stitched_ch[0][20 * 2], rig.sense[0]);
+    BOOST_CHECK_EQUAL(rec.tx_stitched_ch[1][30 * 2], rig.jam[0]);
+    // Call accounting: one send call per fragment, no partials.
+    BOOST_CHECK_EQUAL(rec.tx_calls, 4u);
+    BOOST_CHECK_EQUAL(rec.tx_reissues, 0u);
+}
 BOOST_AUTO_TEST_CASE(test_echo_timer_queue_full_no_deadlock_on_stop)
 {
     auto cfg = base_grid_cfg();
@@ -1431,4 +1570,717 @@ BOOST_AUTO_TEST_CASE(test_echo_timer_queue_full_no_deadlock_on_stop)
 
     tb->stop();
     tb->wait();
+}
+
+// ---------------------------------------------------------------------------
+// M1: Fake multi-channel fragment boundary / SOB-time-EOB / partial
+// continuation: chunked sends keep one shared offset across channels, the
+// first call alone carries SOB+time-spec, EOB only on last-fragment calls.
+// Broken chains and the fragment cap fail with diagnostics.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_fake_multitx_fragment_partial_flags)
+{
+    FakeBurstBackend::Config fcfg;
+    fcfg.max_io_chunk = 37; // forces partial sends inside fragments
+    FakeBurstBackend fake(fcfg);
+    std::string err;
+    BOOST_REQUIRE(fake.prepare(err));
+    MultiTxRig rig;
+    BOOST_REQUIRE(fake.issue_rx(rig.rx_cmd(), err) == BurstStatus::Ok);
+    BOOST_REQUIRE(fake.issue_tx(rig.tx_cmd(), err) == BurstStatus::Ok);
+    BurstResult res;
+    BOOST_REQUIRE(fake.collect_result(0, 1000, res));
+    BOOST_CHECK(res.status == BurstStatus::PartialHandled);
+
+    FakeBurstBackend::FakeBurstRecord rec;
+    BOOST_REQUIRE(fake.find_record(0, rec));
+    // Fragments 20/10/50/40 with chunk 37 → 1+1+2+2 = 6 calls, 2 reissues.
+    BOOST_CHECK_EQUAL(rec.tx_calls, 6u);
+    BOOST_CHECK_EQUAL(rec.tx_reissues, 2u);
+    BOOST_REQUIRE_EQUAL(rec.tx_flags.size(), 6u);
+    const uint8_t kSOB = kFlagStartOfBurst, kEOB = kFlagEndOfBurst,
+                  kTIME = kFlagTimeSpec;
+    BOOST_CHECK_EQUAL(rec.tx_flags[0], kSOB | kTIME); // SOB/time: first only
+    BOOST_CHECK_EQUAL(rec.tx_flags[1], 0u);
+    BOOST_CHECK_EQUAL(rec.tx_flags[2], 0u);
+    BOOST_CHECK_EQUAL(rec.tx_flags[3], 0u);
+    BOOST_CHECK_EQUAL(rec.tx_flags[4], kEOB); // EOB: last fragment only
+    BOOST_CHECK_EQUAL(rec.tx_flags[5], kEOB);
+    // Shared-offset continuation: stitched rows still point-for-point.
+    BOOST_CHECK(rec.tx_stitched_ch[0] == rig.phys0);
+    BOOST_CHECK(rec.tx_stitched_ch[1] == rig.phys1);
+    BOOST_CHECK_EQUAL(res.tx_wire_samples_sent, 240u);
+
+    // Broken chains diagnose (non-empty error, no completion queued).
+    auto expect_broken = [&](TxCommand bad, const char* why) {
+        FakeBurstBackend f2(FakeBurstBackend::Config{});
+        BOOST_REQUIRE(f2.prepare(err));
+        MultiTxRig r2;
+        BOOST_REQUIRE(f2.issue_rx(r2.rx_cmd(), err) == BurstStatus::Ok);
+        std::string e2;
+        BOOST_CHECK_MESSAGE(
+            f2.issue_tx(bad, e2) == BurstStatus::BrokenChain, why);
+        BOOST_CHECK_MESSAGE(!e2.empty(), why);
+    };
+    {
+        MultiTxRig r2;
+        TxCommand cmd = r2.tx_cmd();
+        r2.frags[1].flags = kFlagEndOfBurst; // EOB outside last fragment
+        expect_broken(cmd, "mid EOB rejected");
+    }
+    {
+        MultiTxRig r2;
+        TxCommand cmd = r2.tx_cmd();
+        r2.frags[0].flags = kFlagStartOfBurst; // first lacks time-spec
+        expect_broken(cmd, "first without time-spec rejected");
+    }
+    {
+        MultiTxRig r2;
+        TxCommand cmd = r2.tx_cmd();
+        r2.frags[2].tx_data[1] = nullptr; // null channel pointer
+        expect_broken(cmd, "null channel rejected");
+    }
+    { // fragment cap: 65 > kEchoMaxFragmentsPerBurst
+        MultiTxRig r2;
+        static TxBurstFragment many[kEchoMaxFragmentsPerBurst + 1];
+        for (size_t i = 0; i <= kEchoMaxFragmentsPerBurst; ++i) {
+            many[i].tx_data[0] = r2.zero.data();
+            many[i].tx_data[1] = r2.zero.data();
+            many[i].offset = i;
+            many[i].count = 1;
+        }
+        many[0].flags = kFlagTimeSpec | kFlagStartOfBurst;
+        many[kEchoMaxFragmentsPerBurst].flags = kFlagEndOfBurst;
+        TxCommand cmd = r2.tx_cmd();
+        cmd.tx_multi_fragments = many;
+        cmd.fragment_count = kEchoMaxFragmentsPerBurst + 1;
+        expect_broken(cmd, "fragment cap rejected");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M1: Fake tune_tx_channel order/readback and tx_async_counts with the
+// unmatched/dropped bound.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_fake_multitx_tune_async)
+{
+    FakeBurstBackend fake(FakeBurstBackend::Config{});
+    std::string err;
+    BOOST_REQUIRE(fake.prepare(err));
+    double actual = 0.0;
+    BOOST_CHECK(fake.tune_tx_channel(1, 7.5e9, actual, err) ==
+                BurstStatus::Ok);
+    BOOST_CHECK_EQUAL(actual, 7.5e9);
+    BOOST_CHECK(fake.tune_tx_channel(0, 7.4e9, actual, err) ==
+                BurstStatus::Ok);
+    BOOST_CHECK_EQUAL(actual, 7.4e9);
+    BOOST_CHECK(fake.tune_tx_channel(kEchoMaxTxChannels, 7.4e9, actual,
+                                     err) == BurstStatus::BackendError);
+    BOOST_CHECK(!err.empty());
+    const auto calls = fake.tx_tune_calls();
+    BOOST_REQUIRE_EQUAL(calls.size(), 2u); // order preserved
+    BOOST_CHECK_EQUAL(calls[0].first, 1u);
+    BOOST_CHECK_EQUAL(calls[0].second, 7.5e9);
+    BOOST_CHECK_EQUAL(calls[1].first, 0u);
+    BOOST_CHECK_EQUAL(fake.tx_channel_freq_hz(1), 7.5e9);
+    BOOST_CHECK_EQUAL(fake.tx_channel_freq_hz(0), 7.4e9);
+    BOOST_CHECK_EQUAL(fake.tx_channel_freq_hz(3), 0.0); // never tuned
+
+    // One ok burst → one async ACK.
+    MultiTxRig rig;
+    BOOST_REQUIRE(fake.issue_rx(rig.rx_cmd(), err) == BurstStatus::Ok);
+    BOOST_REQUIRE(fake.issue_tx(rig.tx_cmd(), err) == BurstStatus::Ok);
+    BurstResult res;
+    BOOST_REQUIRE(fake.collect_result(0, 1000, res));
+    TxAsyncCounts counts = fake.tx_async_counts();
+    BOOST_CHECK_EQUAL(counts.ack, 1u);
+    BOOST_CHECK_EQUAL(counts.unmatched, 0u);
+    BOOST_CHECK_EQUAL(counts.dropped, 0u);
+    // Unmatched beyond the cap counts as dropped, never lost silently.
+    fake.inject_tx_async_unmatched(FakeBurstBackend::kAsyncUnmatchedCap + 8);
+    counts = fake.tx_async_counts();
+    BOOST_CHECK_EQUAL(counts.unmatched,
+                      FakeBurstBackend::kAsyncUnmatchedCap);
+    BOOST_CHECK_EQUAL(counts.dropped, 8u);
+    BOOST_CHECK_EQUAL(counts.ack, 1u); // untouched by unmatched overflow
+}
+
+// ---------------------------------------------------------------------------
+// M1: scratch address/capacity invariant across the grid — the same zero
+// base resolves the same address for the same offset at any delay, and the
+// arm-time worst-case fragment count fits the fixed fragment array.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_fake_multitx_scratch_stable)
+{
+    MultiTxRig rig;
+    // Same offset → same zero-scratch address at delay extremes; the
+    // parked sense slice never moves with the jammer delay.
+    for (const int64_t delay : { -20, 0, 20 }) {
+        echo::MultiTxGeometry g;
+        std::string err;
+        BOOST_REQUIRE(
+            echo::prepare_multitx_geometry(100, 50, 20, g, &err));
+        uint64_t bounds[5] = {};
+        const size_t n = echo::multitx_burst_bounds(g, delay, bounds, 5);
+        BOOST_CHECK(n >= 2 && n <= 5);
+        for (size_t i = 0; i + 1 < n; ++i) {
+            const uint64_t off = bounds[i], cnt = bounds[i + 1] - bounds[i];
+            const int16_t* z = echo::multitx_channel_ptr(
+                rig.sense.data(), 20, 100, rig.zero.data(), off, cnt);
+            if (off + cnt <= 20) // leading zero region for every delay
+                BOOST_CHECK_EQUAL(z, rig.zero.data() + off * 2);
+        }
+        const int16_t* s = echo::multitx_channel_ptr(
+            rig.sense.data(), 20, 100, rig.zero.data(), 25, 5);
+        BOOST_CHECK_EQUAL(s, rig.sense.data() + 5 * 2);
+    }
+    // Capacity: scratch holds the whole L; worst-case split fits the cap,
+    // and an oversized plan is rejected with a diagnostic (false).
+    BOOST_REQUIRE_EQUAL(rig.zero.size(), 120u * 2);
+    echo::EchoFragmentSpan spans[echo::kEchoMaxFragmentsPerBurst];
+    size_t nspans = 0;
+    BOOST_REQUIRE(echo::plan_fragments(120, 16, spans,
+                                       echo::kEchoMaxFragmentsPerBurst,
+                                       nspans));
+    BOOST_CHECK_EQUAL(nspans, 8u);
+    BOOST_CHECK(!echo::plan_fragments(120, 1, spans, 7, nspans));
+}
+
+// ---------------------------------------------------------------------------
+// M5 hardware regression: a jam scan plan with a NONZERO dwell offset is an
+// ABSOLUTE tune (base + offset).  Without an absolute base the worker would
+// tune the jammer to the bare offset; measured on the X410 (2026-09-19) an
+// offset-only 491339 Hz request was silently coerced by the device to 1 MHz,
+// moving the jammer out of band and making the apparent "null" a jammer-off
+// artifact.  The handler must reject such a schedule before enqueue; with a
+// schedule "freq_hz" base it must arm and retune.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Multi-TX schedule PDU: cons(meta, pmt_vector[s16vector, s16vector]).
+pmt::pmt_t
+make_multitx_schedule_pdu(int64_t t0,
+                          uint64_t tx_samples,
+                          uint64_t rx_samples,
+                          uint64_t burst_count,
+                          uint64_t index,
+                          uint64_t pulse_id,
+                          bool with_freq_hz)
+{
+    pmt::pmt_t meta = pmt::make_dict();
+    meta = pmt::dict_add(meta, pmt::mp("t0_ticks"), pmt::from_long(t0));
+    meta = pmt::dict_add(meta, pmt::mp("tx_samples"),
+                         pmt::from_uint64(tx_samples));
+    meta = pmt::dict_add(meta, pmt::mp("rx_samples"),
+                         pmt::from_uint64(rx_samples));
+    meta = pmt::dict_add(meta, pmt::mp("schedule_index"),
+                         pmt::from_uint64(index));
+    meta = pmt::dict_add(meta, pmt::mp("pulse_id"),
+                         pmt::from_uint64(pulse_id));
+    meta = pmt::dict_add(meta, pmt::mp("pulse_id_increment"),
+                         pmt::from_uint64(1));
+    meta = pmt::dict_add(meta, pmt::mp("burst_count"),
+                         pmt::from_uint64(burst_count));
+    meta = pmt::dict_add(meta, pmt::mp("tx_channel_count"),
+                         pmt::from_uint64(2));
+    meta = pmt::dict_add(meta, pmt::mp("tx_waveform_samples"),
+                         pmt::init_u64vector(2, std::vector<uint64_t>{ 64, 32 }));
+    meta = pmt::dict_add(meta, pmt::mp("tx_base_offsets_native"),
+                         pmt::init_u64vector(2, std::vector<uint64_t>{ 0, 0 }));
+    meta = pmt::dict_add(meta, pmt::mp("jam_logical_channel"),
+                         pmt::from_uint64(1));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_mode"), pmt::mp("fixed"));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_lo_native"),
+                         pmt::from_long(0));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_hi_native"),
+                         pmt::from_long(0));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_seed"),
+                         pmt::from_uint64(7));
+    meta = pmt::dict_add(meta, pmt::mp("jam_dwell"), pmt::from_uint64(1));
+    meta = pmt::dict_add(meta, pmt::mp("jam_freq_settle_ticks"),
+                         pmt::from_uint64(1000));
+    meta = pmt::dict_add(meta, pmt::mp("jam_freq_offsets_hz"),
+                         pmt::init_f64vector(2, std::vector<double>{ 1000.0, 2000.0 }));
+    if (with_freq_hz)
+        meta = pmt::dict_add(meta, pmt::mp("freq_hz"),
+                             pmt::from_double(7.4e9));
+    std::vector<int16_t> ch0(64 * 2, 11);
+    std::vector<int16_t> ch1(32 * 2, 22);
+    pmt::pmt_t vec = pmt::make_vector(2, pmt::PMT_NIL);
+    pmt::vector_set(vec, 0, pmt::init_s16vector(ch0.size(), ch0.data()));
+    pmt::vector_set(vec, 1, pmt::init_s16vector(ch1.size(), ch1.data()));
+    return pmt::cons(meta, vec);
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(test_echo_timer_multitx_scan_needs_absolute_base)
+{
+    auto fake = std::make_shared<FakeBurstBackend>(
+        FakeBurstBackend::Config{});
+    auto blk = UwbRealtimeEchoTimer::make(base_grid_cfg(), fake, 16, 1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_scan_base");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+
+    // 1) nonzero offsets without an absolute base → rejected, nothing armed.
+    blk->_post(pmt::mp("schedule"),
+               make_multitx_schedule_pdu(2000000, 64, 32, 2, 0, 0,
+                                         /*with_freq_hz=*/false));
+    BOOST_REQUIRE(wait_until([&] { return blk->schedules_invalid() >= 1; }));
+    BOOST_CHECK_EQUAL(blk->bursts_published(), 0u);
+    BOOST_CHECK_EQUAL(fake->tx_tune_calls().size(), 0u);
+
+    // 2) same plan with the absolute base → armed, burst produced, and the
+    //    dwell boundary retuned the jammer to BASE + offset (in band).
+    blk->_post(pmt::mp("schedule"),
+               make_multitx_schedule_pdu(2000000, 64, 32, 2, 0, 10,
+                                         /*with_freq_hz=*/true));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 2));
+    BOOST_CHECK_EQUAL(blk->bursts_ok(), 2u);
+    BOOST_CHECK_GE(blk->jam_retunes(), 1u);
+    BOOST_CHECK_EQUAL(blk->jam_retune_failures(), 0u);
+    const auto tunes = fake->tx_tune_calls();
+    BOOST_REQUIRE(!tunes.empty());
+    // First retune target = 7.4e9 + 2000.0 (offset 0 already applied at arm).
+    BOOST_CHECK_EQUAL(tunes[0].first, 1u);
+    BOOST_CHECK_CLOSE(tunes[0].second, 7.4e9 + 2000.0, 1e-9);
+
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+// A scan dwell is an output-sample quota, not a schedule-slot quota.  An
+// injected RX failure must be retried at the same frequency; every planned
+// frequency must still publish exactly dwell successful captures, and the
+// plan must stop at the final frequency without modulo wraparound.
+BOOST_AUTO_TEST_CASE(test_echo_timer_multitx_scan_dwell_counts_successes)
+{
+    FakeBurstBackend::Config fcfg;
+    fcfg.faults = { { 1, BurstStatus::Overflow } };
+    auto fake = std::make_shared<FakeBurstBackend>(fcfg);
+    auto blk = UwbRealtimeEchoTimer::make(base_grid_cfg(), fake, 16, 1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto status_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_scan_dwell_success");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    tb->msg_connect(blk, "status", status_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+
+    pmt::pmt_t sched = make_multitx_schedule_pdu(
+        2000000, 64, 32, /*successful samples=*/6, 0, 0,
+        /*with_freq_hz=*/true);
+    pmt::pmt_t meta = pmt::car(sched);
+    meta = pmt::dict_add(meta, pmt::mp("jam_dwell"),
+                         pmt::from_uint64(2));
+    meta = pmt::dict_add(
+        meta, pmt::mp("jam_freq_offsets_hz"),
+        pmt::init_f64vector(
+            3, std::vector<double>{ 1000.0, 2000.0, 3000.0 }));
+    blk->_post(pmt::mp("schedule"), pmt::cons(meta, pmt::cdr(sched)));
+
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 7));
+    BOOST_REQUIRE(wait_until(
+        [&] { return status_seen(status_dbg, "grid_complete"); }));
+    BOOST_CHECK_EQUAL(blk->bursts_ok(), 6u);
+    BOOST_CHECK_EQUAL(blk->bursts_failed(), 1u);
+    BOOST_CHECK_EQUAL(blk->bursts_published(), 7u);
+
+    std::map<int64_t, size_t> ok_per_offset;
+    std::map<uint64_t, size_t> ok_per_step;
+    for (size_t i = 0; i < burst_dbg->num_messages(); ++i) {
+        pmt::pmt_t bm;
+        std::vector<int16_t> samples;
+        get_burst(burst_dbg, i, bm, samples);
+        if (meta_str(bm, "status") == "ok") {
+            const int64_t off = static_cast<int64_t>(
+                std::llround(meta_f64(bm, "jam_freq_offset_hz")));
+            ++ok_per_offset[off];
+            ++ok_per_step[meta_u64(bm, "jam_scan_step")];
+            BOOST_CHECK_EQUAL(meta_u64(bm, "jam_dwell_target"), 2u);
+            BOOST_CHECK(!samples.empty());
+        }
+    }
+    BOOST_CHECK_EQUAL(ok_per_offset[1000], 2u);
+    BOOST_CHECK_EQUAL(ok_per_offset[2000], 2u);
+    BOOST_CHECK_EQUAL(ok_per_offset[3000], 2u);
+    BOOST_CHECK_EQUAL(ok_per_offset.size(), 3u);
+    BOOST_CHECK_EQUAL(ok_per_step[0], 2u);
+    BOOST_CHECK_EQUAL(ok_per_step[1], 2u);
+    BOOST_CHECK_EQUAL(ok_per_step[2], 2u);
+    BOOST_CHECK_EQUAL(ok_per_step.size(), 3u);
+
+    const auto tunes = fake->tx_tune_calls();
+    BOOST_REQUIRE_EQUAL(tunes.size(), 2u);
+    BOOST_CHECK_CLOSE(tunes[0].second, 7.4e9 + 2000.0, 1e-9);
+    BOOST_CHECK_CLOSE(tunes[1].second, 7.4e9 + 3000.0, 1e-9);
+
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+BOOST_AUTO_TEST_CASE(test_echo_timer_multitx_scan_late_slots_do_not_consume_dwell)
+{
+    FakeBurstBackend::Config fcfg;
+    fcfg.device_time_auto_advance = 2 * base_grid_cfg().pri_num;
+    auto fake = std::make_shared<FakeBurstBackend>(fcfg);
+    auto blk = UwbRealtimeEchoTimer::make(base_grid_cfg(), fake, 16, 1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_scan_late_dwell");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+
+    pmt::pmt_t sched = make_multitx_schedule_pdu(
+        2000000, 64, 32, /*successful samples=*/4, 0, 0,
+        /*with_freq_hz=*/true);
+    pmt::pmt_t meta = pmt::car(sched);
+    meta = pmt::dict_add(meta, pmt::mp("jam_dwell"),
+                         pmt::from_uint64(2));
+    meta = pmt::dict_add(
+        meta, pmt::mp("jam_freq_settle_ticks"), pmt::from_uint64(10000));
+    blk->_post(pmt::mp("schedule"), pmt::cons(meta, pmt::cdr(sched)));
+
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 4));
+    BOOST_CHECK_EQUAL(blk->bursts_ok(), 4u);
+    BOOST_CHECK_GT(blk->late_slot_skips(), 0u);
+    std::map<uint64_t, size_t> ok_per_step;
+    for (size_t i = 0; i < burst_dbg->num_messages(); ++i) {
+        pmt::pmt_t bm;
+        std::vector<int16_t> samples;
+        get_burst(burst_dbg, i, bm, samples);
+        if (meta_str(bm, "status") == "ok")
+            ++ok_per_step[meta_u64(bm, "jam_scan_step")];
+    }
+    BOOST_CHECK_EQUAL(ok_per_step[0], 2u);
+    BOOST_CHECK_EQUAL(ok_per_step[1], 2u);
+
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+// ---------------------------------------------------------------------------
+// Contiguous-window EchoTimer (256-burst Fake backend).
+// ---------------------------------------------------------------------------
+namespace {
+
+pmt::pmt_t
+make_contiguous_pdu(int64_t t0,
+                    uint64_t burst_count,
+                    uint64_t index,
+                    uint64_t pulse_id,
+                    const std::vector<int16_t>& ch0,
+                    const std::vector<int16_t>& ch1,
+                    uint64_t D,
+                    echo::JamDelayMode mode,
+                    int64_t lo,
+                    int64_t hi,
+                    uint64_t seed,
+                    uint64_t L,
+                    uint64_t max_fragment_size = 0)
+{
+    pmt::pmt_t meta = pmt::make_dict();
+    meta = pmt::dict_add(meta, pmt::mp("t0_ticks"), pmt::from_long(t0));
+    meta = pmt::dict_add(meta, pmt::mp("tx_samples"), pmt::from_uint64(L));
+    meta = pmt::dict_add(meta, pmt::mp("rx_samples"), pmt::from_uint64(32));
+    meta = pmt::dict_add(meta, pmt::mp("schedule_index"),
+                         pmt::from_uint64(index));
+    meta = pmt::dict_add(meta, pmt::mp("pulse_id"),
+                         pmt::from_uint64(pulse_id));
+    meta = pmt::dict_add(meta, pmt::mp("pulse_id_increment"),
+                         pmt::from_uint64(1));
+    meta = pmt::dict_add(meta, pmt::mp("burst_count"),
+                         pmt::from_uint64(burst_count));
+    meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
+                         pmt::from_double(737280000.0));
+    meta = pmt::dict_add(meta, pmt::mp("tx_channel_count"),
+                         pmt::from_uint64(2));
+    meta = pmt::dict_add(
+        meta, pmt::mp("tx_waveform_samples"),
+        pmt::init_u64vector(
+            2, std::vector<uint64_t>{ ch0.size() / 2, ch1.size() / 2 }));
+    const uint64_t jam_base =
+        (mode == echo::JamDelayMode::Fixed)
+            ? static_cast<uint64_t>(static_cast<int64_t>(D) + lo)
+            : D;
+    meta = pmt::dict_add(
+        meta, pmt::mp("tx_base_offsets_native"),
+        pmt::init_u64vector(2, std::vector<uint64_t>{ D, jam_base }));
+    meta = pmt::dict_add(meta, pmt::mp("jam_logical_channel"),
+                         pmt::from_uint64(1));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_mode"),
+                         pmt::mp(mode == echo::JamDelayMode::Uniform
+                                     ? "uniform"
+                                     : "fixed"));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_lo_native"),
+                         pmt::from_long(lo));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_hi_native"),
+                         pmt::from_long(hi));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_seed"),
+                         pmt::from_uint64(seed));
+    if (max_fragment_size != 0)
+        meta = pmt::dict_add(meta, pmt::mp("max_fragment_size"),
+                             pmt::from_uint64(max_fragment_size));
+    pmt::pmt_t vec = pmt::make_vector(2, pmt::PMT_NIL);
+    pmt::vector_set(vec, 0, pmt::init_s16vector(ch0.size(), ch0.data()));
+    pmt::vector_set(vec, 1, pmt::init_s16vector(ch1.size(), ch1.data()));
+    return pmt::cons(meta, vec);
+}
+
+size_t
+find_iq(const std::vector<int16_t>& row, int16_t i0, int16_t q0)
+{
+    const size_t n = row.size() / 2;
+    for (size_t s = 0; s < n; ++s) {
+        if (row[s * 2] == i0 && row[s * 2 + 1] == q0)
+            return s;
+    }
+    return static_cast<size_t>(-1);
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(test_echo_timer_contiguous_window_256)
+{
+    const uint64_t Ns = 16;
+    const uint64_t Nj = 8;
+    const uint64_t D = 4;
+    echo::MultiTxGeometry g;
+    std::string gerr;
+    BOOST_REQUIRE(echo::prepare_multitx_geometry(Ns, Nj, D, g, &gerr));
+    const uint64_t L = g.phys_len_L;
+    std::vector<int16_t> ch0(Ns * 2);
+    std::vector<int16_t> ch1(Nj * 2);
+    for (size_t i = 0; i < ch0.size(); ++i)
+        ch0[i] = static_cast<int16_t>(1100 + static_cast<int>(i));
+    for (size_t i = 0; i < ch1.size(); ++i)
+        ch1[i] = static_cast<int16_t>(-2200 - static_cast<int>(i));
+    BOOST_REQUIRE_NE(ch1[0], 0);
+
+    FakeBurstBackend::Config fcfg;
+    fcfg.max_io_chunk = 7; // forces a shared continuation cursor
+    auto fake = std::make_shared<FakeBurstBackend>(fcfg);
+    auto cfg = base_grid_cfg();
+    cfg.max_fragment_size = 4096; // >= L
+    auto blk = UwbRealtimeEchoTimer::make(cfg, fake, 16, 1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_contiguous");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+
+    const uint64_t seed = 42;
+    const uint64_t nburst = 256;
+    blk->_post(pmt::mp("schedule"),
+               make_contiguous_pdu(2000000, nburst, 0, 0, ch0, ch1, D,
+                                   echo::JamDelayMode::Uniform,
+                                   -static_cast<int64_t>(D),
+                                   static_cast<int64_t>(D), seed, L));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, nburst));
+    BOOST_CHECK_EQUAL(blk->bursts_ok(), nburst);
+
+    const echo::MultiTxWindowBank* bank = blk->armed_window_bank();
+    BOOST_REQUIRE(bank != nullptr);
+    const int16_t* tx0_addr = bank->dense_rows[0].data();
+    const size_t tx0_cap = bank->dense_rows[0].capacity();
+    const int16_t* backing_addr = bank->jam_backing.data();
+    const size_t backing_cap = bank->jam_backing.capacity();
+    BOOST_CHECK_EQUAL(bank->tx_len, L);
+
+    echo::JamDelayRng rng(seed);
+    std::vector<int16_t> tx0_ref;
+    for (uint64_t k = 0; k < nburst; ++k) {
+        const int64_t expect_delay = rng.next_range_inclusive(
+            -static_cast<int64_t>(D), static_cast<int64_t>(D));
+        pmt::pmt_t meta;
+        std::vector<int16_t> rx;
+        get_burst(burst_dbg, static_cast<size_t>(k), meta, rx);
+        BOOST_CHECK_EQUAL(meta_i64(meta, "jam_delay_native"), expect_delay);
+        BOOST_CHECK_EQUAL(meta_u64(meta, "tx_fragment_count"), 1u);
+        BOOST_CHECK_EQUAL(meta_str(meta, "jam_delay_mode"), "uniform");
+        BOOST_CHECK_EQUAL(meta_u64(meta, "jam_delay_seed"), seed);
+        BOOST_CHECK_EQUAL(meta_u64(meta, "sense_offset_native"), D);
+
+        FakeBurstBackend::FakeBurstRecord rec;
+        BOOST_REQUIRE(fake->find_record(k, rec));
+        BOOST_REQUIRE_EQUAL(rec.tx_stitched_ch.size(), 2u);
+        BOOST_CHECK_EQUAL(rec.tx_stitched_ch[0].size(), L * 2);
+        BOOST_CHECK_EQUAL(rec.tx_stitched_ch[1].size(), L * 2);
+        if (k == 0)
+            tx0_ref = rec.tx_stitched_ch[0];
+        else
+            BOOST_CHECK(rec.tx_stitched_ch[0] == tx0_ref);
+        const size_t jam_at =
+            find_iq(rec.tx_stitched_ch[1], ch1[0], ch1[1]);
+        BOOST_CHECK_EQUAL(jam_at, static_cast<size_t>(D + expect_delay));
+        BOOST_REQUIRE(!rec.tx_flags.empty());
+        BOOST_CHECK_EQUAL(rec.tx_flags[0] & kTIME, kTIME);
+        BOOST_CHECK_EQUAL(rec.tx_flags[0] & kSOB, kSOB);
+        BOOST_CHECK_EQUAL(rec.tx_flags.back() & kEOB, kEOB);
+        for (size_t i = 1; i < rec.tx_flags.size(); ++i) {
+            BOOST_CHECK_EQUAL(rec.tx_flags[i] & kTIME, 0u);
+            BOOST_CHECK_EQUAL(rec.tx_flags[i] & kSOB, 0u);
+        }
+        BOOST_CHECK_GT(rec.tx_calls, 1u);
+        BOOST_CHECK_EQUAL(rec.tx_stitched_ch[0].size(),
+                          rec.tx_stitched_ch[1].size());
+    }
+    BOOST_CHECK_EQUAL(blk->armed_window_bank()->dense_rows[0].data(),
+                      tx0_addr);
+    BOOST_CHECK_EQUAL(blk->armed_window_bank()->dense_rows[0].capacity(),
+                      tx0_cap);
+    BOOST_CHECK_EQUAL(blk->armed_window_bank()->jam_backing.data(),
+                      backing_addr);
+    BOOST_CHECK_EQUAL(blk->armed_window_bank()->jam_backing.capacity(),
+                      backing_cap);
+
+    std::vector<int64_t> first_seq;
+    first_seq.reserve(nburst);
+    for (uint64_t k = 0; k < nburst; ++k) {
+        pmt::pmt_t meta;
+        std::vector<int16_t> rx;
+        get_burst(burst_dbg, static_cast<size_t>(k), meta, rx);
+        first_seq.push_back(meta_i64(meta, "jam_delay_native"));
+    }
+    blk->_post(pmt::mp("schedule"),
+               make_contiguous_pdu(2000000 + 3686400 * 300, nburst, 0, 0,
+                                   ch0, ch1, D, echo::JamDelayMode::Uniform,
+                                   -static_cast<int64_t>(D),
+                                   static_cast<int64_t>(D), seed, L));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, nburst * 2));
+    for (uint64_t k = 0; k < nburst; ++k) {
+        pmt::pmt_t meta;
+        std::vector<int16_t> rx;
+        get_burst(burst_dbg, static_cast<size_t>(nburst + k), meta, rx);
+        BOOST_CHECK_EQUAL(meta_i64(meta, "jam_delay_native"), first_seq[k]);
+    }
+
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+BOOST_AUTO_TEST_CASE(test_echo_timer_contiguous_silent_jammer)
+{
+    const uint64_t Ns = 10;
+    const uint64_t Nj = 6;
+    const uint64_t D = 3;
+    echo::MultiTxGeometry g;
+    std::string gerr;
+    BOOST_REQUIRE(echo::prepare_multitx_geometry(Ns, Nj, D, g, &gerr));
+    std::vector<int16_t> ch0(Ns * 2, 77);
+    std::vector<int16_t> ch1(Nj * 2, 0);
+    auto fake = std::make_shared<FakeBurstBackend>(
+        FakeBurstBackend::Config{});
+    auto blk = UwbRealtimeEchoTimer::make(base_grid_cfg(), fake, 16, 1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_silent_jam");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+    const uint64_t nburst = 9;
+    blk->_post(pmt::mp("schedule"),
+               make_contiguous_pdu(2000000, nburst, 0, 0, ch0, ch1, D,
+                                   echo::JamDelayMode::Uniform,
+                                   -static_cast<int64_t>(D),
+                                   static_cast<int64_t>(D), 99, g.phys_len_L));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, nburst));
+    for (uint64_t k = 0; k < nburst; ++k) {
+        FakeBurstBackend::FakeBurstRecord rec;
+        BOOST_REQUIRE(fake->find_record(k, rec));
+        BOOST_REQUIRE_EQUAL(rec.tx_stitched_ch.size(), 2u);
+        for (int16_t v : rec.tx_stitched_ch[1])
+            BOOST_CHECK_EQUAL(v, 0);
+        BOOST_CHECK_EQUAL(rec.tx_calls, 1u);
+        BOOST_CHECK_EQUAL(rec.tx_flags[0], kTIME | kSOB | kEOB);
+        pmt::pmt_t meta;
+        std::vector<int16_t> rx;
+        get_burst(burst_dbg, static_cast<size_t>(k), meta, rx);
+        BOOST_CHECK_EQUAL(meta_u64(meta, "tx_fragment_count"), 1u);
+    }
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+BOOST_AUTO_TEST_CASE(test_echo_timer_contiguous_rejects_small_fragment)
+{
+    const uint64_t Ns = 16;
+    const uint64_t Nj = 8;
+    const uint64_t D = 4;
+    echo::MultiTxGeometry g;
+    std::string gerr;
+    BOOST_REQUIRE(echo::prepare_multitx_geometry(Ns, Nj, D, g, &gerr));
+    std::vector<int16_t> ch0(Ns * 2, 1);
+    std::vector<int16_t> ch1(Nj * 2, 2);
+    auto fake = std::make_shared<FakeBurstBackend>(
+        FakeBurstBackend::Config{});
+    auto blk = UwbRealtimeEchoTimer::make(base_grid_cfg(), fake, 16, 1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_frag_lt_L");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+    blk->_post(pmt::mp("schedule"),
+               make_contiguous_pdu(2000000, 1, 0, 0, ch0, ch1, D,
+                                   echo::JamDelayMode::Uniform,
+                                   -static_cast<int64_t>(D),
+                                   static_cast<int64_t>(D), 1, g.phys_len_L,
+                                   /*max_fragment_size=*/4));
+    BOOST_REQUIRE(wait_until([&] { return blk->schedules_invalid() >= 1; }));
+    BOOST_CHECK_EQUAL(blk->bursts_published(), 0u);
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+BOOST_AUTO_TEST_CASE(test_echo_timer_contiguous_fixed_delay)
+{
+    const uint64_t Ns = 12;
+    const uint64_t Nj = 5;
+    const uint64_t delay = 4;
+    const uint64_t L = std::max(Ns, Nj + delay);
+    std::vector<int16_t> ch0(Ns * 2);
+    std::vector<int16_t> ch1(Nj * 2);
+    for (size_t i = 0; i < ch0.size(); ++i)
+        ch0[i] = static_cast<int16_t>(300 + i);
+    for (size_t i = 0; i < ch1.size(); ++i)
+        ch1[i] = static_cast<int16_t>(900 + i);
+    auto fake = std::make_shared<FakeBurstBackend>(
+        FakeBurstBackend::Config{});
+    auto blk = UwbRealtimeEchoTimer::make(base_grid_cfg(), fake, 16, 1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_fixed_contig");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+    blk->_post(pmt::mp("schedule"),
+               make_contiguous_pdu(2000000, 3, 0, 0, ch0, ch1, 0,
+                                   echo::JamDelayMode::Fixed,
+                                   static_cast<int64_t>(delay),
+                                   static_cast<int64_t>(delay), 0, L));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, 3));
+    for (uint64_t k = 0; k < 3; ++k) {
+        FakeBurstBackend::FakeBurstRecord rec;
+        BOOST_REQUIRE(fake->find_record(k, rec));
+        BOOST_CHECK_EQUAL(rec.tx_calls, 1u);
+        BOOST_CHECK_EQUAL(find_iq(rec.tx_stitched_ch[1], ch1[0], ch1[1]),
+                          static_cast<size_t>(delay));
+        BOOST_CHECK_EQUAL(find_iq(rec.tx_stitched_ch[0], ch0[0], ch0[1]), 0u);
+        pmt::pmt_t meta;
+        std::vector<int16_t> rx;
+        get_burst(burst_dbg, static_cast<size_t>(k), meta, rx);
+        BOOST_CHECK_EQUAL(meta_i64(meta, "jam_delay_native"),
+                          static_cast<int64_t>(delay));
+        BOOST_CHECK_EQUAL(meta_u64(meta, "tx_fragment_count"), 1u);
+    }
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
 }

@@ -39,15 +39,56 @@
  *                                         burst so a single multi-burst
  *                                         schedule yields unique ids (0 =
  *                                         constant passthrough, default)
- *   burst_count       (u64, optional)     produce this many bursts, then
- *                                         publish "grid_complete"
- *                                         (default 0 = unlimited)
+ *   burst_count       (u64, optional)     legacy: attempted bursts; active
+ *                                         jammer scan: successful RX target,
+ *                                         required to equal points*dwell
+ *                                         (default 0 = unlimited otherwise)
  *   max_fragment_size (u64, optional)     override the prepared planning
  *                                         chunk for this schedule (default
  *                                         block config, must be > 0)
  *   sample_rate       (real, optional)    device sample rate, used only to
  *                                         add tx_time_full/tx_time_frac and
  *                                         rx_time_full/rx_time_frac metadata
+ *
+ * Multi-TX input (dual-channel jammer, planning §5.3; M3/M4/M5):
+ * cons(meta_dict, pmt_vector[s16vector_ch0, ...]).  The payload holds one
+ * *effective waveform* per TX channel (never a per-pulse (2, L) composite).
+ * Vector length must be 1..kEchoMaxTxChannels (4); a 1-element vector is
+ * exactly equivalent to the legacy single-TX form above.  Each element must
+ * be an s16vector with an even element count (SC16 pairs); channel 0 is the
+ * sensing waveform.  Additional metadata keys (all integer ticks floats are
+ * converted by the Python/control layer; the worker does no float geometry):
+ *   tx_channel_count      (u64/int, optional) must equal the vector length
+ *                                             (default = vector length)
+ *   tx_samples            (u64, required)     physical burst length L per
+ *                                             channel, > 0, <= max cap
+ *   tx_waveform_samples   (u64vector, optional) per-channel pair counts;
+ *                                             must match the payload lengths
+ *                                             (default = payload lengths)
+ *   tx_base_offsets_native(u64vector, optional) per-channel base start in
+ *                                             [0, L) (default all 0)
+ *   jam_logical_channel   (u64/int, default 1) retuned TX channel, in
+ *                                             [1, channel_count)
+ *   jam_delay_mode        ("fixed"/"uniform" symbol, or 0/1; default fixed)
+ *   jam_delay_lo_native   (i64, default 0)    fixed: the per-pulse delay;
+ *   jam_delay_hi_native   (i64, default 0)    uniform: draw range [lo, hi]
+ *   jam_delay_seed        (u64, default 0)    uniform PRNG seed (frozen arm)
+ *   jam_freq_offsets_hz   (f64vector, optional) dwell scan plan (empty = off)
+ *   jam_dwell             (u64, default 0)    successful full RX captures per
+ *                                             scan step (0 = off)
+ *   jam_freq_settle_ticks (u64, default 0)    re-anchor delay after retune
+ *
+ * Geometry convention (§5.4, contiguous-window remediation): D =
+ * tx_base_offsets_native[0] (sense parked at D).  Uniform mode: per-pulse
+ * jammer begin = D + delay with delay in [-D, +D] drawn from the frozen
+ * JamDelayRng; L must equal prepare_multitx_geometry(sense, jam, D).
+ * Fixed mode (lo == hi): jammer begin = D + lo must equal
+ * tx_base_offsets_native[jam], and L must equal max over channels of
+ * (base + waveform length).  The handler materializes an immutable
+ * MultiTxWindowBank (dense rows of length L, jam backing of length L+2D
+ * in uniform mode) and rejects max_fragment_size < L so each burst is
+ * exactly one data fragment.  Delay never changes TX0 pointer, length,
+ * or sample positions, and never changes send boundaries.
  *
  * Bounded-input contract: tx_samples/rx_samples are rejected unless
  * 0 < value <= max_tx_samples / max_rx_samples (fixed make() caps).  The
@@ -66,6 +107,12 @@
  *   rx_samples_requested/received, tx_reissues, rx_reissues, uhd_error,
  *   sample_format ("sc16"), and (when sample_rate is set) tx_time_full/
  *   tx_time_frac/rx_time_full/rx_time_frac.
+ * Multi-TX bursts additionally carry (§5.2/§5.6, present on every burst):
+ *   tx_channel_count, tx_wire_samples_requested/sent (channels x per-ch),
+ *   tx_async_underflow/seq_error/time_error/unmatched/dropped/ack, and
+ *   (multi-TX bursts only) jam_delay_native/us, jam_freq_plan/actual/offset
+ *   _hz, jam_retune_seq.  Single-TX output semantics are otherwise unchanged
+ *   (same PDU per index, same samples, same legacy keys/values).
  *
  * Output port "status": lifecycle/drop events ("started", "stopped",
  * "schedule_armed", "grid_complete", "grid_error", "late_slot_skip",
@@ -94,6 +141,7 @@
 #include <pmt/pmt.h>
 
 #include <atomic>
+#include <array>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -226,6 +274,31 @@ public:
     uint64_t pdu_publish_us_mean() const;  // message_port_pub in publish_burst
     uint64_t worker_total_us_mean() const; // alias of mean_worker_us()
 
+    // --- multi-TX introspection (M3/M4/M5; thread-safe atomics) ---
+    // Active TX channel count (1 after a legacy arm; N after a multi arm).
+    size_t tx_channel_count() const;
+    // Fixed zero-scratch introspection (QA): allocated once at construction
+    // for max_tx_samples, capacity and data address never change afterwards.
+    size_t zero_scratch_capacity() const;
+    const int16_t* zero_scratch_data() const;
+    // Armed contiguous window bank (nullptr when single-TX / unarmed).
+    // Worker-owned; callers must only read after the grid has been armed
+    // and not concurrently with a re-arm.
+    const echo::MultiTxWindowBank* armed_window_bank() const;
+    // Jammer channel/plan state frozen at arm.
+    size_t jam_logical_channel() const;
+    // Last multi-TX burst values (stale when the armed grid is single-TX).
+    int64_t jam_delay_native_last() const; // relative delay, may be < 0
+    double jam_delay_us_last() const;
+    double jam_freq_plan_hz_last() const;   // absolute target of last burst
+    double jam_freq_actual_hz_last() const; // last NCO readback
+    double jam_freq_offset_hz_last() const; // last applied plan offset
+    uint64_t jam_retunes() const;           // successful jam retunes, grid
+    uint64_t jam_retune_failures() const;   // failed jam retune attempts
+    // Live TX async event counters (§5.6) as a PMT dict with u64 keys:
+    // underflow, seq_error, time_error, unmatched, dropped, ack.
+    pmt::pmt_t tx_async_counts() const;
+
     // Last per-burst backend error string (diagnostics).
     std::string last_error() const;
 
@@ -248,12 +321,52 @@ private:
         uint64_t tx_samples = 0;
         uint64_t rx_samples = 0;
         uint64_t max_fragment_size = 0; // 0 = prepared default
-        uint64_t burst_count = 0;       // 0 = unlimited
+        uint64_t burst_count = 0; // attempts, or successful RX target for scan
         uint64_t publish_native = 0;    // 0 = block-level setting (M2 ROI)
         uint64_t pulse_id_increment = 0; // != 0 → per-burst unique ids
         double sample_rate = 0.0;
         pmt::pmt_t meta = pmt::PMT_NIL;    // input dict (passthrough)
         pmt::pmt_t payload = pmt::PMT_NIL; // s16vector TX burst (immutable)
+        // --- multi-TX (M3/M4/M5; only meaningful when tx_channel_count>1)
+        size_t tx_channel_count = 1; // 1 = legacy single-TX path
+        // Per-channel waveforms (each an s16vector; holds PMT refs so the
+        // underlying buffers stay alive for the whole grid).
+        std::vector<pmt::pmt_t> tx_payloads;
+        // Per-channel effective waveform lengths (pairs) and base offsets.
+        std::array<uint64_t, echo::kEchoMaxTxChannels> tx_waveform_samples{};
+        std::array<uint64_t, echo::kEchoMaxTxChannels> tx_base_offsets{};
+        size_t jam_logical_channel = 1;
+        echo::JamDelayMode jam_delay_mode = echo::JamDelayMode::Fixed;
+        int64_t jam_delay_lo_native = 0;
+        int64_t jam_delay_hi_native = 0;
+        uint64_t jam_delay_seed = 0; // frozen PRNG seed (uniform mode)
+        std::vector<double> jam_freq_offsets_hz; // dwell scan plan (maybe empty)
+        uint64_t jam_dwell = 0; // successful full RX captures/step (0 = off)
+        uint64_t jam_freq_settle_ticks = 0;      // re-anchor delay, ticks
+        // Immutable contiguous window bank, built in handle_schedule.
+        std::shared_ptr<const echo::MultiTxWindowBank> window_bank;
+    };
+
+    // Per-burst multi-TX publish extras (worker stack only, never shared).
+    // multi == false reproduces the exact legacy metadata (plus the §5.2 /
+    // §5.6 accounting keys that are present on every burst).
+    struct PubExtra {
+        bool multi = false;
+        int64_t jam_delay_native = 0; // relative delay in native samples
+        double jam_delay_us = 0.0;
+        double jam_freq_plan_hz = 0.0;   // absolute NCO target this burst
+        double jam_freq_actual_hz = 0.0; // last NCO readback
+        double jam_freq_offset_hz = 0.0; // plan offset this burst
+        uint64_t jam_retune_seq = 0;     // successful retunes so far, grid
+        uint64_t jam_scan_step = 0;
+        uint64_t jam_dwell_target = 0;
+        uint64_t jam_dwell_successes_before = 0;
+        echo::JamDelayMode jam_delay_mode = echo::JamDelayMode::Fixed;
+        uint64_t jam_delay_seed = 0;
+        uint64_t sense_offset_native = 0;
+        uint64_t tx_fragment_count = 0;
+        int64_t sense_tx_ticks = 0;
+        int64_t jam_tx_ticks = 0;
     };
 
     void handle_schedule(pmt::pmt_t msg);
@@ -262,7 +375,9 @@ private:
     void apply_schedule(const Job& job);
     void run_one_burst();
     void finish_grid();
-    void publish_burst(const echo::BurstResult& r, bool with_samples);
+    void publish_burst(const echo::BurstResult& r,
+                       bool with_samples,
+                       const PubExtra& px);
     void publish_status(const std::string& event, pmt::pmt_t extra = pmt::PMT_NIL);
     void snapshot_stats(pmt::pmt_t& meta) const;
     void stop_worker_and_join();
@@ -300,6 +415,48 @@ private:
     std::vector<int16_t> d_rx_buf_; // fixed: max_rx_samples * 2 int16
     echo::BurstFragment d_txf_[echo::kEchoMaxFragmentsPerBurst] = {};
     echo::BurstFragment d_rxf_[echo::kEchoMaxFragmentsPerBurst] = {};
+    // --- multi-TX frozen state (M3/M4/M5; worker-owned, set in
+    // apply_schedule, read-only on the per-burst hot path) ---
+    bool d_mtx_armed_ = false; // true when the armed grid uses N > 1
+    size_t d_mtx_N_ = 1;
+    echo::MultiTxGeometry d_mtx_geom_;
+    // Per-channel effective lengths / base offsets (copies of the Job).
+    std::array<uint64_t, echo::kEchoMaxTxChannels> d_mtx_wave_len_{};
+    std::array<uint64_t, echo::kEchoMaxTxChannels> d_mtx_base_{};
+    size_t d_mtx_jam_ch_ = 1;
+    echo::JamDelayMode d_mtx_delay_mode_ = echo::JamDelayMode::Fixed;
+    int64_t d_mtx_delay_lo_ = 0;
+    int64_t d_mtx_delay_hi_ = 0;
+    // PMT lifetime holders for the per-channel waveforms (reserved for
+    // kEchoMaxTxChannels at construction: re-arming never allocates).
+    std::vector<pmt::pmt_t> d_mtx_payloads_;
+    // Frozen per-channel waveform bases ("UHD buffer pointer array": the
+    // per-fragment send pointers live in d_mtxf_[i].tx_data, resolved from
+    // these bases or d_zero_scratch_ on every burst without allocation).
+    const int16_t* d_mtx_wave_ptrs_[echo::kEchoMaxTxChannels] = {};
+    // All-zero TX scratch, fixed max_tx_samples * 2 int16 from construction;
+    // capacity and address never change; the worker only reads it.
+    std::vector<int16_t> d_zero_scratch_;
+    // Fixed multi-TX fragment array (hot path writes only, no allocation).
+    echo::TxBurstFragment d_mtxf_[echo::kEchoMaxFragmentsPerBurst] = {};
+    // Dwell/scan plan (reserved 2048 at construction; larger plans allocate
+    // once here in apply_schedule, never on the per-burst path).
+    std::vector<double> d_mtx_freqs_;
+    uint64_t d_mtx_dwell_ = 0;
+    uint64_t d_mtx_settle_ticks_ = 0;
+    double d_mtx_base_hz_ = 0.0; // frozen absolute base for scan targets
+    size_t d_mtx_step_ = 0;      // current scan step (SIZE_MAX = unknown)
+    // Scan dwell is counted from successfully published RX captures, never
+    // from schedule_index/pulse_id.  A completed dwell requests one forward
+    // retune; the final step completes the grid without modulo wraparound.
+    uint64_t d_mtx_ok_in_step_ = 0;
+    bool d_mtx_advance_pending_ = false;
+    double d_mtx_jam_offset_hz_ = 0.0; // assumed/applied jammer offset state
+    double d_mtx_jam_actual_hz_ = 0.0; // last jammer NCO readback
+    echo::JamDelayRng d_mtx_rng_;      // seeded at arm; one draw per burst
+    // Contiguous window bank frozen at apply_schedule; hot path read-only.
+    std::shared_ptr<const echo::MultiTxWindowBank> d_mtx_bank_;
+    uint64_t d_mtx_delay_seed_ = 0;
     std::atomic<bool> d_armed_{ false };
 
     // Bounded schedule queue (handler enqueues, worker drains).
@@ -354,6 +511,16 @@ private:
     // pending tune request (worker consumes at burst boundary)
     std::atomic<bool> d_tune_pending_{ false };
     std::atomic<double> d_tune_hz_{ 0.0 };
+    // --- multi-TX atomic mirrors (M3/M4/M5; worker writes, anyone reads)
+    std::atomic<size_t> d_atomic_tx_channels_{ 1 };
+    std::atomic<size_t> d_atomic_jam_ch_{ 1 };
+    std::atomic<int64_t> d_jam_delay_last_{ 0 };
+    std::atomic<double> d_jam_delay_us_last_{ 0.0 };
+    std::atomic<double> d_jam_plan_last_{ 0.0 };
+    std::atomic<double> d_jam_actual_last_{ 0.0 };
+    std::atomic<double> d_jam_offset_last_{ 0.0 };
+    std::atomic<uint64_t> d_jam_retunes_{ 0 };
+    std::atomic<uint64_t> d_jam_retune_fails_{ 0 };
     mutable std::mutex d_err_mutex_;
     std::string d_last_error_;
 };

@@ -14,7 +14,7 @@
  * Files (in `directory`):
  *   <base>.cf32        raw complex CIR taps (complex64, little-endian)
  *   <base>_norm.cf32   L2-normalized taps (only when write_normalized)
- *   <base>.jsonl       one JSON line per pulse
+ *   <base>.jsonl       one JSON line per CIR record (pulse or repetition)
  *   run.json           static run configuration, written at start()
  *
  * Contract:
@@ -122,6 +122,7 @@ private:
     std::mutex d_mutex_;
     std::condition_variable d_cv_;
     std::thread d_thread_;
+    uint64_t d_since_flush_ = 0;
 };
 
 } // namespace uwb

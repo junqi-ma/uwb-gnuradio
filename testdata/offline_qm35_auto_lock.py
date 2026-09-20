@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Blind QM35 acquire + lock on a native 737.28 MS/s SC16 capture.
+Blind QM35 acquire + lock on a native SC16 capture (737.28 or 491.52 MS/s).
 
 No first_packet_sample / t0.  Flow:
 
@@ -45,10 +45,13 @@ DEFAULT_DAT = (
     "dw1000_qm35_mixed_6489p6MHz_737p28Msps_0p5s_sc16_20260811_01.dat"
 )
 TMPL_737 = os.path.join(HERE, "reference_preamble_code9_737p28.cf32")
+TMPL_491 = os.path.join(HERE, "reference_preamble_code9_491p52.cf32")
 TMPL_998 = os.path.join(HERE, "reference_preamble.bin")
 TAPS_MIN = os.path.join(HERE, "resampler_65_48", "taps_quality_minorder.txt")
 
 FS737 = 737.28e6
+FS491 = 491.52e6
+NATIVE_RATES = (737280000.0, 491520000.0)
 FS998 = 998.4e6
 PERIOD_S = 0.005
 PRE = 7373
@@ -56,10 +59,74 @@ CAP = 140083
 POST = 3023
 # Native dump: full DW1000 airtime before QM35, short tail after the body.
 # CIR is estimated on the preamble, so a late-only interferer is not kept.
-PRE_DW = 221184   # 300 µs
-POST_DW = 73728   # 100 µs
+PRE_DW = 221184   # 300 µs @737.28
+POST_DW = 73728   # 100 µs @737.28
 ACQ_PRE = 2032
 ACQ_CAP = 200000
+
+# Native-rate geometry (wall-clock windows shared, sample counts rescale).
+# 737 demod 7373/140083/3023 (demod_n=150479), dump 221184/140083/73728.
+# 491 demod 4915/93389/2015 (demod_n=100319), dump 147456/93389/49152.
+# acq 737: 2032/200000; 491: 1355/133333.  coarse_margin 737:16, 491:11
+# (equal-time rescale llround(16*32/48)=11).
+GEOM_737 = {
+    "demod_pre": 7373,
+    "demod_cap": 140083,
+    "demod_post": 3023,
+    "dump_pre": 221184,
+    "dump_cap": 140083,
+    "dump_post": 73728,
+    "acq_pre": 2032,
+    "acq_cap": 200000,
+    "coarse_margin": 16,
+    "tmpl": TMPL_737,
+}
+GEOM_491 = {
+    "demod_pre": 4915,
+    "demod_cap": 93389,
+    "demod_post": 2015,
+    "dump_pre": 147456,
+    "dump_cap": 93389,
+    "dump_post": 49152,
+    "acq_pre": 1355,
+    "acq_cap": 133333,
+    "coarse_margin": 11,
+    "tmpl": TMPL_491,
+}
+
+
+def resolve_native_geom(rate):
+    """Return the GEOM_* dict for a native rate (737.28 or 491.52 MHz)."""
+    r = float(rate)
+    if abs(r - FS737) < 1.0:
+        return GEOM_737
+    if abs(r - FS491) < 1.0:
+        return GEOM_491
+    raise ValueError(f"unsupported native rate: {rate!r} "
+                     f"(expected one of {NATIVE_RATES})")
+
+
+def make_pdu_resampler(rate, uwb_mod=None):
+    """Build the native->998.4 PDU resampler for the given native rate.
+
+    737.28 MHz -> uwb.pdu_rational_resampler_ccf_65_48 (65/48),
+    491.52 MHz -> uwb.pdu_rational_resampler_ccf_65_32 (65/32).
+    Output is 998.4 MHz in both cases.  uwb_mod may be passed explicitly
+    (the caller in main() already loaded it); when omitted, fall back to
+    `from gnuradio import uwb`.
+    """
+    r = float(rate)
+    if uwb_mod is None:
+        try:
+            from gnuradio import uwb as uwb_mod
+        except Exception as e:
+            raise RuntimeError(f"cannot import gnuradio.uwb: {e}")
+    if abs(r - FS737) < 1.0:
+        return uwb_mod.pdu_rational_resampler_ccf_65_48("quality_minorder")
+    if abs(r - FS491) < 1.0:
+        return uwb_mod.pdu_rational_resampler_ccf_65_32("quality_minorder")
+    raise ValueError(f"unsupported native rate: {rate!r} "
+                     f"(expected one of {NATIVE_RATES})")
 
 
 def as_int(v, default=-1):
@@ -189,31 +256,42 @@ def parser():
     ap.add_argument("--max-seconds", type=float, default=0.08,
                     help="stream prefix to process; 0 = whole file")
     ap.add_argument("--workers", type=int, default=2)
+    ap.add_argument("--native-rate", type=float, default=737280000.0,
+                    choices=list(NATIVE_RATES),
+                    help="native SC16 rate in Hz: 737280000.0 or "
+                         "491520000.0 (default 737280000.0)")
     ap.add_argument("--energy-threshold", type=float, default=0.02)
     ap.add_argument("--lock-observations", type=int, default=3)
     ap.add_argument("--cir-filter-mode", default="bypass")
     ap.add_argument(
         "--write-sc16", default="", metavar="DIR",
-        help="write native 737.28 SC16 dump windows to DIR/capture.iq; "
-             "does not enlarge the 65/48 FIR window")
+        help="write native SC16 dump windows to DIR/capture.iq; "
+             "does not enlarge the 65/48-or-65/32 FIR window")
     ap.add_argument("--dump-pre", type=int, default=0,
-                    help="dump pre-guard samples (default 221184 = 300 µs)")
+                    help="dump pre-guard samples "
+                         "(default 221184@737 / 147456@491 = 300 µs)")
     ap.add_argument("--dump-capture", type=int, default=0,
-                    help="dump QM35 body samples (default 140083 = 190 µs)")
+                    help="dump QM35 body samples "
+                         "(default 140083@737 / 93389@491 = 190 µs)")
     ap.add_argument("--dump-post", type=int, default=0,
-                    help="dump post-guard samples (default 73728 = 100 µs)")
+                    help="dump post-guard samples "
+                         "(default 73728@737 / 49152@491 = 100 µs)")
     ap.add_argument("--demod-pre", type=int, default=0,
-                    help="demod crop pre-guard (default 7373 = 10 µs)")
+                    help="demod crop pre-guard "
+                         "(default 7373@737 / 4915@491 = 10 µs)")
     ap.add_argument("--demod-capture", type=int, default=0,
-                    help="demod crop body (default 140083 = 190 µs)")
+                    help="demod crop body "
+                         "(default 140083@737 / 93389@491 = 190 µs)")
     ap.add_argument("--demod-post", type=int, default=0,
-                    help="demod crop post-guard (default 3023 = 4.1 µs)")
+                    help="demod crop post-guard "
+                         "(default 3023@737 / 2015@491 = 4.1 µs)")
     ap.add_argument("--pre", type=int, default=0,
                     help="alias: dump-pre with --write-sc16, else demod-pre")
     ap.add_argument("--post", type=int, default=0,
                     help="alias: dump-post with --write-sc16, else demod-post")
     ap.add_argument("--capture", type=int, default=0,
-                    help="alias: dump/demod body (default 140083)")
+                    help="alias: dump/demod body "
+                         "(default 140083@737 / 93389@491)")
     ap.add_argument("--skip-postprocess", action="store_true",
                     help="do not run uwb_offline_postprocess_dump after dump")
     ap.add_argument("--no-notch-tone", action="store_true",
@@ -223,13 +301,14 @@ def parser():
     return ap
 
 
-def resolve_geometry(args, write_dir):
-    demod_pre = args.demod_pre if args.demod_pre > 0 else PRE
-    demod_cap = args.demod_capture if args.demod_capture > 0 else CAP
-    demod_post = args.demod_post if args.demod_post > 0 else POST
-    dump_pre = args.dump_pre if args.dump_pre > 0 else PRE_DW
-    dump_cap = args.dump_capture if args.dump_capture > 0 else CAP
-    dump_post = args.dump_post if args.dump_post > 0 else POST_DW
+def resolve_geometry(args, write_dir, defaults=None):
+    g = defaults if defaults is not None else GEOM_737
+    demod_pre = args.demod_pre if args.demod_pre > 0 else g["demod_pre"]
+    demod_cap = args.demod_capture if args.demod_capture > 0 else g["demod_cap"]
+    demod_post = args.demod_post if args.demod_post > 0 else g["demod_post"]
+    dump_pre = args.dump_pre if args.dump_pre > 0 else g["dump_pre"]
+    dump_cap = args.dump_capture if args.dump_capture > 0 else g["dump_cap"]
+    dump_post = args.dump_post if args.dump_post > 0 else g["dump_post"]
     if args.pre > 0:
         if write_dir and args.dump_pre <= 0:
             dump_pre = args.pre
@@ -303,12 +382,28 @@ def write_demod_results(path, packets, results):
 
 def main():
     args = parser().parse_args()
+    try:
+        native = float(args.native_rate)
+    except (TypeError, ValueError):
+        parser().error(f"invalid --native-rate: {args.native_rate!r}")
+    try:
+        g = resolve_native_geom(native)
+    except ValueError:
+        parser().error(f"invalid --native-rate: {args.native_rate!r} "
+                       f"(expected one of {NATIVE_RATES})")
     dat = args.dat
     if not os.path.isfile(dat):
         print(f"ERROR: file not found: {dat}", file=sys.stderr)
         return 2
-    if not os.path.isfile(TMPL_737):
-        print(f"ERROR: missing native template {TMPL_737}", file=sys.stderr)
+    tmpl_nat_path = g["tmpl"]
+    if not os.path.isfile(tmpl_nat_path):
+        if abs(native - FS491) < 1.0:
+            print(f"ERROR: missing native template {tmpl_nat_path}; "
+                  f"run testdata/generate_qm35_reference_491p52.py first",
+                  file=sys.stderr)
+        else:
+            print(f"ERROR: missing native template {tmpl_nat_path}",
+                  file=sys.stderr)
         return 2
     if not os.path.isfile(TMPL_998):
         print(f"ERROR: missing 998.4 template {TMPL_998}", file=sys.stderr)
@@ -334,14 +429,14 @@ def main():
 
     nbytes = os.path.getsize(dat)
     n_complex = nbytes // 4
-    duration_s = n_complex / FS737
+    duration_s = n_complex / native
     n_stream = n_complex
     if args.max_seconds and args.max_seconds > 0:
-        n_stream = min(n_complex, int(round(args.max_seconds * FS737)))
-    stream_s = n_stream / FS737
+        n_stream = min(n_complex, int(round(args.max_seconds * native)))
+    stream_s = n_stream / native
 
     write_dir = args.write_sc16.strip()
-    geom = resolve_geometry(args, write_dir)
+    geom = resolve_geometry(args, write_dir, g)
     ext_pre = geom["dump_pre"] if write_dir else geom["demod_pre"]
     ext_cap = geom["dump_cap"] if write_dir else geom["demod_cap"]
     ext_post = geom["dump_post"] if write_dir else geom["demod_post"]
@@ -350,30 +445,31 @@ def main():
     demod_post = geom["demod_post"]
     demod_n = demod_pre + demod_cap + demod_post
 
-    tmpl737 = np.fromfile(TMPL_737, np.complex64)
+    tmpl_nat = np.fromfile(tmpl_nat_path, np.complex64)
     tmpl998 = np.fromfile(TMPL_998, np.complex64)
     print("=== Offline auto-lock: QM35 on native SC16 (no t0) ===")
     print(f"file: {dat}")
+    print(f"native_rate={native/1e6:.2f} MS/s")
     print(f"file_samples={n_complex} file_s={duration_s:.4f} "
           f"stream_samples={n_stream} stream_s={stream_s:.4f}")
     print("first_packet_sample: NOT PROVIDED")
     print(f"period={PERIOD_S*1e3:.1f} ms  "
           f"extractor=[{ext_pre},{ext_cap},{ext_post}]  "
           f"demod_crop=[{demod_pre},{demod_cap},{demod_post}]  "
-          f"acquire=[{ACQ_PRE},{ACQ_CAP}]")
+          f"acquire=[{g['acq_pre']},{g['acq_cap']}]")
     if write_dir:
         print(f"write_sc16={write_dir}  "
-              f"dump_head={ext_pre/FS737*1e6:.1f} us  "
-              f"dump_body={ext_cap/FS737*1e6:.1f} us  "
-              f"dump_tail={ext_post/FS737*1e6:.1f} us  "
+              f"dump_head={ext_pre/native*1e6:.1f} us  "
+              f"dump_body={ext_cap/native*1e6:.1f} us  "
+              f"dump_tail={ext_post/native*1e6:.1f} us  "
               f"fir_in={demod_n} samples "
-              f"({demod_n/FS737*1e6:.1f} us)")
-    print(f"template_737={len(tmpl737)}  template_998={len(tmpl998)}  "
+              f"({demod_n/native*1e6:.1f} us)")
+    print(f"template_native={len(tmpl_nat)}  template_998={len(tmpl998)}  "
           f"energy_th={args.energy_threshold}")
 
     ext = uwb.auto_scheduled_extractor_sc16(
-        [complex(x) for x in tmpl737],
-        FS737,
+        [complex(x) for x in tmpl_nat],
+        native,
         PERIOD_S,
         ext_pre,
         ext_cap,
@@ -382,16 +478,16 @@ def main():
         100,
         4,
         1,
-        16,
+        int(g["coarse_margin"]),
         int(args.lock_observations),
         3,
         8,
         25.0,
-        ACQ_PRE,
-        ACQ_CAP,
+        int(g["acq_pre"]),
+        int(g["acq_cap"]),
         8,
     )
-    resampler = uwb.pdu_rational_resampler_ccf_65_48("quality_minorder")
+    resampler = make_pdu_resampler(native, uwb)
     demod = uwb.realtime_demodulator.make_from_template(
         tmpl998.tolist(),
         max(1, args.workers),
@@ -538,9 +634,9 @@ def main():
     print(f"lock_state={ext.lock_state_name()}")
     print(f"identity_confirmed={ext.identity_confirmed()}")
     print(f"locked_t0_native={ext.locked_t0():.3f} samples "
-          f"({ext.locked_t0()/FS737*1e3:.3f} ms)")
+          f"({ext.locked_t0()/native*1e3:.3f} ms)")
     print(f"locked_period_s={ext.locked_period_s():.9f} "
-          f"({ext.locked_period_s()*FS737:.3f} native samples)")
+          f"({ext.locked_period_s()*native:.3f} native samples)")
     print(f"identity_wall_s={locked_at if locked_at is not None else -1}")
     print(f"energy_regions={ext.energy_regions()} "
           f"after_lock={ext.energy_regions_after_lock()}")
@@ -554,7 +650,8 @@ def main():
           f"disc={ext.discontinuities()}")
     print(f"resampler emitted={resampler.pdus_emitted()} "
           f"dropped={resampler.pdus_dropped()}")
-    if resampler.pdus_emitted() > 0:
+    if resampler.pdus_emitted() > 0 and hasattr(
+            resampler, "total_input_samples"):
         mean_in = resampler.total_input_samples() / resampler.pdus_emitted()
         print(f"resampler mean_input_samples={mean_in:.1f} "
               f"(demod_window={demod_n})")
@@ -643,7 +740,7 @@ def main():
 
     print()
     print("=== Lock-time analysis ===")
-    print("rf_ms = abs_sample / 737.28e6; wall_ms from status handler")
+    print(f"rf_ms = abs_sample / {native:.1f}; wall_ms from status handler")
     ev_order = ("acquisition_started", "candidate_emitted",
                 "qm35_identity_confirmed", "provisional_schedule_started",
                 "schedule_locked")
@@ -655,7 +752,7 @@ def main():
             print(f"  {ev}: missing")
             continue
         s = hits[0]
-        rf_ms = (s["abs_sample"] / FS737) * 1e3 if s["abs_sample"] >= 0 else -1
+        rf_ms = (s["abs_sample"] / native) * 1e3 if s["abs_sample"] >= 0 else -1
         w = s.get("wall_ms", float("nan"))
         dw = (w - prev_wall) if w == w else float("nan")
         if w == w:
@@ -670,7 +767,7 @@ def main():
     lock_hits = [s for s in status_wall if s["event"] == "schedule_locked"]
     cand_hits = [s for s in status_wall if s["event"] == "candidate_emitted"]
     id_hits = [s for s in status_wall if s["event"] == "qm35_identity_confirmed"]
-    rt = FS737 / 1e6
+    rt = native / 1e6
 
     def rate_line(name, n_samp, t_s):
         if t_s is None or t_s <= 0 or n_samp <= 0:
@@ -682,7 +779,7 @@ def main():
 
     print()
     print("=== Compute-only realtime check (exclude idle drain) ===")
-    print(f"  required = {rt:.2f} MS/s  (737.28)")
+    print(f"  required = {rt:.2f} MS/s  ({native/1e6:.2f})")
     if cand_hits:
         rate_line("acquire_to_candidate",
                   cand_hits[0]["abs_sample"],
@@ -732,7 +829,7 @@ def main():
             f"{r[k]:10.0f}" if r[k] == r[k] else f"{'nan':>10}"
             for _, k in keys)
         print(f"  {r['packet_id']:4d} {r['status']:<14}{cols}")
-    if results:
+    if results and hasattr(resampler, "resample_total_us"):
         fir_ms = resampler.resample_total_us() / 1000.0
         n_rs = max(1, resampler.pdus_emitted())
         print(f"  resampler FIR total={fir_ms:.2f} ms  "
@@ -750,7 +847,8 @@ def main():
             geom["dump_pre"], geom["dump_cap"], geom["dump_post"])
         if dump_ok and crop is not None:
             dump_ok = verify_crop_to_demod(
-                dbg_crop, demod_n, demod_pre, demod_cap, demod_post)
+                dbg_crop, demod_n, demod_pre, demod_cap, demod_post,
+                geom["dump_pre"])
         demod_jsonl = os.path.join(write_dir, "demod_results.jsonl")
         write_demod_results(demod_jsonl, packets, results)
         print(f"  wrote {demod_jsonl} ({len(results)} rows)")
@@ -864,7 +962,10 @@ def verify_sc16_dump(dat, write_dir, n_stream, writer, pre, cap, post):
     return ok
 
 
-def verify_crop_to_demod(dbg_crop, demod_n, demod_pre, demod_cap, demod_post):
+def verify_crop_to_demod(dbg_crop, demod_n, demod_pre, demod_cap, demod_post,
+                         dump_pre=None):
+    # dump_pre is the native dump head (geom["dump_pre"]: 221184@737 /
+    # 147456@491).  Acquisition must stay energy-gate short, not dump-wide.
     print()
     print("=== FIR input crop check ===")
     pkts = [parse_packet_meta(dbg_crop.get_message(i))
@@ -894,7 +995,8 @@ def verify_crop_to_demod(dbg_crop, demod_n, demod_pre, demod_cap, demod_post):
         print(f"  acquisition n={acq[0].get('sample_count')} "
               f"(must stay energy-gate short, not 300 µs dump head)")
         acq_n = int(acq[0].get("sample_count", 0))
-        if acq_n >= PRE_DW:
+        dump_head = dump_pre if dump_pre else PRE_DW
+        if acq_n >= dump_head:
             print("  FAIL: acquisition was cropped/emitted as dump geometry")
             return False
     ok = bad == 0 and (not sched or len(sched) >= 1)

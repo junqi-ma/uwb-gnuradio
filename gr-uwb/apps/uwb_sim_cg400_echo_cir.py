@@ -82,6 +82,16 @@ CG400_HZ = 491520000.0
 WORK_HZ = 998400000.0
 SPS = 1016
 SFD_SYMS_4Z2 = 8
+SFD_MODE = "4z2"
+# Mirror of x410_cg400_hrp_echo_cir.py: HRP BPRF preamble profiles.  TX
+# waveform, CIR estimator and metadata must agree on length and code.
+DEFAULT_CODE_INDEX = 9
+CODE_INDEX_CHOICES = (9, 10, 11, 12)
+DEFAULT_PREAMBLE_LENGTH = 64
+PREAMBLE_LENGTH_CHOICES = (32, 64, 128, 256, 512, 1024)
+# Legacy alias also accepts 2048 (supported by the C++ blocks but not part
+# of the standard selectable preamble set exposed by --preamble-length).
+SYNC_REPS_ALIAS_CHOICES = PREAMBLE_LENGTH_CHOICES + (2048,)
 NATIVE_DECIM = 65
 NATIVE_INTERP = 32
 IQ_SCALE = 32768.0
@@ -148,7 +158,8 @@ class SimTimedEcho(gr.basic_block):
     def __init__(self, rate, pre_us, range_m, tail_us, sync_reps,
                  cal_delay_native, arm_delay_s, pri_s, max_pulses,
                  echo_delays, echo_gains, noise_std, noise_seed,
-                 pad_us=8.0, dump_raw=False):
+                 pad_us=8.0, dump_raw=False,
+                 code_index=DEFAULT_CODE_INDEX, sfd_mode=SFD_MODE):
         gr.basic_block.__init__(self, name="sim_timed_echo",
                                 in_sig=None, out_sig=None)
         self.rate = float(rate)
@@ -156,6 +167,8 @@ class SimTimedEcho(gr.basic_block):
         self.range_m = float(range_m)
         self.tail_us = float(tail_us)
         self.sync_reps = int(sync_reps)
+        self.code_index = int(code_index)
+        self.sfd_mode = sfd_mode
         self.cal_delay_native = float(cal_delay_native)
         self.arm_delay_s = float(arm_delay_s)
         self.pri_s = float(pri_s)
@@ -199,6 +212,8 @@ class SimTimedEcho(gr.basic_block):
             "pre": self.pre,
             "pri_s": self.pri_s,
             "max_pulses": self.max_pulses,
+            "code_index": self.code_index, "sfd_mode": self.sfd_mode,
+            "sync_reps": self.sync_reps,
         }
 
     def set_tx_native(self, wave):
@@ -280,8 +295,9 @@ class SimTimedEcho(gr.basic_block):
                             pmt.from_long(self.rx_len))
         meta = pmt.dict_add(meta, pmt.intern("sync_repetitions"),
                             pmt.from_long(self.sync_reps))
-        meta = pmt.dict_add(meta, pmt.intern("sfd_mode"), pmt.intern("4z2"))
-        meta = pmt.dict_add(meta, pmt.intern("code_index"), pmt.from_long(9))
+        meta = pmt.dict_add(meta, pmt.intern("sfd_mode"), pmt.intern(self.sfd_mode))
+        meta = pmt.dict_add(meta, pmt.intern("code_index"),
+                            pmt.from_long(self.code_index))
         meta = pmt.dict_add(meta, pmt.intern("sync_samples"),
                             pmt.from_long(self.sync_n))
         meta = pmt.dict_add(meta, pmt.intern("sfd_samples"),
@@ -444,7 +460,19 @@ def parse_args():
     p.add_argument("--range-m", type=float, default=15.0)
     p.add_argument("--psdu-hex",
                    default="47261DF66F4C1BEF45C8F77CE77BD7D8C4D180FB1221")
-    p.add_argument("--sync-reps", type=int, default=64)
+    p.add_argument("--code-index", type=int, default=DEFAULT_CODE_INDEX,
+                   choices=list(CODE_INDEX_CHOICES),
+                   help="HRP BPRF preamble code index (9/10/11/12); must "
+                        "match TX waveform and CIR template")
+    p.add_argument("--preamble-length", type=int, default=None,
+                   choices=list(PREAMBLE_LENGTH_CHOICES),
+                   help="HRP SYNC preamble length in repetitions "
+                        "(32/64/128/256/512/1024, default %d)"
+                        % DEFAULT_PREAMBLE_LENGTH)
+    p.add_argument("--sync-reps", type=int, default=None,
+                   choices=list(SYNC_REPS_ALIAS_CHOICES),
+                   help="Deprecated alias for --preamble-length "
+                        "(also accepts 2048)")
     p.add_argument("--insert-sts", action="store_true", default=True)
     p.add_argument("--no-sts", action="store_true")
     p.add_argument("--pulse-shape", default="linear",
@@ -584,9 +612,9 @@ def write_capture_metadata(path, a, insert_sts, native, echoes, gains,
         "freq_hz": 6489600000.0,
         "rate_native_hz": CG400_HZ,
         "rate_work_hz": WORK_HZ,
-        "code_index": 9,
+        "code_index": a.code_index,
         "sync_repetitions": a.sync_reps,
-        "sfd_mode": "4z2",
+        "sfd_mode": SFD_MODE,
         "insert_sts": bool(insert_sts),
         "pulse_shape": pulse_meta["shape"],
         "pulse_sigma_ns": pulse_meta["sigma_ns"],
@@ -645,6 +673,14 @@ def write_capture_metadata(path, a, insert_sts, native, echoes, gains,
 
 def main():
     a = parse_args()
+    if a.preamble_length is not None and a.sync_reps is not None \
+            and a.preamble_length != a.sync_reps:
+        raise SystemExit("--preamble-length=%d conflicts with --sync-reps=%d"
+                         % (a.preamble_length, a.sync_reps))
+    if a.preamble_length is not None:
+        a.sync_reps = a.preamble_length
+    elif a.sync_reps is None:
+        a.sync_reps = DEFAULT_PREAMBLE_LENGTH
     insert_sts = False if a.no_sts else True
     if a.rate_hz and a.rate_hz > 0:
         a.pri_s = 1.0 / a.rate_hz
@@ -668,9 +704,10 @@ def main():
                                   "pulse_minphase_rc160_240.f32")
     else:
         pulse_shape, pulse_taps = a.pulse_shape, ""
-    src = uwb.hrp_packet_source(psdu, a.sync_reps, "4z2", 9, 0.8, a.pri_s,
-                                False, insert_sts, False, pulse_shape,
-                                a.pulse_sigma_ns, a.pulse_bw_mhz, pulse_taps)
+    src = uwb.hrp_packet_source(psdu, a.sync_reps, SFD_MODE, a.code_index,
+                                0.8, a.pri_s, False, insert_sts, False,
+                                pulse_shape, a.pulse_sigma_ns,
+                                a.pulse_bw_mhz, pulse_taps)
     samples = np.array(src.samples(), dtype=np.complex64)
     if samples.size < SPS:
         raise SystemExit("HRP source produced %d samples" % samples.size)
@@ -680,10 +717,12 @@ def main():
     native = resample_poly(samples.astype(np.complex128),
                            NATIVE_INTERP, NATIVE_DECIM).astype(np.complex64)
     print("hrp_tx_998p4_samples=%d native_491p52=%d resample_ms=%.2f "
-          "insert_sts=%s pulse_shape=%s pulse_taps=%d pulse_center=%d"
+          "insert_sts=%s pulse_shape=%s pulse_taps=%d pulse_center=%d "
+          "code_index=%d preamble_length=%d sfd_mode=%s"
           % (samples.size, native.size, (time.perf_counter() - t_rs) * 1e3,
              insert_sts, src.pulse_shape(), src.pulse_taps(),
-             src.pulse_center_taps()), flush=True)
+             src.pulse_center_taps(), a.code_index, a.sync_reps, SFD_MODE),
+          flush=True)
     pulse_meta = {
         "shape": src.pulse_shape(),
         "sigma_ns": src.pulse_sigma_ns(),
@@ -701,7 +740,8 @@ def main():
     echo = SimTimedEcho(
         CG400_HZ, a.pre_guard_us, a.range_m, a.tail_guard_us, a.sync_reps,
         a.cal_delay_native, a.arm_delay_s, a.pri_s, a.pulses,
-        echoes, gains, a.noise_std, a.noise_seed, a.rx_pad_us, a.dump_rx)
+        echoes, gains, a.noise_std, a.noise_seed, a.rx_pad_us, a.dump_rx,
+        a.code_index, SFD_MODE)
     echo.set_tx_native(native)
     print("uhd_free_probe", echo.status, flush=True)
     print("echo_paths delays=%s gains=%s noise_std=%s" % (
@@ -727,11 +767,12 @@ def main():
     res = uwb.pdu_rational_resampler_ccf_65_32(taps, WORK_HZ, True, 2097152)
     est_q = max(64, min(1024, a.pulses + 8))
     est = uwb.radar_cir_estimator(
-        tmpl_path, a.sync_reps, "4z2", 9, 16, 100, 10, 0,
+        tmpl_path, a.sync_reps, SFD_MODE, a.code_index, 16, 100, 10, 0,
         a.sfd_search_margin, a.sync_refine_margin, a.sfd_threshold,
         a.sync_refine_threshold, True, est_q)
-    print("estimator sfd_search_margin=%d queue=%d" % (
-        a.sfd_search_margin, est_q), flush=True)
+    print("estimator code_index=%d preamble_length=%d sfd_search_margin=%d "
+          "queue=%d" % (a.code_index, a.sync_reps, a.sfd_search_margin, est_q),
+          flush=True)
     wr = uwb.cir_writer(a.output, "cir", True, 64)
     wr_iq = uwb.packet_writer(a.output, "capture", False) if a.dump_rx else None
 
@@ -788,6 +829,9 @@ def main():
         "native_samples": int(native.size),
         "native_rate": CG400_HZ,
         "work_rate": WORK_HZ,
+        "code_index": a.code_index,
+        "preamble_length": a.sync_reps,
+        "sfd_mode": SFD_MODE,
         "pulses": a.pulses,
         "pri_s": a.pri_s,
         "rate_hz": 1.0 / a.pri_s,

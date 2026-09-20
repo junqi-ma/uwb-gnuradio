@@ -34,8 +34,11 @@
 #ifndef INCLUDED_GNURADIO_UWB_UWB_ECHO_BURST_BACKEND_H
 #define INCLUDED_GNURADIO_UWB_UWB_ECHO_BURST_BACKEND_H
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
+
+#include <gnuradio/uwb/uwb_echo_multitx.h>
 
 namespace gr {
 namespace uwb {
@@ -82,9 +85,17 @@ struct BurstFragment {
 struct TxCommand {
     uint64_t schedule_index = 0;
     int64_t tx_ticks = 0;
+    // Per-channel burst length L (samples/channel).  Kept as the single
+    // source of truth for both single-TX (legacy) and multi-TX bursts so
+    // old QA and metadata stay bit-exact.
     uint64_t total_samples = 0;
-    const BurstFragment* fragments = nullptr;
+    const BurstFragment* fragments = nullptr; // single-TX legacy path
     size_t fragment_count = 0;
+    // Multi-TX path (§5.2): when tx_channel_count > 1, fragments above is
+    // ignored and tx_multi_fragments carries N equal-length pointers per
+    // fragment.  When == 1, legacy `fragments` is used.
+    size_t tx_channel_count = 1;
+    const TxBurstFragment* tx_multi_fragments = nullptr;
 };
 
 struct RxCommand {
@@ -96,6 +107,8 @@ struct RxCommand {
 };
 
 // Aggregated per-burst result collected by the scheduler worker.
+// tx_samples_requested/sent stay PER-CHANNEL (== L) so single-TX metadata
+// is unchanged; tx_wire_* is channels × per-channel for transport accounting.
 struct BurstResult {
     uint64_t schedule_index = 0;
     BurstStatus status = BurstStatus::BackendError;
@@ -109,7 +122,22 @@ struct BurstResult {
     uint64_t rx_samples_received = 0;
     uint64_t tx_reissues = 0; // partial send() calls handled
     uint64_t rx_reissues = 0; // partial recv() calls handled
-    std::string error;        // UHD-like strerror field
+    size_t tx_channel_count = 1;
+    uint64_t tx_wire_samples_requested = 0; // channels × per-channel
+    uint64_t tx_wire_samples_sent = 0;
+    std::string error; // UHD-like strerror field
+};
+
+// TX async event counters (§5.6).  Steady-state acceptance requires all
+// error counters at 0; startup/unmatched events are reported separately
+// and never silently merged into the steady-state counts.
+struct TxAsyncCounts {
+    uint64_t underflow = 0;
+    uint64_t seq_error = 0;
+    uint64_t time_error = 0;
+    uint64_t unmatched = 0; // no time spec or no matching burst
+    uint64_t dropped = 0;   // ring full, oldest discarded
+    uint64_t ack = 0;
 };
 
 // Abstract radio burst backend (dependency-injected into the EchoTimer
@@ -166,6 +194,23 @@ public:
     // back.  Returns Ok on success, else the failure status with a
     // UHD-like error string — never throws across this interface.
     virtual BurstStatus tune(double freq_hz, std::string& error) = 0;
+
+    // Jammer-only retune (§5.5): tune one logical TX channel, leaving the
+    // sense TX and RX untouched.  Default impl rejects so legacy backends
+    // keep compiling; multi-TX backends override.  actual_hz is the
+    // device readback (NCO resolution applied).
+    virtual BurstStatus tune_tx_channel(size_t /*logical_channel*/,
+                                        double /*hz*/,
+                                        double& /*actual_hz*/,
+                                        std::string& error)
+    {
+        error = "tune_tx_channel not supported by this backend";
+        return BurstStatus::BackendError;
+    }
+
+    // TX async counters (§5.6).  Default zero so legacy backends compile;
+    // real backends override with live ring/thread-safe snapshots.
+    virtual TxAsyncCounts tx_async_counts() const { return TxAsyncCounts{}; }
 };
 
 inline const char* burst_status_to_string(BurstStatus s)
