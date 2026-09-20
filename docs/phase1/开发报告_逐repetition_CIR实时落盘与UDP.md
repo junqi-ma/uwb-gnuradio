@@ -65,7 +65,7 @@ python3 gr-uwb/apps/test_echo_cir_jam_plan.py
 python3 testdata/uwb_radar/verify_cir_individual.py
 ```
 
-结果：targeted CTest 3/3、UDP 8/8、jam args 15/15、jam plan 75/75。
+结果：targeted CTest 4/4、UDP 8/8、jam args 15/15、jam plan 75/75。
 新增数值硬门证明 `mean(individual CIR)` 与原 averaged CIR 的 relative L2 `<2e-6`；
 block QA 证明 64-SYNC/skip10 恰好输出 54 条，index 10..63 且顺序稳定。
 实际 `CirUdpSink → localhost UDP → cir_udp_recv` loopback 为 516 bytes，重建
