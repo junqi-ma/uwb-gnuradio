@@ -351,6 +351,100 @@ def run_capture(run_dir: str, work_rate: float, native_rate: float) -> int:
 
 
 
+# ---------------------------------------------------------------------------
+# Grouped run-dir reader (Python counterpart of read_uwb_cir_repetitions.m)
+# ---------------------------------------------------------------------------
+
+def read_grouped_run(run_dir):
+    """Reconstruct per-repetition CIRs from a grouped UwbCirWriter run dir.
+
+    Returns one dict per pulse with ``index`` (absolute 0-based SYNC indices)
+    and ``raw``/``norm`` matrices of shape (tap_count, repetitions), ordered by
+    repetition ordinal.  The on-disk layout is one compact JSONL line per pulse
+    whose ``repetitions`` object holds equal-length column arrays.
+    """
+    jsonl = os.path.join(run_dir, "cir.jsonl")
+    metas = [json.loads(l) for l in open(jsonl) if l.strip()]
+    raw_all = read_cf32(os.path.join(run_dir, "cir.cf32"))
+    norm_path = os.path.join(run_dir, "cir_norm.cf32")
+    norm_all = read_cf32(norm_path) if os.path.exists(norm_path) else None
+
+    pulses = []
+    for meta in metas:
+        reps = meta.get("repetitions")
+        if not reps:
+            continue
+        tap_count = np.asarray(reps["tap_count"], dtype=np.int64)
+        raw_off = np.asarray(reps["file_offset_taps"], dtype=np.int64)
+        norm_off = np.asarray(reps.get("file_offset_norm_taps", raw_off),
+                              dtype=np.int64)
+        count = tap_count.size
+
+        def gather(source, offs):
+            if source is None:
+                return None
+            cols = [source[int(offs[i]):int(offs[i]) + int(tap_count[i])]
+                    for i in range(count)]
+            return np.stack(cols, axis=1)
+
+        pulses.append({
+            "meta": meta,
+            "index": np.asarray(reps["repetition_index"], dtype=np.int64),
+            "raw": gather(raw_all, raw_off),
+            "norm": gather(norm_all, norm_off),
+        })
+    return pulses
+
+
+def run_read_run(run_dir: str, golden_dir: str, golden_mean: bool) -> int:
+    """Validate a grouped run dir and optionally compare to the clean golden."""
+    pulses = read_grouped_run(run_dir)
+    if not pulses:
+        print("FAIL: %s has no grouped repetition lines" % run_dir)
+        return 1
+
+    failures = 0
+    print("Grouped run-dir read: %s" % run_dir)
+    for p in pulses:
+        meta = p["meta"]
+        raw = p["raw"]
+        tap_count, count = raw.shape
+        records = int(meta.get("repetition_records", -1))
+        expected = int(meta.get("repetition_count", -1))
+        complete = bool(meta.get("repetition_complete", False))
+        idx = p["index"]
+        idx_ok = idx.size == count and bool(np.all(np.diff(idx) == 1))
+        norm_ok = True
+        if p["norm"] is not None:
+            nrm = np.linalg.norm(p["norm"], axis=0)
+            norm_ok = bool(np.all(np.abs(nrm - 1.0) < 1e-3))
+        ok = records == count == expected and complete and idx_ok and norm_ok
+        if not ok:
+            failures += 1
+        print("  pulse %s status=%-8s records=%d/%d complete=%s shape=%dx%d "
+              "index=%d..%d norm_unit=%s  %s"
+              % (meta.get("pulse_id"), meta.get("status"), records, expected,
+                 complete, tap_count, count,
+                 idx[0] if idx.size else -1, idx[-1] if idx.size else -1,
+                 norm_ok, "ok" if ok else "FAIL"))
+
+    if golden_mean:
+        gold = read_cf32(os.path.join(golden_dir, "cir_raw_clean_radar.cf32"))
+        for p in pulses:
+            r = rel_l2(p["raw"].mean(axis=1), gold)
+            print("  pulse %s mean(raw) vs clean golden relL2=%.3e"
+                  % (p["meta"].get("pulse_id"), r))
+            if r >= 1e-5:
+                print("  FAIL: mean(raw) relL2 >= 1e-5")
+                failures += 1
+
+    if failures:
+        print("FAIL: %d check(s) failed" % failures)
+        return 1
+    print("PASS: grouped JSONL expanded; per-repetition taps reconstructed")
+    return 0
+
+
 def run_null_demo(golden_dir: str) -> int:
     """Show the repetition-average null that motivates per-repetition CIRs.
 
@@ -398,12 +492,18 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--golden-dir", default=HERE)
     ap.add_argument("--capture", default="", help="hardware run dir with capture.iq")
+    ap.add_argument("--read-run", default="",
+                    help="UwbCirWriter run dir with grouped cir.jsonl")
+    ap.add_argument("--golden-mean", action="store_true",
+                    help="with --read-run: compare mean(raw) to clean golden")
     ap.add_argument("--null-demo", action="store_true",
                     help="show fs/(2*SPS) repetition-average null")
     ap.add_argument("--work-rate", type=float, default=998.4e6)
     ap.add_argument("--native-rate", type=float, default=737.28e6)
     args = ap.parse_args(argv)
 
+    if args.read_run:
+        return run_read_run(args.read_run, args.golden_dir, args.golden_mean)
     if args.null_demo:
         return run_null_demo(args.golden_dir)
     if args.capture:

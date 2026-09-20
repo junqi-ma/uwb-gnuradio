@@ -481,6 +481,73 @@ direct_core_reference(const std::vector<gr_complex>& tx,
                                                   ref.tap_count));
 }
 
+// Per-repetition direct-core reference: an independent CIR for every absolute
+// SYNC index [first, first+count).  Same 998.4 RX window, code and tap window
+// as the estimator block under test, so the written records can be compared
+// tap-for-tap (not only via their mean).
+void
+direct_core_repetition_reference(const std::vector<gr_complex>& tx,
+                                 const std::vector<gr_complex>& rx,
+                                 size_t sync_reps,
+                                 int64_t predicted,
+                                 size_t first,
+                                 size_t count,
+                                 std::vector<std::vector<gr_complex>>& raw,
+                                 std::vector<std::vector<gr_complex>>& norm)
+{
+    RadarCirCoreScratch scratch;
+    BOOST_REQUIRE(prepare_radar_cir_core(direct_cfg(sync_reps), tx.data(),
+                                         kSps, kCirPre, kCirPost, scratch));
+    raw.assign(count, std::vector<gr_complex>(kTaps));
+    norm.assign(count, std::vector<gr_complex>(kTaps));
+    for (size_t ordinal = 0; ordinal < count; ++ordinal) {
+        const size_t rep = first + ordinal;
+        gr::uwb::radar::RadarCirEstimate one;
+        BOOST_REQUIRE(gr::uwb::radar::estimate_radar_cir_repetition(
+            rx.data(), rx.size(), predicted, kSps, kCirPre, kCirPost, rep,
+            sync_reps, one, scratch.cir));
+        BOOST_REQUIRE_EQUAL(one.tap_count, kTaps);
+        std::copy(scratch.cir.raw_taps.begin(),
+                  scratch.cir.raw_taps.begin() + kTaps, raw[ordinal].begin());
+        std::copy(scratch.cir.norm_taps.begin(),
+                  scratch.cir.norm_taps.begin() + kTaps, norm[ordinal].begin());
+    }
+}
+
+// Minimal JSON integer-array reader for the grouped repetition line.  Returns
+// an empty vector when the key is missing or not an array (so the scalar
+// top-level keys parse_jsonl reads are unaffected).
+std::vector<uint64_t>
+parse_u64_array(const std::string& json, const char* key)
+{
+    std::vector<uint64_t> out;
+    const std::string pat = std::string("\"") + key + "\":";
+    const auto pos = json.find(pat);
+    if (pos == std::string::npos)
+        return out;
+    auto i = pos + pat.size();
+    if (i >= json.size() || json[i] != '[')
+        return out;
+    ++i;
+    while (i < json.size() && json[i] != ']') {
+        while (i < json.size() && (json[i] == ' ' || json[i] == ','))
+            ++i;
+        if (i >= json.size() || json[i] == ']')
+            break;
+        size_t j = i;
+        while (j < json.size() && json[j] != ',' && json[j] != ']')
+            ++j;
+        try {
+            out.push_back(static_cast<uint64_t>(
+                std::stoull(json.substr(i, j - i))));
+        } catch (...) {
+            return {};
+        }
+        i = j;
+    }
+    return out;
+}
+
 pmt::pmt_t
 rx_meta(uint64_t pulse_id, int64_t pre_guard, double cal_native)
 {
@@ -1335,6 +1402,156 @@ BOOST_AUTO_TEST_CASE(e2e_sync_repetitions)
         std::vector<uint8_t> raw;
         BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw));
         BOOST_CHECK_EQUAL(raw.size(), kTaps * 8);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// e2e_repetition_output: the estimator's emit_individual_repetitions mode
+// through the real writer.  One RX pulse expands to `reps - skip` CIR PDUs;
+// the writer lands them as ONE compact JSONL line with column arrays and
+// appends every tap to cir.cf32 / cir_norm.cf32 in (pulse, ordinal) order.
+// Every written repetition is compared tap-for-tap against a direct-core
+// reference, so this covers the block expansion, the grouped line contract
+// and the on-disk binary layout end-to-end.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(e2e_repetition_output)
+{
+    struct Case {
+        size_t reps;
+        size_t skip;
+        const char* tx_path;
+        int64_t sfd_truth;
+        size_t expected; // reps - skip
+    };
+    const Case cases[] = {
+        { 64, 10, "uwb_radar/tx_998p4.cf32", kSfdClean, 54 },
+        // App default repetition policy: skip 0, all 128 SYNC.
+        { 128, 0, "uwb_radar/packets/sync128/tx_998p4.cf32", 132045, 128 },
+    };
+
+    for (const auto& c : cases) {
+        std::vector<gr_complex> tx;
+        BOOST_REQUIRE(load_cf32(testdata_path(c.tx_path), tx));
+        const std::string tag = "rep" + std::to_string(c.reps);
+        const std::string tmpl = write_template_file(tx, tag);
+        const std::string dir = make_out_dir(tag);
+
+        auto src = UwbRadarPacketSource::make(
+            testdata_path(c.tx_path), kFsWork, "fc32", c.reps, "4z2", 9);
+        auto echo = UwbLoopbackEcho::make(
+            kPreGuardWork, kTail, { 0.0 }, { gr_complex(1.0f, 0.0f) });
+        auto est = UwbRadarCirEstimator::make(
+            tmpl, c.reps, "4z2", 9, kCirPre, kCirPost, c.skip,
+            0, // auto repetitions
+            64, 8, 0.3f, 0.3f, true, 32,
+            /*use_predicted_timing=*/false,
+            /*emit_individual_repetitions=*/true);
+        auto w = UwbCirWriter::make(dir, "cir", /*write_normalized=*/true, 256);
+        auto dbg_echo = gr::blocks::message_debug::make();
+        auto tb = gr::make_top_block("qa_radar_e2e_repetition");
+        tb->msg_connect(src, "tx", echo, "tx");
+        tb->msg_connect(echo, "rx", est, "rx");
+        tb->msg_connect(est, "cir", w, "cir");
+        tb->msg_connect(echo, "rx", dbg_echo, "store");
+        tb->start();
+        src->_post(pmt::mp("emit"), pmt::make_dict());
+        BOOST_REQUIRE(wait_until([&] {
+            return est->pdus_published() >= c.expected && est->drained() &&
+                   w->frames_written() >= c.expected;
+        }));
+        tb->stop();
+        tb->wait();
+        BOOST_REQUIRE(w->stop());
+
+        // Estimator: one RX pulse completed, expanded into `expected` frames.
+        BOOST_CHECK_EQUAL(est->pdus_received(), 1u);
+        BOOST_CHECK_EQUAL(est->pdus_completed(), 1u);
+        BOOST_CHECK_EQUAL(est->pdus_failed(), 0u);
+        BOOST_CHECK_EQUAL(est->pdus_published(), c.expected);
+        BOOST_CHECK_EQUAL(est->pdus_dropped(), 0u);
+        BOOST_CHECK(est->emit_individual_repetitions());
+
+        // Writer: every record written, none dropped, exactly one pulse line.
+        BOOST_CHECK_EQUAL(w->frames_received(), c.expected);
+        BOOST_CHECK_EQUAL(w->frames_written(), c.expected);
+        BOOST_CHECK_EQUAL(w->frames_failed(), 0u);
+        BOOST_CHECK_EQUAL(w->frames_dropped(), 0u);
+        BOOST_CHECK_EQUAL(w->taps_written(), c.expected * kTaps);
+
+        const auto lines = read_lines(dir + "/cir.jsonl");
+        BOOST_REQUIRE_EQUAL(lines.size(), 1u);
+        const std::string& line = lines[0];
+        const JsonlLine j = parse_jsonl(line);
+        BOOST_CHECK_EQUAL(j.status, "ok");
+        BOOST_CHECK_EQUAL(j.pulse_id, 0u);
+        BOOST_CHECK(line.find("\"cir_output\":\"repetitions\"") !=
+                    std::string::npos);
+        BOOST_CHECK(line.find("\"repetition_count\":" +
+                              std::to_string(c.expected)) != std::string::npos);
+        BOOST_CHECK(line.find("\"repetition_records\":" +
+                              std::to_string(c.expected)) != std::string::npos);
+        BOOST_CHECK(line.find("\"repetition_complete\":true") !=
+                    std::string::npos);
+        BOOST_CHECK_EQUAL(j.zero_delay, static_cast<int64_t>(kCirPre));
+        BOOST_CHECK_EQUAL(j.cir_origin, kOriginClean);
+        BOOST_CHECK_LE(std::llabs(j.sfd - c.sfd_truth), 2);
+        BOOST_CHECK(j.sfd_ok);
+        BOOST_CHECK(j.timing_ok);
+
+        // Grouped column arrays: ordinal order, absolute repetition index,
+        // per-record tap count and both binary offsets advance by kTaps.
+        const auto index = parse_u64_array(line, "repetition_index");
+        const auto taps = parse_u64_array(line, "tap_count");
+        const auto raw_off = parse_u64_array(line, "file_offset_taps");
+        const auto norm_off = parse_u64_array(line, "file_offset_norm_taps");
+        const auto est_us = parse_u64_array(line, "estimator_us");
+        BOOST_REQUIRE_EQUAL(index.size(), c.expected);
+        BOOST_REQUIRE_EQUAL(taps.size(), c.expected);
+        BOOST_REQUIRE_EQUAL(raw_off.size(), c.expected);
+        BOOST_REQUIRE_EQUAL(norm_off.size(), c.expected);
+        BOOST_REQUIRE_EQUAL(est_us.size(), c.expected);
+        for (size_t ordinal = 0; ordinal < c.expected; ++ordinal) {
+            BOOST_CHECK_EQUAL(index[ordinal], c.skip + ordinal);
+            BOOST_CHECK_EQUAL(taps[ordinal], kTaps);
+            BOOST_CHECK_EQUAL(raw_off[ordinal], ordinal * kTaps);
+            BOOST_CHECK_EQUAL(norm_off[ordinal], ordinal * kTaps);
+        }
+
+        // Binary layout: contiguous (pulse, ordinal) complex64 records.
+        std::vector<uint8_t> raw_bytes, norm_bytes;
+        BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw_bytes));
+        BOOST_REQUIRE(read_bytes(dir + "/cir_norm.cf32", norm_bytes));
+        BOOST_CHECK_EQUAL(raw_bytes.size(), c.expected * kTaps * 8);
+        BOOST_CHECK_EQUAL(norm_bytes.size(), c.expected * kTaps * 8);
+
+        // The RX window the estimator saw (shared PMT vector via loopback).
+        size_t n_rx = 0;
+        const gr_complex* p_rx =
+            pmt::c32vector_elements(pmt::cdr(dbg_echo->get_message(0)), n_rx);
+        std::vector<gr_complex> rx(p_rx, p_rx + n_rx);
+
+        std::vector<std::vector<gr_complex>> ref_raw, ref_norm;
+        direct_core_repetition_reference(tx, rx, c.reps, kOriginClean, c.skip,
+                                         c.expected, ref_raw, ref_norm);
+
+        for (size_t ordinal = 0; ordinal < c.expected; ++ordinal) {
+            std::vector<gr_complex> got_raw(kTaps), got_norm(kTaps);
+            std::memcpy(got_raw.data(), raw_bytes.data() + ordinal * kTaps * 8,
+                        kTaps * 8);
+            std::memcpy(got_norm.data(),
+                        norm_bytes.data() + ordinal * kTaps * 8, kTaps * 8);
+            BOOST_CHECK_MESSAGE(
+                std::memcmp(got_raw.data(), ref_raw[ordinal].data(),
+                            kTaps * 8) == 0,
+                tag + " repetition " + std::to_string(c.skip + ordinal) +
+                    " raw taps differ from the direct core");
+            BOOST_CHECK_MESSAGE(
+                std::memcmp(got_norm.data(), ref_norm[ordinal].data(),
+                            kTaps * 8) == 0,
+                tag + " repetition " + std::to_string(c.skip + ordinal) +
+                    " normalized taps differ from the direct core");
+            BOOST_CHECK_CLOSE(l2_norm(got_norm), 1.0, 1e-3);
+        }
     }
 }
 
