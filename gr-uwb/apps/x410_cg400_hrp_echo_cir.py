@@ -19,8 +19,9 @@ a detected SFD, so DW3000 collisions do not drop frames.  Pass
 --require-sfd to restore the old search gate.
 
 UDP is a non-blocking UCR4 header (pulse + repetition + frequency + SC16
-scale metadata) + 116 block-floating SC16 taps for every CIR record. Live lines report
-echo_ok_hz vs cir_ok_hz vs udp_hz; radio ok is not CIR ok.
+scale metadata) + ``cir_pre+cir_post`` block-floating SC16 taps (default
+16+100=116) for every CIR record. Live lines report echo_ok_hz vs cir_ok_hz
+vs udp_hz; radio ok is not CIR ok.
 """
 from __future__ import annotations
 
@@ -196,8 +197,9 @@ class NativeRateProfile:
         return uwb.pdu_rational_resampler_ccf_65_32(
             taps, WORK_HZ, True, 2097152, int(res_workers), sc16_scale)
 
-# UDP CIR datagram: UCR4 + 116 interleaved little-endian SC16 taps
-# (always, zeros if fail). FC32 = SC16 * cir_scale.
+# UDP CIR datagram: UCR4 + tap_count interleaved little-endian SC16 taps
+# (always, zeros if fail; tap_count = cir_pre + cir_post, default 116).
+# FC32 = SC16 * cir_scale.
 #   magic "UCR4" | pulse_id u32 | status u16 | tap_count u16
 #   | repetition_index u16 | repetition_count u16 | sfd_metric f32
 #   | cir_peak_metric f32 | peak_tap i32 | estimator_us u32
@@ -206,7 +208,23 @@ class NativeRateProfile:
 # UCR3/UCR2/UCR1 are kept only for the receiver's legacy parse path.
 CIR_UDP_MAGIC = b"UCR1"                       # legacy parse-only
 CIR_UDP_HDR = struct.Struct("<4sIHHffiI")     # legacy parse-only
-CIR_UDP_TAPS = 116
+DEFAULT_CIR_PRE = 16
+DEFAULT_CIR_POST = 100
+CIR_UDP_TAPS = DEFAULT_CIR_PRE + DEFAULT_CIR_POST  # 116
+
+
+def resolve_cir_window(a):
+    """Return ``(cir_pre, cir_post, tap_count)`` from CLI args."""
+    pre = int(getattr(a, "cir_pre", DEFAULT_CIR_PRE))
+    post = int(getattr(a, "cir_post", DEFAULT_CIR_POST))
+    if pre < 0 or post < 0:
+        raise SystemExit("--cir-pre and --cir-post must be >= 0")
+    taps = pre + post
+    if taps <= 0:
+        raise SystemExit("CIR window is empty: cir_pre + cir_post must be > 0")
+    if taps > 65535:
+        raise SystemExit("CIR tap_count=%d exceeds the UCR4 u16 field" % taps)
+    return pre, post, taps
 CIR_UDP_MAGIC_V2 = b"UCR2"
 CIR_UDP_HDR_V2 = struct.Struct("<4sIHHffiIdd")
 CIR_UDP_MAGIC_V3 = b"UCR3"
@@ -260,6 +278,11 @@ def _pmt_float(meta, key, default=0.0):
     return default
 
 
+def _pmt_bool(meta, key, default=False):
+    v = pmt.dict_ref(meta, pmt.intern(key), pmt.PMT_NIL)
+    return bool(pmt.to_bool(v)) if pmt.is_bool(v) else bool(default)
+
+
 class CirUdpSink(gr.basic_block):
     """Non-blocking UDP sink for CIR PDUs. Always sends a UCR4 datagram.
 
@@ -296,19 +319,54 @@ class CirUdpSink(gr.basic_block):
             return
         meta = pmt.car(msg)
         vec = pmt.cdr(msg)
-        taps = np.zeros(self.tap_count, dtype=np.complex64)
-        if pmt.is_c32vector(vec):
-            raw = np.asarray(pmt.c32vector_elements(vec), dtype=np.complex64)
-            n = min(int(raw.size), self.tap_count)
-            if n:
-                taps[:n] = raw[:n]
-        status_s = _pmt_str(meta, "status", "other")
-        status = CIR_UDP_STATUS.get(status_s, 4)
+        raw = (np.asarray(pmt.c32vector_elements(vec), dtype=np.complex64)
+               if pmt.is_c32vector(vec) else np.empty(0, np.complex64))
         pulse_id = _pmt_int(meta, "pulse_id", 0) & 0xFFFFFFFF
         sfd_m = _pmt_float(meta, "sfd_metric", 0.0)
-        peak_m = _pmt_float(meta, "cir_peak_metric", 0.0)
-        peak_tap = _pmt_int(meta, "peak_tap", 0)
         est_us = _pmt_int(meta, "estimator_us", 0) & 0xFFFFFFFF
+        if _pmt_bool(meta, "repetition_batch", False):
+            count = _pmt_int(meta, "repetition_count", 0)
+            first = _pmt_int(meta, "repetition_first", 0)
+            sv = pmt.dict_ref(meta, pmt.intern("repetition_status_code"),
+                              pmt.PMT_NIL)
+            pv = pmt.dict_ref(meta, pmt.intern("repetition_peak_tap"),
+                              pmt.PMT_NIL)
+            mv = pmt.dict_ref(meta, pmt.intern("repetition_peak_metric"),
+                              pmt.PMT_NIL)
+            if (count <= 0 or raw.size != count * self.tap_count or
+                    not pmt.is_u64vector(sv) or
+                    not pmt.is_u64vector(pv) or
+                    not pmt.is_f32vector(mv)):
+                self.dropped += max(1, count)
+                return
+            statuses = np.asarray(pmt.u64vector_elements(sv), dtype=np.uint64)
+            peaks = np.asarray(pmt.u64vector_elements(pv), dtype=np.uint64)
+            metrics = np.asarray(pmt.f32vector_elements(mv), dtype=np.float32)
+            if statuses.size != count or peaks.size != count or metrics.size != count:
+                self.dropped += count
+                return
+            for i in range(count):
+                lo = i * self.tap_count
+                self._send_record(meta, raw[lo:lo + self.tap_count],
+                                  int(statuses[i]), pulse_id, sfd_m,
+                                  float(metrics[i]), int(peaks[i]), est_us,
+                                  first + i, count)
+            return
+
+        taps = np.zeros(self.tap_count, dtype=np.complex64)
+        n = min(int(raw.size), self.tap_count)
+        if n:
+            taps[:n] = raw[:n]
+        status = CIR_UDP_STATUS.get(_pmt_str(meta, "status", "other"), 4)
+        self._send_record(
+            meta, taps, status, pulse_id, sfd_m,
+            _pmt_float(meta, "cir_peak_metric", 0.0),
+            _pmt_int(meta, "peak_tap", 0), est_us,
+            _pmt_int(meta, "repetition_index", 0xFFFF) & 0xFFFF,
+            _pmt_int(meta, "repetition_count", 0) & 0xFFFF)
+
+    def _send_record(self, meta, taps, status, pulse_id, sfd_m, peak_m,
+                     peak_tap, est_us, rep_index, rep_count):
         freq_hz = CIR_UDP_FREQ_UNKNOWN
         freq_off = CIR_UDP_FREQ_UNKNOWN
         # C++ success-counted scans can have gaps in pulse_id after retries
@@ -325,8 +383,6 @@ class CirUdpSink(gr.basic_block):
             if fr is not None:
                 freq_hz, freq_off = fr
                 self.sent_freq += 1
-        rep_index = _pmt_int(meta, "repetition_index", 0xFFFF) & 0xFFFF
-        rep_count = _pmt_int(meta, "repetition_count", 0) & 0xFFFF
         cir_scale = 0.0
         taps_sc16 = np.zeros(self.tap_count * 2, dtype="<i2")
         if status == 0 and taps.size:
@@ -535,7 +591,9 @@ class TimedUhdEcho(gr.basic_block):
                  rx_dump_dir="", min_lead_s=0.002, timing_path="",
                  sc16_dump_dir="", rx_pad_us=8.0,
                  code_index=DEFAULT_CODE_INDEX, sfd_mode=SFD_MODE,
-                 publish_native=0, rx_freq_offset=0.0, tx_channels=None):
+                 publish_native=0, rx_freq_offset=0.0, tx_channels=None,
+                 cir_pre=DEFAULT_CIR_PRE, cir_post=DEFAULT_CIR_POST,
+                 cir_skip=10):
         gr.basic_block.__init__(self, name="timed_uhd_echo",
                                 in_sig=None, out_sig=None)
         self._profile = profile
@@ -572,7 +630,9 @@ class TimedUhdEcho(gr.basic_block):
                         self.rx_pad_us, self.tx_interp, self.tx_decim)
         if int(publish_native) < 0:
             publish_native = cir_publish_native(
-                self.pre, self.sync_reps, self.cal_delay_native, self.rate)
+                self.pre, self.sync_reps, self.cal_delay_native, self.rate,
+                cir_pre=int(cir_pre), cir_post=int(cir_post),
+                cir_skip=int(cir_skip))
         self.publish_native = int(publish_native)
 
         self.message_port_register_in(pmt.intern("tx"))
@@ -1068,8 +1128,11 @@ class CppPduEcho:
             self.tail_us, int(self._native.size), self.rx_pad_us,
             self.tx_interp, self.tx_decim)
         if int(a.publish_native) < 0:
-            pub = cir_publish_native(self.pre, self.sync_reps,
-                                     self.cal_delay_native, self.rate)
+            pub = cir_publish_native(
+                self.pre, self.sync_reps, self.cal_delay_native, self.rate,
+                cir_pre=int(getattr(a, "cir_pre", DEFAULT_CIR_PRE)),
+                cir_post=int(getattr(a, "cir_post", DEFAULT_CIR_POST)),
+                cir_skip=(0 if a.cir_output == "repetitions" else 10))
         else:
             pub = int(a.publish_native)
         self.publish_native = int(pub)
@@ -1369,6 +1432,15 @@ def build_parser(add_help=True, cir_output_default="repetitions"):
                    help="CIR records per pulse: every SYNC repetition from "
                         "index 0 (default in base/jam), or one legacy "
                         "coherent average with the first 10 skipped")
+    p.add_argument("--cir-pre", type=int, default=DEFAULT_CIR_PRE,
+                   help="CIR taps before the calibrated zero-delay origin "
+                        "(default %d). tap_count = cir_pre + cir_post."
+                        % DEFAULT_CIR_PRE)
+    p.add_argument("--cir-post", type=int, default=DEFAULT_CIR_POST,
+                   help="CIR taps after the origin (default %d, ~15 m "
+                        "one-way after zero delay @998.4).  64 total taps "
+                        "is --cir-pre 16 --cir-post 48."
+                        % DEFAULT_CIR_POST)
     p.add_argument("--require-sfd", action="store_true",
                    help="Gate CIR on SFD search (default: use scheduled echo time)")
     return p
@@ -1705,6 +1777,7 @@ def main():
         a.publish_native = 0
     dump_dir = os.path.join(a.output, "rx_iq") if a.dump_rx else ""
     sc16_dir = a.output if a.dump_sc16 else ""
+    cir_pre, cir_post, cir_taps = resolve_cir_window(a)
     if a.echo_backend == "cpp-pdu":
         echo = CppPduEcho(a, native, profile)
         echo_out_port = "burst"
@@ -1716,7 +1789,9 @@ def main():
             a.cal_delay_native, a.arm_delay_s, a.pri_s, a.pulses, dump_dir,
             a.min_lead_s, timing_path, sc16_dir, a.rx_pad_us, a.code_index,
             SFD_MODE, publish_native=a.publish_native,
-            rx_freq_offset=a.rx_freq_offset)
+            rx_freq_offset=a.rx_freq_offset,
+            cir_pre=cir_pre, cir_post=cir_post,
+            cir_skip=(0 if a.cir_output == "repetitions" else 10))
         echo.set_tx_native(native)
         echo_out_port = "rx"
     print("echo_backend=%s" % a.echo_backend, flush=True)
@@ -1742,14 +1817,17 @@ def main():
     use_pred = not a.require_sfd
     cir_skip_initial = 0 if a.cir_output == "repetitions" else 10
     est = uwb.radar_cir_estimator(
-        tmpl_path, a.sync_reps, SFD_MODE, a.code_index, 16, 100,
+        tmpl_path, a.sync_reps, SFD_MODE, a.code_index, cir_pre, cir_post,
         cir_skip_initial, 0,
         a.sfd_search_margin, a.sync_refine_margin, a.sfd_threshold,
         a.sync_refine_threshold, True, est_q, use_pred,
+        a.cir_output == "repetitions",
         a.cir_output == "repetitions")
     print("estimator code_index=%d preamble_length=%d sfd_search_margin=%d "
-          "queue=%d use_predicted_timing=%s (overflow=drop)" % (
-              a.code_index, a.sync_reps, a.sfd_search_margin, est_q, use_pred),
+          "cir_pre=%d cir_post=%d taps=%d queue=%d "
+          "use_predicted_timing=%s (overflow=drop)" % (
+              a.code_index, a.sync_reps, a.sfd_search_margin,
+              cir_pre, cir_post, cir_taps, est_q, use_pred),
           flush=True)
     cir_records_per_pulse = (max(1, int(a.sync_reps) - cir_skip_initial)
                              if a.cir_output == "repetitions" else 1)
@@ -1759,11 +1837,11 @@ def main():
     udp_on = (not a.no_udp) and bool(a.udp_host)
     if udp_on:
         udp = CirUdpSink(
-            a.udp_host, int(a.udp_port), CIR_UDP_TAPS,
+            a.udp_host, int(a.udp_port), cir_taps,
             freq_lookup=lambda pid: (echo.freq, 0.0))
         print("udp_cir %s:%s framed=UCR4 SC16(+scale,+repetition,+freq) "
               "always_send_taps=%d nonblock" % (
-                  a.udp_host, a.udp_port, CIR_UDP_TAPS), flush=True)
+                  a.udp_host, a.udp_port, cir_taps), flush=True)
 
     tb = gr.top_block("x410_cg400_hrp_echo_cir")
     # The cpp-pdu path is the C++ block itself; the wrapper only carries the
@@ -1855,6 +1933,9 @@ def main():
         "code_index": a.code_index,
         "preamble_length": a.sync_reps,
         "cir_output": a.cir_output,
+        "cir_pre": cir_pre,
+        "cir_post": cir_post,
+        "cir_tap_count": cir_taps,
         "cir_skip_initial": cir_skip_initial,
         "cir_records_per_pulse": cir_records_per_pulse,
         "sfd_mode": SFD_MODE,

@@ -7,9 +7,9 @@
  * QA for the UwbCirWriter message block (Radar Step 8).
  *
  * Covers: mixed ok/failed frames (JSONL line count == frames, only ok
- * frames advance file_offset_taps and write taps), exact little-endian
- * complex64 bytes, optional normalized file, malformed PDU rejection,
- * queue-full drops, stop() draining, and restart truncation.
+ * frames advance file_offset_taps and write a UCR4 record), SC16
+ * block-floating reconstruction, malformed PDU rejection, queue-full
+ * drops, stop() draining, and restart truncation.
  */
 
 #include <boost/test/unit_test.hpp>
@@ -34,6 +34,10 @@
 #include <vector>
 
 using gr::uwb::UwbCirWriter;
+using gr::uwb::Ucr4Header;
+using gr::uwb::decode_cir_sc16;
+using gr::uwb::encode_cir_sc16;
+using gr::uwb::ucr4_record_bytes;
 
 namespace {
 
@@ -63,6 +67,47 @@ read_bytes(const std::string& path, std::vector<uint8_t>& out)
     out.resize(static_cast<size_t>(n));
     f.read(reinterpret_cast<char*>(out.data()), n);
     return f.good() || f.eof();
+}
+
+double
+rel_l2(const std::vector<gr_complex>& a, const std::vector<gr_complex>& b)
+{
+    if (a.size() != b.size() || a.empty())
+        return 1.0;
+    double num = 0.0, den = 0.0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        const gr_complex d = a[i] - b[i];
+        num += static_cast<double>(std::norm(d));
+        den += static_cast<double>(std::norm(b[i]));
+    }
+    return den > 0.0 ? std::sqrt(num / den) : std::sqrt(num);
+}
+
+bool
+load_ucr4(const std::string& path, std::vector<std::vector<gr_complex>>& out)
+{
+    std::vector<uint8_t> raw;
+    if (!read_bytes(path, raw))
+        return false;
+    size_t off = 0;
+    while (off + sizeof(Ucr4Header) <= raw.size()) {
+        Ucr4Header hdr{};
+        std::memcpy(&hdr, raw.data() + off, sizeof(hdr));
+        if (std::memcmp(hdr.magic, "UCR4", 4) != 0)
+            return false;
+        const size_t rec = ucr4_record_bytes(hdr.tap_count);
+        if (off + rec > raw.size())
+            return false;
+        std::vector<gr_complex> taps(hdr.tap_count);
+        if (hdr.tap_count > 0) {
+            const auto* iq = reinterpret_cast<const int16_t*>(
+                raw.data() + off + sizeof(Ucr4Header));
+            decode_cir_sc16(iq, hdr.tap_count, hdr.cir_scale, taps.data());
+        }
+        out.push_back(std::move(taps));
+        off += rec;
+    }
+    return off == raw.size();
 }
 
 std::vector<std::string>
@@ -297,12 +342,16 @@ BOOST_AUTO_TEST_CASE(test_writer_mixed_frames)
     const auto lines = read_lines(dir + "/cir.jsonl");
     BOOST_REQUIRE_EQUAL(lines.size(), kFrames);
 
-    // Binary: exactly the ok taps, little-endian complex64.
+    // Binary: one UCR4 record per ok frame.
     std::vector<uint8_t> raw;
-    BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw));
-    BOOST_CHECK_EQUAL(raw.size(), expect_taps * 8);
+    BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
+    BOOST_CHECK_EQUAL(raw.size(), posted_ok * ucr4_record_bytes(kTaps));
+    std::vector<std::vector<gr_complex>> decoded;
+    BOOST_REQUIRE(load_ucr4(dir + "/cir.ucr4", decoded));
+    BOOST_REQUIRE_EQUAL(decoded.size(), posted_ok);
 
     uint64_t offset = 0;
+    size_t ok_i = 0;
     for (size_t i = 0; i < kFrames; ++i) {
         const std::string& line = lines[i];
         uint64_t pid = 0, tap_count = 0, file_offset = 0;
@@ -329,17 +378,27 @@ BOOST_AUTO_TEST_CASE(test_writer_mixed_frames)
         if (status == "ok") {
             BOOST_CHECK_EQUAL(tap_count, kTaps);
             BOOST_CHECK_EQUAL(file_offset, offset);
-            // Exact bytes for this frame at its offset.
-            const uint8_t* expect =
-                reinterpret_cast<const uint8_t*>(frames[i].data());
-            BOOST_CHECK(std::memcmp(raw.data() + offset * 8, expect,
-                                    kTaps * 8) == 0);
+            BOOST_CHECK_LT(rel_l2(decoded[ok_i], frames[i]), 1e-4);
+            std::vector<int16_t> expect_sc16(kTaps * 2);
+            const float scale =
+                encode_cir_sc16(frames[i].data(), kTaps, expect_sc16.data());
+            const size_t rec_off = ok_i * ucr4_record_bytes(kTaps);
+            Ucr4Header hdr{};
+            std::memcpy(&hdr, raw.data() + rec_off, sizeof(hdr));
+            BOOST_CHECK_EQUAL(std::string(hdr.magic, 4), "UCR4");
+            BOOST_CHECK_EQUAL(hdr.pulse_id, i);
+            BOOST_CHECK_EQUAL(hdr.tap_count, kTaps);
+            BOOST_CHECK_CLOSE(hdr.cir_scale, scale, 1e-5);
+            BOOST_CHECK(std::memcmp(raw.data() + rec_off + sizeof(Ucr4Header),
+                                    expect_sc16.data(),
+                                    kTaps * 4) == 0);
             int64_t sfd = -1, pre = -1;
             BOOST_REQUIRE(parse_i64(line, "sfd_start_sample", sfd));
             BOOST_CHECK_EQUAL(sfd, 67021);
             BOOST_REQUIRE(parse_i64(line, "preamble_start_sample", pre));
             BOOST_CHECK_EQUAL(pre, 1997);
             offset += kTaps;
+            ++ok_i;
         } else {
             BOOST_CHECK_EQUAL(tap_count, 0u);
             BOOST_CHECK_EQUAL(file_offset, offset); // unchanged tail
@@ -423,17 +482,15 @@ BOOST_AUTO_TEST_CASE(test_writer_normalized)
     BOOST_CHECK_EQUAL(w->frames_failed(), 5u);
     BOOST_CHECK_EQUAL(w->taps_written(), 2u * kTaps);
 
-    std::vector<uint8_t> raw, norm;
-    BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw));
-    BOOST_REQUIRE(read_bytes(dir + "/cir_norm.cf32", norm));
-    BOOST_CHECK_EQUAL(raw.size(), 2u * kTaps * 8);
-    BOOST_CHECK_EQUAL(norm.size(), 2u * kTaps * 8);
-    BOOST_CHECK(std::memcmp(raw.data(), taps.data(), kTaps * 8) == 0);
-    BOOST_CHECK(std::memcmp(raw.data() + kTaps * 8, taps.data(),
-                            kTaps * 8) == 0);
-    BOOST_CHECK(std::memcmp(norm.data(), taps.data(), kTaps * 8) == 0);
-    BOOST_CHECK(std::memcmp(norm.data() + kTaps * 8, taps.data(),
-                            kTaps * 8) == 0);
+    std::vector<uint8_t> raw;
+    BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
+    BOOST_CHECK_EQUAL(raw.size(), 2u * ucr4_record_bytes(kTaps));
+    BOOST_CHECK(!std::filesystem::exists(dir + "/cir_norm.cf32"));
+    std::vector<std::vector<gr_complex>> decoded;
+    BOOST_REQUIRE(load_ucr4(dir + "/cir.ucr4", decoded));
+    BOOST_REQUIRE_EQUAL(decoded.size(), 2u);
+    BOOST_CHECK_LT(rel_l2(decoded[0], taps), 1e-4);
+    BOOST_CHECK_LT(rel_l2(decoded[1], taps), 1e-4);
 
     // Per-line expectations: [ok, missing-norm, short-norm, long-raw,
     // long-norm, failed, ok]. Offsets advance only on ok frames; failed
@@ -443,8 +500,6 @@ BOOST_AUTO_TEST_CASE(test_writer_normalized)
     const uint64_t expect_tc[] = { kTaps, 0, 0, 0, 0, 0, kTaps };
     const uint64_t expect_off[] = { 0, kTaps, kTaps, kTaps, kTaps, kTaps,
                                     kTaps };
-    const uint64_t expect_noff[] = { 0, kTaps, kTaps, kTaps, kTaps, kTaps,
-                                     kTaps };
     for (size_t i = 0; i < lines.size(); ++i) {
         double v = 0.0;
         BOOST_REQUIRE(parse_num(lines[i], "tap_count", v));
@@ -453,12 +508,8 @@ BOOST_AUTO_TEST_CASE(test_writer_normalized)
         BOOST_REQUIRE(parse_num(lines[i], "file_offset_taps", v));
         BOOST_CHECK_EQUAL(static_cast<uint64_t>(std::llround(v)),
                           expect_off[i]);
-        double norm_off = -1.0;
-        const bool has_norm_off =
-            parse_num(lines[i], "file_offset_norm_taps", norm_off);
-        BOOST_CHECK(has_norm_off);
-        BOOST_CHECK_EQUAL(static_cast<uint64_t>(std::llround(norm_off)),
-                          expect_noff[i]);
+        BOOST_CHECK(lines[i].find("file_offset_norm_taps") ==
+                    std::string::npos);
     }
 }
 
@@ -522,8 +573,8 @@ BOOST_AUTO_TEST_CASE(test_writer_groups_repetitions_per_pulse)
                 std::string::npos);
 
     std::vector<uint8_t> raw;
-    BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw));
-    BOOST_CHECK_EQUAL(raw.size(), 5u * kTaps * 8);
+    BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
+    BOOST_CHECK_EQUAL(raw.size(), 5u * ucr4_record_bytes(kTaps));
 }
 
 // ---------------------------------------------------------------------------
@@ -555,7 +606,7 @@ BOOST_AUTO_TEST_CASE(test_writer_invalid_pdus)
     const auto lines = read_lines(dir + "/cir.jsonl");
     BOOST_CHECK_EQUAL(lines.size(), 0u);
     std::vector<uint8_t> raw;
-    BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw));
+    BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
     BOOST_CHECK_EQUAL(raw.size(), 0u);
 }
 
@@ -591,8 +642,8 @@ BOOST_AUTO_TEST_CASE(test_writer_stop_drains)
     const auto lines = read_lines(dir + "/cir.jsonl");
     BOOST_CHECK_EQUAL(lines.size(), 5u);
     std::vector<uint8_t> raw;
-    BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw));
-    BOOST_CHECK_EQUAL(raw.size(), 5u * kTaps * 8);
+    BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
+    BOOST_CHECK_EQUAL(raw.size(), 5u * ucr4_record_bytes(kTaps));
 }
 
 // ---------------------------------------------------------------------------
@@ -627,6 +678,6 @@ BOOST_AUTO_TEST_CASE(test_writer_restart)
     const auto lines = read_lines(dir + "/cir.jsonl");
     BOOST_CHECK_EQUAL(lines.size(), 1u);
     std::vector<uint8_t> raw;
-    BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw));
+    BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
     BOOST_CHECK_EQUAL(raw.size(), 0u); // truncated by restart
 }

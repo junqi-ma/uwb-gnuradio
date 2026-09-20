@@ -42,6 +42,12 @@ struct RadarCirEstimate {
 
 struct RadarCirScratch {
     std::vector<std::complex<float>> sampled_code; // 1016
+    // Non-zero sampled-code entries in ascending sample order.  HRP codes
+    // contain one non-zero chip sample followed by seven exact zeros, so
+    // per-repetition CIR must not rescan all 1016 entries for every tap.
+    // Prepared once; the hot path only reads these vectors.
+    std::vector<size_t> active_code_indices;
+    std::vector<std::complex<float>> active_code_values;
     float code_energy = 0.f;
     std::vector<std::complex<float>> avg;          // capacity >= wlen
     std::vector<std::complex<float>> raw_taps;     // capacity >= tap_count
@@ -51,6 +57,8 @@ struct RadarCirScratch {
     void reserve(size_t code_len, size_t max_taps)
     {
         sampled_code.reserve(code_len);
+        active_code_indices.reserve(code_len);
+        active_code_values.reserve(code_len);
         const size_t max_wlen = code_len + max_taps - 1;
         avg.reserve(max_wlen);
         raw_taps.reserve(max_taps);
@@ -87,6 +95,8 @@ inline bool prepare_radar_cir_code(const int8_t* hrp_code,
                                    RadarCirScratch& scratch)
 {
     scratch.sampled_code.clear();
+    scratch.active_code_indices.clear();
+    scratch.active_code_values.clear();
     scratch.code_energy = 0.f;
 
     if (!hrp_code || code_len == 0)
@@ -133,10 +143,17 @@ inline bool prepare_radar_cir_code(const int8_t* hrp_code,
     }
 
     float energy = 0.f;
-    for (size_t m = 0; m < sampled_len; ++m)
+    for (size_t m = 0; m < sampled_len; ++m) {
         energy += std::norm(scratch.sampled_code[m]);
+        if (scratch.sampled_code[m] != std::complex<float>(0.f, 0.f)) {
+            scratch.active_code_indices.push_back(m);
+            scratch.active_code_values.push_back(scratch.sampled_code[m]);
+        }
+    }
     if (!(energy > 0.f) || !std::isfinite(energy)) {
         scratch.sampled_code.clear();
+        scratch.active_code_indices.clear();
+        scratch.active_code_values.clear();
         scratch.code_energy = 0.f;
         return false;
     }
@@ -298,7 +315,10 @@ inline bool estimate_radar_cir_repetition(
     if (!rx || n == 0 || preamble_start < 0 || samples_per_symbol == 0 ||
         repetition_index >= preamble_repetitions ||
         scratch.sampled_code.empty() || !(scratch.code_energy > 0.f) ||
-        !std::isfinite(scratch.code_energy) || detail::cir_add_overflow(pre, post))
+        !std::isfinite(scratch.code_energy) ||
+        scratch.active_code_indices.empty() ||
+        scratch.active_code_indices.size() != scratch.active_code_values.size() ||
+        detail::cir_add_overflow(pre, post))
         return false;
 
     const size_t tap_count = pre + post;
@@ -329,12 +349,9 @@ inline bool estimate_radar_cir_repetition(
     for (size_t nn = 0; nn < tap_count; ++nn) {
         double acc_re = 0.0;
         double acc_im = 0.0;
-        for (size_t m = 0; m < code_len; ++m) {
-            const auto c = scratch.sampled_code[m];
-            // The sampled HRP code is sparse.  Skipping exact zero entries
-            // preserves the MATLAB sum while avoiding about 7/8 of the MACs.
-            if (c.real() == 0.f && c.imag() == 0.f)
-                continue;
+        for (size_t j = 0; j < scratch.active_code_indices.size(); ++j) {
+            const size_t m = scratch.active_code_indices[j];
+            const auto c = scratch.active_code_values[j];
             const auto a = src[nn + m];
             // HRP sampled_code is real {-1,0,+1}; keep the general complex
             // form for correctness, but avoid constructing complex<double>

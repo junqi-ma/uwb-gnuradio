@@ -37,7 +37,10 @@
  *
  * Output: by default every enqueued job produces one averaged PDU on "cir".
  * With emit_individual_repetitions enabled, a successful job produces one PDU
- * per selected SYNC repetition instead:
+ * per selected SYNC repetition instead.  batch_individual_repetitions packs
+ * those logical records into one PDU per pulse for high-rate writer/UDP paths;
+ * the metadata then carries per-repetition status/peak columns and the raw
+ * and normalized vectors are repetition-major:
  *   cons(meta, c32vector raw taps) — empty vector for failed frames.
  *   meta carries status ("ok"/"sfd_failed"/"timing_failed"/"cir_failed"/
  *   "internal_error"), full lineage and, when emit_normalized is set and the
@@ -109,7 +112,8 @@ public:
                      bool emit_normalized = true,
                      size_t queue_capacity = 64,
                      bool use_predicted_timing = false,
-                     bool emit_individual_repetitions = false);
+                     bool emit_individual_repetitions = false,
+                     bool batch_individual_repetitions = false);
 
     ~UwbRadarCirEstimator() override;
 
@@ -130,19 +134,23 @@ public:
     {
         return d_emit_individual_repetitions_;
     }
+    bool batch_individual_repetitions() const
+    {
+        return d_batch_individual_repetitions_;
+    }
 
     uint64_t pdus_received() const;
     uint64_t pdus_enqueued() const;
     uint64_t pdus_completed() const;   // core status ok
     uint64_t pdus_failed() const;      // core status not ok (still published)
-    uint64_t pdus_published() const;   // frames actually posted on "cir"
+    uint64_t pdus_published() const;   // logical CIR records posted on "cir"
     uint64_t pdus_dropped() const;     // queue full
     uint64_t invalid_inputs() const;   // rejected in handler, not enqueued
     uint64_t worker_exceptions() const;
     size_t queue_depth() const;
     size_t queue_high_watermark() const;
 
-    // Service time (radar_cir_one call) statistics in µs.
+    // Whole worker service time (core + CIR records + publish) in µs.
     uint64_t service_mean_us() const;
     uint64_t service_p95_us() const;
     uint64_t service_p99_us() const;
@@ -172,7 +180,8 @@ public:
                          bool emit_normalized,
                          size_t queue_capacity,
                          bool use_predicted_timing = false,
-                         bool emit_individual_repetitions = false);
+                         bool emit_individual_repetitions = false,
+                         bool batch_individual_repetitions = false);
 
 private:
     struct Job {
@@ -189,13 +198,24 @@ private:
     void handle_rx(pmt::pmt_t msg);
     bool enqueue(Job&& job);
     void worker_loop();
+    pmt::pmt_t make_common_frame_meta(const Job& job,
+                                      const radar::RadarCirResult& r,
+                                      uint64_t queue_us) const;
     void publish_frame(const Job& job,
                        const radar::RadarCirResult& r,
                        uint64_t queue_us,
                        uint64_t service_us,
                        int64_t repetition_index = -1,
                        size_t repetition_ordinal = 0,
-                       size_t repetition_count = 0);
+                       size_t repetition_count = 0,
+                       pmt::pmt_t common_meta = pmt::PMT_NIL);
+    void publish_repetition_batch(const Job& job,
+                                  const radar::RadarCirResult& r,
+                                  uint64_t queue_us,
+                                  uint64_t service_us,
+                                  size_t first,
+                                  size_t count,
+                                  pmt::pmt_t common_meta);
     void publish_status(const std::string& event, pmt::pmt_t extra = pmt::PMT_NIL);
     void snapshot_stats(pmt::pmt_t& meta);
     void record_service_time(uint64_t us);
@@ -211,7 +231,17 @@ private:
     radar::RadarCirCoreScratch d_scratch_;
     bool d_emit_normalized_ = true;
     bool d_emit_individual_repetitions_ = false;
+    bool d_batch_individual_repetitions_ = false;
     size_t d_queue_capacity_ = 0;
+
+    // Worker-only fixed storage for one packed repetition pulse.  Sized at
+    // construction; no allocation occurs in worker_loop().
+    std::vector<gr_complex> d_batch_raw_;
+    std::vector<gr_complex> d_batch_norm_;
+    std::vector<uint64_t> d_batch_status_;
+    std::vector<uint64_t> d_batch_peak_tap_;
+    std::vector<float> d_batch_peak_metric_;
+    std::vector<float> d_batch_raw_l2_norm_;
 
     // Job queue.
     mutable std::mutex d_queue_mutex_;

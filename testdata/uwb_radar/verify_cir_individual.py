@@ -24,7 +24,7 @@ What it proves (golden mode, the default)
 Capture mode (``--capture <run_dir>``)
 --------------------------------------
 Reads a real hardware run directory (native SC16 ``capture.iq`` + capture.jsonl
-+ cir.cf32/cir.jsonl), resamples native->998.4 work with scipy resample_poly,
++ cir.ucr4/cir.jsonl), resamples native->998.4 work with scipy resample_poly,
 and reports per-repetition CIRs.  Because scipy's resampler is NOT the repo's
 65/48 FIR, the averaged CIR is compared to the C++ cir.cf32 by shape/peak, not
 bit-exactly.  Use golden mode for exactness.
@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import struct
 import sys
 
 import numpy as np
@@ -75,6 +76,36 @@ def read_cf32(path: str) -> np.ndarray:
     if raw.size % 2:
         raise ValueError("cf32 file has odd float count: %s" % path)
     return (raw[0::2] + 1j * raw[1::2]).astype(np.complex128)
+
+
+_UCR4_HDR = struct.Struct("<4sIHHHHffiIddf")
+
+
+def read_ucr4(path: str) -> np.ndarray:
+    """Return concatenated reconstructed FC32 taps from a UCR4 dump."""
+    data = open(path, "rb").read()
+    off = 0
+    chunks = []
+    while off + _UCR4_HDR.size <= len(data):
+        magic, _pid, _st, tap_count, _ri, _rc, _sfd, _peak, _pt, _us, \
+            _fh, _fo, scale = _UCR4_HDR.unpack_from(data, off)
+        if magic != b"UCR4":
+            raise ValueError("not a UCR4 stream: %s" % path)
+        rec = _UCR4_HDR.size + int(tap_count) * 4
+        if off + rec > len(data):
+            raise ValueError("truncated UCR4 record in %s" % path)
+        payload = np.frombuffer(data[off + _UCR4_HDR.size:off + rec],
+                                dtype="<i2")
+        iq = payload.reshape(-1, 2)
+        taps = (iq[:, 0].astype(np.float32) +
+                1j * iq[:, 1].astype(np.float32)) * np.float32(scale)
+        chunks.append(taps.astype(np.complex128))
+        off += rec
+    if off != len(data):
+        raise ValueError("trailing bytes in UCR4 file %s" % path)
+    if not chunks:
+        return np.zeros(0, dtype=np.complex128)
+    return np.concatenate(chunks)
 
 
 def estimate_cir(rx, sync_origin0, code, pre, post, skip, n_sync):
@@ -259,7 +290,9 @@ def run_capture(run_dir: str, work_rate: float, native_rate: float) -> int:
     cap = [json.loads(l) for l in open(capture_jsonl) if l.strip()]
     cir_meta = {int(json.loads(l)["pulse_id"]): json.loads(l)
                 for l in open(cir_jsonl) if l.strip()}
-    cir_raw = read_cf32(os.path.join(run_dir, "cir.cf32"))
+    ucr4 = os.path.join(run_dir, "cir.ucr4")
+    cf32 = os.path.join(run_dir, "cir.cf32")
+    cir_raw = read_ucr4(ucr4) if os.path.exists(ucr4) else read_cf32(cf32)
 
     tmpl_path = os.path.join(run_dir, "sync_template_live.cf32")
     tmpl = read_cf32(tmpl_path) if os.path.exists(tmpl_path) else None
@@ -365,7 +398,9 @@ def read_grouped_run(run_dir):
     """
     jsonl = os.path.join(run_dir, "cir.jsonl")
     metas = [json.loads(l) for l in open(jsonl) if l.strip()]
-    raw_all = read_cf32(os.path.join(run_dir, "cir.cf32"))
+    ucr4 = os.path.join(run_dir, "cir.ucr4")
+    cf32 = os.path.join(run_dir, "cir.cf32")
+    raw_all = read_ucr4(ucr4) if os.path.exists(ucr4) else read_cf32(cf32)
     norm_path = os.path.join(run_dir, "cir_norm.cf32")
     norm_all = read_cf32(norm_path) if os.path.exists(norm_path) else None
 
@@ -434,8 +469,8 @@ def run_read_run(run_dir: str, golden_dir: str, golden_mean: bool) -> int:
             r = rel_l2(p["raw"].mean(axis=1), gold)
             print("  pulse %s mean(raw) vs clean golden relL2=%.3e"
                   % (p["meta"].get("pulse_id"), r))
-            if r >= 1e-5:
-                print("  FAIL: mean(raw) relL2 >= 1e-5")
+            if r >= 1e-4:
+                print("  FAIL: mean(raw) relL2 >= 1e-4")
                 failures += 1
 
     if failures:

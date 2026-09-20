@@ -395,6 +395,17 @@ BOOST_AUTO_TEST_CASE(test_individual_repetitions_mean_matches_average)
     const auto rx = load_radar_cf32("rx_clean_998p4.cf32", meta.rx_len);
     RadarCirScratch scratch;
     BOOST_REQUIRE(prepare_code9(scratch));
+    BOOST_REQUIRE_EQUAL(scratch.active_code_indices.size(), 64u);
+    BOOST_REQUIRE_EQUAL(scratch.active_code_values.size(),
+                        scratch.active_code_indices.size());
+    for (size_t i = 0; i < scratch.active_code_indices.size(); ++i) {
+        if (i > 0)
+            BOOST_CHECK_LT(scratch.active_code_indices[i - 1],
+                           scratch.active_code_indices[i]);
+        BOOST_CHECK_EQUAL(scratch.active_code_values[i],
+                          scratch.sampled_code[scratch.active_code_indices[i]]);
+        BOOST_CHECK(scratch.active_code_values[i] != gr_complex(0.f, 0.f));
+    }
 
     RadarCirEstimate avg_out;
     BOOST_REQUIRE(run_cir(rx, meta.origin_clean, kRadarPre, kRadarPost,

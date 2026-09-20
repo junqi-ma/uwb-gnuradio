@@ -845,11 +845,14 @@ def main():
                 lines = f.read().splitlines()
             with open(jsonl, "w", encoding="utf-8") as f:
                 f.write("\n".join(lines[:target_frames]) + "\n")
-            for name in ("cir.cf32", "cir_norm.cf32"):
+            rec = 52 + base.CIR_UDP_TAPS * 4
+            for name, nbytes in (("cir.ucr4", rec),
+                                 ("cir.cf32", base.CIR_UDP_TAPS * 8),
+                                 ("cir_norm.cf32", base.CIR_UDP_TAPS * 8)):
                 p = os.path.join(a.output, name)
                 if os.path.isfile(p):
                     with open(p, "r+b") as f:
-                        f.truncate(target_frames * base.CIR_UDP_TAPS * 8)
+                        f.truncate(target_frames * nbytes)
             frames_done = target_frames
             print("[stream] truncated %d slack CIR frames -> %d"
                   % (len(lines) - target_frames, frames_done), flush=True)

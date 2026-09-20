@@ -18,7 +18,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -67,6 +69,36 @@ bool
 dict_has(const pmt::pmt_t& dict, const char* key)
 {
     return pmt::is_dict(dict) && pmt::dict_has_key(dict, pmt::mp(key));
+}
+
+bool
+dict_bool(const pmt::pmt_t& dict, const char* key, bool fallback = false)
+{
+    const pmt::pmt_t value = pmt::dict_ref(dict, pmt::mp(key), pmt::PMT_NIL);
+    if (pmt::eq(value, pmt::PMT_T))
+        return true;
+    if (pmt::eq(value, pmt::PMT_F))
+        return false;
+    return fallback;
+}
+
+const char*
+cir_status_name(uint64_t code)
+{
+    switch (code) {
+    case 0:
+        return "ok";
+    case 1:
+        return "sfd_failed";
+    case 2:
+        return "timing_failed";
+    case 3:
+        return "cir_failed";
+    case 4:
+        return "invalid_input";
+    default:
+        return "internal_error";
+    }
 }
 
 std::string
@@ -175,6 +207,17 @@ append_opt_str(std::ostringstream& os,
     append_str(os, key, dict_str(meta, key));
 }
 
+void
+freq_from_meta(const pmt::pmt_t& meta, double& freq_hz, double& freq_off)
+{
+    freq_hz = std::numeric_limits<double>::quiet_NaN();
+    freq_off = std::numeric_limits<double>::quiet_NaN();
+    if (dict_has(meta, "jam_freq_actual_hz"))
+        freq_hz = dict_f64(meta, "jam_freq_actual_hz", freq_hz);
+    if (dict_has(meta, "jam_freq_offset_hz"))
+        freq_off = dict_f64(meta, "jam_freq_offset_hz", freq_off);
+}
+
 } // namespace
 
 UwbCirWriter::UwbCirWriter(const std::string& directory,
@@ -265,9 +308,11 @@ UwbCirWriter::write_run_json()
     append_str(os, "directory", d_directory_);
     append_str(os, "base_name", d_base_name_);
     append_bool(os, "write_normalized", d_write_normalized_);
-    append_str(os, "tap_format", "complex64");
+    append_str(os, "tap_format", "ucr4");
     append_str(os, "byte_order", "little-endian");
-    append_u64(os, "bytes_per_tap", 8);
+    append_u64(os, "header_bytes", sizeof(Ucr4Header));
+    append_u64(os, "bytes_per_tap", 4);
+    append_str(os, "reconstruction", "fc32 = sc16 * cir_scale");
     append_str(os, "json_layout", "one-line-per-pulse-columnar-repetitions");
     append_f64(os, "range_m_per_tap", kSpeedOfLight / (2.0 * 998.4e6));
     os << "}\n";
@@ -299,20 +344,14 @@ UwbCirWriter::start()
     // open() on an already-open fstream is a no-op that sets failbit.
     if (d_raw_.is_open())
         d_raw_.close();
-    if (d_norm_.is_open())
-        d_norm_.close();
     if (d_jsonl_.is_open())
         d_jsonl_.close();
     d_raw_.clear();
-    d_norm_.clear();
     d_jsonl_.clear();
     const std::string pre = d_directory_ + "/" + d_base_name_;
-    d_raw_.open(pre + ".cf32", std::ios::binary | std::ios::trunc);
+    d_raw_.open(pre + ".ucr4", std::ios::binary | std::ios::trunc);
     d_jsonl_.open(pre + ".jsonl", std::ios::trunc);
-    if (d_write_normalized_)
-        d_norm_.open(pre + "_norm.cf32", std::ios::binary | std::ios::trunc);
     d_raw_offset_.store(0);
-    d_norm_offset_.store(0);
     d_frames_written_.store(0);
     d_frames_failed_.store(0);
     d_taps_.store(0);
@@ -329,8 +368,7 @@ UwbCirWriter::start()
         d_queue_head_ = d_queue_tail_ = d_queue_count_ = 0;
         d_stop_ = false;
     }
-    const bool ok = d_raw_.is_open() && d_jsonl_.is_open() &&
-                    (d_norm_.is_open() || !d_write_normalized_);
+    const bool ok = d_raw_.is_open() && d_jsonl_.is_open();
     if (!ok)
         return false;
     write_run_json();
@@ -349,12 +387,8 @@ UwbCirWriter::stop()
     if (d_thread_.joinable())
         d_thread_.join();
     d_raw_.flush();
-    if (d_norm_.is_open())
-        d_norm_.flush();
     d_jsonl_.flush();
     d_raw_.close();
-    if (d_norm_.is_open())
-        d_norm_.close();
     d_jsonl_.close();
     return true;
 }
@@ -374,11 +408,15 @@ UwbCirWriter::handle_cir(pmt::pmt_t msg)
         return;
     }
 
-    d_received_.fetch_add(1);
+    const uint64_t logical_frames =
+        dict_bool(meta, "repetition_batch")
+            ? std::max<uint64_t>(1, dict_u64(meta, "repetition_count", 1))
+            : 1;
+    d_received_.fetch_add(logical_frames);
     {
         std::lock_guard<std::mutex> lock(d_mutex_);
         if (d_queue_count_ == d_queue_.size()) {
-            d_dropped_.fetch_add(1);
+            d_dropped_.fetch_add(logical_frames);
             return;
         }
         d_queue_[d_queue_tail_] = msg;
@@ -416,10 +454,58 @@ UwbCirWriter::writer_loop()
 }
 
 void
+UwbCirWriter::write_ucr4_record(uint32_t pulse_id,
+                                uint16_t status,
+                                uint16_t tap_count,
+                                uint16_t repetition_index,
+                                uint16_t repetition_count,
+                                float sfd_metric,
+                                float peak_metric,
+                                int32_t peak_tap,
+                                uint32_t estimator_us,
+                                double freq_hz,
+                                double freq_offset_hz,
+                                const gr_complex* taps)
+{
+    d_sc16_scratch_.assign(static_cast<size_t>(tap_count) * 2, 0);
+    float scale = 0.0f;
+    if (taps != nullptr && tap_count > 0)
+        scale = encode_cir_sc16(taps, tap_count, d_sc16_scratch_.data());
+
+    Ucr4Header hdr{};
+    hdr.magic[0] = 'U';
+    hdr.magic[1] = 'C';
+    hdr.magic[2] = 'R';
+    hdr.magic[3] = '4';
+    hdr.pulse_id = pulse_id;
+    hdr.status = status;
+    hdr.tap_count = tap_count;
+    hdr.repetition_index = repetition_index;
+    hdr.repetition_count = repetition_count;
+    hdr.sfd_metric = sfd_metric;
+    hdr.cir_peak_metric = peak_metric;
+    hdr.peak_tap = peak_tap;
+    hdr.estimator_us = estimator_us;
+    hdr.freq_hz = freq_hz;
+    hdr.freq_offset_hz = freq_offset_hz;
+    hdr.cir_scale = scale;
+    d_raw_.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+    if (tap_count > 0) {
+        d_raw_.write(reinterpret_cast<const char*>(d_sc16_scratch_.data()),
+                     static_cast<std::streamsize>(tap_count * 4));
+    }
+}
+
+void
 UwbCirWriter::write_frame(pmt::pmt_t msg)
 {
     const pmt::pmt_t meta = pmt::car(msg);
     const pmt::pmt_t data = pmt::cdr(msg);
+
+    if (dict_bool(meta, "repetition_batch")) {
+        write_repetition_batch(meta, data);
+        return;
+    }
 
     const uint64_t pulse_id =
         dict_u64(meta, "pulse_id", d_frames_written_.load() +
@@ -452,17 +538,31 @@ UwbCirWriter::write_frame(pmt::pmt_t msg)
     const uint64_t tap_count = ok ? tap_count_in : 0;
 
     uint64_t raw_offset = d_raw_offset_.load();
-    uint64_t norm_offset = d_norm_offset_.load();
+    uint64_t norm_offset = raw_offset;
     if (ok) {
-        const std::streamsize nbytes = static_cast<std::streamsize>(
-            tap_count * sizeof(gr_complex));
-        d_raw_.write(reinterpret_cast<const char*>(raw), nbytes);
-        if (d_write_normalized_ && norm != nullptr) {
-            d_norm_.write(reinterpret_cast<const char*>(norm), nbytes);
-        }
+        double freq_hz = 0.0, freq_off = 0.0;
+        freq_from_meta(meta, freq_hz, freq_off);
+        const uint16_t rep_index = dict_has(meta, "repetition_index")
+            ? static_cast<uint16_t>(
+                  dict_u64(meta, "repetition_index", 0) & 0xFFFFu)
+            : static_cast<uint16_t>(0xFFFF);
+        const uint16_t rep_count = static_cast<uint16_t>(
+            dict_u64(meta, "repetition_count", 0) & 0xFFFFu);
+        write_ucr4_record(
+            static_cast<uint32_t>(pulse_id & 0xFFFFFFFFu),
+            0,
+            static_cast<uint16_t>(tap_count),
+            rep_index,
+            rep_count,
+            static_cast<float>(dict_f64(meta, "sfd_metric", 0.0)),
+            static_cast<float>(dict_f64(meta, "cir_peak_metric", 0.0)),
+            static_cast<int32_t>(dict_u64(meta, "peak_tap", 0)),
+            static_cast<uint32_t>(dict_u64(meta, "estimator_us", 0)),
+            freq_hz,
+            freq_off,
+            raw);
         raw_offset = d_raw_offset_.fetch_add(tap_count);
-        if (d_write_normalized_)
-            norm_offset = d_norm_offset_.fetch_add(tap_count);
+        norm_offset = raw_offset;
         d_taps_.fetch_add(tap_count);
         d_frames_written_.fetch_add(1);
     } else {
@@ -530,8 +630,6 @@ UwbCirWriter::write_frame(pmt::pmt_t msg)
     append_opt_i64(os, meta, "num_delay_samps");
     append_opt_f64(os, meta, "calibration_delay_work_samples");
     append_opt_str(os, meta, "calibration_id");
-    if (d_write_normalized_)
-        append_u64(os, "file_offset_norm_taps", norm_offset);
     append_bool(os, "sfd_ok", dict_i64(meta, "sfd_start_sample", -1) >= 0);
     append_bool(os, "timing_ok",
                 dict_i64(meta, "preamble_start_sample", -1) >= 0);
@@ -540,6 +638,131 @@ UwbCirWriter::write_frame(pmt::pmt_t msg)
     os << "}\n";
 
     d_jsonl_ << os.str();
+    flush_files_if_due();
+}
+
+void
+UwbCirWriter::write_repetition_batch(const pmt::pmt_t& meta,
+                                     const pmt::pmt_t& data)
+{
+    const uint64_t pulse_id = dict_u64(meta, "pulse_id", 0);
+    const uint64_t schedule_index =
+        dict_u64(meta, "schedule_index", pulse_id);
+    const size_t count =
+        static_cast<size_t>(dict_u64(meta, "repetition_count", 0));
+    const size_t first =
+        static_cast<size_t>(dict_u64(meta, "repetition_first", 0));
+    const size_t taps = static_cast<size_t>(dict_u64(meta, "tap_count", 0));
+    if (count == 0 || taps == 0 ||
+        count > std::numeric_limits<size_t>::max() / taps) {
+        d_invalid_.fetch_add(1);
+        d_frames_failed_.fetch_add(count);
+        return;
+    }
+    const size_t total = count * taps;
+    size_t raw_len = 0;
+    const gr_complex* raw = pmt::c32vector_elements(data, raw_len);
+    const pmt::pmt_t status_v = pmt::dict_ref(
+        meta, pmt::mp("repetition_status_code"), pmt::PMT_NIL);
+    const pmt::pmt_t peak_v = pmt::dict_ref(
+        meta, pmt::mp("repetition_peak_tap"), pmt::PMT_NIL);
+    const pmt::pmt_t metric_v = pmt::dict_ref(
+        meta, pmt::mp("repetition_peak_metric"), pmt::PMT_NIL);
+    const pmt::pmt_t norm_metric_v = pmt::dict_ref(
+        meta, pmt::mp("repetition_raw_l2_norm"), pmt::PMT_NIL);
+    size_t status_len = 0, peak_len = 0, metric_len = 0, norm_metric_len = 0;
+    const uint64_t* statuses = pmt::is_u64vector(status_v)
+                                   ? pmt::u64vector_elements(status_v, status_len)
+                                   : nullptr;
+    const uint64_t* peaks = pmt::is_u64vector(peak_v)
+                                ? pmt::u64vector_elements(peak_v, peak_len)
+                                : nullptr;
+    const float* metrics = pmt::is_f32vector(metric_v)
+                               ? pmt::f32vector_elements(metric_v, metric_len)
+                               : nullptr;
+    const float* norm_metrics =
+        pmt::is_f32vector(norm_metric_v)
+            ? pmt::f32vector_elements(norm_metric_v, norm_metric_len)
+            : nullptr;
+    pmt::pmt_t norm_v = pmt::PMT_NIL;
+    size_t norm_len = 0;
+    const gr_complex* norm = nullptr;
+    if (d_write_normalized_) {
+        norm_v = pmt::dict_ref(meta, pmt::mp("normalized_taps"),
+                               pmt::PMT_NIL);
+        if (pmt::is_c32vector(norm_v))
+            norm = pmt::c32vector_elements(norm_v, norm_len);
+    }
+    if (!raw || raw_len != total || !statuses || status_len != count ||
+        !peaks || peak_len != count || !metrics || metric_len != count ||
+        !norm_metrics || norm_metric_len != count ||
+        (d_write_normalized_ && (!norm || norm_len != total))) {
+        d_invalid_.fetch_add(1);
+        d_frames_failed_.fetch_add(count);
+        return;
+    }
+
+    if (d_repetition_group_active_)
+        flush_repetition_group();
+    d_repetition_group_active_ = true;
+    d_repetition_pulse_id_ = pulse_id;
+    d_repetition_schedule_index_ = schedule_index;
+    d_repetition_expected_ = count;
+    d_repetition_common_meta_ = meta;
+    d_repetition_records_.clear();
+
+    const double fs = dict_f64(meta, "sample_rate", 998.4e6);
+    const int64_t zero_tap = dict_i64(meta, "zero_delay_tap", 0);
+    const uint64_t estimator_us = dict_u64(meta, "estimator_us", 0);
+    double freq_hz = 0.0, freq_off = 0.0;
+    freq_from_meta(meta, freq_hz, freq_off);
+    const float sfd_m = static_cast<float>(dict_f64(meta, "sfd_metric", 0.0));
+    const uint32_t pulse32 = static_cast<uint32_t>(pulse_id & 0xFFFFFFFFu);
+    for (size_t i = 0; i < count; ++i) {
+        const bool ok = statuses[i] == 0;
+        uint64_t raw_offset = d_raw_offset_.load();
+        uint64_t norm_offset = raw_offset;
+        if (ok) {
+            write_ucr4_record(
+                pulse32,
+                0,
+                static_cast<uint16_t>(taps),
+                static_cast<uint16_t>((first + i) & 0xFFFFu),
+                static_cast<uint16_t>(count & 0xFFFFu),
+                sfd_m,
+                metrics[i],
+                static_cast<int32_t>(peaks[i]),
+                static_cast<uint32_t>(estimator_us),
+                freq_hz,
+                freq_off,
+                raw + i * taps);
+            raw_offset = d_raw_offset_.fetch_add(taps);
+            norm_offset = raw_offset;
+            d_taps_.fetch_add(taps);
+            d_frames_written_.fetch_add(1);
+        } else {
+            d_frames_failed_.fetch_add(1);
+        }
+
+        RepetitionJsonRecord rec;
+        rec.index = first + i;
+        rec.status = cir_status_name(statuses[i]);
+        rec.tap_count = ok ? taps : 0;
+        rec.raw_offset = raw_offset;
+        rec.norm_offset = norm_offset;
+        rec.peak_tap = ok ? peaks[i] : 0;
+        rec.peak_metric = ok ? metrics[i] : 0.0;
+        rec.raw_l2_norm = ok ? norm_metrics[i] : 0.0;
+        rec.estimator_us = estimator_us;
+        if (ok && fs > 0.0) {
+            rec.peak_delay_ns =
+                (static_cast<double>(rec.peak_tap) -
+                 static_cast<double>(zero_tap)) /
+                fs * 1.0e9;
+        }
+        d_repetition_records_.push_back(std::move(rec));
+    }
+    flush_repetition_group();
     flush_files_if_due();
 }
 
@@ -678,13 +901,6 @@ UwbCirWriter::flush_repetition_group()
     append_u64_column("file_offset_taps", [](const RepetitionJsonRecord& r) {
         return r.raw_offset;
     });
-    if (d_write_normalized_) {
-        os << ',';
-        append_u64_column("file_offset_norm_taps",
-                          [](const RepetitionJsonRecord& r) {
-                              return r.norm_offset;
-                          });
-    }
     os << ',';
     append_u64_column("peak_tap",
                       [](const RepetitionJsonRecord& r) { return r.peak_tap; });
@@ -719,8 +935,6 @@ UwbCirWriter::flush_files_if_due()
     // drain + flush before close.
     if (++d_since_flush_ >= 256) {
         d_raw_.flush();
-        if (d_norm_.is_open())
-            d_norm_.flush();
         d_jsonl_.flush();
         d_since_flush_ = 0;
     }

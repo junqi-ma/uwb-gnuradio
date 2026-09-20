@@ -30,9 +30,10 @@ function verify_read_uwb_cir(mixedDir, normDir)
         assert(isa(cir, 'single') && ~isreal(cir), ...
                'pulse %d: cir must be complex single', pulse_id);
         expect = expect_taps(pulse_id, tap_count);
-        assert(isequal(cir, expect), ...
-               'pulse %d: CIR samples differ from QA writer pattern', ...
-               pulse_id);
+        rel = norm(double(cir) - double(expect)) / max(norm(double(expect)), eps);
+        assert(rel < 1e-4, ...
+               'pulse %d: CIR samples differ from QA writer pattern (relL2=%g)', ...
+               pulse_id, rel);
         assert(strcmp(char(meta.status), 'ok'), 'pulse %d: status must be ok', pulse_id);
         assert(meta.tap_count == tap_count, ...
                'pulse %d: tap_count must be %d', pulse_id, tap_count);
@@ -66,14 +67,18 @@ function verify_read_uwb_cir(mixedDir, normDir)
         [nrm, meta] = read_uwb_cir(normDir, pulse_id, true);
         assert(isequal(size(nrm), [tap_count, 1]), ...
                'pulse %d: norm must be %dx1', pulse_id, tap_count);
-        assert(isequal(nrm, expect_taps(0, tap_count)), ...
-               'pulse %d: normalized samples differ', pulse_id);
+        expectN = expect_taps(0, tap_count);
+        expectN = expectN ./ single(norm(double(expectN)));
+        relN = norm(double(nrm) - double(expectN)) / max(norm(double(expectN)), eps);
+        assert(relN < 1e-4, ...
+               'pulse %d: normalized samples differ (relL2=%g)', pulse_id, relN);
         assert(meta.file_offset_norm_taps == pulse_id / 6 * tap_count, ...
                'pulse %d: wrong file_offset_norm_taps', pulse_id);
         [raw, ~] = read_uwb_cir(normDir, pulse_id);
-        assert(isequal(raw, nrm), ...
-               'pulse %d: raw != norm (QA writes the same pattern)', ...
-               pulse_id);
+        rawN = raw ./ single(norm(double(raw)));
+        relRN = norm(double(rawN) - double(nrm)) / max(norm(double(nrm)), eps);
+        assert(relRN < 1e-4, ...
+               'pulse %d: L2(raw) != wantNorm reconstruction', pulse_id);
         fprintf('PASS 3: pulse %d normalized CIR, per-sample exact\n', ...
                 pulse_id);
     end
@@ -83,19 +88,26 @@ function verify_read_uwb_cir(mixedDir, normDir)
            'normalized run pulse 2 must be a failed frame');
     fprintf('PASS 3b: normalized-run failed pulse 2 -> empty cir\n');
 
-    % ---- 4) truncated cir.cf32 -> error read_uwb_cir:short -------------
+    % ---- 4) truncated cir.ucr4 -> error read_uwb_cir:short -------------
     tmp = tempdir;
     truncDir = fullfile(tmp, sprintf('uwb_verify_trunc_%d', randi(1e9)));
     if exist(truncDir, 'dir'); rmdir(truncDir, 's'); end
     mkdir(truncDir);
     copyfile(fullfile(mixedDir, 'cir.jsonl'), ...
              fullfile(truncDir, 'cir.jsonl'));
-    copyfile(fullfile(mixedDir, 'cir.cf32'), fullfile(truncDir, 'cir.cf32'));
-    % keep only the first tap's bytes -> line for pulse 0 cannot be read
-    fid = fopen(fullfile(truncDir, 'cir.cf32'), 'rb');
+    srcBin = fullfile(mixedDir, 'cir.ucr4');
+    if ~exist(srcBin, 'file')
+        srcBin = fullfile(mixedDir, 'cir.cf32');
+    end
+    dstBin = fullfile(truncDir, 'cir.ucr4');
+    if contains(srcBin, '.cf32')
+        dstBin = fullfile(truncDir, 'cir.cf32');
+    end
+    copyfile(srcBin, dstBin);
+    fid = fopen(dstBin, 'rb');
     allb = fread(fid, inf, 'uint8');
     fclose(fid);
-    fid = fopen(fullfile(truncDir, 'cir.cf32'), 'wb');
+    fid = fopen(dstBin, 'wb');
     fwrite(fid, allb(1:8), 'uint8');
     fclose(fid);
     threw = '';
@@ -109,18 +121,26 @@ function verify_read_uwb_cir(mixedDir, normDir)
            'truncated cir.cf32 must raise read_uwb_cir:short, got %s', threw);
     fprintf('PASS 4: truncated cir.cf32 -> read_uwb_cir:short\n');
 
-    % ---- 5) missing normalized offset -> error read_uwb_cir:noNorm ----
-    assert(~exist(fullfile(mixedDir, 'cir_norm.cf32'), 'file'), ...
-           'mixed run must not contain cir_norm.cf32');
-    threw = '';
-    try
-        read_uwb_cir(mixedDir, 0, true);
-    catch e
-        threw = e.identifier;
+    % ---- 5) UCR4 wantNorm reconstructs L2(raw); legacy cf32 still
+    % requires file_offset_norm_taps.
+    if exist(fullfile(mixedDir, 'cir.ucr4'), 'file')
+        [nrm0, ~] = read_uwb_cir(mixedDir, 0, true);
+        assert(abs(norm(double(nrm0)) - 1) < 1e-3, ...
+               'UCR4 wantNorm must be unit L2');
+        fprintf('PASS 5: UCR4 wantNorm reconstructs unit-L2 CIR\n');
+    else
+        assert(~exist(fullfile(mixedDir, 'cir_norm.cf32'), 'file'), ...
+               'mixed run must not contain cir_norm.cf32');
+        threw = '';
+        try
+            read_uwb_cir(mixedDir, 0, true);
+        catch e
+            threw = e.identifier;
+        end
+        assert(strcmp(threw, 'read_uwb_cir:noNorm'), ...
+               'missing norm must raise read_uwb_cir:noNorm, got %s', threw);
+        fprintf('PASS 5: no file_offset_norm_taps -> read_uwb_cir:noNorm\n');
     end
-    assert(strcmp(threw, 'read_uwb_cir:noNorm'), ...
-           'missing norm must raise read_uwb_cir:noNorm, got %s', threw);
-    fprintf('PASS 5: no file_offset_norm_taps -> read_uwb_cir:noNorm\n');
 
     % ---- 6) missing pulse -> error read_uwb_cir:noPulse ----------------
     threw = '';

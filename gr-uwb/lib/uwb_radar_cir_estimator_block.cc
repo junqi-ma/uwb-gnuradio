@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -215,7 +216,8 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
     bool emit_normalized,
     size_t queue_capacity,
     bool use_predicted_timing,
-    bool emit_individual_repetitions)
+    bool emit_individual_repetitions,
+    bool batch_individual_repetitions)
     : gr::block("uwb_radar_cir_estimator",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
@@ -223,6 +225,7 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
       d_sfd_mode_(sfd_mode),
       d_emit_normalized_(emit_normalized),
       d_emit_individual_repetitions_(emit_individual_repetitions),
+      d_batch_individual_repetitions_(batch_individual_repetitions),
       d_queue_capacity_(queue_capacity)
 {
     if (queue_capacity == 0) {
@@ -258,6 +261,12 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
     } else {
         d_cfg_.cir_repetitions = cir_repetitions;
     }
+    if (d_batch_individual_repetitions_ &&
+        !d_emit_individual_repetitions_) {
+        throw std::invalid_argument(
+            "UwbRadarCirEstimator: repetition batching requires "
+            "emit_individual_repetitions");
+    }
 
     std::vector<gr_complex> tmpl = load_cf32_file(d_template_path_);
     if (tmpl.size() != kSps) {
@@ -288,6 +297,22 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
         throw std::invalid_argument(
             "UwbRadarCirEstimator: failed to prepare radar core from " +
             d_template_path_);
+    }
+
+    if (d_batch_individual_repetitions_) {
+        const size_t count = d_cfg_.cir_repetitions;
+        const size_t taps = d_cfg_.cir_pre + d_cfg_.cir_post;
+        if (count > std::numeric_limits<size_t>::max() / taps) {
+            throw std::invalid_argument(
+                "UwbRadarCirEstimator: repetition batch size overflow");
+        }
+        d_batch_raw_.assign(count * taps, gr_complex(0.f, 0.f));
+        if (d_emit_normalized_)
+            d_batch_norm_.assign(count * taps, gr_complex(0.f, 0.f));
+        d_batch_status_.assign(count, 0);
+        d_batch_peak_tap_.assign(count, 0);
+        d_batch_peak_metric_.assign(count, 0.f);
+        d_batch_raw_l2_norm_.assign(count, 0.f);
     }
 
     message_port_register_in(pmt::mp("rx"));
@@ -325,14 +350,15 @@ UwbRadarCirEstimator::make(const std::string& template_path,
                            bool emit_normalized,
                            size_t queue_capacity,
                            bool use_predicted_timing,
-                           bool emit_individual_repetitions)
+                           bool emit_individual_repetitions,
+                           bool batch_individual_repetitions)
 {
     return gnuradio::get_initial_sptr(new UwbRadarCirEstimator(
         template_path, sync_repetitions, sfd_mode, code_index, cir_pre,
         cir_post, cir_skip_initial, cir_repetitions, sfd_search_margin,
         sync_refine_margin, sfd_threshold, sync_refine_threshold,
         emit_normalized, queue_capacity, use_predicted_timing,
-        emit_individual_repetitions));
+        emit_individual_repetitions, batch_individual_repetitions));
 }
 
 // ---------------------------------------------------------------------------
@@ -776,6 +802,11 @@ UwbRadarCirEstimator::worker_loop()
             const size_t first = d_cfg_.cir_skip_initial;
             const size_t count = std::min(d_cfg_.cir_repetitions,
                                           d_cfg_.sync_repetitions - first);
+            // Lineage and pulse-level timing are identical for every
+            // repetition.  PMT dictionaries are persistent, so build that
+            // common prefix once and only add repetition-local fields below.
+            const pmt::pmt_t common_meta =
+                make_common_frame_meta(job, r, queue_us);
             for (size_t ordinal = 0; ordinal < count; ++ordinal) {
                 const size_t rep = first + ordinal;
                 radar::RadarCirEstimate one;
@@ -794,10 +825,39 @@ UwbRadarCirEstimator::worker_loop()
                     one_result.raw_l2_norm = one.raw_l2_norm;
                     one_result.valid_repetitions = 1;
                 }
-                publish_frame(job, one_result, queue_us,
-                              elapsed_us(t0, std::chrono::steady_clock::now()),
-                              static_cast<int64_t>(rep), ordinal, count);
+                if (d_batch_individual_repetitions_) {
+                    const size_t taps = d_cfg_.cir_pre + d_cfg_.cir_post;
+                    const size_t off = ordinal * taps;
+                    d_batch_status_[ordinal] =
+                        static_cast<uint64_t>(one_result.status);
+                    d_batch_peak_tap_[ordinal] = one_result.peak_tap;
+                    d_batch_peak_metric_[ordinal] = one_result.peak_abs;
+                    d_batch_raw_l2_norm_[ordinal] = one_result.raw_l2_norm;
+                    if (one_result.status == radar::RadarCirStatus::Ok) {
+                        std::copy_n(d_scratch_.cir.raw_taps.data(), taps,
+                                    d_batch_raw_.data() + off);
+                        if (d_emit_normalized_)
+                            std::copy_n(d_scratch_.cir.norm_taps.data(), taps,
+                                        d_batch_norm_.data() + off);
+                    } else {
+                        std::fill_n(d_batch_raw_.data() + off, taps,
+                                    gr_complex(0.f, 0.f));
+                        if (d_emit_normalized_)
+                            std::fill_n(d_batch_norm_.data() + off, taps,
+                                        gr_complex(0.f, 0.f));
+                    }
+                } else {
+                    publish_frame(
+                        job, one_result, queue_us,
+                        elapsed_us(t0, std::chrono::steady_clock::now()),
+                        static_cast<int64_t>(rep), ordinal, count, common_meta);
+                }
             }
+            if (d_batch_individual_repetitions_)
+                publish_repetition_batch(
+                    job, r, queue_us,
+                    elapsed_us(t0, std::chrono::steady_clock::now()), first,
+                    count, common_meta);
         } else {
             publish_frame(job, r, queue_us,
                           elapsed_us(t0, std::chrono::steady_clock::now()));
@@ -827,23 +887,15 @@ UwbRadarCirEstimator::status_to_string(radar::RadarCirStatus s)
     return "internal_error";
 }
 
-void
-UwbRadarCirEstimator::publish_frame(const Job& job,
-                                    const radar::RadarCirResult& r,
-                                    uint64_t queue_us,
-                                    uint64_t service_us,
-                                    int64_t repetition_index,
-                                    size_t repetition_ordinal,
-                                    size_t repetition_count)
+pmt::pmt_t
+UwbRadarCirEstimator::make_common_frame_meta(
+    const Job& job,
+    const radar::RadarCirResult& r,
+    uint64_t queue_us) const
 {
-    const bool ok = r.status == radar::RadarCirStatus::Ok;
     pmt::pmt_t meta = pmt::make_dict();
     copy_lineage(meta, job.meta);
 
-    meta = pmt::dict_add(meta, pmt::mp("status"),
-                         pmt::mp(status_to_string(r.status)));
-    meta = pmt::dict_add(meta, pmt::mp("status_code"),
-                         pmt::from_long(static_cast<long>(r.status)));
     meta = pmt::dict_add(meta, pmt::mp("pulse_id"),
                          pmt::from_uint64(job.pulse_id));
     meta = pmt::dict_add(meta, pmt::mp("schedule_index"),
@@ -862,43 +914,16 @@ UwbRadarCirEstimator::publish_frame(const Job& job,
     meta = pmt::dict_add(meta, pmt::mp("sync_metric"),
                          pmt::from_double(r.sync_metric));
 
-    const size_t tap_count = ok ? r.tap_count : 0;
-    meta = pmt::dict_add(meta, pmt::mp("tap_count"),
-                         pmt::from_uint64(static_cast<uint64_t>(tap_count)));
     meta = pmt::dict_add(meta, pmt::mp("cir_pre_samples"),
                          pmt::from_uint64(static_cast<uint64_t>(
                              d_cfg_.cir_pre)));
     meta = pmt::dict_add(meta, pmt::mp("cir_post_samples"),
                          pmt::from_uint64(static_cast<uint64_t>(
                              d_cfg_.cir_post)));
-    meta = pmt::dict_add(meta, pmt::mp("peak_tap"),
-                         pmt::from_uint64(ok
-                                              ? static_cast<uint64_t>(
-                                                    r.peak_tap)
-                                              : uint64_t(0)));
-    meta = pmt::dict_add(meta, pmt::mp("cir_peak_metric"),
-                         pmt::from_double(ok ? r.peak_abs : 0.0));
-    meta = pmt::dict_add(meta, pmt::mp("raw_l2_norm"),
-                         pmt::from_double(ok ? r.raw_l2_norm : 0.0));
-    meta = pmt::dict_add(meta, pmt::mp("valid_repetitions"),
-                         pmt::from_uint64(ok
-                                              ? static_cast<uint64_t>(
-                                                    r.valid_repetitions)
-                                              : uint64_t(0)));
     meta = pmt::dict_add(meta, pmt::mp("cir_output"),
                          pmt::mp(d_emit_individual_repetitions_
                                      ? "repetition"
                                      : "average"));
-    if (repetition_index >= 0) {
-        meta = pmt::dict_add(meta, pmt::mp("repetition_index"),
-                             pmt::from_uint64(
-                                 static_cast<uint64_t>(repetition_index)));
-        meta = pmt::dict_add(meta, pmt::mp("repetition_ordinal"),
-                             pmt::from_uint64(repetition_ordinal));
-        meta = pmt::dict_add(meta, pmt::mp("repetition_count"),
-                             pmt::from_uint64(repetition_count));
-    }
-
     meta = pmt::dict_add(meta, pmt::mp("zero_delay_tap"),
                          pmt::from_long(job.zero_delay_tap));
     meta = pmt::dict_add(meta, pmt::mp("calibration_delay_work_samples"),
@@ -917,6 +942,54 @@ UwbRadarCirEstimator::publish_frame(const Job& job,
         r.preamble_start_sample >= 0 ? pmt::PMT_T : pmt::PMT_F);
     meta = pmt::dict_add(meta, pmt::mp("queue_delay_us"),
                          pmt::from_uint64(queue_us));
+    return meta;
+}
+
+void
+UwbRadarCirEstimator::publish_frame(const Job& job,
+                                    const radar::RadarCirResult& r,
+                                    uint64_t queue_us,
+                                    uint64_t service_us,
+                                    int64_t repetition_index,
+                                    size_t repetition_ordinal,
+                                    size_t repetition_count,
+                                    pmt::pmt_t common_meta)
+{
+    const bool ok = r.status == radar::RadarCirStatus::Ok;
+    pmt::pmt_t meta = pmt::eq(common_meta, pmt::PMT_NIL)
+                          ? make_common_frame_meta(job, r, queue_us)
+                          : common_meta;
+
+    meta = pmt::dict_add(meta, pmt::mp("status"),
+                         pmt::mp(status_to_string(r.status)));
+    meta = pmt::dict_add(meta, pmt::mp("status_code"),
+                         pmt::from_long(static_cast<long>(r.status)));
+    const size_t tap_count = ok ? r.tap_count : 0;
+    meta = pmt::dict_add(meta, pmt::mp("tap_count"),
+                         pmt::from_uint64(static_cast<uint64_t>(tap_count)));
+    meta = pmt::dict_add(meta, pmt::mp("peak_tap"),
+                         pmt::from_uint64(ok
+                                              ? static_cast<uint64_t>(
+                                                    r.peak_tap)
+                                              : uint64_t(0)));
+    meta = pmt::dict_add(meta, pmt::mp("cir_peak_metric"),
+                         pmt::from_double(ok ? r.peak_abs : 0.0));
+    meta = pmt::dict_add(meta, pmt::mp("raw_l2_norm"),
+                         pmt::from_double(ok ? r.raw_l2_norm : 0.0));
+    meta = pmt::dict_add(meta, pmt::mp("valid_repetitions"),
+                         pmt::from_uint64(ok
+                                              ? static_cast<uint64_t>(
+                                                    r.valid_repetitions)
+                                              : uint64_t(0)));
+    if (repetition_index >= 0) {
+        meta = pmt::dict_add(meta, pmt::mp("repetition_index"),
+                             pmt::from_uint64(
+                                 static_cast<uint64_t>(repetition_index)));
+        meta = pmt::dict_add(meta, pmt::mp("repetition_ordinal"),
+                             pmt::from_uint64(repetition_ordinal));
+        meta = pmt::dict_add(meta, pmt::mp("repetition_count"),
+                             pmt::from_uint64(repetition_count));
+    }
     meta = pmt::dict_add(meta, pmt::mp("estimator_us"),
                          pmt::from_uint64(service_us));
 
@@ -936,6 +1009,59 @@ UwbRadarCirEstimator::publish_frame(const Job& job,
 
     message_port_pub(pmt::mp("cir"), pmt::cons(meta, vec));
     d_published_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void
+UwbRadarCirEstimator::publish_repetition_batch(
+    const Job& job,
+    const radar::RadarCirResult& r,
+    uint64_t queue_us,
+    uint64_t service_us,
+    size_t first,
+    size_t count,
+    pmt::pmt_t common_meta)
+{
+    const size_t taps = d_cfg_.cir_pre + d_cfg_.cir_post;
+    const size_t total = count * taps;
+    pmt::pmt_t meta = pmt::eq(common_meta, pmt::PMT_NIL)
+                          ? make_common_frame_meta(job, r, queue_us)
+                          : common_meta;
+    meta = pmt::dict_add(meta, pmt::mp("status"), pmt::mp("ok"));
+    meta = pmt::dict_add(meta, pmt::mp("status_code"), pmt::from_long(0));
+    meta = pmt::dict_add(meta, pmt::mp("tap_count"),
+                         pmt::from_uint64(taps));
+    meta = pmt::dict_add(meta, pmt::mp("valid_repetitions"),
+                         pmt::from_uint64(count));
+    meta = pmt::dict_add(meta, pmt::mp("repetition_batch"), pmt::PMT_T);
+    meta = pmt::dict_add(meta, pmt::mp("repetition_first"),
+                         pmt::from_uint64(first));
+    meta = pmt::dict_add(meta, pmt::mp("repetition_count"),
+                         pmt::from_uint64(count));
+    meta = pmt::dict_add(
+        meta, pmt::mp("repetition_status_code"),
+        pmt::init_u64vector(count, d_batch_status_.data()));
+    meta = pmt::dict_add(
+        meta, pmt::mp("repetition_peak_tap"),
+        pmt::init_u64vector(count, d_batch_peak_tap_.data()));
+    meta = pmt::dict_add(
+        meta, pmt::mp("repetition_peak_metric"),
+        pmt::init_f32vector(count, d_batch_peak_metric_.data()));
+    meta = pmt::dict_add(
+        meta, pmt::mp("repetition_raw_l2_norm"),
+        pmt::init_f32vector(count, d_batch_raw_l2_norm_.data()));
+    meta = pmt::dict_add(meta, pmt::mp("estimator_us"),
+                         pmt::from_uint64(service_us));
+    if (d_emit_normalized_) {
+        meta = pmt::dict_add(
+            meta, pmt::mp("normalized_taps"),
+            pmt::init_c32vector(total, d_batch_norm_.data()));
+    }
+    message_port_pub(
+        pmt::mp("cir"),
+        pmt::cons(meta, pmt::init_c32vector(total, d_batch_raw_.data())));
+    // Preserve the public counter's historical meaning: logical CIR records,
+    // even though batching uses one GNU Radio message per pulse.
+    d_published_.fetch_add(count, std::memory_order_relaxed);
 }
 
 void

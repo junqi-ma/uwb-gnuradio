@@ -113,7 +113,9 @@ class JamTimedUhdEcho(base.TimedUhdEcho):
                  jam_antenna="TX/RX0", jam_gain_tx=0.0, jam_freq_offset=0.0,
                  jam_scale=0.3, jam_delay_us=0.0, jam_offsets=None,
                  jam_dwell=0, freq_settle_s=0.05,
-                 jam_delay_random_us=None, jam_delay_seed=None):
+                 jam_delay_random_us=None, jam_delay_seed=None,
+                 cir_pre=base.DEFAULT_CIR_PRE, cir_post=base.DEFAULT_CIR_POST,
+                 cir_skip=10):
         tx_channels = [int(tx_ch), int(jam_ch)] if jam_enable else [int(tx_ch)]
         super().__init__(
             args, profile, freq, tx_ch, rx_ch, tx_ant, rx_ant,
@@ -121,7 +123,8 @@ class JamTimedUhdEcho(base.TimedUhdEcho):
             cal_delay_native, arm_delay_s, pri_s, max_pulses,
             rx_dump_dir, min_lead_s, timing_path, sc16_dump_dir, rx_pad_us,
             code_index, sfd_mode, publish_native=publish_native,
-            rx_freq_offset=rx_freq_offset, tx_channels=tx_channels)
+            rx_freq_offset=rx_freq_offset, tx_channels=tx_channels,
+            cir_pre=cir_pre, cir_post=cir_post, cir_skip=cir_skip)
 
         self.jam_enable = bool(jam_enable)
         self.jam_ch = int(jam_ch)
@@ -722,7 +725,10 @@ class JamCppPduEcho:
             self.tx_interp, self.tx_decim)
         if int(a.publish_native) < 0:
             pub = base.cir_publish_native(
-                pre0, self.sync_reps, self.cal_delay_native, self.rate)
+                pre0, self.sync_reps, self.cal_delay_native, self.rate,
+                cir_pre=int(getattr(a, "cir_pre", base.DEFAULT_CIR_PRE)),
+                cir_post=int(getattr(a, "cir_post", base.DEFAULT_CIR_POST)),
+                cir_skip=(0 if a.cir_output == "repetitions" else 10))
         else:
             pub = int(a.publish_native)
         if self.tx_lead_native:
@@ -1272,6 +1278,7 @@ def main():
         a.dump_sc16 = False
     dump_dir = os.path.join(a.output, "rx_iq") if a.dump_rx else ""
     sc16_dir = a.output if a.dump_sc16 else ""
+    cir_pre, cir_post, cir_taps = base.resolve_cir_window(a)
 
     off0 = jam_offsets[0] if jam_offsets else a.jam_freq_offset
     if use_cpp:
@@ -1301,7 +1308,9 @@ def main():
             jam_delay_us=a.jam_delay_us, jam_offsets=jam_offsets,
             jam_dwell=a.jam_dwell, freq_settle_s=a.jam_freq_settle_s,
             jam_delay_random_us=jam_delay_random,
-            jam_delay_seed=a.jam_delay_seed)
+            jam_delay_seed=a.jam_delay_seed,
+            cir_pre=cir_pre, cir_post=cir_post,
+            cir_skip=(0 if a.cir_output == "repetitions" else 10))
         if jam_enabled:
             echo.prepare_jam(native, jam_native)
         else:
@@ -1329,11 +1338,15 @@ def main():
     use_pred = not a.require_sfd
     cir_skip_initial = 0 if a.cir_output == "repetitions" else 10
     est = base.uwb.radar_cir_estimator(
-        tmpl_path, a.sync_reps, base.SFD_MODE, a.code_index, 16, 100,
+        tmpl_path, a.sync_reps, base.SFD_MODE, a.code_index, cir_pre, cir_post,
         cir_skip_initial, 0,
         a.sfd_search_margin, a.sync_refine_margin, a.sfd_threshold,
         a.sync_refine_threshold, True, est_q, use_pred,
+        a.cir_output == "repetitions",
         a.cir_output == "repetitions")
+    print("estimator cir_pre=%d cir_post=%d taps=%d queue=%d "
+          "use_predicted_timing=%s (overflow=drop)"
+          % (cir_pre, cir_post, cir_taps, est_q, use_pred), flush=True)
     cir_records_per_pulse = (max(1, int(a.sync_reps) - cir_skip_initial)
                              if a.cir_output == "repetitions" else 1)
     wr = base.uwb.cir_writer(a.output, "cir", True,
@@ -1342,19 +1355,19 @@ def main():
     if (not a.no_udp) and bool(a.udp_host):
         if use_cpp and jam_enabled:
             udp = base.CirUdpSink(
-                a.udp_host, int(a.udp_port), base.CIR_UDP_TAPS,
+                a.udp_host, int(a.udp_port), cir_taps,
                 freq_lookup=lambda pid: echo.freq_plan.lookup(int(pid)))
         elif use_cpp:
             udp = base.CirUdpSink(
-                a.udp_host, int(a.udp_port), base.CIR_UDP_TAPS,
+                a.udp_host, int(a.udp_port), cir_taps,
                 freq_lookup=lambda pid: (echo.freq, 0.0))
         else:
             udp = base.CirUdpSink(
-                a.udp_host, int(a.udp_port), base.CIR_UDP_TAPS,
+                a.udp_host, int(a.udp_port), cir_taps,
                 freq_lookup=lambda pid: echo.jam_by_pulse.get(
                     int(pid), (echo.jam_freq_hz, echo.jam_freq_offset)))
-        print("udp_cir %s:%s framed=UCR4 SC16 repetition+jam_freq from "
-              "%s" % (a.udp_host, a.udp_port,
+        print("udp_cir %s:%s framed=UCR4 SC16 taps=%d repetition+jam_freq from "
+              "%s" % (a.udp_host, a.udp_port, cir_taps,
                       "jam freq plan (cpp-pdu)" if use_cpp and jam_enabled
                       else ("sense freq (cpp-pdu single-TX)" if use_cpp
                             else "jam_by_pulse")), flush=True)
@@ -1537,6 +1550,9 @@ def main():
         "code_index": a.code_index,
         "preamble_length": a.sync_reps,
         "cir_output": a.cir_output,
+        "cir_pre": cir_pre,
+        "cir_post": cir_post,
+        "cir_tap_count": cir_taps,
         "cir_skip_initial": cir_skip_initial,
         "cir_records_per_pulse": cir_records_per_pulse,
         "sfd_mode": base.SFD_MODE,

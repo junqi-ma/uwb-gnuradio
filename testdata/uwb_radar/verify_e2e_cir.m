@@ -10,7 +10,7 @@ function verify_e2e_cir(writerOutDir, nFrames, groupA, groupB, expectedGainRatio
 %        tap_count == cir_pre_samples + cir_post_samples (when the line
 %        carries those fields); every failed frame has tap_count == 0.
 %     3. file_offset_taps advances only on ok frames and matches the
-%        running sum; cir.cf32 size == 8 * total taps (complex64 LE).
+%        running sum; cir.ucr4 size == n_ok * (52 + 4 * tap_count).
 %     4. If cir_norm.cf32 exists, every ok frame's normalized CIR has
 %        L2 norm ~= 1 (within 1e-3) and the file size matches.
 %     5. Raw CIR magnitude linearity: the ratio of the raw CIR L2 norms
@@ -131,28 +131,51 @@ function verify_e2e_cir(writerOutDir, nFrames, groupA, groupB, expectedGainRatio
             nFrames);
 
     % ---- 3) raw binary: one open, per-frame offset reads (O(N)) ---------
-    rawFile = fullfile(writerOutDir, 'cir.cf32');
-    rawInfo = dir(rawFile);
-    assert(numel(rawInfo) == 1, 'cir.cf32 missing in %s', writerOutDir);
-    assert(rawInfo.bytes == 8 * running, ...
-           'cir.cf32 size %d != 8 * %d taps', rawInfo.bytes, running);
+    ucr4File = fullfile(writerOutDir, 'cir.ucr4');
+    cf32File = fullfile(writerOutDir, 'cir.cf32');
     rawAll = cell(nFrames, 1);
-    fid = fopen(rawFile, 'rb', 'ieee-le');
-    assert(fid > 0, 'cannot open %s', rawFile);
-    cleanupRaw = onCleanup(@() fclose(fid));
-    for k = 1:nFrames
-        if tapCount(k) == 0
-            continue;
+    if exist(ucr4File, 'file')
+        rawInfo = dir(ucr4File);
+        nOk = nnz(okMask);
+        if nOk > 0
+            tc = tapCount(find(okMask, 1));
+            assert(rawInfo.bytes == nOk * (52 + 4 * tc), ...
+                   'cir.ucr4 size %d != %d records of %d taps', ...
+                   rawInfo.bytes, nOk, tc);
+        else
+            assert(rawInfo.bytes == 0, 'cir.ucr4 must be empty when no ok frames');
         end
-        fseek(fid, double(metaAll(k).file_offset_taps) * 8, 'bof');
-        buf = fread(fid, 2 * tapCount(k), 'float32=>single');
-        assert(numel(buf) == 2 * tapCount(k), ...
-               'pulse %d: cir.cf32 truncated at offset %d', ...
-               pid(k), metaAll(k).file_offset_taps);
-        rawAll{k} = buf(1:2:end) + 1i * buf(2:2:end);
+        for k = 1:nFrames
+            if tapCount(k) == 0
+                continue;
+            end
+            rawAll{k} = read_uwb_cir(writerOutDir, pid(k));
+        end
+        fprintf('PASS 3: cir.ucr4 size and per-frame offsets read back (%d taps)\n', ...
+                running);
+    else
+        rawFile = cf32File;
+        rawInfo = dir(rawFile);
+        assert(numel(rawInfo) == 1, 'cir.cf32 missing in %s', writerOutDir);
+        assert(rawInfo.bytes == 8 * running, ...
+               'cir.cf32 size %d != 8 * %d taps', rawInfo.bytes, running);
+        fid = fopen(rawFile, 'rb', 'ieee-le');
+        assert(fid > 0, 'cannot open %s', rawFile);
+        cleanupRaw = onCleanup(@() fclose(fid));
+        for k = 1:nFrames
+            if tapCount(k) == 0
+                continue;
+            end
+            fseek(fid, double(metaAll(k).file_offset_taps) * 8, 'bof');
+            buf = fread(fid, 2 * tapCount(k), 'float32=>single');
+            assert(numel(buf) == 2 * tapCount(k), ...
+                   'pulse %d: cir.cf32 truncated at offset %d', ...
+                   pid(k), metaAll(k).file_offset_taps);
+            rawAll{k} = buf(1:2:end) + 1i * buf(2:2:end);
+        end
+        fprintf('PASS 3: cir.cf32 size and per-frame offsets read back (%d taps)\n', ...
+                running);
     end
-    fprintf('PASS 3: cir.cf32 size and per-frame offsets read back (%d taps)\n', ...
-            running);
 
     % ---- 7) unified coordinate convention --------------------------------
     hasCoords = isfield(metaAll, 'sfd_start_sample') && ...
@@ -281,23 +304,15 @@ function verify_e2e_cir(writerOutDir, nFrames, groupA, groupB, expectedGainRatio
 end
 
 function taps = readRawById(dirName, metaRows, ids)
-%READRAWBYID Read the raw CIR of the given pulse ids from dirName with a
-%   single open of cir.cf32 (offset reads; O(#ids)).  metaRows is the
-%   already-parsed JSONL struct array of that directory.
-    fid = fopen(fullfile(dirName, 'cir.cf32'), 'rb', 'ieee-le');
-    assert(fid > 0, 'cannot open %s', fullfile(dirName, 'cir.cf32'));
-    cleanup = onCleanup(@() fclose(fid));
+%READRAWBYID Read the raw CIR of the given pulse ids from dirName.
     taps = [];
     for k = ids(:)'
         idx = find([metaRows.pulse_id] == k, 1);
         assert(~isempty(idx), 'dir %s has no pulse %d', dirName, k);
         assert(metaRows(idx).tap_count > 0, ...
                'dir %s pulse %d is not an ok frame', dirName, k);
-        fseek(fid, double(metaRows(idx).file_offset_taps) * 8, 'bof');
-        buf = fread(fid, 2 * metaRows(idx).tap_count, 'float32=>single');
-        assert(numel(buf) == 2 * metaRows(idx).tap_count, ...
-               'dir %s truncated at pulse %d', dirName, k);
-        taps = [taps; buf(1:2:end) + 1i * buf(2:2:end)]; %#ok<AGROW>
+        cir = read_uwb_cir(dirName, k);
+        taps = [taps; cir]; %#ok<AGROW>
     end
 end
 

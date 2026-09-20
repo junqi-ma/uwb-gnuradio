@@ -41,6 +41,24 @@ class UdpFormatTest(unittest.TestCase):
         rel = np.linalg.norm(rec["taps"] - taps) / np.linalg.norm(taps)
         self.assertLess(rel, 1e-4)
 
+    def test_ucr4_roundtrip_64_taps(self):
+        taps = _taps(64).astype(np.complex64) / np.float32(200.0)
+        peak = max(float(np.max(np.abs(taps.real))),
+                   float(np.max(np.abs(taps.imag))))
+        scale = peak / 32767.0
+        sc16 = np.empty(taps.size * 2, dtype="<i2")
+        sc16[0::2] = np.rint(taps.real / scale).astype(np.int16)
+        sc16[1::2] = np.rint(taps.imag / scale).astype(np.int16)
+        hdr = rx.HDR_V4.pack(
+            rx.MAGIC_V4, 3, 0, 64, 0, 128, 0.2, 0.3, 16, 10,
+            6489.6e6, 50e3, scale)
+        rec = rx.parse_datagram(hdr + sc16.tobytes())
+        self.assertEqual(rec["tap_count"], 64)
+        self.assertEqual(rec["taps"].size, 64)
+        self.assertEqual(rx.HDR_V4.size + sc16.nbytes, 52 + 64 * 4)
+        rel = np.linalg.norm(rec["taps"] - taps) / np.linalg.norm(taps)
+        self.assertLess(rel, 1e-4)
+
     def test_ucr4_rejects_odd_sc16_payload(self):
         hdr = rx.HDR_V4.pack(
             rx.MAGIC_V4, 1, 0, 1, 0, 1, 0.0, 0.0, 0, 0,

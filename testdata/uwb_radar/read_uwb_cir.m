@@ -1,20 +1,20 @@
 function [cir, meta] = read_uwb_cir(outDir, pulseId, wantNorm, repetitionIndex)
 %READ_UWB_CIR Read one pulse's CIR from a UwbCirWriter output directory.
 %   [CIR, META] = READ_UWB_CIR(OUTDIR, PULSEID) reads the CIR frame whose
-%   pulse_id == PULSEID from OUTDIR/cir.cf32 + OUTDIR/cir.jsonl.
+%   pulse_id == PULSEID from OUTDIR/cir.ucr4 + OUTDIR/cir.jsonl.
 %
-%   [CIR, META] = READ_UWB_CIR(OUTDIR, PULSEID, TRUE) instead reads the
-%   L2-normalized CIR from OUTDIR/cir_norm.cf32 (UwbCirWriter must have been
-%   started with write_normalized=true).
+%   [CIR, META] = READ_UWB_CIR(OUTDIR, PULSEID, TRUE) returns the
+%   L2-normalized reconstruction of that CIR (UCR4 stores raw SC16 only).
 %   [CIR, META] = READ_UWB_CIR(OUTDIR, PULSEID, WANTNORM, REPETITIONINDEX)
 %   selects one per-repetition record by its absolute 0-based SYNC index.
 %   Without REPETITIONINDEX, legacy files and averaged output behave as
 %   before; a per-repetition file returns the first record for that pulse.
 %
 %   CIR is tap_count x 1 complex single (raw CIR: divided by code_energy,
-%   NOT L2-normalized).  For failed frames (sfd_failed / timing_failed /
-%   cir_failed / length-mismatch frames) tap_count is 0 and CIR is empty;
-%   the metadata line is still returned so failures stay observable.
+%   NOT L2-normalized unless WANTNORM).  For failed frames (sfd_failed /
+%   timing_failed / cir_failed / length-mismatch frames) tap_count is 0
+%   and CIR is empty; the metadata line is still returned so failures stay
+%   observable.
 %
 %   META is a legacy-shaped CIR record struct, including
 %   file_offset_taps, tap_count, status, zero_delay_tap, peak_tap and
@@ -24,8 +24,9 @@ function [cir, meta] = read_uwb_cir(outDir, pulseId, wantNorm, repetitionIndex)
 %   expanded records as a struct array and CIR is empty.
 %
 %   Files (UwbCirWriter contract):
-%     cir.cf32      concatenated raw complex CIR taps (complex64 LE, 8 B/tap)
-%     cir_norm.cf32 concatenated normalized taps (optional)
+%     cir.ucr4      concatenated UCR4 records (same as UDP / parse_cir_sweep.m)
+%                   FC32 = SC16 * cir_scale
+%     cir.cf32      legacy FC32 dump, used only if cir.ucr4 is absent
 %     cir.jsonl     one JSON object per pulse (repetitions use column arrays)
 %     run.json      static run configuration
 %
@@ -86,6 +87,18 @@ function [cir, meta] = read_uwb_cir(outDir, pulseId, wantNorm, repetitionIndex)
         return;
     end
 
+    ucr4File = fullfile(outDir, 'cir.ucr4');
+    if exist(ucr4File, 'file')
+        cir = readUcr4Record(ucr4File, meta);
+        if wantNorm
+            nrm = norm(cir);
+            if nrm > 0
+                cir = cir ./ single(nrm);
+            end
+        end
+        return;
+    end
+
     if wantNorm
         binFile = fullfile(outDir, 'cir_norm.cf32');
         if ~isfield(meta, 'file_offset_norm_taps') || ...
@@ -121,6 +134,54 @@ function [cir, meta] = read_uwb_cir(outDir, pulseId, wantNorm, repetitionIndex)
     end
     cir = raw(1:2:end) + 1i * raw(2:2:end);
     cir = cir(:);
+end
+
+function cir = readUcr4Record(ucr4File, meta)
+%READUCR4RECORD Read one UCR4 record by pulse_id / repetition_index.
+    fid = fopen(ucr4File, 'rb', 'ieee-le');
+    if fid < 0
+        error('read_uwb_cir:open', 'cannot open %s', ucr4File);
+    end
+    cleanup = onCleanup(@() fclose(fid));
+    wantRep = [];
+    if isfield(meta, 'repetition_index') && ~isempty(meta.repetition_index)
+        wantRep = double(meta.repetition_index);
+    end
+    while true
+        magic = fread(fid, 4, 'uint8=>char')';
+        if numel(magic) < 4
+            error('read_uwb_cir:noPulse', ...
+                  'UCR4 record for pulse %d not found in %s', ...
+                  meta.pulse_id, ucr4File);
+        end
+        if ~strcmp(magic, 'UCR4')
+            error('read_uwb_cir:badMeta', 'not a UCR4 stream: %s', ucr4File);
+        end
+        pulse_id = fread(fid, 1, 'uint32');
+        status = fread(fid, 1, 'uint16'); %#ok<NASGU>
+        tap_count = fread(fid, 1, 'uint16');
+        rep_index = fread(fid, 1, 'uint16');
+        fread(fid, 1, 'uint16'); % repetition_count
+        fread(fid, 2, 'float32'); % sfd_metric, cir_peak_metric
+        fread(fid, 1, 'int32'); % peak_tap
+        fread(fid, 1, 'uint32'); % estimator_us
+        fread(fid, 2, 'float64'); % freq_hz, freq_offset_hz
+        cir_scale = fread(fid, 1, 'float32');
+        payload = fread(fid, double(tap_count) * 2, 'int16=>single');
+        if numel(payload) < 2 * double(tap_count)
+            error('read_uwb_cir:short', ...
+                  '%s truncated at pulse %d', ucr4File, pulse_id);
+        end
+        match = double(pulse_id) == double(meta.pulse_id);
+        if match && ~isempty(wantRep)
+            match = double(rep_index) == wantRep;
+        end
+        if match
+            iq = reshape(payload, 2, []);
+            cir = (iq(1, :).' + 1i * iq(2, :).') * single(cir_scale);
+            return;
+        end
+    end
 end
 
 function meta = readAllJsonl(jsonlFile)

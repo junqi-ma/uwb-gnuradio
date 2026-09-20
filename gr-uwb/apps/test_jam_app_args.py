@@ -162,6 +162,17 @@ class StaticContractTest(unittest.TestCase):
         self.assertIn("backing_length", src)
         self.assertIn("require_fragment_covers_L", src)
 
+    def test_cir_window_comes_from_cli(self):
+        src = _source()
+        self.assertIn("resolve_cir_window", src)
+        self.assertIn("cir_pre, cir_post, cir_taps", src)
+        self.assertNotIn("a.code_index, 16, 100,", src)
+
+    def test_repetition_roi_does_not_apply_average_skip(self):
+        src = _source()
+        self.assertIn('cir_skip=(0 if a.cir_output == "repetitions" else 10)',
+                      src)
+
     def test_cpp_pdu_carries_absolute_scan_base(self):
         # A jam scan offset is ABSOLUTE base + offset: without the base the
         # C++ worker would tune the jammer to the bare offset (measured on

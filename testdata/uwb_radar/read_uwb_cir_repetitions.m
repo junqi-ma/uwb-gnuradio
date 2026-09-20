@@ -5,7 +5,7 @@ function [cirMatrix, meta] = read_uwb_cir_repetitions(outDir, pulseId, wantNorm)
 %   repetition_ordinal. META is the matching expanded metadata struct array;
 %   on disk, all repetitions for the pulse occupy one compact JSONL line.
 %
-%   Pass WANTNORM=true to read cir_norm.cf32 instead of cir.cf32.
+%   Pass WANTNORM=true to return L2-normalized reconstructed CIRs.
 
     if nargin < 3
         wantNorm = false;

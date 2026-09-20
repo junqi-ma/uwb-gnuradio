@@ -38,6 +38,7 @@ import json
 import math
 import os
 import queue
+import struct
 import threading
 import time
 
@@ -508,9 +509,28 @@ def analyze_cir(jsonl_path, pulses):
     statuses = {}
     pre_sidelobes = []
     post_sidelobes = []
-    cir_path = os.path.join(os.path.dirname(jsonl_path), "cir.cf32")
+    cir_dir = os.path.dirname(jsonl_path)
+    ucr4_path = os.path.join(cir_dir, "cir.ucr4")
+    cir_path = os.path.join(cir_dir, "cir.cf32")
     cir_taps = None
-    if os.path.isfile(cir_path):
+    if os.path.isfile(ucr4_path):
+        data = open(ucr4_path, "rb").read()
+        hdr = struct.Struct("<4sIHHHHffiIddf")
+        off = 0
+        chunks = []
+        while off + hdr.size <= len(data):
+            magic, _pid, _st, tap_count, _ri, _rc, _sfd, _peak, _pt, _us, \
+                _fh, _fo, scale = hdr.unpack_from(data, off)
+            rec = hdr.size + int(tap_count) * 4
+            payload = np.frombuffer(data[off + hdr.size:off + rec], dtype="<i2")
+            iq = payload.reshape(-1, 2)
+            chunks.append((iq[:, 0].astype(np.float32) +
+                           1j * iq[:, 1].astype(np.float32)) *
+                          np.float32(scale))
+            off += rec
+        if chunks:
+            cir_taps = np.concatenate(chunks)
+    elif os.path.isfile(cir_path):
         cir_taps = np.fromfile(cir_path, dtype=np.complex64)
     with open(jsonl_path, "r", encoding="utf-8") as f:
         for ln in f:

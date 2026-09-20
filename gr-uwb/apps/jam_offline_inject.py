@@ -365,9 +365,30 @@ def main():
 
     # ---- D. self-check against the shipped production CIR ----------------
     selfcheck = None
+    cir_ucr4 = os.path.join(args.capture, "cir.ucr4")
     cir_path = os.path.join(args.capture, "cir.cf32")
-    if not args.no_selfcheck and os.path.isfile(cir_path):
-        prod = np.fromfile(cir_path, dtype=np.complex64).reshape(-1, TAP_COUNT)
+    if not args.no_selfcheck and (os.path.isfile(cir_ucr4) or os.path.isfile(cir_path)):
+        if os.path.isfile(cir_ucr4):
+            import struct as _st
+            data = open(cir_ucr4, "rb").read()
+            hdr = _st.Struct("<4sIHHHHffiIddf")
+            off = 0
+            recs = []
+            while off + hdr.size <= len(data):
+                magic, _pid, _stt, tap_count, _ri, _rc, _sfd, _peak, _pt, \
+                    _us, _fh, _fo, scale = hdr.unpack_from(data, off)
+                rec = hdr.size + int(tap_count) * 4
+                payload = np.frombuffer(data[off + hdr.size:off + rec],
+                                        dtype="<i2")
+                iq = payload.reshape(-1, 2)
+                recs.append((iq[:, 0].astype(np.float32) +
+                             1j * iq[:, 1].astype(np.float32)) *
+                            np.float32(scale))
+                off += rec
+            prod = np.stack(recs, axis=0) if recs else np.zeros(
+                (0, TAP_COUNT), dtype=np.complex64)
+        else:
+            prod = np.fromfile(cir_path, dtype=np.complex64).reshape(-1, TAP_COUNT)
         prod = prod[:nframes]
         corr, scale, peak_agree = [], [], []
         for fi in range(nframes):
@@ -385,11 +406,12 @@ def main():
         }
         print("SELF-CHECK vs %s: corr mean=%.6f min=%.6f  |CIR| scale=%.6f  "
               "peak-tap agree=%.3f  max|diff|(frame0)=%.3g"
-              % (cir_path, selfcheck["corr_mean"], selfcheck["corr_min"],
+              % (cir_ucr4 if os.path.isfile(cir_ucr4) else cir_path,
+                 selfcheck["corr_mean"], selfcheck["corr_min"],
                  selfcheck["scale_mean"], selfcheck["peak_tap_agree"],
                  selfcheck["max_abs_first"]))
     else:
-        print("SELF-CHECK skipped (no cir.cf32 or --no-selfcheck)")
+        print("SELF-CHECK skipped (no cir.ucr4/cir.cf32 or --no-selfcheck)")
 
     # ---- B. jammer waveform ----------------------------------------------
     jam_native, jam_peak = build_jammer(

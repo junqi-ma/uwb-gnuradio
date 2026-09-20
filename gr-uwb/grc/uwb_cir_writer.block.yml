@@ -43,12 +43,11 @@ cpp_templates:
 
 documentation: |-
     Per-pulse CIR disk writer.  Input "cir" is the UwbRadarCirEstimator
-    output PDU.  Files: <base>.cf32 (raw complex64 LE taps),
-    <base>_norm.cf32 (optional L2-normalized taps), <base>.jsonl (one line
-    per pulse) and run.json (static run configuration).  Only status=="ok"
-    frames append taps and advance file_offset_taps; failed frames
-    (sfd_failed/timing_failed/cir_failed) write a JSONL line with
-    tap_count=0 and leave the offsets unchanged.  MATLAB:
-    [cir, meta] = read_uwb_cir(dir, pulseId).
+    output PDU.  Files: <base>.ucr4 (concatenated UCR4 records, same as
+    UDP; FC32 = SC16 * cir_scale), <base>.jsonl (one line per pulse) and
+    run.json.  Only status=="ok" frames append a UCR4 record and advance
+    file_offset_taps; failed frames write a JSONL line with tap_count=0
+    and leave the offsets unchanged.  MATLAB: parse_cir_sweep.m on the
+    .ucr4 file, or [cir, meta] = read_uwb_cir(dir, pulseId).
 
 file_format: 1

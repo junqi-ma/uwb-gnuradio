@@ -859,7 +859,8 @@ void bind_radar_cir_estimator(py::module& m)
              py::arg("emit_normalized") = true,
              py::arg("queue_capacity") = size_t(64),
              py::arg("use_predicted_timing") = false,
-             py::arg("emit_individual_repetitions") = false)
+             py::arg("emit_individual_repetitions") = false,
+             py::arg("batch_individual_repetitions") = false)
         .def("template_path", &Blk::template_path)
         .def("sync_repetitions", &Blk::sync_repetitions)
         .def("sfd_mode", &Blk::sfd_mode)
@@ -875,6 +876,8 @@ void bind_radar_cir_estimator(py::module& m)
         .def("use_predicted_timing", &Blk::use_predicted_timing)
         .def("emit_individual_repetitions",
              &Blk::emit_individual_repetitions)
+        .def("batch_individual_repetitions",
+             &Blk::batch_individual_repetitions)
         .def("pdus_received", &Blk::pdus_received)
         .def("pdus_enqueued", &Blk::pdus_enqueued)
         .def("pdus_completed", &Blk::pdus_completed)

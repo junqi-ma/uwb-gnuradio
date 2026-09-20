@@ -83,6 +83,9 @@
 #include <vector>
 
 using gr::uwb::UwbCirWriter;
+using gr::uwb::Ucr4Header;
+using gr::uwb::decode_cir_sc16;
+using gr::uwb::ucr4_record_bytes;
 using gr::uwb::UwbLoopbackEcho;
 using gr::uwb::UwbPduRationalResamplerCcf65_48;
 using gr::uwb::UwbPduRationalResamplerCcf65_32;
@@ -243,6 +246,33 @@ read_bytes(const std::string& path, std::vector<uint8_t>& out)
     f.read(reinterpret_cast<char*>(out.data()),
            static_cast<std::streamsize>(n));
     return f.good() || f.eof();
+}
+
+bool
+load_ucr4_cirs(const std::string& path, std::vector<std::vector<gr_complex>>& out)
+{
+    std::vector<uint8_t> raw;
+    if (!read_bytes(path, raw))
+        return false;
+    size_t off = 0;
+    while (off + sizeof(Ucr4Header) <= raw.size()) {
+        Ucr4Header hdr{};
+        std::memcpy(&hdr, raw.data() + off, sizeof(hdr));
+        if (std::memcmp(hdr.magic, "UCR4", 4) != 0)
+            return false;
+        const size_t rec = ucr4_record_bytes(hdr.tap_count);
+        if (off + rec > raw.size())
+            return false;
+        std::vector<gr_complex> taps(hdr.tap_count);
+        if (hdr.tap_count > 0) {
+            const auto* iq = reinterpret_cast<const int16_t*>(
+                raw.data() + off + sizeof(Ucr4Header));
+            decode_cir_sc16(iq, hdr.tap_count, hdr.cir_scale, taps.data());
+        }
+        out.push_back(std::move(taps));
+        off += rec;
+    }
+    return off == raw.size();
 }
 
 bool
@@ -848,8 +878,8 @@ run_frame_matrix(size_t n_frames,
         BOOST_CHECK_EQUAL(j.zero_delay, static_cast<int64_t>(kCirPre));
     }
     std::vector<uint8_t> raw;
-    BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw));
-    BOOST_CHECK_EQUAL(raw.size(), (n_frames + 1) * kTaps * 8);
+    BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
+    BOOST_CHECK_EQUAL(raw.size(), (n_frames + 1) * ucr4_record_bytes(kTaps));
 
     // RSS must be bounded (allocator arena retention allowed).
     const size_t drift =
@@ -901,31 +931,37 @@ BOOST_AUTO_TEST_CASE(e2e_998p4_direct)
     BOOST_CHECK(j1.timing_ok);
     BOOST_CHECK_EQUAL(j1.source, std::string("loopback"));
 
-    // Binary files: exact size, MATLAB golden alignment, unit L2 norm.
-    std::vector<uint8_t> raw_bytes, norm_bytes, run_json;
-    BOOST_REQUIRE(read_bytes(dir1 + "/cir.cf32", raw_bytes));
-    BOOST_REQUIRE(read_bytes(dir1 + "/cir_norm.cf32", norm_bytes));
+    // Binary: one UCR4 record; reconstruct FC32 = SC16 * cir_scale.
+    std::vector<uint8_t> raw_bytes, run_json;
+    BOOST_REQUIRE(read_bytes(dir1 + "/cir.ucr4", raw_bytes));
     BOOST_REQUIRE(read_bytes(dir1 + "/run.json", run_json));
-    BOOST_CHECK_EQUAL(raw_bytes.size(), kTaps * 8);
-    BOOST_CHECK_EQUAL(norm_bytes.size(), kTaps * 8);
+    BOOST_CHECK_EQUAL(raw_bytes.size(), ucr4_record_bytes(kTaps));
     BOOST_CHECK_GT(run_json.size(), 0u);
-    std::vector<gr_complex> raw1(kTaps), norm1(kTaps), gold_raw, gold_norm;
-    std::memcpy(raw1.data(), raw_bytes.data(), kTaps * 8);
-    std::memcpy(norm1.data(), norm_bytes.data(), kTaps * 8);
+    std::vector<std::vector<gr_complex>> recs;
+    BOOST_REQUIRE(load_ucr4_cirs(dir1 + "/cir.ucr4", recs));
+    BOOST_REQUIRE_EQUAL(recs.size(), 1u);
+    const std::vector<gr_complex>& raw1 = recs[0];
+    std::vector<gr_complex> gold_raw, gold_norm;
     BOOST_REQUIRE(load_cf32(
         testdata_path("uwb_radar/cir_raw_clean_radar.cf32"), gold_raw));
     BOOST_REQUIRE(load_cf32(
         testdata_path("uwb_radar/cir_norm_clean_radar.cf32"), gold_norm));
-    BOOST_CHECK_LT(rel_l2(raw1, gold_raw), 1e-5);
-    BOOST_CHECK_LT(rel_l2(norm1, gold_norm), 1e-5);
+    BOOST_CHECK_LT(rel_l2(raw1, gold_raw), 1e-4);
+    std::vector<gr_complex> norm1 = raw1;
+    {
+        const double n = l2_norm(norm1);
+        if (n > 0.0) {
+            for (auto& z : norm1)
+                z /= static_cast<float>(n);
+        }
+    }
+    BOOST_CHECK_LT(rel_l2(norm1, gold_norm), 1e-4);
     BOOST_CHECK_CLOSE(l2_norm(norm1), 1.0, 1e-3);
 
-    // Taps bit-exact vs a direct radar_cir_one reference on the same input.
     std::vector<gr_complex> ref_raw, ref_norm;
     direct_core_reference(
         tx, r1.rx, 64, kSfdClean, ref_raw, ref_norm);
-    BOOST_CHECK(std::memcmp(raw1.data(), ref_raw.data(), kTaps * 8) == 0);
-    BOOST_CHECK(std::memcmp(norm1.data(), ref_norm.data(), kTaps * 8) == 0);
+    BOOST_CHECK_LT(rel_l2(raw1, ref_raw), 1e-4);
 
     // ---- run 2: integer delay 37 with calibrated axis (cal == D) ----------
     const std::string dir2 = make_out_dir("direct_d37");
@@ -960,16 +996,67 @@ BOOST_AUTO_TEST_CASE(e2e_998p4_direct)
     BOOST_CHECK_EQUAL(j2.tap_count, kTaps);
     BOOST_CHECK_CLOSE(j2.cal_work, kDInt, 1e-6);
 
-    std::vector<gr_complex> raw2(kTaps), norm2(kTaps);
-    std::vector<uint8_t> raw2_bytes, norm2_bytes;
-    BOOST_REQUIRE(read_bytes(dir2 + "/cir.cf32", raw2_bytes));
-    BOOST_REQUIRE(read_bytes(dir2 + "/cir_norm.cf32", norm2_bytes));
-    std::memcpy(raw2.data(), raw2_bytes.data(), kTaps * 8);
-    std::memcpy(norm2.data(), norm2_bytes.data(), kTaps * 8);
+    std::vector<std::vector<gr_complex>> recs2;
+    BOOST_REQUIRE(load_ucr4_cirs(dir2 + "/cir.ucr4", recs2));
+    BOOST_REQUIRE_EQUAL(recs2.size(), 1u);
     std::vector<gr_complex> ref2_raw, ref2_norm;
     direct_core_reference(tx, r2.rx, 64, kSfdD37, ref2_raw, ref2_norm);
-    BOOST_CHECK(std::memcmp(raw2.data(), ref2_raw.data(), kTaps * 8) == 0);
-    BOOST_CHECK(std::memcmp(norm2.data(), ref2_norm.data(), kTaps * 8) == 0);
+    BOOST_CHECK_LT(rel_l2(recs2[0], ref2_raw), 1e-4);
+}
+
+BOOST_AUTO_TEST_CASE(e2e_repetition_batch_200pps)
+{
+    constexpr size_t kPulses = 100;
+    constexpr size_t kReps = 128;
+    std::vector<gr_complex> tx;
+    const std::string tx_path = "uwb_radar/packets/sync128/tx_998p4.cf32";
+    BOOST_REQUIRE(load_cf32(testdata_path(tx_path), tx));
+    const std::string tmpl = write_template_file(tx, "rep_batch_200pps");
+    const std::string dir = make_out_dir("rep_batch_200pps");
+
+    auto src = UwbRadarPacketSource::make(
+        testdata_path(tx_path), kFsWork, "fc32", kReps, "4z2", 9);
+    auto echo = UwbLoopbackEcho::make(
+        kPreGuardWork, kTail, { 0.0 }, { gr_complex(1.0f, 0.0f) });
+    auto est = UwbRadarCirEstimator::make(
+        tmpl, kReps, "4z2", 9, kCirPre, kCirPost, 0, 0, 64, 8, 0.3f,
+        0.3f, true, 8,
+        /*use_predicted_timing=*/true,
+        /*emit_individual_repetitions=*/true,
+        /*batch_individual_repetitions=*/true);
+    auto w = UwbCirWriter::make(dir, "cir", /*write_normalized=*/true, 32);
+    auto tb = gr::make_top_block("qa_repetition_batch_200pps");
+    tb->msg_connect(src, "tx", echo, "tx");
+    tb->msg_connect(echo, "rx", est, "rx");
+    tb->msg_connect(est, "cir", w, "cir");
+    tb->start();
+
+    const auto start = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < kPulses; ++i) {
+        src->_post(pmt::mp("emit"), pmt::make_dict());
+        std::this_thread::sleep_until(start +
+                                      std::chrono::milliseconds(5 * (i + 1)));
+    }
+    BOOST_REQUIRE(wait_until(
+        [&] {
+            return est->pdus_completed() >= kPulses && est->drained() &&
+                   w->frames_written() >= kPulses * kReps;
+        },
+        10000));
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(w->stop());
+
+    BOOST_CHECK_EQUAL(src->pdus_dropped(), 0u);
+    BOOST_CHECK_EQUAL(est->pdus_received(), kPulses);
+    BOOST_CHECK_EQUAL(est->pdus_completed(), kPulses);
+    BOOST_CHECK_EQUAL(est->pdus_dropped(), 0u);
+    BOOST_CHECK_LE(est->queue_high_watermark(), 2u);
+    BOOST_CHECK_LT(est->service_mean_us(), 5000u);
+    BOOST_CHECK_EQUAL(w->frames_received(), kPulses * kReps);
+    BOOST_CHECK_EQUAL(w->frames_written(), kPulses * kReps);
+    BOOST_CHECK_EQUAL(w->frames_dropped(), 0u);
+    BOOST_CHECK_EQUAL(read_lines(dir + "/cir.jsonl").size(), kPulses);
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,16 +1150,19 @@ BOOST_AUTO_TEST_CASE(e2e_native_65_48)
     direct_core_reference(tx_work, r.resampled, 64, predicted, ref_raw,
                           ref_norm);
 
-    std::vector<uint8_t> raw_bytes, norm_bytes;
-    BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw_bytes));
-    BOOST_REQUIRE(read_bytes(dir + "/cir_norm.cf32", norm_bytes));
-    BOOST_CHECK_EQUAL(raw_bytes.size(), kTaps * 8);
-    BOOST_CHECK_EQUAL(norm_bytes.size(), kTaps * 8);
-    std::vector<gr_complex> raw1(kTaps), norm1(kTaps);
-    std::memcpy(raw1.data(), raw_bytes.data(), kTaps * 8);
-    std::memcpy(norm1.data(), norm_bytes.data(), kTaps * 8);
-    BOOST_CHECK(std::memcmp(raw1.data(), ref_raw.data(), kTaps * 8) == 0);
-    BOOST_CHECK(std::memcmp(norm1.data(), ref_norm.data(), kTaps * 8) == 0);
+    std::vector<std::vector<gr_complex>> recs;
+    BOOST_REQUIRE(load_ucr4_cirs(dir + "/cir.ucr4", recs));
+    BOOST_REQUIRE_EQUAL(recs.size(), 1u);
+    BOOST_CHECK_LT(rel_l2(recs[0], ref_raw), 1e-4);
+    std::vector<gr_complex> norm1 = recs[0];
+    {
+        const double n = l2_norm(norm1);
+        if (n > 0.0) {
+            for (auto& z : norm1)
+                z /= static_cast<float>(n);
+        }
+    }
+    BOOST_CHECK_LT(rel_l2(norm1, ref_norm), 1e-4);
     BOOST_CHECK_CLOSE(l2_norm(norm1), 1.0, 1e-3);
 
     const auto lines = read_lines(dir + "/cir.jsonl");
@@ -1238,11 +1328,15 @@ BOOST_AUTO_TEST_CASE(e2e_conditions_matrix)
                    2);
     BOOST_CHECK_EQUAL(jc.zero_delay, static_cast<int64_t>(kCirPre));
     {
-        std::vector<uint8_t> nrmc;
-        BOOST_REQUIRE(read_bytes(dirc + "/cir_norm.cf32", nrmc));
-        BOOST_REQUIRE_EQUAL(nrmc.size(), kTaps * 8);
-        std::vector<gr_complex> nc(kTaps);
-        std::memcpy(nc.data(), nrmc.data(), kTaps * 8);
+        std::vector<std::vector<gr_complex>> recs;
+        BOOST_REQUIRE(load_ucr4_cirs(dirc + "/cir.ucr4", recs));
+        BOOST_REQUIRE_EQUAL(recs.size(), 1u);
+        std::vector<gr_complex> nc = recs[0];
+        const double n = l2_norm(nc);
+        if (n > 0.0) {
+            for (auto& z : nc)
+                z /= static_cast<float>(n);
+        }
         BOOST_CHECK_CLOSE(l2_norm(nc), 1.0, 1e-3);
     }
 
@@ -1270,18 +1364,26 @@ BOOST_AUTO_TEST_CASE(e2e_conditions_matrix)
                      true,
                      1);
 
-    std::vector<uint8_t> raw05, raw20, nrm05, nrm20;
-    BOOST_REQUIRE(read_bytes(dir05 + "/cir.cf32", raw05));
-    BOOST_REQUIRE(read_bytes(dir20 + "/cir.cf32", raw20));
-    BOOST_REQUIRE(read_bytes(dir05 + "/cir_norm.cf32", nrm05));
-    BOOST_REQUIRE(read_bytes(dir20 + "/cir_norm.cf32", nrm20));
-    BOOST_REQUIRE_EQUAL(raw05.size(), kTaps * 8);
-    BOOST_REQUIRE_EQUAL(raw20.size(), kTaps * 8);
-    std::vector<gr_complex> a05(kTaps), a20(kTaps), n05(kTaps), n20(kTaps);
-    std::memcpy(a05.data(), raw05.data(), kTaps * 8);
-    std::memcpy(a20.data(), raw20.data(), kTaps * 8);
-    std::memcpy(n05.data(), nrm05.data(), kTaps * 8);
-    std::memcpy(n20.data(), nrm20.data(), kTaps * 8);
+    std::vector<std::vector<gr_complex>> rec05, rec20;
+    BOOST_REQUIRE(load_ucr4_cirs(dir05 + "/cir.ucr4", rec05));
+    BOOST_REQUIRE(load_ucr4_cirs(dir20 + "/cir.ucr4", rec20));
+    BOOST_REQUIRE_EQUAL(rec05.size(), 1u);
+    BOOST_REQUIRE_EQUAL(rec20.size(), 1u);
+    const std::vector<gr_complex>& a05 = rec05[0];
+    const std::vector<gr_complex>& a20 = rec20[0];
+    std::vector<gr_complex> n05 = a05, n20 = a20;
+    {
+        const double na = l2_norm(n05);
+        const double nb = l2_norm(n20);
+        if (na > 0.0) {
+            for (auto& z : n05)
+                z /= static_cast<float>(na);
+        }
+        if (nb > 0.0) {
+            for (auto& z : n20)
+                z /= static_cast<float>(nb);
+        }
+    }
 
     // raw CIR scales linearly with the gain ratio (2.0/0.5 = 4).
     double worst = 0.0, scale = 0.0;
@@ -1292,7 +1394,7 @@ BOOST_AUTO_TEST_CASE(e2e_conditions_matrix)
     }
     BOOST_CHECK_LT(worst, 1e-4 * std::max(1.0, scale));
     // normalized CIR invariant.
-    BOOST_CHECK_LT(rel_l2(n05, n20), 1e-6);
+    BOOST_CHECK_LT(rel_l2(n05, n20), 1e-3);
     // both runs keep the same coordinates.
     const JsonlLine j05 = parse_jsonl(read_lines(dir05 + "/cir.jsonl")[0]);
     const JsonlLine j20 = parse_jsonl(read_lines(dir20 + "/cir.jsonl")[0]);
@@ -1400,16 +1502,17 @@ BOOST_AUTO_TEST_CASE(e2e_sync_repetitions)
         BOOST_CHECK_LE(std::llabs(j.peak_tap - kPeakClean), 1);
         BOOST_CHECK_EQUAL(j.zero_delay, static_cast<int64_t>(kCirPre));
         std::vector<uint8_t> raw;
-        BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw));
-        BOOST_CHECK_EQUAL(raw.size(), kTaps * 8);
+        BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
+        BOOST_CHECK_EQUAL(raw.size(), ucr4_record_bytes(kTaps));
     }
 }
 
 // ---------------------------------------------------------------------------
 // e2e_repetition_output: the estimator's emit_individual_repetitions mode
-// through the real writer.  One RX pulse expands to `reps - skip` CIR PDUs;
+// through the real writer.  One RX pulse expands to `reps - skip` logical CIR
+// records (individual PDUs or one packed PDU);
 // the writer lands them as ONE compact JSONL line with column arrays and
-// appends every tap to cir.cf32 / cir_norm.cf32 in (pulse, ordinal) order.
+// appends every tap as a UCR4 record in (pulse, ordinal) order.
 // Every written repetition is compared tap-for-tap against a direct-core
 // reference, so this covers the block expansion, the grouped line contract
 // and the on-disk binary layout end-to-end.
@@ -1422,11 +1525,13 @@ BOOST_AUTO_TEST_CASE(e2e_repetition_output)
         const char* tx_path;
         int64_t sfd_truth;
         size_t expected; // reps - skip
+        bool batch;
     };
     const Case cases[] = {
-        { 64, 10, "uwb_radar/tx_998p4.cf32", kSfdClean, 54 },
+        { 64, 10, "uwb_radar/tx_998p4.cf32", kSfdClean, 54, false },
         // App default repetition policy: skip 0, all 128 SYNC.
-        { 128, 0, "uwb_radar/packets/sync128/tx_998p4.cf32", 132045, 128 },
+        { 128, 0, "uwb_radar/packets/sync128/tx_998p4.cf32", 132045, 128,
+          true },
     };
 
     for (const auto& c : cases) {
@@ -1445,7 +1550,8 @@ BOOST_AUTO_TEST_CASE(e2e_repetition_output)
             0, // auto repetitions
             64, 8, 0.3f, 0.3f, true, 32,
             /*use_predicted_timing=*/false,
-            /*emit_individual_repetitions=*/true);
+            /*emit_individual_repetitions=*/true,
+            /*batch_individual_repetitions=*/c.batch);
         auto w = UwbCirWriter::make(dir, "cir", /*write_normalized=*/true, 256);
         auto dbg_echo = gr::blocks::message_debug::make();
         auto tb = gr::make_top_block("qa_radar_e2e_repetition");
@@ -1470,6 +1576,12 @@ BOOST_AUTO_TEST_CASE(e2e_repetition_output)
         BOOST_CHECK_EQUAL(est->pdus_published(), c.expected);
         BOOST_CHECK_EQUAL(est->pdus_dropped(), 0u);
         BOOST_CHECK(est->emit_individual_repetitions());
+        BOOST_CHECK_EQUAL(est->batch_individual_repetitions(), c.batch);
+        BOOST_TEST_MESSAGE("repetition service reps=" << c.reps
+                           << " mean_us=" << est->service_mean_us()
+                           << " max_us=" << est->service_max_us());
+        if (c.batch)
+            BOOST_CHECK_LT(est->service_mean_us(), 5000u);
 
         // Writer: every record written, none dropped, exactly one pulse line.
         BOOST_CHECK_EQUAL(w->frames_received(), c.expected);
@@ -1503,26 +1615,25 @@ BOOST_AUTO_TEST_CASE(e2e_repetition_output)
         const auto index = parse_u64_array(line, "repetition_index");
         const auto taps = parse_u64_array(line, "tap_count");
         const auto raw_off = parse_u64_array(line, "file_offset_taps");
-        const auto norm_off = parse_u64_array(line, "file_offset_norm_taps");
         const auto est_us = parse_u64_array(line, "estimator_us");
         BOOST_REQUIRE_EQUAL(index.size(), c.expected);
         BOOST_REQUIRE_EQUAL(taps.size(), c.expected);
         BOOST_REQUIRE_EQUAL(raw_off.size(), c.expected);
-        BOOST_REQUIRE_EQUAL(norm_off.size(), c.expected);
         BOOST_REQUIRE_EQUAL(est_us.size(), c.expected);
         for (size_t ordinal = 0; ordinal < c.expected; ++ordinal) {
             BOOST_CHECK_EQUAL(index[ordinal], c.skip + ordinal);
             BOOST_CHECK_EQUAL(taps[ordinal], kTaps);
             BOOST_CHECK_EQUAL(raw_off[ordinal], ordinal * kTaps);
-            BOOST_CHECK_EQUAL(norm_off[ordinal], ordinal * kTaps);
         }
 
-        // Binary layout: contiguous (pulse, ordinal) complex64 records.
-        std::vector<uint8_t> raw_bytes, norm_bytes;
-        BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw_bytes));
-        BOOST_REQUIRE(read_bytes(dir + "/cir_norm.cf32", norm_bytes));
-        BOOST_CHECK_EQUAL(raw_bytes.size(), c.expected * kTaps * 8);
-        BOOST_CHECK_EQUAL(norm_bytes.size(), c.expected * kTaps * 8);
+        // Binary layout: contiguous (pulse, ordinal) UCR4 records.
+        std::vector<uint8_t> raw_bytes;
+        BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw_bytes));
+        BOOST_CHECK_EQUAL(raw_bytes.size(),
+                          c.expected * ucr4_record_bytes(kTaps));
+        std::vector<std::vector<gr_complex>> recs;
+        BOOST_REQUIRE(load_ucr4_cirs(dir + "/cir.ucr4", recs));
+        BOOST_REQUIRE_EQUAL(recs.size(), c.expected);
 
         // The RX window the estimator saw (shared PMT vector via loopback).
         size_t n_rx = 0;
@@ -1535,19 +1646,18 @@ BOOST_AUTO_TEST_CASE(e2e_repetition_output)
                                          c.expected, ref_raw, ref_norm);
 
         for (size_t ordinal = 0; ordinal < c.expected; ++ordinal) {
-            std::vector<gr_complex> got_raw(kTaps), got_norm(kTaps);
-            std::memcpy(got_raw.data(), raw_bytes.data() + ordinal * kTaps * 8,
-                        kTaps * 8);
-            std::memcpy(got_norm.data(),
-                        norm_bytes.data() + ordinal * kTaps * 8, kTaps * 8);
             BOOST_CHECK_MESSAGE(
-                std::memcmp(got_raw.data(), ref_raw[ordinal].data(),
-                            kTaps * 8) == 0,
+                rel_l2(recs[ordinal], ref_raw[ordinal]) < 1e-4,
                 tag + " repetition " + std::to_string(c.skip + ordinal) +
                     " raw taps differ from the direct core");
+            std::vector<gr_complex> got_norm = recs[ordinal];
+            const double n = l2_norm(got_norm);
+            if (n > 0.0) {
+                for (auto& z : got_norm)
+                    z /= static_cast<float>(n);
+            }
             BOOST_CHECK_MESSAGE(
-                std::memcmp(got_norm.data(), ref_norm[ordinal].data(),
-                            kTaps * 8) == 0,
+                rel_l2(got_norm, ref_norm[ordinal]) < 1e-4,
                 tag + " repetition " + std::to_string(c.skip + ordinal) +
                     " normalized taps differ from the direct core");
             BOOST_CHECK_CLOSE(l2_norm(got_norm), 1.0, 1e-3);
@@ -1656,11 +1766,9 @@ BOOST_AUTO_TEST_CASE(e2e_missing_sfd)
     BOOST_CHECK_EQUAL(j1.sfd, -1);
     BOOST_CHECK(!j1.sfd_ok);
 
-    std::vector<uint8_t> raw, norm;
-    BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw));
-    BOOST_REQUIRE(read_bytes(dir + "/cir_norm.cf32", norm));
-    BOOST_CHECK_EQUAL(raw.size(), kTaps * 8);  // only the ok frame
-    BOOST_CHECK_EQUAL(norm.size(), kTaps * 8); // only the ok frame
+    std::vector<uint8_t> raw;
+    BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
+    BOOST_CHECK_EQUAL(raw.size(), ucr4_record_bytes(kTaps)); // only the ok frame
 }
 
 // ---------------------------------------------------------------------------
@@ -1784,8 +1892,8 @@ BOOST_AUTO_TEST_CASE(e2e_100_frames)
     }
 
     std::vector<uint8_t> raw;
-    BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw));
-    BOOST_CHECK_EQUAL(raw.size(), (kFrames + 1) * kTaps * 8);
+    BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
+    BOOST_CHECK_EQUAL(raw.size(), (kFrames + 1) * ucr4_record_bytes(kTaps));
 
     // RSS must be bounded (allocator arena retention allowed, no growth
     // proportional to the frame count).
@@ -1945,11 +2053,9 @@ BOOST_AUTO_TEST_CASE(e2e_soak_200pps_30s)
         BOOST_CHECK_EQUAL(j.file_offset,
                           static_cast<uint64_t>(i) * kTaps);
     }
-    std::vector<uint8_t> raw, norm;
-    BOOST_REQUIRE(read_bytes(dir + "/cir.cf32", raw));
-    BOOST_REQUIRE(read_bytes(dir + "/cir_norm.cf32", norm));
-    BOOST_CHECK_EQUAL(raw.size(), n_frames * kTaps * 8);
-    BOOST_CHECK_EQUAL(norm.size(), n_frames * kTaps * 8);
+    std::vector<uint8_t> raw;
+    BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
+    BOOST_CHECK_EQUAL(raw.size(), n_frames * ucr4_record_bytes(kTaps));
 
     // RSS must not grow with the frame count (bounded queues).
     const size_t drift =
