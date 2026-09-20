@@ -1353,7 +1353,7 @@ def main():
                 a.udp_host, int(a.udp_port), base.CIR_UDP_TAPS,
                 freq_lookup=lambda pid: echo.jam_by_pulse.get(
                     int(pid), (echo.jam_freq_hz, echo.jam_freq_offset)))
-        print("udp_cir %s:%s framed=UCR3 repetition+jam_freq from "
+        print("udp_cir %s:%s framed=UCR4 SC16 repetition+jam_freq from "
               "%s" % (a.udp_host, a.udp_port,
                       "jam freq plan (cpp-pdu)" if use_cpp and jam_enabled
                       else ("sense freq (cpp-pdu single-TX)" if use_cpp

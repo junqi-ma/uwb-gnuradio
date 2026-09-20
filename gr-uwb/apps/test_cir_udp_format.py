@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the CIR UDP datagram wire format (UCR1/UCR2/UCR3/raw).
-
-Run:
-    python3 gr-uwb/apps/test_cir_udp_format.py
-"""
+"""Unit tests for CIR UDP formats (UCR1/UCR2/UCR3/UCR4/raw)."""
 from __future__ import annotations
 
 import os
@@ -23,6 +19,35 @@ def _taps(n):
 
 
 class UdpFormatTest(unittest.TestCase):
+    def test_ucr4_roundtrip_sc16_block_float(self):
+        taps = _taps(116).astype(np.complex64) / np.float32(200.0)
+        peak = max(float(np.max(np.abs(taps.real))),
+                   float(np.max(np.abs(taps.imag))))
+        scale = peak / 32767.0
+        sc16 = np.empty(taps.size * 2, dtype="<i2")
+        sc16[0::2] = np.rint(taps.real / scale).astype(np.int16)
+        sc16[1::2] = np.rint(taps.imag / scale).astype(np.int16)
+        hdr = rx.HDR_V4.pack(
+            rx.MAGIC_V4, 7, 0, 116, 10, 128, 0.31, 0.42, 30, 1234,
+            6494.6e6, 5.0e6, scale)
+        rec = rx.parse_datagram(hdr + sc16.tobytes())
+        self.assertEqual(rec["version"], 4)
+        self.assertEqual(rec["sample_format"], "sc16")
+        self.assertEqual(rec["repetition_index"], 10)
+        self.assertEqual(rec["repetition_count"], 128)
+        self.assertEqual(rec["taps_sc16"].size, 232)
+        self.assertEqual(rx.HDR_V4.size, 52)
+        self.assertEqual(rx.HDR_V4.size + sc16.nbytes, 516)
+        rel = np.linalg.norm(rec["taps"] - taps) / np.linalg.norm(taps)
+        self.assertLess(rel, 1e-4)
+
+    def test_ucr4_rejects_odd_sc16_payload(self):
+        hdr = rx.HDR_V4.pack(
+            rx.MAGIC_V4, 1, 0, 1, 0, 1, 0.0, 0.0, 0, 0,
+            0.0, 0.0, 1.0)
+        with self.assertRaisesRegex(ValueError, "odd int16"):
+            rx.parse_datagram(hdr + b"\x00\x00\x00")
+
     def test_ucr3_roundtrip_with_repetition(self):
         taps = _taps(4).astype(np.complex64)
         hdr = rx.HDR_V3.pack(

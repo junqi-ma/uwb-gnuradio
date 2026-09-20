@@ -18,8 +18,8 @@ Timed echo locks SFD to a constant offset from the RX window
 a detected SFD, so DW3000 collisions do not drop frames.  Pass
 --require-sfd to restore the old search gate.
 
-UDP is a non-blocking UCR3 header (pulse + repetition + frequency metadata)
-+ 116 taps for every CIR record.  Live lines report
+UDP is a non-blocking UCR4 header (pulse + repetition + frequency + SC16
+scale metadata) + 116 block-floating SC16 taps for every CIR record. Live lines report
 echo_ok_hz vs cir_ok_hz vs udp_hz; radio ok is not CIR ok.
 """
 from __future__ import annotations
@@ -196,13 +196,14 @@ class NativeRateProfile:
         return uwb.pdu_rational_resampler_ccf_65_32(
             taps, WORK_HZ, True, 2097152, int(res_workers), sc16_scale)
 
-# UDP CIR datagram: UCR3 + 116 complex64 taps (always, zeros if fail).
-#   magic "UCR3" | pulse_id u32 | status u16 | tap_count u16
+# UDP CIR datagram: UCR4 + 116 interleaved little-endian SC16 taps
+# (always, zeros if fail). FC32 = SC16 * cir_scale.
+#   magic "UCR4" | pulse_id u32 | status u16 | tap_count u16
 #   | repetition_index u16 | repetition_count u16 | sfd_metric f32
 #   | cir_peak_metric f32 | peak_tap i32 | estimator_us u32
-#   | freq_hz f64 | freq_offset_hz f64
+#   | freq_hz f64 | freq_offset_hz f64 | cir_scale f32
 # f64 is required because f32 cannot resolve kHz-level CFO at 6.5 GHz.
-# UCR2/UCR1 are kept only for the receiver's legacy parse path.
+# UCR3/UCR2/UCR1 are kept only for the receiver's legacy parse path.
 CIR_UDP_MAGIC = b"UCR1"                       # legacy parse-only
 CIR_UDP_HDR = struct.Struct("<4sIHHffiI")     # legacy parse-only
 CIR_UDP_TAPS = 116
@@ -211,6 +212,8 @@ CIR_UDP_HDR_V2 = struct.Struct("<4sIHHffiIdd")
 CIR_UDP_MAGIC_V3 = b"UCR3"
 # UCR3 adds the absolute SYNC repetition index and selected repetition count.
 CIR_UDP_HDR_V3 = struct.Struct("<4sIHHHHffiIdd")
+CIR_UDP_MAGIC_V4 = b"UCR4"
+CIR_UDP_HDR_V4 = struct.Struct("<4sIHHHHffiIddf")
 CIR_UDP_FREQ_UNKNOWN = float("nan")
 CIR_UDP_STATUS = {
     "ok": 0,
@@ -258,7 +261,7 @@ def _pmt_float(meta, key, default=0.0):
 
 
 class CirUdpSink(gr.basic_block):
-    """Non-blocking UDP sink for CIR PDUs. Always sends a UCR3 datagram.
+    """Non-blocking UDP sink for CIR PDUs. Always sends a UCR4 datagram.
 
     ``freq_lookup(pulse_id) -> (freq_hz, freq_offset_hz) | None`` supplies the
     per-pulse centre frequency.  When it is missing or does not resolve, the
@@ -324,12 +327,28 @@ class CirUdpSink(gr.basic_block):
                 self.sent_freq += 1
         rep_index = _pmt_int(meta, "repetition_index", 0xFFFF) & 0xFFFF
         rep_count = _pmt_int(meta, "repetition_count", 0) & 0xFFFF
-        hdr = CIR_UDP_HDR_V3.pack(
-            CIR_UDP_MAGIC_V3, pulse_id, status, self.tap_count,
+        cir_scale = 0.0
+        taps_sc16 = np.zeros(self.tap_count * 2, dtype="<i2")
+        if status == 0 and taps.size:
+            component_peak = max(float(np.max(np.abs(taps.real))),
+                                 float(np.max(np.abs(taps.imag))))
+            if np.isfinite(component_peak) and component_peak > 0.0:
+                cir_scale = component_peak / 32767.0
+                taps_sc16[0::2] = np.clip(
+                    np.rint(taps.real / cir_scale), -32767, 32767
+                ).astype(np.int16)
+                taps_sc16[1::2] = np.clip(
+                    np.rint(taps.imag / cir_scale), -32767, 32767
+                ).astype(np.int16)
+            elif not np.isfinite(component_peak):
+                self.dropped += 1
+                return
+        hdr = CIR_UDP_HDR_V4.pack(
+            CIR_UDP_MAGIC_V4, pulse_id, status, self.tap_count,
             rep_index, rep_count, sfd_m, peak_m, peak_tap, est_us,
-            float(freq_hz), float(freq_off))
+            float(freq_hz), float(freq_off), cir_scale)
         try:
-            self._sock.sendto(hdr + taps.tobytes(), self._dst)
+            self._sock.sendto(hdr + taps_sc16.tobytes(), self._dst)
         except (BlockingIOError, InterruptedError, OSError):
             self.dropped += 1
             return
@@ -1712,7 +1731,7 @@ def main():
         udp = CirUdpSink(
             a.udp_host, int(a.udp_port), CIR_UDP_TAPS,
             freq_lookup=lambda pid: (echo.freq, 0.0))
-        print("udp_cir %s:%s framed=UCR3(+repetition,+freq) "
+        print("udp_cir %s:%s framed=UCR4 SC16(+scale,+repetition,+freq) "
               "always_send_taps=%d nonblock" % (
                   a.udp_host, a.udp_port, CIR_UDP_TAPS), flush=True)
 

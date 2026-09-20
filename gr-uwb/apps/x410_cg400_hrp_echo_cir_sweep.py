@@ -108,7 +108,7 @@ class SweepTimedUhdEcho(base.TimedUhdEcho):
                 print("[freq] retune to %.3f MHz failed, keep %.3f MHz: %s"
                       % (float(target) / 1e6, self.freq / 1e6, exc), flush=True)
         # Publish this pulse's frequency before the CIR can be produced so the
-        # UDP sink can attach it to the matching UCR3 frame.
+        # UDP sink can attach it to the matching UCR4 frame.
         self.freq_by_pulse[int(pulse_id)] = (
             self.freq, self.freq - self.nominal)
         ok = super()._one_burst(pulse_id)
@@ -726,7 +726,7 @@ def main():
         udp = base.CirUdpSink(
             a.udp_host, int(a.udp_port), base.CIR_UDP_TAPS,
             freq_lookup=lambda pid: echo.freq_by_pulse.get(int(pid)))
-        print("udp_cir %s:%s framed=UCR3(+repetition,+freq) "
+        print("udp_cir %s:%s framed=UCR4 SC16(+scale,+repetition,+freq) "
               "always_send_taps=%d nonblock" % (
                   a.udp_host, a.udp_port, base.CIR_UDP_TAPS), flush=True)
 
