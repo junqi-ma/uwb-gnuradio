@@ -58,11 +58,14 @@ GNU Radio stream scheduler 的 `consume/produce`。一个输入 RX PDU 在 repet
 ```bash
 cmake --build gr-uwb/build -j 4
 ctest --test-dir gr-uwb/build --output-on-failure \
-  -R 'uwb_qa_uwb_(radar_cir_estimator|cir_writer)'
+  -R 'uwb_qa_uwb_(radar_cir_estimator|cir_writer|radar_e2e)'
 python3 gr-uwb/apps/test_cir_udp_format.py
 python3 gr-uwb/apps/test_jam_app_args.py
 python3 gr-uwb/apps/test_echo_cir_jam_plan.py
 python3 testdata/uwb_radar/verify_cir_individual.py
+# grouped run-dir reader vs clean golden (after e2e_repetition_output)
+python3 testdata/uwb_radar/verify_cir_individual.py \
+  --read-run /tmp/uwb_qa_radar_e2e_rep64 --golden-mean
 ```
 
 结果：targeted CTest 4/4、UDP 8/8、jam args 15/15、jam plan 75/75。
@@ -72,6 +75,20 @@ block QA 证明 64-SYNC/skip10 恰好输出 54 条，index 10..63 且顺序稳�
 relative L2 `1.52e-5`（门限 `<1e-4`）。
 全量 CTest 42/43；唯一失败仍为既有、环境相关的 PDU resampler 吞吐阈值
 （本轮约 217 PDU/s，门限 >400），与 CIR 改动无关。
+
+新增离线端到端（本机 ctest 通过）：
+
+- `qa_uwb_radar_e2e` 新增 `e2e_repetition_output`：estimator
+  `emit_individual_repetitions=true` → `UwbCirWriter` 真实链路。覆盖
+  64-SYNC/skip10（54 条，index 10..63）与 128-SYNC/skip0（128 条，
+  index 0..127）两档，断言 `pdus_published`、分组 JSONL 顶层字段与列数组、
+  `file_offset_taps`/`file_offset_norm_taps` 累进、二进制长度，并把每条
+  repetition 的 raw/norm tap 与 `estimate_radar_cir_repetition` 直接 core
+  参考做 `memcmp` 逐 tap 一致，norm 列 L2≈1。
+- `testdata/uwb_radar/verify_cir_individual.py --read-run <dir>`：Python
+  reader（对应 `read_uwb_cir_repetitions.m`）展开分组 JSONL 重建
+  `tap_count×repetition_count` 矩阵；对 clean e2e 输出用 `--golden-mean`
+  校验 `mean(raw)` 与 canonical golden 的 relative L2 = 1.0e-8。
 
 ## 4. 未完成与性能边界
 
