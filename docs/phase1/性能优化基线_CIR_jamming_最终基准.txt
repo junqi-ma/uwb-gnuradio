@@ -1,0 +1,66 @@
+== UWB radar sensing pipeline timing ==
+host rounds=16 pdus=64 warmup=4
+
+-- geometry (CLI defaults: 2 us pre, 15 m range, 4.1 us tail, 64-SYNC 4z2) --
+  UC200     fs=737.28 MS/s  TX=140982 (191.2 us)  RX=58593 (79.5 us)
+           pre=1475  SYNC=48018  SFD=6003  range=74  tail=3023
+           occupancy=193.2 us  radio-max=5175 pulse/s  (TX airtime bound)
+  CG400     fs=491.52 MS/s  TX=93988 (191.2 us)  RX=39062 (79.5 us)
+           pre=983  SYNC=32012  SFD=4002  range=50  tail=2015
+           occupancy=193.2 us  radio-max=5175 pulse/s  (TX airtime bound)
+  work     fs=998.40 MS/s  TX=190912 (191.2 us)  RX-equivalent pre+SYNC+SFD+range+tail=79342
+
+production work window CIR ok: n=79342 predicted_sfd=67021 sfd=67021 origin=1997 peak_tap=18
+
+-- core (no GNU Radio scheduler) --
+  SFD search ±64                      n= 16  mean=  1297.4  p50=  1295.8  p95=  1300.5  p99=  1350.5  max=  1350.5 us
+  SYNC refine ±8                      n= 16  mean=    22.5  p50=    22.5  p95=    22.5  p99=    22.5  max=    22.5 us
+  estimateCir 54-rep                   n= 16  mean=    13.9  p50=    12.4  p95=    16.8  p99=    17.0  max=    17.0 us
+  radar_cir_one (all 3)                n= 16  mean=  1336.8  p50=  1333.0  p95=  1358.6  p99=  1363.5  max=  1363.5 us
+  taps quality_minorder 65/48=2707  65/32=2707; realtime_minorder 65/48=1319  65/32=1055
+  kernel 65/48=volk_macroblock  65/32=volk_macroblock
+  65/48 quality RX window              n= 16  mean=  1380.1  p50=  1375.8  p95=  1411.5  p99=  1413.2  max=  1413.2 us
+  65/32 quality RX window              n= 16  mean=  1397.5  p50=  1397.5  p95=  1400.5  p99=  1409.0  max=  1409.0 us
+  65/48 realtime RX window             n= 16  mean=  1032.6  p50=  1031.1  p95=  1042.0  p99=  1044.0  max=  1044.0 us
+  65/32 realtime RX window             n= 16  mean=   883.4  p50=   884.8  p95=   891.9  p99=   901.5  max=   901.5 us
+  65/48 quality full TX+tail           n= 16  mean=  4038.5  p50=  4033.3  p95=  4044.3  p99=  4133.5  max=  4133.5 us
+  65/32 quality full TX+tail           n= 16  mean=  4006.3  p50=  3975.6  p95=  4080.4  p99=  4087.1  max=  4087.1 us
+  SC16→FC32 UC200 window             n= 16  mean=    18.1  p50=    17.8  p95=    19.0  p99=    21.8  max=    21.8 us
+  SC16→FC32 CG400 window             n= 16  mean=    11.8  p50=    11.8  p95=    11.8  p99=    11.9  max=    11.9 us
+
+-- PDU blocks (GNU Radio message handlers / workers) --
+  PDU 65/48 FC32 quality               n= 64  mean=  2111.4  p50=  2000.9  p95=  2773.1  p99=  3289.7  max=  3289.9 us
+           internal  handler=1937.1  fir=1519.2  sc16=0.0  publish=276.8 us/pdu  max_fir=2652 us
+  PDU 65/48 SC16 quality               n= 64  mean=  2034.0  p50=  2000.3  p95=  2250.9  p99=  2252.9  max=  2997.1 us
+           internal  handler=1864.2  fir=1423.7  sc16=26.1  publish=273.1 us/pdu  max_fir=2336 us
+  PDU 65/32 FC32 quality               n= 64  mean=  1761.3  p50=  1748.5  p95=  1767.1  p99=  2000.4  max=  2009.9 us
+           internal  handler=1676.8  fir=1449.2  sc16=0.0  publish=95.1 us/pdu  max_fir=1554 us
+  PDU 65/32 SC16 quality               n= 64  mean=  1791.9  p50=  1748.8  p95=  1778.4  p99=  2784.0  max=  2784.3 us
+           internal  handler=1694.8  fir=1454.3  sc16=17.0  publish=90.7 us/pdu  max_fir=2316 us
+  PDU 65/48 FC32 realtime              n= 64  mean=  1516.6  p50=  1502.9  p95=  1509.0  p99=  2026.7  max=  2027.5 us
+           internal  handler=1318.0  fir=1093.2  sc16=0.0  publish=92.4 us/pdu  max_fir=1724 us
+  PDU 65/32 FC32 realtime              n= 64  mean=  1320.3  p50=  1252.1  p95=  1748.9  p99=  1756.5  max=  1999.9 us
+           internal  handler=1192.0  fir=969.7  sc16=0.0  publish=93.0 us/pdu  max_fir=1527 us
+  CirEstimator serial (work window, normalized) n= 64  mean=  2000.1  p50=  2000.0  p95=  2002.6  p99=  2003.1  max=  2010.5 us
+           service  mean=1813  p95=1920  p99=1920  max=1881 us  completed=64 dropped=0
+           rss  maxrss_kb=190608
+  CirEstimator serial (work window, no-normalized) n= 64  mean=  2010.5  p50=  2000.0  p95=  2027.5  p99=  2281.4  max=  2281.7 us
+           service  mean=1801  p95=1856  p99=2112  max=2061 us  completed=64 dropped=0
+           rss  maxrss_kb=190608
+  CirWriter serial (116 taps+jsonl)    n= 64  mean=   250.2  p50=   254.2  p95=   254.4  p99=   254.6  max=   254.7 us
+  LoopbackEcho full native TX (QA)     n= 64  mean=   886.8  p50=   759.0  p95=  1250.7  p99=  1251.9  max=  1252.5 us
+
+-- saturated e2e (production RX window, depth 8) --
+  UC200_65_48_SC16              n=64  wall=0.128 s  498.1 pulse/s  ok=65 fail=0 drop_est=0 drop_res=0 drop_w=0 wm=7  est_mean=1970 us
+  CG400_65_32_SC16              n=64  wall=0.128 s  499.8 pulse/s  ok=65 fail=0 drop_est=0 drop_res=0 drop_w=0 wm=7  est_mean=1962 us
+  UC200_65_48_SC16_rt           n=64  wall=0.127 s  504.3 pulse/s  ok=65 fail=0 drop_est=0 drop_res=0 drop_w=0 wm=7  est_mean=1950 us
+  CG400_65_32_SC16_rt           n=64  wall=0.125 s  511.0 pulse/s  ok=65 fail=0 drop_est=0 drop_res=0 drop_w=0 wm=7  est_mean=1928 us
+
+-- capacity (this host, software only) --
+  Radio occupancy does not bind below ~5175 pulse/s (TX airtime 191.2 us).
+  Resampler handler and CIR worker overlap in steady state;
+  throughput ≈ 1 / max(T_resample, T_cir, T_write).
+  Saturated e2e (quality taps):  UC200 498  CG400 500 pulse/s
+  Saturated e2e (realtime taps): UC200 504  CG400 511 pulse/s
+  Default target 200 pulse/s (PRI=5 ms) is a QM35-slot choice, not a host ceiling.
+  Hardware UHD send/recv, late_drops and overflow are NOT in these numbers.
