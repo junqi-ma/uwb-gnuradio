@@ -1142,18 +1142,6 @@ def parse_args():
                         "pulse PDU entries (one entry = one averaged "
                         "record); same sizing rule as "
                         "--cir-writer-queue-pdus")
-    g.add_argument("--cir-writer-aggregate-bytes", type=int, default=1048576,
-                   help="CirWriter aggregate byte threshold (base app "
-                        "option, jam chain honors it for both writers): "
-                        "UCR4 records and JSONL lines accumulate in "
-                        "preallocated buffers and are emitted as one large "
-                        "write() per file when either the threshold or the "
-                        "50 ms age window is reached, making the writer "
-                        "tolerant of multi-second disk-write stalls "
-                        "(wr_hz troughs no longer fill the queue between "
-                        "per-record writes).  Bytes on disk are "
-                        "bit-identical to per-record writes.  0 disables "
-                        "(legacy per-record writes).  Default 1 MiB")
     g.add_argument("--jam-enable", action="store_true",
                    help="Transmit the second (jammer) TX channel.  Without "
                         "it the app degenerates to the base single-TX app.")

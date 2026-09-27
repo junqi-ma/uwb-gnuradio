@@ -50,7 +50,6 @@ REQUIRED_OPTIONS = (
     "--cir-emit-normalized",
     "--cir-writer-queue-pdus",
     "--cir-avg-writer-queue-pdus",
-    "--cir-writer-aggregate-bytes",
     "--jam-repeat-pri-us",
     "--jam-freq-settle-s",
     "--dry-run",
@@ -148,13 +147,17 @@ class CirWriterAggregateTest(unittest.TestCase):
             return f.read()
 
     def test_cli_declared_default_enabled_1mib(self):
-        for src, name in ((_source(), APP_NAME),
-                          (self._base_source(), self.BASE_NAME)):
-            self.assertIn('"--cir-writer-aggregate-bytes"', src,
-                          "%s: missing aggregate-bytes option" % name)
-            # type=int, default 1 MiB (1048576)
-            self.assertIn("type=int, default=1048576", src,
-                          "%s: aggregate default must be 1 MiB" % name)
+        # The jam app INHERITS --cir-writer-aggregate-bytes from the base
+        # parser (parents=[base.build_parser()]); redeclaring it here would
+        # raise argparse "conflicting option string".  So the base source
+        # owns the CLI declaration; the jam source references it in both
+        # writer constructions and the summary keys.
+        base = self._base_source()
+        self.assertIn('"--cir-writer-aggregate-bytes"', base,
+                      "%s: missing aggregate-bytes option" % self.BASE_NAME)
+        self.assertIn("type=int, default=1048576", base,
+                      "%s: aggregate default must be 1 MiB" % self.BASE_NAME)
+        for src, name in ((_source(), APP_NAME), (base, self.BASE_NAME)):
             self.assertIn('"cir_writer_aggregate_bytes"', src,
                           "%s: summary key missing" % name)
             self.assertIn('"cir_writer_aggregate_flushes"', src,
