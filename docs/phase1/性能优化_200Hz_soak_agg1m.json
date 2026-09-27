@@ -1,0 +1,250 @@
+{
+  "hrp_samples": 255936,
+  "native_samples": 188999,
+  "pulses": 12000,
+  "pri_s": 0.005,
+  "rate_hz": 200.0,
+  "schedule_wall_s": 61.747862937045284,
+  "echo_ok": 12000,
+  "echo_fail": 0,
+  "echo_late": 300,
+  "echo_pub": 12000,
+  "publish_native": 103496,
+  "res_rx": 12000,
+  "res_tx": 12000,
+  "res_drop": 0,
+  "est_rx": 12000,
+  "est_enqueued": 12000,
+  "est_done": 12000,
+  "est_fail": 0,
+  "est_drop": 0,
+  "est_invalid": 0,
+  "wr_ok": 1522048,
+  "wr_fail": 0,
+  "wr_drop": 13952,
+  "wr_invalid": 0,
+  "wr_avg_ok": 12000,
+  "wr_avg_fail": 0,
+  "wr_avg_drop": 0,
+  "cir_writer_queue_pdus": 128,
+  "cir_writer_queue_hwm": 128,
+  "cir_writer_aggregate_bytes": 1048576,
+  "cir_writer_aggregate_flushes": 1085,
+  "cir_writer_aggregate_max_bytes": 1048484,
+  "cir_avg_queue_pdus": 128,
+  "cir_avg_queue_hwm": 81,
+  "cir_writer_worst_case_ram_bytes": 15876096,
+  "drain_complete": false,
+  "use_predicted_timing": true,
+  "est_queue_capacity": 64,
+  "est_service_us_mean": 1717,
+  "est_service_us_max": 2387,
+  "udp_sent": 1536000,
+  "udp_sent_ok": 1536000,
+  "cir": {
+    "exists": true,
+    "lines": 11891,
+    "records": 1522048,
+    "ok": 1522048,
+    "fail": 0,
+    "status_hist": {
+      "ok": 1522048
+    },
+    "unique_ids": 11891,
+    "missing_count": 389,
+    "missing_head": [
+      231,
+      232,
+      233,
+      234,
+      235,
+      236,
+      237,
+      238,
+      239,
+      240,
+      241,
+      242,
+      243,
+      244,
+      245,
+      246
+    ],
+    "dup_count": 0,
+    "repetition_records": 1522048,
+    "pulses_with_repetitions": 11891,
+    "id_gaps": [
+      [
+        230,
+        251
+      ],
+      [
+        669,
+        690
+      ],
+      [
+        1303,
+        1324
+      ],
+      [
+        1737,
+        1758
+      ],
+      [
+        2336,
+        2357
+      ],
+      [
+        2430,
+        2451
+      ],
+      [
+        3064,
+        3085
+      ],
+      [
+        4516,
+        4537
+      ],
+      [
+        5964,
+        5985
+      ],
+      [
+        7209,
+        7230
+      ],
+      [
+        7380,
+        7401
+      ],
+      [
+        8594,
+        8615
+      ],
+      [
+        8839,
+        8927
+      ],
+      [
+        9224,
+        9247
+      ],
+      [
+        9247,
+        9268
+      ],
+      [
+        9651,
+        9672
+      ]
+    ],
+    "id_min": 0,
+    "id_max": 12299,
+    "peak_tap_min": 19,
+    "peak_tap_max": 19,
+    "metric_min": 0.0200457796,
+    "metric_max": 0.0207415279,
+    "metric_mean": 0.020444344171000293,
+    "estimator_us_min": 889,
+    "estimator_us_max": 1642,
+    "estimator_us_mean": 1312.873685980994
+  },
+  "timing": {},
+  "output": "/tmp/opencode/x410_soak_200hz_60s_agg",
+  "sc16_packets": 0,
+  "sc16_samples": 0,
+  "dump_sc16": false,
+  "freq_hz": 6489600000.0,
+  "native_rate_hz": 737280000.0,
+  "code_index": 9,
+  "preamble_length": 128,
+  "cir_output": "both",
+  "cir_emit_normalized": false,
+  "cir_pre": 16,
+  "cir_post": 48,
+  "cir_tap_count": 64,
+  "cir_skip_initial": 0,
+  "cir_average_skip": 10,
+  "cir_records_per_pulse": 128,
+  "sfd_mode": "4z2",
+  "gain_tx": 50.0,
+  "gain_rx": 40.0,
+  "tx_channel": 0,
+  "rx_channel": 3,
+  "tx_channels": [
+    0,
+    1
+  ],
+  "echo_backend": "cpp-pdu",
+  "jam_enabled": true,
+  "jam_mode": "align",
+  "jam_channel": 1,
+  "jam_antenna": "TX/RX0",
+  "jam_gain_tx": 10.0,
+  "jam_code_index": 10,
+  "jam_preamble_length": 128,
+  "jam_waveform": "preamble",
+  "jam_random_payload": false,
+  "jam_payload_seed": null,
+  "jam_payload_unique": 0,
+  "jam_user_delay_us": 0.0,
+  "jam_payload_start_work": null,
+  "jam_payload_field_work": 0,
+  "jam_scale": 0.0001,
+  "jam_delay_us": 0.0,
+  "jam_delay_native": 0,
+  "jam_delay_random_us": null,
+  "jam_delay_native_lo": 0,
+  "jam_delay_native_hi": 0,
+  "tx_lead_native": 0,
+  "jam_delay_seed": null,
+  "jam_tx_samples": 188999,
+  "jam_samples_work": 130048,
+  "jam_native_samples": 96036,
+  "jam_freq_offset_hz": 0.0,
+  "jam_freq_actual_hz": 6489600000.0,
+  "jam_offsets_hz": [],
+  "jam_dwell": 50,
+  "jam_retune": 0,
+  "jam_retune_fail": 0,
+  "jam_sweep": [
+    {
+      "dwell_index": 0,
+      "pulse_start": 0,
+      "pulse_count": null,
+      "jam_freq_hz": 6489600000.0,
+      "jam_freq_offset_hz": 0.0
+    }
+  ],
+  "tx_channel_count": 2,
+  "tx_samples_per_channel": 188999,
+  "tx_waveform_samples": [
+    188999,
+    96036
+  ],
+  "tx_base_offsets_native": [
+    0,
+    0
+  ],
+  "jam_delay_mode": "fixed",
+  "jam_overlap_mode": "off",
+  "jam_overlap_min_reps": 0,
+  "jam_overlap_max_reps": 0,
+  "jam_overlap_side": null,
+  "jam_overlap_seed": null,
+  "jam_overlap_histogram": {},
+  "jam_overlap_side_histogram": {},
+  "jam_freq_settle_ticks": 36864000,
+  "cpp_delay_updates": 0,
+  "cpp_jam_retune": 0,
+  "cpp_jam_retune_fail": 0,
+  "cpp_tx_async": {
+    "underflow": 0,
+    "seq_error": 0,
+    "time_error": 0,
+    "unmatched": 23998,
+    "dropped": 0,
+    "ack": 23998
+  }
+}
