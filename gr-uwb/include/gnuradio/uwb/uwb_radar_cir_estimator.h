@@ -24,9 +24,32 @@
 #include <limits>
 #include <vector>
 
+// AVX2/FMA codegen policy (phase 4a): the AVX2 kernels live in this header
+// and are compiled via per-function __attribute__((target("avx2,fma"))),
+// so even a baseline (no -mavx2/-mfma flags) build emits the accelerated
+// code path; the runtime gate (UWB_RADAR_CIR_CPU_AVX2, see *_impl hooks)
+// guarantees a scalar fallback on hosts lacking AVX2/FMA.  No
+// -march=native spuriously defaults an AVX codegen host.
+#if defined(__AVX2__) && defined(__FMA__)
+#define UWB_RADAR_CIR_HAVE_AVX2 1
+#else
+#define UWB_RADAR_CIR_HAVE_AVX2 0
+#endif
+
+// Runtime AVX2/FMA check for the per-function-target-attribute kernels.
+#define UWB_RADAR_CIR_CPU_AVX2() \
+    (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma"))
+
 namespace gr {
 namespace uwb {
 namespace radar {
+
+// QA-only disambiguation tag selecting the scalar kernels (used by
+// test_radar_cir_avx2_matches_scalar for an AVX2-vs-scalar bitwise match
+// check; zero ABI cost for other callers).
+struct CirKernelForceScalar
+{
+};
 
 enum class CirStatus : uint8_t { Ok = 0, CirFailed = 1, InvalidInput = 2 };
 
@@ -56,12 +79,19 @@ struct RadarCirScratch {
     std::vector<std::complex<float>> raw_taps;     // capacity >= tap_count
     std::vector<std::complex<float>> norm_taps;    // capacity >= tap_count
 
+    // AVX2 kernel plan (fixed per prepare; hot path is read-only): the
+    // broadcast float weights of the active code chips in
+    // active_code_indices order.  The HRP code is real {-1,0,+1}, so the
+    // per-chip weight is one plain float broadcast, no mask lanes.
+    std::vector<float> wt_active;                  // reserve(code_len)
+
     // May allocate. Call from prepare, never from estimate_radar_cir.
     void reserve(size_t code_len, size_t max_taps)
     {
         sampled_code.reserve(code_len);
         active_code_indices.reserve(code_len);
         active_code_values.reserve(code_len);
+        wt_active.reserve(code_len);
         const size_t max_wlen = code_len + max_taps - 1;
         avg.reserve(max_wlen);
         avg_rep_sum.reserve(max_wlen);
@@ -88,6 +118,80 @@ inline bool cir_fail_status(RadarCirEstimate& out, CirStatus status)
     cir_fail(out, status);
     return false;
 }
+
+// ---------------------------------------------------------------------------
+// Detail: AVX2/FMA sparse CIR kernels
+//
+// Lane plan (floats): a std::complex<float> is 2 packed floats [re,im], so
+// one __m256 holds 4 complex samples.  The kernels use per-function
+// target("avx2,fma") so the default (baseline, no -mavx2/-mfma flags)
+// build still emits AVX2 code; the runtime gate UWB_RADAR_CIR_CPU_AVX2()
+// makes every caller verify host support and fall back to the untouched
+// scalar kernels otherwise.  No -march=native is added to the module.
+// ---------------------------------------------------------------------------
+
+#if UWB_RADAR_CIR_HAVE_AVX2
+
+// Accumulate one repetition window into the float average buffer: 4 complex
+// (16 floats) per step.  Per-element add order equals the scalar
+// "avg[m] += src[m]" loop ( lanes are independent, no reduction reorder),
+// so the averaged window is bit-identical to the scalar mainline.
+__attribute__((target("avx2,fma"))) inline void
+cir_avg_window_avx2(std::complex<float>* avg,
+                    const std::complex<float>* src,
+                    size_t wlen)
+{
+    float* dst = reinterpret_cast<float*>(avg);
+    const float* s = reinterpret_cast<const float*>(src);
+    size_t m = 0;
+    for (; m + 4 <= wlen; m += 4)
+        _mm256_storeu_ps(
+            dst + 2 * m,
+            _mm256_add_ps(_mm256_loadu_ps(dst + 2 * m),
+                          _mm256_loadu_ps(s + 2 * m)));
+    for (; m < wlen; ++m) {
+        avg[m].real(avg[m].real() + src[m].real());
+        avg[m].imag(avg[m].imag() + src[m].imag());
+    }
+}
+
+// In-place scale of the float average window by 1/valid: 4 complex per step.
+__attribute__((target("avx2,fma"))) inline void
+cir_scale_window_avx2(std::complex<float>* avg, size_t wlen, float inv)
+{
+    float* dst = reinterpret_cast<float*>(avg);
+    const __m256 iv = _mm256_set1_ps(inv);
+    size_t m = 0;
+    for (; m + 4 <= wlen; m += 4)
+        _mm256_storeu_ps(dst + 2 * m,
+                         _mm256_mul_ps(_mm256_loadu_ps(dst + 2 * m), iv));
+    for (; m < wlen; ++m)
+        avg[m] *= inv;
+}
+
+// One 4-tap group of the sparse active-chip correlation.  tar0 points at
+// the tap-0 window sample base (tap row n loads tar0 + n).  Two independent
+// accumulators break the serial FMA chain; the packed result is
+// [re0,im0,re1,im1,re2,im2,re3,im3] for taps n0..n0+3.
+__attribute__((target("avx2,fma"))) inline void
+cir_corr4_kernel_avx2(const std::complex<float>* tar0,
+                      const size_t* m_active,
+                      const float* wt_active,
+                      size_t n_active,
+                      float* out)
+{
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    for (size_t j = 0; j < n_active; ++j) {
+        const __m256 x = _mm256_loadu_ps(
+            reinterpret_cast<const float*>(tar0 + m_active[j]));
+        const __m256 w = _mm256_set1_ps(wt_active[j]);
+        acc0 = _mm256_fmadd_ps(x, w, acc0);
+        acc1 = _mm256_fmadd_ps(x, w, acc1);
+    }
+    _mm256_storeu_ps(out, _mm256_add_ps(acc0, acc1));
+}
+#endif
 
 } // namespace detail
 
@@ -163,6 +267,13 @@ inline bool prepare_radar_cir_code(const int8_t* hrp_code,
         return false;
     }
     scratch.code_energy = energy;
+
+    // AVX2 kernel plan: extract the broadcast weights of the active chips
+    // once (descending |weight| not required; index order is ascending).
+    scratch.wt_active.clear();
+    scratch.wt_active.reserve(scratch.active_code_values.size());
+    for (const auto& cv : scratch.active_code_values)
+        scratch.wt_active.push_back(cv.real());
 
     scratch.avg.assign(max_wlen, std::complex<float>(0.f, 0.f));
     scratch.avg_rep_sum.assign(max_wlen, std::complex<double>(0.0, 0.0));
@@ -246,16 +357,28 @@ inline bool estimate_radar_cir(const std::complex<float>* rx,
         if (lo < 0 || lo > last_ok)
             continue;
         const std::complex<float>* src = rx + static_cast<size_t>(lo);
-        for (size_t m = 0; m < wlen; ++m)
-            scratch.avg[m] += src[m];
+#if UWB_RADAR_CIR_HAVE_AVX2
+        if (UWB_RADAR_CIR_CPU_AVX2())
+            detail::cir_avg_window_avx2(scratch.avg.data(), src, wlen);
+        else
+#endif
+        {
+            for (size_t m = 0; m < wlen; ++m)
+                scratch.avg[m] += src[m];
+        }
         ++valid;
     }
     if (valid == 0)
         return detail::cir_fail_status(out, CirStatus::CirFailed);
 
     const float inv_valid = 1.f / static_cast<float>(valid);
-    for (size_t m = 0; m < wlen; ++m)
-        scratch.avg[m] *= inv_valid;
+#if UWB_RADAR_CIR_HAVE_AVX2
+    if (UWB_RADAR_CIR_CPU_AVX2())
+        detail::cir_scale_window_avx2(scratch.avg.data(), wlen, inv_valid);
+    else
+#endif
+        for (size_t m = 0; m < wlen; ++m)
+            scratch.avg[m] *= inv_valid;
 
     // Correlate on the prepared non-zero code chips (active_code_indices/
     // values) instead of scanning all code_len sampled-code entries.  HRP
@@ -269,26 +392,70 @@ inline bool estimate_radar_cir(const std::complex<float>* rx,
     float peak_abs = -1.f;
     double nrm2 = 0.0;
     const size_t n_active = scratch.active_code_indices.size();
-    for (size_t nn = 0; nn < tap_count; ++nn) {
-        double acc_re = 0.0;
-        double acc_im = 0.0;
-        for (size_t j = 0; j < n_active; ++j) {
-            const size_t m = scratch.active_code_indices[j];
-            const auto c = scratch.active_code_values[j];
-            const auto a = scratch.avg[nn + m];
-            const double cr = static_cast<double>(c.real());
-            const double ci = static_cast<double>(c.imag());
-            acc_re += static_cast<double>(a.real()) * cr +
-                      static_cast<double>(a.imag()) * ci;
-            acc_im += static_cast<double>(a.imag()) * cr -
-                      static_cast<double>(a.real()) * ci;
+#if UWB_RADAR_CIR_HAVE_AVX2
+    if (UWB_RADAR_CIR_CPU_AVX2()) {
+        // AVX2: 4 adjacent taps share one 256-bit unaligned window load.
+        // Accumulation is float FMA (error ~1e-8, harmless under the
+        // golden L2 budget and smaller than the float tap precision).
+        const size_t* const ci = scratch.active_code_indices.data();
+        const float* const cw = scratch.wt_active.data();
+        const size_t groups = tap_count / 4;
+        for (size_t g = 0; g < groups; ++g) {
+            detail::cir_corr4_kernel_avx2(
+                scratch.avg.data() + static_cast<std::ptrdiff_t>(4 * g), ci,
+                cw, n_active,
+                reinterpret_cast<float*>(scratch.raw_taps.data() + 4 * g));
         }
-        const std::complex<float> raw(
-            static_cast<float>(acc_re / energy_d),
-            static_cast<float>(acc_im / energy_d));
-        scratch.raw_taps[nn] = raw;
-        nrm2 += static_cast<double>(std::norm(raw));
-        const float mag = std::abs(raw);
+        const size_t rem = tap_count - 4 * groups;
+        if (rem > 0) {
+            const size_t tap0 = 4 * groups;
+            double acc_re = 0.0;
+            double acc_im = 0.0;
+            for (size_t j = 0; j < n_active; ++j) {
+                const size_t m = ci[j];
+                const auto c = scratch.active_code_values[j];
+                const auto a = scratch.avg[tap0 + m];
+                const double cr = static_cast<double>(c.real());
+                const double ci2 = static_cast<double>(c.imag());
+                acc_re += static_cast<double>(a.real()) * cr +
+                          static_cast<double>(a.imag()) * ci2;
+                acc_im += static_cast<double>(a.imag()) * cr -
+                          static_cast<double>(a.real()) * ci2;
+            }
+            scratch.raw_taps[tap0] = std::complex<float>(
+                static_cast<float>(acc_re / energy_d),
+                static_cast<float>(acc_im / energy_d));
+        }
+    } else
+#endif
+    {
+        // Scalar mainline (phase-2 mainline): kept byte-for-byte so the
+        // fallback path is bit-identical to the pre-phase-4a results.
+        for (size_t nn = 0; nn < tap_count; ++nn) {
+            double acc_re = 0.0;
+            double acc_im = 0.0;
+            for (size_t j = 0; j < n_active; ++j) {
+                const size_t m = scratch.active_code_indices[j];
+                const auto c = scratch.active_code_values[j];
+                const auto a = scratch.avg[nn + m];
+                const double cr = static_cast<double>(c.real());
+                const double ci = static_cast<double>(c.imag());
+                acc_re += static_cast<double>(a.real()) * cr +
+                          static_cast<double>(a.imag()) * ci;
+                acc_im += static_cast<double>(a.imag()) * cr -
+                          static_cast<double>(a.real()) * ci;
+            }
+            const std::complex<float> raw(
+                static_cast<float>(acc_re / energy_d),
+                static_cast<float>(acc_im / energy_d));
+            scratch.raw_taps[nn] = raw;
+        }
+    }
+    // Norm + peak metric generation: scalar, double accumulation (shared
+    // by both kernels so peak_tap / raw_l2_norm are bit-identical).
+    for (size_t nn = 0; nn < tap_count; ++nn) {
+        nrm2 += static_cast<double>(std::norm(scratch.raw_taps[nn]));
+        const float mag = std::abs(scratch.raw_taps[nn]);
         if (mag > peak_abs) {
             peak_abs = mag;
             peak_tap = nn;
