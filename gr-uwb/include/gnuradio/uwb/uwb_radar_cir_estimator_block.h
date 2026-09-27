@@ -235,13 +235,6 @@ private:
                        const char* port = "cir",
                        bool as_average = false,
                        bool count_as_published = true);
-    void publish_alongside_average(const Job& job,
-                                   const radar::RadarCirResult& r,
-                                   uint64_t queue_us,
-                                   uint64_t service_us,
-                                   const gr_complex* rx,
-                                   size_t n,
-                                   pmt::pmt_t common_meta);
     // Phase-1: average-mode PDU built with the per-repetition kernel
     // (estimate_radar_cir_from_repetitions); no second coherent estimate.
     void publish_from_repetitions(const Job& job,
