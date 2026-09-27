@@ -257,23 +257,35 @@ inline bool estimate_radar_cir(const std::complex<float>* rx,
     for (size_t m = 0; m < wlen; ++m)
         scratch.avg[m] *= inv_valid;
 
-    const float energy = scratch.code_energy;
+    // Correlate on the prepared non-zero code chips (active_code_indices/
+    // values) instead of scanning all code_len sampled-code entries.  HRP
+    // sampled codes hold one non-zero chip per 8 samples (64 active of
+    // 1016), so the dropped entries are exact-zero terms whose removal
+    // does not change the mathematical value; the double-summation order
+    // changes, so results may differ from the dense scan by float rounding
+    // only (golden tolerance covers this; see Phase-1 point 3).
+    const double energy_d = static_cast<double>(scratch.code_energy);
     size_t peak_tap = 0;
     float peak_abs = -1.f;
     double nrm2 = 0.0;
+    const size_t n_active = scratch.active_code_indices.size();
     for (size_t nn = 0; nn < tap_count; ++nn) {
-        std::complex<double> acc(0.0, 0.0);
-        for (size_t m = 0; m < code_len; ++m) {
-            const std::complex<float> c = scratch.sampled_code[m];
-            const std::complex<float> a = scratch.avg[nn + m];
-            acc += std::complex<double>(static_cast<double>(a.real()),
-                                        static_cast<double>(a.imag())) *
-                   std::complex<double>(static_cast<double>(c.real()),
-                                        -static_cast<double>(c.imag()));
+        double acc_re = 0.0;
+        double acc_im = 0.0;
+        for (size_t j = 0; j < n_active; ++j) {
+            const size_t m = scratch.active_code_indices[j];
+            const auto c = scratch.active_code_values[j];
+            const auto a = scratch.avg[nn + m];
+            const double cr = static_cast<double>(c.real());
+            const double ci = static_cast<double>(c.imag());
+            acc_re += static_cast<double>(a.real()) * cr +
+                      static_cast<double>(a.imag()) * ci;
+            acc_im += static_cast<double>(a.imag()) * cr -
+                      static_cast<double>(a.real()) * ci;
         }
         const std::complex<float> raw(
-            static_cast<float>(acc.real() / static_cast<double>(energy)),
-            static_cast<float>(acc.imag() / static_cast<double>(energy)));
+            static_cast<float>(acc_re / energy_d),
+            static_cast<float>(acc_im / energy_d));
         scratch.raw_taps[nn] = raw;
         nrm2 += static_cast<double>(std::norm(raw));
         const float mag = std::abs(raw);
