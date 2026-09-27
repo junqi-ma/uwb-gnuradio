@@ -187,14 +187,21 @@ class NativeRateProfile:
 
     def make_pdu_resampler(self, taps, res_workers, sc16_scale):
         """Build the native->998.4 PDU resampler matching this profile."""
+        req_workers = int(res_workers)
         if self.pdu == "65_48":
             # The 65/48 PDU block exposes Sc16ScalePolicy but (yet) no
-            # persistent worker pool; one-shot process per PDU.
+            # persistent worker pool; one-shot process per PDU.  Never let a
+            # requested >1 pool look effective: warn and collapse to 1.
+            if req_workers > 1:
+                print(
+                    "WARN --res-workers %d is ignored for PDU 65/48 "
+                    "(no worker pool; 65/32 only); continuing with 1 worker"
+                    % req_workers, flush=True)
             return uwb.pdu_rational_resampler_ccf_65_48(
                 taps, WORK_HZ, True,
                 uwb.pdu_resampler_emit_policy.FullWindow, 2097152, sc16_scale)
         return uwb.pdu_rational_resampler_ccf_65_32(
-            taps, WORK_HZ, True, 2097152, int(res_workers), sc16_scale)
+            taps, WORK_HZ, True, 2097152, req_workers, sc16_scale)
 
 # UDP CIR datagram: UCR4 + tap_count interleaved little-endian SC16 taps
 # (always, zeros if fail; tap_count = cir_pre + cir_post, default 116).
@@ -1868,8 +1875,17 @@ def main():
                       if a.echo_backend == "cpp-pdu"
                       else uwb.Sc16ScalePolicy.RawInteger)
     res = profile.make_pdu_resampler(taps, a.res_workers, sc16_scale)
+    # Report the effective worker count, not the CLI request: the 65/48 PDU
+    # block has no worker pool, so make_pdu_resampler always collapses to 1
+    # there (with a WARN on stdout when a >1 was requested).  Keep the
+    # requested value in res_workers_requested for the summary/status key.
+    res_workers_effective = (1 if profile.pdu == "65_48" else int(a.res_workers))
+    res_workers_requested = int(a.res_workers)
     print("resampler pdu=%s workers=%d sc16_scale=%s" % (
-        profile.pdu, int(a.res_workers), a.res_sc16_scale), flush=True)
+        profile.pdu, res_workers_effective, a.res_sc16_scale), flush=True)
+    if profile.pdu == "65_48" and res_workers_requested > 1:
+        print("resampler res_workers_requested=%d (ignored; effective=1)"
+              % res_workers_requested, flush=True)
     est_q = max(8, int(a.est_queue))
     use_pred = not a.require_sfd
     cir_skip_initial = cir_skip_for_output(a.cir_output)
@@ -2027,7 +2043,8 @@ def main():
         "iq_scale": IQ_SCALE,
         "sample_format": "sc16",
         "echo_backend": a.echo_backend,
-        "res_workers": int(a.res_workers),
+        "res_workers": res_workers_effective,
+        "res_workers_requested": res_workers_requested,
         "echo_queue_hwm": (int(echo.blk.queue_high_watermark())
                            if a.echo_backend == "cpp-pdu" else 0),
         "echo_worker_us_mean": (int(echo.blk.mean_worker_us())
