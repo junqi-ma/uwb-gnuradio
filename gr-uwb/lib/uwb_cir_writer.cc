@@ -50,6 +50,35 @@ uint32_t test_write_delay_us_from_env()
     return static_cast<uint32_t>(v);
 }
 
+// QA-only burst-stall injection: UWB_CIR_WRITER_TEST_STALL_MS sleeps this
+// long once before the dequeued message selected by
+// UWB_CIR_WRITER_TEST_STALL_AT_MSG (default 64), emulating a multi-second
+// disk stall somewhere in the middle of a run instead of a per-record
+// slowdown.
+uint32_t test_stall_ms_from_env()
+{
+    const char* s = std::getenv("UWB_CIR_WRITER_TEST_STALL_MS");
+    if (s == nullptr || *s == '\0')
+        return 0;
+    char* end = nullptr;
+    const long v = std::strtol(s, &end, 10);
+    if (end == s || v < 0 || v > 60000000L)
+        return 0;
+    return static_cast<uint32_t>(v);
+}
+
+uint64_t test_stall_at_msg_from_env()
+{
+    const char* s = std::getenv("UWB_CIR_WRITER_TEST_STALL_AT_MSG");
+    if (s == nullptr || *s == '\0')
+        return 64;
+    char* end = nullptr;
+    const long v = std::strtol(s, &end, 10);
+    if (end == s || v < 0 || v > 0x7FFFFFFFL)
+        return 64;
+    return static_cast<uint64_t>(v);
+}
+
 uint64_t
 dict_u64(const pmt::pmt_t& dict, const char* key, uint64_t fallback)
 {
@@ -249,14 +278,20 @@ freq_from_meta(const pmt::pmt_t& meta, double& freq_hz, double& freq_off)
 UwbCirWriter::UwbCirWriter(const std::string& directory,
                            const std::string& base_name,
                            bool write_normalized,
-                           size_t queue_capacity)
+                           size_t queue_capacity,
+                           size_t aggregate_bytes,
+                           uint32_t aggregate_window_ms)
     : gr::block("uwb_cir_writer",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
       d_directory_(directory),
       d_base_name_(base_name),
       d_write_normalized_(write_normalized),
-      d_test_write_delay_us_(test_write_delay_us_from_env())
+      d_test_write_delay_us_(test_write_delay_us_from_env()),
+      d_aggregate_bytes_(aggregate_bytes),
+      d_aggregate_window_ms_(aggregate_window_ms),
+      d_test_stall_ms_(test_stall_ms_from_env()),
+      d_test_stall_at_msg_(test_stall_at_msg_from_env())
 {
     if (directory.empty()) {
         throw std::invalid_argument("UwbCirWriter: directory is empty");
@@ -291,10 +326,13 @@ std::shared_ptr<UwbCirWriter>
 UwbCirWriter::make(const std::string& directory,
                    const std::string& base_name,
                    bool write_normalized,
-                   size_t queue_capacity)
+                   size_t queue_capacity,
+                   size_t aggregate_bytes,
+                   uint32_t aggregate_window_ms)
 {
     return gnuradio::get_initial_sptr(new UwbCirWriter(
-        directory, base_name, write_normalized, queue_capacity));
+        directory, base_name, write_normalized, queue_capacity,
+        aggregate_bytes, aggregate_window_ms));
 }
 
 uint64_t UwbCirWriter::frames_received() const
@@ -324,6 +362,14 @@ uint64_t UwbCirWriter::taps_written() const
 size_t UwbCirWriter::queue_high_watermark() const
 {
     return d_high_watermark_.load();
+}
+uint64_t UwbCirWriter::aggregate_flushes() const
+{
+    return d_aggregate_flushes_.load();
+}
+uint64_t UwbCirWriter::aggregate_max_bytes() const
+{
+    return d_aggregate_max_bytes_.load();
 }
 
 void
@@ -390,6 +436,16 @@ UwbCirWriter::start()
     d_repetition_group_active_ = false;
     d_repetition_common_meta_ = pmt::PMT_NIL;
     d_repetition_records_.clear();
+    // Aggregate buffers: preallocate once behind start() (never in the hot
+    // path).  Capacity is sticky, so repeated restarts do not reallocate.
+    if (d_aggregate_bytes_ > 0) {
+        if (d_ucr4_buf_.capacity() < d_aggregate_bytes_)
+            d_ucr4_buf_.reserve(d_aggregate_bytes_ + sizeof(Ucr4Header) + 8);
+        if (d_jsonl_buf_.capacity() < d_aggregate_bytes_)
+            d_jsonl_buf_.reserve(d_aggregate_bytes_ + 4096);
+    }
+    d_ucr4_buf_.clear();
+    d_jsonl_buf_.clear();
     {
         std::lock_guard<std::mutex> lock(d_mutex_);
         d_queue_head_ = d_queue_tail_ = d_queue_count_ = 0;
@@ -413,6 +469,7 @@ UwbCirWriter::stop()
     d_cv_.notify_all();
     if (d_thread_.joinable())
         d_thread_.join();
+    drain_aggregate_buffers();
     d_raw_.flush();
     d_jsonl_.flush();
     d_raw_.close();
@@ -460,8 +517,16 @@ UwbCirWriter::handle_cir(pmt::pmt_t msg)
 void
 UwbCirWriter::writer_loop()
 {
+    bool stalled = false;
+    uint64_t dequeued = 0;
+    if (d_aggregate_bytes_ > 0) {
+        const auto now = std::chrono::steady_clock::now();
+        d_last_ucr4_sweep_ = now;
+        d_last_jsonl_sweep_ = now;
+    }
     for (;;) {
         pmt::pmt_t msg;
+        bool stop_draining = false;
         {
             std::unique_lock<std::mutex> lock(d_mutex_);
             d_cv_.wait(lock, [this] {
@@ -469,12 +534,34 @@ UwbCirWriter::writer_loop()
             });
             if (d_queue_count_ == 0 && d_stop_) {
                 flush_repetition_group();
-                return;
+                stop_draining = true;
             }
-            msg = d_queue_[d_queue_head_];
-            d_queue_[d_queue_head_] = pmt::PMT_NIL;
-            d_queue_head_ = (d_queue_head_ + 1) % d_queue_.size();
-            --d_queue_count_;
+            else {
+                msg = d_queue_[d_queue_head_];
+                d_queue_[d_queue_head_] = pmt::PMT_NIL;
+                d_queue_head_ = (d_queue_head_ + 1) % d_queue_.size();
+                --d_queue_count_;
+            }
+        }
+        if (stop_draining) {
+            // Final aggregate egress: same stop() contract as before —
+            // the buffered bytes hit the files before the streams are
+            // flushed below.
+            maybe_sweep_age_window(true);
+            return;
+        }
+        // QA-only whole-writer stall (one shot): emulates a multi-second
+        // disk stall between two dequeues.  Outside the lock so the
+        // handler keeps enqueueing while the writer is frozen.
+        if (!stalled) {
+            const uint32_t stall_ms =
+                d_test_stall_ms_.load(std::memory_order_relaxed);
+            if (stall_ms != 0 && ++dequeued ==
+                    d_test_stall_at_msg_.load(std::memory_order_relaxed)) {
+                stalled = true;
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(stall_ms));
+            }
         }
         // QA-only slow-disk hook: sleep outside the lock so the handler
         // still enqueues while the fake slow write is in progress.
@@ -482,8 +569,100 @@ UwbCirWriter::writer_loop()
                 d_test_write_delay_us_.load(std::memory_order_relaxed)) {
             std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
         }
+        // Age-window egress check when aggregation is on; off-path it is
+        // one relaxed atomic load, no clock read and no syscall.
+        if (d_aggregate_bytes_ > 0)
+            maybe_sweep_age_window(false);
         write_frame(msg);
     }
+}
+
+void
+UwbCirWriter::aggregate_ucr4(const char* bytes, size_t len)
+{
+    // Legacy per-record path (aggregate_bytes == 0): unchanged bytes,
+    // unchanged syscall granularity.
+    if (d_aggregate_bytes_ == 0) {
+        d_raw_.write(bytes, static_cast<std::streamsize>(len));
+        if (++d_since_flush_ >= 256) {
+            d_raw_.flush();
+            d_jsonl_.flush();
+            d_since_flush_ = 0;
+        }
+        return;
+    }
+    // If the record does not fit and the buffer is non-empty, emit the
+    // accumulated block first, then append: records stay whole, order is
+    // preserved, and the buffer never exceeds threshold + one record.
+    if (!d_ucr4_buf_.empty() &&
+        d_ucr4_buf_.size() + len > d_aggregate_bytes_)
+        flush_aggregate_ucr4();
+    d_ucr4_buf_.insert(d_ucr4_buf_.end(), bytes, bytes + len);
+}
+
+void
+UwbCirWriter::aggregate_jsonl(const char* bytes, size_t len)
+{
+    if (d_aggregate_bytes_ == 0) {
+        d_jsonl_ << bytes;
+        d_jsonl_.flush();
+        return;
+    }
+    if (!d_jsonl_buf_.empty() &&
+        d_jsonl_buf_.size() + len > d_aggregate_bytes_)
+        flush_aggregate_jsonl();
+    d_jsonl_buf_.insert(d_jsonl_buf_.end(), bytes, bytes + len);
+}
+
+void
+UwbCirWriter::flush_aggregate_ucr4()
+{
+    // Writer-thread only: stop() joins the writer thread before calling
+    // the drain, so no other party touches d_ucr4_buf_ here.
+    if (d_ucr4_buf_.empty())
+        return;
+    d_raw_.write(d_ucr4_buf_.data(),
+                 static_cast<std::streamsize>(d_ucr4_buf_.size()));
+    const uint64_t bytes = d_ucr4_buf_.size();
+    d_ucr4_buf_.clear();
+    d_last_ucr4_sweep_ = std::chrono::steady_clock::now();
+    d_aggregate_flushes_.fetch_add(1, std::memory_order_relaxed);
+    uint64_t prev = d_aggregate_max_bytes_.load(std::memory_order_relaxed);
+    while (prev < bytes &&
+           !d_aggregate_max_bytes_.compare_exchange_weak(
+               prev, bytes, std::memory_order_relaxed)) {
+    }
+}
+
+void
+UwbCirWriter::flush_aggregate_jsonl()
+{
+    if (d_jsonl_buf_.empty())
+        return;
+    d_jsonl_.write(d_jsonl_buf_.data(),
+                   static_cast<std::streamsize>(d_jsonl_buf_.size()));
+    d_jsonl_buf_.clear();
+    d_last_jsonl_sweep_ = std::chrono::steady_clock::now();
+}
+
+void
+UwbCirWriter::drain_aggregate_buffers()
+{
+    flush_aggregate_ucr4();
+    flush_aggregate_jsonl();
+}
+
+void
+UwbCirWriter::maybe_sweep_age_window(bool force)
+{
+    if (d_aggregate_bytes_ == 0)
+        return;
+    const auto now = std::chrono::steady_clock::now();
+    const auto window = std::chrono::milliseconds(d_aggregate_window_ms_);
+    if (force || now - d_last_ucr4_sweep_ >= window)
+        flush_aggregate_ucr4();
+    if (force || now - d_last_jsonl_sweep_ >= window)
+        flush_aggregate_jsonl();
 }
 
 void
@@ -500,7 +679,8 @@ UwbCirWriter::write_ucr4_record(uint32_t pulse_id,
                                 double freq_offset_hz,
                                 const gr_complex* taps)
 {
-    d_sc16_scratch_.assign(static_cast<size_t>(tap_count) * 2, 0);
+    if (d_sc16_scratch_.size() < static_cast<size_t>(tap_count) * 2)
+        d_sc16_scratch_.resize(static_cast<size_t>(tap_count) * 2);
     float scale = 0.0f;
     if (taps != nullptr && tap_count > 0)
         scale = encode_cir_sc16(taps, tap_count, d_sc16_scratch_.data());
@@ -522,10 +702,10 @@ UwbCirWriter::write_ucr4_record(uint32_t pulse_id,
     hdr.freq_hz = freq_hz;
     hdr.freq_offset_hz = freq_offset_hz;
     hdr.cir_scale = scale;
-    d_raw_.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+    aggregate_ucr4(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
     if (tap_count > 0) {
-        d_raw_.write(reinterpret_cast<const char*>(d_sc16_scratch_.data()),
-                     static_cast<std::streamsize>(tap_count * 4));
+        aggregate_ucr4(reinterpret_cast<const char*>(d_sc16_scratch_.data()),
+                       tap_count * 4);
     }
 }
 
@@ -678,7 +858,8 @@ UwbCirWriter::write_frame(pmt::pmt_t msg)
     append_opt_str(os, meta, "source");
     os << "}\n";
 
-    d_jsonl_ << os.str();
+    const std::string line = os.str();
+    aggregate_jsonl(line.data(), line.size());
     flush_files_if_due();
 }
 
@@ -967,7 +1148,10 @@ UwbCirWriter::flush_repetition_group()
         return r.estimator_us;
     });
     os << "}}\n";
-    d_jsonl_ << os.str();
+    {
+        const std::string line = os.str();
+        aggregate_jsonl(line.data(), line.size());
+    }
 
     d_repetition_group_active_ = false;
     d_repetition_common_meta_ = pmt::PMT_NIL;
@@ -982,8 +1166,12 @@ UwbCirWriter::flush_files_if_due()
     // flushing preserves observability while stop() still performs a final
     // drain + flush before close.
     if (++d_since_flush_ >= 256) {
-        d_raw_.flush();
-        d_jsonl_.flush();
+        // With aggregation enabled the byte-threshold + age-window egress
+        // bounds the exposure, so the legacy periodic flush is redundant.
+        if (d_aggregate_bytes_ == 0) {
+            d_raw_.flush();
+            d_jsonl_.flush();
+        }
         d_since_flush_ = 0;
     }
 }

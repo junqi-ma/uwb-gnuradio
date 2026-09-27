@@ -50,6 +50,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -144,7 +145,9 @@ public:
     static sptr make(const std::string& directory,
                      const std::string& base_name = "cir",
                      bool write_normalized = false,
-                     size_t queue_capacity = 64);
+                     size_t queue_capacity = 64,
+                     size_t aggregate_bytes = 1u << 20,
+                     uint32_t aggregate_window_ms = 50);
 
     ~UwbCirWriter() override;
 
@@ -160,6 +163,9 @@ public:
     uint64_t frames_invalid() const;   // malformed PDU (no JSONL line)
     uint64_t taps_written() const;
     size_t queue_high_watermark() const;
+    // Aggregate-write stats (0 when aggregation is disabled).
+    uint64_t aggregate_flushes() const;
+    uint64_t aggregate_max_bytes() const;
 
     bool start() override;
     bool stop() override;
@@ -168,7 +174,9 @@ protected:
     UwbCirWriter(const std::string& directory,
                  const std::string& base_name,
                  bool write_normalized,
-                 size_t queue_capacity);
+                 size_t queue_capacity,
+                 size_t aggregate_bytes,
+                 uint32_t aggregate_window_ms);
 
 private:
     void handle_cir(pmt::pmt_t msg);
@@ -187,6 +195,14 @@ private:
                                   double peak_delay_ns);
     void flush_repetition_group();
     void flush_files_if_due();
+    // Aggregate-buffer egress: append one big block per file instead of
+    // many small record writes.  Enabled with d_aggregate_bytes_ > 0.
+    void aggregate_ucr4(const char* bytes, size_t len);
+    void aggregate_jsonl(const char* bytes, size_t len);
+    void flush_aggregate_ucr4();
+    void flush_aggregate_jsonl();
+    void drain_aggregate_buffers();
+    void maybe_sweep_age_window(bool force);
     void writer_loop();
     void write_run_json();
     void write_ucr4_record(uint32_t pulse_id,
@@ -253,6 +269,24 @@ private:
     uint64_t d_repetition_expected_ = 0;
     pmt::pmt_t d_repetition_common_meta_ = pmt::PMT_NIL;
     std::vector<RepetitionJsonRecord> d_repetition_records_;
+
+    // Aggregate write buffering (writer-thread only).  UCR4 records and
+    // JSONL lines accumulate in preallocated byte buffers and are emitted
+    // as one large write() when the byte threshold or the age window is
+    // reached, so multi-second disk-write stalls cannot strand individual
+    // records.  Bytes on disk are bit-identical to the legacy per-record
+    // path; only the syscall granularity changes.
+    size_t d_aggregate_bytes_ = 0;      // threshold; 0 disables aggregation
+    uint32_t d_aggregate_window_ms_ = 50;
+    std::vector<char> d_ucr4_buf_;
+    std::vector<char> d_jsonl_buf_;
+    std::chrono::steady_clock::time_point d_last_ucr4_sweep_{};
+    std::chrono::steady_clock::time_point d_last_jsonl_sweep_{};
+    std::atomic<uint64_t> d_aggregate_flushes_{ 0 };
+    std::atomic<uint64_t> d_aggregate_max_bytes_{ 0 };
+    // QA-only: one-time whole-writer stall before the Nth dequeued message.
+    std::atomic<uint32_t> d_test_stall_ms_{ 0 };
+    std::atomic<uint64_t> d_test_stall_at_msg_{ 64 };
 };
 
 } // namespace uwb

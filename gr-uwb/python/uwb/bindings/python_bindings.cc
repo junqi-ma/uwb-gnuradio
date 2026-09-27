@@ -910,7 +910,9 @@ void bind_cir_writer(py::module& m)
              py::arg("directory"),
              py::arg("base_name") = std::string("cir"),
              py::arg("write_normalized") = false,
-             py::arg("queue_capacity") = size_t(64))
+             py::arg("queue_capacity") = size_t(64),
+             py::arg("aggregate_bytes") = size_t(1u << 20),
+             py::arg("aggregate_window_ms") = uint32_t(50))
         .def("directory", &Blk::directory)
         .def("base_name", &Blk::base_name)
         .def("write_normalized", &Blk::write_normalized)
@@ -921,7 +923,9 @@ void bind_cir_writer(py::module& m)
         .def("frames_dropped", &Blk::frames_dropped)
         .def("frames_invalid", &Blk::frames_invalid)
         .def("taps_written", &Blk::taps_written)
-        .def("queue_high_watermark", &Blk::queue_high_watermark);
+        .def("queue_high_watermark", &Blk::queue_high_watermark)
+        .def("aggregate_flushes", &Blk::aggregate_flushes)
+        .def("aggregate_max_bytes", &Blk::aggregate_max_bytes);
 }
 
 void bind_echo_backends(py::module& m)
