@@ -505,8 +505,15 @@ BOOST_AUTO_TEST_CASE(test_estimator_emits_each_selected_repetition)
 }
 
 // both-mode: every SYNC repetition on "cir", and the legacy skip-10
-// coherent average on "cir_avg".  The average must be bit-exact against
-// radar_cir_one configured the way --cir-output average is.
+// coherent average on "cir_avg".  The average is computed from the same
+// repetition window with the per-repetition kernel
+// (estimate_radar_cir_from_repetitions): same taps/equalities as
+// radar_cir_one within the mean-vs-modified-double-accumulation
+// reordering tolerance (Phase-1 stage-1 permission), and identical
+// metadata/tap_count/valid_repetitions.  On clean signals the two differ
+// only by float rounding; use the guard from
+// qa_uwb_radar_cir_estimator.cc: individual_mean vs average relative L2
+// < 2e-6 reference and check values match within that bound.
 BOOST_AUTO_TEST_CASE(test_estimator_repetitions_and_average)
 {
     std::vector<gr_complex> rx, tx;
@@ -603,16 +610,68 @@ BOOST_AUTO_TEST_CASE(test_estimator_repetitions_and_average)
     size_t n = 0;
     const gr_complex* taps = pmt::c32vector_elements(pmt::cdr(avg_msg), n);
     BOOST_REQUIRE_EQUAL(n, ref.tap_count);
-    BOOST_CHECK(std::memcmp(taps, scratch.cir.raw_taps.data(),
-                            n * sizeof(gr_complex)) == 0);
+    // Phase-1: the average now runs the per-repetition kernel over the same
+    // skip-10 window.  Accumulation order differs from the legacy coherent
+    // estimate_radar_cir, so require the same tolerance the core QA already
+    // uses for individual-mean vs average (relative L2 < 2e-6) instead of
+    // bit-exact memcmp.
+    BOOST_TEST_MESSAGE("avg taps relative L2 (vs radar_cir_one): computed below");
+    {
+        double num = 0.0, den = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            const double dr = static_cast<double>(taps[i].real()) -
+                              static_cast<double>(scratch.cir.raw_taps[i]
+                                                      .real());
+            const double di = static_cast<double>(taps[i].imag()) -
+                              static_cast<double>(scratch.cir.raw_taps[i]
+                                                      .imag());
+            num += dr * dr + di * di;
+            const double br = static_cast<double>(
+                scratch.cir.raw_taps[i].real());
+            const double bi = static_cast<double>(
+                scratch.cir.raw_taps[i].imag());
+            den += br * br + bi * bi;
+        }
+        const double rel = den > 0.0 ? std::sqrt(num) / std::sqrt(den)
+                                     : (num > 0.0
+                                            ? std::numeric_limits<
+                                                  double>::infinity()
+                                            : 0.0);
+        BOOST_CHECK_MESSAGE(rel < 2e-6,
+                            "avg vs radar_cir_one raw relative L2=" +
+                                std::to_string(rel));
+    }
     pmt::pmt_t norm_v = pmt::dict_ref(meta, pmt::mp("normalized_taps"),
                                       pmt::PMT_NIL);
     BOOST_REQUIRE(pmt::is_c32vector(norm_v));
     size_t nn = 0;
     const gr_complex* norm = pmt::c32vector_elements(norm_v, nn);
     BOOST_REQUIRE_EQUAL(nn, ref.tap_count);
-    BOOST_CHECK(std::memcmp(norm, scratch.cir.norm_taps.data(),
-                            nn * sizeof(gr_complex)) == 0);
+    {
+        double num = 0.0, den = 0.0;
+        for (size_t i = 0; i < nn; ++i) {
+            const double dr = static_cast<double>(norm[i].real()) -
+                              static_cast<double>(scratch.cir.norm_taps[i]
+                                                      .real());
+            const double di = static_cast<double>(norm[i].imag()) -
+                              static_cast<double>(scratch.cir.norm_taps[i]
+                                                      .imag());
+            num += dr * dr + di * di;
+            const double br = static_cast<double>(
+                scratch.cir.norm_taps[i].real());
+            const double bi = static_cast<double>(
+                scratch.cir.norm_taps[i].imag());
+            den += br * br + bi * bi;
+        }
+        const double rel = den > 0.0 ? std::sqrt(num) / std::sqrt(den)
+                                     : (num > 0.0
+                                            ? std::numeric_limits<
+                                                  double>::infinity()
+                                            : 0.0);
+        BOOST_CHECK_MESSAGE(rel < 2e-6,
+                            "avg vs radar_cir_one norm relative L2=" +
+                                std::to_string(rel));
+    }
 }
 
 // ---------------------------------------------------------------------------

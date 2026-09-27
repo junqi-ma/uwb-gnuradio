@@ -242,6 +242,15 @@ private:
                                    const gr_complex* rx,
                                    size_t n,
                                    pmt::pmt_t common_meta);
+    // Phase-1: average-mode PDU built with the per-repetition kernel
+    // (estimate_radar_cir_from_repetitions); no second coherent estimate.
+    void publish_from_repetitions(const Job& job,
+                                  const radar::RadarCirResult& r,
+                                  uint64_t queue_us,
+                                  uint64_t service_us,
+                                  const gr_complex* rx,
+                                  size_t n,
+                                  pmt::pmt_t common_meta);
     void publish_repetition_batch(const Job& job,
                                   const radar::RadarCirResult& r,
                                   uint64_t queue_us,

@@ -916,6 +916,62 @@ BOOST_AUTO_TEST_CASE(test_radar_cir_multipath_vs_matlab_clean_taps)
     BOOST_CHECK_LT(std::abs(r2 - gr_complex(0.25f, 0.40f)), 0.08f);
 }
 
+BOOST_AUTO_TEST_CASE(test_radar_cir_from_repetitions_matches_average)
+{
+    // Phase-1 stage-1 point 2/3: estimate_radar_cir_from_repetitions is the
+    // average-mode kernel reusing the per-repetition (sparse active-code)
+    // correlation.  It must stay within the established mean-vs-average
+    // tolerance (relative L2 < 2e-6) of the legacy coherent
+    // estimate_radar_cir on the canonical MATLAB signal, and produce the
+    // same status/peak/valid_repetitions bookkeeping.
+    const auto meta = load_canonical_meta();
+    const auto rx = load_radar_cf32("rx_clean_998p4.cf32", meta.rx_len);
+    RadarCirScratch scratch;
+    BOOST_REQUIRE(prepare_code9(scratch));
+
+    RadarCirEstimate legacy;
+    BOOST_REQUIRE(run_cir(rx, meta.origin_clean, kRadarPre, kRadarPost,
+                          kSkip, kMaxRep, kNSync, legacy, scratch));
+    std::vector<gr_complex> legacy_raw(
+        scratch.raw_taps.begin(), scratch.raw_taps.begin() + kRadarTaps);
+    std::vector<gr_complex> legacy_norm(
+        scratch.norm_taps.begin(), scratch.norm_taps.begin() + kRadarTaps);
+
+    RadarCirEstimate rep;
+    BOOST_REQUIRE(estimate_radar_cir_from_repetitions(
+        rx.data(), rx.size(), meta.origin_clean, kQm35SamplesPerSymbol,
+        kRadarPre, kRadarPost, kSkip, kMaxRep, kNSync, rep, scratch));
+    BOOST_CHECK(rep.status == CirStatus::Ok);
+    BOOST_CHECK_EQUAL(rep.tap_count, legacy.tap_count);
+    BOOST_CHECK_EQUAL(rep.peak_tap, legacy.peak_tap);
+    BOOST_CHECK_EQUAL(rep.valid_repetitions, legacy.valid_repetitions);
+    BOOST_CHECK_EQUAL(rep.first_repetition, legacy.first_repetition);
+    BOOST_CHECK_LE(std::abs(static_cast<double>(rep.raw_l2_norm) -
+                            static_cast<double>(legacy.raw_l2_norm)),
+                   1e-3 * static_cast<double>(legacy.raw_l2_norm) + 1e-6);
+
+    const double e_raw = relative_l2(scratch.raw_taps.data(),
+                                     legacy_raw.data(), kRadarTaps);
+    const double e_norm = relative_l2(scratch.norm_taps.data(),
+                                      legacy_norm.data(), kRadarTaps);
+    BOOST_CHECK_MESSAGE(e_raw < 2e-6,
+                        "from_repetitions vs average raw relative L2=" +
+                            std::to_string(e_raw));
+    BOOST_CHECK_MESSAGE(e_norm < 2e-6,
+                        "from_repetitions vs average norm relative L2=" +
+                            std::to_string(e_norm));
+
+    // Failure bookkeeping: a skip reference covering the whole preamble
+    // leaves no repetition to a mean (skip >= available) — same
+    // InvalidInput gate as the legacy coherent entry.
+    RadarCirEstimate rep_fail;
+    BOOST_REQUIRE(!estimate_radar_cir_from_repetitions(
+        rx.data(), rx.size(), meta.origin_clean, kQm35SamplesPerSymbol,
+        kRadarPre, kRadarPost, kNSync, kMaxRep, kNSync, rep_fail, scratch));
+    BOOST_CHECK(rep_fail.status == CirStatus::InvalidInput);
+    BOOST_CHECK_EQUAL(rep_fail.tap_count, size_t(0));
+}
+
 BOOST_AUTO_TEST_CASE(test_radar_cir_tap_window_edges)
 {
     const auto meta = load_canonical_meta();

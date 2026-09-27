@@ -785,15 +785,56 @@ UwbRadarCirEstimator::worker_loop()
         radar::RadarCirResult r;
         bool threw = false;
         std::string what;
-        try {
-            radar::radar_cir_one(rx, n, job.predicted_sfd, d_cfg_,
-                                 d_scratch_, r);
-        } catch (const std::exception& e) {
-            threw = true;
-            what = e.what();
-        } catch (...) {
-            threw = true;
-            what = "unknown exception";
+        // Repetition mode locate once: the shared locate stage plus the
+        // per-repetition count; no average-mode estimateCir (skip-10, all
+        // reps) is run in this path, so the "cir" records keep carrying the
+        // per-repetition validity.
+        const bool locate_mode = d_emit_individual_repetitions_;
+        if (!locate_mode) {
+            try {
+                radar::radar_cir_one(rx, n, job.predicted_sfd, d_cfg_,
+                                     d_scratch_, r);
+            } catch (const std::exception& e) {
+                threw = true;
+                what = e.what();
+            } catch (...) {
+                threw = true;
+                what = "unknown exception";
+            }
+        } else {
+            radar::RadarCirResult loc;
+            try {
+                size_t located_count = 0;
+                const bool ok = radar::radar_cir_locate(
+                    rx, n, job.predicted_sfd, d_cfg_, d_scratch_, loc,
+                    located_count) &&
+                    located_count > 0;
+                if (!ok) {
+                    r = loc;
+                    // Caller expects the origin field even on failure, so
+                    // downstream code can report the range; zeroed by locate
+                    // already.
+                    r.valid_repetitions = 0;
+                    r.tap_count = 0;
+                } else {
+                    r = loc;
+                    r.status = radar::RadarCirStatus::Ok;
+                    // tap/peak/l2 fields are per-repetition (filled below);
+                    // zero them so failed reps cannot be accidentally
+                    // presented with the averaged stats.
+                    r.tap_count = 0;
+                    r.peak_tap = 0;
+                    r.peak_abs = 0.f;
+                    r.raw_l2_norm = 0.f;
+                    r.valid_repetitions = located_count;
+                }
+            } catch (const std::exception& e) {
+                threw = true;
+                what = e.what();
+            } catch (...) {
+                threw = true;
+                what = "unknown exception";
+            }
         }
         const uint64_t queue_us = elapsed_us(job.enqueued_at, t0);
 
@@ -882,11 +923,11 @@ UwbRadarCirEstimator::worker_loop()
                     job, r, queue_us,
                     elapsed_us(t0, std::chrono::steady_clock::now()), first,
                     count, common_meta);
-            // After the per-repetition taps have been copied or published.
-            // estimate_radar_cir reuses scratch.cir, which the loop above
-            // also writes.
+            // The average uses the same first/count repetition window as
+            // the per-repetition records above; no separate coherent
+            // average pass is run in this mode.
             if (d_emit_repetition_average_)
-                publish_alongside_average(
+                publish_from_repetitions(
                     job, r, queue_us,
                     elapsed_us(t0, std::chrono::steady_clock::now()), rx, n,
                     common_meta);
@@ -1069,8 +1110,18 @@ UwbRadarCirEstimator::publish_frame(const Job& job,
         d_published_.fetch_add(1, std::memory_order_relaxed);
 }
 
+// Phase-1 (stage 1, point 2): both/repetitions average path.  The average
+// reuses the per-repetition kernel via estimate_radar_cir_from_repetitions:
+// locate once (worker_loop), repetitions once, then ONE averaging pass —
+// the legacy flow ran a second, independent estimate_radar_cir coherent
+// average (skip-10, all remaining reps) after every repetition had already
+// been estimated.  scratch.cir is overwritten by each per-repetition
+// estimate, so the derived average fields are set before publishing and
+// the taps are consumed by publish_frame inside this call (which copies
+// into the PMT vector).  Message set, state counters and publish order
+// ("cir" records first, then the "cir_avg" frame) are unchanged.
 void
-UwbRadarCirEstimator::publish_alongside_average(
+UwbRadarCirEstimator::publish_from_repetitions(
     const Job& job,
     const radar::RadarCirResult& r,
     uint64_t queue_us,
@@ -1086,7 +1137,7 @@ UwbRadarCirEstimator::publish_alongside_average(
                              : 0;
     radar::RadarCirEstimate avg;
     if (count == 0 || rx == nullptr ||
-        !radar::estimate_radar_cir(
+        !radar::estimate_radar_cir_from_repetitions(
             rx, n, r.cir_origin_sample, d_cfg_.samples_per_symbol,
             d_cfg_.cir_pre, d_cfg_.cir_post, skip, count,
             d_cfg_.sync_repetitions, avg, d_scratch_.cir)) {

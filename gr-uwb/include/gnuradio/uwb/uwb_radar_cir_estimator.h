@@ -50,6 +50,9 @@ struct RadarCirScratch {
     std::vector<std::complex<float>> active_code_values;
     float code_energy = 0.f;
     std::vector<std::complex<float>> avg;          // capacity >= wlen
+    // Double-precision accumulator for estimate_radar_cir_from_repetitions
+    // (adds each valid repetition window, then scales by 1/N once).
+    std::vector<std::complex<double>> avg_rep_sum; // capacity >= wlen
     std::vector<std::complex<float>> raw_taps;     // capacity >= tap_count
     std::vector<std::complex<float>> norm_taps;    // capacity >= tap_count
 
@@ -61,6 +64,7 @@ struct RadarCirScratch {
         active_code_values.reserve(code_len);
         const size_t max_wlen = code_len + max_taps - 1;
         avg.reserve(max_wlen);
+        avg_rep_sum.reserve(max_wlen);
         raw_taps.reserve(max_taps);
         norm_taps.reserve(max_taps);
     }
@@ -154,12 +158,14 @@ inline bool prepare_radar_cir_code(const int8_t* hrp_code,
         scratch.sampled_code.clear();
         scratch.active_code_indices.clear();
         scratch.active_code_values.clear();
+        scratch.avg_rep_sum.clear();
         scratch.code_energy = 0.f;
         return false;
     }
     scratch.code_energy = energy;
 
     scratch.avg.assign(max_wlen, std::complex<float>(0.f, 0.f));
+    scratch.avg_rep_sum.assign(max_wlen, std::complex<double>(0.0, 0.0));
     scratch.raw_taps.assign(max_taps, std::complex<float>(0.f, 0.f));
     scratch.norm_taps.assign(max_taps, std::complex<float>(0.f, 0.f));
     return true;
@@ -268,6 +274,154 @@ inline bool estimate_radar_cir(const std::complex<float>* rx,
         const std::complex<float> raw(
             static_cast<float>(acc.real() / static_cast<double>(energy)),
             static_cast<float>(acc.imag() / static_cast<double>(energy)));
+        scratch.raw_taps[nn] = raw;
+        nrm2 += static_cast<double>(std::norm(raw));
+        const float mag = std::abs(raw);
+        if (mag > peak_abs) {
+            peak_abs = mag;
+            peak_tap = nn;
+        }
+    }
+
+    const float nrm = static_cast<float>(std::sqrt(nrm2));
+    if (!std::isfinite(nrm) || !(nrm > 0.f) || !std::isfinite(peak_abs))
+        return detail::cir_fail_status(out, CirStatus::CirFailed);
+
+    const float inv_n = 1.f / (nrm + 1e-12f);
+    for (size_t i = 0; i < tap_count; ++i)
+        scratch.norm_taps[i] = scratch.raw_taps[i] * inv_n;
+
+    out.status = CirStatus::Ok;
+    out.tap_count = tap_count;
+    out.peak_tap = peak_tap;
+    out.peak_abs = peak_abs;
+    out.raw_l2_norm = nrm;
+    out.valid_repetitions = valid;
+    out.first_repetition = skip_initial;
+    return true;
+}
+
+// HOT PATH: average-mode CIR assembled from the per-repetition kernel.
+// Numerically this is mean(rep taps): the coherent sum over the same
+// repetitions is only scaled by 1/N at the end, and the correlation already
+// runs on the sparse non-zero code chips (active_code_indices/values).
+// Compared with estimate_radar_cir the floating-point order differs (N
+// per-repetition accumulations instead of one correlated accumulation over
+// the coherent mean window); exact equality with estimate_radar_cir is NOT
+// required or provided.
+//
+// Repetition loop is identical to estimate_radar_cir: absolute repetition
+// k = skip..skip+count-1, out-of-window / negative repetitions are skipped,
+// and out.valid_repetitions counts the ones used.  raw_taps of the sum stay
+// in double precision; scratch.raw_taps is not touched until the final
+// result (single-rep callers must copy their taps before calling this).
+inline bool estimate_radar_cir_from_repetitions(
+    const std::complex<float>* rx,
+    size_t n,
+    int64_t preamble_start,
+    size_t samples_per_symbol,
+    size_t pre,
+    size_t post,
+    size_t skip_initial,
+    size_t max_repetitions,
+    size_t preamble_repetitions,
+    RadarCirEstimate& out,
+    RadarCirScratch& scratch)
+{
+    detail::cir_fail(out, CirStatus::InvalidInput);
+    if (!rx || n == 0 || preamble_start < 0 || samples_per_symbol == 0 ||
+        scratch.sampled_code.empty() || !(scratch.code_energy > 0.f) ||
+        !std::isfinite(scratch.code_energy) ||
+        scratch.avg_rep_sum.empty() ||
+        scratch.active_code_indices.empty() ||
+        scratch.active_code_indices.size() !=
+            scratch.active_code_values.size() ||
+        detail::cir_add_overflow(pre, post))
+        return false;
+
+    const size_t tap_count = pre + post;
+    if (tap_count == 0 || tap_count > scratch.raw_taps.size() ||
+        tap_count > scratch.norm_taps.size())
+        return false;
+    const size_t code_len = scratch.sampled_code.size();
+    if (code_len > std::numeric_limits<size_t>::max() - (tap_count - 1))
+        return false;
+    const size_t wlen = code_len + tap_count - 1;
+    if (wlen > scratch.avg_rep_sum.size() ||
+        wlen > scratch.avg_rep_sum.capacity())
+        return false;
+
+    const size_t available = preamble_repetitions;
+    if (skip_initial >= available)
+        return false;
+    const size_t count = std::min(max_repetitions, available - skip_initial);
+
+    int64_t n64 = 0;
+    int64_t pre64 = 0;
+    int64_t wlen64 = 0;
+    int64_t period64 = 0;
+    int64_t last_ok = 0;
+    if (!radar_i64_from_size(n, n64) || !radar_i64_from_size(pre, pre64) ||
+        !radar_i64_from_size(wlen, wlen64) ||
+        !radar_i64_from_size(samples_per_symbol, period64) ||
+        !radar_i64_sub(n64, wlen64, last_ok))
+        return false;
+
+    // One fixed accumulation buffer, zeroed per call (fill only wlen).
+    std::fill(scratch.avg_rep_sum.begin(),
+              scratch.avg_rep_sum.begin() + static_cast<std::ptrdiff_t>(wlen),
+              std::complex<double>(0.0, 0.0));
+
+    // Add each repetition's window into the double accumulator.  The
+    // ordering matches estimate_radar_cir (repetitions ascending, samples
+    // ascending); sparse code chips are applied in the final correlation.
+    size_t valid = 0;
+    for (size_t k = skip_initial; k < skip_initial + count; ++k) {
+        int64_t k64 = 0;
+        int64_t offset = 0;
+        int64_t rs = 0;
+        int64_t lo = 0;
+        if (!radar_i64_from_size(k, k64) ||
+            !radar_i64_mul(k64, period64, offset) ||
+            !radar_i64_add(preamble_start, offset, rs) ||
+            !radar_i64_sub(rs, pre64, lo))
+            return false;
+        if (lo < 0 || lo > last_ok)
+            continue;
+        const std::complex<float>* src = rx + static_cast<size_t>(lo);
+        for (size_t m = 0; m < wlen; ++m) {
+            const std::complex<float> s = src[m];
+            scratch.avg_rep_sum[m] +=
+                std::complex<double>(static_cast<double>(s.real()),
+                                     static_cast<double>(s.imag()));
+        }
+        ++valid;
+    }
+    if (valid == 0)
+        return detail::cir_fail_status(out, CirStatus::CirFailed);
+
+    const double inv_valid = 1.0 / static_cast<double>(valid);
+    const double energy = static_cast<double>(scratch.code_energy);
+    size_t peak_tap = 0;
+    float peak_abs = -1.f;
+    double nrm2 = 0.0;
+    for (size_t nn = 0; nn < tap_count; ++nn) {
+        double acc_re = 0.0;
+        double acc_im = 0.0;
+        for (size_t j = 0; j < scratch.active_code_indices.size(); ++j) {
+            const size_t m = scratch.active_code_indices[j];
+            const auto c = scratch.active_code_values[j];
+            const auto a = scratch.avg_rep_sum[nn + m];
+            const double cr = static_cast<double>(c.real());
+            const double ci = static_cast<double>(c.imag());
+            acc_re += (static_cast<double>(a.real()) * cr +
+                       static_cast<double>(a.imag()) * ci) * inv_valid;
+            acc_im += (static_cast<double>(a.imag()) * cr -
+                       static_cast<double>(a.real()) * ci) * inv_valid;
+        }
+        const std::complex<float> raw(
+            static_cast<float>(acc_re / energy),
+            static_cast<float>(acc_im / energy));
         scratch.raw_taps[nn] = raw;
         nrm2 += static_cast<double>(std::norm(raw));
         const float mag = std::abs(raw);
