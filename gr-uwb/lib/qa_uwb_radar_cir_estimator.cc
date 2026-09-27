@@ -29,6 +29,8 @@
 #include <string>
 #include <vector>
 
+#include "qa_uwb_radar_cir_scalar_ref.h" // frozen 5260299 scalar mainline
+
 namespace {
 
 using gr::uwb::demod::GetPreambleCode;
@@ -40,6 +42,9 @@ using gr::uwb::radar::estimate_radar_cir_repetition;
 using gr::uwb::radar::prepare_radar_cir_code;
 using gr::uwb::radar::RadarCirEstimate;
 using gr::uwb::radar::RadarCirScratch;
+using gr::uwb::scalar_ref::estimate_radar_cir_ref;
+using gr::uwb::scalar_ref::prepare_radar_cir_code_ref;
+using gr::uwb::scalar_ref::RadarCirScratchRef;
 
 #ifndef UWB_TESTDATA_DIR
 #define UWB_TESTDATA_DIR "../../../testdata"
@@ -1049,3 +1054,77 @@ BOOST_AUTO_TEST_CASE(test_radar_cir_pre0_post1_and_prepare_bound)
     BOOST_CHECK(too_wide.status == CirStatus::InvalidInput);
     BOOST_CHECK_EQUAL(too_wide.tap_count, size_t(0));
 }
+
+BOOST_AUTO_TEST_CASE(test_radar_cir_avx2_matches_scalar)
+{
+    // Phase-4a QA: the AVX2 sparse kernels must stay within the golden
+    // tolerance of the scalar mainline reference (phase-2 baseline).
+    // Enumerate both build modes:
+    //   default (no flags):            AVX2 codegen still present via
+    //                                  target attribute; runtime gate picks
+    //                                  AVX2 (this host) => tests the AVX2
+    //                                  kernels in a default flags build;
+    //   build-avx2 (-mavx2 -mfma):     same kernel, compile-direct AVX2.
+    // Baseline (non-AVX2) hosts: no AVX2 codegen => auto Skipping.
+#if UWB_RADAR_CIR_HAVE_AVX2
+    if (!UWB_RADAR_CIR_CPU_AVX2()) {
+        BOOST_TEST_MESSAGE(
+            "test_radar_cir_avx2_matches_scalar: AVX2/FMA host support not "
+            "detected (__builtin_cpu_supports); skipping AVX2-vs-scalar "
+            "match (scalar mainline is active, no AVX2 kernels to "
+            "compare).");
+        return;
+    }
+#endif
+    const auto meta = load_canonical_meta();
+    const auto rx = load_radar_cf32("rx_clean_998p4.cf32", meta.rx_len);
+
+    RadarCirScratch scratch;
+    BOOST_REQUIRE(prepare_code9(scratch));
+    BOOST_REQUIRE_EQUAL(scratch.wt_active.size(), size_t(64));
+    for (size_t i = 0; i < scratch.active_code_indices.size(); ++i)
+        BOOST_CHECK_EQUAL(scratch.wt_active[i],
+                          scratch.active_code_values[i].real());
+
+    // --- estimate_radar_cir (average mode) -------------------------------
+    RadarCirEstimate auto_out;
+    BOOST_REQUIRE(run_cir(rx, meta.origin_clean, kRadarPre, kRadarPost,
+                          kSkip, kMaxRep, kNSync, auto_out, scratch));
+    std::vector<gr_complex> auto_raw(scratch.raw_taps.begin(),
+                                     scratch.raw_taps.begin() + kRadarTaps);
+    std::vector<gr_complex> auto_norm(scratch.norm_taps.begin(),
+                                      scratch.norm_taps.begin() +
+                                          kRadarTaps);
+
+    // QA-only scalar-reference run (gr::uwb::scalar_ref namespace — a
+    // *frozen* snapshot of the 5260299 pre-4a mainline, see
+    // qa_uwb_radar_cir_scalar_ref.h):
+    RadarCirScratchRef scratch_ref;
+    BOOST_REQUIRE(prepare_radar_cir_code_ref(GetPreambleCode(9),
+                                             kQm35CodeLength, kRadarPre,
+                                             kRadarPost, scratch_ref));
+    gr::uwb::scalar_ref::RadarCirEstimateRef ref_out;
+    BOOST_REQUIRE(estimate_radar_cir_ref(
+        rx.data(), rx.size(), meta.origin_clean, kQm35SamplesPerSymbol,
+        kRadarPre, kRadarPost, kSkip, kMaxRep, kNSync, ref_out, scratch_ref));
+    const float scratch_ref_est_l2 = ref_out.raw_l2_norm;
+    BOOST_CHECK_EQUAL(auto_out.peak_tap, ref_out.peak_tap);
+    BOOST_CHECK_EQUAL(ref_out.tap_count, kRadarTaps);
+    // AVX2-vs-scalar gate (task tolerance: <= 1e-6, or the golden
+    // source tolerance where tighter).
+    const double e_raw =
+        relative_l2(auto_raw.data(), scratch_ref.raw_taps.data(), kRadarTaps);
+    const double e_norm =
+        relative_l2(auto_norm.data(), scratch_ref.norm_taps.data(),
+                    kRadarTaps);
+    BOOST_CHECK_MESSAGE(e_raw < 1e-6,
+                        "avx2-vs-scalar raw relative L2=" +
+                            std::to_string(e_raw));
+    BOOST_CHECK_MESSAGE(e_norm < 1e-6,
+                        "avx2-vs-scalar norm relative L2=" +
+                            std::to_string(e_norm));
+    BOOST_CHECK_LE(std::abs(static_cast<double>(auto_out.raw_l2_norm) -
+                            static_cast<double>(scratch_ref_est_l2)),
+                   1e-6);
+}
+
