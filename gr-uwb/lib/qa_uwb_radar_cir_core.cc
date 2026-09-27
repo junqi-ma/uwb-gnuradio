@@ -39,6 +39,7 @@ using gr::uwb::demod::kQm35CodeLength;
 using gr::uwb::demod::kQm35SamplesPerSymbol;
 using gr::uwb::radar::prepare_radar_cir_core;
 using gr::uwb::radar::radar_cir_one;
+using gr::uwb::radar::radar_cir_locate;
 using gr::uwb::radar::RadarCirConfig;
 using gr::uwb::radar::RadarCirCoreScratch;
 using gr::uwb::radar::RadarCirResult;
@@ -396,6 +397,166 @@ BOOST_AUTO_TEST_CASE(test_radar_cir_invalid_input)
     BOOST_CHECK(out.status == RadarCirStatus::InvalidInput);
     BOOST_CHECK_EQUAL(out.sfd_start_sample, int64_t(-1));
     assert_empty_cir(out);
+}
+
+// Phase-1 refactor: radar_cir_one is split into a reusable locate stage
+// (SFD/SYNC-refine/origin-prediction + boundary checks) and the
+// average-mode CIR estimate.  These QA cases pin the locate stage itself:
+// success must match the radar_cir_one location fields (repetitions/both),
+// failures must map to the same status as radar_cir_one, and the
+// remaining-repetition count must follow min(cir_repetitions, reps-skip)
+// including the boundary windows.
+BOOST_AUTO_TEST_CASE(test_radar_cir_locate_matches_radar_cir_one)
+{
+    const auto sync = load_sync_pulse();
+    RadarCirCoreScratch scratch;
+    BOOST_REQUIRE(prepare_from_sync(sync, scratch));
+    auto pkt = make_sync_sfd_packet(sync, 64);
+
+    // Success (detected SFD path): locate fields equal radar_cir_one.
+    RadarCirResult via_one;
+    BOOST_REQUIRE(radar_cir_one(pkt.rx.data(), pkt.rx.size(), pkt.sfd_start,
+                                make_cfg(64), scratch, via_one));
+    BOOST_REQUIRE(via_one.status == RadarCirStatus::Ok);
+
+    RadarCirResult via_locate;
+    size_t remaining = 0;
+    BOOST_REQUIRE(radar_cir_locate(pkt.rx.data(), pkt.rx.size(),
+                                   pkt.sfd_start, make_cfg(64), scratch,
+                                   via_locate, remaining));
+    BOOST_CHECK(via_locate.sfd_start_sample == via_one.sfd_start_sample);
+    BOOST_CHECK(via_locate.preamble_start_sample ==
+                via_one.preamble_start_sample);
+    BOOST_CHECK(via_locate.cir_origin_sample == via_one.cir_origin_sample);
+    BOOST_CHECK(via_locate.sfd_metric == via_one.sfd_metric);
+    BOOST_CHECK(via_locate.sync_metric == via_one.sync_metric);
+    // Locate must not write success tap/result fields.
+    BOOST_CHECK_EQUAL(via_locate.tap_count, size_t(0));
+    BOOST_CHECK_EQUAL(via_locate.valid_repetitions, size_t(0));
+    // min(54, 64-10) = 54 repetitions remain.
+    BOOST_CHECK_EQUAL(remaining, size_t(54));
+
+    // Success (predicted-timing path).
+    RadarCirConfig pred = make_cfg(64);
+    pred.use_predicted_timing = true;
+    RadarCirResult pred_one;
+    BOOST_REQUIRE(radar_cir_one(pkt.rx.data(), pkt.rx.size(), pkt.sfd_start,
+                                pred, scratch, pred_one));
+    RadarCirResult pred_locate;
+    size_t pred_remaining = 0;
+    BOOST_REQUIRE(radar_cir_locate(pkt.rx.data(), pkt.rx.size(),
+                                   pkt.sfd_start, pred, scratch,
+                                   pred_locate, pred_remaining));
+    BOOST_CHECK(pred_locate.sfd_start_sample == pred_one.sfd_start_sample);
+    BOOST_CHECK(pred_locate.preamble_start_sample ==
+                pred_one.preamble_start_sample);
+    BOOST_CHECK(pred_locate.cir_origin_sample ==
+                pred_one.cir_origin_sample);
+    BOOST_CHECK_EQUAL(pred_remaining, size_t(54));
+}
+
+BOOST_AUTO_TEST_CASE(test_radar_cir_locate_matches_failures)
+{
+    const auto sync = load_sync_pulse();
+    RadarCirCoreScratch scratch;
+    BOOST_REQUIRE(prepare_from_sync(sync, scratch));
+    auto pkt = make_sync_sfd_packet(sync, 64);
+
+    // Invalid input: same gate as radar_cir_one and no stage indices.
+    RadarCirResult one_bad;
+    BOOST_REQUIRE(!radar_cir_one(nullptr, pkt.rx.size(), pkt.sfd_start,
+                                 make_cfg(64), scratch, one_bad));
+    RadarCirResult locate_bad;
+    size_t remaining = 99;
+    BOOST_REQUIRE(!radar_cir_locate(nullptr, pkt.rx.size(), pkt.sfd_start,
+                                    make_cfg(64), scratch, locate_bad,
+                                    remaining));
+    BOOST_CHECK(locate_bad.status == RadarCirStatus::InvalidInput);
+    BOOST_CHECK_EQUAL(locate_bad.sfd_start_sample, int64_t(-1));
+    BOOST_CHECK_EQUAL(locate_bad.preamble_start_sample, int64_t(-1));
+    BOOST_CHECK_EQUAL(locate_bad.cir_origin_sample, int64_t(-1));
+
+    // SFD failure.
+    const size_t sfd_len = GetSfdSequence("4z2").size() * sync.size();
+    std::fill(pkt.rx.begin() + pkt.sfd_start,
+              pkt.rx.begin() + pkt.sfd_start + static_cast<int64_t>(sfd_len),
+              gr_complex(0.0f, 0.0f));
+    RadarCirResult one_sfd;
+    BOOST_REQUIRE(!radar_cir_one(pkt.rx.data(), pkt.rx.size(), pkt.sfd_start,
+                                 make_cfg(64), scratch, one_sfd));
+    RadarCirResult locate_sfd;
+    BOOST_REQUIRE(!radar_cir_locate(pkt.rx.data(), pkt.rx.size(),
+                                    pkt.sfd_start, make_cfg(64), scratch,
+                                    locate_sfd, remaining));
+    BOOST_CHECK(locate_sfd.status == one_sfd.status);
+    BOOST_CHECK(locate_sfd.status == RadarCirStatus::SfdFailed);
+    BOOST_CHECK_EQUAL(locate_sfd.sfd_start_sample, int64_t(-1));
+    BOOST_CHECK_EQUAL(locate_sfd.cir_origin_sample, int64_t(-1));
+
+    // Timing failure (SYNC zeroed): SFD found, refine fails.
+    auto pkt_timing = make_sync_sfd_packet(sync, 64);
+    std::fill(pkt_timing.rx.begin() + pkt_timing.origin,
+              pkt_timing.rx.begin() + pkt_timing.sfd_start,
+              gr_complex(0.0f, 0.0f));
+    RadarCirResult one_timing;
+    BOOST_REQUIRE(!radar_cir_one(pkt_timing.rx.data(), pkt_timing.rx.size(),
+                                 pkt_timing.sfd_start, make_cfg(64), scratch,
+                                 one_timing));
+    RadarCirResult locate_timing;
+    BOOST_REQUIRE(!radar_cir_locate(pkt_timing.rx.data(),
+                                    pkt_timing.rx.size(),
+                                    pkt_timing.sfd_start, make_cfg(64),
+                                    scratch, locate_timing, remaining));
+    BOOST_CHECK(locate_timing.status == one_timing.status);
+    BOOST_CHECK(locate_timing.status == RadarCirStatus::TimingFailed);
+    BOOST_CHECK_EQUAL(locate_timing.preamble_start_sample, int64_t(-1));
+    BOOST_CHECK_EQUAL(locate_timing.cir_origin_sample, int64_t(-1));
+}
+
+BOOST_AUTO_TEST_CASE(test_radar_cir_locate_remaining_boundary)
+{
+    const auto sync = load_sync_pulse();
+    RadarCirCoreScratch scratch;
+    BOOST_REQUIRE(prepare_from_sync(sync, scratch));
+    auto pkt = make_sync_sfd_packet(sync, 64);
+
+    // Boundary window: skip approaches sync_reps; the count must be
+    // min(cir_repetitions, sync_reps - skip) and the gate must fail before
+    // any CIR is invoked when no repetition remains.
+    struct Bound {
+        size_t skip;
+        size_t reps;
+        bool ok;
+        size_t remaining; // when ok
+    };
+    const Bound bounds[] = {
+        {10, 54, true, 54},   // config default
+        {10, 999, true, 54},  // reps clamped by sync window
+        {63, 54, true, 1},    // exactly one repetition remains
+        {63, 0, false, 0},    // zero requested repetitions fails
+        {64, 54, false, 0},   // skip reaches the SYNC window end
+        {65, 54, false, 0},   // skip beyond the window
+    };
+    for (const Bound& b : bounds) {
+        RadarCirConfig cfg = make_cfg(64);
+        cfg.cir_skip_initial = b.skip;
+        cfg.cir_repetitions = b.reps;
+        RadarCirResult out;
+        size_t remaining = 0;
+        const bool ok =
+            radar_cir_locate(pkt.rx.data(), pkt.rx.size(), pkt.sfd_start,
+                             cfg, scratch, out, remaining);
+        BOOST_CHECK_MESSAGE(ok == b.ok,
+                            "skip=" << b.skip << " reps=" << b.reps);
+        if (b.ok) {
+            BOOST_CHECK_EQUAL(remaining, b.remaining);
+            // Cross-check against the estimator entry with the same window:
+            // repetition count is all it takes for the average estimate to
+            // succeed here.
+        } else {
+            BOOST_CHECK(out.status == RadarCirStatus::CirFailed);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(test_radar_cir_sfd_failed)

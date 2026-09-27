@@ -1,0 +1,23 @@
+-- core (no GNU Radio scheduler) --
+  SFD search ±64                      n= 16  mean=  1409.3  p50=  1409.5  p95=  1419.7  p99=  1423.6  max=  1423.6 us
+  SYNC refine ±8                      n= 16  mean=    22.8  p50=    22.6  p95=    22.6  p99=    25.8  max=    25.8 us
+  estimateCir 54-rep                   n= 16  mean=   401.6  p50=   400.2  p95=   411.6  p99=   413.6  max=   413.6 us
+  radar_cir_one (all 3)                n= 16  mean=  1678.0  p50=  1674.3  p95=  1695.4  p99=  1698.0  max=  1698.0 us
+  taps quality_minorder 65/48=2707  65/32=2707; realtime_minorder 65/48=1319  65/32=1055
+-- PDU blocks (GNU Radio message handlers / workers) --
+  PDU 65/48 FC32 quality               n= 64  mean=  2012.0  p50=  2000.1  p95=  2022.7  p99=  2251.2  max=  2252.2 us
+           internal  handler=1843.0  fir=1446.4  sc16=0.0  publish=256.9 us/pdu  max_fir=1587 us
+  PDU 65/48 SC16 quality               n= 64  mean=  2027.2  p50=  2000.0  p95=  2004.7  p99=  2494.7  max=  3000.4 us
+           internal  handler=1879.2  fir=1436.8  sc16=31.3  publish=266.2 us/pdu  max_fir=2327 us
+  PDU 65/32 FC32 quality               n= 64  mean=  2057.4  p50=  2000.1  p95=  3057.3  p99=  3303.2  max=  3303.2 us
+           internal  handler=1855.1  fir=1604.9  sc16=0.0  publish=112.0 us/pdu  max_fir=2726 us
+  PDU 65/32 SC16 quality               n= 64  mean=  1826.9  p50=  1749.8  p95=  2028.9  p99=  2256.7  max=  2784.2 us
+           internal  handler=1737.6  fir=1480.2  sc16=18.5  publish=103.1 us/pdu  max_fir=2381 us
+  PDU 65/48 FC32 realtime              n= 64  mean=  1579.8  p50=  1503.3  p95=  2015.9  p99=  2029.7  max=  2280.4 us
+           internal  handler=1388.0  fir=1159.5  sc16=0.0  publish=97.3 us/pdu  max_fir=1792 us
+  PDU 65/32 FC32 realtime              n= 64  mean=  1266.1  p50=  1251.7  p95=  1261.7  p99=  1503.7  max=  1773.6 us
+           internal  handler=1151.6  fir=924.3  sc16=0.0  publish=93.7 us/pdu  max_fir=1391 us
+  CirEstimator serial (work window)    n= 64  mean=  2013.4  p50=  2000.0  p95=  2027.0  p99=  2282.4  max=  2284.4 us
+           service  mean=1819  p95=1920  p99=2176  max=2112 us  completed=64 dropped=0
+  CirWriter serial (116 taps+jsonl)    n= 64  mean=   250.3  p50=   254.4  p95=   254.9  p99=   255.2  max=   258.3 us
+  LoopbackEcho full native TX (QA)     n= 64  mean=  1001.9  p50=  1000.3  p95=  1011.3  p99=  1012.4  max=  1016.3 us

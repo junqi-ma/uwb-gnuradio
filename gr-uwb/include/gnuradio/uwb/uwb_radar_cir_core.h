@@ -18,6 +18,13 @@
  * peak_tap is argmax(|raw|) on the estimateCir grid, not physical zero range.
  *
  * HOT PATH (radar_cir_one): no heap allocation / no vector growth.
+ *
+ * radar_cir_one is split into a reusable locate stage (detail::
+ * radar_cir_locate) plus the average-mode CIR estimate.  The locate stage
+ * runs the front-gate validation, SFD search / SYNC refine (or the
+ * predicted-timing shortcut), predicts the CIR origin and checks that at
+ * least one repetition remains.  Other callers may reuse the locate stage;
+ * the public radar_cir_one result (average mode) is unchanged.
  */
 
 #pragma once
@@ -262,16 +269,24 @@ inline bool prepare_radar_cir_core(const RadarCirConfig& cfg,
 }
 
 // HOT PATH: no heap alloc / no vector growth.
-inline bool radar_cir_one(const std::complex<float>* rx,
-                          size_t n,
-                          int64_t predicted_sfd_start,
-                          const RadarCirConfig& cfg,
-                          RadarCirCoreScratch& scratch,
-                          RadarCirResult& out)
+//
+// Shared locate stage of radar_cir_one: front-gate validation, SFD search /
+// SYNC refine (or predicted-timing shortcut), CIR-origin prediction and the
+// skip/count boundary check.  On success it returns true and fills
+// out.sfd_start_sample / out.sfd_metric / out.preamble_start_sample /
+// out.sync_metric / out.cir_origin_sample plus the exact CIR repetition
+// count (min(cir_repetitions, sync_reps - cir_skip_initial)).  Callers must
+// have zeroed RadarCirResult and set predicted_sfd_start; all other out
+// fields are untouched.  On failure it returns false with out.status set
+// and zeroes the CIR taps in scratch.
+inline bool radar_cir_locate(const std::complex<float>* rx,
+                             size_t n,
+                             int64_t predicted_sfd_start,
+                             const RadarCirConfig& cfg,
+                             RadarCirCoreScratch& scratch,
+                             RadarCirResult& out,
+                             size_t& remaining_reps)
 {
-    out = RadarCirResult{};
-    out.predicted_sfd_start = predicted_sfd_start;
-
     const bool identity_ok = detail::profile_matches(scratch.prepared, cfg);
     const bool thr_ok = cfg.use_predicted_timing ||
                         (detail::finite_positive(cfg.sfd_threshold) &&
@@ -359,11 +374,34 @@ inline bool radar_cir_one(const std::complex<float>* rx,
         detail::zero_cir_taps(scratch.cir);
         return false;
     }
+    remaining_reps =
+        std::min(cfg.cir_repetitions, sync_reps - cfg.cir_skip_initial);
+    return true;
+}
+
+// HOT PATH: no heap alloc / no vector growth.
+inline bool radar_cir_one(const std::complex<float>* rx,
+                          size_t n,
+                          int64_t predicted_sfd_start,
+                          const RadarCirConfig& cfg,
+                          RadarCirCoreScratch& scratch,
+                          RadarCirResult& out)
+{
+    out = RadarCirResult{};
+    out.predicted_sfd_start = predicted_sfd_start;
+
+    size_t count = 0;
+    if (!radar_cir_locate(rx, n, predicted_sfd_start, cfg, scratch, out,
+                          count))
+        return false;
 
     RadarCirEstimate cir;
-    if (!estimate_radar_cir(rx, n, cir_origin, sps, cfg.cir_pre, cfg.cir_post,
-                            cfg.cir_skip_initial, cfg.cir_repetitions,
-                            sync_reps, cir, scratch.cir)) {
+    if (!estimate_radar_cir(rx, n, out.cir_origin_sample,
+                            scratch.prepared.samples_per_symbol, cfg.cir_pre,
+                            cfg.cir_post, cfg.cir_skip_initial,
+                            cfg.cir_repetitions,
+                            scratch.prepared.sync_repetitions, cir,
+                            scratch.cir)) {
         out.status = RadarCirStatus::CirFailed;
         detail::zero_cir_taps(scratch.cir);
         return false;
