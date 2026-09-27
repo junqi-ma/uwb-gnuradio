@@ -41,6 +41,17 @@ class ConstantsTest(unittest.TestCase):
         self.assertEqual(jp.DEFAULT_JAM_CHANNEL, 1)
 
 
+class RandomPayloadCapacityTest(unittest.TestCase):
+    def test_exact_capacity_and_exhaustion(self):
+        jp.validate_random_payload_capacity(1, 256)
+        with self.assertRaisesRegex(ValueError, "cannot produce 257 unique"):
+            jp.validate_random_payload_capacity(1, 257)
+
+    def test_invalid_data_length(self):
+        with self.assertRaises(ValueError):
+            jp.validate_random_payload_capacity(0, 1)
+
+
 class PayloadBoundaryTest(unittest.TestCase):
     def test_hrp_payload_field_offsets(self):
         # 4z2: 128 SYNC + 8 SFD symbols, 4z STS, 21 PHR symbols.
@@ -273,6 +284,16 @@ class ComposeTest(unittest.TestCase):
 
 
 class ValidateTest(unittest.TestCase):
+    def test_every_scan_offset_is_checked(self):
+        self.assertIsNone(jp.validate_jam_args(good_args(
+            jam_freq_offsets_hz=[0.0, -1e6, 1e6])))
+        with self.assertRaisesRegex(ValueError, r"jam_freq_offsets_hz\[1\]"):
+            jp.validate_jam_args(good_args(
+                jam_freq_offsets_hz=[0.0, 1e6 + 1]))
+        with self.assertRaisesRegex(ValueError, r"jam_freq_offsets_hz\[1\]"):
+            jp.validate_jam_args(good_args(
+                jam_freq_offsets_hz=[0.0, float("nan")]))
+
     def test_success_align(self):
         self.assertIsNone(jp.validate_jam_args(good_args()))
         self.assertIsNone(jp.validate_jam_args(good_args(jam_mode="off")))

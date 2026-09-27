@@ -357,6 +357,12 @@ def validate_jam_args(args):
     if abs(off) > _MAX_FREQ_OFFSET_HZ:
         raise ValueError(
             "jam_freq_offset_hz must satisfy abs(...) <= 1e6, got %r" % (off,))
+    for i, value in enumerate(args.get("jam_freq_offsets_hz") or ()):
+        scan_off = _as_finite("jam_freq_offsets_hz[%d]" % i, value)
+        if abs(scan_off) > _MAX_FREQ_OFFSET_HZ:
+            raise ValueError(
+                "jam_freq_offsets_hz[%d] must satisfy abs(...) <= 1e6, got %r"
+                % (i, scan_off))
 
     code = args.get("jam_code_index")
     if code not in _JAM_CODE_INDICES:
@@ -384,6 +390,18 @@ def validate_jam_args(args):
             raise ValueError(
                 "jam_delay_random_us must be <= %g us, got %r"
                 % (_MAX_DELAY_RANDOM_US, t))
+
+
+def validate_random_payload_capacity(data_bytes, pulse_count):
+    """Reject a unique-PSDU request larger than its finite data space."""
+    nbytes = int(data_bytes)
+    count = int(pulse_count)
+    if nbytes < 1 or count < 0:
+        raise ValueError("random payload needs data bytes and a valid pulse count")
+    if count > (1 << (8 * nbytes)):
+        raise ValueError(
+            "random payload cannot produce %d unique PSDUs from %d data byte(s)"
+            % (count, nbytes))
 
 
 # --- C++ dual-TX schedule metadata (§5.3, M3 app layer) --------------------

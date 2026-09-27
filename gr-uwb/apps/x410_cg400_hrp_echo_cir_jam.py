@@ -284,10 +284,10 @@ class JamTimedUhdEcho(base.TimedUhdEcho):
         self._jam_payload_bank = bank
         self.status["jam_random_payloads"] = int(bank.shape[0])
 
-    def _select_jam_payload(self, pulse_id):
+    def _select_jam_payload(self, payload_index):
         if self._jam_payload_bank is not None:
             jp.place_jam_row(
-                self._tx_payload, self._jam_payload_bank[pulse_id],
+                self._tx_payload, self._jam_payload_bank[payload_index],
                 int(self.tx_lead_native) + int(self.jam_delay_native))
 
     def _randomize_jam_delay(self):
@@ -400,7 +400,12 @@ class JamTimedUhdEcho(base.TimedUhdEcho):
                             continue
 
                 self._randomize_jam_delay()
-                self._select_jam_payload(pulse_id)
+                # Scan retries reuse the pending successful-capture slot.
+                # Thus a failed attempt never exhausts the precomputed bank
+                # and every captured scan pulse still has a distinct PSDU.
+                payload_index = (scan_step * self.jam_dwell + ok_in_step
+                                 if scan else pulse_id)
+                self._select_jam_payload(payload_index)
                 # The publisher can run before _one_burst returns.  Publish
                 # frequency metadata first so its CIR PDU sees this pulse's
                 # actual jammer tune, even at a dwell transition.
@@ -1355,6 +1360,7 @@ def main():
         "rx_channel": int(a.rx_channel),
         "jam_freq_offset_hz": float(
             jam_offsets[0] if jam_offsets else a.jam_freq_offset),
+        "jam_freq_offsets_hz": jam_offsets,
         "jam_code_index": int(a.jam_code_index),
         "jam_scale": float(a.jam_scale),
         "jam_repeat_pri_us": float(a.jam_repeat_pri_us),
@@ -1455,9 +1461,11 @@ def main():
                  jam_work_samples, full_work, jam_native.size,
                  (time.perf_counter() - t_j) * 1e3), flush=True)
         if a.jam_random_payload:
-            if len(jam_psdu) < 3:
-                raise SystemExit("random payload needs at least one data "
-                                 "byte plus two FCS bytes")
+            try:
+                jp.validate_random_payload_capacity(len(jam_psdu) - 2,
+                                                    a.pulses)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
             t_bank = time.perf_counter()
             rng = np.random.default_rng(a.jam_payload_seed)
             random_payload_bank = np.empty(
@@ -1683,39 +1691,47 @@ def main():
     if udp is not None:
         tb.msg_connect((est, "cir"), (udp, "cir"))
 
-    tb.start()
-    echo.start_publisher()
     live_stop = threading.Event()
-    live_th = base.start_live_stats(echo, est, wr, udp, live_stop, a.pri_s, res)
-    t_run = time.perf_counter()
-    echo.run_schedule()
-    sched_s = time.perf_counter() - t_run
-    print("schedule_wall_s=%.3f" % sched_s, flush=True)
-    live_stop.set()
-    live_th.join(timeout=1.5)
-
-    deadline = time.time() + 8.0
-    while time.time() < deadline:
-        written = wr.frames_written() + wr.frames_failed()
-        avg_written = (echo._ok if wr_avg is None else
-                       wr_avg.frames_written() + wr_avg.frames_failed())
-        if (written >= echo._ok * cir_records_per_pulse and
-                avg_written >= echo._ok and est.drained()
-                and echo._pub_q.empty()):
-            break
-        time.sleep(0.05)
-    echo.stop_publisher()
-    tb.stop()
-    tb.wait()
+    live_th = None
+    drain_complete = False
     try:
-        wr.stop()
-    except Exception:
-        pass
-    if wr_avg is not None:
+        tb.start()
+        echo.start_publisher()
+        live_th = base.start_live_stats(
+            echo, est, wr, udp, live_stop, a.pri_s, res)
+        t_run = time.perf_counter()
+        echo.run_schedule()
+        sched_s = time.perf_counter() - t_run
+        print("schedule_wall_s=%.3f" % sched_s, flush=True)
+
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            written = wr.frames_written() + wr.frames_failed()
+            avg_written = (echo._ok if wr_avg is None else
+                           wr_avg.frames_written() + wr_avg.frames_failed())
+            drain_complete = (
+                written >= echo._ok * cir_records_per_pulse and
+                avg_written >= echo._ok and est.drained() and
+                echo._pub_q.empty())
+            if drain_complete:
+                break
+            time.sleep(0.05)
+    finally:
+        live_stop.set()
+        if live_th is not None:
+            live_th.join(timeout=1.5)
+        echo.stop_publisher()
+        tb.stop()
+        tb.wait()
         try:
-            wr_avg.stop()
+            wr.stop()
         except Exception:
             pass
+        if wr_avg is not None:
+            try:
+                wr_avg.stop()
+            except Exception:
+                pass
 
     jsonl = os.path.join(a.output, "cir.jsonl")
     cir_stats = base.analyze_cir(jsonl, a.pulses)
@@ -1884,9 +1900,12 @@ def main():
         "est_invalid": est.invalid_inputs(),
         "wr_ok": wr.frames_written(),
         "wr_fail": wr.frames_failed(),
+        "wr_drop": wr.frames_dropped(),
         "wr_invalid": wr.frames_invalid(),
         "wr_avg_ok": 0 if wr_avg is None else wr_avg.frames_written(),
         "wr_avg_fail": 0 if wr_avg is None else wr_avg.frames_failed(),
+        "wr_avg_drop": 0 if wr_avg is None else wr_avg.frames_dropped(),
+        "drain_complete": drain_complete,
         "use_predicted_timing": use_pred,
         "est_queue_capacity": est_q,
         "est_service_us_mean": int(est.service_mean_us()),
@@ -1985,8 +2004,13 @@ def main():
              summary["jam_retune"]), flush=True)
     if os.path.isfile(jsonl):
         print("cir.jsonl_lines=%d" % cir_stats.get("lines", 0), flush=True)
-    ok = (summary["wr_ok"] == a.pulses * cir_records_per_pulse
+    ok = (drain_complete
+          and summary["wr_ok"] == a.pulses * cir_records_per_pulse
           and summary["echo_ok"] == a.pulses
+          and summary["res_drop"] == 0
+          and summary["est_drop"] == 0
+          and summary["wr_drop"] == 0
+          and summary["wr_avg_drop"] == 0
           and (a.cir_output != "both" or summary["wr_avg_ok"] == a.pulses))
     # Late slot skips are by design in the C++ grid: an expired slot is
     # skipped (never retried) and the schedule continues with higher pulse

@@ -12,7 +12,10 @@ Run:
 from __future__ import annotations
 
 import ast
+import contextlib
+import io
 import os
+import time
 import unittest
 
 
@@ -77,6 +80,22 @@ def _load_functions(*names):
     ns = {}
     exec(compile(module, path, "exec"), ns)
     return {name: ns[name] for name in names}
+
+
+def _load_class_method(class_name, method_name):
+    """Run a hardware-free class method with a fake instance."""
+    path = _app_path()
+    tree = ast.parse(_source(), path)
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for method in node.body:
+                if isinstance(method, ast.FunctionDef) and method.name == method_name:
+                    module = ast.Module(body=[method], type_ignores=[])
+                    ast.fix_missing_locations(module)
+                    ns = {"time": time}
+                    exec(compile(module, path, "exec"), ns)
+                    return ns[method_name]
+    raise AssertionError("missing %s.%s" % (class_name, method_name))
 
 
 class ParseFreqOffsetsTest(unittest.TestCase):
@@ -218,6 +237,59 @@ class StaticContractTest(unittest.TestCase):
         self.assertIn("jp.payload_start_work(", src)
         self.assertNotIn("sense_payload_start_native", src)
         self.assertIn("requires a non-negative ", src)
+
+
+class ScanRetryTest(unittest.TestCase):
+    def test_failed_attempt_reuses_pending_random_payload(self):
+        run_schedule = _load_class_method("JamTimedUhdEcho", "run_schedule")
+
+        class FakeEcho:
+            _native = object()
+            jam_offsets = [0.0]
+            jam_dwell = 2
+            max_pulses = 2
+            pri_s = 0.001
+            freq_settle_s = 0.0
+            jam_freq_offset = 0.0
+            jam_enable = False
+            _ok = 0
+            _fail = 0
+            _late = 0
+            _sc16_written = 0
+            jam_delay_us = 0.0
+            jam_retune_count = 0
+
+            def __init__(self):
+                self.slots = []
+                self.attempts = iter((False, True, True))
+
+            def open_sc16_dump(self):
+                pass
+
+            def close_sc16_dump(self):
+                pass
+
+            def start_publisher(self):
+                pass
+
+            def _randomize_jam_delay(self):
+                pass
+
+            def _select_jam_payload(self, index):
+                self.slots.append(index)
+                if index >= self.max_pulses:
+                    raise IndexError("payload bank exhausted")
+
+            def _one_burst(self, pulse_id):
+                captured = next(self.attempts)
+                self._ok += int(captured)
+                self._fail += int(not captured)
+                return captured
+
+        fake = FakeEcho()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_schedule(fake), (2, 1, 0))
+        self.assertEqual(fake.slots, [0, 0, 1])
 
 
 if __name__ == "__main__":
