@@ -1507,6 +1507,17 @@ def build_parser(add_help=True, cir_output_default="repetitions"):
                         % DEFAULT_CIR_POST)
     p.add_argument("--require-sfd", action="store_true",
                    help="Gate CIR on SFD search (default: use scheduled echo time)")
+    p.add_argument("--cir-writer-aggregate-bytes", type=int, default=1048576,
+                   help="CirWriter aggregate byte threshold: UCR4 records "
+                        "and JSONL lines accumulate in preallocated buffers "
+                        "and are emitted as one large write() when either "
+                        "the threshold or the 50 ms age window is reached. "
+                        "Makes the writer tolerant of multi-second "
+                        "disk-write stalls (large-block writes hit the "
+                        "stall window far less often than per-record "
+                        "writes).  Bytes on disk are bit-identical to the "
+                        "per-record path.  0 disables (legacy per-record "
+                        "writes).  Default 1 MiB = enabled")
     return p
 
 
@@ -1905,11 +1916,23 @@ def main():
           flush=True)
     cir_records_per_pulse = (max(1, int(a.sync_reps) - cir_skip_initial)
                              if emit_reps else 1)
+    wr_aggregate_bytes = max(0, int(a.cir_writer_aggregate_bytes))
+    wr_aggregate_window_ms = 50
+    if wr_aggregate_bytes > 0:
+        print("cir_writer aggregate window=%dms threshold=%dKiB "
+              "(worst RAM += ~2 x threshold = %d B; bytes on disk "
+              "bit-identical to per-record writes)"
+              % (wr_aggregate_window_ms, wr_aggregate_bytes // 1024,
+                 2 * wr_aggregate_bytes), flush=True)
+    else:
+        print("cir_writer aggregate DISABLED (per-record writes)", flush=True)
     wr = uwb.cir_writer(a.output, "cir", True,
-                        max(256, 4 * cir_records_per_pulse))
+                        max(256, 4 * cir_records_per_pulse),
+                        wr_aggregate_bytes, wr_aggregate_window_ms)
     wr_avg = None
     if a.cir_output == "both":
-        wr_avg = uwb.cir_writer(a.output, "cir_avg", True, max(64, est_q))
+        wr_avg = uwb.cir_writer(a.output, "cir_avg", True, max(64, est_q),
+                                wr_aggregate_bytes, wr_aggregate_window_ms)
         print("cir_avg coherent average of SYNC [%d, %d) -> %s "
               "(UDP stays per-repetition)" % (
                   avg_skip, int(a.sync_reps),
@@ -2004,6 +2027,9 @@ def main():
         "wr_ok": wr.frames_written(),
         "wr_fail": wr.frames_failed(),
         "wr_invalid": wr.frames_invalid(),
+        "cir_writer_aggregate_bytes": wr_aggregate_bytes,
+        "cir_writer_aggregate_flushes": int(wr.aggregate_flushes()),
+        "cir_writer_aggregate_max_bytes": int(wr.aggregate_max_bytes()),
         "wr_avg_ok": 0 if wr_avg is None else wr_avg.frames_written(),
         "wr_avg_fail": 0 if wr_avg is None else wr_avg.frames_failed(),
         "use_predicted_timing": use_pred,

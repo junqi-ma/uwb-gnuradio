@@ -50,6 +50,7 @@ REQUIRED_OPTIONS = (
     "--cir-emit-normalized",
     "--cir-writer-queue-pdus",
     "--cir-avg-writer-queue-pdus",
+    "--cir-writer-aggregate-bytes",
     "--jam-repeat-pri-us",
     "--jam-freq-settle-s",
     "--dry-run",
@@ -128,6 +129,58 @@ class CirWriterWorstCaseBytesTest(unittest.TestCase):
         self.assertEqual(payload, 128 * 116 * 8 + 128 * 24)
 
 
+class CirWriterAggregateTest(unittest.TestCase):
+    """Writer aggregate-bytes pass-through (盘停免疫) static contract.
+
+    Default must be ENABLED at 1 MiB (the soak failure mode — per-record
+    writes hitting a multi-second disk trough and filling the queue — is
+    exactly what aggregation fixes), 0 must restore the legacy per-record
+    path, and both base and jam chains must wire the flag into every
+    UwbCirWriter they create and publish the runtime stats in the summary.
+    """
+
+    BASE_NAME = "x410_cg400_hrp_echo_cir.py"
+
+    def _base_source(self):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            self.BASE_NAME)
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+
+    def test_cli_declared_default_enabled_1mib(self):
+        for src, name in ((_source(), APP_NAME),
+                          (self._base_source(), self.BASE_NAME)):
+            self.assertIn('"--cir-writer-aggregate-bytes"', src,
+                          "%s: missing aggregate-bytes option" % name)
+            # type=int, default 1 MiB (1048576)
+            self.assertIn("type=int, default=1048576", src,
+                          "%s: aggregate default must be 1 MiB" % name)
+            self.assertIn('"cir_writer_aggregate_bytes"', src,
+                          "%s: summary key missing" % name)
+            self.assertIn('"cir_writer_aggregate_flushes"', src,
+                          "%s: summary key missing" % name)
+            self.assertIn('"cir_writer_aggregate_max_bytes"', src,
+                          "%s: summary key missing" % name)
+
+    def test_writers_receive_aggregate_args(self):
+        src = _source()
+        # Both jam-chain writers (cir + cir_avg) forward the aggregate
+        # threshold (0 stays a supported explicit disable).
+        self.assertEqual(
+            src.count("a.cir_writer_aggregate_bytes"), 3,
+            "jam app must reference the aggregate flag in the cir and "
+            "cir_avg writer construction plus the summary key")
+        self.assertIn("max(0, int(a.cir_writer_aggregate_bytes)), 50)",
+                      src, "writer call must clamp negatives and pin the "
+                      "50 ms age window")
+        base = self._base_source()
+        self.assertEqual(
+            base.count("wr_aggregate_bytes"), 7,
+            "base app must reference the clamped aggregate value in both "
+            "writers + summary keys")
+        self.assertIn("wr_aggregate_bytes, wr_aggregate_window_ms)", base)
+
+
 class CirEmitNormalizedPolicyTest(unittest.TestCase):
     """Stage-3 consumer-driven normalized policy (静态契约).
 
@@ -159,7 +212,7 @@ class CirEmitNormalizedPolicyTest(unittest.TestCase):
         self.assertIn('a.sync_refine_threshold, emit_norm, est_q, use_pred',
                       src)
         self.assertIn('base.uwb.cir_writer(a.output, "cir", emit_norm, '
-                      'wr_queue_pdus)', src)
+                      'wr_queue_pdus,', src)
         self.assertIn('"cir_avg", emit_norm', src)
         # Worst-case RAM follows the policy too (payload bound halves).
         self.assertIn("cir_taps, emit_norm)", src)

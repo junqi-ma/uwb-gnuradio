@@ -1142,6 +1142,18 @@ def parse_args():
                         "pulse PDU entries (one entry = one averaged "
                         "record); same sizing rule as "
                         "--cir-writer-queue-pdus")
+    g.add_argument("--cir-writer-aggregate-bytes", type=int, default=1048576,
+                   help="CirWriter aggregate byte threshold (base app "
+                        "option, jam chain honors it for both writers): "
+                        "UCR4 records and JSONL lines accumulate in "
+                        "preallocated buffers and are emitted as one large "
+                        "write() per file when either the threshold or the "
+                        "50 ms age window is reached, making the writer "
+                        "tolerant of multi-second disk-write stalls "
+                        "(wr_hz troughs no longer fill the queue between "
+                        "per-record writes).  Bytes on disk are "
+                        "bit-identical to per-record writes.  0 disables "
+                        "(legacy per-record writes).  Default 1 MiB")
     g.add_argument("--jam-enable", action="store_true",
                    help="Transmit the second (jammer) TX channel.  Without "
                         "it the app degenerates to the base single-TX app.")
@@ -1731,13 +1743,16 @@ def main():
     print("cir_writer capacity is a starting candidate, NOT an acceptance "
           "value: final capacity must follow the production queue high "
           "watermark and worst-case disk-write latency", flush=True)
-    wr = base.uwb.cir_writer(a.output, "cir", emit_norm, wr_queue_pdus)
+    wr = base.uwb.cir_writer(a.output, "cir", emit_norm, wr_queue_pdus,
+                             max(0, int(a.cir_writer_aggregate_bytes)), 50)
     wr_avg = None
     if a.cir_output == "both":
         avg_ram, _ap, _au, _aj = cir_writer_worst_case_bytes(
             wr_avg_queue_pdus, 1, cir_taps, emit_norm)
         wr_avg = base.uwb.cir_writer(a.output, "cir_avg", emit_norm,
-                                     wr_avg_queue_pdus)
+                                     wr_avg_queue_pdus,
+                                     max(0, int(
+                                         a.cir_writer_aggregate_bytes)), 50)
         print("cir_avg writer queue capacity_pdus=%d (1 PDU = 1 averaged "
               "record x %d taps) worst_case_ram_bytes=%d"
               % (wr_avg_queue_pdus, cir_taps, avg_ram), flush=True)
@@ -1997,6 +2012,10 @@ def main():
         "wr_avg_drop": 0 if wr_avg is None else wr_avg.frames_dropped(),
         "cir_writer_queue_pdus": wr_queue_pdus,
         "cir_writer_queue_hwm": int(wr.queue_high_watermark()),
+        "cir_writer_aggregate_bytes": max(
+            0, int(a.cir_writer_aggregate_bytes)),
+        "cir_writer_aggregate_flushes": int(wr.aggregate_flushes()),
+        "cir_writer_aggregate_max_bytes": int(wr.aggregate_max_bytes()),
         "cir_avg_queue_pdus": 0 if wr_avg is None else wr_avg_queue_pdus,
         "cir_avg_queue_hwm": (0 if wr_avg is None
                               else int(wr_avg.queue_high_watermark())),
