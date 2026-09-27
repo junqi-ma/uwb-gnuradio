@@ -47,6 +47,8 @@ REQUIRED_OPTIONS = (
     "--jam-overlap-side",
     "--jam-overlap-seed",
     "--jam-scale",
+    "--cir-writer-queue-pdus",
+    "--cir-avg-writer-queue-pdus",
     "--jam-repeat-pri-us",
     "--jam-freq-settle-s",
     "--dry-run",
@@ -98,13 +100,39 @@ def _load_class_method(class_name, method_name):
     raise AssertionError("missing %s.%s" % (class_name, method_name))
 
 
+class CirWriterWorstCaseBytesTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.fn = staticmethod(
+            _load_functions(
+                "cir_writer_worst_case_bytes")["cir_writer_worst_case_bytes"])
+
+    def test_scales_linearly_with_capacity(self):
+        total1, payload, ucr4, jsonl = self.fn(64, 128, 116, True)
+        total2, _, _, _ = self.fn(128, 128, 116, True)
+        self.assertEqual(total2, 2 * total1)
+        # Payload dominates: raw + normalized FC32 batches.
+        self.assertEqual(payload, 128 * 116 * 8 * 2 + 128 * 24)
+        self.assertEqual(ucr4, 128 * (52 + 4 * 116))
+        self.assertGreater(jsonl, 0)
+
+    def test_average_mode_single_record(self):
+        total, payload, ucr4, _ = self.fn(64, 1, 116, True)
+        self.assertEqual(payload, 116 * 8 * 2 + 24)
+        self.assertEqual(ucr4, 52 + 4 * 116)
+        self.assertEqual(total, 64 * (payload + ucr4 + 640 + 120))
+
+    def test_without_normalized_taps(self):
+        _, payload, _, _ = self.fn(4, 128, 116, False)
+        self.assertEqual(payload, 128 * 116 * 8 + 128 * 24)
+
+
 class ParseFreqOffsetsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # staticmethod avoids the implicit self binding on class attributes.
         cls.fn = staticmethod(
             _load_functions("parse_freq_offsets")["parse_freq_offsets"])
-
     def test_empty(self):
         self.assertEqual(self.fn(""), [])
         self.assertEqual(self.fn(None), [])
