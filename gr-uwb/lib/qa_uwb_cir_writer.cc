@@ -10,6 +10,14 @@
  * frames advance file_offset_taps and write a UCR4 record), SC16
  * block-floating reconstruction, malformed PDU rejection, queue-full
  * drops, stop() draining, and restart truncation.
+ *
+ * Queue-unit semantics (per-pulse PDU metering): the bounded queue counts
+ * PDU entries — with batched repetitions one entry holds every repetition
+ * record of a pulse, so a full queue drops whole pulses.  The slow-disk
+ * hook UWB_CIR_WRITER_TEST_WRITE_DELAY_US (QA-only, read at construction)
+ * adds a fixed sleep before each dequeued write so full-queue drops,
+ * FIFO order, stop() drain and the capacity->RSS trend are observable
+ * deterministically.
  */
 
 #include <boost/test/unit_test.hpp>
@@ -20,17 +28,23 @@
 #include <gnuradio/uwb/uwb_cir_writer.h>
 #include <pmt/pmt.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <malloc.h>
+#include <sstream>
 #include <string>
 #include <thread>
+#include <sys/resource.h>
+#include <unistd.h>
 #include <vector>
 
 using gr::uwb::UwbCirWriter;
@@ -293,6 +307,60 @@ wait_written(const UwbCirWriter::sptr& w,
     }
     return true;
 }
+
+// Wait until the handler has accounted for every posted frame (written +
+// failed + dropped == want) without requiring the writer thread to drain.
+bool
+wait_settled(const UwbCirWriter::sptr& w,
+             uint64_t want,
+             long timeout_ms = 30000)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    for (;;) {
+        const uint64_t settled =
+            w->frames_written() + w->frames_failed() + w->frames_dropped();
+        if (settled >= want)
+            return true;
+        const auto ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0)
+                .count();
+        if (ms > timeout_ms) {
+            BOOST_TEST_MESSAGE("wait_settled timeout: want=" << want
+                               << " written=" << w->frames_written()
+                               << " failed=" << w->frames_failed()
+                               << " dropped=" << w->frames_dropped()
+                               << " received=" << w->frames_received()
+                               << " invalid=" << w->frames_invalid());
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+}
+
+// Current process RSS in bytes (from /proc/self/statm), for the
+// queue-capacity shrink trend test.  getrusage maxrss is monotonic, so the
+// live-queue comparison uses statm.
+uint64_t
+current_rss_bytes()
+{
+    std::ifstream f("/proc/self/statm");
+    uint64_t total = 0, resident = 0;
+    if (!(f >> total >> resident))
+        return 0;
+    return resident * static_cast<uint64_t>(::sysconf(_SC_PAGESIZE));
+}
+
+struct ScopedDelayEnv
+{
+    explicit ScopedDelayEnv(const char* us)
+    {
+        setenv("UWB_CIR_WRITER_TEST_WRITE_DELAY_US", us, 1);
+    }
+    ~ScopedDelayEnv() { unsetenv("UWB_CIR_WRITER_TEST_WRITE_DELAY_US"); }
+    ScopedDelayEnv(const ScopedDelayEnv&) = delete;
+    ScopedDelayEnv& operator=(const ScopedDelayEnv&) = delete;
+};
 
 } // namespace
 
@@ -702,4 +770,300 @@ BOOST_AUTO_TEST_CASE(test_writer_restart)
     std::vector<uint8_t> raw;
     BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
     BOOST_CHECK_EQUAL(raw.size(), 0u); // truncated by restart
+}
+
+// ---------------------------------------------------------------------------
+// Simulated slow disk (QA hook UWB_CIR_WRITER_TEST_WRITE_DELAY_US): a full
+// queue drops whole entries while the FIFO order of everything that was
+// enqueued is preserved and the UCR4 record offsets stay continuous.
+// Queue depth counts PDU entries — one entry per message (a batched
+// repetition pulse is one entry covering repetition_count records).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_writer_slow_disk_full_queue_drop_order)
+{
+    const std::string dir = make_temp_dir("slow_full");
+    const ScopedDelayEnv delay("3000"); // 3 ms per record > post loop time
+    constexpr size_t kCapacity = 8;
+    constexpr size_t kFrames = 60;
+    auto w = UwbCirWriter::make(dir, "cir", false, kCapacity);
+    auto dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_cir_writer_slow_full");
+    tb->msg_connect(w, "status", dbg, "store");
+    BOOST_REQUIRE(w->start());
+    tb->start();
+
+    for (uint64_t i = 0; i < kFrames; ++i)
+        w->_post(pmt::mp("cir"), make_frame(i, "ok", make_taps(i)));
+    // Every posted frame must be accounted for: enqueued or dropped.
+    BOOST_REQUIRE(wait_settled(w, kFrames));
+
+    BOOST_CHECK_EQUAL(w->frames_received(), kFrames);
+    // The queue is bounded: while the (slow) writer was busy, the depth
+    // reached the capacity exactly.
+    BOOST_CHECK_EQUAL(w->queue_high_watermark(), kCapacity);
+    // Drop accounting is exact: nothing is lost silently.
+    const uint64_t written = w->frames_written();
+    const uint64_t dropped = w->frames_dropped();
+    BOOST_REQUIRE_GT(written, 0u);
+    BOOST_REQUIRE_GT(dropped, 0u);
+    BOOST_CHECK_EQUAL(written + dropped, kFrames);
+
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(w->stop()); // drain: remaining queued entries are written
+
+    // Everything enqueued before the queue filled is written first, in
+    // posting order, with continuous UCR4 file offsets (ok frames only).
+    const auto lines = read_lines(dir + "/cir.jsonl");
+    BOOST_REQUIRE_EQUAL(lines.size(), written);
+    std::vector<uint8_t> raw;
+    BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
+    BOOST_CHECK_EQUAL(raw.size(), written * ucr4_record_bytes(kTaps));
+    std::vector<std::vector<gr_complex>> decoded;
+    BOOST_REQUIRE(load_ucr4(dir + "/cir.ucr4", decoded));
+    BOOST_REQUIRE_EQUAL(decoded.size(), written);
+    uint64_t offset = 0;
+    uint64_t prev_pid = 0;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        double v = 0.0;
+        BOOST_REQUIRE(parse_num(lines[i], "pulse_id", v));
+        const uint64_t pid = static_cast<uint64_t>(std::llround(v));
+        // FIFO order is preserved for everything written: the first
+        // posted frame is always enqueued (empty queue) and later frames
+        // are written strictly in posting order.  Frames that arrived
+        // while the queue was full are the dropped ones, so the written
+        // ids are increasing but not necessarily consecutive.
+        if (i == 0)
+            BOOST_CHECK_EQUAL(pid, 0u);
+        else
+            BOOST_CHECK_GT(pid, prev_pid);
+        prev_pid = pid;
+        BOOST_REQUIRE(parse_num(lines[i], "file_offset_taps", v));
+        BOOST_CHECK_EQUAL(static_cast<uint64_t>(std::llround(v)), offset);
+        BOOST_CHECK_LT(rel_l2(decoded[i], make_taps(pid)), 1e-4);
+        offset += kTaps;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Simulated slow disk + stop(): everything still queued at stop() time is
+// drained to the files; JSONL line count == written frames, UCR4 records ==
+// written frames, and received == written + failed + dropped exactly.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_writer_slow_disk_stop_drains_rest)
+{
+    const std::string dir = make_temp_dir("slow_drain");
+    const ScopedDelayEnv delay("5000"); // 5 ms per record
+    constexpr size_t kCapacity = 16;
+    constexpr size_t kFrames = 40;
+    auto w = UwbCirWriter::make(dir, "cir", false, kCapacity);
+    auto dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_cir_writer_slow_drain");
+    tb->msg_connect(w, "status", dbg, "store");
+    BOOST_REQUIRE(w->start());
+    tb->start();
+
+    for (uint64_t i = 0; i < kFrames; ++i)
+        w->_post(pmt::mp("cir"), make_frame(i, "ok", make_taps(i)));
+    BOOST_REQUIRE(wait_settled(w, kFrames));
+    // Stop while the queue still holds entries (the writer is ~5 ms/frame).
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(w->stop());
+
+    BOOST_CHECK_EQUAL(w->frames_received(), kFrames);
+    const uint64_t written = w->frames_written();
+    const uint64_t dropped = w->frames_dropped();
+    BOOST_REQUIRE_GT(written, 0u);
+    BOOST_CHECK_EQUAL(written + dropped, kFrames);
+    // Drain left nothing behind: file contents match the counters exactly.
+    const auto lines = read_lines(dir + "/cir.jsonl");
+    BOOST_REQUIRE_EQUAL(lines.size(), written);
+    std::vector<uint8_t> raw;
+    BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
+    BOOST_CHECK_EQUAL(raw.size(), written * ucr4_record_bytes(kTaps));
+    // FIFO order preserved across the stop() drain: strictly increasing
+    // pulse_ids starting at the first posted frame (drops leave gaps).
+    uint64_t prev_pid = 0;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        double v = 0.0;
+        BOOST_REQUIRE(parse_num(lines[i], "pulse_id", v));
+        const uint64_t pid = static_cast<uint64_t>(std::llround(v));
+        if (i == 0)
+            BOOST_CHECK_EQUAL(pid, 0u);
+        else
+            BOOST_CHECK_GT(pid, prev_pid);
+        prev_pid = pid;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Queue-capacity shrink trend (256 -> 64): with large tap payloads, the
+// resident set while the queue is full tracks the capacity.  getrusage
+// maxrss is monotonic, so the live comparison samples /proc/self/statm at
+// each full-queue point.  A trend observation, not a precision test.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_writer_queue_capacity_rss_trend)
+{
+    // Frame payload > glibc's default 128 KiB mmap threshold so each queued
+    // frame is mmap-backed and returned to the OS on free.
+    constexpr size_t kBigTaps = 20480; // 20480 * 8 B = 160 KiB per frame
+    const std::vector<gr_complex> big_taps(kBigTaps, gr_complex(0.25f, -0.5f));
+    const ScopedDelayEnv delay("5000");
+
+    auto fill_and_sample = [&](size_t capacity, size_t frames,
+                               uint64_t& full_rss) {
+        const std::string dir =
+            make_temp_dir("rss_" + std::to_string(capacity));
+        auto w = UwbCirWriter::make(dir, "cir", false, capacity);
+        auto dbg = gr::blocks::message_debug::make();
+        auto tb = gr::make_top_block(
+            ("qa_cir_writer_rss_" + std::to_string(capacity)).c_str());
+        // The block must be part of the flowgraph (a message edge) for its
+        // scheduler thread to dispatch the queued handlers.
+        tb->msg_connect(w, "status", dbg, "store");
+        BOOST_REQUIRE(w->start());
+        tb->start();
+        // Return previously freed heap to the OS so this phase's baseline
+        // is not polluted by earlier tests' retained arenas.
+        malloc_trim(0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const uint64_t rss_base = current_rss_bytes();
+        for (uint64_t i = 0; i < frames; ++i)
+            w->_post(pmt::mp("cir"), make_frame(i, "ok", big_taps));
+        BOOST_REQUIRE(wait_settled(w, frames));
+        // The writer thread is still sleeping before its next write, so
+        // most of the queue is resident here.
+        full_rss = current_rss_bytes() - rss_base;
+        tb->stop();
+        tb->wait();
+        BOOST_REQUIRE(w->stop());
+    };
+
+    uint64_t rss_full_256 = 0, rss_full_64 = 0;
+    fill_and_sample(256, 260, rss_full_256); // full queue (~256 entries)
+    fill_and_sample(64, 68, rss_full_64);    // full queue (~64 entries)
+    BOOST_REQUIRE_GT(rss_full_256, 0u);
+    BOOST_REQUIRE_GT(rss_full_64, 0u);
+    // Observability aids (no assertion): monotonic peak RSS from
+    // getrusage captures the 256-entry phase's high-water mark.
+    struct rusage ru {};
+    getrusage(RUSAGE_SELF, &ru);
+    BOOST_TEST_MESSAGE("queue_rss_trend full_256=" << rss_full_256
+                       << " B full_64=" << rss_full_64
+                       << " B maxrss=" << ru.ru_maxrss * 1024UL << " B");
+    // The 256-entry queue holds ~256 * 160 KiB ~= 40 MiB live, the
+    // 64-entry one ~10 MiB; assert a conservative 8 MiB gap between the
+    // baselined RSS deltas so the shrink trend is observable.
+    BOOST_CHECK_GT(rss_full_256, rss_full_64 + 8u * 1024u * 1024u);
+}
+
+// ---------------------------------------------------------------------------
+// Batched repetition PDUs under a full queue: one entry = one pulse, so a
+// drop removes repetition_count logical frames at once while a written
+// batch keeps repetition count and record offsets intact.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_writer_slow_disk_batch_drop_counts)
+{
+    const std::string dir = make_temp_dir("slow_batch");
+    const ScopedDelayEnv delay("4000");
+    constexpr size_t kCapacity = 4;
+    constexpr size_t kReps = 32; // one batch PDU = 32 repetition records
+    auto w = UwbCirWriter::make(dir, "cir", false, kCapacity);
+    auto dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_cir_writer_slow_batch");
+    tb->msg_connect(w, "status", dbg, "store");
+    BOOST_REQUIRE(w->start());
+    tb->start();
+
+    constexpr size_t kPulses = 12;
+    for (uint64_t p = 0; p < kPulses; ++p) {
+        std::vector<gr_complex> batch(kReps * kTaps);
+        for (size_t r = 0; r < kReps; ++r) {
+            const auto one = make_taps(p * kReps + r);
+            std::copy_n(one.data(), kTaps, batch.begin() + r * kTaps);
+        }
+        pmt::pmt_t meta = pmt::make_dict();
+        meta = pmt::dict_add(meta, pmt::mp("pulse_id"), pmt::from_uint64(p));
+        meta = pmt::dict_add(meta, pmt::mp("schedule_index"),
+                             pmt::from_uint64(p));
+        meta = pmt::dict_add(meta, pmt::mp("status"), pmt::mp("ok"));
+        meta = pmt::dict_add(meta, pmt::mp("tap_count"),
+                             pmt::from_uint64(kTaps));
+        meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
+                             pmt::from_double(998.4e6));
+        meta = pmt::dict_add(meta, pmt::mp("zero_delay_tap"),
+                             pmt::from_long(16));
+        meta = pmt::dict_add(meta, pmt::mp("repetition_batch"), pmt::PMT_T);
+        meta = pmt::dict_add(meta, pmt::mp("repetition_first"),
+                             pmt::from_uint64(0));
+        meta = pmt::dict_add(meta, pmt::mp("repetition_count"),
+                             pmt::from_uint64(kReps));
+        std::vector<uint64_t> status(kReps, 0);
+        std::vector<uint64_t> peak(kReps, 18);
+        std::vector<float> metric(kReps, 0.9f);
+        std::vector<float> l2(kReps, 0.01f);
+        meta = pmt::dict_add(meta, pmt::mp("repetition_status_code"),
+                             pmt::init_u64vector(kReps, status.data()));
+        meta = pmt::dict_add(meta, pmt::mp("repetition_peak_tap"),
+                             pmt::init_u64vector(kReps, peak.data()));
+        meta = pmt::dict_add(meta, pmt::mp("repetition_peak_metric"),
+                             pmt::init_f32vector(kReps, metric.data()));
+        meta = pmt::dict_add(meta, pmt::mp("repetition_raw_l2_norm"),
+                             pmt::init_f32vector(kReps, l2.data()));
+        w->_post(pmt::mp("cir"),
+                 pmt::cons(meta, pmt::init_c32vector(batch.size(),
+                                                     batch.data())));
+    }
+    // logical frames = pulses * repetition_count
+    BOOST_REQUIRE(wait_settled(w, kPulses * kReps));
+    BOOST_CHECK_EQUAL(w->frames_received(), kPulses * kReps);
+    BOOST_CHECK_EQUAL(w->queue_high_watermark(), kCapacity);
+
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(w->stop());
+
+    // Whole pulses are dropped at once: written + dropped logical frames
+    // == total, and both are multiples of kReps (never a partial pulse).
+    const uint64_t written_frames = w->frames_written();
+    const uint64_t dropped_frames = w->frames_dropped();
+    BOOST_REQUIRE_GT(written_frames, 0u);
+    BOOST_REQUIRE_GT(dropped_frames, 0u);
+    BOOST_CHECK_EQUAL(written_frames + dropped_frames, kPulses * kReps);
+    BOOST_CHECK_EQUAL(written_frames % kReps, 0u);
+    BOOST_CHECK_EQUAL(dropped_frames % kReps, 0u);
+    // Written pulses in order, one JSONL line per pulse, UCR4 offsets
+    // contiguous across every repetition of every written pulse.
+    const auto lines = read_lines(dir + "/cir.jsonl");
+    const size_t written_pulses = written_frames / kReps;
+    BOOST_REQUIRE_EQUAL(lines.size(), written_pulses);
+    std::vector<uint8_t> raw;
+    BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
+    BOOST_CHECK_EQUAL(raw.size(), written_frames * ucr4_record_bytes(kTaps));
+    uint64_t offset = 0;
+    uint64_t prev_pid = 0;
+    for (size_t i = 0; i < written_pulses; ++i) {
+        double v = 0.0;
+        BOOST_REQUIRE(parse_num(lines[i], "pulse_id", v));
+        const uint64_t pid = static_cast<uint64_t>(std::llround(v));
+        if (i == 0)
+            BOOST_CHECK_EQUAL(pid, 0u);
+        else
+            BOOST_CHECK_GT(pid, prev_pid);
+        prev_pid = pid;
+        BOOST_CHECK(lines[i].find("\"repetition_count\":" +
+                                  std::to_string(kReps)) !=
+                    std::string::npos);
+        // spot-check the offsets column is the continuous run we expect
+        std::ostringstream want;
+        for (size_t r = 0; r < kReps; ++r) {
+            if (r)
+                want << ',';
+            want << (offset + r * kTaps);
+        }
+        BOOST_CHECK(lines[i].find("\"file_offset_taps\":[" + want.str() +
+                                  "]") != std::string::npos);
+        offset += kReps * kTaps;
+    }
 }

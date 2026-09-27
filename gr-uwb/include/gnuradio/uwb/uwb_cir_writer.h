@@ -25,6 +25,10 @@
  * Reconstruction is FC32 = SC16 * cir_scale (block-floating, same as UDP).
  *
  * Contract:
+ *   - The queue is bounded in PDU entries (one entry = one "cir" message).
+ *     With batched repetitions one entry carries every repetition record
+ *     of a pulse, so a queue-full drop loses a whole pulse; handle_cir
+ *     counts the drop as repetition_count logical frames.
  *   - status=="ok" frames append one UCR4 record and advance
  *     file_offset_taps by tap_count.
  *   - failed frames (sfd_failed/timing_failed/cir_failed/invalid_input/
@@ -233,6 +237,8 @@ private:
     size_t d_queue_tail_ = 0;
     size_t d_queue_count_ = 0;
     bool d_stop_ = false;
+    // QA-only: microseconds to sleep before each dequeued write (0 = off).
+    std::atomic<uint32_t> d_test_write_delay_us_{ 0 };
     std::mutex d_mutex_;
     std::condition_variable d_cv_;
     std::thread d_thread_;

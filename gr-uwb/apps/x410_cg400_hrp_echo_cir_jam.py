@@ -87,6 +87,32 @@ def parse_freq_offsets(text):
     return out
 
 
+def cir_writer_worst_case_bytes(queue_pdus, reps, taps, with_normalized):
+    """Conservative worst-case RAM of one full CIR writer queue.
+
+    A queue entry is one **pulse PDU**, not one CIR record: with batched
+    repetitions the estimator packs every repetition record of a pulse
+    into a single message, so a full preamble occupies exactly one slot.
+    Per-entry upper bounds (bytes):
+
+      payload  reps*taps*8 B raw FC32 taps, plus the same again while the
+               normalized_taps vector rides in the same message
+      columns  reps*(8+8+4+4) B repetition_status_code / peak_tap /
+               peak_metric / raw_l2_norm vectors
+      ucr4     reps*(52+4*taps) B on-disk record (52-byte UCR4 header +
+               interleaved SC16) — disk bytes, counted for conservatism
+      jsonl    ~640 B per-pulse common fields + ~120 B per repetition
+               column entry (measured layout upper bound)
+
+    Returns ``(total_bytes, payload_bytes, ucr4_bytes, jsonl_bytes)``.
+    """
+    payload = reps * taps * 8 * (2 if with_normalized else 1) + reps * 24
+    ucr4 = reps * (52 + 4 * taps)
+    jsonl = 640 + reps * 120
+    total = queue_pdus * (payload + ucr4 + jsonl)
+    return total, payload, ucr4, jsonl
+
+
 def _resolve_shape(shape, taps, repo):
     """Resolve a (--pulse-shape, --pulse-taps) pair to (shape, taps_path)."""
     if taps:
@@ -1091,6 +1117,19 @@ def parse_args():
                     "--echo-backend cpp-pdu and python; continuous is "
                     "python-only).")
     g = p.add_argument_group("jammer")
+    g.add_argument("--cir-writer-queue-pdus", type=int, default=64,
+                   help="CIR writer queue depth in PULSE PDU entries, not "
+                        "CIR records: with batched repetitions one entry "
+                        "holds every repetition record of one pulse, so a "
+                        "full queue drops whole pulses (never blocks).  64 "
+                        "is a starting candidate only — the final value "
+                        "must follow the production queue high watermark "
+                        "and worst-case disk-write latency")
+    g.add_argument("--cir-avg-writer-queue-pdus", type=int, default=64,
+                   help="--cir-output both: cir_avg writer queue depth in "
+                        "pulse PDU entries (one entry = one averaged "
+                        "record); same sizing rule as "
+                        "--cir-writer-queue-pdus")
     g.add_argument("--jam-enable", action="store_true",
                    help="Transmit the second (jammer) TX channel.  Without "
                         "it the app degenerates to the base single-TX app.")
@@ -1645,12 +1684,35 @@ def main():
           flush=True)
     cir_records_per_pulse = (max(1, int(a.sync_reps) - cir_skip_initial)
                              if emit_reps else 1)
-    wr = base.uwb.cir_writer(a.output, "cir", True,
-                             max(256, 4 * cir_records_per_pulse))
+    # Queue depth is measured in pulse PDUs, not CIR records: with batched
+    # repetitions the estimator posts ONE message per pulse (all repetition
+    # taps packed in it), so a full preamble occupies a single queue slot
+    # and a queue-full drop loses a whole pulse (all repetitions).
+    wr_queue_pdus = max(1, int(a.cir_writer_queue_pdus))
+    wr_avg_queue_pdus = max(1, int(a.cir_avg_writer_queue_pdus))
+    wr_ram, wr_payload_b, wr_ucr4_b, wr_jsonl_b = cir_writer_worst_case_bytes(
+        wr_queue_pdus, cir_records_per_pulse, cir_taps, True)
+    print("cir_writer queue capacity_pdus=%d unit=pulse-PDU (1 PDU = 1 "
+          "pulse = %d repetition records x %d taps batched; "
+          "queue-full drops %d records at once, never blocks) "
+          "worst_case_ram_bytes=%d = %d PDUs x [payload %d + ucr4 %d + "
+          "jsonl ~%d] B (conservative upper bound)"
+          % (wr_queue_pdus, cir_records_per_pulse, cir_taps,
+             cir_records_per_pulse, wr_ram, wr_queue_pdus, wr_payload_b,
+             wr_ucr4_b, wr_jsonl_b), flush=True)
+    print("cir_writer capacity is a starting candidate, NOT an acceptance "
+          "value: final capacity must follow the production queue high "
+          "watermark and worst-case disk-write latency", flush=True)
+    wr = base.uwb.cir_writer(a.output, "cir", True, wr_queue_pdus)
     wr_avg = None
     if a.cir_output == "both":
+        avg_ram, _ap, _au, _aj = cir_writer_worst_case_bytes(
+            wr_avg_queue_pdus, 1, cir_taps, True)
         wr_avg = base.uwb.cir_writer(a.output, "cir_avg", True,
-                                     max(64, est_q))
+                                     wr_avg_queue_pdus)
+        print("cir_avg writer queue capacity_pdus=%d (1 PDU = 1 averaged "
+              "record x %d taps) worst_case_ram_bytes=%d"
+              % (wr_avg_queue_pdus, cir_taps, avg_ram), flush=True)
         print("cir_avg coherent average of SYNC [%d, %d) -> %s "
               "(UDP stays per-repetition)" % (
                   avg_skip, int(a.sync_reps),
@@ -1905,6 +1967,12 @@ def main():
         "wr_avg_ok": 0 if wr_avg is None else wr_avg.frames_written(),
         "wr_avg_fail": 0 if wr_avg is None else wr_avg.frames_failed(),
         "wr_avg_drop": 0 if wr_avg is None else wr_avg.frames_dropped(),
+        "cir_writer_queue_pdus": wr_queue_pdus,
+        "cir_writer_queue_hwm": int(wr.queue_high_watermark()),
+        "cir_avg_queue_pdus": 0 if wr_avg is None else wr_avg_queue_pdus,
+        "cir_avg_queue_hwm": (0 if wr_avg is None
+                              else int(wr_avg.queue_high_watermark())),
+        "cir_writer_worst_case_ram_bytes": wr_ram,
         "drain_complete": drain_complete,
         "use_predicted_timing": use_pred,
         "est_queue_capacity": est_q,
