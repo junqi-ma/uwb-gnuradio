@@ -95,8 +95,9 @@ def cir_writer_worst_case_bytes(queue_pdus, reps, taps, with_normalized):
     into a single message, so a full preamble occupies exactly one slot.
     Per-entry upper bounds (bytes):
 
-      payload  reps*taps*8 B raw FC32 taps, plus the same again while the
-               normalized_taps vector rides in the same message
+      payload  reps*taps*8 B raw FC32 taps, plus the same again only while
+               the normalized_taps vector rides in the same message
+               (--cir-emit-normalized; see the consumer note at the flag)
       columns  reps*(8+8+4+4) B repetition_status_code / peak_tap /
                peak_metric / raw_l2_norm vectors
       ucr4     reps*(52+4*taps) B on-disk record (52-byte UCR4 header +
@@ -1125,6 +1126,17 @@ def parse_args():
                         "is a starting candidate only — the final value "
                         "must follow the production queue high watermark "
                         "and worst-case disk-write latency")
+    g.add_argument("--cir-emit-normalized", action="store_true",
+                   help="Keep the legacy estimator message contract: attach "
+                        "the per-record/batch normalized_taps c32vector to "
+                        "every ok CIR frame.  DEFAULT OFF because no "
+                        "consumer needs it: UwbCirWriter stores raw SC16 "
+                        "+ cir_scale in UCR4 and never writes normalized "
+                        "taps (write_normalized only gates validation), "
+                        "CirUdpSink frames raw SC16 into UCR5 datagrams, "
+                        "and no message_debug is attached on this path.  "
+                        "raw_l2_norm / repetition_raw_l2_norm metrics are "
+                        "always computed and published either way")
     g.add_argument("--cir-avg-writer-queue-pdus", type=int, default=64,
                    help="--cir-output both: cir_avg writer queue depth in "
                         "pulse PDU entries (one entry = one averaged "
@@ -1672,12 +1684,28 @@ def main():
     cir_skip_initial = base.cir_skip_for_output(a.cir_output)
     emit_reps = base.cir_outputs_repetitions(a.cir_output)
     avg_skip = base.cir_average_skip_for_output(a.cir_output, a.sync_reps)
+    # Stage-3 normalized policy (按消费者选择 normalized CIR): without the
+    # flag no consumer of "cir"/"cir_avg" reads normalized_taps, so the
+    # estimator does not build the extra c32vector PMT (per-record copy or
+    # count*taps batch) and the writers are created with
+    # write_normalized=emit_norm so they do not REQUIRE the field either.
+    # The L2 metrics (raw_l2_norm / repetition_raw_l2_norm) come from the
+    # raw taps and are always published.
+    emit_norm = bool(getattr(a, "cir_emit_normalized", False))
     est = base.uwb.radar_cir_estimator(
         tmpl_path, a.sync_reps, base.SFD_MODE, a.code_index, cir_pre, cir_post,
         cir_skip_initial, 0,
         a.sfd_search_margin, a.sync_refine_margin, a.sfd_threshold,
-        a.sync_refine_threshold, True, est_q, use_pred,
+        a.sync_refine_threshold, emit_norm, est_q, use_pred,
         emit_reps, emit_reps, a.cir_output == "both", avg_skip)
+    print("cir_emit_normalized=%s (%s)"
+          % (emit_norm,
+             "legacy message contract: normalized_taps attached to ok "
+             "CIR frames (--cir-emit-normalized)"
+             if emit_norm else
+             "no consumer of normalized_taps on this chain (UCR4 writer "
+             "stores raw SC16+scale only, UDP frames raw SC16): batch/"
+             "per-record normalized_taps PMT is NOT created"), flush=True)
     print("estimator cir_pre=%d cir_post=%d taps=%d queue=%d "
           "use_predicted_timing=%s cir_output=%s (overflow=drop)"
           % (cir_pre, cir_post, cir_taps, est_q, use_pred, a.cir_output),
@@ -1691,7 +1719,7 @@ def main():
     wr_queue_pdus = max(1, int(a.cir_writer_queue_pdus))
     wr_avg_queue_pdus = max(1, int(a.cir_avg_writer_queue_pdus))
     wr_ram, wr_payload_b, wr_ucr4_b, wr_jsonl_b = cir_writer_worst_case_bytes(
-        wr_queue_pdus, cir_records_per_pulse, cir_taps, True)
+        wr_queue_pdus, cir_records_per_pulse, cir_taps, emit_norm)
     print("cir_writer queue capacity_pdus=%d unit=pulse-PDU (1 PDU = 1 "
           "pulse = %d repetition records x %d taps batched; "
           "queue-full drops %d records at once, never blocks) "
@@ -1703,12 +1731,12 @@ def main():
     print("cir_writer capacity is a starting candidate, NOT an acceptance "
           "value: final capacity must follow the production queue high "
           "watermark and worst-case disk-write latency", flush=True)
-    wr = base.uwb.cir_writer(a.output, "cir", True, wr_queue_pdus)
+    wr = base.uwb.cir_writer(a.output, "cir", emit_norm, wr_queue_pdus)
     wr_avg = None
     if a.cir_output == "both":
         avg_ram, _ap, _au, _aj = cir_writer_worst_case_bytes(
-            wr_avg_queue_pdus, 1, cir_taps, True)
-        wr_avg = base.uwb.cir_writer(a.output, "cir_avg", True,
+            wr_avg_queue_pdus, 1, cir_taps, emit_norm)
+        wr_avg = base.uwb.cir_writer(a.output, "cir_avg", emit_norm,
                                      wr_avg_queue_pdus)
         print("cir_avg writer queue capacity_pdus=%d (1 PDU = 1 averaged "
               "record x %d taps) worst_case_ram_bytes=%d"
@@ -1991,6 +2019,7 @@ def main():
         "code_index": a.code_index,
         "preamble_length": a.sync_reps,
         "cir_output": a.cir_output,
+        "cir_emit_normalized": emit_norm,
         "cir_pre": cir_pre,
         "cir_post": cir_post,
         "cir_tap_count": cir_taps,

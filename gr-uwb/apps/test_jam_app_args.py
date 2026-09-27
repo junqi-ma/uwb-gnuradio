@@ -47,6 +47,7 @@ REQUIRED_OPTIONS = (
     "--jam-overlap-side",
     "--jam-overlap-seed",
     "--jam-scale",
+    "--cir-emit-normalized",
     "--cir-writer-queue-pdus",
     "--cir-avg-writer-queue-pdus",
     "--jam-repeat-pri-us",
@@ -125,6 +126,49 @@ class CirWriterWorstCaseBytesTest(unittest.TestCase):
     def test_without_normalized_taps(self):
         _, payload, _, _ = self.fn(4, 128, 116, False)
         self.assertEqual(payload, 128 * 116 * 8 + 128 * 24)
+
+
+class CirEmitNormalizedPolicyTest(unittest.TestCase):
+    """Stage-3 consumer-driven normalized policy (静态契约).
+
+    Consumers of the estimator's "cir"/"cir_avg" ports on the jam chain:
+
+      * UwbCirWriter — UCR4 stores raw SC16 + cir_scale only;
+        write_normalized=true merely REQUIRES the normalized_taps field,
+        the normalized data is never written to any file.
+      * CirUdpSink — frames the raw cdr c32vector into UCR5 datagrams;
+        normalized_taps is never read.
+      * message_debug — not attached on this chain.
+
+    So the default must be: estimator emit_normalized=False, writers
+    created with write_normalized=emit_norm (they must not require the
+    absent field), and an explicit --cir-emit-normalized switch restores
+    the legacy message contract.
+    """
+
+    def test_default_off_and_switch_restores_legacy(self):
+        src = _source()
+        self.assertIn('"--cir-emit-normalized"', src)
+        self.assertIn("action=\"store_true\"", src)
+        # Default OFF: the flag is opt-in (store_true defaults to False).
+        self.assertNotIn('a.cir_emit_normalized, default=True', src)
+        # Estimator + both writers follow the policy flag, not a literal.
+        self.assertLessEqual(
+            src.count("emit_norm, est_q, use_pred"), 1,
+            "estimator emit_normalized wired to the policy flag")
+        self.assertIn('a.sync_refine_threshold, emit_norm, est_q, use_pred',
+                      src)
+        self.assertIn('base.uwb.cir_writer(a.output, "cir", emit_norm, '
+                      'wr_queue_pdus)', src)
+        self.assertIn('"cir_avg", emit_norm', src)
+        # Worst-case RAM follows the policy too (payload bound halves).
+        self.assertIn("cir_taps, emit_norm)", src)
+
+    def test_metrics_are_independent_of_normalized(self):
+        # raw_l2_norm is computed from the raw taps and must stay published
+        # when the normalized PMT is omitted.
+        src = _source()
+        self.assertIn("raw_l2_norm", src)
 
 
 class ParseFreqOffsetsTest(unittest.TestCase):
