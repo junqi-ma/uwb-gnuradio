@@ -16,13 +16,16 @@
 #include <gnuradio/io_signature.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 
 namespace gr {
 namespace uwb {
@@ -30,6 +33,22 @@ namespace uwb {
 namespace {
 
 constexpr double kSpeedOfLight = 299792458.0;
+
+// QA-only slow-disk injection.  When UWB_CIR_WRITER_TEST_WRITE_DELAY_US is
+// set in the environment at block construction, the writer thread sleeps
+// that many microseconds before writing each dequeued message; production
+// never sets it, so the steady-state hot path pays one relaxed atomic load.
+uint32_t test_write_delay_us_from_env()
+{
+    const char* s = std::getenv("UWB_CIR_WRITER_TEST_WRITE_DELAY_US");
+    if (s == nullptr || *s == '\0')
+        return 0;
+    char* end = nullptr;
+    const long v = std::strtol(s, &end, 10);
+    if (end == s || v < 0 || v > 600000000L)
+        return 0;
+    return static_cast<uint32_t>(v);
+}
 
 uint64_t
 dict_u64(const pmt::pmt_t& dict, const char* key, uint64_t fallback)
@@ -236,7 +255,8 @@ UwbCirWriter::UwbCirWriter(const std::string& directory,
                 gr::io_signature::make(0, 0, 0)),
       d_directory_(directory),
       d_base_name_(base_name),
-      d_write_normalized_(write_normalized)
+      d_write_normalized_(write_normalized),
+      d_test_write_delay_us_(test_write_delay_us_from_env())
 {
     if (directory.empty()) {
         throw std::invalid_argument("UwbCirWriter: directory is empty");
@@ -455,6 +475,12 @@ UwbCirWriter::writer_loop()
             d_queue_[d_queue_head_] = pmt::PMT_NIL;
             d_queue_head_ = (d_queue_head_ + 1) % d_queue_.size();
             --d_queue_count_;
+        }
+        // QA-only slow-disk hook: sleep outside the lock so the handler
+        // still enqueues while the fake slow write is in progress.
+        if (const uint32_t delay_us =
+                d_test_write_delay_us_.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
         }
         write_frame(msg);
     }
