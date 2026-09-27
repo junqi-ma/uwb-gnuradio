@@ -38,7 +38,12 @@
  * Output: by default every enqueued job produces one averaged PDU on "cir".
  * With emit_individual_repetitions enabled, a successful job produces one PDU
  * per selected SYNC repetition instead.  batch_individual_repetitions packs
- * those logical records into one PDU per pulse for high-rate writer/UDP paths;
+ * those logical records into one PDU per pulse for high-rate writer/UDP paths.
+ * emit_repetition_average additionally posts one coherent average on
+ * "cir_avg": the same skip-N estimateCir used by average-only mode
+ * (repetition_average_skip, default 10), computed from the same origin as
+ * the per-repetition records.  "cir" is unchanged, so a writer/UDP subscriber
+ * on "cir" still sees only the repetitions.
  * the metadata then carries per-repetition status/peak columns and the raw
  * and normalized vectors are repetition-major:
  *   cons(meta, c32vector raw taps) — empty vector for failed frames.
@@ -96,6 +101,11 @@ public:
      * \param use_predicted_timing  skip SFD search and SYNC refine; CIR
      *                        uses the scheduled TX origin.  For timed
      *                        monostatic echo (DW3000 must not gate CIR).
+     * \param emit_repetition_average  with emit_individual_repetitions,
+     *                        also post one coherent average on "cir_avg".
+     * \param repetition_average_skip  leading SYNC repetitions left out of
+     *                        that average (default 10).  A skip that covers
+     *                        the whole preamble averages every repetition.
      */
     static sptr make(const std::string& template_path,
                      size_t sync_repetitions = 64,
@@ -113,7 +123,9 @@ public:
                      size_t queue_capacity = 64,
                      bool use_predicted_timing = false,
                      bool emit_individual_repetitions = false,
-                     bool batch_individual_repetitions = false);
+                     bool batch_individual_repetitions = false,
+                     bool emit_repetition_average = false,
+                     size_t repetition_average_skip = 10);
 
     ~UwbRadarCirEstimator() override;
 
@@ -138,12 +150,21 @@ public:
     {
         return d_batch_individual_repetitions_;
     }
+    bool emit_repetition_average() const
+    {
+        return d_emit_repetition_average_;
+    }
+    size_t repetition_average_skip() const
+    {
+        return d_repetition_average_skip_;
+    }
 
     uint64_t pdus_received() const;
     uint64_t pdus_enqueued() const;
     uint64_t pdus_completed() const;   // core status ok
     uint64_t pdus_failed() const;      // core status not ok (still published)
     uint64_t pdus_published() const;   // logical CIR records posted on "cir"
+    uint64_t averages_published() const; // coherent averages posted on "cir_avg"
     uint64_t pdus_dropped() const;     // queue full
     uint64_t invalid_inputs() const;   // rejected in handler, not enqueued
     uint64_t worker_exceptions() const;
@@ -181,7 +202,9 @@ public:
                          size_t queue_capacity,
                          bool use_predicted_timing = false,
                          bool emit_individual_repetitions = false,
-                         bool batch_individual_repetitions = false);
+                         bool batch_individual_repetitions = false,
+                         bool emit_repetition_average = false,
+                         size_t repetition_average_skip = 10);
 
 private:
     struct Job {
@@ -208,7 +231,17 @@ private:
                        int64_t repetition_index = -1,
                        size_t repetition_ordinal = 0,
                        size_t repetition_count = 0,
-                       pmt::pmt_t common_meta = pmt::PMT_NIL);
+                       pmt::pmt_t common_meta = pmt::PMT_NIL,
+                       const char* port = "cir",
+                       bool as_average = false,
+                       bool count_as_published = true);
+    void publish_alongside_average(const Job& job,
+                                   const radar::RadarCirResult& r,
+                                   uint64_t queue_us,
+                                   uint64_t service_us,
+                                   const gr_complex* rx,
+                                   size_t n,
+                                   pmt::pmt_t common_meta);
     void publish_repetition_batch(const Job& job,
                                   const radar::RadarCirResult& r,
                                   uint64_t queue_us,
@@ -232,6 +265,8 @@ private:
     bool d_emit_normalized_ = true;
     bool d_emit_individual_repetitions_ = false;
     bool d_batch_individual_repetitions_ = false;
+    bool d_emit_repetition_average_ = false;
+    size_t d_repetition_average_skip_ = 10;
     size_t d_queue_capacity_ = 0;
 
     // Worker-only fixed storage for one packed repetition pulse.  Sized at
@@ -256,6 +291,7 @@ private:
     std::atomic<uint64_t> d_enqueued_{ 0 };
     std::atomic<uint64_t> d_completed_{ 0 };
     std::atomic<uint64_t> d_published_{ 0 };
+    std::atomic<uint64_t> d_averages_published_{ 0 };
     std::atomic<uint64_t> d_failed_{ 0 };
     std::atomic<uint64_t> d_dropped_{ 0 };
     std::atomic<uint64_t> d_invalid_{ 0 };

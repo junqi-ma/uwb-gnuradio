@@ -43,6 +43,13 @@ Example::
     --jam-freq-offsets 0,245.67e3,491.34e3 --jam-dwell 50 \\
     --jam-delay-random-us 1.018 \\
     --rate-hz 200 --output /tmp/x410_jam
+
+To interfere with the sensing preamble (CIR estimation window), use
+``--jam-waveform payload``.  This tiles the jammer's BPM-BPSK PSDU
+waveform to exactly the sensing preamble duration (``Ns * SPS`` work
+samples) and starts it at the sensing TX start (``--jam-delay-us``, a
+non-negative offset from that alignment).  The Python and cpp-pdu
+aligned backends are both supported.
 """
 from __future__ import annotations
 
@@ -149,6 +156,7 @@ class JamTimedUhdEcho(base.TimedUhdEcho):
         self.jam_delay_native_lo = 0
         self.jam_delay_native_hi = 0
         self._jam_scaled = None
+        self._jam_payload_bank = None
         self.jam_offsets = list(jam_offsets) if jam_offsets else []
         self.jam_dwell = max(0, int(jam_dwell))
         self.freq_settle_s = float(freq_settle_s)
@@ -161,6 +169,7 @@ class JamTimedUhdEcho(base.TimedUhdEcho):
         self.jam_retune_count = 0
         self.jam_retune_fail = 0
         self.jam_by_pulse = {}
+        self.jam_actual_by_pulse = {}
         self.jam_records = []
 
         if self.jam_enable:
@@ -240,7 +249,8 @@ class JamTimedUhdEcho(base.TimedUhdEcho):
                 self._native, jam_scaled, self.tx_lead_native,
                 self.tx_lead_native, length)
             self.pre += int(self.tx_lead_native)
-            self.rx_len = (int(self.rx_len) + int(self.tx_lead_native) + 3) // 4 * 4
+            self.rx_len = (int(self.rx_len) + int(self.tx_lead_native)
+                           + 7) // 8 * 8
             if int(self.publish_native) > 0:
                 self.publish_native = int(self.publish_native) + int(
                     self.tx_lead_native)
@@ -260,6 +270,25 @@ class JamTimedUhdEcho(base.TimedUhdEcho):
         self.status["jam_tx_samples"] = int(self._tx_payload.shape[1])
         self.status["jam_peak_scale"] = self.jam_scale
         return self._tx_payload
+
+    def set_random_payload_bank(self, bank):
+        """Install one precomputed native payload per scheduled burst."""
+        bank = np.asarray(bank, dtype=np.complex64)
+        if (bank.ndim != 2 or bank.shape !=
+                (self.max_pulses, self.jam_payload_native)):
+            raise ValueError("random payload bank shape does not match schedule")
+        sense_peak = float(np.max(np.abs(self._native))) or 1.0
+        for row in bank:
+            peak = float(np.max(np.abs(row))) or 1.0
+            row *= np.float32(self.jam_scale * sense_peak / peak)
+        self._jam_payload_bank = bank
+        self.status["jam_random_payloads"] = int(bank.shape[0])
+
+    def _select_jam_payload(self, pulse_id):
+        if self._jam_payload_bank is not None:
+            jp.place_jam_row(
+                self._tx_payload, self._jam_payload_bank[pulse_id],
+                int(self.tx_lead_native) + int(self.jam_delay_native))
 
     def _randomize_jam_delay(self):
         """Draw a new relative jammer delay and rewrite TX row 1."""
@@ -317,7 +346,24 @@ class JamTimedUhdEcho(base.TimedUhdEcho):
         self.jam_records.append(rec)
         self.jam_by_pulse[int(pulse_id)] = (self.jam_freq_hz,
                                             self.jam_freq_offset)
+        self.jam_actual_by_pulse[int(pulse_id)] = self.jam_freq_actual
         return rec
+
+    def _make_rx_meta(self, pulse_id):
+        meta = super()._make_rx_meta(pulse_id)
+        planned = self.jam_by_pulse.get(int(pulse_id))
+        actual = self.jam_actual_by_pulse.get(int(pulse_id))
+        if planned is not None and actual is not None:
+            meta = pmt.dict_add(
+                meta, pmt.intern("jam_freq_hz"),
+                pmt.from_double(float(planned[0])))
+            meta = pmt.dict_add(
+                meta, pmt.intern("jam_freq_offset_hz"),
+                pmt.from_double(float(planned[1])))
+            meta = pmt.dict_add(
+                meta, pmt.intern("jam_freq_actual_hz"),
+                pmt.from_double(float(actual)))
+        return meta
 
     def run_schedule(self):
         if self._native is None:
@@ -354,9 +400,14 @@ class JamTimedUhdEcho(base.TimedUhdEcho):
                             continue
 
                 self._randomize_jam_delay()
-                captured = bool(self._one_burst(pulse_id))
+                self._select_jam_payload(pulse_id)
+                # The publisher can run before _one_burst returns.  Publish
+                # frequency metadata first so its CIR PDU sees this pulse's
+                # actual jammer tune, even at a dwell transition.
                 if self.jam_enable:
                     self._record_jam(pulse_id)
+                captured = bool(self._one_burst(pulse_id))
+                if self.jam_enable:
                     self._prepare_timing_record(pulse_id)
                 pulse_id += 1
                 self._done = pulse_id
@@ -526,6 +577,32 @@ def build_cpp_schedule_pdu(cpp_meta, radar_meta, ch0_s16, ch1_s16,
     meta = pmt.dict_add(meta, pmt.intern("jam_freq_settle_ticks"),
                         pmt.from_uint64(
                             int(cpp_meta["jam_freq_settle_ticks"])))
+    # Preamble-overlap keys (§5.1).  Present on every PDU; 0/none when the
+    # overlap mode is off.
+    meta = pmt.dict_add(
+        meta, pmt.intern("jam_overlap_min_reps"),
+        pmt.from_long(int(cpp_meta["jam_overlap_min_reps"])))
+    meta = pmt.dict_add(
+        meta, pmt.intern("jam_overlap_max_reps"),
+        pmt.from_long(int(cpp_meta["jam_overlap_max_reps"])))
+    meta = pmt.dict_add(
+        meta, pmt.intern("jam_overlap_side_mode"),
+        pmt.string_to_symbol(str(cpp_meta["jam_overlap_side_mode"])))
+    meta = pmt.dict_add(
+        meta, pmt.intern("jam_overlap_seed"),
+        pmt.from_uint64(int(cpp_meta["jam_overlap_seed"])))
+    meta = pmt.dict_add(
+        meta, pmt.intern("sense_preamble_reps"),
+        pmt.from_uint64(int(cpp_meta["sense_preamble_reps"])))
+    meta = pmt.dict_add(
+        meta, pmt.intern("jam_preamble_reps"),
+        pmt.from_uint64(int(cpp_meta["jam_preamble_reps"])))
+    lead_tab = [int(v) for v in cpp_meta["jam_overlap_lead_delays_native"]]
+    lag_tab = [int(v) for v in cpp_meta["jam_overlap_lag_delays_native"]]
+    meta = pmt.dict_add(meta, pmt.intern("jam_overlap_lead_delays_native"),
+                        pmt.init_s64vector(len(lead_tab), lead_tab))
+    meta = pmt.dict_add(meta, pmt.intern("jam_overlap_lag_delays_native"),
+                        pmt.init_s64vector(len(lag_tab), lag_tab))
     v0 = pmt.init_s16vector(int(np.asarray(ch0_s16).size),
                             np.asarray(ch0_s16).tolist())
     v1 = pmt.init_s16vector(int(np.asarray(ch1_s16).size),
@@ -606,7 +683,7 @@ class JamCppPduEcho:
     """
 
     def __init__(self, a, profile, sense_native, jam_native, jam_offsets,
-                 jam_delay_random_us):
+                 jam_delay_random_us, overlap_cfg=None):
         self._a = a
         self._profile = profile
         self.rate = float(profile.hz)
@@ -677,6 +754,20 @@ class JamCppPduEcho:
         self._jam_sc16 = base.fc32_to_sc16(self._jam_scaled)
 
         # -- §5.3 schedule metadata (float→ticks here, not on hot path) ---
+        self.jam_overlap = dict(overlap_cfg) if overlap_cfg else None
+        _ov = self.jam_overlap or {}
+        self.overlap_kwargs = dict(
+            overlap_min_reps=int(_ov.get("min_reps", 0)),
+            overlap_max_reps=int(_ov.get("max_reps", 0)),
+            overlap_side=str(_ov.get("side", "random")),
+            sense_reps=int(_ov.get("sense_reps", 0)),
+            jam_reps=int(_ov.get("jam_reps", 0)),
+            sps=int(base.SPS),
+            tx_interp=int(profile.tx_interp),
+            tx_decim=int(profile.tx_decim),
+            overlap_seed=(int(_ov["seed"]) if _ov.get("seed") is not None
+                          else None),
+        )
         self.cpp_meta = jp.build_cpp_schedule_meta(
             sense_len=int(self._sense_norm.size),
             jam_len=int(self._jam_scaled.size),
@@ -687,7 +778,8 @@ class JamCppPduEcho:
             jam_offsets_hz=list(self.jam_offsets),
             jam_dwell=self.jam_dwell,
             freq_settle_s=self.freq_settle_s,
-            jam_logical_channel=1)
+            jam_logical_channel=1,
+            **self.overlap_kwargs)
         self.tx_samples_L = int(self.cpp_meta["tx_samples"])
         self.tx_waveform_samples = [int(v) for v in
                                     self.cpp_meta["tx_waveform_samples"]]
@@ -706,7 +798,8 @@ class JamCppPduEcho:
             jam_len=int(self._jam_scaled.size),
             native_hz=self.rate,
             delay_us=self.jam_delay_us,
-            delay_random_us=self.jam_delay_random_us)
+            delay_random_us=self.jam_delay_random_us,
+            **self.overlap_kwargs)
         self.max_fragment_size = int(
             getattr(a, "max_fragment_size", 262144))
         try:
@@ -728,12 +821,12 @@ class JamCppPduEcho:
                 pre0, self.sync_reps, self.cal_delay_native, self.rate,
                 cir_pre=int(getattr(a, "cir_pre", base.DEFAULT_CIR_PRE)),
                 cir_post=int(getattr(a, "cir_post", base.DEFAULT_CIR_POST)),
-                cir_skip=(0 if a.cir_output == "repetitions" else 10))
+                cir_skip=base.cir_skip_for_output(a.cir_output))
         else:
             pub = int(a.publish_native)
         if self.tx_lead_native:
             self.pre = int(pre0) + int(self.tx_lead_native)
-            self.rx_len = (int(rx0) + int(self.tx_lead_native) + 3) // 4 * 4
+            self.rx_len = (int(rx0) + int(self.tx_lead_native) + 7) // 8 * 8
             self.publish_native = (int(pub) + int(self.tx_lead_native)
                                    if int(pub) > 0 else int(pub))
         else:
@@ -779,6 +872,7 @@ class JamCppPduEcho:
             "jam_channel": self.jam_ch,
             "jam_delay_mode": self.jam_delay_mode,
             "jam_delay_seed": self.jam_delay_seed,
+            "jam_overlap": self.jam_overlap,
         }
 
     # -- C++ block counters (probed; missing M5/M6 methods read as 0) -----
@@ -885,6 +979,22 @@ class JamCppPduEcho:
                  lay["jam_window_begin_min"], lay["jam_window_begin_max"],
                  lay["data_fragments"], self.max_fragment_size),
               flush=True)
+        if self.jam_overlap:
+            ov = self.jam_overlap
+            tx_bytes = self.tx_samples_L * 2 * len(self.tx_channels) * 2
+            rate_hz = (1.0 / self.pri_s) if self.pri_s > 0 else 0.0
+            print("[jam] cpp-overlap: mode=random-reps L=%d..%d side=%s "
+                  "seed=%d Ns=%d Nj=%d lead_us=%.3f lag_us=%.3f "
+                  "delay_native=[%d,%d] tx_bytes_per_pulse=%d "
+                  "tx_GBps=%.3f backing_MiB=%.2f fragment_count=1"
+                  % (ov["min_reps"], ov["max_reps"], ov["side"], ov["seed"],
+                     ov["sense_reps"], ov["jam_reps"],
+                     -self.jam_delay_native_lo / self.rate * 1e6,
+                     self.jam_delay_native_hi / self.rate * 1e6,
+                     self.jam_delay_native_lo, self.jam_delay_native_hi,
+                     tx_bytes, tx_bytes * rate_hz / 1e9,
+                     lay["backing_length"] * 2 * 2 / 1024.0 / 1024.0),
+                  flush=True)
         print("[jam] cpp-schedule-meta %s"
               % json.dumps(self.cpp_meta, sort_keys=True), flush=True)
 
@@ -1022,11 +1132,18 @@ def parse_args():
     g.add_argument("--jam-psdu-hex", default=None,
                    help="jammer PSDU bytes (default: the same PSDU as the "
                         "sensing packet)")
-    g.add_argument("--jam-waveform", choices=["preamble", "packet"],
+    g.add_argument("--jam-random-payload", action="store_true",
+                   help="Precompute a distinct random data PSDU with a valid "
+                        "FCS for each pulse; Python payload backend only")
+    g.add_argument("--jam-payload-seed", type=int, default=None,
+                   help="Seed for per-pulse random payloads")
+    g.add_argument("--jam-waveform", choices=["preamble", "payload", "packet"],
                    default="preamble",
                    help="preamble = keep only the SYNC segment (pure periodic "
-                        "preamble, best for the CFO null); packet = full HRP "
-                        "packet (more realistic)")
+                        "preamble, best for the CFO null); payload = tile the "
+                        "jammer PSDU waveform to the sensing preamble duration "
+                        "and start it at the sensing TX start; packet = full "
+                        "HRP packet")
     g.add_argument("--jam-pulse-shape", default=None,
                    help="jammer pulse shape (default: inherit --pulse-shape)")
     g.add_argument("--jam-pulse-sigma-ns", type=float, default=None)
@@ -1042,6 +1159,25 @@ def parse_args():
                         "the fixed --jam-delay-us.  T <= 2000 us.")
     g.add_argument("--jam-delay-seed", type=int, default=None,
                    help=argparse.SUPPRESS)
+    g.add_argument("--jam-overlap-mode", choices=["off", "random-reps"],
+                   default="off",
+                   help="random-reps: each sensing pulse transmits a COMPLETE "
+                        "jammer UWB packet whose preamble overlaps the "
+                        "sensing preamble by a random L in "
+                        "[min,max] repetitions (real packet collision). "
+                        "Requires --jam-waveform packet and cpp-pdu.")
+    g.add_argument("--jam-overlap-min-reps", type=int, default=1,
+                   help="minimum overlap repetitions L (>= 1)")
+    g.add_argument("--jam-overlap-max-reps", type=int, default=0,
+                   help="maximum overlap repetitions L (default 0 = "
+                        "min(Ns,Nj), i.e. full preamble)")
+    g.add_argument("--jam-overlap-side", choices=["lead", "lag", "random"],
+                   default="random",
+                   help="collision direction: lead = jammer arrives first; "
+                        "lag = jammer arrives later; random = per-pulse")
+    g.add_argument("--jam-overlap-seed", type=int, default=None,
+                   help="PRNG seed for the L/side draws (default: the "
+                        "--jam-delay-seed value or a generated one)")
     g.add_argument("--jam-scale", type=float, default=0.3,
                    help="jammer peak amplitude / sensing TX peak (the sensing "
                         "is normalised to 0.8 full scale)")
@@ -1079,12 +1215,23 @@ def main():
         a.sync_reps = a.preamble_length
     elif a.sync_reps is None:
         a.sync_reps = base.DEFAULT_PREAMBLE_LENGTH
+    jam_sync_reps = (a.jam_preamble_length if a.jam_preamble_length is not None
+                     else a.sync_reps)
     insert_sts = False if a.no_sts else True
     if a.rate_hz and a.rate_hz > 0:
         a.pri_s = 1.0 / a.rate_hz
         a.pulses = int(round(a.rate_hz * a.duration_s))
 
     jam_enabled = bool(a.jam_enable) and a.jam_mode != "off"
+    if a.jam_random_payload:
+        if not jam_enabled or a.jam_waveform != "payload" or use_cpp:
+            raise SystemExit("--jam-random-payload requires an enabled "
+                             "payload jammer with --echo-backend python")
+        if a.jam_payload_seed is None:
+            a.jam_payload_seed = int(
+                np.random.default_rng().integers(0, 2**32))
+        if not (0 <= a.jam_payload_seed < 2**32):
+            raise SystemExit("--jam-payload-seed must be in [0, 2**32)")
     jam_offsets = parse_freq_offsets(a.jam_freq_offsets)
     scan_args = (a.jam_freq_start, a.jam_freq_stop, a.jam_freq_step)
     scan_set = [v is not None for v in scan_args]
@@ -1109,6 +1256,81 @@ def main():
         # way when it receives None).
         a.jam_delay_seed = int(
             np.random.default_rng().integers(0, 2**31 - 1))
+
+    # -- preamble-overlap (real UWB packet collision) validation ------------
+    overlap_mode = str(a.jam_overlap_mode)
+    overlap = (overlap_mode == "random-reps")
+    overlap_min = int(a.jam_overlap_min_reps)
+    overlap_max = int(a.jam_overlap_max_reps)
+    if overlap_max <= 0:
+        overlap_max = min(int(a.sync_reps), int(jam_sync_reps))
+    overlap_side = str(a.jam_overlap_side)
+    overlap_seed = None
+    if overlap:
+        if not jam_enabled:
+            raise SystemExit("--jam-overlap-mode random-reps requires "
+                             "--jam-enable")
+        if a.jam_waveform != "packet":
+            raise SystemExit(
+                "--jam-overlap-mode random-reps requires --jam-waveform "
+                "packet: a truncated preamble is a gated-interference "
+                "experiment, not a real packet collision")
+        if jam_delay_random is not None:
+            raise SystemExit(
+                "--jam-overlap-mode cannot combine with "
+                "--jam-delay-random-us")
+        if abs(float(a.jam_delay_us)) > 0.0:
+            raise SystemExit(
+                "--jam-overlap-mode cannot combine with a nonzero "
+                "--jam-delay-us")
+        if not use_cpp:
+            raise SystemExit(
+                "--jam-overlap-mode random-reps is only supported with "
+                "--echo-backend cpp-pdu (the python backend would emit a "
+                "semantically different approximation)")
+        if a.jam_overlap_seed is not None:
+            overlap_seed = int(a.jam_overlap_seed)
+        elif a.jam_delay_seed is not None:
+            overlap_seed = int(a.jam_delay_seed)
+        else:
+            overlap_seed = int(
+                np.random.default_rng().integers(0, 2**31 - 1))
+        if overlap_seed < 0 or overlap_seed >= 2**32:
+            raise SystemExit(
+                "--jam-overlap-seed must be in [0, 2**32), got %r"
+                % (overlap_seed,))
+        full = min(int(a.sync_reps), int(jam_sync_reps))
+        if not (1 <= overlap_min <= overlap_max <= full):
+            raise SystemExit(
+                "--jam-overlap-min/max-reps must satisfy "
+                "1 <= min <= max <= min(Ns,Nj)=%d, got min=%d max=%d"
+                % (full, overlap_min, overlap_max))
+        a.jam_delay_seed = overlap_seed
+        print("[jam] overlap mode=random-reps L=%d..%d side=%s seed=%d "
+              "Ns=%d Nj=%d waveform=packet"
+              % (overlap_min, overlap_max, overlap_side, overlap_seed,
+                 int(a.sync_reps), int(jam_sync_reps)), flush=True)
+    overlap_cfg = ({
+        "min_reps": overlap_min,
+        "max_reps": overlap_max,
+        "side": overlap_side,
+        "seed": overlap_seed,
+        "sense_reps": int(a.sync_reps),
+        "jam_reps": int(jam_sync_reps),
+    } if overlap else None)
+    if jam_enabled and a.jam_waveform == "payload":
+        if overlap:
+            raise SystemExit("--jam-waveform payload cannot combine with "
+                             "--jam-overlap-mode random-reps")
+        if jam_delay_random is not None:
+            raise SystemExit("--jam-waveform payload does not support "
+                             "--jam-delay-random-us; use --jam-delay-us")
+        if a.jam_mode == "continuous":
+            raise SystemExit("--jam-waveform payload requires --jam-mode align")
+        if float(a.jam_delay_us) < 0.0:
+            raise SystemExit("--jam-waveform payload requires a non-negative "
+                             "--jam-delay-us (0 aligns the jammer start with "
+                             "the sensing TX start)")
     if use_cpp and jam_enabled and a.jam_mode == "continuous":
         raise SystemExit(
             "--echo-backend cpp-pdu does not support --jam-mode continuous: "
@@ -1177,10 +1399,13 @@ def main():
              a.sync_reps, base.SFD_MODE), flush=True)
 
     # -- jammer waveform ----------------------------------------------------
-    jam_sync_reps = (a.jam_preamble_length if a.jam_preamble_length is not None
-                     else a.sync_reps)
     jam_native = None
+    random_payload_bank = None
+    random_payload_unique = 0
     jam_work_samples = 0
+    jam_payload_start_work = None
+    jam_payload_field_work = 0
+    jam_user_delay_us = float(a.jam_delay_us)
     if jam_enabled:
         jam_psdu = base.hex_to_bytes(a.jam_psdu_hex or a.psdu_hex)
         if a.jam_pulse_shape is None and not a.jam_pulse_taps:
@@ -1201,14 +1426,73 @@ def main():
         full_work = int(jam_work.size)
         if a.jam_waveform == "preamble":
             jam_work = jam_work[:jam_sync_reps * base.SPS]
+        elif a.jam_waveform == "payload":
+            if base.SFD_MODE != "4z2":
+                raise SystemExit("payload waveform needs a known SFD length")
+            jam_payload_start_work = jp.payload_start_work(
+                jam_sync_reps, jam_sts)
+            psdu_field = jam_work[jam_payload_start_work:]
+            if not jam_psdu or psdu_field.size == 0:
+                raise SystemExit("--jam-waveform payload needs a nonempty "
+                                 "jammer PSDU")
+            # Tile (or truncate) the PSDU field to the sensing preamble
+            # duration so the jammer TX overlaps the CIR estimation window.
+            jam_work = jp.fill_preamble_span_work(psdu_field, a.sync_reps)
+            jam_payload_field_work = int(psdu_field.size)
         t_j = time.perf_counter()
         jam_native = profile.tx_native(jam_work)
         jam_work_samples = int(jam_work.size)
+        if a.jam_waveform == "payload":
+            # delay is measured from the sensing TX start; delay_us == 0
+            # overlaps the whole sensing preamble.
+            a.jam_delay_us = jam_user_delay_us
+            if (a.sync_reps * base.SPS) % 128:
+                print("jam_payload note: preamble span is not a whole BPM "
+                      "symbol; the last symbol is truncated", flush=True)
         print("jam_enabled code=%d waveform=%s preamble=%d jam_work=%d "
               "(full=%d) jam_native=%d resample_ms=%.2f"
               % (a.jam_code_index, a.jam_waveform, jam_sync_reps,
                  jam_work_samples, full_work, jam_native.size,
                  (time.perf_counter() - t_j) * 1e3), flush=True)
+        if a.jam_random_payload:
+            if len(jam_psdu) < 3:
+                raise SystemExit("random payload needs at least one data "
+                                 "byte plus two FCS bytes")
+            t_bank = time.perf_counter()
+            rng = np.random.default_rng(a.jam_payload_seed)
+            random_payload_bank = np.empty(
+                (a.pulses, jam_native.size), dtype=np.complex64)
+            unique_psdus = set()
+            for i in range(a.pulses):
+                # Keep the on-air PSDU length fixed.  The packet source
+                # computes the two FCS bytes from random data bytes.
+                data = rng.integers(
+                    0, 256, size=len(jam_psdu) - 2,
+                    dtype=np.uint8).tobytes()
+                while data in unique_psdus:
+                    data = rng.integers(
+                        0, 256, size=len(jam_psdu) - 2,
+                        dtype=np.uint8).tobytes()
+                unique_psdus.add(data)
+                src_i = base.uwb.hrp_packet_source(
+                    list(data), jam_sync_reps, base.SFD_MODE,
+                    a.jam_code_index,
+                    0.8, a.pri_s, False, jam_sts, True, jam_shape,
+                    jam_sigma, jam_bw, jam_taps)
+                work_i = jp.fill_preamble_span_work(
+                    np.asarray(src_i.samples(), dtype=np.complex64)
+                    [jam_payload_start_work:], a.sync_reps)
+                native_i = profile.tx_native(work_i)
+                if native_i.size != jam_native.size:
+                    raise SystemExit("random payload native length changed")
+                random_payload_bank[i] = native_i
+            random_payload_unique = len(unique_psdus)
+            jam_native = random_payload_bank[0]
+            print("jam_random_payload seed=%d unique=%d native_each=%d "
+                  "precompute_s=%.3f"
+                  % (a.jam_payload_seed, random_payload_unique,
+                     jam_native.size, time.perf_counter() - t_bank),
+                  flush=True)
         off0 = jam_offsets[0] if jam_offsets else a.jam_freq_offset
         if jam_delay_random is not None:
             delay_txt = "uniform ±%.3f us" % jam_delay_random
@@ -1249,7 +1533,7 @@ def main():
                 # schedule PDU geometry the C++ grid will receive.
                 JamCppPduEcho(
                     a, profile, native, jam_native, jam_offsets,
-                    jam_delay_random).print_dry_run()
+                    jam_delay_random, overlap_cfg=overlap_cfg).print_dry_run()
             else:
                 print("[jam] dry-run cpp-pdu single-TX: tx_samples=%d "
                       "rx via standard geometry (jam disabled)"
@@ -1287,7 +1571,7 @@ def main():
             # grid owns all timed I/O, retune and per-pulse delay.
             echo = JamCppPduEcho(
                 a, profile, native, jam_native, jam_offsets,
-                jam_delay_random)
+                jam_delay_random, overlap_cfg=overlap_cfg)
             echo._build_block()
         else:
             # Jam disabled: reuse the standard single-TX cpp-pdu app path
@@ -1310,9 +1594,11 @@ def main():
             jam_delay_random_us=jam_delay_random,
             jam_delay_seed=a.jam_delay_seed,
             cir_pre=cir_pre, cir_post=cir_post,
-            cir_skip=(0 if a.cir_output == "repetitions" else 10))
+            cir_skip=base.cir_skip_for_output(a.cir_output))
         if jam_enabled:
             echo.prepare_jam(native, jam_native)
+            if random_payload_bank is not None:
+                echo.set_random_payload_bank(random_payload_bank)
         else:
             echo.set_tx_native(native)
     print("echo_backend=%s" % a.echo_backend, flush=True)
@@ -1336,21 +1622,32 @@ def main():
     res = profile.make_pdu_resampler(taps, a.res_workers, sc16_scale)
     est_q = max(8, int(a.est_queue))
     use_pred = not a.require_sfd
-    cir_skip_initial = 0 if a.cir_output == "repetitions" else 10
+    cir_skip_initial = base.cir_skip_for_output(a.cir_output)
+    emit_reps = base.cir_outputs_repetitions(a.cir_output)
+    avg_skip = base.cir_average_skip_for_output(a.cir_output, a.sync_reps)
     est = base.uwb.radar_cir_estimator(
         tmpl_path, a.sync_reps, base.SFD_MODE, a.code_index, cir_pre, cir_post,
         cir_skip_initial, 0,
         a.sfd_search_margin, a.sync_refine_margin, a.sfd_threshold,
         a.sync_refine_threshold, True, est_q, use_pred,
-        a.cir_output == "repetitions",
-        a.cir_output == "repetitions")
+        emit_reps, emit_reps, a.cir_output == "both", avg_skip)
     print("estimator cir_pre=%d cir_post=%d taps=%d queue=%d "
-          "use_predicted_timing=%s (overflow=drop)"
-          % (cir_pre, cir_post, cir_taps, est_q, use_pred), flush=True)
+          "use_predicted_timing=%s cir_output=%s (overflow=drop)"
+          % (cir_pre, cir_post, cir_taps, est_q, use_pred, a.cir_output),
+          flush=True)
     cir_records_per_pulse = (max(1, int(a.sync_reps) - cir_skip_initial)
-                             if a.cir_output == "repetitions" else 1)
+                             if emit_reps else 1)
     wr = base.uwb.cir_writer(a.output, "cir", True,
                              max(256, 4 * cir_records_per_pulse))
+    wr_avg = None
+    if a.cir_output == "both":
+        wr_avg = base.uwb.cir_writer(a.output, "cir_avg", True,
+                                     max(64, est_q))
+        print("cir_avg coherent average of SYNC [%d, %d) -> %s "
+              "(UDP stays per-repetition)" % (
+                  avg_skip, int(a.sync_reps),
+                  os.path.join(a.output, "cir_avg.ucr4")),
+              flush=True)
     udp = None
     if (not a.no_udp) and bool(a.udp_host):
         if use_cpp and jam_enabled:
@@ -1366,7 +1663,7 @@ def main():
                 a.udp_host, int(a.udp_port), cir_taps,
                 freq_lookup=lambda pid: echo.jam_by_pulse.get(
                     int(pid), (echo.jam_freq_hz, echo.jam_freq_offset)))
-        print("udp_cir %s:%s framed=UCR4 SC16 taps=%d repetition+jam_freq from "
+        print("udp_cir %s:%s framed=UCR5 SC16 taps=%d repetition+jam_freq from "
               "%s" % (a.udp_host, a.udp_port, cir_taps,
                       "jam freq plan (cpp-pdu)" if use_cpp and jam_enabled
                       else ("sense freq (cpp-pdu single-TX)" if use_cpp
@@ -1381,6 +1678,8 @@ def main():
         tb.msg_connect((echo, "rx"), (res, "packet"))
     tb.msg_connect((res, "packet"), (est, "rx"))
     tb.msg_connect((est, "cir"), (wr, "cir"))
+    if wr_avg is not None:
+        tb.msg_connect((est, "cir_avg"), (wr_avg, "cir"))
     if udp is not None:
         tb.msg_connect((est, "cir"), (udp, "cir"))
 
@@ -1398,7 +1697,10 @@ def main():
     deadline = time.time() + 8.0
     while time.time() < deadline:
         written = wr.frames_written() + wr.frames_failed()
-        if (written >= echo._ok * cir_records_per_pulse and est.drained()
+        avg_written = (echo._ok if wr_avg is None else
+                       wr_avg.frames_written() + wr_avg.frames_failed())
+        if (written >= echo._ok * cir_records_per_pulse and
+                avg_written >= echo._ok and est.drained()
                 and echo._pub_q.empty()):
             break
         time.sleep(0.05)
@@ -1409,6 +1711,11 @@ def main():
         wr.stop()
     except Exception:
         pass
+    if wr_avg is not None:
+        try:
+            wr_avg.stop()
+        except Exception:
+            pass
 
     jsonl = os.path.join(a.output, "cir.jsonl")
     cir_stats = base.analyze_cir(jsonl, a.pulses)
@@ -1431,12 +1738,13 @@ def main():
         sum_freq_actual = float(echo.jam_freq_actual)
         sum_retune = int(echo.jam_retune_count)
         sum_retune_fail = int(echo.jam_retune_fail)
-        # Placeholder: the C++ grid applies per-pulse delays device-side
-        # (M4); a published per-pulse delay counter does not exist yet.
-        sum_delay_updates = 0
+        # Per-pulse delay updates: the C++ grid reports one per overlap
+        # attempted burst (0 for fixed/uniform, which apply device-side).
+        sum_delay_updates = echo._blk_u64("jam_delay_updates")
         sum_async = echo.cpp_async_counts()
         # Bounded per-dwell plan (the C++ grid owns per-pulse execution).
         jam_sweep = echo.freq_plan.dwell_plan()
+        sum_overlap = echo.jam_overlap
     elif use_cpp:
         tx_channels_list = [int(a.tx_channel)]
         sum_delay_us = 0.0
@@ -1454,6 +1762,7 @@ def main():
         sum_delay_updates = 0
         sum_async = dict(_async_zero)
         jam_sweep = []
+        sum_overlap = None
     else:
         tx_channels_list = list(echo.tx_channels)
         sum_delay_us = float(echo.jam_delay_us)
@@ -1472,12 +1781,37 @@ def main():
         sum_delay_updates = 0
         sum_async = dict(_async_zero)
         jam_sweep = sorted(echo.jam_records, key=lambda r: r["pulse_id"])
+        sum_overlap = None
+    # Preamble-overlap per-pulse histograms from cir.jsonl (L -> count and
+    # side -> count).  Empty for non-overlap runs.
+    overlap_hist = {}
+    overlap_side_hist = {}
+    try:
+        if sum_overlap is not None:
+            with open(jsonl) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    reps = rec.get("jam_overlap_reps")
+                    if reps is None:
+                        continue
+                    overlap_hist[int(reps)] = overlap_hist.get(int(reps), 0) + 1
+                    side = str(rec.get("jam_overlap_side", "none"))
+                    overlap_side_hist[side] = overlap_side_hist.get(side, 0) + 1
+    except OSError:
+        pass
     # Dual-TX geometry plan for the summary (§5.3 keys).  Computed from the
     # same inputs as the schedule PDU so python/cpp geometries agree; a
     # failure here must never break a completed python run, hence the
     # guarded fallback (the cpp path already fails fast at construction).
     try:
         if jam_enabled and jam_native is not None:
+            _ov = sum_overlap or {}
             tx_plan = jp.build_cpp_schedule_meta(
                 sense_len=int(native.size),
                 jam_len=int(jam_native.size),
@@ -1488,7 +1822,17 @@ def main():
                 jam_offsets_hz=list(jam_offsets),
                 jam_dwell=int(a.jam_dwell),
                 freq_settle_s=float(a.jam_freq_settle_s),
-                jam_logical_channel=1)
+                jam_logical_channel=1,
+                overlap_min_reps=int(_ov.get("min_reps", 0)),
+                overlap_max_reps=int(_ov.get("max_reps", 0)),
+                overlap_side=str(_ov.get("side", "random")),
+                sense_reps=int(_ov.get("sense_reps", 0)),
+                jam_reps=int(_ov.get("jam_reps", 0)),
+                sps=int(base.SPS),
+                tx_interp=int(profile.tx_interp),
+                tx_decim=int(profile.tx_decim),
+                overlap_seed=(int(_ov["seed"]) if _ov.get("seed") is not None
+                              else None))
         else:
             raise ValueError("single-TX")
     except ValueError:
@@ -1508,6 +1852,14 @@ def main():
             "jam_freq_offsets_hz": [],
             "jam_dwell": 0,
             "jam_freq_settle_ticks": 0,
+            "jam_overlap_min_reps": 0,
+            "jam_overlap_max_reps": 0,
+            "jam_overlap_side_mode": "lead",
+            "jam_overlap_seed": 0,
+            "sense_preamble_reps": 0,
+            "jam_preamble_reps": 0,
+            "jam_overlap_lead_delays_native": [],
+            "jam_overlap_lag_delays_native": [],
         }
     summary = {
         "hrp_samples": int(samples.size),
@@ -1533,6 +1885,8 @@ def main():
         "wr_ok": wr.frames_written(),
         "wr_fail": wr.frames_failed(),
         "wr_invalid": wr.frames_invalid(),
+        "wr_avg_ok": 0 if wr_avg is None else wr_avg.frames_written(),
+        "wr_avg_fail": 0 if wr_avg is None else wr_avg.frames_failed(),
         "use_predicted_timing": use_pred,
         "est_queue_capacity": est_q,
         "est_service_us_mean": int(est.service_mean_us()),
@@ -1554,6 +1908,7 @@ def main():
         "cir_post": cir_post,
         "cir_tap_count": cir_taps,
         "cir_skip_initial": cir_skip_initial,
+        "cir_average_skip": avg_skip,
         "cir_records_per_pulse": cir_records_per_pulse,
         "sfd_mode": base.SFD_MODE,
         "gain_tx": a.gain_tx,
@@ -1570,6 +1925,12 @@ def main():
         "jam_code_index": int(a.jam_code_index),
         "jam_preamble_length": int(jam_sync_reps),
         "jam_waveform": a.jam_waveform,
+        "jam_random_payload": bool(a.jam_random_payload),
+        "jam_payload_seed": a.jam_payload_seed,
+        "jam_payload_unique": random_payload_unique,
+        "jam_user_delay_us": jam_user_delay_us,
+        "jam_payload_start_work": jam_payload_start_work,
+        "jam_payload_field_work": jam_payload_field_work,
         "jam_scale": a.jam_scale,
         "jam_delay_us": sum_delay_us,
         "jam_delay_native": sum_delay_native,
@@ -1595,6 +1956,17 @@ def main():
         "tx_base_offsets_native": [int(v) for v in
                                    tx_plan["tx_base_offsets_native"]],
         "jam_delay_mode": str(tx_plan["jam_delay_mode"]),
+        "jam_overlap_mode": str(overlap_mode) if sum_overlap else "off",
+        "jam_overlap_min_reps": int(tx_plan["jam_overlap_min_reps"]),
+        "jam_overlap_max_reps": int(tx_plan["jam_overlap_max_reps"]),
+        "jam_overlap_side": (str(sum_overlap.get("side"))
+                             if sum_overlap else None),
+        "jam_overlap_seed": (int(sum_overlap.get("seed"))
+                             if sum_overlap else None),
+        "jam_overlap_histogram": {str(k): int(v)
+                                  for k, v in sorted(overlap_hist.items())},
+        "jam_overlap_side_histogram": {str(k): int(v) for k, v in
+                                       sorted(overlap_side_hist.items())},
         "jam_freq_settle_ticks": int(tx_plan["jam_freq_settle_ticks"]),
         "cpp_delay_updates": sum_delay_updates,
         "cpp_jam_retune": sum_retune,
@@ -1615,7 +1987,23 @@ def main():
         print("cir.jsonl_lines=%d" % cir_stats.get("lines", 0), flush=True)
     ok = (summary["wr_ok"] == a.pulses * cir_records_per_pulse
           and summary["echo_ok"] == a.pulses
-          and summary["echo_late"] == 0)
+          and (a.cir_output != "both" or summary["wr_avg_ok"] == a.pulses))
+    # Late slot skips are by design in the C++ grid: an expired slot is
+    # skipped (never retried) and the schedule continues with higher pulse
+    # ids, so wr_ok/echo_ok still reach the full pulse budget and only the
+    # pulse-id sequence has holes (cir missing_count == late skips).
+    # Accept a small late fraction instead of demanding a gap-free id
+    # range; strict no-late runs stay exactly as before.
+    late = summary["echo_late"]
+    if ok and late / max(1, a.pulses) <= 0.05 and (
+            a.cir_output == "repetitions" or
+            cir_stats.get("missing_count", 1) <= max(late, 0)):
+        print("NOTE accepting %d late slot skips (%.2f%% of %d pulses); "
+              "pulse ids have holes, delivered records are complete"
+              % (late, 100.0 * late / max(1, a.pulses), a.pulses),
+              flush=True)
+    else:
+        ok = ok and late == 0
     return 0 if ok else 1
 
 

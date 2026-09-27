@@ -575,7 +575,7 @@ def main():
     if a.cir_output != "average":
         raise SystemExit("stream peak/frequency servo currently requires "
                          "--cir-output average; use the base or jamming app "
-                         "for per-repetition CIR")
+                         "for per-repetition CIR or --cir-output both")
 
     # preamble length / legacy alias resolution (same as base/sweep)
     if a.preamble_length is not None and a.sync_reps is not None \
@@ -745,7 +745,7 @@ def main():
     if (not a.no_udp) and bool(a.udp_host):
         udp = base.CirUdpSink(a.udp_host, int(a.udp_port),
                               base.CIR_UDP_TAPS, freq_lookup=freq_lookup)
-        print("udp_cir %s:%s framed=UCR4 SC16(+scale,+repetition,+freq) "
+        print("udp_cir %s:%s framed=UCR5 SC16(+scale,+repetition,+freq) "
               "always_send_taps=%d nonblock"
               % (a.udp_host, a.udp_port, base.CIR_UDP_TAPS), flush=True)
 

@@ -18,8 +18,8 @@ Timed echo locks SFD to a constant offset from the RX window
 a detected SFD, so DW3000 collisions do not drop frames.  Pass
 --require-sfd to restore the old search gate.
 
-UDP is a non-blocking UCR4 header (pulse + repetition + frequency + SC16
-scale metadata) + ``cir_pre+cir_post`` block-floating SC16 taps (default
+UDP is a non-blocking UCR5 header (UCR4 + preamble-overlap collision
+metadata) + ``cir_pre+cir_post`` block-floating SC16 taps (default
 16+100=116) for every CIR record. Live lines report echo_ok_hz vs cir_ok_hz
 vs udp_hz; radio ok is not CIR ok.
 """
@@ -119,14 +119,13 @@ WORK_HZ = 998400000.0
 SPS = 1016
 SFD_SYMS_4Z2 = 8
 SFD_MODE = "4z2"
-# HRP BPRF preamble profiles.  The C++ blocks accept sync_repetitions in
-# 32/64/128/256/512/1024/2048 and preamble code indices 9..12.  The app
-# exposes the standard selectable preamble lengths and all four codes; TX
-# waveform, CIR estimator and metadata must agree on both.
+# HRP BPRF preamble profiles.  Short 1..16-repetition lengths are supported
+# for controlled measurements; they are not standard HRP preamble settings.
+# TX waveform, CIR estimator and metadata must agree on the length and code.
 DEFAULT_CODE_INDEX = 9
 CODE_INDEX_CHOICES = (9, 10, 11, 12)
 DEFAULT_PREAMBLE_LENGTH = 64
-PREAMBLE_LENGTH_CHOICES = (32, 64, 128, 256, 512, 1024)
+PREAMBLE_LENGTH_CHOICES = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024)
 # Legacy alias also accepts 2048 (supported by the C++ blocks but not part
 # of the standard selectable preamble set exposed by --preamble-length).
 SYNC_REPS_ALIAS_CHOICES = PREAMBLE_LENGTH_CHOICES + (2048,)
@@ -225,6 +224,38 @@ def resolve_cir_window(a):
     if taps > 65535:
         raise SystemExit("CIR tap_count=%d exceeds the UCR4 u16 field" % taps)
     return pre, post, taps
+
+
+# Coherent-average CIR drops this many leading SYNC repetitions.  The
+# repetitions and both modes still publish index 0, so their ROI skip is 0.
+# both keeps this skip only for the alongside average (cir_avg.ucr4).
+LEGACY_CIR_AVERAGE_SKIP = 10
+
+
+def cir_outputs_repetitions(cir_output):
+    """True when every SYNC repetition is emitted."""
+    return cir_output in ("repetitions", "both")
+
+
+def cir_skip_for_output(cir_output):
+    """Leading SYNC reps excluded from the per-record CIR window."""
+    return 0 if cir_outputs_repetitions(cir_output) else LEGACY_CIR_AVERAGE_SKIP
+
+
+def cir_average_skip_for_output(cir_output, sync_reps):
+    """Leading SYNC reps excluded from the alongside coherent average.
+
+    Returns 0 unless ``cir_output`` is ``both``.  A preamble shorter than
+    the legacy skip averages every repetition, matching the estimator.
+    """
+    if cir_output != "both":
+        return 0
+    reps = int(sync_reps)
+    if reps <= LEGACY_CIR_AVERAGE_SKIP:
+        return 0
+    return LEGACY_CIR_AVERAGE_SKIP
+
+
 CIR_UDP_MAGIC_V2 = b"UCR2"
 CIR_UDP_HDR_V2 = struct.Struct("<4sIHHffiIdd")
 CIR_UDP_MAGIC_V3 = b"UCR3"
@@ -232,6 +263,16 @@ CIR_UDP_MAGIC_V3 = b"UCR3"
 CIR_UDP_HDR_V3 = struct.Struct("<4sIHHHHffiIdd")
 CIR_UDP_MAGIC_V4 = b"UCR4"
 CIR_UDP_HDR_V4 = struct.Struct("<4sIHHHHffiIddf")
+# UCR5 (backward compatible with UCR4): adds the preamble-overlap collision
+# metadata so a live receiver can reconstruct the experiment condition.
+#   UCR4 fields | jam_delay_native i32 | jam_overlap_reps u16
+#   | sense_preamble_reps u16 | jam_preamble_reps u16
+#   | overlap_side u8 (0 none, 1 lead, 2 lag, 3 aligned) | reserved u8
+# 52 + 12 = 64 bytes; 116 taps SC16 -> 528-byte datagram (well under MTU).
+CIR_UDP_MAGIC_V5 = b"UCR5"
+CIR_UDP_HDR_V5 = struct.Struct("<4sIHHHHffiIddfiHHHBB")
+#: UCR5 overlap_side byte encoding (0 none, 1 lead, 2 lag, 3 aligned).
+CIR_UDP_OVERLAP_SIDE = {"none": 0, "lead": 1, "lag": 2, "aligned": 3}
 CIR_UDP_FREQ_UNKNOWN = float("nan")
 CIR_UDP_STATUS = {
     "ok": 0,
@@ -399,10 +440,16 @@ class CirUdpSink(gr.basic_block):
             elif not np.isfinite(component_peak):
                 self.dropped += 1
                 return
-        hdr = CIR_UDP_HDR_V4.pack(
-            CIR_UDP_MAGIC_V4, pulse_id, status, self.tap_count,
+        hdr = CIR_UDP_HDR_V5.pack(
+            CIR_UDP_MAGIC_V5, pulse_id, status, self.tap_count,
             rep_index, rep_count, sfd_m, peak_m, peak_tap, est_us,
-            float(freq_hz), float(freq_off), cir_scale)
+            float(freq_hz), float(freq_off), cir_scale,
+            _pmt_int(meta, "jam_delay_native", 0),
+            _pmt_int(meta, "jam_overlap_reps", 0) & 0xFFFF,
+            _pmt_int(meta, "sense_preamble_reps", 0) & 0xFFFF,
+            _pmt_int(meta, "jam_preamble_reps", 0) & 0xFFFF,
+            CIR_UDP_OVERLAP_SIDE.get(
+                _pmt_str(meta, "jam_overlap_side", "none"), 0), 0)
         try:
             self._sock.sendto(hdr + taps_sc16.tobytes(), self._dst)
         except (BlockingIOError, InterruptedError, OSError):
@@ -520,9 +567,15 @@ def rx_geometry(rate, pre_us, sync_reps, range_m, tail_us,
     """RX window must cover the full native TX burst, not just SYNC+SFD.
 
     With STS+PHR/PSDU the HRP packet is ~191 us; SYNC+SFD is only ~73 us.
-    FPGA RX length is rounded up to a multiple of 4.  ``tx_interp/tx_decim``
-    convert work-grid counts (998.4 MS/s) to native samples: 32/65 for CG400,
-    48/65 for CG600.
+    The FPGA RX engine delivers in samples-per-cycle units (8 samples on
+    the X410 radio): a request that is not a multiple of 8 makes each
+    capture consume ``ceil(n/8)*8`` samples of the device stream, so the
+    capture position vs. the commanded ticks drifts +leftover samples per
+    burst and the CIR window slides across the burst (+5.33 work
+    taps/packet was measured with rx_len=499300).  Round the window up to
+    8 (a multiple of 4 as well).  ``tx_interp/tx_decim`` convert work-grid
+    counts (998.4 MS/s) to native samples: 32/65 for CG400, 48/65 for
+    CG600.
     """
     pre = llround(pre_us * 1e-6 * rate)
     sync = ceildiv(sync_reps * SPS * int(tx_interp), int(tx_decim))
@@ -532,7 +585,7 @@ def rx_geometry(rate, pre_us, sync_reps, range_m, tail_us,
     pad = llround(float(pad_us) * 1e-6 * rate)
     body = int(tx_native_samples) if tx_native_samples else (sync + sfd)
     rx = pre + body + rng + pad + tail
-    rx = (rx + 3) // 4 * 4
+    rx = (rx + 7) // 8 * 8
     return pre, sync, sfd, rng, tail, pad, rx
 
 
@@ -1132,7 +1185,7 @@ class CppPduEcho:
                 self.pre, self.sync_reps, self.cal_delay_native, self.rate,
                 cir_pre=int(getattr(a, "cir_pre", DEFAULT_CIR_PRE)),
                 cir_post=int(getattr(a, "cir_post", DEFAULT_CIR_POST)),
-                cir_skip=(0 if a.cir_output == "repetitions" else 10))
+                cir_skip=cir_skip_for_output(a.cir_output))
         else:
             pub = int(a.publish_native)
         self.publish_native = int(pub)
@@ -1357,7 +1410,7 @@ def build_parser(add_help=True, cir_output_default="repetitions"):
     p.add_argument("--preamble-length", type=int, default=None,
                    choices=list(PREAMBLE_LENGTH_CHOICES),
                    help="HRP SYNC preamble length in repetitions "
-                        "(32/64/128/256/512/1024, default %d)"
+                        "(1/2/4/8/16 are experimental; default %d)"
                         % DEFAULT_PREAMBLE_LENGTH)
     p.add_argument("--sync-reps", type=int, default=None,
                    choices=list(SYNC_REPS_ALIAS_CHOICES),
@@ -1427,11 +1480,15 @@ def build_parser(add_help=True, cir_output_default="repetitions"):
     p.add_argument("--est-queue", type=int, default=64,
                    help="CIR estimator job queue; overflow is a real drop. "
                         "Do not set this to pulses — that hides lag as 'no loss'")
-    p.add_argument("--cir-output", choices=["repetitions", "average"],
+    p.add_argument("--cir-output",
+                   choices=["repetitions", "average", "both"],
                    default=cir_output_default,
                    help="CIR records per pulse: every SYNC repetition from "
-                        "index 0 (default in base/jam), or one legacy "
-                        "coherent average with the first 10 skipped")
+                        "index 0 (default in base/jam); one legacy coherent "
+                        "average with the first 10 skipped; or both, which "
+                        "writes repetitions to cir.ucr4 and that same "
+                        "skip-10 average to cir_avg.ucr4.  UDP stays on the "
+                        "repetition stream")
     p.add_argument("--cir-pre", type=int, default=DEFAULT_CIR_PRE,
                    help="CIR taps before the calibrated zero-delay origin "
                         "(default %d). tap_count = cir_pre + cir_post."
@@ -1791,7 +1848,7 @@ def main():
             SFD_MODE, publish_native=a.publish_native,
             rx_freq_offset=a.rx_freq_offset,
             cir_pre=cir_pre, cir_post=cir_post,
-            cir_skip=(0 if a.cir_output == "repetitions" else 10))
+            cir_skip=cir_skip_for_output(a.cir_output))
         echo.set_tx_native(native)
         echo_out_port = "rx"
     print("echo_backend=%s" % a.echo_backend, flush=True)
@@ -1815,31 +1872,40 @@ def main():
         profile.pdu, int(a.res_workers), a.res_sc16_scale), flush=True)
     est_q = max(8, int(a.est_queue))
     use_pred = not a.require_sfd
-    cir_skip_initial = 0 if a.cir_output == "repetitions" else 10
+    cir_skip_initial = cir_skip_for_output(a.cir_output)
+    emit_reps = cir_outputs_repetitions(a.cir_output)
+    avg_skip = cir_average_skip_for_output(a.cir_output, a.sync_reps)
     est = uwb.radar_cir_estimator(
         tmpl_path, a.sync_reps, SFD_MODE, a.code_index, cir_pre, cir_post,
         cir_skip_initial, 0,
         a.sfd_search_margin, a.sync_refine_margin, a.sfd_threshold,
         a.sync_refine_threshold, True, est_q, use_pred,
-        a.cir_output == "repetitions",
-        a.cir_output == "repetitions")
+        emit_reps, emit_reps, a.cir_output == "both", avg_skip)
     print("estimator code_index=%d preamble_length=%d sfd_search_margin=%d "
           "cir_pre=%d cir_post=%d taps=%d queue=%d "
-          "use_predicted_timing=%s (overflow=drop)" % (
+          "use_predicted_timing=%s cir_output=%s (overflow=drop)" % (
               a.code_index, a.sync_reps, a.sfd_search_margin,
-              cir_pre, cir_post, cir_taps, est_q, use_pred),
+              cir_pre, cir_post, cir_taps, est_q, use_pred, a.cir_output),
           flush=True)
     cir_records_per_pulse = (max(1, int(a.sync_reps) - cir_skip_initial)
-                             if a.cir_output == "repetitions" else 1)
+                             if emit_reps else 1)
     wr = uwb.cir_writer(a.output, "cir", True,
                         max(256, 4 * cir_records_per_pulse))
+    wr_avg = None
+    if a.cir_output == "both":
+        wr_avg = uwb.cir_writer(a.output, "cir_avg", True, max(64, est_q))
+        print("cir_avg coherent average of SYNC [%d, %d) -> %s "
+              "(UDP stays per-repetition)" % (
+                  avg_skip, int(a.sync_reps),
+                  os.path.join(a.output, "cir_avg.ucr4")),
+              flush=True)
     udp = None
     udp_on = (not a.no_udp) and bool(a.udp_host)
     if udp_on:
         udp = CirUdpSink(
             a.udp_host, int(a.udp_port), cir_taps,
             freq_lookup=lambda pid: (echo.freq, 0.0))
-        print("udp_cir %s:%s framed=UCR4 SC16(+scale,+repetition,+freq) "
+        print("udp_cir %s:%s framed=UCR5 SC16(+scale,+repetition,+freq) "
               "always_send_taps=%d nonblock" % (
                   a.udp_host, a.udp_port, cir_taps), flush=True)
 
@@ -1850,6 +1916,8 @@ def main():
     tb.msg_connect((echo_block, echo_out_port), (res, "packet"))
     tb.msg_connect((res, "packet"), (est, "rx"))
     tb.msg_connect((est, "cir"), (wr, "cir"))
+    if wr_avg is not None:
+        tb.msg_connect((est, "cir_avg"), (wr_avg, "cir"))
     if udp is not None:
         tb.msg_connect((est, "cir"), (udp, "cir"))
     # Do not attach message_debug on a 100 Hz soak: queue_full status
@@ -1869,7 +1937,10 @@ def main():
     deadline = time.time() + 8.0
     while time.time() < deadline:
         written = wr.frames_written() + wr.frames_failed()
-        if (written >= echo._ok * cir_records_per_pulse and est.drained()
+        avg_written = (echo._ok if wr_avg is None else
+                       wr_avg.frames_written() + wr_avg.frames_failed())
+        if (written >= echo._ok * cir_records_per_pulse and
+                avg_written >= echo._ok and est.drained()
                 and echo._pub_q.empty()):
             break
         time.sleep(0.05)
@@ -1880,6 +1951,11 @@ def main():
         wr.stop()
     except Exception:
         pass
+    if wr_avg is not None:
+        try:
+            wr_avg.stop()
+        except Exception:
+            pass
 
     if a.timing_detail:
         print_timing_detail(echo, est)
@@ -1912,6 +1988,8 @@ def main():
         "wr_ok": wr.frames_written(),
         "wr_fail": wr.frames_failed(),
         "wr_invalid": wr.frames_invalid(),
+        "wr_avg_ok": 0 if wr_avg is None else wr_avg.frames_written(),
+        "wr_avg_fail": 0 if wr_avg is None else wr_avg.frames_failed(),
         "use_predicted_timing": use_pred,
         "est_queue_capacity": est_q,
         "est_queue_hwm": int(est.queue_high_watermark()),
@@ -1937,6 +2015,7 @@ def main():
         "cir_post": cir_post,
         "cir_tap_count": cir_taps,
         "cir_skip_initial": cir_skip_initial,
+        "cir_average_skip": avg_skip,
         "cir_records_per_pulse": cir_records_per_pulse,
         "sfd_mode": SFD_MODE,
         "gain_tx": a.gain_tx,
@@ -2047,11 +2126,25 @@ def main():
               summary["sc16_packets"] == a.pulses)
     else:
         expected_cir_records = a.pulses * cir_records_per_pulse
+        # Late slot skips are by design in the C++ grid: an expired slot is
+        # skipped (never retried) and the schedule continues with higher
+        # pulse ids, so wr_ok/echo_ok still reach the full pulse budget and
+        # only the pulse-id sequence has holes (missing_count == late
+        # skips).  Accept a small late fraction instead of demanding a
+        # gap-free id range; strict no-late runs stay exactly as before.
+        late = summary["echo_late"]
+        late_frac = late / max(1, a.pulses)
         ok = (summary["wr_ok"] == expected_cir_records and
               summary["echo_ok"] == a.pulses and
-              summary["echo_late"] == 0 and
+              late_frac <= 0.05 and
               cir_stats.get("ok") == expected_cir_records and
-              cir_stats.get("missing_count", 1) == 0)
+              cir_stats.get("missing_count", 1) <= max(late, 0))
+        if a.cir_output == "both":
+            ok = ok and summary["wr_avg_ok"] == a.pulses
+        if ok and late:
+            print("NOTE accepting %d late slot skips (%.2f%% of %d pulses); "
+                  "pulse ids have holes, delivered records are complete"
+                  % (late, 100.0 * late_frac, a.pulses), flush=True)
     raise SystemExit(0 if ok else 3)
 
 

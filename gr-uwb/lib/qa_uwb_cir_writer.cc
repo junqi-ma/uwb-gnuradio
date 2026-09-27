@@ -183,6 +183,10 @@ make_meta(uint64_t pulse_id,
                          pmt::from_uint64(pulse_id));
     meta = pmt::dict_add(meta, pmt::mp("schedule_index"),
                          pmt::from_uint64(pulse_id));
+    meta = pmt::dict_add(meta, pmt::mp("freq_hz"),
+                         pmt::from_double(6.4896e9 + 500.0 * pulse_id));
+    meta = pmt::dict_add(meta, pmt::mp("freq_offset_hz"),
+                         pmt::from_double(500.0 * pulse_id));
     meta = pmt::dict_add(meta, pmt::mp("status"), pmt::mp(status));
     meta = pmt::dict_add(meta, pmt::mp("tap_count"),
                          pmt::from_uint64(tap_count));
@@ -322,8 +326,18 @@ BOOST_AUTO_TEST_CASE(test_writer_mixed_frames)
             ++posted_ok;
             expect_taps += frames[i].size();
         }
-        w->_post(pmt::mp("cir"),
-                 make_frame(i, statuses[i], frames[i]));
+        pmt::pmt_t frame = make_frame(i, statuses[i], frames[i]);
+        if (i == 0) {
+            // Jam-specific fields must continue to override the generic
+            // sense-frequency fallback in the UCR4 header.
+            pmt::pmt_t meta = pmt::car(frame);
+            meta = pmt::dict_add(meta, pmt::mp("jam_freq_actual_hz"),
+                                 pmt::from_double(6.4902e9));
+            meta = pmt::dict_add(meta, pmt::mp("jam_freq_offset_hz"),
+                                 pmt::from_double(600000.0));
+            frame = pmt::cons(meta, pmt::cdr(frame));
+        }
+        w->_post(pmt::mp("cir"), frame);
     }
 
     BOOST_REQUIRE(wait_written(w, kFrames));
@@ -388,6 +402,14 @@ BOOST_AUTO_TEST_CASE(test_writer_mixed_frames)
             BOOST_CHECK_EQUAL(std::string(hdr.magic, 4), "UCR4");
             BOOST_CHECK_EQUAL(hdr.pulse_id, i);
             BOOST_CHECK_EQUAL(hdr.tap_count, kTaps);
+            const double expect_freq = i == 0
+                ? 6.4902e9
+                : 6.4896e9 + 500.0 * static_cast<double>(i);
+            const double expect_offset = i == 0
+                ? 600000.0
+                : 500.0 * static_cast<double>(i);
+            BOOST_CHECK_EQUAL(hdr.freq_hz, expect_freq);
+            BOOST_CHECK_EQUAL(hdr.freq_offset_hz, expect_offset);
             BOOST_CHECK_CLOSE(hdr.cir_scale, scale, 1e-5);
             BOOST_CHECK(std::memcmp(raw.data() + rec_off + sizeof(Ucr4Header),
                                     expect_sc16.data(),

@@ -456,10 +456,12 @@ BOOST_AUTO_TEST_CASE(test_invalid_profile_table)
               return pmt::dict_add(m, pmt::mp("sync_repetitions"),
                                    pmt::from_long(0));
           } },
-        { "sync_16", "invalid_profile",
+        { "sync_3", "invalid_profile",
           [](pmt::pmt_t m) {
+              // Not a power of two: outside kRadarSyncRepetitions.
+              // 16 used to be unsupported but is now a legal profile.
               return pmt::dict_add(m, pmt::mp("sync_repetitions"),
-                                   pmt::from_long(16));
+                                   pmt::from_long(3));
           } },
         { "sfd_unknown", "invalid_profile",
           [](pmt::pmt_t m) {

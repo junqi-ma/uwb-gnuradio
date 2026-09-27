@@ -41,6 +41,63 @@ class ConstantsTest(unittest.TestCase):
         self.assertEqual(jp.DEFAULT_JAM_CHANNEL, 1)
 
 
+class PayloadBoundaryTest(unittest.TestCase):
+    def test_hrp_payload_field_offsets(self):
+        # 4z2: 128 SYNC + 8 SFD symbols, 4z STS, 21 PHR symbols.
+        work = (128 + 8) * 1016 + 67584 + 21 * 512 * 2
+        self.assertEqual(jp.payload_start_work(128, True), work)
+        self.assertEqual(jp.payload_start_work(128, False), work - 67584)
+        self.assertEqual(jp.work_boundary_native(work, 48, 65),
+                         (work * 48 + 64) // 65)
+        self.assertEqual(jp.work_boundary_native(work, 32, 65),
+                         (work * 32 + 64) // 65)
+
+    def test_fill_preamble_span_tiles_and_truncates(self):
+        # Shorter field: tiled to exactly the preamble span.
+        field = np.arange(10, dtype=np.float32) + 1
+        out = jp.fill_preamble_span_work(field, 2, sps=8)   # target 16
+        self.assertEqual(out.size, 16)
+        np.testing.assert_array_equal(out, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+                                            1, 2, 3, 4, 5, 6])
+        # Longer field: truncated.
+        long_field = np.arange(100, dtype=np.float32) + 1
+        out = jp.fill_preamble_span_work(long_field, 2, sps=8)
+        self.assertEqual(out.size, 16)
+        np.testing.assert_array_equal(out, long_field[:16])
+        # Exact match: untouched.
+        exact = np.arange(16, dtype=np.float32) + 1
+        np.testing.assert_array_equal(jp.fill_preamble_span_work(exact, 2, 8),
+                                      exact)
+        # Real geometry: PSDU field (nsym*128) tiled to Ns*SPS.
+        target = 64 * jp.WORK_SPS
+        field = np.zeros(16 * 128, dtype=np.complex64)      # 16 BPM symbols
+        self.assertEqual(jp.fill_preamble_span_work(field, 64).size, target)
+        # BPM symbol boundaries stay aligned when 64*1016 % 128 == 0.
+        self.assertEqual(target % 128, 0)
+
+    def test_fill_preamble_span_rejects_bad_input(self):
+        with self.assertRaises(ValueError):
+            jp.fill_preamble_span_work(np.ones(16), 0)
+        with self.assertRaises(ValueError):
+            jp.fill_preamble_span_work(np.zeros((2, 4)), 4)
+        with self.assertRaises(ValueError):
+            jp.fill_preamble_span_work(np.array([]), 4)
+
+    def test_zero_delay_places_jam_payload_on_sensing_preamble(self):
+        # delay 0 must start the jammer row at sample 0 (the sensing
+        # preamble), and the row must fit inside the composite buffer.
+        reps = 64
+        jam_native_len = (reps * jp.WORK_SPS * 48 + 64) // 65
+        sense_len = ((reps + 8) * jp.WORK_SPS * 48 + 64) // 65
+        jam = np.arange(jam_native_len, dtype=np.float32).astype(np.complex64)
+        tx = jp.compose_tx_native(np.zeros(sense_len, dtype=np.complex64),
+                                  jam, 0)
+        self.assertEqual(tx.shape[1], sense_len)
+        self.assertTrue(np.array_equal(tx[1, :jam_native_len], jam))
+        self.assertTrue(np.all(tx[1, jam_native_len:] == 0))
+        self.assertTrue(np.all(tx[0] == 0))
+
+
 class MakeFreqOffsetScanTest(unittest.TestCase):
     def test_descending_includes_stop(self):
         # 491 kHz -> 0, 300 Hz: last grid point is 200 Hz, stop 0 is appended.
@@ -440,7 +497,9 @@ class BuildCppScheduleMetaTest(unittest.TestCase):
         meta = jp.build_cpp_schedule_meta(
             sense_len=100, jam_len=50, native_hz=737.28e6)
         self.assertEqual(tuple(meta.keys()), jp.CPP_SCHEDULE_META_KEYS)
-        self.assertEqual(jp.CPP_JAM_DELAY_MODES, ("fixed", "uniform"))
+        self.assertEqual(jp.CPP_JAM_DELAY_MODES,
+                         ("fixed", "uniform", "preamble_overlap"))
+        self.assertEqual(jp.CPP_OVERLAP_SIDES, ("lead", "lag", "random"))
 
     def test_fixed_zero_delay(self):
         meta = jp.build_cpp_schedule_meta(
@@ -552,6 +611,198 @@ class BuildCppScheduleMetaTest(unittest.TestCase):
                 sense_len=10, jam_len=4, native_hz=1e9, delay_us=-1.0)
 
 
+class OverlapSpanNativeTest(unittest.TestCase):
+    def test_matches_native_span_formula(self):
+        # CG600 48/65: B(1) = ceil(1016*48/65) = 751.
+        self.assertEqual(jp.overlap_span_native(1), 751)
+        self.assertEqual(jp.overlap_span_native(0), 0)
+        # A single ceiling, not accumulated rounded per-repetition spans.
+        self.assertEqual(jp.overlap_span_native(127), 95286)
+        self.assertEqual(jp.overlap_span_native(2),
+                         (2 * 1016 * 48 + 64) // 65)
+
+    def test_cg400_ratio(self):
+        self.assertEqual(jp.overlap_span_native(1, tx_interp=32, tx_decim=65),
+                         (1016 * 32 + 64) // 65)
+
+    def test_boundary_matches_resample_poly(self):
+        # The lookup must agree with the actual polyphase resampler used by
+        # profile.tx_native() to within one boundary sample.
+        try:
+            from scipy.signal import resample_poly
+        except ImportError:  # pragma: no cover - scipy always present here
+            self.skipTest("scipy unavailable")
+        sps = 1016
+        for interp, decim in ((48, 65), (32, 65)):
+            for q in (1, 2, 5, 63, 127):
+                x = np.zeros(sps * (q + 2), dtype=np.complex128)
+                x[q * sps] = 1.0
+                y = resample_poly(x, interp, decim)
+                pos = int(np.argmax(np.abs(y)))
+                b = jp.overlap_span_native(q, sps, interp, decim)
+                self.assertLessEqual(
+                    abs(pos - b), 1,
+                    "interp/decim=%d/%d q=%d pos=%d B=%d"
+                    % (interp, decim, q, pos, b))
+
+    def test_bad(self):
+        with self.assertRaises(ValueError):
+            jp.overlap_span_native(-1)
+        with self.assertRaises(ValueError):
+            jp.overlap_span_native(1, sps=0)
+
+
+class OverlapDelayTablesTest(unittest.TestCase):
+    def test_endpoints_and_monotonic(self):
+        lead, lag = jp.overlap_delay_tables(
+            sense_reps=128, jam_reps=128, min_reps=1, max_reps=128)
+        self.assertEqual(len(lead), 128)
+        self.assertEqual(len(lag), 128)
+        # L=1 -> maximum separation; L=full -> aligned (0).
+        self.assertEqual(lead[0], -95286)
+        self.assertEqual(lag[0], 95286)
+        self.assertEqual(lead[-1], 0)
+        self.assertEqual(lag[-1], 0)
+        # lead is non-decreasing, lag non-increasing.
+        self.assertTrue(all(b >= a for a, b in zip(lead, lead[1:])))
+        self.assertTrue(all(b <= a for a, b in zip(lag, lag[1:])))
+        self.assertTrue(all(d <= 0 for d in lead))
+        self.assertTrue(all(d >= 0 for d in lag))
+
+    def test_asymmetric_lengths(self):
+        lead, lag = jp.overlap_delay_tables(
+            sense_reps=256, jam_reps=128, min_reps=1, max_reps=128)
+        # Ns=256, Nj=128: lag spans (Ns-L) reps, lead spans (Nj-L).
+        self.assertEqual(lead[0], -jp.overlap_span_native(127))
+        self.assertEqual(lag[0], jp.overlap_span_native(255))
+
+    def test_subrange(self):
+        lead, lag = jp.overlap_delay_tables(
+            sense_reps=128, jam_reps=128, min_reps=32, max_reps=64)
+        self.assertEqual(len(lead), 33)
+        self.assertEqual(lead[0], -jp.overlap_span_native(128 - 32))
+
+    def test_bad_ranges(self):
+        for bad in [(0, 128), (129, 128), (1, 200), (1, 0)]:
+            with self.assertRaises(ValueError):
+                jp.overlap_delay_tables(
+                    sense_reps=128, jam_reps=128,
+                    min_reps=bad[0], max_reps=bad[1])
+        with self.assertRaises(ValueError):
+            jp.overlap_delay_tables(
+                sense_reps=0, jam_reps=128, min_reps=1, max_reps=1)
+
+
+class OverlapGeometryTest(unittest.TestCase):
+    def test_degenerates_to_symmetric(self):
+        D = 500
+        geo = jp.overlap_geometry(
+            sense_len=1000, jam_len=800, delays_native=[-D, 0, D])
+        self.assertEqual(geo["P"], D)
+        self.assertEqual(geo["R"], 2 * D)
+        self.assertEqual(geo["L"], jp.bipolar_tx_len(1000, 800, D))
+        self.assertEqual(geo["jam_wave_begin"], 2 * D)
+        self.assertEqual(geo["backing_length"], geo["L"] + 2 * D)
+
+    def test_lead_only(self):
+        # lead-only: dmin<0, dmax==0 -> P>0, jam wave begins at P.
+        geo = jp.overlap_geometry(
+            sense_len=1000, jam_len=800, delays_native=[-300, -100, 0])
+        self.assertEqual(geo["dmin"], -300)
+        self.assertEqual(geo["dmax"], 0)
+        self.assertEqual(geo["P"], 300)
+        self.assertEqual(geo["jam_wave_begin"], 300)
+        self.assertEqual(geo["L"], max(300 + 1000, 300 + 0 + 800))
+
+    def test_lag_only(self):
+        geo = jp.overlap_geometry(
+            sense_len=1000, jam_len=800, delays_native=[0, 100, 300])
+        self.assertEqual(geo["P"], 0)
+        self.assertEqual(geo["R"], 300)
+        self.assertEqual(geo["L"], max(1000, 300 + 800))
+
+    def test_all_positive_and_all_negative(self):
+        # lag-only with Ns>Nj: every delay is positive; sense parks at 0.
+        pos = jp.overlap_geometry(
+            sense_len=1000, jam_len=800, delays_native=[100, 200])
+        self.assertEqual(pos["P"], 0)
+        self.assertEqual(pos["R"], 100)
+        self.assertEqual(pos["L"], max(1000, 200 + 800))
+        self.assertEqual(pos["jam_wave_begin"], 200)
+        # lead-only with Nj>Ns: every delay is negative; sense parks at |dmin|.
+        neg = jp.overlap_geometry(
+            sense_len=1000, jam_len=800, delays_native=[-200, -100])
+        self.assertEqual(neg["P"], 200)
+        self.assertEqual(neg["R"], 100)
+        self.assertEqual(neg["jam_wave_begin"], 100)
+        self.assertEqual(neg["L"], max(200 + 1000, 100 + 800))
+
+    def test_empty_table_rejected(self):
+        with self.assertRaises(ValueError):
+            jp.overlap_geometry(sense_len=10, jam_len=4, delays_native=[])
+
+
+class BuildCppOverlapMetaTest(unittest.TestCase):
+    def _meta(self, **kw):
+        base = dict(sense_len=285035, jam_len=192071, native_hz=737.28e6,
+                    overlap_min_reps=1, overlap_max_reps=128,
+                    overlap_side="random", sense_reps=128, jam_reps=128,
+                    tx_interp=48, tx_decim=65, overlap_seed=20260921)
+        base.update(kw)
+        return jp.build_cpp_schedule_meta(**base)
+
+    def test_random_both_sides(self):
+        meta = self._meta()
+        self.assertEqual(meta["jam_delay_mode"], "preamble_overlap")
+        self.assertEqual(meta["jam_overlap_min_reps"], 1)
+        self.assertEqual(meta["jam_overlap_max_reps"], 128)
+        self.assertEqual(meta["jam_overlap_side_mode"], "random")
+        self.assertEqual(meta["jam_overlap_seed"], 20260921)
+        self.assertEqual(meta["jam_delay_seed"], 20260921)
+        self.assertEqual(meta["sense_preamble_reps"], 128)
+        self.assertEqual(meta["jam_preamble_reps"], 128)
+        self.assertEqual(meta["jam_delay_lo_native"], -95286)
+        self.assertEqual(meta["jam_delay_hi_native"], 95286)
+        self.assertEqual(meta["tx_base_offsets_native"][0], 95286)
+        self.assertEqual(len(meta["jam_overlap_lead_delays_native"]), 128)
+        self.assertEqual(len(meta["jam_overlap_lag_delays_native"]), 128)
+
+    def test_side_filters_geometry(self):
+        lead = self._meta(overlap_side="lead")
+        self.assertEqual(lead["jam_delay_hi_native"], 0)
+        self.assertEqual(lead["jam_delay_lo_native"], -95286)
+        self.assertEqual(len(lead["jam_overlap_lead_delays_native"]), 128)
+        lag = self._meta(overlap_side="lag")
+        self.assertEqual(lag["jam_delay_lo_native"], 0)
+        self.assertEqual(lag["jam_delay_hi_native"], 95286)
+
+    def test_seed_defaults_to_delay_seed(self):
+        meta = self._meta(overlap_seed=None, delay_seed=7)
+        self.assertEqual(meta["jam_overlap_seed"], 7)
+
+    def test_rejects_conflicts(self):
+        with self.assertRaises(ValueError):
+            self._meta(delay_random_us=1.0)
+        with self.assertRaises(ValueError):
+            self._meta(delay_us=1.0)
+        with self.assertRaises(ValueError):
+            self._meta(overlap_side="sideways")
+        with self.assertRaises(ValueError):
+            self._meta(overlap_min_reps=0, overlap_max_reps=128)
+
+    def test_non_overlap_has_default_keys(self):
+        meta = jp.build_cpp_schedule_meta(
+            sense_len=100, jam_len=50, native_hz=737.28e6)
+        self.assertEqual(meta["jam_overlap_min_reps"], 0)
+        self.assertEqual(meta["jam_overlap_max_reps"], 0)
+        self.assertEqual(meta["jam_overlap_lead_delays_native"], [])
+        self.assertEqual(meta["jam_overlap_lag_delays_native"], [])
+
+    def test_json_serialisable(self):
+        import json
+        json.dumps(self._meta())
+
+
 class ContiguousWindowLayoutTest(unittest.TestCase):
     def test_uniform_backing_and_windows(self):
         lay = jp.contiguous_window_layout(
@@ -586,6 +837,28 @@ class ContiguousWindowLayoutTest(unittest.TestCase):
             jp.require_fragment_covers_L(65536, 189003)
         self.assertIn("max_fragment_size", str(ctx.exception))
         self.assertIn("contiguous-window", str(ctx.exception))
+
+    def test_overlap_asymmetric(self):
+        lay = jp.contiguous_window_layout(
+            sense_len=285035, jam_len=192071, native_hz=737.28e6,
+            overlap_min_reps=1, overlap_max_reps=128, overlap_side="random",
+            sense_reps=128, jam_reps=128, tx_interp=48, tx_decim=65)
+        self.assertEqual(lay["jam_delay_mode"], "preamble_overlap")
+        self.assertEqual(lay["D"], 95286)
+        self.assertEqual(lay["backing_length"], lay["L"] + 2 * 95286)
+        self.assertEqual(lay["jam_window_begin_min"], 0)
+        self.assertEqual(lay["jam_window_begin_max"], 2 * 95286)
+        self.assertEqual(lay["data_fragments"], 1)
+
+    def test_overlap_lead_only_smaller(self):
+        lay = jp.contiguous_window_layout(
+            sense_len=285035, jam_len=192071, native_hz=737.28e6,
+            overlap_min_reps=1, overlap_max_reps=128, overlap_side="lead",
+            sense_reps=128, jam_reps=128, tx_interp=48, tx_decim=65)
+        # lead-only: P=95286, R=95286 (half of the two-sided R=190572).
+        self.assertEqual(lay["D"], 95286)
+        self.assertEqual(lay["jam_window_begin_max"], 95286)
+        self.assertEqual(lay["backing_length"], lay["L"] + 95286)
 
 
 class JamScaleSc16ZeroTest(unittest.TestCase):

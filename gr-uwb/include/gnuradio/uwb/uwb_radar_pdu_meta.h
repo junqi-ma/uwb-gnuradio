@@ -83,7 +83,7 @@ inline int64_t native_span(int64_t work_samples, uint32_t decim)
 // 16/64/1024/4096; 32/128/256/512/2048 are custom profiles built by
 // cropping/tiling a pulse-shaped SYNC field (not 751-sample repeats).
 inline constexpr size_t kRadarSyncRepetitions[] = {
-    32, 64, 128, 256, 512, 1024, 2048
+    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048
 };
 inline constexpr size_t kMaxRadarBurstSamples = 2097152; // 1<<21, 2048-SYNC RX
 inline constexpr size_t kMaxPsduBytes = 127;
@@ -99,7 +99,7 @@ inline bool sync_reps_supported(size_t n)
 
 inline const char* sync_reps_supported_list()
 {
-    return "32, 64, 128, 256, 512, 1024 or 2048";
+    return "1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024 or 2048";
 }
 
 inline bool code_index_supported(size_t n)
@@ -148,6 +148,9 @@ inline constexpr const char* kPassthrough[] = {
     "code_index",
     "uhd_error",
     "source",
+    // Sense-RF sweep coordinates, used by non-jamming CIR captures.
+    "freq_hz",
+    "freq_offset_hz",
     // Dual-TX jammer diagnostics (native control quantities: do not scale
     // jam_delay_native through 65/48).
     "jam_delay_native",
@@ -165,6 +168,13 @@ inline constexpr const char* kPassthrough[] = {
     "tx_fragment_count",
     "sense_tx_ticks",
     "jam_tx_ticks",
+    // Preamble-overlap real packet collision (§6). Native/control
+    // quantities: never scaled through 65/48.
+    "jam_overlap_reps",
+    "jam_overlap_side",
+    "sense_preamble_reps",
+    "jam_preamble_reps",
+    "jam_overlap_seed",
 };
 
 // Absolute native indices → map(p). Native value stored as key+"_native".

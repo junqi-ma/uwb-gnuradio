@@ -75,6 +75,16 @@ parameters:
     default: 'False'
     options: ['True', 'False']
     option_labels: ['True', 'False']
+-   id: emit_repetition_average
+    label: Also emit coherent average
+    dtype: bool
+    default: 'False'
+    options: ['True', 'False']
+    option_labels: ['True', 'False']
+-   id: repetition_average_skip
+    label: Average skip (leading SYNC reps)
+    dtype: int
+    default: '10'
 
 inputs:
 -   domain: message
@@ -86,16 +96,19 @@ outputs:
     id: cir
     optional: true
 -   domain: message
+    id: cir_avg
+    optional: true
+-   domain: message
     id: status
     optional: true
 
 templates:
     imports: from gnuradio import uwb
-    make: uwb.radar_cir_estimator(${template_path}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${cir_pre}, ${cir_post}, ${cir_skip_initial}, ${cir_repetitions}, ${sfd_search_margin}, ${sync_refine_margin}, ${sfd_threshold}, ${sync_refine_threshold}, ${emit_normalized}, ${queue_capacity}, ${use_predicted_timing}, ${emit_individual_repetitions})
+    make: uwb.radar_cir_estimator(${template_path}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${cir_pre}, ${cir_post}, ${cir_skip_initial}, ${cir_repetitions}, ${sfd_search_margin}, ${sync_refine_margin}, ${sfd_threshold}, ${sync_refine_threshold}, ${emit_normalized}, ${queue_capacity}, ${use_predicted_timing}, ${emit_individual_repetitions}, False, ${emit_repetition_average}, ${repetition_average_skip})
 
 cpp_templates:
     includes: ['#include <gnuradio/uwb/uwb_radar_cir_estimator_block.h>']
-    make: 'this->${id} = gr::uwb::UwbRadarCirEstimator::make(${template_path}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${cir_pre}, ${cir_post}, ${cir_skip_initial}, ${cir_repetitions}, ${sfd_search_margin}, ${sync_refine_margin}, ${sfd_threshold}, ${sync_refine_threshold}, ${emit_normalized}, ${queue_capacity}, ${use_predicted_timing}, ${emit_individual_repetitions});'
+    make: 'this->${id} = gr::uwb::UwbRadarCirEstimator::make(${template_path}, ${sync_repetitions}, ${sfd_mode}, ${code_index}, ${cir_pre}, ${cir_post}, ${cir_skip_initial}, ${cir_repetitions}, ${sfd_search_margin}, ${sync_refine_margin}, ${sfd_threshold}, ${sync_refine_threshold}, ${emit_normalized}, ${queue_capacity}, ${use_predicted_timing}, ${emit_individual_repetitions}, false, ${emit_repetition_average}, ${repetition_average_skip});'
     link: ['gnuradio::gnuradio-uwb']
 
 documentation: |-
@@ -112,7 +125,9 @@ documentation: |-
     produces one averaged "cir" PDU by default.  With
     emit_individual_repetitions=True it produces one PDU for each selected
     SYNC repetition and adds repetition_index/repetition_ordinal/
-    repetition_count metadata.  Failed stages have empty taps.  Invalid PDUs
-    only produce a "status" message.
+    repetition_count metadata.  emit_repetition_average=True also posts the
+    coherent average of SYNC repetitions [repetition_average_skip, N) on
+    "cir_avg" (same estimate as average-only mode).  Failed stages have
+    empty taps.  Invalid PDUs only produce a "status" message.
 
 file_format: 1

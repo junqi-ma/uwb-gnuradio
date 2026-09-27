@@ -212,6 +212,13 @@ freq_from_meta(const pmt::pmt_t& meta, double& freq_hz, double& freq_off)
 {
     freq_hz = std::numeric_limits<double>::quiet_NaN();
     freq_off = std::numeric_limits<double>::quiet_NaN();
+    // Non-jamming sweeps carry the tuned sense frequency under the generic
+    // names.  Jam captures retain their historical UCR4 semantics by letting
+    // the jammer's actual carrier override those fallback values.
+    if (dict_has(meta, "freq_hz"))
+        freq_hz = dict_f64(meta, "freq_hz", freq_hz);
+    if (dict_has(meta, "freq_offset_hz"))
+        freq_off = dict_f64(meta, "freq_offset_hz", freq_off);
     if (dict_has(meta, "jam_freq_actual_hz"))
         freq_hz = dict_f64(meta, "jam_freq_actual_hz", freq_hz);
     if (dict_has(meta, "jam_freq_offset_hz"))
@@ -601,6 +608,7 @@ UwbCirWriter::write_frame(pmt::pmt_t msg)
     os << "{\"pulse_id\":" << pulse_id;
     append_u64(os, "schedule_index", schedule_index);
     append_opt_str(os, meta, "cir_output");
+    append_opt_u64(os, meta, "averaged_repetition_first");
     append_opt_u64(os, meta, "repetition_index");
     append_opt_u64(os, meta, "repetition_ordinal");
     append_opt_u64(os, meta, "repetition_count");
@@ -630,6 +638,13 @@ UwbCirWriter::write_frame(pmt::pmt_t msg)
     append_opt_i64(os, meta, "num_delay_samps");
     append_opt_f64(os, meta, "calibration_delay_work_samples");
     append_opt_str(os, meta, "calibration_id");
+    append_opt_str(os, meta, "jam_delay_mode");
+    append_opt_i64(os, meta, "jam_delay_native");
+    append_opt_i64(os, meta, "jam_overlap_reps");
+    append_opt_str(os, meta, "jam_overlap_side");
+    append_opt_u64(os, meta, "sense_preamble_reps");
+    append_opt_u64(os, meta, "jam_preamble_reps");
+    append_opt_u64(os, meta, "jam_overlap_seed");
     append_bool(os, "sfd_ok", dict_i64(meta, "sfd_start_sample", -1) >= 0);
     append_bool(os, "timing_ok",
                 dict_i64(meta, "preamble_start_sample", -1) >= 0);
@@ -851,6 +866,13 @@ UwbCirWriter::flush_repetition_group()
     append_opt_i64(os, meta, "num_delay_samps");
     append_opt_f64(os, meta, "calibration_delay_work_samples");
     append_opt_str(os, meta, "calibration_id");
+    append_opt_str(os, meta, "jam_delay_mode");
+    append_opt_i64(os, meta, "jam_delay_native");
+    append_opt_i64(os, meta, "jam_overlap_reps");
+    append_opt_str(os, meta, "jam_overlap_side");
+    append_opt_u64(os, meta, "sense_preamble_reps");
+    append_opt_u64(os, meta, "jam_preamble_reps");
+    append_opt_u64(os, meta, "jam_overlap_seed");
     append_bool(os, "sfd_ok", dict_i64(meta, "sfd_start_sample", -1) >= 0);
     append_bool(os, "timing_ok",
                 dict_i64(meta, "preamble_start_sample", -1) >= 0);

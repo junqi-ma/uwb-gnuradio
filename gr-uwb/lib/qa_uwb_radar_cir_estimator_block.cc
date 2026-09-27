@@ -138,6 +138,10 @@ make_meta(uint64_t pulse_id,
                          pmt::from_uint64(pulse_id));
     meta = pmt::dict_add(meta, pmt::mp("schedule_index"),
                          pmt::from_uint64(pulse_id));
+    meta = pmt::dict_add(meta, pmt::mp("freq_hz"),
+                         pmt::from_double(6.490091e9));
+    meta = pmt::dict_add(meta, pmt::mp("freq_offset_hz"),
+                         pmt::from_double(491000.0));
     if (with_rate)
         meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
                              pmt::from_double(kWorkRate));
@@ -284,8 +288,15 @@ check_common(pmt::pmt_t msg, uint64_t pulse_id)
 {
     BOOST_REQUIRE(pmt::is_pair(msg));
     pmt::pmt_t meta = pmt::car(msg);
-    pmt::pmt_t data = pmt::cdr(msg);
     BOOST_REQUIRE(pmt::is_dict(meta));
+    BOOST_CHECK_EQUAL(pmt::to_double(pmt::dict_ref(
+                          meta, pmt::mp("freq_hz"), pmt::from_double(0.0))),
+                      6.490091e9);
+    BOOST_CHECK_EQUAL(pmt::to_double(pmt::dict_ref(
+                          meta, pmt::mp("freq_offset_hz"),
+                          pmt::from_double(-1.0))),
+                      491000.0);
+    pmt::pmt_t data = pmt::cdr(msg);
     BOOST_REQUIRE(pmt::is_c32vector(data));
 
     BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
@@ -491,6 +502,117 @@ BOOST_AUTO_TEST_CASE(test_estimator_emits_each_selected_repetition)
                               pmt::from_uint64(0))),
                           1u);
     }
+}
+
+// both-mode: every SYNC repetition on "cir", and the legacy skip-10
+// coherent average on "cir_avg".  The average must be bit-exact against
+// radar_cir_one configured the way --cir-output average is.
+BOOST_AUTO_TEST_CASE(test_estimator_repetitions_and_average)
+{
+    std::vector<gr_complex> rx, tx;
+    BOOST_REQUIRE(
+        load_cf32(testdata_path("uwb_radar/rx_clean_998p4.cf32"), rx));
+    BOOST_REQUIRE(load_cf32(testdata_path("uwb_radar/tx_998p4.cf32"), tx));
+    const std::string tmpl_path = write_template_file(tx);
+
+    RadarCirConfig cfg = direct_cfg();
+    cfg.use_predicted_timing = true;
+    cfg.cir_skip_initial = 10;
+    cfg.cir_repetitions = 54;
+    RadarCirCoreScratch scratch;
+    BOOST_REQUIRE(prepare_radar_cir_core(cfg, tx.data(), kSps, kCirPre,
+                                         kCirPost, scratch));
+    RadarCirResult ref;
+    const int64_t predicted = kPreGuard + 64 * static_cast<int64_t>(kSps);
+    BOOST_REQUIRE(radar_cir_one(rx.data(), rx.size(), predicted, cfg, scratch,
+                                ref));
+    BOOST_REQUIRE(ref.status == gr::uwb::radar::RadarCirStatus::Ok);
+    BOOST_REQUIRE_EQUAL(ref.tap_count, kCirPre + kCirPost);
+    BOOST_REQUIRE_EQUAL(ref.valid_repetitions, 54u);
+
+    auto est = UwbRadarCirEstimator::make(
+        tmpl_path, 64, "4z2", 9, kCirPre, kCirPost,
+        /*cir_skip_initial=*/0, /*cir_repetitions=*/0, 64, 8, 0.3f, 0.3f,
+        true, 16, true, true, true, true, 10);
+    BOOST_CHECK(est->emit_individual_repetitions());
+    BOOST_CHECK(est->batch_individual_repetitions());
+    BOOST_CHECK(est->emit_repetition_average());
+    BOOST_CHECK_EQUAL(est->repetition_average_skip(), 10u);
+
+    auto dbg = gr::blocks::message_debug::make();
+    auto dbg_avg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_radar_estimator_both");
+    tb->msg_connect(est, "cir", dbg, "store");
+    tb->msg_connect(est, "cir_avg", dbg_avg, "store");
+    tb->start();
+    est->_post(pmt::mp("rx"), make_pdu(make_meta(9, kPreGuard), rx));
+    BOOST_REQUIRE(wait_frames(dbg, 1));
+    BOOST_REQUIRE(wait_frames(dbg_avg, 1));
+    BOOST_REQUIRE(wait_drained(est));
+    tb->stop();
+    tb->wait();
+
+    BOOST_CHECK_EQUAL(est->pdus_completed(), 1u);
+    BOOST_CHECK_EQUAL(est->pdus_published(), 64u);
+    BOOST_CHECK_EQUAL(est->averages_published(), 1u);
+    BOOST_REQUIRE_EQUAL(dbg->num_messages(), 1u);
+    BOOST_REQUIRE_EQUAL(dbg_avg->num_messages(), 1u);
+
+    const pmt::pmt_t batch = pmt::car(dbg->get_message(0));
+    BOOST_CHECK(pmt::to_bool(pmt::dict_ref(batch, pmt::mp("repetition_batch"),
+                                           pmt::PMT_F)));
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          batch, pmt::mp("repetition_count"),
+                          pmt::from_uint64(0))),
+                      64u);
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          batch, pmt::mp("repetition_first"),
+                          pmt::from_uint64(99))),
+                      0u);
+
+    const pmt::pmt_t avg_msg = dbg_avg->get_message(0);
+    const FrameCheck fc = check_common(avg_msg, 9);
+    BOOST_CHECK_EQUAL(fc.status, "ok");
+    BOOST_CHECK_EQUAL(fc.tap_count, ref.tap_count);
+    const pmt::pmt_t meta = pmt::car(avg_msg);
+    BOOST_CHECK_EQUAL(pmt::to_double(pmt::dict_ref(
+                          meta, pmt::mp("freq_hz"), pmt::from_double(0.0))),
+                      6.490091e9);
+    BOOST_CHECK_EQUAL(pmt::to_double(pmt::dict_ref(
+                          meta, pmt::mp("freq_offset_hz"),
+                          pmt::from_double(-1.0))),
+                      491000.0);
+    BOOST_CHECK_EQUAL(meta_str(meta, "cir_output"), "average");
+    BOOST_CHECK(!pmt::dict_has_key(meta, pmt::mp("repetition_index")));
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          meta, pmt::mp("averaged_repetition_first"),
+                          pmt::from_uint64(0))),
+                      10u);
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          meta, pmt::mp("repetition_count"),
+                          pmt::from_uint64(0))),
+                      54u);
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          meta, pmt::mp("valid_repetitions"),
+                          pmt::from_uint64(0))),
+                      ref.valid_repetitions);
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          meta, pmt::mp("peak_tap"), pmt::from_uint64(0))),
+                      ref.peak_tap);
+
+    size_t n = 0;
+    const gr_complex* taps = pmt::c32vector_elements(pmt::cdr(avg_msg), n);
+    BOOST_REQUIRE_EQUAL(n, ref.tap_count);
+    BOOST_CHECK(std::memcmp(taps, scratch.cir.raw_taps.data(),
+                            n * sizeof(gr_complex)) == 0);
+    pmt::pmt_t norm_v = pmt::dict_ref(meta, pmt::mp("normalized_taps"),
+                                      pmt::PMT_NIL);
+    BOOST_REQUIRE(pmt::is_c32vector(norm_v));
+    size_t nn = 0;
+    const gr_complex* norm = pmt::c32vector_elements(norm_v, nn);
+    BOOST_REQUIRE_EQUAL(nn, ref.tap_count);
+    BOOST_CHECK(std::memcmp(norm, scratch.cir.norm_taps.data(),
+                            nn * sizeof(gr_complex)) == 0);
 }
 
 // ---------------------------------------------------------------------------

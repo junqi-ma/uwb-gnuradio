@@ -177,7 +177,67 @@ bool read_u64_list(pmt::pmt_t v,
     return true;
 }
 
-// Parse jam_delay_mode: "fixed"/"uniform" symbols or 0/1 integers.
+// Read an arbitrary-length signed 64-bit list (preamble-overlap delay
+// tables).  Accepts s64vector/s32vector/u64vector/vector/tuple.
+bool read_i64_list(pmt::pmt_t v, std::vector<int64_t>& out, std::string& error)
+{
+    out.clear();
+    if (pmt::is_s64vector(v)) {
+        size_t len = 0;
+        const int64_t* el = pmt::s64vector_elements(v, len);
+        out.assign(el, el + len);
+        return true;
+    }
+    if (pmt::is_s32vector(v)) {
+        size_t len = 0;
+        const int32_t* el = pmt::s32vector_elements(v, len);
+        out.reserve(len);
+        for (size_t i = 0; i < len; ++i)
+            out.push_back(static_cast<int64_t>(el[i]));
+        return true;
+    }
+    if (pmt::is_u64vector(v)) {
+        size_t len = 0;
+        const uint64_t* el = pmt::u64vector_elements(v, len);
+        out.reserve(len);
+        for (size_t i = 0; i < len; ++i) {
+            if (el[i] >
+                static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+                error = "list entry exceeds int64";
+                return false;
+            }
+            out.push_back(static_cast<int64_t>(el[i]));
+        }
+        return true;
+    }
+    if (!is_pmt_list(v)) {
+        error = "list must be a vector/tuple/s64vector";
+        return false;
+    }
+    const size_t n = pmt_list_len(v);
+    out.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        const pmt::pmt_t e = pmt_list_ref(v, i);
+        if (pmt::is_integer(e)) {
+            out.push_back(static_cast<int64_t>(pmt::to_long(e)));
+        } else if (pmt::is_uint64(e)) {
+            const uint64_t u = pmt::to_uint64(e);
+            if (u > static_cast<uint64_t>(
+                        std::numeric_limits<int64_t>::max())) {
+                error = "list entry exceeds int64";
+                return false;
+            }
+            out.push_back(static_cast<int64_t>(u));
+        } else {
+            error = "list entry must be an integer";
+            return false;
+        }
+    }
+    return true;
+}
+
+// Parse jam_delay_mode: "fixed"/"uniform"/"preamble_overlap" symbols or
+// 0/1/2 integers.
 bool parse_jam_delay_mode(pmt::pmt_t dict,
                           gr::uwb::echo::JamDelayMode& out,
                           std::string& error)
@@ -199,7 +259,11 @@ bool parse_jam_delay_mode(pmt::pmt_t dict,
             out = JamDelayMode::Uniform;
             return true;
         }
-        error = "jam_delay_mode must be fixed/uniform";
+        if (s == "preamble_overlap") {
+            out = JamDelayMode::PreambleOverlap;
+            return true;
+        }
+        error = "jam_delay_mode must be fixed/uniform/preamble_overlap";
         return false;
     }
     if (pmt::is_uint64(v) || pmt::is_integer(v)) {
@@ -214,8 +278,12 @@ bool parse_jam_delay_mode(pmt::pmt_t dict,
             out = JamDelayMode::Uniform;
             return true;
         }
+        if (l == 2) {
+            out = JamDelayMode::PreambleOverlap;
+            return true;
+        }
     }
-    error = "jam_delay_mode must be fixed/uniform (or 0/1)";
+    error = "jam_delay_mode must be fixed/uniform/preamble_overlap (or 0/1/2)";
     return false;
 }
 
@@ -317,6 +385,9 @@ UwbRealtimeEchoTimer::UwbRealtimeEchoTimer(
     // channel PMT refs (<= kEchoMaxTxChannels) and the dwell scan plan.
     d_mtx_payloads_.reserve(echo::kEchoMaxTxChannels);
     d_mtx_freqs_.reserve(2048);
+    // Preamble-overlap delay tables: at most min(Ns,Nj) <= 2048 entries.
+    d_mtx_overlap_lead_.reserve(2048);
+    d_mtx_overlap_lag_.reserve(2048);
 
     message_port_register_in(pmt::mp("schedule"));
     message_port_register_out(pmt::mp("burst"));
@@ -607,6 +678,21 @@ uint64_t UwbRealtimeEchoTimer::jam_retunes() const
 uint64_t UwbRealtimeEchoTimer::jam_retune_failures() const
 {
     return d_jam_retune_fails_.load(std::memory_order_relaxed);
+}
+
+int64_t UwbRealtimeEchoTimer::jam_overlap_reps_last() const
+{
+    return d_jam_overlap_reps_last_.load(std::memory_order_relaxed);
+}
+
+uint64_t UwbRealtimeEchoTimer::jam_overlap_side_last() const
+{
+    return d_jam_overlap_side_last_.load(std::memory_order_relaxed);
+}
+
+uint64_t UwbRealtimeEchoTimer::jam_delay_updates() const
+{
+    return d_jam_delay_updates_.load(std::memory_order_relaxed);
 }
 
 pmt::pmt_t UwbRealtimeEchoTimer::tx_async_counts() const
@@ -1064,6 +1150,13 @@ UwbRealtimeEchoTimer::handle_schedule(pmt::pmt_t msg)
                 reject("jam_delay_lo_gt_hi");
                 return;
             }
+            // --- preamble-overlap plan locals (§5.1/§5.2) ---
+            int64_t ov_min = 0, ov_max = 0;
+            bool ov_random_side = false;
+            int ov_side_fixed = 0; // 0 lead, 1 lag
+            uint64_t ov_sense_reps = 0, ov_jam_reps = 0;
+            std::vector<int64_t> ov_lead, ov_lag;
+            echo::MultiTxSpanGeometry ov_geom;
             if (mode == echo::JamDelayMode::Fixed) {
                 if (lo != hi) {
                     reject("fixed_delay_requires_lo_eq_hi");
@@ -1082,7 +1175,7 @@ UwbRealtimeEchoTimer::handle_schedule(pmt::pmt_t msg)
                     reject("fixed_tx_samples_mismatch");
                     return;
                 }
-            } else {
+            } else if (mode == echo::JamDelayMode::Uniform) {
                 // Uniform span (§5.4): per-pulse jammer begin = D + delay
                 // with delay in [-D, +D]; L is fixed by the geometry.
                 if (lo < -D || hi < -D || lo > D || hi > D) {
@@ -1095,6 +1188,132 @@ UwbRealtimeEchoTimer::handle_schedule(pmt::pmt_t msg)
                         wave[0], wave[jam_ch], base[0], geom, &gerr) ||
                     geom.phys_len_L != tx_samples) {
                     reject("multitx_geometry_L_mismatch");
+                    return;
+                }
+            } else {
+                // --- PreambleOverlap: real UWB packet collision (§5.1) ---
+                if (!dict_has(meta, "jam_overlap_min_reps") ||
+                    !dict_has(meta, "jam_overlap_max_reps") ||
+                    !dict_i64_strict(meta, "jam_overlap_min_reps", ov_min) ||
+                    !dict_i64_strict(meta, "jam_overlap_max_reps", ov_max)) {
+                    reject("bad_jam_overlap_reps");
+                    return;
+                }
+                if (ov_min < 1 || ov_max < ov_min) {
+                    reject("bad_jam_overlap_reps");
+                    return;
+                }
+                {
+                    const pmt::pmt_t sv = pmt::dict_ref(
+                        meta, pmt::mp("jam_overlap_side_mode"),
+                        pmt::PMT_NIL);
+                    std::string sym;
+                    if (pmt::is_symbol(sv))
+                        sym = pmt::symbol_to_string(sv);
+                    if (sym != "lead" && sym != "lag" && sym != "random") {
+                        reject("bad_jam_overlap_side_mode");
+                        return;
+                    }
+                    ov_random_side = (sym == "random");
+                    ov_side_fixed = (sym == "lag") ? 1 : 0;
+                }
+                if (!strict_u64("sense_preamble_reps", ov_sense_reps) ||
+                    !strict_u64("jam_preamble_reps", ov_jam_reps) ||
+                    ov_sense_reps == 0 || ov_jam_reps == 0) {
+                    reject("bad_overlap_preamble_reps");
+                    return;
+                }
+                if (!dict_has(meta, "jam_overlap_lead_delays_native") ||
+                    !dict_has(meta, "jam_overlap_lag_delays_native")) {
+                    reject("missing_overlap_delay_tables");
+                    return;
+                }
+                {
+                    std::string lerr;
+                    if (!read_i64_list(
+                            pmt::dict_ref(
+                                meta,
+                                pmt::mp("jam_overlap_lead_delays_native"),
+                                pmt::PMT_NIL),
+                            ov_lead, lerr) ||
+                        !read_i64_list(
+                            pmt::dict_ref(
+                                meta,
+                                pmt::mp("jam_overlap_lag_delays_native"),
+                                pmt::PMT_NIL),
+                            ov_lag, lerr)) {
+                        reject("bad_overlap_delay_tables");
+                        return;
+                    }
+                }
+                const size_t want =
+                    static_cast<size_t>(ov_max - ov_min + 1);
+                if (ov_lead.size() != want || ov_lag.size() != want) {
+                    reject("overlap_delay_table_length");
+                    return;
+                }
+                // Sign contract: lead <= 0, lag >= 0.
+                for (size_t i = 0; i < want; ++i) {
+                    if (ov_lead[i] > 0 || ov_lag[i] < 0) {
+                        reject("overlap_delay_table_sign");
+                        return;
+                    }
+                }
+                // L must not exceed min(Ns,Nj); at the full-overlap endpoint
+                // the shorter preamble's direction is exactly aligned (0).
+                {
+                    const uint64_t full =
+                        std::min(ov_sense_reps, ov_jam_reps);
+                    if (static_cast<uint64_t>(ov_max) > full) {
+                        reject("overlap_reps_exceed_full");
+                        return;
+                    }
+                    if (static_cast<uint64_t>(ov_max) == full &&
+                        ((ov_jam_reps == full &&
+                          ov_lead[want - 1] != 0) ||
+                         (ov_sense_reps == full &&
+                          ov_lag[want - 1] != 0))) {
+                        reject("overlap_full_reps_not_aligned");
+                        return;
+                    }
+                }
+                // Selected-side span must match the reported lo/hi.
+                auto span_of = [](const std::vector<int64_t>& v,
+                                  int64_t& a, int64_t& b) {
+                    a = b = v.empty() ? 0 : v[0];
+                    for (int64_t x : v) {
+                        a = std::min(a, x);
+                        b = std::max(b, x);
+                    }
+                };
+                int64_t dmin = 0, dmax = 0;
+                if (ov_random_side) {
+                    int64_t la = 0, lb = 0, ga = 0, gb = 0;
+                    span_of(ov_lead, la, lb);
+                    span_of(ov_lag, ga, gb);
+                    dmin = std::min(la, ga);
+                    dmax = std::max(lb, gb);
+                } else if (ov_side_fixed == 1) {
+                    span_of(ov_lag, dmin, dmax);
+                } else {
+                    span_of(ov_lead, dmin, dmax);
+                }
+                if (dmin != lo || dmax != hi) {
+                    reject("overlap_delay_span_mismatch");
+                    return;
+                }
+                std::string gerr;
+                if (!echo::prepare_overlap_geometry(
+                        wave[0], wave[jam_ch], dmin, dmax, ov_geom,
+                        &gerr) ||
+                    ov_geom.phys_len_L != tx_samples) {
+                    reject(gerr.empty() ? "overlap_geometry_L_mismatch"
+                                        : gerr);
+                    return;
+                }
+                if (base[0] != ov_geom.P ||
+                    base[jam_ch] != ov_geom.jam_wave_begin) {
+                    reject("overlap_base_offset_mismatch");
                     return;
                 }
             }
@@ -1202,6 +1421,13 @@ UwbRealtimeEchoTimer::handle_schedule(pmt::pmt_t msg)
             job.jam_freq_offsets_hz = std::move(freqs);
             job.jam_dwell = dwell;
             job.jam_freq_settle_ticks = settle;
+            job.jam_overlap_min_reps = ov_min;
+            job.jam_overlap_max_reps = ov_max;
+            job.jam_overlap_random_side = ov_random_side;
+            job.sense_preamble_reps = ov_sense_reps;
+            job.jam_preamble_reps = ov_jam_reps;
+            job.jam_overlap_lead_delays = std::move(ov_lead);
+            job.jam_overlap_lag_delays = std::move(ov_lag);
             {
                 const int16_t* waves[echo::kEchoMaxTxChannels] = {};
                 for (size_t i = 0; i < nch; ++i) {
@@ -1211,16 +1437,23 @@ UwbRealtimeEchoTimer::handle_schedule(pmt::pmt_t msg)
                 }
                 auto bank = std::make_shared<echo::MultiTxWindowBank>();
                 std::string berr;
+                bool bank_ok = false;
                 try {
-                    if (!echo::materialize_multitx_window_bank(
+                    if (mode == echo::JamDelayMode::PreambleOverlap) {
+                        bank_ok = echo::materialize_multitx_span_bank(
+                            waves, wave, base, nch, jam_ch, ov_geom,
+                            d_max_tx_samples_, *bank, &berr);
+                    } else {
+                        bank_ok = echo::materialize_multitx_window_bank(
                             waves, wave, base, nch, jam_ch, tx_samples,
-                            mode, d_max_tx_samples_, *bank, &berr)) {
-                        reject(berr.empty() ? "window_bank_materialize"
-                                            : berr);
-                        return;
+                            mode, d_max_tx_samples_, *bank, &berr);
                     }
                 } catch (const std::bad_alloc&) {
                     reject("window_bank_alloc_failed");
+                    return;
+                }
+                if (!bank_ok) {
+                    reject(berr.empty() ? "window_bank_materialize" : berr);
                     return;
                 }
                 job.window_bank = std::move(bank);
@@ -1444,12 +1677,19 @@ UwbRealtimeEchoTimer::apply_schedule(const Job& job)
         // handler; re-derive defensively (uniform) so the worker owns one
         // ground truth even if the handler is ever bypassed.
         d_mtx_geom_ = echo::MultiTxGeometry{};
+        d_mtx_span_geom_ = echo::MultiTxSpanGeometry{};
         {
             std::string gerr;
             if (job.jam_delay_mode == echo::JamDelayMode::Uniform) {
                 echo::prepare_multitx_geometry(
                     d_mtx_wave_len_[0], d_mtx_wave_len_[d_mtx_jam_ch_],
                     d_mtx_base_[0], d_mtx_geom_, &gerr);
+            } else if (job.jam_delay_mode ==
+                       echo::JamDelayMode::PreambleOverlap) {
+                echo::prepare_overlap_geometry(
+                    d_mtx_wave_len_[0], d_mtx_wave_len_[d_mtx_jam_ch_],
+                    job.jam_delay_lo_native, job.jam_delay_hi_native,
+                    d_mtx_span_geom_, &gerr);
             } else {
                 // Fixed mode: physical length is the frozen tx_samples;
                 // sense anchor D is the channel-0 base offset.
@@ -1460,6 +1700,29 @@ UwbRealtimeEchoTimer::apply_schedule(const Job& job)
                 d_mtx_geom_.sense_begin = d_mtx_base_[0];
             }
         }
+        // Preamble-overlap frozen plan (worker-owned; re-arm never
+        // allocates because the vectors are reserved at construction).
+        d_mtx_overlap_min_ = job.jam_overlap_min_reps;
+        d_mtx_overlap_max_ = job.jam_overlap_max_reps;
+        d_mtx_overlap_random_side_ = job.jam_overlap_random_side;
+        d_mtx_overlap_side_fixed_ = 0;
+        if (!job.jam_overlap_random_side &&
+            job.jam_overlap_min_reps > 0) {
+            // Recover the fixed side from the reported lo/hi sign.
+            d_mtx_overlap_side_fixed_ =
+                (job.jam_delay_hi_native == 0 &&
+                 job.jam_delay_lo_native < 0)
+                    ? 0
+                    : 1;
+        }
+        d_mtx_sense_reps_ = job.sense_preamble_reps;
+        d_mtx_jam_reps_ = job.jam_preamble_reps;
+        d_mtx_overlap_seed_ = job.jam_delay_seed;
+        d_mtx_overlap_lead_ = job.jam_overlap_lead_delays;
+        d_mtx_overlap_lag_ = job.jam_overlap_lag_delays;
+        d_jam_delay_updates_.store(0, std::memory_order_relaxed);
+        d_jam_overlap_reps_last_.store(0, std::memory_order_relaxed);
+        d_jam_overlap_side_last_.store(0, std::memory_order_relaxed);
         d_mtx_rng_.seed_rng(job.jam_delay_seed);
         d_mtx_delay_seed_ = job.jam_delay_seed;
         d_mtx_bank_ = job.window_bank;
@@ -1549,6 +1812,7 @@ UwbRealtimeEchoTimer::apply_schedule(const Job& job)
         d_jam_retune_fails_.store(0, std::memory_order_relaxed);
     } else {
         d_mtx_geom_ = echo::MultiTxGeometry{};
+        d_mtx_span_geom_ = echo::MultiTxSpanGeometry{};
         d_mtx_payloads_.clear();
         d_mtx_bank_.reset();
         d_mtx_delay_seed_ = 0;
@@ -1560,6 +1824,15 @@ UwbRealtimeEchoTimer::apply_schedule(const Job& job)
         d_mtx_advance_pending_ = false;
         d_mtx_jam_offset_hz_ = 0.0;
         d_mtx_jam_actual_hz_ = 0.0;
+        d_mtx_overlap_min_ = 0;
+        d_mtx_overlap_max_ = 0;
+        d_mtx_overlap_random_side_ = false;
+        d_mtx_overlap_side_fixed_ = 0;
+        d_mtx_sense_reps_ = 0;
+        d_mtx_jam_reps_ = 0;
+        d_mtx_overlap_seed_ = 0;
+        d_mtx_overlap_lead_.clear();
+        d_mtx_overlap_lag_.clear();
     }
     d_armed_.store(true, std::memory_order_relaxed);
 
@@ -1748,14 +2021,50 @@ UwbRealtimeEchoTimer::run_one_burst()
         }
         // M4 per-pulse jammer delay: uniform draws consume exactly one PRNG
         // step per attempted burst (fixed seed → reproducible sequence);
-        // fixed mode uses the constant.  A silent jammer (jam_len == 0)
-        // ignores the value in planning but still reports/draws it, so the
-        // sequence never depends on the jammer length.
-        if (d_mtx_delay_mode_ == echo::JamDelayMode::Uniform)
+        // fixed mode uses the constant.  Preamble overlap consumes exactly
+        // two sampler invocations (L then side) per attempted burst,
+        // regardless of side mode or a degenerate L.  A silent jammer
+        // (jam_len == 0) ignores the value in planning but still reports/
+        // draws it, so the sequence never depends on the jammer length.
+        if (d_mtx_delay_mode_ == echo::JamDelayMode::Uniform) {
             mtx_delay = d_mtx_rng_.next_range_inclusive(
                 d_mtx_delay_lo_, d_mtx_delay_hi_);
-        else
+        } else if (d_mtx_delay_mode_ ==
+                   echo::JamDelayMode::PreambleOverlap) {
+            int64_t reps = 0;
+            int drawn_side = 0;
+            echo::draw_overlap_reps(
+                d_mtx_rng_, d_mtx_overlap_min_, d_mtx_overlap_max_,
+                d_mtx_overlap_random_side_, reps, drawn_side);
+            const int side = d_mtx_overlap_random_side_
+                                 ? drawn_side
+                                 : d_mtx_overlap_side_fixed_;
+            const int64_t idx = reps - d_mtx_overlap_min_;
+            const std::vector<int64_t>& tab =
+                (side == 0) ? d_mtx_overlap_lead_ : d_mtx_overlap_lag_;
+            if (idx >= 0 && static_cast<size_t>(idx) < tab.size()) {
+                mtx_delay = tab[static_cast<size_t>(idx)];
+            } else {
+                // Unreachable after handle_schedule validation: force the
+                // jammer pointer out of span so the burst fails cleanly at
+                // the planning stage instead of reading out of bounds.
+                mtx_delay = d_mtx_delay_hi_ + 1;
+            }
+            px.jam_overlap_reps = reps;
+            px.jam_overlap_side =
+                (mtx_delay == 0) ? 3
+                                 : (mtx_delay < 0 ? 1 : 2);
+            px.sense_preamble_reps = d_mtx_sense_reps_;
+            px.jam_preamble_reps = d_mtx_jam_reps_;
+            px.jam_overlap_seed = d_mtx_overlap_seed_;
+            d_jam_overlap_reps_last_.store(reps,
+                                           std::memory_order_relaxed);
+            d_jam_overlap_side_last_.store(
+                px.jam_overlap_side, std::memory_order_relaxed);
+            d_jam_delay_updates_.fetch_add(1, std::memory_order_relaxed);
+        } else {
             mtx_delay = d_mtx_delay_lo_;
+        }
         px.multi = true;
         px.jam_delay_native = mtx_delay;
         px.jam_delay_us =
@@ -2201,9 +2510,11 @@ UwbRealtimeEchoTimer::publish_burst(const echo::BurstResult& r,
             pmt::from_uint64(px.jam_dwell_successes_before));
         meta = pmt::dict_add(
             meta, pmt::mp("jam_delay_mode"),
-            pmt::mp(px.jam_delay_mode == echo::JamDelayMode::Uniform
-                        ? "uniform"
-                        : "fixed"));
+            pmt::mp(px.jam_delay_mode == echo::JamDelayMode::PreambleOverlap
+                        ? "preamble_overlap"
+                        : (px.jam_delay_mode == echo::JamDelayMode::Uniform
+                               ? "uniform"
+                               : "fixed")));
         meta = pmt::dict_add(meta, pmt::mp("jam_delay_seed"),
                              pmt::from_uint64(px.jam_delay_seed));
         meta = pmt::dict_add(meta, pmt::mp("sense_offset_native"),
@@ -2214,6 +2525,26 @@ UwbRealtimeEchoTimer::publish_burst(const echo::BurstResult& r,
                              pmt::from_long(px.sense_tx_ticks));
         meta = pmt::dict_add(meta, pmt::mp("jam_tx_ticks"),
                              pmt::from_long(px.jam_tx_ticks));
+        // Preamble-overlap collision metadata (§6); present on every
+        // multi-TX burst (0/none for non-overlap modes).  jam_overlap_side
+        // is the REALIZED direction as a symbol: none/lead/lag/aligned.
+        meta = pmt::dict_add(meta, pmt::mp("jam_overlap_reps"),
+                             pmt::from_long(px.jam_overlap_reps));
+        const char* side_name =
+            px.jam_overlap_side == 3
+                ? "aligned"
+                : (px.jam_overlap_side == 2
+                       ? "lag"
+                       : (px.jam_overlap_side == 1 ? "lead" : "none"));
+        meta = pmt::dict_add(meta, pmt::mp("jam_overlap_side"),
+                             pmt::mp(side_name));
+        meta = pmt::dict_add(
+            meta, pmt::mp("sense_preamble_reps"),
+            pmt::from_uint64(px.sense_preamble_reps));
+        meta = pmt::dict_add(meta, pmt::mp("jam_preamble_reps"),
+                             pmt::from_uint64(px.jam_preamble_reps));
+        meta = pmt::dict_add(meta, pmt::mp("jam_overlap_seed"),
+                             pmt::from_uint64(px.jam_overlap_seed));
     }
     meta = pmt::dict_add(meta, pmt::mp("uhd_error"),
                          pmt::string_to_symbol(r.error));

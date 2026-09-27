@@ -217,7 +217,9 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
     size_t queue_capacity,
     bool use_predicted_timing,
     bool emit_individual_repetitions,
-    bool batch_individual_repetitions)
+    bool batch_individual_repetitions,
+    bool emit_repetition_average,
+    size_t repetition_average_skip)
     : gr::block("uwb_radar_cir_estimator",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
@@ -226,6 +228,8 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
       d_emit_normalized_(emit_normalized),
       d_emit_individual_repetitions_(emit_individual_repetitions),
       d_batch_individual_repetitions_(batch_individual_repetitions),
+      d_emit_repetition_average_(emit_repetition_average),
+      d_repetition_average_skip_(repetition_average_skip),
       d_queue_capacity_(queue_capacity)
 {
     if (queue_capacity == 0) {
@@ -267,6 +271,13 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
             "UwbRadarCirEstimator: repetition batching requires "
             "emit_individual_repetitions");
     }
+    if (d_emit_repetition_average_ && !d_emit_individual_repetitions_) {
+        throw std::invalid_argument(
+            "UwbRadarCirEstimator: emit_repetition_average requires "
+            "emit_individual_repetitions");
+    }
+    if (d_repetition_average_skip_ >= sync_repetitions)
+        d_repetition_average_skip_ = 0;
 
     std::vector<gr_complex> tmpl = load_cf32_file(d_template_path_);
     if (tmpl.size() != kSps) {
@@ -317,6 +328,7 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
 
     message_port_register_in(pmt::mp("rx"));
     message_port_register_out(pmt::mp("cir"));
+    message_port_register_out(pmt::mp("cir_avg"));
     message_port_register_out(pmt::mp("status"));
     set_msg_handler(pmt::mp("rx"),
                     [this](pmt::pmt_t msg) { handle_rx(msg); });
@@ -351,14 +363,17 @@ UwbRadarCirEstimator::make(const std::string& template_path,
                            size_t queue_capacity,
                            bool use_predicted_timing,
                            bool emit_individual_repetitions,
-                           bool batch_individual_repetitions)
+                           bool batch_individual_repetitions,
+                           bool emit_repetition_average,
+                           size_t repetition_average_skip)
 {
     return gnuradio::get_initial_sptr(new UwbRadarCirEstimator(
         template_path, sync_repetitions, sfd_mode, code_index, cir_pre,
         cir_post, cir_skip_initial, cir_repetitions, sfd_search_margin,
         sync_refine_margin, sfd_threshold, sync_refine_threshold,
         emit_normalized, queue_capacity, use_predicted_timing,
-        emit_individual_repetitions, batch_individual_repetitions));
+        emit_individual_repetitions, batch_individual_repetitions,
+        emit_repetition_average, repetition_average_skip));
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +395,10 @@ uint64_t UwbRadarCirEstimator::pdus_completed() const
 uint64_t UwbRadarCirEstimator::pdus_published() const
 {
     return d_published_.load(std::memory_order_relaxed);
+}
+uint64_t UwbRadarCirEstimator::averages_published() const
+{
+    return d_averages_published_.load(std::memory_order_relaxed);
 }
 
 uint64_t UwbRadarCirEstimator::pdus_failed() const
@@ -482,6 +501,7 @@ void UwbRadarCirEstimator::reset_stats()
     d_enqueued_.store(0, std::memory_order_relaxed);
     d_completed_.store(0, std::memory_order_relaxed);
     d_published_.store(0, std::memory_order_relaxed);
+    d_averages_published_.store(0, std::memory_order_relaxed);
     d_failed_.store(0, std::memory_order_relaxed);
     d_dropped_.store(0, std::memory_order_relaxed);
     d_invalid_.store(0, std::memory_order_relaxed);
@@ -788,6 +808,10 @@ UwbRadarCirEstimator::worker_loop()
                                   pmt::string_to_symbol(what));
             publish_status("worker_exception", extra);
             publish_frame(job, err, queue_us, service_us);
+            if (d_emit_repetition_average_) {
+                publish_frame(job, err, queue_us, service_us, -1, 0, 0,
+                              pmt::PMT_NIL, "cir_avg", true, false);
+            }
             d_queue_cv_.notify_all();
             continue;
         }
@@ -858,9 +882,22 @@ UwbRadarCirEstimator::worker_loop()
                     job, r, queue_us,
                     elapsed_us(t0, std::chrono::steady_clock::now()), first,
                     count, common_meta);
+            // After the per-repetition taps have been copied or published.
+            // estimate_radar_cir reuses scratch.cir, which the loop above
+            // also writes.
+            if (d_emit_repetition_average_)
+                publish_alongside_average(
+                    job, r, queue_us,
+                    elapsed_us(t0, std::chrono::steady_clock::now()), rx, n,
+                    common_meta);
         } else {
-            publish_frame(job, r, queue_us,
-                          elapsed_us(t0, std::chrono::steady_clock::now()));
+            const uint64_t service_us =
+                elapsed_us(t0, std::chrono::steady_clock::now());
+            publish_frame(job, r, queue_us, service_us);
+            if (d_emit_repetition_average_) {
+                publish_frame(job, r, queue_us, service_us, -1, 0, 0,
+                              pmt::PMT_NIL, "cir_avg", true, false);
+            }
         }
         const uint64_t service_us = elapsed_us(t0, std::chrono::steady_clock::now());
         record_service_time(service_us);
@@ -953,12 +990,22 @@ UwbRadarCirEstimator::publish_frame(const Job& job,
                                     int64_t repetition_index,
                                     size_t repetition_ordinal,
                                     size_t repetition_count,
-                                    pmt::pmt_t common_meta)
+                                    pmt::pmt_t common_meta,
+                                    const char* port,
+                                    bool as_average,
+                                    bool count_as_published)
 {
     const bool ok = r.status == radar::RadarCirStatus::Ok;
     pmt::pmt_t meta = pmt::eq(common_meta, pmt::PMT_NIL)
                           ? make_common_frame_meta(job, r, queue_us)
                           : common_meta;
+    if (as_average) {
+        meta = pmt::dict_add(meta, pmt::mp("cir_output"), pmt::mp("average"));
+        meta = pmt::dict_add(
+            meta, pmt::mp("averaged_repetition_first"),
+            pmt::from_uint64(static_cast<uint64_t>(
+                d_repetition_average_skip_)));
+    }
 
     meta = pmt::dict_add(meta, pmt::mp("status"),
                          pmt::mp(status_to_string(r.status)));
@@ -989,6 +1036,14 @@ UwbRadarCirEstimator::publish_frame(const Job& job,
                              pmt::from_uint64(repetition_ordinal));
         meta = pmt::dict_add(meta, pmt::mp("repetition_count"),
                              pmt::from_uint64(repetition_count));
+    } else if (as_average) {
+        // Header repetition_count is how many SYNC reps entered the mean.
+        // Leave repetition_index unset so the writer keeps this as one
+        // average record (UCR4 index 0xFFFF), not another repetition row.
+        meta = pmt::dict_add(
+            meta, pmt::mp("repetition_count"),
+            pmt::from_uint64(ok ? static_cast<uint64_t>(r.valid_repetitions)
+                                : uint64_t(0)));
     }
     meta = pmt::dict_add(meta, pmt::mp("estimator_us"),
                          pmt::from_uint64(service_us));
@@ -1007,8 +1062,50 @@ UwbRadarCirEstimator::publish_frame(const Job& job,
         vec = pmt::init_c32vector(0, static_cast<const gr_complex*>(nullptr));
     }
 
-    message_port_pub(pmt::mp("cir"), pmt::cons(meta, vec));
-    d_published_.fetch_add(1, std::memory_order_relaxed);
+    message_port_pub(pmt::mp(port), pmt::cons(meta, vec));
+    if (as_average)
+        d_averages_published_.fetch_add(1, std::memory_order_relaxed);
+    else if (count_as_published)
+        d_published_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void
+UwbRadarCirEstimator::publish_alongside_average(
+    const Job& job,
+    const radar::RadarCirResult& r,
+    uint64_t queue_us,
+    uint64_t service_us,
+    const gr_complex* rx,
+    size_t n,
+    pmt::pmt_t common_meta)
+{
+    radar::RadarCirResult avg_result = r;
+    const size_t skip = d_repetition_average_skip_;
+    const size_t count = d_cfg_.sync_repetitions > skip
+                             ? d_cfg_.sync_repetitions - skip
+                             : 0;
+    radar::RadarCirEstimate avg;
+    if (count == 0 || rx == nullptr ||
+        !radar::estimate_radar_cir(
+            rx, n, r.cir_origin_sample, d_cfg_.samples_per_symbol,
+            d_cfg_.cir_pre, d_cfg_.cir_post, skip, count,
+            d_cfg_.sync_repetitions, avg, d_scratch_.cir)) {
+        avg_result.status = radar::RadarCirStatus::CirFailed;
+        avg_result.tap_count = 0;
+        avg_result.peak_tap = 0;
+        avg_result.peak_abs = 0.f;
+        avg_result.raw_l2_norm = 0.f;
+        avg_result.valid_repetitions = 0;
+    } else {
+        avg_result.status = radar::RadarCirStatus::Ok;
+        avg_result.tap_count = avg.tap_count;
+        avg_result.peak_tap = avg.peak_tap;
+        avg_result.peak_abs = avg.peak_abs;
+        avg_result.raw_l2_norm = avg.raw_l2_norm;
+        avg_result.valid_repetitions = avg.valid_repetitions;
+    }
+    publish_frame(job, avg_result, queue_us, service_us, -1, 0, 0,
+                  common_meta, "cir_avg", true, false);
 }
 
 void

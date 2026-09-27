@@ -295,6 +295,12 @@ public:
     double jam_freq_offset_hz_last() const; // last applied plan offset
     uint64_t jam_retunes() const;           // successful jam retunes, grid
     uint64_t jam_retune_failures() const;   // failed jam retune attempts
+    // Preamble-overlap live state (M-overlap): last drawn overlap reps and
+    // side (0 none, 1 lead, 2 lag, 3 aligned), and the number of overlap
+    // per-burst delay updates (one per attempted burst).
+    int64_t jam_overlap_reps_last() const;
+    uint64_t jam_overlap_side_last() const;
+    uint64_t jam_delay_updates() const;
     // Live TX async event counters (§5.6) as a PMT dict with u64 keys:
     // underflow, seq_error, time_error, unmatched, dropped, ack.
     pmt::pmt_t tx_async_counts() const;
@@ -343,6 +349,14 @@ private:
         std::vector<double> jam_freq_offsets_hz; // dwell scan plan (maybe empty)
         uint64_t jam_dwell = 0; // successful full RX captures/step (0 = off)
         uint64_t jam_freq_settle_ticks = 0;      // re-anchor delay, ticks
+        // --- preamble-overlap plan (real packet collision, §5.1) ---
+        int64_t jam_overlap_min_reps = 0;
+        int64_t jam_overlap_max_reps = 0;
+        bool jam_overlap_random_side = false;
+        uint64_t sense_preamble_reps = 0;
+        uint64_t jam_preamble_reps = 0;
+        std::vector<int64_t> jam_overlap_lead_delays; // indexed by L-min
+        std::vector<int64_t> jam_overlap_lag_delays;
         // Immutable contiguous window bank, built in handle_schedule.
         std::shared_ptr<const echo::MultiTxWindowBank> window_bank;
     };
@@ -367,6 +381,12 @@ private:
         uint64_t tx_fragment_count = 0;
         int64_t sense_tx_ticks = 0;
         int64_t jam_tx_ticks = 0;
+        // Preamble-overlap per-burst metadata (§6).
+        int64_t jam_overlap_reps = 0;
+        uint64_t jam_overlap_side = 0; // 0 none, 1 lead, 2 lag, 3 aligned
+        uint64_t sense_preamble_reps = 0;
+        uint64_t jam_preamble_reps = 0;
+        uint64_t jam_overlap_seed = 0;
     };
 
     void handle_schedule(pmt::pmt_t msg);
@@ -420,6 +440,7 @@ private:
     bool d_mtx_armed_ = false; // true when the armed grid uses N > 1
     size_t d_mtx_N_ = 1;
     echo::MultiTxGeometry d_mtx_geom_;
+    echo::MultiTxSpanGeometry d_mtx_span_geom_; // preamble-overlap geometry
     // Per-channel effective lengths / base offsets (copies of the Job).
     std::array<uint64_t, echo::kEchoMaxTxChannels> d_mtx_wave_len_{};
     std::array<uint64_t, echo::kEchoMaxTxChannels> d_mtx_base_{};
@@ -457,6 +478,18 @@ private:
     // Contiguous window bank frozen at apply_schedule; hot path read-only.
     std::shared_ptr<const echo::MultiTxWindowBank> d_mtx_bank_;
     uint64_t d_mtx_delay_seed_ = 0;
+    // --- preamble-overlap frozen plan (worker-owned; §5.1/§6) ---
+    int64_t d_mtx_overlap_min_ = 0;
+    int64_t d_mtx_overlap_max_ = 0;
+    bool d_mtx_overlap_random_side_ = false;
+    int d_mtx_overlap_side_fixed_ = 0; // 0 lead, 1 lag (when not random)
+    uint64_t d_mtx_sense_reps_ = 0;
+    uint64_t d_mtx_jam_reps_ = 0;
+    uint64_t d_mtx_overlap_seed_ = 0;
+    // Reserved at construction: re-arming never allocates on the worker.
+    std::vector<int64_t> d_mtx_overlap_lead_;
+    std::vector<int64_t> d_mtx_overlap_lag_;
+    uint64_t d_mtx_delay_updates_ = 0; // overlap attempts (atomic mirror)
     std::atomic<bool> d_armed_{ false };
 
     // Bounded schedule queue (handler enqueues, worker drains).
@@ -521,6 +554,9 @@ private:
     std::atomic<double> d_jam_offset_last_{ 0.0 };
     std::atomic<uint64_t> d_jam_retunes_{ 0 };
     std::atomic<uint64_t> d_jam_retune_fails_{ 0 };
+    std::atomic<int64_t> d_jam_overlap_reps_last_{ 0 };
+    std::atomic<uint64_t> d_jam_overlap_side_last_{ 0 };
+    std::atomic<uint64_t> d_jam_delay_updates_{ 0 };
     mutable std::mutex d_err_mutex_;
     std::string d_last_error_;
 };

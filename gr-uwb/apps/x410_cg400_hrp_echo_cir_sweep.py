@@ -77,6 +77,9 @@ class SweepTimedUhdEcho(base.TimedUhdEcho):
         self.retune_count = 0
         self.retune_fail = 0
 
+    def frequency_for_pulse(self, pulse_id):
+        return self.freq_by_pulse.get(int(pulse_id))
+
     def retune(self, freq_hz, next_pulse_id):
         """Shift TX+RX to freq_hz and re-arm the schedule at next_pulse_id."""
         freq_hz = float(freq_hz)
@@ -257,6 +260,17 @@ class SweepCppPduEcho(base.CppPduEcho):
         self.retune_count = 0
         self.retune_fail = 0
         self._done = 0
+        self._active_frequency = None
+
+    def frequency_for_pulse(self, pulse_id):
+        pulse_id = int(pulse_id)
+        recorded = self.freq_by_pulse.get(pulse_id)
+        if recorded is not None:
+            return recorded
+        active = self._active_frequency
+        if active is not None and pulse_id >= active[0]:
+            return active[1], active[2]
+        return None
 
     def retune(self, freq_hz, next_pulse_id):
         """Queue a TX+RX retune on the C++ worker (burst-boundary tune)."""
@@ -288,10 +302,12 @@ class SweepCppPduEcho(base.CppPduEcho):
             n += 1
         return max(1, n)
 
-    def _record_pulse(self, pulse_id):
+    def _record_pulse(self, pulse_id, plan_pulse_id=None):
         """Append the per-pulse frequency record (Python-path keys)."""
         offset = self.freq - self.nominal
-        dwell_index = (self.plan.dwell_index(pulse_id)
+        plan_pulse_id = (int(pulse_id) if plan_pulse_id is None
+                         else int(plan_pulse_id))
+        dwell_index = (self.plan.dwell_index(plan_pulse_id)
                        if self.plan is not None else 0)
         align_first = self.align.last_first_peak if self.align is not None else None
         align_err = self.align.last_error if self.align is not None else None
@@ -300,6 +316,7 @@ class SweepCppPduEcho(base.CppPduEcho):
         align_skipped = self.align.skipped if self.align is not None else None
         rec = {
             "pulse_id": int(pulse_id),
+            "plan_pulse_id": plan_pulse_id,
             "freq_hz": self.freq,
             "freq_offset_hz": offset,
             "tx_freq_actual": self.tx_freq_actual,
@@ -372,6 +389,7 @@ class SweepCppPduEcho(base.CppPduEcho):
             raise RuntimeError("TX waveform not set")
         t_host0 = time.perf_counter()
         pulse_id = 0
+        output_pulse_id = 0
         while pulse_id < self.max_pulses:
             if self.plan is not None and self.plan.stop_requested:
                 print("[freq] stop requested at pulse %d" % pulse_id,
@@ -389,12 +407,25 @@ class SweepCppPduEcho(base.CppPduEcho):
                           flush=True)
             count = min(self._segment_len(pulse_id),
                         self.max_pulses - pulse_id)
-            for k in range(count):
-                self._record_pulse(pulse_id + k)
             before = int(self.blk.bursts_published())
-            t0 = self._post_segment(pulse_id, count)
+            late_before = int(self.blk.late_slot_skips())
+            self._active_frequency = (
+                output_pulse_id, self.freq, self.freq - self.nominal)
+            t0 = self._post_segment(output_pulse_id, count)
             seg_ok = self._wait_published(before + count,
                                           count * self.pri_s + 15.0)
+            published = max(0, int(self.blk.bursts_published()) - before)
+            segment_skips = max(
+                0, int(self.blk.late_slot_skips()) - late_before)
+            # C++ advances schedule_index past expired slots, and uses that
+            # index to form pulse_id within this PDU.  Carry the resulting
+            # span (published bursts + skipped slots) into the next PDU so a
+            # new dwell can never reuse ids from the preceding one.
+            output_span = published + segment_skips
+            for k in range(output_span):
+                self._record_pulse(output_pulse_id + k, pulse_id)
+            self._active_frequency = None
+            output_pulse_id += output_span
             pulse_id += count
             self._done = pulse_id
             dt = time.perf_counter() - t_host0
@@ -535,10 +566,6 @@ def build_freq_plan(a):
 def main():
     base.bootstrap_uhd_env()
     a = parse_args()
-    if a.cir_output != "average":
-        raise SystemExit("sweep peak/frequency servo currently requires "
-                         "--cir-output average; use the base or jamming app "
-                         "for per-repetition CIR")
     base.resolve_echo_backend(a)
     base.resolve_dpdk_args(a)
     if a.preamble_length is not None and a.sync_reps is not None \
@@ -711,22 +738,42 @@ def main():
           flush=True)
     est_q = max(8, int(a.est_queue))
     use_pred = not a.require_sfd
+    cir_pre, cir_post, cir_taps = base.resolve_cir_window(a)
+    cir_skip_initial = base.cir_skip_for_output(a.cir_output)
+    emit_reps = base.cir_outputs_repetitions(a.cir_output)
+    avg_skip = base.cir_average_skip_for_output(a.cir_output, a.sync_reps)
     est = base.uwb.radar_cir_estimator(
-        tmpl_path, a.sync_reps, base.SFD_MODE, a.code_index, 16, 100, 10, 0,
+        tmpl_path, a.sync_reps, base.SFD_MODE, a.code_index,
+        cir_pre, cir_post,
+        cir_skip_initial, 0,
         a.sfd_search_margin, a.sync_refine_margin, a.sfd_threshold,
-        a.sync_refine_threshold, True, est_q, use_pred)
+        a.sync_refine_threshold, True, est_q, use_pred,
+        emit_reps, emit_reps, a.cir_output == "both", avg_skip)
     print("estimator code_index=%d preamble_length=%d sfd_search_margin=%d "
-          "queue=%d use_predicted_timing=%s (overflow=drop)" % (
-              a.code_index, a.sync_reps, a.sfd_search_margin, est_q, use_pred),
-          flush=True)
-    wr = base.uwb.cir_writer(a.output, "cir", True, 64)
+          "cir_pre=%d cir_post=%d taps=%d queue=%d "
+          "use_predicted_timing=%s cir_output=%s (overflow=drop)" % (
+              a.code_index, a.sync_reps, a.sfd_search_margin,
+              cir_pre, cir_post, cir_taps, est_q, use_pred,
+              a.cir_output), flush=True)
+    cir_records_per_pulse = (max(1, int(a.sync_reps) - cir_skip_initial)
+                             if emit_reps else 1)
+    wr = base.uwb.cir_writer(
+        a.output, "cir", True, max(256, 4 * cir_records_per_pulse))
+    wr_avg = None
+    if a.cir_output == "both":
+        wr_avg = base.uwb.cir_writer(a.output, "cir_avg", True,
+                                     max(64, est_q))
+        print("cir_avg coherent average of SYNC [%d, %d) -> %s "
+              "(UDP stays per-repetition)" % (
+                  avg_skip, int(a.sync_reps),
+                  os.path.join(a.output, "cir_avg.ucr4")), flush=True)
     udp = None
     udp_on = (not a.no_udp) and bool(a.udp_host)
     if udp_on:
         udp = base.CirUdpSink(
-            a.udp_host, int(a.udp_port), base.CIR_UDP_TAPS,
-            freq_lookup=lambda pid: echo.freq_by_pulse.get(int(pid)))
-        print("udp_cir %s:%s framed=UCR4 SC16(+scale,+repetition,+freq) "
+            a.udp_host, int(a.udp_port), cir_taps,
+            freq_lookup=echo.frequency_for_pulse)
+        print("udp_cir %s:%s framed=UCR5 SC16(+scale,+repetition,+freq) "
               "always_send_taps=%d nonblock" % (
                   a.udp_host, a.udp_port, base.CIR_UDP_TAPS), flush=True)
 
@@ -737,6 +784,8 @@ def main():
     tb.msg_connect((echo_block, echo_out_port), (res, "packet"))
     tb.msg_connect((res, "packet"), (est, "rx"))
     tb.msg_connect((est, "cir"), (wr, "cir"))
+    if wr_avg is not None:
+        tb.msg_connect((est, "cir_avg"), (wr_avg, "cir"))
     if udp is not None:
         tb.msg_connect((est, "cir"), (udp, "cir"))
     if align_sink is not None:
@@ -757,7 +806,11 @@ def main():
     deadline = time.time() + 8.0
     while time.time() < deadline:
         written = wr.frames_written() + wr.frames_failed()
-        if written >= echo._ok and est.drained() and echo._pub_q.empty():
+        avg_written = (echo._ok if wr_avg is None else
+                       wr_avg.frames_written() + wr_avg.frames_failed())
+        if (written >= echo._ok * cir_records_per_pulse and
+                avg_written >= echo._ok and est.drained()
+                and echo._pub_q.empty()):
             break
         time.sleep(0.05)
     echo.stop_publisher()
@@ -767,6 +820,11 @@ def main():
         wr.stop()
     except Exception:
         pass
+    if wr_avg is not None:
+        try:
+            wr_avg.stop()
+        except Exception:
+            pass
 
     if a.timing_detail:
         base.print_timing_detail(echo, est)
@@ -809,6 +867,13 @@ def main():
         "wr_ok": wr.frames_written(),
         "wr_fail": wr.frames_failed(),
         "wr_invalid": wr.frames_invalid(),
+        "wr_avg_ok": 0 if wr_avg is None else wr_avg.frames_written(),
+        "wr_avg_fail": 0 if wr_avg is None else wr_avg.frames_failed(),
+        "cir_output": a.cir_output,
+        "cir_pre": cir_pre,
+        "cir_post": cir_post,
+        "cir_taps": cir_taps,
+        "cir_records_per_pulse": cir_records_per_pulse,
         "use_predicted_timing": use_pred,
         "est_queue_capacity": est_q,
         "est_queue_hwm": int(est.queue_high_watermark()),
@@ -881,6 +946,16 @@ def main():
         "rx_window_us": echo.rx_len / profile.hz * 1e6,
         "rx_pad_us": a.rx_pad_us,
     }
+    expected_cir_records = expected * cir_records_per_pulse
+    pulse_id_integrity_ok = (
+        cir_stats.get("records") == expected_cir_records and
+        cir_stats.get("unique_ids") == expected and
+        cir_stats.get("dup_count") == 0)
+    if emit_reps:
+        pulse_id_integrity_ok = (
+            pulse_id_integrity_ok and
+            cir_stats.get("pulses_with_repetitions") == expected)
+    summary["pulse_id_integrity_ok"] = pulse_id_integrity_ok
     with open(os.path.join(a.output, "summary.json"), "w",
               encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
@@ -981,11 +1056,15 @@ def main():
         ok = (summary["echo_ok"] == expected and summary["echo_late"] == 0
               and summary["sc16_packets"] == expected)
     else:
-        ok = (summary["wr_ok"] == expected and summary["echo_ok"] == expected
-              and summary["echo_late"] == 0
-              and cir_stats.get("ok") == expected
-              and cir_stats.get("missing_count", 1) == 0
+        ok = (summary["wr_ok"] == expected_cir_records and
+              summary["echo_ok"] == expected
+              and cir_stats.get("ok") == expected_cir_records
+              and pulse_id_integrity_ok
+              and (summary["echo_late"] == 0 or
+                   a.echo_backend == "cpp-pdu")
               and echo.retune_fail == 0)
+        if a.cir_output == "both":
+            ok = ok and summary["wr_avg_ok"] == expected
     raise SystemExit(0 if ok else 3)
 
 

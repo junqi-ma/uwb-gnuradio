@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Receive UWB radar CIR datagrams, plot them live, and dump raw UCR4.
+"""Receive UWB radar CIR datagrams, plot them live, and dump raw UCR5/UCR4.
 
 Both live scripts (x410_cg400_hrp_echo_cir.py and ..._jam.py) send the unified
-UCR4 header followed by ``tap_count`` interleaved little-endian SC16 taps on
-every CIR record.  A float32 ``cir_scale`` reconstructs FC32 as
-``SC16 * cir_scale`` (per-record block-floating).  Legacy UCR3/UCR2/UCR1 and
-bare raw socket_pdu payloads (unframed complex64 taps) are still accepted.
+UCR5 header (UCR4 + preamble-overlap collision metadata) followed by
+``tap_count`` interleaved little-endian SC16 taps on every CIR record.  A
+float32 ``cir_scale`` reconstructs FC32 as ``SC16 * cir_scale`` (per-record
+block-floating).  Legacy UCR4/UCR3/UCR2/UCR1 and bare raw socket_pdu payloads
+(unframed complex64 taps) are still accepted.
 
-UCR4 header (little-endian, 52 bytes):
-  magic "UCR4" | pulse_id u32 | status u16 | tap_count u16
+UCR5 header (little-endian, 64 bytes):
+  magic "UCR5" | pulse_id u32 | status u16 | tap_count u16
   | repetition_index u16 | repetition_count u16
   | sfd_metric f32 | cir_peak_metric f32 | peak_tap i32 | estimator_us u32
   | freq_hz f64 | freq_offset_hz f64 | cir_scale f32
+  | jam_delay_native i32 | jam_overlap_reps u16
+  | sense_preamble_reps u16 | jam_preamble_reps u16
+  | overlap_side u8 (0 none, 1 lead, 2 lag, 3 aligned) | reserved u8
 
 Two independent outputs:
 
@@ -23,11 +27,12 @@ Two independent outputs:
    Reception runs in a background thread so the GUI never blocks the socket;
    the canvas is redrawn at a fixed ``--refresh`` rate.
 
-2. Raw UCR4 dump (``--save-ucr4 PREFIX``): ``PREFIX.ucr4`` is the byte-exact
-   concatenation of every received UCR4 datagram (header + SC16 payload), so
-   MATLAB can re-parse ``FC32 = SC16 * cir_scale`` directly.  ``PREFIX.jsonl``
-   carries one index object per record (byte_offset/byte_len + metadata).
-   Non-UCR4 datagrams are counted and skipped (the stream stays self-describing).
+2. Raw datagram dump (``--save-ucr4 PREFIX``): ``PREFIX.ucr4`` is the
+   byte-exact concatenation of every received UCR5/UCR4 datagram (header +
+   SC16 payload), so MATLAB can re-parse ``FC32 = SC16 * cir_scale``
+   directly.  ``PREFIX.jsonl`` carries one index object per record
+   (byte_offset/byte_len + metadata).  Non-framed datagrams are counted and
+   skipped (the stream stays self-describing).
 """
 from __future__ import annotations
 
@@ -50,6 +55,10 @@ MAGIC_V3 = b"UCR3"
 HDR_V3 = struct.Struct("<4sIHHHHffiIdd")
 MAGIC_V4 = b"UCR4"
 HDR_V4 = struct.Struct("<4sIHHHHffiIddf")
+MAGIC_V5 = b"UCR5"
+HDR_V5 = struct.Struct("<4sIHHHHffiIddfiHHHBB")
+#: overlap_side byte -> name (UCR5).
+OVERLAP_SIDE_NAME = {0: "none", 1: "lead", 2: "lag", 3: "aligned"}
 STATUS_NAME = {
     0: "ok",
     1: "sfd_failed",
@@ -60,6 +69,37 @@ STATUS_NAME = {
 
 
 def parse_datagram(data):
+    if len(data) >= HDR_V5.size and data[:4] == MAGIC_V5:
+        (magic, pulse_id, status, tap_count, rep_index, rep_count, sfd,
+         peak, peak_tap, est_us, freq_hz, freq_off, cir_scale,
+         jam_delay_native, overlap_reps, sense_reps, jam_reps,
+         overlap_side, _reserved) = HDR_V5.unpack_from(data)
+        payload = data[HDR_V5.size:]
+        if len(payload) % 4:
+            raise ValueError("UCR5 SC16 payload has an odd int16 count")
+        taps_sc16 = np.frombuffer(payload, dtype="<i2")
+        iq = taps_sc16.reshape(-1, 2)
+        if iq.shape[0] != int(tap_count):
+            raise ValueError("UCR5 tap_count does not match SC16 payload")
+        taps = ((iq[:, 0].astype(np.float32) +
+                 1j * iq[:, 1].astype(np.float32)) * np.float32(cir_scale))
+        return {
+            "framed": True, "version": 5, "sample_format": "sc16",
+            "pulse_id": int(pulse_id),
+            "status": STATUS_NAME.get(int(status), "other"),
+            "status_code": int(status), "tap_count": int(tap_count),
+            "repetition_index": (None if rep_index == 0xFFFF else int(rep_index)),
+            "repetition_count": int(rep_count), "sfd_metric": float(sfd),
+            "peak_abs": float(peak), "peak_tap": int(peak_tap),
+            "estimator_us": int(est_us), "freq_hz": float(freq_hz),
+            "freq_offset_hz": float(freq_off), "cir_scale": float(cir_scale),
+            "jam_delay_native": int(jam_delay_native),
+            "jam_overlap_reps": int(overlap_reps),
+            "sense_preamble_reps": int(sense_reps),
+            "jam_preamble_reps": int(jam_reps),
+            "jam_overlap_side": OVERLAP_SIDE_NAME.get(int(overlap_side), "none"),
+            "taps_sc16": taps_sc16, "taps": taps.astype(np.complex64),
+        }
     if len(data) >= HDR_V4.size and data[:4] == MAGIC_V4:
         (magic, pulse_id, status, tap_count, rep_index, rep_count, sfd,
          peak, peak_tap, est_us, freq_hz, freq_off,
@@ -217,7 +257,7 @@ class Recorder:
         self.lock = threading.Lock()
 
     def add(self, data, rec, src, t0):
-        if len(data) < 4 or data[:4] != MAGIC_V4:
+        if len(data) < 4 or data[:4] not in (MAGIC_V4, MAGIC_V5):
             self.skipped += 1
             return
         meta = {
@@ -242,6 +282,12 @@ class Recorder:
             "freq_offset_hz": _json_num(rec["freq_offset_hz"]),
             "cir_scale": rec["cir_scale"],
         }
+        if rec.get("version") == 5:
+            meta["jam_delay_native"] = rec["jam_delay_native"]
+            meta["jam_overlap_reps"] = rec["jam_overlap_reps"]
+            meta["sense_preamble_reps"] = rec["sense_preamble_reps"]
+            meta["jam_preamble_reps"] = rec["jam_preamble_reps"]
+            meta["jam_overlap_side"] = rec["jam_overlap_side"]
         with self.lock:
             self.fh.write(data)
             self.jh.write(json.dumps(meta) + "\n")
@@ -373,8 +419,9 @@ def parse_args():
     p.add_argument("--bind", default="0.0.0.0")
     p.add_argument("--port", type=int, default=12345)
     p.add_argument("--expect-bytes", type=int, default=0,
-                   help="Raw-payload length check (0 = any); framed UCR4/3/2/1 "
-                        "are validated against their tap_count field")
+                   help="Raw-payload length check (0 = any); framed "
+                        "UCR5/4/3/2/1 are validated against their tap_count "
+                        "field")
     p.add_argument("--seconds", type=float, default=0.0,
                    help="Stop after this many seconds (0 = until Ctrl-C)")
     p.add_argument("--plot", dest="plot", action="store_true", default=True,
@@ -394,8 +441,8 @@ def parse_args():
     p.add_argument("--show-failed", action="store_true",
                    help="Also plot frames whose status != ok (zero taps)")
     p.add_argument("--save-ucr4", default="",
-                   help="Dump every raw UCR4 datagram to PREFIX.ucr4 plus a "
-                        "PREFIX.jsonl index for offline MATLAB parsing")
+                   help="Dump every raw UCR5/UCR4 datagram to PREFIX.ucr4 plus "
+                        "a PREFIX.jsonl index for offline MATLAB parsing")
     p.add_argument("--append", action="store_true",
                    help="Append to existing --save-ucr4 files (else overwrite)")
     p.add_argument("--record-ok-only", action="store_true",
@@ -418,10 +465,11 @@ def main():
         pass
     sock.bind((args.bind, args.port))
     sock.settimeout(0.5)
-    print("listening %s:%d expect_bytes=%d hdr_ucr4=%d hdr_ucr3=%d "
-          "hdr_ucr2=%d hdr_ucr1=%d plot=%s" % (
-              args.bind, args.port, args.expect_bytes, HDR_V4.size,
-              HDR_V3.size, HDR_V2.size, HDR.size, args.plot), flush=True)
+    print("listening %s:%d expect_bytes=%d hdr_ucr5=%d hdr_ucr4=%d "
+          "hdr_ucr3=%d hdr_ucr2=%d hdr_ucr1=%d plot=%s" % (
+              args.bind, args.port, args.expect_bytes, HDR_V5.size,
+              HDR_V4.size, HDR_V3.size, HDR_V2.size, HDR.size,
+              args.plot), flush=True)
 
     plt = None
     fig = axes = line_all = img = None

@@ -95,7 +95,9 @@ BOOST_AUTO_TEST_CASE(test_hrp_packet_source_emits_p1_length)
 BOOST_AUTO_TEST_CASE(test_hrp_packet_source_rejects_bad_sync)
 {
     std::vector<uint8_t> b{ 1 };
-    BOOST_CHECK_THROW(UwbHrpPacketSource::make(b, 16, "ieee", 9),
+    // 3 is not a power of two, so it is outside kRadarSyncRepetitions
+    // (1..2048).  16 used to be unsupported but is now a legal profile.
+    BOOST_CHECK_THROW(UwbHrpPacketSource::make(b, 3, "ieee", 9),
                       std::invalid_argument);
 }
 

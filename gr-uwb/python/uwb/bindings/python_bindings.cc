@@ -860,7 +860,9 @@ void bind_radar_cir_estimator(py::module& m)
              py::arg("queue_capacity") = size_t(64),
              py::arg("use_predicted_timing") = false,
              py::arg("emit_individual_repetitions") = false,
-             py::arg("batch_individual_repetitions") = false)
+             py::arg("batch_individual_repetitions") = false,
+             py::arg("emit_repetition_average") = false,
+             py::arg("repetition_average_skip") = size_t(10))
         .def("template_path", &Blk::template_path)
         .def("sync_repetitions", &Blk::sync_repetitions)
         .def("sfd_mode", &Blk::sfd_mode)
@@ -878,6 +880,9 @@ void bind_radar_cir_estimator(py::module& m)
              &Blk::emit_individual_repetitions)
         .def("batch_individual_repetitions",
              &Blk::batch_individual_repetitions)
+        .def("emit_repetition_average", &Blk::emit_repetition_average)
+        .def("repetition_average_skip", &Blk::repetition_average_skip)
+        .def("averages_published", &Blk::averages_published)
         .def("pdus_received", &Blk::pdus_received)
         .def("pdus_enqueued", &Blk::pdus_enqueued)
         .def("pdus_completed", &Blk::pdus_completed)
@@ -1309,6 +1314,9 @@ void bind_realtime_echo_timer(py::module& m)
         .def("jam_freq_offset_hz_last", &Blk::jam_freq_offset_hz_last)
         .def("jam_retunes", &Blk::jam_retunes)
         .def("jam_retune_failures", &Blk::jam_retune_failures)
+        .def("jam_overlap_reps_last", &Blk::jam_overlap_reps_last)
+        .def("jam_overlap_side_last", &Blk::jam_overlap_side_last)
+        .def("jam_delay_updates", &Blk::jam_delay_updates)
         .def("tx_async_counts", [](const Blk& self) {
             py::dict out;
             pmt::pmt_t d = self.tx_async_counts();

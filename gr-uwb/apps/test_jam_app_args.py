@@ -38,6 +38,11 @@ REQUIRED_OPTIONS = (
     "--jam-pulse-shape",
     "--jam-delay-us",
     "--jam-delay-random-us",
+    "--jam-overlap-mode",
+    "--jam-overlap-min-reps",
+    "--jam-overlap-max-reps",
+    "--jam-overlap-side",
+    "--jam-overlap-seed",
     "--jam-scale",
     "--jam-repeat-pri-us",
     "--jam-freq-settle-s",
@@ -170,8 +175,14 @@ class StaticContractTest(unittest.TestCase):
 
     def test_repetition_roi_does_not_apply_average_skip(self):
         src = _source()
-        self.assertIn('cir_skip=(0 if a.cir_output == "repetitions" else 10)',
-                      src)
+        self.assertIn("cir_skip=base.cir_skip_for_output(a.cir_output)", src)
+        base_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "x410_cg400_hrp_echo_cir.py")
+        with open(base_path, "r", encoding="utf-8") as f:
+            base_src = f.read()
+        self.assertIn('return cir_output in ("repetitions", "both")',
+                      base_src)
+        self.assertIn("LEGACY_CIR_AVERAGE_SKIP = 10", base_src)
 
     def test_cpp_pdu_carries_absolute_scan_base(self):
         # A jam scan offset is ABSOLUTE base + offset: without the base the
@@ -182,6 +193,31 @@ class StaticContractTest(unittest.TestCase):
         self.assertIn("base_freq_hz", src)
         self.assertIn('"freq_hz"', src)
         self.assertIn("base_freq_hz=self.freq", src)
+
+    def test_overlap_requires_packet_and_cpp(self):
+        src = _source()
+        # The overlap mode is a real packet collision: it must demand
+        # --jam-waveform packet, refuse --jam-delay-random-us / nonzero
+        # --jam-delay-us, and be cpp-pdu only (never a python approximation).
+        self.assertIn("random-reps", src)
+        self.assertIn("random-reps requires ", src)
+        self.assertIn("requires --jam-waveform", src)
+        self.assertIn("cannot combine with", src)
+        self.assertIn("only supported with ", src)
+        self.assertIn("echo-backend cpp-pdu", src)
+        self.assertIn("jam_overlap_lead_delays_native", src)
+        self.assertIn("jam_overlap_lag_delays_native", src)
+        self.assertIn("init_s64vector", src)
+
+    def test_payload_jam_covers_sensing_preamble(self):
+        # The payload jammer must overlap the CIR estimation window: the
+        # PSDU field is tiled to Ns*SPS and started at the sensing TX
+        # start; negative delays and random delays are refused.
+        src = _source()
+        self.assertIn("jp.fill_preamble_span_work(", src)
+        self.assertIn("jp.payload_start_work(", src)
+        self.assertNotIn("sense_payload_start_native", src)
+        self.assertIn("requires a non-negative ", src)
 
 
 if __name__ == "__main__":

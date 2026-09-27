@@ -2033,6 +2033,105 @@ make_contiguous_pdu(int64_t t0,
     return pmt::cons(meta, vec);
 }
 
+// Preamble-overlap schedule PDU: one complete jammer packet placed so its
+// preamble overlaps the sensing preamble by L in [min_reps, max_reps].
+pmt::pmt_t
+make_overlap_pdu(int64_t t0,
+                 uint64_t burst_count,
+                 const std::vector<int16_t>& ch0,
+                 const std::vector<int16_t>& ch1,
+                 int64_t min_reps,
+                 uint64_t sense_reps,
+                 uint64_t jam_reps,
+                 const std::vector<int64_t>& lead,
+                 const std::vector<int64_t>& lag,
+                 const char* side,
+                 uint64_t seed,
+                 uint64_t max_fragment_size = 0)
+{
+    const int64_t max_reps =
+        min_reps + static_cast<int64_t>(lead.size()) - 1;
+    const std::string side_s(side);
+    std::vector<int64_t> sel;
+    if (side_s == "random") {
+        sel = lead;
+        sel.insert(sel.end(), lag.begin(), lag.end());
+    } else if (side_s == "lag") {
+        sel = lag;
+    } else {
+        sel = lead;
+    }
+    if (sel.empty())
+        throw std::runtime_error("empty overlap delay table");
+    int64_t dmin = sel[0];
+    int64_t dmax = sel[0];
+    for (int64_t v : sel) {
+        dmin = std::min(dmin, v);
+        dmax = std::max(dmax, v);
+    }
+    echo::MultiTxSpanGeometry g;
+    std::string gerr;
+    if (!echo::prepare_overlap_geometry(ch0.size() / 2, ch1.size() / 2,
+                                        dmin, dmax, g, &gerr))
+        throw std::runtime_error("overlap geometry: " + gerr);
+    pmt::pmt_t meta = pmt::make_dict();
+    meta = pmt::dict_add(meta, pmt::mp("t0_ticks"), pmt::from_long(t0));
+    meta = pmt::dict_add(meta, pmt::mp("tx_samples"),
+                         pmt::from_uint64(g.phys_len_L));
+    meta = pmt::dict_add(meta, pmt::mp("rx_samples"), pmt::from_uint64(32));
+    meta = pmt::dict_add(meta, pmt::mp("schedule_index"), pmt::from_uint64(0));
+    meta = pmt::dict_add(meta, pmt::mp("pulse_id"), pmt::from_uint64(0));
+    meta = pmt::dict_add(meta, pmt::mp("pulse_id_increment"),
+                         pmt::from_uint64(1));
+    meta = pmt::dict_add(meta, pmt::mp("burst_count"),
+                         pmt::from_uint64(burst_count));
+    meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
+                         pmt::from_double(737280000.0));
+    meta = pmt::dict_add(meta, pmt::mp("tx_channel_count"),
+                         pmt::from_uint64(2));
+    meta = pmt::dict_add(
+        meta, pmt::mp("tx_waveform_samples"),
+        pmt::init_u64vector(
+            2, std::vector<uint64_t>{ ch0.size() / 2, ch1.size() / 2 }));
+    meta = pmt::dict_add(
+        meta, pmt::mp("tx_base_offsets_native"),
+        pmt::init_u64vector(2, std::vector<uint64_t>{ g.P,
+                                                      g.jam_wave_begin }));
+    meta = pmt::dict_add(meta, pmt::mp("jam_logical_channel"),
+                         pmt::from_uint64(1));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_mode"),
+                         pmt::mp("preamble_overlap"));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_lo_native"),
+                         pmt::from_long(dmin));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_hi_native"),
+                         pmt::from_long(dmax));
+    meta = pmt::dict_add(meta, pmt::mp("jam_delay_seed"),
+                         pmt::from_uint64(seed));
+    meta = pmt::dict_add(meta, pmt::mp("jam_overlap_min_reps"),
+                         pmt::from_long(min_reps));
+    meta = pmt::dict_add(meta, pmt::mp("jam_overlap_max_reps"),
+                         pmt::from_long(max_reps));
+    meta = pmt::dict_add(meta, pmt::mp("jam_overlap_side_mode"),
+                         pmt::mp(side));
+    meta = pmt::dict_add(meta, pmt::mp("jam_overlap_seed"),
+                         pmt::from_uint64(seed));
+    meta = pmt::dict_add(meta, pmt::mp("sense_preamble_reps"),
+                         pmt::from_uint64(sense_reps));
+    meta = pmt::dict_add(meta, pmt::mp("jam_preamble_reps"),
+                         pmt::from_uint64(jam_reps));
+    meta = pmt::dict_add(meta, pmt::mp("jam_overlap_lead_delays_native"),
+                         pmt::init_s64vector(lead.size(), lead));
+    meta = pmt::dict_add(meta, pmt::mp("jam_overlap_lag_delays_native"),
+                         pmt::init_s64vector(lag.size(), lag));
+    if (max_fragment_size != 0)
+        meta = pmt::dict_add(meta, pmt::mp("max_fragment_size"),
+                             pmt::from_uint64(max_fragment_size));
+    pmt::pmt_t vec = pmt::make_vector(2, pmt::PMT_NIL);
+    pmt::vector_set(vec, 0, pmt::init_s16vector(ch0.size(), ch0.data()));
+    pmt::vector_set(vec, 1, pmt::init_s16vector(ch1.size(), ch1.data()));
+    return pmt::cons(meta, vec);
+}
+
 size_t
 find_iq(const std::vector<int16_t>& row, int16_t i0, int16_t q0)
 {
@@ -2279,6 +2378,185 @@ BOOST_AUTO_TEST_CASE(test_echo_timer_contiguous_fixed_delay)
         BOOST_CHECK_EQUAL(meta_i64(meta, "jam_delay_native"),
                           static_cast<int64_t>(delay));
         BOOST_CHECK_EQUAL(meta_u64(meta, "tx_fragment_count"), 1u);
+    }
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+BOOST_AUTO_TEST_CASE(test_echo_timer_preamble_overlap_random)
+{
+    // Real packet collision: a complete jammer packet is placed so its
+    // preamble overlaps the sensing preamble by L in [min_reps, max_reps].
+    // Synthetic B(q) = sps*q with sps=4 keeps the numbers small.
+    const uint64_t Ns = 12;
+    const uint64_t Nj = 8;
+    const int64_t min_reps = 1;
+    const int64_t max_reps = 8;
+    const int64_t sps = 4;
+    std::vector<int64_t> lead;
+    std::vector<int64_t> lag;
+    for (int64_t L = min_reps; L <= max_reps; ++L) {
+        lead.push_back(-sps * (static_cast<int64_t>(Nj) - L));
+        lag.push_back(sps * (static_cast<int64_t>(Ns) - L));
+    }
+    const int64_t dmin =
+        std::min(*std::min_element(lead.begin(), lead.end()),
+                 *std::min_element(lag.begin(), lag.end()));
+    const int64_t dmax =
+        std::max(*std::max_element(lead.begin(), lead.end()),
+                 *std::max_element(lag.begin(), lag.end()));
+    std::vector<int16_t> ch0(Ns * 2);
+    std::vector<int16_t> ch1(Nj * 2);
+    for (size_t i = 0; i < ch0.size(); ++i)
+        ch0[i] = static_cast<int16_t>(1200 + static_cast<int>(i));
+    for (size_t i = 0; i < ch1.size(); ++i)
+        ch1[i] = static_cast<int16_t>(-2400 - static_cast<int>(i));
+
+    echo::MultiTxSpanGeometry g;
+    std::string gerr;
+    BOOST_REQUIRE(echo::prepare_overlap_geometry(Ns, Nj, dmin, dmax, g,
+                                                 &gerr));
+
+    auto fake = std::make_shared<FakeBurstBackend>(
+        FakeBurstBackend::Config{});
+    auto cfg = base_grid_cfg();
+    cfg.max_fragment_size = 4096;
+    auto blk = UwbRealtimeEchoTimer::make(cfg, fake, 16, 1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_overlap");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+
+    const uint64_t seed = 20260921;
+    const uint64_t nburst = 64;
+    blk->_post(pmt::mp("schedule"),
+               make_overlap_pdu(2000000, nburst, ch0, ch1, min_reps, Ns, Nj,
+                                lead, lag, "random", seed));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, nburst));
+    BOOST_CHECK_EQUAL(blk->bursts_ok(), nburst);
+
+    const echo::MultiTxWindowBank* bank = blk->armed_window_bank();
+    BOOST_REQUIRE(bank != nullptr);
+    BOOST_CHECK_EQUAL(bank->tx_len, g.phys_len_L);
+    BOOST_CHECK_EQUAL(bank->sense_offset, g.P);
+    const int16_t* tx0_addr = bank->dense_rows[0].data();
+
+    echo::JamDelayRng rng(seed);
+    std::vector<int16_t> tx0_ref;
+    for (uint64_t k = 0; k < nburst; ++k) {
+        int64_t reps = 0;
+        int side = 0;
+        echo::draw_overlap_reps(rng, min_reps, max_reps, true, reps, side);
+        const int64_t expect_delay =
+            (side == 0) ? lead[static_cast<size_t>(reps - min_reps)]
+                        : lag[static_cast<size_t>(reps - min_reps)];
+        pmt::pmt_t meta;
+        std::vector<int16_t> rx;
+        get_burst(burst_dbg, static_cast<size_t>(k), meta, rx);
+        BOOST_CHECK_EQUAL(meta_str(meta, "jam_delay_mode"),
+                          "preamble_overlap");
+        BOOST_CHECK_EQUAL(meta_i64(meta, "jam_delay_native"), expect_delay);
+        BOOST_CHECK_EQUAL(meta_i64(meta, "jam_overlap_reps"), reps);
+        const char* expect_side =
+            (expect_delay == 0) ? "aligned"
+                                : (expect_delay < 0 ? "lead" : "lag");
+        BOOST_CHECK_EQUAL(meta_str(meta, "jam_overlap_side"), expect_side);
+        BOOST_CHECK_EQUAL(meta_u64(meta, "sense_preamble_reps"), Ns);
+        BOOST_CHECK_EQUAL(meta_u64(meta, "jam_preamble_reps"), Nj);
+        BOOST_CHECK_EQUAL(meta_u64(meta, "jam_overlap_seed"), seed);
+        BOOST_CHECK_EQUAL(meta_u64(meta, "tx_fragment_count"), 1u);
+
+        FakeBurstBackend::FakeBurstRecord rec;
+        BOOST_REQUIRE(fake->find_record(k, rec));
+        BOOST_REQUIRE_EQUAL(rec.tx_stitched_ch.size(), 2u);
+        BOOST_CHECK_EQUAL(rec.tx_stitched_ch[0].size(), g.phys_len_L * 2);
+        BOOST_CHECK_EQUAL(rec.tx_stitched_ch[1].size(), g.phys_len_L * 2);
+        if (k == 0)
+            tx0_ref = rec.tx_stitched_ch[0];
+        else
+            BOOST_CHECK(rec.tx_stitched_ch[0] == tx0_ref);
+        const size_t at =
+            find_iq(rec.tx_stitched_ch[1], ch1[0], ch1[1]);
+        BOOST_CHECK_EQUAL(at, static_cast<size_t>(g.P + expect_delay));
+        // The full packet is present (first and last marker).
+        const size_t last_at = find_iq(
+            rec.tx_stitched_ch[1], ch1[Nj * 2 - 2], ch1[Nj * 2 - 1]);
+        BOOST_CHECK_EQUAL(
+            last_at,
+            static_cast<size_t>(g.P + expect_delay + Nj - 1));
+        BOOST_REQUIRE(!rec.tx_flags.empty());
+        BOOST_CHECK_EQUAL(rec.tx_flags[0], kTIME | kSOB | kEOB);
+    }
+    BOOST_CHECK_EQUAL(blk->armed_window_bank()->dense_rows[0].data(),
+                      tx0_addr);
+    BOOST_CHECK_EQUAL(blk->jam_delay_updates(), nburst);
+    BOOST_CHECK_GE(blk->jam_overlap_reps_last(), min_reps);
+    BOOST_CHECK_LE(blk->jam_overlap_reps_last(), max_reps);
+
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(blk->stop());
+}
+
+BOOST_AUTO_TEST_CASE(test_echo_timer_preamble_overlap_fixed_side)
+{
+    // side=lead: only the lead table is used; the second RNG draw is still
+    // consumed so the sequence matches side=random's first value.
+    const uint64_t Ns = 10;
+    const uint64_t Nj = 10;
+    const int64_t min_reps = 1;
+    const int64_t max_reps = 10;
+    const int64_t sps = 3;
+    std::vector<int64_t> lead;
+    std::vector<int64_t> lag;
+    for (int64_t L = min_reps; L <= max_reps; ++L) {
+        lead.push_back(-sps * (static_cast<int64_t>(Nj) - L));
+        lag.push_back(sps * (static_cast<int64_t>(Ns) - L));
+    }
+    std::vector<int16_t> ch0(Ns * 2, 5);
+    std::vector<int16_t> ch1(Nj * 2, 0);
+    for (size_t i = 0; i < ch1.size(); ++i)
+        ch1[i] = static_cast<int16_t>(-500 - static_cast<int>(i));
+
+    const int64_t dmin = lead.front();
+    auto fake = std::make_shared<FakeBurstBackend>(
+        FakeBurstBackend::Config{});
+    auto cfg = base_grid_cfg();
+    cfg.max_fragment_size = 4096;
+    auto blk = UwbRealtimeEchoTimer::make(cfg, fake, 16, 1000);
+    auto burst_dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_echo_timer_overlap_lead");
+    tb->msg_connect(blk, "burst", burst_dbg, "store");
+    BOOST_REQUIRE(blk->start());
+    tb->start();
+
+    const uint64_t seed = 7;
+    const uint64_t nburst = 16;
+    blk->_post(pmt::mp("schedule"),
+               make_overlap_pdu(2000000, nburst, ch0, ch1, min_reps, Ns, Nj,
+                                lead, lag, "lead", seed));
+    BOOST_REQUIRE(wait_bursts(burst_dbg, nburst));
+
+    echo::JamDelayRng rng(seed);
+    for (uint64_t k = 0; k < nburst; ++k) {
+        int64_t reps = 0;
+        int side = 0;
+        echo::draw_overlap_reps(rng, min_reps, max_reps, false, reps, side);
+        const int64_t expect_delay =
+            lead[static_cast<size_t>(reps - min_reps)];
+        pmt::pmt_t meta;
+        std::vector<int16_t> rx;
+        get_burst(burst_dbg, static_cast<size_t>(k), meta, rx);
+        BOOST_CHECK_EQUAL(meta_i64(meta, "jam_delay_native"), expect_delay);
+        BOOST_CHECK_EQUAL(meta_i64(meta, "jam_overlap_reps"), reps);
+        BOOST_CHECK_LE(expect_delay, 0);
+        FakeBurstBackend::FakeBurstRecord rec;
+        BOOST_REQUIRE(fake->find_record(k, rec));
+        BOOST_CHECK_EQUAL(
+            find_iq(rec.tx_stitched_ch[1], ch1[0], ch1[1]),
+            static_cast<size_t>(-dmin + expect_delay));
     }
     tb->stop();
     tb->wait();

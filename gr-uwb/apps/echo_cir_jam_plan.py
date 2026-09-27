@@ -404,10 +404,76 @@ CPP_SCHEDULE_META_KEYS = (
     "jam_freq_offsets_hz",
     "jam_dwell",
     "jam_freq_settle_ticks",
+    # --- preamble-overlap mode (real UWB packet collision) ---
+    "jam_overlap_min_reps",
+    "jam_overlap_max_reps",
+    "jam_overlap_side_mode",
+    "jam_overlap_seed",
+    "sense_preamble_reps",
+    "jam_preamble_reps",
+    "jam_overlap_lead_delays_native",
+    "jam_overlap_lag_delays_native",
 )
 
 #: Schedule-PDU ``jam_delay_mode`` values (C++ ``JamDelayMode``).
-CPP_JAM_DELAY_MODES = ("fixed", "uniform")
+CPP_JAM_DELAY_MODES = ("fixed", "uniform", "preamble_overlap")
+
+#: Preamble-overlap collision direction modes.
+CPP_OVERLAP_SIDES = ("lead", "lag", "random")
+
+#: SYNC repetition length on the 998.4 MS/s work grid (mirrors
+#: ``x410_cg400_hrp_echo_cir.SPS``; duplicated so this module stays
+#: GNU-Radio-free).
+WORK_SPS = 1016
+
+
+def payload_start_work(sync_reps, insert_sts, sfd_symbols=8):
+    """First PSDU sample on the 998.4 MS/s grid for the HRP modulator.
+
+    The current radar source uses 4z2 (8 SFD symbols).  The PHR is
+    21 symbols * 512 chips * 2 samples/chip; optional 4z STS is 67584
+    samples.  These are the field lengths in uwb_hrp_mod_core.h.
+    """
+    reps = int(sync_reps)
+    sfd = int(sfd_symbols)
+    if reps <= 0 or sfd <= 0:
+        raise ValueError("sync_reps and sfd_symbols must be > 0")
+    return (reps + sfd) * WORK_SPS + (67584 if insert_sts else 0) + 21 * 512 * 2
+
+
+def work_boundary_native(work_sample, tx_interp, tx_decim):
+    """Map a work-grid field boundary to the first native sample at it."""
+    n = int(work_sample)
+    i = int(tx_interp)
+    d = int(tx_decim)
+    if n < 0 or i <= 0 or d <= 0:
+        raise ValueError("work_sample must be >= 0 and resampler ratio positive")
+    return (n * i + d - 1) // d
+
+
+def fill_preamble_span_work(field, sync_reps, sps=WORK_SPS):
+    """Tile or truncate a BPM-BPSK payload field to the preamble span.
+
+    The payload jammer must transmit for exactly ``sync_reps * sps``
+    work-grid samples (the sensing preamble duration).  ``field`` (a
+    PSDU waveform, ``nsym * 128`` samples) is repeated until the target
+    is reached, then cut; a field longer than the target is truncated.
+    Returns a fresh 1-D array of exactly ``reps * sps`` samples.
+    """
+    reps = int(sync_reps)
+    s = int(sps)
+    if reps <= 0 or s <= 0:
+        raise ValueError(
+            "sync_reps and sps must be > 0, got %r/%r" % (reps, s))
+    target = reps * s
+    arr = np.asarray(field)
+    if arr.ndim != 1 or arr.size == 0:
+        raise ValueError(
+            "field must be a non-empty 1-D array, got shape %r" % (arr.shape,))
+    if arr.size >= target:
+        return arr[:target].copy()
+    tiles = -(-target // arr.size)
+    return np.tile(arr, int(tiles))[:target]
 
 
 def cpp_jam_delay_mode(delay_random_us):
@@ -419,11 +485,116 @@ def cpp_jam_delay_mode(delay_random_us):
     return "uniform" if delay_random_us is not None else "fixed"
 
 
+# --- preamble-overlap (real packet collision) pure helpers -----------------
+
+
+def overlap_span_native(reps, sps=WORK_SPS, tx_interp=48, tx_decim=65):
+    """Native samples spanned by ``reps`` SYNC repetitions.
+
+    Integer rational map ``B(q) = ceil(q * SPS * tx_interp / tx_decim)``
+    matching the polyphase resampler used by ``profile.tx_native`` (and
+    ``radar_meta::native_span``).  Never accumulates rounded per-repetition
+    spans: a single integer ceiling keeps the error below one polyphase
+    boundary sample.
+    """
+    q = int(reps)
+    if q < 0:
+        raise ValueError("reps must be >= 0, got %r" % (reps,))
+    s = int(sps)
+    interp = int(tx_interp)
+    decim = int(tx_decim)
+    if s <= 0 or interp <= 0 or decim <= 0:
+        raise ValueError(
+            "sps/tx_interp/tx_decim must be > 0, got %r/%r/%r"
+            % (sps, tx_interp, tx_decim))
+    scaled = q * s * interp
+    return (scaled + decim - 1) // decim
+
+
+def overlap_delay_tables(*, sense_reps, jam_reps, min_reps, max_reps,
+                         sps=WORK_SPS, tx_interp=48, tx_decim=65):
+    """Native lead/lag delay tables indexed by ``L - min_reps``.
+
+    For overlap ``L`` (1 <= L <= min(Ns, Nj)):
+
+    * ``lead``: ``d_native = -B(Nj - L)`` (jammer starts earlier, its
+      SFD/PHR/PSDU continue into the sensing preamble);
+    * ``lag``:  ``d_native = +B(Ns - L)`` (jammer starts later).
+
+    ``L == min(Ns, Nj)`` maps both directions to 0 (aligned).  Returns
+    ``(lead, lag)`` lists of plain ints.
+    """
+    ns = int(sense_reps)
+    nj = int(jam_reps)
+    lo = int(min_reps)
+    hi = int(max_reps)
+    if ns <= 0 or nj <= 0:
+        raise ValueError(
+            "sense_reps/jam_reps must be > 0, got %r/%r"
+            % (sense_reps, jam_reps))
+    full = min(ns, nj)
+    if not (1 <= lo <= hi <= full):
+        raise ValueError(
+            "overlap reps must satisfy 1 <= min <= max <= min(Ns,Nj)=%d, "
+            "got min=%r max=%r" % (full, min_reps, max_reps))
+    lead = []
+    lag = []
+    for L in range(lo, hi + 1):
+        lead.append(-overlap_span_native(nj - L, sps, tx_interp, tx_decim))
+        lag.append(overlap_span_native(ns - L, sps, tx_interp, tx_decim))
+    return lead, lag
+
+
+def overlap_geometry(*, sense_len, jam_len, delays_native):
+    """Asymmetric contiguous-window geometry for a delay table (§5.2).
+
+    ``dmin = min(delays)`` and ``dmax = max(delays)`` are the table
+    extremes.  The sense is parked at ``P = max(0, -dmin)`` (so a
+    lead-only table whose largest delay is still negative parks the sense
+    at the maximum lead, while an all-positive lag-only table parks it at
+    0).  ``R = dmax - dmin`` is the jammer pointer slide.  Returns ``P``,
+    ``R``, ``L = Ltx`` and the jammer backing placement.  Never uses a
+    symmetric ``max(abs(delay))`` pad.
+    """
+    s = int(sense_len)
+    j = int(jam_len)
+    if s <= 0:
+        raise ValueError("sense_len must be > 0, got %r" % (sense_len,))
+    if j <= 0:
+        raise ValueError(
+            "jam_len must be > 0 for overlap mode, got %r" % (jam_len,))
+    ds = [int(d) for d in delays_native]
+    if not ds:
+        raise ValueError("overlap delay table must be non-empty")
+    dmin = min(ds)
+    dmax = max(ds)
+    if dmin > dmax:
+        raise ValueError(
+            "overlap delay table reversed, got [%d, %d]" % (dmin, dmax))
+    P = -dmin if dmin < 0 else 0
+    R = dmax - dmin
+    Ltx = max(P + s, P + dmax + j)
+    return {
+        "dmin": int(dmin),
+        "dmax": int(dmax),
+        "P": int(P),
+        "R": int(R),
+        "L": int(Ltx),
+        "sense_begin": int(P),
+        "jam_wave_begin": int(P + dmax),
+        "backing_length": int(Ltx + R),
+    }
+
+
 def build_cpp_schedule_meta(*, sense_len, jam_len, native_hz,
                             delay_us=0.0, delay_random_us=None,
                             delay_seed=0, jam_offsets_hz=(),
                             jam_dwell=0, freq_settle_s=0.05,
-                            jam_logical_channel=1):
+                            jam_logical_channel=1,
+                            overlap_min_reps=0, overlap_max_reps=0,
+                            overlap_side="random", sense_reps=0,
+                            jam_reps=0, sps=WORK_SPS, tx_interp=48,
+                            tx_decim=65, overlap_seed=None):
     """Build the §5.3 multi-TX schedule metadata (plain Python, PMT-free).
 
     Geometry mirrors ``JamTimedUhdEcho.prepare_jam`` so the Python timed
@@ -434,7 +605,11 @@ def build_cpp_schedule_meta(*, sense_len, jam_len, native_hz,
       ``L = combined_tx_len(sense, jam, delay)``;
     * uniform: sense is parked at ``D = delay_half_span_native(span)``,
       jammer base at ``D`` with per-pulse ``delay in [-D, +D]``,
-      ``L = bipolar_tx_len(sense, jam, D)``.
+      ``L = bipolar_tx_len(sense, jam, D)``;
+    * preamble_overlap (``overlap_min_reps > 0``): a complete jammer
+      packet is placed so its preamble overlaps the sensing preamble by
+      ``L in [min_reps, max_reps]`` repetitions, ``side`` lead/lag/random.
+      Uses the asymmetric §5.2 geometry (never a symmetric pad).
 
     The payload handed to C++ holds the two *effective* waveforms (no
     per-pulse ``(2, L)`` composite); ``tx_base_offsets_native`` gives each
@@ -456,8 +631,41 @@ def build_cpp_schedule_meta(*, sense_len, jam_len, native_hz,
     n = _as_finite("native_hz", native_hz)
     if not (n > 0.0):
         raise ValueError("native_hz must be > 0, got %r" % (native_hz,))
-    mode = cpp_jam_delay_mode(delay_random_us)
-    if mode == "uniform":
+    overlap = int(overlap_min_reps) > 0 or int(overlap_max_reps) > 0
+    if overlap:
+        mode = "preamble_overlap"
+    else:
+        mode = cpp_jam_delay_mode(delay_random_us)
+    lead_tab = []
+    lag_tab = []
+    if mode == "preamble_overlap":
+        if delay_random_us is not None:
+            raise ValueError(
+                "preamble_overlap cannot be combined with "
+                "delay_random_us; use --jam-overlap-* only")
+        if abs(_as_finite("delay_us", delay_us)) > 0.0:
+            raise ValueError(
+                "preamble_overlap requires delay_us == 0, got %r"
+                % (delay_us,))
+        if overlap_side not in CPP_OVERLAP_SIDES:
+            raise ValueError(
+                "overlap_side must be one of %r, got %r"
+                % (CPP_OVERLAP_SIDES, overlap_side))
+        lead_tab, lag_tab = overlap_delay_tables(
+            sense_reps=int(sense_reps), jam_reps=int(jam_reps),
+            min_reps=int(overlap_min_reps), max_reps=int(overlap_max_reps),
+            sps=int(sps), tx_interp=int(tx_interp), tx_decim=int(tx_decim))
+        if overlap_side == "lead":
+            delays = lead_tab
+        elif overlap_side == "lag":
+            delays = lag_tab
+        else:
+            delays = lead_tab + lag_tab
+        geo = overlap_geometry(sense_len=s, jam_len=j, delays_native=delays)
+        length = geo["L"]
+        sense_off, jam_base = geo["sense_begin"], geo["jam_wave_begin"]
+        lo_n, hi_n = geo["dmin"], geo["dmax"]
+    elif mode == "uniform":
         span = _as_finite("delay_random_us", delay_random_us)
         if span < 0.0:
             raise ValueError(
@@ -475,14 +683,16 @@ def build_cpp_schedule_meta(*, sense_len, jam_len, native_hz,
         length = combined_tx_len(s, j, delay_n)
         sense_off, jam_base = 0, delay_n
         lo_n = hi_n = delay_n
+    seed_in = (overlap_seed
+               if (overlap and overlap_seed is not None) else delay_seed)
     try:
-        seed = int(delay_seed or 0)
+        seed = int(seed_in or 0)
     except (TypeError, ValueError):
         raise ValueError(
-            "delay_seed must be an int, got %r" % (delay_seed,))
+            "delay_seed must be an int, got %r" % (seed_in,))
     if seed < 0 or seed >= 2**32:
         raise ValueError(
-            "delay_seed must be in [0, 2**32), got %r" % (delay_seed,))
+            "delay_seed must be in [0, 2**32), got %r" % (seed_in,))
     offsets = [float(_as_finite("jam_offsets_hz[%d]" % i, o))
                for i, o in enumerate(list(jam_offsets_hz))]
     dwell = int(jam_dwell)
@@ -506,28 +716,51 @@ def build_cpp_schedule_meta(*, sense_len, jam_len, native_hz,
         "jam_freq_offsets_hz": offsets,
         "jam_dwell": dwell,
         "jam_freq_settle_ticks": settle_ticks,
+        "jam_overlap_min_reps": int(overlap_min_reps) if overlap else 0,
+        "jam_overlap_max_reps": int(overlap_max_reps) if overlap else 0,
+        "jam_overlap_side_mode": str(overlap_side) if overlap else "lead",
+        "jam_overlap_seed": seed if overlap else 0,
+        "sense_preamble_reps": int(sense_reps) if overlap else 0,
+        "jam_preamble_reps": int(jam_reps) if overlap else 0,
+        "jam_overlap_lead_delays_native": [int(v) for v in lead_tab],
+        "jam_overlap_lag_delays_native": [int(v) for v in lag_tab],
     }
 
 
 def contiguous_window_layout(*, sense_len, jam_len, native_hz,
-                             delay_us=0.0, delay_random_us=None):
+                             delay_us=0.0, delay_random_us=None,
+                             overlap_min_reps=0, overlap_max_reps=0,
+                             overlap_side="random", sense_reps=0,
+                             jam_reps=0, sps=WORK_SPS, tx_interp=48,
+                             tx_decim=65, overlap_seed=None):
     """C++ contiguous-window send geometry (no delay-dependent fragments).
 
     Returns a JSON-serialisable dict with ``layout='contiguous-window'``,
     ``L``, ``D``, ``backing_length``, jam-window range and
     ``data_fragments=1``.  Uniform: backing is ``L+2D`` and the jammer
-    read window start is ``D-delta`` in ``[0, 2D]``.  Fixed: two dense
-    rows of length ``L``, jammer parked at the fixed delay.
+    read window start is ``D-delta`` in ``[0, 2D]``.  Preamble-overlap:
+    asymmetric ``P/R`` geometry (``D == P``).  Fixed: two dense rows of
+    length ``L``, jammer parked at the fixed delay.
     """
     meta = build_cpp_schedule_meta(
         sense_len=sense_len, jam_len=jam_len, native_hz=native_hz,
-        delay_us=delay_us, delay_random_us=delay_random_us)
+        delay_us=delay_us, delay_random_us=delay_random_us,
+        overlap_min_reps=overlap_min_reps, overlap_max_reps=overlap_max_reps,
+        overlap_side=overlap_side, sense_reps=sense_reps, jam_reps=jam_reps,
+        sps=sps, tx_interp=tx_interp, tx_decim=tx_decim)
     L = int(meta["tx_samples"])
     D = int(meta["tx_base_offsets_native"][0])
     mode = str(meta["jam_delay_mode"])
     if mode == "uniform":
         backing = L + 2 * D
         win_lo, win_hi = 0, 2 * D
+    elif mode == "preamble_overlap":
+        # dmin/dmax are the overlap delay-table extremes; P == D and
+        # backing == L + R with the window slide in [0, R].
+        dmin = int(meta["jam_delay_lo_native"])
+        dmax = int(meta["jam_delay_hi_native"])
+        backing = L + (dmax - dmin)
+        win_lo, win_hi = 0, dmax - dmin
     else:
         backing = L
         jam_at = int(meta["tx_base_offsets_native"][1])
@@ -549,8 +782,11 @@ def require_fragment_covers_L(max_fragment_size, L):
     f = int(max_fragment_size)
     n = int(L)
     if f < n:
+        suggest = 1
+        while suggest < n:
+            suggest <<= 1
         raise ValueError(
             "max_fragment_size %d < L %d; contiguous-window dual-TX "
-            "requires one data fragment (raise --max-fragment-size)"
-            % (f, n))
+            "requires one data fragment (raise --max-fragment-size to >= %d, "
+            "e.g. %d)" % (f, n, n, suggest))
     return 1

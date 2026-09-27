@@ -55,8 +55,13 @@ struct TxBurstFragment {
     int64_t device_ticks = 0; // command time when kFlagTimeSpec
 };
 
-// Jammer delay mode (schedule PDU "jam_delay_mode": 0 = fixed, 1 = uniform).
-enum class JamDelayMode : uint8_t { Fixed = 0, Uniform = 1 };
+// Jammer delay mode (schedule PDU "jam_delay_mode": 0 = fixed, 1 = uniform,
+// 2 = preamble_overlap / real packet collision).
+enum class JamDelayMode : uint8_t {
+    Fixed = 0,
+    Uniform = 1,
+    PreambleOverlap = 2,
+};
 
 // ---------------------------------------------------------------------------
 // Deterministic PRNG (§5.4): PCG-XSH-RR 32-bit output, 64-bit LCG state.
@@ -115,10 +120,38 @@ public:
         }
     }
 
+    // Same mapping, but ALWAYS consumes at least one 32-bit draw — even for
+    // a degenerate [lo, hi] span.  The preamble-overlap contract fixes the
+    // per-burst draw count so a single-value L (or fixed side) can never
+    // shift the sequence of later pulses.
+    int64_t next_range_consume(int64_t lo, int64_t hi)
+    {
+        if (hi <= lo) {
+            next_u32();
+            return lo;
+        }
+        return next_range_inclusive(lo, hi);
+    }
+
 private:
     uint64_t d_state = 0;
     uint64_t d_inc = 1442695040888963407ULL;
 };
+
+// Preamble-overlap per-burst draw (planning §4).  Exactly two sampler
+// invocations per attempted burst: the first selects the overlap
+// repetition count L in [lo, hi]; the second selects the side, consumed
+// even when the side mode is fixed (or L is degenerate) so configuration
+// branches and special values never shift later pulses' sequence.
+// `side_out`: 0 = lead, 1 = lag.
+inline void
+draw_overlap_reps(JamDelayRng& rng, int64_t lo, int64_t hi,
+                  bool random_side, int64_t& reps_out, int& side_out)
+{
+    reps_out = rng.next_range_consume(lo, hi);
+    const int64_t s = rng.next_range_consume(0, 1);
+    side_out = random_side ? static_cast<int>(s) : 0;
+}
 
 // ---------------------------------------------------------------------------
 // Zero-copy layout planner (§5.4).
@@ -193,6 +226,87 @@ prepare_multitx_geometry(uint64_t sense_len,
     out.half_span_D = half_span_D;
     out.phys_len_L = L;
     out.sense_begin = half_span_D;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Asymmetric contiguous-window geometry (planning §5.2, preamble overlap).
+//
+// A real packet-collision delay table spans dmin <= dmax (lead gives
+// negative delays, lag positive; a single-direction table may lie wholly
+// on one side).  Instead of a symmetric pad D = max(abs(delay)):
+//   P = max(0, -dmin)         sense parked offset
+//   R = dmax - dmin           jammer pointer slide
+//   L = max(P + sense_len, P + dmax + jam_len)
+//   jam backing = L + R, jam wave at P + dmax
+//   jam window begin(delay) = dmax - delay in [0, R]
+// This strictly degenerates to the uniform geometry for dmin=-D, dmax=+D.
+// ---------------------------------------------------------------------------
+struct MultiTxSpanGeometry {
+    uint64_t sense_len = 0;
+    uint64_t jam_len = 0;
+    int64_t dmin = 0;
+    int64_t dmax = 0;
+    uint64_t P = 0;            // max(0, -dmin): sense parked offset
+    uint64_t R = 0;            // dmax - dmin (jammer slide)
+    uint64_t phys_len_L = 0;
+    uint64_t sense_begin = 0;       // == P
+    uint64_t jam_wave_begin = 0;    // == P + dmax
+    uint64_t backing_len = 0;       // == L + R
+};
+
+inline bool
+prepare_overlap_geometry(uint64_t sense_len, uint64_t jam_len,
+                         int64_t dmin, int64_t dmax,
+                         MultiTxSpanGeometry& out,
+                         std::string* error = nullptr)
+{
+    auto fail = [&](const char* what) {
+        if (error)
+            *error = what;
+        return false;
+    };
+    out = MultiTxSpanGeometry{};
+    if (sense_len == 0)
+        return fail("sense waveform must be non-empty");
+    if (jam_len == 0)
+        return fail("jam waveform must be non-empty");
+    if (dmin > dmax)
+        return fail("overlap_delay_table_reversed");
+    if (dmin == std::numeric_limits<int64_t>::min())
+        return fail("geometry overflow");
+    const uint64_t P = (dmin < 0) ? static_cast<uint64_t>(-dmin) : 0u;
+    const __int128 r128 =
+        static_cast<__int128>(dmax) - static_cast<__int128>(dmin);
+    if (r128 < 0 ||
+        r128 > static_cast<__int128>(std::numeric_limits<uint64_t>::max()))
+        return fail("geometry overflow");
+    const uint64_t R = static_cast<uint64_t>(r128);
+    const __int128 jw128 = static_cast<__int128>(P) +
+                           static_cast<__int128>(dmax);
+    if (jw128 < 0 ||
+        jw128 > static_cast<__int128>(std::numeric_limits<uint64_t>::max()))
+        return fail("geometry overflow");
+    const uint64_t jam_wave_begin = static_cast<uint64_t>(jw128);
+    if (P > std::numeric_limits<uint64_t>::max() - sense_len)
+        return fail("geometry overflow");
+    const uint64_t a = P + sense_len;
+    if (jam_wave_begin > std::numeric_limits<uint64_t>::max() - jam_len)
+        return fail("geometry overflow");
+    const uint64_t b = jam_wave_begin + jam_len;
+    const uint64_t L = a > b ? a : b;
+    if (L == 0 || L > std::numeric_limits<uint64_t>::max() - R)
+        return fail("geometry overflow");
+    out.sense_len = sense_len;
+    out.jam_len = jam_len;
+    out.dmin = dmin;
+    out.dmax = dmax;
+    out.P = P;
+    out.R = R;
+    out.phys_len_L = L;
+    out.sense_begin = P;
+    out.jam_wave_begin = jam_wave_begin;
+    out.backing_len = L + R;
     return true;
 }
 
@@ -296,8 +410,10 @@ multitx_channel_ptr(const int16_t* wave,
 // ---------------------------------------------------------------------------
 struct MultiTxWindowBank {
     uint64_t tx_len = 0;                 // L, samples/channel
-    uint64_t sense_offset = 0;           // D
-    uint64_t jam_backing_wave_begin = 0; // 2D (uniform); unused in fixed
+    uint64_t sense_offset = 0;           // D (uniform) / P (overlap)
+    uint64_t jam_backing_wave_begin = 0; // 2D (uniform) / R (overlap)
+    int64_t jam_dmin = 0;                // delay span lower bound
+    int64_t jam_dmax = 0;                // delay span upper bound
     size_t channel_count = 0;
     size_t jam_channel = 1;
     JamDelayMode delay_mode = JamDelayMode::Fixed;
@@ -450,6 +566,12 @@ materialize_multitx_window_bank(const int16_t* const waves[],
     out.channel_count = nch;
     out.jam_channel = jam_ch;
     out.delay_mode = mode;
+    if (mode == JamDelayMode::Uniform) {
+        if (D > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+            return fail("geometry overflow");
+        out.jam_dmin = -static_cast<int64_t>(D);
+        out.jam_dmax = static_cast<int64_t>(D);
+    }
 
     const size_t pair_elems = static_cast<size_t>(L) * 2u;
     auto place = [&](std::vector<int16_t>& row, const int16_t* wave,
@@ -512,21 +634,112 @@ materialize_multitx_window_bank(const int16_t* const waves[],
     return true;
 }
 
-// Per-burst jammer pointer: uniform slides the backing window; fixed
-// returns the already-placed dense row.  Never allocates.
+// Materialize dense rows + jammer backing for an explicit asymmetric span
+// geometry (preamble overlap).  Control path only.  The sense channel is
+// parked at geom.P; the jammer channel's dense row stays zeros and the
+// waveform lives once in jam_backing at geom.jam_wave_begin.
+inline bool
+materialize_multitx_span_bank(const int16_t* const waves[],
+                              const uint64_t* wave_lens,
+                              const uint64_t* bases,
+                              size_t nch,
+                              size_t jam_ch,
+                              const MultiTxSpanGeometry& geom,
+                              uint64_t max_tx_samples,
+                              MultiTxWindowBank& out,
+                              std::string* error = nullptr)
+{
+    auto fail = [&](const char* what) {
+        if (error)
+            *error = what;
+        out = MultiTxWindowBank{};
+        return false;
+    };
+    if (waves == nullptr || wave_lens == nullptr || bases == nullptr)
+        return fail("materialize null args");
+    if (nch < 2 || nch > kEchoMaxTxChannels)
+        return fail("bad_channel_count");
+    if (jam_ch < 1 || jam_ch >= nch)
+        return fail("jam_logical_channel_out_of_range");
+    const uint64_t L = geom.phys_len_L;
+    if (L == 0 || L > max_tx_samples)
+        return fail("tx_len_over_cap");
+    if (L > std::numeric_limits<size_t>::max() / 2 ||
+        geom.backing_len > std::numeric_limits<size_t>::max() / 2)
+        return fail("geometry overflow");
+    if (wave_lens[0] == 0)
+        return fail("sense_waveform_empty");
+    // Bound backing by 2 * max_tx_samples so a large R cannot explode
+    // memory after L itself already passed the cap.
+    const uint64_t backing_cap =
+        (max_tx_samples > std::numeric_limits<uint64_t>::max() / 2)
+            ? std::numeric_limits<uint64_t>::max()
+            : max_tx_samples * 2u;
+    if (geom.backing_len > backing_cap)
+        return fail("backing_over_cap");
+
+    out = MultiTxWindowBank{};
+    out.tx_len = L;
+    out.sense_offset = geom.sense_begin;
+    out.jam_backing_wave_begin = geom.jam_wave_begin;
+    out.jam_dmin = geom.dmin;
+    out.jam_dmax = geom.dmax;
+    out.channel_count = nch;
+    out.jam_channel = jam_ch;
+    out.delay_mode = JamDelayMode::PreambleOverlap;
+
+    const size_t pair_elems = static_cast<size_t>(L) * 2u;
+    for (size_t c = 0; c < nch; ++c) {
+        if (bases[c] > L || wave_lens[c] > L - bases[c])
+            return fail("channel_geometry_out_of_bounds");
+        out.dense_rows[c].assign(pair_elems, static_cast<int16_t>(0));
+        // The jammer lives in jam_backing; its dense row stays zeros so a
+        // bug that forgets to slide the pointer still sends silence.
+        if (c == jam_ch)
+            continue;
+        if (waves[c] != nullptr && wave_lens[c] > 0) {
+            std::memcpy(out.dense_rows[c].data() +
+                            static_cast<size_t>(bases[c]) * 2,
+                        waves[c],
+                        static_cast<size_t>(wave_lens[c]) * 2u *
+                            sizeof(int16_t));
+        }
+    }
+    out.jam_backing.assign(static_cast<size_t>(geom.backing_len) * 2u,
+                           static_cast<int16_t>(0));
+    const uint64_t Nj = wave_lens[jam_ch];
+    if (waves[jam_ch] != nullptr && Nj > 0) {
+        if (geom.jam_wave_begin > geom.backing_len ||
+            Nj > geom.backing_len - geom.jam_wave_begin)
+            return fail("jam_backing_out_of_bounds");
+        std::memcpy(out.jam_backing.data() +
+                        static_cast<size_t>(geom.jam_wave_begin) * 2,
+                    waves[jam_ch],
+                    static_cast<size_t>(Nj) * 2u * sizeof(int16_t));
+    }
+    return true;
+}
+
+// Per-burst jammer pointer: uniform/overlap slide the backing window;
+// fixed returns the already-placed dense row.  Never allocates.
 inline const int16_t*
 multitx_jam_ptr(const MultiTxWindowBank& bank, int64_t delta,
                 std::string* error = nullptr)
 {
-    if (bank.delay_mode != JamDelayMode::Uniform) {
+    if (bank.delay_mode == JamDelayMode::Fixed) {
         if (bank.jam_channel >= kEchoMaxTxChannels)
             return nullptr;
         const auto& row = bank.dense_rows[bank.jam_channel];
         return row.empty() ? nullptr : row.data();
     }
-    uint64_t win = 0;
-    if (!jam_window_begin(bank.sense_offset, delta, win, error))
+    if (delta < bank.jam_dmin || delta > bank.jam_dmax) {
+        if (error)
+            *error = "jam_delay_out_of_span";
         return nullptr;
+    }
+    // win = dmax - delta in [0, dmax-dmin] == [0, backing_len - L].
+    const uint64_t win =
+        static_cast<uint64_t>(bank.jam_dmax - delta);
     const uint64_t backing_pairs = bank.jam_backing.size() / 2;
     if (win > backing_pairs || bank.tx_len > backing_pairs - win)
         return nullptr;

@@ -19,6 +19,49 @@ def _taps(n):
 
 
 class UdpFormatTest(unittest.TestCase):
+    def test_ucr5_roundtrip_overlap(self):
+        taps = _taps(116).astype(np.complex64) / np.float32(200.0)
+        peak = max(float(np.max(np.abs(taps.real))),
+                   float(np.max(np.abs(taps.imag))))
+        scale = peak / 32767.0
+        sc16 = np.empty(taps.size * 2, dtype="<i2")
+        sc16[0::2] = np.rint(taps.real / scale).astype(np.int16)
+        sc16[1::2] = np.rint(taps.imag / scale).astype(np.int16)
+        hdr = rx.HDR_V5.pack(
+            rx.MAGIC_V5, 7, 0, 116, 10, 128, 0.31, 0.42, 30, 1234,
+            6494.6e6, 5.0e6, scale,
+            -95286, 64, 128, 128, 1, 0)
+        rec = rx.parse_datagram(hdr + sc16.tobytes())
+        self.assertEqual(rec["version"], 5)
+        self.assertEqual(rec["sample_format"], "sc16")
+        self.assertEqual(rec["repetition_index"], 10)
+        self.assertEqual(rec["repetition_count"], 128)
+        self.assertEqual(rec["jam_delay_native"], -95286)
+        self.assertEqual(rec["jam_overlap_reps"], 64)
+        self.assertEqual(rec["sense_preamble_reps"], 128)
+        self.assertEqual(rec["jam_preamble_reps"], 128)
+        self.assertEqual(rec["jam_overlap_side"], "lead")
+        self.assertEqual(rx.HDR_V5.size, 64)
+        self.assertEqual(rx.HDR_V5.size + sc16.nbytes, 528)
+        rel = np.linalg.norm(rec["taps"] - taps) / np.linalg.norm(taps)
+        self.assertLess(rel, 1e-4)
+
+    def test_ucr5_side_names(self):
+        for code, name in ((0, "none"), (1, "lead"), (2, "lag"),
+                           (3, "aligned")):
+            hdr = rx.HDR_V5.pack(
+                rx.MAGIC_V5, 1, 0, 0, 0, 1, 0.0, 0.0, 0, 0,
+                0.0, 0.0, 1.0, 0, 0, 0, 0, code, 0)
+            rec = rx.parse_datagram(hdr)
+            self.assertEqual(rec["jam_overlap_side"], name)
+
+    def test_ucr5_rejects_odd_sc16_payload(self):
+        hdr = rx.HDR_V5.pack(
+            rx.MAGIC_V5, 1, 0, 1, 0, 1, 0.0, 0.0, 0, 0,
+            0.0, 0.0, 1.0, 0, 0, 0, 0, 0, 0)
+        with self.assertRaisesRegex(ValueError, "odd int16"):
+            rx.parse_datagram(hdr + b"\x00\x00\x00")
+
     def test_ucr4_roundtrip_sc16_block_float(self):
         taps = _taps(116).astype(np.complex64) / np.float32(200.0)
         peak = max(float(np.max(np.abs(taps.real))),
