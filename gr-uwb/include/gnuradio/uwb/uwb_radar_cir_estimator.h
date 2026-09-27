@@ -24,32 +24,33 @@
 #include <limits>
 #include <vector>
 
-// AVX2/FMA codegen policy (phase 4a): the AVX2 kernels live in this header
-// and are compiled via per-function __attribute__((target("avx2,fma"))),
-// so even a baseline (no -mavx2/-mfma flags) build emits the accelerated
-// code path; the runtime gate (UWB_RADAR_CIR_CPU_AVX2, see *_impl hooks)
-// guarantees a scalar fallback on hosts lacking AVX2/FMA.  No
-// -march=native spuriously defaults an AVX codegen host.
-#if defined(__AVX2__) && defined(__FMA__)
-#define UWB_RADAR_CIR_HAVE_AVX2 1
-#else
-#define UWB_RADAR_CIR_HAVE_AVX2 0
+// AVX2/FMA codegen policy (phase 4a): the AVX2 kernels live in this
+// header and are compiled via per-function __attribute__((target)), so
+// even a baseline (no -mavx2/-mfma flags) build emits the accelerated
+// code path; every call site gates at runtime via UWB_RADAR_CIR_CPU_AVX2()
+// (scalar fallback for hosts lacking AVX2/FMA).  The module is never
+// built with -march=native.
+// The AVX2 kernels below need the intrinsic declarations in scope in
+// every build (baseline too): uwb_detector_core.h includes <immintrin.h>
+// only when __AVX2__ is predefined, so include it locally here.
+#if (defined(__x86_64__) || defined(__i386__)) && \
+    !defined(_IMMINTRIN_H_INCLUDED)
+#include <immintrin.h>
 #endif
 
 // Runtime AVX2/FMA check for the per-function-target-attribute kernels.
+// x86 only: __builtin_cpu_supports is an x86 GCC/clang builtin; other
+// architectures take the scalar mainline unconditionally.
+#if defined(__x86_64__) || defined(__i386__)
 #define UWB_RADAR_CIR_CPU_AVX2() \
     (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma"))
+#else
+#define UWB_RADAR_CIR_CPU_AVX2() 0
+#endif
 
 namespace gr {
 namespace uwb {
 namespace radar {
-
-// QA-only disambiguation tag selecting the scalar kernels (used by
-// test_radar_cir_avx2_matches_scalar for an AVX2-vs-scalar bitwise match
-// check; zero ABI cost for other callers).
-struct CirKernelForceScalar
-{
-};
 
 enum class CirStatus : uint8_t { Ok = 0, CirFailed = 1, InvalidInput = 2 };
 
@@ -123,18 +124,25 @@ inline bool cir_fail_status(RadarCirEstimate& out, CirStatus status)
 // Detail: AVX2/FMA sparse CIR kernels
 //
 // Lane plan (floats): a std::complex<float> is 2 packed floats [re,im], so
-// one __m256 holds 4 complex samples.  The kernels use per-function
-// target("avx2,fma") so the default (baseline, no -mavx2/-mfma flags)
-// build still emits AVX2 code; the runtime gate UWB_RADAR_CIR_CPU_AVX2()
-// makes every caller verify host support and fall back to the untouched
-// scalar kernels otherwise.  No -march=native is added to the module.
+// one __m256 holds 4 complex samples; the correlation processes 4 adjacent
+// taps per 256-bit window load over the active (non-zero) code chips.
 // ---------------------------------------------------------------------------
+
+// AVX2 kernels are compiled into EVERY x86 build (the per-function
+// target("avx2,fma") attribute overrides the command-line ISA baseline);
+// callers gate them at runtime via UWB_RADAR_CIR_CPU_AVX2().  Non-x86
+// targets keep the scalar mainline only.
+#if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__)
+#define UWB_RADAR_CIR_HAVE_AVX2 1
+#else
+#define UWB_RADAR_CIR_HAVE_AVX2 0
+#endif
 
 #if UWB_RADAR_CIR_HAVE_AVX2
 
 // Accumulate one repetition window into the float average buffer: 4 complex
 // (16 floats) per step.  Per-element add order equals the scalar
-// "avg[m] += src[m]" loop ( lanes are independent, no reduction reorder),
+// "avg[m] += src[m]" loop (lanes are independent, no reduction reorder),
 // so the averaged window is bit-identical to the scalar mainline.
 __attribute__((target("avx2,fma"))) inline void
 cir_avg_window_avx2(std::complex<float>* avg,
@@ -170,26 +178,23 @@ cir_scale_window_avx2(std::complex<float>* avg, size_t wlen, float inv)
 }
 
 // One 4-tap group of the sparse active-chip correlation.  tar0 points at
-// the tap-0 window sample base (tap row n loads tar0 + n).  Two independent
-// accumulators break the serial FMA chain; the packed result is
-// [re0,im0,re1,im1,re2,im2,re3,im3] for taps n0..n0+3.
+// the tap-0 window sample base (tap row n loads tar0 + n).  The packed
+// result is [re0,im0,re1,im1,re2,im2,re3,im3] for taps n0..n0+3.
 __attribute__((target("avx2,fma"))) inline void
 cir_corr4_kernel_avx2(const std::complex<float>* tar0,
                       const size_t* m_active,
                       const float* wt_active,
                       size_t n_active,
-                      float* out)
+                      float* out,
+                      float inv_energy)
 {
-    __m256 acc0 = _mm256_setzero_ps();
-    __m256 acc1 = _mm256_setzero_ps();
+    __m256 acc = _mm256_setzero_ps();
     for (size_t j = 0; j < n_active; ++j) {
         const __m256 x = _mm256_loadu_ps(
             reinterpret_cast<const float*>(tar0 + m_active[j]));
-        const __m256 w = _mm256_set1_ps(wt_active[j]);
-        acc0 = _mm256_fmadd_ps(x, w, acc0);
-        acc1 = _mm256_fmadd_ps(x, w, acc1);
+        acc = _mm256_fmadd_ps(x, _mm256_set1_ps(wt_active[j]), acc);
     }
-    _mm256_storeu_ps(out, _mm256_add_ps(acc0, acc1));
+    _mm256_storeu_ps(out, _mm256_mul_ps(acc, _mm256_set1_ps(inv_energy)));
 }
 
 // Per-repetition double avoidance: accumulate the float window complex
@@ -203,27 +208,16 @@ cir_avg_window_rep_sum_avx2(std::complex<double>* rep_sum,
 {
     double* dst = reinterpret_cast<double*>(rep_sum);
     size_t m = 0;
-    for (; m + 4 <= wlen; m += 4) {
-        // Load src window as float m256 with 4 complex samples, then
-        // re-expand to 2 pd vectors (re/im) with cvt+fma.
-        const __m256 x = _mm256_loadu_ps(
+    for (; m + 2 <= wlen; m += 2) {
+        // Two complex samples per step: src float pair [re0,im0,re1,im1]
+        // converts straight to the dst pair's double layout
+        // [re0,im0,re1,im1] (cvtps2pd widens each float lane in order).
+        // dst complex index 2m..2m+1 = doubles [4m .. 4m+3].
+        const __m128 x = _mm_loadu_ps(
             reinterpret_cast<const float*>(src + m));
-        const __m128 lo = _mm256_castps256_ps128(x);
-        const __m128 hi = _mm256_extractf128_ps(x, 1);
-        // lane pairs: [re0,im0,re1,im1] and [re2,im2,re3,im3]
-        float sf[4];
-        _mm_storeu_ps(sf, lo);
-        float sh[4];
-        _mm_storeu_ps(sh, hi);
-        // Two doubles per complex: [re0, im0, re1, im1, ...]
-        dst[0] += double(sf[0]);
-        dst[1] += double(sf[1]);
-        dst[2] += double(sf[2]);
-        dst[3] += double(sf[3]);
-        dst[4] += double(sh[0]);
-        dst[5] += double(sh[1]);
-        dst[6] += double(sh[2]);
-        dst[7] += double(sh[3]);
+        const __m256d r = _mm256_loadu_pd(dst + 2 * m);
+        const __m256d conv = _mm256_cvtps_pd(x);
+        _mm256_storeu_pd(dst + 2 * m, _mm256_add_pd(r, conv));
     }
     for (; m < wlen; ++m) {
         rep_sum[m].real(rep_sum[m].real() + double(src[m].real()));
@@ -467,15 +461,17 @@ inline bool estimate_radar_cir(const std::complex<float>* rx,
         const size_t* const ci = scratch.active_code_indices.data();
         const float* const cw = scratch.wt_active.data();
         const size_t groups = tap_count / 4;
+        const float inv_energy = static_cast<float>(1.0 / energy_d);
         for (size_t g = 0; g < groups; ++g) {
             detail::cir_corr4_kernel_avx2(
                 scratch.avg.data() + static_cast<std::ptrdiff_t>(4 * g), ci,
                 cw, n_active,
-                reinterpret_cast<float*>(scratch.raw_taps.data() + 4 * g));
+                reinterpret_cast<float*>(scratch.raw_taps.data() + 4 * g),
+                inv_energy);
         }
         const size_t rem = tap_count - 4 * groups;
-        if (rem > 0) {
-            const size_t tap0 = 4 * groups;
+        for (size_t t = 0; t < rem; ++t) {
+            const size_t tap0 = 4 * groups + t;
             double acc_re = 0.0;
             double acc_im = 0.0;
             for (size_t j = 0; j < n_active; ++j) {
@@ -672,15 +668,17 @@ inline bool estimate_radar_cir_from_repetitions(
         const size_t* const ci = scratch.active_code_indices.data();
         const float* const cw = scratch.wt_active.data();
         const size_t groups = tap_count / 4;
+        const float inv_energy_f = static_cast<float>(1.0 / energy);
         for (size_t g = 0; g < groups; ++g) {
             detail::cir_corr4_kernel_avx2(
                 scratch.avg.data() + static_cast<std::ptrdiff_t>(4 * g),
                 ci, cw, scratch.active_code_indices.size(),
-                reinterpret_cast<float*>(scratch.raw_taps.data() + 4 * g));
+                reinterpret_cast<float*>(scratch.raw_taps.data() + 4 * g),
+                inv_energy_f);
         }
         const size_t rem = tap_count - 4 * groups;
-        if (rem > 0) {
-            const size_t tap0 = 4 * groups;
+        for (size_t t = 0; t < rem; ++t) {
+            const size_t tap0 = 4 * groups + t;
             double acc_re = 0.0;
             double acc_im = 0.0;
             for (size_t j = 0; j < scratch.active_code_indices.size(); ++j) {
@@ -801,32 +799,81 @@ inline bool estimate_radar_cir_repetition(
     size_t peak_tap = 0;
     float peak_abs = -1.f;
     double nrm2 = 0.0;
-    for (size_t nn = 0; nn < tap_count; ++nn) {
-        double acc_re = 0.0;
-        double acc_im = 0.0;
-        for (size_t j = 0; j < scratch.active_code_indices.size(); ++j) {
-            const size_t m = scratch.active_code_indices[j];
-            const auto c = scratch.active_code_values[j];
-            const auto a = src[nn + m];
-            // HRP sampled_code is real {-1,0,+1}; keep the general complex
-            // form for correctness, but avoid constructing complex<double>
-            // temporaries in the 118 x tap_count inner loop.
-            const double cr = static_cast<double>(c.real());
-            const double ci = static_cast<double>(c.imag());
-            acc_re += static_cast<double>(a.real()) * cr +
-                      static_cast<double>(a.imag()) * ci;
-            acc_im += static_cast<double>(a.imag()) * cr -
-                      static_cast<double>(a.real()) * ci;
+#if UWB_RADAR_CIR_HAVE_AVX2
+    if (UWB_RADAR_CIR_CPU_AVX2()) {
+        // AVX2: same 4-tap corr4 kernel on the raw repetition window.
+        const size_t* const ci = scratch.active_code_indices.data();
+        const float* const cw = scratch.wt_active.data();
+        const size_t groups = tap_count / 4;
+        const float inv_energy = static_cast<float>(1.0 / energy);
+        for (size_t g = 0; g < groups; ++g) {
+            detail::cir_corr4_kernel_avx2(
+                src + static_cast<std::ptrdiff_t>(4 * g), ci, cw,
+                    scratch.active_code_indices.size(),
+                reinterpret_cast<float*>(scratch.raw_taps.data() + 4 * g),
+                inv_energy);
         }
-        const std::complex<float> raw(
-            static_cast<float>(acc_re / energy),
-            static_cast<float>(acc_im / energy));
-        scratch.raw_taps[nn] = raw;
-        nrm2 += static_cast<double>(std::norm(raw));
-        const float mag = std::abs(raw);
-        if (mag > peak_abs) {
-            peak_abs = mag;
-            peak_tap = nn;
+        const size_t rem = tap_count - 4 * groups;
+        for (size_t t = 0; t < rem; ++t) {
+            const size_t tap0 = 4 * groups + t;
+            double acc_re = 0.0;
+            double acc_im = 0.0;
+            for (size_t j = 0; j < scratch.active_code_indices.size(); ++j) {
+                const size_t m = scratch.active_code_indices[j];
+                const auto c = scratch.active_code_values[j];
+                const auto a = src[tap0 + m];
+                const double cr = static_cast<double>(c.real());
+                const double ci2 = static_cast<double>(c.imag());
+                acc_re += static_cast<double>(a.real()) * cr +
+                          static_cast<double>(a.imag()) * ci2;
+                acc_im += static_cast<double>(a.imag()) * cr -
+                          static_cast<double>(a.real()) * ci2;
+            }
+            scratch.raw_taps[tap0] = std::complex<float>(
+                static_cast<float>(acc_re / energy),
+                static_cast<float>(acc_im / energy));
+        }
+        // Norm + peak metric pass (shared scalar, double accumulation).
+        for (size_t nn = 0; nn < tap_count; ++nn) {
+            nrm2 += static_cast<double>(std::norm(scratch.raw_taps[nn]));
+            const float mag = std::abs(scratch.raw_taps[nn]);
+            if (mag > peak_abs) {
+                peak_abs = mag;
+                peak_tap = nn;
+            }
+        }
+    } else
+#endif
+    {
+        // Scalar mainline (phase-2 mainline): kept byte-for-byte so the
+        // fallback path is bit-identical to the pre-phase-4a results.
+        for (size_t nn = 0; nn < tap_count; ++nn) {
+            double acc_re = 0.0;
+            double acc_im = 0.0;
+            for (size_t j = 0; j < scratch.active_code_indices.size(); ++j) {
+                const size_t m = scratch.active_code_indices[j];
+                const auto c = scratch.active_code_values[j];
+                const auto a = src[nn + m];
+                // HRP sampled_code is real {-1,0,+1}; keep the general
+                // complex form for correctness, but avoid constructing
+                // complex<double> temporaries in the 64 x tap_count loop.
+                const double cr = static_cast<double>(c.real());
+                const double ci = static_cast<double>(c.imag());
+                acc_re += static_cast<double>(a.real()) * cr +
+                          static_cast<double>(a.imag()) * ci;
+                acc_im += static_cast<double>(a.imag()) * cr -
+                          static_cast<double>(a.real()) * ci;
+            }
+            const std::complex<float> raw(
+                static_cast<float>(acc_re / energy),
+                static_cast<float>(acc_im / energy));
+            scratch.raw_taps[nn] = raw;
+            nrm2 += static_cast<double>(std::norm(raw));
+            const float mag = std::abs(raw);
+            if (mag > peak_abs) {
+                peak_abs = mag;
+                peak_tap = nn;
+            }
         }
     }
     const float nrm = static_cast<float>(std::sqrt(nrm2));
