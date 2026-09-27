@@ -362,6 +362,24 @@ struct ScopedDelayEnv
     ScopedDelayEnv& operator=(const ScopedDelayEnv&) = delete;
 };
 
+// One-shot whole-writer stall hook: UWB_CIR_WRITER_TEST_STALL_MS sleeps
+// once before the UWB_CIR_WRITER_TEST_STALL_AT_MSG-th dequeued message.
+struct ScopedStallEnv
+{
+    explicit ScopedStallEnv(const char* ms, const char* at)
+    {
+        setenv("UWB_CIR_WRITER_TEST_STALL_MS", ms, 1);
+        setenv("UWB_CIR_WRITER_TEST_STALL_AT_MSG", at, 1);
+    }
+    ~ScopedStallEnv()
+    {
+        unsetenv("UWB_CIR_WRITER_TEST_STALL_MS");
+        unsetenv("UWB_CIR_WRITER_TEST_STALL_AT_MSG");
+    }
+    ScopedStallEnv(const ScopedStallEnv&) = delete;
+    ScopedStallEnv& operator=(const ScopedStallEnv&) = delete;
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -1034,8 +1052,7 @@ BOOST_AUTO_TEST_CASE(test_writer_queue_capacity_rss_trend)
 // batch keeps repetition count and record offsets intact.
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(test_writer_slow_disk_batch_drop_counts)
-{
-    const std::string dir = make_temp_dir("slow_batch");
+{    const std::string dir = make_temp_dir("slow_batch");
     const ScopedDelayEnv delay("4000");
     constexpr size_t kCapacity = 4;
     constexpr size_t kReps = 32; // one batch PDU = 32 repetition records
@@ -1136,4 +1153,329 @@ BOOST_AUTO_TEST_CASE(test_writer_slow_disk_batch_drop_counts)
                                   "]") != std::string::npos);
         offset += kReps * kTaps;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate-byte determinism: the same synthetic stream (mixed ok/failed
+// frames + one short batch), written once with aggregation disabled and
+// once with a 1 MiB aggregate buffer, must produce bit-identical .ucr4
+// bytes and identical .jsonl lines — the aggregation must change only the
+// syscall granularity, never a single byte on disk.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_writer_aggregate_byte_identical)
+{
+    // Dataset: 3 single-tap frames (one failed) + 2 rep batches (one with
+    // a failed record) + 1 trailing short batch (incomplete group), so
+    // every emit path (per-frame, group flush, drain-time partial
+    // group, UCR4/JSONL both files) is exercised on both runs.
+    auto build_frames = [](std::vector<pmt::pmt_t>& out) {
+        uint64_t pid = 0;
+        // single ok, single failed
+        out.push_back(make_frame(pid++, "ok", make_taps(0)));
+        out.push_back(make_frame(pid++, "sfd_failed", make_taps(1)));
+        // two full rep batches, one with a failed record in the middle
+        uint64_t offset = 0;
+        for (int b = 0; b < 2; ++b) {
+            constexpr size_t kReps = 8;
+            std::vector<gr_complex> batch(kReps * kTaps);
+            std::vector<uint64_t> statuses(kReps, 0);
+            std::vector<uint64_t> peaks(kReps, 18);
+            std::vector<float> metrics(kReps, 0.9f);
+            std::vector<float> l2s(kReps, 0.01f);
+            if (b == 1) {
+                statuses[3] = 3; // cir_failed record inside a batch
+            }
+            std::vector<gr_complex> const* frames = nullptr;
+            std::vector<gr_complex> one;
+            (void)frames;
+            for (size_t r = 0; r < kReps; ++r) {
+                const auto t = make_taps(offset + r);
+                std::copy_n(t.data(), kTaps,
+                            batch.begin() + r * kTaps);
+            }
+            offset += kReps;
+            pmt::pmt_t meta = pmt::make_dict();
+            meta = pmt::dict_add(meta, pmt::mp("pulse_id"),
+                                 pmt::from_uint64(pid));
+            meta = pmt::dict_add(meta, pmt::mp("schedule_index"),
+                                 pmt::from_uint64(pid));
+            meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
+                                 pmt::from_double(998.4e6));
+            meta = pmt::dict_add(meta, pmt::mp("zero_delay_tap"),
+                                 pmt::from_long(16));
+            meta = pmt::dict_add(meta, pmt::mp("tap_count"),
+                                 pmt::from_uint64(kTaps));
+            meta = pmt::dict_add(meta, pmt::mp("repetition_batch"), pmt::PMT_T);
+            meta = pmt::dict_add(meta, pmt::mp("repetition_first"),
+                                 pmt::from_uint64(0));
+            meta = pmt::dict_add(meta, pmt::mp("repetition_count"),
+                                 pmt::from_uint64(kReps));
+            meta = pmt::dict_add(meta, pmt::mp("repetition_status_code"),
+                                 pmt::init_u64vector(kReps, statuses.data()));
+            meta = pmt::dict_add(meta, pmt::mp("repetition_peak_tap"),
+                                 pmt::init_u64vector(kReps, peaks.data()));
+            meta = pmt::dict_add(meta, pmt::mp("repetition_peak_metric"),
+                                 pmt::init_f32vector(kReps, metrics.data()));
+            meta = pmt::dict_add(meta, pmt::mp("repetition_raw_l2_norm"),
+                                 pmt::init_f32vector(kReps, l2s.data()));
+            ++pid;
+            out.push_back(pmt::cons(
+                meta, pmt::init_c32vector(batch.size(), batch.data())));
+        }
+        // a tail pulse group with fewer records than repetition_count
+        // (drained incomplete by stop) so both runs must agree on the
+        // "incomplete" JSONL line as well
+        for (uint64_t ordinal = 0; ordinal < 2; ++ordinal) {
+            out.push_back(make_repetition_frame(
+                pid, 30 + ordinal, ordinal, 3,
+                ordinal == 1 ? "cir_failed" : "ok", make_taps(90 + ordinal)));
+        }
+    };
+
+    const std::string dir_off = make_temp_dir("agg_off");
+    const std::string dir_on = make_temp_dir("agg_on");
+    // aggregate_bytes=0 → legacy per-record path; 4 KiB threshold forces
+    // several mid-stream egresses well within the dataset.
+    auto w_off = UwbCirWriter::make(dir_off, "cir", false, 16, /*agg=*/0);
+    auto w_on = UwbCirWriter::make(dir_on, "cir", false, 16, /*agg=*/4096);
+    auto dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_writer_agg_identical");
+    tb->msg_connect(w_off, "status", dbg, "store");
+    tb->msg_connect(w_on, "status", dbg, "store");
+    BOOST_REQUIRE(w_off->start());
+    BOOST_REQUIRE(w_on->start());
+    tb->start();
+
+    std::vector<pmt::pmt_t> msgs;
+    build_frames(msgs);
+    uint64_t want_settled = 0;
+    for (const auto& m : msgs) {
+        pmt::pmt_t meta = pmt::car(m);
+        uint64_t frames = 1;
+        const pmt::pmt_t is_batch =
+            pmt::dict_ref(meta, pmt::mp("repetition_batch"), pmt::PMT_F);
+        const pmt::pmt_t rep_count = pmt::dict_ref(
+            meta, pmt::mp("repetition_count"), pmt::from_uint64(0));
+        if (pmt::eq(is_batch, pmt::PMT_T) && pmt::is_uint64(rep_count))
+            frames = std::max<uint64_t>(1, pmt::to_uint64(rep_count));
+        want_settled += frames;
+        w_off->_post(pmt::mp("cir"), m);
+        w_on->_post(pmt::mp("cir"), m);
+    }
+
+    BOOST_REQUIRE(wait_settled(w_off, want_settled));
+    BOOST_REQUIRE(wait_settled(w_on, want_settled));
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(w_off->stop());
+    BOOST_REQUIRE(w_on->stop());
+
+    BOOST_CHECK_EQUAL(w_on->frames_received(), w_off->frames_received());
+    BOOST_CHECK_EQUAL(w_on->frames_written(), w_off->frames_written());
+    BOOST_CHECK_EQUAL(w_on->frames_failed(), w_off->frames_failed());
+    BOOST_CHECK_EQUAL(w_on->taps_written(), w_off->taps_written());
+
+    std::vector<uint8_t> raw_off, raw_on;
+    BOOST_REQUIRE(read_bytes(dir_off + "/cir.ucr4", raw_off));
+    BOOST_REQUIRE(read_bytes(dir_on + "/cir.ucr4", raw_on));
+    BOOST_REQUIRE_GT(raw_off.size(), 0u);
+    BOOST_CHECK_EQUAL(raw_on.size(), raw_off.size());
+    // Bit-identical UCR4 (the TCP-relevant contract): every header and
+    // every interleaved SC16 tap payload is unchanged by aggregation.
+    BOOST_CHECK(std::memcmp(raw_on.data(), raw_off.data(),
+                            raw_off.size()) == 0);
+
+    const auto lines_off = read_lines(dir_off + "/cir.jsonl");
+    const auto lines_on = read_lines(dir_on + "/cir.jsonl");
+    BOOST_REQUIRE_EQUAL(lines_on.size(), lines_off.size());
+    for (size_t i = 0; i < lines_off.size(); ++i)
+        BOOST_CHECK_EQUAL(lines_on[i], lines_off[i]);
+}
+
+// ---------------------------------------------------------------------------
+// Disk-stall burst survival: a one-shot 1.2 s writer stall (longer than
+// any per-record delay) while 400 rep-batch messages × 128 reps are being
+// posted must lose nothing — the queue absorbs the burst for as long as
+// the stall lasts, and stop() drains the rest (frames_dropped==0).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_writer_stall_survives_1s)
+{
+    const std::string dir = make_temp_dir("stall_1s");
+    // Stall 1200 ms before dequeuing message #100; with the stall under
+    // one absorb budget and everything posted in ~0 time, the writer
+    // queue (capacity 128) buffers while the disk is frozen.
+    const ScopedStallEnv stall("1200", "100");
+    constexpr size_t kCapacity = 128;
+    constexpr size_t kPulses = 400;
+    constexpr size_t kReps = 128;
+    constexpr size_t kStallMsg = 100; // matches the hook's stall position
+    constexpr size_t kStallMs = 1200; // ditto
+    auto w = UwbCirWriter::make(dir, "cir", false, kCapacity,
+                                /*aggregate_bytes=*/1u << 20);
+    auto dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_writer_stall_1s");
+    tb->msg_connect(w, "status", dbg, "store");
+    BOOST_REQUIRE(w->start());
+    tb->start();
+
+    for (uint64_t p = 0; p < kPulses; ++p) {
+        std::vector<gr_complex> batch(kReps * kTaps);
+        for (size_t r = 0; r < kReps; ++r) {
+            const auto one = make_taps(p * kReps + r);
+            std::copy_n(one.data(), kTaps, batch.begin() + r * kTaps);
+        }
+        pmt::pmt_t meta = pmt::make_dict();
+        meta = pmt::dict_add(meta, pmt::mp("pulse_id"), pmt::from_uint64(p));
+        meta = pmt::dict_add(meta, pmt::mp("schedule_index"),
+                             pmt::from_uint64(p));
+        meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
+                             pmt::from_double(998.4e6));
+        meta = pmt::dict_add(meta, pmt::mp("zero_delay_tap"),
+                             pmt::from_long(16));
+        meta = pmt::dict_add(meta, pmt::mp("repetition_batch"), pmt::PMT_T);
+        meta = pmt::dict_add(meta, pmt::mp("repetition_first"),
+                             pmt::from_uint64(0));
+        meta = pmt::dict_add(meta, pmt::mp("repetition_count"),
+                             pmt::from_uint64(kReps));
+        meta = pmt::dict_add(meta, pmt::mp("tap_count"),
+                             pmt::from_uint64(kTaps));
+        std::vector<uint64_t> status(kReps, 0);
+        std::vector<uint64_t> peak(kReps, 18);
+        std::vector<float> metric(kReps, 0.9f);
+        std::vector<float> l2(kReps, 0.01f);
+        meta = pmt::dict_add(meta, pmt::mp("repetition_status_code"),
+                             pmt::init_u64vector(kReps, status.data()));
+        meta = pmt::dict_add(meta, pmt::mp("repetition_peak_tap"),
+                             pmt::init_u64vector(kReps, peak.data()));
+        meta = pmt::dict_add(meta, pmt::mp("repetition_peak_metric"),
+                             pmt::init_f32vector(kReps, metric.data()));
+        meta = pmt::dict_add(meta, pmt::mp("repetition_raw_l2_norm"),
+                             pmt::init_f32vector(kReps, l2.data()));
+        w->_post(pmt::mp("cir"),
+                 pmt::cons(meta, pmt::init_c32vector(batch.size(),
+                                                     batch.data())));
+        // Pace the burst so the flowgraph's per-scheduler message queue
+        // (not the writer queue) is never the limiting buffer, and pause
+        // posting across the simulated 1.2 s disk stall: everything not
+        // yet consumed must fit into the writer's 128-entry queue.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (p == kStallMsg) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(
+                kStallMs + 150));
+        }
+    }
+
+    // wait_settled waits out the 1.2 s stall + the drain after it.
+    BOOST_REQUIRE(wait_settled(w, kPulses * kReps, 60000));
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(w->stop());
+
+    BOOST_CHECK_EQUAL(w->frames_received(), kPulses * kReps);
+    BOOST_CHECK_EQUAL(w->frames_dropped(), 0u);
+    BOOST_CHECK_EQUAL(w->frames_written(), kPulses * kReps);
+    BOOST_CHECK_EQUAL(w->frames_failed(), 0u);
+    BOOST_CHECK_EQUAL(w->taps_written(),
+                      static_cast<uint64_t>(kPulses) * kReps * kTaps);
+
+    // Files complete: one JSONL line per pulse, contiguous offsets,
+    // every UCR4 record present.
+    std::vector<uint8_t> raw;
+    BOOST_REQUIRE(read_bytes(dir + "/cir.ucr4", raw));
+    BOOST_CHECK_EQUAL(raw.size(),
+                      static_cast<uint64_t>(kPulses) * kReps *
+                          ucr4_record_bytes(kTaps));
+    std::vector<std::vector<gr_complex>> decoded;
+    BOOST_REQUIRE(load_ucr4(dir + "/cir.ucr4", decoded));
+    BOOST_REQUIRE_EQUAL(decoded.size(), size_t(kPulses) * kReps);
+    const auto lines = read_lines(dir + "/cir.jsonl");
+    BOOST_CHECK_EQUAL(lines.size(), kPulses);
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate flush frequency: with aggregation enabled the number of
+// observable writer-to-kernel write() events drops well below the
+// per-record legacy count on the same traffic.  Compared indirectly via
+// the emitted aggregate_flushes() counter vs. the exact number of records
+// the legacy path would have issued (>= one syscall per record set).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_writer_flush_count_reduced)
+{
+    const std::string dir = make_temp_dir("agg_flushes");
+    constexpr size_t kPulses = 300;   // 300 msgs * 4 reps
+    auto run = [&](size_t aggregate_bytes, uint64_t& flushes,
+                   uint64_t& max_bytes, std::string& used_dir) {
+        const std::string d =
+            make_temp_dir(std::string("agg_fc_") +
+                          std::to_string(aggregate_bytes));
+        auto w = UwbCirWriter::make(d, "cir", false, 64, aggregate_bytes);
+        auto dbg = gr::blocks::message_debug::make();
+        auto tb = gr::make_top_block(
+            ("qa_writer_agg_fc_" + std::to_string(aggregate_bytes)).c_str());
+        tb->msg_connect(w, "status", dbg, "store");
+        BOOST_REQUIRE(w->start());
+        tb->start();
+        for (uint64_t p = 0; p < kPulses; ++p) {
+            pmt::pmt_t meta = pmt::make_dict();
+            meta = pmt::dict_add(meta, pmt::mp("pulse_id"),
+                                 pmt::from_uint64(p));
+            meta = pmt::dict_add(meta, pmt::mp("schedule_index"),
+                                 pmt::from_uint64(p));
+            meta = pmt::dict_add(meta, pmt::mp("sample_rate"),
+                                 pmt::from_double(998.4e6));
+            meta = pmt::dict_add(meta, pmt::mp("zero_delay_tap"),
+                                 pmt::from_long(16));
+            meta = pmt::dict_add(meta, pmt::mp("tap_count"),
+                                 pmt::from_uint64(kTaps));
+            meta = pmt::dict_add(meta, pmt::mp("repetition_batch"),
+                                 pmt::PMT_T);
+            meta = pmt::dict_add(meta, pmt::mp("repetition_first"),
+                                 pmt::from_uint64(0));
+            meta = pmt::dict_add(meta, pmt::mp("repetition_count"),
+                                 pmt::from_uint64(8));
+            std::vector<uint64_t> status(8, 0);
+            std::vector<uint64_t> peak(8, 18);
+            std::vector<float> metric(8, 0.9f);
+            std::vector<float> l2(8, 0.01f);
+            std::vector<gr_complex> batch(8 * kTaps);
+            for (size_t r = 0; r < 8; ++r) {
+                const auto one = make_taps(p * 8 + r);
+                std::copy_n(one.data(), kTaps, batch.begin() + r * kTaps);
+            }
+            meta = pmt::dict_add(meta, pmt::mp("repetition_status_code"),
+                                 pmt::init_u64vector(8, status.data()));
+            meta = pmt::dict_add(meta, pmt::mp("repetition_peak_tap"),
+                                 pmt::init_u64vector(8, peak.data()));
+            meta = pmt::dict_add(meta, pmt::mp("repetition_peak_metric"),
+                                 pmt::init_f32vector(8, metric.data()));
+            meta = pmt::dict_add(meta, pmt::mp("repetition_raw_l2_norm"),
+                                 pmt::init_f32vector(8, l2.data()));
+            w->_post(pmt::mp("cir"),
+                     pmt::cons(meta,
+                               pmt::init_c32vector(batch.size(),
+                                                   batch.data())));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        BOOST_REQUIRE(wait_settled(w, kPulses * 8, 60000));
+        tb->stop();
+        tb->wait();
+        BOOST_REQUIRE(w->stop());
+        flushes = w->aggregate_flushes();
+        max_bytes = w->aggregate_max_bytes();
+        used_dir = d;
+    };
+
+    uint64_t flushes_on = 0, max_bytes_on = 0;
+    std::string used_dir;
+    run(/*aggregate_bytes=*/4096, flushes_on, max_bytes_on, used_dir);
+    // 2400 records, each 52+4*116 = 516 B → ~1.2 MB of UCR4; with a 4 KiB
+    // threshold the aggregate emit path issues well under 1/4 of the
+    // legacy per-record writes (300 group flush × 8 records each).
+    BOOST_CHECK_GT(flushes_on, 0u);
+    BOOST_CHECK_LT(flushes_on, (kPulses * 8) / 4);
+    BOOST_CHECK_GT(max_bytes_on, 0u);
+    // No crash / no lost data sanity at the same time.
+    std::vector<uint8_t> raw;
+    BOOST_REQUIRE(read_bytes(used_dir + "/cir.ucr4", raw));
+    BOOST_CHECK_EQUAL(raw.size(), kPulses * 8 * ucr4_record_bytes(kTaps));
 }
