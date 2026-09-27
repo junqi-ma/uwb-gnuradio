@@ -675,6 +675,171 @@ BOOST_AUTO_TEST_CASE(test_estimator_repetitions_and_average)
 }
 
 // ---------------------------------------------------------------------------
+// Stage-3 (按消费者选择 normalized CIR): with emit_normalized=false the
+// block must NOT create the normalized_taps c32vector PMT (neither the
+// per-record copy nor the batch vector), while raw_l2_norm keeps being
+// computed from the raw taps and published.  Raw taps stay bit-exact vs
+// the direct radar_cir_one reference.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_estimator_normalized_off_omits_pmt_keeps_metrics)
+{
+    std::vector<gr_complex> rx, tx;
+    BOOST_REQUIRE(
+        load_cf32(testdata_path("uwb_radar/rx_clean_998p4.cf32"), rx));
+    BOOST_REQUIRE(load_cf32(testdata_path("uwb_radar/tx_998p4.cf32"), tx));
+    const std::string tmpl_path = write_template_file(tx);
+
+    RadarCirCoreScratch scratch;
+    BOOST_REQUIRE(prepare_radar_cir_core(direct_cfg(), tx.data(), kSps,
+                                         kCirPre, kCirPost, scratch));
+    RadarCirResult ref;
+    const int64_t predicted = kPreGuard + 64 * static_cast<int64_t>(kSps);
+    BOOST_REQUIRE(radar_cir_one(rx.data(), rx.size(), predicted, direct_cfg(),
+                                scratch, ref));
+    BOOST_REQUIRE(ref.status == gr::uwb::radar::RadarCirStatus::Ok);
+    BOOST_REQUIRE_EQUAL(ref.tap_count, kCirPre + kCirPost);
+    std::vector<gr_complex> ref_raw(ref.tap_count);
+    std::copy(scratch.cir.raw_taps.begin(),
+              scratch.cir.raw_taps.begin() +
+                  static_cast<std::ptrdiff_t>(ref.tap_count),
+              ref_raw.begin());
+
+    auto est = UwbRadarCirEstimator::make(tmpl_path, 64, "4z2", 9, kCirPre,
+                                          kCirPost, 10, 0, 64, 8, 0.3f,
+                                          0.3f, /*emit_normalized=*/false,
+                                          16);
+    BOOST_CHECK(!est->emit_normalized());
+    auto dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_radar_estimator_norm_off");
+    tb->msg_connect(est, "cir", dbg, "store");
+    tb->start();
+    est->_post(pmt::mp("rx"), make_pdu(make_meta(6, kPreGuard), rx));
+    BOOST_REQUIRE(wait_frames(dbg, 1));
+    BOOST_REQUIRE(wait_drained(est));
+    tb->stop();
+    tb->wait();
+
+    BOOST_CHECK_EQUAL(est->pdus_completed(), 1u);
+    BOOST_REQUIRE_EQUAL(dbg->num_messages(), 1u);
+    pmt::pmt_t msg = dbg->get_message(0);
+    FrameCheck fc = check_common(msg, 6);
+    BOOST_CHECK_EQUAL(fc.status, "ok");
+    BOOST_CHECK_EQUAL(fc.tap_count, kCirPre + kCirPost);
+    pmt::pmt_t meta = pmt::car(msg);
+
+    // (a) The normalized PMT is not created at all.
+    BOOST_CHECK(!pmt::dict_has_key(meta, pmt::mp("normalized_taps")));
+    // (b) The raw L2 metric is still published.
+    BOOST_CHECK_EQUAL(pmt::to_double(pmt::dict_ref(
+                          meta, pmt::mp("raw_l2_norm"),
+                          pmt::from_double(-1.0))),
+                      static_cast<double>(ref.raw_l2_norm));
+    // Raw taps are unchanged vs the original implementation.
+    size_t n = 0;
+    const gr_complex* taps = pmt::c32vector_elements(pmt::cdr(msg), n);
+    BOOST_REQUIRE_EQUAL(n, ref.tap_count);
+    BOOST_CHECK(std::memcmp(taps, ref_raw.data(),
+                            n * sizeof(gr_complex)) == 0);
+    BOOST_CHECK_EQUAL(pmt::to_uint64(pmt::dict_ref(
+                          meta, pmt::mp("peak_tap"), pmt::from_uint64(0))),
+                      ref.peak_tap);
+}
+
+// ---------------------------------------------------------------------------
+// Stage-3: batched repetitions with emit_normalized=false vs true on the
+// same input — the batch meta must omit normalized_taps when disabled and
+// the raw batch columns/vectors must be tap-for-tap identical.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_estimator_normalized_off_batch_matches_on)
+{
+    std::vector<gr_complex> rx, tx;
+    BOOST_REQUIRE(
+        load_cf32(testdata_path("uwb_radar/rx_clean_998p4.cf32"), rx));
+    BOOST_REQUIRE(load_cf32(testdata_path("uwb_radar/tx_998p4.cf32"), tx));
+    const std::string tmpl_path = write_template_file(tx);
+
+    auto est_on = UwbRadarCirEstimator::make(
+        tmpl_path, 64, "4z2", 9, kCirPre, kCirPost,
+        /*cir_skip_initial=*/0, /*cir_repetitions=*/0, 64, 8, 0.3f, 0.3f,
+        /*emit_normalized=*/true, 16, true, true, true, true, 10);
+    auto est_off = UwbRadarCirEstimator::make(
+        tmpl_path, 64, "4z2", 9, kCirPre, kCirPost,
+        /*cir_skip_initial=*/0, /*cir_repetitions=*/0, 64, 8, 0.3f, 0.3f,
+        /*emit_normalized=*/false, 16, true, true, true, true, 10);
+    auto dbg_on = gr::blocks::message_debug::make();
+    auto dbg_off = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_radar_estimator_norm_batch");
+    tb->msg_connect(est_on, "cir", dbg_on, "store");
+    tb->msg_connect(est_off, "cir", dbg_off, "store");
+    tb->start();
+    est_on->_post(pmt::mp("rx"), make_pdu(make_meta(11, kPreGuard), rx));
+    est_off->_post(pmt::mp("rx"), make_pdu(make_meta(12, kPreGuard), rx));
+    BOOST_REQUIRE(wait_frames(dbg_on, 1));
+    BOOST_REQUIRE(wait_frames(dbg_off, 1));
+    BOOST_REQUIRE(wait_drained(est_on));
+    BOOST_REQUIRE(wait_drained(est_off));
+    tb->stop();
+    tb->wait();
+
+    BOOST_REQUIRE_EQUAL(dbg_on->num_messages(), 1u);
+    BOOST_REQUIRE_EQUAL(dbg_off->num_messages(), 1u);
+    const pmt::pmt_t meta_on = pmt::car(dbg_on->get_message(0));
+    const pmt::pmt_t meta_off = pmt::car(dbg_off->get_message(0));
+    BOOST_CHECK(pmt::dict_has_key(meta_on, pmt::mp("normalized_taps")));
+    BOOST_CHECK(!pmt::dict_has_key(meta_off, pmt::mp("normalized_taps")));
+
+    // The legacy contract keeps the normalized batch vector, tap-exact.
+    const size_t kTaps = kCirPre + kCirPost;
+    const pmt::pmt_t norm_v = pmt::dict_ref(meta_on,
+                                            pmt::mp("normalized_taps"),
+                                            pmt::PMT_NIL);
+    BOOST_REQUIRE(pmt::is_c32vector(norm_v));
+    size_t nn = 0;
+    const gr_complex* norm = pmt::c32vector_elements(norm_v, nn);
+    BOOST_REQUIRE_EQUAL(nn, 64u * kTaps);
+    for (size_t i = 0; i < nn; ++i)
+        BOOST_CHECK(std::isfinite(norm[i].real()) &&
+                    std::isfinite(norm[i].imag()));
+
+    // Raw payload and every raw column are identical between on and off.
+    size_t rn_on = 0, rn_off = 0;
+    const gr_complex* raw_on = pmt::c32vector_elements(
+        pmt::cdr(dbg_on->get_message(0)), rn_on);
+    const gr_complex* raw_off = pmt::c32vector_elements(
+        pmt::cdr(dbg_off->get_message(0)), rn_off);
+    BOOST_REQUIRE_EQUAL(rn_on, 64u * kTaps);
+    BOOST_REQUIRE_EQUAL(rn_off, 64u * kTaps);
+    BOOST_CHECK(std::memcmp(raw_on, raw_off,
+                            rn_on * sizeof(gr_complex)) == 0);
+
+    const pmt::pmt_t l2_on = pmt::dict_ref(
+        meta_on, pmt::mp("repetition_raw_l2_norm"), pmt::PMT_NIL);
+    const pmt::pmt_t l2_off = pmt::dict_ref(
+        meta_off, pmt::mp("repetition_raw_l2_norm"), pmt::PMT_NIL);
+    BOOST_REQUIRE(pmt::is_f32vector(l2_on));
+    BOOST_REQUIRE(pmt::is_f32vector(l2_off));
+    size_t ln_on = 0, ln_off = 0;
+    const float* l2p_on = pmt::f32vector_elements(l2_on, ln_on);
+    const float* l2p_off = pmt::f32vector_elements(l2_off, ln_off);
+    BOOST_REQUIRE_EQUAL(ln_on, 64u);
+    BOOST_REQUIRE_EQUAL(ln_off, 64u);
+    BOOST_CHECK(std::memcmp(l2p_on, l2p_off, ln_on * sizeof(float)) == 0);
+
+    const pmt::pmt_t st_on = pmt::dict_ref(
+        meta_on, pmt::mp("repetition_status_code"), pmt::PMT_NIL);
+    const pmt::pmt_t st_off = pmt::dict_ref(
+        meta_off, pmt::mp("repetition_status_code"), pmt::PMT_NIL);
+    BOOST_REQUIRE(pmt::is_u64vector(st_on));
+    BOOST_REQUIRE(pmt::is_u64vector(st_off));
+    size_t sn_on = 0, sn_off = 0;
+    const uint64_t* stp_on = pmt::u64vector_elements(st_on, sn_on);
+    const uint64_t* stp_off = pmt::u64vector_elements(st_off, sn_off);
+    BOOST_REQUIRE_EQUAL(sn_on, 64u);
+    BOOST_REQUIRE_EQUAL(sn_off, 64u);
+    BOOST_CHECK(std::memcmp(stp_on, stp_off, sn_on * sizeof(uint64_t)) == 0);
+}
+
+// ---------------------------------------------------------------------------
 // Failed stages publish empty CIR frames only.
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(test_estimator_failed_frames_no_taps)

@@ -604,6 +604,76 @@ BOOST_AUTO_TEST_CASE(test_writer_normalized)
 }
 
 // ---------------------------------------------------------------------------
+// Stage-3 (按消费者选择 normalized CIR): with write_normalized=false the
+// writer must accept frames whose meta has no normalized_taps at all, and
+// the UCR4 bytes / JSONL fields must be identical to the same records
+// written with write_normalized=true + normalized_taps present (the
+// writer never persisted normalized data; it only used it as a gate).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_writer_normalized_off_ucr4_jsonl_identical)
+{
+    const std::string dir_on = make_temp_dir("norm_on");
+    const std::string dir_off = make_temp_dir("norm_off");
+    auto w_on = UwbCirWriter::make(dir_on, "cir", /*write_normalized=*/true,
+                                   16);
+    auto w_off = UwbCirWriter::make(dir_off, "cir",
+                                    /*write_normalized=*/false, 16);
+    auto dbg = gr::blocks::message_debug::make();
+    auto tb = gr::make_top_block("qa_cir_writer_norm_off");
+    tb->msg_connect(w_on, "status", dbg, "store");
+    tb->msg_connect(w_off, "status", dbg, "store");
+    BOOST_REQUIRE(w_on->start());
+    BOOST_REQUIRE(w_off->start());
+    tb->start();
+
+    const auto taps = make_taps(0);
+    // Legacy contract: write_normalized=true + normalized_taps present.
+    w_on->_post(pmt::mp("cir"), make_frame(0, "ok", taps, /*with_norm=*/true));
+    // Stage-3 default: write_normalized=false + normalized_taps ABSENT
+    // (the estimator no longer built the normalized PMT).
+    w_off->_post(pmt::mp("cir"),
+                 make_frame(0, "ok", taps, /*with_norm=*/false));
+    // A repeated record through both writers for a second sample point.
+    const auto taps2 = make_taps(1);
+    w_on->_post(pmt::mp("cir"), make_frame(1, "ok", taps2, true));
+    w_off->_post(pmt::mp("cir"), make_frame(1, "ok", taps2, false));
+    // Failed frame must behave the same in both modes.
+    w_on->_post(pmt::mp("cir"), make_frame(2, "sfd_failed", taps, true));
+    w_off->_post(pmt::mp("cir"), make_frame(2, "sfd_failed", taps, false));
+
+    BOOST_REQUIRE(wait_written(w_on, 3));
+    BOOST_REQUIRE(wait_written(w_off, 3));
+    tb->stop();
+    tb->wait();
+    BOOST_REQUIRE(w_on->stop());
+    BOOST_REQUIRE(w_off->stop());
+
+    BOOST_CHECK_EQUAL(w_on->frames_written(), 2u);
+    BOOST_CHECK_EQUAL(w_off->frames_written(), 2u);
+    BOOST_CHECK_EQUAL(w_off->frames_failed(), 1u);
+
+    std::vector<uint8_t> raw_on, raw_off;
+    BOOST_REQUIRE(read_bytes(dir_on + "/cir.ucr4", raw_on));
+    BOOST_REQUIRE(read_bytes(dir_off + "/cir.ucr4", raw_off));
+    BOOST_REQUIRE_EQUAL(raw_on.size(), 2u * ucr4_record_bytes(kTaps));
+    // Byte-identical raw UCR4 (raw SC16 + cir_scale; no normalized data
+    // ever reached the file in either mode).
+    BOOST_CHECK(std::memcmp(raw_on.data(), raw_off.data(), raw_on.size()) ==
+                0);
+
+    // JSONL metrics identical field-for-field (the writer emits the same
+    // columns; normalized taps were never a JSONL field).
+    const auto lines_on = read_lines(dir_on + "/cir.jsonl");
+    const auto lines_off = read_lines(dir_off + "/cir.jsonl");
+    BOOST_REQUIRE_EQUAL(lines_on.size(), 3u);
+    BOOST_REQUIRE_EQUAL(lines_off.size(), 3u);
+    for (size_t i = 0; i < 3; ++i)
+        BOOST_CHECK_EQUAL(lines_on[i], lines_off[i]);
+    BOOST_CHECK(lines_off[0].find("\"file_offset_norm_taps\"") ==
+                std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
 // Per-repetition input: one compact JSON line per pulse.  A complete packet
 // flushes as soon as repetition_count records arrive; stop() preserves an
 // incomplete final packet and marks it observable.

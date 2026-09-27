@@ -43,6 +43,7 @@
 #include <complex>
 #include <cstdint>
 #include <cstdio>
+#include <sys/resource.h>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -673,13 +674,17 @@ main(int argc, char** argv)
         UwbPduRationalResamplerCcf65_32::make_from_taps(taps32rt),
         pdu_cg_fc32);
 
-    // CIR estimator (work-domain production window)
-    {
+    // CIR estimator (work-domain production window).  Stage-3: run the
+    // serial segment twice — the legacy contract (emit_normalized=true,
+    // per-record normalized_taps PMT) and the consumer-driven default
+    // (emit_normalized=false, no normalized PMT) — so the PMT-creation
+    // saving is measurable.
+    auto bench_estimator = [&](bool emit_norm) {
         auto est = UwbRadarCirEstimator::make(tmpl, 64, "4z2", 9, kCirPre,
                                               kCirPost, 10, 0, 64, 8, kThr,
-                                              kThr, true, 64);
+                                              kThr, emit_norm, 64);
         auto dbg = gr::blocks::message_debug::make();
-        auto tb = gr::make_top_block("bench_est");
+        auto tb = gr::make_top_block(emit_norm ? "bench_est" : "bench_est_nonorm");
         tb->msg_connect(est, "cir", dbg, "store");
         tb->start();
         pmt::pmt_t samples =
@@ -714,7 +719,9 @@ main(int argc, char** argv)
         }
         tb->stop();
         tb->wait();
-        print_stats("CirEstimator serial (work window)", summarize(xs));
+        print_stats(emit_norm ? "CirEstimator serial (work window, normalized)"
+                              : "CirEstimator serial (work window, no-normalized)",
+                    summarize(xs));
         std::printf("           service  mean=%llu  p95=%llu  p99=%llu  "
                     "max=%llu us  completed=%llu dropped=%llu\n",
                     static_cast<unsigned long long>(est->service_mean_us()),
@@ -723,7 +730,15 @@ main(int argc, char** argv)
                     static_cast<unsigned long long>(est->service_max_us()),
                     static_cast<unsigned long long>(est->pdus_completed()),
                     static_cast<unsigned long long>(est->pdus_dropped()));
-    }
+        std::printf("           rss  maxrss_kb=%ld\n",
+                    static_cast<long>([] {
+                        struct rusage ru;
+                        getrusage(RUSAGE_SELF, &ru);
+                        return ru.ru_maxrss;
+                    }()));
+    };
+    bench_estimator(true);
+    bench_estimator(false);
 
     // Writer: replay one ok CIR PDU.  The writer must sit in a running
     // top_block so its message handler is dispatched.
