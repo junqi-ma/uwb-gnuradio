@@ -62,3 +62,40 @@
 - MATLAB `verify_read_uwb_cir` 对照：阶段二/三 writer 输出已做字节级/逐行 QA，MATLAB 脚本对照留待硬件数据到位后执行。
 - 256-rep 生产配置未实测（QA 以 64/128 reps 覆盖）。
 - `/usr/local/lib` 陈旧安装库（8 月 b897677 版）仍存在；QA 均经 build/lib RUNPATH 正确解析，但建议重新 install 以绝后患。
+
+---
+
+# 附录：X410 200 Hz 实机加测（2026-09-27 硬件累积验证）
+
+## 方法
+同参数 60 s × 200 Hz × 128 rep × 64 taps × `--cir-output both` × jam+UDP，仅逐步调整 writer 队列/聚合参数共 5 组。软件版本：分支 `perf/writer-aggregate`（合并上述主线 + 3 commit 聚合写）。
+
+## 结果表
+
+| run | 队列 | 聚合 | wr_drop(pulse批) | wr_avg_drop | drain_complete | echo_late | 说明 |
+|---|---|---|---|---|---|---|---|
+| q64 | 64 | — | 341 | 81 | false | 180 | 首次暴露长 gap |
+| q128 | 128 | — | 135 | 0 | false | 60 | 未根治 |
+| agg 1M | 128 | 1 MiB | 109 | 0 | false | 300 | 机制生效，稳态 flushes 1085 |
+| agg 8M | 128 | 8 MiB | 53 | 0 | false | 260 | 单调收敛 |
+| **agg 8M + q256** | 256 | 8 MiB | **0** | **0** | **true** | 180 | **全硬门槛通过** |
+
+- 最优 run：`wr_ok=1536000=12000×128` 精确满额、writer hwm **151/256**（60% 余量，非触顶）、estimator 1707/2438 µs（PRI 的 34%）、UDP 1.536M/1.536M ok、对账 `12000+180=12180=id_max+1` 完全闭合、late 全部为 9 段恰好 20 slot 的 radio 跳发。
+- **每小时损失对账**：本 run 每间隔 5-10 s 出现 1 次 20-slot（100 ms）radio 跳发，共 180/12000 = 1.5% ≤ 5% 的 app 宽容判据，交付记录 gap-free。
+- 定稿生产参数：`--cir-writer-queue-pdus 256 --cir-avg-writer-queue-pdus 128 --cir-writer-aggregate-bytes 8388608`（RAM 代价 ≈31.75 MB 最坏 + 聚合 buffer 实测 ≤3.2 MB）。
+
+## echo_late（未解决，独立线）
+- 三组不同 run：180/60/300/260/180——非启动瞬态、非周期常数，5-10 s 一跳、每段恰好 20 slot（100 ms 收发窗）。
+- 最优 run `cpp_tx_async` 出现 **`time_error=2385`**（此前各组为 0）：TX 时基偏移计数首次与 late 段时间相关，方向指向 radio worker 内部时隙/时基分配，**主机代码不可修**；待 X410 侧独立实验（关 jam 对照、不同 PRI、PPS 校核对时）定位。
+- 注意按方案 §7 之要求：硬件 late 与 CPU 阶段耗时分别报告；CPU/链路层 wr_drop 已清零≠late 已解决。
+
+## 聚合写机制验证（硬件侧）
+- `cir_writer_aggregate_flushes ≈ 1080–1092`（60 s ÷ 55 ms，与 50 ms 窗口一致）；
+- `cir_writer_aggregate_max_bytes：1.0 MB（1M 阈值）/ 3.1–3.2 MB（8M 阈值下）`——阈值不是瓶颈，窗口（50 ms）主导稳态输出；
+- 8 MiB 阈值把 writer 对盘停容忍度从 640 ms（q128）推到 ~2.1 s（q256+8M），覆盖全部实测 1-2 s 阵发 stall；
+- CirWriter 主路径性能不变（QA 微基准 254.0 µs 与基线持平，字节级对账 bit-identical）。
+
+## 后续（超出本轮范围）
+- `echo_late` 的 X410 侧独立定位（本轮新线索：time_error=2385 与 late 段时间相关）；
+- writeback attribution（如有必要再深挖 long-stall 本体，`/proc/meminfo Dirty/Writeback` 关联）；
+- 300 Hz 与 10 min soak 仍是后续目标。
