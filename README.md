@@ -9,6 +9,14 @@ This repository also holds MATLAB demodulation references (`UWB_demodulation/`),
 test vectors (`testdata/`), and design notes (`docs/`, Chinese status docs at the
 root). The installable OOT tree is **`gr-uwb/`**.
 
+On branch **`feature/uwb-ds-twr`**, the current development target is configurable
+**SS-TWR and DS-TWR**: first between two channels of one X410, then between
+X410 and specified DW1000/DW3000 modules, with both initiator and responder roles.
+The TWR requirements are documented; the TWR API and protocol implementation are
+not yet available. Start with the [TWR requirements](docs/twr/需求_UWB_SS_DS_TWR.md),
+[development and acceptance plan](docs/twr/开发路线与验收矩阵.md), and
+[API references](docs/twr/参考资料与API映射.md).
+
 | Item | Value |
 |------|--------|
 | Module | `gr-uwb` |
@@ -38,9 +46,10 @@ root). The installable OOT tree is **`gr-uwb/`**.
 - **Shared production defaults** — window geometry and host sample rate live in
   `include/gnuradio/uwb/uwb_defaults.h` and are mirrored by GRC YAML defaults.
 
-**Not in scope for this tree (yet):** full production multi-device PHY profile UI,
-realtime SIC block (see branch `feature/sic-validation`), or host-side 737→998.4
-resampling (resampling is RFNoC/FPGA).
+Host-side native-to-998.4 MS/s resampling is also available through the existing
+65/48 and 65/32 C++ paths used by the radar applications. Supported rates depend
+on the radio/FPGA profile. TWR configuration support is planned on this branch;
+realtime SIC development is tracked separately (see branch `feature/sic-validation`).
 
 ---
 
