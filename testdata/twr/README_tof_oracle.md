@@ -21,9 +21,46 @@ does not claim it is.  The checked-in vectors were produced by
 model.  That is a weaker authority than MATLAB and is recorded as such in the
 JSON `provenance` block.
 
-To close this properly, run the MATLAB script on a machine that has MATLAB and
-commit the regenerated vectors (object key order will differ; object order is
-not significant).
+## Running the MATLAB oracle on another machine (handoff)
+
+The repo is self-contained; no build is needed to run the oracle.
+
+```bash
+git clone <repo> && cd <repo>
+git checkout feature/uwb-ds-twr
+
+# 1. run the oracle of record (overwrites tof_oracle_vectors.json in place)
+matlab -batch "cd('testdata/twr'); generate_tof_oracle"
+```
+
+Expected: the script prints 12 vectors and exits 0.  If its internal identity
+check fails for a vector it calls `error(...)` and exits non-zero **without**
+writing a wrong golden.
+
+```bash
+# 2. the vectors must satisfy BOTH independent checks
+python3 tools/twr/verify_m1_a_tof.py          # expects 4/4
+python3 testdata/twr/gen_tof_oracle.py        # DO NOT run before step 3
+
+# 3. build + C++ QA against the MATLAB-produced JSON
+cd gr-uwb/build && cmake . && cmake --build . -j"$(nproc)"
+env -u LD_LIBRARY_PATH ctest -R uwb_qa_uwb_twr_math --output-on-failure
+```
+
+If every step passes, commit the regenerated `tof_oracle_vectors.json` (its
+`provenance.matlab_executed` becomes `true`), update the hashes below and the
+`docs/twr/M1-A_ToF数学开发报告.md` completion checklist, and only then is the
+"M1-A completed" box tickable.
+
+**What NOT to do**
+
+* Do **not** run `gen_tof_oracle.py` after MATLAB: it would overwrite the
+  MATLAB output with the Python reference and silently undo the very thing the
+  handoff exists to establish.  (It stays in the tree as the reference that
+  produced the pre-MATLAB vectors, and to prove the two models agree.)
+* Do **not** treat a key-order difference as a failure: MATLAB's `jsonencode`
+  sorts object keys, the Python writer does not.  Object order is not
+  significant; only the values are.
 
 ## Files
 

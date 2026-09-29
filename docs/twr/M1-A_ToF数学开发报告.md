@@ -22,6 +22,9 @@
   （`fractions.Fraction` 精确实现，**同一个物理模型**）生成；
 - 这一点写进了 JSON 的 `provenance` 块、`README_tof_oracle.md` 和本报告；
 - **MATLAB 实跑仍是唯一未决项**，补齐后才能按 §10 判 M1-A 完成并进入 M1-B。
+- 在另一台有 MATLAB 的机器上的操作清单见
+  [README_tof_oracle.md](../../testdata/twr/README_tof_oracle.md) 的
+  「Running the MATLAB oracle on another machine (handoff)」一节。
 
 我按用户确认的选项执行：Python oracle 继续，MATLAB 标未实跑。
 
@@ -232,7 +235,12 @@ python3 testdata/twr/gen_tof_oracle.py            # 重新生成 12 向量
 tools/twr/verify_install_consumer.sh /tmp/opencode/uwb_install_m1a   # ALL OK
 
 # 补齐唯一未决项（需要可用的 MATLAB）：
-# matlab -batch "cd('testdata/twr'); generate_tof_oracle"
+#   完整交接步骤见 testdata/twr/README_tof_oracle.md 的 handoff 一节。要点：
+# matlab -batch "cd('testdata/twr'); generate_tof_oracle"   # 期望 12 向量、exit 0
+# python3 tools/twr/verify_m1_a_tof.py                      # 期望 4/4
+# env -u LD_LIBRARY_PATH ctest -R uwb_qa_uwb_twr_math       # 期望通过
+# 然后把 provenance.matlab_executed 变为 true 的 JSON 检入。
+# 切记：MATLAB 跑完后不要再跑 gen_tof_oracle.py，否则会覆盖 MATLAB 的产物。
 ```
 
 手工跑测试二进制必须 `env -u LD_LIBRARY_PATH`。安装验证只用临时前缀，不 `sudo install`。
