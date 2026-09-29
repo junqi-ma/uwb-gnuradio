@@ -2949,6 +2949,68 @@ std::string json_set(const std::string& js, const std::string& key,
 
 } // namespace
 
+// N01: the reader assigned through `static_cast<uintN_t>(get_i64(...))`, which
+// WRAPS an out-of-range JSON number instead of refusing it: channel 261 became
+// channel 5, session 2^32+1 became session 1, local_address -1 became the
+// reserved address 0xffff.  The validator then saw the wrapped value, so two
+// different documents produced one runtime configuration and the value the
+// document actually carried was lost.  A cast is not a specification.
+BOOST_AUTO_TEST_CASE(json_unsigned_fields_refuse_out_of_range_instead_of_wrapping)
+{
+    TwrConfig c = minimal();
+    std::string js;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(to_json_string(c, js, err), err);
+
+    struct Row {
+        const char* key;
+        long long from;
+        const char* to;
+        const char* field;
+    };
+    // The second entry of each uint8/16/32 group is one MODULUS past a legal
+    // value, which a mask would accept by landing back INSIDE the range -- the
+    // case that makes "one past the top" insufficient on its own.
+    const Row rows[] = {
+        {"channel", c.phy.channel, "256", "phy.channel"},
+        {"channel", c.phy.channel, "261", "phy.channel"},
+        {"session_id", c.session.session_id, "4294967297", "session.session_id"},
+        {"local_address", c.session.local_address, "65537", "session.local_address"},
+        {"local_address", c.session.local_address, "-1", "session.local_address"},
+        {"pan_id", c.session.pan_id, "65536", "session.pan_id"},
+        {"sequence", c.session.sequence, "256", "session.sequence"},
+        {"preamble_symbols", c.phy.preamble_symbols, "65536", "phy.preamble_symbols"},
+        {"mac_header_bytes", c.frame.geometry.mac_header_bytes, "65550",
+         "frame.geometry.mac_header_bytes"},
+        {"port", c.tx.port, "256", "tx.port"},
+        {"port", c.tx.port, "-1", "tx.port"},
+    };
+    for (const Row& r : rows) {
+        const std::string doc = json_set(js, r.key, std::to_string(r.from), r.to);
+        BOOST_REQUIRE_MESSAGE(
+            !doc.empty(), std::string("the document has no \"") + r.key +
+                              "\": " + std::to_string(r.from));
+        TwrConfig back;
+        const ValidationReport rep = from_json_string(doc, back);
+        BOOST_REQUIRE_MESSAGE(!rep.ok(),
+            std::string(r.field) + " = " + r.to + " was ACCEPTED");
+        BOOST_REQUIRE_MESSAGE(
+            rep.find(r.field, ConfigReason::OutOfRange) != nullptr,
+            std::string(r.field) + " = " + r.to + ": " + rep.to_string());
+    }
+
+    // The BOUNDARY is inclusive: the width maximum is still read as itself. A
+    // range check that rejected the maximum would be as wrong as one that
+    // wrapped it.
+    const std::string at_max =
+        json_set(js, "sequence", std::to_string(c.session.sequence), "255");
+    BOOST_REQUIRE(!at_max.empty());
+    TwrConfig back;
+    const ValidationReport rep = from_json_string(at_max, back);
+    BOOST_REQUIRE_MESSAGE(rep.ok(), rep.to_string());
+    BOOST_REQUIRE_EQUAL(back.session.sequence, 255u);
+}
+
 BOOST_AUTO_TEST_CASE(json_carries_the_phr_rate_and_frame_profile_contract)
 {
     const TwrConfig c = minimal();

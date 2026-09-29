@@ -147,6 +147,8 @@ using gr::uwb::twr::timestamp_interval;
 using gr::uwb::twr::Timestamp;
 using gr::uwb::twr::TimestampMarker;
 using gr::uwb::twr::TimestampSource;
+using gr::uwb::twr::TxOutcome;
+using gr::uwb::twr::TxSendEvidence;
 
 // ---------------------------------------------------------------------------
 // Expected correction masks, written out by hand from the requirement text
@@ -485,11 +487,19 @@ BOOST_AUTO_TEST_CASE(tof_sub_mid_preamble_and_sfd_are_not_range_capable)
 // REQ-TIME-03 -- provenance
 // ===========================================================================
 
-BOOST_AUTO_TEST_CASE(tof_scheduled_calibrated_source_is_refused)
+BOOST_AUTO_TEST_CASE(tof_scheduled_calibrated_source_is_permitted_only_with_send_evidence)
 {
+    // REQ-TIME-03 permits a deterministic timed TX ("可通过确定性时序加标定取得
+    // 合格 TX timestamp") as long as it is labelled scheduled_calibrated and
+    // carries the evidence that the burst happened; it forbids passing a
+    // SCHEDULE off as a measurement.  This test used to assert the opposite --
+    // that a scheduled TX must be refused -- which would have blocked the
+    // planned X410 timed-TX route and pushed the pipeline toward mislabelling
+    // its own timestamps as HardwareMeasured.
     gr::uwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
 
+    // (1) A scheduled RECEIVE time is still refused: it is a PREDICTION.
     Timestamp ts;
     BOOST_REQUIRE(Timestamp::from_ticks(9000, d, TimestampMarker::RmarkerRx,
                                         TimestampSource::ScheduledCalibrated,
@@ -511,8 +521,8 @@ BOOST_AUTO_TEST_CASE(tof_scheduled_calibrated_source_is_refused)
     BOOST_TEST(r.status == ExchangeStatus::InvalidTimeDomain);
     BOOST_TEST(!r.value.has_value());
 
-    // A scheduled TX RMARKER is refused for the same reason: a timed-TX
-    // command that returned success is not a hardware-measured air time.
+    // (2) A scheduled TX RMARKER WITHOUT send evidence is refused, and the
+    //     refusal names the missing evidence rather than the source.
     Timestamp txs;
     BOOST_REQUIRE(Timestamp::from_ticks(5000, d, TimestampMarker::RmarkerTx,
                                         TimestampSource::ScheduledCalibrated,
@@ -520,9 +530,83 @@ BOOST_AUTO_TEST_CASE(tof_scheduled_calibrated_source_is_refused)
     BOOST_TEST(gr::uwb::twr::apply_calibration_ticks(
                    txs, "cal-dw1000-sn0001-ch5-uus-r1", 0, 0, 0u, 0u) ==
                CalibrationResult::Applied);
-    const RangeAdmission rt = admit_range_capable_time(txs, ctx);
-    BOOST_TEST(!rt.admitted);
-    BOOST_TEST(rt.reason == RangeAdmissionReason::NotMeasured);
+
+    const RangeAdmission no_ev = admit_range_capable_time(txs, ctx);
+    BOOST_TEST(!no_ev.admitted);
+    BOOST_TEST(no_ev.reason == RangeAdmissionReason::ScheduledTxEvidenceMissing);
+    BOOST_TEST(no_ev.status == ExchangeStatus::InvalidTimeDomain);
+
+    // (3) `send_accepted` ALONE is not enough: the outcome must be known to be
+    //     Completed.  This is the REQ-TIME-03 sentence "send 返回成功或 burst
+    //     ACK 不等价于芯片提供的精细空口 timestamp".
+    TxSendEvidence send_only;
+    send_only.command_time_recorded = true;
+    send_only.quantised_instant_recorded = true;
+    send_only.marker_offset_recorded = true;
+    send_only.calibrated_air_time_recorded = true;
+    send_only.send_accepted = true;
+    send_only.outcome = TxOutcome::Unknown;
+    ctx.tx_evidence = &send_only;
+    const RangeAdmission only_send = admit_range_capable_time(txs, ctx);
+    BOOST_TEST(!only_send.admitted);
+    BOOST_TEST(only_send.reason == RangeAdmissionReason::ScheduledTxEvidenceMissing);
+    BOOST_TEST(only_send.detail.find("send_accepted") != std::string::npos);
+
+    // (4) An incomplete PLAN is refused, and names the record that is missing.
+    TxSendEvidence no_plan;
+    no_plan.outcome = TxOutcome::Completed;
+    no_plan.send_accepted = true;
+    ctx.tx_evidence = &no_plan;
+    const RangeAdmission plan = admit_range_capable_time(txs, ctx);
+    BOOST_TEST(!plan.admitted);
+    BOOST_TEST(plan.reason == RangeAdmissionReason::ScheduledTxEvidenceMissing);
+    BOOST_TEST(plan.detail.find("command_time") != std::string::npos);
+
+    // (5) Late / underflow / cancelled each invalidate the exchange, with their
+    //     OWN terminal status -- a soak report must be able to tell them apart
+    //     without parsing prose (REQ-ERR-01).
+    const TxOutcome bad[] = {TxOutcome::Late, TxOutcome::Underflow,
+                             TxOutcome::Cancelled};
+    const RangeAdmissionReason bad_reason[] = {
+        RangeAdmissionReason::TxOutcomeLate,
+        RangeAdmissionReason::TxOutcomeUnderflow,
+        RangeAdmissionReason::TxOutcomeCancelled};
+    const ExchangeStatus bad_status[] = {ExchangeStatus::TxLate,
+                                         ExchangeStatus::TxUnderflow,
+                                         ExchangeStatus::Cancelled};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        TxSendEvidence ev;
+        ev.command_time_recorded = true;
+        ev.quantised_instant_recorded = true;
+        ev.marker_offset_recorded = true;
+        ev.calibrated_air_time_recorded = true;
+        ev.send_accepted = true;
+        ev.outcome = bad[i];
+        ctx.tx_evidence = &ev;
+        const RangeAdmission rb = admit_range_capable_time(txs, ctx);
+        BOOST_TEST(!rb.admitted);
+        BOOST_TEST(rb.reason == bad_reason[i]);
+        BOOST_TEST(rb.status == bad_status[i]);
+        BOOST_TEST(!rb.value.has_value());
+    }
+
+    // (6) A COMPLETE, completed plan is admitted -- and the admitted value is
+    //     still labelled ScheduledCalibrated, never promoted to a hardware
+    //     measurement.  Reaching the ranging math did not relabel the source.
+    TxSendEvidence good;
+    good.command_time_recorded = true;
+    good.quantised_instant_recorded = true;
+    good.marker_offset_recorded = true;
+    good.calibrated_air_time_recorded = true;
+    good.send_accepted = true;
+    good.outcome = TxOutcome::Completed;
+    ctx.tx_evidence = &good;
+    const RangeAdmission ok = admit_range_capable_time(txs, ctx);
+    BOOST_REQUIRE_MESSAGE(ok.admitted, ok.detail);
+    BOOST_TEST(ok.reason == RangeAdmissionReason::Admitted);
+    BOOST_TEST(ok.value.has_value());
+    BOOST_TEST(ok.value->source() == TimestampSource::ScheduledCalibrated);
+    BOOST_TEST(ok.value->source() != TimestampSource::HardwareMeasured);
 }
 
 BOOST_AUTO_TEST_CASE(tof_estimated_and_reconstructed_sources_are_refused)
@@ -1271,6 +1355,14 @@ BOOST_AUTO_TEST_CASE(tof_every_reason_round_trips_and_maps_to_a_defined_status)
          ExchangeStatus::InvalidTimeDomain},
         {RangeAdmissionReason::IntervalNotFormable, "interval_not_formable",
          ExchangeStatus::InvalidTimeDomain},
+        {RangeAdmissionReason::ScheduledTxEvidenceMissing,
+         "scheduled_tx_evidence_missing", ExchangeStatus::InvalidTimeDomain},
+        {RangeAdmissionReason::TxOutcomeLate, "tx_outcome_late",
+         ExchangeStatus::TxLate},
+        {RangeAdmissionReason::TxOutcomeUnderflow, "tx_outcome_underflow",
+         ExchangeStatus::TxUnderflow},
+        {RangeAdmissionReason::TxOutcomeCancelled, "tx_outcome_cancelled",
+         ExchangeStatus::Cancelled},
     };
     const int n = static_cast<int>(sizeof(expected) / sizeof(expected[0]));
     BOOST_TEST(n == static_cast<int>(kRangeAdmissionReasonMax) + 1);
@@ -1306,12 +1398,18 @@ BOOST_AUTO_TEST_CASE(tof_every_reason_round_trips_and_maps_to_a_defined_status)
     const auto reached = [&distinct](ExchangeStatus s) {
         return std::find(distinct.begin(), distinct.end(), s) != distinct.end();
     };
-    BOOST_TEST(distinct.size() == 5u);
+    BOOST_TEST(distinct.size() == 8u);
     BOOST_TEST(reached(ExchangeStatus::Ok));
     BOOST_TEST(reached(ExchangeStatus::InvalidTimeDomain));
     BOOST_TEST(reached(ExchangeStatus::CalibrationMissing));
     BOOST_TEST(reached(ExchangeStatus::CalibrationExpired));
     BOOST_TEST(reached(ExchangeStatus::FirstPathUnreliable));
+    // N02: a timed TX that did not complete is not a time-domain problem.  The
+    // three TX failure modes keep their own terminal codes so a soak report can
+    // separate them without parsing prose.
+    BOOST_TEST(reached(ExchangeStatus::TxLate));
+    BOOST_TEST(reached(ExchangeStatus::TxUnderflow));
+    BOOST_TEST(reached(ExchangeStatus::Cancelled));
 
     // A refusal can never yield a range (REQ-PROTO-03 / types.h).
     for (int i = 1; i < n; ++i) {
@@ -1509,4 +1607,74 @@ BOOST_AUTO_TEST_CASE(tof_invalid_timestamp_is_refused_before_anything_else)
     const RangeAdmission r2 = admit_range_capable_time(Timestamp(), ctx);
     BOOST_TEST(!r2.admitted);
     BOOST_TEST(r2.reason == RangeAdmissionReason::InvalidTimestamp);
+}
+
+// ===========================================================================
+// N04 -- the admission layer must not admit an interval whose merged
+//        tick+fraction value exceeds half the wrap period
+// ===========================================================================
+//
+// The interval formability gate is reached through `timestamp_relative_interval()`
+// -> `timestamp_interval()`, so once the interval re-checks the merged value the
+// admission verdict follows.  A 12-bit domain is used (P = 4096, P/2 = 2048)
+// because the calibration window must fit inside one wrap period.
+
+BOOST_AUTO_TEST_CASE(tof_interval_upper_bound_after_fraction_is_refused)
+{
+    gr::uwb::twr::ClockDomain d;
+    BOOST_REQUIRE(gr::uwb::twr::ClockDomain::make("dw1000_n04_12bit", 737.28e6, 7u, 12u, d));
+    BOOST_TEST(gr::uwb::twr::clock_domain_wrap_period(d) == 4096u);
+
+    const CalibrationStamp cal = good_calibration();
+    RangeAdmissionContext ctx;
+    ctx.calibration = &cal;
+    ctx.reference_ticks = 1500;
+    ctx.reference_ticks_recorded = true;
+    ctx.rx_first_path = FirstPathQuality::passed(18.5, 9.0, 0.82);
+
+    const auto mapped = [&](int64_t ticks, int32_t num, uint32_t den, TimestampMarker marker,
+                            Timestamp& out) {
+        Timestamp ts;
+        const uint32_t corrections = (marker == TimestampMarker::RmarkerRx)
+                                         ? mask_of(rmarker_rx_bits())
+                                         : mask_of(rmarker_tx_bits());
+        if (!Timestamp::from_fractional_ticks(ticks, num, den, d, marker,
+                                              TimestampSource::HardwareMeasured, corrections, ts))
+            return false;
+        if (gr::uwb::twr::apply_calibration_ticks(ts, cal.id, 0, 0, 0u, 0u) !=
+            CalibrationResult::Applied)
+            return false;
+        out = ts;
+        return true;
+    };
+
+    Timestamp later;
+    Timestamp earlier;
+    BOOST_REQUIRE(mapped(2048, 3, 4, TimestampMarker::RmarkerRx, later)); // 2048 + 3/4
+    BOOST_REQUIRE(mapped(0, 1, 4, TimestampMarker::RmarkerTx, earlier));   // 0 + 1/4
+
+    // The merged value is 2048 + 1/2 = 2048.5 > 2048, so the pair must be
+    // refused as IntervalNotFormable rather than admitted.
+    const RangingIntervalAdmission r = admit_ranging_interval(later, earlier, ctx);
+    BOOST_TEST(!r.admitted);
+    BOOST_TEST(r.reason == RangeAdmissionReason::IntervalNotFormable);
+    BOOST_TEST(r.interval_status == TimeIntervalStatus::WrapAmbiguous);
+    BOOST_TEST(r.status == ExchangeStatus::InvalidTimeDomain);
+    BOOST_TEST(!r.value.has_value());
+
+    // Exactly P/2 (2048 + 1/4 minus 1/4) is still admitted: the documented
+    // "exactly half period is allowed when later/earlier are known" policy is
+    // unchanged.
+    Timestamp half_later;
+    Timestamp half_earlier;
+    BOOST_REQUIRE(mapped(2048, 1, 4, TimestampMarker::RmarkerRx, half_later));
+    BOOST_REQUIRE(mapped(0, 1, 4, TimestampMarker::RmarkerTx, half_earlier));
+    const RangingIntervalAdmission rh = admit_ranging_interval(half_later, half_earlier, ctx);
+    BOOST_TEST(rh.admitted);
+    BOOST_REQUIRE(rh.value.has_value());
+    int64_t hn = 0;
+    int64_t hd = 0;
+    BOOST_REQUIRE(rh.value->exact_ratio(hn, hd));
+    BOOST_TEST(hn == 2048);
+    BOOST_TEST(hd == 1);
 }

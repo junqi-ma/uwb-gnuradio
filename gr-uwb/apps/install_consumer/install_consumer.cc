@@ -14,16 +14,23 @@
  *
  *   - its include path is the prefix's include directory only, never the
  *     source tree;
- *   - its Python path is the prefix's site-packages only;
+ *   - its Python path is the prefix's configured Python install directory
+ *     only (dist-packages on a stock local install), never site-packages by
+ *     assumption;
  *   - it does not link the OOT module's build directory, so the header-only
  *     API is exercised on its own, exactly as an external consumer would.
  *
- * It checks the two things that were actually missing:
- *   1. all four TWR headers are includable from the prefix, and the contract
+ * It checks the things that were actually missing:
+ *   1. every public TWR header is includable from the prefix, and the contract
  *      they describe is usable (build a config, look it up in the capability
  *      whitelist, encode a frame, do timestamp arithmetic);
- *   2. `import uwb.twr_config` works from the prefix and validates the same
- *      profile the C++ side does.
+ *   2. the ranging-admission entry point (`uwb_twr_tof_input.h`, review defect
+ *      N05) is not merely includable but USABLE: the consumer builds a fully
+ *      evidenced RMARKER pair, shows `admit_range_capable_time()` admits it,
+ *      shows `admit_ranging_interval()` yields the exact interval, and shows
+ *      the default admission context admits NOTHING (default deny);
+ *   3. `import uwb.twr_config` works from the prefix and validates the same
+ *      profile the C++ side does, against the CURRENT schema (`twr-config/2`).
  *
  * If a header is missing from install(FILES ...) or twr_config.py is missing
  * from GR_PYTHON_INSTALL(...), this fails to compile / fails at import, which
@@ -31,13 +38,16 @@
  *
  * Build (see run_install_consumer.sh):
  *   c++ -std=c++17 -I<prefix>/include install_consumer.cc -o consumer
- *   PYTHONPATH=<prefix>/lib/python3.10/site-packages python3 install_consumer.py
+ *   PYTHONPATH=<prefix>/<configured python dir> python3 install_consumer.py
+ * (the configured Python dir is dist-packages on a stock local install, not
+ * the site-packages this comment used to hardcode -- review defect N05).
  */
 
 #include <gnuradio/uwb/uwb_twr_capability_evidence.h>
 #include <gnuradio/uwb/uwb_twr_config.h>
 #include <gnuradio/uwb/uwb_twr_frame.h>
 #include <gnuradio/uwb/uwb_twr_timestamp.h>
+#include <gnuradio/uwb/uwb_twr_tof_input.h>
 #include <gnuradio/uwb/uwb_twr_types.h>
 
 #include <cstdio>
@@ -45,6 +55,21 @@
 
 namespace twr = gr::uwb::twr;
 namespace ev = gr::uwb::twr::evidence;
+
+// The exact correction masks the TWR contract requires for each marker
+// family.  Written out here from the requirement text (REQ-TIME-02 / 03)
+// rather than read back from the header, so the consumer proves the contract
+// and not merely its own reflection.
+constexpr uint32_t kRmarkerRxBits = twr::kCorrectionRxSampleToFirstPath |
+                                    twr::kCorrectionWindowCrop |
+                                    twr::kCorrectionSampleRateConversion |
+                                    twr::kCorrectionFirstPathFraction |
+                                    twr::kCorrectionWaveformGeometry |
+                                    twr::kCorrectionRmarkerOffset |
+                                    twr::kCorrectionFirstPathQualityGate;
+constexpr uint32_t kRmarkerTxBits = twr::kCorrectionWaveformGeometry |
+                                    twr::kCorrectionTxCommandToAir |
+                                    twr::kCorrectionDelayedTxQuantization;
 
 static int g_failures = 0;
 
@@ -67,7 +92,10 @@ main()
                 caps.schema_version.c_str(),
                 caps.profile_version.c_str(),
                 caps.phy_matrix.size());
-    check(caps.schema_version == "twr-config/1", "schema_version is present");
+    // twr-config/2 is the CURRENT schema: frame.frame_profile became required
+    // and the insufficient-phr-rate constraint was removed (M0.1).  A stale
+    // "twr-config/1" expectation here is exactly review defect N05.
+    check(caps.schema_version == "twr-config/2", "schema_version is current (twr-config/2)");
     check(!caps.phy_matrix.empty(), "capability whitelist is populated");
     // The M0 profile: ch5 / 64 MHz PRF / 6.81 Mb/s / ranging bit required.
     check(caps.channels.size() == 1 && caps.channels[0] == 5,
@@ -203,6 +231,100 @@ main()
           "the two native rates are recognised");
     check(!twr::is_allowed_native_rate(998.4e6),
           "the work grid is not a native rate");
+
+    // ---- 5. the ranging-admission entry point (M0.1 / R6) ----------------
+    // uwb_twr_tof_input.h was the one public TWR header the install rules
+    // omitted.  It is EXERCISED here, not merely included: a fully evidenced
+    // RMARKER pair must be admitted and yield the exact tick interval, while
+    // a default admission context (no calibration, no reference instant, no
+    // first-path decision) must admit nothing.
+    {
+        twr::ClockDomain domain;
+        check(twr::ClockDomain::make("consumer_dw1000_ch5_uus", 499.2e6 * 128.0, 7u,
+                                     40u, domain),
+              "the admission header builds a clock domain");
+
+        twr::Timestamp rx;
+        twr::Timestamp tx;
+        check(twr::Timestamp::from_ticks(9000,
+                                         domain,
+                                         twr::TimestampMarker::RmarkerRx,
+                                         twr::TimestampSource::HardwareMeasured,
+                                         kRmarkerRxBits,
+                                         rx),
+              "an RX RMARKER timestamp is constructible");
+        check(twr::Timestamp::from_ticks(5000,
+                                         domain,
+                                         twr::TimestampMarker::RmarkerTx,
+                                         twr::TimestampSource::HardwareMeasured,
+                                         kRmarkerTxBits,
+                                         tx),
+              "a TX RMARKER timestamp is constructible");
+
+        const std::string cal_id = "cal-consumer-dw1000-ch5-uus-r1";
+        check(twr::apply_calibration_ticks(rx, cal_id, 0, 0, 0u, 0u) ==
+                  twr::CalibrationResult::Applied,
+              "the RX timestamp is calibrated exactly once");
+        check(twr::apply_calibration_ticks(tx, cal_id, 0, 0, 0u, 0u) ==
+                  twr::CalibrationResult::Applied,
+              "the TX timestamp is calibrated exactly once");
+
+        twr::CalibrationStamp cal;
+        cal.id = cal_id;
+        cal.calibrated_epoch = 7u;
+        cal.valid_from_ticks = 1000;
+        cal.valid_until_ticks = 2000;
+        twr::CalibrationApplication app;
+        app.calibration_id = cal_id;
+        app.result = twr::CalibrationResult::Applied;
+        cal.applications.push_back(app);
+
+        twr::RangeAdmissionContext ctx;
+        ctx.calibration = &cal;
+        ctx.reference_ticks = 1500;
+        ctx.reference_ticks_recorded = true;
+        ctx.rx_first_path = twr::FirstPathQuality::passed(18.5, 9.0, 0.82);
+
+        // DEFAULT DENY: the whole point of the gate.  A context that was
+        // never filled in carries no calibration, no reference instant and no
+        // first-path decision, and must admit nothing rather than defaulting
+        // to "fine".
+        twr::RangeAdmissionContext empty;
+        const twr::RangeAdmission denied = twr::admit_range_capable_time(rx, empty);
+        check(!denied.admitted && !denied.value.has_value(),
+              "a default admission context admits NOTHING (default deny)");
+
+        // R6: a host capture coordinate is refused however many correction
+        // bits it claims, because it is not an on-air instant.
+        twr::Timestamp raw;
+        const bool raw_made =
+            twr::Timestamp::from_ticks(1000,
+                                       domain,
+                                       twr::TimestampMarker::UhdRxFirstIqSample,
+                                       twr::TimestampSource::HardwareMeasured,
+                                       twr::kCorrectionAll,
+                                       raw);
+        check(raw_made && !twr::admit_range_capable_time(raw, ctx).admitted,
+              "a raw UhdRxFirstIqSample is refused even with all bits set (R6)");
+
+        const twr::RangeAdmission one = twr::admit_range_capable_time(rx, ctx);
+        check(one.admitted && one.value.has_value(),
+              "a fully-evidenced RX RMARKER is admitted");
+
+        const twr::RangingIntervalAdmission pair =
+            twr::admit_ranging_interval(rx, tx, ctx);
+        check(pair.admitted && pair.value.has_value() &&
+                  pair.value->interval().ticks == 4000,
+              "admit_ranging_interval yields the exact 4000-tick interval");
+        int64_t num = 0;
+        int64_t den = 0;
+        check(pair.value.has_value() && pair.value->exact_ratio(num, den) && num == 4000 &&
+                  den == 1,
+              "the admitted interval is an exact tick-space rational");
+        std::printf("        admission header: %s\n",
+                    pair.value.has_value() ? pair.value->to_string().c_str()
+                                           : "<refused>");
+    }
 
     std::printf("%s\n", g_failures == 0 ? "CONSUMER OK"
                                         : "CONSUMER FAILED");

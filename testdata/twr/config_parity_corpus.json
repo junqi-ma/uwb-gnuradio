@@ -6858,41 +6858,247 @@
    }
   },
   {
-   "name": "negative_local_address_is_a_negative_index",
-   "note": "local_address is a uint16 on the wire. The reader stores the int64 the JSON carried and the validator refuses it, rather than masking it to 65535 and transmitting a reserved address nobody chose.",
+   "name": "negative_local_address_is_refused_not_wrapped",
+   "note": "Session addresses are uint16 on the wire. A negative JSON number must be REFUSED at the reader with out_of_range, not masked. The previous version of this case claimed the reader stored the int64 the JSON carried and the validator then refused it as a reserved address; that described behaviour the code did not have. The reader was wrapping -1 to 0xffff, and the case passed only because 0xffff happens to be a reserved address. Both readers now range-check before narrowing (M0.1 / N01), so the refusal names the real cause.",
    "base": "ss_initiator",
    "patch": {
     "session.local_address": -1
    },
    "expect": {
+    "import_ok": false,
+    "import_violations": [
+     "session.local_address|out_of_range|config_rejected"
+    ],
     "accepted": false,
     "violations": [
      "session.local_address|field_conflict|config_rejected"
+    ]
+   }
+  },
+  {
+   "name": "channel_uint8_max_plus_one_is_refused",
+   "base": "ss_initiator",
+   "patch": {
+    "phy.channel": 256
+   },
+   "note": "phy.channel is a uint8. 256 is one past the field. A mask would fold it to 0, which is a DIFFERENT channel; the reader must refuse it with out_of_range.",
+   "expect": {
+    "import_ok": false,
+    "import_violations": [
+     "phy.channel|out_of_range|config_rejected"
     ],
-    "import_ok": true,
-    "import_violations": [],
-    "config_hash": "fnv1a64:7e3ad9006d4ab8f3",
+    "accepted": false,
+    "violations": [
+     "phy.channel|unsupported|unsupported",
+     "phy.center_frequency_hz|channel_frequency_mismatch|config_rejected",
+     "calibration.record.channel|calibration_mismatch|config_rejected"
+    ]
+   }
+  },
+  {
+   "name": "channel_one_modulus_past_a_legal_value_is_refused",
+   "base": "ss_initiator",
+   "patch": {
+    "phy.channel": 261
+   },
+   "note": "261 = 5 + 256: exactly one modulus past a legal channel, so a mask lands back on a LEGAL value (5) and the validator would admit a document nobody wrote. This is the case that makes 'one past the top' insufficient; the reader must refuse.",
+   "expect": {
+    "import_ok": false,
+    "import_violations": [
+     "phy.channel|out_of_range|config_rejected"
+    ],
+    "accepted": false,
+    "violations": [
+     "phy.channel|unsupported|unsupported",
+     "phy.center_frequency_hz|channel_frequency_mismatch|config_rejected",
+     "calibration.record.channel|calibration_mismatch|config_rejected"
+    ]
+   }
+  },
+  {
+   "name": "session_id_one_modulus_past_uint32_is_refused",
+   "base": "ss_initiator",
+   "patch": {
+    "session.session_id": 4294967297
+   },
+   "note": "2**32 + 1 is one modulus past the uint32 field, and folds to session 1 under a mask -- a live session id. Refused, never truncated (REQ-PROTO-01).",
+   "expect": {
+    "import_ok": false,
+    "import_violations": [
+     "session.session_id|out_of_range|config_rejected"
+    ],
+    "accepted": false,
+    "violations": [
+     "session.session_id|zero_value|config_rejected"
+    ]
+   }
+  },
+  {
+   "name": "local_address_one_past_uint16_is_refused",
+   "base": "ss_initiator",
+   "patch": {
+    "session.local_address": 65537
+   },
+   "note": "65537 = 1 + 65536 folds to address 1 under a uint16 mask. Refused.",
+   "expect": {
+    "import_ok": false,
+    "import_violations": [
+     "session.local_address|out_of_range|config_rejected"
+    ],
+    "accepted": false,
+    "violations": [
+     "session.local_address|field_conflict|config_rejected"
+    ]
+   }
+  },
+  {
+   "name": "pan_id_one_past_uint16_is_refused",
+   "base": "ss_initiator",
+   "patch": {
+    "session.pan_id": 65536
+   },
+   "note": "One past the uint16 PAN field; a mask would make it PAN 0, the wildcard.",
+   "expect": {
+    "import_ok": false,
+    "import_violations": [
+     "session.pan_id|out_of_range|config_rejected"
+    ],
+    "accepted": false,
+    "violations": [
+     "session.pan_id|empty_value|config_rejected"
+    ]
+   }
+  },
+  {
+   "name": "sequence_uint8_max_plus_one_is_refused",
+   "base": "ss_initiator",
+   "patch": {
+    "session.sequence": 256
+   },
+   "note": "One past the uint8 sequence field; folds to 0, the start of the sequence, which would silently restart an exchange.",
+   "expect": {
+    "import_ok": false,
+    "import_violations": [
+     "session.sequence|out_of_range|config_rejected"
+    ],
+    "accepted": true,
+    "violations": [],
+    "config_hash": "fnv1a64:5037e1278e2d795f",
     "effective": {
-     "ok": false,
+     "ok": true,
      "schema_version": "twr-config/2",
      "profile_version": "parity-corpus/1",
      "calibration_version": "parity-corpus-cal/1",
-     "tick_rate_hz": "0",
-     "poll_bytes": 0,
-     "response_bytes": 0,
-     "final_bytes": 0,
-     "max_psdu_bytes": 0,
-     "max_timestamp_count": 0,
-     "phr_bytes": 0,
-     "phr_coded_bits": 0,
-     "poll_start_ticks": 0,
+     "tick_rate_hz": "737280000",
+     "poll_bytes": 16,
+     "response_bytes": 26,
+     "final_bytes": 31,
+     "max_psdu_bytes": 127,
+     "max_timestamp_count": 3,
+     "phr_bytes": 2,
+     "phr_coded_bits": 19,
+     "poll_start_ticks": 29491200000,
      "poll_to_response_ticks": 0,
      "response_to_final_ticks": 0,
-     "post_tx_rx_enable_ticks": 0,
-     "poll_start_effective_ns": 0,
+     "post_tx_rx_enable_ticks": 1475,
+     "poll_start_effective_ns": 40000000000,
      "poll_to_response_effective_ns": 0,
      "response_to_final_effective_ns": 0,
-     "post_tx_rx_enable_effective_ns": 0
+     "post_tx_rx_enable_effective_ns": 2000
+    }
+   }
+  },
+  {
+   "name": "geometry_mac_header_bytes_out_of_uint16_is_refused",
+   "base": "ss_initiator",
+   "patch": {
+    "frame.geometry.mac_header_bytes": 65550
+   },
+   "note": "The frame geometry is compared field by field against the codec authority. 65550 does not fit the uint16 field, so it must be refused BEFORE it is compared -- a masked 14 would silently match the authority and hide the error.",
+   "expect": {
+    "import_ok": false,
+    "import_violations": [
+     "frame.geometry.mac_header_bytes|out_of_range|config_rejected"
+    ],
+    "accepted": false,
+    "violations": [
+     "frame.geometry.mac_header_bytes|field_conflict|config_rejected"
+    ]
+   }
+  },
+  {
+   "name": "negative_tx_port_is_refused_not_wrapped",
+   "base": "ss_initiator",
+   "patch": {
+    "tx.port": -1
+   },
+   "note": "A negative JSON number in an unsigned field is refused, never wrapped to 0xffff: the wire has no negative port, and 0xffff is a port nobody chose.",
+   "expect": {
+    "import_ok": false,
+    "import_violations": [
+     "tx.port|out_of_range|config_rejected"
+    ],
+    "accepted": true,
+    "violations": [],
+    "config_hash": "fnv1a64:15cc8b04750c47de",
+    "effective": {
+     "ok": true,
+     "schema_version": "twr-config/2",
+     "profile_version": "parity-corpus/1",
+     "calibration_version": "parity-corpus-cal/1",
+     "tick_rate_hz": "737280000",
+     "poll_bytes": 16,
+     "response_bytes": 26,
+     "final_bytes": 31,
+     "max_psdu_bytes": 127,
+     "max_timestamp_count": 3,
+     "phr_bytes": 2,
+     "phr_coded_bits": 19,
+     "poll_start_ticks": 29491200000,
+     "poll_to_response_ticks": 0,
+     "response_to_final_ticks": 0,
+     "post_tx_rx_enable_ticks": 1475,
+     "poll_start_effective_ns": 40000000000,
+     "poll_to_response_effective_ns": 0,
+     "response_to_final_effective_ns": 0,
+     "post_tx_rx_enable_effective_ns": 2000
+    }
+   }
+  },
+  {
+   "name": "sequence_uint8_max_is_accepted_at_the_boundary",
+   "base": "ss_initiator",
+   "patch": {
+    "session.sequence": 255
+   },
+   "note": "The BOUNDARY is inclusive: 255 is in [0, 255] and must still be read as 255. A range check that rejected the maximum would be as wrong as one that wrapped it.",
+   "expect": {
+    "import_ok": true,
+    "import_violations": [],
+    "accepted": true,
+    "violations": [],
+    "config_hash": "fnv1a64:effce1bc0ca617c7",
+    "effective": {
+     "ok": true,
+     "schema_version": "twr-config/2",
+     "profile_version": "parity-corpus/1",
+     "calibration_version": "parity-corpus-cal/1",
+     "tick_rate_hz": "737280000",
+     "poll_bytes": 16,
+     "response_bytes": 26,
+     "final_bytes": 31,
+     "max_psdu_bytes": 127,
+     "max_timestamp_count": 3,
+     "phr_bytes": 2,
+     "phr_coded_bits": 19,
+     "poll_start_ticks": 29491200000,
+     "poll_to_response_ticks": 0,
+     "response_to_final_ticks": 0,
+     "post_tx_rx_enable_ticks": 1475,
+     "poll_start_effective_ns": 40000000000,
+     "poll_to_response_effective_ns": 0,
+     "response_to_final_effective_ns": 0,
+     "post_tx_rx_enable_effective_ns": 2000
     }
    }
   }

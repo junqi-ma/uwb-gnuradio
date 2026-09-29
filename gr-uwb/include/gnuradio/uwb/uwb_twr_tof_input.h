@@ -280,6 +280,120 @@ inline bool calibration_window_fits_domain(const ClockDomain& d, const Calibrati
 } // namespace detail
 
 // ===========================================================================
+// REQ-TIME-03: the evidence a SCHEDULED transmit must carry
+// ===========================================================================
+//
+// The requirement is explicit:
+//
+//   "UHD timed TX 的目标是第一样点；send 返回成功或 burst ACK 不等价于芯片
+//    提供的精细空口 timestamp。可通过确定性时序加标定取得合格 TX timestamp，
+//    但必须标注 `scheduled_calibrated` 来源，关联 async error，不能冒充
+//    `hardware_measured`。"
+//
+// So a deterministic timed TX IS a legitimate ranging input -- the X410 route
+// depends on it -- provided the planned instant is recorded and `send()`
+// returning is not mistaken for the burst having happened.  Which of the two
+// it was cannot be told from `send()`: UHD reports late/underflow
+// asynchronously, after the call has already returned.
+enum class TxOutcome : uint8_t {
+    Unknown = 0,    // nothing observed yet -- NOT "fine"
+    Completed = 1,  // the burst completed with no late/underflow
+    Late = 2,       // ERR_TX_LATE_DATA: the deadline could not be met
+    Underflow = 3,  // the TX stream underran
+    Cancelled = 4   // stop()/cancel during the burst
+};
+
+inline const char* tx_outcome_to_string(TxOutcome o)
+{
+    switch (o) {
+    case TxOutcome::Unknown:
+        return "unknown";
+    case TxOutcome::Completed:
+        return "completed";
+    case TxOutcome::Late:
+        return "late";
+    case TxOutcome::Underflow:
+        return "underflow";
+    case TxOutcome::Cancelled:
+        return "cancelled";
+    }
+    return "invalid";
+}
+
+// Which of the planned-instant records is missing, as a bit mask, so a
+// refusal names the one stage that did not run instead of saying "incomplete".
+enum class TxPlanRecord : uint32_t {
+    CommandTime = 1u << 0,          // the UHD command time
+    QuantisedInstant = 1u << 1,     // the first quantised sample instant
+    MarkerOffset = 1u << 2,         // the waveform marker offset
+    CalibratedAirTime = 1u << 3     // the calibrated expected air time
+};
+
+inline const char* tx_plan_record_name(uint32_t bit)
+{
+    switch (static_cast<TxPlanRecord>(bit)) {
+    case TxPlanRecord::CommandTime:
+        return "command_time";
+    case TxPlanRecord::QuantisedInstant:
+        return "quantised_instant";
+    case TxPlanRecord::MarkerOffset:
+        return "marker_offset";
+    case TxPlanRecord::CalibratedAirTime:
+        return "calibrated_air_time";
+    }
+    return "unknown";
+}
+
+// The send evidence for ONE scheduled transmit.  Every field is explicit and
+// defaults to "not recorded", so a default-constructed value records nothing
+// and admits nothing.
+struct TxSendEvidence {
+    bool command_time_recorded = false;
+    bool quantised_instant_recorded = false;
+    bool marker_offset_recorded = false;
+    bool calibrated_air_time_recorded = false;
+
+    // `send()` returned success or the burst was ACKed.  Recorded because it is
+    // a real observation, but deliberately NOT sufficient on its own: no check
+    // below admits on this bit alone.
+    bool send_accepted = false;
+
+    TxOutcome outcome = TxOutcome::Unknown;
+
+    // The planned instant, fully recorded.  Says nothing about whether the
+    // burst happened; `completed()` is the other half.
+    bool records_the_plan() const
+    {
+        return command_time_recorded && quantised_instant_recorded &&
+               marker_offset_recorded && calibrated_air_time_recorded;
+    }
+    bool completed() const { return outcome == TxOutcome::Completed; }
+
+    // The first missing plan record, or 0 when all four were recorded.
+    uint32_t missing_plan_record() const
+    {
+        uint32_t missing = 0u;
+        if (!command_time_recorded)
+            missing |= static_cast<uint32_t>(TxPlanRecord::CommandTime);
+        if (!quantised_instant_recorded)
+            missing |= static_cast<uint32_t>(TxPlanRecord::QuantisedInstant);
+        if (!marker_offset_recorded)
+            missing |= static_cast<uint32_t>(TxPlanRecord::MarkerOffset);
+        if (!calibrated_air_time_recorded)
+            missing |= static_cast<uint32_t>(TxPlanRecord::CalibratedAirTime);
+        return missing;
+    }
+
+    std::string to_string() const
+    {
+        return std::string("TxSendEvidence{plan=") +
+               (records_the_plan() ? "recorded" : "incomplete") +
+               ", send_accepted=" + (send_accepted ? "true" : "false") +
+               ", outcome=" + tx_outcome_to_string(outcome) + "}";
+    }
+};
+
+// ===========================================================================
 // The admission context -- what the pipeline hands the gate
 // ===========================================================================
 //
@@ -287,6 +401,7 @@ inline bool calibration_window_fits_domain(const ClockDomain& d, const Calibrati
 //   * `calibration == nullptr`  -> refused (no calibration set in force)
 //   * `reference_ticks_recorded == false` -> refused (cannot decide currency)
 //   * `rx_first_path` default-constructed -> refused for receive markers
+//   * `tx_evidence == nullptr` -> refused for a scheduled TRANSMIT
 //
 // A default-constructed `RangeAdmissionContext` therefore admits NOTHING,
 // which is the whole point: forgetting to fill one in is a compile-clean
@@ -304,6 +419,11 @@ struct RangeAdmissionContext {
     // REQ-TIME-05.  Applies to the receive marker families only; a transmit
     // RMARKER has no first path to judge.
     FirstPathQuality rx_first_path;
+
+    // REQ-TIME-03.  Required for a `ScheduledCalibrated` TRANSMIT RMARKER and
+    // ignored for everything else.  `nullptr` means "no send evidence was
+    // supplied", which is a REFUSAL -- not a permissive default.
+    const TxSendEvidence* tx_evidence = nullptr;
 };
 
 // ===========================================================================
@@ -333,11 +453,17 @@ enum class RangeAdmissionReason : uint8_t {
     MarkerPairNotAllowed = 12,       // REQ-TIME-02
     WrongEpoch = 13,                 // REQ-TIME-01
     CrossDomain = 14,                // REQ-TIME-01 / 04
-    IntervalNotFormable = 15         // REQ-TIME-04
+    IntervalNotFormable = 15,        // REQ-TIME-04
+    // REQ-TIME-03: a deterministic timed TX must carry the evidence that the
+    // burst happened as planned.  `send()` returning success is NOT it.
+    ScheduledTxEvidenceMissing = 16,
+    TxOutcomeLate = 17,              // the timed TX missed its deadline
+    TxOutcomeUnderflow = 18,         // the TX stream underran
+    TxOutcomeCancelled = 19          // the burst was cancelled
 };
 
 inline constexpr int kRangeAdmissionReasonMax =
-    static_cast<int>(RangeAdmissionReason::IntervalNotFormable);
+    static_cast<int>(RangeAdmissionReason::TxOutcomeCancelled);
 
 inline const char* range_admission_reason_to_string(RangeAdmissionReason r)
 {
@@ -374,6 +500,14 @@ inline const char* range_admission_reason_to_string(RangeAdmissionReason r)
         return "cross_domain";
     case RangeAdmissionReason::IntervalNotFormable:
         return "interval_not_formable";
+    case RangeAdmissionReason::ScheduledTxEvidenceMissing:
+        return "scheduled_tx_evidence_missing";
+    case RangeAdmissionReason::TxOutcomeLate:
+        return "tx_outcome_late";
+    case RangeAdmissionReason::TxOutcomeUnderflow:
+        return "tx_outcome_underflow";
+    case RangeAdmissionReason::TxOutcomeCancelled:
+        return "tx_outcome_cancelled";
     }
     return "invalid";
 }
@@ -416,7 +550,18 @@ inline ExchangeStatus range_admission_reason_to_exchange_status(RangeAdmissionRe
     case RangeAdmissionReason::WrongEpoch:
     case RangeAdmissionReason::CrossDomain:
     case RangeAdmissionReason::IntervalNotFormable:
+    case RangeAdmissionReason::ScheduledTxEvidenceMissing:
         return ExchangeStatus::InvalidTimeDomain;
+    // A timed TX that did not complete is NOT an invalid time domain: the
+    // domain is fine, the burst is the problem.  Each of these maps to its own
+    // terminal status so a soak report can separate them without parsing a
+    // detail string (REQ-ERR-01).
+    case RangeAdmissionReason::TxOutcomeLate:
+        return ExchangeStatus::TxLate;
+    case RangeAdmissionReason::TxOutcomeUnderflow:
+        return ExchangeStatus::TxUnderflow;
+    case RangeAdmissionReason::TxOutcomeCancelled:
+        return ExchangeStatus::Cancelled;
     }
     return ExchangeStatus::InternalError;
 }
@@ -747,17 +892,97 @@ inline RangeAdmission admit_range_capable_time(const Timestamp& ts,
         return r;
     }
 
-    // --- 3. REQ-TIME-03: a real measurement, not a schedule or a guess. ---
-    // `timestamp_source_is_measurement()` also accepts
-    // `ScheduledCalibrated`; that is correct for the *interval* gate (a
-    // scheduled time is a real number in the domain) but NOT for a ranging
-    // input, because REQ-TIME-03 forbids passing a deterministic schedule off
-    // as a hardware-measured air time.  Only `HardwareMeasured` qualifies.
-    if (ts.source != TimestampSource::HardwareMeasured) {
-        detail::reject(r, RangeAdmissionReason::NotMeasured,
-                       std::string("source=") + timestamp_source_to_string(ts.source) +
-                           " is not a hardware measurement",
-                       RangeTimeSide::Subject, ts.marker);
+    // --- 3. REQ-TIME-03: a real measurement, or an EVIDENCED schedule. ----
+    //
+    // This step used to refuse every source but `HardwareMeasured`, which also
+    // refused the deterministic timed TX that REQ-TIME-03 explicitly PERMITS
+    // ("可通过确定性时序加标定取得合格 TX timestamp，但必须标注
+    // scheduled_calibrated 来源...不能冒充 hardware_measured").  The forbidden
+    // thing is presenting a schedule AS a measurement, not using a calibrated
+    // schedule -- and the planned X410 timed-TX route depends on the permitted
+    // case, so refusing it would have forced the pipeline to mislabel its own
+    // timestamps to make progress.
+    //
+    // The rule is therefore split by marker class:
+    //   * a RECEIVE instant must be hardware-measured.  A scheduled receive
+    //     time is a PREDICTION, which is the R6 point and stays refused;
+    //   * a TRANSMIT RMARKER may be `ScheduledCalibrated`, but only with the
+    //     send evidence REQ-TIME-03 lists.  It is never relabelled: the
+    //     admitted value keeps source == ScheduledCalibrated, so a caller can
+    //     never mistake a planned instant for a chip timestamp.
+    //
+    // A planned instant may be STORED before the exchange converges, but it
+    // must not become a valid distance until the outcome is known; that is why
+    // `Unknown` is a refusal here rather than a "probably fine".
+    if (ts.source == TimestampSource::ScheduledCalibrated &&
+        timestamp_marker_class(ts.marker) == TimestampMarkerClass::WaveformTx) {
+        const TxSendEvidence* ev = ctx.tx_evidence;
+        if (ev == nullptr) {
+            detail::reject(
+                r, RangeAdmissionReason::ScheduledTxEvidenceMissing,
+                "a scheduled TX needs TxSendEvidence in the admission context: "
+                "send() returning is not evidence that the burst happened as planned",
+                RangeTimeSide::Subject, ts.marker);
+            return r;
+        }
+        const uint32_t missing = ev->missing_plan_record();
+        if (missing != 0u) {
+            uint32_t first = 0u;
+            for (uint32_t bit = 1u; bit != 0u; bit <<= 1) {
+                if ((missing & bit) != 0u) {
+                    first = bit;
+                    break;
+                }
+            }
+            detail::reject(
+                r, RangeAdmissionReason::ScheduledTxEvidenceMissing,
+                std::string("the scheduled TX plan is not fully recorded: missing=") +
+                    tx_plan_record_name(first) + " (mask=" +
+                    std::to_string(missing) + ", " + ev->to_string() +
+                    "); send_accepted alone is never sufficient",
+                RangeTimeSide::Subject, ts.marker);
+            return r;
+        }
+        switch (ev->outcome) {
+        case TxOutcome::Completed:
+            break; // the burst completed as planned
+        case TxOutcome::Late:
+            detail::reject(r, RangeAdmissionReason::TxOutcomeLate,
+                           "the timed TX missed its deadline (ERR_TX_LATE_DATA): the "
+                           "frame was not sent at the planned instant",
+                           RangeTimeSide::Subject, ts.marker);
+            return r;
+        case TxOutcome::Underflow:
+            detail::reject(r, RangeAdmissionReason::TxOutcomeUnderflow,
+                           "the TX stream underran: the frame is not on the air",
+                           RangeTimeSide::Subject, ts.marker);
+            return r;
+        case TxOutcome::Cancelled:
+            detail::reject(r, RangeAdmissionReason::TxOutcomeCancelled,
+                           "the TX burst was cancelled before it completed",
+                           RangeTimeSide::Subject, ts.marker);
+            return r;
+        case TxOutcome::Unknown:
+            detail::reject(r, RangeAdmissionReason::ScheduledTxEvidenceMissing,
+                           std::string("the TX outcome is Unknown (") + ev->to_string() +
+                               "): send_accepted does not establish that the burst "
+                               "completed, and a planned instant is not a measurement "
+                               "until it has",
+                           RangeTimeSide::Subject, ts.marker);
+            return r;
+        }
+    } else if (ts.source != TimestampSource::HardwareMeasured) {
+        const bool scheduled_rx =
+            ts.source == TimestampSource::ScheduledCalibrated;
+        detail::reject(
+            r, RangeAdmissionReason::NotMeasured,
+            std::string("source=") + timestamp_source_to_string(ts.source) +
+                " marker=" + timestamp_marker_to_string(ts.marker) +
+                (scheduled_rx
+                     ? " is a scheduled RECEIVE time: a prediction, not a measured "
+                       "receive instant"
+                     : " is not a hardware measurement"),
+            RangeTimeSide::Subject, ts.marker);
         return r;
     }
 

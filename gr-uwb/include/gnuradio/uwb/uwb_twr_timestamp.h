@@ -777,41 +777,108 @@ inline bool clock_domain_ns_per_tick_exact(double tick_rate_hz,
 
 namespace detail {
 
+// N03: THE single exact nanosecond projection.
+//
+// The exact value of `ticks + frac_num/frac_den` device ticks, in nanoseconds,
+// is
+//
+//     X * Np / (frac_den * Dp)      with X = ticks*frac_den + frac_num
+//                                   and Np/Dp = ns per tick
+//
+// where `Np/Dp` is the EXACT rational returned by
+// `clock_domain_ns_per_tick_exact()`.  ONE 128-bit quotient/remainder answers
+// BOTH questions at once:
+//
+//   * `out_ns`       = floor(exact value), the documented truncate-toward-zero
+//                      rule.  The value is non-negative here, so floor == trunc.
+//   * `out_lossless` = (remainder == 0), i.e. the stored integer IS the exact
+//                      value.
+//
+// Defect N03 was exactly the mistake of deriving the flag from a divisibility
+// test and the integer from a SEPARATE `double` path: the double could land one
+// ulp below an integer and silently drop 1 ns while the flag still said "true".
+// A quotient and its remainder cannot disagree, so here they cannot either.
+//
+// Returns false only when the projection cannot be formed at all (bad rate,
+// negative/inconsistent input, or a quotient past int64).  `out_lossless` is
+// still written in the "cannot store" case, because losslessness is a property
+// of the VALUE and the rate, not of the destination type.
+inline bool ts_ticks_to_nanos_exact(double tick_rate_hz,
+                                    int64_t ticks,
+                                    int32_t frac_num,
+                                    uint32_t frac_den,
+                                    int64_t& out_ns,
+                                    bool& out_lossless)
+{
+    out_ns = 0;
+    out_lossless = false;
+    if (ticks < 0 || frac_num < 0 || (frac_den == 0u && frac_num != 0))
+        return false;
+
+    int64_t np = 0;
+    int64_t dp = 0;
+    if (!clock_domain_ns_per_tick_exact(tick_rate_hz, np, dp))
+        return false;
+
+    using u128 = unsigned __int128;
+    const u128 fden = (frac_den == 0u) ? u128{ 1 } : u128{ frac_den };
+    const u128 x = static_cast<u128>(static_cast<uint64_t>(ticks)) * fden +
+                   static_cast<u128>(static_cast<uint64_t>(frac_num));
+    const u128 den = fden * static_cast<u128>(static_cast<uint64_t>(dp));
+    // `x` and `den` are bounded by (2^63 * 2^15) and (2^63 * 2^15); the product
+    // `x*np` is the only term that can leave 128 bits, and it is guarded.
+    if (np != 0) {
+        const u128 umax = ~static_cast<u128>(0);
+        if (x != 0u && static_cast<u128>(static_cast<uint64_t>(np)) > umax / x)
+            return false;
+    }
+    const u128 numer = x * static_cast<u128>(static_cast<uint64_t>(np));
+    const u128 q = numer / den;
+    const u128 rem = numer % den;
+    out_lossless = (rem == 0u);
+    if (q > static_cast<u128>(std::numeric_limits<int64_t>::max()))
+        return false;
+    out_ns = static_cast<int64_t>(q);
+    return true;
+}
+
 // EXACT test: is `ticks + frac_num/frac_den` ticks an integer number of
-// nanoseconds at `rate_hz`?  The exact value is
-//
-//     (ticks*den + num) * Np / (den * Dp)      with Np/Dp = ns per tick
-//
-// and the integrality question is answered WITHOUT ever forming that product.
-// With `g = gcd(Dp*den, Np)`, `Dp*den | X*Np` is equivalent to
-// `(Dp*den)/g | X` for `X = ticks*den + num`, because `gcd(D/g, Np/g) == 1`.
-// Only `X` and `Dp*den` are formed, both of which are checked for overflow; a
-// value that cannot be proven exact is reported NOT lossless, never guessed.
+// nanoseconds at `rate_hz`?  Delegates to the single quotient/remainder above,
+// so the predicate and the emitted integer can never disagree (N03).
 inline bool ts_tick_ns_projection_is_lossless(double tick_rate_hz,
                                               int64_t ticks,
                                               int32_t frac_num,
                                               uint32_t frac_den)
 {
-    int64_t np = 0;
-    int64_t dp = 0;
-    if (!clock_domain_ns_per_tick_exact(tick_rate_hz, np, dp))
-        return false;
+    int64_t ignored_ns = 0;
+    bool lossless = false;
+    (void)ts_ticks_to_nanos_exact(tick_rate_hz, ticks, frac_num, frac_den, ignored_ns, lossless);
+    return lossless;
+}
+
+// N04: exact test `ticks + frac_num/frac_den > half_period`, where the value is
+// the FULL merged rational (a tick count plus its sub-tick part) and
+// `half_period` is an integer >= 0.  Cross-multiplied in 128 bit so no legal
+// interval can overflow:
+//
+//     ticks + num/den > half   <=>   ticks*den + num > half*den
+//
+// `den == 0` is the exact whole-tick spelling (num == 0).  This is the check
+// the integer-only gate in `raw_tick_delta()` cannot make, because at that
+// point the fraction has not been merged yet.
+inline bool ts_interval_exceeds_half_period(int64_t ticks,
+                                            int32_t frac_num,
+                                            uint32_t frac_den,
+                                            uint64_t half_period)
+{
     if (ticks < 0 || frac_num < 0 || (frac_den == 0u && frac_num != 0))
         return false;
-
-    int64_t x = ticks; // X
-    int64_t dd = dp;   // Dp*den
-    if (frac_den != 0u) {
-        const int64_t fden = static_cast<int64_t>(frac_den);
-        if (dp > (std::numeric_limits<int64_t>::max() / fden))
-            return false;
-        dd = dp * fden;
-        if (ticks > (std::numeric_limits<int64_t>::max() - frac_num) / fden)
-            return false;
-        x = ticks * fden + frac_num;
-    }
-    const int64_t g = ts_gcd(dd, np);
-    return (x % (dd / g)) == 0;
+    using u128 = unsigned __int128;
+    const uint64_t fden = (frac_den == 0u) ? 1u : static_cast<uint64_t>(frac_den);
+    const u128 lhs = static_cast<u128>(static_cast<uint64_t>(ticks)) * fden +
+                     static_cast<u128>(static_cast<uint64_t>(frac_num));
+    const u128 rhs = static_cast<u128>(half_period) * fden;
+    return lhs > rhs;
 }
 
 // ---------------------------------------------------------------------------
@@ -1328,8 +1395,9 @@ inline TickDelta raw_tick_delta(const ClockDomain& d, int64_t later_ticks, int64
 //                            whole number of nanoseconds.
 //
 // When `duration_is_lossless_ns` is false, `duration` is a TRUNCATION whose
-// absolute error is < 1 ns (see `detail::ts_project_seconds_to_nanos_trunc`).
-// That is acceptable for JSON / logs / the public API.  It is NOT acceptable as
+// absolute error is < 1 ns (see `detail::ts_ticks_to_nanos_exact`, the single
+// quotient/remainder that also decides the flag).  That is acceptable for JSON
+// / logs / the public API.  It is NOT acceptable as
 // an input to the ToF math: feeding it in would inject a quantisation error
 // that is comparable to the whole measurement.  Use
 // `timestamp_relative_interval()` instead -- its type deliberately has no
@@ -1524,22 +1592,34 @@ inline TimeInterval timestamp_interval(const Timestamp& later, const Timestamp& 
 
     r.ticks = whole;
 
+    // 9b. N04: re-check the upper bound AFTER the sub-tick fraction has been
+    //     merged.  `raw_tick_delta()` gated only the integer difference, so a
+    //     positive fraction could push `whole + frac` strictly past P/2 while
+    //     the integer gate still saw P/2.  Exactly P/2 stays legal (the caller
+    //     supplied the sign, so the magnitude is unique there); only a value
+    //     that EXCEEDS the API's stated bound is refused.
+    const uint64_t wrap_period = clock_domain_wrap_period(r.domain);
+    if (wrap_period != 0u &&
+        detail::ts_interval_exceeds_half_period(r.ticks, r.frac_num, r.frac_den,
+                                                wrap_period / 2u)) {
+        r.status = TimeIntervalStatus::WrapAmbiguous;
+        r.ticks = 0;
+        r.frac_num = 0;
+        r.frac_den = 0u;
+        return r;
+    }
+
     // 10. nanosecond projection.  REQ-API-02 wants SI time at the API
     //     boundary; the tick-space fields above stay exact for sub-nanosecond
     //     domains such as DW UUS.  The projection is TRUNCATED toward zero and
-    //     its exactness is decided here by actually testing the conversion
-    //     (R4) -- never by the tick rate alone.
+    //     its exactness is decided by the SAME quotient/remainder that produces
+    //     the integer (N03), never by a rate threshold and never by a second
+    //     floating-point path that could disagree with the flag.
     r.is_whole_ticks = (r.frac_den == 0u);
-    r.duration_is_lossless_ns = detail::ts_tick_ns_projection_is_lossless(
-        r.domain.tick_rate_hz, r.ticks, r.frac_num, r.frac_den);
-
-    double secs = static_cast<double>(whole) / r.domain.tick_rate_hz;
-    if (r.frac_den != 0u) {
-        secs += (static_cast<double>(r.frac_num) / static_cast<double>(r.frac_den)) /
-                r.domain.tick_rate_hz;
-    }
     int64_t ns = 0;
-    if (!detail::ts_project_seconds_to_nanos_trunc(secs, ns)) {
+    bool lossless = false;
+    if (!detail::ts_ticks_to_nanos_exact(r.domain.tick_rate_hz, r.ticks, r.frac_num,
+                                         r.frac_den, ns, lossless)) {
         // A rejected interval is EMPTY, not partially populated: no tick count
         // and no "whole ticks" claim survive a failed projection, so a caller
         // that ignores `status` sees a zeroed value rather than a tick count it
@@ -1552,6 +1632,7 @@ inline TimeInterval timestamp_interval(const Timestamp& later, const Timestamp& 
         r.duration_is_lossless_ns = false;
         return r;
     }
+    r.duration_is_lossless_ns = lossless;
     r.duration = Duration::from_nanos(ns);
 
     r.status = TimeIntervalStatus::Ok;
@@ -1704,6 +1785,11 @@ inline bool timestamp_relative_interval(const Timestamp& later,
 // An explicit SI projection of the exact form, for the API/JSON boundary.  The
 // caller is told whether that projection lost anything, so a truncated integer
 // can never be mistaken for a measurement.
+//
+// N03: this uses the SAME quotient/remainder projection as
+// `timestamp_interval()`.  The previous `ri.seconds()` (a `double`) path could
+// land one ulp below an integer and drop 1 ns even when the exact value was an
+// integer number of nanoseconds.
 inline bool relative_interval_to_duration(const RelativeTickInterval& ri,
                                           Duration& out,
                                           TimeIntervalStatus& status)
@@ -1713,7 +1799,9 @@ inline bool relative_interval_to_duration(const RelativeTickInterval& ri,
         return false;
     }
     int64_t ns = 0;
-    if (!detail::ts_project_seconds_to_nanos_trunc(ri.seconds(), ns)) {
+    bool lossless = false;
+    if (!detail::ts_ticks_to_nanos_exact(ri.domain.tick_rate_hz, ri.ticks, ri.frac_num,
+                                         ri.frac_den, ns, lossless)) {
         status = TimeIntervalStatus::DurationOutOfRange;
         return false;
     }

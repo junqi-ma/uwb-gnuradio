@@ -49,19 +49,37 @@ install(FILES
     uwb_uhd_burst_backend.h
     uwb_hrp_mod_core.h
     uwb_hrp_packet_source.h
-    # TWR M0 contract layer.  These four headers ARE the public API for
+    # TWR M0 contract layer.  These six headers ARE the public API for
     # configuring a TWR exchange from C++ (frame profile, timestamp/ToF
-    # arithmetic, typed configuration + capability whitelist).  They were
-    # never installed, so the installed module could not include them and an
-    # installed consumer had no way to reach the M0 contract at all
-    # (M0 review R8 / P2).  twr_twr_capability_evidence.h and
-    # uwb_twr_test_output.h are the M0.1 additions: the evidence grading for
-    # capability claims and the QA output-directory policy.
+    # arithmetic, typed configuration + capability whitelist) AND for
+    # admitting a raw measurement into a ranging input (the M0.1 R6 gate).
+    # They were never installed, so the installed module could not include
+    # them and an installed consumer had no way to reach the M0 contract at
+    # all (M0 review R8 / P2).
+    #
+    # uwb_twr_capability_evidence.h (M0.1) grades capability claims;
+    # uwb_twr_tof_input.h (M0.1, R6) is the ranging-admission entry point
+    # (`admit_range_capable_time` / `admit_ranging_interval`) that M1-A will
+    # call.  It was accidentally left out of this list even though the other
+    # five TWR headers were installed, so an isolated install could not
+    # compile a consumer that used the publicly documented gate at all
+    # (review defect N05).  It is installed here.
+    #
+    # uwb_twr_test_output.h is deliberately NOT installed, and this is a
+    # decision, not an omission.  It is QA-only output-directory policy (it
+    # picks where a QA may write generated CSV), not part of the TWR
+    # contract a consumer links against.  More concretely, it expands
+    # `UWB_TESTDATA_DIR` with no default (see `source_twr_dir()`), so a
+    # consumer that includes it from an isolated prefix WITHOUT the project's
+    # `target_compile_definitions()` fails to compile.  Shipping a public
+    # header that cannot compile standalone is worse than not shipping it;
+    # the TWR QAs still include it from the source tree.  The installed
+    # consumer's header check was updated to match.
     uwb_twr_types.h
     uwb_twr_frame.h
     uwb_twr_timestamp.h
     uwb_twr_config.h
     uwb_twr_capability_evidence.h
-    uwb_twr_test_output.h
+    uwb_twr_tof_input.h
     DESTINATION include/gnuradio/uwb
 )

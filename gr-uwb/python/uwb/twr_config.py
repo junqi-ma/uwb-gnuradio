@@ -2218,23 +2218,34 @@ class Capabilities:
     def quantisation_supported(self, hz: float) -> bool:
         return any(rate_matches_strict(v, hz) for v in self.quantisation_rates_hz)
 
-    def copy(self) -> "Capabilities":
-        """A MUTABLE deep copy, so a builder can never mutate the shipped one.
+    def mutable_copy(self) -> "Capabilities":
+        """A NEW, independent, mutable deep copy of this table.
 
-        The copy is deliberately NOT frozen: a :class:`CapabilitiesBuilder` has
-        to append to it.  Handing that copy to a caller is safe precisely
-        because it is private to the builder -- the shipped table is never
-        reachable from it.
+        This is the ONLY public way to obtain a table you may modify, and it
+        never touches the table it came from: a :class:`CapabilitiesBuilder`
+        appends to that private copy while the table in use stays read-only.
+
+        Added in M0.1 (N06).  The previous public entry point, ``thaw()``,
+        unfroze the receiver IN PLACE, so ``snapshot.caps.thaw()`` reached into
+        a running snapshot's validation basis through ordinary public API.  An
+        in-place unfreeze is not something a caller can hold safely, so it is
+        no longer public: see :meth:`_thaw_in_place`.
         """
-        return _copy.deepcopy(self).thaw()
+        return _copy.deepcopy(self)._thaw_in_place()
 
-    def thaw(self) -> "Capabilities":
-        """Undo :meth:`freeze` IN PLACE and return the table.
+    def copy(self) -> "Capabilities":
+        """Alias for :meth:`mutable_copy`; a builder's entry point."""
+        return self.mutable_copy()
 
-        Every container becomes a plain ``list`` again and attribute assignment
-        works.  Only a builder calls this, on a table it just copied.  Calling
-        it on a shipped table would be an API bug, not a feature: there is
-        exactly one shipped table per process and it must stay read-only.
+    def _thaw_in_place(self) -> "Capabilities":
+        """Undo :meth:`freeze` IN PLACE and return the receiver.
+
+        PRIVATE.  The only legitimate caller is :meth:`mutable_copy`, on a deep
+        copy it has just made and that no other object can reach.  Calling it
+        on a table that is in use would make the whitelist move underneath every
+        validation already holding it, which is exactly what freezing exists to
+        prevent -- so it is deliberately not part of the public API, and there
+        is no public method that performs an in-place unfreeze.
         """
         if not self._frozen:
             return self
@@ -6135,6 +6146,45 @@ class _ConfigJsonReader:
             return 0
         return v
 
+    # -- range-checked unsigned narrowing (M0.1 / N01) -------------------
+    #
+    # The reader used to narrow with a MASK (`_u8`/`_u16`/`_u32`), deliberately
+    # mirroring the C++ `static_cast<uintN_t>(get_i64(...))`.  Both WRAP an
+    # out-of-range JSON number instead of refusing it, so `channel: 261` became
+    # channel 5, `session_id: 2**32+1` became session 1, `local_address: 65537`
+    # became 1 -- and the validator never saw the value the document carried.
+    # A cast is not a specification; the value must be in [0, max] or it is
+    # refused with out_of_range and stored as 0.
+    #
+    # These keep `get_i64`'s shape (same arguments) so call sites read the same
+    # way, but the range check happens BEFORE any narrowing.
+    def check_unsigned(self, path: str, key: str, v: int, max_value: int) -> int:
+        p = "%s.%s" % (path, key)
+        if v < 0:
+            self.bad(p, ConfigReason.OUT_OF_RANGE,
+                     "must be in [0, %d], got %d (a negative value is refused, "
+                     "never wrapped to fit the field)" % (max_value, v))
+            return 0
+        if v > max_value:
+            self.bad(p, ConfigReason.OUT_OF_RANGE,
+                     "must be in [0, %d], got %d (out of range for this field; "
+                     "refused, not masked)" % (max_value, v))
+            return 0
+        return v
+
+    def get_u64(self, o: Optional[Dict[str, Any]], path: str, key: str,
+                max_value: int = 0xFFFFFFFFFFFFFFFF) -> int:
+        return self.check_unsigned(path, key, self.get_i64(o, path, key), max_value)
+
+    def get_u32(self, o: Optional[Dict[str, Any]], path: str, key: str) -> int:
+        return self.get_u64(o, path, key, 0xFFFFFFFF)
+
+    def get_u16(self, o: Optional[Dict[str, Any]], path: str, key: str) -> int:
+        return self.get_u64(o, path, key, 0xFFFF)
+
+    def get_u8(self, o: Optional[Dict[str, Any]], path: str, key: str) -> int:
+        return self.get_u64(o, path, key, 0xFF)
+
     def get_double(self, o: Optional[Dict[str, Any]], path: str, key: str) -> float:
         v = self.key_of(o, path, key)
         if v is None:
@@ -6277,22 +6327,6 @@ class _ConfigJsonReader:
                          "key is not part of schema %s" % SCHEMA_VERSION)
 
 
-def _u8(v: int) -> int:
-    return v & 0xFF
-
-
-def _u16(v: int) -> int:
-    return v & 0xFFFF
-
-
-def _u32(v: int) -> int:
-    return v & 0xFFFFFFFF
-
-
-def _u64(v: int) -> int:
-    return v & 0xFFFFFFFFFFFFFFFF
-
-
 def _json_type_name(v: Any) -> str:
     if v is None:
         return "null"
@@ -6316,23 +6350,26 @@ def _json_type_name(v: Any) -> str:
 _META_KEYS = ("schema_version", "profile_version", "calibration_version", "label")
 
 
-# The UNSIGNED-WIDTH NARROWING, mirrored from C++.
+# The UNSIGNED-WIDTH NARROWING is RANGE-CHECKED, on both sides (M0.1 / N01).
 # ---------------------------------------------------------------------------
-# The C++ reader assigns with ``static_cast<uint16_t>(get_i64(...))`` and so on.
-# A JSON number outside the field's width is therefore WRAPPED there, not
-# refused, and a wrapped value is what the validator then sees.  Python has no
-# implicit narrowing, so the reader does it explicitly at the same sites.
+# The reader used to assign through ``static_cast<uint16_t>(get_i64(...))`` in
+# C++ and an explicit ``v & 0xFFFF`` mask in Python.  Both WRAPPED a JSON number
+# that did not fit the field: ``channel: 261`` became channel 5, ``session_id:
+# 2**32 + 1`` became session 1, ``local_address: 65537`` became 1, ``-1`` became
+# 65535.  The validator then saw the WRAPPED value, so two different documents
+# could produce the same runtime configuration and the value the document
+# actually carried was lost -- the silent fallback the config contract forbids.
 #
-# It matters: ``"local_address": -1`` is 65535 in C++, which trips the
-# "0xffff is a reserved address" rule; a Python that kept -1 would store a value
-# no C++ build can hold, would hash differently, and would accept a document the
-# authority rejects.  The parity corpus pins the difference (``negative_
-# local_address_is_a_negative_index``).
+# The C++ cast was never the specification; it was a missing check.  Both
+# readers now call a bounded getter (``get_u8`` / ``get_u16`` / ``get_u32`` /
+# ``get_u64``) that REFUSES a value outside ``[0, max]`` with ``out_of_range``
+# and stores 0.  There is deliberately no masking helper left to call: a
+# wrapper such as ``_u16(...)`` around an already-checked value would only be a
+# place for the old behaviour to grow back.
 #
-# The wrap is a property of the FIELD WIDTH, not a licence to invent a value:
-# every check that could reject an out-of-range magnitude still runs afterwards
-# on the narrowed number, and the int64 range check in ``get_i64`` still
-# refuses a literal outside int64 outright.
+# ``-1`` in a uint16 field is therefore a refusal, not the reserved address
+# 0xffff.  The old corpus case that pinned the wrap described behaviour the
+# code never had; it now pins the refusal instead.
 
 _SESSION_KEYS = (
     "protocol", "role", "local_address", "peer_address", "pan_id", "session_id",
@@ -6409,20 +6446,20 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
         s = c.session
         s.protocol = rd.get_enum(g, "session", "protocol", Protocol)
         s.role = rd.get_enum(g, "session", "role", Role)
-        s.local_address = _u16(rd.get_i64(g, "session", "local_address"))
-        s.peer_address = _u16(rd.get_i64(g, "session", "peer_address"))
-        s.pan_id = _u16(rd.get_i64(g, "session", "pan_id"))
-        s.session_id = _u32(rd.get_i64(g, "session", "session_id"))
-        s.exchange_id = _u32(rd.get_i64(g, "session", "exchange_id"))
-        s.sequence = _u8(rd.get_i64(g, "session", "sequence"))
-        s.sequence_modulus = _u16(rd.get_i64(g, "session", "sequence_modulus"))
-        s.measurement_count = _u32(rd.get_i64(g, "session", "measurement_count"))
+        s.local_address = rd.get_u16(g, "session", "local_address")
+        s.peer_address = rd.get_u16(g, "session", "peer_address")
+        s.pan_id = rd.get_u16(g, "session", "pan_id")
+        s.session_id = rd.get_u32(g, "session", "session_id")
+        s.exchange_id = rd.get_u32(g, "session", "exchange_id")
+        s.sequence = rd.get_u8(g, "session", "sequence")
+        s.sequence_modulus = rd.get_u16(g, "session", "sequence_modulus")
+        s.measurement_count = rd.get_u32(g, "session", "measurement_count")
         s.measurement_interval = rd.get_dur(g, "session", "measurement_interval_ns")
-        s.max_attempts_per_exchange = _u32(rd.get_i64(
-            g, "session", "max_attempts_per_exchange"))
+        s.max_attempts_per_exchange = rd.get_u32(
+            g, "session", "max_attempts_per_exchange")
         s.retry_backoff = rd.get_dur(g, "session", "retry_backoff_ns")
-        s.max_in_flight_exchanges = _u32(rd.get_i64(
-            g, "session", "max_in_flight_exchanges"))
+        s.max_in_flight_exchanges = rd.get_u32(
+            g, "session", "max_in_flight_exchanges")
         s.require_pan_match = rd.get_bool(g, "session", "require_pan_match")
         s.require_address_match = rd.get_bool(g, "session", "require_address_match")
 
@@ -6430,11 +6467,11 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
     if g is not None:
         rd.reject_unknown_keys(g, "phy", _PHY_KEYS)
         p = c.phy
-        p.channel = _u8(rd.get_i64(g, "phy", "channel"))
+        p.channel = rd.get_u8(g, "phy", "channel")
         p.center_frequency_hz = rd.get_double(g, "phy", "center_frequency_hz")
-        p.tx_preamble_code = _u8(rd.get_i64(g, "phy", "tx_preamble_code"))
-        p.rx_preamble_code = _u8(rd.get_i64(g, "phy", "rx_preamble_code"))
-        p.preamble_symbols = _u16(rd.get_i64(g, "phy", "preamble_symbols"))
+        p.tx_preamble_code = rd.get_u8(g, "phy", "tx_preamble_code")
+        p.rx_preamble_code = rd.get_u8(g, "phy", "rx_preamble_code")
+        p.preamble_symbols = rd.get_u16(g, "phy", "preamble_symbols")
         p.prf_class = rd.get_enum(g, "phy", "prf_class", PrfClass)
         p.data_rate = rd.get_enum(g, "phy", "data_rate", DataRate)
         # PHR rate, read in the PHR-RATE domain.  A payload-rate name such as
@@ -6448,7 +6485,7 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
         f = c.frame
         f.frame_profile = rd.get_enum(g, "frame", "frame_profile", FrameProfileId)
         f.sfd_mode = rd.get_enum(g, "frame", "sfd_mode", SfdMode)
-        f.sfd_symbols = _u16(rd.get_i64(g, "frame", "sfd_symbols"))
+        f.sfd_symbols = rd.get_u16(g, "frame", "sfd_symbols")
         f.sfd_timeout = rd.get_timed(g, "frame", "sfd_timeout")
         f.phr_mode = rd.get_enum(g, "frame", "phr_mode", PhrMode)
         f.ranging_bit = rd.get_bool(g, "frame", "ranging_bit")
@@ -6461,29 +6498,29 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
         else:
             rd.reject_unknown_keys(geo, "frame.geometry", _GEOMETRY_KEYS)
             gp = "frame.geometry"
-            f.geometry.mac_header_bytes = _u16(rd.get_i64(geo, gp,
-                                                             "mac_header_bytes"))
-            f.geometry.timestamp_bytes = _u16(rd.get_i64(geo, gp,
-                                                            "timestamp_bytes"))
-            f.geometry.mac_footer_bytes = _u16(rd.get_i64(geo, gp,
-                                                            "mac_footer_bytes"))
-            f.geometry.mac_fcs_bytes = _u16(rd.get_i64(geo, gp,
-                                                          "mac_fcs_bytes"))
-            f.geometry.phr_bytes = _u16(rd.get_i64(geo, gp, "phr_bytes"))
-        f.mac_psdu_bytes = _u16(rd.get_i64(g, "frame", "mac_psdu_bytes"))
+            f.geometry.mac_header_bytes = rd.get_u16(geo, gp,
+                                                             "mac_header_bytes")
+            f.geometry.timestamp_bytes = rd.get_u16(geo, gp,
+                                                            "timestamp_bytes")
+            f.geometry.mac_footer_bytes = rd.get_u16(geo, gp,
+                                                            "mac_footer_bytes")
+            f.geometry.mac_fcs_bytes = rd.get_u16(geo, gp,
+                                                          "mac_fcs_bytes")
+            f.geometry.phr_bytes = rd.get_u16(geo, gp, "phr_bytes")
+        f.mac_psdu_bytes = rd.get_u16(g, "frame", "mac_psdu_bytes")
         f.mac_psdu_includes_fcs = rd.get_bool(g, "frame", "mac_psdu_includes_fcs")
         f.fcs_append = rd.get_enum(g, "frame", "fcs_append", FcsAppender)
-        f.fcs_bytes = _u16(rd.get_i64(g, "frame", "fcs_bytes"))
-        f.application_payload_bytes = _u16(rd.get_i64(
-            g, "frame", "application_payload_bytes"))
+        f.fcs_bytes = rd.get_u16(g, "frame", "fcs_bytes")
+        f.application_payload_bytes = rd.get_u16(
+            g, "frame", "application_payload_bytes")
         f.sts_mode = rd.get_enum(g, "frame", "sts_mode", StsMode)
-        f.sts_length_symbols = _u16(rd.get_i64(g, "frame", "sts_length_symbols"))
+        f.sts_length_symbols = rd.get_u16(g, "frame", "sts_length_symbols")
 
     g = rd.group("tx", root)
     if g is not None:
         rd.reject_unknown_keys(g, "tx", _TX_KEYS)
         t = c.tx
-        t.port = _u8(rd.get_i64(g, "tx", "port"))
+        t.port = rd.get_u8(g, "tx", "port")
         t.gain_db = rd.get_opt_double(g, "tx", "gain_db")
         t.iq_amplitude = rd.get_opt_double(g, "tx", "iq_amplitude")
         t.calibrated_tx_power_dbm = rd.get_opt_double(g, "tx",
@@ -6498,15 +6535,15 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
     if g is not None:
         rd.reject_unknown_keys(g, "rx", _RX_KEYS)
         r = c.rx
-        r.port = _u8(rd.get_i64(g, "rx", "port"))
+        r.port = rd.get_u8(g, "rx", "port")
         r.gain_db = rd.get_opt_double(g, "rx", "gain_db")
         r.agc = rd.get_enum(g, "rx", "agc", AgcMode)
         r.bandwidth_hz = rd.get_opt_double(g, "rx", "bandwidth_hz")
         r.detection_threshold = rd.get_double(g, "rx", "detection_threshold")
         r.correlation_threshold = rd.get_double(g, "rx", "correlation_threshold")
         r.first_path_threshold = rd.get_double(g, "rx", "first_path_threshold")
-        r.first_path_index = _u16(rd.get_i64(g, "rx", "first_path_index"))
-        r.first_path_window = _u16(rd.get_i64(g, "rx", "first_path_window"))
+        r.first_path_index = rd.get_u16(g, "rx", "first_path_index")
+        r.first_path_window = rd.get_u16(g, "rx", "first_path_window")
         r.vendor_pac_value = rd.get_opt_u32(g, "rx", "vendor_pac_value")
         r.vendor_pac_backend = rd.get_str(g, "rx", "vendor_pac_backend")
         r.vendor_pac_applied_step = rd.get_opt_double(g, "rx",
@@ -6517,8 +6554,8 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
         rd.reject_unknown_keys(g, "radio", _RADIO_KEYS)
         r = c.radio
         r.device_args = rd.get_str(g, "radio", "device_args")
-        r.tx_channel = _u8(rd.get_i64(g, "radio", "tx_channel"))
-        r.rx_channel = _u8(rd.get_i64(g, "radio", "rx_channel"))
+        r.tx_channel = rd.get_u8(g, "radio", "tx_channel")
+        r.rx_channel = rd.get_u8(g, "radio", "rx_channel")
         r.native_sample_rate_hz = rd.get_double(g, "radio", "native_sample_rate_hz")
         r.clock_source = rd.get_str(g, "radio", "clock_source")
         r.time_source = rd.get_str(g, "radio", "time_source")
@@ -6539,8 +6576,8 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
                 b = EndpointBinding()
                 b.id = rd.get_str(e, pp, "id")
                 b.role = rd.get_enum(e, pp, "role", Role)
-                b.tx_channel = _u8(rd.get_i64(e, pp, "tx_channel"))
-                b.rx_channel = _u8(rd.get_i64(e, pp, "rx_channel"))
+                b.tx_channel = rd.get_u8(e, pp, "tx_channel")
+                b.rx_channel = rd.get_u8(e, pp, "rx_channel")
                 b.native_sample_rate_hz = rd.get_double(e, pp,
                                                         "native_sample_rate_hz")
                 b.occupies_resources = rd.get_bool(e, pp, "occupies_resources")
@@ -6558,8 +6595,8 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
             r.readback.present = rd.get_bool(rb, rp, "present")
             r.readback.sample_rate_hz = rd.get_double(rb, rp, "sample_rate_hz")
             r.readback.center_freq_hz = rd.get_double(rb, rp, "center_freq_hz")
-            r.readback.tx_channel = rd.get_i64(rb, rp, "tx_channel")
-            r.readback.rx_channel = rd.get_i64(rb, rp, "rx_channel")
+            r.readback.tx_channel = rd.get_u8(rb, rp, "tx_channel")
+            r.readback.rx_channel = rd.get_u8(rb, rp, "rx_channel")
             r.readback.mpm_string = rd.get_str(rb, rp, "mpm_string")
             r.readback.fpga_image = rd.get_str(rb, rp, "fpga_image")
             r.readback.uhd_version = rd.get_str(rb, rp, "uhd_version")
@@ -6615,14 +6652,14 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
             rd.reject_unknown_keys(rec, rp, _RECORD_KEYS)
             k.record.calibration_id = rd.get_str(rec, rp, "calibration_id")
             k.record.device_serial = rd.get_str(rec, rp, "device_serial")
-            k.record.channel = _u8(rd.get_i64(rec, rp, "channel"))
+            k.record.channel = rd.get_u8(rec, rp, "channel")
             k.record.native_sample_rate_hz = rd.get_double(
                 rec, rp, "native_sample_rate_hz")
             k.record.profile_version = rd.get_str(rec, rp, "profile_version")
             k.record.gain_db = rd.get_opt_double(rec, rp, "gain_db")
             k.record.valid_until_monotonic_ns = rd.get_i64(
                 rec, rp, "valid_until_monotonic_ns")
-        k.applied_count = _u32(rd.get_i64(g, "calibration", "applied_count"))
+        k.applied_count = rd.get_u32(g, "calibration", "applied_count")
         k.calibration_required = rd.get_bool(g, "calibration",
                                              "calibration_required")
 
@@ -6631,19 +6668,19 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
         rd.reject_unknown_keys(g, "diagnostics", _DIAGNOSTICS_KEYS)
         d = c.diagnostics
         d.cir_capture_enabled = rd.get_bool(g, "diagnostics", "cir_capture_enabled")
-        d.cir_capture_max_bytes = _u64(rd.get_i64(
-            g, "diagnostics", "cir_capture_max_bytes"))
-        d.cir_capture_stride = _u32(rd.get_i64(g, "diagnostics", "cir_capture_stride"))
+        d.cir_capture_max_bytes = rd.get_u64(
+            g, "diagnostics", "cir_capture_max_bytes")
+        d.cir_capture_stride = rd.get_u32(g, "diagnostics", "cir_capture_stride")
         d.short_iq_enabled = rd.get_bool(g, "diagnostics", "short_iq_enabled")
-        d.short_iq_max_bytes = _u64(rd.get_i64(g, "diagnostics", "short_iq_max_bytes"))
-        d.short_iq_stride = _u32(rd.get_i64(g, "diagnostics", "short_iq_stride"))
+        d.short_iq_max_bytes = rd.get_u64(g, "diagnostics", "short_iq_max_bytes")
+        d.short_iq_stride = rd.get_u32(g, "diagnostics", "short_iq_stride")
         d.raw_frame_dump = rd.get_bool(g, "diagnostics", "raw_frame_dump")
-        d.raw_frame_max_bytes = _u64(rd.get_i64(g, "diagnostics", "raw_frame_max_bytes"))
+        d.raw_frame_max_bytes = rd.get_u64(g, "diagnostics", "raw_frame_max_bytes")
         d.result_output_path = rd.get_str(g, "diagnostics", "result_output_path")
-        d.result_queue_capacity = _u32(rd.get_i64(
-            g, "diagnostics", "result_queue_capacity"))
-        d.event_queue_capacity = _u32(rd.get_i64(
-            g, "diagnostics", "event_queue_capacity"))
+        d.result_queue_capacity = rd.get_u32(
+            g, "diagnostics", "result_queue_capacity")
+        d.event_queue_capacity = rd.get_u32(
+            g, "diagnostics", "event_queue_capacity")
         d.stats_cadence = rd.get_timed(g, "diagnostics", "stats_cadence")
         d.io_on_realtime_thread = rd.get_bool(g, "diagnostics",
                                               "io_on_realtime_thread")

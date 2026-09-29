@@ -1,7 +1,8 @@
 """External consumer for the INSTALLED uwb.twr_config module.
 
 Companion to install_consumer.cc.  Run with PYTHONPATH set to the install
-prefix's site-packages and the source checkout deliberately NOT on the path, so
+prefix's configured Python install directory and the source checkout
+deliberately NOT on the path, so
 a twr_config.py missing from GR_PYTHON_INSTALL(...) is a hard failure rather
 than something the source tree quietly satisfies.
 
@@ -14,9 +15,12 @@ Checks the M0 contract the installed module must honour:
   * the public API surface named by REQ-API-01 is present.
 
 The module is installed as `gnuradio/uwb/twr_config.py` inside the prefix's
-site-packages, next to the package `__init__.py` and the pybind11 extension --
-i.e. in exactly the directory `import uwb.twr_config` / `from gnuradio.uwb
-import twr_config` resolves through.
+configured Python install directory, next to the package `__init__.py` and the
+pybind11 extension -- i.e. in exactly the directory `import uwb.twr_config` /
+`from gnuradio.uwb import twr_config` resolves through.  That directory is
+`dist-packages` on a stock local install (review defect N05: the shell wrapper
+used to hardcode `site-packages`); the wrapper/CTest pass the actually
+configured directory rather than guessing.
 
 Why this consumer imports it as a TOP-LEVEL `uwb` package rather than as
 `gnuradio.uwb`:
@@ -26,7 +30,8 @@ Why this consumer imports it as a TOP-LEVEL `uwb` package rather than as
     from an earlier `sudo install`, and that root is found FIRST, so a
     `gnuradio.uwb` import would silently exercise the OLD install and prove
     nothing about this prefix.  Importing `uwb` directly from the prefix's
-    site-packages puts the prefix in control of the name resolution.
+    configured Python install directory puts the prefix in control of the
+    name resolution.
   * `twr_config` is deliberately importable with NO GNU Radio and NO pybind11
     extension (its own design contract).  Going through `gnuradio.uwb.__init__`
     would import the extension first, which is the opposite of what is being
@@ -62,8 +67,15 @@ print("  schema=%s profile=%s channels=%s sync_reps=%s phy_rows=%d"
       % (caps.schema_version, caps.profile_version, caps.channels,
          caps.sync_repetitions, len(caps.phy_matrix)))
 
-# The M0 measured profile must be intact after installation.
-assert caps.schema_version == "twr-config/1", caps.schema_version
+# The M0.1 measured profile must be intact after installation.  The schema is
+# CURRENT (`twr-config/2`); a stale "twr-config/1" expectation here is review
+# defect N05.
+assert caps.schema_version == T.SCHEMA_VERSION, (
+    "installed module advertises %r but its own SCHEMA_VERSION is %r"
+    % (caps.schema_version, T.SCHEMA_VERSION))
+assert caps.schema_version == "twr-config/2", caps.schema_version
+assert T.LEGACY_SCHEMA_VERSIONS == ("twr-config/1",), T.LEGACY_SCHEMA_VERSIONS
+assert "BREAKING" in T.SCHEMA_V1_MIGRATION_REASON, T.SCHEMA_V1_MIGRATION_REASON
 assert caps.channels == [5], caps.channels
 assert caps.sync_repetitions == [16, 64], caps.sync_repetitions
 assert len(caps.phy_matrix) == 48, len(caps.phy_matrix)

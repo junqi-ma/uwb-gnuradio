@@ -5718,6 +5718,85 @@ public:
         }
         return v->integer;
     }
+
+    // -- range-checked unsigned narrowing (M0.1 / N01) --------------------
+    //
+    // The reader used to assign through `static_cast<uint16_t>(get_i64(...))`,
+    // which WRAPS an out-of-range JSON number instead of refusing it: channel
+    // 261 became channel 5, session 2^32+1 became session 1, local_address
+    // 65537 became 1.  The validator then never saw the value the document
+    // actually carried, and two different documents could produce the same
+    // runtime configuration -- exactly the silent fallback REQ-CFG forbids and
+    // the reason `session_id_to_wire()` exists.
+    //
+    // A C++ cast is not a specification.  These getters are: the value must be
+    // in [0, max] or it is refused with `out_of_range` and stored as 0.  They
+    // keep `get_i64`'s shape (same arguments) so the call sites read the same
+    // way, but the range check happens BEFORE any narrowing.
+    bool check_unsigned(const std::string& path, const char* key, int64_t v,
+                        uint64_t max_value, uint64_t& out)
+    {
+        // Formatted unsigned: `twr_int_to_text` takes an int64_t, so passing a
+        // uint64_t max would print a negative bound.
+        const std::string bound = std::to_string(
+            static_cast<unsigned long long>(max_value));
+        if (v < 0) {
+            bad(path + "." + key, ConfigReason::OutOfRange,
+                "must be in [0, " + bound + "], got " + twr_int_to_text(v) +
+                    " (a negative value is refused, never wrapped to fit the field)");
+            out = 0u;
+            return false;
+        }
+        const uint64_t u = static_cast<uint64_t>(v);
+        if (u > max_value) {
+            bad(path + "." + key, ConfigReason::OutOfRange,
+                "must be in [0, " + bound + "], got " + twr_int_to_text(v) +
+                    " (out of range for this field; refused, not masked)");
+            out = 0u;
+            return false;
+        }
+        out = u;
+        return true;
+    }
+
+    uint64_t get_u64(const json::Value* o, const std::string& path, const char* key,
+                     uint64_t max_value)
+    {
+        const json::Value* v = key_of(o, path, key);
+        if (!v)
+            return 0u;
+        int64_t raw = 0;
+        if (v->type == json::Type::String) {
+            if (!parse_int64_strict(v->text, raw)) {
+                bad(path + "." + key, ConfigReason::IntegerPrecisionLoss,
+                    "string is not a decimal int64: '" + v->text + "'");
+                return 0u;
+            }
+        } else if (v->type != json::Type::Int) {
+            bad(path + "." + key, ConfigReason::TypeMismatch,
+                "expected an integer, got " + std::string(v->type_name()) +
+                    " (a decimal fraction or exponent is never truncated silently)");
+            return 0u;
+        } else {
+            raw = v->integer;
+        }
+        uint64_t out = 0u;
+        check_unsigned(path, key, raw, max_value, out);
+        return out;
+    }
+
+    uint8_t get_u8(const json::Value* o, const std::string& path, const char* key)
+    {
+        return static_cast<uint8_t>(get_u64(o, path, key, 0xFFu));
+    }
+    uint16_t get_u16(const json::Value* o, const std::string& path, const char* key)
+    {
+        return static_cast<uint16_t>(get_u64(o, path, key, 0xFFFFu));
+    }
+    uint32_t get_u32(const json::Value* o, const std::string& path, const char* key)
+    {
+        return static_cast<uint32_t>(get_u64(o, path, key, 0xFFFFFFFFu));
+    }
     double get_double(const json::Value* o, const std::string& path, const char* key)
     {
         const json::Value* v = key_of(o, path, key);
@@ -6018,26 +6097,26 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
                 protocol_from_string);
             c.session.role = rd.get_enum<Role>(g, p, "role", role_from_string);
             c.session.local_address =
-                static_cast<uint16_t>(rd.get_i64(g, p, "local_address"));
-            c.session.peer_address = static_cast<uint16_t>(rd.get_i64(g, p,
+                static_cast<uint16_t>(rd.get_u16(g, p, "local_address"));
+            c.session.peer_address = static_cast<uint16_t>(rd.get_u16(g, p,
                 "peer_address"));
-            c.session.pan_id = static_cast<uint16_t>(rd.get_i64(g, p, "pan_id"));
-            c.session.session_id = static_cast<uint32_t>(rd.get_i64(g, p,
+            c.session.pan_id = static_cast<uint16_t>(rd.get_u16(g, p, "pan_id"));
+            c.session.session_id = static_cast<uint32_t>(rd.get_u32(g, p,
                 "session_id"));
-            c.session.exchange_id = static_cast<uint32_t>(rd.get_i64(g, p,
+            c.session.exchange_id = static_cast<uint32_t>(rd.get_u32(g, p,
                 "exchange_id"));
-            c.session.sequence = static_cast<uint8_t>(rd.get_i64(g, p, "sequence"));
+            c.session.sequence = static_cast<uint8_t>(rd.get_u8(g, p, "sequence"));
             c.session.sequence_modulus =
-                static_cast<uint16_t>(rd.get_i64(g, p, "sequence_modulus"));
+                static_cast<uint16_t>(rd.get_u16(g, p, "sequence_modulus"));
             c.session.measurement_count =
-                static_cast<uint32_t>(rd.get_i64(g, p, "measurement_count"));
+                static_cast<uint32_t>(rd.get_u32(g, p, "measurement_count"));
             c.session.measurement_interval = rd.get_dur(g, p,
                 "measurement_interval_ns");
             c.session.max_attempts_per_exchange =
-                static_cast<uint32_t>(rd.get_i64(g, p, "max_attempts_per_exchange"));
+                static_cast<uint32_t>(rd.get_u32(g, p, "max_attempts_per_exchange"));
             c.session.retry_backoff = rd.get_dur(g, p, "retry_backoff_ns");
             c.session.max_in_flight_exchanges =
-                static_cast<uint32_t>(rd.get_i64(g, p, "max_in_flight_exchanges"));
+                static_cast<uint32_t>(rd.get_u32(g, p, "max_in_flight_exchanges"));
             c.session.require_pan_match = rd.get_bool(g, p, "require_pan_match");
             c.session.require_address_match = rd.get_bool(g, p,
                 "require_address_match");
@@ -6052,13 +6131,13 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
                 "preamble_symbols", "prf_class", "data_rate", "phr_rate", nullptr
             };
             rd.reject_unknown_keys(g, p, kKeys);
-            c.phy.channel = static_cast<uint8_t>(rd.get_i64(g, p, "channel"));
+            c.phy.channel = static_cast<uint8_t>(rd.get_u8(g, p, "channel"));
             c.phy.center_frequency_hz = rd.get_double(g, p, "center_frequency_hz");
-            c.phy.tx_preamble_code = static_cast<uint8_t>(rd.get_i64(g, p,
+            c.phy.tx_preamble_code = static_cast<uint8_t>(rd.get_u8(g, p,
                 "tx_preamble_code"));
-            c.phy.rx_preamble_code = static_cast<uint8_t>(rd.get_i64(g, p,
+            c.phy.rx_preamble_code = static_cast<uint8_t>(rd.get_u8(g, p,
                 "rx_preamble_code"));
-            c.phy.preamble_symbols = static_cast<uint16_t>(rd.get_i64(g, p,
+            c.phy.preamble_symbols = static_cast<uint16_t>(rd.get_u16(g, p,
                 "preamble_symbols"));
             c.phy.prf_class = rd.get_enum<PrfClass>(g, p, "prf_class",
                 prf_class_from_string);
@@ -6086,7 +6165,7 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
                 frame_profile_id_from_string);
             c.frame.sfd_mode = rd.get_enum<SfdMode>(g, p, "sfd_mode",
                 sfd_mode_from_string);
-            c.frame.sfd_symbols = static_cast<uint16_t>(rd.get_i64(g, p,
+            c.frame.sfd_symbols = static_cast<uint16_t>(rd.get_u16(g, p,
                 "sfd_symbols"));
             c.frame.sfd_timeout = rd.get_timed(g, p, "sfd_timeout");
             c.frame.phr_mode = rd.get_enum<PhrMode>(g, p, "phr_mode",
@@ -6106,33 +6185,33 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
                                                     "phr_bytes", nullptr };
                 rd.reject_unknown_keys(geo, p + ".geometry", kGeo);
                 c.frame.geometry.mac_header_bytes =
-                    static_cast<uint16_t>(rd.get_i64(geo, p + ".geometry",
+                    static_cast<uint16_t>(rd.get_u16(geo, p + ".geometry",
                         "mac_header_bytes"));
                 c.frame.geometry.timestamp_bytes =
-                    static_cast<uint16_t>(rd.get_i64(geo, p + ".geometry",
+                    static_cast<uint16_t>(rd.get_u16(geo, p + ".geometry",
                         "timestamp_bytes"));
                 c.frame.geometry.mac_footer_bytes =
-                    static_cast<uint16_t>(rd.get_i64(geo, p + ".geometry",
+                    static_cast<uint16_t>(rd.get_u16(geo, p + ".geometry",
                         "mac_footer_bytes"));
                 c.frame.geometry.mac_fcs_bytes =
-                    static_cast<uint16_t>(rd.get_i64(geo, p + ".geometry",
+                    static_cast<uint16_t>(rd.get_u16(geo, p + ".geometry",
                         "mac_fcs_bytes"));
                 c.frame.geometry.phr_bytes =
-                    static_cast<uint16_t>(rd.get_i64(geo, p + ".geometry",
+                    static_cast<uint16_t>(rd.get_u16(geo, p + ".geometry",
                         "phr_bytes"));
             }
-            c.frame.mac_psdu_bytes = static_cast<uint16_t>(rd.get_i64(g, p,
+            c.frame.mac_psdu_bytes = static_cast<uint16_t>(rd.get_u16(g, p,
                 "mac_psdu_bytes"));
             c.frame.mac_psdu_includes_fcs = rd.get_bool(g, p, "mac_psdu_includes_fcs");
             c.frame.fcs_append =
                 rd.get_enum<FcsAppender>(g, p, "fcs_append", fcs_appender_from_string);
-            c.frame.fcs_bytes = static_cast<uint16_t>(rd.get_i64(g, p, "fcs_bytes"));
+            c.frame.fcs_bytes = static_cast<uint16_t>(rd.get_u16(g, p, "fcs_bytes"));
             c.frame.application_payload_bytes =
-                static_cast<uint16_t>(rd.get_i64(g, p, "application_payload_bytes"));
+                static_cast<uint16_t>(rd.get_u16(g, p, "application_payload_bytes"));
             c.frame.sts_mode = rd.get_enum<StsMode>(g, p, "sts_mode",
                 sts_mode_from_string);
             c.frame.sts_length_symbols =
-                static_cast<uint16_t>(rd.get_i64(g, p, "sts_length_symbols"));
+                static_cast<uint16_t>(rd.get_u16(g, p, "sts_length_symbols"));
         }
     }
     {
@@ -6144,7 +6223,7 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
                 "pulse_shaping", "vendor_power_word", "vendor_power_word_backend", nullptr
             };
             rd.reject_unknown_keys(g, p, kKeys);
-            c.tx.port = static_cast<uint8_t>(rd.get_i64(g, p, "port"));
+            c.tx.port = static_cast<uint8_t>(rd.get_u8(g, p, "port"));
             c.tx.gain_db = rd.get_opt_double(g, p, "gain_db");
             c.tx.iq_amplitude = rd.get_opt_double(g, p, "iq_amplitude");
             c.tx.calibrated_tx_power_dbm = rd.get_opt_double(g, p,
@@ -6171,16 +6250,16 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
                 "vendor_pac_applied_step", nullptr
             };
             rd.reject_unknown_keys(g, p, kKeys);
-            c.rx.port = static_cast<uint8_t>(rd.get_i64(g, p, "port"));
+            c.rx.port = static_cast<uint8_t>(rd.get_u8(g, p, "port"));
             c.rx.gain_db = rd.get_opt_double(g, p, "gain_db");
             c.rx.agc = rd.get_enum<AgcMode>(g, p, "agc", agc_mode_from_string);
             c.rx.bandwidth_hz = rd.get_opt_double(g, p, "bandwidth_hz");
             c.rx.detection_threshold = rd.get_double(g, p, "detection_threshold");
             c.rx.correlation_threshold = rd.get_double(g, p, "correlation_threshold");
             c.rx.first_path_threshold = rd.get_double(g, p, "first_path_threshold");
-            c.rx.first_path_index = static_cast<uint16_t>(rd.get_i64(g, p,
+            c.rx.first_path_index = static_cast<uint16_t>(rd.get_u16(g, p,
                 "first_path_index"));
-            c.rx.first_path_window = static_cast<uint16_t>(rd.get_i64(g, p,
+            c.rx.first_path_window = static_cast<uint16_t>(rd.get_u16(g, p,
                 "first_path_window"));
             c.rx.vendor_pac_value = rd.get_opt_u32(g, p, "vendor_pac_value");
             c.rx.vendor_pac_backend = rd.get_str(g, p, "vendor_pac_backend");
@@ -6199,8 +6278,8 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
             };
             rd.reject_unknown_keys(g, p, kKeys);
             c.radio.device_args = rd.get_str(g, p, "device_args");
-            c.radio.tx_channel = static_cast<uint8_t>(rd.get_i64(g, p, "tx_channel"));
-            c.radio.rx_channel = static_cast<uint8_t>(rd.get_i64(g, p, "rx_channel"));
+            c.radio.tx_channel = static_cast<uint8_t>(rd.get_u8(g, p, "tx_channel"));
+            c.radio.rx_channel = static_cast<uint8_t>(rd.get_u8(g, p, "rx_channel"));
             c.radio.native_sample_rate_hz = rd.get_double(g, p,
                 "native_sample_rate_hz");
             c.radio.clock_source = rd.get_str(g, p, "clock_source");
@@ -6229,9 +6308,9 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
                     EndpointBinding b;
                     b.id = rd.get_str(&e, pp, "id");
                     b.role = rd.get_enum<Role>(&e, pp, "role", role_from_string);
-                    b.tx_channel = static_cast<uint8_t>(rd.get_i64(&e, pp,
+                    b.tx_channel = static_cast<uint8_t>(rd.get_u8(&e, pp,
                         "tx_channel"));
-                    b.rx_channel = static_cast<uint8_t>(rd.get_i64(&e, pp,
+                    b.rx_channel = static_cast<uint8_t>(rd.get_u8(&e, pp,
                         "rx_channel"));
                     b.native_sample_rate_hz = rd.get_double(&e, pp,
                         "native_sample_rate_hz");
@@ -6259,9 +6338,9 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
                     "sample_rate_hz");
                 c.radio.readback.center_freq_hz = rd.get_double(rb, rp,
                     "center_freq_hz");
-                c.radio.readback.tx_channel = static_cast<uint8_t>(rd.get_i64(rb, rp,
+                c.radio.readback.tx_channel = static_cast<uint8_t>(rd.get_u8(rb, rp,
                     "tx_channel"));
-                c.radio.readback.rx_channel = static_cast<uint8_t>(rd.get_i64(rb, rp,
+                c.radio.readback.rx_channel = static_cast<uint8_t>(rd.get_u8(rb, rp,
                     "rx_channel"));
                 c.radio.readback.mpm_string = rd.get_str(rb, rp, "mpm_string");
                 c.radio.readback.fpga_image = rd.get_str(rb, rp, "fpga_image");
@@ -6357,7 +6436,7 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
                     "calibration_id");
                 c.calibration.record.device_serial = rd.get_str(rec, rp,
                     "device_serial");
-                c.calibration.record.channel = static_cast<uint8_t>(rd.get_i64(rec, rp,
+                c.calibration.record.channel = static_cast<uint8_t>(rd.get_u8(rec, rp,
                     "channel"));
                 c.calibration.record.native_sample_rate_hz =
                     rd.get_double(rec, rp, "native_sample_rate_hz");
@@ -6367,7 +6446,7 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
                 c.calibration.record.valid_until_monotonic_ns =
                     rd.get_i64(rec, rp, "valid_until_monotonic_ns");
             }
-            c.calibration.applied_count = static_cast<uint32_t>(rd.get_i64(g, p,
+            c.calibration.applied_count = static_cast<uint32_t>(rd.get_u32(g, p,
                 "applied_count"));
             c.calibration.calibration_required = rd.get_bool(g, p,
                 "calibration_required");
@@ -6389,22 +6468,22 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
             c.diagnostics.cir_capture_enabled = rd.get_bool(g, p,
                 "cir_capture_enabled");
             c.diagnostics.cir_capture_max_bytes =
-                static_cast<uint64_t>(rd.get_i64(g, p, "cir_capture_max_bytes"));
+                static_cast<uint64_t>(rd.get_u64(g, p, "cir_capture_max_bytes", 0xFFFFFFFFFFFFFFFFull));
             c.diagnostics.cir_capture_stride =
-                static_cast<uint32_t>(rd.get_i64(g, p, "cir_capture_stride"));
+                static_cast<uint32_t>(rd.get_u32(g, p, "cir_capture_stride"));
             c.diagnostics.short_iq_enabled = rd.get_bool(g, p, "short_iq_enabled");
             c.diagnostics.short_iq_max_bytes =
-                static_cast<uint64_t>(rd.get_i64(g, p, "short_iq_max_bytes"));
+                static_cast<uint64_t>(rd.get_u64(g, p, "short_iq_max_bytes", 0xFFFFFFFFFFFFFFFFull));
             c.diagnostics.short_iq_stride =
-                static_cast<uint32_t>(rd.get_i64(g, p, "short_iq_stride"));
+                static_cast<uint32_t>(rd.get_u32(g, p, "short_iq_stride"));
             c.diagnostics.raw_frame_dump = rd.get_bool(g, p, "raw_frame_dump");
             c.diagnostics.raw_frame_max_bytes =
-                static_cast<uint64_t>(rd.get_i64(g, p, "raw_frame_max_bytes"));
+                static_cast<uint64_t>(rd.get_u64(g, p, "raw_frame_max_bytes", 0xFFFFFFFFFFFFFFFFull));
             c.diagnostics.result_output_path = rd.get_str(g, p, "result_output_path");
             c.diagnostics.result_queue_capacity =
-                static_cast<uint32_t>(rd.get_i64(g, p, "result_queue_capacity"));
+                static_cast<uint32_t>(rd.get_u32(g, p, "result_queue_capacity"));
             c.diagnostics.event_queue_capacity =
-                static_cast<uint32_t>(rd.get_i64(g, p, "event_queue_capacity"));
+                static_cast<uint32_t>(rd.get_u32(g, p, "event_queue_capacity"));
             c.diagnostics.stats_cadence = rd.get_timed(g, p, "stats_cadence");
             c.diagnostics.io_on_realtime_thread = rd.get_bool(g, p,
                 "io_on_realtime_thread");

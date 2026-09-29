@@ -74,6 +74,55 @@ if(PYTHONINTERP_FOUND)
 endif()
 
 ########################################################################
+# Installed-Consumer release gate (M0 review R8 / P2, review defect N05).
+#
+# install_consumer/ proves the INSTALLED public API is usable and DEFAULT
+# DENY: it compiles install_consumer.cc and runs install_consumer.py against
+# an install prefix and NOTHING else, exercising `uwb_twr_tof_input.h`'s
+# `admit_range_capable_time()` / `admit_ranging_interval()` rather than merely
+# including the header.  It was never registered with CTest, so a green
+# `ctest` said nothing about the installed deliverable -- the reviewer found
+# the two consumers stale (`twr-config/1`) and the admission header missing
+# from the prefix.
+#
+# The prefix is supplied at configure time (after an install) because an
+# ordinary developer build has no installed prefix to test.  When
+# UWB_TWR_INSTALL_PREFIX is empty, or the prefix has no installed headers, the
+# wrapper prints why and exits 77; SKIP_RETURN_CODE turns that into a SKIPPED
+# CTest case rather than a failure, so the normal build is never broken by the
+# absence of an install.  To make it part of the release gate:
+#
+#   cmake -S gr-uwb -B build -DUWB_TWR_INSTALL_PREFIX=<prefix>
+#   ctest --test-dir build -R uwb_qa_install_consumer
+#
+# GR_PYTHON_DIR is the configured Python install directory (dist-packages on a
+# stock local install), passed so the wrapper does not have to guess
+# site-packages.
+########################################################################
+set(UWB_TWR_INSTALL_PREFIX "" CACHE PATH
+    "Prefix of an installed gr-uwb used by the install_consumer release gate; \
+empty means the case is SKIPPED")
+if(PYTHONINTERP_FOUND AND UNIX)
+    add_test(NAME uwb_qa_install_consumer
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/install_consumer/run_install_consumer.sh
+                --prefix "${UWB_TWR_INSTALL_PREFIX}"
+                --python-rel "${GR_PYTHON_DIR}"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/install_consumer)
+    set_tests_properties(uwb_qa_install_consumer PROPERTIES
+        TIMEOUT 300
+        # 77 == "no installed prefix available".  CTest reports SKIPPED
+        # instead of FAILED, so the plain developer build stays green.
+        SKIP_RETURN_CODE 77
+        # The consumer compiles and imports against an install prefix that may
+        # live outside the build tree; keep it alone for the same
+        # stale-LD_LIBRARY_PATH / stale-install reasons as the Python QA.
+        RUN_SERIAL TRUE)
+
+    message(STATUS "UWB CTest: registered uwb_qa_install_consumer "
+                   "(prefix='${UWB_TWR_INSTALL_PREFIX}'; empty => SKIP)")
+endif()
+
+########################################################################
 # Standalone detector benchmark (开发需求参考.md §10)
 ########################################################################
 add_executable(benchmark_detector benchmark_detector.cc)

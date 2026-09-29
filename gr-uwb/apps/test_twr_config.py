@@ -3250,6 +3250,65 @@ class TestValueIsolation(TwrConfigTestBase):
         with self.assertRaises(AttributeError):
             snap.caps = T.capabilities()
 
+    def test_capability_freeze_cannot_be_undone_through_public_api(self):
+        """N06: no public method unfreezes a table that is in use.
+
+        The removed bypass needed no private access at all::
+
+            s.caps.thaw()          # public, unfroze IN PLACE
+            s.caps.channels.append(9)   # now accepted
+
+        which made the validation basis of a running exchange mutable.  There is
+        no public in-place unfreeze any more: the only way to obtain a mutable
+        table is ``mutable_copy()``, and it returns a NEW object.
+        """
+        snap, _ = self._snapshot_of()
+        frozen = snap.caps
+        self.assertTrue(frozen.read_only)
+        before_channels = list(frozen.channels)
+        before_rows = len(frozen.phy_matrix)
+
+        # (1) There is no public in-place unfreeze left to call.
+        for name in ("thaw", "unfreeze", "melt", "_thaw"):
+            self.assertFalse(hasattr(frozen, name),
+                             "Capabilities.%s is a public unfreeze" % name)
+
+        # (2) Exercise EVERY public method that takes no arguments.  A refusal
+        #     is fine; a mutation is not.
+        for name in dir(type(frozen)):
+            if name.startswith("_"):
+                continue
+            attr = getattr(frozen, name)
+            if not callable(attr):
+                continue
+            try:
+                attr()
+            except TypeError:
+                pass        # needs arguments; the mutators do not
+            except Exception:
+                pass        # a refusal of any kind is acceptable here
+        self.assertTrue(
+            frozen.read_only,
+            "a public method unfroze the snapshot's capability table")
+        self.assertEqual(list(frozen.channels), before_channels)
+        self.assertEqual(len(frozen.phy_matrix), before_rows)
+
+        # (3) mutable_copy() is INDEPENDENT: widening it must reach neither the
+        #     snapshot nor the process-wide shipped table.
+        mine = frozen.mutable_copy()
+        self.assertFalse(mine.read_only)
+        mine.channels.append(9)
+        mine.sync_repetitions.append(128)
+        mine.phy_matrix.clear()
+        self.assertEqual(list(frozen.channels), before_channels)
+        self.assertEqual(len(frozen.phy_matrix), before_rows)
+        self.assertEqual(snap.caps.channels, before_channels)
+        self.assertEqual(T.capabilities().channels, [5])
+        self.assertEqual(T.capabilities().sync_repetitions, [16, 64])
+        self.assertEqual(len(T.capabilities().phy_matrix), 48)
+        # copy() is the same entry point; a builder gets a mutable table.
+        self.assertFalse(frozen.copy().read_only)
+
     # -- 3. the capability table is a value too --------------------------
     def test_shipped_capability_table_refuses_every_mutation_attempt(self):
         good = _minimal()
@@ -4030,32 +4089,73 @@ class TestM01Vocabulary(TwrConfigTestBase):
         self.assertFalse(miss.allowed)
         self.assertTrue(miss.evidence_not_established)
 
-    def test_unsigned_fields_narrow_exactly_like_cxx(self):
+    def test_unsigned_fields_refuse_out_of_range_instead_of_wrapping(self):
         """A 16-bit wire field is 16 bits on BOTH sides of the language line.
 
-        C++ assigns with ``static_cast<uint16_t>(get_i64(...))``, so a JSON
-        number outside the field's width is WRAPPED there rather than refused,
-        and the validator then sees the wrapped value.  A Python that kept -1
-        would hold a number no C++ build can, would hash differently, and would
-        accept a document the authority rejects.
+        This test used to assert the OPPOSITE: that the reader WRAPS a JSON
+        number outside the field's width, "mirroring" the C++
+        ``static_cast<uintN_t>(get_i64(...))``.  A cast is not a specification.
+        ``channel: 261`` silently becoming channel 5, ``session_id: 2**32 + 1``
+        becoming session 1 and ``local_address: -1`` becoming the reserved
+        address 0xffff are precisely the silent fallback the contract forbids:
+        two different documents must not produce one runtime configuration, and
+        the value the document carried must be refused rather than folded.
+
+        The second case in each pair is the one a mask would ACCEPT by landing
+        back inside the range, which is why "one past the top" alone is not
+        enough coverage.
         """
-        doc = T.to_json_dict(_minimal())
-        doc["session"]["local_address"] = -1
-        cfg, rep = T.from_json_dict(doc)
-        self.assertTrue(rep.ok(), rep.to_string())
-        self.assertEqual(cfg.session.local_address, 0xFFFF)
-        self.assert_has(T.validate(cfg), "session.local_address",
-                        T.ConfigReason.FIELD_CONFLICT)
-        # Every unsigned width behaves the same way.
-        for path, width in (("session.pan_id", 16), ("session.session_id", 32),
-                            ("phy.channel", 8), ("phy.preamble_symbols", 16),
-                            ("frame.mac_psdu_bytes", 16), ("tx.port", 8)):
+        cases = (
+            ("session.local_address", 0x10000),
+            ("session.local_address", 0x10000 + 1),
+            ("session.local_address", -1),
+            ("session.pan_id", 0x10000),
+            ("session.session_id", 0x100000000),
+            ("session.session_id", 0x100000000 + 1),
+            ("session.session_id", -1),
+            ("phy.channel", 256),
+            ("phy.channel", 256 + 5),
+            ("phy.channel", -1),
+            ("phy.preamble_symbols", 0x10000),
+            ("frame.mac_psdu_bytes", 0x10000),
+        )
+        for path, value in cases:
             d = T.to_json_dict(_minimal())
-            T._u8  # the helpers are module-private but must exist
-            d[".".join(path.split(".")[:-1])][path.split(".")[-1]] = -1
-            got, rep2 = T.from_json_dict(d)
-            self.assertTrue(rep2.ok(), "%s: %s" % (path, rep2.to_string()))
-            self.assertEqual(getattr_path(got, path), (1 << width) - 1, path)
+            grp, leaf = path.rsplit(".", 1)
+            d[grp][leaf] = value
+            got, rep = T.from_json_dict(d)
+            p = "%s.%s" % (grp, leaf)
+            self.assertFalse(rep.ok(), "%s = %r was ACCEPTED" % (path, value))
+            v = rep.find(p, T.ConfigReason.OUT_OF_RANGE)
+            self.assertIsNotNone(
+                v, "%s = %r must fail with out_of_range: %s"
+                % (path, value, rep.to_string()))
+            self.assertTrue("not masked" in v.message
+                            or "never wrapped" in v.message,
+                            "%s = %r: refusal must say it did not fold the "
+                            "value: %s" % (path, value, v.message))
+        # (The reader stores 0 on refusal, so "did it store the folded value"
+        # is checked below against the specific foldings that USED to happen;
+        # comparing against an arbitrary mask here would pass trivially
+        # whenever the folded value also happens to be 0.)
+        # The four inputs that used to walk straight through are now refused,
+        # at the reader, before the validator ever sees them.
+        for path, value, wrapped in (
+                ("phy.channel", 261, 5),
+                ("session.session_id", 2 ** 32 + 1, 1),
+                ("session.local_address", 65537, 1),
+                ("session.local_address", -1, 0xFFFF)):
+            d = T.to_json_dict(_minimal())
+            grp, leaf = path.rsplit(".", 1)
+            d[grp][leaf] = value
+            got, rep = T.from_json_dict(d)
+            self.assertFalse(rep.ok(), "%s = %r was ACCEPTED" % (path, value))
+            self.assertIsNotNone(
+                rep.find("%s.%s" % (grp, leaf), T.ConfigReason.OUT_OF_RANGE),
+                "%s = %r: %s" % (path, value, rep.to_string()))
+            self.assertNotEqual(getattr_path(got, path), wrapped,
+                                "%s = %r wrapped to %d"
+                                % (path, value, wrapped))
         # And a literal outside int64 is refused outright, not wrapped.
         d = T.to_json_dict(_minimal())
         d["session"]["session_id"] = 2 ** 70
@@ -4402,7 +4502,21 @@ REQUIRED_CORPUS_CASES = {
     "report_delay_is_reserved": "and so is the Report delay",
     "two_in_flight_exchanges_are_refused": "one exchange in flight, per endpoint",
     "local_and_peer_address_identical": "identical addresses match everything",
-    "negative_local_address_is_a_negative_index": "a uint16 field wraps like C++",
+    "negative_local_address_is_refused_not_wrapped": "a negative uint16 is refused, not wrapped",
+    # N01: the reader must range-check before narrowing.  A value one modulus
+    # past a legal one is the case a mask accepts by landing back in range.
+    "channel_uint8_max_plus_one_is_refused": "uint8 overflow is refused",
+    "channel_one_modulus_past_a_legal_value_is_refused":
+        "one modulus past a legal channel still folds nowhere",
+    "session_id_one_modulus_past_uint32_is_refused": "uint32 overflow is refused",
+    "local_address_one_past_uint16_is_refused": "uint16 overflow is refused",
+    "pan_id_one_past_uint16_is_refused": "the PAN field has the same rule",
+    "sequence_uint8_max_plus_one_is_refused": "and so does the sequence",
+    "geometry_mac_header_bytes_out_of_uint16_is_refused":
+        "geometry is checked, but only after the value fits its field",
+    "negative_tx_port_is_refused_not_wrapped": "unsigned means unsigned",
+    "sequence_uint8_max_is_accepted_at_the_boundary":
+        "the bound is inclusive, not exclusive",
     # non-finite
     "non_finite_phy_center_frequency_hz": "NaN in the centre frequency",
     "non_finite_radio_native_sample_rate_hz": "NaN in the native sample rate",
