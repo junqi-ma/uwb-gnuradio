@@ -1,0 +1,65 @@
+scope,profile,item,value,unit,status,source
+SS_responder_after_Poll,64SYNC_4z2_noSTS,rmarker_assumed_at_PreambleStart,0,work_samples,ASSUMPTION,internal marker only; absolute RMARKER convention OPEN (M2/M5)
+SS_responder_after_Poll,64SYNC_4z2_noSTS,rx_marker_to_PreambleStart,0,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+SS_responder_after_Poll,64SYNC_4z2_noSTS,rx_marker_to_SfdStart,65.1282051282,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+SS_responder_after_Poll,64SYNC_4z2_noSTS,rx_marker_to_PHRStart,73.2692307692,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+SS_responder_after_Poll,64SYNC_4z2_noSTS,rx_marker_to_PHREnd,94.8076923077,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+SS_responder_after_Poll,64SYNC_4z2_noSTS,rx_marker_to_FrameEnd,117.371794872,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+SS_responder_after_Poll,64SYNC_4z2_noSTS,frame_tail_after_PreambleStart,52160,work_samples,MEASURED_GEOMETRY,packet_samples_998p4
+SS_responder_after_Poll,64SYNC_4z2_noSTS,frame_tail_after_PreambleStart,52.2435897436,us,MEASURED_GEOMETRY,packet_samples_998p4
+SS_responder_after_Poll,64SYNC_4z2_noSTS,rf_geometry_lower_bound_reply_start,117.371794872,us,MEASURED_GEOMETRY_ONLY,Poll FrameEnd measured from the assumed RMARKER (PreambleStart); assumes zero propagation and excludes every host-side term, so it is a hard lower bound, not an achievable reply delay
+SS_initiator_after_Response,64SYNC_4z2_noSTS,rmarker_assumed_at_PreambleStart,0,work_samples,ASSUMPTION,internal marker only; absolute RMARKER convention OPEN (M2/M5)
+SS_initiator_after_Response,64SYNC_4z2_noSTS,rx_marker_to_PreambleStart,0,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+SS_initiator_after_Response,64SYNC_4z2_noSTS,rx_marker_to_SfdStart,65.1282051282,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+SS_initiator_after_Response,64SYNC_4z2_noSTS,rx_marker_to_PHRStart,73.2692307692,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+SS_initiator_after_Response,64SYNC_4z2_noSTS,rx_marker_to_PHREnd,94.8076923077,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+SS_initiator_after_Response,64SYNC_4z2_noSTS,rx_marker_to_FrameEnd,127.628205128,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+SS_initiator_after_Response,64SYNC_4z2_noSTS,frame_tail_after_PreambleStart,62400,work_samples,MEASURED_GEOMETRY,packet_samples_998p4
+SS_initiator_after_Response,64SYNC_4z2_noSTS,frame_tail_after_PreambleStart,62.5,us,MEASURED_GEOMETRY,packet_samples_998p4
+SS_initiator_after_Response,64SYNC_4z2_noSTS,rf_geometry_lower_bound_reply_start,127.628205128,us,MEASURED_GEOMETRY_ONLY,Response FrameEnd measured from the assumed RMARKER (PreambleStart); assumes zero propagation and excludes every host-side term, so it is a hard lower bound, not an achievable reply delay
+DS_initiator_after_Response,64SYNC_4z2_noSTS,rmarker_assumed_at_PreambleStart,0,work_samples,ASSUMPTION,internal marker only; absolute RMARKER convention OPEN (M2/M5)
+DS_initiator_after_Response,64SYNC_4z2_noSTS,rx_marker_to_PreambleStart,0,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+DS_initiator_after_Response,64SYNC_4z2_noSTS,rx_marker_to_SfdStart,65.1282051282,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+DS_initiator_after_Response,64SYNC_4z2_noSTS,rx_marker_to_PHRStart,73.2692307692,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+DS_initiator_after_Response,64SYNC_4z2_noSTS,rx_marker_to_PHREnd,94.8076923077,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+DS_initiator_after_Response,64SYNC_4z2_noSTS,rx_marker_to_FrameEnd,127.628205128,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+DS_initiator_after_Response,64SYNC_4z2_noSTS,frame_tail_after_PreambleStart,62400,work_samples,MEASURED_GEOMETRY,packet_samples_998p4
+DS_initiator_after_Response,64SYNC_4z2_noSTS,frame_tail_after_PreambleStart,62.5,us,MEASURED_GEOMETRY,packet_samples_998p4
+DS_initiator_after_Response,64SYNC_4z2_noSTS,rf_geometry_lower_bound_reply_start,127.628205128,us,MEASURED_GEOMETRY_ONLY,Response FrameEnd measured from the assumed RMARKER (PreambleStart); assumes zero propagation and excludes every host-side term, so it is a hard lower bound, not an achievable reply delay
+DS_responder_after_Final,64SYNC_4z2_noSTS,rmarker_assumed_at_PreambleStart,0,work_samples,ASSUMPTION,internal marker only; absolute RMARKER convention OPEN (M2/M5)
+DS_responder_after_Final,64SYNC_4z2_noSTS,rx_marker_to_PreambleStart,0,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+DS_responder_after_Final,64SYNC_4z2_noSTS,rx_marker_to_SfdStart,65.1282051282,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+DS_responder_after_Final,64SYNC_4z2_noSTS,rx_marker_to_PHRStart,73.2692307692,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+DS_responder_after_Final,64SYNC_4z2_noSTS,rx_marker_to_PHREnd,94.8076923077,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+DS_responder_after_Final,64SYNC_4z2_noSTS,rx_marker_to_FrameEnd,132.756410256,us,MEASURED_GEOMETRY,mod::packet_samples_998p4 + PHY constants; work grid 998.4e6; offset from the assumed RMARKER = PreambleStart
+DS_responder_after_Final,64SYNC_4z2_noSTS,frame_tail_after_PreambleStart,67520,work_samples,MEASURED_GEOMETRY,packet_samples_998p4
+DS_responder_after_Final,64SYNC_4z2_noSTS,frame_tail_after_PreambleStart,67.6282051282,us,MEASURED_GEOMETRY,packet_samples_998p4
+DS_responder_after_Final,64SYNC_4z2_noSTS,rf_geometry_lower_bound_reply_start,132.756410256,us,MEASURED_GEOMETRY_ONLY,Final FrameEnd measured from the assumed RMARKER (PreambleStart); assumes zero propagation and excludes every host-side term, so it is a hard lower bound, not an achievable reply delay
+SS_responder_after_Poll,64SYNC_4z2_noSTS,host_detect_decode,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+SS_responder_after_Poll,64SYNC_4z2_noSTS,host_fsm_frame_patch_modulate,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+SS_responder_after_Poll,64SYNC_4z2_noSTS,host_tx_pdu_transport,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+SS_responder_after_Poll,64SYNC_4z2_noSTS,uhd_min_lead_time,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+SS_responder_after_Poll,64SYNC_4z2_noSTS,scheduled_margin,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+SS_responder_after_Poll,64SYNC_4z2_noSTS,min_feasible_reply_delay,NOT_COMPUTED,us,BLOCKED_ON_HOST_MEASUREMENT,sum of the UNMEASURED terms; must be recomputed from measured percentiles, not from this table
+SS_initiator_after_Response,64SYNC_4z2_noSTS,host_detect_decode,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+SS_initiator_after_Response,64SYNC_4z2_noSTS,host_fsm_frame_patch_modulate,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+SS_initiator_after_Response,64SYNC_4z2_noSTS,host_tx_pdu_transport,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+SS_initiator_after_Response,64SYNC_4z2_noSTS,uhd_min_lead_time,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+SS_initiator_after_Response,64SYNC_4z2_noSTS,scheduled_margin,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+SS_initiator_after_Response,64SYNC_4z2_noSTS,min_feasible_reply_delay,NOT_COMPUTED,us,BLOCKED_ON_HOST_MEASUREMENT,sum of the UNMEASURED terms; must be recomputed from measured percentiles, not from this table
+DS_initiator_after_Response,64SYNC_4z2_noSTS,host_detect_decode,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+DS_initiator_after_Response,64SYNC_4z2_noSTS,host_fsm_frame_patch_modulate,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+DS_initiator_after_Response,64SYNC_4z2_noSTS,host_tx_pdu_transport,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+DS_initiator_after_Response,64SYNC_4z2_noSTS,uhd_min_lead_time,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+DS_initiator_after_Response,64SYNC_4z2_noSTS,scheduled_margin,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+DS_initiator_after_Response,64SYNC_4z2_noSTS,min_feasible_reply_delay,NOT_COMPUTED,us,BLOCKED_ON_HOST_MEASUREMENT,sum of the UNMEASURED terms; must be recomputed from measured percentiles, not from this table
+DS_responder_after_Final,64SYNC_4z2_noSTS,host_detect_decode,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+DS_responder_after_Final,64SYNC_4z2_noSTS,host_fsm_frame_patch_modulate,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+DS_responder_after_Final,64SYNC_4z2_noSTS,host_tx_pdu_transport,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+DS_responder_after_Final,64SYNC_4z2_noSTS,uhd_min_lead_time,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+DS_responder_after_Final,64SYNC_4z2_noSTS,scheduled_margin,UNMEASURED,us,UNMEASURED,requires M2 (synthetic) and M3 (X410) P99/P99.9 measurement per REQ-GR-04; do not assume a value
+DS_responder_after_Final,64SYNC_4z2_noSTS,min_feasible_reply_delay,NOT_COMPUTED,us,BLOCKED_ON_HOST_MEASUREMENT,sum of the UNMEASURED terms; must be recomputed from measured percentiles, not from this table
+SS_responder_after_Poll,737p28,poll_frame_len_native,86536,native_samples,MEASURED_GEOMETRY,ceil(work*48/65)
+SS_responder_after_Poll,737p28,poll_frame_duration_native,117.371961806,us,MEASURED_GEOMETRY,native_rate_737p28
+SS_responder_after_Poll,491p52,poll_frame_len_native,57691,native_samples,MEASURED_GEOMETRY,ceil(work*32/65)
+SS_responder_after_Poll,491p52,poll_frame_duration_native,117.372639974,us,MEASURED_GEOMETRY,native_rate_491p52

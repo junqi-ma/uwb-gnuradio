@@ -197,6 +197,20 @@ inline bool rate_matches_strict(double requested, double readback,
 {
     if (!(rel_tol > 0.0))
         return false;
+    // A non-finite readback is never a match.  Without this guard a +Inf
+    // readback compared against a finite `requested` yields
+    //   scale   = +Inf            (max(requested, readback))
+    //   |diff|  = +Inf
+    //   tol*scale = +Inf          ->  +Inf <= +Inf  is TRUE
+    // so a device reporting +Inf (transport error, partially initialised
+    // radio) would be accepted as a matching 737.28/491.52 MS/s and
+    // silently defeat the "any silent UHD rate coercion is a hard prepare
+    // failure" contract in uwb_uhd_burst_backend.h.  -Inf and NaN already
+    // failed by accident (|−Inf−finite| = +Inf vs tol*scale = +Inf only for
+    // +Inf; NaN compares false), but they are rejected explicitly here so the
+    // intent does not depend on IEEE comparison accidents.
+    if (!std::isfinite(requested) || !std::isfinite(readback))
+        return false;
     const double scale = requested > readback ? requested : readback;
     return std::fabs(readback - requested) <= rel_tol * scale;
 }

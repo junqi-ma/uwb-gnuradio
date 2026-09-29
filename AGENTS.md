@@ -2,15 +2,51 @@
 
 ## 当前分支：UWB SS-TWR / DS-TWR
 
-`feature/uwb-ds-twr` 从 radar 分支 `b897677` 创建，同时开发 SS-TWR 与 DS-TWR。
+`feature/uwb-ds-twr` 从 radar 分支 `b897677` 创建（首个提交 `38fbe2c` 为纯文档），
+同时开发 SS-TWR 与 DS-TWR。
 主要需求是 **docs/twr/需求_UWB_SS_DS_TWR.md**，开发顺序和验收见
 **docs/twr/开发路线与验收矩阵.md**，芯片资料和 API 映射见
 **docs/twr/参考资料与API映射.md**。先读这三份文档和 **开发状态.md**。
-当前仅完成需求文档，不能将设计中的 Python API 或 TWR 能力描述为已实现。
+
+**M0 初版已实现，但复核发现契约阻塞项，尚不满足冻结验收**（2026-09-28）。
+先读 **docs/twr/M0_复核报告.md** 和 **docs/twr/下一步开发方案_M0复核后.md**。
+当前顺序为 **M0.1 契约修复 → M1 独立协议核心 → M2 PHY/时间映射 → M3/M4 上板**。
+TWR 协议能力仍未实现（无 FSM、无 ToF 公式、无双端点、无 TWR 硬件收发）。
+
+M0 初版设计、回归和调度说明分别见 **docs/twr/M0_设计契约.md**、
+**docs/twr/M0_回归基线.md**、**docs/twr/M0_调度语义.md**。
+其中与复核报告冲突的结论不再作为冻结约束；不能用“已冻结”阻止修复已复现缺陷。
 
 第一阶段：一台 X410 两个 channel 各作为独立逻辑端点，实现真实空口/有线的
 SS/DS 测距及角色互换。第二阶段：X410 与指定 DW1000、DW3000 模组，分别完成
 两种协议和两端角色互通。现有 radar、TX/RX、解调和 MATLAB 代码是复用与回归基线。
+
+### 当前事实与必须关闭的缺口
+
+- frame v1 为 14 B 头 + 40-bit LE timestamps；Poll/Response/Final 空口长度为
+  16/26/31 B，FCS 由 HRP 层追加。它是阶段一内部协议，商用适配需另验具体固件。
+  Report 保留且未实现；STS 本阶段不开发。
+- 配置必须对齐 codec：修复现有 7 B 几何、session 位宽不一致以及错误的
+  `phr_rate == data_rate` 约束；现有调制器是 0.85 Mb/s PHR + 6.81 Mb/s payload。
+- Python effective/snapshot 共享可变对象，尚未做到不可变；必须修复并补修改隔离测试。
+- 时间数学需修复 exact 标志、恰好半周期和分数排序；ToF 不使用有损整数 ns 投影，
+  且显式校验 range-capable marker、校准和质量，不能只依赖 interval 返回 Ok。
+- 48 行白名单证明的是 998.4 MS/s work-grid 解码自洽，未证明 native/ToA/硬件互通。
+  16 SYNC 在 ToA 验证前不得用于测距。128 等暂因当前链路限制拒绝，不能写成芯片
+  不支持；能力按 work/native/ToA/hardware/vendor 证据分别升级。
+- 仓库已有 Python work→native resample_poly；缺口是反应式 TWR 所需的 C++ 集成、
+  buffer 复用与时间映射。两路 RX、分数首径和 delayed-frame timestamp patch 仍待实现。
+- controller 可采用零流端口 gr::block + 短 handler + 有界队列 + 单 owner；
+  还必须限制 PMT 入口积压，其他 adapter 按实际 scheduler 语义选型。
+- X4xx ctrlport `EXEC_LATE_CMDS` 与 timed TX 数据是不同路径；TX 需处理设备
+  `ERR_TX_LATE_DATA` 和主机 deadline。具体 FPGA/UHD 行为需绑定版本上板验证。
+
+### 验证环境
+
+检查测试二进制实际加载的库。本机默认 LD_LIBRARY_PATH 可能命中旧 /usr/local 库，
+CTest 脚本也会继承它；本地验证使用 `env -u LD_LIBRARY_PATH ctest ...` 并用 ldd 确认
+build/lib。手工测试在环境正确时有效；不把 sudo install 作为普通测试前置条件。
+吞吐 benchmark 串行、同环境对照，失败单列；CSV 输出到临时/build 目录后显式归档。
 
 ### TWR 开发必须遵守
 

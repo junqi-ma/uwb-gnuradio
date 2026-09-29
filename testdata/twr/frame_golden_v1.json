@@ -1,0 +1,168 @@
+{
+  "schema": "uwb.twr.frame_golden",
+  "schema_version": 1,
+  "profile_name": "twr_x410_40bit_v1",
+  "notes": [
+    "Byte-level goldens for gr-uwb/include/gnuradio/uwb/uwb_twr_frame.h.",
+    "This file is TEST DATA, not documentation: qa_uwb_twr_frame.cc reads it",
+    "via UWB_TESTDATA_DIR and fails if it disagrees with the codec, with the",
+    "hand-written byte table in the QA, or internally.",
+    "The bytes were derived by hand from the frozen field table and checked",
+    "with an independent serialiser, not by running the codec under test.",
+    "mac_payload_hex is the MAC PSDU WITHOUT the FCS. Exactly one layer",
+    "appends the FCS: the HRP modulation layer, UwbHrpPacketSource with",
+    "append_fcs=true calling mod::append_ieee_fcs (REQ-API-01).",
+    "All multi-byte fields and every timestamp are little-endian.",
+    "Phase-1 profile: 40-bit timestamps at the X410 device tick rate."
+  ],
+  "profile": {
+    "version": 1,
+    "timestamp_bits": 40,
+    "timestamp_unit_hz": 737280000,
+    "timestamp_unit_note": "X410 device ticks; 1 tick = 1/737.28e6 s",
+    "max_psdu_bytes": 127,
+    "fcs_layer": "modulation_layer",
+    "fcs_bytes": 2,
+    "fcs_in_codec": false
+  },
+  "cases": [
+    {
+      "name": "poll_v1",
+      "description": "Initiator A -> Responder B, SS and DS baseline, no timestamps",
+      "function_code": 0,
+      "function_code_name": "poll",
+      "timestamp_count": 0,
+      "mac_payload_hex": "0100efbe02013412010002000100",
+      "mac_payload_length": 14,
+      "psdu_with_fcs_length": 16,
+      "header": {
+        "version": 1,
+        "session_id": 48879,
+        "seq": 258,
+        "pan_id": 4660,
+        "src_addr": 1,
+        "dst_addr": 2,
+        "flags": 1
+      },
+      "timestamp_names": [],
+      "timestamp_values_dec": [],
+      "timestamp_values_hex": [],
+      "byte_map": "00:01 01:00 02:ef 03:be 04:02 05:01 06:34 07:12 08:01 09:00 10:02 11:00 12:01 13:00"
+    },
+    {
+      "name": "response_v1",
+      "description": "Responder B -> Initiator A, carries t2B then t3B",
+      "function_code": 1,
+      "function_code_name": "response",
+      "timestamp_count": 2,
+      "mac_payload_hex": "0101efbe020134120200010001008967452301badcfe0000",
+      "mac_payload_length": 24,
+      "psdu_with_fcs_length": 26,
+      "header": {
+        "version": 1,
+        "session_id": 48879,
+        "seq": 258,
+        "pan_id": 4660,
+        "src_addr": 2,
+        "dst_addr": 1,
+        "flags": 1
+      },
+      "timestamp_names": ["t2B", "t3B"],
+      "timestamp_values_dec": [4886718345, 16702650],
+      "timestamp_values_hex": ["0123456789", "00fedcba"],
+      "byte_map": "00:01 01:01 02:ef 03:be 04:02 05:01 06:34 07:12 08:02 09:00 10:01 11:00 12:01 13:00 14:89 15:67 16:45 17:23 18:01 19:ba 20:dc 21:fe 22:00 23:00"
+    },
+    {
+      "name": "final_v1",
+      "description": "Initiator A -> Responder B, carries t1A, t4A then t5A; t2B/t3B are NOT echoed",
+      "function_code": 2,
+      "function_code_name": "final",
+      "timestamp_count": 3,
+      "mac_payload_hex": "0102efbe02013412010002000100554433221155667788990504030201",
+      "mac_payload_length": 29,
+      "psdu_with_fcs_length": 31,
+      "header": {
+        "version": 1,
+        "session_id": 48879,
+        "seq": 258,
+        "pan_id": 4660,
+        "src_addr": 1,
+        "dst_addr": 2,
+        "flags": 1
+      },
+      "timestamp_names": ["t1A", "t4A", "t5A"],
+      "timestamp_values_dec": [73588229205, 659419522645, 4328719365],
+      "timestamp_values_hex": ["1122334455", "9988776655", "0102030405"],
+      "byte_map": "00:01 01:02 02:ef 03:be 04:02 05:01 06:34 07:12 08:01 09:00 10:02 11:00 12:01 13:00 14:55 15:44 16:33 17:22 18:11 19:55 20:66 21:77 22:88 23:99 24:05 25:04 26:03 27:02 28:01"
+    },
+    {
+      "name": "poll_wrap_v1",
+      "description": "session_id and seq both at 0xFFFF; next_seq wraps each to 0x0000 independently",
+      "function_code": 0,
+      "function_code_name": "poll",
+      "timestamp_count": 0,
+      "mac_payload_hex": "0100ffffffff3412010002000100",
+      "mac_payload_length": 14,
+      "psdu_with_fcs_length": 16,
+      "header": {
+        "version": 1,
+        "session_id": 65535,
+        "seq": 65535,
+        "pan_id": 4660,
+        "src_addr": 1,
+        "dst_addr": 2,
+        "flags": 1
+      },
+      "timestamp_names": [],
+      "timestamp_values_dec": [],
+      "timestamp_values_hex": [],
+      "byte_map": "00:01 01:00 02:ff 03:ff 04:ff 05:ff 06:34 07:12 08:01 09:00 10:02 11:00 12:01 13:00"
+    },
+    {
+      "name": "response_wrap_v1",
+      "description": "t2B at the 40-bit maximum 0xFFFFFFFFFF and t3B at 0: the wrap boundary round trip",
+      "function_code": 1,
+      "function_code_name": "response",
+      "timestamp_count": 2,
+      "mac_payload_hex": "0101efbe02013412020001000100ffffffffff0000000000",
+      "mac_payload_length": 24,
+      "psdu_with_fcs_length": 26,
+      "header": {
+        "version": 1,
+        "session_id": 48879,
+        "seq": 258,
+        "pan_id": 4660,
+        "src_addr": 2,
+        "dst_addr": 1,
+        "flags": 1
+      },
+      "timestamp_names": ["t2B", "t3B"],
+      "timestamp_values_dec": [1099511627775, 0],
+      "timestamp_values_hex": ["ffffffffff", "0000000000"],
+      "byte_map": "00:01 01:01 02:ef 03:be 04:02 05:01 06:34 07:12 08:02 09:00 10:01 11:00 12:01 13:00 14:ff 15:ff 16:ff 17:ff 18:ff 19:00 20:00 21:00 22:00 23:00"
+    },
+    {
+      "name": "final_wrap_v1",
+      "description": "t1A at the 40-bit maximum, t4A at 0 and t5A at the 2^39 sign bit 0x8000000000",
+      "function_code": 2,
+      "function_code_name": "final",
+      "timestamp_count": 3,
+      "mac_payload_hex": "0102efbe02013412010002000100ffffffffff00000000000000000080",
+      "mac_payload_length": 29,
+      "psdu_with_fcs_length": 31,
+      "header": {
+        "version": 1,
+        "session_id": 48879,
+        "seq": 258,
+        "pan_id": 4660,
+        "src_addr": 1,
+        "dst_addr": 2,
+        "flags": 1
+      },
+      "timestamp_names": ["t1A", "t4A", "t5A"],
+      "timestamp_values_dec": [1099511627775, 0, 549755813888],
+      "timestamp_values_hex": ["ffffffffff", "0000000000", "8000000000"],
+      "byte_map": "00:01 01:02 02:ef 03:be 04:02 05:01 06:34 07:12 08:01 09:00 10:02 11:00 12:01 13:00 14:ff 15:ff 16:ff 17:ff 18:ff 19:00 20:00 21:00 22:00 23:00 24:00 25:00 26:00 27:00 28:80"
+    }
+  ]
+}

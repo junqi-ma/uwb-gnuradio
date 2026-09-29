@@ -273,6 +273,28 @@ BOOST_AUTO_TEST_CASE(test_uhd_backend_rate_strict)
     BOOST_CHECK(!uhd_cfg::rate_matches_strict(rate, rate * 0.75, 1e-9));
     BOOST_CHECK(!uhd_cfg::rate_matches_strict(rate, 1e8, 1e-9));
     BOOST_CHECK(!uhd_cfg::rate_matches_strict(rate, rate, 0.0)); // bad tol
+
+    // Non-finite readbacks are never a match.  The +Inf case is the one that
+    // used to slip through: with a finite `requested`, scale became +Inf,
+    // |diff| became +Inf and tol*scale became +Inf, so the comparison
+    // degenerated to (+Inf <= +Inf) == true and a device reporting +Inf was
+    // accepted as a matching 737.28 MS/s.  See the guard in
+    // uwb_uhd_backend_config.h:rate_matches_strict.
+    const double inf = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    BOOST_CHECK(!uhd_cfg::rate_matches_strict(rate, inf, 1e-9));
+    BOOST_CHECK(!uhd_cfg::rate_matches_strict(rate, -inf, 1e-9));
+    BOOST_CHECK(!uhd_cfg::rate_matches_strict(rate, nan, 1e-9));
+    BOOST_CHECK(!uhd_cfg::rate_matches_strict(inf, rate, 1e-9));
+    BOOST_CHECK(!uhd_cfg::rate_matches_strict(inf, inf, 1e-9));
+    BOOST_CHECK(!uhd_cfg::rate_matches_strict(nan, nan, 1e-9));
+    // The hole was reachable through the public allow-list gate.
+    BOOST_CHECK(!uhd_cfg::is_allowed_uhd_native_rate(inf));
+    BOOST_CHECK(!uhd_cfg::is_allowed_uhd_native_rate(-inf));
+    BOOST_CHECK(!uhd_cfg::is_allowed_uhd_native_rate(nan));
+    // ... and the legitimate rates still pass.
+    BOOST_CHECK(uhd_cfg::is_allowed_uhd_native_rate(rate));
+    BOOST_CHECK(uhd_cfg::is_allowed_uhd_native_rate(491520000.0));
 }
 
 // ---------------------------------------------------------------------------

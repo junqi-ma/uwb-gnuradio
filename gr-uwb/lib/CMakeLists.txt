@@ -187,6 +187,11 @@ list(APPEND test_uwb_sources
     qa_uwb_uhd_backend.cc
     qa_uwb_hrp_mod_core.cc
     qa_uwb_hrp_packet_source.cc
+    qa_uwb_twr_config.cc
+    qa_uwb_twr_frame.cc
+    qa_uwb_twr_phy_matrix.cc
+    qa_uwb_twr_timing_budget.cc
+    qa_uwb_twr_timestamp.cc
 )
 # Anything we need to link to for the unit tests go here
 list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks)
@@ -270,6 +275,16 @@ target_compile_definitions(uwb_qa_uwb_hrp_mod_core.cc PRIVATE
 
 target_compile_definitions(uwb_qa_uwb_hrp_packet_source.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+# TWR M0: three of the five TWR QAs read goldens from testdata/twr/.
+target_compile_definitions(uwb_qa_uwb_twr_frame.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+target_compile_definitions(uwb_qa_uwb_twr_phy_matrix.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+target_compile_definitions(uwb_qa_uwb_twr_timing_budget.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+# qa_uwb_twr_timestamp and qa_uwb_twr_config are self-contained (no golden
+# files) and deliberately get NO UWB_TESTDATA_DIR, so a testdata path
+# regression cannot silently degrade into a pass.
 
 ########################################################################
 # UHD backend dry-run CLI (Radar Step 11)
