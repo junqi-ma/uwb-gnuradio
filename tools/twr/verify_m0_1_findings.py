@@ -268,6 +268,109 @@ int main() {
         printf("n04_interval_status=%d\n", (int)iv.status);
     }
 
+    // -----------------------------------------------------------------------
+    // N07: an enum value the enum does not have must be REFUSED, never
+    // admitted.  Base-validity independent: the check is that the violation
+    // NAMES the field as out-of-domain, which holds whatever else is wrong.
+    // -----------------------------------------------------------------------
+    {
+        struct Site { const char* field; void (*set)(TwrConfig&, int); };
+        const Site sites[] = {
+            {"rx.agc", [](TwrConfig& x, int v) { x.rx.agc = static_cast<AgcMode>(v); }},
+            {"calibration.link_delay_unit",
+             [](TwrConfig& x, int v) {
+                 x.calibration.link_delay_unit = static_cast<TimeUnit>(v); }},
+            {"frame.fcs_append",
+             [](TwrConfig& x, int v) { x.frame.fcs_append = static_cast<FcsAppender>(v); }},
+            {"tx.pulse_shaping",
+             [](TwrConfig& x, int v) { x.tx.pulse_shaping = static_cast<PulseShaping>(v); }},
+            {"calibration.first_path_algorithm",
+             [](TwrConfig& x, int v) {
+                 x.calibration.first_path_algorithm = static_cast<FirstPathAlgorithm>(v); }},
+            {"calibration.cfo_compensation",
+             [](TwrConfig& x, int v) {
+                 x.calibration.cfo_compensation = static_cast<CompensationFlag>(v); }},
+            {"calibration.sfo_compensation",
+             [](TwrConfig& x, int v) {
+                 x.calibration.sfo_compensation = static_cast<CompensationFlag>(v); }},
+            {"session.protocol",
+             [](TwrConfig& x, int v) { x.session.protocol = static_cast<Protocol>(v); }},
+            {"session.role",
+             [](TwrConfig& x, int v) { x.session.role = static_cast<Role>(v); }},
+            {"timeouts.rx_timeout.domain",
+             [](TwrConfig& x, int v) {
+                 x.timeouts.rx_timeout.domain = static_cast<TimeDomain>(v); }},
+            {"timeouts.rx_timeout.marker",
+             [](TwrConfig& x, int v) {
+                 x.timeouts.rx_timeout.marker = Opt<TimestampMarker>(
+                     static_cast<TimestampMarker>(v)); }},
+        };
+        int refused = 0, total = 0;
+        for (const Site& s : sites) {
+            for (const int v : { 250 }) {
+                TwrConfig x;
+                s.set(x, v);
+                ++total;
+                const ValidationReport rep = validate(x, capabilities());
+                if (rep.find(s.field, ConfigReason::UnknownEnumValue) != nullptr)
+                    ++refused;
+            }
+        }
+        printf("n07_config_refused=%d n07_config_total=%d\n", refused, total);
+
+        // The ranging gate: only a COMPLETED burst may publish an instant.
+        ClockDomain d7;
+        ClockDomain::make("n07", 63.8976e9, 7, 40, d7);
+        Timestamp tx7;
+        Timestamp::from_ticks(5000, d7, TimestampMarker::RmarkerTx,
+                              TimestampSource::ScheduledCalibrated,
+                              timestamp_required_corrections(TimestampMarker::RmarkerTx),
+                              tx7);
+        tx7.calibration_id = "cal-n07";
+        CalibrationStamp cal7;
+        cal7.id = "cal-n07";
+        cal7.calibrated_epoch = d7.epoch_id;
+        cal7.valid_from_ticks = 0;
+        cal7.valid_until_ticks = 1000000;
+        CalibrationApplication app7;
+        app7.calibration_id = "cal-n07";
+        app7.result = CalibrationResult::Applied;
+        cal7.applications.push_back(app7);
+        RangeAdmissionContext ctx7;
+        ctx7.calibration = &cal7;
+        ctx7.reference_ticks = 4000;
+        ctx7.reference_ticks_recorded = true;
+
+        int bad_admitted = 0, bad_total = 0, ok_admitted = 0;
+        for (const int v : { 5, 6, 99, 255 }) {
+            TxSendEvidence ev;
+            ev.command_time_recorded = true;
+            ev.quantised_instant_recorded = true;
+            ev.marker_offset_recorded = true;
+            ev.calibrated_air_time_recorded = true;
+            ev.send_accepted = true;
+            ev.outcome = static_cast<TxOutcome>(v);
+            ctx7.tx_evidence = &ev;
+            ++bad_total;
+            if (admit_range_capable_time(tx7, ctx7).admitted)
+                ++bad_admitted;
+        }
+        {
+            TxSendEvidence ev;
+            ev.command_time_recorded = true;
+            ev.quantised_instant_recorded = true;
+            ev.marker_offset_recorded = true;
+            ev.calibrated_air_time_recorded = true;
+            ev.send_accepted = true;
+            ev.outcome = TxOutcome::Completed;
+            ctx7.tx_evidence = &ev;
+            ok_admitted = admit_range_capable_time(tx7, ctx7).admitted ? 1 : 0;
+        }
+        printf("n07_tx_out_of_domain_admitted=%d n07_tx_out_of_domain_total=%d "
+               "n07_tx_completed_admitted=%d\n",
+               bad_admitted, bad_total, ok_admitted);
+    }
+
     return 0;
 }
 """
@@ -329,6 +432,37 @@ for path, val in rows:
         refused += 1
 print("n01_refused", refused)
 print("n01_total", len(rows))
+
+# --- N07: an enum value the enum does not have is refused, and named. ---
+# JSON cannot express an out-of-domain enum (the reader only accepts known
+# strings), so this is injected directly -- exactly the path a C++ caller or an
+# async-event mapping would take, and the path a dataclass does not guard.
+_c = T.from_json_dict(json.loads(json.dumps(base)))[0]
+_n07_sites = [
+    ("rx.agc", ("rx", "agc")), ("calibration.link_delay_unit",
+     ("calibration", "link_delay_unit")),
+    ("frame.fcs_append", ("frame", "fcs_append")),
+    ("tx.pulse_shaping", ("tx", "pulse_shaping")),
+    ("calibration.first_path_algorithm", ("calibration", "first_path_algorithm")),
+    ("calibration.cfo_compensation", ("calibration", "cfo_compensation")),
+    ("calibration.sfo_compensation", ("calibration", "sfo_compensation")),
+    ("session.protocol", ("session", "protocol")),
+    ("session.role", ("session", "role")),
+    ("timeouts.rx_timeout.domain", ("timeouts", "rx_timeout", "domain")),
+    ("timeouts.rx_timeout.marker", ("timeouts", "rx_timeout", "marker")),
+]
+_n07_refused = 0
+for _field, _path_parts in _n07_sites:
+    _cc = T.from_json_dict(json.loads(json.dumps(base)))[0]
+    _node = _cc
+    for _part in _path_parts[:-1]:
+        _node = getattr(_node, _part)
+    setattr(_node, _path_parts[-1], 250)
+    _rep = T.validate(_cc, T.capabilities())
+    if _rep.find(_field, T.ConfigReason.UNKNOWN_ENUM_VALUE) is not None:
+        _n07_refused += 1
+print("n07_py_refused", _n07_refused)
+print("n07_py_total", len(_n07_sites))
 
 # --- N06: no public in-place unfreeze of a running capability table. ---
 snap = T.TwrConfigSnapshot(T.effective_config(m["_minimal"]()), T.capabilities())
@@ -583,6 +717,24 @@ def main() -> int:
            f"consumer exercises the admission entry="
            f"{n5.get('n05_cc_uses_admission')} "
            f"(end-to-end: tools/twr/verify_install_consumer.sh)")
+
+    # N07: an enum value the enum does not have must be refused, never admitted.
+    ok = (c.get("n07_config_refused") == c.get("n07_config_total")
+          and c.get("n07_config_total") not in (None, "0", "-1")
+          and c.get("n07_tx_out_of_domain_admitted") == "0"
+          and c.get("n07_tx_out_of_domain_total") not in (None, "0")
+          and c.get("n07_tx_completed_admitted") == "1"
+          and p.get("n07_py_refused") == p.get("n07_py_total")
+          and p.get("n07_py_total") not in (None, "0"))
+    record("N07 an out-of-domain enum is refused, not admitted",
+           "PASS" if ok else "FAIL",
+           f"config enum sites named as out-of-domain: C++ "
+           f"{c.get('n07_config_refused')}/{c.get('n07_config_total')}, Python "
+           f"{p.get('n07_py_refused')}/{p.get('n07_py_total')}; "
+           f"ranging gate admitted {c.get('n07_tx_out_of_domain_admitted')}"
+           f"/{c.get('n07_tx_out_of_domain_total')} out-of-domain outcomes "
+           f"(must be 0) while a Completed one is admitted="
+           f"{c.get('n07_tx_completed_admitted')} (must be 1)")
 
     print("=" * 72)
     failed = [r for r in results if r[1] == "FAIL"]

@@ -147,6 +147,7 @@ using gr::uwb::twr::timestamp_interval;
 using gr::uwb::twr::Timestamp;
 using gr::uwb::twr::TimestampMarker;
 using gr::uwb::twr::TimestampSource;
+using gr::uwb::twr::tx_outcome_is_known;
 using gr::uwb::twr::TxOutcome;
 using gr::uwb::twr::TxSendEvidence;
 
@@ -607,6 +608,76 @@ BOOST_AUTO_TEST_CASE(tof_scheduled_calibrated_source_is_permitted_only_with_send
     BOOST_TEST(ok.value.has_value());
     BOOST_TEST(ok.value->source() == TimestampSource::ScheduledCalibrated);
     BOOST_TEST(ok.value->source() != TimestampSource::HardwareMeasured);
+}
+
+
+// ===========================================================================
+// N07: an out-of-domain TxOutcome must not reach the admitted path
+// ===========================================================================
+//
+// The admission switch covers all five enumerators with NO `default`, so a
+// value the enum does not have -- `static_cast<TxOutcome>(5)`, which a caller,
+// a deserialiser or an async-event mapping can produce -- matched no case, fell
+// THROUGH the switch and continued to the admitted path.  That is fail-open in
+// the gate that decides whether a distance may be published, and it is the
+// exact opposite of what REQ-TIME-03 requires: only a COMPLETED burst may
+// publish a ranging instant.
+BOOST_AUTO_TEST_CASE(tof_out_of_domain_tx_outcome_is_refused)
+{
+    gr::uwb::twr::ClockDomain d;
+    BOOST_REQUIRE(make_uus_domain(d));
+    Timestamp txs;
+    BOOST_REQUIRE(Timestamp::from_ticks(5000, d, TimestampMarker::RmarkerTx,
+                                        TimestampSource::ScheduledCalibrated,
+                                        mask_of(rmarker_tx_bits()), txs));
+    BOOST_TEST(gr::uwb::twr::apply_calibration_ticks(
+                   txs, "cal-dw1000-sn0001-ch5-uus-r1", 0, 0, 0u, 0u) ==
+               CalibrationResult::Applied);
+
+    const CalibrationStamp cal = good_calibration();
+    RangeAdmissionContext ctx;
+    ctx.calibration = &cal;
+    ctx.reference_ticks = 1500;
+    ctx.reference_ticks_recorded = true;
+
+    // The domain test itself, so a regression is attributed to the right half.
+    BOOST_TEST(tx_outcome_is_known(TxOutcome::Completed));
+    BOOST_TEST(tx_outcome_is_known(TxOutcome::Unknown));
+    BOOST_TEST(!tx_outcome_is_known(static_cast<TxOutcome>(5)));
+    BOOST_TEST(!tx_outcome_is_known(static_cast<TxOutcome>(255)));
+
+    // A complete, otherwise-admissible plan: the ONLY thing wrong is the
+    // outcome, so a rejection here is the outcome's doing.
+    for (const int v : { 5, 6, 99, 255 }) {
+        TxSendEvidence ev;
+        ev.command_time_recorded = true;
+        ev.quantised_instant_recorded = true;
+        ev.marker_offset_recorded = true;
+        ev.calibrated_air_time_recorded = true;
+        ev.send_accepted = true;
+        ev.outcome = static_cast<TxOutcome>(v);
+        ctx.tx_evidence = &ev;
+        const RangeAdmission r = admit_range_capable_time(txs, ctx);
+        BOOST_TEST(!r.admitted);
+        BOOST_TEST(r.reason == RangeAdmissionReason::ScheduledTxEvidenceMissing);
+        BOOST_TEST(r.status == ExchangeStatus::InvalidTimeDomain);
+        BOOST_TEST(!r.value.has_value());
+    }
+
+    // Control: Completed with the same plan IS admitted, so the loop above is
+    // failing for the outcome and not because the fixture never admits.
+    {
+        TxSendEvidence ev;
+        ev.command_time_recorded = true;
+        ev.quantised_instant_recorded = true;
+        ev.marker_offset_recorded = true;
+        ev.calibrated_air_time_recorded = true;
+        ev.send_accepted = true;
+        ev.outcome = TxOutcome::Completed;
+        ctx.tx_evidence = &ev;
+        const RangeAdmission ok = admit_range_capable_time(txs, ctx);
+        BOOST_REQUIRE_MESSAGE(ok.admitted, ok.detail);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(tof_estimated_and_reconstructed_sources_are_refused)

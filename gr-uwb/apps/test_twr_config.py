@@ -4089,6 +4089,154 @@ class TestM01Vocabulary(TwrConfigTestBase):
         self.assertFalse(miss.allowed)
         self.assertTrue(miss.evidence_not_established)
 
+
+    def test_total_enum_lookups_never_raise_on_an_out_of_domain_value(self):
+        """N07: validate() must REPORT, never RAISE.
+
+        A gate that raises reports nothing, which is not the same as refusing.
+        Three enum-to-value lookups were written as ``{...}[v]``, so an
+        out-of-domain value made ``validate()`` raise ``KeyError`` instead of
+        returning a report -- the exhaustive sweep is what surfaced it.
+        """
+        for fn in (T.sfd_mode_symbols, T.frame_type_timestamp_count):
+            for v in (99, 250):
+                self.assertEqual(fn(v), 0,
+                                 "%s(%r) raised or returned a non-zero count"
+                                 % (fn.__name__, v))
+        # `evidence_required_level` is total too, and fail-closed: an unknown
+        # use requires the HIGHEST rung, so it can never lower the bar.
+        self.assertEqual(T.evidence_required_level(250),
+                         T.EvidenceLevel.VENDOR_INTEROP_VERIFIED)
+
+    def test_every_enum_refuses_an_out_of_domain_value(self):
+        """N07: an enum value the enum does not have must be refused, and named.
+
+        Enum values are validated only at the JSON reader.  A value assigned
+        DIRECTLY -- ``cfg.rx.agc = 250`` -- went through ``validate()``
+        unchecked, and the fields gated by an equality test rather than an
+        allow-list were ACCEPTED: fail-open in the single gate that admits a
+        configuration.  A Python dataclass does not enforce its annotations at
+        runtime, so this is reachable here exactly as it is in C++ -- and the
+        shared JSON corpus cannot express it, which is why it needed its own
+        test rather than another corpus case.
+
+        Exhaustive over the enum sites, so a new enum field that forgets its
+        domain check fails here instead of shipping.
+        """
+        sites = (
+            ("session.protocol", ("session", "protocol")),
+            ("session.role", ("session", "role")),
+            ("phy.prf_class", ("phy", "prf_class")),
+            ("phy.data_rate", ("phy", "data_rate")),
+            ("phy.phr_rate", ("phy", "phr_rate")),
+            ("frame.frame_profile", ("frame", "frame_profile")),
+            ("frame.sfd_mode", ("frame", "sfd_mode")),
+            ("frame.phr_mode", ("frame", "phr_mode")),
+            ("frame.fcs_append", ("frame", "fcs_append")),
+            ("frame.sts_mode", ("frame", "sts_mode")),
+            ("tx.power_policy", ("tx", "power_policy")),
+            ("tx.pulse_shaping", ("tx", "pulse_shaping")),
+            ("rx.agc", ("rx", "agc")),
+            ("calibration.link_delay_unit",
+             ("calibration", "link_delay_unit")),
+            ("calibration.first_path_algorithm",
+             ("calibration", "first_path_algorithm")),
+            ("calibration.cfo_compensation",
+             ("calibration", "cfo_compensation")),
+            ("calibration.sfo_compensation",
+             ("calibration", "sfo_compensation")),
+        )
+        # 99 and 250 are outside every one of these enums.  NOT 7: that is a
+        # real TimeReferenceEvent member (it has eleven), and a real member must
+        # be judged on merit by the semantic checks -- pinned at the end below.
+        for field_name, (group, key) in sites:
+            for v in (99, 250):
+                c = _minimal()
+                node = c
+                for part in group.split("."):
+                    node = getattr(node, part)
+                setattr(node, key, v)
+                rep = T.validate(c, T.capabilities())
+                self.assertFalse(rep.ok(),
+                                 "%s = %r was ACCEPTED (fail-open)"
+                                 % (field_name, v))
+                self.assertIsNotNone(
+                    rep.find(field_name, T.ConfigReason.UNKNOWN_ENUM_VALUE),
+                    "%s = %r: refused, but not as out-of-domain, and the "
+                    "violation does not name the field: %s"
+                    % (field_name, v, rep.to_string()))
+
+        # Every TimedField carries a (domain, reference) pair; both are enums.
+        timed = ("frame.sfd_timeout", "timing.poll_start",
+                 "timing.poll_to_response", "timing.response_to_final",
+                 "timing.final_to_report", "timing.post_tx_rx_enable",
+                 "timing.min_tx_lead_time", "timeouts.poll_rx_window",
+                 "timeouts.response_rx_window", "timeouts.final_rx_window",
+                 "timeouts.report_rx_window", "timeouts.rx_timeout",
+                 "timeouts.exchange_timeout", "timeouts.retry_interval",
+                 "diagnostics.stats_cadence")
+        # The third enum on every TimedField: `marker`.  It is OPTIONAL
+        # (absent is legal on a host-monotonic clock), and because it is
+        # optional it is easy to forget -- covering domain+reference and
+        # assuming the pair was complete left twelve more configurations
+        # accepted.  None must stay legal; anything else must be a member.
+        for path in timed:
+            c = _minimal()
+            node = c
+            for part in path.split("."):
+                node = getattr(node, part)
+            node.marker = 250
+            rep = T.validate(c, T.capabilities())
+            field_name = "%s.marker" % path
+            self.assertFalse(rep.ok(), "%s was ACCEPTED" % field_name)
+            self.assertIsNotNone(
+                rep.find(field_name, T.ConfigReason.UNKNOWN_ENUM_VALUE),
+                "%s: %s" % (field_name, rep.to_string()))
+        # ... and an ABSENT marker is still legal, so the check above did not
+        # simply forbid the optional field.
+        for path in timed:
+            c = _minimal()
+            node = c
+            for part in path.split("."):
+                node = getattr(node, part)
+            node.marker = None
+            node.domain = T.TimeDomain.MONOTONIC_HOST
+            rep = T.validate(c, T.capabilities())
+            self.assertIsNone(
+                rep.find("%s.marker" % path, T.ConfigReason.UNKNOWN_ENUM_VALUE),
+                "%s.marker=None was refused as out-of-domain" % path)
+
+        for path in timed:
+            for sub in ("domain", "reference"):
+                c = _minimal()
+                node = c
+                for part in path.split("."):
+                    node = getattr(node, part)
+                setattr(node, sub, 250)
+                rep = T.validate(c, T.capabilities())
+                field_name = "%s.%s" % (path, sub)
+                self.assertFalse(rep.ok(), "%s was ACCEPTED" % field_name)
+                self.assertIsNotNone(
+                    rep.find(field_name, T.ConfigReason.UNKNOWN_ENUM_VALUE),
+                    "%s: %s" % (field_name, rep.to_string()))
+
+        # The peer binding repeats Role once per endpoint.
+        c = _minimal()
+        c.radio.peers[0].role = 250
+        rep = T.validate(c, T.capabilities())
+        self.assertFalse(rep.ok())
+        self.assertIsNotNone(rep.find("radio.peers[0].role",
+                                      T.ConfigReason.UNKNOWN_ENUM_VALUE))
+
+        # A value that IS a member is not touched by this check: the domain
+        # question and the supported/implemented question are DIFFERENT, and a
+        # real member survives to be judged on merit.
+        c = _minimal()
+        c.calibration.cfo_compensation = T.CompensationFlag.REQUIRED
+        rep = T.validate(c, T.capabilities())
+        self.assertIsNone(rep.find("calibration.cfo_compensation",
+                                   T.ConfigReason.UNKNOWN_ENUM_VALUE))
+
     def test_unsigned_fields_refuse_out_of_range_instead_of_wrapping(self):
         """A 16-bit wire field is 16 bits on BOTH sides of the language line.
 

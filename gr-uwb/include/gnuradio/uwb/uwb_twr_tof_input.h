@@ -320,6 +320,28 @@ inline const char* tx_outcome_to_string(TxOutcome o)
     return "invalid";
 }
 
+// Is `o` a value the enum actually has?
+//
+// N07: `TxOutcome` is a public enum, so a caller -- or an async-event mapping --
+// can hold `static_cast<TxOutcome>(5)`.  The admission gate's `switch` covered
+// the five enumerators with no `default`, so such a value matched NO case,
+// fell through the switch and continued to the admitted path: fail-open in the
+// gate that decides whether a distance may be published.  This helper is the
+// domain test the switch must be paired with.  No `default`, so -Wswitch fires
+// if an enumerator is added.
+inline bool tx_outcome_is_known(TxOutcome o)
+{
+    switch (o) {
+    case TxOutcome::Unknown:
+    case TxOutcome::Completed:
+    case TxOutcome::Late:
+    case TxOutcome::Underflow:
+    case TxOutcome::Cancelled:
+        return true;
+    }
+    return false;
+}
+
 // Which of the planned-instant records is missing, as a bit mask, so a
 // refusal names the one stage that did not run instead of saying "incomplete".
 enum class TxPlanRecord : uint32_t {
@@ -940,6 +962,23 @@ inline RangeAdmission admit_range_capable_time(const Timestamp& ts,
                     tx_plan_record_name(first) + " (mask=" +
                     std::to_string(missing) + ", " + ev->to_string() +
                     "); send_accepted alone is never sufficient",
+                RangeTimeSide::Subject, ts.marker);
+            return r;
+        }
+        // N07: the domain test comes FIRST.  `TxOutcome` is a PUBLIC enum, so a
+        // variable -- set by a caller, a deserialiser or an async-event mapping
+        // -- can hold a value the enum does not have.  The switch below covers
+        // every enumerator, but it has no `default`, so an unknown value would
+        // match no case, fall THROUGH it and reach the admitted path: fail-open
+        // in the gate that decides whether a distance may be published.  The
+        // domain test is the switch's partner, not a substitute for it.
+        if (!tx_outcome_is_known(ev->outcome)) {
+            detail::reject(
+                r, RangeAdmissionReason::ScheduledTxEvidenceMissing,
+                std::string("the TX outcome is not a member of TxOutcome (raw=") +
+                    std::to_string(static_cast<int>(ev->outcome)) +
+                    "): an out-of-domain outcome cannot be reasoned about, and "
+                    "only Completed may publish a ranging instant",
                 RangeTimeSide::Subject, ts.marker);
             return r;
         }

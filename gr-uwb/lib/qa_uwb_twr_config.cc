@@ -1490,8 +1490,11 @@ BOOST_AUTO_TEST_CASE(every_other_phr_rate_is_rejected_with_its_own_reason)
         BOOST_REQUIRE(viol->message.find("Qorvo") != std::string::npos);
         BOOST_REQUIRE(viol->message.find("21 symbols") != std::string::npos);
     }
-    // Values outside the enumeration are rejected too, never coerced to the
-    // implemented member.
+    // Values outside the enumeration are refused as OUT-OF-DOMAIN.  Note this
+    // is a different answer from "a real member this build does not implement"
+    // (PhrRate::SameAsData above, which stays Unsupported): N07 made the
+    // domain question explicit instead of leaving it to be caught incidentally
+    // by the support check.
     for (unsigned r = 2; r < 8; ++r) {
         TwrConfig c = minimal();
         c.phy.phr_rate = static_cast<PhrRate>(r);
@@ -1499,7 +1502,7 @@ BOOST_AUTO_TEST_CASE(every_other_phr_rate_is_rejected_with_its_own_reason)
         require_machine_readable(v);
         const ConfigViolation* viol = v.first_for_field("phy.phr_rate");
         BOOST_REQUIRE_MESSAGE(viol != nullptr, "an out-of-enum PHR rate was accepted");
-        BOOST_REQUIRE(viol->reason == ConfigReason::Unsupported);
+        BOOST_REQUIRE(viol->reason == ConfigReason::UnknownEnumValue);
     }
     // The string form round-trips, and a PAYLOAD-rate name is not a PHR-rate
     // name any more: the two axes no longer share a value domain.
@@ -1831,8 +1834,16 @@ BOOST_AUTO_TEST_CASE(unknown_frame_profile_is_rejected_not_defaulted)
         require_machine_readable(v);
         const ConfigViolation* viol = v.first_for_field("frame.frame_profile");
         BOOST_REQUIRE_MESSAGE(viol != nullptr, "an unknown frame profile was accepted");
-        BOOST_REQUIRE(viol->reason == ConfigReason::Unsupported);
-        BOOST_REQUIRE(viol->message.find("free-form") != std::string::npos);
+        // N07: the DOMAIN answer comes first now -- a cast-in id is not a value
+        // the enum has, which is a different (and more precise) statement than
+        // "this build does not implement it".
+        BOOST_REQUIRE(viol->reason == ConfigReason::UnknownEnumValue);
+        // ... and the support answer is still given, so a caller that only
+        // reads that one is not left without the codec explanation.
+        const ConfigViolation* unsup_viol =
+            v.find("frame.frame_profile", ConfigReason::Unsupported);
+        BOOST_REQUIRE(unsup_viol != nullptr);
+        BOOST_REQUIRE(unsup_viol->message.find("free-form") != std::string::npos);
     }
     // The strings round trip and nothing else is accepted, so a document
     // cannot name a profile this build has no codec for.
@@ -3354,6 +3365,184 @@ BOOST_AUTO_TEST_CASE(opt_presence_is_explicit)
     BOOST_REQUIRE(g.to_text().find("antenna_plane") != std::string::npos);
     BOOST_REQUIRE(f.to_text().find("rmarker_tx") != std::string::npos);
     BOOST_REQUIRE(g.to_text().find("rmarker_tx") == std::string::npos);
+}
+
+
+// ===========================================================================
+// N07: an enum value the enum does not have must be REFUSED, and NAMED.
+// ===========================================================================
+//
+// Enum values are validated only at the JSON reader.  A value that reaches a
+// TwrConfig by DIRECT CONSTRUCTION went through validate() unchecked, and the
+// fields gated by an equality test rather than an allow-list were ACCEPTED:
+// `rx.agc = 250` passed, serialised as "invalid", and was then refused by this
+// layer's own reader -- the contract contradicted itself.  A few more were
+// refused only incidentally, with the violation naming an UNRELATED field
+// (`session.protocol = 2` was reported as a problem with
+// timing.response_to_final.ns).
+//
+// This test is exhaustive over the enum sites rather than a sample: a new enum
+// field that forgets its domain check should fail here, not ship.
+BOOST_AUTO_TEST_CASE(every_config_enum_refuses_an_out_of_domain_value)
+{
+    using Setter = void (*)(TwrConfig&, int);
+    struct Site {
+        const char* field;
+        Setter set;
+    };
+    // 99 and 250 are outside every one of these enums.  NOT 7: that is a real
+    // `TimeReferenceEvent` member (which has eleven), and a real member must be
+    // judged on merit by the semantic checks rather than flagged as unknown --
+    // the last block below pins exactly that distinction.
+    const Site sites[] = {
+        {"session.protocol",
+         [](TwrConfig& c, int v) { c.session.protocol = static_cast<Protocol>(v); }},
+        {"session.role",
+         [](TwrConfig& c, int v) { c.session.role = static_cast<Role>(v); }},
+        {"phy.prf_class",
+         [](TwrConfig& c, int v) { c.phy.prf_class = static_cast<PrfClass>(v); }},
+        {"phy.data_rate",
+         [](TwrConfig& c, int v) { c.phy.data_rate = static_cast<DataRate>(v); }},
+        {"phy.phr_rate",
+         [](TwrConfig& c, int v) { c.phy.phr_rate = static_cast<PhrRate>(v); }},
+        {"frame.frame_profile",
+         [](TwrConfig& c, int v) { c.frame.frame_profile = static_cast<FrameProfileId>(v); }},
+        {"frame.sfd_mode",
+         [](TwrConfig& c, int v) { c.frame.sfd_mode = static_cast<SfdMode>(v); }},
+        {"frame.phr_mode",
+         [](TwrConfig& c, int v) { c.frame.phr_mode = static_cast<PhrMode>(v); }},
+        {"frame.fcs_append",
+         [](TwrConfig& c, int v) { c.frame.fcs_append = static_cast<FcsAppender>(v); }},
+        {"frame.sts_mode",
+         [](TwrConfig& c, int v) { c.frame.sts_mode = static_cast<StsMode>(v); }},
+        {"tx.power_policy",
+         [](TwrConfig& c, int v) { c.tx.power_policy = static_cast<TxPowerPolicy>(v); }},
+        {"tx.pulse_shaping",
+         [](TwrConfig& c, int v) { c.tx.pulse_shaping = static_cast<PulseShaping>(v); }},
+        {"rx.agc",
+         [](TwrConfig& c, int v) { c.rx.agc = static_cast<AgcMode>(v); }},
+        {"calibration.link_delay_unit",
+         [](TwrConfig& c, int v) { c.calibration.link_delay_unit = static_cast<TimeUnit>(v); }},
+        {"calibration.first_path_algorithm",
+         [](TwrConfig& c, int v) {
+             c.calibration.first_path_algorithm = static_cast<FirstPathAlgorithm>(v); }},
+        {"calibration.cfo_compensation",
+         [](TwrConfig& c, int v) {
+             c.calibration.cfo_compensation = static_cast<CompensationFlag>(v); }},
+        {"calibration.sfo_compensation",
+         [](TwrConfig& c, int v) {
+             c.calibration.sfo_compensation = static_cast<CompensationFlag>(v); }},
+        {"frame.sfd_timeout.domain",
+         [](TwrConfig& c, int v) { c.frame.sfd_timeout.domain = static_cast<TimeDomain>(v); }},
+        {"frame.sfd_timeout.reference",
+         [](TwrConfig& c, int v) {
+             c.frame.sfd_timeout.reference = static_cast<TimeReferenceEvent>(v); }},
+        {"timing.poll_start.domain",
+         [](TwrConfig& c, int v) { c.timing.poll_start.domain = static_cast<TimeDomain>(v); }},
+        {"timing.poll_to_response.reference",
+         [](TwrConfig& c, int v) {
+             c.timing.poll_to_response.reference = static_cast<TimeReferenceEvent>(v); }},
+        {"timeouts.rx_timeout.domain",
+         [](TwrConfig& c, int v) { c.timeouts.rx_timeout.domain = static_cast<TimeDomain>(v); }},
+        {"timeouts.rx_timeout.reference",
+         [](TwrConfig& c, int v) {
+             c.timeouts.rx_timeout.reference = static_cast<TimeReferenceEvent>(v); }},
+        {"diagnostics.stats_cadence.domain",
+         [](TwrConfig& c, int v) {
+             c.diagnostics.stats_cadence.domain = static_cast<TimeDomain>(v); }},
+        // The third enum on every TimedField.  It is OPTIONAL (absent is legal
+        // on a host-monotonic clock), and because it is optional it is easy to
+        // forget: covering domain+reference and assuming the pair was complete
+        // left twelve more configurations accepted.  The exhaustive sweep is
+        // what found that, so the sweep is what is pinned here.
+        {"frame.sfd_timeout.marker",
+         [](TwrConfig& c, int v) {
+             c.frame.sfd_timeout.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+        {"timing.poll_start.marker",
+         [](TwrConfig& c, int v) {
+             c.timing.poll_start.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+        {"timing.poll_to_response.marker",
+         [](TwrConfig& c, int v) {
+             c.timing.poll_to_response.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+        {"timing.response_to_final.marker",
+         [](TwrConfig& c, int v) {
+             c.timing.response_to_final.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+        {"timing.final_to_report.marker",
+         [](TwrConfig& c, int v) {
+             c.timing.final_to_report.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+        {"timing.post_tx_rx_enable.marker",
+         [](TwrConfig& c, int v) {
+             c.timing.post_tx_rx_enable.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+        {"timing.min_tx_lead_time.marker",
+         [](TwrConfig& c, int v) {
+             c.timing.min_tx_lead_time.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+        {"timeouts.poll_rx_window.marker",
+         [](TwrConfig& c, int v) {
+             c.timeouts.poll_rx_window.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+        {"timeouts.response_rx_window.marker",
+         [](TwrConfig& c, int v) {
+             c.timeouts.response_rx_window.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+        {"timeouts.final_rx_window.marker",
+         [](TwrConfig& c, int v) {
+             c.timeouts.final_rx_window.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+        {"timeouts.report_rx_window.marker",
+         [](TwrConfig& c, int v) {
+             c.timeouts.report_rx_window.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+        {"timeouts.rx_timeout.marker",
+         [](TwrConfig& c, int v) {
+             c.timeouts.rx_timeout.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+        {"timeouts.exchange_timeout.marker",
+         [](TwrConfig& c, int v) {
+             c.timeouts.exchange_timeout.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+        {"timeouts.retry_interval.marker",
+         [](TwrConfig& c, int v) {
+             c.timeouts.retry_interval.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+        {"diagnostics.stats_cadence.marker",
+         [](TwrConfig& c, int v) {
+             c.diagnostics.stats_cadence.marker = Opt<TimestampMarker>(static_cast<TimestampMarker>(v)); }},
+    };
+    for (const Site& s : sites) {
+        for (const int v : { 99, 250 }) {
+            TwrConfig c = minimal();
+            s.set(c, v);
+            const ValidationReport rep = validate(c, measured_caps());
+            require_machine_readable(rep);
+            BOOST_REQUIRE_MESSAGE(!rep.ok(), std::string(s.field) + " = " +
+                std::to_string(v) + " was ACCEPTED (fail-open)");
+            const ConfigViolation* viol =
+                rep.find(s.field, ConfigReason::UnknownEnumValue);
+            BOOST_REQUIRE_MESSAGE(viol != nullptr,
+                std::string(s.field) + " = " + std::to_string(v) +
+                " was refused, but not as an out-of-domain enum, and the "
+                "violation does not name the field: " + rep.to_string());
+        }
+    }
+
+    // The peer binding repeats Role once per endpoint.
+    {
+        TwrConfig c = minimal();
+        c.radio.peers.clear();
+        EndpointBinding p;
+        p.id = "peer";
+        c.radio.peers.push_back(p);
+        c.radio.peers[0].role = static_cast<Role>(99);
+        const ValidationReport rep = validate(c, measured_caps());
+        require_machine_readable(rep);
+        BOOST_REQUIRE(!rep.ok());
+        BOOST_REQUIRE(rep.find("radio.peers[0].role",
+                               ConfigReason::UnknownEnumValue) != nullptr);
+    }
+
+    // ... and a value that IS a member is not touched by this check: the
+    // domain answer and the supported/implemented answer are different
+    // questions, and a real member survives to be judged on merit.
+    {
+        TwrConfig c = minimal();
+        c.calibration.cfo_compensation = CompensationFlag::Required;
+        const ValidationReport rep = validate(c, measured_caps());
+        BOOST_REQUIRE(rep.find("calibration.cfo_compensation",
+                               ConfigReason::UnknownEnumValue) == nullptr);
+    }
 }
 
 } // BOOST_AUTO_TEST_SUITE(twr_config)

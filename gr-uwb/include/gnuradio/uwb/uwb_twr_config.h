@@ -135,6 +135,7 @@
 // The frame codec: this file's geometry/session authority (M0.1 / R3).  It is
 // stdlib-only, so including it keeps the "no GNU Radio, no UHD" property.
 #include <gnuradio/uwb/uwb_twr_frame.h>
+#include <gnuradio/uwb/uwb_twr_timestamp.h>
 #include <gnuradio/uwb/uwb_twr_types.h>
 // M0.1 R7: the per-row evidence ladder.  uwb_twr_capability_evidence.h does
 // NOT include this file, so the dependency is one-way.
@@ -2952,6 +2953,195 @@ diff_fields(const TwrConfig& requested, const TwrConfig& effective)
 }
 
 // ===========================================================================
+// 5b. Enum-domain checks (M0.1, review finding N07)
+// ===========================================================================
+//
+// Why this section exists
+// -----------------------
+// Every enum below is validated ONLY at the JSON reader (`get_enum` ->
+// `from_string`).  A value that reaches a `TwrConfig` by DIRECT CONSTRUCTION --
+// `c.rx.agc = static_cast<AgcMode>(250)`, or a bad async-event / status mapping
+// in M1 -- went through `validate()` with no domain check at all.  The fields
+// whose gates happen to be allow-lists were refused, but the ones gated by an
+// equality test (`if (r.agc == AgcMode::Manual)`) or not gated at all were
+// ACCEPTED.  That is fail-open in the single gate that admits a configuration,
+// and it contradicted the layer's own contract: such a config serialises as
+// "invalid" and is then REFUSED by this layer's own reader.
+//
+// Same root cause as the ranging gate's `switch (ev->outcome)` with no
+// `default`: an enum's DOMAIN was treated as if its enumerators were exhaustive
+// of what a variable can hold.  They are not.
+//
+// Why a `switch` and not `<= kXxxMax`
+// -----------------------------------
+// These switches have NO `default`, exactly like `timestamp_marker_is_known` in
+// uwb_twr_timestamp.h.  Adding an enumerator to one of these enums therefore
+// makes -Wswitch fire instead of silently widening the accepted domain.  A
+// `<= last` form would need a second constant kept in sync, and a `default:`
+// would silence the warning that makes this safe.
+//
+// `frame_profile_id_is_supported()` in uwb_twr_frame.h already does this for
+// FrameProfileId, so there is no duplicate here.
+
+inline bool prf_class_is_known(PrfClass v)
+{
+    switch (v) {
+    case PrfClass::Bprf64: case PrfClass::Hprf64: return true;
+    case PrfClass::Hprf400: return true;
+    }
+    return false;
+}
+
+inline bool data_rate_is_known(DataRate v)
+{
+    switch (v) {
+    case DataRate::R850k: case DataRate::R6p8M: return true;
+    case DataRate::R27M: case DataRate::R7p8M: return true;
+    case DataRate::R27p2M: case DataRate::R6p8M_hprf: return true;
+    }
+    return false;
+}
+
+inline bool phr_rate_is_known(PhrRate v)
+{
+    switch (v) {
+    case PhrRate::Standard850k: case PhrRate::SameAsData: return true;
+    }
+    return false;
+}
+
+inline bool sfd_mode_is_known(SfdMode v)
+{
+    switch (v) {
+    case SfdMode::R4z1: case SfdMode::R4z2: return true;
+    case SfdMode::R4z3: case SfdMode::R4z4: return true;
+    case SfdMode::Dwt8: case SfdMode::Ieee8: return true;
+    }
+    return false;
+}
+
+inline bool phr_mode_is_known(PhrMode v)
+{
+    switch (v) {
+    case PhrMode::Standard: case PhrMode::Extended: return true;
+    case PhrMode::None: return true;
+    }
+    return false;
+}
+
+inline bool fcs_appender_is_known(FcsAppender v)
+{
+    switch (v) {
+    case FcsAppender::None: case FcsAppender::MacLayer: return true;
+    case FcsAppender::PhyLayer: return true;
+    }
+    return false;
+}
+
+inline bool sts_mode_is_known(StsMode v)
+{
+    switch (v) {
+    case StsMode::Off: case StsMode::Sp64: return true;
+    case StsMode::Sp128: case StsMode::Sp256: return true;
+    case StsMode::Sp512: case StsMode::Sp1024: return true;
+    }
+    return false;
+}
+
+inline bool tx_power_policy_is_known(TxPowerPolicy v)
+{
+    switch (v) {
+    case TxPowerPolicy::LeaveUntouched: case TxPowerPolicy::ManualGainDb: return true;
+    case TxPowerPolicy::IqAmplitude: case TxPowerPolicy::CalibratedDbm: return true;
+    }
+    return false;
+}
+
+inline bool pulse_shaping_is_known(PulseShaping v)
+{
+    switch (v) {
+    case PulseShaping::ExistingHrP: case PulseShaping::Rectangular: return true;
+    case PulseShaping::RootRaisedCosine: return true;
+    }
+    return false;
+}
+
+inline bool agc_mode_is_known(AgcMode v)
+{
+    switch (v) {
+    case AgcMode::Manual: case AgcMode::Disabled: return true;
+    case AgcMode::VendorDefault: return true;
+    }
+    return false;
+}
+
+inline bool first_path_algorithm_is_known(FirstPathAlgorithm v)
+{
+    switch (v) {
+    case FirstPathAlgorithm::LeadingEdge: case FirstPathAlgorithm::Peak: return true;
+    case FirstPathAlgorithm::EnergyCentroid: case FirstPathAlgorithm::InterpolatedPeak: return true;
+    case FirstPathAlgorithm::StrongestCluster: return true;
+    }
+    return false;
+}
+
+inline bool compensation_flag_is_known(CompensationFlag v)
+{
+    switch (v) {
+    case CompensationFlag::Off: case CompensationFlag::On: return true;
+    case CompensationFlag::Required: return true;
+    }
+    return false;
+}
+
+inline bool time_unit_is_known(TimeUnit v)
+{
+    switch (v) {
+    case TimeUnit::Nanoseconds: case TimeUnit::Seconds: return true;
+    case TimeUnit::NativeTicks: return true;
+    }
+    return false;
+}
+
+inline bool time_reference_event_is_known(TimeReferenceEvent v)
+{
+    switch (v) {
+    case TimeReferenceEvent::PollTransmitRmarker: case TimeReferenceEvent::PollReceiveRmarker: return true;
+    case TimeReferenceEvent::ResponseTransmitRmarker: case TimeReferenceEvent::ResponseReceiveRmarker: return true;
+    case TimeReferenceEvent::FinalTransmitRmarker: case TimeReferenceEvent::FinalReceiveRmarker: return true;
+    case TimeReferenceEvent::ReportTransmitRmarker: case TimeReferenceEvent::ReportReceiveRmarker: return true;
+    case TimeReferenceEvent::FrameTail: case TimeReferenceEvent::RxEnable: return true;
+    case TimeReferenceEvent::HostMonotonic: return true;
+    }
+    return false;
+}
+
+inline bool time_domain_is_known(TimeDomain v)
+{
+    switch (v) {
+    case TimeDomain::Unspecified: case TimeDomain::DeviceTicks: return true;
+    case TimeDomain::MonotonicHost: return true;
+    }
+    return false;
+}
+
+inline bool protocol_is_known(Protocol v)
+{
+    switch (v) {
+    case Protocol::Ss: case Protocol::Ds: return true;
+    }
+    return false;
+}
+
+inline bool role_is_known(Role v)
+{
+    switch (v) {
+    case Role::Initiator: case Role::Responder: return true;
+    }
+    return false;
+}
+
+// ===========================================================================
 // 6. The validator
 // ===========================================================================
 
@@ -2966,6 +3156,13 @@ public:
     ValidationReport run(const TwrConfig& cfg) const
     {
         d_report = ValidationReport{};
+        // FIRST: an out-of-domain enum makes every later check meaningless --
+        // a value the enum does not have cannot be reasoned about.  Catching it
+        // here also means the refusal NAMES the enum field instead of surfacing
+        // as a confusing complaint about some field that depends on it (an
+        // unknown `session.protocol`, for instance, used to be reported as a
+        // problem with `timing.response_to_final.ns`).
+        check_enum_domains(cfg);
         check_meta(cfg);
         check_session(cfg);
         check_phy(cfg);
@@ -2982,6 +3179,124 @@ public:
     }
 
 private:
+    // -- enum domains (N07) ----------------------------------------------
+    //
+    // One place that refuses an enum value the enum does not have, for EVERY
+    // enum field in the config.  Fourteen of these were verified to be
+    // accepted outright before this pass existed, and a further few were
+    // refused only incidentally, with the violation naming an unrelated field.
+    //
+    // The check is deliberately unconditional: it does not matter whether the
+    // value came from a cast, a deserialiser, an async-event mapping or a
+    // future enum member whose gate was not updated.  `UnknownEnumValue` is the
+    // same reason the JSON reader uses, so a caller sees one vocabulary
+    // whichever path produced the bad value.
+    void check_enum(const std::string& f, bool known, const char* what) const
+    {
+        if (!known)
+            cfg_rej(f, ConfigReason::UnknownEnumValue,
+                    std::string("value is not a member of ") + what +
+                        "; an out-of-domain enum is refused rather than reasoned "
+                        "about (it would serialise as \"invalid\" and be refused "
+                        "by the reader, so accepting it would contradict this "
+                        "layer's own contract)",
+                    "REQ-API-01");
+    }
+
+    void check_enum_domains(const TwrConfig& c) const
+    {
+        check_enum("session.protocol", protocol_is_known(c.session.protocol),
+                   "Protocol");
+        check_enum("session.role", role_is_known(c.session.role), "Role");
+        check_enum("phy.prf_class", prf_class_is_known(c.phy.prf_class),
+                   "PrfClass");
+        check_enum("phy.data_rate", data_rate_is_known(c.phy.data_rate),
+                   "DataRate");
+        check_enum("phy.phr_rate", phr_rate_is_known(c.phy.phr_rate),
+                   "PhrRate");
+        check_enum("frame.frame_profile",
+                   frame_profile_id_is_supported(c.frame.frame_profile),
+                   "FrameProfileId");
+        check_enum("frame.sfd_mode", sfd_mode_is_known(c.frame.sfd_mode),
+                   "SfdMode");
+        check_enum("frame.phr_mode", phr_mode_is_known(c.frame.phr_mode),
+                   "PhrMode");
+        check_enum("frame.fcs_append",
+                   fcs_appender_is_known(c.frame.fcs_append), "FcsAppender");
+        check_enum("frame.sts_mode", sts_mode_is_known(c.frame.sts_mode),
+                   "StsMode");
+        check_enum("tx.power_policy",
+                   tx_power_policy_is_known(c.tx.power_policy),
+                   "TxPowerPolicy");
+        check_enum("tx.pulse_shaping",
+                   pulse_shaping_is_known(c.tx.pulse_shaping), "PulseShaping");
+        check_enum("rx.agc", agc_mode_is_known(c.rx.agc), "AgcMode");
+        check_enum("calibration.link_delay_unit",
+                   time_unit_is_known(c.calibration.link_delay_unit),
+                   "TimeUnit");
+        check_enum("calibration.first_path_algorithm",
+                   first_path_algorithm_is_known(
+                       c.calibration.first_path_algorithm),
+                   "FirstPathAlgorithm");
+        check_enum("calibration.cfo_compensation",
+                   compensation_flag_is_known(c.calibration.cfo_compensation),
+                   "CompensationFlag");
+        check_enum("calibration.sfo_compensation",
+                   compensation_flag_is_known(c.calibration.sfo_compensation),
+                   "CompensationFlag");
+
+        // Every TimedField carries a (domain, reference) pair; both are enums,
+        // and both are reachable by direct construction.
+        check_timed_enums("frame.sfd_timeout", c.frame.sfd_timeout);
+        check_timed_enums("timing.poll_start", c.timing.poll_start);
+        check_timed_enums("timing.poll_to_response", c.timing.poll_to_response);
+        check_timed_enums("timing.response_to_final", c.timing.response_to_final);
+        check_timed_enums("timing.final_to_report", c.timing.final_to_report);
+        check_timed_enums("timing.post_tx_rx_enable",
+                          c.timing.post_tx_rx_enable);
+        check_timed_enums("timing.min_tx_lead_time", c.timing.min_tx_lead_time);
+        check_timed_enums("timeouts.poll_rx_window",
+                          c.timeouts.poll_rx_window);
+        check_timed_enums("timeouts.response_rx_window",
+                          c.timeouts.response_rx_window);
+        check_timed_enums("timeouts.final_rx_window",
+                          c.timeouts.final_rx_window);
+        check_timed_enums("timeouts.report_rx_window",
+                          c.timeouts.report_rx_window);
+        check_timed_enums("timeouts.rx_timeout", c.timeouts.rx_timeout);
+        check_timed_enums("timeouts.exchange_timeout",
+                          c.timeouts.exchange_timeout);
+        check_timed_enums("timeouts.retry_interval", c.timeouts.retry_interval);
+        check_timed_enums("diagnostics.stats_cadence",
+                          c.diagnostics.stats_cadence);
+
+        // The peer bindings repeat one of the same enums, once per endpoint.
+        for (size_t i = 0; i < c.radio.peers.size(); ++i) {
+            const std::string p = "radio.peers[" + twr_int_to_text(
+                                      static_cast<int64_t>(i)) + "]";
+            check_enum(p + ".role", role_is_known(c.radio.peers[i].role),
+                       "Role");
+        }
+    }
+
+    void check_timed_enums(const std::string& f, const TimedField& t) const
+    {
+        check_enum(f + ".domain", time_domain_is_known(t.domain), "TimeDomain");
+        check_enum(f + ".reference",
+                   time_reference_event_is_known(t.reference),
+                   "TimeReferenceEvent");
+        // `marker` is OPTIONAL -- absent is a legal state (there is no RF marker
+        // on a host-monotonic clock) -- but when it is present it must be a
+        // value the enum has.  Missing this third enum was worth twelve more
+        // accepted configurations (an exhaustive sweep over every enum-typed
+        // field is what found it; covering domain+reference and assuming the
+        // pair was complete was the mistake).
+        if (t.marker.has())
+            check_enum(f + ".marker",
+                       timestamp_marker_is_known(t.marker.value()),
+                       "TimestampMarker");
+    }
+
     // -- helpers ---------------------------------------------------------
     void rej(const std::string& f,
              ConfigReason r,

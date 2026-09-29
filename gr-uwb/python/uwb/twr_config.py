@@ -786,13 +786,18 @@ class FrameType(_StrEnum):
 
 
 def frame_type_timestamp_count(t: FrameType) -> int:
-    """Number of 40-bit timestamps a frame type carries (profile-fixed)."""
+    """Number of 40-bit timestamps a frame type carries (profile-fixed).
+
+    TOTAL, like its C++ counterpart: an out-of-domain value returns 0 rather
+    than raising.  ``validate()`` must never throw on any input -- a gate that
+    crashes reports nothing, which is not the same as refusing (N07).
+    """
     return {
         FrameType.POLL: 0,
         FrameType.RESPONSE: 2,   # t2B, t3B
         FrameType.FINAL: 3,      # t1A, t4A, t5A
         FrameType.REPORT: 0,     # reserved / not implemented
-    }[t]
+    }.get(t, 0)
 
 
 class TimestampMarker(_StrEnum):
@@ -1230,7 +1235,13 @@ class SfdMode(_StrEnum):
 
 
 def sfd_mode_symbols(v: SfdMode) -> int:
-    """SYMBOL count of each SFD (the sequence lengths in GetSfdSequence)."""
+    """SYMBOL count of each SFD (the sequence lengths in GetSfdSequence).
+
+    TOTAL, mirroring ``sfd_mode_symbols()`` in uwb_twr_config.h, which returns
+    0 for a value the enum does not have.  An out-of-domain SFD must not make
+    ``validate()`` raise: a gate that crashes reports nothing, which is not the
+    same as refusing (N07).
+    """
     return {
         SfdMode.R4Z1: 4,
         SfdMode.R4Z2: 8,
@@ -1238,7 +1249,7 @@ def sfd_mode_symbols(v: SfdMode) -> int:
         SfdMode.R4Z4: 32,
         SfdMode.DWT8: 8,
         SfdMode.IEEE8: 8,
-    }[v]
+    }.get(v, 0)
 
 
 class PhrMode(_StrEnum):
@@ -1343,14 +1354,18 @@ EVIDENCE_USE_ORDER: Tuple[EvidenceUse, ...] = (
 
 
 def evidence_required_level(u: EvidenceUse) -> EvidenceLevel:
-    """The ladder rung a given use requires; Ranging needs ToaVerified."""
+    """The ladder rung a given use requires; Ranging needs ToaVerified.
+
+    TOTAL: an out-of-domain use requires the HIGHEST rung, so an unknown value
+    can never lower the bar.  Fail-closed by construction (N07).
+    """
     return {
         EvidenceUse.WORK_DECODE: EvidenceLevel.WORK_DECODE_VERIFIED,
         EvidenceUse.NATIVE_ROUNDTRIP: EvidenceLevel.NATIVE_ROUNDTRIP_VERIFIED,
         EvidenceUse.RANGING: EvidenceLevel.TOA_VERIFIED,
         EvidenceUse.HARDWARE: EvidenceLevel.HARDWARE_VERIFIED,
         EvidenceUse.VENDOR_INTEROP: EvidenceLevel.VENDOR_INTEROP_VERIFIED,
-    }[u]
+    }.get(u, EvidenceLevel.VENDOR_INTEROP_VERIFIED)
 
 
 def evidence_allows(established: EvidenceLevel, u: EvidenceUse) -> bool:
@@ -4079,6 +4094,14 @@ class ConfigValidator:
     # -- sections --------------------------------------------------------
     def run(self, c: TwrConfig) -> ValidationReport:
         self.report = ValidationReport()
+        # FIRST: an out-of-domain enum makes every later check meaningless -- a
+        # value the enum does not have cannot be reasoned about.  Catching it
+        # here also means the refusal NAMES the enum field instead of surfacing
+        # as a confusing complaint about a field that depends on it (an unknown
+        # session.protocol used to be reported as a problem with
+        # timing.response_to_final.ns).  Mirrors ConfigValidator::run() in
+        # uwb_twr_config.h.
+        self.check_enum_domains(c)
         self.check_meta(c)
         self.check_session(c)
         self.check_phy(c)
@@ -4092,6 +4115,96 @@ class ConfigValidator:
         self.check_diagnostics(c)
         self.check_frame_lengths(c)
         return self.report
+
+    # -- enum domains (M0.1, review finding N07) -------------------------
+    #
+    # Enum values are validated ONLY by the JSON reader (`from_string`).  A
+    # value that reaches a TwrConfig by DIRECT ASSIGNMENT -- ``c.rx.agc = 250``,
+    # a bad async-event mapping, or a future enum member whose gate was not
+    # updated -- went through ``validate()`` with no domain check at all, and
+    # the fields gated by an equality test rather than an allow-list were
+    # ACCEPTED.  That is fail-open in the single gate that admits a
+    # configuration.  Mirrors ``ConfigValidator::check_enum_domains()`` in
+    # ``uwb_twr_config.h`` field for field, so the two implementations answer
+    # the same question the same way.
+    #
+    # ``isinstance(v, cls)`` is the exact test in Python: an enum MEMBER is an
+    # instance of its enum and nothing else is, so a raw int -- or a raw string
+    # that merely spells a member's value -- is out of domain.  There is no
+    # member list here to drift out of sync with the enum.
+    def _enum(self, f: str, cls: type, v: object, what: str) -> None:
+        if not isinstance(v, cls):
+            self._cfg_rej(
+                f, ConfigReason.UNKNOWN_ENUM_VALUE,
+                "%r is not a member of %s; an out-of-domain enum is refused "
+                "rather than reasoned about (it would serialise as \"invalid\" "
+                "and be refused by the reader, so accepting it would contradict "
+                "this layer's own contract)" % (v, what))
+
+    def _enum_timed(self, f: str, t: object) -> None:
+        self._enum(f + ".domain", TimeDomain, t.domain, "TimeDomain")
+        self._enum(f + ".reference", TimeReferenceEvent, t.reference,
+                   "TimeReferenceEvent")
+        # `marker` is OPTIONAL -- absent is a legal state (there is no RF marker
+        # on a host-monotonic clock) -- but when present it must be a value the
+        # enum has.  Missing this third enum was worth twelve more accepted
+        # configurations; an exhaustive sweep over every enum-typed field is
+        # what found it, and assuming domain+reference was the complete set was
+        # the mistake.
+        if getattr(t, "marker", None) is not None:
+            self._enum(f + ".marker", TimestampMarker, t.marker,
+                       "TimestampMarker")
+
+    def check_enum_domains(self, c: TwrConfig) -> None:
+        self._enum("session.protocol", Protocol, c.session.protocol, "Protocol")
+        self._enum("session.role", Role, c.session.role, "Role")
+        self._enum("phy.prf_class", PrfClass, c.phy.prf_class, "PrfClass")
+        self._enum("phy.data_rate", DataRate, c.phy.data_rate, "DataRate")
+        self._enum("phy.phr_rate", PhrRate, c.phy.phr_rate, "PhrRate")
+        self._enum("frame.frame_profile", FrameProfileId,
+                   c.frame.frame_profile, "FrameProfileId")
+        self._enum("frame.sfd_mode", SfdMode, c.frame.sfd_mode, "SfdMode")
+        self._enum("frame.phr_mode", PhrMode, c.frame.phr_mode, "PhrMode")
+        self._enum("frame.fcs_append", FcsAppender, c.frame.fcs_append,
+                   "FcsAppender")
+        self._enum("frame.sts_mode", StsMode, c.frame.sts_mode, "StsMode")
+        self._enum("tx.power_policy", TxPowerPolicy, c.tx.power_policy,
+                   "TxPowerPolicy")
+        self._enum("tx.pulse_shaping", PulseShaping, c.tx.pulse_shaping,
+                   "PulseShaping")
+        self._enum("rx.agc", AgcMode, c.rx.agc, "AgcMode")
+        self._enum("calibration.link_delay_unit", TimeUnit,
+                   c.calibration.link_delay_unit, "TimeUnit")
+        self._enum("calibration.first_path_algorithm", FirstPathAlgorithm,
+                   c.calibration.first_path_algorithm, "FirstPathAlgorithm")
+        self._enum("calibration.cfo_compensation", CompensationFlag,
+                   c.calibration.cfo_compensation, "CompensationFlag")
+        self._enum("calibration.sfo_compensation", CompensationFlag,
+                   c.calibration.sfo_compensation, "CompensationFlag")
+
+        # Every TimedField carries a (domain, reference) pair; both are enums
+        # and both are reachable by direct assignment.
+        for f, t in (
+                ("frame.sfd_timeout", c.frame.sfd_timeout),
+                ("timing.poll_start", c.timing.poll_start),
+                ("timing.poll_to_response", c.timing.poll_to_response),
+                ("timing.response_to_final", c.timing.response_to_final),
+                ("timing.final_to_report", c.timing.final_to_report),
+                ("timing.post_tx_rx_enable", c.timing.post_tx_rx_enable),
+                ("timing.min_tx_lead_time", c.timing.min_tx_lead_time),
+                ("timeouts.poll_rx_window", c.timeouts.poll_rx_window),
+                ("timeouts.response_rx_window", c.timeouts.response_rx_window),
+                ("timeouts.final_rx_window", c.timeouts.final_rx_window),
+                ("timeouts.report_rx_window", c.timeouts.report_rx_window),
+                ("timeouts.rx_timeout", c.timeouts.rx_timeout),
+                ("timeouts.exchange_timeout", c.timeouts.exchange_timeout),
+                ("timeouts.retry_interval", c.timeouts.retry_interval),
+                ("diagnostics.stats_cadence", c.diagnostics.stats_cadence)):
+            self._enum_timed(f, t)
+
+        # The peer bindings repeat one of the same enums, once per endpoint.
+        for i, peer in enumerate(c.radio.peers):
+            self._enum("radio.peers[%d].role" % i, Role, peer.role, "Role")
 
     def check_meta(self, c: TwrConfig) -> None:
         # Two INDEPENDENT checks, not an if/elif: an empty version is both "not
