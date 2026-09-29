@@ -52,7 +52,7 @@ config 业务规则扩张 / PHY 证据级升级。
 | 交付 | 文件 |
 |---|---|
 | 数学头（安装） | `gr-uwb/include/gnuradio/uwb/uwb_twr_math.h` |
-| C++ QA | `gr-uwb/lib/qa_uwb_twr_math.cc`（13 用例，注册进 CTest） |
+| C++ QA | `gr-uwb/lib/qa_uwb_twr_math.cc`（14 用例，注册进 CTest） |
 | oracle（记录版） | `testdata/twr/generate_tof_oracle.m`（**未实跑**） |
 | oracle（生成版） | `testdata/twr/gen_tof_oracle.py`（实跑，产生 golden） |
 | golden | `testdata/twr/tof_oracle_vectors.json`（12 向量） |
@@ -163,7 +163,7 @@ DS: kRB = 2τ + dA, kDB = dB
 
 ## 8. QA 与独立验证
 
-- `qa_uwb_twr_math.cc`：13 用例。读 `testdata/twr/tof_oracle_vectors.json`，
+- `qa_uwb_twr_math.cc`：14 用例。读 `testdata/twr/tof_oracle_vectors.json`，
   用**真实准入门**（完整 calibration + first-path + corrections）重建每个向量的
   `AdmittedRangingInterval`，断言精确有理数相等（交叉相乘，不要求约分形式一致）。
   失败矩阵用手写期望值，**不**断言两个同源 C++ predicate 相等。
