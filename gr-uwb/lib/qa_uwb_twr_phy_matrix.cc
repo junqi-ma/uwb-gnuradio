@@ -35,7 +35,8 @@
  *     qa_uwb_radar_e2e.cc::e2e_sync_repetitions
  * => 128 SYNC was NOT verified at PHR/payload/FCS level.  This QA closes that
  *    gap and finds that 128 SYNC decodes at zero CFO but its CFO estimate is
- *    structurally wrong (see twr_phy_matrix_128sync_cfo_cause).
+ *    badly wrong under this build's CFO fit (see
+ *    twr_phy_matrix_128sync_cfo_cause).
  *
  * sync_repetitions whitelist (measured, see the boundary test)
  * ----------------------------------------------------------
@@ -53,10 +54,22 @@
  *       unverified.
  *   64  SUPPORTED.  The reference profile.
  *   32  excluded: CFO-exact, but advertises preamble duration 64.
- *   128 / 256 / 512 / 1024 / 2048  excluded: the CFO fit is structurally
- *       biased (measured -16.2 kHz error at 128 SYNC, growing with length)
- *       and the PHR cannot describe the length (1024 excepted, and it is still
- *       CFO-biased).
+ *   128 / 256 / 512 / 1024 / 2048  excluded BY THIS BUILD'S SOFTWARE ONLY.
+ *       The measured cause is the CFO fit: uwb_demod_core.h re-measures only
+ *       the last max(cfo_min_fit_repetitions, 40) SYNCs while
+ *       cfo_skip_initial_repetitions stays 24, so synthesised zero-phase peaks
+ *       enter the phase fit (measured -16.2 kHz error at 128 SYNC, growing
+ *       with length).  On top of that mod::encode_phr19 maps the length onto
+ *       the 4-value preamble-duration index, so the PHR does not self-describe
+ *       (1024 excepted, and it is still CFO-biased).
+ *       This is emphatically NOT a claim about the hardware: Qorvo DW1000 and
+ *       DW3000 parts DO support 128 / 256 / 512 / 1024 preamble lengths
+ *       (DW1000 API Guide v2.7 §5.12 `txPreambLength`; DW3xxx API Guide PDF
+ *       pp. 32-34, whose preamble enumeration includes 128 / 256 / 512 as
+ *       non-standard preamble lengths).  Lifting these lengths is a decoder /
+ *       encoder change plus a re-measure, not a capability discovery, and the
+ *       rejection is recorded as reject_scope=current_software_-
+ *       implementation_limit so it can never harden into a hardware verdict.
  *   1 / 2  excluded: stage_cfo needs at least 4 measured peaks.
  *   4 / 8  excluded: stage_cir_softchips requires more than
  *       cir_skip_initial_repetitions (10) repetitions.
@@ -83,13 +96,52 @@
  *     native 65/48 and 65/32 e2e cases use pre-generated native-rate packet
  *     goldens (testdata/uwb_radar/tx_737p28.cf32, tx_491p52.cf32) whose
  *     payload is not a TWR frame.
+ *     CONSEQUENCE: the `native_rate_hz` column of the CSV is the rate the
+ *     capability row is KEYED on, NOT evidence that a frame ever visited that
+ *     grid.  See the evidence section below.
  *   * Any vendor module.  Nothing here says DW1000 / DW3000 interoperate.  A
  *     self-consistent loopback round trip only proves this repo's TX and RX
  *     agree with each other.
  *
- * Output: testdata/twr/phy_matrix_<native_rate>.csv  (directory override with
- * UWB_TWR_PHY_MATRIX_CSV_DIR).  Offline QA — no streaming latency contract,
- * no allocation-in-work constraint applies.
+ * Evidence grading (M0 review R7 / P2)
+ * ------------------------------------
+ * Every row above establishes AT MOST ONE of five levels, via
+ * uwb_twr_capability_evidence.h:
+ *
+ *   work_decode_verified       YES, every 'supported' row.  A TWR-sized PSDU
+ *                               was modulated, looped back through
+ *                               UwbLoopbackEcho and demodulated byte-exactly
+ *                               on the 998.4 MS/s work grid.
+ *   native_roundtrip_verified  NO row.
+ *   toa_verified               NO row.
+ *   hardware_verified          NO row.
+ *   vendor_interop_verified    NO row.
+ *
+ * The level and the levels a row explicitly does NOT claim are written to the
+ * CSV (`evidence_level`, `evidence_not_established`), so a row can say "work
+ * decode verified" while visibly not claiming ToA.  Grading is fail-closed:
+ * `ev::allows()` / `ev::explain()` reject any use above the established
+ * level, and nothing defaults.
+ *
+ * The level is a PURE function of fields the committed 318-row CSV already
+ * has (path / result / whitelist / sync_repetitions), so the shipped file can
+ * be annotated without re-running a single measurement -- see
+ * twr_phy_matrix_evidence_annotation_is_pure.
+ *
+ * Output: phy_matrix_<native_rate>.csv + phy_matrix_whitelist_<rate>.csv, plus
+ * a provenance sidecar phy_matrix_provenance_<rate>.txt naming the source
+ * revision, working-tree hash, the ABSOLUTE path of the libgnuradio-uwb this
+ * process actually loaded, the compiler, the VOLK setting, the exact test
+ * command, the seed policy and the SHA-256 of the CSV.
+ *
+ * Where they land (M0 review R8 / M0.1 §2.C.2):
+ *   DEFAULT  ${UWB_BUILD_DIR}/test-output/twr  (or $UWB_TWR_TEST_OUTPUT_DIR).
+ *            An ordinary `ctest` run can therefore no longer clobber the
+ *            reviewed artifacts in the source `testdata/twr` tree.
+ *   EXPORT   set UWB_TWR_EXPORT_DIR=<dir> to write into a tree deliberately.
+ *   OVERRIDE UWB_TWR_PHY_MATRIX_CSV_DIR still honoured.
+ * Offline QA — no streaming latency contract, no allocation-in-work constraint
+ * applies.
  */
 
 #include <boost/test/unit_test.hpp>
@@ -102,6 +154,8 @@
 #include <gnuradio/uwb/uwb_loopback_echo.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
 #include <gnuradio/uwb/uwb_radar_packet_source.h>
+#include <gnuradio/uwb/uwb_twr_capability_evidence.h>
+#include <gnuradio/uwb/uwb_twr_test_output.h>
 
 #include <algorithm>
 #include <chrono>
@@ -124,6 +178,16 @@
 #ifndef UWB_TESTDATA_DIR
 #define UWB_TESTDATA_DIR "../../../testdata"
 #endif
+
+// Build tree the QA was compiled into, used to decide whether the
+// libgnuradio-uwb this process actually loaded is the freshly built one or a
+// stale /usr/local install (M0 review R7 / R8).  Overridable so the
+// provenance can be reproduced out of tree.
+#ifndef UWB_BUILD_DIR
+#define UWB_BUILD_DIR ""
+#endif
+
+namespace ev = gr::uwb::twr::evidence;
 
 namespace {
 
@@ -569,6 +633,24 @@ struct Row {
     size_t tx_samples = 0;
     size_t rx_window_samples = 0;
     std::string reason;
+
+    // M0 review R7: which of the five evidence levels this row actually
+    // establishes, where the evidence came from, and what the row explicitly
+    // does NOT claim.  Derived from the fields above by `evidence()`; every
+    // measured row of this QA is a WORK-GRID decode, so the level is capped
+    // at work_decode_verified and the `native_rate_hz` label stops implying a
+    // native round trip.
+    ev::RowEvidence evidence() const
+    {
+        ev::SourceRecord rec;
+        rec.native_rate_hz = native_rate_hz;
+        rec.path = path;
+        rec.result = result;
+        rec.whitelist = whitelist;
+        rec.reason = reason;
+        rec.sync_repetitions = static_cast<uint16_t>(sync_repetitions);
+        return ev::derive_row_evidence(rec);
+    }
 };
 
 Row
@@ -718,7 +800,66 @@ struct Csv {
     std::vector<Row> rows;
     std::string path;
     std::string whitelist_path;
+    std::string provenance_path;
     double rate = kFsNativeCg600;
+
+    // M0 review R7 / R8: every generated CSV is accompanied by a provenance
+    // sidecar naming the revision, the working-tree hash, the ABSOLUTE path of
+    // the libgnuradio-uwb this process actually loaded, the compiler, the VOLK
+    // setting, the exact test command, the seed policy and the output hash.  A
+    // CSV generated against the wrong library is otherwise a silent, dangerous
+    // artifact: it looks identical and it is not.
+    ev::RunProvenance provenance;
+
+    // The sidecar's own fields, gathered once per process.  `test_command`
+    // records what the operator/CTest actually ran, including the filters that
+    // shaped the run, because a filtered run does not reproduce a full one.
+    void capture_provenance(int argc, char** argv, const std::string& output_file)
+    {
+        provenance.resolved_library = ev::resolved_library_path();
+        provenance.compiler = ev::compiler_string();
+        provenance.build_type =
+#if defined(NDEBUG)
+            "Release";
+#else
+            "Debug";
+#endif
+        provenance.volk_setting = ev::volk_setting();
+
+        std::string cmd;
+        for (int i = 0; i < argc; ++i) {
+            if (i)
+                cmd += " ";
+            cmd += argv[i];
+        }
+        const char* filter = std::getenv("BOOST_TEST_RUN_FILTER");
+        if (filter && *filter)
+            cmd += " BOOST_TEST_RUN_FILTER=" + std::string(filter);
+        const char* log = std::getenv("BOOST_TEST_LOG_LEVEL");
+        if (log && *log)
+            cmd += " BOOST_TEST_LOG_LEVEL=" + std::string(log);
+        provenance.test_command = cmd;
+
+        // The sweep uses no RNG: the AWGN seeds are fixed per condition (see
+        // the `seed` fields in the 16-SYNC condition table), so the run is
+        // deterministic.  Recorded explicitly rather than left blank, because
+        // a blank seed is indistinguishable from "we forgot to record it".
+        provenance.seed = "deterministic_fixed_per_condition_awgn_seeds_11_and_7919n";
+
+        ev::capture_git(std::string(UWB_TESTDATA_DIR) + "/..",
+                        provenance.source_revision,
+                        provenance.working_tree_hash);
+        provenance.generated_by =
+            "gr-uwb/lib/qa_uwb_twr_phy_matrix.cc::"
+            "twr_phy_matrix_sweep_and_csv";
+        provenance.notes =
+            "every row was measured on the 998.4 MS/s work grid via "
+            "UwbLoopbackEcho; the native_rate_hz column is the rate the "
+            "capability row is KEYED on, not proof of a native round trip; "
+            "resolved_library=" +
+            ev::library_origin(provenance.resolved_library,
+                               std::string(UWB_BUILD_DIR));
+    }
 
     void write(const std::string& dir)
     {
@@ -727,12 +868,26 @@ struct Csv {
         path = dir + "/phy_matrix_" +
                std::to_string(static_cast<long long>(rate)) + ".csv";
         std::ofstream f(path, std::ios::trunc);
+        f << "# TWR M0 PHY capability matrix.  Provenance: see "
+          << provenance_path_name() << " next to this file.\n"
+          << "# evidence_level is the HIGHEST of five levels this row actually"
+             " establishes (work_decode_verified, native_roundtrip_verified,"
+             " toa_verified, hardware_verified, vendor_interop_verified);"
+             " evidence_not_established lists the rest explicitly.\n"
+          << "# native_rate_hz is the rate the capability row is KEYED on."
+             "  Every measured row here is a WORK-GRID (998.4 MS/s) decode:"
+             " no native downsample/upsample round trip, no first-path/ToA"
+             " accuracy, no hardware and no vendor module was measured.\n"
+          << "# Generated by gr-uwb/lib/qa_uwb_twr_phy_matrix.cc.\n";
         f << "native_rate_hz,path,code_index,sync_repetitions,sfd_mode,frame,"
              "mac_bytes,psdu_bytes,ranging,result,whitelist,status,"
              "phr_psdu_length,phr_ranging,phr_preamble_idx,"
              "phr_data_rate_mbps,bytes_exact,fcs_rx,fcs_calc,fcs_pass,"
              "cfo_inject_hz,cfo_est_hz,detected_peaks,cfo_zero_peak_corr,"
-             "ns_sfd_chip,tx_samples,rx_window_samples,reason\n";
+             "ns_sfd_chip,tx_samples,rx_window_samples,reason";
+        for (const auto& c : ev::evidence_csv_columns())
+            f << ',' << c;
+        f << '\n';
         for (const auto& r : rows) {
             f << static_cast<long long>(r.native_rate_hz) << ','
               << csv_field(r.path) << ',' << r.code_index << ',' << r.sync_repetitions << ','
@@ -748,13 +903,45 @@ struct Csv {
               << f3(r.cfo_est_hz) << ',' << r.detected_peaks << ','
               << r.cfo_zero_peak_corr << ',' << r.ns_sfd_chip << ','
               << r.tx_samples << ',' << r.rx_window_samples << ','
-              << csv_field(r.reason.empty() ? "ok" : r.reason) << '\n';
+              << csv_field(r.reason.empty() ? "ok" : r.reason) << ','
+              << ev::evidence_csv_joined(r.evidence(), csv_field) << '\n';
         }
+        f.close();
+
+        // The sidecar's output hash covers the CSV that was just written, so a
+        // truncated or hand-edited CSV is detectable after the fact.
+        provenance.output_sha256 = ev::Sha256::hex_of_file(path);
+        write_provenance(dir);
+    }
+
+    std::string provenance_path_name() const
+    {
+        return "phy_matrix_provenance_" +
+               std::to_string(static_cast<long long>(rate)) + ".txt";
+    }
+
+    void write_provenance(const std::string& dir)
+    {
+        provenance_path = dir + "/" + provenance_path_name();
+        std::ofstream f(provenance_path, std::ios::trunc);
+        if (!f.good())
+            return;
+        f << "# Provenance of the CSV written beside this file.  Read this"
+             " BEFORE believing the CSV: a matrix generated against a stale"
+             " libgnuradio-uwb is otherwise indistinguishable from a correct"
+             " one.\n";
+        f << provenance.to_text(path);
+        f << "sidecar_self_sha256=" << provenance_sidecar_sha256(provenance) << '\n';
     }
 
     // Deduplicated (code_index, sync_repetitions, sfd_mode) verdict: exactly the
     // table the M0 capabilities() validator has to encode, one row per PHY
     // combination with the observed reason on the unsupported side.
+    //
+    // The evidence columns are the conservative merge over every contributing
+    // row: the combination is only as strong as its WEAKEST contributing frame.
+    // A 3-frame set where two decode and one fails does not earn work-decode
+    // evidence for the combination.
     void write_whitelist(const std::string& dir)
     {
         struct Key {
@@ -770,6 +957,7 @@ struct Csv {
             }
         };
         std::map<Key, std::pair<std::string, std::string>> verdict;
+        std::map<Key, ev::RowEvidence> verdict_evidence;
         for (const auto& r : rows) {
             if (r.frame != "Poll" && r.frame != "Response" &&
                 r.frame != "Final" && r.frame != "Max127")
@@ -778,6 +966,7 @@ struct Csv {
             auto it = verdict.find(k);
             if (it == verdict.end()) {
                 verdict.emplace(k, std::make_pair(r.whitelist, r.reason));
+                verdict_evidence.emplace(k, r.evidence());
             } else {
                 // Any measured failure downgrades the whole combination.
                 if (it->second.first == "supported" &&
@@ -787,6 +976,19 @@ struct Csv {
                            it->second.second.empty() &&
                            !r.reason.empty()) {
                     it->second.second = r.reason;
+                }
+                // Weakest-link merge: the combination cannot be better
+                // evidenced than its worst contributing frame.
+                auto& acc = verdict_evidence[k];
+                const ev::RowEvidence cur = r.evidence();
+                if (cur.established < acc.established) {
+                    acc.established = cur.established;
+                    acc.kind = cur.kind;
+                    acc.reason = cur.reason;
+                }
+                if (!cur.reject_scope.empty()) {
+                    acc.reject_scope = cur.reject_scope;
+                    acc.reject_scope_note = cur.reject_scope_note;
                 }
             }
         }
@@ -805,8 +1007,21 @@ struct Csv {
              "standard defines; a non-standard length is self-consistent here "
              "but must be confirmed against the target module before M5.  "
              "Generated by gr-uwb/lib/qa_uwb_twr_phy_matrix.cc.\n"
-             "native_rate_hz,code_index,sync_repetitions,sfd_mode,sfd_symbols,"
-             "sfd_len_ieee_802154a_standard,whitelist,reason\n";
+             "# EVIDENCE (M0 review R7): every 'supported' row here is "
+             "work_decode_verified ONLY, measured on the 998.4 MS/s work grid "
+             "through UwbLoopbackEcho.  native_rate_hz is the rate the "
+             "capability row is KEYED on, NOT a measured native round trip.  "
+             "No first-path/ToA accuracy, no hardware and no vendor module was "
+             "measured for any row.\n"
+             "# Rejections of 128/256/512/1024/2048 are limits of THIS build's "
+             "software (reject_scope=current_software_implementation_limit), "
+             "not claims about the hardware: Qorvo DW1000 and DW3000 parts do "
+             "support those preamble lengths.  See reject_scope_note.\n";
+        f << "native_rate_hz,code_index,sync_repetitions,sfd_mode,sfd_symbols,"
+             "sfd_len_ieee_802154a_standard,whitelist,reason";
+        for (const auto& c : ev::evidence_csv_columns())
+            f << ',' << c;
+        f << '\n';
         for (const auto& kv : verdict) {
             const auto seq = gr::uwb::demod::GetSfdSequence(kv.first.sfd.c_str());
             const bool len_ok = (seq.size() == 8 || seq.size() == 16);
@@ -815,6 +1030,8 @@ struct Csv {
               << (seq.empty() ? 0u : static_cast<unsigned>(seq.size())) << ','
               << (len_ok ? 1 : 0) << ',' << kv.second.first << ','
               << csv_field(kv.second.second.empty() ? "ok" : kv.second.second)
+              << ','
+              << ev::evidence_csv_joined(verdict_evidence[kv.first], csv_field)
               << '\n';
         }
         whitelist_path = p;
@@ -1484,6 +1701,7 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_sweep_and_csv)
     const Channel clean = clean_channel();
     Csv csv;
     csv.rate = kFsNativeCg600;
+    std::string why;
 
     const size_t codes[] = { 9, 10, 11, 12 };
     const char* sfds[] = { "4z2", "4z3", "ieee", "decawave", "4z1", "4z4" };
@@ -1778,15 +1996,41 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_sweep_and_csv)
         }
     }
 
-    const char* dir_env = std::getenv("UWB_TWR_PHY_MATRIX_CSV_DIR");
-    const std::string dir = dir_env ? std::string(dir_env)
-                                    : std::string(UWB_TESTDATA_DIR) + "/twr";
+    // Output location (M0 review R8 / M0.1 §2.C.2).  DEFAULT is the build
+    // tree; the source `testdata/twr` tree is written only on an explicit
+    // UWB_TWR_EXPORT_DIR, so an ordinary ctest run can no longer clobber the
+    // reviewed artifacts.  UWB_TWR_PHY_MATRIX_CSV_DIR is kept as a compatible
+    // override for the reviewer's out-of-tree invocation.
+    std::string dir = gr::uwb::twr::testout::resolve(why);
+    if (const char* legacy = std::getenv("UWB_TWR_PHY_MATRIX_CSV_DIR")) {
+        // Kept so the reviewer's out-of-tree invocation keeps working.
+        if (*legacy)
+            dir = legacy;
+    }
+    if (dir.empty()) {
+        BOOST_TEST_MESSAGE("CSV not emitted: " << why);
+    } else {
+        BOOST_TEST_MESSAGE("CSV output dir: " << dir);
+    }
     // The CG400 (491.52 MS/s) rows are unverified and are recorded inside the
     // same file; see the native_491p52_65_32_roundtrip row.
-    csv.write(dir);
-    csv.write_whitelist(dir);
-    BOOST_TEST_MESSAGE("CSV: " << csv.path << " rows=" << csv.rows.size());
-    BOOST_TEST_MESSAGE("CSV: " << csv.whitelist_path);
+    if (!dir.empty()) {
+        const auto& master = boost::unit_test::framework::master_test_suite();
+        csv.capture_provenance(master.argc, master.argv, "phy_matrix CSV");
+        BOOST_TEST_MESSAGE("provenance.resolved_library="
+                           << csv.provenance.resolved_library
+                           << " origin="
+                           << ev::library_origin(csv.provenance.resolved_library,
+                                                 std::string(UWB_BUILD_DIR))
+                           << " revision=" << csv.provenance.source_revision);
+        csv.write(dir);
+        csv.write_whitelist(dir);
+        BOOST_TEST_MESSAGE("CSV: " << csv.path << " rows=" << csv.rows.size());
+        BOOST_TEST_MESSAGE("CSV: " << csv.whitelist_path);
+        BOOST_TEST_MESSAGE("CSV: " << csv.provenance_path
+                                   << " output_sha256="
+                                   << csv.provenance.output_sha256);
+    }
 
     size_t pass = 0, fail = 0, err = 0, supported = 0, unsupported = 0,
            unverified = 0;
@@ -1839,4 +2083,477 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_sweep_and_csv)
             ++base_supported;
     }
     BOOST_CHECK_GE(base_supported, size_t(6)); // 3 frames x {16, 64}
+
+    // ---- R7: the evidence each row actually establishes -------------------
+    // The sweep's whole point is that 998.4 MS/s work-grid decode is ONE
+    // level.  Assert it here, on the rows just measured, so the claim cannot
+    // quietly widen when the matrix is regenerated.
+    size_t work_decode_rows = 0;
+    for (const auto& r : csv.rows) {
+        const ev::RowEvidence e = r.evidence();
+        BOOST_REQUIRE(ev::level_valid(e.established));
+        BOOST_REQUIRE(ev::source_kind_valid(e.kind));
+        if (e.established != ev::Level::None) {
+            // Whatever was established, it is at most work decode.
+            BOOST_REQUIRE_EQUAL(static_cast<int>(e.established),
+                                static_cast<int>(ev::Level::WorkDecodeVerified));
+            // ... and therefore nothing above it may be claimed for any use.
+            BOOST_REQUIRE(!ev::allows(e.established, ev::Use::NativeRoundtrip));
+            BOOST_REQUIRE(!ev::allows(e.established, ev::Use::Ranging));
+            BOOST_REQUIRE(!ev::allows(e.established, ev::Use::Hardware));
+            BOOST_REQUIRE(!ev::allows(e.established, ev::Use::VendorInterop));
+            // The absence must be DATA, not a comment.
+            const std::string absent = ev::not_established_list(e.established);
+            BOOST_REQUIRE(absent.find("native_roundtrip_verified") !=
+                           std::string::npos);
+            BOOST_REQUIRE(absent.find("toa_verified") != std::string::npos);
+            BOOST_REQUIRE(absent.find("hardware_verified") != std::string::npos);
+            BOOST_REQUIRE(absent.find("vendor_interop_verified") !=
+                           std::string::npos);
+            ++work_decode_rows;
+        } else {
+            BOOST_REQUIRE(!ev::row_evidence_allows(e, ev::Use::WorkDecode));
+        }
+    }
+    BOOST_CHECK_GT(work_decode_rows, size_t(0));
+}
+
+// ---------------------------------------------------------------------------
+// 6) Evidence grading (M0 review R7 / P2).
+//
+// The capability whitelist must not overstate what its 318-row CSV proves.
+// These cases pin the model itself, independently of the sweep, so a change to
+// either one is caught.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(twr_phy_matrix_evidence_levels_are_ordered_and_fail_closed)
+{
+    using ev::Level;
+    using ev::Use;
+
+    // The ladder is cumulative and each rung implies the ones below.
+    BOOST_REQUIRE_EQUAL(std::string(ev::level_name(Level::None)), "none");
+    BOOST_REQUIRE_EQUAL(std::string(ev::level_name(Level::WorkDecodeVerified)),
+                        "work_decode_verified");
+    BOOST_REQUIRE_EQUAL(std::string(ev::level_name(Level::NativeRoundtripVerified)),
+                        "native_roundtrip_verified");
+    BOOST_REQUIRE_EQUAL(std::string(ev::level_name(Level::ToaVerified)),
+                        "toa_verified");
+    BOOST_REQUIRE_EQUAL(std::string(ev::level_name(Level::HardwareVerified)),
+                        "hardware_verified");
+    BOOST_REQUIRE_EQUAL(std::string(ev::level_name(Level::VendorInteropVerified)),
+                        "vendor_interop_verified");
+
+    BOOST_REQUIRE(ev::level_implies(Level::VendorInteropVerified,
+                                    Level::WorkDecodeVerified));
+    BOOST_REQUIRE(ev::level_implies(Level::WorkDecodeVerified,
+                                    Level::NativeRoundtripVerified) == false);
+    BOOST_REQUIRE(ev::level_implies(Level::HardwareVerified,
+                                    Level::ToaVerified));
+
+    // R7's central point: a work-decode-verified row says exactly one thing.
+    // It covers offline decode work and NOTHING else -- in particular it may
+    // not be used to produce a range.
+    BOOST_REQUIRE(ev::allows(Level::WorkDecodeVerified, Use::WorkDecode));
+    for (const Use u : { Use::NativeRoundtrip,
+                         Use::Ranging,
+                         Use::Hardware,
+                         Use::VendorInterop }) {
+        BOOST_REQUIRE(!ev::allows(Level::WorkDecodeVerified, u));
+        const std::string why = ev::explain(Level::WorkDecodeVerified, u);
+        BOOST_REQUIRE(why.find("evidence_insufficient") != std::string::npos);
+        BOOST_REQUIRE(why.find(std::string(ev::level_name(
+                        ev::required_level(u)))) != std::string::npos);
+        BOOST_REQUIRE(why.find("unverified_stays_rejected") != std::string::npos);
+    }
+
+    // Each rung unlocks exactly one further use.
+    BOOST_REQUIRE(ev::allows(Level::NativeRoundtripVerified,
+                             Use::NativeRoundtrip));
+    BOOST_REQUIRE(!ev::allows(Level::NativeRoundtripVerified, Use::Ranging));
+    BOOST_REQUIRE(ev::allows(Level::ToaVerified, Use::Ranging));
+    BOOST_REQUIRE(!ev::allows(Level::ToaVerified, Use::Hardware));
+    BOOST_REQUIRE(ev::allows(Level::HardwareVerified, Use::Hardware));
+    BOOST_REQUIRE(!ev::allows(Level::HardwareVerified, Use::VendorInterop));
+    BOOST_REQUIRE(ev::allows(Level::VendorInteropVerified, Use::VendorInterop));
+
+    // Nothing is established at Level::None -- the fail-closed default.
+    for (size_t i = 0; i < ev::kUseCount; ++i) {
+        BOOST_REQUIRE(!ev::allows(Level::None, static_cast<Use>(i)));
+    }
+
+    // Round-trip every name through the parser.
+    for (size_t i = 0; i < ev::kLevelCount; ++i) {
+        const Level l = static_cast<Level>(i);
+        Level back = Level::None;
+        BOOST_REQUIRE(ev::level_from_name(ev::level_name(l), back));
+        BOOST_REQUIRE_EQUAL(static_cast<int>(back), static_cast<int>(l));
+    }
+    Level unused = Level::None;
+    BOOST_REQUIRE(!ev::level_from_name("hardware", unused));
+    BOOST_REQUIRE(!ev::level_from_name("", unused));
+}
+
+// ---------------------------------------------------------------------------
+// 7) R7 again, on the REAL committed CSV: annotate it WITHOUT regenerating
+//    it.  The level is a pure function of fields the shipped 318-row file
+//    already has (path / result / whitelist / sync_repetitions), so no
+//    re-measurement is needed to grade it.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(twr_phy_matrix_evidence_annotation_is_pure)
+{
+    // A work-grid PASS: work decode, nothing else.
+    {
+        ev::SourceRecord rec;
+        rec.path = "work_direct_998p4";
+        rec.result = "PASS";
+        rec.whitelist = "supported";
+        rec.reason = "ok";
+        rec.sync_repetitions = 64;
+        const ev::RowEvidence e = ev::derive_row_evidence(rec);
+        BOOST_REQUIRE_EQUAL(static_cast<int>(e.established),
+                            static_cast<int>(ev::Level::WorkDecodeVerified));
+        BOOST_REQUIRE_EQUAL(std::string(ev::source_kind_name(e.kind)),
+                            "measured");
+        BOOST_REQUIRE(!ev::row_evidence_allows(e, ev::Use::Ranging));
+        BOOST_REQUIRE(!ev::row_evidence_allows(e, ev::Use::VendorInterop));
+        BOOST_REQUIRE(e.reject_scope.empty());
+    }
+    // 16 SYNC decodes too -- and still must not be used to produce a range
+    // until first-path/ToA accuracy is measured.
+    {
+        ev::SourceRecord rec;
+        rec.path = "work_direct_998p4";
+        rec.result = "PASS";
+        rec.whitelist = "supported";
+        rec.sync_repetitions = 16;
+        const ev::RowEvidence e = ev::derive_row_evidence(rec);
+        BOOST_REQUIRE_EQUAL(static_cast<int>(e.established),
+                            static_cast<int>(ev::Level::WorkDecodeVerified));
+        BOOST_REQUIRE(!ev::row_evidence_allows(e, ev::Use::Ranging));
+    }
+    // 128 / 256 / 512 / 2048: rejected for a limit of THIS build's software.
+    // The wording must NOT claim the hardware lacks them, and must not use
+    // "structurally impossible".
+    for (const uint16_t n : { 128, 256, 512, 2048 }) {
+        ev::SourceRecord rec;
+        rec.path = "work_direct_998p4";
+        rec.result = "PASS"; // the frame decodes byte-exactly
+        rec.whitelist = "unsupported"; // ... but the combination is refused
+        rec.sync_repetitions = n;
+        rec.reason = "cfo_fit_includes_88_zero_peak_corr_generated_peaks";
+        const ev::RowEvidence e = ev::derive_row_evidence(rec);
+        BOOST_REQUIRE_EQUAL(static_cast<int>(e.established),
+                            static_cast<int>(ev::Level::None));
+        BOOST_REQUIRE_EQUAL(e.reject_scope,
+                            std::string(ev::reject_scope_current_software()));
+        BOOST_REQUIRE(e.reject_scope_note.find("current_software_"
+                                               "implementation_limit") !=
+                      std::string::npos);
+        // The vendor citation must be present: these lengths ARE supported by
+        // Qorvo parts.
+        BOOST_REQUIRE(ev::preamble_length_supported_by_vendor(n));
+        BOOST_REQUIRE(e.reject_scope_note.find("qorvo_supports_these_lengths") !=
+                      std::string::npos);
+        BOOST_REQUIRE(e.reject_scope_note.find("structurally impossible") ==
+                      std::string::npos);
+        BOOST_REQUIRE(e.reject_scope_note.find("not_a_hardware_claim") !=
+                      std::string::npos);
+    }
+    // 1024: refused for the same software reason, with no PHR claim.
+    {
+        ev::SourceRecord rec;
+        rec.path = "work_direct_998p4";
+        rec.result = "PASS";
+        rec.whitelist = "unsupported";
+        rec.sync_repetitions = 1024;
+        rec.reason = "cfo_fit_bias";
+        const ev::RowEvidence e = ev::derive_row_evidence(rec);
+        BOOST_REQUIRE_EQUAL(e.reject_scope,
+                            std::string(ev::reject_scope_current_software()));
+        BOOST_REQUIRE(e.reject_scope_note.find("phr_does_not_self_describe") ==
+                      std::string::npos);
+        BOOST_REQUIRE(e.reject_scope_note.find("measured_error_19901_Hz") !=
+                      std::string::npos);
+    }
+    // 1 / 2 / 4 / 8 SYNC: measured stage failures, still software scope.
+    for (const uint16_t n : { 1, 2, 4, 8 }) {
+        ev::SourceRecord rec;
+        rec.path = "work_direct_998p4";
+        rec.result = "FAIL";
+        rec.whitelist = "unsupported";
+        rec.sync_repetitions = n;
+        rec.reason = "stage2_cfo_failed";
+        const ev::RowEvidence e = ev::derive_row_evidence(rec);
+        BOOST_REQUIRE_EQUAL(e.reject_scope,
+                            std::string(ev::reject_scope_current_software()));
+        BOOST_REQUIRE_EQUAL(static_cast<int>(e.established),
+                            static_cast<int>(ev::Level::None));
+    }
+    // STS: out of scope, not a limit and not a measurement.
+    {
+        ev::SourceRecord rec;
+        rec.path = "work_direct_998p4";
+        rec.result = "NOT_RUN";
+        rec.whitelist = "unverified";
+        rec.sync_repetitions = 64;
+        rec.reason = "deliberately_excluded_REQ_SCOPE_04_phase1_baseline_is_"
+                     "sts_free";
+        const ev::RowEvidence e = ev::derive_row_evidence(rec);
+        BOOST_REQUIRE_EQUAL(e.reject_scope,
+                            std::string(ev::reject_scope_out_of_scope()));
+        BOOST_REQUIRE_EQUAL(static_cast<int>(e.established),
+                            static_cast<int>(ev::Level::None));
+    }
+    // The native round-trip NOT_RUN rows: not measured.  A row must never
+    // self-upgrade just because its label says "native".
+    for (const char* p : { "work_direct_998p4", "native_737p28_65_48_roundtrip",
+                           "native_491p52_65_32_roundtrip" }) {
+        ev::SourceRecord rec;
+        rec.path = p;
+        rec.result = "NOT_RUN";
+        rec.whitelist = "unverified";
+        rec.sync_repetitions = 64;
+        rec.reason = "no_work_to_native_decimator_in_repo";
+        const ev::RowEvidence e = ev::derive_row_evidence(rec);
+        BOOST_REQUIRE_EQUAL(static_cast<int>(e.established),
+                            static_cast<int>(ev::Level::None));
+        BOOST_REQUIRE_EQUAL(std::string(ev::source_kind_name(e.kind)),
+                            "not_measured");
+    }
+    // API refusals are scoped to this build's API, not the hardware.
+    {
+        ev::SourceRecord rec;
+        rec.path = "work_direct_998p4";
+        rec.result = "ERROR";
+        rec.whitelist = "unsupported";
+        rec.sync_repetitions = 100;
+        rec.reason = "sync_repetitions_outside_api_list_rejected_before_"
+                     "modulating";
+        const ev::RowEvidence e = ev::derive_row_evidence(rec);
+        BOOST_REQUIRE_EQUAL(e.reject_scope,
+                            std::string(ev::reject_scope_api_contract()));
+    }
+    // Purity: the same input always yields the same output, which is what lets
+    // the shipped CSV be annotated in place.
+    {
+        ev::SourceRecord rec;
+        rec.path = "work_direct_998p4";
+        rec.result = "PASS";
+        rec.whitelist = "supported";
+        rec.sync_repetitions = 64;
+        const auto a = ev::evidence_csv_fields(ev::derive_row_evidence(rec));
+        const auto b = ev::evidence_csv_fields(ev::derive_row_evidence(rec));
+        BOOST_REQUIRE_EQUAL(a.size(), b.size());
+        for (size_t i = 0; i < a.size(); ++i)
+            BOOST_REQUIRE_EQUAL(a[i], b[i]);
+        BOOST_REQUIRE_EQUAL(a.size(), ev::evidence_csv_columns().size());
+        // Six evidence columns, in the declared order.
+        BOOST_REQUIRE_EQUAL(ev::evidence_csv_columns().size(), size_t(6));
+        BOOST_REQUIRE_EQUAL(ev::evidence_csv_columns()[0],
+                            std::string("evidence_level"));
+        BOOST_REQUIRE_EQUAL(ev::evidence_csv_columns()[1],
+                            std::string("evidence_source"));
+        // A supported work-grid row names its level, names its artifact, and
+        // lists every level it does NOT claim.
+        BOOST_REQUIRE_EQUAL(a[0], std::string("work_decode_verified"));
+        BOOST_REQUIRE(a[1].find("phy_matrix_737280000.csv") !=
+                      std::string::npos);
+        BOOST_REQUIRE_EQUAL(a[2],
+                            std::string("native_roundtrip_verified;toa_"
+                                        "verified;hardware_verified;vendor_"
+                                        "interop_verified"));
+        BOOST_REQUIRE_EQUAL(a[3], std::string("measured"));
+        BOOST_REQUIRE(a[4].empty()); // supported: nothing rejected
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 8) The evidence CSV rendering must stay parseable.  The fields are produced
+//    SEPARATELY and sanitised individually, then joined with commas: joining
+//    first and sanitising afterwards would rewrite the column separators and
+//    silently collapse six columns into one.  This case pins that.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(twr_phy_matrix_evidence_csv_fields_are_sanitisable)
+{
+    ev::SourceRecord rec;
+    rec.path = "work_direct_998p4";
+    rec.result = "PASS";
+    rec.whitelist = "unsupported";
+    rec.sync_repetitions = 128;
+    rec.reason = "cfo_fit_includes_88_zero_peak_corr, with a comma";
+    const ev::RowEvidence e = ev::derive_row_evidence(rec);
+    const auto fields = ev::evidence_csv_fields(e);
+    BOOST_REQUIRE_EQUAL(fields.size(), size_t(6));
+    // No individual field carries a comma that could be mistaken for a column
+    // break once sanitised.
+    for (size_t i = 0; i < fields.size(); ++i)
+        BOOST_REQUIRE_MESSAGE(fields[i].find(',') == std::string::npos,
+                              "evidence field " + std::to_string(i) +
+                                  " contains a raw comma: " + fields[i]);
+    // ... and after sanitising, the joined form still has exactly six fields.
+    const std::string joined = ev::evidence_csv_joined(e, csv_field);
+    size_t commas = 0;
+    for (const char c : joined) {
+        if (c == ',')
+            ++commas;
+    }
+    BOOST_REQUIRE_EQUAL(commas, size_t(5));
+    BOOST_REQUIRE(joined.find(", with a comma") == std::string::npos);
+    // The unsupported row is graded as a limit of this build's software.
+    BOOST_REQUIRE_EQUAL(fields[4],
+                        std::string(ev::reject_scope_current_software()));
+    BOOST_REQUIRE(joined.find("not_a_hardware_claim") != std::string::npos);
+    // The ';' list separator survives intact: a comma-separated list would
+    // have been rewritten to ';' by the sanitiser, hiding the intent.
+    BOOST_REQUIRE(joined.find("native_roundtrip_verified;toa_verified") !=
+                  std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 9) SHA-256 against the FIPS-180-4 vectors.  The provenance sidecar's whole
+//    value rests on the output hash being correct, and it has to be checked
+//    against something other than itself.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(twr_phy_matrix_sha256_matches_fips_vectors)
+{
+    BOOST_REQUIRE_EQUAL(
+        ev::Sha256::hex_of(""),
+        std::string("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b"
+                    "7852b855"));
+    BOOST_REQUIRE_EQUAL(
+        ev::Sha256::hex_of("abc"),
+        std::string("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f"
+                    "20015ad"));
+    BOOST_REQUIRE_EQUAL(
+        ev::Sha256::hex_of("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+        std::string("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419d"
+                    "b06c1"));
+    BOOST_REQUIRE_EQUAL(
+        ev::Sha256::hex_of(std::string(1000000, 'a')),
+        std::string("cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc711"
+                    "2cd0"));
+    // Chunked updates must equal a single update.
+    {
+        ev::Sha256 a, b;
+        for (int i = 0; i < 1000; ++i) {
+            a.update("chunk", 5);
+            b.update(std::string("chunk"));
+        }
+        BOOST_REQUIRE_EQUAL(a.hex(), b.hex());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 10) Provenance completeness + the resolved-library check (R8).  A CSV whose
+//     sidecar does not name the loaded library is not evidence.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(twr_phy_matrix_provenance_names_the_loaded_library)
+{
+    // This QA links libgnuradio-uwb, so /proc/self/maps MUST name it.
+    const std::string lib = ev::resolved_library_path();
+    BOOST_REQUIRE_MESSAGE(!lib.empty(),
+                           "cannot determine the loaded libgnuradio-uwb; the "
+                           "provenance would be unverifiable");
+    BOOST_REQUIRE_MESSAGE(lib[0] == '/',
+                           "resolved library is not an absolute path: " + lib);
+    BOOST_REQUIRE_MESSAGE(lib.find("libgnuradio-uwb.so") != std::string::npos,
+                           "unexpected resolved library: " + lib);
+    BOOST_TEST_MESSAGE("resolved libgnuradio-uwb: " << lib << " origin="
+                                                             << ev::library_origin(
+                                                                    lib,
+                                                                    std::string(
+                                                                        UWB_BUILD_DIR)));
+    // A run that loaded a system /usr/local copy instead of the build tree is
+    // RECORDED, not silently accepted: the origin string distinguishes them
+    // and the field is non-empty either way.
+    BOOST_REQUIRE(!ev::library_origin(lib, std::string(UWB_BUILD_DIR)).empty());
+    BOOST_REQUIRE(!ev::library_origin("", "").empty());
+
+    ev::RunProvenance p;
+    p.source_revision = "deadbeef";
+    p.working_tree_hash = std::string(64, 'a');
+    p.resolved_library = lib;
+    p.compiler = ev::compiler_string();
+    p.build_type = "Release";
+    p.volk_setting = ev::volk_setting();
+    p.test_command = "uwb_qa_uwb_twr_phy_matrix.cc --run_test=x";
+    p.seed = "deterministic";
+    p.output_sha256 = std::string(64, 'b');
+    p.generated_by = "qa";
+    BOOST_REQUIRE(p.complete());
+    BOOST_REQUIRE(p.missing_fields().empty());
+    BOOST_REQUIRE_EQUAL(p.provenance_id().size(), size_t(21)); // "prov-" + 16 hex
+    // The id is stable for identical inputs and changes with any of them.
+    BOOST_REQUIRE_EQUAL(p.provenance_id(), p.provenance_id());
+    ev::RunProvenance q = p;
+    q.resolved_library = "/somewhere/else/libgnuradio-uwb.so";
+    BOOST_REQUIRE_NE(p.provenance_id(), q.provenance_id());
+
+    // A missing field is REPORTED, never defaulted.
+    ev::RunProvenance incomplete;
+    BOOST_REQUIRE(!incomplete.complete());
+    const auto missing = incomplete.missing_fields();
+    BOOST_REQUIRE_EQUAL(missing.size(), size_t(9));
+
+    // The sidecar text carries every field by name, so a reader never has to
+    // guess which one is missing.
+    const std::string text = p.to_text("phy_matrix_737280000.csv");
+    for (const char* k : { "source_revision=",
+                           "working_tree_hash=",
+                           "resolved_library=",
+                           "compiler=",
+                           "build_type=",
+                           "volk_setting=",
+                           "test_command=",
+                           "seed=",
+                           "output_sha256=",
+                           "output_file=",
+                           "generated_by=",
+                           "evidence_levels=" })
+        BOOST_REQUIRE(text.find(k) != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 11) The generated CSV must land in the BUILD tree by default, never in the
+//     source `testdata/twr` tree (R8 / M0.1 §2.C.2).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(twr_phy_matrix_output_dir_refuses_the_source_tree)
+{
+    // The default must not be the source artifact directory.  Compare
+    // lexically-normalised paths so `..` cannot hide a write back into it.
+    const std::string src = std::string(UWB_TESTDATA_DIR) + "/twr";
+    BOOST_REQUIRE(gr::uwb::twr::testout::is_source_twr_dir(src));
+    BOOST_REQUIRE(gr::uwb::twr::testout::is_source_twr_dir(
+        std::string(UWB_TESTDATA_DIR) + "/twr/../twr"));
+
+    const std::string dflt = gr::uwb::twr::testout::default_output_dir();
+    BOOST_TEST_MESSAGE("default TWR QA output dir: " << dflt);
+    if (std::string(UWB_BUILD_DIR).empty() &&
+        !std::getenv("UWB_TWR_TEST_OUTPUT_DIR") &&
+        !std::getenv("UWB_TWR_EXPORT_DIR")) {
+        // No build dir compiled in and no override: the fallback is the temp
+        // dir, which is still not the source tree.
+        BOOST_REQUIRE(!gr::uwb::twr::testout::is_source_twr_dir(dflt));
+    } else {
+        BOOST_REQUIRE(!gr::uwb::twr::testout::is_source_twr_dir(dflt));
+    }
+
+    // resolve() honours the source tree ONLY with an explicit export.
+    {
+        std::string why;
+        setenv("UWB_TWR_TEST_OUTPUT_DIR", (src + "/x").c_str(), 1);
+        unsetenv("UWB_TWR_EXPORT_DIR");
+        const std::string d = gr::uwb::twr::testout::resolve(why);
+        BOOST_REQUIRE(d.empty());
+        BOOST_REQUIRE(why.find("UWB_TWR_EXPORT_DIR") != std::string::npos);
+        unsetenv("UWB_TWR_TEST_OUTPUT_DIR");
+    }
+    // A legitimate build-tree directory resolves and is writable.
+    {
+        std::string why;
+        const std::string tmp = gr::uwb::twr::testout::resolve(why);
+        BOOST_REQUIRE(!tmp.empty());
+        BOOST_REQUIRE(!gr::uwb::twr::testout::is_source_twr_dir(tmp));
+        BOOST_REQUIRE(why == "ok");
+    }
 }

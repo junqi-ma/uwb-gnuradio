@@ -81,12 +81,109 @@ WHAT IS *NOT* CLAIMED HERE
     one sigma point per length, not a sweep, so a ceiling could not be sourced
     from the data this file mirrors.
 
+VALUE SEMANTICS AT THE CONFIG BOUNDARY (M0.1, closes R1)
+-------------------------------------------------------
+A validated config is a VALUE.  Nothing this module hands out is a handle onto
+one:
+
+  * ``effective_config()`` reads the caller's config ONCE and immediately turns
+    it into a private deep copy; ``requested``, ``effective`` and ``readback``
+    are three further independent copies.  Mutating the caller's object
+    afterwards -- a scalar, a nested dataclass, a list element, the readback --
+    cannot move the snapshot, its hash, its ``ok`` flag or its quantised values.
+  * ``TwrConfigSnapshot`` deep-copies the ``EffectiveConfig`` it is given, and
+    ``get()`` returns a FRESH deep copy on every call.  There is no public
+    attribute, cache or iterator onto the internal config.
+  * The process-wide capability tables are FROZEN: every container is a
+    ``ReadOnlyList`` with no mutator at all, attribute assignment is refused,
+    and a ``PhyCapabilityRow`` is a frozen dataclass.  ``capabilities()`` and
+    ``default_deny_capabilities()`` return the one shared read-only instance,
+    because two endpoints validating concurrently must not disagree about what
+    the hardware supports.  Derive a different table with
+    ``CapabilitiesBuilder(base)`` -- never by editing the shipped one.
+
+``set_overrides()`` is the only way to change a validated config, and only at an
+exchange boundary; a call while an exchange is in flight is refused and the
+running exchange keeps the value it started with (REQ-API-03).
+
+WHERE COPYING IS ALLOWED, AND WHERE IT IS NOT
+----------------------------------------------
+Copying belongs to CONFIGURE/EXCHANGE BOUNDARIES ONLY.  It is allowed when a
+config is read from JSON or built by the operator, inside ``effective_config()``,
+inside ``TwrConfigSnapshot``, and once per ``set_overrides()``.  It is FORBIDDEN
+on any per-sample, per-IQ or per-packet path: M2's work<->native rate
+conversion and M3's timed-TX controller must hold the effective value they were
+given and read it, because a per-packet copy is a per-packet heap allocation and
+belongs in no realtime budget.  A caller that needs the config on a hot path
+takes it once with ``get()`` and keeps it for the lifetime of the work.  If that
+is ever too expensive, the answer is a fixed-size POD struct on the C++ side
+(M1 owns that), not a weaker Python guarantee.  ``copy_config`` documents this
+rule where a caller will actually read it.
+
+THE SCHEMA VERSION (M0.1, R3 / R5)
+-----------------------------------
+``twr-config/2`` is a BREAKING change and the version says so:
+``frame.frame_profile`` became REQUIRED (it selects the MAC layout the geometry
+claim is checked against, and a free-form profile name is not a layout), and
+``phy.phr_rate`` changed value domain -- it used to be a ``DataRate`` required
+to EQUAL ``phy.data_rate`` and is now a :class:`PhrRate` with its own two
+members.  A ``twr-config/1`` document is REFUSED with a migration message that
+names the fields that changed, never silently misread: the two schemas disagree
+about what a PHR rate is, and reading one as the other would produce a config
+that validates and transmits something the author never asked for.
+
+THE FRAME CODEC IS THE GEOMETRY AUTHORITY (M0.1, R3)
+----------------------------------------------------
+M0 review R3 found TWO geometries for one format: this schema carried a
+pre-codec "7-byte header" :class:`FrameGeometry` with 9/19/24-byte budgets while
+``uwb_twr_frame.h`` had emitted a 14-byte header and 16/26/31-byte on-air frames
+since it was frozen.  Both suites passed, because nothing ever asked whether an
+ACCEPTED configuration can losslessly build the real frame.
+
+The dependency now points in the one direction that can be wrong in one place
+instead of two:
+
+  * :class:`FrameGeometry` is a CLAIM -- "this is what I believe the layout to
+    be" -- checked field by field through :func:`frame_geometry_check`, and
+    every disagreement becomes its own rejection naming that exact field.  It
+    never decides anything.
+  * Every byte count this module reports is a DELEGATION to
+    :class:`FrameProfileGeometry`.  There is no second ``header + n * timestamp``
+    sum anywhere in this file, and no fixture keeps its own copy of the numbers.
+  * ``frame.frame_profile`` is a :class:`FrameProfileId`, not a free-form
+    string, so "an arbitrary profile name is an executable geometry" is
+    UNREPRESENTABLE rather than merely discouraged.
+  * :func:`frame_psdu_bytes` and :func:`frame_bytes_on_air` keep their old
+    three- and four-argument call SHAPES for source compatibility, but the
+    geometry argument is deliberately IGNORED -- a claim does not decide a
+    length, and keeping the parameter means an existing call site keeps working
+    while losing the ability to pass a number of its own.
+
+THE PARITY CORPUS (M0.1, plan 2.A item 4)
+------------------------------------------
+C++ is the runtime authority of record.  A retained pure-Python validator is
+only defensible if it is pinned to the SAME profile data and compared ITEM BY
+ITEM against the SAME JSON corpus: accepted/rejected, the reason, and the
+effective values -- including the ``config_hash``, which is an fnv1a64 over the
+canonical listing of every field and so catches any single wrong spelling,
+missing entry or ordering difference.  Comparing enums, or grepping source
+strings, does not count.
+
+The corpus is ``testdata/twr/config_parity_corpus.json`` and is read by BOTH
+implementations: by this module through :func:`load_parity_corpus` and
+:func:`run_parity_case` (driven by ``gr-uwb/apps/test_twr_config.py``), and by
+``gr-uwb/lib/qa_uwb_twr_config_parity.cc`` through the C++ header's own JSON
+parser.  Section 11 of this module is the loader both sides share.
+
 DELIBERATE DIVERGENCES FROM THE C++ HEADER (and why)
 ----------------------------------------------------
 1. Each rejection carries the MEASURED reason the CSV recorded (or, for a
    length the matrix never swept, the derived tokens in
    ``sync_repetition_reasons``) instead of the single generic "matrix not
-   measured yet" string.  Same ``ConfigReason``, better message.
+   measured yet" string.  Same ``ConfigReason``, better message.  The human
+   MESSAGE is the ONLY thing that differs, and the parity corpus therefore
+   compares the machine-readable triple -- field path, ``ConfigReason``,
+   ``ExchangeStatus`` -- rather than the prose.
 2. Rejected combinations are carried in ``Capabilities.phy_matrix_rejections``
    so the rejection reason can be recovered from the table instead of being
    recomputed.  A row in that list can only ever produce a *better* message; it
@@ -96,11 +193,23 @@ DELIBERATE DIVERGENCES FROM THE C++ HEADER (and why)
    not the C++ default any more -- ``build_default_capabilities()`` is, and it is
    the measured whitelist, byte-for-byte the same 48 rows / 2 SYNC lengths /
    2 reason strings / profile version.
-4. ``Opt<T>`` is ``Optional[T]`` with ``None`` meaning absent.
+4. ``Opt[T]`` is ``Optional[T]`` with ``None`` meaning absent.
 5. The JSON codec uses the stdlib ``json`` module rather than a hand-written
    parser, with ``parse_float``/``parse_constant`` hooks that reproduce the C++
    reader's int64-vs-double distinction and its refusal of ``NaN`` /
    ``Infinity`` / ``-Infinity``.
+6. TWO BEHAVIOURS THAT LOOK LIKE DIVERGENCES AND ARE NOT -- they are MIRRORS of
+   the C++ reader, and the parity corpus pins both:
+   * an unknown or mistyped enum leaves the enumeration's ZERO member behind
+     (C++ ``static_cast<E>(0)``) and always records a machine-readable
+     violation.  It is not a silent default: the import report is the authority
+     and is what every entry point returns.  Substituting a "sensible" member
+     instead would make the two implementations disagree about a document they
+     both reject.
+   * an unsigned field NARROWS to its width (C++
+     ``static_cast<uint16_t>(get_i64(...))``), so ``"local_address": -1`` is
+     65535 and trips the reserved-address rule rather than storing a number no
+     C++ build can hold.
 """
 
 from __future__ import annotations
@@ -108,6 +217,7 @@ from __future__ import annotations
 import copy as _copy
 import json
 import math
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -115,10 +225,13 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 __all__ = [
     # enums
     "Protocol", "Role", "FrameType", "PrfClass", "DataRate", "SfdMode",
-    "PhrMode", "StsMode", "FcsAppender", "TxPowerPolicy", "PulseShaping",
+    "PhrMode", "PhrRate", "PreambleLength", "FrameProfileId",
+    "StsMode", "FcsAppender", "TxPowerPolicy", "PulseShaping",
     "AgcMode", "FirstPathAlgorithm", "CompensationFlag", "TimeReferenceEvent",
     "TimeDomain", "TimeUnit", "TimestampMarker", "TimestampSource",
     "EndpointState", "ExchangeStatus", "CapabilityStatus", "ConfigReason",
+    "EvidenceLevel", "EvidenceUse", "SessionIdError", "GeometryField",
+    "FcsOwner",
     # constants
     "JSON_MAX_SAFE_INTEGER", "NATIVE_RATE_UC200_HZ", "NATIVE_RATE_CG400_HZ",
     "NATIVE_RATE_TOLERANCE_REL", "CHANNEL_FREQUENCY_TOLERANCE_HZ",
@@ -127,14 +240,23 @@ __all__ = [
     "MAX_PSDU_BYTES", "MAX_IN_FLIGHT_EXCHANGES", "MAX_DIAGNOSTIC_BYTES",
     "MAX_QUEUE_ENTRIES", "MAX_MEASUREMENT_COUNT", "MAX_ATTEMPTS_PER_EXCHANGE",
     "MAX_PHYSICAL_CHANNELS", "MAX_PEERS_PER_CONFIG", "SCHEMA_VERSION",
+    "LEGACY_SCHEMA_VERSIONS", "SCHEMA_V1_MIGRATION_REASON",
+    "FRAME_HEADER_BYTES", "FRAME_FCS_BYTES", "FRAME_MAX_PSDU_BYTES",
+    "FRAME_TIMESTAMP_BITS", "FRAME_TIMESTAMP_BYTES", "FRAME_MAX_TIMESTAMPS",
+    "FRAME_VERSION", "PHR_STANDARD_INFO_BYTES", "PHR_STANDARD_CODED_BITS",
+    "PHR_STANDARD_SYMBOLS", "SESSION_ID_WIRE_BITS", "SESSION_ID_WIRE_MAX",
+    "SESSION_ID_RESERVED_LOCAL", "SESSION_ID_BIRTHDAY_SESSIONS_50PCT",
     "NATIVE_TICK_NS", "UWB_CHANNEL_CENTER_FREQUENCY_HZ",
     "RADAR_SYNC_REPETITIONS", "IEEE_802154A_PREAMBLE_SYMBOLS",
+    "ALL_PHR_RATES", "ALL_PREAMBLE_LENGTHS", "ALL_FRAME_PROFILE_IDS",
     "MEASURED_CODE_INDICES", "MEASURED_SYNC_REPETITIONS", "MEASURED_SFD_MODES",
     "MEASURED_DATA_RATES", "MEASURED_PHY_NATIVE_RATE_HZ",
     "CFO_TAIL_REPETITIONS", "CFO_SKIP_INITIAL_REPETITIONS",
     "SYNC_16_TOA_UNVERIFIED_REASON", "SYNC_16_CAVEAT_REASON",
     "SYNC_REPS_NEEDING_TOA_VALIDATION", "sync_reps_needing_toa_validation",
     "MEASURED_ROW_REASON", "MEASURED_ROW_REASON_TOA_UNVERIFIED",
+    "MEASURED_ROW_EVIDENCE_LEVEL", "MEASURED_ROW_EVIDENCE_SOURCE",
+    "MEASURED_ROW_EVIDENCE_STATEMENT",
     "CFO_FIT_REASON_TEMPLATE",
     "PHR_DURATION_REASON_TEMPLATE", "ILLEGAL_LENGTH_REASON_TEMPLATE",
     "API_LIST_REASON", "CODE_INDEX_REASON", "STAGE_CFO_FAILED_REASON",
@@ -151,15 +273,38 @@ __all__ = [
     # timed fields
     "TimedField", "timed_field_to_text",
     # capabilities
-    "PhyCapabilityRow", "CapabilityLookup", "Capabilities",
-    "CapabilitiesBuilder", "capabilities", "default_deny_capabilities",
+    "PhyCapabilityRow", "CapabilityLookup", "ReadOnlyList", "Capabilities",
+    "CapabilitiesBuilder", "capabilities", "unmeasured_capabilities",
+    "default_deny_capabilities",
     "build_measured_capabilities", "build_default_capabilities",
+    "build_unmeasured_capabilities",
     "is_allowed_native_rate", "is_allowed_quantisation_hz",
     "code_index_supported", "sync_reps_supported",
     "uwb_channel_center_frequency_hz", "sfd_mode_symbols",
     "phr_advertised_sync_symbols", "phr_preamble_duration_index",
     "sync_repetition_reasons", "phr_self_description_reason",
     "cfo_fit_leak_reason",
+    "phr_rate_is_implemented", "phr_rate_symbols",
+    "phr_rate_unsupported_reason", "phr_mode_unsupported_reason",
+    "preamble_length_symbols", "preamble_length_from_symbols",
+    "preamble_length_unsupported_reason", "preamble_length_supported_by_vendor",
+    "preamble_length_reject_note", "reject_scope_current_software",
+    "reject_scope_out_of_scope", "reject_scope_not_measured",
+    "reject_scope_api_contract", "vendor_preamble_length_citation",
+    "evidence_level_implies", "evidence_level_valid",
+    "evidence_level_index", "evidence_required_level", "evidence_allows",
+    "evidence_explain", "not_established_list", "EVIDENCE_LEVEL_ORDER",
+    "EVIDENCE_USE_ORDER",
+    # frame geometry authority
+    "FrameProfileGeometry", "FrameGeometryClaim", "GeometryMismatch",
+    "GeometryCheckResult", "GEOMETRY_FIELD_ORDER",
+    "frame_geometry_for", "frame_geometry_mac_appends_fcs",
+    "frame_geometry_check", "frame_geometry_claim",
+    "frame_geometry_from_authority", "frame_geometry_of_profile",
+    "frame_profile_id_is_supported",
+    # session id wire mapping
+    "session_id_fits_wire", "session_id_to_wire",
+    "session_id_error_to_exchange_status", "wire_session_id_collides",
     # config
     "FrameGeometry", "SessionConfig", "PhyConfig", "FrameFormatConfig",
     "TransmitConfig", "ReceiveConfig", "RadioReadback", "EndpointBinding",
@@ -174,7 +319,7 @@ __all__ = [
     # validation
     "ConfigValidator", "validate",
     # effective / runtime
-    "EffectiveConfig", "effective_config", "ExchangeGate",
+    "EffectiveConfig", "effective_config", "copy_config", "ExchangeGate",
     "PerMessageOverrides", "TwrConfigSnapshot", "apply_calibration_once",
     # json
     "ConfigJsonError", "to_json_dict", "from_json_dict", "to_json_string",
@@ -230,7 +375,54 @@ MAX_ATTEMPTS_PER_EXCHANGE = 16
 MAX_PHYSICAL_CHANNELS = 16
 MAX_PEERS_PER_CONFIG = 4
 
-SCHEMA_VERSION = "twr-config/1"
+# ---------------------------------------------------------------------------
+# THE SCHEMA VERSION (M0.1, R3 / R5)
+# ---------------------------------------------------------------------------
+# ``twr-config/2`` is a BREAKING change and the version says so:
+#
+#   * ``frame.frame_profile`` became REQUIRED.  It selects the MAC layout the
+#     geometry claim is checked against, and a free-form profile name is not a
+#     layout (M0 review R3).
+#   * ``phy.phr_rate`` changed value domain: it used to be a ``DataRate`` that
+#     had to EQUAL ``phy.data_rate``, and is now a ``PhrRate`` with its own two
+#     members.  A document that says ``"phr_rate": "6p8m"`` meant a 6.81 Mb/s
+#     PHR, which this modulator cannot transmit, so the string is no longer a
+#     legal value on that axis (M0 review R2).
+#   * the frame geometry is checked field by field against the codec, so a
+#     pre-codec "7-byte header" claim is now a per-field rejection rather than
+#     an accepted 9/19/24-byte budget.
+#
+# A ``twr-config/1`` document is REJECTED with a migration message, never
+# silently misread: the two schemas disagree about what a PHR rate is, and
+# reading one as the other would produce a config that validates and transmits
+# something the author never asked for.
+SCHEMA_VERSION = "twr-config/2"
+
+#: The schema(s) this build knows how to MIGRATE FROM.  A document naming one
+#: of these is rejected with a message naming the specific field that changed,
+#: not with the generic "this build implements X" text used for a version it
+#: has never heard of.
+LEGACY_SCHEMA_VERSIONS: Tuple[str, ...] = ("twr-config/1",)
+
+#: Why the v1 -> v2 migration is not automatic, stated once so both languages
+#: emit the same sentence.
+SCHEMA_V1_MIGRATION_REASON = (
+    "twr-config/2 is a BREAKING change: frame.frame_profile is now REQUIRED "
+    "(it selects the MAC layout the geometry claim is checked against), "
+    "phy.phr_rate changed value domain from a payload DataRate that had to "
+    "equal phy.data_rate to its own PhrRate enumeration, and the frame "
+    "geometry is compared field by field with the frame codec "
+    "(14-byte header, 5-byte timestamps, 2-byte PHR information, "
+    "16/26/31-byte on-air frames). A twr-config/1 document is refused rather "
+    "than silently misread, because the two schemas disagree about what a PHR "
+    "rate is and misreading one as the other would accept a configuration that "
+    "transmits something the author never asked for. To migrate: add "
+    "frame.frame_profile = \"frame_v1\"; set phy.phr_rate = \"850k\" (the rate "
+    "uwb_hrp_mod_core.h actually modulates) and leave phy.data_rate at the "
+    "payload rate \"6p8m\"; then replace the frame.geometry object with "
+    "frame_geometry_of_profile(frame.frame_profile) instead of a hand-written "
+    "byte count; and set meta.schema_version = \"twr-config/2\"."
+)
 
 # Mirrors radar_meta::kRadarSyncRepetitions / sync_reps_supported().  These
 # are the lengths the *modulator API* will accept; being in this list says
@@ -387,6 +579,39 @@ NATIVE_ROUNDTRIP_BLOCKED_REASON = (
     "no_work_to_native_decimator_in_repo_so_a_twr_psdu_cannot_be_modulated_"
     "on_the_native_grid"
 )
+
+
+# ---------------------------------------------------------------------------
+# THE FRAME CODEC'S FROZEN LAYOUT CONSTANTS (M0.1, R3)
+# ---------------------------------------------------------------------------
+# Mirrors uwb_twr_frame.h.  These are the ONE set of numbers in the Python
+# layer: there is no second "7-byte header" geometry anywhere in this file, and
+# a test fixture fills a claim from them rather than typing literals.
+#
+#   kFrameHeaderBytes = kOffTimestamps = 14
+#   kFrameFcsBytes    = 2            (IEEE 802.15.4, appended by the PHY)
+#   kPhyMaxPsduBytes  = 127
+#   timestamp_bits    = 40           -> 5 bytes
+#   kPhrStandardInfoBytes = 2, coded to kPhrStandardCodedBits = 19 over 21
+#   symbols
+#
+# M0 review R3 is the reason this block exists at all: the Python schema
+# carried a pre-codec geometry with 7-byte headers and 9/19/24-byte budgets
+# while the codec had emitted a 14-byte header and 16/26/31-byte frames since
+# it was frozen.  Both suites passed because nothing compared them.
+FRAME_HEADER_BYTES = 14
+FRAME_FCS_BYTES = 2
+FRAME_MAX_PSDU_BYTES = 127
+FRAME_TIMESTAMP_BITS = 40
+FRAME_TIMESTAMP_BYTES = FRAME_TIMESTAMP_BITS // 8  # 5
+FRAME_MAX_TIMESTAMPS = 3                            # Final carries three
+PHR_STANDARD_INFO_BYTES = 2
+PHR_STANDARD_CODED_BITS = 19
+PHR_STANDARD_SYMBOLS = 21
+FRAME_VERSION = 0x01
+#: Offsets are the specification; the header size IS the first timestamp's
+#: offset, so there is exactly one definition of 14 here.
+FRAME_OFF_TIMESTAMPS = FRAME_HEADER_BYTES
 
 
 # ===========================================================================
@@ -718,7 +943,14 @@ class PrfClass(_StrEnum):
 
 
 class DataRate(_StrEnum):
-    """Data-rate CLASS.  Only 6.8M is enabled; see DATA_RATE_REJECT_REASON."""
+    """PAYLOAD data-rate CLASS.
+
+    Only ``6p8m`` is enabled; see ``DATA_RATE_REJECT_REASON``.  This is the
+    rate of the frame BODY, and it is a DIFFERENT axis from :class:`PhrRate`
+    below: M0 typed ``phr_rate`` as one of these and required it to equal
+    ``data_rate``, which was the exact inverse of what this repository
+    transmits.
+    """
 
     R850K = "850k"
     R6P8M = "6p8m"
@@ -726,6 +958,266 @@ class DataRate(_StrEnum):
     R7P8M = "7p8m"
     R27P2M = "27p2m"
     R6P8M_HPRF = "6p8m_hprf"
+
+
+# ---------------------------------------------------------------------------
+# PHR RATE -- a SEPARATE quantity from the payload data rate (M0.1, R2)
+# ---------------------------------------------------------------------------
+# Mirrors ``enum class PhrRate`` in uwb_twr_config.h, and the argument there in
+# full: uwb_hrp_mod_core.h modulates a 0.85 Mb/s PHR (21 SEC-DED-coded symbols
+# of 512 chips) ahead of a 6.81 Mb/s payload (8 chips per burst of 64 per
+# symbol).  The PHR is a different modulation at a different rate.  The 2-bit
+# data-rate field that lives INSIDE the PHR describes the PAYLOAD that follows
+# it and says nothing about how the PHR itself is transmitted.
+#
+# So the M0 rule accepted a 6.81 Mb/s PHR -- which this modulator cannot
+# produce -- and rejected the 0.85 Mb/s PHR it does produce.  A dedicated enum
+# is the fix: the two axes are separately typed, separately named and
+# separately validated, and this one carries only PHR rates.
+class PhrRate(_StrEnum):
+    #: 851.2 kb/s, the fixed PHR rate of an HRP BPRF profile.  THIS IS THE ONE
+    #: uwb_hrp_mod_core.h modulates.
+    STANDARD_850K = "850k"
+    #: "Transmit the PHR at the payload data rate."  A legal option in IEEE
+    #: 802.15.4 and an explicit enum in the Qorvo DW3xxx API guide.
+    #:
+    #: It is an enum member so the config surface can NAME an option it does
+    #: not implement, instead of encoding the wish as a payload rate.  It is
+    #: rejected, and the reason is a limit of THIS IMPLEMENTATION: the
+    #: modulator has exactly one PHR code path and it is the
+    #: 512-chips-per-symbol one.
+    SAME_AS_DATA = "same_as_data"
+
+
+#: The complete set, so a validator can enumerate what it may offer.
+ALL_PHR_RATES: Tuple[PhrRate, ...] = (PhrRate.STANDARD_850K, PhrRate.SAME_AS_DATA)
+
+
+def phr_rate_is_implemented(v: PhrRate) -> bool:
+    """True only for a PHR rate this build can actually TRANSMIT.
+
+    A member that is a legitimate protocol option with no implementation is
+    refused; being a named option is not the same as being a runnable one.
+    """
+    return v is PhrRate.STANDARD_850K
+
+
+def phr_rate_symbols(v: PhrRate) -> int:
+    """PHR symbols per frame of the implemented PHR: 21.
+
+    0 for a rate with no implementation, so it can never be mistaken for a
+    real budget.
+    """
+    return PHR_STANDARD_SYMBOLS if phr_rate_is_implemented(v) else 0
+
+
+def phr_rate_unsupported_reason(v: PhrRate) -> str:
+    """Why a PHR-rate member is refused, in its own words.
+
+    Every member that is not implemented has its own reason here, so no
+    rejection of this field is ever a bare "unsupported" with nothing behind
+    it.  The wording is deliberately a statement about THIS SOFTWARE, never
+    about any Qorvo part.
+    """
+    if v is PhrRate.STANDARD_850K:
+        return "the 851.2 kb/s PHR is the rate uwb_hrp_mod_core.h modulates"
+    if v is PhrRate.SAME_AS_DATA:
+        return (
+            "phr_rate=same_as_data is a legal 802.15.4 / DW3xxx API option, but "
+            "this build has exactly ONE PHR code path and it is the fixed "
+            "0.85 Mb/s one (21 symbols of 512 chips, uwb_hrp_mod_core.h "
+            "kPhrSymbols / kPhrChipsPerSymbol). There is no same-as-data PHR "
+            "implementation to select, so the request is refused rather than "
+            "silently transmitted as a 0.85 Mb/s PHR. This is a limit of the "
+            "software, not a claim about any Qorvo part.")
+    return ("phr_rate %s is not a member of the PHR-rate enumeration" % (v,))
+
+
+# ---------------------------------------------------------------------------
+# PREAMBLE (SYNC) LENGTH -- the lengths THIS decoder / CFO path implements
+# ---------------------------------------------------------------------------
+# Mirrors ``enum class PreambleLength`` in uwb_twr_config.h.
+#
+# This is deliberately an enumeration of what the current software can RUN,
+# not of what the standard or any vendor part can do.  What limits this build
+# is the DEMODULATOR: the CFO re-measurement in uwb_demod_core.h re-fits only
+# the last max(cfo_min_fit_repetitions, 40) SYNCs and synthesises the earlier
+# peaks at phase 0, so the number of zero-phase points that leak into the
+# least-squares fit is max(0, reps - 64) and 64 is the first clean length.
+# Separately, mod::encode_phr19 maps 128 / 256 / 512 to preamble-duration
+# index 1 (= 64), so the PHR does not self-describe those lengths.
+#
+# Qorvo's own API accepts 64 / 128 / 256 / 512 / 1024 / 2048, and the DW3xxx
+# guide lists 128 / 256 / 512 as non-standard-but-supported.  None of that is
+# in dispute, which is exactly why "the chip cannot do 128" would be a false
+# statement about hardware this project has never spoken to.
+class PreambleLength(_StrEnum):
+    #: The other measured-clean length: its tail covers the whole preamble, so
+    #: no zero-phase point reaches the fit, and it is self-describing
+    #: (preamble-duration index 0 = 16).  Its first-path / ToA accuracy is
+    #: still unmeasured, a separate caveat carried by
+    #: ``sync_reps_needing_toa_validation``.
+    SYM16 = "16"
+    #: 64 SYNC: 65.1 us integration window, preamble-duration index 1.
+    SYM64 = "64"
+
+
+ALL_PREAMBLE_LENGTHS: Tuple[PreambleLength, ...] = (
+    PreambleLength.SYM16, PreambleLength.SYM64)
+
+
+def preamble_length_symbols(v: PreambleLength) -> int:
+    """The SYNC repetition count of a length.  0 for a non-member."""
+    return {PreambleLength.SYM16: 16, PreambleLength.SYM64: 64}.get(v, 0)
+
+
+def preamble_length_from_symbols(symbols: int) -> Optional[PreambleLength]:
+    """The reverse mapping, for the raw ``phy.preamble_symbols`` field.
+
+    ``None`` means "not a length this build implements" -- never "round to the
+    nearest".
+    """
+    for v in ALL_PREAMBLE_LENGTHS:
+        if preamble_length_symbols(v) == symbols:
+            return v
+    return None
+
+
+def preamble_length_unsupported_reason(symbols: int) -> str:
+    """Why a SYNC repetition count is refused.
+
+    Each refused length gets its own measured reason, and every one of them
+    names a limit of THIS SOFTWARE rather than of a chip.  Byte-identical to
+    C++ ``preamble_length_unsupported_reason()``, so the two languages cannot
+    disagree about what was measured.
+    """
+    n = int_to_text(symbols)
+    if symbols == 32:
+        return ("preamble length %s SYNC is refused: mod::encode_phr19 "
+                "advertises preamble-duration index 1 (= 64) for it, so the "
+                "PHR does not self-describe a 32-symbol preamble" % n)
+    if symbols in (128, 256, 512):
+        return ("preamble length %s SYNC is refused by the CURRENT DEMODULATOR,"
+                " not by any hardware: uwb_demod_core.h re-measures only the "
+                "last max(cfo_min_fit_repetitions, 40) SYNCs and synthesises "
+                "the earlier peaks at phase 0, so the zero-phase points that "
+                "leak into the least-squares CFO fit number max(0, reps - 64) "
+                "-- measured at 128 SYNC as an injected 20 kHz offset coming "
+                "back as 3791 Hz; and mod::encode_phr19 maps %s to "
+                "preamble-duration index 1 (= 64), so the PHR does not "
+                "self-describe it. Qorvo's API accepts these lengths (DW3xxx "
+                "lists 128/256/512 as non-standard preamble lengths), so this is "
+                "a limit of this software path, not a statement about what a "
+                "DW1000 or DW3000 can transmit" % (n, n))
+    if symbols == 1024:
+        return ("preamble length %s SYNC is PHR-legal (preamble-duration index "
+                "2) but refused by the current demodulator for the same "
+                "CFO-fit bias as 128/256/512; a software limit, not a hardware "
+                "one" % n)
+    if symbols == 2048:
+        return ("preamble length %s SYNC exceeds the work-grid TX buffer this "
+                "build sizes for one frame (mod::kMaxHrpTxSamples); a length "
+                "this large is a buffer and scheduling decision, not a hardware "
+                "capability statement" % n)
+    if symbols in (1, 2):
+        return ("preamble length %s SYNC leaves fewer than the 4 measured peaks "
+                "uwb_demod_core.h stage_cfo needs" % n)
+    if symbols in (4, 8):
+        return ("preamble length %s SYNC is shorter than the 10 initial "
+                "repetitions uwb_demod_core.h skips before the CIR search" % n)
+    return ("preamble length %s is not a SYNC repetition count this build "
+            "implements: the enumeration is 16 or 64, bounded by this "
+            "repository's demodulator/CFO path (see the PreambleLength "
+            "comment). That is a software limit; the Qorvo parts' own API "
+            "accepts 64 through 2048" % n)
+
+
+# ---------------------------------------------------------------------------
+# Rejection scope, and the vendor citation behind it (M0.1, R7)
+# ---------------------------------------------------------------------------
+# A rejection is always attributed to something.  Naming the scope is what
+# stops "our decoder can't" from hardening into "the chip can't".
+def reject_scope_current_software() -> str:
+    return "current_software_implementation_limit"
+
+
+def reject_scope_out_of_scope() -> str:
+    """Reject-scope tag: deliberately out of scope for phase 1 (e.g. STS)."""
+    return "out_of_scope_phase1"
+
+
+def reject_scope_not_measured() -> str:
+    """Reject-scope tag: nobody looked, distinct from looked-and-failed."""
+    return "not_measured"
+
+
+def reject_scope_api_contract() -> str:
+    """Reject-scope tag: refused by the API contract, not by measurement."""
+    return "this_build_api_contract"
+
+
+#: Kept as data so the claim is greppable and can be re-verified against the
+#: PDFs rather than living only in a comment.
+def vendor_preamble_length_citation() -> str:
+    return ("qorvo_supports_these_lengths_see_dw1000_api_guide_v2.7_sec5.12_"
+            "txPreambLength_and_dw3xxx_api_guide_pdf_pp32-34_preamble_"
+            "enumeration_including_128_256_512_listed_as_non_standard_"
+            "preamble_lengths")
+
+
+def preamble_length_supported_by_vendor(n: int) -> bool:
+    """True for the lengths this build refuses for decoder/encoder reasons.
+
+    It is emphatically NOT a statement that the hardware lacks them.
+    """
+    return n in (64, 128, 256, 512, 1024, 2048)
+
+
+def preamble_length_reject_note(n: int) -> str:
+    """The note carried alongside a 128/256/512/1024/2048 rejection.
+
+    Byte-identical to C++ ``preamble_length_reject_note()``.  The word
+    "structurally impossible" appears nowhere: what fails is THIS decoder, and
+    the citation says so.
+    """
+    s = reject_scope_current_software()
+    s += "_preamble_symbols_%d_refused_by_this_build_only_" % n
+    if n == 1024:
+        s += ("uwb_demod_core_stage_cfo_refits_only_the_last_40_reps_while"
+              "_cfo_skip_initial_repetitions_stays_24_so_synthesised_zero_phase"
+              "_peaks_enter_the_phase_fit_measured_error_19901_Hz_at_20_kHz_")
+    else:
+        s += ("uwb_demod_core_stage_cfo_refits_only_the_last_40_reps_while"
+              "_cfo_skip_initial_repetitions_stays_24_so_synthesised_zero_phase"
+              "_peaks_enter_the_phase_fit_and_mod_encode_phr19_maps_the_length"
+              "_onto_the_4_value_preamble_duration_index_so_the_phr_does_not_"
+              "self_describe_")
+    if preamble_length_supported_by_vendor(n):
+        s += "not_a_hardware_claim_" + vendor_preamble_length_citation()
+    return s
+
+
+def phr_mode_unsupported_reason(v: "PhrMode") -> str:
+    """Why a PHR-form member is refused, in its own words.
+
+    M0 caught only ``none`` and let ``extended`` through as a valid profile.
+    Every member now carries its own reason.
+    """
+    if v is PhrMode.STANDARD:
+        return ("the standard 13-bit (2 octet) HRP PHR is the one frame v1 "
+                "encodes")
+    if v is PhrMode.EXTENDED:
+        return ("phr_mode=extended asks for a vendor PHR layout longer than the "
+                "13 information bits frame v1 encodes (2 octets, SEC-DED coded "
+                "to 19 bits over 21 symbols). No extended-PHR layout exists in "
+                "this codec or in uwb_hrp_mod_core.h, so the request is refused "
+                "rather than transmitted as a standard PHR. This is a limit of "
+                "this software, not a claim about any Qorvo part")
+    if v is PhrMode.NONE:
+        return ("a TWR frame without a PHR is not a valid TWR profile; the PHR "
+                "carries the RANGING bit and the PSDU length the receiver needs "
+                "before it can decode the payload")
+    return "phr_mode %s is not a member of the PHR-mode enumeration" % (v,)
 
 
 class SfdMode(_StrEnum):
@@ -750,9 +1242,172 @@ def sfd_mode_symbols(v: SfdMode) -> int:
 
 
 class PhrMode(_StrEnum):
+    """PHR PRESENCE/FORM -- a different axis from the PHR RATE.
+
+    This says whether a PHR is transmitted at all and which layout carries it;
+    :class:`PhrRate` says at what rate.  Both axes were present in M0; what was
+    missing is that each member gets its own reason, instead of only ``none``
+    being caught while ``extended`` passed validation silently.
+    """
+
     STANDARD = "standard"
+    #: A vendor PHR layout longer than the 13 information bits frame v1
+    #: encodes.  This codec and this modulator have no layout for it.
     EXTENDED = "extended"
+    #: Not a UWB frame at all: the PHR is what carries the RANGING bit and the
+    #: PSDU length a receiver needs before it can decode the payload.
     NONE = "none"
+
+
+# ---------------------------------------------------------------------------
+# THE EVIDENCE LADDER (M0.1, R7)
+# ---------------------------------------------------------------------------
+# Mirrors uwb_twr_capability_evidence.h.  The M0 whitelist overstates its
+# evidence: every one of the 318 rows in testdata/twr/phy_matrix_737280000.csv
+# carries ``path = work_direct_998p4*`` -- a full modulate -> loopback ->
+# demodulate -> byte-exact-FCS round trip on THIS repo's 998.4 MS/s work grid.
+# That is a real, useful result, and it is exactly ONE level of evidence.
+#
+# The ladder is MONOTONIC and CUMULATIVE: establishing a higher level
+# establishes every lower one, because each stage strictly contains the
+# previous one as a precondition.
+class EvidenceLevel(_StrEnum):
+    #: nothing measured
+    NONE = "none"
+    #: a TWR-sized PSDU was modulated, looped back and demodulated
+    #: byte-exactly on this repo's work grid (998.4 MS/s).  Proves TX and RX
+    #: agree with each OTHER.  Proves nothing about a radio.
+    WORK_DECODE_VERIFIED = "work_decode_verified"
+    #: additionally: the frame actually traversed the native sample rate
+    #: (work -> native -> work) with the resampler and its time mapping under
+    #: test.  Not established by any M0 row.
+    NATIVE_ROUNDTRIP_VERIFIED = "native_roundtrip_verified"
+    #: additionally: first-path / ToA accuracy measured against an independent
+    #: oracle.  Ranging accuracy is a function of exactly this quantity, which
+    #: is why a decode-verified row may NOT be used to produce a range.
+    TOA_VERIFIED = "toa_verified"
+    #: additionally: measured on real hardware, with the FPGA/UHD versions and
+    #: the clock source recorded.
+    HARDWARE_VERIFIED = "hardware_verified"
+    #: additionally: measured against a NAMED module with its SDK / firmware
+    #: hash and frame bytes recorded.
+    VENDOR_INTEROP_VERIFIED = "vendor_interop_verified"
+
+
+#: The complete ladder, weakest first.  ``not_established_list()`` walks it.
+EVIDENCE_LEVEL_ORDER: Tuple[EvidenceLevel, ...] = (
+    EvidenceLevel.NONE,
+    EvidenceLevel.WORK_DECODE_VERIFIED,
+    EvidenceLevel.NATIVE_ROUNDTRIP_VERIFIED,
+    EvidenceLevel.TOA_VERIFIED,
+    EvidenceLevel.HARDWARE_VERIFIED,
+    EvidenceLevel.VENDOR_INTEROP_VERIFIED,
+)
+
+EVIDENCE_LEVEL_COUNT = len(EVIDENCE_LEVEL_ORDER)
+
+
+def evidence_level_index(v: EvidenceLevel) -> int:
+    """Position of `l` on the ladder, or -1 when it is not a level."""
+    return EVIDENCE_LEVEL_ORDER.index(v)
+
+
+def evidence_level_valid(v: EvidenceLevel) -> bool:
+    """True when `l` is one of the five ladder levels (None excluded)."""
+    return v in EVIDENCE_LEVEL_ORDER
+
+
+def evidence_level_implies(a: EvidenceLevel, b: EvidenceLevel) -> bool:
+    """``a`` is at least as strong as ``b``."""
+    return evidence_level_index(a) >= evidence_level_index(b)
+
+
+class EvidenceUse(_StrEnum):
+    """The level a given USE requires before it may be attempted.
+
+    A decode-only row is usable for offline codec work; producing a range
+    needs ToA; putting it on a radio needs hardware; talking to a DW1000 needs
+    a named module.
+    """
+
+    WORK_DECODE = "work_decode"          # offline codec / loopback self-consistency
+    NATIVE_ROUNDTRIP = "native_roundtrip"  # frame must survive the native grid
+    RANGING = "ranging"                  # must yield a first path / ToA
+    HARDWARE = "hardware"                # must run on a real radio
+    VENDOR_INTEROP = "vendor_interop"    # must interop with a named module
+
+
+EVIDENCE_USE_ORDER: Tuple[EvidenceUse, ...] = (
+    EvidenceUse.WORK_DECODE, EvidenceUse.NATIVE_ROUNDTRIP, EvidenceUse.RANGING,
+    EvidenceUse.HARDWARE, EvidenceUse.VENDOR_INTEROP)
+
+
+def evidence_required_level(u: EvidenceUse) -> EvidenceLevel:
+    """The ladder rung a given use requires; Ranging needs ToaVerified."""
+    return {
+        EvidenceUse.WORK_DECODE: EvidenceLevel.WORK_DECODE_VERIFIED,
+        EvidenceUse.NATIVE_ROUNDTRIP: EvidenceLevel.NATIVE_ROUNDTRIP_VERIFIED,
+        EvidenceUse.RANGING: EvidenceLevel.TOA_VERIFIED,
+        EvidenceUse.HARDWARE: EvidenceLevel.HARDWARE_VERIFIED,
+        EvidenceUse.VENDOR_INTEROP: EvidenceLevel.VENDOR_INTEROP_VERIFIED,
+    }[u]
+
+
+def evidence_allows(established: EvidenceLevel, u: EvidenceUse) -> bool:
+    """Never widens a claim: it only ever fails closed."""
+    return evidence_level_implies(established, evidence_required_level(u))
+
+
+def evidence_explain(established: EvidenceLevel, u: EvidenceUse) -> str:
+    """The fail-closed explanation.
+
+    Names both the missing level and where it would have to be measured, so an
+    operator can tell "not looked at" from "looked at and failed".
+    """
+    need = evidence_required_level(u)
+    if evidence_allows(established, u):
+        return "evidence_ok:%s covers use=%s" % (established, u)
+    return ("evidence_insufficient:use=%s_requires_%s_but_only_%s_is_established"
+            "_unverified_stays_rejected_REQ_SCOPE_01" % (u, need, established))
+
+
+def not_established_list(established: EvidenceLevel) -> str:
+    """The levels a row explicitly does NOT claim, ``;``-separated.
+
+    Written out so the absence is DATA rather than a comment: a row that says
+    "work decode verified" must also say, in the same record, that native /
+    ToA / hardware / vendor are not.
+    """
+    out: List[str] = []
+    for level in EVIDENCE_LEVEL_ORDER:
+        if level is EvidenceLevel.NONE:
+            continue
+        if evidence_level_implies(established, level):
+            continue
+        out.append(str(level))
+    return ";".join(out)  # empty when every level is established
+
+
+#: M0.1 R7: the level the 48 measured rows ACTUALLY establish, and the
+#: artifact that establishes it.  Byte-identical to the C++ row fields.  The
+#: ``native_rate_hz`` a row is KEYED on is the device rate the profile targets,
+#: NOT proof that a frame was ever resampled down to that grid and back, which
+#: is why the established level stops at the work grid.
+MEASURED_ROW_EVIDENCE_LEVEL = EvidenceLevel.WORK_DECODE_VERIFIED
+MEASURED_ROW_EVIDENCE_SOURCE = (
+    "work_direct_998p4_modulate_loopback_demodulate_fcs"
+)
+#: The same statement, for a human: what the 48 rows do and do not establish.
+MEASURED_ROW_EVIDENCE_STATEMENT = (
+    "the 48 measured rows were produced by a full modulate -> "
+    "UwbLoopbackEcho -> demodulate -> FCS-pass, byte-exact round trip at "
+    "998.4 MS/s on this repository's WORK grid. That proves this repo's TX and "
+    "RX agree with each other and nothing more: no DW1000 / DW3000, no SDK "
+    "frame profile and no firmware hash was measured. The native_rate_hz column "
+    "is the rate the row is KEYED on, not proof of a native round trip; nothing "
+    "was measured for first-path / ToA accuracy; nothing was measured on "
+    "hardware."
+)
 
 
 class StsMode(_StrEnum):
@@ -1038,6 +1693,21 @@ class Duration:
     def to_text(self) -> str:
         return duration_to_text(self)
 
+    def __deepcopy__(self, memo: Dict[int, Any]) -> "Duration":
+        """A Duration is already an immutable value, so the copy is trivial.
+
+        Stated explicitly because :func:`copy_config` deep-copies whole
+        ``TwrConfig`` trees containing dozens of these, and the generic
+        ``__reduce_ex__`` path is a measurable share of the cost of taking a
+        snapshot.  It is a real copy, not a shared reference: there is nothing
+        mutable inside a Duration to reach through, and the new object carries
+        its own ``_ns`` in its own ``__slots__`` storage.
+        """
+        out = Duration.__new__(Duration)
+        memo[id(self)] = out
+        object.__setattr__(out, "_ns", self._ns)
+        return out
+
 
 ZERO = Duration(0)
 
@@ -1220,7 +1890,7 @@ def host_field(ns: int, max_quantisation_error_ns: int = 1,
 # ===========================================================================
 
 
-@dataclass
+@dataclass(frozen=True)
 class PhyCapabilityRow:
     """One row of testdata/twr/phy_matrix_whitelist_737280000.csv.
 
@@ -1228,6 +1898,19 @@ class PhyCapabilityRow:
     modulate -> loopback -> demodulate -> FCS-pass round trip was observed for
     it AND the PHR preamble-duration field actually describes the transmitted
     preamble length (REQ-PHY-01: "不能仅据 API 枚举认定兼容").
+
+    FROZEN (M0.1, defect R1): a row IS the whitelist claim -- ``reason`` is the
+    measured evidence a rejection quotes, ``verdict`` is the accept/reject
+    decision, ``max_psdu_bytes`` and ``ranging`` are the conditions it admits.
+    A mutable row reachable from a read-only table is therefore a hole straight
+    through the freeze: ``capabilities().phy_matrix[0].verdict = "supported"``
+    would have turned a measured rejection into an acceptance without touching
+    a single container.  Being frozen closes that at the row itself rather than
+    hoping every container around it is protected.
+
+    To derive a different row, build a new one (``dataclasses.replace`` or a
+    fresh constructor call); a whitelist row is evidence and evidence is not
+    edited in place.
     """
 
     native_rate_hz: float = 0.0
@@ -1241,6 +1924,31 @@ class PhyCapabilityRow:
     sfd_symbols: int = 0
     sfd_len_ieee_802154a_standard: bool = False
     verdict: str = ""
+    # M0.1 R7: what this row was ACTUALLY measured to establish.  A row may
+    # be work-decode verified and nothing more -- which is exactly the M0
+    # state, and the reason it must not be read as ranging capability.
+    evidence_level: EvidenceLevel = EvidenceLevel.NONE
+    evidence_source: str = ""
+    evidence_provenance_id: str = ""
+    #: the levels this row explicitly does NOT claim, so a reader can never
+    #: mistake a work-decode row for a ranging or vendor claim
+    evidence_not_established: str = ""
+
+    def __deepcopy__(self, memo: Dict[int, Any]) -> "PhyCapabilityRow":
+        """A value copy, cheaply.
+
+        Every field is an immutable scalar or enum, so copying the fields IS a
+        deep copy -- there is no nested container to share.  The generic
+        dataclass ``deepcopy`` goes through ``__reduce_ex__`` and is the single
+        largest cost in freezing a whitelist (84 rows), and a whitelist is
+        copied by every ``TwrConfigSnapshot``, so this is worth stating rather
+        than leaving to the default.
+        """
+        out = PhyCapabilityRow.__new__(PhyCapabilityRow)
+        memo[id(self)] = out
+        for name in self.__dataclass_fields__:
+            object.__setattr__(out, name, getattr(self, name))
+        return out
 
 
 @dataclass
@@ -1251,18 +1959,143 @@ class CapabilityLookup:
     is still a rejection (REQ-SCOPE-01) and never a silent fallback.
     ``allowed == False`` with ``MEASURED`` means the measurement exists and
     its verdict is "no"; ``reason`` then carries the measured reason tokens.
+
+    M0.1 R7: the EVIDENCE behind this answer is carried as data too.  A
+    refusal states what is missing and at which level it would have to be
+    measured, so an operator can tell "not looked at" from "looked at and
+    failed".
     """
 
     allowed: bool = False
     status: CapabilityStatus = CapabilityStatus.MEASURED_PENDING
     reason: str = ""
+    established: EvidenceLevel = EvidenceLevel.NONE
+    requested_use: EvidenceUse = EvidenceUse.WORK_DECODE
+    evidence_not_established: str = ""
+    provenance_id: str = ""
+
+
+class ReadOnlyList(Sequence):
+    """An immutable sequence: the type every capability container has.
+
+    R1 (docs/twr/M0_复核报告.md) was not only that the config was shared: the
+    PROCESS-WIDE whitelist was reachable too, so one caller could widen the
+    whitelist for every later validation in the process.  A plain ``list`` gives
+    no protection at all -- ``caps.channels.append(9)`` is a one-liner nobody
+    thinks of as a mutation of a global.
+
+    So the containers here are this instead: it is a :class:`Sequence` (it
+    compares equal to a list, iterates, indexes and slices), it has no
+    ``append`` / ``__setitem__`` / ``clear`` / ``sort`` at all, and neither the
+    instance nor its backing tuple can be rebound or deleted.  Mutation is
+    therefore refused at the point of the call rather than merely discouraged.
+
+    It is not hashable, exactly like the list it replaces; nothing in this
+    module needs to hash a capability container.
+    """
+
+    __slots__ = ("_items",)
+
+    def __init__(self, items: Iterable[Any] = ()) -> None:
+        object.__setattr__(self, "_items", tuple(items))
+
+    # -- read-only by construction --------------------------------------
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(
+            "ReadOnlyList is immutable; the capability table it belongs to is a "
+            "value, not a workspace (use CapabilitiesBuilder to derive a "
+            "different table)")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("ReadOnlyList is immutable")
+
+    def __repr__(self) -> str:
+        return "ReadOnlyList(%r)" % (list(self._items),)
+
+    # -- Sequence --------------------------------------------------------
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __getitem__(self, index: Any) -> Any:
+        return self._items[index]
+
+    def __iter__(self) -> Any:
+        return iter(self._items)
+
+    def __reversed__(self) -> Any:
+        return reversed(self._items)
+
+    def index(self, value: Any, *args: Any) -> int:
+        return self._items.index(value, *args)
+
+    def count(self, value: Any) -> int:
+        return self._items.count(value)
+
+    def __contains__(self, value: Any) -> bool:
+        return value in self._items
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, ReadOnlyList):
+            return self._items == other._items
+        if isinstance(other, (list, tuple)):
+            return self._items == tuple(other)
+        return NotImplemented
+
+    def __ne__(self, other: object) -> bool:
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __hash__(self) -> int:
+        raise TypeError("ReadOnlyList is unhashable, like the list it replaces")
+
+    # -- a deep copy of a read-only container is still read-only ---------
+    def __deepcopy__(self, memo: Dict[int, Any]) -> "ReadOnlyList":
+        return ReadOnlyList(_copy.deepcopy(self._items, memo))
+
+
+#: Every container a :class:`Capabilities` owns.  Freezing iterates exactly
+#: this list, so a new list-valued field cannot be shipped unfrozen by accident
+#: as long as it is declared here.
+_CAPABILITY_LIST_FIELDS: Tuple[str, ...] = (
+    "native_rates_hz", "code_indices", "max_psdu_bytes_seen", "prf_classes",
+    "channels", "data_rates", "phy_matrix", "sync_repetitions", "sfd_modes",
+    "phy_matrix_rejections", "sts_modes", "quantisation_rates_hz",
+)
+
+#: Every SCALAR field a :class:`Capabilities` owns, including the provenance
+#: strings.  They are copied so that the reason a config was refused keeps
+#: naming the evidence that produced it.
+_CAPABILITY_SCALAR_FIELDS: Tuple[str, ...] = (
+    "work_sample_rate_hz", "work_samples_per_symbol", "mean_prf_hz",
+    "ranging_bit_required", "sts_supported", "schema_version",
+    "profile_version", "build_id", "pending_reason", "unsupported_sts_reason",
+    "phy_matrix_source",
+)
 
 
 class Capabilities:
-    """The whitelist.  Everything not listed here is rejected."""
+    """The whitelist.  Everything not listed here is rejected.
+
+    Two states, and the difference is load-bearing:
+
+    * **frozen** (what :func:`capabilities`, :func:`unmeasured_capabilities`,
+      :func:`default_deny_capabilities` and every ``build_*_capabilities()``
+      return): every container is a :class:`ReadOnlyList` and every attribute
+      is locked, so no caller can widen or narrow the table through a returned
+      reference.  ``caps.channels.append(9)`` raises instead of silently
+      changing every later validation in the process.
+    * **mutable** (only inside :class:`CapabilitiesBuilder`): plain lists, so a
+      measured row can be appended.  A builder never sees a frozen table; it
+      works on :meth:`copy` of one.
+    """
 
     # ---- MEASURED lists -------------------------------------------------
     def __init__(self) -> None:
+        # Must be the FIRST assignment: __setattr__ consults it, and every
+        # attribute set below runs through __setattr__.
+        self._frozen = False
         self.native_rates_hz: List[float] = []
         self.code_indices: List[int] = []
         self.max_psdu_bytes_seen: List[int] = []
@@ -1300,6 +2133,50 @@ class Capabilities:
         self.unsupported_sts_reason: str = UNSUPPORTED_STS_REASON
         self.phy_matrix_source: str = PHY_MATRIX_WHITELIST_CSV
 
+    # ---- frozen / mutable state ----------------------------------------
+    @property
+    def read_only(self) -> bool:
+        """True when this table refuses every mutation attempt."""
+        return self._frozen
+
+    def freeze(self) -> "Capabilities":
+        """Make this table read-only IN PLACE and return it.
+
+        Every container becomes a :class:`ReadOnlyList` and every attribute
+        assignment is refused afterwards.  Idempotent.  Freezing is what
+        ``freeze()`` on an already-frozen table must mean: a no-op, never a
+        second wrapping.
+        """
+        if self._frozen:
+            return self
+        for name in _CAPABILITY_LIST_FIELDS:
+            current = getattr(self, name)
+            if isinstance(current, ReadOnlyList):
+                continue
+            setattr(self, name, ReadOnlyList(current))
+        # Set last: every setattr above is a plain attribute store, which
+        # freeze() itself forbids once the flag is on.
+        self._frozen = True
+        return self
+
+    def _check_mutable(self, name: str) -> None:
+        if self._frozen:
+            raise AttributeError(
+                "the capability table is read-only (%s): a measured whitelist "
+                "is a value shared by every validation in the process, so it "
+                "cannot be widened in place -- derive a different table with "
+                "CapabilitiesBuilder(base)" % name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, "_frozen", False):
+            self._check_mutable(name)
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if getattr(self, "_frozen", False):
+            self._check_mutable(name)
+        object.__delattr__(self, name)
+
     # ---- queries --------------------------------------------------------
     def native_rate_supported(self, hz: float) -> bool:
         return any(rate_matches_strict(v, hz) for v in self.native_rates_hz)
@@ -1322,6 +2199,19 @@ class Capabilities:
     def sfd_mode_supported(self, m: SfdMode) -> bool:
         return m in self.sfd_modes
 
+    def phr_rate_supported(self, r: PhrRate) -> bool:
+        """True for a PHR rate this build can actually TRANSMIT.
+
+        Deliberately NOT derived from the payload ``data_rates`` list: the PHR
+        is a different modulation at a different rate, and the M0 rule that
+        conflated the two accepted a PHR this modulator cannot produce.
+        """
+        return phr_rate_is_implemented(r)
+
+    def preamble_length_supported(self, v: PreambleLength) -> bool:
+        """True for a SYNC length this decoder / CFO path can actually run."""
+        return v in ALL_PREAMBLE_LENGTHS
+
     def max_psdu_bytes(self) -> int:
         return max(self.max_psdu_bytes_seen) if self.max_psdu_bytes_seen else 0
 
@@ -1329,8 +2219,40 @@ class Capabilities:
         return any(rate_matches_strict(v, hz) for v in self.quantisation_rates_hz)
 
     def copy(self) -> "Capabilities":
-        """A deep copy, so a builder can never mutate the shipped instance."""
-        return _copy.deepcopy(self)
+        """A MUTABLE deep copy, so a builder can never mutate the shipped one.
+
+        The copy is deliberately NOT frozen: a :class:`CapabilitiesBuilder` has
+        to append to it.  Handing that copy to a caller is safe precisely
+        because it is private to the builder -- the shipped table is never
+        reachable from it.
+        """
+        return _copy.deepcopy(self).thaw()
+
+    def thaw(self) -> "Capabilities":
+        """Undo :meth:`freeze` IN PLACE and return the table.
+
+        Every container becomes a plain ``list`` again and attribute assignment
+        works.  Only a builder calls this, on a table it just copied.  Calling
+        it on a shipped table would be an API bug, not a feature: there is
+        exactly one shipped table per process and it must stay read-only.
+        """
+        if not self._frozen:
+            return self
+        # The flag comes off first: every setattr below is otherwise refused.
+        object.__setattr__(self, "_frozen", False)
+        for name in _CAPABILITY_LIST_FIELDS:
+            current = getattr(self, name)
+            if isinstance(current, ReadOnlyList):
+                setattr(self, name, list(current))
+        return self
+
+    def frozen_copy(self) -> "Capabilities":
+        """An independent, read-only copy of this table.
+
+        Used where a caller must hold a table that cannot move underneath it
+        even if the table it was derived from is later thawed by its owner.
+        """
+        return _copy.deepcopy(self).freeze()
 
     # ---- the joint lookup -----------------------------------------------
     def lookup_phy(self, native_rate_hz: float, code_index: int,
@@ -1360,6 +2282,11 @@ class Capabilities:
                 out.allowed = True
                 out.status = row.status
                 out.reason = row.reason
+                # M0.1 R7: the evidence travels with the answer, so a caller
+                # can never read "decode round-trips" as "produces a range".
+                out.established = row.evidence_level
+                out.evidence_not_established = row.evidence_not_established
+                out.provenance_id = row.evidence_provenance_id
                 return out
 
         out.allowed = False
@@ -1380,6 +2307,9 @@ class Capabilities:
             out.status = row.status
             out.reason = "measured_reject: " + (row.reason or "no reason recorded")
             out.reason += " (%s)" % self.phy_matrix_source
+            out.established = row.evidence_level
+            out.evidence_not_established = row.evidence_not_established
+            out.provenance_id = row.evidence_provenance_id
             return out
 
         # No row at all for this (rate, code, length, sfd): still a rejection.
@@ -1388,6 +2318,7 @@ class Capabilities:
             out.status = CapabilityStatus.MEASURED
             out.reason = "measured_reject: " + "; ".join(derived)
             out.reason += " (%s)" % self.phy_matrix_source
+            out.evidence_not_established = not_established_list(EvidenceLevel.NONE)
             return out
 
         out.status = CapabilityStatus.MEASURED_PENDING
@@ -1399,6 +2330,7 @@ class Capabilities:
                 ("; " + self.pending_reason) if self.pending_reason else "",
             )
         )
+        out.evidence_not_established = not_established_list(EvidenceLevel.NONE)
         return out
 
     def to_string(self) -> str:
@@ -1443,6 +2375,9 @@ class CapabilitiesBuilder:
     """
 
     def __init__(self, base: Capabilities):
+        # copy() thaws, so the builder has a MUTABLE workspace even when the
+        # base is the frozen process-wide table.  This is the ONLY supported way
+        # to change what the whitelist allows.
         self._caps = base.copy()
 
     def add_native_rate(self, hz: float) -> "CapabilitiesBuilder":
@@ -1498,7 +2433,13 @@ class CapabilitiesBuilder:
         return self
 
     def build(self) -> Capabilities:
-        return self._caps
+        """The derived table, FROZEN.
+
+        Frozen because it is a decision, not a workspace: handing a mutable
+        table to a caller would let them widen it after the fact and invalidate
+        every validation that already used it.  Build another one to change it.
+        """
+        return self._caps.freeze()
 
 
 # --- measured reasons for a preamble length -------------------------------
@@ -1673,16 +2614,12 @@ def cfo_fit_leak_reason(n: int) -> str:
         tail_first=n - CFO_TAIL_REPETITIONS, skip=CFO_SKIP_INITIAL_REPETITIONS)
 
 
-def build_unmeasured_capabilities() -> Capabilities:
-    """The PRE-matrix default-deny state: every measured list EMPTY.
+def _build_unmeasured_table() -> Capabilities:
+    """The MUTABLE pre-matrix table, before :meth:`Capabilities.freeze`.
 
-    This is the state uwb_twr_config.h had before the PHY matrix landed, and it
-    is retained deliberately so the default-deny MECHANISM stays testable: the
-    same config must be refused against these empty lists and accepted against
-    the measured whitelist, and nothing in between.
-
-    It is NOT the current C++ default any more; ``build_default_capabilities()``
-    is.  Use it only to exercise the refusal path.
+    Private on purpose: it is the base :func:`build_measured_capabilities`
+    extends, and a mutable base cannot be a frozen one.  Both public builders
+    call it and freeze their result.
     """
     c = Capabilities()
     c.schema_version = SCHEMA_VERSION
@@ -1718,6 +2655,24 @@ def build_unmeasured_capabilities() -> Capabilities:
     c.sts_supported = False
     c.sts_modes = []
     return c
+
+
+def build_unmeasured_capabilities() -> Capabilities:
+    """The PRE-matrix default-deny state: every measured list EMPTY.
+
+    This is the state uwb_twr_config.h had before the PHY matrix landed, and it
+    is retained deliberately so the default-deny MECHANISM stays testable: the
+    same config must be refused against these empty lists and accepted against
+    the measured whitelist, and nothing in between.
+
+    It is NOT the current C++ default any more; ``build_default_capabilities()``
+    is.  Use it only to exercise the refusal path.
+
+    The table is FROZEN before it is returned, so a caller cannot turn the
+    default-deny state into something else by accident; derive a different
+    table with ``CapabilitiesBuilder``.
+    """
+    return _build_unmeasured_table().freeze()
 
 
 def build_measured_capabilities() -> Capabilities:
@@ -1773,8 +2728,11 @@ def build_measured_capabilities() -> Capabilities:
     The CSV carries no PSDU column, so each row's ``max_psdu_bytes`` is the
     frozen capability bound ``kMaxPsduBytes = 127``; the 127-byte PHR/FCS
     golden is part of the same measured matrix (``phr_psdu_length == 127``).
+
+    The table is FROZEN before it is returned (R1: a caller must not be able to
+    widen the process-wide whitelist through a returned reference).
     """
-    c = build_unmeasured_capabilities()
+    c = _build_unmeasured_table()
     c.profile_version = MEASURED_PROFILE_VERSION
     c.phy_matrix_source = PHY_MATRIX_WHITELIST_CSV
 
@@ -1783,6 +2741,13 @@ def build_measured_capabilities() -> Capabilities:
     c.sfd_modes = list(MEASURED_SFD_MODES)
 
     # ---- the 48 measured-supported rows, in the C++ loop order -------------
+    #
+    # M0.1 R7: every one of these 48 rows was measured ONLY on the 998.4 MS/s
+    # work grid (a full modulate -> loopback -> demodulate -> byte-exact-FCS
+    # round trip).  The established level is therefore exactly
+    # WORK_DECODE_VERIFIED and nothing above it, and the absent levels are
+    # recorded AS DATA so nothing downstream can read a decode-verified row as
+    # ranging, hardware or vendor capability.
     for sync in MEASURED_SYNC_REPETITIONS:
         for code in MEASURED_CODE_INDICES:
             for sfd in MEASURED_SFD_MODES:
@@ -1800,6 +2765,10 @@ def build_measured_capabilities() -> Capabilities:
                         SfdMode.R4Z2, SfdMode.R4Z3, SfdMode.DWT8,
                         SfdMode.IEEE8),
                     verdict="supported",
+                    evidence_level=MEASURED_ROW_EVIDENCE_LEVEL,
+                    evidence_source=MEASURED_ROW_EVIDENCE_SOURCE,
+                    evidence_not_established=not_established_list(
+                        MEASURED_ROW_EVIDENCE_LEVEL),
                 ))
 
     # ---- the measured REJECTIONS, cell strings verbatim --------------------
@@ -1815,6 +2784,13 @@ def build_measured_capabilities() -> Capabilities:
             reason=reason,
             sfd_symbols=sfd_mode_symbols(sfd),
             verdict="unsupported",
+            # A rejection row was also produced on the work grid: it establishes
+            # the same level, and the fact that it was NOT established is why
+            # the row refuses.  Every level above work-decode is absent.
+            evidence_level=MEASURED_ROW_EVIDENCE_LEVEL,
+            evidence_source=MEASURED_ROW_EVIDENCE_SOURCE,
+            evidence_not_established=not_established_list(
+                MEASURED_ROW_EVIDENCE_LEVEL),
         ))
 
     # 1 / 2 -- the CFO stage needs at least 4 measured peaks.
@@ -1847,7 +2823,7 @@ def build_measured_capabilities() -> Capabilities:
     # The `bogus_sfd` row cannot be carried at all: it is not an SfdMode value.
 
     c.pending_reason = PENDING_MATRIX_REASON
-    return c
+    return c.freeze()
 
 
 def build_default_capabilities() -> Capabilities:
@@ -1865,7 +2841,19 @@ _UNMEASURED_CAPS: Optional[Capabilities] = None
 
 
 def capabilities() -> Capabilities:
-    """The process-wide measured whitelist (built once, never mutated)."""
+    """The process-wide measured whitelist (built once, never mutated).
+
+    THE SAME FROZEN INSTANCE every call, on purpose: one table per process, so
+    two endpoints validating concurrently cannot disagree about what the
+    hardware supports.  It is safe to share precisely because it is read-only
+    (R1): every container is a :class:`ReadOnlyList` and every attribute is
+    locked, so ``capabilities().channels.append(9)`` raises instead of silently
+    widening the whitelist for every later validation.
+
+    To evaluate a config against a DIFFERENT table, derive one with
+    ``CapabilitiesBuilder(capabilities())`` and pass it to ``validate()`` /
+    ``effective_config()``.  That is a value of your own, not the shared one.
+    """
     global _MEASURED_CAPS
     if _MEASURED_CAPS is None:
         _MEASURED_CAPS = build_measured_capabilities()
@@ -1873,7 +2861,10 @@ def capabilities() -> Capabilities:
 
 
 def unmeasured_capabilities() -> Capabilities:
-    """The pre-matrix default-deny whitelist, for the refusal-path QA only."""
+    """The pre-matrix default-deny whitelist, for the refusal-path QA only.
+
+    One frozen process-wide instance, exactly like :func:`capabilities`.
+    """
     global _UNMEASURED_CAPS
     if _UNMEASURED_CAPS is None:
         _UNMEASURED_CAPS = build_unmeasured_capabilities()
@@ -1881,7 +2872,12 @@ def unmeasured_capabilities() -> Capabilities:
 
 
 def default_deny_capabilities() -> Capabilities:
-    """Backwards-compatible alias of :func:`unmeasured_capabilities`."""
+    """Backwards-compatible alias of :func:`unmeasured_capabilities`.
+
+    The alias deliberately returns the SAME frozen instance rather than a
+    second copy: the pre-matrix table exists to exercise the refusal path, and
+    two references to one table cannot drift apart.
+    """
     return unmeasured_capabilities()
 
 
@@ -1911,24 +2907,88 @@ def uwb_channel_center_frequency_hz(channel: int) -> float:
 # ===========================================================================
 
 
-@dataclass
-class FrameGeometry:
-    """Byte layout of the versioned TWR MAC frame profile (REQ-PROTO-06).
+# ---------------------------------------------------------------------------
+# THE FRAME PROFILE -- an enumeration, never a free-form name (M0.1, R3)
+# ---------------------------------------------------------------------------
+# Mirrors ``enum class FrameProfileId`` in uwb_twr_frame.h.  Phase 1 implements
+# exactly one.  Selecting it by enum is what makes "an arbitrary non-empty
+# profile string is an executable geometry" UNREPRESENTABLE rather than merely
+# discouraged.
+#
+# NOT the same concept as the PHY capability profile string
+# ("m0-ch5-64sync-4z2" in ``capabilities()``), which names channel / SYNC
+# length / SFD, not the MAC PSDU layout.  The two must not be conflated or
+# derived from one another.
+class FrameProfileId(_StrEnum):
+    #: frame v1: 14 B header (version, function code, 16-bit session/seq/PAN/
+    #: src/dst/flags), 40-bit little-endian timestamps, standard HRP PHR, FCS
+    #: appended by the modulation layer.  On air: Poll 16 / Response 26 /
+    #: Final 31 B.
+    TWR_V1 = "frame_v1"
 
-    These are PROFILE values, not capability claims: they are recorded
-    verbatim in ``effective_config()`` and re-checked by the frame codec.
-    They live in the config so the byte layout is never a hidden constant.
+
+#: The complete set, so a validator can enumerate what it may offer.
+ALL_FRAME_PROFILE_IDS: Tuple[FrameProfileId, ...] = (FrameProfileId.TWR_V1,)
+
+
+def frame_profile_id_is_supported(v: FrameProfileId) -> bool:
+    """True only for an implemented layout.
+
+    A value cast in from an int, or a future enumerator added without
+    handling, is refused -- never defaulted to frame v1.
+    """
+    return v is FrameProfileId.TWR_V1
+
+
+# ---------------------------------------------------------------------------
+# The claim
+# ---------------------------------------------------------------------------
+class GeometryField(_StrEnum):
+    """The five comparable geometry fields, in a fixed report order."""
+
+    MAC_HEADER_BYTES = "mac_header_bytes"
+    TIMESTAMP_BYTES = "timestamp_bytes"
+    MAC_FOOTER_BYTES = "mac_footer_bytes"
+    MAC_FCS_BYTES = "mac_fcs_bytes"
+    PHR_BYTES = "phr_bytes"
+
+
+#: The report order both languages use, so a rejection lists the fields the
+#: same way round.
+GEOMETRY_FIELD_ORDER: Tuple[GeometryField, ...] = (
+    GeometryField.MAC_HEADER_BYTES,
+    GeometryField.TIMESTAMP_BYTES,
+    GeometryField.MAC_FOOTER_BYTES,
+    GeometryField.MAC_FCS_BYTES,
+    GeometryField.PHR_BYTES,
+)
+
+
+class FcsOwner(_StrEnum):
+    """Who appends the FCS.  Exactly one layer may (REQ-API-01 帧格式).
+
+    Distinct from :class:`FcsAppender`, which is the configuration layer's own
+    enumeration; a configuration maps onto this one.
     """
 
-    #: FCF(2) + sequence(1) + PAN(2) + address(2)
+    PHY_LAYER = "phy"
+    MAC_LAYER = "mac"
+
+
+@dataclass(frozen=True)
+class FrameGeometryClaim:
+    """What a caller BELIEVES the frame layout to be.
+
+    Same field names as :class:`FrameGeometry` on purpose: the config states
+    its claim in that type and the frame layer checks it.  A DISTINCT type from
+    the authority below is also deliberate -- the two can never be swapped for
+    one another by accident.
+    """
+
     mac_header_bytes: int = 0
-    #: per 40-bit timestamp carried by the frame (0 for Poll)
     timestamp_bytes: int = 0
-    #: trailing address(2) / profile(1) trailer, 0 if the profile has none
     mac_footer_bytes: int = 0
-    #: FCS appended by the MAC (0 when the PHY appends it)
     mac_fcs_bytes: int = 0
-    #: PHR, present for every TWR frame in this profile
     phr_bytes: int = 0
 
     def any_set(self) -> bool:
@@ -1936,22 +2996,377 @@ class FrameGeometry:
                 self.mac_footer_bytes != 0 or self.mac_fcs_bytes != 0 or
                 self.phr_bytes != 0)
 
+    def field(self, f: GeometryField) -> int:
+        return getattr(self, str(f))
 
-def frame_psdu_bytes(g: FrameGeometry, t: FrameType, fcs: FcsAppender) -> int:
-    """PSDU bytes of a frame, INCLUDING the FCS when the PHY appends it and
-    EXCLUDING it when the MAC does (exactly one layer appends the FCS).
+    def items(self) -> List[Tuple[GeometryField, int]]:
+        return [(f, self.field(f)) for f in GEOMETRY_FIELD_ORDER]
+
+
+@dataclass(frozen=True)
+class FrameProfileGeometry:
+    """THE AUTHORITY: the layout the frame codec builds.
+
+    Every number comes from the module's frozen codec constants; there is no
+    second ``header + n * timestamp`` sum anywhere in this file.  ``frame_v1``
+    is the only member, so the accessors read their value rather than being
+    constants of their own -- a future profile with a footer has ONE place to
+    say so, instead of each caller inventing a third geometry.
     """
-    timestamps = frame_type_timestamp_count(t) * g.timestamp_bytes
-    mac = g.mac_header_bytes + timestamps + g.mac_footer_bytes
-    if fcs == FcsAppender.MAC:
-        return mac + g.mac_fcs_bytes
-    return mac
+
+    id: FrameProfileId = FrameProfileId.TWR_V1
+    fcs_owner: FcsOwner = FcsOwner.PHY_LAYER
+
+    def mac_header_bytes(self) -> int:
+        return FRAME_HEADER_BYTES
+
+    def timestamp_bytes(self) -> int:
+        return FRAME_TIMESTAMP_BYTES
+
+    def mac_footer_bytes(self) -> int:
+        return 0
+
+    def mac_fcs_bytes(self) -> int:
+        return (FRAME_FCS_BYTES if self.fcs_owner is FcsOwner.MAC_LAYER else 0)
+
+    def fcs_bytes_on_air(self) -> int:
+        return FRAME_FCS_BYTES
+
+    def phr_bytes(self) -> int:
+        return PHR_STANDARD_INFO_BYTES
+
+    def phr_coded_bits(self) -> int:
+        return PHR_STANDARD_CODED_BITS
+
+    def mac_payload_bytes(self, t: FrameType) -> int:
+        """MAC PSDU of one frame as THIS profile builds it.
+
+        The single place a frame length is computed:
+        ``FRAME_HEADER_BYTES + n * FRAME_TIMESTAMP_BYTES + footer`` plus the
+        FCS bytes this profile reserves INSIDE the MAC PSDU.  For the
+        executable frame-v1 profile that reservation is 0, so this is exactly
+        14 / 24 / 29 B.
+        """
+        return (self.mac_header_bytes()
+                + frame_type_timestamp_count(t) * self.timestamp_bytes()
+                + self.mac_footer_bytes()
+                + self.mac_fcs_bytes())
+
+    def on_air_bytes(self, t: FrameType) -> int:
+        """On-air PSDU: the MAC payload plus the 2 FCS bytes -- 16/26/31 B.
+
+        INVARIANT under ``fcs_owner``: moving who appends the FCS does not
+        change a single sample on the air, it only changes which layer is
+        responsible for it.
+        """
+        return self.mac_payload_bytes(t) - self.mac_fcs_bytes() \
+            + self.fcs_bytes_on_air()
+
+    def executable(self) -> bool:
+        """True only for a layout this codec can actually build.
+
+        The MAC-appends variant is DESCRIBABLE but not encodable here.
+        """
+        return self.fcs_owner is FcsOwner.PHY_LAYER
+
+    def claim(self) -> FrameGeometryClaim:
+        """The claim that agrees with this authority.
+
+        Checking it back must report no mismatch; that self-consistency is
+        what the R3 regression test relies on.
+        """
+        return FrameGeometryClaim(
+            mac_header_bytes=self.mac_header_bytes(),
+            timestamp_bytes=self.timestamp_bytes(),
+            mac_footer_bytes=self.mac_footer_bytes(),
+            mac_fcs_bytes=self.mac_fcs_bytes(),
+            phr_bytes=self.phr_bytes())
 
 
-def frame_bytes_on_air(g: FrameGeometry, t: FrameType, fcs: FcsAppender,
-                       fcs_bytes: int) -> int:
-    """Transmitted bytes, with the FCS counted EXACTLY once."""
-    return frame_psdu_bytes(g, t, fcs) + (fcs_bytes if fcs == FcsAppender.PHY else 0)
+#: The description-only variant: same layout, but the MAC reserves and appends
+#: the 2 FCS bytes itself.  Provided so a configuration can STATE that layout
+#: and be told it is not executable here, rather than having the number
+#: silently accepted.
+def frame_geometry_mac_appends_fcs(
+        pid: FrameProfileId = FrameProfileId.TWR_V1) -> FrameProfileGeometry:
+    return FrameProfileGeometry(id=pid, fcs_owner=FcsOwner.MAC_LAYER)
+
+
+#: The executable authority for a profile id, or ``None`` when the id names no
+#: implemented layout.  Never a silent fallback to frame v1.
+def frame_geometry_for(pid: FrameProfileId) -> Optional[FrameProfileGeometry]:
+    if not frame_profile_id_is_supported(pid):
+        return None
+    return FrameProfileGeometry(id=pid, fcs_owner=FcsOwner.PHY_LAYER)
+
+
+@dataclass(frozen=True)
+class GeometryMismatch:
+    field: GeometryField
+    expected: int
+    actual: int
+
+
+@dataclass(frozen=True)
+class GeometryCheckResult:
+    id: FrameProfileId
+    authority: FrameProfileGeometry
+    claimed: FrameGeometryClaim
+    #: False when the authority is describeable but not encodable by this codec
+    #: (the MAC-appends variant).
+    fcs_owner_ok: bool
+    #: The mismatching fields, in ``GEOMETRY_FIELD_ORDER``.
+    mismatches: Tuple[GeometryMismatch, ...]
+
+    def ok(self) -> bool:
+        return self.fcs_owner_ok and not self.mismatches
+
+    def first_mismatch(self) -> Optional[GeometryMismatch]:
+        return self.mismatches[0] if self.mismatches else None
+
+    def summary(self) -> str:
+        """One line naming every field that disagrees.
+
+        ``"mac_header_bytes: expected 14, got 7; phr_bytes: expected 2, got 12"``
+        """
+        parts: List[str] = []
+        for m in self.mismatches:
+            parts.append("%s: expected %d, got %d"
+                         % (m.field, m.expected, m.actual))
+        if not self.fcs_owner_ok:
+            if parts:
+                parts.append("")
+            parts.append("fcs_owner: expected %s, got %s (this codec only "
+                         "encodes the PHY-appends form)"
+                         % (FcsOwner.PHY_LAYER, self.authority.fcs_owner))
+        return "; ".join(parts)
+
+
+#: Checks a caller-supplied claim against the authority, PER FIELD.  This is
+#: the function a configuration validator calls: it never decides geometry, it
+#: only reports where the claim diverges from the one source of truth, so a
+#: 7-byte header is reported as ``mac_header_bytes: expected 14, got 7``
+#: rather than quietly accepted with a 9-byte budget (M0 review R3).
+def frame_geometry_check(claimed: FrameGeometryClaim,
+                         authority: FrameProfileGeometry) -> GeometryCheckResult:
+    mismatches: List[GeometryMismatch] = []
+    for f in GEOMETRY_FIELD_ORDER:
+        want = authority.claim().field(f)
+        got = claimed.field(f)
+        if want != got:
+            mismatches.append(GeometryMismatch(f, want, got))
+    return GeometryCheckResult(id=authority.id, authority=authority,
+                               claimed=claimed,
+                               fcs_owner_ok=authority.executable(),
+                               mismatches=tuple(mismatches))
+
+
+@dataclass
+class FrameGeometry:
+    """A CLAIM about the versioned TWR MAC frame layout (REQ-PROTO-06).
+
+    NOT a second source of truth for it.  M0 review R3: this struct used to
+    carry a pre-codec "7-byte header" geometry (FCF(2) + sequence(1) + PAN(2) +
+    address(2)) with 9/19/24-byte budgets while the frame codec emitted a
+    14-byte header and 16/26/31-byte on-air frames.  Both suites passed because
+    nothing compared the two.
+
+    Now the codec owns every one of these numbers
+    (:class:`FrameProfileGeometry`) and this struct is only what a caller
+    BELIEVES.  :func:`frame_geometry_claim` turns it into the codec's
+    :class:`FrameGeometryClaim`, :func:`frame_geometry_check` reports every
+    field that disagrees, and the validator turns each disagreement into its
+    own rejection naming that exact field.  The fields stay here so the claim
+    is visible in the canonical field listing, in the config hash and in the
+    JSON -- an operator must be able to see what was claimed -- but they never
+    decide anything.
+    """
+
+    #: MAC header bytes the caller believes the frame has.  frame v1: 14
+    #: (version / function code / 16-bit session / seq / PAN / src / dst /
+    #: flags), from FRAME_HEADER_BYTES.
+    mac_header_bytes: int = 0
+    #: bytes per timestamp field; 5 for the 40-bit frame-v1 timestamp.
+    timestamp_bytes: int = 0
+    #: trailing address / profile trailer; frame v1 has none.
+    mac_footer_bytes: int = 0
+    #: FCS bytes reserved INSIDE the MAC PSDU; 0 when the PHY appends it.
+    mac_fcs_bytes: int = 0
+    #: PHR INFORMATION bytes the caller believes are carried; frame v1: 2
+    #: (13 information bits, SEC-DED coded to 19 bits over 21 symbols).  This
+    #: is the PHR's INFORMATION size, not its on-air duration.
+    phr_bytes: int = 0
+
+    def any_set(self) -> bool:
+        return (self.mac_header_bytes != 0 or self.timestamp_bytes != 0 or
+                self.mac_footer_bytes != 0 or self.mac_fcs_bytes != 0 or
+                self.phr_bytes != 0)
+
+    def to_text(self) -> str:
+        """One line, in the codec's own field order so the two read alike."""
+        return ("mac_header_bytes=%d timestamp_bytes=%d mac_footer_bytes=%d "
+                "mac_fcs_bytes=%d phr_bytes=%d"
+                % (self.mac_header_bytes, self.timestamp_bytes,
+                   self.mac_footer_bytes, self.mac_fcs_bytes, self.phr_bytes))
+
+    def to_claim(self) -> FrameGeometryClaim:
+        return FrameGeometryClaim(
+            mac_header_bytes=self.mac_header_bytes,
+            timestamp_bytes=self.timestamp_bytes,
+            mac_footer_bytes=self.mac_footer_bytes,
+            mac_fcs_bytes=self.mac_fcs_bytes,
+            phr_bytes=self.phr_bytes)
+
+
+#: The claim, in the codec's own claim type.  Same field names on purpose.
+def frame_geometry_claim(g: FrameGeometry) -> FrameGeometryClaim:
+    return g.to_claim()
+
+
+#: The geometry the CODEC says, in the config's own struct.  This is how a
+#: caller (and every test fixture) states a claim without keeping a private
+#: copy of the numbers: fill the config from the authority, then let the
+#: validator prove the two agree.
+def frame_geometry_from_authority(
+        g: FrameProfileGeometry) -> FrameGeometry:
+    return FrameGeometry(
+        mac_header_bytes=g.mac_header_bytes(),
+        timestamp_bytes=g.timestamp_bytes(),
+        mac_footer_bytes=g.mac_footer_bytes(),
+        mac_fcs_bytes=g.mac_fcs_bytes(),
+        phr_bytes=g.phr_bytes())
+
+
+#: The claim of the executable authority for a profile id, or ``None`` when
+#: the id names no implemented layout.  Never a silent fallback to frame v1.
+def frame_geometry_of_profile(
+        pid: FrameProfileId) -> Optional[FrameGeometry]:
+    g = frame_geometry_for(pid)
+    if g is None:
+        return None
+    return frame_geometry_from_authority(g)
+
+
+def frame_psdu_bytes(t: Any, fcs: Any, legacy_fcs: Any = None) -> int:
+    """MAC PSDU bytes a frame of type ``t`` occupies.
+
+    INCLUDING the FCS when the MAC appends it and EXCLUDING it when the PHY
+    does (exactly one layer appends the FCS, REQ-API-01 帧格式).
+
+    A DELEGATION to the codec authority, which is the only place a frame length
+    is computed.  M0 re-summed ``header + n * timestamp + footer`` from the
+    config's own geometry claim, which is how a 7-byte header produced a
+    9-byte Poll and understated the frame-duration budget.
+
+    RETAINED CALL SHAPE.  ``frame_psdu_bytes(geometry, type, fcs)`` still
+    compiles: the geometry argument is DELIBERATELY IGNORED, because a claim
+    does not decide a length, and keeping the parameter means an existing call
+    site keeps working while losing the ability to pass a number of its own.
+    New code should use the two-argument form.
+    """
+    if isinstance(t, FrameGeometry):  # the old three-argument shape
+        t, fcs = fcs, legacy_fcs
+    owner = (FcsOwner.MAC_LAYER if fcs is FcsAppender.MAC
+             else FcsOwner.PHY_LAYER)
+    g = FrameProfileGeometry(id=FrameProfileId.TWR_V1, fcs_owner=owner)
+    return g.mac_payload_bytes(t)
+
+
+def frame_bytes_on_air(t: Any, fcs: Any, legacy_fcs: Any = None,
+                       legacy_fcs_bytes: Any = None) -> int:
+    """Transmitted bytes, with the FCS counted EXACTLY once -- 16/26/31.
+
+    Invariant under which layer appends the FCS, which is exactly the property
+    a frame-duration budget should have.  ``fcs_bytes`` from the old
+    four-argument shape is ignored for the same reason as above: the FCS size
+    is the codec's, not the config's.
+    """
+    if isinstance(t, FrameGeometry):  # the old four-argument shape
+        t, fcs = fcs, legacy_fcs
+    g = frame_geometry_for(FrameProfileId.TWR_V1)
+    assert g is not None  # frame_v1 is the only implemented profile
+    return g.on_air_bytes(t)
+
+
+# ---------------------------------------------------------------------------
+# Session id: the local -> wire contract (mirrors uwb_twr_frame.h)
+# ---------------------------------------------------------------------------
+# The wire session field of frame v1 is 2 bytes, so the wire session space is
+# 16 bits and that is the ENTIRE space.  Everything below follows from those
+# two facts; none of it is a policy choice the codec could have made differently.
+SESSION_ID_WIRE_BITS = 16
+SESSION_ID_WIRE_MAX = 0xFFFF
+#: A locally chosen session id of 0 must not reach the air: the configuration
+#: layer uses it as its "not stated" marker.  The codec itself does not refuse
+#: it -- a frame is a frame -- so this is a caller rule, stated here so both
+#: sides quote the same constant instead of inventing one.
+SESSION_ID_RESERVED_LOCAL = 0
+#: ~sqrt(2**16): the birthday bound of a 16-bit wire field.  No local->wire
+#: mapping can raise it; a wider (or keyed) session field needs a different
+#: frame version the peer must also understand.
+SESSION_ID_BIRTHDAY_SESSIONS_50PCT = 256.0
+
+
+class SessionIdError(_StrEnum):
+    NONE = "none"
+    #: local id > SESSION_ID_WIRE_MAX: refused, never truncated
+    OUT_OF_WIRE_RANGE = "session_id_out_of_wire_range"
+
+
+def session_id_error_to_exchange_status(e: SessionIdError) -> ExchangeStatus:
+    """Map a session-id narrowing failure onto the frozen ExchangeStatus."""
+    if e is SessionIdError.NONE:
+        return ExchangeStatus.OK
+    if e is SessionIdError.OUT_OF_WIRE_RANGE:
+        # A configuration that cannot be represented is rejected before the
+        # radio starts; it is not a peer or a decode problem.
+        return ExchangeStatus.CONFIG_REJECTED
+    return ExchangeStatus.INTERNAL_ERROR
+
+
+def session_id_fits_wire(local_session_id: int) -> bool:
+    """True when the local id is representable on the wire, bit for bit."""
+    return 0 <= local_session_id <= SESSION_ID_WIRE_MAX
+
+
+#: THE MAPPING RULE (frame v1):
+#:
+#:     wire_session_id == local_session_id, bit for bit, 16 bits,
+#:                       little-endian at the session offset
+#:     a local id outside [0, 0xFFFF] is REFUSED
+#:
+#: There is deliberately no folding, hashing, low-word extraction or derived
+#: value.  A lossy local->wire map would make two different local sessions
+#: produce byte-identical session fields, and a frame match would then accept
+#: the wrong session's reply as this one's (REQ-PROTO-01) -- a wrong-peer frame
+#: silently folded into a range.  A refusal is visible and attributable; a
+#: collision is neither.  So: in range -> exact, out of range -> explicit error.
+def session_id_to_wire(local_session_id: int) -> Tuple[int, str, SessionIdError]:
+    """``(wire_id, error_text, error)``.
+
+    On failure the wire id is 0, never left holding a plausible-looking value:
+    a caller that ignores the error must not transmit a truncated id that some
+    other session is already using.
+    """
+    if not session_id_fits_wire(local_session_id):
+        return (0,
+                "%s: local session id %d does not fit the %d-bit wire field at "
+                "the session offset; refused, not truncated to %d"
+                % (SessionIdError.OUT_OF_WIRE_RANGE, local_session_id,
+                   SESSION_ID_WIRE_BITS, local_session_id & SESSION_ID_WIRE_MAX),
+                SessionIdError.OUT_OF_WIRE_RANGE)
+    return (local_session_id, "", SessionIdError.NONE)
+
+
+def wire_session_id_collides(a: int, b: int) -> bool:
+    """True only for two in-range ids that are the SAME integer.
+
+    Because an out-of-range id is refused instead of narrowed, the mapping is
+    injective over everything that can reach the air; the ``fits`` test is what
+    makes that statement true rather than false for a rejected id (which
+    collides with nothing, because it never goes on the air).
+    """
+    return session_id_fits_wire(a) and session_id_fits_wire(b) and a == b
 
 
 @dataclass
@@ -1961,7 +3376,16 @@ class SessionConfig:
     local_address: int = 0
     peer_address: int = 0
     pan_id: int = 0
-    session_id: int = 0        # 0 is the frame profile's "invalid" marker
+    #: LOCAL session id.  The wire field is 16 bits, so the mapping is
+    #: identity-or-refuse (:func:`session_id_to_wire`), never a fold or a mask.
+    #: The type stays a plain ``int`` DELIBERATELY rather than narrowing to 16
+    #: bits: narrowing would make the local id space and the wire id space
+    #: indistinguishable, so an operator could no longer express the id they
+    #: intended and would never learn it does not fit.  Keeping the wider space
+    #: makes the refusal a VISIBLE, TESTABLE, ATTRIBUTABLE configuration error
+    #: instead of an unreachable code path.  0 is the frame profile's "no
+    #: session" marker.
+    session_id: int = 0
     exchange_id: int = 0
     #: Frame sequence number and its own wrap modulus, INDEPENDENT of the
     #: session id (帧序号回绕与会话 ID 独立).
@@ -1984,24 +3408,41 @@ class PhyConfig:
     center_frequency_hz: float = 0.0   # 0 = not stated; the plan decides
     tx_preamble_code: int = 0         # 0 = "not stated" -> rejected
     rx_preamble_code: int = 0
-    preamble_symbols: int = 0         # SYNC repetitions
+    preamble_symbols: int = 0         # SYNC repetitions; must be a PreambleLength
     prf_class: PrfClass = PrfClass.BPRF64
+    #: PAYLOAD data rate, measured: 6.81 Mb/s is the only rate that round
+    #: trips through this modulator/demodulator pair.
     data_rate: DataRate = DataRate.R6P8M
-    #: companion of data_rate; must equal it (REQ-PHY-02)
-    phr_rate: DataRate = DataRate.R6P8M
+    #: PHR rate -- a SEPARATE quantity from ``data_rate`` (M0.1, R2).  It used
+    #: to be a DataRate required to EQUAL ``data_rate``, which had the rule
+    #: exactly backwards: this modulator sends a 0.85 Mb/s PHR (21 symbols of
+    #: 512 chips) ahead of a 6.81 Mb/s payload (8 chips per burst of 64 per
+    #: symbol).  The two axes are now separately typed and separately
+    #: validated, and neither is derived from the other.
+    phr_rate: PhrRate = PhrRate.STANDARD_850K
 
 
 @dataclass
 class FrameFormatConfig:
+    #: WHICH MAC LAYOUT.  A FrameProfileId, not a free-form string: an
+    #: arbitrary non-empty profile name must not be able to act as an
+    #: executable geometry (M0 review R3).  It selects the authority that the
+    #: ``geometry`` claim below is checked against, and it is REQUIRED in the
+    #: JSON schema (twr-config/2).
+    frame_profile: FrameProfileId = FrameProfileId.TWR_V1
     sfd_mode: SfdMode = SfdMode.R4Z2
     sfd_symbols: int = 0
     #: Timeout after which a received frame is declared SFD-missing.  Zero
     #: means "disabled"; non-zero must be in a device-tick domain.
     sfd_timeout: TimedField = field(default_factory=TimedField)
+    #: PHR presence/form.  The PHR RATE is ``phy.phr_rate``; the two are
+    #: separate axes and neither is derived from the other.
     phr_mode: PhrMode = PhrMode.STANDARD
     ranging_bit: bool = True
 
     # THREE DISTINCT CONCEPTS, never conflated:
+    #  (1) upper-layer bytes handed to the MAC, stated as a CLAIM about the
+    #      layout that the codec then checks field by field,
     geometry: FrameGeometry = field(default_factory=FrameGeometry)
     mac_psdu_bytes: int = 0
     mac_psdu_includes_fcs: bool = False
@@ -2355,6 +3796,10 @@ def _collect_fields(s: FieldSink, v: Any, p: str) -> None:
         s.i64(p + ".phr_bytes", v.phr_bytes)
 
     elif isinstance(v, FrameFormatConfig):
+        # frame_profile comes FIRST, exactly as C++ collect_fields orders it,
+        # so the canonical text -- and therefore config_hash -- is identical on
+        # both sides.
+        s.enum(p + ".frame_profile", v.frame_profile)
         s.enum(p + ".sfd_mode", v.sfd_mode)
         s.i64(p + ".sfd_symbols", v.sfd_symbols)
         _collect_timed(s, p + ".sfd_timeout", v.sfd_timeout)
@@ -2638,13 +4083,29 @@ class ConfigValidator:
         return self.report
 
     def check_meta(self, c: TwrConfig) -> None:
+        # Two INDEPENDENT checks, not an if/elif: an empty version is both "not
+        # stated" and "not the version this build implements", and reporting
+        # only the first would tell an operator to fill in a field when the
+        # field is already there with the wrong value.
         if c.meta.schema_version == "":
             self._cfg_rej("meta.schema_version", ConfigReason.EMPTY_VALUE,
                           "schema_version is required")
         if c.meta.schema_version != self.caps.schema_version:
-            self._unsup("meta.schema_version",
-                        "this build implements %s, config asks for '%s'" % (
-                            self.caps.schema_version, c.meta.schema_version))
+            # A version this build KNOWS how to migrate from gets the migration
+            # message; one it has never heard of gets the generic one.  Neither
+            # is a silent misread: the v1 and v2 schemas disagree about what a
+            # PHR rate is, so reading one as the other would accept a config
+            # that transmits something the author never asked for.
+            if c.meta.schema_version in LEGACY_SCHEMA_VERSIONS:
+                self._unsup("meta.schema_version",
+                            "this build implements %s, config asks for '%s': "
+                            "%s" % (self.caps.schema_version,
+                                    c.meta.schema_version,
+                                    SCHEMA_V1_MIGRATION_REASON))
+            else:
+                self._unsup("meta.schema_version",
+                            "this build implements %s, config asks for '%s'" % (
+                                self.caps.schema_version, c.meta.schema_version))
         if c.meta.profile_version == "":
             self._cfg_rej("meta.profile_version", ConfigReason.EMPTY_VALUE,
                           "profile_version is required (REQ-OUT-01 "
@@ -2669,6 +4130,18 @@ class ConfigValidator:
         if s.session_id == 0:
             self._cfg_rej("session.session_id", ConfigReason.ZERO_VALUE,
                           "0 is the frame profile's 'no session' marker")
+        else:
+            # The wire session field of frame v1 is 16 bits, so the local ->
+            # wire mapping is identity-or-refuse: in range -> exact, out of
+            # range -> an explicit error.  It is NOT folded, masked or hashed,
+            # because a lossy map makes two different local sessions produce a
+            # byte-identical session field and the frame match would then
+            # accept the wrong session's reply as this one's (REQ-PROTO-01).
+            _wire, sid_err_text, sid_err = session_id_to_wire(s.session_id)
+            if sid_err is not SessionIdError.NONE:
+                self._rej("session.session_id", ConfigReason.OUT_OF_RANGE,
+                          session_id_error_to_exchange_status(sid_err),
+                          sid_err_text, "REQ-PROTO-01")
         if s.sequence_modulus == 0:
             self._cfg_rej("session.sequence_modulus", ConfigReason.ZERO_VALUE,
                           "wrap modulus is zero")
@@ -2761,11 +4234,22 @@ class ConfigValidator:
             self._unsup("phy.prf_class",
                         "PRF class %s is not in the capability whitelist"
                         % p.prf_class)
-        if p.phr_rate != p.data_rate:
-            self._cfg_rej(
-                "phy.phr_rate", ConfigReason.FIELD_CONFLICT,
-                "PHR rate (%s) must equal the data rate (%s)"
-                % (p.phr_rate, p.data_rate), "REQ-PHY-02")
+        # The PHR rate is validated on its OWN axis.  It is NOT compared to the
+        # payload data rate: the PHR is a different modulation at a different
+        # rate, and the data-rate field INSIDE the PHR describes the payload,
+        # not the PHR's own transmission.  M0's `phr_rate == data_rate` rule
+        # therefore accepted the 6.81 Mb/s PHR this modulator cannot produce
+        # and rejected the 0.85 Mb/s PHR it does produce.
+        if not phr_rate_is_implemented(p.phr_rate):
+            self._unsup(
+                "phy.phr_rate",
+                "PHR rate %s is not implemented: %s It is NOT compared with "
+                "phy.data_rate (%s): the PHR and the payload are separate "
+                "modulations, and the data-rate field carried inside the PHR "
+                "describes the payload"
+                % (p.phr_rate, phr_rate_unsupported_reason(p.phr_rate),
+                   p.data_rate),
+                ConfigReason.UNSUPPORTED, "REQ-PHY-02")
 
         # data rate: only the one the modulator can produce is enabled.
         if not self.caps.data_rate_supported(p.data_rate):
@@ -2784,13 +4268,37 @@ class ConfigValidator:
         if p.preamble_symbols == 0:
             self._cfg_rej("phy.preamble_symbols", ConfigReason.ZERO_VALUE,
                           "preamble length is required")
-        elif not self.caps.sync_repetitions_supported(p.preamble_symbols):
-            self._unsup(
-                "phy.preamble_symbols",
-                "preamble length %d is not in this build's measured "
-                "whitelist: %s" % (p.preamble_symbols, self._sync_reason(
-                    p.preamble_symbols)),
-                ConfigReason.UNSUPPORTED, "REQ-PHY-01")
+        else:
+            # GATE 1: the length must be a member of PreambleLength, i.e. one
+            # this repository's demodulator / CFO path can actually run.  The
+            # reason names THAT limit and never a chip's capability: the
+            # Qorvo parts' own API accepts 64 through 2048, so "the hardware
+            # cannot do 128" would be a false statement about hardware this
+            # project has never spoken to.
+            if preamble_length_from_symbols(p.preamble_symbols) is None:
+                self._unsup("phy.preamble_symbols",
+                            preamble_length_unsupported_reason(
+                                p.preamble_symbols),
+                            ConfigReason.UNSUPPORTED, "REQ-PHY-01")
+            # GATE 2: the length must also be MEASURED for this (native rate,
+            # code, SFD, PSDU, ranging) combination.  Separate from gate 1 on
+            # purpose: a length can be implemented and still unmeasured.
+            if not self.caps.sync_repetitions_supported(p.preamble_symbols):
+                # M0.1 R7: state the SCOPE of the refusal.  For the lengths
+                # Qorvo parts do support, this build's decoder / CFO path is
+                # the limit -- that is not a hardware claim, and the note
+                # carries the vendor citation so the message and the CSV agree.
+                note = (" [%s]" % preamble_length_reject_note(
+                    p.preamble_symbols)
+                    if preamble_length_supported_by_vendor(p.preamble_symbols)
+                    else "")
+                self._unsup(
+                    "phy.preamble_symbols",
+                    "preamble length %d is not in the capability whitelist: "
+                    "%s%s" % (p.preamble_symbols,
+                              self.caps.pending_reason
+                              or self._sync_reason(p.preamble_symbols), note),
+                    ConfigReason.UNSUPPORTED, "REQ-PHY-01")
 
     def _sync_reason(self, n: int) -> str:
         """Why a preamble length is not in the whitelist.
@@ -2810,6 +4318,23 @@ class ConfigValidator:
 
     def check_frame(self, c: TwrConfig) -> None:
         f = c.frame
+
+        # ---- which layout? ------------------------------------------------
+        # The profile is an ENUM, so "an arbitrary non-empty profile string"
+        # is not expressible.  An id this build has no implementation for is
+        # refused with its name, never defaulted to frame v1.
+        if not frame_profile_id_is_supported(f.frame_profile):
+            self._unsup(
+                "frame.frame_profile",
+                "frame profile %s is not implemented: only the ids named by "
+                "ALL_FRAME_PROFILE_IDS have a codec, a geometry authority and "
+                "an encoder in this build. A free-form profile name is never "
+                "an executable geometry" % f.frame_profile,
+                ConfigReason.UNSUPPORTED, "REQ-PROTO-06")
+        # The authority this config is checked against.  It comes from the
+        # enum; it is never read out of the config.
+        authority = frame_geometry_for(f.frame_profile)
+
         if not self.caps.sfd_mode_supported(f.sfd_mode):
             look = self.caps.lookup_phy(
                 c.radio.native_sample_rate_hz, c.phy.tx_preamble_code,
@@ -2819,22 +4344,30 @@ class ConfigValidator:
                         "SFD mode %s is not in the capability whitelist: %s"
                         % (f.sfd_mode, look.reason),
                         ConfigReason.UNSUPPORTED, "REQ-PHY-01")
+        # The raw SFD length is a RESTATEMENT of the mode, never an
+        # independent number: "4z2" and 4 symbols cannot both be stated.
         if f.sfd_symbols == 0:
             self._cfg_rej("frame.sfd_symbols", ConfigReason.ZERO_VALUE,
                           "SFD length is required")
         elif f.sfd_symbols != sfd_mode_symbols(f.sfd_mode):
             self._cfg_rej(
                 "frame.sfd_symbols", ConfigReason.FIELD_CONFLICT,
-                "SFD mode %s is %d symbols, config states %d" % (
+                "SFD mode %s is %d symbols, config states %d; the length is "
+                "derived from the mode, not chosen beside it" % (
                     f.sfd_mode, sfd_mode_symbols(f.sfd_mode), f.sfd_symbols),
                 "REQ-PHY-01")
 
-        if f.phr_mode == PhrMode.NONE:
+        # PHR presence/form.  Each unimplemented member carries its own reason
+        # (phr_mode_unsupported_reason); M0 caught only `none` and let
+        # `extended` through as a valid profile.
+        if f.phr_mode is not PhrMode.STANDARD:
             self._unsup(
                 "frame.phr_mode",
-                "a TWR frame without a PHR is not a valid TWR profile; the "
-                "PHR carries the RANGING bit and the RX timestamp fields",
-                ConfigReason.OUT_OF_SCOPE, "REQ-PHY-01")
+                "PHR mode %s is not implemented: %s"
+                % (f.phr_mode, phr_mode_unsupported_reason(f.phr_mode)),
+                ConfigReason.OUT_OF_SCOPE if f.phr_mode is PhrMode.NONE
+                else ConfigReason.UNSUPPORTED,
+                "REQ-PHY-01")
         if self.caps.ranging_bit_required and not f.ranging_bit:
             self._cfg_rej(
                 "frame.ranging_bit", ConfigReason.FIELD_CONFLICT,
@@ -2849,18 +4382,36 @@ class ConfigValidator:
         self._validate_timed_field("frame.sfd_timeout", f.sfd_timeout, False,
                                    TimeReferenceEvent.RX_ENABLE, True)
 
-        # exactly one layer appends the FCS
+        # Exactly one layer appends the FCS, and WHICH one is not free.
+        # A config that names the MAC as the appender is DESCRIBABLE -- the
+        # geometry authority has a variant for it and the on-air length does
+        # not change -- but it is not ENCODABLE here.  M0 accepted such a
+        # configuration and then reported a "MAC PSDU" no encoder can produce,
+        # which is the R3 class of defect one layer down.
         if f.fcs_append == FcsAppender.NONE:
             self._cfg_rej("frame.fcs_append", ConfigReason.FIELD_CONFLICT,
                           "no layer appends the FCS; exactly one of mac/phy must")
+        elif f.fcs_append is FcsAppender.MAC and authority is not None:
+            self._unsup(
+                "frame.fcs_append",
+                "fcs_append=mac asks for a MAC that builds and appends the FCS "
+                "itself. The geometry is DESCRIBABLE and the on-air length is "
+                "unchanged, but this codec only encodes the PHY-appends form: "
+                "FrameProfileGeometry.executable() is false for the MAC-appends "
+                "variant",
+                ConfigReason.UNSUPPORTED, "REQ-API-01")
         if f.fcs_bytes == 0:
             self._cfg_rej("frame.fcs_bytes", ConfigReason.ZERO_VALUE,
                           "FCS length is required")
-        elif f.fcs_bytes != 2:
-            self._unsup("frame.fcs_bytes",
-                        "only the 16-bit FCS of this frame profile is "
-                        "implemented (asked for %d bytes)" % f.fcs_bytes)
-        declared_includes = (f.fcs_append == FcsAppender.MAC)
+        elif authority is not None and f.fcs_bytes != authority.fcs_bytes_on_air():
+            self._unsup(
+                "frame.fcs_bytes",
+                "frame profile %s has a %d-byte FCS (IEEE 802.15.4), the config "
+                "states %d bytes" % (f.frame_profile,
+                                     authority.fcs_bytes_on_air(),
+                                     f.fcs_bytes),
+                ConfigReason.UNSUPPORTED, "REQ-API-01")
+        declared_includes = (f.fcs_append is FcsAppender.MAC)
         if f.mac_psdu_includes_fcs != declared_includes:
             self._cfg_rej(
                 "frame.mac_psdu_includes_fcs", ConfigReason.FIELD_CONFLICT,
@@ -2868,28 +4419,43 @@ class ConfigValidator:
                 "appends the FCS" % (f.fcs_append,
                                      bool_to_text(f.mac_psdu_includes_fcs)),
                 "REQ-API-01")
-        if f.mac_psdu_includes_fcs and f.geometry.mac_fcs_bytes != f.fcs_bytes:
-            self._cfg_rej(
-                "frame.geometry.mac_fcs_bytes", ConfigReason.FIELD_CONFLICT,
-                "the MAC appends the FCS, so the geometry must reserve %d "
-                "bytes, it reserves %d" % (f.fcs_bytes,
-                                            f.geometry.mac_fcs_bytes))
-        if (not f.mac_psdu_includes_fcs and
-                f.geometry.mac_fcs_bytes != 0):
-            self._cfg_rej(
-                "frame.geometry.mac_fcs_bytes", ConfigReason.FIELD_CONFLICT,
-                "the PHY appends the FCS, so the MAC geometry must reserve 0 "
-                "FCS bytes, it reserves %d" % f.geometry.mac_fcs_bytes)
 
+        # ---- the geometry CLAIM, field by field, against the codec -------
         if not f.geometry.any_set():
             self._cfg_rej("frame.geometry", ConfigReason.EMPTY_VALUE,
                           "the frame profile geometry must be stated "
-                          "explicitly; it is never assumed")
-        if f.geometry.timestamp_bytes not in (0, 4, 5):
-            self._cfg_rej(
-                "frame.geometry.timestamp_bytes", ConfigReason.UNSUPPORTED,
-                "only 40-bit (5 byte) and 32-bit (4 byte) timestamp widths are "
-                "implemented in this frame profile", "REQ-TIME-04")
+                          "explicitly; it is never assumed. Fill it with "
+                          "frame_geometry_of_profile(frame.frame_profile) so "
+                          "the claim comes from the codec rather than from a "
+                          "literal")
+        elif authority is not None:
+            # A claim that disagrees with the codec is a REJECTION PER FIELD,
+            # not a silently-corrected value: an operator who believes the
+            # header is 7 bytes must be told it is 14, not handed a working
+            # config that says something else.
+            #
+            # The authority the claim is checked against follows the FCS owner
+            # the config NAMES, not the one it should name: a MAC-appends
+            # layout is described by frame_geometry_mac_appends_fcs(), which
+            # expects the 2 FCS bytes inside the MAC PSDU.  That way a
+            # MAC-appends claim that forgets to reserve them is caught as the
+            # field disagreement it is, and the separate `fcs_append`
+            # rejection above says the layout is not encodable here at all.
+            named_authority = (
+                frame_geometry_mac_appends_fcs(f.frame_profile)
+                if f.fcs_append is FcsAppender.MAC else authority)
+            geo = frame_geometry_check(frame_geometry_claim(f.geometry),
+                                       named_authority)
+            for m in geo.mismatches:
+                self._cfg_rej(
+                    "frame.geometry.%s" % m.field, ConfigReason.FIELD_CONFLICT,
+                    "the frame codec is the geometry authority: profile %s "
+                    "with FCS appended by %s has %s = %d, the config claims "
+                    "%d. A claim does not decide the layout: fill the geometry "
+                    "from frame_geometry_of_profile() so there is one source"
+                    % (f.frame_profile, named_authority.fcs_owner, m.field,
+                       m.expected, m.actual),
+                    "REQ-PROTO-06")
 
         # STS: out of scope for phase 1, explicitly.
         if f.sts_mode != StsMode.OFF:
@@ -3620,7 +5186,13 @@ class ConfigValidator:
                                    False)
 
     def check_frame_lengths(self, c: TwrConfig) -> None:
-        """Poll / Response / Final must each fit the negotiated PSDU."""
+        """Poll / Response / Final must each fit the negotiated PSDU.
+
+        Every length below comes from the CODEC, through ``frame_psdu_bytes()``
+        -> ``FrameProfileGeometry.mac_payload_bytes()``.  The config's geometry
+        is a claim, already checked field by field in ``check_frame()``, and is
+        used here ONLY to describe the arithmetic back to the operator.
+        """
         f = c.frame
         if f.mac_psdu_bytes == 0:
             return  # already reported as a missing value elsewhere
@@ -3630,30 +5202,50 @@ class ConfigValidator:
                       ExchangeStatus.UNSUPPORTED,
                       "negotiated PSDU %d bytes exceeds the capability maximum "
                       "%d bytes" % (f.mac_psdu_bytes, cap), "REQ-PHY-01")
-        if f.geometry.phr_bytes > 127:
-            self._cfg_rej("frame.geometry.phr_bytes", ConfigReason.OUT_OF_RANGE,
-                          "the PHR is at most 127 bytes (extended PHR)")
+
+        authority = frame_geometry_for(f.frame_profile)
 
         for t in (FrameType.POLL, FrameType.RESPONSE, FrameType.FINAL):
-            need = frame_bytes_on_air(f.geometry, t, f.fcs_append, f.fcs_bytes)
+            # `mac_psdu_bytes` is the negotiated MAC PSDU and, when the PHY
+            # appends the FCS, EXCLUDES it (see the fcs_append /
+            # mac_psdu_includes_fcs cross-check above).  So the comparison
+            # below must be against the MAC bytes only.  The 127-byte IEEE
+            # limit is separately checked against the ON-AIR length.
+            need = frame_psdu_bytes(t, f.fcs_append)
+            on_air = (authority.on_air_bytes(t) if authority is not None
+                      else need + (f.fcs_bytes
+                                   if f.fcs_append is FcsAppender.PHY else 0))
             path = "frame.mac_psdu_bytes[%s]" % t
             if need == 0:
-                continue
+                continue  # the profile itself was already reported as unknown
             if need > f.mac_psdu_bytes:
                 self._rej(
                     path, ConfigReason.FRAME_LENGTH_OVERFLOW,
                     ExchangeStatus.UNSUPPORTED,
-                    "the %s frame needs %d PSDU bytes (header %d + %dx%d "
-                    "timestamps + footer %d + FCS %d) but only %d are negotiated" % (
-                        t, need, f.geometry.mac_header_bytes,
-                        frame_type_timestamp_count(t), f.geometry.timestamp_bytes,
-                        f.geometry.mac_footer_bytes, f.fcs_bytes,
+                    "the %s frame needs %d MAC PSDU bytes (as frame profile %s "
+                    "builds it: header %d + %dx%d timestamps + footer %d%s) but "
+                    "only %d are negotiated" % (
+                        t, need, f.frame_profile,
+                        authority.mac_header_bytes() if authority else 0,
+                        frame_type_timestamp_count(t),
+                        authority.timestamp_bytes() if authority else 0,
+                        authority.mac_footer_bytes() if authority else 0,
+                        (" + FCS %d" % f.fcs_bytes)
+                        if f.fcs_append is FcsAppender.MAC
+                        else "; the PHY appends the FCS separately",
                         f.mac_psdu_bytes), "REQ-PHY-01")
-            if cap != 0 and need > cap:
-                self._rej(path, ConfigReason.FRAME_LENGTH_OVERFLOW,
-                          ExchangeStatus.UNSUPPORTED,
-                          "the %s frame does not fit the %d-byte PSDU maximum"
-                          % (t, cap), "REQ-PHY-01")
+            # The IEEE 127-byte limit applies to the ON-AIR PSDU, i.e. with
+            # the FCS the PHY appends, so this is the check that uses
+            # `on_air`.
+            if cap != 0 and on_air > cap:
+                self._rej(
+                    path, ConfigReason.FRAME_LENGTH_OVERFLOW,
+                    ExchangeStatus.UNSUPPORTED,
+                    "the %s frame needs %d on-air PSDU bytes (MAC %d + FCS %d) "
+                    "and does not fit the %d-byte PSDU maximum" % (
+                        t, on_air, need,
+                        authority.fcs_bytes_on_air() if authority else f.fcs_bytes,
+                        cap), "REQ-PHY-01")
 
         # The application payload is a separate concept and must fit inside
         # the MAC PSDU after the header/timestamps/FCS are removed.
@@ -3703,6 +5295,25 @@ class EffectiveConfig:
 
     It is a VALUE: an exchange in flight holds a copy, so a later change to
     the requested config cannot reach it (REQ-API-03).
+
+    VALUE SEMANTICS (M0.1, defect R1)
+    ----------------------------------
+    :func:`effective_config` builds ``requested``, ``effective`` and ``readback``
+    as three INDEPENDENT deep copies, taken once from the caller's config.  No
+    attribute here aliases the object the caller passed in, and no two of them
+    alias each other -- not the top-level dataclasses, not a nested
+    ``radio.peers`` list, not an element of it.
+
+    Why this matters, concretely: before the fix, ``e.effective IS cfg``, so
+    ``cfg.phy.channel = 9`` after the call left ``e.ok`` True and
+    ``e.config_hash`` naming the config that had actually been validated, while
+    the live config no longer validated.  Any later use of the snapshot would
+    then have been driven by a config nobody ever checked.  A validated config
+    is a value or it is nothing.
+
+    The cost is one deep copy per snapshot, which is a configure-time and
+    exchange-time cost only.  See the module docstring for where copying is and
+    is not allowed to happen.
     """
 
     ok: bool = False
@@ -3732,12 +5343,58 @@ class EffectiveConfig:
     poll_start_effective: Duration = field(default_factory=Duration)
     tick_rate_hz: float = 0.0
 
-    #: Frame budget, per frame type, as transmitted (FCS exactly once).
+    #: Frame budget, per frame type, as transmitted (FCS exactly once).  These
+    #: are the CODEC's numbers, not a re-summation of the config's geometry
+    #: claim: see :func:`effective_config`.
     poll_bytes: int = 0
     response_bytes: int = 0
     final_bytes: int = 0
     max_psdu_bytes: int = 0
     max_timestamp_count: int = 0
+    #: The PHR of this profile, recorded so no consumer recomputes it: the
+    #: number of INFORMATION bytes and the number of transmitted coded bits.
+    phr_bytes: int = 0
+    phr_coded_bits: int = 0
+
+
+def copy_config(value: Any) -> Any:
+    """A VALUE copy of a config object, recursively.
+
+    The same helper copies a whole ``TwrConfig``, a single nested dataclass such
+    as ``radio.readback``, and an ``EffectiveConfig``; all three are plain
+    dataclasses and enums, and ``deepcopy`` is the only one mechanism that is
+    correct for all of them.
+
+    This is the copy :func:`effective_config` and :class:`TwrConfigSnapshot`
+    use, exposed so a caller can take the same copy themselves instead of
+    reaching into a snapshot.  It is a ``deepcopy``, not a ``dataclasses.
+    replace``: a shallow copy would still share ``radio.peers`` and every
+    element of it, which is precisely the aliasing R1 is about.
+
+    WHERE COPYING BELONGS (M0.1, binding on M2/M3)
+    ----------------------------------------------
+    Copying is a CONFIGURE/EXCHANGE-BOUNDARY cost and nothing else:
+
+      * ALLOWED: once when a config is read from JSON or built by the operator;
+        once inside ``effective_config()``; once inside ``TwrConfigSnapshot``;
+        once per ``set_overrides()``.  These all run at startup or at an
+        exchange boundary, where a heap allocation is free.
+      * FORBIDDEN: any per-sample or per-IQ path, and any handler that runs on
+        a stream.  M2's work-grid / native-rate conversion and M3's timed-TX
+        controller must NOT copy a config per packet: they hold the one
+        effective value they were given and read it.  A per-packet copy would
+        also be a per-packet allocation, which is exactly what the realtime
+        budget forbids.
+      * If a future hot path needs an immutable view, it must use a borrowed
+        reference held for the lifetime of the work, or a fixed-size POD
+        struct on the C++ side -- never a per-iteration ``deepcopy``.
+
+    The cost is linear in the number of config fields (a few hundred objects,
+    all small) and is paid a handful of times per session.  It is not on any
+    path where its cost is observable, and it is the price of never having to
+    ask "is this snapshot still true?".
+    """
+    return _copy.deepcopy(value)
 
 
 def effective_config(cfg: TwrConfig,
@@ -3747,70 +5404,98 @@ def effective_config(cfg: TwrConfig,
     On failure ``ok`` is False, ``validation`` holds every reason, and
     ``effective`` is a value-initialised (NOT a default-substituted) config:
     there is no way to accidentally use it.
+
+    ISOLATION (M0.1, defect R1): the result owns deep copies.  ``requested``,
+    ``effective`` and ``readback`` are three independent values, none of them
+    is the caller's ``cfg``, and mutating the caller's config afterwards --
+    directly, or through a list element, or through the readback -- cannot move
+    the snapshot, its hash, its ``ok`` flag or its quantised numbers.  The one
+    legal way to change a validated config is ``TwrConfigSnapshot.
+    set_overrides()`` at an exchange boundary.
     """
     if caps is None:
         caps = capabilities()
     out = EffectiveConfig()
-    out.requested = cfg
-    out.validation = validate(cfg, caps)
+    # ONE read of the caller's config, immediately turned into a private value.
+    # Everything below is computed from that copy, so a caller mutating `cfg`
+    # concurrently cannot make the report describe one config and the hash
+    # another.  Validating a value rather than a live object is the whole point
+    # (REQ-API-01: a validated config is immutable for the run that validated it).
+    src = copy_config(cfg)
+    out.requested = src
+    out.validation = validate(src, caps)
     out.ok = out.validation.ok()
     out.schema_version = caps.schema_version
-    out.profile_version = cfg.meta.profile_version
-    out.calibration_version = cfg.meta.calibration_version
+    out.profile_version = src.meta.profile_version
+    out.calibration_version = src.meta.calibration_version
     if not out.ok:
         # A rejected config produces no effective values at all.  The hash of
         # the REQUESTED config is still recorded so a failure can be tied to
         # the exact input that caused it (REQ-OUT-01).
         out.effective = TwrConfig()
-        out.config_hash = config_hash(cfg)
+        out.config_hash = config_hash(src)
         out.changes = []
         return out
 
     # Effective == requested plus the materialisations the validator proved
-    # legal: nothing is invented, everything is recorded.
-    out.effective = cfg
+    # legal: nothing is invented, everything is recorded.  It is a SEPARATE
+    # copy, so a later edit to `requested` (by anyone) cannot reach it.
+    out.effective = copy_config(src)
     out.config_hash = config_hash(out.effective)
-    out.readback = cfg.radio.readback
+    out.readback = copy_config(src.radio.readback)
     out.changes = diff_fields(out.requested, out.effective)
     out.max_psdu_bytes = caps.max_psdu_bytes()
     out.max_timestamp_count = frame_type_timestamp_count(FrameType.FINAL)
 
-    rate = (cfg.radio.native_sample_rate_hz
-            if caps.native_rate_supported(cfg.radio.native_sample_rate_hz)
+    rate = (src.radio.native_sample_rate_hz
+            if caps.native_rate_supported(src.radio.native_sample_rate_hz)
             else caps.native_rates_hz[0])
     out.tick_rate_hz = rate
 
+    # `src` stays the private copy for the whole derivation: the quantised
+    # numbers and the frame budget below must describe the SAME config the
+    # validation report describes, not whatever the caller holds now.
     items = (
-        (cfg.timing.poll_start, "poll_start_ticks", "poll_start_effective"),
-        (cfg.timing.poll_to_response, "poll_to_response_ticks",
+        (src.timing.poll_start, "poll_start_ticks", "poll_start_effective"),
+        (src.timing.poll_to_response, "poll_to_response_ticks",
          "poll_to_response_effective"),
-        (cfg.timing.response_to_final, "response_to_final_ticks",
+        (src.timing.response_to_final, "response_to_final_ticks",
          "response_to_final_effective"),
-        (cfg.timing.post_tx_rx_enable, "post_tx_rx_enable_ticks",
+        (src.timing.post_tx_rx_enable, "post_tx_rx_enable_ticks",
          "post_tx_rx_enable_effective"),
     )
-    for src, ticks_attr, eff_attr in items:
-        if src.domain != TimeDomain.DEVICE_TICKS:
+    for field, ticks_attr, eff_attr in items:
+        if field.domain != TimeDomain.DEVICE_TICKS:
             continue
-        ticks, back = quantise_duration(src.value, src.required_quantisation_hz)
+        ticks, back = quantise_duration(field.value,
+                                        field.required_quantisation_hz)
         setattr(out, ticks_attr, ticks if ticks is not None else 0)
         setattr(out, eff_attr, back if back is not None else Duration())
-        if back is None or back == src.value:
+        if back is None or back == field.value:
             continue
         # Record the quantisation as an explicit requested/effective
         # difference; the device gets the tick value, the operator sees both.
         out.changes.append(FieldChange(
-            "timing.quantised_delay" if src.value.nanos() != 0 else "timing.delay",
-            duration_to_text(src.value), duration_to_text(back),
+            "timing.quantised_delay" if field.value.nanos() != 0 else "timing.delay",
+            duration_to_text(field.value), duration_to_text(back),
             "quantised at %s Hz (ticks=%d)" % (
-                double_to_text(src.required_quantisation_hz), ticks or 0)))
+                double_to_text(field.required_quantisation_hz), ticks or 0)))
 
-    g = cfg.frame.geometry
-    fa = cfg.frame.fcs_append
-    fb = cfg.frame.fcs_bytes
-    out.poll_bytes = frame_bytes_on_air(g, FrameType.POLL, fa, fb)
-    out.response_bytes = frame_bytes_on_air(g, FrameType.RESPONSE, fa, fb)
-    out.final_bytes = frame_bytes_on_air(g, FrameType.FINAL, fa, fb)
+    # The frame budget is the CODEC's, computed once through the authority.
+    # M0 re-summed the config's own geometry claim here, which is how a 7-byte
+    # header produced a 9-byte Poll and understated the on-air length; and it
+    # took the FCS size from a raw config field, so a wrong fcs_bytes silently
+    # changed the answer.  `on_air_bytes()` is invariant under which layer
+    # appends the FCS, which is exactly the property the budget should have.
+    authority = frame_geometry_for(src.frame.frame_profile)
+    if authority is not None:
+        out.poll_bytes = authority.on_air_bytes(FrameType.POLL)
+        out.response_bytes = authority.on_air_bytes(FrameType.RESPONSE)
+        out.final_bytes = authority.on_air_bytes(FrameType.FINAL)
+        # The PHR is present in every frame of this profile; recording its
+        # information size here means a consumer never has to recompute it.
+        out.phr_bytes = authority.phr_bytes()
+        out.phr_coded_bits = authority.phr_coded_bits()
     return out
 
 
@@ -3891,16 +5576,69 @@ class TwrConfigSnapshot:
 
     Copying it is the only way to hand an immutable config to a worker; there
     is no mutable accessor.
+
+    ISOLATION MECHANISM (M0.1, defect R1 -- chosen: COPY ON WRITE-OUT)
+    ------------------------------------------------------------------
+    Two copies, both ``deepcopy``:
+
+      1. The CONSTRUCTOR deep-copies the ``EffectiveConfig`` it is given, so the
+         caller's object is the caller's: editing it afterwards cannot reach
+         this snapshot, and neither can editing the snapshot's private copy.
+      2. ``get()`` returns a FRESH DEEP COPY on every call.  There is no
+         reference to the internal config in the public surface at all: no
+         attribute, no cache, no iterator, and ``get()`` twice never returns the
+         same object.  A caller can do anything it likes to what ``get()``
+         returns -- read it, keep it, mutate it, throw it away -- and the
+         snapshot is unchanged.
+
+    Why a copy per ``get()`` rather than a read-only proxy (a frozen
+    ``EffectiveConfig`` / ``__slots__`` view): a proxy would have to be total.
+    ``TwrConfig`` is a tree of mutable dataclasses with a ``List[EndpointBinding]``
+    inside it and a ``ValidationReport`` with a ``List[ConfigViolation]``, and a
+    proxy that only blocks attribute assignment still lets ``cfg.radio.peers[0]
+    .tx_channel = 1`` through.  Making every node of the tree read-only is a
+    larger and more error-prone change to 12 dataclasses, and it would make
+    ``set_overrides()`` -- which legitimately rewrites a private copy -- awkward
+    to express.  A copy is total by construction: there is no in-place edit that
+    can escape it, because the caller and the snapshot hold different objects.
+
+    PERFORMANCE CONSEQUENCE, stated plainly: ``get()`` is O(config size) in time
+    and allocations -- a few hundred small objects, a few hundred microseconds
+    on an ordinary host, and NOT a constant.  That is affordable once per
+    exchange and once per result record, and that is where it belongs.  It would
+    NOT be affordable per packet inside a controller's RX or TX loop, and it
+    must NEVER appear on a per-sample or per-IQ path; see :func:`copy_config`
+    for the rule that binds M2/M3.  A caller that needs the config on a hot
+    path must hold the value ``get()`` returned for the lifetime of the work
+    rather than re-fetching it.  If that ever proves too expensive, the fix is a
+    fixed-size POD struct on the C++ side (which M1 owns), not a weaker Python
+    guarantee.
+
+    ``caps`` is exposed as a FROZEN table: the process-wide whitelist must not
+    be widenable through a snapshot reference, and it is deep-copied here so
+    that even a table a caller built and still holds cannot move underneath a
+    running snapshot.
     """
 
     def __init__(self, effective: Optional[EffectiveConfig] = None,
                  caps: Optional[Capabilities] = None):
-        self.caps = caps if caps is not None else capabilities()
-        self._effective = effective if effective is not None else EffectiveConfig()
+        self._caps = (caps if caps is not None else capabilities()).frozen_copy()
+        self._effective = (copy_config(effective) if effective is not None
+                           else EffectiveConfig())
         self._gate = ExchangeGate()
 
+    @property
+    def caps(self) -> Capabilities:
+        """The read-only capability table this snapshot validates against."""
+        return self._caps
+
     def get(self) -> EffectiveConfig:
-        return self._effective
+        """A fresh deep copy of the effective config; the snapshot is not it.
+
+        See the class docstring: this is a COPY, every call, on purpose.  It is
+        an exchange-boundary accessor.
+        """
+        return copy_config(self._effective)
 
     def ok(self) -> bool:
         return self._effective.ok
@@ -3931,16 +5669,16 @@ class TwrConfigSnapshot:
                         "at an exchange boundary and the running exchange keeps "
                         "its immutable snapshot",
                 requirement="REQ-API-03"))
-            return (r, TwrConfigSnapshot(EffectiveConfig(), self.caps))
+            return (r, TwrConfigSnapshot(EffectiveConfig(), self._caps))
         if not self._effective.ok:
             r.add(ConfigViolation(
                 field="", reason=ConfigReason.OUT_OF_SCOPE,
                 status=ExchangeStatus.CONFIG_REJECTED,
                 message="the base config is not valid; overrides cannot be "
                         "applied to it", requirement="REQ-API-03"))
-            return (r, TwrConfigSnapshot(EffectiveConfig(), self.caps))
+            return (r, TwrConfigSnapshot(EffectiveConfig(), self._caps))
 
-        nxt = _copy.deepcopy(self._effective.effective)
+        nxt = copy_config(self._effective.effective)
         if o.measurement_count != 0:
             nxt.session.measurement_count = (o.measurement_count if
                                              o.measurement_count >= 0 else 0)
@@ -3957,13 +5695,19 @@ class TwrConfigSnapshot:
         if o.exchange_timeout_ns != 0:
             nxt.timeouts.exchange_timeout.value = Duration(o.exchange_timeout_ns)
 
-        out_eff = effective_config(nxt, self.caps)
-        snap = TwrConfigSnapshot(out_eff, self.caps)
+        out_eff = effective_config(nxt, self._caps)
         if not out_eff.ok:
-            return (out_eff.validation, snap)
-        out_eff.requested = self._effective.requested  # keep the original
+            return (out_eff.validation, TwrConfigSnapshot(out_eff, self._caps))
+        # The requested side stays the ORIGINAL request, so the record shows
+        # what was asked for and what the exchange actually ran with.  It is a
+        # COPY of the base snapshot's requested config: two snapshots must never
+        # share one TwrConfig, or editing one would edit the other.
+        out_eff.requested = copy_config(self._effective.requested)
         out_eff.changes = diff_fields(out_eff.requested, out_eff.effective)
-        return (r, snap)
+        # The snapshot is built LAST, from the finished EffectiveConfig: its
+        # constructor takes a private copy, so anything patched after the fact
+        # would be silently lost.
+        return (r, TwrConfigSnapshot(out_eff, self._caps))
 
 
 # ===========================================================================
@@ -4129,9 +5873,14 @@ def to_json_dict(cfg: TwrConfig) -> Dict[str, Any]:
             "preamble_symbols": _json_int(cfg.phy.preamble_symbols),
             "prf_class": str(cfg.phy.prf_class),
             "data_rate": str(cfg.phy.data_rate),
+            # PHR rate, in the PHR-RATE spelling ("850k" / "same_as_data"), NOT
+            # the payload-rate spelling: the two axes have separate value
+            # domains and a document that used "6p8m" here was describing a PHR
+            # this build cannot transmit.
             "phr_rate": str(cfg.phy.phr_rate),
         },
         "frame": {
+            "frame_profile": str(cfg.frame.frame_profile),
             "sfd_mode": str(cfg.frame.sfd_mode),
             "sfd_symbols": _json_int(cfg.frame.sfd_symbols),
             "sfd_timeout": _to_dict_timed(cfg.frame.sfd_timeout),
@@ -4439,19 +6188,42 @@ class _ConfigJsonReader:
 
     def get_enum(self, o: Optional[Dict[str, Any]], path: str, key: str,
                  enum_cls: Any) -> Any:
-        v = self.key_of(o, path, key)
-        if v is None:
-            return None
+        """Read a string enum.
+
+        On ANY failure -- key absent, wrong type, unknown spelling -- the value
+        left in the field is the enumeration's ZERO member, exactly what C++
+        ``static_cast<E>(0)`` produces.  That is deliberate: it keeps the two
+        implementations reporting the same downstream violation, which is what
+        the parity corpus compares.
+
+        It is NOT a silent default, and the reason is that this method always
+        records a machine-readable violation in the report.  The returned
+        config is therefore only usable when the report is empty, and the
+        report is what every entry point hands back.  Substituting a
+        "sensible" member instead would make the two implementations disagree
+        about a document they both reject.
+        """
+        zero = next(iter(enum_cls))
+        if o is None or key not in o:
+            self.key_of(o, path, key)          # records the missing key
+            return zero
+        v = o[key]
         p = "%s.%s" % (path, key)
+        if v is None:
+            # A present-but-null enum is a TYPE error, not an absent key: C++
+            # get_enum sees Type::Null, which is not Type::String, and says so.
+            self.bad(p, ConfigReason.TYPE_MISMATCH,
+                     "expected a string enum, got null")
+            return zero
         if not isinstance(v, str):
             self.bad(p, ConfigReason.TYPE_MISMATCH,
                      "expected a string enum, got %s" % _json_type_name(v))
-            return None
+            return zero
         out = enum_cls.from_string(v)
         if out is None:
             self.bad(p, ConfigReason.UNKNOWN_ENUM_VALUE,
                      "'%s' is not a known value of %s" % (v, enum_cls.__name__))
-            return None
+            return zero
         return out
 
     def get_timed(self, o: Optional[Dict[str, Any]], path: str,
@@ -4466,9 +6238,8 @@ class _ConfigJsonReader:
                      "expected an object, got %s" % _json_type_name(v))
             return t
         t.value = Duration(self.get_i64(v, p, "ns"))
-        t.domain = self.get_enum(v, p, "domain", TimeDomain) or TimeDomain.UNSPECIFIED
-        t.reference = (self.get_enum(v, p, "reference", TimeReferenceEvent) or
-                       TimeReferenceEvent.HOST_MONOTONIC)
+        t.domain = self.get_enum(v, p, "domain", TimeDomain)
+        t.reference = self.get_enum(v, p, "reference", TimeReferenceEvent)
         if "marker" in v:
             mk = v["marker"]
             if mk is None:
@@ -4499,6 +6270,22 @@ class _ConfigJsonReader:
                          "key is not part of schema %s" % SCHEMA_VERSION)
 
 
+def _u8(v: int) -> int:
+    return v & 0xFF
+
+
+def _u16(v: int) -> int:
+    return v & 0xFFFF
+
+
+def _u32(v: int) -> int:
+    return v & 0xFFFFFFFF
+
+
+def _u64(v: int) -> int:
+    return v & 0xFFFFFFFFFFFFFFFF
+
+
 def _json_type_name(v: Any) -> str:
     if v is None:
         return "null"
@@ -4520,6 +6307,26 @@ def _json_type_name(v: Any) -> str:
 
 
 _META_KEYS = ("schema_version", "profile_version", "calibration_version", "label")
+
+
+# The UNSIGNED-WIDTH NARROWING, mirrored from C++.
+# ---------------------------------------------------------------------------
+# The C++ reader assigns with ``static_cast<uint16_t>(get_i64(...))`` and so on.
+# A JSON number outside the field's width is therefore WRAPPED there, not
+# refused, and a wrapped value is what the validator then sees.  Python has no
+# implicit narrowing, so the reader does it explicitly at the same sites.
+#
+# It matters: ``"local_address": -1`` is 65535 in C++, which trips the
+# "0xffff is a reserved address" rule; a Python that kept -1 would store a value
+# no C++ build can hold, would hash differently, and would accept a document the
+# authority rejects.  The parity corpus pins the difference (``negative_
+# local_address_is_a_negative_index``).
+#
+# The wrap is a property of the FIELD WIDTH, not a licence to invent a value:
+# every check that could reject an out-of-range magnitude still runs afterwards
+# on the narrowed number, and the int64 range check in ``get_i64`` still
+# refuses a literal outside int64 outright.
+
 _SESSION_KEYS = (
     "protocol", "role", "local_address", "peer_address", "pan_id", "session_id",
     "exchange_id", "sequence", "sequence_modulus", "measurement_count",
@@ -4529,6 +6336,7 @@ _PHY_KEYS = (
     "channel", "center_frequency_hz", "tx_preamble_code", "rx_preamble_code",
     "preamble_symbols", "prf_class", "data_rate", "phr_rate")
 _FRAME_KEYS = (
+    "frame_profile",
     "sfd_mode", "sfd_symbols", "sfd_timeout", "phr_mode", "ranging_bit",
     "geometry", "mac_psdu_bytes", "mac_psdu_includes_fcs", "fcs_append",
     "fcs_bytes", "application_payload_bytes", "sts_mode", "sts_length_symbols")
@@ -4592,22 +6400,22 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
     if g is not None:
         rd.reject_unknown_keys(g, "session", _SESSION_KEYS)
         s = c.session
-        s.protocol = rd.get_enum(g, "session", "protocol", Protocol) or Protocol.SS
-        s.role = rd.get_enum(g, "session", "role", Role) or Role.INITIATOR
-        s.local_address = rd.get_i64(g, "session", "local_address")
-        s.peer_address = rd.get_i64(g, "session", "peer_address")
-        s.pan_id = rd.get_i64(g, "session", "pan_id")
-        s.session_id = rd.get_i64(g, "session", "session_id")
-        s.exchange_id = rd.get_i64(g, "session", "exchange_id")
-        s.sequence = rd.get_i64(g, "session", "sequence")
-        s.sequence_modulus = rd.get_i64(g, "session", "sequence_modulus")
-        s.measurement_count = rd.get_i64(g, "session", "measurement_count")
+        s.protocol = rd.get_enum(g, "session", "protocol", Protocol)
+        s.role = rd.get_enum(g, "session", "role", Role)
+        s.local_address = _u16(rd.get_i64(g, "session", "local_address"))
+        s.peer_address = _u16(rd.get_i64(g, "session", "peer_address"))
+        s.pan_id = _u16(rd.get_i64(g, "session", "pan_id"))
+        s.session_id = _u32(rd.get_i64(g, "session", "session_id"))
+        s.exchange_id = _u32(rd.get_i64(g, "session", "exchange_id"))
+        s.sequence = _u8(rd.get_i64(g, "session", "sequence"))
+        s.sequence_modulus = _u16(rd.get_i64(g, "session", "sequence_modulus"))
+        s.measurement_count = _u32(rd.get_i64(g, "session", "measurement_count"))
         s.measurement_interval = rd.get_dur(g, "session", "measurement_interval_ns")
-        s.max_attempts_per_exchange = rd.get_i64(g, "session",
-                                                 "max_attempts_per_exchange")
+        s.max_attempts_per_exchange = _u32(rd.get_i64(
+            g, "session", "max_attempts_per_exchange"))
         s.retry_backoff = rd.get_dur(g, "session", "retry_backoff_ns")
-        s.max_in_flight_exchanges = rd.get_i64(g, "session",
-                                               "max_in_flight_exchanges")
+        s.max_in_flight_exchanges = _u32(rd.get_i64(
+            g, "session", "max_in_flight_exchanges"))
         s.require_pan_match = rd.get_bool(g, "session", "require_pan_match")
         s.require_address_match = rd.get_bool(g, "session", "require_address_match")
 
@@ -4615,23 +6423,27 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
     if g is not None:
         rd.reject_unknown_keys(g, "phy", _PHY_KEYS)
         p = c.phy
-        p.channel = rd.get_i64(g, "phy", "channel")
+        p.channel = _u8(rd.get_i64(g, "phy", "channel"))
         p.center_frequency_hz = rd.get_double(g, "phy", "center_frequency_hz")
-        p.tx_preamble_code = rd.get_i64(g, "phy", "tx_preamble_code")
-        p.rx_preamble_code = rd.get_i64(g, "phy", "rx_preamble_code")
-        p.preamble_symbols = rd.get_i64(g, "phy", "preamble_symbols")
-        p.prf_class = rd.get_enum(g, "phy", "prf_class", PrfClass) or PrfClass.BPRF64
-        p.data_rate = rd.get_enum(g, "phy", "data_rate", DataRate) or DataRate.R6P8M
-        p.phr_rate = rd.get_enum(g, "phy", "phr_rate", DataRate) or DataRate.R6P8M
+        p.tx_preamble_code = _u8(rd.get_i64(g, "phy", "tx_preamble_code"))
+        p.rx_preamble_code = _u8(rd.get_i64(g, "phy", "rx_preamble_code"))
+        p.preamble_symbols = _u16(rd.get_i64(g, "phy", "preamble_symbols"))
+        p.prf_class = rd.get_enum(g, "phy", "prf_class", PrfClass)
+        p.data_rate = rd.get_enum(g, "phy", "data_rate", DataRate)
+        # PHR rate, read in the PHR-RATE domain.  A payload-rate name such as
+        # "6p8m" is now an unknown_enum_value here, which is the point: the
+        # two axes no longer share a value domain.
+        p.phr_rate = rd.get_enum(g, "phy", "phr_rate", PhrRate)
 
     g = rd.group("frame", root)
     if g is not None:
         rd.reject_unknown_keys(g, "frame", _FRAME_KEYS)
         f = c.frame
-        f.sfd_mode = rd.get_enum(g, "frame", "sfd_mode", SfdMode) or SfdMode.R4Z2
-        f.sfd_symbols = rd.get_i64(g, "frame", "sfd_symbols")
+        f.frame_profile = rd.get_enum(g, "frame", "frame_profile", FrameProfileId)
+        f.sfd_mode = rd.get_enum(g, "frame", "sfd_mode", SfdMode)
+        f.sfd_symbols = _u16(rd.get_i64(g, "frame", "sfd_symbols"))
         f.sfd_timeout = rd.get_timed(g, "frame", "sfd_timeout")
-        f.phr_mode = rd.get_enum(g, "frame", "phr_mode", PhrMode) or PhrMode.STANDARD
+        f.phr_mode = rd.get_enum(g, "frame", "phr_mode", PhrMode)
         f.ranging_bit = rd.get_bool(g, "frame", "ranging_bit")
         geo = g.get("geometry")
         if geo is None:
@@ -4642,34 +6454,35 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
         else:
             rd.reject_unknown_keys(geo, "frame.geometry", _GEOMETRY_KEYS)
             gp = "frame.geometry"
-            f.geometry.mac_header_bytes = rd.get_i64(geo, gp, "mac_header_bytes")
-            f.geometry.timestamp_bytes = rd.get_i64(geo, gp, "timestamp_bytes")
-            f.geometry.mac_footer_bytes = rd.get_i64(geo, gp, "mac_footer_bytes")
-            f.geometry.mac_fcs_bytes = rd.get_i64(geo, gp, "mac_fcs_bytes")
-            f.geometry.phr_bytes = rd.get_i64(geo, gp, "phr_bytes")
-        f.mac_psdu_bytes = rd.get_i64(g, "frame", "mac_psdu_bytes")
+            f.geometry.mac_header_bytes = _u16(rd.get_i64(geo, gp,
+                                                             "mac_header_bytes"))
+            f.geometry.timestamp_bytes = _u16(rd.get_i64(geo, gp,
+                                                            "timestamp_bytes"))
+            f.geometry.mac_footer_bytes = _u16(rd.get_i64(geo, gp,
+                                                            "mac_footer_bytes"))
+            f.geometry.mac_fcs_bytes = _u16(rd.get_i64(geo, gp,
+                                                          "mac_fcs_bytes"))
+            f.geometry.phr_bytes = _u16(rd.get_i64(geo, gp, "phr_bytes"))
+        f.mac_psdu_bytes = _u16(rd.get_i64(g, "frame", "mac_psdu_bytes"))
         f.mac_psdu_includes_fcs = rd.get_bool(g, "frame", "mac_psdu_includes_fcs")
-        f.fcs_append = rd.get_enum(g, "frame", "fcs_append", FcsAppender) or \
-            FcsAppender.PHY
-        f.fcs_bytes = rd.get_i64(g, "frame", "fcs_bytes")
-        f.application_payload_bytes = rd.get_i64(g, "frame",
-                                                 "application_payload_bytes")
-        f.sts_mode = rd.get_enum(g, "frame", "sts_mode", StsMode) or StsMode.OFF
-        f.sts_length_symbols = rd.get_i64(g, "frame", "sts_length_symbols")
+        f.fcs_append = rd.get_enum(g, "frame", "fcs_append", FcsAppender)
+        f.fcs_bytes = _u16(rd.get_i64(g, "frame", "fcs_bytes"))
+        f.application_payload_bytes = _u16(rd.get_i64(
+            g, "frame", "application_payload_bytes"))
+        f.sts_mode = rd.get_enum(g, "frame", "sts_mode", StsMode)
+        f.sts_length_symbols = _u16(rd.get_i64(g, "frame", "sts_length_symbols"))
 
     g = rd.group("tx", root)
     if g is not None:
         rd.reject_unknown_keys(g, "tx", _TX_KEYS)
         t = c.tx
-        t.port = rd.get_i64(g, "tx", "port")
+        t.port = _u8(rd.get_i64(g, "tx", "port"))
         t.gain_db = rd.get_opt_double(g, "tx", "gain_db")
         t.iq_amplitude = rd.get_opt_double(g, "tx", "iq_amplitude")
         t.calibrated_tx_power_dbm = rd.get_opt_double(g, "tx",
                                                       "calibrated_tx_power_dbm")
-        t.power_policy = rd.get_enum(g, "tx", "power_policy", TxPowerPolicy) or \
-            TxPowerPolicy.LEAVE_UNTOUCHED
-        t.pulse_shaping = rd.get_enum(g, "tx", "pulse_shaping", PulseShaping) or \
-            PulseShaping.EXISTING_HRP
+        t.power_policy = rd.get_enum(g, "tx", "power_policy", TxPowerPolicy)
+        t.pulse_shaping = rd.get_enum(g, "tx", "pulse_shaping", PulseShaping)
         t.vendor_power_word = rd.get_opt_u32(g, "tx", "vendor_power_word")
         t.vendor_power_word_backend = rd.get_str(g, "tx",
                                                  "vendor_power_word_backend")
@@ -4678,15 +6491,15 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
     if g is not None:
         rd.reject_unknown_keys(g, "rx", _RX_KEYS)
         r = c.rx
-        r.port = rd.get_i64(g, "rx", "port")
+        r.port = _u8(rd.get_i64(g, "rx", "port"))
         r.gain_db = rd.get_opt_double(g, "rx", "gain_db")
-        r.agc = rd.get_enum(g, "rx", "agc", AgcMode) or AgcMode.MANUAL
+        r.agc = rd.get_enum(g, "rx", "agc", AgcMode)
         r.bandwidth_hz = rd.get_opt_double(g, "rx", "bandwidth_hz")
         r.detection_threshold = rd.get_double(g, "rx", "detection_threshold")
         r.correlation_threshold = rd.get_double(g, "rx", "correlation_threshold")
         r.first_path_threshold = rd.get_double(g, "rx", "first_path_threshold")
-        r.first_path_index = rd.get_i64(g, "rx", "first_path_index")
-        r.first_path_window = rd.get_i64(g, "rx", "first_path_window")
+        r.first_path_index = _u16(rd.get_i64(g, "rx", "first_path_index"))
+        r.first_path_window = _u16(rd.get_i64(g, "rx", "first_path_window"))
         r.vendor_pac_value = rd.get_opt_u32(g, "rx", "vendor_pac_value")
         r.vendor_pac_backend = rd.get_str(g, "rx", "vendor_pac_backend")
         r.vendor_pac_applied_step = rd.get_opt_double(g, "rx",
@@ -4697,8 +6510,8 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
         rd.reject_unknown_keys(g, "radio", _RADIO_KEYS)
         r = c.radio
         r.device_args = rd.get_str(g, "radio", "device_args")
-        r.tx_channel = rd.get_i64(g, "radio", "tx_channel")
-        r.rx_channel = rd.get_i64(g, "radio", "rx_channel")
+        r.tx_channel = _u8(rd.get_i64(g, "radio", "tx_channel"))
+        r.rx_channel = _u8(rd.get_i64(g, "radio", "rx_channel"))
         r.native_sample_rate_hz = rd.get_double(g, "radio", "native_sample_rate_hz")
         r.clock_source = rd.get_str(g, "radio", "clock_source")
         r.time_source = rd.get_str(g, "radio", "time_source")
@@ -4718,9 +6531,9 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
                 rd.reject_unknown_keys(e, pp, _PEER_KEYS)
                 b = EndpointBinding()
                 b.id = rd.get_str(e, pp, "id")
-                b.role = rd.get_enum(e, pp, "role", Role) or Role.INITIATOR
-                b.tx_channel = rd.get_i64(e, pp, "tx_channel")
-                b.rx_channel = rd.get_i64(e, pp, "rx_channel")
+                b.role = rd.get_enum(e, pp, "role", Role)
+                b.tx_channel = _u8(rd.get_i64(e, pp, "tx_channel"))
+                b.rx_channel = _u8(rd.get_i64(e, pp, "rx_channel"))
                 b.native_sample_rate_hz = rd.get_double(e, pp,
                                                         "native_sample_rate_hz")
                 b.occupies_resources = rd.get_bool(e, pp, "occupies_resources")
@@ -4774,15 +6587,14 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
         k.native_sample_rate_hz = rd.get_double(g, "calibration",
                                                 "native_sample_rate_hz")
         k.link_delay_unit = rd.get_enum(g, "calibration", "link_delay_unit",
-                                        TimeUnit) or TimeUnit.NANOSECONDS
+                                        TimeUnit)
         k.first_path_algorithm = rd.get_enum(g, "calibration",
                                              "first_path_algorithm",
-                                             FirstPathAlgorithm) or \
-            FirstPathAlgorithm.LEADING_EDGE
+                                             FirstPathAlgorithm)
         k.cfo_compensation = rd.get_enum(g, "calibration", "cfo_compensation",
-                                         CompensationFlag) or CompensationFlag.OFF
+                                         CompensationFlag)
         k.sfo_compensation = rd.get_enum(g, "calibration", "sfo_compensation",
-                                         CompensationFlag) or CompensationFlag.OFF
+                                         CompensationFlag)
         k.calibration_id = rd.get_str(g, "calibration", "calibration_id")
         rec = g.get("record")
         if rec is None:
@@ -4796,14 +6608,14 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
             rd.reject_unknown_keys(rec, rp, _RECORD_KEYS)
             k.record.calibration_id = rd.get_str(rec, rp, "calibration_id")
             k.record.device_serial = rd.get_str(rec, rp, "device_serial")
-            k.record.channel = rd.get_i64(rec, rp, "channel")
+            k.record.channel = _u8(rd.get_i64(rec, rp, "channel"))
             k.record.native_sample_rate_hz = rd.get_double(
                 rec, rp, "native_sample_rate_hz")
             k.record.profile_version = rd.get_str(rec, rp, "profile_version")
             k.record.gain_db = rd.get_opt_double(rec, rp, "gain_db")
             k.record.valid_until_monotonic_ns = rd.get_i64(
                 rec, rp, "valid_until_monotonic_ns")
-        k.applied_count = rd.get_i64(g, "calibration", "applied_count")
+        k.applied_count = _u32(rd.get_i64(g, "calibration", "applied_count"))
         k.calibration_required = rd.get_bool(g, "calibration",
                                              "calibration_required")
 
@@ -4812,19 +6624,19 @@ def from_json_dict(root: Any) -> Tuple[TwrConfig, ValidationReport]:
         rd.reject_unknown_keys(g, "diagnostics", _DIAGNOSTICS_KEYS)
         d = c.diagnostics
         d.cir_capture_enabled = rd.get_bool(g, "diagnostics", "cir_capture_enabled")
-        d.cir_capture_max_bytes = rd.get_i64(g, "diagnostics",
-                                             "cir_capture_max_bytes")
-        d.cir_capture_stride = rd.get_i64(g, "diagnostics", "cir_capture_stride")
+        d.cir_capture_max_bytes = _u64(rd.get_i64(
+            g, "diagnostics", "cir_capture_max_bytes"))
+        d.cir_capture_stride = _u32(rd.get_i64(g, "diagnostics", "cir_capture_stride"))
         d.short_iq_enabled = rd.get_bool(g, "diagnostics", "short_iq_enabled")
-        d.short_iq_max_bytes = rd.get_i64(g, "diagnostics", "short_iq_max_bytes")
-        d.short_iq_stride = rd.get_i64(g, "diagnostics", "short_iq_stride")
+        d.short_iq_max_bytes = _u64(rd.get_i64(g, "diagnostics", "short_iq_max_bytes"))
+        d.short_iq_stride = _u32(rd.get_i64(g, "diagnostics", "short_iq_stride"))
         d.raw_frame_dump = rd.get_bool(g, "diagnostics", "raw_frame_dump")
-        d.raw_frame_max_bytes = rd.get_i64(g, "diagnostics", "raw_frame_max_bytes")
+        d.raw_frame_max_bytes = _u64(rd.get_i64(g, "diagnostics", "raw_frame_max_bytes"))
         d.result_output_path = rd.get_str(g, "diagnostics", "result_output_path")
-        d.result_queue_capacity = rd.get_i64(g, "diagnostics",
-                                             "result_queue_capacity")
-        d.event_queue_capacity = rd.get_i64(g, "diagnostics",
-                                            "event_queue_capacity")
+        d.result_queue_capacity = _u32(rd.get_i64(
+            g, "diagnostics", "result_queue_capacity"))
+        d.event_queue_capacity = _u32(rd.get_i64(
+            g, "diagnostics", "event_queue_capacity"))
         d.stats_cadence = rd.get_timed(g, "diagnostics", "stats_cadence")
         d.io_on_realtime_thread = rd.get_bool(g, "diagnostics",
                                               "io_on_realtime_thread")
@@ -4873,6 +6685,8 @@ def effective_to_json_dict(e: EffectiveConfig) -> Dict[str, Any]:
         "response_bytes": _json_int(e.response_bytes),
         "final_bytes": _json_int(e.final_bytes),
         "max_psdu_bytes": _json_int(e.max_psdu_bytes),
+        "phr_bytes": _json_int(e.phr_bytes),
+        "phr_coded_bits": _json_int(e.phr_coded_bits),
     }
     return d
 
@@ -4897,3 +6711,332 @@ def from_json_string(text: str) -> Tuple[TwrConfig, ValidationReport]:
         rd.bad("", ConfigReason.MALFORMED_JSON, str(exc))
         return (TwrConfig(), rd.report)
     return from_json_dict(root)
+
+
+# ===========================================================================
+# 11. The shared differential corpus (M0.1, plan 2.A item 4)
+# ===========================================================================
+#
+# C++ is the runtime authority of record.  A retained pure-Python validator is
+# only defensible if it is pinned to the SAME profile data and compared ITEM BY
+# ITEM against the SAME JSON corpus: accepted/rejected, the reason, and the
+# effective values.  Comparing enums, or grepping source strings, does not count
+# -- and neither does "the Python suite is green".  M0 shipped two
+# implementations that had drifted badly: a 7-byte frame header against the
+# codec's 14, a PHR rate typed as a payload data rate, a session id that did
+# not fit the wire field, an accepted `phr_mode=extended`, and a
+# `twr-config/1` schema that had become wrong.  Both suites were green.
+#
+# The corpus lives at testdata/twr/config_parity_corpus.json and is read by
+# BOTH implementations:
+#
+#   * this module's loader, driven by gr-uwb/apps/test_twr_config.py, and
+#   * gr-uwb/lib/qa_uwb_twr_config_parity.cc, which parses the same file with
+#     the C++ header's own JSON parser and runs the same cases.
+#
+# SHAPE
+# ------
+#   {
+#     "corpus_version": "twr-config-parity-corpus/1",
+#     "config_schema_version": "twr-config/2",
+#     "note": "...",
+#     "non_finite_fields": [ "phy.center_frequency_hz", ... ],
+#     "base": { "ss_initiator": {...}, "ss_responder": {...},
+#               "ds_initiator": {...}, "ds_responder": {...} },
+#     "cases": [
+#       {"name": "...", "note": "...",
+#        "base": "ss_initiator",
+#        "patch": {"phy.channel": 9, "frame.frame_profile": "frame_v2"},
+#        "non_finite_fields": ["rx.detection_threshold"],
+#        "expect": {"accepted": false,
+#                   "violations": ["phy.channel|unsupported|unsupported", ...],
+#                   "import_ok": true,
+#                   "import_violations": [...],
+#                   "config_hash": "fnv1a64:...",
+#                   "effective": {"poll_bytes": 16, ...}}}, ...]
+#   }
+#
+# A patch is a map of dotted path -> value applied to a deep copy of the named
+# base document; a null value DELETES the key, which is how the missing-key
+# cases are written.  The paths are the SAME dotted field paths the validator
+# reports, so a case reads as the sentence it tests.
+#
+# A violation is the triple "field|ConfigReason|ExchangeStatus" -- the
+# machine-readable contract (REQ-ERR-01).  The human MESSAGE is deliberately
+# NOT compared: the two implementations are allowed to word a rejection
+# differently (the module docstring lists the divergences, because Python quotes
+# the measured CSV cell where C++ quotes a summary), and pinning prose would turn
+# a contract test into a string comparison.
+#
+# The config_hash IS compared, and it is the strongest single check in the
+# suite: it is an fnv1a64 over the canonical "path=value" listing of EVERY
+# field, so one wrong spelling, one missing entry in the listing or one field
+# emitted in a different order changes it.
+
+#: The corpus's own version, independent of the config schema it exercises.
+CORPUS_VERSION = "twr-config-parity-corpus/1"
+#: The config schema the corpus is written against.  A loader that disagrees
+#: with this is testing the wrong thing, so both sides assert on it.
+CORPUS_SCHEMA_VERSION = SCHEMA_VERSION
+#: Where the corpus lives, relative to the repository root.
+PARITY_CORPUS_PATH = os.path.join("testdata", "twr",
+                                  "config_parity_corpus.json")
+
+#: The three non-finite spellings a corpus may use, and the double each is.
+_NON_FINITE: Dict[str, float] = {
+    "nan": float("nan"),
+    "inf": float("inf"),
+    "-inf": float("-inf"),
+}
+
+
+def _split_path(path: str) -> List[Any]:
+    """``"radio.peers[0].id"`` -> ``["radio", "peers", 0, "id"]``."""
+    out: List[Any] = []
+    for part in path.split("."):
+        if not part:
+            raise ValueError("empty path segment in %r" % path)
+        if part.endswith("]") and "[" in part:
+            head, _, idx = part.partition("[")
+            out.append(head)
+            out.append(int(idx[:-1]))
+        else:
+            out.append(part)
+    return out
+
+
+def apply_corpus_patch(base: Dict[str, Any],
+                       patch: Dict[str, Any]) -> Dict[str, Any]:
+    """A deep copy of ``base`` with ``patch`` applied.
+
+    ``None`` deletes a key.  An unknown PARENT is an ERROR, not a silent no-op:
+    a corpus case whose patch does not land would otherwise be testing the base
+    configuration and reporting a false pass.  A new LEAF may be added, because
+    "this key is not in the schema" is itself a case worth stating.
+    """
+    doc = _copy.deepcopy(base)
+    for path, value in patch.items():
+        parts = _split_path(path)
+        node: Any = doc
+        for part in parts[:-1]:
+            if isinstance(part, int):
+                if not isinstance(node, list) or part >= len(node):
+                    raise KeyError("corpus patch path %r: no index %d"
+                                   % (path, part))
+                node = node[part]
+            else:
+                if not isinstance(node, dict) or part not in node:
+                    raise KeyError("corpus patch path %r: no key %r"
+                                   % (path, part))
+                node = node[part]
+        last = parts[-1]
+        if isinstance(last, int):
+            if not isinstance(node, list) or last >= len(node):
+                raise KeyError("corpus patch path %r: no index %d"
+                               % (path, last))
+            node[last] = value
+        else:
+            if not isinstance(node, dict):
+                raise KeyError("corpus patch path %r: parent is not an object"
+                               % path)
+            if value is None:
+                if last not in node:
+                    raise KeyError("corpus patch path %r: cannot delete absent key %r"
+                                   % (path, last))
+                del node[last]
+            else:
+                node[last] = value
+    return doc
+
+
+def expand_non_finite(value: Any) -> Tuple[Any, List[Tuple[str, float]]]:
+    """Split a document into a strict-JSON copy and its non-finite requests.
+
+    Strict JSON has no ``NaN`` / ``Infinity`` literal, and both readers refuse
+    one, so a corpus cannot put a non-finite double in a document.  Instead it
+    writes the STRING ``"$nan"`` / ``"$inf"`` / ``"$-inf"`` at a field path, and
+    both loaders do the same two steps:
+
+      1. take the document apart here -- the sentinel is removed and recorded
+         as ``(dotted_path, value)``;
+      2. import the remaining, strictly-serialisable document, then ASSIGN the
+         non-finite value to the named config field.
+
+    Step 2 is the only way a non-finite double can reach a validator, and it is
+    done identically on both sides, so the case is genuinely mirrored.
+
+    Returns ``(strict_copy, [(path, value), ...])``.
+    """
+    found: List[Tuple[str, float]] = []
+    return (_strip_sentinels(value, found, ""), found)
+
+
+def _strip_sentinels(node: Any, out: List[Tuple[str, float]],
+                     prefix: str = "") -> Any:
+    """Remove the non-finite sentinels from a document, recording them."""
+    if isinstance(node, dict):
+        copy: Dict[str, Any] = {}
+        for k, v in node.items():
+            child = ("%s.%s" % (prefix, k)) if prefix else str(k)
+            if isinstance(v, str) and v in _NON_FINITE:
+                out.append((child, _NON_FINITE[v]))
+                continue
+            copy[k] = _strip_sentinels(v, out, child)
+        return copy
+    if isinstance(node, list):
+        items: List[Any] = []
+        for i, v in enumerate(node):
+            child = "%s[%d]" % (prefix, i)
+            if isinstance(v, str) and v in _NON_FINITE:
+                out.append((child, _NON_FINITE[v]))
+                continue
+            items.append(_strip_sentinels(v, out, child))
+        return items
+    return node
+
+
+def set_config_double(cfg: TwrConfig, path: str, value: float) -> None:
+    """Assign a (possibly non-finite) double to a dotted config field path.
+
+    This is the ONLY way a non-finite double can reach a validator, because
+    neither JSON reader produces one: both refuse the ``NaN`` / ``Infinity``
+    literals outright.  The path names a real config field; an unknown path is
+    an error, so a corpus case cannot silently do nothing.
+
+    ``<timed field>.quantisation_hz`` is the one composite path: a timed field
+    is a nested object, so the last segment is looked up on it rather than on
+    the group that owns it, and its attribute is ``required_quantisation_hz``
+    while its JSON key is ``quantisation_hz``.
+    """
+    parts = _split_path(path)
+    node: Any = cfg
+    for part in parts[:-1]:
+        if isinstance(part, int):
+            node = node[part]
+        else:
+            node = getattr(node, part)
+    last = parts[-1]
+    if isinstance(last, int):
+        raise TypeError("cannot assign a double to the list element %r" % path)
+    if last == "quantisation_hz" and isinstance(node, TimedField):
+        node.required_quantisation_hz = float(value)
+        return
+    if not hasattr(node, last):
+        raise AttributeError("no config field %r (path %r)" % (last, path))
+    current = getattr(node, last)
+    if current is not None and not isinstance(current, (int, float)):
+        raise TypeError("config field %r is not a float" % path)
+    setattr(node, last, float(value))
+
+
+def default_parity_corpus_path() -> str:
+    """The corpus, found from the repository root above this file.
+
+    ``gr-uwb/python/uwb/twr_config.py`` -> ``<repo>/testdata/twr/...``.  No
+    environment variable, no cwd dependence: the corpus is a repository
+    artifact and is looked up like one.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))   # gr-uwb/python/uwb
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(here)))
+    return os.path.join(repo, PARITY_CORPUS_PATH)
+
+
+def load_parity_corpus(path: Optional[str] = None) -> Dict[str, Any]:
+    """Read and sanity-check the shared corpus.
+
+    Raises rather than returning an empty corpus: a differential test that
+    silently found no cases would pass without having compared anything, which
+    is the exact failure mode a parity test exists to prevent.
+    """
+    if path is None:
+        path = default_parity_corpus_path()
+    with open(path, "r", encoding="utf-8") as handle:
+        corpus = json.load(handle)
+    for key in ("corpus_version", "config_schema_version", "base", "cases"):
+        if key not in corpus:
+            raise ValueError("corpus %s has no %r" % (path, key))
+    if corpus["corpus_version"] != CORPUS_VERSION:
+        raise ValueError("corpus %s is version %r, this loader implements %r"
+                         % (path, corpus["corpus_version"], CORPUS_VERSION))
+    if corpus["config_schema_version"] != SCHEMA_VERSION:
+        raise ValueError(
+            "corpus %s targets config schema %r but this build implements %r"
+            % (path, corpus["config_schema_version"], SCHEMA_VERSION))
+    return corpus
+
+
+def run_parity_case(case: Dict[str, Any], base: Dict[str, Any],
+                    caps: Optional[Capabilities] = None
+                    ) -> Dict[str, Any]:
+    """Run ONE corpus case and return its observable outcome.
+
+    The returned mapping is exactly what the C++ suite reports for the same
+    case, so the two can be compared field for field: the import report, the
+    validation report, the effective values and the config hash.
+    """
+    table = caps if caps is not None else capabilities()
+    doc = apply_corpus_patch(base, case.get("patch", {}))
+    strict, non_finite = expand_non_finite(doc)
+    # A case may ALSO name the float fields it wants poisoned in a
+    # `non_finite_fields` list.  That is the portable spelling the C++ loader
+    # reads; the in-document "$nan" sentinel above is the same thing written
+    # inline, and both expand to the identical assignment.
+    for item in case.get("non_finite_fields", []):
+        non_finite.append((str(item), _NON_FINITE["nan"]))
+    text = json.dumps(strict, allow_nan=False)
+    cfg, import_report = from_json_string(text)
+    for path, value in non_finite:
+        set_config_double(cfg, path, value)
+
+    report = validate(cfg, table)
+    eff = effective_config(cfg, table)
+    return {
+        "import_ok": import_report.ok(),
+        "import_violations": _violation_triples(import_report),
+        "accepted": report.ok(),
+        "violations": _violation_triples(report),
+        "effective": _effective_summary(eff),
+        "config_hash": eff.config_hash,
+    }
+
+
+def _violation_triples(report: ValidationReport) -> List[str]:
+    """``["field|reason|status", ...]`` -- the machine-readable part only.
+
+    The human MESSAGE is deliberately NOT part of the comparison; see the
+    section comment above.
+    """
+    return ["%s|%s|%s" % (v.field, v.reason, v.status) for v in report.violations]
+
+
+def _effective_summary(e: EffectiveConfig) -> Dict[str, Any]:
+    """The effective values both implementations must agree on."""
+    return {
+        "ok": bool(e.ok),
+        "schema_version": e.schema_version,
+        "profile_version": e.profile_version,
+        "calibration_version": e.calibration_version,
+        # A double is rendered the C++ way (%.17g), because the corpus stores
+        # the text the C++ side produced.
+        "tick_rate_hz": double_to_text(e.tick_rate_hz),
+        "poll_bytes": e.poll_bytes,
+        "response_bytes": e.response_bytes,
+        "final_bytes": e.final_bytes,
+        "max_psdu_bytes": e.max_psdu_bytes,
+        "max_timestamp_count": e.max_timestamp_count,
+        "phr_bytes": e.phr_bytes,
+        "phr_coded_bits": e.phr_coded_bits,
+        "poll_start_ticks": e.poll_start_ticks,
+        "poll_to_response_ticks": e.poll_to_response_ticks,
+        "response_to_final_ticks": e.response_to_final_ticks,
+        "post_tx_rx_enable_ticks": e.post_tx_rx_enable_ticks,
+        "poll_start_effective_ns": e.poll_start_effective.nanos(),
+        "poll_to_response_effective_ns": e.poll_to_response_effective.nanos(),
+        "response_to_final_effective_ns": e.response_to_final_effective.nanos(),
+        "post_tx_rx_enable_effective_ns": e.post_tx_rx_enable_effective.nanos(),
+    }
+
+
+# ===========================================================================
+# End of the TWR configuration layer
+# ===========================================================================

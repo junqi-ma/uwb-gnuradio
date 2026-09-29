@@ -19,9 +19,18 @@ add_subdirectory(bindings)
 ########################################################################
 # Install python sources
 ########################################################################
+# twr_config.py is the pure-Python TWR configuration layer: the typed config,
+# the frame profile, the capability whitelist with its DEFAULT DENY behaviour
+# and the validation / effective-config / JSON entry points.  It was NOT
+# installed, so `import uwb.twr_config` only ever worked from a source
+# checkout -- an installed consumer got a package whose one real module was
+# missing (M0 review R8 / P2).  It goes in the SAME install() call as
+# __init__.py so it lands in the same directory as the package __init__ and is
+# importable as `uwb.twr_config` after installation.
 GR_PYTHON_INSTALL(
     FILES
     __init__.py
+    twr_config.py
     DESTINATION ${GR_PYTHON_DIR}/gnuradio/uwb
 )
 

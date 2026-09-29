@@ -20,7 +20,9 @@
  *     0    1    version     0x01
  *     1    1    function    Poll 0x00 / Response 0x01 / Final 0x02
  *                           Report 0x03 is RESERVED (see below)
- *     2    2    session_id  u16, wraps independently of `seq`
+ *     2    2    session_id  u16, wraps independently of `seq`.  The local ->
+ *                           wire mapping is identity-or-refuse: see
+ *                           `session_id_to_wire()` and the collision note.
  *     4    2    seq         u16
  *     6    2    pan_id      u16
  *     8    2    src_addr    u16
@@ -86,6 +88,19 @@
  * logging and tests; `out` is resized once to the exact frame length.
  * `FrameScratch` bundles the 38-byte worst-case buffer.
  *
+ * GEOMETRY AUTHORITY (M0.1, fixes R3)
+ * -----------------------------------
+ * A frame's length is computed in exactly ONE function, `frame_length_for()`.
+ * Everything else that needs a size -- `psdu_length_for()`, `FrameProfileGeometry`,
+ * the configuration layer, any budget calculation -- delegates to it, and this
+ * header contains no second `header + n*timestamp` sum.  `FrameProfileGeometry`
+ * is the authority for every byte count of the frozen layout, and
+ * `frame_geometry_check()` compares a caller's claim against it field by
+ * field, so a configuration cannot assert a 7-byte header and a 9/19/24-byte
+ * budget while the codec emits 14 bytes and 16/26/31.  The frame profile is
+ * an enumeration (`FrameProfileId`), never a free-form name, and the local ->
+ * wire session id mapping is identity-or-refuse -- see the sections below.
+ *
  * Requirements traceability (docs/twr/需求_UWB_SS_DS_TWR.md):
  *   REQ-API-01  one single FCS layer, application payload vs MAC PSDU split
  *   REQ-PROTO-01 only a matching frame may advance the FSM (frame_match)
@@ -132,7 +147,10 @@ inline constexpr size_t kOffDstAddr = 10;
 inline constexpr size_t kOffFlags = 12;
 inline constexpr size_t kOffTimestamps = 14;
 
-inline constexpr size_t kFrameHeaderBytes = 14;
+// The header is exactly everything ahead of the first timestamp, so its size IS
+// the first timestamp's offset: one definition, not two that can drift apart
+// (a moved offset with a stale size would silently corrupt every frame length).
+inline constexpr size_t kFrameHeaderBytes = kOffTimestamps;
 
 // Max timestamps any frame type carries (Final).  Fixed capacity, no heap.
 inline constexpr size_t kMaxTimestamps = 3;
@@ -648,6 +666,560 @@ inline size_t frame_length_for_checked(FrameType t,
     return n;
 }
 
+// ===========================================================================
+// FRAME GEOMETRY AUTHORITY  (M0.1 / R3)
+//
+// WHY THIS SECTION EXISTS
+// -----------------------
+// The M0 review (docs/twr/M0_复核报告.md R3) found TWO geometries for one
+// format.  The configuration schema carried a pre-codec "7-byte header"
+// FrameGeometry (FCF(2)+seq(1)+PAN(2)+addr(2)) with 9/19/24-byte budgets,
+// while this codec has emitted a 14-byte header and 16/26/31-byte on-air
+// frames since it was frozen.  Both test suites passed, because nothing ever
+// asked whether an ACCEPTED configuration can losslessly build the real
+// frame.  A wrong 7-byte claim does not merely describe a slightly different
+// budget: it understates the buffer and frame-duration budget, and a session
+// id narrowed from 32 to 16 bits collides with a probability no test stated.
+//
+// THE CONTRACT RESTATED HERE
+// -------------------------
+//   * This file is the ONLY authority for frame v1's byte geometry.  The
+//     configuration layer does not recompute a single one of these numbers;
+//     it asks, and `frame_geometry_check()` proves the two agree.
+//   * A frame's length is computed in exactly one function, `frame_length_for()`.
+//     Every other size in this header, in the geometry authority, and in any
+//     caller is a delegation to it.  There is no second `header + n*ts` sum.
+//   * A frame profile is a NAMED, IMPLEMENTED layout taken from an
+//     enumeration.  A free-form profile string is never accepted as an
+//     executable geometry.
+//   * The local -> wire session id mapping is identity-or-refuse.  A lossy
+//     mapping would fabricate session collisions silently, so it does not
+//     exist.
+//
+// It is deliberately NOT a config/JSON/dictionary type: the configuration
+// layer builds a `FrameGeometryClaim` from whatever it has (schema, JSON,
+// a test fixture) and checks the claim against the authority.  Three parallel
+// geometry types would be the defect, not the fix.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Profile identity
+// ---------------------------------------------------------------------------
+
+// A frame profile is a versioned MAC PSDU layout.  Phase 1 implements exactly
+// one.  Selecting it by enum is what makes "an arbitrary non-empty profile
+// name" unrepresentable instead of merely discouraged (R3).
+//
+// NOT the same concept as the PHY capability profile string
+// ("m0-ch5-64sync-4z2" in capabilities()), which names channel / SYNC length /
+// SFD, not the MAC PSDU layout.  The two must not be conflated or derived
+// from one another.
+enum class FrameProfileId : uint8_t {
+    // frame v1: 14 B header (version, function code, 16-bit session/seq/PAN/
+    // src/dst/flags), 40-bit little-endian timestamps, standard HRP PHR,
+    // FCS appended by the modulation layer.  Frozen; see the wire-format
+    // table at the top of this file.
+    TwrV1 = 0
+};
+
+inline const char* frame_profile_id_to_string(FrameProfileId id)
+{
+    switch (id) {
+    case FrameProfileId::TwrV1:
+        return "frame_v1";
+    }
+    return "invalid";
+}
+
+// Strict: exactly one accepted spelling, and nothing else.  An unknown name is
+// a rejection with a reason, never a default to whatever happens to exist.
+inline bool frame_profile_id_from_string(const std::string& name, FrameProfileId& out)
+{
+    if (name == "frame_v1") {
+        out = FrameProfileId::TwrV1;
+        return true;
+    }
+    return false;
+}
+
+// True only for an implemented layout.  A value cast in from an int, or a
+// future enumerator added without a case here, is refused.
+inline bool frame_profile_id_is_supported(FrameProfileId id)
+{
+    return id == FrameProfileId::TwrV1;
+}
+
+// The complete set, so a validator can enumerate what it may offer.
+inline constexpr FrameProfileId kAllFrameProfileIds[] = { FrameProfileId::TwrV1 };
+inline constexpr size_t kFrameProfileIdCount =
+    sizeof(kAllFrameProfileIds) / sizeof(kAllFrameProfileIds[0]);
+
+// The `FrameProfile` of a profile id, or false when the id names no
+// implemented layout.  A default-constructed `FrameProfile` IS frame v1, so
+// selecting the profile explicitly does not change a single byte on the air;
+// it only makes the choice checkable.
+inline bool frame_profile_for(FrameProfileId id, FrameProfile& out)
+{
+    if (!frame_profile_id_is_supported(id))
+        return false;
+    out = FrameProfile();
+    return true;
+}
+
+// Who appends the FCS.  Exactly one layer may (REQ-API-01).  Distinct from
+// the configuration layer's own FcsAppender enumeration, which this header
+// does not depend on; a configuration maps onto this one.
+enum class FcsOwner : uint8_t {
+    PhyLayer = 0, // the modulation layer appends it (UwbHrpPacketSource)
+    MacLayer = 1  // a MAC that builds and appends the CRC itself
+};
+
+inline const char* fcs_owner_to_string(FcsOwner o)
+{
+    switch (o) {
+    case FcsOwner::PhyLayer:
+        return "phy";
+    case FcsOwner::MacLayer:
+        return "mac";
+    }
+    return "invalid";
+}
+
+// ---------------------------------------------------------------------------
+// PHR: the standard HRP BPRF PHY header
+// ---------------------------------------------------------------------------
+
+// `phr_bytes()` answers "how many information bytes does the PHR carry", not
+// "how long is the PHR on the air" -- those differ and conflating them is how
+// a frame-duration budget gets understated.  The 13 information bits are
+// exactly the standard 2-octet PHY header: 2 data-rate + 7 PSDU-length + 1
+// ranging + 1 reserved + 2 preamble-duration index.  mod::encode_phr19()
+// fills those 13 bits and SEC-DED(13,13)-codes them to 19 bits, which the
+// modulator spreads over 21 PHR symbols (19 coded bits + 2 trailing bits).
+// qa_uwb_twr_frame.cc asserts the 19 against the modulator's own constant.
+inline constexpr size_t kPhrStandardInfoBytes = 2;
+inline constexpr uint16_t kPhrStandardCodedBits = 19;
+
+// ---------------------------------------------------------------------------
+// A caller's claim about the layout
+// ---------------------------------------------------------------------------
+
+// A claim is a plain POD with the same field names as the configuration
+// layer's `FrameGeometry`, on purpose: the config builds one of these, the
+// frame layer checks it, and no third geometry type exists.  A distinct type
+// from FrameProfileGeometry is also deliberate -- the authority and the claim
+// can never be swapped for one another by accident.
+struct FrameGeometryClaim {
+    size_t mac_header_bytes = 0;
+    size_t timestamp_bytes = 0;
+    size_t mac_footer_bytes = 0;
+    size_t mac_fcs_bytes = 0;
+    size_t phr_bytes = 0;
+
+    bool operator==(const FrameGeometryClaim& o) const
+    {
+        return mac_header_bytes == o.mac_header_bytes &&
+               timestamp_bytes == o.timestamp_bytes &&
+               mac_footer_bytes == o.mac_footer_bytes &&
+               mac_fcs_bytes == o.mac_fcs_bytes && phr_bytes == o.phr_bytes;
+    }
+    bool operator!=(const FrameGeometryClaim& o) const { return !(*this == o); }
+    bool any_set() const
+    {
+        return mac_header_bytes != 0 || timestamp_bytes != 0 ||
+               mac_footer_bytes != 0 || mac_fcs_bytes != 0 || phr_bytes != 0;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// The authority
+// ---------------------------------------------------------------------------
+
+struct FrameProfileGeometry {
+    // Which layout this describes, and which layer owns the FCS.  Both are
+    // part of the profile's identity, not per-call options: a caller states a
+    // profile and gets exactly one geometry.
+    FrameProfileId id = FrameProfileId::TwrV1;
+    FcsOwner fcs_owner = FcsOwner::PhyLayer;
+
+    // MAC header size.  Returns kFrameHeaderBytes -- the codec's own constant
+    // -- so a 14 can never exist anywhere else in the system (R3).
+    size_t mac_header_bytes() const { return kFrameHeaderBytes; }
+
+    // Bytes per timestamp field.  Delegates to the profile's declared width
+    // (a profile parameter, REQ-TIME-04): 5 B at the 40-bit frame-v1 default.
+    size_t timestamp_bytes(const FrameProfile& p) const
+    {
+        // Qualified: an unqualified call would find this member and recurse.
+        return ::gr::uwb::twr::timestamp_bytes(p);
+    }
+
+    // No trailing address/profile trailer in frame v1.  It is a method rather
+    // than a constant so a future profile with a footer has one place to say
+    // so instead of a caller inventing a third geometry.
+    size_t mac_footer_bytes() const { return 0; }
+
+    // FCS bytes reserved INSIDE the MAC PSDU.  Frame v1 is 0: the modulation
+    // layer appends the FCS and the codec never emits one.
+    //
+    // The MAC-appends variant is a DESCRIPTION, not an executable path: see
+    // frame_geometry_mac_appends_fcs() and executable().  This codec cannot
+    // produce a MAC-appended PSDU -- frame_profile_validate() rejects
+    // `fcs_appended_by_modulation_layer == false` -- so advertising that
+    // layout as encodable would be a lie the validator then has to undo.
+    size_t mac_fcs_bytes() const
+    {
+        return fcs_owner == FcsOwner::MacLayer ? kFrameFcsBytes : 0u;
+    }
+
+    // The FCS the PHY appends after the MAC payload.  2 B, IEEE 802.15.4.
+    size_t fcs_bytes_on_air() const { return kFrameFcsBytes; }
+
+    // PHR information size / coded size.  See kPhrStandardInfoBytes above.
+    size_t phr_bytes() const { return kPhrStandardInfoBytes; }
+    uint16_t phr_coded_bits() const { return kPhrStandardCodedBits; }
+
+    // MAC PSDU of one frame as THIS profile builds it -- the single place, a
+    // delegation to frame_length_for() plus the FCS bytes this profile
+    // reserves inside the MAC PSDU.  For the executable frame-v1 profile that
+    // reservation is 0, so this is exactly 14 / 24 / 29 B; for the
+    // MAC-appends description it is the 2 FCS bytes the MAC itself adds.
+    size_t mac_payload_bytes(FrameType t, const FrameProfile& p) const
+    {
+        return frame_length_for(t, p) + mac_fcs_bytes();
+    }
+
+    // Size-checked form: 0 with a reason for a reserved frame type (Report),
+    // an unusable profile, or a frame that would not fit the profile's PSDU
+    // once the FCS is on it.  Delegates to frame_length_for_checked().
+    size_t mac_payload_bytes_checked(FrameType t,
+                                     const FrameProfile& p,
+                                     std::string& error,
+                                     FrameError* code = nullptr) const
+    {
+        const size_t n = frame_length_for_checked(t, p, error, code);
+        if (n == 0)
+            return 0;
+        return n + mac_fcs_bytes();
+    }
+
+    // On-air PSDU: the MAC payload plus the 2 FCS bytes, whichever layer
+    // appends them -- 16 / 26 / 31 B.  Invariant under fcs_owner: moving who
+    // appends the FCS does not change a single sample on the air, it only
+    // changes which layer is responsible for it.
+    size_t on_air_bytes(FrameType t, const FrameProfile& p) const
+    {
+        return psdu_length_for(t, p);
+    }
+
+    // True only for a layout this codec can actually build.  A MAC-appends
+    // geometry is describeable but not encodable here.
+    bool executable() const { return fcs_owner == FcsOwner::PhyLayer; }
+
+    // The claim that agrees with this authority, for a caller filling a
+    // FrameGeometryClaim in.  Checking it back must report no mismatch; that
+    // is the self-consistency the R3 regression test relies on.
+    FrameGeometryClaim claim(const FrameProfile& p) const
+    {
+        FrameGeometryClaim c;
+        c.mac_header_bytes = mac_header_bytes();
+        c.timestamp_bytes = timestamp_bytes(p);
+        c.mac_footer_bytes = mac_footer_bytes();
+        c.mac_fcs_bytes = mac_fcs_bytes();
+        c.phr_bytes = phr_bytes();
+        return c;
+    }
+};
+
+inline bool operator==(const FrameProfileGeometry& a, const FrameProfileGeometry& b)
+{
+    return a.id == b.id && a.fcs_owner == b.fcs_owner;
+}
+inline bool operator!=(const FrameProfileGeometry& a, const FrameProfileGeometry& b)
+{
+    return !(a == b);
+}
+
+// The description-only variant: same layout, but the MAC reserves and appends
+// the 2 FCS bytes itself instead of the modulation layer.  Provided so a
+// configuration can STATE that layout and be told it is not executable here,
+// rather than having the number silently accepted (R3).
+inline FrameProfileGeometry frame_geometry_mac_appends_fcs(FrameProfileId id = FrameProfileId::TwrV1)
+{
+    FrameProfileGeometry g;
+    g.id = id;
+    g.fcs_owner = FcsOwner::MacLayer;
+    return g;
+}
+
+// The executable authority for a profile id, or false when the id names no
+// implemented layout (never a silent fallback to frame v1).
+inline bool frame_geometry_for(FrameProfileId id, FrameProfileGeometry& out)
+{
+    if (!frame_profile_id_is_supported(id))
+        return false;
+    out = FrameProfileGeometry();
+    out.id = id;
+    out.fcs_owner = FcsOwner::PhyLayer;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-checking a caller's claim
+// ---------------------------------------------------------------------------
+
+// The five comparable fields, in a fixed report order.
+enum class GeometryField : uint8_t {
+    MacHeaderBytes = 0,
+    TimestampBytes = 1,
+    MacFooterBytes = 2,
+    MacFcsBytes = 3,
+    PhrBytes = 4,
+    Count = 5
+};
+
+inline constexpr size_t kGeometryFieldCount =
+    static_cast<size_t>(GeometryField::Count);
+
+inline const char* geometry_field_to_string(GeometryField f)
+{
+    switch (f) {
+    case GeometryField::MacHeaderBytes:
+        return "mac_header_bytes";
+    case GeometryField::TimestampBytes:
+        return "timestamp_bytes";
+    case GeometryField::MacFooterBytes:
+        return "mac_footer_bytes";
+    case GeometryField::MacFcsBytes:
+        return "mac_fcs_bytes";
+    case GeometryField::PhrBytes:
+        return "phr_bytes";
+    case GeometryField::Count:
+        break;
+    }
+    return "invalid";
+}
+
+struct GeometryMismatch {
+    GeometryField field = GeometryField::MacHeaderBytes;
+    size_t expected = 0;
+    size_t actual = 0;
+};
+
+// Fixed capacity, trivially copyable: five fields, so the report is a value
+// type with no allocation.  A validator can hand the whole thing to a log.
+struct GeometryMismatchReport {
+    static constexpr size_t capacity = kGeometryFieldCount;
+    GeometryMismatch items[capacity] = {};
+    size_t count = 0;
+
+    bool ok() const { return count == 0; }
+    const GeometryMismatch* at(size_t index) const
+    {
+        if (index >= count)
+            return nullptr;
+        return &items[index];
+    }
+    const GeometryMismatch* find(GeometryField f) const
+    {
+        for (size_t i = 0; i < count; ++i) {
+            if (items[i].field == f)
+                return &items[i];
+        }
+        return nullptr;
+    }
+};
+
+struct GeometryCheckResult {
+    FrameProfileId id = FrameProfileId::TwrV1;
+    FrameProfileGeometry authority;
+    FrameGeometryClaim claimed;
+    // False when the authority is describeable but not encodable by this codec
+    // (the MAC-appends variant).
+    bool fcs_owner_ok = true;
+    GeometryMismatchReport fields;
+
+    bool ok() const { return fcs_owner_ok && fields.ok(); }
+    // The first mismatching field, or null when `ok()`.
+    const GeometryMismatch* first_mismatch() const { return fields.at(0); }
+
+    // One line naming every field that disagrees, for a rejection message:
+    //   "mac_header_bytes: expected 14, got 7; phr_bytes: expected 2, got 12"
+    std::string summary() const;
+};
+
+// Checks a caller-supplied claim against the authority, per field.  This is
+// the function a configuration validator calls: it never decides geometry, it
+// only reports where the claim diverges from the one source of truth, so a
+// 7-byte header is reported as `mac_header_bytes: expected 14, got 7` rather
+// than quietly accepted with a 9-byte budget.
+inline GeometryCheckResult
+frame_geometry_check(const FrameGeometryClaim& claimed,
+                     const FrameProfileGeometry& authority,
+                     const FrameProfile& p)
+{
+    GeometryCheckResult r;
+    r.id = authority.id;
+    r.authority = authority;
+    r.claimed = claimed;
+    r.fcs_owner_ok = authority.executable();
+
+    const size_t want[kGeometryFieldCount] = {
+        authority.mac_header_bytes(), authority.timestamp_bytes(p),
+        authority.mac_footer_bytes(), authority.mac_fcs_bytes(),
+        authority.phr_bytes()
+    };
+    const size_t got[kGeometryFieldCount] = {
+        claimed.mac_header_bytes, claimed.timestamp_bytes,
+        claimed.mac_footer_bytes, claimed.mac_fcs_bytes, claimed.phr_bytes
+    };
+    for (size_t i = 0; i < kGeometryFieldCount; ++i) {
+        if (want[i] == got[i])
+            continue;
+        GeometryMismatch& m = r.fields.items[r.fields.count++];
+        m.field = static_cast<GeometryField>(i);
+        m.expected = want[i];
+        m.actual = got[i];
+    }
+    return r;
+}
+
+inline std::string GeometryCheckResult::summary() const
+{
+    std::string s;
+    for (size_t i = 0; i < fields.count; ++i) {
+        if (!s.empty())
+            s += "; ";
+        s += geometry_field_to_string(fields.items[i].field);
+        s += ": expected ";
+        s += std::to_string(fields.items[i].expected);
+        s += ", got ";
+        s += std::to_string(fields.items[i].actual);
+    }
+    if (!fcs_owner_ok) {
+        if (!s.empty())
+            s += "; ";
+        s += "fcs_owner: expected ";
+        s += fcs_owner_to_string(FcsOwner::PhyLayer);
+        s += ", got ";
+        s += fcs_owner_to_string(authority.fcs_owner);
+        s += " (this codec only encodes the PHY-appends form)";
+    }
+    return s;
+}
+
+// ---------------------------------------------------------------------------
+// Session id: the local -> wire contract
+// ---------------------------------------------------------------------------
+
+// `kOffSessionId` is 2 bytes, so the wire session field is 16 bits wide and
+// that is the ENTIRE session space.  Everything below follows from those two
+// facts; none of it is a policy choice the codec could have made differently.
+inline constexpr unsigned kSessionIdWireBits = 16;
+inline constexpr uint32_t kSessionIdWireMax = 0xFFFFu;
+
+// A locally chosen session id of 0 must not reach the air: the configuration
+// layer uses it as its "not stated" marker.  The codec itself does not refuse
+// it -- a `Frame` is a `Frame` -- so this is a caller rule, stated here so both
+// sides quote the same constant instead of inventing one.
+inline constexpr uint32_t kSessionIdReservedLocal = 0;
+
+enum class SessionIdError : uint8_t {
+    None = 0,
+    OutOfWireRange // local id > kSessionIdWireMax: refused, never truncated
+};
+
+inline const char* session_id_error_to_string(SessionIdError e)
+{
+    switch (e) {
+    case SessionIdError::None:
+        return "none";
+    case SessionIdError::OutOfWireRange:
+        return "session_id_out_of_wire_range";
+    }
+    return "invalid";
+}
+
+inline ExchangeStatus session_id_error_to_exchange_status(SessionIdError e)
+{
+    switch (e) {
+    case SessionIdError::None:
+        return ExchangeStatus::Ok;
+    case SessionIdError::OutOfWireRange:
+        // A configuration that cannot be represented is rejected before the
+        // radio starts; it is not a peer or a decode problem.
+        return ExchangeStatus::ConfigRejected;
+    }
+    return ExchangeStatus::InternalError;
+}
+
+// THE MAPPING RULE (frame v1):
+//
+//     wire_session_id == local_session_id, bit for bit, 16 bits,
+//                       little-endian at kOffSessionId
+//     a local id outside [0, 0xFFFF] is REFUSED
+//
+// There is deliberately no folding, hashing, low-word extraction or derived
+// value.  A lossy local->wire map would make two different local sessions
+// produce byte-identical session fields, and frame_match() would then accept
+// the wrong session's reply as this one's (REQ-PROTO-01) -- a wrong-peer frame
+// silently folded into a range.  A refusal is visible and attributable; a
+// collision is neither.  So the rule is: in range -> exact, out of range ->
+// explicit error.  There is no third case.
+inline bool session_id_fits_wire(uint32_t local_session_id)
+{
+    return local_session_id <= kSessionIdWireMax;
+}
+
+inline bool session_id_to_wire(uint32_t local_session_id,
+                               uint16_t& wire,
+                               std::string& error,
+                               SessionIdError* code = nullptr)
+{
+    if (!session_id_fits_wire(local_session_id)) {
+        if (code != nullptr)
+            *code = SessionIdError::OutOfWireRange;
+        error = std::string(session_id_error_to_string(SessionIdError::OutOfWireRange)) +
+                ": local session id " + std::to_string(local_session_id) +
+                " does not fit the " + std::to_string(kSessionIdWireBits) +
+                "-bit wire field at kOffSessionId; refused, not truncated to " +
+                std::to_string(static_cast<uint32_t>(local_session_id & kSessionIdWireMax));
+        wire = 0; // never leave a plausible-looking id behind on failure
+        return false;
+    }
+    wire = static_cast<uint16_t>(local_session_id);
+    if (code != nullptr)
+        *code = SessionIdError::None;
+    error.clear();
+    return true;
+}
+
+// THE COLLISION PROPERTY, as a predicate so it is tested rather than merely
+// asserted in prose:
+//
+//   Two ACCEPTED local session ids are indistinguishable on the wire if and
+//   only if they are the same integer.  Because an out-of-range id is refused
+//   instead of narrowed, the mapping is injective over everything that can
+//   reach the air; the `fits` tests are what make that statement true rather
+//   than false for a rejected id (which collides with nothing, because it
+//   never goes on the air).
+//
+// THE CONSEQUENCE, which any session-space sizing must state: the wire field is
+// 16 bits, so the space is 2^16 sessions and the birthday bound is ~2^8 = 256
+// concurrently live sessions at a 50% chance of one collision.  That density
+// is a consequence of the 16-bit field at kOffSessionId.  The codec cannot fix
+// it, and NO local->wire mapping can raise it: a wider local id folded into 16
+// wire bits can only lose distinctions, never create room.  Raising it needs a
+// different frame version with a wider (or keyed) session field, which the
+// peer must also understand -- i.e. an interoperability change, not a config
+// option.
+inline constexpr double kSessionIdBirthdaySessions50pct = 256.0; // ~sqrt(2^16)
+
+inline bool wire_session_id_collides(uint32_t a, uint32_t b)
+{
+    return session_id_fits_wire(a) && session_id_fits_wire(b) && a == b;
+}
+
 // ---------------------------------------------------------------------------
 // Little-endian primitives (the wire order, in one place)
 // ---------------------------------------------------------------------------
@@ -742,7 +1314,9 @@ inline bool encode_into(const Frame& f,
 
     const size_t tsb = timestamp_bytes(p);
     const size_t n_ts = layout->timestamp_count;
-    const size_t need = kFrameHeaderBytes + n_ts * tsb;
+    // frame_length_for() is the ONE place a frame's length is computed; this
+    // function must not restate the arithmetic (R3: no second geometry).
+    const size_t need = frame_length_for(f.function_code, p);
 
     // A value that does not fit the declared field is refused, never
     // truncated: truncation would silently change a measurement instant.
@@ -898,7 +1472,8 @@ inline bool decode(const uint8_t* data,
     }
 
     const size_t tsb = timestamp_bytes(p);
-    const size_t need = kFrameHeaderBytes + layout->timestamp_count * tsb;
+    // Same single place as encode_into(): a frame's length is computed once.
+    const size_t need = frame_length_for(type, p);
     if (n < need) {
         set_error(error, code, FrameError::Truncated,
                   "timestamp block is shorter than the function code requires");

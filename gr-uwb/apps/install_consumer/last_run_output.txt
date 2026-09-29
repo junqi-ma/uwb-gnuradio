@@ -1,0 +1,66 @@
+== install prefix ==
+   include    : /tmp/opencode/b6/destdir//tmp/opencode/b6/prefix/include
+   python     : /tmp/opencode/b6/destdir//tmp/opencode/b6/prefix/lib/python3.10/site-packages
+
+== files present in the prefix ==
+   header  OK  gnuradio/uwb/uwb_twr_types.h
+   header  OK  gnuradio/uwb/uwb_twr_frame.h
+   header  OK  gnuradio/uwb/uwb_twr_timestamp.h
+   header  OK  gnuradio/uwb/uwb_twr_config.h
+   header  OK  gnuradio/uwb/uwb_twr_capability_evidence.h
+   header  OK  gnuradio/uwb/uwb_twr_test_output.h
+   module  OK  gnuradio/uwb/__init__.py
+   module  OK  gnuradio/uwb/twr_config.py
+
+== compile the C++ consumer against the prefix only ==
+   compiled: /tmp/opencode/b6/install_consumer
+
+== run the C++ consumer ==
+gr-uwb installed TWR API consumer
+  schema=twr-config/1 profile=m0-ch5-64sync-4z2 phy_rows=48
+  [ ok ] schema_version is present
+  [ ok ] capability whitelist is populated
+  [ ok ] channel whitelist is {5}
+  [ ok ] STS is out of scope (fail-closed)
+  [ ok ] ranging bit is required
+  [ ok ] measured 64-SYNC/4z2/code9 row is admitted
+  [ ok ] 128 SYNC is rejected (DEFAULT DENY)
+  [ ok ] the rejection carries a reason
+        reason: no measured row for native_rate=737280000 code=9 sync=128 sfd=4z2 psdu<=127; see testdata/twr/phy_matrix_*.csv
+  [ ok ] a supported M0 row is work_decode_verified
+  [ ok ] work-decode evidence does NOT license ranging (fail-closed)
+  [ ok ] work-decode evidence does NOT license vendor interop
+  [ ok ] the absent ToA level is listed explicitly
+  [ ok ] 128 SYNC rejection is scoped to this build's software
+  [ ok ] the rejection explicitly disclaims a hardware verdict
+  [ ok ] SHA-256 matches the FIPS vector (provenance output hash works)
+  frame v1 MAC payload: Poll=14 Response=24 Final=29 B
+  [ ok ] frame v1 MAC payload is 14 B header + 40-bit timestamps
+  [ ok ] the FCS belongs to exactly one layer (2 bytes, not two)
+  [ ok ] a caller-supplied geometry cannot override the codec length
+  [ ok ] the frame v1 profile is resolvable
+  [ ok ] config and codec agree on the Response length
+  frame v1 profile=frame_v1 version=1 timestamp=40 bits (unit 7.3728e+08 Hz), max_psdu=127 B
+  [ ok ] frame v1 carries 40-bit timestamps
+  [ ok ] a 40-bit timestamp is 5 bytes on the wire
+  [ ok ] the frame v1 MAC header is 14 B, owned by the codec
+  [ ok ] frame v1 has no MAC footer
+  [ ok ] frame v1 reserves no FCS inside the MAC PSDU
+  [ ok ] timestamp counts per frame type
+  737.28 MHz tick = 1.356336806 ns
+  [ ok ] tick period is ~1.356 ns
+  [ ok ] a tick is NOT an integer ns (so a lossy ns projection is wrong)
+  [ ok ] the two native rates are recognised
+  [ ok ] the work grid is not a native rate
+CONSUMER OK
+
+== import the Python module from the prefix only ==
+  imported from : /tmp/opencode/b6/destdir/tmp/opencode/b6/prefix/lib/python3.10/site-packages/gnuradio/uwb/twr_config.py
+  package       : /tmp/opencode/b6/destdir/tmp/opencode/b6/prefix/lib/python3.10/site-packages/gnuradio/uwb/__init__.py
+  schema=twr-config/1 profile=m0-ch5-64sync-4z2 channels=ReadOnlyList([5]) sync_reps=ReadOnlyList([16, 64]) phy_rows=48
+  128 SYNC rejected with: measured_reject: phr_preamble_duration_index_1_advertises_64_syMBOLs_not_128_ieee_802154a_cannot_express_this_length | cfo_fit_includes_88_zero_peak_corr_generated_peaks_because_cfo_skip_24_lt_tail_first_88_needs_cfo_skip_eq_preamble_minus_40 (testdata/twr/phy_matrix_whitelist_737280000.csv)
+  twr_config alone (no __init__, no extension, no GNU Radio): standalone_ok rows=48
+  public API present: validate/effective_config/JSON/snapshot
+  PYTHON CONSUMER OK
+
+== install consumer: ALL OK ==

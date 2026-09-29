@@ -31,6 +31,11 @@
  */
 
 #include <gnuradio/uwb/uwb_twr_config.h>
+// The frame codec is the geometry authority the config layer validates
+// against (M0.1 / R3).  Both headers are stdlib-only, so co-including them
+// here is exactly what a consumer does.  qa_uwb_twr_frame.cc owns the other
+// half of this contract.
+#include <gnuradio/uwb/uwb_twr_frame.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -128,7 +133,7 @@ TwrConfig minimal(Protocol protocol = Protocol::Ss, Role role = Role::Initiator)
     c.session.local_address = initiator ? 0x0001 : 0x0002;
     c.session.peer_address = initiator ? 0x0002 : 0x0001;
     c.session.pan_id = 0xcafe;
-    c.session.session_id = 0x11223344u;
+    c.session.session_id = 0x1234u;
     c.session.exchange_id = 1u;
     c.session.sequence = 7u;
     c.session.sequence_modulus = 256u;
@@ -147,34 +152,41 @@ TwrConfig minimal(Protocol protocol = Protocol::Ss, Role role = Role::Initiator)
     c.phy.rx_preamble_code = 9u;
     // 64 SYNC is the MEASURED phase-1 profile (testdata/twr/
     // phy_matrix_737280000.csv).  128/256/512/2048 are measured-unsupported.
-    c.phy.preamble_symbols = 64u;
+    c.phy.preamble_symbols = preamble_length_symbols(PreambleLength::Sym64);
     c.phy.prf_class = PrfClass::Bprf64;
     c.phy.data_rate = DataRate::R6p8M;
-    c.phy.phr_rate = DataRate::R6p8M;
+    // 0.85 Mb/s PHR + 6.81 Mb/s payload: the profile uwb_hrp_mod_core.h
+    // actually modulates.  The two rates are separate fields.
+    c.phy.phr_rate = PhrRate::Standard850k;
 
     // 帧格式
     c.frame.sfd_mode = SfdMode::R4z2;
-    c.frame.sfd_symbols = 8u;
+    c.frame.sfd_symbols = sfd_mode_symbols(SfdMode::R4z2);
     c.frame.sfd_timeout =
         device_field(20'000, TimeReferenceEvent::RxEnable,
             TimestampMarker::UhdRxFirstIqSample);
     c.frame.phr_mode = PhrMode::Standard;
     c.frame.ranging_bit = true;
-    // Must match the FROZEN frame codec in uwb_twr_frame.h: a 14-byte
-    // versioned header (version / function_code / session_id / seq / pan_id /
-    // src_addr / dst_addr / flags) plus 40-bit little-endian timestamps.  The
-    // value 7 that stood here before was a placeholder from a pre-codec draft
-    // and disagreed with kFrameHeaderBytes == 14.
-    c.frame.geometry.mac_header_bytes = 14u;
-    c.frame.geometry.timestamp_bytes = 5u;  // 40-bit
-    c.frame.geometry.mac_footer_bytes = 0u;
-    c.frame.geometry.mac_fcs_bytes = 0u; // the PHY appends the FCS
-    c.frame.geometry.phr_bytes = 12u;
+    // The geometry is a CLAIM about the layout, taken from the codec that
+    // OWNS the layout: frame_geometry_of_profile() reads
+    // frame_geometry_for() / frame_profile_for().  No number in this fixture
+    // is written by hand, so a change to the codec cannot leave a stale copy
+    // here (M0 review R3).
+    BOOST_REQUIRE_MESSAGE(
+        frame_geometry_of_profile(c.frame.frame_profile, c.frame.geometry),
+        "the fixture could not read the frame geometry from the codec authority");
     // Final is the largest frozen TWR frame: 14 + 3*5 = 29 B of MAC PSDU.
     // mac_psdu_bytes EXCLUDES the FCS because fcs_append == PhyLayer, so the
     // 31 B on-air size is 29 + 2 and the 127-byte IEEE limit is applied to
-    // that on-air length, not to this field.
-    c.frame.mac_psdu_bytes = 29u;
+    // that on-air length, not to this field.  It is read from the codec too.
+    {
+        FrameProfileGeometry auth;
+        FrameProfile profile;
+        BOOST_REQUIRE(frame_geometry_for(c.frame.frame_profile, auth));
+        BOOST_REQUIRE(frame_profile_for(c.frame.frame_profile, profile));
+        c.frame.mac_psdu_bytes = static_cast<uint16_t>(
+            auth.mac_payload_bytes(FrameType::Final, profile));
+    }
     c.frame.mac_psdu_includes_fcs = false;
     c.frame.fcs_append = FcsAppender::PhyLayer;
     c.frame.fcs_bytes = 2u;
@@ -718,11 +730,7 @@ BOOST_AUTO_TEST_CASE(shipped_whitelist_is_measured_not_default_deny_forever)
         const char* field;
     };
     const Probe probes[] = {
-        { [](TwrConfig& x) {
-              x.phy.data_rate = DataRate::R850k;
-              x.phy.phr_rate = DataRate::R850k;
-          },
-          "phy.data_rate" },
+        { [](TwrConfig& x) { x.phy.data_rate = DataRate::R850k; }, "phy.data_rate" },
         { [](TwrConfig& x) { x.phy.preamble_symbols = 128; }, "phy.preamble_symbols" },
         // 16 SYNC is measured-supported and must NOT appear here; 32 is the
         // shortest length that is still rejected (PHR advertises 64).
@@ -764,16 +772,17 @@ BOOST_AUTO_TEST_CASE(shipped_whitelist_is_measured_not_default_deny_forever)
 
 BOOST_AUTO_TEST_CASE(shipped_whitelist_accepts_measured_data_rate_only)
 {
-    // 6.81 Mb/s is the ONLY measured rate: uwb_hrp_mod_core.h:585 hardcodes
-    // PHR rate index 2 and the payload stage always uses the 6.81 geometry
-    // (64 chips/burst, 64 chips/symbol, scrambler offset 1344).  It must now be
-    // ACCEPTED; every other rate must still be rejected, not defaulted.
+    // 6.81 Mb/s is the ONLY measured PAYLOAD rate: uwb_hrp_mod_core.h hardcodes
+    // the payload geometry (64 chips/burst, 64 chips/symbol, scrambler offset
+    // 1344) and uwb_demod_core.h:stage_payload_fcs always decodes the 6.81
+    // geometry.  The PHR is a SEPARATE axis at its own 0.85 Mb/s rate, which
+    // is why the fixture sets phr_rate independently.
     {
         TwrConfig c = minimal();
         c.phy.data_rate = DataRate::R6p8M;
-        c.phy.phr_rate = DataRate::R6p8M;
+        c.phy.phr_rate = PhrRate::Standard850k;
         BOOST_REQUIRE_MESSAGE(validate(c, capabilities()).ok(),
-                              "measured 6.81 Mb/s was rejected");
+                              "measured 6.81 Mb/s payload was rejected");
     }
     const char* unmeasured[] = { "850k", "27m", "7p8m", "27p2m", "6p8m_hprf" };
     for (const char* n : unmeasured) {
@@ -781,7 +790,6 @@ BOOST_AUTO_TEST_CASE(shipped_whitelist_accepts_measured_data_rate_only)
         BOOST_REQUIRE(data_rate_from_string(n, r));
         TwrConfig c = minimal();
         c.phy.data_rate = r;
-        c.phy.phr_rate = r;
         const ValidationReport v = validate(c, capabilities());
         require_machine_readable(v);
         BOOST_REQUIRE_MESSAGE(has(v, "phy.data_rate", ConfigReason::Unsupported),
@@ -877,11 +885,11 @@ BOOST_AUTO_TEST_CASE(measured_whitelist_accepts_only_listed_combination)
     BOOST_REQUIRE(!caps.lookup_phy(kTwrNativeRateUc200Hz, 9, 128, SfdMode::R4z2, 127,
         false)
                        .allowed);
-    // A preamble length that is inside the header's 9..12 codes but absent
-    // from every measured matrix row is still rejected.  16 SYNC is the right
-    // probe: the header enumerates it and the block accepts it, but the
-    // measured first-path ToA accuracy is unverified, so it must not enter
-    // the whitelist.
+    // A preamble length that is inside the code range but absent from every
+    // measured matrix row is still rejected.  32 SYNC is refused by TWO gates
+    // for two different reasons, and the report keeps them apart: the
+    // PreambleLength enumeration (this decoder's CFO fit and PHR
+    // self-description) and the capability whitelist (the measurement).
     TwrConfig c = minimal();
     c.phy.tx_preamble_code = 10u;
     c.phy.rx_preamble_code = 10u;
@@ -889,10 +897,22 @@ BOOST_AUTO_TEST_CASE(measured_whitelist_accepts_only_listed_combination)
     const ValidationReport v = validate(c, caps);
     require_machine_readable(v);
     BOOST_REQUIRE(has(v, "phy.preamble_symbols", ConfigReason::Unsupported));
-    const std::string msg = v.find("phy.preamble_symbols",
-        ConfigReason::Unsupported)->message;
-    BOOST_REQUIRE(msg.find("capability whitelist") != std::string::npos ||
-                  msg.find("no measured row") != std::string::npos);
+    // Both gates are visible: the software limit and the measurement.
+    bool named_implementation = false;
+    bool named_whitelist = false;
+    for (const auto& vi : v.violations) {
+        if (vi.field != "phy.preamble_symbols" || vi.reason != ConfigReason::Unsupported)
+            continue;
+        if (vi.message == preamble_length_unsupported_reason(32))
+            named_implementation = true;
+        if (vi.message.find("capability whitelist") != std::string::npos ||
+            vi.message.find("no measured row") != std::string::npos)
+            named_whitelist = true;
+    }
+    BOOST_REQUIRE_MESSAGE(named_implementation,
+                          "the implementation limit was not reported: " + v.to_string());
+    BOOST_REQUIRE_MESSAGE(named_whitelist,
+                          "the measurement gate was not reported: " + v.to_string());
 }
 
 BOOST_AUTO_TEST_CASE(sts_is_rejected_for_every_non_off_mode)
@@ -1240,21 +1260,45 @@ BOOST_AUTO_TEST_CASE(frame_length_for_poll_response_final_must_fit)
 
 BOOST_AUTO_TEST_CASE(frame_psdu_bytes_helper_respects_single_fcs_layer)
 {
-    FrameGeometry g;
-    g.mac_header_bytes = 7;
-    g.timestamp_bytes = 5;
-    g.mac_fcs_bytes = 2;
-    g.phr_bytes = 12;
-    // MAC appends the FCS: it is inside the MAC PSDU.
-    BOOST_REQUIRE_EQUAL(frame_psdu_bytes(g, FrameType::Poll, FcsAppender::MacLayer), 9);
-    BOOST_REQUIRE_EQUAL(frame_psdu_bytes(g, FrameType::Response, FcsAppender::MacLayer),
-        19);
-    BOOST_REQUIRE_EQUAL(frame_psdu_bytes(g, FrameType::Final, FcsAppender::MacLayer),
-        24);
+    // The helper is a DELEGATION to the codec now, so it is asserted against
+    // the codec and never against a private 7-byte geometry (M0 review R3).
+    FrameProfileGeometry auth;
+    FrameProfile profile;
+    BOOST_REQUIRE(frame_geometry_for(FrameProfileId::TwrV1, auth));
+    BOOST_REQUIRE(frame_profile_for(FrameProfileId::TwrV1, profile));
+
+    // MAC appends the FCS: it is inside the MAC PSDU, so the MAC-appends
+    // variant of the authority is the one to compare against.
+    const FrameProfileGeometry mac_auth = frame_geometry_mac_appends_fcs();
+    BOOST_REQUIRE_EQUAL(frame_psdu_bytes(FrameType::Poll, FcsAppender::MacLayer),
+        mac_auth.mac_payload_bytes(FrameType::Poll, profile));
+    BOOST_REQUIRE_EQUAL(frame_psdu_bytes(FrameType::Response, FcsAppender::MacLayer),
+        mac_auth.mac_payload_bytes(FrameType::Response, profile));
+    BOOST_REQUIRE_EQUAL(frame_psdu_bytes(FrameType::Final, FcsAppender::MacLayer),
+        mac_auth.mac_payload_bytes(FrameType::Final, profile));
     // PHY appends it: the MAC PSDU stops before the CRC.
-    BOOST_REQUIRE_EQUAL(frame_psdu_bytes(g, FrameType::Poll, FcsAppender::PhyLayer), 7);
-    BOOST_REQUIRE_EQUAL(frame_psdu_bytes(g, FrameType::Final, FcsAppender::PhyLayer),
-        22);
+    BOOST_REQUIRE_EQUAL(frame_psdu_bytes(FrameType::Poll, FcsAppender::PhyLayer),
+        auth.mac_payload_bytes(FrameType::Poll, profile));
+    BOOST_REQUIRE_EQUAL(frame_psdu_bytes(FrameType::Final, FcsAppender::PhyLayer),
+        auth.mac_payload_bytes(FrameType::Final, profile));
+    // The MAC-appends form is exactly the on-air length (14/24/29 + 2 FCS);
+    // the PHY-appends form is the on-air length minus the FCS.
+    BOOST_REQUIRE_EQUAL(frame_psdu_bytes(FrameType::Final, FcsAppender::MacLayer), 31u);
+    BOOST_REQUIRE_EQUAL(frame_psdu_bytes(FrameType::Final, FcsAppender::PhyLayer), 29u);
+    // Either way the ON-AIR length is the same, which is the property the
+    // frame-duration budget depends on.
+    BOOST_REQUIRE_EQUAL(auth.on_air_bytes(FrameType::Final, profile), 31u);
+    BOOST_REQUIRE_EQUAL(mac_auth.on_air_bytes(FrameType::Final, profile), 31u);
+
+    // The retained three-argument form ignores its geometry argument, on
+    // purpose: a claim cannot decide a length.
+    FrameGeometry wrong;
+    wrong.mac_header_bytes = 7;
+    wrong.timestamp_bytes = 5;
+    wrong.mac_fcs_bytes = 2;
+    wrong.phr_bytes = 12;
+    BOOST_REQUIRE_EQUAL(frame_psdu_bytes(wrong, FrameType::Poll, FcsAppender::PhyLayer),
+        frame_psdu_bytes(FrameType::Poll, FcsAppender::PhyLayer));
 }
 
 BOOST_AUTO_TEST_CASE(exactly_one_layer_appends_the_fcs)
@@ -1274,7 +1318,9 @@ BOOST_AUTO_TEST_CASE(exactly_one_layer_appends_the_fcs)
     require_machine_readable(w);
     BOOST_REQUIRE(has(w, "frame.fcs_append", ConfigReason::FieldConflict));
 
-    // MAC appends it, but the geometry still reserves none.
+    // MAC appends it, but the geometry still reserves none: the claim is
+    // checked against the MAC-appends variant of the authority, which is the
+    // layout this config just named.
     TwrConfig e = minimal();
     e.frame.fcs_append = FcsAppender::MacLayer;
     e.frame.mac_psdu_includes_fcs = true;
@@ -1282,16 +1328,39 @@ BOOST_AUTO_TEST_CASE(exactly_one_layer_appends_the_fcs)
     require_machine_readable(x);
     BOOST_REQUIRE(has(x, "frame.geometry.mac_fcs_bytes", ConfigReason::FieldConflict));
 
-    // Consistent: MAC appends, the geometry reserves 2 bytes, and the
-    // negotiated mac_psdu_bytes therefore INCLUDES the FCS -> 29 + 2 = 31.
-    TwrConfig ok = minimal();
-    ok.frame.fcs_append = FcsAppender::MacLayer;
-    ok.frame.mac_psdu_includes_fcs = true;
-    ok.frame.geometry.mac_fcs_bytes = 2u;
-    ok.frame.mac_psdu_bytes = 31u;
-    BOOST_REQUIRE_MESSAGE(validate(ok, measured_caps()).ok(),
-                          "MAC-appended-FCS profile rejected: " +
-                              validate(ok, measured_caps()).to_string());
+    // Self-consistent as a description: the MAC appends, the claim reserves the
+    // 2 FCS bytes and the negotiated mac_psdu_bytes includes them (29 + 2 =
+    // 31).  It is still REJECTED, because this codec cannot ENCODE that form:
+    // frame_geometry_mac_appends_fcs().executable() is false.  M0 accepted it,
+    // and a config that validates but cannot be encoded is exactly the R3
+    // defect one layer down.
+    TwrConfig described = minimal();
+    described.frame.fcs_append = FcsAppender::MacLayer;
+    described.frame.mac_psdu_includes_fcs = true;
+    described.frame.geometry.mac_fcs_bytes = 2u;
+    described.frame.mac_psdu_bytes = 31u;
+    const ValidationReport y = validate(described, measured_caps());
+    require_machine_readable(y);
+    const ConfigViolation* viol = y.first_for_field("frame.fcs_append");
+    BOOST_REQUIRE_MESSAGE(viol != nullptr,
+                          "a MAC-appends-FCS profile this codec cannot encode was accepted: " +
+                              y.to_string());
+    BOOST_REQUIRE(viol->reason == ConfigReason::Unsupported);
+    BOOST_REQUIRE(viol->status == ExchangeStatus::Unsupported);
+    BOOST_REQUIRE(viol->message.find("executable") != std::string::npos);
+    // The geometry itself is NOT the thing being refused: the claim now agrees
+    // with the MAC-appends authority.
+    BOOST_REQUIRE(!y.has_field("frame.geometry.mac_fcs_bytes"));
+    // And the on-air length is unchanged by who appends the FCS.
+    FrameProfileGeometry auth;
+    FrameProfile profile;
+    BOOST_REQUIRE(frame_geometry_for(FrameProfileId::TwrV1, auth));
+    BOOST_REQUIRE(frame_profile_for(FrameProfileId::TwrV1, profile));
+    const FrameProfileGeometry mac_auth = frame_geometry_mac_appends_fcs();
+    BOOST_REQUIRE_EQUAL(auth.on_air_bytes(FrameType::Final, profile),
+                        mac_auth.on_air_bytes(FrameType::Final, profile));
+    BOOST_REQUIRE(mac_auth.mac_fcs_bytes() == 2u);
+    BOOST_REQUIRE(!mac_auth.executable());
 }
 
 BOOST_AUTO_TEST_CASE(application_payload_macsdu_and_fcs_are_distinct)
@@ -1308,11 +1377,18 @@ BOOST_AUTO_TEST_CASE(application_payload_macsdu_and_fcs_are_distinct)
     TwrConfig ok = minimal();
     ok.frame.application_payload_bytes = 0u;
     BOOST_REQUIRE(validate(ok, measured_caps()).ok());
-    // mac_psdu_bytes is independent of the geometry and the payload.
+    // mac_psdu_bytes is independent of the application payload -- but NOT of
+    // the geometry, which is a claim the codec owns.  M0 asserted a 2-byte
+    // header validated; it is refused now, per field, because the header is 14
+    // and claiming 2 understates the buffer and frame-duration budget.
     TwrConfig g = minimal();
     g.frame.geometry.mac_header_bytes = 2u;
     g.frame.application_payload_bytes = 20u;
-    BOOST_REQUIRE(validate(g, measured_caps()).ok());
+    const ValidationReport w = validate(g, measured_caps());
+    require_machine_readable(w);
+    const ConfigViolation* viol = w.first_for_field("frame.geometry.mac_header_bytes");
+    BOOST_REQUIRE_MESSAGE(viol != nullptr, "a 2-byte header claim was accepted");
+    BOOST_REQUIRE(viol->message.find("geometry authority") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(sfd_length_must_match_the_mode)
@@ -1331,19 +1407,520 @@ BOOST_AUTO_TEST_CASE(sfd_length_must_match_the_mode)
     BOOST_REQUIRE_EQUAL(sfd_mode_symbols(SfdMode::Ieee8), 8);
 }
 
-BOOST_AUTO_TEST_CASE(phr_rate_must_equal_data_rate)
+// ---------------------------------------------------------------------------
+// M0.1 / R2: the PHR rate is its OWN quantity, not the payload rate.
+//
+// The modulator's frozen profile (uwb_hrp_mod_core.h:8-12) is "0.85 Mb/s PHR
+// + 6.81 Mb/s payload", and the constants back it: the PHR is 21 symbols of
+// 512 chips (kPhrSymbols / kPhrChipsPerSymbol) while the payload is 8 chips
+// per burst of 64 per symbol.  The PHR is a different modulation of a
+// different rate.  The data-rate field that lives INSIDE the PHR describes the
+// PAYLOAD, so it says nothing about how the PHR itself is transmitted.
+//
+// The M0 rule `phr_rate == data_rate` therefore had it exactly backwards: it
+// accepted the 6.81 Mb/s PHR this modulator cannot produce and rejected the
+// 0.85 Mb/s PHR it actually produces.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(phr_rate_is_independent_of_the_payload_rate)
 {
+    // 0.85 Mb/s PHR + 6.81 Mb/s payload: the profile that is really modulated.
+    // This configuration was REJECTED by M0's `phr_rate == data_rate` rule.
     TwrConfig c = minimal();
-    c.phy.phr_rate = DataRate::R850k;
+    c.phy.phr_rate = PhrRate::Standard850k;
+    c.phy.data_rate = DataRate::R6p8M;
     const ValidationReport v = validate(c, measured_caps());
-    require_machine_readable(v);
-    BOOST_REQUIRE(has(v, "phy.phr_rate", ConfigReason::FieldConflict));
-    // No PHR at all is not a TWR profile.
+    BOOST_REQUIRE_MESSAGE(v.ok(),
+                          "the modulator's own 0.85 Mb/s PHR was rejected: " + v.to_string());
+    BOOST_REQUIRE(!v.has_field("phy.phr_rate"));
+
+    // The two axes are genuinely independent: an unsupported PAYLOAD rate is
+    // refused by the payload whitelist while the PHR, at its own rate, is not
+    // implicated at all.
     TwrConfig d = minimal();
-    d.frame.phr_mode = PhrMode::None;
+    d.phy.phr_rate = PhrRate::Standard850k;
+    d.phy.data_rate = DataRate::R27M;
     const ValidationReport w = validate(d, measured_caps());
     require_machine_readable(w);
-    BOOST_REQUIRE(has(w, "frame.phr_mode", ConfigReason::OutOfScope));
+    BOOST_REQUIRE(has(w, "phy.data_rate", ConfigReason::Unsupported));
+    BOOST_REQUIRE(!w.has_field("phy.phr_rate"));
+}
+
+BOOST_AUTO_TEST_CASE(every_other_phr_rate_is_rejected_with_its_own_reason)
+{
+    // Exactly one member is implemented.  Every other member -- including the
+    // out-of-enum values a cast can produce -- is refused, and each refusal
+    // names its own member and its own reason.  The obsolete "must equal the
+    // data rate" wording is gone for good.
+    for (size_t i = 0; i < kPhrRateCount; ++i) {
+        const PhrRate r = kAllPhrRates[i];
+        if (phr_rate_is_implemented(r)) {
+            TwrConfig c = minimal();
+            c.phy.phr_rate = r;
+            BOOST_REQUIRE_MESSAGE(validate(c, measured_caps()).ok(),
+                                  std::string("implemented PHR rate ") +
+                                      phr_rate_to_string(r) + " was rejected");
+            continue;
+        }
+        TwrConfig c = minimal();
+        c.phy.phr_rate = r;
+        const ValidationReport v = validate(c, measured_caps());
+        require_machine_readable(v);
+        const ConfigViolation* viol = v.first_for_field("phy.phr_rate");
+        BOOST_REQUIRE_MESSAGE(viol != nullptr,
+                              std::string("PHR rate ") + phr_rate_to_string(r) +
+                                  " was accepted");
+        BOOST_REQUIRE(viol->reason == ConfigReason::Unsupported);
+        BOOST_REQUIRE(viol->status == ExchangeStatus::Unsupported);
+        BOOST_REQUIRE(viol->requirement == "REQ-PHY-02");
+        // The message names the member, carries its specific reason, and never
+        // claims the two rates must be equal.
+        BOOST_REQUIRE(viol->message.find(phr_rate_to_string(r)) != std::string::npos);
+        BOOST_REQUIRE(viol->message.find("must equal") == std::string::npos);
+        BOOST_REQUIRE(viol->message.find(phr_rate_unsupported_reason(r).substr(0, 40)) !=
+                      std::string::npos);
+    }
+    // `same_as_data` in particular is refused as a limit of THIS software, and
+    // says so rather than claiming the option does not exist.
+    {
+        TwrConfig c = minimal();
+        c.phy.phr_rate = PhrRate::SameAsData;
+        const ValidationReport v = validate(c, measured_caps());
+        const ConfigViolation* viol = v.first_for_field("phy.phr_rate");
+        BOOST_REQUIRE(viol != nullptr);
+        BOOST_REQUIRE(viol->message.find("Qorvo") != std::string::npos);
+        BOOST_REQUIRE(viol->message.find("21 symbols") != std::string::npos);
+    }
+    // Values outside the enumeration are rejected too, never coerced to the
+    // implemented member.
+    for (unsigned r = 2; r < 8; ++r) {
+        TwrConfig c = minimal();
+        c.phy.phr_rate = static_cast<PhrRate>(r);
+        const ValidationReport v = validate(c, measured_caps());
+        require_machine_readable(v);
+        const ConfigViolation* viol = v.first_for_field("phy.phr_rate");
+        BOOST_REQUIRE_MESSAGE(viol != nullptr, "an out-of-enum PHR rate was accepted");
+        BOOST_REQUIRE(viol->reason == ConfigReason::Unsupported);
+    }
+    // The string form round-trips, and a PAYLOAD-rate name is not a PHR-rate
+    // name any more: the two axes no longer share a value domain.
+    {
+        PhrRate r = PhrRate::Standard850k;
+        for (size_t i = 0; i < kPhrRateCount; ++i) {
+            const PhrRate m = kAllPhrRates[i];
+            BOOST_REQUIRE(phr_rate_from_string(phr_rate_to_string(m), r));
+            BOOST_REQUIRE(r == m);
+            BOOST_REQUIRE(!phr_rate_from_string("nope", r));
+            // "850k" is a legal spelling of BOTH enums: it is the PHR rate and
+            // also a payload-rate class.  The DOMAIN is what separates them.
+            BOOST_REQUIRE(phr_rate_from_string("850k", r));
+            BOOST_REQUIRE(r == PhrRate::Standard850k);
+        }
+        BOOST_REQUIRE(!phr_rate_from_string("6p8m", r));
+        BOOST_REQUIRE(!phr_rate_from_string("same as data", r));
+        BOOST_REQUIRE(!phr_rate_from_string("SameAsData", r));
+        BOOST_REQUIRE_EQUAL(std::string(phr_rate_to_string(PhrRate::SameAsData)),
+                            std::string("same_as_data"));
+    }
+    // A PHR rate with no implementation has 0 symbols rather than a plausible
+    // budget, so it can never be mistaken for a real one.
+    BOOST_REQUIRE_EQUAL(phr_rate_symbols(PhrRate::Standard850k), 21u);
+    BOOST_REQUIRE_EQUAL(phr_rate_symbols(PhrRate::SameAsData), 0u);
+}
+
+BOOST_AUTO_TEST_CASE(phr_mode_members_each_carry_their_own_reason)
+{
+    // PHR presence/form is a different axis from the PHR rate.  M0 rejected
+    // only `none` and let `extended` through as if it were a valid profile.
+    for (int i = 0; i <= static_cast<int>(PhrMode::None); ++i) {
+        const PhrMode m = static_cast<PhrMode>(i);
+        TwrConfig c = minimal();
+        c.frame.phr_mode = m;
+        const ValidationReport v = validate(c, measured_caps());
+        const ConfigViolation* viol = v.first_for_field("frame.phr_mode");
+        if (m == PhrMode::Standard) {
+            BOOST_REQUIRE_MESSAGE(viol == nullptr, "the standard PHR was rejected");
+            continue;
+        }
+        require_machine_readable(v);
+        BOOST_REQUIRE_MESSAGE(viol != nullptr, "an unimplemented PHR mode was accepted");
+        BOOST_REQUIRE(viol->status == ExchangeStatus::Unsupported);
+        // Each member's own words, not one shared sentence.
+        BOOST_REQUIRE(viol->message.find(phr_mode_unsupported_reason(m).substr(0, 40)) !=
+                      std::string::npos);
+        if (m == PhrMode::None)
+            BOOST_REQUIRE(viol->reason == ConfigReason::OutOfScope);
+        else
+            BOOST_REQUIRE(viol->reason == ConfigReason::Unsupported);
+    }
+    // `extended` is a vendor PHR layout with no encoder here; the reason says
+    // so instead of leaving it silently accepted.
+    {
+        TwrConfig c = minimal();
+        c.frame.phr_mode = PhrMode::Extended;
+        const ConfigViolation* viol =
+            validate(c, measured_caps()).first_for_field("frame.phr_mode");
+        BOOST_REQUIRE(viol != nullptr);
+        BOOST_REQUIRE(viol->message.find("extended") != std::string::npos);
+        BOOST_REQUIRE(viol->message.find("Qorvo") != std::string::npos);
+    }
+    // Out-of-enum values are refused, not coerced to Standard.
+    for (unsigned m = 3; m < 8; ++m) {
+        TwrConfig c = minimal();
+        c.frame.phr_mode = static_cast<PhrMode>(m);
+        const ValidationReport v = validate(c, measured_caps());
+        require_machine_readable(v);
+        BOOST_REQUIRE(v.first_for_field("frame.phr_mode") != nullptr);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M0.1 / R3: the config may CLAIM a geometry, it may not DECIDE one.
+//
+// uwb_twr_frame.h is the authority for frame v1's byte geometry.  The config
+// states what it believes the layout is; frame_geometry_check() reports every
+// field that disagrees, and the validator turns each one into its own
+// violation naming that exact field.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(the_codec_is_the_only_frame_geometry_authority)
+{
+    FrameProfileGeometry auth;
+    FrameProfile profile;
+    BOOST_REQUIRE(frame_geometry_for(FrameProfileId::TwrV1, auth));
+    BOOST_REQUIRE(frame_profile_for(FrameProfileId::TwrV1, profile));
+
+    // The shipped/default geometry, read from the authority and not from a
+    // literal in this file.
+    BOOST_REQUIRE_EQUAL(auth.mac_header_bytes(), 14u);
+    BOOST_REQUIRE_EQUAL(auth.timestamp_bytes(profile), 5u);
+    BOOST_REQUIRE_EQUAL(auth.mac_footer_bytes(), 0u);
+    BOOST_REQUIRE_EQUAL(auth.mac_fcs_bytes(), 0u);
+    BOOST_REQUIRE_EQUAL(auth.phr_bytes(), 2u);
+    BOOST_REQUIRE_EQUAL(auth.phr_coded_bits(), kPhrStandardCodedBits);
+    BOOST_REQUIRE(auth.executable());
+
+    // On the air, with the FCS the modulation layer appends exactly once.
+    BOOST_REQUIRE_EQUAL(auth.on_air_bytes(FrameType::Poll, profile), 16u);
+    BOOST_REQUIRE_EQUAL(auth.on_air_bytes(FrameType::Response, profile), 26u);
+    BOOST_REQUIRE_EQUAL(auth.on_air_bytes(FrameType::Final, profile), 31u);
+
+    // The claim the authority itself produces checks back with no mismatch:
+    // this is what makes "one place the numbers come from" testable.
+    const GeometryCheckResult self =
+        frame_geometry_check(auth.claim(profile), auth, profile);
+    BOOST_REQUIRE_MESSAGE(self.ok(), self.summary());
+    BOOST_REQUIRE(self.first_mismatch() == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(frame_geometry_claim_must_match_the_codec_authority)
+{
+    // The R3 regression: the pre-codec 7-byte header that used to validate.
+    TwrConfig c = minimal();
+    c.frame.geometry.mac_header_bytes = 7u;
+    const ValidationReport v = validate(c, measured_caps());
+    require_machine_readable(v);
+    const ConfigViolation* viol = v.first_for_field("frame.geometry.mac_header_bytes");
+    BOOST_REQUIRE_MESSAGE(viol != nullptr,
+                          "a 7-byte header claim was accepted: " + v.to_string());
+    BOOST_REQUIRE(viol->reason == ConfigReason::FieldConflict);
+    // The message names the field and both numbers, so the operator can see
+    // which of the two geometries is the real one.
+    BOOST_REQUIRE(viol->message.find("mac_header_bytes") != std::string::npos);
+    BOOST_REQUIRE(viol->message.find("14") != std::string::npos);
+    BOOST_REQUIRE(viol->message.find("7") != std::string::npos);
+
+    // Every one of the five comparable fields is checked on its own, and a
+    // claim that is wrong in several of them produces one violation each.
+    struct Probe {
+        const char* what;
+        void (*mutate)(FrameGeometry&);
+        const char* field;
+    };
+    const Probe probes[] = {
+        { "mac_header_bytes", [](FrameGeometry& g) { g.mac_header_bytes = 7; },
+            "frame.geometry.mac_header_bytes" },
+        { "timestamp_bytes", [](FrameGeometry& g) { g.timestamp_bytes = 4; },
+            "frame.geometry.timestamp_bytes" },
+        { "mac_footer_bytes", [](FrameGeometry& g) { g.mac_footer_bytes = 3; },
+            "frame.geometry.mac_footer_bytes" },
+        { "mac_fcs_bytes", [](FrameGeometry& g) { g.mac_fcs_bytes = 2; },
+            "frame.geometry.mac_fcs_bytes" },
+        { "phr_bytes", [](FrameGeometry& g) { g.phr_bytes = 12; },
+            "frame.geometry.phr_bytes" },
+    };
+    for (const Probe& pr : probes) {
+        TwrConfig x = minimal();
+        pr.mutate(x.frame.geometry);
+        const ValidationReport r = validate(x, measured_caps());
+        require_machine_readable(r);
+        BOOST_REQUIRE_MESSAGE(r.first_for_field(pr.field) != nullptr,
+                              std::string("a wrong ") + pr.what + " claim was accepted: " +
+                                  r.to_string());
+    }
+    // A claim that is wrong in two fields names both, not just the first.
+    TwrConfig multi = minimal();
+    multi.frame.geometry.mac_header_bytes = 7u;
+    multi.frame.geometry.phr_bytes = 12u;
+    const ValidationReport m = validate(multi, measured_caps());
+    require_machine_readable(m);
+    BOOST_REQUIRE(m.first_for_field("frame.geometry.mac_header_bytes") != nullptr);
+    BOOST_REQUIRE(m.first_for_field("frame.geometry.phr_bytes") != nullptr);
+
+    // The authority's own claim validates, so the fixture is not carrying a
+    // private copy of the numbers.
+    TwrConfig good = minimal();
+    BOOST_REQUIRE_MESSAGE(validate(good, measured_caps()).ok(),
+                          "the authority's own geometry was rejected: " +
+                              validate(good, measured_caps()).to_string());
+}
+
+BOOST_AUTO_TEST_CASE(effective_frame_budget_is_the_codecs_own)
+{
+    // The effective budget must be the codec's, not a re-summation of a
+    // claim: 16 / 26 / 31 on air for Poll / Response / Final.
+    FrameProfileGeometry auth;
+    FrameProfile profile;
+    BOOST_REQUIRE(frame_geometry_for(FrameProfileId::TwrV1, auth));
+    BOOST_REQUIRE(frame_profile_for(FrameProfileId::TwrV1, profile));
+
+    const EffectiveConfig e = effective_config(minimal(Protocol::Ds, Role::Initiator),
+        measured_caps());
+    BOOST_REQUIRE_MESSAGE(e.ok, e.validation.to_string());
+    BOOST_REQUIRE_EQUAL(e.poll_bytes, auth.on_air_bytes(FrameType::Poll, profile));
+    BOOST_REQUIRE_EQUAL(e.response_bytes, auth.on_air_bytes(FrameType::Response, profile));
+    BOOST_REQUIRE_EQUAL(e.final_bytes, auth.on_air_bytes(FrameType::Final, profile));
+    // And not the 9 / 19 / 24 the pre-codec 7-byte claim produced.
+    BOOST_REQUIRE(e.poll_bytes != 9u);
+    BOOST_REQUIRE(e.final_bytes != 24u);
+    // The PHR of the profile is recorded, so no consumer recomputes it: 2
+    // information octets, SEC-DED coded to 19 bits over 21 symbols.  The
+    // fixture's `phr_bytes = 12` from M0 was neither the information size nor
+    // anything else the standard PHR has.
+    BOOST_REQUIRE_EQUAL(e.phr_bytes, auth.phr_bytes());
+    BOOST_REQUIRE_EQUAL(e.phr_bytes, 2u);
+    BOOST_REQUIRE_EQUAL(e.phr_coded_bits, auth.phr_coded_bits());
+    BOOST_REQUIRE_EQUAL(e.phr_coded_bits, kPhrStandardCodedBits);
+    // ... and the PHR rate agrees with the modulator's own description of the
+    // frozen profile: one implemented rate, 21 symbols, and nothing else.
+    BOOST_REQUIRE_EQUAL(phr_rate_symbols(PhrRate::Standard850k), 21u);
+    BOOST_REQUIRE_EQUAL(phr_rate_symbols(PhrRate::SameAsData), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// M0.1: the SYNC repetition count is a MEMBER of an enumeration, and every
+// refusal names a limit of THIS software rather than of a chip.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(preamble_length_enum_bounds_the_sync_repetitions)
+{
+    // Both members are accepted: 64 is the phase-1 profile, 16 is
+    // decode-verified (its CFO-fit tail covers the whole preamble and
+    // encode_phr19 advertises the legal duration 16).
+    for (size_t i = 0; i < kPreambleLengthCount; ++i) {
+        const PreambleLength p = kAllPreambleLengths[i];
+        TwrConfig c = minimal();
+        c.phy.preamble_symbols = preamble_length_symbols(p);
+        BOOST_REQUIRE_MESSAGE(validate(c, capabilities()).ok(),
+                              std::string("SYNC length ") + preamble_length_to_string(p) +
+                                  " was rejected");
+    }
+    BOOST_REQUIRE_EQUAL(preamble_length_symbols(PreambleLength::Sym16), 16u);
+    BOOST_REQUIRE_EQUAL(preamble_length_symbols(PreambleLength::Sym64), 64u);
+    BOOST_REQUIRE_EQUAL(kPreambleLengthCount, 2u);
+
+    // 128 SYNC and every other non-member are refused.
+    const uint16_t refused[] = { 0,    1,    2,    4,    8,     32,    128,
+                                 256,  512,  1024, 2048, 100,   4096,  0xffff };
+    for (uint16_t reps : refused) {
+        TwrConfig c = minimal();
+        c.phy.preamble_symbols = reps;
+        const ValidationReport v = validate(c, capabilities());
+        require_machine_readable(v);
+        const ConfigViolation* viol = v.first_for_field("phy.preamble_symbols");
+        BOOST_REQUIRE_MESSAGE(viol != nullptr, twr_int_to_text(reps) + " SYNC was accepted");
+        if (reps == 0) {
+            // 0 is "not stated", not "an unsupported length".
+            BOOST_REQUIRE(viol->reason == ConfigReason::ZeroValue);
+            continue;
+        }
+        BOOST_REQUIRE(viol->reason == ConfigReason::Unsupported);
+        BOOST_REQUIRE(viol->status == ExchangeStatus::Unsupported);
+        BOOST_REQUIRE(viol->requirement == "REQ-PHY-01");
+        BOOST_REQUIRE(viol->message == preamble_length_unsupported_reason(reps));
+    }
+    // 128 specifically: the reason names the demodulator and the measurement,
+    // and explicitly says the Qorvo parts' API accepts it.
+    {
+        TwrConfig c = minimal();
+        c.phy.preamble_symbols = 128;
+        const ConfigViolation* viol =
+            validate(c, capabilities()).first_for_field("phy.preamble_symbols");
+        BOOST_REQUIRE(viol != nullptr);
+        BOOST_REQUIRE(viol->message.find("CURRENT DEMODULATOR") != std::string::npos);
+        BOOST_REQUIRE(viol->message.find("not by any hardware") != std::string::npos);
+        BOOST_REQUIRE(viol->message.find("Qorvo") != std::string::npos);
+        BOOST_REQUIRE(viol->message.find("max(0, reps - 64)") != std::string::npos);
+        // It must never say the hardware is incapable of 128.
+        BOOST_REQUIRE(viol->message.find("cannot do 128") == std::string::npos);
+        BOOST_REQUIRE(viol->message.find("not supported by the chip") ==
+                      std::string::npos);
+    }
+    // The reason helper is total, and every length it is asked about gets a
+    // message that names the length itself.
+    for (uint16_t reps = 1; reps < 300; ++reps) {
+        const std::string why = preamble_length_unsupported_reason(reps);
+        BOOST_REQUIRE(!why.empty());
+        BOOST_REQUIRE_MESSAGE(why.find(twr_int_to_text(reps)) != std::string::npos,
+                              "the reason for " + twr_int_to_text(reps) +
+                                  " does not name the length");
+    }
+    // The string / symbols round trips, and anything else is refused rather
+    // than rounded to the nearest member.
+    {
+        PreambleLength p = PreambleLength::Sym64;
+        for (size_t i = 0; i < kPreambleLengthCount; ++i) {
+            const PreambleLength m = kAllPreambleLengths[i];
+            BOOST_REQUIRE(preamble_length_from_string(preamble_length_to_string(m), p));
+            BOOST_REQUIRE(p == m);
+            BOOST_REQUIRE(preamble_length_from_symbols(preamble_length_symbols(m), p));
+            BOOST_REQUIRE(p == m);
+        }
+        BOOST_REQUIRE(!preamble_length_from_string("128", p));
+        BOOST_REQUIRE(!preamble_length_from_string("nope", p));
+        BOOST_REQUIRE(!preamble_length_from_string("0x40", p));
+        BOOST_REQUIRE(!preamble_length_from_symbols(128, p));
+        BOOST_REQUIRE(!preamble_length_from_symbols(32, p));
+        BOOST_REQUIRE(!preamble_length_from_symbols(0, p));
+        BOOST_REQUIRE_EQUAL(std::string(preamble_length_to_string(PreambleLength::Sym16)),
+                            std::string("16"));
+        BOOST_REQUIRE_EQUAL(std::string(preamble_length_to_string(PreambleLength::Sym64)),
+                            std::string("64"));
+        // An out-of-enum value has no name and no length, so it cannot be
+        // silently rendered as a real one.
+        BOOST_REQUIRE_EQUAL(
+            std::string(preamble_length_to_string(static_cast<PreambleLength>(9))),
+            std::string("invalid"));
+        BOOST_REQUIRE_EQUAL(preamble_length_symbols(static_cast<PreambleLength>(9)), 0u);
+    }
+    // The capability whitelist is a SEPARATE, second gate.
+    BOOST_REQUIRE(capabilities().sync_repetitions_supported(16));
+    BOOST_REQUIRE(capabilities().sync_repetitions_supported(64));
+    BOOST_REQUIRE(!capabilities().sync_repetitions_supported(128));
+    BOOST_REQUIRE(!capabilities().sync_repetitions_supported(32));
+    // 16 is decode-verified but its first-path / ToA accuracy is NOT measured,
+    // so it is accepted as a config and still refused as a ranging profile.
+    BOOST_REQUIRE(twr_sync_reps_needs_toa_validation(
+        preamble_length_symbols(PreambleLength::Sym16)));
+    BOOST_REQUIRE(!twr_sync_reps_needs_toa_validation(
+        preamble_length_symbols(PreambleLength::Sym64)));
+}
+
+// ---------------------------------------------------------------------------
+// M0.1 / R3: the frame profile is an ENUM, so an arbitrary profile NAME
+// cannot act as an executable geometry.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(unknown_frame_profile_is_rejected_not_defaulted)
+{
+    for (unsigned i = 0; i < 8; ++i) {
+        const FrameProfileId id = static_cast<FrameProfileId>(i);
+        TwrConfig c = minimal();
+        c.frame.frame_profile = id;
+        const ValidationReport v = validate(c, measured_caps());
+        if (frame_profile_id_is_supported(id)) {
+            BOOST_REQUIRE_MESSAGE(v.ok(), "an implemented frame profile was rejected");
+            continue;
+        }
+        require_machine_readable(v);
+        const ConfigViolation* viol = v.first_for_field("frame.frame_profile");
+        BOOST_REQUIRE_MESSAGE(viol != nullptr, "an unknown frame profile was accepted");
+        BOOST_REQUIRE(viol->reason == ConfigReason::Unsupported);
+        BOOST_REQUIRE(viol->message.find("free-form") != std::string::npos);
+    }
+    // The strings round trip and nothing else is accepted, so a document
+    // cannot name a profile this build has no codec for.
+    {
+        FrameProfileId id = FrameProfileId::TwrV1;
+        for (size_t i = 0; i < kFrameProfileIdCount; ++i) {
+            const FrameProfileId m = kAllFrameProfileIds[i];
+            BOOST_REQUIRE(frame_profile_id_from_string(frame_profile_id_to_string(m), id));
+            BOOST_REQUIRE(id == m);
+        }
+        BOOST_REQUIRE(!frame_profile_id_from_string("frame_v2", id));
+        BOOST_REQUIRE(!frame_profile_id_from_string("", id));
+        BOOST_REQUIRE(!frame_profile_id_from_string("qa-synthetic-frame/0", id));
+    }
+    // The fixture's profile is the one the authority serves, and the geometry
+    // came from that authority rather than from a literal.
+    {
+        const TwrConfig c = minimal();
+        FrameGeometry from_codec;
+        BOOST_REQUIRE(frame_geometry_of_profile(c.frame.frame_profile, from_codec));
+        BOOST_REQUIRE(from_codec == c.frame.geometry);
+        FrameGeometry none;
+        BOOST_REQUIRE(!frame_geometry_of_profile(static_cast<FrameProfileId>(9), none));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M0.1 / R3: the session id is narrowed by REFUSAL, never by truncation.
+//
+// kOffSessionId is 2 bytes.  session_id_to_wire() is identity-or-refuse: in
+// range -> exact, out of range -> explicit error.  A fold, a mask or a hash
+// would make two different local sessions produce byte-identical session
+// fields, and frame_match() would then accept the wrong session's reply.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(session_id_must_fit_the_codec_wire_field)
+{
+    // In range: accepted, and the wire value is the local value, bit for bit.
+    const uint32_t in_range[] = { 1u, 0x1234u, 0x8000u, kSessionIdWireMax };
+    for (uint32_t id : in_range) {
+        TwrConfig c = minimal();
+        c.session.session_id = id;
+        const ValidationReport v = validate(c, measured_caps());
+        BOOST_REQUIRE_MESSAGE(v.ok(),
+                              twr_int_to_text(id) + " was rejected: " + v.to_string());
+        uint16_t wire = 0xffffu;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(session_id_to_wire(id, wire, err), err);
+        BOOST_REQUIRE_EQUAL(static_cast<uint32_t>(wire), id);
+    }
+
+    // Out of range: REFUSED, naming the width and the value.
+    const uint32_t out_of_range[] = { 0x00010000u, 0x0001ffffu, 0xffffffffu };
+    for (uint32_t id : out_of_range) {
+        TwrConfig c = minimal();
+        c.session.session_id = id;
+        const ValidationReport v = validate(c, measured_caps());
+        require_machine_readable(v);
+        const ConfigViolation* viol = v.first_for_field("session.session_id");
+        BOOST_REQUIRE_MESSAGE(viol != nullptr,
+                              twr_int_to_text(id) + " was accepted, it does not fit 16 bits");
+        BOOST_REQUIRE(viol->reason == ConfigReason::OutOfRange);
+        BOOST_REQUIRE(viol->status == ExchangeStatus::ConfigRejected);
+        BOOST_REQUIRE(viol->message.find("16") != std::string::npos);
+        BOOST_REQUIRE(viol->message.find(twr_int_to_text(id)) != std::string::npos);
+
+        // The mapping itself agrees with the validator, and it leaves nothing
+        // plausible-looking behind on failure.
+        uint16_t wire = 0x1234u;
+        std::string err;
+        SessionIdError code = SessionIdError::None;
+        BOOST_REQUIRE(!session_id_to_wire(id, wire, err, &code));
+        BOOST_REQUIRE(code == SessionIdError::OutOfWireRange);
+        BOOST_REQUIRE_EQUAL(static_cast<int>(wire), 0);
+        BOOST_REQUIRE(err.find("not truncated") != std::string::npos ||
+                      err.find("refused") != std::string::npos);
+    }
+
+    // The consequence of a 16-bit session field, stated as a number rather
+    // than as prose: ~256 concurrently live sessions at a 50% chance of one
+    // collision.  It is a property of the field, not of this config.
+    BOOST_REQUIRE_EQUAL(kSessionIdWireBits, 16u);
+    BOOST_REQUIRE_EQUAL(kSessionIdWireMax, 0xffffu);
+    BOOST_REQUIRE_CLOSE(kSessionIdBirthdaySessions50pct, 256.0, 1e-9);
+    // Two accepted ids are indistinguishable on the wire iff they are the same
+    // integer; the predicate is what makes the injectivity claim testable.
+    BOOST_REQUIRE(wire_session_id_collides(0x0001u, 0x0001u));
+    BOOST_REQUIRE(!wire_session_id_collides(0x0001u, 0x0002u));
+    BOOST_REQUIRE(!wire_session_id_collides(0x00010000u, 0x00010000u));
 }
 
 BOOST_AUTO_TEST_CASE(addresses_and_pan_must_be_sane)
@@ -2356,6 +2933,99 @@ BOOST_AUTO_TEST_CASE(json_unknown_enum_value_is_rejected)
         ConfigReason::UnknownEnumValue) != nullptr);
 }
 
+namespace {
+
+// Replaces the first `"key": <old>` literal with `"key": <new>`.
+std::string json_set(const std::string& js, const std::string& key,
+                     const std::string& old_value, const std::string& new_value)
+{
+    const std::string needle = "\"" + key + "\": " + old_value;
+    const size_t at = js.find(needle);
+    if (at == std::string::npos)
+        return std::string();
+    return js.substr(0, at) + "\"" + key + "\": " + new_value +
+           js.substr(at + needle.size());
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(json_carries_the_phr_rate_and_frame_profile_contract)
+{
+    const TwrConfig c = minimal();
+    std::string js;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(to_json_string(c, js, err), err);
+
+    // The PHR rate is written in the PHR-rate domain, and the frame profile
+    // is a named id.  A document that used a payload-rate spelling for the
+    // PHR was describing a 6.81 Mb/s PHR, which this modulator cannot
+    // produce.
+    BOOST_REQUIRE(js.find("\"phr_rate\": \"850k\"") != std::string::npos);
+    BOOST_REQUIRE(js.find("\"data_rate\": \"6p8m\"") != std::string::npos);
+    BOOST_REQUIRE(js.find("\"frame_profile\": \"frame_v1\"") != std::string::npos);
+
+    // A payload-rate spelling in the PHR-rate field is now an
+    // UnknownEnumValue, not a silently reinterpreted 850k.
+    {
+        const std::string bad = json_set(js, "phr_rate", "\"850k\"", "\"6p8m\"");
+        BOOST_REQUIRE(!bad.empty());
+        TwrConfig back;
+        const ValidationReport rep = from_json_string(bad, back);
+        require_machine_readable(rep);
+        BOOST_REQUIRE(rep.find("phy.phr_rate", ConfigReason::UnknownEnumValue) !=
+                      nullptr);
+    }
+    // Same for a frame profile this build has no codec for.
+    {
+        const std::string bad =
+            json_set(js, "frame_profile", "\"frame_v1\"", "\"frame_v2\"");
+        BOOST_REQUIRE(!bad.empty());
+        TwrConfig back;
+        const ValidationReport rep = from_json_string(bad, back);
+        require_machine_readable(rep);
+        BOOST_REQUIRE(rep.find("frame.frame_profile", ConfigReason::UnknownEnumValue) !=
+                      nullptr);
+    }
+    // A geometry that disagrees with the codec survives the IMPORT (the
+    // reader is not the authority) and is refused by the validator, naming
+    // the field.  That split is deliberate: the JSON says what was claimed,
+    // the validator says whether it is true.
+    {
+        const std::string bad = json_set(js, "mac_header_bytes", "14", "7");
+        BOOST_REQUIRE(!bad.empty());
+        TwrConfig back;
+        BOOST_REQUIRE(from_json_string(bad, back).ok());
+        BOOST_REQUIRE_EQUAL(back.frame.geometry.mac_header_bytes, 7u);
+        const ValidationReport v = validate(back, measured_caps());
+        require_machine_readable(v);
+        BOOST_REQUIRE(v.first_for_field("frame.geometry.mac_header_bytes") != nullptr);
+    }
+    // An out-of-wire-range session id survives the import as the 32-bit value
+    // the operator wrote and is then refused -- never narrowed on the way in.
+    {
+        const std::string bad = json_set(js, "session_id", "4660", "4294967295");
+        BOOST_REQUIRE(!bad.empty());
+        TwrConfig back;
+        BOOST_REQUIRE(from_json_string(bad, back).ok());
+        BOOST_REQUIRE_EQUAL(back.session.session_id, 0xffffffffu);
+        const ValidationReport v = validate(back, measured_caps());
+        require_machine_readable(v);
+        BOOST_REQUIRE(v.find("session.session_id", ConfigReason::OutOfRange) != nullptr);
+    }
+    // frame_profile is part of the schema, so omitting it is a MissingKey and
+    // not a silent default.
+    {
+        const size_t at = js.find("\"frame_profile\": \"frame_v1\"");
+        BOOST_REQUIRE(at != std::string::npos);
+        const size_t comma = js.find(',', at);
+        const std::string bad = js.substr(0, at) + js.substr(comma + 1);
+        TwrConfig back;
+        const ValidationReport rep = from_json_string(bad, back);
+        require_machine_readable(rep);
+        BOOST_REQUIRE(rep.find("frame.frame_profile", ConfigReason::MissingKey) != nullptr);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(json_malformed_documents_are_rejected)
 {
     const char* bad[] = { "",       "{",       "[]",     "null",     "{\"a\":}",
@@ -2517,6 +3187,35 @@ BOOST_AUTO_TEST_CASE(enum_helpers_round_trip_for_every_new_enum)
     PhrMode pm = PhrMode::Standard;
     BOOST_REQUIRE(phr_mode_from_string(phr_mode_to_string(PhrMode::None), pm));
     BOOST_REQUIRE(!phr_mode_from_string("nope", pm));
+    // The two NEW enumerations round-trip for every member, and the PHR rate
+    // deliberately REJECTS the payload-rate spellings: the two axes no longer
+    // share a value domain, which is the whole point of M0.1 / R2.
+    for (size_t i = 0; i < kPhrRateCount; ++i) {
+        const PhrRate r = kAllPhrRates[i];
+        PhrRate back = PhrRate::Standard850k;
+        BOOST_REQUIRE(phr_rate_from_string(phr_rate_to_string(r), back));
+        BOOST_REQUIRE(back == r);
+        BOOST_REQUIRE(!phr_rate_from_string("6p8m", back));
+        BOOST_REQUIRE(!phr_rate_from_string("27m", back));
+        BOOST_REQUIRE(!phr_rate_from_string("nope", back));
+    }
+    for (size_t i = 0; i < kPreambleLengthCount; ++i) {
+        const PreambleLength p = kAllPreambleLengths[i];
+        PreambleLength back = PreambleLength::Sym64;
+        BOOST_REQUIRE(preamble_length_from_string(preamble_length_to_string(p), back));
+        BOOST_REQUIRE(back == p);
+        BOOST_REQUIRE(preamble_length_from_symbols(preamble_length_symbols(p), back));
+        BOOST_REQUIRE(back == p);
+        BOOST_REQUIRE(!preamble_length_from_string("128", back));
+        BOOST_REQUIRE(!preamble_length_from_string("nope", back));
+    }
+    for (size_t i = 0; i < kFrameProfileIdCount; ++i) {
+        const FrameProfileId m = kAllFrameProfileIds[i];
+        FrameProfileId back = FrameProfileId::TwrV1;
+        BOOST_REQUIRE(frame_profile_id_from_string(frame_profile_id_to_string(m), back));
+        BOOST_REQUIRE(back == m);
+        BOOST_REQUIRE(!frame_profile_id_from_string("nope", back));
+    }
     StsMode sm = StsMode::Off;
     BOOST_REQUIRE(sts_mode_from_string(sts_mode_to_string(StsMode::Sp1024), sm));
     BOOST_REQUIRE(!sts_mode_from_string("nope", sm));

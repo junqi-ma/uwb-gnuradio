@@ -12,10 +12,23 @@
  * an *input* to the feasibility question rather than a guess.  This QA turns
  * the M0 geometry into numbers and writes them to
  *
- *     testdata/twr/timing_budget_737p28.csv
- *     testdata/twr/timing_budget_491p52.csv
- *     testdata/twr/timing_budget_rmarker_candidates.csv
- *     testdata/twr/timing_budget_turnaround_estimate.csv
+ *     timing_budget_737p28.csv
+ *     timing_budget_491p52.csv
+ *     timing_budget_rmarker_candidates.csv
+ *     timing_budget_turnaround_estimate.csv
+ *
+ * WHERE (M0 review R8 / M0.1 §2.C.2).  These are generated tables, not
+ * reviewed artifacts, so they do NOT go into the source `testdata/twr` tree
+ * by default -- an ordinary `ctest` run used to overwrite the reviewed copies
+ * there.  Default is the build tree:
+ *
+ *     DEFAULT  ${UWB_BUILD_DIR}/test-output/twr
+ *              (override with UWB_TWR_TEST_OUTPUT_DIR=<dir>)
+ *     EXPORT   UWB_TWR_EXPORT_DIR=<dir> to write into a tree deliberately,
+ *              including the source testdata/twr when that is the intent.
+ *
+ * When no writable directory is available the emit cases SKIP and record
+ * why; they never fall back to the source tree.
  *
  * WHAT IS MEASURED HERE
  *   1. Work-grid (998.4 MS/s) frame geometry, from
@@ -79,6 +92,7 @@
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>
 #include <gnuradio/uwb/uwb_radar_checked_math.h>
 #include <gnuradio/uwb/uwb_radar_pdu_meta.h>
+#include <gnuradio/uwb/uwb_twr_test_output.h>
 #include <gnuradio/uwb/uwb_uhd_backend_config.h>
 
 #include <algorithm>
@@ -207,30 +221,31 @@ join_path(const std::string& dir, const std::string& rel)
     return (std::filesystem::path(dir) / rel).string();
 }
 
-// Returns the writable testdata/twr directory, or "" if it cannot be used.
+// Returns the directory this QA's generated CSV tables may be written into,
+// or "" if none is usable (in which case the emit cases SKIP and say why).
+//
+// M0 review R8 / M0.1 §2.C.2.  This used to hardcode `testdata/twr` in the
+// SOURCE tree, so every ordinary `ctest` run overwrote the reviewed
+// artifacts there; the reviewer had to rebuild and run this QA out of tree
+// just to avoid clobbering them.  The rule is now:
+//
+//   DEFAULT  ${UWB_BUILD_DIR}/test-output/twr  (or $UWB_TWR_TEST_OUTPUT_DIR)
+//   EXPORT   $UWB_TWR_EXPORT_DIR=<dir> to write into a tree deliberately
+//
+// The source `testdata/twr` tree is refused unless export was requested, and
+// there is no silent fallback to it.
 std::string
-twr_dir()
+twr_dir(std::string& why_out)
 {
     static int tried = 0;
-    static bool ok = false;
     static std::string path;
+    static std::string why;
     if (tried == 0) {
         tried = 1;
-        std::error_code ec;
-        const std::filesystem::path d =
-            std::filesystem::path(UWB_TESTDATA_DIR) / "twr";
-        std::filesystem::create_directories(d, ec);
-        if (!ec && std::filesystem::is_directory(d)) {
-            std::ofstream probe(d / ".qa_write_probe", std::ios::app);
-            if (probe.good()) {
-                probe.close();
-                std::filesystem::remove(d / ".qa_write_probe", ec);
-                path = d.string();
-                ok = true;
-            }
-        }
+        path = gr::uwb::twr::testout::resolve(why);
     }
-    return ok ? path : std::string();
+    why_out = why;
+    return path;
 }
 
 // Marker positions inside a frame, in work samples from PreambleStart.
@@ -850,11 +865,15 @@ BOOST_AUTO_TEST_CASE(twr_timing_anchor_65_32)
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(twr_timing_emit_tables)
 {
-    const std::string dir = twr_dir();
+    std::string why;
+    const std::string dir = twr_dir(why);
     if (dir.empty()) {
-        BOOST_TEST_MESSAGE("testdata/twr not writable; CSV not emitted");
+        BOOST_TEST_MESSAGE("CSV not emitted: " << why);
         return;
     }
+    BOOST_TEST_MESSAGE("CSV output dir: " << dir
+                                        << " (export to the source tree only "
+                                           "with UWB_TWR_EXPORT_DIR)");
 
     for (const auto& rate : kRates) {
         // Re-derive map() locally for the table; the block-backed values are
@@ -949,11 +968,15 @@ BOOST_AUTO_TEST_CASE(twr_timing_emit_tables)
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(twr_timing_emit_rmarker_candidates)
 {
-    const std::string dir = twr_dir();
+    std::string why;
+    const std::string dir = twr_dir(why);
     if (dir.empty()) {
-        BOOST_TEST_MESSAGE("testdata/twr not writable; CSV not emitted");
+        BOOST_TEST_MESSAGE("CSV not emitted: " << why);
         return;
     }
+    BOOST_TEST_MESSAGE("CSV output dir: " << dir
+                                        << " (export to the source tree only "
+                                           "with UWB_TWR_EXPORT_DIR)");
     // The 65/48 and 65/32 chains both use the quality_minorder tap set
     // (T = 2707), which the anchor tests pin against the real blocks.
     const MapFn mapfn_48{ 65, 48, 2707 };
@@ -1036,11 +1059,15 @@ BOOST_AUTO_TEST_CASE(twr_timing_emit_rmarker_candidates)
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(twr_timing_emit_turnaround_estimate)
 {
-    const std::string dir = twr_dir();
+    std::string why;
+    const std::string dir = twr_dir(why);
     if (dir.empty()) {
-        BOOST_TEST_MESSAGE("testdata/twr not writable; CSV not emitted");
+        BOOST_TEST_MESSAGE("CSV not emitted: " << why);
         return;
     }
+    BOOST_TEST_MESSAGE("CSV output dir: " << dir
+                                        << " (export to the source tree only "
+                                           "with UWB_TWR_EXPORT_DIR)");
     const std::string path =
         join_path(dir, "timing_budget_turnaround_estimate.csv");
     std::ofstream f(path, std::ios::trunc);

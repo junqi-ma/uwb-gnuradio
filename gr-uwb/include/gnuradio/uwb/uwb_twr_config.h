@@ -11,8 +11,35 @@
  * header, NO UHD header and NO pmt header, so the whole configuration
  * surface can be unit tested, fuzzed and imported from Python without a
  * radio, without a device and without the OOT module being built.  The
- * only project dependency is the frozen vocabulary header
- * <gnuradio/uwb/uwb_twr_types.h>.
+ * only project dependencies are the frozen vocabulary header
+ * <gnuradio/uwb/uwb_twr_types.h> and the frame codec
+ * <gnuradio/uwb/uwb_twr_frame.h>.  Both are themselves stdlib-only, and the
+ * dependency runs ONE WAY: the codec does not know this file exists.
+ *
+ * ---------------------------------------------------------------------------
+ * THE FRAME CODEC IS THE GEOMETRY AUTHORITY (M0.1 / R3)
+ * ---------------------------------------------------------------------------
+ * M0 review R3 found TWO geometries for one format: this schema carried a
+ * pre-codec "7-byte header" FrameGeometry with 9/19/24-byte budgets, while
+ * uwb_twr_frame.h has emitted a 14-byte header and 16/26/31-byte on-air frames
+ * since it was frozen.  Both test suites passed, because nothing ever asked
+ * whether an ACCEPTED configuration can losslessly build the real frame.
+ *
+ * The dependency now points in the only direction that can be wrong in one
+ * place instead of two:
+ *
+ *   - `FrameFormatConfig::geometry` is a CLAIM -- "this is what I believe the
+ *     layout to be".  It is checked field by field through
+ *     `frame_geometry_check()` / `frame_geometry_for()`, and every
+ *     disagreement becomes a rejection naming that exact field.  It never
+ *     decides anything.
+ *   - Every byte count the config reports -- the PSDU budget, the on-air
+ *     lengths in `effective_config()`, `frame_psdu_bytes()` -- is a delegation
+ *     to the codec.  There is no second `header + n * timestamp` sum anywhere
+ *     in this file, and no test fixture keeps its own copy of the numbers.
+ *   - `FrameFormatConfig::frame_profile` is a `FrameProfileId`, not a
+ *     free-form string, so "an arbitrary profile name is an executable
+ *     geometry" is unrepresentable rather than merely discouraged.
  *
  * ---------------------------------------------------------------------------
  * THE ONE RULE THIS FILE EXISTS TO ENFORCE
@@ -74,10 +101,19 @@
  * Requirements traceability (docs/twr/需求_UWB_SS_DS_TWR.md):
  *   REQ-SCOPE-01  unsupported combinations are rejected, never defaulted
  *   REQ-SCOPE-04  no STS in phase 1
- *   REQ-PHY-01    common profile is ch5 / 6489.6 MHz / 64 MHz PRF class
- *   REQ-PHY-02    native rate, work rate, symbol rate and RF bandwidth
- *                 are four different quantities
+ *   REQ-PHY-01    common profile is ch5 / 6489.6 MHz / 64 MHz PRF class;
+ *                 the SYNC lengths, SFD modes, PHR rate and data rate are
+ *                 limited by what THIS software implements, and a refusal
+ *                 says so rather than claiming a chip cannot do it
+ *   REQ-PHY-02    native rate, work rate, symbol rate, PHR rate and RF
+ *                 bandwidth are five different quantities
  *   REQ-PHY-03    channel 5 first; other channels are per-channel claims
+ *   REQ-PROTO-01  a session id that does not fit the 16-bit wire field is
+ *                 refused, never narrowed
+ *   REQ-PROTO-06  one frame profile, one geometry authority, one set of
+ *                 numbers; a claim that disagrees is rejected per field
+ *   REQ-TIME-04   the timestamp width is a profile parameter, not a
+ *                 project-wide constant
  *   REQ-API-01    typed config, one validator, capabilities() /
  *                 validate() / effective_config(), versions, requested
  *                 vs effective, readback, startup rejection
@@ -96,7 +132,18 @@
 #ifndef INCLUDED_GNURADIO_UWB_UWB_TWR_CONFIG_H
 #define INCLUDED_GNURADIO_UWB_UWB_TWR_CONFIG_H
 
+// The frame codec: this file's geometry/session authority (M0.1 / R3).  It is
+// stdlib-only, so including it keeps the "no GNU Radio, no UHD" property.
+#include <gnuradio/uwb/uwb_twr_frame.h>
 #include <gnuradio/uwb/uwb_twr_types.h>
+// M0.1 R7: the per-row evidence ladder.  uwb_twr_capability_evidence.h does
+// NOT include this file, so the dependency is one-way.
+#include <gnuradio/uwb/uwb_twr_capability_evidence.h>
+
+// File-scope alias so the evidence vocabulary reads as `evidence::...` in the
+// capability tables below.  C++ forbids a namespace alias as a *member*, so it
+// must live at namespace scope.
+namespace evidence = ::gr::uwb::twr::evidence;
 
 #include <cerrno>
 #include <cmath>
@@ -350,6 +397,245 @@ inline bool data_rate_from_string(const std::string& s, DataRate& out)
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// PHR RATE -- a SEPARATE quantity from the payload data rate (M0.1 / R2)
+// ---------------------------------------------------------------------------
+// WHY THIS IS NOT A DataRate ANY MORE
+// ------------------------------------
+// M0 typed `PhyConfig::phr_rate` as a DataRate and then required it to EQUAL
+// `PhyConfig::data_rate`.  That rule was the exact inverse of what this
+// repository transmits:
+//
+//   uwb_hrp_mod_core.h:8-12   "BPM-BPSK 0.85 Mb/s PHR + 6.81 Mb/s payload"
+//   kPhrSymbols = 21, kPhrChipsPerSymbol = 512              (the PHR)
+//   kPayloadChipsPerBurst = 8, kPayloadChipsPerSymbol = 64  (the payload)
+//
+// The PHR is a different modulation at a different rate.  The 2-bit data-rate
+// field that lives INSIDE the PHR describes the PAYLOAD that follows it; it
+// says nothing about how the PHR itself is transmitted.  Qorvo's API guides
+// keep the two as separate fields for the same reason.
+//
+// So the M0 rule accepted a 6.81 Mb/s PHR -- which this modulator cannot
+// produce -- and rejected the 0.85 Mb/s PHR it does produce.  A dedicated enum
+// is the fix: the two axes are separately typed, separately named and
+// separately validated, and the value domain is the set of PHR rates the
+// modulator actually implements rather than the set of payload rates.
+enum class PhrRate : uint8_t {
+    // 851.2 kb/s, the fixed PHR rate of an HRP BPRF profile.  THIS IS THE ONE
+    // uwb_hrp_mod_core.h modulates: 21 SEC-DED-coded symbols of 512 chips.
+    Standard850k = 0,
+    // "Transmit the PHR at the payload data rate."  A legal option in IEEE
+    // 802.15.4 and an explicit enum in the Qorvo DW3xxx API guide.
+    //
+    // IT IS REJECTED HERE, and the reason is a limit of THIS IMPLEMENTATION,
+    // not of the standard and not of any chip: the modulator has exactly one
+    // PHR code path and it is the 512-chips-per-symbol one.  There is no
+    // second path to select.  When one is added and measured this member
+    // becomes supported -- it is an enum member precisely so the config
+    // surface can NAME the option it does not implement, instead of encoding
+    // the wish as a payload rate.
+    SameAsData = 1
+};
+
+inline const char* phr_rate_to_string(PhrRate v)
+{
+    switch (v) {
+    case PhrRate::Standard850k:
+        return "850k";
+    case PhrRate::SameAsData:
+        return "same_as_data";
+    }
+    return "invalid";
+}
+
+// Strict: one accepted spelling per member, nothing else.  A payload-rate name
+// such as "6p8m" is NOT accepted here; that string belongs to DataRate, and
+// asking for it as a PHR rate is exactly the confusion this enum removes.
+inline bool phr_rate_from_string(const std::string& s, PhrRate& out)
+{
+    if (s == "850k") {
+        out = PhrRate::Standard850k;
+        return true;
+    }
+    if (s == "same_as_data") {
+        out = PhrRate::SameAsData;
+        return true;
+    }
+    return false;
+}
+
+// The complete set, so a validator can enumerate what it may offer.
+inline constexpr PhrRate kAllPhrRates[] = { PhrRate::Standard850k, PhrRate::SameAsData };
+inline constexpr size_t kPhrRateCount = sizeof(kAllPhrRates) / sizeof(kAllPhrRates[0]);
+
+// True only for a PHR rate this build can actually transmit.  A member that is
+// a legitimate protocol option with no implementation is refused.
+inline bool phr_rate_is_implemented(PhrRate v) { return v == PhrRate::Standard850k; }
+
+// PHR symbols per frame of the implemented PHR: 21 SEC-DED(13,13)-coded
+// symbols carrying 13 information bits (mod::kPhrSymbols).  0 for a rate with
+// no implementation, so it can never be mistaken for a real budget.
+inline uint16_t phr_rate_symbols(PhrRate v)
+{
+    return phr_rate_is_implemented(v) ? 21u : 0u;
+}
+
+// Why a PHR rate member is refused, in its own words.  Every member that is
+// not implemented has its own reason here, so no rejection of this field is
+// ever a bare "unsupported" with nothing behind it.
+inline std::string phr_rate_unsupported_reason(PhrRate v)
+{
+    switch (v) {
+    case PhrRate::Standard850k:
+        return "the 851.2 kb/s PHR is the rate uwb_hrp_mod_core.h modulates";
+    case PhrRate::SameAsData:
+        return "phr_rate=same_as_data is a legal 802.15.4 / DW3xxx API option, but this build "
+               "has exactly ONE PHR code path and it is the fixed 0.85 Mb/s one (21 symbols of "
+               "512 chips, uwb_hrp_mod_core.h kPhrSymbols / kPhrChipsPerSymbol). There is no "
+               "same-as-data PHR implementation to select, so the request is refused rather than "
+               "silently transmitted as a 0.85 Mb/s PHR. This is a limit of the software, not a "
+               "claim about any Qorvo part.";
+    }
+    return "phr_rate " + std::to_string(static_cast<unsigned>(v)) +
+           " is not a member of the PHR-rate enumeration";
+}
+
+// ---------------------------------------------------------------------------
+// PREAMBLE (SYNC) LENGTH -- the lengths THIS decoder / CFO path implements
+// ---------------------------------------------------------------------------
+// A SYNC repetition count, named.  `PreambleLength` is deliberately an
+// enumeration of what the current software can RUN, not of what the standard
+// or any vendor part can do:
+//
+//   * Qorvo's own API accepts 64 / 128 / 256 / 512 / 1024 / 2048, and the
+//     DW3xxx guide lists 128 / 256 / 512 as non-standard-but-supported
+//     preamble lengths.  None of that is in dispute.
+//   * What limits THIS build is the demodulator.  The CFO re-measurement in
+//     uwb_demod_core.h re-fits only the last max(cfo_min_fit_repetitions, 40)
+//     SYNCs and synthesises the earlier peaks at phase 0, so the number of
+//     zero-phase points that leak into the least-squares fit is
+//     max(0, reps - 64) and 64 is the first clean length.  Separately,
+//     mod::encode_phr19 maps 128 / 256 / 512 to preamble-duration index 1
+//     (= 64), so the PHR does not self-describe those lengths.
+//   * 16 is the other measured-clean length (its tail covers the whole
+//     preamble, so no zero-phase point reaches the fit) and it is
+//     self-describing (index 0 = 16) -- but its first-path / ToA accuracy is
+//     still unmeasured, which is a separate caveat carried by
+//     kTwrSyncRepsNeedingToaValidation.
+//   * 128 and everything longer are therefore refused HERE, with a reason
+//     that names this decoder/CFO path.  Writing "the chip cannot do 128" would
+//     be a false statement about hardware this project has never spoken to.
+//
+// 128 is NOT a member of this enumeration, deliberately, for this task: adding
+// it means the CFO-fit and PHR self-description work has been done AND
+// measured, and then the member is added with that evidence attached.
+enum class PreambleLength : uint8_t {
+    Sym16 = 0,
+    Sym64 = 1
+};
+
+inline const char* preamble_length_to_string(PreambleLength v)
+{
+    switch (v) {
+    case PreambleLength::Sym16:
+        return "16";
+    case PreambleLength::Sym64:
+        return "64";
+    }
+    return "invalid";
+}
+
+inline bool preamble_length_from_string(const std::string& s, PreambleLength& out)
+{
+    if (s == "16") {
+        out = PreambleLength::Sym16;
+        return true;
+    }
+    if (s == "64") {
+        out = PreambleLength::Sym64;
+        return true;
+    }
+    return false;
+}
+
+inline constexpr PreambleLength kAllPreambleLengths[] = { PreambleLength::Sym16,
+                                                          PreambleLength::Sym64 };
+inline constexpr size_t kPreambleLengthCount =
+    sizeof(kAllPreambleLengths) / sizeof(kAllPreambleLengths[0]);
+
+// The symbols() accessor.  Named `preamble_length_symbols()` to match this
+// file's own `sfd_mode_symbols()` convention, which is what the raw
+// `phy.preamble_symbols` integer is checked against.
+inline uint16_t preamble_length_symbols(PreambleLength v)
+{
+    switch (v) {
+    case PreambleLength::Sym16:
+        return 16;
+    case PreambleLength::Sym64:
+        return 64;
+    }
+    return 0;
+}
+
+// The reverse mapping, for the raw `phy.preamble_symbols` field.  False means
+// "not a length this build implements" -- never "round to the nearest".
+inline bool preamble_length_from_symbols(uint16_t symbols, PreambleLength& out)
+{
+    for (size_t i = 0; i < kPreambleLengthCount; ++i) {
+        const PreambleLength v = kAllPreambleLengths[i];
+        if (preamble_length_symbols(v) == symbols) {
+            out = v;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Why a SYNC repetition count is refused.  Each refused length gets its own
+// measured reason, and every one of them names a limit of THIS SOFTWARE
+// rather than of a chip: the Qorvo API accepts 64 through 2048, so "the
+// hardware cannot do 128" would be a false statement.
+inline std::string preamble_length_unsupported_reason(uint16_t symbols)
+{
+    const std::string n = std::to_string(symbols);
+    if (symbols == 32)
+        return "preamble length " + n +
+               " SYNC is refused: mod::encode_phr19 advertises preamble-duration index 1 (= 64) "
+               "for it, so the PHR does not self-describe a 32-symbol preamble";
+    if (symbols == 128 || symbols == 256 || symbols == 512)
+        return "preamble length " + n +
+               " SYNC is refused by the CURRENT DEMODULATOR, not by any hardware: "
+               "uwb_demod_core.h re-measures only the last max(cfo_min_fit_repetitions, 40) SYNCs "
+               "and synthesises the earlier peaks at phase 0, so the zero-phase points that leak "
+               "into the least-squares CFO fit number max(0, reps - 64) -- measured at 128 SYNC as "
+               "an injected 20 kHz offset coming back as 3791 Hz; and mod::encode_phr19 maps " + n +
+               " to preamble-duration index 1 (= 64), so the PHR does not self-describe it. "
+               "Qorvo's API accepts these lengths (DW3xxx lists 128/256/512 as non-standard "
+               "preamble lengths), so this is a limit of this software path, not a statement about "
+               "what a DW1000 or DW3000 can transmit";
+    if (symbols == 1024)
+        return "preamble length " + n +
+               " SYNC is PHR-legal (preamble-duration index 2) but refused by the current "
+               "demodulator for the same CFO-fit bias as 128/256/512; a software limit, not a "
+               "hardware one";
+    if (symbols == 2048)
+        return "preamble length " + n +
+               " SYNC exceeds the work-grid TX buffer this build sizes for one frame "
+               "(mod::kMaxHrpTxSamples); a length this large is a buffer and scheduling "
+               "decision, not a hardware capability statement";
+    if (symbols == 1 || symbols == 2)
+        return "preamble length " + n +
+               " SYNC leaves fewer than the 4 measured peaks uwb_demod_core.h stage_cfo needs";
+    if (symbols == 4 || symbols == 8)
+        return "preamble length " + n +
+               " SYNC is shorter than the 10 initial repetitions uwb_demod_core.h skips before "
+               "the CIR search";
+    return "preamble length " + n +
+           " is not a SYNC repetition count this build implements: the enumeration is 16 or 64, "
+           "bounded by this repository's demodulator/CFO path (see the PreambleLength comment). "
+           "That is a software limit; the Qorvo parts' own API accepts 64 through 2048";
+}
+
 enum class SfdMode : uint8_t {
     R4z1 = 0,
     R4z2 = 1,
@@ -438,6 +724,36 @@ inline bool phr_mode_from_string(const std::string& s, PhrMode& out)
         return true;
     }
     return false;
+}
+
+// The PHR PRESENCE/FORM is a different axis from the PHR RATE above: this says
+// whether a PHR is transmitted at all and which PHR layout carries it, while
+// PhrRate says at what rate.  Both axes were present in M0; what was missing
+// is that each member gets its own reason, instead of only `none` being caught
+// while `extended` passed validation silently.
+//
+// Only `standard` is implemented.  `extended` is a vendor PHR layout (a
+// header longer than the 13 information bits frame v1 encodes) that this codec
+// and this modulator have no layout for; `none` is not a UWB frame at all,
+// because the PHR is what carries the RANGING bit and the PSDU length a
+// receiver needs before it can decode the payload.
+inline std::string phr_mode_unsupported_reason(PhrMode v)
+{
+    switch (v) {
+    case PhrMode::Standard:
+        return "the standard 13-bit (2 octet) HRP PHR is the one frame v1 encodes";
+    case PhrMode::Extended:
+        return "phr_mode=extended asks for a vendor PHR layout longer than the 13 information "
+               "bits frame v1 encodes (2 octets, SEC-DED coded to 19 bits over 21 symbols). No "
+               "extended-PHR layout exists in this codec or in uwb_hrp_mod_core.h, so the request "
+               "is refused rather than transmitted as a standard PHR. This is a limit of this "
+               "software, not a claim about any Qorvo part";
+    case PhrMode::None:
+        return "a TWR frame without a PHR is not a valid TWR profile; the PHR carries the RANGING "
+               "bit and the PSDU length the receiver needs before it can decode the payload";
+    }
+    return "phr_mode " + std::to_string(static_cast<unsigned>(v)) +
+           " is not a member of the PHR-mode enumeration";
 }
 
 // STS is a phase-2 capability (REQ-SCOPE-04).  The values exist so a future
@@ -1212,6 +1528,13 @@ struct PhyCapabilityRow {
     bool ranging = true;
     CapabilityStatus status = CapabilityStatus::MeasuredPending;
     std::string reason;
+    // M0.1 R7: what this row was ACTUALLY measured to establish.  A row may
+    // be work-decode verified and nothing more -- which is exactly the M0
+    // state, and the reason it must not be read as ranging capability.
+    evidence::Level evidence_level = evidence::Level::None;
+    std::string evidence_source;
+    std::string evidence_provenance_id;
+    std::string evidence_not_established; // the levels explicitly NOT claimed
 };
 
 // Outcome of a whitelist lookup.  `allowed == false` with a
@@ -1221,6 +1544,13 @@ struct CapabilityLookup {
     bool allowed = false;
     CapabilityStatus status = CapabilityStatus::MeasuredPending;
     std::string reason;
+    // M0.1 R7: the evidence behind this answer.  A refusal states what is
+    // missing and at which level it would have to be measured, so an operator
+    // can tell "not looked at" from "looked at and failed".
+    evidence::Level established = evidence::Level::None;
+    evidence::Use requested_use = evidence::Use::WorkDecode;
+    std::string evidence_not_established;
+    std::string provenance_id;
 };
 
 // The whitelist.  Everything not listed here is rejected.
@@ -1257,7 +1587,7 @@ public:
     std::vector<double> quantisation_rates_hz;
 
     // ---- provenance -----------------------------------------------------
-    std::string schema_version = "twr-config/1";
+    std::string schema_version = "twr-config/2";
     std::string profile_version = "unfrozen";
     std::string build_id = "m0";
     std::string pending_reason =
@@ -1367,10 +1697,14 @@ public:
             out.allowed = true;
             out.status = row.status;
             out.reason = row.reason;
+            out.established = row.evidence_level;
+            out.evidence_not_established = row.evidence_not_established;
+            out.provenance_id = row.evidence_provenance_id;
             return out;
         }
         out.allowed = false;
         out.status = CapabilityStatus::MeasuredPending;
+        out.established = evidence::Level::None;
         out.reason = "no measured row for native_rate=" + twr_double_to_text(native_rate_hz) +
                      " code=" + twr_int_to_text(code_index) +
                      " sync=" + twr_int_to_text(sync_repetitions_in) +
@@ -1586,7 +1920,7 @@ inline bool twr_sync_reps_needs_toa_validation(uint16_t n)
 inline Capabilities build_default_capabilities()
 {
     Capabilities c;
-    c.schema_version = "twr-config/1";
+    c.schema_version = "twr-config/2";
     c.profile_version = "unfrozen-m0";
     c.build_id = "m0";
 
@@ -1613,11 +1947,16 @@ inline Capabilities build_default_capabilities()
     // agree with each other and nothing more: no DW1000 / DW3000, no SDK
     // frame profile and no firmware hash was measured (REQ-PHY-01, M5).
     //
-    // data rate: 6.81 Mb/s is the only rate that can round trip.
-    //   uwb_hrp_mod_core.h:585 hardcodes PHR rate index 2 and
+    // PAYLOAD data rate: 6.81 Mb/s is the only rate that can round trip.
     //   uwb_demod_core.h:stage_payload_fcs always uses the 6.81 geometry
     //   (64 chips/burst, 64 chips/symbol, scrambler offset 1344).  Every
     //   other rate stays rejected.
+    //
+    //   This is the PAYLOAD axis only.  The PHR is a separate modulation at a
+    //   separate rate (0.85 Mb/s, PhrRate::Standard850k); the 2-bit data-rate
+    //   field the PHR carries describes THIS rate, not the PHR's own.  M0
+    //   conflated the two and required them to be equal, which was backwards
+    //   (M0 review R2).
     c.data_rates.push_back(DataRate::R6p8M);
 
     // SYNC length: 16 and 64 are both measured-supported; 64 is the phase-1
@@ -1663,6 +2002,12 @@ inline Capabilities build_default_capabilities()
     //  4 / 8  rejected: cir_skip_initial_repetitions = 10 exceeds the
     //           available repetitions -> CirFailed.
     //  Non-power-of-two values are rejected by the API.
+    //
+    //  EVERY one of these rejections is a limit of THIS repository's
+    //  demodulator / modulator, and the Qorvo parts' own API accepts 64
+    //  through 2048 (DW3xxx lists 128/256/512 as non-standard preamble
+    //  lengths).  `PreambleLength` is therefore the enumeration of what this
+    //  software can run, and every reason it emits says so.
     c.sync_repetitions.push_back(16);
     c.sync_repetitions.push_back(64);
 
@@ -1713,6 +2058,23 @@ inline Capabilities build_default_capabilities()
                               "testdata/twr/phy_matrix_737280000.csv"
                             : "measured_fcs_pass_round_trip_see_"
                               "testdata/twr/phy_matrix_737280000.csv";
+                    // M0.1 R7: these 48 rows were measured ONLY on the
+                    // 998.4 MS/s work grid.  The established level is therefore
+                    // exactly WorkDecodeVerified and nothing above it; the
+                    // absent levels are recorded as data so nothing downstream
+                    // can read a decode-verified row as ranging, hardware or
+                    // vendor capability.
+                    row.evidence_level = evidence::Level::WorkDecodeVerified;
+                    row.evidence_source =
+                        "work_direct_998p4_modulate_loopback_demodulate_fcs";
+                    row.evidence_not_established =
+                        std::string(evidence::level_name(
+                            evidence::Level::NativeRoundtripVerified)) +
+                        ";" + evidence::level_name(evidence::Level::ToaVerified) +
+                        ";" +
+                        evidence::level_name(evidence::Level::HardwareVerified) +
+                        ";" +
+                        evidence::level_name(evidence::Level::VendorInteropVerified);
                     c.phy_matrix.push_back(row);
                 }
             }
@@ -1748,22 +2110,38 @@ inline const Capabilities& capabilities()
 // 4. The typed configuration
 // ===========================================================================
 
-// --- 会话 (session) --------------------------------------------------------
+// --- 帧几何 (frame geometry) ------------------------------------------------
 
-// Frame-layout parameters of the versioned TWR MAC frame profile
-// (REQ-PROTO-06).  These are PROFILE values, not capability claims: they are
-// recorded verbatim in effective_config() and re-checked by the frame codec.
-// They live in the config so the byte layout is never a hidden constant.
+// A CLAIM about the versioned TWR MAC frame layout (REQ-PROTO-06), not a
+// second source of truth for it.
+//
+// M0 review R3: this struct used to carry a pre-codec "7-byte header" geometry
+// (FCF(2) + sequence(1) + PAN(2) + address(2)) with 9/19/24-byte budgets while
+// uwb_twr_frame.h emitted a 14-byte header and 16/26/31-byte on-air frames.
+// Both suites passed because nothing compared the two.
+//
+// Now the codec owns every one of these numbers (`FrameProfileGeometry`) and
+// this struct is only what a caller BELIEVES.  `frame_geometry_claim()` turns
+// it into the codec's `FrameGeometryClaim`, `frame_geometry_check()` reports
+// every field that disagrees, and the validator turns each disagreement into
+// its own rejection naming that exact field.  The fields stay here so the
+// claim is visible in the canonical field listing, in the config hash and in
+// the JSON -- an operator must be able to see what was claimed -- but they
+// never decide anything.
 struct FrameGeometry {
-    // FCF(2) + sequence(1) + PAN(2) + address(2)
+    // MAC header bytes the caller believes the frame has.  frame v1: 14
+    // (version / function code / 16-bit session / seq / PAN / src / dst /
+    // flags), from kFrameHeaderBytes.
     uint16_t mac_header_bytes = 0;
-    // per 40-bit timestamp carried by the frame (0 for Poll)
+    // bytes per timestamp field; 5 for the 40-bit frame-v1 timestamp.
     uint16_t timestamp_bytes = 0;
-    // trailing address(2) / profile(1) trailer, 0 if the profile has none
+    // trailing address / profile trailer; frame v1 has none.
     uint16_t mac_footer_bytes = 0;
-    // FCS appended by the MAC (0 when the PHY appends it)
+    // FCS bytes reserved INSIDE the MAC PSDU; 0 when the PHY appends it.
     uint16_t mac_fcs_bytes = 0;
-    // PHR, present for every TWR frame in this profile
+    // PHR information bytes the caller believes are carried; frame v1: 2
+    // (13 information bits, SEC-DED coded to 19 bits over 21 symbols).  This is
+    // the PHR's INFORMATION size, not its on-air duration.
     uint16_t phr_bytes = 0;
 
     bool operator==(const FrameGeometry& o) const
@@ -1780,20 +2158,93 @@ struct FrameGeometry {
         return mac_header_bytes != 0 || timestamp_bytes != 0 || mac_footer_bytes != 0 ||
                mac_fcs_bytes != 0 || phr_bytes != 0;
     }
+    // One line for a rejection or a diff, with the field order of the codec's
+    // own report so the two can be read side by side.
+    std::string to_text() const
+    {
+        return "mac_header_bytes=" + std::to_string(mac_header_bytes) +
+               " timestamp_bytes=" + std::to_string(timestamp_bytes) +
+               " mac_footer_bytes=" + std::to_string(mac_footer_bytes) +
+               " mac_fcs_bytes=" + std::to_string(mac_fcs_bytes) +
+               " phr_bytes=" + std::to_string(phr_bytes);
+    }
 };
 
-// Number of PSDU bytes a frame of `type` occupies, INCLUDING the FCS when the
-// PHY appends it and EXCLUDING it when the MAC does (exactly one layer
-// appends the FCS, REQ-API-01 帧格式).
-inline uint32_t frame_psdu_bytes(const FrameGeometry& g, FrameType type,
-    FcsAppender fcs)
+// The claim, in the codec's own claim type.  Same field names on purpose: the
+// config states what it believes and the codec checks it.  A DISTINCT type
+// from FrameProfileGeometry is also deliberate, so an authority and a claim can
+// never be swapped for one another by accident.
+inline FrameGeometryClaim frame_geometry_claim(const FrameGeometry& g)
 {
-    const uint32_t timestamps = frame_type_timestamp_count(type) * g.timestamp_bytes;
-    const uint32_t mac = static_cast<uint32_t>(g.mac_header_bytes) + timestamps +
-                         static_cast<uint32_t>(g.mac_footer_bytes);
-    if (fcs == FcsAppender::MacLayer)
-        return mac + static_cast<uint32_t>(g.mac_fcs_bytes);
-    return mac; // FcsAppender::PhyLayer appends after the MAC PSDU
+    FrameGeometryClaim c;
+    c.mac_header_bytes = g.mac_header_bytes;
+    c.timestamp_bytes = g.timestamp_bytes;
+    c.mac_footer_bytes = g.mac_footer_bytes;
+    c.mac_fcs_bytes = g.mac_fcs_bytes;
+    c.phr_bytes = g.phr_bytes;
+    return c;
+}
+
+// The geometry the CODEC says, in the config's own struct.  This is how a
+// caller (and every test fixture) states a claim without keeping a private
+// copy of the numbers: fill the config from the authority, then let the
+// validator prove the two agree.
+inline FrameGeometry frame_geometry_from_authority(const FrameProfileGeometry& g,
+                                                   const FrameProfile& p)
+{
+    FrameGeometry out;
+    out.mac_header_bytes = static_cast<uint16_t>(g.mac_header_bytes());
+    out.timestamp_bytes = static_cast<uint16_t>(g.timestamp_bytes(p));
+    out.mac_footer_bytes = static_cast<uint16_t>(g.mac_footer_bytes());
+    out.mac_fcs_bytes = static_cast<uint16_t>(g.mac_fcs_bytes());
+    out.phr_bytes = static_cast<uint16_t>(g.phr_bytes());
+    return out;
+}
+
+// The claim of the executable authority for a profile id, or false when the id
+// names no implemented layout.  Never a silent fallback to frame v1.
+inline bool frame_geometry_of_profile(FrameProfileId id, FrameGeometry& out)
+{
+    FrameProfileGeometry g;
+    if (!frame_geometry_for(id, g))
+        return false;
+    FrameProfile p;
+    if (!frame_profile_for(id, p))
+        return false;
+    out = frame_geometry_from_authority(g, p);
+    return true;
+}
+
+// Number of MAC PSDU bytes a frame of `type` occupies for a profile, INCLUDING
+// the FCS when the MAC appends it and EXCLUDING it when the PHY does (exactly
+// one layer appends the FCS, REQ-API-01 帧格式).
+//
+// This is a DELEGATION to the codec, which is the only place a frame length is
+// computed: `FrameProfileGeometry::mac_payload_bytes()` calls
+// `frame_length_for()`.  M0 re-summed `header + n * timestamp + footer` here,
+// which is how a 7-byte header produced a 9-byte Poll and understated the
+// frame-duration budget.
+inline uint32_t frame_psdu_bytes(FrameType type, FcsAppender fcs)
+{
+    const FcsOwner owner = (fcs == FcsAppender::MacLayer) ? FcsOwner::MacLayer
+                                                          : FcsOwner::PhyLayer;
+    FrameProfileGeometry g;
+    g.id = FrameProfileId::TwrV1;
+    g.fcs_owner = owner;
+    FrameProfile p;
+    if (!frame_profile_for(FrameProfileId::TwrV1, p))
+        return 0;
+    return static_cast<uint32_t>(g.mac_payload_bytes(type, p));
+}
+
+// Retained call shape.  `g` is DELIBERATELY IGNORED: a claim does not decide
+// a length, and keeping the parameter means an existing call site keeps
+// compiling while losing the ability to pass a number of its own.  New code
+// should use the two-argument form above.
+inline uint32_t frame_psdu_bytes(const FrameGeometry& g, FrameType type, FcsAppender fcs)
+{
+    (void)g;
+    return frame_psdu_bytes(type, fcs);
 }
 
 struct SessionConfig {
@@ -1802,7 +2253,22 @@ struct SessionConfig {
     uint16_t local_address = 0;
     uint16_t peer_address = 0;
     uint16_t pan_id = 0;
-    uint32_t session_id = 0; // 0 is the frame profile's "invalid" marker
+    // LOCAL session id.  The wire field at kOffSessionId is 16 bits, so the
+    // mapping is identity-or-refuse (session_id_to_wire()), never a fold or a
+    // mask.  The type stays uint32_t DELIBERATELY rather than narrowing to
+    // uint16_t: narrowing would make the local id space and the wire id space
+    // indistinguishable in the type system, so an operator could no longer
+    // express the id they intended and would never learn it does not fit.
+    // Keeping the wider type makes the refusal a VISIBLE, TESTABLE, ATTRIBUTABLE
+    // configuration error instead of an unreachable code path.
+    //
+    // The cost is stated here rather than left to be discovered: the wire
+    // session space is 2^16, so ~256 concurrently live sessions reach a 50%
+    // chance of one collision (kSessionIdBirthdaySessions50pct).  No local ->
+    // wire mapping can raise that; only a different frame version with a wider
+    // or keyed session field could, and the peer would have to understand it.
+    // 0 is the frame profile's "no session" marker.
+    uint32_t session_id = 0;
     uint32_t exchange_id = 0;
     // Frame sequence number and its own wrap modulus, INDEPENDENT of the
     // session id (REQ-API-01 会话: 帧序号回绕与会话 ID 独立).
@@ -1826,33 +2292,56 @@ struct PhyConfig {
     double center_frequency_hz = 0.0; // 0 = not stated; the plan decides
     uint8_t tx_preamble_code = 0;     // 0 = "not stated" -> rejected
     uint8_t rx_preamble_code = 0;
-    uint16_t preamble_symbols = 0; // SYNC repetitions
+    // SYNC repetitions.  The raw count is kept because it is what the
+    // capability whitelist and the measured PHY matrix key on, but it must be
+    // a member of `PreambleLength` -- a length this decoder/CFO path can
+    // actually run -- and the validator separately consults the whitelist.
+    uint16_t preamble_symbols = 0;
     PrfClass prf_class = PrfClass::Bprf64;
+    // PAYLOAD data rate, measured: 6.81 Mb/s is the only rate that round
+    // trips through this modulator/demodulator pair.
     DataRate data_rate = DataRate::R6p8M;
-    // MEASURED-PENDING companions of data_rate.
-    DataRate phr_rate = DataRate::R6p8M;
+    // PHR rate -- a SEPARATE quantity from `data_rate` (M0.1 / R2).  It used
+    // to be a DataRate required to EQUAL `data_rate`, which had the rule
+    // exactly backwards: this modulator sends a 0.85 Mb/s PHR (21 symbols of
+    // 512 chips) ahead of a 6.81 Mb/s payload (8 chips per burst of 64 per
+    // symbol).  See the PhrRate comment for the full argument.
+    PhrRate phr_rate = PhrRate::Standard850k;
 };
 
 // --- 帧格式 (frame format) --------------------------------------------------
 
 struct FrameFormatConfig {
+    // WHICH MAC LAYOUT.  A FrameProfileId, not a free-form string: an
+    // arbitrary non-empty profile name must not be able to act as an
+    // executable geometry (M0 review R3).  It selects the authority that the
+    // `geometry` claim below is checked against.
+    FrameProfileId frame_profile = FrameProfileId::TwrV1;
     SfdMode sfd_mode = SfdMode::R4z2;
+    // Raw SFD length.  It must equal sfd_mode_symbols(sfd_mode): the mode
+    // names the sequence, the count is a restatement of it, and a caller may
+    // not say "4z2" while stating 4.
     uint16_t sfd_symbols = 0;
     // Timeout after which a received frame is declared SFD-missing.
     // Zero means "disabled"; a non-zero value must be in a device-tick domain.
     TimedField sfd_timeout;
+    // PHR presence/form.  The PHR RATE is phy.phr_rate; the two are separate
+    // axes and neither is derived from the other.
     PhrMode phr_mode = PhrMode::Standard;
     bool ranging_bit = true;
 
     // THREE DISTINCT CONCEPTS, never conflated:
-    //  (1) upper-layer bytes handed to the MAC,
+    //  (1) upper-layer bytes handed to the MAC, stated as a CLAIM about the
+    //      layout that the codec then checks field by field,
     FrameGeometry geometry;
     //  (2) bytes the MAC places in the PSDU field,
     uint16_t mac_psdu_bytes = 0;
     //  (3) whether (2) already contains the FCS,
     bool mac_psdu_includes_fcs = false;
     FcsAppender fcs_append = FcsAppender::PhyLayer;
-    uint16_t fcs_bytes = 2; // 16-bit CRC for this frame profile
+    // 16-bit CRC.  Checked against the profile's own FCS size; the default
+    // value here is only a starting point the validator will refuse.
+    uint16_t fcs_bytes = 2;
     // 1 = the application payload the caller wants to carry; the MAC header,
     // the timestamps and the FCS are NOT counted here.
     uint16_t application_payload_bytes = 0;
@@ -2056,7 +2545,7 @@ struct DiagnosticsConfig {
 // --- meta ------------------------------------------------------------------
 
 struct ConfigMeta {
-    std::string schema_version = "twr-config/1";
+    std::string schema_version = "twr-config/2";
     std::string profile_version;
     std::string calibration_version;
     // Optional operator note carried into every result.
@@ -2201,7 +2690,7 @@ inline void collect_fields(FieldSink& s, const PhyConfig& v, const std::string& 
     s.add_u16(p + ".preamble_symbols", v.preamble_symbols);
     s.add_enum(p + ".prf_class", prf_class_to_string(v.prf_class));
     s.add_enum(p + ".data_rate", data_rate_to_string(v.data_rate));
-    s.add_enum(p + ".phr_rate", data_rate_to_string(v.phr_rate));
+    s.add_enum(p + ".phr_rate", phr_rate_to_string(v.phr_rate));
 }
 
 inline void collect_fields(FieldSink& s, const FrameGeometry& v, const std::string& p)
@@ -2216,11 +2705,15 @@ inline void collect_fields(FieldSink& s, const FrameGeometry& v, const std::stri
 inline void collect_fields(FieldSink& s, const FrameFormatConfig& v,
     const std::string& p)
 {
+    s.add_enum(p + ".frame_profile", frame_profile_id_to_string(v.frame_profile));
     s.add_enum(p + ".sfd_mode", sfd_mode_to_string(v.sfd_mode));
     s.add_u16(p + ".sfd_symbols", v.sfd_symbols);
     collect_timed_fields(s, p + ".sfd_timeout", v.sfd_timeout);
     s.add_enum(p + ".phr_mode", phr_mode_to_string(v.phr_mode));
     s.add_bool(p + ".ranging_bit", v.ranging_bit);
+    // The geometry CLAIM goes into the hash verbatim: two configs that claim
+    // different layouts are different configs, even though the codec will
+    // reject one of them.
     collect_fields(s, v.geometry, p + ".geometry");
     s.add_u16(p + ".mac_psdu_bytes", v.mac_psdu_bytes);
     s.add_bool(p + ".mac_psdu_includes_fcs", v.mac_psdu_includes_fcs);
@@ -2539,10 +3032,26 @@ private:
         if (c.meta.schema_version.empty())
             cfg_rej("meta.schema_version", ConfigReason::EmptyValue,
                 "schema_version is required");
-        if (c.meta.schema_version != d_caps.schema_version)
-            unsup("meta.schema_version",
-                  "this build implements " + d_caps.schema_version + ", config asks for '" +
-                      c.meta.schema_version + "'");
+        if (c.meta.schema_version != d_caps.schema_version) {
+            // M0.1: twr-config/2 is a BREAKING change -- frame.frame_profile
+            // became required and phy.phr_rate changed value domain.  A v1
+            // document is refused with a migration message, never silently
+            // misread as a v2 one.
+            if (c.meta.schema_version == "twr-config/1")
+                unsup("meta.schema_version",
+                      "twr-config/1 is superseded by twr-config/2: "
+                      "frame.frame_profile is now REQUIRED (frame_v1) and "
+                      "phy.phr_rate now takes 850k (the PHR rate the modulator "
+                      "actually uses) rather than the payload rate; the frame "
+                      "geometry moved from the old 7-byte header to the frozen "
+                      "14-byte header, so on-air sizes are 16/26/31 B and "
+                      "session.session_id must fit 16 bits. This document is "
+                      "refused rather than reinterpreted");
+            else
+                unsup("meta.schema_version",
+                      "this build implements " + d_caps.schema_version +
+                          ", config asks for '" + c.meta.schema_version + "'");
+        }
         if (c.meta.profile_version.empty())
             cfg_rej("meta.profile_version",
                     ConfigReason::EmptyValue,
@@ -2571,6 +3080,24 @@ private:
             cfg_rej("session.session_id",
                     ConfigReason::ZeroValue,
                     "0 is the frame profile's 'no session' marker");
+        else {
+            // The wire field at kOffSessionId is 16 bits.  session_id_to_wire()
+            // is identity-or-refuse: in range -> exact, out of range -> an
+            // explicit error.  It is NOT folded, masked or hashed, because a
+            // lossy map makes two different local sessions produce a
+            // byte-identical session field and frame_match() would then accept
+            // the wrong session's reply as this one's.
+            uint16_t wire = 0;
+            std::string sid_err_text;
+            SessionIdError sid_err = SessionIdError::None;
+            if (!session_id_to_wire(s.session_id, wire, sid_err_text, &sid_err)) {
+                rej("session.session_id",
+                    ConfigReason::OutOfRange,
+                    session_id_error_to_exchange_status(sid_err),
+                    sid_err_text,
+                    "REQ-PROTO-01");
+            }
+        }
         if (s.sequence_modulus == 0)
             cfg_rej("session.sequence_modulus", ConfigReason::ZeroValue,
                 "wrap modulus is zero");
@@ -2674,13 +3201,23 @@ private:
             unsup("phy.prf_class",
                   std::string("PRF class ") + prf_class_to_string(p.prf_class) +
                       " is not in the capability whitelist");
-        if (p.phr_rate != p.data_rate)
-            cfg_rej("phy.phr_rate",
-                    ConfigReason::FieldConflict,
-                    std::string("PHR rate (") + data_rate_to_string(p.phr_rate) +
-                        std::string(") must equal the data rate (") +
-                            data_rate_to_string(p.data_rate) + ")",
-                    "REQ-PHY-02");
+        // The PHR rate is validated on its OWN axis.  It is NOT compared to
+        // the payload data rate: the PHR is a different modulation at a
+        // different rate, and the data-rate field INSIDE the PHR describes
+        // the payload, not the PHR's own transmission.  M0's `phr_rate ==
+        // data_rate` rule therefore accepted the 6.81 Mb/s PHR this modulator
+        // cannot produce and rejected the 0.85 Mb/s PHR it does produce.
+        if (!phr_rate_is_implemented(p.phr_rate)) {
+            unsup("phy.phr_rate",
+                  "PHR rate " + std::string(phr_rate_to_string(p.phr_rate)) +
+                      " is not implemented: " + phr_rate_unsupported_reason(p.phr_rate) +
+                      " It is NOT compared with phy.data_rate (" +
+                      data_rate_to_string(p.data_rate) +
+                      "): the PHR and the payload are separate modulations, and the "
+                      "data-rate field carried inside the PHR describes the payload",
+                  ConfigReason::Unsupported,
+                  "REQ-PHY-02");
+        }
 
         // MEASURED-PENDING: sync repetitions / SFD mode / data rate.
         if (!d_caps.data_rate_supported(p.data_rate))
@@ -2692,23 +3229,81 @@ private:
         if (p.preamble_symbols == 0)
             cfg_rej("phy.preamble_symbols", ConfigReason::ZeroValue,
                 "preamble length is required");
-        else if (!d_caps.sync_repetitions_supported(p.preamble_symbols))
-            unsup("phy.preamble_symbols",
-                  "preamble length " + twr_int_to_text(p.preamble_symbols) +
-                      " is not in the capability whitelist: " + d_caps.pending_reason,
-                  ConfigReason::Unsupported,
-                  "REQ-PHY-01");
+        else {
+            // Gate 1: the length must be a member of PreambleLength, i.e. one
+            // this repository's demodulator / CFO path can actually run.  The
+            // reason names THAT limit and never a chip's capability: the
+            // Qorvo parts' own API accepts 64 through 2048, so "the hardware
+            // cannot do 128" would be a false statement about hardware this
+            // project has never spoken to.
+            PreambleLength plen = PreambleLength::Sym64;
+            if (!preamble_length_from_symbols(p.preamble_symbols, plen)) {
+                unsup("phy.preamble_symbols",
+                      preamble_length_unsupported_reason(p.preamble_symbols),
+                      ConfigReason::Unsupported,
+                      "REQ-PHY-01");
+            }
+            // Gate 2: the length must also be MEASURED for this (native rate,
+            // code, SFD, PSDU, ranging) combination.  Separate from gate 1 on
+            // purpose: a length can be implemented and still unmeasured.
+            if (!d_caps.sync_repetitions_supported(p.preamble_symbols)) {
+                // M0.1 R7: state the SCOPE of the refusal.  For the lengths
+                // Qorvo parts do support, this build's decoder / CFO path is
+                // the limit -- that is not a hardware claim, and the note
+                // carries the vendor citation so C++ and the CSV agree.
+                std::string note = evidence::preamble_length_supported_by_vendor(
+                                       p.preamble_symbols)
+                                       ? std::string(" [") +
+                                             evidence::preamble_length_reject_note(
+                                                 p.preamble_symbols) +
+                                             "]"
+                                       : std::string();
+                unsup("phy.preamble_symbols",
+                      "preamble length " + twr_int_to_text(p.preamble_symbols) +
+                          " is not in the capability whitelist: " +
+                          d_caps.pending_reason + note,
+                      ConfigReason::Unsupported,
+                      "REQ-PHY-01");
+            }
+        }
     }
 
     void check_frame(const TwrConfig& c) const
     {
         const FrameFormatConfig& f = c.frame;
+
+        // ---- which layout? -------------------------------------------------
+        // The profile is an ENUM, so "an arbitrary non-empty profile string"
+        // is not expressible.  An id this build has no implementation for is
+        // refused with its name, never defaulted to frame v1.
+        if (!frame_profile_id_is_supported(f.frame_profile)) {
+            unsup("frame.frame_profile",
+                  "frame profile " + std::string(frame_profile_id_to_string(f.frame_profile)) +
+                      " is not implemented: only the ids named by "
+                      "frame_profile_id_to_string() have a codec, a geometry authority and an "
+                      "encoder in this build. A free-form profile name is never an executable "
+                      "geometry",
+                  ConfigReason::Unsupported,
+                  "REQ-PROTO-06");
+        }
+        // The authority this config is checked against, and the codec profile
+        // whose timestamp width it reports.  Both come from the enum; neither
+        // is read out of the config.
+        FrameProfileGeometry authority;
+        FrameProfile profile;
+        const bool have_profile =
+            frame_profile_id_is_supported(f.frame_profile) &&
+            frame_geometry_for(f.frame_profile, authority) &&
+            frame_profile_for(f.frame_profile, profile);
+
         if (!d_caps.sfd_mode_supported(f.sfd_mode))
             unsup("frame.sfd_mode",
                   std::string("SFD mode ") + sfd_mode_to_string(f.sfd_mode) +
                       " is not in the capability whitelist: " + d_caps.pending_reason,
                   ConfigReason::Unsupported,
                   "REQ-PHY-01");
+        // The raw SFD length is a RESTATEMENT of the mode, never an
+        // independent number: "4z2" and 4 symbols cannot both be stated.
         if (f.sfd_symbols == 0)
             cfg_rej("frame.sfd_symbols", ConfigReason::ZeroValue,
                 "SFD length is required");
@@ -2717,15 +3312,21 @@ private:
                     ConfigReason::FieldConflict,
                     std::string("SFD mode ") + sfd_mode_to_string(f.sfd_mode) + " is " +
                         twr_int_to_text(sfd_mode_symbols(f.sfd_mode)) + " symbols, config states " +
-                        twr_int_to_text(f.sfd_symbols),
+                        twr_int_to_text(f.sfd_symbols) +
+                        "; the length is derived from the mode, not chosen beside it",
                     "REQ-PHY-01");
 
-        if (f.phr_mode == PhrMode::None)
+        // PHR presence/form.  Each unimplemented member carries its own reason
+        // (phr_mode_unsupported_reason); M0 caught only `none` and let
+        // `extended` through as a valid profile.
+        if (f.phr_mode != PhrMode::Standard) {
             unsup("frame.phr_mode",
-                  "a TWR frame without a PHR is not a valid TWR profile; the PHR carries the "
-                  "RANGING bit and the RX timestamp fields",
-                  ConfigReason::OutOfScope,
+                  std::string("PHR mode ") + phr_mode_to_string(f.phr_mode) +
+                      " is not implemented: " + phr_mode_unsupported_reason(f.phr_mode),
+                  f.phr_mode == PhrMode::None ? ConfigReason::OutOfScope
+                                              : ConfigReason::Unsupported,
                   "REQ-PHY-01");
+        }
         if (d_caps.ranging_bit_required && !f.ranging_bit)
             cfg_rej("frame.ranging_bit",
                     ConfigReason::FieldConflict,
@@ -2742,18 +3343,42 @@ private:
         validate_timed_field("frame.sfd_timeout", f.sfd_timeout, /*required=*/false,
                              TimeReferenceEvent::RxEnable, /*require_marker=*/true);
 
-        // exactly one layer appends the FCS
+        // Exactly one layer appends the FCS, and WHICH one is not free.
+        // A config that names the MAC as the appender is DESCRIBABLE -- the
+        // geometry authority has a variant for it, frame_geometry_check()
+        // reports the mac_fcs_bytes that layout requires, and the on-air
+        // length does not change -- but it is not ENCODABLE here:
+        // FrameProfile::fcs_appended_by_modulation_layer is true, so
+        // frame_profile_validate() rejects it, and
+        // FrameProfileGeometry::executable() is false for it.  M0 accepted
+        // such a configuration and then reported a "MAC PSDU" no encoder can
+        // produce, which is the R3 class of defect one layer down.
         if (f.fcs_append == FcsAppender::None)
             cfg_rej("frame.fcs_append",
                     ConfigReason::FieldConflict,
                     "no layer appends the FCS; exactly one of mac/phy must");
+        else if (f.fcs_append == FcsAppender::MacLayer && have_profile) {
+            unsup("frame.fcs_append",
+                  "fcs_append=mac asks for a MAC that builds and appends the FCS itself. The "
+                  "geometry is DESCRIBABLE and the on-air length is unchanged, but this codec "
+                  "only encodes the PHY-appends form: FrameProfileGeometry::executable() is false "
+                  "for the MAC-appends variant and frame_profile_validate() rejects "
+                  "fcs_appended_by_modulation_layer=false",
+                  ConfigReason::Unsupported,
+                  "REQ-API-01");
+        }
         if (f.fcs_bytes == 0)
             cfg_rej("frame.fcs_bytes", ConfigReason::ZeroValue,
                 "FCS length is required");
-        else if (f.fcs_bytes != 2u)
+        else if (have_profile &&
+                 f.fcs_bytes != static_cast<uint16_t>(authority.fcs_bytes_on_air()))
             unsup("frame.fcs_bytes",
-                  "only the 16-bit FCS of this frame profile is implemented (asked for " +
-                      twr_int_to_text(f.fcs_bytes) + " bytes)");
+                  "frame profile " + std::string(frame_profile_id_to_string(f.frame_profile)) +
+                      " has a " + twr_int_to_text(authority.fcs_bytes_on_air()) +
+                      "-byte FCS (IEEE 802.15.4), the config states " +
+                      twr_int_to_text(f.fcs_bytes) + " bytes",
+                  ConfigReason::Unsupported,
+                  "REQ-API-01");
         const bool declared_includes = (f.fcs_append == FcsAppender::MacLayer);
         if (f.mac_psdu_includes_fcs != declared_includes)
             cfg_rej("frame.mac_psdu_includes_fcs",
@@ -2762,29 +3387,49 @@ private:
                         " but mac_psdu_includes_fcs=" + twr_bool_to_text(f.mac_psdu_includes_fcs) +
                         "; exactly one layer appends the FCS",
                     "REQ-API-01");
-        if (f.mac_psdu_includes_fcs && f.geometry.mac_fcs_bytes != f.fcs_bytes)
-            cfg_rej("frame.geometry.mac_fcs_bytes",
-                    ConfigReason::FieldConflict,
-                    "the MAC appends the FCS, so the geometry must reserve " +
-                        twr_int_to_text(f.fcs_bytes) + " bytes, it reserves " +
-                        twr_int_to_text(f.geometry.mac_fcs_bytes));
-        if (!f.mac_psdu_includes_fcs && f.geometry.mac_fcs_bytes != 0)
-            cfg_rej("frame.geometry.mac_fcs_bytes",
-                    ConfigReason::FieldConflict,
-                    "the PHY appends the FCS, so the MAC geometry must reserve 0 FCS bytes, it "
-                    "reserves " + twr_int_to_text(f.geometry.mac_fcs_bytes));
 
-        if (!f.geometry.any_set())
+        // ---- the geometry CLAIM, field by field, against the codec ---------
+        if (!f.geometry.any_set()) {
             cfg_rej("frame.geometry",
                     ConfigReason::EmptyValue,
-                    "the frame profile geometry must be stated explicitly; it is never assumed");
-        if (f.geometry.timestamp_bytes != 0 && f.geometry.timestamp_bytes != 5u &&
-            f.geometry.timestamp_bytes != 4u)
-            cfg_rej("frame.geometry.timestamp_bytes",
-                    ConfigReason::Unsupported,
-                    "only 40-bit (5 byte) and 32-bit (4 byte) timestamp widths are implemented in "
-                    "this frame profile",
-                    "REQ-TIME-04");
+                    "the frame profile geometry must be stated explicitly; it is never assumed. "
+                    "Fill it with frame_geometry_of_profile(frame.frame_profile) so the claim "
+                    "comes from the codec rather than from a literal");
+        } else if (have_profile) {
+            // A claim that disagrees with the codec is a REJECTION PER FIELD,
+            // not a silently-corrected value: an operator who believes the
+            // header is 7 bytes must be told it is 14, not handed a working
+            // config that says something else.
+            //
+            // The authority the claim is checked against follows the FCS owner
+            // the config NAMES, not the one it should name: a MAC-appends
+            // layout is described by frame_geometry_mac_appends_fcs(), which
+            // expects the 2 FCS bytes inside the MAC PSDU.  That way a
+            // MAC-appends claim that forgets to reserve them is caught as the
+            // field disagreement it is, and the separate `fcs_append`
+            // rejection above says the layout is not encodable here at all.
+            const FrameProfileGeometry& named_authority =
+                (f.fcs_append == FcsAppender::MacLayer)
+                    ? frame_geometry_mac_appends_fcs(f.frame_profile)
+                    : authority;
+            const GeometryCheckResult geo = frame_geometry_check(
+                frame_geometry_claim(f.geometry), named_authority, profile);
+            for (size_t i = 0; i < geo.fields.count; ++i) {
+                const GeometryMismatch& m = geo.fields.items[i];
+                cfg_rej(std::string("frame.geometry.") + geometry_field_to_string(m.field),
+                        ConfigReason::FieldConflict,
+                        std::string("the frame codec is the geometry authority: profile ") +
+                            frame_profile_id_to_string(f.frame_profile) + " with FCS appended by " +
+                            fcs_owner_to_string(named_authority.fcs_owner) + " has " +
+                            geometry_field_to_string(m.field) + " = " +
+                            twr_int_to_text(static_cast<int64_t>(m.expected)) +
+                            ", the config claims " +
+                            twr_int_to_text(static_cast<int64_t>(m.actual)) +
+                            ". A claim does not decide the layout: fill the geometry from "
+                            "frame_geometry_of_profile() so there is one source",
+                        "REQ-PROTO-06");
+            }
+        }
 
         // STS: out of scope for phase 1, explicitly.
         if (f.sts_mode != StsMode::Off)
@@ -3595,9 +4240,18 @@ private:
                 "negotiated PSDU " + twr_int_to_text(f.mac_psdu_bytes) +
                     " bytes exceeds the capability maximum " + twr_int_to_text(cap) + " bytes",
                 "REQ-PHY-01");
-        if (static_cast<uint32_t>(f.geometry.phr_bytes) > 127u)
-            cfg_rej("frame.geometry.phr_bytes", ConfigReason::OutOfRange,
-                    "the PHR is at most 127 bytes (extended PHR)");
+
+        // Every length below comes from the codec, through
+        // frame_psdu_bytes() -> FrameProfileGeometry::mac_payload_bytes() ->
+        // frame_length_for().  The config's geometry is a claim, already
+        // checked field by field in check_frame(), and is used here ONLY to
+        // describe the arithmetic back to the operator.
+        FrameProfileGeometry authority;
+        FrameProfile profile;
+        const bool have_profile =
+            frame_profile_id_is_supported(f.frame_profile) &&
+            frame_geometry_for(f.frame_profile, authority) &&
+            frame_profile_for(f.frame_profile, profile);
 
         const FrameType types[] = { FrameType::Poll, FrameType::Response,
             FrameType::Final };
@@ -3605,28 +4259,32 @@ private:
             // `mac_psdu_bytes` is the negotiated MAC PSDU and, when the PHY
             // appends the FCS, EXCLUDES it (see the fcs_append /
             // mac_psdu_includes_fcs cross-check above).  So the comparison
-            // below must be against the MAC bytes only.  Adding fcs_bytes
-            // into `need` made a 29-byte Final payload get compared against a
-            // 31-byte on-air requirement and always overflow; the 127-byte
-            // IEEE limit is separately checked against the on-air length.
-            const uint32_t need = frame_psdu_bytes(f.geometry, t, f.fcs_append);
-            const uint32_t on_air = need +
-                ((f.fcs_append == FcsAppender::PhyLayer) ? f.fcs_bytes : 0u);
+            // below must be against the MAC bytes only.  The 127-byte IEEE
+            // limit is separately checked against the on-air length.
+            const uint32_t need = frame_psdu_bytes(t, f.fcs_append);
+            const uint32_t on_air = have_profile
+                                        ? static_cast<uint32_t>(
+                                              authority.on_air_bytes(t, profile))
+                                        : need + ((f.fcs_append == FcsAppender::PhyLayer)
+                                                      ? f.fcs_bytes
+                                                      : 0u);
             const std::string path =
                 std::string("frame.mac_psdu_bytes[") + frame_type_to_string(t) + "]";
             if (need == 0)
-                continue; // the geometry itself was reported as empty
+                continue; // the profile itself was already reported as unknown
             if (need > static_cast<uint32_t>(f.mac_psdu_bytes))
                 rej(path,
                     ConfigReason::FrameLengthOverflow,
                     ExchangeStatus::Unsupported,
                     std::string("the ") + frame_type_to_string(t) + " frame needs " +
                         twr_int_to_text(static_cast<int64_t>(need)) +
-                        " MAC PSDU bytes (header " +
-                        twr_int_to_text(f.geometry.mac_header_bytes) + " + " +
+                        " MAC PSDU bytes (as frame profile " +
+                        frame_profile_id_to_string(f.frame_profile) + " builds it: header " +
+                        twr_int_to_text(authority.mac_header_bytes()) + " + " +
                         twr_int_to_text(frame_type_timestamp_count(t)) + "x" +
-                        twr_int_to_text(f.geometry.timestamp_bytes) + " timestamps + footer " +
-                        twr_int_to_text(f.geometry.mac_footer_bytes) +
+                        twr_int_to_text(authority.timestamp_bytes(profile)) +
+                        " timestamps + footer " +
+                        twr_int_to_text(authority.mac_footer_bytes()) +
                         (f.fcs_append == FcsAppender::MacLayer
                              ? std::string(" + FCS ") + twr_int_to_text(f.fcs_bytes)
                              : std::string("; the PHY appends the FCS separately")) +
@@ -3643,8 +4301,9 @@ private:
                     std::string("the ") + frame_type_to_string(t) +
                         " frame needs " + twr_int_to_text(static_cast<int64_t>(on_air)) +
                         " on-air PSDU bytes (MAC " + twr_int_to_text(static_cast<int64_t>(need)) +
-                        " + FCS " + twr_int_to_text(f.fcs_bytes) + ") and does not fit the " +
-                        twr_int_to_text(cap) + "-byte PSDU maximum",
+                        " + FCS " + twr_int_to_text(authority.fcs_bytes_on_air()) +
+                        ") and does not fit the " + twr_int_to_text(cap) +
+                        "-byte PSDU maximum",
                     "REQ-PHY-01");
         }
         // The application payload is a separate concept and must fit inside
@@ -3726,12 +4385,17 @@ struct EffectiveConfig {
     double tick_rate_hz = 0.0;
 
     // Frame budget, per frame type, as transmitted (including the FCS exactly
-    // once).
+    // once).  These are the CODEC's numbers, not a re-summation of the
+    // config's geometry claim: see effective_config().
     uint16_t poll_bytes = 0;
     uint16_t response_bytes = 0;
     uint16_t final_bytes = 0;
     uint16_t max_psdu_bytes = 0;
     uint32_t max_timestamp_count = 0;
+    // The PHR of this profile, recorded so no consumer recomputes it: the
+    // number of INFORMATION bytes and the number of transmitted coded bits.
+    uint16_t phr_bytes = 0;
+    uint16_t phr_coded_bits = 0;
 };
 
 // Build the frozen snapshot.  On failure `ok == false`, `validation` holds
@@ -3808,16 +4472,26 @@ effective_config(const TwrConfig& cfg, const Capabilities& caps)
         }
     }
 
-    out.poll_bytes = static_cast<uint16_t>(
-        frame_psdu_bytes(cfg.frame.geometry, FrameType::Poll, cfg.frame.fcs_append) +
-        (cfg.frame.fcs_append == FcsAppender::PhyLayer ? cfg.frame.fcs_bytes : 0));
-    out.response_bytes = static_cast<uint16_t>(
-        frame_psdu_bytes(cfg.frame.geometry, FrameType::Response,
-            cfg.frame.fcs_append) +
-        (cfg.frame.fcs_append == FcsAppender::PhyLayer ? cfg.frame.fcs_bytes : 0));
-    out.final_bytes = static_cast<uint16_t>(
-        frame_psdu_bytes(cfg.frame.geometry, FrameType::Final, cfg.frame.fcs_append) +
-        (cfg.frame.fcs_append == FcsAppender::PhyLayer ? cfg.frame.fcs_bytes : 0));
+    // The frame budget is the CODEC's, computed once through the authority.
+    // M0 re-summed the config's own geometry claim here, which is how a 7-byte
+    // header produced a 9-byte Poll and understated the on-air length; and it
+    // added the FCS from a raw config field, so a wrong fcs_bytes silently
+    // changed the answer.  `on_air_bytes()` is invariant under which layer
+    // appends the FCS, which is exactly the property the budget should have.
+    FrameProfileGeometry authority;
+    FrameProfile profile;
+    if (frame_geometry_for(cfg.frame.frame_profile, authority) &&
+        frame_profile_for(cfg.frame.frame_profile, profile)) {
+        out.poll_bytes = static_cast<uint16_t>(authority.on_air_bytes(FrameType::Poll, profile));
+        out.response_bytes =
+            static_cast<uint16_t>(authority.on_air_bytes(FrameType::Response, profile));
+        out.final_bytes =
+            static_cast<uint16_t>(authority.on_air_bytes(FrameType::Final, profile));
+        // The PHR is present in every frame of this profile; recording its
+        // information size here means a consumer never has to recompute it.
+        out.phr_bytes = static_cast<uint16_t>(authority.phr_bytes());
+        out.phr_coded_bits = authority.phr_coded_bits();
+    }
     return out;
 }
 
@@ -4796,15 +5470,23 @@ inline void write_config_json(const TwrConfig& c, ConfigJsonWriter& w)
     w.put("preamble_symbols", c.phy.preamble_symbols);
     w.put("prf_class", prf_class_to_string(c.phy.prf_class));
     w.put("data_rate", data_rate_to_string(c.phy.data_rate));
-    w.put("phr_rate", data_rate_to_string(c.phy.phr_rate));
+    // PHR rate, in the PHR-rate spelling ("850k" / "same_as_data"), NOT the
+    // payload-rate spelling: the two axes have separate value domains and a
+    // document that used "6p8m" here was describing a PHR this build cannot
+    // transmit.
+    w.put("phr_rate", phr_rate_to_string(c.phy.phr_rate));
     w.end();
 
     w.begin_group("frame");
+    w.put("frame_profile", frame_profile_id_to_string(c.frame.frame_profile));
     w.put("sfd_mode", sfd_mode_to_string(c.frame.sfd_mode));
     w.put("sfd_symbols", c.frame.sfd_symbols);
     w.put_timed("sfd_timeout", c.frame.sfd_timeout);
     w.put("phr_mode", phr_mode_to_string(c.frame.phr_mode));
     w.put("ranging_bit", c.frame.ranging_bit);
+    // The geometry CLAIM is written out verbatim, so a reader can see what the
+    // operator asserted; the validator is what decides whether it agrees with
+    // the codec.
     w.begin_group("geometry");
     w.put("mac_header_bytes", c.frame.geometry.mac_header_bytes);
     w.put("timestamp_bytes", c.frame.geometry.timestamp_bytes);
@@ -5194,7 +5876,7 @@ public:
             }
             if (!found)
                 bad(path + "." + m.first, ConfigReason::UnknownKey,
-                    "key is not part of schema " + std::string("twr-config/1"));
+                    "key is not part of schema twr-config/2");
         }
     }
 
@@ -5375,8 +6057,11 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
                 prf_class_from_string);
             c.phy.data_rate = rd.get_enum<DataRate>(g, p, "data_rate",
                 data_rate_from_string);
-            c.phy.phr_rate = rd.get_enum<DataRate>(g, p, "phr_rate",
-                data_rate_from_string);
+            // PHR rate, read in the PHR-rate domain.  A payload-rate name such
+            // as "6p8m" is now an UnknownEnumValue here, which is the point:
+            // the two axes no longer share a value domain.
+            c.phy.phr_rate = rd.get_enum<PhrRate>(g, p, "phr_rate",
+                phr_rate_from_string);
         }
     }
     {
@@ -5384,11 +6069,14 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
         const json::Value* g = rd.group(p, &root);
         if (g) {
             static const char* const kKeys[] = {
+                "frame_profile",
                 "sfd_mode", "sfd_symbols", "sfd_timeout", "phr_mode", "ranging_bit", "geometry",
                 "mac_psdu_bytes", "mac_psdu_includes_fcs", "fcs_append", "fcs_bytes",
                 "application_payload_bytes", "sts_mode", "sts_length_symbols", nullptr
             };
             rd.reject_unknown_keys(g, p, kKeys);
+            c.frame.frame_profile = rd.get_enum<FrameProfileId>(g, p, "frame_profile",
+                frame_profile_id_from_string);
             c.frame.sfd_mode = rd.get_enum<SfdMode>(g, p, "sfd_mode",
                 sfd_mode_from_string);
             c.frame.sfd_symbols = static_cast<uint16_t>(rd.get_i64(g, p,

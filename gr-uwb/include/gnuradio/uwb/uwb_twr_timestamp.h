@@ -55,6 +55,63 @@
  *   - fractional first-path estimation and its SNR/sign gate arithmetic;
  *   - the SS clock-ratio (SFO) estimate and its validity window.
  * This header only models and validates the *contract* those stages fill in.
+ *
+ * ---------------------------------------------------------------------------
+ * M0.1 corrections to the M0 time contract (defects R4 and R5)
+ * ---------------------------------------------------------------------------
+ *
+ * R4 -- the "exact" flag was not exact.  M0 shipped one boolean,
+ * `TimeInterval::duration_is_tick_exact`, meant as "use ticks, not ns".  It was
+ * computed as `frac == 0 && tick_rate <= 1e9`, i.e. "the interval is whole
+ * ticks AND one tick is at least 1 ns".  The second clause bounds the ns
+ * projection error at less than one tick; it does not make it zero.  At
+ * 737.28 MS/s a 1-tick interval was reported `nanos() == 1` with the flag SET
+ * while the true value is 1.356336806 ns: 0.356 ns silently discarded.  A
+ * report that tells M1 "use ticks when the flag is set" is therefore unsafe.
+ *
+ *   * The flag is split into two honest, independent questions:
+ *       `TimeInterval::is_whole_ticks`         -- is the VALUE a whole number
+ *                                                 of device ticks?
+ *       `TimeInterval::duration_is_lossless_ns` -- does the integer-ns
+ *                                                 projection reproduce the
+ *                                                 value with NO error?
+ *     The second is decided per INTERVAL by an exact rational test
+ *     (`timestamp_tick_ns_projection_is_lossless`), never by a tick-rate
+ *     threshold.  `clock_domain_tick_is_ns_or_coarser()` survives only as a
+ *     RATE-LEVEL QUERY and is documented as never being the lossless test.
+ *     `duration_is_tick_exact` is GONE; the misleading name must not survive.
+ *   * The nanosecond projection has a stated rounding rule -- TRUNCATE toward
+ *     zero, error strictly inside the interval and always in the safe
+ *     direction for a reply-delay budget.  It is applied explicitly, not left
+ *     as an accident of `Duration::from_seconds`.
+ *   * `RelativeTickInterval` + `timestamp_relative_interval()` is the SAFE form
+ *     for M1: the exact rational tick value in a type that has NO nanosecond
+ *     field, so a lossy projection cannot be read even by accident.
+ *
+ * R5 -- modular ordering accepted the ambiguous case.  M0's
+ * `timestamp_precedes()` refused only `dist > P/2`, so a pair exactly half a
+ * period apart was reported "a precedes b" AND "b precedes a", and the
+ * sub-tick fraction was ignored, so 0.25 and 0.75 on the same tick compared
+ * equal.
+ *
+ *   * The half-period bound is now STRICT (`dist < P/2`) and is applied
+ *     consistently in both directions, in `timestamp_precedes()` and in the new
+ *     `timestamp_compare()` alike.
+ *   * `timestamp_compare()` orders sub-tick fractions exactly (with the
+ *     borrow that a modular difference needs), is three-valued, and returns
+ *     `TimestampOrder::Indeterminate` -- never an order -- when no definite
+ *     relation exists.  It ALWAYS writes `out`, so a caller that ignores the
+ *     return value still cannot read an invented order.
+ *   * The half-period rule is documented as the strategy it is: a sound bound
+ *     that needs no extra history, sound only up to P/2, and NOT a hardware
+ *     law.  `TimestampOrderBudget` lets a caller declare the real
+ *     maximum-exchange-duration bound; the declaration is clamped to P/2
+ *     because exceeding it would destroy antisymmetry.
+ *   * `raw_tick_delta()` still ACCEPTS d == P/2, deliberately and for a
+ *     different reason: `timestamp_interval()` is given the (later, earlier)
+ *     pair, so the sign is supplied and only the magnitude is derived, and at
+ *     d == P/2 the magnitude is unique.  It is only ORDERING that has to
+ *     derive the direction itself.
  */
 
 #ifndef INCLUDED_GNURADIO_UWB_UWB_TWR_TIMESTAMP_H
@@ -615,12 +672,204 @@ inline double clock_domain_wrap_period_seconds(const ClockDomain& d)
     return static_cast<double>(p) / d.tick_rate_hz;
 }
 
-// True when one tick is at least one nanosecond, i.e. the integer-ns
-// `Duration` view of an interval loses nothing.  DW UUS ticks
-// (1/(499.2e6*128) s ~ 15.65 ps) do NOT satisfy this.
+// RATE-LEVEL QUERY ONLY.  True when one tick is at least one nanosecond long.
+//
+// M0.1 (defect R4): this predicate does NOT say that an integer-nanosecond
+// projection of a tick-space value is lossless, and it never may be used that
+// way.  At 998.4 MS/s one tick is 1.0016 ns and at 737.28 MS/s it is
+// 1.3563 ns, so a *whole* number of ticks still projects onto a NON-integer
+// number of nanoseconds: a 1-tick interval at 737.28 MS/s is 1.356336806... ns
+// and the integer-ns view is 1 ns, i.e. 0.356 ns of discarded precision.  A
+// tick being "at least 1 ns" bounds the projection error at < 1 tick; it does
+// not make that error zero.  For the lossless question, which is per-INTERVAL
+// and not per-domain, use `timestamp_tick_ns_projection_is_lossless()` (or the
+// `is_whole_ticks` / `duration_is_lossless_ns` pair on a TimeInterval).
+//
+// It remains useful as a cheap coarse/fine screen -- a sub-nanosecond tick
+// means essentially every interval is lossy -- and as a documented statement
+// about the grid, which is why it is kept at all.
+//
+// DW UUS ticks (1/(499.2e6*128) s ~ 15.65 ps) do NOT satisfy this at all.
 inline bool clock_domain_tick_is_ns_or_coarser(const ClockDomain& d)
 {
     return std::isfinite(d.tick_rate_hz) && d.tick_rate_hz <= 1.0e9;
+}
+
+// ---------------------------------------------------------------------------
+// R4: exact nanosecond projection
+// ---------------------------------------------------------------------------
+//
+// The nanosecond field of a `Duration` is a *projection*: the interval's exact
+// value is `ticks/rate + (num/den)/rate` seconds, and a `Duration` can only
+// hold an integer number of nanoseconds.  Two questions must not be confused:
+//
+//   Q1 "is the tick-space value a whole number of device ticks?"  -- a
+//       property of the VALUE.  Answer: `frac_num == 0` (see
+//       `TimeInterval::is_whole_ticks` / `time_interval_is_whole_ticks()`).
+//   Q2 "does the integer-nanosecond projection lose anything?" -- a property
+//       of the VALUE *AND* the tick rate.  Answer:
+//       `timestamp_tick_ns_projection_is_lossless()`.
+//
+// The old single flag conflated them, and answered Q2 with the rate-level test
+// `tick_rate <= 1e9`.  That is the R4 defect: at 737.28 MS/s a 1-tick interval
+// was reported `duration_is_tick_exact = true` with `nanos() == 1` while the
+// true value is 1.356336806 ns, i.e. 0.356 ns had silently been discarded.
+//
+// The tests below are EXACT, not floating-point tolerances.  A finite positive
+// double is exactly `m * 2^e` with `m` a 53-bit integer, so
+// `1e9 / tick_rate_hz` is exactly a rational and can be computed with integer
+// arithmetic only.
+
+namespace detail {
+
+// 1e9 == 2^9 * 1953125, and 1953125 is odd.
+inline constexpr int64_t kNsPerSecondOdd = 1953125LL;
+inline constexpr int kNsPerSecondPow2 = 9;
+
+} // namespace detail
+
+// EXACT nanoseconds in one tick of `rate_hz`, as a reduced rational
+// `num/den` (num >= 1, den >= 1).  Returns false only when the exact value does
+// not fit the bounded rational, which needs an absurd tick rate; the caller
+// must then treat every nanosecond projection as lossy.
+inline bool clock_domain_ns_per_tick_exact(double tick_rate_hz,
+                                           int64_t& out_num,
+                                           int64_t& out_den)
+{
+    out_num = 0;
+    out_den = 0;
+    if (!std::isfinite(tick_rate_hz) || tick_rate_hz <= 0.0)
+        return false;
+
+    // rate == mant * 2^exp exactly (frexp/ldexp are exact for binary FP).
+    int be = 0;
+    const double mant = std::ldexp(std::frexp(tick_rate_hz, &be), 53);
+    if (!(mant >= 4503599627370496.0 && mant < 9007199254740992.0))
+        return false; // not the expected normal form
+    uint64_t m = static_cast<uint64_t>(mant);
+    int e = be - 53; // rate == m * 2^e
+    while ((m & 1u) == 0u) { // absorb the powers of two into e; m ends up odd
+        m >>= 1;
+        ++e;
+    }
+
+    // ns_per_tick = 1e9 / (m * 2^e) = (2^9 * 1953125) / (m * 2^e)
+    const int k = detail::kNsPerSecondPow2 - e;
+    int64_t num = 0;
+    int64_t den = 0;
+    if (k >= 0) {
+        if (k > 42) // 1953125 * 2^43 > INT64_MAX
+            return false;
+        num = detail::kNsPerSecondOdd * (static_cast<int64_t>(1) << k);
+        den = static_cast<int64_t>(m);
+    } else {
+        const int s = -k;
+        if (s >= 62 || m > (static_cast<uint64_t>(INT64_MAX) >> s))
+            return false;
+        num = detail::kNsPerSecondOdd;
+        den = static_cast<int64_t>(m) << s;
+    }
+    const int64_t g = detail::ts_gcd(num, den);
+    out_num = num / g;
+    out_den = den / g;
+    return true;
+}
+
+namespace detail {
+
+// EXACT test: is `ticks + frac_num/frac_den` ticks an integer number of
+// nanoseconds at `rate_hz`?  The exact value is
+//
+//     (ticks*den + num) * Np / (den * Dp)      with Np/Dp = ns per tick
+//
+// and the integrality question is answered WITHOUT ever forming that product.
+// With `g = gcd(Dp*den, Np)`, `Dp*den | X*Np` is equivalent to
+// `(Dp*den)/g | X` for `X = ticks*den + num`, because `gcd(D/g, Np/g) == 1`.
+// Only `X` and `Dp*den` are formed, both of which are checked for overflow; a
+// value that cannot be proven exact is reported NOT lossless, never guessed.
+inline bool ts_tick_ns_projection_is_lossless(double tick_rate_hz,
+                                              int64_t ticks,
+                                              int32_t frac_num,
+                                              uint32_t frac_den)
+{
+    int64_t np = 0;
+    int64_t dp = 0;
+    if (!clock_domain_ns_per_tick_exact(tick_rate_hz, np, dp))
+        return false;
+    if (ticks < 0 || frac_num < 0 || (frac_den == 0u && frac_num != 0))
+        return false;
+
+    int64_t x = ticks; // X
+    int64_t dd = dp;   // Dp*den
+    if (frac_den != 0u) {
+        const int64_t fden = static_cast<int64_t>(frac_den);
+        if (dp > (std::numeric_limits<int64_t>::max() / fden))
+            return false;
+        dd = dp * fden;
+        if (ticks > (std::numeric_limits<int64_t>::max() - frac_num) / fden)
+            return false;
+        x = ticks * fden + frac_num;
+    }
+    const int64_t g = ts_gcd(dd, np);
+    return (x % (dd / g)) == 0;
+}
+
+// ---------------------------------------------------------------------------
+// R4: the nanosecond projection rounding rule, made explicit
+// ---------------------------------------------------------------------------
+//
+// `Duration` holds INTEGER nanoseconds, so a real-valued interval must be
+// rounded.  The rule in this header is **truncate toward zero**:
+//
+//   ns = trunc(exact_seconds * 1e9)
+//
+// Why truncation, and not round-half-away-from-zero or round-half-even:
+//
+//   * Direction.  A TWR reply-delay budget is an upper bound: over-reporting
+//     the elapsed time is how a late Response/Final becomes a "successful"
+//     exchange that was really late.  Truncation can only under-report, i.e.
+//     err toward "we still have time", which is the direction a human reader
+//     also assumes when they see a smaller number.
+//   * Stability.  Half-way cases are exactly where a double lands on either
+//     side depending on the accumulated double, so a tie rule makes the
+//     emitted integer depend on the path taken to compute the seconds (this
+//     header computes `ticks/rate` and `frac/rate` separately).  Truncation is
+//     a single monotone map, so the same tick value always yields the same
+//     integer regardless of how the sum was formed.
+//   * The error is bounded by exactly 1 ns, always strictly inside the
+//     interval, and is always in the same direction; `half-away` would make the
+//     error two-sided and up to 0.5 ns, and would still not be exact.
+//
+// The consequence, stated once so no caller re-derives it: for a tick rate
+// finer than 1 GHz, or for any interval with a sub-tick fraction, the
+// nanosecond field is a LOSSY projection.  It is fine for JSON, logs and
+// API display.  It is NOT fine for ToF.  For ToF use
+// `timestamp_relative_interval()`, whose type has no nanosecond field at all.
+inline bool ts_project_seconds_to_nanos_trunc(double seconds, int64_t& out_ns)
+{
+    out_ns = 0;
+    if (!std::isfinite(seconds))
+        return false;
+    const double ns = seconds * 1e9;
+    const double limit = 9223372036854775808.0; // |INT64_MIN| exactly
+    if (!(ns > -limit) || !(ns < limit))
+        return false;
+    const double t = std::trunc(ns);
+    if (!(t >= -9223372036854774784.0)) // largest double < |INT64_MIN| + 1
+        return false;
+    out_ns = static_cast<int64_t>(t);
+    return true;
+}
+
+} // namespace detail
+
+// Public spelling of the R4 rules above.
+inline bool timestamp_tick_ns_projection_is_lossless(double tick_rate_hz,
+                                                     int64_t ticks,
+                                                     int32_t frac_num,
+                                                     uint32_t frac_den)
+{
+    return detail::ts_tick_ns_projection_is_lossless(tick_rate_hz, ticks, frac_num, frac_den);
 }
 
 // Same counter, ignoring the epoch: same name, same tick rate, same width.
@@ -1059,12 +1308,32 @@ inline TickDelta raw_tick_delta(const ClockDomain& d, int64_t later_ticks, int64
 // A validated, same-domain interval.
 //
 // `ticks` + `frac_num`/`frac_den` are the EXACT tick-space value, including
-// the sub-tick part.  `duration` is the integer-nanosecond view required by
-// REQ-API-02, converted from the full tick+fraction value; for domains whose
-// tick is finer than a nanosecond (DW UUS, ~15.65 ps) that projection is
-// necessarily a coarse rounding, which is exactly what `duration_is_tick_exact`
-// reports.  The ToF core must use the tick-space fields, never the nanosecond
-// projection, whenever `duration_is_tick_exact` is false.
+// the sub-tick part.  They are the only fields the ToF core may consume.
+//
+// `duration` is the REQ-API-02 integer-nanosecond view of the SAME value.  It
+// is a *projection* and `duration_is_lossless_ns` says whether it is a faithful
+// one.  M0.1 (defect R4) split the old, misleading `duration_is_tick_exact`
+// into two honest flags:
+//
+//   `is_whole_ticks`         the tick-space value is a whole number of device
+//                            ticks (there is no sub-tick fraction).  A
+//                            statement about the VALUE only.
+//   `duration_is_lossless_ns` `duration` reproduces the exact interval with no
+//                            error at all, i.e. the exact value is an integer
+//                            number of nanoseconds.  A statement about the
+//                            VALUE *AND* the tick rate; it is false whenever
+//                            the rate is not an exact sub-multiple of 1 GHz
+//                            for this particular tick count, and false for
+//                            every sub-tick fraction that is not itself a
+//                            whole number of nanoseconds.
+//
+// When `duration_is_lossless_ns` is false, `duration` is a TRUNCATION whose
+// absolute error is < 1 ns (see `detail::ts_project_seconds_to_nanos_trunc`).
+// That is acceptable for JSON / logs / the public API.  It is NOT acceptable as
+// an input to the ToF math: feeding it in would inject a quantisation error
+// that is comparable to the whole measurement.  Use
+// `timestamp_relative_interval()` instead -- its type deliberately has no
+// nanosecond field.
 struct TimeInterval {
     TimeIntervalStatus status = TimeIntervalStatus::InvalidTimestamp;
 
@@ -1078,8 +1347,29 @@ struct TimeInterval {
     bool wrapped = false;
 
     Duration duration = Duration();
-    bool duration_is_tick_exact = false;
+
+    // R4 (a): the tick-space value is a whole number of device ticks.
+    bool is_whole_ticks = false;
+
+    // R4 (b): `duration` is a LOSSLESS record of the interval.  When false,
+    // `duration` is a truncation with < 1 ns error and must not drive ToF.
+    bool duration_is_lossless_ns = false;
 };
+
+// The R4 whole-tick predicate, stated once.  True when the tick-space value
+// carries no sub-tick fraction.
+inline bool time_interval_is_whole_ticks(const TimeInterval& ti)
+{
+    return ti.frac_num == 0;
+}
+
+// The R4 lossless-projection predicate, stated once, for an interval's tick
+// fields.  See `timestamp_tick_ns_projection_is_lossless()`.
+inline bool time_interval_ns_projection_is_lossless(const TimeInterval& ti)
+{
+    return detail::ts_tick_ns_projection_is_lossless(
+        ti.domain.tick_rate_hz, ti.ticks, ti.frac_num, ti.frac_den);
+}
 
 // The central safety function (REQ-TIME-01).
 //
@@ -1234,32 +1524,46 @@ inline TimeInterval timestamp_interval(const Timestamp& later, const Timestamp& 
 
     r.ticks = whole;
 
-    // 10. nanosecond projection.  Req-API-02 wants SI time at the API
+    // 10. nanosecond projection.  REQ-API-02 wants SI time at the API
     //     boundary; the tick-space fields above stay exact for sub-nanosecond
-    //     domains such as DW UUS.  `duration_is_tick_exact` is true only when
-    //     the interval is a whole number of ticks AND one tick spans at least
-    //     a nanosecond -- then `duration` is within one tick period (< 1 ns)
-    //     of the exact value and nothing finer was discarded.
-    r.duration_is_tick_exact = (r.frac_den == 0u) &&
-                               clock_domain_tick_is_ns_or_coarser(r.domain);
+    //     domains such as DW UUS.  The projection is TRUNCATED toward zero and
+    //     its exactness is decided here by actually testing the conversion
+    //     (R4) -- never by the tick rate alone.
+    r.is_whole_ticks = (r.frac_den == 0u);
+    r.duration_is_lossless_ns = detail::ts_tick_ns_projection_is_lossless(
+        r.domain.tick_rate_hz, r.ticks, r.frac_num, r.frac_den);
+
     double secs = static_cast<double>(whole) / r.domain.tick_rate_hz;
     if (r.frac_den != 0u) {
         secs += (static_cast<double>(r.frac_num) / static_cast<double>(r.frac_den)) /
                 r.domain.tick_rate_hz;
     }
-    if (!Duration::from_seconds(secs, r.duration)) {
+    int64_t ns = 0;
+    if (!detail::ts_project_seconds_to_nanos_trunc(secs, ns)) {
+        // A rejected interval is EMPTY, not partially populated: no tick count
+        // and no "whole ticks" claim survive a failed projection, so a caller
+        // that ignores `status` sees a zeroed value rather than a tick count it
+        // might mistake for a measurement.
         r.status = TimeIntervalStatus::DurationOutOfRange;
         r.ticks = 0;
         r.frac_num = 0;
         r.frac_den = 0u;
+        r.is_whole_ticks = false;
+        r.duration_is_lossless_ns = false;
         return r;
     }
+    r.duration = Duration::from_nanos(ns);
 
     r.status = TimeIntervalStatus::Ok;
     return r;
 }
 
 // Bool-returning convenience form for call sites that only want the Duration.
+//
+// M0.1 (R4) WARNING: this is the *projected* form.  It is right for JSON,
+// logs and the public API, and wrong as a ToF input unless the interval's
+// `duration_is_lossless_ns` is true.  The ToF core must use
+// `timestamp_relative_interval()`.
 inline bool timestamp_interval_to_duration(const Timestamp& later,
                                            const Timestamp& earlier,
                                            Duration& out,
@@ -1273,13 +1577,491 @@ inline bool timestamp_interval_to_duration(const Timestamp& later,
     return true;
 }
 
-// Ordering helper with the same domain/epoch gate as `timestamp_interval()`.
-// `out` is set to true when `a` is strictly earlier than `b`, false when the
-// two denote the same instant.  Returns false (leaving `out` untouched) when
-// the two are not on one timeline, when either is structurally invalid, or
-// when the relation is ambiguous modulo the wrap.  The sub-tick fraction is
-// not consulted: two timestamps one fraction apart compare equal here, which
-// is harmless for ordering and keeps the check purely modular.
+// ===========================================================================
+// RelativeTickInterval -- the ONLY interval type the ToF core may consume
+// ===========================================================================
+//
+// M0.1 (R4).  The review's finding was that a report telling M1 "use ticks
+// when the exact flag is set" is unsafe, because the flag itself was wrong.
+// So the safe form is made structurally safe instead: `RelativeTickInterval`
+// has NO nanosecond field at all.  There is nothing lossy to reach for, no
+// predicate to get wrong, and no way for a future caller to read a truncated
+// projection into a distance.
+//
+// Everything here is the exact rational tick value of the interval, and
+// `tick_rate_hz` is the domain's.  Cross-domain conversion is still M1's job
+// and is only allowed between two of these that have already been validated.
+struct RelativeTickInterval {
+    bool valid = false;
+
+    ClockDomain domain;
+    TimestampMarker later_marker = TimestampMarker::RmarkerRx;
+    TimestampMarker earlier_marker = TimestampMarker::RmarkerTx;
+
+    int64_t ticks = 0;    // >= 0 whole device ticks
+    int32_t frac_num = 0; // 0 when exact, else 0 < num < den <= 32767
+    uint32_t frac_den = 0;
+    bool wrapped = false;
+
+    bool is_valid() const { return valid; }
+
+    // R4 (a): whole number of device ticks, no sub-tick fraction.
+    bool is_whole_ticks() const { return valid && frac_num == 0; }
+
+    // R4 (b): would an integer-nanosecond `Duration` be a lossless record of
+    // this value?  The ToF core does not need the answer -- it must use the
+    // tick fields regardless -- but callers that must emit SI time need it in
+    // order to label the projection honestly.
+    bool ns_projection_is_lossless() const
+    {
+        return valid && detail::ts_tick_ns_projection_is_lossless(
+                            domain.tick_rate_hz, ticks, frac_num, frac_den);
+    }
+
+    // EXACT: the interval as a rational number of TICKS,
+    //     value == out_num / out_den,
+    // from which seconds follow as value/tick_rate_hz.  This is the form M1's
+    // SS clock-ratio and DS non-symmetric formulas should consume, so that no
+    // floating point enters before the final division.  Returns false only on
+    // an int64 overflow of `ticks*den + num` (never on a valid, small
+    // interval); it is refused, never rounded.
+    bool exact_ratio(int64_t& out_num, int64_t& out_den) const
+    {
+        if (!valid)
+            return false;
+        if (frac_den == 0u) {
+            out_num = ticks;
+            out_den = 1;
+            return true;
+        }
+        const int64_t den = static_cast<int64_t>(frac_den);
+        if (ticks > (std::numeric_limits<int64_t>::max() - frac_num) / den)
+            return false;
+        out_num = ticks * den + frac_num;
+        out_den = den;
+        return true;
+    }
+
+    // The sub-tick fraction as a double in [0, 1).  CONVENIENCE ONLY: for
+    // frac_den > 2^53 a double cannot represent every rational, so the ToF
+    // math must use `exact_ratio()` rather than this.
+    double tick_fraction() const
+    {
+        if (!valid || frac_den == 0u)
+            return 0.0;
+        return static_cast<double>(frac_num) / static_cast<double>(frac_den);
+    }
+
+    // Seconds as a double.  DISPLAY / LOG / ORACLE COMPARISON ONLY: this is the
+    // projected number, subject to the truncating nanosecond rule and to
+    // double rounding, and it is NOT what a distance should be computed from.
+    double seconds() const
+    {
+        if (!valid)
+            return 0.0;
+        double t = static_cast<double>(ticks);
+        if (frac_den != 0u)
+            t += tick_fraction();
+        return t / domain.tick_rate_hz;
+    }
+};
+
+// Project a validated interval into the exact, projection-free form.  Runs
+// exactly the same gate sequence as `timestamp_interval()` (domain, epoch,
+// marker pair, correction chain, wrap resolution, exact sub-tick combination),
+// so it cannot be more permissive than the interval it is derived from.
+inline bool timestamp_relative_interval(const Timestamp& later,
+                                        const Timestamp& earlier,
+                                        RelativeTickInterval& out,
+                                        TimeIntervalStatus& status)
+{
+    const TimeInterval ti = timestamp_interval(later, earlier);
+    status = ti.status;
+    if (ti.status != TimeIntervalStatus::Ok)
+        return false;
+
+    RelativeTickInterval r;
+    r.valid = true;
+    r.domain = ti.domain;
+    r.later_marker = ti.later_marker;
+    r.earlier_marker = ti.earlier_marker;
+    r.ticks = ti.ticks;
+    r.frac_num = ti.frac_num;
+    r.frac_den = ti.frac_den;
+    r.wrapped = ti.wrapped;
+    out = r;
+    return true;
+}
+
+inline bool timestamp_relative_interval(const Timestamp& later,
+                                        const Timestamp& earlier,
+                                        RelativeTickInterval& out)
+{
+    TimeIntervalStatus ignored = TimeIntervalStatus::Ok;
+    return timestamp_relative_interval(later, earlier, out, ignored);
+}
+
+// An explicit SI projection of the exact form, for the API/JSON boundary.  The
+// caller is told whether that projection lost anything, so a truncated integer
+// can never be mistaken for a measurement.
+inline bool relative_interval_to_duration(const RelativeTickInterval& ri,
+                                          Duration& out,
+                                          TimeIntervalStatus& status)
+{
+    if (!ri.valid) {
+        status = TimeIntervalStatus::InvalidTimestamp;
+        return false;
+    }
+    int64_t ns = 0;
+    if (!detail::ts_project_seconds_to_nanos_trunc(ri.seconds(), ns)) {
+        status = TimeIntervalStatus::DurationOutOfRange;
+        return false;
+    }
+    out = Duration::from_nanos(ns);
+    status = TimeIntervalStatus::Ok;
+    return true;
+}
+
+// ===========================================================================
+// Ordering (M0.1 / R5)
+// ===========================================================================
+//
+// The half-period rule and what it actually rests on
+// -------------------------------------------------
+//
+// A wrapping counter stores `ticks mod 2^bits`.  Given only two readings, the
+// forward distance from `a` to `b` is known only modulo the period: it is
+// `d`, or `d + P`, or `d + 2P`, ...  If the caller can state an upper bound B
+// on the true forward distance, then `d` is the unique candidate in (0, B)
+// provided B <= P.  The textbook choice B = P/2 ("half period") needs NO
+// extra information at all: it is the largest bound that is guaranteed sound
+// for arbitrary serial numbers, and it makes the comparison antisymmetric,
+// because the two directions sum to exactly P and so at most one of them can
+// be < P/2.
+//
+// Consequences, all of which this header now enforces:
+//
+//   * EXACTLY P/2 IS AMBIGUOUS.  At d == P/2 the forward and backward
+//     distances are equal, so nothing in the two numbers says which one a and
+//     b are.  M0 accepted it (`d > P/2` refused only what is strictly greater)
+//     and so reported "a precedes b" AND "b precedes a" for the same pair.
+//     The rule is now strict: `d < P/2`, so d == P/2 is REFUSED in both
+//     directions.
+//   * HALF PERIOD IS A STRATEGY, NOT A HARDWARE LAW.  It is the right default
+//     only when no additional history exists.  A TWR exchange does have such a
+//     bound: an SS/DS exchange at 499.2e6*128 UUS is bounded by the reply
+//     delay plus a timeout, a few hundred microseconds at most, i.e. far below
+//     2^39 ticks on a 40-bit DW field.  A caller that knows its real budget
+//     passes it in a `TimestampOrderBudget`, which is both stricter (it refuses
+//     stale or spoofed readings earlier) and honest about what it assumes.
+//   * A REQUESTED BUDGET IS CLAMPED TO P/2.  Asking for more than P/2 would
+//     let both directions resolve, which is exactly the R5 defect; the
+//     request is therefore reduced, not honoured, and the effective window is
+//     readable through `timestamp_order_window_ticks()`.
+//   * THIS DOES NOT APPLY TO INTERVALS.  `raw_tick_delta()` still accepts
+//     d == P/2, and that is not an inconsistency: `timestamp_interval()` is
+//     handed an explicit (later, earlier) pair, so the SIGN is supplied by the
+//     caller and only the magnitude is derived, and at d == P/2 the magnitude
+//     is unique.  It is only ORDERING -- deriving which of two numbers came
+//     first -- that has no such external information, and that is where the
+//     strict bound applies.
+//
+// WHICH ENTRY POINT MAY THE ToF CORE USE?
+//
+//   `timestamp_compare()`      YES.  Exact sub-tick ordering, budget-checked,
+//                              three-valued, and it can return "no order
+//                              exists" instead of guessing.
+//   `timestamp_precedes()`     NO for anything that decides a distance, a
+//                              deadline or a frame field.  It is a
+//                              whole-tick, fraction-agnostic convenience kept
+//                              for adapter bookkeeping and tests; M0 already
+//                              documented that it ignores the sub-tick
+//                              fraction, and this header keeps that
+//                              restriction explicit.
+
+// Tri-state ordering.  `Indeterminate` is the "does not exist" answer: it is
+// never reported as an order, and `timestamp_compare()` returns false whenever
+// it writes it.
+enum class TimestampOrder : uint8_t {
+    Indeterminate = 0, // no definite order: different timeline, invalid input,
+                       // or the relation is ambiguous under the budget
+    Equal = 1,         // the same instant
+    Earlier = 2,       // `a` is strictly before `b`
+    Later = 3          // `a` is strictly after `b`
+};
+
+inline const char* timestamp_order_to_string(TimestampOrder o)
+{
+    switch (o) {
+    case TimestampOrder::Indeterminate:
+        return "indeterminate";
+    case TimestampOrder::Equal:
+        return "equal";
+    case TimestampOrder::Earlier:
+        return "earlier";
+    case TimestampOrder::Later:
+        return "later";
+    }
+    return "invalid";
+}
+
+// Declared EXCLUSIVE upper bound on the forward distance of any ordering
+// relation, in WHOLE TICKS of the domain.  "Exclusive" and "whole ticks" are
+// both deliberate:
+//
+//   * whole ticks, because the resolvability test is then
+//     `floor(distance) < budget`.  A sub-tick fraction can therefore never
+//     change the outcome, and no cross-multiplication is needed.  Callers that
+//     want a fractional bound express it by flooring it themselves.
+//   * exclusive, so that the budget has EXACTLY the same meaning as the half
+//     period it defaults to: a relation resolves only when its forward
+//     distance is strictly below the window.  `explicit_ticks(4000)` therefore
+//     resolves up to 3999 ticks and refuses 4000, matching `4000 < 4000` being
+//     false.  Using `<=` here would make the budget and the half period mean
+//     different things for the same number.
+//
+// Use 0 (the default) to mean "the domain's half period", i.e. assume nothing
+// beyond what the counter width guarantees.
+struct TimestampOrderBudget {
+    int64_t max_forward_ticks = 0;
+
+    bool is_valid() const { return max_forward_ticks >= 0; }
+
+    static TimestampOrderBudget half_period() { return TimestampOrderBudget{0}; }
+    static TimestampOrderBudget explicit_ticks(int64_t ticks)
+    {
+        return TimestampOrderBudget{ticks < 0 ? 0 : ticks};
+    }
+};
+
+// The window actually used, after clamping an explicit budget to the half
+// period.  False for a negative budget.  A no-wrap (monotonic) domain has no
+// modular ambiguity, so the window is unbounded there unless the caller
+// declared one -- in which case the declaration is still enforced, because a
+// caller that knows its exchange cannot be longer than N ticks wants a
+// refusal, not a verdict, when it is.
+inline bool timestamp_order_window_ticks(const ClockDomain& d,
+                                          const TimestampOrderBudget& budget,
+                                          int64_t& out_window)
+{
+    out_window = 0;
+    if (!clock_domain_is_valid(d) || !budget.is_valid())
+        return false;
+    const uint64_t p = clock_domain_wrap_period(d);
+    const int64_t half = (p == 0u) ? 0
+                                   : static_cast<int64_t>(p / 2u);
+    if (budget.max_forward_ticks == 0) {
+        out_window = (p == 0u) ? std::numeric_limits<int64_t>::max() : half;
+        return true;
+    }
+    if (p == 0u) {
+        out_window = budget.max_forward_ticks;
+        return true;
+    }
+    out_window = budget.max_forward_ticks < half ? budget.max_forward_ticks : half;
+    return true;
+}
+
+// EXACT comparison of two normalized sub-tick fractions; den == 0 means 0/1.
+// Returns -1, 0 or +1.  num < 32767 and den <= 32767, so num*den < 2^30 and
+// int64 cannot overflow.
+inline int timestamp_fraction_compare(int32_t a_num, uint32_t a_den,
+                                      int32_t b_num, uint32_t b_den)
+{
+    if (a_num == 0)
+        return b_num == 0 ? 0 : -1;
+    if (b_num == 0)
+        return 1;
+    const int64_t l = static_cast<int64_t>(a_num) * static_cast<int64_t>(b_den);
+    const int64_t r = static_cast<int64_t>(b_num) * static_cast<int64_t>(a_den);
+    if (l < r)
+        return -1;
+    if (l > r)
+        return 1;
+    return 0;
+}
+
+// The denominator a DIFFERENCE of two sub-tick fractions may need.
+//
+// `Timestamp::frac_den` is capped at kMaxTimestampFractionDenominator (32767)
+// so that any single stored value stays small.  The difference of two such
+// values has denominator lcm(den_a, den_b), which can be as large as
+// 32767*32766 ~ 1.07e9 even when both inputs are perfectly legal and reduced.
+// Capping a difference at 32767 would therefore refuse ordinary inputs such
+// as 1/32767 - (-1/32766), so the modular-distance helper carries its own,
+// wider, exact bound.  It is deliberately a DIFFERENT constant from the
+// timestamp one, and it is not a stored-timestamp constraint.
+inline constexpr uint32_t kMaxFractionDifferenceDenominator = 32767u * 32767u;
+
+// Exact forward distance from `a` to `b` on a wrapping counter, in ticks plus
+// a normalized sub-tick fraction, always in [0, period).
+//
+//   m = (b.ticks - a.ticks) mod P            integer part from the tick grid
+//   D = m + (b.frac - a.frac)                exact forward distance
+//
+// When b's fraction is below a's, `m + (b.frac - a.frac)` lands in (m-1, m),
+// so the whole-tick part DECREASES by one and the fraction wraps up to
+// `1 - a.frac`.  Getting that sign wrong is not cosmetic: 255.75 -> 0.25 on an
+// 8-bit counter is a distance of 1/2 tick, not of 2 1/4 ticks, and the two
+// answers sit on opposite sides of a budget boundary.
+struct ModularTickDistance {
+    bool ok = false;
+    int64_t ticks = 0;     // in [0, period-1]
+    int32_t frac_num = 0;  // 0, or 0 < num < den <= 32767
+    uint32_t frac_den = 0;
+    bool wrapped = false; // the integer tick difference itself crossed the wrap
+};
+
+inline ModularTickDistance modular_tick_distance(const Timestamp& a, const Timestamp& b)
+{
+    ModularTickDistance r;
+    if (!timestamp_is_self_consistent(a) || !timestamp_is_self_consistent(b))
+        return r;
+    if (!clock_domain_is_comparable(a.domain, b.domain))
+        return r;
+    const uint64_t p = clock_domain_wrap_period(a.domain);
+    if (p == 0u)
+        return r; // a monotonic counter has no modular distance
+
+    const uint64_t from = static_cast<uint64_t>(a.ticks);
+    const uint64_t to = static_cast<uint64_t>(b.ticks);
+    r.wrapped = to < from;
+    r.ticks = r.wrapped ? (to + p - from) : (to - from);
+
+    // Exact sub-tick part: b.frac - a.frac, as a common-denominator rational.
+    // den == 0 means 0/1.  den_a*den_b <= 32767^2 fits in uint32, and the
+    // numerator is bounded by the same, so int64 cannot overflow.
+    const uint32_t ad = a.frac_den == 0u ? 1u : a.frac_den;
+    const uint32_t bd = b.frac_den == 0u ? 1u : b.frac_den;
+    if (ad > kMaxFractionDifferenceDenominator / bd)
+        return r; // unreachable for legal Timestamps; refused, never rounded
+    const uint32_t den = ad * bd;
+    const int64_t an = static_cast<int64_t>(a.frac_num) * static_cast<int64_t>(bd);
+    const int64_t bn = static_cast<int64_t>(b.frac_num) * static_cast<int64_t>(ad);
+    int64_t num = bn - an; // in (-den, den)
+    if (num < 0) {
+        // A fraction below `a`'s makes the distance one whole tick SHORTER
+        // plus the wrapped-up remainder.  Skipping this borrow is the M0 bug
+        // that made 255.25 -> 0.75 look like a full tick instead of 1.5, and
+        // the two answers sit on opposite sides of a budget boundary.
+        // When the integer part is already 0, the downward borrow would go
+        // negative: a whole period elapsed minus (a.frac - b.frac), which is
+        // outside every budget by construction.
+        if (r.ticks == 0) {
+            r.ticks = static_cast<int64_t>(p) - 1;
+        } else {
+            --r.ticks;
+        }
+        num += den;
+    }
+    const int64_t g = detail::ts_gcd(num, den);
+    num /= g;
+    if (num == 0) {
+        r.frac_num = 0;
+        r.frac_den = 0u;
+    } else {
+        r.frac_num = static_cast<int32_t>(num);
+        r.frac_den = static_cast<uint32_t>(den / g);
+    }
+    r.ok = true;
+    return r;
+}
+
+// The R5 ordering entry point.  `out` is ALWAYS written, including on failure,
+// so a caller that ignores the return value still cannot read an invented
+// order: the failure value is `Indeterminate`.
+//
+// Returns false and writes `Indeterminate` when
+//   - either timestamp is structurally invalid;
+//   - the two are not on one timeline (different name / rate / width / epoch);
+//   - the budget is invalid; or
+//   - the relation is not resolvable: the forward distance is not strictly
+//     below the effective window.  Exactly half a period is in this class, in
+//     BOTH directions, which is the R5 fix.
+inline bool timestamp_compare(const Timestamp& a,
+                              const Timestamp& b,
+                              TimestampOrder& out,
+                              const TimestampOrderBudget& budget = TimestampOrderBudget())
+{
+    out = TimestampOrder::Indeterminate;
+    if (!timestamp_is_self_consistent(a) || !timestamp_is_self_consistent(b))
+        return false;
+    if (!clock_domain_is_comparable(a.domain, b.domain))
+        return false;
+    int64_t window = 0;
+    if (!timestamp_order_window_ticks(a.domain, budget, window))
+        return false;
+
+    const uint64_t p = clock_domain_wrap_period(a.domain);
+    if (p == 0u) {
+        // Monotonic counter: a total order, no ambiguity, but a declared
+        // budget is still enforced as a sanity bound.
+        if (a.ticks == b.ticks) {
+            const int c =
+                timestamp_fraction_compare(a.frac_num, a.frac_den, b.frac_num, b.frac_den);
+            out = (c < 0) ? TimestampOrder::Earlier
+                          : (c > 0 ? TimestampOrder::Later : TimestampOrder::Equal);
+            return true;
+        }
+        const int64_t dist = a.ticks < b.ticks ? b.ticks - a.ticks : a.ticks - b.ticks;
+        if (dist >= window)
+            return false;
+        out = a.ticks < b.ticks ? TimestampOrder::Earlier : TimestampOrder::Later;
+        return true;
+    }
+
+    const ModularTickDistance ab = modular_tick_distance(a, b);
+    if (!ab.ok)
+        return false;
+    if (ab.ticks == 0 && ab.frac_num == 0) {
+        out = TimestampOrder::Equal;
+        return true;
+    }
+    // STRICT: `>= window` is refused, so the exactly-half-period pair is
+    // Indeterminate in both directions instead of "earlier" in both.
+    if (ab.ticks >= window)
+        return false;
+    out = TimestampOrder::Earlier;
+    return true;
+}
+
+// Absolute (non-modular) ordering, for a no-wrap counter where a total order
+// always exists.  Refuses a wrapping domain rather than pretending the wrap
+// does not matter.
+inline bool timestamp_compare_absolute(const Timestamp& a,
+                                       const Timestamp& b,
+                                       TimestampOrder& out)
+{
+    out = TimestampOrder::Indeterminate;
+    if (!timestamp_is_self_consistent(a) || !timestamp_is_self_consistent(b))
+        return false;
+    if (!clock_domain_is_comparable(a.domain, b.domain))
+        return false;
+    if (clock_domain_wrap_period(a.domain) != 0u)
+        return false;
+    if (a.ticks == b.ticks) {
+        const int c = timestamp_fraction_compare(a.frac_num, a.frac_den, b.frac_num, b.frac_den);
+        out = (c < 0) ? TimestampOrder::Earlier
+                      : (c > 0 ? TimestampOrder::Later : TimestampOrder::Equal);
+        return true;
+    }
+    out = a.ticks < b.ticks ? TimestampOrder::Earlier : TimestampOrder::Later;
+    return true;
+}
+
+// Whole-tick, fraction-agnostic modular ordering, kept for adapter
+// bookkeeping and for the M0 test suite.  Same domain/epoch gate as
+// `timestamp_interval()`, and M0.1 tightened the boundary: the forward
+// distance must be STRICTLY below half the period, so the exactly-half-period
+// pair is refused in both directions instead of claiming "earlier" twice.
+//
+// Returns false (leaving `out` untouched, as documented since M0) when the two
+// are not on one timeline, when either is structurally invalid, or when the
+// relation is ambiguous modulo the wrap.  The sub-tick fraction is NOT
+// consulted: two timestamps less than a tick apart compare equal here.
+//
+// M1 MUST NOT use this to decide a distance, a deadline or a frame field; use
+// `timestamp_compare()`.
 inline bool timestamp_precedes(const Timestamp& a, const Timestamp& b, bool& out)
 {
     if (!timestamp_is_self_consistent(a) || !timestamp_is_self_consistent(b))
@@ -1299,8 +2081,10 @@ inline bool timestamp_precedes(const Timestamp& a, const Timestamp& b, bool& out
         dist = to - from;
     } else {
         dist = (to >= from) ? (to - from) : (to + p - from);
-        if (dist > p / 2u)
-            return false; // ambiguous modulo the wrap
+        // R5: STRICT.  `dist == p/2` is the ambiguous case and is refused here
+        // exactly as it is in `timestamp_compare()`.
+        if (dist >= p / 2u)
+            return false;
     }
     out = dist != 0;
     return true;
@@ -1512,20 +2296,23 @@ inline std::string timestamp_to_json_string(const Timestamp& ts)
 
 inline std::string time_interval_to_json_string(const TimeInterval& ti)
 {
-    char buf[1024];
-    std::snprintf(buf, sizeof(buf),
-                  "{\"status\":\"%s\",\"ticks\":%lld,\"frac_num\":%d,\"frac_den\":%u,"
-                  "\"wrapped\":%s,\"duration_ns\":%lld,\"duration_is_tick_exact\":%s,"
-                  "\"clock_domain\":%s,\"later_marker\":\"%s\","
-                  "\"earlier_marker\":\"%s\"}",
-                  time_interval_status_to_string(ti.status),
-                  static_cast<long long>(ti.ticks), static_cast<int>(ti.frac_num),
-                  static_cast<unsigned>(ti.frac_den), ti.wrapped ? "true" : "false",
-                  static_cast<long long>(ti.duration.nanos()),
-                  ti.duration_is_tick_exact ? "true" : "false",
-                  clock_domain_to_json_string(ti.domain).c_str(),
-                  timestamp_marker_to_string(ti.later_marker),
-                  timestamp_marker_to_string(ti.earlier_marker));
+    char buf[1200];
+    std::snprintf(
+        buf, sizeof(buf),
+        "{\"status\":\"%s\",\"ticks\":%lld,\"frac_num\":%d,\"frac_den\":%u,"
+        "\"wrapped\":%s,\"duration_ns\":%lld,\"whole_ticks\":%s,"
+        "\"duration_ns_is_lossless\":%s,\"ns_projection_rounding\":\"truncate_toward_zero\","
+        "\"clock_domain\":%s,\"later_marker\":\"%s\","
+        "\"earlier_marker\":\"%s\"}",
+        time_interval_status_to_string(ti.status),
+        static_cast<long long>(ti.ticks), static_cast<int>(ti.frac_num),
+        static_cast<unsigned>(ti.frac_den), ti.wrapped ? "true" : "false",
+        static_cast<long long>(ti.duration.nanos()),
+        ti.is_whole_ticks ? "true" : "false",
+        ti.duration_is_lossless_ns ? "true" : "false",
+        clock_domain_to_json_string(ti.domain).c_str(),
+        timestamp_marker_to_string(ti.later_marker),
+        timestamp_marker_to_string(ti.earlier_marker));
     return std::string(buf);
 }
 

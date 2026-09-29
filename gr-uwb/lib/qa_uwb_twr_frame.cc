@@ -53,6 +53,7 @@
 
 #include <dirent.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -86,6 +87,31 @@ inline std::ostream& operator<<(std::ostream& os, TimestampField f)
 inline std::ostream& operator<<(std::ostream& os, ExchangeStatus s)
 {
     return os << exchange_status_to_string(s);
+}
+
+inline std::ostream& operator<<(std::ostream& os, FrameProfileId id)
+{
+    return os << frame_profile_id_to_string(id);
+}
+
+inline std::ostream& operator<<(std::ostream& os, GeometryField f)
+{
+    return os << geometry_field_to_string(f);
+}
+
+inline std::ostream& operator<<(std::ostream& os, FcsOwner o)
+{
+    return os << fcs_owner_to_string(o);
+}
+
+inline std::ostream& operator<<(std::ostream& os, SessionIdError e)
+{
+    return os << session_id_error_to_string(e);
+}
+
+inline std::ostream& operator<<(std::ostream& os, FrameType t)
+{
+    return os << frame_type_to_string(t);
 }
 
 } // namespace twr
@@ -2053,4 +2079,603 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_hex_helpers)
         BOOST_REQUIRE(hex_to_bytes(bytes_to_hex(b), back));
         BOOST_CHECK(back == b);
     }
+}
+
+// ===========================================================================
+// 15. The geometry authority: one source for the frozen byte counts
+// ===========================================================================
+//
+// M0.1 / R3.  The configuration schema used to carry a 7-byte
+// "FCF(2)+seq(1)+PAN(2)+addr(2)" header and a 9/19/24-byte budget, while this
+// codec has emitted a 14-byte header and 16/26/31 bytes on the air.  Both
+// suites passed because nothing connected them.  These cases assert that
+// FrameProfileGeometry agrees with the FROZEN CONSTANTS (not with a second
+// copy of 14/5/0/0), and that every length in the system derives from
+// frame_length_for().
+
+BOOST_AUTO_TEST_CASE(uwb_twr_frame_profile_geometry_matches_frozen_constants)
+{
+    using namespace gr::uwb::twr;
+    const FrameProfile p = default_profile();
+
+    FrameProfileGeometry g;
+    BOOST_REQUIRE(frame_geometry_for(FrameProfileId::TwrV1, g));
+    BOOST_CHECK_EQUAL(g.id, FrameProfileId::TwrV1);
+    BOOST_CHECK_EQUAL(g.fcs_owner, FcsOwner::PhyLayer);
+    BOOST_CHECK(g.executable());
+
+    // Asserted against the codec's own constants, never against a literal, so
+    // a second copy of the number cannot be introduced here.
+    BOOST_CHECK_EQUAL(g.mac_header_bytes(), kFrameHeaderBytes);
+    BOOST_CHECK_EQUAL(g.timestamp_bytes(p), timestamp_bytes(p));
+    BOOST_CHECK_EQUAL(g.mac_footer_bytes(), 0u);
+    BOOST_CHECK_EQUAL(g.mac_fcs_bytes(), 0u);
+    BOOST_CHECK_EQUAL(g.phr_bytes(), kPhrStandardInfoBytes);
+    BOOST_CHECK_EQUAL(g.phr_coded_bits(), kPhrStandardCodedBits);
+    BOOST_CHECK_EQUAL(g.fcs_bytes_on_air(), kFrameFcsBytes);
+
+    // The header size IS the first timestamp's offset -- one definition, so an
+    // edited offset table cannot leave a stale header size behind.
+    BOOST_CHECK_EQUAL(kFrameHeaderBytes, kOffTimestamps);
+    BOOST_CHECK_EQUAL(kFrameHeaderBytes, kOffFlags + 2);
+    static_assert(kOffTimestamps == 14,
+                  "UWBR: the frame v1 header is 14 bytes; changing it is a new "
+                  "frame version and needs new goldens, not a new constant");
+
+    // The 40-bit default width really is 5 bytes per timestamp.
+    BOOST_CHECK_EQUAL(p.timestamp_bits, 40);
+    BOOST_CHECK_EQUAL(timestamp_bytes(p), 5u);
+    BOOST_CHECK_EQUAL(g.timestamp_bytes(p), 5u);
+
+    // PHR: the standard 2-octet HRP PHY header, 13 information bits SEC-DED
+    // coded to 19 bits.  19 is cross-checked against the modulator's own
+    // symbol count: kPhrSymbols = 19 coded bits + 2 trailing bits.
+    BOOST_CHECK_EQUAL(kPhrStandardInfoBytes, 2u);
+    BOOST_CHECK_EQUAL(kPhrStandardCodedBits, 19u);
+    BOOST_CHECK_EQUAL(gr::uwb::mod::kPhrSymbols,
+                      static_cast<size_t>(kPhrStandardCodedBits) + 2u);
+
+    // The MAC-appends variant: describeable, 2 reserved FCS bytes, and NOT
+    // executable by this codec (which only emits the PHY-appends form).
+    const FrameProfileGeometry macfcs = frame_geometry_mac_appends_fcs();
+    BOOST_CHECK_EQUAL(macfcs.fcs_owner, FcsOwner::MacLayer);
+    BOOST_CHECK(!macfcs.executable());
+    BOOST_CHECK_EQUAL(macfcs.mac_fcs_bytes(), kFrameFcsBytes);
+    // ... and every other number is identical: it is a different FCS owner, not
+    // a different frame layout.  The MAC payload grows by exactly the 2 FCS
+    // bytes the MAC now reserves, and the ON-AIR length does not move at all.
+    BOOST_CHECK_EQUAL(macfcs.mac_header_bytes(), g.mac_header_bytes());
+    BOOST_CHECK_EQUAL(macfcs.phr_bytes(), g.phr_bytes());
+    BOOST_CHECK_EQUAL(macfcs.mac_payload_bytes(FrameType::Final, p),
+                      g.mac_payload_bytes(FrameType::Final, p) + kFrameFcsBytes);
+    BOOST_CHECK_EQUAL(macfcs.on_air_bytes(FrameType::Final, p),
+                      g.on_air_bytes(FrameType::Final, p));
+    for (FrameType t : { FrameType::Poll, FrameType::Response, FrameType::Final }) {
+        BOOST_CHECK_EQUAL(macfcs.on_air_bytes(t, p), g.on_air_bytes(t, p));
+    }
+    // The codec refuses a profile that claims the MAC appends the FCS, so the
+    // variant is a statement, never an encodable path.
+    FrameProfile lies = p;
+    lies.fcs_appended_by_modulation_layer = false;
+    std::string err;
+    BOOST_CHECK(!frame_profile_validate(lies, err));
+
+    // fcs_owner names.
+    BOOST_CHECK_EQUAL(std::string(fcs_owner_to_string(FcsOwner::PhyLayer)), "phy");
+    BOOST_CHECK_EQUAL(std::string(fcs_owner_to_string(FcsOwner::MacLayer)), "mac");
+    BOOST_CHECK(std::string(fcs_owner_to_string(static_cast<FcsOwner>(7))) == "invalid");
+}
+
+// The on-air length is computed in exactly one place.  Every size the system
+// quotes for Poll/Response/Final must equal frame_length_for() plus the two
+// bytes the modulation layer appends -- for EVERY timestamp width, so a second
+// arithmetic cannot hide behind the 40-bit default.
+BOOST_AUTO_TEST_CASE(uwb_twr_frame_on_air_length_comes_from_one_place)
+{
+    using namespace gr::uwb::twr;
+    FrameProfileGeometry g;
+    BOOST_REQUIRE(frame_geometry_for(FrameProfileId::TwrV1, g));
+
+    const FrameType types[] = { FrameType::Poll, FrameType::Response,
+                                FrameType::Final };
+    // MAC 14/24/29 and on-air 16/26/31 for the 40-bit profile (the frozen
+    // numbers, spelled out so a divergence prints the expected value).
+    const size_t want_mac[] = { 14, 24, 29 };
+    const size_t want_air[] = { 16, 26, 31 };
+
+    for (int w = 0; w <= 64; w += 8) {
+        FrameProfile p = default_profile();
+        p.timestamp_bits = static_cast<uint8_t>(w);
+        for (size_t i = 0; i < 3; ++i) {
+            const FrameType t = types[i];
+            // The authority delegates; it does not restate the sum.
+            BOOST_CHECK_EQUAL(g.mac_payload_bytes(t, p), frame_length_for(t, p));
+            BOOST_CHECK_EQUAL(g.on_air_bytes(t, p), psdu_length_for(t, p));
+            BOOST_CHECK_EQUAL(g.on_air_bytes(t, p),
+                              g.mac_payload_bytes(t, p) + g.fcs_bytes_on_air());
+            BOOST_CHECK_EQUAL(g.mac_payload_bytes(t, p),
+                              g.mac_header_bytes() +
+                                  static_cast<size_t>(frame_type_timestamp_count(t)) *
+                                      g.timestamp_bytes(p) + g.mac_footer_bytes());
+            if (w == 40) {
+                BOOST_CHECK_EQUAL(g.mac_payload_bytes(t, p), want_mac[i]);
+                BOOST_CHECK_EQUAL(g.on_air_bytes(t, p), want_air[i]);
+            }
+        }
+    }
+
+    // The checked form refuses a reserved frame type instead of reporting its
+    // 14-byte "Poll-sized" length, which is what the authority must do too.
+    const FrameProfile p = default_profile();
+    std::string err;
+    FrameError code = FrameError::None;
+    BOOST_CHECK_EQUAL(g.mac_payload_bytes_checked(FrameType::Report, p, err, &code), 0u);
+    BOOST_CHECK_EQUAL(code, FrameError::NotImplemented);
+    BOOST_CHECK_EQUAL(g.mac_payload_bytes_checked(FrameType::Final, p, err, &code), 29u);
+
+    // ... and the encoder agrees with the authority, byte for byte, for every
+    // frame type and every width: the geometry is the codec's own.
+    for (uint8_t w : { 8, 16, 32, 40, 64 }) {
+        FrameProfile q = default_profile();
+        q.timestamp_bits = w;
+        for (size_t gi = 0; gi < 3; ++gi) {
+            Frame f = make_golden_frame(kGoldens[gi]);
+            for (size_t k = 0; k < kMaxTimestamps; ++k)
+                f.timestamps[k] &= timestamp_max_value(q);
+            std::vector<uint8_t> out;
+            BOOST_REQUIRE_MESSAGE(encode(f, q, out, err, &code), err);
+            BOOST_CHECK_EQUAL(out.size(), g.mac_payload_bytes(kGoldens[gi].type, q));
+            // The modulation layer then appends exactly the two FCS bytes.
+            gr::uwb::mod::append_ieee_fcs(out);
+            BOOST_CHECK_EQUAL(out.size(), g.on_air_bytes(kGoldens[gi].type, q));
+        }
+    }
+}
+
+// ===========================================================================
+// 16. The frame profile is an enumeration, not a free-form name
+// ===========================================================================
+
+BOOST_AUTO_TEST_CASE(uwb_twr_frame_profile_identity_is_enumerated)
+{
+    using namespace gr::uwb::twr;
+
+    // Exactly one profile exists, and it is named.
+    BOOST_CHECK_EQUAL(kFrameProfileIdCount, 1u);
+    BOOST_CHECK_EQUAL(kAllFrameProfileIds[0], FrameProfileId::TwrV1);
+    BOOST_CHECK_EQUAL(std::string(frame_profile_id_to_string(FrameProfileId::TwrV1)),
+                      "frame_v1");
+    BOOST_CHECK(frame_profile_id_is_supported(FrameProfileId::TwrV1));
+    BOOST_CHECK(std::string(frame_profile_id_to_string(static_cast<FrameProfileId>(9))) ==
+                "invalid");
+    BOOST_CHECK(!frame_profile_id_is_supported(static_cast<FrameProfileId>(9)));
+    BOOST_CHECK(!frame_profile_id_is_supported(static_cast<FrameProfileId>(0xFF)));
+
+    // The canonical name round trips.
+    FrameProfileId id = FrameProfileId::TwrV1;
+    BOOST_REQUIRE(frame_profile_id_from_string(
+        frame_profile_id_to_string(FrameProfileId::TwrV1), id));
+    BOOST_CHECK(id == FrameProfileId::TwrV1);
+
+    // An arbitrary non-empty profile name is REJECTED, not accepted as an
+    // executable geometry.  This is the R3 "any non-empty string is a
+    // profile" hole: the PHY capability profile string is a different concept
+    // and must not be usable here either.
+    const char* rejected[] = {
+        "",
+        " ",
+        "frame_v2",
+        "FRAME_V1",
+        "frame-v1",
+        "frame_v1 ",
+        "v1",
+        "1",
+        "twr",
+        "m0-ch5-64sync-4z2", // the PHY capability profile, NOT a frame profile
+        "ch5-64sync-4z2",
+        "default",
+        "profile_v1",
+    };
+    for (const char* name : rejected) {
+        FrameProfileId out = FrameProfileId::TwrV1;
+        BOOST_CHECK_MESSAGE(!frame_profile_id_from_string(name, out),
+                            "profile name \"" << name << "\" must be rejected");
+    }
+    // A rejected name leaves the caller's value untouched (no defaulting).
+    {
+        FrameProfileId out = FrameProfileId::TwrV1;
+        BOOST_CHECK(!frame_profile_id_from_string("frame_v2", out));
+        BOOST_CHECK(out == FrameProfileId::TwrV1);
+    }
+
+    // An unsupported id produces no geometry and no profile -- never a silent
+    // fallback to frame v1.
+    for (int raw : { 1, 2, 42, 255 }) {
+        FrameProfileGeometry g;
+        BOOST_CHECK_MESSAGE(!frame_geometry_for(static_cast<FrameProfileId>(raw), g),
+                            "geometry for unknown id " << raw << " must be refused");
+        FrameProfile p = default_profile();
+        p.timestamp_bits = 7; // poison, so a silent write-back would show
+        BOOST_CHECK(!frame_profile_for(static_cast<FrameProfileId>(raw), p));
+        BOOST_CHECK_EQUAL(p.timestamp_bits, 7); // untouched
+    }
+
+    // The supported id yields frame v1 itself: selecting the profile changes no
+    // byte on the air, it only makes the choice checkable.
+    FrameProfileGeometry g;
+    FrameProfile p = default_profile();
+    BOOST_REQUIRE(frame_geometry_for(FrameProfileId::TwrV1, g));
+    BOOST_REQUIRE(frame_profile_for(FrameProfileId::TwrV1, p));
+    BOOST_CHECK_EQUAL(p.timestamp_bits, default_profile().timestamp_bits);
+    BOOST_CHECK_EQUAL(p.timestamp_unit_hz, default_profile().timestamp_unit_hz);
+    BOOST_CHECK_EQUAL(p.max_psdu_bytes, default_profile().max_psdu_bytes);
+    BOOST_CHECK_EQUAL(p.version, default_profile().version);
+    BOOST_CHECK(g == FrameProfileGeometry());
+
+    // The wire format is tied to the profile: the authority's header size is the
+    // frame's own constant, and the golden bytes still decode as frame v1.
+    std::vector<uint8_t> bytes = golden_bytes(kGoldens[2]);
+    Frame back;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(decode(bytes, p, back, err), err);
+    BOOST_CHECK(back == make_golden_frame(kGoldens[2]));
+    BOOST_CHECK_EQUAL(back.function_code, FrameType::Final);
+}
+
+// ===========================================================================
+// 17. R3 REGRESSION: a wrong geometry is reported field by field
+// ===========================================================================
+//
+// The defect this closes: a configuration declaring a 7-byte header and a
+// 12-byte PHR was ACCEPTED while the codec emitted 14 bytes and 16/26/31 on
+// the air.  The cross-check must name the offending field, expected and
+// actual, so the rejection is attributable instead of a second silent budget.
+
+BOOST_AUTO_TEST_CASE(uwb_twr_frame_geometry_check_names_the_mismatching_field)
+{
+    using namespace gr::uwb::twr;
+    const FrameProfile p = default_profile();
+
+    FrameProfileGeometry g;
+    BOOST_REQUIRE(frame_geometry_for(FrameProfileId::TwrV1, g));
+
+    // The authority's own claim checks clean -- otherwise "one mismatch" below
+    // would be meaningless.
+    const GeometryCheckResult clean = frame_geometry_check(g.claim(p), g, p);
+    BOOST_CHECK(clean.ok());
+    BOOST_CHECK(clean.fcs_owner_ok);
+    BOOST_CHECK(clean.fields.ok());
+    BOOST_CHECK_EQUAL(clean.fields.count, 0u);
+    BOOST_CHECK(clean.first_mismatch() == nullptr);
+    BOOST_CHECK(clean.summary().empty());
+    BOOST_CHECK(clean.claimed.any_set());
+
+    // THE R3 CASE: the pre-codec 7-byte header.  Exactly one field disagrees
+    // and it is the header, expected 14 got 7 -- not "some size mismatch".
+    {
+        FrameGeometryClaim bad = g.claim(p);
+        bad.mac_header_bytes = 7;
+        const GeometryCheckResult r = frame_geometry_check(bad, g, p);
+        BOOST_CHECK(!r.ok());
+        BOOST_CHECK(r.fcs_owner_ok);
+        BOOST_REQUIRE_EQUAL(r.fields.count, 1u);
+        BOOST_REQUIRE(r.first_mismatch() != nullptr);
+        BOOST_CHECK(r.first_mismatch()->field == GeometryField::MacHeaderBytes);
+        BOOST_CHECK_EQUAL(r.first_mismatch()->expected, kFrameHeaderBytes);
+        BOOST_CHECK_EQUAL(r.first_mismatch()->actual, 7u);
+        BOOST_CHECK(r.fields.find(GeometryField::MacHeaderBytes) != nullptr);
+        // Every other field is reported as agreeing, not as "unknown".
+        for (GeometryField f : { GeometryField::TimestampBytes,
+                                 GeometryField::MacFooterBytes,
+                                 GeometryField::MacFcsBytes,
+                                 GeometryField::PhrBytes }) {
+            BOOST_CHECK_MESSAGE(r.fields.find(f) == nullptr,
+                                f << " must not be reported for a header-only error");
+        }
+        BOOST_CHECK_EQUAL(r.summary(),
+                          std::string("mac_header_bytes: expected 14, got 7"));
+    }
+
+    // Each field, moved alone, is reported alone: the right field, the right
+    // expected value (taken from the authority's own claim, not from a second
+    // constant) and the wrong value that was supplied.
+    const FrameGeometryClaim truth = g.claim(p);
+    struct Case {
+        GeometryField field;
+        size_t wrong;
+        size_t expected;
+    };
+    const Case cases[] = {
+        { GeometryField::MacHeaderBytes, 0, truth.mac_header_bytes },
+        { GeometryField::MacHeaderBytes, 2, truth.mac_header_bytes },
+        { GeometryField::MacHeaderBytes, 7, truth.mac_header_bytes },
+        { GeometryField::MacHeaderBytes, 15, truth.mac_header_bytes },
+        { GeometryField::TimestampBytes, 0, truth.timestamp_bytes },
+        { GeometryField::TimestampBytes, 4, truth.timestamp_bytes },
+        { GeometryField::TimestampBytes, 8, truth.timestamp_bytes },
+        { GeometryField::MacFooterBytes, 1, truth.mac_footer_bytes },
+        { GeometryField::MacFooterBytes, 3, truth.mac_footer_bytes },
+        { GeometryField::MacFcsBytes, 1, truth.mac_fcs_bytes },
+        { GeometryField::MacFcsBytes, 2, truth.mac_fcs_bytes },
+        { GeometryField::PhrBytes, 0, truth.phr_bytes },
+        { GeometryField::PhrBytes, 12, truth.phr_bytes },
+    };
+    for (const Case& c : cases) {
+        FrameGeometryClaim bad = truth;
+        size_t* slot = nullptr;
+        switch (c.field) {
+        case GeometryField::MacHeaderBytes:
+            slot = &bad.mac_header_bytes;
+            break;
+        case GeometryField::TimestampBytes:
+            slot = &bad.timestamp_bytes;
+            break;
+        case GeometryField::MacFooterBytes:
+            slot = &bad.mac_footer_bytes;
+            break;
+        case GeometryField::MacFcsBytes:
+            slot = &bad.mac_fcs_bytes;
+            break;
+        case GeometryField::PhrBytes:
+            slot = &bad.phr_bytes;
+            break;
+        case GeometryField::Count:
+            break;
+        }
+        BOOST_REQUIRE(slot != nullptr);
+        *slot = c.wrong;
+        const GeometryCheckResult r = frame_geometry_check(bad, g, p);
+        BOOST_CHECK_MESSAGE(!r.ok(),
+                            "a wrong " << geometry_field_to_string(c.field)
+                                       << " must not be accepted");
+        BOOST_REQUIRE_MESSAGE(r.fields.count == 1u,
+                              "wrong " << geometry_field_to_string(c.field) << ": "
+                                       << r.summary() << " reported "
+                                       << r.fields.count << " fields");
+        BOOST_CHECK(r.first_mismatch()->field == c.field);
+        BOOST_CHECK_EQUAL(r.first_mismatch()->expected, c.expected);
+        BOOST_CHECK_EQUAL(r.first_mismatch()->actual, c.wrong);
+        BOOST_CHECK(r.summary().find(geometry_field_to_string(c.field)) == 0u);
+    }
+
+    // The whole pre-codec 7-byte schema at once: header 7, PHR 12, FCS 2.  All
+    // three disagree and the report names all three, with the header first.
+    {
+        FrameGeometryClaim old_schema;
+        old_schema.mac_header_bytes = 7;
+        old_schema.timestamp_bytes = 5;
+        old_schema.mac_footer_bytes = 0;
+        old_schema.mac_fcs_bytes = 2;
+        old_schema.phr_bytes = 12;
+        const GeometryCheckResult r = frame_geometry_check(old_schema, g, p);
+        BOOST_CHECK(!r.ok());
+        BOOST_REQUIRE_EQUAL(r.fields.count, 3u);
+        BOOST_CHECK(r.fields.items[0].field == GeometryField::MacHeaderBytes);
+        BOOST_CHECK(r.fields.items[1].field == GeometryField::MacFcsBytes);
+        BOOST_CHECK(r.fields.items[2].field == GeometryField::PhrBytes);
+        BOOST_CHECK_EQUAL(r.fields.items[0].expected, kFrameHeaderBytes);
+        BOOST_CHECK_EQUAL(r.fields.items[1].expected, 0u); // the codec emits none
+        BOOST_CHECK_EQUAL(r.fields.items[2].expected, kPhrStandardInfoBytes);
+        BOOST_CHECK_EQUAL(r.summary(),
+                          std::string("mac_header_bytes: expected 14, got 7; "
+                                      "mac_fcs_bytes: expected 0, got 2; "
+                                      "phr_bytes: expected 2, got 12"));
+        // ... and the budget such a claim implies (9/19/24) is provably wrong:
+        // the on-air frames are 16/26/31.
+        BOOST_CHECK_EQUAL(g.on_air_bytes(FrameType::Poll, p), 16u);
+        BOOST_CHECK_EQUAL(g.on_air_bytes(FrameType::Response, p), 26u);
+        BOOST_CHECK_EQUAL(g.on_air_bytes(FrameType::Final, p), 31u);
+    }
+
+    // An all-zero claim is not "the default geometry" -- it disagrees wherever
+    // the authority is non-zero, and the report says exactly which.
+    {
+        const GeometryCheckResult r =
+            frame_geometry_check(FrameGeometryClaim(), g, p);
+        BOOST_CHECK(!r.ok());
+        BOOST_CHECK(!FrameGeometryClaim().any_set());
+        BOOST_REQUIRE_EQUAL(r.fields.count, 3u); // header, timestamp, PHR
+        BOOST_CHECK(r.fields.find(GeometryField::MacHeaderBytes) != nullptr);
+        BOOST_CHECK(r.fields.find(GeometryField::TimestampBytes) != nullptr);
+        BOOST_CHECK(r.fields.find(GeometryField::PhrBytes) != nullptr);
+        // footer and FCS are 0 in both, so they are not "wrong" -- reporting
+        // them would be noise that hides the real three.
+        BOOST_CHECK(r.fields.find(GeometryField::MacFooterBytes) == nullptr);
+        BOOST_CHECK(r.fields.find(GeometryField::MacFcsBytes) == nullptr);
+    }
+    // ... and all five disagree when all five are wrong.
+    {
+        FrameGeometryClaim wrong = truth;
+        wrong.mac_header_bytes = 7;
+        wrong.timestamp_bytes = 4;
+        wrong.mac_footer_bytes = 3;
+        wrong.mac_fcs_bytes = 2;
+        wrong.phr_bytes = 12;
+        const GeometryCheckResult r = frame_geometry_check(wrong, g, p);
+        BOOST_CHECK(!r.ok());
+        BOOST_CHECK_EQUAL(r.fields.count, kGeometryFieldCount);
+    }
+
+    // The MAC-appends authority is executable() == false, and the check says so
+    // even when every number agrees with it.
+    {
+        const FrameProfileGeometry macfcs = frame_geometry_mac_appends_fcs();
+        const GeometryCheckResult r = frame_geometry_check(macfcs.claim(p), macfcs, p);
+        BOOST_CHECK(!r.ok()); // the numbers agree...
+        BOOST_CHECK(r.fields.ok());
+        BOOST_CHECK(!r.fcs_owner_ok); // ... but it is not an encodable layout
+        BOOST_CHECK(r.summary().find("fcs_owner") != std::string::npos);
+    }
+
+    // The field names are the stable, machine-readable keys.
+    BOOST_CHECK_EQUAL(std::string(geometry_field_to_string(GeometryField::MacHeaderBytes)),
+                      "mac_header_bytes");
+    BOOST_CHECK_EQUAL(std::string(geometry_field_to_string(GeometryField::TimestampBytes)),
+                      "timestamp_bytes");
+    BOOST_CHECK_EQUAL(std::string(geometry_field_to_string(GeometryField::MacFooterBytes)),
+                      "mac_footer_bytes");
+    BOOST_CHECK_EQUAL(std::string(geometry_field_to_string(GeometryField::MacFcsBytes)),
+                      "mac_fcs_bytes");
+    BOOST_CHECK_EQUAL(std::string(geometry_field_to_string(GeometryField::PhrBytes)),
+                      "phr_bytes");
+    BOOST_CHECK(std::string(geometry_field_to_string(static_cast<GeometryField>(9))) ==
+                "invalid");
+    BOOST_CHECK_EQUAL(kGeometryFieldCount,
+                      static_cast<size_t>(GeometryField::Count));
+    BOOST_CHECK_EQUAL(GeometryMismatchReport::capacity, kGeometryFieldCount);
+    // The report is a fixed-capacity value type: no vector, no std::string
+    // member, so a validator can copy it into a snapshot or a log record.
+    BOOST_CHECK_LT(sizeof(GeometryCheckResult), 512u);
+}
+
+// ===========================================================================
+// 18. Session id: local -> wire is identity-or-refuse (R3)
+// ===========================================================================
+//
+// The configuration carried a uint32_t session_id while the wire field is
+// 16 bits.  Narrowing it silently would have made two different local
+// sessions produce identical frames, so the codec states the mapping and the
+// collision density, and the conversion refuses instead of truncating.
+
+BOOST_AUTO_TEST_CASE(uwb_twr_frame_session_id_local_to_wire)
+{
+    using namespace gr::uwb::twr;
+
+    // The wire field is two bytes, and that is the whole story.
+    BOOST_CHECK_EQUAL(kSessionIdWireBits, 16u);
+    BOOST_CHECK_EQUAL(kSessionIdWireMax, 0xFFFFu);
+    static_assert(kOffSessionId + 2 == kOffSeq,
+                  "UWBR: session_id must stay a 2-byte field ahead of seq");
+
+    // In range: exact, bit for bit, no transformation.
+    const uint32_t in_range[] = { kSessionIdReservedLocal, 1, 0xBEEF, 0x8000,
+                                  kSessionIdWireMax };
+    for (uint32_t local : in_range) {
+        uint16_t wire = 0xFFFF; // poison: must be overwritten on success
+        std::string err = "stale";
+        SessionIdError code = SessionIdError::OutOfWireRange;
+        BOOST_REQUIRE_MESSAGE(session_id_to_wire(local, wire, err, &code),
+                              "local " << local << " must convert");
+        BOOST_CHECK_EQUAL(code, SessionIdError::None);
+        BOOST_CHECK(err.empty());
+        BOOST_CHECK_EQUAL(wire, static_cast<uint16_t>(local));
+        BOOST_CHECK(session_id_fits_wire(local));
+    }
+
+    // Out of range: REFUSED with a machine-readable reason, never truncated.
+    // 0x11223344 is the value the old schema accepted as a legal session.
+    const uint32_t out_of_range[] = { 0x00010000u, 0x11223344u, 0x80000000u,
+                                      0xFFFFFFFFu /* UINT32_MAX */ };
+    for (uint32_t local : out_of_range) {
+        uint16_t wire = 0xBEEF; // poison: must NOT survive a refusal
+        std::string err;
+        SessionIdError code = SessionIdError::None;
+        BOOST_CHECK_MESSAGE(!session_id_to_wire(local, wire, err, &code),
+                            "local " << local << " must be refused, not truncated");
+        BOOST_CHECK_EQUAL(code, SessionIdError::OutOfWireRange);
+        BOOST_CHECK(!session_id_fits_wire(local));
+        // No plausible-looking value left behind for a caller to ignore.
+        BOOST_CHECK_EQUAL(wire, 0u);
+        BOOST_CHECK(err.find(session_id_error_to_string(SessionIdError::OutOfWireRange)) ==
+                    0u);
+        BOOST_CHECK(err.find("kOffSessionId") != std::string::npos);
+        // The message states what did NOT happen, so a truncated value can
+        // never be mistaken for the accepted one.
+        BOOST_CHECK(err.find("refused") != std::string::npos);
+        BOOST_CHECK(err.find("not truncated to " +
+                             std::to_string(static_cast<uint32_t>(
+                                 local & kSessionIdWireMax))) != std::string::npos);
+        // The rejection is a configuration failure, never a peer or decode
+        // failure, and it can never yield a range.
+        const ExchangeStatus st = session_id_error_to_exchange_status(code);
+        BOOST_CHECK_EQUAL(st, ExchangeStatus::ConfigRejected);
+        BOOST_CHECK(!exchange_status_yields_range(st));
+        BOOST_CHECK(!exchange_status_is_ok(st));
+    }
+
+    // The 0x10000 and UINT32_MAX cases named in the review, spelled out.
+    {
+        uint16_t wire = 0x1234;
+        std::string err;
+        SessionIdError code = SessionIdError::None;
+        BOOST_CHECK(!session_id_to_wire(0x10000u, wire, err, &code));
+        BOOST_CHECK_EQUAL(code, SessionIdError::OutOfWireRange);
+        BOOST_CHECK_EQUAL(wire, 0u);
+        BOOST_CHECK(!session_id_to_wire(UINT32_MAX, wire, err, &code));
+        BOOST_CHECK_EQUAL(code, SessionIdError::OutOfWireRange);
+        BOOST_CHECK_EQUAL(wire, 0u);
+    }
+
+    // THE COLLISION PROPERTY, exhaustively: over the whole wire range the
+    // mapping is injective, i.e. two accepted ids collide if and only if they
+    // are the same integer.  This is what "identity-or-refuse" buys, and it is
+    // the reason the out-of-range case is refused instead of folded.
+    for (uint32_t a = 0; a <= kSessionIdWireMax; a += 7u) {
+        BOOST_CHECK(wire_session_id_collides(a, a));
+        for (uint32_t b = 0; b <= kSessionIdWireMax; b += 101u) {
+            if (b == a)
+                continue; // the same id is the only allowed collision
+            BOOST_CHECK_MESSAGE(!wire_session_id_collides(a, b),
+                                "distinct accepted ids " << a << "/" << b
+                                                            << " must not collide");
+        }
+    }
+    // ... and the neighbours, which is where a modulo fold would show up.
+    for (uint32_t a = 0; a <= kSessionIdWireMax; ++a) {
+        const uint32_t b = (a + 1u) & kSessionIdWireMax;
+        BOOST_CHECK_MESSAGE(!wire_session_id_collides(a, b),
+                            "id " << a << " collides with its successor");
+    }
+
+    // A refused id collides with nothing, because it never reaches the air.
+    BOOST_CHECK(!wire_session_id_collides(0x10000u, 0x0000u));
+    BOOST_CHECK(!wire_session_id_collides(0x11223344u, 0x3344u));
+    BOOST_CHECK(!wire_session_id_collides(UINT32_MAX, 0xFFFFu));
+
+    // The density this implies, stated as a constant so a session-space
+    // calculation quotes it instead of inventing it.  16-bit field => 2^16
+    // sessions => ~2^8 live sessions at a 50% birthday bound.  It is a property
+    // of the field at kOffSessionId; no local->wire mapping can raise it.
+    BOOST_CHECK_EQUAL(kSessionIdBirthdaySessions50pct, 256.0);
+    BOOST_CHECK_CLOSE(kSessionIdBirthdaySessions50pct,
+                      std::sqrt(static_cast<double>(kSessionIdWireMax) + 1.0), 1.0);
+
+    // The converted id is what frame_match() compares, so the contract is
+    // observable end to end: the expected session matches, a different one is
+    // a SessionMismatch, and two sessions never encode to the same bytes.
+    const FrameProfile p = default_profile();
+    uint16_t wire_a = 0, wire_b = 0;
+    std::string err;
+    Frame fa = make_golden_frame(kGoldens[0]);
+    Frame fb = fa;
+    BOOST_REQUIRE(session_id_to_wire(0xBEEFu, wire_a, err));
+    BOOST_REQUIRE(session_id_to_wire(0xBEF0u, wire_b, err));
+    BOOST_CHECK_EQUAL(wire_a, 0xBEEFu);
+    BOOST_CHECK_EQUAL(wire_b, 0xBEF0u);
+    fa.session_id = wire_a;
+    fb.session_id = wire_b;
+
+    std::vector<uint8_t> ba, bb;
+    BOOST_REQUIRE(encode(fa, p, ba, err));
+    BOOST_REQUIRE(encode(fb, p, bb, err));
+    BOOST_CHECK_MESSAGE(ba != bb,
+                        "two different sessions must not produce the same frame");
+
+    PeerExpectation e;
+    e.expected_type = FrameType::Poll;
+    e.pan_id = kGoldenPan;
+    e.local_addr = kAddrB;
+    e.seq = kGoldenSeq;
+    e.session_id = wire_a;
+    BOOST_CHECK(frame_match(fa, e) == FrameMatch::Match);
+    // The neighbouring session is a mismatch, and it can never yield a range.
+    BOOST_CHECK(frame_match(fb, e) == FrameMatch::SessionMismatch);
+    BOOST_CHECK(!exchange_status_yields_range(
+        frame_match_to_exchange_status(FrameMatch::SessionMismatch)));
+    // The reserved local value 0 is a distinct id too, and frame v1 does not
+    // refuse it -- the codec is a codec; it is the configuration layer that
+    // must not use it for a live session.
+    BOOST_REQUIRE(session_id_to_wire(kSessionIdReservedLocal, wire_b, err));
+    BOOST_CHECK_EQUAL(wire_b, static_cast<uint16_t>(kSessionIdReservedLocal));
+    BOOST_CHECK(wire_b != wire_a);
 }

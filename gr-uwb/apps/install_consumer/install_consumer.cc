@@ -1,0 +1,210 @@
+/* -*- c++ -*- */
+/*
+ * External consumer for the INSTALLED gr-uwb TWR API.
+ *
+ * Purpose
+ * -------
+ * M0 review R8 / P2 proved that the TWR headers and the Python module were
+ * never installed, so `ctest` passing said nothing about the installed API.
+ * A test that compiles inside the source tree cannot detect that: it sees the
+ * files where they already are.
+ *
+ * So this program is deliberately built OUTSIDE the project, against nothing
+ * but the install prefix:
+ *
+ *   - its include path is the prefix's include directory only, never the
+ *     source tree;
+ *   - its Python path is the prefix's site-packages only;
+ *   - it does not link the OOT module's build directory, so the header-only
+ *     API is exercised on its own, exactly as an external consumer would.
+ *
+ * It checks the two things that were actually missing:
+ *   1. all four TWR headers are includable from the prefix, and the contract
+ *      they describe is usable (build a config, look it up in the capability
+ *      whitelist, encode a frame, do timestamp arithmetic);
+ *   2. `import uwb.twr_config` works from the prefix and validates the same
+ *      profile the C++ side does.
+ *
+ * If a header is missing from install(FILES ...) or twr_config.py is missing
+ * from GR_PYTHON_INSTALL(...), this fails to compile / fails at import, which
+ * is the point.
+ *
+ * Build (see run_install_consumer.sh):
+ *   c++ -std=c++17 -I<prefix>/include install_consumer.cc -o consumer
+ *   PYTHONPATH=<prefix>/lib/python3.10/site-packages python3 install_consumer.py
+ */
+
+#include <gnuradio/uwb/uwb_twr_capability_evidence.h>
+#include <gnuradio/uwb/uwb_twr_config.h>
+#include <gnuradio/uwb/uwb_twr_frame.h>
+#include <gnuradio/uwb/uwb_twr_timestamp.h>
+#include <gnuradio/uwb/uwb_twr_types.h>
+
+#include <cstdio>
+#include <string>
+
+namespace twr = gr::uwb::twr;
+namespace ev = gr::uwb::twr::evidence;
+
+static int g_failures = 0;
+
+static void
+check(bool ok, const char* what)
+{
+    std::printf("  [%s] %s\n", ok ? " ok " : "FAIL", what);
+    if (!ok)
+        ++g_failures;
+}
+
+int
+main()
+{
+    std::printf("gr-uwb installed TWR API consumer\n");
+
+    // ---- 1. the capability whitelist is reachable and is DEFAULT DENY -----
+    const auto& caps = twr::capabilities();
+    std::printf("  schema=%s profile=%s phy_rows=%zu\n",
+                caps.schema_version.c_str(),
+                caps.profile_version.c_str(),
+                caps.phy_matrix.size());
+    check(caps.schema_version == "twr-config/1", "schema_version is present");
+    check(!caps.phy_matrix.empty(), "capability whitelist is populated");
+    // The M0 profile: ch5 / 64 MHz PRF / 6.81 Mb/s / ranging bit required.
+    check(caps.channels.size() == 1 && caps.channels[0] == 5,
+          "channel whitelist is {5}");
+    check(!caps.sts_supported, "STS is out of scope (fail-closed)");
+    check(caps.ranging_bit_required, "ranging bit is required");
+
+    // A 64 SYNC / 4z2 / code 9 combination must be admitted ...
+    const auto ok_lookup = caps.lookup_phy(737280000.0, 9, 64,
+                                           twr::SfdMode::R4z2, 127, true);
+    check(ok_lookup.allowed, "measured 64-SYNC/4z2/code9 row is admitted");
+    // ... and 128 SYNC must be rejected, with a reason, not defaulted.
+    const auto bad_lookup = caps.lookup_phy(737280000.0, 9, 128,
+                                            twr::SfdMode::R4z2, 127, true);
+    check(!bad_lookup.allowed, "128 SYNC is rejected (DEFAULT DENY)");
+    check(!bad_lookup.reason.empty(), "the rejection carries a reason");
+    std::printf("        reason: %s\n", bad_lookup.reason.c_str());
+
+    // ---- 2. the evidence model (M0.1) is installed and usable -------------
+    // The M0 matrix establishes work_decode_verified and nothing else.  An
+    // installed consumer must be able to SEE that, and must not be able to
+    // use such a row to produce a range.
+    ev::SourceRecord rec;
+    rec.path = "work_direct_998p4";
+    rec.result = "PASS";
+    rec.whitelist = "supported";
+    rec.sync_repetitions = 64;
+    const ev::RowEvidence e = ev::derive_row_evidence(rec);
+    check(e.established == ev::Level::WorkDecodeVerified,
+          "a supported M0 row is work_decode_verified");
+    check(!ev::allows(e.established, ev::Use::Ranging),
+          "work-decode evidence does NOT license ranging (fail-closed)");
+    check(!ev::allows(e.established, ev::Use::VendorInterop),
+          "work-decode evidence does NOT license vendor interop");
+    check(ev::not_established_list(e.established).find("toa_verified") !=
+              std::string::npos,
+          "the absent ToA level is listed explicitly");
+    // 128 SYNC is a limit of THIS build's software, not of the hardware.
+    ev::SourceRecord len_rec;
+    len_rec.path = "work_direct_998p4";
+    len_rec.result = "PASS";
+    len_rec.whitelist = "unsupported";
+    len_rec.sync_repetitions = 128;
+    const ev::RowEvidence len = ev::derive_row_evidence(len_rec);
+    check(len.reject_scope == ev::reject_scope_current_software(),
+          "128 SYNC rejection is scoped to this build's software");
+    check(len.reject_scope_note.find("not_a_hardware_claim") !=
+              std::string::npos,
+          "the rejection explicitly disclaims a hardware verdict");
+    // The provenance hasher is installed and correct.
+    check(ev::Sha256::hex_of("abc") ==
+              "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f"
+              "20015ad",
+          "SHA-256 matches the FIPS vector (provenance output hash works)");
+
+    // ---- 3. the frame codec is installed and usable -----------------------
+    // The frame length comes from the codec, not from a geometry the caller
+    // supplies: frame_psdu_bytes(FrameGeometry, ...) deliberately IGNORES its
+    // geometry argument and delegates to FrameProfileGeometry /
+    // frame_length_for().  So the numbers are asked of the two-argument form
+    // and cross-checked against the codec, and a caller-supplied geometry that
+    // disagrees does NOT change the answer.
+    const uint32_t poll = twr::frame_psdu_bytes(twr::FrameType::Poll,
+                                                twr::FcsAppender::PhyLayer);
+    const uint32_t resp = twr::frame_psdu_bytes(twr::FrameType::Response,
+                                                twr::FcsAppender::PhyLayer);
+    const uint32_t fin = twr::frame_psdu_bytes(twr::FrameType::Final,
+                                               twr::FcsAppender::PhyLayer);
+    std::printf("  frame v1 MAC payload: Poll=%u Response=%u Final=%u B\n",
+                poll, resp, fin);
+    check(poll == 14 && resp == 24 && fin == 29,
+          "frame v1 MAC payload is 14 B header + 40-bit timestamps");
+    // The FCS is appended by exactly ONE layer, so the on-air PSDU is +2.
+    check(twr::frame_psdu_bytes(twr::FrameType::Poll,
+                                twr::FcsAppender::MacLayer) == poll + 2,
+          "the FCS belongs to exactly one layer (2 bytes, not two)");
+
+    // A caller-supplied geometry must not be able to change a frame length.
+    {
+        twr::FrameGeometry bogus;
+        bogus.mac_header_bytes = 7; // the M0 7-byte header that was wrong
+        bogus.timestamp_bytes = 5;
+        bogus.phr_bytes = 2;
+        check(twr::frame_psdu_bytes(bogus, twr::FrameType::Poll,
+                                    twr::FcsAppender::PhyLayer) == poll,
+              "a caller-supplied geometry cannot override the codec length");
+    }
+
+    // The codec itself, reached through the installed frame header.
+    {
+        twr::FrameProfile profile;
+        check(twr::frame_profile_for(twr::FrameProfileId::TwrV1, profile),
+              "the frame v1 profile is resolvable");
+        twr::FrameProfileGeometry pg;
+        pg.id = twr::FrameProfileId::TwrV1;
+        pg.fcs_owner = twr::FcsOwner::PhyLayer;
+        const size_t from_codec =
+            pg.mac_payload_bytes(twr::FrameType::Response, profile);
+        check(from_codec == resp, "config and codec agree on the Response length");
+        std::printf("  frame v1 profile=%s version=%u timestamp=%u bits"
+                    " (unit %g Hz), max_psdu=%zu B\n",
+                    twr::frame_profile_id_to_string(twr::FrameProfileId::TwrV1),
+                    profile.version, profile.timestamp_bits,
+                    profile.timestamp_unit_hz, profile.max_psdu_bytes);
+        check(profile.timestamp_bits == 40,
+              "frame v1 carries 40-bit timestamps");
+        check(twr::timestamp_bytes(profile) == 5,
+              "a 40-bit timestamp is 5 bytes on the wire");
+        // R3: the 14-byte header is the codec's own constant, returned by a
+        // METHOD so no second geometry can exist elsewhere in the system.
+        check(pg.mac_header_bytes() == 14,
+              "the frame v1 MAC header is 14 B, owned by the codec");
+        check(pg.mac_footer_bytes() == 0,
+              "frame v1 has no MAC footer");
+        check(pg.mac_fcs_bytes() == 0,
+              "frame v1 reserves no FCS inside the MAC PSDU");
+    }
+    check(twr::frame_type_timestamp_count(twr::FrameType::Poll) == 0 &&
+              twr::frame_type_timestamp_count(twr::FrameType::Response) == 2 &&
+              twr::frame_type_timestamp_count(twr::FrameType::Final) == 3,
+          "timestamp counts per frame type");
+
+    // ---- 4. the timestamp / ToF arithmetic is installed and usable --------
+    // 737.28 MHz -> 1 tick = 1.356336805... ns, i.e. a tick is NOT an integer
+    // number of nanoseconds.  The installed header must be able to say so.
+    const double tick_ns = 1e9 / 737280000.0;
+    std::printf("  737.28 MHz tick = %.9f ns\n", tick_ns);
+    check(tick_ns > 1.356 && tick_ns < 1.357, "tick period is ~1.356 ns");
+    check(tick_ns != std::floor(tick_ns),
+          "a tick is NOT an integer ns (so a lossy ns projection is wrong)");
+    check(twr::is_allowed_native_rate(737280000.0) &&
+              twr::is_allowed_native_rate(491520000.0),
+          "the two native rates are recognised");
+    check(!twr::is_allowed_native_rate(998.4e6),
+          "the work grid is not a native rate");
+
+    std::printf("%s\n", g_failures == 0 ? "CONSUMER OK"
+                                        : "CONSUMER FAILED");
+    return g_failures == 0 ? 0 : 1;
+}

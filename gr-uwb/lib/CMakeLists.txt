@@ -192,6 +192,15 @@ list(APPEND test_uwb_sources
     qa_uwb_twr_phy_matrix.cc
     qa_uwb_twr_timing_budget.cc
     qa_uwb_twr_timestamp.cc
+    # M0.1 R6: the ranging-input admission gate.  Self-contained -- no golden
+    # files, no radio -- so it belongs here and NOT in the UWB_TESTDATA_DIR
+    # block below.
+    qa_uwb_twr_tof_input.cc
+    # M0.1 plan 2.A item 4: the C++ half of the shared differential corpus.
+    # The Python half lives in apps/test_twr_config.py; both read the SAME
+    # testdata/twr/config_parity_corpus.json, which is why this one does need
+    # UWB_TESTDATA_DIR.
+    qa_uwb_twr_config_parity.cc
 )
 # Anything we need to link to for the unit tests go here
 list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks)
@@ -207,6 +216,75 @@ foreach(qa_file ${test_uwb_sources})
     )
 endforeach(qa_file)
 
+# ########################################################################
+# Deterministic library resolution for EVERY test registered above.
+#
+# M0 review R8 / M0.1 §2.C.4.  GrTest's generated `<test>_test.sh` does
+#     export LD_LIBRARY_PATH="":$LD_LIBRARY_PATH
+# i.e. it APPENDS the caller's LD_LIBRARY_PATH, so the test's RUNPATH (which
+# correctly points at the build tree) is only consulted when the caller has
+# no LD_LIBRARY_PATH at all.  On this machine the default shell exports
+# LD_LIBRARY_PATH=/usr/local/lib, so a plain `ctest` run linked the STALE
+# installed libgnuradio-uwb rather than the one just built, while
+# `env -u LD_LIBRARY_PATH ldd` showed the build tree.  A regression pass can
+# therefore silently grade a CSV produced by the wrong library.
+#
+# The fix belongs in the registration, not in the operator's shell: pin
+# LD_LIBRARY_PATH to the build tree for every test in this directory, so
+# `ctest` and a hand-run of the same script resolve identically.
+#
+#   - the build lib dir goes FIRST, ahead of anything inherited;
+#   - the inherited path is preserved AFTER it, so a developer who really
+#     needs an extra path still gets it -- just not in a position that
+#     shadows the library under test;
+#   - nothing is removed, so this cannot break a working setup.
+#
+# Not a performance threshold change and not a behaviour change for the
+# library: it only decides WHICH copy of the library a test loads.
+# ########################################################################
+set(UWB_CTEST_LIB_PATH "${PROJECT_BINARY_DIR}/lib")
+if(EXISTS "${UWB_CTEST_LIB_PATH}")
+    get_property(_uwb_tests DIRECTORY PROPERTY TESTS)
+    foreach(_t ${_uwb_tests})
+        set_property(TEST ${_t} APPEND PROPERTY
+            ENVIRONMENT "LD_LIBRARY_PATH=${UWB_CTEST_LIB_PATH}:$ENV{LD_LIBRARY_PATH}")
+    endforeach()
+    message(STATUS "UWB CTest: pinning LD_LIBRARY_PATH=${UWB_CTEST_LIB_PATH} for "
+                   "${CMAKE_CURRENT_SOURCE_DIR} tests")
+endif()
+
+# ########################################################################
+# Serial execution for the throughput-sensitive tests.
+#
+# These measure PDU/s and input MS/s.  Running them concurrently with the rest
+# of the suite on a 17-core box makes the numbers depend on how many other
+# tests happen to be resident, so a failure cannot be attributed.  RUN_SERIAL
+# makes each of them run alone.
+#
+# NOTE ON uwb_qa_uwb_pdu_rational_resampler.cc: its throughput assertions
+# (>400 PDU/s, 200 Hz headroom >2, input >50 MS/s) have a standing historical
+# failure tracked separately.  It is listed here for SERIAL EXECUTION ONLY --
+# no threshold is changed, relaxed or re-baselined, and a new functional
+# failure is never folded into it.
+# ########################################################################
+set(UWB_SERIAL_TESTS
+    uwb_qa_uwb_rational_resampler.cc
+    uwb_qa_uwb_rational_resampler_65_32_stream.cc
+    uwb_qa_uwb_pdu_rational_resampler.cc
+    uwb_qa_uwb_pdu_rational_resampler_65_32.cc
+    uwb_qa_uwb_pdu_rational_resampler_65_32_workers.cc
+    uwb_qa_uwb_pdu_sc16_scale_65_32.cc
+    uwb_qa_uwb_pdu_sc16_scale_65_48.cc
+    uwb_qa_uwb_pdu_roi_cir_65_32.cc
+    uwb_qa_uwb_twr_phy_matrix.cc
+    uwb_qa_uwb_twr_timing_budget.cc
+)
+foreach(_t ${UWB_SERIAL_TESTS})
+    if(TEST ${_t})
+        set_tests_properties(${_t} PROPERTIES RUN_SERIAL TRUE)
+    endif()
+endforeach()
+
 # UHD-gated runtime QA: only compiled when UHD is available; verifies the
 # device-unavailable contract without any USRP (skips when one exists).
 if(UWB_HAVE_UHD)
@@ -216,6 +294,11 @@ if(UWB_HAVE_UHD)
     # Device discovery can take several seconds on transport timeouts.
     set_tests_properties(uwb_qa_uwb_uhd_backend_device.cc PROPERTIES
         TIMEOUT 300)
+    # Registered after the LD_LIBRARY_PATH block above, so pin it too.
+    if(EXISTS "${UWB_CTEST_LIB_PATH}")
+        set_property(TEST uwb_qa_uwb_uhd_backend_device.cc APPEND PROPERTY
+            ENVIRONMENT "LD_LIBRARY_PATH=${UWB_CTEST_LIB_PATH}:$ENV{LD_LIBRARY_PATH}")
+    endif()
 endif()
 
 # qa_uwb_defaults reads GRC YAML next to the source tree.
@@ -276,12 +359,22 @@ target_compile_definitions(uwb_qa_uwb_hrp_mod_core.cc PRIVATE
 target_compile_definitions(uwb_qa_uwb_hrp_packet_source.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 # TWR M0: three of the five TWR QAs read goldens from testdata/twr/.
+target_compile_definitions(uwb_qa_uwb_twr_config_parity.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 target_compile_definitions(uwb_qa_uwb_twr_frame.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+# The two QAs that EMIT generated tables also need to know which build tree
+# they were compiled into.  They write their CSV output under
+# ${UWB_BUILD_DIR}/test-output by default and record the ABSOLUTE path of the
+# libgnuradio-uwb the running process actually loaded, so a CSV generated
+# against a stale /usr/local install is visible instead of silent
+# (M0 review R7 / R8, M0.1 §2.C.2).
 target_compile_definitions(uwb_qa_uwb_twr_phy_matrix.cc PRIVATE
-    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\""
+    "UWB_BUILD_DIR=\"${PROJECT_BINARY_DIR}\"")
 target_compile_definitions(uwb_qa_uwb_twr_timing_budget.cc PRIVATE
-    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\""
+    "UWB_BUILD_DIR=\"${PROJECT_BINARY_DIR}\"")
 # qa_uwb_twr_timestamp and qa_uwb_twr_config are self-contained (no golden
 # files) and deliberately get NO UWB_TESTDATA_DIR, so a testdata path
 # regression cannot silently degrade into a pass.

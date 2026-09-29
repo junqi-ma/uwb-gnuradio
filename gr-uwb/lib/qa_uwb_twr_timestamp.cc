@@ -39,12 +39,29 @@ using gr::uwb::twr::clock_domain_is_comparable;
 using gr::uwb::twr::clock_domain_is_valid;
 using gr::uwb::twr::clock_domain_same_epoch;
 using gr::uwb::twr::clock_domain_same_identity;
+using gr::uwb::twr::clock_domain_ns_per_tick_exact;
 using gr::uwb::twr::clock_domain_tick_is_ns_or_coarser;
 using gr::uwb::twr::clock_domain_ticks_in_range;
 using gr::uwb::twr::clock_domain_unambiguous_interval_ns;
 using gr::uwb::twr::clock_domain_unambiguous_ticks;
 using gr::uwb::twr::clock_domain_wrap_period;
 using gr::uwb::twr::clock_domain_wrap_period_seconds;
+using gr::uwb::twr::kMaxFractionDifferenceDenominator;
+using gr::uwb::twr::modular_tick_distance;
+using gr::uwb::twr::ModularTickDistance;
+using gr::uwb::twr::relative_interval_to_duration;
+using gr::uwb::twr::RelativeTickInterval;
+using gr::uwb::twr::time_interval_is_whole_ticks;
+using gr::uwb::twr::time_interval_ns_projection_is_lossless;
+using gr::uwb::twr::TimestampOrder;
+using gr::uwb::twr::TimestampOrderBudget;
+using gr::uwb::twr::timestamp_compare;
+using gr::uwb::twr::timestamp_compare_absolute;
+using gr::uwb::twr::timestamp_fraction_compare;
+using gr::uwb::twr::timestamp_order_to_string;
+using gr::uwb::twr::timestamp_order_window_ticks;
+using gr::uwb::twr::timestamp_relative_interval;
+using gr::uwb::twr::timestamp_tick_ns_projection_is_lossless;
 using gr::uwb::twr::ClockDomain;
 using gr::uwb::twr::Duration;
 using gr::uwb::twr::ExchangeStatus;
@@ -113,6 +130,46 @@ constexpr int64_t kTwoPow31 = 2147483648LL;
 constexpr int64_t kTwoPow32 = 4294967296LL;
 constexpr int64_t kTwoPow33 = 8589934592LL;
 constexpr int64_t kTwoPow40 = 1099511627776LL;
+
+// A small wrapping counter, used by the M0.1 ordering vectors.  8 bits makes
+// the half period exactly 128, so "just under / exactly / just over" are three
+// adjacent integers and cannot be confused with a rate-dependent value.  The
+// rate is the 998.4 MS/s work grid; only the counter width matters here.
+constexpr uint32_t kTightBits = 8;
+constexpr int64_t kTightPeriod = 1LL << kTightBits;   // 256
+constexpr int64_t kTightHalf = kTightPeriod / 2;      // 128
+
+ClockDomain tight_wrap()
+{
+    ClockDomain d;
+    d.name = "tight_wrap_8bit";
+    d.tick_rate_hz = kX410WorkHz;
+    d.epoch_id = 11;
+    d.timestamp_bits = kTightBits;
+    return d;
+}
+
+// A wrapping counter wide enough that a declared ordering budget sits well
+// inside the half period (2^15 = 32768 ticks).
+constexpr uint32_t kWideBits = 16;
+constexpr int64_t kWideHalf = 1LL << (kWideBits - 1); // 32768
+
+ClockDomain tight_wrap_next_epoch()
+{
+    ClockDomain d = tight_wrap();
+    d.epoch_id = 12; // reboot / time reset
+    return d;
+}
+
+ClockDomain wide_wrap()
+{
+    ClockDomain d;
+    d.name = "wide_wrap_16bit";
+    d.tick_rate_hz = kX410WorkHz;
+    d.epoch_id = 12;
+    d.timestamp_bits = kWideBits;
+    return d;
+}
 
 // Full RX time-mapping chain: resampler/filter group delay, window crop,
 // sample-rate conversion, waveform geometry, fractional first path, the
@@ -353,11 +410,15 @@ BOOST_AUTO_TEST_CASE(test_interval_whole_ticks_across_rates)
         BOOST_REQUIRE(ti.frac_num == 0);
         BOOST_REQUIRE(ti.frac_den == 0u);
 
-        // A whole-tick interval in a sub-nanosecond domain is NOT a faithful
-        // nanosecond projection; the tick-space field is the exact one.
-        const bool coarse = clock_domain_tick_is_ns_or_coarser(c.domain);
-        BOOST_REQUIRE(ti.duration_is_tick_exact == coarse);
-        BOOST_REQUIRE((c.domain.tick_rate_hz > 1.0e9) != coarse);
+        // M0.1 / R4: the old `duration_is_tick_exact` claimed a whole-tick
+        // interval at a >= 1 ns tick rate was a faithful nanosecond
+        // projection.  It is not.  "One tick is at least 1 ns" bounds the
+        // projection error at < 1 tick; it does not make it zero.  So the
+        // predicate is now `duration_is_lossless_ns` and each vector below
+        // asserts it against the ACTUAL error, not against a rate threshold.
+        BOOST_REQUIRE(ti.is_whole_ticks);
+        BOOST_REQUIRE(ti.duration_is_lossless_ns ==
+                      time_interval_ns_projection_is_lossless(ti));
     }
 
     // A zero interval is legal and exact.
@@ -367,7 +428,9 @@ BOOST_AUTO_TEST_CASE(test_interval_whole_ticks_across_rates)
     BOOST_REQUIRE(zi.status == TimeIntervalStatus::Ok);
     BOOST_REQUIRE(zi.ticks == 0);
     BOOST_REQUIRE(zi.duration.is_zero());
-    BOOST_REQUIRE(zi.duration_is_tick_exact);
+    BOOST_REQUIRE(zi.is_whole_ticks);
+    // Zero is 0 ns at every rate: the one case that is always lossless.
+    BOOST_REQUIRE(zi.duration_is_lossless_ns);
 
     // The bool convenience form agrees with the struct form.
     Duration dur;
@@ -405,7 +468,8 @@ BOOST_AUTO_TEST_CASE(test_interval_fractional_round_trip)
     BOOST_REQUIRE(ti.ticks == 50);
     BOOST_REQUIRE(ti.frac_num == 1 && ti.frac_den == 4u);
     // A sub-tick part means the nanosecond view is flagged inexact.
-    BOOST_REQUIRE(!ti.duration_is_tick_exact);
+    BOOST_REQUIRE(!ti.is_whole_ticks);
+    BOOST_REQUIRE(!ti.duration_is_lossless_ns);
 
     // (200 + 3/8) - (100 + 1/8) = 100 + 1/4 after reduction.
     const Timestamp c = must_make_frac(200, 3, 8, d, TimestampMarker::RmarkerRx,
@@ -803,7 +867,8 @@ BOOST_AUTO_TEST_CASE(test_wrap_around_resolves)
     BOOST_REQUIRE(ti4.ticks == 20);
     BOOST_REQUIRE(ti4.wrapped);
     BOOST_REQUIRE(ti4.duration.nanos() == 0); // 20 * 15.65 ps is sub-ns
-    BOOST_REQUIRE(!ti4.duration_is_tick_exact);
+    BOOST_REQUIRE(ti4.is_whole_ticks);
+    BOOST_REQUIRE(!ti4.duration_is_lossless_ns);
 
     // The raw (adapter-level) modular difference agrees with the protocol one.
     const TickDelta td = raw_tick_delta(d, 2000, kTwoPow40 - 1000);
@@ -1461,7 +1526,13 @@ BOOST_AUTO_TEST_CASE(test_json_integer_precision_round_trip)
     BOOST_REQUIRE(ti.frac_num == 4 && ti.frac_den == 5u);
     const std::string ij = time_interval_to_json_string(ti);
     BOOST_REQUIRE(ij.find("\"status\":\"ok\"") != std::string::npos);
-    BOOST_REQUIRE(ij.find("\"duration_is_tick_exact\":false") != std::string::npos);
+    // M0.1 / R4: the JSON now carries the two HONEST flags separately, plus the
+    // rounding rule, and the misleading old key is gone.
+    BOOST_REQUIRE(ij.find("\"whole_ticks\":false") != std::string::npos);
+    BOOST_REQUIRE(ij.find("\"duration_ns_is_lossless\":false") != std::string::npos);
+    BOOST_REQUIRE(ij.find("\"ns_projection_rounding\":\"truncate_toward_zero\"") !=
+                  std::string::npos);
+    BOOST_REQUIRE(ij.find("duration_is_tick_exact") == std::string::npos);
     BOOST_REQUIRE(ij.find("\"clock_domain\":{\"name\":\"dw1000_uus\"") !=
                   std::string::npos);
     BOOST_REQUIRE(ij.find("\"later_marker\":\"rmarker_rx\"") != std::string::npos);
@@ -1801,13 +1872,27 @@ BOOST_AUTO_TEST_CASE(test_twr_interval_shapes)
     BOOST_REQUIRE(da.duration.nanos() == 700);
     BOOST_REQUIRE(db.duration.nanos() == 500);
     BOOST_REQUIRE(rb.duration.nanos() == 1100);
-    // ... but three of the four carry a sub-tick part and one uses a
-    // sub-nanosecond tick, so only the exactness flag tells the ToF core
-    // which representation it must use.
-    BOOST_REQUIRE(!ra.duration_is_tick_exact);
-    BOOST_REQUIRE(!da.duration_is_tick_exact);
-    BOOST_REQUIRE(!db.duration_is_tick_exact);
-    BOOST_REQUIRE(!rb.duration_is_tick_exact);
+    // M0.1 / R4 correction to the M0 expectation.  These four intervals were
+    // chosen to be exact ns values, and the M0 flag said "inexact" for all of
+    // them -- so M0 was wrong in BOTH directions, not only the reported one.
+    // The new predicate sees that 900/700/500/1100 ns are reproduced with zero
+    // error and says so.
+    BOOST_REQUIRE(ra.duration_is_lossless_ns);
+    BOOST_REQUIRE(da.duration_is_lossless_ns);
+    BOOST_REQUIRE(db.duration_is_lossless_ns);
+    BOOST_REQUIRE(rb.duration_is_lossless_ns);
+    // ... but the tick-space fields are still the representation the ToF core
+    // must use, because the guarantee is per-interval and the next exchange
+    // will not be integral.  The safe form makes that structural:
+    RelativeTickInterval ra_rel;
+    BOOST_REQUIRE(timestamp_relative_interval(t4a, t1a, ra_rel));
+    BOOST_REQUIRE(!ra_rel.is_whole_ticks());
+    BOOST_REQUIRE(!ra_rel.ns_projection_is_lossless() == false); // it IS lossless
+    int64_t rn = 0;
+    int64_t rd = 0;
+    BOOST_REQUIRE(ra_rel.exact_ratio(rn, rd));
+    // 663 + 69/125 == 82944/125
+    BOOST_REQUIRE(rn == 82944 && rd == 125);
 
     const auto secs = [](const TimeInterval& t) {
         return (static_cast<double>(t.ticks) + static_cast<double>(t.frac_num) /
@@ -1842,6 +1927,1028 @@ BOOST_AUTO_TEST_CASE(test_twr_interval_shapes)
     BOOST_REQUIRE(!timestamp_precedes(t4a, t3b, order));
     BOOST_REQUIRE(!timestamp_precedes(t5a, t6b, order));
     BOOST_REQUIRE(!timestamp_precedes(t6b, t4a, order));
+
+    // The same orderings through the M0.1 fraction-aware entry point.  The
+    // cross-endpoint pairs are Indeterminate, never an order.
+    TimestampOrder o = TimestampOrder::Indeterminate;
+    BOOST_REQUIRE(timestamp_compare(t1a, t4a, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    BOOST_REQUIRE(timestamp_compare(t4a, t5a, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    BOOST_REQUIRE(timestamp_compare(t2b, t3b, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    BOOST_REQUIRE(!timestamp_compare(t1a, t2b, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    BOOST_REQUIRE(!timestamp_compare(t4a, t3b, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    BOOST_REQUIRE(!timestamp_compare(t5a, t6b, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    BOOST_REQUIRE(!timestamp_compare(t6b, t4a, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+}
+
+// ===========================================================================
+// 23. M0.1 / R4 -- the ns projection is lossless only when it really is
+// ===========================================================================
+//
+// Independent small vectors.  The header's predicate is compared against the
+// ACTUAL error of the emitted integer for each vector; a vector where the two
+// disagree is a bug in one of them.  `exact_ns` below is the true value in
+// nanoseconds, computed from the rate and tick count independently of the
+// header, and `expect_lossless` is hand-derived.
+
+BOOST_AUTO_TEST_CASE(test_r4_lossless_projection_per_rate)
+{
+    struct Case {
+        const char* label;
+        double rate_hz;
+        int64_t dticks;
+        int32_t num;
+        uint32_t den;
+        int64_t expect_ns;   // truncated projection
+        bool expect_lossless;
+    };
+    const std::vector<Case> cases = {
+        // --- the R4 reproducer: 737.28 MS/s, 1 tick = 1.356336805... ns.
+        // The M0 flag said "exact" here while discarding 0.356 ns.
+        { "737.28M 1 tick", kX410DeviceHz, 1, 0, 0u, 1, false },
+        { "737.28M 1 tick + 1/2", kX410DeviceHz, 1, 1, 2u, 2, false },
+        { "737.28M 2 ticks", kX410DeviceHz, 2, 0, 0u, 2, false },
+        { "737.28M 3 ticks", kX410DeviceHz, 3, 0, 0u, 4, false },
+        { "737.28M 64 ticks", kX410DeviceHz, 64, 0, 0u, 86, false },
+        // 73728 = 737.28e6/1e4 -> exactly 100000 ns: the rate alone does not
+        // decide losslessness, a per-interval test does.
+        { "737.28M 73728 ticks", kX410DeviceHz, 73728, 0, 0u, 100000, true },
+        { "737.28M 147456 ticks", kX410DeviceHz, 147456, 0, 0u, 200000, true },
+        { "737.28M 73729 ticks", kX410DeviceHz, 73729, 0, 0u, 100001, false },
+
+        // --- 998.4 MS/s work grid: 1 tick = 1.001602564... ns.
+        { "998.4M 1 tick", kX410WorkHz, 1, 0, 0u, 1, false },
+        { "998.4M 99840 ticks", kX410WorkHz, 99840, 0, 0u, 100000, true },
+        { "998.4M 49920 ticks", kX410WorkHz, 49920, 0, 0u, 50000, true },
+
+        // --- 491.52 MS/s native grid: 1 tick = 2.034505208... ns.
+        { "491.52M 1 tick", kX410NativeHz, 1, 0, 0u, 2, false },
+        { "491.52M 49152 ticks", kX410NativeHz, 49152, 0, 0u, 100000, true },
+        { "491.52M 12288 ticks", kX410NativeHz, 12288, 0, 0u, 25000, true },
+
+        // --- DW UUS at 1/(499.2e6*128): 1 tick = 0.0156500400641 ns.
+        { "DW UUS 1 tick", kDwUusTickHz, 1, 0, 0u, 0, false },
+        { "DW UUS 64 ticks", kDwUusTickHz, 64, 0, 0u, 1, false },
+        { "DW UUS 6389760 ticks", kDwUusTickHz, 6389760, 0, 0u, 100000, true },
+        { "DW UUS 6389759 ticks", kDwUusTickHz, 6389759, 0, 0u, 99999, false },
+
+        // --- an exactly 1 GHz domain really is lossless at every tick count.
+        { "1 GHz 1 tick", 1.0e9, 1, 0, 0u, 1, true },
+        { "1 GHz 7 ticks", 1.0e9, 7, 0, 0u, 7, true },
+
+        // --- a coarser-than-1 ns tick is not automatically lossy either:
+        // 500 MHz -> 2 ns/tick exactly, 250 MHz -> 4 ns/tick exactly.
+        { "500 MHz 1 tick", 500.0e6, 1, 0, 0u, 2, true },
+        { "500 MHz 9 ticks", 500.0e6, 9, 0, 0u, 18, true },
+        { "250 MHz 3 ticks", 250.0e6, 3, 0, 0u, 12, true },
+        { "200 MHz 1 tick", 200.0e6, 1, 0, 0u, 5, true },
+
+        // --- faster than 1 GHz: the tick is sub-ns, so almost nothing is.
+        { "2.5 GHz 2 ticks", 2.5e9, 2, 0, 0u, 0, false },
+        { "2.5 GHz 4 ticks", 2.5e9, 4, 0, 0u, 1, false },
+        { "2.5 GHz 8 ticks", 2.5e9, 8, 0, 0u, 3, false },
+
+        // --- a sub-tick fraction: exact only when it lands on a whole ns.
+        // 1 GHz -> 1 ns/tick, so +1/2 tick is 1.5 ns: NOT lossless.
+        { "1 GHz 1 tick + 1/2", 1.0e9, 1, 1, 2u, 1, false },
+        { "1 GHz 1 tick + 1/4", 1.0e9, 1, 1, 4u, 1, false },
+        // 500 MHz -> 2 ns/tick, so +1/2 tick is exactly 3 ns: lossless.
+        { "500 MHz 1 tick + 1/2", 500.0e6, 1, 1, 2u, 3, true },
+        // +1/4 tick is 0.5 ns -> 2.5 ns: not lossless.
+        { "500 MHz 1 tick + 1/4", 500.0e6, 1, 1, 4u, 2, false },
+        // 250 MHz -> 4 ns/tick, so +1/2 is exactly 6 ns.
+        { "250 MHz 1 tick + 1/2", 250.0e6, 1, 1, 2u, 6, true },
+        // 400 MHz -> 2.5 ns/tick, an exact half-ns: never lossless.
+        { "400 MHz 1 tick", 400.0e6, 1, 0, 0u, 2, false },
+        { "1 GHz 0 ticks", 1.0e9, 0, 0, 0u, 0, true },
+        { "737.28M 0 ticks", kX410DeviceHz, 0, 0, 0u, 0, true },
+    };
+
+    for (const Case& c : cases) {
+        ClockDomain d;
+        d.name = "r4_vector";
+        d.tick_rate_hz = c.rate_hz;
+        d.epoch_id = 1;
+        d.timestamp_bits = 0;
+
+        const Timestamp later = must_make_frac(c.dticks, c.num, c.den, d,
+                                              TimestampMarker::RmarkerRx,
+                                              TimestampSource::HardwareMeasured, kFullRxChain);
+        const Timestamp earlier = must_make(0, d, TimestampMarker::RmarkerRx,
+                                            TimestampSource::HardwareMeasured, kFullRxChain);
+        const TimeInterval ti = timestamp_interval(later, earlier);
+        BOOST_REQUIRE_MESSAGE(ti.status == TimeIntervalStatus::Ok, c.label);
+        BOOST_REQUIRE_MESSAGE(ti.ticks == c.dticks, c.label);
+        BOOST_REQUIRE_MESSAGE(ti.duration.nanos() == c.expect_ns, c.label);
+
+        // The independent truth: exact value in ns, and the observed error.
+        double exact_ns = static_cast<double>(c.dticks) * 1e9 / c.rate_hz;
+        if (c.den != 0u)
+            exact_ns += (static_cast<double>(c.num) / static_cast<double>(c.den)) * 1e9 / c.rate_hz;
+        const double err = static_cast<double>(ti.duration.nanos()) - exact_ns;
+
+        // (1) the emitted integer really is the truncation of the exact value;
+        BOOST_REQUIRE_MESSAGE(std::fabs(err) < 1.0, c.label);
+        BOOST_REQUIRE_MESSAGE(err <= 0.0, c.label); // truncation, never up
+        // (2) "lossless" means EXACTLY zero error, so it must agree with the
+        //     measured error in both directions.  This is the assertion the M0
+        //     flag could not have satisfied: at 737.28 MS/s / 1 tick it said
+        //     "exact" with a 0.356 ns error.
+        BOOST_REQUIRE_MESSAGE((err == 0.0) == c.expect_lossless, c.label);
+        BOOST_REQUIRE_MESSAGE(ti.duration_is_lossless_ns == c.expect_lossless, c.label);
+        // (3) the header's own predicate, called directly, agrees too.
+        BOOST_REQUIRE_MESSAGE(timestamp_tick_ns_projection_is_lossless(
+                                  c.rate_hz, ti.ticks, ti.frac_num, ti.frac_den) ==
+                                  c.expect_lossless, c.label);
+        // (4) the two flags are INDEPENDENT questions and must not be conflated.
+        BOOST_REQUIRE_MESSAGE(ti.is_whole_ticks == (c.den == 0u), c.label);
+        BOOST_REQUIRE_MESSAGE(ti.is_whole_ticks == time_interval_is_whole_ticks(ti), c.label);
+    }
+
+    // The specific vector the M0 report was built on, asserted on its own so
+    // the regression is named in the log.
+    {
+        ClockDomain d;
+        d.name = "x410_device";
+        d.tick_rate_hz = kX410DeviceHz;
+        d.epoch_id = 3;
+        d.timestamp_bits = 0;
+        const TimeInterval ti = timestamp_interval(
+            must_make(1, d, TimestampMarker::RmarkerRx, TimestampSource::HardwareMeasured,
+                      kFullRxChain),
+            must_make(0, d, TimestampMarker::RmarkerRx, TimestampSource::HardwareMeasured,
+                      kFullRxChain));
+        BOOST_REQUIRE(ti.status == TimeIntervalStatus::Ok);
+        BOOST_REQUIRE(ti.ticks == 1);
+        BOOST_REQUIRE(ti.duration.nanos() == 1);
+        BOOST_REQUIRE(ti.is_whole_ticks);
+        // The M0 assertion was `duration_is_tick_exact == true` here.  The
+        // true value is 1.356336806 ns, so it was wrong.
+        BOOST_REQUIRE(!ti.duration_is_lossless_ns);
+        // The rate-level query is still true, and that is precisely why it
+        // cannot be the lossless test.
+        BOOST_REQUIRE(clock_domain_tick_is_ns_or_coarser(d));
+    }
+}
+
+// ===========================================================================
+// 24. M0.1 / R4 -- exact ns/tick rational, and the projection's boundaries
+// ===========================================================================
+
+BOOST_AUTO_TEST_CASE(test_r4_exact_ns_per_tick_rational)
+{
+    struct Case {
+        const char* label;
+        double rate_hz;
+        int64_t num;
+        int64_t den;
+    };
+    const std::vector<Case> cases = {
+        // 1e9/1e9 = 1
+        { "1 GHz", 1.0e9, 1, 1 },
+        // 1e9/500e6 = 2
+        { "500 MHz", 500.0e6, 2, 1 },
+        // 1e9/250e6 = 4
+        { "250 MHz", 250.0e6, 4, 1 },
+        // 1e9/125e6 = 8
+        { "125 MHz", 125.0e6, 8, 1 },
+        // 1e9/100e6 = 10
+        { "100 MHz", 100.0e6, 10, 1 },
+        // 1e9/200e6 = 5
+        { "200 MHz", 200.0e6, 5, 1 },
+        // 1e9/737.28e6 = 3125/2304 = 1.35633680555...  (737.28e6 = 2^17*5625)
+        { "737.28 MS/s", kX410DeviceHz, 3125, 2304 },
+        // 1e9/998.4e6 = 625/624 = 1.00160256410...  (998.4e6 = 2^22*3*37)
+        { "998.4 MS/s", kX410WorkHz, 625, 624 },
+        // 1e9/491.52e6 = 625/307.2 -> 3125/1536 = 2.03450520833...
+        { "491.52 MS/s", kX410NativeHz, 3125, 1536 },
+        // 1e9/(499.2e6*128) = 1/63.8976 = 625/39936 = 0.0156500400641...
+        { "DW UUS", kDwUusTickHz, 625, 39936 },
+        // 1e9/2.5e9 = 2/5
+        { "2.5 GHz", 2.5e9, 2, 5 },
+    };
+
+    for (const Case& c : cases) {
+        int64_t num = 0;
+        int64_t den = 0;
+        BOOST_REQUIRE_MESSAGE(clock_domain_ns_per_tick_exact(c.rate_hz, num, den), c.label);
+        BOOST_REQUIRE_MESSAGE(num == c.num && den == c.den, c.label);
+        // Reduced: gcd(num, den) == 1.
+        int64_t a = num, b = den;
+        while (b != 0) { const int64_t t = a % b; a = b; b = t; }
+        BOOST_REQUIRE_MESSAGE(a == 1, c.label);
+        // And it really is 1e9/rate to double precision.
+        BOOST_REQUIRE_MESSAGE(std::fabs(static_cast<double>(num) / static_cast<double>(den) -
+                                        1e9 / c.rate_hz) < 1e-12, c.label);
+    }
+
+    // Invalid input is refused, never silently turned into a rational.
+    int64_t num = 7;
+    int64_t den = 9;
+    BOOST_REQUIRE(!clock_domain_ns_per_tick_exact(0.0, num, den));
+    BOOST_REQUIRE(!clock_domain_ns_per_tick_exact(-1.0e9, num, den));
+    BOOST_REQUIRE(!clock_domain_ns_per_tick_exact(
+        std::numeric_limits<double>::infinity(), num, den));
+    BOOST_REQUIRE(!clock_domain_ns_per_tick_exact(
+        std::numeric_limits<double>::quiet_NaN(), num, den));
+    BOOST_REQUIRE(!clock_domain_ns_per_tick_exact(
+        std::numeric_limits<double>::denorm_min(), num, den));
+    // A refused rational leaves a valid-looking (0, 0), never a stale value.
+    BOOST_REQUIRE(num == 0 && den == 0);
+
+    // A non-finite rate is refused by the lossless predicate too: the
+    // direction is "not provably lossless", never "assumed lossless".
+    BOOST_REQUIRE(!timestamp_tick_ns_projection_is_lossless(0.0, 1, 0, 0u));
+    BOOST_REQUIRE(!timestamp_tick_ns_projection_is_lossless(
+        std::numeric_limits<double>::infinity(), 1, 0, 0u));
+}
+
+// ===========================================================================
+// 25. M0.1 / R4 -- projection overflow, rounding rule, and the safe API
+// ===========================================================================
+
+BOOST_AUTO_TEST_CASE(test_r4_projection_overflow_and_rounding_rule)
+{
+    // Rounding rule: TRUNCATE toward zero.  Each vector's exact value lies
+    // strictly between two integers, so the answer is forced.
+    struct Case {
+        const char* label;
+        double rate_hz;
+        int64_t dticks;
+        int32_t num;
+        uint32_t den;
+        int64_t expect_ns;
+    };
+    const std::vector<Case> cases = {
+        // 2.5 ns: the true value is exactly halfway between 2 and 3.  Under
+        // round-half-away-from-zero it would be 3; under round-half-even it
+        // would be 2; the documented rule is TRUNCATION, so 2 -- and the value
+        // being a genuine tie is what makes the rule observable.
+        { "2.5 ns (tie)", 400.0e6, 1, 0, 0u, 2 },
+        // 1.5 ns: half-away would give 2, truncation gives 1.
+        { "1.5 ns (tie b)", 2.0e9 / 3.0, 1, 0, 0u, 1 },
+        // 3.5 ns: half-away 4, half-even 4, truncation 3.
+        { "3.5 ns (tie c)", 2.0e9 / 7.0, 1, 0, 0u, 3 },
+        // 0.6 ns: below 1, so it truncates to 0 rather than rounding to 1.
+        { "0.6 ns", 5.0e9 / 3.0, 1, 0, 0u, 0 },
+        // Non-tie values, to show the rule is truncation and not rounding to
+        // nearest: 1.9 -> 1, 2.9 -> 2.
+        { "1.9 ns", 1.0e9 / 1.9, 1, 0, 0u, 1 },
+        { "2.9 ns", 1.0e9 / 2.9, 1, 0, 0u, 2 },
+        // 31948 + 4/5 DW UUS ticks is exactly 500 ns: a tie-free exact value
+        // that must come out unchanged, and the one case here that is lossless.
+        { "500 ns exact", kDwUusTickHz, 31948, 4, 5u, 500 },
+    };
+    for (const Case& c : cases) {
+        ClockDomain d;
+        d.name = "r4_round";
+        d.tick_rate_hz = c.rate_hz;
+        d.epoch_id = 1;
+        d.timestamp_bits = 0;
+        const TimeInterval ti = timestamp_interval(
+            must_make_frac(c.dticks, c.num, c.den, d, TimestampMarker::RmarkerRx,
+                           TimestampSource::HardwareMeasured, kFullRxChain),
+            must_make(0, d, TimestampMarker::RmarkerRx, TimestampSource::HardwareMeasured,
+                      kFullRxChain));
+        BOOST_REQUIRE_MESSAGE(ti.status == TimeIntervalStatus::Ok, c.label);
+        BOOST_REQUIRE_MESSAGE(ti.duration.nanos() == c.expect_ns, c.label);
+        // Truncation means the emitted integer never EXCEEDS the true value.
+        double exact_ns = static_cast<double>(c.dticks) * 1e9 / c.rate_hz;
+        if (c.den != 0u)
+            exact_ns += (static_cast<double>(c.num) / static_cast<double>(c.den)) * 1e9 / c.rate_hz;
+        BOOST_REQUIRE_MESSAGE(static_cast<double>(c.expect_ns) <= exact_ns + 1e-9, c.label);
+        BOOST_REQUIRE_MESSAGE(exact_ns - static_cast<double>(c.expect_ns) < 1.0, c.label);
+        BOOST_REQUIRE_MESSAGE(ti.duration_is_lossless_ns == (exact_ns == std::floor(exact_ns)),
+                              c.label);
+    }
+
+    // The safe form M1 must consume: exact rational ticks, no ns field.
+    const ClockDomain d = dw_uus40();
+    RelativeTickInterval ri2;
+    {
+        TimeIntervalStatus st = TimeIntervalStatus::Ok;
+        BOOST_REQUIRE(timestamp_relative_interval(
+            must_make_frac(100, 3, 4, d, TimestampMarker::RmarkerRx,
+                           TimestampSource::HardwareMeasured, kFullRxChain),
+            must_make_frac(50, 1, 2, d, TimestampMarker::RmarkerRx,
+                           TimestampSource::HardwareMeasured, kFullRxChain),
+            ri2, st));
+        BOOST_REQUIRE(st == TimeIntervalStatus::Ok);
+    }
+    BOOST_REQUIRE(ri2.is_valid());
+    BOOST_REQUIRE(!ri2.is_whole_ticks());
+    // 50 + 1/4 ticks exactly, as a rational, with no rounding anywhere.
+    int64_t rn = 0;
+    int64_t rd = 0;
+    BOOST_REQUIRE(ri2.exact_ratio(rn, rd));
+    BOOST_REQUIRE(rn == 201 && rd == 4);
+    // Its ns projection is lossy, and the type says so.
+    BOOST_REQUIRE(!ri2.ns_projection_is_lossless());
+    Duration dur(12345);
+    TimeIntervalStatus st = TimeIntervalStatus::Ok;
+    BOOST_REQUIRE(relative_interval_to_duration(ri2, dur, st));
+    BOOST_REQUIRE(st == TimeIntervalStatus::Ok);
+    BOOST_REQUIRE(dur.nanos() == 0); // 50.25 * 0.01565 ns ~ 0.787 ns -> 0
+    // A whole-tick relative interval reports the rational 1/1, not 0/0.
+    {
+        RelativeTickInterval r3;
+        BOOST_REQUIRE(timestamp_relative_interval(
+            must_make(7, d, TimestampMarker::RmarkerRx, TimestampSource::HardwareMeasured,
+                      kFullRxChain),
+            must_make(3, d, TimestampMarker::RmarkerRx, TimestampSource::HardwareMeasured,
+                      kFullRxChain),
+            r3));
+        BOOST_REQUIRE(r3.is_whole_ticks());
+        BOOST_REQUIRE(r3.exact_ratio(rn, rd));
+        BOOST_REQUIRE(rn == 4 && rd == 1);
+        // 4 DW UUS ticks is 0.0626 ns, so the ns projection is NOT lossless --
+        // and the type says so, instead of the caller having to know it.
+        BOOST_REQUIRE(!r3.ns_projection_is_lossless());
+        Duration d3(99);
+        TimeIntervalStatus s3 = TimeIntervalStatus::Ok;
+        BOOST_REQUIRE(relative_interval_to_duration(r3, d3, s3));
+        BOOST_REQUIRE(d3.nanos() == 0);
+        // A whole-tick interval that IS an integral ns count is reported so.
+        {
+            RelativeTickInterval r5;
+            BOOST_REQUIRE(timestamp_relative_interval(
+                must_make(6389760, d, TimestampMarker::RmarkerRx,
+                          TimestampSource::HardwareMeasured, kFullRxChain),
+                must_make(0, d, TimestampMarker::RmarkerRx,
+                          TimestampSource::HardwareMeasured, kFullRxChain),
+                r5));
+            BOOST_REQUIRE(r5.is_whole_ticks());
+            BOOST_REQUIRE(r5.ns_projection_is_lossless());
+            Duration d5(99);
+            TimeIntervalStatus s5 = TimeIntervalStatus::Ok;
+            BOOST_REQUIRE(relative_interval_to_duration(r5, d5, s5));
+            BOOST_REQUIRE(d5.nanos() == 100000);
+        }
+    }
+    // The safe form runs the SAME gate as the interval, so it is never more
+    // permissive: a cross-domain pair fails here too.
+    {
+        RelativeTickInterval r4;
+        TimeIntervalStatus s4 = TimeIntervalStatus::Ok;
+        BOOST_REQUIRE(!timestamp_relative_interval(
+            must_make(10, dw_uus40(), TimestampMarker::RmarkerRx,
+                      TimestampSource::HardwareMeasured, kFullRxChain),
+            must_make(1, dw_uus32(), TimestampMarker::RmarkerRx,
+                      TimestampSource::HardwareMeasured, kFullRxChain),
+            r4, s4));
+        BOOST_REQUIRE(s4 == TimeIntervalStatus::WrapWidthMismatch);
+        BOOST_REQUIRE(!r4.is_valid());
+    }
+    // An invalid relative interval cannot be projected.
+    {
+        RelativeTickInterval bad;
+        Duration untouched(7);
+        TimeIntervalStatus s5 = TimeIntervalStatus::Ok;
+        BOOST_REQUIRE(!relative_interval_to_duration(bad, untouched, s5));
+        BOOST_REQUIRE(s5 == TimeIntervalStatus::InvalidTimestamp);
+        BOOST_REQUIRE(untouched.nanos() == 7);
+        int64_t dummy = 0;
+        BOOST_REQUIRE(!bad.exact_ratio(dummy, dummy));
+        BOOST_REQUIRE(bad.seconds() == 0.0);
+        BOOST_REQUIRE(bad.tick_fraction() == 0.0);
+    }
+
+    // Overflow: a whole-tick interval far past int64 nanoseconds is refused
+    // with DurationOutOfRange rather than saturating.  A 1 Hz domain makes the
+    // boundary reachable with a small tick count (1 tick = 1e9 ns).
+    {
+        ClockDomain slow;
+        slow.name = "very_slow";
+        slow.tick_rate_hz = 1.0;
+        slow.epoch_id = 1;
+        slow.timestamp_bits = 0;
+        const int64_t kMaxTicks = 9223372036LL; // 9223372036e9 ns ~ INT64_MAX
+        // One tick past the boundary: refused, not saturated.
+        const TimeInterval over = timestamp_interval(
+            must_make(kMaxTicks + 1, slow, TimestampMarker::RmarkerRx,
+                      TimestampSource::HardwareMeasured, kFullRxChain),
+            must_make(0, slow, TimestampMarker::RmarkerRx, TimestampSource::HardwareMeasured,
+                      kFullRxChain));
+        BOOST_REQUIRE(over.status == TimeIntervalStatus::DurationOutOfRange);
+        BOOST_REQUIRE(over.ticks == 0);
+        BOOST_REQUIRE(over.frac_num == 0 && over.frac_den == 0u);
+        BOOST_REQUIRE(over.duration.nanos() == 0);
+        BOOST_REQUIRE(!over.is_whole_ticks); // the value was discarded
+        BOOST_REQUIRE(!over.duration_is_lossless_ns);
+        BOOST_REQUIRE(time_interval_status_to_exchange_status(over.status) ==
+                      ExchangeStatus::InvalidTimeDomain);
+        BOOST_REQUIRE(std::string(time_interval_status_to_string(over.status)) ==
+                      "duration_out_of_range");
+        // Just inside the range still works: 9e9 ticks at 1 Hz is 9e18 ns,
+        // which is below INT64_MAX, and 1 Hz is exactly 1e9 ns/tick so the
+        // projection IS lossless there.
+        const TimeInterval ok = timestamp_interval(
+            must_make(9000000000LL, slow, TimestampMarker::RmarkerRx,
+                      TimestampSource::HardwareMeasured, kFullRxChain),
+            must_make(0, slow, TimestampMarker::RmarkerRx, TimestampSource::HardwareMeasured,
+                      kFullRxChain));
+        BOOST_REQUIRE(ok.status == TimeIntervalStatus::Ok);
+        BOOST_REQUIRE(ok.duration.nanos() == 9000000000000000000LL);
+        BOOST_REQUIRE(ok.is_whole_ticks);
+        BOOST_REQUIRE(ok.duration_is_lossless_ns);
+        // ... and the exact tick value survives alongside it, so a caller that
+        // ignores the status still has the non-lossy representation.
+        BOOST_REQUIRE(ok.ticks == 9000000000LL);
+    }
+
+    // A no-wrap domain refuses a reversed interval BEFORE projecting, so a
+    // negative duration can never reach the API.
+    {
+        const TimeInterval ti = timestamp_interval(
+            must_make(1, x410_device(), TimestampMarker::RmarkerRx,
+                      TimestampSource::HardwareMeasured, kFullRxChain),
+            must_make(5, x410_device(), TimestampMarker::RmarkerRx,
+                      TimestampSource::HardwareMeasured, kFullRxChain));
+        BOOST_REQUIRE(ti.status == TimeIntervalStatus::OrderReversed);
+        BOOST_REQUIRE(ti.duration.nanos() == 0);
+    }
+    // A negative sub-tick difference is refused the same way, not clamped.
+    {
+        const TimeInterval ti = timestamp_interval(
+            must_make_frac(5, 1, 4, x410_device(), TimestampMarker::RmarkerRx,
+                           TimestampSource::HardwareMeasured, kFullRxChain),
+            must_make_frac(5, 3, 4, x410_device(), TimestampMarker::RmarkerRx,
+                           TimestampSource::HardwareMeasured, kFullRxChain));
+        BOOST_REQUIRE(ti.status == TimeIntervalStatus::DurationOutOfRange);
+        BOOST_REQUIRE(ti.duration.nanos() == 0);
+        BOOST_REQUIRE(!ti.duration_is_lossless_ns);
+    }
+}
+
+// ===========================================================================
+// 26. M0.1 / R5 -- the exactly-half-period case, in BOTH directions
+// ===========================================================================
+
+BOOST_AUTO_TEST_CASE(test_r5_exact_half_period_is_ambiguous)
+{
+    const ClockDomain d = tight_wrap();
+
+    const Timestamp zero = must_make(0, d, TimestampMarker::RmarkerRx,
+                                     TimestampSource::HardwareMeasured, kFullRxChain);
+    const Timestamp half = must_make(kTightHalf, d, TimestampMarker::RmarkerRx,
+                                     TimestampSource::HardwareMeasured, kFullRxChain);
+    const Timestamp under = must_make(kTightHalf - 1, d, TimestampMarker::RmarkerRx,
+                                      TimestampSource::HardwareMeasured, kFullRxChain);
+    const Timestamp over = must_make(kTightHalf + 1, d, TimestampMarker::RmarkerRx,
+                                     TimestampSource::HardwareMeasured, kFullRxChain);
+
+    // THE R5 DEFECT: M0 accepted dist == P/2, so BOTH directions claimed
+    // "a precedes b".  Both are now Indeterminate, and both helpers agree.
+    TimestampOrder o = TimestampOrder::Equal;
+    BOOST_REQUIRE(!timestamp_compare(zero, half, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    BOOST_REQUIRE(!timestamp_compare(half, zero, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+
+    // The legacy bool helper refuses the same pair and, as documented since
+    // M0, leaves `out` untouched when it refuses.
+    bool out = true;
+    BOOST_REQUIRE(!timestamp_precedes(zero, half, out));
+    BOOST_REQUIRE(out); // untouched: no verdict was invented
+    BOOST_REQUIRE(!timestamp_precedes(half, zero, out));
+    BOOST_REQUIRE(out);
+
+    // Just under resolves, and antisymmetry holds: only ONE direction can.
+    BOOST_REQUIRE(timestamp_compare(zero, under, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    BOOST_REQUIRE(!timestamp_compare(under, zero, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    BOOST_REQUIRE(timestamp_precedes(zero, under, out));
+    BOOST_REQUIRE(out);
+    BOOST_REQUIRE(!timestamp_precedes(under, zero, out));
+
+    // Just over: the forward direction 0 -> 129 is 129 ticks, past the half
+    // period, so no order.  The REVERSE is 256 - 129 = 127 ticks, which is
+    // inside, so it resolves -- and it resolves as "0 is earlier than 129",
+    // i.e. the pair is 127 ticks before the wrap, not 129 after it.
+    BOOST_REQUIRE(!timestamp_compare(zero, over, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    BOOST_REQUIRE(timestamp_compare(over, zero, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+
+    // P/2 - 1 tick is the largest resolvable forward distance, and the
+    // backward distance is then P/2 + 1 ticks, which is not resolvable.
+    BOOST_REQUIRE(timestamp_compare(under, zero, o) == false);
+    BOOST_REQUIRE(timestamp_compare(zero, under, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+
+    // This is NOT an interval statement: the interval (half - zero) is a
+    // perfectly definite 128-tick magnitude, because the caller supplied the
+    // sign.  Only ORDERING is ambiguous there.  Asserting the contrast keeps
+    // the two rules from drifting into each other.
+    const TimeInterval ti = timestamp_interval(half, zero);
+    BOOST_REQUIRE(ti.status == TimeIntervalStatus::Ok);
+    BOOST_REQUIRE(ti.ticks == kTightHalf);
+
+    // d == 0 in both directions is Equal, not "earlier".
+    BOOST_REQUIRE(timestamp_compare(zero, zero, o));
+    BOOST_REQUIRE(o == TimestampOrder::Equal);
+    BOOST_REQUIRE(timestamp_precedes(zero, zero, out));
+    BOOST_REQUIRE(!out);
+
+    // A quarter and three quarters of the way round are both definite.
+    BOOST_REQUIRE(timestamp_compare(zero, must_make(kTightHalf / 2, d,
+                                                    TimestampMarker::RmarkerRx,
+                                                    TimestampSource::HardwareMeasured,
+                                                    kFullRxChain),
+                                    o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+}
+
+// ===========================================================================
+// 27. M0.1 / R5 -- sub-tick ordering, zero crossing, and the +-1 boundaries
+// ===========================================================================
+
+BOOST_AUTO_TEST_CASE(test_r5_fractional_ordering_and_boundaries)
+{
+    const ClockDomain d = tight_wrap();
+
+    // THE R5 FRACTION DEFECT: 0.25 and 0.75 on the same tick compared EQUAL in
+    // M0.  They are now ordered, and the reverse direction is the mirror.
+    const Timestamp q = must_make_frac(0, 1, 4, d, TimestampMarker::RmarkerRx,
+                                       TimestampSource::HardwareMeasured, kFullRxChain);
+    const Timestamp tq = must_make_frac(0, 3, 4, d, TimestampMarker::RmarkerRx,
+                                        TimestampSource::HardwareMeasured, kFullRxChain);
+    TimestampOrder o = TimestampOrder::Equal;
+    BOOST_REQUIRE(timestamp_compare(q, tq, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    BOOST_REQUIRE(timestamp_compare(q, q, o));
+    BOOST_REQUIRE(o == TimestampOrder::Equal);
+    // The REVERSE of 0.25 -> 0.75 is 255.5 ticks forward on a 256-tick
+    // counter, i.e. past the half period, so no order exists.  This is the
+    // fraction-aware path doing exactly what the integer-only path could not:
+    // an integer-only comparison would have called the two EQUAL (same tick)
+    // and silently dropped a real 255-tick separation.
+    BOOST_REQUIRE(!timestamp_compare(tq, q, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    BOOST_REQUIRE(std::string(timestamp_order_to_string(o)) == "indeterminate");
+    // A WIDE wrapping counter does not help here, and that is a structural
+    // consequence worth pinning: two timestamps one tick apart are always
+    // period - 1 apart in the reverse direction, so the reverse is past the
+    // half period on ANY wrapping counter.  A wrapping counter can therefore
+    // only ever order a sub-tick pair in ONE direction; a definite
+    // two-way ordering of fractions requires a no-wrap counter.
+    {
+        const Timestamp wq = must_make_frac(0, 1, 4, wide_wrap(), TimestampMarker::RmarkerRx,
+                                            TimestampSource::HardwareMeasured, kFullRxChain);
+        const Timestamp wtq = must_make_frac(0, 3, 4, wide_wrap(), TimestampMarker::RmarkerRx,
+                                             TimestampSource::HardwareMeasured, kFullRxChain);
+        BOOST_REQUIRE(timestamp_compare(wq, wtq, o));
+        BOOST_REQUIRE(o == TimestampOrder::Earlier);
+        BOOST_REQUIRE(!timestamp_compare(wtq, wq, o));
+        BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+        const ModularTickDistance md = modular_tick_distance(wtq, wq);
+        BOOST_REQUIRE(md.ok);
+        BOOST_REQUIRE(md.ticks == 65535);
+        // The forward distance is 65535 + (1/4 - 3/4) = 65535 - 1/2, and the
+        // borrow turns the negative half into 1/2 one tick down.
+        BOOST_REQUIRE(md.frac_num == 1 && md.frac_den == 2u);
+    }
+
+    // The exact same instants on a MONOTONIC counter, where a total order
+    // always exists, so fractions are ordered there too.
+    const Timestamp mq = must_make_frac(5, 1, 4, x410_device(), TimestampMarker::RmarkerRx,
+                                        TimestampSource::HardwareMeasured, kFullRxChain);
+    const Timestamp mtq = must_make_frac(5, 3, 4, x410_device(), TimestampMarker::RmarkerRx,
+                                         TimestampSource::HardwareMeasured, kFullRxChain);
+    BOOST_REQUIRE(timestamp_compare(mq, mtq, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    BOOST_REQUIRE(timestamp_compare(mtq, mq, o));
+    BOOST_REQUIRE(o == TimestampOrder::Later);
+    BOOST_REQUIRE(timestamp_compare(mq, mq, o));
+    BOOST_REQUIRE(o == TimestampOrder::Equal);
+    BOOST_REQUIRE(timestamp_compare_absolute(mq, mtq, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    // ... and the absolute helper refuses a WRAPPING domain rather than
+    // pretending the wrap does not matter.
+    BOOST_REQUIRE(!timestamp_compare_absolute(q, tq, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+
+    // The exact difference between two sub-tick fractions needs a denominator
+    // that no single Timestamp may carry, and it still comes out exact.
+    {
+        const Timestamp a = must_make_frac(0, 1, 32767, d, TimestampMarker::RmarkerRx,
+                                           TimestampSource::HardwareMeasured, kFullRxChain);
+        const Timestamp b = must_make_frac(0, 32766, 32767, d, TimestampMarker::RmarkerRx,
+                                           TimestampSource::HardwareMeasured, kFullRxChain);
+        const ModularTickDistance md = modular_tick_distance(a, b);
+        BOOST_REQUIRE(md.ok);
+        BOOST_REQUIRE(md.ticks == 0);
+        // (32766 - 1)/32767 = 32765/32767, reduced.
+        BOOST_REQUIRE(md.frac_num == 32765 && md.frac_den == 32767u);
+        // A difference of two den-32767 fractions stays under the wide bound.
+        BOOST_REQUIRE(md.frac_den <= kMaxFractionDifferenceDenominator);
+        BOOST_REQUIRE(timestamp_compare(a, b, o));
+        BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    }
+
+    // Zero crossing: 255.75 -> 0.25 on a 256-tick counter is 1/2 tick forward
+    // (256.25 - 255.75).  The INTEGER part of the modular difference is 1 and
+    // the fraction is -1/2, so the whole-tick part must be borrowed DOWN.
+    // Getting that borrow wrong reports 2 1/4 ticks instead of 1/2, and the
+    // two answers sit on opposite sides of every budget boundary.
+    {
+        const Timestamp a = must_make_frac(255, 3, 4, d, TimestampMarker::RmarkerRx,
+                                           TimestampSource::HardwareMeasured, kFullRxChain);
+        const Timestamp b = must_make_frac(0, 1, 4, d, TimestampMarker::RmarkerRx,
+                                           TimestampSource::HardwareMeasured, kFullRxChain);
+        const ModularTickDistance md = modular_tick_distance(a, b);
+        BOOST_REQUIRE(md.ok);
+        BOOST_REQUIRE(md.wrapped);
+        BOOST_REQUIRE(md.ticks == 0);
+        BOOST_REQUIRE(md.frac_num == 1 && md.frac_den == 2u);
+        BOOST_REQUIRE(timestamp_compare(a, b, o));
+        BOOST_REQUIRE(o == TimestampOrder::Earlier);
+        // The reverse direction is 255.5 ticks: past the half period, so no
+        // order exists.
+        BOOST_REQUIRE(!timestamp_compare(b, a, o));
+        BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    }
+    // The same zero crossing with the fraction ABOVE the origin: 255.25 ->
+    // 0.75 is 1.5 ticks, so the integer part stays 1 and the fraction is +1/2.
+    {
+        const Timestamp a = must_make_frac(255, 1, 4, d, TimestampMarker::RmarkerRx,
+                                           TimestampSource::HardwareMeasured, kFullRxChain);
+        const Timestamp b = must_make_frac(0, 3, 4, d, TimestampMarker::RmarkerRx,
+                                           TimestampSource::HardwareMeasured, kFullRxChain);
+        const ModularTickDistance md = modular_tick_distance(a, b);
+        BOOST_REQUIRE(md.ok);
+        BOOST_REQUIRE(md.wrapped);
+        BOOST_REQUIRE(md.ticks == 1);
+        BOOST_REQUIRE(md.frac_num == 1 && md.frac_den == 2u);
+        BOOST_REQUIRE(timestamp_compare(a, b, o));
+        BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    }
+    // 255.75 -> 0 (no fraction on b): the borrow wraps the fraction up to 1/4.
+    {
+        const Timestamp a = must_make_frac(255, 3, 4, d, TimestampMarker::RmarkerRx,
+                                           TimestampSource::HardwareMeasured, kFullRxChain);
+        const Timestamp b = must_make(0, d, TimestampMarker::RmarkerRx,
+                                      TimestampSource::HardwareMeasured, kFullRxChain);
+        const ModularTickDistance md = modular_tick_distance(a, b);
+        BOOST_REQUIRE(md.ok);
+        BOOST_REQUIRE(md.ticks == 0);
+        BOOST_REQUIRE(md.frac_num == 1 && md.frac_den == 4u);
+        BOOST_REQUIRE(timestamp_compare(a, b, o));
+        BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    }
+    // 255.99997... -> 0 is one 1/32767-th of a tick: the borrow lands on the
+    // smallest representable fraction, not on zero.
+    {
+        const Timestamp a = must_make_frac(255, 32766, 32767, d, TimestampMarker::RmarkerRx,
+                                           TimestampSource::HardwareMeasured, kFullRxChain);
+        const Timestamp b = must_make(0, d, TimestampMarker::RmarkerRx,
+                                      TimestampSource::HardwareMeasured, kFullRxChain);
+        const ModularTickDistance md = modular_tick_distance(a, b);
+        BOOST_REQUIRE(md.ok);
+        BOOST_REQUIRE(md.ticks == 0);
+        BOOST_REQUIRE(md.frac_num == 1 && md.frac_den == 32767u);
+        BOOST_REQUIRE(timestamp_compare(a, b, o));
+        BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    }
+
+    // The +-1 boundaries of a sub-tick fraction, at the same tick: one
+    // 1/32767 step apart.  On a wrapping counter the step direction resolves
+    // and the reverse does not (the reverse is 256 - 1/32767 ticks, past the
+    // half period), so BOTH directions are checked against that rule.
+    {
+        const Timestamp a = must_make_frac(9, 1, 32767, d, TimestampMarker::RmarkerRx,
+                                           TimestampSource::HardwareMeasured, kFullRxChain);
+        const Timestamp b = must_make_frac(9, 2, 32767, d, TimestampMarker::RmarkerRx,
+                                           TimestampSource::HardwareMeasured, kFullRxChain);
+        BOOST_REQUIRE(timestamp_compare(a, b, o));
+        BOOST_REQUIRE(o == TimestampOrder::Earlier);
+        BOOST_REQUIRE(!timestamp_compare(b, a, o));
+        BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+        const ModularTickDistance md_ab = modular_tick_distance(a, b);
+        BOOST_REQUIRE(md_ab.ok);
+        BOOST_REQUIRE(md_ab.ticks == 0);
+        BOOST_REQUIRE(md_ab.frac_num == 1 && md_ab.frac_den == 32767u);
+        // On a no-wrap counter the very same pair orders in BOTH directions,
+        // which is where a two-way fraction ordering is actually available.
+        const Timestamp ma = must_make_frac(9, 1, 32767, x410_device(),
+                                            TimestampMarker::RmarkerRx,
+                                            TimestampSource::HardwareMeasured, kFullRxChain);
+        const Timestamp mb = must_make_frac(9, 2, 32767, x410_device(),
+                                            TimestampMarker::RmarkerRx,
+                                            TimestampSource::HardwareMeasured, kFullRxChain);
+        BOOST_REQUIRE(timestamp_compare(ma, mb, o));
+        BOOST_REQUIRE(o == TimestampOrder::Earlier);
+        BOOST_REQUIRE(timestamp_compare(mb, ma, o));
+        BOOST_REQUIRE(o == TimestampOrder::Later);
+        // ... and the fraction immediately below an exact tick, versus that
+        // exact tick, is exactly one 1/32767 step earlier.
+        const Timestamp below = must_make_frac(8, 32766, 32767, d, TimestampMarker::RmarkerRx,
+                                                TimestampSource::HardwareMeasured, kFullRxChain);
+        const Timestamp exact = must_make(9, d, TimestampMarker::RmarkerRx,
+                                          TimestampSource::HardwareMeasured, kFullRxChain);
+        BOOST_REQUIRE(timestamp_compare(below, exact, o));
+        BOOST_REQUIRE(o == TimestampOrder::Earlier);
+        BOOST_REQUIRE(!timestamp_compare(exact, below, o));
+        BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+        const ModularTickDistance md = modular_tick_distance(below, exact);
+        BOOST_REQUIRE(md.ok);
+        BOOST_REQUIRE(md.ticks == 0);
+        BOOST_REQUIRE(md.frac_num == 1 && md.frac_den == 32767u);
+    }
+    // An exact tick and the smallest non-zero fraction sitting on that same
+    // tick, i.e. the smallest separation the type can represent at all.  The
+    // forward direction is 1/32767 ticks and resolves; the reverse is
+    // 256 - 1/32767 and does not.
+    {
+        const Timestamp a = must_make(0, d, TimestampMarker::RmarkerRx,
+                                      TimestampSource::HardwareMeasured, kFullRxChain);
+        const Timestamp b = must_make_frac(0, 1, 32767, d, TimestampMarker::RmarkerRx,
+                                           TimestampSource::HardwareMeasured, kFullRxChain);
+        BOOST_REQUIRE(timestamp_compare(a, b, o));
+        BOOST_REQUIRE(o == TimestampOrder::Earlier);
+        BOOST_REQUIRE(!timestamp_compare(b, a, o));
+        BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+        const ModularTickDistance md = modular_tick_distance(a, b);
+        BOOST_REQUIRE(md.ok);
+        BOOST_REQUIRE(md.ticks == 0);
+        BOOST_REQUIRE(md.frac_num == 1 && md.frac_den == 32767u);
+        // The reverse really is 256 - 1/32767, not "the same short distance":
+        // the fraction must be borrowed and the integer part saturated.
+        const ModularTickDistance rev = modular_tick_distance(b, a);
+        BOOST_REQUIRE(rev.ok);
+        BOOST_REQUIRE(rev.ticks == 255);
+        BOOST_REQUIRE(rev.frac_num == 32766 && rev.frac_den == 32767u);
+    }
+
+    // The fraction comparator itself, on the degenerate spellings.
+    BOOST_REQUIRE(timestamp_fraction_compare(0, 0u, 0, 0u) == 0);
+    BOOST_REQUIRE(timestamp_fraction_compare(0, 0u, 1, 4u) == -1);
+    BOOST_REQUIRE(timestamp_fraction_compare(1, 4u, 0, 0u) == 1);
+    BOOST_REQUIRE(timestamp_fraction_compare(1, 4u, 1, 4u) == 0);
+    BOOST_REQUIRE(timestamp_fraction_compare(1, 4u, 3, 4u) == -1);
+    BOOST_REQUIRE(timestamp_fraction_compare(2, 4u, 1, 2u) == 0); // equal values
+    BOOST_REQUIRE(timestamp_fraction_compare(1, 3u, 2, 3u) == -1);
+    // A modular distance across a domain boundary is refused, not guessed.
+    {
+        const Timestamp other = must_make(1, wide_wrap(), TimestampMarker::RmarkerRx,
+                                          TimestampSource::HardwareMeasured, kFullRxChain);
+        const ModularTickDistance md = modular_tick_distance(mq, other);
+        BOOST_REQUIRE(!md.ok);
+    }
+}
+
+// ===========================================================================
+// 28. M0.1 / R5 -- the ordering budget replaces the blanket half period
+// ===========================================================================
+
+BOOST_AUTO_TEST_CASE(test_r5_ordering_budget_is_configurable_and_clamped)
+{
+    const ClockDomain d = wide_wrap(); // 16-bit, half period 32768 ticks
+    const Timestamp zero = must_make(0, d, TimestampMarker::RmarkerRx,
+                                     TimestampSource::HardwareMeasured, kFullRxChain);
+
+    // The default budget IS the half period, so nothing is assumed beyond it.
+    int64_t window = 0;
+    BOOST_REQUIRE(timestamp_order_window_ticks(d, TimestampOrderBudget(), window));
+    BOOST_REQUIRE(window == kWideHalf);
+    BOOST_REQUIRE(timestamp_order_window_ticks(d, TimestampOrderBudget::half_period(), window));
+    BOOST_REQUIRE(window == kWideHalf);
+
+    // A declared budget: a TWR exchange is bounded by the reply delay plus a
+    // timeout, so 4000 ticks is the whole plausible span.  Under the blanket
+    // half period 4000 ticks would resolve; under this budget it does not.
+    TimestampOrder o = TimestampOrder::Indeterminate;
+    const Timestamp at3000 = must_make(3000, d, TimestampMarker::RmarkerRx,
+                                       TimestampSource::HardwareMeasured, kFullRxChain);
+    const Timestamp at4000 = must_make(4000, d, TimestampMarker::RmarkerRx,
+                                       TimestampSource::HardwareMeasured, kFullRxChain);
+    const Timestamp at4001 = must_make(4001, d, TimestampMarker::RmarkerRx,
+                                       TimestampSource::HardwareMeasured, kFullRxChain);
+    // Under the DEFAULT budget (the half period) all of these resolve.
+    BOOST_REQUIRE(timestamp_compare(zero, at3000, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    BOOST_REQUIRE(timestamp_compare(zero, at4000, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    BOOST_REQUIRE(timestamp_compare(zero, at4001, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+
+    // Under a declared budget the bound is EXCLUSIVE, exactly as the half
+    // period is: explicit_ticks(4000) resolves 3999 and refuses 4000.
+    const TimestampOrderBudget b4000 = TimestampOrderBudget::explicit_ticks(4000);
+    BOOST_REQUIRE(timestamp_compare(zero, must_make(3999, d, TimestampMarker::RmarkerRx,
+                                                   TimestampSource::HardwareMeasured,
+                                                   kFullRxChain),
+                                    o, b4000));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    BOOST_REQUIRE(!timestamp_compare(zero, at4000, o, b4000));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    BOOST_REQUIRE(!timestamp_compare(zero, at4001, o, b4000));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    // ... and the budget is what made the difference, since both resolve with
+    // the default.
+    BOOST_REQUIRE(timestamp_compare(zero, at4001, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+
+    // A budget SMALLER than the half period is honoured as given.
+    BOOST_REQUIRE(timestamp_order_window_ticks(d, TimestampOrderBudget::explicit_ticks(9999),
+                                               window));
+    BOOST_REQUIRE(window == 9999);
+    // A budget LARGER than the half period is CLAMPED, not honoured: honouring
+    // it would let both directions resolve, which is the R5 defect.
+    BOOST_REQUIRE(timestamp_order_window_ticks(d, TimestampOrderBudget::explicit_ticks(99999),
+                                               window));
+    BOOST_REQUIRE(window == kWideHalf);
+    // ... and on the 8-bit domain, where the half period is only 128, a budget
+    // of 9999 is clamped to 128 rather than to 9999.
+    int64_t tight_window = 0;
+    BOOST_REQUIRE(timestamp_order_window_ticks(tight_wrap(),
+                                               TimestampOrderBudget::explicit_ticks(9999),
+                                               tight_window));
+    BOOST_REQUIRE(tight_window == kTightHalf);
+    // Behaviour under an OVERSIZED budget: it is the half period that decides,
+    // so 32767 ticks still resolves and 32768 does not -- the same verdicts the
+    // default budget gives, proving the clamp took effect.
+    const TimestampOrderBudget oversized = TimestampOrderBudget::explicit_ticks(99999);
+    const Timestamp just_under_half = must_make(kWideHalf - 1, d, TimestampMarker::RmarkerRx,
+                                                TimestampSource::HardwareMeasured,
+                                                kFullRxChain);
+    BOOST_REQUIRE(timestamp_compare(zero, just_under_half, o, oversized));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    const Timestamp exactly_half = must_make(kWideHalf, d, TimestampMarker::RmarkerRx,
+                                             TimestampSource::HardwareMeasured, kFullRxChain);
+    BOOST_REQUIRE(!timestamp_compare(zero, exactly_half, o, oversized));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    // A budget that is smaller than the half period is the binding one, and it
+    // refuses a relation the default would have accepted.
+    const Timestamp at10000 = must_make(10000, d, TimestampMarker::RmarkerRx,
+                                        TimestampSource::HardwareMeasured, kFullRxChain);
+    BOOST_REQUIRE(timestamp_compare(zero, at10000, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    BOOST_REQUIRE(!timestamp_compare(zero, at10000, o,
+                                     TimestampOrderBudget::explicit_ticks(9999)));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+
+    // On a no-wrap (monotonic) counter there is no modular ambiguity, so the
+    // default window is unbounded -- but a declared budget is still enforced,
+    // because a caller that knows its exchange cannot be longer than N ticks
+    // wants a refusal, not a verdict.
+    int64_t mwin = 0;
+    BOOST_REQUIRE(timestamp_order_window_ticks(x410_device(), TimestampOrderBudget(), mwin));
+    BOOST_REQUIRE(mwin == std::numeric_limits<int64_t>::max());
+    const Timestamp mono_a = must_make(100, x410_device(), TimestampMarker::RmarkerRx,
+                                       TimestampSource::HardwareMeasured, kFullRxChain);
+    const Timestamp mono_b = must_make(900000, x410_device(), TimestampMarker::RmarkerRx,
+                                       TimestampSource::HardwareMeasured, kFullRxChain);
+    BOOST_REQUIRE(timestamp_compare(mono_a, mono_b, o));
+    BOOST_REQUIRE(o == TimestampOrder::Earlier);
+    BOOST_REQUIRE(!timestamp_compare(mono_a, mono_b, o,
+                                     TimestampOrderBudget::explicit_ticks(1000)));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+
+    // A negative budget is invalid: the comparison refuses, and `out` is
+    // Indeterminate rather than left holding a previous verdict.
+    o = TimestampOrder::Later;
+    BOOST_REQUIRE(!timestamp_compare(zero, at3000, o, TimestampOrderBudget{-1}));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    BOOST_REQUIRE(!timestamp_order_window_ticks(d, TimestampOrderBudget{-1}, window));
+    BOOST_REQUIRE(!TimestampOrderBudget{-1}.is_valid());
+    BOOST_REQUIRE(TimestampOrderBudget::explicit_ticks(-5).is_valid()); // clamps to 0
+    BOOST_REQUIRE(TimestampOrderBudget::explicit_ticks(-5).max_forward_ticks == 0);
+}
+
+// ===========================================================================
+// 29. M0.1 / R5 -- "no such order exists" is never reported as an order
+// ===========================================================================
+
+BOOST_AUTO_TEST_CASE(test_r5_missing_order_is_never_reported_as_an_order)
+{
+    const ClockDomain d = tight_wrap();
+    const Timestamp zero = must_make(0, d, TimestampMarker::RmarkerRx,
+                                     TimestampSource::HardwareMeasured, kFullRxChain);
+    const Timestamp far = must_make(200, d, TimestampMarker::RmarkerRx,
+                                    TimestampSource::HardwareMeasured, kFullRxChain);
+
+    // (a) ambiguous modulo the wrap: the helper returns false AND writes
+    // Indeterminate, so a caller that ignores the return value still cannot
+    // read an order.
+    TimestampOrder o = TimestampOrder::Later;
+    BOOST_REQUIRE(!timestamp_compare(zero, far, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    BOOST_REQUIRE(std::string(timestamp_order_to_string(o)) == "indeterminate");
+
+    // (b) different clock domains: never comparable, so no order.
+    const Timestamp other_domain =
+        must_make(10, x410_device(), TimestampMarker::RmarkerRx,
+                  TimestampSource::HardwareMeasured, kFullRxChain);
+    o = TimestampOrder::Later;
+    BOOST_REQUIRE(!timestamp_compare(zero, other_domain, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+
+    // (c) different epochs of the same counter.
+    const Timestamp next_epoch =
+        must_make_frac(10, 1, 2, tight_wrap_next_epoch(), TimestampMarker::RmarkerRx,
+                       TimestampSource::HardwareMeasured, kFullRxChain);
+    o = TimestampOrder::Later;
+    BOOST_REQUIRE(!timestamp_compare(zero, next_epoch, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+
+    // (d) different wrap widths on the same name and rate.
+    const Timestamp other_width = must_make(10, dw_uus32(), TimestampMarker::RmarkerRx,
+                                            TimestampSource::HardwareMeasured, kFullRxChain);
+    o = TimestampOrder::Later;
+    BOOST_REQUIRE(!timestamp_compare(zero, other_width, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+
+    // (e) a structurally invalid timestamp.
+    {
+        Timestamp broken = zero;
+        broken.frac_num = 3; // 3/4 with den 0 is not normalized
+        broken.frac_den = 0u;
+        o = TimestampOrder::Later;
+        BOOST_REQUIRE(!timestamp_compare(broken, zero, o));
+        BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+        BOOST_REQUIRE(!timestamp_compare(zero, broken, o));
+        BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+        // ... and a modular distance refuses it too.
+        BOOST_REQUIRE(!modular_tick_distance(broken, zero).ok);
+    }
+    // (f) an invalid clock domain on one side.
+    {
+        Timestamp broken = zero;
+        broken.domain.tick_rate_hz = -1.0;
+        o = TimestampOrder::Later;
+        BOOST_REQUIRE(!timestamp_compare(broken, zero, o));
+        BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+        BOOST_REQUIRE(!timestamp_compare_absolute(broken, zero, o));
+        BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    }
+    // (g) the same set of refusals through the absolute helper: a wrapping
+    // domain has no total order, so it is Indeterminate, never a guess.
+    o = TimestampOrder::Later;
+    BOOST_REQUIRE(!timestamp_compare_absolute(zero, far, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+    o = TimestampOrder::Later;
+    BOOST_REQUIRE(!timestamp_compare_absolute(zero, other_domain, o));
+    BOOST_REQUIRE(o == TimestampOrder::Indeterminate);
+
+    // Exhaustive sweep of an 8-bit counter, whole ticks: the modular distance
+    // and the ordering must match the reference computed from first
+    // principles -- the forward distance is (b - a) mod 256, and a relation
+    // resolves only when that is strictly below 128.
+    for (int64_t a = 0; a < kTightPeriod; a += 1) {
+        for (int64_t b = 0; b < kTightPeriod; b += 1) {
+            const Timestamp ta = must_make(a, d, TimestampMarker::RmarkerRx,
+                                           TimestampSource::HardwareMeasured, kFullRxChain);
+            const Timestamp tb = must_make(b, d, TimestampMarker::RmarkerRx,
+                                           TimestampSource::HardwareMeasured, kFullRxChain);
+            const int64_t fwd = (b >= a) ? (b - a) : (kTightPeriod - (a - b));
+            const int64_t back = kTightPeriod - fwd; // fwd == 0 -> 256, i.e. a==b
+
+            const ModularTickDistance md = modular_tick_distance(ta, tb);
+            BOOST_REQUIRE(md.ok);
+            BOOST_REQUIRE(md.ticks == fwd);
+            BOOST_REQUIRE(md.frac_num == 0);
+            BOOST_REQUIRE(md.wrapped == (b < a));
+
+            TimestampOrder o_ab = TimestampOrder::Indeterminate;
+            const bool ok_ab = timestamp_compare(ta, tb, o_ab);
+            if (a == b) {
+                BOOST_REQUIRE(ok_ab);
+                BOOST_REQUIRE(o_ab == TimestampOrder::Equal);
+            } else if (fwd < kTightHalf) {
+                BOOST_REQUIRE(ok_ab);
+                BOOST_REQUIRE(o_ab == TimestampOrder::Earlier);
+                // Antisymmetry: the reverse is past the half period, so it is
+                // Indeterminate -- never "Later", and never "Earlier" too.
+                TimestampOrder o_ba = TimestampOrder::Indeterminate;
+                BOOST_REQUIRE(!timestamp_compare(tb, ta, o_ba));
+                BOOST_REQUIRE(o_ba == TimestampOrder::Indeterminate);
+            } else {
+                // Ambiguous in this direction.  The reverse may still resolve,
+                // unless the pair is exactly half a period apart -- the R5
+                // defect case, where BOTH directions must be Indeterminate.
+                BOOST_REQUIRE(!ok_ab);
+                BOOST_REQUIRE(o_ab == TimestampOrder::Indeterminate);
+                TimestampOrder o_ba = TimestampOrder::Indeterminate;
+                const bool ok_ba = timestamp_compare(tb, ta, o_ba);
+                if (back < kTightHalf) {
+                    BOOST_REQUIRE(ok_ba);
+                    BOOST_REQUIRE(o_ba == TimestampOrder::Earlier);
+                } else {
+                    BOOST_REQUIRE(fwd == kTightHalf && back == kTightHalf);
+                    BOOST_REQUIRE(!ok_ba);
+                    BOOST_REQUIRE(o_ba == TimestampOrder::Indeterminate);
+                }
+            }
+        }
+    }
 }
 
 } // namespace

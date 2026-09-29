@@ -28,6 +28,52 @@ GR_PYTHON_INSTALL(
 )
 
 ########################################################################
+# Python QA registration (M0 review R8 / P2).
+#
+# test_twr_config.py is the QA for the pure-Python TWR configuration layer:
+# DEFAULT DENY, the effective-config snapshot, JSON round trip and the
+# cross-check against the C++ header and the measured whitelist CSV.  It was
+# never registered with CTest, so a green `ctest` said nothing about the
+# Python half of REQ-API-01 -- and it was reachable only by hand, from a source
+# checkout.
+#
+# The module deliberately resolves its own paths from __file__ (source
+# gr-uwb/python, the C++ header, the measured CSV), so it needs no PYTHONPATH
+# and no built extension: that is the point of the pure-Python design.  What
+# it DOES need is a deterministic environment, because the generated CTest
+# shell scripts elsewhere in this project inherit the caller's
+# LD_LIBRARY_PATH / PYTHONPATH and can therefore resolve a stale
+# /usr/local/libgnuradio-uwb or an installed `uwb` package instead of the
+# checkout under test.  The ENVIRONMENT below pins both, so `ctest` and a
+# hand-run resolve identically.
+########################################################################
+if(PYTHONINTERP_FOUND)
+    add_test(NAME uwb_qa_twr_config_py
+        COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_twr_config.py
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+    # The test asserts `gnuradio` is NOT importable, so it must not be handed
+    # a build tree whose pybind module would satisfy that import.  Pin an empty
+    # PYTHONPATH rather than inheriting one.
+    set_property(TEST uwb_qa_twr_config_py APPEND PROPERTY
+        ENVIRONMENT
+            "PYTHONPATH="
+            "PYTHONDONTWRITEBYTECODE=1"
+            "GR_DONT_LOAD_PREFS=1"
+            "GR_CONF_CONTROLPORT_ON=False"
+            "UWB_TWR_PYTHON_QA=ctest")
+    set_tests_properties(uwb_qa_twr_config_py PROPERTIES
+        TIMEOUT 300
+        # A hand-edited checkout or a stale installed uwb package must not make
+        # this test's result depend on run order, so it never runs alongside
+        # anything else.
+        RUN_SERIAL TRUE)
+
+    message(STATUS "UWB CTest: registered uwb_qa_twr_config_py "
+                   "(apps/test_twr_config.py)")
+endif()
+
+########################################################################
 # Standalone detector benchmark (开发需求参考.md §10)
 ########################################################################
 add_executable(benchmark_detector benchmark_detector.cc)
