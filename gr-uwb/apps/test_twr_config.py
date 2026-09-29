@@ -424,7 +424,7 @@ class TestVocabulary(TwrConfigTestBase):
                      "tx_chain_broken", "invalid_time_domain",
                      "clock_estimate_invalid", "first_path_unreliable",
                      "calibration_missing", "calibration_expired",
-                     "protocol_timeout", "deadline_missed"):
+                     "protocol_timeout", "deadline_missed", "negative_tof"):
             status = T.ExchangeStatus.from_string(name)
             self.assertIsNotNone(status, name)
             self.assertNotEqual(T.exchange_status_family(status), "invalid")

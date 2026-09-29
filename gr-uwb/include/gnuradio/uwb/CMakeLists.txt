@@ -81,5 +81,10 @@ install(FILES
     uwb_twr_config.h
     uwb_twr_capability_evidence.h
     uwb_twr_tof_input.h
+    # M1-A: the SS/DS ToF mathematics (ClockRatio, compute_ss_tof,
+    # compute_ds_tof).  Header-only, UHD-free and config-free -- it depends
+    # only on the TWR contract headers above, so it installs cleanly and an
+    # isolated consumer can compute a ToF from admitted intervals.
+    uwb_twr_math.h
     DESTINATION include/gnuradio/uwb
 )

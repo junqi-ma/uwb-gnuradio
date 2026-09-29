@@ -201,6 +201,10 @@ list(APPEND test_uwb_sources
     # testdata/twr/config_parity_corpus.json, which is why this one does need
     # UWB_TESTDATA_DIR.
     qa_uwb_twr_config_parity.cc
+    # M1-A: the SS/DS ToF mathematics.  Reads
+    # testdata/twr/tof_oracle_vectors.json (the independent physical-model
+    # oracle), so it needs UWB_TESTDATA_DIR as well.
+    qa_uwb_twr_math.cc
 )
 # Anything we need to link to for the unit tests go here
 list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks)
@@ -362,6 +366,9 @@ target_compile_definitions(uwb_qa_uwb_hrp_packet_source.cc PRIVATE
 target_compile_definitions(uwb_qa_uwb_twr_config_parity.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 target_compile_definitions(uwb_qa_uwb_twr_frame.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+# M1-A reads the physics-derived ToF oracle, so it needs the testdata root.
+target_compile_definitions(uwb_qa_uwb_twr_math.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 # The two QAs that EMIT generated tables also need to know which build tree
 # they were compiled into.  They write their CSV output under

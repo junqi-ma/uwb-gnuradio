@@ -391,14 +391,14 @@ BOOST_AUTO_TEST_CASE(frozen_types_unchanged)
         ExchangeStatus::InvalidTimeDomain, ExchangeStatus::ClockEstimateInvalid,
         ExchangeStatus::FirstPathUnreliable, ExchangeStatus::CalibrationMissing,
         ExchangeStatus::CalibrationExpired, ExchangeStatus::ProtocolTimeout,
-        ExchangeStatus::DeadlineMissed
+        ExchangeStatus::DeadlineMissed, ExchangeStatus::NegativeTof
     };
     for (const ExchangeStatus s : defined) {
         ExchangeStatus back = ExchangeStatus::Ok;
         BOOST_REQUIRE(exchange_status_from_string(exchange_status_to_string(s), back));
         BOOST_REQUIRE(back == s);
     }
-    for (int i = 0; i <= static_cast<int>(ExchangeStatus::DeadlineMissed); ++i) {
+    for (int i = 0; i <= static_cast<int>(ExchangeStatus::NegativeTof); ++i) {
         const ExchangeStatus s = static_cast<ExchangeStatus>(i);
         if (std::string(exchange_status_to_string(s)) == "invalid")
             continue; // a reserved code point

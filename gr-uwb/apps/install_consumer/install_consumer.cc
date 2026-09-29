@@ -46,6 +46,7 @@
 #include <gnuradio/uwb/uwb_twr_capability_evidence.h>
 #include <gnuradio/uwb/uwb_twr_config.h>
 #include <gnuradio/uwb/uwb_twr_frame.h>
+#include <gnuradio/uwb/uwb_twr_math.h>
 #include <gnuradio/uwb/uwb_twr_timestamp.h>
 #include <gnuradio/uwb/uwb_twr_tof_input.h>
 #include <gnuradio/uwb/uwb_twr_types.h>
@@ -324,6 +325,68 @@ main()
         std::printf("        admission header: %s\n",
                     pair.value.has_value() ? pair.value->to_string().c_str()
                                            : "<refused>");
+    }
+
+    // ---- 6. the SS/DS ToF mathematics (M1-A) ------------------------------
+    // uwb_twr_math.h is INCLUDED and EXERCISED.  A common clock (k = 1 stated
+    // explicitly, never assumed) with RA = 2000 and DB = 1000 ticks must give
+    // exactly 500 A ticks.  The intervals are built through the real ranging
+    // gate, so this also proves the install ships the gate the math needs.
+    {
+        twr::ClockDomain domain;
+        check(twr::ClockDomain::make("consumer_m1a_ch5_uus", 499.2e6 * 128.0, 7u, 40u,
+                                     domain),
+              "the math header builds a clock domain");
+
+        const std::string cal_id = "cal-consumer-m1a";
+        auto make = [&](int64_t ticks, twr::TimestampMarker m, uint32_t bits,
+                        twr::Timestamp& out) {
+            if (!twr::Timestamp::from_ticks(ticks, domain, m,
+                                            twr::TimestampSource::HardwareMeasured, bits, out))
+                return false;
+            return twr::apply_calibration_ticks(out, cal_id, 0, 0, 0u, 0u) ==
+                   twr::CalibrationResult::Applied;
+        };
+        twr::Timestamp ra_l;
+        twr::Timestamp ra_e;
+        twr::Timestamp db_l;
+        twr::Timestamp db_e;
+        check(make(2000, twr::TimestampMarker::RmarkerRx, kRmarkerRxBits, ra_l) &&
+                  make(0, twr::TimestampMarker::RmarkerTx, kRmarkerTxBits, ra_e) &&
+                  make(1000, twr::TimestampMarker::RmarkerTx, kRmarkerTxBits, db_l) &&
+                  make(0, twr::TimestampMarker::RmarkerRx, kRmarkerRxBits, db_e),
+              "the M1-A timestamps are constructible");
+
+        twr::CalibrationStamp cal;
+        cal.id = cal_id;
+        cal.calibrated_epoch = 7u;
+        cal.valid_from_ticks = 1000;
+        cal.valid_until_ticks = 2000;
+        twr::CalibrationApplication app;
+        app.calibration_id = cal_id;
+        app.result = twr::CalibrationResult::Applied;
+        cal.applications.push_back(app);
+
+        twr::RangeAdmissionContext ctx;
+        ctx.calibration = &cal;
+        ctx.reference_ticks = 1500;
+        ctx.reference_ticks_recorded = true;
+        ctx.rx_first_path = twr::FirstPathQuality::passed(18.5, 9.0, 0.82);
+
+        const twr::RangingIntervalAdmission ra =
+            twr::admit_ranging_interval(ra_l, ra_e, ctx);
+        const twr::RangingIntervalAdmission db =
+            twr::admit_ranging_interval(db_l, db_e, ctx);
+        check(ra.admitted && db.admitted, "the M1-A intervals pass the ranging gate");
+
+        twr::ClockRatio k;
+        check(twr::ClockRatio::unity_same_clock(domain, k),
+              "a common clock is STATED (k=1) rather than defaulted");
+        const twr::TofResult tof = twr::compute_ss_tof(*ra.value, *db.value, k);
+        check(tof.ok && tof.tof.num == 500 && tof.tof.den == 1,
+              "compute_ss_tof gives exactly 500 A ticks for RA=2000, DB=1000");
+        std::printf("        math header: compute_ss_tof -> %s A ticks (%s)\n",
+                    tof.tof.to_string().c_str(), twr::tof_status_to_string(tof.status));
     }
 
     std::printf("%s\n", g_failures == 0 ? "CONSUMER OK"

@@ -123,11 +123,11 @@ fi
 # The admission header MUST be installed (review defect N05).
 # ---------------------------------------------------------------------------
 for h in uwb_twr_types.h uwb_twr_frame.h uwb_twr_timestamp.h uwb_twr_config.h \
-         uwb_twr_capability_evidence.h uwb_twr_tof_input.h; do
+         uwb_twr_capability_evidence.h uwb_twr_tof_input.h uwb_twr_math.h; do
     [ -f "$PREFIX/include/gnuradio/uwb/$h" ] || fail \
         "installed public header is missing: include/gnuradio/uwb/$h"
 done
-echo "   all six public TWR headers present"
+echo "   all seven public TWR headers present"
 
 # The QA-only header must NOT be installed (it cannot compile standalone).
 if [ -f "$PREFIX/include/gnuradio/uwb/uwb_twr_test_output.h" ]; then
@@ -155,6 +155,7 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 cat > "$WORK/tiny_admission_consumer.cc" <<'EOF'
 // Throwaway external consumer: proves uwb_twr_tof_input.h is installed AND
 // usable against the prefix alone.  No source tree, no build tree, no link.
+#include <gnuradio/uwb/uwb_twr_math.h>
 #include <gnuradio/uwb/uwb_twr_tof_input.h>
 
 #include <cstdio>
@@ -230,6 +231,47 @@ int main()
     }
     std::printf("TINY CONSUMER OK: admit_ranging_interval -> exact %lld ticks\n",
                 static_cast<long long>(pair.value->interval().ticks));
+
+    // M1-A: the installed math header computes the hand-checked SS example.
+    // Common clock (k=1 STATED), RA = 2000, DB = 1000 -> ToF = 500 A ticks.
+    Timestamp ra_l, ra_e, db_l, db_e;
+    if (!Timestamp::from_ticks(2000, d, TimestampMarker::RmarkerRx,
+                               TimestampSource::HardwareMeasured, rx_bits, ra_l) ||
+        !Timestamp::from_ticks(0, d, TimestampMarker::RmarkerTx,
+                               TimestampSource::HardwareMeasured, tx_bits, ra_e) ||
+        !Timestamp::from_ticks(1000, d, TimestampMarker::RmarkerTx,
+                               TimestampSource::HardwareMeasured, tx_bits, db_l) ||
+        !Timestamp::from_ticks(0, d, TimestampMarker::RmarkerRx,
+                               TimestampSource::HardwareMeasured, rx_bits, db_e)) {
+        std::printf("FAIL: cannot build the M1-A timestamps\n");
+        return 1;
+    }
+    if (apply_calibration_ticks(ra_l, cal_id, 0, 0, 0u, 0u) != CalibrationResult::Applied ||
+        apply_calibration_ticks(ra_e, cal_id, 0, 0, 0u, 0u) != CalibrationResult::Applied ||
+        apply_calibration_ticks(db_l, cal_id, 0, 0, 0u, 0u) != CalibrationResult::Applied ||
+        apply_calibration_ticks(db_e, cal_id, 0, 0, 0u, 0u) != CalibrationResult::Applied) {
+        std::printf("FAIL: cannot calibrate the M1-A timestamps\n");
+        return 1;
+    }
+    const RangingIntervalAdmission ra = admit_ranging_interval(ra_l, ra_e, ctx);
+    const RangingIntervalAdmission db = admit_ranging_interval(db_l, db_e, ctx);
+    if (!ra.admitted || !db.admitted || !ra.value.has_value() || !db.value.has_value()) {
+        std::printf("FAIL: the M1-A intervals were not admitted\n");
+        return 1;
+    }
+    ClockRatio k;
+    if (!ClockRatio::unity_same_clock(d, k)) {
+        std::printf("FAIL: cannot state a common clock\n");
+        return 1;
+    }
+    const TofResult tof = compute_ss_tof(*ra.value, *db.value, k);
+    if (!tof.ok || tof.tof.num != 500 || tof.tof.den != 1) {
+        std::printf("FAIL: compute_ss_tof expected 500/1, got %s (%s)\n",
+                    tof.tof.to_string().c_str(), tof_status_to_string(tof.status));
+        return 1;
+    }
+    std::printf("M1-A CONSUMER OK: compute_ss_tof -> %s A ticks\n",
+                tof.tof.to_string().c_str());
     return 0;
 }
 EOF

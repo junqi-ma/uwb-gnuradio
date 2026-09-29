@@ -140,12 +140,13 @@ fi
 
 echo
 echo "== files present in the prefix =="
-# The SIX public TWR contract headers, including uwb_twr_tof_input.h (the
+# The SEVEN public TWR contract headers, including uwb_twr_tof_input.h (the
 # ranging-admission entry point that review defect N05 found was not
-# installed).  uwb_twr_test_output.h is intentionally NOT installed: it is
+# installed) and uwb_twr_math.h (the M1-A SS/DS ToF mathematics).
+# uwb_twr_test_output.h is intentionally NOT installed: it is
 # QA-only output policy and expands UWB_TESTDATA_DIR with no default.
 for h in uwb_twr_types.h uwb_twr_frame.h uwb_twr_timestamp.h uwb_twr_config.h \
-         uwb_twr_capability_evidence.h uwb_twr_tof_input.h; do
+         uwb_twr_capability_evidence.h uwb_twr_tof_input.h uwb_twr_math.h; do
     if [ -f "$INCDIR/gnuradio/uwb/$h" ]; then
         echo "   header  OK  gnuradio/uwb/$h"
     else

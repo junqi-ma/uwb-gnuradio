@@ -13,8 +13,16 @@ fail-open）；M0.1 契约层完成，TWR 协议能力仍未实现**（2026-09-2
 **docs/twr/评审意见_M0.1_2026-09-29.md**（N01–N06）、
 **docs/twr/M0.1第二轮整改报告_N01-N06.md**、以及
 **docs/twr/M0.1_N07修复报告_2026-09-29.md**（N07：审核报 1 处，实际 20 处）。
-当前顺序为 **M1 独立协议核心 → M2 PHY/时间映射 → M3/M4 上板**。
-TWR 协议能力仍未实现（无 FSM、无 ToF 公式、无双端点、无 TWR 硬件收发）。
+当前工作是 **M1-A 独立 ToF 数学 + MATLAB oracle**，指示见
+**docs/twr/OpenCode开发指示_M1-A_ToF数学.md**，进展见
+**docs/twr/M1-A_ToF数学开发报告.md**。其后才是 M1-B FSM、
+M2 PHY/时间映射、M3/M4 上板。
+**M1-A 代码/QA/oracle 已交付，但未标完成**：完成判定要求「MATLAB 已实跑」，
+而本机没有可用的 MATLAB（`/usr/local/MATLAB/R2024a` 无启动器/主二进制，无
+Octave/MCR）。`generate_tof_oracle.m` 已写但未运行；检入向量由同一物理模型的
+Python `fractions` 参考生成。**这不是 MATLAB 验证。** 补齐前不开 M1-B。
+TWR 协议能力仍未实现（无 FSM、无 ToF 公式对硬件的验证、无双端点、无 TWR 硬件收发）。
+M1-A 未完成前不要实现 FSM / fake radio / controller / pybind 大迁移。
 
 第二/三轮的关键教训（不要再犯）：
 

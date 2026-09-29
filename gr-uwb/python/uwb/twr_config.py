@@ -889,6 +889,13 @@ class ExchangeStatus(_StrEnum):
     PROTOCOL_TIMEOUT = "protocol_timeout"
     DEADLINE_MISSED = "deadline_missed"
 
+    # --- measurement (M1-A) -------------------------------------------------
+    # The SS/DS formula produced a signed NEGATIVE ToF.  Mirrors the C++
+    # `ExchangeStatus::NegativeTof` (append only).  Python never computes a
+    # ToF itself -- M1-A is C++ -- this member exists so the two vocabularies
+    # do not drift apart.
+    NEGATIVE_TOF = "negative_tof"
+
 
 def exchange_status_is_ok(s: ExchangeStatus) -> bool:
     return s == ExchangeStatus.OK
@@ -925,6 +932,7 @@ _STATUS_FAMILY = {
     ExchangeStatus.CALIBRATION_EXPIRED: "calibration",
     ExchangeStatus.PROTOCOL_TIMEOUT: "deadline",
     ExchangeStatus.DEADLINE_MISSED: "deadline",
+    ExchangeStatus.NEGATIVE_TOF: "signal",
 }
 
 

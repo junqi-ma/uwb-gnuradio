@@ -339,7 +339,13 @@ enum class ExchangeStatus : uint8_t {
 
     // --- protocol -----------------------------------------------------------
     ProtocolTimeout = 60,  // whole-exchange deadline expired
-    DeadlineMissed = 61    // a per-message reply deadline was not schedulable
+    DeadlineMissed = 61,   // a per-message reply deadline was not schedulable
+    // --- measurement (M1-A) -------------------------------------------------
+    // The SS/DS formula produced a signed NEGATIVE ToF.  Kept as its own code
+    // because "the two intervals are mutually inconsistent" is not a clock
+    // estimate failure or a first-path failure, and REQ-ERR-01 forbids folding
+    // it into a success.  APPEND ONLY (numeric values are the JSON schema).
+    NegativeTof = 62
 };
 
 inline const char* exchange_status_to_string(ExchangeStatus s)
@@ -395,6 +401,8 @@ inline const char* exchange_status_to_string(ExchangeStatus s)
         return "protocol_timeout";
     case ExchangeStatus::DeadlineMissed:
         return "deadline_missed";
+    case ExchangeStatus::NegativeTof:
+        return "negative_tof";
     }
     return "invalid";
 }
@@ -402,7 +410,7 @@ inline const char* exchange_status_to_string(ExchangeStatus s)
 inline bool exchange_status_from_string(const std::string& s, ExchangeStatus& out)
 {
     // Reverse of exchange_status_to_string; used by config/CLI round trips.
-    for (int i = 0; i <= static_cast<int>(ExchangeStatus::DeadlineMissed); ++i) {
+    for (int i = 0; i <= static_cast<int>(ExchangeStatus::NegativeTof); ++i) {
         ExchangeStatus c = static_cast<ExchangeStatus>(i);
         if (s == exchange_status_to_string(c)) {
             out = c;
@@ -462,6 +470,8 @@ inline const char* exchange_status_family(ExchangeStatus s)
     case ExchangeStatus::ProtocolTimeout:
     case ExchangeStatus::DeadlineMissed:
         return "deadline";
+    case ExchangeStatus::NegativeTof:
+        return "signal";
     }
     return "invalid";
 }
