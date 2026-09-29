@@ -4550,12 +4550,14 @@ class TestConfigParityCorpus(TwrConfigTestBase):
                 problems.append("violations:\n      corpus: %s\n"
                                 "      python: %s"
                                 % (want["violations"], got["violations"]))
-            if got["config_hash"] != want["config_hash"]:
+            # config_hash and effective are absent for a case that is not
+            # accepted: there is no effective snapshot to hash or compare.
+            if "config_hash" in want and got["config_hash"] != want["config_hash"]:
                 problems.append("config_hash: corpus %r, python %r. Every field "
                                 "name, value rendering and the order of all of "
                                 "them differ between the two implementations"
                                 % (want["config_hash"], got["config_hash"]))
-            for key, want_value in want["effective"].items():
+            for key, want_value in want.get("effective", {}).items():
                 if key not in got["effective"]:
                     problems.append("effective.%s: in the corpus, not produced"
                                     % key)
@@ -4599,11 +4601,15 @@ class TestConfigParityCorpus(TwrConfigTestBase):
         """
         base = self.corpus["base"]["ss_initiator"]
         fields = self.corpus["non_finite_fields"]
-        # The one field the validator has no finiteness check on, pinned as a
-        # corpus case rather than hidden: a NaN there is ACCEPTED, which is the
-        # defect, and saying so out loud is what stops it being mistaken for
-        # coverage.
-        unchecked = {"calibration.record.native_sample_rate_hz"}
+        # EMPTY, and that is the point.  It used to hold
+        # "calibration.record.native_sample_rate_hz", the one field the
+        # validator had no finiteness check on: its applicability rule is
+        # guarded by `> 0.0` and a NaN fails that comparison, so a non-finite
+        # value skipped validation entirely.  The parity corpus found it; both
+        # validators now reject it.  Keep the set as a tripwire -- a new float
+        # field with no check fails this sweep, which is how the omission was
+        # found in the first place.
+        unchecked: set = set()
         for path in fields:
             for value in (float("nan"), float("inf"), float("-inf")):
                 doc = json.dumps(base, allow_nan=False)

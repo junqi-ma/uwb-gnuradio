@@ -4132,6 +4132,13 @@ private:
                     "calibration channel " + twr_int_to_text(k.record.channel) +
                         " does not match phy.channel " + twr_int_to_text(c.phy.channel),
                     "REQ-CAL-01");
+        // M0.1: the applicability rule below is guarded by `> 0.0`, and a NaN
+        // fails that comparison, so a NaN here used to sail through the whole
+        // validator.  The record is compared against a rate, so it must be
+        // finite whether or not the match ends up being attempted.
+        // (record.gain_db is already covered by check_finite_opt above.)
+        finite("calibration.record.native_sample_rate_hz",
+               k.record.native_sample_rate_hz, "REQ-CAL-01");
         if (k.record.native_sample_rate_hz > 0.0 && c.radio.native_sample_rate_hz > 0.0 &&
             !twr_rate_matches_strict(k.record.native_sample_rate_hz,
                                      c.radio.native_sample_rate_hz,

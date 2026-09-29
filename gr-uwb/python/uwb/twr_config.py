@@ -5092,6 +5092,13 @@ class ConfigValidator:
                 "calibration.record.channel", ConfigReason.CALIBRATION_MISMATCH,
                 "calibration channel %d does not match phy.channel %d" % (
                     k.record.channel, c.phy.channel), "REQ-CAL-01")
+        # M0.1: the applicability rule below is guarded by `> 0.0`, and a NaN
+        # fails that comparison, so a non-finite value here used to skip the
+        # whole validator.  The record is compared against a rate, so it must be
+        # finite whether or not the match is ever attempted.  Matches the C++
+        # guard added in uwb_twr_config.h (found by the parity corpus).
+        self._finite("calibration.record.native_sample_rate_hz",
+                     k.record.native_sample_rate_hz)
         if (k.record.native_sample_rate_hz > 0.0 and
                 c.radio.native_sample_rate_hz > 0.0 and
                 not rate_matches_strict(k.record.native_sample_rate_hz,

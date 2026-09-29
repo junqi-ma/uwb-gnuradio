@@ -341,12 +341,20 @@ const size_t kFloatFieldCount = sizeof(kFloatFields) / sizeof(kFloatFields[0]);
 //     in the config reaches it either: an infinite value does trip the
 //     applicability rule, but a NaN sails through.
 //
-// Every other entry of kFloatFields is covered by an explicit `finite()` or
+// Every entry of kFloatFields must be covered by an explicit `finite()` or
 // `check_finite_opt()` call -- including radio.peers[N].native_sample_rate_hz,
 // which check_radio() finiteness-checks per peer -- and is required to produce
 // `not_finite` below.
+//
+// This list is now EMPTY.  It used to hold
+// "calibration.record.native_sample_rate_hz", whose applicability rule is
+// guarded by `> 0.0`: a NaN fails that comparison, so a non-finite value
+// skipped the whole validator.  The orchestrator added the missing
+// `finite()` call.  Keep the list as the tripwire that makes the next omission
+// loud rather than silent: adding a float field means adding it here ONLY if
+// the check is genuinely absent, and the sweep test below fails either way.
 const char* const kFloatFieldsNotFiniteChecked[] = {
-    "calibration.record.native_sample_rate_hz",
+    // none
 };
 const size_t kFloatFieldsNotFiniteCheckedCount =
     sizeof(kFloatFieldsNotFiniteChecked) / sizeof(kFloatFieldsNotFiniteChecked[0]);
