@@ -14,8 +14,10 @@ function generate_tof_oracle()
 %   RUN:
 %       matlab -batch "cd('testdata/twr'); generate_tof_oracle"
 %   It overwrites tof_oracle_vectors.json in the same directory and prints the
-%   per-vector expected values.  JSON object KEY ORDER differs from the Python
-%   writer (jsonencode sorts keys); object order is not significant.
+%   per-vector expected values.  Object key order is NOT significant; both this
+%   script (via jsonencode) and the Python writer preserve struct/dict order,
+%   so the only textual differences are number FORMATTING (MATLAB emits large
+%   magnitudes as e.g. 6.38976E+10 where Python wrote 63897600000.0).
 %
 %   THE MODEL (must match gen_tof_oracle.py statement for statement)
 %   -----------------------------------------------------------------

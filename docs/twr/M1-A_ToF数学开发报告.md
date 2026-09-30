@@ -234,6 +234,26 @@ N07 规则继续适用：新枚举一律 `xxx_is_known()` + **无 `default`** �
   全套 **52/52 全绿**。本次未触碰这些模块，不把这类 flaky 归入 ToF 提交，
   也不放宽任何历史门槛。
 
+**2026-09-30 独立复核（本仓库 Linux 开发机，拉取 `10426cf` 后）：**
+
+- **MATLAB 实跑是真实的，不是只翻了个标志位。** 证据：JSON 里
+  `"tick_rate_hz": 6.38976E+10` 是 MATLAB `jsonencode` 的指数写法（Python 写的是
+  `63897600000.0`）；`.m` 为能跑通而修的三处缺陷（单参 `R(n)`、`R(3000)+R(2,7)`
+  的 struct 相加、wrap 折叠用未取模整数算分数）恰好都是「文件从未执行过」才会留下
+  的；`generator_language` 由 `version('-release')` 产生为 `2025b`。
+- **数值独立复算一致**：用 `fractions.Fraction` 重新构建 12 个向量，与检入的
+  MATLAB JSON **逐字段一致**（含 `tick_rate_hz` 的 double 位型），且
+  `gen_tof_oracle.py` 的**计算部分未被改动**（其 diff 只有注释与 provenance 文字）。
+- **C++ 读 MATLAB JSON 通过**：`ctest` **52/53**（唯一失败为下述历史吞吐）、
+  `uwb_qa_uwb_twr_math.cc` 14 用例、`verify_m1_a_tof.py` **4/4**、
+  `verify_m0_1_findings.py` **15/15**、Python **138**。
+- **历史吞吐项在本机并非 flaky**：`uwb_qa_uwb_pdu_rational_resampler.cc` 连续 5 次
+  运行均失败（5/5）。它是机器/负载相关的吞吐基准，**门槛未改**，本阶段未触碰；
+  某台机器上偶发通过不能当作已修复。
+- **一处文档事实错误已修正**：`jsonencode` 并**不**排序对象键——它按 struct 字段
+  定义顺序输出，与 Python 写入器一致。README 与 `.m` 注释里「sorts keys」的说法已
+  改为「键序不显著，两者都保持定义顺序，文本差异只在数字格式」。
+
 完成判定 §10 逐条：
 
 - [x] `uwb_twr_math.h` 已安装；外部消费者调用 SS 小例子得到 500 ticks。
@@ -244,7 +264,9 @@ N07 规则继续适用：新枚举一律 `xxx_is_known()` + **无 `default`** �
       C++ QA 读该 MATLAB JSON 通过。
 - [x] 公式路径无整数 ns、无 `double` 秒作为中间真值。
 - [x] 未实现 FSM / fake endpoint / block / pybind 大迁移 / config 膨胀。
-- [x] 历史吞吐失败不再是唯一红灯：本次全套 52/52；未改任何门槛。
+- [x] 未新增 CTest 失败、未改任何历史门槛；历史吞吐项
+      `uwb_qa_uwb_pdu_rational_resampler.cc` 仍是**已知失败项**（机器/负载相关，
+      见 §9 的独立复核，不因某一次通过而视为已修复）。
 - [x] `开发状态.md` / `AGENTS.md` 写「M1-A 公式+oracle 完成，协议能力仍无 FSM」。
 - [x] 报告不声称测距可用、不升级 PHY 证据级、不承诺厘米级。
 
@@ -296,7 +318,7 @@ sha256(qa_uwb_twr_math.cc)        = 6858fdf13834f3ad7125d4b67f8e09b56404f4d8bbd8
 sha256(verify_m1_a_tof.py)        = 8faa896552ff8d1e053f0d2013d651872c970a05284013cbd8e23f53b756b1e3
 
 # 2026-09-30 MATLAB 实跑后更新：
-sha256(generate_tof_oracle.m)     = 2aa8ce31cbe3f13e6ea8b2da9747dee7d967a90b9b18a939402f950e50d2405c
+sha256(generate_tof_oracle.m)     = fb7eab562ea4f63805216e2e71ddcdb6c4e2f368dcde41a33cf5c1f93154b4ea
 sha256(gen_tof_oracle.py)         = 5e71cc5fc6e19e883925cfa1189e9d6f487f285852596ff9d8d7b9a1b4238f42
 sha256(tof_oracle_vectors.json)   = 9d4dd0036240d8abaaeae1d7655eb2045c0da3970613645063909d65d14249d4
 ```

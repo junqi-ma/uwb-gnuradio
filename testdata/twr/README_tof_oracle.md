@@ -41,10 +41,14 @@ independent re-derivation from the raw endpoint ticks, including the wrap.
 
 ### Two things that are NOT failures
 
-* MATLAB's `jsonencode` **sorts object keys**; the Python writer does not.
-  Object order is not significant.
+* Object key order is **not** significant.  In practice both writers preserve
+  it (MATLAB's `jsonencode` emits struct fields in definition order, exactly as
+  the Python writer emits its dict keys), so the only textual differences from
+  the Python output are number FORMATTING, not key order.  Do not diff the two
+  files byte-for-byte and read a difference as a value disagreement.
 * MATLAB writes large magnitudes in **exponent notation** (e.g.
-  `"tick_rate_hz": 6.38976E+10`).  That is valid JSON; the in-tree reader
+  `"tick_rate_hz": 6.38976E+10` where the Python writer produced
+  `63897600000.0`).  That is valid JSON; the in-tree reader
   (`uwb_twr_config.h`, `json::parse_number` via `strtod`) and Python both parse
   it, and every value round-trips exactly (all magnitudes here are integers
   below 2^53).
@@ -119,6 +123,6 @@ python3 tools/twr/verify_m1_a_tof.py
 
 ```
 sha256(tof_oracle_vectors.json) = 9d4dd0036240d8abaaeae1d7655eb2045c0da3970613645063909d65d14249d4
-sha256(generate_tof_oracle.m)   = 2aa8ce31cbe3f13e6ea8b2da9747dee7d967a90b9b18a939402f950e50d2405c
+sha256(generate_tof_oracle.m)   = fb7eab562ea4f63805216e2e71ddcdb6c4e2f368dcde41a33cf5c1f93154b4ea
 sha256(gen_tof_oracle.py)       = 5e71cc5fc6e19e883925cfa1189e9d6f487f285852596ff9d8d7b9a1b4238f42
 ```
