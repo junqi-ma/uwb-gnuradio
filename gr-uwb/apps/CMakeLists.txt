@@ -74,6 +74,53 @@ if(PYTHONINTERP_FOUND)
 endif()
 
 ########################################################################
+# M1-B: the offline two-endpoint simulation demo and its independent checks.
+#
+# `twr_fake_demo` links ONLY the standalone `uwb_twr_core` archive and the
+# QA-only fake link -- never gnuradio-uwb and never UHD -- so running it is
+# itself evidence that the protocol core is radio-free (M1-B §8).
+#
+# The Python demo/QA and the independent verifier are registered here so a
+# green `ctest` covers B17 rather than only a hand run.  The demo never
+# bypasses a capability gate: it runs with an explicit simulation envelope.
+########################################################################
+add_executable(twr_fake_demo twr_fake_demo.cc)
+target_include_directories(twr_fake_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(twr_fake_demo PRIVATE uwb_twr_core uwb_twr_fake_link)
+
+if(PYTHONINTERP_FOUND)
+    add_test(NAME uwb_qa_twr_fake_demo_py
+        COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_twr_fake_demo.py
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    set_property(TEST uwb_qa_twr_fake_demo_py APPEND PROPERTY
+        ENVIRONMENT
+            "PYTHONPATH="
+            "PYTHONDONTWRITEBYTECODE=1"
+            "UWB_TWR_FAKE_DEMO=$<TARGET_FILE:twr_fake_demo>")
+    set_tests_properties(uwb_qa_twr_fake_demo_py PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
+
+    # The independent verifier re-derives the ToF from the frame fields and the
+    # transport model without calling the C++ at all.  It needs a real
+    # request/output pair, generated in a scratch dir on the fly.
+    add_test(NAME uwb_qa_twr_m1b_verify_py
+        COMMAND sh -c
+            "d=$(mktemp -d ${CMAKE_CURRENT_BINARY_DIR}/m1b_verify.XXXXXX) && \
+${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/twr_fake_demo.py --scenario ds_unity \
+    --request-out $d/req.json --output $d/out.json && \
+${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/twr/verify_m1_b_protocol.py \
+    --request $d/req.json --output $d/out.json; rc=$?; rm -rf $d; exit $rc")
+    set_property(TEST uwb_qa_twr_m1b_verify_py APPEND PROPERTY
+        ENVIRONMENT
+            "PYTHONPATH="
+            "PYTHONDONTWRITEBYTECODE=1"
+            "UWB_TWR_FAKE_DEMO=$<TARGET_FILE:twr_fake_demo>")
+    set_tests_properties(uwb_qa_twr_m1b_verify_py PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
+
+    message(STATUS "UWB CTest: registered uwb_qa_twr_fake_demo_py + "
+                   "uwb_qa_twr_m1b_verify_py (M1-B demo + verifier)")
+endif()
+
+########################################################################
 # Installed-Consumer release gate (M0 review R8 / P2, review defect N05).
 #
 # install_consumer/ proves the INSTALLED public API is usable and DEFAULT
