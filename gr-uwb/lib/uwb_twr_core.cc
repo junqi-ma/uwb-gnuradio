@@ -177,6 +177,12 @@ struct EndpointCore::Impl {
     PeerTimestampClaim c_t1A, c_t4A, c_t5A;
 
     int64_t deadline_ticks = 0;
+    // Set when the exchange has reached a point where a RESULT is owed but a
+    // local transmit outcome has not converged.  The evidence deadline is a
+    // stricter bound than the whole-exchange deadline (M1-B §4.2): without it
+    // an unresolved TX would only be caught by the exchange timeout.
+    bool awaiting_evidence = false;
+    int64_t evidence_deadline_ticks = 0;
 
     std::vector<ProtocolTofEstimate> results;
     uint64_t token_counter = 0;
@@ -196,6 +202,8 @@ struct EndpointCore::Impl {
         have_rx_poll = have_rx_response = have_rx_final = false;
         have_peer_response = have_peer_final = false;
         deadline_ticks = 0;
+        awaiting_evidence = false;
+        evidence_deadline_ticks = 0;
     }
 
     void terminal(CoreActionBatch& out, ProtocolTofEstimate est, ExchangeStatus st,
@@ -408,20 +416,69 @@ struct EndpointCore::Impl {
     }
 
     // ---- completion evaluation --------------------------------------------
+    //
+    // `maybe_finish` is the single place an exchange decides whether it can
+    // reach a terminal result.  It first checks that the LOCAL transmit
+    // evidence the result depends on has converged; if it has not, it records
+    // an EVIDENCE deadline (M1-B §4.2) so the wait is finite even when the
+    // whole-exchange timeout is longer or unset, and re-arms the driver's
+    // deadline hint.  A pending result is never published as a success.
     void maybe_finish(CoreActionBatch& out, uint64_t event_id)
     {
         if (!in_flight)
             return;
 
+        const TxRecord* need = nullptr;
+        int64_t base = 0;
+        FrameType expect = FrameType::Response;
         if (cfg.role == Role::Initiator && cfg.protocol == Protocol::Ss) {
-            if (state != EndpointState::ResponseReceived || !tx_poll.completed())
+            if (state != EndpointState::ResponseReceived)
                 return;
+            need = &tx_poll;
+            base = rx_response_time.ticks;
+            expect = FrameType::Response;
+        } else if (cfg.role == Role::Initiator && cfg.protocol == Protocol::Ds) {
+            if (state != EndpointState::FinalSent)
+                return;
+            need = &tx_final;
+            base = rx_response_time.ticks;
+            expect = FrameType::Final;
+        } else if (cfg.role == Role::Responder && cfg.protocol == Protocol::Ss) {
+            if (state != EndpointState::PollReceived)
+                return;
+            need = &tx_response;
+            base = rx_poll_time.ticks;
+            expect = FrameType::Response;
+        } else {
+            if (state != EndpointState::FinalReceived)
+                return;
+            need = &tx_response;
+            base = rx_final_time.ticks;
+            expect = FrameType::Final;
+        }
+
+        if (!need->completed()) {
+            if (cfg.evidence_wait_ticks > 0) {
+                if (!awaiting_evidence) {
+                    awaiting_evidence = true;
+                    evidence_deadline_ticks = base + cfg.evidence_wait_ticks;
+                    // Tighten the driver's deadline hint so it can post a
+                    // Deadline at the evidence bound; the action also states
+                    // the frame this endpoint is still waiting for (or would
+                    // be, for an endpoint with no air wait).
+                    deadline_ticks = evidence_deadline_ticks;
+                    arm_rx(out, expect, event_id);
+                }
+            }
+            return;
+        }
+        awaiting_evidence = false;
+
+        if (cfg.role == Role::Initiator && cfg.protocol == Protocol::Ss) {
             finish_ss_initiator(out, event_id);
             return;
         }
         if (cfg.role == Role::Initiator && cfg.protocol == Protocol::Ds) {
-            if (state != EndpointState::FinalSent || !tx_final.completed())
-                return;
             ProtocolTofEstimate est = make_protocol_complete_without_estimate(
                 cfg.protocol, ComputedAt::InitiatorA,
                 "DS initiator: Final transmitted; the responder computes the estimate");
@@ -430,8 +487,6 @@ struct EndpointCore::Impl {
             return;
         }
         if (cfg.role == Role::Responder && cfg.protocol == Protocol::Ss) {
-            if (state != EndpointState::PollReceived || !tx_response.completed())
-                return;
             ProtocolTofEstimate est = make_protocol_complete_without_estimate(
                 cfg.protocol, ComputedAt::ResponderB,
                 "SS responder: Response transmitted; the initiator computes the estimate");
@@ -439,12 +494,7 @@ struct EndpointCore::Impl {
                      "SS responder exchange complete", event_id);
             return;
         }
-        if (cfg.role == Role::Responder && cfg.protocol == Protocol::Ds) {
-            if (state != EndpointState::FinalReceived || !tx_response.completed())
-                return;
-            finish_ds_responder(out, event_id);
-            return;
-        }
+        finish_ds_responder(out, event_id);
     }
 
     void finish_ss_initiator(CoreActionBatch& out, uint64_t event_id)
@@ -905,6 +955,17 @@ struct EndpointCore::Impl {
         counters.deadline_events++;
         if (!in_flight)
             return;
+        // The evidence bound is stricter than the whole-exchange bound and is
+        // checked first so a pending result that never converges is reported
+        // as an evidence timeout rather than a generic protocol timeout.
+        if (awaiting_evidence && cfg.evidence_wait_ticks > 0 &&
+            ev.now_ticks >= evidence_deadline_ticks) {
+            counters.timeouts++;
+            fail(out, ExchangeStatus::ProtocolTimeout,
+                 "the local transmit evidence did not converge before the evidence deadline",
+                 ev.event_id);
+            return;
+        }
         if (deadline_ticks != 0 && ev.now_ticks >= deadline_ticks) {
             counters.timeouts++;
             fail(out, ExchangeStatus::ProtocolTimeout,

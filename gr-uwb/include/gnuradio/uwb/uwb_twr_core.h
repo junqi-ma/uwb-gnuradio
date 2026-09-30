@@ -303,7 +303,7 @@ struct CoreEvent {
 // ===========================================================================
 
 enum class CoreActionKind : uint8_t {
-    ArmRx = 0,         // open/refresh the RX window for the expected frame
+    ArmRx = 0,         // open the RX window / (re)state the driver's deadline
     PrepareTx = 1,     // ask the adapter to quantise a transmit plan
     SubmitTx = 2,      // hand the encoded frame to the adapter (exactly once)
     AbortPending = 3,  // drop the pending token/plan without submitting
@@ -347,9 +347,16 @@ struct CoreAction {
     TxToken token;
 
     // ArmRx: the message this window expects.
+    //
+    // ArmRx is ALSO the driver's deadline channel: `deadline_ticks` is the
+    // local tick at which this endpoint expects a Deadline event, and the
+    // core may emit a fresh ArmRx to TIGHTEN it (e.g. when a result is owed
+    // but a local transmit outcome has not converged, the evidence deadline
+    // from `CoreConfig::evidence_wait_ticks` replaces the looser
+    // whole-exchange deadline).  A compliant driver posts a Deadline at the
+    // most recent `deadline_ticks` it was given.
     FrameType expect_type = FrameType::Response;
-    // ArmRx: the local tick at which this wait must be given up (0 == no
-    // deadline).  The driver posts a Deadline event at/after this instant.
+    // The local tick at which this wait must be given up (0 == no deadline).
     int64_t deadline_ticks = 0;
 
     // PrepareTx: the message the adapter must plan.

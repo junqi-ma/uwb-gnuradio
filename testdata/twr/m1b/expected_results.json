@@ -1,0 +1,431 @@
+{
+  "schema": "uwb_twr_m1b_expected_results_v1",
+  "note": "Derived with Python fractions.Fraction from the physical model and the documented TX-planning model; NOT by running the C++ core.",
+  "cases": [
+    {
+      "id": "same_clock_ss",
+      "requirement_ids": [
+        "B01",
+        "B02"
+      ],
+      "initiator": "A",
+      "responder": "B",
+      "k": "1/1",
+      "local_instants": {
+        "A": {
+          "t1A": 2000,
+          "t4A": 2600,
+          "t5A": 2900
+        },
+        "B": {
+          "t2B": 2050,
+          "t3B": 2550,
+          "t6B": 2950
+        }
+      },
+      "intervals": {
+        "RA_ticks_A": 600,
+        "DA_ticks_A": 300,
+        "RB_ticks_B": 400,
+        "DB_ticks_B": 500
+      },
+      "wire_fields": {
+        "response": {
+          "t2B": 2050,
+          "t3B": 2550
+        },
+        "final": {
+          "t1A": 2000,
+          "t4A": 2600,
+          "t5A": 2900
+        }
+      },
+      "expected_tof": {
+        "num": 50,
+        "den": 1,
+        "domain": "A global ticks",
+        "exact": "50/1"
+      },
+      "estimate_at": "A",
+      "no_estimate_at": "B",
+      "derivation": "(RA - k*DB)/2 = (600 - (1/1)*500)/2 = 50/1"
+    },
+    {
+      "id": "same_clock_ds",
+      "requirement_ids": [
+        "B01",
+        "B02"
+      ],
+      "initiator": "A",
+      "responder": "B",
+      "k": "1/1",
+      "local_instants": {
+        "A": {
+          "t1A": 2000,
+          "t4A": 2600,
+          "t5A": 2900
+        },
+        "B": {
+          "t2B": 2050,
+          "t3B": 2550,
+          "t6B": 2950
+        }
+      },
+      "intervals": {
+        "RA_ticks_A": 600,
+        "DA_ticks_A": 300,
+        "RB_ticks_B": 400,
+        "DB_ticks_B": 500
+      },
+      "wire_fields": {
+        "response": {
+          "t2B": 2050,
+          "t3B": 2550
+        },
+        "final": {
+          "t1A": 2000,
+          "t4A": 2600,
+          "t5A": 2900
+        }
+      },
+      "expected_tof": {
+        "num": 50,
+        "den": 1,
+        "domain": "A global ticks",
+        "exact": "50/1"
+      },
+      "estimate_at": "B",
+      "no_estimate_at": "A",
+      "derivation": "(RA*k*RB - DA*k*DB)/(RA + k*RB + DA + k*DB) = (600*1/1*400 - 300*1/1*500)/(600 + 1/1*400 + 300 + 1/1*500) = 50/1"
+    },
+    {
+      "id": "same_clock_ds_unequal_replies",
+      "requirement_ids": [
+        "B02"
+      ],
+      "initiator": "A",
+      "responder": "B",
+      "k": "1/1",
+      "local_instants": {
+        "A": {
+          "t1A": 2000,
+          "t4A": 2600,
+          "t5A": 3900
+        },
+        "B": {
+          "t2B": 2050,
+          "t3B": 2550,
+          "t6B": 3950
+        }
+      },
+      "intervals": {
+        "RA_ticks_A": 600,
+        "DA_ticks_A": 1300,
+        "RB_ticks_B": 1400,
+        "DB_ticks_B": 500
+      },
+      "wire_fields": {
+        "response": {
+          "t2B": 2050,
+          "t3B": 2550
+        },
+        "final": {
+          "t1A": 2000,
+          "t4A": 2600,
+          "t5A": 3900
+        }
+      },
+      "expected_tof": {
+        "num": 50,
+        "den": 1,
+        "domain": "A global ticks",
+        "exact": "50/1"
+      },
+      "estimate_at": "B",
+      "no_estimate_at": "A",
+      "derivation": "(RA*k*RB - DA*k*DB)/(RA + k*RB + DA + k*DB) = (600*1/1*1400 - 1300*1/1*500)/(600 + 1/1*1400 + 1300 + 1/1*500) = 50/1"
+    },
+    {
+      "id": "same_clock_role_swap_ss",
+      "requirement_ids": [
+        "B01"
+      ],
+      "initiator": "B",
+      "responder": "A",
+      "k": "1/1",
+      "local_instants": {
+        "B": {
+          "t1A": 2000,
+          "t4A": 2600,
+          "t5A": 2900
+        },
+        "A": {
+          "t2B": 2050,
+          "t3B": 2550,
+          "t6B": 2950
+        }
+      },
+      "intervals": {
+        "RA_ticks_A": 600,
+        "DA_ticks_A": 300,
+        "RB_ticks_B": 400,
+        "DB_ticks_B": 500
+      },
+      "wire_fields": {
+        "response": {
+          "t2B": 2050,
+          "t3B": 2550
+        },
+        "final": {
+          "t1A": 2000,
+          "t4A": 2600,
+          "t5A": 2900
+        }
+      },
+      "expected_tof": {
+        "num": 50,
+        "den": 1,
+        "domain": "A global ticks",
+        "exact": "50/1"
+      },
+      "estimate_at": "B",
+      "no_estimate_at": "A",
+      "derivation": "(RA - k*DB)/2 = (600 - (1/1)*500)/2 = 50/1"
+    },
+    {
+      "id": "same_clock_role_swap_ds",
+      "requirement_ids": [
+        "B01"
+      ],
+      "initiator": "B",
+      "responder": "A",
+      "k": "1/1",
+      "local_instants": {
+        "B": {
+          "t1A": 2000,
+          "t4A": 2600,
+          "t5A": 2900
+        },
+        "A": {
+          "t2B": 2050,
+          "t3B": 2550,
+          "t6B": 2950
+        }
+      },
+      "intervals": {
+        "RA_ticks_A": 600,
+        "DA_ticks_A": 300,
+        "RB_ticks_B": 400,
+        "DB_ticks_B": 500
+      },
+      "wire_fields": {
+        "response": {
+          "t2B": 2050,
+          "t3B": 2550
+        },
+        "final": {
+          "t1A": 2000,
+          "t4A": 2600,
+          "t5A": 2900
+        }
+      },
+      "expected_tof": {
+        "num": 50,
+        "den": 1,
+        "domain": "A global ticks",
+        "exact": "50/1"
+      },
+      "estimate_at": "A",
+      "no_estimate_at": "B",
+      "derivation": "(RA*k*RB - DA*k*DB)/(RA + k*RB + DA + k*DB) = (600*1/1*400 - 300*1/1*500)/(600 + 1/1*400 + 300 + 1/1*500) = 50/1"
+    },
+    {
+      "id": "diff_rate_k_gt1_ss",
+      "requirement_ids": [
+        "B02"
+      ],
+      "initiator": "A",
+      "responder": "B",
+      "k": "5/4",
+      "local_instants": {
+        "A": {
+          "t1A": 100000,
+          "t4A": 105500,
+          "t5A": 106200
+        },
+        "B": {
+          "t2B": 80200,
+          "t3B": 84200,
+          "t6B": 85160
+        }
+      },
+      "intervals": {
+        "RA_ticks_A": 5500,
+        "DA_ticks_A": 700,
+        "RB_ticks_B": 960,
+        "DB_ticks_B": 4000
+      },
+      "wire_fields": {
+        "response": {
+          "t2B": 80200,
+          "t3B": 84200
+        },
+        "final": {
+          "t1A": 100000,
+          "t4A": 105500,
+          "t5A": 106200
+        }
+      },
+      "expected_tof": {
+        "num": 250,
+        "den": 1,
+        "domain": "A global ticks",
+        "exact": "250/1"
+      },
+      "estimate_at": "A",
+      "no_estimate_at": "B",
+      "derivation": "(RA - k*DB)/2 = (5500 - (5/4)*4000)/2 = 250/1"
+    },
+    {
+      "id": "diff_rate_k_gt1_ds",
+      "requirement_ids": [
+        "B02"
+      ],
+      "initiator": "A",
+      "responder": "B",
+      "k": "5/4",
+      "local_instants": {
+        "A": {
+          "t1A": 100000,
+          "t4A": 105500,
+          "t5A": 106200
+        },
+        "B": {
+          "t2B": 80200,
+          "t3B": 84200,
+          "t6B": 85160
+        }
+      },
+      "intervals": {
+        "RA_ticks_A": 5500,
+        "DA_ticks_A": 700,
+        "RB_ticks_B": 960,
+        "DB_ticks_B": 4000
+      },
+      "wire_fields": {
+        "response": {
+          "t2B": 80200,
+          "t3B": 84200
+        },
+        "final": {
+          "t1A": 100000,
+          "t4A": 105500,
+          "t5A": 106200
+        }
+      },
+      "expected_tof": {
+        "num": 250,
+        "den": 1,
+        "domain": "A global ticks",
+        "exact": "250/1"
+      },
+      "estimate_at": "B",
+      "no_estimate_at": "A",
+      "derivation": "(RA*k*RB - DA*k*DB)/(RA + k*RB + DA + k*DB) = (5500*5/4*960 - 700*5/4*4000)/(5500 + 5/4*960 + 700 + 5/4*4000) = 250/1"
+    },
+    {
+      "id": "diff_rate_k_lt1_ss",
+      "requirement_ids": [
+        "B02"
+      ],
+      "initiator": "A",
+      "responder": "B",
+      "k": "4/5",
+      "local_instants": {
+        "A": {
+          "t1A": 100000,
+          "t4A": 104400,
+          "t5A": 105200
+        },
+        "B": {
+          "t2B": 125250,
+          "t3B": 130250,
+          "t6B": 131750
+        }
+      },
+      "intervals": {
+        "RA_ticks_A": 4400,
+        "DA_ticks_A": 800,
+        "RB_ticks_B": 1500,
+        "DB_ticks_B": 5000
+      },
+      "wire_fields": {
+        "response": {
+          "t2B": 125250,
+          "t3B": 130250
+        },
+        "final": {
+          "t1A": 100000,
+          "t4A": 104400,
+          "t5A": 105200
+        }
+      },
+      "expected_tof": {
+        "num": 200,
+        "den": 1,
+        "domain": "A global ticks",
+        "exact": "200/1"
+      },
+      "estimate_at": "A",
+      "no_estimate_at": "B",
+      "derivation": "(RA - k*DB)/2 = (4400 - (4/5)*5000)/2 = 200/1"
+    },
+    {
+      "id": "diff_rate_k_lt1_ds",
+      "requirement_ids": [
+        "B02"
+      ],
+      "initiator": "A",
+      "responder": "B",
+      "k": "4/5",
+      "local_instants": {
+        "A": {
+          "t1A": 100000,
+          "t4A": 104400,
+          "t5A": 105200
+        },
+        "B": {
+          "t2B": 125250,
+          "t3B": 130250,
+          "t6B": 131750
+        }
+      },
+      "intervals": {
+        "RA_ticks_A": 4400,
+        "DA_ticks_A": 800,
+        "RB_ticks_B": 1500,
+        "DB_ticks_B": 5000
+      },
+      "wire_fields": {
+        "response": {
+          "t2B": 125250,
+          "t3B": 130250
+        },
+        "final": {
+          "t1A": 100000,
+          "t4A": 104400,
+          "t5A": 105200
+        }
+      },
+      "expected_tof": {
+        "num": 200,
+        "den": 1,
+        "domain": "A global ticks",
+        "exact": "200/1"
+      },
+      "estimate_at": "B",
+      "no_estimate_at": "A",
+      "derivation": "(RA*k*RB - DA*k*DB)/(RA + k*RB + DA + k*DB) = (4400*4/5*1500 - 800*4/5*5000)/(4400 + 4/5*1500 + 800 + 4/5*5000) = 200/1"
+    }
+  ]
+}

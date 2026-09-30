@@ -58,10 +58,11 @@ TxOutcomeResolved(token,o)                adapter -> core
 | A | `TxPlanned(Poll)` | PollSent | SubmitTx(Poll) |
 | A | `RxFrame(Response, 合法)` | PollSent→ResponseReceived | SS：算 RA−k·DB（本地证据收敛后）；DS：PrepareTx(Final, t1A,t4A,t5A) |
 | A / DS | `TxPlanned(Final)` | ResponseReceived→FinalSent | SubmitTx(Final) |
-| B / SS+DS | `RxFrame(Poll, 合法)` | Idle→PollReceived | ArmRx(Response 或 Final); PrepareTx(Response, t2B,t3B) |
+| B / SS+DS | `RxFrame(Poll, 合法)` | Idle→PollReceived | PrepareTx(Response, t2B,t3B)；SS 无后续空口等待，DS 在该计划提交后 ArmRx(Final) |
 | B / SS | `TxPlanned(Response)` | PollReceived | SubmitTx(Response)，随后本地证据收敛即完成（无估计） |
 | B / DS | `RxFrame(Final, 合法)` | PollReceived→FinalReceived | 算 DS（DB/RB 本地，RA/DA 为 A 声明） |
-| 任一端 | `Deadline` 超出预算 | 在途→终态 | TerminalResult(失败原因) |
+| 任一端 | `Deadline` 超出证据等待预算 | 待结果→终态 | TerminalResult(ProtocolTimeout)；证据等待预算 `evidence_wait_ticks` 严格于整交换超时 |
+| 任一端 | `Deadline` 超出整交换预算 | 在途→终态 | TerminalResult(ProtocolTimeout) |
 | 任一端 | `Cancel/Stop/Reset/Overflow` | 在途→终态 | AbortPending + TerminalResult |
 
 守恒：`accepted_exchanges == terminal_results + in_flight`（每端每 attempt）。

@@ -1,0 +1,332 @@
+{
+  "schema": "uwb_twr_m1b_event_cases_v1",
+  "note": "Inputs for the deterministic two-endpoint driver. Timestamps are whole device ticks on each endpoint's own ClockDomain. distance_m is ground truth held only by the fake transport.",
+  "cases": [
+    {
+      "id": "same_clock_ss",
+      "requirement_ids": [
+        "B01",
+        "B02"
+      ],
+      "protocol": "ss",
+      "initiator": "A",
+      "responder": "B",
+      "seed": 1,
+      "units": "device ticks per endpoint domain",
+      "quantisation": "whole 40-bit LE ticks on the wire; the fake link uses llround(src_ticks/src_rate*dst_rate) for a rate change and llround(distance_m/c*dst_rate) for propagation",
+      "clock_a": {
+        "name": "x410_dev",
+        "rate_hz": 1000000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "clock_b": {
+        "name": "x410_dev",
+        "rate_hz": 1000000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "ratio_k": "1/1",
+      "distance_m": 15.0,
+      "tx_air_latency_a_ticks": 0,
+      "tx_air_latency_b_ticks": 0,
+      "planning": {
+        "begin_now_ticks": 1000,
+        "poll_offset_ticks": 1000,
+        "respond_turnaround_ticks": 500,
+        "final_turnaround_ticks": 300
+      },
+      "exchange_timeout_ticks": 100000,
+      "sequence_modulus": 4
+    },
+    {
+      "id": "same_clock_ds",
+      "requirement_ids": [
+        "B01",
+        "B02"
+      ],
+      "protocol": "ds",
+      "initiator": "A",
+      "responder": "B",
+      "seed": 1,
+      "units": "device ticks per endpoint domain",
+      "quantisation": "whole 40-bit LE ticks on the wire; the fake link uses llround(src_ticks/src_rate*dst_rate) for a rate change and llround(distance_m/c*dst_rate) for propagation",
+      "clock_a": {
+        "name": "x410_dev",
+        "rate_hz": 1000000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "clock_b": {
+        "name": "x410_dev",
+        "rate_hz": 1000000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "ratio_k": "1/1",
+      "distance_m": 15.0,
+      "tx_air_latency_a_ticks": 0,
+      "tx_air_latency_b_ticks": 0,
+      "planning": {
+        "begin_now_ticks": 1000,
+        "poll_offset_ticks": 1000,
+        "respond_turnaround_ticks": 500,
+        "final_turnaround_ticks": 300
+      },
+      "exchange_timeout_ticks": 100000,
+      "sequence_modulus": 4
+    },
+    {
+      "id": "same_clock_ds_unequal_replies",
+      "requirement_ids": [
+        "B02"
+      ],
+      "protocol": "ds",
+      "initiator": "A",
+      "responder": "B",
+      "seed": 1,
+      "units": "device ticks per endpoint domain",
+      "quantisation": "whole 40-bit LE ticks on the wire; the fake link uses llround(src_ticks/src_rate*dst_rate) for a rate change and llround(distance_m/c*dst_rate) for propagation",
+      "clock_a": {
+        "name": "x410_dev",
+        "rate_hz": 1000000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "clock_b": {
+        "name": "x410_dev",
+        "rate_hz": 1000000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "ratio_k": "1/1",
+      "distance_m": 15.0,
+      "tx_air_latency_a_ticks": 0,
+      "tx_air_latency_b_ticks": 0,
+      "planning": {
+        "begin_now_ticks": 1000,
+        "poll_offset_ticks": 1000,
+        "respond_turnaround_ticks": 500,
+        "final_turnaround_ticks": 1300
+      },
+      "exchange_timeout_ticks": 100000,
+      "sequence_modulus": 4
+    },
+    {
+      "id": "same_clock_role_swap_ss",
+      "requirement_ids": [
+        "B01"
+      ],
+      "protocol": "ss",
+      "initiator": "B",
+      "responder": "A",
+      "seed": 1,
+      "units": "device ticks per endpoint domain",
+      "quantisation": "whole 40-bit LE ticks on the wire; the fake link uses llround(src_ticks/src_rate*dst_rate) for a rate change and llround(distance_m/c*dst_rate) for propagation",
+      "clock_a": {
+        "name": "x410_dev",
+        "rate_hz": 1000000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "clock_b": {
+        "name": "x410_dev",
+        "rate_hz": 1000000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "ratio_k": "1/1",
+      "distance_m": 15.0,
+      "tx_air_latency_a_ticks": 0,
+      "tx_air_latency_b_ticks": 0,
+      "planning": {
+        "begin_now_ticks": 1000,
+        "poll_offset_ticks": 1000,
+        "respond_turnaround_ticks": 500,
+        "final_turnaround_ticks": 300
+      },
+      "exchange_timeout_ticks": 100000,
+      "sequence_modulus": 4
+    },
+    {
+      "id": "same_clock_role_swap_ds",
+      "requirement_ids": [
+        "B01"
+      ],
+      "protocol": "ds",
+      "initiator": "B",
+      "responder": "A",
+      "seed": 1,
+      "units": "device ticks per endpoint domain",
+      "quantisation": "whole 40-bit LE ticks on the wire; the fake link uses llround(src_ticks/src_rate*dst_rate) for a rate change and llround(distance_m/c*dst_rate) for propagation",
+      "clock_a": {
+        "name": "x410_dev",
+        "rate_hz": 1000000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "clock_b": {
+        "name": "x410_dev",
+        "rate_hz": 1000000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "ratio_k": "1/1",
+      "distance_m": 15.0,
+      "tx_air_latency_a_ticks": 0,
+      "tx_air_latency_b_ticks": 0,
+      "planning": {
+        "begin_now_ticks": 1000,
+        "poll_offset_ticks": 1000,
+        "respond_turnaround_ticks": 500,
+        "final_turnaround_ticks": 300
+      },
+      "exchange_timeout_ticks": 100000,
+      "sequence_modulus": 4
+    },
+    {
+      "id": "diff_rate_k_gt1_ss",
+      "requirement_ids": [
+        "B02"
+      ],
+      "protocol": "ss",
+      "initiator": "A",
+      "responder": "B",
+      "seed": 1,
+      "units": "device ticks per endpoint domain",
+      "quantisation": "whole 40-bit LE ticks on the wire; the fake link uses llround(src_ticks/src_rate*dst_rate) for a rate change and llround(distance_m/c*dst_rate) for propagation",
+      "clock_a": {
+        "name": "devA",
+        "rate_hz": 1000000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "clock_b": {
+        "name": "devB",
+        "rate_hz": 800000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "ratio_k": "5/4",
+      "distance_m": 74.9481145,
+      "tx_air_latency_a_ticks": 0,
+      "tx_air_latency_b_ticks": 0,
+      "planning": {
+        "begin_now_ticks": 0,
+        "poll_offset_ticks": 100000,
+        "respond_turnaround_ticks": 4000,
+        "final_turnaround_ticks": 700
+      },
+      "exchange_timeout_ticks": 1000000,
+      "sequence_modulus": 4
+    },
+    {
+      "id": "diff_rate_k_gt1_ds",
+      "requirement_ids": [
+        "B02"
+      ],
+      "protocol": "ds",
+      "initiator": "A",
+      "responder": "B",
+      "seed": 1,
+      "units": "device ticks per endpoint domain",
+      "quantisation": "whole 40-bit LE ticks on the wire; the fake link uses llround(src_ticks/src_rate*dst_rate) for a rate change and llround(distance_m/c*dst_rate) for propagation",
+      "clock_a": {
+        "name": "devA",
+        "rate_hz": 1000000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "clock_b": {
+        "name": "devB",
+        "rate_hz": 800000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "ratio_k": "5/4",
+      "distance_m": 74.9481145,
+      "tx_air_latency_a_ticks": 0,
+      "tx_air_latency_b_ticks": 0,
+      "planning": {
+        "begin_now_ticks": 0,
+        "poll_offset_ticks": 100000,
+        "respond_turnaround_ticks": 4000,
+        "final_turnaround_ticks": 700
+      },
+      "exchange_timeout_ticks": 1000000,
+      "sequence_modulus": 4
+    },
+    {
+      "id": "diff_rate_k_lt1_ss",
+      "requirement_ids": [
+        "B02"
+      ],
+      "protocol": "ss",
+      "initiator": "A",
+      "responder": "B",
+      "seed": 1,
+      "units": "device ticks per endpoint domain",
+      "quantisation": "whole 40-bit LE ticks on the wire; the fake link uses llround(src_ticks/src_rate*dst_rate) for a rate change and llround(distance_m/c*dst_rate) for propagation",
+      "clock_a": {
+        "name": "devA",
+        "rate_hz": 800000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "clock_b": {
+        "name": "devB",
+        "rate_hz": 1000000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "ratio_k": "4/5",
+      "distance_m": 74.9481145,
+      "tx_air_latency_a_ticks": 0,
+      "tx_air_latency_b_ticks": 0,
+      "planning": {
+        "begin_now_ticks": 0,
+        "poll_offset_ticks": 100000,
+        "respond_turnaround_ticks": 5000,
+        "final_turnaround_ticks": 800
+      },
+      "exchange_timeout_ticks": 1000000,
+      "sequence_modulus": 4
+    },
+    {
+      "id": "diff_rate_k_lt1_ds",
+      "requirement_ids": [
+        "B02"
+      ],
+      "protocol": "ds",
+      "initiator": "A",
+      "responder": "B",
+      "seed": 1,
+      "units": "device ticks per endpoint domain",
+      "quantisation": "whole 40-bit LE ticks on the wire; the fake link uses llround(src_ticks/src_rate*dst_rate) for a rate change and llround(distance_m/c*dst_rate) for propagation",
+      "clock_a": {
+        "name": "devA",
+        "rate_hz": 800000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "clock_b": {
+        "name": "devB",
+        "rate_hz": 1000000000.0,
+        "epoch": 1,
+        "bits": 40
+      },
+      "ratio_k": "4/5",
+      "distance_m": 74.9481145,
+      "tx_air_latency_a_ticks": 0,
+      "tx_air_latency_b_ticks": 0,
+      "planning": {
+        "begin_now_ticks": 0,
+        "poll_offset_ticks": 100000,
+        "respond_turnaround_ticks": 5000,
+        "final_turnaround_ticks": 800
+      },
+      "exchange_timeout_ticks": 1000000,
+      "sequence_modulus": 4
+    }
+  ]
+}

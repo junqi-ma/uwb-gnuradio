@@ -261,6 +261,11 @@ endfunction()
 
 uwb_add_pure_twr_test(uwb_qa_uwb_twr_protocol_time.cc qa_uwb_twr_protocol_time.cc)
 uwb_add_pure_twr_test(uwb_qa_uwb_twr_fake_link.cc qa_uwb_twr_fake_link.cc)
+# M1-B: the endpoint core unit QA and the two-endpoint end-to-end matrix.
+# Both hard-code the expectations they hand-derive; neither reads the goldens
+# in testdata/twr/m1b at run time, so they need no UWB_TESTDATA_DIR.
+uwb_add_pure_twr_test(uwb_qa_uwb_twr_core.cc qa_uwb_twr_core.cc)
+uwb_add_pure_twr_test(uwb_qa_uwb_twr_m1b_e2e.cc qa_uwb_twr_m1b_e2e.cc)
 
 # ########################################################################
 # Deterministic library resolution for EVERY test registered above.
