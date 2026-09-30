@@ -28,7 +28,41 @@ endpoint may publish a validated range.  It additionally re-derives the
 transport arrival relation so a wire field cannot be a value the transport
 could not have produced.
 
+REMEDIATION CHECKS (R01-R09)
+----------------------------
+Beyond the ToF re-derivation, the same run re-checks the review findings that
+do not depend on the formula, entirely in Python:
+
+  * R08  every TX frame's numeric ``plan`` must satisfy its own identity
+         ``calibrated_air_ticks == quantised_instant_ticks + marker_offset_ticks``,
+         live on THIS endpoint's declared domain (name/rate/epoch/width), cite
+         the calibration in force with the RMARKER_TX correction set, and its
+         ``calibrated_air_ticks`` must equal the frame's ``t3B`` (Response) /
+         ``t5A`` (Final) and the recorded local TX instant.
+  * R04  the per-endpoint token trace must be strictly increasing (a reused or
+         non-positive token fails) and the executed session generation must
+         match the requested one (a stale-generation binding fails).
+  * R05/R14  per endpoint ``accepted == terminal + in_flight`` (with the
+         derived in-flight when the demo does not publish it), no more terminals
+         than accepted, and ``results_dropped == 0``.
+  * R07  every ``arm_rx`` deadline must be positive and must never exceed the
+         endpoint's absolute exchange deadline ``accept + exchange_timeout``
+         (the evidence wait may tighten, never extend it).
+  * R09  ``config_sha256`` / ``profile_sha256`` are recomputed here, with
+         ``hashlib``, from ``configuration.executed_fields`` /
+         ``configuration.profile_fields`` and compared; the
+         requested->effective->core ``mapping`` must be present and the executed
+         values must match the request, so a mutated executed value fails.
+  * provenance  every endpoint must stay ``wire_claim`` / ``simulation`` /
+         ``measurement_valid == false`` / ``yields_range == false``.
+
+``--self-test`` mutates a copy of the output in memory (a ToF numerator, a
+frame timestamp, a provenance flag, a plan identity, a token, an executed
+config field, a counter and a deadline) and asserts each mutation makes the
+verifier fail.  That is the negative test for this verifier itself.
+
     python3 tools/twr/verify_m1_b_protocol.py --request req.json --output out.json
+    python3 tools/twr/verify_m1_b_protocol.py --request req.json --output out.json --self-test
 
 Exit status 0 iff every check passes; non-zero with a clear diff otherwise.
 """
@@ -36,6 +70,7 @@ Exit status 0 iff every check passes; non-zero with a clear diff otherwise.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -45,12 +80,24 @@ from fractions import Fraction as F
 
 C_MPS = 299792458.0  # exactly the fake link's kFakeLinkSpeedOfLightMps
 
+# R08: RMARKER_TX requires exactly these correction bits to be set (see
+# uwb_twr_timestamp.h::timestamp_required_corrections).  Kept here as a
+# documented constant rather than imported from the C++ tree.
+REQUIRED_RMARKER_TX_CORRECTIONS = (1 << 4) | (1 << 6) | (1 << 7)  # 208
+REQUIRED_TX_CORRECTION_NAMES = (
+    "waveform_geometry", "tx_command_to_air", "delayed_tx_quantization",
+)
+# The frame field a plan-derived TX instant is written into, per frame type.
+PLAN_FRAME_FIELD = {"response": "t3B", "final": "t5A"}
+
 results = []
+_QUIET = False
 
 
 def record(item, verdict, detail):
     results.append((item, verdict, detail))
-    print("[%s] %s\n         %s" % (verdict, item, detail))
+    if not _QUIET:
+        print("[%s] %s\n         %s" % (verdict, item, detail))
 
 
 def fail(item, detail):
@@ -154,6 +201,77 @@ def tof_fraction(ep):
 
 def is_hex64(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value or "") is not None
+
+
+def counters_of(ep):
+    """The endpoint's counter object, whether emitted as an object or a JSON string."""
+    c = (ep or {}).get("counters")
+    if isinstance(c, str):
+        try:
+            return json.loads(c)
+        except ValueError:
+            return None
+    return c
+
+
+def kv_map(entries):
+    """``configuration.executed_fields`` / ``profile_fields`` -> {path: value}."""
+    out = {}
+    for row in entries or []:
+        if isinstance(row, dict) and "path" in row:
+            out[row["path"]] = row.get("value")
+    return out
+
+
+def canonical_fields(entries):
+    """The documented canonical text: one "path=value" per entry, '\\n' joined,
+    with a trailing newline (matches configuration.canonical_layout)."""
+    return "\n".join("%s=%s" % (r["path"], r["value"]) for r in entries or []) + "\n"
+
+
+def tx_frames(ep):
+    return [f for f in (ep.get("frames") or []) if f.get("dir") == "tx"]
+
+
+def rx_frames(ep):
+    return [f for f in (ep.get("frames") or []) if f.get("dir") == "rx"]
+
+
+def frame_type(fr):
+    return fr.get("type")
+
+
+def as_int(value):
+    """Accept an int, a decimal string, or a JSON number."""
+    if value is None:
+        raise ValueError("missing integer")
+    return int(value)
+
+
+DOMAIN_RE = re.compile(
+    r"^(?P<name>.+)@(?P<rate>-?\d+(?:\.\d+)?)Hz,epoch=(?P<epoch>-?\d+),bits=(?P<bits>-?\d+)$")
+
+
+def parse_domain_string(text):
+    m = DOMAIN_RE.match(text or "")
+    if not m:
+        return None
+    d = m.groupdict()
+    return {"name": d["name"], "tick_rate_hz": float(d["rate"]),
+            "epoch_id": int(d["epoch"]), "timestamp_bits": int(d["bits"])}
+
+
+def expected_domain(req, name):
+    d = req["domains"][name]
+    return {"name": d["name"], "tick_rate_hz": float(d["tick_rate_hz"]),
+            "epoch_id": int(d["epoch_id"]), "timestamp_bits": int(d["timestamp_bits"])}
+
+
+def same_domain(a, b):
+    return (a and b and a["name"] == b["name"]
+            and float(a["tick_rate_hz"]) == float(b["tick_rate_hz"])
+            and int(a["epoch_id"]) == int(b["epoch_id"])
+            and int(a["timestamp_bits"]) == int(b["timestamp_bits"]))
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +381,30 @@ def check_endpoint_provenance(ep, expect_estimate):
         ok("%s carries no distance field" % label, str(sorted(ep.keys()))[:200])
     else:
         fail("%s carries no distance field" % label, "found a distance key")
+
+
+def check_wire_copies(out):
+    """The fields the SENDER encoded and the fields the RECEIVER decoded must be
+    identical: both are decodes of the same on-air bytes.  This catches a tamper
+    in the received copy that the sender-side formula re-derivation would miss."""
+    label = "wire copy"
+    pairs = [("a", "poll", "b"), ("b", "response", "a")]
+    if out.get("protocol") == "ds":
+        pairs.append(("a", "final", "b"))
+    for src, ftype, dst in pairs:
+        tf = frame(endpoint(out, src), ftype, "tx")
+        rf = frame(endpoint(out, dst), ftype, "rx")
+        if tf is None or rf is None:
+            fail("%s: %s->%s %s pair exists" % (label, src, dst, ftype),
+                 "tx=%s rx=%s" % (tf is not None, rf is not None))
+            continue
+        if tf.get("fields") == rf.get("fields"):
+            ok("%s: %s->%s %s decoded fields equal the encoded fields" % (
+                label, src, dst, ftype), "session/seq/addressing/timestamps agree")
+        else:
+            fail("%s: %s->%s %s decoded fields equal the encoded fields" % (
+                label, src, dst, ftype),
+                 "tx=%s rx=%s" % (json.dumps(tf.get("fields")), json.dumps(rf.get("fields"))))
 
 
 def check_frames_addressed(ep, name):
@@ -488,10 +630,490 @@ def verify_ds(req, out):
              "t5A=%s rx_response=%s reply=%s" % (t5a, a_resp, freply))
 
 
+# ---------------------------------------------------------------------------
+# Remediation checks (R04/R05/R07/R08/R09/R14)
+# ---------------------------------------------------------------------------
+
+
+def check_config(req, out):
+    label = "R09 config"
+    cfg = out.get("configuration")
+    if not isinstance(cfg, dict) or not cfg:
+        fail(label + ": configuration block is present", "got %r" % (cfg,))
+        return
+    executed = cfg.get("executed_fields")
+    profile = cfg.get("profile_fields")
+    mapping = cfg.get("mapping")
+    if not isinstance(executed, list) or not executed or \
+            not isinstance(profile, list) or not profile:
+        fail(label + ": executed and profile field lists are present",
+             "executed=%s profile=%s" % (len(executed or []), len(profile or [])))
+        return
+
+    want_cfg = hashlib.sha256(canonical_fields(executed).encode()).hexdigest()
+    if out.get("config_sha256") == want_cfg:
+        ok(label + ": config_sha256 == sha256(executed_fields, canonical form)", want_cfg)
+    else:
+        fail(label + ": config_sha256 == sha256(executed_fields, canonical form)",
+             "output=%r recomputed=%s" % (out.get("config_sha256"), want_cfg))
+    want_prof = hashlib.sha256(canonical_fields(profile).encode()).hexdigest()
+    if out.get("profile_sha256") == want_prof:
+        ok(label + ": profile_sha256 == sha256(profile_fields, canonical form)", want_prof)
+    else:
+        fail(label + ": profile_sha256 == sha256(profile_fields, canonical form)",
+             "output=%r recomputed=%s" % (out.get("profile_sha256"), want_prof))
+
+    emap = kv_map(executed)
+    if isinstance(mapping, list) and mapping:
+        rows = {r.get("field"): r for r in mapping if isinstance(r, dict)}
+        need = ["session.protocol", "session.local_address", "session.peer_address",
+                "session.session_id", "session.sequence_modulus"]
+        missing = [f for f in need if f not in rows]
+        if missing:
+            fail(label + ": requested->effective->core mapping covers the identity",
+                 "missing rows: %s" % missing)
+        else:
+            ok(label + ": requested->effective->core mapping covers the identity",
+               "%d rows" % len(mapping))
+        proto_row = rows.get("session.protocol") or {}
+        if (proto_row.get("requested") == req.get("protocol")
+                and proto_row.get("effective") == req.get("protocol")):
+            ok(label + ": mapping.protocol requested==effective==request", req.get("protocol"))
+        else:
+            fail(label + ": mapping.protocol requested==effective==request",
+                 json.dumps(proto_row))
+    else:
+        fail(label + ": requested->effective->core mapping is present", "got %r" % (mapping,))
+
+    checks = [
+        ("core.a.protocol", req.get("protocol")),
+        ("core.b.protocol", req.get("protocol")),
+        ("core.a.role", "initiator"),
+        ("core.b.role", "responder"),
+        ("core.a.local_address", str(req["endpoints"]["a"]["local_address"])),
+        ("core.a.peer_address", str(req["endpoints"]["a"]["peer_address"])),
+        ("core.b.local_address", str(req["endpoints"]["b"]["local_address"])),
+        ("core.b.peer_address", str(req["endpoints"]["b"]["peer_address"])),
+        ("core.a.session_id", str(req["session"]["session_id"])),
+        ("core.b.session_id", str(req["session"]["session_id"])),
+        ("core.a.sequence_modulus", str(req["session"]["sequence_modulus"])),
+        ("core.a.initial_sequence", str(req["session"]["initial_sequence"])),
+        ("core.a.session_generation", str(req["session"]["session_generation"])),
+        ("core.b.session_generation", str(req["session"]["session_generation"])),
+    ]
+    bad = ["%s=%r want %r" % (p, emap.get(p), w) for p, w in checks
+           if str(emap.get(p)) != w]
+    if bad:
+        fail(label + ": executed core fields match the requested values", "; ".join(bad))
+    else:
+        ok(label + ": executed core fields match the requested values",
+           "%d executed fields cross-checked" % len(checks))
+    for name in ("a", "b"):
+        got = parse_domain_string(emap.get("core.%s.local_domain" % name))
+        if same_domain(got, expected_domain(req, name)):
+            ok(label + ": executed core.%s.local_domain is the requested domain" % name,
+               emap.get("core.%s.local_domain" % name))
+        else:
+            fail(label + ": executed core.%s.local_domain is the requested domain" % name,
+                 "got=%r want=%s" % (emap.get("core.%s.local_domain" % name),
+                                     expected_domain(req, name)))
+    for path in ("core.a.result_queue_capacity", "core.a.exchange_timeout_ticks"):
+        if path in emap:
+            ok(label + ": executed field %s is present" % path, emap[path])
+        else:
+            fail(label + ": executed field %s is present" % path, "missing")
+
+
+def check_plans(req, out):
+    label = "R08 plan"
+    for name in ("a", "b"):
+        ep = endpoint(out, name)
+        if not ep:
+            fail(label + ": endpoint %s present" % name, "missing")
+            continue
+        dom = expected_domain(req, name)
+        cal_id = req["calibration"]["id"]
+        for fr in tx_frames(ep):
+            ftype = frame_type(fr)
+            ctx = "%s %s tx" % (name, ftype)
+            plan = fr.get("plan")
+            if not isinstance(plan, dict):
+                fail(label + ": %s carries a numeric plan" % ctx, "plan=%r" % (plan,))
+                continue
+            try:
+                q = as_int(plan.get("quantised_instant_ticks"))
+                mo = as_int(plan.get("marker_offset_ticks"))
+                ca = as_int(plan.get("calibrated_air_ticks"))
+                cmd = as_int(plan.get("command_time_ticks"))
+                corr = as_int(plan.get("applied_corrections"))
+            except (TypeError, ValueError) as exc:
+                fail(label + ": %s plan tick fields parse" % ctx, str(exc))
+                continue
+            if ca == q + mo:
+                ok(label + ": %s calibrated_air == quantised_instant + marker_offset" % ctx,
+                   "%d == %d + %d" % (ca, q, mo))
+            else:
+                fail(label + ": %s calibrated_air == quantised_instant + marker_offset" % ctx,
+                     "%d != %d + %d" % (ca, q, mo))
+            if 0 <= mo and 0 <= q and 0 <= cmd <= q:
+                ok(label + ": %s plan ticks ordered (0<=command<=quantised)" % ctx,
+                   "cmd=%d q=%d marker=%d" % (cmd, q, mo))
+            else:
+                fail(label + ": %s plan ticks ordered (0<=command<=quantised)" % ctx,
+                     "cmd=%d q=%d marker=%d" % (cmd, q, mo))
+            if plan.get("valid") is True and plan.get("internally_consistent") is True:
+                ok(label + ": %s plan valid and internally consistent" % ctx,
+                   "identity_holds=%s" % plan.get("identity_holds"))
+            else:
+                fail(label + ": %s plan valid and internally consistent" % ctx,
+                     "valid=%r consistent=%r note=%r" % (
+                         plan.get("valid"), plan.get("internally_consistent"),
+                         plan.get("consistency_note")))
+            got_dom = {"name": plan.get("domain_name"),
+                       "tick_rate_hz": plan.get("tick_rate_hz"),
+                       "epoch_id": plan.get("epoch_id"),
+                       "timestamp_bits": plan.get("timestamp_bits")}
+            if same_domain(got_dom, dom):
+                ok(label + ": %s plan domain is the endpoint's declared domain" % ctx,
+                   plan.get("domain"))
+            else:
+                fail(label + ": %s plan domain is the endpoint's declared domain" % ctx,
+                     "got=%r want=%s" % (got_dom, dom))
+            if plan.get("source") == "scheduled_calibrated":
+                ok(label + ": %s plan source is scheduled_calibrated" % ctx, plan.get("source"))
+            else:
+                fail(label + ": %s plan source is scheduled_calibrated" % ctx,
+                     "got %r" % plan.get("source"))
+            if plan.get("calibration_id") == cal_id:
+                ok(label + ": %s plan cites the calibration in force" % ctx, cal_id)
+            else:
+                fail(label + ": %s plan cites the calibration in force" % ctx,
+                     "got %r want %r" % (plan.get("calibration_id"), cal_id))
+            if (corr & REQUIRED_RMARKER_TX_CORRECTIONS) == REQUIRED_RMARKER_TX_CORRECTIONS:
+                ok(label + ": %s plan records every RMARKER_TX correction" % ctx,
+                   "%d (%s)" % (corr, plan.get("corrections_text")))
+            else:
+                fail(label + ": %s plan records every RMARKER_TX correction" % ctx,
+                     "applied=%d text=%r" % (corr, plan.get("corrections_text")))
+            text = plan.get("corrections_text") or ""
+            if all(n in text for n in REQUIRED_TX_CORRECTION_NAMES):
+                ok(label + ": %s correction text names the required stages" % ctx, text)
+            else:
+                fail(label + ": %s correction text names the required stages" % ctx,
+                     "text=%r" % text)
+            if as_int(fr.get("ticks")) == ca:
+                ok(label + ": %s frame tick == plan calibrated_air" % ctx, str(ca))
+            else:
+                fail(label + ": %s frame tick == plan calibrated_air" % ctx,
+                     "frame=%r plan=%d" % (fr.get("ticks"), ca))
+            fld = PLAN_FRAME_FIELD.get(ftype)
+            if fld is not None:
+                wire = frame_ts(fr, fld)
+                if wire is not None and as_int(wire) == ca:
+                    ok(label + ": %s frame %s == plan calibrated_air" % (ctx, fld), str(ca))
+                else:
+                    fail(label + ": %s frame %s == plan calibrated_air" % (ctx, fld),
+                         "%s=%r plan=%d" % (fld, wire, ca))
+
+
+def check_identity(req, out, emap):
+    label = "R04 identity"
+    for name in ("a", "b"):
+        ep = endpoint(out, name)
+        if not ep:
+            fail(label + ": endpoint %s present" % name, "missing")
+            continue
+        for kind, frames in (("tx", tx_frames(ep)), ("rx", rx_frames(ep))):
+            if any("token" not in fr for fr in frames):
+                fail(label + ": %s %s frames carry a token" % (name, kind), "missing token")
+                continue
+            toks = [as_int(fr["token"]) for fr in frames]
+            if all(t > 0 for t in toks) and all(b > a for a, b in zip(toks, toks[1:])):
+                ok(label + ": %s %s tokens positive and strictly increasing" % (name, kind),
+                   str(toks))
+            else:
+                fail(label + ": %s %s tokens positive and strictly increasing" % (name, kind),
+                     str(toks))
+    for name in ("a", "b"):
+        want = str(req["session"]["session_generation"])
+        got = str(emap.get("core.%s.session_generation" % name))
+        if got == want:
+            ok(label + ": %s executed session generation matches the request" % name, got)
+        else:
+            fail(label + ": %s executed session generation matches the request" % name,
+                 "executed=%r requested=%r (stale-generation binding)" % (got, want))
+
+
+def check_conservation(out):
+    label = "R05/R14 conservation"
+    for name in ("a", "b"):
+        ep = endpoint(out, name)
+        c = counters_of(ep) if ep else None
+        if not isinstance(c, dict):
+            fail(label + ": endpoint %s exposes its counters" % name, "got %r" % (c,))
+            continue
+        try:
+            accepted = int(c["accepted_exchanges"])
+            terminal = int(c["terminal_results"])
+            dropped = int(c["results_dropped"])
+        except (KeyError, TypeError, ValueError) as exc:
+            fail(label + ": endpoint %s counter fields present" % name, str(exc))
+            continue
+        if dropped == 0:
+            ok(label + ": endpoint %s results_dropped == 0" % name, "0")
+        else:
+            fail(label + ": endpoint %s results_dropped == 0" % name, "got %d" % dropped)
+        if terminal <= accepted:
+            ok(label + ": endpoint %s terminal_results <= accepted_exchanges" % name,
+               "%d <= %d" % (terminal, accepted))
+        else:
+            fail(label + ": endpoint %s terminal_results <= accepted_exchanges" % name,
+                 "%d > %d" % (terminal, accepted))
+        reported = ep.get("in_flight")
+        if reported is None:
+            reported = c.get("in_flight")
+        if reported is not None:
+            if accepted == terminal + int(reported):
+                ok(label + ": endpoint %s accepted == terminal + in_flight" % name,
+                   "%d == %d + %d" % (accepted, terminal, int(reported)))
+            else:
+                fail(label + ": endpoint %s accepted == terminal + in_flight" % name,
+                     "%d != %d + %d" % (accepted, terminal, int(reported)))
+        else:
+            derived = accepted - terminal
+            converged = ep.get("completion") not in (None, "not_complete")
+            if derived < 0 or (converged and derived != 0):
+                fail(label + ": endpoint %s accepted == terminal + derived in_flight "
+                     "(in_flight not published)" % name,
+                     "accepted=%d terminal=%d derived=%d completion=%r"
+                     % (accepted, terminal, derived, ep.get("completion")))
+            else:
+                ok(label + ": endpoint %s accepted == terminal + derived in_flight "
+                   "(in_flight not published)" % name,
+                   "%d == %d + %d" % (accepted, terminal, derived))
+
+
+def check_deadlines(req, out, emap):
+    label = "R07 deadline"
+    for name in ("a", "b"):
+        ep = endpoint(out, name)
+        if not ep:
+            fail(label + ": endpoint %s present" % name, "missing")
+            continue
+        poll_rx = local_ticks(ep, "rx_marker_ticks", "poll")
+        accept = 0 if ep.get("role") == "initiator" else (
+            as_int(poll_rx) if poll_rx is not None else None)
+        try:
+            exchange = int(emap.get("core.%s.exchange_timeout_ticks" % name, 0) or 0)
+            evidence = int(emap.get("core.%s.evidence_wait_ticks" % name, 0) or 0)
+        except (TypeError, ValueError):
+            exchange, evidence = 0, 0
+        if exchange > 0 or evidence > 0:
+            ok(label + ": endpoint %s states a finite termination budget" % name,
+               "exchange=%d evidence=%d" % (exchange, evidence))
+        else:
+            fail(label + ": endpoint %s states a finite termination budget" % name,
+                 "both exchange and evidence budgets are 0")
+        if accept is not None and exchange > 0:
+            ceiling = accept + exchange
+            offenders = [a.get("deadline_ticks") for a in (ep.get("arm_rx") or [])
+                         if int(a.get("deadline_ticks", 0)) <= 0
+                         or int(a.get("deadline_ticks", 0)) > ceiling]
+            if not offenders:
+                ok(label + ": endpoint %s arm_rx deadlines never exceed the absolute "
+                   "exchange deadline" % name,
+                   "accept=%d exchange=%d ceiling=%d" % (accept, exchange, ceiling))
+            else:
+                fail(label + ": endpoint %s arm_rx deadlines never exceed the absolute "
+                   "exchange deadline" % name,
+                     "ceiling=%d offenders=%s" % (ceiling, offenders))
+        reason = ep.get("terminal_failure_reason") or ep.get("failure_reason")
+        if reason == "protocol_timeout":
+            c = counters_of(ep) or {}
+            if int(c.get("timeouts", 0)) >= 1:
+                ok(label + ": endpoint %s timeout terminal counted" % name, "timeouts>=1")
+            else:
+                fail(label + ": endpoint %s timeout terminal counted" % name,
+                     "failure_reason=protocol_timeout but timeouts=%r" % c.get("timeouts"))
+
+
+def run_checks(req, out, request_bytes):
+    """Run the whole check suite; return the list of failing checks."""
+    del results[:]
+    status = out.get("status") or {}
+    if status.get("ok") is not True:
+        fail("the demo reported a successful run", "status=%s" % json.dumps(status))
+        return [r for r in results if r[1] == "FAIL"]
+
+    check_common(req, out, request_bytes)
+    cfg = out.get("configuration")
+    if isinstance(cfg, dict) and cfg:
+        check_config(req, out)
+        emap = kv_map(cfg.get("executed_fields"))
+    else:
+        emap = {}
+        fail("R09 config: configuration block is present", "got %r" % (cfg,))
+    check_plans(req, out)
+    check_identity(req, out, emap)
+    check_conservation(out)
+    check_deadlines(req, out, emap)
+    check_wire_copies(out)
+    proto = req.get("protocol")
+    if proto == "ss":
+        verify_ss(req, out)
+    elif proto == "ds":
+        verify_ds(req, out)
+    else:
+        fail("the request names a protocol", "got %r" % proto)
+    return [r for r in results if r[1] == "FAIL"]
+
+
+def _endpoint_with_estimate(out, req):
+    expect = "a" if req.get("protocol") == "ss" else "b"
+    for name in (expect, "a", "b"):
+        ep = endpoint(out, name)
+        if ep and ep.get("estimate_available") and (ep.get("tof") or {}).get("available"):
+            return name
+    return expect
+
+
+def _mutation_specs(req, out):
+    """Each mutation, applied to a deep copy, MUST make the verifier fail."""
+    est = _endpoint_with_estimate(out, req)
+    specs = []
+
+    def tof_num(o):
+        o["endpoints"][est]["tof"]["num"] = str(int(o["endpoints"][est]["tof"]["num"]) + 1)
+    specs.append(("ToF numerator", tof_num))
+
+    def frame_field(o):
+        for fr in o["endpoints"]["a"]["frames"]:
+            if fr.get("type") == "response" and fr.get("dir") == "rx":
+                fr["fields"]["timestamps"]["t3B"] += 1
+                return
+        raise RuntimeError("no response rx frame at A")
+    specs.append(("frame field (rx copy) t3B", frame_field))
+
+    def frame_field_tx(o):
+        for fr in o["endpoints"]["b"]["frames"]:
+            if fr.get("type") == "response" and fr.get("dir") == "tx":
+                fr["fields"]["timestamps"]["t3B"] += 1
+                return
+        raise RuntimeError("no response tx frame at B")
+    specs.append(("frame field (wire) t3B", frame_field_tx))
+
+    def provenance(o):
+        o["endpoints"]["a"]["measurement_valid"] = True
+    specs.append(("provenance measurement_valid", provenance))
+
+    def yields_range(o):
+        o["endpoints"]["a"]["yields_range"] = True
+    specs.append(("provenance yields_range", yields_range))
+
+    def peer_evidence(o):
+        o["endpoints"]["a"]["peer_evidence"] = "peer_hardware_event"
+    specs.append(("provenance peer_evidence", peer_evidence))
+
+    def execution_mode(o):
+        o["endpoints"]["a"]["execution_mode"] = "hardware"
+    specs.append(("provenance execution_mode", execution_mode))
+
+    def plan_identity(o):
+        for ep_name in ("a", "b"):
+            for fr in o["endpoints"][ep_name]["frames"]:
+                if fr.get("plan"):
+                    fr["plan"]["calibrated_air_ticks"] = \
+                        str(int(fr["plan"]["calibrated_air_ticks"]) + 1)
+                    return
+        raise RuntimeError("no tx plan")
+    specs.append(("plan identity", plan_identity))
+
+    def plan_domain(o):
+        for ep_name in ("a", "b"):
+            for fr in o["endpoints"][ep_name]["frames"]:
+                if fr.get("plan"):
+                    fr["plan"]["tick_rate_hz"] = float(fr["plan"]["tick_rate_hz"]) * 2.0
+                    return
+        raise RuntimeError("no tx plan")
+    specs.append(("plan domain", plan_domain))
+
+    def token_reuse(o):
+        txs = [f for f in o["endpoints"]["a"]["frames"] if f.get("dir") == "tx"]
+        if len(txs) >= 2:
+            txs[1]["token"] = txs[0]["token"]
+        else:
+            txs[0]["token"] = 0 if int(txs[0]["token"]) != 0 else 1
+    specs.append(("token reuse", token_reuse))
+
+    def exec_field(o):
+        for row in o["configuration"]["executed_fields"]:
+            if row["path"] == "core.a.protocol":
+                row["value"] = "ss" if row["value"] != "ss" else "ds"
+                return
+        raise RuntimeError("no core.a.protocol executed field")
+    specs.append(("executed config field", exec_field))
+
+    def dropped(o):
+        o["endpoints"]["b"]["counters"]["results_dropped"] = 1
+    specs.append(("results_dropped", dropped))
+
+    def conservation(o):
+        o["endpoints"]["b"]["counters"]["terminal_results"] = \
+            int(o["endpoints"]["b"]["counters"]["accepted_exchanges"]) + 1
+    specs.append(("conservation terminal>accepted", conservation))
+
+    def deadline(o):
+        ar = o["endpoints"]["b"].get("arm_rx") or []
+        if not ar:
+            raise RuntimeError("no arm_rx")
+        ar[0]["deadline_ticks"] = str(int(ar[0]["deadline_ticks"]) + 10 ** 12)
+    specs.append(("deadline extension", deadline))
+
+    return specs
+
+
+def self_test(req, out, request_bytes):
+    global _QUIET
+    _QUIET = False
+    print("== self-test: the pristine output must PASS ==")
+    base = run_checks(req, out, request_bytes)
+    if base:
+        print("SELF-TEST FAILED: the pristine output already fails: %s"
+              % [f[0] for f in base])
+        return 1
+    print("PASS (%d checks)" % len(results))
+    missed = []
+    for name, mutate in _mutation_specs(req, out):
+        mutant = copy.deepcopy(out)
+        try:
+            mutate(mutant)
+        except Exception as exc:  # fixture problem, not a verifier result
+            print("SELF-TEST MUTATION ERROR (%s): %s" % (name, exc))
+            missed.append(name)
+            continue
+        _QUIET = True
+        caught = run_checks(req, mutant, request_bytes)
+        _QUIET = False
+        if caught:
+            print("[PASS] mutation '%s' caught by %d check(s): %s"
+                  % (name, len(caught), caught[0][0]))
+        else:
+            print("[FAIL] mutation '%s' was NOT caught" % name)
+            missed.append(name)
+    print("=" * 72)
+    if missed:
+        print("SELF-TEST FAILED: %s" % missed)
+        return 1
+    print("SELF-TEST PASSED: every mutation was detected")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--request", required=True)
     ap.add_argument("--output", required=True)
+    ap.add_argument("--self-test", action="store_true",
+                    help="also mutate a copy of the output and require the verifier to fail")
     args = ap.parse_args(argv)
 
     for path in (args.request, args.output):
@@ -509,25 +1131,11 @@ def main(argv=None):
         sys.stderr.write("error: cannot read the request/output: %s\n" % exc)
         return 2
 
-    status = out.get("status") or {}
-    if status.get("ok") is not True:
-        fail("the demo reported a successful run",
-             "status=%s" % json.dumps(status))
-        print("=" * 72)
-        print("0/%d checks pass" % len(results))
-        return 1
+    if args.self_test:
+        return self_test(req, out, request_bytes)
 
-    check_common(req, out, request_bytes)
-    proto = req.get("protocol")
-    if proto == "ss":
-        verify_ss(req, out)
-    elif proto == "ds":
-        verify_ds(req, out)
-    else:
-        fail("the request names a protocol", "got %r" % proto)
-
+    failed = run_checks(req, out, request_bytes)
     print("=" * 72)
-    failed = [r for r in results if r[1] == "FAIL"]
     print("%d/%d checks pass" % (len(results) - len(failed), len(results)))
     if failed:
         print("FAILED: " + ", ".join(f[0] for f in failed))

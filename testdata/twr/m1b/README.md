@@ -227,8 +227,71 @@ bound.
 
 - Real PHY / FCS / FEC / waveform timestamp patch, native resampling, two RX
   routing, UHD radio adapter — out of M1-B scope.
-- Install/standalone consumer and the Python demo/verifier (B17 remainder).
 - Full historical regression and throughput (B18 remainder).
+- The install/standalone consumer is verified by `tools/twr/verify_install_consumer.sh`,
+  not here. The Python demo/verifier themselves are covered by
+  `gr-uwb/apps/test_twr_fake_demo.py` and the section below.
 - Any claim of hardware ranging: every result here is a
   `simulation` / `wire_claim` protocol estimate (`measurement_valid == false`,
   `yields_range() == false`).
+
+---
+
+## 7. Independent M1-B verifier and the R-item cross-reference
+
+`tools/twr/verify_m1_b_protocol.py` is the **independent** verifier for the
+two-endpoint demo. It imports no C++ and never calls the FSM or the ToF
+formula; it re-derives everything in Python `fractions.Fraction` from the
+request, the actual frame field values and the local evidence, and re-checks
+the review findings directly from the emitted trace. It was extended for the
+M1-B remediation (R01–R09). The JSON files in this directory
+(`event_cases.json`, `expected_results.json`) are the **core-QA** goldens and
+their schema did not change; the verifier consumes the demo's output JSON, not
+these files.
+
+Build the demo out of tree and run the verifier (the coordinator owns
+`gr-uwb/build`):
+
+```bash
+g++ -std=c++17 -Wall -Wextra -I gr-uwb/include -o /tmp/opencode/twr_fake_demo \
+  gr-uwb/apps/twr_fake_demo.cc gr-uwb/lib/uwb_twr_core.cc gr-uwb/lib/uwb_twr_fake_link.cc
+for sc in ss_unity ds_unity ss_nominal ds_nominal; do
+  UWB_TWR_FAKE_DEMO=/tmp/opencode/twr_fake_demo \
+    python3 gr-uwb/apps/twr_fake_demo.py --scenario $sc \
+      --request-out /tmp/opencode/req_$sc.json --output /tmp/opencode/out_$sc.json
+  python3 tools/twr/verify_m1_b_protocol.py \
+      --request /tmp/opencode/req_$sc.json --output /tmp/opencode/out_$sc.json
+done
+# negative test of the verifier itself:
+python3 tools/twr/verify_m1_b_protocol.py \
+    --request /tmp/opencode/req_ds_unity.json --output /tmp/opencode/out_ds_unity.json --self-test
+```
+
+Observed (2026-09-30): the four scenarios pass 70–86 checks each; the
+`--self-test` proves the verifier can fail (all 14 in-memory mutations are
+caught: a ToF numerator, both the encoded and the decoded frame `t3B`, the four
+provenance fields, the plan identity and domain, a reused token, an executed
+config field, `results_dropped`, terminal>accepted and a deadline extension),
+and four on-disk mutants (`ToF numerator`, frame `t3B`, provenance flag,
+executed config field) each exit non-zero.
+
+What each finding is checked against, and where:
+
+| ID | verifier check (`verify_m1_b_protocol.py`) | fixture requirement |
+|---|---|---|
+| R08 / B06 | per-TX `plan` identity `calibrated_air == quantised_instant + marker_offset`; plan domain = endpoint domain; `scheduled_calibrated`; RMARKER_TX correction set; frame `t3B`/`t5A` == `calibrated_air` | `check_plans` |
+| R04 | per-endpoint tx/rx tokens strictly increasing; executed session generation == requested (stale generation fails) | `check_identity`, `check_config` |
+| R05 / R14 / B13 / B14 | `accepted == terminal + in_flight` (derived in-flight when the demo omits it); `terminal <= accepted`; `results_dropped == 0` | `check_conservation` |
+| R07 / B07 | every `arm_rx` deadline positive and `<= accept_tick + exchange_timeout_ticks` (the evidence wait tightens, never extends) | `check_deadlines` |
+| R09 / B17 | `config_sha256`/`profile_sha256` recomputed from `configuration.executed_fields`/`profile_fields`; requested→effective→core `mapping` present; executed core fields equal the request | `check_config` |
+| B16/receipt | the sender's encoded fields equal the receiver's decoded fields | `check_wire_copies` |
+| all | every endpoint stays `wire_claim` / `simulation` / `measurement_valid == false` / `yields_range == false` | `check_endpoint_provenance` |
+
+Boundary: the verifier is only as strong as the demo's **emitted trace**. The
+demo does not publish a per-action `generation` field or a top-level
+`in_flight`, so the stale-generation axis is checked through the executed
+snapshot's session generation (not per event), and in-flight is derived
+(`accepted − terminal`) rather than read. Those two are the outstanding gaps to
+close if the demo can expose them; the token-monotonic, plan-identity, config,
+conservation, deadline and provenance checks are direct.
+
