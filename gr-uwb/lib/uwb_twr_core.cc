@@ -56,6 +56,45 @@ bool local_ts_to_wire(const Timestamp& ts, const FrameProfile& p, uint64_t& out,
     return true;
 }
 
+// Domain test for `ExchangeStatus`, with NO `default` (N07).  The vocabulary
+// has numeric gaps, so a range check is NOT a domain test: `cancel_reason` is
+// a caller-supplied public enum and can hold a value the enum does not have
+// (F's finding N-2).  Kept local to the core so the frozen vocabulary header is
+// not extended.
+bool exchange_status_is_known(ExchangeStatus s)
+{
+    switch (s) {
+    case ExchangeStatus::Ok:
+    case ExchangeStatus::ConfigRejected:
+    case ExchangeStatus::Unsupported:
+    case ExchangeStatus::Cancelled:
+    case ExchangeStatus::QueueFull:
+    case ExchangeStatus::InternalError:
+    case ExchangeStatus::PhyFcsFailed:
+    case ExchangeStatus::PhyDecodeFailed:
+    case ExchangeStatus::WrongPeer:
+    case ExchangeStatus::UnexpectedFrameType:
+    case ExchangeStatus::StaleSession:
+    case ExchangeStatus::RxTimeout:
+    case ExchangeStatus::RxOverflow:
+    case ExchangeStatus::RxChainBroken:
+    case ExchangeStatus::TxLate:
+    case ExchangeStatus::TxUnderflow:
+    case ExchangeStatus::TxSeqError:
+    case ExchangeStatus::TxChainBroken:
+    case ExchangeStatus::InvalidTimeDomain:
+    case ExchangeStatus::ClockEstimateInvalid:
+    case ExchangeStatus::FirstPathUnreliable:
+    case ExchangeStatus::CalibrationMissing:
+    case ExchangeStatus::CalibrationExpired:
+    case ExchangeStatus::ProtocolTimeout:
+    case ExchangeStatus::DeadlineMissed:
+    case ExchangeStatus::NegativeTof:
+        return true;
+    }
+    return false;
+}
+
 // The single configuration validator used by both `configure()` and
 // `reset()`.  An out-of-domain enum is refused up front (N07).
 bool validate_core_config(const CoreConfig& cfg, std::string& why)
@@ -324,7 +363,7 @@ struct EndpointCore::Impl {
         est.peer_evidence_is_wire_claim = true;
         est.measurement_valid = false;
         est.protocol = cfg.protocol;
-        est.failure_reason = st;
+        est.set_failure_reason(st);
         est.detail = detail;
         terminal(out, std::move(est), st, detail, event_id);
     }
@@ -594,8 +633,10 @@ struct EndpointCore::Impl {
         }
         const ProtocolInterval ra_iv = ProtocolInterval::from_local(*ra);
         ProtocolTofEstimate est = compute_protocol_ss_tof(ra_iv, db_iv, cfg.ratio);
+        ExchangeStatus reason = ExchangeStatus::InternalError;
         const ExchangeStatus tst = est.estimate_available ? ExchangeStatus::Ok
-                                                          : est.failure_reason;
+                                 : (est.failure_reason(reason) ? reason
+                                                               : ExchangeStatus::InternalError);
         terminal(out, std::move(est), tst, "SS initiator protocol estimate", event_id);
     }
 
@@ -633,8 +674,10 @@ struct EndpointCore::Impl {
         ProtocolTofEstimate est = compute_protocol_ds_tof(
             ra_iv, ProtocolInterval::from_local(*rb), da_iv,
             ProtocolInterval::from_local(*db), cfg.ratio);
+        ExchangeStatus reason = ExchangeStatus::InternalError;
         const ExchangeStatus tst = est.estimate_available ? ExchangeStatus::Ok
-                                                          : est.failure_reason;
+                                 : (est.failure_reason(reason) ? reason
+                                                               : ExchangeStatus::InternalError);
         terminal(out, std::move(est), tst, "DS responder protocol estimate", event_id);
     }
 
@@ -1068,8 +1111,7 @@ struct EndpointCore::Impl {
         // the enum does not have.  An out-of-domain reason is replaced by the
         // default cancellation reason rather than stored as-is.
         ExchangeStatus st = ev.cancel_reason;
-        if (static_cast<int>(st) > static_cast<int>(ExchangeStatus::NegativeTof) ||
-            st == ExchangeStatus::Ok)
+        if (!exchange_status_is_known(st) || st == ExchangeStatus::Ok)
             st = ExchangeStatus::Cancelled;
         counters.cancellations++;
         if (pending_prepare)
@@ -1107,6 +1149,12 @@ struct EndpointCore::Impl {
         cfg.session_generation = (ev.new_generation != 0) ? ev.new_generation
                                                           : cfg.session_generation + 1;
         seq_issued = 0;
+        // `seq_used` (the responder replay barrier) is deliberately NOT
+        // cleared here.  Reusing the same wire bytes under a new LOCAL
+        // generation must not by itself prove they belong to the new session
+        // (M1-B §4.1), so the conservative direction is to keep refusing a
+        // replayed sequence until a fresh binding/session is declared (F's
+        // observation N-9: asymmetric with `seq_issued`, but it fails closed).
         if (in_flight) {
             if (pending_prepare)
                 emit_abort(out, pending_token, ev.event_id);
@@ -1179,8 +1227,11 @@ bool EndpointCore::reset(const CoreConfig& cfg, uint64_t new_generation, std::st
     d.state = EndpointState::Idle;
     d.seq_issued = 0;
     d.token_counter = 0;
-    d.results.clear();
-    d.results.reserve(cfg.result_queue_capacity);
+    // Undrained terminal results are RETAINED across a reset: they belong to
+    // exchanges that already completed, and dropping them would lose a
+    // terminal result (F's finding N-8 / B-2 residual).  `results` is bounded
+    // by `result_queue_capacity`, so a caller that does not drain will have
+    // new Begins refused rather than losing anything.
     d.seq_used.fill(false);
     return true;
 }

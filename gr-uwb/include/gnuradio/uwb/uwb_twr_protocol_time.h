@@ -315,10 +315,12 @@ enum class PeerClaimError : uint8_t {
     RawOutOfDomain = 5,
     IntervalNotFormable = 6, // reversed / wrap ambiguous
     IntervalTooLong = 7,
-    // Reserved for a future binding that declares which session a claim must
-    // belong to; M1-B's `WireTimestampBinding` carries a generation but a
-    // claim does not, so no M1-B path returns this value.  Kept because the
-    // numeric codes are append-only schema (REQ-OUT-01).
+    // The peer binding's session generation does not match the endpoint's
+    // current session generation.  Produced at claim-formation time by
+    // `EndpointCore` (e.g. after a local Reset whose binding was not
+    // re-declared), so a claim that cannot be shown to belong to the current
+    // session is refused rather than used.  Numeric codes are append-only
+    // schema (REQ-OUT-01).
     SessionGenerationMismatch = 8
 };
 
@@ -573,8 +575,21 @@ struct ProtocolTofEstimate {
     ClockRatio ratio;
 
     TofStatus math_status = TofStatus::InvalidResult;
-    ExchangeStatus failure_reason = ExchangeStatus::InternalError;
     std::string detail;
+
+    // The failure reason is reachable ONLY through this accessor, and only
+    // when the estimate FAILED.  There is deliberately no `ExchangeStatus`
+    // data member, so `exchange_status_yields_range(x)` cannot be handed
+    // anything read off this type without proving the estimate failed first
+    // (F's findings B-1 and N-10).
+    bool failure_reason(ExchangeStatus& out) const
+    {
+        if (completion != ProtocolCompletionStatus::Failed)
+            return false;
+        out = reason_;
+        return true;
+    }
+    void set_failure_reason(ExchangeStatus r) { reason_ = r; }
 
     // No entry point here can ever claim a range.  `method_*` naming keeps the
     // intent obvious and makes an accidental use in a range helper a compile
@@ -598,10 +613,16 @@ struct ProtocolTofEstimate {
                       domain.is_valid() ? domain.name.c_str() : "(none)",
                       tof_status_to_string(math_status));
         std::string s(buf);
+        ExchangeStatus reason = ExchangeStatus::InternalError;
+        if (failure_reason(reason))
+            s += " failure_reason=" + std::string(exchange_status_to_string(reason));
         if (!detail.empty())
             s += " detail=" + detail;
         return s;
     }
+
+private:
+    ExchangeStatus reason_ = ExchangeStatus::InternalError;
 };
 
 // A terminal status that CANNOT be fed to a range helper.  F's read-only review
@@ -666,7 +687,6 @@ inline ProtocolTofEstimate make_protocol_complete_without_estimate(Protocol prot
     e.protocol = protocol;
     e.computed_at = computed_at;
     e.math_status = TofStatus::Ok;
-    e.failure_reason = ExchangeStatus::Ok;
     e.detail = detail;
     return e;
 }
@@ -693,7 +713,7 @@ inline ProtocolTofEstimate protocol_fail(ProtocolTofEstimate e, TofStatus s,
     e.completion = ProtocolCompletionStatus::Failed;
     e.estimate_available = false;
     e.math_status = s;
-    e.failure_reason = tof_status_to_exchange_status(s);
+    e.set_failure_reason(tof_status_to_exchange_status(s));
     e.detail = why;
     return e;
 }
@@ -839,7 +859,6 @@ inline ProtocolTofEstimate compute_protocol_ss_tof(const ProtocolInterval& ra,
 
     e.tof = detail::rat128_to_ticks(half);
     e.math_status = TofStatus::Ok;
-    e.failure_reason = ExchangeStatus::Ok;
     e.local_evidence_complete = true;
     e.peer_evidence_is_wire_claim = ra.is_peer_wire_claim() || db.is_peer_wire_claim();
     e.estimate_available = true;
@@ -848,7 +867,7 @@ inline ProtocolTofEstimate compute_protocol_ss_tof(const ProtocolInterval& ra,
     if (e.tof.num < 0) {
         e.estimate_available = false;
         e.math_status = TofStatus::NegativeTof;
-        e.failure_reason = tof_status_to_exchange_status(TofStatus::NegativeTof);
+        e.set_failure_reason(tof_status_to_exchange_status(TofStatus::NegativeTof));
         e.detail = "protocol SS ToF is negative (" + e.tof.to_string() +
                    " A ticks): retained with its sign";
     } else {
@@ -911,7 +930,6 @@ inline ProtocolTofEstimate compute_protocol_ds_tof(const ProtocolInterval& ra,
 
     e.tof = detail::rat128_to_ticks(tof);
     e.math_status = TofStatus::Ok;
-    e.failure_reason = ExchangeStatus::Ok;
     e.local_evidence_complete = true;
     e.peer_evidence_is_wire_claim = ra.is_peer_wire_claim() || rb.is_peer_wire_claim() ||
                                     da.is_peer_wire_claim() || db.is_peer_wire_claim();
@@ -921,7 +939,7 @@ inline ProtocolTofEstimate compute_protocol_ds_tof(const ProtocolInterval& ra,
     if (e.tof.num < 0) {
         e.estimate_available = false;
         e.math_status = TofStatus::NegativeTof;
-        e.failure_reason = tof_status_to_exchange_status(TofStatus::NegativeTof);
+        e.set_failure_reason(tof_status_to_exchange_status(TofStatus::NegativeTof));
         e.detail = "protocol DS ToF is negative (" + e.tof.to_string() +
                    " A ticks): retained with its sign";
     } else {

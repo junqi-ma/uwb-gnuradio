@@ -106,6 +106,15 @@ namespace {
 
 using namespace gr::uwb::twr;
 
+// The protocol estimate exposes its failure reason only through a failed-only
+// accessor (F's finding N-10); this helper reads it for the assertions.
+inline ExchangeStatus est_failure_reason(const ProtocolTofEstimate& e)
+{
+    ExchangeStatus r = ExchangeStatus::InternalError;
+    e.failure_reason(r);
+    return r;
+}
+
 // ---------------------------------------------------------------------------
 // Hand-computed constants (Python fractions.Fraction, physical model above).
 //
@@ -364,7 +373,7 @@ BOOST_AUTO_TEST_CASE(protocol_time_ss_peer_path_matches_hand_math)
     BOOST_REQUIRE(est.local_evidence_complete);
     BOOST_REQUIRE(est.peer_evidence_is_wire_claim);
     BOOST_REQUIRE(est.math_status == TofStatus::Ok);
-    BOOST_REQUIRE(est.failure_reason == ExchangeStatus::Ok);
+    BOOST_REQUIRE(est.completion == ProtocolCompletionStatus::Complete);
     BOOST_REQUIRE(est.protocol == Protocol::Ss);
     BOOST_REQUIRE(est.computed_at == ComputedAt::InitiatorA);
     BOOST_REQUIRE(clock_domain_same_identity(est.domain, a));
@@ -725,7 +734,7 @@ BOOST_AUTO_TEST_CASE(protocol_time_empty_inputs_fail_closed)
     BOOST_REQUIRE(ss.completion == ProtocolCompletionStatus::Failed);
     BOOST_TEST(!ss.estimate_available);
     BOOST_TEST(ss.math_status == TofStatus::InvalidInput);
-    BOOST_TEST(ss.failure_reason == ExchangeStatus::InvalidTimeDomain);
+    BOOST_TEST(est_failure_reason(ss) == ExchangeStatus::InvalidTimeDomain);
     BOOST_TEST(!ss.yields_range());
 
     const ProtocolTofEstimate ds =
@@ -742,7 +751,7 @@ BOOST_AUTO_TEST_CASE(protocol_time_empty_inputs_fail_closed)
     BOOST_REQUIRE(no_ratio.completion == ProtocolCompletionStatus::Failed);
     BOOST_TEST(!no_ratio.estimate_available);
     BOOST_TEST(no_ratio.math_status == TofStatus::ClockRatioMissing);
-    BOOST_TEST(no_ratio.failure_reason == ExchangeStatus::ClockEstimateInvalid);
+    BOOST_TEST(est_failure_reason(no_ratio) == ExchangeStatus::ClockEstimateInvalid);
 
     // The completion enum is fail-closed too (N07).
     BOOST_TEST(protocol_completion_status_is_known(ProtocolCompletionStatus::Complete));
@@ -782,7 +791,7 @@ BOOST_AUTO_TEST_CASE(protocol_time_negative_tof_is_retained)
     BOOST_REQUIRE(est.completion == ProtocolCompletionStatus::Failed);
     BOOST_TEST(!est.estimate_available);
     BOOST_TEST(est.math_status == TofStatus::NegativeTof);
-    BOOST_TEST(est.failure_reason == ExchangeStatus::NegativeTof);
+    BOOST_TEST(est_failure_reason(est) == ExchangeStatus::NegativeTof);
     BOOST_REQUIRE(est.tof.valid);
     BOOST_REQUIRE_EQUAL(est.tof.num, -125);
     BOOST_REQUIRE_EQUAL(est.tof.den, 1);
@@ -815,7 +824,7 @@ BOOST_AUTO_TEST_CASE(protocol_time_domain_and_window_checks_still_apply)
         const ProtocolTofEstimate est = compute_protocol_ss_tof(ra, db, k);
         BOOST_REQUIRE(est.completion == ProtocolCompletionStatus::Failed);
         BOOST_TEST(est.math_status == TofStatus::ClockRatioEpochMismatch);
-        BOOST_TEST(est.failure_reason == ExchangeStatus::InvalidTimeDomain);
+        BOOST_TEST(est_failure_reason(est) == ExchangeStatus::InvalidTimeDomain);
     }
 
     // A differently-named A counter is a domain mismatch.
@@ -838,7 +847,7 @@ BOOST_AUTO_TEST_CASE(protocol_time_domain_and_window_checks_still_apply)
         const ProtocolTofEstimate est = compute_protocol_ss_tof(ra, db, windowed);
         BOOST_REQUIRE(est.completion == ProtocolCompletionStatus::Failed);
         BOOST_TEST(est.math_status == TofStatus::ClockRatioNotValidAtTime);
-        BOOST_TEST(est.failure_reason == ExchangeStatus::ClockEstimateInvalid);
+        BOOST_TEST(est_failure_reason(est) == ExchangeStatus::ClockEstimateInvalid);
     }
 }
 

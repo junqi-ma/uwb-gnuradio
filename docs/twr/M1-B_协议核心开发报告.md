@@ -40,7 +40,7 @@ M1-B 在**离线、纯 C++、接收驱动**的范围内完成：SS/DS 两个独�
 | `gr-uwb/lib/qa_uwb_twr_fake_link.cc` | C | 14 例 |
 | `gr-uwb/lib/qa_uwb_twr_protocol_time.cc` | A | 10 例 |
 | `gr-uwb/lib/twr_m1b_test_support.h` | D | 双核心↔fake link 驱动 |
-| `gr-uwb/lib/qa_uwb_twr_core.cc` | D（协调者补 4 例） | 25 例 |
+| `gr-uwb/lib/qa_uwb_twr_core.cc` | D（协调者补 7 例） | 28 例 |
 | `gr-uwb/lib/qa_uwb_twr_m1b_e2e.cc` | D | 11 例 / 248 断言 |
 | `testdata/twr/m1b/{README.md,event_cases.json,expected_results.json}` | D | 9 场景 golden |
 | `gr-uwb/apps/twr_fake_demo.cc` | E | 纯 C++ CLI 双端仿真 |
@@ -227,7 +227,7 @@ F 的评审见 [M1-B_评审报告.md](M1-B_评审报告.md)。**3 项阻塞 + 7 
 
 | 编号 | 问题 | 整改 |
 |---|---|---|
-| B-1 | 成功协议估计的 `CoreAction::status` 是 `ExchangeStatus::Ok`，`exchange_status_yields_range(Ok)==true`，重新打开了类型层已关闭的 fail-open | 新增强类型 `ProtocolTerminalStatus`（`yields_range()==false`、无到 `ExchangeStatus` 的转换），`CoreAction::status` 改用它；demo 输出改为 `terminal_completion`/`terminal_failure_reason`；QA 加 `f_b1_protocol_terminal_status_is_not_a_range_status`（含 `static_assert`） |
+| B-1 | 成功协议估计的 `CoreAction::status` 是 `ExchangeStatus::Ok`，`exchange_status_yields_range(Ok)==true`，重新打开了类型层已关闭的 fail-open | 新增强类型 `ProtocolTerminalStatus`（`yields_range()==false`、无到 `ExchangeStatus` 的转换），`CoreAction::status` 改用它；失败原因只经「仅失败时成功」的 `failure_reason(out)` 访问器暴露，**没有** `ExchangeStatus` 数据成员（连字段直读的绕过也堵死）；demo 输出改为 `terminal_completion`/`terminal_failure_reason`；QA 加 `f_b1_protocol_terminal_status_is_not_a_range_status`（含 `static_assert` 与「成功时无原因」断言） |
 | B-2 | `EndpointCore::reset(cfg,gen)` 内部调 `configure()`，静默丢弃在途终态并清空计数器 | `reset()` 在途时**拒绝**；抽出 `validate_core_config()`，reset 不再清计数器；QA `f_b2_reset_refuses_in_flight_and_preserves_counters` |
 | B-3 | `WireTimestampBinding::session_generation` 文档称强制，实际只在 configure 检查；Reset 后仍被使用 | 运行期在 `make_peer_interval()` 校验 binding 与当前 session generation；`Reset` 后旧 binding 的 peer claim 被拒（`PeerClaimError::SessionGenerationMismatch` 终于有生产者）；`reset()` 要求新 binding；QA `f_b3_stale_peer_binding_generation_is_refused` |
 | N-1 | responder 侧无序号复用屏障，重放旧 Poll 会开新 exchange | 新增有界 `seq_used[256]`，已消费的 wire seq 重放被拒并计 `stale_events`；QA `f_n1_responder_replay_of_a_consumed_sequence_is_refused` |
@@ -237,6 +237,21 @@ F 的评审见 [M1-B_评审报告.md](M1-B_评审报告.md)。**3 项阻塞 + 7 
 | N-5 | `count_match_failure` 死代码；`frames_rejected_self` 恒 0 | 删除死函数；`validate_frame` 显式判 `src_addr == local_address` 并计 `frames_rejected_self` |
 | N-6 | B16 结构检测只查 3 个成员名 | **未改**（D 的测试强度问题，非产品缺陷）；F 的人工穷举未发现泄漏，作为已知覆盖限制记录 |
 | N-7 | CTest 的 `uwb_qa_install_consumer` 只跑 M0.1 消费者 | `gr-uwb/apps/install_consumer/run_install_consumer.sh` 增加 M1-B 头检查、`libuwb_twr_core.a` 检查与 SS/DS 消费者实跑、无 GR/UHD 依赖检查 |
+
+### 13.1 F 复审（第二轮）的新发现与整改
+
+F 复审把 B-1/B-3 判为 CLOSED、B-2 判为 PARTIAL，并新增以下项：
+
+| 编号 | 问题 | 整改 |
+|---|---|---|
+| 残余 B-2 / N-8 | `reset()` 虽不再清计数器，但仍 `results.clear()`，未取走的终态丢失 | `reset()` **保留**未取走终态；QA `f_n8_reset_retains_undrained_terminal_results` |
+| N-2（加强） | `cancel_reason` 的 `>62 || ==Ok` 不是域检查，枚举数字空洞（如 6）漏过 | core.cc 增局部 `exchange_status_is_known()`（全枚举、无 `default`）；QA `f_n2_out_of_domain_cancel_reason_is_not_stored` |
+| N-10 | `ProtocolTofEstimate::failure_reason` 仍是公开 `ExchangeStatus`，成功时 `Ok`，demo 仍打印 `"failure_reason":"ok"` | 改为「仅失败时成功」的 `failure_reason(out)` 访问器 + `set_failure_reason()`；**无** `ExchangeStatus` 数据成员；demo 只在失败时输出；QA `f_n10_estimate_failure_reason_is_failed_only` |
+| N-11 | `uwb_twr_protocol_time.h` 仍称 `SessionGenerationMismatch` 无生产者；`uwb_twr_core.h` 的 `reset()` 注释仍是旧行为 | 两处注释已改为与实现一致 |
+| N-9 | `Reset` 事件清 `seq_issued` 但不清 `seq_used`，responder 屏障不对称 | **保留行为**（同样的 wire bytes 不能因本端 generation 变更而自动被接受，fail-closed），在 `on_reset` 与 G0 §4 显式记录 |
+
+整改后全量串行 CTest 仍为 **59 项 58 通过**；`qa_uwb_twr_core.cc` 增至 **28 例 / 全绿**。
+
 
 整改后全量串行 CTest 回到 **59 项 58 通过**（唯一失败仍为历史吞吐项），
 `uwb_qa_install_consumer` 在重新安装的新前缀下通过（含 M1-B 消费者）。

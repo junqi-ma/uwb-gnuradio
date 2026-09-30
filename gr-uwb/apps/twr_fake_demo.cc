@@ -1334,7 +1334,12 @@ Value endpoint_value(const EndpointTrace& tr, const twr::CoreConfig& cfg, bool s
                 o.set("terminal_failure_reason",
                       mkstr(twr::exchange_status_to_string(reason)));
         }
-        o.set("failure_reason", mkstr(twr::exchange_status_to_string(e.failure_reason)));
+        {
+            twr::ExchangeStatus est_reason = twr::ExchangeStatus::InternalError;
+            if (e.failure_reason(est_reason))
+                o.set("failure_reason",
+                      mkstr(twr::exchange_status_to_string(est_reason)));
+        }
         o.set("detail", mkstr(e.detail));
 
         Value tof = mkobj();

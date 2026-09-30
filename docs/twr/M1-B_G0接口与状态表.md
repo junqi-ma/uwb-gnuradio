@@ -68,6 +68,20 @@ TxOutcomeResolved(token,o)                adapter -> core
 守恒：`accepted_exchanges == terminal_results + in_flight`（每端每 attempt）。
 `Begin` 在结果队列满时被拒（`QueueFull`），已接受请求的终态不丢。
 
+序号复用屏障（F 评审后补强）：responder 侧用有界 `seq_used[≤256]` 拒绝**已消费**
+wire seq 的重放（计 `stale_events`）；initiator 侧用 `seq_issued == sequence_modulus`
+拒绝新 Begin。`Reset` **事件**会清 `seq_issued` 但**不清** `seq_used` —— 同样的 wire
+bytes 不能因为本端 generation 变了就自动被当作新 session（M1-B §4.1），
+这个方向是 fail-closed，属于有意的不对称。
+
+`reset()` **方法**：在途时拒绝（须先 post `Reset`/`Stop` 事件以保留终态）；
+要求传入新 generation 的 peer binding；**不清计数器**；**保留**未取走的终态结果。
+
+结果与终态的 fail-closed 类型（F 评审 B-1/N-10）：`CoreAction::status` 为
+`ProtocolTerminalStatus`，`ProtocolTofEstimate` 的失败原因只经「仅失败时成功」的
+`failure_reason(out)` 访问器暴露；两者都**没有** `ExchangeStatus` 数据成员，
+也没有到 `ExchangeStatus` 的转换，`yields_range()` 恒 false。
+
 ## 5. 支持 / 拒绝集合（M1-B）
 
 支持：SS 双角色；DS 双角色；whole-tick wire；同物理时钟（`unity_same_clock`）与

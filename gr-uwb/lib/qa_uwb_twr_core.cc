@@ -227,6 +227,15 @@ inline ExchangeStatus action_status(const CoreAction& a)
     return ExchangeStatus::InternalError;
 }
 
+// The protocol estimate exposes its failure reason only through a failed-only
+// accessor (F's finding N-10); this TEST helper reads it for the assertions.
+inline ExchangeStatus est_failure_reason(const ProtocolTofEstimate& e)
+{
+    ExchangeStatus r = ExchangeStatus::InternalError;
+    e.failure_reason(r);
+    return r;
+}
+
 // Drive an SS initiator all the way to the terminal produced by receiving one
 // Response, with a caller-chosen local first-path quality.  Returns the
 // terminal status (or InternalError if no terminal was produced).
@@ -381,7 +390,7 @@ BOOST_AUTO_TEST_CASE(b02_out_of_window_ratio_is_reported_not_used)
     const ProtocolTofEstimate est = compute_protocol_ss_tof(ra, db, k);
     BOOST_TEST(!est.estimate_available);
     BOOST_TEST(est.math_status == TofStatus::ClockRatioNotValidAtTime);
-    BOOST_TEST(est.failure_reason == ExchangeStatus::ClockEstimateInvalid);
+    BOOST_TEST(est_failure_reason(est) == ExchangeStatus::ClockEstimateInvalid);
 }
 
 // ===========================================================================
@@ -1174,7 +1183,7 @@ BOOST_AUTO_TEST_CASE(b15_negative_tof_kept_signed_and_ds_zero_denominator_report
     BOOST_TEST(est.completion == ProtocolCompletionStatus::Failed);
     BOOST_TEST(!est.estimate_available);
     BOOST_TEST(est.math_status == TofStatus::NegativeTof);
-    BOOST_TEST(est.failure_reason == ExchangeStatus::NegativeTof);
+    BOOST_TEST(est_failure_reason(est) == ExchangeStatus::NegativeTof);
 
     // DS with four zero-length intervals -> zero denominator, not a divide by 0.
     ProtocolInterval z;
@@ -1369,4 +1378,92 @@ BOOST_AUTO_TEST_CASE(f_n1_responder_replay_of_a_consumed_sequence_is_refused)
     BOOST_TEST(find_action(b2, CoreActionKind::PrepareTx) == nullptr);
     BOOST_TEST(core.counters().accepted_exchanges == accepted);
     BOOST_TEST(core.counters().stale_events == stale + 1);
+}
+
+// F-N2: an OUT-OF-DOMAIN cancel reason (a numeric gap in ExchangeStatus) must
+// be replaced, not stored as-is.
+BOOST_AUTO_TEST_CASE(f_n2_out_of_domain_cancel_reason_is_not_stored)
+{
+    const Env e = make_env(Role::Initiator, Protocol::Ss, 4);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+    core.post(make_begin(1, 1000));
+    // 6 is a numeric gap: no ExchangeStatus enumerator has that value.
+    CoreActionBatch b = core.post(make_cancel(static_cast<ExchangeStatus>(6)));
+    const CoreAction* tr = find_action(b, CoreActionKind::TerminalResult);
+    BOOST_TEST(tr != nullptr);
+    if (tr != nullptr) {
+        ExchangeStatus reason = ExchangeStatus::Ok;
+        BOOST_TEST(tr->status.failure_reason(reason));
+        BOOST_TEST(reason == ExchangeStatus::Cancelled);
+    }
+}
+
+// F-N8: `reset()` must not drop an undrained terminal result.
+BOOST_AUTO_TEST_CASE(f_n8_reset_retains_undrained_terminal_results)
+{
+    const Env e = make_env(Role::Initiator, Protocol::Ss, 4);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+
+    CoreActionBatch b = core.post(make_begin(1, 1000));
+    const CoreAction* prep = find_action(b, CoreActionKind::PrepareTx);
+    BOOST_TEST(prep != nullptr);
+    if (prep == nullptr)
+        return;
+    core.post(make_tx_planned(prep->token, FrameType::Poll, 2000, e.dom, e.cal.id));
+    core.post(outcome_ev(prep->token, TxOutcome::Completed));
+    Frame resp = base_frame(e.cfg, FrameType::Response, 0);
+    resp.set(TimestampField::T2B, 2050);
+    resp.set(TimestampField::T3B, 2550);
+    core.post(rx_of(e.cfg, resp, 2600, e.dom)); // terminal produced, not drained
+
+    BOOST_TEST(core.counters().terminal_results == 1u);
+    CoreConfig fresh = e.cfg;
+    fresh.session_generation = 2;
+    fresh.peer_binding.session_generation = 2;
+    BOOST_TEST(core.reset(fresh, 2, why));
+
+    ProtocolTofEstimate retained;
+    BOOST_TEST(core.pop_result(retained));
+    BOOST_TEST(retained.estimate_available);
+}
+
+// F-N10: the result type must not expose a range-compatible status either.
+BOOST_AUTO_TEST_CASE(f_n10_estimate_failure_reason_is_failed_only)
+{
+    static_assert(!std::is_convertible<ProtocolTofEstimate, ExchangeStatus>::value,
+                  "a protocol estimate must not convert to ExchangeStatus");
+
+    const Env e = make_env(Role::Initiator, Protocol::Ss, 256);
+    bool with_estimate = false;
+    const ExchangeStatus st =
+        run_ss_initiator(e, FirstPathQuality::passed(20.0, 6.0, 0.9), &with_estimate);
+    BOOST_TEST(with_estimate);
+    BOOST_TEST(st == ExchangeStatus::Ok);
+
+    // A successful estimate exposes NO failure reason.
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+    CoreActionBatch b = core.post(make_begin(1, 1000));
+    const CoreAction* prep = find_action(b, CoreActionKind::PrepareTx);
+    BOOST_TEST(prep != nullptr);
+    if (prep == nullptr)
+        return;
+    core.post(make_tx_planned(prep->token, FrameType::Poll, 2000, e.dom, e.cal.id));
+    core.post(outcome_ev(prep->token, TxOutcome::Completed));
+    Frame resp = base_frame(e.cfg, FrameType::Response, 0);
+    resp.set(TimestampField::T2B, 2050);
+    resp.set(TimestampField::T3B, 2550);
+    CoreActionBatch rb = core.post(rx_of(e.cfg, resp, 2600, e.dom));
+    const CoreAction* tr = find_action(rb, CoreActionKind::TerminalResult);
+    BOOST_TEST(tr != nullptr);
+    if (tr != nullptr) {
+        ExchangeStatus reason = ExchangeStatus::InternalError;
+        BOOST_TEST(!tr->result.failure_reason(reason));
+        BOOST_TEST(!tr->result.yields_range());
+    }
 }

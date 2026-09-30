@@ -505,10 +505,12 @@ public:
     // unconfigured and unable to advance.
     bool configure(const CoreConfig& cfg, std::string& why);
 
-    // Start a new session generation on the same configuration.  Clears all
-    // in-flight state (emitting terminal failures for anything in flight is
-    // the caller's job via `stop()` first); old events cannot revive an
-    // exchange because their token/exchange identities are gone.
+    // Start a new session generation on the same configuration.  REFUSES
+    // while an exchange is in flight (post a `Reset` or `Stop` EVENT first so
+    // its terminal result is not lost), requires the supplied configuration to
+    // carry a peer binding for the new generation, does NOT clear the
+    // counters, and RETAINS undrained terminal results.  Old events cannot
+    // revive an exchange because their token/exchange identities are gone.
     bool reset(const CoreConfig& cfg, uint64_t new_generation, std::string& why);
 
     bool is_configured() const;
