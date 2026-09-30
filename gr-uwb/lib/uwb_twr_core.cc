@@ -12,6 +12,7 @@
 
 #include <gnuradio/uwb/uwb_twr_core.h>
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -52,6 +53,81 @@ bool local_ts_to_wire(const Timestamp& ts, const FrameProfile& p, uint64_t& out,
         return false;
     }
     out = static_cast<uint64_t>(ts.ticks);
+    return true;
+}
+
+// The single configuration validator used by both `configure()` and
+// `reset()`.  An out-of-domain enum is refused up front (N07).
+bool validate_core_config(const CoreConfig& cfg, std::string& why)
+{
+    if (cfg.endpoint_id.empty()) {
+        why = "endpoint_id is empty";
+        return false;
+    }
+    if (!protocol_is_known(cfg.protocol)) {
+        why = "protocol is out of domain";
+        return false;
+    }
+    if (!role_is_known(cfg.role)) {
+        why = "role is out of domain";
+        return false;
+    }
+    if (!cfg.local_domain.is_valid()) {
+        why = "local_domain is not a valid clock domain";
+        return false;
+    }
+    if (!wire_timestamp_binding_is_well_formed(cfg.peer_binding, why))
+        return false;
+    if (cfg.peer_binding.session_generation != cfg.session_generation) {
+        why = "peer_binding session_generation does not match the endpoint session";
+        return false;
+    }
+    if (!sequence_modulus_is_supported(cfg.sequence_modulus)) {
+        why = "sequence_modulus is not one of 4/16/64/256";
+        return false;
+    }
+    if (cfg.initial_sequence >= cfg.sequence_modulus) {
+        why = "initial_sequence is outside the sequence modulus";
+        return false;
+    }
+    if (cfg.result_queue_capacity == 0) {
+        why = "result_queue_capacity is 0";
+        return false;
+    }
+    if (cfg.max_in_flight != 1) {
+        why = "M1-B supports exactly one in-flight exchange per endpoint";
+        return false;
+    }
+    if (!cfg.local_calibration.is_well_formed()) {
+        why = "local_calibration is not well formed";
+        return false;
+    }
+    if (!frame_profile_validate(cfg.frame_profile, why, nullptr))
+        return false;
+    if (!(cfg.frame_profile.timestamp_unit_hz == cfg.local_domain.tick_rate_hz)) {
+        why = "frame profile timestamp unit must equal local_domain.tick_rate_hz "
+              "(a lossy local->wire unit conversion is not performed in M1-B)";
+        return false;
+    }
+    if (const TofStatus ks = cfg.ratio.check(); ks != TofStatus::Ok) {
+        why = std::string("clock ratio is unusable: ") + tof_status_to_string(ks);
+        return false;
+    }
+    // The formula's A/B domains: for BOTH protocols the initiator is "A" and
+    // the responder is "B".  The local domain must match the side this
+    // endpoint occupies, so a role swap re-binds the formula domain rather
+    // than silently reusing the names.
+    if (cfg.role == Role::Initiator) {
+        if (!clock_domain_same_identity(cfg.local_domain, cfg.ratio.domain_a())) {
+            why = "initiator local_domain does not match the clock ratio's A domain";
+            return false;
+        }
+    } else {
+        if (!clock_domain_same_identity(cfg.local_domain, cfg.ratio.domain_b())) {
+            why = "responder local_domain does not match the clock ratio's B domain";
+            return false;
+        }
+    }
     return true;
 }
 
@@ -127,6 +203,12 @@ struct EndpointCore::Impl {
     ExchangeId exchange;
     uint16_t current_seq = 0;
     uint64_t seq_issued = 0;
+    // Bounded per-session-generation reuse barrier for the RESPONDER side.
+    // A Poll whose sequence was already consumed in this generation is a
+    // replay of a possibly-live identity and is refused rather than opening a
+    // second exchange with the same seq (instruction §4.1; F's finding N-1).
+    // `sequence_modulus` is at most 256, so this is a fixed-size array.
+    std::array<bool, 256> seq_used{};
 
     // ---- causal TX records -------------------------------------------------
     struct TxRecord {
@@ -213,7 +295,11 @@ struct EndpointCore::Impl {
         a.kind = CoreActionKind::TerminalResult;
         a.event_id = event_id;
         a.exchange = exchange;
-        a.status = st;
+        // The action's status is a strong type: it carries the completion
+        // state, and its range entries are false (F's finding B-1).
+        a.status.completion = est.completion;
+        a.status.failure_reason =
+            (est.completion == ProtocolCompletionStatus::Failed) ? st : ExchangeStatus::Ok;
         a.detail = detail;
         a.result = est;
         out.push(a);
@@ -289,36 +375,18 @@ struct EndpointCore::Impl {
     bool validate_frame(const Frame& f)
     {
         // Source address: frame_match() checks dst + self, not that src is the
-        // CONFIGURED peer (M1-B §3.1).  Do it here, explicitly.
+        // CONFIGURED peer (M1-B §3.1).  Do it here, explicitly.  A frame whose
+        // source is OUR OWN address is a loopback of our own transmission, not
+        // a peer measurement, and is counted separately (REQ-PROTO-01/03).
+        if (f.src_addr == cfg.local_address) {
+            counters.frames_rejected_self++;
+            return false;
+        }
         if (f.src_addr != cfg.peer_address) {
             counters.frames_rejected_wrong_peer++;
             return false;
         }
         return true;
-    }
-
-    void count_match_failure(FrameMatch m)
-    {
-        switch (m) {
-        case FrameMatch::Match:
-            break;
-        case FrameMatch::TypeMismatch:
-            counters.frames_rejected_wrong_type++;
-            break;
-        case FrameMatch::PanMismatch:
-        case FrameMatch::AddressMismatch:
-            counters.frames_rejected_wrong_peer++;
-            break;
-        case FrameMatch::SelfAddressed:
-            counters.frames_rejected_self++;
-            break;
-        case FrameMatch::SessionMismatch:
-            counters.frames_rejected_session++;
-            break;
-        case FrameMatch::SeqMismatch:
-            counters.frames_rejected_seq++;
-            break;
-        }
     }
 
     // Build a frame of `intent` with the current exchange's fixed fields.
@@ -406,6 +474,15 @@ struct EndpointCore::Impl {
                             const PeerTimestampClaim& earlier, ProtocolInterval& out,
                             std::string& why) const
     {
+        // Runtime enforcement of the session binding (F's finding B-3).  The
+        // wire bytes alone cannot prove they belong to the current session, so
+        // a binding whose generation no longer matches this endpoint's session
+        // is refused instead of being used.  This is the producer for
+        // `PeerClaimError::SessionGenerationMismatch`.
+        if (cfg.peer_binding.session_generation != cfg.session_generation) {
+            why = peer_claim_error_to_string(PeerClaimError::SessionGenerationMismatch);
+            return false;
+        }
         const PeerClaimError e =
             ProtocolInterval::make_peer(later, earlier, cfg.peer_binding, out);
         if (e != PeerClaimError::Ok) {
@@ -650,7 +727,16 @@ struct EndpointCore::Impl {
                     counters.frames_rejected_seq++;
                     return;
                 }
+                if (seq_used[ev.frame.seq]) {
+                    // A replay of an already-consumed wire sequence: the old
+                    // exchange's identity may still be alive, so it is refused
+                    // rather than reused (requires a fresh session).
+                    counters.frames_rejected_seq++;
+                    counters.stale_events++;
+                    return;
+                }
                 // Adopt the Poll as a real exchange.
+                seq_used[ev.frame.seq] = true;
                 in_flight = true;
                 exchange.valid = true;
                 exchange.value = ev.event_id;
@@ -977,8 +1063,13 @@ struct EndpointCore::Impl {
     {
         if (!in_flight)
             return;
+        // Domain test FIRST (N07 / F's finding N-2): `cancel_reason` is a
+        // public ExchangeStatus the caller supplies, so it can hold a value
+        // the enum does not have.  An out-of-domain reason is replaced by the
+        // default cancellation reason rather than stored as-is.
         ExchangeStatus st = ev.cancel_reason;
-        if (st == ExchangeStatus::Ok)
+        if (static_cast<int>(st) > static_cast<int>(ExchangeStatus::NegativeTof) ||
+            st == ExchangeStatus::Ok)
             st = ExchangeStatus::Cancelled;
         counters.cancellations++;
         if (pending_prepare)
@@ -1037,74 +1128,8 @@ bool EndpointCore::configure(const CoreConfig& cfg, std::string& why)
 {
     Impl& d = *d_impl;
 
-    if (cfg.endpoint_id.empty()) {
-        why = "endpoint_id is empty";
+    if (!validate_core_config(cfg, why))
         return false;
-    }
-    if (!protocol_is_known(cfg.protocol)) {
-        why = "protocol is out of domain";
-        return false;
-    }
-    if (!role_is_known(cfg.role)) {
-        why = "role is out of domain";
-        return false;
-    }
-    if (!cfg.local_domain.is_valid()) {
-        why = "local_domain is not a valid clock domain";
-        return false;
-    }
-    if (!wire_timestamp_binding_is_well_formed(cfg.peer_binding, why))
-        return false;
-    if (cfg.peer_binding.session_generation != cfg.session_generation) {
-        why = "peer_binding session_generation does not match the endpoint session";
-        return false;
-    }
-    if (!sequence_modulus_is_supported(cfg.sequence_modulus)) {
-        why = "sequence_modulus is not one of 4/16/64/256";
-        return false;
-    }
-    if (cfg.initial_sequence >= cfg.sequence_modulus) {
-        why = "initial_sequence is outside the sequence modulus";
-        return false;
-    }
-    if (cfg.result_queue_capacity == 0) {
-        why = "result_queue_capacity is 0";
-        return false;
-    }
-    if (cfg.max_in_flight != 1) {
-        why = "M1-B supports exactly one in-flight exchange per endpoint";
-        return false;
-    }
-    if (!cfg.local_calibration.is_well_formed()) {
-        why = "local_calibration is not well formed";
-        return false;
-    }
-    if (!frame_profile_validate(cfg.frame_profile, why, nullptr))
-        return false;
-    if (!(cfg.frame_profile.timestamp_unit_hz == cfg.local_domain.tick_rate_hz)) {
-        why = "frame profile timestamp unit must equal local_domain.tick_rate_hz "
-              "(a lossy local->wire unit conversion is not performed in M1-B)";
-        return false;
-    }
-    if (const TofStatus ks = cfg.ratio.check(); ks != TofStatus::Ok) {
-        why = std::string("clock ratio is unusable: ") + tof_status_to_string(ks);
-        return false;
-    }
-    // The formula's A/B domains: for BOTH protocols the initiator is "A" and
-    // the responder is "B".  The local domain must match the side this
-    // endpoint occupies, so a role swap re-binds the formula domain rather
-    // than silently reusing the names.
-    if (cfg.role == Role::Initiator) {
-        if (!clock_domain_same_identity(cfg.local_domain, cfg.ratio.domain_a())) {
-            why = "initiator local_domain does not match the clock ratio's A domain";
-            return false;
-        }
-    } else {
-        if (!clock_domain_same_identity(cfg.local_domain, cfg.ratio.domain_b())) {
-            why = "responder local_domain does not match the clock ratio's B domain";
-            return false;
-        }
-    }
 
     d.cfg = cfg;
     d.configured = true;
@@ -1115,16 +1140,48 @@ bool EndpointCore::configure(const CoreConfig& cfg, std::string& why)
     d.token_counter = 0;
     d.results.clear();
     d.results.reserve(cfg.result_queue_capacity);
+    d.seq_used.fill(false);
     return true;
 }
 
+// Start a new session generation.  F's review (finding B-2) reproduced that
+// the old implementation called `configure()`, which silently ERASED an
+// in-flight exchange's terminal and every counter.  The instruction's
+// conservation rule (`accepted == terminal + in_flight`, REQ-LIFE-01) forbids
+// losing an accepted exchange's terminal, so a reset with an exchange in
+// flight is REFUSED: the caller must post a `Reset` event (which fails the
+// in-flight exchange with a terminal result) or a `Stop` event first.
+//
+// Counters are observability and are NOT cleared here.
 bool EndpointCore::reset(const CoreConfig& cfg, uint64_t new_generation, std::string& why)
 {
-    if (!configure(cfg, why))
+    Impl& d = *d_impl;
+    if (d.in_flight) {
+        why = "cannot reset while an exchange is in flight; post a Reset/Stop "
+              "event first so its terminal result is not lost";
         return false;
-    d_impl->cfg.session_generation =
+    }
+    if (!validate_core_config(cfg, why))
+        return false;
+
+    d.cfg = cfg;
+    // A reset MUST declare a fresh peer binding: reusing a binding from the
+    // previous generation would let same wire bytes look like a new session
+    // (M1-B §4.1 / finding B-3).  The requested generation is the one the
+    // binding must name.
+    d.cfg.session_generation =
         (new_generation != 0) ? new_generation : cfg.session_generation + 1;
-    d_impl->seq_issued = 0;
+    if (d.cfg.peer_binding.session_generation != d.cfg.session_generation) {
+        why = "reset requires a fresh peer_binding for the new session generation";
+        return false;
+    }
+    d.configured = true;
+    d.state = EndpointState::Idle;
+    d.seq_issued = 0;
+    d.token_counter = 0;
+    d.results.clear();
+    d.results.reserve(cfg.result_queue_capacity);
+    d.seq_used.fill(false);
     return true;
 }
 

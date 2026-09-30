@@ -213,6 +213,19 @@ CoreEvent outcome_ev(const TxToken& t,
     return e;
 }
 
+// The product action carries a strong `ProtocolTerminalStatus` (F's review
+// finding B-1).  This TEST helper maps it back onto the exchange vocabulary the
+// stored expectations use; the product API no longer exposes a status that
+// `exchange_status_yields_range()` accepts.
+inline ExchangeStatus action_status(const CoreAction& a)
+{
+    if (a.status.completion == ProtocolCompletionStatus::Failed)
+        return a.status.failure_reason;
+    if (a.status.completion == ProtocolCompletionStatus::Complete)
+        return ExchangeStatus::Ok;
+    return ExchangeStatus::InternalError;
+}
+
 // Drive an SS initiator all the way to the terminal produced by receiving one
 // Response, with a caller-chosen local first-path quality.  Returns the
 // terminal status (or InternalError if no terminal was produced).
@@ -242,7 +255,7 @@ ExchangeStatus run_ss_initiator(const Env& e,
     const CoreAction* tr = find_action(rb, CoreActionKind::TerminalResult);
     if (estimate_available != nullptr)
         *estimate_available = (tr != nullptr) && tr->result.estimate_available;
-    return (tr != nullptr) ? tr->status : ExchangeStatus::Ok;
+    return (tr != nullptr) ? action_status(*tr) : ExchangeStatus::Ok;
 }
 
 // Build one peer interval from two fields of one frame.
@@ -656,7 +669,7 @@ BOOST_AUTO_TEST_CASE(b06_bad_plan_token_domain_and_deadline_verdict_reject_witho
         BOOST_TEST(has_action(r, CoreActionKind::AbortPending));
         const CoreAction* tr = find_action(r, CoreActionKind::TerminalResult);
         BOOST_TEST(tr != nullptr);
-        BOOST_TEST(tr->status == ExchangeStatus::InvalidTimeDomain);
+        BOOST_TEST(action_status(*tr) == ExchangeStatus::InvalidTimeDomain);
         BOOST_TEST(core.counters().tx_submitted == 0u);
         BOOST_TEST(core.in_flight() == 0u);
     }
@@ -709,7 +722,7 @@ BOOST_AUTO_TEST_CASE(b06_bad_plan_token_domain_and_deadline_verdict_reject_witho
         BOOST_TEST(has_action(r, CoreActionKind::AbortPending));
         const CoreAction* tr = find_action(r, CoreActionKind::TerminalResult);
         BOOST_TEST(tr != nullptr);
-        BOOST_TEST(tr->status == ExchangeStatus::DeadlineMissed);
+        BOOST_TEST(action_status(*tr) == ExchangeStatus::DeadlineMissed);
         BOOST_TEST(core.counters().tx_submit_rejected_deadline == 1u);
         BOOST_TEST(core.counters().tx_submitted == 0u);
     }
@@ -752,7 +765,7 @@ BOOST_AUTO_TEST_CASE(b07_accepted_is_not_completion_and_rx_before_outcome_still_
     const CoreAction* tr = find_action(ob, CoreActionKind::TerminalResult);
     BOOST_TEST(tr != nullptr);
     if (tr != nullptr) {
-        BOOST_TEST(tr->status == ExchangeStatus::Ok);
+        BOOST_TEST(action_status(*tr) == ExchangeStatus::Ok);
         BOOST_TEST(tr->result.estimate_available);
         // RA = 2600-2000 = 600, DB = 2550-2050 = 500, ToF = 50/1 A ticks.
         BOOST_TEST(tr->result.tof.num == 50);
@@ -780,7 +793,7 @@ BOOST_AUTO_TEST_CASE(b07_unresolved_evidence_with_a_deadline_fails_finitely)
     CoreActionBatch d = core.post(make_deadline(101000));
     const CoreAction* tr = find_action(d, CoreActionKind::TerminalResult);
     BOOST_TEST(tr != nullptr);
-    BOOST_TEST(tr->status == ExchangeStatus::ProtocolTimeout);
+    BOOST_TEST(action_status(*tr) == ExchangeStatus::ProtocolTimeout);
     BOOST_TEST(core.in_flight() == 0u);
 }
 
@@ -819,7 +832,7 @@ BOOST_AUTO_TEST_CASE(b08_failure_outcomes_and_faults_fail_without_resend)
         const CoreAction* tr = find_action(r, CoreActionKind::TerminalResult);
         BOOST_TEST(tr != nullptr);
         if (tr != nullptr) {
-            BOOST_TEST(tr->status == c.want);
+            BOOST_TEST(action_status(*tr) == c.want);
             BOOST_TEST(!tr->result.estimate_available);
             BOOST_TEST(tr->result.completion == ProtocolCompletionStatus::Failed);
             BOOST_TEST(!tr->result.yields_range());
@@ -923,7 +936,7 @@ BOOST_AUTO_TEST_CASE(b10_local_reset_fails_inflight_and_old_events_cannot_revive
     BOOST_TEST(has_action(r, CoreActionKind::AbortPending));
     const CoreAction* tr = find_action(r, CoreActionKind::TerminalResult);
     BOOST_TEST(tr != nullptr);
-    BOOST_TEST(tr->status == ExchangeStatus::StaleSession);
+    BOOST_TEST(action_status(*tr) == ExchangeStatus::StaleSession);
     BOOST_TEST(core.in_flight() == 0u);
     BOOST_TEST(core.counters().resets == 1u);
 
@@ -1111,7 +1124,7 @@ BOOST_AUTO_TEST_CASE(b14_exactly_one_terminal_per_attempt_and_conservation_holds
     CoreActionBatch st = core.post(make_stop());
     const CoreAction* tr = find_action(st, CoreActionKind::TerminalResult);
     BOOST_TEST(tr != nullptr);
-    BOOST_TEST(tr->status == ExchangeStatus::Cancelled);
+    BOOST_TEST(action_status(*tr) == ExchangeStatus::Cancelled);
     BOOST_TEST(core.counters().terminal_results == 1u);
     BOOST_TEST(core.in_flight() == 0u);
 
@@ -1218,7 +1231,137 @@ BOOST_AUTO_TEST_CASE(b16_endpoint_has_no_ground_truth_input_and_a_missing_frame_
     const CoreAction* tr = find_action(d, CoreActionKind::TerminalResult);
     BOOST_TEST(tr != nullptr);
     if (tr != nullptr) {
-        BOOST_TEST(tr->status == ExchangeStatus::ProtocolTimeout);
+        BOOST_TEST(action_status(*tr) == ExchangeStatus::ProtocolTimeout);
         BOOST_TEST(!tr->result.estimate_available);
     }
+}
+
+// ===========================================================================
+// F (read-only review) regression cases: the three blocking findings.
+// ===========================================================================
+
+// F-B1: the FSM's own output envelope must not carry a status that a range
+// helper accepts.  Before the fix, `CoreAction::status` was an ExchangeStatus
+// and `exchange_status_yields_range(ExchangeStatus::Ok)` was true on success.
+BOOST_AUTO_TEST_CASE(f_b1_protocol_terminal_status_is_not_a_range_status)
+{
+    static_assert(std::is_same<decltype(CoreAction{}.status), ProtocolTerminalStatus>::value,
+                  "CoreAction::status must be the strong ProtocolTerminalStatus");
+    static_assert(!std::is_convertible<ProtocolTerminalStatus, ExchangeStatus>::value,
+                  "a protocol terminal status must not convert to ExchangeStatus");
+    static_assert(!std::is_convertible<ProtocolTerminalStatus, bool>::value,
+                  "a protocol terminal status must not be truthy");
+
+    const Env e = make_env(Role::Initiator, Protocol::Ss, 256);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+
+    CoreActionBatch b = core.post(make_begin(1, 1000));
+    const CoreAction* prep = find_action(b, CoreActionKind::PrepareTx);
+    BOOST_TEST(prep != nullptr);
+    if (prep == nullptr)
+        return;
+    core.post(make_tx_planned(prep->token, FrameType::Poll, 2000, e.dom, e.cal.id));
+    core.post(outcome_ev(prep->token, TxOutcome::Completed));
+    Frame resp = base_frame(e.cfg, FrameType::Response, 0);
+    resp.set(TimestampField::T2B, 2050);
+    resp.set(TimestampField::T3B, 2550);
+    CoreActionBatch rb = core.post(rx_of(e.cfg, resp, 2600, e.dom));
+    const CoreAction* tr = find_action(rb, CoreActionKind::TerminalResult);
+    BOOST_TEST(tr != nullptr);
+    if (tr != nullptr) {
+        BOOST_TEST(tr->status.completed());
+        BOOST_TEST(!tr->status.yields_range());
+        BOOST_TEST(!tr->status.measurement_valid());
+        BOOST_TEST(tr->result.estimate_available);
+    }
+}
+
+// F-B2: `reset()` must not silently discard an in-flight terminal or clear the
+// counters; it refuses until the in-flight exchange has a terminal result.
+BOOST_AUTO_TEST_CASE(f_b2_reset_refuses_in_flight_and_preserves_counters)
+{
+    const Env e = make_env(Role::Initiator, Protocol::Ss, 4);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+
+    CoreActionBatch b = core.post(make_begin(1, 1000));
+    BOOST_TEST(find_action(b, CoreActionKind::PrepareTx) != nullptr);
+    const uint64_t accepted = core.counters().accepted_exchanges;
+    BOOST_TEST(accepted == 1u);
+
+    CoreConfig fresh = e.cfg;
+    fresh.session_generation = 2;
+    fresh.peer_binding.session_generation = 2;
+
+    BOOST_TEST(!core.reset(fresh, 2, why));      // refused: in flight
+    BOOST_TEST(core.in_flight() == 1u);
+    BOOST_TEST(core.counters().accepted_exchanges == accepted);
+
+    CoreActionBatch s = core.post(make_cancel(ExchangeStatus::Cancelled));
+    BOOST_TEST(find_action(s, CoreActionKind::TerminalResult) != nullptr);
+    BOOST_TEST(core.in_flight() == 0u);
+
+    BOOST_TEST(core.reset(fresh, 2, why));       // now allowed
+    BOOST_TEST(core.counters().accepted_exchanges == accepted);
+}
+
+// F-B3: after a local Reset the peer binding is for the OLD generation; a peer
+// wire claim must then be refused rather than silently used.
+BOOST_AUTO_TEST_CASE(f_b3_stale_peer_binding_generation_is_refused)
+{
+    const Env e = make_env(Role::Initiator, Protocol::Ss, 4);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+
+    core.post(make_reset(2)); // bumps the session generation; binding stays gen 1
+
+    CoreActionBatch b = core.post(make_begin(9, 1000));
+    const CoreAction* prep = find_action(b, CoreActionKind::PrepareTx);
+    BOOST_TEST(prep != nullptr);
+    if (prep == nullptr)
+        return;
+    core.post(make_tx_planned(prep->token, FrameType::Poll, 2000, e.dom, e.cal.id));
+    core.post(outcome_ev(prep->token, TxOutcome::Completed));
+
+    Frame resp = base_frame(e.cfg, FrameType::Response, 0);
+    resp.set(TimestampField::T2B, 2050);
+    resp.set(TimestampField::T3B, 2550);
+    CoreActionBatch rb = core.post(rx_of(e.cfg, resp, 2600, e.dom));
+    const CoreAction* tr = find_action(rb, CoreActionKind::TerminalResult);
+    BOOST_TEST(tr != nullptr);
+    if (tr != nullptr) {
+        BOOST_TEST(action_status(*tr) == ExchangeStatus::InvalidTimeDomain);
+        BOOST_TEST(!tr->result.estimate_available);
+    }
+}
+
+// F-N1: a responder must not open a second exchange from a replayed Poll whose
+// wire sequence was already consumed in this session generation.
+BOOST_AUTO_TEST_CASE(f_n1_responder_replay_of_a_consumed_sequence_is_refused)
+{
+    const Env e = make_env(Role::Responder, Protocol::Ss, 4);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+
+    Frame poll = base_frame(e.cfg, FrameType::Poll, 0);
+    CoreActionBatch b1 = core.post(rx_of(e.cfg, poll, 1000, e.dom));
+    const CoreAction* prep = find_action(b1, CoreActionKind::PrepareTx);
+    BOOST_TEST(prep != nullptr);
+    if (prep == nullptr)
+        return;
+    core.post(make_tx_planned(prep->token, FrameType::Response, 1500, e.dom, e.cal.id));
+    core.post(outcome_ev(prep->token, TxOutcome::Completed)); // SS responder terminal
+
+    const uint64_t accepted = core.counters().accepted_exchanges;
+    const uint64_t stale = core.counters().stale_events;
+
+    CoreActionBatch b2 = core.post(rx_of(e.cfg, poll, 5000, e.dom));
+    BOOST_TEST(find_action(b2, CoreActionKind::PrepareTx) == nullptr);
+    BOOST_TEST(core.counters().accepted_exchanges == accepted);
+    BOOST_TEST(core.counters().stale_events == stale + 1);
 }

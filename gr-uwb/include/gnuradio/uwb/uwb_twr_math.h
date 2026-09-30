@@ -804,6 +804,19 @@ enum class KernelStatus : uint8_t {
     ZeroDenominator = 2
 };
 
+// Domain test with NO `default` (N07): an out-of-domain status is not "some
+// other math error" and must not be mapped or reported as one.
+inline bool kernel_status_is_known(KernelStatus s)
+{
+    switch (s) {
+    case KernelStatus::Ok:
+    case KernelStatus::Overflow:
+    case KernelStatus::ZeroDenominator:
+        return true;
+    }
+    return false;
+}
+
 // SS: out = (RA - k*DB) / 2, all exact.
 inline KernelStatus
 ss_tof_kernel(const Rat128& RA, const Rat128& DB, const Rat128& k, Rat128& out)

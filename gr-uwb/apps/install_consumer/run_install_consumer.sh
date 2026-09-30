@@ -146,7 +146,8 @@ echo "== files present in the prefix =="
 # uwb_twr_test_output.h is intentionally NOT installed: it is
 # QA-only output policy and expands UWB_TESTDATA_DIR with no default.
 for h in uwb_twr_types.h uwb_twr_frame.h uwb_twr_timestamp.h uwb_twr_config.h \
-         uwb_twr_capability_evidence.h uwb_twr_tof_input.h uwb_twr_math.h; do
+         uwb_twr_capability_evidence.h uwb_twr_tof_input.h uwb_twr_math.h \
+         uwb_twr_protocol_time.h uwb_twr_core.h; do
     if [ -f "$INCDIR/gnuradio/uwb/$h" ]; then
         echo "   header  OK  gnuradio/uwb/$h"
     else
@@ -154,6 +155,11 @@ for h in uwb_twr_types.h uwb_twr_frame.h uwb_twr_timestamp.h uwb_twr_config.h \
         exit 1
     fi
 done
+# The QA/demo-only transport header must NOT be installed (M1-B §5/§8).
+if [ -f "$INCDIR/gnuradio/uwb/uwb_twr_fake_link.h" ]; then
+    echo "   header  UNEXPECTED  gnuradio/uwb/uwb_twr_fake_link.h (QA-only)"
+    exit 1
+fi
 for p in __init__.py twr_config.py; do
     if [ -f "$PYDIR/gnuradio/uwb/$p" ]; then
         echo "   module  OK  gnuradio/uwb/$p"
@@ -182,6 +188,33 @@ echo "   compiled: $BIN"
 echo
 echo "== run the C++ consumer =="
 "$BIN"
+
+# ---------------------------------------------------------------------------
+# M1-B: the hand-driven protocol-core consumer, linked against the INSTALLED
+# standalone archive only.  Compiles with the prefix headers and libuwb_twr_core;
+# runs one SS and one DS exchange; asserts no GNU Radio/UHD dynamic dependency.
+# ---------------------------------------------------------------------------
+echo
+echo "== M1-B standalone core consumer (SS + DS) =="
+CORE_LIB=$(find "$PREFIX" -name 'libuwb_twr_core.a' -o -name 'libuwb_twr_core.so*' \
+               2>/dev/null | head -1 || true)
+if [ -z "$CORE_LIB" ]; then
+    echo "   MISSING  libuwb_twr_core archive under $PREFIX"
+    exit 1
+fi
+CORE_BIN="$WORK/twr_core_consumer"
+c++ -std=c++17 -O1 -Wall -Wextra -I"$INCDIR" \
+    "$ROOT/twr_core_consumer.cc" "$CORE_LIB" -o "$CORE_BIN"
+"$CORE_BIN"
+if ldd "$CORE_BIN" 2>/dev/null | grep -qiE 'gnuradio|uhd'; then
+    echo "   FAIL  the M1-B core consumer pulled in GNU Radio / UHD"
+    exit 1
+fi
+if readelf -d "$CORE_BIN" 2>/dev/null | grep -qiE 'gnuradio|uhd'; then
+    echo "   FAIL  the M1-B core consumer has a GNU Radio / UHD dependency"
+    exit 1
+fi
+echo "   no GNU Radio / UHD dynamic dependency"
 
 echo
 echo "== import the Python module from the prefix only =="

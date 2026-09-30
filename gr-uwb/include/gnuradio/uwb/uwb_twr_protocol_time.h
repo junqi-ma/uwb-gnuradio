@@ -604,6 +604,37 @@ struct ProtocolTofEstimate {
     }
 };
 
+// A terminal status that CANNOT be fed to a range helper.  F's read-only review
+// (M1-B_评审报告.md, finding B-1) reproduced that a successful protocol action
+// carried `ExchangeStatus::Ok`, and
+// `exchange_status_yields_range(ExchangeStatus::Ok) == true` -- i.e. the FSM's
+// own output envelope re-opened the fail-open path the result type closes.  This
+// strong type keeps the completion state and the failure reason, and its every
+// range entry is hard false.
+struct ProtocolTerminalStatus {
+    ProtocolCompletionStatus completion = ProtocolCompletionStatus::NotComplete;
+    // Only meaningful when `completion == Failed`; `Ok` means "no failure".
+    ExchangeStatus failure_reason = ExchangeStatus::InternalError;
+
+    bool completed() const { return completion == ProtocolCompletionStatus::Complete; }
+    bool failed() const { return completion == ProtocolCompletionStatus::Failed; }
+    bool yields_range() const { return false; }
+    bool measurement_valid() const { return false; }
+
+    std::string to_string() const
+    {
+        std::string s = protocol_completion_status_to_string(completion);
+        if (failed())
+            s += "(" + std::string(exchange_status_to_string(failure_reason)) + ")";
+        return s;
+    }
+};
+
+inline std::string protocol_terminal_status_to_string(const ProtocolTerminalStatus& s)
+{
+    return s.to_string();
+}
+
 // The protocol terminal state of an endpoint that owns NO ToF estimate
 // (SS responder / DS initiator).  It completes, and it does so without a
 // distance: the other end's result is never copied across.

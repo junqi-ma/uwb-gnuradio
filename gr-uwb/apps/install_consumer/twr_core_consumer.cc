@@ -247,11 +247,13 @@ bool run(Protocol proto, const char* expect_endpoint, int64_t expect_tof)
                                         : (rb && eb.estimate_available);
     const bool other_none = initiator ? (rb && !eb.estimate_available)
                                       : (ra && !ea.estimate_available);
-    const char* tof = initiator ? ea.tof.to_string().c_str() : eb.tof.to_string().c_str();
+    // Hold the string: `to_string()` returns a temporary, so taking `.c_str()`
+    // from it would dangle (F's finding N-4).
+    const std::string tof = initiator ? ea.tof.to_string() : eb.tof.to_string();
     const int64_t expected_num = expect_tof;
 
     std::printf("%s: estimate at %s = %s (expected %lld/1), other end none=%s\n",
-                protocol_to_string(proto), expect_endpoint, tof,
+                protocol_to_string(proto), expect_endpoint, tof.c_str(),
                 static_cast<long long>(expected_num), other_none ? "yes" : "no");
 
     // Conservation on both endpoints.

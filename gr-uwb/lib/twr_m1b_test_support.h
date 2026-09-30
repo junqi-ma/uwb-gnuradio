@@ -476,7 +476,15 @@ private:
                 break;
             case CoreActionKind::TerminalResult: {
                 TerminalRecord r;
-                r.status = a.status;
+                // The product action now carries a strong `ProtocolTerminalStatus`.
+                // This TEST helper maps it back to the exchange vocabulary it
+                // asserts on; the product API itself no longer exposes a
+                // range-compatible status (F's finding B-1).
+                r.status = (a.status.completion == ProtocolCompletionStatus::Failed)
+                               ? a.status.failure_reason
+                               : (a.status.completion == ProtocolCompletionStatus::Complete
+                                      ? ExchangeStatus::Ok
+                                      : ExchangeStatus::InternalError);
                 r.result = a.result;
                 r.detail = a.detail;
                 terminals_[p].push_back(r);

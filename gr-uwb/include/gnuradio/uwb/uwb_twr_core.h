@@ -370,9 +370,11 @@ struct CoreAction {
     // protocol completion can never be read as a validated range.
     ProtocolTofEstimate result;
 
-    // TerminalResult: the exchange's terminal vocabulary reason.  `Ok` is only
-    // ever set together with a completed protocol exchange.
-    ExchangeStatus status = ExchangeStatus::InternalError;
+    // TerminalResult: the exchange's terminal status.  A strong type whose
+    // every range entry is false -- deliberately NOT an `ExchangeStatus`, so
+    // `exchange_status_yields_range(action.status)` does not even compile
+    // (F's review finding B-1).
+    ProtocolTerminalStatus status;
     std::string detail;
 };
 

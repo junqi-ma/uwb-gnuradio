@@ -503,7 +503,9 @@ struct EndpointTrace {
 
     bool have_terminal = false;
     twr::ProtocolTofEstimate result;
-    twr::ExchangeStatus terminal_status = twr::ExchangeStatus::InternalError;
+    // The product's strong terminal type -- not an ExchangeStatus, so this
+    // struct cannot hold a range-compatible status either (F's finding B-1).
+    twr::ProtocolTerminalStatus terminal;
     std::string terminal_detail;
 
     twr::CoreCounters counters;
@@ -847,7 +849,7 @@ private:
             case twr::CoreActionKind::TerminalResult:
                 tr.have_terminal = true;
                 tr.result = a.result;
-                tr.terminal_status = a.status;
+                tr.terminal = a.status;
                 tr.terminal_detail = a.detail;
                 break;
             }
@@ -1324,7 +1326,11 @@ Value endpoint_value(const EndpointTrace& tr, const twr::CoreConfig& cfg, bool s
         o.set("protocol_completed",
               mkbool(e.completion == twr::ProtocolCompletionStatus::Complete));
         o.set("computed_at", mkstr(twr::computed_at_to_string(e.computed_at)));
-        o.set("terminal_status", mkstr(twr::exchange_status_to_string(tr.terminal_status)));
+        o.set("terminal_completion",
+              mkstr(twr::protocol_completion_status_to_string(tr.terminal.completion)));
+        if (tr.terminal.failed())
+            o.set("terminal_failure_reason",
+                  mkstr(twr::exchange_status_to_string(tr.terminal.failure_reason)));
         o.set("failure_reason", mkstr(twr::exchange_status_to_string(e.failure_reason)));
         o.set("detail", mkstr(e.detail));
 
@@ -1360,7 +1366,7 @@ Value endpoint_value(const EndpointTrace& tr, const twr::CoreConfig& cfg, bool s
         o.set("measurement_valid", mkbool(false));
         o.set("execution_mode", mkstr("simulation"));
         o.set("protocol_completed", mkbool(false));
-        o.set("terminal_status", mkstr("not_complete"));
+        o.set("terminal_completion", mkstr("not_complete"));
         Value tof = mkobj();
         tof.set("available", mkbool(false));
         tof.set("num", Value::make_null());
