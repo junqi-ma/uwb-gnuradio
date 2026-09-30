@@ -673,8 +673,12 @@ struct EndpointCore::Impl {
             counters.frames_rejected_wrong_type++;
             return;
         }
-        if (ev.frame.session_id != cfg.session_id || !seq_matches(current_seq, ev.frame.seq)) {
+        if (ev.frame.session_id != cfg.session_id) {
             counters.frames_rejected_session++;
+            return;
+        }
+        if (!seq_matches(current_seq, ev.frame.seq)) {
+            counters.frames_rejected_seq++;
             return;
         }
         if (ev.frame.pan_id != cfg.pan_id || ev.frame.dst_addr != cfg.local_address) {
