@@ -613,21 +613,37 @@ struct ProtocolTofEstimate {
 // range entry is hard false.
 struct ProtocolTerminalStatus {
     ProtocolCompletionStatus completion = ProtocolCompletionStatus::NotComplete;
-    // Only meaningful when `completion == Failed`; `Ok` means "no failure".
-    ExchangeStatus failure_reason = ExchangeStatus::InternalError;
 
     bool completed() const { return completion == ProtocolCompletionStatus::Complete; }
     bool failed() const { return completion == ProtocolCompletionStatus::Failed; }
     bool yields_range() const { return false; }
     bool measurement_valid() const { return false; }
 
+    // The failure reason is reachable ONLY through this accessor, and only for
+    // a FAILED exchange.  There is deliberately NO `ExchangeStatus` data
+    // member, so `exchange_status_yields_range(x)` cannot be handed anything
+    // read off this type without the caller first proving the exchange failed
+    // (F's finding B-1, hardened against the obvious field-read workaround).
+    bool failure_reason(ExchangeStatus& out) const
+    {
+        if (completion != ProtocolCompletionStatus::Failed)
+            return false;
+        out = reason_;
+        return true;
+    }
+    void set_failure_reason(ExchangeStatus r) { reason_ = r; }
+
     std::string to_string() const
     {
         std::string s = protocol_completion_status_to_string(completion);
-        if (failed())
-            s += "(" + std::string(exchange_status_to_string(failure_reason)) + ")";
+        ExchangeStatus r = ExchangeStatus::InternalError;
+        if (failure_reason(r))
+            s += "(" + std::string(exchange_status_to_string(r)) + ")";
         return s;
     }
+
+private:
+    ExchangeStatus reason_ = ExchangeStatus::InternalError;
 };
 
 inline std::string protocol_terminal_status_to_string(const ProtocolTerminalStatus& s)

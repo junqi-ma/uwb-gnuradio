@@ -40,7 +40,7 @@ M1-B 在**离线、纯 C++、接收驱动**的范围内完成：SS/DS 两个独�
 | `gr-uwb/lib/qa_uwb_twr_fake_link.cc` | C | 14 例 |
 | `gr-uwb/lib/qa_uwb_twr_protocol_time.cc` | A | 10 例 |
 | `gr-uwb/lib/twr_m1b_test_support.h` | D | 双核心↔fake link 驱动 |
-| `gr-uwb/lib/qa_uwb_twr_core.cc` | D | 21 例 / 295 断言 |
+| `gr-uwb/lib/qa_uwb_twr_core.cc` | D（协调者补 4 例） | 25 例 |
 | `gr-uwb/lib/qa_uwb_twr_m1b_e2e.cc` | D | 11 例 / 248 断言 |
 | `testdata/twr/m1b/{README.md,event_cases.json,expected_results.json}` | D | 9 场景 golden |
 | `gr-uwb/apps/twr_fake_demo.cc` | E | 纯 C++ CLI 双端仿真 |
@@ -136,7 +136,7 @@ QA 场景与期望依据见 `testdata/twr/m1b/README.md`。此处只列 ID → �
 | 构建 | `cmake -S gr-uwb -B gr-uwb/build && cmake --build gr-uwb/build -j8` | 退出 0 |
 | 全量串行 CTest | `env -u LD_LIBRARY_PATH ctest --test-dir gr-uwb/build -j 1 --output-on-failure` | **59 项，58 通过，1 失败** |
 | 唯一失败 | `uwb_qa_uwb_pdu_rational_resampler.cc` | 历史吞吐项，**门槛未改**，与 M1-B 无关 |
-| M1-B 专项 | `ctest -R 'twr'` | 13/13 通过（config/frame/phy matrix/timing/timestamp/tof_input/parity/math/protocol_time/fake_link/core/e2e/config_py/demo_py/verify 全绿） |
+| M1-B 专项 | `ctest -R 'twr'` | 15/15 通过（config/frame/phy matrix/timing/timestamp/tof_input/parity/math/protocol_time/fake_link/core/e2e/config_py/demo_py/verify 全绿） |
 | Python 配置 | `python3 gr-uwb/apps/test_twr_config.py` | 138 OK |
 | M0.1 独立 | `python3 tools/twr/verify_m0_1_findings.py` | 15/15 |
 | M1-A 独立 | `python3 tools/twr/verify_m1_a_tof.py` | 4/4 |
@@ -220,3 +220,28 @@ sha256(uwb_twr_fake_link.h)       = 218712dd4b8e018b70aa7be393586053811e0af2de84
 - [x] 核心独立消费、最终安装交付通过；无新增回归，历史门槛未改。
 - [x] 文档写明 simulation/protocol estimate 不等于正式测距；PHY/ToA/硬件未升级。
 - [x] 同步 AGENTS/开发状态/总路线（见提交）。
+
+## 13. F 只读评审与整改
+
+F 的评审见 [M1-B_评审报告.md](M1-B_评审报告.md)。**3 项阻塞 + 7 项非阻塞**全部处理：
+
+| 编号 | 问题 | 整改 |
+|---|---|---|
+| B-1 | 成功协议估计的 `CoreAction::status` 是 `ExchangeStatus::Ok`，`exchange_status_yields_range(Ok)==true`，重新打开了类型层已关闭的 fail-open | 新增强类型 `ProtocolTerminalStatus`（`yields_range()==false`、无到 `ExchangeStatus` 的转换），`CoreAction::status` 改用它；demo 输出改为 `terminal_completion`/`terminal_failure_reason`；QA 加 `f_b1_protocol_terminal_status_is_not_a_range_status`（含 `static_assert`） |
+| B-2 | `EndpointCore::reset(cfg,gen)` 内部调 `configure()`，静默丢弃在途终态并清空计数器 | `reset()` 在途时**拒绝**；抽出 `validate_core_config()`，reset 不再清计数器；QA `f_b2_reset_refuses_in_flight_and_preserves_counters` |
+| B-3 | `WireTimestampBinding::session_generation` 文档称强制，实际只在 configure 检查；Reset 后仍被使用 | 运行期在 `make_peer_interval()` 校验 binding 与当前 session generation；`Reset` 后旧 binding 的 peer claim 被拒（`PeerClaimError::SessionGenerationMismatch` 终于有生产者）；`reset()` 要求新 binding；QA `f_b3_stale_peer_binding_generation_is_refused` |
+| N-1 | responder 侧无序号复用屏障，重放旧 Poll 会开新 exchange | 新增有界 `seq_used[256]`，已消费的 wire seq 重放被拒并计 `stale_events`；QA `f_n1_responder_replay_of_a_consumed_sequence_is_refused` |
+| N-2 | 域外 `cancel_reason` 被原样保存 | `on_cancel` 先做域检查，域外/`Ok` 归一为 `Cancelled` |
+| N-3 | `KernelStatus` 缺 `is_known()` | 新增 `kernel_status_is_known()`（无 `default`） |
+| N-4 | `twr_core_consumer.cc` 取临时 `to_string().c_str()` 悬垂 | 改为持有 `std::string` |
+| N-5 | `count_match_failure` 死代码；`frames_rejected_self` 恒 0 | 删除死函数；`validate_frame` 显式判 `src_addr == local_address` 并计 `frames_rejected_self` |
+| N-6 | B16 结构检测只查 3 个成员名 | **未改**（D 的测试强度问题，非产品缺陷）；F 的人工穷举未发现泄漏，作为已知覆盖限制记录 |
+| N-7 | CTest 的 `uwb_qa_install_consumer` 只跑 M0.1 消费者 | `gr-uwb/apps/install_consumer/run_install_consumer.sh` 增加 M1-B 头检查、`libuwb_twr_core.a` 检查与 SS/DS 消费者实跑、无 GR/UHD 依赖检查 |
+
+整改后全量串行 CTest 回到 **59 项 58 通过**（唯一失败仍为历史吞吐项），
+`uwb_qa_install_consumer` 在重新安装的新前缀下通过（含 M1-B 消费者）。
+`qa_uwb_twr_core.cc` 由 21 例增至 **25 例 / 全绿**。
+
+**范围未变**：以上都是类型/生命周期/诊断的收紧，未放宽任何准入，未改历史门槛，
+未新增硬件能力；结果仍是 `measurement_valid=false` 的离线协议估计。
+

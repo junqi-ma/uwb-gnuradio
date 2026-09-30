@@ -219,8 +219,9 @@ CoreEvent outcome_ev(const TxToken& t,
 // `exchange_status_yields_range()` accepts.
 inline ExchangeStatus action_status(const CoreAction& a)
 {
-    if (a.status.completion == ProtocolCompletionStatus::Failed)
-        return a.status.failure_reason;
+    ExchangeStatus r = ExchangeStatus::InternalError;
+    if (a.status.failure_reason(r))
+        return r;
     if (a.status.completion == ProtocolCompletionStatus::Complete)
         return ExchangeStatus::Ok;
     return ExchangeStatus::InternalError;
@@ -1275,6 +1276,10 @@ BOOST_AUTO_TEST_CASE(f_b1_protocol_terminal_status_is_not_a_range_status)
         BOOST_TEST(!tr->status.yields_range());
         BOOST_TEST(!tr->status.measurement_valid());
         BOOST_TEST(tr->result.estimate_available);
+        // No failure reason is exposed on a successful exchange, so a caller
+        // cannot read an Ok status off this type either.
+        ExchangeStatus reason = ExchangeStatus::InternalError;
+        BOOST_TEST(!tr->status.failure_reason(reason));
     }
 }
 

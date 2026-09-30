@@ -298,8 +298,8 @@ struct EndpointCore::Impl {
         // The action's status is a strong type: it carries the completion
         // state, and its range entries are false (F's finding B-1).
         a.status.completion = est.completion;
-        a.status.failure_reason =
-            (est.completion == ProtocolCompletionStatus::Failed) ? st : ExchangeStatus::Ok;
+        if (est.completion == ProtocolCompletionStatus::Failed)
+            a.status.set_failure_reason(st);
         a.detail = detail;
         a.result = est;
         out.push(a);

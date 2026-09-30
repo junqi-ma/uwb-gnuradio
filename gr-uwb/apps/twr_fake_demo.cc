@@ -1328,9 +1328,12 @@ Value endpoint_value(const EndpointTrace& tr, const twr::CoreConfig& cfg, bool s
         o.set("computed_at", mkstr(twr::computed_at_to_string(e.computed_at)));
         o.set("terminal_completion",
               mkstr(twr::protocol_completion_status_to_string(tr.terminal.completion)));
-        if (tr.terminal.failed())
-            o.set("terminal_failure_reason",
-                  mkstr(twr::exchange_status_to_string(tr.terminal.failure_reason)));
+        {
+            twr::ExchangeStatus reason = twr::ExchangeStatus::InternalError;
+            if (tr.terminal.failure_reason(reason))
+                o.set("terminal_failure_reason",
+                      mkstr(twr::exchange_status_to_string(reason)));
+        }
         o.set("failure_reason", mkstr(twr::exchange_status_to_string(e.failure_reason)));
         o.set("detail", mkstr(e.detail));
 

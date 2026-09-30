@@ -480,11 +480,14 @@ private:
                 // This TEST helper maps it back to the exchange vocabulary it
                 // asserts on; the product API itself no longer exposes a
                 // range-compatible status (F's finding B-1).
-                r.status = (a.status.completion == ProtocolCompletionStatus::Failed)
-                               ? a.status.failure_reason
-                               : (a.status.completion == ProtocolCompletionStatus::Complete
-                                      ? ExchangeStatus::Ok
-                                      : ExchangeStatus::InternalError);
+                ExchangeStatus mapped = ExchangeStatus::InternalError;
+                if (a.status.failure_reason(mapped)) {
+                    r.status = mapped;
+                } else if (a.status.completion == ProtocolCompletionStatus::Complete) {
+                    r.status = ExchangeStatus::Ok;
+                } else {
+                    r.status = ExchangeStatus::InternalError;
+                }
                 r.result = a.result;
                 r.detail = a.detail;
                 terminals_[p].push_back(r);
