@@ -276,8 +276,9 @@ struct CoreEvent {
     TxToken token;
     FrameType tx_intent = FrameType::Poll;
     // The planned transmit instant: marker RMARKER_TX, source
-    // ScheduledCalibrated, the four planned records present.  The core builds
-    // the frame from THIS value, never from "now".
+    // ScheduledCalibrated, the full TX correction chain, the SAME
+    // calibration_id as `local_calibration`, and the four planned records
+    // present.  The core builds the frame from THIS value, never from "now".
     Timestamp planned_tx_time;
     TxSendEvidence tx_evidence;
     // The adapter's verdict about the remaining host deadline budget.  The
@@ -347,6 +348,9 @@ struct CoreAction {
 
     // ArmRx: the message this window expects.
     FrameType expect_type = FrameType::Response;
+    // ArmRx: the local tick at which this wait must be given up (0 == no
+    // deadline).  The driver posts a Deadline event at/after this instant.
+    int64_t deadline_ticks = 0;
 
     // PrepareTx: the message the adapter must plan.
     FrameType tx_intent = FrameType::Poll;
