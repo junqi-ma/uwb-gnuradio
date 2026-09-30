@@ -13,18 +13,22 @@ fail-open）；M0.1 契约层完成，TWR 协议能力仍未实现**（2026-09-2
 **docs/twr/评审意见_M0.1_2026-09-29.md**（N01–N06）、
 **docs/twr/M0.1第二轮整改报告_N01-N06.md**、以及
 **docs/twr/M0.1_N07修复报告_2026-09-29.md**（N07：审核报 1 处，实际 20 处）。
-当前已完成 **M1-A 独立 ToF 数学 + MATLAB oracle** 与
-**M1-B 协议核心与双端仿真**（2026-09-30），报告分别见
-**docs/twr/M1-A_ToF数学开发报告.md** 与
-**docs/twr/M1-B_协议核心开发报告.md**。下一阶段是 M2 PHY/时间映射，
-再到 M3/M4 上板；**M1-B 完成后不自动进入 M2**。
-**M1-B 已完成（2026-09-30）**：纯 C++ 的 SS/DS 两端协议核心（`uwb_twr_core.h`/
+当前已完成 **M1-A 独立 ToF 数学 + MATLAB oracle**；**M1-B 离线协议框架已交付，
+但复核整改中**（见
+**docs/twr/M1-B_复核整改任务单_2026-09-30.md** 与
+**docs/twr/M1-B_复核整改问题台账_2026-09-30.md**）。报告见
+**docs/twr/M1-B_协议核心开发报告.md**。
+**R01–R09 全部关闭前保持 M1-B 未完成**；不进入 M2。
+**M1-B 已交付（2026-09-30）**：纯 C++ 的 SS/DS 两端协议核心（`uwb_twr_core.h`/
 `lib/uwb_twr_core.cc`）、wire claim 边界（`uwb_twr_protocol_time.h`）、确定性
-fake link、B01–B18 QA 矩阵、离线 demo 与独立 verifier、独立安装消费者；
-全量串行 CTest 59 项 58 通过（唯一失败为历史吞吐项，门槛未改）。
-**但它仍是离线协议估计，不是硬件测距**：结果带 simulation/wire-claim 标注，
+fake link、B01–B18 QA 矩阵、离线 demo 与独立 verifier、独立安装消费者。
+**独立复核不通过**：发现 R01–R09（TxPlanned 可携带 Completed 提前成功、
+DS initiator 遗漏 Poll outcome、非估计端绕过本端准入、reset 清身份屏障、
+responder 未预留终态容量、空域外 outcome 生成无主终态、evidence 覆盖绝对 deadline、
+计划无数值映射、TwrConfig 校验后丢弃）。整改后需重评 B01–B18。
+**它不是硬件测距**：结果是带 simulation/wire-claim 标注的协议估计，
 `measurement_valid=false`，ToF 公式未对硬件/native/首径验证。
-M2-A native PHY 闭环 / M2-B RMARKER·首径·时映射·timestamp patch / 两 RX 路由 /
+M2-A native PHY / M2-B RMARKER·首径·时映射·timestamp patch / 两 RX 路由 /
 controller / UHD / pybind 大迁移均**不在** M1-B 范围；不自动进入 M2。
 
 第二/三轮的关键教训（不要再犯）：

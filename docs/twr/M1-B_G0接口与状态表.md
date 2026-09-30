@@ -34,21 +34,43 @@ Cancel / Stop / Overflow / Reset`，每个 enum 都有无 `default` 的 `is_know
 动作：`ArmRx / PrepareTx / SubmitTx / AbortPending / TerminalResult`，
 每次 `post()` 返回定长 `CoreActionBatch`（≤4），核心不为事件申请动态队列。
 
-## 3. 因果 TX token 状态表
+## 3. 因果 TX token 状态表（本轮复核整改后，R01/R04/R08）
 
 ```
 PrepareTx(token,intent)                    core -> adapter
-TxPlanned(token, plan, verdict)            adapter -> core   (量化时刻/命令时刻/
-                                                             marker offset/校准空口时刻)
+TxPlanned(token, intent, TxPlan)           adapter -> core   数值计划（无完成状态）
 SubmitTx(token, bytes)   恰好一次          core -> adapter
 TxAccepted(token)                         adapter -> core   (send() 返回；不是完成)
-TxOutcomeResolved(token,o)                adapter -> core
+TxOutcomeResolved(token, outcome/fault)    adapter -> core   唯一可闭合发送的来源
 ```
 
-规则：乱序/重复/未知/过期 token 不改写计划、不产生第二次 Submit、不推进状态；
-分别计入 `tx_token_mismatch` / `contract_violations`。`TxAccepted` 不等于完成；
-仿真中完成必须来自显式 completion 事件。未收敛前不发布成功终态；
-`evidence_wait_ticks` 到期必须有限时间失败。
+规则（R01/R04/R06）：
+- `TxPlanned` **不得**携带 `sent/completed`；它只给数值计划。core 由计划构造
+  `TxSendEvidence`（记录计划），`outcome` 初值只能是 `Unknown`，
+  **只有** `TxOutcomeResolved` 能把它推进。`TxAccepted`/BURST_ACK 不等于完成。
+- token 在会话内单调递增，**`configure`/`reset`/Reset 事件都不清零 token 计数器**，
+  旧事件不可能与新 token 值巧合。
+- 每个事件带 `generation`；与该端当前会话代次不符的事件只计数、不推进、不生成终态。
+- 乱序/重复/未知/过期 token：不重写计划、不二次 Submit、不推进状态。
+- 终态出口有防重复/无主守卫（R06）：只有能归属当前已接受在途请求的错误才终止它。
+
+## 3.1 终态容量预留（R05）
+
+initiator `Begin` 与 responder 接纳 Poll **统一**先检查
+`results.size() + reserved < result_queue_capacity`；满则在接纳前拒绝并计数，
+不增加 `accepted`、不发 `PrepareTx`。接纳即 `reserved++`，终态时 `reserved--` 并写入
+结果存储，保证已接受请求不因队列满丢结果（正常输入 `results_dropped == 0`）。
+
+## 3.2 期限（R07）
+
+两个上限**分别保存**：
+- `exchange_deadline_ticks`：接纳时确定，**绝不延长**；
+- `evidence_deadline_ticks`：待结果但本端 TX 未闭合时由 `evidence_wait_ticks` 确定。
+
+`ArmRx.deadline_ticks` 取二者中**有效且最早**者；`on_deadline` 按最早者判定一次终止。
+时间加法用溢出安全的加法，不使用可能溢出的有符号加法。配置须保证已接纳请求有有限
+终止条件（某项为 0 关闭时，另一项必须有限）。
+
 
 ## 4. 状态转移表（每端一个 exchange；至多一个在途）
 
