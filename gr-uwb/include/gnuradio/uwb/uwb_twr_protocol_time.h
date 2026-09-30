@@ -315,8 +315,31 @@ enum class PeerClaimError : uint8_t {
     RawOutOfDomain = 5,
     IntervalNotFormable = 6, // reversed / wrap ambiguous
     IntervalTooLong = 7,
+    // Reserved for a future binding that declares which session a claim must
+    // belong to; M1-B's `WireTimestampBinding` carries a generation but a
+    // claim does not, so no M1-B path returns this value.  Kept because the
+    // numeric codes are append-only schema (REQ-OUT-01).
     SessionGenerationMismatch = 8
 };
+
+// Domain test with NO `default` (N07): an out-of-domain error code is not
+// "some other refusal" and must not be formatted or reasoned about.
+inline bool peer_claim_error_is_known(PeerClaimError e)
+{
+    switch (e) {
+    case PeerClaimError::Ok:
+    case PeerClaimError::BindingNotWellFormed:
+    case PeerClaimError::ClaimNotBound:
+    case PeerClaimError::UnknownField:
+    case PeerClaimError::NotSameMessage:
+    case PeerClaimError::RawOutOfDomain:
+    case PeerClaimError::IntervalNotFormable:
+    case PeerClaimError::IntervalTooLong:
+    case PeerClaimError::SessionGenerationMismatch:
+        return true;
+    }
+    return false;
+}
 
 inline const char* peer_claim_error_to_string(PeerClaimError e)
 {
@@ -360,6 +383,8 @@ public:
         p.origin_ = ProtocolIntervalOrigin::LocalAdmitted;
         p.valid_ = true;
         p.interval_ = admitted.interval();
+        p.later_tick_ = admitted.later().ticks();
+        p.earlier_tick_ = admitted.earlier().ticks();
         return p;
     }
 
@@ -411,6 +436,8 @@ public:
         p.interval_.frac_num = 0;
         p.interval_.frac_den = 0; // whole-tick wire: no fraction to fabricate
         p.interval_.wrapped = d.wrapped;
+        p.later_tick_ = static_cast<int64_t>(later.raw_ticks);
+        p.earlier_tick_ = static_cast<int64_t>(earlier.raw_ticks);
         out = p;
         return PeerClaimError::Ok;
     }
@@ -434,6 +461,13 @@ public:
 
     uint64_t session_generation() const { return session_generation_; }
     uint64_t binding_generation() const { return binding_generation_; }
+
+    // The absolute tick coordinate of each endpoint of the interval, in the
+    // interval's OWN domain.  For a local interval these are the admitted
+    // instants' ticks; for a peer claim they are the raw wire values.  They
+    // are what the clock-ratio validity window is checked against.
+    int64_t later_tick() const { return later_tick_; }
+    int64_t earlier_tick() const { return earlier_tick_; }
 
     // Exact rational tick value.  For a peer claim the denominator is 1: a
     // wire value is a whole number of ticks by construction.
@@ -468,6 +502,8 @@ private:
     bool valid_ = false;
     ProtocolIntervalOrigin origin_ = ProtocolIntervalOrigin::LocalAdmitted;
     RelativeTickInterval interval_;
+    int64_t later_tick_ = 0;
+    int64_t earlier_tick_ = 0;
     uint64_t session_generation_ = 0;
     uint64_t binding_generation_ = 0;
 };
@@ -671,32 +707,28 @@ inline bool protocol_load_interval(ProtocolTofEstimate& e, const char* what,
 }
 
 // The A-domain validity window of the clock ratio applies to whatever A-domain
-// interval the exchange runs on, local or wire.
+// interval the exchange runs on, local or wire.  Both endpoints of the
+// interval are checked (min/max, so a wrapped interval that straddles the
+// rollover is handled the same way as the strict M1-A window check).
 inline bool protocol_window_ok(ProtocolTofEstimate& e, const char* what,
                                const ProtocolInterval& iv, const ClockRatio& k)
 {
     if (!k.has_validity_window())
         return true;
-    int64_t num = 0;
-    int64_t den = 1;
-    if (!iv.exact_ratio(num, den)) {
-        e = protocol_fail(e, TofStatus::Overflow,
-                          std::string(what) + ": exact_ratio() did not fit int64");
-        return false;
-    }
-    // The A-domain instant the interval ends at is the only tick coordinate
-    // the ratio window is expressed against (A ticks).  Use exact integer
-    // division of num/den and compare the (non-negative) tick bound.
-    if (den <= 0) {
+    if (!iv.is_valid()) {
         e = protocol_fail(e, TofStatus::InvalidInput,
-                          std::string(what) + ": non-positive denominator");
+                          std::string(what) + ": protocol interval is not valid");
         return false;
     }
-    const int64_t ticks = num / den;
-    if (!k.covers_ticks(ticks)) {
+    const int64_t a = iv.earlier_tick();
+    const int64_t b = iv.later_tick();
+    const int64_t lo = (a < b) ? a : b;
+    const int64_t hi = (a < b) ? b : a;
+    if (!k.covers_ticks(lo) || !k.covers_ticks(hi)) {
         e = protocol_fail(e, TofStatus::ClockRatioNotValidAtTime,
-                          std::string(what) + " is at A tick " + std::to_string(ticks) +
-                              ", outside the clock ratio validity window [" +
+                          std::string(what) + " spans ticks [" + std::to_string(lo) +
+                              "," + std::to_string(hi) +
+                              "], outside the clock ratio validity window [" +
                               std::to_string(k.valid_from_ticks()) + "," +
                               std::to_string(k.valid_until_ticks()) + "]");
         return false;
