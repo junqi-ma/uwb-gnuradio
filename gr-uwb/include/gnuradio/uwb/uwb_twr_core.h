@@ -110,6 +110,99 @@ struct TxToken {
 };
 
 // ===========================================================================
+// The numeric transmit plan (R08)
+// ===========================================================================
+//
+// Original defect R08: `TxPlanned` carried only a `Timestamp` plus four
+// boolean "recorded" flags, so nothing tied the frame's t3B/t5A to an actual
+// command time, quantisation instant and marker offset.  The plan is now a
+// bounded NUMERIC record with explicit domains, units and a verifiable
+// internal mapping, and it deliberately carries NO "sent/completed" state
+// (defect R01): a plan cannot close a transmit.
+//
+// Units: every tick field is in `domain` ticks.  `command_time_ticks` is the
+// host command time expressed on the SAME device counter (M1-B has no
+// cross-domain plan); `quantised_instant_ticks` is the first quantised sample
+// instant; `marker_offset_ticks` is the RMARKER offset inside the burst; and
+// `calibrated_air_ticks` is the expected RMARKER air instant.  The internal
+// identity M1-B requires is
+//
+//     calibrated_air_ticks == quantised_instant_ticks + marker_offset_ticks
+//
+// with all three inside the domain's tick range.
+struct TxPlan {
+    ClockDomain domain;
+    TimestampSource source = TimestampSource::ScheduledCalibrated;
+    uint32_t applied_corrections = kCorrectionNone;
+    std::string calibration_id;
+
+    int64_t command_time_ticks = 0;
+    int64_t quantised_instant_ticks = 0;
+    int64_t marker_offset_ticks = 0;
+    int64_t calibrated_air_ticks = 0;
+
+    bool valid = false;
+
+    // The plan's own consistency, independent of any exchange.  A caller that
+    // can produce a plan violating this cannot make the core accept it.
+    bool internally_consistent(std::string& why) const
+    {
+        if (!valid) {
+            why = "plan is not marked valid";
+            return false;
+        }
+        if (!domain.is_valid()) {
+            why = "plan domain is not a valid clock domain";
+            return false;
+        }
+        if (!timestamp_source_is_known(source)) {
+            why = "plan source is out of domain";
+            return false;
+        }
+        if (calibration_id.empty()) {
+            why = "plan carries no calibration_id";
+            return false;
+        }
+        if (!timestamp_corrections_satisfied(TimestampMarker::RmarkerTx,
+                                             applied_corrections)) {
+            why = "plan does not record every correction RMARKER_TX requires";
+            return false;
+        }
+        if (!domain.ticks_in_range(command_time_ticks) ||
+            !domain.ticks_in_range(quantised_instant_ticks) ||
+            !domain.ticks_in_range(calibrated_air_ticks)) {
+            why = "a plan tick is outside the domain range";
+            return false;
+        }
+        // Overflow-safe addition for the identity check.
+        int64_t sum = 0;
+        if (__builtin_add_overflow(quantised_instant_ticks, marker_offset_ticks, &sum)) {
+            why = "quantised_instant + marker_offset overflows int64";
+            return false;
+        }
+        if (sum != calibrated_air_ticks) {
+            why = "calibrated_air != quantised_instant + marker_offset";
+            return false;
+        }
+        return true;
+    }
+
+    // The RMARKER air instant as a Timestamp in this endpoint's own domain.
+    bool to_air_timestamp(Timestamp& out) const
+    {
+        if (!valid)
+            return false;
+        Timestamp ts;
+        if (!Timestamp::from_ticks(calibrated_air_ticks, domain, TimestampMarker::RmarkerTx,
+                                   source, applied_corrections, ts))
+            return false;
+        ts.calibration_id = calibration_id;
+        out = ts;
+        return true;
+    }
+};
+
+// ===========================================================================
 // Input events
 // ===========================================================================
 
@@ -257,6 +350,12 @@ struct CoreEvent {
     CoreEventKind kind = CoreEventKind::Begin;
     uint64_t event_id = 0;
 
+    // The session generation this event belongs to (R04).  The core refuses an
+    // event whose generation is not the live one, so an event from a previous
+    // generation cannot advance a new exchange even if its token value happens
+    // to coincide.
+    uint64_t generation = 0;
+
     // ---- Begin -----------------------------------------------------------
     ExchangeId exchange;
 
@@ -275,12 +374,8 @@ struct CoreEvent {
     // ---- TxPlanned -------------------------------------------------------
     TxToken token;
     FrameType tx_intent = FrameType::Poll;
-    // The planned transmit instant: marker RMARKER_TX, source
-    // ScheduledCalibrated, the full TX correction chain, the SAME
-    // calibration_id as `local_calibration`, and the four planned records
-    // present.  The core builds the frame from THIS value, never from "now".
-    Timestamp planned_tx_time;
-    TxSendEvidence tx_evidence;
+    // The NUMERIC plan (R08).  It carries NO sent/completed state (R01).
+    TxPlan tx_plan;
     // The adapter's verdict about the remaining host deadline budget.  The
     // core only consumes it; it does not read a clock.
     bool deadline_verdict_feasible = false;
@@ -293,6 +388,11 @@ struct CoreEvent {
     // ---- Deadline / Reset -------------------------------------------------
     int64_t now_ticks = 0;
     uint64_t new_generation = 0;
+    // Reset: the new WIRE session id when the caller declares one.  A local
+    // generation bump alone must NOT clear the wire replay barrier (R04); only
+    // a new wire session does.
+    uint16_t new_wire_session_id = 0;
+    bool has_new_wire_session_id = false;
 
     // ---- Cancel ----------------------------------------------------------
     ExchangeStatus cancel_reason = ExchangeStatus::Cancelled;
@@ -343,6 +443,7 @@ inline bool core_action_kind_is_known(CoreActionKind k)
 struct CoreAction {
     CoreActionKind kind = CoreActionKind::ArmRx;
     uint64_t event_id = 0;
+    uint64_t generation = 0; // the session generation this action belongs to (R04)
     ExchangeId exchange;
     TxToken token;
 
@@ -502,7 +603,8 @@ public:
 
     // Validate and freeze a configuration snapshot.  Returns false and leaves
     // `why` explaining the FIRST problem; a refused configure leaves the core
-    // unconfigured and unable to advance.
+    // COMPLETELY unchanged (atomic, R04) and unable to advance.  A configure
+    // with an exchange in flight is refused so its terminal result is not lost.
     bool configure(const CoreConfig& cfg, std::string& why);
 
     // Start a new session generation on the same configuration.  REFUSES
