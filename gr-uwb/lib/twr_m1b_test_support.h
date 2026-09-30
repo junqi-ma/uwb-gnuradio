@@ -253,7 +253,7 @@ inline TxPlan make_tx_plan_defect(int64_t calibrated_air_ticks,
 inline CoreEvent make_begin(uint64_t exchange_value,
                             int64_t now_ticks,
                             uint64_t event_id = 0,
-                            uint64_t generation = 0)
+                            uint64_t generation = 1)
 {
     CoreEvent e;
     e.kind = CoreEventKind::Begin;
@@ -266,7 +266,7 @@ inline CoreEvent make_begin(uint64_t exchange_value,
 }
 
 inline CoreEvent make_deadline(int64_t now_ticks, uint64_t event_id = 0,
-                               uint64_t generation = 0)
+                               uint64_t generation = 1)
 {
     CoreEvent e;
     e.kind = CoreEventKind::Deadline;
@@ -278,7 +278,7 @@ inline CoreEvent make_deadline(int64_t now_ticks, uint64_t event_id = 0,
 
 inline CoreEvent make_cancel(ExchangeStatus reason = ExchangeStatus::Cancelled,
                              uint64_t event_id = 0,
-                             uint64_t generation = 0)
+                             uint64_t generation = 1)
 {
     CoreEvent e;
     e.kind = CoreEventKind::Cancel;
@@ -288,7 +288,7 @@ inline CoreEvent make_cancel(ExchangeStatus reason = ExchangeStatus::Cancelled,
     return e;
 }
 
-inline CoreEvent make_stop(uint64_t event_id = 0, uint64_t generation = 0)
+inline CoreEvent make_stop(uint64_t event_id = 0, uint64_t generation = 1)
 {
     CoreEvent e;
     e.kind = CoreEventKind::Stop;
@@ -303,7 +303,7 @@ inline CoreEvent make_reset(uint64_t new_generation,
                             uint64_t event_id = 0,
                             bool has_new_wire_session = false,
                             uint16_t new_wire_session_id = 0,
-                            uint64_t generation = 0)
+                            uint64_t generation = 1)
 {
     CoreEvent e;
     e.kind = CoreEventKind::Reset;
@@ -316,7 +316,7 @@ inline CoreEvent make_reset(uint64_t new_generation,
 }
 
 inline CoreEvent make_accepted(const TxToken& t, uint64_t event_id = 0,
-                               uint64_t generation = 0)
+                               uint64_t generation = 1)
 {
     CoreEvent e;
     e.kind = CoreEventKind::TxAccepted;
@@ -329,7 +329,7 @@ inline CoreEvent make_accepted(const TxToken& t, uint64_t event_id = 0,
 inline CoreEvent make_outcome(const TxToken& t,
                               TxOutcome outcome,
                               AdapterFault fault = AdapterFault::None,
-                              uint64_t generation = 0,
+                              uint64_t generation = 1,
                               uint64_t event_id = 0)
 {
     CoreEvent e;
@@ -350,7 +350,7 @@ inline CoreEvent make_tx_planned_raw(const TxToken& token,
                                      bool deadline_verdict_feasible = true,
                                      int64_t deadline_slack_ticks = 0,
                                      uint64_t event_id = 0,
-                                     uint64_t generation = 0)
+                                     uint64_t generation = 1)
 {
     CoreEvent e;
     e.kind = CoreEventKind::TxPlanned;
@@ -376,7 +376,7 @@ inline CoreEvent make_tx_planned(const TxToken& token,
                                  bool deadline_verdict_feasible = true,
                                  int64_t deadline_slack_ticks = 0,
                                  uint64_t event_id = 0,
-                                 uint64_t generation = 0,
+                                 uint64_t generation = 1,
                                  int64_t marker_offset_ticks = 16,
                                  int64_t command_lead_ticks = 32)
 {
@@ -399,11 +399,13 @@ inline CoreEvent make_rx_event(const uint8_t* bytes,
                                const FirstPathQuality& first_path,
                                bool fcs_passed = true,
                                bool decode_ok = true,
-                               uint64_t event_id = 0)
+                               uint64_t event_id = 0,
+                               uint64_t generation = 1)
 {
     CoreEvent e;
     e.kind = CoreEventKind::RxFrame;
     e.event_id = event_id;
+    e.generation = generation;
     e.fcs_passed = fcs_passed;
     e.decode_ok = decode_ok;
     e.rx_time = make_rx_ts(rx_ticks, d, calibration_id);
@@ -418,6 +420,16 @@ inline CoreEvent make_rx_event(const uint8_t* bytes,
         }
     }
     return e;
+}
+
+// Stamp the endpoint's CURRENT session generation into an event and post it.
+// The core requires every event to name the live generation (R04), so a test
+// that resets must post subsequent events through this helper rather than
+// hard-coding a generation.
+inline CoreActionBatch post_now(EndpointCore& c, CoreEvent e)
+{
+    e.generation = c.config().session_generation;
+    return c.post(e);
 }
 
 inline WireTimestampBinding make_binding(const ClockDomain& peer_domain,
@@ -505,7 +517,14 @@ public:
     // Post an event and fully process the resulting action cascade.
     CoreActionBatch post(uint8_t p, const CoreEvent& ev)
     {
-        const CoreActionBatch b = core(p).post(ev);
+        // R04: the core requires every event to name the live generation.  A
+        // driver-level event with generation 0 means "unspecified" and is
+        // stamped here; an explicit generation is preserved so a stale-event
+        // test still works.
+        CoreEvent stamped = ev;
+        if (stamped.generation == 0)
+            stamped.generation = core(p).config().session_generation;
+        const CoreActionBatch b = core(p).post(stamped);
         process(p, b);
         return b;
     }
@@ -608,6 +627,7 @@ private:
         const CoreConfig& cfg = (dest == kEndpointA) ? cfg_.cfg_a : cfg_.cfg_b;
         CoreEvent e;
         e.kind = CoreEventKind::RxFrame;
+        e.generation = cfg.session_generation;
         e.fcs_passed = rx.fcs_passed;
         e.decode_ok = rx.decode_ok;
         e.rx_time = make_rx_ts(rx.rx_marker_ticks, cfg.local_domain,

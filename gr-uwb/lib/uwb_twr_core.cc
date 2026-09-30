@@ -162,9 +162,13 @@ bool validate_core_config(const CoreConfig& cfg, std::string& why)
         why = "evidence_wait_ticks is negative";
         return false;
     }
-    if (cfg.exchange_timeout_ticks == 0 && cfg.evidence_wait_ticks == 0) {
-        why = "exchange_timeout_ticks and evidence_wait_ticks are both 0: an "
-              "accepted exchange would have no finite termination bound";
+    // R07 (review): the evidence bound is only armed once a result is owed, so
+    // it CANNOT bound an exchange that never receives a plan or response.  Only
+    // the absolute exchange deadline guarantees termination, so it must be
+    // strictly positive; `evidence_wait_ticks == 0` (disabled) is then safe.
+    if (cfg.exchange_timeout_ticks <= 0) {
+        why = "exchange_timeout_ticks must be > 0: it is the absolute bound that "
+              "makes every accepted exchange terminate finitely";
         return false;
     }
     if (!cfg.local_calibration.is_well_formed()) {
@@ -1449,7 +1453,10 @@ bool EndpointCore::configure(const CoreConfig& cfg, std::string& why)
     // R04: `token_counter` is monotonic for the life of the object and is NOT
     // reset by configure().
     d.reserved_ = 0;
-    d.results.clear();
+    // Undrained terminal results are RETAINED across a reconfigure, for the
+    // same reason as across `reset()`: dropping them would lose a terminal
+    // result of an exchange that already completed (review §4 observation).
+    // Counters are a fresh observability baseline for a new configuration.
     d.results.reserve(cfg.result_queue_capacity);
     return true;
 }
@@ -1531,10 +1538,11 @@ CoreActionBatch EndpointCore::post(const CoreEvent& ev)
         d.counters.events_rejected_out_of_domain++;
         return out;
     }
-    // R04: an event whose generation is set and does not match the live session
-    // generation is STALE: it is counted and can never advance a new exchange,
-    // even if its token value happens to coincide.
-    if (ev.generation != 0 && ev.generation != d.cfg.session_generation) {
+    // R04: every event must name the LIVE session generation.  There is no
+    // `0 == wildcard`: a generation-0 event is as stale as any other mismatch,
+    // so an old event can never slip through by leaving the field unset (review
+    // observation on the earlier wildcard).
+    if (ev.generation != d.cfg.session_generation) {
         d.counters.stale_events++;
         return out;
     }

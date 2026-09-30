@@ -724,7 +724,7 @@ BOOST_AUTO_TEST_CASE(r04_e2e_new_wire_session_clears_the_replay_barrier)
 
     // (b) a declared new wire session clears the barrier.
     drv.post(kEndpointB, make_reset(3, 0, /*has_new_wire_session*/ true,
-                                    /*new_wire_session_id*/ 9));
+                                    /*new_wire_session_id*/ 9, /*generation*/ 2));
     drv.post(kEndpointB, e2e_poll_rx(dc.cfg_b, dc.link.domain_b, 9, 0, 6000));
     BOOST_TEST(drv.core(kEndpointB).counters().accepted_exchanges == accepted_b + 1u);
     assert_conservation(drv, kEndpointB);

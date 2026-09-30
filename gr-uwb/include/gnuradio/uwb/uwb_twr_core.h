@@ -159,6 +159,14 @@ struct TxPlan {
             why = "plan source is out of domain";
             return false;
         }
+        // A PLAN is produced BEFORE the burst, so it can only be a calibrated
+        // SCHEDULE.  `HardwareMeasured` / `Estimated` / `Reconstructed` would
+        // assert an observation that cannot exist yet (review finding R03/R08).
+        if (source != TimestampSource::ScheduledCalibrated) {
+            why = "a transmit plan must be scheduled_calibrated; a measured or "
+                  "estimated source cannot be planned in advance";
+            return false;
+        }
         if (calibration_id.empty()) {
             why = "plan carries no calibration_id";
             return false;
@@ -589,10 +597,15 @@ struct CoreConfig {
     // The calibration set in force for this endpoint's local instants.
     CalibrationStamp local_calibration;
 
-    // Timing budget, in LOCAL ticks.  All three default to "not stated"
-    // (0 == disabled) and are enforced only when non-zero.
+    // Timing budget, in LOCAL ticks.
+    //
+    // `exchange_timeout_ticks` MUST be > 0: it is the ABSOLUTE bound that makes
+    // every accepted exchange terminate finitely.  `evidence_wait_ticks` may be
+    // 0 (disabled) because it is only armed once a result is owed, so it can
+    // never by itself bound an exchange that never receives a plan/response
+    // (review finding R07).  `reply_deadline_ticks` 0 means "not stated".
     int64_t reply_deadline_ticks = 0;   // per-message reply budget
-    int64_t exchange_timeout_ticks = 0; // whole-exchange deadline
+    int64_t exchange_timeout_ticks = 0; // whole-exchange ABSOLUTE deadline (>0)
     int64_t evidence_wait_ticks = 0;    // how long to wait for local TX evidence
 
     // Bounded completed-result storage.  When it is full a NEW Begin is

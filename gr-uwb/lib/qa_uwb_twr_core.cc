@@ -179,10 +179,12 @@ CoreEvent rx_of(const CoreConfig& cfg,
                 const Frame& f,
                 int64_t ticks,
                 const ClockDomain& d,
-                FirstPathQuality fp = FirstPathQuality::passed(20.0, 6.0, 0.9))
+                FirstPathQuality fp = FirstPathQuality::passed(20.0, 6.0, 0.9),
+                uint64_t generation = 1)
 {
     CoreEvent e;
     e.kind = CoreEventKind::RxFrame;
+    e.generation = generation;
     e.fcs_passed = true;
     e.decode_ok = true;
     e.frame = f;
@@ -194,11 +196,13 @@ CoreEvent rx_of(const CoreConfig& cfg,
 CoreEvent outcome_ev(const TxToken& t,
                      TxOutcome o,
                      AdapterFault f = AdapterFault::None,
-                     uint64_t event_id = 0)
+                     uint64_t event_id = 0,
+                     uint64_t generation = 1)
 {
     CoreEvent e;
     e.kind = CoreEventKind::TxOutcomeResolved;
     e.event_id = event_id;
+    e.generation = generation;
     e.token = t;
     e.tx_outcome = o;
     e.adapter_fault = f;
@@ -651,15 +655,15 @@ BOOST_AUTO_TEST_CASE(b05_sequence_modulus_is_the_reuse_barrier_and_reset_clears_
     // barrier -- the same wire identity could still be alive.  (The Reset EVENT
     // itself counts one stale event, and the refused Begin a second.)
     core.post(make_reset(2));
-    CoreActionBatch blocked = core.post(make_begin(6, 1000));
+    CoreActionBatch blocked = post_now(core, make_begin(6, 1000));
     BOOST_TEST(!has_action(blocked, CoreActionKind::PrepareTx));
     BOOST_TEST(core.counters().accepted_exchanges == 4u);
     BOOST_TEST(core.counters().stale_events == 3u);
 
     // A genuinely NEW wire session does clear it.
-    core.post(make_reset(3, 0, /*has_new_wire_session*/ true,
-                         /*new_wire_session_id*/ 8));
-    CoreActionBatch nb = core.post(make_begin(7, 1000));
+    post_now(core, make_reset(3, 0, /*has_new_wire_session*/ true,
+                              /*new_wire_session_id*/ 8));
+    CoreActionBatch nb = post_now(core, make_begin(7, 1000));
     BOOST_TEST(has_action(nb, CoreActionKind::PrepareTx));
     BOOST_TEST(core.counters().accepted_exchanges == 5u);
 }
@@ -980,12 +984,12 @@ BOOST_AUTO_TEST_CASE(b10_local_reset_fails_inflight_and_old_events_cannot_revive
     BOOST_TEST(core.counters().resets == 1u);
 
     // The old plan cannot revive the exchange.
-    CoreActionBatch old = core.post(make_tx_planned(stale, FrameType::Poll, 2000, e.dom, e.cal.id));
+    CoreActionBatch old = post_now(core, make_tx_planned(stale, FrameType::Poll, 2000, e.dom, e.cal.id));
     BOOST_TEST(old.count == 0u);
     BOOST_TEST(core.counters().tx_token_mismatch == 1u);
 
     // A new session can begin again; old times are not mixed in.
-    CoreActionBatch nb = core.post(make_begin(2, 5000));
+    CoreActionBatch nb = post_now(core, make_begin(2, 5000));
     BOOST_TEST(has_action(nb, CoreActionKind::PrepareTx));
     BOOST_TEST(core.counters().accepted_exchanges == 2u);
 }
@@ -1365,18 +1369,18 @@ BOOST_AUTO_TEST_CASE(f_b3_stale_peer_binding_generation_is_refused)
 
     core.post(make_reset(2)); // bumps the session generation; binding stays gen 1
 
-    CoreActionBatch b = core.post(make_begin(9, 1000));
+    CoreActionBatch b = post_now(core, make_begin(9, 1000));
     const CoreAction* prep = find_action(b, CoreActionKind::PrepareTx);
     BOOST_TEST(prep != nullptr);
     if (prep == nullptr)
         return;
-    core.post(make_tx_planned(prep->token, FrameType::Poll, 2000, e.dom, e.cal.id));
-    core.post(outcome_ev(prep->token, TxOutcome::Completed));
+    post_now(core, make_tx_planned(prep->token, FrameType::Poll, 2000, e.dom, e.cal.id));
+    post_now(core, outcome_ev(prep->token, TxOutcome::Completed));
 
     Frame resp = base_frame(e.cfg, FrameType::Response, 0);
     resp.set(TimestampField::T2B, 2050);
     resp.set(TimestampField::T3B, 2550);
-    CoreActionBatch rb = core.post(rx_of(e.cfg, resp, 2600, e.dom));
+    CoreActionBatch rb = post_now(core, rx_of(e.cfg, resp, 2600, e.dom));
     const CoreAction* tr = find_action(rb, CoreActionKind::TerminalResult);
     BOOST_TEST(tr != nullptr);
     if (tr != nullptr) {
@@ -1531,7 +1535,7 @@ TxToken responder_first_token(EndpointCore& core, const Env& e, uint16_t seq = 0
 TxToken initiator_first_token(EndpointCore& core, const Env& e, uint64_t exch = 1)
 {
     (void)e;
-    CoreActionBatch b = core.post(make_begin(exch, 1000));
+    CoreActionBatch b = post_now(core, make_begin(exch, 1000));
     const CoreAction* prep = find_action(b, CoreActionKind::PrepareTx);
     return (prep != nullptr) ? prep->token : TxToken{};
 }
@@ -2035,7 +2039,7 @@ BOOST_AUTO_TEST_CASE(r04_token_is_never_reused_across_reset_and_configure)
     BOOST_TEST(t2.value > t1.value);
 
     core.post(make_cancel());
-    core.post(make_reset(3));
+    post_now(core, make_reset(3));
     const TxToken t3 = initiator_first_token(core, e, 3);
     BOOST_TEST(t3.valid);
     BOOST_TEST(t3.value > t2.value);
@@ -2065,17 +2069,17 @@ BOOST_AUTO_TEST_CASE(r04_wire_replay_barrier_follows_the_wire_session)
 
     // (a) A pure local generation bump must NOT clear the barrier.
     core.post(make_reset(2));
-    CoreActionBatch b2 = core.post(rx_of(e.cfg, poll0, 5000, e.dom));
+    CoreActionBatch b2 = core.post(rx_of(e.cfg, poll0, 5000, e.dom, FirstPathQuality::passed(20.0, 6.0, 0.9), 1));
     BOOST_TEST(!has_action(b2, CoreActionKind::PrepareTx));
     BOOST_TEST(core.counters().accepted_exchanges == accepted);
     BOOST_TEST(core.counters().stale_events > stale);
 
     // (b) A declared NEW wire session DOES clear it: the same seq is a new
     //     wire identity in the new session.
-    core.post(make_reset(3, 0, /*has_new_wire_session*/ true, /*new_wire_session_id*/ 9));
+    post_now(core, make_reset(3, 0, /*has_new_wire_session*/ true, /*new_wire_session_id*/ 9));
     Frame poll_new = base_frame(e.cfg, FrameType::Poll, 0);
     poll_new.session_id = 9;
-    CoreActionBatch b3 = core.post(rx_of(e.cfg, poll_new, 6000, e.dom));
+    CoreActionBatch b3 = post_now(core, rx_of(e.cfg, poll_new, 6000, e.dom));
     BOOST_TEST(has_action(b3, CoreActionKind::PrepareTx));
     BOOST_TEST(core.counters().accepted_exchanges == accepted + 1u);
     BOOST_TEST(conservation_holds(core));
@@ -2256,6 +2260,7 @@ BOOST_AUTO_TEST_CASE(r06_out_of_domain_and_ownerless_outcomes_never_create_a_ter
         BOOST_TEST(core.configure(e.cfg, why));
         CoreEvent bad;
         bad.kind = CoreEventKind::TxOutcomeResolved;
+        bad.generation = e.cfg.session_generation;
         bad.tx_outcome = static_cast<TxOutcome>(99);
         CoreActionBatch b = core.post(bad);
         BOOST_TEST(b.count == 0u);
@@ -2313,7 +2318,7 @@ BOOST_AUTO_TEST_CASE(r06_out_of_domain_and_ownerless_outcomes_never_create_a_ter
         BOOST_TEST(core.counters().terminal_results == 1u);
         BOOST_TEST(conservation_holds(core));
         // The SAME token at the live generation is a plain token mismatch.
-        CoreActionBatch b2 = core.post(make_outcome(t, TxOutcome::Completed));
+        CoreActionBatch b2 = post_now(core, make_outcome(t, TxOutcome::Completed));
         BOOST_TEST(!has_action(b2, CoreActionKind::TerminalResult));
         BOOST_TEST(core.counters().tx_token_mismatch == 1u);
         BOOST_TEST(core.counters().terminal_results == 1u);
@@ -2607,7 +2612,7 @@ BOOST_AUTO_TEST_CASE(r08_submitted_frame_carries_the_plan_air_instant)
         const TxToken tok = responder_first_token(core, e, 0);
         BOOST_TEST(tok.valid);
         CoreActionBatch b = core.post(make_tx_planned(
-            tok, FrameType::Response, 3000, e.dom, e.cal.id, TxPlanDefect::None, true, 0, 0, 0,
+            tok, FrameType::Response, 3000, e.dom, e.cal.id, TxPlanDefect::None, true, 0, 0, 1,
             /*marker_offset*/ 64, /*command_lead*/ 128));
         const CoreAction* st = find_action(b, CoreActionKind::SubmitTx);
         BOOST_TEST(st != nullptr);
@@ -2634,7 +2639,7 @@ BOOST_AUTO_TEST_CASE(r08_submitted_frame_carries_the_plan_air_instant)
         const TxToken poll = p->token;
         BOOST_TEST(has_action(
             core.post(make_tx_planned(poll, FrameType::Poll, 2000, e.dom, e.cal.id,
-                                      TxPlanDefect::None, true, 0, 0, 0, 64, 128)),
+                                      TxPlanDefect::None, true, 0, 0, 1, 64, 128)),
             CoreActionKind::SubmitTx));
         Frame resp = base_frame(e.cfg, FrameType::Response, 0);
         resp.set(TimestampField::T2B, 2050);
@@ -2646,7 +2651,7 @@ BOOST_AUTO_TEST_CASE(r08_submitted_frame_carries_the_plan_air_instant)
             return;
         CoreActionBatch fb = core.post(make_tx_planned(
             f->token, FrameType::Final, 5000, e.dom, e.cal.id, TxPlanDefect::None, true, 0, 0,
-            0, 64, 128));
+            1, 64, 128));
         const CoreAction* st = find_action(fb, CoreActionKind::SubmitTx);
         BOOST_TEST(st != nullptr);
         if (st != nullptr) {
@@ -2783,4 +2788,80 @@ BOOST_AUTO_TEST_CASE(r08_negative_offset_and_command_order_are_refused)
         BOOST_TEST(has_action(r, CoreActionKind::AbortPending));
         BOOST_TEST(!has_action(r, CoreActionKind::SubmitTx));
     }
+}
+
+// E's review, finding R03/R08: a transmit PLAN is produced BEFORE the burst, so
+// it can only be a calibrated SCHEDULE.  HardwareMeasured / Estimated /
+// Reconstructed sources must be refused, not admitted (previously they could
+// complete for the roles that own no ToF).
+BOOST_AUTO_TEST_CASE(r08_plan_source_must_be_scheduled_calibrated)
+{
+    const TimestampSource bad[] = { TimestampSource::HardwareMeasured,
+                                    TimestampSource::Estimated,
+                                    TimestampSource::Reconstructed };
+    for (TimestampSource src : bad) {
+        // The header-level predicate refuses it.
+        TxPlan p;
+        p.valid = true;
+        p.domain = make_domain("dev", 1.0e9);
+        p.source = src;
+        p.applied_corrections = timestamp_required_corrections(TimestampMarker::RmarkerTx);
+        p.calibration_id = "cal";
+        p.marker_offset_ticks = 16;
+        p.quantised_instant_ticks = 2984;
+        p.command_time_ticks = 2952;
+        p.calibrated_air_ticks = 3000;
+        std::string why;
+        BOOST_TEST(!p.internally_consistent(why));
+
+        // And the core refuses the plan (no SubmitTx, no terminal for an
+        // endpoint that would otherwise complete on the plan alone).
+        Env e = make_env(Role::Responder, Protocol::Ss, 4);
+        EndpointCore core;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken tok = responder_first_token(core, e, 0);
+        BOOST_TEST(tok.valid);
+        CoreEvent pe = make_tx_planned_raw(tok, FrameType::Response, p);
+        pe.generation = e.cfg.session_generation;
+        CoreActionBatch b = core.post(pe);
+        BOOST_TEST(has_action(b, CoreActionKind::AbortPending));
+        BOOST_TEST(!has_action(b, CoreActionKind::SubmitTx));
+        const CoreAction* tr = find_action(b, CoreActionKind::TerminalResult);
+        BOOST_TEST(tr != nullptr);
+        if (tr != nullptr)
+            BOOST_TEST(!tr->status.completed());
+        BOOST_TEST(core.counters().tx_submitted == 0u);
+    }
+}
+
+// E's review, finding R07: the ABSOLUTE exchange deadline is the only bound
+// that guarantees termination, so a config with exchange_timeout_ticks == 0
+// must be refused even when the evidence wait is positive.
+BOOST_AUTO_TEST_CASE(r07_zero_exchange_timeout_is_refused)
+{
+    Env e = make_env(Role::Initiator, Protocol::Ss);
+    e.cfg.exchange_timeout_ticks = 0;
+    e.cfg.evidence_wait_ticks = 1000;
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(!core.configure(e.cfg, why));
+    BOOST_TEST(!why.empty());
+
+    // A positive absolute bound with the evidence wait disabled is legal: the
+    // absolute bound alone guarantees termination.
+    Env e2 = make_env(Role::Initiator, Protocol::Ss);
+    e2.cfg.exchange_timeout_ticks = 1000;
+    e2.cfg.evidence_wait_ticks = 0;
+    EndpointCore core2;
+    std::string why2;
+    BOOST_TEST(core2.configure(e2.cfg, why2));
+
+    // Begin, never receive anything, and the absolute deadline still ends it.
+    const TxToken tok = initiator_first_token(core2, e2);
+    BOOST_TEST(tok.valid);
+    CoreActionBatch d = post_now(core2, make_deadline(2000));
+    const CoreAction* tr = find_action(d, CoreActionKind::TerminalResult);
+    BOOST_TEST(tr != nullptr);
+    BOOST_TEST(core2.in_flight() == 0u);
+    BOOST_TEST(conservation_holds(core2));
 }
