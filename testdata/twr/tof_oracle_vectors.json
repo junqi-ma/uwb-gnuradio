@@ -1,11 +1,11 @@
 {
   "schema": "uwb-twr-tof-oracle/1",
   "provenance": {
-    "generator": "testdata/twr/gen_tof_oracle.py",
-    "generator_language": "Python 3 fractions.Fraction (exact)",
+    "generator": "testdata/twr/generate_tof_oracle.m",
+    "generator_language": "MATLAB 2025b int64 rational arithmetic",
     "matlab_script": "testdata/twr/generate_tof_oracle.m",
-    "matlab_executed": false,
-    "matlab_executed_note": "The M1-A instruction requires the MATLAB oracle to be RUN. This machine has no runnable MATLAB (no launcher and no main binary under /usr/local/MATLAB/R2024a) and no Octave, so the script is written but NOT executed.  These vectors are from the Python reference of the same physical model.  This is NOT MATLAB verification.",
+    "matlab_executed": true,
+    "matlab_executed_note": "produced by running this script under MATLAB; see testdata/twr/README_tof_oracle.md",
     "units": "ticks",
     "tof_domain": "A (clock ratio k = fA/fB converts B ticks to A ticks)",
     "formulas": {
@@ -27,13 +27,13 @@
       },
       "domain_a": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
       "domain_b": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
@@ -89,13 +89,13 @@
       },
       "domain_a": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 1000000000.0,
+        "tick_rate_hz": 1.0E+9,
         "epoch": 7,
         "timestamp_bits": 40
       },
       "domain_b": {
         "name": "dw3000_snB_ch5_uus",
-        "tick_rate_hz": 998400000.0,
+        "tick_rate_hz": 9.984E+8,
         "epoch": 7,
         "timestamp_bits": 40
       },
@@ -151,13 +151,13 @@
       },
       "domain_a": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 1000000000.0,
+        "tick_rate_hz": 1.0E+9,
         "epoch": 7,
         "timestamp_bits": 40
       },
       "domain_b": {
         "name": "dw3000_snB_ch5_uus",
-        "tick_rate_hz": 998400000.0,
+        "tick_rate_hz": 9.984E+8,
         "epoch": 7,
         "timestamp_bits": 40
       },
@@ -213,13 +213,13 @@
       },
       "domain_a": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 1000000000.0,
+        "tick_rate_hz": 1.0E+9,
         "epoch": 7,
         "timestamp_bits": 40
       },
       "domain_b": {
         "name": "dw3000_snB_ch5_uus",
-        "tick_rate_hz": 998400000.0,
+        "tick_rate_hz": 9.984E+8,
         "epoch": 7,
         "timestamp_bits": 40
       },
@@ -275,13 +275,13 @@
       },
       "domain_a": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
       "domain_b": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
@@ -337,13 +337,13 @@
       },
       "domain_a": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
       "domain_b": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
@@ -399,13 +399,13 @@
       },
       "domain_a": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
       "domain_b": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
@@ -461,13 +461,13 @@
       },
       "domain_a": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
       "domain_b": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
@@ -551,13 +551,13 @@
       },
       "domain_a": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
       "domain_b": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
@@ -641,13 +641,13 @@
       },
       "domain_a": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
       "domain_b": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
@@ -731,13 +731,13 @@
       },
       "domain_a": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 1000000000.0,
+        "tick_rate_hz": 1.0E+9,
         "epoch": 7,
         "timestamp_bits": 40
       },
       "domain_b": {
         "name": "dw3000_snB_ch5_uus",
-        "tick_rate_hz": 998400000.0,
+        "tick_rate_hz": 9.984E+8,
         "epoch": 7,
         "timestamp_bits": 40
       },
@@ -821,13 +821,13 @@
       },
       "domain_a": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },
       "domain_b": {
         "name": "dw1000_snA_ch5_uus",
-        "tick_rate_hz": 63897600000.0,
+        "tick_rate_hz": 6.38976E+10,
         "epoch": 7,
         "timestamp_bits": 40
       },

@@ -13,16 +13,19 @@ fail-open）；M0.1 契约层完成，TWR 协议能力仍未实现**（2026-09-2
 **docs/twr/评审意见_M0.1_2026-09-29.md**（N01–N06）、
 **docs/twr/M0.1第二轮整改报告_N01-N06.md**、以及
 **docs/twr/M0.1_N07修复报告_2026-09-29.md**（N07：审核报 1 处，实际 20 处）。
-当前工作是 **M1-A 独立 ToF 数学 + MATLAB oracle**，指示见
+当前阶段是 **M1-A 独立 ToF 数学 + MATLAB oracle**，指示见
 **docs/twr/OpenCode开发指示_M1-A_ToF数学.md**，进展见
 **docs/twr/M1-A_ToF数学开发报告.md**。其后才是 M1-B FSM、
 M2 PHY/时间映射、M3/M4 上板。
-**M1-A 代码/QA/oracle 已交付，但未标完成**：完成判定要求「MATLAB 已实跑」，
-而本机没有可用的 MATLAB（`/usr/local/MATLAB/R2024a` 无启动器/主二进制，无
-Octave/MCR）。`generate_tof_oracle.m` 已写但未运行；检入向量由同一物理模型的
-Python `fractions` 参考生成。**这不是 MATLAB 验证。** 补齐前不开 M1-B。
-TWR 协议能力仍未实现（无 FSM、无 ToF 公式对硬件的验证、无双端点、无 TWR 硬件收发）。
-M1-A 未完成前不要实现 FSM / fake radio / controller / pybind 大迁移。
+**M1-A 已完成（2026-09-30）**：`uwb_twr_math.h`（SS/DS ToF 精确有理数）、
+C++ QA、12 向量 golden 均已交付，且 **MATLAB oracle 已实跑** ——
+`generate_tof_oracle.m` 在本机 MATLAB R2025b（Windows `F:\MATLAB`，从 WSL 经
+`matlab.exe -batch`）执行，exit 0，产出的 `tof_oracle_vectors.json` 与 Python
+`fractions` 参考逐字段一致，C++ QA 读该 MATLAB 向量通过。
+**但这只是数学与 oracle**：TWR 协议能力仍未实现，无 FSM、无双端点、
+无 TWR 硬件收发、ToF 公式未对硬件验证。按指示 §2.3 **不要自动开工 M1-B**，
+等下一份指示；也不要在没有新指示前实现 FSM / fake radio / controller /
+pybind 大迁移。
 
 第二/三轮的关键教训（不要再犯）：
 

@@ -6,22 +6,30 @@ WHY THIS FILE EXISTS
 --------------------
 REQ-QA-01 requires an oracle that is independent of the implementation: the
 golden values must come from a physical model, never from reading the C++
-output back.  The written oracle of record for M1-A is
-`generate_tof_oracle.m` (MATLAB, R2024a).  This machine has no runnable
-MATLAB (the `/usr/local/MATLAB/R2024a` tree has no launcher and no main
-binary) and no Octave, so the checked-in vectors are produced by THIS file
-instead, using `fractions.Fraction` for exact rational arithmetic.
+output back.  The oracle of record for M1-A is `generate_tof_oracle.m`
+(MATLAB).  When M1-A was first delivered there was no runnable MATLAB on the
+development machine (the `/usr/local/MATLAB/R2024a` tree had no launcher and no
+main binary) and no Octave, so the checked-in vectors were produced by THIS
+file instead, using `fractions.Fraction` for exact rational arithmetic.
 
-That substitution is recorded, not hidden:
+That substitution was recorded, not hidden, and it has since been RESOLVED:
+`generate_tof_oracle.m` was run on MATLAB R2025b and its output agrees with
+this reference vector for vector.  The checked-in
+`tof_oracle_vectors.json` is now the MATLAB output (see
+`README_tof_oracle.md`).  This script is kept as the second, independent
+check on the same model -- `tools/twr/verify_m1_a_tof.py` and the C++ QA
+consume the MATLAB vectors, and re-running this script must reproduce them
+exactly.
 
-  * `tof_oracle_vectors.json` carries a provenance block naming this
-    generator and stating that the MATLAB script has NOT been executed;
-  * `README_tof_oracle.md` says the same and gives the command to re-run the
-    MATLAB script once MATLAB exists;
+  * `tof_oracle_vectors.json` carries a provenance block naming the MATLAB
+    oracle and stating that it WAS executed;
+  * `README_tof_oracle.md` gives the exact command, the MATLAB version and
+    the file hashes;
   * every value here is derived from the physical model below, so the C++ is
     checked against physics and not against itself.
 
-This is NOT claimed to be MATLAB verification.
+Re-running this script overwrites the MATLAB-produced golden with an
+equivalent Python-produced one; do not do it unless you mean to.
 
 THE MODEL (must match `generate_tof_oracle.m` statement for statement)
 ---------------------------------------------------------------------
@@ -320,12 +328,13 @@ def main():
             "matlab_script": "testdata/twr/generate_tof_oracle.m",
             "matlab_executed": False,
             "matlab_executed_note": (
-                "The M1-A instruction requires the MATLAB oracle to be RUN. "
-                "This machine has no runnable MATLAB (no launcher and no main "
-                "binary under /usr/local/MATLAB/R2024a) and no Octave, so the "
-                "script is written but NOT executed.  These vectors are from "
-                "the Python reference of the same physical model.  This is "
-                "NOT MATLAB verification."),
+                "This file is the Python reference of the physical model, not "
+                "the oracle of record.  The oracle of record is "
+                "generate_tof_oracle.m, which HAS been run (MATLAB R2025b) and "
+                "agrees with these vectors vector for vector; the checked-in "
+                "tof_oracle_vectors.json is that MATLAB output.  Regenerating "
+                "with this script would replace it with an equivalent "
+                "Python-produced file and drop the MATLAB provenance."),
             "units": "ticks",
             "tof_domain": "A (clock ratio k = fA/fB converts B ticks to A ticks)",
             "formulas": {

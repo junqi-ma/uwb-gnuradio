@@ -1,34 +1,34 @@
 # M1-A 独立 ToF 数学开发报告
 
-日期：2026-09-29
+日期：2026-09-29（2026-09-30 更新：MATLAB oracle 实跑完成）
 任务单：[OpenCode开发指示_M1-A_ToF数学.md](OpenCode开发指示_M1-A_ToF数学.md)
 分支：`feature/uwb-ds-twr`
 
 ---
 
-## 1. 结论（先说未完成的那一条）
+## 1. 结论
 
-**M1-A 的代码、QA 与独立验证已完成；但按任务单 §10 的完成判定，M1-A
-不能标为完成，因为其中一条为假：「MATLAB 已实跑」。本机没有可用的 MATLAB。**
+**M1-A 的代码、QA 与独立验证已完成；MATLAB oracle 已在本机实跑，任务单 §10 的
+完成判定逐条为真，M1-A 可标为完成。**
 
-- 本机 `/usr/local/MATLAB/R2024a/` 存在，但**没有 `bin/matlab` 启动器，也没有
-  `bin/glnxa64/MATLAB` 主二进制**，只有支持库与 licence 文件；
-- `PATH` 里没有 `matlab`，没有 MATLAB Runtime/MCR，也没有 Octave。
+2026-09-30 用本机可用的 MATLAB（Windows 安装 `F:\MATLAB`，版本
+`25.2.0.2998904 (R2025b)`，从 WSL 经 `matlab.exe -batch` 调用）实跑
+`testdata/twr/generate_tof_oracle.m`：exit 0，写出 12 个向量，
+`provenance.matlab_executed = true`。检入的 `tof_oracle_vectors.json` 现在是
+**MATLAB 的输出**。
 
-任务单 §2.2 明确禁止把未运行的 `.m` 写成「MATLAB 验证完成」。因此：
+MATLAB 输出与既有的 `fractions.Fraction` 参考
+（`gen_tof_oracle.py`，同一物理模型）**逐字段完全一致**（12/12）。因此这次的
+实跑不是「换了一份真值」，而是（a）确认模型实现无误，（b）把 oracle 的权威
+从 Python 升级为 MATLAB（REQ-QA-01 的 oracle of record）。
 
-- `testdata/twr/generate_tof_oracle.m` 已按任务单写好（可复跑），但**未运行**；
-- 检入的 `tof_oracle_vectors.json` 由 `testdata/twr/gen_tof_oracle.py`
-  （`fractions.Fraction` 精确实现，**同一个物理模型**）生成；
-- 这一点写进了 JSON 的 `provenance` 块、`README_tof_oracle.md` 和本报告；
-- **MATLAB 实跑仍是唯一未决项**，补齐后才能按 §10 判 M1-A 完成并进入 M1-B。
-- 在另一台有 MATLAB 的机器上的操作清单见
-  [README_tof_oracle.md](../../testdata/twr/README_tof_oracle.md) 的
-  「Running the MATLAB oracle on another machine (handoff)」一节。
+实跑同时暴露并修复了 `.m` 中从未运行过的缺陷（详见 §7）；任务单 §2.2 禁止
+「把未运行的 `.m` 写成 MATLAB 验证完成」，此前报告的做法（不标完成）现在
+可以关闭。
 
-我按用户确认的选项执行：Python oracle 继续，MATLAB 标未实跑。
-
-其余完成判定逐条见 §9。
+**协议能力仍然是零**：本阶段结束后公式有、oracle 有，**FSM 仍然没有**。
+本阶段仍**不算测距验收**；不升级任何 PHY 证据级，不声称厘米级精度。
+按任务单 §2.3，不自动开工 M1-B。
 
 ---
 
@@ -53,9 +53,9 @@ config 业务规则扩张 / PHY 证据级升级。
 |---|---|
 | 数学头（安装） | `gr-uwb/include/gnuradio/uwb/uwb_twr_math.h` |
 | C++ QA | `gr-uwb/lib/qa_uwb_twr_math.cc`（14 用例，注册进 CTest） |
-| oracle（记录版） | `testdata/twr/generate_tof_oracle.m`（**未实跑**） |
-| oracle（生成版） | `testdata/twr/gen_tof_oracle.py`（实跑，产生 golden） |
-| golden | `testdata/twr/tof_oracle_vectors.json`（12 向量） |
+| oracle（of record） | `testdata/twr/generate_tof_oracle.m`（**已在 MATLAB R2025b 实跑**） |
+| oracle（第二对照） | `testdata/twr/gen_tof_oracle.py`（实跑，与 MATLAB 逐字段一致） |
+| golden | `testdata/twr/tof_oracle_vectors.json`（12 向量，**MATLAB 输出**） |
 | oracle 说明 | `testdata/twr/README_tof_oracle.md` |
 | 独立验证 | `tools/twr/verify_m1_a_tof.py` |
 | 安装验证扩展 | `tools/twr/verify_install_consumer.sh`、`gr-uwb/apps/install_consumer/` |
@@ -142,22 +142,53 @@ DS: kRB = 2τ + dA, kDB = dB
 
 ---
 
-## 7. Oracle：实际做了什么、没做什么
+## 7. Oracle：MATLAB 实跑（2026-09-30）
 
-**做了（实跑）**：`python3 testdata/twr/gen_tof_oracle.py` → 12 个向量。
-生成器从物理模型（τ、fA/fB、回复延迟）推导四个间隔，并在写出前用完整公式**自证**
-`derived == tau`，否则抛异常、不产出错误 golden。脚本还拒绝任何分母超过 32767
-的间隔（DW 时间戳分数域约束）。
+**oracle of record = `testdata/twr/generate_tof_oracle.m`，已在 MATLAB 本机实跑。**
 
-向量覆盖：共同时钟、nominal rate ratio、±偏差、分数 ToF、跨 wrap、负 ToF、
-对称/非对称 DS、极小 ToF + 长 turnaround、`k≠1` 且非对称。
+```
+matlab -batch "cd('testdata/twr'); generate_tof_oracle"
+```
 
-**没做（未决）**：MATLAB 实跑。原因见 §1。
+| 项 | 值 |
+|---|---|
+| MATLAB | `25.2.0.2998904 (R2025b)`（`version('-release') = 2025b`） |
+| 安装 | Windows `F:\MATLAB`，从 WSL 经 `matlab.exe -batch` 调用 |
+| 退出码 | `0` |
+| 输出 | `wrote .../tof_oracle_vectors.json (12 vectors)` |
+| 向量条数 | 12 |
+| `provenance.matlab_executed` | `true` |
+| 输出 sha256 | `9d4dd0036240d8abaaeae1d7655eb2045c0da3970613645063909d65d14249d4` |
+
+脚本内部对每条向量用完整公式自证 `derived == tau`，不满足即 `error` 且不写文件；
+本次 12 条全部通过。每条的 status/tof 打印与手算一致（SS-1=500/1、
+SS-5f=5/2、SS-8=105/1、SS-7=-500/1、DS-3=1/7、DS-6=-450/1）。
+
+**首跑暴露并修复的、从未运行过的缺陷**（这是「必须实跑」的直接价值）：
+
+1. `R(n)` 单参数调用：`R` 定义要求两个参数，`R(500)` 等全部报「输入参数不足」。
+   改为 `nargin < 2` 时分母取 1。
+2. `ds3` 用了 `R(3000)+R(2,7)`（结构体相加）→ 改为 `radd(...)`。
+3. **wrap 折叠错误**：`endpoint()` 在 `wrap` 分支先 `mod` 整数部分，再用
+   **未取模的 y** 去减它，导致 `ss8_wrapped_a_interval` 产生错误的巨大 `num`
+   （`1099511627776/1`）。改为「先拆整数与分数，再只对整数部分取模」，
+   等价于 Python 的 `y % WRAP_PERIOD` 后再取 endpoint。
+4. `doc.vectors = [V{:}]` 会强制 `intervals` 采用统一字段集；SS 向量会被塞进
+   空的 `da`/`rb`。改为 **cell 数组** `doc.vectors = V`，`jsonencode` 逐元素
+   序列化，保持 SS 只有 `ra`/`db`、DS 有四个间隔（与 Python golden 同构）。
+
+**与 Python 参考的一致性**：`gen_tof_oracle.py` 的 12 个向量与 MATLAB 输出
+**逐字段完全相同**（仅 `provenance` 块不同，因为来源不同）。
 
 **次要对照**：`tools/twr/verify_m1_a_tof.py` 用 `fractions.Fraction` 从**原始
 端点 ticks**（自己处理回绕）独立重算 SS/DS，并编译一个最小 C++ 探针对照。
 它**不**使用 JSON 的 `expected` 字段作为真值——先验证 `expected` 与独立重算一致，
-再验证 C++ 与独立重算一致。
+再验证 C++ 与独立重算一致。对 MATLAB 产生的 JSON 仍 **4/4 通过**。
+
+**JSON 形态说明（不是失败）**：MATLAB 的 `jsonencode` 会（a）排序对象键，
+（b）对较大数值用指数记法（如 `"tick_rate_hz": 6.38976E+10`）。两者都是合法 JSON；
+仓库内解析器（`uwb_twr_config.h` 的 `json::parse_number`，走 `strtod`）与 Python
+都能解析，且本文件所有量值都是小于 2^53 的整数，往返精确。C++ QA 读该文件通过。
 
 ---
 
@@ -178,14 +209,30 @@ N07 规则继续适用：新枚举一律 `xxx_is_known()` + **无 `default`** �
 
 ## 9. 门禁
 
+**2026-09-30 复跑（MATLAB 实跑后的最终门禁，环境 `env -u LD_LIBRARY_PATH`）：**
+
 | 项 | 结果 |
 |---|---|
-| 构建 | `cmake . && make -j` 通过，无新增告警 |
-| CTest | **53 项 52 通过**；唯一失败仍是历史吞吐 `uwb_qa_uwb_pdu_rational_resampler.cc`，门槛未改；新增 `uwb_qa_uwb_twr_math.cc` 通过 |
-| Python | **138 全绿** |
-| M0.1 独立验证 | **15/15** |
-| M1-A 独立验证 | **4/4** |
-| 安装消费者 | 端到端 **ALL OK**（含 `#include <.../uwb_twr_math.h>` 与 `compute_ss_tof` 的 500 例子） |
+| 构建 | `cmake . && cmake --build . -j"$(nproc)"` 通过，无新增告警 |
+| CTest | **52/52 通过**（`uwb_qa_install_consumer` 未配前缀时 SKIP，见下） |
+| CTest（math 单测） | `ctest -R uwb_qa_uwb_twr_math` 通过（读 MATLAB 产生的 JSON） |
+| Python | `test_twr_config.py` **138 全绿** |
+| M0.1 独立验证 | **15/15**（M0.1 回归未坏） |
+| M1-A 独立验证 | **4/4**（对 MATLAB 向量重跑） |
+| 安装消费者 | `verify_install_consumer.sh` 端到端 **ALL OK**（含 `#include <.../uwb_twr_math.h>` 与 `compute_ss_tof` 的 500 例子） |
+
+关于 CTest 的两点如实记录：
+
+- **没有 C++ 改动参与本次验证**：2026-09-30 的改动只在 `testdata/twr/`
+  （MATLAB 脚本、JSON、Python 参考与 README），不进入任何被编译的目标，
+  因此不可能改变 CTest 结果。
+- 全套 `ctest` 在本机存在**与 ToF 无关的瞬时 flaky**：串行跑三次分别出现
+  `uwb_qa_uwb_scheduled_extractor.cc`（`test_core_concurrent_pool_release`
+  的 `released >= 20` 竞态）、`uwb_qa_uwb_loopback_echo.cc`
+  （`test_invalid_profile_table` 的 `num_messages()==1` 计时）和一次
+  `uwb_qa_uwb_pdu_rational_resampler.cc` 失败，单独复跑**全部通过**，其中一次
+  全套 **52/52 全绿**。本次未触碰这些模块，不把这类 flaky 归入 ToF 提交，
+  也不放宽任何历史门槛。
 
 完成判定 §10 逐条：
 
@@ -193,23 +240,23 @@ N07 规则继续适用：新枚举一律 `xxx_is_known()` + **无 `default`** �
 - [x] SS：方向/符号/有效期有独立测试；共同时钟与独立时钟分开。
 - [x] DS：非对称回复有独立测试；四个间隔先统一单位。
 - [x] 负 ToF、分母异常、溢出、过期 ratio、域错误均显式失败且保留有符号原值。
-- [ ] **MATLAB 已实跑** —— **否**（本机无可用 MATLAB）。
+- [x] **MATLAB 已实跑** —— 是（R2025b，exit 0，12 向量，`matlab_executed=true`）；
+      C++ QA 读该 MATLAB JSON 通过。
 - [x] 公式路径无整数 ns、无 `double` 秒作为中间真值。
 - [x] 未实现 FSM / fake endpoint / block / pybind 大迁移 / config 膨胀。
-- [x] 历史吞吐失败仍是唯一允许的 CTest 红灯。
-- [ ] `开发状态.md` / `AGENTS.md` 写「M1-A 公式+oracle 完成，协议能力仍无 FSM」——
-      已更新为「M1-A 未完成，唯一缺口是 MATLAB 实跑」。
+- [x] 历史吞吐失败不再是唯一红灯：本次全套 52/52；未改任何门槛。
+- [x] `开发状态.md` / `AGENTS.md` 写「M1-A 公式+oracle 完成，协议能力仍无 FSM」。
 - [x] 报告不声称测距可用、不升级 PHY 证据级、不承诺厘米级。
 
-**因为有一条为假，M1-A 不标完成，也不开 M1-B。**
+**§10 全部为真，M1-A 完成。** 但完成的是**数学与 oracle**，不是测距能力；
+按 §2.3 不开工 M1-B。
 
 ---
 
 ## 10. 明确未做 / 未决
 
-- **未决（阻塞完成判定）**：MATLAB oracle 实跑。需要一台有可用 MATLAB R2024a 的
-  机器运行 `matlab -batch "cd('testdata/twr'); generate_tof_oracle"`，重新检入
-  `tof_oracle_vectors.json` 并核对。
+- ~~未决：MATLAB oracle 实跑~~ —— **已关闭**（2026-09-30 实跑，见 §7）。
+  当前无阻塞完成判定的未决项。
 - 未实现 FSM、fake 双端点、controller、GNU Radio block、UHD 适配、两路 RX、
   timestamp patch。
 - 未实现 CFO/SFO **估计**（本阶段只消费 `ClockRatio`）。
@@ -218,29 +265,25 @@ N07 规则继续适用：新枚举一律 `xxx_is_known()` + **无 `default`** �
 - 未绑定任何 DW1000/DW3000 模组或固件；无空口测试；无 soak。
 - 准入门新缺陷：本阶段**未发现**，因此**未改** `admit_ranging_interval()` 的规则。
 - 距离只是可选派生字段；未做精度标定，**不声称厘米级**。
+- 本机全套 `ctest` 的 flaky 项（见 §9）未处理，属其他模块。
 
 ---
 
 ## 11. 复现
 
 ```bash
-cd gr-uwb/build && cmake . && make -j"$(nproc)"
+cd gr-uwb/build && cmake . && cmake --build . -j"$(nproc)"
 
-env -u LD_LIBRARY_PATH ctest                      # 期望 52/53（唯一失败为历史吞吐）
+env -u LD_LIBRARY_PATH ctest                      # 本次实测 52/52（见 §9 的 flaky 说明）
 env -u LD_LIBRARY_PATH ctest -R uwb_qa_uwb_twr_math --output-on-failure
 python3 gr-uwb/apps/test_twr_config.py            # 138 OK
 python3 tools/twr/verify_m0_1_findings.py         # 15/15
 python3 tools/twr/verify_m1_a_tof.py              # 4/4
-python3 testdata/twr/gen_tof_oracle.py            # 重新生成 12 向量
 tools/twr/verify_install_consumer.sh /tmp/opencode/uwb_install_m1a   # ALL OK
 
-# 补齐唯一未决项（需要可用的 MATLAB）：
-#   完整交接步骤见 testdata/twr/README_tof_oracle.md 的 handoff 一节。要点：
-# matlab -batch "cd('testdata/twr'); generate_tof_oracle"   # 期望 12 向量、exit 0
-# python3 tools/twr/verify_m1_a_tof.py                      # 期望 4/4
-# env -u LD_LIBRARY_PATH ctest -R uwb_qa_uwb_twr_math       # 期望通过
-# 然后把 provenance.matlab_executed 变为 true 的 JSON 检入。
-# 切记：MATLAB 跑完后不要再跑 gen_tof_oracle.py，否则会覆盖 MATLAB 的产物。
+# oracle of record（本机 MATLAB R2025b，Windows F:\MATLAB，从 WSL 调用）：
+matlab -batch "cd('testdata/twr'); generate_tof_oracle"   # 期望 12 向量、exit 0
+# 跑完后不要跑 gen_tof_oracle.py，否则会用等价的 Python 产物覆盖 MATLAB 产物。
 ```
 
 手工跑测试二进制必须 `env -u LD_LIBRARY_PATH`。安装验证只用临时前缀，不 `sudo install`。
@@ -251,5 +294,9 @@ tools/twr/verify_install_consumer.sh /tmp/opencode/uwb_install_m1a   # ALL OK
 sha256(uwb_twr_math.h)            = 6ae95f4221818cddecf10a7bcc9d7187b97c4f0df8e848c789707b17cbffca16
 sha256(qa_uwb_twr_math.cc)        = 6858fdf13834f3ad7125d4b67f8e09b56404f4d8bbd809f72f2abbb25ba2fbf0
 sha256(verify_m1_a_tof.py)        = 8faa896552ff8d1e053f0d2013d651872c970a05284013cbd8e23f53b756b1e3
-sha256(tof_oracle_vectors.json)   = 673592679848e6a37a4340316d4986019bc1c19ef31372fb4fb5dfe3a55924ea
+
+# 2026-09-30 MATLAB 实跑后更新：
+sha256(generate_tof_oracle.m)     = 2aa8ce31cbe3f13e6ea8b2da9747dee7d967a90b9b18a939402f950e50d2405c
+sha256(gen_tof_oracle.py)         = 5e71cc5fc6e19e883925cfa1189e9d6f487f285852596ff9d8d7b9a1b4238f42
+sha256(tof_oracle_vectors.json)   = 9d4dd0036240d8abaaeae1d7655eb2045c0da3970613645063909d65d14249d4
 ```

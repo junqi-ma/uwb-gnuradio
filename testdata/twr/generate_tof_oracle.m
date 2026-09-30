@@ -1,16 +1,17 @@
 function generate_tof_oracle()
 %GENERATE_TOF_ORACLE  M1-A independent SS/DS ToF oracle (MATLAB of record).
 %
-%   STATUS ON THIS MACHINE: NOT EXECUTED.  The M1-A instruction requires this
-%   script to be RUN and its vectors checked in.  The machine used to develop
-%   M1-A has no runnable MATLAB: /usr/local/MATLAB/R2024a has no `bin/matlab`
-%   launcher and no main binary, there is no MATLAB Runtime, and there is no
-%   Octave.  The checked-in `tof_oracle_vectors.json` was therefore produced
-%   by `gen_tof_oracle.py`, an exact `fractions.Fraction` reference of the SAME
-%   physical model.  That substitution is recorded in the JSON provenance
-%   block and in README_tof_oracle.md.  It is NOT MATLAB verification.
+%   STATUS: EXECUTED.  This script was first written but never run (the machine
+%   used to develop M1-A had no runnable MATLAB), so `tof_oracle_vectors.json`
+%   was initially produced by `gen_tof_oracle.py`, an exact
+%   `fractions.Fraction` reference of the SAME physical model.  It has since
+%   been RUN on MATLAB R2025b (Windows host, invoked from WSL); the
+%   checked-in vectors are now the output of THIS script.  The first run also
+%   exposed and fixed several latent bugs that only ever existed because the
+%   file had never been executed (single-argument R() calls, struct addition,
+%   and the wrap fold computing the fraction against the un-modded integer).
 %
-%   RUN (once MATLAB exists):
+%   RUN:
 %       matlab -batch "cd('testdata/twr'); generate_tof_oracle"
 %   It overwrites tof_oracle_vectors.json in the same directory and prints the
 %   per-vector expected values.  JSON object KEY ORDER differs from the Python
@@ -73,7 +74,7 @@ V{end+1} = mk('ds2_asymmetric','ds', R(1,1), domA, domA, ...
     R(500), R(1000), R(3000), 'nominal_same_clock', false, 'ok', ...
     'RA=2000,RB=4000,DA=3000,DB=1000 -> (8e6-3e6)/10000=500');
 V{end+1} = mk('ds3_tiny_tof_long_turnaround','ds', R(1,1), domA, domA, ...
-    R(1,7), R(3000)+R(2,7), R(5000)+R(3,7), 'nominal_same_clock', false, 'ok', ...
+    R(1,7), radd(R(3000), R(2,7)), radd(R(5000), R(3,7)), 'nominal_same_clock', false, 'ok', ...
     'tau=1/7; long asymmetric turnaround; no ns truncation anywhere');
 V{end+1} = mk('ds7_asymmetric_rate_ratio','ds', R(625,624), domA_rr, domB_rr, ...
     R(500), R(1000), R(1000), 'nominal_rate_ratio', false, 'ok', ...
@@ -86,15 +87,19 @@ doc = struct();
 doc.schema = 'uwb-twr-tof-oracle/1';
 doc.provenance = struct( ...
     'generator', 'testdata/twr/generate_tof_oracle.m', ...
-    'generator_language', 'MATLAB R2024a, int64 rational arithmetic', ...
+    'generator_language', ['MATLAB ' version('-release') ' int64 rational arithmetic'], ...
     'matlab_script', 'testdata/twr/generate_tof_oracle.m', ...
     'matlab_executed', true, ...
-    'matlab_executed_note', 'produced by running this script', ...
+    'matlab_executed_note', 'produced by running this script under MATLAB; see testdata/twr/README_tof_oracle.md', ...
     'units', 'ticks', ...
     'tof_domain', 'A (clock ratio k = fA/fB converts B ticks to A ticks)', ...
     'formulas', struct('ss', '(RA_A - k*DB_B) / 2', ...
                        'ds', '(RA_A*k*RB_B - DA_A*k*DB_B) / (RA_A + k*RB_B + DA_A + k*DB_B)'));
-doc.vectors = [V{:}];
+% A CELL array, not `[V{:}]`: SS vectors must carry only `ra`/`db`, DS vectors
+% all four.  jsonencode() serialises a cell array element by element, so each
+% vector keeps exactly the interval set it owns (the struct-array concatenation
+% would force a common schema on `intervals`).
+doc.vectors = V;
 
 fid = fopen(OUT, 'w');
 if fid < 0, error('cannot open %s for writing', OUT); end
@@ -124,6 +129,9 @@ end
 
 function r = R(n, d)
 %R  Exact rational in lowest terms, positive denominator.
+%   R(n) is the whole number n (denominator 1), matching the Python
+%   `Fraction` call sites; R(n, d) is the general case.
+if nargin < 2, d = 1; end
 if d == 0, error('zero denominator'); end
 if d < 0, n = -n; d = -d; end
 g = gcd(abs(n), d);
@@ -146,24 +154,20 @@ end
 function e = endpoint(x, base, wrap, WRAP_PERIOD)
 %ENDPOINT  (ticks,num,den) of `x + base`, folded when `wrap`.
 y = radd(x, base);
+% Split into an integer part and a sub-tick fraction FIRST.  Folding only the
+% integer part modulo the counter period is equivalent to `y mod WRAP_PERIOD`
+% and leaves the fraction untouched.  (An earlier revision modded the integer
+% and then subtracted it from the UN-folded y, which produced a bogus large
+% `num` -- it had never been executed.)
+ti = floor(double(y.num) / double(y.den));
+fr = rsub(y, R(ti, 1));
 if wrap
-    % `y` is a non-negative rational; fold the INTEGER part.
-    ti = floor(double(y.num) / double(y.den));
     ti = mod(ti, WRAP_PERIOD);
-    fr = rsub(y, R(ti, 1));
-    if fr.num == 0
-        e = struct('ticks', int64(ti), 'num', int64(0), 'den', int64(0));
-    else
-        e = struct('ticks', int64(ti), 'num', int64(fr.num), 'den', int64(fr.den));
-    end
+end
+if fr.num == 0
+    e = struct('ticks', int64(ti), 'num', int64(0), 'den', int64(0));
 else
-    ti = floor(double(y.num) / double(y.den));
-    fr = rsub(y, R(ti, 1));
-    if fr.num == 0
-        e = struct('ticks', int64(ti), 'num', int64(0), 'den', int64(0));
-    else
-        e = struct('ticks', int64(ti), 'num', int64(fr.num), 'den', int64(fr.den));
-    end
+    e = struct('ticks', int64(ti), 'num', int64(fr.num), 'den', int64(fr.den));
 end
 if e.den ~= 0 && e.den > 32767
     error('interval fraction denominator %d exceeds 32767', e.den);

@@ -4,71 +4,58 @@
 mathematics (`gr-uwb/include/gnuradio/uwb/uwb_twr_math.h`).  It is produced
 from an explicit PHYSICAL model, never from the C++ output (REQ-QA-01).
 
-## STATUS: the MATLAB oracle has NOT been run
+## STATUS: the MATLAB oracle HAS been run
 
-The M1-A instruction requires the MATLAB script to be executed on this machine
-(`matlab -batch "cd('testdata/twr'); generate_tof_oracle"`).  **It was not**,
-because this machine has no runnable MATLAB:
-
-* `/usr/local/MATLAB/R2024a/` exists but contains no `bin/matlab` launcher and
-  no `bin/glnxa64/MATLAB` binary -- only support libraries and licence files;
-* `matlab` is not on `PATH`;
-* there is no MATLAB Runtime / MCR and no Octave.
-
-Per the instruction, an unrun `.m` is **not** "MATLAB verified", so this file
-does not claim it is.  The checked-in vectors were produced by
-`gen_tof_oracle.py`, an exact `fractions.Fraction` reference of the **same**
-model.  That is a weaker authority than MATLAB and is recorded as such in the
-JSON `provenance` block.
-
-## Running the MATLAB oracle on another machine (handoff)
-
-The repo is self-contained; no build is needed to run the oracle.
+The oracle of record, `generate_tof_oracle.m`, **was executed** and produced the
+checked-in `tof_oracle_vectors.json`:
 
 ```bash
-git clone <repo> && cd <repo>
-git checkout feature/uwb-ds-twr
-
-# 1. run the oracle of record (overwrites tof_oracle_vectors.json in place)
 matlab -batch "cd('testdata/twr'); generate_tof_oracle"
 ```
 
-Expected: the script prints 12 vectors and exits 0.  If its internal identity
-check fails for a vector it calls `error(...)` and exits non-zero **without**
-writing a wrong golden.
+| field | value |
+|---|---|
+| MATLAB | `25.2.0.2998904 (R2025b)`, release `2025b` |
+| host | Windows install at `F:\MATLAB`, invoked from WSL through `matlab.exe -batch` |
+| command | `matlab -batch "cd('testdata/twr'); generate_tof_oracle"` |
+| exit status | `0` |
+| output | `wrote .../tof_oracle_vectors.json (12 vectors)` |
+| vector count | 12 |
+| JSON `provenance.matlab_executed` | `true` |
 
-```bash
-# 2. the vectors must satisfy BOTH independent checks
-python3 tools/twr/verify_m1_a_tof.py          # expects 4/4
-python3 testdata/twr/gen_tof_oracle.py        # DO NOT run before step 3
+The first execution also fixed latent bugs in the script, which had been
+written but never run: single-argument `R(n)` calls, a struct addition
+(`R(3000)+R(2,7)`), and -- most importantly -- the wrap fold, which computed the
+sub-tick fraction against the *un-modded* integer and therefore emitted a bogus
+large `num` for the `ss8_wrapped_a_interval` vector.  `jsonencode` also required
+the vector list to be a **cell array** rather than `[V{:}]`, so that SS vectors
+carry only `ra`/`db` and DS vectors all four intervals.
 
-# 3. build + C++ QA against the MATLAB-produced JSON
-cd gr-uwb/build && cmake . && cmake --build . -j"$(nproc)"
-env -u LD_LIBRARY_PATH ctest -R uwb_qa_uwb_twr_math --output-on-failure
-```
+### Independent agreement
 
-If every step passes, commit the regenerated `tof_oracle_vectors.json` (its
-`provenance.matlab_executed` becomes `true`), update the hashes below and the
-`docs/twr/M1-A_ToF数学开发报告.md` completion checklist, and only then is the
-"M1-A completed" box tickable.
+`gen_tof_oracle.py` is an exact `fractions.Fraction` implementation of the
+**same** physical model.  Its 12 vectors are identical to the MATLAB output
+field for field; `tools/twr/verify_m1_a_tof.py` and `gr-uwb/lib/qa_uwb_twr_math.cc`
+then check the C++ against both.  The Python file additionally gives an
+independent re-derivation from the raw endpoint ticks, including the wrap.
 
-**What NOT to do**
+### Two things that are NOT failures
 
-* Do **not** run `gen_tof_oracle.py` after MATLAB: it would overwrite the
-  MATLAB output with the Python reference and silently undo the very thing the
-  handoff exists to establish.  (It stays in the tree as the reference that
-  produced the pre-MATLAB vectors, and to prove the two models agree.)
-* Do **not** treat a key-order difference as a failure: MATLAB's `jsonencode`
-  sorts object keys, the Python writer does not.  Object order is not
-  significant; only the values are.
+* MATLAB's `jsonencode` **sorts object keys**; the Python writer does not.
+  Object order is not significant.
+* MATLAB writes large magnitudes in **exponent notation** (e.g.
+  `"tick_rate_hz": 6.38976E+10`).  That is valid JSON; the in-tree reader
+  (`uwb_twr_config.h`, `json::parse_number` via `strtod`) and Python both parse
+  it, and every value round-trips exactly (all magnitudes here are integers
+  below 2^53).
 
 ## Files
 
 | file | role |
 |---|---|
-| `generate_tof_oracle.m` | the oracle of record (MATLAB, R2024a). **Written, not executed.** |
-| `gen_tof_oracle.py` | exact `fractions.Fraction` reference of the same model; produced the checked-in vectors |
-| `tof_oracle_vectors.json` | the golden. 12 vectors. |
+| `generate_tof_oracle.m` | the oracle of record (MATLAB). **Executed** on R2025b; produced the checked-in vectors. |
+| `gen_tof_oracle.py` | exact `fractions.Fraction` reference of the same model; independent second check. Re-running it overwrites the MATLAB golden with an equivalent Python one. |
+| `tof_oracle_vectors.json` | the golden. 12 vectors, MATLAB output. |
 | `README_tof_oracle.md` | this file |
 
 ## The model
@@ -115,13 +102,15 @@ physical value.
 ## Reproduce
 
 ```bash
-# regenerate with the Python reference (what produced the checked-in file)
-python3 testdata/twr/gen_tof_oracle.py
-
-# the MATLAB oracle of record (needs a working MATLAB)
+# the oracle of record: this is what produced the checked-in vectors
 matlab -batch "cd('testdata/twr'); generate_tof_oracle"
 
-# the C++ QA and the independent verifier
+# the Python reference (independent; overwrites the golden with an
+# equivalent file -- do not run it if you want to keep MATLAB provenance)
+python3 testdata/twr/gen_tof_oracle.py
+
+# the C++ QA and the independent verifier, against the MATLAB vectors
+cd gr-uwb/build && cmake . && cmake --build . -j"$(nproc)"
 env -u LD_LIBRARY_PATH ctest -R uwb_qa_uwb_twr_math --output-on-failure
 python3 tools/twr/verify_m1_a_tof.py
 ```
@@ -129,7 +118,7 @@ python3 tools/twr/verify_m1_a_tof.py
 ## Hashes (of the checked-in files)
 
 ```
-sha256(tof_oracle_vectors.json) = 673592679848e6a37a4340316d4986019bc1c19ef31372fb4fb5dfe3a55924ea
-sha256(gen_tof_oracle.py)       = d09859b88cbd7ed5eac4e90acc5d90dc23057adf6dbe017086317f57dba18023
-sha256(generate_tof_oracle.m)   = 91eb8cb05e937684dea82facab34082d70cd697ecb5bb7e92cdd3d5b1109a418
+sha256(tof_oracle_vectors.json) = 9d4dd0036240d8abaaeae1d7655eb2045c0da3970613645063909d65d14249d4
+sha256(generate_tof_oracle.m)   = 2aa8ce31cbe3f13e6ea8b2da9747dee7d967a90b9b18a939402f950e50d2405c
+sha256(gen_tof_oracle.py)       = 5e71cc5fc6e19e883925cfa1189e9d6f487f285852596ff9d8d7b9a1b4238f42
 ```
