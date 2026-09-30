@@ -176,11 +176,14 @@ M1-A 的 14 例 C++ QA 与 12 条 MATLAB oracle 向量在 `uwb_qa_uwb_twr_math.c
 
 ## 9. 分配与容量观测
 
-- core 无每事件动态分配：输入按值、输出定长 batch；每次 `configure()` 只做
-  一次 `results.reserve(result_queue_capacity)`。
-- `qa_uwb_twr_core` / `qa_uwb_twr_m1b_e2e` 在 ASAN+UBSan（`detect_leaks=1`）下
-  无报告。
-- 既有数学/准入路径的分配未被本阶段改变；未声称「零分配」。
+> **复核更正**：本节原称"core 无每事件动态分配"，该说法**不成立**。实测（见
+> `M1-B_复核整改报告_2026-09-30.md` §8）：`Begin`/`TxPlanned`/`TxAccepted`/
+> `TxOutcomeResolved` 各 0 次分配；触发终态的 `RxFrame`（计算并发布估计）**6 次**分配
+> （结果对象的域/ratio/detail 字符串与结果存储插入）。
+
+- 每次 `configure()` 只做一次 `results.reserve(result_queue_capacity)`。
+- `qa_uwb_twr_core` / `qa_uwb_twr_m1b_e2e` 在 ASAN+UBSan（`detect_leaks=1`）下无报告。
+- 既有数学/准入路径的分配未被本阶段改变；不声称"零分配"。
 - 容量边界（结果存储、动作 batch、RX 队列、fake link 队列）均有上限并有 QA。
 
 ## 10. 未做 / 未验证
