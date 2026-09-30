@@ -76,8 +76,18 @@
  * same-clock case; for an independent-clock ratio each endpoint encodes and
  * interprets wire fields in its OWN domain, which is the whole point of the
  * session-level `WireTimestampBinding`.  `twr_config`, when present, is parsed
- * by the EXISTING `from_json_string` + `validate()` and cross-checked; a
- * rejection refuses the whole run (B17: "demo rejects a wrong config").
+ * by the EXISTING `from_json_string` + `validate()` and frozen with
+ * `effective_config()`; the endpoint cores are then built FROM that validated
+ * snapshot (R09), and the run prints an explicit requested -> effective -> core
+ * mapping.  A field the envelope also states must AGREE with the config -- a
+ * conflict refuses the whole run -- and every requested field the offline core
+ * does not consume is listed with its use and limit.  A rejection refuses the
+ * whole run (B17: "demo rejects a wrong config").
+ *
+ * `config_sha256` / `profile_sha256` are taken over the ACTUAL executed values,
+ * not over the request: the output publishes the canonical path/value list they
+ * were computed from, so an independent verifier can recompute them and catch a
+ * mutation.
  *
  * CLI:
  *     twr_fake_demo --request <in.json> --output <out.json>
@@ -301,6 +311,16 @@ std::string hex_bytes(const uint8_t* p, size_t n)
     return s;
 }
 
+// Small decimal formatting helpers for the config mapping view.
+std::string fmt_u16(uint16_t v)
+{
+    return twr::twr_int_to_text(static_cast<int64_t>(v));
+}
+std::string fmt_u32(uint32_t v)
+{
+    return twr::twr_int_to_text(static_cast<int64_t>(v));
+}
+
 // ===========================================================================
 // Small typed JSON readers.  Every failure names the offending path.
 // ===========================================================================
@@ -430,6 +450,29 @@ bool get_object(const Value& obj, const char* key, const std::string& path, cons
 // The scenario
 // ===========================================================================
 
+// R09: one row of the requested -> effective -> core field mapping.  The C++
+// side parses and validates the requested TwrConfig with the EXISTING parser
+// and validator, then builds the core snapshot FROM the validated values.  A
+// row records where each value came from so a consumer can see that the config
+// (not the discarded check) drove the run.
+struct MappingRow {
+    std::string field;     // logical name, e.g. "session.protocol"
+    std::string requested; // the requested view (config JSON, or the envelope)
+    std::string effective; // the validated/effective value
+    std::string core;      // the value the endpoint core actually executed
+    std::string source;    // "twr_config" | "envelope"
+    bool consumed = true;  // false: recorded use/limit, not executed by M1-B
+    std::string note;      // the conversion / limit, stated rather than implied
+};
+
+// R09: a requested field the OFFLINE core does not consume.  It is listed with
+// its intended use and the limit of that use here; nothing is silently ignored.
+struct UnconsumedRow {
+    std::string field;
+    std::string use;
+    std::string limit;
+};
+
 struct Scenario {
     // simulation gate
     std::string execution;
@@ -439,6 +482,7 @@ struct Scenario {
 
     twr::Protocol protocol = twr::Protocol::Ss;
 
+    // ---- envelope-stated values (the conflict view) ----------------------
     uint16_t session_id = 0;
     uint64_t session_generation = 1;
     uint16_t sequence_modulus = 4;
@@ -465,10 +509,108 @@ struct Scenario {
     int64_t response_reply_ticks = 0;
     int64_t final_reply_ticks = 0;
 
-    // Optional existing TwrConfig, validated by the existing validator.
+    // ---- R09 execution authority -----------------------------------------
+    //
+    // When `twr_config` is present it is parsed with `twr::from_json_string`,
+    // validated with `twr::validate()` and frozen with
+    // `twr::effective_config()`; the fields below are then taken FROM that
+    // validated snapshot (with an explicit mapping), and a value that
+    // contradicts the envelope is a refusal, never a silent override.  When it
+    // is absent the envelope values + documented core defaults are used.
     bool has_twr_config = false;
-    Value twr_config;
+    Value twr_config; // the raw requested TwrConfig JSON
+
+    bool config_resolved = false;
+    std::string requested_config_json; // "" when no twr_config was supplied
+    std::string effective_config_json; // the frozen effective snapshot view
+    std::string requested_config_fnv;  // twr::config_hash(requested)
+    std::string effective_config_fnv;  // twr::config_hash(effective)
+
+    // Effective execution values the two endpoint cores are built from.
+    uint32_t max_in_flight_exchanges = 1;
+    uint32_t result_queue_capacity = 8;
+    uint32_t event_queue_capacity = 16;
+    uint32_t exchange_id = 0;
+
+    // The three timing budgets stay in their REQUESTED representation (value +
+    // domain + reference + quantisation) and are projected onto each
+    // endpoint's own local tick grid only when the core config is built.  That
+    // way a two-rate scenario projects each endpoint correctly instead of
+    // reusing the initiator's ticks.
+    twr::TimedField reply_budget;    // timing.poll_to_response (reply budget)
+    twr::TimedField exchange_budget; // timeouts.exchange_timeout (whole exchange)
+    twr::TimedField evidence_budget; // timeouts.rx_timeout (wait for the missing step)
+
+    // The simulated adapter's plan constants.  These are DECLARED, not
+    // measured: M1-B has no device, so the numeric plan is generated from a
+    // stated TX-chain marker offset and host command lead.
+    int64_t plan_marker_offset_ticks = 64;
+    int64_t plan_command_lead_ticks = 32;
+
+    std::vector<MappingRow> mappings;
+    std::vector<UnconsumedRow> unconsumed;
 };
+
+// Project a TimedField onto an endpoint's LOCAL tick grid.  This is the one
+// place an offline timing budget becomes core ticks; the requested domain /
+// reference is preserved in the mapping row so the projection is visible, not
+// implied.  A zero value is "disabled" and stays zero.
+inline int64_t project_timed_to_local_ticks(const twr::TimedField& f,
+                                            const twr::ClockDomain& dom,
+                                            bool& ok)
+{
+    ok = true;
+    if (f.value.is_zero())
+        return 0;
+    if (f.value.negative()) {
+        ok = false;
+        return 0;
+    }
+    const int64_t ticks = twr::quantise_duration(f.value, dom.tick_rate_hz, ok);
+    if (!ok || ticks < 0) {
+        ok = false;
+        return 0;
+    }
+    return ticks;
+}
+
+// R09: build the per-endpoint CoreConfig from the RESOLVED scenario.  Both the
+// driver and the output builder call this ONE function, so the config the core
+// executed and the config the output describes cannot drift apart.
+twr::CoreConfig make_core_config(const Scenario& sc, twr::Role role)
+{
+    twr::CoreConfig c;
+    c.endpoint_id = (role == twr::Role::Initiator) ? "A" : "B";
+    c.protocol = sc.protocol;
+    c.role = role;
+    c.pan_id = sc.pan_id;
+    c.local_address = (role == twr::Role::Initiator) ? sc.a_local : sc.b_local;
+    c.peer_address = (role == twr::Role::Initiator) ? sc.a_peer : sc.b_peer;
+    c.session_id = sc.session_id;
+    c.session_generation = sc.session_generation;
+    c.sequence_modulus = sc.sequence_modulus;
+    c.initial_sequence = sc.initial_sequence;
+    c.local_domain = (role == twr::Role::Initiator) ? sc.dom_a : sc.dom_b;
+    c.peer_binding.peer_domain = (role == twr::Role::Initiator) ? sc.dom_b : sc.dom_a;
+    c.peer_binding.session_generation = sc.session_generation;
+    c.peer_binding.binding_generation = 1;
+    c.peer_binding.peer_marker = twr::TimestampMarker::RmarkerTx;
+    c.peer_binding.unit_convention = "device_ticks";
+    c.peer_binding.calibration_convention_id = sc.cal.id;
+    c.peer_binding.max_interval_ticks = sc.max_interval_ticks;
+    c.peer_binding.sequence_modulus = sc.sequence_modulus;
+    c.ratio = sc.ratio;
+    c.frame_profile = (role == twr::Role::Initiator) ? sc.profile_a : sc.profile_b;
+    c.local_calibration = sc.cal;
+    bool ok = true;
+    c.reply_deadline_ticks = project_timed_to_local_ticks(sc.reply_budget, c.local_domain, ok);
+    c.exchange_timeout_ticks =
+        project_timed_to_local_ticks(sc.exchange_budget, c.local_domain, ok);
+    c.evidence_wait_ticks = project_timed_to_local_ticks(sc.evidence_budget, c.local_domain, ok);
+    c.result_queue_capacity = sc.result_queue_capacity;
+    c.max_in_flight = sc.max_in_flight_exchanges;
+    return c;
+}
 
 // ===========================================================================
 // Endpoint tracing
@@ -486,6 +628,22 @@ struct FrameTrace {
     size_t nbytes = 0;
     twr::Frame frame;
     bool decoded = false;
+
+    // R08: the NUMERIC transmit plan this frame was BUILT from (tx frames
+    // only).  Emitted so an independent verifier can recompute the plan's
+    // identity from the trace alone.
+    bool has_plan = false;
+    twr::TxPlan plan;
+    bool deadline_verdict_feasible = false;
+    int64_t deadline_slack_ticks = 0;
+};
+
+// One ArmRx action, recorded so a verifier can see the deadline the core
+// handed the driver (R07's driver contract; also how a timeout change is
+// observable without inventing a failure).
+struct ArmRxTrace {
+    twr::FrameType expect_type = twr::FrameType::Response;
+    int64_t deadline_ticks = 0;
 };
 
 struct EndpointTrace {
@@ -495,6 +653,7 @@ struct EndpointTrace {
     uint16_t peer_address = 0;
 
     std::vector<FrameTrace> frames;
+    std::vector<ArmRxTrace> arm_rx;
 
     bool tx_planned_set[4] = { false, false, false, false };
     int64_t tx_planned_ticks[4] = { 0, 0, 0, 0 };
@@ -543,8 +702,8 @@ public:
         if (!link_.configure(lc, why))
             return false;
 
-        twr::CoreConfig ca = make_core_config(twr::Role::Initiator, sc_.a_local, sc_.a_peer);
-        twr::CoreConfig cb = make_core_config(twr::Role::Responder, sc_.b_local, sc_.b_peer);
+        twr::CoreConfig ca = make_core_config(sc_, twr::Role::Initiator);
+        twr::CoreConfig cb = make_core_config(sc_, twr::Role::Responder);
         if (!core_a_.configure(ca, why))
             return false;
         if (!core_b_.configure(cb, why))
@@ -564,8 +723,12 @@ public:
         {
             twr::CoreEvent ev;
             ev.kind = twr::CoreEventKind::Begin;
+            ev.generation = sc_.session_generation;
             ev.exchange.valid = true;
-            ev.exchange.value = 1;
+            // R09: the requested exchange id is an execution value.  The config
+            // validator allows 0 (the default), which is not a legal runtime
+            // identity, so 0 becomes the documented runtime default of 1.
+            ev.exchange.value = sc_.exchange_id != 0 ? sc_.exchange_id : 1;
             ev.event_id = 1;
             ev.now_ticks = 0;
             twr::CoreActionBatch b = core_a_.post(ev);
@@ -596,39 +759,6 @@ public:
     const EndpointTrace& trace_b() const { return tb_; }
 
 private:
-    twr::CoreConfig make_core_config(twr::Role role, uint16_t local, uint16_t peer) const
-    {
-        twr::CoreConfig c;
-        c.endpoint_id = (role == twr::Role::Initiator) ? "A" : "B";
-        c.protocol = sc_.protocol;
-        c.role = role;
-        c.pan_id = sc_.pan_id;
-        c.local_address = local;
-        c.peer_address = peer;
-        c.session_id = sc_.session_id;
-        c.session_generation = sc_.session_generation;
-        c.sequence_modulus = sc_.sequence_modulus;
-        c.initial_sequence = sc_.initial_sequence;
-        c.local_domain = (role == twr::Role::Initiator) ? sc_.dom_a : sc_.dom_b;
-        c.peer_binding.peer_domain = (role == twr::Role::Initiator) ? sc_.dom_b : sc_.dom_a;
-        c.peer_binding.session_generation = sc_.session_generation;
-        c.peer_binding.binding_generation = 1;
-        c.peer_binding.peer_marker = twr::TimestampMarker::RmarkerTx;
-        c.peer_binding.unit_convention = "device_ticks";
-        c.peer_binding.calibration_convention_id = sc_.cal.id;
-        c.peer_binding.max_interval_ticks = sc_.max_interval_ticks;
-        c.peer_binding.sequence_modulus = sc_.sequence_modulus;
-        c.ratio = sc_.ratio;
-        c.frame_profile = (role == twr::Role::Initiator) ? sc_.profile_a : sc_.profile_b;
-        c.local_calibration = sc_.cal;
-        c.reply_deadline_ticks = 0;
-        c.exchange_timeout_ticks = 0;
-        c.evidence_wait_ticks = 0;
-        c.result_queue_capacity = 8;
-        c.max_in_flight = 1;
-        return c;
-    }
-
     const twr::ClockDomain& domain_of(uint8_t ep) const
     {
         return ep == twr::kEndpointA ? sc_.dom_a : sc_.dom_b;
@@ -651,28 +781,40 @@ private:
         return ts;
     }
 
-    twr::Timestamp tx_timestamp(int64_t ticks, const twr::ClockDomain& dom) const
+    // R08: build the NUMERIC transmit plan the core will validate.  The
+    // internal identity the core checks is
+    //
+    //     calibrated_air_ticks == quantised_instant_ticks + marker_offset_ticks
+    //
+    // and every tick must be inside the endpoint's own domain.  The simulated
+    // adapter therefore derives the plan from the desired air instant:
+    //
+    //   marker_offset_ticks   = min(declared offset, air)        >= 0
+    //   quantised_instant     = air - marker_offset               >= 0
+    //   command_time_ticks    = quantised - min(declared lead, quantised) >= 0
+    //
+    // The declared offset/lead are constants of THIS simulated adapter (M1-B
+    // has no device to measure them); they are printed in the output and are
+    // not a claim about any hardware.  The plan carries NO sent/completed
+    // state: the outcome is a separate event.
+    twr::TxPlan make_tx_plan(int64_t air_ticks, const twr::ClockDomain& dom) const
     {
-        twr::Timestamp ts;
-        twr::Timestamp::from_ticks(ticks, dom, twr::TimestampMarker::RmarkerTx,
-                                   twr::TimestampSource::ScheduledCalibrated,
-                                   twr::timestamp_required_corrections(
-                                       twr::TimestampMarker::RmarkerTx),
-                                   ts);
-        ts.calibration_id = sc_.cal.id;
-        return ts;
-    }
-
-    static twr::TxSendEvidence plan_evidence()
-    {
-        twr::TxSendEvidence e;
-        e.command_time_recorded = true;
-        e.quantised_instant_recorded = true;
-        e.marker_offset_recorded = true;
-        e.calibrated_air_time_recorded = true;
-        e.send_accepted = false;
-        e.outcome = twr::TxOutcome::Unknown; // resolved by an explicit event
-        return e;
+        twr::TxPlan p;
+        p.domain = dom;
+        p.source = twr::TimestampSource::ScheduledCalibrated;
+        p.applied_corrections =
+            twr::timestamp_required_corrections(twr::TimestampMarker::RmarkerTx);
+        p.calibration_id = sc_.cal.id;
+        p.calibrated_air_ticks = air_ticks;
+        p.marker_offset_ticks =
+            air_ticks < sc_.plan_marker_offset_ticks ? air_ticks : sc_.plan_marker_offset_ticks;
+        p.quantised_instant_ticks = air_ticks - p.marker_offset_ticks;
+        const int64_t lead = p.quantised_instant_ticks < sc_.plan_command_lead_ticks
+                                 ? p.quantised_instant_ticks
+                                 : sc_.plan_command_lead_ticks;
+        p.command_time_ticks = p.quantised_instant_ticks - lead;
+        p.valid = true;
+        return p;
     }
 
     bool choose_planned(const EndpointTrace& tr, twr::FrameType intent, int64_t& out,
@@ -750,6 +892,7 @@ private:
 
         twr::CoreEvent ev;
         ev.kind = twr::CoreEventKind::RxFrame;
+        ev.generation = sc_.session_generation;
         ev.event_id = 1000u + static_cast<uint64_t>(rx.token);
         ev.fcs_passed = rx.fcs_passed;
         ev.decode_ok = rx.decode_ok && decoded;
@@ -767,36 +910,46 @@ private:
         for (size_t i = 0; i < batch.count; ++i) {
             const twr::CoreAction& a = batch.actions[i];
             switch (a.kind) {
-            case twr::CoreActionKind::ArmRx:
+            case twr::CoreActionKind::ArmRx: {
+                ArmRxTrace ar;
+                ar.expect_type = a.expect_type;
+                ar.deadline_ticks = a.deadline_ticks;
+                tr.arm_rx.push_back(ar);
                 break;
+            }
             case twr::CoreActionKind::PrepareTx: {
-                int64_t planned = 0;
-                if (!choose_planned(tr, a.tx_intent, planned, why))
+                int64_t air = 0;
+                if (!choose_planned(tr, a.tx_intent, air, why))
                     return false;
-                planned_by_token_[a.token.value] = planned;
-                planned_intent_by_token_[a.token.value] = a.tx_intent;
+                PendingPlan p;
+                p.intent = a.tx_intent;
+                p.plan = make_tx_plan(air, domain_of(ep));
+                p.deadline_verdict_feasible = true;
+                p.deadline_slack_ticks = 0;
+                pending_[a.token.value] = p;
 
                 twr::CoreEvent ev;
                 ev.kind = twr::CoreEventKind::TxPlanned;
+                ev.generation = sc_.session_generation;
                 ev.event_id = 2000u + a.token.value;
                 ev.token = a.token;
                 ev.tx_intent = a.tx_intent;
-                ev.planned_tx_time = tx_timestamp(planned, domain_of(ep));
-                ev.tx_evidence = plan_evidence();
-                ev.deadline_verdict_feasible = true;
-                ev.deadline_slack_ticks = 0;
+                ev.tx_plan = p.plan;
+                ev.deadline_verdict_feasible = p.deadline_verdict_feasible;
+                ev.deadline_slack_ticks = p.deadline_slack_ticks;
                 twr::CoreActionBatch b = core.post(ev);
                 if (!handle(core, tr, ep, b, why))
                     return false;
                 break;
             }
             case twr::CoreActionKind::SubmitTx: {
-                const auto it = planned_by_token_.find(a.token.value);
-                if (it == planned_by_token_.end()) {
+                const auto it = pending_.find(a.token.value);
+                if (it == pending_.end()) {
                     why = "SubmitTx for an unknown prepared token";
                     return false;
                 }
-                const int64_t air = it->second;
+                const PendingPlan& p = it->second;
+                const int64_t air = p.plan.calibrated_air_ticks;
                 const int idx = type_index(a.tx_intent);
                 tr.tx_planned_set[idx] = true;
                 tr.tx_planned_ticks[idx] = air;
@@ -807,6 +960,10 @@ private:
                 ft.peer_id = (ep == twr::kEndpointA) ? "B" : "A";
                 ft.ticks = air;
                 ft.token = a.token.value;
+                ft.has_plan = true;
+                ft.plan = p.plan;
+                ft.deadline_verdict_feasible = p.deadline_verdict_feasible;
+                ft.deadline_slack_ticks = p.deadline_slack_ticks;
                 std::memcpy(ft.bytes, a.bytes, a.nbytes);
                 ft.nbytes = a.nbytes;
                 std::string derr;
@@ -827,14 +984,19 @@ private:
                     return false;
                 }
 
+                // TxAccepted is NOT completion (R01).  The success outcome is a
+                // SEPARATE event, so the terminal result can only close after
+                // the local transmit evidence has converged.
                 twr::CoreEvent ea;
                 ea.kind = twr::CoreEventKind::TxAccepted;
+                ea.generation = sc_.session_generation;
                 ea.event_id = 3000u + a.token.value;
                 ea.token = a.token;
                 (void)core.post(ea);
 
                 twr::CoreEvent eo;
                 eo.kind = twr::CoreEventKind::TxOutcomeResolved;
+                eo.generation = sc_.session_generation;
                 eo.event_id = 4000u + a.token.value;
                 eo.token = a.token;
                 eo.tx_outcome = twr::TxOutcome::Completed;
@@ -857,13 +1019,21 @@ private:
         return true;
     }
 
+    // R08/R09: everything the adapter must remember between PrepareTx and
+    // SubmitTx, keyed by the causal token the core created.
+    struct PendingPlan {
+        twr::TxPlan plan;
+        twr::FrameType intent = twr::FrameType::Poll;
+        bool deadline_verdict_feasible = true;
+        int64_t deadline_slack_ticks = 0;
+    };
+
     const Scenario& sc_;
     twr::FakeTwrLink link_;
     twr::EndpointCore core_a_;
     twr::EndpointCore core_b_;
     EndpointTrace ta_, tb_;
-    std::map<uint64_t, int64_t> planned_by_token_;
-    std::map<uint64_t, twr::FrameType> planned_intent_by_token_;
+    std::map<uint64_t, PendingPlan> pending_;
 };
 
 // ===========================================================================
@@ -1186,43 +1356,327 @@ bool make_profile(const Scenario& sc, const twr::ClockDomain& dom, twr::FramePro
     return true;
 }
 
-// Validate the optional TwrConfig with the EXISTING parser/validator, and
-// cross-check it against the envelope.
-bool validate_twr_config(const Scenario& sc, std::string& why)
+// A host-monotonic timing budget, as the envelope's documented default (the
+// offline core has a single deadline channel and no host clock; the mapping
+// row says so).  This is NOT a substitute for an operator's measured value.
+twr::TimedField envelope_host_budget(int64_t ns)
 {
-    if (!sc.has_twr_config)
+    twr::TimedField f;
+    f.value = twr::Duration::from_nanos(ns);
+    f.domain = twr::TimeDomain::MonotonicHost;
+    f.reference = twr::TimeReferenceEvent::HostMonotonic;
+    f.marker.reset();
+    f.required_quantisation_hz = 1.0e9;
+    f.max_quantisation_error_ns = 1;
+    return f;
+}
+
+std::string budget_ns_text(const twr::TimedField& f)
+{
+    return twr::twr_duration_to_text(f.value);
+}
+
+// R09: every requested section the OFFLINE core does not consume, with its
+// intended use and the limit of that use here.  This is deliberately a
+// fixed list, not a silent omission.
+void add_unconsumed_rows(Scenario& sc, bool config_present)
+{
+    const std::string basis = config_present
+                                  ? "validated in the requested twr_config but not executed by M1-B"
+                                  : "not stated (the run used only the envelope)";
+    auto add = [&](const std::string& field, const std::string& use, const std::string& limit) {
+        sc.unconsumed.push_back(UnconsumedRow{ field, use, limit });
+    };
+    add("phy", "channel / preamble codes / SYNC length / PRF class / payload+PHR rate; the "
+               "radio profile M2 will program. " + basis,
+        "the offline core has no PHY: it consumes only the frame codec's profile. The measured "
+        "whitelist is still enforced by validate(), so an unsupported PHY is refused.");
+    add("frame.layout (geometry, sfd, phr, ranging_bit, mac_psdu, fcs, sts)",
+        "the MAC layout claim and the length/FCS rules. " + basis,
+        "the codec (frame_profile=frame_v1) is the geometry authority and builds the bytes; the "
+        "claim only has to AGREE with it. sts is phase-2 only.");
+    add("tx", "port, gain_db, iq_amplitude, calibrated_tx_power_dbm, power policy, pulse shaping "
+              "and a vendor power word. " + basis,
+        "no RF chain exists offline; the three different power quantities are never merged.");
+    add("rx", "port, gain, AGC, bandwidth, detection/correlation/first-path thresholds and "
+              "vendor PAC. " + basis,
+        "offline the first-path verdict comes from the fake link, not from these thresholds.");
+    add("radio", "device args, channels, native rate, clock/time source, peers and the readback "
+                 "record. " + basis,
+        "no device is opened offline; require_readback is a startup-only rule.");
+    add("timing.poll_start / response_to_final / final_to_report / post_tx_rx_enable / "
+        "min_tx_lead_time",
+        "the per-message timing plan (when the Poll goes out, the DS final-to-final delay, the "
+        "post-TX RX enable and the measured UHD lead time). " + basis,
+        "the offline core is receive-driven and has no device lead time; only the reply budget "
+        "(poll_to_response) and the two deadlines are mapped.");
+    add("calibration (link/antenna/cable delays, native ticks, first_path_algorithm, "
+        "cfo/sfo compensation, record, applied_count)",
+        "the versioned calibration constants and compensation policy. " + basis,
+        "the demo's local_calibration comes from the versioned envelope block, which must name "
+        "the same calibration id; applied_count must be 0 (applicable exactly once).");
+    add("session.measurement_count / measurement_interval / max_attempts_per_exchange / "
+        "retry_backoff",
+        "the multi-measurement and retry policy. " + basis,
+        "M1-B runs exactly one exchange with no retry; validate() already forces a consistent "
+        "attempt/backoff pair.");
+    add("session.require_pan_match / require_address_match",
+        "the peer-matching policy. " + basis,
+        "the M1-B core ALWAYS requires a PAN and address match; there is no offline switch that "
+        "could disable it.");
+    add("diagnostics (all except result_queue_capacity)",
+        "CIR/short-IQ/raw-frame capture bounds, output path, stats cadence and the "
+        "io_on_realtime_thread guard. " + basis,
+        "the offline core emits a bounded action batch and no diagnostic I/O. "
+        "event_queue_capacity is listed in the mapping above.");
+}
+
+// R09: resolve the execution authority.  When a `twr_config` is present it is
+// parsed with the EXISTING `from_json_string`, validated with the EXISTING
+// `validate()` and frozen with `effective_config()`; the core snapshot is then
+// built FROM those validated values, and a field the envelope also states is
+// REFUSED on disagreement rather than silently overridden.  Everything the
+// offline core does not consume is listed with its use and limit.
+bool resolve_execution_config(Scenario& sc, std::string& why)
+{
+    if (!sc.has_twr_config) {
+        // Envelope-only path: document the core defaults explicitly.
+        sc.exchange_budget = envelope_host_budget(1000000000); // 1 s
+        sc.evidence_budget = envelope_host_budget(1000000000); // 1 s
+        sc.reply_budget = twr::TimedField();
+        const twr::CoreConfig ca = make_core_config(sc, twr::Role::Initiator);
+        const twr::CoreConfig cb = make_core_config(sc, twr::Role::Responder);
+        auto add = [&](const std::string& field, const std::string& v,
+                       const std::string& core_v, const char* source, bool consumed,
+                       const char* note) {
+            sc.mappings.push_back(MappingRow{ field, v, v, core_v, source, consumed,
+                                              note ? note : "" });
+        };
+        add("session.protocol", twr::protocol_to_string(sc.protocol),
+            twr::protocol_to_string(ca.protocol), "envelope", true, "");
+        add("session.local_address", fmt_u16(sc.a_local),
+            "A=" + fmt_u16(ca.local_address) + " B=" + fmt_u16(cb.local_address),
+            "envelope", true, "");
+        add("session.peer_address", fmt_u16(sc.a_peer),
+            "A=" + fmt_u16(ca.peer_address) + " B=" + fmt_u16(cb.peer_address),
+            "envelope", true, "");
+        add("session.pan_id", fmt_u16(sc.pan_id), fmt_u16(ca.pan_id), "envelope", true, "");
+        add("session.session_id", fmt_u16(sc.session_id), fmt_u16(ca.session_id),
+            "envelope", true, "");
+        add("session.session_generation",
+            twr::twr_int_to_text(static_cast<int64_t>(sc.session_generation)),
+            "A=" + twr::twr_int_to_text(static_cast<int64_t>(ca.session_generation)),
+            "envelope", true, "");
+        add("session.sequence_modulus", fmt_u16(sc.sequence_modulus),
+            fmt_u16(ca.sequence_modulus), "envelope", true, "");
+        add("session.sequence", fmt_u16(sc.initial_sequence),
+            fmt_u16(ca.initial_sequence), "envelope", true, "");
+        add("session.exchange_id", fmt_u32(sc.exchange_id),
+            twr::twr_int_to_text(static_cast<int64_t>(sc.exchange_id != 0 ? sc.exchange_id : 1)),
+            "core_default", true,
+            "0 is not a legal runtime identity; the Begin uses the documented default 1");
+        add("session.max_in_flight_exchanges", fmt_u32(sc.max_in_flight_exchanges),
+            fmt_u32(ca.max_in_flight), "core_default", true,
+            "phase 1 allows exactly one in-flight exchange");
+        add("diagnostics.result_queue_capacity", fmt_u32(sc.result_queue_capacity),
+            fmt_u32(ca.result_queue_capacity), "core_default", true,
+            "bounded completed-result storage (M1-B B13); a full queue refuses a new Begin");
+        add("diagnostics.event_queue_capacity", fmt_u32(sc.event_queue_capacity),
+            "not consumed", "core_default", false,
+            "the offline two-endpoint driver has no adapter input queue; the core's bounded "
+            "action batch and the fake link's rx queue are the actual bounds");
+        add("timeouts.exchange_timeout", budget_ns_text(sc.exchange_budget),
+            "A=" + twr::twr_int_to_text(ca.exchange_timeout_ticks) + "ticks B=" +
+                twr::twr_int_to_text(cb.exchange_timeout_ticks) + "ticks",
+            "core_default", true,
+            "whole-exchange deadline: a host-monotonic ns budget projected onto the local device "
+            "grid (the offline core has ONE deadline channel and no host clock)");
+        add("timeouts.rx_timeout", budget_ns_text(sc.evidence_budget),
+            "A=" + twr::twr_int_to_text(ca.evidence_wait_ticks) + "ticks B=" +
+                twr::twr_int_to_text(cb.evidence_wait_ticks) + "ticks",
+            "core_default", true,
+            "used as the evidence wait (how long the core keeps waiting for the missing local "
+            "step); M1-B has no separate evidence-wait config field");
+        add("timing.poll_to_response (reply budget)", budget_ns_text(sc.reply_budget),
+            "A=" + twr::twr_int_to_text(ca.reply_deadline_ticks) + "ticks",
+            "core_default", true, "0 == disabled (the envelope states no reply budget)");
+        add_unconsumed_rows(sc, /*config_present=*/false);
+        sc.config_resolved = true;
         return true;
+    }
+
     std::string text;
     std::string derr;
     if (!twr::json::dump(sc.twr_config, text, derr, false)) {
         why = "twr_config is not serialisable: " + derr;
         return false;
     }
-    twr::TwrConfig cfg;
-    const twr::ValidationReport parsed = twr::from_json_string(text, cfg);
+    twr::TwrConfig requested;
+    const twr::ValidationReport parsed = twr::from_json_string(text, requested);
     if (!parsed.ok()) {
         why = "twr_config failed the existing parser/validator: " + parsed.to_string();
         return false;
     }
-    const twr::ValidationReport report = twr::validate(cfg);
+    const twr::ValidationReport report = twr::validate(requested);
     if (!report.ok()) {
         why = "twr_config failed validate(): " + report.to_string();
         return false;
     }
-    // Cross-check: the envelope and the config must name the same exchange.
-    if (cfg.session.protocol != sc.protocol) {
-        why = "twr_config.session.protocol does not match the envelope protocol";
+    const twr::EffectiveConfig eff = twr::effective_config(requested);
+    if (!eff.ok) {
+        why = "twr_config produced no effective snapshot: " + eff.validation.to_string();
         return false;
     }
-    if (cfg.session.session_id != sc.session_id) {
-        why = "twr_config.session.session_id does not match the envelope session_id";
+    const twr::TwrConfig& e = eff.effective;
+
+    // ---- conflicts: a field both state must agree, or the run is refused ---
+    auto conflict = [&](const std::string& field) {
+        why = "twr_config conflicts with the envelope on " + field +
+              " (a conflict is refused, never silently overridden)";
+        return false;
+    };
+    if (e.session.role != twr::Role::Initiator) {
+        why = "twr_config.session.role must be \"initiator\": this demo's endpoint A is the "
+              "initiator and role reversal is a later milestone";
         return false;
     }
-    if (cfg.session.local_address != sc.a_local ||
-        cfg.session.peer_address != sc.a_peer) {
-        why = "twr_config session addresses do not match the envelope's initiator addressing";
+    if (e.session.protocol != sc.protocol)
+        return conflict("session.protocol");
+    if (static_cast<uint16_t>(e.session.session_id) != sc.session_id)
+        return conflict("session.session_id");
+    if (e.session.pan_id != sc.pan_id)
+        return conflict("session.pan_id");
+    if (e.session.sequence_modulus != sc.sequence_modulus)
+        return conflict("session.sequence_modulus");
+    if (static_cast<uint16_t>(e.session.sequence) != sc.initial_sequence)
+        return conflict("session.sequence");
+    if (e.session.local_address != sc.a_local || e.session.peer_address != sc.a_peer)
+        return conflict("session.local_address/session.peer_address");
+    if (!e.calibration.calibration_id.empty() &&
+        e.calibration.calibration_id != sc.cal.id)
+        return conflict("calibration.calibration_id");
+
+    // ---- the config is the authority: adopt its validated values ----------
+    sc.protocol = e.session.protocol;
+    sc.session_id = static_cast<uint16_t>(e.session.session_id);
+    sc.pan_id = e.session.pan_id;
+    sc.sequence_modulus = e.session.sequence_modulus;
+    sc.initial_sequence = static_cast<uint16_t>(e.session.sequence);
+    sc.a_local = e.session.local_address;
+    sc.a_peer = e.session.peer_address;
+    sc.b_local = e.session.peer_address;
+    sc.b_peer = e.session.local_address;
+    sc.max_in_flight_exchanges = e.session.max_in_flight_exchanges;
+    sc.exchange_id = e.session.exchange_id;
+    sc.result_queue_capacity = e.diagnostics.result_queue_capacity;
+    sc.event_queue_capacity = e.diagnostics.event_queue_capacity;
+    sc.reply_budget = e.timing.poll_to_response;
+    sc.exchange_budget = e.timeouts.exchange_timeout;
+    sc.evidence_budget = e.timeouts.rx_timeout;
+
+    std::string rj;
+    if (!twr::to_json_string(requested, sc.requested_config_json, rj)) {
+        why = "cannot serialise the requested twr_config: " + rj;
         return false;
     }
+    std::string ej;
+    if (!twr::to_json_string(eff, sc.effective_config_json, ej)) {
+        why = "cannot serialise the effective config snapshot: " + ej;
+        return false;
+    }
+    sc.requested_config_fnv = twr::config_hash(requested);
+    sc.effective_config_fnv = twr::config_hash(eff.effective);
+
+    // ---- the explicit requested -> effective -> core mapping --------------
+    const twr::CoreConfig ca = make_core_config(sc, twr::Role::Initiator);
+    const twr::CoreConfig cb = make_core_config(sc, twr::Role::Responder);
+    auto add = [&](const std::string& field, const std::string& requested_v,
+                   const std::string& effective_v, const std::string& core_v,
+                   const char* note) {
+        sc.mappings.push_back(MappingRow{ field, requested_v, effective_v, core_v,
+                                          "twr_config", true, note ? note : "" });
+    };
+    add("session.protocol", twr::protocol_to_string(requested.session.protocol),
+        twr::protocol_to_string(e.session.protocol),
+        twr::protocol_to_string(ca.protocol), "");
+    add("session.local_address", fmt_u16(requested.session.local_address),
+        fmt_u16(e.session.local_address),
+        "A=" + fmt_u16(ca.local_address) + " B=" + fmt_u16(cb.local_address), "");
+    add("session.peer_address", fmt_u16(requested.session.peer_address),
+        fmt_u16(e.session.peer_address),
+        "A=" + fmt_u16(ca.peer_address) + " B=" + fmt_u16(cb.peer_address), "");
+    add("session.pan_id", fmt_u16(requested.session.pan_id), fmt_u16(e.session.pan_id),
+        fmt_u16(ca.pan_id), "");
+    add("session.session_id", fmt_u16(requested.session.session_id),
+        fmt_u16(e.session.session_id), fmt_u16(ca.session_id), "");
+    add("session.session_generation",
+        twr::twr_int_to_text(static_cast<int64_t>(sc.session_generation)),
+        twr::twr_int_to_text(static_cast<int64_t>(sc.session_generation)),
+        twr::twr_int_to_text(static_cast<int64_t>(ca.session_generation)),
+        "the config has no generation field; the envelope's versioned value is used");
+    add("session.sequence_modulus", fmt_u16(requested.session.sequence_modulus),
+        fmt_u16(e.session.sequence_modulus), fmt_u16(ca.sequence_modulus), "");
+    add("session.sequence", fmt_u16(requested.session.sequence),
+        fmt_u16(e.session.sequence), fmt_u16(ca.initial_sequence),
+        "the wire sequence is the core's initial_sequence");
+    add("session.exchange_id", fmt_u32(requested.session.exchange_id),
+        fmt_u32(e.session.exchange_id),
+        twr::twr_int_to_text(static_cast<int64_t>(sc.exchange_id != 0 ? sc.exchange_id : 1)),
+        sc.exchange_id != 0
+            ? "the Begin exchange identity"
+            : "0 is the config default and is not a legal runtime identity; Begin uses 1");
+    add("session.max_in_flight_exchanges",
+        fmt_u32(requested.session.max_in_flight_exchanges),
+        fmt_u32(e.session.max_in_flight_exchanges), fmt_u32(ca.max_in_flight), "");
+    add("diagnostics.result_queue_capacity",
+        fmt_u32(requested.diagnostics.result_queue_capacity),
+        fmt_u32(e.diagnostics.result_queue_capacity), fmt_u32(ca.result_queue_capacity),
+        "bounded completed-result storage; a full queue refuses a new Begin");
+    sc.mappings.push_back(MappingRow{
+        "diagnostics.event_queue_capacity",
+        fmt_u32(requested.diagnostics.event_queue_capacity),
+        fmt_u32(e.diagnostics.event_queue_capacity), "not consumed", "twr_config", false,
+        "the offline two-endpoint driver has no adapter input queue; the core's bounded action "
+        "batch and the fake link's rx queue are the actual bounds" });
+    add("timing.poll_to_response (reply budget)", budget_ns_text(requested.timing.poll_to_response),
+        budget_ns_text(e.timing.poll_to_response),
+        "A=" + twr::twr_int_to_text(ca.reply_deadline_ticks) + "ticks B=" +
+            twr::twr_int_to_text(cb.reply_deadline_ticks) + "ticks",
+        "projected onto each endpoint's local grid into CoreConfig.reply_deadline_ticks "
+        "(validated); the M1-B receive-driven FSM does not currently act on it, so it is a "
+        "stated per-message budget rather than a driver of the trace");
+    add("timeouts.exchange_timeout", budget_ns_text(requested.timeouts.exchange_timeout),
+        budget_ns_text(e.timeouts.exchange_timeout),
+        "A=" + twr::twr_int_to_text(ca.exchange_timeout_ticks) + "ticks B=" +
+            twr::twr_int_to_text(cb.exchange_timeout_ticks) + "ticks",
+        "whole-exchange deadline: a host-monotonic ns budget projected onto the local device "
+        "grid (the offline core has ONE deadline channel and no host clock)");
+    add("timeouts.rx_timeout", budget_ns_text(requested.timeouts.rx_timeout),
+        budget_ns_text(e.timeouts.rx_timeout),
+        "A=" + twr::twr_int_to_text(ca.evidence_wait_ticks) + "ticks B=" +
+            twr::twr_int_to_text(cb.evidence_wait_ticks) + "ticks",
+        "used as the evidence wait (how long the core keeps waiting for the missing local "
+        "step); M1-B has no separate evidence-wait field in the config");
+    add("frame.frame_profile",
+        twr::frame_profile_id_to_string(requested.frame.frame_profile),
+        twr::frame_profile_id_to_string(e.frame.frame_profile),
+        "frame_profile{bits=" + std::to_string(static_cast<unsigned>(ca.frame_profile.timestamp_bits)) +
+            ",unit=" + twr::twr_double_to_text(ca.frame_profile.timestamp_unit_hz) + "}",
+        "the codec profile selects the on-wire layout; the demo builds the equivalent "
+        "FrameProfile from the envelope's wire geometry");
+
+    // The core requires a finite termination bound.  Refuse here with a clear
+    // message rather than letting configure() fail with a generic one.
+    if (ca.exchange_timeout_ticks == 0 && ca.evidence_wait_ticks == 0 &&
+        ca.reply_deadline_ticks == 0) {
+        why = "the requested config leaves every timing budget disabled (exchange_timeout, "
+              "rx_timeout and poll_to_response all project to 0): an accepted exchange would "
+              "have no finite termination bound";
+        return false;
+    }
+
+    add_unconsumed_rows(sc, /*config_present=*/true);
+    sc.config_resolved = true;
     return true;
 }
 
@@ -1263,6 +1717,34 @@ Value frame_fields_value(const twr::Frame& f)
     return o;
 }
 
+// R08: the numeric plan, emitted so an independent verifier can recompute
+//     calibrated_air_ticks == quantised_instant_ticks + marker_offset_ticks
+// and check every field against the frame's t3B/t5A and the local evidence.
+Value plan_value(const twr::TxPlan& p)
+{
+    Value o = mkobj();
+    o.set("valid", mkbool(p.valid));
+    o.set("domain", mkstr(p.domain.to_string()));
+    o.set("domain_name", mkstr(p.domain.name));
+    o.set("tick_rate_hz", mknum(p.domain.tick_rate_hz));
+    o.set("epoch_id", mkint(static_cast<int64_t>(p.domain.epoch_id)));
+    o.set("timestamp_bits", mkint(static_cast<int64_t>(p.domain.timestamp_bits)));
+    o.set("source", mkstr(twr::timestamp_source_to_string(p.source)));
+    o.set("applied_corrections", mkint(static_cast<int64_t>(p.applied_corrections)));
+    o.set("corrections_text", mkstr(twr::timestamp_corrections_to_string(p.applied_corrections)));
+    o.set("calibration_id", mkstr(p.calibration_id));
+    o.set("command_time_ticks", mkstr(twr::twr_int_to_text(p.command_time_ticks)));
+    o.set("quantised_instant_ticks", mkstr(twr::twr_int_to_text(p.quantised_instant_ticks)));
+    o.set("marker_offset_ticks", mkstr(twr::twr_int_to_text(p.marker_offset_ticks)));
+    o.set("calibrated_air_ticks", mkstr(twr::twr_int_to_text(p.calibrated_air_ticks)));
+    o.set("identity_holds",
+          mkbool(p.calibrated_air_ticks == p.quantised_instant_ticks + p.marker_offset_ticks));
+    std::string why;
+    o.set("internally_consistent", mkbool(p.internally_consistent(why)));
+    o.set("consistency_note", mkstr(why));
+    return o;
+}
+
 Value frames_value(const EndpointTrace& tr)
 {
     Value arr = Value::make_array();
@@ -1278,6 +1760,23 @@ Value frames_value(const EndpointTrace& tr)
         o.set("decoded", mkbool(ft.decoded));
         Value fields = ft.decoded ? frame_fields_value(ft.frame) : mkobj();
         o.set("fields", fields);
+        if (ft.has_plan) {
+            o.set("plan", plan_value(ft.plan));
+            o.set("deadline_verdict_feasible", mkbool(ft.deadline_verdict_feasible));
+            o.set("deadline_slack_ticks", mkstr(twr::twr_int_to_text(ft.deadline_slack_ticks)));
+        }
+        arr.push(o);
+    }
+    return arr;
+}
+
+Value arm_rx_value(const EndpointTrace& tr)
+{
+    Value arr = Value::make_array();
+    for (const auto& ar : tr.arm_rx) {
+        Value o = mkobj();
+        o.set("expect", mkstr(twr::frame_type_to_string(ar.expect_type)));
+        o.set("deadline_ticks", mkstr(twr::twr_int_to_text(ar.deadline_ticks)));
         arr.push(o);
     }
     return arr;
@@ -1391,57 +1890,144 @@ Value endpoint_value(const EndpointTrace& tr, const twr::CoreConfig& cfg, bool s
         o.set("counters", mkstr(cj));
 
     o.set("local_evidence", local_evidence_value(tr, same_clock, tr.role == twr::Role::Initiator));
+    o.set("arm_rx", arm_rx_value(tr));
     o.set("frames", frames_value(tr));
     return o;
 }
 
-std::string scenario_canonical_text(const Scenario& sc)
+// A path/value record used for the executed snapshot and its hashes.  The text
+// layout (path "=" value "\n") is trivial to reproduce independently, which is
+// what lets a Python verifier recompute the hash and catch a mutation.
+struct KV {
+    std::string path;
+    std::string value;
+};
+
+void add_core_fields(std::vector<KV>& out, const twr::CoreConfig& c, const std::string& p)
 {
-    char buf[1024];
-    std::snprintf(buf, sizeof(buf),
-                  "twr-m1b-demo/1|protocol=%s|session=%u|gen=%llu|mod=%u|init_seq=%u|"
-                  "pan=%u|a=%u/%u|b=%u/%u|domA=%s|domB=%s|k=%lld/%lld|"
-                  "cal=%s@%llu|wire_bits=%u|max_interval=%llu|distance=%.17g|"
-                  "latA=%lld|latB=%lld|poll=%lld|reply=%lld|final=%lld|seed=%llu",
-                  twr::protocol_to_string(sc.protocol),
-                  static_cast<unsigned>(sc.session_id),
-                  static_cast<unsigned long long>(sc.session_generation),
-                  static_cast<unsigned>(sc.sequence_modulus),
-                  static_cast<unsigned>(sc.initial_sequence), static_cast<unsigned>(sc.pan_id),
-                  static_cast<unsigned>(sc.a_local), static_cast<unsigned>(sc.a_peer),
-                  static_cast<unsigned>(sc.b_local), static_cast<unsigned>(sc.b_peer),
-                  sc.dom_a.to_string().c_str(), sc.dom_b.to_string().c_str(),
-                  static_cast<long long>(sc.ratio.k_num()),
-                  static_cast<long long>(sc.ratio.k_den()), sc.cal.id.c_str(),
-                  static_cast<unsigned long long>(sc.cal.calibrated_epoch),
-                  static_cast<unsigned>(sc.wire_timestamp_bits),
-                  static_cast<unsigned long long>(sc.max_interval_ticks), sc.distance_m,
-                  static_cast<long long>(sc.tx_latency_a),
-                  static_cast<long long>(sc.tx_latency_b),
-                  static_cast<long long>(sc.poll_air_ticks),
-                  static_cast<long long>(sc.response_reply_ticks),
-                  static_cast<long long>(sc.final_reply_ticks),
-                  static_cast<unsigned long long>(sc.seed));
-    return std::string(buf);
+    out.push_back({ p + ".endpoint_id", c.endpoint_id });
+    out.push_back({ p + ".protocol", twr::protocol_to_string(c.protocol) });
+    out.push_back({ p + ".role", twr::role_to_string(c.role) });
+    out.push_back({ p + ".pan_id", fmt_u16(c.pan_id) });
+    out.push_back({ p + ".local_address", fmt_u16(c.local_address) });
+    out.push_back({ p + ".peer_address", fmt_u16(c.peer_address) });
+    out.push_back({ p + ".session_id", fmt_u16(c.session_id) });
+    out.push_back({ p + ".session_generation",
+                    twr::twr_int_to_text(static_cast<int64_t>(c.session_generation)) });
+    out.push_back({ p + ".sequence_modulus", fmt_u16(c.sequence_modulus) });
+    out.push_back({ p + ".initial_sequence", fmt_u16(c.initial_sequence) });
+    out.push_back({ p + ".reply_deadline_ticks",
+                    twr::twr_int_to_text(c.reply_deadline_ticks) });
+    out.push_back({ p + ".exchange_timeout_ticks",
+                    twr::twr_int_to_text(c.exchange_timeout_ticks) });
+    out.push_back({ p + ".evidence_wait_ticks",
+                    twr::twr_int_to_text(c.evidence_wait_ticks) });
+    out.push_back({ p + ".result_queue_capacity", fmt_u32(c.result_queue_capacity) });
+    out.push_back({ p + ".max_in_flight", fmt_u32(c.max_in_flight) });
+    out.push_back({ p + ".local_domain", c.local_domain.to_string() });
+    out.push_back({ p + ".peer_domain", c.peer_binding.peer_domain.to_string() });
+    out.push_back({ p + ".peer_max_interval_ticks",
+                    twr::twr_int_to_text(
+                        static_cast<int64_t>(c.peer_binding.max_interval_ticks)) });
+    out.push_back({ p + ".ratio.k_num",
+                    twr::twr_int_to_text(static_cast<int64_t>(c.ratio.k_num())) });
+    out.push_back({ p + ".ratio.k_den",
+                    twr::twr_int_to_text(static_cast<int64_t>(c.ratio.k_den())) });
+    out.push_back({ p + ".calibration.id", c.local_calibration.id });
+    out.push_back({ p + ".calibration.epoch",
+                    twr::twr_int_to_text(
+                        static_cast<int64_t>(c.local_calibration.calibrated_epoch)) });
+    out.push_back({ p + ".calibration.valid_from",
+                    twr::twr_int_to_text(c.local_calibration.valid_from_ticks) });
+    out.push_back({ p + ".calibration.valid_until",
+                    twr::twr_int_to_text(c.local_calibration.valid_until_ticks) });
 }
 
-std::string profile_canonical_text(const Scenario& sc)
+// The ACTUAL executed values, in a stable order.  A mutation of any of these
+// (or of the request that produced them) changes `config_sha256`.
+std::vector<KV> executed_field_records(const Scenario& sc)
 {
-    std::string s;
-    s += "profileA{bits=" + std::to_string(static_cast<unsigned>(sc.profile_a.timestamp_bits)) +
-         ",unit=" + twr::twr_double_to_text(sc.profile_a.timestamp_unit_hz) +
-         ",max_psdu=" + std::to_string(static_cast<unsigned long long>(sc.profile_a.max_psdu_bytes)) +
-         "}\n";
-    s += "profileB{bits=" + std::to_string(static_cast<unsigned>(sc.profile_b.timestamp_bits)) +
-         ",unit=" + twr::twr_double_to_text(sc.profile_b.timestamp_unit_hz) +
-         ",max_psdu=" + std::to_string(static_cast<unsigned long long>(sc.profile_b.max_psdu_bytes)) +
-         "}\n";
-    return s;
+    std::vector<KV> out;
+    out.push_back({ "schema", "twr-m1b-demo/1" });
+    out.push_back({ "simulation.execution", "offline_simulation" });
+    out.push_back({ "simulation.mode", "protocol_estimate" });
+    out.push_back({ "simulation.seed", twr::twr_int_to_text(static_cast<int64_t>(sc.seed)) });
+    out.push_back({ "simulation.scenario_id", sc.scenario_id });
+    out.push_back({ "source",
+                    sc.has_twr_config ? std::string("twr_config") : std::string("envelope") });
+    out.push_back({ "requested_config_hash", sc.requested_config_fnv });
+    out.push_back({ "effective_config_hash", sc.effective_config_fnv });
+    out.push_back({ "runtime.exchange_id",
+                    twr::twr_int_to_text(static_cast<int64_t>(sc.exchange_id != 0
+                                                                  ? sc.exchange_id
+                                                                  : 1)) });
+    out.push_back({ "adapter.plan_marker_offset_ticks",
+                    twr::twr_int_to_text(sc.plan_marker_offset_ticks) });
+    out.push_back({ "adapter.plan_command_lead_ticks",
+                    twr::twr_int_to_text(sc.plan_command_lead_ticks) });
+    out.push_back({ "wire.timestamp_bits", fmt_u16(sc.wire_timestamp_bits) });
+    add_core_fields(out, make_core_config(sc, twr::Role::Initiator), "core.a");
+    add_core_fields(out, make_core_config(sc, twr::Role::Responder), "core.b");
+    return out;
+}
+
+std::vector<KV> profile_field_records(const Scenario& sc)
+{
+    std::vector<KV> out;
+    const twr::FrameProfile* ps[2] = { &sc.profile_a, &sc.profile_b };
+    const char* names[2] = { "profile.a", "profile.b" };
+    for (int i = 0; i < 2; ++i) {
+        const std::string p = names[i];
+        out.push_back({ p + ".version", twr::twr_int_to_text(ps[i]->version) });
+        out.push_back({ p + ".timestamp_bits",
+                        fmt_u16(ps[i]->timestamp_bits) });
+        out.push_back({ p + ".timestamp_unit_hz",
+                        twr::twr_double_to_text(ps[i]->timestamp_unit_hz) });
+        out.push_back({ p + ".max_psdu_bytes",
+                        fmt_u16(ps[i]->max_psdu_bytes) });
+        out.push_back({ p + ".fcs_appended_by_modulation_layer",
+                        twr::twr_bool_to_text(ps[i]->fcs_appended_by_modulation_layer) });
+    }
+    return out;
+}
+
+std::string kv_canonical_text(const std::vector<KV>& fields)
+{
+    std::string text;
+    for (const KV& f : fields) {
+        text += f.path;
+        text += '=';
+        text += f.value;
+        text += '\n';
+    }
+    return text;
+}
+
+Value kv_array_value(const std::vector<KV>& fields)
+{
+    Value arr = Value::make_array();
+    for (const KV& f : fields) {
+        Value o = mkobj();
+        o.set("path", mkstr(f.path));
+        o.set("value", mkstr(f.value));
+        arr.push(o);
+    }
+    return arr;
+}
+
+Value parse_json_or_null(const std::string& text)
+{
+    if (text.empty())
+        return Value::make_null();
+    Value v;
+    std::string err;
+    if (!twr::json::parse(text, v, err))
+        return Value::make_string(text);
+    return v;
 }
 
 // Forward declarations for helpers used while building the output.
 int64_t driver_prop(const Scenario& sc, uint8_t source);
-twr::CoreConfig CoreConfigView(const Scenario& sc, twr::Role role);
 
 Value build_output(const Scenario& sc, const DemoDriver& driver, const std::string& input_sha,
                     const std::string& config_sha, const std::string& profile_sha)
@@ -1498,34 +2084,50 @@ Value build_output(const Scenario& sc, const DemoDriver& driver, const std::stri
     cr.set("domain_b", mkstr(sc.dom_b.to_string()));
     out.set("clock_ratio", cr);
 
-    // A validated echo of the execution snapshot (what the C++ core actually
-    // used), so a consumer never has to re-derive it from the request.  This is
-    // a CONFIGURATION echo, not a measurement.
+    // R09: the configuration authority.  `requested` and `effective` are the
+    // config module's own views; `executed_fields` are the ACTUAL values both
+    // endpoint cores ran with (their hash is `config_sha256`); `mapping` is the
+    // explicit requested -> effective -> core table; `unconsumed` names every
+    // requested field the offline core does not use, with its use and limit.
+    const std::vector<KV> executed = executed_field_records(sc);
+    const std::vector<KV> profile = profile_field_records(sc);
     Value cfg = mkobj();
-    cfg.set("note", mkstr("validated execution snapshot echo; not a measurement"));
-    Value sess = mkobj();
-    sess.set("session_id", mkint(sc.session_id));
-    sess.set("session_generation", mkint(static_cast<int64_t>(sc.session_generation)));
-    sess.set("sequence_modulus", mkint(sc.sequence_modulus));
-    sess.set("initial_sequence", mkint(sc.initial_sequence));
-    sess.set("pan_id", mkint(sc.pan_id));
-    cfg.set("session", sess);
-    Value eps2 = mkobj();
-    Value ea2 = mkobj();
-    ea2.set("local_address", mkint(sc.a_local));
-    ea2.set("peer_address", mkint(sc.a_peer));
-    Value eb2 = mkobj();
-    eb2.set("local_address", mkint(sc.b_local));
-    eb2.set("peer_address", mkint(sc.b_peer));
-    eps2.set("a", ea2);
-    eps2.set("b", eb2);
-    cfg.set("endpoints", eps2);
-    Value cals = mkobj();
-    cals.set("id", mkstr(sc.cal.id));
-    cals.set("calibrated_epoch", mkint(static_cast<int64_t>(sc.cal.calibrated_epoch)));
-    cals.set("valid_from_ticks", mkint(sc.cal.valid_from_ticks));
-    cals.set("valid_until_ticks", mkint(sc.cal.valid_until_ticks));
-    cfg.set("calibration", cals);
+    cfg.set("note", mkstr(
+        "configuration authority: the core snapshot was built from the validated "
+        "twr_config when present, otherwise from the envelope; this is a configuration echo, "
+        "not a measurement"));
+    cfg.set("source", mkstr(sc.has_twr_config ? "twr_config" : "envelope"));
+    cfg.set("requested", parse_json_or_null(sc.requested_config_json));
+    cfg.set("effective", parse_json_or_null(sc.effective_config_json));
+    cfg.set("requested_config_hash", mkstr(sc.requested_config_fnv));
+    cfg.set("effective_config_hash", mkstr(sc.effective_config_fnv));
+    cfg.set("canonical_layout", mkstr("one \"path=value\" per entry, joined with '\\n'"));
+    cfg.set("executed_fields", kv_array_value(executed));
+    cfg.set("profile_fields", kv_array_value(profile));
+
+    Value map_arr = Value::make_array();
+    for (const MappingRow& m : sc.mappings) {
+        Value o = mkobj();
+        o.set("field", mkstr(m.field));
+        o.set("requested", mkstr(m.requested));
+        o.set("effective", mkstr(m.effective));
+        o.set("core", mkstr(m.core));
+        o.set("source", mkstr(m.source));
+        o.set("consumed", mkbool(m.consumed));
+        o.set("note", mkstr(m.note));
+        map_arr.push(o);
+    }
+    cfg.set("mapping", map_arr);
+
+    Value unc_arr = Value::make_array();
+    for (const UnconsumedRow& u : sc.unconsumed) {
+        Value o = mkobj();
+        o.set("field", mkstr(u.field));
+        o.set("use", mkstr(u.use));
+        o.set("limit", mkstr(u.limit));
+        unc_arr.push(o);
+    }
+    cfg.set("unconsumed", unc_arr);
     out.set("configuration", cfg);
 
     out.set("input_sha256", mkstr(input_sha));
@@ -1533,8 +2135,8 @@ Value build_output(const Scenario& sc, const DemoDriver& driver, const std::stri
     out.set("profile_sha256", mkstr(profile_sha));
 
     Value eps = mkobj();
-    eps.set("a", endpoint_value(ta, CoreConfigView(sc, twr::Role::Initiator), same_clock));
-    eps.set("b", endpoint_value(tb, CoreConfigView(sc, twr::Role::Responder), same_clock));
+    eps.set("a", endpoint_value(ta, make_core_config(sc, twr::Role::Initiator), same_clock));
+    eps.set("b", endpoint_value(tb, make_core_config(sc, twr::Role::Responder), same_clock));
     out.set("endpoints", eps);
 
     return out;
@@ -1548,29 +2150,6 @@ int64_t driver_prop(const Scenario& sc, uint8_t source)
         (source == twr::kEndpointA) ? sc.dom_b : sc.dom_a;
     const double seconds = sc.distance_m / twr::kFakeLinkSpeedOfLightMps;
     return static_cast<int64_t>(std::llround(seconds * dest.tick_rate_hz));
-}
-
-// A tiny view helper so endpoint_value does not need the driver's private
-// mapping.  It reconstructs the endpoint's own CoreConfig fields from the
-// scenario (the same values driver.make_core_config used).
-twr::CoreConfig CoreConfigView(const Scenario& sc, twr::Role role)
-{
-    twr::CoreConfig c;
-    c.endpoint_id = (role == twr::Role::Initiator) ? "A" : "B";
-    c.protocol = sc.protocol;
-    c.role = role;
-    c.pan_id = sc.pan_id;
-    c.local_address = (role == twr::Role::Initiator) ? sc.a_local : sc.b_local;
-    c.peer_address = (role == twr::Role::Initiator) ? sc.a_peer : sc.b_peer;
-    c.session_id = sc.session_id;
-    c.session_generation = sc.session_generation;
-    c.sequence_modulus = sc.sequence_modulus;
-    c.initial_sequence = sc.initial_sequence;
-    c.local_domain = (role == twr::Role::Initiator) ? sc.dom_a : sc.dom_b;
-    c.ratio = sc.ratio;
-    c.frame_profile = (role == twr::Role::Initiator) ? sc.profile_a : sc.profile_b;
-    c.local_calibration = sc.cal;
-    return c;
 }
 
 Value error_output(const std::string& message)
@@ -1689,11 +2268,19 @@ int main(int argc, char** argv)
     }
 
     why.clear();
-    if (!demo::validate_twr_config(sc, why)) {
+    if (!demo::resolve_execution_config(sc, why)) {
         std::fprintf(stderr, "error: %s\n", why.c_str());
         demo::write_output(output_path, demo::error_output(why), why);
         return 2;
     }
+
+    // The hashes are taken over the ACTUAL executed values (not over the
+    // request), so a mutation of any executed field is detectable by
+    // recomputing the canonical text the output itself publishes.
+    const std::string config_sha =
+        demo::sha256_hex(demo::kv_canonical_text(demo::executed_field_records(sc)));
+    const std::string profile_sha =
+        demo::sha256_hex(demo::kv_canonical_text(demo::profile_field_records(sc)));
 
     demo::DemoDriver driver(sc);
     why.clear();
@@ -1702,9 +2289,6 @@ int main(int argc, char** argv)
         demo::write_output(output_path, demo::error_output(why), why);
         return 2;
     }
-
-    const std::string config_sha = demo::sha256_hex(demo::scenario_canonical_text(sc));
-    const std::string profile_sha = demo::sha256_hex(demo::profile_canonical_text(sc));
 
     Value out = demo::build_output(sc, driver, input_sha, config_sha, profile_sha);
 
@@ -1730,5 +2314,19 @@ int main(int argc, char** argv)
                  "(simulation / protocol estimate; measurement_valid=false)\n",
                  request_path.c_str(), twr::protocol_to_string(sc.protocol),
                  sc.scenario_id.c_str(), output_path.c_str());
+    // R09: the requested -> effective -> core mapping is BOTH in the machine
+    // output (configuration.mapping) and printed here, so the authority of the
+    // run is visible at a glance and a non-consumed field can never look used.
+    std::fprintf(stderr, "twr_fake_demo: config authority=%s requested_hash=%s "
+                         "effective_hash=%s\n",
+                 sc.has_twr_config ? "twr_config" : "envelope",
+                 sc.requested_config_fnv.empty() ? "(none)" : sc.requested_config_fnv.c_str(),
+                 sc.effective_config_fnv.empty() ? "(none)" : sc.effective_config_fnv.c_str());
+    for (const demo::MappingRow& m : sc.mappings) {
+        std::fprintf(stderr, "  map %-44s %s -> %s -> %s [%s]%s%s\n", m.field.c_str(),
+                     m.requested.c_str(), m.effective.c_str(), m.core.c_str(),
+                     m.source.c_str(), m.consumed ? "" : " NOT-CONSUMED: ",
+                     m.consumed ? "" : m.note.c_str());
+    }
     return 0;
 }

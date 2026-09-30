@@ -27,6 +27,8 @@ binary nor ``g++`` is available the suite SKIPS with an explicit message.
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 import shutil
@@ -275,6 +277,236 @@ class TestDemo(DemoCase):
         self.assertEqual(output1["output_sha256"], output2["output_sha256"])
         self.assertEqual(json.dumps(output1, sort_keys=True),
                          json.dumps(output2, sort_keys=True))
+
+    # -- R09: the TwrConfig is an execution authority, not a discarded check --
+
+    @staticmethod
+    def _canonical(fields):
+        """Reproduce the C++ demo's executed-field canonical text.
+
+        The output publishes ``configuration.executed_fields`` as path/value
+        pairs and ``configuration.canonical_layout`` says exactly how they are
+        joined, so this is an INDEPENDENT recomputation, not a copy of a number
+        the C++ side handed out.
+        """
+        return "".join(f["path"] + "=" + f["value"] + "\n" for f in fields)
+
+    def _config_run(self, name, request):
+        rc, output = self.run_request(request, name)
+        if rc != 0:
+            self.fail("demo refused %s: rc=%s output=%s" % (name, rc, output))
+        return output
+
+    def test_full_legal_twr_config_runs_end_to_end(self):
+        """A COMPLETE requested TwrConfig is validated and then EXECUTED."""
+        if D.T is None:
+            self.skipTest("uwb.twr_config unavailable: %s" % D.TWR_CONFIG_IMPORT_ERROR)
+        twr_config = D.build_twr_config(protocol="ss")
+        request = D.build_request("ss_unity", twr_config=twr_config)
+        output = self._config_run("full_config", request)
+
+        self.assertTrue(output["status"]["ok"])
+        self.assertEqual(output["protocol"], "ss")
+        self.assertEqual(self._endpoint(output, "a")["completion"], "complete")
+
+        cfg = output["configuration"]
+        self.assertEqual(cfg["source"], "twr_config")
+        self.assertEqual(cfg["requested_config_hash"],
+                         cfg["effective_config_hash"])
+        self.assertTrue(cfg["requested_config_hash"].startswith("fnv1a64:"))
+
+        # The hashes are over the ACTUAL executed values and are independently
+        # reproducible from what the output itself publishes.
+        self.assertEqual(
+            hashlib.sha256(self._canonical(cfg["executed_fields"]).encode()).hexdigest(),
+            output["config_sha256"])
+        self.assertEqual(
+            hashlib.sha256(self._canonical(cfg["profile_fields"]).encode()).hexdigest(),
+            output["profile_sha256"])
+
+        # The mapping must show the config drove the session fields.
+        by_field = {m["field"]: m for m in cfg["mapping"]}
+        for field in ("session.protocol", "session.local_address",
+                      "session.session_id", "session.pan_id",
+                      "session.sequence_modulus", "session.sequence",
+                      "diagnostics.result_queue_capacity"):
+            self.assertIn(field, by_field)
+            self.assertEqual(by_field[field]["source"], "twr_config", field)
+            self.assertTrue(by_field[field]["consumed"], field)
+        # event_queue_capacity is stated but NOT consumed offline, with a limit.
+        self.assertFalse(by_field["diagnostics.event_queue_capacity"]["consumed"])
+        self.assertIn("queue", by_field["diagnostics.event_queue_capacity"]["note"])
+
+        # Every unconsumed section is named with its use and limit.
+        self.assertGreaterEqual(len(cfg["unconsumed"]), 8)
+        for row in cfg["unconsumed"]:
+            self.assertTrue(row["field"])
+            self.assertTrue(row["use"])
+            self.assertTrue(row["limit"])
+
+    def test_r08_numeric_plan_is_verifiable_and_matches_the_frame(self):
+        """The plan's internal identity and the frame's t3B/t5A agree."""
+        twr_config = D.build_twr_config(protocol="ds")
+        request = D.build_request("ds_unity", twr_config=twr_config)
+        output = self._config_run("plan", request)
+
+        for name in ("a", "b"):
+            ep = self._endpoint(output, name)
+            tx_frames = [f for f in ep["frames"] if f["dir"] == "tx"]
+            self.assertTrue(tx_frames, name)
+            for fr in tx_frames:
+                plan = fr["plan"]
+                self.assertTrue(plan["valid"])
+                self.assertTrue(plan["internally_consistent"])
+                self.assertTrue(plan["identity_holds"])
+                q = int(plan["quantised_instant_ticks"])
+                off = int(plan["marker_offset_ticks"])
+                air = int(plan["calibrated_air_ticks"])
+                self.assertEqual(q + off, air)
+                self.assertGreaterEqual(q, 0)
+                self.assertGreaterEqual(off, 0)
+                self.assertLessEqual(int(plan["command_time_ticks"]), q)
+                # The frame's t3B/t5A carry the calibrated air instant.
+                ts = fr["fields"]["timestamps"]
+                for fld in ("t3B", "t5A"):
+                    if fld in ts:
+                        self.assertEqual(int(ts[fld]), air)
+
+    def test_config_protocol_change_changes_trace(self):
+        if D.T is None:
+            self.skipTest("uwb.twr_config unavailable")
+        ss = self._config_run(
+            "proto_ss",
+            D.build_request("ss_unity", twr_config=D.build_twr_config(protocol="ss")))
+        ds = self._config_run(
+            "proto_ds",
+            D.build_request("ds_unity", twr_config=D.build_twr_config(protocol="ds")))
+        self.assertEqual(ss["protocol"], "ss")
+        self.assertEqual(ds["protocol"], "ds")
+        # DS has a Final frame at B; SS does not.
+        self.assertTrue(any(f["type"] == "final" for f in
+                            self._endpoint(ds, "b")["frames"]))
+        self.assertFalse(any(f["type"] == "final" for f in
+                             self._endpoint(ss, "b")["frames"]))
+        self.assertNotEqual(ss["config_sha256"], ds["config_sha256"])
+
+    def test_config_address_change_changes_frames_and_trace(self):
+        if D.T is None:
+            self.skipTest("uwb.twr_config unavailable")
+        local, peer = 300, 700
+        twr_config = D.build_twr_config(local_address=local, peer_address=peer)
+        request = D.build_request("ss_unity", twr_config=twr_config)
+        request["endpoints"] = {
+            "a": {"local_address": local, "peer_address": peer},
+            "b": {"local_address": peer, "peer_address": local},
+        }
+        output = self._config_run("addr", request)
+
+        poll = self._frame(self._endpoint(output, "a"), "poll", "tx")
+        self.assertEqual(poll["fields"]["src_addr"], local)
+        self.assertEqual(poll["fields"]["dst_addr"], peer)
+        by_field = {m["field"]: m for m in output["configuration"]["mapping"]}
+        self.assertEqual(by_field["session.local_address"]["requested"], str(local))
+        self.assertIn(str(local), by_field["session.local_address"]["core"])
+
+        base = self._config_run(
+            "addr_base",
+            D.build_request("ss_unity", twr_config=D.build_twr_config()))
+        self.assertNotEqual(output["config_sha256"], base["config_sha256"])
+
+    def test_config_initial_sequence_changes_frame_seq(self):
+        if D.T is None:
+            self.skipTest("uwb.twr_config unavailable")
+        for seq in (0, 2):
+            twr_config = D.build_twr_config(sequence=seq, sequence_modulus=4)
+            request = D.build_request("ss_unity", twr_config=twr_config)
+            request["session"]["initial_sequence"] = seq
+            request["session"]["sequence_modulus"] = 4
+            output = self._config_run("seq%d" % seq, request)
+            poll = self._frame(self._endpoint(output, "a"), "poll", "tx")
+            self.assertEqual(poll["fields"]["seq"], seq)
+            by_field = {m["field"]: m for m in output["configuration"]["mapping"]}
+            self.assertEqual(by_field["session.sequence"]["requested"], str(seq))
+
+    def test_config_capacity_and_timeout_changes_are_observable(self):
+        if D.T is None:
+            self.skipTest("uwb.twr_config unavailable")
+        # Capacity: only in the config; the executed snapshot must move.
+        cap1 = self._config_run(
+            "cap1", D.build_request(
+                "ss_unity",
+                twr_config=D.build_twr_config(result_queue_capacity=1)))
+        cap3 = self._config_run(
+            "cap3", D.build_request(
+                "ss_unity",
+                twr_config=D.build_twr_config(result_queue_capacity=3)))
+        map1 = {m["field"]: m for m in cap1["configuration"]["mapping"]}
+        map3 = {m["field"]: m for m in cap3["configuration"]["mapping"]}
+        self.assertEqual(map1["diagnostics.result_queue_capacity"]["core"], "1")
+        self.assertEqual(map3["diagnostics.result_queue_capacity"]["core"], "3")
+        self.assertNotEqual(cap1["config_sha256"], cap3["config_sha256"])
+
+        # Timeout: the whole-exchange deadline the core handed the driver moves.
+        long_ = self._config_run(
+            "to_long", D.build_request(
+                "ss_unity",
+                twr_config=D.build_twr_config(exchange_timeout_ns=50_000_000)))
+        short = self._config_run(
+            "to_short", D.build_request(
+                "ss_unity",
+                twr_config=D.build_twr_config(exchange_timeout_ns=5_000_000)))
+        d_long = int(self._endpoint(long_, "a")["arm_rx"][0]["deadline_ticks"])
+        d_short = int(self._endpoint(short, "a")["arm_rx"][0]["deadline_ticks"])
+        self.assertEqual(d_long, 50_000_000)
+        self.assertEqual(d_short, 5_000_000)
+        self.assertLess(d_short, d_long)
+
+    def test_malformed_full_config_is_rejected(self):
+        """A structurally bad config is refused by the existing validator."""
+        if D.T is None:
+            self.skipTest("uwb.twr_config unavailable")
+        bad = D.build_twr_config()
+        bad["session"]["session_id"] = 70000  # does not fit the 16-bit wire field
+        rc, output = self.run_request(
+            D.build_request("ss_unity", twr_config=bad), "bad_session_id")
+        self.assertNotEqual(rc, 0)
+        self.assertFalse(output["status"]["ok"])
+        self.assertIn("twr_config", output["status"]["error"])
+
+        unknown = D.build_twr_config()
+        unknown["session"]["no_such_field"] = 1
+        rc, output = self.run_request(
+            D.build_request("ss_unity", twr_config=unknown), "unknown_key")
+        self.assertNotEqual(rc, 0)
+        self.assertFalse(output["status"]["ok"])
+        self.assertIn("unknown_key", output["status"]["error"])
+
+    def test_envelope_config_conflict_is_rejected(self):
+        if D.T is None:
+            self.skipTest("uwb.twr_config unavailable")
+        ds = D.build_twr_config(protocol="ds")
+        request = D.build_request("ss_unity", twr_config=ds)
+        rc, output = self.run_request(request, "conflict")
+        self.assertNotEqual(rc, 0, "a config/envelope conflict must be refused")
+        self.assertFalse(output["status"]["ok"])
+        self.assertIn("conflict", output["status"]["error"])
+
+    def test_output_mutation_is_detectable(self):
+        """A verifier recomputing the published canonical text catches a mutation."""
+        if D.T is None:
+            self.skipTest("uwb.twr_config unavailable")
+        output = self._config_run(
+            "mutation",
+            D.build_request("ss_unity", twr_config=D.build_twr_config()))
+        cfg = output["configuration"]
+        clean = hashlib.sha256(self._canonical(cfg["executed_fields"]).encode()).hexdigest()
+        self.assertEqual(clean, output["config_sha256"])
+
+        mutated = copy.deepcopy(cfg["executed_fields"])
+        mutated[len(mutated) // 2]["value"] = "0xDEADBEEF"
+        dirty = hashlib.sha256(self._canonical(mutated).encode()).hexdigest()
+        self.assertNotEqual(dirty, output["config_sha256"],
+                            "a mutated executed field must change the hash")
 
     def test_binary_does_not_link_gnuradio_or_uhd(self):
         ldd = shutil.which("ldd")
