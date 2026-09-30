@@ -26,6 +26,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -190,15 +191,6 @@ CoreEvent rx_of(const CoreConfig& cfg,
     return e;
 }
 
-CoreEvent make_accepted(const TxToken& t, uint64_t event_id = 0)
-{
-    CoreEvent e;
-    e.kind = CoreEventKind::TxAccepted;
-    e.event_id = event_id;
-    e.token = t;
-    return e;
-}
-
 CoreEvent outcome_ev(const TxToken& t,
                      TxOutcome o,
                      AdapterFault f = AdapterFault::None,
@@ -236,9 +228,16 @@ inline ExchangeStatus est_failure_reason(const ProtocolTofEstimate& e)
     return r;
 }
 
-// Drive an SS initiator all the way to the terminal produced by receiving one
-// Response, with a caller-chosen local first-path quality.  Returns the
-// terminal status (or InternalError if no terminal was produced).
+// Drive an SS initiator until it reaches its FIRST terminal, with a
+// caller-chosen local first-path quality.  Returns that terminal's status (or
+// InternalError if the exchange never terminated) and reports whether the
+// terminal carried an estimate.
+//
+// R03: a refused local receive no longer terminates the exchange at the RX;
+// the strict gate rejects the frame and the (finite) exchange deadline is what
+// converges it.  So the driver also posts deadlines when the RX produced no
+// terminal.  A broken PLAN (e.g. an expired calibration) can terminate at the
+// plan step, so every batch is scanned for the first terminal.
 ExchangeStatus run_ss_initiator(const Env& e,
                                 const FirstPathQuality& fp,
                                 bool* estimate_available = nullptr)
@@ -248,24 +247,44 @@ ExchangeStatus run_ss_initiator(const Env& e,
     if (!core.configure(e.cfg, why))
         return ExchangeStatus::ConfigRejected;
 
+    ExchangeStatus status = ExchangeStatus::InternalError;
+    bool have_terminal = false;
+    bool estimate = false;
+    auto grab = [&](const CoreActionBatch& b) {
+        const CoreAction* tr = find_action(b, CoreActionKind::TerminalResult);
+        if (tr != nullptr && !have_terminal) {
+            have_terminal = true;
+            status = action_status(*tr);
+            estimate = tr->result.estimate_available;
+        }
+        return have_terminal;
+    };
+
     CoreActionBatch b = core.post(make_begin(1, 1000));
     const CoreAction* prep = find_action(b, CoreActionKind::PrepareTx);
     if (prep == nullptr)
         return ExchangeStatus::InternalError;
     const TxToken tok = prep->token;
-    core.post(make_tx_planned(tok, FrameType::Poll, 2000, e.dom, e.cal.id));
-    core.post(outcome_ev(tok, TxOutcome::Completed));
+    if (grab(core.post(make_tx_planned(tok, FrameType::Poll, 2000, e.dom, e.cal.id))))
+        ;
+    else if (grab(core.post(outcome_ev(tok, TxOutcome::Completed))))
+        ;
+    else {
+        Frame resp = base_frame(e.cfg, FrameType::Response, 0);
+        resp.set(TimestampField::T2B, 2050);
+        resp.set(TimestampField::T3B, 2550);
+        CoreEvent rx = rx_of(e.cfg, resp, 2600, e.dom, fp);
+        if (!grab(core.post(rx))) {
+            // No terminal at the RX: converge through the exchange deadline
+            // (Begin at 1000 + exchange_timeout).
+            if (!grab(core.post(make_deadline(101000))))
+                grab(core.post(make_deadline(200000)));
+        }
+    }
 
-    Frame resp = base_frame(e.cfg, FrameType::Response, 0);
-    resp.set(TimestampField::T2B, 2050);
-    resp.set(TimestampField::T3B, 2550);
-    CoreEvent rx = rx_of(e.cfg, resp, 2600, e.dom, fp);
-    CoreActionBatch rb = core.post(rx);
-
-    const CoreAction* tr = find_action(rb, CoreActionKind::TerminalResult);
     if (estimate_available != nullptr)
-        *estimate_available = (tr != nullptr) && tr->result.estimate_available;
-    return (tr != nullptr) ? action_status(*tr) : ExchangeStatus::Ok;
+        *estimate_available = estimate;
+    return have_terminal ? status : ExchangeStatus::InternalError;
 }
 
 // Build one peer interval from two fields of one frame.
@@ -628,9 +647,19 @@ BOOST_AUTO_TEST_CASE(b05_sequence_modulus_is_the_reuse_barrier_and_reset_clears_
     BOOST_TEST(core.counters().accepted_exchanges == 4u);
     BOOST_TEST(core.counters().stale_events == 1u);
 
-    // A new session generation clears the running sequence.
+    // R04: a pure LOCAL generation bump does NOT clear the wire sequence
+    // barrier -- the same wire identity could still be alive.  (The Reset EVENT
+    // itself counts one stale event, and the refused Begin a second.)
     core.post(make_reset(2));
-    CoreActionBatch nb = core.post(make_begin(6, 1000));
+    CoreActionBatch blocked = core.post(make_begin(6, 1000));
+    BOOST_TEST(!has_action(blocked, CoreActionKind::PrepareTx));
+    BOOST_TEST(core.counters().accepted_exchanges == 4u);
+    BOOST_TEST(core.counters().stale_events == 3u);
+
+    // A genuinely NEW wire session does clear it.
+    core.post(make_reset(3, 0, /*has_new_wire_session*/ true,
+                         /*new_wire_session_id*/ 8));
+    CoreActionBatch nb = core.post(make_begin(7, 1000));
     BOOST_TEST(has_action(nb, CoreActionKind::PrepareTx));
     BOOST_TEST(core.counters().accepted_exchanges == 5u);
 }
@@ -674,8 +703,8 @@ BOOST_AUTO_TEST_CASE(b06_bad_plan_token_domain_and_deadline_verdict_reject_witho
         const CoreAction* prep = find_action(b, CoreActionKind::PrepareTx);
         BOOST_TEST(prep != nullptr);
         CoreActionBatch r = core.post(make_tx_planned(prep->token, FrameType::Poll, 1500,
-                                                      e.dom, e.cal.id, TxOutcome::Unknown,
-                                                      /*records_plan*/ false));
+                                                      e.dom, e.cal.id,
+                                                      TxPlanDefect::MissingCorrections));
         BOOST_TEST(has_action(r, CoreActionKind::AbortPending));
         const CoreAction* tr = find_action(r, CoreActionKind::TerminalResult);
         BOOST_TEST(tr != nullptr);
@@ -699,7 +728,8 @@ BOOST_AUTO_TEST_CASE(b06_bad_plan_token_domain_and_deadline_verdict_reject_witho
         BOOST_TEST(core.counters().tx_token_mismatch == 1u);
         BOOST_TEST(core.in_flight() == 1u);
     }
-    // (c) an out-of-domain enum in the plan is reported, not reasoned about
+    // (c) a plan whose internal numeric mapping is broken is reported, not
+    // reasoned about (R08): quantised + marker_offset overflows int64.
     {
         const Env e = make_env(Role::Initiator, Protocol::Ss, 256);
         EndpointCore core;
@@ -708,9 +738,8 @@ BOOST_AUTO_TEST_CASE(b06_bad_plan_token_domain_and_deadline_verdict_reject_witho
         CoreActionBatch b = core.post(make_begin(1, 1000));
         const CoreAction* prep = find_action(b, CoreActionKind::PrepareTx);
         BOOST_TEST(prep != nullptr);
-        CoreEvent ev =
-            make_tx_planned(prep->token, FrameType::Poll, 1500, e.dom, e.cal.id);
-        ev.tx_evidence.outcome = static_cast<TxOutcome>(9);
+        CoreEvent ev = make_tx_planned(prep->token, FrameType::Poll, 1500, e.dom, e.cal.id,
+                                       TxPlanDefect::SumOverflow);
         CoreActionBatch r = core.post(ev);
         BOOST_TEST(has_action(r, CoreActionKind::TerminalResult));
         BOOST_TEST(core.counters().events_rejected_out_of_domain == 1u);
@@ -726,8 +755,8 @@ BOOST_AUTO_TEST_CASE(b06_bad_plan_token_domain_and_deadline_verdict_reject_witho
         const CoreAction* prep = find_action(b, CoreActionKind::PrepareTx);
         BOOST_TEST(prep != nullptr);
         CoreActionBatch r = core.post(make_tx_planned(prep->token, FrameType::Poll, 1500,
-                                                      e.dom, e.cal.id, TxOutcome::Unknown,
-                                                      /*records_plan*/ true,
+                                                      e.dom, e.cal.id,
+                                                      TxPlanDefect::None,
                                                       /*deadline_feasible*/ false));
         BOOST_TEST(has_action(r, CoreActionKind::AbortPending));
         const CoreAction* tr = find_action(r, CoreActionKind::TerminalResult);
@@ -969,12 +998,14 @@ BOOST_AUTO_TEST_CASE(b11_local_first_path_and_calibration_are_mandatory)
 {
     bool estimate_available = true;
 
+    // R03: a local receive failing the strict first-path gate is refused at the
+    // gate (no estimate); the finite exchange deadline converges the exchange.
     // First path not recorded -> refused.
     {
         Env e = make_env(Role::Initiator, Protocol::Ss, 256);
         const ExchangeStatus st = run_ss_initiator(
             e, FirstPathQuality::not_recorded(), &estimate_available);
-        BOOST_TEST(st == ExchangeStatus::FirstPathUnreliable);
+        BOOST_TEST(st == ExchangeStatus::ProtocolTimeout);
         BOOST_TEST(!estimate_available);
     }
     // First path explicitly failed -> refused.
@@ -982,7 +1013,7 @@ BOOST_AUTO_TEST_CASE(b11_local_first_path_and_calibration_are_mandatory)
         Env e = make_env(Role::Initiator, Protocol::Ss, 256);
         const ExchangeStatus st = run_ss_initiator(
             e, FirstPathQuality::failed(5.0, 2.0, 0.4), &estimate_available);
-        BOOST_TEST(st == ExchangeStatus::FirstPathUnreliable);
+        BOOST_TEST(st == ExchangeStatus::ProtocolTimeout);
         BOOST_TEST(!estimate_available);
     }
     // No calibration application record -> refused.
@@ -991,10 +1022,11 @@ BOOST_AUTO_TEST_CASE(b11_local_first_path_and_calibration_are_mandatory)
         e.cfg.local_calibration.applications.clear();
         const ExchangeStatus st =
             run_ss_initiator(e, FirstPathQuality::passed(20.0, 6.0, 0.9), &estimate_available);
-        BOOST_TEST(st == ExchangeStatus::CalibrationMissing);
+        BOOST_TEST(st == ExchangeStatus::ProtocolTimeout);
         BOOST_TEST(!estimate_available);
     }
-    // Calibration expired for the exchange instant -> refused.
+    // Calibration expired for the exchange instant -> refused (at the plan,
+    // because the planned air instant already lies outside the window).
     {
         Env e = make_env(Role::Initiator, Protocol::Ss, 256);
         e.cfg.local_calibration = make_calibration("cal1", 1, 0, 1000);
@@ -1465,5 +1497,1290 @@ BOOST_AUTO_TEST_CASE(f_n10_estimate_failure_reason_is_failed_only)
         ExchangeStatus reason = ExchangeStatus::InternalError;
         BOOST_TEST(!tr->result.failure_reason(reason));
         BOOST_TEST(!tr->result.yields_range());
+    }
+}
+
+// ===========================================================================
+// R01-R08 regression cases (m1b_fix_qa)
+//
+// These are the cases the ORIGINAL QA was missing: each asserts the CORRECT
+// behaviour that the bad baseline violated, with the old bad behaviour named in
+// a comment.  Expectations are hand-derived from the interface contract, never
+// read back out of the core.
+// ===========================================================================
+
+namespace {
+
+// The conservation identity (REQ-LIFE-01) at every step.
+bool conservation_holds(const EndpointCore& c)
+{
+    return c.counters().accepted_exchanges ==
+           c.counters().terminal_results + c.in_flight();
+}
+
+// Drive a responder to its first PrepareTx (a valid Poll) and return the token.
+TxToken responder_first_token(EndpointCore& core, const Env& e, uint16_t seq = 0)
+{
+    Frame poll = base_frame(e.cfg, FrameType::Poll, seq);
+    CoreActionBatch b = core.post(rx_of(e.cfg, poll, 2050, e.dom));
+    const CoreAction* prep = find_action(b, CoreActionKind::PrepareTx);
+    return (prep != nullptr) ? prep->token : TxToken{};
+}
+
+// Drive an initiator to its first PrepareTx (a Poll) and return the token.
+TxToken initiator_first_token(EndpointCore& core, const Env& e, uint64_t exch = 1)
+{
+    (void)e;
+    CoreActionBatch b = core.post(make_begin(exch, 1000));
+    const CoreAction* prep = find_action(b, CoreActionKind::PrepareTx);
+    return (prep != nullptr) ? prep->token : TxToken{};
+}
+
+// A DS initiator with both the Poll and the Final planned (neither outcome
+// resolved).  Returns the two tokens.
+void build_ds_initiator(const Env& e, EndpointCore& core, TxToken& poll, TxToken& fin)
+{
+    poll = TxToken{};
+    fin = TxToken{};
+    std::string why;
+    if (!core.configure(e.cfg, why))
+        return;
+    CoreActionBatch b = core.post(make_begin(1, 1000));
+    const CoreAction* p = find_action(b, CoreActionKind::PrepareTx);
+    if (p == nullptr)
+        return;
+    poll = p->token;
+    core.post(make_tx_planned(poll, FrameType::Poll, 2000, e.dom, e.cal.id));
+
+    Frame resp = base_frame(e.cfg, FrameType::Response, 0);
+    resp.set(TimestampField::T2B, 2050);
+    resp.set(TimestampField::T3B, 2550);
+    CoreActionBatch rb = core.post(rx_of(e.cfg, resp, 2600, e.dom));
+    const CoreAction* f = find_action(rb, CoreActionKind::PrepareTx);
+    if (f == nullptr)
+        return;
+    fin = f->token;
+    core.post(make_tx_planned(fin, FrameType::Final, 2900, e.dom, e.cal.id));
+}
+
+// An SS initiator with its Poll planned and one valid Response received (the
+// Poll outcome is left Unknown).
+TxToken build_ss_initiator_rx(const Env& e, EndpointCore& core)
+{
+    std::string why;
+    if (!core.configure(e.cfg, why))
+        return TxToken{};
+    CoreActionBatch b = core.post(make_begin(1, 1000));
+    const CoreAction* p = find_action(b, CoreActionKind::PrepareTx);
+    if (p == nullptr)
+        return TxToken{};
+    const TxToken poll = p->token;
+    core.post(make_tx_planned(poll, FrameType::Poll, 2000, e.dom, e.cal.id));
+    Frame resp = base_frame(e.cfg, FrameType::Response, 0);
+    resp.set(TimestampField::T2B, 2050);
+    resp.set(TimestampField::T3B, 2550);
+    core.post(rx_of(e.cfg, resp, 2600, e.dom));
+    return poll;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// R01: a TxPlanned event cannot carry a completed/sent state
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(r01_tx_planned_alone_never_completes_an_exchange)
+{
+    // R01 old bad behaviour: `make_tx_planned(..., outcome=Completed)` produced
+    // SubmitTx AND a success TerminalResult in the SAME batch, with zero
+    // outcome events.  A plan now carries NO sent/completed state, so a plan
+    // followed by TxAccepted (send() returned) still leaves every role and
+    // protocol open.
+    const struct {
+        Role role;
+        Protocol proto;
+        FrameType intent;
+        int64_t air;
+    } cells[] = {
+        { Role::Initiator, Protocol::Ss, FrameType::Poll, 2000 },
+        { Role::Responder, Protocol::Ss, FrameType::Response, 2550 },
+        { Role::Initiator, Protocol::Ds, FrameType::Poll, 2000 },
+        { Role::Responder, Protocol::Ds, FrameType::Response, 2550 },
+    };
+    for (const auto& c : cells) {
+        Env e = make_env(c.role, c.proto, 256);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken tok = (c.role == Role::Responder)
+                                ? responder_first_token(core, e)
+                                : initiator_first_token(core, e);
+        BOOST_TEST(tok.valid);
+        if (!tok.valid)
+            continue;
+
+        CoreActionBatch sub =
+            core.post(make_tx_planned(tok, c.intent, c.air, e.dom, e.cal.id));
+        BOOST_TEST(has_action(sub, CoreActionKind::SubmitTx));
+        BOOST_TEST(!has_action(sub, CoreActionKind::TerminalResult));
+        BOOST_TEST(core.counters().terminal_results == 0u);
+        BOOST_TEST(core.in_flight() == 1u);
+
+        // send() returning is recorded, yet is NOT a completion.
+        CoreActionBatch acc = core.post(make_accepted(tok));
+        BOOST_TEST(acc.count == 0u);
+        BOOST_TEST(core.counters().tx_accepted == 1u);
+        BOOST_TEST(core.counters().terminal_results == 0u);
+        BOOST_TEST(conservation_holds(core));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(r01_broken_plan_is_refused_only_a_legal_outcome_completes)
+{
+    // R01: a plan whose internal mapping is broken is refused; only a legal
+    // TxOutcomeResolved(Completed) may close the transmit.
+    {
+        Env e = make_env(Role::Responder, Protocol::Ss, 256);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken tok = responder_first_token(core, e);
+        BOOST_TEST(tok.valid);
+        CoreActionBatch r = core.post(make_tx_planned(
+            tok, FrameType::Response, 2550, e.dom, e.cal.id, TxPlanDefect::MappingMismatch));
+        BOOST_TEST(has_action(r, CoreActionKind::AbortPending));
+        BOOST_TEST(has_action(r, CoreActionKind::TerminalResult));
+        BOOST_TEST(core.counters().tx_submitted == 0u);
+        BOOST_TEST(core.in_flight() == 0u);
+    }
+    {
+        Env e = make_env(Role::Responder, Protocol::Ss, 256);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken tok = responder_first_token(core, e);
+        BOOST_TEST(tok.valid);
+        const CoreActionBatch sub =
+            core.post(make_tx_planned(tok, FrameType::Response, 2550, e.dom, e.cal.id));
+        BOOST_TEST(has_action(sub, CoreActionKind::SubmitTx));
+        const CoreActionBatch ob = core.post(make_outcome(tok, TxOutcome::Completed));
+        BOOST_TEST(has_action(ob, CoreActionKind::TerminalResult));
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(core.in_flight() == 0u);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R02: every required local TX must close; failures terminate exactly once
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(r02_ds_initiator_needs_both_poll_and_final)
+{
+    // R02 old bad behaviour: the DS initiator completed on the Final alone; a
+    // still-Unknown Poll outcome was ignored (and a later Poll Underflow only
+    // counted a token mismatch).  Now BOTH must be Completed, in either order.
+    for (int order = 0; order < 2; ++order) {
+        Env e = make_env(Role::Initiator, Protocol::Ds, 256);
+        EndpointCore core;
+        TxToken poll, fin;
+        build_ds_initiator(e, core, poll, fin);
+        BOOST_TEST(poll.valid);
+        BOOST_TEST(fin.valid);
+        BOOST_TEST(core.counters().tx_submitted == 2u);
+        BOOST_TEST(core.in_flight() == 1u);
+
+        const TxToken first = (order == 0) ? fin : poll;
+        const TxToken second = (order == 0) ? poll : fin;
+
+        CoreActionBatch b1 = core.post(make_outcome(first, TxOutcome::Completed));
+        BOOST_TEST(!has_action(b1, CoreActionKind::TerminalResult)); // R02 catch
+        BOOST_TEST(core.counters().terminal_results == 0u);
+        BOOST_TEST(core.in_flight() == 1u);
+
+        CoreActionBatch b2 = core.post(make_outcome(second, TxOutcome::Completed));
+        const CoreAction* tr = find_action(b2, CoreActionKind::TerminalResult);
+        BOOST_TEST(tr != nullptr);
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(core.in_flight() == 0u);
+        BOOST_TEST(conservation_holds(core));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(r02_unknown_and_failed_required_tx_fail_exactly_once)
+{
+    // R02: each required TX Unknown then a failure -> one terminal; and a
+    // contradicting callback after closure is a token mismatch, never a second
+    // terminal and never a revived success.
+    {
+        // DS initiator: Final Completed while Poll Unknown; then Poll Late.
+        Env e = make_env(Role::Initiator, Protocol::Ds, 256);
+        EndpointCore core;
+        TxToken poll, fin;
+        build_ds_initiator(e, core, poll, fin);
+        BOOST_TEST(!has_action(core.post(make_outcome(fin, TxOutcome::Completed)),
+                               CoreActionKind::TerminalResult));
+        CoreActionBatch f = core.post(make_outcome(poll, TxOutcome::Late));
+        const CoreAction* tr = find_action(f, CoreActionKind::TerminalResult);
+        BOOST_TEST(tr != nullptr);
+        if (tr != nullptr)
+            BOOST_TEST(action_status(*tr) == ExchangeStatus::TxLate);
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(core.in_flight() == 0u);
+        // After closure: a late callback cannot re-terminate or revive success.
+        CoreActionBatch late = core.post(make_outcome(fin, TxOutcome::Completed));
+        BOOST_TEST(!has_action(late, CoreActionKind::TerminalResult));
+        BOOST_TEST(core.counters().tx_token_mismatch == 1u);
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(conservation_holds(core));
+    }
+    {
+        // DS initiator: Poll Unknown; then Final Underflow fails once.
+        Env e = make_env(Role::Initiator, Protocol::Ds, 256);
+        EndpointCore core;
+        TxToken poll, fin;
+        build_ds_initiator(e, core, poll, fin);
+        CoreActionBatch f = core.post(make_outcome(fin, TxOutcome::Underflow));
+        const CoreAction* tr = find_action(f, CoreActionKind::TerminalResult);
+        BOOST_TEST(tr != nullptr);
+        if (tr != nullptr)
+            BOOST_TEST(action_status(*tr) == ExchangeStatus::TxUnderflow);
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(conservation_holds(core));
+    }
+    {
+        // SS initiator: Poll Unknown, valid Response, then Poll Underflow.
+        Env e = make_env(Role::Initiator, Protocol::Ss, 256);
+        EndpointCore core;
+        const TxToken poll = build_ss_initiator_rx(e, core);
+        BOOST_TEST(poll.valid);
+        BOOST_TEST(core.counters().terminal_results == 0u);
+        CoreActionBatch f = core.post(make_outcome(poll, TxOutcome::Underflow));
+        const CoreAction* tr = find_action(f, CoreActionKind::TerminalResult);
+        BOOST_TEST(tr != nullptr);
+        if (tr != nullptr)
+            BOOST_TEST(action_status(*tr) == ExchangeStatus::TxUnderflow);
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(conservation_holds(core));
+    }
+    {
+        // SS responder: Response Unknown then Underflow.
+        Env e = make_env(Role::Responder, Protocol::Ss, 256);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken tok = responder_first_token(core, e);
+        BOOST_TEST(tok.valid);
+        BOOST_TEST(!has_action(
+            core.post(make_tx_planned(tok, FrameType::Response, 2550, e.dom, e.cal.id)),
+            CoreActionKind::TerminalResult));
+        CoreActionBatch f = core.post(make_outcome(tok, TxOutcome::Underflow));
+        const CoreAction* tr = find_action(f, CoreActionKind::TerminalResult);
+        BOOST_TEST(tr != nullptr);
+        if (tr != nullptr)
+            BOOST_TEST(action_status(*tr) == ExchangeStatus::TxUnderflow);
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(conservation_holds(core));
+    }
+    {
+        // DS responder: Response Unknown then a Late adapter fault.
+        Env e = make_env(Role::Responder, Protocol::Ds, 256);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken tok = responder_first_token(core, e);
+        BOOST_TEST(tok.valid);
+        core.post(make_tx_planned(tok, FrameType::Response, 2550, e.dom, e.cal.id));
+        CoreActionBatch f =
+            core.post(make_outcome(tok, TxOutcome::Unknown, AdapterFault::Late));
+        const CoreAction* tr = find_action(f, CoreActionKind::TerminalResult);
+        BOOST_TEST(tr != nullptr);
+        if (tr != nullptr)
+            BOOST_TEST(action_status(*tr) == ExchangeStatus::TxLate);
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(conservation_holds(core));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(r02_duplicate_callbacks_never_advance_twice)
+{
+    // R02: duplicate plan/accepted/outcome for the same token must never
+    // produce a second Submit or a second terminal.
+    Env e = make_env(Role::Responder, Protocol::Ss, 256);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+    const TxToken tok = responder_first_token(core, e);
+    BOOST_TEST(tok.valid);
+    BOOST_TEST(has_action(
+        core.post(make_tx_planned(tok, FrameType::Response, 2550, e.dom, e.cal.id)),
+        CoreActionKind::SubmitTx));
+    // duplicate plan -> no second submit
+    CoreActionBatch dup =
+        core.post(make_tx_planned(tok, FrameType::Response, 2550, e.dom, e.cal.id));
+    BOOST_TEST(!has_action(dup, CoreActionKind::SubmitTx));
+    BOOST_TEST(core.counters().tx_token_mismatch == 1u);
+    BOOST_TEST(core.counters().tx_submitted == 1u);
+    // first Completed -> terminal
+    BOOST_TEST(has_action(core.post(make_outcome(tok, TxOutcome::Completed)),
+                          CoreActionKind::TerminalResult));
+    BOOST_TEST(core.counters().terminal_results == 1u);
+    // duplicate outcome after closure -> no second terminal
+    CoreActionBatch after = core.post(make_outcome(tok, TxOutcome::Completed));
+    BOOST_TEST(after.count == 0u);
+    BOOST_TEST(core.counters().terminal_results == 1u);
+    BOOST_TEST(core.counters().tx_token_mismatch == 2u);
+    BOOST_TEST(conservation_holds(core));
+}
+
+// ---------------------------------------------------------------------------
+// R03: every role's local RX/TX admission, defect by defect
+// ---------------------------------------------------------------------------
+
+namespace {
+
+enum class RxDefect {
+    NotRecorded,
+    Failed,
+    WrongDomain,
+    WrongEpoch,
+    WrongMarker,
+    WrongSource,
+    MissingCorrections,
+    EmptyCalibrationId,
+    WrongCalibrationId
+};
+
+Timestamp rx_ts_defect(int64_t ticks, const ClockDomain& d, const std::string& cal_id,
+                       RxDefect def)
+{
+    Timestamp ts;
+    switch (def) {
+    case RxDefect::NotRecorded:
+    case RxDefect::Failed:
+        ts = make_rx_ts(ticks, d, cal_id);
+        break;
+    case RxDefect::WrongDomain: {
+        ClockDomain other = make_domain("other_dev", 2.0e9, d.epoch_id, d.timestamp_bits);
+        ts = make_rx_ts(ticks, other, cal_id);
+        break;
+    }
+    case RxDefect::WrongEpoch: {
+        ClockDomain other =
+            make_domain(d.name, d.tick_rate_hz, d.epoch_id + 1, d.timestamp_bits);
+        ts = make_rx_ts(ticks, other, cal_id);
+        break;
+    }
+    case RxDefect::WrongMarker:
+        ts = make_rx_ts(ticks, d, cal_id);
+        ts.marker = TimestampMarker::SfdStart;
+        break;
+    case RxDefect::WrongSource:
+        ts = make_rx_ts(ticks, d, cal_id);
+        ts.source = TimestampSource::Unknown;
+        break;
+    case RxDefect::MissingCorrections:
+        ts = make_rx_ts(ticks, d, cal_id);
+        ts.applied_corrections = kCorrectionNone;
+        break;
+    case RxDefect::EmptyCalibrationId:
+        ts = make_rx_ts(ticks, d, std::string());
+        break;
+    case RxDefect::WrongCalibrationId:
+        ts = make_rx_ts(ticks, d, std::string("other-cal"));
+        break;
+    }
+    return ts;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(r03_rx_admission_is_per_role_and_defect)
+{
+    // R03 old bad behaviour: the SS responder accepted a Poll with a
+    // NotRecorded quality and a TX plan on another device's domain/epoch and
+    // still reported protocol complete.  The strict gate is now reached by
+    // EVERY role, and each factor is tested SEPARATELY so none masks another.
+    const RxDefect defects[] = {
+        RxDefect::NotRecorded,        RxDefect::Failed,
+        RxDefect::WrongDomain,        RxDefect::WrongEpoch,
+        RxDefect::WrongMarker,        RxDefect::WrongSource,
+        RxDefect::MissingCorrections, RxDefect::EmptyCalibrationId,
+        RxDefect::WrongCalibrationId,
+    };
+    for (Role role : { Role::Initiator, Role::Responder }) {
+        for (Protocol proto : { Protocol::Ss, Protocol::Ds }) {
+            for (RxDefect def : defects) {
+                Env e = make_env(role, proto, 256);
+                EndpointCore core;
+                std::string why;
+                BOOST_TEST(core.configure(e.cfg, why));
+
+                const std::string cid =
+                    (def == RxDefect::EmptyCalibrationId)
+                        ? std::string()
+                        : (def == RxDefect::WrongCalibrationId) ? std::string("other-cal")
+                                                                : e.cal.id;
+
+                if (role == Role::Responder) {
+                    Frame poll = base_frame(e.cfg, FrameType::Poll, 0);
+                    CoreEvent ev = rx_of(e.cfg, poll, 2050, e.dom);
+                    ev.rx_time = rx_ts_defect(2050, e.dom, cid, def);
+                    if (def == RxDefect::NotRecorded)
+                        ev.rx_first_path = FirstPathQuality::not_recorded();
+                    if (def == RxDefect::Failed)
+                        ev.rx_first_path = FirstPathQuality::failed(5.0, 2.0, 0.4);
+                    CoreActionBatch b = core.post(ev);
+                    BOOST_TEST(!has_action(b, CoreActionKind::PrepareTx));
+                    BOOST_TEST(core.counters().accepted_exchanges == 0u);
+                    BOOST_TEST(core.in_flight() == 0u);
+                    BOOST_TEST(core.counters().terminal_results == 0u);
+                } else {
+                    CoreActionBatch b = core.post(make_begin(1, 1000));
+                    const CoreAction* prep = find_action(b, CoreActionKind::PrepareTx);
+                    BOOST_TEST(prep != nullptr);
+                    if (prep == nullptr)
+                        continue;
+                    core.post(make_tx_planned(prep->token, FrameType::Poll, 2000, e.dom,
+                                              e.cal.id));
+                    core.post(make_outcome(prep->token, TxOutcome::Completed));
+                    Frame resp = base_frame(e.cfg, FrameType::Response, 0);
+                    resp.set(TimestampField::T2B, 2050);
+                    resp.set(TimestampField::T3B, 2550);
+                    CoreEvent ev = rx_of(e.cfg, resp, 2600, e.dom);
+                    ev.rx_time = rx_ts_defect(2600, e.dom, cid, def);
+                    if (def == RxDefect::NotRecorded)
+                        ev.rx_first_path = FirstPathQuality::not_recorded();
+                    if (def == RxDefect::Failed)
+                        ev.rx_first_path = FirstPathQuality::failed(5.0, 2.0, 0.4);
+                    CoreActionBatch rb = core.post(ev);
+                    BOOST_TEST(!has_action(rb, CoreActionKind::TerminalResult));
+                    // The DS initiator must not fabricate a Final from a
+                    // refused receive instant.
+                    BOOST_TEST(!has_action(rb, CoreActionKind::PrepareTx));
+                    BOOST_TEST(core.in_flight() == 1u);
+                    BOOST_TEST(core.counters().terminal_results == 0u);
+                }
+                BOOST_TEST(conservation_holds(core));
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(r03_expired_calibration_window_refuses_a_local_receive)
+{
+    // R03: the calibration SET exists but does not cover the exchange instant.
+    Env e = make_env(Role::Responder, Protocol::Ss, 256);
+    e.cfg.local_calibration = make_calibration("cal1", 1, 0, 1000);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+    Frame poll = base_frame(e.cfg, FrameType::Poll, 0);
+    CoreActionBatch b = core.post(rx_of(e.cfg, poll, 2000, e.dom)); // 2000 not in [0,1000)
+    BOOST_TEST(!has_action(b, CoreActionKind::PrepareTx));
+    BOOST_TEST(core.counters().accepted_exchanges == 0u);
+    BOOST_TEST(conservation_holds(core));
+}
+
+// ---------------------------------------------------------------------------
+// R04: identity barriers, token reuse, atomic configure/reset
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(r04_stale_generation_events_are_refused)
+{
+    // R04: an event whose generation is not the live one cannot advance a new
+    // exchange even when its token value coincides.
+    Env e = make_env(Role::Initiator, Protocol::Ss, 4);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why)); // generation 1
+
+    CoreActionBatch stale =
+        core.post(make_begin(1, 1000, /*event_id*/ 0, /*generation*/ 2));
+    BOOST_TEST(stale.count == 0u);
+    BOOST_TEST(core.counters().stale_events == 1u);
+    BOOST_TEST(core.counters().accepted_exchanges == 0u);
+
+    CoreActionBatch ok = core.post(make_begin(1, 1000, 0, /*generation*/ 1));
+    BOOST_TEST(has_action(ok, CoreActionKind::PrepareTx));
+    BOOST_TEST(core.counters().accepted_exchanges == 1u);
+
+    // After a Reset EVENT the live generation changes; gen-1 events are stale.
+    core.post(make_cancel(ExchangeStatus::Cancelled, 0, /*generation*/ 1));
+    BOOST_TEST(core.in_flight() == 0u);
+    core.post(make_reset(2));
+    CoreActionBatch old = core.post(make_begin(2, 2000, 0, /*generation*/ 1));
+    BOOST_TEST(old.count == 0u);
+    BOOST_TEST(core.counters().accepted_exchanges == 1u);
+}
+
+BOOST_AUTO_TEST_CASE(r04_token_is_never_reused_across_reset_and_configure)
+{
+    // R04 old bad behaviour: `reset` zeroed the token counter, so an OLD plan
+    // whose token value happened to coincide was accepted by a NEW exchange.
+    Env e = make_env(Role::Initiator, Protocol::Ss, 4);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+
+    const TxToken t1 = initiator_first_token(core, e, 1);
+    BOOST_TEST(t1.valid);
+    core.post(make_cancel());
+
+    CoreConfig fresh = e.cfg;
+    fresh.session_generation = 2;
+    fresh.peer_binding.session_generation = 2;
+    BOOST_TEST(core.reset(fresh, 2, why));
+    const TxToken t2 = initiator_first_token(core, e, 2);
+    BOOST_TEST(t2.valid);
+    BOOST_TEST(t2.value > t1.value);
+
+    core.post(make_cancel());
+    core.post(make_reset(3));
+    const TxToken t3 = initiator_first_token(core, e, 3);
+    BOOST_TEST(t3.valid);
+    BOOST_TEST(t3.value > t2.value);
+}
+
+BOOST_AUTO_TEST_CASE(r04_wire_replay_barrier_follows_the_wire_session)
+{
+    // R04 old bad behaviour: a local generation bump cleared the replay
+    // barrier, so the SAME wire Poll opened a second exchange.
+    Env e = make_env(Role::Responder, Protocol::Ss, 4);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+
+    Frame poll0 = base_frame(e.cfg, FrameType::Poll, 0);
+    CoreActionBatch b1 = core.post(rx_of(e.cfg, poll0, 2050, e.dom));
+    const CoreAction* prep = find_action(b1, CoreActionKind::PrepareTx);
+    BOOST_TEST(prep != nullptr);
+    if (prep == nullptr)
+        return;
+    core.post(make_tx_planned(prep->token, FrameType::Response, 2550, e.dom, e.cal.id));
+    core.post(make_outcome(prep->token, TxOutcome::Completed));
+    BOOST_TEST(core.counters().accepted_exchanges == 1u);
+
+    const uint64_t accepted = core.counters().accepted_exchanges;
+    const uint64_t stale = core.counters().stale_events;
+
+    // (a) A pure local generation bump must NOT clear the barrier.
+    core.post(make_reset(2));
+    CoreActionBatch b2 = core.post(rx_of(e.cfg, poll0, 5000, e.dom));
+    BOOST_TEST(!has_action(b2, CoreActionKind::PrepareTx));
+    BOOST_TEST(core.counters().accepted_exchanges == accepted);
+    BOOST_TEST(core.counters().stale_events > stale);
+
+    // (b) A declared NEW wire session DOES clear it: the same seq is a new
+    //     wire identity in the new session.
+    core.post(make_reset(3, 0, /*has_new_wire_session*/ true, /*new_wire_session_id*/ 9));
+    Frame poll_new = base_frame(e.cfg, FrameType::Poll, 0);
+    poll_new.session_id = 9;
+    CoreActionBatch b3 = core.post(rx_of(e.cfg, poll_new, 6000, e.dom));
+    BOOST_TEST(has_action(b3, CoreActionKind::PrepareTx));
+    BOOST_TEST(core.counters().accepted_exchanges == accepted + 1u);
+    BOOST_TEST(conservation_holds(core));
+}
+
+BOOST_AUTO_TEST_CASE(r04_sequence_modulus_matrix)
+{
+    // R04/R05: the wire sequence space is 4/16/64/256; (modulus) exchanges fit,
+    // the next collides with a possibly-live identity and is refused.
+    for (uint16_t m : { uint16_t(4), uint16_t(16), uint16_t(64), uint16_t(256) }) {
+        Env e = make_env(Role::Initiator, Protocol::Ss, m, 0, uint32_t(m) + 2u);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        for (uint16_t i = 0; i < m; ++i) {
+            CoreActionBatch b = core.post(make_begin(static_cast<uint64_t>(i) + 1u, 1000));
+            BOOST_TEST(has_action(b, CoreActionKind::PrepareTx));
+            core.post(make_cancel());
+        }
+        BOOST_TEST(core.counters().accepted_exchanges == m);
+        BOOST_TEST(core.counters().terminal_results == m);
+        CoreActionBatch over = core.post(make_begin(static_cast<uint64_t>(m) + 1u, 1000));
+        BOOST_TEST(!has_action(over, CoreActionKind::PrepareTx));
+        BOOST_TEST(core.counters().accepted_exchanges == m);
+        BOOST_TEST(conservation_holds(core));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(r04_failed_reset_and_configure_are_atomic)
+{
+    // R04: a refused configure/reset must leave the execution state COMPLETELY
+    // unchanged (no half-updated config, no lost in-flight terminal).
+    Env e = make_env(Role::Initiator, Protocol::Ss, 4);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+
+    CoreConfig bad = e.cfg;
+    bad.protocol = static_cast<Protocol>(7);
+    const uint16_t sid = core.config().session_id;
+    const uint64_t gen = core.config().session_generation;
+    BOOST_TEST(!core.configure(bad, why));
+    BOOST_TEST(core.config().session_id == sid);
+    BOOST_TEST(core.config().session_generation == gen);
+    BOOST_TEST(has_action(core.post(make_begin(1, 1000)), CoreActionKind::PrepareTx));
+    core.post(make_cancel());
+    const uint64_t accepted = core.counters().accepted_exchanges;
+
+    CoreConfig stale_binding = e.cfg; // binding still generation 1
+    BOOST_TEST(!core.reset(stale_binding, 5, why));
+    BOOST_TEST(core.config().session_generation == gen);
+    BOOST_TEST(core.counters().accepted_exchanges == accepted);
+    BOOST_TEST(conservation_holds(core));
+
+    BOOST_TEST(has_action(core.post(make_begin(2, 2000)), CoreActionKind::PrepareTx));
+    CoreConfig fresh = e.cfg;
+    fresh.session_generation = 6;
+    fresh.peer_binding.session_generation = 6;
+    BOOST_TEST(!core.reset(fresh, 6, why)); // refused while in flight
+    BOOST_TEST(core.in_flight() == 1u);
+    core.post(make_cancel());
+    BOOST_TEST(core.in_flight() == 0u);
+    BOOST_TEST(conservation_holds(core));
+}
+
+BOOST_AUTO_TEST_CASE(r04_reset_event_retains_undrained_results)
+{
+    Env e = make_env(Role::Initiator, Protocol::Ss, 4);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+    core.post(make_begin(1, 1000));
+    core.post(make_cancel());
+    BOOST_TEST(core.counters().terminal_results == 1u);
+    core.post(make_reset(2)); // must not drop the undrained result
+    ProtocolTofEstimate est;
+    BOOST_TEST(core.pop_result(est));
+    BOOST_TEST(core.counters().terminal_results == 1u);
+}
+
+// ---------------------------------------------------------------------------
+// R05: terminal-result capacity is reserved before acceptance
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(r05_result_capacity_is_reserved_for_both_roles)
+{
+    // R05 old bad behaviour: with result capacity 1 the responder accepted and
+    // completed a SECOND Poll without a result slot (results_dropped=1).  Now
+    // the second request is refused BEFORE acceptance.
+    {
+        Env e = make_env(Role::Responder, Protocol::Ss, 4, 0, /*cap*/ 1);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+
+        const TxToken t = responder_first_token(core, e, 0);
+        BOOST_TEST(t.valid);
+        core.post(make_tx_planned(t, FrameType::Response, 2550, e.dom, e.cal.id));
+        core.post(make_outcome(t, TxOutcome::Completed));
+        BOOST_TEST(core.counters().accepted_exchanges == 1u);
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(core.counters().results_dropped == 0u);
+
+        Frame poll1 = base_frame(e.cfg, FrameType::Poll, 1);
+        CoreActionBatch b2 = core.post(rx_of(e.cfg, poll1, 5000, e.dom));
+        BOOST_TEST(!has_action(b2, CoreActionKind::PrepareTx));
+        BOOST_TEST(core.counters().accepted_exchanges == 1u);
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(core.counters().requests_rejected_queue_full == 1u);
+        BOOST_TEST(core.counters().results_dropped == 0u);
+        BOOST_TEST(conservation_holds(core));
+
+        ProtocolTofEstimate est;
+        BOOST_TEST(core.pop_result(est));
+        Frame poll2 = base_frame(e.cfg, FrameType::Poll, 2);
+        CoreActionBatch b3 = core.post(rx_of(e.cfg, poll2, 6000, e.dom));
+        BOOST_TEST(has_action(b3, CoreActionKind::PrepareTx));
+        BOOST_TEST(core.counters().accepted_exchanges == 2u);
+        BOOST_TEST(conservation_holds(core));
+    }
+    {
+        Env e = make_env(Role::Initiator, Protocol::Ss, 4, 0, /*cap*/ 1);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        BOOST_TEST(has_action(core.post(make_begin(1, 1000)), CoreActionKind::PrepareTx));
+        core.post(make_cancel());
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(core.counters().results_dropped == 0u);
+
+        CoreActionBatch b2 = core.post(make_begin(2, 2000));
+        BOOST_TEST(b2.count == 0u);
+        BOOST_TEST(core.counters().requests_rejected_queue_full == 1u);
+        BOOST_TEST(core.counters().accepted_exchanges == 1u);
+        BOOST_TEST(core.counters().results_dropped == 0u);
+        BOOST_TEST(conservation_holds(core));
+
+        ProtocolTofEstimate est;
+        BOOST_TEST(core.pop_result(est));
+        BOOST_TEST(has_action(core.post(make_begin(3, 3000)), CoreActionKind::PrepareTx));
+        BOOST_TEST(conservation_holds(core));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(r05_failure_and_cancel_results_are_also_reserved)
+{
+    // R05: a FAILED (not only a successful) terminal still reserves its slot.
+    Env e = make_env(Role::Responder, Protocol::Ds, 4, 0, /*cap*/ 1);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+    const TxToken t = responder_first_token(core, e, 0);
+    BOOST_TEST(t.valid);
+    core.post(make_tx_planned(t, FrameType::Response, 2550, e.dom, e.cal.id));
+    core.post(make_outcome(t, TxOutcome::Underflow));
+    BOOST_TEST(core.counters().terminal_results == 1u);
+    BOOST_TEST(core.counters().results_dropped == 0u);
+
+    Frame poll1 = base_frame(e.cfg, FrameType::Poll, 1);
+    BOOST_TEST(!has_action(core.post(rx_of(e.cfg, poll1, 5000, e.dom)),
+                           CoreActionKind::PrepareTx));
+    BOOST_TEST(core.counters().results_dropped == 0u);
+    BOOST_TEST(conservation_holds(core));
+}
+
+// ---------------------------------------------------------------------------
+// R06: ownerless / out-of-domain outcomes never create a terminal
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(r06_out_of_domain_and_ownerless_outcomes_never_create_a_terminal)
+{
+    // R06 old bad behaviour: an idle core receiving an out-of-domain
+    // TxOutcomeResolved produced accepted=0, terminal=1, in_flight=0.
+    {
+        Env e = make_env(Role::Responder, Protocol::Ss, 4, 0, 8);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        CoreEvent bad;
+        bad.kind = CoreEventKind::TxOutcomeResolved;
+        bad.tx_outcome = static_cast<TxOutcome>(99);
+        CoreActionBatch b = core.post(bad);
+        BOOST_TEST(b.count == 0u);
+        BOOST_TEST(core.counters().terminal_results == 0u);
+        BOOST_TEST(core.counters().events_rejected_out_of_domain == 1u);
+        BOOST_TEST(conservation_holds(core)); // 0 == 0 + 0
+    }
+    {
+        // A VALID outcome with an unknown token on an idle core: rejected, no
+        // terminal.
+        Env e = make_env(Role::Responder, Protocol::Ss, 4, 0, 8);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        TxToken ghost;
+        ghost.valid = true;
+        ghost.value = 12345;
+        CoreActionBatch b = core.post(make_outcome(ghost, TxOutcome::Completed));
+        BOOST_TEST(b.count == 0u);
+        BOOST_TEST(core.counters().tx_token_mismatch == 1u);
+        BOOST_TEST(core.counters().terminal_results == 0u);
+        BOOST_TEST(conservation_holds(core));
+    }
+    {
+        // In flight: an out-of-domain outcome must NOT terminate the exchange.
+        Env e = make_env(Role::Responder, Protocol::Ss, 4, 0, 8);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken t = responder_first_token(core, e, 0);
+        core.post(make_tx_planned(t, FrameType::Response, 2550, e.dom, e.cal.id));
+        CoreActionBatch b = core.post(make_outcome(t, static_cast<TxOutcome>(77)));
+        BOOST_TEST(!has_action(b, CoreActionKind::TerminalResult));
+        BOOST_TEST(core.in_flight() == 1u);
+        BOOST_TEST(core.counters().events_rejected_out_of_domain == 1u);
+        BOOST_TEST(conservation_holds(core));
+        BOOST_TEST(has_action(core.post(make_outcome(t, TxOutcome::Completed)),
+                              CoreActionKind::TerminalResult));
+        BOOST_TEST(conservation_holds(core));
+    }
+    {
+        // An old-generation token cannot terminate a new session's exchange.
+        Env e = make_env(Role::Responder, Protocol::Ss, 4, 0, 8);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken t = responder_first_token(core, e, 0);
+        core.post(make_tx_planned(t, FrameType::Response, 2550, e.dom, e.cal.id));
+        core.post(make_reset(2, 0, false, 0, /*generation*/ 1)); // in flight -> terminal
+        BOOST_TEST(core.in_flight() == 0u);
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        CoreActionBatch b = core.post(
+            make_outcome(t, TxOutcome::Completed, AdapterFault::None, /*generation*/ 1));
+        BOOST_TEST(b.count == 0u);
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(conservation_holds(core));
+        // The SAME token at the live generation is a plain token mismatch.
+        CoreActionBatch b2 = core.post(make_outcome(t, TxOutcome::Completed));
+        BOOST_TEST(!has_action(b2, CoreActionKind::TerminalResult));
+        BOOST_TEST(core.counters().tx_token_mismatch == 1u);
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(conservation_holds(core));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R07: two independent deadlines; the earliest valid one terminates once
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(r07_exchange_deadline_is_not_extended_by_evidence)
+{
+    // R07 old bad behaviour: Begin(0), exchange_timeout=1000, RX(300),
+    // evidence_wait=1000 -- a Deadline(1000) did NOT terminate because the
+    // evidence bound had overwritten the absolute exchange bound.
+    Env e = make_env(Role::Initiator, Protocol::Ss, 256);
+    e.cfg.exchange_timeout_ticks = 1000;
+    e.cfg.evidence_wait_ticks = 5000;
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+
+    CoreActionBatch begin = core.post(make_begin(1, 0));
+    const CoreAction* prep = find_action(begin, CoreActionKind::PrepareTx);
+    BOOST_TEST(prep != nullptr);
+    if (prep == nullptr)
+        return;
+    // Poll left Unknown so a result is owed while local evidence is open.
+    core.post(make_tx_planned(prep->token, FrameType::Poll, 100, e.dom, e.cal.id));
+    core.post(make_accepted(prep->token));
+
+    Frame resp = base_frame(e.cfg, FrameType::Response, 0);
+    resp.set(TimestampField::T2B, 2050);
+    resp.set(TimestampField::T3B, 2550);
+    CoreActionBatch rb = core.post(rx_of(e.cfg, resp, 300, e.dom));
+    const CoreAction* arm = find_action(rb, CoreActionKind::ArmRx);
+    BOOST_TEST(arm != nullptr);
+    if (arm != nullptr)
+        BOOST_TEST(arm->deadline_ticks == 1000); // the absolute bound wins
+
+    CoreActionBatch d = core.post(make_deadline(1000));
+    BOOST_TEST(has_action(d, CoreActionKind::TerminalResult));
+    BOOST_TEST(core.counters().terminal_results == 1u);
+    BOOST_TEST(core.in_flight() == 0u);
+    BOOST_TEST(!has_action(core.post(make_deadline(100000)), CoreActionKind::TerminalResult));
+    BOOST_TEST(core.counters().terminal_results == 1u);
+    BOOST_TEST(conservation_holds(core));
+}
+
+BOOST_AUTO_TEST_CASE(r07_evidence_deadline_wins_when_it_is_earlier)
+{
+    Env e = make_env(Role::Initiator, Protocol::Ss, 256);
+    e.cfg.exchange_timeout_ticks = 100000;
+    e.cfg.evidence_wait_ticks = 1000;
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+    CoreActionBatch begin = core.post(make_begin(1, 0));
+    const CoreAction* prep = find_action(begin, CoreActionKind::PrepareTx);
+    BOOST_TEST(prep != nullptr);
+    if (prep == nullptr)
+        return;
+    core.post(make_tx_planned(prep->token, FrameType::Poll, 100, e.dom, e.cal.id));
+    Frame resp = base_frame(e.cfg, FrameType::Response, 0);
+    resp.set(TimestampField::T2B, 2050);
+    resp.set(TimestampField::T3B, 2550);
+    CoreActionBatch rb = core.post(rx_of(e.cfg, resp, 500, e.dom));
+    const CoreAction* arm = find_action(rb, CoreActionKind::ArmRx);
+    BOOST_TEST(arm != nullptr);
+    if (arm != nullptr)
+        BOOST_TEST(arm->deadline_ticks == 1500); // 500 + 1000, earlier than 100000
+    CoreActionBatch d = core.post(make_deadline(1500));
+    BOOST_TEST(has_action(d, CoreActionKind::TerminalResult));
+    BOOST_TEST(core.counters().terminal_results == 1u);
+    BOOST_TEST(conservation_holds(core));
+}
+
+BOOST_AUTO_TEST_CASE(r07_equal_bounds_and_repeated_rx_terminate_once)
+{
+    Env e = make_env(Role::Initiator, Protocol::Ss, 256);
+    e.cfg.exchange_timeout_ticks = 1000;
+    e.cfg.evidence_wait_ticks = 1000;
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+    CoreActionBatch begin = core.post(make_begin(1, 0));
+    const CoreAction* prep = find_action(begin, CoreActionKind::PrepareTx);
+    BOOST_TEST(prep != nullptr);
+    if (prep == nullptr)
+        return;
+    core.post(make_tx_planned(prep->token, FrameType::Poll, 100, e.dom, e.cal.id));
+    Frame resp = base_frame(e.cfg, FrameType::Response, 0);
+    resp.set(TimestampField::T2B, 2050);
+    resp.set(TimestampField::T3B, 2550);
+    core.post(rx_of(e.cfg, resp, 0, e.dom)); // evidence bound = 0 + 1000
+    // A repeated RX is a duplicate and must not re-arm a later deadline.
+    CoreActionBatch dup = core.post(rx_of(e.cfg, resp, 500, e.dom));
+    BOOST_TEST(!has_action(dup, CoreActionKind::TerminalResult));
+    BOOST_TEST(core.counters().duplicate_frames == 1u);
+    CoreActionBatch d = core.post(make_deadline(1000));
+    BOOST_TEST(has_action(d, CoreActionKind::TerminalResult));
+    BOOST_TEST(core.counters().terminal_results == 1u);
+    BOOST_TEST(!has_action(core.post(make_deadline(5000)), CoreActionKind::TerminalResult));
+    BOOST_TEST(conservation_holds(core));
+}
+
+BOOST_AUTO_TEST_CASE(r07_plan_never_arrives_and_wrapping_bounds)
+{
+    // A plan that never arrives still has the finite exchange bound.
+    {
+        Env e = make_env(Role::Initiator, Protocol::Ss, 256);
+        e.cfg.exchange_timeout_ticks = 1000;
+        e.cfg.evidence_wait_ticks = 1000;
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        core.post(make_begin(1, 0));
+        CoreActionBatch d = core.post(make_deadline(1000));
+        BOOST_TEST(has_action(d, CoreActionKind::TerminalResult));
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(conservation_holds(core));
+    }
+    // A base tick near INT64_MAX must not wrap; the max instant is used and a
+    // deadline at it still terminates.
+    {
+        Env e = make_env(Role::Initiator, Protocol::Ss, 256);
+        e.cfg.exchange_timeout_ticks = 1000;
+        e.cfg.evidence_wait_ticks = 5000;
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const int64_t base = (std::numeric_limits<int64_t>::max)() - 500;
+        CoreActionBatch begin = core.post(make_begin(1, base));
+        const CoreAction* arm = find_action(begin, CoreActionKind::ArmRx);
+        BOOST_TEST(arm != nullptr);
+        if (arm != nullptr)
+            BOOST_TEST(arm->deadline_ticks == (std::numeric_limits<int64_t>::max)());
+        CoreActionBatch d = core.post(make_deadline((std::numeric_limits<int64_t>::max)()));
+        BOOST_TEST(has_action(d, CoreActionKind::TerminalResult));
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(conservation_holds(core));
+    }
+    // A Deadline on an idle core is a no-op.
+    {
+        Env e = make_env(Role::Initiator, Protocol::Ss, 256);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        BOOST_TEST(core.post(make_deadline(12345)).count == 0u);
+        BOOST_TEST(core.counters().terminal_results == 0u);
+        BOOST_TEST(conservation_holds(core));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R08: the numeric plan is validated, and what is submitted is what is planned
+// ---------------------------------------------------------------------------
+
+namespace {
+
+ExchangeStatus expected_plan_status(TxPlanDefect d)
+{
+    switch (d) {
+    case TxPlanDefect::NotValid:
+    case TxPlanDefect::InvalidDomain:
+    case TxPlanDefect::SourceOutOfDomain:
+    case TxPlanDefect::EmptyCalibrationId:
+    case TxPlanDefect::MissingCorrections:
+    case TxPlanDefect::MappingMismatch:
+    case TxPlanDefect::ReversedMapping:
+    case TxPlanDefect::QuantisedNegative:
+    case TxPlanDefect::TickOutOfDomainRange:
+    case TxPlanDefect::SumOverflow:
+    case TxPlanDefect::WrongEpoch:
+    case TxPlanDefect::WrongDomainRate:
+        return ExchangeStatus::InvalidTimeDomain;
+    case TxPlanDefect::None:
+        return ExchangeStatus::Ok;
+    }
+    return ExchangeStatus::InternalError;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(r08_each_broken_plan_variant_is_refused)
+{
+    // R08 old bad behaviour: the plan was only a Timestamp plus four recorded
+    // bools, so there was no numeric mapping to be wrong.  Every numeric defect
+    // now refuses with AbortPending + a failure terminal and no SubmitTx.
+    const TxPlanDefect defects[] = {
+        TxPlanDefect::NotValid,          TxPlanDefect::InvalidDomain,
+        TxPlanDefect::SourceOutOfDomain, TxPlanDefect::EmptyCalibrationId,
+        TxPlanDefect::MissingCorrections, TxPlanDefect::MappingMismatch,
+        TxPlanDefect::ReversedMapping,   TxPlanDefect::QuantisedNegative,
+        TxPlanDefect::TickOutOfDomainRange, TxPlanDefect::SumOverflow,
+        TxPlanDefect::WrongEpoch,        TxPlanDefect::WrongDomainRate,
+    };
+    for (TxPlanDefect def : defects) {
+        Env e = make_env(Role::Initiator, Protocol::Ss, 256);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken tok = initiator_first_token(core, e);
+        BOOST_TEST(tok.valid);
+        if (!tok.valid)
+            continue;
+        CoreActionBatch r =
+            core.post(make_tx_planned(tok, FrameType::Poll, 1500, e.dom, e.cal.id, def));
+        BOOST_TEST(has_action(r, CoreActionKind::AbortPending));
+        const CoreAction* tr = find_action(r, CoreActionKind::TerminalResult);
+        BOOST_TEST(tr != nullptr);
+        if (tr != nullptr)
+            BOOST_TEST(action_status(*tr) == expected_plan_status(def));
+        BOOST_TEST(core.counters().tx_submitted == 0u);
+        BOOST_TEST(core.in_flight() == 0u);
+        BOOST_TEST(core.counters().terminal_results == 1u);
+        BOOST_TEST(conservation_holds(core));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(r08_wrong_calibration_id_and_infeasible_deadline_are_refused)
+{
+    {
+        Env e = make_env(Role::Initiator, Protocol::Ss, 256);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken tok = initiator_first_token(core, e);
+        BOOST_TEST(tok.valid);
+        CoreActionBatch r = core.post(
+            make_tx_planned(tok, FrameType::Poll, 1500, e.dom, std::string("not-the-cal")));
+        const CoreAction* tr = find_action(r, CoreActionKind::TerminalResult);
+        BOOST_TEST(tr != nullptr);
+        if (tr != nullptr)
+            BOOST_TEST(action_status(*tr) == ExchangeStatus::CalibrationMissing);
+        BOOST_TEST(core.counters().tx_submitted == 0u);
+    }
+    {
+        // Infeasible adapter deadline verdict -> DeadlineMissed, no submit.
+        Env e = make_env(Role::Initiator, Protocol::Ss, 256);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken tok = initiator_first_token(core, e);
+        BOOST_TEST(tok.valid);
+        CoreActionBatch r = core.post(make_tx_planned(tok, FrameType::Poll, 1500, e.dom,
+                                                      e.cal.id, TxPlanDefect::None,
+                                                      /*deadline_feasible*/ false));
+        const CoreAction* tr = find_action(r, CoreActionKind::TerminalResult);
+        BOOST_TEST(tr != nullptr);
+        if (tr != nullptr)
+            BOOST_TEST(action_status(*tr) == ExchangeStatus::DeadlineMissed);
+        BOOST_TEST(core.counters().tx_submit_rejected_deadline == 1u);
+        BOOST_TEST(core.counters().tx_submitted == 0u);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(r08_wire_unrepresentable_air_instant_is_refused)
+{
+    // R08: internally consistent and on the local 40-bit domain, but the wire
+    // profile field is only 32 bits -> not representable.
+    Env e = make_env(Role::Initiator, Protocol::Ss, 256);
+    e.cfg.frame_profile = make_profile(1.0e9, /*bits*/ 32);
+    e.cfg.local_calibration = make_calibration("cal1", 1, 0, (1LL << 40) - 1);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+    const TxToken tok = initiator_first_token(core, e);
+    BOOST_TEST(tok.valid);
+    const int64_t air = (int64_t(1) << 33); // > 2^32-1, < 2^40
+    BOOST_TEST(e.dom.ticks_in_range(air));
+    CoreActionBatch r =
+        core.post(make_tx_planned(tok, FrameType::Poll, air, e.dom, e.cal.id));
+    const CoreAction* tr = find_action(r, CoreActionKind::TerminalResult);
+    BOOST_TEST(tr != nullptr);
+    if (tr != nullptr)
+        BOOST_TEST(action_status(*tr) == ExchangeStatus::InvalidTimeDomain);
+    BOOST_TEST(core.counters().tx_submitted == 0u);
+}
+
+BOOST_AUTO_TEST_CASE(r08_submitted_frame_carries_the_plan_air_instant)
+{
+    // R08: what the core writes into t3B/t5A is the SUBMITTED plan's
+    // calibrated_air_ticks, not the quantised instant.
+    {
+        Env e = make_env(Role::Responder, Protocol::Ss, 256);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken tok = responder_first_token(core, e, 0);
+        BOOST_TEST(tok.valid);
+        CoreActionBatch b = core.post(make_tx_planned(
+            tok, FrameType::Response, 3000, e.dom, e.cal.id, TxPlanDefect::None, true, 0, 0, 0,
+            /*marker_offset*/ 64, /*command_lead*/ 128));
+        const CoreAction* st = find_action(b, CoreActionKind::SubmitTx);
+        BOOST_TEST(st != nullptr);
+        if (st != nullptr) {
+            Frame f;
+            std::string err;
+            BOOST_TEST(decode(st->bytes, st->nbytes, e.prof, f, err));
+            BOOST_TEST(f.t2B() == 2050u);
+            BOOST_TEST(f.t3B() == 3000u);
+            BOOST_TEST(f.t3B() != 2936u); // the quantised instant
+        }
+    }
+    {
+        // DS initiator: t1A comes from the Poll plan, t5A from the Final plan.
+        Env e = make_env(Role::Initiator, Protocol::Ds, 256);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        CoreActionBatch b0 = core.post(make_begin(1, 1000));
+        const CoreAction* p = find_action(b0, CoreActionKind::PrepareTx);
+        BOOST_TEST(p != nullptr);
+        if (p == nullptr)
+            return;
+        const TxToken poll = p->token;
+        BOOST_TEST(has_action(
+            core.post(make_tx_planned(poll, FrameType::Poll, 2000, e.dom, e.cal.id,
+                                      TxPlanDefect::None, true, 0, 0, 0, 64, 128)),
+            CoreActionKind::SubmitTx));
+        Frame resp = base_frame(e.cfg, FrameType::Response, 0);
+        resp.set(TimestampField::T2B, 2050);
+        resp.set(TimestampField::T3B, 2550);
+        CoreActionBatch rb = core.post(rx_of(e.cfg, resp, 2600, e.dom));
+        const CoreAction* f = find_action(rb, CoreActionKind::PrepareTx);
+        BOOST_TEST(f != nullptr);
+        if (f == nullptr)
+            return;
+        CoreActionBatch fb = core.post(make_tx_planned(
+            f->token, FrameType::Final, 5000, e.dom, e.cal.id, TxPlanDefect::None, true, 0, 0,
+            0, 64, 128));
+        const CoreAction* st = find_action(fb, CoreActionKind::SubmitTx);
+        BOOST_TEST(st != nullptr);
+        if (st != nullptr) {
+            Frame fin;
+            std::string err;
+            BOOST_TEST(decode(st->bytes, st->nbytes, e.prof, fin, err));
+            BOOST_TEST(fin.t1A() == 2000u);
+            BOOST_TEST(fin.t4A() == 2600u);
+            BOOST_TEST(fin.t5A() == 5000u);
+            BOOST_TEST(fin.t5A() != 4936u);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(r03_valid_scheduled_tx_is_admitted_for_every_role)
+{
+    // R03: a plan that really is on the configured domain/epoch/corrections/
+    // calibration is admitted -- the strict gate must not reject legitimate
+    // scheduled TX.  (Complements the per-defect refusals above.)
+    const struct {
+        Role role;
+        Protocol proto;
+        FrameType intent;
+    } cells[] = {
+        { Role::Initiator, Protocol::Ss, FrameType::Poll },
+        { Role::Responder, Protocol::Ss, FrameType::Response },
+        { Role::Initiator, Protocol::Ds, FrameType::Poll },
+        { Role::Responder, Protocol::Ds, FrameType::Response },
+    };
+    for (const auto& c : cells) {
+        Env e = make_env(c.role, c.proto, 256);
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken tok = (c.role == Role::Responder)
+                                ? responder_first_token(core, e)
+                                : initiator_first_token(core, e);
+        BOOST_TEST(tok.valid);
+        if (!tok.valid)
+            continue;
+        CoreActionBatch b =
+            core.post(make_tx_planned(tok, c.intent, 2550, e.dom, e.cal.id));
+        BOOST_TEST(has_action(b, CoreActionKind::SubmitTx));
+        BOOST_TEST(!has_action(b, CoreActionKind::AbortPending));
+        BOOST_TEST(!has_action(b, CoreActionKind::TerminalResult));
+        BOOST_TEST(conservation_holds(core));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(r08_fractional_local_receive_is_not_representable_on_the_wire)
+{
+    // R08: the local RX instant carries a sub-tick first-path fraction.  The v1
+    // wire holds whole ticks only, so the frame built from it must be REFUSED,
+    // not silently rounded.
+    Env e = make_env(Role::Responder, Protocol::Ss, 256);
+    EndpointCore core;
+    std::string why;
+    BOOST_TEST(core.configure(e.cfg, why));
+
+    Frame poll = base_frame(e.cfg, FrameType::Poll, 0);
+    CoreEvent ev = rx_of(e.cfg, poll, 2050, e.dom);
+    Timestamp frac;
+    BOOST_TEST(Timestamp::from_fractional_ticks(
+        2050, 1, 2, e.dom, TimestampMarker::RmarkerRx, TimestampSource::HardwareMeasured,
+        timestamp_required_corrections(TimestampMarker::RmarkerRx), frac));
+    frac.calibration_id = e.cal.id;
+    ev.rx_time = frac;
+    CoreActionBatch b = core.post(ev);
+    const CoreAction* prep = find_action(b, CoreActionKind::PrepareTx);
+    BOOST_TEST(prep != nullptr);
+    if (prep == nullptr)
+        return;
+    CoreActionBatch r =
+        core.post(make_tx_planned(prep->token, FrameType::Response, 2550, e.dom, e.cal.id));
+    const CoreAction* tr = find_action(r, CoreActionKind::TerminalResult);
+    BOOST_TEST(tr != nullptr);
+    if (tr != nullptr)
+        BOOST_TEST(action_status(*tr) == ExchangeStatus::InvalidTimeDomain);
+    BOOST_TEST(core.counters().tx_submitted == 0u);
+    BOOST_TEST(conservation_holds(core));
+}
+
+// R08 follow-up (agent B's finding, coordinator fix in uwb_twr_core.h): the
+// plan's sign/order constraints must be enforced.  Before the fix a NEGATIVE
+// marker offset with a matching sum, or a command time AFTER the quantised
+// instant, was admitted.
+BOOST_AUTO_TEST_CASE(r08_negative_offset_and_command_order_are_refused)
+{
+    Env e = make_env(Role::Initiator, Protocol::Ss, 256);
+
+    { // negative marker offset, sum still consistent
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken tok = initiator_first_token(core, e);
+        BOOST_TEST(tok.valid);
+        TxPlan p;
+        p.valid = true;
+        p.domain = e.dom;
+        p.source = TimestampSource::ScheduledCalibrated;
+        p.applied_corrections = timestamp_required_corrections(TimestampMarker::RmarkerTx);
+        p.calibration_id = e.cal.id;
+        p.marker_offset_ticks = -64;
+        p.quantised_instant_ticks = 3064;
+        p.command_time_ticks = 3000;
+        p.calibrated_air_ticks = p.quantised_instant_ticks + p.marker_offset_ticks; // 3000
+        std::string why2;
+        BOOST_TEST(!p.internally_consistent(why2));
+        CoreActionBatch r = core.post(make_tx_planned_raw(tok, FrameType::Poll, p));
+        BOOST_TEST(has_action(r, CoreActionKind::AbortPending));
+        BOOST_TEST(!has_action(r, CoreActionKind::SubmitTx));
+        BOOST_TEST(core.in_flight() == 0u);
+        BOOST_TEST(conservation_holds(core));
+    }
+    { // command time after the quantised instant
+        EndpointCore core;
+        std::string why;
+        BOOST_TEST(core.configure(e.cfg, why));
+        const TxToken tok = initiator_first_token(core, e);
+        BOOST_TEST(tok.valid);
+        TxPlan p;
+        p.valid = true;
+        p.domain = e.dom;
+        p.source = TimestampSource::ScheduledCalibrated;
+        p.applied_corrections = timestamp_required_corrections(TimestampMarker::RmarkerTx);
+        p.calibration_id = e.cal.id;
+        p.marker_offset_ticks = 16;
+        p.quantised_instant_ticks = 2990;
+        p.command_time_ticks = 3050; // after the quantised instant
+        p.calibrated_air_ticks = p.quantised_instant_ticks + p.marker_offset_ticks;
+        std::string why2;
+        BOOST_TEST(!p.internally_consistent(why2));
+        CoreActionBatch r = core.post(make_tx_planned_raw(tok, FrameType::Poll, p));
+        BOOST_TEST(has_action(r, CoreActionKind::AbortPending));
+        BOOST_TEST(!has_action(r, CoreActionKind::SubmitTx));
     }
 }

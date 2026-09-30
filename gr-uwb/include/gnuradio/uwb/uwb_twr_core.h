@@ -174,6 +174,22 @@ struct TxPlan {
             why = "a plan tick is outside the domain range";
             return false;
         }
+        // Sign / order constraints (R08 "wrong sign"): a marker offset is a
+        // non-negative displacement, and the command time precedes the first
+        // quantised sample.  Without this a negative offset with a matching
+        // sum would be admitted.
+        if (marker_offset_ticks < 0) {
+            why = "marker_offset_ticks is negative";
+            return false;
+        }
+        if (quantised_instant_ticks < 0) {
+            why = "quantised_instant_ticks is negative";
+            return false;
+        }
+        if (command_time_ticks > quantised_instant_ticks) {
+            why = "command_time_ticks is after the quantised instant";
+            return false;
+        }
         // Overflow-safe addition for the identity check.
         int64_t sum = 0;
         if (__builtin_add_overflow(quantised_instant_ticks, marker_offset_ticks, &sum)) {

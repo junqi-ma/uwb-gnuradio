@@ -4,14 +4,17 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * M1-B test support (Agent D): header-only drivers shared by the endpoint-core
- * unit QA and the two-endpoint end-to-end QA.
+ * M1-B test support (Agent D / m1b_fix_qa): header-only drivers shared by the
+ * endpoint-core unit QA and the two-endpoint end-to-end QA.
  *
  * WHAT THIS IS
  * ------------
  *   * small, explicit builders for the clock/timestamp/calibration/binding
  *     values the QA needs, so every test states its own numbers rather than
  *     inheriting whatever the production code happens to do;
+ *   * the R08 numeric `TxPlan` builder plus deliberately-broken variants, so a
+ *     test can inject a plan whose internal mapping is wrong and assert that
+ *     the core refuses it;
  *   * `TwoEndpointDriver`: wires two real `EndpointCore`s to one real
  *     `FakeTwrLink`.  It translates `SubmitTx` actions into `FakeTx`, turns
  *     `FakeRx` arrivals into `RxFrame` events, and services `Deadline` events
@@ -40,6 +43,11 @@
  * propagation delay regardless of the turnarounds (see testdata/twr/m1b/
  * README.md for the derivation).  The link itself is the authority for the
  * arrival instants; the driver only forwards what the link computed.
+ *
+ * The R08 plan is a NUMERIC record.  This driver builds it with a real internal
+ * mapping -- quantised_instant = air - marker_offset, command_time =
+ * quantised - command_lead, calibrated_air = quantised + marker_offset -- so a
+ * regression that drops the mapping or the identity check is caught here.
  */
 
 #ifndef INCLUDED_GNURADIO_UWB_TWR_M1B_TEST_SUPPORT_H
@@ -49,7 +57,9 @@
 #include <gnuradio/uwb/uwb_twr_fake_link.h>
 #include <gnuradio/uwb/uwb_twr_frame.h>
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <string>
 #include <utility>
@@ -128,115 +138,253 @@ inline Timestamp make_tx_ts(int64_t ticks,
     return ts;
 }
 
-// The plan record the adapter returns for a scheduled transmit: all four plan
-// fields recorded, send() accepted, and an outcome that is a real enum value
-// (Unknown until a completion event says otherwise).
-inline TxSendEvidence make_plan_evidence(TxOutcome outcome = TxOutcome::Unknown)
+// ===========================================================================
+// R08: the numeric TxPlan and its deliberate defects
+// ===========================================================================
+
+// A fully-consistent plan whose RMARKER air instant is `calibrated_air_ticks`.
+// The internal identity is calibrated = quantised + marker_offset.
+inline TxPlan make_tx_plan(int64_t calibrated_air_ticks,
+                           const ClockDomain& d,
+                           const std::string& calibration_id,
+                           int64_t marker_offset_ticks = 16,
+                           int64_t command_lead_ticks = 32)
 {
-    TxSendEvidence e;
-    e.command_time_recorded = true;
-    e.quantised_instant_recorded = true;
-    e.marker_offset_recorded = true;
-    e.calibrated_air_time_recorded = true;
-    e.send_accepted = true;
-    e.outcome = outcome;
-    return e;
+    TxPlan p;
+    p.domain = d;
+    p.source = TimestampSource::ScheduledCalibrated;
+    p.applied_corrections = timestamp_required_corrections(TimestampMarker::RmarkerTx);
+    p.calibration_id = calibration_id;
+    p.marker_offset_ticks = marker_offset_ticks;
+    p.quantised_instant_ticks = calibrated_air_ticks - marker_offset_ticks;
+    p.calibrated_air_ticks = p.quantised_instant_ticks + marker_offset_ticks;
+    p.command_time_ticks = p.quantised_instant_ticks - command_lead_ticks;
+    p.valid = true;
+    return p;
 }
 
-inline WireTimestampBinding make_binding(const ClockDomain& peer_domain,
-                                         uint64_t session_generation = 1,
-                                         uint64_t binding_generation = 1,
-                                         uint64_t max_interval_ticks = 1000000,
-                                         uint16_t sequence_modulus = 4,
-                                         TimestampMarker peer_marker = TimestampMarker::RmarkerTx)
+// Deliberately-broken plan variants.  Each names ONE way the R08 mapping can be
+// wrong, so a negative case never masks another.
+enum class TxPlanDefect {
+    None = 0,
+    NotValid,             // valid == false
+    InvalidDomain,        // a default-constructed (invalid) ClockDomain
+    SourceOutOfDomain,    // a source the enum does not have
+    EmptyCalibrationId,   // no calibration id
+    MissingCorrections,   // kCorrectionNone (RMARKER_TX requires three bits)
+    MappingMismatch,      // calibrated != quantised + offset
+    ReversedMapping,      // calibrated == quantised - offset (sign error)
+    QuantisedNegative,    // the first quantised instant is negative
+    TickOutOfDomainRange, // a tick at/above the domain's wrap period
+    SumOverflow,          // quantised + offset overflows int64
+    WrongEpoch,           // same counter identity, different epoch
+    WrongDomainRate       // same name, different tick rate (different domain)
+};
+
+inline TxPlan make_tx_plan_defect(int64_t calibrated_air_ticks,
+                                  const ClockDomain& d,
+                                  const std::string& calibration_id,
+                                  TxPlanDefect defect,
+                                  int64_t marker_offset_ticks = 16,
+                                  int64_t command_lead_ticks = 32)
 {
-    WireTimestampBinding b;
-    b.peer_domain = peer_domain;
-    b.session_generation = session_generation;
-    b.binding_generation = binding_generation;
-    b.peer_marker = peer_marker;
-    b.unit_convention = "peer_device_ticks";
-    b.calibration_convention_id = "twr-link-cal-v1";
-    b.max_interval_ticks = max_interval_ticks;
-    b.sequence_modulus = sequence_modulus;
-    return b;
+    TxPlan p = make_tx_plan(calibrated_air_ticks, d, calibration_id, marker_offset_ticks,
+                            command_lead_ticks);
+    switch (defect) {
+    case TxPlanDefect::None:
+        break;
+    case TxPlanDefect::NotValid:
+        p.valid = false;
+        break;
+    case TxPlanDefect::InvalidDomain:
+        p.domain = ClockDomain{};
+        break;
+    case TxPlanDefect::SourceOutOfDomain:
+        p.source = static_cast<TimestampSource>(99);
+        break;
+    case TxPlanDefect::EmptyCalibrationId:
+        p.calibration_id.clear();
+        break;
+    case TxPlanDefect::MissingCorrections:
+        p.applied_corrections = kCorrectionNone;
+        break;
+    case TxPlanDefect::MappingMismatch:
+        p.calibrated_air_ticks += 1;
+        break;
+    case TxPlanDefect::ReversedMapping:
+        p.calibrated_air_ticks =
+            p.quantised_instant_ticks - p.marker_offset_ticks;
+        break;
+    case TxPlanDefect::QuantisedNegative:
+        p.quantised_instant_ticks = -5;
+        p.marker_offset_ticks = 5;
+        p.calibrated_air_ticks = 0;
+        break;
+    case TxPlanDefect::TickOutOfDomainRange: {
+        const uint64_t period = d.wrap_period();
+        if (period != 0u) {
+            p.quantised_instant_ticks = static_cast<int64_t>(period);
+            p.marker_offset_ticks = 16;
+            p.calibrated_air_ticks = static_cast<int64_t>(period) + 16;
+        } else {
+            p.quantised_instant_ticks = (std::numeric_limits<int64_t>::max)() - 8;
+            p.marker_offset_ticks = 8;
+            p.calibrated_air_ticks = (std::numeric_limits<int64_t>::max)();
+        }
+        break;
+    }
+    case TxPlanDefect::SumOverflow:
+        p.quantised_instant_ticks = 10;
+        p.marker_offset_ticks = (std::numeric_limits<int64_t>::max)();
+        p.calibrated_air_ticks = 10;
+        break;
+    case TxPlanDefect::WrongEpoch:
+        p.domain.epoch_id = d.epoch_id + 1;
+        break;
+    case TxPlanDefect::WrongDomainRate:
+        p.domain.tick_rate_hz = d.tick_rate_hz * 2.0;
+        break;
+    }
+    return p;
 }
 
-inline CoreEvent make_begin(uint64_t exchange_value, int64_t now_ticks, uint64_t event_id = 0)
+// ---- CoreEvent builders --------------------------------------------------
+
+inline CoreEvent make_begin(uint64_t exchange_value,
+                            int64_t now_ticks,
+                            uint64_t event_id = 0,
+                            uint64_t generation = 0)
 {
     CoreEvent e;
     e.kind = CoreEventKind::Begin;
     e.event_id = event_id;
+    e.generation = generation;
     e.exchange.valid = true;
     e.exchange.value = exchange_value;
     e.now_ticks = now_ticks;
     return e;
 }
 
-inline CoreEvent make_deadline(int64_t now_ticks, uint64_t event_id = 0)
+inline CoreEvent make_deadline(int64_t now_ticks, uint64_t event_id = 0,
+                               uint64_t generation = 0)
 {
     CoreEvent e;
     e.kind = CoreEventKind::Deadline;
     e.now_ticks = now_ticks;
     e.event_id = event_id;
+    e.generation = generation;
     return e;
 }
 
 inline CoreEvent make_cancel(ExchangeStatus reason = ExchangeStatus::Cancelled,
-                             uint64_t event_id = 0)
+                             uint64_t event_id = 0,
+                             uint64_t generation = 0)
 {
     CoreEvent e;
     e.kind = CoreEventKind::Cancel;
     e.cancel_reason = reason;
     e.event_id = event_id;
+    e.generation = generation;
     return e;
 }
 
-inline CoreEvent make_stop(uint64_t event_id = 0)
+inline CoreEvent make_stop(uint64_t event_id = 0, uint64_t generation = 0)
 {
     CoreEvent e;
     e.kind = CoreEventKind::Stop;
     e.event_id = event_id;
+    e.generation = generation;
     return e;
 }
 
-inline CoreEvent make_reset(uint64_t new_generation, uint64_t event_id = 0)
+// A local Reset EVENT.  `has_new_wire_session` is what actually clears the wire
+// replay barrier (R04); a pure local generation bump must NOT.
+inline CoreEvent make_reset(uint64_t new_generation,
+                            uint64_t event_id = 0,
+                            bool has_new_wire_session = false,
+                            uint16_t new_wire_session_id = 0,
+                            uint64_t generation = 0)
 {
     CoreEvent e;
     e.kind = CoreEventKind::Reset;
     e.new_generation = new_generation;
     e.event_id = event_id;
+    e.has_new_wire_session_id = has_new_wire_session;
+    e.new_wire_session_id = new_wire_session_id;
+    e.generation = generation;
     return e;
 }
 
-// A TxPlanned event.  `intent` is the message the adapter was asked to plan.
-inline CoreEvent make_tx_planned(const TxToken& token,
-                                 FrameType intent,
-                                 int64_t planned_air_ticks,
-                                 const ClockDomain& d,
-                                 const std::string& calibration_id,
-                                 TxOutcome evidence_outcome = TxOutcome::Unknown,
-                                 bool records_plan = true,
-                                 bool deadline_feasible = true,
-                                 int64_t deadline_slack_ticks = 0,
-                                 uint64_t event_id = 0)
+inline CoreEvent make_accepted(const TxToken& t, uint64_t event_id = 0,
+                               uint64_t generation = 0)
+{
+    CoreEvent e;
+    e.kind = CoreEventKind::TxAccepted;
+    e.event_id = event_id;
+    e.token = t;
+    e.generation = generation;
+    return e;
+}
+
+inline CoreEvent make_outcome(const TxToken& t,
+                              TxOutcome outcome,
+                              AdapterFault fault = AdapterFault::None,
+                              uint64_t generation = 0,
+                              uint64_t event_id = 0)
+{
+    CoreEvent e;
+    e.kind = CoreEventKind::TxOutcomeResolved;
+    e.event_id = event_id;
+    e.token = t;
+    e.tx_outcome = outcome;
+    e.adapter_fault = fault;
+    e.generation = generation;
+    return e;
+}
+
+// A TxPlanned event carrying an ARBITRARY plan (the injection point for the R08
+// negative cases).
+inline CoreEvent make_tx_planned_raw(const TxToken& token,
+                                     FrameType intent,
+                                     const TxPlan& plan,
+                                     bool deadline_verdict_feasible = true,
+                                     int64_t deadline_slack_ticks = 0,
+                                     uint64_t event_id = 0,
+                                     uint64_t generation = 0)
 {
     CoreEvent e;
     e.kind = CoreEventKind::TxPlanned;
     e.event_id = event_id;
+    e.generation = generation;
     e.token = token;
     e.tx_intent = intent;
-    e.planned_tx_time = make_tx_ts(planned_air_ticks, d, calibration_id);
-    e.tx_evidence = make_plan_evidence(evidence_outcome);
-    if (!records_plan) {
-        e.tx_evidence.command_time_recorded = false;
-        e.tx_evidence.quantised_instant_recorded = false;
-        e.tx_evidence.marker_offset_recorded = false;
-        e.tx_evidence.calibrated_air_time_recorded = false;
-    }
-    e.deadline_verdict_feasible = deadline_feasible;
+    e.tx_plan = plan;
+    e.deadline_verdict_feasible = deadline_verdict_feasible;
     e.deadline_slack_ticks = deadline_slack_ticks;
     return e;
+}
+
+// The common case: a consistent plan for `calibrated_air_ticks`, optionally
+// broken by `defect`.  The plan carries NO sent/completed state (R01); only a
+// later `TxOutcomeResolved` can complete the transmit.
+inline CoreEvent make_tx_planned(const TxToken& token,
+                                 FrameType intent,
+                                 int64_t calibrated_air_ticks,
+                                 const ClockDomain& d,
+                                 const std::string& calibration_id,
+                                 TxPlanDefect defect = TxPlanDefect::None,
+                                 bool deadline_verdict_feasible = true,
+                                 int64_t deadline_slack_ticks = 0,
+                                 uint64_t event_id = 0,
+                                 uint64_t generation = 0,
+                                 int64_t marker_offset_ticks = 16,
+                                 int64_t command_lead_ticks = 32)
+{
+    const TxPlan plan = make_tx_plan_defect(calibrated_air_ticks, d, calibration_id,
+                                             defect, marker_offset_ticks,
+                                             command_lead_ticks);
+    return make_tx_planned_raw(token, intent, plan, deadline_verdict_feasible,
+                               deadline_slack_ticks, event_id, generation);
 }
 
 // Build an RxFrame event from already-decoded bytes.  `decode_ok`/`fcs_passed`
@@ -270,6 +418,25 @@ inline CoreEvent make_rx_event(const uint8_t* bytes,
         }
     }
     return e;
+}
+
+inline WireTimestampBinding make_binding(const ClockDomain& peer_domain,
+                                         uint64_t session_generation = 1,
+                                         uint64_t binding_generation = 1,
+                                         uint64_t max_interval_ticks = 1000000,
+                                         uint16_t sequence_modulus = 4,
+                                         TimestampMarker peer_marker = TimestampMarker::RmarkerTx)
+{
+    WireTimestampBinding b;
+    b.peer_domain = peer_domain;
+    b.session_generation = session_generation;
+    b.binding_generation = binding_generation;
+    b.peer_marker = peer_marker;
+    b.unit_convention = "peer_device_ticks";
+    b.calibration_convention_id = "twr-link-cal-v1";
+    b.max_interval_ticks = max_interval_ticks;
+    b.sequence_modulus = sequence_modulus;
+    return b;
 }
 
 // ===========================================================================
@@ -517,9 +684,11 @@ private:
             break;
         }
         plan_air_[p][a.token.value] = air;
-        const CoreEvent planned = make_tx_planned(
-            a.token, a.tx_intent, air, cfg.local_domain, cfg.local_calibration.id,
-            TxOutcome::Unknown, true, true, 0u);
+        // R08: the adapter returns a NUMERIC plan with a real internal mapping;
+        // it carries no sent/completed state (R01).
+        const CoreEvent planned = make_tx_planned(a.token, a.tx_intent, air,
+                                                  cfg.local_domain,
+                                                  cfg.local_calibration.id);
         post(p, planned);
     }
 
@@ -562,17 +731,8 @@ private:
         }
 
         if (cfg_.auto_resolve_completed) {
-            CoreEvent acc;
-            acc.kind = CoreEventKind::TxAccepted;
-            acc.token = a.token;
-            post(p, acc);
-
-            CoreEvent out;
-            out.kind = CoreEventKind::TxOutcomeResolved;
-            out.token = a.token;
-            out.tx_outcome = TxOutcome::Completed;
-            out.adapter_fault = AdapterFault::None;
-            post(p, out);
+            post(p, make_accepted(a.token));
+            post(p, make_outcome(a.token, TxOutcome::Completed));
         }
     }
 

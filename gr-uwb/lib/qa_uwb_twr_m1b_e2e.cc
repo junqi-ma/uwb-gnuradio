@@ -631,3 +631,132 @@ BOOST_AUTO_TEST_CASE(b18_same_scenario_is_bit_for_bit_reproducible)
     BOOST_TEST(s1.b_resp_t2 == s2.b_resp_t2);
     BOOST_TEST(s1.b_resp_t3 == s2.b_resp_t3);
 }
+
+// ===========================================================================
+// R02/R04/R05 end-to-end additions (m1b_fix_qa)
+// ===========================================================================
+
+namespace {
+
+// A raw RxFrame event for `cfg`'s endpoint, built without the link so a
+// scenario can replay a specific wire Poll / session.
+CoreEvent e2e_poll_rx(const CoreConfig& cfg,
+                      const ClockDomain& d,
+                      uint16_t session,
+                      uint16_t seq,
+                      int64_t ticks)
+{
+    Frame f;
+    f.version = cfg.frame_profile.version;
+    f.function_code = FrameType::Poll;
+    f.session_id = session;
+    f.seq = seq;
+    f.pan_id = cfg.pan_id;
+    f.src_addr = cfg.peer_address;
+    f.dst_addr = cfg.local_address;
+    f.flags = make_flags(true, false);
+    CoreEvent e;
+    e.kind = CoreEventKind::RxFrame;
+    e.fcs_passed = true;
+    e.decode_ok = true;
+    e.frame = f;
+    e.rx_time = make_rx_ts(ticks, d, cfg.local_calibration.id);
+    e.rx_first_path = FirstPathQuality::passed(20.0, 6.0, 0.9);
+    return e;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(r02_e2e_ds_initiator_submits_poll_and_final)
+{
+    // R02: over the real two-endpoint link a DS initiator owes BOTH a Poll and
+    // a Final; both must close locally before its own (estimate-less) terminal,
+    // while the responder owns the estimate.
+    DriverConfig dc = same_clock_driver(Protocol::Ds, kEndpointA, 15.0, 500, 300, 1000);
+    TwoEndpointDriver drv;
+    std::string why;
+    BOOST_TEST(drv.configure(dc, why));
+    BOOST_TEST(drv.begin(kEndpointA, 1000, 1));
+    BOOST_TEST(drv.run_until_idle(2000, why));
+
+    BOOST_TEST(drv.core(kEndpointA).counters().tx_submitted == 2u);
+    BOOST_TEST(drv.core(kEndpointA).counters().tx_outcome_completed == 2u);
+    BOOST_TEST(drv.core(kEndpointA).counters().tx_outcome_failed == 0u);
+
+    const TerminalRecord* ta = last_terminal(drv, kEndpointA);
+    BOOST_TEST(ta != nullptr);
+    if (ta != nullptr) {
+        BOOST_TEST(ta->status == ExchangeStatus::Ok);
+        BOOST_TEST(!ta->result.estimate_available);
+    }
+    const TerminalRecord* tb = last_terminal(drv, kEndpointB);
+    BOOST_TEST(tb != nullptr);
+    if (tb != nullptr) {
+        BOOST_TEST(tb->status == ExchangeStatus::Ok);
+        BOOST_TEST(tb->result.estimate_available);
+        BOOST_TEST(tb->result.tof.num == 50);
+        BOOST_TEST(tb->result.tof.den == 1);
+    }
+    assert_conservation(drv, kEndpointA);
+    assert_conservation(drv, kEndpointB);
+}
+
+BOOST_AUTO_TEST_CASE(r04_e2e_new_wire_session_clears_the_replay_barrier)
+{
+    // R04: over the link, the SAME wire Poll after only a LOCAL generation bump
+    // must not open a second exchange; a declared NEW wire session may.
+    DriverConfig dc = same_clock_driver(Protocol::Ss, kEndpointA, 15.0, 500, 300, 1000);
+    TwoEndpointDriver drv;
+    std::string why;
+    BOOST_TEST(drv.configure(dc, why));
+    BOOST_TEST(drv.begin(kEndpointA, 1000, 1));
+    BOOST_TEST(drv.run_until_idle(2000, why));
+    BOOST_TEST(drv.core(kEndpointB).counters().accepted_exchanges == 1u);
+
+    const uint64_t accepted_b = drv.core(kEndpointB).counters().accepted_exchanges;
+
+    // (a) local generation bump only: the replay is refused.
+    drv.post(kEndpointB, make_reset(2));
+    drv.post(kEndpointB,
+             e2e_poll_rx(dc.cfg_b, dc.link.domain_b, dc.cfg_b.session_id, 0, 5000));
+    BOOST_TEST(drv.core(kEndpointB).counters().accepted_exchanges == accepted_b);
+    BOOST_TEST(drv.core(kEndpointB).counters().stale_events >= 1u);
+
+    // (b) a declared new wire session clears the barrier.
+    drv.post(kEndpointB, make_reset(3, 0, /*has_new_wire_session*/ true,
+                                    /*new_wire_session_id*/ 9));
+    drv.post(kEndpointB, e2e_poll_rx(dc.cfg_b, dc.link.domain_b, 9, 0, 6000));
+    BOOST_TEST(drv.core(kEndpointB).counters().accepted_exchanges == accepted_b + 1u);
+    assert_conservation(drv, kEndpointB);
+}
+
+BOOST_AUTO_TEST_CASE(r05_e2e_responder_capacity_refuses_until_drained)
+{
+    // R05: with result capacity 1 the responder refuses a second exchange
+    // BEFORE accepting it (no dropped result); after draining it accepts again.
+    DriverConfig dc = same_clock_driver(Protocol::Ss, kEndpointA, 15.0, 500, 300, 1000);
+    dc.cfg_b.result_queue_capacity = 1;
+    TwoEndpointDriver drv;
+    std::string why;
+    BOOST_TEST(drv.configure(dc, why));
+
+    BOOST_TEST(drv.begin(kEndpointA, 1000, 1));
+    BOOST_TEST(drv.run_until_idle(2000, why));
+    BOOST_TEST(drv.core(kEndpointB).counters().accepted_exchanges == 1u);
+    BOOST_TEST(drv.core(kEndpointB).counters().terminal_results == 1u);
+    BOOST_TEST(drv.core(kEndpointB).counters().results_dropped == 0u);
+
+    BOOST_TEST(drv.begin(kEndpointA, 5000, 2));
+    BOOST_TEST(drv.run_until_idle(2000, why));
+    BOOST_TEST(drv.core(kEndpointB).counters().accepted_exchanges == 1u);
+    BOOST_TEST(drv.core(kEndpointB).counters().requests_rejected_queue_full == 1u);
+    BOOST_TEST(drv.core(kEndpointB).counters().results_dropped == 0u);
+    assert_conservation(drv, kEndpointB);
+
+    ProtocolTofEstimate est;
+    BOOST_TEST(drv.core(kEndpointB).pop_result(est));
+    BOOST_TEST(drv.begin(kEndpointA, 9000, 3));
+    BOOST_TEST(drv.run_until_idle(2000, why));
+    BOOST_TEST(drv.core(kEndpointB).counters().accepted_exchanges == 2u);
+    BOOST_TEST(drv.core(kEndpointB).counters().results_dropped == 0u);
+}

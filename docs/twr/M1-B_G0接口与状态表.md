@@ -15,9 +15,10 @@
 | 信息 | 来源 | 进入哪条路径 |
 |---|---|---|
 | 本端 RX 时间/质量/校准 | `CoreEvent::rx_time`（RmarkerRx + HardwareMeasured + 修正链 + calibration_id）、`rx_first_path` | 严格 `admit_ranging_interval()` |
-| 本端 TX 计划 | `CoreEvent::planned_tx_time`（RmarkerTx + ScheduledCalibrated）、`tx_evidence` | 计划先保留；`Completed` 后才进严格准入 |
+| 本端 TX 计划 | `CoreEvent::tx_plan`（`TxPlan`：command time/量化时刻/marker offset/校准空口时刻的**数值**映射，域/单位/校准显式） | 计划先保留（不含完成状态）；`Completed` 后才进严格准入 |
 | 远端 wire ticks | `PeerTimestampClaim` + `WireTimestampBinding` | `ProtocolInterval`（`peer_wire_claim`），**不能**变 `AdmittedRangingInterval` |
 | 对端单位/marker/校准约定 | `WireTimestampBinding` 的会话声明 | 仅作为约定记录进结果，不是运行时证据 |
+| 事件代次 | `CoreEvent::generation` / `CoreAction::generation` | 代次不符的事件只计数、不推进；`Reset` 可声明新 **wire** session |
 | 传播延迟/真实距离 | 仅 fake transport 与验收观察者持有 | **禁止**进入 `EndpointCore` 接口 |
 
 `ProtocolTofEstimate` 的 `yields_range()` / `is_hardware_measurement()` /
