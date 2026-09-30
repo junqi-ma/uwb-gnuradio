@@ -40,26 +40,20 @@ Timestamp rx_ts(int64_t t)
     ts.calibration_id = g_cal.id;
     return ts;
 }
-Timestamp tx_ts(int64_t t)
-{
-    Timestamp ts;
-    Timestamp::from_ticks(t, g_dom, TimestampMarker::RmarkerTx,
-                          TimestampSource::ScheduledCalibrated,
-                          timestamp_required_corrections(TimestampMarker::RmarkerTx), ts);
-    ts.calibration_id = g_cal.id;
-    return ts;
-}
 
-TxSendEvidence plan_ev()
+TxPlan good_plan(int64_t air)
 {
-    TxSendEvidence e;
-    e.command_time_recorded = true;
-    e.quantised_instant_recorded = true;
-    e.marker_offset_recorded = true;
-    e.calibrated_air_time_recorded = true;
-    e.send_accepted = true;
-    e.outcome = TxOutcome::Unknown;
-    return e;
+    TxPlan p;
+    p.valid = true;
+    p.domain = g_dom;
+    p.source = TimestampSource::ScheduledCalibrated;
+    p.applied_corrections = timestamp_required_corrections(TimestampMarker::RmarkerTx);
+    p.calibration_id = g_cal.id;
+    p.marker_offset_ticks = 10;
+    p.quantised_instant_ticks = air - 10;
+    p.command_time_ticks = air - 20;
+    p.calibrated_air_ticks = air;
+    return p;
 }
 
 WireTimestampBinding binding()
@@ -140,6 +134,7 @@ CoreEvent ev_begin(uint64_t id, int64_t now)
 {
     CoreEvent e;
     e.kind = CoreEventKind::Begin;
+    e.generation = 1;
     e.exchange.valid = true;
     e.exchange.value = id;
     e.now_ticks = now;
@@ -149,10 +144,10 @@ CoreEvent ev_planned(const TxToken& t, FrameType intent, int64_t air)
 {
     CoreEvent e;
     e.kind = CoreEventKind::TxPlanned;
+    e.generation = 1;
     e.token = t;
     e.tx_intent = intent;
-    e.planned_tx_time = tx_ts(air);
-    e.tx_evidence = plan_ev();
+    e.tx_plan = good_plan(air);
     e.deadline_verdict_feasible = true;
     return e;
 }
@@ -160,6 +155,7 @@ CoreEvent ev_outcome(const TxToken& t, TxOutcome o)
 {
     CoreEvent e;
     e.kind = CoreEventKind::TxOutcomeResolved;
+    e.generation = 1;
     e.token = t;
     e.tx_outcome = o;
     e.adapter_fault = AdapterFault::None;
@@ -169,6 +165,7 @@ CoreEvent ev_rx(const uint8_t* bytes, size_t n, int64_t t)
 {
     CoreEvent e;
     e.kind = CoreEventKind::RxFrame;
+    e.generation = 1;
     e.fcs_passed = true;
     e.decode_ok = true;
     e.rx_time = rx_ts(t);
