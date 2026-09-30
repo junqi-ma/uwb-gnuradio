@@ -201,10 +201,10 @@ tools/twr/verify_install_consumer.sh /tmp/opencode/uwb_install_m1b
 最终 revision 与文件哈希：
 
 ```
-revision (parent of the report commit) = 309f7bf5bab77a98bef40451d2fc7bdf70b21b00
-sha256(uwb_twr_core.h)            = 79de7ed69e9b3bcbff29f3ebebff3201aeb242fd87e56bc1c941b6b416231369
-sha256(uwb_twr_protocol_time.h)   = 8216cf197754cfe8ad7c33d8e9634041c47115cd357e09b313a425160ce8e671
-sha256(uwb_twr_core.cc)           = 62727c59e72e85c266241c3173e6ce946a34788d5f5a9032d4639fa6baaaaa31
+revision (M1-B final code) = d71b7b4
+sha256(uwb_twr_core.h)            = b1cac7ded988380f3335692a864455ee1bc0210a62a5e1e6f07b3a726640e1a5
+sha256(uwb_twr_protocol_time.h)   = dbbf18799b26af150bb78291443956d60b46d883c936edcd1735ba3212b32f64
+sha256(uwb_twr_core.cc)           = 1a4814d1d5bbc6f41bf698bb1989a1e624e0cee77b7b874c1c40495cf3a87345
 sha256(uwb_twr_fake_link.h)       = 218712dd4b8e018b70aa7be393586053811e0af2de84a5372ef2edeeee45f90c
 ```
 
