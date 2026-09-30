@@ -13,19 +13,20 @@ fail-open）；M0.1 契约层完成，TWR 协议能力仍未实现**（2026-09-2
 **docs/twr/评审意见_M0.1_2026-09-29.md**（N01–N06）、
 **docs/twr/M0.1第二轮整改报告_N01-N06.md**、以及
 **docs/twr/M0.1_N07修复报告_2026-09-29.md**（N07：审核报 1 处，实际 20 处）。
-当前已完成 **M1-A 独立 ToF 数学 + MATLAB oracle**；**M1-B 离线协议框架已交付，
-但复核整改中**（见
-**docs/twr/M1-B_复核整改任务单_2026-09-30.md** 与
-**docs/twr/M1-B_复核整改问题台账_2026-09-30.md**）。报告见
-**docs/twr/M1-B_协议核心开发报告.md**。
-**R01–R09 全部关闭前保持 M1-B 未完成**；不进入 M2。
-**M1-B 已交付（2026-09-30）**：纯 C++ 的 SS/DS 两端协议核心（`uwb_twr_core.h`/
-`lib/uwb_twr_core.cc`）、wire claim 边界（`uwb_twr_protocol_time.h`）、确定性
-fake link、B01–B18 QA 矩阵、离线 demo 与独立 verifier、独立安装消费者。
-**独立复核不通过**：发现 R01–R09（TxPlanned 可携带 Completed 提前成功、
-DS initiator 遗漏 Poll outcome、非估计端绕过本端准入、reset 清身份屏障、
-responder 未预留终态容量、空域外 outcome 生成无主终态、evidence 覆盖绝对 deadline、
-计划无数值映射、TwrConfig 校验后丢弃）。整改后需重评 B01–B18。
+当前已完成 **M1-A 独立 ToF 数学 + MATLAB oracle**，以及
+**M1-B 离线协议核心与双端仿真**（2026-09-30 交付，经第二轮独立复核发现 R01–R09，
+已全部整改关闭，见
+**docs/twr/M1-B_复核整改报告_2026-09-30.md** 与
+**docs/twr/M1-B_复核整改审核意见_2026-09-30.md**）。报告见
+**docs/twr/M1-B_协议核心开发报告.md**（其"完成"结论仅在整改后成立）。
+下一阶段是 M2-A native PHY 闭环，再是 M2-B RMARKER/首径/时映射/timestamp patch，
+随后 M3/M4 上板；**不自动进入 M2**。
+**M1-B（复核整改后）**：纯 C++ SS/DS 两端协议核心、wire claim 边界、确定性 fake link、
+B01–B18 QA、离线 demo/独立 verifier、独立安装消费者。复核整改关闭了：计划可携带
+Completed 提前成功、DS initiator 遗漏 Poll outcome、非估计端绕过本端准入、
+reset 清身份屏障、responder 未预留终态容量、空域外 outcome 生成无主终态、
+evidence 覆盖绝对 deadline、计划无数值映射、TwrConfig 校验后丢弃，以及复审的
+计划 source 未约束与 `exchange_timeout==0` 无绝对上限。
 **它不是硬件测距**：结果是带 simulation/wire-claim 标注的协议估计，
 `measurement_valid=false`，ToF 公式未对硬件/native/首径验证。
 M2-A native PHY / M2-B RMARKER·首径·时映射·timestamp patch / 两 RX 路由 /
