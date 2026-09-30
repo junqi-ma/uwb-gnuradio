@@ -13,19 +13,19 @@ fail-open）；M0.1 契约层完成，TWR 协议能力仍未实现**（2026-09-2
 **docs/twr/评审意见_M0.1_2026-09-29.md**（N01–N06）、
 **docs/twr/M0.1第二轮整改报告_N01-N06.md**、以及
 **docs/twr/M0.1_N07修复报告_2026-09-29.md**（N07：审核报 1 处，实际 20 处）。
-当前阶段是 **M1-A 独立 ToF 数学 + MATLAB oracle**，指示见
-**docs/twr/OpenCode开发指示_M1-A_ToF数学.md**，进展见
-**docs/twr/M1-A_ToF数学开发报告.md**。其后才是 M1-B FSM、
-M2 PHY/时间映射、M3/M4 上板。
-**M1-A 已完成（2026-09-30）**：`uwb_twr_math.h`（SS/DS ToF 精确有理数）、
-C++ QA、12 向量 golden 均已交付，且 **MATLAB oracle 已实跑** ——
-`generate_tof_oracle.m` 在本机 MATLAB R2025b（Windows `F:\MATLAB`，从 WSL 经
-`matlab.exe -batch`）执行，exit 0，产出的 `tof_oracle_vectors.json` 与 Python
-`fractions` 参考逐字段一致，C++ QA 读该 MATLAB 向量通过。
-**但这只是数学与 oracle**：TWR 协议能力仍未实现，无 FSM、无双端点、
-无 TWR 硬件收发、ToF 公式未对硬件验证。按指示 §2.3 **不要自动开工 M1-B**，
-等下一份指示；也不要在没有新指示前实现 FSM / fake radio / controller /
-pybind 大迁移。
+当前已完成 **M1-A 独立 ToF 数学 + MATLAB oracle** 与
+**M1-B 协议核心与双端仿真**（2026-09-30），报告分别见
+**docs/twr/M1-A_ToF数学开发报告.md** 与
+**docs/twr/M1-B_协议核心开发报告.md**。下一阶段是 M2 PHY/时间映射，
+再到 M3/M4 上板；**M1-B 完成后不自动进入 M2**。
+**M1-B 已完成（2026-09-30）**：纯 C++ 的 SS/DS 两端协议核心（`uwb_twr_core.h`/
+`lib/uwb_twr_core.cc`）、wire claim 边界（`uwb_twr_protocol_time.h`）、确定性
+fake link、B01–B18 QA 矩阵、离线 demo 与独立 verifier、独立安装消费者；
+全量串行 CTest 59 项 58 通过（唯一失败为历史吞吐项，门槛未改）。
+**但它仍是离线协议估计，不是硬件测距**：结果带 simulation/wire-claim 标注，
+`measurement_valid=false`，ToF 公式未对硬件/native/首径验证。
+M2-A native PHY 闭环 / M2-B RMARKER·首径·时映射·timestamp patch / 两 RX 路由 /
+controller / UHD / pybind 大迁移均**不在** M1-B 范围；不自动进入 M2。
 
 第二/三轮的关键教训（不要再犯）：
 
@@ -57,11 +57,12 @@ SS/DS 测距及角色互换。第二阶段：X410 与指定 DW1000、DW3000 模�
 - frame v1 为 14 B 头 + 40-bit LE timestamps；Poll/Response/Final 空口长度为
   16/26/31 B，FCS 由 HRP 层追加。它是阶段一内部协议，商用适配需另验具体固件。
   Report 保留且未实现；STS 本阶段不开发。
-- 配置必须对齐 codec：修复现有 7 B 几何、session 位宽不一致以及错误的
-  `phr_rate == data_rate` 约束；现有调制器是 0.85 Mb/s PHR + 6.81 Mb/s payload。
-- Python effective/snapshot 共享可变对象，尚未做到不可变；必须修复并补修改隔离测试。
-- 时间数学需修复 exact 标志、恰好半周期和分数排序；ToF 不使用有损整数 ns 投影，
-  且显式校验 range-capable marker、校准和质量，不能只依赖 interval 返回 Ok。
+- 配置/codec 的 14 B 几何、session 收窄、独立 PHR 速率约束已整改；现有调制器
+  是 0.85 Mb/s PHR + 6.81 Mb/s payload。frame 的运行 seq 是 uint16，配置初值
+  `session.sequence` 为 uint8；M1-B 必须显式管理运行身份和旧帧复用屏障。
+- Python effective/snapshot 的修改隔离和 capability 公开解冻漏洞已整改，保留回归。
+- 时间数学的精确投影、半周期和分数边界已整改；ToF 不使用有损整数 ns 投影，
+  本端输入显式校验 range-capable marker、校准和质量，不能只依赖 interval 返回 Ok。
 - 48 行白名单证明的是 998.4 MS/s work-grid 解码自洽，未证明 native/ToA/硬件互通。
   16 SYNC 在 ToA 验证前不得用于测距。128 等暂因当前链路限制拒绝，不能写成芯片
   不支持；能力按 work/native/ToA/hardware/vendor 证据分别升级。
