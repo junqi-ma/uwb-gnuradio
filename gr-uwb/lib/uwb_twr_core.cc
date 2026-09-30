@@ -15,6 +15,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 
 namespace gr {
@@ -95,6 +96,14 @@ bool exchange_status_is_known(ExchangeStatus s)
     return false;
 }
 
+// Overflow-safe deadline arithmetic (R07): every deadline is formed from a
+// tick coordinate plus a budget, and the add may not wrap.  Returns false and
+// leaves `out` untouched on overflow.
+bool tick_add_checked(int64_t a, int64_t b, int64_t& out)
+{
+    return !__builtin_add_overflow(a, b, &out);
+}
+
 // The single configuration validator used by both `configure()` and
 // `reset()`.  An out-of-domain enum is refused up front (N07).
 bool validate_core_config(const CoreConfig& cfg, std::string& why)
@@ -135,6 +144,27 @@ bool validate_core_config(const CoreConfig& cfg, std::string& why)
     }
     if (cfg.max_in_flight != 1) {
         why = "M1-B supports exactly one in-flight exchange per endpoint";
+        return false;
+    }
+    // R07: every accepted request must have a FINITE termination bound.  A
+    // negative budget is not a budget, and a config that disables BOTH the
+    // whole-exchange timeout and the evidence wait would leave an accepted
+    // exchange with no deadline at all (0 == "disabled"), so it is refused.
+    if (cfg.reply_deadline_ticks < 0) {
+        why = "reply_deadline_ticks is negative";
+        return false;
+    }
+    if (cfg.exchange_timeout_ticks < 0) {
+        why = "exchange_timeout_ticks is negative";
+        return false;
+    }
+    if (cfg.evidence_wait_ticks < 0) {
+        why = "evidence_wait_ticks is negative";
+        return false;
+    }
+    if (cfg.exchange_timeout_ticks == 0 && cfg.evidence_wait_ticks == 0) {
+        why = "exchange_timeout_ticks and evidence_wait_ticks are both 0: an "
+              "accepted exchange would have no finite termination bound";
         return false;
     }
     if (!cfg.local_calibration.is_well_formed()) {
@@ -250,10 +280,18 @@ struct EndpointCore::Impl {
     std::array<bool, 256> seq_used{};
 
     // ---- causal TX records -------------------------------------------------
+    //
+    // R01: a `TxRecord` is built ONLY from a validated `TxPlan`.  It carries
+    // the plan itself (for the frame's t3B/t5A and for auditing) and an
+    // internal `TxSendEvidence` whose four plan records are set by the core
+    // from that plan; `outcome` starts `Unknown` and is advanced ONLY by
+    // `TxOutcomeResolved`.  Nothing a plan event says can mark a transmit
+    // completed.
     struct TxRecord {
         bool present = false;
         TxToken token;
         FrameType intent = FrameType::Poll;
+        TxPlan plan;
         Timestamp planned_tx_time;
         TxSendEvidence evidence;
         bool accepted = false;
@@ -297,16 +335,77 @@ struct EndpointCore::Impl {
     bool have_peer_final = false;
     PeerTimestampClaim c_t1A, c_t4A, c_t5A;
 
-    int64_t deadline_ticks = 0;
-    // Set when the exchange has reached a point where a RESULT is owed but a
-    // local transmit outcome has not converged.  The evidence deadline is a
-    // stricter bound than the whole-exchange deadline (M1-B §4.2): without it
-    // an unresolved TX would only be caught by the exchange timeout.
-    bool awaiting_evidence = false;
+    // ---- deadlines (R07) ---------------------------------------------------
+    //
+    // Two INDEPENDENT bounds.  `exchange_deadline_ticks` is fixed when the
+    // exchange is accepted and is NEVER recomputed or extended by an RX or a
+    // plan event.  `evidence_deadline_ticks` is set only when a result is owed
+    // but a required local transmit has not completed.  0 means "disabled".
+    int64_t exchange_deadline_ticks = 0;
     int64_t evidence_deadline_ticks = 0;
 
+    // Terminal capacity reservation (R05).  Every ACCEPTED exchange reserves
+    // one slot here, so a full `results` queue can never make a completed
+    // terminal disappear; an incoming Begin/Poll that cannot reserve is
+    // refused BEFORE it is accepted.
+    uint32_t reserved_ = 0;
+
     std::vector<ProtocolTofEstimate> results;
+    // R04: monotonic for the whole life of the object -- `configure()`,
+    // `reset()` and the `Reset` event all leave it untouched, so an old plan
+    // token can never coincide with a new one.
     uint64_t token_counter = 0;
+
+    // ---- deadline helpers --------------------------------------------------
+
+    int64_t earliest_deadline() const
+    {
+        const int64_t a = exchange_deadline_ticks;
+        const int64_t b = evidence_deadline_ticks;
+        if (a == 0)
+            return b;
+        if (b == 0)
+            return a;
+        return (a < b) ? a : b;
+    }
+
+    // R05: is there room for one more terminal result?  Counts both the
+    // results already stored and the slots reserved by accepted exchanges.
+    bool has_terminal_slot() const
+    {
+        return static_cast<uint64_t>(results.size()) +
+                   static_cast<uint64_t>(reserved_) <
+               static_cast<uint64_t>(cfg.result_queue_capacity);
+    }
+
+    // Set the evidence bound from a tick base exactly once, so it can never be
+    // extended by a later RX or plan event.  Returns the bound (0 disabled).
+    void arm_evidence_deadline(int64_t base_tick)
+    {
+        if (evidence_deadline_ticks != 0)
+            return;
+        if (cfg.evidence_wait_ticks <= 0)
+            return;
+        int64_t d = 0;
+        if (tick_add_checked(base_tick, cfg.evidence_wait_ticks, d))
+            evidence_deadline_ticks = d;
+        else
+            evidence_deadline_ticks = (std::numeric_limits<int64_t>::max)();
+    }
+
+    // The whole-exchange bound, fixed once at accept (R07).
+    void arm_exchange_deadline(int64_t base_tick)
+    {
+        if (cfg.exchange_timeout_ticks <= 0) {
+            exchange_deadline_ticks = 0;
+            return;
+        }
+        int64_t d = 0;
+        if (tick_add_checked(base_tick, cfg.exchange_timeout_ticks, d))
+            exchange_deadline_ticks = d;
+        else
+            exchange_deadline_ticks = (std::numeric_limits<int64_t>::max)();
+    }
 
     // ---- helpers -----------------------------------------------------------
 
@@ -322,17 +421,23 @@ struct EndpointCore::Impl {
         pending_token = TxToken{};
         have_rx_poll = have_rx_response = have_rx_final = false;
         have_peer_response = have_peer_final = false;
-        deadline_ticks = 0;
-        awaiting_evidence = false;
+        exchange_deadline_ticks = 0;
         evidence_deadline_ticks = 0;
     }
 
     void terminal(CoreActionBatch& out, ProtocolTofEstimate est, ExchangeStatus st,
                   const std::string& detail, uint64_t event_id)
     {
+        // R06: a terminal belongs to exactly one ACCEPTED in-flight exchange.
+        // An idle/ownerless terminal is a contract violation, not a result.
+        if (!in_flight) {
+            counters.contract_violations++;
+            return;
+        }
         CoreAction a;
         a.kind = CoreActionKind::TerminalResult;
         a.event_id = event_id;
+        a.generation = cfg.session_generation;
         a.exchange = exchange;
         // The action's status is a strong type: it carries the completion
         // state, and its range entries are false (F's finding B-1).
@@ -343,6 +448,10 @@ struct EndpointCore::Impl {
         a.result = est;
         out.push(a);
 
+        // R05: release the slot reserved at accept, then store the result.  The
+        // reservation guarantees room, so the drop branch is defensive only.
+        if (reserved_ > 0)
+            reserved_--;
         if (results.size() < cfg.result_queue_capacity) {
             results.push_back(std::move(est));
         } else {
@@ -374,6 +483,7 @@ struct EndpointCore::Impl {
         CoreAction a;
         a.kind = CoreActionKind::PrepareTx;
         a.event_id = event_id;
+        a.generation = cfg.session_generation;
         a.exchange = exchange;
         a.token = token;
         a.tx_intent = intent;
@@ -386,6 +496,7 @@ struct EndpointCore::Impl {
         CoreAction a;
         a.kind = CoreActionKind::AbortPending;
         a.event_id = event_id;
+        a.generation = cfg.session_generation;
         a.exchange = exchange;
         a.token = token;
         out.push(a);
@@ -397,9 +508,11 @@ struct EndpointCore::Impl {
         CoreAction a;
         a.kind = CoreActionKind::ArmRx;
         a.event_id = event_id;
+        a.generation = cfg.session_generation;
         a.exchange = exchange;
         a.expect_type = expect;
-        a.deadline_ticks = deadline_ticks;
+        // R07: the driver's deadline channel carries the EARLIEST valid bound.
+        a.deadline_ticks = earliest_deadline();
         out.push(a);
     }
 
@@ -491,6 +604,37 @@ struct EndpointCore::Impl {
         return ctx;
     }
 
+    // R03: the single-instant strict gate for a LOCAL receive.  Every role --
+    // including the SS responder and the DS initiator, which own no ToF -- must
+    // run this before a receive instant may drive a plan or a formula.  It
+    // catches NotRecorded/Failed first path, a wrong domain/epoch, a missing
+    // correction or a missing/stale calibration.
+    bool admit_rx_single(const Timestamp& ts, const FirstPathQuality& fp,
+                         std::string& why) const
+    {
+        // R03: the receive instant must be on THIS endpoint's configured
+        // counter -- same identity (name, rate, width) and same epoch -- before
+        // the strict gate is even asked.  A wrong-domain instant can otherwise
+        // share an epoch and a calibration id and slip through.
+        if (!clock_domain_same_identity(ts.domain, cfg.local_domain) ||
+            !clock_domain_same_epoch(ts.domain, cfg.local_domain)) {
+            why = "local RX instant is not on the configured local domain/epoch";
+            return false;
+        }
+        RangeAdmissionContext ctx;
+        ctx.calibration = &cfg.local_calibration;
+        ctx.reference_ticks = ts.ticks;
+        ctx.reference_ticks_recorded = true;
+        ctx.rx_first_path = fp;
+        const RangeAdmission a = admit_range_capable_time(ts, ctx);
+        if (!a.admitted) {
+            why = std::string("local RX admission refused: ") +
+                  range_admission_reason_to_string(a.reason) + " (" + a.detail + ")";
+            return false;
+        }
+        return true;
+    }
+
     // Local interval admission through the REAL strict gate.
     bool admit_local(const Timestamp& later, const Timestamp& earlier,
                      const Timestamp& ref_rx, const FirstPathQuality& rx_fp,
@@ -534,61 +678,60 @@ struct EndpointCore::Impl {
     // ---- completion evaluation --------------------------------------------
     //
     // `maybe_finish` is the single place an exchange decides whether it can
-    // reach a terminal result.  It first checks that the LOCAL transmit
-    // evidence the result depends on has converged; if it has not, it records
-    // an EVIDENCE deadline (M1-B §4.2) so the wait is finite even when the
-    // whole-exchange timeout is longer or unset, and re-arms the driver's
-    // deadline hint.  A pending result is never published as a success.
-    void maybe_finish(CoreActionBatch& out, uint64_t event_id)
+    // reach a terminal result.  R02: it requires EVERY local transmit the
+    // role/protocol combination depends on to be `Completed`, not just the last
+    // one.  If any is still open it records the EVIDENCE deadline (R07) from
+    // the tick that triggered the evaluation, re-arms the driver's deadline
+    // hint, and returns; a pending result is never published as a success.
+    void maybe_finish(CoreActionBatch& out, int64_t base_tick, uint64_t event_id)
     {
         if (!in_flight)
             return;
 
-        const TxRecord* need = nullptr;
-        int64_t base = 0;
+        // R02: the required local transmit set is per role AND protocol.
+        //   SS initiator -> {Poll}
+        //   SS responder -> {Response}
+        //   DS initiator -> {Poll, Final}
+        //   DS responder -> {Response}
+        bool need_poll = false;
+        bool need_response = false;
+        bool need_final = false;
         FrameType expect = FrameType::Response;
         if (cfg.role == Role::Initiator && cfg.protocol == Protocol::Ss) {
             if (state != EndpointState::ResponseReceived)
                 return;
-            need = &tx_poll;
-            base = rx_response_time.ticks;
+            need_poll = true;
             expect = FrameType::Response;
         } else if (cfg.role == Role::Initiator && cfg.protocol == Protocol::Ds) {
             if (state != EndpointState::FinalSent)
                 return;
-            need = &tx_final;
-            base = rx_response_time.ticks;
+            need_poll = true;
+            need_final = true;
             expect = FrameType::Final;
         } else if (cfg.role == Role::Responder && cfg.protocol == Protocol::Ss) {
             if (state != EndpointState::PollReceived)
                 return;
-            need = &tx_response;
-            base = rx_poll_time.ticks;
+            need_response = true;
             expect = FrameType::Response;
         } else {
             if (state != EndpointState::FinalReceived)
                 return;
-            need = &tx_response;
-            base = rx_final_time.ticks;
+            need_response = true;
             expect = FrameType::Final;
         }
 
-        if (!need->completed()) {
-            if (cfg.evidence_wait_ticks > 0) {
-                if (!awaiting_evidence) {
-                    awaiting_evidence = true;
-                    evidence_deadline_ticks = base + cfg.evidence_wait_ticks;
-                    // Tighten the driver's deadline hint so it can post a
-                    // Deadline at the evidence bound; the action also states
-                    // the frame this endpoint is still waiting for (or would
-                    // be, for an endpoint with no air wait).
-                    deadline_ticks = evidence_deadline_ticks;
-                    arm_rx(out, expect, event_id);
-                }
-            }
+        const bool all_completed = (!need_poll || tx_poll.completed()) &&
+                                   (!need_response || tx_response.completed()) &&
+                                   (!need_final || tx_final.completed());
+        if (!all_completed) {
+            // The evidence bound is set once and never extended (R07).  The
+            // ArmRx re-states the driver's current earliest bound.
+            arm_evidence_deadline(base_tick);
+            if (earliest_deadline() != 0)
+                arm_rx(out, expect, event_id);
             return;
         }
-        awaiting_evidence = false;
+        evidence_deadline_ticks = 0;
 
         if (cfg.role == Role::Initiator && cfg.protocol == Protocol::Ss) {
             finish_ss_initiator(out, event_id);
@@ -597,7 +740,7 @@ struct EndpointCore::Impl {
         if (cfg.role == Role::Initiator && cfg.protocol == Protocol::Ds) {
             ProtocolTofEstimate est = make_protocol_complete_without_estimate(
                 cfg.protocol, ComputedAt::InitiatorA,
-                "DS initiator: Final transmitted; the responder computes the estimate");
+                "DS initiator: Poll and Final transmitted; the responder computes the estimate");
             terminal(out, std::move(est), ExchangeStatus::Ok,
                      "DS initiator exchange complete", event_id);
             return;
@@ -694,7 +837,7 @@ struct EndpointCore::Impl {
             counters.contract_violations++;
             return;
         }
-        if (results.size() >= cfg.result_queue_capacity) {
+        if (!has_terminal_slot()) {
             counters.requests_rejected_queue_full++;
             return;
         }
@@ -711,6 +854,7 @@ struct EndpointCore::Impl {
         }
 
         in_flight = true;
+        reserved_++;
         exchange = ev.exchange;
         current_seq = static_cast<uint16_t>(
             (static_cast<uint64_t>(cfg.initial_sequence) + seq_issued) %
@@ -721,9 +865,7 @@ struct EndpointCore::Impl {
         if (counters.in_flight_peak < 1)
             counters.in_flight_peak = 1;
 
-        deadline_ticks = (cfg.exchange_timeout_ticks > 0)
-                             ? ev.now_ticks + cfg.exchange_timeout_ticks
-                             : 0;
+        arm_exchange_deadline(ev.now_ticks);
         arm_rx(out, FrameType::Response, ev.event_id);
         const TxToken t = next_token();
         pending_prepare = true;
@@ -778,9 +920,25 @@ struct EndpointCore::Impl {
                     counters.stale_events++;
                     return;
                 }
+                // R03: strict local admission of the receive instant BEFORE the
+                // Poll may open an exchange or drive a plan.  A refused instant
+                // is counted and emits NO terminal.
+                std::string adm_why;
+                if (!admit_rx_single(ev.rx_time, ev.rx_first_path, adm_why)) {
+                    counters.contract_violations++;
+                    return;
+                }
+                // R05: reserve one terminal slot before accepting.  A full
+                // queue refuses the Poll here -- no accepted++, no PrepareTx,
+                // no terminal.
+                if (!has_terminal_slot()) {
+                    counters.requests_rejected_queue_full++;
+                    return;
+                }
                 // Adopt the Poll as a real exchange.
                 seq_used[ev.frame.seq] = true;
                 in_flight = true;
+                reserved_++;
                 exchange.valid = true;
                 exchange.value = ev.event_id;
                 current_seq = ev.frame.seq;
@@ -791,9 +949,7 @@ struct EndpointCore::Impl {
                 rx_poll_time = ev.rx_time;
                 rx_poll_fp = ev.rx_first_path;
                 have_rx_poll = true;
-                deadline_ticks = (cfg.exchange_timeout_ticks > 0)
-                                     ? ev.rx_time.ticks + cfg.exchange_timeout_ticks
-                                     : 0;
+                arm_exchange_deadline(ev.rx_time.ticks);
                 counters.frames_accepted++;
                 const TxToken t = next_token();
                 pending_prepare = true;
@@ -818,6 +974,14 @@ struct EndpointCore::Impl {
                     counters.frames_rejected_wrong_peer++;
                     return;
                 }
+                // R03: the DS responder's Final receive instant is a local
+                // ranging input; admit it strictly before it can drive a
+                // formula.
+                std::string adm_why;
+                if (!admit_rx_single(ev.rx_time, ev.rx_first_path, adm_why)) {
+                    counters.contract_violations++;
+                    return;
+                }
                 rx_final_time = ev.rx_time;
                 rx_final_fp = ev.rx_first_path;
                 have_rx_final = true;
@@ -834,7 +998,7 @@ struct EndpointCore::Impl {
                 have_peer_final = true;
                 counters.frames_accepted++;
                 state = EndpointState::FinalReceived;
-                maybe_finish(out, ev.event_id);
+                maybe_finish(out, ev.rx_time.ticks, ev.event_id);
                 return;
             }
             // Anything else while in flight: a duplicate/late frame, NOT a
@@ -868,6 +1032,15 @@ struct EndpointCore::Impl {
             counters.duplicate_frames++;
             return;
         }
+        // R03: the initiator's Response receive instant is a local ranging
+        // input; admit it strictly before it can drive the Final or estimate.
+        {
+            std::string adm_why;
+            if (!admit_rx_single(ev.rx_time, ev.rx_first_path, adm_why)) {
+                counters.contract_violations++;
+                return;
+            }
+        }
         PeerTimestampClaim b2, b3;
         if (!make_peer_claim(ev.frame, TimestampField::T2B, b2) ||
             !make_peer_claim(ev.frame, TimestampField::T3B, b3)) {
@@ -892,15 +1065,20 @@ struct EndpointCore::Impl {
             emit_prepare(out, t, FrameType::Final, ev.event_id);
             return;
         }
-        maybe_finish(out, ev.event_id);
+        maybe_finish(out, ev.rx_time.ticks, ev.event_id);
     }
 
     void on_tx_planned(const CoreEvent& ev, CoreActionBatch& out)
     {
+        // (a) R08: the token must match the outstanding PrepareTx.  Anything
+        // else -- unknown, stale, or a second plan for an already-planned
+        // token -- is attributed and produces NO action: it never rewrites a
+        // plan and never submits.
         if (!pending_prepare || !ev.token.valid || !(ev.token == pending_token)) {
             counters.tx_token_mismatch++;
             return;
         }
+        // (b) R08: the plan must be for the message that was prepared.
         if (ev.tx_intent != pending_intent) {
             counters.contract_violations++;
             emit_abort(out, pending_token, ev.event_id);
@@ -908,26 +1086,64 @@ struct EndpointCore::Impl {
                  "TxPlanned intent does not match the outstanding PrepareTx", ev.event_id);
             return;
         }
-        // Domain check first (N07).
-        if (!tx_outcome_is_known(ev.tx_evidence.outcome) ||
-            !timestamp_source_is_known(ev.planned_tx_time.source)) {
+        // (c) R08: the plan must be internally consistent.  This domain-tests
+        // the plan's domain and source AND checks the numeric identity
+        // calibrated_air == quantised_instant + marker_offset (overflow-safe).
+        std::string why;
+        if (!ev.tx_plan.internally_consistent(why)) {
             counters.events_rejected_out_of_domain++;
             emit_abort(out, pending_token, ev.event_id);
-            fail(out, ExchangeStatus::InternalError,
-                 "TxPlanned carries an out-of-domain enum value", ev.event_id);
+            fail(out, ExchangeStatus::InvalidTimeDomain,
+                 "TxPlanned plan is not internally consistent: " + why, ev.event_id);
             return;
         }
-        if (!ev.tx_evidence.records_the_plan()) {
+        // (d) R08: the plan must live on THIS endpoint's own counter -- same
+        // identity (name, rate, width) and same epoch.
+        if (!clock_domain_same_identity(ev.tx_plan.domain, cfg.local_domain) ||
+            !clock_domain_same_epoch(ev.tx_plan.domain, cfg.local_domain)) {
             emit_abort(out, pending_token, ev.event_id);
             fail(out, ExchangeStatus::InvalidTimeDomain,
-                 "TxPlanned did not record the full transmit plan", ev.event_id);
+                 "TxPlanned plan domain/epoch is not this endpoint's local domain",
+                 ev.event_id);
             return;
         }
+        // (e) R08: the plan must cite the calibration set in force, and that
+        // set must be current for the plan instant (same epoch, inside
+        // [valid_from, valid_until)).
+        if (ev.tx_plan.calibration_id != cfg.local_calibration.id) {
+            counters.contract_violations++;
+            emit_abort(out, pending_token, ev.event_id);
+            fail(out, ExchangeStatus::CalibrationMissing,
+                 "TxPlanned plan cites a calibration that is not the set in force",
+                 ev.event_id);
+            return;
+        }
+        if (cfg.local_calibration.calibrated_epoch != ev.tx_plan.domain.epoch_id ||
+            ev.tx_plan.calibrated_air_ticks < cfg.local_calibration.valid_from_ticks ||
+            ev.tx_plan.calibrated_air_ticks >= cfg.local_calibration.valid_until_ticks) {
+            emit_abort(out, pending_token, ev.event_id);
+            fail(out, ExchangeStatus::CalibrationExpired,
+                 "TxPlanned plan instant is outside the calibration's validity window",
+                 ev.event_id);
+            return;
+        }
+        // (f) R08: the adapter's deadline verdict is consumed as-is.
         if (!ev.deadline_verdict_feasible) {
             counters.tx_submit_rejected_deadline++;
             emit_abort(out, pending_token, ev.event_id);
             fail(out, ExchangeStatus::DeadlineMissed,
                  "the adapter's deadline verdict says the plan cannot be submitted",
+                 ev.event_id);
+            return;
+        }
+        // (g) R08: the calibrated air instant is what t3B/t5A will carry, so
+        // it must be representable in the wire field.
+        if (ev.tx_plan.calibrated_air_ticks < 0 ||
+            !timestamp_fits(cfg.frame_profile,
+                            static_cast<uint64_t>(ev.tx_plan.calibrated_air_ticks))) {
+            emit_abort(out, pending_token, ev.event_id);
+            fail(out, ExchangeStatus::InvalidTimeDomain,
+                 "TxPlanned calibrated air instant does not fit the wire field",
                  ev.event_id);
             return;
         }
@@ -952,12 +1168,29 @@ struct EndpointCore::Impl {
         rec->present = true;
         rec->token = ev.token;
         rec->intent = pending_intent;
-        rec->planned_tx_time = ev.planned_tx_time;
-        rec->evidence = ev.tx_evidence;
-        rec->outcome = ev.tx_evidence.outcome;
+        rec->plan = ev.tx_plan;
+        // R01: the internal evidence is DERIVED from the validated plan here.
+        // The four plan records are recorded because the plan proved them; the
+        // outcome starts `Unknown` and ONLY `TxOutcomeResolved` may advance it.
+        rec->evidence = TxSendEvidence{};
+        rec->evidence.command_time_recorded = true;
+        rec->evidence.quantised_instant_recorded = true;
+        rec->evidence.marker_offset_recorded = true;
+        rec->evidence.calibrated_air_time_recorded = true;
+        rec->evidence.send_accepted = false;
+        rec->evidence.outcome = TxOutcome::Unknown;
+        rec->outcome = TxOutcome::Unknown;
+
+        Timestamp air;
+        if (!rec->plan.to_air_timestamp(air)) {
+            emit_abort(out, pending_token, ev.event_id);
+            fail(out, ExchangeStatus::InvalidTimeDomain,
+                 "could not express the plan air instant as a timestamp", ev.event_id);
+            return;
+        }
+        rec->planned_tx_time = air;
 
         Frame f;
-        std::string why;
         if (!build_frame(pending_intent, *rec, f, why)) {
             emit_abort(out, pending_token, ev.event_id);
             fail(out, ExchangeStatus::InvalidTimeDomain,
@@ -969,6 +1202,7 @@ struct EndpointCore::Impl {
         CoreAction a;
         a.kind = CoreActionKind::SubmitTx;
         a.event_id = ev.event_id;
+        a.generation = cfg.session_generation;
         a.exchange = exchange;
         a.token = ev.token;
         a.tx_intent = pending_intent;
@@ -990,16 +1224,16 @@ struct EndpointCore::Impl {
         if (pending_intent == FrameType::Response) {
             state = EndpointState::PollReceived;
             if (cfg.protocol == Protocol::Ds) {
-                deadline_ticks = (cfg.exchange_timeout_ticks > 0)
-                                     ? ev.planned_tx_time.ticks + cfg.exchange_timeout_ticks
-                                     : 0;
+                // The whole-exchange deadline was fixed at Poll accept (R07);
+                // it is NOT restarted here.  This ArmRx only opens the Final
+                // window and carries the earliest bound.
                 arm_rx(out, FrameType::Final, ev.event_id);
             }
         } else if (pending_intent == FrameType::Final) {
             state = EndpointState::FinalSent;
         }
         pending_prepare = false;
-        maybe_finish(out, ev.event_id);
+        maybe_finish(out, rec->planned_tx_time.ticks, ev.event_id);
     }
 
     void on_tx_accepted(const CoreEvent& ev, CoreActionBatch& out)
@@ -1011,17 +1245,23 @@ struct EndpointCore::Impl {
             return;
         }
         rec->accepted = true;
+        rec->evidence.send_accepted = true;
         counters.tx_accepted++;
     }
 
     void on_tx_outcome(const CoreEvent& ev, CoreActionBatch& out)
     {
-        if (!tx_outcome_is_known(ev.tx_outcome) || !adapter_fault_is_known(ev.adapter_fault)) {
+        // Domain test FIRST (N07).  An out-of-domain value is an illegal EVENT,
+        // not a reason to terminate a live exchange (R06): it is counted and
+        // dropped, and the exchange still converges through its deadline.
+        if (!tx_outcome_is_known(ev.tx_outcome) ||
+            !adapter_fault_is_known(ev.adapter_fault)) {
             counters.events_rejected_out_of_domain++;
-            fail(out, ExchangeStatus::InternalError,
-                 "TxOutcomeResolved carries an out-of-domain enum value", ev.event_id);
             return;
         }
+        // R06: only a token that belongs to the CURRENT in-flight exchange may
+        // affect it.  An idle/unknown/old-token outcome is attributed and
+        // ignored, and never touches an unrelated correct exchange.
         TxRecord* rec = find_record(ev.token);
         if (rec == nullptr) {
             counters.tx_token_mismatch++;
@@ -1038,31 +1278,35 @@ struct EndpointCore::Impl {
         }
         rec->outcome = ev.tx_outcome;
         rec->evidence.outcome = ev.tx_outcome;
-        if (ev.tx_outcome == TxOutcome::Completed) {
+        switch (ev.tx_outcome) {
+        case TxOutcome::Completed:
             counters.tx_outcome_completed++;
-            maybe_finish(out, ev.event_id);
-        } else {
+            maybe_finish(out, rec->planned_tx_time.ticks, ev.event_id);
+            return;
+        case TxOutcome::Unknown:
+            // Neither a completion nor a failure: the transmit has no observed
+            // result yet.  The evidence deadline is what makes this converge
+            // (R02/R07); no terminal is fabricated here.
+            maybe_finish(out, rec->planned_tx_time.ticks, ev.event_id);
+            return;
+        case TxOutcome::Late:
             counters.tx_outcome_failed++;
-            ExchangeStatus st = ExchangeStatus::TxLate;
-            switch (ev.tx_outcome) {
-            case TxOutcome::Completed:
-                break;
-            case TxOutcome::Late:
-                st = ExchangeStatus::TxLate;
-                break;
-            case TxOutcome::Underflow:
-                st = ExchangeStatus::TxUnderflow;
-                break;
-            case TxOutcome::Cancelled:
-                st = ExchangeStatus::Cancelled;
-                break;
-            case TxOutcome::Unknown:
-                st = ExchangeStatus::InternalError;
-                break;
-            }
-            fail(out, st, std::string("transmit outcome ") +
-                              tx_outcome_to_string(ev.tx_outcome),
+            fail(out, ExchangeStatus::TxLate,
+                 "transmit outcome " + std::string(tx_outcome_to_string(ev.tx_outcome)),
                  ev.event_id);
+            return;
+        case TxOutcome::Underflow:
+            counters.tx_outcome_failed++;
+            fail(out, ExchangeStatus::TxUnderflow,
+                 "transmit outcome " + std::string(tx_outcome_to_string(ev.tx_outcome)),
+                 ev.event_id);
+            return;
+        case TxOutcome::Cancelled:
+            counters.tx_outcome_failed++;
+            fail(out, ExchangeStatus::Cancelled,
+                 "transmit outcome " + std::string(tx_outcome_to_string(ev.tx_outcome)),
+                 ev.event_id);
+            return;
         }
     }
 
@@ -1084,22 +1328,23 @@ struct EndpointCore::Impl {
         counters.deadline_events++;
         if (!in_flight)
             return;
-        // The evidence bound is stricter than the whole-exchange bound and is
-        // checked first so a pending result that never converges is reported
-        // as an evidence timeout rather than a generic protocol timeout.
-        if (awaiting_evidence && cfg.evidence_wait_ticks > 0 &&
-            ev.now_ticks >= evidence_deadline_ticks) {
-            counters.timeouts++;
+        // R07: terminate ONCE at the EARLIEST valid bound.  The whole-exchange
+        // bound was fixed at accept and is never extended; the evidence bound
+        // is only in play while a result is owed.
+        const int64_t bound = earliest_deadline();
+        if (bound == 0)
+            return;
+        if (ev.now_ticks < bound)
+            return;
+        counters.timeouts++;
+        if (evidence_deadline_ticks != 0 && evidence_deadline_ticks == bound) {
             fail(out, ExchangeStatus::ProtocolTimeout,
                  "the local transmit evidence did not converge before the evidence deadline",
                  ev.event_id);
             return;
         }
-        if (deadline_ticks != 0 && ev.now_ticks >= deadline_ticks) {
-            counters.timeouts++;
-            fail(out, ExchangeStatus::ProtocolTimeout,
-                 "the exchange deadline expired before a terminal result", ev.event_id);
-        }
+        fail(out, ExchangeStatus::ProtocolTimeout,
+             "the exchange deadline expired before a terminal result", ev.event_id);
     }
 
     void on_cancel(const CoreEvent& ev, CoreActionBatch& out)
@@ -1148,13 +1393,17 @@ struct EndpointCore::Impl {
         counters.resets++;
         cfg.session_generation = (ev.new_generation != 0) ? ev.new_generation
                                                           : cfg.session_generation + 1;
-        seq_issued = 0;
-        // `seq_used` (the responder replay barrier) is deliberately NOT
-        // cleared here.  Reusing the same wire bytes under a new LOCAL
-        // generation must not by itself prove they belong to the new session
-        // (M1-B §4.1), so the conservative direction is to keep refusing a
-        // replayed sequence until a fresh binding/session is declared (F's
-        // observation N-9: asymmetric with `seq_issued`, but it fails closed).
+        // R04: token_counter is NEVER reset, so an old plan token can never
+        // coincide with a new one.  The wire replay barrier (`seq_used`) and
+        // the initiator `seq_issued` counter move ONLY with the WIRE session: a
+        // genuinely new wire id clears them; a pure local generation bump
+        // keeps them (reusing the same wire bytes is not proof of a new
+        // session, which is the fail-closed direction).
+        if (ev.has_new_wire_session_id && ev.new_wire_session_id != cfg.session_id) {
+            cfg.session_id = ev.new_wire_session_id;
+            seq_used.fill(false);
+            seq_issued = 0;
+        }
         if (in_flight) {
             if (pending_prepare)
                 emit_abort(out, pending_token, ev.event_id);
@@ -1176,6 +1425,14 @@ bool EndpointCore::configure(const CoreConfig& cfg, std::string& why)
 {
     Impl& d = *d_impl;
 
+    // R04: refuse while an exchange is in flight, leaving EVERYTHING unchanged
+    // (atomic).  A caller that wants a fresh start must first post a
+    // Reset/Stop event so the in-flight terminal result is not lost.
+    if (d.in_flight) {
+        why = "cannot configure while an exchange is in flight; post a "
+              "Reset/Stop event first so its terminal result is not lost";
+        return false;
+    }
     if (!validate_core_config(cfg, why))
         return false;
 
@@ -1184,11 +1441,16 @@ bool EndpointCore::configure(const CoreConfig& cfg, std::string& why)
     d.counters = CoreCounters{};
     d.clear_exchange();
     d.state = EndpointState::Idle;
+    // R04: the wire identity starts fresh from `cfg.session_id`, so the replay
+    // barrier and the issued-sequence counter are cleared here (and ONLY here
+    // for a same-wire generation bump, they are kept).
     d.seq_issued = 0;
-    d.token_counter = 0;
+    d.seq_used.fill(false);
+    // R04: `token_counter` is monotonic for the life of the object and is NOT
+    // reset by configure().
+    d.reserved_ = 0;
     d.results.clear();
     d.results.reserve(cfg.result_queue_capacity);
-    d.seq_used.fill(false);
     return true;
 }
 
@@ -1200,7 +1462,10 @@ bool EndpointCore::configure(const CoreConfig& cfg, std::string& why)
 // flight is REFUSED: the caller must post a `Reset` event (which fails the
 // in-flight exchange with a terminal result) or a `Stop` event first.
 //
-// Counters are observability and are NOT cleared here.
+// Counters are observability and are NOT cleared here.  R04: `token_counter`
+// is NOT reset, and the wire replay barrier / issued-sequence counter are
+// cleared ONLY when the wire session id actually changes; a pure local
+// generation bump keeps them.
 bool EndpointCore::reset(const CoreConfig& cfg, uint64_t new_generation, std::string& why)
 {
     Impl& d = *d_impl;
@@ -1209,30 +1474,37 @@ bool EndpointCore::reset(const CoreConfig& cfg, uint64_t new_generation, std::st
               "event first so its terminal result is not lost";
         return false;
     }
-    if (!validate_core_config(cfg, why))
-        return false;
 
-    d.cfg = cfg;
+    // R04: build and validate the NEXT config BEFORE mutating anything, so a
+    // refused reset leaves the core completely unchanged (atomic).
+    CoreConfig next = cfg;
+    next.session_generation =
+        (new_generation != 0) ? new_generation : cfg.session_generation + 1;
     // A reset MUST declare a fresh peer binding: reusing a binding from the
     // previous generation would let same wire bytes look like a new session
     // (M1-B §4.1 / finding B-3).  The requested generation is the one the
     // binding must name.
-    d.cfg.session_generation =
-        (new_generation != 0) ? new_generation : cfg.session_generation + 1;
-    if (d.cfg.peer_binding.session_generation != d.cfg.session_generation) {
+    if (next.peer_binding.session_generation != next.session_generation) {
         why = "reset requires a fresh peer_binding for the new session generation";
         return false;
     }
+    if (!validate_core_config(next, why))
+        return false;
+
+    const bool wire_changed = (next.session_id != d.cfg.session_id);
+    d.cfg = next;
     d.configured = true;
+    d.clear_exchange();
     d.state = EndpointState::Idle;
-    d.seq_issued = 0;
-    d.token_counter = 0;
+    if (wire_changed) {
+        d.seq_issued = 0;
+        d.seq_used.fill(false);
+    }
     // Undrained terminal results are RETAINED across a reset: they belong to
     // exchanges that already completed, and dropping them would lose a
     // terminal result (F's finding N-8 / B-2 residual).  `results` is bounded
     // by `result_queue_capacity`, so a caller that does not drain will have
     // new Begins refused rather than losing anything.
-    d.seq_used.fill(false);
     return true;
 }
 
@@ -1257,6 +1529,13 @@ CoreActionBatch EndpointCore::post(const CoreEvent& ev)
     // no action and no terminal result.
     if (!core_event_kind_is_known(ev.kind)) {
         d.counters.events_rejected_out_of_domain++;
+        return out;
+    }
+    // R04: an event whose generation is set and does not match the live session
+    // generation is STALE: it is counted and can never advance a new exchange,
+    // even if its token value happens to coincide.
+    if (ev.generation != 0 && ev.generation != d.cfg.session_generation) {
+        d.counters.stale_events++;
         return out;
     }
     switch (ev.kind) {
