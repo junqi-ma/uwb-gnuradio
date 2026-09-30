@@ -71,6 +71,10 @@ initiator `Begin` 与 responder 接纳 Poll **统一**先检查
 时间加法用溢出安全的加法，不使用可能溢出的有符号加法。配置须保证已接纳请求有有限
 终止条件（某项为 0 关闭时，另一项必须有限）。
 
+证据上限的起算点（实现固定，供 QA/verifier 对齐）：取「本端首次开始欠一个结果」的
+事件 tick —— SS initiator 为 Response 的 RX tick；responder 为 Response 的 plan tick；
+DS initiator 为 Final 的 plan tick。绝对 exchange 上限始终自接纳时刻起算，二者独立。
+
 
 ## 4. 状态转移表（每端一个 exchange；至多一个在途）
 
