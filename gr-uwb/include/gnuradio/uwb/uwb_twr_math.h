@@ -775,6 +775,91 @@ inline bool rat128_from_interval(const RelativeTickInterval& ri, Rat128& out)
     return true;
 }
 
+// A whole number of device ticks as an exact rational.  Used by the M1-B
+// protocol path, whose peer input is a whole-tick wire field: the value is
+// converted WITHOUT a nanosecond projection, and a wire fraction that cannot
+// be represented is refused by the caller rather than rounded here.
+inline Rat128 rat128_from_whole_ticks(uint64_t ticks)
+{
+    return rat128_make(static_cast<i128>(ticks), static_cast<i128>(1));
+}
+
+// ===========================================================================
+// The shared exact SS/DS numeric kernel (M1-B, instruction §3.3)
+// ===========================================================================
+//
+// There is exactly ONE place the two formulas are written down.  Both the
+// strict M1-A entry points (`compute_ss_tof` / `compute_ds_tof`, which demand
+// an `AdmittedRangingInterval`) and the M1-B protocol entry points (which take
+// a `ProtocolInterval` that may be a wire claim) run their OWN input checks and
+// then call this kernel.  The formulas are therefore not copied, and the
+// kernel cannot import a permissive input rule because it receives only
+// already-validated, exact rationals.
+//
+// The kernel returns a status rather than a bool so the DS all-zero interval
+// case stays `ZeroDenominator` and is not folded into `Overflow`.
+enum class KernelStatus : uint8_t {
+    Ok = 0,
+    Overflow = 1,
+    ZeroDenominator = 2
+};
+
+// SS: out = (RA - k*DB) / 2, all exact.
+inline KernelStatus
+ss_tof_kernel(const Rat128& RA, const Rat128& DB, const Rat128& k, Rat128& out)
+{
+    Rat128 kdb;
+    Rat128 diff;
+    Rat128 half;
+    if (!rat128_mul(k, DB, kdb))
+        return KernelStatus::Overflow;
+    if (!rat128_sub(RA, kdb, diff))
+        return KernelStatus::Overflow;
+    if (!rat128_div(diff, rat128_make(2, 1), half))
+        return KernelStatus::Overflow;
+    out = half;
+    return KernelStatus::Ok;
+}
+
+// DS: out = (RA*k*RB - DA*k*DB) / (RA + k*RB + DA + k*DB), all exact, and the
+// four values are already in ONE unit (A ticks) by the caller.
+inline KernelStatus
+ds_tof_kernel(const Rat128& RA, const Rat128& RB, const Rat128& DA, const Rat128& DB,
+              const Rat128& k, Rat128& out)
+{
+    Rat128 rba;
+    Rat128 dba;
+    if (!rat128_mul(k, RB, rba))
+        return KernelStatus::Overflow;
+    if (!rat128_mul(k, DB, dba))
+        return KernelStatus::Overflow;
+
+    Rat128 p1;
+    Rat128 p2;
+    Rat128 numer;
+    if (!rat128_mul(RA, rba, p1))
+        return KernelStatus::Overflow;
+    if (!rat128_mul(DA, dba, p2))
+        return KernelStatus::Overflow;
+    if (!rat128_sub(p1, p2, numer))
+        return KernelStatus::Overflow;
+
+    Rat128 s1;
+    Rat128 s2;
+    Rat128 denom;
+    if (!rat128_add(RA, rba, s1))
+        return KernelStatus::Overflow;
+    if (!rat128_add(DA, dba, s2))
+        return KernelStatus::Overflow;
+    if (!rat128_add(s1, s2, denom))
+        return KernelStatus::Overflow;
+    if (denom.n <= 0)
+        return KernelStatus::ZeroDenominator;
+    if (!rat128_div(numer, denom, out))
+        return KernelStatus::Overflow;
+    return KernelStatus::Ok;
+}
+
 inline TofRationalTicks rat128_to_ticks(const Rat128& r)
 {
     TofRationalTicks t;
@@ -922,14 +1007,14 @@ inline TofResult compute_ss_tof(const AdmittedRangingInterval& ra,
 
     const detail::Rat128 k = detail::rat128_make(k_ab.k_num(), k_ab.k_den());
     detail::Rat128 kdb;
-    detail::Rat128 diff;
     detail::Rat128 half;
     if (!detail::rat128_mul(k, DB, kdb))
         return detail::tof_fail(r, TofStatus::Overflow, "k*DB left 128 bits");
-    if (!detail::rat128_sub(RA, kdb, diff))
-        return detail::tof_fail(r, TofStatus::Overflow, "RA - k*DB left 128 bits");
-    if (!detail::rat128_div(diff, detail::rat128_make(2, 1), half))
-        return detail::tof_fail(r, TofStatus::Overflow, "(RA - k*DB)/2 left 128 bits");
+    // The formula itself lives in the ONE shared kernel (M1-B §3.3); this
+    // strict entry point keeps its own admission checks above and maps the
+    // kernel status back onto its own vocabulary below.
+    if (detail::ss_tof_kernel(RA, DB, k, half) != detail::KernelStatus::Ok)
+        return detail::tof_fail(r, TofStatus::Overflow, "SS exact kernel left 128 bits");
     if (!detail::rat128_fits_int64(half))
         return detail::tof_fail(r, TofStatus::Overflow,
                                 "ToF numerator/denominator do not fit int64 ticks");
@@ -1018,40 +1103,21 @@ inline TofResult compute_ds_tof(const AdmittedRangingInterval& ra,
     if (!detail::rat128_mul(k, DB, dba))
         return detail::tof_fail(r, TofStatus::Overflow, "k*DB left 128 bits");
 
-    detail::Rat128 p1;
-    detail::Rat128 p2;
-    detail::Rat128 numer;
-    if (!detail::rat128_mul(RA, rba, p1))
-        return detail::tof_fail(r, TofStatus::Overflow, "RA*k*RB left 128 bits");
-    if (!detail::rat128_mul(DA, dba, p2))
-        return detail::tof_fail(r, TofStatus::Overflow, "DA*k*DB left 128 bits");
-    if (!detail::rat128_sub(p1, p2, numer))
-        return detail::tof_fail(r, TofStatus::Overflow, "DS numerator left 128 bits");
-
-    detail::Rat128 s1;
-    detail::Rat128 s2;
-    detail::Rat128 denom;
-    if (!detail::rat128_add(RA, rba, s1))
-        return detail::tof_fail(r, TofStatus::Overflow, "RA + k*RB left 128 bits");
-    if (!detail::rat128_add(DA, dba, s2))
-        return detail::tof_fail(r, TofStatus::Overflow, "DA + k*DB left 128 bits");
-    if (!detail::rat128_add(s1, s2, denom))
-        return detail::tof_fail(r, TofStatus::Overflow, "DS denominator left 128 bits");
-
-    if (denom.n <= 0) {
+    // The formula itself lives in the ONE shared kernel (M1-B §3.3); the
+    // strict entry point keeps its own admission checks above.
+    detail::Rat128 tof;
+    const detail::KernelStatus kst = detail::ds_tof_kernel(RA, RB, DA, DB, k, tof);
+    if (kst == detail::KernelStatus::ZeroDenominator) {
         // Four non-negative intervals sum to something non-positive: only the
         // all-zero case is reachable, and the quotient is undefined.
         r.ok = false;
         r.status = TofStatus::ZeroDenominator;
         r.exchange_status = tof_status_to_exchange_status(TofStatus::ZeroDenominator);
-        r.detail = "DS denominator is not positive: RA+k*RB+DA+k*DB = " +
-                   detail::rat128_to_ticks(denom).to_string();
+        r.detail = "DS denominator is not positive: RA+k*RB+DA+k*DB is non-positive";
         return r;
     }
-
-    detail::Rat128 tof;
-    if (!detail::rat128_div(numer, denom, tof))
-        return detail::tof_fail(r, TofStatus::Overflow, "DS quotient left 128 bits");
+    if (kst != detail::KernelStatus::Ok)
+        return detail::tof_fail(r, TofStatus::Overflow, "DS exact kernel left 128 bits");
     if (!detail::rat128_fits_int64(tof))
         return detail::tof_fail(r, TofStatus::Overflow,
                                 "ToF numerator/denominator do not fit int64 ticks");
