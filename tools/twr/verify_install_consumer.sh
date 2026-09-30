@@ -123,11 +123,27 @@ fi
 # The admission header MUST be installed (review defect N05).
 # ---------------------------------------------------------------------------
 for h in uwb_twr_types.h uwb_twr_frame.h uwb_twr_timestamp.h uwb_twr_config.h \
-         uwb_twr_capability_evidence.h uwb_twr_tof_input.h uwb_twr_math.h; do
+         uwb_twr_capability_evidence.h uwb_twr_tof_input.h uwb_twr_math.h \
+         uwb_twr_protocol_time.h uwb_twr_core.h; do
     [ -f "$PREFIX/include/gnuradio/uwb/$h" ] || fail \
         "installed public header is missing: include/gnuradio/uwb/$h"
 done
-echo "   all seven public TWR headers present"
+echo "   all nine public TWR headers present"
+
+# The QA/demo-only transport header must NOT be installed (M1-B §5/§8).
+if [ -f "$PREFIX/include/gnuradio/uwb/uwb_twr_fake_link.h" ]; then
+    fail "uwb_twr_fake_link.h was installed, but it is QA/demo support only; \
+the fake link is not part of the public install ABI"
+fi
+echo "   QA/demo-only uwb_twr_fake_link.h correctly absent"
+
+# The standalone core archive MUST be installed: the public core contract
+# `uwb_twr_core.h` is a class with an out-of-line implementation.
+CORE_LIB=$(find "$PREFIX" -name 'libuwb_twr_core.a' -o -name 'libuwb_twr_core.so*' \
+               2>/dev/null | head -1 || true)
+[ -n "$CORE_LIB" ] || fail \
+    "the standalone uwb_twr_core archive was not installed under $PREFIX/lib"
+echo "   standalone core archive present: $CORE_LIB"
 
 # The QA-only header must NOT be installed (it cannot compile standalone).
 if [ -f "$PREFIX/include/gnuradio/uwb/uwb_twr_test_output.h" ]; then
@@ -281,6 +297,25 @@ echo "== compile + run the throwaway admission consumer against the prefix only 
 "$CXX" -std=c++17 -O1 -Wall -Wextra -I"$PREFIX/include" \
     "$WORK/tiny_admission_consumer.cc" -o "$WORK/tiny_admission_consumer"
 "$WORK/tiny_admission_consumer"
+
+# ---------------------------------------------------------------------------
+# M1-B: the repository's hand-driven core consumer, compiled against the
+# PREFIX headers and the INSTALLED standalone archive ONLY -- no source tree,
+# no build tree, no GNU Radio, no UHD.  It runs one SS and one DS exchange and
+# asserts the exact ToF at the correct endpoint.
+# ---------------------------------------------------------------------------
+echo
+echo "== M1-B standalone core consumer (SS + DS) against the installed prefix =="
+"$CXX" -std=c++17 -O1 -Wall -Wextra -I"$PREFIX/include" \
+    "$CONSUMER_DIR/twr_core_consumer.cc" "$CORE_LIB" -o "$WORK/twr_core_consumer"
+"$WORK/twr_core_consumer"
+if ldd "$WORK/twr_core_consumer" 2>/dev/null | grep -qiE 'gnuradio|uhd'; then
+    fail "the M1-B core consumer pulled in a GNU Radio / UHD dependency"
+fi
+if readelf -d "$WORK/twr_core_consumer" 2>/dev/null | grep -qiE 'gnuradio|uhd'; then
+    fail "the M1-B core consumer has a GNU Radio / UHD dynamic dependency"
+fi
+echo "   no GNU Radio / UHD dynamic dependency in the core consumer"
 
 # ---------------------------------------------------------------------------
 # The repository's full consumer (header set + contract + Python module),

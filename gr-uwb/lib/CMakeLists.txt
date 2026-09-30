@@ -134,6 +134,26 @@ include(GrMiscUtils)
 GR_LIBRARY_FOO(gnuradio-uwb)
 
 ########################################################################
+# M1-B: the standalone, GNU-Radio-free / UHD-free TWR protocol core.
+#
+# `uwb_twr_core.h` + `uwb_twr_protocol_time.h` are the PUBLIC installed M1-B
+# contract.  The core is its OWN archive so an isolated install consumer can
+# link it and PROVE (ldd/readelf) that it pulls in neither GNU Radio nor UHD
+# (M1-B §8).  The fake link is transport/QA support and is NOT installed.
+########################################################################
+add_library(uwb_twr_core STATIC uwb_twr_core.cc)
+target_include_directories(uwb_twr_core PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
+    $<INSTALL_INTERFACE:include>)
+set_target_properties(uwb_twr_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+install(TARGETS uwb_twr_core ARCHIVE DESTINATION lib)
+
+add_library(uwb_twr_fake_link STATIC uwb_twr_fake_link.cc)
+target_include_directories(uwb_twr_fake_link PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>)
+target_link_libraries(uwb_twr_fake_link PUBLIC uwb_twr_core)
+
+########################################################################
 # Print summary
 ########################################################################
 message(STATUS "Using install prefix: ${CMAKE_INSTALL_PREFIX}")
@@ -219,6 +239,28 @@ foreach(qa_file ${test_uwb_sources})
         ${CMAKE_CURRENT_SOURCE_DIR}/${qa_file}
     )
 endforeach(qa_file)
+
+########################################################################
+# M1-B pure protocol-core tests.
+#
+# These link ONLY uwb_twr_core / uwb_twr_fake_link / Boost.Test -- never
+# gnuradio-uwb and never UHD -- so a green run is itself evidence that the
+# protocol core is radio-free (M1-B §8).  They are registered separately from
+# GR_ADD_CPP_TEST because that macro pulls in the whole GR link closure.
+########################################################################
+function(uwb_add_pure_twr_test test_name test_source)
+    add_executable(${test_name} ${test_source})
+    target_include_directories(${test_name}
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+    target_link_libraries(${test_name}
+        PRIVATE uwb_twr_core uwb_twr_fake_link Boost::unit_test_framework)
+    set_target_properties(${test_name} PROPERTIES
+        COMPILE_DEFINITIONS "BOOST_TEST_DYN_LINK;BOOST_TEST_MAIN")
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endfunction()
+
+uwb_add_pure_twr_test(uwb_qa_uwb_twr_protocol_time.cc qa_uwb_twr_protocol_time.cc)
+uwb_add_pure_twr_test(uwb_qa_uwb_twr_fake_link.cc qa_uwb_twr_fake_link.cc)
 
 # ########################################################################
 # Deterministic library resolution for EVERY test registered above.

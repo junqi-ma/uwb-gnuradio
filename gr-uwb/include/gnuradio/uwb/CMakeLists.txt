@@ -86,5 +86,16 @@ install(FILES
     # only on the TWR contract headers above, so it installs cleanly and an
     # isolated consumer can compute a ToF from admitted intervals.
     uwb_twr_math.h
+    # M1-B: the wire-claim boundary and the per-endpoint protocol core.  Both
+    # are pure C++ (no GNU Radio, no UHD, no config business rules) and are the
+    # PUBLIC M1-B contract, so they are installed and exercised by the isolated
+    # install consumer.  `uwb_twr_protocol_time.h` is a strict superset of the
+    # M0.1 ranging gate contract; `uwb_twr_core.h` declares the endpoint FSM
+    # whose implementation ships in the standalone `uwb_twr_core` archive.
+    #
+    # uwb_twr_fake_link.h is deliberately NOT installed: it is QA/demo support
+    # only (M1-B §5/§8).
+    uwb_twr_protocol_time.h
+    uwb_twr_core.h
     DESTINATION include/gnuradio/uwb
 )
