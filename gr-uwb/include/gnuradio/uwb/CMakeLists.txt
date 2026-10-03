@@ -97,5 +97,17 @@ install(FILES
     # only (M1-B §5/§8).
     uwb_twr_protocol_time.h
     uwb_twr_core.h
+    # M2-A (review B2): the HRP modulator / resampler / demod cores are
+    # header-only and were ALREADY on this list, but their transitive includes
+    # were not.  uwb_hrp_mod_core.h includes uwb_demod_core.h, which includes
+    # uwb_demod_result.h, uwb_detector_core.h, uwb_phy_profile.h and
+    # uwb_cir_fir_simd.h.  Only uwb_detector_core.h (and uwb_defaults.h /
+    # uwb_radar_pdu_meta.h) were installed, so the installed uwb_hrp_mod_core.h
+    # could not compile against the prefix alone.  Install the four missing
+    # headers so an isolated consumer of the M2-A native PHY helper compiles.
+    uwb_demod_core.h
+    uwb_demod_result.h
+    uwb_phy_profile.h
+    uwb_cir_fir_simd.h
     DESTINATION include/gnuradio/uwb
 )

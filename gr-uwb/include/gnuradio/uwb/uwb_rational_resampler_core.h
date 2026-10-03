@@ -298,8 +298,34 @@ public:
             profile_.ns_assemble += ns_since(t_a0);
 
         size_t post_i = 0;
+        // M2-A G0 §3.4 chunk-invariance fix.  Compiled ONLY for Decim > Interp
+        // (the new TX work->native directions), so the existing RX directions
+        // (65/48, 65/32) are byte-for-byte unchanged and pay no extra work.
+        //
+        // If the previous process() call exhausted in the middle of a phase
+        // wrap, the logical input position floor(output_items_*M/L) is ahead
+        // of the consumed count.  Resume the local cursor at that offset so
+        // subsequent chunks continue the same upfirdn stream, and restore the
+        // exact polyphase arm for the next output.
+        if constexpr (kDecim > kInterp) {
+            if (!started_held) {
+                const int64_t logical_post =
+                    (static_cast<int64_t>(output_items_) *
+                     static_cast<int64_t>(kDecim)) /
+                    static_cast<int64_t>(kInterp);
+                const int64_t start_post =
+                    logical_post - static_cast<int64_t>(in_count_entry);
+                if (start_post > 0)
+                    post_i = static_cast<size_t>(start_post);
+                ctr_ = static_cast<uint32_t>(
+                    (static_cast<uint64_t>(output_items_) *
+                     static_cast<uint64_t>(kDecim)) %
+                    static_cast<uint64_t>(kInterp));
+            }
+        }
         have_current_ = true;
-        current_ = work_[hist_n + post_i];
+        current_ = (post_i < post_n) ? work_[hist_n + post_i]
+                                     : gr_complex(0.0f, 0.0f);
 
         const int nw =
             (nworkers_override > 0) ? nworkers_override : nworkers_;
@@ -334,12 +360,47 @@ public:
 
     size_t flush(gr_complex* out, size_t max_out)
     {
+        [[maybe_unused]] const bool first_flush = !flush_mode_;
         flush_mode_ = true;
         const uint64_t N = input_items_;
         const size_t Lout = expected_output_length(N, T_);
         size_t produced = 0;
 
         const size_t hist_n = hist_.size();
+
+        // M2-A G0 §3.4 flush fix.  Compiled ONLY for Decim > Interp, so the
+        // existing RX directions are byte-for-byte unchanged.
+        //
+        // process() can return from its exhaustion branch in the MIDDLE of the
+        // phase-wrap loop, so ctr_ may still be >= Interp and the logical input
+        // pointer floor(output_items_*M/L) may exceed the consumed count N.
+        // Restore the exact upfirdn phase and shift the history by that
+        // overshoot (shifted-in samples are implicit zero padding) so flush
+        // continues the same stream.
+        if constexpr (kDecim > kInterp) {
+        if (first_flush && hist_n > 0) {
+            ctr_ = static_cast<uint32_t>(
+                (static_cast<uint64_t>(output_items_) *
+                 static_cast<uint64_t>(kDecim)) %
+                static_cast<uint64_t>(kInterp));
+            const int64_t logical_post =
+                (static_cast<int64_t>(output_items_) *
+                 static_cast<int64_t>(kDecim)) /
+                static_cast<int64_t>(kInterp);
+            const int64_t overshoot =
+                logical_post - static_cast<int64_t>(N);
+            if (overshoot > 0) {
+                const size_t sh = static_cast<size_t>(
+                    std::min<int64_t>(overshoot,
+                                      static_cast<int64_t>(hist_n)));
+                std::memmove(hist_.data(), hist_.data() + sh,
+                             (hist_n - sh) * sizeof(gr_complex));
+                std::fill(hist_.data() + (hist_n - sh),
+                          hist_.data() + hist_n, gr_complex(0.0f, 0.0f));
+            }
+        }
+        } // if constexpr (kDecim > kInterp)
+
         if (work_.size() < hist_n + 1)
             work_.resize(hist_n + 1);
         if (hist_n > 0)
@@ -989,6 +1050,15 @@ private:
 
 using RationalResampler65_48Core = RationalResamplerLmCore<65, 48>;
 using RationalResampler65_32Core = RationalResamplerLmCore<65, 32>;
+
+// M2-A G0 §3.3: TX (work -> native) aliases.  Only the two RX directions above
+// were instantiated; <48,65> (998.4 -> 737.28 MS/s, UC200) and <32,65>
+// (998.4 -> 491.52 MS/s, CG400) are template-legal but had no alias.  The
+// template is NOT re-implemented: these are the same causal upfirdn core.
+// Their TX taps must have DC sum == Interp (48 / 32) so the effective gain is
+// 1 (G0 §3.3); see testdata/twr/m2a/taps/.
+using RationalResampler48_65Core = RationalResamplerLmCore<48, 65>;
+using RationalResampler32_65Core = RationalResamplerLmCore<32, 65>;
 
 } // namespace core
 } // namespace uwb

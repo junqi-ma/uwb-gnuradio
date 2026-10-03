@@ -1,0 +1,4 @@
+# M2-A MATLAB runtime outputs are produced on a MATLAB machine and are not
+# committed as goldens.  Commit only after review.
+out/
+generated/

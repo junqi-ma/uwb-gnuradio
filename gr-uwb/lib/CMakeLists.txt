@@ -188,6 +188,7 @@ list(APPEND test_uwb_sources
     qa_uwb_pdu_sc16_scale_65_48.cc
     qa_uwb_pdu_roi_cir_65_32.cc
     qa_uwb_rational_resampler_core_65_32.cc
+    qa_uwb_rational_resampler_m2a.cc
     qa_uwb_rational_resampler_65_32_stream.cc
     qa_uwb_pdu_window_crop.cc
     qa_uwb_tone_canceller.cc
@@ -387,6 +388,11 @@ target_compile_definitions(uwb_qa_uwb_radar_e2e.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
 target_compile_definitions(uwb_qa_uwb_rational_resampler_core_65_32.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
+# M2-A: the TX (work -> native) resampler directions and their taps live under
+# testdata/twr/m2a/taps/, so this QA needs the testdata root too.
+target_compile_definitions(uwb_qa_uwb_rational_resampler_m2a.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
 target_compile_definitions(uwb_qa_uwb_pdu_rational_resampler_65_32.cc PRIVATE

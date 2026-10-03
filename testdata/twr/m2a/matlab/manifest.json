@@ -1,0 +1,160 @@
+{
+  "schema": "twr-m2a-matlab-oracle-manifest/1",
+  "generated_utc": "2026-10-03T14:03:20Z",
+  "owner": "agent C (m2a_matlab_oracle)",
+  "matlab_executed": false,
+  "acceptance_note": "M2-A 未完成，MATLAB 待实跑",
+  "matlab_unavailable_reason": "/usr/local/MATLAB/R2024a has no bin/matlab launcher and no main binary; no matlab/octave/MCR on PATH; not WSL. MATLAB was NOT run for these files.",
+  "disclaimer": "A .m file existing is not a pass. Python/SciPy is not used as a substitute for a MATLAB claim. gen_golden_inputs.py generates INPUTS only and never computes an oracle output.",
+  "toolboxes_required": [
+    "Communications Toolbox (lrwpanHRPConfig, lrwpanWaveformGenerator)",
+    "Signal Processing Toolbox (upfirdn, readmatrix); script #1 has an explicit polyphase fallback if upfirdn is absent"
+  ],
+  "scripts": [
+    {
+      "id": "A11-1",
+      "file": "matlab_resample_reference.m",
+      "sha256": "eeea40376d1b4a9562679225aa6c4fb293d82143da9a4ee014705527035a5aeb",
+      "purpose": "Independent MATLAB upfirdn + explicit polyphase reference of the G0 §3.1 causal full-convolution contract; per-sample comparison against a C++ resampler output given as input.",
+      "consumes": [
+        "inputs/<case>_in.cf32",
+        "testdata/twr/m2a/taps/ (frozen taps)",
+        "testdata/twr/m2a/cpp/<dir>_<case>_cpp.cf32"
+      ],
+      "produces": [
+        "out/matlab_resample_reference_result.json",
+        "out/<dir>_<case>_matlab.cf32"
+      ],
+      "checks": [
+        "numel(upfirdn) == ceil(((N-1)*L+T)/M)",
+        "upfirdn vs explicit polyphase <= 1e-9",
+        "vs C++: max_abs_error <= 1e-4 and relative_L2 <= 1e-5",
+        "all-zero input produces exactly zero"
+      ]
+    },
+    {
+      "id": "A11-2",
+      "file": "matlab_decode_cpp_iq.m",
+      "sha256": "3637e8d4684d6ed124037696fbebdf6a22ae49b3f12e3c39b8c6dc4b3c7c3119",
+      "purpose": "Resample the C++ native IQ with the same frozen contract, decode it with UWB_demodulation/decode_uwb.m, compare PHR/PSDU/FCS and diagnostic coordinates to the twr-m2a-native/1 JSON.",
+      "consumes": [
+        "a twr-m2a-native/1 JSON (G0 §8)",
+        "its native CF32 IQ (artifacts.native_cf32 or <json>.cf32)",
+        "testdata/twr/m2a/taps/ (frozen RX taps)"
+      ],
+      "produces": [
+        "out/matlab_decode_cpp_iq_result.json"
+      ],
+      "checks": [
+        "phr.psdu_length_bytes == frame.psdu_bytes",
+        "payload.bytes == mac_hex + independently computed FCS",
+        "fcs_pass and fcs_received/calculated == independent FCS",
+        "packet-start and SFD-start within 1 work sample (0-based, explicit conversion)"
+      ]
+    },
+    {
+      "id": "A11-3",
+      "file": "matlab_generate_twr_frame.m",
+      "sha256": "b35a6ee01bc42fd446d0cdf2302e97f1a2bd41bb9afe2265ab375a0f2eee6769",
+      "purpose": "Independently serialise Poll/Response/Final frame v1, append the FCS via +uwbdecoder/ieee802154CRC16.m, generate the standard minimal-profile work-grid waveform via +uwbdecoder/buildUwbReference.m + lrwpanWaveformGenerator, and self-decode it.",
+      "consumes": [
+        "UWB_demodulation/+uwbdecoder/buildUwbReference.m",
+        "UWB_demodulation/+uwbdecoder/ieee802154CRC16.m",
+        "testdata/twr/frame_golden_v1.json (cross-check only)"
+      ],
+      "produces": [
+        "generated/<frame>_work.cf32",
+        "generated/<frame>_expected.json",
+        "generated/BLOCKED.json only if the toolbox cannot express the profile"
+      ],
+      "checks": [
+        "independent serializer == frame_golden_v1.json mac_payload_hex",
+        "ranging bit expressible; otherwise BLOCKED and no waveform written",
+        "self-decode bytes == generated PSDU and fcs_pass"
+      ]
+    }
+  ],
+  "commands": [
+    "matlab -batch \"cd('testdata/twr/m2a/matlab'); matlab_resample_reference('cpp_dir','testdata/twr/m2a/cpp')\"",
+    "matlab -batch \"cd('testdata/twr/m2a/matlab'); matlab_decode_cpp_iq('result_json','testdata/twr/m2a/native_roundtrip_uc200_737280000.json')\"",
+    "matlab -batch \"cd('testdata/twr/m2a/matlab'); matlab_generate_twr_frame\""
+  ],
+  "expected_outputs": [
+    "out/matlab_resample_reference_result.json (records pass/failed/blocked per direction and case)",
+    "out/matlab_decode_cpp_iq_result.json (records status, checks, deltas)",
+    "generated/poll_work.cf32 + generated/poll_expected.json",
+    "generated/response_work.cf32 + generated/response_expected.json",
+    "generated/final_work.cf32 + generated/final_expected.json"
+  ],
+  "taps_contract": {
+    "dir": "testdata/twr/m2a/taps/ (owner: agent A)",
+    "directions": [
+      "48_65",
+      "32_65",
+      "65_48",
+      "65_32"
+    ],
+    "discovery": "design.json directions[] with interp/decim + file; else taps_/tx_taps_/rx_taps_/m2a_taps_<L>_<M> with .f32/.bin (float32 LE)/.txt/.csv",
+    "missing": "blocked, never PASS"
+  },
+  "cpp_output_contract": {
+    "resampler_outputs": "testdata/twr/m2a/cpp/<tx_48_65|tx_32_65|rx_65_48|rx_65_32>_<impulse|zeros|random|twr_waveform>_cpp.cf32",
+    "note": "C++ must consume exactly inputs/<case>_in.cf32 with the matching frozen taps"
+  },
+  "native_json_contract": {
+    "schema": "twr-m2a-native/1 (G0 §8)",
+    "used_fields": [
+      "frame.mac_hex",
+      "frame.psdu_bytes",
+      "rate.native_hz",
+      "decode.diagnostic.packet_start_sample",
+      "decode.diagnostic.sfd_start_sample",
+      "decode.payload_hex (C++ self-consistency only)"
+    ],
+    "native_iq": "artifacts.native_cf32, or <json-basename>.cf32 in the same directory"
+  },
+  "blocked_acceptance": [
+    "A11 cross-check #1: MATLAB not run (blocked/未满足)",
+    "A11 cross-check #2: MATLAB not run (blocked/未满足)",
+    "A11 cross-check #3: MATLAB not run (blocked/未满足); also blocked if the installed Communications Toolbox cannot set the ranging bit",
+    "A11 overall: 未满足 until all three scripts run on a MATLAB machine"
+  ],
+  "files": {
+    "README.md": "9050bd193b162a639abdd983f0e67585c359f0fc4b32e812d2552fc356f6cb4b",
+    ".gitignore": "4525355bf54259684314fe4274475cb38e4aa5560ebce0bebcd37db75f0de96b",
+    "gen_golden_inputs.py": "adeb0b23400fd99c1a2e40e596fef02236092620d65afa4eb23676a1020e4535",
+    "matlab_resample_reference.m": "eeea40376d1b4a9562679225aa6c4fb293d82143da9a4ee014705527035a5aeb",
+    "matlab_decode_cpp_iq.m": "3637e8d4684d6ed124037696fbebdf6a22ae49b3f12e3c39b8c6dc4b3c7c3119",
+    "matlab_generate_twr_frame.m": "b35a6ee01bc42fd446d0cdf2302e97f1a2bd41bb9afe2265ab375a0f2eee6769",
+    "inputs/impulse_in.cf32": "3c563f14ae18c17c9365324c2fd265ee96251a3448d5ae43e0fee1474cd5233c",
+    "inputs/zeros_in.cf32": "e5a00aa9991ac8a5ee3109844d84a55583bd20572ad3ffcd42792f3c36b183ad",
+    "inputs/random_in.cf32": "3ad503a9939c783fd6299f26267a31989825e1bcaf4f3403f8ee2963ae870dac",
+    "inputs/twr_waveform_in.cf32": "b3fc2f8830f3fb95e29c0f49ef3149a6baabd83b0f56b27c098635f8967adbf9"
+  },
+  "frozen_assets": {
+    "gr-uwb/include/gnuradio/uwb/uwb_hrp_mod_core.h": "636aec1326d9d5fdebf619dd07a6e269ec246c19f5b6cdf144945924e0568912",
+    "gr-uwb/include/gnuradio/uwb/uwb_rational_resampler_core.h": "8ed466c3382a8c5ef6099c915d553f0734e77864f0f57f0805c43883656fe223",
+    "gr-uwb/include/gnuradio/uwb/uwb_demod_core.h": "f1dbf344af9e09cff7561617f32893b4c04c30007986b217ee7e6945654f48fc",
+    "gr-uwb/include/gnuradio/uwb/uwb_phy_profile.h": "709a5296aae2be6c564f4378407010e0d38d899b28521417fc9b3a517f2f04d4",
+    "gr-uwb/include/gnuradio/uwb/uwb_twr_frame.h": "69ccb0f53ad116f15faca9112f6ecd7ff6771aebbe8fcbb26c5ce0a78087d0a2",
+    "testdata/twr/frame_golden_v1.json": "b12eeb1fb03802ab5a11fef5ed80e8b0863422574838d36b90f07f67c098e828",
+    "testdata/uwb_code9_preamble64_payload128_standard_sfd.cfile": "d8e4e2fdee360dca18e1f1f0dc8287a3fbd0b4a35a612ad94af2a2462ee363db"
+  },
+  "provenance": {
+    "branch": "feature/uwb-ds-twr",
+    "revision": "d8bcebf1cb2d1a27d1fe86da065c7478f6e03ae5",
+    "input_generator": "gen_golden_inputs.py (inputs only)",
+    "manifest_self_hash": "not included (self-referential)"
+  },
+  "taps_observed": {
+    "testdata/twr/m2a/taps/design.json": "b0716a598985b082d05dec8a60514144d13e23f57e6e7377e9675bc8112b8fe6",
+    "testdata/twr/m2a/taps/design_m2a_tx_taps.py": "f6e9a3a526280d5e8b104aaf9d79d4a2200210d7b3a538dcfe77061f8d349414",
+    "testdata/twr/m2a/taps/tx_48_65.f32": "edc40fa1427adbb1a4d140aa3e9824431ee1812e687af61515129256595b0ab5",
+    "testdata/twr/m2a/taps/tx_32_65.f32": "3f0ffaf1d7548f30875c5a23661ebf92c04889ab1b18405cd7b542af692a8c78",
+    "testdata/twr/m2a/taps/tx_48_65_rescale_rx.f32": "d2a0a3c54b34c214794d6fe71fdf547dcd3f11f7b8767634368454f095aa63a0",
+    "testdata/twr/m2a/taps/tx_32_65_rescale_rx.f32": "a198c6a5c3e9bc8a0486a2aa6027d710460c766cc93874f4648b3f7194bbc70e",
+    "testdata/resampler_65_48/taps_quality_minorder.txt": "07b09983f072a06604ec08a1fee19317e010b2b10d2bf79077b6f2b6a39a2667",
+    "testdata/resampler_65_32/taps_quality_minorder.txt": "07b09983f072a06604ec08a1fee19317e010b2b10d2bf79077b6f2b6a39a2667"
+  },
+  "frozen_assets_note": "gr-uwb/include/gnuradio/uwb/uwb_rational_resampler_core.h differs from G0 §1.2's 006901... because agent A added the RationalResampler48_65Core / RationalResampler32_65Core aliases (G0 §3.3 permits 'aliases + validation only'). All other listed hashes match G0 §1.2."
+}
