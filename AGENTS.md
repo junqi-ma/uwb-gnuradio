@@ -13,7 +13,13 @@ fail-open）；M0.1 契约层完成，TWR 协议能力仍未实现**（2026-09-2
 **docs/twr/评审意见_M0.1_2026-09-29.md**（N01–N06）、
 **docs/twr/M0.1第二轮整改报告_N01-N06.md**、以及
 **docs/twr/M0.1_N07修复报告_2026-09-29.md**（N07：审核报 1 处，实际 20 处）。
-当前已完成 **M1-A 独立 ToF 数学 + MATLAB oracle**，以及
+当前进行 **M2-A native PHY 闭环**（未完成：A10 损伤压力、A13 分配/延迟、A11 MATLAB 按用户
+指示忽略）。见 **docs/twr/M2-A_G0接口与数字坐标.md**、**docs/twr/M2-A_评审报告.md**、
+**docs/twr/M2-A_native_PHY开发报告.md**。M2-A 只证 native 往返与数字坐标，**不证**首径
+ToA/硬件测距；`allows(NativeRoundtripVerified, Ranging)` 仍为 false。**不自动进入 M2-B**。
+另：重采样核 SIMD 路径存在已复现的未初始化读取（输出非逐位可复现），按任务单只记录不修。
+
+此前已完成 **M1-A 独立 ToF 数学 + MATLAB oracle**，以及
 **M1-B 离线协议核心与双端仿真**（2026-09-30 交付，经第二轮独立复核发现 R01–R09，
 已全部整改关闭，见
 **docs/twr/M1-B_复核整改报告_2026-09-30.md** 与

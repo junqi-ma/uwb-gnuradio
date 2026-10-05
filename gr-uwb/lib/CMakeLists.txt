@@ -154,6 +154,23 @@ target_include_directories(uwb_twr_fake_link PUBLIC
 target_link_libraries(uwb_twr_fake_link PUBLIC uwb_twr_core)
 
 ########################################################################
+# M2-A: the offline native-rate PHY closed loop (G0 §2).
+#
+# `uwb_twr_phy.h` is the PUBLIC M2-A entry.  It reuses the header-only
+# hrp_mod / rational_resampler / demod cores under ../include, so this archive
+# links VOLK + Threads and needs NO GNU Radio runtime.  The install consumer
+# proves that with ldd/readelf (G0 §14.1); if libgnuradio-* ever appears here,
+# the fallback is header-only + a consumer-only compile check.
+########################################################################
+add_library(uwb_twr_phy STATIC uwb_twr_phy.cc)
+target_include_directories(uwb_twr_phy PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
+    $<INSTALL_INTERFACE:include>)
+target_link_libraries(uwb_twr_phy PUBLIC Volk::volk Threads::Threads)
+set_target_properties(uwb_twr_phy PROPERTIES POSITION_INDEPENDENT_CODE ON)
+install(TARGETS uwb_twr_phy ARCHIVE DESTINATION lib)
+
+########################################################################
 # Print summary
 ########################################################################
 message(STATUS "Using install prefix: ${CMAKE_INSTALL_PREFIX}")
@@ -226,9 +243,11 @@ list(APPEND test_uwb_sources
     # testdata/twr/tof_oracle_vectors.json (the independent physical-model
     # oracle), so it needs UWB_TESTDATA_DIR as well.
     qa_uwb_twr_math.cc
+    # M2-A: the full-frame native-rate PHY closed loop (G0 §12 A01-A14).
+    qa_uwb_twr_native_phy.cc
 )
 # Anything we need to link to for the unit tests go here
-list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks)
+list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks uwb_twr_phy)
 
 if(NOT test_uwb_sources)
     MESSAGE(STATUS "No C++ unit tests... skipping")
@@ -393,6 +412,11 @@ target_compile_definitions(uwb_qa_uwb_rational_resampler_core_65_32.cc PRIVATE
 # M2-A: the TX (work -> native) resampler directions and their taps live under
 # testdata/twr/m2a/taps/, so this QA needs the testdata root too.
 target_compile_definitions(uwb_qa_uwb_rational_resampler_m2a.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
+# M2-A full-frame QA: reads the frozen TX taps under testdata/twr/m2a/taps/ and
+# the RX taps under testdata/resampler_65_48|65_32/.
+target_compile_definitions(uwb_qa_uwb_twr_native_phy.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
 target_compile_definitions(uwb_qa_uwb_pdu_rational_resampler_65_32.cc PRIVATE

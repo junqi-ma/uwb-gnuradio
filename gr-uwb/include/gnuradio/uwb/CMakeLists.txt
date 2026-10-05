@@ -109,5 +109,9 @@ install(FILES
     uwb_demod_result.h
     uwb_phy_profile.h
     uwb_cir_fir_simd.h
+    # M2-A: the offline native-rate PHY closed loop.  Header-only entry that
+    # reuses the hrp_mod / resampler / demod cores above, so it installs and an
+    # isolated consumer can drive a full-frame native round trip.
+    uwb_twr_phy.h
     DESTINATION include/gnuradio/uwb
 )

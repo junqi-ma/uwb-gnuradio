@@ -239,3 +239,35 @@ target_link_libraries(uwb_offline_postprocess_dump
     Threads::Threads
 )
 install(TARGETS uwb_offline_postprocess_dump DESTINATION bin)
+
+########################################################################
+# M2-A: offline native-rate PHY demo + independent verifier (G0 §10).
+#
+# `twr_native_phy_demo` links ONLY the static `uwb_twr_phy` archive (+ its
+# PUBLIC Volk/Threads) -- never gnuradio-uwb / UHD -- so a green run is itself
+# evidence that the closed loop is radio-free.
+########################################################################
+add_executable(twr_native_phy_demo twr_native_phy_demo.cc)
+target_include_directories(twr_native_phy_demo PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(twr_native_phy_demo PRIVATE
+    uwb_twr_phy Volk::volk Threads::Threads)
+target_compile_definitions(twr_native_phy_demo PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
+# The verifier re-derives the frame bytes / CRC / lengths / decode verdict from
+# the manifest WITHOUT calling the C++, so it needs no build tree.  It runs the
+# demo on the fly to get a real manifest and then checks it, plus --self-test.
+add_test(NAME uwb_qa_twr_m2a_native_phy_verify_py
+    COMMAND sh -c
+        "d=$(mktemp -d ${CMAKE_CURRENT_BINARY_DIR}/m2a_verify.XXXXXX) && \
+$<TARGET_FILE:twr_native_phy_demo> --frame poll --native-rate 737280000 --iq cf32 \
+    --output $d/out.json && \
+${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/twr/verify_m2_a_native_phy.py \
+    --output $d/out.json --self-test; rc=$?; rm -rf $d; exit $rc")
+set_property(TEST uwb_qa_twr_m2a_native_phy_verify_py APPEND PROPERTY
+    ENVIRONMENT
+        "PYTHONPATH="
+        "PYTHONDONTWRITEBYTECODE=1")
+set_tests_properties(uwb_qa_twr_m2a_native_phy_verify_py PROPERTIES
+    TIMEOUT 300 RUN_SERIAL TRUE)

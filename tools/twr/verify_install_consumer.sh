@@ -124,11 +124,13 @@ fi
 # ---------------------------------------------------------------------------
 for h in uwb_twr_types.h uwb_twr_frame.h uwb_twr_timestamp.h uwb_twr_config.h \
          uwb_twr_capability_evidence.h uwb_twr_tof_input.h uwb_twr_math.h \
-         uwb_twr_protocol_time.h uwb_twr_core.h; do
+         uwb_twr_protocol_time.h uwb_twr_core.h uwb_twr_phy.h \
+         uwb_demod_core.h uwb_demod_result.h uwb_phy_profile.h \
+         uwb_cir_fir_simd.h; do
     [ -f "$PREFIX/include/gnuradio/uwb/$h" ] || fail \
         "installed public header is missing: include/gnuradio/uwb/$h"
 done
-echo "   all nine public TWR headers present"
+echo "   all fourteen public TWR/PHY headers present"
 
 # The QA/demo-only transport header must NOT be installed (M1-B §5/§8).
 if [ -f "$PREFIX/include/gnuradio/uwb/uwb_twr_fake_link.h" ]; then
@@ -316,6 +318,86 @@ if readelf -d "$WORK/twr_core_consumer" 2>/dev/null | grep -qiE 'gnuradio|uhd'; 
     fail "the M1-B core consumer has a GNU Radio / UHD dynamic dependency"
 fi
 echo "   no GNU Radio / UHD dynamic dependency in the core consumer"
+
+# ---------------------------------------------------------------------------
+# M2-A: the native-PHY helper header + its standalone archive must be usable
+# from the prefix alone.  The consumer calls only PURE entry points (no taps,
+# no data files), so it proves the install is complete and linkable without
+# depending on the source tree.  (G0 B2: the transitive demod/phy headers must
+# be installed too, or this does not compile.)
+# ---------------------------------------------------------------------------
+echo
+echo "== M2-A native-PHY header + archive against the installed prefix =="
+PHY_LIB=$(find "$PREFIX" -name 'libuwb_twr_phy.a' -o -name 'libuwb_twr_phy.so*' \
+               2>/dev/null | head -1 || true)
+[ -n "$PHY_LIB" ] || fail \
+    "the standalone uwb_twr_phy archive was not installed under $PREFIX/lib"
+echo "   standalone native-PHY archive present: $PHY_LIB"
+
+cat > "$WORK/tiny_phy_consumer.cc" <<'PHYEOF'
+// Throwaway external consumer: proves uwb_twr_phy.h is installed AND usable
+// against the prefix alone.  No source tree, no build tree, no taps, no radio.
+#include <gnuradio/uwb/uwb_twr_phy.h>
+
+#include <cstdio>
+#include <string>
+
+using namespace gr::uwb::twr;
+
+int main()
+{
+    // Enum domains are fail-closed (N07).
+    if (m2a_native_rate_is_known(static_cast<M2aNativeRate>(250)) ||
+        m2a_iq_format_is_known(static_cast<M2aIqFormat>(250)) ||
+        m2a_status_is_known(static_cast<M2aStatus>(250))) {
+        std::printf("FAIL: an out-of-domain M2-A enum was accepted\n");
+        return 1;
+    }
+
+    // The frozen waveform geometry (G0 §1.3): 64 SYNC + ieee + Legacy.
+    M2aConfig cfg;
+    const size_t poll = m2a_expected_work_samples(16, cfg);   // Poll  PSDU
+    const size_t fin = m2a_expected_work_samples(31, cfg);    // Final PSDU
+    const size_t cap = m2a_expected_work_samples(127, cfg);   // PHY capacity
+    if (poll != 117184u || fin != 132544u || cap != 249280u) {
+        std::printf("FAIL: unexpected work-grid lengths %zu %zu %zu\n", poll, fin, cap);
+        return 1;
+    }
+
+    // The causal full-convolution length contract (G0 §3.1), and N == 0 -> 0.
+    unsigned l = 0, m = 0;
+    if (!m2a_rate_tx_lm(M2aNativeRate::Uc200_737280000, l, m) || l != 48u || m != 65u) {
+        std::printf("FAIL: TX ratio for 737.28 MS/s is not 48/65\n");
+        return 1;
+    }
+    if (m2a_resampled_length(poll, 2707u, l, m) != 86577u) {
+        std::printf("FAIL: unexpected resampled length\n");
+        return 1;
+    }
+    if (m2a_resampled_length(0u, 2707u, l, m) != 0u) {
+        std::printf("FAIL: N=0 must yield 0 output samples\n");
+        return 1;
+    }
+
+    // A default config has no taps, so it must be refused with a reason.
+    std::string why;
+    if (cfg.is_valid(why)) {
+        std::printf("FAIL: a config without taps was accepted\n");
+        return 1;
+    }
+    std::printf("M2-A CONSUMER OK: work lengths 117184/132544/249280, "
+                "48/65 -> 86577, default refused (%s)\n", why.c_str());
+    return 0;
+}
+PHYEOF
+"$CXX" -std=c++17 -O1 -Wall -Wextra -I"$PREFIX/include" \
+    "$WORK/tiny_phy_consumer.cc" "$PHY_LIB" -o "$WORK/tiny_phy_consumer" \
+    -lvolk -lpthread
+"$WORK/tiny_phy_consumer"
+if ldd "$WORK/tiny_phy_consumer" 2>/dev/null | grep -qiE 'gnuradio|uhd'; then
+    fail "the M2-A native-PHY consumer pulled in a GNU Radio / UHD dependency"
+fi
+echo "   no GNU Radio / UHD dynamic dependency in the native-PHY consumer"
 
 # ---------------------------------------------------------------------------
 # The repository's full consumer (header set + contract + Python module),
