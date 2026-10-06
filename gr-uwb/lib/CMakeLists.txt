@@ -162,7 +162,7 @@ target_link_libraries(uwb_twr_fake_link PUBLIC uwb_twr_core)
 # proves that with ldd/readelf (G0 §14.1); if libgnuradio-* ever appears here,
 # the fallback is header-only + a consumer-only compile check.
 ########################################################################
-add_library(uwb_twr_phy STATIC uwb_twr_phy.cc)
+add_library(uwb_twr_phy STATIC uwb_twr_phy.cc uwb_twr_phy_impairment.cc)
 target_include_directories(uwb_twr_phy PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
     $<INSTALL_INTERFACE:include>)
@@ -245,6 +245,9 @@ list(APPEND test_uwb_sources
     qa_uwb_twr_math.cc
     # M2-A: the full-frame native-rate PHY closed loop (G0 §12 A01-A14).
     qa_uwb_twr_native_phy.cc
+    # M2-A closeout: the test-harness channel model, verified independently
+    # (G0 A.3).  Self-contained: it reads no testdata.
+    qa_uwb_twr_phy_impairment.cc
 )
 # Anything we need to link to for the unit tests go here
 list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks uwb_twr_phy)

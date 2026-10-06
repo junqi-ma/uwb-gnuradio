@@ -271,3 +271,15 @@ set_property(TEST uwb_qa_twr_m2a_native_phy_verify_py APPEND PROPERTY
         "PYTHONDONTWRITEBYTECODE=1")
 set_tests_properties(uwb_qa_twr_m2a_native_phy_verify_py PROPERTIES
     TIMEOUT 300 RUN_SERIAL TRUE)
+
+########################################################################
+# M2-A closeout: the A13 allocation/latency observation tool (G0 A.4).
+# An observation tool, not a timing gate; links only uwb_twr_phy.
+########################################################################
+add_executable(twr_m2a_bench twr_m2a_bench.cc)
+target_include_directories(twr_m2a_bench PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(twr_m2a_bench PRIVATE
+    uwb_twr_phy Volk::volk Threads::Threads)
+target_compile_definitions(twr_m2a_bench PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")

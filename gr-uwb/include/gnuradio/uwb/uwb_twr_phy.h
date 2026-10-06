@@ -398,21 +398,89 @@ private:
 // samples it consumed and produced, and the valid output range.
 struct M2aStageTrace {
     std::string name;
+    // G0 A.2: every stage states its own UNIT, so a byte count is never read as
+    // a sample count (or vice versa).
+    std::string unit = "samples"; // "samples" | "bytes"
     double rate_hz = 0.0;
     uint32_t interp = 1;
     uint32_t decim = 1;
-    int64_t origin = 0;      // 0-based absolute input sample of this stage
+    int64_t origin = 0;      // 0-based input index of this stage, in `unit`
     size_t in_count = 0;
     size_t out_count = 0;
     uint32_t phase = 0;      // resampler phase at entry
     int64_t trim = 0;        // 0: causal full convolution, no crop
-    int64_t padding = 0;     // implicit two-sided zero padding
-    double filter_delay = 0.0; // (T-1)/2 in the INTERPOLATED domain
+    // G0 A.2: the two padding components are recorded SEPARATELY; the sum must
+    // not be used to guess the front offset.
+    int64_t pad_front = 0;
+    int64_t pad_back = 0;
+    int64_t padding = 0;     // == pad_front + pad_back (convenience only)
+    // Search window (demod stage): the guards it added and the ROI it searched.
+    // Diagnostic coordinates must be rebased out of the guards.
+    int64_t search_guard_front = 0;
+    int64_t search_guard_back = 0;
+    size_t search_roi_from = 0;
+    size_t search_roi_to = 0;
+    double filter_delay = 0.0; // 0.5*(T-1) in the INTERPOLATED domain
     size_t valid_from = 0;
     size_t valid_to = 0;     // exclusive
 
     std::string to_string() const;
 };
+
+// ===========================================================================
+// Impairment (TEST HARNESS ONLY -- G0 A.3)
+// ===========================================================================
+//
+// The channel model lives in the harness, never in the decoder's inputs as a
+// truth.  It is applied on the NATIVE CF32 grid, between TX resampling and the
+// (optional) RX SC16 quantisation.  `m2a_apply_impairment` is implemented in
+// lib/uwb_twr_phy_impairment.cc and is NOT part of the production pipeline.
+struct M2aImpairment {
+    bool enabled = false;
+    double cfo_hz = 0.0;            // phase advances with native sample index
+    bool awgn_enabled = false;
+    double awgn_snr_db = 0.0;       // over the SIGNAL VALID REGION (G0 A.3)
+    uint64_t awgn_seed = 0;
+    int64_t delay_int_samples = 0;  // whole native samples
+    int32_t delay_frac_num = 0;     // sub-sample delay = num/den, 0 <= num < den
+    uint32_t delay_frac_den = 1;
+    // Complex taps; index 0 is the first path.  Empty == no multipath.
+    std::vector<std::complex<float>> multipath;
+
+    bool is_valid(std::string& why) const
+    {
+        if (!std::isfinite(cfo_hz))
+            return why = "cfo_hz must be finite", false;
+        if (awgn_enabled && !std::isfinite(awgn_snr_db))
+            return why = "awgn_snr_db must be finite", false;
+        if (delay_int_samples < 0)
+            return why = "delay_int_samples must be >= 0", false;
+        if (delay_frac_den == 0u)
+            return why = "delay_frac_den must be > 0", false;
+        if (delay_frac_num < 0 ||
+            static_cast<uint32_t>(delay_frac_num) >= delay_frac_den)
+            return why = "delay_frac_num must be in [0, den)", false;
+        if (!multipath.empty() && multipath[0] == std::complex<float>(0.0f, 0.0f))
+            return why = "multipath[0] (the first path) must not be zero", false;
+        for (const std::complex<float>& t : multipath)
+            if (!std::isfinite(t.real()) || !std::isfinite(t.imag()))
+                return why = "multipath has a non-finite tap", false;
+        return true;
+    }
+
+    // True when this is a no-op (all sub-impairments disabled).
+    bool is_identity() const
+    {
+        return !enabled || (cfo_hz == 0.0 && !awgn_enabled && delay_int_samples == 0 &&
+                            delay_frac_num == 0 && multipath.empty());
+    }
+};
+
+// Apply the model in place on the native grid.  `native_rate_hz` sets the CFO
+// phase increment.  Deterministic given `awgn_seed`.  Returns false with a
+// reason on an invalid impairment or a non-finite result.
+bool m2a_apply_impairment(std::vector<std::complex<float>>& iq, double native_rate_hz,
+                          const M2aImpairment& imp, std::string& why);
 
 // ===========================================================================
 // The result (mirrors the `twr-m2a-native/1` manifest schema, G0 §8)
@@ -536,6 +604,48 @@ bool m2a_sc16_roundtrip(const std::complex<float>* in, size_t n, float scale,
 // work IQ -> demodulate_one -> DemodResult (real PHR / payload / FCS).
 bool m2a_demod_work(const std::complex<float>* work, size_t n, const M2aConfig& cfg,
                     demod::DemodResult& out, M2aStageTrace& trace, std::string& why);
+
+// ===========================================================================
+// Prepared context (G0 A.1)
+// ===========================================================================
+//
+// The one-shot `m2a_native_roundtrip` below is a COLD wrapper: it builds every
+// core/scratch and runs one frame.  A benchmark or a soak must instead prepare
+// once and reuse, so `M2aContext` freezes the profile/taps/capacity/format and
+// owns the TX/RX resamplers, the modulation scratch, the demod scratch, the
+// demod template and a reusable search workspace.
+//
+// Rules (G0 A.1): not a concurrent shared object (one per worker/endpoint);
+// `prepare()` is atomic; capacity changes happen only in `prepare()`; the
+// per-frame path must not reserve/resize; every guard/tail/impairment length
+// counts toward kM2aMaxSamples; a failed frame leaves the context usable and
+// `reset()` clears filter history and the previous frame's bytes.
+class M2aContext {
+public:
+    M2aContext();
+    ~M2aContext();
+    M2aContext(const M2aContext&) = delete;
+    M2aContext& operator=(const M2aContext&) = delete;
+
+    // Atomic: on failure the context stays unusable and is not half-updated.
+    bool prepare(const M2aConfig& cfg, std::string& why);
+    bool prepared() const;
+
+    // Per-frame.  No reallocation of the owned cores/scratch.  A failure leaves
+    // the context usable for the next frame.
+    bool run(const Frame& frame, const FrameProfile& profile, M2aResult& out,
+             std::string& why);
+
+    // Between independent bursts: clears filter history, phase and the previous
+    // frame's bytes WITHOUT rebuilding the cores.
+    void reset();
+
+    const M2aConfig& config() const;
+
+private:
+    struct Impl;
+    Impl* d_impl;
+};
 
 // ===========================================================================
 // The closed loop
