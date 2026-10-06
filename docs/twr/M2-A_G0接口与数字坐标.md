@@ -84,7 +84,7 @@ Frame v1（真实 Poll/Response/Final）
 | SFD 序列 `kSfdIeee` | `"ieee"`，8 symbols | `sha256(uwb_phy_profile.h) = 709a5296aae2be6c564f4378407010e0d38d899b28521417fc9b3a517f2f04d4` |
 | 脉冲系数 `kPulse48` | 48 taps，Legacy，无归一化，center=2 | `sha256(uwb_hrp_mod_core.h) = 636aec1326d9d5fdebf619dd07a6e269ec246c19f5b6cdf144945924e0568912` |
 | 解调核 | 全 PHR/payload/FCS 路径 | `sha256(uwb_demod_core.h) = f1dbf344af9e09cff7561617f32893b4c04c30007986b217ee7e6945654f48fc` |
-| 重采样核 | 因果 upfirdn 契约 | `sha256(uwb_rational_resampler_core.h) = 006901ef11ca5578b51b46ae51894806aeeb58f41f0cbb93c2b54980895a554a` |
+| 重采样核 | 因果 upfirdn 契约 | `sha256(uwb_rational_resampler_core.h) = d0b9af704164a5c6e1f8d3451dfcda065e7af4f173605bf66803cfcd9045e1d4`（**2026-10-06 更正**：本文件在 `985bbc9` 因 M2-A 的 `<48,65>`/`<32,65>` 别名与 `Decim>Interp` 修复而改变；评审时的 `006901ef…` 已过时） |
 
 **新产物**（TX taps、短 golden、manifest）的 hash 由实现报告锁定（G0 不能预先冻结尚未生成
 的二进制）；所有产物必须记录 `sha256` 与生成命令。

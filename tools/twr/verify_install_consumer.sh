@@ -385,8 +385,19 @@ int main()
         std::printf("FAIL: a config without taps was accepted\n");
         return 1;
     }
+
+    // The prepared context must be linkable and usable from the prefix alone,
+    // and `prepare()` must be ATOMIC: a bad config leaves it unusable rather
+    // than half-ready (G0 A.1).
+    M2aContext ctx;
+    std::string cwhy;
+    if (ctx.prepare(cfg, cwhy) || ctx.prepared()) {
+        std::printf("FAIL: prepare() accepted a tap-less config\n");
+        return 1;
+    }
     std::printf("M2-A CONSUMER OK: work lengths 117184/132544/249280, "
-                "48/65 -> 86577, default refused (%s)\n", why.c_str());
+                "48/65 -> 86577, default refused (%s), prepare() atomic\n",
+                why.c_str());
     return 0;
 }
 PHYEOF

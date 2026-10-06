@@ -1371,8 +1371,14 @@ BOOST_AUTO_TEST_CASE(m2a_a05_stage_coordinates_polyphase_and_chunking)
         for (size_t i = 0; i < out.stages.size(); ++i) {
             const twr::M2aStageTrace& t = out.stages[i];
             BOOST_CHECK_EQUAL(t.name, want[i]);
-            BOOST_CHECK_MESSAGE(t.unit == "samples" || t.unit == "bytes",
-                                "stage " + t.name + " unit not stated");
+            // A stage states its INPUT and OUTPUT unit separately: hrp_mod
+            // consumes PSDU bytes and emits samples; the demod does the reverse
+            // (review E finding 1).
+            const char* want_in[] = { "bytes", "samples", "samples", "samples" };
+            const char* want_out[] = { "samples", "samples", "samples", "bytes" };
+            BOOST_CHECK_EQUAL(t.in_unit, want_in[i]);
+            BOOST_CHECK_EQUAL(t.out_unit, want_out[i]);
+            BOOST_CHECK_EQUAL(t.unit, t.out_unit);
             BOOST_CHECK_EQUAL(t.padding, t.pad_front + t.pad_back);
             BOOST_CHECK_MESSAGE(t.valid_from <= t.valid_to,
                                 "stage " + t.name + " valid range inverted");
@@ -1485,7 +1491,9 @@ BOOST_AUTO_TEST_CASE(m2a_a05_demod_guard_rebase_and_failure_clear)
                               "clean frame did not decode: " + why);
         BOOST_CHECK(res.payload.bytes == expect);
 
-        BOOST_CHECK_EQUAL(tr.unit, "samples");
+        BOOST_CHECK_EQUAL(tr.in_unit, "samples");
+        BOOST_CHECK_EQUAL(tr.out_unit, "bytes"); // decoded PSDU length
+        BOOST_CHECK_EQUAL(tr.unit, tr.out_unit);
         BOOST_CHECK_EQUAL(tr.pad_front, tr.search_guard_front);
         BOOST_CHECK_EQUAL(tr.pad_back, tr.search_guard_back);
         BOOST_CHECK_EQUAL(tr.padding, tr.pad_front + tr.pad_back);

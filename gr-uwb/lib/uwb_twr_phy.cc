@@ -354,7 +354,10 @@ bool modulate_with_scratch(const uint8_t* mac_bytes,
     out.clear();
     trace = M2aStageTrace{};
     trace.name = "hrp_mod";
-    trace.unit = "samples"; // output grid (input is the PSDU byte string)
+    // MIXED stage: the PSDU input is BYTES, the work waveform is SAMPLES.
+    trace.in_unit = "bytes";
+    trace.out_unit = "samples";
+    trace.unit = "samples"; // == out_unit (compatibility alias)
     trace.rate_hz = cfg.tx_rate_hz();
     trace.interp = 1;
     trace.decim = 1;
@@ -565,9 +568,12 @@ bool demod_with_resources(const std::complex<float>* work,
         out.timing.preamble_start_sample =
             rebase(out.timing.preamble_start_sample);
         out.sfd.sfd_start_sample = rebase(out.sfd.sfd_start_sample);
+        // ... and the SFD END, which is a guarded index too (review E).
+        out.sfd.sfd_end_sample = rebase(out.sfd.sfd_end_sample);
     } else {
         out.timing.preamble_start_sample = -1;
         out.sfd.sfd_start_sample = -1;
+        out.sfd.sfd_end_sample = -1;
     }
 
     const size_t seed = best_buf_n / 2;
@@ -577,6 +583,9 @@ bool demod_with_resources(const std::complex<float>* work,
     // The stage's own grid is the un-guarded work_rx grid: origin 0, in_count
     // is the input length (the guards are the pad_front/pad_back).  The search
     // window is reported separately in the guarded search-buffer grid.
+    trace.in_unit = "samples";
+    trace.out_unit = "bytes"; // decoded PSDU length
+    trace.unit = "bytes";
     trace.in_count = n;
     trace.out_count = out.payload.bytes.size();
     trace.pad_front = static_cast<int64_t>(best_gf);

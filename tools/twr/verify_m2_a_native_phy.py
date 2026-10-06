@@ -860,14 +860,30 @@ def check_stages_v2(out, dims, want_work, want_native, impaired):
     samples = out["samples"]
     native_hz = rate.get("native_hz")
 
-    # Every stage states its own unit (G0 A.2) and the frozen origin/trim.
+    # Every stage states its own INPUT and OUTPUT unit (G0 A.2).  A stage can be
+    # MIXED -- the HRP modulator consumes PSDU BYTES and produces SAMPLES, the
+    # demod consumes samples and produces PSDU BYTES -- so a single label is not
+    # enough (review E finding 1).
+    want_units = {"hrp_mod": ("bytes", "samples"),
+                  "tx_resample": ("samples", "samples"),
+                  "rx_resample": ("samples", "samples"),
+                  "demod": ("samples", "bytes")}
     for stage in stages:
         name = stage.get("name")
-        if stage.get("unit") == "samples":
-            ok("stage %s states unit=samples" % name, "samples")
+        iu = stage.get("in_unit")
+        ou = stage.get("out_unit")
+        exp = want_units.get(name)
+        if exp is not None and (iu, ou) == exp:
+            ok("stage %s states in/out units %s/%s" % (name, iu, ou),
+               "%s/%s" % (iu, ou))
+        elif exp is not None:
+            fail("stage %s states in/out units %s/%s" % (name, exp[0], exp[1]),
+                 "got %r/%r" % (iu, ou))
+        if stage.get("unit") == ou:
+            ok("stage %s unit aliases out_unit" % name, str(ou))
         else:
-            fail("stage %s states unit=samples" % name,
-                 "got %r" % (stage.get("unit"),))
+            fail("stage %s unit aliases out_unit" % name,
+                 "unit=%r out_unit=%r" % (stage.get("unit"), ou))
         if stage.get("origin") == 0:
             ok("stage %s records 0-based origin 0" % name, "0")
         else:
@@ -1802,6 +1818,19 @@ def _mutation_specs(out):
     def stage_unit(o):
         _stage(o, "demod")["unit"] = "widgets"
     specs.append(("stage unit", stage_unit))
+
+    def stage_in_unit(o):
+        _stage(o, "hrp_mod")["in_unit"] = "widgets"
+    specs.append(("stage in_unit", stage_in_unit))
+
+    def stage_out_unit(o):
+        _stage(o, "demod")["out_unit"] = "widgets"
+    specs.append(("stage out_unit", stage_out_unit))
+
+    def stage_unit_alias(o):
+        # unit must keep aliasing out_unit
+        _stage(o, "tx_resample")["unit"] = "widgets"
+    specs.append(("stage unit aliases out_unit", stage_unit_alias))
 
     def stage_trim(o):
         _stage(o, "rx_resample")["trim"] = 5

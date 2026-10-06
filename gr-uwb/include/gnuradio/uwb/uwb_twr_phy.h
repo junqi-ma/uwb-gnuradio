@@ -399,8 +399,13 @@ private:
 struct M2aStageTrace {
     std::string name;
     // G0 A.2: every stage states its own UNIT, so a byte count is never read as
-    // a sample count (or vice versa).
-    std::string unit = "samples"; // "samples" | "bytes"
+    // a sample count (or vice versa).  A stage can be MIXED (the HRP modulator
+    // consumes PSDU bytes and produces work samples; the demod does the
+    // reverse), so the input and output units are stated SEPARATELY.  `unit` is
+    // kept as the OUTPUT unit for backward compatibility.
+    std::string in_unit = "samples";  // "samples" | "bytes"
+    std::string out_unit = "samples"; // "samples" | "bytes"
+    std::string unit = "samples";     // == out_unit (compatibility alias)
     double rate_hz = 0.0;
     uint32_t interp = 1;
     uint32_t decim = 1;

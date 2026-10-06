@@ -1042,7 +1042,9 @@ bool run_stage_chain(const std::vector<uint8_t>& mac,
 std::string stage_json(const twr::M2aStageTrace& s)
 {
     std::ostringstream os;
-    os << "{\"name\":" << jstr(s.name) << ",\"unit\":" << jstr(s.unit)
+    os << "{\"name\":" << jstr(s.name)
+       << ",\"in_unit\":" << jstr(s.in_unit) << ",\"out_unit\":" << jstr(s.out_unit)
+       << ",\"unit\":" << jstr(s.unit)
        << ",\"rate_hz\":" << jnum(s.rate_hz) << ",\"l\":" << juint(s.interp)
        << ",\"m\":" << juint(s.decim) << ",\"origin\":" << jint(s.origin)
        << ",\"in_count\":" << juint(s.in_count) << ",\"out_count\":" << juint(s.out_count)
