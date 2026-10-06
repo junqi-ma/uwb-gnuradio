@@ -503,3 +503,142 @@ reviewer 对 §14 五个未决项的独立意见（**采纳**）：
 
 **未决（需在实现中关闭，不阻断 P2 开工）**：§14.1 的 `ldd` 实测结论、§14.5 的 SNR 值。
 B1–B5 已关闭，可按任务单 §5/§10 进入 P2 并行实现。
+
+---
+
+# 附录 A（2026-10-06 收尾冻结）
+
+依据：[M2-A 收尾指示](OpenCode开发指示_M2-A收尾_2026-10-06.md)（下称"收尾单"）。
+本附录在**改动主链前**冻结收尾所需的接口/坐标/损伤/观测契约；reviewer 确认后实施。
+
+## A.1 prepared context 生命周期（收尾单 §4）
+
+新增 **`M2aContext`**（公开头 `uwb_twr_phy.h`，协调者所有），冻结 profile/taps/容量/格式，
+持有 TX/RX core、调制 scratch、解调 scratch、解调模板、可复用搜索 workspace 与 IQ 缓冲。
+
+```cpp
+class M2aContext {
+public:
+    // 原子准备：成功后才可用；失败时对象保持"未准备"状态，不半更新。
+    bool prepare(const M2aConfig& cfg, std::string& why);
+    bool prepared() const;
+
+    // 逐帧：不重新分配 core/scratch；帧失败后可继续下一帧。
+    bool run(const Frame& frame, const FrameProfile& profile, M2aResult& out,
+             std::string& why);
+
+    // 独立 burst 之间调用：清滤波历史/相位/上一帧 bytes，不重建 core。
+    void reset();
+
+    // 冷包装（保持向后兼容）：prepare + run，一次性。
+};
+bool m2a_native_roundtrip(const Frame&, const FrameProfile&, const M2aConfig&,
+                          M2aResult&, std::string&);   // 保留，标记为 cold wrapper
+```
+
+规则（冻结）：
+
+1. **不是并发共享对象**：每 worker/端点各自一个实例。
+2. `prepare` 失败**原子**：不留下半更新配置；随后 `run` 必须返回失败而不是跑半套。
+3. **扩容/配置变更只在 `prepare`**；逐帧路径不得 reserve/resize（除既有 demod 内部临时）。
+4. **容量**：所有 guard、tail、损伤滤波长度计入 `kM2aMaxSamples = 2^20`；不得只让原始
+   输入满足上界而 padding/搜索缓冲越界。超限**显式拒绝**（`CapacityExceeded`）。
+5. 帧失败后**可恢复**；`reset()` 清滤波历史与上一帧 bytes，不得带入。
+6. 新 demo/benchmark **必须实际走 prepared 路径**；cold wrapper 只作兼容。
+7. **不修改** shared resampler/HRP/demod 的算法；若复用使已知 SIMD 异常更明显，单独报告。
+
+## A.2 stage 坐标契约（收尾单 §6）
+
+- **单位分开**：`codec`/`fcs` 阶段以 **bytes** 计，`modulate`/`tx_resample`/`quantise`/
+  `rx_resample`/`demod` 阶段以 **samples** 计。每个 `M2aStageTrace` 必须标明单位。
+- **0-based origin**：每阶段记录其输入在**该阶段网格**上的 0-based 起点。
+- **padding 分量分开**：`pad_front` 与 `pad_back` 分别记录，**不得**用总和推测前端偏移。
+- **搜索窗口**：`m2a_demod_work` 的 guard 以 `search_guard_front` / `search_guard_back` /
+  `search_roi = [lo, hi)` 记录；解调诊断坐标必须换算回**未加 guard 的 work_rx 网格**。
+- **trim**：因果全卷积，`trim = 0`；如实现另有裁剪必须显式记录区间。
+- **filter delay**：`0.5*(T-1)`，位于**内插（上采样）域**；输入端等效 `(T-1)/(2L)`。
+  精确有理数与显示用 rounded index **分开**；逆映射只断言定义内可逆/误差界。
+- **失败后**：解调失败时诊断字段必须清空/置无效，**不得**保留未换算的 padded 索引冒充输入坐标。
+- 这些仍是 **sample-grid bookkeeping**，不是 RMARKER/首径/硬件时间戳。
+
+## A.3 损伤模型与 SNR 定义（收尾单 §5）
+
+损伤只在**测试/离线 harness**，不进入生产 helper 的解码输入真值。
+
+- **冻结顺序**：TX native CF32 → **信道模型** → （可选）RX SC16 → RX resampler → demod。
+  若另做 TX DAC 量化，必须作为**独立选项**，不与现有 native SC16 往返语义混用。
+- `M2aImpairment` 字段（版本化进 JSON）：`cfo_hz`、`awgn_snr_db`、`awgn_seed`、
+  `delay_int_samples`、`delay_frac_num`/`delay_frac_den`、`multipath`（复数抽头数组）、
+  `enabled`。
+- **CFO**：相位按 **native rate 与样点坐标**推进，跨 chunk **不重置**。
+- **SNR 定义**：以**信号有效区间**的平均功率计算，`SNR_dB = 10*log10(P_signal_valid /
+  P_noise)`；噪声为复高斯，每维方差 `sigma^2 = P_signal_valid / (2*10^(SNR/10))`。
+  **不得**因前置零填充变长而改变同一信号的噪声水平；记录区间、功率与每维方差。
+- **固定场景（最小集）**：
+
+  | 场景 | 必测点 |
+  |---|---|
+  | clean | 现有全部基本单元，输出兼容 |
+  | CFO | `0`、`+20 kHz`、`-20 kHz` |
+  | AWGN | `30 dB`（常规）、`10 dB`（压力） |
+  | 延迟 | 整数 `0/1/17` native samples；分数 `1/4, 1/2, 3/4` sample |
+  | 多径 | 至少一组弱首径强后径：复振幅 `0.35` 与 `1.0`，后径 `+8` native samples |
+  | 组合 | `CFO+AWGN`、分数延迟+多径 各至少一组 |
+
+- **seed**：含随机项的场景每基本单元固定 **≥10 个 seed**，seed 列表冻结并记录；
+  **不得**按跑出的成功种子挑子集。`seed 0` 若特殊必须说明。
+- **判据**：clean 与退化路径（零 CFO/零噪声/单位信道）必须与 clean 一致；损伤模型先用
+  **独立单位测试**验证（CFO 相位/频偏、AWGN 方差、impulse 延迟、多径系数），不能只靠
+  "解调似乎成功"。压力场景允许真实失败，但必须记录终态，
+  `attempted = exact_success + explicit_failure`；非精确帧不得计入成功。失败场景**不取得**
+  native evidence；clean 成功也不为压力失败背书。
+- CLI 原 `--scenario` 的拒绝行为**仅在有真实实现后**替换。
+
+## A.4 A13 观测窗口与准入（收尾单 §4.2）
+
+- **分配计数**：重载全局 `new` / `new[]` / aligned `new` 与 `malloc`；计数器自身不得递归分配。
+  分开统计：`prepare`、prepare 后**首帧**、**后续帧**；并分阶段：调制、TX resample、量化、
+  RX resample、搜索/解调、结果/JSON 序列化。**未拦截到的分配不宣称为零。**
+- **目标**：新 TX/重采样调度与 IQ workspace 热路径零分配；既有 demod 内部临时 vector/
+  结果字符串分配**独立统计**，不为"整链零分配"重构 demod core。
+- **耗时**：与分配计数**分次运行**；日志/文件 I/O 不计入核心计算时间；端到端 wall time 另列。
+- **矩阵**：两 rate × 三帧 × 两格式；相同帧重复与 timestamp/seq/地址变化各一组；
+  clean 与长搜索/失败路径**分别**报告，不只测缓存命中的最快路径。
+- **样本量**：默认每组 ≥ **1000** 次热调用；报告样本数、P50/P95/P99/max、cold 延迟、
+  RSS/峰值内存。样本不足**不报告 P99.9**。重复循环 RSS/容量不得持续增长。
+- **对照**：同环境串行比较一次性 wrapper 与 prepared 路径，保留原始 CSV。
+  **不**从软件数据推出硬件 reply-delay 下限、1 GS/s 实时率或双 RX 可运行。
+
+## A.5 JSON/schema 扩展（版本 `twr-m2a-native/2`）
+
+在 `twr-m2a-native/1` 基础上**新增**（旧字段保持兼容）：
+
+```json
+{
+  "schema": "twr-m2a-native/2",
+  "impairment": {"enabled": false, "cfo_hz": 0.0, "awgn_snr_db": null,
+                 "awgn_seed": null, "delay_int_samples": 0,
+                 "delay_frac_num": 0, "delay_frac_den": 1, "multipath": [],
+                 "snr_definition": "valid-region mean power"},
+  "context": {"prepared": true, "capacity_samples": 1048576},
+  "kernel": {"tx": "volk_macroblock", "rx": "volk_macroblock", "demod": "scalar"},
+  "stages": [ {"name": "…", "unit": "samples|bytes", "origin": 0,
+               "pad_front": 0, "pad_back": 0, "trim": 0,
+               "search_guard_front": 0, "search_guard_back": 0,
+               "search_roi": [0, 0], "…": "…"} ],
+  "observation": {"iters": 1000, "p50_us": 0.0, "p95_us": 0.0, "p99_us": 0.0,
+                  "max_us": 0.0, "cold_us": 0.0, "rss_kb": 0,
+                  "alloc": {"prepare": 0, "first_frame": 0, "hot_frame": 0,
+                            "demod_internal": 0},
+                  "counter_scope": "operator new/new[]/aligned/malloc"}
+}
+```
+
+verifier 必须**变异检查**：`impairment` 参数、`origin`、`pad_front`/`pad_back`、
+区间上下界、`unit`、实际 `kernel`、`context.capacity_samples`、`config.executed_*`。
+schema 改动版本化；`twr-m2a-native/1` 的消费者按显式向后兼容处理。
+
+## A.6 收尾后允许的结论
+
+最多声明：**"M2-A 本轮非 MATLAB 子项完成；独立 MATLAB 对照未做，SIMD 已知风险保留。"**
+A11 按完整口径**仍未满足**；SIMD 缺陷**只记录不修**；**不进入 M2-B**。
