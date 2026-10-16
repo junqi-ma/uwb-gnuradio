@@ -36,6 +36,15 @@
  *           (code_index / sync_repetitions / sfd_mode / pulse_id / window ids).
  *           Those fields ALWAYS describe sensing and are copied through
  *           untouched; the comm profile is block configuration only.
+ *           Optional `sensing_roi_lo` / `sensing_roi_hi` (int, absolute window
+ *           samples) declare the SENSING processing ROI = the subtraction /
+ *           commit region.  It is kept SEPARATE from the wide search ROI in the
+ *           block config: the core only commits when the detected comm support
+ *           actually OVERLAPS this region (a real comm entirely outside it is
+ *           bypassed, out == y).  Optional `sensing_min_overlap` (uint) sets the
+ *           minimum required overlap in samples (default 0 => require > 0).  If
+ *           the keys are absent the gate is disabled (subtraction = support ∩
+ *           search ROI, the legacy behaviour).
  *   truth : ORACLE-ONLY dict (see below).  Registered/read only when
  *           mode == "oracle"; in estimate/off the port does not exist and no
  *           truth object is stored on the block.
@@ -65,7 +74,7 @@
  *   sic_state, sic_detected, sic_committed, sic_partial, sic_ambiguous,
  *   sic_bypass_reason, sic_uses_truth,
  *   sic_detected_start, sic_cfo_hz, sic_n_paths, sic_support_lo,
- *   sic_support_hi, sic_residual_corr,
+ *   sic_support_hi, sic_sub_overlap, sic_residual_corr,
  *   handler_us, queue_wait_us, core_total_us, output_wrap_publish_us,
  *   completion_latency_us,
  *   sic_detect_coarse_us, sic_detect_fine_us, sic_cfo_us, sic_cir_us,

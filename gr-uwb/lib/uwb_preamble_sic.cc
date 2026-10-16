@@ -767,11 +767,26 @@ UwbPreambleSic::process(Pending& p)
         tpl.preamble = d_preamble_.data();
         tpl.preamble_len = d_preamble_.size();
 
+        // R10: the SENSING processing ROI (the subtraction / commit region) is a
+        // sensing property carried in the input PDU meta and kept SEPARATE from
+        // the wide candidate search ROI in the block config.  It gates the commit
+        // so a real comm detected outside the sensing preamble/CIR window is
+        // bypassed instead of committed (out == y).  Absent keys leave the gate
+        // disabled (legacy behaviour: subtraction = support ∩ search ROI).
+        sic::SicConfig cfg = d_cfg_;
+        if (pmt::dict_has_key(p.meta_in, pmt::mp("sensing_roi_lo")) ||
+            pmt::dict_has_key(p.meta_in, pmt::mp("sensing_roi_hi"))) {
+            cfg.sub_roi_lo = dict_i64(p.meta_in, "sensing_roi_lo", 0);
+            cfg.sub_roi_hi = dict_i64(p.meta_in, "sensing_roi_hi", 0);
+            cfg.sub_min_overlap =
+                dict_u64(p.meta_in, "sensing_min_overlap", d_cfg_.sub_min_overlap);
+        }
+
         size_t nelem = 0;
         const gr_complex* y = pmt::c32vector_elements(p.iq_in, nelem);
         bool ok = false;
         try {
-            ok = sic::sic_one(y, nelem, tpl, d_cfg_, d_scratch_, r, truth_ptr);
+            ok = sic::sic_one(y, nelem, tpl, cfg, d_scratch_, r, truth_ptr);
         } catch (...) {
             ok = false;
         }
@@ -840,6 +855,10 @@ UwbPreambleSic::process(Pending& p)
             (p.admitted && sic_ran) ? r.support_lo : int64_t(-1));
     put_i64("sic_support_hi",
             (p.admitted && sic_ran) ? r.support_hi : int64_t(-1));
+    // Actionable overlap of the detected support with the sensing processing ROI
+    // (the subtraction/commit gate).  -1 when no sensing ROI was supplied.
+    put_i64("sic_sub_overlap",
+            (p.admitted && sic_ran) ? r.sub_overlap : int64_t(-1));
     put_f64("sic_residual_corr",
             (p.admitted && sic_ran) ? r.residual_corr : 0.0);
 

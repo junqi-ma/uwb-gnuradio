@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "frozen": true,
+  "purpose": "R04 frozen target-protection ROI in the sensing CIR tap domain. The ROI and reference amplitude are fixed on the CALIBRATION set only and must never be re-searched on SIC results. One CIR tap equals one work sample (998.4 MS/s).",
+  "profile_key": "code9-64SYNC-4z2",
+  "method": "For each calibration seed, take the clean (s+w) consumer raw complex CIR (the SIC consumer's `__c32` payload, before any L2 normalization). The weak sensing path is delay 37 work samples with gain 0.25 on top of the delay-0 unit path; the frozen ROI is placed around the weak-target local peak, far from the main lobe. target_tap = argmax |c_raw| within the ROI of the calibration median CIR. target_ref_amp = median over the calibration windows of |c_raw[target_tap]|.",
+  "profiles": {
+    "code9-64SYNC-4z2": {
+      "sensing_profile_id": "code9-64SYNC-4z2",
+      "tap_domain": "1 CIR tap = 1 work sample (998.4 MS/s)",
+      "target_roi": [51, 60],
+      "target_lo": 51,
+      "target_hi": 60,
+      "target_tap": 55,
+      "target_ref_amp": 0.115741,
+      "detect_ratio": 3.0,
+      "false_peak_ratio": 0.5,
+      "main_lobe_guard": 3,
+      "sensing_paths": [[0, [1.0, 0.0]], [37, [0.25, 0.0]]],
+      "calibration": {
+        "seeds": [1000000, 1000001, 1000002, 1000003, 1000004],
+        "seed_set": "calibration",
+        "main_peak_tap": 18,
+        "weak_target_delay_work_samples": 37,
+        "measured_ref_amp_median": 0.115741,
+        "measured_ref_amp_min": 0.115700,
+        "measured_ref_amp_max": 0.115820,
+        "measured_roi_peak_tap": 55,
+        "roi_argmax_stable_across_seeds": true,
+        "note": "Seeds 1000000-1000099 are the frozen calibration list (testdata/sic_preamble/cases/main.json). The SIC-acceptance seed list (2000000+) is disjoint. The ROI is not re-derived from any SIC result."
+      }
+    }
+  }
+}

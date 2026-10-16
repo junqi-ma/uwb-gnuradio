@@ -224,6 +224,211 @@ def recon_pair(i_true, i_hat, lo, hi):
     return float(nmse), float(sup), int(lo), int(hi)
 
 
+def actual_cancellation(y, y_clean, i_true, lo, hi):
+    """R01 actual-output cancellation over [lo, hi).
+
+    ``y`` is the raw SIC input, ``y_clean`` is the IQ the SIC actually output;
+    ``delta_actual = y - y_clean`` and ``residual = i - delta_actual``.  The
+    metric is evaluated over the generator-side truth overlap (never a mask
+    chosen to look best).  ``||i||^2 == 0`` is N/A by the frozen contract.
+
+    Returns a dict (or None for an empty interval).  ``i_energy`` and
+    ``output_changed`` are carried for the zero-interference accounting.
+    """
+    n = int(min(len(y), len(y_clean), len(i_true)))
+    lo = max(0, int(lo))
+    hi = min(n, int(hi))
+    if hi <= lo:
+        return None
+    yy = y[lo:hi].astype(np.complex128)
+    yc = y_clean[lo:hi].astype(np.complex128)
+    ii = i_true[lo:hi].astype(np.complex128)
+    den = float(np.vdot(ii, ii).real)
+    changed = bool(np.any(yy != yc))
+    if den <= 0.0:
+        return {"actual_nmse": None, "actual_suppression_db": None, "na": True,
+                "i_energy": 0.0, "output_changed": changed}
+    delta = yy - yc
+    resid = ii - delta
+    num = float(np.vdot(resid, resid).real)
+    nmse = num / den
+    sup = (-10.0 * math.log10(nmse)) if num > 0.0 else 60.0
+    return {"actual_nmse": float(nmse), "actual_suppression_db": float(sup),
+            "na": False, "i_energy": float(den), "output_changed": changed,
+            "delta_energy": float(np.vdot(delta, delta).real)}
+
+
+def changed_support(y, y_clean, lo, hi):
+    """The real ``y != y_clean`` support inside [lo, hi) (the applied mask)."""
+    n = int(min(len(y), len(y_clean)))
+    lo = max(0, int(lo))
+    hi = min(n, int(hi))
+    if hi <= lo:
+        return 0, 0
+    idx = np.nonzero(y[lo:hi] != y_clean[lo:hi])[0]
+    if idx.size == 0:
+        return 0, 0
+    return lo + int(idx[0]), lo + int(idx[-1]) + 1
+
+
+def region_metric(i_true, i_hat, lo, hi):
+    """``(nmse, suppression_db, lo, hi)`` over [lo,hi) plus a zero-energy flag.
+
+    Mirrors the frozen convention: ``||i||^2 == 0`` yields NMSE 0 / 60 dB when
+    the reconstruction is also zero, else NMSE 1 / 0 dB.  Returns
+    ``(None, False)`` for an empty interval."""
+    m = recon_pair(i_true, i_hat, lo, hi)
+    if m is not None:
+        return m, False
+    n = int(min(len(i_true), len(i_hat)))
+    lo = max(0, int(lo))
+    hi = min(n, int(hi))
+    if hi <= lo:
+        return None, False
+    num = float(np.sum(np.abs(i_hat[lo:hi].astype(np.complex128)) ** 2))
+    if num == 0.0:
+        return (0.0, 60.0, lo, hi), True
+    return (1.0, 0.0, lo, hi), True
+
+
+def sync_rep_scan(y, sync_norm, anchor, reps, sps, threshold):
+    """Public-template repetition scan (R02 signal-evidence).
+
+    For each candidate SYNC repetition ``anchor + k*sps`` compute the same
+    normalized correlation the core's detector uses and count the CONSECUTIVE
+    repetitions whose correlation is >= ``threshold``.  Pure online data (y +
+    the public template); the injected start/CFO/paths are never read."""
+    n = int(len(y))
+    ls = int(len(sync_norm))
+    yc = np.asarray(y, dtype=np.complex128)
+    sn = np.asarray(sync_norm, dtype=np.complex128)
+    norms = []
+    for k in range(int(reps)):
+        d = int(anchor) + k * int(sps)
+        if d < 0 or d + ls > n:
+            norms.append(0.0)
+            continue
+        seg = yc[d:d + ls]
+        den = float(np.linalg.norm(seg)) * float(np.linalg.norm(sn))
+        norms.append(float(abs(np.vdot(sn, seg)) / den) if den > 0 else 0.0)
+    consecutive = 0
+    for v in norms:
+        if v >= float(threshold):
+            consecutive += 1
+        else:
+            break
+    return {"norms": norms, "threshold": float(threshold),
+            "consecutive_reps": int(consecutive),
+            "max_norm": (max(norms) if norms else None),
+            "reps_scanned": int(reps), "sps": int(sps),
+            "anchor": int(anchor)}
+
+
+
+def raw_target_metrics(cir_clean, cir_sic, target_lo, target_hi,
+                       detect_ratio=3.0, false_peak_ratio=0.5,
+                       main_lobe_guard=3):
+    """R04 raw (non-L2-normalised) target protection metrics.
+
+    The target tap is the frozen ROI's clean argmax (never re-searched on the
+    SIC result); the amplitude/phase error is measured at that fixed tap.  The
+    local peak shift is the ROI argmax difference.  ``weak_target_detected`` is
+    the ROI peak relative to the out-of-ROI background; ``false_peak_count``
+    counts strong local maxima outside the ROI (main lobe excluded).
+    """
+    cl = np.asarray(cir_clean, dtype=np.complex128).ravel()
+    cs = np.asarray(cir_sic, dtype=np.complex128).ravel()
+    lo, hi = int(target_lo), int(target_hi)
+    if len(cl) != len(cs) or not (0 <= lo < hi) or hi > len(cl) or hi > len(cs):
+        return None
+    seg_c = cl[lo:hi]
+    seg_s = cs[lo:hi]
+    t = lo + int(np.argmax(np.abs(seg_c)))
+    amp_c = abs(complex(cl[t]))
+    amp_s = abs(complex(cs[t]))
+    if amp_c <= 0.0:
+        return None
+    amp_err_db = 20.0 * math.log10(amp_s / amp_c) if amp_s > 0 else None
+    dphi = math.atan2(cs[t].imag, cs[t].real) \
+        - math.atan2(cl[t].imag, cl[t].real)
+    dphi = (dphi + math.pi) % (2.0 * math.pi) - math.pi
+    phase_err_deg = math.degrees(dphi)
+    peak_c = lo + int(np.argmax(np.abs(seg_c)))
+    peak_s = lo + int(np.argmax(np.abs(seg_s)))
+    # Background outside the ROI (main lobe excluded by its own guard band).
+    abs_s = np.abs(cs)
+    in_roi = np.zeros(abs_s.size, dtype=bool)
+    in_roi[lo:hi] = True
+    pk = int(np.argmax(abs_s))
+    g_lo = max(0, pk - int(main_lobe_guard))
+    g_hi = min(abs_s.size, pk + int(main_lobe_guard) + 1)
+    in_guard = np.zeros(abs_s.size, dtype=bool)
+    in_guard[g_lo:g_hi] = True
+    bg = abs_s[~(in_roi | in_guard)]
+    noise_floor = float(np.median(bg)) if bg.size else 0.0
+    roi_peak = float(abs_s[lo:hi].max())
+    weak_detected = bool(noise_floor > 0 and roi_peak > detect_ratio * noise_floor)
+    weak_snr_db = (20.0 * math.log10(roi_peak / noise_floor)
+                   if noise_floor > 0 else None)
+    false_peaks = 0
+    for i in range(1, abs_s.size - 1):
+        if in_roi[i] or in_guard[i]:
+            continue
+        if abs_s[i] > abs_s[i - 1] and abs_s[i] >= abs_s[i + 1] \
+                and abs_s[i] > false_peak_ratio * roi_peak:
+            false_peaks += 1
+    return {
+        "target_tap": int(t),
+        "target_clean_peak_tap": int(peak_c),
+        "target_sic_peak_tap": int(peak_s),
+        "target_amp_err_db": (None if amp_err_db is None else float(amp_err_db)),
+        "target_phase_err_deg": float(phase_err_deg),
+        "target_peak_shift": int(peak_s - peak_c),
+        "target_amp_clean": float(amp_c),
+        "target_amp_sic": float(amp_s),
+        "cir_raw_target_amp_abs_db": (20.0 * math.log10(amp_s)
+                                      if amp_s > 0 else None),
+        "weak_target_detected": weak_detected,
+        "weak_target_snr_db": weak_snr_db,
+        "false_peak_count": int(false_peaks),
+        "noise_floor": noise_floor,
+    }
+
+
+def load_target_roi(repo, profile_id):
+    """Load the frozen R04 target ROI for a sensing profile (never re-searched).
+
+    The ROI/reference are fixed on the calibration set and stored in
+    ``testdata/sic_preamble/cases/target_roi.json`` (hashed into the manifest).
+    """
+    path = os.path.join(repo, "testdata", "sic_preamble", "cases",
+                        "target_roi.json")
+    if not os.path.isfile(path):
+        return None, None
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    profiles = cfg.get("profiles", {})
+    want = str(profile_id).lower()
+    prof = None
+    for key, val in profiles.items():
+        if str(key).lower() == want:
+            prof = val
+            break
+    if prof is None:
+        return None, path
+    roi = prof.get("target_roi")
+    if isinstance(roi, (list, tuple)) and len(roi) == 2:
+        lo, hi = int(roi[0]), int(roi[1])
+    else:
+        lo, hi = int(prof["target_lo"]), int(prof["target_hi"])
+    prof = dict(prof)
+    prof["target_lo"] = lo
+    prof["target_hi"] = hi
+    prof["target_roi"] = [lo, hi]
+    prof["_config_path"] = path
+    return prof, path
+
+
 def px_median(values):
     vals = [float(v) for v in values if v is not None and
             math.isfinite(float(v))]
@@ -267,6 +472,53 @@ def file_sha256(path):
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _git_capture(repo, args):
+    try:
+        out = subprocess.run(["git", "-C", repo] + list(args),
+                             capture_output=True, text=True, timeout=120)
+        return out.stdout
+    except Exception:  # pragma: no cover - defensive
+        return ""
+
+
+def git_worktree_provenance(repo):
+    """R10: the real commit plus a sha256 id of the working-tree diff.
+
+    The dirty-patch identifier hashes ``git diff HEAD`` together with the
+    untracked-file listing so a dirty tree always carries a stable, non-empty
+    id (never the empty-tree sha256).  A clean tree is reported as
+    ``dirty=False``.  Everything is re-derived from the working tree at run
+    time; nothing is read back from a previous manifest.
+    """
+    head = _git_capture(repo, ["rev-parse", "HEAD"]).strip()
+    branch = _git_capture(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).strip()
+    status = _git_capture(repo, ["status", "--porcelain"])
+    diff = _git_capture(repo, ["diff", "HEAD"])
+    untracked = _git_capture(repo, ["ls-files", "--others", "--exclude-standard"])
+    h = hashlib.sha256()
+    h.update(diff.encode("utf-8", "replace"))
+    h.update(b"\x00--untracked--\x00")
+    h.update(untracked.encode("utf-8", "replace"))
+    return {"head": head, "branch": branch,
+            "dirty": bool(status.strip()),
+            "status_sha256": h.hexdigest()}
+
+
+def pick_loaded_library(build_dir):
+    """The real ``libgnuradio-uwb.so*`` file (not the symlink) under build_dir."""
+    import glob
+    candidates = sorted(glob.glob(
+        os.path.join(build_dir, "lib", "libgnuradio-uwb.so*")))
+    for cand in candidates:
+        if not os.path.islink(cand) and os.path.isfile(cand):
+            return cand
+    for cand in candidates:
+        real = os.path.realpath(cand)
+        if os.path.isfile(real):
+            return real
+    return None
 
 
 def ldd_lines(so_path):
@@ -320,6 +572,19 @@ def cpu_model():
     except Exception:
         pass
     return platform.processor() or platform.machine()
+
+
+def _proc_peak_rss_bytes():
+    """Peak resident set (VmHWM) for THIS process, or None."""
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8",
+                  errors="replace") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +711,8 @@ class SimRuntime:
     """Owns the bounded top_block + consumers for a whole run."""
 
     def __init__(self, uwb, *, tpl_path, consumers, windows,
-                 demod_softchip="bypass", sic=None, keep_iq=4):
+                 demod_softchip="bypass", sic=None, keep_iq=4,
+                 demod_rake_top_k=0, radar_use_predicted=False):
         self.uwb = uwb
         self.consumers = consumers
         self.want_cir = consumers in ("cir", "both")
@@ -462,12 +728,14 @@ class SimRuntime:
         self.sink_cir = None
         self.sink_demod = None
         qcap = max(64, 2 * int(windows) + 8)
-        rake = 0
-        mode = demod_softchip
+        rake = int(demod_rake_top_k) if demod_softchip == "rake4" else 0
+        if demod_softchip == "rake4" and rake <= 0:
+            rake = 4
+        mode = "rake" if demod_softchip == "rake4" else demod_softchip
         if self.want_cir:
             self.cir = uwb.radar_cir_estimator(
                 tpl_path, 64, SFD_MODE, 9, 16, 100, 10, 0, 128, 32, 0.12,
-                0.02, True, qcap)
+                0.02, True, qcap, bool(radar_use_predicted))
             self.sink_cir = ResultSink("cir_sink", self.keep_iq)
             self.tb.msg_connect((self.cir, "cir"), (self.sink_cir, "in"))
         if self.want_demod:
@@ -576,6 +844,324 @@ class SimRuntime:
         return False
 
 
+class NativeFrontEnd:
+    """R08 CG400 native front-end: common-scale SC16 + PDU 65/32 resample.
+
+    Owns the production ``pdu_rational_resampler_ccf_65_32`` block (SC16 input,
+    UnitRange policy so the work-grid amplitude matches the SC16/32768 scale)
+    in its own top block.  Every window is quantized with ONE scale shared by
+    its clean/raw mixtures; the resampler maps 491.52 -> 998.4 with the frozen
+    group-delay-centered map.  The known SIMD non-determinism is recorded (via
+    repeat runs), never fixed here.
+    """
+
+    def __init__(self, uwb, *, taps: str, workers: int = 1,
+                 headroom: float = 1.0, native_rate: float = S.CG400_HZ):
+        self.uwb = uwb
+        self.taps_name = taps
+        self.workers = max(1, int(workers))
+        self.headroom = float(headroom)
+        self.native_rate = float(native_rate)
+        self.tb = gr.top_block("uwb_native_frontend")
+        self.res = uwb.pdu_rational_resampler_ccf_65_32(
+            taps, S.WORK_HZ, True, 2097152, self.workers,
+            uwb.Sc16ScalePolicy.UnitRange)
+        self.sink = ResultSink("native_resample_sink")
+        self.tb.msg_connect((self.res, "packet"), (self.sink, "in"))
+        self.tap_count = int(self.res.tap_count())
+        self.gd_in = int(round(S.native_group_delay_input(self.tap_count)))
+        self.kernel = None
+        try:
+            self.kernel = self.res.resampler_kernel()
+        except Exception:
+            self.kernel = None
+        self.total_windows = 0
+        self.total_in_samples = 0
+
+    def start(self):
+        self.tb.start()
+
+    def stop(self):
+        self.tb.stop()
+        self.tb.wait()
+
+    def _meta(self, n_in: int, wid: int):
+        gd = self.gd_in
+        pre = min(gd, max(0, n_in // 4))
+        post = min(gd, max(0, n_in // 4))
+        cap = max(0, n_in - pre - post)
+        meta = pmt.make_dict()
+        meta = put_float(meta, "sample_rate", self.native_rate)
+        meta = put_str(meta, "sample_format", "sc16")
+        meta = put_int(meta, "window_start_sample", 0)
+        meta = put_int(meta, "pre_guard_samples", pre)
+        meta = put_int(meta, "capture_samples", cap)
+        meta = put_int(meta, "post_guard_samples", post)
+        meta = put_int(meta, "sample_count", int(n_in))
+        meta = put_int(meta, "packet_id", int(wid))
+        meta = put_int(meta, "schedule_index", int(wid))
+        return meta
+
+    def resample(self, nat_i16: np.ndarray, wid: int, deadline_s: float = 180.0):
+        """Post one SC16 native PDU; return (work_cf32, timings_us)."""
+        n_in = int(np.asarray(nat_i16).size // 2)
+        r0 = int(self.res.resample_total_us())
+        h0 = int(self.res.handler_total_us())
+        c0 = int(self.res.input_convert_total_us())
+        n_out = self.sink.count + 1
+        t_wrap0 = time.perf_counter()
+        vec = pmt.init_s16vector(int(nat_i16.size), np.asarray(nat_i16,
+                                                               dtype=np.int16
+                                                               ).tolist())
+        t_wrap = (time.perf_counter() - t_wrap0) * 1e6
+        t_post0 = time.perf_counter()
+        self.res.to_basic_block()._post(
+            pmt.intern("packet"), pmt.cons(self._meta(n_in, wid), vec))
+        t_post = (time.perf_counter() - t_post0) * 1e6
+        t0 = time.time()
+        while time.time() - t0 < deadline_s:
+            if self.sink.count >= n_out:
+                break
+            time.sleep(0.0005)
+        if self.sink.count < n_out:
+            raise SystemExit("native resampler did not emit window %d "
+                             "(in=%d)" % (wid, n_in))
+        d = self.sink.latest
+        wf = np.ascontiguousarray(d.get("__c32", np.zeros(0, np.complex64)),
+                                  dtype=np.complex64)
+        stats = {
+            "wrap_us": t_wrap, "post_us": t_post,
+            "resample_us": int(self.res.resample_total_us()) - r0,
+            "handler_us": int(self.res.handler_total_us()) - h0,
+            "convert_us": int(self.res.input_convert_total_us()) - c0,
+        }
+        self.total_windows += 1
+        self.total_in_samples += n_in
+        return wf, stats
+
+    def stats(self):
+        return {
+            "taps": self.taps_name,
+            "tap_count": int(self.tap_count),
+            "workers": int(self.workers),
+            "kernel": self.kernel,
+            "group_delay_input_native": float(
+                S.native_group_delay_input(self.tap_count)),
+            "group_delay_output_work": float(
+                S.native_group_delay_output(self.tap_count)),
+            "pdus_received": int(self.res.pdus_received()),
+            "pdus_emitted": int(self.res.pdus_emitted()),
+            "pdus_dropped": int(self.res.pdus_dropped()),
+            "short_guard_events": int(self.res.short_guard_events()),
+            "resets": int(self.res.resets()),
+            "total_input_samples": int(self.res.total_input_samples()),
+            "total_output_samples": int(self.res.total_output_samples()),
+            "resample_total_us": int(self.res.resample_total_us()),
+            "resample_max_us": int(self.res.resample_max_us()),
+            "handler_total_us": int(self.res.handler_total_us()),
+            "input_convert_total_us": int(self.res.input_convert_total_us()),
+            "publish_total_us": int(self.res.publish_total_us()),
+        }
+
+
+def _native_repeat_probe(front, i16, wid, repeats):
+    """Repeat the SAME native PDU to expose the known SIMD non-determinism."""
+    outs = []
+    dmax = 0.0
+    for r in range(max(1, int(repeats))):
+        wf, _ = front.resample(i16, wid * 1000 + r)
+        outs.append(wf)
+    ref = outs[0]
+    for o in outs[1:]:
+        if o.size == ref.size:
+            dmax = max(dmax, float(np.max(np.abs(o - ref))))
+        else:
+            dmax = float("inf")
+    return {"repeats": len(outs), "identical": bool(dmax == 0.0),
+            "max_abs_diff": dmax}
+
+
+def _native_scalar_reference(front, nat_i16, work_block):
+    """Independent scipy upfirdn reference (same taps, same dequantized data).
+
+    The reference is fed the EXACT int16 PDU payload dequantized with the block's
+    UnitRange policy (int16/32768), so the only residual is the C++ FIR / kernel
+    arithmetic vs scipy -- the scalar/reference error floor.
+    """
+    taps = np.asarray(front.res.taps(), dtype=np.float64)
+    iq = np.asarray(nat_i16, dtype=np.float64)
+    x = iq[0::2] / 32768.0 + 1j * (iq[1::2] / 32768.0)
+    ref = S.reference_resample_65_32(x, taps)
+    a = np.asarray(work_block, dtype=np.complex128)
+    b = np.asarray(ref, dtype=np.complex128)
+    m = min(a.size, b.size)
+    if m == 0:
+        return {"ran": False, "reason": "empty"}
+    a = a[:m]
+    b = b[:m]
+    cross = np.correlate(a, b, mode="full")
+    lag = int(np.argmax(np.abs(cross)) - (b.size - 1))
+    if lag >= 0:
+        aa = a[lag:]
+        bb = b[:aa.size]
+    else:
+        bb = b[-lag:]
+        aa = a[:bb.size]
+    k = min(aa.size, bb.size)
+    aa, bb = aa[:k], bb[:k]
+    if k == 0:
+        return {"ran": False, "reason": "alignment empty", "lag": lag}
+    d = aa - bb
+    den = float(np.vdot(aa, aa).real)
+    return {
+        "ran": True, "lag": lag, "compared_samples": int(k),
+        "max_abs_diff": float(np.max(np.abs(d))),
+        "rms_diff": float(np.sqrt(np.mean(np.abs(d) ** 2))),
+        "nmse": (float(np.vdot(d, d).real) / den if den > 0 else None),
+        "reference": "scipy.signal.upfirdn (same taps, same int16 payload)",
+        "note": ("residual is the C++ FIR vs scipy scalar arithmetic only (the "
+                 "known resampler SIMD path); it is the numerical error floor, "
+                 "not a filter mismatch"),
+    }
+
+
+def _estimate_lag(a, b):
+    """Integer lag so that a[n] ~= b[n - lag] (peak of the cross-correlation)."""
+    a = np.asarray(a, dtype=np.complex128).ravel()
+    b = np.asarray(b, dtype=np.complex128).ravel()
+    m = min(a.size, b.size)
+    if m < 8:
+        return 0
+    cross = np.correlate(a[:m], b[:m], mode="full")
+    return int(np.argmax(np.abs(cross)) - (m - 1))
+
+
+def native_transform_window(front, win, *, comm_present: bool,
+                            headroom: float, wid: int,
+                            do_scalar: bool = False,
+                            repeat_check: int = 0):
+    """R08: turn one work-grid window into the three-way native capture.
+
+    Returns ``(clean_work, raw_work, i_metric, ov_lo, ov_hi, rec)`` where
+    ``clean_work``/``raw_work`` are the PDU 65/32 outputs (CF32, work grid),
+    ``i_metric = raw_work - clean_work`` is the *realized* interference under
+    the identical common scaling/filtering/valid-range convention, and
+    ``[ov_lo, ov_hi)`` is the truth overlap mapped into that same domain.
+    """
+    s = np.asarray(win["s"], dtype=np.complex128)
+    i = np.asarray(win["i"], dtype=np.complex128)
+    w = np.asarray(win["w"], dtype=np.complex128)
+    clean_w = s + w
+    raw_w = s + i + w
+
+    s_nat = S.work_to_native(s)
+    i_nat = S.work_to_native(i)
+    w_nat = S.work_to_native(w)
+    raw_nat = s_nat + i_nat + w_nat
+    clean_nat = s_nat + w_nat
+
+    peaks = [float(np.max(np.abs(raw_nat))) if raw_nat.size else 0.0,
+             float(np.max(np.abs(clean_nat))) if clean_nat.size else 0.0]
+    scale = S.common_sc16_scale(peaks, headroom=headroom)
+
+    raw_i16, rci, rcq, _ = S.quantize_sc16(raw_nat, scale)
+    cln_i16, cci, ccq, _ = S.quantize_sc16(clean_nat, scale)
+
+    # The two mixtures share the SAME scale and the SAME resampler/valid range.
+    raw_work, rstats = front.resample(raw_i16, wid * 2)
+    cln_work, cstats = front.resample(cln_i16, wid * 2 + 1)
+
+    lag = _estimate_lag(cln_work, clean_w)
+    ov = win.get("overlap") or {"lo": 0, "hi": 0}
+    ov_lo = max(0, int(ov["lo"]) + int(lag))
+    ov_hi = min(min(raw_work.size, cln_work.size), int(ov["hi"]) + int(lag))
+
+    n_i = min(raw_work.size, cln_work.size)
+    i_metric = (raw_work[:n_i].astype(np.complex128)
+                - cln_work[:n_i].astype(np.complex128)).astype(np.complex64)
+
+    # Error floor: the un-quantized mixture through the SAME taps/upsampler.  The
+    # residual raw_work - ideal is the SC16 quantization error + numerical noise.
+    # scipy resample_poly is NOT used here (its Kaiser filter would masquerade
+    # as a floor); the reference uses the production taps.
+    ideal = S.reference_resample_65_32(raw_nat, np.asarray(front.res.taps(),
+                                                           dtype=np.float64))
+    # The block dequantizes the int16 payload with 1/32768, while this window
+    # was quantized with `scale`; the produced work amplitude is therefore
+    # (scale/32768) * ideal.  Compensate before measuring the residual.
+    dequant_gain = float(scale) / 32768.0
+    ideal = ideal * dequant_gain
+    a = raw_work.astype(np.complex128)
+    lag_ideal = _estimate_lag(a, ideal)
+    if lag_ideal >= 0:
+        aa = a[lag_ideal:]
+        bb = ideal[:aa.size]
+    else:
+        bb = ideal[-lag_ideal:]
+        aa = a[:bb.size]
+    kf = min(aa.size, bb.size)
+    if kf > 0:
+        err = aa[:kf] - bb[:kf]
+        den = float(np.vdot(bb[:kf], bb[:kf]).real)
+        floor = {
+            "compared_samples": int(kf), "lag": int(lag_ideal),
+            "effective_noise_rms": float(np.sqrt(np.mean(np.abs(err) ** 2))),
+            "effective_noise_nmse": (float(np.vdot(err, err).real) / den
+                                     if den > 0 else None),
+            "note": ("y_work - ideal_filtered(s+i+w) = SC16 quantization + "
+                     "numerical error under the SAME production taps; NOT an "
+                     "interference gain and not an SIC implementation error"),
+        }
+    else:
+        floor = {"compared_samples": 0}
+
+    rec = {
+        "ran": True,
+        "iq_scale": float(scale),
+        "headroom": float(headroom),
+        "scale_method": "common_sc16_scale=32767*headroom/max_peak(all mixtures)",
+        "native_rate": S.CG400_HZ,
+        "work_rate": S.WORK_HZ,
+        "native_samples": int(raw_nat.size),
+        "work_samples_in": int(raw_w.size),
+        "work_samples_out": int(raw_work.size),
+        "clean_clip_i": int(cci), "clean_clip_q": int(ccq),
+        "raw_clip_i": int(rci), "raw_clip_q": int(rcq),
+        "peak_native": max(peaks),
+        "common_scale_shared": True,
+        "per_component_normalization": False,
+        "nonlinearity": S.quantize_nonlinearity(s_nat, i_nat, w_nat, scale),
+        "roundtrip_lag_work": int(lag),
+        "roundtrip_lag_expected_work": float(
+            S.native_group_delay_output(front.tap_count)),
+        "resampler_group_delay_input_native": float(
+            S.native_group_delay_input(front.tap_count)),
+        "resampler_group_delay_output_work": float(
+            S.native_group_delay_output(front.tap_count)),
+        "resampler_taps": int(front.tap_count),
+        "resampler_kernel": front.kernel,
+        "valid_lo": int(front.gd_in),
+        "valid_hi": int(max(0, raw_nat.size - front.gd_in)),
+        "filter_delay": float(S.native_group_delay_input(front.tap_count)),
+        "work_to_native": [S.NATIVE_DECIM, S.NATIVE_INTERP],
+        "native_to_work": [S.NATIVE_INTERP, S.NATIVE_DECIM],
+        "error_floor": floor,
+        "resample_stats": {"raw": rstats, "clean": cstats},
+        "filtering_convention": (
+            "clean and raw both quantized with ONE common scale then passed "
+            "through the SAME PDU 65/32 resampler; the metric reference "
+            "i_metric=raw_work-clean_work is the realized interference under "
+            "that identical convention (R08)"),
+    }
+    if do_scalar:
+        rec["scalar_reference"] = _native_scalar_reference(front, raw_i16,
+                                                           raw_work)
+    if repeat_check and repeat_check > 1:
+        rec["repeat_run_difference"] = _native_repeat_probe(
+            front, raw_i16, wid, repeat_check)
+    return cln_work, raw_work, i_metric, ov_lo, ov_hi, rec
+
+
 def run_canonical_cir_reference(uwb, repo, tpl_path, out):
     """G0: feed the canonical radar RX to the CIR block; compare to golden."""
     rx = os.path.join(repo, "testdata", "uwb_radar", "rx_clean_998p4.cf32")
@@ -676,6 +1262,7 @@ def _isnum(v):
 def pooled_effect(windows):
     """Effect aggregate over non-truth windows (verifier's exact formula)."""
     sups, nmses, shifts, amps = [], [], [], []
+    actual = []
     n_truth = 0
     for w in windows:
         st = w.get("sic_state") or {}
@@ -688,6 +1275,8 @@ def pooled_effect(windows):
                 sups.append(float(rec["suppression_db"]))
             if _isnum(rec.get("nmse")):
                 nmses.append(float(rec["nmse"]))
+            if _isnum(rec.get("actual_suppression_db")):
+                actual.append(float(rec["actual_suppression_db"]))
         c, s = w.get("clean"), w.get("sic")
         if isinstance(c, dict) and isinstance(s, dict):
             if isinstance(c.get("cir_peak_tap"), int) and \
@@ -702,6 +1291,10 @@ def pooled_effect(windows):
         "median_suppression_db": (float(np.median(sups)) if sups else None),
         "frac_ge_3db": (sum(1.0 for s in sups if s >= 3.0) / len(sups)
                         if sups else None),
+        "median_actual_suppression_db": (float(np.median(actual)) if actual
+                                         else None),
+        "frac_actual_ge_3db": (sum(1.0 for s in actual if s >= 3.0)
+                               / len(actual) if actual else None),
         "nmse_median": (float(np.median(nmses)) if nmses else None),
         "peak_shift_max": (max(shifts) if shifts else None),
         "target_amp_err_db_p95": (float(np.percentile(np.asarray(amps), 95))
@@ -787,6 +1380,14 @@ def build_child_argv(args, output, isr=None, offset=None, cfo=None,
         argv += ["--cfo-hz", str(cfo)]
     if channel is not None:
         argv += ["--comm-channel", channel]
+    # R02: propagate the EXPLICIT window config so every sweep child uses the
+    # same case/config (never a silent per-child change).
+    if getattr(args, "sic_fit_reps", None) is not None:
+        argv += ["--sic-fit-reps", str(int(args.sic_fit_reps))]
+    if getattr(args, "sic_validation_reps", None) is not None:
+        argv += ["--sic-validation-reps", str(int(args.sic_validation_reps))]
+    if getattr(args, "sic_cover_preamble", False):
+        argv += ["--sic-cover-preamble"]
     return argv
 
 
@@ -926,8 +1527,286 @@ def run_sweep(args, repo, argv):
     return 0
 
 
+def run_r01_regression(args, repo, argv):
+    """Emit the two R01 regression inputs as real, verifier-shaped runs.
+
+    Case A ``case_a_tiny_mask``: a very accurate full reconstruction (small
+    ``recon.nmse``) whose ACTUAL applied subtraction mask only covers the
+    confirmed reps (``--sic-fit-reps 8 --sic-validation-reps 8
+    --sic-no-auto-cover``).  The main actual-output gate must judge it as
+    insufficient (low ``actual_suppression_db``, small ``coverage``).
+    Case B ``case_b_uncommitted``: the core reconstructs but never commits
+    (``validate_threshold`` unreachable) so the output is bit-identical to the
+    input; the window must NOT be counted as cancelled
+    (``actual_suppression_db == 0``).
+    """
+    root = args.output
+    n = args.windows if args.windows else 8
+    cases = [
+        ("case_a_tiny_mask",
+         ["--sic-fit-reps", "8", "--sic-validation-reps", "8",
+          "--sic-no-auto-cover"],
+         "accurate i_hat but a tiny applied subtraction mask"),
+        ("case_b_uncommitted",
+         ["--sic-validate-threshold", "0.000001"],
+         "reconstruction available but not committed (bypassed output)"),
+    ]
+    os.makedirs(root, exist_ok=True)
+    rows = []
+    for cid, extra, purpose in cases:
+        cout = os.path.join(root, cid)
+        ca = ["--build-dir", args.build_dir, "--preset", "main",
+              "--input-grid", args.input_grid, "--sic", "estimate",
+              "--consumer", args.consumer, "--output", cout,
+              "--seed-set", args.seed_set, "--windows", str(int(n)),
+              "--interference", "on", "--fixtures",
+              str(max(4, int(args.fixtures)))] + extra
+        rc = _run_child(ca, os.path.join(cout, "run.log"))
+        summ = _read_json(os.path.join(cout, "summary.json")) or {}
+        wins = _read_windows(os.path.join(cout, "windows.jsonl"))
+        eff = summ.get("effect", {}) or {}
+        tgt = summ.get("target", {}) or {}
+        rec = None
+        for w in wins:
+            if isinstance(w.get("recon"), dict):
+                rec = w["recon"]
+                break
+        row = {
+            "case": cid, "purpose": purpose, "run_dir": cout,
+            "returncode": rc, "windows": len(wins),
+            "recon_nmse_first": (rec or {}).get("nmse"),
+            "recon_suppression_db_first": (rec or {}).get("suppression_db"),
+            "actual_nmse_first": (rec or {}).get("actual_nmse"),
+            "actual_suppression_db_first": (rec or {}).get(
+                "actual_suppression_db"),
+            "coverage_first": (rec or {}).get("coverage"),
+            "sub_lo_first": (rec or {}).get("sub_lo"),
+            "sub_hi_first": (rec or {}).get("sub_hi"),
+            "median_actual_suppression_db": eff.get(
+                "median_actual_suppression_db"),
+            "frac_actual_ge_3db": eff.get("frac_actual_ge_3db"),
+            "median_suppression_db": eff.get("median_suppression_db"),
+            "target_amp_abs_err_db_p95": eff.get("target_amp_abs_err_db_p95"),
+            "target_peak_shift_max": eff.get("target_peak_shift_max"),
+            "target_lo": tgt.get("target_lo"), "target_hi": tgt.get("target_hi"),
+            "eff_pass": (summ.get("gates", {}) or {}).get("eff_pass"),
+            "n_interference_windows": eff.get("n_interference_windows"),
+            "n_na_windows": eff.get("n_na_windows"),
+        }
+        if cid == "case_a_tiny_mask":
+            row["judged_insufficient"] = bool(
+                row["median_actual_suppression_db"] is not None and
+                row["median_actual_suppression_db"] < 10.0 and
+                row["recon_suppression_db_first"] is not None and
+                row["recon_suppression_db_first"] >= 10.0 and
+                row["eff_pass"] is not True)
+        else:
+            row["judged_not_cancelled"] = bool(
+                row["actual_suppression_db_first"] is not None and
+                abs(float(row["actual_suppression_db_first"])) <= 1e-9 and
+                row["eff_pass"] is not True)
+        rows.append(row)
+        print("  regression %-20s rc=%d median_actual=%s recon_supp=%s "
+              "coverage=%s eff_pass=%s"
+              % (cid, rc, _fmt(row["median_actual_suppression_db"]),
+                 _fmt(row["median_suppression_db"]),
+                 _fmt(row["coverage_first"]), row["eff_pass"]), flush=True)
+    out = {"mode": "r01_regression", "root": root, "windows": int(n),
+           "cases": rows}
+    write_json(os.path.join(root, "regression_r01.json"), out)
+    print("regression_r01:", json.dumps(out, sort_keys=True), flush=True)
+    return 0
+
+
+def _sic_once(rt, meta, iq):
+    """Post one window and return its terminal out_meta (blocking)."""
+    n_out = rt.sink_sic_out.count + 1
+    n_ih = rt.sink_sic_ihat.count + 1
+    rt.post_sic_input(meta, iq)
+    if not rt.wait_sic(n_out, n_ih, deadline_s=180.0):
+        raise SystemExit("R06 data-dependency: SIC did not terminate "
+                         "(out=%r i_hat=%r)" % (rt.sic_counts(),
+                                                rt.sic_counts()))
+    return rt.sink_sic_out.latest, rt.sink_sic_ihat.latest
+
+
+def run_r06_data_dep(args, repo, argv):
+    """R06 data-dependency experiment (real cores, two windows).
+
+    Window A is the nominal window.  Window B is byte-identical to A on
+    [0, eval_lo) and has a DIFFERENT interferer realization inside the
+    independent final-eval region [eval_lo, eval_hi).  The frozen fit / online
+    gate results (detected_start, cfo, paths, residual_corr, committed support)
+    must not move; only the eval-region metric may change.
+    """
+    uwb = S.load_uwb(os.path.abspath(args.build_dir))
+    preset = load_preset(repo, "main")
+    gen = preset.get("generator", {})
+    runtime = preset.get("runtime", {})
+    sensing_code = int(gen.get("sensing_code", 9))
+    comm_code = int(gen.get("comm_code", 10))
+    sync_reps = int(gen.get("sync_reps", 64))
+    fit = int(runtime.get("fit_reps", 8))
+    val = int(runtime.get("validation_reps", 8))
+    isr_db = float(preset.get("nominal_for_benchmark", {}).get("isr_db", 10.0))
+    generator = S.SicSignalGenerator(
+        uwb, sensing_code=sensing_code, comm_code=comm_code,
+        sync_reps=sync_reps, sfd_mode=SFD_MODE,
+        pulse_shape=S.DEFAULT_PULSE_SHAPE, comm_present=True, build_comm=True,
+        snr_db=float(gen.get("snr_db", 30.0)), isr_db=isr_db, verbose=False)
+    seed_specs = gen.get("seeds", {})
+    seeds, _ = materialize_seeds(seed_specs.get("calibration",
+                                                {"start": 0, "step": 1,
+                                                 "count": 1}), 1)
+    seed = int(seeds[0])
+    comm_paths = gen.get("comm_paths", {}).get("single_int", [[0, [1.0, 0.0]]])
+    win = generator.build(seed=seed, comm_paths=comm_paths,
+                          start_offset_work=0.0, cfo_hz=0.0, isr_db=isr_db,
+                          snr_db=float(gen.get("snr_db", 30.0)))
+    n = generator.n
+    anchor = int(generator.pre)
+    eval_lo = anchor + (fit + val) * S.SPS
+    eval_hi = anchor + sync_reps * S.SPS
+    eval_hi = min(eval_hi, n)
+    if eval_hi <= eval_lo:
+        raise SystemExit("R06: fit_reps+validation_reps=%d covers sync_reps=%d; "
+                         "no independent eval region exists for this config "
+                         "(use --sic-validation-reps < sync_reps - fit_reps)"
+                         % (fit + val, sync_reps))
+    # Variant B: same s/w and same comm prefix, different eval-region content.
+    alt = np.zeros(n, dtype=np.complex128)
+    S.apply_path(alt, generator.comm_wave, anchor, 13.7, 0.7, "bandlimited")
+    i_b = np.asarray(win["i"], dtype=np.complex128).copy()
+    i_b[eval_lo:eval_hi] = alt[eval_lo:eval_hi]
+    y_a = np.ascontiguousarray(win["y"], dtype=np.complex64)
+    # Start from the EXACT array A and rewrite only the eval slice, so the
+    # frozen prefix stays bit-identical (any float noise there would be a
+    # different test).
+    y_b = y_a.copy()
+    y_b[eval_lo:eval_hi] = np.ascontiguousarray(
+        (win["s"].astype(np.complex128) + i_b
+         + win["w"].astype(np.complex128)), dtype=np.complex64)[eval_lo:eval_hi]
+    prefix_equal = bool(np.array_equal(y_a[:eval_lo], y_b[:eval_lo]))
+
+    # Build the SIC adapter exactly as the main path does (same template/ROI).
+    tpl_dir = os.path.join(args.output, "templates")
+    os.makedirs(tpl_dir, exist_ok=True)
+    tpl_path = os.path.join(tpl_dir, "sync_template_code9_998p4.cf32")
+    generator.template.tofile(tpl_path)
+    search_roi = (max(0, generator.pre),
+                  min(generator.n, generator.pre + sync_reps * S.SPS))
+    subtraction_roi = (search_roi[0],
+                       min(generator.n, search_roi[1]
+                           + generator.comm_wave.size + int(args.sic_post_tail)))
+    core_roi = (search_roi[0], subtraction_roi[1])
+    sic_cfg = {
+        "sync": generator.comm_sync, "preamble": generator.comm_wave,
+        "comm_code": comm_code, "sync_reps": sync_reps,
+        "k_paths": int(runtime.get("sic_k", 4)), "fit_reps": fit,
+        "validation_reps": val, "fit_reps_source": "preset",
+        "roi": core_roi, "coarse_stride": 14, "mode": "estimate",
+        "detect_threshold": float(args.sic_detect_threshold),
+        "validate_threshold": float(args.sic_validate_threshold),
+        "in_flight_max": 8, "iq_budget_bytes": 64 << 20, "queue_capacity": 8,
+        "post_tail": int(args.sic_post_tail),
+        "path_min_spacing": 0, "max_window_samples": 0,
+        "enable_fractional": True, "enable_cfo": True,
+    }
+    rt = SimRuntime(uwb, tpl_path=tpl_path, consumers="cir", windows=2,
+                    sic=sic_cfg, keep_iq=0)
+    rt.start()
+
+    def meta_for(wid):
+        m = pmt.make_dict()
+        m = put_int(m, "window_id", wid)
+        m = put_int(m, "sample_count", int(y_a.size))
+        m = put_int(m, "code_index", sensing_code)
+        m = put_int(m, "sync_repetitions", sync_reps)
+        m = put_str(m, "sfd_mode", SFD_MODE)
+        m = put_str(m, "sensing_profile_id",
+                    "code%d-%dSYNC-%s" % (sensing_code, sync_reps, SFD_MODE))
+        return m
+
+    out_a, ihat_a_meta = _sic_once(rt, meta_for(0), y_a)
+    out_b, ihat_b_meta = _sic_once(rt, meta_for(1), y_b)
+    rt.stop()
+
+    def ihat_of(meta):
+        return np.ascontiguousarray(meta.get("__c32", y_a), dtype=np.complex64)
+
+    def frozen(om):
+        return {
+            "detected": bool(dget(om, "sic_detected", False)),
+            "committed": bool(dget(om, "sic_committed", False)),
+            "detected_start": dnum(om, "sic_detected_start", -1),
+            "cfo_hz": dnum(om, "sic_cfo_hz", 0.0),
+            "n_paths": dnum(om, "sic_n_paths", 0),
+            "support_lo": dnum(om, "sic_support_lo", -1),
+            "support_hi": dnum(om, "sic_support_hi", -1),
+            "residual_corr": dnum(om, "sic_residual_corr", 0.0),
+            "bypass_reason": dget(om, "sic_bypass_reason", None),
+        }
+
+    fa, fb = frozen(out_a), frozen(out_b)
+    important = ("detected", "committed", "detected_start", "cfo_hz", "n_paths",
+                 "support_lo", "support_hi", "bypass_reason")
+    exact = ("detected", "committed", "detected_start", "n_paths",
+             "support_lo", "support_hi", "bypass_reason")
+    frozen_equal_exact = all(fa[k] == fb[k] for k in exact)
+    frozen_equal = bool(
+        frozen_equal_exact and
+        abs(float(fa["cfo_hz"]) - float(fb["cfo_hz"])) <= 1e-3 and
+        abs(float(fa["residual_corr"]) - float(fb["residual_corr"])) <= 1e-6)
+    ihat_a = ihat_of(ihat_a_meta)
+    ihat_b = ihat_of(ihat_b_meta)
+
+    def eval_metrics(i_true, ihat):
+        lo = eval_lo
+        hi = min(eval_hi, len(i_true), len(ihat))
+        if hi <= lo:
+            return None, None
+        a = np.asarray(i_true[lo:hi], dtype=np.complex128)
+        b = np.asarray(ihat[lo:hi], dtype=np.complex128)
+        den = float(np.vdot(a, a).real)
+        if den <= 0:
+            return None, None
+        num = float(np.vdot(b - a, b - a).real)
+        nmse = num / den
+        return nmse, (-10.0 * math.log10(nmse) if num > 0 else 60.0)
+
+    nmse_a, sup_a = eval_metrics(win["i"], ihat_a)
+    nmse_b, sup_b = eval_metrics(np.ascontiguousarray(i_b,
+                                                      dtype=np.complex64),
+                                 ihat_b)
+    eval_changed = bool(
+        nmse_a is not None and nmse_b is not None and
+        (abs(nmse_a - nmse_b) > 1e-9 or abs((sup_a or 0) - (sup_b or 0)) > 1e-9))
+    report = {
+        "mode": "r06_data_dependency",
+        "seed": seed, "eval_region": [int(eval_lo), int(eval_hi)],
+        "fit_reps": fit, "validation_reps": val, "sync_reps": sync_reps,
+        "prefix_equal_before_eval": prefix_equal,
+        "frozen_A": fa, "frozen_B": fb,
+        "frozen_keys_compared": list(important),
+        "frozen_equal_exact": bool(frozen_equal_exact),
+        "frozen_equal": frozen_equal,
+        "eval_nmse_A": nmse_a, "eval_suppression_db_A": sup_a,
+        "eval_nmse_B": nmse_b, "eval_suppression_db_B": sup_b,
+        "eval_metric_changed": eval_changed,
+        "pass": bool(prefix_equal and frozen_equal and eval_changed),
+        "note": ("changing ONLY the independent final-eval region content must "
+                 "not move the frozen fit/online-gate results; the eval metric "
+                 "must change. The coarse search sees the candidate ROI "
+                 "(disclosed), but no eval sample feeds a fit or the gate."),
+    }
+    write_json(os.path.join(args.output, "r06_data_dependency.json"), report)
+    print("r06_data_dependency:", json.dumps(report, sort_keys=True), flush=True)
+    return 0 if report["pass"] else 1
+
+
 def _fmt(v, nd=3):
     return "n/a" if v is None else ("%%.%df" % nd) % float(v)
+
 
 
 def run_negative(args, repo, argv):
@@ -943,7 +1822,7 @@ def run_negative(args, repo, argv):
     print("negative: %d cases x %d windows" % (len(cases), per_case),
           flush=True)
     rows = []
-    fp = fn = 0
+    fp = fn = fo = fa = 0
     bypass_n = bypass_ok = 0
     for idx, case in enumerate(cases):
         cid = str(case.get("id", "case%d" % idx))
@@ -958,6 +1837,17 @@ def run_negative(args, repo, argv):
                     if (w.get("sic_state") or {}).get("detected") is True)
         n_com = sum(1 for w in wins
                     if (w.get("sic_state") or {}).get("committed") is True)
+        # R01/R10: a negative is judged by a false COMMIT *and* an actual output
+        # change (the real y!=y_clean support), not by the raw detection alone: a
+        # real comm detected in the wide search ROI but outside the sensing
+        # processing ROI is legitimately detected, yet must be bypassed.
+        n_chg = sum(1 for w in wins
+                    if bool((w.get("recon") or {}).get("output_changed")))
+        # Actionable overlap the core measured against the sensing processing ROI.
+        n_act = sum(1 for w in wins
+                    if (w.get("sic_state") or {}).get("sub_overlap") not in
+                    (None, -1) and
+                    int((w.get("sic_state") or {}).get("sub_overlap")) > 0)
         sic = summ.get("sic") or {}
         bbi = (sic.get("bypass_bit_identical") or {})
         bypass_n += int(bbi.get("n_bypassed") or 0)
@@ -966,23 +1856,33 @@ def run_negative(args, repo, argv):
         if is_neg:
             fp += n_det
             fn += n_com
+            fo += n_chg
+            # ACTIONABLE detection: a detected interferer whose support actually
+            # overlaps the sensing processing ROI.  This is the detection metric
+            # the "<= 1%" actionable-negative bound refers to; a raw template hit
+            # outside the sensing ROI (no_overlap) is real but not actionable.
+            fa += n_act
         row = {
             "case": cid, "expected_negative": is_neg,
             "windows": n, "returncode": rc,
-            "detected": n_det, "committed": n_com,
+            "detected": n_det, "committed": n_com, "output_changed": n_chg,
+            "actionable_overlap": n_act,
             "false_detect": n_det if is_neg else None,
             "false_commit": n_com if is_neg else None,
+            "output_change": n_chg if is_neg else None,
             "detect_rate": (n_det / n) if n else None,
             "commit_rate": (n_com / n) if n else None,
             "bypassed": bbi.get("n_bypassed"),
             "bypass_bit_identical": bbi.get("n_bit_identical"),
             "bypass_all_identical": bbi.get("all_identical"),
             "isr_db": (summ.get("config", {}) or {}).get("isr_db"),
+            "sensing_roi": ((summ.get("config", {}) or {}).get("sensing_roi")),
             "returncode_ok": rc == 0,
         }
         rows.append(row)
-        print("  case %-26s n=%4d det=%4d commit=%4d neg=%s bypass=%s/%s rc=%d"
-              % (cid, n, n_det, n_com, is_neg,
+        print("  case %-26s n=%4d det=%4d commit=%4d chg=%4d neg=%s "
+              "bypass=%s/%s rc=%d"
+              % (cid, n, n_det, n_com, n_chg, is_neg,
                  bbi.get("n_bit_identical"), bbi.get("n_bypassed"), rc),
               flush=True)
 
@@ -990,30 +1890,43 @@ def run_negative(args, repo, argv):
     overall = {
         "negative_windows": neg_n,
         "false_detect": fp,
+        "false_actionable_detect": fa,
         "false_commit": fn,
+        "false_output_change": fo,
         "false_detect_rate": (fp / neg_n) if neg_n else None,
+        "false_actionable_detect_rate": (fa / neg_n) if neg_n else None,
         "false_commit_rate": (fn / neg_n) if neg_n else None,
+        "false_output_change_rate": (fo / neg_n) if neg_n else None,
         "false_detect_ci95": wilson_ci(fp, neg_n),
+        "false_actionable_detect_ci95": wilson_ci(fa, neg_n),
         "false_commit_ci95": wilson_ci(fn, neg_n),
+        "false_output_change_ci95": wilson_ci(fo, neg_n),
         "gate_false_commit_max": 0.01,
         "gate_windows_min": 1000,
         "gate_pass": bool(neg_n >= 1000 and
                           (neg_n > 0 and fn / neg_n <= 0.01)),
+        "gate_pass_false_commit_or_change": bool(
+            neg_n >= 1000 and neg_n > 0 and fo / neg_n <= 0.01),
         "bypass_windows": bypass_n,
         "bypass_bit_identical": bypass_ok,
         "bypass_all_identical": bool(bypass_n == 0 or bypass_n == bypass_ok),
         "expected_negative_cases": sorted(expected_negative),
         "ci_method": "Wilson score interval, z=1.96 (95%)",
-        "note": ("false-detect/commit are counted only on the "
+        "note": ("false-detect/commit/output-change are counted only on the "
                  "no-actionable-interferer cases (no_interference, no_overlap, "
-                 "wrong_code11); never zero-risk claimed"),
+                 "wrong_code11).  false-commit is the frozen S0 gate (<=1%); a "
+                 "raw DETECT of a real comm in the wide search ROI that lands "
+                 "outside the sensing processing ROI is not a commit: it is "
+                 "bypassed (output bit-identical), so false_output_change stays "
+                 "0.  Never zero-risk claimed."),
     }
     write_json(os.path.join(args.output, "negative_table.json"),
                {"cases": rows, "overall": overall})
     with open(os.path.join(args.output, "negative_table.csv"), "w",
               encoding="utf-8") as f:
         cols = ["case", "expected_negative", "windows", "detected",
-                "committed", "false_detect", "false_commit", "detect_rate",
+                "committed", "output_changed", "actionable_overlap",
+                "false_detect", "false_commit", "output_change", "detect_rate",
                 "commit_rate", "bypassed", "bypass_bit_identical",
                 "bypass_all_identical", "returncode"]
         f.write(",".join(cols) + "\n")
@@ -1074,9 +1987,30 @@ def main(argv=None):
                     help="disable fractional-delay refinement in the core")
     ap.add_argument("--sic-no-cfo", action="store_true",
                     help="disable CFO estimation in the core")
+    ap.add_argument("--sic-cover-preamble", action="store_true",
+                    help="EXPLICITLY extend the observation window "
+                         "(fit_reps+validation_reps) to cover the whole nominal "
+                         "comm preamble (sync_reps). Recorded as "
+                         "fit_reps_source=explicit_cover_preamble and timed; "
+                         "never applied silently. With full coverage there is no "
+                         "repetition left for an independent final-eval region, "
+                         "which is then reported as unavailable (R06).")
+    ap.add_argument("--sic-no-auto-cover", action="store_true",
+                    help="deprecated no-op: the silent auto-bump has been "
+                         "removed (R02). The declared fit/validation reps are "
+                         "used verbatim; coverage shortfall is reported, never "
+                         "hidden.")
+    ap.add_argument("--emit-r06-data-dep", action="store_true",
+                    help="run the R06 data-dependency experiment: perturb only "
+                         "the independent final-eval region content and assert "
+                         "the frozen fit/online-gate results do not move.")
     # §8.2 main-matrix axes (single-cell overrides) and the sweep driver.
     ap.add_argument("--sweep", action="store_true",
                     help="iterate the main-preset axes (per-cell runs)")
+    ap.add_argument("--emit-r01-regression", action="store_true",
+                    help="write the two R01 regression inputs (tiny applied "
+                         "mask / uncommitted) as verifier-shaped runs under "
+                         "--output")
     ap.add_argument("--isr-db", type=float, default=None,
                     help="override ISR (dB) for the main preset cell")
     ap.add_argument("--start-offset", type=float, default=None,
@@ -1093,16 +2027,67 @@ def main(argv=None):
     ap.add_argument("--keep-iq", type=int, default=4,
                     help="bounded number of consumer PDUs whose IQ array is "
                          "retained by the sinks (memory bound for long runs)")
+    # R08: CG400 native front-end (491.52 MS/s RX / SC16 / PDU 65-32).
+    ap.add_argument("--native-taps", default="quality_minorder",
+                    help="65/32 taps profile/path (testdata/resampler_65_32) or "
+                         "an absolute float32 taps file")
+    ap.add_argument("--native-resampler-workers", type=int, default=1,
+                    help="Persistent 65/32 FIR worker count (default 1)")
+    ap.add_argument("--native-headroom", type=float, default=1.0,
+                    help="Common SC16 scale headroom (<1 leaves clip margin)")
+    ap.add_argument("--native-repeat-check", type=int, default=3,
+                    help="Repeat the SAME native PDU N times to quantify the "
+                         "known resampler SIMD non-determinism (recorded, not "
+                         "fixed)")
+    ap.add_argument("--native-scalar-check", action="store_true",
+                    help="Also compute the independent scipy upfirdn reference "
+                         "and the scalar/error-floor comparison for the first "
+                         "window (separate path, not the production chain)")
+    # R09: real consumer variants (functions/correctness bound to one case).
+    ap.add_argument("--demod-softchip", default="bypass",
+                    choices=["bypass", "full", "rake4"],
+                    help="Sensing demod CIR soft-chip filter mode")
+    ap.add_argument("--demod-rake-top-k", type=int, default=0,
+                    help="RAKE top-k (used when --demod-softchip rake4)")
+    ap.add_argument("--radar-timing", default="search",
+                    choices=["search", "planned"],
+                    help="radar CIR timing: full search vs planned coordinate "
+                         "(use_predicted_timing)")
+    # R09: pacing measurement controls.
+    ap.add_argument("--timing-instrumentation", default="on",
+                    choices=["on", "off"],
+                    help="on: full per-window stage/eval instrumentation; off: "
+                         "skip Python-side per-window aggregation to bound its "
+                         "cost (paired short comparison)")
+    ap.add_argument("--paced-pool", type=int, default=64,
+                    help="number of distinct pre-generated windows in the paced "
+                         "pool (>=1)")
+    ap.add_argument("--paced-target-only", action="store_true",
+                    help="R09: in the paced timed region run ONLY the target "
+                         "path (SIC->consumer when SIC is on), skipping the "
+                         "clean/raw pairing consumers. The effect pairing is "
+                         "verified by a separate load; without this the loop "
+                         "still runs all three and reports every bucket.")
     args = ap.parse_args(argv)
 
     if args.windows is not None and args.windows <= 0:
         raise SystemExit("--windows must be > 0")
-    if args.input_grid != "work":
-        raise SystemExit("--input-grid %s (CG400 native roundtrip) is S0 "
-                         "stage B and is not implemented in S0-A"
-                         % args.input_grid)
+    if args.windows is not None and (args.rate is not None
+                                     or args.duration is not None):
+        raise SystemExit("--windows is mutually exclusive with --rate/"
+                         "--duration (the paced schedule fixes the count)")
+    # R08: the CG400 native front-end is implemented; no grid is refused here.
+    # The paced/burst driver (§8.4) is a work-grid measurement and is not
+    # combined with the native front-end (kept separate, never silently mixed).
+    if args.input_grid == "cg400" and (
+            args.rate is not None or args.duration is not None
+            or args.burst is not None):
+        raise SystemExit("--input-grid cg400 is not combined with paced/burst "
+                         "replay; measure the native effect with --windows")
 
     repo = S.find_repo_root(os.path.dirname(os.path.abspath(__file__)))
+    native = (args.input_grid == "cg400")
+    instrumentation = (str(args.timing_instrumentation) == "on")
 
     # ---- driver dispatch (sweep / negative-set / paced / burst) ----
     if args.sweep:
@@ -1112,6 +2097,21 @@ def main(argv=None):
                 args.burst is not None:
             raise SystemExit("--sweep cannot be combined with paced replay")
         return run_sweep(args, repo, argv)
+    if args.emit_r01_regression:
+        if args.rate is not None or args.duration is not None or \
+                args.burst is not None:
+            raise SystemExit("--emit-r01-regression cannot be combined with "
+                             "paced replay")
+        if args.preset != "main":
+            raise SystemExit("--emit-r01-regression is defined for "
+                             "--preset main")
+        return run_r01_regression(args, repo, argv)
+    if args.emit_r06_data_dep:
+        if args.rate is not None or args.duration is not None or \
+                args.burst is not None:
+            raise SystemExit("--emit-r06-data-dep cannot be combined with "
+                             "paced replay")
+        return run_r06_data_dep(args, repo, argv)
     if args.rate is not None or args.duration is not None or \
             args.burst is not None:
         pass  # handled inside the single-run path via the `paced` flag
@@ -1216,6 +2216,7 @@ def main(argv=None):
     fit_reps = int(runtime.get("fit_reps", 8)) if sic_on else None
     validation_reps = int(runtime.get("validation_reps", 8)) if sic_on else None
     fit_source = "preset"
+    cover_preamble = False
     if sic_on:
         if args.sic_fit_reps is not None or args.sic_validation_reps is not None:
             fit_reps = int(args.sic_fit_reps) if args.sic_fit_reps is not None \
@@ -1224,24 +2225,28 @@ def main(argv=None):
                                if args.sic_validation_reps is not None
                                else validation_reps)
             fit_source = "cli"
-        # The frozen core subtracts only the CONFIRMED repetitions
-        # (support_hi = detected_start + confirmed*sps + post_tail) and
-        # `confirmed <= fit_reps + validation_reps`.  With the preset nominal
-        # 8/8 the mask would cancel only 16 of the 64 comm SYNC symbols, so
-        # auto-extend the estimation window (within the declared fit_reps
-        # axis) to cover the interferer preamble.
-        if fit_reps + validation_reps < sync_reps:
-            base = max(1, min(32, fit_reps))
-            fit_reps = base
-            validation_reps = sync_reps - base
-            fit_source = "auto_cover_preamble"
+        # R02: the observation window (fit_reps -> parameter FIT; validation ->
+        # online gate) is used VERBATIM.  The core subtracts only the CONFIRMED
+        # repetitions (support_hi = detected_start + confirmed*sps + post_tail)
+        # and `confirmed <= fit_reps + validation_reps`, so a short window gives
+        # a genuinely PARTIAL subtraction mask.  That shortfall is reported
+        # (coverage / partial), never silently repaired.  Full coverage is an
+        # explicit opt-in that is recorded and timed.
+        if args.sic_cover_preamble:
+            cover_preamble = True
+            if fit_reps + validation_reps != sync_reps:
+                base = max(1, min(fit_reps, sync_reps - 8))
+                fit_reps = base
+                validation_reps = sync_reps - base
+            fit_source = "explicit_cover_preamble"
         if fit_reps <= 0 or validation_reps < 8:
             raise SystemExit("fit_reps>0 and validation_reps>=8 required for "
                              "SIC (got %r/%r)" % (fit_reps, validation_reps))
         if fit_reps + validation_reps > sync_reps:
-            raise SystemExit("fit_reps + validation_reps (%d) exceeds "
-                             "sync_reps (%d)" % (fit_reps + validation_reps,
-                                                 sync_reps))
+            raise SystemExit(
+                "UNSATISFIABLE SIC config: fit_reps+validation_reps (%d) > "
+                "sync_reps (%d); refused (never silently rewritten)"
+                % (fit_reps + validation_reps, sync_reps))
 
     # Public candidate search ROI for the comm preamble.  The online SIC only
     # knows this window (plus the comm code/template/rate) -- never the true
@@ -1259,10 +2264,63 @@ def main(argv=None):
     else:
         roi_mode = "nominal"
         roi_pair = roi_base
-    roi_pair = (int(roi_pair[0]), int(roi_pair[1]))
-    if sic_on and not (0 <= roi_pair[0] < roi_pair[1] <= generator.n):
-        raise SystemExit("resolved SIC roi %r is outside the window [0,%d)"
-                         % (roi_pair, generator.n))
+    search_roi = (int(roi_pair[0]), int(roi_pair[1]))
+    if sic_on and not (0 <= search_roi[0] < search_roi[1] <= generator.n):
+        raise SystemExit("resolved SIC search roi %r is outside the window "
+                         "[0,%d)" % (search_roi, generator.n))
+
+    # R02: the SEARCH ROI (the core's `roi_lo/roi_hi`) stays deliberately WIDE
+    # so the natural comm preamble tail `support_hi = detected_start +
+    # confirmed*sps + post_tail` (confirmed <= fit+validation) is never clipped
+    # by the candidate-start range.  It is extended past the candidate range by
+    # the maximum possible support tail.
+    rtot_reps = int(fit_reps) + int(validation_reps) if sic_on else 0
+    subtraction_roi = (
+        int(search_roi[0]),
+        int(min(generator.n,
+                search_roi[1] + rtot_reps * S.SPS + int(args.sic_post_tail))))
+    core_roi = (int(search_roi[0]), int(subtraction_roi[1]))
+    if sic_on and not (0 <= core_roi[0] < core_roi[1] <= generator.n):
+        raise SystemExit("resolved SIC core roi %r is outside the window "
+                         "[0,%d)" % (core_roi, generator.n))
+
+    # R10: the SENSING processing ROI = the sensing preamble / CIR window
+    # [pre, pre+sync_reps*sps).  It is a SEPARATE region from the wide search
+    # ROI above: it is the subtraction/commit region, and the core commits only
+    # when the detected comm support actually OVERLAPS it.  A real comm detected
+    # entirely outside the sensing processing window is real but not actionable
+    # and is bypassed (out == y) -- S0 §8.3 requires that a no-overlap case is
+    # never counted as a cancellation success.  Passed per-window in the SIC PDU
+    # meta (`sensing_roi_lo`/`sensing_roi_hi`).
+    sensing_roi = (int(roi_base[0]), int(roi_base[1]))
+    if sic_on and not (0 <= sensing_roi[0] < sensing_roi[1] <= generator.n):
+        raise SystemExit("resolved sensing processing roi %r is outside the "
+                         "window [0,%d)" % (sensing_roi, generator.n))
+
+
+    # R04: frozen raw-CIR target-protection ROI (calibration set only).  It is
+    # never re-searched on SIC results; the run records the config path + hash.
+    sensing_profile_id = "code%d-%dSYNC-%s" % (sensing_code, sync_reps,
+                                               SFD_MODE)
+    target_cfg, target_cfg_path = load_target_roi(repo, sensing_profile_id)
+    target_lo = target_hi = None
+    target_ref_amp = None
+    target_detect_ratio = 3.0
+    target_false_peak_ratio = 0.5
+    target_main_lobe_guard = 3
+    if target_cfg is not None:
+        target_lo = int(target_cfg["target_lo"])
+        target_hi = int(target_cfg["target_hi"])
+        target_ref_amp = target_cfg.get("target_ref_amp")
+        target_detect_ratio = float(target_cfg.get("detect_ratio", 3.0))
+        target_false_peak_ratio = float(target_cfg.get("false_peak_ratio", 0.5))
+        target_main_lobe_guard = int(target_cfg.get("main_lobe_guard", 3))
+    if sic_on and args.consumer in ("cir", "both") and target_lo is None:
+        raise SystemExit(
+            "R04 target protection needs a frozen ROI for sensing profile %r "
+            "in testdata/sic_preamble/cases/target_roi.json (missing or no "
+            "matching profile); refusing to re-search a target on SIC results"
+            % sensing_profile_id)
 
     # Seeds.
     seed_specs = gen.get("seeds", {})
@@ -1371,8 +2429,77 @@ def main(argv=None):
         "seeds": run_seeds, "demod_softchip_mode": "bypass",
         "sic_k": int(runtime.get("sic_k", 0)),
         "sync_reps_schema": sync_reps,
+        # R02 named quantities (nullable when SIC is off).
+        "fit_reps": (None if not sic_on else int(fit_reps)),
+        "validation_reps": (None if not sic_on else int(validation_reps)),
+        "fit_reps_source": (None if not sic_on else fit_source),
+        "cover_preamble": (False if not sic_on else bool(cover_preamble)),
+        "fit_len": (None if not sic_on else int(fit_reps) * S.SPS),
+        "estimation_len": (None if not sic_on else int(fit_reps) * S.SPS),
+        "online_validation_len": (None if not sic_on
+                                  else int(validation_reps) * S.SPS),
+        "independent_eval_len": (None if not sic_on else
+                                 max(0, sync_reps - int(fit_reps) -
+                                     int(validation_reps)) * S.SPS),
+        "search_roi": [int(search_roi[0]), int(search_roi[1])],
+        "subtraction_roi": ([int(subtraction_roi[0]),
+                             int(subtraction_roi[1])] if sic_on else None),
+        "core_roi": ([int(core_roi[0]), int(core_roi[1])] if sic_on else None),
+        "sensing_roi": ([int(sensing_roi[0]), int(sensing_roi[1])]
+                        if sic_on else None),
+        "post_tail": int(args.sic_post_tail),
+        "coarse_stride": 14,
+        "detect_threshold": float(args.sic_detect_threshold),
+        "validate_threshold": float(args.sic_validate_threshold),
+        "comm_template_mode": generator.comm_meta.get("mode"),
+        "comm_template_sha256": (generator.comm_template_info().sha256
+                                 if generator.comm_template_info() else None),
+        "comm_template_length": (generator.comm_template_info().length
+                                 if generator.comm_template_info() else None),
+        "sic_no_auto_cover_deprecated": bool(args.sic_no_auto_cover),
+        "sensing_profile_id": sensing_profile_id,
+        "target_roi": ([int(target_lo), int(target_hi)]
+                       if target_lo is not None else None),
+        "target_ref_amp": (float(target_ref_amp)
+                           if target_ref_amp is not None else None),
     }
     config_hash = stdin_hash(resolved_config)
+    # R02 effective runtime config (the identity functional/core/GR/native must
+    # share) + its hash.  Distinct from the broader run config above.
+    effective_config = {
+        "case_id": (str(args.case) if args.case else "nominal"),
+        "preset": args.preset, "input_grid": args.input_grid,
+        "input_length": int(generator.n),
+        "sample_rate": float(S.WORK_HZ), "samples_per_symbol": int(S.SPS),
+        "sensing_code": int(sensing_code), "comm_code": int(sic_comm_code),
+        "sync_reps": int(sync_reps),
+        "k_paths": int(sic_k),
+        "fit_reps": (None if not sic_on else int(fit_reps)),
+        "validation_reps": (None if not sic_on else int(validation_reps)),
+        "fit_reps_source": (None if not sic_on else fit_source),
+        "cover_preamble": (False if not sic_on else bool(cover_preamble)),
+        "search_roi": [int(search_roi[0]), int(search_roi[1])],
+        "subtraction_roi": ([int(subtraction_roi[0]),
+                             int(subtraction_roi[1])] if sic_on else None),
+        "core_roi": ([int(core_roi[0]), int(core_roi[1])] if sic_on else None),
+        "sensing_roi": ([int(sensing_roi[0]), int(sensing_roi[1])]
+                        if sic_on else None),
+        "coarse_stride": 14,
+        "post_tail": int(args.sic_post_tail),
+        "detect_threshold": float(args.sic_detect_threshold),
+        "validate_threshold": float(args.sic_validate_threshold),
+        "comm_template_id": ("comm_preamble_code%d_%s" % (sic_comm_code,
+                                                          generator.comm_meta.get(
+                                                              "mode", "-"))),
+        "comm_template_sha256": (S.sha256_array(sic_preamble)
+                                 if sic_on and sic_preamble is not None
+                                 else None),
+        "comm_template_length": (int(sic_preamble.size)
+                                 if sic_on and sic_preamble is not None
+                                 else None),
+    }
+    effective_config_hash = stdin_hash(effective_config)
+
 
     summary = {
         "run_id": run_id, "preset": args.preset,
@@ -1382,7 +2509,11 @@ def main(argv=None):
         "clean": {}, "raw": {}, "sic": None,
         "effect": {"median_suppression_db": None, "frac_ge_3db": None,
                    "target_amp_err_db_p95": None, "peak_shift_max": None,
+                   "median_actual_suppression_db": None,
+                   "frac_actual_ge_3db": None,
+                   "n_interference_windows": None, "n_na_windows": None,
                    "nmse_median": None},
+        "target": None,
         "demod": {}, "negative": {"false_detect": None,
                                   "false_commit": None, "n_windows": windows,
                                   "ci95": None,
@@ -1391,15 +2522,34 @@ def main(argv=None):
         "runtime": {}, "gates": {}, "g0": {}, "not_run": [],
     }
     not_run = summary["not_run"]
-    not_run.append("native_cg400_roundtrip (S0 stage B; --input-grid cg400)")
+    if not native:
+        not_run.append("native_cg400_roundtrip (S0-B native front-end; this "
+                       "run used --input-grid work)")
     not_run.append("matlab_cross_check (no MATLAB/Octave run)")
     not_run.append("core_cxx_benchmark_10000x3 (benchmark_preamble_sic; S0-D)")
+    not_run.append("layer:core (SIC math core benchmark; not run in this "
+                   "invocation; R03)")
+    not_run.append("layer:gr (standalone GNU Radio PDU chain; this run "
+                   "exercises the PDU adapter in-process)")
+    if not native:
+        not_run.append("layer:native (CG400 native roundtrip; this run used "
+                       "--input-grid work)")
+    # R10: the speed gates are never exercised by a functional run, so they are
+    # null (= untested) and must be named here regardless of sic_mode.
+    not_run.append("gates.sic_speed_pass (single-worker C++ core P50/P99 "
+                   "speed gate NOT TESTED in this functional run; R10: null = "
+                   "untested)")
+    not_run.append("gates.demod_speed_pass (downstream full-demod cost gate "
+                   "NOT TESTED in this functional run; R10: null = untested)")
     if args.sic == "off":
         not_run.append("sic_estimate_core (sic_mode=off)")
         not_run.append("sic_oracle (diagnostic only)")
+        not_run.append("gates.eff_pass (untested; sic_mode=off, no SIC "
+                       "estimate to gate)")
     else:
-        not_run.append("sic_speed_pass (single-worker C++ core P50/P99 gate "
-                       "not evaluated here)")
+        if args.consumer == "demod":
+            not_run.append("R04 raw target protection (consumer=demod; no CIR "
+                           "consumer was run)")
     if args.preset != "main" or not args.sweep:
         not_run.append("main_matrix_full_sweep (ISR/offset/CFO axes)")
     if args.preset != "negative":
@@ -1466,6 +2616,20 @@ def main(argv=None):
         "zero-lag correlation vs the code9 SYNC template confirms no cache "
         "reuse. best_lag_abs_corr is unnormalized over the full preamble.")
 
+    # R07: the comm template is a FINITE SYNC code-pulse train (not a truncated
+    # packet).  Record the independent-reference agreement, the SFD/PHR/payload
+    # independence, and the edge/tail checks; the gate consumes `pass`.
+    r07 = generator.comm_template_evidence() if sic_on or comm_present else None
+    if r07 is not None:
+        g0["comm_template_r07"] = r07
+        g0["comm_template_r07_pass"] = bool(r07.get("pass"))
+        g0["comm_template_mode"] = generator.comm_meta.get("mode")
+        g0["comm_template_length"] = generator.comm_template_info().length
+        g0["comm_template_sha256"] = generator.comm_template_info().sha256
+        if not r07.get("pass"):
+            print("WARNING: R07 comm-template evidence did not pass: %s"
+                  % json.dumps(r07, sort_keys=True), flush=True)
+
     # CIR canonical reference (tight geometry/template proof).
     out_holder = {"g0": g0}
     run_canonical_cir_reference(uwb, repo, tpl_path, out_holder)
@@ -1485,7 +2649,9 @@ def main(argv=None):
             "fit_reps": fit_reps,
             "validation_reps": validation_reps,
             "fit_reps_source": fit_source,
-            "roi": roi_pair,
+            "roi": core_roi,
+            "search_roi": search_roi,
+            "subtraction_roi": subtraction_roi,
             "coarse_stride": 14,
             "mode": args.sic,
             "detect_threshold": args.sic_detect_threshold,
@@ -1501,15 +2667,34 @@ def main(argv=None):
         }
         if args.sic_in_flight_max < 1:
             raise SystemExit("--sic-in-flight-max must be >= 1")
+    sic_sync_norm = None
+    if sic_on and sic_sync is not None:
+        _sn = float(np.linalg.norm(np.asarray(sic_sync, dtype=np.complex128)))
+        sic_sync_norm = (np.asarray(sic_sync, dtype=np.complex128) / _sn
+                         if _sn > 0 else np.asarray(sic_sync,
+                                                   dtype=np.complex128))
     rt = SimRuntime(uwb, tpl_path=tpl_path, consumers=args.consumer,
                     windows=windows, sic=sic_cfg,
-                    keep_iq=max(0, int(args.keep_iq)))
+                    keep_iq=max(0, int(args.keep_iq)),
+                    demod_softchip=args.demod_softchip,
+                    demod_rake_top_k=int(args.demod_rake_top_k),
+                    radar_use_predicted=(args.radar_timing == "planned"))
+    # R08: CG400 native front-end (SC16 common scale + PDU 65/32).  Only built
+    # for the native grid; the work-grid path is byte-identical to before.
+    front = None
+    if native:
+        front = NativeFrontEnd(
+            uwb, taps=args.native_taps,
+            workers=int(args.native_resampler_workers),
+            headroom=float(args.native_headroom))
     # Explicit SOURCE credit tracker (indication §4): never publish more than
     # in_flight_max published-but-not-terminal windows, nor exceed the IQ
     # budget.  Determined before any window is posted.
     credit = (CreditTracker(sic_cfg["in_flight_max"],
                             sic_cfg["iq_budget_bytes"]) if sic_cfg else None)
     rt.start()
+    if front is not None:
+        front.start()
 
     # Feature detection for the adapter's newer make() params (fall back
     # cleanly when the built binding does not expose them yet).
@@ -1547,8 +2732,32 @@ def main(argv=None):
     eff_supp = []
     eff_holdout_supp = []
     eff_holdout_nmse = []
+    # R02/R06 region accumulators.
+    eff_online_nmse = []
+    eff_online_supp = []
+    eff_eval_nmse = []
+    eff_eval_supp = []
+    eff_overlap_nmse = []
+    eff_overlap_supp = []
+    eff_eval_available = []
+    eff_regions = []
+    preamble_scan_us_all = []
     eff_target_err_db = []
     eff_peak_shift = []
+    # R01 actual-output accumulators (non-truth windows only).
+    eff_actual_sup = []
+    eff_actual_sup_confirmed = []
+    eff_coverage = []
+    n_interference_windows = 0
+    n_na_windows = 0
+    n_uncommitted_changed = 0
+    # R04 raw-CIR target accumulators (non-truth windows only).
+    eff_target_err_raw_db = []
+    eff_target_shift_raw = []
+    eff_target_phase_raw = []
+    eff_target_weak_detected = []
+    eff_target_false_peaks = []
+    target_rois_used = set()
     sic_adapter_hwm = []
     psdu_match = 0
     demod_ran = 0
@@ -1562,6 +2771,19 @@ def main(argv=None):
     deadline_miss = 0
     completed_windows = 0
 
+    # R08: native front-end per-window diagnostics + effect/timing evidence.
+    native_records = []
+    native_i_metric = None
+    # R09: separated paced timing buckets (no double counting).
+    t_gen_us = []          # window generation (pre-generated => pool average)
+    t_pmt_wrap_us = []     # Python -> PMT vector wrapping
+    t_post_us = []         # message entry (blocking _post call)
+    t_worker_us = []       # SIC adapter worker / core
+    t_consumer_us = []     # consumer service (publish -> terminal)
+    t_eval_us = []         # offline evaluation overhead inside the loop
+    run_utime0 = run_stime0 = 0.0
+    proc_hwm0 = None
+
     # Paced replay (§8.4): pre-generate a pool of distinct windows (>=64
     # distinct-content rotation guidance) BEFORE timing; the schedule fixes the
     # publish times.  Nothing is generated inside the paced timing path.
@@ -1572,12 +2794,14 @@ def main(argv=None):
     paced_late_ns = []
     paced_submit_late_ns = []
     paced_latency_us = []
+    paced_service_us = []
     paced_deadline_miss = 0
     paced_pool_us_each = 0.0
     paced_pool = []
     paced_pool_seeds = []
+    paced_deferred_records = []
     if paced:
-        pool_n = min(planned, 64)
+        pool_n = max(1, min(planned, int(args.paced_pool)))
         tp0 = time.perf_counter()
         for i in range(pool_n):
             ps = run_seeds[i]
@@ -1596,6 +2820,12 @@ def main(argv=None):
                  (credit.in_flight_max if credit else "n/a"),
                  float(args.max_wall_s)), flush=True)
 
+    # R09: per-run resource delta baseline (never a cross-run cumulative).
+    _ru0 = resource.getrusage(resource.RUSAGE_SELF)
+    run_utime0, run_stime0 = float(_ru0.ru_utime), float(_ru0.ru_stime)
+    proc_hwm0 = _proc_peak_rss_bytes()
+    timed_t0 = time.monotonic()
+
     for wid in range(windows):
         if paced:
             elapsed = time.monotonic() - paced_wall0
@@ -1609,6 +2839,7 @@ def main(argv=None):
             seed = paced_pool_seeds[wid % len(paced_pool)]
             gen_us = paced_pool_us_each
             gen_us_all.append(gen_us)
+            t_gen_us.append(gen_us)
         else:
             seed = run_seeds[wid]
             t0 = time.perf_counter()
@@ -1619,6 +2850,7 @@ def main(argv=None):
                 isr_db=isr_db, snr_db=snr_db)
             gen_us = (time.perf_counter() - t0) * 1e6
             gen_us_all.append(gen_us)
+            t_gen_us.append(gen_us)
 
         if wid == 0:
             # Determinism: rebuild the same window with the same seed.
@@ -1643,14 +2875,51 @@ def main(argv=None):
         raw_iq = (np.ascontiguousarray(win["y"], dtype=np.complex64)
                   if comm_present else clean_iq)
 
+        # ---- R08 CG400 native front-end (work -> SC16 native -> PDU 65/32) --
+        # The three-way clean/raw/sic all use the SAME common scale and the SAME
+        # resampler; the metric reference is the realized interference
+        # i_metric = raw_work - clean_work in the identical domain.
+        i_metric = win["i"]
+        metric_ov = dict(win.get("overlap") or {"lo": 0, "hi": 0,
+                                                "samples": 0})
+        native_rec = None
+        work_shift = 0
+        if native:
+            _tn = time.perf_counter()
+            (clean_iq, raw_iq, i_metric, _ov_lo, _ov_hi, native_rec) = \
+                native_transform_window(
+                    front, win, comm_present=comm_present,
+                    headroom=float(args.native_headroom), wid=wid,
+                    do_scalar=(bool(args.native_scalar_check) and wid == 0),
+                    repeat_check=(int(args.native_repeat_check)
+                                  if wid == 0 else 0))
+            work_shift = int(native_rec["roundtrip_lag_work"])
+            metric_ov = {"lo": int(_ov_lo), "hi": int(_ov_hi),
+                         "samples": int(max(0, _ov_hi - _ov_lo)),
+                         "source": "truth overlap mapped through the native "
+                                   "65/32 round trip"}
+            native_records.append({"window_id": int(wid), **native_rec})
+            print("native window %d/%d scale=%.1f lag=%d ov=[%d,%d) "
+                  "clip(raw)=%d/%d floor_nmse=%s kernel=%s"
+                  % (wid + 1, windows, native_rec["iq_scale"],
+                     native_rec["roundtrip_lag_work"], _ov_lo, _ov_hi,
+                     native_rec["raw_clip_i"], native_rec["raw_clip_q"],
+                     _fmt(native_rec["error_floor"].get(
+                         "effective_noise_nmse")),
+                     native_rec.get("resampler_kernel")), flush=True)
+
         # ---- SIC (estimate / oracle) on the raw window ----------------
         cleaned_iq = None
         sic_block = None
         sic_state_rec = None
         recon_rec = None
+        regions = None
         sic_credit_snap = None
         win_planned_ns = None
         win_submit_ns = None
+        uses_truth = False
+        clean_cir_raw_win = None
+        sic_cir_raw_win = None
         if rt.sic is not None:
             # Paced replay: hold the window until its planned publish time.
             # A late submit (pipeline can't keep up) is recorded, never hidden
@@ -1684,6 +2953,10 @@ def main(argv=None):
                                                     SFD_MODE))
             in_meta = put_str(in_meta, "template_id",
                               "sync_template_code%d_998p4" % sensing_code)
+            # R10: sensing processing ROI (subtraction/commit region).  The core
+            # only commits when the detected comm support overlaps this window.
+            in_meta = put_int(in_meta, "sensing_roi_lo", int(sensing_roi[0]))
+            in_meta = put_int(in_meta, "sensing_roi_hi", int(sensing_roi[1]))
             in_meta = pmt.dict_add(in_meta, pmt.intern("planned_publish_ns"),
                                    pmt.from_long(int(planned_ns)))
             if args.sic == "oracle":
@@ -1712,7 +2985,15 @@ def main(argv=None):
                 rt.post_sic_truth(truth_msg)
             n_out = rt.sink_sic_out.count + 1
             n_ih = rt.sink_sic_ihat.count + 1
-            rt.post_sic_input(in_meta, raw_iq)
+            # R09 buckets: Python -> PMT wrapping vs message entry are timed
+            # separately (never attributed to the C++ worker or generator).
+            _tw = time.perf_counter()
+            _payload = pmt.init_c32vector(int(raw_iq.size), raw_iq.tolist())
+            t_pmt_wrap_us.append((time.perf_counter() - _tw) * 1e6)
+            _tp = time.perf_counter()
+            rt.sic.to_basic_block()._post(
+                pmt.intern("in"), pmt.cons(in_meta, _payload))
+            t_post_us.append((time.perf_counter() - _tp) * 1e6)
             win_submit_ns = time.monotonic_ns()
             if paced and win_planned_ns is not None:
                 paced_submit_late_ns.append(win_submit_ns - win_planned_ns)
@@ -1734,6 +3015,8 @@ def main(argv=None):
                 bypass_n += 1
                 if np.array_equal(cleaned_iq, raw_iq):
                     bypass_identical += 1
+            t_worker_us.append(float(dnum(out_meta, "core_total_us", 0.0) or 0.0))
+            _teval0 = time.perf_counter()
             uses_truth = bool(dget(out_meta, "sic_uses_truth", False))
             sic_state_rec = {
                 "detected": bool(dget(out_meta, "sic_detected", False)),
@@ -1748,76 +3031,280 @@ def main(argv=None):
                 "cfo_hz": dnum(out_meta, "sic_cfo_hz", 0.0),
                 "support_lo": dnum(out_meta, "sic_support_lo", -1),
                 "support_hi": dnum(out_meta, "sic_support_hi", -1),
+                # R10 actionable overlap of the detected support with the sensing
+                # processing ROI (the subtraction/commit gate).
+                "sub_overlap": dnum(out_meta, "sic_sub_overlap", -1),
                 "residual_corr": dnum(out_meta, "sic_residual_corr", 0.0),
             }
             if uses_truth:
                 oracle_windows += 1
                 sic_state_rec["diagnostic_only"] = True
-            # Truth evaluation interval = the true injected comm support.
-            comm_lo = int(math.floor(
-                win["truth"]["comm"]["start_sample_exact"]))
-            comm_len = int(win["truth"]["comm"]["length_samples"])
-            comm_hi = min(generator.n, comm_lo + comm_len)
-            if comm_hi <= comm_lo:
-                # no interferer injected: evaluate over the nominal comm span
-                comm_lo, comm_hi = int(roi_pair[0]), int(roi_pair[1])
-            ev = recon_pair(win["i"], ihat, comm_lo, comm_hi)
-            ev_zero = False
-            if ev is None:
-                # ||i||^2 == 0: the reconstruction is measured against the
-                # (zero) injected interferer; 0 residual => NMSE 0, a phantom
-                # reconstruction => NMSE 1.  Both are declared conventions.
-                num = float(np.sum(np.abs(
-                    ihat[comm_lo:comm_hi].astype(np.complex128)) ** 2))
-                if num == 0.0:
-                    ev = (0.0, 60.0, comm_lo, comm_hi)
-                else:
-                    ev = (1.0, 0.0, comm_lo, comm_hi)
-                ev_zero = True
             det_start = sic_state_rec["detected_start"]
+            spp = int(S.SPS)
+            post_tail = int(args.sic_post_tail)
+            rtot = int(fit_reps) + int(validation_reps)
+            n_win = int(generator.n)
+            # R01 truth overlap = the FULL truth overlap (the intersection of
+            # the injected comm support and the sensing processing window); it
+            # is the reference interval for the actual-output metric and must
+            # never be shortened to a mask chosen to look best.  For the native
+            # grid it is mapped through the SAME 65/32 round trip (metric_ov).
+            ov = metric_ov
+            if int(ov.get("samples", 0)) > 0:
+                comm_lo, comm_hi = int(ov["lo"]), int(ov["hi"])
+            else:
+                comm_lo, comm_hi = int(search_roi[0]), int(search_roi[1])
             anchor = det_start if (isinstance(det_start, int) and
                                    det_start >= 0) else comm_lo
-            ho_lo = anchor + fit_reps * S.SPS
-            ho_hi = ho_lo + validation_reps * S.SPS
-            ho = recon_pair(win["i"], ihat, ho_lo, ho_hi)
-            if ho is None:
-                h_lo = max(0, min(generator.n, ho_lo))
-                h_hi = max(h_lo, min(generator.n, ho_hi))
-                hnum = float(np.sum(np.abs(
-                    ihat[h_lo:h_hi].astype(np.complex128)) ** 2))
-                if hnum == 0.0:
-                    ho = (0.0, 60.0, h_lo, h_hi)
-                else:
-                    ho = (1.0, 0.0, h_lo, h_hi)
+            # ---- R06: three explicit, declared regions (window-local) -------
+            # estimation == the parameter FIT window (gain LS / path select /
+            # fractional refine).  online-validation == the core's commit
+            # holdout.  independent eval == the repetitions the core NEVER uses
+            # for CFO / gain / commit; it only feeds the offline metric.
+            est_lo = int(anchor)
+            est_hi = est_lo + int(fit_reps) * spp
+            on_lo = est_hi
+            on_hi = on_lo + int(validation_reps) * spp
+            ev_lo = on_hi
+            ev_hi = int(anchor) + int(sync_reps) * spp
+            est_lo = max(0, min(n_win, est_lo))
+            est_hi = max(est_lo, min(n_win, est_hi))
+            on_lo = max(est_hi, min(n_win, on_lo))
+            on_hi = max(on_lo, min(n_win, on_hi))
+            ev_lo = max(on_hi, min(n_win, ev_lo))
+            ev_hi = max(ev_lo, min(n_win, ev_hi))
+            eval_available = bool(ev_hi > ev_lo)
+
+            # Explicit public-template repetition scan (R02 signal evidence).
+            # `--timing-instrumentation off` skips this Python-loop-heavy scan
+            # (and the raw target re-search) for the on/off cost comparison.
+            _ts = time.perf_counter()
+            if instrumentation:
+                scan = (sync_rep_scan(raw_iq, sic_sync_norm, int(anchor),
+                                      int(sync_reps), spp,
+                                      float(args.sic_detect_threshold))
+                        if sic_sync_norm is not None else
+                        {"consecutive_reps": 0, "reps_scanned": 0,
+                         "threshold": float(args.sic_detect_threshold),
+                         "norms": [], "max_norm": None, "anchor": int(anchor),
+                         "sps": spp})
+            else:
+                scan = {"consecutive_reps": 0, "reps_scanned": 0,
+                        "threshold": float(args.sic_detect_threshold),
+                        "norms": [], "max_norm": None, "anchor": int(anchor),
+                        "sps": spp, "not_run": "timing_instrumentation_off"}
+            scan_us = (time.perf_counter() - _ts) * 1e6
+            preamble_scan_us_all.append(scan_us)
+            scan["scan_us"] = scan_us
+            # Signal-evidenced start/stop = the CONSECUTIVE reps the public
+            # template confirms at/after the detected start, capped at the
+            # observed window (rtot).  Never extrapolated to the nominal 64.
+            signal_reps = int(max(1, min(int(scan["consecutive_reps"]),
+                                         max(1, rtot))))
+            signal_lo = int(anchor)
+            signal_hi = int(anchor) + signal_reps * spp
+
+            # ---- R01 truth overlap (full) -----------------------------------
+            ov_ev, ov_zero = region_metric(i_metric, ihat, comm_lo, comm_hi)
+            if ov_ev is None:
+                ov_ev = (0.0, 60.0, comm_lo, comm_hi)
+
+            # ---- online-validation metric (gate region) ---------------------
+            on_ev, _on_zero = region_metric(i_metric, ihat, on_lo, on_hi)
+            # ---- independent final-eval metric (never feeds estimation/gate)
+            ev_ev, ev_zero = region_metric(i_metric, ihat, ev_lo, ev_hi)
+            # "holdout" = the second half of the independent eval region (kept
+            # as a named blind sub-window; disjoint from fit/online).
+            if eval_available and (ev_hi - ev_lo) >= 2:
+                ho_lo = ev_lo + (ev_hi - ev_lo) // 2
+                ho_hi = ev_hi
+            else:
+                ho_lo = ho_hi = 0
+            ho, _ho_zero = region_metric(i_metric, ihat, ho_lo, ho_hi)
+
+            # ---- R01 actual-output cancellation (delta_actual = y - y_clean)
+            act = actual_cancellation(raw_iq, cleaned_iq, i_metric,
+                                      comm_lo, comm_hi)
+            # Full applied subtraction support (window-wide) for the R02
+            # SUBTRACTION ROI; the R01 `sub_lo/sub_hi` stays clipped to the
+            # truth overlap so `coverage` and the mask check are well-defined.
+            applied_lo, applied_hi = changed_support(raw_iq, cleaned_iq,
+                                                     0, n_win)
+            sub_lo = max(int(comm_lo), int(applied_lo))
+            sub_hi = min(int(comm_hi), int(applied_hi))
+            if sub_hi <= sub_lo:
+                sub_lo = sub_hi = 0
+            span = max(0, int(comm_hi) - int(comm_lo))
+            coverage = (((sub_hi - sub_lo) / float(span)) if span > 0 else 0.0)
+            # Coverage against the signal-evidenced preamble support (R02).
+            sig_span = max(1, int(signal_hi) - int(signal_lo))
+            sig_cov = (max(0, min(int(applied_hi), int(signal_hi))
+                           - max(int(applied_lo), int(signal_lo)))
+                       / float(sig_span)
+                       if applied_hi > applied_lo else 0.0)
+            c_lo = max(int(comm_lo), int(sub_lo))
+            c_hi = min(int(comm_hi), int(sub_hi))
+            act_c = (actual_cancellation(raw_iq, cleaned_iq, i_metric, c_lo, c_hi)
+                     if c_hi > c_lo else None)
+            regions = {
+                "fit_lo": int(est_lo), "fit_hi": int(est_hi),
+                "fit_len": int(fit_reps) * spp,
+                "estimation_lo": int(est_lo), "estimation_hi": int(est_hi),
+                "estimation_len": int(fit_reps) * spp,
+                # R02 (b): the sample range actually used for CFO / repetition
+                # confirmation / gain / path / fractional estimation.  The core
+                # reads the ONLINE rep range as well, so this is wider than the
+                # fit window; recorded explicitly rather than assumed equal.
+                "cfo_estimation_lo": int(est_lo),
+                "cfo_estimation_hi": int(on_hi),
+                "cfo_estimation_len": (int(on_hi) - int(est_lo)),
+                "estimation_includes_online": True,
+                "online_validation_lo": int(on_lo),
+                "online_validation_hi": int(on_hi),
+                "online_validation_len": int(validation_reps) * spp,
+                "eval_lo": (int(ev_lo) if eval_available else None),
+                "eval_hi": (int(ev_hi) if eval_available else None),
+                "eval_len": ((int(ev_hi) - int(ev_lo)) if eval_available
+                             else None),
+                "eval_available": bool(eval_available),
+                "eval_limitation": (
+                    None if eval_available else
+                    "no independent repetitions remain (fit_reps+"
+                    "validation_reps == sync_reps); the R06 claim is downgraded "
+                    "for this config -- no blind final-eval region exists"),
+                "signal_start": int(signal_lo), "signal_stop": int(signal_hi),
+                "signal_evidenced_reps": int(signal_reps),
+                "signal_evidenced_reps_full_scan": int(
+                    scan.get("consecutive_reps", 0)),
+                "signal_evidence": ("public-template normalized correlation >= "
+                                    "detect_threshold at detected_start + "
+                                    "k*sps; signal_stop is capped at the "
+                                    "observed window (fit+validation reps) so "
+                                    "it never exceeds the applied mask"),
+                "preamble_scan": scan,
+                "search_roi": [int(search_roi[0]), int(search_roi[1])],
+                "subtraction_roi": [int(applied_lo), int(applied_hi)],
+                "subtraction_roi_overlap_clipped": [int(sub_lo), int(sub_hi)],
+                "core_roi": [int(core_roi[0]), int(core_roi[1])],
+                # R10: the sensing processing ROI (subtraction/commit region),
+                # and the actionable overlap the core actually measured.
+                "sensing_roi": [int(sensing_roi[0]), int(sensing_roi[1])],
+                "sensing_roi_overlap": int(
+                    sic_state_rec.get("sub_overlap", -1)),
+                "gate_lo": int(on_lo), "gate_hi": int(on_hi),
+                "gate_keys": ["residual_corr", "online_nmse",
+                              "online_suppression_db"],
+                "support_lo": int(sic_state_rec["support_lo"]),
+                "support_hi": int(sic_state_rec["support_hi"]),
+                "coverage_overlap": float(coverage),
+                "coverage_signal": float(sig_cov),
+                "partial": bool(rtot < sync_reps),
+                "observation_reps": int(rtot),
+                "sync_reps": int(sync_reps),
+                "data_dependency": {
+                    "estimation_region": "fit window only (gain LS / path / "
+                                         "fractional); the core's CFO and "
+                                         "repetition confirmation ALSO read the "
+                                         "online-validation repetitions, so the "
+                                         "online region is not a blind holdout",
+                    "online_is_used_for_cfo": True,
+                    "eval_feeds_estimation": False,
+                    "eval_feeds_gate": False,
+                    "coarse_search_sees_candidate_roi": True,
+                    "disclosure": ("coarse detection correlates the public "
+                                   "template over the search ROI, so the eval "
+                                   "region's candidate window is search-visible; "
+                                   "eval content is excluded from every "
+                                   "parameter fit and from the commit gate."),
+                },
+            }
             recon_rec = {
-                "nmse": ev[0] if ev else None,
-                "suppression_db": ev[1] if ev else None,
-                "eval_lo": ev[2] if ev else comm_lo,
-                "eval_hi": ev[3] if ev else comm_hi,
+                # recon.nmse/suppression_db = the INDEPENDENT final-eval region
+                # (R06).  This is the offline metric only.
+                "nmse": ev_ev[0] if ev_ev else None,
+                "suppression_db": ev_ev[1] if ev_ev else None,
+                "eval_lo": (ev_ev[2] if ev_ev else (int(ev_lo)
+                                                    if eval_available else None)),
+                "eval_hi": (ev_ev[3] if ev_ev else (int(ev_hi)
+                                                    if eval_available else None)),
+                "eval_available": bool(eval_available),
+                "zero_reference_energy": bool(ev_zero or ov_zero),
+                # R06: the core's real commit (online) region, reported
+                # separately and never conflated with the eval region.
+                "online_nmse": on_ev[0] if on_ev else None,
+                "online_suppression_db": on_ev[1] if on_ev else None,
+                "online_validation_lo": int(on_lo),
+                "online_validation_hi": int(on_hi),
+                # R01 full-overlap diagnostic (frozen contract interval).
+                "overlap_lo": int(comm_lo), "overlap_hi": int(comm_hi),
+                "overlap_nmse": ov_ev[0] if ov_ev else None,
+                "overlap_suppression_db": ov_ev[1] if ov_ev else None,
+                # blind sub-holdout inside the independent eval region.
                 "holdout_nmse": ho[0] if ho else None,
                 "holdout_suppression_db": ho[1] if ho else None,
-                "holdout_lo": ho[2] if ho else None,
-                "holdout_hi": ho[3] if ho else None,
+                "holdout_lo": (ho[2] if ho else None),
+                "holdout_hi": (ho[3] if ho else None),
                 "mask_lo": sic_state_rec["support_lo"],
                 "mask_hi": sic_state_rec["support_hi"],
                 "mask_samples": (max(0, sic_state_rec["support_hi"] -
                                      sic_state_rec["support_lo"])
                                  if sic_state_rec["support_hi"] >
                                  sic_state_rec["support_lo"] else 0),
+                # ---- R01 frozen measurement contract ----------------------
+                "actual_nmse": (None if act is None else act["actual_nmse"]),
+                "actual_suppression_db": (None if act is None
+                                          else act["actual_suppression_db"]),
+                "sub_lo": int(sub_lo),
+                "sub_hi": int(sub_hi),
+                "coverage": float(coverage),
+                "coverage_signal": float(sig_cov),
+                "uses_truth": bool(uses_truth),
+                "actual_na": (True if act is None else bool(act["na"])),
+                "output_changed": (False if act is None
+                                   else bool(act["output_changed"])),
+                "confirmed_lo": int(c_lo),
+                "confirmed_hi": int(c_hi),
+                "actual_nmse_confirmed": (None if act_c is None
+                                          else act_c["actual_nmse"]),
+                "actual_suppression_db_confirmed":
+                    (None if act_c is None else act_c["actual_suppression_db"]),
                 "noise_included": False,
-                "zero_reference_energy": bool(ev_zero),
-                "note": ("nmse/suppression are the i-based metric on the true "
-                         "injected comm support; AWGN is excluded (i carries "
-                         "no noise). holdout is the disjoint validation-rep "
-                         "span [detected_start+fit_reps*sps, "
-                         "+validation_reps*sps)."),
+                "note": ("nmse/suppression_db are the i-based reconstruction "
+                         "over the INDEPENDENT final-eval region (reps beyond "
+                         "fit+validation); overlap_* is the R01 full-overlap "
+                         "diagnostic; online_* is the core's commit region; "
+                         "actual_suppression_db is the REAL-output metric "
+                         "(delta_actual = y - y_clean)."),
             }
-            if ev is not None and not uses_truth:
-                eff_nmse.append(ev[0])
-                eff_supp.append(ev[1])
+            if ov_ev is not None and not uses_truth:
+                eff_nmse.append(ov_ev[0])
+                eff_supp.append(ov_ev[1])
+                eff_overlap_nmse.append(ov_ev[0])
+                eff_overlap_supp.append(ov_ev[1])
+                if on_ev is not None:
+                    eff_online_nmse.append(on_ev[0])
+                    eff_online_supp.append(on_ev[1])
+                eff_eval_available.append(bool(eval_available))
+                if ev_ev is not None:
+                    eff_eval_nmse.append(ev_ev[0])
+                    eff_eval_supp.append(ev_ev[1])
                 if ho is not None:
                     eff_holdout_nmse.append(ho[0])
                     eff_holdout_supp.append(ho[1])
+                eff_regions.append(regions)
+                if act is not None:
+                    if act["na"]:
+                        n_na_windows += 1
+                    else:
+                        n_interference_windows += 1
+                        eff_actual_sup.append(act["actual_suppression_db"])
+                        eff_coverage.append(coverage)
+                        if act_c is not None and not act_c["na"]:
+                            eff_actual_sup_confirmed.append(
+                                act_c["actual_suppression_db"])
+                    if not sic_state_rec["committed"] and act["output_changed"]:
+                        n_uncommitted_changed += 1
+
             # consumer=sic core + adapter stage rows
             for key, stage in SIC_CORE_STAGES:
                 val = dnum(out_meta, key)
@@ -1833,14 +3320,24 @@ def main(argv=None):
             stamp = time.monotonic_ns()
             stage_rows.append((run_id, wid, "sic", "outer", "outer",
                                "generator", round(gen_us, 3), "sic_window"))
+            t_eval_us.append((time.perf_counter() - _teval0) * 1e6)
 
         consumer_log = {"clean": {}, "raw": {}}
-        consumers_iter = [("clean", clean_iq, "s+w"),
-                          ("raw", raw_iq,
-                           "s+i+w" if comm_present else "s+w")]
-        if cleaned_iq is not None:
-            consumer_log["sic"] = {}
-            consumers_iter.append(("sic", cleaned_iq, "sic_cleaned"))
+        if paced and args.paced_target_only:
+            # R09: timed region runs ONLY the target processing path.
+            if cleaned_iq is not None:
+                consumers_iter = [("sic", cleaned_iq, "sic_target_only")]
+            else:
+                consumers_iter = [("raw", raw_iq,
+                                   "target_only"
+                                   + ("_s+i+w" if comm_present else "_s+w"))]
+        else:
+            consumers_iter = [("clean", clean_iq, "s+w"),
+                              ("raw", raw_iq,
+                               "s+i+w" if comm_present else "s+w")]
+            if cleaned_iq is not None:
+                consumer_log["sic"] = {}
+                consumers_iter.append(("sic", cleaned_iq, "sic_cleaned"))
         for cname, sig, gen_detail in consumers_iter:
             input_sha = hashlib.sha256(
                 np.ascontiguousarray(sig, dtype=np.complex64).tobytes()
@@ -1848,7 +3345,8 @@ def main(argv=None):
             meta_cir = pmt.make_dict()
             meta_cir = put_int(meta_cir, "pulse_id", wid + 1)
             meta_cir = put_int(meta_cir, "schedule_index", wid)
-            meta_cir = put_int(meta_cir, "pre_guard_samples", generator.pre)
+            meta_cir = put_int(meta_cir, "pre_guard_samples",
+                               generator.pre + work_shift)
             meta_cir = put_int(meta_cir, "window_start_sample", 0)
             meta_cir = put_float(meta_cir, "sample_rate", S.WORK_HZ)
             meta_cir = put_str(meta_cir, "sfd_mode", SFD_MODE)
@@ -1865,10 +3363,10 @@ def main(argv=None):
             meta_dem = put_int(meta_dem, "packet_id", wid + 1)
             meta_dem = put_int(meta_dem, "schedule_index", wid)
             meta_dem = put_int(meta_dem, "predicted_start_sample",
-                               generator.pre)
+                               generator.pre + work_shift)
             meta_dem = put_int(meta_dem, "window_start_sample", 0)
             meta_dem = put_int(meta_dem, "predicted_sensing_start",
-                               generator.pre)
+                               generator.pre + work_shift)
             meta_dem = put_int(meta_dem, "sample_count", int(sig.size))
             meta_dem = put_float(meta_dem, "sample_rate", S.WORK_HZ)
             meta_dem = put_str(meta_dem, "sensing_profile_id",
@@ -1912,15 +3410,22 @@ def main(argv=None):
                                     dtype=np.complex64)
             cir_valid_reps = (dnum(cir_d, "valid_repetitions")
                               if rt.want_cir else None)
-            if cname == "clean" and cir_norm is not None and \
-                    cir_peak is not None:
-                clean_cir_norm = cir_norm
-                clean_cir_raw = cir_raw
-                lo = max(0, int(cir_peak) + 25)
-                hi = min(cir_norm.size, int(cir_peak) + 45)
-                if hi > lo:
-                    target_tap = lo + int(np.argmax(np.abs(
-                        cir_norm[lo:hi])))
+            if rt.want_cir and cir_raw is not None:
+                if cname == "clean":
+                    clean_cir_norm = cir_norm
+                    clean_cir_raw = cir_raw
+                    clean_cir_raw_win = np.asarray(cir_raw, dtype=np.complex64)
+                    # R04: the target tap is the clean argmax inside the FROZEN
+                    # calibration ROI (never re-searched on the SIC result).
+                    if target_lo is not None and clean_cir_raw_win is not None:
+                        hi_c = min(clean_cir_raw_win.size, int(target_hi))
+                        if hi_c > int(target_lo):
+                            seg = np.abs(clean_cir_raw_win[int(target_lo):hi_c])
+                            if seg.size:
+                                target_tap = int(target_lo) + int(
+                                    np.argmax(seg))
+                elif cname == "sic":
+                    sic_cir_raw_win = np.asarray(cir_raw, dtype=np.complex64)
 
             dem_status = dget(dem_d, "status") if rt.want_demod else None
             fcs = bool(dget(dem_d, "fcs_pass", False)) if rt.want_demod \
@@ -2007,16 +3512,41 @@ def main(argv=None):
             stage_rows.append((run_id, wid, cname, "adapter", "adapter",
                                "completion_latency", round(comp_us, 3),
                                "from_publish_to_terminal"))
+            if cname == ("sic" if cleaned_iq is not None else "raw"):
+                t_consumer_us.append(comp_us)
 
-        # paced replay terminal/deadline accounting (planned -> terminal)
+        # R09 target-only: declare the clean/raw pairing consumers as skipped
+        # (never faked as a measured 0-us service); the timed region ran only
+        # the target path. The pairing was verified on a separate load.
+        if paced and args.paced_target_only:
+            _src = ("sic" if completions.get("sic") else "raw")
+            for _c in ("clean", "raw"):
+                if _c in consumer_log and not consumer_log[_c]:
+                    consumer_log[_c] = {
+                        "status": "skipped",
+                        "skip_reason": "paced_target_only",
+                        "note": "clean/raw pairing is verified on a separate "
+                                "load; not part of the paced timed region (R09)",
+                    }
+                    failing_status[_c]["skipped"] = 1
+                published_ns.setdefault((wid, _c), published_ns.get((wid, _src)))
+                completions[_c] = completions.get(_src)
+            clean_queue_us = 0.0
+
+        # paced replay terminal/deadline accounting (planned -> terminal).
+        # R09: the target path terminal is the SIC output consumer when SIC is
+        # on (the accepted 200/s gate is the SIC->CIR terminal), else raw/clean.
         if paced and win_planned_ns is not None:
-            terms = [completions[c] for c in consumer_log
-                     if completions.get(c)]
-            if terms:
-                term_ns = max(terms)
+            target_c = ("sic" if (sic_on and completions.get("sic"))
+                        else ("raw" if completions.get("raw") else "clean"))
+            term_ns = completions.get(target_c)
+            if term_ns:
                 lat_us = (term_ns - win_planned_ns) / 1000.0
                 paced_latency_us.append(lat_us)
                 paced_late_ns.append((term_ns - win_planned_ns) / 1000.0)
+                if win_submit_ns is not None:
+                    paced_service_us.append(
+                        (term_ns - win_submit_ns) / 1000.0)
                 if lat_us > paced_deadline_us:
                     paced_deadline_miss += 1
 
@@ -2050,6 +3580,61 @@ def main(argv=None):
                 elif (not _ok(consumer_log.get("raw"))) and _ok(
                         consumer_log.get("sic")):
                     raw_fail_sic_ok += 1
+
+        # ---- R04 raw (non-L2-normalized) target protection ----------------
+        target_rec = None
+        if instrumentation and sic_on and rt.want_cir and cleaned_iq is not None \
+                and clean_cir_raw_win is not None \
+                and sic_cir_raw_win is not None \
+                and target_lo is not None and target_hi is not None:
+            tm = raw_target_metrics(
+                clean_cir_raw_win, sic_cir_raw_win, target_lo, target_hi,
+                detect_ratio=target_detect_ratio,
+                false_peak_ratio=target_false_peak_ratio,
+                main_lobe_guard=target_main_lobe_guard)
+            if tm is not None:
+                ref = (float(target_ref_amp) if target_ref_amp else
+                       tm["target_amp_clean"])
+                target_rec = {
+                    "target_lo": int(target_lo), "target_hi": int(target_hi),
+                    "target_roi": [int(target_lo), int(target_hi)],
+                    "target_tap": int(tm["target_tap"]),
+                    "target_ref_amp": float(ref),
+                    "cir_raw_target_amp_db": (
+                        float(20.0 * math.log10(tm["target_amp_sic"] / ref))
+                        if (ref > 0.0 and tm["target_amp_sic"] > 0.0)
+                        else None),
+                    "cir_raw_target_amp_db_clean": (
+                        float(20.0 * math.log10(tm["target_amp_clean"] / ref))
+                        if (ref > 0.0 and tm["target_amp_clean"] > 0.0)
+                        else None),
+                    "cir_raw_target_amp_abs_db":
+                        tm["cir_raw_target_amp_abs_db"],
+                    "target_amp_err_db": tm["target_amp_err_db"],
+                    "target_phase_err_deg": tm["target_phase_err_deg"],
+                    "target_peak_shift": int(tm["target_peak_shift"]),
+                    "target_clean_peak_tap": int(tm["target_clean_peak_tap"]),
+                    "target_sic_peak_tap": int(tm["target_sic_peak_tap"]),
+                    "weak_target_detected": bool(tm["weak_target_detected"]),
+                    "weak_target_snr_db": tm["weak_target_snr_db"],
+                    "false_peak_count": int(tm["false_peak_count"]),
+                    "noise_floor": float(tm["noise_floor"]),
+                    "uses_truth": bool(uses_truth),
+                    "note": ("raw (non-L2) complex CIR at the frozen "
+                             "calibration target ROI; the target tap is the "
+                             "clean ROI argmax and is never re-searched on the "
+                             "SIC result. The L2-normalized target_amp stays "
+                             "as a shape-only diagnostic."),
+                }
+                target_rois_used.add((int(target_lo), int(target_hi)))
+                if not (sic_state_rec or {}).get("uses_truth", False):
+                    if tm["target_amp_err_db"] is not None:
+                        eff_target_err_raw_db.append(tm["target_amp_err_db"])
+                    eff_target_shift_raw.append(int(tm["target_peak_shift"]))
+                    eff_target_phase_raw.append(tm["target_phase_err_deg"])
+                    eff_target_weak_detected.append(
+                        bool(tm["weak_target_detected"]))
+                    eff_target_false_peaks.append(int(tm["false_peak_count"]))
 
         # admission (single consumer pair per window)
         pub = published_ns.get((wid, "clean"))
@@ -2086,7 +3671,7 @@ def main(argv=None):
             })
 
         # bounds
-        cir_origin = generator.pre
+        cir_origin = generator.pre + work_shift
         cir_roi_lo = cir_origin - 16
         cir_roi_hi = cir_origin + 100
         last_rep_hi = cir_origin + (10 + 54 - 1) * SPS + 100
@@ -2113,14 +3698,14 @@ def main(argv=None):
             "sample_rate": S.WORK_HZ,
             "sample_count": int(sig.size),
             "window_start_sample": 0,
-            "predicted_sensing_start": int(generator.pre),
+            "predicted_sensing_start": int(generator.pre + work_shift),
             "sensing_profile_id": "code%d-%dSYNC-%s" % (sensing_code,
                                                         sync_reps, SFD_MODE),
             "sensing_code": sensing_code,
             "sensing_sync_reps": sync_reps,
             "sensing_sfd_mode": SFD_MODE,
             "template_id": "sync_template_code%d_998p4" % sensing_code,
-            "overlap": dict(win["overlap"]),
+            "overlap": (metric_ov if native else dict(win["overlap"])),
             "bounds": bounds,
             "isr_db": win["isr_db"],
             "snr_db": snr_db,
@@ -2131,9 +3716,18 @@ def main(argv=None):
             "fit_reps": (None if not sic_on else fit_reps),
             "validation_reps": (None if not sic_on else validation_reps),
             "fit_reps_source": (None if not sic_on else fit_source),
-            "roi": (None if not sic_on else [int(roi_pair[0]),
-                                             int(roi_pair[1])]),
-            "demod_softchip_mode": "bypass",
+            "roi": (None if not sic_on else [int(search_roi[0]),
+                                             int(search_roi[1])]),
+            "search_roi": [int(search_roi[0]), int(search_roi[1])],
+            "subtraction_roi": (None if not sic_on else
+                                [int(subtraction_roi[0]),
+                                 int(subtraction_roi[1])]),
+            "core_roi": (None if not sic_on else [int(core_roi[0]),
+                                                  int(core_roi[1])]),
+            "sensing_roi": (None if not sic_on else [int(sensing_roi[0]),
+                                                     int(sensing_roi[1])]),
+            "cover_preamble": (False if not sic_on else bool(cover_preamble)),
+            "demod_softchip_mode": args.demod_softchip,
             "seed": int(seed),
             "clean": consumer_log["clean"],
             "raw": consumer_log["raw"],
@@ -2143,16 +3737,60 @@ def main(argv=None):
                            "bypass_reason": "sic_off",
                            "uses_truth": False}),
             "admission": admission,
+            "timing": {
+                "generator_us": float(gen_us),
+                "pmt_wrap_us": (float(t_pmt_wrap_us[-1])
+                                if t_pmt_wrap_us else None),
+                "post_us": (float(t_post_us[-1]) if t_post_us else None),
+                "worker_us": (float(t_worker_us[-1]) if t_worker_us else None),
+                "eval_us": (float(t_eval_us[-1]) if t_eval_us else None),
+                "consumer_us": (float(t_consumer_us[-1])
+                                if t_consumer_us else None),
+                "note": ("R09 separated buckets: generator / PMT wrap / message "
+                         "entry / SIC worker(core) / offline eval / consumer "
+                         "service. Never summed as one number."),
+            },
             "recon": (recon_rec if sic_on else None),
+            "regions": (regions if sic_on else None),
+            "target": (target_rec if sic_on else None),
         }
+        if native and native_rec is not None:
+            rec["coord"] = {
+                "work_to_native": [S.NATIVE_DECIM, S.NATIVE_INTERP],
+                "native_to_work": [S.NATIVE_INTERP, S.NATIVE_DECIM],
+                "filter_delay": float(
+                    S.native_group_delay_input(front.tap_count)),
+                "filter_delay_work": float(
+                    S.native_group_delay_output(front.tap_count)),
+                "filter_delay_native": float(
+                    S.native_group_delay_input(front.tap_count)),
+                "valid_lo": int(front.gd_in),
+                "valid_hi": int(max(0, native_rec["native_samples"]
+                                    - front.gd_in)),
+                "native_samples": int(native_rec["native_samples"]),
+                "work_samples": int(native_rec["work_samples_out"]),
+                "roundtrip_lag_work": int(native_rec["roundtrip_lag_work"]),
+                "metric_overlap": [int(metric_ov["lo"]), int(metric_ov["hi"])],
+                "note": ("native 491.52 <-> work 998.4 mapping; the metric "
+                         "overlap is the truth overlap advanced by the measured "
+                         "round-trip lag (R08)"),
+            }
+            rec["native"] = {k: v for k, v in native_rec.items()
+                             if k != "resample_stats"}
+            rec["native"]["resample_stats"] = native_rec["resample_stats"]
         if sic_on:
             rec["sic"] = consumer_log.get("sic")
             if args.sic == "oracle":
                 rec["diagnostic_only"] = True
                 rec["oracle"] = True
                 rec["sic_state"]["diagnostic_only"] = True
-        windows_jsonl.write(json.dumps(rec, sort_keys=True) + "\n")
-        windows_jsonl.flush()
+        # R09: the paced timed region must not do disk I/O; buffer the JSONL
+        # records in memory and flush them after the timed loop.
+        if paced:
+            paced_deferred_records.append(json.dumps(rec, sort_keys=True))
+        else:
+            windows_jsonl.write(json.dumps(rec, sort_keys=True) + "\n")
+            windows_jsonl.flush()
         completed_windows += 1
 
         t_rec = {
@@ -2165,6 +3803,16 @@ def main(argv=None):
                 "template_sha256": generator.sensing_template_info().sha256,
             },
         }
+        if native:
+            # The evaluation interval is truth-defined and mapped through the
+            # SAME 65/32 round trip as the metrics (R08); keep the sidecar
+            # consistent with windows.overlap.
+            t_rec["comm"]["real_overlap_lo"] = int(metric_ov["lo"])
+            t_rec["comm"]["real_overlap_hi"] = int(metric_ov["hi"])
+            t_rec["comm"]["overlap_samples"] = int(metric_ov["samples"])
+            t_rec["comm"]["native_roundtrip_lag_work"] = int(work_shift)
+            t_rec["comm"]["overlap_domain"] = (
+                "work grid after the 491.52<->998.4 SC16 round trip")
         if wid < args.fixtures:
             truth_jsonl.write(json.dumps(t_rec, sort_keys=True) + "\n")
             truth_jsonl.flush()
@@ -2176,15 +3824,43 @@ def main(argv=None):
                 y=win["y"].astype(np.complex64),
                 seed=np.int64(seed), isr_db=np.float64(
                     win["isr_db"] if win["isr_db"] is not None else np.nan),
-                overlap_lo=np.int64(win["overlap"]["lo"]),
-                overlap_hi=np.int64(win["overlap"]["hi"]))
+                overlap_lo=np.int64(metric_ov["lo"]),
+                overlap_hi=np.int64(metric_ov["hi"]))
+            if native:
+                np.savez_compressed(
+                    os.path.join(fix_dir, "window_%04d_native.npz" % wid),
+                    clean_work=np.ascontiguousarray(clean_iq,
+                                                    dtype=np.complex64),
+                    raw_work=np.ascontiguousarray(raw_iq, dtype=np.complex64),
+                    i_metric=np.ascontiguousarray(i_metric,
+                                                  dtype=np.complex64),
+                    roundtrip_lag_work=np.int64(work_shift),
+                    iq_scale=np.float64(native_rec["iq_scale"]))
             if sic_on and cleaned_iq is not None:
                 recon_dir = os.path.join(args.output, "recon")
                 os.makedirs(recon_dir, exist_ok=True)
+                recon_arrays = dict(
+                    # Native: the reference is the REALIZED interference under
+                    # the identical common-scale/filtering convention (R08), so
+                    # the verifier recomputes on exactly the metric reference.
+                    i=(i_metric if native else win["i"]).astype(np.complex64),
+                    i_hat=np.ascontiguousarray(ihat, dtype=np.complex64),
+                    # R01: the raw SIC input `y` and the actual SIC output
+                    # `y_clean`, so the verifier can recompute delta_actual and
+                    # never synthesize the output from a declared mask.
+                    y=np.ascontiguousarray(raw_iq, dtype=np.complex64),
+                    y_clean=np.ascontiguousarray(cleaned_iq,
+                                                 dtype=np.complex64))
+                # R04: raw (non-normalized) complex CIRs of the same window.
+                if clean_cir_raw_win is not None:
+                    recon_arrays["cir_raw_clean"] = np.ascontiguousarray(
+                        clean_cir_raw_win, dtype=np.complex64)
+                if sic_cir_raw_win is not None:
+                    recon_arrays["cir_raw_sic"] = np.ascontiguousarray(
+                        sic_cir_raw_win, dtype=np.complex64)
                 np.savez_compressed(
                     os.path.join(recon_dir, "window_%d.npz" % wid),
-                    i=win["i"].astype(np.complex64),
-                    i_hat=np.ascontiguousarray(ihat, dtype=np.complex64))
+                    **recon_arrays)
             first_windows.append(wid)
         if wid < 2:
             print("window %d/%d seed=%d gen_us=%.1f isr=%s overlap=%s "
@@ -2196,6 +3872,12 @@ def main(argv=None):
 
     windows_jsonl.close()
     truth_jsonl.close()
+    # R09: flush the buffered paced records after the timed region ended.
+    if paced and paced_deferred_records:
+        with open(os.path.join(args.output, "windows.jsonl"), "w",
+                  encoding="utf-8") as f:
+            for ln in paced_deferred_records:
+                f.write(ln + "\n")
 
     # CIR cleanup: wait for blocks drained, then stop.
     if rt.want_cir:
@@ -2209,6 +3891,8 @@ def main(argv=None):
         except Exception:
             pass
     rt.stop()
+    if front is not None:
+        front.stop()
 
     summary["windows_completed"] = completed_windows
     paced_stats = None
@@ -2216,20 +3900,41 @@ def main(argv=None):
         elapsed_s = max(1e-9, time.monotonic() - paced_wall0)
         lat = sorted(paced_latency_us)
         sub_late = sorted(ns / 1000.0 for ns in paced_submit_late_ns)
+        missed_submission = sum(1 for v in sub_late if v > 0.0)
 
         def _pct(vals, q):
             if not vals:
                 return None
             return float(np.percentile(np.asarray(vals, dtype=float), q))
+
+        def _summ(vals):
+            v = [float(x) for x in vals if x is not None]
+            if not v:
+                return {"n": 0}
+            a = np.asarray(v, dtype=float)
+            return {"n": int(a.size), "mean": float(a.mean()),
+                    "p50": float(np.percentile(a, 50)),
+                    "p95": float(np.percentile(a, 95)),
+                    "p99": float(np.percentile(a, 99)),
+                    "max": float(a.max())}
+        # R09: offered / admitted / missed-deadline / completed never collapsed
+        # into one "admitted rate".  A missed submission is a FAILURE.
         paced_stats = {
             "rate_hz_target": float(pace_rate),
             "planned_windows": int(planned),
-            "submitted": int(completed_windows),
+            "offered": int(credit.offered) if credit else int(completed_windows),
+            "admitted": int(credit.admitted) if credit else int(completed_windows),
+            "missed_admission": (int(credit.missed_admission) if credit
+                                 else None),
+            "miss_reasons": (dict(credit.by_reason) if credit else None),
+            "attempted_submit": int(len(paced_submit_late_ns)),
+            "missed_submission": int(missed_submission),
             "not_submitted": int(paced_not_submitted),
-            "admitted": int(completed_windows),
             "completed": int(completed_windows),
+            "failed": 0,
             "deadline_us": float(paced_deadline_us),
             "deadline_misses": int(paced_deadline_miss),
+            "achieved_window_rate": float(completed_windows / elapsed_s),
             "sustained_windows_per_s": float(completed_windows / elapsed_s),
             "observed_wall_s": float(elapsed_s),
             "submit_late_us": {
@@ -2242,15 +3947,44 @@ def main(argv=None):
                 "p99": _pct(lat, 99),
                 "max": (lat[-1] if lat else None),
             },
+            "service_latency_us": {
+                "description": ("submit -> CIR terminal (the per-window "
+                                "processing latency, excluding the accumulated "
+                                "planned-submit deficit)"),
+                "n": len(paced_service_us),
+                "p50": _pct(paced_service_us, 50),
+                "p95": _pct(paced_service_us, 95),
+                "p99": _pct(paced_service_us, 99),
+                "max": (max(paced_service_us) if paced_service_us else None),
+            },
+            "implied_serial_capacity_windows_per_s": (
+                (1e6 / _pct(paced_service_us, 50))
+                if paced_service_us and _pct(paced_service_us, 50) else None),
             "in_flight_max": int(credit.in_flight_max) if credit else None,
-            "source_missed_admission": int(credit.missed_admission)
-            if credit else None,
             "budget_bytes": int(credit.iq_budget_bytes) if credit else None,
             "window_bytes": int(generator.n * 8),
-            "note": ("submit latency is measured from the planned publish time; "
-                     "a pipeline that cannot keep up is recorded as a late "
-                     "submit / deadline miss and never masked by lowering the "
-                     "actual rate"),
+            "timing_buckets_us": {
+                "generator": _summ(t_gen_us),
+                "pmt_wrap": _summ(t_pmt_wrap_us),
+                "message_entry": _summ(t_post_us),
+                "sic_worker_core": _summ(t_worker_us),
+                "offline_eval": _summ(t_eval_us),
+                "consumer_service": _summ(t_consumer_us),
+                "note": ("separate buckets; generator is the pre-generated pool "
+                         "cost, not the timed loop. No single bucket is claimed "
+                         "to explain every deadline miss."),
+            },
+            "rss_cpu_per_run": {
+                "cpu_seconds": float(
+                    (resource.getrusage(resource.RUSAGE_SELF).ru_utime
+                     + resource.getrusage(resource.RUSAGE_SELF).ru_stime)
+                    - run_utime0 - run_stime0),
+                "peak_rss_bytes": proc_hwm0,
+                "note": "per-run delta from a fresh process, not cross-run",
+            },
+            "note": ("a planned publish that is not submitted on time counts as "
+                     "missed_submission; the admitted rate is never substituted "
+                     "for the planned load"),
         }
         summary["paced"] = paced_stats
         if paced_not_submitted > 0:
@@ -2258,9 +3992,13 @@ def main(argv=None):
                            "submitted before the wall-clock cap (reported, not "
                            "silently truncated)"
                            % (paced_not_submitted, planned))
+        if missed_submission > 0:
+            not_run.append("paced deadline: %d planned submissions were late "
+                           "(missed_submission; a failure, not masked)"
+                           % missed_submission)
 
     # ---------------- G0 clean-consumer CIR comparison ----------------
-    if clean_cir_raw is not None and clean_cir_norm is not None:
+    if (not native) and clean_cir_raw is not None and clean_cir_norm is not None:
         raw_g = np.fromfile(os.path.join(repo, "testdata", "uwb_radar",
                                          "cir_raw_clean_radar.cf32"),
                             dtype=np.complex64)
@@ -2332,6 +4070,21 @@ def main(argv=None):
         g0.get("cir_clean_consumer", {}).get("raw_main_lobe_pass") and
         g0.get("cir_clean_consumer", {}).get("peak_tap_pass") and
         g0.get("cir_clean_consumer", {}).get("norm_scale_explained"))
+    if native:
+        # The canonical work-grid clean golden is not the native (band-limited,
+        # SC16-quantized) clean, so this G0 check is work-grid only.  The native
+        # clean CIR is still produced and compared via the R04 raw target block.
+        g0["cir_clean_consumer_skipped"] = (
+            "native front-end: the clean consumer CIR is the 491.52->998.4 "
+            "round trip of SC16 samples, not the canonical 998.4 work-grid RX; "
+            "the canonical comparisons are cir_canonical_pass (work-grid "
+            "fixture) and the per-window native target block")
+        g0["cir_clean_pass"] = None
+    elif not (rt.want_cir and clean_cir_raw is not None):
+        g0["cir_clean_consumer_skipped"] = (
+            "the clean pairing consumer did not run (e.g. R09 target-only paced "
+            "region); the canonical clean-golden check needs the clean CIR")
+        g0["cir_clean_pass"] = None
     g0["psdu_canonical_pass"] = bool(clean_demod_ran > 0 and
                                       clean_psdu_match == clean_demod_ran)
     g0["determinism_pass"] = bool(g0.get("determinism", {}).get("y_equal"))
@@ -2367,7 +4120,56 @@ def main(argv=None):
         summary["sic"]["fit_reps"] = int(fit_reps)
         summary["sic"]["validation_reps"] = int(validation_reps)
         summary["sic"]["fit_reps_source"] = fit_source
-        summary["sic"]["roi"] = [int(roi_pair[0]), int(roi_pair[1])]
+        summary["sic"]["cover_preamble"] = bool(cover_preamble)
+        summary["sic"]["search_roi"] = [int(search_roi[0]),
+                                        int(search_roi[1])]
+        summary["sic"]["subtraction_roi"] = [int(subtraction_roi[0]),
+                                             int(subtraction_roi[1])]
+        summary["sic"]["core_roi"] = [int(core_roi[0]), int(core_roi[1])]
+        summary["sic"]["sensing_roi"] = [int(sensing_roi[0]),
+                                         int(sensing_roi[1])]
+        summary["sic"]["roi"] = [int(search_roi[0]), int(search_roi[1])]
+        summary["sic"]["named_quantities"] = {
+            "fit_reps": int(fit_reps),
+            "validation_reps": int(validation_reps),
+            "fit_len": int(fit_reps) * S.SPS,
+            "estimation_len": int(fit_reps) * S.SPS,
+            "online_validation_len": int(validation_reps) * S.SPS,
+            "independent_eval_len": max(0, int(sync_reps) - int(fit_reps) -
+                                        int(validation_reps)) * S.SPS,
+            "observation_reps": int(fit_reps) + int(validation_reps),
+            "sync_reps": int(sync_reps),
+            "coverage_nominal": ((int(fit_reps) + int(validation_reps))
+                                 / float(sync_reps)),
+            "search_roi": [int(search_roi[0]), int(search_roi[1])],
+            "subtraction_roi": [int(subtraction_roi[0]),
+                                int(subtraction_roi[1])],
+            "core_roi": [int(core_roi[0]), int(core_roi[1])],
+            "sensing_roi": [int(sensing_roi[0]), int(sensing_roi[1])],
+            "fractional_estimate_source": "core (fit window)",
+            "preamble_scan_us_median": px_median(preamble_scan_us_all),
+            "effective_config_hash": effective_config_hash,
+        }
+        summary["sic"]["regions_semantics"] = {
+            "estimation": "[detected_start, +fit_reps*sps) - gain LS / path "
+                          "select / fractional refine",
+            "online_validation": "[detected_start+fit_reps*sps, "
+                                 "+validation_reps*sps) - the core commit gate",
+            "independent_eval": "[detected_start+(fit+validation)*sps, "
+                                "+sync_reps*sps) - offline metric only",
+            "shares_data_with_estimation": (
+                "the core's CFO and repetition confirmation read the "
+                "ONLINE region as well, so the online region is NOT an "
+                "estimation-independent holdout; only `independent_eval` is "
+                "disjoint from estimation and gate (R06 disclosure)"),
+            "search_roi": [int(search_roi[0]), int(search_roi[1])],
+            "subtraction_roi": [int(subtraction_roi[0]),
+                                int(subtraction_roi[1])],
+            "core_roi_note": ("the core's roi_lo/roi_hi serve BOTH candidate "
+                              "search and the subtraction clip; core_roi is the "
+                              "union so the natural preamble tail is not clipped "
+                              "by the candidate range (R02)"),
+        }
         summary["sic"]["bypass_bit_identical"] = {
             "n_bypassed": int(bypass_n),
             "n_bit_identical": int(bypass_identical),
@@ -2421,35 +4223,202 @@ def main(argv=None):
     }
 
     # effect aggregates over the NON-truth windows (exact verifier formula).
-    sup3 = [1.0 for s in eff_supp if s >= 3.0]
-    eff_abs_err = [abs(v) for v in eff_target_err_db]
+    # recon.suppression_db / recon.nmse are now the INDEPENDENT eval region, so
+    # the verifier-recomputed median_suppression_db/nmse_median aggregate those.
+    sup3 = [1.0 for s in eff_eval_supp if s >= 3.0]
+    eff_abs_err = [abs(v) for v in eff_target_err_raw_db]
+    eff_norm_abs_err = [abs(v) for v in eff_target_err_db]
+    act3 = [1.0 for s in eff_actual_sup if s >= 3.0]
+    n_gate = len(eff_nmse)
+    raw_shift_abs = [abs(v) for v in eff_target_shift_raw]
     summary["effect"] = {
-        "median_suppression_db": px_median(eff_supp),
-        "frac_ge_3db": (len(sup3) / len(eff_supp)) if eff_supp else None,
-        "target_amp_err_db_p95": px_p95(eff_target_err_db),
-        "target_amp_abs_err_db_p95": px_p95(eff_abs_err),
-        "peak_shift_max": (max(eff_peak_shift) if eff_peak_shift else None),
-        "nmse_median": px_median(eff_nmse),
+        # --- R01 actual-output cancellation (PRIMARY gate) ---------------
+        "median_actual_suppression_db": px_median(eff_actual_sup),
+        "frac_actual_ge_3db": (len(act3) / len(eff_actual_sup))
+        if eff_actual_sup else None,
+        "median_actual_suppression_db_confirmed":
+            px_median(eff_actual_sup_confirmed),
+        "coverage_median": px_median(eff_coverage),
+        "coverage_min": (min(eff_coverage) if eff_coverage else None),
+        "n_interference_windows": int(n_interference_windows),
+        "n_na_windows": int(n_na_windows),
+        "n_uncommitted_output_changed": int(n_uncommitted_changed),
+        # --- R06 independent final-eval reconstruction (diagnostic) -------
+        "median_suppression_db": px_median(eff_eval_supp),
+        "frac_ge_3db": (len(sup3) / len(eff_eval_supp))
+        if eff_eval_supp else None,
+        "nmse_median": px_median(eff_eval_nmse),
+        "n_eval_windows": len(eff_eval_nmse),
+        "eval_available_frac": (sum(1.0 for v in eff_eval_available if v)
+                                / len(eff_eval_available))
+        if eff_eval_available else None,
+        # --- R06 online-validation (gate) region --------------------------
+        "online_nmse_median": px_median(eff_online_nmse),
+        "online_suppression_db_median": px_median(eff_online_supp),
+        # --- R01 full truth-overlap reconstruction (diagnostic) -----------
+        "overlap_nmse_median": px_median(eff_overlap_nmse),
+        "overlap_suppression_db_median": px_median(eff_overlap_supp),
         "holdout_nmse_median": px_median(eff_holdout_nmse),
         "holdout_suppression_db_median": px_median(eff_holdout_supp),
-        "n_windows": len(eff_supp),
+
+        # --- R04 raw-CIR target protection (gate) ------------------------
+        "target_amp_err_db_p95": px_p95(eff_target_err_raw_db),
+        "target_amp_abs_err_db_p95": px_p95(eff_abs_err),
+        "target_phase_err_deg_p95": px_p95(eff_target_phase_raw),
+        "target_peak_shift_max": (max(raw_shift_abs) if raw_shift_abs
+                                  else None),
+        "target_weak_detected_frac": (
+            sum(1.0 for v in eff_target_weak_detected if v)
+            / len(eff_target_weak_detected)) if eff_target_weak_detected
+        else None,
+        "target_false_peak_max": (max(eff_target_false_peaks)
+                                  if eff_target_false_peaks else None),
+        # --- normalized-CIR (L2) shape-only diagnostic -------------------
+        "normalized_target_amp_err_db_p95": px_p95(eff_target_err_db),
+        "normalized_target_amp_abs_err_db_p95": px_p95(eff_norm_abs_err),
+        "peak_shift_max": (max(eff_peak_shift) if eff_peak_shift else None),
+        "n_windows": n_gate,
         "oracle_windows": int(oracle_windows),
         "oracle_excluded": True,
-        "note": ("primary gate: median suppression >=10 dB AND >=95% windows "
-                 ">=3 dB, target |amp err| <=1 dB (p95) and |peak shift| <=1 "
-                 "work sample. Aggregate excludes uses_truth windows."),
+        "note": ("primary effect gate: median ACTUAL-output suppression >=10 dB "
+                 "AND >=95% windows >=3 dB (delta_actual = y - y_clean over the "
+                 "full truth overlap), plus raw-CIR target |amp err| <=1 dB "
+                 "(p95) and |peak shift| <=1 work sample. median_suppression_db/"
+                 "nmse_median are the R06 INDEPENDENT final-eval reconstruction "
+                 "diagnostic (not the gate); online_* is the core commit region; "
+                 "overlap_* is the R01 full-overlap diagnostic; normalized_* are "
+                 "the L2 shape-only diagnostic. Aggregate excludes uses_truth "
+                 "windows; n_na_windows are ||i||^2==0."),
     }
     eff_ok = bool(
         sic_on and args.sic == "estimate" and args.preset == "main" and
         oracle_windows == 0 and
-        summary["effect"]["median_suppression_db"] is not None and
-        summary["effect"]["median_suppression_db"] >= 10.0 and
-        summary["effect"]["frac_ge_3db"] is not None and
-        summary["effect"]["frac_ge_3db"] >= 0.95 and
+        summary["effect"]["median_actual_suppression_db"] is not None and
+        summary["effect"]["median_actual_suppression_db"] >= 10.0 and
+        summary["effect"]["frac_actual_ge_3db"] is not None and
+        summary["effect"]["frac_actual_ge_3db"] >= 0.95 and
         summary["effect"]["target_amp_abs_err_db_p95"] is not None and
         summary["effect"]["target_amp_abs_err_db_p95"] <= 1.0 and
-        summary["effect"]["peak_shift_max"] is not None and
-        summary["effect"]["peak_shift_max"] <= 1)
+        summary["effect"]["target_peak_shift_max"] is not None and
+        summary["effect"]["target_peak_shift_max"] <= 1)
+
+    # R04 raw-CIR target-protection aggregate (frozen calibration ROI).
+    _tgt_n = len(eff_target_err_raw_db)
+    _tgt_shift_abs = [abs(v) for v in eff_target_shift_raw]
+    summary["target"] = {
+        "profile": sensing_profile_id,
+        "target_lo": (int(target_lo) if target_lo is not None else None),
+        "target_hi": (int(target_hi) if target_hi is not None else None),
+        "target_ref_amp": (float(target_ref_amp)
+                           if target_ref_amp is not None else None),
+        "config_path": target_cfg_path,
+        "n_windows": int(_tgt_n),
+        "target_amp_err_db_median": px_median(eff_target_err_raw_db),
+        "target_amp_abs_err_db_p95": px_p95(eff_abs_err),
+        "target_phase_err_deg_p95": px_p95(eff_target_phase_raw),
+        "target_peak_shift_max": (max(_tgt_shift_abs) if _tgt_shift_abs
+                                  else None),
+        "frac_amp_le_1db": ((sum(1.0 for a in eff_abs_err if a <= 1.0)
+                             / float(_tgt_n)) if _tgt_n else None),
+        "frac_shift_le_1": ((sum(1.0 for s in _tgt_shift_abs if s <= 1)
+                             / float(len(_tgt_shift_abs)))
+                            if _tgt_shift_abs else None),
+        "weak_target_detected_frac": (
+            (sum(1.0 for v in eff_target_weak_detected if v)
+             / float(len(eff_target_weak_detected)))
+            if eff_target_weak_detected else None),
+        "false_peak_max": (max(eff_target_false_peaks)
+                           if eff_target_false_peaks else None),
+        "roi_fixed_across_windows": bool(len(target_rois_used) <= 1),
+        "note": ("R04 raw (non-L2-normalized) complex CIR target protection at "
+                 "the frozen calibration ROI. The L2-normalized target_amp is a "
+                 "shape-only diagnostic and does not satisfy this gate."),
+    }
+
+    # ---------------- R08 native effect + timing summary ----------------
+    native_block = None
+    native_pass_value = False
+    if native:
+        clip_total = sum(int(r.get("raw_clip_i", 0)) + int(r.get("raw_clip_q", 0))
+                         + int(r.get("clean_clip_i", 0))
+                         + int(r.get("clean_clip_q", 0))
+                         for r in native_records)
+        scales = [float(r["iq_scale"]) for r in native_records]
+        lags = [int(r["roundtrip_lag_work"]) for r in native_records]
+        floors = [r.get("error_floor", {}).get("effective_noise_nmse")
+                  for r in native_records]
+        nl = [r.get("nonlinearity", {}).get("max_abs_diff")
+              for r in native_records]
+        res_us = [r.get("resample_stats", {}).get("raw", {}).get("resample_us")
+                  for r in native_records]
+        hdl_us = [r.get("resample_stats", {}).get("raw", {}).get("handler_us")
+                  for r in native_records]
+        scalar = next((r.get("scalar_reference") for r in native_records
+                       if r.get("scalar_reference")), None)
+        repeat = next((r.get("repeat_run_difference") for r in native_records
+                       if r.get("repeat_run_difference")), None)
+        res_stats = front.stats() if front is not None else {}
+        native_block = {
+            "ran": bool(native_records),
+            "input_grid": "cg400",
+            "native_rate": S.CG400_HZ,
+            "work_rate": S.WORK_HZ,
+            "windows": len(native_records),
+            "resampler": res_stats,
+            "common_sc16_scale": True,
+            "per_component_normalization": False,
+            "iq_scale": {"min": (min(scales) if scales else None),
+                         "max": (max(scales) if scales else None),
+                         "n": len(scales)},
+            "clip_counts_total": int(clip_total),
+            "clip_free": bool(clip_total == 0),
+            "roundtrip_lag_work": {
+                "min": (min(lags) if lags else None),
+                "max": (max(lags) if lags else None),
+                "expected": float(S.native_group_delay_output(
+                    front.tap_count)) if front is not None else None},
+            "quantization_nonlinearity_max_abs_diff": {
+                "n": len(nl), "max": (max(nl) if nl else None)},
+            "error_floor_effective_noise_nmse": summarize(floors),
+            "resample_us": summarize(res_us),
+            "resample_handler_us": summarize(hdl_us),
+            "scalar_reference": scalar,
+            "repeat_run_difference": repeat,
+            "coord": {
+                "work_to_native": [S.NATIVE_DECIM, S.NATIVE_INTERP],
+                "native_to_work": [S.NATIVE_INTERP, S.NATIVE_DECIM],
+                "filter_delay": (float(S.native_group_delay_input(
+                    front.tap_count)) if front is not None else None),
+                "valid_lo": (int(front.gd_in) if front is not None else None),
+                "valid_hi": (int(max(0, native_records[0]["native_samples"]
+                                     - front.gd_in))
+                             if (front is not None and native_records)
+                             else None),
+            },
+            "effect": {
+                "median_actual_suppression_db":
+                    summary["effect"].get("median_actual_suppression_db"),
+                "frac_actual_ge_3db":
+                    summary["effect"].get("frac_actual_ge_3db"),
+                "coverage_median": summary["effect"].get("coverage_median"),
+                "n_interference_windows":
+                    summary["effect"].get("n_interference_windows"),
+                "note": ("actual-output suppression measured on the REALIZED "
+                         "interference i_metric=raw_work-clean_work under the "
+                         "identical common scale/filtering (R08)"),
+            },
+            "note": ("native capture is ONE quantized mixture; clean/raw/sic use "
+                     "the same scale, resampler and valid range. The known "
+                     "resampler SIMD non-determinism is recorded (repeat/scalar "
+                     "comparison + error floor), not fixed."),
+        }
+        summary["native"] = native_block
+        native_pass_value = bool(
+            native_block["ran"] and native_block["clip_free"]
+            and int(res_stats.get("pdus_dropped", 0)) == 0
+            and bool(eff_ok))
+    else:
+        native_pass_value = False
 
     rss = resource.getrusage(resource.RUSAGE_SELF)
     summary["runtime"] = {
@@ -2506,33 +4475,114 @@ def main(argv=None):
                 g0.get("wrong_template_pass"),
                 g0.get("determinism_pass"),
                 g0.get("window_bounds_pass")]
+    if g0.get("comm_template_r07") is not None:
+        g0_parts.append(g0.get("comm_template_r07_pass"))
     if rt.want_demod:
         g0_parts.append(g0.get("psdu_canonical_pass"))
-    if rt.want_cir:
+    if rt.want_cir and not native and clean_cir_raw is not None:
         g0_parts.append(g0.get("cir_clean_pass"))
+    # ---- R10 gate discipline -------------------------------------------------
+    # A gate that was exercised is a real boolean AND carries explicit tested
+    # evidence; a gate that was NOT exercised in this invocation is null and is
+    # named untested in not_run[].  A ``false`` gate means tested-and-failed and
+    # must NOT also be named untested (that was the pre-R10 contradiction).
+    eff_pass = bool(eff_ok) if sic_on else None
+    sic_speed_pass = None            # core P50/P99 speed gate: not run here
+    demod_speed_pass = None          # downstream demod-cost gate: later stage
+    native_gate = native_pass_value if native else None
+    gate_evidence = {}
+    if sic_on:
+        gate_evidence["eff_pass"] = (
+            "recomputed over %s non-truth windows on the actual-output "
+            "suppression: median_actual_suppression_db=%s (>=10), "
+            "frac_actual_ge_3db=%s (>=0.95), target_amp_abs_err_db_p95=%s "
+            "(<=1), target_peak_shift_max=%s (<=1)"
+            % (summary["effect"].get("n_windows"),
+               summary["effect"].get("median_actual_suppression_db"),
+               summary["effect"].get("frac_actual_ge_3db"),
+               summary["effect"].get("target_amp_abs_err_db_p95"),
+               summary["effect"].get("target_peak_shift_max")))
+    if native:
+        gate_evidence["native_pass"] = (
+            "native front-end ran on %d window(s): clip_free=%s "
+            "pdus_dropped=%s eff_ok=%s (see summary.native); a false result is "
+            "tested-and-failed, not untested"
+            % (len(native_records),
+               (native_block or {}).get("clip_free"),
+               res_stats.get("pdus_dropped"), bool(eff_ok)))
     summary["gates"] = {
-        "eff_pass": bool(eff_ok),
-        "sic_speed_pass": False,
-        "demod_speed_pass": False, "native_pass": False,
+        "eff_pass": eff_pass,
+        "sic_speed_pass": sic_speed_pass,
+        "demod_speed_pass": demod_speed_pass,
+        "native_pass": native_gate,
         "g0_pass": bool(all(g0_parts)),
         "note": ("g0_pass is the S0-A closure gate over the checks applicable "
                  "to the selected --consumer; eff_pass is the S0 primary "
-                 "effect gate (main/estimate only); sic_speed/demod_speed/"
-                 "native belong to later stages and are not claimed here."),
+                 "effect gate (main/estimate only); native_pass requires the "
+                 "native front-end to run clip-free with no dropped PDU AND the "
+                 "same effect gate.  R10: sic_speed_pass/demod_speed_pass/ "
+                 "native_pass are null when NOT TESTED in this invocation and "
+                 "are then named in not_run[]; a false gate is a "
+                 "tested-and-failed result carrying evidence."),
     }
+    summary["gate_evidence"] = gate_evidence
     g0["g0_pass"] = summary["gates"]["g0_pass"]
-    if not eff_ok and sic_on:
-        not_run.append("gates.eff_pass (primary effect gate not met or not "
-                       "applied: preset=%s sic=%s)" % (args.preset, args.sic))
+    if native_gate is None:
+        not_run.append("gates.native_pass (untested: native front-end not run "
+                       "in this invocation; use --input-grid cg400)")
 
     # ---------------- manifests / tables ----------------
+    # R10: bind the ACTUAL run to the real commit, a sha256 id of the
+    # working-tree diff, the loaded library / benchmark binary file hashes, the
+    # template hashes tied to the effective config, and the input/fixture
+    # hashes.  Every one of these is re-derived from disk right now.
+    gitp = git_worktree_provenance(repo)
+    lib_uwb_path = pick_loaded_library(build_dir)
+    bench_exe_path = os.path.join(build_dir, "apps", "benchmark_preamble_sic")
+    bench_src_path = os.path.join(repo, "gr-uwb", "apps",
+                                  "benchmark_preamble_sic.cc")
+    provenance_block = {
+        "repo_root": repo,
+        "build_dir": build_dir,
+        "git_head": gitp["head"],
+        "git_branch": gitp["branch"],
+        "git_dirty": bool(gitp["dirty"]),
+        "git_status_sha256": gitp["status_sha256"],
+        "dirty_patch_sha256": gitp["status_sha256"],
+        "libgnuradio_uwb_path": lib_uwb_path,
+        "libgnuradio_uwb_sha256": (file_sha256(lib_uwb_path)
+                                   if lib_uwb_path and
+                                   os.path.isfile(lib_uwb_path) else None),
+        "benchmark_exe_path": (bench_exe_path
+                               if os.path.isfile(bench_exe_path) else None),
+        "benchmark_exe_sha256": (file_sha256(bench_exe_path)
+                                 if os.path.isfile(bench_exe_path) else None),
+        "benchmark_source_sha256": (file_sha256(bench_src_path)
+                                    if os.path.isfile(bench_src_path)
+                                    else None),
+        "config_hash": effective_config_hash,
+        "input_source": args.input_grid,
+        "input_grid": args.input_grid,
+        "production_profile": False,
+        "stamped_from": "run_time",
+    }
     manifest = {
         "run_id": run_id,
-        "commit": subprocess.run(["git", "rev-parse", "HEAD"],
-                                 capture_output=True, text=True).stdout.strip(),
-        "dirty": bool(subprocess.run(["git", "status", "--porcelain"],
-                                     capture_output=True, text=True
-                                     ).stdout.strip()),
+        "commit": gitp["head"] or subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True,
+            text=True).stdout.strip(),
+        "dirty": bool(gitp["dirty"]),
+        "provenance": provenance_block,
+        "matlab": {
+            "status": "未实跑",
+            "command": ("matlab -batch \"run('testdata/sic_preamble/matlab/"
+                        "verify_sic_preamble.m')\""),
+            "log_path": "testdata/sic_preamble/matlab/matlab_verify.log",
+            "note": ("No MATLAB/Octave is available in this environment, so "
+                     "the independent MATLAB cross-check is NOT RUN (R10); the "
+                     "script is kept runnable and this is recorded as "
+                     "未实跑, never as parity evidence."),
+        },
         "build_type": cmake_cache_value(build_dir, "CMAKE_BUILD_TYPE"),
         "compiler": subprocess.run(["c++", "--version"], capture_output=True,
                                    text=True).stdout.splitlines()[0]
@@ -2551,6 +4601,8 @@ def main(argv=None):
                                     "%s.json" % args.preset),
         "config_hash": config_hash,
         "config": resolved_config,
+        "effective_config": effective_config,
+        "effective_config_hash": effective_config_hash,
         "fixture_hashes": {},
         "template_hashes": {
             "sensing_sync_code%d" % sensing_code:
@@ -2575,12 +4627,16 @@ def main(argv=None):
                            if generator.comm_template_info() else
                            g0.get("wrong_template_control", {}).get(
                                "code%d" % comm_code, {}).get("comm_len")),
-                "source": "hrp_packet_source(code=%d)[:sync_reps*1016+"
-                          "pulse_taps]" % comm_code,
+                "source": ("finite %d-SYNC code-pulse train (spread code -> "
+                           "chip/pulse train -> HRP pulse-shaping FIR); "
+                           "SYNC-only, no SFD/PHR/payload (R07)"
+                           % sync_reps),
                 "sha256": (generator.comm_template_info().sha256
                            if generator.comm_template_info() else
                            g0.get("wrong_template_control", {}).get(
                                "code%d" % comm_code, {}).get("comm_sha256")),
+                "r07_evidence": (g0.get("comm_template_r07", {}).get("pass")
+                                 if g0.get("comm_template_r07") else None),
             },
             "sensing_tx": {
                 "length": int(generator.tx.size),
@@ -2607,6 +4663,23 @@ def main(argv=None):
             "canonical STS packet (verified: sync_region_max_abs_diff=0.0), so "
             "the canonical CIR golden still applies."),
         "generator_geometry": generator.geom,
+        "target_protection": ({
+            "profile": sensing_profile_id,
+            "target_lo": int(target_lo),
+            "target_hi": int(target_hi),
+            "target_ref_amp": (float(target_ref_amp)
+                               if target_ref_amp is not None else None),
+            "config_path": target_cfg_path,
+            "config_hash": (file_sha256(target_cfg_path)
+                            if target_cfg_path
+                            and os.path.isfile(target_cfg_path) else None),
+            "roi_fixed_across_windows": bool(len(target_rois_used) <= 1),
+            "detect_ratio": float(target_detect_ratio),
+            "false_peak_ratio": float(target_false_peak_ratio),
+            "main_lobe_guard": int(target_main_lobe_guard),
+            "note": ("R04 frozen calibration-set target ROI in the CIR tap "
+                     "domain; never re-searched on SIC results."),
+        } if target_lo is not None else None),
         "demod_softchip_mode": "bypass",
         "sic_k": int(sic_k),
         "sic_config": ({"comm_code": int(sic_cfg["comm_code"]),
@@ -2662,11 +4735,70 @@ def main(argv=None):
             = S.sha256_array(sic_preamble)
         manifest["template_meta"]["sic_preamble_code%d" % sic_comm_code] = {
             "length": int(sic_preamble.size),
-            "source": "hrp_packet_source(code=%d)[:sync_reps*1016+pulse_taps] "
-                      "for the SIC adapter (nominal comm code)"
-                      % sic_comm_code,
+            "source": ("finite %d-SYNC code-pulse train for the SIC adapter "
+                       "(nominal comm code); SYNC-only (R07)" % sync_reps),
             "sha256": S.sha256_array(sic_preamble),
         }
+    # R02: declare the effective config identity for every implementation layer.
+    # This work-grid run is the functional layer; core/GR/native are separate
+    # stages, so they are either declared identically or explicitly not run.
+    _same_diffs = [] if not sic_on else [
+        "core: benchmark_preamble_sic.cc uses its own synthetic load "
+        "(R03 scope) unless run with the same case; not run in this invocation",
+        "gr: GNU Radio flowgraph is the same functional chain here; the "
+        "standalone PDU adapter path is exercised in-process",
+    ]
+    _native_entry = None
+    if native:
+        _native_entry = {
+            "case_id": effective_config["case_id"],
+            "effective_config_hash": effective_config_hash,
+            "template_id": effective_config.get("comm_template_id"),
+            "template_sha256": effective_config.get("comm_template_sha256"),
+            "input_length": int(generator.n),
+            "input_grid": "cg400",
+            "native_rate": S.CG400_HZ,
+            "native_samples": (int(native_records[0]["native_samples"])
+                               if native_records else None),
+            "resampler_taps": (int(front.tap_count)
+                               if front is not None else None),
+            "difference_note": (
+                "native front-end: the SAME case/config/template/input length "
+                "is pushed through CG400 491.52 MS/s SC16 + PDU 65/32 before "
+                "SIC; only the input grid differs and is recorded here"),
+        }
+        _same_diffs = list(_same_diffs) + [
+            "native: same case/config/template/input_length; front-end is the "
+            "CG400 491.52 MS/s SC16 + PDU 65/32 round trip (R08)"]
+    else:
+        _same_diffs = list(_same_diffs) + [
+            "native: CG400 native roundtrip not run in this invocation"]
+    manifest["configuration"] = {
+        "functional": {
+            "case_id": effective_config["case_id"],
+            "effective_config_hash": effective_config_hash,
+            "template_id": effective_config.get("comm_template_id"),
+            "template_sha256": effective_config.get("comm_template_sha256"),
+            "input_length": int(generator.n),
+        },
+    }
+    manifest["implementation_configs"] = {
+        "functional": {
+            "case_id": effective_config["case_id"],
+            "effective_config_hash": effective_config_hash,
+            "template_id": effective_config.get("comm_template_id"),
+            "input_length": int(generator.n),
+            "differences": _same_diffs,
+        },
+    }
+    if _native_entry is not None:
+        manifest["implementation_configs"]["native"] = _native_entry
+    manifest["config_differences"] = _same_diffs
+    manifest["roi_semantics"] = (
+        "effective_config.subtraction_roi/core_roi are the CONFIGURED ranges "
+        "passed to the core; each window's regions.subtraction_roi is the "
+        "ACTUAL applied mask support in that window (R02).")
+
     for wid in first_windows:
         p = os.path.join(fix_dir, "window_%04d.npz" % wid)
         if os.path.isfile(p):
@@ -2717,6 +4849,8 @@ def main(argv=None):
     print("  demod", json.dumps(summary["demod"], sort_keys=True), flush=True)
     if sic_on:
         print("  effect", json.dumps(summary["effect"], sort_keys=True),
+              flush=True)
+        print("  target", json.dumps(summary.get("target"), sort_keys=True),
               flush=True)
         print("  sic adapter", json.dumps(summary["sic"].get("adapter"),
                                           sort_keys=True), flush=True)

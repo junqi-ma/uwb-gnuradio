@@ -1,0 +1,126 @@
+{
+  "byte_order": "little-endian",
+  "chip_energy": 64,
+  "chip_sample_stride": 8,
+  "chip_sha256": "7317adeeeb46227f28b6300494447fcc2e91ee746ce8e44ee910a1d90309180e",
+  "chips_nonzero": 64,
+  "code_len": 127,
+  "comm_code": 10,
+  "comm_preamble_energy": 4625.11328125,
+  "comm_preamble_length": 65064,
+  "comm_preamble_peak": 0.800000011920929,
+  "comm_preamble_sha256": "90f78b8d61ffcc91f266e345b9a74594e906e749f4cea512fc600fef75ae2e1b",
+  "comm_sync_energy": 72.26331329345703,
+  "comm_sync_length": 1016,
+  "comm_sync_peak": 0.800000011920929,
+  "comm_sync_sha256": "90f600e7f9f9f27c1d36d094760c0a23030c2509d613ed4fa3e2d417d290257c",
+  "description": "Finite 64-SYNC code-10 comm preamble shaped directly from the spread code-pulse train through the HRP pulse-shaping FIR. SYNC-only: no SFD/PHR/payload may enter (R07).",
+  "dtype": "complex64",
+  "files": {
+    "comm_preamble_code10": "comm_preamble_code10_998p4.cf32",
+    "comm_sync_code10": "comm_sync_code10_998p4.cf32"
+  },
+  "generator": "gr-uwb/apps/sic_preamble_sim.py (finite SYNC, R07)",
+  "layout": "interleaved_iq",
+  "mode": "finite_sync_code_pulse",
+  "natural_sync_length": 65064,
+  "normalization": {
+    "method": "sync_train_peak",
+    "peak_amplitude": 0.8,
+    "scale": 8.500818655420586,
+    "sync_train_peak": 0.09410858323508364
+  },
+  "not_overwritten": "testdata/uwb_radar/* canonical code-9 MATLAB fixture",
+  "packet_truncation_diagnostic": {
+    "length": 65072,
+    "sfd_leak_samples": 48,
+    "sfd_region_lo": 65024,
+    "sha256": "70807b6d8143bc3f1b4e1c080b75b9f46f9c0cb78f9275560f384e591db7b04e"
+  },
+  "peak_amplitude": 0.8,
+  "pulse_center_taps": 2,
+  "pulse_shape": "legacy",
+  "pulse_taps": 48,
+  "r07_evidence": {
+    "chip_energy": 64,
+    "chip_nonzero": 64,
+    "convolve_ref_max_abs_diff": 0.0,
+    "edge": {
+      "leading_edge_first8_energy": 1.1254038113995717,
+      "leading_edge_nonzero": true,
+      "natural_tail_samples": 47,
+      "symbol_edge_region": [
+        65016,
+        65024
+      ],
+      "tail_last_energy": 0.004079447551332823,
+      "tail_present": true
+    },
+    "finite_template_independent_by_construction": true,
+    "finite_template_sha256": "90f78b8d61ffcc91f266e345b9a74594e906e749f4cea512fc600fef75ae2e1b",
+    "length_matches_natural": true,
+    "natural_length": 65064,
+    "packet_prefix_matches_finite": true,
+    "packet_prefix_rel_resid": {
+      "canonical_4z2": 3.444969628787661e-08,
+      "empty_psdu": 3.444969628787661e-08,
+      "other_psdu": 3.444969628787661e-08,
+      "sfd_ieee": 3.444969628787661e-08
+    },
+    "packet_prefix_rel_resid_inline": 3.444969628787661e-08,
+    "packet_prefix_rel_resid_max": 3.444969628787661e-08,
+    "packet_trunc_differs_across_variants": true,
+    "packet_trunc_sfd_region_max_abs_by_variant": {
+      "canonical_4z2": 0.4758046567440033,
+      "empty_psdu": 0.4758046567440033,
+      "other_psdu": 0.4758046567440033,
+      "sfd_ieee": 0.028267644345760345
+    },
+    "packet_trunc_sha256_by_variant": {
+      "canonical_4z2": "70807b6d8143bc3f1b4e1c080b75b9f46f9c0cb78f9275560f384e591db7b04e",
+      "empty_psdu": "70807b6d8143bc3f1b4e1c080b75b9f46f9c0cb78f9275560f384e591db7b04e",
+      "other_psdu": "70807b6d8143bc3f1b4e1c080b75b9f46f9c0cb78f9275560f384e591db7b04e",
+      "sfd_ieee": "b9aa042b79fa7292bf8b6c779adbea3f1223a62b3fbcb32389902dab1c4f0d02"
+    },
+    "pass": true,
+    "post_sfd_depends_on_sfd_and_psdu": true,
+    "post_sfd_hash_by_variant": {
+      "canonical_4z2": "fe45d1cf1ffd5200b22644420e49e25d3b8bc95da65ac174852428989327107b",
+      "empty_psdu": "fe45d1cf1ffd5200b22644420e49e25d3b8bc95da65ac174852428989327107b",
+      "other_psdu": "fe45d1cf1ffd5200b22644420e49e25d3b8bc95da65ac174852428989327107b",
+      "sfd_ieee": "b8ea13a352fa76593566362f775af93b07c555ed16bc883d368bf161f82f07ea"
+    },
+    "recovery_max_int_dev": 8.177354238192436e-08,
+    "recovery_rank_ok": true,
+    "recovery_resid_rel": 2.8245664810032314e-08
+  },
+  "r07_pass": true,
+  "rate_work_hz": 998400000.0,
+  "recovery": {
+    "chip_energy": 64,
+    "expected_rank": 127,
+    "max_int_dev": 8.177354238192436e-08,
+    "nonzero_chips": 64,
+    "rank": 127,
+    "resid_rel": 2.8245664810032314e-08,
+    "sync_symbol_scale": 5.055912238249137,
+    "ternary_values": [
+      -1,
+      0,
+      1
+    ]
+  },
+  "reference": {
+    "convolve_max_abs_diff": 0.0,
+    "packet_prefix_ratio": 5.055912023033744,
+    "packet_prefix_rel_resid": 3.444969628787661e-08,
+    "packet_prefix_samples": 65024
+  },
+  "sample_format": "fc32",
+  "sample_index_base": 0,
+  "samples_per_symbol": 1016,
+  "schema_version": 1,
+  "sensing_code": 9,
+  "source": "finite 64-SYNC code-pulse train; length = (R-1)*sps + (127-1)*8 + pulse_taps",
+  "sync_repetitions": 64
+}

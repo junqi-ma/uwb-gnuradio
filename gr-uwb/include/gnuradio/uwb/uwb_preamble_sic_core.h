@@ -75,13 +75,14 @@ constexpr size_t kSicMaxPaths = 16;
 // per-lag VOLK dot.  The reconstruction combine is VOLK 32fc
 // (volk_64f_convert_32f to narrow the double accumulation, then
 // volk_32fc_x2_multiply_32fc with a block-decomposed float32 CFO ramp).  The
-// final gain fit forms the K x K Gram matrix and RHS in DOUBLE precision (a
-// flat, unrolled complex conjugate dot per entry) and solves them with a
-// self-contained double Cholesky -- no explicit inverse, and NOT a float32
-// normal-equation factor, so `gain_condition` is the honest cond(A) up to the
-// 1e6 commit ceiling.  VOLK is already a link dependency of gnuradio-uwb, so
-// this adds no new wiring.  The fractional-refine seed solve remains a
-// Householder QR in the .cc.
+// final gain fit solves the M x K least squares by Householder QR of A (NO
+// normal equations, NO explicit inverse) and reports cond(A) computed from the
+// singular values of the K x K factor R (A = QR, Q orthogonal => cond2(A) ==
+// cond2(R) exactly) via a self-contained one-sided complex Jacobi SVD.  The old
+// max|R_kk|/min|R_kk| diagonal ratio was NOT cond(A) and has been removed; see
+// `SicResult::gain_condition`.  VOLK is already a link dependency of
+// gnuradio-uwb, so this adds no new wiring.  The fractional-refine seed solve
+// uses the same Householder QR in the .cc.
 struct SicConfig {
     SicMode mode = SicMode::Off;
     size_t comm_code = 10;
@@ -92,6 +93,19 @@ struct SicConfig {
     size_t fit_reps = 8;              // estimation window in SYNC (8/16/32)
     size_t validation_reps = 8;       // holdout, disjoint from fit_reps, >=8
     int64_t roi_lo = 0, roi_hi = 0;   // public candidate search ROI [lo,hi)
+    // Distinct SUBTRACTION / COMMIT ROI [lo, hi): the SENSING processing region
+    // (the sensing preamble / CIR window) the SIC is allowed to modify and that
+    // a detected interferer must actually OVERLAP to be actionable.  It is NOT
+    // the candidate search range: `roi_lo/roi_hi` above stay deliberately wide
+    // so the natural preamble/multipath tail of a real comm is never clipped by
+    // the candidate range (R02).  A real comm detected entirely OUTSIDE this
+    // region is not actionable -- committing there would change the output
+    // without removing anything from the sensing signal, which the negative
+    // contract counts as a false commit -- so the core BYPASSES (out == y).
+    // Disabled when `sub_roi_hi <= sub_roi_lo` (legacy: subtraction = support).
+    // Absolute sample coordinates in the sic_one window.
+    int64_t sub_roi_lo = 0, sub_roi_hi = 0;
+    size_t sub_min_overlap = 0;       // required support∩sub_roi overlap (0 => >0)
     size_t coarse_stride = 14;        // detection coarse stride (samples)
     size_t path_min_spacing = 0;      // 0 => derive from template autocorr mainlobe
     size_t post_tail = 100;           // defined reconstruction tail (samples)
@@ -165,8 +179,11 @@ struct SicResult {
     // number of valid entries.
     size_t n_taus = 0;
     double taus[kSicMaxPaths] = {};
-    double gain_condition = 0.0;           // rank/conditioning indicator
+    double gain_condition = 0.0;           // cond2(A) of the final gain-fit design
     double residual_corr = 0.0;            // holdout comm residual correlation
+    // |support ∩ sub_roi| in samples: the actionable overlap used by the
+    // subtraction/commit gate.  -1 when no sub_roi was configured (disabled).
+    int64_t sub_overlap = -1;
     uint64_t coarse_candidates = 0;
     uint64_t fine_candidates = 0;
     uint64_t correlations = 0;
@@ -275,19 +292,30 @@ struct SicScratch {
 namespace detail {
 
 // Complex least squares A h ~ y for a column-major M x K matrix (K in
-// [1, kSicMaxPaths]) via the K x K Gram matrix G = A^H A and a double
-// Cholesky factorization G = L L^H.  The Gram and RHS are accumulated in DOUBLE
-// (not float32) so that cond(G) = cond(A)^2 cannot destroy the conditioning
-// indicator at the 1e6 commit ceiling.  No explicit matrix inverse is formed.
-// Returns false when a Cholesky pivot is non-positive / non-finite (rank or
-// conditioning collapse); on success writes h[0..K) and, when non-null,
-// *cond = max|R_kk| / min|R_kk| = cond(A).
-UWB_API bool gram_cholesky_solve(const std::complex<double>* A,
-                                 size_t M,
-                                 size_t K,
-                                 const std::complex<double>* y,
-                                 std::complex<double>* h,
-                                 double* cond);
+// [1, kSicMaxPaths]) via Householder QR of A (NO normal equations, NO explicit
+// inverse): factor A = Q R, transform the RHS with Q^H, back-substitute
+// R h = Q^H y.  A is overwritten with the factor R; `work` is caller scratch of
+// length >= M used for the Householder vector.
+//
+// The reported `*cond` is cond2(A) -- the ratio of the largest to smallest
+// singular value, the same quantity as NumPy's `numpy.linalg.cond`.  It is
+// computed from the singular values of the K x K factor R: A = Q R with Q
+// orthogonal implies A^H A = R^H R, so cond2(A) == cond2(R) exactly.  The
+// singular values of R come from a self-contained one-sided complex Jacobi SVD
+// (K <= 16, no LAPACK); operating on R and never on R^H R avoids the
+// normal-equation kappa^2 amplification.  This is NOT the ratio of the |R_kk|
+// diagonal entries, which underestimates cond(A).
+//
+// Returns false when the factor is rank-deficient / non-finite or a computed
+// singular value is not strictly positive (fail-closed); on success writes
+// h[0..K) and, when non-null, *cond = cond2(A) >= 1.
+UWB_API bool qr_cond_solve(std::complex<double>* A,
+                           size_t M,
+                           size_t K,
+                           std::complex<double>* y,
+                           std::complex<double>* h,
+                           std::complex<double>* work,
+                           double* cond);
 
 } // namespace detail
 

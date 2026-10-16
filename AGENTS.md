@@ -35,8 +35,15 @@
 - 新 block 前仍须查本地 GNU Radio 类似实现、说明 scheduler 语义、先补针对性 QA，
   每次有意义修改后构建/测试。吞吐 benchmark 串行、同环境配对。
 
-S0 尚未实现。最终开发结果写 **docs/sic/S0_前导碰撞仿真与耗时开发报告.md**，
-区分 work/native、效果/算力、CIR-only/full demod，通过项、失败项、未实跑项均列明。
+S0 已实现并完成一轮独立整改（R01–R10）。开发结果见
+**docs/sic/S0_前导碰撞仿真与耗时开发报告.md**（含 superseded 说明）与
+复核依据 **docs/sic/S0_整改意见报告_2026-10-16.md**、整改结果
+**docs/sic/S0_整改开发报告_R01-R10.md**、测量合同
+**docs/sic/S0_整改_测量合同.md**。效果以“真实输出”指标（`actual_suppression_db`）
+为准，不是重构 NMSE；工作/采样网格与效果/算力/CIR-only/full demod 分列，通过项、
+失败项、未实跑项（MATLAB 未实跑等）均列明。关键结论：主矩阵 68/72 cell 通过、
+负样本误提交 0/3000（重叠门控修复后）；SIC 核心实测 ~5 ms/窗（真实负载），
+未达 mean≤0.5 ms/200 窗/s 相关门槛（core/GR 达标旧口径已 superseded）。
 
 ## 继承基线：UWB SS-TWR / DS-TWR
 

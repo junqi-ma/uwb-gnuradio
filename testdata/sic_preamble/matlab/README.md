@@ -16,8 +16,8 @@ These scripts therefore:
 
 | item | MATLAB method | shared input with C++ |
 |---|---|---|
-| code-10 SYNC (1016) | independent `lrwpanWaveformGenerator` | none |
-| code-10 64-SYNC preamble (65072) | independent `lrwpanWaveformGenerator` | none |
+| code-10 SYNC (1016) | first symbol of the finite-SYNC preamble (see R07 below) | none |
+| code-10 64-SYNC preamble (65072) | independent `lrwpan.internal.HRPCodes(10)` code-pulse train + LSQ-fitted 48-tap FIR (finite SYNC, **no SFD/PHR/payload**) | none |
 | code-9 sensing SYNC (1016) | independent `lrwpanWaveformGenerator` | none |
 | `i` (interferer) | MATLAB regenerated from the template + generator truth channel + §3.1 ISR rule | template (independent), truth channel, clean `s` (for ISR scale) |
 | `s` (clean sensing) | **loaded** from the C++ fixture (not regenerated) | C++ fixture |
@@ -44,6 +44,70 @@ a floor.
 * No additional toolbox. The `.npy`/`.npz` reader is a small self-contained
   parser (MATLAB has no native `.npz` reader); it handles the dtypes the S0
   fixtures use (`<c8`, `<f8`, `<f4`, `<i8`, `<i4`).
+
+## R07 finite-SYNC comm preamble convention
+
+**Problem fixed (R07).** The previous `comm_preamble_code10_998p4.cf32` was a
+slice `full_packet(SYNC(1) : SYNC(end)+47)` of a full 64-SYNC packet. Because
+the SFD follows the SYNC in the packet, the first SFD pulses leaked into the
+last `n_taps` = 48 samples of the "preamble" tail. R07 requires the preamble to
+be the natural response of the shaping filter to a **finite-length SYNC
+code-pulse train only**.
+
+**Generation (independent MATLAB implementation).** `export_comm_template.m`
+now builds the waveform itself; it does **not** slice a packet:
+
+| quantity | value | note |
+|---|---|---|
+| sample rate | 998.4 MS/s | work grid |
+| samples per chip | 2 | `kQm35SamplesPerChip` |
+| spreading factor | 4 | `kQm35SpreadingFactor` |
+| Ipatov code length | 127, ternary {-1,0,+1} | `lrwpan.internal.HRPCodes(10)`, 64 non-zeros |
+| chips per symbol | 508 = 127·4 | `kQm35ChipsPerSymbol` |
+| samples per symbol | 1016 = 508·2 | `kQm35SamplesPerSymbol` |
+| SYNC repetitions | 64 | |
+| shaping FIR taps | 48 real causal, centre tap 2 | recovered by MATLAB LSQ, see below |
+| pulse placement | `sample(r,c) = r*1016 + c*8`, amplitude `code(c+1)` | same as C++ `add_shaped_chip` |
+| tail convention | `y(n) = Σ_k taps(k)·train(n-k+1)` | causal, `taps(1)` at the pulse sample |
+| length convention | `64*1016 + 48 = 65072` | `sync_reps*samples_per_symbol + n_taps` |
+| first pulse sample | 0 | leading edge = `taps(1)·code(1)` |
+| last pulse sample | 65016 = 63·1016 + 126·8 | |
+| last non-zero sample | 65063 (zero-based) | natural filter tail = 65016+47 |
+| trailing zeros | 8 | close the 65072 convention |
+| contains SFD / PHR / payload | **no / no / no** | by construction |
+
+**Pulse shaping.** The 48 taps are recovered *inside MATLAB* by a
+least-squares fit of the toolbox waveform's **SYNC region only**
+(`packet(idx.SYNC(1):idx.SYNC(end))`, 65024 samples — upstream of the SFD)
+against the known code-pulse train. Nothing is read from the C++ output. The
+fitted taps are additionally cross-checked against the frozen profile file
+`testdata/uwb_hrp_tx/pulse_48.f32` (diagnostic only; the fit is used unless its
+relative residual exceeds `1e-3`, in which case the frozen file is a labelled
+fallback). The taps, their `sha256`, the LSQ residual and the frozen-file delta
+are all written to `comm_template_meta.json` and stored in
+`comm_pulse_taps_998p4.f32`.
+
+**Normalisation.** The preamble is peak-normalised to `peak_amplitude = 0.8`
+using its **own peak** (not the full-packet peak), so the preamble-only waveform
+is independent of the downstream SFD/PHR/payload. `comm_sync_code10_998p4.cf32`
+is the first 1016 samples scaled with the same factor. The scale and the
+diagnostic whole-packet peak are recorded in the meta.
+
+**SFD-independence check.** `export_comm_template.m` also regenerates a packet
+with an alternative `SFDNumber` (best effort) and records that the 65024-sample
+SYNC region is unchanged (`meta.sfd_independence`). This is what makes
+"editing the downstream packet cannot change the preamble-only waveform" a
+checked statement.
+
+**Edge/tail self-checks** (hard invariants, run inside the exporter): the
+leading edge is sample 0, the last significant sample is `65063` (the natural
+tail end), the 8 samples past it are exactly zero (no leaked SFD/PHR/payload),
+the length is `65072`, and the `comm_sync` first symbol equals
+`comm_preamble(1:1016)`.
+
+The old full-packet-slice template and its hashes are **not** overwritten
+anywhere under version control; the new template has new length/energy/hash
+recorded in `comm_template_meta.json`.
 
 ## Exact invocation
 
@@ -74,8 +138,9 @@ missing required artifact, which makes `matlab -batch` exit non-zero. It writes
 
 | file | samples | producer | compared against |
 |---|---|---|---|
-| `comm_sync_code10_998p4.cf32` | 1016 | independent MATLAB | `templates/comm_sync_code10_998p4.cf32` |
-| `comm_preamble_code10_998p4.cf32` | 65072 | independent MATLAB | `templates/comm_preamble_code10_998p4.cf32` |
+| `comm_sync_code10_998p4.cf32` | 1016 | first symbol of the finite-SYNC preamble | `templates/comm_sync_code10_998p4.cf32` |
+| `comm_preamble_code10_998p4.cf32` | 65072 | independent MATLAB finite 64-SYNC code-pulse conv (no SFD) | `templates/comm_preamble_code10_998p4.cf32` |
+| `comm_pulse_taps_998p4.f32` | 48 | MATLAB LSQ-fitted shaping FIR | `testdata/uwb_hrp_tx/pulse_48.f32` (diagnostic) |
 | `sensing_sync_code9_998p4.cf32` | 1016 | independent MATLAB | `templates/sync_template_code9_998p4.cf32` (optional) |
 | `s_998p4.cf32` | 157376 | loaded from C++ fixture | `fixtures/window_0000.npz:s` (integrity) |
 | `i_998p4.cf32` | 157376 | MATLAB regenerated | `fixtures/window_0000.npz:i` |
@@ -135,7 +200,8 @@ reconciled (documented revision), not silently skipped.
 
 ## 未实跑 evidence
 
-`not_run.log` records the actual probe on 2026-10-16:
+`not_run.log` records the actual probes on 2026-10-16 (08:56:52Z and the R07
+re-check at 14:16:00Z):
 
 ```
 $ which matlab octave
@@ -147,4 +213,8 @@ $ octave --eval "disp(version)"
 ```
 
 Conclusion: no cross-check has been executed. The final S0 report must list this
-as `not_run`; the Python reference is not an accepted substitute.
+as `not_run`; the Python reference is not an accepted substitute. In particular
+the R07 finite-SYNC preamble (`export_comm_template.m`) and every output hash in
+`comm_template_meta.json` remain **未实跑 (NOT RUN)** until a host with the
+Communications Toolbox executes the exporter; the convention above is the frozen
+contract the C++ producer must match, not a MATLAB-verified result.

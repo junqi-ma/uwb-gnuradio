@@ -287,11 +287,44 @@ bool wait_for(Pred pred, size_t timeout_ms = 120000)
     return true;
 }
 
-bool wait_drained(const Blk::sptr& b, uint64_t want_offered)
+// Deterministic harness wait.  `blk->drained()` is an ADAPTER-side condition
+// (its own queue is empty and the worker is idle); the `out`/`i_hat`/`status`
+// PDUs are then handed to asynchronous GNU Radio message queues, so the
+// downstream message_debug blocks may not have STORED them yet.  Reading the
+// stores (or calling stop(), which tears the subscribers down) before delivery
+// completes races the message threads -- that is the original flake.  Wait
+// until the adapter is terminal AND every PDU it produced has been delivered.
+//
+//   - one `out` and one `status` are produced per offered window (`status` is
+//     either the terminal "window" event or a per-window reject event such as
+//     "queue_overflow"); a queue-overflow window produces no `out`;
+//   - one `i_hat` per window while that port is connected.
+//
+// `offered - queue_overflow` stays correct even if the last `in` handler is
+// still running: the target only shrinks as reject decisions are recorded, so
+// the wait resolves exactly when every decision/publication is done.  This is a
+// real synchronisation, not an assertion relaxation.
+bool wait_delivered(const Harness& h, uint64_t want_offered,
+                    size_t timeout_ms = 120000)
 {
-    return wait_for([&] {
-        return b->windows_offered() >= want_offered && b->drained();
-    });
+    return wait_for(
+        [&] {
+            if (h.blk->windows_offered() < want_offered || !h.blk->drained())
+                return false;
+            const uint64_t expected_out =
+                h.blk->windows_offered() - h.blk->windows_queue_overflow();
+            if (static_cast<uint64_t>(h.out_dbg->num_messages()) < expected_out)
+                return false;
+            if (static_cast<uint64_t>(h.status_dbg->num_messages()) <
+                h.blk->windows_offered())
+                return false;
+            if (h.ihat_dbg &&
+                static_cast<uint64_t>(h.ihat_dbg->num_messages()) <
+                    h.blk->windows_offered())
+                return false;
+            return true;
+        },
+        timeout_ms);
 }
 
 bool status_seen(gr::blocks::message_debug::sptr dbg, const std::string& event)
@@ -303,6 +336,14 @@ bool status_seen(gr::blocks::message_debug::sptr dbg, const std::string& event)
             return true;
     }
     return false;
+}
+
+// Wait until `event` has actually been delivered to the status store.
+bool wait_status_event(gr::blocks::message_debug::sptr dbg,
+                       const std::string& event,
+                       size_t timeout_ms = 120000)
+{
+    return wait_for([&] { return status_seen(dbg, event); }, timeout_ms);
 }
 
 // First status dict with event=="window" and the given window_id (PMT_NIL if
@@ -324,12 +365,32 @@ pmt::pmt_t find_window_status(gr::blocks::message_debug::sptr dbg,
     return pmt::PMT_NIL;
 }
 
+// Wait until the terminal "window" status for `window_id` has been delivered.
+// Returns PMT_NIL on timeout: callers MUST test `!pmt::is_null(...)` and NOT
+// `pmt::is_dict(...)`, because pmt::is_dict(PMT_NIL) is TRUE (PMT treats the
+// empty list as an empty dict) -- using is_dict here was exactly what masked
+// the delivery race that produced the 0-timer status.
+pmt::pmt_t wait_window_status(gr::blocks::message_debug::sptr dbg,
+                              uint64_t window_id,
+                              size_t timeout_ms = 120000)
+{
+    pmt::pmt_t out;
+    wait_for(
+        [&] {
+            out = find_window_status(dbg, window_id);
+            return !pmt::is_null(out);
+        },
+        timeout_ms);
+    return out;
+}
+
 const char* const kOutMetaKeys[] = {
     "sic_state",          "sic_detected",          "sic_committed",
     "sic_partial",        "sic_ambiguous",         "sic_bypass_reason",
     "sic_uses_truth",     "sic_detected_start",    "sic_cfo_hz",
     "sic_n_paths",        "sic_support_lo",        "sic_support_hi",
-    "sic_residual_corr",  "handler_us",            "queue_wait_us",
+    "sic_sub_overlap",    "sic_residual_corr",     "handler_us",
+    "queue_wait_us",
     "core_total_us",      "output_wrap_publish_us", "completion_latency_us",
     "sic_detect_coarse_us", "sic_detect_fine_us",  "sic_cfo_us",
     "sic_cir_us",         "sic_path_select_us",    "sic_fractional_refine_us",
@@ -538,7 +599,7 @@ BOOST_AUTO_TEST_CASE(test_adapter_off_bypass_bit_exact)
                                         8, size_t(1) << 30, 8, true);
     Harness h(blk, true);
     blk->_post(pmt::mp("in"), make_pdu(y, 1));
-    BOOST_REQUIRE(wait_drained(blk, 1));
+    BOOST_REQUIRE(wait_delivered(h, 1));
     h.stop();
 
     BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), 1u);
@@ -579,7 +640,7 @@ BOOST_AUTO_TEST_CASE(test_adapter_no_detection_bypass)
                                         0.25, 8, size_t(1) << 30, 8, true);
     Harness h(blk, true);
     blk->_post(pmt::mp("in"), make_pdu(y, 5));
-    BOOST_REQUIRE(wait_drained(blk, 1));
+    BOOST_REQUIRE(wait_delivered(h, 1));
     h.stop();
 
     BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), 1u);
@@ -609,7 +670,7 @@ BOOST_AUTO_TEST_CASE(test_adapter_wrong_template_bypass)
                                         0.25, 8, size_t(1) << 30, 8, false);
     Harness h(blk);
     blk->_post(pmt::mp("in"), make_pdu(y, 9));
-    BOOST_REQUIRE(wait_drained(blk, 1));
+    BOOST_REQUIRE(wait_delivered(h, 1));
     h.stop();
 
     BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), 1u);
@@ -617,6 +678,85 @@ BOOST_AUTO_TEST_CASE(test_adapter_wrong_template_bypass)
     BOOST_CHECK(bit_equal(pdu_iq(h.out_dbg->get_message(0)), y));
     BOOST_CHECK(pmt::to_bool(
         pmt::dict_ref(meta, pmt::mp("sic_committed"), pmt::PMT_T)) == false);
+}
+
+// ---------------------------------------------------------------------------
+// 3b. Real comm present but OUTSIDE the sensing processing ROI -> bypass.
+// ---------------------------------------------------------------------------
+// R10 regression: the search ROI stays wide (the adapter detects the real
+// comm), but the per-window `sensing_roi_lo/hi` PDU meta declares the sensing
+// processing ROI and the comm does not overlap it, so the core bypasses and the
+// published IQ is byte-identical to the input.
+BOOST_AUTO_TEST_CASE(test_adapter_comm_outside_sensing_roi_bypass)
+{
+    const Model m = build_model(10, 16);
+    const int64_t sensing_hi = 34000;               // sensing processing ROI end
+    const int64_t start = sensing_hi + 1500;        // comm fully outside it
+    const size_t n = static_cast<size_t>(start + 16 * kSps + 1000);
+    const std::vector<cplx> y =
+        make_signal(m, n, start, { { 0.0, cplx(1.f, 0.f) } }, 0.0, 1e-3, 11);
+
+    // WIDE search ROI [0, n): the real comm is inside it and is detected.
+    auto blk = Blk::make_from_templates(m.sync, m.preamble, 10, 16, kSps, kFs,
+                                        4, 8, 8, 0, static_cast<int64_t>(n), 14,
+                                        "estimate", 0.5, 0.25, 8,
+                                        size_t(1) << 30, 8, true);
+    Harness h(blk, true);
+    pmt::pmt_t pdu = make_pdu(y, 3);
+    pmt::pmt_t meta_in = pdu_meta(pdu);
+    meta_in = pmt::dict_add(meta_in, pmt::mp("sensing_roi_lo"),
+                            pmt::from_long(0));
+    meta_in = pmt::dict_add(meta_in, pmt::mp("sensing_roi_hi"),
+                            pmt::from_long(sensing_hi));
+    blk->_post(pmt::mp("in"), pmt::cons(meta_in, pmt::cdr(pdu)));
+    BOOST_REQUIRE(wait_delivered(h, 1));
+    h.stop();
+
+    BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), 1u);
+    const pmt::pmt_t out = h.out_dbg->get_message(0);
+    const pmt::pmt_t meta = pdu_meta(out);
+    BOOST_CHECK(bit_equal(pdu_iq(out), y));
+    BOOST_CHECK(all_zero(pdu_iq(h.ihat_dbg->get_message(0))));
+    BOOST_CHECK_EQUAL(sym(pmt::dict_ref(meta, pmt::mp("sic_state"), pmt::PMT_NIL)),
+                      "bypassed");
+    BOOST_CHECK_EQUAL(
+        sym(pmt::dict_ref(meta, pmt::mp("sic_bypass_reason"), pmt::PMT_NIL)),
+        "outside_sensing_roi");
+    BOOST_CHECK(pmt::to_bool(pmt::dict_ref(meta, pmt::mp("sic_detected"),
+                                           pmt::PMT_F)) == true);
+    BOOST_CHECK(pmt::to_bool(pmt::dict_ref(meta, pmt::mp("sic_committed"),
+                                           pmt::PMT_F)) == false);
+    BOOST_CHECK_EQUAL(
+        pmt::to_long(pmt::dict_ref(meta, pmt::mp("sic_sub_overlap"),
+                                   pmt::from_long(-2))),
+        0);
+    check_out_meta_keys(meta);
+
+    // Positive control: the SAME window with a sensing ROI that covers the comm
+    // must commit and publish a cleaned vector that differs from the input.
+    auto blk2 = Blk::make_from_templates(m.sync, m.preamble, 10, 16, kSps, kFs,
+                                         4, 8, 8, 0, static_cast<int64_t>(n), 14,
+                                         "estimate", 0.5, 0.25, 8,
+                                         size_t(1) << 30, 8, true);
+    Harness h2(blk2, true);
+    pmt::pmt_t pdu2 = make_pdu(y, 4);
+    pmt::pmt_t meta2 = pdu_meta(pdu2);
+    meta2 = pmt::dict_add(meta2, pmt::mp("sensing_roi_lo"),
+                          pmt::from_long(start - 64));
+    meta2 = pmt::dict_add(meta2, pmt::mp("sensing_roi_hi"),
+                          pmt::from_long(start + 16 * kSps + 1000));
+    blk2->_post(pmt::mp("in"), pmt::cons(meta2, pmt::cdr(pdu2)));
+    BOOST_REQUIRE(wait_delivered(h2, 1));
+    h2.stop();
+    BOOST_REQUIRE_EQUAL(h2.out_dbg->num_messages(), 1u);
+    const pmt::pmt_t out2 = h2.out_dbg->get_message(0);
+    const pmt::pmt_t meta2o = pdu_meta(out2);
+    BOOST_CHECK_EQUAL(
+        sym(pmt::dict_ref(meta2o, pmt::mp("sic_state"), pmt::PMT_NIL)),
+        "committed");
+    BOOST_CHECK(pmt::to_bool(pmt::dict_ref(meta2o, pmt::mp("sic_committed"),
+                                           pmt::PMT_F)) == true);
+    BOOST_CHECK(!bit_equal(pdu_iq(out2), y));
 }
 
 // ---------------------------------------------------------------------------
@@ -640,7 +780,7 @@ BOOST_AUTO_TEST_CASE(test_adapter_one_out_per_offered_in_order)
         inputs.push_back(y);
         blk->_post(pmt::mp("in"), make_pdu(y, k));
     }
-    BOOST_REQUIRE(wait_drained(blk, N));
+    BOOST_REQUIRE(wait_delivered(h, N));
     h.stop();
 
     BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), N);
@@ -689,7 +829,7 @@ BOOST_AUTO_TEST_CASE(test_adapter_byte_budget_missed_admission)
     const uint64_t N = 6;
     for (uint64_t k = 0; k < N; ++k)
         blk->_post(pmt::mp("in"), make_pdu(y, 100 + k));
-    BOOST_REQUIRE(wait_drained(blk, N));
+    BOOST_REQUIRE(wait_delivered(h, N));
     h.stop();
 
     BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), N);
@@ -756,7 +896,7 @@ BOOST_AUTO_TEST_CASE(test_adapter_inflight_burst_missed_no_reorder)
                              pmt::from_long(static_cast<long>(y.size())));
         blk->_post(pmt::mp("in"), pmt::cons(meta, vec));
     }
-    BOOST_REQUIRE(wait_drained(blk, N));
+    BOOST_REQUIRE(wait_delivered(h, N));
     h.stop();
 
     BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), N);
@@ -830,7 +970,7 @@ BOOST_AUTO_TEST_CASE(test_adapter_bounded_bypass_fifo_queue_overflow)
                              pmt::from_long(static_cast<long>(y.size())));
         blk->_post(pmt::mp("in"), pmt::cons(meta, vec));
     }
-    BOOST_REQUIRE(wait_drained(blk, N));
+    BOOST_REQUIRE(wait_delivered(h, N));
     h.stop();
 
     BOOST_CHECK_GT(blk->windows_queue_overflow(), uint64_t(0));
@@ -897,6 +1037,9 @@ BOOST_AUTO_TEST_CASE(test_adapter_invalid_input)
     }
 
     BOOST_REQUIRE(wait_for([&] { return blk->windows_invalid() >= 4; }));
+    // The status PDUs share the async delivery path; wait for delivery before
+    // stop() tears the subscriber down (drained()/counters are adapter-side).
+    BOOST_REQUIRE(wait_status_event(h.status_dbg, "invalid_input"));
     h.stop();
 
     BOOST_CHECK_EQUAL(blk->windows_invalid(), 4u);
@@ -927,7 +1070,7 @@ BOOST_AUTO_TEST_CASE(test_adapter_stop_drain)
         y[2] = cplx(static_cast<float>(k), 1.f);
         blk->_post(pmt::mp("in"), make_pdu(y, k));
     }
-    BOOST_REQUIRE(wait_drained(blk, N));
+    BOOST_REQUIRE(wait_delivered(h, N));
     blk->drain(); // must return immediately
     h.stop();
 
@@ -988,7 +1131,7 @@ BOOST_AUTO_TEST_CASE(test_adapter_oracle_vs_estimate_uses_truth)
         Harness h(blk);
         blk->_post(pmt::mp("truth"), truth_msg(42));
         blk->_post(pmt::mp("in"), make_pdu(y, 42));
-        BOOST_REQUIRE(wait_drained(blk, 1));
+        BOOST_REQUIRE(wait_delivered(h, 1));
         h.stop();
 
         BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), 1u);
@@ -1009,15 +1152,21 @@ BOOST_AUTO_TEST_CASE(test_adapter_oracle_vs_estimate_uses_truth)
                                             kFs, 4, 8, 8, 0, 0, 14, "estimate",
                                             0.5, 0.25, 8, size_t(1) << 30, 8,
                                             false);
-        // Truth port is oracle-only: not registered in estimate mode and the
-        // block stores no truth object.  Posting to it is an error.
+        // Truth port is oracle-only: it is not registered in estimate mode and
+        // the block stores no truth object.  Assert the port is absent rather
+        // than posting a PDU to it: posting to a nonexistent port trips
+        // basic_block's "attempted insertion on invalid queue" error log before
+        // it throws, which is the benign warning this test used to emit.
         BOOST_CHECK(!blk->truth_port_enabled());
         BOOST_CHECK(!blk->has_msg_port(pmt::mp("truth")));
-        BOOST_CHECK_THROW(blk->_post(pmt::mp("truth"), truth_msg(42)),
-                          std::runtime_error);
+        // Only post truth where the port actually exists, so the estimate path
+        // below proves it IGNORES truth (sic_uses_truth stays false) without
+        // relying on the rejection path.
+        if (blk->truth_port_enabled())
+            blk->_post(pmt::mp("truth"), truth_msg(42));
         Harness h(blk);
         blk->_post(pmt::mp("in"), make_pdu(y, 42));
-        BOOST_REQUIRE(wait_drained(blk, 1));
+        BOOST_REQUIRE(wait_delivered(h, 1));
         h.stop();
 
         BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), 1u);
@@ -1060,10 +1209,13 @@ BOOST_AUTO_TEST_CASE(test_adapter_oracle_vs_estimate_uses_truth)
         BOOST_CHECK_GE(core, max_kid);
         BOOST_CHECK_LE(kids, core + 200); // children are sub-timers, not summed in
         BOOST_CHECK_GT(meta_u64(meta, "output_wrap_publish_us") + 1, uint64_t(0));
-        // The status event mirrors the PUB-INCLUSIVE adapter timers (the out
-        // meta can only carry the construction-measured portion).
-        const pmt::pmt_t st_meta = find_window_status(h.status_dbg, 42);
-        BOOST_REQUIRE(pmt::is_dict(st_meta));
+        // The terminal status event mirrors the PUB-INCLUSIVE adapter timers
+        // (the out meta can only carry the construction-measured portion).
+        // Wait for that event to be DELIVERED and require a non-null result:
+        // pmt::is_dict(PMT_NIL) is true, so an is_dict() check would accept a
+        // not-yet-delivered status and read back zeros.
+        const pmt::pmt_t st_meta = wait_window_status(h.status_dbg, 42);
+        BOOST_REQUIRE(!pmt::is_null(st_meta));
         const uint64_t wrap_status =
             meta_u64(st_meta, "output_wrap_publish_us");
         const uint64_t lat_status =
@@ -1118,7 +1270,7 @@ BOOST_AUTO_TEST_CASE(test_adapter_rev2_knobs_and_one_time_grow)
     const std::vector<cplx> y1 = post_off(0, 1024);
     const std::vector<cplx> y2 = post_off(1, 2048);
     const std::vector<cplx> y3 = post_off(2, 4096);
-    BOOST_REQUIRE(wait_drained(blk, 3));
+    BOOST_REQUIRE(wait_delivered(h, 3));
     h.stop();
 
     BOOST_CHECK_EQUAL(blk->window_grow_count(), uint64_t(1));
@@ -1145,10 +1297,10 @@ BOOST_AUTO_TEST_CASE(test_adapter_rev2_knobs_and_one_time_grow)
         BOOST_CHECK_EQUAL(b2->max_window_samples(), size_t(2048));
         Harness h2(b2);
         b2->_post(pmt::mp("in"), make_pdu(std::vector<cplx>(1024), 0));
-        BOOST_REQUIRE(wait_drained(b2, 1));
+        BOOST_REQUIRE(wait_delivered(h2, 1));
         BOOST_CHECK_EQUAL(b2->window_grow_count(), uint64_t(0));
         b2->_post(pmt::mp("in"), make_pdu(std::vector<cplx>(4096), 1));
-        BOOST_REQUIRE(wait_drained(b2, 2));
+        BOOST_REQUIRE(wait_delivered(h2, 2));
         h2.stop();
         BOOST_CHECK_EQUAL(b2->window_grow_count(), uint64_t(1));
         BOOST_CHECK_EQUAL(b2->windows_pool_capacity_exceeded(), uint64_t(0));
@@ -1189,7 +1341,7 @@ BOOST_AUTO_TEST_CASE(test_adapter_golden_fixture_optional)
                                         size_t(1) << 30, 8, true);
     Harness h(blk, true);
     blk->_post(pmt::mp("in"), make_pdu(y, 1));
-    BOOST_REQUIRE(wait_drained(blk, 1));
+    BOOST_REQUIRE(wait_delivered(h, 1));
     h.stop();
 
     BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), 1u);

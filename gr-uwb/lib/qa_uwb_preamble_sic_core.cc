@@ -773,6 +773,100 @@ BOOST_AUTO_TEST_CASE(test_sic_core_roi_narrow_vs_wide)
 }
 
 // ---------------------------------------------------------------------------
+// 7b. real comm present but OUTSIDE the sensing processing ROI -> bypass
+// ---------------------------------------------------------------------------
+// Regression for the R10 no_overlap false commit.  A REAL, template-consistent
+// comm preamble is injected entirely OUTSIDE the sensing processing ROI, and the
+// SEARCH ROI stays wide (it includes the comm) so the core still detects it.
+// The subtraction/commit ROI is separate: the comm support does not overlap it,
+// so the core must fail closed (Bypassed, out == y byte-for-byte).  The positive
+// control moves the sensing ROI over the comm and must then commit.
+BOOST_AUTO_TEST_CASE(test_sic_core_comm_outside_sensing_roi_bypasses)
+{
+    const size_t comm_reps = 16;
+    const size_t sensing_reps = 32;
+    Fixture f;
+    f.model = build_model(10, comm_reps);
+    const int64_t sensing_lo = static_cast<int64_t>(kPre);
+    const int64_t sensing_hi =
+        sensing_lo + static_cast<int64_t>(sensing_reps) * kSps;
+    f.comm_start = sensing_hi + 400;   // fully outside the sensing ROI
+    f.n = static_cast<size_t>(f.comm_start +
+                              static_cast<int64_t>(comm_reps) * kSps + 2000);
+    f.cfg.mode = SicMode::Estimate;
+    f.cfg.comm_code = 10;
+    f.cfg.sync_reps = comm_reps;
+    f.cfg.samples_per_symbol = kSps;
+    f.cfg.sample_rate = kFs;
+    f.cfg.k_paths = 4;
+    f.cfg.fit_reps = 8;
+    f.cfg.validation_reps = 8;
+    f.cfg.roi_lo = 0;                        // WIDE search ROI (sees the comm)
+    f.cfg.roi_hi = static_cast<int64_t>(f.n);
+    f.cfg.coarse_stride = 14;
+    f.cfg.path_min_spacing = 0;
+    f.cfg.post_tail = 100;
+    f.cfg.enable_fractional = true;
+    f.cfg.enable_cfo = true;
+    f.cfg.detect_threshold = 0.5;
+    f.cfg.validate_threshold = 0.25;
+    f.cfg.sub_roi_lo = sensing_lo;           // SEPARATE sensing processing ROI
+    f.cfg.sub_roi_hi = sensing_hi;
+    f.cfg.sub_min_overlap = 0;
+    f.out.assign(f.n, cplx(0.f, 0.f));
+    f.ihat.assign(f.n, cplx(0.f, 0.f));
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(sic::prepare_sic_core(
+                              f.cfg, f.model.sync.data(), f.model.sync.size(),
+                              f.model.preamble.data(), f.model.preamble.size(),
+                              f.scratch, &err),
+                          "prepare_sic_core failed: " << err);
+
+    Signal s = build_signal(f.model, f.n, f.comm_start,
+                            { { 0.0, cplx(1.f, 0.f) } }, 0.0, kQaNoise, 77);
+    SicResult r = run(f, s);
+    std::printf("[sic-qa] outside-sensing-roi state=%s reason=%s detected=%d "
+                "start=%lld sub_overlap=%lld\n",
+                state_name(r.state), r.bypass_reason ? r.bypass_reason : "-",
+                static_cast<int>(r.detected),
+                static_cast<long long>(r.detected_start),
+                static_cast<long long>(r.sub_overlap));
+    // The comm is real: the WIDE search ROI still detects it...
+    BOOST_CHECK_MESSAGE(r.detected,
+                        "real comm outside the sensing ROI must still be "
+                        "detected by the wide search ROI");
+    BOOST_CHECK(std::abs(r.detected_start - f.comm_start) <= 1);
+    // ...but it is NOT actionable: no overlap with the sensing ROI -> bypass.
+    BOOST_CHECK_EQUAL(static_cast<int>(r.state),
+                      static_cast<int>(SicState::Bypassed));
+    BOOST_CHECK(!r.committed);
+    BOOST_CHECK_EQUAL(r.sub_overlap, int64_t(0));
+    BOOST_CHECK_EQUAL(std::string(r.bypass_reason ? r.bypass_reason : ""),
+                      std::string("outside_sensing_roi"));
+    BOOST_CHECK_EQUAL_COLLECTIONS(f.out.begin(), f.out.end(), s.y.begin(),
+                                  s.y.end());
+
+    // Positive control: the SAME window, sensing ROI moved to cover the comm,
+    // must commit and change the output.  (sub_roi is a runtime field not used
+    // by prepare, so the prepared scratch is reused.)
+    f.cfg.sub_roi_lo = f.comm_start - 64;
+    f.cfg.sub_roi_hi =
+        f.comm_start + static_cast<int64_t>(comm_reps) * kSps + 1000;
+    SicResult r2 = run(f, s);
+    std::printf("[sic-qa] overlap-control state=%s sub_overlap=%lld\n",
+                state_name(r2.state),
+                static_cast<long long>(r2.sub_overlap));
+    BOOST_CHECK_EQUAL(static_cast<int>(r2.state),
+                      static_cast<int>(SicState::Committed));
+    BOOST_CHECK(r2.committed);
+    BOOST_CHECK_GT(r2.sub_overlap, int64_t(0));
+    bool changed = false;
+    for (size_t k = 0; k < f.n; ++k)
+        changed = changed || (f.out[k] != s.y[k]);
+    BOOST_CHECK_MESSAGE(changed, "committed control must change the output");
+}
+
+// ---------------------------------------------------------------------------
 // 8. wrong comm code must not commit on a code-9 signal
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(test_sic_core_wrong_code_no_commit)
@@ -925,16 +1019,14 @@ BOOST_AUTO_TEST_CASE(test_sic_core_noise_bypass_is_clean)
 }
 
 // ---------------------------------------------------------------------------
-// 13. gain-fit conditioning indicator (float32 K x K Gram + Cholesky, iter-5)
+// 13. gain-fit conditioning indicator (Householder QR; cond2(A) of the design)
 // ---------------------------------------------------------------------------
-// The final gain fit no longer runs a Householder QR over M x K; it forms the
-// K x K Gram matrix with VOLK 32fc conjugate dots and solves it with a Cholesky
-// (still no explicit inverse).  The reported `gain_condition` must keep the same
-// meaning as before -- cond(A) = max|R_kk| / min|R_kk|, i.e. the square root of
-// the largest/smallest Cholesky pivot ratio -- and stay finite, >= 1 and below
-// the commit ceiling; the solve must still produce a committed, model-matching
-// reconstruction.  A single fitted column is the sharpest pin: the Gram is 1x1,
-// so every pivot equals |A_0| and cond(A) == 1 exactly.
+// The final gain fit solves the M x K least squares with a Householder QR and
+// reports `gain_condition` = cond2(A), computed from the singular values of the
+// K x K factor R (A = QR).  It must stay finite, >= 1 and below the commit
+// ceiling; the solve must still produce a committed, model-matching
+// reconstruction.  A single fitted column is the sharpest pin: R is 1x1, so
+// cond2(A) == 1 exactly.
 BOOST_AUTO_TEST_CASE(test_sic_core_gain_condition_semantics)
 {
     const std::vector<Path> paths = {
@@ -1030,139 +1122,350 @@ BOOST_AUTO_TEST_CASE(test_sic_core_fractional_selection_differential)
 }
 
 // ---------------------------------------------------------------------------
-// 15. declared ILL-CONDITIONED gain fit (double Gram + Cholesky safety)
+// 15. gain-fit condition number: cond2(A) is NOT the R diagonal ratio (R05)
 // ---------------------------------------------------------------------------
-// The final gain fit factors a normal-equation (Gram) matrix, so its own
-// conditioning is cond(A)^2.  A float32 Gram can therefore only resolve cond(A)
-// below ~1/sqrt(eps32) ~ 1e3 and its pivot noise (~eps32) can flip the
-// `cond < 1e6` commit gate.  This DECLARED case drives detail::gram_cholesky_solve
-// on synthetic designs with a known cond(A) and asserts:
-//   * the double factor recovers cond(A) to a few percent up to and past 1e6;
-//   * the solution is accurate (y = A h_true is recovered) at every stage;
-//   * at cond(A) ~ 2e6 the reported cond is >= 1e6, so the reference rule
-//     (commit only if cond(A) < 1e6) REJECTS -- fail closed;
-//   * a float32 normal-equation factor of the SAME design is off by more than
-//     50% there (unsafe), which is the defect the double factor removes.
-static double gram_cond_f32(const std::vector<dcp>& A, size_t M, size_t K, bool& ok)
+// The commit gate is `cond < 1e6`, so `cond` needs a DEFINED meaning.  This case
+// pins it to cond2(A) -- the ratio of the largest to smallest singular value,
+// i.e. the NumPy `linalg.cond` quantity -- and drives detail::qr_cond_solve
+// directly.  It reproduces the R05 counterexample
+//
+//     A = [[1, 1], [0, 1.5e-6]]
+//     old max|R_kk|/min|R_kk| = 666666.7  (would PASS the gate)
+//     true cond2(A)          = 1333333.3 (> 1e6, must be REJECTED)
+//
+// and additionally checks, for column scales / near-collinear columns / column
+// permutation / both sides of the 1e6 gate / an ill-conditioned design, that
+// (a) the reported cond matches an independent oracle and (b) the least-squares
+// solution has a machine-level residual.
+//
+// The oracle is a self-contained long-double eigenvalue decomposition of the
+// Gram (classical cyclic Jacobi), a DIFFERENT algorithm and a wider precision
+// from the core's double one-sided complex Jacobi on the QR factor R.  It is
+// validated below against designs built from a KNOWN singular-value spectrum.
+
+// Independent reference cond2(A) = sqrt(lambda_max/lambda_min) of the Hermitian
+// Gram G = A^H A, eigenvalues by the classical cyclic Jacobi method in long
+// double.  (Different algorithm from the core; used only as a cross-check.)
+static long double ref_cond2(const std::vector<dcp>& A, size_t M, size_t K)
 {
-    std::vector<cplx> af(M * K);
-    for (size_t i = 0; i < M * K; ++i)
-        af[i] = cplx(static_cast<float>(A[i].real()), static_cast<float>(A[i].imag()));
-    dcp G[sic::kSicMaxPaths][sic::kSicMaxPaths];
+    using lc = std::complex<long double>;
+    std::vector<lc> G(K * K, lc(0, 0));
     for (size_t i = 0; i < K; ++i) {
         for (size_t j = i; j < K; ++j) {
-            cplx d(0.f, 0.f); // float32 accumulation, as the reviewed factor did
-            for (size_t m = 0; m < M; ++m)
-                d += std::conj(af[i * M + m]) * af[j * M + m];
-            G[i][j] = dcp(d);
-            G[j][i] = std::conj(G[i][j]);
+            long double rr = 0, ii = 0;
+            for (size_t m = 0; m < M; ++m) {
+                const long double ar = A[i * M + m].real();
+                const long double ai = A[i * M + m].imag();
+                const long double br = A[j * M + m].real();
+                const long double bi = A[j * M + m].imag();
+                rr += ar * br + ai * bi;
+                ii += ar * bi - ai * br;
+            }
+            G[i * K + j] = lc(rr, ii);
+            G[j * K + i] = lc(rr, -ii);
         }
     }
-    dcp L[sic::kSicMaxPaths][sic::kSicMaxPaths];
-    double dmax = 0.0, dmin = std::numeric_limits<double>::infinity();
-    ok = true;
-    for (size_t j = 0; j < K && ok; ++j) {
-        dcp s = G[j][j];
-        for (size_t l = 0; l < j; ++l)
-            s -= L[j][l] * std::conj(L[j][l]);
-        if (!(s.real() > 0.0) || !std::isfinite(s.real())) {
-            ok = false;
+    for (int sweep = 0; sweep < 100; ++sweep) {
+        long double off = 0;
+        for (size_t p = 0; p + 1 < K; ++p) {
+            for (size_t q = p + 1; q < K; ++q) {
+                const lc gpq = G[p * K + q];
+                const long double b = std::abs(gpq);
+                const long double app = G[p * K + p].real();
+                const long double aqq = G[q * K + q].real();
+                off = std::max(off, b);
+                if (b <= 1e-30L * std::max(1.0L, std::max(std::abs(app),
+                                                           std::abs(aqq))))
+                    continue;
+                const long double theta = 0.5L * (aqq - app);
+                const long double r = std::hypot(theta, b);
+                const long double np = std::hypot(b, theta + r);
+                const long double nm = std::hypot(b, theta - r);
+                const lc c0 = gpq / np, c2 = lc((theta + r) / np, 0);
+                const lc c1 = gpq / nm, c3 = lc((theta - r) / nm, 0);
+                for (size_t i = 0; i < K; ++i) { // G <- G J
+                    const lc gp = G[i * K + p], gq = G[i * K + q];
+                    G[i * K + p] = gp * c0 + gq * c2;
+                    G[i * K + q] = gp * c1 + gq * c3;
+                }
+                for (size_t j = 0; j < K; ++j) { // G <- J^H G
+                    const lc gp = G[p * K + j], gq = G[q * K + j];
+                    G[p * K + j] = std::conj(c0) * gp + std::conj(c2) * gq;
+                    G[q * K + j] = std::conj(c1) * gp + std::conj(c3) * gq;
+                }
+            }
+        }
+        if (off < 1e-25L)
             break;
-        }
-        const double dj = std::sqrt(s.real());
-        L[j][j] = dcp(dj, 0.0);
-        dmax = std::max(dmax, dj);
-        dmin = std::min(dmin, dj);
-        for (size_t i = j + 1; i < K; ++i) {
-            dcp t = G[i][j];
-            for (size_t l = 0; l < j; ++l)
-                t -= L[i][l] * std::conj(L[j][l]);
-            L[i][j] = t / dj;
-        }
     }
-    return ok ? dmax / dmin : std::numeric_limits<double>::infinity();
+    long double lmin = 1e300L, lmax = 0;
+    for (size_t i = 0; i < K; ++i) {
+        long double l = G[i * K + i].real();
+        if (l < 0)
+            l = 0; // clamp a tiny negative rounding residue
+        lmin = std::min(lmin, l);
+        lmax = std::max(lmax, l);
+    }
+    return (lmin > 0) ? std::sqrt(lmax / lmin) : 1e300L;
+}
+
+// Build a column-major M x K design with EXACTLY the prescribed singular values:
+// A = U diag(sigma) V^H, U (M x K) and V (K x K) with orthonormal columns.
+static std::vector<dcp> make_design(size_t M, size_t K,
+                                    const std::vector<double>& sigma, uint64_t seed)
+{
+    std::mt19937_64 rng(seed);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    auto orthonormalize = [&](std::vector<dcp>& B, size_t rows, size_t cols) {
+        for (size_t k = 0; k < cols; ++k) {
+            for (size_t j = 0; j < k; ++j) {
+                dcp d(0, 0);
+                for (size_t m = 0; m < rows; ++m)
+                    d += std::conj(B[j * rows + m]) * B[k * rows + m];
+                for (size_t m = 0; m < rows; ++m)
+                    B[k * rows + m] -= d * B[j * rows + m];
+            }
+            double n = 0;
+            for (size_t m = 0; m < rows; ++m)
+                n += std::norm(B[k * rows + m]);
+            n = std::sqrt(n);
+            for (size_t m = 0; m < rows; ++m)
+                B[k * rows + m] /= n;
+        }
+    };
+    std::vector<dcp> U(M * K), V(K * K);
+    for (auto& z : U)
+        z = dcp(nd(rng), nd(rng));
+    for (auto& z : V)
+        z = dcp(nd(rng), nd(rng));
+    orthonormalize(U, M, K);
+    orthonormalize(V, K, K);
+    std::vector<dcp> A(M * K, dcp(0, 0));
+    for (size_t k = 0; k < K; ++k)
+        for (size_t j = 0; j < K; ++j) {
+            const dcp vj = std::conj(V[k * K + j]); // (V^H)[j][k]
+            for (size_t m = 0; m < M; ++m)
+                A[k * M + m] += U[j * M + m] * sigma[j] * vj;
+        }
+    return A;
+}
+
+static std::vector<dcp> make_h_true(size_t K, uint64_t seed)
+{
+    std::mt19937_64 rng(seed);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    std::vector<dcp> h(K);
+    for (auto& z : h)
+        z = dcp(nd(rng), nd(rng));
+    return h;
+}
+
+struct SolveOut {
+    bool ok = false;
+    double cond = 0.0;
+    double old_pivot_ratio = 0.0;
+    double ref_cond = 0.0;
+    double h_err = 0.0;
+    double resid = 0.0;
+};
+
+static SolveOut run_solve_case(const std::vector<dcp>& A, size_t M, size_t K,
+                               const std::vector<dcp>& h_true)
+{
+    SolveOut o;
+    std::vector<dcp> Ac = A;
+    std::vector<dcp> y(M), y_orig(M);
+    for (size_t m = 0; m < M; ++m) {
+        dcp s(0, 0);
+        for (size_t k = 0; k < K; ++k)
+            s += A[k * M + m] * h_true[k];
+        y[m] = s;
+        y_orig[m] = s;
+    }
+    std::vector<dcp> h(K, dcp(0, 0)), work(M, dcp(0, 0));
+    o.ok = sic::detail::qr_cond_solve(Ac.data(), M, K, y.data(), h.data(),
+                                      work.data(), &o.cond);
+    o.ref_cond = static_cast<double>(ref_cond2(A, M, K));
+    if (!o.ok)
+        return o;
+    // Old (wrong) convention for contrast: the diagonal ratio of the factor R.
+    double dmax = 0.0, dmin = std::numeric_limits<double>::infinity();
+    for (size_t k = 0; k < K; ++k) {
+        const double d = std::abs(Ac[k * M + k]);
+        dmax = std::max(dmax, d);
+        dmin = std::min(dmin, d);
+    }
+    o.old_pivot_ratio = (dmin > 0.0) ? dmax / dmin
+                                     : std::numeric_limits<double>::infinity();
+    for (size_t k = 0; k < K; ++k)
+        o.h_err = std::max(o.h_err, std::abs(h[k] - h_true[k]));
+    double rn = 0.0, yn = 0.0;
+    for (size_t m = 0; m < M; ++m) {
+        dcp s(0, 0);
+        for (size_t k = 0; k < K; ++k)
+            s += A[k * M + m] * h[k];
+        rn += std::norm(s - y_orig[m]);
+        yn += std::norm(y_orig[m]);
+    }
+    o.resid = (yn > 0.0) ? std::sqrt(rn / yn) : 0.0;
+    return o;
 }
 
 BOOST_AUTO_TEST_CASE(test_sic_core_gain_fit_ill_conditioned)
 {
-    const size_t M = 4096;
-    const size_t K = 2;
-    // Two orthonormal complex directions u, v; columns c0 = u, c1 = u + eps*v.
-    // Gram = [[1,1],[1,1+eps^2]] -> cond(A) ~= 2/eps.
-    std::mt19937_64 rng(0xC0FFEEu);
-    std::normal_distribution<double> nd(0.0, 1.0);
-    std::vector<dcp> u(M), v(M);
-    for (auto& z : u)
-        z = dcp(nd(rng), nd(rng));
-    for (auto& z : v)
-        z = dcp(nd(rng), nd(rng));
-    auto dotc = [&](const std::vector<dcp>& a, const std::vector<dcp>& b) {
-        dcp s(0.0, 0.0);
-        for (size_t i = 0; i < M; ++i)
-            s += std::conj(a[i]) * b[i];
-        return s;
-    };
+    // (a) exact R05 counterexample.
     {
+        const size_t M = 2, K = 2;
+        std::vector<dcp> A(M * K, dcp(0, 0));
+        A[0 * M + 0] = dcp(1.0, 0.0);
+        A[1 * M + 0] = dcp(1.0, 0.0);
+        A[1 * M + 1] = dcp(1.5e-6, 0.0);
+        const std::vector<dcp> ht = { dcp(0.7, -0.2), dcp(0.3, 0.45) };
+        SolveOut o = run_solve_case(A, M, K, ht);
+        std::printf("[sic-qa] R05 counterexample A=[[1,1],[0,1.5e-6]]: "
+                    "old_ratio=%.6g (PASSES <1e6), cond2(A)=%.6g (REJECTS >=1e6), "
+                    "ref=%.6g, resid=%.2e\n",
+                    o.old_pivot_ratio, o.cond, o.ref_cond, o.resid);
+        BOOST_REQUIRE(o.ok);
+        // The rejected old-vs-true gap: the diagonal ratio would let this
+        // through the gate, the true cond(A) must not.
+        BOOST_CHECK_LT(o.old_pivot_ratio, 1e6);
+        BOOST_CHECK_GE(o.cond, 1e6);
+        BOOST_CHECK_GT(o.cond / o.old_pivot_ratio, 1.5);
+        BOOST_CHECK_CLOSE(o.cond, 1333333.333, 1.0);
+        BOOST_CHECK_CLOSE(o.ref_cond, 1333333.333, 1.0);
+        BOOST_CHECK_SMALL(o.resid, 1e-9);
+    }
+
+    // (b) the same counterexample embedded in a realistic-size design: two
+    //     columns u and u + eps*w with w orthogonal to u (M = 4096).
+    {
+        const size_t M = 4096, K = 2;
+        const double eps = 1.5e-6;
+        std::mt19937_64 rng(0xC0FFEEu);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        std::vector<dcp> u(M), w(M);
+        for (auto& z : u)
+            z = dcp(nd(rng), nd(rng));
+        for (auto& z : w)
+            z = dcp(nd(rng), nd(rng));
+        auto dotc = [&](const std::vector<dcp>& a, const std::vector<dcp>& b) {
+            dcp s(0, 0);
+            for (size_t i = 0; i < M; ++i)
+                s += std::conj(a[i]) * b[i];
+            return s;
+        };
         const double nu = std::sqrt(dotc(u, u).real());
         for (auto& z : u)
             z /= nu;
-        const dcp uv = dotc(u, v);
+        const dcp uw = dotc(u, w);
         for (size_t i = 0; i < M; ++i)
-            v[i] -= uv * u[i];
-        const double nv = std::sqrt(dotc(v, v).real());
-        for (auto& z : v)
-            z /= nv;
-    }
-    const dcp h_true[2] = { dcp(0.7, -0.2), dcp(0.3, 0.45) };
-
-    struct Stage {
-        double cond_target;  // reported max|R_kk|/min|R_kk| ~= 1/eps for this design
-        double h_tol;        // solution tolerance (info below)
-        bool expect_gate_ok; // cond < 1e6 -> the reference rule would commit
-        bool f32_unsafe;     // float32 normal-equation factor is wrong here
-    };
-    const Stage stages[] = {
-        { 1e3, 1e-6, true, false },
-        { 1e4, 1e-4, true, true },
-        { 3e6, 1e-2, false, true },
-    };
-    for (const Stage& st : stages) {
-        const double eps = 1.0 / st.cond_target;
-        std::vector<dcp> A(M * K), y(M);
+            w[i] -= uw * u[i];
+        const double nw = std::sqrt(dotc(w, w).real());
+        for (auto& z : w)
+            z /= nw;
+        std::vector<dcp> A(M * K, dcp(0, 0));
         for (size_t i = 0; i < M; ++i) {
             A[0 * M + i] = u[i];
-            A[1 * M + i] = u[i] + eps * v[i];
-            y[i] = A[0 * M + i] * h_true[0] + A[1 * M + i] * h_true[1];
+            A[1 * M + i] = u[i] + eps * w[i];
         }
-        dcp h[2] = { dcp(0.0, 0.0), dcp(0.0, 0.0) };
-        double cond = 0.0;
-        const bool ok = sic::detail::gram_cholesky_solve(A.data(), M, K, y.data(), h,
-                                                         &cond);
-        bool f32_ok = false;
-        const double cond32 = gram_cond_f32(A, M, K, f32_ok);
-        const double herr = std::max(std::abs(h[0] - h_true[0]),
-                                     std::abs(h[1] - h_true[1]));
-        std::printf("[sic-qa] ill-cond cond~%.1e: double ok=%d cond=%.6g (rel err "
-                    "%.1e) h_err=%.2e | float32 ok=%d cond=%.6g\n",
-                    st.cond_target, static_cast<int>(ok), cond,
-                    std::abs(cond - st.cond_target) / st.cond_target, herr,
-                    static_cast<int>(f32_ok), cond32);
-        BOOST_CHECK(ok);
-        // The double factor recovers cond(A) to a few percent even at 3e6.
-        BOOST_CHECK_CLOSE(cond, st.cond_target, 10.0);
-        // The solution stays accurate over the whole range.
-        BOOST_CHECK_SMALL(herr, st.h_tol);
-        // The reference decision rule at this cond.
-        BOOST_CHECK_EQUAL((cond < 1e6), st.expect_gate_ok);
-        if (st.f32_unsafe) {
-            // At this conditioning a float32 normal-equation factor of the SAME
-            // design is off by far more than 50% (or not even positive definite):
-            // this is the defect the double factor removes.
-            BOOST_CHECK_MESSAGE(!f32_ok || std::abs(cond32 - st.cond_target) >
-                                               0.5 * st.cond_target,
-                                "float32 Gram unexpectedly matched the ill-conditioned "
-                                "design: cond32=" << cond32);
-        }
+        const std::vector<dcp> ht = { dcp(0.7, -0.2), dcp(0.3, 0.45) };
+        SolveOut o = run_solve_case(A, M, K, ht);
+        std::printf("[sic-qa] R05 embedded (M=4096, near-collinear): "
+                    "old_ratio=%.6g cond2=%.6g ref=%.6g gate=%s\n",
+                    o.old_pivot_ratio, o.cond, o.ref_cond,
+                    (o.cond < 1e6) ? "accept" : "reject");
+        BOOST_REQUIRE(o.ok);
+        BOOST_CHECK_LT(o.old_pivot_ratio, 1e6);
+        BOOST_CHECK_GE(o.cond, 1e6);
+        BOOST_CHECK_CLOSE(o.cond, o.ref_cond, 5.0);
+        BOOST_CHECK_SMALL(o.resid, 1e-8);
+    }
+
+    // (c) known-spectrum designs: both sides of the 1e6 gate + a clearly
+    //     ill-conditioned one.  cond_target is exact by construction.
+    struct Case {
+        const char* name;
+        std::vector<double> sigma;
+        double cond_target;
+        bool expect_commit;
+        double resid_tol;
+    };
+    const std::vector<Case> cases = {
+        { "well-conditioned", { 1.0, 0.5, 0.25, 0.125 }, 8.0, true, 1e-13 },
+        { "gate just under (5e5)", { 1.0, 1.0, 1.0, 2e-6 }, 5e5, true, 1e-8 },
+        { "gate just over (2e6)", { 1.0, 1.0, 1.0, 5e-7 }, 2e6, false, 1e-7 },
+        { "ill-conditioned 1e8", { 1.0, 1.0, 1.0, 1e-8 }, 1e8, false, 1e-5 },
+    };
+    for (const Case& c : cases) {
+        const size_t M = 2048, K = c.sigma.size();
+        const std::vector<dcp> A = make_design(M, K, c.sigma, 0xABCDEFull + K);
+        const std::vector<dcp> ht = make_h_true(K, 0x1234567ull + K);
+        SolveOut o = run_solve_case(A, M, K, ht);
+        double hmax = 0.0;
+        for (const dcp& z : ht)
+            hmax = std::max(hmax, std::abs(z));
+        std::printf("[sic-qa] cond-case '%s': cond=%.6g (target %.3g, rel %.1e) "
+                    "ref=%.6g gate=%s h_err=%.2e resid=%.2e\n",
+                    c.name, o.cond, c.cond_target,
+                    std::abs(o.cond - c.cond_target) / c.cond_target, o.ref_cond,
+                    (o.cond < 1e6) ? "accept" : "reject", o.h_err, o.resid);
+        BOOST_REQUIRE_MESSAGE(o.ok, c.name << ": qr_cond_solve failed");
+        BOOST_CHECK_GE(o.cond, 1.0 - 1e-12);
+        BOOST_CHECK_CLOSE(o.cond, c.cond_target, 1.0);
+        BOOST_CHECK_CLOSE(o.cond, o.ref_cond, 1.0);
+        BOOST_CHECK_EQUAL((o.cond < 1e6), c.expect_commit);
+        BOOST_CHECK_SMALL(o.resid, c.resid_tol);
+        // Forward error of the solved gains must obey the standard
+        // O(cond * eps * ||h||) QR least-squares bound (a grossly wrong
+        // solution, or a cond that did not track the design, fails here).
+        BOOST_CHECK_LE(o.h_err, 1000.0 * o.cond * 2.3e-16 * hmax);
+    }
+
+    // (d) column permutation must not change cond2(A) (the SVD is invariant);
+    //     the old diagonal ratio is NOT invariant, which is the point.
+    {
+        const size_t M = 2048, K = 4;
+        const std::vector<double> sigma = { 1.0, 1.0, 1.0, 1e-8 };
+        const std::vector<dcp> A = make_design(M, K, sigma, 0x55AAull);
+        std::vector<dcp> P(M * K, dcp(0, 0));
+        for (size_t k = 0; k < K; ++k)
+            for (size_t m = 0; m < M; ++m)
+                P[k * M + m] = A[(K - 1 - k) * M + m]; // reverse column order
+        const std::vector<dcp> ht = make_h_true(K, 77);
+        SolveOut oa = run_solve_case(A, M, K, ht);
+        SolveOut op = run_solve_case(P, M, K, ht);
+        std::printf("[sic-qa] cond permutation: cond=%.6g -> %.6g (rel %.1e), "
+                    "old_ratio=%.6g -> %.6g\n",
+                    oa.cond, op.cond, std::abs(oa.cond - op.cond) / oa.cond,
+                    oa.old_pivot_ratio, op.old_pivot_ratio);
+        BOOST_REQUIRE(oa.ok && op.ok);
+        BOOST_CHECK_CLOSE(oa.cond, op.cond, 1e-6);
+        BOOST_CHECK_CLOSE(oa.cond, oa.ref_cond, 1.0);
+        BOOST_CHECK_CLOSE(op.cond, op.ref_cond, 1.0);
+    }
+
+    // (e) different column scales: scaling columns by s_k changes cond2(A);
+    //     the reported value must still track the independent oracle.
+    {
+        const size_t M = 2048, K = 4;
+        const std::vector<double> sigma = { 1.0, 0.5, 0.25, 0.125 };
+        const std::vector<dcp> A = make_design(M, K, sigma, 0x9900ull);
+        const double sc[4] = { 1e3, 1.0, 1e-2, 10.0 };
+        std::vector<dcp> S(M * K, dcp(0, 0));
+        for (size_t k = 0; k < K; ++k)
+            for (size_t m = 0; m < M; ++m)
+                S[k * M + m] = A[k * M + m] * sc[k];
+        const std::vector<dcp> ht = make_h_true(K, 91);
+        SolveOut oa = run_solve_case(A, M, K, ht);
+        SolveOut os = run_solve_case(S, M, K, ht);
+        std::printf("[sic-qa] cond column-scales: cond=%.6g -> %.6g, ref=%.6g "
+                    "(rel %.1e)\n",
+                    oa.cond, os.cond, os.ref_cond,
+                    std::abs(os.cond - os.ref_cond) / os.ref_cond);
+        BOOST_REQUIRE(oa.ok && os.ok);
+        BOOST_CHECK_CLOSE(os.cond, os.ref_cond, 1.0);
+        BOOST_CHECK_NE(oa.cond, os.cond); // scaling really changed cond
     }
 }
 

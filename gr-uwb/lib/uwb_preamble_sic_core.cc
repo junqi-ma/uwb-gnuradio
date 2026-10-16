@@ -48,7 +48,7 @@ constexpr size_t kInterpTaps = static_cast<size_t>(2 * kInterpHalf + 1);
 // operator reads at most two neighbouring rows and blends them (linear in the
 // phase), so nothing in the hot path runs a per-output 33-tap dot product.
 constexpr size_t kPreUpPhases = 32;
-constexpr double kMaxGainCond = 1e6;   // reference commit ceiling on cond(A)
+constexpr double kMaxGainCond = 1e6;   // commit ceiling on cond2(A), not a pivot ratio
 constexpr double kPathPeakFloor = 0.15; // candidate floor vs strongest peak
 constexpr size_t kMaxReps = 512;       // confirmed-rep scratch ceiling
 constexpr int64_t kCirPre = 4;         // CIR delay range: [-4, post_tail+4)
@@ -364,95 +364,187 @@ inline void reconstruct_combine(cplx* out, const dcp* acc, size_t count,
                                static_cast<unsigned>(count));
 }
 
-// sum_m conj(a[m]) * b[m] in DOUBLE precision, over `len` interleaved complex
-// doubles.  This is the K x K Gram / RHS kernel of the final gain fit.
+// cond2 (2-norm condition number) of a K x K complex matrix given column-major,
+// by a self-contained one-sided complex Jacobi SVD (K <= kSicMaxPaths).  The
+// singular values are the column 2-norms at convergence, so cond2 = smax/smin.
 //
-// It is deliberately NOT a float32 VOLK conjugate dot: the Gram is a normal-
-// equation factor, so its error is amplified by cond(G) = cond(A)^2 in the
-// solve.  A float32 accumulator would make cond(A) meaningless above ~1e3 and
-// could flip the `cond < 1e6` commit gate.  Double accumulation keeps
-// `gain_condition` the honest cond(A) all the way to the ceiling, and it is
-// still far cheaper than the old M x K Householder QR: four independent
-// scalar accumulator pairs let the compiler SLP-vectorize the reduction.
-inline dcp gram_dot(const dcp* a, const dcp* b, size_t len)
+// This is the definition the commit gate uses.  It deliberately factors the QR
+// factor R itself and NEVER forms R^H R, so it does not square the condition
+// number: forming the normal-equation Gram loses log10(cond) digits of the
+// small singular value.  A matrix whose |R_kk| diagonal ratio is small but whose
+// true cond2 exceeds the ceiling is therefore still rejected.  Returns false for
+// a non-finite or (numerically) rank-deficient factor so the caller fails closed.
+bool jacobi_cond2(const dcp* Rin, size_t K, double* cond_out)
 {
-    const double* x = reinterpret_cast<const double*>(a);
-    const double* y = reinterpret_cast<const double*>(b);
-    double sr[4] = { 0.0, 0.0, 0.0, 0.0 };
-    double si[4] = { 0.0, 0.0, 0.0, 0.0 };
-    size_t m = 0;
-    for (; m + 3 < len; m += 4) {
-        for (size_t j = 0; j < 4; ++j) {
-            const double xr = x[2 * (m + j)];
-            const double xi = x[2 * (m + j) + 1];
-            const double yr = y[2 * (m + j)];
-            const double yi = y[2 * (m + j) + 1];
-            sr[j] += xr * yr + xi * yi;
-            si[j] += xr * yi - xi * yr;
+    dcp M[kSicMaxPaths][kSicMaxPaths];
+    for (size_t j = 0; j < K; ++j)
+        for (size_t i = 0; i < K; ++i)
+            M[i][j] = Rin[j * K + i];
+    for (size_t i = 0; i < K; ++i)
+        for (size_t j = 0; j < K; ++j)
+            if (!std::isfinite(M[i][j].real()) || !std::isfinite(M[i][j].imag()))
+                return false;
+
+    constexpr int kMaxSweeps = 50;
+    bool converged = false;
+    for (int sweep = 0; sweep < kMaxSweeps && !converged; ++sweep) {
+        double worst = 0.0;
+        for (size_t p = 0; p + 1 < K; ++p) {
+            for (size_t q = p + 1; q < K; ++q) {
+                double alpha = 0.0, beta = 0.0;
+                dcp gamma(0.0, 0.0);
+                for (size_t i = 0; i < K; ++i) {
+                    alpha += std::norm(M[i][p]);
+                    beta += std::norm(M[i][q]);
+                    gamma += std::conj(M[i][p]) * M[i][q];
+                }
+                const double mu = std::abs(gamma);
+                const double scale = std::sqrt(alpha * beta);
+                if (scale > 0.0)
+                    worst = std::max(worst, mu / scale);
+                // Already (numerically) orthogonal, or a zero column: no rotation.
+                if (!(mu > 1e-15 * scale))
+                    continue;
+                // Orthogonalize columns p,q with the eigenvectors of the 2x2
+                // Hermitian Gram [[alpha,gamma],[conj(gamma),beta]].  For
+                // theta = (beta-alpha)/2, r = hypot(theta,|gamma|), the
+                // eigenvectors are [gamma, theta +/- r]; V = [v+ v-] normalized
+                // is unitary and diagonalizes the block, so the rotated column
+                // norms are its eigenvalues (the pair singular values squared).
+                const double theta = 0.5 * (beta - alpha);
+                const double r = std::hypot(theta, mu);
+                const double np = std::hypot(mu, theta + r);
+                const double nm = std::hypot(mu, theta - r);
+                if (!(np > 0.0) || !(nm > 0.0))
+                    continue;
+                const dcp c0 = gamma / np;
+                const dcp c2((theta + r) / np, 0.0);
+                const dcp c1 = gamma / nm;
+                const dcp c3((theta - r) / nm, 0.0);
+                for (size_t i = 0; i < K; ++i) {
+                    const dcp gp = M[i][p];
+                    const dcp gq = M[i][q];
+                    M[i][p] = gp * c0 + gq * c2;
+                    M[i][q] = gp * c1 + gq * c3;
+                }
+            }
         }
+        // `worst` is the largest relative off-diagonal of the sweep start; near
+        // convergence it decays quadratically, so a small cap on `worst` is a
+        // safe stop.  mu is NOT recomputed for the just-rotated pair, but the
+        // rotation drives it to ~eps, so the next sweep confirms convergence.
+        converged = (worst < 1e-14);
     }
-    for (; m < len; ++m) {
-        const double xr = x[2 * m];
-        const double xi = x[2 * m + 1];
-        const double yr = y[2 * m];
-        const double yi = y[2 * m + 1];
-        sr[0] += xr * yr + xi * yi;
-        si[0] += xr * yi - xi * yr;
+
+    double smax = 0.0, smin = std::numeric_limits<double>::infinity();
+    for (size_t j = 0; j < K; ++j) {
+        double nrm = 0.0;
+        for (size_t i = 0; i < K; ++i)
+            nrm += std::norm(M[i][j]);
+        nrm = std::sqrt(nrm);
+        if (!std::isfinite(nrm))
+            return false;
+        smax = std::max(smax, nrm);
+        smin = std::min(smin, nrm);
     }
-    return dcp((sr[0] + sr[1]) + (sr[2] + sr[3]), (si[0] + si[1]) + (si[2] + si[3]));
+    if (!(smin > 0.0) || !std::isfinite(smax))
+        return false;
+    if (cond_out)
+        *cond_out = smax / smin;
+    return true;
 }
 
 // Householder QR of A (column-major, M x K) with a single RHS transform in
-// place (b <- Q^H b).  v is a length-M workspace.  cond_out = max|R_kk|/min|R_kk|.
-bool qr_factor_rhs(dcp* A, size_t M, size_t K, dcp* b, dcp* v, double* cond_out)
+// place (b <- Q^H b).  v is a length-M workspace.  The upper triangle of A holds
+// the factor R on success.  Does NOT report a condition number: the old
+// max|R_kk|/min|R_kk| diagonal ratio is not cond(A) (see jacobi_cond2).
+//
+// Raw interleaved-double arithmetic (not std::complex) on the four shoulders:
+// each Householder apply is two straight AXPYs over M elements, which the
+// compiler can SLP-vectorize.  The old std::complex< double > form was the
+// scalar bottleneck of the gain fit (~6x slower than the Gram it replaced).
+bool qr_factor_rhs(dcp* A, size_t M, size_t K, dcp* b, dcp* v)
 {
-    double dmax = 0.0, dmin = std::numeric_limits<double>::infinity();
+    double* const Ad = reinterpret_cast<double*>(A);
+    double* const bd = reinterpret_cast<double*>(b);
+    double* const vd = reinterpret_cast<double*>(v);
     for (size_t k = 0; k < K; ++k) {
+        const size_t rk = k * M;
         double nrm = 0.0;
-        for (size_t i = k; i < M; ++i)
-            nrm += std::norm(A[k * M + i]);
+        for (size_t i = k; i < M; ++i) {
+            const double xr = Ad[2 * (i + rk)];
+            const double xi = Ad[2 * (i + rk) + 1];
+            nrm += xr * xr + xi * xi;
+        }
         nrm = std::sqrt(nrm);
         if (!(nrm > 0.0) || !std::isfinite(nrm))
             return false;
-        const dcp x0 = A[k * M + k];
-        const double ax = std::abs(x0);
-        const dcp phase = (ax > 1e-300) ? x0 / ax : dcp(1.0, 0.0);
-        const dcp alpha = -phase * nrm;
+        const double x0r = Ad[2 * (k + rk)];
+        const double x0i = Ad[2 * (k + rk) + 1];
+        const double ax = std::hypot(x0r, x0i);
+        double phr = 1.0, phi = 0.0;
+        if (ax > 1e-300) {
+            phr = x0r / ax;
+            phi = x0i / ax;
+        }
+        const double alr = -phr * nrm;
+        const double ali = -phi * nrm;
         double vn2 = 0.0;
         for (size_t i = k; i < M; ++i) {
-            dcp vi = A[k * M + i];
-            if (i == k)
-                vi -= alpha;
-            v[i] = vi;
-            vn2 += std::norm(vi);
+            double vr = Ad[2 * (i + rk)];
+            double vi = Ad[2 * (i + rk) + 1];
+            if (i == k) {
+                vr -= alr;
+                vi -= ali;
+            }
+            vd[2 * i] = vr;
+            vd[2 * i + 1] = vi;
+            vn2 += vr * vr + vi * vi;
         }
         if (!(vn2 > 0.0) || !std::isfinite(vn2))
             return false;
         const double beta = 2.0 / vn2;
         for (size_t j = k; j < K; ++j) {
-            dcp dot(0.0, 0.0);
-            for (size_t i = k; i < M; ++i)
-                dot += std::conj(v[i]) * A[j * M + i];
-            const dcp c = beta * dot;
-            for (size_t i = k; i < M; ++i)
-                A[j * M + i] -= c * v[i];
+            const size_t cj = j * M;
+            double dr = 0.0, di = 0.0;
+            for (size_t i = k; i < M; ++i) {
+                const double vr = vd[2 * i];
+                const double vi = vd[2 * i + 1];
+                const double ar = Ad[2 * (i + cj)];
+                const double ai = Ad[2 * (i + cj) + 1];
+                dr += vr * ar + vi * ai;
+                di += vr * ai - vi * ar;
+            }
+            const double cr = beta * dr;
+            const double ci = beta * di;
+            for (size_t i = k; i < M; ++i) {
+                const double vr = vd[2 * i];
+                const double vi = vd[2 * i + 1];
+                Ad[2 * (i + cj)] -= cr * vr - ci * vi;
+                Ad[2 * (i + cj) + 1] -= cr * vi + ci * vr;
+            }
         }
-        dcp dotb(0.0, 0.0);
-        for (size_t i = k; i < M; ++i)
-            dotb += std::conj(v[i]) * b[i];
-        const dcp cb = beta * dotb;
-        for (size_t i = k; i < M; ++i)
-            b[i] -= cb * v[i];
-        const double dk = std::abs(A[k * M + k]);
-        if (!std::isfinite(dk))
+        double dbr = 0.0, dbi = 0.0;
+        for (size_t i = k; i < M; ++i) {
+            const double vr = vd[2 * i];
+            const double vi = vd[2 * i + 1];
+            const double br = bd[2 * i];
+            const double bi = bd[2 * i + 1];
+            dbr += vr * br + vi * bi;
+            dbi += vr * bi - vi * br;
+        }
+        const double cbr = beta * dbr;
+        const double cbi = beta * dbi;
+        for (size_t i = k; i < M; ++i) {
+            const double vr = vd[2 * i];
+            const double vi = vd[2 * i + 1];
+            bd[2 * i] -= cbr * vr - cbi * vi;
+            bd[2 * i + 1] -= cbr * vi + cbi * vr;
+        }
+        if (!std::isfinite(Ad[2 * (k + rk)]) ||
+            !std::isfinite(Ad[2 * (k + rk) + 1]))
             return false;
-        dmax = std::max(dmax, dk);
-        dmin = std::min(dmin, dk);
     }
-    if (!(dmin > 0.0) || !std::isfinite(dmax))
-        return false;
-    if (cond_out)
-        *cond_out = dmax / dmin;
     return true;
 }
 
@@ -491,6 +583,7 @@ void reset_result(SicResult& r, cplx* outbuf, cplx* ihatbuf)
         r.taus[k] = 0.0;
     r.gain_condition = 0.0;
     r.residual_corr = 0.0;
+    r.sub_overlap = -1;
     r.coarse_candidates = 0;
     r.fine_candidates = 0;
     r.correlations = 0;
@@ -509,71 +602,35 @@ inline bool finite_cplx(const cplx& v)
 } // namespace
 
 // ---------------------------------------------------------------------------
-// detail::gram_cholesky_solve  (see header)
+// detail::qr_cond_solve  (see header)
 // ---------------------------------------------------------------------------
 namespace detail {
 
-bool gram_cholesky_solve(const dcp* A, size_t M, size_t K, const dcp* y, dcp* h,
-                         double* cond)
+bool qr_cond_solve(dcp* A, size_t M, size_t K, dcp* y, dcp* h, dcp* work,
+                   double* cond)
 {
-    if (!A || !y || !h || M == 0 || K == 0 || K > kSicMaxPaths)
+    if (!A || !y || !h || !work || M == 0 || K == 0 || K > kSicMaxPaths)
         return false;
 
-    // G = A^H A (Hermitian K x K) and g = A^H y, DOUBLE accumulated.  Only the
-    // upper triangle is formed and mirrored (G[j][i] = conj(G[i][j])).
-    dcp G[kSicMaxPaths][kSicMaxPaths];
-    dcp g[kSicMaxPaths];
-    for (size_t i = 0; i < K; ++i) {
-        for (size_t j = i; j < K; ++j) {
-            G[i][j] = gram_dot(A + i * M, A + j * M, M);
-            G[j][i] = std::conj(G[i][j]);
-        }
-        g[i] = gram_dot(A + i * M, y, M);
-    }
-
-    // Cholesky G = L L^H, then a forward/back substitution for h.  The pivots
-    // L[j][j] are exactly |R_jj| of the QR of A (G = R^H R), so
-    // cond(A) = max|R_kk|/min|R_kk| = max pivot/min pivot.  No inverse.
-    dcp L[kSicMaxPaths][kSicMaxPaths];
-    double dmax = 0.0, dmin = std::numeric_limits<double>::infinity();
-    for (size_t j = 0; j < K; ++j) {
-        dcp s = G[j][j];
-        for (size_t l = 0; l < j; ++l)
-            s -= L[j][l] * std::conj(L[j][l]);
-        const double sj = s.real();
-        if (!(sj > 0.0) || !std::isfinite(sj))
-            return false;
-        const double dj = std::sqrt(sj);
-        L[j][j] = dcp(dj, 0.0);
-        dmax = std::max(dmax, dj);
-        dmin = std::min(dmin, dj);
-        for (size_t i = j + 1; i < K; ++i) {
-            dcp t = G[i][j];
-            for (size_t l = 0; l < j; ++l)
-                t -= L[i][l] * std::conj(L[j][l]);
-            L[i][j] = t / dj;
-        }
-    }
-    if (!(dmin > 0.0) || !std::isfinite(dmax))
+    // Householder QR of A with the RHS transform b <- Q^H y (both in place).
+    if (!qr_factor_rhs(A, M, K, y, work))
         return false;
 
-    dcp z[kSicMaxPaths];
-    for (size_t i = 0; i < K; ++i) {
-        dcp t = g[i];
-        for (size_t l = 0; l < i; ++l)
-            t -= L[i][l] * z[l];
-        z[i] = t / L[i][i];
-    }
-    for (size_t ii = K; ii-- > 0;) {
-        dcp t = z[ii];
-        for (size_t l = ii + 1; l < K; ++l)
-            t -= std::conj(L[l][ii]) * h[l];
-        h[ii] = t / L[ii][ii];
-        if (!std::isfinite(h[ii].real()) || !std::isfinite(h[ii].imag()))
-            return false;
-    }
+    // Extract the K x K factor R from the upper triangle of the column-major A
+    // and report cond2(A) = cond2(R) from a self-contained SVD.  This is the
+    // honest condition number -- NOT the |R_kk| diagonal ratio.
+    dcp R[kSicMaxPaths * kSicMaxPaths];
+    for (size_t j = 0; j < K; ++j)
+        for (size_t i = 0; i < K; ++i)
+            R[j * K + i] = (i <= j) ? A[j * M + i] : dcp(0.0, 0.0);
+    double c2 = 0.0;
+    if (!jacobi_cond2(R, K, &c2))
+        return false;
+
+    if (!qr_solve(A, M, K, y, h))
+        return false;
     if (cond)
-        *cond = dmax / dmin;
+        *cond = c2;
     return true;
 }
 
@@ -1239,6 +1296,43 @@ bool sic_one(const cplx* y,
         static_cast<int64_t>(n),
         detected_start + static_cast<int64_t>(confirmed * sps + cfg.post_tail));
 
+    // ---- 4b. subtraction / commit ROI overlap gate --------------------------
+    // The SEARCH ROI (cfg.roi_lo/roi_hi) is deliberately wide so the natural
+    // preamble/multipath tail is never clipped by the candidate-start range
+    // (R02).  The SUBTRACTION / COMMIT ROI (cfg.sub_roi_lo/sub_roi_hi) is a
+    // separate, sensing-owned region: the SIC may only alter samples that
+    // overlap the region the sensing receiver actually processes (its preamble /
+    // CIR).  A template-consistent comm detected ENTIRELY OUTSIDE that region is
+    // real but NOT actionable -- subtracting it would change the output while
+    // removing nothing from the sensing signal, which the R01/R10 negative
+    // contract counts as a false commit.  Fail-closed: BYPASS (out == y).
+    // When no sub_roi is configured the legacy subtraction mask (clipped to the
+    // search ROI) is kept so existing callers are byte-for-byte unchanged.
+    int64_t sub_lo = 0;
+    int64_t sub_hi = 0;
+    if (cfg.sub_roi_hi > cfg.sub_roi_lo) {
+        const int64_t lo = std::max<int64_t>(out.support_lo, cfg.sub_roi_lo);
+        const int64_t hi = std::min<int64_t>(out.support_hi, cfg.sub_roi_hi);
+        const int64_t overlap = (hi > lo) ? (hi - lo) : 0;
+        out.sub_overlap = overlap;
+        const int64_t need = std::max<int64_t>(
+            1, static_cast<int64_t>(cfg.sub_min_overlap));
+        if (overlap < need) {
+            out.state = SicState::Bypassed;
+            out.bypass_reason = "outside_sensing_roi";
+            out.reject_reason = "outside_sensing_roi";
+            finish();
+            return true;
+        }
+        sub_lo = lo;
+        sub_hi = hi;
+    } else {
+        out.sub_overlap = -1;
+        sub_lo = std::max<int64_t>(0, std::max<int64_t>(detected_start, roi_lo));
+        sub_hi = std::min<int64_t>(static_cast<int64_t>(n),
+                                   std::min<int64_t>(out.support_hi, roi_hi));
+    }
+
     const int64_t fit_lo = detected_start;
     const int64_t fit_hi = detected_start + static_cast<int64_t>(Mfit);
 
@@ -1257,7 +1351,7 @@ bool sic_one(const cplx* y,
         for (size_t m = 0; m < Mfit; ++m)
             scratch.hh_b[m] = dcp(y[fit_lo + static_cast<int64_t>(m)]);
         if (qr_factor_rhs(scratch.A.data(), Mfit, nsel, scratch.hh_b.data(),
-                          scratch.hh_v.data(), &cond) &&
+                          scratch.hh_v.data()) &&
             qr_solve(scratch.A.data(), Mfit, nsel, scratch.hh_b.data(), h)) {
             // The projection score |<col, r>|^2 / ||col||^2 with
             // col = u * rot is invariant if both the column and the residual
@@ -1329,7 +1423,7 @@ bool sic_one(const cplx* y,
         out.timings.matrix_build_us = us_since(t0);
     }
 
-    // ---- 6b. gain_fit (double K x K Gram + Cholesky; no explicit inverse) --
+    // ---- 6b. gain_fit (Householder QR of A; cond(A) from the SVD of R) ------
     bool basis_finite = true;
     {
         const auto t0 = std::chrono::steady_clock::now();
@@ -1340,13 +1434,16 @@ bool sic_one(const cplx* y,
                 break;
             }
         }
-        // Double Gram + Cholesky (detail::, see the header).  G/g are accumulated
-        // in double so `gain_condition` is the honest cond(A) with the same
-        // semantics as the old Householder QR, up to and past the 1e6 commit
-        // ceiling (a float32 normal-equation factor would only resolve cond(A)
-        // below ~1e3, which is exactly what the F2 review flagged).
-        const bool solve_ok = detail::gram_cholesky_solve(
-            scratch.A.data(), Mfit, nsel, scratch.hh_b.data(), h, &cond);
+        // Householder QR solves the M x K least squares directly -- no normal
+        // equations, so no cond(A)^2 amplification -- and `gain_condition` is
+        // cond2(A) computed from the singular values of the factor R (see
+        // detail::qr_cond_solve).  The old max|R_kk|/min|R_kk| pivot ratio was
+        // NOT cond(A): it underestimated it (e.g. 666669.93 vs 1333333.33 for
+        // A = [[1,1],[0,1.5e-6]]) and let ill-conditioned fits through the
+        // ceiling.  Any failure here is fail-closed.
+        const bool solve_ok = detail::qr_cond_solve(
+            scratch.A.data(), Mfit, nsel, scratch.hh_b.data(), h,
+            scratch.hh_v.data(), &cond);
         out.gain_condition = solve_ok ? cond : 0.0;
         out.timings.gain_fit_us = us_since(t0);
         if (!solve_ok || !basis_finite) {
@@ -1376,11 +1473,9 @@ bool sic_one(const cplx* y,
             union_hi, static_cast<int64_t>(std::ceil(tau_abs[k])) +
                           static_cast<int64_t>(plen));
     }
-    const int64_t sub_lo = std::max<int64_t>(
-        0, std::max<int64_t>(detected_start, roi_lo));
-    const int64_t sub_hi = std::min<int64_t>(
-        static_cast<int64_t>(n),
-        std::min<int64_t>(out.support_hi, roi_hi));
+    // sub_lo/sub_hi were resolved by the subtraction/commit ROI gate in step 4b:
+    // support ∩ sub_roi when a sensing sub_roi is configured, else the legacy
+    // support ∩ search-ROI mask.
     int64_t ih_lo = std::max<int64_t>(0, std::min<int64_t>(union_lo, sub_lo));
     int64_t ih_hi = std::min<int64_t>(
         static_cast<int64_t>(n), std::max<int64_t>(union_hi, sub_hi));
@@ -1419,6 +1514,8 @@ bool sic_one(const cplx* y,
         const auto t0 = std::chrono::steady_clock::now();
         const int64_t hstart = detected_start + static_cast<int64_t>(Mfit);
         const int64_t hend = hstart + static_cast<int64_t>(cfg.validation_reps * sps);
+        // cond is cond2(A) (SVD of the QR factor R), the honest condition
+        // number, so this gate is exactly `numpy.linalg.cond(A) < 1e6`.
         const bool cond_ok = cond < kMaxGainCond;
         if (hend <= static_cast<int64_t>(n) && cond_ok) {
             const size_t Mv = static_cast<size_t>(hend - hstart);

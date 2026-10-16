@@ -58,7 +58,7 @@ struct SicResult {
     int64_t support_lo = -1, support_hi = -1; // confirmed interferer support [lo,hi)
     double  cfo_hz = 0.0;
     size_t  n_paths = 0, n_path_candidates = 0;
-    double  gain_condition = 0.0;          // rank/conditioning indicator
+    double  gain_condition = 0.0;          // cond2(A) of the final gain fit; see below
     double  residual_corr = 0.0;           // post-cancel comm residual correlation (holdout)
     uint64_t coarse_candidates = 0, fine_candidates = 0, correlations = 0;
     size_t  roi_samples = 0;
@@ -101,9 +101,22 @@ vector, does no file I/O, and does not allocate. State the peak scratch bytes.
    must be closed first and gated separately.
 6. **matrix_build / gain_fit**: columns are the `preamble` delayed by `tau_k`
    (fractional) and CFO-rotated, restricted to the FIT window; solve the complex
-   least squares `A h ≈ y_fit` with a QR / stable factorization — **no explicit
-   matrix inverse**. Check rank/conditioning (`gain_condition`) and finite values;
-   fail-closed on ill-conditioning or capacity overflow.
+   least squares `A h ≈ y_fit` with a Householder **QR** of `A` (no normal
+   equations and **no explicit matrix inverse**). Check rank/conditioning
+   (`gain_condition`) and finite values; fail-closed on ill-conditioning or
+   capacity overflow.
+
+   **`gain_condition` semantics (corrected, R05).** It is `cond2(A)`, the ratio
+   of the largest to smallest singular value of the M×K design matrix — exactly
+   the `numpy.linalg.cond(A)` quantity the reference reports. The C++ core
+   computes it from the K×K QR factor `R`: `A = Q R` with `Q` orthogonal implies
+   `AᴴA = RᴴR`, so `cond2(A) == cond2(R)` exactly, and the singular values of `R`
+   come from a self-contained one-sided complex Jacobi SVD (K ≤ 16, no LAPACK).
+   It is **not** the `max|R_kk|/min|R_kk|` diagonal ratio, which underestimates
+   `cond(A)` (R05 counterexample `A = [[1,1],[0,1.5e-6]]`: diagonal ratio
+   666666.7 vs true `cond2(A)` 1333333.3). The commit gate is
+   `gain_condition < 1e6`; a non-finite or rank-deficient factor, or a failed
+   solve, is fail-closed (no commit).
 7. **reconstruct**: `i_hat[n] = Σ_k h_k · preamble[n - tau_k]·exp(j(2π f_cfo n/Fs))`.
    Subtraction region = intersection(estimated comm support, public sensing ROI)
    plus `post_tail`; bounds from config + signal evidence only. Outside that
