@@ -218,6 +218,18 @@ target_link_libraries(benchmark_radar_pipeline
 )
 
 ########################################################################
+# S0-D: layered preamble-SIC benchmark (core / GR-PDU / native 65/32).
+# Measurement only; it drives the frozen core + adapter + resampler.
+########################################################################
+add_executable(benchmark_preamble_sic benchmark_preamble_sic.cc)
+target_link_libraries(benchmark_preamble_sic
+    gnuradio-uwb
+    gnuradio::gnuradio-blocks
+    gnuradio::gnuradio-runtime
+    Threads::Threads
+)
+
+########################################################################
 # HRP TX modulator timing (P3: 64-SYNC PSDU<=127 B >= 1000 pkt/s)
 ########################################################################
 add_executable(benchmark_hrp_mod benchmark_hrp_mod.cc)

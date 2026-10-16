@@ -1,0 +1,72 @@
+{
+  "$comment": "S0 preamble-collision fixture + SIC runtime schema. Documentation-as-data; the CLI validates against these field sets and rejects unknown parameters. 'generator' is truth-bearing (never passed to the online SIC API); 'runtime' is what the SIC block/CLI may know. All indices 0-based, intervals [lo,hi).",
+  "schema_version": 1,
+
+  "generator": {
+    "sensing_code": { "type": "int", "domain": [9, 10, 11, 12], "default": 9 },
+    "comm_code": { "type": "int", "domain": [9, 10, 11, 12], "default": 10,
+      "rule": "must differ from sensing_code unless diagnostic_preset=true" },
+    "diagnostic_preset": { "type": "bool", "default": false,
+      "rule": "only true to allow sensing_code==comm_code (同码近时延诊断)" },
+    "sync_reps": { "type": "int", "domain": [16, 32, 64, 128], "default": 64,
+      "note": "nominal length; the true start is a swept parameter, not known" },
+    "pulse_id": { "type": "string", "default": "pulse_trunc_linear_rc183_240.f32" },
+    "template_id": { "type": "string",
+      "note": "shaping template identity for the comm preamble; recorded + hashed" },
+    "input_grid": { "type": "string", "domain": ["work", "cg400"], "default": "work" },
+    "sensing_paths": {
+      "type": "array<{delay_samples:float, gain_complex:[float,float]}>",
+      "default": [[0, [1.0, 0.0]], [37, [0.25, 0.0]]],
+      "note": "weak target preserved: delay 37, |g|=0.25; post=100 covers it" },
+    "comm_paths": {
+      "type": "array<{delay_samples:float, gain_complex:[float,float]}>",
+      "default_single": [[0, [1.0, 0.0]]],
+      "default_four": [[0,[1,0]],[7.4,[0,0.5]],[23,[0.276,-0.116]],[51.2,[0.2,0]]]
+    },
+    "start_offset_work": { "type": "float", "unit": "work samples",
+      "note": "comm preamble start relative to sensing SYNC origin; swept 0/0.4/8/-8" },
+    "cfo_hz": { "type": "float", "unit": "Hz", "note": "comm CFO; swept 0/+/-50e3" },
+    "snr_db": { "type": "float", "default": 30.0, "unit": "dB",
+      "note": "on overlapping SYNC interval vs clean sensing energy" },
+    "isr_db": { "type": "float", "default": 10.0, "unit": "dB",
+      "note": "on overlapping SYNC interval vs clean sensing energy; null when no overlap" },
+    "seed": { "type": "int", "note": "fixed per window; exact rng seed recorded" },
+    "iq_scale": { "type": "float", "default": 32768.0,
+      "note": "native SC16 single shared scale for all components; record clip+peak" },
+    "noise_std": { "type": "float", "note": "per I/Q component std; total complex power 2*s^2" },
+    "commission_pgf": { "type": "string", "note": "v1 (delayed int) then fractional model" },
+    "frac_model": { "type": "string", "domain": ["pchip", "bandlimited"], "default": "pchip",
+      "note": "generator uses pchip; >=1 cross case uses bandlimited to break self-consistency" },
+    "sfo_ppm": { "type": "float", "default": 0.0, "note": "stress only; +/-20 ppm" },
+    "truth": { "type": "object", "note": "written ONLY to truth.jsonl; never handed to SIC" }
+  },
+
+  "runtime": {
+    "sensing_code": { "type": "int" },
+    "comm_code": { "type": "int" },
+    "sync_reps": { "type": "int" },
+    "template_id": { "type": "string" },
+    "sic_k": { "type": "int", "domain": [1, 2, 4, 8, 16], "default": 4,
+      "note": "interferer path count; DISTINCT from demod soft-chip mode" },
+    "fit_reps": { "type": "int", "note": "estimation window in SYNC reps; 8/16/32 scanned" },
+    "validation_reps": { "type": "int", "note": "holdout reps; disjoint from fit_reps; >=8" },
+    "comm_search_roi": { "type": "[int,int]", "note": "[lo,hi) candidate window; wide/narrow scanned" },
+    "demod_softchip_mode": { "type": "string",
+      "domain": ["bypass", "full", "rake4"], "default": "bypass",
+      "note": "demod consumer only; not the SIC K" },
+    "input_grid": { "type": "string", "domain": ["work", "cg400"] },
+    "matrix_backend": { "type": "string", "domain": ["qr", "lapack"], "note": "checked at prepare" },
+    "in_flight_max": { "type": "int", "default": 8, "note": "credits across published-but-unterminated windows" },
+    "iq_budget_bytes": { "type": "int", "default": 67108864 }
+  },
+
+  "metrics": {
+    "reconstruction_nmse": "||i - i_hat||^2 / ||i||^2 on the truth evaluation interval; note whether noise included",
+    "suppression_db": "10*log10(||i||^2 / ||i - i_hat||^2); never ||y||^2/||y_clean||^2",
+    "sensing_cir": "per-tap clean/raw/sic, target complex amplitude, peak shift (work samples), weak-target detection, false peaks",
+    "target_protection": "coherent projection / matched amplitude on a fixed target ROI; total energy is NOT target amplitude",
+    "full_demod": "per-window status, completion rate, PSDU/FCS, failing stage, timing split by success/failure",
+    "primary_gate": "median suppression >= 10 dB AND >=95% windows >= 3 dB; >=95% windows target |amp err| <= 1 dB and |peak shift| <= 1 work sample",
+    "negative_gate": ">=1000 independent negative windows; false-commit <= 1%; report count/sample size + binomial CI, no zero-risk claim"
+  }
+}

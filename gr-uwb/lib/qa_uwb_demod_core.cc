@@ -706,6 +706,55 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r3_full_pipeline_reaches_phr)
     BOOST_CHECK(!res.phr.secded_uncorrectable);
 }
 
+BOOST_AUTO_TEST_CASE(test_demod_core_r3_sfd_child_subtimers_are_consistent)
+{
+    // S0-A: the SFD parent stage publishes diagnostic child sub-timers.  They
+    // must partition `stage_sfd_us` and must NOT be double-counted into
+    // `stage_total_us`.  Decoding behaviour itself must be unchanged.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+    prof.sfd_mode = "ieee";
+    const auto res = core::demodulate_one(
+        iq.data(), iq.size(), prof, 1, 9984, 0, load_reference_template(),
+        scratch);
+
+    // (c) the decode verdict is unchanged (same fixture as the r3 pipeline
+    // test above).
+    BOOST_REQUIRE(res.status == DemodStatus::Success);
+    BOOST_REQUIRE(res.payload.ok);
+    BOOST_CHECK(res.payload.fcs_pass);
+
+    // (a) children partition the parent.  `stage_sfd_anchor_other_us` is the
+    // clamped remainder, so the sum telescopes back to `stage_sfd_us`; an
+    // independent-clock overshoot would clamp to 0 and break the equality.
+    const uint64_t children_us = res.stage_sfd_bootstrap_us +
+        res.stage_sfd_tail_retrack_us + res.stage_sfd_cfo_refit_us +
+        res.stage_sfd_final_us;
+    BOOST_TEST_MESSAGE("stage_sfd_us=" << res.stage_sfd_us
+                       << " bootstrap=" << res.stage_sfd_bootstrap_us
+                       << " tail_retrack=" << res.stage_sfd_tail_retrack_us
+                       << " cfo_refit=" << res.stage_sfd_cfo_refit_us
+                       << " final=" << res.stage_sfd_final_us
+                       << " anchor_other=" << res.stage_sfd_anchor_other_us);
+    BOOST_CHECK_LE(children_us, res.stage_sfd_us);
+    BOOST_CHECK_EQUAL(children_us + res.stage_sfd_anchor_other_us,
+                      res.stage_sfd_us);
+    BOOST_CHECK_GT(res.stage_sfd_bootstrap_us, uint64_t(0));
+    BOOST_CHECK_GT(res.stage_sfd_final_us, uint64_t(0));
+
+    // (b) `stage_total_us` is the sum of exactly the fields written by the
+    // `lap()` lambda (timing, cfo, sfd, cir, ns_sfd, phr, payload).  The SFD
+    // children are NOT separately accumulated, so this equality would fail if
+    // they leaked into the total.
+    const uint64_t parent_sum = res.stage_timing_us + res.stage_cfo_us +
+        res.stage_sfd_us + res.stage_cir_us + res.stage_ns_sfd_us +
+        res.stage_phr_us + res.stage_payload_us;
+    BOOST_CHECK_EQUAL(res.stage_total_us, parent_sum);
+}
+
 BOOST_AUTO_TEST_CASE(test_demod_core_r3_bad_input_fails_cleanly)
 {
     std::vector<float> short_soft(5000, 0.0f); // no SFD / no PHR

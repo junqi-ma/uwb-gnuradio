@@ -3,7 +3,9 @@ UWB_demodulation/
 
 # Build trees
 gr-uwb/build/
+gr-uwb/build-sic/
 **/build/
+**/build-*/
 **/CMakeFiles/
 **/CMakeCache.txt
 **/cmake_install.cmake
@@ -34,6 +36,10 @@ testdata/capture_out/
 qa_writer_out/
 qa_writer_pkt/
 *.log
+
+# Windows/macOS metadata copied alongside repo files
+*Zone.Identifier
+.DS_Store
 
 # Editor / tool local state
 .claude/

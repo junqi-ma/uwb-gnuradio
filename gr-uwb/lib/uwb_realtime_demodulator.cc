@@ -963,6 +963,18 @@ UwbRealtimeDemodulator::publish_result(const Job& job,
                          pmt::from_uint64(r.stage_cfo_us));
     meta = pmt::dict_add(meta, pmt::mp("stage_sfd_us"),
                          pmt::from_uint64(r.stage_sfd_us));
+    // Diagnostic child sub-timers of stage_sfd_us (already included in the
+    // parent; never added to stage_total_us).
+    meta = pmt::dict_add(meta, pmt::mp("sfd_bootstrap_us"),
+                         pmt::from_uint64(r.stage_sfd_bootstrap_us));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_tail_retrack_us"),
+                         pmt::from_uint64(r.stage_sfd_tail_retrack_us));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_cfo_refit_us"),
+                         pmt::from_uint64(r.stage_sfd_cfo_refit_us));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_final_us"),
+                         pmt::from_uint64(r.stage_sfd_final_us));
+    meta = pmt::dict_add(meta, pmt::mp("sfd_anchor_other_us"),
+                         pmt::from_uint64(r.stage_sfd_anchor_other_us));
     meta = pmt::dict_add(meta, pmt::mp("sfd_bootstrap_windows"),
                          pmt::from_uint64(r.sfd_bootstrap_windows));
     meta = pmt::dict_add(meta, pmt::mp("sfd_bootstrap_coarse_correlations"),

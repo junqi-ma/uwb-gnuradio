@@ -2180,8 +2180,12 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     const auto sfd_seq = gr::uwb::demod::GetSfdSequence(profile.sfd_mode);
     const std::complex<float>* sfd_rx =
         scratch.derotated.empty() ? rx : scratch.derotated.data();
+    const auto sfd_bootstrap_t0 = std::chrono::steady_clock::now();
     const bool bootstrap_sfd_ok = stage_sfd(
         sfd_rx, n, profile, res.timing, sfd_seq, template_wf, res.sfd, scratch);
+    res.stage_sfd_bootstrap_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - sfd_bootstrap_t0).count());
     res.sfd_bootstrap_windows = res.sfd.search_windows;
     res.sfd_bootstrap_coarse_correlations = res.sfd.coarse_correlations;
     res.sfd_bootstrap_fine_correlations = res.sfd.fine_correlations;
@@ -2228,9 +2232,14 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         static_cast<int64_t>(std::llround(
             static_cast<double>(tail_repetitions) * period_hint));
     TimingResult tail_timing;
-    if (!stage_timing(rx, n, cfo_anchor_profile, template_wf, tail_start,
-                      tail_timing, scratch) ||
-        tail_timing.detected_peaks != tail_repetitions) {
+    const auto sfd_tail_t0 = std::chrono::steady_clock::now();
+    const bool tail_timing_ok = stage_timing(
+        rx, n, cfo_anchor_profile, template_wf, tail_start, tail_timing,
+        scratch);
+    res.stage_sfd_tail_retrack_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - sfd_tail_t0).count());
+    if (!tail_timing_ok || tail_timing.detected_peaks != tail_repetitions) {
         lap(res.stage_sfd_us);
         res.status = DemodStatus::CfoFailed;
         rebase();
@@ -2286,7 +2295,13 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         cfo_timing.peak_corr[dst] = tail_timing.peak_corr[k];
     }
 
-    if (!stage_cfo(rx, n, profile, cfo_timing, res.cfo, scratch)) {
+    const auto sfd_cfo_t0 = std::chrono::steady_clock::now();
+    const bool cfo_refit_ok = stage_cfo(rx, n, profile, cfo_timing, res.cfo,
+                                        scratch);
+    res.stage_sfd_cfo_refit_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - sfd_cfo_t0).count());
+    if (!cfo_refit_ok) {
         lap(res.stage_sfd_us);
         res.status = DemodStatus::CfoFailed;
         rebase();
@@ -2301,9 +2316,13 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     // any bootstrap-CFO bias from the SFD/CIR path while retaining the same
     // full-rate refinement contract as MATLAB refineTimingWithNsSfd.
     sfd_rx = scratch.derotated.empty() ? rx : scratch.derotated.data();
+    const auto sfd_final_t0 = std::chrono::steady_clock::now();
     const bool final_sfd_ok = stage_sfd(
         sfd_rx, n, cfo_anchor_profile, res.timing, sfd_seq, template_wf,
         res.sfd, scratch);
+    res.stage_sfd_final_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - sfd_final_t0).count());
     res.sfd_final_windows = res.sfd.search_windows;
     res.sfd_final_coarse_correlations = res.sfd.coarse_correlations;
     res.sfd_final_fine_correlations = res.sfd.fine_correlations;
@@ -2318,6 +2337,20 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             static_cast<double>(profile.preamble_repetitions) *
             res.timing.measured_period));
     lap(res.stage_sfd_us);
+    // Diagnostic remainder of the SFD parent stage.  The four child sub-timers
+    // above are strictly children of `stage_sfd_us` — the parent already
+    // includes them, so this value is diagnostics only and is never added to
+    // `stage_sfd_us` or `stage_total_us`.  Clamp at 0 so an independent-clock
+    // overshoot can never produce a negative (wrapped) value.
+    {
+        const uint64_t sfd_children_us =
+            res.stage_sfd_bootstrap_us + res.stage_sfd_tail_retrack_us +
+            res.stage_sfd_cfo_refit_us + res.stage_sfd_final_us;
+        res.stage_sfd_anchor_other_us =
+            (res.stage_sfd_us >= sfd_children_us)
+                ? res.stage_sfd_us - sfd_children_us
+                : 0;
+    }
     // Stage 4: CIR + soft chips on the CFO-compensated frame.
     const int8_t* pc = GetPreambleCode(profile.code_index);
     std::vector<int8_t> pcode(pc, pc + kQm35CodeLength);

@@ -1,0 +1,46 @@
+{
+  "preset": "main",
+  "schema_version": 1,
+  "frozen": true,
+  "purpose": "§8.2 main effect set: code9 sensing / code10 comm, 64 SYNC, integer single path then four-path comm.",
+  "generator": {
+    "sensing_code": 9,
+    "comm_code": 10,
+    "sync_reps": 64,
+    "pulse_id": "pulse_trunc_linear_rc183_240.f32",
+    "input_grid": "work",
+    "snr_db": 30.0,
+    "isr_db_axis": [0, 10, 20],
+    "start_offset_work_axis": [0, 0.4, 8, -8],
+    "cfo_hz_axis": [0, -50000, 50000],
+    "comm_channel_axis": ["single_int", "four_path"],
+    "comm_paths": {
+      "single_int": [[0, [1.0, 0.0]]],
+      "four_path": [[0, [1.0, 0.0]], [7.4, [0.0, 0.5]], [23, [0.276, -0.116]], [51.2, [0.2, 0.0]]]
+    },
+    "sensing_paths": [[0, [1.0, 0.0]], [37, [0.25, 0.0]]],
+    "frac_model": "pchip",
+    "seeds": {
+      "calibration": { "start": 1000000, "count": 100, "step": 1 },
+      "acceptance": { "start": 2000000, "count": 100, "step": 1 },
+      "rule": "disjoint by construction; materialized, hashed and re-derived by the verifier"
+    }
+  },
+  "runtime": {
+    "sic": "estimate",
+    "sic_k": 4,
+    "fit_reps": 8,
+    "validation_reps": 8,
+    "comm_search_roi": "nominal",
+    "demod_softchip_mode": ["bypass", "full", "rake4"],
+    "input_grid": "work"
+  },
+  "nominal_for_benchmark": {
+    "isr_db": 10,
+    "cfo_hz": 0,
+    "start_offset_work": 0,
+    "sic_k": 4,
+    "note": "benchmark main uses ONLY the nominal cell; other axes are separate case configs to avoid mixing one delay distribution"
+  },
+  "windows_per_cell": 100
+}

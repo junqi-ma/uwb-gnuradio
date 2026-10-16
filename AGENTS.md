@@ -1,6 +1,44 @@
 # UWB GNU Radio Project
 
-## 当前分支：UWB SS-TWR / DS-TWR
+## 当前分支：SIC 论文研究（优先执行，2026-10-16）
+
+当前分支 `feature/sic-research`，从 `feature/uwb-ds-twr` 的 `d0c8138` 创建。
+当前用户任务是 **S0 GNU Radio 前导碰撞仿真与耗时验证**，不是继续 TWR 里程碑。
+先读根目录 **UWB_Preamble_SIC_GNU_Radio_Design.md**，再读
+**docs/sic/OpenCode开发指示_S0_前导碰撞仿真与耗时验证.md**；后者为 OpenCode
+可执行开发任务与验收依据。此处为当前任务范围，下面 TWR 资料保留为继承基线。
+
+### S0 任务与约束
+
+- 复用现有 sensing RX 仿真，在时间上重叠的 SYNC 区注入不同 preamble code 的
+  comm 前导：默认 sensing code 9、comm code 10、64 SYNC、998.4 MS/s。
+  “重合”是时间重叠，不是同码；同码只在显式困难诊断用例中启用。
+- 先做 work-grid CF32，再接现有 CG400 native 491.52 → work 998.4 PDU 65/32。
+  保留完整 sensing RX 给解调器，不能把只覆盖 preamble 的 CIR 窗拿去完整包解调。
+- comm 是 **preamble-only**；SIC 不要求解码 comm PHR/payload/FCS，不复用旧
+  full-packet SIC 的 FCS 门槛。旧 `feature/sic-validation` 保留，不整体合并。
+- clean/raw/sic 按同一窗口配对，报告 sensing CIR/弱目标保护及完整 sensing 包
+  解调状态。在线 SIC 只接收公开模板/粗 ROI，不得读取注入时延/CFO/路径/IQ 真值；
+  oracle 只作单列诊断。相减总功率下降不等于消除了干扰。
+- 新增 SIC 数学核心与 GNU Radio adapter 分离；先 Python 数学参考与 C++ QA，
+  再薄 PDU block、benchmark。执行范围和顺序按 S0 指示，不自动上板。
+- 完整解调、radar CIR-only、SIC 前端分开计时。当前 `stage_sfd_us` 还包含
+  tail timing/CFO refit，`stage_cir_us` 含 soft-chip；补诊断子计时，保留旧字段语义，
+  父子计时不二次累加。失败路径、PMT/队列与生成器开销必须单列。
+- 默认单 worker，scratch 预分配；同时限制 worker 队列与 PMT 入口 in-flight。
+  回放源延迟提交也算 missed admission，不能靠降低实际输入率掩盖过载。
+- 原有 MATLAB canonical fixture 不覆盖；新信号/脚本存 `testdata/sic_preamble/`。
+  MATLAB 未运行明确写未验证。既有 resampler SIMD 非确定性只记录不修，保留
+  scalar/reference 对照，不把其风险混同为 SIC 算法失败。
+- 所有性能数字重新绑定 commit/profile/实际加载库/窗口长度。SIC mean≤0.5 ms、
+  P99≤1 ms 和 200 窗/s 是验证目标，不能预先写为实现事实；不宣称连续 1 GS/s 已通过。
+- 新 block 前仍须查本地 GNU Radio 类似实现、说明 scheduler 语义、先补针对性 QA，
+  每次有意义修改后构建/测试。吞吐 benchmark 串行、同环境配对。
+
+S0 尚未实现。最终开发结果写 **docs/sic/S0_前导碰撞仿真与耗时开发报告.md**，
+区分 work/native、效果/算力、CIR-only/full demod，通过项、失败项、未实跑项均列明。
+
+## 继承基线：UWB SS-TWR / DS-TWR
 
 `feature/uwb-ds-twr` 从 radar 分支 `b897677` 创建（首个提交 `38fbe2c` 为纯文档），
 同时开发 SS-TWR 与 DS-TWR。
@@ -185,6 +223,14 @@ energy / coarse detection
 - Full MATLAB demodulation pipeline is in `UWB_demodulation/`.
 
 ## Goal
+
+Current branch: validate detection-triggered preamble-only SIC in GNU Radio
+simulation, with different sensing/communication codes overlapping in time.
+Measure sensing CIR recovery, target preservation, full sensing demodulation
+and SIC costs separately. Follow the S0 instruction above; do not advance
+to hardware or TWR milestones automatically.
+
+### Inherited TWR goal
 
 Build configurable SS-TWR and DS-TWR on the existing GNU Radio C++ UWB TX/RX
 chain, with Python APIs, timestamp calibration, explicit error handling and

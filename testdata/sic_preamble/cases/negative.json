@@ -1,0 +1,37 @@
+{
+  "preset": "negative",
+  "schema_version": 1,
+  "frozen": true,
+  "purpose": "False-trigger / bypass evidence. Independent negatives >= 1000 windows; single-column false-detect and false-commit; bypass must be bit-identical.",
+  "generator": {
+    "sensing_code": 9,
+    "comm_code": 10,
+    "sync_reps": 64,
+    "input_grid": "work",
+    "cases": [
+      { "id": "no_interference", "isr_db": null, "comm_code": 10, "note": "no comm present" },
+      { "id": "no_overlap", "isr_db": 10, "start_offset_work": 66000, "note": "comm fully outside sensing SYNC; ISR null, not a cancellation success" },
+      { "id": "wrong_code11", "isr_db": 10, "comm_code": 11, "note": "wrong-template control; must differ from code9/code10 cache" },
+      { "id": "same_code_near_delay", "isr_db": 10, "comm_code": 9, "diagnostic_preset": true, "note": "explicit diagnostic only" },
+      { "id": "low_snr", "isr_db": 10, "snr_db": 5.0 },
+      { "id": "very_weak_isr", "isr_db": -10.0 },
+      { "id": "preamble_shift_half_sync", "start_offset_work": 508, "note": "+/- half SYNC; only middle segment visible" },
+      { "id": "cycle_boundary_and_crop", "note": "period-boundary + window head/tail crop; only confirmed region subtracted" }
+    ],
+    "seeds": {
+      "calibration": { "start": 3000000, "count": 200, "step": 1 },
+      "acceptance": { "start": 4000000, "count": 1000, "step": 1 },
+      "rule": "disjoint by construction; materialized, hashed and re-derived by the verifier"
+    }
+  },
+  "runtime": {
+    "sic": "estimate",
+    "sic_k": 4,
+    "input_grid": "work"
+  },
+  "gates": {
+    "false_commit_max": 0.01,
+    "windows_min": 1000,
+    "report": "count / sample size + binomial CI; never claim zero risk"
+  }
+}

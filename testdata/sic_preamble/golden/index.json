@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "int_single",
+      "path": "int_single/io.npz",
+      "sha256": "5c8ed0602e7aa43006d1c58ac7205c2b79b492d57031df0d6a0a37cdec19e3e9",
+      "arrays": [
+        "y",
+        "sync",
+        "preamble",
+        "i",
+        "i_hat_expected",
+        "out_expected"
+      ],
+      "samples_per_symbol": 127,
+      "sync_reps": 16,
+      "sample_rate": 998400000.0
+    },
+    {
+      "name": "int_four",
+      "path": "int_four/io.npz",
+      "sha256": "835b2e41d2ea6462e366593dd8cde0a6c951fbd4305142a7651714d4b1b7801a",
+      "arrays": [
+        "y",
+        "sync",
+        "preamble",
+        "i",
+        "i_hat_expected",
+        "out_expected"
+      ],
+      "samples_per_symbol": 127,
+      "sync_reps": 16,
+      "sample_rate": 998400000.0
+    },
+    {
+      "name": "frac",
+      "path": "frac/io.npz",
+      "sha256": "14ae65428460113b7c55f6f26b3b3bc6d63ac5cb3c117f714e6d951f1f38146b",
+      "arrays": [
+        "y",
+        "sync",
+        "preamble",
+        "i",
+        "i_hat_expected",
+        "out_expected"
+      ],
+      "samples_per_symbol": 127,
+      "sync_reps": 16,
+      "sample_rate": 998400000.0
+    },
+    {
+      "name": "cfo",
+      "path": "cfo/io.npz",
+      "sha256": "e572e17b9ca5857534b2d4cc4e3b63f7419b5877254dbbc56d15c7526806a0d3",
+      "arrays": [
+        "y",
+        "sync",
+        "preamble",
+        "i",
+        "i_hat_expected",
+        "out_expected"
+      ],
+      "samples_per_symbol": 127,
+      "sync_reps": 16,
+      "sample_rate": 998400000.0
+    },
+    {
+      "name": "k_sweep",
+      "path": "k_sweep/io.npz",
+      "sha256": "835b2e41d2ea6462e366593dd8cde0a6c951fbd4305142a7651714d4b1b7801a",
+      "arrays": [
+        "y",
+        "sync",
+        "preamble",
+        "i",
+        "i_hat_expected",
+        "out_expected"
+      ],
+      "samples_per_symbol": 127,
+      "sync_reps": 16,
+      "sample_rate": 998400000.0
+    },
+    {
+      "name": "cross_model",
+      "path": "cross_model/io.npz",
+      "sha256": "ecb1a12d464d2147a3f284d989394467a9bbd1d0c107f72a9f24e4096b7fd452",
+      "arrays": [
+        "y",
+        "sync",
+        "preamble",
+        "i",
+        "i_hat_expected",
+        "out_expected"
+      ],
+      "samples_per_symbol": 127,
+      "sync_reps": 16,
+      "sample_rate": 998400000.0
+    }
+  ]
+}

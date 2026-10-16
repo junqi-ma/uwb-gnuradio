@@ -1,0 +1,35 @@
+{
+  "preset": "baseline",
+  "schema_version": 1,
+  "frozen": true,
+  "purpose": "G0 no-interference baseline: canonical code-9 sensing packet + CIR vs existing MATLAB golden; code-10 template independence; no-interference/no-SIC must equal the old fixture.",
+  "generator": {
+    "sensing_code": 9,
+    "comm_code": 10,
+    "sync_reps": 64,
+    "pulse_id": "pulse_trunc_linear_rc183_240.f32",
+    "input_grid": "work",
+    "interference": "off",
+    "snr_db": 30.0,
+    "isr_db": null,
+    "noise_std": null,
+    "seed": null,
+    "seeds": {
+      "calibration": { "start": 1000000, "count": 32, "step": 1 },
+      "acceptance": { "start": 2000000, "count": 32, "step": 1 },
+      "rule": "disjoint by construction; materialized, hashed and re-derived by the verifier"
+    }
+  },
+  "runtime": {
+    "sic_k": 0,
+    "input_grid": "work",
+    "demod_softchip_mode": "bypass"
+  },
+  "g0_checks": [
+    "canonical code9 PSDU/FCS equals metadata.json payload_bytes_hex",
+    "CIR matches testdata/uwb_radar/cir_norm_clean_radar.cf32 within frozen tolerance",
+    "code10 comm template differs from code9 cache (wrong-template control)",
+    "interference off + SIC off reproduces the old fixture with fixed signal shape and noise seed",
+    "full window vs CIR subwindow bounds recorded; out-of-range rejected or marked partial"
+  ]
+}

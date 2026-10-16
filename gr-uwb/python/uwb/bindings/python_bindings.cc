@@ -40,6 +40,7 @@
 #include <gnuradio/uwb/uwb_radar_packet_source.h>
 #include <gnuradio/uwb/uwb_hrp_packet_source.h>
 #include <gnuradio/uwb/uwb_loopback_echo.h>
+#include <gnuradio/uwb/uwb_preamble_sic.h>
 #include <gnuradio/uwb/uwb_radar_cir_estimator_block.h>
 #include <gnuradio/uwb/uwb_cir_writer.h>
 #include <gnuradio/uwb/uwb_echo_burst_backend.h>
@@ -838,6 +839,124 @@ void bind_loopback_echo(py::module& m)
         .def("pdus_dropped", &Blk::pdus_dropped);
 }
 
+void bind_preamble_sic(py::module& m)
+{
+    using Blk = gr::uwb::UwbPreambleSic;
+    const size_t kDefaultIqBudget = size_t(64) << 20;
+    py::class_<Blk, gr::block, std::shared_ptr<Blk>>(m, "preamble_sic")
+        .def(py::init(&Blk::make),
+             py::arg("sync_template_path"),
+             py::arg("preamble_template_path"),
+             py::arg("comm_code"),
+             py::arg("sync_reps"),
+             py::arg("samples_per_symbol"),
+             py::arg("sample_rate"),
+             py::arg("k_paths"),
+             py::arg("fit_reps"),
+             py::arg("validation_reps"),
+             py::arg("roi_lo"),
+             py::arg("roi_hi"),
+             py::arg("coarse_stride"),
+             py::arg("mode"),
+             py::arg("detect_threshold"),
+             py::arg("validate_threshold"),
+             py::arg("in_flight_max") = size_t(8),
+             py::arg("iq_budget_bytes") = kDefaultIqBudget,
+             py::arg("queue_capacity") = size_t(8),
+             py::arg("publish_reconstruction") = false,
+             py::arg("enable_fractional") = true,
+             py::arg("enable_cfo") = true,
+             py::arg("path_min_spacing") = size_t(0),
+             py::arg("post_tail") = size_t(100),
+             py::arg("max_window_samples") = size_t(0),
+             py::arg("pending_bypass_max") = size_t(0))
+        .def_static("make",
+                    &Blk::make,
+                    py::arg("sync_template_path"),
+                    py::arg("preamble_template_path"),
+                    py::arg("comm_code"),
+                    py::arg("sync_reps"),
+                    py::arg("samples_per_symbol"),
+                    py::arg("sample_rate"),
+                    py::arg("k_paths"),
+                    py::arg("fit_reps"),
+                    py::arg("validation_reps"),
+                    py::arg("roi_lo"),
+                    py::arg("roi_hi"),
+                    py::arg("coarse_stride"),
+                    py::arg("mode"),
+                    py::arg("detect_threshold"),
+                    py::arg("validate_threshold"),
+                    py::arg("in_flight_max") = size_t(8),
+                    py::arg("iq_budget_bytes") = kDefaultIqBudget,
+                    py::arg("queue_capacity") = size_t(8),
+                    py::arg("publish_reconstruction") = false,
+                    py::arg("enable_fractional") = true,
+                    py::arg("enable_cfo") = true,
+                    py::arg("path_min_spacing") = size_t(0),
+                    py::arg("post_tail") = size_t(100),
+                    py::arg("max_window_samples") = size_t(0),
+                    py::arg("pending_bypass_max") = size_t(0))
+        .def_static("make_from_templates",
+                    &Blk::make_from_templates,
+                    py::arg("sync"),
+                    py::arg("preamble"),
+                    py::arg("comm_code"),
+                    py::arg("sync_reps"),
+                    py::arg("samples_per_symbol"),
+                    py::arg("sample_rate"),
+                    py::arg("k_paths"),
+                    py::arg("fit_reps"),
+                    py::arg("validation_reps"),
+                    py::arg("roi_lo"),
+                    py::arg("roi_hi"),
+                    py::arg("coarse_stride"),
+                    py::arg("mode"),
+                    py::arg("detect_threshold"),
+                    py::arg("validate_threshold"),
+                    py::arg("in_flight_max") = size_t(8),
+                    py::arg("iq_budget_bytes") = kDefaultIqBudget,
+                    py::arg("queue_capacity") = size_t(8),
+                    py::arg("publish_reconstruction") = false,
+                    py::arg("enable_fractional") = true,
+                    py::arg("enable_cfo") = true,
+                    py::arg("path_min_spacing") = size_t(0),
+                    py::arg("post_tail") = size_t(100),
+                    py::arg("max_window_samples") = size_t(0),
+                    py::arg("pending_bypass_max") = size_t(0))
+        .def("windows_offered", &Blk::windows_offered)
+        .def("windows_admitted", &Blk::windows_admitted)
+        .def("windows_completed", &Blk::windows_completed)
+        .def("windows_failed", &Blk::windows_failed)
+        .def("windows_bypassed", &Blk::windows_bypassed)
+        .def("windows_dropped", &Blk::windows_dropped)
+        .def("windows_invalid", &Blk::windows_invalid)
+        .def("windows_missed_admission", &Blk::windows_missed_admission)
+        .def("windows_queue_overflow", &Blk::windows_queue_overflow)
+        .def("windows_pool_capacity_exceeded",
+             &Blk::windows_pool_capacity_exceeded)
+        .def("window_grow_count", &Blk::window_grow_count)
+        .def("inflight_high_watermark", &Blk::inflight_high_watermark)
+        .def("queue_high_watermark", &Blk::queue_high_watermark)
+        .def("bypass_fifo_high_watermark",
+             &Blk::bypass_fifo_high_watermark)
+        .def("queue_depth", &Blk::queue_depth)
+        .def("drained", &Blk::drained)
+        .def("drain", &Blk::drain)
+        .def("mode", &Blk::mode)
+        .def("in_flight_max", &Blk::in_flight_max)
+        .def("iq_budget_bytes", &Blk::iq_budget_bytes)
+        .def("queue_capacity", &Blk::queue_capacity)
+        .def("publish_reconstruction", &Blk::publish_reconstruction)
+        .def("enable_fractional", &Blk::enable_fractional)
+        .def("enable_cfo", &Blk::enable_cfo)
+        .def("path_min_spacing", &Blk::path_min_spacing)
+        .def("post_tail", &Blk::post_tail)
+        .def("max_window_samples", &Blk::max_window_samples)
+        .def("pending_bypass_max", &Blk::pending_bypass_max)
+        .def("truth_port_enabled", &Blk::truth_port_enabled);
+}
+
 void bind_radar_cir_estimator(py::module& m)
 {
     using Blk = gr::uwb::UwbRadarCirEstimator;
@@ -1594,6 +1713,7 @@ PYBIND11_MODULE(uwb_python, m)
     bind_radar_packet_source(m);
     bind_hrp_packet_source(m);
     bind_loopback_echo(m);
+    bind_preamble_sic(m);
     bind_radar_cir_estimator(m);
     bind_cir_writer(m);
     bind_echo_backends(m);

@@ -214,6 +214,23 @@ struct DemodResult {
     uint64_t sfd_final_windows = 0;
     uint64_t sfd_final_coarse_correlations = 0;
     uint64_t sfd_final_fine_correlations = 0;
+    // Diagnostic CHILD sub-timers of `stage_sfd_us`.  They break the parent
+    // stage — already measured end-to-end by the single `lap(stage_sfd_us)`
+    // on the success path — into its internal sub-blocks:
+    //   bootstrap stage_sfd()  -> stage_sfd_bootstrap_us
+    //   tail stage_timing()    -> stage_sfd_tail_retrack_us
+    //   second stage_cfo()     -> stage_sfd_cfo_refit_us
+    //   final stage_sfd()      -> stage_sfd_final_us
+    //   remainder of the stage -> stage_sfd_anchor_other_us (checks, grid
+    //                             rebuild, clamp at 0)
+    // IMPORTANT: the parent `stage_sfd_us` ALREADY INCLUDES these children.
+    // They must NEVER be added to `stage_sfd_us` or `stage_total_us` (that
+    // would double-count).  They are published for diagnostics only.
+    uint64_t stage_sfd_bootstrap_us = 0;
+    uint64_t stage_sfd_tail_retrack_us = 0;
+    uint64_t stage_sfd_cfo_refit_us = 0;
+    uint64_t stage_sfd_final_us = 0;
+    uint64_t stage_sfd_anchor_other_us = 0;
     // Bootstrap preamble prediction vs final CFO-aligned SFD coordinates.
     // Both are absolute after demodulate_one() rebases the cropped PDU.
     int64_t sfd_initial_predicted_sample = -1;

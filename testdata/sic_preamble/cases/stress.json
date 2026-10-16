@@ -1,0 +1,36 @@
+{
+  "preset": "stress",
+  "schema_version": 1,
+  "frozen": true,
+  "purpose": "Boundary/pressure axes. Not a full Cartesian product; run only after a main failure has been localized, or as the declared extension set.",
+  "generator": {
+    "sensing_code": 9,
+    "comm_code": 10,
+    "sync_reps": 64,
+    "input_grid": "work",
+    "axes": {
+      "sic_k": [1, 2, 4, 8, 16],
+      "fit_reps": [8, 16, 32],
+      "comm_search_roi": ["narrow", "nominal", "wide"],
+      "sfo_ppm": [0, -20, 20],
+      "frac_model": ["pchip", "bandlimited"],
+      "sc16_clip": [false, true],
+      "comm_channel_axis": ["single_int", "four_path", "six_path_over_K"]
+    },
+    "notes": [
+      "fit_reps=8 (8128 samples) minimum; validation uses >=8 further SYNC or fails explicitly",
+      "estimate vs validation reps must be disjoint; buffered processing, not real-time claim",
+      "six_path_over_K is a declared pressure case exceeding the configured K",
+      "bandlimited model breaks pchip self-consistency in the fractional-delay estimate"
+    ],
+    "seeds": {
+      "calibration": { "start": 5000000, "count": 100, "step": 1 },
+      "acceptance": { "start": 6000000, "count": 100, "step": 1 },
+      "rule": "disjoint by construction; materialized, hashed and re-derived by the verifier"
+    }
+  },
+  "runtime": {
+    "sic": "estimate",
+    "input_grid": "work"
+  }
+}

@@ -1,0 +1,11 @@
+# Generated S0 fixtures are large and truth-bearing: never commit them.
+fixtures/
+*.npz
+*.jsonl
+*.cf32
+*.sc16
+
+# ...except the small, intentional C++/Python cross-check golden vectors.
+!golden/
+!golden/**
+!golden/*.npz

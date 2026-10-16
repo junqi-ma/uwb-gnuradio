@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "case": "cfo",
+  "description": "integer path (delay 0) + CFO +50 kHz",
+  "sample_rate": 998400000.0,
+  "samples_per_symbol": 127,
+  "sync_reps": 16,
+  "arrays": {
+    "y": "complex64 received window (s + i + w)",
+    "sync": "complex64 ONE shaped SYNC template (comm code)",
+    "preamble": "complex64 FULL comm preamble template",
+    "i": "complex64 TRUTH interferer (never pass to estimate_sic)",
+    "i_hat_expected": "complex64 reference estimate reconstruction",
+    "out_expected": "complex64 reference estimate output (masked)"
+  },
+  "generator": {
+    "paths": [
+      {
+        "delay_samples": 0.0,
+        "gain_complex": [
+          1.0,
+          0.0
+        ]
+      }
+    ],
+    "cfo_hz": 50000.0,
+    "frac_model": "core",
+    "code": 10
+  },
+  "truth": {
+    "start": 64.0,
+    "cfo_hz": 50000.0,
+    "model": "core",
+    "paths": [
+      {
+        "delay_samples": 0.0,
+        "gain_complex": [
+          1.0,
+          0.0
+        ]
+      }
+    ]
+  },
+  "runtime_cfg": {
+    "mode": "Estimate",
+    "comm_code": 10,
+    "sync_reps": 16,
+    "samples_per_symbol": 127,
+    "sample_rate": 998400000.0,
+    "k_paths": 4,
+    "fit_reps": 8,
+    "validation_reps": 8,
+    "roi_lo": 0,
+    "roi_hi": 2160,
+    "coarse_stride": 14,
+    "path_min_spacing": 0,
+    "post_tail": 64,
+    "enable_fractional": false,
+    "enable_cfo": true,
+    "detect_threshold": 0.4,
+    "validate_threshold": 0.25
+  },
+  "expected": {
+    "detected_start": 64,
+    "cfo_hz": 50000.0,
+    "taus": [
+      64.0
+    ],
+    "gains": [
+      [
+        1.0,
+        0.0
+      ]
+    ]
+  },
+  "thresholds": {
+    "detect_threshold": 0.4,
+    "validate_threshold": 0.25
+  },
+  "pass_criteria": {
+    "oracle_nmse_max": 1e-06,
+    "estimate_nmse_max": 0.05,
+    "suppression_min_db": 12.0,
+    "detected_start_tol": 1,
+    "cfo_hz_tol": 3000.0,
+    "require_commit": true
+  },
+  "nominal_k_used_for_expected_arrays": 4,
+  "declared_stress": false
+}
