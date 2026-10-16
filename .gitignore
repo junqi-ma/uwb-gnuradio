@@ -50,3 +50,19 @@ venv/
 # Runtime artifacts from x410_uwb_radar_validate
 err.txt
 plan.json
+
+# Machine-local runtime logs and scratch output (GB-scale, never publish)
+logs/
+out/
+probe_tmp.txt
+
+# Multi-GB IQ captures dumped at the testdata root. Small per-case goldens
+# (testdata/twr/, testdata/generated_uwb_test/, ...) stay tracked.
+/testdata/*.dat
+
+# Radar/capture app IQ dumps (capture.iq next to its capture.jsonl/cir.*)
+capture.iq
+
+# MATLAB scratch outputs from the analysis scripts
+/all_frames_cir.mat
+/frame_summary.csv
