@@ -24,13 +24,15 @@
  *     cell, the S1 fit/validation split (fit=8, validation=8 holdout CAPACITY,
  *     evaluation_reps=56 offline-only), acceptance seeds, and the same
  *     search/subtraction/core/sensing ROIs as `uwb_sim_preamble_sic.py`;
- *   - the corpus records the S1 `effective_config` dict (identical key set and
- *     values to the effect runner) and its canonical SHA-256. At load time the
- *     tool re-serializes that dict canonically, re-hashes it, and REQUIRES the
- *     hash to equal both the corpus record and an effect run's
- *     `effective_config_hash` (default: newest effect run under the output
- *     parent whose `gates.eff_pass`/`gates.s1_pass` are true; `--effect-run`
- *     pins it).
+ *   - the corpus carries the S1 `effective_config` dict VERBATIM from the effect
+ *     run's `run_manifest.json` (canonical bytes + recorded SHA-256), rather
+ *     than re-deriving a key list here. At load time the tool parses that dict,
+ *     re-serializes it canonically (which must reproduce the stored bytes) and
+ *     re-hashes it, REQUIRING the hash to equal both the corpus record and an
+ *     effect run's `effective_config_hash` (default: newest effect run under
+ *     the output parent whose `gates.eff_pass`/`gates.s1_pass` are true;
+ *     `--effect-run` pins it).  A key the effect runner adds or renames can
+ *     never silently break the binding.
  *     A real-input row that cannot be bound to a passing effect run is written
  *     with `effect_verified=false` and the tool exits non-zero (anti-cheat).
  *   - every input window / template is written as raw CF32 with a SHA-256 in
@@ -439,71 +441,14 @@ parse_args(int argc, char** argv, Options& o)
 }
 
 // ---------------------------------------------------------------------------
-// The S1 effective config (S1-02): the EXACT identity the effect runner
-// (`uwb_sim_preamble_sic.py`) hashes.  Key set and canonical serialization are
-// frozen here; the corpus and the bound effect run must both reproduce it.
+// The S1 effective config (S1-02) is NOT re-derived here.  The single source of
+// truth is the effect run's `run_manifest.json.effective_config`, carried into
+// the corpus VERBATIM (canonical bytes + hash).  The benchmark reads that dict
+// back, verifies its hash by canonical re-serialization, and uses it as the row
+// identity.  Runtime knobs (mode/consumer/windows/rounds/distinct) stay OUTSIDE
+// it, so a key the effect runner adds or renames can never silently break the
+// binding or force this tool to duplicate a frozen key list.
 // ---------------------------------------------------------------------------
-struct EffectiveConfig {
-    std::string case_id = "nominal";
-    long long coarse_stride = 14;
-    long long comm_code = 10;
-    std::string comm_template_id;
-    long long comm_template_length = 0;
-    std::string comm_template_sha256;
-    long long core_lo = -1, core_hi = -1;
-    bool cover_preamble = false;
-    double detect_threshold = kDetectThreshold;
-    long long evaluation_reps = 56;
-    long long fit_reps = 8;
-    std::string fit_reps_source = "preset";
-    std::string input_grid = "work";
-    long long input_length = 0;
-    long long k_paths = 4;
-    long long online_validation_reps = 0;
-    long long post_tail = 100;
-    std::string preset = "main";
-    double sample_rate = kWorkRate;
-    long long samples_per_symbol = 1016;
-    long long search_lo = -1, search_hi = -1;
-    long long sensing_code = 9;
-    long long sensing_lo = -1, sensing_hi = -1;
-    std::string sic_model_mode = "estimate8_frozen";
-    long long sub_lo = -1, sub_hi = -1;
-    long long sync_reps = 64;
-    double validate_threshold = kValidateThreshold;
-    long long validation_reps = 8;
-};
-
-// Python-compatible repr of a double for the values this config uses
-// (|v| in [1e-4, 1e16)): shortest fixed-point form that round-trips, with a
-// trailing ".0" for integral values (Python prints 998400000.0, not 998400000).
-std::string
-py_number_repr(double v)
-{
-    if (!std::isfinite(v))
-        return "null";
-    if (v == 0.0)
-        return std::signbit(v) ? "-0.0" : "0.0";
-    const double av = std::abs(v);
-    if (av < 1e-4 || av >= 1e16) {
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "%.17g", v);
-        return std::string(buf);
-    }
-    for (int dec = 0; dec <= 17; ++dec) {
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "%.*f", dec, v);
-        if (std::strtod(buf, nullptr) == v) {
-            std::string s(buf);
-            if (s.find('.') == std::string::npos)
-                s += ".0";
-            return s;
-        }
-    }
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.17g", v);
-    return std::string(buf);
-}
 
 std::string
 json_str(const std::string& s)
@@ -530,66 +475,6 @@ json_str(const std::string& s)
     o.push_back('"');
     return o;
 }
-
-// Canonical per-key JSON values of the effective config: keys sorted, values in
-// Python repr form. `json.dumps(obj, sort_keys=True, separators=(",", ":"))`
-// produces the concatenation of these, so sha256(canonical) is the effect
-// runner's `effective_config_hash`.
-std::map<std::string, std::string>
-effective_config_fields(const EffectiveConfig& e)
-{
-    std::map<std::string, std::string> m;
-    auto b = [](bool v) { return std::string(v ? "true" : "false"); };
-    auto i = [](long long v) { return std::to_string(v); };
-    auto pair = [&](long long lo, long long hi) {
-        return "[" + std::to_string(lo) + "," + std::to_string(hi) + "]";
-    };
-    m["case_id"] = json_str(e.case_id);
-    m["coarse_stride"] = i(e.coarse_stride);
-    m["comm_code"] = i(e.comm_code);
-    m["comm_template_id"] = json_str(e.comm_template_id);
-    m["comm_template_length"] = i(e.comm_template_length);
-    m["comm_template_sha256"] = json_str(e.comm_template_sha256);
-    m["core_roi"] = pair(e.core_lo, e.core_hi);
-    m["cover_preamble"] = b(e.cover_preamble);
-    m["detect_threshold"] = py_number_repr(e.detect_threshold);
-    m["evaluation_reps"] = i(e.evaluation_reps);
-    m["fit_reps"] = i(e.fit_reps);
-    m["fit_reps_source"] = json_str(e.fit_reps_source);
-    m["input_grid"] = json_str(e.input_grid);
-    m["input_length"] = i(e.input_length);
-    m["k_paths"] = i(e.k_paths);
-    m["online_validation_reps"] = i(e.online_validation_reps);
-    m["post_tail"] = i(e.post_tail);
-    m["preset"] = json_str(e.preset);
-    m["sample_rate"] = py_number_repr(e.sample_rate);
-    m["samples_per_symbol"] = i(e.samples_per_symbol);
-    m["search_roi"] = pair(e.search_lo, e.search_hi);
-    m["sensing_code"] = i(e.sensing_code);
-    m["sensing_roi"] = pair(e.sensing_lo, e.sensing_hi);
-    m["sic_model_mode"] = json_str(e.sic_model_mode);
-    m["subtraction_roi"] = pair(e.sub_lo, e.sub_hi);
-    m["sync_reps"] = i(e.sync_reps);
-    m["validate_threshold"] = py_number_repr(e.validate_threshold);
-    m["validation_reps"] = i(e.validation_reps);
-    return m;
-}
-
-std::string
-effective_config_json(const EffectiveConfig& e)
-{
-    const auto fields = effective_config_fields(e);
-    std::ostringstream j;
-    j << "{";
-    bool first = true;
-    for (const auto& kv : fields) {
-        j << (first ? "" : ",") << json_str(kv.first) << ":" << kv.second;
-        first = false;
-    }
-    j << "}";
-    return j.str();
-}
-
 
 // ---------------------------------------------------------------------------
 // Stats / process metrics
@@ -1042,6 +927,44 @@ public:
 // ---------------------------------------------------------------------------
 // Real-input corpus (R03)
 // ---------------------------------------------------------------------------
+
+// Minimal JSON value model (parser/writer below).  Declared here because the
+// corpus carries the effect run's `effective_config` dict verbatim.  Numbers
+// keep their raw token, so canonical output reproduces the Python
+// `json.dumps` bytes the effect runner hashed.
+struct JsonValue {
+    enum class Kind { Null, Bool, Number, String, Array, Object };
+    Kind kind = Kind::Null;
+    bool b = false;
+    std::string text; // string content or raw number token
+    std::vector<JsonValue> arr;
+    std::map<std::string, JsonValue> obj;
+
+    const JsonValue* find(const std::string& k) const
+    {
+        auto it = obj.find(k);
+        return it == obj.end() ? nullptr : &it->second;
+    }
+    bool bool_or(bool def) const
+    {
+        return (kind == Kind::Bool) ? b : def;
+    }
+    long long int_or(long long def) const
+    {
+        if (kind != Kind::Number)
+            return def;
+        try {
+            return std::stoll(text);
+        } catch (...) {
+            return def;
+        }
+    }
+    std::string str_or(const std::string& def) const
+    {
+        return (kind == Kind::String) ? text : def;
+    }
+};
+
 struct WindowTruth {
     size_t index = 0;
     uint64_t seed = 0;
@@ -1090,9 +1013,13 @@ struct Corpus {
     double validate_threshold = kValidateThreshold;
     size_t coarse_stride = kCoarseStride, post_tail = kPostTail;
 
-    // S1 effective-config identity (see EffectiveConfig).
-    EffectiveConfig ec;
-    std::string effective_config_hash;     // recorded by the generator
+    // S1 effective-config identity: the effect run's dict, carried VERBATIM.
+    // `effective_config` is the parsed dict, `effective_config_json` its
+    // canonical bytes (exactly the effect runner's hashed bytes) and
+    // `effective_config_hash` the recorded SHA-256, re-verified at load time.
+    JsonValue effective_config;
+    std::string case_id = "nominal";
+    std::string effective_config_hash;     // recorded by the generator/effect run
     std::string effective_config_hash_recomputed;
     std::string effective_config_json;     // canonical bytes
 
@@ -1163,39 +1090,6 @@ kv_get(const std::map<std::string, std::string>& kv, const std::string& k,
 // Numbers keep their raw token, so canonical output reproduces the Python
 // `json.dumps` bytes the effect runner hashed.
 // ---------------------------------------------------------------------------
-struct JsonValue {
-    enum class Kind { Null, Bool, Number, String, Array, Object };
-    Kind kind = Kind::Null;
-    bool b = false;
-    std::string text; // string content or raw number token
-    std::vector<JsonValue> arr;
-    std::map<std::string, JsonValue> obj;
-
-    const JsonValue* find(const std::string& k) const
-    {
-        auto it = obj.find(k);
-        return it == obj.end() ? nullptr : &it->second;
-    }
-    bool bool_or(bool def) const
-    {
-        return (kind == Kind::Bool) ? b : def;
-    }
-    long long int_or(long long def) const
-    {
-        if (kind != Kind::Number)
-            return def;
-        try {
-            return std::stoll(text);
-        } catch (...) {
-            return def;
-        }
-    }
-    std::string str_or(const std::string& def) const
-    {
-        return (kind == Kind::String) ? text : def;
-    }
-};
-
 class JsonReader
 {
 public:
@@ -1451,9 +1345,9 @@ read_json_file(const std::string& path, JsonValue& out, std::string& err)
 }
 
 // An effect run the measured row may bind to.  `ok` means: the manifest's
-// effective_config reproduces its own recorded hash, the hash equals the
-// benchmark's canonical hash, the effect gates pass, and both agree on the
-// template sha256 / input length / model mode.
+// effective_config reproduces its own recorded hash (by canonical
+// re-serialization), the effect gates pass, and its canonical config bytes
+// equal the corpus identity (carried verbatim from an effect run).
 struct EffectRun {
     bool found = false;
     std::string dir, run_id;
@@ -1529,26 +1423,26 @@ load_effect_run(const std::string& dir, EffectRun& e)
     return true;
 }
 
-// Compare the benchmark's own effective config against the effect run's dict:
-// per-field canonical rendering, so a mismatch names the exact keys.
+// Diagnose a difference between the corpus's verbatim effective config and the
+// effect run's dict: generic per-key canonical rendering over the UNION of keys
+// (no frozen key list), so a mismatch names the exact keys on either side.
 void
-compare_effective_config(const EffectiveConfig& mine, const JsonValue& theirs,
-                         std::vector<std::string>& mismatch)
+diff_effective_config(const JsonValue& mine, const JsonValue& theirs,
+                      std::vector<std::string>& mismatch)
 {
-    const auto f = effective_config_fields(mine);
-    for (const auto& kv : f) {
+    for (const auto& kv : mine.obj) {
         const JsonValue* v = theirs.find(kv.first);
         if (v == nullptr) {
             mismatch.push_back(kv.first + ": missing in effect run");
             continue;
         }
         const std::string a = json_canonical(*v);
-        if (a != kv.second)
-            mismatch.push_back(kv.first + ": benchmark=" + kv.second +
-                               " effect=" + a);
+        const std::string b = json_canonical(kv.second);
+        if (a != b)
+            mismatch.push_back(kv.first + ": corpus=" + b + " effect=" + a);
     }
     for (const auto& kv : theirs.obj) {
-        if (f.find(kv.first) == f.end())
+        if (mine.obj.find(kv.first) == mine.obj.end())
             mismatch.push_back(kv.first + ": extra key in effect run");
     }
 }
@@ -1730,14 +1624,81 @@ def main():
             psdu_hex=S.DEFAULT_PSDU_HEX, comm_present=False,
             build_comm=False, snr_db=snr_db, isr_db=None, verbose=False)
 
-    search_roi = (max(0, gen.pre), min(gen.n, gen.pre + sync_reps * S.SPS))
-    sensing_roi = (search_roi[0], search_roi[1])
-    # Same widening rule as uwb_sim_preamble_sic.py: the core ROI covers the
-    # whole nominal preamble so the natural tail is never clipped.
-    core_tail_reps = max(int(fit) + int(val), int(sync_reps))
-    sub_roi = (search_roi[0],
-               min(gen.n, search_roi[1] + core_tail_reps * S.SPS + post_tail))
-    core_roi = (sub_roi[0], sub_roi[1])
+    # ---- S1 effective config: the effect run's dict, carried VERBATIM --------
+    # The effect run is the single source of truth for the identity AND for the
+    # runtime parameters the measured pipeline must share.  We never re-derive
+    # the dict from our own key list: doing that is exactly what drifted from
+    # the app.  If a run is pinned (check_dir) its dict and hash are copied
+    # byte-for-byte; the generator geometry must reproduce them or we fail
+    # closed.
+    eff_cfg = None
+    eff_hash = None
+    if check_dir:
+        man_path = os.path.join(check_dir, "run_manifest.json")
+        if not os.path.isfile(man_path):
+            raise SystemExit("effect run %s has no run_manifest.json"
+                             % check_dir)
+        with open(man_path) as f:
+            eff_man = json.load(f)
+        eff_cfg = eff_man.get("effective_config")
+        eff_hash = eff_man.get("effective_config_hash")
+        if not isinstance(eff_cfg, dict):
+            raise SystemExit("effect run %s has no effective_config dict"
+                             % check_dir)
+        if canonical_hash(eff_cfg) != eff_hash:
+            raise SystemExit(
+                "effect run %s effective_config does not reproduce its "
+                "recorded hash %s" % (check_dir, eff_hash))
+
+    def eff_get(key):
+        if key not in eff_cfg:
+            raise SystemExit("effect run %s effective_config has no %r"
+                             % (check_dir, key))
+        return eff_cfg[key]
+
+    if eff_cfg is not None:
+        model_mode = str(eff_get("sic_model_mode"))
+        fit = int(eff_get("fit_reps"))
+        val = int(eff_get("validation_reps"))
+        online_val = int(eff_get("online_validation_reps"))
+        eval_reps = int(eff_get("evaluation_reps"))
+        post_tail = int(eff_get("post_tail"))
+        case_id = str(eff_get("case_id"))
+        k_paths = int(eff_get("k_paths"))
+        coarse_stride = int(eff_get("coarse_stride"))
+        detect_threshold = float(eff_get("detect_threshold"))
+        validate_threshold = float(eff_get("validate_threshold"))
+        search_roi = tuple(int(x) for x in eff_get("search_roi"))
+        subtraction_roi = tuple(int(x) for x in eff_get("subtraction_roi"))
+        core_roi = tuple(int(x) for x in eff_get("core_roi"))
+        sensing_roi = tuple(int(x) for x in eff_get("sensing_roi"))
+        for name, got, want in (
+                ("preset", eff_get("preset"), "main"),
+                ("input_grid", eff_get("input_grid"), "work"),
+                ("input_length", int(eff_get("input_length")), int(gen.n)),
+                ("sample_rate", float(eff_get("sample_rate")), float(S.WORK_HZ)),
+                ("samples_per_symbol", int(eff_get("samples_per_symbol")),
+                 int(S.SPS)),
+                ("sensing_code", int(eff_get("sensing_code")), sensing_code),
+                ("comm_code", int(eff_get("comm_code")), comm_code),
+                ("sync_reps", int(eff_get("sync_reps")), sync_reps)):
+            if got != want:
+                raise SystemExit("effect run %s %s=%r but the generator "
+                                 "resolved %r" % (check_dir, name, got, want))
+    else:
+        k_paths = int(preset.get("runtime", {}).get("sic_k", 4))
+        coarse_stride = 14
+        detect_threshold = 0.40
+        validate_threshold = 0.25
+        search_roi = (max(0, gen.pre), min(gen.n, gen.pre + sync_reps * S.SPS))
+        sensing_roi = (search_roi[0], search_roi[1])
+        # Same widening rule as uwb_sim_preamble_sic.py: the core ROI covers the
+        # whole nominal preamble so the natural tail is never clipped.
+        core_tail_reps = max(int(fit) + int(val), int(sync_reps))
+        subtraction_roi = (
+            search_roi[0],
+            min(gen.n, search_roi[1] + core_tail_reps * S.SPS + post_tail))
+        core_roi = (subtraction_roi[0], subtraction_roi[1])
 
     tpl = {
         "sensing_sync_code9": (gen.template, "sync_template_code9_998p4.cf32"),
@@ -1757,6 +1718,17 @@ def main():
     comm_mode = gen.comm_meta.get("mode") or "unknown"
     comm_sha = tpl_meta["comm_preamble_code10"]["sha256"]
     comm_len = tpl_meta["comm_preamble_code10"]["length"]
+    if eff_cfg is not None:
+        for name, got, want in (
+                ("comm_template_sha256", str(eff_get("comm_template_sha256")),
+                 comm_sha),
+                ("comm_template_length", int(eff_get("comm_template_length")),
+                 int(comm_len)),
+                ("comm_template_id", str(eff_get("comm_template_id")),
+                 "comm_preamble_code%d_%s" % (comm_code, comm_mode))):
+            if got != want:
+                raise SystemExit("effect run %s %s=%r but the generator "
+                                 "resolved %r" % (check_dir, name, got, want))
 
     # ---- windows -----------------------------------------------------------
     # class plan: 0% (clean, no comm), 10% (comm starts 90% into the sensing
@@ -1803,35 +1775,46 @@ def main():
                                 else float(w["isr_db"])),
                      "noise_std": float(w["noise_std"])})
 
-    # ---- S1 effective config (identical key set / values to the effect run) --
-    effective_config = {
-        "case_id": str(case_id),
-        "preset": "main", "input_grid": "work",
-        "input_length": int(gen.n),
-        "sample_rate": float(S.WORK_HZ), "samples_per_symbol": int(S.SPS),
-        "sensing_code": sensing_code, "comm_code": comm_code,
-        "sync_reps": sync_reps,
-        "k_paths": int(preset.get("runtime", {}).get("sic_k", 4)),
-        "fit_reps": int(fit),
-        "validation_reps": int(val),
-        "fit_reps_source": "preset",
-        "cover_preamble": False,
-        "sic_model_mode": str(model_mode),
-        "online_validation_reps": int(online_val),
-        "evaluation_reps": int(eval_reps),
-        "search_roi": [int(search_roi[0]), int(search_roi[1])],
-        "subtraction_roi": [int(sub_roi[0]), int(sub_roi[1])],
-        "core_roi": [int(core_roi[0]), int(core_roi[1])],
-        "sensing_roi": [int(sensing_roi[0]), int(sensing_roi[1])],
-        "coarse_stride": 14,
-        "post_tail": int(post_tail),
-        "detect_threshold": 0.40,
-        "validate_threshold": 0.25,
-        "comm_template_id": "comm_preamble_code%d_%s" % (comm_code, comm_mode),
-        "comm_template_sha256": comm_sha,
-        "comm_template_length": int(comm_len),
-    }
+    # ---- S1 effective config (the effect run's dict, or a self-derived one) --
+    if eff_cfg is not None:
+        # VERBATIM: the exact dict the effect runner hashed.
+        effective_config = eff_cfg
+    else:
+        effective_config = {
+            "case_id": str(case_id),
+            "preset": "main", "input_grid": "work",
+            "input_length": int(gen.n),
+            "sample_rate": float(S.WORK_HZ), "samples_per_symbol": int(S.SPS),
+            "sensing_code": sensing_code, "comm_code": comm_code,
+            "sync_reps": sync_reps,
+            "k_paths": int(preset.get("runtime", {}).get("sic_k", 4)),
+            "fit_reps": int(fit),
+            "validation_reps": int(val),
+            "fit_reps_source": "preset",
+            "cover_preamble": False,
+            "sic_model_mode": str(model_mode),
+            "online_validation_reps": int(online_val),
+            "evaluation_reps": int(eval_reps),
+            "search_roi": [int(search_roi[0]), int(search_roi[1])],
+            "subtraction_roi": [int(subtraction_roi[0]),
+                                int(subtraction_roi[1])],
+            "core_roi": [int(core_roi[0]), int(core_roi[1])],
+            "sensing_roi": [int(sensing_roi[0]), int(sensing_roi[1])],
+            "coarse_stride": 14,
+            "post_tail": int(post_tail),
+            "detect_threshold": 0.40,
+            "validate_threshold": 0.25,
+            "comm_template_id": "comm_preamble_code%d_%s" % (comm_code, comm_mode),
+            "comm_template_sha256": comm_sha,
+            "comm_template_length": int(comm_len),
+        }
+    effective_config_json = json.dumps(effective_config, sort_keys=True,
+                                       separators=(",", ":"))
     effective_config_hash = canonical_hash(effective_config)
+    if eff_hash is not None and effective_config_hash != eff_hash:
+        raise SystemExit("corpus effective_config hash %s does not match the "
+                         "effect run hash %s" % (effective_config_hash,
+                                                 eff_hash))
 
     cross = {"reference_run": (os.path.basename(check_dir.rstrip("/"))
                                if check_dir else None)}
@@ -1879,13 +1862,15 @@ def main():
         "fit_reps": fit, "validation_reps": val,
         "online_validation_reps": online_val, "evaluation_reps": eval_reps,
         "sic_model_mode": str(model_mode),
-        "k_paths": int(preset.get("runtime", {}).get("sic_k", 4)),
-        "post_tail": post_tail, "coarse_stride": 14,
-        "detect_threshold": 0.40, "validate_threshold": 0.25,
+        "k_paths": k_paths,
+        "post_tail": post_tail, "coarse_stride": coarse_stride,
+        "detect_threshold": detect_threshold,
+        "validate_threshold": validate_threshold,
         "pre_guard": int(gen.pre), "window_len": int(gen.n),
         "geometry": {k: int(v) for k, v in gen.geom.items()},
         "search_roi": [int(search_roi[0]), int(search_roi[1])],
-        "subtraction_roi": [int(sub_roi[0]), int(sub_roi[1])],
+        "subtraction_roi": [int(subtraction_roi[0]),
+                            int(subtraction_roi[1])],
         "core_roi": [int(core_roi[0]), int(core_roi[1])],
         "sensing_roi": [int(sensing_roi[0]), int(sensing_roi[1])],
         "samples_per_symbol": int(S.SPS), "sample_rate": float(S.WORK_HZ),
@@ -1930,6 +1915,7 @@ def main():
     add("generator_script_sha256", manifest["generator"]["script_sha256"])
     add("config_hash", config_hash)
     add("effective_config_hash", effective_config_hash)
+    add("effective_config_json", effective_config_json)
     for k in sorted(effective_config):
         v = effective_config[k]
         add("effective_config." + k, json.dumps(v, separators=(",", ":")))
@@ -2092,116 +2078,133 @@ load_real_corpus(const Options& o, const std::string& inputs)
     c.comm_template_mode = kv_get(kv, "comm_template_mode");
     c.comm_template_r07_pass = kv_get(kv, "comm_template_r07_pass") == "true";
 
-    // ---- S1 effective config: recorded dict + verified canonical hash ------
-    auto ecv = [&](const char* k) -> JsonValue {
-        const std::string raw =
-            kv_get(kv, std::string("effective_config.") + k, "");
-        JsonValue v;
-        std::string err;
-        JsonReader r(raw);
-        if (raw.empty() || !r.parse(v))
+    // ---- S1 effective config: the effect run's dict, carried VERBATIM ------
+    // The corpus stores the effect run's `effective_config` canonical bytes and
+    // its recorded SHA-256.  This tool does NOT re-derive the identity from its
+    // own key list (that is exactly what drifted from the app): it parses the
+    // stored dict, re-serializes it canonically (which must reproduce the exact
+    // bytes) and verifies the hash, failing closed otherwise.
+    c.effective_config_json = kv_get(kv, "effective_config_json");
+    if (c.effective_config_json.empty())
+        throw std::runtime_error(
+            "corpus is missing effective_config_json (regenerate with "
+            "--generate-inputs bound to --effect-run)");
+    {
+        JsonReader r(c.effective_config_json);
+        if (!r.parse(c.effective_config) ||
+            c.effective_config.kind != JsonValue::Kind::Object)
             throw std::runtime_error(
-                std::string("corpus is missing/bad effective_config.") + k +
-                " (regenerate with --generate-inputs)");
-        return v;
+                "corpus effective_config_json is not a JSON object");
+        const std::string canon = json_canonical(c.effective_config);
+        if (canon != c.effective_config_json)
+            throw std::runtime_error(
+                "corpus effective_config_json is not canonical (a canonical "
+                "re-serialization differs; regenerate with --generate-inputs)");
+        c.effective_config_hash = kv_get(kv, "effective_config_hash");
+        c.effective_config_hash_recomputed = sha256_text(canon);
+        if (c.effective_config_hash.empty() ||
+            c.effective_config_hash != c.effective_config_hash_recomputed)
+            throw std::runtime_error(
+                "corpus effective_config hash mismatch: recorded '" +
+                c.effective_config_hash + "' recomputed '" +
+                c.effective_config_hash_recomputed +
+                "' (the corpus and this tool disagree on the S1 effective "
+                "config; regenerate with --generate-inputs)");
+    }
+    // Read the runtime parameters the measured pipeline shares with the effect
+    // run straight out of the verbatim dict (no duplicated key list).
+    const JsonValue& ec = c.effective_config;
+    auto ec_get = [&](const char* k) -> const JsonValue* { return ec.find(k); };
+    auto ec_need = [&](const char* k) -> const JsonValue& {
+        const JsonValue* v = ec_get(k);
+        if (v == nullptr)
+            throw std::runtime_error(
+                std::string("corpus effective_config is missing '") + k +
+                "' (regenerate with --generate-inputs)");
+        return *v;
     };
-    auto ec_ll = [&](const char* k) { return ecv(k).int_or(0); };
-    auto ec_d = [&](const char* k) {
-        const JsonValue v = ecv(k);
-        return (v.kind == JsonValue::Kind::Number) ? std::stod(v.text) : 0.0;
-    };
-    auto ec_s = [&](const char* k) { return ecv(k).str_or(""); };
+    auto ec_ll = [&](const char* k) { return ec_need(k).int_or(0); };
+    auto ec_s = [&](const char* k) { return ec_need(k).str_or(""); };
     auto ec_roi = [&](const char* k, long long& lo, long long& hi) {
-        const JsonValue v = ecv(k);
+        const JsonValue& v = ec_need(k);
         if (v.kind != JsonValue::Kind::Array || v.arr.size() != 2)
             throw std::runtime_error(std::string("bad effective_config.") + k);
         lo = v.arr[0].int_or(-1);
         hi = v.arr[1].int_or(-1);
     };
-    EffectiveConfig& ec = c.ec;
-    ec.case_id = ec_s("case_id");
-    ec.coarse_stride = ec_ll("coarse_stride");
-    ec.comm_code = ec_ll("comm_code");
-    ec.comm_template_id = ec_s("comm_template_id");
-    ec.comm_template_length = ec_ll("comm_template_length");
-    ec.comm_template_sha256 = ec_s("comm_template_sha256");
-    ec_roi("core_roi", ec.core_lo, ec.core_hi);
-    ec.cover_preamble = ecv("cover_preamble").bool_or(false);
-    ec.detect_threshold = ec_d("detect_threshold");
-    ec.evaluation_reps = ec_ll("evaluation_reps");
-    ec.fit_reps = ec_ll("fit_reps");
-    ec.fit_reps_source = ec_s("fit_reps_source");
-    ec.input_grid = ec_s("input_grid");
-    ec.input_length = ec_ll("input_length");
-    ec.k_paths = ec_ll("k_paths");
-    ec.online_validation_reps = ec_ll("online_validation_reps");
-    ec.post_tail = ec_ll("post_tail");
-    ec.preset = ec_s("preset");
-    ec.sample_rate = ec_d("sample_rate");
-    ec.samples_per_symbol = ec_ll("samples_per_symbol");
-    ec_roi("search_roi", ec.search_lo, ec.search_hi);
-    ec.sensing_code = ec_ll("sensing_code");
-    ec_roi("sensing_roi", ec.sensing_lo, ec.sensing_hi);
-    ec.sic_model_mode = ec_s("sic_model_mode");
-    ec_roi("subtraction_roi", ec.sub_lo, ec.sub_hi);
-    ec.sync_reps = ec_ll("sync_reps");
-    ec.validate_threshold = ec_d("validate_threshold");
-    ec.validation_reps = ec_ll("validation_reps");
-
-    c.effective_config_hash = kv_get(kv, "effective_config_hash");
-    c.effective_config_json = effective_config_json(ec);
-    c.effective_config_hash_recomputed = sha256_text(c.effective_config_json);
-    if (c.effective_config_hash.empty() ||
-        c.effective_config_hash != c.effective_config_hash_recomputed) {
-        throw std::runtime_error(
-            "corpus effective_config hash mismatch: recorded '" +
-            c.effective_config_hash + "' recomputed '" +
-            c.effective_config_hash_recomputed +
-            "' (the corpus and this tool disagree on the S1 effective config; "
-            "regenerate with --generate-inputs)");
-    }
-    // The recorded effective config and the loose cfg.* fields must agree, so a
-    // hand-edited inputs.txt cannot create two different identities.
+    c.case_id = ec_s("case_id");
+    const long long ec_fit = ec_ll("fit_reps");
+    const long long ec_val = ec_ll("validation_reps");
+    const long long ec_online = ec_ll("online_validation_reps");
+    const long long ec_eval = ec_ll("evaluation_reps");
+    const long long ec_k = ec_ll("k_paths");
+    const long long ec_post = ec_ll("post_tail");
+    const long long ec_coarse = ec_ll("coarse_stride");
+    const long long ec_sps = ec_ll("samples_per_symbol");
+    const long long ec_input_len = ec_ll("input_length");
+    const std::string ec_model = ec_s("sic_model_mode");
+    const std::string ec_tpl_sha = ec_s("comm_template_sha256");
+    const long long ec_tpl_len = ec_ll("comm_template_length");
+    long long ec_search_lo = 0, ec_search_hi = 0, ec_sub_lo = 0, ec_sub_hi = 0;
+    long long ec_sens_lo = 0, ec_sens_hi = 0, ec_core_lo = 0, ec_core_hi = 0;
+    ec_roi("search_roi", ec_search_lo, ec_search_hi);
+    ec_roi("subtraction_roi", ec_sub_lo, ec_sub_hi);
+    ec_roi("sensing_roi", ec_sens_lo, ec_sens_hi);
+    ec_roi("core_roi", ec_core_lo, ec_core_hi);
+    (void)ec_core_lo;
+    // The loose cfg.* fields (what the generator resolved) and the identity
+    // dict must agree, so a hand-edited inputs.txt cannot create two different
+    // identities.  The dict is authoritative for the identity; cfg is what the
+    // pipeline actually runs, so they must match exactly.
     auto need = [&](const std::string& what, long long a, long long b) {
         if (a != b)
             throw std::runtime_error("corpus identity mismatch: " + what +
                                      " cfg=" + std::to_string(a) +
                                      " effective_config=" + std::to_string(b));
     };
-    need("input_length", c.n, ec.input_length);
-    need("fit_reps", c.fit_reps, ec.fit_reps);
-    need("validation_reps", c.validation_reps, ec.validation_reps);
-    need("online_validation_reps", c.online_validation_reps,
-         ec.online_validation_reps);
-    need("evaluation_reps", c.evaluation_reps, ec.evaluation_reps);
-    need("k_paths", c.k_paths, ec.k_paths);
-    need("sync_reps", c.sync_reps, ec.sync_reps);
-    need("sensing_code", c.sensing_code, ec.sensing_code);
-    need("comm_code", c.comm_code, ec.comm_code);
-    need("search_lo", c.search_lo, ec.search_lo);
-    need("search_hi", c.search_hi, ec.search_hi);
-    need("sub_lo", c.sub_lo, ec.sub_lo);
-    need("sub_hi", c.sub_hi, ec.sub_hi);
-    need("sensing_lo", c.sensing_lo, ec.sensing_lo);
-    need("sensing_hi", c.sensing_hi, ec.sensing_hi);
-    need("core_hi", c.sub_hi, ec.core_hi);
-    need("post_tail", static_cast<long long>(c.post_tail), ec.post_tail);
-    need("coarse_stride", static_cast<long long>(c.coarse_stride),
-         ec.coarse_stride);
-    need("samples_per_symbol", static_cast<long long>(kSps),
-         ec.samples_per_symbol);
-    if (c.model_mode != ec.sic_model_mode)
+    need("input_length", c.n, ec_input_len);
+    need("fit_reps", c.fit_reps, ec_fit);
+    need("validation_reps", c.validation_reps, ec_val);
+    need("online_validation_reps", c.online_validation_reps, ec_online);
+    need("evaluation_reps", c.evaluation_reps, ec_eval);
+    need("k_paths", c.k_paths, ec_k);
+    need("sync_reps", c.sync_reps, ec_ll("sync_reps"));
+    need("sensing_code", c.sensing_code, ec_ll("sensing_code"));
+    need("comm_code", c.comm_code, ec_ll("comm_code"));
+    need("search_lo", c.search_lo, ec_search_lo);
+    need("search_hi", c.search_hi, ec_search_hi);
+    need("sub_lo", c.sub_lo, ec_sub_lo);
+    need("sub_hi", c.sub_hi, ec_sub_hi);
+    need("sensing_lo", c.sensing_lo, ec_sens_lo);
+    need("sensing_hi", c.sensing_hi, ec_sens_hi);
+    need("core_hi", c.sub_hi, ec_core_hi);
+    need("post_tail", static_cast<long long>(c.post_tail), ec_post);
+    need("coarse_stride", static_cast<long long>(c.coarse_stride), ec_coarse);
+    need("samples_per_symbol", static_cast<long long>(kSps), ec_sps);
+    if (c.model_mode != ec_model)
         throw std::runtime_error(
             "corpus model mode mismatch: cfg=" + c.model_mode +
-            " effective_config=" + ec.sic_model_mode);
+            " effective_config=" + ec_model);
 
-    // The S1 estimation visibility prefix is the PUBLIC plan: candidate ROI
-    // start + fit_reps SYNC.  It is 0 (whole window) only in the explicit
-    // confirmed_legacy comparison, matching uwb_sim_preamble_sic.py.
+    // The S1 estimation visibility prefix is the PUBLIC plan carried by the
+    // effect run: `observed_end_public` (= nominal origin + public start-jitter
+    // guard + fit_reps SYNC), never the injected comm start.  It is 0 (whole
+    // window) only in the explicit confirmed_legacy comparison.  Reading it
+    // verbatim from the identity dict keeps the measured split identical to the
+    // app's; `search_roi_lo + fit_reps*sps` is NOT equivalent once the guard
+    // widens search_roi_lo, and would clip the 8-SYNC training span.
     if (c.model_mode == "estimate8_frozen") {
-        c.observed_end = std::min<int64_t>(
-            c.n, c.search_lo + static_cast<int64_t>(c.fit_reps) *
-                                   static_cast<int64_t>(kSps));
+        const JsonValue* oe = ec_get("observed_end_public");
+        const long long pub =
+            (oe != nullptr && oe->kind == JsonValue::Kind::Number)
+                ? oe->int_or(0)
+                : 0;
+        if (pub > 0)
+            c.observed_end = std::min<int64_t>(c.n, pub);
+        else
+            c.observed_end = std::min<int64_t>(
+                c.n, c.search_lo + static_cast<int64_t>(c.fit_reps) *
+                                       static_cast<int64_t>(kSps));
     } else {
         c.observed_end = 0;
     }
@@ -2221,15 +2224,15 @@ load_real_corpus(const Options& o, const std::string& inputs)
         std::stoul(kv_get(kv, "template.comm_sync_code10.length", "0"));
     c.comm_preamble_len =
         std::stoul(kv_get(kv, "template.comm_preamble_code10.length", "0"));
-    if (c.comm_preamble_sha != ec.comm_template_sha256)
+    if (c.comm_preamble_sha != ec_tpl_sha)
         throw std::runtime_error(
             "corpus template sha mismatch: corpus=" + c.comm_preamble_sha +
-            " effective_config=" + ec.comm_template_sha256);
-    if (static_cast<long long>(c.comm_preamble_len) != ec.comm_template_length)
+            " effective_config=" + ec_tpl_sha);
+    if (static_cast<long long>(c.comm_preamble_len) != ec_tpl_len)
         throw std::runtime_error(
             "corpus template length mismatch: corpus=" +
             std::to_string(c.comm_preamble_len) + " effective_config=" +
-            std::to_string(ec.comm_template_length));
+            std::to_string(ec_tpl_len));
 
     // Re-verify every recorded hash before the corpus is used as evidence.
     auto check = [&](const std::string& p, const std::string& want,
@@ -3733,15 +3736,17 @@ main(int argc, char** argv)
 
         // ---- S1-02 effect binding -----------------------------------------
         // The measured row may only be quoted for the effect set if its
-        // effective config (canonical hash + every field), template and input
-        // length match a PASSING effect run.  manifest -> hash -> gates -> diff.
+        // effective config (canonical bytes + hash), template and input length
+        // match a PASSING effect run.  The corpus identity IS the effect run's
+        // dict (carried verbatim), so binding is exact string/hash equality;
+        // the diff is diagnostic only.
         EffectRun eff;
         if (effect_dir.empty()) {
             eff.error = "no effect run found (searched " + out_parent + ")";
         } else if (!load_effect_run(effect_dir, eff)) {
             // eff.error set by the loader
         } else {
-            compare_effective_config(c.ec, eff.config, eff.mismatch);
+            diff_effective_config(c.effective_config, eff.config, eff.mismatch);
             eff.config_match = eff.mismatch.empty();
             if (!eff.hash_ok)
                 eff.mismatch.push_back(
@@ -3758,7 +3763,8 @@ main(int argc, char** argv)
                                            alt)) {
                 eff = alt;
                 effect_dir = alt.dir;
-                compare_effective_config(c.ec, eff.config, eff.mismatch);
+                diff_effective_config(c.effective_config, eff.config,
+                                      eff.mismatch);
                 eff.config_match = eff.mismatch.empty();
             }
         }
@@ -4122,7 +4128,7 @@ main(int argc, char** argv)
              << "\",\"observed_end_source\":\""
              << (c.model_mode == "confirmed_legacy"
                      ? "whole_window_default"
-                     : "public_plan_search_roi_lo_plus_fit_reps")
+                     : "effect_run_observed_end_public")
              << "\",\"benchmark_build_lib_verified_by\":\"ldd "
                 "gr-uwb/build-sic/libgnuradio-uwb.so\""
              << ",\"crosscheck_templates_match\":"
@@ -4132,7 +4138,7 @@ main(int argc, char** argv)
              << ",\"crosscheck_fixture_windows\":"
              << c.crosscheck_fixture_windows << "},\n";
         json << "  \"resolved_config\":{\"preset\":\"" << c.preset
-             << "\",\"case_id\":\"" << json_escape(c.ec.case_id)
+             << "\",\"case_id\":\"" << json_escape(c.case_id)
              << "\",\"model_mode\":\"" << c.model_mode
              << "\",\"sensing_code\":" << c.sensing_code << ",\"comm_code\":"
              << c.comm_code << ",\"sync_reps\":" << c.sync_reps

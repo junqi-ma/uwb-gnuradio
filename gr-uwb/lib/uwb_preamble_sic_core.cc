@@ -1825,8 +1825,18 @@ bool apply_model(const SicModel& model,
         std::fill(i_hat, i_hat + n, cplx(0.f, 0.f));
 
     // Fail-closed: any inconsistency (invalid model, unprepared/mismatched
-    // scratch, negative chunk origin, non-positive sample rate) leaves out == y.
-    const bool usable = model.valid &&
+    // scratch, negative chunk origin, non-positive sample rate, or a
+    // DEGENERATE / NON-FINITE model) leaves out == y byte-for-byte.  The
+    // finiteness of every gain/delay is checked here as well as at freeze time:
+    // a NaN/Inf parameter must never be written into the committed window, and
+    // `out` has already been copied from `y`, so rejecting the model keeps the
+    // whole chunk bit-identical to the input (the same guarantee every bypass /
+    // failure path gives).
+    bool finite_params = std::isfinite(model.cfo_hz);
+    for (size_t k = 0; k < model.n_paths && finite_params; ++k)
+        finite_params = std::isfinite(model.tau_abs[k]) &&
+                        finite_cplx(model.gain[k]);
+    const bool usable = model.valid && finite_params &&
         model.n_paths > 0 && model.n_paths <= kSicMaxPaths &&
         std::isfinite(model.cfo_hz) && model.sample_rate > 0.0 &&
         model.samples_per_symbol == scratch.sps &&

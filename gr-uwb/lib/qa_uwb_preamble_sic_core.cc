@@ -40,6 +40,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <string>
 #include <sys/stat.h>
@@ -2473,6 +2474,86 @@ BOOST_AUTO_TEST_CASE(test_sic_s1_bypass_untrusted_model)
                           std::string("outside_sensing_roi"));
         BOOST_CHECK_EQUAL_COLLECTIONS(g.out.begin(), g.out.end(), t.y.begin(),
                                       t.y.end());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// S1-10. A DEGENERATE / NON-FINITE model must bypass bit-exactly.
+//
+// apply_model is the only consumer of a frozen model.  A model that is
+// `valid` but carries a NaN/Inf gain or delay (a corrupted freeze, or a model
+// the estimator never actually committed) must never write a non-finite sample
+// into `out`: the whole chunk stays byte-for-byte identical to `y`, exactly
+// like the untrusted/invalid-model and sub-ROI bypass paths.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_sic_s1_degenerate_nonfinite_model_bypass)
+{
+    Fixture f = make_fixture(10, 64, static_cast<int64_t>(kPre), 64, 64, 4, 8, 8,
+                             100);
+    const std::vector<Path> paths = { { 0.0, cplx(1.f, 0.f) } };
+    Signal s = build_signal(f.model, f.n, f.comm_start, paths, 0.0, kQaNoise,
+                            611);
+    const int64_t oe = f.comm_start + 8 * static_cast<int64_t>(kSps);
+    f.cfg.observed_end_sample = oe;
+
+    SicModel good = estimate_model_checked(f, s, oe, nullptr);
+    BOOST_REQUIRE(good.valid);
+    BOOST_REQUIRE(good.n_paths > 0);
+
+    const auto apply_expect_bypass = [&](const SicModel& m, const char* what) {
+        std::vector<cplx> out(s.y.size(), cplx(9.f, 9.f));
+        std::vector<cplx> ih(s.y.size(), cplx(9.f, 9.f));
+        const bool ok = sic::apply_model(m, s.y.data(), s.y.size(), 0,
+                                         f.templates(), f.cfg, f.scratch,
+                                         out.data(), ih.data(), nullptr);
+        BOOST_CHECK_MESSAGE(ok, what << ": apply_model returned false");
+        for (size_t k = 0; k < out.size(); ++k)
+            BOOST_CHECK_EQUAL(out[k], s.y[k]);
+        for (size_t k = 0; k < ih.size(); ++k)
+            BOOST_CHECK_EQUAL(ih[k], cplx(0.f, 0.f));
+    };
+
+    // (a) valid but a NaN complex gain.
+    {
+        SicModel m = good;
+        m.gain[0] = cplx(std::numeric_limits<float>::quiet_NaN(), 0.f);
+        apply_expect_bypass(m, "nan_gain");
+    }
+    // (b) valid but an Inf delay.
+    {
+        SicModel m = good;
+        m.tau_abs[0] = std::numeric_limits<double>::infinity();
+        apply_expect_bypass(m, "inf_tau");
+    }
+    // (c) valid but a NaN CFO.
+    {
+        SicModel m = good;
+        m.cfo_hz = std::numeric_limits<double>::quiet_NaN();
+        apply_expect_bypass(m, "nan_cfo");
+    }
+    // (d) never-committed (valid=false) model.
+    {
+        SicModel m = good;
+        m.valid = false;
+        apply_expect_bypass(m, "invalid");
+    }
+
+    // Control: the untouched committed model DOES subtract, so the bypass
+    // assertions above are not vacuous.
+    {
+        std::vector<cplx> out(s.y.size(), cplx(0.f, 0.f));
+        std::vector<cplx> ih(s.y.size(), cplx(0.f, 0.f));
+        BOOST_REQUIRE(sic::apply_model(good, s.y.data(), s.y.size(), 0,
+                                       f.templates(), f.cfg, f.scratch,
+                                       out.data(), ih.data(), nullptr));
+        bool changed = false;
+        for (size_t k = 0; k < out.size(); ++k) {
+            if (out[k] != s.y[k]) {
+                changed = true;
+                break;
+            }
+        }
+        BOOST_CHECK_MESSAGE(changed, "committed control model did not subtract");
     }
 }
 

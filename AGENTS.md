@@ -3,10 +3,11 @@
 ## 当前分支：SIC 论文研究（优先执行，2026-10-16）
 
 当前分支 `feature/sic-research`，从 `feature/uwb-ds-twr` 的 `d0c8138` 创建。
-当前用户任务是 **S0 GNU Radio 前导碰撞仿真与耗时验证**，不是继续 TWR 里程碑。
+当前用户任务是 **S1 八符号估计与全前导消除**，不是继续 TWR 里程碑。
 先读根目录 **UWB_Preamble_SIC_GNU_Radio_Design.md**，再读
-**docs/sic/OpenCode开发指示_S0_前导碰撞仿真与耗时验证.md**；后者为 OpenCode
-可执行开发任务与验收依据。此处为当前任务范围，下面 TWR 资料保留为继承基线。
+**docs/sic/OpenCode修改指示_S1_八符号估计与全前导消除_2026-10-17.md** 与
+**docs/sic/S1_八符号模型API.md**；前者为 OpenCode 可执行任务与验收依据。
+S0 的指示/合同/整改报告保留为历史基线，S1 语义优先于旧 fit/validation 耦合。
 
 ### S0 任务与约束
 
@@ -44,6 +45,27 @@ S0 已实现并完成一轮独立整改（R01–R10）。开发结果见
 失败项、未实跑项（MATLAB 未实跑等）均列明。关键结论：主矩阵 68/72 cell 通过、
 负样本误提交 0/3000（重叠门控修复后）；SIC 核心实测 ~5 ms/窗（真实负载），
 未达 mean≤0.5 ms/200 窗/s 相关门槛（core/GR 达标旧口径已 superseded）。
+
+### S1 八符号估计与全前导消除（当前默认路径）
+
+依据 **docs/sic/OpenCode修改指示_S1_八符号估计与全前导消除_2026-10-17.md**，
+契约 **docs/sic/S1_八符号模型API.md**。默认路径 `estimate8_frozen`：
+
+- 严格只读前 8 个 SYNC 的 `observed_end_sample` 前缀完成检测/CFO/CIR/分数时延/
+  增益估计，冻结为 `SicModel`（`model_id`/fingerprint）；`apply_model` 不再重拟合。
+- 支持由 **configured nominal prediction**（`origin + sync_reps*sps + post_tail`）
+  预测，不再被 `confirmed*sps` 截断；相减覆盖完整前导，含独立评估区与末 4 SYNC。
+- 默认 `online_validation_reps=0`（不等 holdout 才相减）；可选显式保守对照。
+  旧 `--sic-cover-preamble` 仅为 `confirmed_legacy` 别名，不得当作 S1 结果。
+- 四区分离：acquisition/search、training `[0,8)`、cancellation（全支持）、
+  evaluation（离线 `[8,64)`，只评估不反馈）。效果以真实输出残余为准。
+- 验证：core QA 28 例（前缀隔离含 guard page、全支持、末 4 SYNC 实减、
+  chunk 逐位一致、外推失配、旁路、R05 数值安全）；verifier 增加 S1 检查。
+- 关键风险（如实保留）：8 符号 CFO 精度限制远端深度；CFO 非零 cell 的
+  tail 抑制明显低于名义 CFO=0 的 20–25 dB 目标。性能门槛仍未达。
+
+S1 阶段结论以 **docs/sic/S1_八符号估计与全前导消除开发报告.md** 为准；
+不能只引用本轮阶段性数字。
 
 ## 继承基线：UWB SS-TWR / DS-TWR
 

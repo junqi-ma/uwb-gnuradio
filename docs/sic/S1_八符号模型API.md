@@ -366,23 +366,29 @@ semantics: the C++ core reproduces the reference `i_hat` at NMSE
 
 ## 11. OPEN / not claimed here
 
-1. **Adapter / CLI plumbing of the S1 modes.** `uwb_preamble_sic.*` and the apps
-   are owned by other S1 work items. The adapter's default configuration now
-   takes the S1 path (`ConfiguredNominal`, `online_validation_reps = 0`), and its
-   QA passes, but there is no adapter/CLI switch yet for
-   `support_mode`/`observed_end_sample`/`online_validation_reps`, and the old
-   `--sic-cover-preamble` flag has not been migrated (S1-01).
-2. **Measured effect on the acceptance matrix, negatives, full demodulation,
-   native CG400 and the paced benchmarks** (S1-02…S1-06, §7 of the instruction)
-   are not claimed here. This document reports core-level measurements only.
+1. **Adapter / CLI plumbing of the S1 modes — DONE (later in this session).**
+   `uwb_preamble_sic.*` now exposes `support_mode` / `online_validation_reps` /
+   per-window `observed_end_sample` and publishes the frozen model (id,
+   fingerprint, ranges, support/sub, phase reference, cond2, fit_residual,
+   per-path `tau` + complex gain, `apply.refit_count=0`); the CLI has
+   `--sic-model-mode estimate8_frozen|confirmed_legacy`, `--sic-fit-reps 8`,
+   `--sic-online-validation-reps 0`, `--sic-evaluation-reps` (offline only) and
+   `--sic-cover-preamble` as a legacy alias. See
+   `docs/sic/S1_八符号估计与全前导消除开发报告.md`.
+2. **Measured effect / negatives / full demod / native / paced — REPORTED in
+   `docs/sic/S1_八符号估计与全前导消除开发报告.md`** (acceptance matrix,
+   negatives, CG400 native, benchmark profiler, asynchronous paced). This API
+   document itself still reports only core-level measurements.
 3. **8-symbol CFO accuracy is the depth limit of full-nominal cancellation.**
    With 8 training symbols the CFO phase estimate carries a per-symbol error from
    the co-channel signal and noise; over the remaining 56 symbols it accumulates,
    which caps the far-tail cancellation depth (measured here: 54.6 dB clean,
    14.6 dB at ISR 10 dB / SNR 30 dB on the C++ QA window; 33.0 → 3.1 dB on the
-   reference vector). The support mechanism itself is measured correct; the depth
-   is CFO-limited and would need a longer observation or an explicit refinement
-   mode (not implemented, per §4.2 "no implicit PLL / no SFO tracking").
-4. **MATLAB** was not run for this change.
+   reference vector). This is visible in the acceptance matrix: every failing
+   cell is ISR = 0 dB with CFO = ±50 kHz. The support mechanism itself is
+   measured correct; the depth is CFO-limited and would need a longer observation
+   or an explicit refinement mode (not implemented, per §4.2 "no implicit PLL /
+   no SFO tracking").
+4. **MATLAB** was not run for this change (未实跑).
 5. Peak scratch is unchanged, but the alternating SIMD resampler issue (S0) is
    untouched by this work.

@@ -180,6 +180,15 @@ R10 turns the anti-shortcut requirements into fail-closed checks:
   effective config + its sha256.  The library/binary hashes are re-derived from
   disk when the referenced file is resolvable here.  A run that only carries a
   stale/omitted identifier, or omits the benchmark/library hash, FAILS.
+  The recorded benchmark-binary hash is required everywhere, but its re-hash
+  MATCH is scoped: it is strict for a run that DECLARES itself benchmark/perf
+  output (a ``sic_perf*`` schema, ``benchmark_exe_used=true``, or a
+  ``mode``/``implementation``/``row_kind`` of ``benchmark``/``perf``/``core``/
+  ``gr``/``native``), and merely informational for an APP run
+  (``uwb_sim_preamble_sic.py`` functional/effect/negative/native/paced), whose
+  execution path never runs the benchmark binary -- the current value is
+  recorded and a differing hash is a skip/note, not a failure.  The
+  loaded-library hash stays strict and re-hashed for EVERY run.
   ``provenance{...}`` is canonical; the same fields are accepted top-level.
 * **false vs null.**  ``gates.* == false`` is a TESTED-AND-FAILED result and
   must carry explicit tested evidence (a ``gate_evidence`` mapping, a
@@ -230,15 +239,29 @@ separate from the S0 checks:
    post_tail)``; a support returned as ``confirmed*sps`` (the old 8-SYNC clip)
    fails, and ``support_coverage`` is recomputed against the truth overlap.
 4. **Regions.**  Training [0,8) SYNC, independent evaluation [8,64) SYNC and
-   the last-4-SYNC tail must be explicit and disjoint from training; the
-   evaluation and tail regions must BOTH be inside the applied subtraction
-   (an un-cancelled evaluation region fails) and the gate must not use eval
-   data.
+   the last-4-SYNC tail must be explicit and disjoint from training; the gate
+   must not use eval data.  The independent-eval and tail regions are DEFINED
+   as the nominal repetition ranges intersected with the applied subtraction
+   (``sub_lo``/``sub_hi``) and the truth overlap: a run that cannot cancel the
+   whole nominal region must declare that clip (``cancellation_clipped`` /
+   ``eval_covered_frac`` / ``tail_covered_frac``) with a covered fraction that
+   matches the recomputed intersection, and a region that extends outside
+   ``sub``/overlap while claiming the full nominal coverage is a FAIL.  A
+   run with ZERO committed windows (all bypassed) has no frozen model to audit,
+   so the S1 model-evidence family (1-4) is SKIPped, never FAILed; its bypass
+   bit-identity / false-commit / output-change gates live in the negative
+   aggregate.
 5. **Actual effect.**  The suppression is recomputed from ``y``/``y_clean``/
    ``i`` as ``i - (y - y_clean)`` over the truth overlap, the independent
    evaluation region and the tail region; the three per-window metrics and the
    three summary medians/counts are required (a reconstruction-NMSE-only
-   report fails) and the evaluation/tail regions must actually change.
+   report fails) and the evaluation/tail regions must actually change.  When a
+   run ships only a subset of the per-window ``recon/window_*.npz`` arrays it
+   must declare an ``archive_policy`` (``per_cell`` / ``archived_ids`` /
+   ``total_windows`` plus the stated non-archived limitation); the verifier
+   then independently recomputes only the ARCHIVED windows (>= 4 per
+   cell/case) and skips the rest.  With no policy the full-array requirement is
+   kept.
 6. **Seeds.**  ``seed_lists.calibration``/``acceptance`` must be recorded and
    disjoint; ``calibration_windows`` records the generated
    ``(seed, seed_offset, noise_root)`` tuples, and no acceptance window may
@@ -253,6 +276,30 @@ Canonical S1 field names are listed in the ``S1`` constants block; aliases are
 accepted for robustness.  A SIC-on run that declares no model mode is a FAIL,
 and an explicit ``legacy_cover``-style declaration is a SKIP that may not claim
 an S1 pass or report S1 region metrics.
+
+Aggregate roots (``--results`` on a sweep or negative-set directory)
+-------------------------------------------------------------------
+A results root that contains ``cells/`` (main sweep) or ``cases/`` (negative
+set) is an AGGREGATE root: every child run directory is verified with the same
+single-run checks, and the aggregate tables are cross-checked against the child
+artifacts (a table/child mismatch FAILS):
+
+* ``main_matrix.json`` must carry one row per ``cells/<cell_id>``; each row's
+  ``cell_id``/``eff_pass``/``median_suppression_db`` must match that cell's
+  ``summary.json``; exactly one ``effective_config_hash`` must be shared by all
+  cells; and every cell must declare the same template / shared-input hashes.
+* ``negative_table.json`` per-case ``windows``/``detected``/``committed``/
+  ``false_commit``/``output_change``/``bypass_bit_identical`` must be
+  recomputed from the case's ``windows.jsonl``/``summary.json``; every
+  actionable case (``expected_negative``) must carry >= 1000 windows; and the
+  overall counters, rates and Wilson CI must be recomputed from the per-case
+  counts.
+
+An aggregate root prints one line per child (PASS/FAIL + the first failing
+check) instead of per-window spam; ``--verbose`` restores the full detail.
+``index.json`` is a results-root artifact, so an aggregate CHILD does not have
+to resolve one: the index is only consulted when it sits in the aggregate root
+itself.
 
 Exit status 0 iff every check passes; non-zero with a clear diff otherwise.
 """
@@ -453,6 +500,11 @@ _QUIET = False
 # recording one line per window (used to keep large-run output readable; every
 # failure is still recorded individually).
 _OK_AGGREGATE = None
+# True while a child run of an aggregate root (``cells/`` / ``cases/``) is being
+# verified.  The results-root ``index.json`` is then owned by the aggregate
+# root, not by the child, so ``_s1_index_path`` must not fall back to a
+# sibling/global index.
+_AGGREGATE_CHILD = False
 
 
 def record(item, verdict, detail):
@@ -4132,6 +4184,47 @@ def _prov_lib_hash(manifest, prov):
     return None, None
 
 
+# Marker keys/values that DECLARE a manifest is a benchmark/perf run rather
+# than an app run.  The app ``run_manifest.json`` (written by
+# ``uwb_sim_preamble_sic.py``) never carries any of these keys -- only the
+# ``sic_perf*`` benchmark summaries do -- so an app run can never be mis-scoped
+# as a benchmark.  ``benchmark_exe_used=true`` is the explicit override.
+BENCH_RUN_MARKER_KEYS = ("mode", "implementation", "row_kind", "run_kind",
+                         "kind", "pipeline_kind", "output_kind", "result_kind",
+                         "artifact_kind")
+BENCH_RUN_MARKER_VALUES = {"benchmark", "perf", "performance", "core", "gr",
+                           "native", "microbenchmark", "micro"}
+BENCH_EXE_USED_KEYS = ("benchmark_exe_used", "benchmark_binary_used",
+                       "uses_benchmark_exe", "uses_benchmark")
+
+
+def _run_is_benchmark(manifest, prov):
+    """True when the manifest DECLARES itself a benchmark/perf run.
+
+    The benchmark executable's file hash is only on the benchmark row's
+    execution path; an APP run (``uwb_sim_preamble_sic.py``
+    functional/effect/negative/native/paced) never executes it.  Its re-hash is
+    therefore a hard requirement only for a run that actually declares it is
+    benchmark/perf output, and merely informational for an app run.
+
+    Returns ``(is_benchmark, reason)``.
+    """
+    if not isinstance(manifest, dict):
+        return False, None
+    schema = manifest.get("schema")
+    if is_nonempty_str(schema) and norm_text(schema).startswith("sic perf"):
+        return True, "schema=%s" % schema
+    used, used_path = _prov_lookup(manifest, prov, BENCH_EXE_USED_KEYS)
+    if used is True:
+        return True, "%s=true" % (used_path or "benchmark_exe_used")
+    for key in BENCH_RUN_MARKER_KEYS:
+        value = manifest.get(key)
+        if isinstance(value, str) \
+                and norm_text(value) in BENCH_RUN_MARKER_VALUES:
+            return True, "%s=%s" % (key, value)
+    return False, None
+
+
 def check_provenance(manifest, run_dir, results_dir, prefix, superseded=False):
     item = "%s provenance binding (R10)" % prefix
     if not isinstance(manifest, dict):
@@ -4220,11 +4313,22 @@ def check_provenance(manifest, run_dir, results_dir, prefix, superseded=False):
                   % "/".join(PROV_LIB_HASH_KEYS[:3]))
 
     # --- benchmark binary file hash (re-derived when resolvable) ----------
+    # SCOPE: the benchmark executable is on the BENCHMARK row's execution path
+    # only.  An APP run (uwb_sim_preamble_sic.py functional/effect/negative/
+    # native/paced) never executes it, so a benchmark binary rebuilt after the
+    # app run must not fail the app's provenance.  The recorded hash is still
+    # REQUIRED everywhere (it is the provenance record); only the re-hash MATCH
+    # is scoped: strict for a declared benchmark/perf run, informational (a
+    # recorded skip/note, never a failure) for an app run.  The loaded-library
+    # hash below stays strict for every run.
+    is_benchmark, bench_reason = _run_is_benchmark(manifest, prov)
     bench_hash, bench_hash_path = _prov_lookup(manifest, prov,
                                                PROV_BENCH_HASH_KEYS)
     if is_hex64(bench_hash):
         ok("%s: benchmark binary file hash is a sha256" % item,
-           "%s=%s..." % (bench_hash_path, normalize_hash(bench_hash)[:16]))
+           "%s=%s...%s" % (bench_hash_path, normalize_hash(bench_hash)[:16],
+                           "" if is_benchmark
+                           else " (app run: informational)"))
         bench_path, _ = _prov_lookup(manifest, prov, PROV_BENCH_PATH_KEYS)
         resolved = _resolve_prov_path(bench_path, roots)
         if resolved is not None:
@@ -4232,9 +4336,17 @@ def check_provenance(manifest, run_dir, results_dir, prefix, superseded=False):
             if got == normalize_hash(bench_hash):
                 ok("%s: benchmark binary re-hashes to the manifest" % item,
                    resolved)
-            else:
+            elif is_benchmark:
                 prov_fail("%s: benchmark binary re-hashes to the manifest" % item,
-                          "on disk=%s manifest=%s" % (got, bench_hash))
+                          "on disk=%s manifest=%s (%s declares a benchmark run)"
+                          % (got, bench_hash, bench_reason))
+            else:
+                skip("%s: benchmark binary re-hash" % item,
+                     "app run (%s): recorded=%s on disk=%s; the benchmark "
+                     "binary is not on this run's execution path, so the "
+                     "re-hash is informational and must not fail"
+                     % (bench_reason or "no benchmark marker",
+                        normalize_hash(bench_hash)[:16], got[:16]))
         elif is_nonempty_str(bench_path):
             skip("%s: benchmark binary re-hash" % item,
                  "%s not resolvable; recorded hash kept" % bench_path)
@@ -4997,6 +5109,30 @@ S1_LAYER_ALIASES = {
 S1_INDEX_FILES = ("index.json", "results_index.json")
 S1_SEED_CONTAINERS = ("generator", "input_gen", "generation", "seed_info")
 
+# --- S1 clipped regions + reconstruction archive policy --------------------
+# The independent-eval and tail regions are DEFINED as the nominal repetition
+# ranges intersected with the applied subtraction (``sub_lo``/``sub_hi``) and
+# the generator truth overlap.  A run whose public processing ROI cannot cancel
+# the whole nominal region must declare the clipped region together with its
+# covered fraction (``eval_covered_frac``/``tail_covered_frac``,
+# ``cancellation_clipped``); a run that ships only a subset of the per-window
+# reconstruction arrays must declare an archive policy that names the archived
+# windows and states the non-archived limitation.
+S1_MIN_ARCHIVED = 4
+S1_ARCHIVE_POLICY_KEYS = ("archive_policy", "recon_archive_policy",
+                          "archived_recon", "sic_archive_policy")
+S1_ARCHIVED_ID_KEYS = ("archived_ids", "archived_window_ids",
+                       "recon_archived_ids", "archived")
+S1_ARCHIVED_COUNT_KEYS = ("per_cell", "per_cell_archived", "archived_per_cell",
+                          "n_archived_per_cell")
+S1_ARCHIVED_TOTAL_KEYS = ("total_windows", "n_windows", "windows")
+S1_CLIP_FLAG_KEYS = ("cancellation_clipped", "sub_clipped", "region_clipped",
+                     "subtraction_clipped")
+S1_EVAL_COVERED_KEYS = ("eval_covered_frac", "evaluation_covered_frac",
+                        "eval_covered_fraction", "eval_covered")
+S1_TAIL_COVERED_KEYS = ("tail_covered_frac", "tail_eval_covered_frac",
+                        "tail_covered_fraction", "tail_covered")
+
 
 def _s1_online_declared_zero(window):
     """Explicit online_validation_reps == 0 (the S1 default)."""
@@ -5569,6 +5705,96 @@ def _s1_check_support(window, g, where):
     return failures
 
 
+def _s1_lookup_any(window, keys):
+    """Find a declaration key at the window top level or in a known block."""
+    for key in keys:
+        if key in window:
+            return window[key], key
+    for name in ("sic_model", "frozen_model", "model", "regions", "region",
+                 "recon", "config", "sic_config", "sic", "s1"):
+        block = window.get(name)
+        if isinstance(block, dict):
+            for key in keys:
+                if key in block:
+                    return block[key], "%s.%s" % (name, key)
+    return None, None
+
+
+def _s1_check_clipped_region(item, label, nominal, declared, sub, support,
+                             overlap, covered, covered_path, failures):
+    """Accept a nominal or nominal∩sub∩overlap-clipped eval/tail region.
+
+    The region is DEFINED as the nominal repetition range intersected with the
+    applied subtraction (``sub``) and the generator truth overlap.  A run that
+    cannot cancel the whole nominal region must declare that clip and its
+    covered fraction.  A declared region that extends outside ``sub``/overlap
+    while claiming the full nominal coverage is a FAIL.
+    """
+    n_lo, n_hi = nominal
+    d_lo, d_hi = declared
+    sub_lo, sub_hi = sub
+    sup_lo, sup_hi = support
+    ov_lo, ov_hi = overlap
+    span = n_hi - n_lo
+    eff_lo = max(n_lo, sub_lo, ov_lo)
+    eff_hi = min(n_hi, sub_hi, ov_hi)
+    if eff_lo >= eff_hi:
+        fail(item, "the %s nominal region intersects the applied subtraction "
+             "and the truth overlap" % label,
+             "nominal=[%d,%d) sub=[%d,%d) overlap=[%d,%d)"
+             % (n_lo, n_hi, sub_lo, sub_hi, ov_lo, ov_hi))
+        return failures + 1
+    if not (sup_lo <= eff_lo and eff_hi <= sup_hi):
+        fail(item, "the %s covered region is inside the predicted support"
+             % label, "%s covered=[%d,%d) support=[%d,%d)"
+             % (label, eff_lo, eff_hi, sup_lo, sup_hi))
+        failures += 1
+    clipped = (eff_lo, eff_hi) != (n_lo, n_hi)
+    frac_want = (eff_hi - eff_lo) / float(span) if span > 0 else 0.0
+    # The declared region may be the nominal repetition range (the app keeps
+    # ``eval_lo``/``eval_hi`` nominal and declares the clip separately) or the
+    # recomputed clip itself.
+    if (d_lo, d_hi) != (n_lo, n_hi) and (d_lo, d_hi) != (eff_lo, eff_hi):
+        if d_lo < eff_lo or d_hi > eff_hi:
+            fail(item, "the %s region does not extend outside the applied "
+                 "subtraction / truth overlap while claiming coverage" % label,
+                 "%s=[%d,%d) sub=[%d,%d) overlap=[%d,%d)"
+                 % (label, d_lo, d_hi, sub_lo, sub_hi, ov_lo, ov_hi))
+        else:
+            fail(item, "the %s region is the nominal repetition range or its "
+                 "nominal∩sub∩overlap clip" % label,
+                 "%s=[%d,%d) nominal=[%d,%d) clip=[%d,%d)"
+                 % (label, d_lo, d_hi, n_lo, n_hi, eff_lo, eff_hi))
+        return failures + 1
+    if not clipped:
+        # The whole nominal region is inside sub and the truth overlap: a
+        # covered fraction, if declared, must be the full 1.0.
+        if is_num(covered) and abs(float(covered) - 1.0) > 1e-3:
+            fail(item, "the %s covered fraction is 1.0 when nothing is clipped"
+                 % label, "declared=%r via %s" % (covered, covered_path))
+            failures += 1
+        return failures
+    # The nominal region is clipped by sub/overlap: the covered fraction must be
+    # declared and match the recomputed intersection, and it must not claim the
+    # full nominal coverage.
+    if not is_num(covered):
+        fail(item, "the clipped %s region declares its covered fraction" % label,
+             "nominal=[%d,%d) clip=[%d,%d) but no eval/tail_covered_frac is "
+             "declared (%s)" % (n_lo, n_hi, eff_lo, eff_hi, covered_path))
+        return failures + 1
+    if abs(float(covered) - frac_want) > 1e-3:
+        fail(item, "the %s covered fraction matches the recomputed "
+             "nominal∩sub∩overlap intersection" % label,
+             "declared=%r recomputed=%.4f (nominal span=%d clip span=%d)"
+             % (covered, frac_want, span, eff_hi - eff_lo))
+        failures += 1
+    elif float(covered) >= 1.0 - 1e-3:
+        fail(item, "the clipped %s region does not claim full coverage" % label,
+             "covered=%r but sub/overlap clip the nominal region" % (covered,))
+        failures += 1
+    return failures
+
+
 def _s1_check_regions(window, g, where):
     """S1-4: training/eval/tail regions + eval and tail are cancelled."""
     item = "%s S1-4 regions" % where
@@ -5604,7 +5830,14 @@ def _s1_check_regions(window, g, where):
         fail(item, "the applied subtraction range is a non-empty [lo,hi)",
              "[%d,%d)" % (sub_lo, sub_hi))
         failures += 1
-    want_eval_lo = int(training_hi) + int(online_reps) * int(sps)
+    # The nominal eval/tail repetition ranges: the independent evaluation is the
+    # [fit+online, sync_reps) repetition span of the configured preamble, NOT a
+    # span measured from a (possibly clipped) training end.
+    if is_int(g.get("fit_reps")):
+        want_eval_lo = int(origin) + int(g["fit_reps"]) * int(sps) \
+            + int(online_reps) * int(sps)
+    else:
+        want_eval_lo = int(training_hi) + int(online_reps) * int(sps)
     want_eval_hi = int(origin) + int(sync_reps) * int(sps)
     if int(eval_lo) < want_eval_lo:
         fail(item, "the independent evaluation region starts after "
@@ -5617,13 +5850,6 @@ def _s1_check_regions(window, g, where):
         fail(item, "the independent evaluation region is disjoint from training",
              "eval=[%d,%d) training=[%d,%d)"
              % (eval_lo, eval_hi, training_lo, training_hi))
-        failures += 1
-    if int(eval_lo) != want_eval_lo or int(eval_hi) != want_eval_hi:
-        fail(item, "evaluation is the [8+online,64) SYNC region",
-             "declared=[%d,%d) expected=[%d,%d) (origin=%d sps=%d sync_reps=%d "
-             "online_reps=%d)"
-             % (eval_lo, eval_hi, want_eval_lo, want_eval_hi, origin, sps,
-                sync_reps, online_reps))
         failures += 1
     declared_eval_reps, _ = _first_key(window, ("evaluation_reps",
                                                 "independent_eval_reps"))
@@ -5642,11 +5868,6 @@ def _s1_check_regions(window, g, where):
         failures += 1
     want_tail_lo = int(origin) + (int(sync_reps) - S1_TAIL_REPS) * int(sps)
     want_tail_hi = int(origin) + int(sync_reps) * int(sps)
-    if int(tail_lo) != want_tail_lo or int(tail_hi) != want_tail_hi:
-        fail(item, "tail-eval is the last 4 SYNC",
-             "declared=[%d,%d) expected=[%d,%d)"
-             % (tail_lo, tail_hi, want_tail_lo, want_tail_hi))
-        failures += 1
     if _intervals_overlap((int(tail_lo), int(tail_hi)),
                           (int(training_lo), int(training_hi))):
         fail(item, "the tail-eval region is disjoint from training",
@@ -5657,26 +5878,34 @@ def _s1_check_regions(window, g, where):
         fail(item, "the tail-eval region lies inside the independent evaluation",
              "tail=[%d,%d) eval=[%d,%d)" % (tail_lo, tail_hi, eval_lo, eval_hi))
         failures += 1
-    # The evaluation and tail regions must be CANCELLED, not kept aside.
-    for label, lo, hi in (("evaluation", eval_lo, eval_hi),
-                          ("tail-eval", tail_lo, tail_hi)):
-        if not (sub_lo <= lo and hi <= sub_hi):
-            fail(item, "the %s region is inside the applied subtraction" % label,
-                 "%s=[%d,%d) sub=[%d,%d) (evaluating an un-cancelled region "
-                 "measures nothing)" % (label, lo, hi, sub_lo, sub_hi))
-            failures += 1
     ov_lo, ov_hi = window_truth_overlap(window)
-    if ov_lo is not None:
-        support_lo, support_hi = g.get("support_lo"), g.get("support_hi")
-        if is_int(support_lo) and is_int(support_hi):
-            need_lo = max(support_lo, ov_lo)
-            need_hi = min(support_hi, ov_hi)
-            if sub_lo > need_lo or sub_hi < need_hi:
-                fail(item, "the subtraction covers the predicted support "
-                     "inside the truth overlap",
-                     "sub=[%d,%d) support∩overlap=[%d,%d)"
-                     % (sub_lo, sub_hi, need_lo, need_hi))
-                failures += 1
+    if ov_lo is None:
+        fail(item, "the truth overlap is well-formed",
+             "overlap=%r" % (window.get("overlap"),))
+        return failures + 1
+    support_lo, support_hi = g.get("support_lo"), g.get("support_hi")
+    support = (int(support_lo), int(support_hi)) \
+        if is_int(support_lo) and is_int(support_hi) else None
+    if support is not None and not (support[0] <= sub_lo and sub_hi <= support[1]):
+        fail(item, "the applied subtraction is inside the predicted support",
+             "sub=[%d,%d) support=[%d,%d)"
+             % (sub_lo, sub_hi, support[0], support[1]))
+        failures += 1
+    # The eval/tail regions are the nominal repetition ranges intersected with
+    # the applied subtraction and the truth overlap.  A run that cannot cancel
+    # the whole nominal region must declare the clip and its covered fraction.
+    eval_covered, eval_cpath = _s1_lookup_any(window, S1_EVAL_COVERED_KEYS)
+    tail_covered, tail_cpath = _s1_lookup_any(window, S1_TAIL_COVERED_KEYS)
+    sub = (int(sub_lo), int(sub_hi))
+    support_for_clip = support if support is not None else sub
+    failures = _s1_check_clipped_region(
+        item, "independent evaluation", (want_eval_lo, want_eval_hi),
+        (int(eval_lo), int(eval_hi)), sub, support_for_clip,
+        (int(ov_lo), int(ov_hi)), eval_covered, eval_cpath, failures)
+    failures = _s1_check_clipped_region(
+        item, "tail-eval", (want_tail_lo, want_tail_hi),
+        (int(tail_lo), int(tail_hi)), sub, support_for_clip,
+        (int(ov_lo), int(ov_hi)), tail_covered, tail_cpath, failures)
     # The gate is decided on training/online data, never on the eval region.
     gate_lo, gate_path = _first_key(g, ("gate_lo", "commit_gate_lo"))
     gate_hi, _ = _first_key(g, ("gate_hi", "commit_gate_hi"))
@@ -5701,6 +5930,23 @@ def _s1_check_regions(window, g, where):
                  % (gate_lo, gate_hi, training_lo, want_eval_lo, online_reps))
             failures += 1
     return failures
+
+
+def _s1_covered_bounds(recon, window, label):
+    """The declared covered (nominal∩sub∩overlap) bounds for eval/tail, if any."""
+    lo_key = "eval_actual_lo" if label == "eval" else "tail_actual_lo"
+    hi_key = "eval_actual_hi" if label == "eval" else "tail_actual_hi"
+    cov_key = "eval_covered" if label == "eval" else "tail_covered"
+    for src in (recon, window.get("regions"), window.get("sic_model")):
+        if not isinstance(src, dict):
+            continue
+        value = src.get(cov_key)
+        if isinstance(value, (list, tuple)) and len(value) == 2 \
+                and all(is_int(v) for v in value):
+            return (int(value[0]), int(value[1]))
+        if is_int(src.get(lo_key)) and is_int(src.get(hi_key)):
+            return (int(src[lo_key]), int(src[hi_key]))
+    return None
 
 
 def _s1_check_actual(window, g, recon, arrays, where):
@@ -5735,8 +5981,23 @@ def _s1_check_actual(window, g, recon, arrays, where):
              "[%d,%d) > %d" % (ov_lo, ov_hi, len(i)))
         return result
     delta = y - y_clean
+    sub_lo, sub_hi = g.get("sub_lo"), g.get("sub_hi")
+
+    def _effective(lo, hi):
+        # The eval/tail region for the actual metric is the nominal (or
+        # declared) repetition range intersected with the applied subtraction
+        # and the truth overlap -- the same clip the covered fraction names.
+        if is_int(lo) and is_int(hi) and is_int(sub_lo) and is_int(sub_hi):
+            return max(int(lo), int(sub_lo), ov_lo), \
+                min(int(hi), int(sub_hi), ov_hi)
+        return lo, hi
+
     eval_lo, eval_hi = g.get("eval_lo"), g.get("eval_hi")
     tail_lo, tail_hi = g.get("tail_lo"), g.get("tail_hi")
+    if is_int(eval_lo) and is_int(eval_hi):
+        eval_lo, eval_hi = _effective(eval_lo, eval_hi)
+    if is_int(tail_lo) and is_int(tail_hi):
+        tail_lo, tail_hi = _effective(tail_lo, tail_hi)
     regions = (("full", ov_lo, ov_hi), ("eval", eval_lo, eval_hi),
                ("tail", tail_lo, tail_hi))
     declared = {
@@ -5761,6 +6022,12 @@ def _s1_check_actual(window, g, recon, arrays, where):
                      "%s=[%d,%d) overlap=[%d,%d)"
                      % (label, lo, hi, ov_lo, ov_hi))
                 continue
+            covered_pair = _s1_covered_bounds(recon, window, label)
+            if covered_pair is not None and covered_pair != (lo, hi):
+                fail(item, "the declared %s covered region is the "
+                     "nominal∩sub∩overlap clip" % label,
+                     "declared covered=[%d,%d) recomputed=[%d,%d)"
+                     % (covered_pair[0], covered_pair[1], lo, hi))
             if hi > len(i):
                 fail(item, "the %s region fits the archived arrays" % label,
                      "[%d,%d) > %d" % (lo, hi, len(i)))
@@ -5905,6 +6172,137 @@ def _s1_check_summary(summary, windows, prefix):
                  % (cnt_na_path or na_keys[0], count_na, na))
 
 
+def _s1_archive_policy(manifest, summary):
+    """The declared reconstruction archive policy, or (None, None).
+
+    Accepted at the summary/manifest top level or nested in a known block
+    (the app writes ``summary.sic.archive_policy``).
+    """
+    for src, name in ((summary, "summary.json"), (manifest, "run_manifest.json")):
+        if not isinstance(src, dict):
+            continue
+        for key in S1_ARCHIVE_POLICY_KEYS:
+            block = src.get(key)
+            if isinstance(block, dict):
+                return block, "%s.%s" % (name, key)
+        for sub in ("sic", "recon", "s1", "reconstruction", "artifacts",
+                    "runtime", "config"):
+            block = src.get(sub)
+            if not isinstance(block, dict):
+                continue
+            for key in S1_ARCHIVE_POLICY_KEYS:
+                policy = block.get(key)
+                if isinstance(policy, dict):
+                    return policy, "%s.%s.%s" % (name, sub, key)
+    return None, None
+
+
+def _s1_archived_ids(policy):
+    """The archived window-id set declared by the policy."""
+    raw, key = _first_key(policy, S1_ARCHIVED_ID_KEYS)
+    ids = set()
+    if isinstance(raw, list):
+        for value in raw:
+            if is_int(value):
+                ids.add(str(value))
+            elif is_nonempty_str(value):
+                ids.add(value.strip())
+    elif isinstance(raw, dict):
+        for entry_key, value in raw.items():
+            if value is True or (is_nonempty_str(value)
+                                 and value.strip().lower() in
+                                 ("archived", "true", "yes", "1")):
+                ids.add(str(entry_key))
+    return ids, key
+
+
+def _s1_archive_limitation(policy, summary):
+    """A declared limitation string from the policy or the summary."""
+    keys = ("limitation", "limitations", "non_archived", "non_archived_note",
+            "declared_limitation", "note", "notes", "caveat")
+    for src in (policy, summary):
+        if not isinstance(src, dict):
+            continue
+        for key in keys:
+            value = src.get(key)
+            if is_nonempty_str(value):
+                return value
+            if isinstance(value, list) \
+                    and any(is_nonempty_str(v) for v in value):
+                return " ".join(str(v) for v in value if is_nonempty_str(v))
+    return None
+
+
+def _s1_limitation_declared(text):
+    """True when `text` states that something is NOT independently recomputable."""
+    if not is_nonempty_str(text):
+        return False
+    norm = norm_text(text)
+    tokens = set(norm.split())
+    negated = bool(tokens & {"not", "non", "no", "unable", "cannot",
+                             "without", "never"})
+    return ("recomput" in norm) and negated
+
+
+def _s1_check_archive_policy(manifest, summary, windows, prefix):
+    """Validate a declared reconstruction archive policy.
+
+    Returns ``(policy, archived_ids)``.  ``archived_ids`` is the set of window
+    ids that must ship archived ``recon/window_*.npz`` arrays.  When no policy
+    is declared the caller keeps requiring arrays for every committed window.
+    """
+    item = "%s S1 archive policy" % prefix
+    policy, path = _s1_archive_policy(manifest, summary)
+    if policy is None:
+        return None, None
+    n_windows = len(windows)
+    all_ids = {str(w.get("window_id")) for w in windows}
+    ids, ids_path = _s1_archived_ids(policy)
+    if not ids:
+        fail("%s: archived_ids declares the archived windows" % item,
+             "no non-empty archived_ids list/dict via %s" % (path,))
+        return None, None
+    bad = 0
+    unknown = sorted(i for i in ids if i not in all_ids)
+    if unknown:
+        fail("%s: every archived id names a window in windows.jsonl" % item,
+             "unknown ids %s" % unknown[:8])
+        bad += 1
+    n_archived = len(ids & all_ids)
+    per_cell, per_path = _first_key(policy, S1_ARCHIVED_COUNT_KEYS)
+    if not is_int(per_cell) or int(per_cell) < S1_MIN_ARCHIVED:
+        fail("%s: per_cell declares >= %d archived windows per cell/case"
+             % (item, S1_MIN_ARCHIVED),
+             "%s=%r" % (per_path or "per_cell", per_cell))
+        bad += 1
+    elif n_archived < int(per_cell):
+        fail("%s: at least per_cell archived windows are present" % item,
+             "per_cell=%d archived=%d" % (per_cell, n_archived))
+        bad += 1
+    if n_archived < S1_MIN_ARCHIVED:
+        fail("%s: at least %d archived windows per cell/case"
+             % (item, S1_MIN_ARCHIVED), "archived=%d" % n_archived)
+        bad += 1
+    total, total_path = _first_key(policy, S1_ARCHIVED_TOTAL_KEYS)
+    if not is_int(total) or int(total) != n_windows:
+        fail("%s: total_windows matches the run window count" % item,
+             "%s=%r windows.jsonl=%d"
+             % (total_path or "total_windows", total, n_windows))
+        bad += 1
+    if n_archived < n_windows:
+        limitation = _s1_archive_limitation(policy, summary)
+        if not _s1_limitation_declared(limitation):
+            fail("%s: the non-archived windows are declared not independently "
+                 "recomputable" % item,
+                 "limitation=%r via %s (a declared limitation is required)"
+                 % (limitation, path))
+            bad += 1
+    if not bad:
+        ok("%s: policy archives %d/%d windows and states the non-archived "
+           "limitation" % (item, n_archived, n_windows), path)
+    return policy, ids
+
+
 def _s1_generator_of(window):
     for name in S1_SEED_CONTAINERS:
         block = window.get(name)
@@ -6027,6 +6425,12 @@ def _s1_index_path(results_dir):
         path = os.path.join(results_dir, name)
         if os.path.isfile(path):
             return path, os.path.abspath(results_dir)
+    if _AGGREGATE_CHILD:
+        # A child of an aggregate root is not the results-root of the global
+        # index; only an index inside the aggregate root itself would describe
+        # it, and that is reported once for the aggregate.  Do not fall back to
+        # a sibling/global index.json.
+        return None, None
     parent = os.path.dirname(os.path.abspath(results_dir))
     if parent != os.path.abspath(results_dir):
         for name in S1_INDEX_FILES:
@@ -6076,6 +6480,10 @@ def _s1_check_index(results_dir, run_dir, manifest, summary, prefix):
     item = "%s S1-7 results index" % prefix
     path, root = _s1_index_path(results_dir)
     if path is None:
+        if _AGGREGATE_CHILD:
+            skip(item, "aggregate child: no per-cell results index is required "
+                 "(the aggregate root owns the results-root index.json)")
+            return
         fail(item, "results-root index.json is present",
              "no %s next to %s or its parent (the index must reference the "
              "actual latest run)" % ("/".join(S1_INDEX_FILES), results_dir))
@@ -6312,27 +6720,51 @@ def check_s1(run_dir, results_dir, manifest, summary, windows, prefix):
              "%d window(s) lack sic_model, first ids %s"
              % (len(missing_model), missing_model[:5]))
     if not with_model:
-        fail("%s: at least one window carries S1 model evidence" % item,
-             "no sic_model block under %d committed window(s)" % len(committed))
-        # Make each S1 evidence family explicit instead of silently skipping it.
-        fail("%s S1-1 strict-prefix evidence" % item,
-             "no observed_end_sample/training_lo/hi/estimation_ready_sample/"
-             "estimation_ranges/guard is declared on any committed window")
-        fail("%s S1-2 frozen-model evidence" % item,
-             "no model_id/fingerprint/frozen params/apply block is declared on "
-             "any committed window")
-        fail("%s S1-3 support semantics" % item,
-             "no support_lo/hi/support_source/support_coverage is declared on "
-             "any committed window")
-        fail("%s S1-4 regions" % item,
-             "no eval_lo/hi, tail_lo/hi or applied sub range is declared on any "
-             "committed window")
+        if not committed:
+            # A zero-commit (all-bypass) run has no frozen SicModel to audit:
+            # the S1 model-evidence family is not applicable, so it is SKIPped.
+            # The run is still checked for bypass bit-identity, false-commit
+            # and output-change by the negative aggregate (and by the S0/R01
+            # per-window checks), which is where those gates live.
+            skip("%s: at least one window carries S1 model evidence" % item,
+                 "zero committed windows (all bypassed): the S1 model-evidence "
+                 "family does not apply")
+            for label in ("S1-1 strict-prefix evidence",
+                          "S1-2 frozen-model evidence",
+                          "S1-3 support semantics", "S1-4 regions"):
+                skip("%s %s" % (item, label),
+                     "zero committed windows: no frozen model to audit")
+        else:
+            fail("%s: at least one window carries S1 model evidence" % item,
+                 "no sic_model block under %d committed window(s)"
+                 % len(committed))
+            # Make each S1 evidence family explicit instead of silently
+            # skipping it.
+            fail("%s S1-1 strict-prefix evidence" % item,
+                 "no observed_end_sample/training_lo/hi/"
+                 "estimation_ready_sample/estimation_ranges/guard is declared "
+                 "on any committed window")
+            fail("%s S1-2 frozen-model evidence" % item,
+                 "no model_id/fingerprint/frozen params/apply block is declared "
+                 "on any committed window")
+            fail("%s S1-3 support semantics" % item,
+                 "no support_lo/hi/support_source/support_coverage is declared "
+                 "on any committed window")
+            fail("%s S1-4 regions" % item,
+                 "no eval_lo/hi, tail_lo/hi or applied sub range is declared on "
+                 "any committed window")
         _s1_check_summary(summary, windows, prefix)
         if manifest is not None:
             _s1_check_seeds(manifest, summary, windows, prefix)
             check_s1_provenance(manifest, summary, run_dir, results_dir,
                                 prefix, mode)
         return
+
+    # A declared reconstruction archive policy names the windows whose arrays
+    # must be independently recomputed; the remaining windows are explicitly
+    # not recomputable.  With no policy the full-array requirement is kept.
+    archive_policy, archived_ids = _s1_check_archive_policy(
+        manifest, summary, windows, prefix)
 
     counts = {name: 0 for name in ("prefix", "frozen", "support", "regions",
                                    "actual")}
@@ -6350,8 +6782,16 @@ def check_s1(run_dir, results_dir, manifest, summary, windows, prefix):
             counts["support"] += 1
         if _s1_check_regions(window, g, where) == 0:
             counts["regions"] += 1
-        arrays = load_recon_arrays(run_dir, wid, npz_cache)
         recon = window.get("recon")
+        if archive_policy is not None and str(wid) not in archived_ids:
+            # Declared non-archived: no arrays are shipped, so the actual output
+            # cannot be independently recomputed here (a declared limitation).
+            # The declared metrics are still aggregated by _s1_check_summary.
+            per_window[wid] = {"eval": None, "tail": None, "full": None,
+                               "eval_na": False, "tail_na": False,
+                               "full_na": False}
+            continue
+        arrays = load_recon_arrays(run_dir, wid, npz_cache)
         result = _s1_check_actual(window, g, recon, arrays, where)
         per_window[wid] = result
         if all(result[k] is not None or result[k + "_na"]
@@ -6453,11 +6893,14 @@ def find_run_dirs(results_dir):
     return found
 
 
-def verify_results(results_dir):
+def verify_results(results_dir, verbose=False):
     del results[:]
     if not os.path.isdir(results_dir):
         fail("results dir exists", "%s is not a directory" % results_dir)
         return [r for r in results if r[1] == "FAIL"]
+    kind = aggregate_kind(results_dir)
+    if kind is not None:
+        return verify_aggregate(results_dir, kind, verbose)
     runs = find_run_dirs(results_dir)
     if not runs:
         fail("results dir declares at least one run",
@@ -6469,6 +6912,589 @@ def verify_results(results_dir):
     index = find_superseded_index(results_dir)
     for run_dir in runs:
         check_run(run_dir, results_dir, index)
+    check_perf_tables(results_dir)
+    check_benchmark_summaries(results_dir, index)
+    return [r for r in results if r[1] == "FAIL"]
+
+
+# ---------------------------------------------------------------------------
+# Aggregate roots (sweep ``cells/`` / negative-set ``cases/``)
+# ---------------------------------------------------------------------------
+
+# ``sweep`` roots hold ``cells/<cell_id>/``; ``negative`` roots ``cases/<case>/``.
+AGGREGATE_SUBDIRS = {"sweep": "cells", "negative": "cases"}
+NEGATIVE_REQUIRED_FIELDS = ("windows", "detected", "committed", "false_commit",
+                            "output_change", "bypass_bit_identical")
+# The frozen actionable-negative bound: a no-actionable-interferer case must be
+# measured over at least this many windows.  The per-window ``effect.n_*``
+# "evaluable" count is NOT the window count; the count of ``windows.jsonl``
+# rows is.
+ACTIONABLE_WINDOWS_MIN = 1000
+
+
+def aggregate_kind(results_dir):
+    """Return ``"sweep"``/``"negative"`` when the root aggregates child runs."""
+    for kind, sub in AGGREGATE_SUBDIRS.items():
+        if os.path.isdir(os.path.join(results_dir, sub)):
+            return kind
+    return None
+
+
+def aggregate_children(results_dir, kind):
+    """Immediate child run dirs of an aggregate root, sorted by name."""
+    sub = os.path.join(results_dir, AGGREGATE_SUBDIRS[kind])
+    children = []
+    for name in sorted(os.listdir(sub)):
+        path = os.path.join(sub, name)
+        if os.path.isdir(path):
+            children.append(path)
+    return children
+
+
+def wilson_ci(k, n, z=1.96):
+    """Wilson score interval, recomputed independently of the generator."""
+    if n <= 0:
+        return (None, None)
+    p = k / n
+    d = 1.0 + z * z / n
+    c = p + z * z / (2.0 * n)
+    half = z * math.sqrt(p * (1.0 - p) / n + z * z / (4.0 * n * n))
+    return (max(0.0, (c - half) / d), min(1.0, (c + half) / d))
+
+
+def _strip_child_prefix(item, prefix):
+    if prefix and item.startswith(prefix):
+        item = item[len(prefix):].lstrip(": ")
+    return item
+
+
+def _normalize_check(item):
+    item = re.sub(r"window_id=[^ ]+", "window_id=*", item)
+    return re.sub(r"\s+", " ", item).strip()
+
+
+def _summary_eff_pass(summary):
+    gates = summary.get("gates") if isinstance(summary, dict) else None
+    if isinstance(gates, dict) and isinstance(gates.get("eff_pass"), bool):
+        return gates["eff_pass"]
+    return None
+
+
+def _summary_median_suppression(summary):
+    effect = summary.get("effect") if isinstance(summary, dict) else None
+    if isinstance(effect, dict):
+        return effect.get("median_suppression_db")
+    return None
+
+
+def _shared_manifest_hashes(manifest):
+    """The template hashes plus the shared (non-per-window) input hashes."""
+    template = manifest.get("template_hashes")
+    fixture = manifest.get("fixture_hashes")
+    template = template if isinstance(template, dict) else {}
+    shared = {}
+    if isinstance(fixture, dict):
+        for key, value in fixture.items():
+            # ``fixtures/`` and ``recon/`` hold per-window dumps and legitimately
+            # differ between cells; every other entry is a shared input file.
+            if key.startswith(("fixtures/", "recon/")):
+                continue
+            shared[key] = value
+    return template, shared
+
+
+def _case_counters(child):
+    """Recompute the negative-set counters from the case's ``windows.jsonl``."""
+    rows, err = load_jsonl(os.path.join(child, "windows.jsonl"))
+    if rows is None:
+        return None, err or "windows.jsonl unreadable"
+    detected = committed = changed = actionable = 0
+    for _lineno, window in rows:
+        state = window.get("sic_state")
+        state = state if isinstance(state, dict) else {}
+        recon = window.get("recon")
+        recon = recon if isinstance(recon, dict) else {}
+        if state.get("detected") is True:
+            detected += 1
+        if state.get("committed") is True:
+            committed += 1
+        if bool(recon.get("output_changed")):
+            changed += 1
+        overlap = state.get("sub_overlap")
+        if is_int(overlap) and int(overlap) > 0:
+            actionable += 1
+    return {"windows": len(rows), "detected": detected, "committed": committed,
+            "output_changed": changed, "actionable_overlap": actionable}, None
+
+
+def _case_bypass(summary):
+    """(bypassed, bit-identical) counts from the case summary (None when absent)."""
+    if not isinstance(summary, dict):
+        return None, None
+    sic = summary.get("sic")
+    sic = sic if isinstance(sic, dict) else {}
+    block = sic.get("bypass_bit_identical")
+    if not isinstance(block, dict):
+        return None, None
+    return block.get("n_bypassed"), block.get("n_bit_identical")
+
+
+def check_sweep_table(results_dir, children):
+    """Cross-check ``main_matrix.json`` against every ``cells/<id>/`` run."""
+    item = "sweep aggregate main_matrix.json"
+    data, err = load_json(os.path.join(results_dir, "main_matrix.json"))
+    if not isinstance(data, dict):
+        fail("%s: present and a JSON object" % item, err or "not an object")
+        return
+    rows = data.get("cells")
+    if not isinstance(rows, list):
+        fail("%s: carries a cells[] row list" % item, "got %r" % (rows,))
+        return
+    child_ids = [os.path.basename(child) for child in children]
+    if len(rows) != len(children):
+        fail("%s: row count matches the cells/ count" % item,
+             "%d row(s) vs %d cell dir(s)" % (len(rows), len(children)))
+    else:
+        ok("%s: row count matches the cells/ count" % item,
+           "%d row(s)" % len(rows))
+    by_id = {}
+    duplicates = []
+    for row in rows:
+        cid = row.get("cell_id") if isinstance(row, dict) else None
+        if not is_nonempty_str(cid):
+            fail("%s: every row declares a cell_id" % item, "row=%r" % (row,))
+            continue
+        if cid in by_id:
+            duplicates.append(cid)
+        by_id[cid] = row
+    if duplicates:
+        fail("%s: cell_id values are unique" % item,
+             "duplicate(s) %s" % sorted(set(duplicates))[:8])
+    missing = [cid for cid in child_ids if cid not in by_id]
+    extra = [cid for cid in by_id if cid not in child_ids]
+    if missing:
+        fail("%s: every cell dir has a matrix row" % item,
+             "missing row(s) for %s" % missing[:8])
+    if extra:
+        fail("%s: every matrix row names a cells/<id> dir" % item,
+             "row(s) without a dir: %s" % extra[:8])
+    if not (missing or extra or duplicates):
+        ok("%s: rows and cell dirs are 1:1" % item, "%d cell(s)" % len(child_ids))
+
+    mismatches = []
+    for child in children:
+        cid = os.path.basename(child)
+        row = by_id.get(cid)
+        summary, _err = load_json(os.path.join(child, "summary.json"))
+        if row is None or not isinstance(summary, dict):
+            continue
+        want_eff = _summary_eff_pass(summary)
+        if want_eff is not None and row.get("eff_pass") is not want_eff:
+            mismatches.append((cid, "eff_pass", row.get("eff_pass"), want_eff))
+        want_med = _summary_median_suppression(summary)
+        if is_num(want_med):
+            got_med = row.get("median_suppression_db")
+            if not (is_num(got_med) and close(float(got_med), float(want_med))):
+                mismatches.append(
+                    (cid, "median_suppression_db", got_med, want_med))
+    if mismatches:
+        cid, field, got, want = mismatches[0]
+        fail("%s: each row's cell_id/eff_pass/median_suppression_db matches its "
+             "cells/<id>/summary.json" % item,
+             "%d mismatch(es); first %s: row.%s=%r summary=%r"
+             % (len(mismatches), cid, field, got, want))
+    else:
+        ok("%s: each row's cell_id/eff_pass/median_suppression_db matches its "
+           "cells/<id>/summary.json" % item, "%d cell(s)" % len(child_ids))
+
+    hash_groups = {}
+    for child in children:
+        manifest, _err = load_json(os.path.join(child, "run_manifest.json"))
+        if not isinstance(manifest, dict):
+            continue
+        value, _key = _first_key(manifest, EFFECTIVE_HASH_KEYS)
+        hash_groups.setdefault(value, []).append(os.path.basename(child))
+    if len(hash_groups) != 1:
+        fail("%s: exactly one effective_config_hash across all cells" % item,
+             "%d distinct hash(es): %s"
+             % (len(hash_groups),
+                {str(k): len(v) for k, v in hash_groups.items()}))
+    else:
+        value = next(iter(hash_groups))
+        if not is_hex64(value):
+            fail("%s: the effective_config_hash is a sha256 hex string" % item,
+                 "got %r" % (value,))
+        else:
+            ok("%s: exactly one effective_config_hash across all cells" % item,
+               "%s (%d cell(s))" % (value, len(hash_groups[value])))
+
+    identity_groups = {}
+    for child in children:
+        manifest, _err = load_json(os.path.join(child, "run_manifest.json"))
+        if not isinstance(manifest, dict):
+            continue
+        template, shared = _shared_manifest_hashes(manifest)
+        identity_groups.setdefault(
+            json.dumps([template, shared], sort_keys=True), []).append(
+                os.path.basename(child))
+    if len(identity_groups) != 1:
+        examples = [(names[0], key[:200])
+                    for key, names in identity_groups.items()]
+        fail("%s: every cell shares the same template/shared-input hashes"
+             % item,
+             "%d distinct template/input hash set(s); e.g. %s"
+             % (len(identity_groups), examples[:2]))
+    else:
+        ok("%s: every cell shares the same template/shared-input hashes" % item,
+           "%d cell(s)" % len(children))
+
+
+def check_negative_table(results_dir, children):
+    """Cross-check ``negative_table.json`` against every ``cases/<case>/`` run."""
+    item = "negative aggregate negative_table.json"
+    data, err = load_json(os.path.join(results_dir, "negative_table.json"))
+    if not isinstance(data, dict):
+        fail("%s: present and a JSON object" % item, err or "not an object")
+        return
+    rows = data.get("cases")
+    overall = data.get("overall")
+    if not isinstance(rows, list):
+        fail("%s: carries a cases[] row list" % item, "got %r" % (rows,))
+        return
+    if not isinstance(overall, dict):
+        fail("%s: carries an overall block" % item, "got %r" % (overall,))
+        overall = {}
+    child_ids = [os.path.basename(child) for child in children]
+    by_id = {}
+    duplicates = []
+    for row in rows:
+        cid = row.get("case") if isinstance(row, dict) else None
+        if not is_nonempty_str(cid):
+            fail("%s: every row declares a case" % item, "row=%r" % (row,))
+            continue
+        if cid in by_id:
+            duplicates.append(cid)
+        by_id[cid] = row
+    missing = [cid for cid in child_ids if cid not in by_id]
+    extra = [cid for cid in by_id if cid not in child_ids]
+    if len(rows) != len(children):
+        fail("%s: one row per cases/ dir" % item,
+             "%d row(s) vs %d case dir(s)" % (len(rows), len(children)))
+    if missing:
+        fail("%s: every case dir has a table row" % item,
+             "missing row(s) for %s" % missing[:8])
+    if extra:
+        fail("%s: every table row names a cases/<case> dir" % item,
+             "row(s) without a dir: %s" % extra[:8])
+    if not (missing or extra or duplicates or len(rows) != len(children)):
+        ok("%s: rows and case dirs are 1:1" % item, "%d case(s)" % len(children))
+
+    recomputed = {}
+    mismatches = []
+    too_few = []
+    for child in children:
+        cid = os.path.basename(child)
+        row = by_id.get(cid)
+        counters, cerr = _case_counters(child)
+        if counters is None:
+            fail("%s: %s windows.jsonl is readable" % (item, cid),
+                 cerr or "unreadable")
+            continue
+        if row is None:
+            continue
+        summary, _err = load_json(os.path.join(child, "summary.json"))
+        bypassed, bit_identical = _case_bypass(summary)
+        expected_negative = row.get("expected_negative") is True
+        derived = {
+            "windows": counters["windows"],
+            "detected": counters["detected"],
+            "committed": counters["committed"],
+            "false_commit": (counters["committed"] if expected_negative
+                             else None),
+            "output_change": (counters["output_changed"] if expected_negative
+                              else None),
+            "bypass_bit_identical": bit_identical,
+        }
+        for field in NEGATIVE_REQUIRED_FIELDS:
+            if row.get(field) != derived[field]:
+                mismatches.append((cid, field, row.get(field), derived[field]))
+        if expected_negative and counters["windows"] < ACTIONABLE_WINDOWS_MIN:
+            too_few.append((cid, counters["windows"]))
+        recomputed[cid] = dict(counters, expected_negative=expected_negative,
+                               bypassed=bypassed, bit_identical=bit_identical)
+    if mismatches:
+        cid, field, got, want = mismatches[0]
+        fail("%s: each row's windows/detected/committed/false_commit/"
+             "output_change/bypass_bit_identical matches its case artifacts"
+             % item,
+             "%d mismatch(es); first %s: table.%s=%r recomputed=%r"
+             % (len(mismatches), cid, field, got, want))
+    else:
+        ok("%s: each row's windows/detected/committed/false_commit/"
+           "output_change/bypass_bit_identical matches its case artifacts"
+           % item, "%d case(s)" % len(child_ids))
+    if too_few:
+        fail("%s: every actionable (expected_negative) case has >= %d windows"
+             % (item, ACTIONABLE_WINDOWS_MIN),
+             "%d case(s) below the bound (windows.jsonl row count): %s"
+             % (len(too_few), too_few[:8]))
+    else:
+        actionable = [cid for cid, info in recomputed.items()
+                      if info["expected_negative"]]
+        ok("%s: every actionable (expected_negative) case has >= %d windows"
+           % (item, ACTIONABLE_WINDOWS_MIN),
+           "%d actionable case(s)" % len(actionable))
+
+    # Recompute the overall counters/rates/CI from the per-case counts.
+    negative_ids = [cid for cid, info in recomputed.items()
+                    if info["expected_negative"]]
+    neg_n = sum(recomputed[cid]["windows"] for cid in negative_ids)
+    fp = sum(recomputed[cid]["detected"] for cid in negative_ids)
+    fn = sum(recomputed[cid]["committed"] for cid in negative_ids)
+    fo = sum(recomputed[cid]["output_changed"] for cid in negative_ids)
+    fa = sum(recomputed[cid]["actionable_overlap"] for cid in negative_ids)
+
+    def rate(count):
+        return (count / neg_n) if neg_n else None
+
+    def pair_equal(a, b):
+        if not (isinstance(a, list) and isinstance(b, list)
+                and len(a) == len(b) == 2):
+            return False
+        for x, y in zip(a, b):
+            if x is None or y is None:
+                if not (x is None and y is None):
+                    return False
+            elif not close(x, y):
+                return False
+        return True
+
+    overall_expected = {
+        "negative_windows": neg_n,
+        "false_detect": fp,
+        "false_actionable_detect": fa,
+        "false_commit": fn,
+        "false_output_change": fo,
+        "false_detect_rate": rate(fp),
+        "false_actionable_detect_rate": rate(fa),
+        "false_commit_rate": rate(fn),
+        "false_output_change_rate": rate(fo),
+    }
+    overall_bad = []
+    for field, want in overall_expected.items():
+        got = overall.get(field)
+        if want is None:
+            if got is not None:
+                overall_bad.append((field, got, want))
+        elif not (is_num(got) and close(got, want)):
+            overall_bad.append((field, got, want))
+    ci_expected = {
+        "false_detect_ci95": list(wilson_ci(fp, neg_n)),
+        "false_actionable_detect_ci95": list(wilson_ci(fa, neg_n)),
+        "false_commit_ci95": list(wilson_ci(fn, neg_n)),
+        "false_output_change_ci95": list(wilson_ci(fo, neg_n)),
+    }
+    for field, want in ci_expected.items():
+        if not pair_equal(overall.get(field), want):
+            overall_bad.append((field, overall.get(field), want))
+    if overall_bad:
+        field, got, want = overall_bad[0]
+        fail("%s: overall counters/rates/Wilson CI recomputed from the per-case "
+             "counts" % item,
+             "%d mismatch(es); first %s: declared=%r recomputed=%r"
+             % (len(overall_bad), field, got, want))
+    else:
+        ok("%s: overall counters/rates/Wilson CI recomputed from the per-case "
+           "counts" % item,
+           "negative_windows=%d false_commit=%d" % (neg_n, fn))
+
+    declared_neg = overall.get("expected_negative_cases")
+    if not (isinstance(declared_neg, list)
+            and sorted(str(c) for c in declared_neg) == sorted(negative_ids)):
+        fail("%s: expected_negative_cases names exactly the actionable rows"
+             % item,
+             "declared=%r actionable=%r" % (declared_neg, sorted(negative_ids)))
+    else:
+        ok("%s: expected_negative_cases names exactly the actionable rows"
+           % item, "%s" % sorted(negative_ids))
+
+    bypass_n = sum(int(recomputed[cid]["bypassed"] or 0)
+                   for cid in recomputed)
+    bypass_ok = sum(int(recomputed[cid]["bit_identical"] or 0)
+                    for cid in recomputed)
+    bypass_bad = []
+    if overall.get("bypass_windows") != bypass_n:
+        bypass_bad.append(("bypass_windows", overall.get("bypass_windows"),
+                           bypass_n))
+    if overall.get("bypass_bit_identical") != bypass_ok:
+        bypass_bad.append(("bypass_bit_identical",
+                           overall.get("bypass_bit_identical"), bypass_ok))
+    want_all = bool(bypass_n == 0 or bypass_n == bypass_ok)
+    if overall.get("bypass_all_identical") is not want_all:
+        bypass_bad.append(("bypass_all_identical",
+                           overall.get("bypass_all_identical"), want_all))
+    if bypass_bad:
+        field, got, want = bypass_bad[0]
+        fail("%s: overall bypass counts recomputed from the per-case summaries"
+             % item,
+             "%d mismatch(es); first %s: declared=%r recomputed=%r"
+             % (len(bypass_bad), field, got, want))
+    else:
+        ok("%s: overall bypass counts recomputed from the per-case summaries"
+           % item, "bypassed=%d bit_identical=%d" % (bypass_n, bypass_ok))
+
+    want_gate = bool(neg_n >= ACTIONABLE_WINDOWS_MIN and neg_n > 0
+                     and fn / neg_n <= 0.01)
+    want_gate_change = bool(neg_n >= ACTIONABLE_WINDOWS_MIN and neg_n > 0
+                            and fo / neg_n <= 0.01)
+    gate_bad = []
+    if overall.get("gate_pass") is not want_gate:
+        gate_bad.append(("gate_pass", overall.get("gate_pass"), want_gate))
+    if overall.get("gate_pass_false_commit_or_change") is not want_gate_change:
+        gate_bad.append(("gate_pass_false_commit_or_change",
+                         overall.get("gate_pass_false_commit_or_change"),
+                         want_gate_change))
+    if gate_bad:
+        field, got, want = gate_bad[0]
+        fail("%s: the overall gate flags follow the recomputed counts" % item,
+             "%d mismatch(es); first %s: declared=%r recomputed=%r"
+             % (len(gate_bad), field, got, want))
+    else:
+        ok("%s: the overall gate flags follow the recomputed counts" % item,
+           "gate_pass=%s" % want_gate)
+
+
+def check_aggregate_index(results_dir, kind, children):
+    """Validate the aggregate's own index (``cells/index.json`` etc.) once.
+
+    The single-run ``S1-7`` index check is a results-root artifact; a child of
+    an aggregate root must not resolve a sibling/global index (that produced
+    one spurious failure per child).  The index the aggregate runner writes
+    inside ``cells/``/``cases/`` is validated here, once, against every child.
+    """
+    item = "%s aggregate index" % kind
+    sub = AGGREGATE_SUBDIRS[kind]
+    candidates = [os.path.join(results_dir, name) for name in S1_INDEX_FILES]
+    candidates += [os.path.join(results_dir, sub, name)
+                   for name in S1_INDEX_FILES]
+    path = next((p for p in candidates if os.path.isfile(p)), None)
+    if path is None:
+        skip("%s: present" % item,
+             "no index.json under %s or %s/" % (results_dir, sub))
+        return
+    data, err = load_json(path)
+    if not isinstance(data, dict):
+        fail("%s: is a JSON object" % item, err or "not an object")
+        return
+    child_ids = [os.path.basename(child) for child in children]
+    latest = data.get("latest_run", data.get("latest"))
+    runs_block = data.get("runs")
+    if latest is None and isinstance(runs_block, dict):
+        latest = runs_block.get("latest")
+    if latest not in child_ids:
+        fail("%s: latest_run resolves to an actual child run" % item,
+             "latest_run=%r under %s" % (latest, sub))
+    else:
+        ok("%s: latest_run resolves to an actual child run" % item,
+           "%s" % latest)
+    mismatches = []
+    missing = []
+    for child in children:
+        cid = os.path.basename(child)
+        entry = runs_block.get(cid) if isinstance(runs_block, dict) else None
+        if not isinstance(entry, dict):
+            missing.append(cid)
+            continue
+        rows, _err = load_jsonl(os.path.join(child, "windows.jsonl"))
+        count = len(rows) if rows is not None else None
+        declared, _key = _first_key(entry, ("windows", "windows_completed",
+                                            "window_count"))
+        if count is not None and is_int(declared) and int(declared) != count:
+            mismatches.append((cid, "windows", declared, count))
+        manifest, _err = load_json(os.path.join(child, "run_manifest.json"))
+        if isinstance(manifest, dict) and is_nonempty_str(entry.get("run_id")) \
+                and entry["run_id"] != manifest.get("run_id"):
+            mismatches.append((cid, "run_id", entry.get("run_id"),
+                               manifest.get("run_id")))
+    if missing:
+        fail("%s: every child has an index entry" % item,
+             "missing entry for %s" % missing[:8])
+    if mismatches:
+        cid, field, got, want = mismatches[0]
+        fail("%s: each index entry's count/run_id matches the child artifact"
+             % item,
+             "%d mismatch(es); first %s: index.%s=%r child=%r"
+             % (len(mismatches), cid, field, got, want))
+    else:
+        ok("%s: each index entry's count/run_id matches the child artifact"
+           % item, "%d child(ren)" % len(child_ids))
+
+
+def print_aggregate_summary(results_dir, kind, per_child):
+    """One line per child (first failing check), no per-window spam."""
+    print("-" * 72)
+    print("aggregate summary: %s (%s, %d child run dir(s))"
+          % (results_dir, kind, len(per_child)))
+    print("  %-44s %-4s %7s %8s  %s"
+          % ("child", "stat", "checks", "fails", "first failing check"))
+    groups = {}
+    n_pass = 0
+    for child, checks, fails in per_child:
+        name = os.path.basename(child)
+        if fails:
+            prefix = label_for(child, results_dir)
+            first = _strip_child_prefix(fails[0][0], prefix)
+            print("  %-44s %-4s %7d %8d  %s"
+                  % (name, "FAIL", checks, len(fails), first))
+            groups.setdefault(_normalize_check(first), []).append(name)
+        else:
+            n_pass += 1
+            print("  %-44s %-4s %7d %8d"
+                  % (name, "PASS", checks, len(fails)))
+    print("  children: %d PASS / %d FAIL; checks %d, failures %d"
+          % (n_pass, len(per_child) - n_pass,
+             sum(checks for _c, checks, _f in per_child),
+             sum(len(fails) for _c, _checks, fails in per_child)))
+    if groups:
+        print("  distinct first-failure groups:")
+        for key, names in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+            print("    %3d child(ren): %s" % (len(names), key))
+            if len(names) <= 6:
+                print("        %s" % ", ".join(names))
+
+
+def verify_aggregate(results_dir, kind, verbose=False):
+    """Verify every child run dir and cross-check the aggregate tables."""
+    global _AGGREGATE_CHILD, _QUIET
+    children = aggregate_children(results_dir, kind)
+    ok("aggregate results root", "%s: %d child run dir(s) under %s/"
+       % (kind, len(children), AGGREGATE_SUBDIRS[kind]))
+    if not children:
+        fail("aggregate results root declares at least one child run",
+             "no run dir under %s/" % AGGREGATE_SUBDIRS[kind])
+        return [r for r in results if r[1] == "FAIL"]
+    index = find_superseded_index(results_dir)
+    quiet = _QUIET
+    per_child = []
+    try:
+        for child in children:
+            start = len(results)
+            _AGGREGATE_CHILD = True
+            _QUIET = quiet or not verbose
+            check_run(child, results_dir, index)
+            _QUIET = quiet
+            _AGGREGATE_CHILD = False
+            per_child.append((child, len(results) - start,
+                              [r for r in results[start:] if r[1] == "FAIL"]))
+    finally:
+        _AGGREGATE_CHILD = False
+        _QUIET = quiet
+    if kind == "sweep":
+        check_sweep_table(results_dir, children)
+    else:
+        check_negative_table(results_dir, children)
+    check_aggregate_index(results_dir, kind, children)
+    print_aggregate_summary(results_dir, kind, per_child)
     check_perf_tables(results_dir)
     check_benchmark_summaries(results_dir, index)
     return [r for r in results if r[1] == "FAIL"]
@@ -7069,6 +8095,261 @@ def results_dir_root(run_dir):
     return os.path.dirname(run_dir)
 
 
+def _write_negative_overall(root, rows):
+    """Write a ``negative_table.json`` whose overall block is self-consistent."""
+    negative = [r for r in rows if r.get("expected_negative") is True]
+    neg_n = sum(r["windows"] for r in negative)
+    fp = sum(r["detected"] for r in negative)
+    fn = sum(r["committed"] for r in negative)
+    fo = sum(r["output_changed"] for r in negative)
+    fa = sum(r["actionable_overlap"] for r in negative)
+    bypass_n = sum(int(r.get("bypassed") or 0) for r in rows)
+    bypass_ok = sum(int(r.get("bypass_bit_identical") or 0) for r in rows)
+    overall = {
+        "negative_windows": neg_n,
+        "false_detect": fp, "false_actionable_detect": fa,
+        "false_commit": fn, "false_output_change": fo,
+        "false_detect_rate": (fp / neg_n) if neg_n else None,
+        "false_actionable_detect_rate": (fa / neg_n) if neg_n else None,
+        "false_commit_rate": (fn / neg_n) if neg_n else None,
+        "false_output_change_rate": (fo / neg_n) if neg_n else None,
+        "false_detect_ci95": list(wilson_ci(fp, neg_n)),
+        "false_actionable_detect_ci95": list(wilson_ci(fa, neg_n)),
+        "false_commit_ci95": list(wilson_ci(fn, neg_n)),
+        "false_output_change_ci95": list(wilson_ci(fo, neg_n)),
+        "gate_false_commit_max": 0.01,
+        "gate_windows_min": ACTIONABLE_WINDOWS_MIN,
+        "gate_pass": bool(neg_n >= ACTIONABLE_WINDOWS_MIN and neg_n > 0
+                          and fn / neg_n <= 0.01),
+        "gate_pass_false_commit_or_change": bool(
+            neg_n >= ACTIONABLE_WINDOWS_MIN and neg_n > 0
+            and fo / neg_n <= 0.01),
+        "bypass_windows": bypass_n, "bypass_bit_identical": bypass_ok,
+        "bypass_all_identical": bool(bypass_n == 0 or bypass_n == bypass_ok),
+        "expected_negative_cases": sorted(r["case"] for r in negative),
+        "ci_method": "Wilson score interval, z=1.96 (95%)",
+    }
+    with open(os.path.join(root, "negative_table.json"), "w",
+              encoding="utf-8") as handle:
+        json.dump({"cases": rows, "overall": overall}, handle, indent=1)
+
+
+def build_good_aggregate(root, kind="sweep", child_names=None):
+    """Create an aggregate root (sweep ``cells/`` or negative ``cases/``)."""
+    sub = AGGREGATE_SUBDIRS[kind]
+    if child_names is None:
+        child_names = (["cell_a", "cell_b"] if kind == "sweep"
+                       else ["case_a", "case_b"])
+    scratch = tempfile.mkdtemp(prefix="sic_agg_", dir=root)
+    try:
+        build_good_set(scratch)
+        run_dir = os.path.join(scratch, "main")
+        parent = os.path.join(root, sub)
+        for name in child_names:
+            shutil.copytree(run_dir, os.path.join(parent, name))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    children = [os.path.join(parent, name) for name in child_names]
+    if kind == "sweep":
+        rows = []
+        for child in children:
+            summary, _err = load_json(os.path.join(child, "summary.json"))
+            rows.append({
+                "cell_id": os.path.basename(child),
+                "cell_index": len(rows),
+                "eff_pass": _summary_eff_pass(summary),
+                "median_suppression_db":
+                    _summary_median_suppression(summary),
+            })
+        with open(os.path.join(root, "main_matrix.json"), "w",
+                  encoding="utf-8") as handle:
+            json.dump({"mode": "sweep", "n_cells": len(rows), "cells": rows},
+                      handle, indent=1)
+    else:
+        rows = []
+        for child in children:
+            counters, cerr = _case_counters(child)
+            if counters is None:
+                raise RuntimeError("fixture case counters: %s" % cerr)
+            summary, _err = load_json(os.path.join(child, "summary.json"))
+            bypassed, bit_identical = _case_bypass(summary)
+            rows.append({
+                "case": os.path.basename(child),
+                "expected_negative": False,
+                "windows": counters["windows"],
+                "detected": counters["detected"],
+                "committed": counters["committed"],
+                "output_changed": counters["output_changed"],
+                "actionable_overlap": counters["actionable_overlap"],
+                "false_commit": None,
+                "output_change": None,
+                "bypassed": bypassed,
+                "bypass_bit_identical": bit_identical,
+                "returncode": 0,
+            })
+        _write_negative_overall(root, rows)
+    # The aggregate runner also writes an index of its children next to them.
+    index_runs = {}
+    for child in children:
+        summary, _err = load_json(os.path.join(child, "summary.json"))
+        manifest, _err = load_json(os.path.join(child, "run_manifest.json"))
+        count = None
+        if isinstance(summary, dict):
+            count = summary.get("windows_completed")
+        if count is None:
+            rows, _err = load_jsonl(os.path.join(child, "windows.jsonl"))
+            count = len(rows) if rows is not None else None
+        index_runs[os.path.basename(child)] = {
+            "run_id": manifest.get("run_id") if isinstance(manifest, dict)
+            else None,
+            "windows": count,
+        }
+    with open(os.path.join(parent, "index.json"), "w",
+              encoding="utf-8") as handle:
+        json.dump({"schema": "sic-s1-results-index/1",
+                   "latest_run": child_names[-1],
+                   "runs": index_runs}, handle, indent=1)
+    return parent
+
+
+def aggregate_mutation_specs():
+    """Aggregate-root counterexamples: each mutates a good aggregate root."""
+    specs = []
+
+    def _sweep_table(root):
+        return os.path.join(root, "main_matrix.json")
+
+    def _negative_table(root):
+        return os.path.join(root, "negative_table.json")
+
+    def sweep_row_value_mismatch(root):
+        """A sweep row's median_suppression_db disagrees with its cell."""
+        path = _sweep_table(root)
+        data, _err = load_json(path)
+        data["cells"][0]["median_suppression_db"] += 5.0
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=1)
+    specs.append(("aggregate sweep table/cell mismatch", "sweep",
+                  sweep_row_value_mismatch))
+
+    def sweep_row_count_mismatch(root):
+        """The matrix carries a row with no cells/<id> dir."""
+        path = _sweep_table(root)
+        data, _err = load_json(path)
+        data["cells"].append(dict(data["cells"][0], cell_id="cell_ghost"))
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=1)
+    specs.append(("aggregate sweep table row count mismatch", "sweep",
+                  sweep_row_count_mismatch))
+
+    def sweep_two_config_hashes(root):
+        """Two cells declare different effective_config_hash values."""
+        path = os.path.join(root, "cells", "cell_b", "run_manifest.json")
+        manifest, _err = load_json(path)
+        manifest["effective_config_hash"] = "0" * 64
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=1)
+    specs.append(("aggregate sweep more than one effective_config_hash",
+                  "sweep", sweep_two_config_hashes))
+
+    def negative_actionable_too_few(root):
+        """An actionable case is measured over fewer than 1000 windows."""
+        path = _negative_table(root)
+        data, _err = load_json(path)
+        row = data["cases"][0]
+        row["expected_negative"] = True
+        row["false_commit"] = row["committed"]
+        row["output_change"] = row["output_changed"]
+        _write_negative_overall(root, data["cases"])
+    specs.append(("aggregate negative actionable case with < 1000 windows",
+                  "negative", negative_actionable_too_few))
+
+    def negative_case_counter_mismatch(root):
+        """A per-case committed counter disagrees with windows.jsonl."""
+        path = _negative_table(root)
+        data, _err = load_json(path)
+        data["cases"][0]["committed"] += 1
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=1)
+    specs.append(("aggregate negative per-case counter mismatch", "negative",
+                  negative_case_counter_mismatch))
+
+    def negative_overall_counter_mismatch(root):
+        """The overall false_commit disagrees with the per-case counts."""
+        path = _negative_table(root)
+        data, _err = load_json(path)
+        data["overall"]["false_commit"] += 1
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=1)
+    specs.append(("aggregate negative overall counter mismatch", "negative",
+                  negative_overall_counter_mismatch))
+
+    def aggregate_child_failing(root):
+        """One child run is internally inconsistent and must be reported."""
+        path = os.path.join(root, "cells", "cell_b", "summary.json")
+        summary, _err = load_json(path)
+        summary["windows_completed"] = summary["windows_completed"] + 1
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=1)
+    specs.append(("aggregate child run failing", "sweep",
+                  aggregate_child_failing))
+
+    def aggregate_index_stale(root):
+        """The aggregate index's latest_run points at a nonexistent child."""
+        path = os.path.join(root, "cells", "index.json")
+        data, _err = load_json(path)
+        data["latest_run"] = "cell_ghost"
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=1)
+    specs.append(("aggregate index stale latest_run", "sweep",
+                  aggregate_index_stale))
+
+    return specs
+
+
+def self_test_aggregate(work, failures):
+    """Self-test the aggregate-root support and its cross-checks."""
+    global _QUIET
+    print("== self-test: the fabricated aggregate roots must PASS ==")
+    for kind in ("sweep", "negative"):
+        root = os.path.join(work, "agg_good_%s" % kind)
+        os.makedirs(root)
+        build_good_aggregate(root, kind)
+        _QUIET = True
+        bad = verify_results(root)
+        _QUIET = False
+        if bad:
+            print("[FAIL] good %s aggregate PASSES -- got %d failure(s): %s"
+                  % (kind, len(bad), [f[0] for f in bad][:5]))
+            failures.append("aggregate good %s" % kind)
+        else:
+            print("[PASS] good %s aggregate PASSES: %d checks, 0 failures"
+                  % (kind, len(results)))
+
+    print("== self-test: each corrupted aggregate must FAIL ==")
+    for name, kind, mutate in aggregate_mutation_specs():
+        agg_root = os.path.join(
+            work, "agg_%s" % re.sub(r"[^A-Za-z0-9]+", "_", name))
+        os.makedirs(agg_root)
+        build_good_aggregate(agg_root, kind)
+        try:
+            mutate(agg_root)
+        except Exception as exc:  # fixture problem, not a verifier result
+            print("[FAIL] aggregate mutation '%s' could not be applied: %s"
+                  % (name, exc))
+            failures.append(name)
+            continue
+        _QUIET = True
+        caught = verify_results(agg_root)
+        _QUIET = False
+        if caught:
+            print("[PASS] aggregate mutation '%s' caught by %d check(s): %s"
+                  % (name, len(caught), caught[0][0]))
+        else:
+            print("[FAIL] aggregate mutation '%s' was NOT caught" % name)
+            failures.append(name)
+
+
 def make_off_variant(root):
     """Turn the built main/estimate set into a valid rev-2 baseline/SIC-off set.
 
@@ -7135,6 +8416,87 @@ def make_off_variant(root):
     ]
     with open(summary_path, "w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=1)
+
+
+def make_zero_commit_variant(root):
+    """Turn the built main/estimate set into an all-bypass (zero-commit) run.
+
+    Every window is bypassed, so there is no committed frozen ``SicModel`` to
+    audit: the S1 model-evidence family must be SKIPped (not failed).  The
+    bypass bit-identity / false-commit / output-change gates are the negative
+    aggregate's job, not the S1 model-evidence checks.
+    """
+    run_dir = os.path.join(root, "main")
+    windows_path = os.path.join(run_dir, "windows.jsonl")
+    with open(windows_path, "r", encoding="utf-8") as handle:
+        windows = [json.loads(line) for line in handle if line.strip()]
+    for window in windows:
+        window.pop("sic_model", None)
+        state = window.setdefault("sic_state", {})
+        state["committed"] = False
+        state["detected"] = False
+        state["bypass_reason"] = "below_detect_threshold"
+    with open(windows_path, "w", encoding="utf-8") as handle:
+        for window in windows:
+            handle.write(json.dumps(window) + "\n")
+
+
+def make_partial_archive_variant(root, archived=(0, 1, 2, 3), policy=True):
+    """Archive only ``archived`` recon windows and declare the archive policy.
+
+    The run then ships arrays for a declared subset (>= S1_MIN_ARCHIVED) and
+    states that the non-archived windows are not independently recomputable.
+    """
+    run_dir = os.path.join(root, "main")
+    windows_path = os.path.join(run_dir, "windows.jsonl")
+    with open(windows_path, "r", encoding="utf-8") as handle:
+        windows = [json.loads(line) for line in handle if line.strip()]
+    total = len(windows)
+    keep = {int(w) for w in archived}
+    recon_dir = os.path.join(run_dir, "recon")
+    removed = []
+    for wid in range(total):
+        if wid in keep:
+            continue
+        path = os.path.join(recon_dir, "window_%d.npz" % wid)
+        if os.path.isfile(path):
+            os.remove(path)
+            removed.append(wid)
+
+    def edit_manifest(manifest):
+        fixture = manifest.get("fixture_hashes")
+        if isinstance(fixture, dict):
+            for wid in removed:
+                fixture.pop("recon/window_%d.npz" % wid, None)
+
+    _manifest_edit(root, edit_manifest)
+    if policy:
+        def edit_summary(summary):
+            # The app writes the policy nested under summary.sic.
+            summary.setdefault("sic", {})["archive_policy"] = {
+                "per_cell": len(keep),
+                "archived_ids": sorted(keep),
+                "n_archived": len(keep),
+                "total_windows": total,
+                "note": ("recon/window_<id>.npz holds y/y_clean/i for the first "
+                         "`per_cell` windows; the remaining windows are covered "
+                         "by the per-window declared metrics but not archived, "
+                         "so they are not independently recomputable"),
+            }
+        _summary_edit(root, edit_summary)
+
+
+def make_app_bench_hash_mismatch_variant(root):
+    """An APP run whose recorded benchmark-exe hash no longer matches disk.
+
+    The benchmark binary is not on an app run's execution path, so the
+    benchmark-exe re-hash is informational: the run must still PASS with a
+    recorded skip/note, never a failure.
+    """
+    def edit(manifest):
+        manifest["provenance"]["benchmark_exe_sha256"] = \
+            hashlib.sha256(b"rebuilt benchmark binary").hexdigest()
+    _manifest_edit(root, edit)
 
 
 # ---- corrupted variants ----------------------------------------------------
@@ -7640,6 +9002,44 @@ def mutation_specs(root):
     specs.append(("R10 provenance: library hash absent",
                   provenance_lib_hash_missing))
 
+    def provenance_lib_hash_mismatch():
+        """A recorded loaded-library hash that no longer matches disk (APP run).
+
+        The library hash stays strict for EVERY run, so an app run with a
+        mismatched library hash must still FAIL (the scoping only relaxed the
+        benchmark-exe re-hash)."""
+        def edit(manifest):
+            manifest["provenance"]["libgnuradio_uwb_sha256"] = \
+                hashlib.sha256(b"rebuilt loaded library").hexdigest()
+        _manifest_edit(root, edit)
+    specs.append(("R10 provenance: library hash mismatched (app run)",
+                  provenance_lib_hash_mismatch))
+
+    def benchmark_exe_hash_mismatch():
+        """A declared BENCHMARK run whose benchmark-exe re-hash mismatches.
+
+        The benchmark summary declares itself benchmark output, so its
+        benchmark-exe re-hash stays strict and the mismatch must FAIL."""
+        path = os.path.join(root, "real_core", "gr_sic_summary.json")
+        data, _err = load_json(path)
+        data["provenance"]["benchmark_exe_sha256"] = \
+            hashlib.sha256(b"rebuilt benchmark binary").hexdigest()
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=1)
+    specs.append(("R10 provenance: benchmark-exe hash mismatched "
+                  "(benchmark run)", benchmark_exe_hash_mismatch))
+
+    def benchmark_lib_hash_mismatch():
+        """A declared BENCHMARK run whose library re-hash mismatches."""
+        path = os.path.join(root, "real_core", "gr_sic_summary.json")
+        data, _err = load_json(path)
+        data["provenance"]["libgnuradio_uwb_sha256"] = \
+            hashlib.sha256(b"rebuilt loaded library").hexdigest()
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=1)
+    specs.append(("R10 provenance: library hash mismatched (benchmark run)",
+                  benchmark_lib_hash_mismatch))
+
     def provenance_dirty_patch_missing():
         """A dirty tree with no dirty-patch identifier."""
         def edit(manifest):
@@ -7969,6 +9369,59 @@ def mutation_specs(root):
     specs.append(("S1-7 index report/artifact count mismatch",
                   s1_index_count_mismatch))
 
+    # ---- S1 clipped-region / archive-policy counterexamples ---------------
+    def s1_region_outside_sub_full_coverage():
+        """S1-4: the nominal eval/tail region extends outside the subtraction.
+
+        The subtraction is clipped (public ROI) but the eval/tail regions still
+        declare the full nominal repetition range and no covered fraction.
+        """
+        def edit(rows):
+            model = rows[0]["sic_model"]
+            clipped_hi = model["eval_lo"] + 4 * SYNC_SAMPLES_PER_SYMBOL
+            model["sub_hi"] = clipped_hi
+            model["apply"]["params"]["sub_hi"] = clipped_hi
+            rows[0]["regions"]["sub_hi"] = clipped_hi
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1-4 nominal eval/tail extends outside the subtraction while "
+                  "claiming full coverage", s1_region_outside_sub_full_coverage))
+
+    def s1_archive_policy_missing():
+        """S1-archive: a partial recon archive with no declared policy."""
+        make_partial_archive_variant(root, policy=False)
+    specs.append(("S1 archive policy missing for a partial archive",
+                  s1_archive_policy_missing))
+
+    def s1_archive_too_few():
+        """S1-archive: the policy archives fewer than 4 windows per case."""
+        make_partial_archive_variant(root, archived=(0, 1, 2))
+    specs.append(("S1 archive policy declares < 4 archived windows",
+                  s1_archive_too_few))
+
+    def s1_archive_metric_mismatch():
+        """S1-archive: a declared metric disagrees on an archived window."""
+        make_partial_archive_variant(root)
+
+        def edit(rows):
+            rows[0]["recon"]["eval_actual_suppression_db"] += 5.0
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1 archive policy: archived-window metric disagrees",
+                  s1_archive_metric_mismatch))
+
+    def s1_committed_window_lacks_model():
+        """S1: a run WITH committed windows still demands frozen-model evidence.
+
+        Only an all-bypass (zero-commit) run may skip the model-evidence family.
+        """
+        def edit(rows):
+            rows[0].pop("sic_model", None)
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1 committed window lacks the frozen SicModel",
+                  s1_committed_window_lacks_model))
+
     return specs
 
 
@@ -8013,6 +9466,61 @@ def self_test():
             return 1
         print("[PASS] SIC-off set PASSES: %d checks, 0 failures" % len(results))
 
+        print("== self-test: an all-bypass (zero-commit) run must SKIP the S1 "
+              "model evidence, not fail it ==")
+        zc_root = os.path.join(work, "zero_commit")
+        os.makedirs(zc_root)
+        build_good_set(zc_root)
+        make_zero_commit_variant(zc_root)
+        _QUIET = True
+        zc_bad = verify_results(results_dir_root(os.path.join(zc_root, "main")))
+        _QUIET = False
+        zc_model = [f for f in zc_bad
+                    if "S1 model evidence" in f[0]
+                    or "S1-1 strict-prefix" in f[0]
+                    or "S1-2 frozen-model" in f[0]
+                    or "S1-3 support semantics" in f[0]
+                    or "S1-4 regions" in f[0]]
+        if zc_model:
+            print("[FAIL] zero-commit run must skip the S1 model-evidence "
+                  "family -- got %s" % [f[0] for f in zc_model])
+            failures.append("zero-commit skips the S1 model evidence")
+        else:
+            print("[PASS] zero-commit run skips the S1 model-evidence family "
+                  "(other failures: %d)" % len(zc_bad))
+
+        print("== self-test: a declared partial archive policy must PASS ==")
+        pa_root = os.path.join(work, "partial_archive")
+        os.makedirs(pa_root)
+        build_good_set(pa_root)
+        make_partial_archive_variant(pa_root)
+        _QUIET = True
+        pa_bad = verify_results(results_dir_root(os.path.join(pa_root, "main")))
+        _QUIET = False
+        if pa_bad:
+            print("[FAIL] declared partial archive policy PASSES -- got %d "
+                  "failure(s): %s" % (len(pa_bad), [f[0] for f in pa_bad]))
+            failures.append("partial archive policy passes")
+        else:
+            print("[PASS] declared partial archive policy PASSES: 0 failures")
+
+        print("== self-test: an APP run with a mismatched benchmark-exe hash must "
+              "PASS (informational) ==")
+        ab_root = os.path.join(work, "app_bench_mismatch")
+        os.makedirs(ab_root)
+        build_good_set(ab_root)
+        make_app_bench_hash_mismatch_variant(ab_root)
+        _QUIET = True
+        ab_bad = verify_results(results_dir_root(os.path.join(ab_root, "main")))
+        _QUIET = False
+        if ab_bad:
+            print("[FAIL] app run with a mismatched benchmark-exe hash must PASS "
+                  "-- got %d failure(s): %s" % (len(ab_bad), [f[0] for f in ab_bad]))
+            failures.append("app bench-exe mismatch passes (informational)")
+        else:
+            print("[PASS] app run with a mismatched benchmark-exe hash PASSES "
+                  "(recorded informational skip, not a failure)")
+
         print("== self-test: each corrupted variant must FAIL ==")
         variant_dir = os.path.join(work, "variants")
         os.makedirs(variant_dir)
@@ -8039,6 +9547,7 @@ def self_test():
             else:
                 print("[FAIL] mutation '%s' was NOT caught" % name)
                 failures.append(name)
+        self_test_aggregate(work, failures)
         print("=" * 72)
         if failures:
             print("SELF-TEST FAILED: %s" % failures)
@@ -8053,6 +9562,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Independent verifier for the S0 SIC artifacts.")
     parser.add_argument("--results", help="directory holding the declared artifacts")
+    parser.add_argument("--verbose", action="store_true",
+                        help="print every check (aggregate roots print a "
+                             "compact per-child summary by default)")
     parser.add_argument("--self-test", action="store_true",
                         help="fabricate consistent + corrupted sets and assert the verdicts")
     args = parser.parse_args(argv)
@@ -8064,11 +9576,17 @@ def main(argv=None):
     if not os.path.isdir(args.results):
         sys.stderr.write("error: %s is not a directory\n" % args.results)
         return 2
-    failed = verify_results(args.results)
+    failed = verify_results(args.results, verbose=args.verbose)
     print("=" * 72)
     print("%d/%d checks pass" % (len(results) - len(failed), len(results)))
     if failed:
-        print("FAILED: " + ", ".join(f[0] for f in failed))
+        shown = failed[:10]
+        print("FAILED: %d check(s); first %d: %s"
+              % (len(failed), len(shown),
+                 " | ".join(f[0] for f in shown)))
+        if len(failed) > len(shown):
+            print("        ... and %d more failure(s)"
+                  % (len(failed) - len(shown)))
         return 1
     return 0
 

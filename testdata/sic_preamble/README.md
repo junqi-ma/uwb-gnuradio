@@ -113,17 +113,61 @@ rejected. Every preset first fixes its **calibration seed list** and
 Preset fields and types are declared in `config_schema.json`; the concrete
 values are in `cases/<preset>.json`.
 
-## Commands (post-implementation; not yet runnable)
+## Commands (S1 `estimate8_frozen`, actually runnable)
+
+All commands use `env -u LD_LIBRARY_PATH` and the `build-sic` tree; check with
+`ldd` that `libgnuradio-uwb` resolves under `gr-uwb/build-sic/lib`.
 
 ```bash
-# Generate fixtures for a case (truth sidecar written under fixtures/).
-python3 gr-uwb/apps/uwb_sim_preamble_sic.py --build-dir gr-uwb/build-sic \
-    --preset baseline --input-grid work --sic off --consumer both \
-    --windows 100 --output gr-uwb/build-sic/sic-results/baseline
+# 1. Nominal smoke: strict 8-SYNC estimation + full-preamble cancellation,
+#    real CIR + full sensing demod, acceptance seeds.
+env -u LD_LIBRARY_PATH python3 gr-uwb/apps/uwb_sim_preamble_sic.py \
+  --build-dir gr-uwb/build-sic --preset main --input-grid work \
+  --sic estimate --consumer both --windows 8 --fixtures 8 \
+  --seed-set acceptance --sic-model-mode estimate8_frozen \
+  --output gr-uwb/build-sic/sic-results/s1_smoke_nominal
 
-# No-simulation verifier over already-declared artifacts.
-python3 tools/sic/verify_s0.py --results gr-uwb/build-sic/sic-results
+# 2. Acceptance main matrix (72 cells x 100 windows), same model mode/config.
+env -u LD_LIBRARY_PATH python3 gr-uwb/apps/uwb_sim_preamble_sic.py \
+  --build-dir gr-uwb/build-sic --preset main --sweep --sic estimate \
+  --consumer both --windows 100 --seed-set acceptance \
+  --sic-model-mode estimate8_frozen \
+  --output gr-uwb/build-sic/sic-results/s1_accept_main
+
+# 3. Acceptance negatives (>=1000 windows per actionable category).
+env -u LD_LIBRARY_PATH python3 gr-uwb/apps/uwb_sim_preamble_sic.py \
+  --build-dir gr-uwb/build-sic --preset negative --sic estimate \
+  --consumer both --windows 1000 --seed-set acceptance \
+  --sic-model-mode estimate8_frozen \
+  --output gr-uwb/build-sic/sic-results/s1_accept_negative
+
+# 4. CG400 native nominal (same 8-SYNC mode).
+env -u LD_LIBRARY_PATH python3 gr-uwb/apps/uwb_sim_preamble_sic.py \
+  --build-dir gr-uwb/build-sic --preset main --input-grid cg400 \
+  --sic estimate --consumer both --windows 32 --seed-set acceptance \
+  --output gr-uwb/build-sic/sic-results/s1_native
+
+# 5. Pure-target asynchronous paced (100/s then 200/s, 60 s).
+env -u LD_LIBRARY_PATH python3 gr-uwb/apps/uwb_sim_preamble_sic.py \
+  --build-dir gr-uwb/build-sic --preset main --sic estimate \
+  --consumer cir --rate 100 --duration 60 --seed-set acceptance \
+  --paced-target-only \
+  --output gr-uwb/build-sic/sic-results/paced_s1_100
+
+# 6. Real-input effect-verified benchmark (core / GR / CIR / full demod).
+env -u LD_LIBRARY_PATH gr-uwb/build-sic/apps/benchmark_preamble_sic \
+  --preset main --mode gr --consumer demod --model-mode estimate8_frozen \
+  --windows 10000 --rounds 3 --output gr-uwb/build-sic/sic-results/s1_perf_demod
+
+# 7. Independent verifier (S0 + S1 checks) over declared artifacts.
+python3 tools/sic/verify_s0.py --results gr-uwb/build-sic/sic-results/s1_smoke_nominal
+python3 tools/sic/verify_s0.py --self-test
 ```
+
+Legacy control only (NOT the S1 path): `--sic-model-mode confirmed_legacy` or
+`--sic-cover-preamble`; those restore the old confirmed-count support and must
+not be reported as the 8-SYNC result. `--sic-fit-reps` other than 8 is rejected
+in `estimate8_frozen`. `--sic-evaluation-reps` is offline-only (never gates).
 
 MATLAB export/verify scripts (`export_sic_preamble.m`, `verify_sic_preamble.m`)
 live in this directory; if no MATLAB/Octave is present they are kept runnable

@@ -649,6 +649,7 @@ class SicSignalGenerator:
                  comm_present: bool = False,
                  build_comm: Optional[bool] = None,
                  frac_model: str = "pchip",
+                 overlap_tail_guard: int = 0,
                  verbose: bool = True):
         self.uwb = uwb
         self.rate = float(rate)
@@ -666,6 +667,13 @@ class SicSignalGenerator:
         self.snr_db = None if snr_db is None else float(snr_db)
         self.isr_db = None if isr_db is None else float(isr_db)
         self.frac_model = frac_model
+        # S1: the public start-jitter budget.  The comm preamble may start up to
+        # this many work samples AFTER the nominal plan origin, so the sensing
+        # SYNC span that defines the truth overlap is extended by it.  The
+        # interference is physically present in the extension (the comm preamble
+        # continues past the sensing SYNC span), so this widens the measured
+        # overlap, it does not invent one.  Default 0 = the frozen S0 span.
+        self.overlap_tail_guard = max(0, int(overlap_tail_guard))
         if sensing_paths is None:
             sensing_paths = [[0, [1.0, 0.0]], [37, [0.25, 0.0]]]
         self.sensing_paths = PathSpec.from_pairs(sensing_paths)
@@ -834,9 +842,15 @@ class SicSignalGenerator:
 
     # -- signal ------------------------------------------------------------
     def sensing_overlap_span(self) -> Tuple[int, int]:
-        """Nominal clean-sensing SYNC span [lo, hi) on the window grid."""
+        """Nominal clean-sensing SYNC span [lo, hi) on the window grid.
+
+        Extended by ``overlap_tail_guard`` (the public start-jitter budget) so a
+        comm preamble that starts up to that many samples after the nominal plan
+        origin still has its full nominal 64-SYNC span inside the measured truth
+        overlap.  ``overlap_tail_guard == 0`` reproduces the frozen S0 span.
+        """
         lo = self.pre
-        hi = self.pre + self.sync_reps * SPS
+        hi = self.pre + self.sync_reps * SPS + int(self.overlap_tail_guard)
         return lo, min(hi, self.n)
 
     def build(self, *, seed: int, comm_paths: Optional[Sequence] = None,
@@ -972,6 +986,7 @@ class SicSignalGenerator:
                            "gain": [p.gain.real, p.gain.imag]}
                           for p in self.sensing_paths],
                 "sync_origin": self.pre,
+                "overlap_tail_guard": int(self.overlap_tail_guard),
                 "geometry": dict(self.geom),
             },
             "noise_std": noise_std,

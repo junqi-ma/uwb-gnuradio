@@ -171,6 +171,13 @@ class ResultSink(gr.basic_block):
         self.latest = None
         self.retained = []
         self.dropped_iq = 0
+        # `_handle` runs on the GNU Radio message thread while the driver polls
+        # `count` and reads `latest` from the main thread.  `count` and `latest`
+        # MUST advance together: publishing `count` before `latest` let a waiter
+        # observe the new count while `latest` still held the PREVIOUS window's
+        # dict (a stale bypass read that is not bit-identical to its own y).
+        # The lock + snapshot() make the pair atomic.
+        self._lock = threading.Lock()
 
     def _handle(self, msg):
         t_ns = time.monotonic_ns()
@@ -189,13 +196,20 @@ class ResultSink(gr.basic_block):
                 d["__s16"] = np.array(pmt.s16vector_elements(payload),
                                       dtype=np.int16)
             d["__t_ns"] = t_ns
-        self.count += 1
-        if len(self.retained) < self.keep_iq:
-            self.retained.append(d)
-        elif self.keep_iq == 0 or self.count > self.keep_iq:
-            self.dropped_iq += 1
-        # Replace the previous "latest" so its IQ array is released.
-        self.latest = d
+        with self._lock:
+            self.count += 1
+            if len(self.retained) < self.keep_iq:
+                self.retained.append(d)
+            elif self.keep_iq == 0 or self.count > self.keep_iq:
+                self.dropped_iq += 1
+            # Replace the previous "latest" so its IQ array is released.  Set
+            # under the same lock as `count` so a snapshot is self-consistent.
+            self.latest = d
+
+    def snapshot(self):
+        """Atomically read ``(count, latest)`` as one consistent pair."""
+        with self._lock:
+            return self.count, self.latest
 
 
 DEMOD_STAGES = [
@@ -389,6 +403,21 @@ def changed_support(y, y_clean, lo, hi):
     return lo + int(idx[0]), lo + int(idx[-1]) + 1
 
 
+def iq_bit_identical(a, b):
+    """True iff two IQ arrays are byte-for-byte identical.
+
+    This is the SINGLE source of truth for "did the SIC change the output".
+    It is an exact CF32 byte comparison, so a NaN/Inf at the SAME position in
+    both arrays is *identical* (unlike ``np.array_equal``, which reports any
+    NaN as unequal).  ``bypass_bit_identical`` and ``recon.output_changed``
+    both derive from this one predicate, so the metric can never claim a change
+    that did not happen (and vice versa).
+    """
+    aa = np.ascontiguousarray(a, dtype=np.complex64)
+    bb = np.ascontiguousarray(b, dtype=np.complex64)
+    return bool(aa.shape == bb.shape and aa.tobytes() == bb.tobytes())
+
+
 def region_metric(i_true, i_hat, lo, hi):
     """``(nmse, suppression_db, lo, hi)`` over [lo,hi) plus a zero-energy flag.
 
@@ -484,7 +513,8 @@ def extract_adapter_model(out_meta):
 
 def build_sic_model_block(fields, sources, *, mode, fit_reps, sps, sync_reps,
                           sample_rate, post_tail, sensing_roi, overlap,
-                          eval_lo, eval_hi, tail_lo, tail_hi, sample_count):
+                          eval_lo, eval_hi, tail_lo, tail_hi, sample_count,
+                          visibility_guard=0, training_window_available=True):
     """Assemble the per-window ``sic_model`` block from real adapter evidence.
 
     Only values the adapter actually published (or unambiguous public-profile
@@ -572,27 +602,23 @@ def build_sic_model_block(fields, sources, *, mode, fit_reps, sps, sync_reps,
                           if mode == S1_MODEL_MODE else S1_SUPPORT_SOURCE_LEGACY)
         src["support_source"] = "app_mode_%s" % mode
 
-    # Strict 8-SYNC requires the declared visibility limit to equal the training
-    # end and the estimation to be ready at that same sample.  When the adapter
-    # publishes the visibility limit, verify it instead of assuming it.
+    # S1-1: the visibility prefix is the PUBLIC plan prefix.  The guard is the
+    # actual slack between the training end and that prefix (0 when the training
+    # span reaches it).  ``strict_8sync`` is claimed ONLY when the public
+    # start-jitter budget is zero, i.e. the caller declared no guard at all; a
+    # nonzero budget is reported as a guarded (non-strict) mode, never silently
+    # called strict.
     obs_end = fields.get("observed_end_sample")
     ready = fields.get("estimation_ready_sample")
-    guard_pre = fields.get("guard_pre")
-    guard_post = fields.get("guard_post")
-    if not isinstance(guard_pre, int) or isinstance(guard_pre, bool):
-        guard_pre = 0
-    if not isinstance(guard_post, int) or isinstance(guard_post, bool):
-        guard_post = (max(0, int(obs_end) - int(training_hi))
-                      if isinstance(obs_end, int) and not isinstance(obs_end, bool)
-                      else 0)
+    guard_pre = 0
+    if isinstance(obs_end, int) and not isinstance(obs_end, bool):
+        guard_post = max(0, int(obs_end) - int(training_hi))
         src["guard_post"] = "derived_observed_end_minus_training_hi"
-    strict = fields.get("strict_8sync")
-    if not isinstance(strict, bool):
-        strict = bool(mode == S1_MODEL_MODE
-                      and isinstance(obs_end, int) and not isinstance(obs_end, bool)
-                      and int(obs_end) == int(training_hi)
-                      and int(guard_pre) == 0 and int(guard_post) == 0)
-        src["strict_8sync"] = "derived_from_adapter_visibility"
+    else:
+        guard_post = 0
+    strict = bool(mode == S1_MODEL_MODE and int(visibility_guard) == 0)
+    src["strict_8sync"] = "derived_from_visibility_guard=%d" % int(
+        visibility_guard)
 
     block = {
         "mode": mode,
@@ -618,6 +644,12 @@ def build_sic_model_block(fields, sources, *, mode, fit_reps, sps, sync_reps,
         "tail_hi": int(tail_hi),
         "strict_8sync": bool(strict),
         "guard": {"pre": int(guard_pre), "post": int(guard_post)},
+        # S1-1: the public start-jitter budget and whether this window's 8-SYNC
+        # training span was actually visible under it.  A window whose detected
+        # origin + fit_reps*sps exceeds the public prefix is reported
+        # training_window_unavailable (partial), never silently claimed strict.
+        "visibility_guard": int(visibility_guard),
+        "training_window_unavailable": (not bool(training_window_available)),
         "evidence_sources": {k: v for k, v in src.items() if v},
     }
     # Adapter model_id is a u64; the verifier requires a stable non-empty string.
@@ -658,11 +690,22 @@ def build_sic_model_block(fields, sources, *, mode, fit_reps, sps, sync_reps,
     else:
         block["status"] = "committed" if block.get("support_hi") else "unavailable"
         src["status"] = "derived_from_state"
-    # Visibility / readiness are only published fields (never invented).
+    # Visibility / readiness are only published fields (never invented).  S1-1:
+    # ``estimation_ready_sample`` is the sample at which the whole PUBLIC
+    # visibility prefix has been consumed, so it is at least the prefix end; it
+    # is never reported as ready before the prefix the estimation was allowed to
+    # read.  For the zero-guard case this is exactly the training end (the S1 API
+    # identity estimation_ready_sample == training_hi).
     if isinstance(obs_end, int) and not isinstance(obs_end, bool):
         block["observed_end_sample"] = int(obs_end)
     if isinstance(ready, int) and not isinstance(ready, bool):
-        block["estimation_ready_sample"] = int(ready)
+        block["estimation_ready_sample"] = int(
+            max(int(ready), int(obs_end))
+            if isinstance(obs_end, int) and not isinstance(obs_end, bool)
+            else int(ready))
+        if isinstance(obs_end, int) and not isinstance(obs_end, bool) \
+                and int(ready) < int(obs_end):
+            src["estimation_ready_sample"] = "max(adapter_ready,observed_end)"
     # Report explicitly which per-path fields the adapter did not publish.
     block["missing_fields"] = [n for n in ("tau", "gain")
                                if fields.get(n) is None]
@@ -1032,6 +1075,31 @@ def resolve_s1_config(args, *, sync_reps, preset_fit_reps, preset_validation_rep
         "cover_alias": cover_alias,
         "fit_source": fit_source,
     }
+
+
+def default_visibility_guard(preset, runtime, sps, preset_name):
+    """The declared public start-jitter budget for the visibility prefix (S1-1).
+
+    The comm preamble may start anywhere in the preset's declared start-offset
+    axis/cases.  A start offset of at least one SYNC symbol is a *period* shift
+    (the detector locks onto a later repetition, handled by the detection ROI),
+    not a visibility-guard case, so only offsets strictly inside one SYNC symbol
+    (``< sps``) contribute.  The default is the smallest integer that covers the
+    largest positive such offset; 0 when the preset declares none.
+    """
+    offsets = []
+    axis = (preset.get("generator", {}) or {}).get("start_offset_work_axis")
+    if isinstance(axis, (list, tuple)):
+        offsets.extend(float(v) for v in axis)
+    for case in ((preset.get("generator", {}) or {}).get("cases") or []):
+        if isinstance(case, dict) and case.get("start_offset_work") is not None:
+            offsets.extend([float(case["start_offset_work"])])
+    if runtime.get("start_offset_work") is not None:
+        offsets.extend([float(runtime["start_offset_work"])])
+    positive = [o for o in offsets if 0.0 < o < float(sps)]
+    if not positive:
+        return 0
+    return int(math.ceil(max(positive)))
 
 
 def check_seed_separation(cal_tuples, accept_windows, *, run_seeds):
@@ -2112,24 +2180,41 @@ class SimRuntime:
         return (self.sink_sic_out.count, self.sink_sic_ihat.count)
 
     def wait_sic(self, n_out, n_ihat, deadline_s=120.0):
+        """Wait for the ``n_out``-th / ``n_ihat``-th SIC PDUs.
+
+        Returns ``(out_meta, ihat_meta)`` on success or ``None`` on timeout.
+        Both dicts are read through ``ResultSink.snapshot()`` so the returned
+        meta is the one whose count satisfied the wait -- never a stale
+        previous-window dict (which is what broke bypass bit-identity).
+        """
         t0 = time.time()
         while time.time() - t0 < deadline_s:
-            o, h = self.sic_counts()
+            o, out_meta = self.sink_sic_out.snapshot()
+            h, ihat_meta = self.sink_sic_ihat.snapshot()
             if o >= n_out and h >= n_ihat:
-                return True
+                return out_meta, ihat_meta
             time.sleep(0.002)
-        return False
+        return None
 
     def wait_for(self, n_cir, n_demod, deadline_s=120.0):
+        """Wait for the ``n_cir``-th / ``n_demod``-th consumer PDUs.
+
+        Returns ``(cir_meta, demod_meta)`` on success (each ``None`` when that
+        consumer is not part of this run) or ``None`` on timeout.  Reads through
+        ``ResultSink.snapshot()`` for the same reason as ``wait_sic``.
+        """
         t0 = time.time()
         while time.time() - t0 < deadline_s:
-            c, dd = self.counts()
+            c, cir_meta = (self.sink_cir.snapshot()
+                           if self.sink_cir is not None else (0, None))
+            dd, demod_meta = (self.sink_demod.snapshot()
+                              if self.sink_demod is not None else (0, None))
             ok_c = (not self.want_cir) or c >= n_cir
             ok_d = (not self.want_demod) or dd >= n_demod
             if ok_c and ok_d:
-                return True
+                return cir_meta, demod_meta
             time.sleep(0.002)
-        return False
+        return None
 
 
 class NativeFrontEnd:
@@ -2207,14 +2292,13 @@ class NativeFrontEnd:
             pmt.intern("packet"), pmt.cons(self._meta(n_in, wid), vec))
         t_post = (time.perf_counter() - t_post0) * 1e6
         t0 = time.time()
-        while time.time() - t0 < deadline_s:
-            if self.sink.count >= n_out:
-                break
+        cnt, d = self.sink.snapshot()
+        while cnt < n_out and time.time() - t0 < deadline_s:
             time.sleep(0.0005)
-        if self.sink.count < n_out:
+            cnt, d = self.sink.snapshot()
+        if cnt < n_out:
             raise SystemExit("native resampler did not emit window %d "
                              "(in=%d)" % (wid, n_in))
-        d = self.sink.latest
         wf = np.ascontiguousarray(d.get("__c32", np.zeros(0, np.complex64)),
                                   dtype=np.complex64)
         stats = {
@@ -2698,6 +2782,7 @@ def build_child_argv(args, output, isr=None, offset=None, cfo=None,
             "--seed-set", seed_set or args.seed_set,
             "--interference", args.interference,
             "--fixtures", str(args.fixtures),
+            "--archive-windows", str(int(args.archive_windows)),
             "--sic-detect-threshold", str(args.sic_detect_threshold),
             "--sic-validate-threshold", str(args.sic_validate_threshold),
             "--sic-in-flight-max", str(args.sic_in_flight_max),
@@ -2734,6 +2819,9 @@ def build_child_argv(args, output, isr=None, offset=None, cfo=None,
                  str(int(args.sic_online_validation_reps))]
     if getattr(args, "sic_evaluation_reps", None) is not None:
         argv += ["--sic-evaluation-reps", str(int(args.sic_evaluation_reps))]
+    if getattr(args, "sic_visibility_guard", None) is not None:
+        argv += ["--sic-visibility-guard",
+                 str(int(args.sic_visibility_guard))]
     return argv
 
 
@@ -2971,15 +3059,16 @@ def run_r01_regression(args, repo, argv):
 
 
 def _sic_once(rt, meta, iq):
-    """Post one window and return its terminal out_meta (blocking)."""
+    """Post one window and return its terminal ``(out_meta, ihat_meta)``."""
     n_out = rt.sink_sic_out.count + 1
     n_ih = rt.sink_sic_ihat.count + 1
     rt.post_sic_input(meta, iq)
-    if not rt.wait_sic(n_out, n_ih, deadline_s=180.0):
+    res = rt.wait_sic(n_out, n_ih, deadline_s=180.0)
+    if res is None:
         raise SystemExit("R06 data-dependency: SIC did not terminate "
                          "(out=%r i_hat=%r)" % (rt.sic_counts(),
                                                 rt.sic_counts()))
-    return rt.sink_sic_out.latest, rt.sink_sic_ihat.latest
+    return res
 
 
 def run_r06_data_dep(args, repo, argv):
@@ -3320,6 +3409,20 @@ def main(argv=None):
                     choices=["auto", "on", "off"])
     ap.add_argument("--fixtures", type=int, default=4,
                     help="number of windows dumped as npz+truth sidecars")
+    ap.add_argument("--archive-windows", type=int, default=8,
+                    help="S1-5: number of windows whose recon/ arrays "
+                         "(y/y_clean/i/i_hat/cir) are archived so the actual "
+                         "suppression is independently recomputable; default 8 "
+                         "per cell/case (never all windows).  Independent of "
+                         "--fixtures.")
+    ap.add_argument("--sic-visibility-guard", type=int, default=None,
+                    help="S1-1: public start-jitter budget (work samples) by "
+                         "which the estimation visibility prefix and the truth "
+                         "overlap are extended.  Default = ceil of the preset's "
+                         "max positive start offset inside one SYNC symbol "
+                         "(8 for the main preset).  Only used by the S1 "
+                         "estimate8_frozen estimate mode; 0 restores the strict "
+                         "8-SYNC (no guard) declaration.")
     ap.add_argument("--case", default=None,
                     help="negative/main sub-case id (default: nominal)")
     ap.add_argument("--sic-fit-reps", type=int, default=None,
@@ -3633,6 +3736,31 @@ def main(argv=None):
         fit_source = None
         cover_preamble = False
 
+    # ---- S1-1: public start-jitter (visibility) budget ----------------------
+    # The comm preamble may start up to `visibility_guard` work samples AFTER the
+    # nominal plan origin (a *public* budget, never the injected start).  It
+    # widens (a) the estimation visibility prefix so the full 8-SYNC training
+    # span is visible for any in-budget start, (b) the detection ROI lower bound
+    # so a comm starting before the nominal origin is still detected at its own
+    # first repetition, and (c) the sensing processing ROI / truth overlap so the
+    # nominal 64-SYNC support stays fully cancellable.  Only the S1
+    # estimate8_frozen estimate mode uses it; 0 restores the strict no-guard
+    # declaration.
+    visibility_guard = 0
+    if sic_on and args.sic == "estimate" and model_mode == S1_MODEL_MODE:
+        if args.sic_visibility_guard is not None:
+            visibility_guard = max(0, int(args.sic_visibility_guard))
+        else:
+            visibility_guard = default_visibility_guard(preset, runtime, S.SPS,
+                                                        args.preset)
+        generator.overlap_tail_guard = int(visibility_guard)
+    nominal_origin = int(generator.pre)
+    # Estimation visibility prefix end (public): covers the 8-SYNC training span
+    # of any start offset in [0, visibility_guard].
+    observed_end_public = int(min(
+        generator.n, nominal_origin + int(visibility_guard)
+        + int(fit_reps) * S.SPS)) if sic_on else None
+
     # Public candidate search ROI for the comm preamble.  The online SIC only
     # knows this window (plus the comm code/template/rate) -- never the true
     # injected start.  `nominal` is the sensing SYNC span; `narrow`/`wide` are
@@ -3649,7 +3777,12 @@ def main(argv=None):
     else:
         roi_mode = "nominal"
         roi_pair = roi_base
-    search_roi = (int(roi_pair[0]), int(roi_pair[1]))
+    # S1-1: extend the detection ROI lower bound by the public start-jitter
+    # budget so a comm that starts before the nominal plan origin is detected at
+    # its own first repetition (the core's period-ambiguity walk-back is bounded
+    # by roi_lo).  The upper bound is unchanged.
+    search_roi = (int(max(0, int(roi_pair[0]) - int(visibility_guard))),
+                  int(roi_pair[1]))
     if sic_on and not (0 <= search_roi[0] < search_roi[1] <= generator.n):
         raise SystemExit("resolved SIC search roi %r is outside the window "
                          "[0,%d)" % (search_roi, generator.n))
@@ -3677,8 +3810,14 @@ def main(argv=None):
     # entirely outside the sensing processing window is real but not actionable
     # and is bypassed (out == y) -- S0 §8.3 requires that a no-overlap case is
     # never counted as a cancellation success.  Passed per-window in the SIC PDU
-    # meta (`sensing_roi_lo`/`sensing_roi_hi`).
-    sensing_roi = (int(roi_base[0]), int(roi_base[1]))
+    # meta (`sensing_roi_lo`/`sensing_roi_hi`).  S1-1: the upper bound is
+    # extended by the public start-jitter budget so the nominal 64-SYNC support
+    # of a comm starting up to `visibility_guard` late stays inside the applied
+    # subtraction (and the independent-eval / tail regions are actually
+    # cancelled, never silently left uncancelled).
+    sensing_roi = (int(roi_base[0]),
+                   int(min(generator.n,
+                           int(roi_base[1]) + int(visibility_guard))))
     if sic_on and not (0 <= sensing_roi[0] < sensing_roi[1] <= generator.n):
         raise SystemExit("resolved sensing processing roi %r is outside the "
                          "window [0,%d)" % (sensing_roi, generator.n))
@@ -3827,6 +3966,12 @@ def main(argv=None):
                                    else int(online_validation_reps)),
         "evaluation_reps": (None if not sic_on else int(evaluation_reps)),
         "fit_residual_max": (None if not sic_on else 0.8),
+        # S1-1: the public start-jitter budget and the resulting estimation
+        # visibility prefix end (window-constant public plan quantity).
+        "sic_visibility_guard": (None if not sic_on
+                                 else int(visibility_guard)),
+        "observed_end_public": (None if not sic_on
+                                else int(observed_end_public)),
         "fit_len": (None if not sic_on else int(fit_reps) * S.SPS),
         "estimation_len": (None if not sic_on else int(fit_reps) * S.SPS),
         "online_validation_len": (None if not sic_on
@@ -3875,6 +4020,11 @@ def main(argv=None):
         "online_validation_reps": (None if not sic_on
                                    else int(online_validation_reps)),
         "evaluation_reps": (None if not sic_on else int(evaluation_reps)),
+        "sic_visibility_guard": (None if not sic_on
+                                 else int(visibility_guard)),
+        "observed_end_public": (None if not sic_on
+                                else int(observed_end_public)),
+        "archive_windows": int(args.archive_windows),
         "search_roi": [int(search_roi[0]), int(search_roi[1])],
         "subtraction_roi": ([int(subtraction_roi[0]),
                              int(subtraction_roi[1])] if sic_on else None),
@@ -4135,10 +4285,9 @@ def main(argv=None):
         paced_pool_us_each = ((time.perf_counter() - tp0) * 1e6 /
                               max(1, pool_n))
         paced_pool_n = pool_n
-        observed_end_base = (
-            int(min(generator.n, int(search_roi[0]) + int(fit_reps) * S.SPS))
-            if (model_mode == S1_MODEL_MODE and args.sic == "estimate")
-            else None)
+        observed_end_base = (int(observed_end_public)
+                             if (model_mode == S1_MODEL_MODE
+                                 and args.sic == "estimate") else None)
         paced_meta_base = paced_input_meta_base(
             sensing_code=sensing_code, sync_reps=sync_reps,
             sensing_roi=sensing_roi,
@@ -4298,6 +4447,7 @@ def main(argv=None):
     clean_psdu_match = 0
     clean_demod_ran = 0
     first_windows = []
+    archived_ids = []
     det_check = None
 
     n_posted_cir = 0
@@ -4497,20 +4647,29 @@ def main(argv=None):
                               "sync_template_code%d_998p4" % sensing_code)
             # R10: sensing processing ROI (subtraction/commit region).  The core
             # only commits when the detected comm support overlaps this window.
-            in_meta = put_int(in_meta, "sensing_roi_lo", int(sensing_roi[0]))
-            in_meta = put_int(in_meta, "sensing_roi_hi", int(sensing_roi[1]))
+            # The native grid shifts every coordinate by the 65/32 round-trip
+            # lag, so the ROI is mapped into the same domain the SIC sees.
+            coord_shift = int(work_shift)
+            sensing_roi_win = (int(sensing_roi[0]) + coord_shift,
+                               int(min(generator.n,
+                                       int(sensing_roi[1]) + coord_shift)))
+            in_meta = put_int(in_meta, "sensing_roi_lo",
+                              int(sensing_roi_win[0]))
+            in_meta = put_int(in_meta, "sensing_roi_hi",
+                              int(sensing_roi_win[1]))
             # S1-1 strict-prefix VISIBILITY: declare the estimation prefix from
-            # the PUBLIC plan only (candidate ROI start + fit_reps SYNC + the
-            # template/post tail), never from the injected comm start.  The
-            # nominal cell places the comm at the ROI start, so
-            # observed_end == training_hi == estimation_ready_sample there; a
-            # later-starting comm simply sees a clipped training span and is
-            # reported as such.  confirmed_legacy keeps whole-window visibility
-            # (observed_end = 0), the explicit S0 contract.
+            # the PUBLIC plan only (nominal plan origin + the public start-jitter
+            # budget + fit_reps SYNC), never from the injected comm start.  It
+            # covers the full 8-SYNC training span for any start offset in
+            # [0, visibility_guard].  A comm detected beyond that budget sees a
+            # clipped training span and is reported partial /
+            # training_window_unavailable, never silently claimed strict.
+            # confirmed_legacy keeps whole-window visibility (observed_end = 0),
+            # the explicit S0 contract.
+            observed_end = None
             if model_mode == S1_MODEL_MODE and args.sic == "estimate":
-                observed_end = int(min(
-                    generator.n,
-                    int(search_roi[0]) + int(fit_reps) * S.SPS))
+                observed_end = int(min(generator.n,
+                                       int(observed_end_public) + coord_shift))
                 in_meta = put_int(in_meta, "observed_end_sample", observed_end)
             in_meta = pmt.dict_add(in_meta, pmt.intern("planned_publish_ns"),
                                    pmt.from_long(int(planned_ns)))
@@ -4552,12 +4711,12 @@ def main(argv=None):
             win_submit_ns = time.monotonic_ns()
             if paced and win_planned_ns is not None:
                 paced_submit_late_ns.append(win_submit_ns - win_planned_ns)
-            if not rt.wait_sic(n_out, n_ih, deadline_s=180.0):
+            res = rt.wait_sic(n_out, n_ih, deadline_s=180.0)
+            if res is None:
                 raise SystemExit("SIC adapter did not terminate window_id=%d "
                                  "(out=%r i_hat=%r)" % (wid, rt.sic_counts(),
                                                         rt.sic_counts()))
-            out_meta = rt.sink_sic_out.latest
-            ihat_meta = rt.sink_sic_ihat.latest
+            out_meta, ihat_meta = res
             # Terminal reached: capture the credit state, then release.
             sic_credit_snap = credit.snapshot(planned_ns)
             credit.release(int(raw_iq.size) * 8)
@@ -4566,9 +4725,13 @@ def main(argv=None):
             ihat = np.ascontiguousarray(
                 ihat_meta.get("__c32", np.zeros_like(raw_iq)),
                 dtype=np.complex64)
+            # SINGLE bit-identity predicate: the same whole-window CF32 byte
+            # comparison feeds both the bypass counter and recon.output_changed,
+            # so the two can never disagree.
+            output_bit_identical = iq_bit_identical(raw_iq, cleaned_iq)
             if not bool(dget(out_meta, "sic_committed", False)):
                 bypass_n += 1
-                if np.array_equal(cleaned_iq, raw_iq):
+                if output_bit_identical:
                     bypass_identical += 1
             t_worker_us.append(float(dnum(out_meta, "core_total_us", 0.0) or 0.0))
             _teval0 = time.perf_counter()
@@ -4586,6 +4749,11 @@ def main(argv=None):
                 "cfo_hz": dnum(out_meta, "sic_cfo_hz", 0.0),
                 "support_lo": dnum(out_meta, "sic_support_lo", -1),
                 "support_hi": dnum(out_meta, "sic_support_hi", -1),
+                # S1-4: the ACTUALLY APPLIED subtraction (the frozen model's
+                # permitted cancellation range), used to declare the covered
+                # fraction of the eval/tail regions.
+                "sub_lo": dnum(out_meta, "sic_sub_lo", -1),
+                "sub_hi": dnum(out_meta, "sic_sub_hi", -1),
                 # R10 actionable overlap of the detected support with the sensing
                 # processing ROI (the subtraction/commit gate).
                 "sub_overlap": dnum(out_meta, "sic_sub_overlap", -1),
@@ -4637,6 +4805,20 @@ def main(argv=None):
             tail_hi = max(tail_lo, min(n_win, tail_hi))
             eval_available = bool(ev_hi > ev_lo)
             tail_available = bool(tail_hi > tail_lo)
+            # S1-1: the full 8-SYNC training span is visible only when it ends
+            # at/before the PUBLIC estimation prefix.  A detected origin beyond
+            # the public start-jitter budget is reported
+            # partial/training_window_unavailable -- never silently claimed
+            # strict 8-SYNC.
+            training_window_unavailable = bool(
+                observed_end is not None and est_hi > int(observed_end))
+            training_window_available = not training_window_unavailable
+            sic_state_rec["training_window_unavailable"] = bool(
+                training_window_unavailable)
+            if training_window_unavailable:
+                # A clipped training span is reported partial (the S1-1
+                # unavailable case), never silently claimed strict 8-SYNC.
+                sic_state_rec["partial"] = True
 
             # Explicit public-template repetition scan (R02 signal evidence).
             # `--timing-instrumentation off` skips this Python-loop-heavy scan
@@ -4712,14 +4894,37 @@ def main(argv=None):
             # ---- S1-05 actual-output metrics over the INDEPENDENT evaluation
             # and the tail-4-SYNC regions (truth-defined; recomputed from
             # delta_actual = y - y_clean with the frozen N/A rule).  Only the S1
-            # formal mode reports these.
+            # formal mode reports these.  The metric is taken over the region's
+            # COVERED intersection with the applied subtraction and the truth
+            # overlap; the covered fraction is recorded so an under-covered
+            # (clipped) region is declared instead of silently measuring less.
+            sub_lo_m = int(sic_state_rec.get("sub_lo", -1) or -1)
+            sub_hi_m = int(sic_state_rec.get("sub_hi", -1) or -1)
+
+            def _covered(lo, hi):
+                c_lo = max(int(lo), int(comm_lo))
+                c_hi = min(int(hi), int(comm_hi))
+                if sub_hi_m > sub_lo_m >= 0:
+                    c_lo = max(c_lo, sub_lo_m)
+                    c_hi = min(c_hi, sub_hi_m)
+                return int(c_lo), int(c_hi)
+
+            ev_cov_lo, ev_cov_hi = _covered(ev_lo, ev_hi)
+            tail_cov_lo, tail_cov_hi = _covered(tail_lo, tail_hi)
+            eval_covered_frac = ((ev_cov_hi - ev_cov_lo) / float(ev_hi - ev_lo)
+                                 if ev_hi > ev_lo else 0.0)
+            tail_covered_frac = ((tail_cov_hi - tail_cov_lo)
+                                 / float(tail_hi - tail_lo)
+                                 if tail_hi > tail_lo else 0.0)
             eval_act = tail_act = None
-            if model_mode == S1_MODEL_MODE and eval_available:
+            if model_mode == S1_MODEL_MODE and eval_available \
+                    and ev_cov_hi > ev_cov_lo:
                 eval_act = actual_cancellation(raw_iq, cleaned_iq, i_metric,
-                                               ev_lo, ev_hi)
-            if model_mode == S1_MODEL_MODE and tail_available:
+                                               ev_cov_lo, ev_cov_hi)
+            if model_mode == S1_MODEL_MODE and tail_available \
+                    and tail_cov_hi > tail_cov_lo:
                 tail_act = actual_cancellation(raw_iq, cleaned_iq, i_metric,
-                                               tail_lo, tail_hi)
+                                               tail_cov_lo, tail_cov_hi)
             # ---- S1-1/S1-2 frozen-model evidence (from the adapter's own meta,
             # never from the injected truth).
             model_fields, model_sources = extract_adapter_model(out_meta)
@@ -4731,7 +4936,9 @@ def main(argv=None):
                 overlap=(int(comm_lo), int(comm_hi)),
                 eval_lo=int(ev_lo), eval_hi=int(ev_hi),
                 tail_lo=int(tail_lo), tail_hi=int(tail_hi),
-                sample_count=int(n_win))
+                sample_count=int(n_win),
+                visibility_guard=int(visibility_guard),
+                training_window_available=bool(training_window_available))
             if model_ev is None:
                 model_error = (
                     "adapter published no usable frozen-model evidence; missing "
@@ -4787,8 +4994,12 @@ def main(argv=None):
                 "subtraction_roi_overlap_clipped": [int(sub_lo), int(sub_hi)],
                 "core_roi": [int(core_roi[0]), int(core_roi[1])],
                 # R10: the sensing processing ROI (subtraction/commit region),
-                # and the actionable overlap the core actually measured.
-                "sensing_roi": [int(sensing_roi[0]), int(sensing_roi[1])],
+                # and the actionable overlap the core actually measured.  The
+                # native grid reports it in the SIC's own (lag-shifted) domain.
+                "sensing_roi": [int(sensing_roi_win[0]),
+                                int(sensing_roi_win[1])],
+                "sensing_roi_work_grid": [int(sensing_roi[0]),
+                                          int(sensing_roi[1])],
                 "sensing_roi_overlap": int(
                     sic_state_rec.get("sub_overlap", -1)),
                 "gate_lo": int(est_lo if online_validation_reps == 0
@@ -4827,9 +5038,31 @@ def main(argv=None):
                     "estimation_ready_sample"),
                 "coverage_overlap": float(coverage),
                 "coverage_signal": float(sig_cov),
-                "partial": bool(rtot < sync_reps),
+                "partial": bool(rtot < sync_reps
+                                or training_window_unavailable),
                 "observation_reps": int(rtot),
                 "sync_reps": int(sync_reps),
+                # S1-1: the public start-jitter budget and whether this window's
+                # 8-SYNC training span was visible under it.
+                "visibility_guard": int(visibility_guard),
+                "training_window_available": bool(training_window_available),
+                "training_window_unavailable": bool(training_window_unavailable),
+                "training_window_limitation": (
+                    None if training_window_available else
+                    "detected origin + fit_reps*sps (%d) exceeds the public "
+                    "estimation prefix (%s); the 8-SYNC training span is clipped "
+                    "-- reported partial, never claimed strict"
+                    % (int(est_hi), observed_end)),
+                # S1-4: the covered fraction of the nominal eval/tail regions
+                # inside the applied subtraction and the truth overlap, and the
+                # explicit clipping flag (never let the tail metric silently miss
+                # samples the comm support legitimately extends over).
+                "eval_covered_frac": float(eval_covered_frac),
+                "tail_covered_frac": float(tail_covered_frac),
+                "eval_covered": [int(ev_cov_lo), int(ev_cov_hi)],
+                "tail_covered": [int(tail_cov_lo), int(tail_cov_hi)],
+                "cancellation_clipped": bool(eval_covered_frac < 1.0
+                                             or tail_covered_frac < 1.0),
                 "data_dependency": {
                     "estimation_region": (
                         "strict visible-prefix training window only (CFO / CIR / "
@@ -4891,8 +5124,7 @@ def main(argv=None):
                 "coverage_signal": float(sig_cov),
                 "uses_truth": bool(uses_truth),
                 "actual_na": (True if act is None else bool(act["na"])),
-                "output_changed": (False if act is None
-                                   else bool(act["output_changed"])),
+                "output_changed": (not output_bit_identical),
                 "confirmed_lo": int(c_lo),
                 "confirmed_hi": int(c_hi),
                 "actual_nmse_confirmed": (None if act_c is None
@@ -4907,8 +5139,10 @@ def main(argv=None):
                     else eval_act["actual_suppression_db"]),
                 "eval_actual_na": (True if eval_act is None
                                    else bool(eval_act["na"])),
-                "eval_actual_lo": (int(ev_lo) if eval_available else None),
-                "eval_actual_hi": (int(ev_hi) if eval_available else None),
+                "eval_actual_lo": (int(ev_cov_lo) if eval_available else None),
+                "eval_actual_hi": (int(ev_cov_hi) if eval_available else None),
+                "eval_covered_frac": float(eval_covered_frac),
+                "eval_covered_clipped": bool(eval_covered_frac < 1.0),
                 "tail_actual_nmse": (None if tail_act is None
                                      else tail_act["actual_nmse"]),
                 "tail_actual_suppression_db": (
@@ -4916,8 +5150,10 @@ def main(argv=None):
                     else tail_act["actual_suppression_db"]),
                 "tail_actual_na": (True if tail_act is None
                                    else bool(tail_act["na"])),
-                "tail_actual_lo": (int(tail_lo) if tail_available else None),
-                "tail_actual_hi": (int(tail_hi) if tail_available else None),
+                "tail_actual_lo": (int(tail_cov_lo) if tail_available else None),
+                "tail_actual_hi": (int(tail_cov_hi) if tail_available else None),
+                "tail_covered_frac": float(tail_covered_frac),
+                "tail_covered_clipped": bool(tail_covered_frac < 1.0),
                 "noise_included": False,
                 "note": ("nmse/suppression_db are the i-based reconstruction "
                          "over the INDEPENDENT final-eval region (reps beyond "
@@ -4973,7 +5209,8 @@ def main(argv=None):
                         if act_c is not None and not act_c["na"]:
                             eff_actual_sup_confirmed.append(
                                 act_c["actual_suppression_db"])
-                    if not sic_state_rec["committed"] and act["output_changed"]:
+                    if (not sic_state_rec["committed"]
+                            and not output_bit_identical):
                         n_uncommitted_changed += 1
                 # S1-1/S1-2 model-evidence accounting.
                 if model_ev is None:
@@ -5071,8 +5308,8 @@ def main(argv=None):
             if rt.want_demod:
                 rt.post_demod(meta_dem, sig)
                 n_posted_demod += 1
-            ok = rt.wait_for(n_posted_cir, n_posted_demod, deadline_s=180.0)
-            if not ok:
+            res_c = rt.wait_for(n_posted_cir, n_posted_demod, deadline_s=180.0)
+            if res_c is None:
                 deadline_miss += 1
                 raise SystemExit(
                     "consumer results did not arrive (window=%d consumer=%s "
@@ -5081,9 +5318,9 @@ def main(argv=None):
                                           rt.sink_demod else -1))
             c_ns = time.monotonic_ns()
             completions[cname] = c_ns
-
-            cir_d = rt.sink_cir.latest if rt.want_cir else {}
-            dem_d = (rt.sink_demod.latest if rt.want_demod else {})
+            cir_d, dem_d = res_c
+            cir_d = cir_d if rt.want_cir else {}
+            dem_d = dem_d if rt.want_demod else {}
 
             cir_status = dget(cir_d, "status") if rt.want_cir else None
             cir_peak = dnum(cir_d, "peak_tap") if rt.want_cir else None
@@ -5533,32 +5770,39 @@ def main(argv=None):
                                                   dtype=np.complex64),
                     roundtrip_lag_work=np.int64(work_shift),
                     iq_scale=np.float64(native_rec["iq_scale"]))
-            if sic_on and cleaned_iq is not None:
-                recon_dir = os.path.join(args.output, "recon")
-                os.makedirs(recon_dir, exist_ok=True)
-                recon_arrays = dict(
-                    # Native: the reference is the REALIZED interference under
-                    # the identical common-scale/filtering convention (R08), so
-                    # the verifier recomputes on exactly the metric reference.
-                    i=(i_metric if native else win["i"]).astype(np.complex64),
-                    i_hat=np.ascontiguousarray(ihat, dtype=np.complex64),
-                    # R01: the raw SIC input `y` and the actual SIC output
-                    # `y_clean`, so the verifier can recompute delta_actual and
-                    # never synthesize the output from a declared mask.
-                    y=np.ascontiguousarray(raw_iq, dtype=np.complex64),
-                    y_clean=np.ascontiguousarray(cleaned_iq,
-                                                 dtype=np.complex64))
-                # R04: raw (non-normalized) complex CIRs of the same window.
-                if clean_cir_raw_win is not None:
-                    recon_arrays["cir_raw_clean"] = np.ascontiguousarray(
-                        clean_cir_raw_win, dtype=np.complex64)
-                if sic_cir_raw_win is not None:
-                    recon_arrays["cir_raw_sic"] = np.ascontiguousarray(
-                        sic_cir_raw_win, dtype=np.complex64)
-                np.savez_compressed(
-                    os.path.join(recon_dir, "window_%d.npz" % wid),
-                    **recon_arrays)
             first_windows.append(wid)
+        # S1-5 archive policy: archive the recon/ arrays for the first
+        # ``--archive-windows`` windows of the cell/case so the actual
+        # suppression is independently recomputable for a representative set
+        # WITHOUT dumping every window (7200 windows ~ 36 GB).  Independent of
+        # ``--fixtures`` (which keeps the generator-side truth sidecars).
+        if sic_on and cleaned_iq is not None and not timed_target_only \
+                and wid < int(args.archive_windows):
+            recon_dir = os.path.join(args.output, "recon")
+            os.makedirs(recon_dir, exist_ok=True)
+            recon_arrays = dict(
+                # Native: the reference is the REALIZED interference under
+                # the identical common-scale/filtering convention (R08), so
+                # the verifier recomputes on exactly the metric reference.
+                i=(i_metric if native else win["i"]).astype(np.complex64),
+                i_hat=np.ascontiguousarray(ihat, dtype=np.complex64),
+                # R01: the raw SIC input `y` and the actual SIC output
+                # `y_clean`, so the verifier can recompute delta_actual and
+                # never synthesize the output from a declared mask.
+                y=np.ascontiguousarray(raw_iq, dtype=np.complex64),
+                y_clean=np.ascontiguousarray(cleaned_iq,
+                                             dtype=np.complex64))
+            # R04: raw (non-normalized) complex CIRs of the same window.
+            if clean_cir_raw_win is not None:
+                recon_arrays["cir_raw_clean"] = np.ascontiguousarray(
+                    clean_cir_raw_win, dtype=np.complex64)
+            if sic_cir_raw_win is not None:
+                recon_arrays["cir_raw_sic"] = np.ascontiguousarray(
+                    sic_cir_raw_win, dtype=np.complex64)
+            np.savez_compressed(
+                os.path.join(recon_dir, "window_%d.npz" % wid),
+                **recon_arrays)
+            archived_ids.append(int(wid))
         if wid < 2:
             print("window %d/%d seed=%d gen_us=%.1f isr=%s overlap=%s "
                   "clean=%s raw=%s" % (
@@ -5957,6 +6201,9 @@ def main(argv=None):
         }
         summary["sic"]["fit_reps"] = int(fit_reps)
         summary["sic"]["model_mode"] = model_mode
+        summary["sic"]["visibility_guard"] = int(visibility_guard)
+        summary["sic"]["strict_8sync_declared"] = bool(
+            model_mode == S1_MODEL_MODE and int(visibility_guard) == 0)
         summary["sic"]["support_mode"] = s1cfg["support_mode"]
         summary["sic"]["online_validation_reps"] = int(online_validation_reps)
         summary["sic"]["evaluation_reps"] = int(evaluation_reps)
@@ -6051,6 +6298,23 @@ def main(argv=None):
             "inflight_high_watermark": int(credit.inflight_high_watermark),
             "pending_bytes_peak": int(credit.pending_bytes_peak),
             "window_bytes": int(generator.n * 8),
+        }
+        # S1-5: the recon/ archive policy.  A representative prefix of each
+        # cell/case is archived so the actual suppression is independently
+        # recomputable, without dumping every window.
+        summary["sic"]["archive_policy"] = {
+            "per_cell": int(args.archive_windows),
+            "archived_ids": sorted(int(v) for v in archived_ids),
+            "n_archived": int(len(archived_ids)),
+            "total_windows": int(completed_windows),
+            "fixtures_per_run": int(args.fixtures),
+            "note": ("recon/window_<id>.npz holds y/y_clean/i/i_hat (+ raw CIR) "
+                     "for the first `per_cell` windows of this cell/case so the "
+                     "actual suppression is independently recomputable; the "
+                     "remaining windows are covered by the per-window declared "
+                     "metrics but not archived (full archive would be ~36 GB for "
+                     "the 72x100 matrix).  --archive-windows controls this; "
+                     "--fixtures controls the generator-side truth sidecars."),
         }
     summary["demod"] = {
         "clean_ok": int(clean_ok), "raw_ok": int(raw_ok),
