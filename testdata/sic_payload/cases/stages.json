@@ -1,0 +1,50 @@
+{
+  "schema": "sic-s2b-cases/1",
+  "note": "Staged S2-B matrix (design contract §7). Windows/NOT formal unless the report marks them frozen. B2 formal 1000/cell is OPEN when only the reduced exploratory set was run.",
+  "seed_sets": {
+    "calibration": {"base": 21000000, "substreams": {"noise": 0, "payload": 100000, "jitter": 200000, "path": 300000}},
+    "acceptance": {"base": 22000000, "substreams": {"noise": 0, "payload": 100000, "jitter": 200000, "path": 300000}}
+  },
+  "frozen": {
+    "comm_code": 10, "sensing_code": 9, "sync_reps": 64, "sfd_mode": "4z2",
+    "psdu_bytes": 96, "pulse_shape": "legacy",
+    "sic": {"mode": "estimate", "model_mode": "estimate8_frozen", "support_mode": "configured_nominal",
+            "fit_reps": 8, "online_validation_reps": 0, "k_paths": 4, "post_tail": 100,
+            "coarse_stride": 2, "detect_threshold": 0.40, "validate_threshold": 0.25},
+    "snr_db_reference": "comm payload region [payload_lo, payload_hi)",
+    "isr_db_reference": "true overlap = i-support ∩ comm payload region",
+    "comm_cfo_hz": 0.0
+  },
+  "phases": {
+    "b0": {
+      "purpose": "design + no-interference clean closure",
+      "windows": [8, 100],
+      "cells": [{"id": "b0_clean", "interferer": "off", "position": "center", "snr_db": 30}]
+    },
+    "b1": {
+      "purpose": "nominal paired recovery",
+      "windows": 100,
+      "cells": [{"id": "b1_center_isr10_snr30", "position": "center", "isr_db": 10, "snr_db": 30, "cfo_hz": 0, "paths": "single"}]
+    },
+    "b2": {
+      "purpose": "PER waterfall; calibration SNR scan then 5 frozen points",
+      "formal_windows_per_cell": 1000,
+      "exploratory_windows_per_cell": 100,
+      "snr_points_exploratory": [12, 15, 18, 22, 30],
+      "isr_points": [0, 10, 20],
+      "position": "center", "cfo_hz": 0, "paths": "single"
+    },
+    "b3": {
+      "purpose": "boundary / difficult conditions",
+      "formal_windows_per_cell": 500,
+      "cells_positions": [{"position": "early", "isr_db": 10, "snr_db": 30}, {"position": "late", "isr_db": 10, "snr_db": 30}],
+      "cells_cfo_paths": [{"cfo_hz": -50000, "paths": "single"}, {"cfo_hz": 50000, "paths": "single"}, {"cfo_hz": -50000, "paths": "four"}, {"cfo_hz": 50000, "paths": "four"}],
+      "snr_db": 30, "isr_db": 10, "position": "center"
+    },
+    "b4": {
+      "purpose": "negatives; false commit <= 1%; bypass bit-identical",
+      "windows": 1000,
+      "cells": [{"id": "no_sensing", "interferer": "off"}, {"id": "wrong_code11", "interferer": "wrong_code", "wrong_code": 11}, {"id": "no_overlap", "position": "no_overlap"}]
+    }
+  }
+}
