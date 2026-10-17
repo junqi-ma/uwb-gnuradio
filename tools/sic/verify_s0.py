@@ -207,6 +207,53 @@ R10 turns the anti-shortcut requirements into fail-closed checks:
 Percentiles are recomputed with numpy's default (``linear``) interpolation;
 the generator must use the same convention for the summary to cross-check.
 
+S1 (strict 8-SYNC estimation, frozen model, full-preamble cancellation)
+-----------------------------------------------------------------------
+The S1 order adds checks 1-7 in ``check_s1``.  They fail closed and are kept
+separate from the S0 checks:
+
+1. **Strict-prefix evidence.**  Every committed window carries a ``sic_model``
+   block with ``observed_end_sample``, ``training_lo/hi``,
+   ``estimation_ready_sample`` and an ``estimation_ranges`` mapping
+   (``training``/``cfo``/``cir``); every declared estimation input range must
+   end before ``observed_end_sample``.  A strict 8-SYNC claim requires
+   ``fit_reps == 8``, ``observed_end_sample == training_hi`` and an explicitly
+   declared (zero) guard.
+2. **Frozen model.**  A stable ``model_id`` + ``fingerprint`` and every frozen
+   parameter (origin, cfo, tau[], gain[], n_paths, support, sub, phase
+   reference) are required, and the ``apply`` step must reference the same
+   identity and mirror the same parameters with ``refit_count == 0`` and no
+   parameter delta.  Mutating one frozen parameter after estimation is caught
+   by the estimation/apply comparison.
+3. **Support semantics.**  ``support_source`` must be the configured-nominal
+   prediction and ``support == [origin-pre_tail, origin+sync_reps*sps+
+   post_tail)``; a support returned as ``confirmed*sps`` (the old 8-SYNC clip)
+   fails, and ``support_coverage`` is recomputed against the truth overlap.
+4. **Regions.**  Training [0,8) SYNC, independent evaluation [8,64) SYNC and
+   the last-4-SYNC tail must be explicit and disjoint from training; the
+   evaluation and tail regions must BOTH be inside the applied subtraction
+   (an un-cancelled evaluation region fails) and the gate must not use eval
+   data.
+5. **Actual effect.**  The suppression is recomputed from ``y``/``y_clean``/
+   ``i`` as ``i - (y - y_clean)`` over the truth overlap, the independent
+   evaluation region and the tail region; the three per-window metrics and the
+   three summary medians/counts are required (a reconstruction-NMSE-only
+   report fails) and the evaluation/tail regions must actually change.
+6. **Seeds.**  ``seed_lists.calibration``/``acceptance`` must be recorded and
+   disjoint; ``calibration_windows`` records the generated
+   ``(seed, seed_offset, noise_root)`` tuples, and no acceptance window may
+   reuse a calibration seed/tuple or another acceptance window's tuple.
+7. **Provenance/report.**  ``effective_config`` declares the S1 model mode,
+   ``fit_reps == 8``, ``evaluation_reps >= 8`` and ``online_validation_reps ==
+   0``; effect/core/GR/CIR/full-demod/native rows share that config hash, model
+   mode, template and input length; ``index.json`` references the actual latest
+   run and its declared window count matches the artifact.
+
+Canonical S1 field names are listed in the ``S1`` constants block; aliases are
+accepted for robustness.  A SIC-on run that declares no model mode is a FAIL,
+and an explicit ``legacy_cover``-style declaration is a SKIP that may not claim
+an S1 pass or report S1 region metrics.
+
 Exit status 0 iff every check passes; non-zero with a clear diff otherwise.
 """
 
@@ -301,11 +348,22 @@ CIR_CHILDREN = ("cir_estimate", "soft_fir", "postprocess")
 # producer tags them `demod_timing_child`); they are excluded from the
 # top-level demod sum so `total` is not inflated.
 TIMING_CHILDREN = ("timing_coarse", "timing_fine_track")
+# S1 §8 splits the SIC cost into acquisition / 8-SYNC estimation / model
+# preparation / backtrack of the first 8 SYNC / forward apply.  These names are
+# accepted alongside the S0 names so a strict-8-SYNC run can report the split
+# without being rejected as an unknown timer.  `core_total` remains the
+# authoritative SIC total; the children still sum to <= it.
+S1_SIC_STAGES = {
+    "acquisition", "acquire", "param_estimate", "parameter_estimate",
+    "estimate8", "estimate_8sync", "model_prepare", "model_prep",
+    "backtrack", "backtrack_cleanup", "retro_clean", "apply", "apply_model",
+    "apply_total", "num_ready",
+}
 SIC_STAGES = {
     "detect_coarse", "detect_fine", "cfo", "cir", "path_select",
     "fractional_refine", "matrix_build", "gain_fit", "reconstruct",
     "validate_commit", "core_total",
-}
+} | S1_SIC_STAGES
 # Top-level demod stages are the ones the demod `total` must cover; the
 # timing/SFD/CIR children and `total` itself are excluded so parents are never
 # double-counted.
@@ -403,18 +461,36 @@ def record(item, verdict, detail):
         print("[%s] %s\n         %s" % (verdict, item, detail))
 
 
-def fail(item, detail):
+def _split_detail(rest):
+    """Accept either (detail,) or (subject, detail) call shapes."""
+    if len(rest) == 1:
+        return rest[0], None
+    if len(rest) == 2:
+        return rest[1], rest[0]
+    raise TypeError("expected (item, detail) or (item, subject, detail)")
+
+
+def fail(item, *rest):
+    detail, subject = _split_detail(rest)
+    if subject is not None:
+        item = "%s: %s" % (item, subject)
     record(item, "FAIL", detail)
 
 
-def ok(item, detail):
+def ok(item, *rest):
+    detail, subject = _split_detail(rest)
+    if subject is not None:
+        item = "%s: %s" % (item, subject)
     if _OK_AGGREGATE is not None:
         _OK_AGGREGATE.setdefault(item, []).append(detail)
         return
     record(item, "PASS", detail)
 
 
-def skip(item, detail):
+def skip(item, *rest):
+    detail, subject = _split_detail(rest)
+    if subject is not None:
+        item = "%s: %s" % (item, subject)
     record(item, "SKIP", detail)
 
 
@@ -972,6 +1048,13 @@ def check_window_body(window, where, sic_mode, preset, grid):
         fail("%s: sic_k is 1/2/4/8/16" % where, "got %r" % (sic_k,))
     for key in ("fit_reps", "validation_reps"):
         value = window.get(key)
+        # S1 default: online_validation_reps == 0 (evaluation is offline and
+        # separate).  Zero is legal only when the window declares the S1 model
+        # mode and a separate independent-evaluation span >= 8 SYNC.
+        s1_zero = (key == "validation_reps" and is_int(value) and value == 0
+                   and isinstance(window.get("sic_model"), dict)
+                   and is_int(window.get("evaluation_reps"))
+                   and int(window["evaluation_reps"]) >= 8)
         if off:
             if value is None:
                 ok("%s: %s is null when SIC is off" % (where, key), "null")
@@ -980,11 +1063,18 @@ def check_window_body(window, where, sic_mode, preset, grid):
                      "got %r (rev 2 forbids a fake positive value)" % (value,))
         elif is_int(value) and value > 0:
             ok("%s: %s is a positive integer" % (where, key), str(value))
+        elif s1_zero:
+            ok("%s: validation_reps == 0 is the S1 online-validation default"
+               % where, "evaluation_reps=%r" % (window.get("evaluation_reps"),))
         else:
             fail("%s: %s is a positive integer" % (where, key),
                  "got %r" % (value,))
     if not off and is_int(window.get("validation_reps")) \
-            and window["validation_reps"] < 8:
+            and window["validation_reps"] < 8 \
+            and not (window["validation_reps"] == 0
+                     and isinstance(window.get("sic_model"), dict)
+                     and is_int(window.get("evaluation_reps"))
+                     and int(window["evaluation_reps"]) >= 8):
         fail("%s: validation_reps >= 8 when SIC is on" % where,
              str(window["validation_reps"]))
     roi = window.get("roi")
@@ -2979,6 +3069,11 @@ def check_effective_config(manifest, windows, summary, prefix):
         if val >= 8:
             ok("%s: effective validation_reps is >= 8" % item, "%s=%d"
                % (val_path, val))
+        elif _s1_zero_validation_ok(config):
+            ok("%s: effective validation_reps == 0 is the S1 default" % item,
+               "%s=0 with evaluation_reps=%r (S1 offline evaluation)"
+               % (val_path, _nested_lookup(config, ("evaluation_reps",
+                                                    "eval_reps"))[0]))
         else:
             fail("%s: effective validation_reps is >= 8" % item, "%s=%r"
                  % (val_path, val))
@@ -3165,7 +3260,19 @@ def _check_regions(window, where):
             fail("%s: declared fit length matches the estimation range" % where,
                  "fit_len=%r range=%d" % (explicit, est_hi - est_lo))
 
-    if on_lo is None:
+    online_zero = _s1_online_declared_zero(window)
+    if online_zero:
+        # S1 default: online_validation_reps == 0.  The gate then runs on the
+        # training/estimation region only (checked below), never on eval data.
+        if is_int(on_lo) and is_int(on_hi) and on_hi < on_lo:
+            fail("%s: zero-length online-validation range is well-formed"
+                 % where, "lo=%r hi=%r" % (on_lo, on_hi))
+        else:
+            online = None
+            ok("%s: online_validation_reps == 0 (S1 offline evaluation)" % where,
+               "online range %s" % ("absent" if on_lo is None
+                                    else "[%d,%d)" % (on_lo, on_hi)))
+    elif on_lo is None:
         fail("%s: online-validation region [lo,hi) is declared" % where,
              "could not read %s" % (on_path,))
     elif not (0 <= on_lo < on_hi):
@@ -3241,7 +3348,7 @@ def _check_regions(window, where):
 
 
 def _check_data_dependency(window, where, est, online, ev):
-    if est is None or ev is None or online is None:
+    if est is None or ev is None:
         return
     if _intervals_overlap(est, ev):
         fail("%s: estimation region is disjoint from the evaluation region"
@@ -3251,16 +3358,19 @@ def _check_data_dependency(window, where, est, online, ev):
     else:
         ok("%s: estimation region is disjoint from the evaluation region"
            % where, "%s vs %s" % (est, ev))
-    if _intervals_overlap(online, ev):
-        fail("%s: online-validation region is disjoint from the evaluation "
-             "region" % where,
-             "online=[%d,%d) evaluation=[%d,%d)" % (online[0], online[1],
-                                                    ev[0], ev[1]))
-    else:
-        ok("%s: online-validation region is disjoint from the evaluation region"
-           % where, "%s vs %s" % (online, ev))
+    if online is not None:
+        if _intervals_overlap(online, ev):
+            fail("%s: online-validation region is disjoint from the evaluation "
+                 "region" % where,
+                 "online=[%d,%d) evaluation=[%d,%d)" % (online[0], online[1],
+                                                        ev[0], ev[1]))
+        else:
+            ok("%s: online-validation region is disjoint from the evaluation "
+               "region" % where, "%s vs %s" % (online, ev))
 
-    # The gate region must be the online region, never the eval region.
+    # The gate region must be the online region, never the eval region.  When
+    # online_validation_reps == 0 (S1 default) the gate must be the training /
+    # estimation region instead.
     gate_lo, gate_lo_path = _region_lookup(window, GATE_LO_KEYS)
     gate_hi, _ = _region_lookup(window, GATE_HI_KEYS)
     gate = None
@@ -3270,17 +3380,20 @@ def _check_data_dependency(window, where, est, online, ev):
         fail("%s: commit-gate region is declared" % where,
              "could not read %s" % (gate_lo_path,))
     else:
+        target = online if online is not None else est
+        label = "online-validation" if online is not None \
+            else "training/estimation (online_validation_reps==0)"
         if _intervals_overlap(gate, ev):
             fail("%s: commit-gate region is disjoint from the evaluation region"
                  % where, "gate=[%d,%d) evaluation=[%d,%d)"
                  % (gate[0], gate[1], ev[0], ev[1]))
-        elif not _within(gate, online):
-            fail("%s: commit gate is computed on the online-validation region"
-                 % where, "gate=[%d,%d) online=[%d,%d)"
-                 % (gate[0], gate[1], online[0], online[1]))
+        elif not _within(gate, target):
+            fail("%s: commit gate is computed on the %s region" % (where, label),
+                 "gate=[%d,%d) target=[%d,%d)"
+                 % (gate[0], gate[1], target[0], target[1]))
         else:
-            ok("%s: commit gate is computed on the online-validation region"
-               % where, "gate=[%d,%d)" % gate)
+            ok("%s: commit gate is computed on the %s region" % (where, label),
+               "gate=[%d,%d)" % gate)
 
     keys, keys_path = _region_lookup(window, GATE_KEYS_KEYS)
     if not (isinstance(keys, (list, tuple)) and keys
@@ -4791,6 +4904,1472 @@ def check_benchmark_summaries(results_dir, index):
 
 
 # ---------------------------------------------------------------------------
+# S1: strict 8-SYNC estimation, frozen model, full-preamble cancellation
+# ---------------------------------------------------------------------------
+# The S1 order (docs/sic/OpenCode修改指示_S1_八符号估计与全前导消除_2026-10-17.md)
+# supersedes the S0 fit/validation/support coupling.  These checks fail closed:
+#
+# * every SIC-on run must declare its model mode; the only accepted formal mode
+#   is ``estimate8_frozen``;
+# * the model parameters are estimated from the first 8 SYNC only
+#   (``observed_end_sample``), frozen, and applied unchanged to the rest of the
+#   nominal 64-SYNC preamble;
+# * the cancellation support is the configured-nominal prediction
+#   ``origin + sync_reps*sps + post_tail``, never ``confirmed*sps``;
+# * training [0,8) SYNC, independent evaluation [8,64) SYNC and the last-4-SYNC
+#   tail are explicit, disjoint from training, and ALL OF THEM are cancelled;
+# * the actual-output suppression is recomputed from archived arrays over the
+#   full truth overlap, the independent-evaluation region and the tail region
+#   (``i - (y - y_clean)``), and the three reported medians are required;
+# * the formal acceptance windows use acceptance seeds whose generated
+#   (seed, seed_offset, noise_root) tuples are disjoint from the calibration
+#   windows;
+# * effect/core/GR/CIR/full-demod/native run one effective config and one model
+#   mode/hash set, and ``index.json`` points at the actual latest run.
+#
+# Canonical per-window field names (aliases accepted):
+#   window.sic_model{...}: mode, model_id, fingerprint, origin, cfo_hz,
+#     n_paths, tau[], gain[][], samples_per_symbol, nominal_sync_reps,
+#     training_lo/hi, observed_end_sample, estimation_ready_sample,
+#     estimation_ranges{training|cfo|cir:[lo,hi]}, guard{pre,post},
+#     strict_8sync, support_lo/hi, support_source, support_pre_tail,
+#     support_post_tail, support_coverage, sub_lo/hi, phase_reference,
+#     eval_lo/hi, tail_lo/hi, fit_reps, fit_residual, cond2, status,
+#     apply{model_id, fingerprint, params{...}, refit_count, param_deltas}
+#   window.generator{seed_set, seed, seed_offset, noise_root}
+#   window.recon.eval_actual_suppression_db,
+#   window.recon.tail_actual_suppression_db (plus actual_suppression_db)
+#   manifest.sic_model_mode, manifest.calibration_windows[],
+#   manifest.effective_config{sic_model_mode, evaluation_reps,
+#     online_validation_reps, fit_reps},
+#   manifest.implementation_configs{cir, full_demod, ...}
+#   summary.effect.median_eval_actual_suppression_db,
+#     median_tail_actual_suppression_db,
+#     n_eval_windows, n_eval_na_windows, n_tail_windows, n_tail_na_windows
+#   results-root index.json.latest_run
+
+S1_MODEL_MODE = "estimate8_frozen"
+# Comparisons use norm_text (lowercase, non-alphanumerics collapsed).
+S1_MODEL_MODE_NORM = "estimate8 frozen"
+S1_MODEL_MODES = {"estimate8 frozen"}
+S1_LEGACY_MODES = {"legacy cover", "legacy", "s0 cover", "cover validation",
+                   "legacy validated", "validated cover", "s0 8 of 52"}
+S1_MODEL_CONTAINERS = ("sic_model", "frozen_model", "model", "sic_model_block")
+S1_STATE_CONTAINERS = ("sic_model", "frozen_model", "model")
+S1_SUPPORT_SOURCES = {"configured nominal prediction",
+                      "configured nominal", "configured nominal predict",
+                      "nominal prediction"}
+S1_STRICT_FIT_REPS = 8
+S1_MIN_EVAL_REPS = 8
+S1_TAIL_REPS = 4
+S1_SUPPORT_COVERAGE = 0.99
+S1_CANCEL_FRACTION = 0.99
+S1_ACTUAL_TOL_DB = SUPPRESSION_TOL_DB
+S1_PARAM_TOL = 1e-9
+
+S1_EVAL_ACTUAL_KEYS = (
+    "eval_actual_suppression_db", "actual_suppression_db_eval",
+    "eval_actual_sup_db", "independent_eval_actual_suppression_db")
+S1_TAIL_ACTUAL_KEYS = (
+    "tail_actual_suppression_db", "actual_suppression_db_tail",
+    "tail_actual_sup_db", "tail4_actual_suppression_db")
+S1_EVAL_MEDIAN_KEYS = (
+    "median_eval_actual_suppression_db", "eval_median_actual_suppression_db",
+    "median_actual_suppression_db_eval", "eval_median_suppression_db")
+S1_TAIL_MEDIAN_KEYS = (
+    "median_tail_actual_suppression_db", "tail_median_actual_suppression_db",
+    "median_actual_suppression_db_tail", "tail_median_suppression_db")
+S1_EVAL_COUNT_KEYS = ("n_eval_windows", "eval_windows", "eval_window_count")
+S1_TAIL_COUNT_KEYS = ("n_tail_windows", "tail_windows", "tail_window_count")
+S1_EVAL_NA_KEYS = ("n_eval_na_windows", "eval_na_windows",
+                   "n_eval_not_applicable")
+S1_TAIL_NA_KEYS = ("n_tail_na_windows", "tail_na_windows",
+                   "n_tail_not_applicable")
+
+S1_LAYER_ALIASES = {
+    "effect": ("functional", "effect", "app", "python", "effect_path"),
+    "core": ("core", "cxx", "sic_core", "math_core"),
+    "gr": ("gr", "gnuradio", "flowgraph", "pipeline"),
+    "cir": ("cir", "sic_cir", "radar_cir", "cir_path"),
+    "full_demod": ("full_demod", "demod", "full_demodulation", "demod_path"),
+    "native": ("native", "cg400", "native_benchmark"),
+}
+S1_INDEX_FILES = ("index.json", "results_index.json")
+S1_SEED_CONTAINERS = ("generator", "input_gen", "generation", "seed_info")
+
+
+def _s1_online_declared_zero(window):
+    """Explicit online_validation_reps == 0 (the S1 default)."""
+    for value in (window.get("validation_reps"), window.get("online_validation_reps")):
+        if is_int(value) and value == 0:
+            return True
+    for container in ("regions", "region", "config", "sic_config", "sic"):
+        block = window.get(container)
+        if isinstance(block, dict):
+            for key in ("online_validation_reps", "validation_reps",
+                        "online_validation_len", "validation_len"):
+                value = block.get(key)
+                if is_int(value) and value == 0:
+                    return True
+    return False
+
+
+def _s1_zero_validation_ok(config):
+    """A zero online-validation config is legal under the S1 offline semantics."""
+    if not isinstance(config, dict):
+        return False
+    mode, _ = _nested_lookup(config, ("sic_model_mode", "model_mode",
+                                      "method_mode", "mode"))
+    eval_reps, _ = _nested_lookup(config, ("evaluation_reps", "eval_reps",
+                                           "independent_eval_reps"))
+    return is_nonempty_str(mode) and norm_text(mode) in S1_MODEL_MODES \
+        and is_int(eval_reps) and int(eval_reps) >= S1_MIN_EVAL_REPS
+
+
+def s1_model_of(window):
+    """The per-window frozen-model block (S1 canonical + aliases)."""
+    for name in S1_MODEL_CONTAINERS:
+        block = window.get(name)
+        if isinstance(block, dict):
+            return block, name
+    state = window.get("sic_state")
+    if isinstance(state, dict):
+        for name in S1_STATE_CONTAINERS:
+            block = state.get(name)
+            if isinstance(block, dict):
+                return block, "sic_state.%s" % name
+    return None, None
+
+
+def _s1_declared_mode(obj):
+    if not isinstance(obj, dict):
+        return None, None
+    value, key = _first_key(obj, ("sic_model_mode", "model_mode", "method_mode",
+                                  "estimate_mode", "model_method"))
+    if is_nonempty_str(value):
+        return norm_text(value), key
+    for sub in ("s1", "sic", "effective_config", "config", "provenance",
+                "method"):
+        block = obj.get(sub)
+        if isinstance(block, dict):
+            value, key = _first_key(block, ("sic_model_mode", "model_mode",
+                                            "method_mode", "estimate_mode"))
+            if is_nonempty_str(value):
+                return norm_text(value), "%s.%s" % (sub, key)
+    return None, None
+
+
+def s1_mode_of(manifest, summary):
+    for source, name in ((manifest, "run_manifest.json"),
+                         (summary, "summary.json")):
+        value, path = _s1_declared_mode(source)
+        if value is not None:
+            return value, "%s.%s" % (name, path)
+    return None, None
+
+
+def _s1_legacy_declared(manifest, summary):
+    for source, name in ((manifest, "run_manifest.json"),
+                         (summary, "summary.json")):
+        if not isinstance(source, dict):
+            continue
+        for key in ("legacy_model_mode", "legacy_method", "legacy"):
+            if source.get(key) is True:
+                return "%s.%s=true" % (name, key)
+        value, path = _s1_declared_mode(source)
+        if value is not None and value in S1_LEGACY_MODES:
+            return "%s.%s=%s" % (name, path, value)
+    return None
+
+
+def _s1_gain_pair(value):
+    if isinstance(value, (list, tuple)) and len(value) == 2 \
+            and all(is_num(v) for v in value):
+        return float(value[0]), float(value[1])
+    if isinstance(value, dict):
+        re = value.get("real", value.get("re"))
+        im = value.get("imag", value.get("im"))
+        if is_num(re) and is_num(im):
+            return float(re), float(im)
+    return None
+
+
+def _s1_num_equal(a, b, tol=S1_PARAM_TOL):
+    if not (is_num(a) and is_num(b)):
+        return False
+    fa, fb = float(a), float(b)
+    return abs(fa - fb) <= tol + tol * max(abs(fa), abs(fb))
+
+
+def _s1_vec_equal(a, b, pair=False):
+    if not (isinstance(a, (list, tuple)) and isinstance(b, (list, tuple))) \
+            or len(a) != len(b):
+        return False
+    for x, y in zip(a, b):
+        if pair:
+            px, py = _s1_gain_pair(x), _s1_gain_pair(y)
+            if px is None or py is None \
+                    or not _s1_num_equal(px[0], py[0]) \
+                    or not _s1_num_equal(px[1], py[1]):
+                return False
+        elif not _s1_num_equal(x, y):
+            return False
+    return True
+
+
+def _s1_estimation_ranges(model):
+    raw, path = _first_key(model, ("estimation_ranges", "estimation_inputs",
+                                   "estimation_input_ranges",
+                                   "estimation_visible_ranges"))
+    ranges = {}
+    if isinstance(raw, dict):
+        for name, value in raw.items():
+            pair = _int_pair(value)
+            if pair is not None:
+                ranges[norm_text(name)] = pair
+            else:
+                lo = value.get("lo") if isinstance(value, dict) else None
+                hi = value.get("hi") if isinstance(value, dict) else None
+                if is_int(lo) and is_int(hi):
+                    ranges[norm_text(name)] = (int(lo), int(hi))
+    elif isinstance(raw, list):
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name") or entry.get("range_name")
+            pair = _int_pair([entry.get("lo"), entry.get("hi")])
+            if pair is None:
+                pair = _int_pair(entry.get("range"))
+            if name and pair is not None:
+                ranges[norm_text(name)] = pair
+    return ranges, path
+
+
+def _s1_guard(model):
+    raw, path = _first_key(model, ("guard", "guard_samples",
+                                   "observation_guard"))
+    if isinstance(raw, dict):
+        pre = raw.get("pre", raw.get("pre_samples", 0))
+        post = raw.get("post", raw.get("post_samples", 0))
+        if is_int(pre) and is_int(post) and pre >= 0 and post >= 0:
+            return (int(pre), int(post)), path
+        return None, path
+    if is_int(raw) and raw >= 0:
+        return (0, int(raw)), path
+    return None, path
+
+
+def _s1_argument(model, keys):
+    return _first_key(model, keys)
+
+
+def _s1_layer_entry(layers, layer):
+    if not isinstance(layers, dict):
+        return None, None
+    for alias in S1_LAYER_ALIASES.get(layer, (layer,)):
+        if alias in layers and layers[alias] is not None:
+            return layers[alias], alias
+    return None, None
+
+
+def _s1_actual_metric(i, delta, lo, hi):
+    """-10log10(||i-(y-y_clean)||^2 / ||i||^2) over [lo,hi).
+
+    Returns (declared_value, n_samples, interference_energy).  A value of
+    ``None`` means N/A (zero interference energy).
+    """
+    ref = i[lo:hi]
+    residual = ref - delta[lo:hi]
+    den = float(np.vdot(ref, ref).real)
+    num = float(np.vdot(residual, residual).real)
+    if den <= 0.0:
+        return None, hi - lo, den
+    if num <= 0.0:
+        return 60.0, hi - lo, den
+    return -10.0 * math.log10(num / den), hi - lo, den
+
+
+def _s1_changed_fraction(y, y_clean, lo, hi):
+    span = hi - lo
+    if span <= 0:
+        return 0.0
+    changed = (y[lo:hi] != y_clean[lo:hi])
+    return float(np.count_nonzero(changed)) / float(span)
+
+
+def _s1_run_windows(windows):
+    return [w for w in windows
+            if isinstance(w.get("recon"), dict)
+            and isinstance(w.get("sic_state"), dict)
+            and w["sic_state"].get("committed") is True
+            and not w.get("diagnostic_only")]
+
+
+def _s1_parse_model(model, mpath, where):
+    """Read + validate the frozen-model evidence.  Returns a geometry dict."""
+    g = {}
+    simple = (
+        ("model_id", ("model_id", "id")),
+        ("fingerprint", ("fingerprint", "model_fingerprint", "model_sha256")),
+        ("origin", ("origin", "origin_integer", "detected_start")),
+        ("cfo_hz", ("cfo_hz", "cfo")),
+        ("n_paths", ("n_paths", "path_count")),
+        ("support_lo", ("support_lo", "support_start")),
+        ("support_hi", ("support_hi", "support_stop")),
+        ("support_source", ("support_source", "support_origin")),
+        ("support_pre_tail", ("support_pre_tail", "pre_tail",
+                              "support_lead_samples")),
+        ("support_post_tail", ("support_post_tail", "post_tail",
+                               "support_tail_samples")),
+        ("support_coverage", ("support_coverage", "nominal_support_coverage",
+                              "predicted_support_coverage")),
+        ("sub_lo", ("sub_lo", "subtraction_lo", "mask_lo")),
+        ("sub_hi", ("sub_hi", "subtraction_hi", "mask_hi")),
+        ("phase_reference", ("phase_reference", "phase_reference_sample",
+                             "n_ref")),
+        ("training_lo", ("training_lo", "training_start")),
+        ("training_hi", ("training_hi", "training_end")),
+        ("observed_end_sample", ("observed_end_sample", "observed_end",
+                                 "prefix_end_sample")),
+        ("estimation_ready_sample", ("estimation_ready_sample",
+                                     "estimation_ready",
+                                     "params_ready_sample")),
+        ("eval_lo", ("eval_lo", "evaluation_lo", "independent_eval_lo")),
+        ("eval_hi", ("eval_hi", "evaluation_hi", "independent_eval_hi")),
+        ("tail_lo", ("tail_lo", "tail_eval_lo", "last4_sync_lo")),
+        ("tail_hi", ("tail_hi", "tail_eval_hi", "last4_sync_hi")),
+        ("fit_reps", ("fit_reps", "training_reps")),
+        ("samples_per_symbol", ("samples_per_symbol", "sps")),
+        ("nominal_sync_reps", ("nominal_sync_reps", "sync_reps",
+                               "sensing_sync_reps")),
+        ("sample_rate", ("sample_rate",)),
+        ("strict_8sync", ("strict_8sync", "strict_8_sync", "strict")),
+        ("fit_residual", ("fit_residual", "residual")),
+        ("cond2", ("cond2", "condition_number")),
+        ("status", ("status", "model_status", "quality")),
+    )
+    for name, keys in simple:
+        value, key = _first_key(model, keys)
+        g[name] = value
+        g[name + "_path"] = ("%s.%s" % (mpath, key)) if key else mpath
+    tau, tau_key = _first_key(model, ("tau", "taus", "delays",
+                                      "delays_samples", "fractional_delay"))
+    gain, gain_key = _first_key(model, ("gain", "gains", "complex_gain"))
+    g["tau"], g["tau_path"] = tau, tau_key
+    g["gain"], g["gain_path"] = gain, gain_key
+    g["ranges"], g["ranges_path"] = _s1_estimation_ranges(model)
+    g["guard"], g["guard_path"] = _s1_guard(model)
+    g["apply"], g["apply_path"] = _s1_argument(
+        model, ("apply", "apply_model", "applied", "apply_state"))
+    return g
+
+
+def _s1_check_prefix(window, g, where, mode):
+    """S1-1: strict-prefix evidence (ranges must not read past observed_end)."""
+    item = "%s S1-1 strict-prefix evidence" % where
+    problems = []
+    for name in ("training_lo", "training_hi", "observed_end_sample",
+                 "estimation_ready_sample", "origin", "fit_reps",
+                 "samples_per_symbol", "nominal_sync_reps"):
+        if not is_int(g.get(name)):
+            problems.append("%s is an integer (%s=%r via %s)"
+                            % (name, name, g.get(name), g.get(name + "_path")))
+    for name in ("strict_8sync",):
+        if g.get(name) is not None and not isinstance(g.get(name), bool):
+            problems.append("strict_8sync is a boolean (got %r)"
+                            % (g.get(name),))
+    if problems:
+        for text in problems:
+            fail(item, text)
+        return False
+    origin = int(g["origin"])
+    sps = int(g["samples_per_symbol"])
+    sync_reps = int(g["nominal_sync_reps"])
+    fit_reps = int(g["fit_reps"])
+    strict = g["strict_8sync"] is True
+    if g["strict_8sync"] is None:
+        strict = (mode == S1_MODEL_MODE_NORM)
+    guard, guard_path = g["guard"], g["guard_path"]
+    if sps != SYNC_SAMPLES_PER_SYMBOL:
+        fail(item, "samples_per_symbol is the frozen work grid %d (got %d via %s)"
+             % (SYNC_SAMPLES_PER_SYMBOL, sps, g["samples_per_symbol_path"]))
+        return False
+    if is_num(g.get("sample_rate")) and float(g["sample_rate"]) != WORK_HZ:
+        fail(item, "the model coordinates are on the work grid (%r != %r)"
+             % (g["sample_rate"], WORK_HZ))
+    if fit_reps != S1_STRICT_FIT_REPS:
+        fail(item, "fit_reps is %d (the strict 8-SYNC training); got %d via %s"
+             % (S1_STRICT_FIT_REPS, fit_reps, g["fit_reps_path"]))
+    if window.get("fit_reps") is not None \
+            and is_int(window.get("fit_reps")) \
+            and int(window["fit_reps"]) != fit_reps:
+        fail(item, "window.fit_reps == model.fit_reps",
+             "window=%r model=%r" % (window.get("fit_reps"), fit_reps))
+    if guard is None:
+        fail(item, "the guard length is explicitly declared",
+             "no guard/guard_samples (0 is the strict 8-SYNC value); a hidden "
+             "guard cannot be audited via %s" % (guard_path,))
+    elif strict and (guard[0] or guard[1]):
+        fail(item, "strict 8-SYNC declares a zero guard",
+             "guard pre=%d post=%d via %s (report a guarded mode instead of "
+             "calling it strict)" % (guard[0], guard[1], guard_path))
+    if int(g["training_lo"]) != origin:
+        fail(item, "training starts at repetition 0 (training_lo == origin)",
+             "training_lo=%d origin=%d" % (g["training_lo"], origin))
+    if int(g["training_hi"]) - int(g["training_lo"]) \
+            != S1_STRICT_FIT_REPS * sps:
+        fail(item, "training covers exactly the first 8 SYNC",
+             "[%d,%d) span=%d != %d"
+             % (g["training_lo"], g["training_hi"],
+                int(g["training_hi"]) - int(g["training_lo"]),
+                S1_STRICT_FIT_REPS * sps))
+    observed_end = int(g["observed_end_sample"])
+    training_hi = int(g["training_hi"])
+    if strict and observed_end != training_hi:
+        fail(item, "strict 8-SYNC observed_end_sample == training_hi",
+             "observed_end=%d training_hi=%d (a strict claim cannot read a "
+             "guard)" % (observed_end, training_hi))
+    if guard is not None and not strict:
+        if observed_end < training_hi + guard[0] + guard[1]:
+            fail(item, "observed_end_sample covers the declared guard",
+                 "observed_end=%d training_hi=%d guard=(%d,%d)"
+                 % (observed_end, training_hi, guard[0], guard[1]))
+    sample_count = window.get("sample_count")
+    if is_int(sample_count) and not (0 < observed_end <= sample_count):
+        fail(item, "observed_end_sample lies inside the window",
+             "observed_end=%d sample_count=%d" % (observed_end, sample_count))
+    ready = int(g["estimation_ready_sample"])
+    if ready < observed_end:
+        fail(item, "estimation_ready_sample >= observed_end_sample",
+             "ready=%d observed_end=%d" % (ready, observed_end))
+    if is_int(sample_count) and ready > sample_count:
+        fail(item, "estimation_ready_sample lies inside the window",
+             "ready=%d sample_count=%d" % (ready, sample_count))
+
+    ranges, ranges_path = g["ranges"], g["ranges_path"]
+    if not ranges:
+        fail(item, "the estimation input ranges are declared",
+             "no estimation_ranges mapping/list via %s" % (ranges_path,))
+        return False
+    required = {"training": ("training", "fit", "ls"),
+                "cfo": ("cfo",),
+                "cir": ("cir", "paths", "path_estimate", "cir_fit")}
+    for label, aliases in required.items():
+        if not any(alias in ranges for alias in aliases):
+            fail(item, "the %s estimation input range is declared" % label,
+                 "declared=%s via %s" % (sorted(ranges), ranges_path))
+    worst_hi = None
+    for name, (lo, hi) in sorted(ranges.items()):
+        if not (0 <= lo < hi):
+            fail(item, "estimation range %r is a non-empty [lo,hi)" % name,
+                 "[%d,%d)" % (lo, hi))
+            continue
+        worst_hi = hi if worst_hi is None else max(worst_hi, hi)
+        if hi > observed_end:
+            fail(item, "estimation input %r stays before observed_end_sample"
+                 % name,
+                 "range=[%d,%d) observed_end=%d (reads %d sample(s) past the "
+                 "declared visible prefix)" % (lo, hi, observed_end,
+                                               hi - observed_end))
+    if worst_hi is not None and ready < worst_hi:
+        fail(item, "estimation_ready_sample >= every estimation range",
+             "ready=%d max_range_hi=%d" % (ready, worst_hi))
+    g["strict"] = strict
+    return True
+
+
+def _s1_check_frozen(window, g, where):
+    """S1-2: frozen model identity + every frozen parameter + apply used it."""
+    item = "%s S1-2 frozen-model evidence" % where
+    model, mpath = s1_model_of(window)
+    ok_so_far = True
+    if not is_nonempty_str(g.get("model_id")):
+        fail(item, "model_id is a non-empty string (got %r via %s)"
+             % (g.get("model_id"), g["model_id_path"]))
+        ok_so_far = False
+    if not is_hex64(g.get("fingerprint")):
+        fail(item, "fingerprint is a 64-char sha256 (got %r via %s)"
+             % (g.get("fingerprint"), g["fingerprint_path"]))
+        ok_so_far = False
+    for name in ("origin", "n_paths", "support_lo", "support_hi", "sub_lo",
+                 "sub_hi", "phase_reference"):
+        if not is_int(g.get(name)):
+            fail(item, "%s is an integer (got %r via %s)"
+                 % (name, g.get(name), g.get(name + "_path")))
+            ok_so_far = False
+    if not is_num(g.get("cfo_hz")):
+        fail(item, "cfo_hz is a finite number (got %r via %s)"
+             % (g.get("cfo_hz"), g["cfo_hz_path"]))
+        ok_so_far = False
+    n_paths = g.get("n_paths")
+    if is_int(n_paths) and 1 <= int(n_paths) <= 16:
+        tau, gain = g.get("tau"), g.get("gain")
+        if not (isinstance(tau, list) and len(tau) == int(n_paths)
+                and all(is_num(v) for v in tau)):
+            fail(item, "tau[] carries one fractional delay per path",
+                 "n_paths=%d tau=%r" % (n_paths, tau))
+            ok_so_far = False
+        if not (isinstance(gain, list) and len(gain) == int(n_paths)
+                and all(_s1_gain_pair(v) is not None for v in gain)):
+            fail(item, "gain[] carries one complex gain per path",
+                 "n_paths=%d gain=%r" % (n_paths, gain))
+            ok_so_far = False
+    elif is_int(n_paths):
+        fail(item, "n_paths is in [1,16]", "got %d" % n_paths)
+        ok_so_far = False
+    for name in ("fit_residual", "cond2"):
+        value = g.get(name)
+        if not is_num(value) or (name == "cond2" and float(value) <= 0.0) \
+                or (name == "fit_residual" and float(value) < 0.0):
+            fail(item, "%s is a valid admission quantity (got %r via %s)"
+                 % (name, value, g.get(name + "_path")))
+            ok_so_far = False
+    if not is_nonempty_str(g.get("status")):
+        fail(item, "status/quality is a non-empty string (got %r)"
+             % (g.get("status"),))
+        ok_so_far = False
+
+    apply, apath = g["apply"], g["apply_path"]
+    if not isinstance(apply, dict):
+        fail(item, "the apply step declares the frozen model it used",
+             "no apply block via %s (S1 requires estimate/applied evidence)"
+             % (apath,))
+        return ok_so_far
+    if apply.get("model_id") != g.get("model_id"):
+        fail(item, "apply.model_id == the estimation model_id",
+             "apply=%r model=%r" % (apply.get("model_id"), g.get("model_id")))
+        ok_so_far = False
+    fp = apply.get("fingerprint", apply.get("model_fingerprint"))
+    if fp != g.get("fingerprint"):
+        fail(item, "apply.fingerprint == the frozen estimation fingerprint",
+             "apply=%r model=%r" % (fp, g.get("fingerprint")))
+        ok_so_far = False
+    refit, rpath = _first_key(apply, ("refit_count", "refits", "n_refits",
+                                      "reestimate_count", "refit"))
+    if not is_int(refit) or int(refit) != 0:
+        fail(item, "apply performs no re-fit (refit_count == 0)",
+             "got %r via %s (a post-estimation re-fit is not a frozen model)"
+             % (refit, rpath))
+        ok_so_far = False
+    deltas, dpath = _first_key(apply, ("param_deltas", "deltas",
+                                       "parameter_deltas", "max_param_delta",
+                                       "delta"))
+    if not (deltas is None or deltas == {} or deltas == [] or (
+            is_num(deltas) and abs(float(deltas)) <= S1_PARAM_TOL)):
+        fail(item, "apply reports no frozen-parameter delta",
+             "param_deltas=%r via %s (a non-zero delta means the applied "
+             "model differs from the estimation)" % (deltas, dpath))
+        ok_so_far = False
+    params = apply.get("params", apply.get("applied_params",
+                                          apply.get("frozen_params")))
+    if not isinstance(params, dict):
+        fail(item, "apply carries the frozen params it used",
+             "no apply.params mapping via %s" % (apath,))
+        return ok_so_far
+    for name in ("origin", "n_paths", "support_lo", "support_hi", "sub_lo",
+                 "sub_hi", "phase_reference"):
+        if not (is_int(params.get(name)) and is_int(g.get(name))
+                and int(params[name]) == int(g[name])):
+            fail(item, "apply.params.%s equals the frozen value" % name,
+                 "apply=%r model=%r" % (params.get(name), g.get(name)))
+            ok_so_far = False
+    if not _s1_num_equal(params.get("cfo_hz"), g.get("cfo_hz")):
+        fail(item, "apply.params.cfo_hz equals the frozen cfo_hz",
+             "apply=%r model=%r" % (params.get("cfo_hz"), g.get("cfo_hz")))
+        ok_so_far = False
+    if not _s1_vec_equal(params.get("tau"), g.get("tau")):
+        fail(item, "apply.params.tau[] equals the frozen tau[]",
+             "apply=%r model=%r" % (params.get("tau"), g.get("tau")))
+        ok_so_far = False
+    if not _s1_vec_equal(params.get("gain"), g.get("gain"), pair=True):
+        fail(item, "apply.params.gain[] equals the frozen gain[]",
+             "apply=%r model=%r" % (params.get("gain"), g.get("gain")))
+        ok_so_far = False
+    return ok_so_far
+
+
+def _s1_check_support(window, g, where):
+    """S1-3: support is the configured-nominal prediction, not confirmed*sps."""
+    item = "%s S1-3 support semantics" % where
+    origin = g.get("origin")
+    sps = g.get("samples_per_symbol")
+    sync_reps = g.get("nominal_sync_reps")
+    lo, hi = g.get("support_lo"), g.get("support_hi")
+    pre, post = g.get("support_pre_tail"), g.get("support_post_tail")
+    source = g.get("support_source")
+    failures = 0
+    if not is_nonempty_str(source):
+        fail(item, "support_source is declared",
+             "got %r via %s" % (source, g["support_source_path"]))
+        failures += 1
+    elif norm_text(source) not in S1_SUPPORT_SOURCES:
+        fail(item, "support_source is the configured-nominal prediction",
+             "got %r via %s (a confirmed/measured support is the legacy "
+             "cover-mode coupling)" % (source, g["support_source_path"]))
+        failures += 1
+    if not (is_int(pre) and is_int(post)):
+        fail(item, "support_pre_tail/support_post_tail are integers",
+             "pre=%r post=%r (%s / %s)"
+             % (pre, post, g.get("support_pre_tail_path"),
+                g.get("support_post_tail_path")))
+        return failures
+    if not (is_int(origin) and is_int(sps) and is_int(sync_reps)
+            and is_int(lo) and is_int(hi)):
+        fail(item, "the support bounds and geometry are integers",
+             "origin=%r sps=%r sync_reps=%r support=[%r,%r)"
+             % (origin, sps, sync_reps, lo, hi))
+        return failures
+    want_lo = int(origin) - int(pre)
+    want_hi = int(origin) + int(sync_reps) * int(sps) + int(post)
+    if int(lo) != want_lo or int(hi) != want_hi:
+        fail(item, "support == origin + sync_reps*sps + post_tail",
+             "declared=[%d,%d) predicted=[%d,%d) (origin=%d sync_reps=%d "
+             "sps=%d pre=%d post=%d); a support tied to a confirmed count is "
+             "the old clip" % (lo, hi, want_lo, want_hi, origin, sync_reps,
+                               sps, pre, post))
+        failures += 1
+    old_clip_hi = int(origin) + S1_STRICT_FIT_REPS * int(sps) + int(post)
+    if int(hi) <= old_clip_hi:
+        fail(item, "support_hi is not clipped to the first 8 SYNC",
+             "support_hi=%d <= origin+8*sps+post_tail=%d (the old 8-SYNC clip)"
+             % (hi, old_clip_hi))
+        failures += 1
+    if int(hi) - int(lo) < int(sync_reps) * int(sps):
+        fail(item, "the support spans the full nominal preamble",
+             "span=%d < sync_reps*sps=%d" % (hi - lo,
+                                             int(sync_reps) * int(sps)))
+        failures += 1
+    sample_count = window.get("sample_count")
+    if is_int(sample_count) and not (0 <= lo < hi <= sample_count):
+        fail(item, "the support lies inside the declared window",
+             "[%d,%d) sample_count=%d" % (lo, hi, sample_count))
+        failures += 1
+    coverage = g.get("support_coverage")
+    if not (is_num(coverage) and 0.0 <= float(coverage) <= 1.0):
+        fail(item, "support_coverage is reported in [0,1]",
+             "got %r via %s" % (coverage, g.get("support_coverage_path")))
+        failures += 1
+    else:
+        ov_lo, ov_hi = window_truth_overlap(window)
+        state = window.get("sic_state") or {}
+        partial = bool(state.get("partial")) or bool(state.get("ambiguous"))
+        if ov_lo is not None and not partial:
+            covered = max(0, min(hi, ov_hi) - max(lo, ov_lo))
+            want = covered / float(ov_hi - ov_lo)
+            if want < S1_SUPPORT_COVERAGE:
+                fail(item, "the predicted support covers >= %.0f%% of the "
+                     "truth overlap" % (100.0 * S1_SUPPORT_COVERAGE),
+                     "covered=%d/%d (%.4f) support=[%d,%d) overlap=[%d,%d)"
+                     % (covered, ov_hi - ov_lo, want, lo, hi, ov_lo, ov_hi))
+                failures += 1
+            if abs(float(coverage) - want) > 1e-3:
+                fail(item, "support_coverage matches the declared support",
+                     "declared=%r recomputed=%.4f" % (coverage, want))
+                failures += 1
+    return failures
+
+
+def _s1_check_regions(window, g, where):
+    """S1-4: training/eval/tail regions + eval and tail are cancelled."""
+    item = "%s S1-4 regions" % where
+    origin = g.get("origin")
+    sps = g.get("samples_per_symbol")
+    sync_reps = g.get("nominal_sync_reps")
+    training_lo, training_hi = g.get("training_lo"), g.get("training_hi")
+    eval_lo, eval_hi = g.get("eval_lo"), g.get("eval_hi")
+    tail_lo, tail_hi = g.get("tail_lo"), g.get("tail_hi")
+    sub_lo, sub_hi = g.get("sub_lo"), g.get("sub_hi")
+    failures = 0
+    for name in ("training_lo", "training_hi", "eval_lo", "eval_hi",
+                 "tail_lo", "tail_hi", "sub_lo", "sub_hi", "origin",
+                 "samples_per_symbol", "nominal_sync_reps"):
+        if not is_int(g.get(name)):
+            fail(item, "%s is an integer (got %r via %s)"
+                 % (name, g.get(name), g.get(name + "_path")))
+            return failures + 1
+    # The optional 8-training + N-online-validation contrast shifts the
+    # independent evaluation start by the online-validation span.
+    online_reps, _ = _first_key(window, ("online_validation_reps",
+                                         "validation_reps"))
+    if not is_int(online_reps):
+        online_reps, _ = _region_lookup(window, ("online_validation_reps",
+                                                 "validation_reps"))
+    if not is_int(online_reps):
+        online_reps = 0
+    if online_reps < 0:
+        fail(item, "online_validation_reps is a non-negative integer",
+             "got %r" % (online_reps,))
+        online_reps = 0
+    if not (0 <= sub_lo < sub_hi):
+        fail(item, "the applied subtraction range is a non-empty [lo,hi)",
+             "[%d,%d)" % (sub_lo, sub_hi))
+        failures += 1
+    want_eval_lo = int(training_hi) + int(online_reps) * int(sps)
+    want_eval_hi = int(origin) + int(sync_reps) * int(sps)
+    if int(eval_lo) < want_eval_lo:
+        fail(item, "the independent evaluation region starts after "
+             "training%s" % ("+online-validation" if online_reps else ""),
+             "eval_lo=%d expected>=%d (online_reps=%d)"
+             % (eval_lo, want_eval_lo, online_reps))
+        failures += 1
+    if _intervals_overlap((int(eval_lo), int(eval_hi)),
+                          (int(training_lo), int(training_hi))):
+        fail(item, "the independent evaluation region is disjoint from training",
+             "eval=[%d,%d) training=[%d,%d)"
+             % (eval_lo, eval_hi, training_lo, training_hi))
+        failures += 1
+    if int(eval_lo) != want_eval_lo or int(eval_hi) != want_eval_hi:
+        fail(item, "evaluation is the [8+online,64) SYNC region",
+             "declared=[%d,%d) expected=[%d,%d) (origin=%d sps=%d sync_reps=%d "
+             "online_reps=%d)"
+             % (eval_lo, eval_hi, want_eval_lo, want_eval_hi, origin, sps,
+                sync_reps, online_reps))
+        failures += 1
+    declared_eval_reps, _ = _first_key(window, ("evaluation_reps",
+                                                "independent_eval_reps"))
+    if is_int(declared_eval_reps) \
+            and int(declared_eval_reps) != (int(sync_reps) - S1_STRICT_FIT_REPS
+                                            - int(online_reps)):
+        fail(item, "evaluation_reps partitions the 64-SYNC preamble",
+             "evaluation_reps=%d expected %d (8 training + %d online + eval)"
+             % (declared_eval_reps,
+                int(sync_reps) - S1_STRICT_FIT_REPS - int(online_reps),
+                online_reps))
+        failures += 1
+    if int(eval_hi) - int(eval_lo) < S1_MIN_EVAL_REPS * int(sps):
+        fail(item, "the evaluation region spans >= %d SYNC" % S1_MIN_EVAL_REPS,
+             "span=%d < %d" % (eval_hi - eval_lo, S1_MIN_EVAL_REPS * sps))
+        failures += 1
+    want_tail_lo = int(origin) + (int(sync_reps) - S1_TAIL_REPS) * int(sps)
+    want_tail_hi = int(origin) + int(sync_reps) * int(sps)
+    if int(tail_lo) != want_tail_lo or int(tail_hi) != want_tail_hi:
+        fail(item, "tail-eval is the last 4 SYNC",
+             "declared=[%d,%d) expected=[%d,%d)"
+             % (tail_lo, tail_hi, want_tail_lo, want_tail_hi))
+        failures += 1
+    if _intervals_overlap((int(tail_lo), int(tail_hi)),
+                          (int(training_lo), int(training_hi))):
+        fail(item, "the tail-eval region is disjoint from training",
+             "tail=[%d,%d) training=[%d,%d)"
+             % (tail_lo, tail_hi, training_lo, training_hi))
+        failures += 1
+    if not _within((int(tail_lo), int(tail_hi)), (int(eval_lo), int(eval_hi))):
+        fail(item, "the tail-eval region lies inside the independent evaluation",
+             "tail=[%d,%d) eval=[%d,%d)" % (tail_lo, tail_hi, eval_lo, eval_hi))
+        failures += 1
+    # The evaluation and tail regions must be CANCELLED, not kept aside.
+    for label, lo, hi in (("evaluation", eval_lo, eval_hi),
+                          ("tail-eval", tail_lo, tail_hi)):
+        if not (sub_lo <= lo and hi <= sub_hi):
+            fail(item, "the %s region is inside the applied subtraction" % label,
+                 "%s=[%d,%d) sub=[%d,%d) (evaluating an un-cancelled region "
+                 "measures nothing)" % (label, lo, hi, sub_lo, sub_hi))
+            failures += 1
+    ov_lo, ov_hi = window_truth_overlap(window)
+    if ov_lo is not None:
+        support_lo, support_hi = g.get("support_lo"), g.get("support_hi")
+        if is_int(support_lo) and is_int(support_hi):
+            need_lo = max(support_lo, ov_lo)
+            need_hi = min(support_hi, ov_hi)
+            if sub_lo > need_lo or sub_hi < need_hi:
+                fail(item, "the subtraction covers the predicted support "
+                     "inside the truth overlap",
+                     "sub=[%d,%d) support∩overlap=[%d,%d)"
+                     % (sub_lo, sub_hi, need_lo, need_hi))
+                failures += 1
+    # The gate is decided on training/online data, never on the eval region.
+    gate_lo, gate_path = _first_key(g, ("gate_lo", "commit_gate_lo"))
+    gate_hi, _ = _first_key(g, ("gate_hi", "commit_gate_hi"))
+    if not (is_int(gate_lo) and is_int(gate_hi)):
+        gate_lo, gate_path = _region_lookup(window, GATE_LO_KEYS)
+        gate_hi, _ = _region_lookup(window, GATE_HI_KEYS)
+    if not (is_int(gate_lo) and is_int(gate_hi) and gate_lo < gate_hi):
+        fail(item, "the commit gate region is declared",
+             "could not read it (via %s)" % (gate_path,))
+        failures += 1
+    else:
+        if _intervals_overlap((int(gate_lo), int(gate_hi)),
+                              (int(eval_lo), int(eval_hi))):
+            fail(item, "the gate does not use evaluation-region data",
+                 "gate=[%d,%d) eval=[%d,%d)"
+                 % (gate_lo, gate_hi, eval_lo, eval_hi))
+            failures += 1
+        if not _within((int(gate_lo), int(gate_hi)),
+                       (int(training_lo), int(want_eval_lo))):
+            fail(item, "the gate is decided on the training/online region",
+                 "gate=[%d,%d) allowed=[%d,%d) (online_reps=%d; never eval)"
+                 % (gate_lo, gate_hi, training_lo, want_eval_lo, online_reps))
+            failures += 1
+    return failures
+
+
+def _s1_check_actual(window, g, recon, arrays, where):
+    """S1-5: actual-output suppression over full / eval / tail, from arrays."""
+    item = "%s S1-5 actual-output cancellation" % where
+    result = {"eval": None, "tail": None, "full": None,
+              "eval_na": False, "tail_na": False, "full_na": False}
+    if arrays is None:
+        fail(item, "archived arrays exist to recompute the three regions",
+             "no recon/window_*.npz for window_id=%r" % (window.get("window_id"),))
+        return result
+    if "error" in arrays:
+        fail(item, "archived arrays are readable", arrays.get("error"))
+        return result
+    missing = [k for k in ("y", "y_clean", "i") if k not in arrays]
+    if missing:
+        fail(item, "archived arrays carry y, y_clean and i",
+             "missing %s in %s" % (missing, os.path.basename(arrays.get("path", "?"))))
+        return result
+    y, y_clean, i = arrays["y"], arrays["y_clean"], arrays["i"]
+    if not (len(y) == len(y_clean) == len(i)):
+        fail(item, "archived arrays are the same length",
+             "y=%d y_clean=%d i=%d" % (len(y), len(y_clean), len(i)))
+        return result
+    ov_lo, ov_hi = window_truth_overlap(window)
+    if ov_lo is None:
+        fail(item, "the truth overlap is well-formed",
+             "overlap=%r" % (window.get("overlap"),))
+        return result
+    if ov_hi > len(i):
+        fail(item, "the truth overlap fits the archived arrays",
+             "[%d,%d) > %d" % (ov_lo, ov_hi, len(i)))
+        return result
+    delta = y - y_clean
+    eval_lo, eval_hi = g.get("eval_lo"), g.get("eval_hi")
+    tail_lo, tail_hi = g.get("tail_lo"), g.get("tail_hi")
+    regions = (("full", ov_lo, ov_hi), ("eval", eval_lo, eval_hi),
+               ("tail", tail_lo, tail_hi))
+    declared = {
+        "full": (recon.get("actual_suppression_db"), "recon.actual_suppression_db"),
+        "eval": (next((recon[k] for k in S1_EVAL_ACTUAL_KEYS if k in recon),
+                      None),
+                 "recon.%s" % (next((k for k in S1_EVAL_ACTUAL_KEYS
+                                     if k in recon), "eval_actual_suppression_db"))),
+        "tail": (next((recon[k] for k in S1_TAIL_ACTUAL_KEYS if k in recon),
+                      None),
+                 "recon.%s" % (next((k for k in S1_TAIL_ACTUAL_KEYS
+                                     if k in recon), "tail_actual_suppression_db"))),
+    }
+    for label, lo, hi in regions:
+        if not (is_int(lo) and is_int(hi) and 0 <= lo < hi):
+            fail(item, "%s region is declared before recomputing it" % label,
+                 "got [%r,%r)" % (lo, hi))
+            continue
+        if label != "full":
+            if not (ov_lo <= lo and hi <= ov_hi):
+                fail(item, "the %s region lies inside the truth overlap" % label,
+                     "%s=[%d,%d) overlap=[%d,%d)"
+                     % (label, lo, hi, ov_lo, ov_hi))
+                continue
+            if hi > len(i):
+                fail(item, "the %s region fits the archived arrays" % label,
+                     "[%d,%d) > %d" % (lo, hi, len(i)))
+                continue
+        value, _n, den = _s1_actual_metric(i, delta, lo, hi)
+        present_key = all(k not in recon for k in (
+            S1_EVAL_ACTUAL_KEYS if label == "eval"
+            else (S1_TAIL_ACTUAL_KEYS if label == "tail" else ())))
+        if label != "full" and present_key:
+            fail(item, "%s_actual_suppression_db is reported" % label,
+                 "recon lacks %s (a reconstruction nmse is not the actual "
+                 "output metric)"
+                 % (S1_EVAL_ACTUAL_KEYS if label == "eval"
+                    else S1_TAIL_ACTUAL_KEYS,))
+        if value is None:
+            result[label] = None
+            result[label + "_na"] = True
+            if declared[label][0] is not None:
+                fail(item, "%s actual suppression is N/A for zero "
+                     "interference" % label,
+                     "%s=%r but ||i||^2 == 0" % (declared[label][1],
+                                                 declared[label][0]))
+            continue
+        result[label] = value
+        declared_value = declared[label][0]
+        if not is_num(declared_value):
+            fail(item, "%s actual_suppression_db is reported" % label,
+                 "%s=%r (recomputed %.4f dB)"
+                 % (declared[label][1], declared_value, value))
+        elif abs(float(declared_value) - value) > S1_ACTUAL_TOL_DB:
+            fail(item, "%s actual_suppression_db matches the arrays" % label,
+                 "%s=%r recomputed=%.4f dB"
+                 % (declared[label][1], declared_value, value))
+        if label != "full":
+            frac = _s1_changed_fraction(y, y_clean, lo, hi)
+            if frac < S1_CANCEL_FRACTION:
+                fail(item, "the %s region is actually cancelled" % label,
+                     "only %.2f%% of the %s samples changed in y!=y_clean "
+                     "(the region is left un-cancelled)"
+                     % (100.0 * frac, label))
+    return result
+
+
+def _s1_declared_region_value(recon, keys):
+    for key in keys:
+        if key in recon:
+            value = recon[key]
+            return True, (float(value) if is_num(value) else None)
+    return False, None
+
+
+def _s1_check_summary(summary, windows, prefix):
+    """S1-5 at the run level: the three medians/counts are required."""
+    item = "%s S1-5 actual effect medians" % prefix
+    effect = summary.get("effect") if isinstance(summary, dict) else None
+    if not isinstance(effect, dict):
+        fail(item, "summary.effect carries the actual-output aggregates",
+             "summary.effect is absent; reconstruction NMSE alone is not the "
+             "S1 effect report")
+        return
+    full_vals, eval_vals, tail_vals = [], [], []
+    full_na = eval_na = tail_na = 0
+    absent_full = absent_eval = absent_tail = 0
+    for window in windows:
+        if window_uses_truth(window):
+            continue
+        recon = window.get("recon")
+        if not isinstance(recon, dict):
+            continue
+        if "actual_suppression_db" in recon:
+            if is_num(recon["actual_suppression_db"]):
+                full_vals.append(float(recon["actual_suppression_db"]))
+            else:
+                full_na += 1
+        else:
+            absent_full += 1
+        present, value = _s1_declared_region_value(recon, S1_EVAL_ACTUAL_KEYS)
+        if not present:
+            absent_eval += 1
+        elif value is None:
+            eval_na += 1
+        else:
+            eval_vals.append(value)
+        present_t, value_t = _s1_declared_region_value(recon, S1_TAIL_ACTUAL_KEYS)
+        if not present_t:
+            absent_tail += 1
+        elif value_t is None:
+            tail_na += 1
+        else:
+            tail_vals.append(value_t)
+    if absent_full:
+        fail(item, "every evaluated window reports actual_suppression_db",
+             "%d window(s) lack it" % absent_full)
+    if absent_eval:
+        fail(item, "every evaluated window reports eval_actual_suppression_db",
+             "%d window(s) lack it (reconstruction nmse does not substitute)"
+             % absent_eval)
+    if absent_tail:
+        fail(item, "every evaluated window reports tail_actual_suppression_db",
+             "%d window(s) lack it (reconstruction nmse does not substitute)"
+             % absent_tail)
+    plans = (
+        ("full overlap", ("median_actual_suppression_db",),
+         ("n_interference_windows",), ("n_na_windows",),
+         full_vals, full_na,
+         effect.get("median_actual_suppression_db")),
+        ("independent evaluation", S1_EVAL_MEDIAN_KEYS, S1_EVAL_COUNT_KEYS,
+         S1_EVAL_NA_KEYS, eval_vals, eval_na,
+         next((effect[k] for k in S1_EVAL_MEDIAN_KEYS if k in effect), None)),
+        ("tail-4-SYNC", S1_TAIL_MEDIAN_KEYS, S1_TAIL_COUNT_KEYS,
+         S1_TAIL_NA_KEYS, tail_vals, tail_na,
+         next((effect[k] for k in S1_TAIL_MEDIAN_KEYS if k in effect), None)),
+    )
+    for label, med_keys, count_keys, na_keys, vals, na, declared in plans:
+        med_present = any(k in effect for k in med_keys)
+        if vals:
+            want = median(vals)
+            if not med_present:
+                fail(item, "%s median is reported" % label,
+                     "no effect key in %s (reconstruction-only reporting is "
+                     "not the S1 effect gate)" % (med_keys,))
+            elif not is_num(declared) or abs(float(declared) - want) > 1e-6:
+                fail(item, "%s median matches the per-window actual values"
+                     % label, "summary=%r recomputed=%.4f" % (declared, want))
+            else:
+                ok(item, "%s: median %.4f dB over %d window(s)%s"
+                   % (label, want, len(vals),
+                      ", %d N/A" % na if na else ""))
+        else:
+            if med_present and declared is not None:
+                fail(item, "%s median is N/A when every window is N/A" % label,
+                     "summary=%r" % (declared,))
+        count, cnt_path = _first_key(effect, count_keys)
+        if not is_int(count) or int(count) != len(vals):
+            fail(item, "%s window count matches the per-window metrics" % label,
+                 "effect.%s=%r recomputed=%d"
+                 % (cnt_path or count_keys[0], count, len(vals)))
+        count_na, cnt_na_path = _first_key(effect, na_keys)
+        if not is_int(count_na) or int(count_na) != na:
+            fail(item, "%s N/A count matches the evaluated windows" % label,
+                 "effect.%s=%r recomputed=%d"
+                 % (cnt_na_path or na_keys[0], count_na, na))
+
+
+def _s1_generator_of(window):
+    for name in S1_SEED_CONTAINERS:
+        block = window.get(name)
+        if isinstance(block, dict):
+            return block, name
+    return None, None
+
+
+def _s1_check_seeds(manifest, summary, windows, prefix):
+    """S1-6: acceptance seeds are recorded and disjoint from calibration."""
+    item = "%s S1-6 seed independence" % prefix
+    if not isinstance(manifest, dict):
+        return
+    seeds = manifest.get("seed_lists")
+    if not isinstance(seeds, dict):
+        fail(item, "manifest.seed_lists declares calibration and acceptance",
+             "got %r" % (seeds,))
+        return
+    cal, acc = seeds.get("calibration"), seeds.get("acceptance")
+    if not (isinstance(cal, list) and cal and all(is_int(v) for v in cal)):
+        fail(item, "the calibration seed set is recorded",
+             "seed_lists.calibration=%r" % (cal,))
+        cal = []
+    if not (isinstance(acc, list) and acc and all(is_int(v) for v in acc)):
+        fail(item, "the formal acceptance seed set is recorded",
+             "seed_lists.acceptance=%r" % (acc,))
+        acc = []
+    shared = sorted(set(cal) & set(acc))
+    if shared:
+        fail(item, "calibration and acceptance seeds are disjoint by name",
+             "%d shared seed(s), first %s" % (len(shared), shared[:5]))
+    else:
+        ok(item, "calibration and acceptance seed sets are disjoint by name",
+           "%d + %d" % (len(cal), len(acc)))
+    cal_windows, cal_path = _first_key(manifest, (
+        "calibration_windows", "generator_calibration_windows",
+        "calibration_window_set"))
+    cal_tuples = set()
+    if not isinstance(cal_windows, list) or not cal_windows:
+        fail(item, "the actual calibration windows are recorded",
+             "no calibration_windows[] via %s (a disjoint name list alone "
+             "cannot prove the windows were not reused)" % (cal_path,))
+    else:
+        for entry in cal_windows:
+            if not isinstance(entry, dict):
+                continue
+            seed = entry.get("seed")
+            offset = entry.get("seed_offset", 0)
+            root = entry.get("noise_root", entry.get("noise_seed"))
+            if is_int(seed) and is_int(offset) and is_nonempty_str(root):
+                cal_tuples.add((int(seed), int(offset), str(root)))
+        if len(cal_tuples) != len(cal_windows):
+            fail(item, "every calibration window carries seed/seed_offset/"
+                 "noise_root", "declared=%d usable=%d"
+                 % (len(cal_windows), len(cal_tuples)))
+        else:
+            ok(item, "calibration windows are recorded", "%d tuple(s)"
+               % len(cal_tuples))
+    cal_seed_set = set(cal)
+    seen = {}
+    reused_seed, reused_tuple = [], []
+    missing_gen = 0
+    for window in windows:
+        wid = window.get("window_id")
+        gen, gpath = _s1_generator_of(window)
+        if not isinstance(gen, dict):
+            missing_gen += 1
+            continue
+        seed_set = gen.get("seed_set", gen.get("set", gen.get("split")))
+        seed = gen.get("seed")
+        offset = gen.get("seed_offset", 0)
+        root = gen.get("noise_root", gen.get("noise_seed"))
+        if not (is_nonempty_str(seed_set) and is_int(seed)
+                and is_int(offset) and is_nonempty_str(root)):
+            fail(item, "window_id=%r declares the generated-window identity"
+                 % (wid,),
+                 "generator block via %s needs seed_set/seed/seed_offset/"
+                 "noise_root (got %r)" % (gpath, gen))
+            continue
+        if norm_text(seed_set) != "acceptance":
+            fail(item, "window_id=%r belongs to the acceptance set" % (wid,),
+                 "seed_set=%r (the formal effect matrix must not run on the "
+                 "calibration set)" % (seed_set,))
+        if int(seed) in cal_seed_set:
+            reused_seed.append(wid)
+        key = (int(seed), int(offset), str(root))
+        if key in cal_tuples:
+            reused_tuple.append(wid)
+        elif key in seen:
+            fail(item, "window_id=%r does not reuse another acceptance window"
+                 % (wid,), "generated tuple %r already used by window_id=%r"
+                 % (key, seen[key]))
+        else:
+            seen[key] = wid
+    if reused_seed:
+        fail(item, "no acceptance window reuses a calibration seed",
+             "window_id(s) %s" % reused_seed[:5])
+    if reused_tuple:
+        fail(item, "no acceptance window reuses a calibration window/noise",
+             "window_id(s) %s (seed, seed_offset, noise_root) collide with "
+             "calibration_windows" % reused_tuple[:5])
+    if missing_gen:
+        fail(item, "every window declares its generator seed identity",
+             "%d window(s) lack a generator block" % missing_gen)
+    if not (reused_seed or reused_tuple or missing_gen):
+        ok(item, "acceptance windows are disjoint from the calibration windows",
+           "%d unique generated window(s)" % len(seen))
+
+
+def _s1_layer_mode(entry):
+    if not isinstance(entry, dict):
+        return None, None
+    value, key = _first_key(entry, ("sic_model_mode", "model_mode",
+                                    "method_mode", "mode"))
+    return (norm_text(value) if is_nonempty_str(value) else None), key
+
+
+def _s1_index_path(results_dir):
+    for name in S1_INDEX_FILES:
+        path = os.path.join(results_dir, name)
+        if os.path.isfile(path):
+            return path, os.path.abspath(results_dir)
+    parent = os.path.dirname(os.path.abspath(results_dir))
+    if parent != os.path.abspath(results_dir):
+        for name in S1_INDEX_FILES:
+            path = os.path.join(parent, name)
+            if os.path.isfile(path):
+                return path, parent
+    return None, None
+
+
+def _s1_run_dirs(root):
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        if "summary.json" in filenames and "run_manifest.json" in filenames:
+            found.append(dirpath)
+            dirnames[:] = []
+    return found
+
+
+def _s1_newest_run(root):
+    runs = _s1_run_dirs(root)
+    if not runs:
+        return None
+
+    def stamp(path):
+        return os.path.getmtime(os.path.join(path, "summary.json"))
+    return max(runs, key=stamp)
+
+
+def _s1_resolve_index_run(value, root):
+    if isinstance(value, dict):
+        value = value.get("dir") or value.get("path") or value.get("label") \
+            or value.get("run")
+    if not is_nonempty_str(value):
+        return None
+    direct = value if os.path.isabs(value) else os.path.join(root, value)
+    if os.path.isdir(direct) \
+            and os.path.isfile(os.path.join(direct, "summary.json")):
+        return os.path.abspath(direct)
+    target = os.path.basename(os.path.normpath(value))
+    for path in _s1_run_dirs(root):
+        if os.path.basename(path) == target:
+            return os.path.abspath(path)
+    return None
+
+
+def _s1_check_index(results_dir, run_dir, manifest, summary, prefix):
+    item = "%s S1-7 results index" % prefix
+    path, root = _s1_index_path(results_dir)
+    if path is None:
+        fail(item, "results-root index.json is present",
+             "no %s next to %s or its parent (the index must reference the "
+             "actual latest run)" % ("/".join(S1_INDEX_FILES), results_dir))
+        return
+    data, err = load_json(path)
+    if not isinstance(data, dict):
+        fail(item, "results index is a JSON object", err or "not an object")
+        return
+    latest = data.get("latest_run", data.get("latest"))
+    runs_block = data.get("runs")
+    if latest is None and isinstance(runs_block, dict):
+        latest = runs_block.get("latest")
+    resolved = _s1_resolve_index_run(latest, root)
+    if resolved is None:
+        fail(item, "index.latest_run resolves to an actual run directory",
+             "latest_run=%r under %s" % (latest, root))
+        return
+    newest = _s1_newest_run(root)
+    if newest is not None and os.path.abspath(newest) != resolved:
+        fail(item, "index.latest_run references the actual latest run",
+             "index -> %s but the newest run is %s (stale index)"
+             % (os.path.relpath(resolved, root),
+                os.path.relpath(newest, root)))
+    else:
+        ok(item, "index.latest_run references the actual latest run",
+           os.path.relpath(resolved, root))
+    # Report/artifact count consistency for the referenced run.
+    entry = None
+    if isinstance(runs_block, dict):
+        for key, value in runs_block.items():
+            candidate = _s1_resolve_index_run(key, root)
+            if candidate is not None and os.path.abspath(candidate) == resolved:
+                entry = value
+                break
+        if entry is None:
+            entry = runs_block.get(os.path.basename(resolved))
+    elif isinstance(runs_block, list):
+        for value in runs_block:
+            candidate = _s1_resolve_index_run(
+                value.get("dir") or value.get("path") or value.get("label")
+                if isinstance(value, dict) else value, root)
+            if candidate is not None and os.path.abspath(candidate) == resolved:
+                entry = value
+                break
+    if isinstance(entry, dict):
+        target_summary, _err = load_json(os.path.join(resolved, "summary.json"))
+        target_manifest, _err = load_json(os.path.join(
+            resolved, "run_manifest.json"))
+        count, cpath = _first_key(entry, ("windows", "windows_completed",
+                                          "window_count"))
+        if is_int(count) and isinstance(target_summary, dict):
+            declared = target_summary.get("windows_completed")
+            on_disk = None
+            try:
+                rows, _ = load_jsonl(os.path.join(resolved, "windows.jsonl"))
+                on_disk = len(rows) if rows is not None else None
+            except OSError:
+                on_disk = None
+            want = on_disk if on_disk is not None else declared
+            if is_int(want) and int(count) != int(want):
+                fail(item, "index report count matches the referenced run",
+                     "index.%s=%d but the run has %d artifact row(s)"
+                     % (cpath, count, want))
+            else:
+                ok(item, "index report count matches the referenced run",
+                   "%s=%r" % (cpath, count))
+        run_id = entry.get("run_id")
+        if is_nonempty_str(run_id) and isinstance(target_manifest, dict) \
+                and target_manifest.get("run_id") != run_id:
+            fail(item, "index entry run_id matches the referenced manifest",
+                 "index=%r manifest=%r"
+                 % (run_id, target_manifest.get("run_id")))
+    # The run under verification itself must also be identified consistently.
+    if os.path.abspath(resolved) == os.path.abspath(run_dir) \
+            and isinstance(manifest, dict) and isinstance(entry, dict):
+        if is_nonempty_str(entry.get("run_id")) \
+                and entry["run_id"] != manifest.get("run_id"):
+            fail(item, "the index entry for this run names its run_id",
+                 "index=%r manifest=%r"
+                 % (entry["run_id"], manifest.get("run_id")))
+
+
+def check_s1_provenance(manifest, summary, run_dir, results_dir, prefix, mode):
+    """S1-7: one effective config/model mode across all measured rows."""
+    item = "%s S1-7 provenance/report consistency" % prefix
+    if not isinstance(manifest, dict):
+        return
+    config, cpath = _first_key(manifest, EFFECTIVE_CONFIG_KEYS)
+    config = config if isinstance(config, dict) else {}
+    eff_hash = None
+    hvalue, _ = _first_key(manifest, EFFECTIVE_HASH_KEYS)
+    if is_hex64(hvalue):
+        eff_hash = normalize_hash(hvalue)
+    mode_value, mode_path = _nested_lookup(
+        config, ("sic_model_mode", "model_mode", "method_mode"))
+    if not (is_nonempty_str(mode_value)
+            and norm_text(mode_value) in S1_MODEL_MODES):
+        fail(item, "effective_config declares the S1 model mode",
+             "%s=%r (expected %r)" % (mode_path or "effective_config",
+                                      mode_value, S1_MODEL_MODE))
+    fit, _ = _nested_lookup(config, ("fit_reps", "fit_length_reps"))
+    if is_int(fit) and int(fit) != S1_STRICT_FIT_REPS:
+        fail(item, "effective fit_reps == %d in the S1 mode"
+             % S1_STRICT_FIT_REPS, "got %r" % (fit,))
+    eval_reps, eval_path = _nested_lookup(config, ("evaluation_reps",
+                                                   "eval_reps",
+                                                   "independent_eval_reps"))
+    if not (is_int(eval_reps) and int(eval_reps) >= S1_MIN_EVAL_REPS):
+        fail(item, "effective evaluation_reps is declared and >= %d"
+             % S1_MIN_EVAL_REPS, "%s=%r" % (eval_path or "evaluation_reps",
+                                            eval_reps))
+    online, online_path = _nested_lookup(config, ("online_validation_reps",
+                                                  "validation_reps"))
+    if online is not None and not (is_int(online) and int(online) == 0):
+        fail(item, "effective online_validation_reps == 0 (S1 default)",
+             "%s=%r" % (online_path, online))
+    template_id, _ = _nested_lookup(config, ("template_id",))
+    input_length, _ = _nested_lookup(config, LAYER_LENGTH_KEYS)
+    layers, lpath = _first_key(manifest, IMPL_CONFIG_KEYS)
+    layers = layers if isinstance(layers, dict) else {}
+    not_run = summary.get("not_run") if isinstance(summary, dict) else []
+    missing_rows = []
+    for layer in ("effect", "core", "gr", "cir", "full_demod", "native"):
+        entry, alias = _s1_layer_entry(layers, layer)
+        if entry is None:
+            if layer == "native" and isinstance(not_run, list) \
+                    and summary_key_mentioned(summary, "native"):
+                skip(item, "layer %s is explicitly not_run" % layer,
+                     "summary.not_run names native")
+                continue
+            missing_rows.append(layer)
+            continue
+        if not isinstance(entry, dict):
+            fail(item, "layer %s declares its effective config" % layer,
+                 "%s=%r" % (alias, entry))
+            continue
+        horizon = _layer_identity(entry)
+        if eff_hash is not None and horizon[1] is not None \
+                and horizon[1] != eff_hash:
+            fail(item, "layer %s ran under the effective config hash" % layer,
+                 "%s=%s != %s" % (alias, horizon[1], eff_hash))
+        layer_mode, layer_mode_path = _s1_layer_mode(entry)
+        if layer_mode != mode:
+            fail(item, "layer %s runs the declared model mode" % layer,
+                 "%s.%s=%r expected %r"
+                 % (alias, layer_mode_path, layer_mode, mode))
+        if isinstance(horizon[2], str) and is_nonempty_str(template_id) \
+                and horizon[2] != str(template_id):
+            fail(item, "layer %s uses the effective template" % layer,
+                 "%s.template=%r expected %r"
+                 % (alias, horizon[2], template_id))
+        if is_int(horizon[3]) and is_int(input_length) \
+                and int(horizon[3]) != int(input_length):
+            fail(item, "layer %s uses the effective input length" % layer,
+                 "%s.input_length=%r expected %r"
+                 % (alias, horizon[3], input_length))
+    if missing_rows:
+        fail(item, "effect/core/GR/CIR/full-demod rows are declared",
+             "missing %s in %s (or named not_run for native only)"
+             % (missing_rows, lpath))
+    else:
+        ok(item, "effect/core/GR/CIR/full-demod/native rows are declared", lpath)
+    # S1-02: perf rows for this run's mode must carry the same model mode.
+    for path in _find_perf_tables(results_dir):
+        try:
+            with open(path, "r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+        except OSError:
+            continue
+        for index, row in enumerate(rows, 2):
+            production = _csv_bool(row.get("production_profile"))
+            if production is None:
+                production = _csv_bool(row.get("official_evidence"))
+            verified = _csv_bool(row.get("effect_verified"))
+            if not (production or verified):
+                continue
+            row_mode = row.get("model_mode", row.get("sic_model_mode"))
+            row_hash = normalize_hash(row.get("config_hash", ""))
+            if eff_hash is not None and is_hex64(row_hash) \
+                    and row_hash != eff_hash:
+                continue    # a different case/run; not this run's row
+            if not is_nonempty_str(row_mode) or norm_text(row_mode) != mode:
+                fail(item, "perf row %s carries the run's model mode"
+                     % os.path.relpath(path, results_dir),
+                     "line %d model_mode=%r expected %r" % (index, row_mode,
+                                                            mode))
+    _s1_check_index(results_dir, run_dir, manifest, summary, prefix)
+
+
+def check_s1(run_dir, results_dir, manifest, summary, windows, prefix):
+    """Run all S1 checks; fail closed but keep the S0 checks untouched."""
+    item = "%s S1 strict-8SYNC/frozen/full-support" % prefix
+    if not any(isinstance(w.get("recon"), dict) for w in windows):
+        return
+    mode, mode_path = s1_mode_of(manifest, summary)
+    legacy = _s1_legacy_declared(manifest, summary)
+    if legacy is not None:
+        skip("%s: explicit legacy method" % item,
+             "%s -> S1 evidence not required; S1 claims forbidden" % legacy)
+        gates = summary.get("gates") if isinstance(summary, dict) else None
+        if isinstance(gates, dict) and gates.get("s1_pass") is True:
+            fail("%s: a legacy run does not claim an S1 pass" % item,
+                 "gates.s1_pass=true with legacy marker %s" % legacy)
+        for window in windows:
+            recon = window.get("recon")
+            if isinstance(recon, dict) and any(k in recon
+                                               for k in S1_EVAL_ACTUAL_KEYS):
+                fail("%s: a legacy run does not report S1 region metrics"
+                     % item, "window_id=%r reports %s"
+                     % (window.get("window_id"),
+                        [k for k in S1_EVAL_ACTUAL_KEYS if k in recon]))
+                break
+        return
+    if mode is None:
+        fail("%s: the run declares its SIC model mode" % item,
+             "expected sic_model_mode=%r at the manifest top level, in "
+             "effective_config, or in a sic/s1 block; a SIC-on run that "
+             "declares nothing cannot be audited" % S1_MODEL_MODE)
+    elif mode not in S1_MODEL_MODES:
+        fail("%s: the declared model mode is %r" % (item, S1_MODEL_MODE),
+             "got %r via %s" % (mode, mode_path))
+
+    committed = _s1_run_windows(windows)
+    with_model = []
+    missing_model = []
+    for window in committed:
+        model, mpath = s1_model_of(window)
+        if isinstance(model, dict):
+            with_model.append((window, model, mpath))
+        else:
+            missing_model.append(window.get("window_id"))
+    if missing_model:
+        fail("%s: committed windows declare the frozen SicModel" % item,
+             "%d window(s) lack sic_model, first ids %s"
+             % (len(missing_model), missing_model[:5]))
+    if not with_model:
+        fail("%s: at least one window carries S1 model evidence" % item,
+             "no sic_model block under %d committed window(s)" % len(committed))
+        # Make each S1 evidence family explicit instead of silently skipping it.
+        fail("%s S1-1 strict-prefix evidence" % item,
+             "no observed_end_sample/training_lo/hi/estimation_ready_sample/"
+             "estimation_ranges/guard is declared on any committed window")
+        fail("%s S1-2 frozen-model evidence" % item,
+             "no model_id/fingerprint/frozen params/apply block is declared on "
+             "any committed window")
+        fail("%s S1-3 support semantics" % item,
+             "no support_lo/hi/support_source/support_coverage is declared on "
+             "any committed window")
+        fail("%s S1-4 regions" % item,
+             "no eval_lo/hi, tail_lo/hi or applied sub range is declared on any "
+             "committed window")
+        _s1_check_summary(summary, windows, prefix)
+        if manifest is not None:
+            _s1_check_seeds(manifest, summary, windows, prefix)
+            check_s1_provenance(manifest, summary, run_dir, results_dir,
+                                prefix, mode)
+        return
+
+    counts = {name: 0 for name in ("prefix", "frozen", "support", "regions",
+                                   "actual")}
+    per_window = {}
+    npz_cache = {}
+    for window, model, mpath in with_model:
+        wid = window.get("window_id")
+        where = "%s window_id=%r" % (item, wid)
+        g = _s1_parse_model(model, mpath, where)
+        if _s1_check_prefix(window, g, where, mode):
+            counts["prefix"] += 1
+        if _s1_check_frozen(window, g, where):
+            counts["frozen"] += 1
+        if _s1_check_support(window, g, where) == 0:
+            counts["support"] += 1
+        if _s1_check_regions(window, g, where) == 0:
+            counts["regions"] += 1
+        arrays = load_recon_arrays(run_dir, wid, npz_cache)
+        recon = window.get("recon")
+        result = _s1_check_actual(window, g, recon, arrays, where)
+        per_window[wid] = result
+        if all(result[k] is not None or result[k + "_na"]
+               for k in ("eval", "tail", "full")):
+            counts["actual"] += 1
+    total = len(with_model)
+    for name in ("prefix", "frozen", "support", "regions", "actual"):
+        if counts[name] == total:
+            ok("%s %s: %d/%d window(s)" % (item, name, counts[name], total),
+               "all committed windows pass")
+    _s1_check_summary(summary, windows, prefix)
+    if manifest is not None:
+        _s1_check_seeds(manifest, summary, windows, prefix)
+        check_s1_provenance(manifest, summary, run_dir, results_dir, prefix,
+                            mode)
+
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 
@@ -4828,6 +6407,9 @@ def check_run(run_dir, results_dir, index=None):
         check_effective_config(manifest, windows, summary, prefix)
         check_window_config_recorded(manifest, windows, summary, prefix)
         check_regions_r02_r06(run_dir, windows, summary, prefix)
+        # S1: strict 8-SYNC estimation, frozen model, full-support cancellation,
+        # independent-eval/tail actual effect, seed independence, provenance.
+        check_s1(run_dir, results_dir, manifest, summary, windows, prefix)
     stats = None
     if os.path.isfile(os.path.join(run_dir, "stage_times.csv")):
         stats = check_stage_times(run_dir, by_id or {}, prefix)
@@ -4920,22 +6502,32 @@ def build_good_set(root):
 
     n_windows = 5
     sample_count = 190912
-    # R02/R06 geometry: three disjoint regions -- estimation (fit), online
-    # validation (commit gate) and the independent final evaluation region.
-    fit_reps = 2
-    validation_reps = 8
-    fit_len = fit_reps * SYNC_SAMPLES_PER_SYMBOL                  # 2032
-    online_len = validation_reps * SYNC_SAMPLES_PER_SYMBOL        # 8128
-    array_len = 32000
-    eval_lo, eval_hi = 0, 4000
-    est_lo, est_hi = 4000, 4000 + fit_len                         # [4000,6032)
-    on_lo, on_hi = est_hi, est_hi + online_len                    # [6032,14160)
-    hold_lo, hold_hi = 20000, 24000     # disjoint holdout (h_lo > eval_lo)
-    ov_lo, ov_hi = 100, 4000            # R01 truth overlap (window-local)
+    # S1 geometry: training is the first 8 SYNC [origin, origin+8*sps); the
+    # independent evaluation is SYNC [8,64); the tail-eval is the last 4 SYNC.
+    # online_validation_reps == 0 (the S1 default): the gate runs on training.
+    fit_reps = 8
+    validation_reps = 0
+    evaluation_reps = 56
+    sps = SYNC_SAMPLES_PER_SYMBOL
+    sync_reps = 64
+    origin = 1000
+    fit_len = fit_reps * sps                                      # 8128
+    est_lo, est_hi = origin, origin + fit_len                     # [1000,9128)
+    on_lo, on_hi = est_hi, est_hi                                 # empty (0 reps)
+    online_len = 0
+    eval_lo, eval_hi = est_hi, origin + sync_reps * sps           # [9128,66024)
+    tail_lo, tail_hi = origin + (sync_reps - 4) * sps, eval_hi    # [61960,66024)
+    hold_lo, hold_hi = 20000, 24000     # inside eval, disjoint from training
+    ov_lo, ov_hi = origin, origin + sync_reps * sps               # truth overlap
+    support_pre_tail, support_post_tail = 0, 64
+    support_lo = origin - support_pre_tail
+    support_hi = origin + sync_reps * sps + support_post_tail     # 66088
+    sub_lo, sub_hi = support_lo, support_hi
+    array_len = 70000
+    model_seed = 1000
     cir_len = 256
     target_lo, target_hi = 85, 96
     target_tap = 90
-    online_nmse = 0.05
 
     # config + template files (referenced and hashed by the manifest)
     config_path = os.path.join(run_dir, "config.json")
@@ -4955,17 +6547,17 @@ def build_good_set(root):
 
     rng = np.random.default_rng(1234)
     for wid in range(n_windows):
-        suppression = 12.0 + 0.5 * wid  # distinct so medians differ
-        nmse = 10.0 ** (-suppression / 10.0)
-        hold_sup = suppression - 1.0
+        # Reconstruction NMSE targets (region-dependent: eval and holdout are
+        # independent, and holdout is nested inside eval but overrides it).
+        recon_sup = 12.0 + 0.5 * wid
+        recon_nmse = 10.0 ** (-recon_sup / 10.0)
+        hold_sup = recon_sup - 1.0
         hold_nmse = 10.0 ** (-hold_sup / 10.0)
         i = (rng.standard_normal(array_len) + 1j * rng.standard_normal(array_len))
         i_hat = i.copy()
-        # Region-dependent error so the estimation / online-gate / eval / holdout
-        # NMSEs are independent (R06 data-dependency).
-        for region_lo, region_hi, target_nmse in ((eval_lo, eval_hi, nmse),
-                                                  (hold_lo, hold_hi, hold_nmse),
-                                                  (on_lo, on_hi, online_nmse)):
+        for region_lo, region_hi, target_nmse in (
+                (eval_lo, eval_hi, recon_nmse),
+                (hold_lo, hold_hi, hold_nmse)):
             ref = i[region_lo:region_hi]
             err = (rng.standard_normal(region_hi - region_lo)
                    + 1j * rng.standard_normal(region_hi - region_lo))
@@ -4973,36 +6565,67 @@ def build_good_set(root):
             scale = math.sqrt(target_nmse * den
                               / float(np.vdot(err, err).real))
             i_hat[region_lo:region_hi] = ref + err * scale
-        npz_path = os.path.join(run_dir, "recon", "window_%d.npz" % wid)
-        # R01 actual-output arrays: ``y`` is the raw SIC input and ``y_clean`` is
-        # the IQ the SIC actually output, so delta_actual = y - y_clean is the
-        # applied subtraction.  The true interferer ``i`` is the reference.
-        actual_sup = suppression - 2.0           # deliberately != reconstruction
-        actual_nmse = 10.0 ** (-actual_sup / 10.0)
+
+        # Distinct actual-output suppression per region so a copy from one
+        # region into another is caught by the independent recompute.
+        actual_full_sup = 23.0 - 0.4 * wid
+        actual_eval_sup = 21.0 - 0.3 * wid
+        actual_tail_sup = 20.0 - 0.2 * wid
         base = 0.25 * (rng.standard_normal(array_len)
                        + 1j * rng.standard_normal(array_len))
         y = base + i
         y_clean = y.copy()
-        resid = (rng.standard_normal(ov_hi - ov_lo)
-                 + 1j * rng.standard_normal(ov_hi - ov_lo))
-        den_ov = float(np.vdot(i[ov_lo:ov_hi], i[ov_lo:ov_hi]).real)
-        rscale = math.sqrt(actual_nmse * den_ov
-                           / float(np.vdot(resid, resid).real))
-        y_clean[ov_lo:ov_hi] = base[ov_lo:ov_hi] + resid * rscale
+        residual = np.zeros(array_len, dtype=np.complex128)
+
+        def _fill_region(target_sup, lo, hi):
+            noise = (rng.standard_normal(hi - lo)
+                     + 1j * rng.standard_normal(hi - lo))
+            den = float(np.vdot(i[lo:hi], i[lo:hi]).real)
+            nmse = 10.0 ** (-target_sup / 10.0)
+            scale = math.sqrt(nmse * den / float(np.vdot(noise, noise).real))
+            residual[lo:hi] = noise * scale
+
+        _fill_region(actual_full_sup, sub_lo, sub_hi)      # full support
+        _fill_region(actual_eval_sup, eval_lo, eval_hi)    # independent eval
+        _fill_region(actual_tail_sup, tail_lo, tail_hi)    # tail-4-SYNC
+        # y_clean = y - i + residual over the applied support (the SIC removed
+        # the true interference and left `residual`).
+        y_clean[sub_lo:sub_hi] = base[sub_lo:sub_hi] + residual[sub_lo:sub_hi]
         y_c64 = y.astype(np.complex64)
         yc_c64 = y_clean.astype(np.complex64)
         i_c64 = i.astype(np.complex64)
-        # Declare the actual metric from the *cast* arrays so it is exactly the
-        # quantity the verifier recomputes.
-        _delta = (y_c64[ov_lo:ov_hi].astype(np.complex128)
-                  - yc_c64[ov_lo:ov_hi].astype(np.complex128))
-        _resid = i_c64[ov_lo:ov_hi].astype(np.complex128) - _delta
-        _den = float(np.vdot(i_c64[ov_lo:ov_hi].astype(np.complex128),
-                             i_c64[ov_lo:ov_hi].astype(np.complex128)).real)
-        _num = float(np.vdot(_resid, _resid).real)
-        declared_actual_nmse = _num / _den
-        declared_actual_sup = (-10.0 * math.log10(declared_actual_nmse)
-                               if _num > 0 else 60.0)
+        i_hat_c64 = i_hat.astype(np.complex64)
+        npz_path = os.path.join(run_dir, "recon", "window_%d.npz" % wid)
+
+        # Declare every recomputed quantity from the *cast* arrays so it is
+        # exactly the quantity the verifier re-derives.
+        def _declared_nmse(lo, hi):
+            ref = i_c64[lo:hi].astype(np.complex128)
+            est = i_hat_c64[lo:hi].astype(np.complex128)
+            den = float(np.vdot(ref, ref).real)
+            if den <= 0:
+                return 0.0
+            return float(np.vdot(est - ref, est - ref).real) / den
+
+        def _declared_actual(lo, hi):
+            ref = i_c64[lo:hi].astype(np.complex128)
+            delta = (y_c64[lo:hi].astype(np.complex128)
+                     - yc_c64[lo:hi].astype(np.complex128))
+            resid = ref - delta
+            den = float(np.vdot(ref, ref).real)
+            num = float(np.vdot(resid, resid).real)
+            if den <= 0:
+                return None, None
+            nmse = num / den
+            return nmse, (-10.0 * math.log10(nmse) if num > 0 else 60.0)
+
+        nmse = _declared_nmse(eval_lo, eval_hi)
+        suppression = -10.0 * math.log10(nmse) if nmse > 0 else 60.0
+        hold_nmse = _declared_nmse(hold_lo, hold_hi)
+        hold_sup = -10.0 * math.log10(hold_nmse) if hold_nmse > 0 else 60.0
+        declared_actual_nmse, declared_actual_sup = _declared_actual(ov_lo, ov_hi)
+        _eval_actual_nmse, eval_actual_sup = _declared_actual(eval_lo, eval_hi)
+        _tail_actual_nmse, tail_actual_sup = _declared_actual(tail_lo, tail_hi)
         # R04 raw (non-normalized) CIRs with a fixed weak-target ROI.
         cir_clean = 0.001 * (rng.standard_normal(cir_len)
                              + 1j * rng.standard_normal(cir_len))
@@ -5021,7 +6644,7 @@ def build_good_set(root):
         _peak_c = target_lo + int(np.argmax(np.abs(cir_clean_c64[target_lo:target_hi])))
         _peak_s = target_lo + int(np.argmax(np.abs(cir_sic_c64[target_lo:target_hi])))
         _peak_shift = _peak_s - _peak_c
-        np.savez(npz_path, i=i_c64, i_hat=i_hat.astype(np.complex64),
+        np.savez(npz_path, i=i_c64, i_hat=i_hat_c64,
                  y=y_c64, y_clean=yc_c64,
                  cir_raw_clean=cir_clean_c64, cir_raw_sic=cir_sic_c64)
         fixture_hashes["recon/window_%d.npz" % wid] = sha256_file(npz_path)
@@ -5053,6 +6676,7 @@ def build_good_set(root):
             "overlap": {"lo": ov_lo, "hi": ov_hi, "samples": ov_hi - ov_lo},
             "isr_db": 10.0, "snr_db": 30.0, "comm_code": 10, "sic_k": 4,
             "fit_reps": fit_reps, "validation_reps": validation_reps,
+            "evaluation_reps": evaluation_reps,
             "fit_reps_source": "preset", "validation_reps_source": "preset",
             "roi": [0, 1024],
             "demod_softchip_mode": "bypass",
@@ -5067,28 +6691,90 @@ def build_good_set(root):
                       "holdout_nmse": hold_nmse,
                       "holdout_suppression_db": hold_sup,
                       "holdout_lo": hold_lo, "holdout_hi": hold_hi,
-                      # R06: online-validation (gate) metric, recomputed by the
-                      # verifier over the online region only.
-                      "online_nmse": online_nmse,
-                      "online_suppression_db": -10.0 * math.log10(online_nmse),
-                      # R01 actual-output cancellation (main gate).
+                      # R01 actual-output cancellation (main gate) + the S1
+                      # independent-eval / tail-4-SYNC actual metrics.
                       "actual_nmse": declared_actual_nmse,
                       "actual_suppression_db": declared_actual_sup,
+                      "full_overlap_actual_suppression_db": declared_actual_sup,
+                      "eval_actual_suppression_db": eval_actual_sup,
+                      "tail_actual_suppression_db": tail_actual_sup,
                       "sub_lo": ov_lo, "sub_hi": ov_hi, "coverage": 1.0,
                       "uses_truth": False},
-            # R02/R06 region + named-quantity block.
+            # R02/R06 region + named-quantity block (S1 geometry).
             "regions": {
                 "fit_len": fit_len,
                 "estimation_lo": est_lo, "estimation_hi": est_hi,
                 "online_validation_len": online_len,
                 "online_validation_lo": on_lo, "online_validation_hi": on_hi,
+                "evaluation_reps": evaluation_reps,
                 "eval_len": eval_hi - eval_lo,
                 "eval_lo": eval_lo, "eval_hi": eval_hi,
                 "signal_start": ov_lo, "signal_stop": ov_hi,
-                "gate_lo": on_lo, "gate_hi": on_hi,
-                "gate_keys": ["online_nmse", "online_suppression_db"],
+                "gate_lo": est_lo, "gate_hi": est_hi,
+                "gate_keys": ["fit_residual", "cond2"],
                 "search_roi": [0, 1024],
-                "subtraction_roi": [ov_lo, ov_hi],
+                "subtraction_roi": [sub_lo, sub_hi],
+                "training_lo": est_lo, "training_hi": est_hi,
+                "tail_eval_lo": tail_lo, "tail_eval_hi": tail_hi,
+            },
+            # S1: the frozen model estimated from the first 8 SYNC.
+            "sic_model": {
+                "mode": S1_MODEL_MODE,
+                "model_id": "model-w%d" % wid,
+                "fingerprint": hashlib.sha256(
+                    ("model-%d" % wid).encode("utf-8")).hexdigest(),
+                "fit_reps": fit_reps,
+                "strict_8sync": True,
+                "guard": {"pre": 0, "post": 0},
+                "origin": origin,
+                "cfo_hz": 0.0,
+                "n_paths": 1,
+                "tau": [0.0],
+                "gain": [[1.0, 0.0]],
+                "sample_rate": WORK_HZ,
+                "samples_per_symbol": sps,
+                "nominal_sync_reps": sync_reps,
+                "training_lo": est_lo, "training_hi": est_hi,
+                "observed_end_sample": est_hi,
+                "estimation_ready_sample": est_hi + 272,
+                "estimation_ranges": {
+                    "training": [est_lo, est_hi],
+                    "cfo": [est_lo, est_hi],
+                    "cir": [est_lo, est_hi],
+                },
+                "support_lo": support_lo, "support_hi": support_hi,
+                "support_source": "configured_nominal_prediction",
+                "support_pre_tail": support_pre_tail,
+                "support_post_tail": support_post_tail,
+                "support_coverage": 1.0,
+                "sub_lo": sub_lo, "sub_hi": sub_hi,
+                "phase_reference": est_lo,
+                "eval_lo": eval_lo, "eval_hi": eval_hi,
+                "tail_lo": tail_lo, "tail_hi": tail_hi,
+                "fit_residual": 1.0e-3,
+                "cond2": 2.5,
+                "status": "ok",
+                "apply": {
+                    "model_id": "model-w%d" % wid,
+                    "fingerprint": hashlib.sha256(
+                        ("model-%d" % wid).encode("utf-8")).hexdigest(),
+                    "refit_count": 0,
+                    "param_deltas": {},
+                    "params": {
+                        "origin": origin, "cfo_hz": 0.0, "n_paths": 1,
+                        "tau": [0.0], "gain": [[1.0, 0.0]],
+                        "support_lo": support_lo, "support_hi": support_hi,
+                        "sub_lo": sub_lo, "sub_hi": sub_hi,
+                        "phase_reference": est_lo,
+                    },
+                },
+            },
+            # S1: the formal acceptance window identity (seed provenance).
+            "generator": {
+                "seed_set": "acceptance",
+                "seed": 2000000 + wid,
+                "seed_offset": wid,
+                "noise_root": "noise-acc-%d" % wid,
             },
             "target": {"target_lo": target_lo, "target_hi": target_hi,
                        "target_amp_err_db": _amp_err,
@@ -5126,7 +6812,11 @@ def build_good_set(root):
         sic_demod = {"detect_coarse": 40, "detect_fine": 60, "cfo": 25,
                      "cir": 70, "path_select": 20, "fractional_refine": 30,
                      "matrix_build": 15, "gain_fit": 35, "reconstruct": 45,
-                     "validate_commit": 10, "core_total": 400}
+                     "validate_commit": 10,
+                     # S1 §8 cost split.
+                     "acquisition": 30, "estimate8": 60, "model_prep": 20,
+                     "backtrack": 25, "apply": 40,
+                     "core_total": 600}
         for consumer_name in ("clean", "raw", "sic"):
             for stage, us in demod.items():
                 stage_rows.append(("run-main-1", wid, consumer_name, "demod",
@@ -5171,6 +6861,15 @@ def build_good_set(root):
     effect["n_windows"] = n_windows
     effect["n_interference_windows"] = n_windows
     effect["n_na_windows"] = 0
+    # S1: the independent-eval and tail-4-SYNC actual medians/counts.
+    effect["median_eval_actual_suppression_db"] = median(
+        [w["recon"]["eval_actual_suppression_db"] for w in windows])
+    effect["median_tail_actual_suppression_db"] = median(
+        [w["recon"]["tail_actual_suppression_db"] for w in windows])
+    effect["n_eval_windows"] = n_windows
+    effect["n_eval_na_windows"] = 0
+    effect["n_tail_windows"] = n_windows
+    effect["n_tail_na_windows"] = 0
     summary = {
         "run_id": "run-main-1", "preset": "main", "input_grid": "work",
         "sic_mode": "estimate", "consumer": "sic",
@@ -5219,6 +6918,9 @@ def build_good_set(root):
         "sync_reps": 64,
         "fit_reps": fit_reps,
         "validation_reps": validation_reps,
+        "online_validation_reps": validation_reps,
+        "evaluation_reps": evaluation_reps,
+        "sic_model_mode": S1_MODEL_MODE,
         "sic_k": 4,
         "template_id": "comm_code10",
         "comm_template_sha256": template_sha,
@@ -5230,6 +6932,7 @@ def build_good_set(root):
     layer_identity = {
         "case_id": "main",
         "config_hash": effective_hash,
+        "sic_model_mode": S1_MODEL_MODE,
         "template_id": "comm_code10",
         "input_length": sample_count,
         "validation_reps": validation_reps,
@@ -5251,6 +6954,8 @@ def build_good_set(root):
             "functional": dict(layer_identity),
             "core": dict(layer_identity),
             "gr": dict(layer_identity),
+            "cir": dict(layer_identity),
+            "full_demod": dict(layer_identity),
             "native": dict(layer_identity),
         },
         "fixture_hashes": fixture_hashes,
@@ -5260,9 +6965,15 @@ def build_good_set(root):
                                           "sha256": template_sha,
                                           "mode": "finite_sync_code_pulse"}},
         "seed_lists": {"calibration": list(range(1000000, 1000004)),
-                       "acceptance": list(range(2000000, 2000004))},
+                       "acceptance": list(range(2000000, 2000005))},
+        # S1: the generated calibration windows (seed + offset + noise root) so
+        # seed reuse can be disproved, not only a disjoint name list.
+        "calibration_windows": [
+            {"seed": 1000000 + index, "seed_offset": 0,
+             "noise_root": "noise-cal-%d" % index} for index in range(4)],
         "sample_rate_work": WORK_HZ, "sample_rate_native": 491520000.0,
         "input_grid": "work", "preset": "main", "sic_mode": "estimate",
+        "sic_model_mode": S1_MODEL_MODE,
         # R10: provenance, an explicit 未实跑 MATLAB status, and an explicit
         # "not superseded" flag.
         "superseded": False,
@@ -5279,6 +6990,7 @@ def build_good_set(root):
             "libgnuradio_uwb_sha256": lib_sha,
             "input_source": "work",
             "production_profile": False,
+            "sic_model_mode": S1_MODEL_MODE,
         },
         "matlab": {
             "status": "未实跑",
@@ -5302,10 +7014,10 @@ def build_good_set(root):
                          "comm_preamble_sha256", "input_len", "windows",
                          "effect_ok", "effect_fail", "effect_verified",
                          "production_profile", "official_evidence",
-                         "exit_class"])
+                         "exit_class", "model_mode"])
         writer.writerow(["sic_only", "gr", "sic", effective_hash, template_sha,
                          sample_count, 2000, 4000, 0, "True", "True", "True",
-                         "ok"])
+                         "ok", S1_MODEL_MODE])
     bench_dir = os.path.join(root, "real_core")
     os.makedirs(bench_dir, exist_ok=True)
     bench_summary = {
@@ -5330,13 +7042,26 @@ def build_good_set(root):
             "libgnuradio_uwb_sha256": lib_sha,
         },
         "resolved_config": {"preset": "main", "fit_reps": fit_reps,
-                            "validation_reps": validation_reps},
+                            "validation_reps": validation_reps,
+                            "online_validation_reps": validation_reps,
+                            "evaluation_reps": evaluation_reps,
+                            "sic_model_mode": S1_MODEL_MODE},
         "terminal": {"completions": 4000, "downstream_ok": 4000},
         "effect": {"ok": 4000, "fail": 0, "verified": True},
     }
     with open(os.path.join(bench_dir, "gr_sic_summary.json"), "w",
               encoding="utf-8") as handle:
         json.dump(bench_summary, handle, indent=1)
+
+    # S1-7: the results-root index must reference the actual latest run.
+    with open(os.path.join(root, "index.json"), "w", encoding="utf-8") as handle:
+        json.dump({
+            "schema": "sic-s1-results-index/1",
+            "latest_run": "main",
+            "runs": {"main": {"run_id": "run-main-1", "windows": n_windows,
+                              "model_mode": S1_MODEL_MODE,
+                              "config_hash": effective_hash}},
+        }, handle, indent=1)
     return results_dir_root(run_dir)
 
 
@@ -5450,6 +7175,15 @@ def _manifest_edit(root, mutate):
     mutate(manifest)
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=1)
+
+
+def _index_edit(root, mutate):
+    path = os.path.join(root, "index.json")
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    mutate(data)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=1)
 
 
 def _truth_edit(root, mutate):
@@ -6034,6 +7768,206 @@ def mutation_specs(root):
             json.dump(data, handle, indent=1)
     specs.append(("R10 production: synthetic input claimed as production",
                   benchmark_claims_production_synthetic))
+
+    # ---- S1 adversarial counterexamples (one per S1 check 1-7) ------------
+    def s1_estimation_range_reads_past_prefix():
+        """S1-1: an estimation input range extends past observed_end_sample."""
+        def edit(rows):
+            model = rows[0]["sic_model"]
+            model["estimation_ranges"]["cir"] = [
+                model["training_lo"],
+                model["observed_end_sample"] + SYNC_SAMPLES_PER_SYMBOL]
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1-1 estimation range reads past the visible prefix",
+                  s1_estimation_range_reads_past_prefix))
+
+    def s1_strict_claim_with_52_reps():
+        """S1-1: the model claims 52 training reps (not a strict 8-SYNC)."""
+        def edit(rows):
+            rows[0]["sic_model"]["fit_reps"] = 52
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1-1 strict 8-SYNC claim with fit_reps != 8",
+                  s1_strict_claim_with_52_reps))
+
+    def s1_guard_not_declared():
+        """S1-1: the guard length is not explicitly declared."""
+        def edit(rows):
+            rows[0]["sic_model"].pop("guard", None)
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1-1 guard length not explicitly declared",
+                  s1_guard_not_declared))
+
+    def s1_frozen_param_mutated_at_apply():
+        """S1-2: a frozen gain changed after estimation (apply diverges)."""
+        def edit(rows):
+            rows[0]["sic_model"]["apply"]["params"]["gain"] = [[1.25, 0.0]]
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1-2 frozen parameter mutated after estimation",
+                  s1_frozen_param_mutated_at_apply))
+
+    def s1_refit_during_apply():
+        """S1-2: the apply step re-fits the model."""
+        def edit(rows):
+            rows[0]["sic_model"]["apply"]["refit_count"] = 1
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1-2 apply re-fits the frozen model", s1_refit_during_apply))
+
+    def s1_support_clipped_to_8sync():
+        """S1-3: the support is clipped to the first 8 SYNC."""
+        def edit(rows):
+            model = rows[0]["sic_model"]
+            model["support_hi"] = (model["origin"] + 8 * SYNC_SAMPLES_PER_SYMBOL
+                                   + model["support_post_tail"])
+            model["apply"]["params"]["support_hi"] = model["support_hi"]
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1-3 support clipped to the first 8 SYNC",
+                  s1_support_clipped_to_8sync))
+
+    def s1_support_from_confirmed_count():
+        """S1-3: the support comes from a measured/confirmed count."""
+        def edit(rows):
+            model = rows[0]["sic_model"]
+            model["support_hi"] = (model["origin"]
+                                   + 60 * SYNC_SAMPLES_PER_SYMBOL
+                                   + model["support_post_tail"])
+            model["apply"]["params"]["support_hi"] = model["support_hi"]
+            model["support_source"] = "measured_confirmed"
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1-3 support from a confirmed count, not the nominal "
+                  "prediction", s1_support_from_confirmed_count))
+
+    def s1_eval_left_uncancelled():
+        """S1-4: the independent-evaluation region is not in the subtraction."""
+        def edit(rows):
+            model = rows[0]["sic_model"]
+            model["sub_hi"] = model["eval_lo"]
+            model["apply"]["params"]["sub_hi"] = model["sub_hi"]
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1-4 evaluation region left un-cancelled",
+                  s1_eval_left_uncancelled))
+
+    def s1_eval_overlaps_training():
+        """S1-4: the evaluation region overlaps the training region."""
+        def edit(rows):
+            model = rows[0]["sic_model"]
+            model["eval_lo"] = model["training_hi"] - 500
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1-4 evaluation region overlaps training",
+                  s1_eval_overlaps_training))
+
+    def s1_gate_on_eval_region():
+        """S1-4: the commit gate is decided on the evaluation region."""
+        def edit(rows):
+            model = rows[0]["sic_model"]
+            rows[0]["regions"]["gate_lo"] = model["eval_lo"]
+            rows[0]["regions"]["gate_hi"] = model["eval_hi"]
+            rows[0]["regions"]["gate_keys"] = ["nmse"]
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1-4 commit gate uses evaluation-region data",
+                  s1_gate_on_eval_region))
+
+    def s1_eval_metric_copied_from_full():
+        """S1-5: the eval metric is copied from the full-overlap metric."""
+        def edit(rows):
+            recon = rows[0]["recon"]
+            recon["eval_actual_suppression_db"] = \
+                recon["actual_suppression_db"]
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1-5 evaluation metric copied from the full overlap",
+                  s1_eval_metric_copied_from_full))
+
+    def s1_eval_arrays_left_uncancelled():
+        """S1-5: the archived output does not change over the eval region."""
+        def transform(data):
+            model_lo, model_hi = 9128, 66024
+            out = dict(data)
+            y_clean = np.array(data["y"]).astype(np.complex64)
+            y_clean[model_lo:model_hi] = data["y"][model_lo:model_hi]
+            out["y_clean"] = y_clean
+            return out
+        _rewrite_npz(root, 0, transform)
+    specs.append(("S1-5 evaluation region not actually cancelled in the arrays",
+                  s1_eval_arrays_left_uncancelled))
+
+    def s1_only_reconstruction_medians():
+        """S1-5: only reconstruction NMSE is reported (no region medians)."""
+        def edit(summary):
+            for key in ("median_eval_actual_suppression_db",
+                        "median_tail_actual_suppression_db"):
+                summary["effect"].pop(key, None)
+            return summary
+        _summary_edit(root, edit)
+    specs.append(("S1-5 only reconstruction NMSE is reported",
+                  s1_only_reconstruction_medians))
+
+    def s1_acceptance_reuses_calibration_seed():
+        """S1-6: a formal window reuses a calibration seed."""
+        def edit(rows):
+            rows[0]["generator"]["seed"] = 1000000
+            rows[0]["generator"]["seed_set"] = "calibration"
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1-6 acceptance window reuses a calibration seed",
+                  s1_acceptance_reuses_calibration_seed))
+
+    def s1_reused_acceptance_noise():
+        """S1-6: two formal windows share one generated window/noise."""
+        def edit(rows):
+            rows[0]["generator"] = dict(rows[1]["generator"])
+            return rows
+        _windows_insert(root, edit)
+    specs.append(("S1-6 acceptance window reuses another window/noise",
+                  s1_reused_acceptance_noise))
+
+    def s1_calibration_windows_missing():
+        """S1-6: the generated calibration windows are not recorded."""
+        def edit(manifest):
+            manifest.pop("calibration_windows", None)
+        _manifest_edit(root, edit)
+    specs.append(("S1-6 calibration windows not recorded",
+                  s1_calibration_windows_missing))
+
+    def s1_layer_model_mode_differs():
+        """S1-7: one layer ran a different model mode."""
+        def edit(manifest):
+            manifest["implementation_configs"]["gr"]["sic_model_mode"] = \
+                "legacy_cover"
+        _manifest_edit(root, edit)
+    specs.append(("S1-7 layer runs a different model mode",
+                  s1_layer_model_mode_differs))
+
+    def s1_cir_row_missing():
+        """S1-7: the CIR row is not declared at all."""
+        def edit(manifest):
+            manifest["implementation_configs"].pop("cir", None)
+        _manifest_edit(root, edit)
+    specs.append(("S1-7 CIR implementation row missing", s1_cir_row_missing))
+
+    def s1_stale_index():
+        """S1-7: index.json points at a run that does not exist."""
+        def edit(index):
+            index["latest_run"] = "ghost_run"
+        _index_edit(root, edit)
+    specs.append(("S1-7 stale index.json latest_run", s1_stale_index))
+
+    def s1_index_count_mismatch():
+        """S1-7: the index report count disagrees with the artifact."""
+        def edit(index):
+            index["runs"]["main"]["windows"] = 3
+        _index_edit(root, edit)
+    specs.append(("S1-7 index report/artifact count mismatch",
+                  s1_index_count_mismatch))
 
     return specs
 

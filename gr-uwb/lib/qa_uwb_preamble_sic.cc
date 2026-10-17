@@ -395,7 +395,22 @@ const char* const kOutMetaKeys[] = {
     "sic_detect_coarse_us", "sic_detect_fine_us",  "sic_cfo_us",
     "sic_cir_us",         "sic_path_select_us",    "sic_fractional_refine_us",
     "sic_matrix_build_us", "sic_gain_fit_us",      "sic_reconstruct_us",
-    "sic_validate_commit_us"
+    "sic_validate_commit_us",
+    // S1 frozen-model publication (additive).
+    "sic_model_mode",     "sic_model_id",          "sic_model_fingerprint",
+    "sic_observed_end_sample", "sic_observed_end_source",
+    "sic_visible_end_sample",  "sic_training_lo",   "sic_training_hi",
+    "sic_estimation_ready_sample", "sic_support_source",
+    "sic_support_coverage", "sic_sub_lo",          "sic_sub_hi",
+    "sic_phase_reference", "sic_fit_residual",     "sic_cond2",
+    "sic_apply_refit_count", "sic_apply_param_deltas",
+    "sic_nominal_sync_reps", "sic_samples_per_symbol", "sic_sample_rate",
+    // S1 per-path frozen-model tables (always present, empty when not applied).
+    "sic_tau",            "sic_gain_re",           "sic_gain_im",
+    "sic_path_count",     "sic_gain_cond",
+    // S1 estimate/apply decomposition.
+    "sic_estimate_us",    "sic_model_prepare_us",  "sic_apply_us",
+    "sic_backfill_us",    "sic_apply_forward_us"
 };
 
 void check_out_meta_keys(pmt::pmt_t meta)
@@ -413,6 +428,114 @@ uint64_t meta_u64(pmt::pmt_t meta, const char* k)
     if (pmt::is_integer(v))
         return static_cast<uint64_t>(pmt::to_long(v));
     return 0;
+}
+
+int64_t meta_i64(pmt::pmt_t meta, const char* k)
+{
+    pmt::pmt_t v = pmt::dict_ref(meta, pmt::mp(k), pmt::from_long(0));
+    if (pmt::is_integer(v))
+        return static_cast<int64_t>(pmt::to_long(v));
+    if (pmt::is_uint64(v))
+        return static_cast<int64_t>(pmt::to_uint64(v));
+    return 0;
+}
+
+double meta_f64(pmt::pmt_t meta, const char* k)
+{
+    pmt::pmt_t v = pmt::dict_ref(meta, pmt::mp(k), pmt::from_double(0.0));
+    if (pmt::is_real(v) || pmt::is_integer(v) || pmt::is_uint64(v))
+        return pmt::to_double(v);
+    return 0.0;
+}
+
+std::string meta_str(pmt::pmt_t meta, const char* k)
+{
+    return sym(pmt::dict_ref(meta, pmt::mp(k), pmt::PMT_NIL));
+}
+
+// Read a per-path f64vector table.  Returns false when the key is ABSENT or not
+// an f64vector; a PRESENT-but-empty vector returns true with out.empty() (the
+// adapter's "no paths" publication, which must not be confused with "not
+// published").  pmt::f64vector_elements is never called on an empty vector.
+bool meta_f64vec(pmt::pmt_t meta, const char* k, std::vector<double>& out)
+{
+    out.clear();
+    pmt::pmt_t v = pmt::dict_ref(meta, pmt::mp(k), pmt::PMT_NIL);
+    if (!pmt::is_f64vector(v))
+        return false;
+    const size_t n = pmt::length(v);
+    if (n == 0)
+        return true;
+    size_t ne = 0;
+    const double* p = pmt::f64vector_elements(v, ne);
+    out.assign(p, p + std::min(n, ne));
+    return true;
+}
+
+// The frozen-model witness set: every field that identifies the estimate.  Two
+// windows whose prefixes are identical must agree on ALL of them even when the
+// post-prefix IQ differs.
+struct ModelMeta {
+    std::string mode;
+    uint64_t id;
+    std::string fingerprint;
+    int64_t observed_end;
+    std::string observed_source;
+    int64_t training_lo, training_hi, ready, sub_lo, sub_hi, phase_ref;
+    std::string support_source;
+    int64_t support_lo, support_hi;
+    double coverage, fit_residual, cond2, sample_rate;
+    uint64_t nominal_reps, sps;
+};
+
+ModelMeta read_model_meta(pmt::pmt_t meta)
+{
+    ModelMeta m;
+    m.mode = meta_str(meta, "sic_model_mode");
+    m.id = meta_u64(meta, "sic_model_id");
+    m.fingerprint = meta_str(meta, "sic_model_fingerprint");
+    m.observed_end = meta_i64(meta, "sic_observed_end_sample");
+    m.observed_source = meta_str(meta, "sic_observed_end_source");
+    m.training_lo = meta_i64(meta, "sic_training_lo");
+    m.training_hi = meta_i64(meta, "sic_training_hi");
+    m.ready = meta_i64(meta, "sic_estimation_ready_sample");
+    m.sub_lo = meta_i64(meta, "sic_sub_lo");
+    m.sub_hi = meta_i64(meta, "sic_sub_hi");
+    m.phase_ref = meta_i64(meta, "sic_phase_reference");
+    m.support_source = meta_str(meta, "sic_support_source");
+    m.support_lo = meta_i64(meta, "sic_support_lo");
+    m.support_hi = meta_i64(meta, "sic_support_hi");
+    m.coverage = meta_f64(meta, "sic_support_coverage");
+    m.fit_residual = meta_f64(meta, "sic_fit_residual");
+    m.cond2 = meta_f64(meta, "sic_cond2");
+    m.sample_rate = meta_f64(meta, "sic_sample_rate");
+    m.nominal_reps = meta_u64(meta, "sic_nominal_sync_reps");
+    m.sps = meta_u64(meta, "sic_samples_per_symbol");
+    return m;
+}
+
+void check_model_meta_equal(const ModelMeta& a, const ModelMeta& b)
+{
+    BOOST_CHECK_EQUAL(a.mode, b.mode);
+    BOOST_CHECK_EQUAL(a.id, b.id);
+    BOOST_CHECK_EQUAL(a.fingerprint, b.fingerprint);
+    BOOST_CHECK_EQUAL(a.observed_end, b.observed_end);
+    BOOST_CHECK_EQUAL(a.observed_source, b.observed_source);
+    BOOST_CHECK_EQUAL(a.training_lo, b.training_lo);
+    BOOST_CHECK_EQUAL(a.training_hi, b.training_hi);
+    BOOST_CHECK_EQUAL(a.ready, b.ready);
+    BOOST_CHECK_EQUAL(a.sub_lo, b.sub_lo);
+    BOOST_CHECK_EQUAL(a.sub_hi, b.sub_hi);
+    BOOST_CHECK_EQUAL(a.phase_ref, b.phase_ref);
+    BOOST_CHECK_EQUAL(a.support_source, b.support_source);
+    BOOST_CHECK_EQUAL(a.support_lo, b.support_lo);
+    BOOST_CHECK_EQUAL(a.support_hi, b.support_hi);
+    BOOST_CHECK_EQUAL(a.coverage, b.coverage);
+    BOOST_CHECK_EQUAL(a.fit_residual, b.fit_residual);
+    BOOST_CHECK_EQUAL(a.cond2, b.cond2);
+    BOOST_CHECK_EQUAL(a.nominal_reps, b.nominal_reps);
+    BOOST_CHECK_EQUAL(a.sps, b.sps);
+    BOOST_CHECK_EQUAL(a.sample_rate, b.sample_rate);
 }
 
 size_t meta_children_sum(pmt::pmt_t meta)
@@ -1130,6 +1253,10 @@ BOOST_AUTO_TEST_CASE(test_adapter_oracle_vs_estimate_uses_truth)
         BOOST_CHECK(blk->has_msg_port(pmt::mp("truth")));
         Harness h(blk);
         blk->_post(pmt::mp("truth"), truth_msg(42));
+        // GNU Radio input ports have independent queues, so posting the truth
+        // before the window does not order the two handlers.  Wait for the
+        // stored acknowledgement before offering the window.
+        BOOST_REQUIRE(wait_status_event(h.status_dbg, "truth_ready"));
         blk->_post(pmt::mp("in"), make_pdu(y, 42));
         BOOST_REQUIRE(wait_delivered(h, 1));
         h.stop();
@@ -1347,4 +1474,469 @@ BOOST_AUTO_TEST_CASE(test_adapter_golden_fixture_optional)
     BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), 1u);
     BOOST_CHECK(bit_equal(pdu_iq(h.out_dbg->get_message(0)), y));
     BOOST_CHECK(all_zero(pdu_iq(h.ihat_dbg->get_message(0))));
+}
+
+// ---------------------------------------------------------------------------
+// 11. S1 prefix isolation at the ADAPTER level.  Two windows share an identical
+//     prefix [0, observed_end_sample) and differ only AFTER it; the published
+//     frozen-model metadata must be byte-for-byte identical (the post-prefix IQ
+//     never reaches estimation), while the cleaned output may differ.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_adapter_s1_prefix_isolation_meta)
+{
+    const Model m = build_model(10, 16);
+    const size_t n = 40960;
+    const int64_t start = 2500;
+    const int64_t observed_end = start + 8 * static_cast<int64_t>(kSps) + 64;
+    const std::vector<cplx> base =
+        make_signal(m, n, start, { { 0.0, cplx(1.f, 0.f) } }, 0.0, 0.0, 31);
+
+    // Variant A: the post-prefix region is zeroed.
+    std::vector<cplx> yA = base;
+    std::fill(yA.begin() + observed_end, yA.end(), cplx(0.f, 0.f));
+    // Variant B: a strong unrelated tone is ADDED after the prefix.
+    std::vector<cplx> yB = base;
+    for (size_t i = static_cast<size_t>(observed_end); i < n; ++i)
+        yB[i] += cplx(static_cast<float>(0.9 * std::sin(0.03 * double(i))),
+                      static_cast<float>(-0.7 * std::cos(0.017 * double(i))));
+    BOOST_REQUIRE(bit_equal(std::vector<cplx>(yA.begin(),
+                                              yA.begin() + observed_end),
+                            std::vector<cplx>(yB.begin(),
+                                              yB.begin() + observed_end)));
+
+    auto post = [&](const std::vector<cplx>& y, uint64_t wid) {
+        auto blk = Blk::make_from_templates(m.sync, m.preamble, 10, 16, kSps,
+                                            kFs, 4, 8, 8, 0,
+                                            static_cast<int64_t>(n), 14,
+                                            "estimate", 0.5, 0.25, 8,
+                                            size_t(1) << 30, 8, false);
+        Harness h(blk);
+        pmt::pmt_t pdu = make_pdu(y, wid);
+        pmt::pmt_t meta = pdu_meta(pdu);
+        meta = pmt::dict_add(meta, pmt::mp("observed_end_sample"),
+                             pmt::from_long(observed_end));
+        blk->_post(pmt::mp("in"), pmt::cons(meta, pmt::cdr(pdu)));
+        BOOST_REQUIRE(wait_delivered(h, 1));
+        h.stop();
+        BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), 1u);
+        return h.out_dbg->get_message(0);
+    };
+
+    const pmt::pmt_t outA = post(yA, 71);
+    const pmt::pmt_t outB = post(yB, 72);
+    const pmt::pmt_t mA = pdu_meta(outA);
+    const pmt::pmt_t mB = pdu_meta(outB);
+
+    BOOST_CHECK_EQUAL(meta_str(mA, "sic_state"), "committed");
+    BOOST_CHECK_EQUAL(meta_str(mB, "sic_state"), "committed");
+    // The declared prefix is recorded verbatim, never widened to the window.
+    BOOST_CHECK_EQUAL(meta_i64(mA, "sic_observed_end_sample"), observed_end);
+    BOOST_CHECK_EQUAL(meta_str(mA, "sic_observed_end_source"),
+                      "observed_end_sample");
+    BOOST_CHECK_EQUAL(meta_i64(mA, "sic_training_hi") -
+                          meta_i64(mA, "sic_training_lo"),
+                      start + 8 * static_cast<int64_t>(kSps) - start);
+    // Every frozen-model field is identical under different post-prefix IQ.
+    check_model_meta_equal(read_model_meta(mA), read_model_meta(mB));
+    // ... and the outputs genuinely differ (the post-prefix edit took effect).
+    BOOST_CHECK(!bit_equal(pdu_iq(outA), pdu_iq(outB)));
+    check_out_meta_keys(mA);
+    std::printf("[sic-adapter-qa] prefix_iso: model_id=%llu observed_end=%lld "
+                "src=%s training=[%lld,%lld) fit_res=%.4f cond2=%.3g\n",
+                static_cast<unsigned long long>(meta_u64(mA, "sic_model_id")),
+                static_cast<long long>(observed_end),
+                meta_str(mA, "sic_observed_end_source").c_str(),
+                static_cast<long long>(meta_i64(mA, "sic_training_lo")),
+                static_cast<long long>(meta_i64(mA, "sic_training_hi")),
+                meta_f64(mA, "sic_fit_residual"),
+                meta_f64(mA, "sic_cond2"));
+}
+
+// ---------------------------------------------------------------------------
+// 12. S1 full-nominal support on a committed window.  The cancellation support
+//     must be the WHOLE nominal preamble (sync_reps*sps + post_tail), not the
+//     8/16-symbol training window; the far tail must really be subtracted; and
+//     apply must not re-fit (refit_count == 0, no parameter deltas).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_adapter_s1_full_support_committed)
+{
+    const Model m = build_model(10, 64);
+    const size_t n = 70024;
+    const int64_t start = 2500;
+    const std::vector<cplx> y =
+        make_signal(m, n, start, { { 0.0, cplx(1.f, 0.f) } }, 0.0, 1e-3, 41);
+
+    const size_t post_tail = 100;
+    auto blk = Blk::make_from_templates(m.sync, m.preamble, 10, 64, kSps, kFs,
+                                        4, 8, 8, 0, static_cast<int64_t>(n), 14,
+                                        "estimate", 0.5, 0.25, 8,
+                                        size_t(1) << 30, 8, true, true, true, 0,
+                                        post_tail);
+    BOOST_CHECK_EQUAL(blk->support_mode(), std::string("configured_nominal"));
+    BOOST_CHECK_EQUAL(blk->model_mode(), std::string("estimate8_frozen"));
+    BOOST_CHECK_EQUAL(blk->online_validation_reps(), size_t(0));
+    Harness h(blk, true);
+    blk->_post(pmt::mp("in"), make_pdu(y, 81));
+    BOOST_REQUIRE(wait_delivered(h, 1));
+    h.stop();
+
+    BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), 1u);
+    const pmt::pmt_t out = h.out_dbg->get_message(0);
+    const pmt::pmt_t meta = pdu_meta(out);
+    BOOST_REQUIRE_EQUAL(meta_str(meta, "sic_state"), "committed");
+    BOOST_CHECK_EQUAL(meta_str(meta, "sic_model_mode"), "estimate8_frozen");
+    BOOST_CHECK_EQUAL(meta_str(meta, "sic_support_source"),
+                      "configured_nominal_prediction");
+    BOOST_CHECK_EQUAL(meta_u64(meta, "sic_nominal_sync_reps"), uint64_t(64));
+    BOOST_CHECK_EQUAL(meta_u64(meta, "sic_samples_per_symbol"), kSps);
+
+    const int64_t support_lo = meta_i64(meta, "sic_support_lo");
+    const int64_t support_hi = meta_i64(meta, "sic_support_hi");
+    const int64_t support_len = support_hi - support_lo;
+    const int64_t nominal =
+        static_cast<int64_t>(64 * kSps) + static_cast<int64_t>(post_tail);
+    BOOST_CHECK_EQUAL(support_len, nominal); // 64*sps + post_tail = 65124
+    // Explicitly NOT the 8- or 16-symbol training window.
+    BOOST_CHECK_GT(support_len, static_cast<int64_t>(16 * kSps));
+    BOOST_CHECK_GT(support_len, static_cast<int64_t>(60 * kSps));
+    BOOST_CHECK_CLOSE(meta_f64(meta, "sic_support_coverage"), 1.0, 1e-3);
+
+    // Training really is 8 SYNC symbols; the estimation is ready at training_hi.
+    BOOST_CHECK_EQUAL(meta_i64(meta, "sic_training_hi") -
+                          meta_i64(meta, "sic_training_lo"),
+                      static_cast<int64_t>(8 * kSps));
+    BOOST_CHECK_EQUAL(meta_i64(meta, "sic_estimation_ready_sample"),
+                      meta_i64(meta, "sic_training_hi"));
+    BOOST_CHECK_GT(meta_u64(meta, "sic_model_id"), uint64_t(0));
+    BOOST_CHECK_EQUAL(meta_str(meta, "sic_model_fingerprint").substr(0, 2),
+                      std::string("0x"));
+
+    // No re-fit / no parameter update during apply.
+    BOOST_CHECK_EQUAL(meta_u64(meta, "sic_apply_refit_count"), uint64_t(0));
+    BOOST_CHECK_EQUAL(meta_u64(meta, "sic_apply_param_deltas"), uint64_t(0));
+
+    // The last-4-SYNC region (well past the 8-symbol training span) is actually
+    // subtracted: the published output differs from the input there.
+    const std::vector<cplx> oi = pdu_iq(out);
+    const int64_t tail_lo = start + 60 * static_cast<int64_t>(kSps);
+    const int64_t tail_hi = start + 64 * static_cast<int64_t>(kSps);
+    uint64_t tail_diff = 0;
+    for (int64_t i = tail_lo; i < tail_hi; ++i)
+        if (oi[static_cast<size_t>(i)] != y[static_cast<size_t>(i)])
+            ++tail_diff;
+    BOOST_CHECK_MESSAGE(tail_diff > 0,
+                        "last-4-SYNC region was not subtracted: tail_diff="
+                            << tail_diff);
+    // Outside the support nothing changes (bit-exact bypass there).
+    for (int64_t i = 0; i < support_lo; ++i)
+        BOOST_CHECK(oi[static_cast<size_t>(i)] == y[static_cast<size_t>(i)]);
+
+    // The reconstruction was published too (diagnostic port).
+    BOOST_REQUIRE_EQUAL(h.ihat_dbg->num_messages(), 1u);
+    BOOST_CHECK(!all_zero(pdu_iq(h.ihat_dbg->get_message(0))));
+
+    // Timing decomposition is populated and not double counted.
+    const uint64_t est = meta_u64(meta, "sic_estimate_us");
+    const uint64_t core = meta_u64(meta, "core_total_us");
+    const uint64_t bf = meta_u64(meta, "sic_backfill_us");
+    const uint64_t fw = meta_u64(meta, "sic_apply_forward_us");
+    const uint64_t ap = meta_u64(meta, "sic_apply_us");
+    BOOST_CHECK_GT(est, uint64_t(0));
+    BOOST_CHECK_GT(core, uint64_t(0));
+    BOOST_CHECK_GE(core, est);          // estimate is inside core_total
+    BOOST_CHECK_LE(est, core + 200);
+    BOOST_CHECK_LE(ap, bf + fw + 200);  // internal apply inside the two passes
+    std::printf("[sic-adapter-qa] full_support: support=[%lld,%lld) len=%lld "
+                "cov=%.4f tail_diff=%llu est=%llu bf=%llu fw=%llu core=%llu\n",
+                static_cast<long long>(support_lo),
+                static_cast<long long>(support_hi),
+                static_cast<long long>(support_len),
+                meta_f64(meta, "sic_support_coverage"),
+                static_cast<unsigned long long>(tail_diff),
+                static_cast<unsigned long long>(est),
+                static_cast<unsigned long long>(bf),
+                static_cast<unsigned long long>(fw),
+                static_cast<unsigned long long>(core));
+}
+
+// ---------------------------------------------------------------------------
+// 13. `observed_end_sample` absent => 0 recorded (whole-window legacy-visible),
+//     and the resolved visibility limit is the window length.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_adapter_s1_observed_end_default_whole_window)
+{
+    const Model m = build_model(10, 16);
+    const size_t n = 21256;
+    const int64_t start = 2500;
+    const std::vector<cplx> y =
+        make_signal(m, n, start, { { 0.0, cplx(1.f, 0.f) } }, 0.0, 1e-3, 51);
+
+    auto blk = Blk::make_from_templates(m.sync, m.preamble, 10, 16, kSps, kFs,
+                                        4, 8, 8, 0, 0, 14, "estimate", 0.5,
+                                        0.25, 8, size_t(1) << 30, 8, false);
+    Harness h(blk);
+    blk->_post(pmt::mp("in"), make_pdu(y, 91)); // no observed_end key
+    BOOST_REQUIRE(wait_delivered(h, 1));
+    h.stop();
+
+    BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), 1u);
+    const pmt::pmt_t meta = pdu_meta(h.out_dbg->get_message(0));
+    BOOST_REQUIRE_EQUAL(meta_str(meta, "sic_state"), "committed");
+    // Absent => 0 recorded, documented as the whole-window legacy-visible mode.
+    BOOST_CHECK_EQUAL(meta_i64(meta, "sic_observed_end_sample"), 0);
+    BOOST_CHECK_EQUAL(meta_str(meta, "sic_observed_end_source"),
+                      "whole_window_default");
+    BOOST_CHECK_EQUAL(meta_i64(meta, "sic_visible_end_sample"),
+                      static_cast<int64_t>(n));
+    check_out_meta_keys(meta);
+    std::printf("[sic-adapter-qa] whole_window: observed_end=%lld src=%s "
+                "visible_end=%lld\n",
+                static_cast<long long>(meta_i64(meta, "sic_observed_end_sample")),
+                meta_str(meta, "sic_observed_end_source").c_str(),
+                static_cast<long long>(
+                    meta_i64(meta, "sic_visible_end_sample")));
+}
+
+// ---------------------------------------------------------------------------
+// 14. S1 config plumbing: support_mode / online_validation_reps reach the core
+//     and are reflected in sic_model_mode; invalid combinations are rejected.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_adapter_s1_config_plumbing)
+{
+    const Model m = build_model(10, 16);
+
+    // Defaults.
+    auto d = Blk::make_from_templates(m.sync, m.preamble, 10, 16, kSps, kFs, 4,
+                                      8, 8, 0, 0, 14, "off", 0.0, 0.0);
+    BOOST_CHECK_EQUAL(d->support_mode(), std::string("configured_nominal"));
+    BOOST_CHECK_EQUAL(d->model_mode(), std::string("estimate8_frozen"));
+    BOOST_CHECK_EQUAL(d->online_validation_reps(), size_t(0));
+
+    // Explicit legacy mode is labelled "confirmed_legacy" on every window.
+    auto leg = Blk::make_from_templates(m.sync, m.preamble, 10, 16, kSps, kFs, 4,
+                                        8, 8, 0, 0, 14, "estimate", 0.5, 0.25, 8,
+                                        size_t(1) << 30, 8, false, true, true, 0,
+                                        100, 0, 0, "confirmed_legacy", 0);
+    BOOST_CHECK_EQUAL(leg->support_mode(), std::string("confirmed_legacy"));
+    BOOST_CHECK_EQUAL(leg->model_mode(), std::string("confirmed_legacy"));
+    {
+        const size_t n = 21256;
+        const std::vector<cplx> y = make_signal(
+            m, n, 2500, { { 0.0, cplx(1.f, 0.f) } }, 0.0, 1e-3, 61);
+        Harness h(leg);
+        leg->_post(pmt::mp("in"), make_pdu(y, 101));
+        BOOST_REQUIRE(wait_delivered(h, 1));
+        h.stop();
+        BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), 1u);
+        BOOST_CHECK_EQUAL(
+            meta_str(pdu_meta(h.out_dbg->get_message(0)), "sic_model_mode"),
+            "confirmed_legacy");
+    }
+
+    // Explicit online validation is plumbed and bounded by validation_reps.
+    auto val = Blk::make_from_templates(m.sync, m.preamble, 10, 16, kSps, kFs, 4,
+                                        8, 8, 0, 0, 14, "estimate", 0.5, 0.25, 8,
+                                        size_t(1) << 30, 8, false, true, true, 0,
+                                        100, 0, 0, "configured_nominal", 8);
+    BOOST_CHECK_EQUAL(val->online_validation_reps(), size_t(8));
+
+    // Fail-closed: unknown support_mode and an impossible holdout request.
+    bool threw = false;
+    try {
+        Blk::make_from_templates(m.sync, m.preamble, 10, 16, kSps, kFs, 4, 8, 8,
+                                 0, 0, 14, "off", 0.0, 0.0, 8, size_t(1) << 30, 8,
+                                 false, true, true, 0, 100, 0, 0, "bogus", 0);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    BOOST_CHECK_MESSAGE(threw, "unknown support_mode must be rejected");
+    threw = false;
+    try {
+        Blk::make_from_templates(m.sync, m.preamble, 10, 16, kSps, kFs, 4, 8, 8,
+                                 0, 0, 14, "off", 0.0, 0.0, 8, size_t(1) << 30, 8,
+                                 false, true, true, 0, 100, 0, 0,
+                                 "configured_nominal", 9);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    BOOST_CHECK_MESSAGE(threw,
+                        "online_validation_reps > validation_reps must be "
+                        "rejected");
+}
+
+// ---------------------------------------------------------------------------
+// 15. S1 per-path frozen-model tables on `out`.  The adapter must publish the
+//     model's OWN per-path tables (absolute delays + complex gains), one entry
+//     per path in the model's selection order, on a committed 64-SYNC window;
+//     `sic_path_count` must agree with the table lengths and with `sic_n_paths`;
+//     every entry must be finite; and the tables must be PRESENT-but-EMPTY on a
+//     window where no frozen model was applied (bypass), never absent.
+//     The published delays are cross-checked against an INDEPENDENT
+//     estimate_model() run on the same window/config (the model is the
+//     authority; SicResult::taus is only an inspection mirror).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_adapter_s1_per_path_tables)
+{
+    namespace sic = gr::uwb::sic;
+    constexpr size_t kReps = 64;
+    const Model m = build_model(10, kReps);
+    const size_t n = 70024;
+    const int64_t start = 2500;
+    // Synthetic TWO-path comm: strong direct path at 0.0 and a 0.6-amplitude
+    // echo 6.35 work samples later.  (The 0.35 fractional part exercises the
+    // fractional refine whose result the published tau_abs carries; the 6.35
+    // separation is above the template autocorrelation mainlobe so the core
+    // selects two distinct paths -- path_min_spacing is pinned to 2 below.)
+    const double tau_rel[2] = { 0.0, 6.35 };
+    const std::vector<Path> paths = {
+        { tau_rel[0], cplx(1.0f, 0.0f) },
+        { tau_rel[1], cplx(static_cast<float>(0.6 * std::cos(0.7)),
+                           static_cast<float>(0.6 * std::sin(0.7))) },
+    };
+    const std::vector<cplx> y = make_signal(m, n, start, paths, 0.0, 1e-3, 71);
+
+    const size_t k_paths = 4;
+    const size_t fit_reps = 8;
+    const size_t validation_reps = 8;
+    const size_t post_tail = 100;
+    const int64_t roi_lo = 0;
+    const int64_t roi_hi = static_cast<int64_t>(n);
+    const size_t coarse_stride = 14;
+    const size_t path_min_spacing = 2;
+    const double det_thr = 0.5;
+    const double val_thr = 0.25;
+
+    auto blk = Blk::make_from_templates(m.sync, m.preamble, 10, kReps, kSps,
+                                        kFs, k_paths, fit_reps,
+                                        validation_reps, roi_lo, roi_hi,
+                                        coarse_stride, "estimate", det_thr,
+                                        val_thr, 8, size_t(1) << 30, 8, true,
+                                        true, true, path_min_spacing);
+    Harness h(blk, true);
+    blk->_post(pmt::mp("in"), make_pdu(y, 201));
+    BOOST_REQUIRE(wait_delivered(h, 1));
+    h.stop();
+
+    BOOST_REQUIRE_EQUAL(h.out_dbg->num_messages(), 1u);
+    const pmt::pmt_t out = h.out_dbg->get_message(0);
+    const pmt::pmt_t meta = pdu_meta(out);
+    BOOST_REQUIRE_EQUAL(meta_str(meta, "sic_state"), "committed");
+    check_out_meta_keys(meta);
+
+    std::vector<double> tau, gre, gim;
+    BOOST_REQUIRE_MESSAGE(meta_f64vec(meta, "sic_tau", tau),
+                          "sic_tau must be present as an f64vector");
+    BOOST_REQUIRE_MESSAGE(meta_f64vec(meta, "sic_gain_re", gre),
+                          "sic_gain_re must be present as an f64vector");
+    BOOST_REQUIRE_MESSAGE(meta_f64vec(meta, "sic_gain_im", gim),
+                          "sic_gain_im must be present as an f64vector");
+    const size_t pc = static_cast<size_t>(meta_u64(meta, "sic_path_count"));
+    const size_t np = static_cast<size_t>(meta_u64(meta, "sic_n_paths"));
+    BOOST_CHECK_EQUAL(tau.size(), gre.size());
+    BOOST_CHECK_EQUAL(tau.size(), gim.size());
+    BOOST_CHECK_EQUAL(tau.size(), pc);
+    BOOST_CHECK_EQUAL(pc, np);
+    BOOST_CHECK_GE(tau.size(), size_t(2)); // both injected paths fitted
+    BOOST_CHECK_LE(tau.size(), k_paths);
+    for (size_t k = 0; k < tau.size(); ++k) {
+        BOOST_CHECK_MESSAGE(std::isfinite(tau[k]), "sic_tau[" << k << "] finite");
+        BOOST_CHECK_MESSAGE(std::isfinite(gre[k]),
+                            "sic_gain_re[" << k << "] finite");
+        BOOST_CHECK_MESSAGE(std::isfinite(gim[k]),
+                            "sic_gain_im[" << k << "] finite");
+    }
+    // cond2 of the final gain fit is published and finite, and agrees with the
+    // existing sic_cond2 key (same frozen model field).
+    const double gcond = meta_f64(meta, "sic_gain_cond");
+    BOOST_CHECK(std::isfinite(gcond));
+    BOOST_CHECK_GT(gcond, 0.0);
+    BOOST_CHECK_EQUAL(gcond, meta_f64(meta, "sic_cond2"));
+
+    // ---- cross-check against the core model (the authority) --------------
+    sic::SicConfig cfg;
+    cfg.mode = sic::SicMode::Estimate;
+    cfg.comm_code = 10;
+    cfg.sync_reps = kReps;
+    cfg.samples_per_symbol = kSps;
+    cfg.sample_rate = kFs;
+    cfg.k_paths = k_paths;
+    cfg.fit_reps = fit_reps;
+    cfg.validation_reps = validation_reps;
+    cfg.roi_lo = roi_lo;
+    cfg.roi_hi = roi_hi;
+    cfg.coarse_stride = coarse_stride;
+    cfg.path_min_spacing = path_min_spacing;
+    cfg.detect_threshold = det_thr;
+    cfg.validate_threshold = val_thr;
+    cfg.post_tail = post_tail;
+    cfg.observed_end_sample = 0; // adapter default: whole window visible
+    sic::SicScratch scratch;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(sic::prepare_sic_core(cfg, m.sync.data(),
+                                                m.sync.size(),
+                                                m.preamble.data(),
+                                                m.preamble.size(), scratch,
+                                                &err),
+                          "prepare_sic_core failed: " << err);
+    sic::SicTemplates tpl;
+    tpl.sync = m.sync.data();
+    tpl.sync_len = m.sync.size();
+    tpl.preamble = m.preamble.data();
+    tpl.preamble_len = m.preamble.size();
+    sic::SicModel cm;
+    sic::SicResult cr;
+    BOOST_REQUIRE(sic::estimate_model(y.data(), y.size(), 0, tpl, cfg, scratch,
+                                      cm, nullptr, &cr));
+    BOOST_REQUIRE_MESSAGE(cm.valid, "reference model did not commit");
+    BOOST_REQUIRE_EQUAL(cm.n_paths, tau.size());
+    BOOST_CHECK_EQUAL(gcond, cm.gain_condition);
+    for (size_t k = 0; k < tau.size(); ++k) {
+        // Same model field, same order: the published delay IS model.tau_abs[k].
+        BOOST_CHECK_SMALL(tau[k] - cm.tau_abs[k], 0.06);
+        BOOST_CHECK_SMALL(gre[k] - static_cast<double>(cm.gain[k].real()), 1e-6);
+        BOOST_CHECK_SMALL(gim[k] - static_cast<double>(cm.gain[k].imag()), 1e-6);
+    }
+    // The injected path spacing must survive (relative, so independent of the
+    // detected-origin quantisation): the strongest path comes first.
+    BOOST_CHECK_GT(std::abs(gre[0]) + std::abs(gim[0]),
+                   std::abs(gre[1]) + std::abs(gim[1]));
+    BOOST_CHECK_SMALL(tau[1] - tau[0] - (tau_rel[1] - tau_rel[0]), 0.06);
+
+    // The terminal status event mirrors the counts.
+    const pmt::pmt_t st = wait_window_status(h.status_dbg, 201);
+    BOOST_REQUIRE(!pmt::is_null(st));
+    BOOST_CHECK_EQUAL(meta_u64(st, "sic_path_count"), static_cast<uint64_t>(pc));
+    BOOST_CHECK_EQUAL(meta_u64(st, "sic_n_paths"), static_cast<uint64_t>(np));
+    BOOST_CHECK_EQUAL(meta_f64(st, "sic_gain_cond"), gcond);
+
+    std::printf("[sic-adapter-qa] per_path: paths=%zu n_paths=%zu cond=%.3f "
+                "tau0=%.4f dtau=%.4f\n",
+                tau.size(), np, gcond, tau[0], tau[1] - tau[0]);
+
+    // ---- bypass window: the SAME keys, PRESENT but EMPTY -----------------
+    {
+        auto b2 = Blk::make_from_templates(m.sync, m.preamble, 10, kReps, kSps,
+                                           kFs, k_paths, fit_reps,
+                                           validation_reps, roi_lo, roi_hi,
+                                           coarse_stride, "off", 0.0, 0.0, 8,
+                                           size_t(1) << 30, 8, false);
+        Harness h2(b2);
+        b2->_post(pmt::mp("in"), make_pdu(y, 202));
+        BOOST_REQUIRE(wait_delivered(h2, 1));
+        h2.stop();
+        BOOST_REQUIRE_EQUAL(h2.out_dbg->num_messages(), 1u);
+        const pmt::pmt_t bm = pdu_meta(h2.out_dbg->get_message(0));
+        BOOST_CHECK_EQUAL(meta_str(bm, "sic_state"), "bypassed");
+        check_out_meta_keys(bm); // present, not absent
+        std::vector<double> bt, br, bi;
+        BOOST_CHECK(meta_f64vec(bm, "sic_tau", bt));
+        BOOST_CHECK(meta_f64vec(bm, "sic_gain_re", br));
+        BOOST_CHECK(meta_f64vec(bm, "sic_gain_im", bi));
+        BOOST_CHECK_EQUAL(bt.size(), size_t(0));
+        BOOST_CHECK_EQUAL(br.size(), size_t(0));
+        BOOST_CHECK_EQUAL(bi.size(), size_t(0));
+        BOOST_CHECK_EQUAL(meta_u64(bm, "sic_path_count"), uint64_t(0));
+        BOOST_CHECK_EQUAL(meta_u64(bm, "sic_n_paths"), uint64_t(0));
+        BOOST_CHECK_EQUAL(meta_f64(bm, "sic_gain_cond"), 0.0);
+    }
 }

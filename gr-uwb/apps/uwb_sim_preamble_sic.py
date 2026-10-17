@@ -21,6 +21,48 @@ Example (S0-A baseline):
       --build-dir gr-uwb/build-sic --preset baseline --input-grid work \
       --sic off --consumer both --windows 32 \
       --output gr-uwb/build-sic/sic-results/baseline
+
+S1-03 paced measurement (the default when --rate/--duration is given with
+--sic-model-mode estimate8_frozen): the timed region runs ONLY the target path
+(SIC adapter -> one consumer) under an ASYNCHRONOUS pipelined pacer.  A
+scheduler thread posts each ``in`` PDU at its ABSOLUTE planned deadline
+(t0 + k/rate) independently of any completion, under a bounded in-flight/byte
+credit; completions are recorded by the ``out`` / ``status`` / consumer-result
+message handlers, which are the only place the credit is released.  A planned
+deadline that cannot be posted is ``missed_submission`` -- the schedule is never
+re-timed and never skipped ahead.  >=64 distinct-content windows and their CF32
+PMT payloads are pre-built before the first deadline; there is no clean/raw
+generation, offline evaluation, array dump, plotting or truth recompute inside
+the timed region.  ``--paced-legacy-three-way`` keeps the old serial three-way
+loop as an explicitly named diagnostic.
+
+  # functional smoke (S1-2 evidence, verifier passes on this directory)
+  env -u LD_LIBRARY_PATH python3 gr-uwb/apps/uwb_sim_preamble_sic.py \
+      --build-dir gr-uwb/build-sic --preset main --input-grid work \
+      --sic estimate --consumer cir --windows 8 --fixtures 8 \
+      --seed-set acceptance --sic-model-mode estimate8_frozen \
+      --output gr-uwb/build-sic/sic-results/s1_smoke_r11b
+  env -u LD_LIBRARY_PATH python3 tools/sic/verify_s0.py \
+      --results gr-uwb/build-sic/sic-results/s1_smoke_r11b
+
+  # paced target-only 100/s then 200/s, 60 s each (serial, same environment)
+  env -u LD_LIBRARY_PATH python3 gr-uwb/apps/uwb_sim_preamble_sic.py \
+      --build-dir gr-uwb/build-sic --preset main --input-grid work \
+      --sic estimate --consumer cir --seed-set acceptance \
+      --rate 100 --duration 60 --paced-pool 64 \
+      --output gr-uwb/build-sic/sic-results/paced_s1_100
+  env -u LD_LIBRARY_PATH python3 gr-uwb/apps/uwb_sim_preamble_sic.py \
+      --build-dir gr-uwb/build-sic --preset main --input-grid work \
+      --sic estimate --consumer cir --seed-set acceptance \
+      --rate 200 --duration 60 --paced-pool 64 \
+      --output gr-uwb/build-sic/sic-results/paced_s1_200
+
+The per-window timeline of a paced run is ``paced_windows.jsonl`` (planned /
+actual submit, terminal, throughput buckets); ``summary.paced`` carries the
+offered/admitted/missed/completed accounting, the achieved rates, the entry
+backlog, the adapter/in-flight high-water marks, the service-latency
+percentiles, the deadline misses and the explicit sub-gates.  A paced directory
+is a TIMING result, not an S0 effect artifact run (no ``windows.jsonl``).
 """
 from __future__ import annotations
 
@@ -34,6 +76,7 @@ import platform
 import resource
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -199,6 +242,81 @@ SIC_ADAPTER_STAGES = [
     ("completion_latency_us", "completion_latency"),
 ]
 
+# ---------------------------------------------------------------------------
+# S1 (docs/sic/S1_八符号模型API.md): model-mode names and the frozen-model
+# evidence the adapter is expected to publish as flat ``sic_model_*`` meta keys
+# (or a nested ``sic_model`` dict).  The app translates them into the per-window
+# ``sic_model`` block the verifier audits.  Nothing here is inferred from the
+# injected truth: the values come from the adapter's frozen SicModel.
+# ---------------------------------------------------------------------------
+S1_MODEL_MODE = "estimate8_frozen"
+S1_LEGACY_MODE = "confirmed_legacy"
+S1_MODEL_MODES = (S1_MODEL_MODE, S1_LEGACY_MODE)
+S1_STRICT_FIT_REPS = 8
+S1_TAIL_REPS = 4
+S1_SUPPORT_SOURCE_NOMINAL = "configured_nominal_prediction"
+S1_SUPPORT_SOURCE_LEGACY = "confirmed_repetition_legacy"
+# Adapter meta key -> canonical model-block field.  Both the flat
+# ``sic_model_<field>`` spelling and the legacy ``sic_<field>`` spelling are
+# accepted for the subset the S0 adapter already emitted.  ``vec`` marks a
+# vector meta value (f64vector / c32vector).
+_SIC_MODEL_SCALAR_KEYS = {
+    "mode": ("sic_model_mode",),
+    "model_id": ("sic_model_id",),
+    "fingerprint": ("sic_model_fingerprint", "sic_model_hash"),
+    "origin": ("sic_detected_start", "sic_model_origin"),
+    "cfo_hz": ("sic_cfo_hz", "sic_model_cfo_hz"),
+    "n_paths": ("sic_n_paths", "sic_model_n_paths"),
+    # S1: the adapter publishes the number of per-path table entries as
+    # ``sic_path_count`` (len(sic_tau)); it is the authoritative length of the
+    # frozen tau/gain tables and the fallback for ``n_paths``.
+    "path_count": ("sic_model_path_count", "sic_path_count"),
+    "samples_per_symbol": ("sic_samples_per_symbol",
+                           "sic_model_samples_per_symbol"),
+    "nominal_sync_reps": ("sic_nominal_sync_reps",
+                          "sic_model_nominal_sync_reps"),
+    "sample_rate": ("sic_sample_rate", "sic_model_sample_rate"),
+    "training_lo": ("sic_training_lo", "sic_model_training_lo"),
+    "training_hi": ("sic_training_hi", "sic_model_training_hi"),
+    "observed_end_sample": ("sic_observed_end_sample",
+                            "sic_model_observed_end_sample"),
+    "estimation_ready_sample": ("sic_estimation_ready_sample",
+                                "sic_model_estimation_ready_sample"),
+    "fit_reps": ("sic_model_fit_reps",),
+    "support_lo": ("sic_support_lo", "sic_model_support_lo"),
+    "support_hi": ("sic_support_hi", "sic_model_support_hi"),
+    "support_source": ("sic_support_source", "sic_model_support_source"),
+    "support_pre_tail": ("sic_model_support_pre_tail",),
+    "support_post_tail": ("sic_model_support_post_tail",),
+    "support_coverage": ("sic_support_coverage",
+                         "sic_model_support_coverage"),
+    "sub_lo": ("sic_sub_lo", "sic_model_sub_lo"),
+    "sub_hi": ("sic_sub_hi", "sic_model_sub_hi"),
+    "phase_reference": ("sic_phase_reference", "sic_model_phase_reference"),
+    "guard_pre": ("sic_model_guard_pre",),
+    "guard_post": ("sic_model_guard_post",),
+    "strict_8sync": ("sic_model_strict_8sync",),
+    "fit_residual": ("sic_fit_residual", "sic_model_fit_residual"),
+    "cond2": ("sic_cond2", "sic_gain_condition"),
+    "status": ("sic_model_status",),
+    "observed_end_source": ("sic_observed_end_source",),
+    "apply_refit_count": ("sic_apply_refit_count",
+                          "sic_model_refit_count"),
+}
+# Vector-valued adapter meta keys.  The gain table is published by the S1
+# adapter either as one complex vector (``sic_gain``) or, canonical for the
+# frozen model, as the split real/imag f64 tables ``sic_gain_re`` /
+# ``sic_gain_im``; ``sic_tau`` carries the matching absolute work-sample
+# delays.  All three tables share one index order (gain[k] belongs to tau[k]).
+_SIC_MODEL_VEC_KEYS = {
+    "tau": ("sic_model_tau", "sic_tau"),
+}
+_GAIN_COMPLEX_KEYS = ("sic_model_gain", "sic_gain")
+_GAIN_RE_KEYS = ("sic_model_gain_re", "sic_gain_re")
+_GAIN_IM_KEYS = ("sic_model_gain_im", "sic_gain_im")
+
+S1_MAKE_PARAMS = ("support_mode", "online_validation_reps", "fit_residual_max")
+
 
 def recon_pair(i_true, i_hat, lo, hi):
     """NMSE / suppression over [lo,hi) with the verifier's exact arithmetic.
@@ -289,6 +407,349 @@ def region_metric(i_true, i_hat, lo, hi):
     if num == 0.0:
         return (0.0, 60.0, lo, hi), True
     return (1.0, 0.0, lo, hi), True
+
+
+def _meta_read(out_meta, keys):
+    """Read the first present scalar meta key from ``keys`` (pmt-safe)."""
+    for key in keys:
+        value = out_meta.get(key, pmt.PMT_NIL)
+        if value is pmt.PMT_NIL:
+            continue
+        got = pmt_to_py(value)
+        if got is not pmt.PMT_NIL:
+            return got, key
+    return None, None
+
+
+def _meta_read_vec(out_meta, keys, kind="f64"):
+    """Read the first present vector meta key; returns (np.ndarray, key)."""
+    for key in keys:
+        value = out_meta.get(key, pmt.PMT_NIL)
+        if value is pmt.PMT_NIL:
+            continue
+        if kind == "c32" and pmt.is_c32vector(value):
+            return np.array(pmt.c32vector_elements(value),
+                            dtype=np.complex64), key
+        if kind == "f64" and pmt.is_f64vector(value):
+            return np.array(pmt.f64vector_elements(value),
+                            dtype=np.float64), key
+    return None, None
+
+
+def _meta_read_gain(out_meta):
+    """The frozen complex gain table, from either published spelling.
+
+    Returns ``(np.complex64 array, source label)`` or ``(None, None)``.  The
+    S1 adapter publishes ``sic_gain_re`` / ``sic_gain_im`` (f64, same index
+    order as ``sic_tau``); a single complex ``sic_gain`` vector is also
+    accepted.  Nothing is synthesised when only one half is present.
+    """
+    value, key = _meta_read_vec(out_meta, _GAIN_COMPLEX_KEYS, "c32")
+    if value is not None:
+        return value, key
+    re, k_re = _meta_read_vec(out_meta, _GAIN_RE_KEYS, "f64")
+    im, k_im = _meta_read_vec(out_meta, _GAIN_IM_KEYS, "f64")
+    if re is not None and im is not None and re.size == im.size:
+        return (re + 1j * im).astype(np.complex64), "%s+%s" % (k_re, k_im)
+    return None, None
+
+
+def extract_adapter_model(out_meta):
+    """Read the frozen-model evidence the adapter published (S1).
+
+    Returns ``(fields, sources)`` with only the fields actually present.  The
+    preferred keys are the S1 ``sic_model_*`` set; the legacy ``sic_*`` keys the
+    S0 adapter already emitted are accepted for ``origin`` / ``cfo_hz`` /
+    ``n_paths`` / ``support_lo`` / ``support_hi`` / ``cond2`` only.  Missing
+    fields are NOT invented (the caller reports them)."""
+    fields, sources = {}, {}
+    for name, keys in _SIC_MODEL_SCALAR_KEYS.items():
+        if name == "mode":
+            continue
+        value, key = _meta_read(out_meta, keys)
+        if value is not None:
+            fields[name] = value
+            sources[name] = key
+    for name, keys in _SIC_MODEL_VEC_KEYS.items():
+        value, key = _meta_read_vec(out_meta, keys, "f64")
+        if value is not None:
+            fields[name] = value
+            sources[name] = key
+    gain, gkey = _meta_read_gain(out_meta)
+    if gain is not None:
+        fields["gain"] = gain
+        sources["gain"] = gkey
+    return fields, sources
+
+
+def build_sic_model_block(fields, sources, *, mode, fit_reps, sps, sync_reps,
+                          sample_rate, post_tail, sensing_roi, overlap,
+                          eval_lo, eval_hi, tail_lo, tail_hi, sample_count):
+    """Assemble the per-window ``sic_model`` block from real adapter evidence.
+
+    Only values the adapter actually published (or unambiguous public-profile
+    geometry / truth-derived coverage) are emitted.  Returns
+    ``(model_block_or_None, missing_required_list)``.  ``model_block`` is None
+    when the adapter published no usable origin/support: the caller then records
+    a clear ``sic_model_error`` instead of a silent placeholder.  Store the
+    unresolved required fields in ``missing_required`` so the error is explicit.
+    """
+    origin = fields.get("origin")
+    support_lo = fields.get("support_lo")
+    support_hi = fields.get("support_hi")
+    missing = []
+    for name, value in (("origin", origin), ("support_lo", support_lo),
+                        ("support_hi", support_hi)):
+        if not isinstance(value, int) or isinstance(value, bool):
+            missing.append(name)
+    # A bypassed / not-committed window publishes -1 placeholders: they are not
+    # usable frozen-model evidence, so report them as missing rather than
+    # building a support from sentinel values.
+    if not missing and (int(origin) < 0 or int(support_lo) < 0
+                        or int(support_hi) <= int(support_lo)):
+        missing.append("committed_support")
+    if missing:
+        return None, missing
+
+    src = dict(sources)
+
+    def pick(name, default):
+        if name in fields and fields[name] is not None:
+            return fields[name], sources.get(name)
+        return default, "app_geometry"
+
+    fit = fields.get("fit_reps")
+    if not (isinstance(fit, int) and not isinstance(fit, bool)):
+        fit = int(fit_reps)
+        src["fit_reps"] = "app_cli"
+    training_lo = fields.get("training_lo")
+    training_hi = fields.get("training_hi")
+    if not isinstance(training_lo, int) or isinstance(training_lo, bool):
+        training_lo = int(origin)
+        src["training_lo"] = "derived_origin"
+    if not isinstance(training_hi, int) or isinstance(training_hi, bool):
+        training_hi = int(origin) + int(fit) * int(sps)
+        src["training_hi"] = "derived_origin+fit*sps"
+
+    s_pre, _ = pick("support_pre_tail", 0)
+    s_post, _ = pick("support_post_tail", int(post_tail))
+    if not isinstance(s_pre, int) or isinstance(s_pre, bool):
+        s_pre = 0
+    if not isinstance(s_post, int) or isinstance(s_post, bool):
+        s_post = int(post_tail)
+
+    # Permitted subtraction region = predicted support ∩ sensing processing ROI.
+    s_lo, s_hi = int(support_lo), int(support_hi)
+    sub_lo = fields.get("sub_lo")
+    sub_hi = fields.get("sub_hi")
+    if not (isinstance(sub_lo, int) and not isinstance(sub_lo, bool)):
+        sub_lo = max(s_lo, int(sensing_roi[0]))
+        src["sub_lo"] = "derived_support_intersect_sensing_roi"
+    if not (isinstance(sub_hi, int) and not isinstance(sub_hi, bool)):
+        sub_hi = min(s_hi, int(sensing_roi[1]))
+        src["sub_hi"] = "derived_support_intersect_sensing_roi"
+
+    phase_ref = fields.get("phase_reference")
+    if not (isinstance(phase_ref, int) and not isinstance(phase_ref, bool)):
+        phase_ref = int(origin)
+        src["phase_reference"] = "derived_origin"
+
+    # support_coverage is recomputed from the declared support and the truth
+    # overlap (the verifier recomputes the same quantity).
+    cov = None
+    ov_lo, ov_hi = overlap
+    if isinstance(ov_lo, int) and isinstance(ov_hi, int) and ov_hi > ov_lo:
+        covered = max(0, min(s_hi, ov_hi) - max(s_lo, ov_lo))
+        cov = covered / float(ov_hi - ov_lo)
+    if fields.get("support_coverage") is not None:
+        cov_decl = fields.get("support_coverage")
+    else:
+        cov_decl = cov
+
+    support_source = fields.get("support_source")
+    if not isinstance(support_source, str) or not support_source:
+        support_source = (S1_SUPPORT_SOURCE_NOMINAL
+                          if mode == S1_MODEL_MODE else S1_SUPPORT_SOURCE_LEGACY)
+        src["support_source"] = "app_mode_%s" % mode
+
+    # Strict 8-SYNC requires the declared visibility limit to equal the training
+    # end and the estimation to be ready at that same sample.  When the adapter
+    # publishes the visibility limit, verify it instead of assuming it.
+    obs_end = fields.get("observed_end_sample")
+    ready = fields.get("estimation_ready_sample")
+    guard_pre = fields.get("guard_pre")
+    guard_post = fields.get("guard_post")
+    if not isinstance(guard_pre, int) or isinstance(guard_pre, bool):
+        guard_pre = 0
+    if not isinstance(guard_post, int) or isinstance(guard_post, bool):
+        guard_post = (max(0, int(obs_end) - int(training_hi))
+                      if isinstance(obs_end, int) and not isinstance(obs_end, bool)
+                      else 0)
+        src["guard_post"] = "derived_observed_end_minus_training_hi"
+    strict = fields.get("strict_8sync")
+    if not isinstance(strict, bool):
+        strict = bool(mode == S1_MODEL_MODE
+                      and isinstance(obs_end, int) and not isinstance(obs_end, bool)
+                      and int(obs_end) == int(training_hi)
+                      and int(guard_pre) == 0 and int(guard_post) == 0)
+        src["strict_8sync"] = "derived_from_adapter_visibility"
+
+    block = {
+        "mode": mode,
+        "fit_reps": int(fit),
+        "samples_per_symbol": int(sps),
+        "nominal_sync_reps": int(sync_reps),
+        "sample_rate": float(sample_rate),
+        "origin": int(origin),
+        "support_lo": int(s_lo),
+        "support_hi": int(s_hi),
+        "support_source": support_source,
+        "support_pre_tail": int(s_pre),
+        "support_post_tail": int(s_post),
+        "support_coverage": (float(cov_decl) if cov_decl is not None else None),
+        "sub_lo": int(sub_lo),
+        "sub_hi": int(sub_hi),
+        "phase_reference": int(phase_ref),
+        "training_lo": int(training_lo),
+        "training_hi": int(training_hi),
+        "eval_lo": int(eval_lo),
+        "eval_hi": int(eval_hi),
+        "tail_lo": int(tail_lo),
+        "tail_hi": int(tail_hi),
+        "strict_8sync": bool(strict),
+        "guard": {"pre": int(guard_pre), "post": int(guard_post)},
+        "evidence_sources": {k: v for k, v in src.items() if v},
+    }
+    # Adapter model_id is a u64; the verifier requires a stable non-empty string.
+    raw_mid = fields.get("model_id")
+    if isinstance(raw_mid, int) and not isinstance(raw_mid, bool) and raw_mid > 0:
+        block["model_id"] = "model-%016x" % raw_mid
+        src["model_id"] = sources.get("model_id")
+    elif isinstance(raw_mid, str) and raw_mid:
+        block["model_id"] = raw_mid
+        src["model_id"] = sources.get("model_id")
+    # Fingerprint: a 64-char sha256 over the frozen identity.  The adapter's
+    # own id is 16 hex chars, so it is hashed with the frozen geometry to give
+    # the canonical fingerprint the contract expects (never a different model).
+    raw_fp = fields.get("fingerprint")
+    if isinstance(raw_fp, str) and len(raw_fp.strip()) == 64 \
+            and all(c in "0123456789abcdefABCDEF" for c in raw_fp.strip()):
+        block["fingerprint"] = raw_fp.strip().lower()
+    elif block.get("model_id") is not None or raw_fp is not None:
+        basis = {
+            "model_id": block.get("model_id"),
+            "adapter_fingerprint": raw_fp,
+            "origin": int(origin), "cfo_hz": fields.get("cfo_hz"),
+            "n_paths": fields.get("n_paths"),
+            "training_lo": int(training_lo), "training_hi": int(training_hi),
+            "observed_end_sample": obs_end,
+            "support_lo": int(s_lo), "support_hi": int(s_hi),
+            "sub_lo": int(sub_lo), "sub_hi": int(sub_hi),
+            "phase_reference": int(phase_ref),
+            "support_source": support_source,
+        }
+        block["fingerprint"] = hashlib.sha256(
+            json.dumps(basis, sort_keys=True, default=str).encode()).hexdigest()
+        src["fingerprint"] = "derived_sha256_identity"
+    # Status: the adapter publishes the terminal state; derive a stable label
+    # from it when no explicit model status key exists.
+    if isinstance(fields.get("status"), str) and fields["status"]:
+        block["status"] = fields["status"]
+    else:
+        block["status"] = "committed" if block.get("support_hi") else "unavailable"
+        src["status"] = "derived_from_state"
+    # Visibility / readiness are only published fields (never invented).
+    if isinstance(obs_end, int) and not isinstance(obs_end, bool):
+        block["observed_end_sample"] = int(obs_end)
+    if isinstance(ready, int) and not isinstance(ready, bool):
+        block["estimation_ready_sample"] = int(ready)
+    # Report explicitly which per-path fields the adapter did not publish.
+    block["missing_fields"] = [n for n in ("tau", "gain")
+                               if fields.get(n) is None]
+    # Only emit fields the adapter actually published (never invented).
+    # Only the scalar fields that need no app-side normalisation are copied
+    # verbatim.  model_id / fingerprint / status / observed_end / ready were
+    # already normalised above and must NOT be overwritten by the raw values.
+    # ``n_paths`` is resolved below together with the per-path tables: the
+    # adapter's ``sic_path_count`` (== len(sic_tau)) is authoritative for the
+    # frozen table, while ``sic_n_paths`` is the core's detected selection
+    # count.  They agree on a committed window; when only one is published it is
+    # used, and ``len(tau)`` is the last resort.  Never invented.
+    for name in ("cfo_hz", "fit_residual", "cond2"):
+        if fields.get(name) is not None:
+            block[name] = fields[name]
+    # estimation_ranges: training/cfo/cir all read the visible prefix only.
+    if isinstance(block.get("training_lo"), int) \
+            and isinstance(block.get("training_hi"), int):
+        block["estimation_ranges"] = {
+            "training": [int(training_lo), int(training_hi)],
+            "cfo": [int(training_lo), int(training_hi)],
+            "cir": [int(training_lo), int(training_hi)],
+        }
+    tau = fields.get("tau")
+    gain = fields.get("gain")
+    n_paths = fields.get("n_paths")
+    if not (isinstance(n_paths, int) and not isinstance(n_paths, bool)):
+        n_paths = fields.get("path_count")
+        if isinstance(n_paths, int) and not isinstance(n_paths, bool):
+            src["n_paths"] = sources.get("path_count")
+    if not (isinstance(n_paths, int) and not isinstance(n_paths, bool)):
+        n_paths = int(np.asarray(tau).size) if tau is not None else None
+        if n_paths is not None:
+            src["n_paths"] = "derived_len(tau)"
+    if isinstance(n_paths, int) and not isinstance(n_paths, bool):
+        block["n_paths"] = int(n_paths)
+    if tau is not None:
+        t = [float(v) for v in np.asarray(tau).ravel()]
+        if isinstance(block.get("n_paths"), int):
+            t = t[:int(block["n_paths"])]
+        block["tau"] = t
+        # sic_tau carries ABSOLUTE work-sample delays (tau_abs), the same
+        # coordinate as ``origin``/``phase_reference``; the label keeps that
+        # explicit instead of implying an origin-relative delay.
+        if sources.get("tau"):
+            src["tau"] = "%s(absolute_work_samples)" % sources["tau"]
+    if gain is not None:
+        g = np.asarray(gain).ravel()
+        if isinstance(block.get("n_paths"), int):
+            g = g[:int(block["n_paths"])]
+        block["gain"] = [[float(v.real), float(v.imag)] for v in g]
+        if sources.get("gain"):
+            src["gain"] = "%s(complex_re_im)" % sources["gain"]
+    # The apply step: only when the frozen identity + every parameter is real
+    # and the two per-path tables are complete for the declared path count.
+    apply_ok = (
+        isinstance(block.get("model_id"), str) and block["model_id"] != ""
+        and isinstance(block.get("fingerprint"), str)
+        and isinstance(block.get("n_paths"), int) and block["n_paths"] >= 1
+        and isinstance(block.get("cfo_hz"), (int, float))
+        and isinstance(block.get("tau"), list)
+        and isinstance(block.get("gain"), list)
+        and len(block["tau"]) == block["n_paths"]
+        and len(block["gain"]) == block["n_paths"])
+    if apply_ok:
+        refit = fields.get("apply_refit_count")
+        if not (isinstance(refit, int) and not isinstance(refit, bool)):
+            refit = 0
+        block["apply"] = {
+            "model_id": block["model_id"],
+            "fingerprint": block["fingerprint"],
+            "refit_count": int(refit),
+            "param_deltas": {},
+            "params": {
+                "origin": int(origin),
+                "cfo_hz": float(block["cfo_hz"]),
+                "n_paths": int(block["n_paths"]),
+                "tau": list(block.get("tau", [])),
+                "gain": list(block.get("gain", [])),
+                "support_lo": int(s_lo),
+                "support_hi": int(s_hi),
+                "sub_lo": int(sub_lo),
+                "sub_hi": int(sub_hi),
+                "phase_reference": int(phase_ref),
+            },
+        }
+    return block, []
 
 
 def sync_rep_scan(y, sync_norm, anchor, reps, sps, threshold):
@@ -461,6 +922,148 @@ def materialize_seeds(spec, count):
     return [start + i * step for i in range(min(count, total))], total
 
 
+def noise_root_of(seed):
+    """Stable identifier of the AWGN realization for a window.
+
+    The generator draws its noise from ``numpy.random.default_rng(seed)`` (see
+    ``SicSignalGenerator.build``), so the realization is fully identified by the
+    generator seed.  The S1 seed-independence contract compares the tuple
+    ``(seed, seed_offset, noise_root)``; making the noise root a function of the
+    seed guarantees that two windows sharing a seed also share a noise root.
+    """
+    return "numpy_default_rng:%d" % int(seed)
+
+
+def generator_identity(seed_set, seed, seed_offset):
+    return {"seed_set": str(seed_set), "seed": int(seed),
+            "seed_offset": int(seed_offset), "noise_root": noise_root_of(seed)}
+
+
+def resolve_s1_config(args, *, sync_reps, preset_fit_reps, preset_validation_reps):
+    """Resolve the S1 model/config surface (S1-01, §9 CLI) with fail-closed rules.
+
+    * ``estimate8_frozen`` (default): strict ``fit_reps == 8``; the online
+      validation gate is OFF (``online_validation_reps == 0``); the offline
+      independent evaluation region is ``sync_reps - 8 - online`` SYNC.
+    * ``confirmed_legacy``: the S0 coupling kept reachable; ``--sic-cover-preamble``
+      is only a legacy alias that selects this mode (it never silently widens an
+      ``estimate8_frozen`` run).
+    """
+    mode = str(args.sic_model_mode)
+    cover_alias = bool(getattr(args, "sic_cover_preamble", False))
+    if cover_alias:
+        if getattr(args, "_sic_model_mode_explicit", False) \
+                and mode == S1_MODEL_MODE:
+            raise SystemExit(
+                "--sic-cover-preamble is the legacy alias of "
+                "--sic-model-mode confirmed_legacy; it cannot be combined with "
+                "an explicit --sic-model-mode estimate8_frozen (refused, never "
+                "silently rewritten)")
+        mode = S1_LEGACY_MODE
+    if mode not in S1_MODEL_MODES:
+        raise SystemExit("bad --sic-model-mode %r (expected one of %s)"
+                         % (mode, list(S1_MODEL_MODES)))
+    fit = args.sic_fit_reps if args.sic_fit_reps is not None else preset_fit_reps
+    if mode == S1_MODEL_MODE and args.sic_fit_reps is None:
+        # S1 default: strict 8-SYNC training, independent of the preset value.
+        fit = S1_STRICT_FIT_REPS
+    if fit is None:
+        fit = 8
+    fit = int(fit)
+    if mode == S1_MODEL_MODE and fit != S1_STRICT_FIT_REPS:
+        raise SystemExit(
+            "--sic-model-mode estimate8_frozen requires --sic-fit-reps %d "
+            "(got %d); use --sic-model-mode confirmed_legacy for another value"
+            % (S1_STRICT_FIT_REPS, fit))
+    if fit <= 0:
+        raise SystemExit("--sic-fit-reps must be > 0 (got %d)" % fit)
+    online_cli = getattr(args, "sic_online_validation_reps", None)
+    online = 0 if online_cli is None else int(online_cli)
+    if online < 0:
+        raise SystemExit("--sic-online-validation-reps must be >= 0 (got %d)"
+                         % online)
+    capacity = int(preset_validation_reps or 8)
+    if args.sic_validation_reps is not None:
+        capacity = int(args.sic_validation_reps)
+    if mode == S1_MODEL_MODE:
+        support_mode = "configured_nominal"
+        online_runtime = online
+        if capacity < 1:
+            capacity = 1
+    else:
+        support_mode = "confirmed_legacy"
+        # S0 reproduces the disjoint-holdout gate over the prepared holdout.
+        online_runtime = max(8, online)
+        capacity = max(8, online_runtime, capacity)
+    eval_reps = getattr(args, "sic_evaluation_reps", None)
+    if eval_reps is None:
+        eval_reps = int(sync_reps) - fit - online_runtime
+    eval_reps = int(eval_reps)
+    if eval_reps < 0:
+        raise SystemExit("--sic-evaluation-reps must be >= 0 (got %d)"
+                         % eval_reps)
+    if fit + online_runtime + eval_reps > int(sync_reps):
+        raise SystemExit(
+            "UNSATISFIABLE S1 config: fit_reps(%d) + online_validation_reps(%d) "
+            "+ evaluation_reps(%d) = %d > sync_reps(%d); refused (never silently "
+            "rewritten)" % (fit, online_runtime, eval_reps,
+                            fit + online_runtime + eval_reps, sync_reps))
+    if mode == S1_MODEL_MODE and eval_reps < 8:
+        raise SystemExit(
+            "estimate8_frozen needs an independent evaluation region >= 8 SYNC "
+            "(sync_reps(%d) - fit_reps(%d) - online(%d) = %d); reduce the "
+            "online validation or use a longer preamble"
+            % (sync_reps, fit, online_runtime, eval_reps))
+    if fit + capacity > int(sync_reps):
+        raise SystemExit(
+            "UNSATISFIABLE prepared config: fit_reps(%d) + validation_reps(%d) "
+            "> sync_reps(%d); refused" % (fit, capacity, sync_reps))
+    fit_source = "explicit_cover_preamble" if cover_alias else (
+        "cli" if args.sic_fit_reps is not None else "preset")
+    return {
+        "mode": mode,
+        "fit_reps": fit,
+        "online_validation_reps": online_runtime,
+        "evaluation_reps": eval_reps,
+        # prepared holdout capacity handed to the adapter (never the runtime
+        # gate count: the S1 default gate is the training/fit residual / fit).
+        "validation_reps": capacity,
+        "support_mode": support_mode,
+        "cover_alias": cover_alias,
+        "fit_source": fit_source,
+    }
+
+
+def check_seed_separation(cal_tuples, accept_windows, *, run_seeds):
+    """Runtime S1-04 guard: no acceptance window reuses calibration content.
+
+    ``cal_tuples`` is a set of ``(seed, seed_offset, noise_root)`` used for
+    threshold/ROI/profile calibration.  ``accept_windows`` is the list of
+    ``(seed, seed_offset, noise_root)`` actually generated for this run.  A
+    collision (or a duplicated acceptance tuple) is a hard failure and the run is
+    refused with a non-zero exit.
+    """
+    reused = [t for t in accept_windows if t in cal_tuples]
+    if reused:
+        raise SystemExit(
+            "S1-04 seed separation: %d acceptance window(s) reuse a calibration "
+            "(seed, seed_offset, noise_root) tuple, first %r"
+            % (len(reused), reused[:3]))
+    seen = {}
+    dups = []
+    for t in accept_windows:
+        if t in seen:
+            dups.append(t)
+        else:
+            seen[t] = True
+    if dups:
+        raise SystemExit(
+            "S1-04 seed separation: %d acceptance window(s) reuse another "
+            "acceptance tuple, first %r" % (len(dups), dups[:3]))
+    return {"n_acceptance": len(accept_windows),
+            "n_calibration": len(cal_tuples), "reused": 0, "duplicates": 0}
+
+
 def stdin_hash(obj):
     blob = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(blob).hexdigest()
@@ -596,7 +1199,8 @@ _SIC_REQUIRED = ("sync", "preamble", "comm_code", "sync_reps",
                  "mode", "detect_threshold", "validate_threshold")
 _SIC_OPTIONAL = ("in_flight_max", "iq_budget_bytes", "queue_capacity",
                  "publish_reconstruction", "post_tail", "enable_fractional",
-                 "enable_cfo", "path_min_spacing", "max_window_samples")
+                 "enable_cfo", "path_min_spacing", "max_window_samples",
+                 "support_mode", "online_validation_reps", "fit_residual_max")
 
 
 def pybind_param_names(fn):
@@ -617,7 +1221,14 @@ def sic_adapter_supported_params(uwb):
 
 
 def call_sic_make_from_templates(uwb, vals, extras):
-    """Build the adapter, passing new make() params only when supported."""
+    """Build the adapter, passing new make() params only when supported.
+
+    S1: ``support_mode`` / ``online_validation_reps`` / ``fit_residual_max`` are
+    forwarded when the binding exposes them.  If the call with them fails (a
+    binding that advertises the name but not the value domain), fall back to the
+    pre-S1 kwargs and record the failure in ``used`` under
+    ``__s1_params_error`` so it is reported, never silently dropped.
+    """
     fn = uwb.preamble_sic.make_from_templates
     names = pybind_param_names(fn)
     used = {}
@@ -627,7 +1238,17 @@ def call_sic_make_from_templates(uwb, vals, extras):
             if n in names and n in extras:
                 kwargs[n] = extras[n]
                 used[n] = extras[n]
-        return fn(**kwargs), used
+        try:
+            return fn(**kwargs), used
+        except Exception as exc:  # pragma: no cover - binding specific
+            s1 = {k: kwargs.pop(k) for k in list(kwargs)
+                  if k in S1_MAKE_PARAMS}
+            blk = fn(**kwargs)
+            used.pop("support_mode", None)
+            used.pop("online_validation_reps", None)
+            used.pop("fit_residual_max", None)
+            used["__s1_params_error"] = "%s (dropped %s)" % (exc, sorted(s1))
+            return blk, used
     # Legacy positional fallback (pre-feature-detection binding).
     for n in _SIC_OPTIONAL:
         if n in extras:
@@ -705,6 +1326,605 @@ class CreditTracker:
 
 
 # ---------------------------------------------------------------------------
+# S1-03: asynchronous pipelined pacer (target-only paced measurement)
+#
+# Design (docs/sic/OpenCode修改指示_S1_八符号估计与全前导消除_2026-10-17.md S1-03)
+# ---------------------------------------------------------------------------
+# Threads
+#   * scheduler  : ONE Python thread owned by PipelinedPacer.  It computes the
+#                  ABSOLUTE planned submit time of every window from the nominal
+#                  rate (t0 + k/rate) and posts the ``in`` PDU at that deadline.
+#                  It NEVER waits for a completion, never re-times the schedule
+#                  and never skips ahead: when the bounded credit is not
+#                  available AT the planned deadline the window is counted as
+#                  ``missed_submission`` (reason recorded) and the schedule moves
+#                  on to the next absolute deadline.
+#   * SIC adapter: the block's own single C++ worker thread (in-process).
+#   * consumer   : the CIR/demod block's own C++ worker thread.
+#   * handlers   : Python message handlers on the block threads
+#                  (``sic.out`` recorder, ``sic.status``, consumer result
+#                  status).  They record completion timestamps/states and are
+#                  the ONLY place the in-flight counter is decremented.
+#
+# Credit
+#   ``in_flight_max`` windows AND an IQ byte budget, both held from the moment
+#   the PDU is posted until the TARGET terminal (the consumer result when a
+#   consumer is part of the path, else the SIC ``status`` event).  Holding the
+#   credit to the consumer terminal (not to the SIC output) is stricter than the
+#   adapter's own admission cap, so a slow consumer can never build an unbounded
+#   queue: it shows up as ``missed_submission`` instead.
+#
+# Completion path
+#   ``sic.out`` is routed DIRECTLY to the consumer's message port by
+#   ``msg_connect`` (C++ -> C++, no Python IQ copy).  A parallel
+#   ``sic.out`` -> Python recorder only reads ``window_id`` (no payload
+#   conversion).  ``sic.status`` carries the per-window terminal state / model
+#   evidence; the consumer result carries the target terminal.
+# ---------------------------------------------------------------------------
+PACE_HANDLER_BUCKETS = ("sic_out", "sic_status", "consumer", "consumer_status")
+
+
+def _msg_int(meta, key, default=-1):
+    """Fast integer read from a PMT dict (no full dict conversion)."""
+    if not pmt.is_dict(meta):
+        return default
+    v = pmt.dict_ref(meta, pmt.intern(key), pmt.PMT_NIL)
+    if v is pmt.PMT_NIL:
+        return default
+    if pmt.is_uint64(v):
+        return int(pmt.to_uint64(v))
+    if pmt.is_integer(v):
+        return int(pmt.to_long(v))
+    return default
+
+
+def _msg_str(meta, key, default=None):
+    if not pmt.is_dict(meta):
+        return default
+    v = pmt.dict_ref(meta, pmt.intern(key), pmt.PMT_NIL)
+    if v is pmt.PMT_NIL:
+        return default
+    if pmt.is_symbol(v):
+        return pmt.symbol_to_string(v)
+    return default
+
+
+def _msg_bool(meta, key, default=False):
+    if not pmt.is_dict(meta):
+        return default
+    v = pmt.dict_ref(meta, pmt.intern(key), pmt.PMT_NIL)
+    if v is pmt.PMT_NIL:
+        return default
+    if pmt.is_bool(v):
+        return bool(pmt.to_bool(v))
+    return default
+
+
+class PacedSink(gr.basic_block):
+    """Zero-stream message sink used by the paced pipeline.
+
+    ``hook(msg, t_ns)`` runs on this block's own message thread.  Nothing is
+    converted, retained or written: the sink exists only so the completion can
+    be timestamped and accounted asynchronously, without any thread waiting on
+    it.  Its own Python cost is measured by the hook and reported as the
+    handler duty cycle (so GIL/throughput limits are stated with numbers, not
+    assumed away).
+    """
+
+    def __init__(self, name, hook):
+        gr.basic_block.__init__(self, name=name, in_sig=None, out_sig=None)
+        self.message_port_register_in(pmt.intern("in"))
+        self.set_msg_handler(pmt.intern("in"), self._handle)
+        self._hook = hook
+        self.count = 0
+
+    def _handle(self, msg):
+        self.count += 1
+        self._hook(msg, time.monotonic_ns())
+
+
+class PipelinedPacer:
+    """S1-03 asynchronous pipelined pacer / measurement ledger (see above)."""
+
+    def __init__(self, *, rate_hz, planned, in_flight_max, iq_budget_bytes,
+                 window_bytes, deadline_us=5000.0, lead_us=2000.0,
+                 terminal_timeout_s=5.0, drain_timeout_s=60.0,
+                 max_wall_s=None, target_stage="cir"):
+        self.rate_hz = float(rate_hz)
+        self.planned = int(planned)
+        self.in_flight_max = max(1, int(in_flight_max))
+        self.iq_budget_bytes = int(iq_budget_bytes)
+        self.window_bytes = int(window_bytes)
+        self.deadline_us = float(deadline_us)
+        self.lead_us = float(lead_us)
+        self.terminal_timeout_ns = int(terminal_timeout_s * 1e9)
+        self.drain_timeout_ns = int(drain_timeout_s * 1e9)
+        self.max_wall_ns = (None if max_wall_s is None
+                            else int(float(max_wall_s) * 1e9))
+        self.target_stage = str(target_stage)
+
+        self._lock = threading.Lock()
+        self._thread = None
+        self._start_ns = None
+        self._t0_ns = None
+        self._finished = False
+        # per-window timeline
+        self.planned_ns = [None] * self.planned
+        self.submit_ns = [None] * self.planned
+        self.submit_state = ["not_submitted"] * self.planned
+        self.sic_out_ns = [None] * self.planned
+        self.terminal_ns = [None] * self.planned
+        self.terminal_state = [None] * self.planned
+        self.sic_state = [None] * self.planned
+        self.sic_committed = [None] * self.planned
+        self.sic_missed_admission = [0] * self.planned
+        self.core_total_us = [None] * self.planned
+        self.backlog = [0] * self.planned      # offered - admitted at deadline
+        self.inflight_at_deadline = [0] * self.planned
+        self.prepare_us = [None] * self.planned
+        self.post_us = [None] * self.planned
+        # counters
+        self.offered = 0
+        self.admitted = 0
+        self.missed_submission = 0
+        self.miss_reasons = {"in_flight_limit": 0, "iq_budget": 0,
+                             "post_error": 0}
+        self.not_submitted = 0
+        self.completed = 0
+        self.terminal_timeouts = 0
+        self.deadline_misses = 0
+        self.in_flight = 0
+        self.pending_bytes = 0
+        self.inflight_hwm = 0
+        self.pending_bytes_peak = 0
+        self.handler_us = {k: [] for k in PACE_HANDLER_BUCKETS}
+        self._outstanding = {}
+        self._submit_fn = None
+        self.scheduler_cpu_s = None
+
+    # -- credit -----------------------------------------------------------
+    def _hold(self, wid, now_ns):
+        """Reserve credit for ``wid``.  Returns (ok, reason)."""
+        with self._lock:
+            self.offered += 1
+            self.backlog[wid] = self.offered - self.admitted
+            self.inflight_at_deadline[wid] = self.in_flight
+            if self.in_flight >= self.in_flight_max:
+                self.missed_submission += 1
+                self.miss_reasons["in_flight_limit"] += 1
+                return False, "in_flight_limit"
+            if self.pending_bytes + self.window_bytes > self.iq_budget_bytes:
+                self.missed_submission += 1
+                self.miss_reasons["iq_budget"] += 1
+                return False, "iq_budget"
+            self.admitted += 1
+            self.in_flight += 1
+            self.pending_bytes += self.window_bytes
+            self.inflight_hwm = max(self.inflight_hwm, self.in_flight)
+            self.pending_bytes_peak = max(self.pending_bytes_peak,
+                                          self.pending_bytes)
+            self._outstanding[wid] = now_ns
+            return True, None
+
+    def _release(self, wid, t_ns, state):
+        """Terminal for ``wid``: record it and give the credit back."""
+        with self._lock:
+            if self.terminal_ns[wid] is not None:
+                return False
+            self.terminal_ns[wid] = int(t_ns)
+            self.terminal_state[wid] = state
+            self.completed += 1
+            if wid in self._outstanding:
+                del self._outstanding[wid]
+            if self.in_flight > 0:
+                self.in_flight -= 1
+            self.pending_bytes = max(0, self.pending_bytes - self.window_bytes)
+            return True
+
+    def _expire_stale(self, now_ns):
+        """Release windows whose terminal never arrived (recorded, not hidden)."""
+        with self._lock:
+            stale = [w for w, t in self._outstanding.items()
+                     if now_ns - t > self.terminal_timeout_ns]
+        for wid in sorted(stale):
+            if self._release(wid, now_ns, "terminal_timeout"):
+                with self._lock:
+                    self.terminal_timeouts += 1
+
+    # -- completion handlers (block threads) ------------------------------
+    def _record_handler(self, bucket, t0_ns):
+        self.handler_us[bucket].append((time.perf_counter_ns() - t0_ns) / 1e3)
+
+    def on_sic_out(self, msg, t_ns):
+        """``sic.out`` recorder: SIC-stage completion (no IQ conversion)."""
+        t0 = time.perf_counter_ns()
+        meta = pmt.car(msg) if pmt.is_pair(msg) else pmt.PMT_NIL
+        wid = _msg_int(meta, "window_id", -1)
+        if 0 <= wid < self.planned:
+            self.sic_out_ns[wid] = int(t_ns)
+        self._record_handler("sic_out", t0)
+
+    def on_sic_status(self, msg, t_ns):
+        """``sic.status`` handler: terminal state / model evidence per window."""
+        t0 = time.perf_counter_ns()
+        event = _msg_str(msg, "event")
+        wid = _msg_int(msg, "window_id", -1)
+        if 0 <= wid < self.planned and event == "window":
+            self.sic_state[wid] = _msg_str(msg, "sic_state")
+            self.sic_committed[wid] = _msg_bool(msg, "sic_committed",
+                                               _msg_str(msg, "sic_state")
+                                               == "committed")
+            self.sic_missed_admission[wid] = int(
+                _msg_bool(msg, "missed_admission", False))
+            self.core_total_us[wid] = _msg_int(msg, "core_total_us", -1)
+            if self.target_stage == "sic":
+                self._release(wid, t_ns, self.sic_state[wid] or "sic_done")
+        self._record_handler("sic_status", t0)
+
+    def on_consumer_result(self, msg, t_ns):
+        """Target consumer result: the target terminal (releases credit)."""
+        t0 = time.perf_counter_ns()
+        meta = pmt.car(msg) if pmt.is_pair(msg) else msg
+        wid = _msg_int(meta, "schedule_index", -1)
+        if not (0 <= wid < self.planned):
+            wid = _msg_int(meta, "packet_id", 0) - 1
+        if 0 <= wid < self.planned:
+            state = _msg_str(meta, "status", "unknown")
+            self._release(wid, t_ns, state)
+            planned = self.planned_ns[wid]
+            if planned is not None and \
+                    (t_ns - planned) / 1000.0 > self.deadline_us:
+                with self._lock:
+                    self.deadline_misses += 1
+        self._record_handler("consumer", t0)
+
+    def on_consumer_status(self, msg, t_ns):
+        """Consumer reject/drop event: a failed terminal (never silently lost)."""
+        t0 = time.perf_counter_ns()
+        wid = _msg_int(msg, "pulse_id", -1) - 1
+        if not (0 <= wid < self.planned):
+            wid = _msg_int(msg, "schedule_index", -1)
+        if 0 <= wid < self.planned and self.terminal_ns[wid] is None:
+            self._release(wid, t_ns,
+                          "consumer_rejected:%s" % (_msg_str(msg, "event")
+                                                    or "unknown"))
+        self._record_handler("consumer_status", t0)
+
+    # -- scheduler thread -------------------------------------------------
+    def start(self, submit_fn):
+        """Start the scheduler thread.  ``submit_fn(wid, planned_ns)`` posts the
+        ``in`` PDU and returns once the block accepted it."""
+        self._submit_fn = submit_fn
+        self._thread = threading.Thread(target=self._run, name="sic-pacer",
+                                        daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        # ``time.thread_time`` is THIS thread's CPU time (not the process total,
+        # which would include the C++ worker and the message-handler threads).
+        cpu0 = (time.thread_time() if hasattr(time, "thread_time")
+                else time.process_time())
+        self._start_ns = time.monotonic_ns()
+        self._t0_ns = self._start_ns + int(self.lead_us * 1000)
+        period_ns = 1e9 / self.rate_hz
+        wall_stop_ns = (None if self.max_wall_ns is None else
+                        self._start_ns + self.max_wall_ns)
+        for wid in range(self.planned):
+            planned = self._t0_ns + int(round(wid * period_ns))
+            self.planned_ns[wid] = planned
+            # Absolute-deadline wait.  No completion, credit state or PDU
+            # count can move this deadline; the loop only ever sleeps until it.
+            while True:
+                now = time.monotonic_ns()
+                if now >= planned:
+                    break
+                time.sleep(min((planned - now) * 1e-9, 0.001))
+            now = time.monotonic_ns()
+            if wall_stop_ns is not None and now > wall_stop_ns:
+                self.not_submitted = self.planned - wid
+                print("paced: wall cap %.1fs hit at wid=%d/%d; %d windows not "
+                      "submitted (reported, never hidden)"
+                      % (self.max_wall_ns / 1e9, wid, self.planned,
+                         self.not_submitted), flush=True)
+                break
+            self._expire_stale(now)
+            ok, reason = self._hold(wid, now)
+            if not ok:
+                self.submit_state[wid] = "missed_" + str(reason)
+                continue
+            t_prep0 = time.perf_counter_ns()
+            try:
+                self._submit_fn(wid, planned)
+            except Exception as exc:  # pragma: no cover - defensive
+                t_done = time.monotonic_ns()
+                with self._lock:
+                    self.missed_submission += 1
+                    self.miss_reasons["post_error"] += 1
+                    self._outstanding.pop(wid, None)
+                    if self.in_flight > 0:
+                        self.in_flight -= 1
+                    self.pending_bytes = max(0, self.pending_bytes
+                                             - self.window_bytes)
+                self.submit_state[wid] = "post_error:%s" % exc
+                continue
+            t_done = time.monotonic_ns()
+            self.prepare_us[wid] = (t_done - t_prep0) / 1e3
+            self.submit_ns[wid] = int(t_done)
+            self.submit_state[wid] = "submitted"
+            with self._lock:
+                if wid in self._outstanding:
+                    self._outstanding[wid] = int(t_done)
+        # ---- drain (outside every planned deadline) ----------------------
+        drain_until = time.monotonic_ns() + self.drain_timeout_ns
+        while True:
+            with self._lock:
+                n_out = len(self._outstanding)
+            if n_out == 0 or time.monotonic_ns() > drain_until:
+                break
+            self._expire_stale(time.monotonic_ns())
+            time.sleep(0.001)
+        self._expire_stale(time.monotonic_ns() + self.terminal_timeout_ns + 1)
+        self.scheduler_cpu_s = ((time.thread_time()
+                                 if hasattr(time, "thread_time")
+                                 else time.process_time()) - cpu0)
+        self._finished = True
+
+    def join(self, timeout=None):
+        if self._thread is not None:
+            self._thread.join(timeout)
+        return self._finished
+
+    # -- report -----------------------------------------------------------
+    def _pct(self, values, q):
+        vals = [float(v) for v in values if v is not None]
+        if not vals:
+            return None
+        return float(np.percentile(np.asarray(vals, dtype=float), q))
+
+    def _summ(self, values):
+        vals = [float(v) for v in values if v is not None]
+        if not vals:
+            return {"n": 0}
+        a = np.asarray(vals, dtype=float)
+        return {"n": int(a.size), "mean": float(a.mean()),
+                "p50": float(np.percentile(a, 50)),
+                "p95": float(np.percentile(a, 95)),
+                "p99": float(np.percentile(a, 99)),
+                "max": float(a.max())}
+
+    def scheduled_span_ns(self):
+        return int(self.planned * 1e9 / self.rate_hz)
+
+    def report(self, adapter=None):
+        submitted = [w for w in range(self.planned)
+                     if self.submit_ns[w] is not None]
+        gaps_us = [(self.submit_ns[w] - self.planned_ns[w]) / 1e3
+                   for w in submitted]
+        service_us = []
+        latency_us = []
+        sic_stage_us = []
+        for w in submitted:
+            term = self.terminal_ns[w]
+            if term is not None:
+                service_us.append((term - self.submit_ns[w]) / 1e3)
+                latency_us.append((term - self.planned_ns[w]) / 1e3)
+            out_ns = self.sic_out_ns[w]
+            if out_ns is not None:
+                sic_stage_us.append((out_ns - self.submit_ns[w]) / 1e3)
+        span_s = self.scheduled_span_ns() / 1e9
+        first = submitted[0] if submitted else None
+        end_ns = max([self.terminal_ns[w] for w in range(self.planned)
+                      if self.terminal_ns[w] is not None] or
+                     [self._t0_ns + self.scheduled_span_ns()])
+        observed_s = max(1e-9, (end_ns - self._t0_ns) / 1e9)
+        states = {}
+        for w in range(self.planned):
+            st = self.terminal_state[w]
+            if st is not None:
+                states[str(st)] = states.get(str(st), 0) + 1
+        sic_states = {}
+        for w in range(self.planned):
+            st = self.sic_state[w]
+            if st is not None:
+                sic_states[str(st)] = sic_states.get(str(st), 0) + 1
+        backlog = [self.backlog[w] for w in submitted]
+        inflight = [self.inflight_at_deadline[w] for w in submitted]
+        sched_us = [self.prepare_us[w] for w in submitted]
+        handler = {k: self._summ(v) for k, v in self.handler_us.items()}
+        h_total_us = sum(sum(v) for v in self.handler_us.values())
+        sic_stage = self._summ(sic_stage_us)
+        core = self._summ(self.core_total_us)
+        load_ok = bool(self.missed_submission == 0 and self.not_submitted == 0
+                       and self.terminal_timeouts == 0
+                       and self.completed == self.admitted
+                       and self.admitted == self.planned)
+        latency_ok = bool(latency_us and
+                          self._pct(latency_us, 99) is not None and
+                          self._pct(latency_us, 99) <= self.deadline_us)
+        # The frozen S0 low-latency target for the SIC front-end itself
+        # (mean <= 0.5 ms / P99 <= 1 ms).  Reported as a sub-gate; it is NOT
+        # relaxed here and NOT substituted by the end-to-end number.
+        sic_mean_ok = bool(sic_stage["n"] > 0 and sic_stage["mean"] <= 500.0)
+        sic_p99_ok = bool(sic_stage["n"] > 0 and sic_stage["p99"] is not None
+                          and sic_stage["p99"] <= 1000.0)
+        gates = {
+            "load_met": load_ok,
+            "terminal_p99_le_deadline": latency_ok,
+            "sic_stage_mean_le_0.5ms": sic_mean_ok,
+            "sic_stage_p99_le_1ms": sic_p99_ok,
+        }
+        return {
+            "rate_hz_target": self.rate_hz,
+            "planned_windows": self.planned,
+            "offered": int(self.offered),
+            "admitted": int(self.admitted),
+            "missed_submission": int(self.missed_submission),
+            "miss_reasons": dict(self.miss_reasons),
+            "not_submitted": int(self.not_submitted),
+            "completed": int(self.completed),
+            "failed": int(self.terminal_timeouts),
+            "terminal_timeouts": int(self.terminal_timeouts),
+            "deadline_us": self.deadline_us,
+            "deadline_misses": int(self.deadline_misses),
+            "achieved_offered_rate": float(self.admitted / span_s),
+            "achieved_completed_rate": float(self.completed / observed_s),
+            "scheduled_span_s": float(span_s),
+            "observed_wall_s": float(observed_s),
+            "first_launch_us": (None if first is None else
+                                (self.submit_ns[first] - self._start_ns) / 1e3),
+            "first_submit_offset_from_t0_us": (
+                None if first is None else
+                (self.submit_ns[first] - self._t0_ns) / 1e3),
+            "schedule_gap_us": dict(
+                self._summ(gaps_us),
+                description="actual_submit - ABSOLUTE planned_submit "
+                            "(>0 = posted late; the schedule is never re-timed)"),
+            "submit_late": {"n": int(sum(1 for v in gaps_us if v > 0))},
+            "sic_stage_latency_us": dict(
+                sic_stage,
+                description="PDU submit -> the SIC `out`/`status` completion "
+                            "(the front-end the frozen S0 mean<=0.5 ms / "
+                            "P99<=1 ms target refers to)"),
+            "sic_core_total_us": dict(
+                core, description="adapter-reported SIC core work per window"),
+            "service_latency_us": dict(
+                self._summ(service_us),
+                description="PDU submit -> target terminal (consumer result)"),
+            "completion_latency_us": dict(
+                self._summ(latency_us),
+                description="planned submit -> target terminal"),
+            "entry_backlog": {
+                "definition": "offered - admitted sampled at every planned "
+                              "deadline (cumulative); in_flight is the "
+                              "instantaneous admitted-but-not-terminal count",
+                "max": (max(backlog) if backlog else 0),
+                "mean": (float(np.mean(backlog)) if backlog else 0.0),
+                "p95": self._pct(backlog, 95),
+                "final": (backlog[-1] if backlog else 0),
+                "inflight_max_at_deadline": (max(inflight) if inflight else 0),
+                "inflight_p95_at_deadline": self._pct(inflight, 95),
+            },
+            "source_inflight_high_watermark": int(self.inflight_hwm),
+            "source_pending_bytes_peak": int(self.pending_bytes_peak),
+            "in_flight_max": int(self.in_flight_max),
+            "iq_budget_bytes": int(self.iq_budget_bytes),
+            "window_bytes": int(self.window_bytes),
+            "terminal_state": {
+                "completed": int(self.completed),
+                "deadline_missed": int(self.deadline_misses),
+                "not_submitted": int(self.not_submitted),
+                "timeout": int(self.terminal_timeouts),
+            },
+            "terminal_state_histogram": states,
+            "sic_state_histogram": sic_states,
+            "adapter_queue_high_watermark": (
+                None if adapter is None else
+                int(adapter.queue_high_watermark())),
+            "adapter_inflight_high_watermark": (
+                None if adapter is None else
+                int(adapter.inflight_high_watermark())),
+            "adapter_bypass_fifo_high_watermark": (
+                None if adapter is None else
+                int(adapter.bypass_fifo_high_watermark())),
+            "adapter_missed_admission": (
+                None if adapter is None else
+                int(adapter.windows_missed_admission())),
+            "submit_mode": "async_pipelined_scheduler_thread",
+            "target_stage": self.target_stage,
+            "handler_us": handler,
+            "python_handler_duty": (
+                (h_total_us / 1e6) / observed_s if observed_s > 0 else None),
+            "scheduler_python_cpu_s": self.scheduler_cpu_s,
+            "scheduler_cpu_duty": (
+                (self.scheduler_cpu_s / observed_s)
+                if (self.scheduler_cpu_s is not None and observed_s > 0)
+                else None),
+            "submit_prepare_us": self._summ(sched_us),
+            "gates": gates,
+            "target_load_met": load_ok,
+            "target_latency_met": latency_ok,
+            "target_met": bool(load_ok and latency_ok and sic_mean_ok
+                               and sic_p99_ok),
+            "note": ("every value is measured: a planned deadline that could "
+                     "not be posted within the bounded credit is "
+                     "missed_submission (never re-timed, never skipped ahead); "
+                     "the achieved rate is reported next to the planned load "
+                     "and is never substituted for it."),
+        }
+
+    def window_records(self):
+        """Per-window timeline records (written AFTER the timed region)."""
+        out = []
+        for w in range(self.planned):
+            sub = self.submit_ns[w]
+            plan = self.planned_ns[w]
+            term = self.terminal_ns[w]
+            out.append({
+                "window_id": int(w),
+                "planned_submit_ns": plan,
+                "actual_submit_ns": sub,
+                "submit_state": self.submit_state[w],
+                "schedule_gap_us": (None if (sub is None or plan is None)
+                                    else (sub - plan) / 1e3),
+                "sic_out_ns": self.sic_out_ns[w],
+                "terminal_ns": term,
+                "terminal_state": self.terminal_state[w],
+                "service_us": (None if (term is None or sub is None)
+                               else (term - sub) / 1e3),
+                "completion_us": (None if (term is None or plan is None)
+                                  else (term - plan) / 1e3),
+                "backlog_offered_minus_admitted": int(self.backlog[w]),
+                "inflight_at_deadline": int(self.inflight_at_deadline[w]),
+                "submit_prepare_us": self.prepare_us[w],
+                "sic_state": self.sic_state[w],
+                "sic_committed": self.sic_committed[w],
+                "sic_missed_admission": int(self.sic_missed_admission[w]),
+                "core_total_us": self.core_total_us[w],
+            })
+        return out
+
+
+def paced_input_meta_base(*, sensing_code, sync_reps, sensing_roi,
+                          pre_guard, observed_end, sample_count, run_id,
+                          epoch_id, predicted_start, template_id,
+                          sensing_profile_id):
+    """The per-window-CONSTANT part of the paced ``in`` meta.
+
+    Built ONCE, before the timed region; the scheduler only adds
+    ``window_id`` / ``pulse_id`` / ``schedule_index`` / ``planned_publish_ns``
+    per window (4 ``dict_add`` calls on a pre-built dict).  It carries every key
+    the SIC adapter AND the downstream consumer need, because ``sic.out`` is
+    routed straight into the consumer and the adapter copies its input meta into
+    the ``out`` meta.
+    """
+    meta = pmt.make_dict()
+    meta = put_int(meta, "sample_count", int(sample_count))
+    meta = put_int(meta, "code_index", int(sensing_code))
+    meta = put_int(meta, "sync_repetitions", int(sync_reps))
+    meta = put_str(meta, "sfd_mode", SFD_MODE)
+    meta = put_str(meta, "sensing_profile_id", str(sensing_profile_id))
+    meta = put_str(meta, "template_id", str(template_id))
+    meta = put_int(meta, "sensing_roi_lo", int(sensing_roi[0]))
+    meta = put_int(meta, "sensing_roi_hi", int(sensing_roi[1]))
+    if observed_end is not None:
+        meta = put_int(meta, "observed_end_sample", int(observed_end))
+    meta = put_float(meta, "sample_rate", float(S.WORK_HZ))
+    meta = put_int(meta, "window_start_sample", 0)
+    meta = put_int(meta, "pre_guard_samples", int(pre_guard))
+    meta = put_float(meta, "calibration_delay_native_samples", 0.0)
+    # Consumer-side keys (demod schema; the CIR ignores what it does not use).
+    meta = put_int(meta, "schema_version", SCHEMA_VERSION)
+    meta = put_str(meta, "run_id", str(run_id))
+    meta = put_int(meta, "epoch_id", int(epoch_id))
+    meta = put_int(meta, "predicted_start_sample", int(predicted_start))
+    meta = put_int(meta, "predicted_sensing_start", int(predicted_start))
+    meta = put_int(meta, "sensing_code", int(sensing_code))
+    meta = put_int(meta, "sensing_sync_reps", int(sync_reps))
+    meta = put_str(meta, "sensing_sfd_mode", SFD_MODE)
+    return meta
+
+
+# ---------------------------------------------------------------------------
 # Simulator runtime
 # ---------------------------------------------------------------------------
 class SimRuntime:
@@ -712,22 +1932,38 @@ class SimRuntime:
 
     def __init__(self, uwb, *, tpl_path, consumers, windows,
                  demod_softchip="bypass", sic=None, keep_iq=4,
-                 demod_rake_top_k=0, radar_use_predicted=False):
+                 demod_rake_top_k=0, radar_use_predicted=False,
+                 paced=None, paced_target_consumer=None):
         self.uwb = uwb
         self.consumers = consumers
-        self.want_cir = consumers in ("cir", "both")
-        self.want_demod = consumers in ("demod", "both")
+        self.paced = paced
+        # S1-03: in the paced target-only mode exactly ONE consumer is part of
+        # the timed path; the other is not built at all (never faked as a
+        # measured 0-us service).
+        if paced is not None:
+            if paced_target_consumer is None:
+                paced_target_consumer = "cir" if consumers in ("cir", "both") \
+                    else "demod"
+            self.consumers = str(paced_target_consumer)
+        self.paced_target_consumer = (None if paced is None
+                                      else str(paced_target_consumer))
+        self.want_cir = self.consumers in ("cir", "both")
+        self.want_demod = self.consumers in ("demod", "both")
         self.keep_iq = max(0, int(keep_iq))
         self.sic = None
         self.sic_params_used = {}
         self.sink_sic_out = None
         self.sink_sic_ihat = None
+        self.sink_sic_status = None
+        self.paced_sinks = {}
         self.tb = gr.top_block("uwb_sim_preamble_sic")
         self.cir = None
         self.demod = None
         self.sink_cir = None
         self.sink_demod = None
-        qcap = max(64, 2 * int(windows) + 8)
+        qcap = (max(64, 2 * int(windows) + 8) if paced is None
+                else max(64, 4 * int(sic.get("in_flight_max", 8) if sic
+                                     else 8) + 8))
         rake = int(demod_rake_top_k) if demod_softchip == "rake4" else 0
         if demod_softchip == "rake4" and rake <= 0:
             rake = 4
@@ -736,14 +1972,29 @@ class SimRuntime:
             self.cir = uwb.radar_cir_estimator(
                 tpl_path, 64, SFD_MODE, 9, 16, 100, 10, 0, 128, 32, 0.12,
                 0.02, True, qcap, bool(radar_use_predicted))
-            self.sink_cir = ResultSink("cir_sink", self.keep_iq)
-            self.tb.msg_connect((self.cir, "cir"), (self.sink_cir, "in"))
+            if paced is None:
+                self.sink_cir = ResultSink("cir_sink", self.keep_iq)
+                self.tb.msg_connect((self.cir, "cir"), (self.sink_cir, "in"))
+            else:
+                self._paced_sink("consumer",
+                                 (self.cir, "cir"), paced.on_consumer_result)
+                self._paced_sink("consumer_status",
+                                 (self.cir, "status"),
+                                 paced.on_consumer_status)
         if self.want_demod:
             self.demod = uwb.realtime_demodulator(
                 tpl_path, 1, qcap, SFD_MODE, rake, mode, 9, 64, 14)
-            self.sink_demod = ResultSink("demod_sink", self.keep_iq)
-            self.tb.msg_connect((self.demod, "result"),
-                                (self.sink_demod, "in"))
+            if paced is None:
+                self.sink_demod = ResultSink("demod_sink", self.keep_iq)
+                self.tb.msg_connect((self.demod, "result"),
+                                    (self.sink_demod, "in"))
+            else:
+                self._paced_sink("consumer",
+                                 (self.demod, "result"),
+                                 paced.on_consumer_result)
+                self._paced_sink("consumer_status",
+                                 (self.demod, "status"),
+                                 paced.on_consumer_status)
         if sic is not None:
             vals = {
                 "sync": sic["sync"].astype(np.complex64).tolist(),
@@ -766,20 +2017,57 @@ class SimRuntime:
                 "in_flight_max": int(sic.get("in_flight_max", 8)),
                 "iq_budget_bytes": int(sic.get("iq_budget_bytes", 64 << 20)),
                 "queue_capacity": int(sic.get("queue_capacity", 8)),
-                "publish_reconstruction": True,
+                # The diagnostic i_hat reconstruction is NOT part of the paced
+                # target path (it is a full extra c32vector per window), so it
+                # is not published there; the functional runs keep it.
+                "publish_reconstruction": bool(
+                    sic.get("publish_reconstruction", True)),
                 "post_tail": int(sic.get("post_tail", 100)),
                 "enable_fractional": bool(sic.get("enable_fractional", True)),
                 "enable_cfo": bool(sic.get("enable_cfo", True)),
                 "path_min_spacing": int(sic.get("path_min_spacing", 0)),
                 "max_window_samples": int(sic.get("max_window_samples", 0)),
+                # S1 (S1-01/§9): the support derivation mode and the ONLINE
+                # validation gate count.  Forwarded only when the binding
+                # exposes the parameter names.
+                "support_mode": str(sic.get("support_mode",
+                                            "configured_nominal")),
+                "online_validation_reps": int(
+                    sic.get("online_validation_reps", 0)),
+                "fit_residual_max": float(sic.get("fit_residual_max", 0.8)),
             }
             self.sic, self.sic_params_used = \
                 call_sic_make_from_templates(uwb, vals, extras)
-            self.sink_sic_out = ResultSink("sic_out_sink", self.keep_iq)
-            self.sink_sic_ihat = ResultSink("sic_ihat_sink", self.keep_iq)
-            self.tb.msg_connect((self.sic, "out"), (self.sink_sic_out, "in"))
-            self.tb.msg_connect((self.sic, "i_hat"),
-                                (self.sink_sic_ihat, "in"))
+            if paced is None:
+                self.sink_sic_out = ResultSink("sic_out_sink", self.keep_iq)
+                self.sink_sic_ihat = ResultSink("sic_ihat_sink", self.keep_iq)
+                self.tb.msg_connect((self.sic, "out"),
+                                    (self.sink_sic_out, "in"))
+                self.tb.msg_connect((self.sic, "i_hat"),
+                                    (self.sink_sic_ihat, "in"))
+            else:
+                # S1-03 completion path.  The IQ goes C++ -> C++ straight into
+                # the target consumer (no Python copy, no re-wrap); a parallel
+                # recorder timestamps the SIC stage, and `status` carries the
+                # per-window terminal state / frozen-model evidence.
+                if self.want_cir:
+                    self.tb.msg_connect((self.sic, "out"),
+                                        (self.cir, "rx"))
+                elif self.want_demod:
+                    self.tb.msg_connect((self.sic, "out"),
+                                        (self.demod, "samples"))
+                self._paced_sink("sic_out", (self.sic, "out"),
+                                 paced.on_sic_out)
+                self.sink_sic_status = self._paced_sink(
+                    "sic_status", (self.sic, "status"), paced.on_sic_status)
+
+    def _paced_sink(self, name, src, hook):
+        """Create a paced message sink and connect ``src`` to it."""
+        sink = PacedSink("paced_%s_sink" % name, hook)
+        self.paced_sinks[name] = sink
+        self.tb.msg_connect(src, (sink, "in"))
+        return sink
+
 
     def start(self):
         self.tb.start()
@@ -790,15 +2078,15 @@ class SimRuntime:
 
     def posted(self):
         n = 0
-        if self.want_cir:
+        if self.want_cir and self.sink_cir is not None:
             n = self.sink_cir.count
-        if self.want_demod:
+        if self.want_demod and self.sink_demod is not None:
             n = self.sink_demod.count
         return n
 
     def counts(self):
-        return (self.sink_cir.count if self.want_cir else -1,
-                self.sink_demod.count if self.want_demod else -1)
+        return (self.sink_cir.count if self.sink_cir is not None else -1,
+                self.sink_demod.count if self.sink_demod is not None else -1)
 
     def post_cir(self, meta, iq):
         self.cir.to_basic_block()._post(
@@ -819,7 +2107,7 @@ class SimRuntime:
         self.sic.to_basic_block()._post(pmt.intern("truth"), truth)
 
     def sic_counts(self):
-        if self.sic is None:
+        if self.sic is None or self.sink_sic_out is None:
             return (-1, -1)
         return (self.sink_sic_out.count, self.sink_sic_ihat.count)
 
@@ -1241,6 +2529,55 @@ def write_json(path, obj):
         f.write("\n")
 
 
+def update_results_index(run_dir):
+    """S1-06/S1-07: keep ``index.json`` pointing at the REAL newest run.
+
+    The index lives at the results root (the parent of ``run_dir``); its
+    ``latest_run`` is re-derived from the actual sibling run directories by
+    ``summary.json`` mtime, never copied from a stale manifest.
+    """
+    run_dir = os.path.abspath(run_dir)
+    root = os.path.dirname(run_dir)
+    index_path = os.path.join(root, "index.json")
+    data = _read_json(index_path) or {}
+    runs = data.get("runs")
+    if not isinstance(runs, dict):
+        runs = {}
+    found = []
+    try:
+        for name in sorted(os.listdir(root)):
+            cand = os.path.join(root, name)
+            if os.path.isfile(os.path.join(cand, "summary.json")) and \
+                    os.path.isfile(os.path.join(cand, "run_manifest.json")):
+                found.append(cand)
+    except OSError:  # pragma: no cover - defensive
+        found = [run_dir]
+    if not found:
+        found = [run_dir]
+
+    def _stamp(path):
+        try:
+            return os.path.getmtime(os.path.join(path, "summary.json"))
+        except OSError:  # pragma: no cover - defensive
+            return 0.0
+
+    newest = max(found, key=_stamp)
+    summ = _read_json(os.path.join(run_dir, "summary.json")) or {}
+    man = _read_json(os.path.join(run_dir, "run_manifest.json")) or {}
+    runs[os.path.basename(run_dir)] = {
+        "run_id": man.get("run_id"),
+        "windows": summ.get("windows_completed"),
+        "windows_expected": summ.get("windows_expected"),
+        "model_mode": man.get("sic_model_mode"),
+        "config_hash": man.get("effective_config_hash"),
+    }
+    data["schema"] = data.get("schema", "sic-s1-results-index/1")
+    data["runs"] = runs
+    data["latest_run"] = os.path.basename(newest)
+    write_json(index_path, data)
+    return index_path
+
+
 def _mag(v):
     if isinstance(v, bool):
         return None
@@ -1388,6 +2725,15 @@ def build_child_argv(args, output, isr=None, offset=None, cfo=None,
         argv += ["--sic-validation-reps", str(int(args.sic_validation_reps))]
     if getattr(args, "sic_cover_preamble", False):
         argv += ["--sic-cover-preamble"]
+    # S1: propagate the model mode and the online/offline repetition split so
+    # every child uses the identical effective config (S1-02/S1-07).
+    if getattr(args, "sic_model_mode", None) is not None:
+        argv += ["--sic-model-mode", str(args.sic_model_mode)]
+    if getattr(args, "sic_online_validation_reps", None) is not None:
+        argv += ["--sic-online-validation-reps",
+                 str(int(args.sic_online_validation_reps))]
+    if getattr(args, "sic_evaluation_reps", None) is not None:
+        argv += ["--sic-evaluation-reps", str(int(args.sic_evaluation_reps))]
     return argv
 
 
@@ -1560,7 +2906,13 @@ def run_r01_regression(args, repo, argv):
               "--consumer", args.consumer, "--output", cout,
               "--seed-set", args.seed_set, "--windows", str(int(n)),
               "--interference", "on", "--fixtures",
-              str(max(4, int(args.fixtures)))] + extra
+              str(max(4, int(args.fixtures))),
+              # The R01 regression cases exercise the S0 tiny-mask / uncommitted
+              # behaviour, so they run the EXPLICIT legacy mode (the S1 default
+              # cancels the whole nominal preamble).
+              "--sic-model-mode", "confirmed_legacy",
+              "--sic-online-validation-reps", "8",
+              "--sic-evaluation-reps", "48"] + extra
         rc = _run_child(ca, os.path.join(cout, "run.log"))
         summ = _read_json(os.path.join(cout, "summary.json")) or {}
         wins = _read_windows(os.path.join(cout, "windows.jsonl"))
@@ -1955,9 +3307,12 @@ def main(argv=None):
                     choices=["cir", "demod", "both"])
     ap.add_argument("--windows", type=int, default=None)
     ap.add_argument("--rate", type=float, default=None,
-                    help="paced replay rate (Hz) -- future stage")
+                    help="paced replay rate (Hz).  In estimate8_frozen the "
+                         "default S1-03 path is the ASYNCHRONOUS pipelined "
+                         "target-only pacer (see --paced-target-only)")
     ap.add_argument("--duration", type=float, default=None,
-                    help="paced replay duration (s) -- future stage")
+                    help="paced replay duration (s); the schedule fixes the "
+                         "window count (rate * duration)")
     ap.add_argument("--output", required=True)
     ap.add_argument("--seed-set", default="calibration",
                     choices=["calibration", "acceptance"])
@@ -1968,10 +3323,26 @@ def main(argv=None):
     ap.add_argument("--case", default=None,
                     help="negative/main sub-case id (default: nominal)")
     ap.add_argument("--sic-fit-reps", type=int, default=None,
-                    help="SIC estimation window in SYNC reps (default: preset, "
-                         "auto-extended to cover the comm preamble)")
+                    help="SIC estimation window in SYNC reps.  "
+                         "estimate8_frozen is strict 8 (default 8; any other "
+                         "value is rejected); confirmed_legacy accepts others.")
+    ap.add_argument("--sic-model-mode", default=None,
+                    choices=["estimate8_frozen", "confirmed_legacy"],
+                    help="S1 model mode (default estimate8_frozen).  "
+                         "estimate8_frozen = strict 8-SYNC estimation + frozen "
+                         "nominal full-preamble cancellation (S1-01).  "
+                         "confirmed_legacy = the explicit S0 coupling.")
+    ap.add_argument("--sic-online-validation-reps", type=int, default=0,
+                    help="ONLINE validation (holdout gate) repetitions; default "
+                         "0 = no holdout wait before cancelling (S1 default).  "
+                         "The offline evaluation region is separate.")
+    ap.add_argument("--sic-evaluation-reps", type=int, default=None,
+                    help="OFFLINE independent-evaluation repetitions.  Default = "
+                         "sync_reps - fit_reps - online_validation_reps.  It is "
+                         "NEVER passed to estimation or the commit gate.")
     ap.add_argument("--sic-validation-reps", type=int, default=None,
-                    help="SIC holdout reps, disjoint from fit_reps")
+                    help="prepared holdout capacity for the adapter (S0 legacy "
+                         "gate); not the S1 runtime gate count")
     ap.add_argument("--sic-in-flight-max", type=int, default=8,
                     help="source/adapter cap on published-but-not-terminal "
                          "windows")
@@ -1988,13 +3359,11 @@ def main(argv=None):
     ap.add_argument("--sic-no-cfo", action="store_true",
                     help="disable CFO estimation in the core")
     ap.add_argument("--sic-cover-preamble", action="store_true",
-                    help="EXPLICITLY extend the observation window "
-                         "(fit_reps+validation_reps) to cover the whole nominal "
-                         "comm preamble (sync_reps). Recorded as "
-                         "fit_reps_source=explicit_cover_preamble and timed; "
-                         "never applied silently. With full coverage there is no "
-                         "repetition left for an independent final-eval region, "
-                         "which is then reported as unavailable (R06).")
+                    help="LEGACY alias that selects --sic-model-mode "
+                         "confirmed_legacy (the S0 fit/validation/support "
+                         "coupling).  It NEVER widens an estimate8_frozen run; "
+                         "combining it with an explicit estimate8_frozen mode is "
+                         "refused.")
     ap.add_argument("--sic-no-auto-cover", action="store_true",
                     help="deprecated no-op: the silent auto-bump has been "
                          "removed (R02). The declared fit/validation reps are "
@@ -2063,12 +3432,30 @@ def main(argv=None):
                     help="number of distinct pre-generated windows in the paced "
                          "pool (>=1)")
     ap.add_argument("--paced-target-only", action="store_true",
-                    help="R09: in the paced timed region run ONLY the target "
+                    help="S1-03: in the paced timed region run ONLY the target "
                          "path (SIC->consumer when SIC is on), skipping the "
-                         "clean/raw pairing consumers. The effect pairing is "
-                         "verified by a separate load; without this the loop "
-                         "still runs all three and reports every bucket.")
+                         "clean/raw pairing consumers and every offline "
+                         "evaluation.  DEFAULT ON in estimate8_frozen; use "
+                         "--paced-legacy-three-way to keep the old three-way "
+                         "diagnostic loop.")
+    ap.add_argument("--paced-legacy-three-way", action="store_true",
+                    help="keep the OLD three-way paced timed loop (clean/raw/sic "
+                         "consumers + inline offline evaluation).  This is the "
+                         "explicit legacy/diagnostic mode; the S1 default is the "
+                         "pure target-only path.")
     args = ap.parse_args(argv)
+    # `--sic-model-mode` default is estimate8_frozen, but the explicit/None
+    # distinction is needed so --sic-cover-preamble cannot silently widen an
+    # estimate8 run.
+    args._sic_model_mode_explicit = args.sic_model_mode is not None
+    if args.sic_model_mode is None:
+        args.sic_model_mode = S1_MODEL_MODE
+    # S1-03: the paced timed region defaults to the pure target-only path.
+    # --paced-legacy-three-way keeps the old diagnostic three-way loop.
+    if getattr(args, "paced_legacy_three_way", False):
+        args.paced_target_only = False
+    elif args.sic_model_mode == S1_MODEL_MODE:
+        args.paced_target_only = True
 
     if args.windows is not None and args.windows <= 0:
         raise SystemExit("--windows must be > 0")
@@ -2088,6 +3475,14 @@ def main(argv=None):
     repo = S.find_repo_root(os.path.dirname(os.path.abspath(__file__)))
     native = (args.input_grid == "cg400")
     instrumentation = (str(args.timing_instrumentation) == "on")
+    # S1-03: the paced pure-target timed region must not run the Python-side
+    # per-window scanning (public-template repetition scan / raw target
+    # re-search) or any offline evaluation.
+    timed_target_only = bool(args.paced_target_only and (
+        args.rate is not None or args.duration is not None
+        or args.burst is not None))
+    if timed_target_only:
+        instrumentation = False
 
     # ---- driver dispatch (sweep / negative-set / paced / burst) ----
     if args.sweep:
@@ -2213,40 +3608,30 @@ def main(argv=None):
     if sic_on and sic_k not in (1, 2, 4, 8, 16):
         raise SystemExit("--sic %s requires sic_k in 1/2/4/8/16 (preset had "
                          "%r)" % (args.sic, sic_k))
-    fit_reps = int(runtime.get("fit_reps", 8)) if sic_on else None
-    validation_reps = int(runtime.get("validation_reps", 8)) if sic_on else None
-    fit_source = "preset"
-    cover_preamble = False
+    # S1-01/§9: resolve the model mode and the training / online-validation /
+    # offline-evaluation repetition split with fail-closed domain checks.  The
+    # offline evaluation NEVER reaches estimation or the gate.
+    s1cfg = None
     if sic_on:
-        if args.sic_fit_reps is not None or args.sic_validation_reps is not None:
-            fit_reps = int(args.sic_fit_reps) if args.sic_fit_reps is not None \
-                else fit_reps
-            validation_reps = (int(args.sic_validation_reps)
-                               if args.sic_validation_reps is not None
-                               else validation_reps)
-            fit_source = "cli"
-        # R02: the observation window (fit_reps -> parameter FIT; validation ->
-        # online gate) is used VERBATIM.  The core subtracts only the CONFIRMED
-        # repetitions (support_hi = detected_start + confirmed*sps + post_tail)
-        # and `confirmed <= fit_reps + validation_reps`, so a short window gives
-        # a genuinely PARTIAL subtraction mask.  That shortfall is reported
-        # (coverage / partial), never silently repaired.  Full coverage is an
-        # explicit opt-in that is recorded and timed.
-        if args.sic_cover_preamble:
-            cover_preamble = True
-            if fit_reps + validation_reps != sync_reps:
-                base = max(1, min(fit_reps, sync_reps - 8))
-                fit_reps = base
-                validation_reps = sync_reps - base
-            fit_source = "explicit_cover_preamble"
-        if fit_reps <= 0 or validation_reps < 8:
-            raise SystemExit("fit_reps>0 and validation_reps>=8 required for "
-                             "SIC (got %r/%r)" % (fit_reps, validation_reps))
-        if fit_reps + validation_reps > sync_reps:
-            raise SystemExit(
-                "UNSATISFIABLE SIC config: fit_reps+validation_reps (%d) > "
-                "sync_reps (%d); refused (never silently rewritten)"
-                % (fit_reps + validation_reps, sync_reps))
+        s1cfg = resolve_s1_config(
+            args, sync_reps=sync_reps,
+            preset_fit_reps=int(runtime.get("fit_reps", 8)),
+            preset_validation_reps=int(runtime.get("validation_reps", 8)))
+        model_mode = s1cfg["mode"]
+        fit_reps = int(s1cfg["fit_reps"])
+        online_validation_reps = int(s1cfg["online_validation_reps"])
+        evaluation_reps = int(s1cfg["evaluation_reps"])
+        # prepared holdout CAPACITY handed to the adapter (>=1; NOT the runtime
+        # online gate count).
+        validation_reps = int(s1cfg["validation_reps"])
+        fit_source = s1cfg["fit_source"]
+        cover_preamble = bool(s1cfg["cover_alias"])
+    else:
+        model_mode = None
+        fit_reps = validation_reps = online_validation_reps = None
+        evaluation_reps = None
+        fit_source = None
+        cover_preamble = False
 
     # Public candidate search ROI for the comm preamble.  The online SIC only
     # knows this window (plus the comm code/template/rate) -- never the true
@@ -2270,15 +3655,16 @@ def main(argv=None):
                          "[0,%d)" % (search_roi, generator.n))
 
     # R02: the SEARCH ROI (the core's `roi_lo/roi_hi`) stays deliberately WIDE
-    # so the natural comm preamble tail `support_hi = detected_start +
-    # confirmed*sps + post_tail` (confirmed <= fit+validation) is never clipped
-    # by the candidate-start range.  It is extended past the candidate range by
-    # the maximum possible support tail.
+    # so the natural comm preamble tail is never clipped by the candidate-start
+    # range.  In the S1 nominal mode the reconstructed support reaches
+    # origin + sync_reps*sps + post_tail, so the core ROI is widened to cover at
+    # least the whole nominal preamble.
     rtot_reps = int(fit_reps) + int(validation_reps) if sic_on else 0
+    core_tail_reps = max(rtot_reps, int(sync_reps)) if sic_on else 0
     subtraction_roi = (
         int(search_roi[0]),
         int(min(generator.n,
-                search_roi[1] + rtot_reps * S.SPS + int(args.sic_post_tail))))
+                search_roi[1] + core_tail_reps * S.SPS + int(args.sic_post_tail))))
     core_roi = (int(search_roi[0]), int(subtraction_roi[1]))
     if sic_on and not (0 <= core_roi[0] < core_roi[1] <= generator.n):
         raise SystemExit("resolved SIC core roi %r is outside the window "
@@ -2434,13 +3820,19 @@ def main(argv=None):
         "validation_reps": (None if not sic_on else int(validation_reps)),
         "fit_reps_source": (None if not sic_on else fit_source),
         "cover_preamble": (False if not sic_on else bool(cover_preamble)),
+        # S1-01/§9: the model mode and the training/online/offline split.
+        "sic_model_mode": (None if not sic_on else model_mode),
+        "support_mode": (None if not sic_on else s1cfg["support_mode"]),
+        "online_validation_reps": (None if not sic_on
+                                   else int(online_validation_reps)),
+        "evaluation_reps": (None if not sic_on else int(evaluation_reps)),
+        "fit_residual_max": (None if not sic_on else 0.8),
         "fit_len": (None if not sic_on else int(fit_reps) * S.SPS),
         "estimation_len": (None if not sic_on else int(fit_reps) * S.SPS),
         "online_validation_len": (None if not sic_on
-                                  else int(validation_reps) * S.SPS),
+                                  else int(online_validation_reps) * S.SPS),
         "independent_eval_len": (None if not sic_on else
-                                 max(0, sync_reps - int(fit_reps) -
-                                     int(validation_reps)) * S.SPS),
+                                 int(evaluation_reps) * S.SPS),
         "search_roi": [int(search_roi[0]), int(search_roi[1])],
         "subtraction_roi": ([int(subtraction_roi[0]),
                              int(subtraction_roi[1])] if sic_on else None),
@@ -2478,6 +3870,11 @@ def main(argv=None):
         "validation_reps": (None if not sic_on else int(validation_reps)),
         "fit_reps_source": (None if not sic_on else fit_source),
         "cover_preamble": (False if not sic_on else bool(cover_preamble)),
+        # S1-07: the identity every measured layer must share.
+        "sic_model_mode": (None if not sic_on else model_mode),
+        "online_validation_reps": (None if not sic_on
+                                   else int(online_validation_reps)),
+        "evaluation_reps": (None if not sic_on else int(evaluation_reps)),
         "search_roi": [int(search_roi[0]), int(search_roi[1])],
         "subtraction_roi": ([int(subtraction_roi[0]),
                              int(subtraction_roi[1])] if sic_on else None),
@@ -2664,6 +4061,12 @@ def main(argv=None):
             "max_window_samples": int(args.sic_max_window_samples),
             "enable_fractional": not args.sic_no_fractional,
             "enable_cfo": not args.sic_no_cfo,
+            # S1: support derivation + runtime online gate + offline evaluation.
+            "support_mode": s1cfg["support_mode"],
+            "online_validation_reps": int(online_validation_reps),
+            "evaluation_reps": int(evaluation_reps),
+            "model_mode": model_mode,
+            "fit_residual_max": 0.8,
         }
         if args.sic_in_flight_max < 1:
             raise SystemExit("--sic-in-flight-max must be >= 1")
@@ -2673,12 +4076,104 @@ def main(argv=None):
         sic_sync_norm = (np.asarray(sic_sync, dtype=np.complex128) / _sn
                          if _sn > 0 else np.asarray(sic_sync,
                                                    dtype=np.complex128))
+    # ------------------------------------------------------------------
+    # S1-03: asynchronous pipelined pacer (target-only paced measurement).
+    #
+    # EVERYTHING the timed region needs is prepared HERE, before the first
+    # planned deadline:
+    #   * >= 64 distinct-content windows (generator + truth objects),
+    #   * one immutable CF32 PMT payload per pool window (the expensive
+    #     numpy -> PMT wrap is NOT in the timed loop),
+    #   * the per-window-constant input meta.
+    # The timed region itself only sleeps to an absolute deadline, checks the
+    # bounded credit and posts a pre-built (meta, payload) pair.  It does no
+    # generation, no truth access, no offline evaluation, no array dump and no
+    # disk I/O.
+    # ------------------------------------------------------------------
+    paced_async = bool(timed_target_only and sic_on)
+    pacer = None
+    paced_payloads = []
+    paced_meta_base = None
+    paced_pool_us_each = 0.0
+    paced_pool_n = 0
+    paced_deadline_us = 5000.0
+    if paced_async:
+        # S1-03: the diagnostic i_hat reconstruction is NOT part of the target
+        # path and is not published in the timed region (it would build and
+        # publish a second full c32vector per window).
+        sic_cfg["publish_reconstruction"] = False
+        pool_n = max(1, min(planned, int(args.paced_pool)))
+        if pool_n < 64:
+            print("paced: WARNING --paced-pool=%d is below the >=64 "
+                  "distinct-content guidance" % pool_n, flush=True)
+        tp0 = time.perf_counter()
+        n_bytes = 0
+        for i in range(pool_n):
+            ps = run_seeds[i]
+            win = generator.build(
+                seed=ps, comm_paths=comm_paths if comm_present else None,
+                start_offset_work=start_offset_work, cfo_hz=cfo_hz,
+                isr_db=isr_db, snr_db=snr_db)
+            y = np.ascontiguousarray(win["y"], dtype=np.complex64)
+            n_bytes = int(y.size) * 8
+            paced_payloads.append(pmt.init_c32vector(int(y.size), y.tolist()))
+            if i == 0:
+                # Determinism evidence, computed BEFORE the timed region.
+                win2 = generator.build(
+                    seed=ps, comm_paths=comm_paths if comm_present else None,
+                    start_offset_work=start_offset_work, cfo_hz=cfo_hz,
+                    isr_db=isr_db, snr_db=snr_db)
+                g0["determinism"] = {
+                    "seed": int(ps),
+                    "s_equal": bool(np.array_equal(win["s"], win2["s"])),
+                    "i_equal": bool(np.array_equal(win["i"], win2["i"])),
+                    "w_equal": bool(np.array_equal(win["w"], win2["w"])),
+                    "y_equal": bool(np.array_equal(win["y"], win2["y"])),
+                }
+                del win2
+            del win, y
+        paced_pool_us_each = ((time.perf_counter() - tp0) * 1e6 /
+                              max(1, pool_n))
+        paced_pool_n = pool_n
+        observed_end_base = (
+            int(min(generator.n, int(search_roi[0]) + int(fit_reps) * S.SPS))
+            if (model_mode == S1_MODEL_MODE and args.sic == "estimate")
+            else None)
+        paced_meta_base = paced_input_meta_base(
+            sensing_code=sensing_code, sync_reps=sync_reps,
+            sensing_roi=sensing_roi,
+            pre_guard=int(generator.pre),
+            observed_end=observed_end_base,
+            sample_count=int(generator.n),
+            run_id=run_id, epoch_id=epoch_id,
+            predicted_start=int(generator.pre),
+            template_id="sync_template_code%d_998p4" % sensing_code,
+            sensing_profile_id=sensing_profile_id)
+        target_stage = ("cir" if args.consumer in ("cir", "both") else "demod")
+        pacer = PipelinedPacer(
+            rate_hz=pace_rate, planned=planned,
+            in_flight_max=int(sic_cfg["in_flight_max"]),
+            iq_budget_bytes=int(sic_cfg["iq_budget_bytes"]),
+            window_bytes=int(n_bytes),
+            deadline_us=float(paced_deadline_us),
+            max_wall_s=float(args.max_wall_s),
+            target_stage=target_stage)
+        print("paced: ASYNC pipelined; rate=%.1f planned=%d pool=%d "
+              "(distinct payloads pre-built) pool_win_us=%.0f "
+              "in_flight_max=%d budget=%.1fMiB window_bytes=%d "
+              "target=%s->%s wall_cap=%.0fs"
+              % (pace_rate, planned, pool_n, paced_pool_us_each,
+                 pacer.in_flight_max, pacer.iq_budget_bytes / (1 << 20),
+                 n_bytes, "sic", target_stage, float(args.max_wall_s)),
+              flush=True)
+
     rt = SimRuntime(uwb, tpl_path=tpl_path, consumers=args.consumer,
                     windows=windows, sic=sic_cfg,
                     keep_iq=max(0, int(args.keep_iq)),
                     demod_softchip=args.demod_softchip,
                     demod_rake_top_k=int(args.demod_rake_top_k),
-                    radar_use_predicted=(args.radar_timing == "planned"))
+                    radar_use_predicted=(args.radar_timing == "planned"),
+                    paced=pacer)
     # R08: CG400 native front-end (SC16 common scale + PDU 65/32).  Only built
     # for the native grid; the work-grid path is byte-identical to before.
     front = None
@@ -2696,6 +4191,25 @@ def main(argv=None):
     if front is not None:
         front.start()
 
+    # S1-03: hand the timed region to the asynchronous pacer.  The scheduler
+    # thread posts pre-built (meta, payload) pairs at absolute deadlines; no
+    # Python thread ever waits for a terminal.
+    if pacer is not None:
+        def _paced_submit(wid, planned_ns):
+            m = paced_meta_base
+            m = pmt.dict_add(m, pmt.intern("window_id"),
+                             pmt.from_long(int(wid)))
+            m = pmt.dict_add(m, pmt.intern("pulse_id"),
+                             pmt.from_uint64(int(wid) + 1))
+            m = pmt.dict_add(m, pmt.intern("schedule_index"),
+                             pmt.from_long(int(wid)))
+            m = pmt.dict_add(m, pmt.intern("planned_publish_ns"),
+                             pmt.from_long(int(planned_ns)))
+            rt.sic.to_basic_block()._post(
+                pmt.intern("in"),
+                pmt.cons(m, paced_payloads[int(wid) % paced_pool_n]))
+        pacer.start(_paced_submit)
+
     # Feature detection for the adapter's newer make() params (fall back
     # cleanly when the built binding does not expose them yet).
     sic_optional_supported, _sic_doc_params = sic_adapter_supported_params(uwb)
@@ -2704,8 +4218,13 @@ def main(argv=None):
               % (sorted(rt.sic_params_used), sic_optional_supported),
               flush=True)
 
-    windows_jsonl = open(os.path.join(args.output, "windows.jsonl"), "w",
-                         encoding="utf-8")
+    # S1-03: the asynchronous paced run produces no per-window functional record
+    # (that would be an offline evaluation inside the timed region).  Its
+    # timeline goes to ``paced_windows.jsonl`` instead, and ``windows.jsonl`` is
+    # NOT created so no verifier can mistake a timing-only run for an effect run.
+    windows_jsonl = (None if pacer is not None else
+                     open(os.path.join(args.output, "windows.jsonl"), "w",
+                          encoding="utf-8"))
     truth_jsonl = open(os.path.join(fix_dir, "truth.jsonl"), "w",
                        encoding="utf-8")
     stage_rows = []
@@ -2751,6 +4270,21 @@ def main(argv=None):
     n_interference_windows = 0
     n_na_windows = 0
     n_uncommitted_changed = 0
+    # S1-05 accumulators: the independent-evaluation and tail-4-SYNC actual
+    # output suppression, plus their N/A counts.
+    eff_eval_actual_sup = []
+    eff_tail_actual_sup = []
+    n_eval_na_windows = 0
+    n_tail_na_windows = 0
+    # S1-1/2: frozen-model evidence coverage.
+    n_model_windows = 0
+    n_model_missing = 0
+    model_missing_ids = []
+    model_error_samples = []
+    support_coverage_min = None
+    # S1-06 seeds: the generated acceptance (seed, seed_offset, noise_root)
+    # tuples actually used, for the runtime separation check.
+    accept_tuples = []
     # R04 raw-CIR target accumulators (non-truth windows only).
     eff_target_err_raw_db = []
     eff_target_shift_raw = []
@@ -2784,23 +4318,25 @@ def main(argv=None):
     run_utime0 = run_stime0 = 0.0
     proc_hwm0 = None
 
-    # Paced replay (§8.4): pre-generate a pool of distinct windows (>=64
-    # distinct-content rotation guidance) BEFORE timing; the schedule fixes the
-    # publish times.  Nothing is generated inside the paced timing path.
+    # Paced replay (§8.4 legacy three-way diagnostic): pre-generate a pool of
+    # distinct windows BEFORE timing; the schedule fixes the publish times.
+    # Nothing is generated inside the paced timing path.  The S1-03 asynchronous
+    # target-only path has already pre-generated its payloads above.
     paced_t0_ns = None
     paced_wall0 = None
     paced_not_submitted = 0
-    paced_deadline_us = 5000.0        # planned publish -> terminal deadline
+    # planned publish -> terminal deadline (frozen S0 contract; the S1-03 pacer
+    # receives the same value above).
+    paced_deadline_us = 5000.0
     paced_late_ns = []
     paced_submit_late_ns = []
     paced_latency_us = []
     paced_service_us = []
     paced_deadline_miss = 0
-    paced_pool_us_each = 0.0
     paced_pool = []
     paced_pool_seeds = []
     paced_deferred_records = []
-    if paced:
+    if paced and pacer is None:
         pool_n = max(1, min(planned, int(args.paced_pool)))
         tp0 = time.perf_counter()
         for i in range(pool_n):
@@ -2815,7 +4351,8 @@ def main(argv=None):
         paced_t0_ns = time.monotonic_ns() + int(0.05e9)
         paced_wall0 = time.monotonic()
         print("paced: rate=%.1f planned=%d pool=%d pool_win_us=%.0f "
-              "in_flight_max=%s wall_cap=%.0fs"
+              "in_flight_max=%s wall_cap=%.0fs (LEGACY serial three-way "
+              "diagnostic loop)"
               % (pace_rate, planned, pool_n, paced_pool_us_each,
                  (credit.in_flight_max if credit else "n/a"),
                  float(args.max_wall_s)), flush=True)
@@ -2826,7 +4363,10 @@ def main(argv=None):
     proc_hwm0 = _proc_peak_rss_bytes()
     timed_t0 = time.monotonic()
 
-    for wid in range(windows):
+    # S1-03: when the asynchronous pacer owns the timed region this serial loop
+    # must not run AT ALL (0 iterations): the timed loop contains only the
+    # target path, not a second copy of it.
+    for wid in range(0 if pacer is not None else windows):
         if paced:
             elapsed = time.monotonic() - paced_wall0
             if elapsed > float(args.max_wall_s) + planned / pace_rate:
@@ -2920,6 +4460,8 @@ def main(argv=None):
         uses_truth = False
         clean_cir_raw_win = None
         sic_cir_raw_win = None
+        model_ev = None
+        model_error = None
         if rt.sic is not None:
             # Paced replay: hold the window until its planned publish time.
             # A late submit (pipeline can't keep up) is recorded, never hidden
@@ -2957,6 +4499,19 @@ def main(argv=None):
             # only commits when the detected comm support overlaps this window.
             in_meta = put_int(in_meta, "sensing_roi_lo", int(sensing_roi[0]))
             in_meta = put_int(in_meta, "sensing_roi_hi", int(sensing_roi[1]))
+            # S1-1 strict-prefix VISIBILITY: declare the estimation prefix from
+            # the PUBLIC plan only (candidate ROI start + fit_reps SYNC + the
+            # template/post tail), never from the injected comm start.  The
+            # nominal cell places the comm at the ROI start, so
+            # observed_end == training_hi == estimation_ready_sample there; a
+            # later-starting comm simply sees a clipped training span and is
+            # reported as such.  confirmed_legacy keeps whole-window visibility
+            # (observed_end = 0), the explicit S0 contract.
+            if model_mode == S1_MODEL_MODE and args.sic == "estimate":
+                observed_end = int(min(
+                    generator.n,
+                    int(search_roi[0]) + int(fit_reps) * S.SPS))
+                in_meta = put_int(in_meta, "observed_end_sample", observed_end)
             in_meta = pmt.dict_add(in_meta, pmt.intern("planned_publish_ns"),
                                    pmt.from_long(int(planned_ns)))
             if args.sic == "oracle":
@@ -3042,7 +4597,7 @@ def main(argv=None):
             det_start = sic_state_rec["detected_start"]
             spp = int(S.SPS)
             post_tail = int(args.sic_post_tail)
-            rtot = int(fit_reps) + int(validation_reps)
+            rtot = int(fit_reps) + int(online_validation_reps)
             n_win = int(generator.n)
             # R01 truth overlap = the FULL truth overlap (the intersection of
             # the injected comm support and the sensing processing window); it
@@ -3056,24 +4611,32 @@ def main(argv=None):
                 comm_lo, comm_hi = int(search_roi[0]), int(search_roi[1])
             anchor = det_start if (isinstance(det_start, int) and
                                    det_start >= 0) else comm_lo
-            # ---- R06: three explicit, declared regions (window-local) -------
-            # estimation == the parameter FIT window (gain LS / path select /
-            # fractional refine).  online-validation == the core's commit
-            # holdout.  independent eval == the repetitions the core NEVER uses
-            # for CFO / gain / commit; it only feeds the offline metric.
+            # ---- S1: four explicit, declared regions (window-local) ----------
+            # training == the strict fit window (gain LS / path select /
+            # fractional refine / CFO / CIR).  online-validation == the
+            # EXPLICIT conservative holdout gate (online_validation_reps; 0 in the
+            # S1 default, so this region is empty).  independent eval == the
+            # repetitions NEVER fed to estimation or the gate.  tail-eval == the
+            # last 4 SYNC, a direct probe of the old 8-SYNC clip.
             est_lo = int(anchor)
             est_hi = est_lo + int(fit_reps) * spp
             on_lo = est_hi
-            on_hi = on_lo + int(validation_reps) * spp
-            ev_lo = on_hi
+            on_hi = on_lo + int(online_validation_reps) * spp
+            ev_lo = int(anchor) + (int(fit_reps)
+                                   + int(online_validation_reps)) * spp
             ev_hi = int(anchor) + int(sync_reps) * spp
+            tail_hi = int(anchor) + int(sync_reps) * spp
+            tail_lo = int(anchor) + (int(sync_reps) - S1_TAIL_REPS) * spp
             est_lo = max(0, min(n_win, est_lo))
             est_hi = max(est_lo, min(n_win, est_hi))
             on_lo = max(est_hi, min(n_win, on_lo))
             on_hi = max(on_lo, min(n_win, on_hi))
             ev_lo = max(on_hi, min(n_win, ev_lo))
             ev_hi = max(ev_lo, min(n_win, ev_hi))
+            tail_lo = max(ev_lo, min(n_win, tail_lo))
+            tail_hi = max(tail_lo, min(n_win, tail_hi))
             eval_available = bool(ev_hi > ev_lo)
+            tail_available = bool(tail_hi > tail_lo)
 
             # Explicit public-template repetition scan (R02 signal evidence).
             # `--timing-instrumentation off` skips this Python-loop-heavy scan
@@ -3146,6 +4709,36 @@ def main(argv=None):
             c_hi = min(int(comm_hi), int(sub_hi))
             act_c = (actual_cancellation(raw_iq, cleaned_iq, i_metric, c_lo, c_hi)
                      if c_hi > c_lo else None)
+            # ---- S1-05 actual-output metrics over the INDEPENDENT evaluation
+            # and the tail-4-SYNC regions (truth-defined; recomputed from
+            # delta_actual = y - y_clean with the frozen N/A rule).  Only the S1
+            # formal mode reports these.
+            eval_act = tail_act = None
+            if model_mode == S1_MODEL_MODE and eval_available:
+                eval_act = actual_cancellation(raw_iq, cleaned_iq, i_metric,
+                                               ev_lo, ev_hi)
+            if model_mode == S1_MODEL_MODE and tail_available:
+                tail_act = actual_cancellation(raw_iq, cleaned_iq, i_metric,
+                                               tail_lo, tail_hi)
+            # ---- S1-1/S1-2 frozen-model evidence (from the adapter's own meta,
+            # never from the injected truth).
+            model_fields, model_sources = extract_adapter_model(out_meta)
+            model_ev, model_missing = build_sic_model_block(
+                model_fields, model_sources, mode=model_mode,
+                fit_reps=int(fit_reps), sps=int(spp), sync_reps=int(sync_reps),
+                sample_rate=float(S.WORK_HZ), post_tail=int(post_tail),
+                sensing_roi=(int(sensing_roi[0]), int(sensing_roi[1])),
+                overlap=(int(comm_lo), int(comm_hi)),
+                eval_lo=int(ev_lo), eval_hi=int(ev_hi),
+                tail_lo=int(tail_lo), tail_hi=int(tail_hi),
+                sample_count=int(n_win))
+            if model_ev is None:
+                model_error = (
+                    "adapter published no usable frozen-model evidence; missing "
+                    "%s (expected flat sic_model_* meta keys or a nested "
+                    "sic_model dict) -- not inferred" % model_missing)
+            else:
+                model_error = None
             regions = {
                 "fit_lo": int(est_lo), "fit_hi": int(est_hi),
                 "fit_len": int(fit_reps) * spp,
@@ -3156,12 +4749,14 @@ def main(argv=None):
                 # reads the ONLINE rep range as well, so this is wider than the
                 # fit window; recorded explicitly rather than assumed equal.
                 "cfo_estimation_lo": int(est_lo),
-                "cfo_estimation_hi": int(on_hi),
-                "cfo_estimation_len": (int(on_hi) - int(est_lo)),
-                "estimation_includes_online": True,
+                "cfo_estimation_hi": int(est_hi if online_validation_reps == 0
+                                         else on_hi),
+                "cfo_estimation_len": (int(est_hi if online_validation_reps == 0
+                                           else on_hi) - int(est_lo)),
+                "estimation_includes_online": bool(online_validation_reps > 0),
                 "online_validation_lo": int(on_lo),
                 "online_validation_hi": int(on_hi),
-                "online_validation_len": int(validation_reps) * spp,
+                "online_validation_len": int(online_validation_reps) * spp,
                 "eval_lo": (int(ev_lo) if eval_available else None),
                 "eval_hi": (int(ev_hi) if eval_available else None),
                 "eval_len": ((int(ev_hi) - int(ev_lo)) if eval_available
@@ -3182,7 +4777,12 @@ def main(argv=None):
                                     "observed window (fit+validation reps) so "
                                     "it never exceeds the applied mask"),
                 "preamble_scan": scan,
-                "search_roi": [int(search_roi[0]), int(search_roi[1])],
+                # S0: the CANDIDATE SEARCH ROI is the core's public candidate
+                # range (deliberately wider than the applied subtraction so the
+                # nominal preamble tail is not clipped by the candidate range).
+                "search_roi": [int(core_roi[0]), int(core_roi[1])],
+                "candidate_search_roi": [int(search_roi[0]),
+                                         int(search_roi[1])],
                 "subtraction_roi": [int(applied_lo), int(applied_hi)],
                 "subtraction_roi_overlap_clipped": [int(sub_lo), int(sub_hi)],
                 "core_roi": [int(core_roi[0]), int(core_roi[1])],
@@ -3191,23 +4791,54 @@ def main(argv=None):
                 "sensing_roi": [int(sensing_roi[0]), int(sensing_roi[1])],
                 "sensing_roi_overlap": int(
                     sic_state_rec.get("sub_overlap", -1)),
-                "gate_lo": int(on_lo), "gate_hi": int(on_hi),
-                "gate_keys": ["residual_corr", "online_nmse",
-                              "online_suppression_db"],
+                "gate_lo": int(est_lo if online_validation_reps == 0
+                               else on_lo),
+                "gate_hi": int(est_hi if online_validation_reps == 0
+                               else on_hi),
+                "gate_keys": (["fit_residual", "cond2"]
+                              if online_validation_reps == 0 else
+                              ["residual_corr", "online_nmse",
+                               "online_suppression_db"]),
                 "support_lo": int(sic_state_rec["support_lo"]),
                 "support_hi": int(sic_state_rec["support_hi"]),
+                # S1-3: the support derivation and its coverage of the truth
+                # overlap (recomputed exactly as the verifier does).
+                "support_source": (model_ev or {}).get("support_source"),
+                "support_pre_tail": (model_ev or {}).get("support_pre_tail"),
+                "support_post_tail": (model_ev or {}).get("support_post_tail"),
+                "support_coverage": (model_ev or {}).get("support_coverage"),
+                # S1-4: training / independent-eval / tail-eval regions and the
+                # permitted subtraction range (support ∩ sensing processing ROI).
+                "training_lo": int(est_lo), "training_hi": int(est_hi),
+                "sub_lo": int((model_ev or {}).get("sub_lo", 0) or 0),
+                "sub_hi": int((model_ev or {}).get("sub_hi", 0) or 0),
+                "tail_lo": (int(tail_lo) if tail_available else None),
+                "tail_hi": (int(tail_hi) if tail_available else None),
+                "tail_eval_lo": (int(tail_lo) if tail_available else None),
+                "tail_eval_hi": (int(tail_hi) if tail_available else None),
+                "tail_eval_len": ((int(tail_hi) - int(tail_lo))
+                                  if tail_available else None),
+                "evaluation_reps": (int(evaluation_reps) if sic_on else None),
+                "online_validation_reps": (int(online_validation_reps)
+                                           if sic_on else None),
+                "observed_end_sample": (model_ev or {}).get(
+                    "observed_end_sample"),
+                "estimation_ready_sample": (model_ev or {}).get(
+                    "estimation_ready_sample"),
                 "coverage_overlap": float(coverage),
                 "coverage_signal": float(sig_cov),
                 "partial": bool(rtot < sync_reps),
                 "observation_reps": int(rtot),
                 "sync_reps": int(sync_reps),
                 "data_dependency": {
-                    "estimation_region": "fit window only (gain LS / path / "
-                                         "fractional); the core's CFO and "
-                                         "repetition confirmation ALSO read the "
-                                         "online-validation repetitions, so the "
-                                         "online region is not a blind holdout",
-                    "online_is_used_for_cfo": True,
+                    "estimation_region": (
+                        "strict visible-prefix training window only (CFO / CIR / "
+                        "gain / path / fractional all read [training_lo, "
+                        "training_hi))" if online_validation_reps == 0 else
+                        "fit window + the explicit online-validation holdout"),
+                    "online_is_used_for_cfo": bool(online_validation_reps > 0),
+                    "online_validation_reps": int(online_validation_reps),
+                    "evaluation_reps": int(evaluation_reps),
                     "eval_feeds_estimation": False,
                     "eval_feeds_gate": False,
                     "coarse_search_sees_candidate_roi": True,
@@ -3268,14 +4899,42 @@ def main(argv=None):
                                           else act_c["actual_nmse"]),
                 "actual_suppression_db_confirmed":
                     (None if act_c is None else act_c["actual_suppression_db"]),
+                # ---- S1-05 independent-eval / tail-4-SYNC actual metrics ----
+                "eval_actual_nmse": (None if eval_act is None
+                                     else eval_act["actual_nmse"]),
+                "eval_actual_suppression_db": (
+                    None if eval_act is None
+                    else eval_act["actual_suppression_db"]),
+                "eval_actual_na": (True if eval_act is None
+                                   else bool(eval_act["na"])),
+                "eval_actual_lo": (int(ev_lo) if eval_available else None),
+                "eval_actual_hi": (int(ev_hi) if eval_available else None),
+                "tail_actual_nmse": (None if tail_act is None
+                                     else tail_act["actual_nmse"]),
+                "tail_actual_suppression_db": (
+                    None if tail_act is None
+                    else tail_act["actual_suppression_db"]),
+                "tail_actual_na": (True if tail_act is None
+                                   else bool(tail_act["na"])),
+                "tail_actual_lo": (int(tail_lo) if tail_available else None),
+                "tail_actual_hi": (int(tail_hi) if tail_available else None),
                 "noise_included": False,
                 "note": ("nmse/suppression_db are the i-based reconstruction "
                          "over the INDEPENDENT final-eval region (reps beyond "
-                         "fit+validation); overlap_* is the R01 full-overlap "
-                         "diagnostic; online_* is the core's commit region; "
-                         "actual_suppression_db is the REAL-output metric "
+                         "fit+online); overlap_* is the R01 full-overlap "
+                         "diagnostic; online_* is the explicit commit region; "
+                         "actual_suppression_db / eval_actual_suppression_db / "
+                         "tail_actual_suppression_db are the REAL-output metrics "
                          "(delta_actual = y - y_clean)."),
             }
+            if model_mode != S1_MODEL_MODE:
+                # The explicit LEGACY path must not report S1 region metrics
+                # (the verifier forbids an S1 claim from a legacy run).
+                for _k in ("eval_actual_nmse", "eval_actual_suppression_db",
+                           "eval_actual_na", "eval_actual_lo", "eval_actual_hi",
+                           "tail_actual_nmse", "tail_actual_suppression_db",
+                           "tail_actual_na", "tail_actual_lo", "tail_actual_hi"):
+                    recon_rec.pop(_k, None)
             if ov_ev is not None and not uses_truth:
                 eff_nmse.append(ov_ev[0])
                 eff_supp.append(ov_ev[1])
@@ -3292,6 +4951,18 @@ def main(argv=None):
                     eff_holdout_nmse.append(ho[0])
                     eff_holdout_supp.append(ho[1])
                 eff_regions.append(regions)
+                # S1-05 eval/tail actual-output aggregates + N/A accounting.
+                if model_mode == S1_MODEL_MODE:
+                    if eval_act is None or eval_act["na"]:
+                        n_eval_na_windows += 1
+                    else:
+                        eff_eval_actual_sup.append(
+                            eval_act["actual_suppression_db"])
+                    if tail_act is None or tail_act["na"]:
+                        n_tail_na_windows += 1
+                    else:
+                        eff_tail_actual_sup.append(
+                            tail_act["actual_suppression_db"])
                 if act is not None:
                     if act["na"]:
                         n_na_windows += 1
@@ -3304,6 +4975,20 @@ def main(argv=None):
                                 act_c["actual_suppression_db"])
                     if not sic_state_rec["committed"] and act["output_changed"]:
                         n_uncommitted_changed += 1
+                # S1-1/S1-2 model-evidence accounting.
+                if model_ev is None:
+                    n_model_missing += 1
+                    if len(model_missing_ids) < 8:
+                        model_missing_ids.append(wid)
+                    if model_error and len(model_error_samples) < 3:
+                        model_error_samples.append(model_error)
+                else:
+                    n_model_windows += 1
+                    cov = model_ev.get("support_coverage")
+                    if _isnum(cov):
+                        support_coverage_min = (
+                            float(cov) if support_coverage_min is None
+                            else min(support_coverage_min, float(cov)))
 
             # consumer=sic core + adapter stage rows
             for key, stage in SIC_CORE_STAGES:
@@ -3727,6 +5412,17 @@ def main(argv=None):
             "sensing_roi": (None if not sic_on else [int(sensing_roi[0]),
                                                      int(sensing_roi[1])]),
             "cover_preamble": (False if not sic_on else bool(cover_preamble)),
+            # S1-01/§9: the model mode + the training/online/offline split.
+            "sic_model_mode": (None if not sic_on else model_mode),
+            "online_validation_reps": (None if not sic_on
+                                       else int(online_validation_reps)),
+            "evaluation_reps": (None if not sic_on else int(evaluation_reps)),
+            "sic_model": model_ev,
+            "support_coverage": ((model_ev or {}).get("support_coverage")
+                                 if sic_on else None),
+            "sic_model_error": (model_error if sic_on else None),
+            # S1-06: the generated-window identity (formal acceptance runs).
+            "generator": generator_identity(args.seed_set, seed, wid),
             "demod_softchip_mode": args.demod_softchip,
             "seed": int(seed),
             "clean": consumer_log["clean"],
@@ -3792,6 +5488,7 @@ def main(argv=None):
             windows_jsonl.write(json.dumps(rec, sort_keys=True) + "\n")
             windows_jsonl.flush()
         completed_windows += 1
+        accept_tuples.append((int(seed), int(wid), noise_root_of(seed)))
 
         t_rec = {
             "run_id": run_id, "window_id": wid, "seed": int(seed),
@@ -3813,7 +5510,7 @@ def main(argv=None):
             t_rec["comm"]["native_roundtrip_lag_work"] = int(work_shift)
             t_rec["comm"]["overlap_domain"] = (
                 "work grid after the 491.52<->998.4 SC16 round trip")
-        if wid < args.fixtures:
+        if wid < args.fixtures and not timed_target_only:
             truth_jsonl.write(json.dumps(t_rec, sort_keys=True) + "\n")
             truth_jsonl.flush()
             np.savez_compressed(
@@ -3870,7 +5567,18 @@ def main(argv=None):
                       consumer_log["clean"].get("demod_status"),
                       consumer_log["raw"].get("demod_status")), flush=True)
 
-    windows_jsonl.close()
+    # S1-03: join the scheduler (it drains every outstanding terminal before it
+    # returns) and write the per-window timeline OUTSIDE the timed region.
+    if pacer is not None:
+        if not pacer.join():
+            raise SystemExit("paced scheduler thread did not finish")
+        completed_windows = int(pacer.completed)
+        with open(os.path.join(args.output, "paced_windows.jsonl"), "w",
+                  encoding="utf-8") as f:
+            for rec in pacer.window_records():
+                f.write(json.dumps(rec, sort_keys=True) + "\n")
+    if windows_jsonl is not None:
+        windows_jsonl.close()
     truth_jsonl.close()
     # R09: flush the buffered paced records after the timed region ended.
     if paced and paced_deferred_records:
@@ -3896,7 +5604,114 @@ def main(argv=None):
 
     summary["windows_completed"] = completed_windows
     paced_stats = None
-    if paced:
+    if paced and pacer is not None:
+        # ---- S1-03 asynchronous pipelined target-only measurement --------
+        paced_stats = pacer.report(adapter=rt.sic)
+        paced_stats["paced_target_only"] = True
+        paced_stats["legacy_three_way"] = False
+        paced_stats["timed_region_contents"] = (
+            "target path only: SIC adapter -> %s consumer. The timed region "
+            "performs NO clean/raw generation, NO offline evaluation, NO array "
+            "dump, NO plotting and NO truth recompute; the %d distinct-content "
+            "windows and their CF32 PMT payloads are pre-built before the first "
+            "planned deadline." % (pacer.target_stage, paced_pool_n))
+        paced_stats["pool"] = {
+            "distinct_windows": int(paced_pool_n),
+            "pool_window_us": float(paced_pool_us_each),
+            "prebuilt_pmt_payloads": True,
+            "publish_reconstruction": bool(
+                rt.sic.publish_reconstruction() if rt.sic else False),
+            "note": ("generation and the numpy->PMT wrap happen BEFORE the "
+                     "timed region; the diagnostic i_hat port is disabled so "
+                     "no reconstruction vector is published in the timed path"),
+        }
+        paced_stats["timing_buckets_us"] = {
+            "scheduler_submit": paced_stats.get("submit_prepare_us"),
+            "sic_worker_core": paced_stats.get("sic_core_total_us"),
+            "sic_stage_latency": paced_stats.get("sic_stage_latency_us"),
+            "consumer_service": paced_stats.get("service_latency_us"),
+            "generator": {"n": 0,
+                          "note": "pre-generated pool; not in the timed loop"},
+            "pmt_wrap": {"n": 0,
+                         "note": "payload PMTs are pre-built; not in the "
+                                 "timed loop"},
+            "offline_eval": {"n": 0,
+                             "note": "no offline evaluation in the timed "
+                                     "region"},
+            "note": ("separate buckets, never summed into one number; each is "
+                     "measured, and no single bucket is claimed to explain "
+                     "every deadline miss"),
+        }
+        paced_stats["implied_capacity_windows_per_s"] = (
+            (1e6 / paced_stats["service_latency_us"]["p50"])
+            if paced_stats.get("service_latency_us", {}).get("p50") else None)
+        paced_stats["rss_cpu_per_run"] = {
+            "cpu_seconds": float(
+                (resource.getrusage(resource.RUSAGE_SELF).ru_utime
+                 + resource.getrusage(resource.RUSAGE_SELF).ru_stime)
+                - run_utime0 - run_stime0),
+            "peak_rss_bytes": proc_hwm0,
+            "note": "per-run delta from a fresh process, not cross-run",
+        }
+        summary["paced"] = paced_stats
+        if paced_stats["not_submitted"] > 0:
+            not_run.append("windows: %d of %d planned paced windows were not "
+                           "submitted inside --max-wall-s (reported, not "
+                           "silently truncated)"
+                           % (paced_stats["not_submitted"], planned))
+        if paced_stats["missed_submission"] > 0:
+            not_run.append(
+                "paced load: %d of %d planned deadlines could not be posted "
+                "within the bounded credit (missed_submission, reasons %s); "
+                "the achieved rate is NOT substituted for the planned load and "
+                "the target is NOT met"
+                % (paced_stats["missed_submission"], paced_stats["offered"],
+                   json.dumps(paced_stats["miss_reasons"], sort_keys=True)))
+        if paced_stats["deadline_misses"] > 0:
+            not_run.append(
+                "paced deadline: %d window(s) reached the target terminal later "
+                "than %.0f us after their planned submit time (a failure, "
+                "recorded per window)"
+                % (paced_stats["deadline_misses"], paced_stats["deadline_us"]))
+        if paced_stats["terminal_timeouts"] > 0:
+            not_run.append(
+                "paced terminal: %d window(s) never reached a terminal state "
+                "and were released as terminal_timeout after %.1f s"
+                % (paced_stats["terminal_timeouts"], pacer.terminal_timeout_ns
+                   / 1e9))
+        _pg = paced_stats.get("gates", {})
+        if not _pg.get("terminal_p99_le_deadline", False):
+            not_run.append(
+                "paced terminal latency: the frozen end-to-end gate "
+                "(planned -> terminal P99 <= %.0f us) is NOT met "
+                "(completion_latency_us=%s)"
+                % (paced_stats["deadline_us"],
+                   json.dumps(paced_stats["completion_latency_us"],
+                              sort_keys=True)))
+        if not _pg.get("sic_stage_mean_le_0.5ms", False) or \
+                not _pg.get("sic_stage_p99_le_1ms", False):
+            not_run.append(
+                "paced SIC front-end latency: the frozen S0 gate "
+                "(sic stage mean <= 0.5 ms / P99 <= 1 ms) is NOT met "
+                "(sic_stage_latency_us=%s)"
+                % json.dumps(paced_stats["sic_stage_latency_us"],
+                             sort_keys=True))
+        if paced_stats.get("target_met"):
+            print("paced TARGET MET: %s" % json.dumps(_pg, sort_keys=True),
+                  flush=True)
+        else:
+            print("paced TARGET NOT MET: %s" % json.dumps(_pg, sort_keys=True),
+                  flush=True)
+        not_run.append(
+            "paced effect/demod/fixtures (S1-03 target-only timed run): no "
+            "clean/raw pairing, no offline effect evaluation, no npz/truth "
+            "fixture dump and no full-demod consumer were executed; those "
+            "belong to the functional runs")
+        not_run.append(
+            "windows.jsonl (a target-only timed run keeps no per-window "
+            "functional record: the per-window timeline is paced_windows.jsonl; "
+            "this directory is a TIMING result, not an S0 effect artifact run)")
+    elif paced:
         elapsed_s = max(1e-9, time.monotonic() - paced_wall0)
         lat = sorted(paced_latency_us)
         sub_late = sorted(ns / 1000.0 for ns in paced_submit_late_ns)
@@ -3963,6 +5778,29 @@ def main(argv=None):
             "in_flight_max": int(credit.in_flight_max) if credit else None,
             "budget_bytes": int(credit.iq_budget_bytes) if credit else None,
             "window_bytes": int(generator.n * 8),
+            # S1-03: the timed region contents and submission mode.
+            "paced_target_only": bool(args.paced_target_only),
+            "legacy_three_way": True,
+            "timed_region_contents": (
+                "LEGACY DIAGNOSTIC three-way loop (clean/raw/sic consumers + "
+                "inline offline evaluation) via --paced-legacy-three-way; this "
+                "is NOT the S1-03 target-only measurement"),
+            "submit_mode": "serial_blocking_legacy",
+            "submit_serial_limitation": (
+                "LEGACY DIAGNOSTIC: this driver submits window N and waits for "
+                "its terminal before offering N+1, so the achieved rate is the "
+                "SERIAL service rate, not a load test of the asynchronous "
+                "pipeline.  The S1-03 asynchronous pacer is the default path."),
+            "terminal_state": {
+                "completed": int(completed_windows),
+                "deadline_missed": int(paced_deadline_miss),
+                "not_submitted": int(paced_not_submitted),
+            },
+            "entry_backlog": int(paced_not_submitted),
+            "worker_queue_high_watermark": (
+                int(rt.sic.queue_high_watermark()) if rt.sic else None),
+            "adapter_queue_high_watermark": (
+                int(rt.sic.queue_depth()) if rt.sic else None),
             "timing_buckets_us": {
                 "generator": _summ(t_gen_us),
                 "pmt_wrap": _summ(t_pmt_wrap_us),
@@ -4118,6 +5956,11 @@ def main(argv=None):
             "drained": bool(rt.sic.drained()),
         }
         summary["sic"]["fit_reps"] = int(fit_reps)
+        summary["sic"]["model_mode"] = model_mode
+        summary["sic"]["support_mode"] = s1cfg["support_mode"]
+        summary["sic"]["online_validation_reps"] = int(online_validation_reps)
+        summary["sic"]["evaluation_reps"] = int(evaluation_reps)
+        summary["sic"]["validation_reps_prepared"] = int(validation_reps)
         summary["sic"]["validation_reps"] = int(validation_reps)
         summary["sic"]["fit_reps_source"] = fit_source
         summary["sic"]["cover_preamble"] = bool(cover_preamble)
@@ -4221,6 +6064,13 @@ def main(argv=None):
             if any(st not in TERMINAL_STATUS_OK for st in hist)),
         "clean_psdu": S.DEFAULT_PSDU_HEX,
     }
+    if pacer is not None:
+        # A target-only timed run does not run the full-demod consumer: report
+        # that explicitly instead of publishing a misleading 0/0 decode table.
+        summary["demod"]["note"] = (
+            "S1-03 target-only paced run: no full-demod consumer was part of "
+            "the timed path (target consumer=%s); PSDU/FCS is not measured here."
+            % pacer.target_stage)
 
     # effect aggregates over the NON-truth windows (exact verifier formula).
     # recon.suppression_db / recon.nmse are now the INDEPENDENT eval region, so
@@ -4280,15 +6130,28 @@ def main(argv=None):
         "n_windows": n_gate,
         "oracle_windows": int(oracle_windows),
         "oracle_excluded": True,
+        # --- S1-05 independent-evaluation / tail-4-SYNC actual metrics -----
+        "median_eval_actual_suppression_db": px_median(eff_eval_actual_sup),
+        "median_tail_actual_suppression_db": px_median(eff_tail_actual_sup),
+        "n_eval_windows": len(eff_eval_actual_sup),
+        "n_eval_na_windows": int(n_eval_na_windows),
+        "n_tail_windows": len(eff_tail_actual_sup),
+        "n_tail_na_windows": int(n_tail_na_windows),
+        "support_coverage_min": support_coverage_min,
+        "n_model_windows": int(n_model_windows),
+        "n_model_missing": int(n_model_missing),
         "note": ("primary effect gate: median ACTUAL-output suppression >=10 dB "
                  "AND >=95% windows >=3 dB (delta_actual = y - y_clean over the "
                  "full truth overlap), plus raw-CIR target |amp err| <=1 dB "
                  "(p95) and |peak shift| <=1 work sample. median_suppression_db/"
                  "nmse_median are the R06 INDEPENDENT final-eval reconstruction "
-                 "diagnostic (not the gate); online_* is the core commit region; "
-                 "overlap_* is the R01 full-overlap diagnostic; normalized_* are "
-                 "the L2 shape-only diagnostic. Aggregate excludes uses_truth "
-                 "windows; n_na_windows are ||i||^2==0."),
+                 "diagnostic (not the gate); online_* is the explicit commit "
+                 "region; overlap_* is the R01 full-overlap diagnostic; "
+                 "median_eval_actual_suppression_db / "
+                 "median_tail_actual_suppression_db are the S1-05 ACTUAL-output "
+                 "metrics over the independent-eval / tail-4-SYNC regions. "
+                 "Aggregate excludes uses_truth windows; n_na_windows are "
+                 "||i||^2==0."),
     }
     eff_ok = bool(
         sic_on and args.sic == "estimate" and args.preset == "main" and
@@ -4451,6 +6314,25 @@ def main(argv=None):
             "in_flight_max": int(credit.in_flight_max),
             "iq_budget_bytes": int(credit.iq_budget_bytes),
         })
+    if pacer is not None:
+        # The asynchronous pacer owns the source accounting for this run.
+        summary["runtime"].update({
+            "offered": int(pacer.offered),
+            "admitted": int(pacer.admitted),
+            "completed": int(pacer.completed),
+            "failed": int(pacer.terminal_timeouts),
+            "planned": int(pacer.planned),
+            "deadline_misses": int(pacer.deadline_misses),
+            "source_offered": int(pacer.offered),
+            "source_admitted": int(pacer.admitted),
+            "source_missed_admission": int(pacer.missed_submission),
+            "source_inflight_hw": int(pacer.inflight_hwm),
+            "source_pending_bytes_peak": int(pacer.pending_bytes_peak),
+            "in_flight_max": int(pacer.in_flight_max),
+            "iq_budget_bytes": int(pacer.iq_budget_bytes),
+            "submit_mode": "async_pipelined_scheduler_thread",
+            "pacer_thread": "sic-pacer (python threading.Thread, 1)",
+        })
     # F7: bounded-result-sink evidence (kept IQ arrays vs dropped).
     summary["runtime"]["sinks"] = {
         "keep_iq": int(args.keep_iq),
@@ -4510,26 +6392,140 @@ def main(argv=None):
             % (len(native_records),
                (native_block or {}).get("clip_free"),
                res_stats.get("pdus_dropped"), bool(eff_ok)))
+    # ---- S1-05/§7: the S1 nominal acceptance gate ---------------------------
+    s1_pass = None
+    s1_evidence = {}
+    if sic_on and args.sic == "estimate":
+        eff = summary["effect"]
+        med_full = eff.get("median_actual_suppression_db")
+        med_eval = eff.get("median_eval_actual_suppression_db")
+        med_tail = eff.get("median_tail_actual_suppression_db")
+        cov_min = eff.get("support_coverage_min")
+        amp95 = eff.get("target_amp_abs_err_db_p95")
+        shift = eff.get("target_peak_shift_max")
+        frac_full = eff.get("frac_actual_ge_3db")
+
+        def _ge(v, t):
+            return bool(v is not None and float(v) >= float(t))
+
+        s1_evidence = {
+            "model_mode": model_mode,
+            # §7 nominal targets: the three ACTUAL medians >= 20 dB (25 dB is the
+            # optimization target, reported separately and never substituted).
+            "nominal_full_actual_median_ge_20db": _ge(med_full, 20.0),
+            "nominal_eval_actual_median_ge_20db": _ge(med_eval, 20.0),
+            "nominal_tail_actual_median_ge_20db": _ge(med_tail, 20.0),
+            "nominal_full_actual_median_ge_25db": _ge(med_full, 25.0),
+            "nominal_eval_actual_median_ge_25db": _ge(med_eval, 25.0),
+            "nominal_tail_actual_median_ge_25db": _ge(med_tail, 25.0),
+            # §7 nominal static coverage >= 99%.
+            "nominal_support_coverage_ge_0.99": _ge(cov_min, 0.99),
+            # §7 main-matrix per-cell floor, proxied by the nominal cell here:
+            # median actual >= 10 dB and >= 95% windows >= 3 dB.
+            "nominal_actual_median_ge_10db": _ge(med_full, 10.0),
+            "nominal_actual_frac_ge_3db": _ge(frac_full, 0.95),
+            # §7: target protection unchanged.
+            "target_amp_abs_err_p95_le_1db": bool(amp95 is not None
+                                                  and float(amp95) <= 1.0),
+            "target_peak_shift_le_1": bool(shift is not None
+                                           and int(shift) <= 1),
+            # S1-1/S1-2: frozen-model evidence was actually published.
+            "frozen_model_evidence_present": bool(n_model_missing == 0
+                                                  and n_model_windows > 0),
+        }
+        if model_mode == S1_MODEL_MODE and args.preset == "main":
+            s1_pass = bool(all(s1_evidence.values()))
+        else:
+            # not the formal nominal matrix cell: report evidence, but do not
+            # claim an S1 pass from a non-nominal configuration.
+            s1_pass = False
+    if pacer is not None:
+        # S1-03: a target-only TIMED run does not evaluate cancellation, so the
+        # effect/S1 gates are UNTESTED here (null + named in not_run), never
+        # reported as a tested failure of a measurement that was not performed.
+        eff_pass = None
+        s1_pass = None
+        s1_evidence = {}
+        gate_evidence.pop("eff_pass", None)
+        gate_evidence.pop("s1_pass", None)
+        not_run.append(
+            "gates.eff_pass (untested: S1-03 target-only paced run performs no "
+            "effect evaluation inside the timed region)")
+        not_run.append(
+            "gates.s1_pass (untested: S1-03 target-only paced run performs no "
+            "effect evaluation inside the timed region)")
+    summary["s1_evidence"] = s1_evidence
     summary["gates"] = {
         "eff_pass": eff_pass,
+        "s1_pass": s1_pass,
         "sic_speed_pass": sic_speed_pass,
         "demod_speed_pass": demod_speed_pass,
         "native_pass": native_gate,
         "g0_pass": bool(all(g0_parts)),
         "note": ("g0_pass is the S0-A closure gate over the checks applicable "
                  "to the selected --consumer; eff_pass is the S0 primary "
-                 "effect gate (main/estimate only); native_pass requires the "
-                 "native front-end to run clip-free with no dropped PDU AND the "
-                 "same effect gate.  R10: sic_speed_pass/demod_speed_pass/ "
-                 "native_pass are null when NOT TESTED in this invocation and "
-                 "are then named in not_run[]; a false gate is a "
-                 "tested-and-failed result carrying evidence."),
+                 "effect gate (main/estimate only); s1_pass is the S1-05/§7 "
+                 "nominal acceptance gate (actual full/eval/tail medians >=20 dB, "
+                 "coverage >=0.99, main-cell median >=10 dB / >=95% >=3 dB, "
+                 "target protection, and frozen-model evidence present); "
+                 "native_pass requires the native front-end to run clip-free "
+                 "with no dropped PDU AND the same effect gate.  R10: "
+                 "sic_speed_pass/demod_speed_pass/native_pass are null when NOT "
+                 "TESTED in this invocation and are then named in not_run[]; a "
+                 "false gate is a tested-and-failed result carrying evidence."),
     }
+    if s1_evidence:
+        gate_evidence["s1_pass"] = (
+            "§7 nominal targets recomputed from the per-window actual metrics: "
+            "%s" % json.dumps(s1_evidence, sort_keys=True))
+    if sic_on and model_mode == S1_MODEL_MODE:
+        gate_evidence["s1_model_evidence"] = (
+            "%d/%d windows published frozen-model evidence; %d missing (first "
+            "ids %s). %s"
+            % (n_model_windows, n_model_windows + n_model_missing,
+               n_model_missing, model_missing_ids[:5],
+               (model_error_samples[0] if model_error_samples else "")))
     summary["gate_evidence"] = gate_evidence
     g0["g0_pass"] = summary["gates"]["g0_pass"]
     if native_gate is None:
         not_run.append("gates.native_pass (untested: native front-end not run "
                        "in this invocation; use --input-grid cg400)")
+    if sic_on and args.sic == "estimate" and pacer is None:
+        if model_mode == S1_MODEL_MODE and args.preset != "main":
+            not_run.append(
+                "gates.s1_pass (reported false: this run is not the formal "
+                "nominal main-preset matrix cell; run --preset main for the S1 "
+                "acceptance gate)")
+        elif model_mode != S1_MODEL_MODE:
+            not_run.append(
+                "gates.s1_pass (reported false: confirmed_legacy is the explicit "
+                "legacy comparison; it does not claim an S1 pass)")
+    elif pacer is None:
+        not_run.append("gates.s1_pass (untested: sic_mode=%s)" % args.sic)
+
+    # ---- S1-06: calibration windows + runtime seed separation --------------
+    cal_spec = seed_specs.get("calibration") if isinstance(seed_specs, dict) \
+        else None
+    calibration_windows = []
+    if isinstance(cal_spec, dict):
+        cal_list, _ = materialize_seeds(cal_spec, int(cal_spec.get("count", 0)))
+        calibration_windows = [
+            {"seed": int(s), "seed_offset": int(i), "noise_root": noise_root_of(s)}
+            for i, s in enumerate(cal_list)]
+    cal_tuples = {(int(w["seed"]), int(w["seed_offset"]), w["noise_root"])
+                  for w in calibration_windows}
+    seed_separation = None
+    if sic_on and args.seed_set == "acceptance" and accept_tuples:
+        seed_separation = check_seed_separation(
+            cal_tuples, accept_tuples, run_seeds=run_seeds)
+    summary["seed_separation"] = seed_separation
+    summary["generator_windows"] = {
+        "seed_set": args.seed_set,
+        "n_windows": len(accept_tuples),
+        "n_calibration_tuples": len(cal_tuples),
+        "separation_checked": bool(seed_separation is not None),
+        "first_tuples": [list(t) for t in accept_tuples[:3]],
+    }
 
     # ---------------- manifests / tables ----------------
     # R10: bind the ACTUAL run to the real commit, a sha256 id of the
@@ -4603,6 +6599,11 @@ def main(argv=None):
         "config": resolved_config,
         "effective_config": effective_config,
         "effective_config_hash": effective_config_hash,
+        # S1-07: the declared model mode (top-level so the verifier finds it) and
+        # the seed-provenance evidence (S1-06).
+        "sic_model_mode": (model_mode if sic_on else None),
+        "legacy_model_mode": bool(sic_on and model_mode == S1_LEGACY_MODE),
+        "calibration_windows": calibration_windows,
         "fixture_hashes": {},
         "template_hashes": {
             "sensing_sync_code%d" % sensing_code:
@@ -4786,12 +6787,52 @@ def main(argv=None):
         "functional": {
             "case_id": effective_config["case_id"],
             "effective_config_hash": effective_config_hash,
+            "config_hash": effective_config_hash,
+            "sic_model_mode": (model_mode if sic_on else None),
             "template_id": effective_config.get("comm_template_id"),
             "input_length": int(generator.n),
+            "run_state": "executed",
             "differences": _same_diffs,
         },
     }
+    # S1-07: declare the effective-config identity for every measured layer.
+    # Layers that were NOT executed in this functional invocation carry an
+    # explicit run_state/note -- the identity is declared for binding, never a
+    # claim that the layer was reproduced here.
+    _layer_common = {
+        "case_id": effective_config["case_id"],
+        "effective_config_hash": effective_config_hash,
+        "config_hash": effective_config_hash,
+        "sic_model_mode": (model_mode if sic_on else None),
+        "template_id": effective_config.get("comm_template_id"),
+        "input_length": int(generator.n),
+    }
+    manifest["implementation_configs"].update({
+        "effect": dict(_layer_common, run_state="executed",
+                       note="the functional/effect path is THIS run"),
+        "core": dict(_layer_common,
+                     run_state="declared_identity_not_executed",
+                     note=("benchmark_preamble_sic.cc (SIC math core) was NOT run "
+                           "in this invocation; it uses its own synthetic load, "
+                           "so the input content differs though the effective "
+                           "config hash/model mode/template/input length are "
+                           "declared the same (S1-02).")),
+        "gr": dict(_layer_common, run_state="declared_identity_not_executed",
+                   note=("the standalone GNU Radio PDU chain is exercised "
+                         "IN-PROCESS by this run's adapter; no separate GR "
+                         "benchmark was executed here (S1-02).")),
+        "cir": dict(_layer_common,
+                    run_state=("executed" if (sic_on and rt.want_cir)
+                               else "declared_identity_not_executed"),
+                    note="the SIC->CIR (radar CIR-only) consumer path"),
+        "full_demod": dict(_layer_common,
+                           run_state=("executed" if (sic_on and rt.want_demod)
+                                      else "declared_identity_not_executed"),
+                           note="the SIC->full sensing demodulation consumer path"),
+    })
     if _native_entry is not None:
+        _native_entry = dict(_native_entry, config_hash=effective_config_hash,
+                             sic_model_mode=(model_mode if sic_on else None))
         manifest["implementation_configs"]["native"] = _native_entry
     manifest["config_differences"] = _same_diffs
     manifest["roi_semantics"] = (
@@ -4828,6 +6869,12 @@ def main(argv=None):
                 r[0], r[1], r[2], r[3], r[4], r[5], ("%.3f" % r[6])
                 if isinstance(r[6], float) else r[6], r[7]))
     write_json(os.path.join(args.output, "summary.json"), summary)
+    # S1-06/S1-07: point the results-root index.json at the real newest run.
+    try:
+        idx = update_results_index(args.output)
+        print("results index:", idx, flush=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        print("results index write failed:", exc, flush=True)
 
     # ---------------- print + exit ----------------
     print("\n=== S0-A G0 checks ===", flush=True)

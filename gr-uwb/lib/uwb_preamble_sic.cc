@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
@@ -93,12 +94,54 @@ pmt::pmt_t copy_dict(pmt::pmt_t in)
     return out;
 }
 
+// S1 cancellation-support mode label -> core enumerator.  Explicit: an unknown
+// string is rejected (fail-closed), never silently mapped to a default.
+bool parse_support_mode(const std::string& s, sic::SicSupportMode& out)
+{
+    if (s == "configured_nominal") {
+        out = sic::SicSupportMode::ConfiguredNominal;
+        return true;
+    }
+    if (s == "confirmed_legacy") {
+        out = sic::SicSupportMode::ConfirmedLegacy;
+        return true;
+    }
+    return false;
+}
+
+// The per-window estimation visibility limit declared in the PDU meta:
+// `observed_end_sample` (preferred) or `visible_end_sample`.  Absent => 0, which
+// the core reads as "the whole window is visible" (legacy-visible contract).
+// A declared prefix is passed through unchanged and never widened.  `source`
+// records which input produced the value (adapter meta key, or the default).
+int64_t declared_observed_end(pmt::pmt_t meta, const char** source)
+{
+    if (pmt::dict_has_key(meta, pmt::mp("observed_end_sample"))) {
+        *source = "observed_end_sample";
+        return dict_i64(meta, "observed_end_sample", 0);
+    }
+    if (pmt::dict_has_key(meta, pmt::mp("visible_end_sample"))) {
+        *source = "visible_end_sample";
+        return dict_i64(meta, "visible_end_sample", 0);
+    }
+    *source = "whole_window_default";
+    return 0;
+}
+
+// Lower-case hex of a 64-bit model fingerprint ("0x%016llx").
+std::string hex_u64(uint64_t v)
+{
+    char buf[19];
+    std::snprintf(buf, sizeof(buf), "0x%016llx",
+                  static_cast<unsigned long long>(v));
+    return std::string(buf);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
 // Construction / factory
 // ---------------------------------------------------------------------------
-
 std::vector<gr_complex>
 UwbPreambleSic::load_cf32_file(const std::string& path)
 {
@@ -170,7 +213,9 @@ UwbPreambleSic::UwbPreambleSic(const std::vector<gr_complex>& sync,
                                size_t path_min_spacing,
                                size_t post_tail,
                                size_t max_window_samples,
-                               size_t pending_bypass_max)
+                               size_t pending_bypass_max,
+                               const std::string& support_mode,
+                               size_t online_validation_reps)
     : gr::block("uwb_preamble_sic",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
@@ -231,6 +276,29 @@ UwbPreambleSic::UwbPreambleSic(const std::vector<gr_complex>& sync,
     d_cfg_.enable_cfo = enable_cfo;
     d_cfg_.path_min_spacing = path_min_spacing;
     d_cfg_.post_tail = post_tail;
+
+    // S1 support/visibility plumbing.  support_mode is validated explicitly (an
+    // unknown label is a hard construction error, not a silent default).
+    sic::SicSupportMode sm;
+    if (!parse_support_mode(support_mode, sm)) {
+        throw std::invalid_argument(
+            "UwbPreambleSic: unknown support_mode '" + support_mode +
+            "' (configured_nominal|confirmed_legacy)");
+    }
+    d_cfg_.support_mode = sm;
+    d_support_mode_name_ = (sm == sic::SicSupportMode::ConfiguredNominal)
+        ? "configured_nominal"
+        : "confirmed_legacy";
+    d_model_mode_name_ = (sm == sic::SicSupportMode::ConfiguredNominal)
+        ? "estimate8_frozen"
+        : "confirmed_legacy";
+    // The explicit holdout is bounded by the PREPARED holdout capacity; reject
+    // an impossible request at construction instead of failing every window.
+    if (online_validation_reps > validation_reps) {
+        throw std::invalid_argument(
+            "UwbPreambleSic: online_validation_reps must be <= validation_reps");
+    }
+    d_cfg_.online_validation_reps = online_validation_reps;
 
     // Pre-size the output pool when the caller declared a maximum window.
     if (d_max_window_samples_ > 0) {
@@ -312,7 +380,9 @@ UwbPreambleSic::make(const std::string& sync_template_path,
                      size_t path_min_spacing,
                      size_t post_tail,
                      size_t max_window_samples,
-                     size_t pending_bypass_max)
+                     size_t pending_bypass_max,
+                     const std::string& support_mode,
+                     size_t online_validation_reps)
 {
     std::vector<gr_complex> sync = load_cf32_file(sync_template_path);
     std::vector<gr_complex> preamble = load_cf32_file(preamble_template_path);
@@ -340,7 +410,9 @@ UwbPreambleSic::make(const std::string& sync_template_path,
                                path_min_spacing,
                                post_tail,
                                max_window_samples,
-                               pending_bypass_max);
+                               pending_bypass_max,
+                               support_mode,
+                               online_validation_reps);
 }
 
 UwbPreambleSic::sptr
@@ -368,7 +440,9 @@ UwbPreambleSic::make_from_templates(const std::vector<gr_complex>& sync,
                                     size_t path_min_spacing,
                                     size_t post_tail,
                                     size_t max_window_samples,
-                                    size_t pending_bypass_max)
+                                    size_t pending_bypass_max,
+                                    const std::string& support_mode,
+                                    size_t online_validation_reps)
 {
     return gnuradio::get_initial_sptr(new UwbPreambleSic(sync,
                                                          preamble,
@@ -394,7 +468,9 @@ UwbPreambleSic::make_from_templates(const std::vector<gr_complex>& sync,
                                                          path_min_spacing,
                                                          post_tail,
                                                          max_window_samples,
-                                                         pending_bypass_max));
+                                                         pending_bypass_max,
+                                                         support_mode,
+                                                         online_validation_reps));
 }
 
 // ---------------------------------------------------------------------------
@@ -643,8 +719,18 @@ UwbPreambleSic::handle_truth(pmt::pmt_t msg)
     }
 
     const uint64_t wid = dict_u64(msg, "window_id", 0);
-    std::lock_guard<std::mutex> lock(d_truth_mutex_);
-    d_truth_[wid] = t;
+    {
+        std::lock_guard<std::mutex> lock(d_truth_mutex_);
+        d_truth_[wid] = t;
+    }
+    // Deterministic "stored" acknowledgement.  GNU Radio keeps a SEPARATE queue
+    // per input port (basic_block::msg_queue_map_t), so posting `truth` and then
+    // `in` gives no cross-port ordering guarantee.  A producer that needs the
+    // sidecar to be visible before the window can wait for this event.
+    pmt::pmt_t extra = pmt::make_dict();
+    extra = pmt::dict_add(extra, pmt::mp("window_id"),
+                          pmt::from_uint64(wid));
+    publish_status("truth_ready", extra);
 }
 
 // ---------------------------------------------------------------------------
@@ -734,9 +820,15 @@ UwbPreambleSic::process(Pending& p)
     bool pool_exceeded = false;
 
     sic::SicResult r;
+    sic::SicModel model;      // frozen S1 model (estimate mode only)
+    bool have_model = false;  // model struct filled by estimate_model
     bool sic_ran = false;
     bool failed = false;
     const char* reason = p.bypass_reason;
+    // Declared estimation visibility limit (0 = whole window) and the meta key
+    // it came from.  Recorded verbatim; never widened to the whole window.
+    int64_t observed_end_declared = 0;
+    const char* observed_end_source = "whole_window_default";
     if (p.admitted && !pool_ok) {
         pool_exceeded = true;
         d_pool_capacity_exceeded_.fetch_add(1, std::memory_order_relaxed);
@@ -746,20 +838,6 @@ UwbPreambleSic::process(Pending& p)
     if (p.admitted && pool_ok) {
         r.out = d_out_.data();
         r.i_hat = d_publish_reconstruction_ ? d_ihat_.data() : nullptr;
-
-        // Oracle-only: an explicit, window-matched truth struct.  Estimate mode
-        // never reaches this branch, so it can never read injected truth.
-        sic::SicTruth truth;
-        const sic::SicTruth* truth_ptr = nullptr;
-        if (d_cfg_.mode == sic::SicMode::Oracle) {
-            const uint64_t wid = dict_u64(p.meta_in, "window_id", 0);
-            std::lock_guard<std::mutex> lock(d_truth_mutex_);
-            auto it = d_truth_.find(wid);
-            if (it != d_truth_.end()) {
-                truth = it->second;
-                truth_ptr = &truth;
-            }
-        }
 
         sic::SicTemplates tpl;
         tpl.sync = d_sync_.data();
@@ -781,22 +859,115 @@ UwbPreambleSic::process(Pending& p)
             cfg.sub_min_overlap =
                 dict_u64(p.meta_in, "sensing_min_overlap", d_cfg_.sub_min_overlap);
         }
+        // S1: per-window estimation visibility.  `observed_end_sample` (or the
+        // `visible_end_sample` alias) is taken from the meta when the caller
+        // declares a prefix; absent => 0 = whole window (legacy-visible).
+        observed_end_declared = declared_observed_end(p.meta_in, &observed_end_source);
+        cfg.observed_end_sample = observed_end_declared;
 
         size_t nelem = 0;
         const gr_complex* y = pmt::c32vector_elements(p.iq_in, nelem);
-        bool ok = false;
-        try {
-            ok = sic::sic_one(y, nelem, tpl, cfg, d_scratch_, r, truth_ptr);
-        } catch (...) {
-            ok = false;
-        }
-        sic_ran = true;
-        if (!ok) {
-            failed = true;
-            reason = (r.reject_reason != nullptr) ? r.reject_reason
-                                                  : "sic_one_failed";
+        const size_t n = nelem;
+
+        if (d_cfg_.mode == sic::SicMode::Estimate) {
+            // S1: estimate a FROZEN 8-SYNC model over the declared prefix, then
+            // apply it to the WHOLE window (backfill the observed prefix, then
+            // clean forward) -- the same composition sic_one uses, but with the
+            // explicit model in hand so its frozen fields can be published.
+            const auto t_core0 = std::chrono::steady_clock::now();
+            // Byte-exact bypass default: `out` starts as a copy of `y`, the
+            // diagnostic reconstruction as zeros.  Every failure/bypass path
+            // leaves this untouched (out == y bit-for-bit).
+            std::copy(y, y + n, d_out_.data());
+            if (r.i_hat)
+                std::fill(d_ihat_.begin(),
+                          d_ihat_.begin() + static_cast<std::ptrdiff_t>(n),
+                          gr_complex(0.0f, 0.0f));
+
+            const auto t_est0 = std::chrono::steady_clock::now();
+            bool ok = false;
+            try {
+                ok = sic::estimate_model(y, n, observed_end_declared, tpl, cfg,
+                                         d_scratch_, model, &r.timings, &r);
+            } catch (...) {
+                ok = false;
+            }
+            r.timings.estimate_total_us =
+                elapsed_us(t_est0, std::chrono::steady_clock::now());
+            sic_ran = true;
+            have_model = true;
+            if (!ok) {
+                failed = true;
+                reason = (r.reject_reason != nullptr)
+                    ? r.reject_reason
+                    : (model.reason != nullptr ? model.reason
+                                               : "sic_estimate_failed");
+            } else {
+                // model.state is the authoritative terminal estimation state
+                // (estimate_model does not back-fill diag on its early returns).
+                r.state = model.state;
+                reason = (r.bypass_reason != nullptr) ? r.bypass_reason
+                                                      : model.reason;
+                if (model.valid) {
+                    const int64_t visible_end = model.observed_end_sample;
+                    const size_t backfill_end = static_cast<size_t>(
+                        std::max<int64_t>(0,
+                                          std::min<int64_t>(visible_end,
+                                                            static_cast<int64_t>(n))));
+                    const auto t_bf0 = std::chrono::steady_clock::now();
+                    if (backfill_end > 0)
+                        sic::apply_model(model, y, backfill_end, 0, tpl, cfg,
+                                         d_scratch_, d_out_.data(), r.i_hat,
+                                         &r.timings);
+                    r.timings.backfill_us =
+                        elapsed_us(t_bf0, std::chrono::steady_clock::now());
+                    const auto t_fw0 = std::chrono::steady_clock::now();
+                    const size_t fwd0 = backfill_end;
+                    const size_t fwd = n - fwd0;
+                    if (fwd > 0)
+                        sic::apply_model(model, y + fwd0, fwd,
+                                         static_cast<int64_t>(fwd0), tpl, cfg,
+                                         d_scratch_, d_out_.data() + fwd0,
+                                         r.i_hat ? r.i_hat + fwd0 : nullptr,
+                                         &r.timings);
+                    r.timings.apply_forward_us =
+                        elapsed_us(t_fw0, std::chrono::steady_clock::now());
+                }
+            }
+            // Outer total over the estimate+apply composition (single authority,
+            // exactly the role core_total_us plays inside sic_one).
+            r.timings.core_total_us =
+                elapsed_us(t_core0, std::chrono::steady_clock::now());
         } else {
-            reason = r.bypass_reason;
+            // off / oracle: the core's single-entry sic_one path is unchanged
+            // (it owns the out-copy and core_total_us; oracle consumes an
+            // explicit, window-matched truth struct; estimate never reaches this
+            // branch and reads no truth).
+            sic::SicTruth truth;
+            const sic::SicTruth* truth_ptr = nullptr;
+            if (d_cfg_.mode == sic::SicMode::Oracle) {
+                const uint64_t wid = dict_u64(p.meta_in, "window_id", 0);
+                std::lock_guard<std::mutex> lock(d_truth_mutex_);
+                auto it = d_truth_.find(wid);
+                if (it != d_truth_.end()) {
+                    truth = it->second;
+                    truth_ptr = &truth;
+                }
+            }
+            bool ok = false;
+            try {
+                ok = sic::sic_one(y, n, tpl, cfg, d_scratch_, r, truth_ptr);
+            } catch (...) {
+                ok = false;
+            }
+            sic_ran = true;
+            if (!ok) {
+                failed = true;
+                reason = (r.reject_reason != nullptr) ? r.reject_reason
+                                                      : "sic_one_failed";
+            } else {
+                reason = r.bypass_reason;
+            }
         }
     }
 
@@ -862,17 +1033,127 @@ UwbPreambleSic::process(Pending& p)
     put_f64("sic_residual_corr",
             (p.admitted && sic_ran) ? r.residual_corr : 0.0);
 
+    const bool have_core = p.admitted && sic_ran;
+
+    // ---- S1 frozen-model metadata (additive) ------------------------------
+    // Published from the FROZEN SicModel when estimation ran (estimate mode);
+    // otherwise neutral defaults so every `out` carries the same key set.  The
+    // declared visibility limit is recorded verbatim (0 = whole window) together
+    // with the meta key it came from; the RESOLVED limit is separate.
+    const int64_t declared_end = observed_end_declared;
+    const int64_t resolved_end =
+        (have_model && model.observed_end_sample > 0)
+        ? model.observed_end_sample
+        : (declared_end == 0
+               ? static_cast<int64_t>(p.n)
+               : std::min<int64_t>(declared_end, static_cast<int64_t>(p.n)));
+    const char* const support_source_pub =
+        have_core ? (r.support_source != nullptr
+                         ? r.support_source
+                         : (have_model ? model.support_source : "none"))
+                  : "none";
+    const int64_t support_lo_pub = have_core ? r.support_lo : int64_t(-1);
+    const int64_t support_hi_pub = have_core ? r.support_hi : int64_t(-1);
+    double support_coverage = 0.0;
+    if (have_core && support_hi_pub > support_lo_pub) {
+        const double nominal =
+            static_cast<double>(d_cfg_.sync_reps) *
+                static_cast<double>(d_cfg_.samples_per_symbol) +
+            static_cast<double>(d_cfg_.post_tail);
+        if (nominal > 0.0)
+            support_coverage =
+                static_cast<double>(support_hi_pub - support_lo_pub) / nominal;
+        if (support_coverage > 1.0)
+            support_coverage = 1.0;
+        if (support_coverage < 0.0)
+            support_coverage = 0.0;
+    }
+    meta = pmt::dict_add(meta, pmt::mp("sic_model_mode"),
+                         pmt::string_to_symbol(d_model_mode_name_));
+    put_u64("sic_model_id", have_model ? model.model_id : uint64_t(0));
+    meta = pmt::dict_add(
+        meta, pmt::mp("sic_model_fingerprint"),
+        pmt::string_to_symbol(hex_u64(have_model ? model.model_id : 0)));
+    put_i64("sic_observed_end_sample", declared_end);
+    meta = pmt::dict_add(meta, pmt::mp("sic_observed_end_source"),
+                         pmt::string_to_symbol(observed_end_source));
+    put_i64("sic_visible_end_sample", resolved_end);
+    put_i64("sic_training_lo", have_model ? model.training_lo : int64_t(-1));
+    put_i64("sic_training_hi", have_model ? model.training_hi : int64_t(-1));
+    put_i64("sic_estimation_ready_sample",
+            have_model ? model.estimation_ready_sample : int64_t(-1));
+    meta = pmt::dict_add(meta, pmt::mp("sic_support_source"),
+                         pmt::string_to_symbol(support_source_pub));
+    put_f64("sic_support_coverage", support_coverage);
+    put_i64("sic_sub_lo", have_model ? model.sub_lo : int64_t(-1));
+    put_i64("sic_sub_hi", have_model ? model.sub_hi : int64_t(-1));
+    put_i64("sic_phase_reference",
+            have_model ? model.phase_reference_sample : int64_t(-1));
+    put_f64("sic_fit_residual",
+            have_model ? model.fit_residual
+                       : (have_core ? r.fit_residual : 0.0));
+    put_f64("sic_cond2",
+            have_model ? model.gain_condition
+                       : (have_core ? r.gain_condition : 0.0));
+
+    // ---- S1 per-path frozen-model tables (additive) ----------------------
+    // Published from the AUTHORITATIVE frozen SicModel (not SicResult::taus,
+    // which is only an inspection mirror).  Index order is the model's own
+    // selection order, i.e. 0 .. n_paths-1 of SicModel::tau_abs[], and the gain
+    // tables use EXACTLY the same index order, so gain[k] belongs to tau[k].
+    //   sic_tau       f64vector, absolute work-sample delays (tau_abs)
+    //   sic_gain_re   f64vector, real part of the complex gain
+    //   sic_gain_im   f64vector, imag part of the complex gain
+    // A window with no APPLIED frozen model (off/oracle, bypass, failure) still
+    // publishes all three keys, as EMPTY vectors: the consumer can distinguish
+    // "no paths" (present, length 0) from "table not published" (absent).
+    // `sic_path_count` mirrors the table length on `out` and `status`.
+    const bool have_frozen = have_model && model.valid;
+    const size_t n_tbl = have_frozen
+        ? std::min<size_t>(model.n_paths,
+                           static_cast<size_t>(sic::kSicMaxPaths))
+        : 0;
+    double tau_tbl[sic::kSicMaxPaths] = {};
+    double gre_tbl[sic::kSicMaxPaths] = {};
+    double gim_tbl[sic::kSicMaxPaths] = {};
+    for (size_t k = 0; k < n_tbl; ++k) {
+        tau_tbl[k] = model.tau_abs[k];
+        gre_tbl[k] = static_cast<double>(model.gain[k].real());
+        gim_tbl[k] = static_cast<double>(model.gain[k].imag());
+    }
+    meta = pmt::dict_add(meta, pmt::mp("sic_tau"),
+                         pmt::init_f64vector(n_tbl, tau_tbl));
+    meta = pmt::dict_add(meta, pmt::mp("sic_gain_re"),
+                         pmt::init_f64vector(n_tbl, gre_tbl));
+    meta = pmt::dict_add(meta, pmt::mp("sic_gain_im"),
+                         pmt::init_f64vector(n_tbl, gim_tbl));
+    put_u64("sic_path_count", static_cast<uint64_t>(n_tbl));
+    put_f64("sic_gain_cond",
+            have_model ? model.gain_condition
+                       : (have_core ? r.gain_condition : 0.0));
+    // apply_model takes the model by const reference and has no re-fit path, so
+    // the frozen parameters cannot change during apply.  These are the contract
+    // witnesses the QA asserts on every committed window.
+    put_u64("sic_apply_refit_count", uint64_t(0));
+    put_u64("sic_apply_param_deltas", uint64_t(0));
+    put_u64("sic_nominal_sync_reps",
+            have_model ? static_cast<uint64_t>(model.nominal_sync_reps)
+                       : static_cast<uint64_t>(d_cfg_.sync_reps));
+    put_u64("sic_samples_per_symbol",
+            have_model ? static_cast<uint64_t>(model.samples_per_symbol)
+                       : static_cast<uint64_t>(d_cfg_.samples_per_symbol));
+    put_f64("sic_sample_rate",
+            have_model ? model.sample_rate : d_cfg_.sample_rate);
+
     // Adapter timers.  Values written here are measured through CONSTRUCTION:
     // a message cannot carry the duration of its own enqueue.  The
     // pub-inclusive mirrors are published on the `status` event below.
     put_u64("handler_us", p.handler_us);
     put_u64("queue_wait_us", queue_wait_us);
-    put_u64("core_total_us",
-            (p.admitted && sic_ran) ? r.timings.core_total_us : 0);
+    put_u64("core_total_us", have_core ? r.timings.core_total_us : 0);
 
     // Core stage timers (children of core_total_us; never double counted).
     const sic::SicTimings& tt = r.timings;
-    const bool have_core = p.admitted && sic_ran;
     put_u64("sic_detect_coarse_us", have_core ? tt.detect_coarse_us : 0);
     put_u64("sic_detect_fine_us", have_core ? tt.detect_fine_us : 0);
     put_u64("sic_cfo_us", have_core ? tt.cfo_us : 0);
@@ -884,6 +1165,17 @@ UwbPreambleSic::process(Pending& p)
     put_u64("sic_gain_fit_us", have_core ? tt.gain_fit_us : 0);
     put_u64("sic_reconstruct_us", have_core ? tt.reconstruct_us : 0);
     put_u64("sic_validate_commit_us", have_core ? tt.validate_commit_us : 0);
+
+    // S1 decomposition.  These describe the estimate/apply split and are NOT
+    // summed into core_total_us (estimate_total_us is itself the parent of the
+    // stage children above; model_prepare_us is inside estimate_total_us;
+    // apply_us == backfill_us + apply_forward_us).  No parent/child is added
+    // twice anywhere.
+    put_u64("sic_estimate_us", have_core ? tt.estimate_total_us : 0);
+    put_u64("sic_model_prepare_us", have_core ? tt.model_prepare_us : 0);
+    put_u64("sic_apply_us", have_core ? tt.apply_us : 0);
+    put_u64("sic_backfill_us", have_core ? tt.backfill_us : 0);
+    put_u64("sic_apply_forward_us", have_core ? tt.apply_forward_us : 0);
 
     // Byte-exact bypass: reuse the producer's c32vector PMT unchanged.  A
     // committed window is a fresh vector copied from the cleaned output buffer.
@@ -935,6 +1227,53 @@ UwbPreambleSic::process(Pending& p)
                               pmt::from_uint64(wrap_full_us));
         extra = pmt::dict_add(extra, pmt::mp("completion_latency_us"),
                               pmt::from_uint64(latency_full_us));
+        // S1 frozen-model essentials mirrored on status.
+        extra = pmt::dict_add(extra, pmt::mp("sic_model_mode"),
+                              pmt::string_to_symbol(d_model_mode_name_));
+        extra = pmt::dict_add(
+            extra, pmt::mp("sic_model_id"),
+            pmt::from_uint64(have_model ? model.model_id : uint64_t(0)));
+        extra = pmt::dict_add(
+            extra, pmt::mp("sic_observed_end_sample"),
+            pmt::from_long(declared_end));
+        extra = pmt::dict_add(extra, pmt::mp("sic_support_source"),
+                              pmt::string_to_symbol(support_source_pub));
+        extra = pmt::dict_add(extra, pmt::mp("sic_support_lo"),
+                              pmt::from_long(support_lo_pub));
+        extra = pmt::dict_add(extra, pmt::mp("sic_support_hi"),
+                              pmt::from_long(support_hi_pub));
+        extra = pmt::dict_add(extra, pmt::mp("sic_sub_lo"),
+                              pmt::from_long(have_model ? model.sub_lo : int64_t(-1)));
+        extra = pmt::dict_add(extra, pmt::mp("sic_sub_hi"),
+                              pmt::from_long(have_model ? model.sub_hi : int64_t(-1)));
+        extra = pmt::dict_add(extra, pmt::mp("sic_apply_refit_count"),
+                              pmt::from_uint64(0));
+        extra = pmt::dict_add(extra, pmt::mp("sic_apply_param_deltas"),
+                              pmt::from_uint64(0));
+        // S1 per-path table counts (mirrors of the `out` meta; the tables
+        // themselves stay on `out`).  sic_path_count is the number of PUBLISHED
+        // per-path entries (len(sic_tau)); sic_n_paths is the core's detected
+        // selection count.  They are equal on a committed window and both 0 on
+        // a window where no frozen model was applied.
+        extra = pmt::dict_add(
+            extra, pmt::mp("sic_path_count"),
+            pmt::from_uint64(static_cast<uint64_t>(n_tbl)));
+        extra = pmt::dict_add(
+            extra, pmt::mp("sic_n_paths"),
+            pmt::from_uint64(have_core ? static_cast<uint64_t>(r.n_paths)
+                                       : uint64_t(0)));
+        extra = pmt::dict_add(
+            extra, pmt::mp("sic_gain_cond"),
+            pmt::from_double(have_model ? model.gain_condition
+                                        : (have_core ? r.gain_condition : 0.0)));
+        extra = pmt::dict_add(extra, pmt::mp("sic_estimate_us"),
+                              pmt::from_uint64(have_core ? tt.estimate_total_us : 0));
+        extra = pmt::dict_add(extra, pmt::mp("sic_model_prepare_us"),
+                              pmt::from_uint64(have_core ? tt.model_prepare_us : 0));
+        extra = pmt::dict_add(extra, pmt::mp("sic_backfill_us"),
+                              pmt::from_uint64(have_core ? tt.backfill_us : 0));
+        extra = pmt::dict_add(extra, pmt::mp("sic_apply_forward_us"),
+                              pmt::from_uint64(have_core ? tt.apply_forward_us : 0));
         publish_status("window", extra);
     }
 

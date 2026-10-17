@@ -4,33 +4,47 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * S0 preamble-only SIC math core (frozen contract:
- * docs/sic/S0_sic_core_api.md).  Namespace gr::uwb::sic.
+ * S0/S1 preamble-only SIC math core (S1 contract:
+ * docs/sic/S1_八符号模型API.md; S0 contract: docs/sic/S0_sic_core_api.md).
+ * Namespace gr::uwb::sic.
  *
  * This is the PURE math core of the detection-triggered preamble SIC branch.
  * It has NO GNU Radio types, NO scheduler, NO file I/O and does NOT allocate
- * or grow a vector inside sic_one(): every buffer is sized once by
- * prepare_sic_core().  The PDU adapter (uwb_preamble_sic.*) is a separate,
- * thinner layer.
+ * or grow a vector inside sic_one() / estimate_model() / apply_model(): every
+ * buffer is sized once by prepare_sic_core().  The PDU adapter
+ * (uwb_preamble_sic.*) is a separate, thinner layer.
  *
- * Pipeline (contract §Algorithm):
- *   detect_coarse / detect_fine  -> detect_threshold gate
- *   repetition confirmation       -> confirmed origin + support
- *   cfo from repeated-peak phases -> rotate the RECONSTRUCTION basis (never y)
- *   cir / path_select             -> <= K distinct integer delays
- *   fractional_refine (optional)  -> core-owned bandlimited interpolation
- *   matrix_build / gain_fit       -> complex least squares via the K x K Gram
- *                                    matrix + Cholesky (double; no inverse)
- *   reconstruct                   -> i_hat over the union support window
- *   validate_commit               -> DISJOINT holdout reps; fail-closed
+ * S1 pipeline (contract §Pipeline):
+ *   estimate_model: detect_coarse / detect_fine  -> detect_threshold gate
+ *                   repetition confirmation      -> training-span confirmations
+ *                   cfo (training reps)          -> rotate the reconstruction basis
+ *                   cir / path_select            -> <= K distinct integer delays
+ *                   fractional_refine (optional) -> polyphase-table bandlimited delay
+ *                   matrix_build / gain_fit      -> complex LS via Householder QR
+ *                   freeze SicModel              -> immutable + model_id
+ *                   commit gate                  -> fit_residual (default) and/or
+ *                                                   the explicit online holdout
+ *   apply_model:    reconstruct on a fixed ABSOLUTE block grid, subtract only
+ *                   inside the model's permitted region, bit-identical outside.
+ *   sic_one:        estimate over min(n, observed_end) (0 => n), then apply the
+ *                   frozen model to the whole [0,n) window (backfill + forward).
  *
- * Output convention (matches UWB_Preamble_SIC_GNU_Radio_Design.md):
- *   i_hat[n] = sum_k h_k * preamble[n - origin - tau_k] * exp(j 2*pi*f*n/Fs)
- *   out[n]   = y[n] - i_hat[n]
- * i_hat is the reconstruction over the union of the delayed-preamble supports
- * (the whole `plen`-sample tail); it is NOT confined to the subtraction mask.
- * Only `out` equals `y` byte-for-byte outside the subtraction mask, and EVERY
- * failure / bypass path leaves out bit-identical to y.
+ * STRICT PREFIX: estimation reads only y[0, min(observed_end, n)); every
+ * correlation row / LS row / CIR tap / CFO pair lies fully inside it (see the
+ * S1 API doc §2.1).  The injected comm start is never an input.
+ *
+ * Support: ConfiguredNominal PREDICTS origin + sync_reps*sps + post_tail from the
+ * public profile and is NOT clamped to the confirmed repetition count;
+ * ConfirmedLegacy reproduces S0.  Only the frozen model may cancel, and only
+ * inside model.[sub_lo, sub_hi): out == y byte-for-byte everywhere else, and
+ * EVERY failure / bypass path leaves out bit-identical to y.
+ *
+ * Output convention:
+ *   i_hat[n] = exp(j*w*(n - phase_reference_sample))
+ *              * sum_k gain[k] * preamble(n - tau_abs[k])
+ *   out[n]   = y[n] - i_hat[n]   (inside the permitted region only)
+ * i_hat is the reconstruction over the model support; it is NOT confined to the
+ * subtraction mask.
  *
  * TRUTH ISOLATION: Estimate mode reads only y, the comm templates and the
  * config.  It never receives injected delay/CFO/paths/ISR/interferer IQ.
@@ -63,6 +77,28 @@ enum class SicState : uint8_t {
     Failed = 2,
     Ambiguous = 3
 };
+
+// S1: how the CANCELLATION support is derived.  This is deliberately decoupled
+// from how many repetitions were confirmed / validated (S1-01), and it never
+// re-fits anything: it only decides WHICH samples the frozen model is allowed to
+// modify.
+//
+//   ConfiguredNominal (default) : the support is PREDICTED from the public
+//       profile -- detected origin + configured `sync_reps * samples_per_symbol`
+//       + template/post tail -- and is NOT clamped to the confirmed/validated
+//       repetition count.  The estimate itself still uses only the first
+//       `fit_reps` SYNC symbols (8 by default) of the VISIBLE PREFIX, so the
+//       full nominal preamble can be cancelled while the parameters remain
+//       strictly 8-symbol.  This is the S1 "estimate 8 symbols, then subtract
+//       the whole known preamble" path.
+//   ConfirmedLegacy (1)         : S0 behaviour kept as an EXPLICIT legacy
+//       comparison: support = confirmed repetitions (counted over
+//       `fit_reps + online_validation_reps`) * samples_per_symbol + post_tail,
+//       and the commit gate is the old disjoint-holdout residual test.  It is
+//       NOT the default.  Strict-prefix estimation still applies to it (CFO is
+//       training-only), so it is bit-identical to S0 only when the whole window
+//       is visible and the estimator's changed stages are not exercised.
+enum class SicSupportMode : uint8_t { ConfiguredNominal = 0, ConfirmedLegacy = 1 };
 
 // Maximum number of interference paths the core will ever fit.  The config
 // permits k_paths in {1,2,4,8,16}; larger values are rejected by prepare.
@@ -113,6 +149,36 @@ struct SicConfig {
     bool enable_cfo = true;
     double detect_threshold = 0.0;    // fixed from the CALIBRATION set
     double validate_threshold = 0.0;  // fixed from the CALIBRATION set
+
+    // ---------------------------------------------------------------------
+    // S1: strict 8-SYNC estimation, frozen model, full-nominal cancellation.
+    // ---------------------------------------------------------------------
+    // Support derivation (see SicSupportMode).  Default = the S1 path.
+    SicSupportMode support_mode = SicSupportMode::ConfiguredNominal;
+    // VISIBILITY LIMIT of the estimation stage: only y[0, min(observed_end, n))
+    // may be read by ANY estimation stage (detection, repetition confirmation,
+    // CFO, CIR, fractional refine, gain fit).  0 (default) => the whole sic_one
+    // window is visible, which is the legacy caller contract.  Negative is
+    // invalid.  This does NOT limit `apply`: the frozen model is applied to the
+    // whole [0,n) window (see apply_model / sic_one).
+    int64_t observed_end_sample = 0;
+    // Optional EXPLICIT conservative mode (0 = default, no holdout wait): when
+    // > 0 the legacy disjoint-holdout residual gate is evaluated over
+    //   [origin + fit_reps*sps, origin + (fit_reps+online_validation_reps)*sps)
+    // and the cancellation still covers the whole predicted support.  The extra
+    // observation latency is therefore explicit.  Must be <= validation_reps
+    // (the prepared holdout capacity) and fit_reps+online_validation_reps <=
+    // kMaxReps.  For the exact S0 gate set combine with
+    // support_mode=ConfirmedLegacy and online_validation_reps=validation_reps.
+    size_t online_validation_reps = 0;
+    // Default-mode commit ceiling on the NORMALIZED TRAINING residual
+    // ||y - i_hat||^2 / ||y||^2 over the (prefix-clipped) training span.  This
+    // is a model-quality sanity ceiling, NOT an effect threshold: a misaligned
+    // or wrong-template fit leaves ~1.0, while a perfect cancellation of an
+    // ISR=0 dB interferer still leaves ~0.5 (the sensing signal is in the
+    // residual).  Calibration-fixed at 0.8 per the S0/S1 profile review; it must
+    // be re-calibrated per profile, never tuned on acceptance windows.
+    double fit_residual_max = 0.8;
 };
 
 // Both templates are supplied by the caller and live in the INDEPENDENT comm
@@ -126,6 +192,56 @@ struct SicTemplates {
     size_t sync_len = 0;
     const std::complex<float>* preamble = nullptr;
     size_t preamble_len = 0;
+};
+
+// ---------------------------------------------------------------------------
+// SicModel: the FROZEN estimate produced by estimate_model() and consumed by
+// apply_model().  Every field is fixed at freeze time; apply NEVER updates CFO,
+// delays, gains or the path count from the data it sees.  Two consequences used
+// by the S1 QA:
+//   * the whole struct (including tau[], gain[], support and the terminal state)
+//     is a deterministic function of y[0, observed_end) + templates + config --
+//     nothing after the prefix can change it;
+//   * model_id is an FNV-1a-64 hash over exactly those frozen fields plus the
+//     template/config hashes, so equality of model_id is a strong (but not
+//     sufficient) equality check; the QA compares every field explicitly too.
+// ---------------------------------------------------------------------------
+struct SicModel {
+    bool valid = false;                  // true <=> state == Committed (may cancel)
+    SicState state = SicState::Failed;   // terminal estimation state
+    const char* status = "not_estimated"; // stable literal: model_ready|bypassed|
+                                          // ambiguous|failed|not_estimated
+    const char* reason = nullptr;        // stable literal or nullptr
+    uint64_t model_id = 0;               // hash of all frozen fields below
+    uint64_t template_hash = 0;          // hash of the prepared sync+preamble bytes
+    uint64_t config_hash = 0;            // hash of the estimation-relevant config
+    int64_t origin = -1;                 // comm SYNC origin (integer work sample)
+    double cfo_hz = 0.0;
+    size_t n_paths = 0;
+    // Absolute work-sample delays and COMPLEX gains (per path).  Gains are the
+    // fitted least-squares coefficients in the phase_reference_sample frame:
+    //   i_hat[n] = exp(j*w*(n - phase_reference_sample))
+    //              * sum_k gain[k] * preamble(n - tau_abs[k])
+    // where preamble(m) is the full frozen comm preamble template (finite, with
+    // its natural pulse/multipath tail) and w = 2*pi*cfo_hz/sample_rate.
+    double tau_abs[kSicMaxPaths] = {};
+    std::complex<float> gain[kSicMaxPaths] = {};
+    double gain_condition = 0.0;         // cond2(A) of the final gain-fit design
+    double fit_residual = 0.0;           // ||y-i_hat||^2/||y||^2 over training
+    int64_t training_lo = -1;            // samples the fit actually used
+    int64_t training_hi = -1;            // (clipped to the visible prefix)
+    int64_t observed_end_sample = 0;     // visibility limit that was used
+    int64_t estimation_ready_sample = -1; // == training_hi
+    int64_t predicted_support_lo = -1;   // permitted cancellation support
+    int64_t predicted_support_hi = -1;
+    const char* support_source = "none"; // stable literal
+    int64_t sub_lo = -1;                 // permitted cancellation region
+    int64_t sub_hi = -1;                 // (= support ∩ sub_roi, else legacy mask)
+    size_t training_reps_confirmed = 0;  // reps confirmed INSIDE the training span
+    size_t nominal_sync_reps = 0;        // public profile: the preamble length
+    size_t samples_per_symbol = 0;
+    double sample_rate = 0.0;
+    int64_t phase_reference_sample = 0;  // CFO phase anchor (== origin)
 };
 
 // Oracle-only injected truth.  NEVER passed to Estimate mode.  `tau` and
@@ -143,6 +259,17 @@ struct SicTruth {
 // Every field is measured.  Failed stages are timed; not-run stages stay 0
 // (with a reason in the result).  core_total_us is the outer steady_clock
 // total and is the authority; children are sequential and never summed into it.
+//
+// S1 decomposition (also sequential, NOT additive with the stage children):
+//   estimate_total_us  acquisition + estimation + model freeze (the stages
+//                      above are its children; it is NOT a new child of itself)
+//   model_prepare_us   the fit-residual reconstruction + model finalisation
+//   apply_us           apply_model total (reconstruct + masked subtract)
+//   backfill_us        apply over [0, observed_end)  (retro-clean the prefix)
+//   apply_forward_us   apply over [observed_end, n)  (forward clean)
+//   apply_us == backfill_us + apply_forward_us (both measured in sic_one).
+// None of these may be added to the stage children; core_total_us stays the
+// single authority.
 struct SicTimings {
     uint64_t detect_coarse_us = 0;
     uint64_t detect_fine_us = 0;
@@ -155,6 +282,12 @@ struct SicTimings {
     uint64_t reconstruct_us = 0;
     uint64_t validate_commit_us = 0;
     uint64_t core_total_us = 0;
+    // S1 decomposition (see above).
+    uint64_t estimate_total_us = 0;
+    uint64_t model_prepare_us = 0;
+    uint64_t apply_us = 0;
+    uint64_t backfill_us = 0;
+    uint64_t apply_forward_us = 0;
 };
 
 struct SicResult {
@@ -167,7 +300,8 @@ struct SicResult {
     bool uses_truth = false;
     int64_t detected_start = -1;           // estimated comm SYNC origin (work samples)
     int64_t support_lo = -1;
-    int64_t support_hi = -1;               // confirmed interferer support [lo,hi)
+    int64_t support_hi = -1;               // PREDICTED support [lo,hi); see
+                                           // support_source (S1: not "confirmed")
     double cfo_hz = 0.0;
     size_t n_paths = 0;
     size_t n_path_candidates = 0;
@@ -192,6 +326,20 @@ struct SicResult {
     SicTimings timings;
 
     // ---------------------------------------------------------------------
+    // S1 diagnostics.  support_lo/support_hi now carry the PREDICTED support
+    // (``support_source`` says which derivation produced it):
+    //   "configured_nominal_prediction" : detected origin + configured
+    //       sync_reps*sps + post_tail, clipped to [0,n).  This is NOT a measured
+    //       64-SYNC boundary and is NOT clamped to the confirmed repetition count.
+    //   "confirmed_repetition_legacy"   : S0 confirmed*sps + post_tail.
+    // ---------------------------------------------------------------------
+    const char* support_source = nullptr;   // stable string literal
+    double fit_residual = 0.0;              // training-region ||y-i_hat||^2/||y||^2
+    size_t training_reps_confirmed = 0;     // confirmed reps INSIDE the training span
+    int64_t observed_end_sample = 0;        // visibility limit actually used
+    uint64_t model_id = 0;                  // hash of the frozen model fields
+
+    // ---------------------------------------------------------------------
     // I/O buffers: CALLER-OWNED, both of length `n` (the sic_one window).
     // Set them before calling sic_one.  They are preserved across the call
     // (sic_one never resets these two pointers).
@@ -210,7 +358,7 @@ struct SicResult {
 // ---------------------------------------------------------------------------
 // Preallocated scratch.  Allocated / prepared ONCE.  sic_one never grows it.
 //
-// Peak scratch bytes for the S0 main config (sps=1016, k=4, fit_reps=8,
+// Peak scratch bytes for the main work config (sps=1016, k=4, fit_reps=8,
 // preamble_len~65024, post_tail=100) is reported in `peak_bytes` after
 // prepare_sic_core(); it is dominated by the polyphase-upsampled preamble
 // (kPreUpPhases rows), followed by the M x K double-precision design matrix,
@@ -234,6 +382,7 @@ struct SicScratch {
     size_t work_len = 0;                  // max(fit_reps, validation_reps) * sps
     size_t cap_region = 0;                // max reconstruction-mask length
     size_t peak_bytes = 0;                // peak scratch footprint (bytes)
+    uint64_t template_hash = 0;           // FNV-1a-64 of the prepared template bytes
 
     std::vector<std::complex<float>> sync_norm;  // L2-normalized `sync`
     std::vector<std::complex<float>> preamble;   // raw `preamble` copy
@@ -337,14 +486,87 @@ UWB_API bool prepare_sic_core(const SicConfig& cfg,
                               std::string* err = nullptr);
 
 // ---------------------------------------------------------------------------
+// estimate_model: S1 estimation stage.  May NOT allocate (scratch is prepared).
+//
+// Reads ONLY y[0, min(observed_end, n)) and the templates/config:
+//   * every correlation row / LS row / CIR tap / CFO pair lies fully inside the
+//     visible prefix (a row that would cross it is dropped, never read past);
+//   * the training span is [origin, origin + fit_reps*samples_per_symbol), also
+//     clipped to the visible prefix;
+//   * the injected comm start is never an input (detection runs from the public
+//     coarse ROI only).
+// `observed_end <= 0` means "the whole window is visible" (legacy callers).
+//
+// On success `model` is a FROZEN SicModel (valid or not; see model.state/status/
+// reason) and apply_model() is the only consumer.  Returns false only when no
+// defined model could be produced at all (null y / n==0 / unprepared scratch /
+// template or geometry mismatch); in that case model.reason says why.
+//
+// `timings` (optional) receives the stage timings.  `diag` (optional) receives
+// the SicResult diagnostics (detected flags, stage counters, support, overlap);
+// its caller-owned out/i_hat pointers are preserved.
+// ---------------------------------------------------------------------------
+UWB_API bool estimate_model(const std::complex<float>* y,
+                            size_t n,
+                            int64_t observed_end,
+                            const SicTemplates& templates,
+                            const SicConfig& cfg,
+                            SicScratch& scratch,
+                            SicModel& model,
+                            SicTimings* timings = nullptr,
+                            SicResult* diag = nullptr);
+
+// ---------------------------------------------------------------------------
+// apply_model: apply a FROZEN model to an arbitrary chunk [offset, offset+n).
+//
+//   y / out / i_hat : chunk-length buffers; `y` is the window starting at
+//                     ABSOLUTE sample `offset`.  `out` and `i_hat` may differ.
+//   i_hat[n] = exp(j*w*(n - phase_reference_sample))
+//              * sum_k gain[k] * preamble(n - tau_abs[k])
+//   out[n]   = y[n] - i_hat[n]   ONLY inside model.[sub_lo, sub_hi)
+//   out[n]   = y[n]              bit-identically everywhere else.
+//
+// The CFO phase is anchored ABSOLUTELY at phase_reference_sample and the phase
+// block grid is aligned to absolute sample multiples, so a given absolute sample
+// is reconstructed with the SAME arithmetic in every chunking: whole-window,
+// fixed chunks and random chunks agree BIT-IDENTICALLY (no cross-chunk state,
+// no re-fit).  Preallocated scratch only: no heap growth, no I/O, and no
+// per-sample sin/cos (one exp per kRotBlock samples plus one per chunk edge).
+//
+// Fail-closed: a null `out`, an unprepared scratch, a template/geometry
+// mismatch, an invalid model, or a reconstruction region larger than the
+// prepared capacity all leave out == y byte-for-byte.  Returns false only when
+// `out` is null or `n > 0` with `y == nullptr` (no defined output possible).
+//
+// `timings` (optional) accumulates reconstruct_us and apply_us.
+// ---------------------------------------------------------------------------
+UWB_API bool apply_model(const SicModel& model,
+                         const std::complex<float>* y,
+                         size_t n,
+                         int64_t offset,
+                         const SicTemplates& templates,
+                         const SicConfig& cfg,
+                         SicScratch& scratch,
+                         std::complex<float>* out,
+                         std::complex<float>* i_hat,
+                         SicTimings* timings = nullptr);
+
+// ---------------------------------------------------------------------------
 // sic_one: the hot path.  No allocation, no vector growth, no file I/O.
+//
+// S1 composition: estimation over min(n, observed_end) (0 => n), then the
+// frozen model is applied to the WHOLE [0,n) window in two passes -- the
+// backfill of the already-observed prefix [0, observed_end) and the forward
+// clean [observed_end, n) -- so the cross-chunk phase/index continuity is the
+// same code path the hardware loop would use.
 //
 //   y / n     : input IQ window (n samples).
 //   templates : the same sync/preamble handed to prepare_sic_core (lengths and
 //               pointers are checked against the prepared identity).
 //   cfg       : runtime config.  Template geometry (samples_per_symbol,
 //               sync_reps, k_paths, fit_reps, validation_reps, post_tail) must
-//               agree with prepare; roi / stride / thresholds may change.
+//               agree with prepare; roi / stride / thresholds / support mode /
+//               visibility / online validation may change.
 //   scratch   : prepared once.
 //   out       : result + caller-owned out/i_hat buffers.
 //   truth     : Oracle only.  Pass nullptr in Estimate mode.

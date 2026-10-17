@@ -43,7 +43,11 @@
 #include <random>
 #include <string>
 #include <sys/stat.h>
+#include <utility>
 #include <vector>
+#if defined(__linux__)
+#include <sys/mman.h>
+#endif
 
 namespace {
 
@@ -53,9 +57,11 @@ namespace sic = gr::uwb::sic;
 
 using sic::SicConfig;
 using sic::SicMode;
+using sic::SicModel;
 using sic::SicResult;
 using sic::SicScratch;
 using sic::SicState;
+using sic::SicSupportMode;
 using sic::SicTemplates;
 using sic::SicTruth;
 
@@ -466,6 +472,29 @@ bool json_number(const std::string& t, const std::string& key, double& v)
     }
 }
 
+// Naive flat-JSON string lookup ("key": "value").
+bool json_string(const std::string& t, const std::string& key, std::string& v)
+{
+    const std::string pat = "\"" + key + "\"";
+    size_t p = t.find(pat);
+    if (p == std::string::npos)
+        return false;
+    p = t.find(':', p + pat.size());
+    if (p == std::string::npos)
+        return false;
+    ++p;
+    while (p < t.size() && (t[p] == ' ' || t[p] == '\t' || t[p] == '\n' || t[p] == '\r'))
+        ++p;
+    if (p >= t.size() || t[p] != '"')
+        return false;
+    ++p;
+    const size_t e = t.find('"', p);
+    if (e == std::string::npos)
+        return false;
+    v = t.substr(p, e - p);
+    return true;
+}
+
 bool json_bool(const std::string& t, const std::string& key, bool& v)
 {
     const std::string pat = "\"" + key + "\"";
@@ -588,13 +617,30 @@ BOOST_AUTO_TEST_CASE(test_sic_core_integer_single_path)
     BOOST_CHECK_LT(e, 1e-3);
     BOOST_CHECK(!r.uses_truth);
     BOOST_CHECK_GT(suppression_db(s.i, f.ihat, 0, f.n), 30.0);
-    // Outside the subtraction mask out == y byte-for-byte.  Mask =
-    // [detected_start, detected_start + confirmed*sps + post_tail).
-    const int64_t mask_lo = f.comm_start;
-    const int64_t mask_hi =
-        f.comm_start + static_cast<int64_t>((f.cfg.fit_reps +
-                                             f.cfg.validation_reps) * kSps +
-                                            f.cfg.post_tail);
+    // S1: the support is now the CONFIGURED NOMINAL prediction (origin +
+    // sync_reps*sps + post_tail), not the confirmed-repetition support, so it is
+    // 32 symbols long here -- not 16 (fit+validation).
+    BOOST_CHECK_EQUAL(std::string(r.support_source ? r.support_source : ""),
+                      std::string("configured_nominal_prediction"));
+    const int64_t nominal_len =
+        static_cast<int64_t>(f.cfg.sync_reps * kSps + f.cfg.post_tail);
+    BOOST_CHECK_EQUAL(r.support_hi - r.support_lo, nominal_len);
+    BOOST_CHECK_GT(r.support_hi - r.support_lo,
+                   static_cast<int64_t>((f.cfg.fit_reps + f.cfg.validation_reps) * kSps));
+    // Outside the permitted cancellation mask out == y byte-for-byte.  With no
+    // sub_roi configured the mask is support ∩ search ROI (the legacy mask
+    // SHAPE, now over the nominal support).
+    const int64_t mask_lo =
+        std::max<int64_t>(r.support_lo, std::max<int64_t>(f.cfg.roi_lo, 0));
+    const int64_t mask_hi = std::min<int64_t>(
+        r.support_hi, std::min<int64_t>(static_cast<int64_t>(f.n), f.cfg.roi_hi));
+    std::printf("[sic-qa] single-path support=[%lld,%lld) mask=[%lld,%lld) "
+                "coverage=%.1f%%\n",
+                static_cast<long long>(r.support_lo),
+                static_cast<long long>(r.support_hi),
+                static_cast<long long>(mask_lo), static_cast<long long>(mask_hi),
+                100.0 * static_cast<double>(mask_hi - mask_lo) /
+                    static_cast<double>(nominal_len));
     for (size_t k = 0; k < f.n; ++k) {
         if (static_cast<int64_t>(k) < mask_lo || static_cast<int64_t>(k) >= mask_hi)
             BOOST_CHECK_EQUAL(f.out[k], s.y[k]);
@@ -972,7 +1018,8 @@ BOOST_AUTO_TEST_CASE(test_sic_core_timings_no_double_count)
                               t.validate_commit_us;
     std::printf("[sic-qa] timings children_sum=%llu core_total=%llu "
                 "(coarse=%llu fine=%llu cfo=%llu cir=%llu sel=%llu frac=%llu "
-                "mat=%llu fit=%llu rec=%llu val=%llu)\n",
+                "mat=%llu fit=%llu rec=%llu val=%llu) | S1 estimate_total=%llu "
+                "model_prepare=%llu apply=%llu backfill=%llu forward=%llu\n",
                 static_cast<unsigned long long>(children),
                 static_cast<unsigned long long>(t.core_total_us),
                 static_cast<unsigned long long>(t.detect_coarse_us),
@@ -984,7 +1031,12 @@ BOOST_AUTO_TEST_CASE(test_sic_core_timings_no_double_count)
                 static_cast<unsigned long long>(t.matrix_build_us),
                 static_cast<unsigned long long>(t.gain_fit_us),
                 static_cast<unsigned long long>(t.reconstruct_us),
-                static_cast<unsigned long long>(t.validate_commit_us));
+                static_cast<unsigned long long>(t.validate_commit_us),
+                static_cast<unsigned long long>(t.estimate_total_us),
+                static_cast<unsigned long long>(t.model_prepare_us),
+                static_cast<unsigned long long>(t.apply_us),
+                static_cast<unsigned long long>(t.backfill_us),
+                static_cast<unsigned long long>(t.apply_forward_us));
     BOOST_CHECK_GT(t.core_total_us, uint64_t(0));
     for (uint64_t c : { t.detect_coarse_us, t.detect_fine_us, t.cfo_us, t.cir_us,
                         t.path_select_us, t.fractional_refine_us, t.matrix_build_us,
@@ -993,6 +1045,15 @@ BOOST_AUTO_TEST_CASE(test_sic_core_timings_no_double_count)
     // Sequential children: their sum cannot exceed the outer total (allow a
     // couple of microseconds of per-measurement truncation rounding).
     BOOST_CHECK_LE(children, t.core_total_us + 12);
+    // S1 decomposition: the two apply passes partition the window and the model
+    // preparation is inside the estimation total; none of them is added to the
+    // stage children.
+    BOOST_CHECK_GT(t.estimate_total_us, uint64_t(0));
+    BOOST_CHECK_LE(t.estimate_total_us, t.core_total_us + 12);
+    BOOST_CHECK_LE(t.model_prepare_us, t.estimate_total_us + 12);
+    BOOST_CHECK_LE(t.backfill_us + t.apply_forward_us, t.core_total_us + 12);
+    BOOST_CHECK_LE(t.apply_us, t.backfill_us + t.apply_forward_us + 12);
+    BOOST_CHECK_GT(t.reconstruct_us, uint64_t(0)); // apply reconstructs both passes
 }
 
 // ---------------------------------------------------------------------------
@@ -1043,16 +1104,19 @@ BOOST_AUTO_TEST_CASE(test_sic_core_gain_condition_semantics)
         SicResult r = run(f, s);
         const double e = nmse(s.i, f.ihat, 0, f.n);
         std::printf("[sic-qa] gain-cond K=%zu state=%s n_paths=%zu cond=%.6f "
-                    "res=%.4f NMSE=%.3e\n",
+                    "fit_res=%.4f residual_corr=%.4f NMSE=%.3e\n",
                     K, state_name(r.state), r.n_paths, r.gain_condition,
-                    r.residual_corr, e);
+                    r.fit_residual, r.residual_corr, e);
         BOOST_CHECK_EQUAL(static_cast<int>(r.state),
                           static_cast<int>(SicState::Committed));
         BOOST_CHECK(std::isfinite(r.gain_condition));
         BOOST_CHECK_GE(r.gain_condition, 1.0 - 1e-9);
         BOOST_CHECK_LT(r.gain_condition, 1e6);
-        BOOST_CHECK(std::isfinite(r.residual_corr));
-        BOOST_CHECK_LT(r.residual_corr, f.cfg.validate_threshold);
+        // S1 default path: no holdout wait, so residual_corr is NaN BY DESIGN and
+        // the model-quality gate is the training-region fit_residual.
+        BOOST_CHECK(std::isnan(r.residual_corr));
+        BOOST_CHECK(std::isfinite(r.fit_residual));
+        BOOST_CHECK_LE(r.fit_residual, f.cfg.fit_residual_max);
         if (K == 1) {
             BOOST_CHECK_SMALL(r.gain_condition - 1.0, 1e-9);
             BOOST_CHECK_EQUAL(r.n_paths, size_t(1));
@@ -1494,18 +1558,20 @@ BOOST_AUTO_TEST_CASE(test_sic_core_adjacent_path_conditioning)
     Signal s = build_signal(f.model, f.n, f.comm_start, paths, 0.0, kQaNoise, 313);
     SicResult r = run(f, s);
     std::printf("[sic-qa] adjacent-path state=%s n_paths=%zu n_cand=%zu cond=%.6g "
-                "res=%.4f\n",
+                "fit_res=%.4f res_corr=%.4f\n",
                 state_name(r.state), r.n_paths, r.n_path_candidates, r.gain_condition,
-                r.residual_corr);
+                r.fit_residual, r.residual_corr);
     for (size_t k = 0; k < r.n_taus; ++k)
         std::printf("[sic-qa] adjacent-path   tau[%zu]=%.4f\n", k, r.taus[k]);
     BOOST_CHECK_EQUAL(static_cast<int>(r.state), static_cast<int>(SicState::Committed));
     BOOST_CHECK_EQUAL(r.n_taus, r.n_paths);
     BOOST_CHECK(std::isfinite(r.gain_condition));
     BOOST_CHECK_GE(r.gain_condition, 1.0 - 1e-9);
-    // Committed implies the gate passed on the core's OWN reported cond.
+    // Committed implies the default S1 gate passed on the core's OWN reported
+    // cond and training fit residual.
     BOOST_CHECK_LT(r.gain_condition, 1e6);
-    BOOST_CHECK_LT(r.residual_corr, f.cfg.validate_threshold);
+    BOOST_CHECK_LE(r.fit_residual, f.cfg.fit_residual_max);
+    BOOST_CHECK(std::isnan(r.residual_corr)); // no holdout in the default path
 }
 
 // ---------------------------------------------------------------------------
@@ -1658,6 +1724,803 @@ BOOST_AUTO_TEST_CASE(test_sic_core_energy_prefix_fallback)
 
 
 // ---------------------------------------------------------------------------
+// S1 QA: strict 8-SYNC estimation, frozen model, full-nominal cancellation.
+// ---------------------------------------------------------------------------
+
+// Compare EVERY frozen-model field (not just n_paths/valid) plus the terminal
+// state and the field hash: the data-dependency tests must prove the whole
+// model is independent of the tail, not just its size.
+static void check_models_identical(const sic::SicModel& a, const sic::SicModel& b,
+                                   const char* what)
+{
+    BOOST_CHECK_MESSAGE(a.valid == b.valid, what << ": valid differs");
+    BOOST_CHECK_MESSAGE(static_cast<int>(a.state) == static_cast<int>(b.state),
+                        what << ": state differs");
+    BOOST_CHECK_MESSAGE(a.model_id == b.model_id, what << ": model_id differs");
+    BOOST_CHECK_MESSAGE(a.template_hash == b.template_hash,
+                        what << ": template_hash differs");
+    BOOST_CHECK_MESSAGE(a.config_hash == b.config_hash,
+                        what << ": config_hash differs");
+    BOOST_CHECK_MESSAGE(a.origin == b.origin, what << ": origin differs");
+    BOOST_CHECK_MESSAGE(a.cfo_hz == b.cfo_hz, what << ": cfo differs");
+    BOOST_CHECK_MESSAGE(a.n_paths == b.n_paths, what << ": n_paths differs");
+    BOOST_CHECK_MESSAGE(a.gain_condition == b.gain_condition,
+                        what << ": gain_condition differs");
+    BOOST_CHECK_MESSAGE(a.fit_residual == b.fit_residual,
+                        what << ": fit_residual differs");
+    BOOST_CHECK_MESSAGE(a.training_lo == b.training_lo &&
+                            a.training_hi == b.training_hi,
+                        what << ": training span differs");
+    BOOST_CHECK_MESSAGE(a.observed_end_sample == b.observed_end_sample,
+                        what << ": observed_end differs");
+    BOOST_CHECK_MESSAGE(a.estimation_ready_sample == b.estimation_ready_sample,
+                        what << ": estimation_ready differs");
+    BOOST_CHECK_MESSAGE(a.predicted_support_lo == b.predicted_support_lo &&
+                            a.predicted_support_hi == b.predicted_support_hi,
+                        what << ": predicted support differs");
+    BOOST_CHECK_MESSAGE(std::string(a.support_source) == std::string(b.support_source),
+                        what << ": support_source differs");
+    BOOST_CHECK_MESSAGE(a.sub_lo == b.sub_lo && a.sub_hi == b.sub_hi,
+                        what << ": cancellation region differs");
+    BOOST_CHECK_MESSAGE(a.training_reps_confirmed == b.training_reps_confirmed,
+                        what << ": training_reps_confirmed differs");
+    BOOST_CHECK_MESSAGE(a.nominal_sync_reps == b.nominal_sync_reps &&
+                            a.samples_per_symbol == b.samples_per_symbol &&
+                            a.sample_rate == b.sample_rate &&
+                            a.phase_reference_sample == b.phase_reference_sample,
+                        what << ": profile/phase reference differs");
+    for (size_t k = 0; k < sic::kSicMaxPaths; ++k) {
+        BOOST_CHECK_MESSAGE(a.tau_abs[k] == b.tau_abs[k], what << ": tau[" << k << "]");
+        BOOST_CHECK_MESSAGE(a.gain[k] == b.gain[k], what << ": gain[" << k << "]");
+    }
+}
+
+// Actual-output suppression (docs/sic/S1): 10*log10( energy(i_true) /
+// energy(out - (y - i_true)) ) over [lo,hi).  This is the "real output"
+// metric -- it compares the delivered window against the ideal clean signal,
+// not against a reconstruction NMSE, so a bypass (out == y) scores 0 dB.
+static double actual_suppression_db(const std::vector<cplx>& i_true,
+                                    const std::vector<cplx>& y,
+                                    const std::vector<cplx>& out, size_t lo,
+                                    size_t hi)
+{
+    double ei = 0.0, er = 0.0;
+    for (size_t k = lo; k < hi && k < y.size(); ++k) {
+        ei += std::norm(i_true[k]);
+        er += std::norm(out[k] - (y[k] - i_true[k]));
+    }
+    return (er > 0.0) ? 10.0 * std::log10(ei / er) : 300.0;
+}
+
+static double region_energy(const std::vector<cplx>& v, size_t lo, size_t hi)
+{
+    double e = 0.0;
+    for (size_t k = lo; k < hi && k < v.size(); ++k)
+        e += std::norm(v[k]);
+    return e;
+}
+
+static SicModel estimate_model_checked(Fixture& f, const Signal& s, int64_t oe,
+                                       SicResult* r_out = nullptr)
+{
+    SicModel m;
+    SicResult r;
+    const bool ok = sic::estimate_model(s.y.data(), s.y.size(), oe, f.templates(),
+                                        f.cfg, f.scratch, m, nullptr, &r);
+    BOOST_REQUIRE_MESSAGE(ok, "estimate_model returned false");
+    if (r_out)
+        *r_out = r;
+    return m;
+}
+
+// Apply the frozen model to a tiling of [0, n) given as (offset, length) pairs.
+static void apply_chunks(Fixture& f, const SicModel& m, const Signal& s,
+                         const std::vector<std::pair<int64_t, size_t>>& chunks,
+                         std::vector<cplx>& out, std::vector<cplx>& ihat)
+{
+    out.assign(s.y.size(), cplx(0.f, 0.f));
+    ihat.assign(s.y.size(), cplx(0.f, 0.f));
+    for (const auto& c : chunks) {
+        BOOST_REQUIRE(c.first >= 0 &&
+                      static_cast<size_t>(c.first) + c.second <= s.y.size());
+        const bool ok = sic::apply_model(
+            m, s.y.data() + c.first, c.second, c.first, f.templates(), f.cfg,
+            f.scratch, out.data() + c.first, ihat.data() + c.first);
+        BOOST_REQUIRE(ok);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// S1-1. prefix isolation: mutating/zeroing everything at or after observed_end
+// must not change ANY frozen-model field (and ASan/guard-page-wise, no read may
+// touch it).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_sic_s1_prefix_isolation)
+{
+    Fixture f = make_fixture(10, 64, static_cast<int64_t>(kPre), 64, 64, 4, 8, 8, 100);
+    const std::vector<Path> paths = { { 0.0, cplx(1.f, 0.f) },
+                                      { 7.4, cplx(0.f, 0.5f) } };
+    Signal a = build_signal(f.model, f.n, f.comm_start, paths, 0.0, kQaNoise, 401);
+    const int64_t oe = f.comm_start + 8 * static_cast<int64_t>(kSps);
+    f.cfg.observed_end_sample = oe;
+
+    SicResult ra;
+    SicModel ma = estimate_model_checked(f, a, oe, &ra);
+    BOOST_REQUIRE_EQUAL(static_cast<int>(ra.state),
+                        static_cast<int>(SicState::Committed));
+    BOOST_REQUIRE_EQUAL(ma.estimation_ready_sample, oe);
+    BOOST_REQUIRE_EQUAL(ma.training_lo, f.comm_start);
+    BOOST_REQUIRE_EQUAL(ma.training_hi, oe);
+
+    // (a) large additive mutation of the whole tail
+    Signal b = a;
+    for (size_t k = static_cast<size_t>(oe); k < b.y.size(); ++k)
+        b.y[k] = b.y[k] + cplx(7.0f, -3.0f);
+    SicModel mb = estimate_model_checked(f, b, oe, nullptr);
+    check_models_identical(ma, mb, "prefix-additive-mutation");
+
+    // (b) zeroed tail
+    Signal c = a;
+    for (size_t k = static_cast<size_t>(oe); k < c.y.size(); ++k)
+        c.y[k] = cplx(0.f, 0.f);
+    SicModel mc = estimate_model_checked(f, c, oe, nullptr);
+    check_models_identical(ma, mc, "prefix-zeroed-tail");
+
+    // (c) a wholly different tail signal (noise only)
+    Signal d = a;
+    std::mt19937_64 rng(402);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    for (size_t k = static_cast<size_t>(oe); k < d.y.size(); ++k)
+        d.y[k] = cplx(static_cast<float>(nd(rng)), static_cast<float>(nd(rng)));
+    SicModel md = estimate_model_checked(f, d, oe, nullptr);
+    check_models_identical(ma, md, "prefix-unrelated-tail");
+
+    std::printf("[sic-qa] s1-prefix-isolation: origin=%lld ready=%lld "
+                "training=[%lld,%lld) model_id=%016llx 3 tail variants identical\n",
+                static_cast<long long>(ma.origin),
+                static_cast<long long>(ma.estimation_ready_sample),
+                static_cast<long long>(ma.training_lo),
+                static_cast<long long>(ma.training_hi),
+                static_cast<unsigned long long>(ma.model_id));
+}
+
+// ---------------------------------------------------------------------------
+// S1-2. CFO isolation: a post-prefix phase/CFO discontinuity leaves the training
+// estimate untouched, while the independent-region effect degrades realistically.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_sic_s1_cfo_isolation)
+{
+    Fixture f = make_fixture(10, 64, static_cast<int64_t>(kPre), 64, 64, 4, 8, 8, 100);
+    const std::vector<Path> paths = { { 0.0, cplx(1.f, 0.f) } };
+    Signal a = build_signal(f.model, f.n, f.comm_start, paths, 25000.0, kQaNoise, 403);
+    const int64_t oe = f.comm_start + 8 * static_cast<int64_t>(kSps);
+    f.cfg.observed_end_sample = oe;
+
+    SicModel ma = estimate_model_checked(f, a, oe, nullptr);
+
+    // Tail gets an extra +80 kHz rotation on top of the +25 kHz carrier: the
+    // prefix (used for the estimate) is byte-identical, the tail is not.  The
+    // modified interferer and the SAME noise realisation are used to rebuild y,
+    // so the prefix bytes are exactly a.y while i_true stays consistent.
+    Signal b = a;
+    for (size_t k = static_cast<size_t>(oe); k < b.y.size(); ++k) {
+        const double ph = 2.0 * kPi * 80000.0 *
+                          static_cast<double>(k - static_cast<size_t>(oe)) / kFs;
+        const cplx rot(static_cast<float>(std::cos(ph)),
+                       static_cast<float>(std::sin(ph)));
+        const cplx nse = a.y[k] - a.i[k];
+        b.i[k] = a.i[k] * rot;
+        b.y[k] = b.i[k] + nse;
+    }
+    SicModel mb = estimate_model_checked(f, b, oe, nullptr);
+    check_models_identical(ma, mb, "cfo-isolation");
+
+    // Effect over the independent region (reps 8..64, past the pulse tail).
+    const size_t ind_lo = static_cast<size_t>(oe) + 200;
+    const size_t ind_hi = static_cast<size_t>(f.comm_start) + 64 * kSps;
+    SicResult r = run(f, a);
+    BOOST_REQUIRE_EQUAL(static_cast<int>(r.state),
+                        static_cast<int>(SicState::Committed));
+    const double supp_a = actual_suppression_db(a.i, a.y, f.out, ind_lo, ind_hi);
+    SicResult rb = run(f, b);
+    BOOST_REQUIRE_EQUAL(static_cast<int>(rb.state),
+                        static_cast<int>(SicState::Committed));
+    const double supp_b = actual_suppression_db(b.i, b.y, f.out, ind_lo, ind_hi);
+    std::printf("[sic-qa] s1-cfo-isolation: models identical; independent-region "
+                "actual suppression clean=%.2f dB tail-phase-jump=%.2f dB\n",
+                supp_a, supp_b);
+    BOOST_CHECK_GT(supp_a, 20.0);
+    BOOST_CHECK_LT(supp_b, supp_a - 10.0);
+}
+
+// ---------------------------------------------------------------------------
+// S1-3 / S1-4. Full-nominal support + tail actual subtraction.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_sic_s1_full_support_and_tail)
+{
+    Fixture f = make_fixture(10, 64, static_cast<int64_t>(kPre), 64, 64, 4, 8, 8, 100);
+    const std::vector<Path> paths = { { 0.0, cplx(1.f, 0.f) } };
+    Signal s = build_signal(f.model, f.n, f.comm_start, paths, 0.0, kQaNoise, 404);
+    const int64_t oe = f.comm_start + 8 * static_cast<int64_t>(kSps);
+    f.cfg.observed_end_sample = oe;
+
+    SicResult r = run(f, s);
+    BOOST_REQUIRE_EQUAL(static_cast<int>(r.state),
+                        static_cast<int>(SicState::Committed));
+    const int64_t nominal_len =
+        static_cast<int64_t>(f.cfg.sync_reps * kSps + f.cfg.post_tail);
+    BOOST_CHECK_EQUAL(std::string(r.support_source ? r.support_source : ""),
+                      std::string("configured_nominal_prediction"));
+    BOOST_CHECK_EQUAL(r.support_hi - r.support_lo, nominal_len);
+    BOOST_CHECK_GT(r.support_hi - r.support_lo, 60 * static_cast<int64_t>(kSps));
+    // Coverage of the TRUE interferer support (its extent is primer tail included).
+    const int64_t true_hi = std::min<int64_t>(
+        static_cast<int64_t>(f.n),
+        f.comm_start + static_cast<int64_t>(f.model.preamble.size()));
+    const int64_t cov_lo = std::max(r.support_lo, f.comm_start);
+    const int64_t cov_hi = std::min(r.support_hi, true_hi);
+    const double coverage = static_cast<double>(cov_hi - cov_lo) /
+                            static_cast<double>(true_hi - f.comm_start);
+
+    const size_t ind_lo = static_cast<size_t>(oe);
+    const size_t ind_hi = static_cast<size_t>(f.comm_start) + 64 * kSps;
+    const size_t t4_lo = static_cast<size_t>(f.comm_start) + 60 * kSps;
+    const size_t t4_hi = static_cast<size_t>(f.comm_start) + 64 * kSps;
+    const double supp_ind = actual_suppression_db(s.i, s.y, f.out, ind_lo, ind_hi);
+    const double supp_all = actual_suppression_db(s.i, s.y, f.out, 0, f.n);
+    const double supp_tail = actual_suppression_db(s.i, s.y, f.out, t4_lo, t4_hi);
+
+    // Differential against the legacy confirmed-support mode: it can only cover
+    // confirmed (fit+online=16) symbols, so the last 4 SYNC stay untouched.
+    f.cfg.support_mode = SicSupportMode::ConfirmedLegacy;
+    f.cfg.online_validation_reps = f.cfg.validation_reps;
+    run(f, s);
+    const double supp_tail_legacy =
+        actual_suppression_db(s.i, s.y, f.out, t4_lo, t4_hi);
+    const double ei_tail = region_energy(s.i, t4_lo, t4_hi);
+
+    std::printf("[sic-qa] s1-full-support: support=[%lld,%lld) nominal_len=%lld "
+                "coverage=%.4f | actual suppression all=%.2f dB indep=%.2f dB "
+                "tail4=%.2f dB | legacy tail4=%.2f dB (raw tail E_i=%.6g)\n",
+                static_cast<long long>(r.support_lo),
+                static_cast<long long>(r.support_hi),
+                static_cast<long long>(nominal_len), coverage, supp_all, supp_ind,
+                supp_tail, supp_tail_legacy, ei_tail);
+    BOOST_CHECK_GE(coverage, 0.99);
+    BOOST_CHECK_GT(supp_ind, 20.0);
+    BOOST_CHECK_GT(supp_tail, 20.0);
+    std::printf("[sic-qa] s1-full-support timing: core_total=%llu "
+                "estimate_total=%llu detect=%llu/%llu cfo=%llu cir=%llu "
+                "sel=%llu frac=%llu mat=%llu fit=%llu model_prepare=%llu "
+                "apply=%llu backfill=%llu forward=%llu recon=%llu "
+                "scratch_peak=%zu bytes\n",
+                static_cast<unsigned long long>(r.timings.core_total_us),
+                static_cast<unsigned long long>(r.timings.estimate_total_us),
+                static_cast<unsigned long long>(r.timings.detect_coarse_us),
+                static_cast<unsigned long long>(r.timings.detect_fine_us),
+                static_cast<unsigned long long>(r.timings.cfo_us),
+                static_cast<unsigned long long>(r.timings.cir_us),
+                static_cast<unsigned long long>(r.timings.path_select_us),
+                static_cast<unsigned long long>(r.timings.fractional_refine_us),
+                static_cast<unsigned long long>(r.timings.matrix_build_us),
+                static_cast<unsigned long long>(r.timings.gain_fit_us),
+                static_cast<unsigned long long>(r.timings.model_prepare_us),
+                static_cast<unsigned long long>(r.timings.apply_us),
+                static_cast<unsigned long long>(r.timings.backfill_us),
+                static_cast<unsigned long long>(r.timings.apply_forward_us),
+                static_cast<unsigned long long>(r.timings.reconstruct_us),
+                f.scratch.peak_bytes);
+    // The legacy differential PROVES the tail was previously not subtracted.
+    BOOST_CHECK_LT(supp_tail_legacy, 3.0);
+    BOOST_CHECK_GT(supp_tail - supp_tail_legacy, 15.0);
+    // Raw arrays for an independent recompute: out == y - i_hat within the mask.
+    {
+        int64_t tested = 0;
+        double worst = 0.0;
+        for (int64_t k = t4_lo; k < static_cast<int64_t>(t4_hi); ++k) {
+            const cplx rhs = s.y[static_cast<size_t>(k)] - f.ihat[static_cast<size_t>(k)];
+            worst = std::max(worst,
+                             static_cast<double>(std::abs(f.out[static_cast<size_t>(k)] -
+                                                          rhs)));
+            ++tested;
+        }
+        std::printf("[sic-qa] s1-full-support: out==y-i_hat over %lld tail samples "
+                    "(max|diff|=%.3e)\n",
+                    static_cast<long long>(tested), worst);
+        BOOST_CHECK_LT(worst, 2e-6);
+    }
+
+    // Nominal-load reality check (MEASURED, not asserted as a target): with a
+    // co-channel sensing signal at ISR=10 dB and SNR=30 dB, the 8-symbol CFO
+    // estimate is perturbed and the far-tail depth becomes CFO-limited.  It is
+    // reported next to the clean-environment depth so the SUPPORT mechanism
+    // (proven above) is not confused with the CFO-limited DEPTH.
+    {
+        Fixture g = make_fixture(10, 64, static_cast<int64_t>(kPre), 64, 64, 4, 8, 8,
+                                 100);
+        Signal s2 = build_signal(g.model, g.n, g.comm_start, paths, 0.0, 0.0, 505);
+        const double ei = region_energy(s2.i, 0, g.n);
+        const double e_tgt = ei / 10.0;                    // total target: ISR 10 dB
+        std::mt19937_64 rng(506);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        std::vector<cplx> tgt(g.n);
+        double e0 = 0.0;
+        for (size_t k = 0; k < g.n; ++k) {
+            tgt[k] = cplx(static_cast<float>(nd(rng)), static_cast<float>(nd(rng)));
+            e0 += std::norm(tgt[k]);
+        }
+        const double sc = std::sqrt(e_tgt / std::max(e0, 1e-30));
+        // SNR = 30 dB: total noise energy = e_tgt/1000, split over 2 components.
+        const double sigma =
+            std::sqrt(e_tgt / (2000.0 * static_cast<double>(g.n)));
+        for (size_t k = 0; k < g.n; ++k) {
+            tgt[k] = cplx(static_cast<float>(tgt[k].real() * sc),
+                          static_cast<float>(tgt[k].imag() * sc));
+            s2.y[k] = s2.i[k] + tgt[k] +
+                cplx(static_cast<float>(nd(rng) * sigma),
+                     static_cast<float>(nd(rng) * sigma));
+        }
+        const int64_t oe2 = g.comm_start + 8 * static_cast<int64_t>(kSps);
+        g.cfg.observed_end_sample = oe2;
+        SicResult rn = run(g, s2);
+        const double tail_n =
+            actual_suppression_db(s2.i, s2.y, g.out, t4_lo, t4_hi);
+        const double ind_n =
+            actual_suppression_db(s2.i, s2.y, g.out, ind_lo, ind_hi);
+        std::printf("[sic-qa] s1-full-support nominal-load: state=%s reason=%s "
+                    "cfo_hat=%.0f Hz "
+                    "fit_res=%.4f indep=%.2f dB tail4=%.2f dB "
+                    "(8-symbol CFO limited; clean env above)\n",
+                    state_name(rn.state),
+                    rn.bypass_reason ? rn.bypass_reason : "-", rn.cfo_hz,
+                    rn.fit_residual, ind_n, tail_n);
+        BOOST_CHECK_EQUAL(static_cast<int>(rn.state),
+                          static_cast<int>(SicState::Committed));
+        BOOST_CHECK_GT(tail_n, 0.0); // actually subtracted, not ~0 dB
+    }
+}
+
+// ---------------------------------------------------------------------------
+// S1-5. Chunk invariance: whole-window vs fixed chunks vs random chunks produce
+// bit-identical out and i_hat (absolute phase anchoring, no cross-chunk state).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_sic_s1_chunk_invariance)
+{
+    Fixture f = make_fixture(10, 64, static_cast<int64_t>(kPre), 64, 64, 4, 8, 8, 100);
+    const std::vector<Path> paths = { { 0.0, cplx(1.f, 0.f) },
+                                      { 11.4, cplx(0.4f, -0.2f) } };
+    Signal s = build_signal(f.model, f.n, f.comm_start, paths, 30000.0, kQaNoise,
+                            405);
+    const int64_t oe = f.comm_start + 8 * static_cast<int64_t>(kSps);
+    f.cfg.observed_end_sample = oe;
+    SicModel m = estimate_model_checked(f, s, oe, nullptr);
+    BOOST_REQUIRE(m.valid);
+
+    std::vector<cplx> out_ref, ih_ref;
+    apply_chunks(f, m, s, { { 0, s.y.size() } }, out_ref, ih_ref);
+
+    // sic_one (estimate + two-pass backfill/forward) must agree bit-for-bit.
+    SicResult r = run(f, s);
+    BOOST_REQUIRE_EQUAL(static_cast<int>(r.state),
+                        static_cast<int>(SicState::Committed));
+    size_t diff_one = 0;
+    for (size_t k = 0; k < s.y.size(); ++k)
+        diff_one += (f.out[k] != out_ref[k]) ? 1 : 0;
+
+    // Fixed chunks aligned to the training boundary + odd sizes.
+    std::vector<std::pair<int64_t, size_t>> fixed;
+    for (int64_t p = 0; p < static_cast<int64_t>(s.y.size());) {
+        const size_t len = static_cast<size_t>(
+            std::min<int64_t>(1500 + (p % 3) * 137, static_cast<int64_t>(s.y.size()) - p));
+        fixed.push_back({ p, len });
+        p += static_cast<int64_t>(len);
+    }
+    std::vector<cplx> out_fix, ih_fix;
+    apply_chunks(f, m, s, fixed, out_fix, ih_fix);
+
+    // Random chunks.
+    std::vector<std::pair<int64_t, size_t>> rnd;
+    std::mt19937_64 rng(406);
+    for (int64_t p = 0; p < static_cast<int64_t>(s.y.size());) {
+        const size_t len = static_cast<size_t>(
+            std::min<int64_t>(1 + static_cast<int64_t>(rng() % 4000),
+                              static_cast<int64_t>(s.y.size()) - p));
+        rnd.push_back({ p, len });
+        p += static_cast<int64_t>(len);
+    }
+    std::vector<cplx> out_rnd, ih_rnd;
+    apply_chunks(f, m, s, rnd, out_rnd, ih_rnd);
+
+    size_t diff_f = 0, diff_r = 0, diff_ih_f = 0, diff_ih_r = 0;
+    for (size_t k = 0; k < s.y.size(); ++k) {
+        diff_f += (out_fix[k] != out_ref[k]) ? 1 : 0;
+        diff_r += (out_rnd[k] != out_ref[k]) ? 1 : 0;
+        diff_ih_f += (ih_fix[k] != ih_ref[k]) ? 1 : 0;
+        diff_ih_r += (ih_rnd[k] != ih_ref[k]) ? 1 : 0;
+    }
+    std::printf("[sic-qa] s1-chunk-invariance: n=%zu chunks fixed=%zu random=%zu | "
+                "out diffs: whole-vs-sic_one=%zu fixed=%zu random=%zu | "
+                "i_hat diffs: fixed=%zu random=%zu\n",
+                s.y.size(), fixed.size(), rnd.size(), diff_one, diff_f, diff_r,
+                diff_ih_f, diff_ih_r);
+    // Documented tolerance: bit-identical (0 differing samples).  If a platform
+    // ever fails this, the printed counts are the measured deviation.
+    BOOST_CHECK_EQUAL(diff_one, size_t(0));
+    BOOST_CHECK_EQUAL(diff_f, size_t(0));
+    BOOST_CHECK_EQUAL(diff_r, size_t(0));
+    BOOST_CHECK_EQUAL(diff_ih_f, size_t(0));
+    BOOST_CHECK_EQUAL(diff_ih_r, size_t(0));
+}
+
+// ---------------------------------------------------------------------------
+// S1-6. Preamble boundary: start +/- offsets, fractional delay, finite template
+// tail and window clipping; and the nominal-vs-measured support distinction.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_sic_s1_preamble_boundary)
+{
+    for (int64_t off : { -3, -1, 0, 1, 3 }) {
+        Fixture f = make_fixture(10, 64, static_cast<int64_t>(kPre) + off, 64, 64, 4,
+                                 8, 8, 100);
+        const std::vector<Path> paths = { { 0.4, cplx(1.f, 0.f) },
+                                          { 11.4, cplx(0.f, 0.5f) } };
+        Signal s = build_signal(f.model, f.n, f.comm_start, paths, 0.0, kQaNoise,
+                                410 + static_cast<uint64_t>(off + 3));
+        const int64_t oe = f.comm_start + 8 * static_cast<int64_t>(kSps);
+        f.cfg.observed_end_sample = oe;
+        SicResult r = run(f, s);
+        const double supp = actual_suppression_db(s.i, s.y, f.out, 0, f.n);
+        std::printf("[sic-qa] s1-boundary off=%lld state=%s ds=%lld np=%zu "
+                    "support=[%lld,%lld) actual=%.2f dB fit_res=%.4f\n",
+                    static_cast<long long>(off), state_name(r.state),
+                    static_cast<long long>(r.detected_start), r.n_paths,
+                    static_cast<long long>(r.support_lo),
+                    static_cast<long long>(r.support_hi), supp, r.fit_residual);
+        BOOST_CHECK_EQUAL(static_cast<int>(r.state),
+                          static_cast<int>(SicState::Committed));
+        BOOST_CHECK_LE(std::abs(r.detected_start - f.comm_start), 1);
+        BOOST_CHECK_GT(supp, 15.0);
+        BOOST_CHECK_EQUAL(std::string(r.support_source ? r.support_source : ""),
+                          std::string("configured_nominal_prediction"));
+    }
+
+    // Nominal vs measured support: the profile claims 64 SYNC but the actual
+    // interferer is only 20 SYNC long.  The NOMINAL support must still be the
+    // full 64-symbol prediction (it is a prediction, not a measurement), which
+    // is exactly the over-reach the extrapolation test quantifies.
+    {
+        Fixture f = make_fixture(10, 64, static_cast<int64_t>(kPre) + 2, 64, 64, 4, 8,
+                                 8, 100);
+        Model gen20 = build_model(10, 20);
+        const std::vector<Path> paths = { { 0.0, cplx(1.f, 0.f) } };
+        Signal s = build_signal(gen20, f.n, f.comm_start, paths, 0.0, kQaNoise, 429);
+        const int64_t oe = f.comm_start + 8 * static_cast<int64_t>(kSps);
+        f.cfg.observed_end_sample = oe;
+        SicModel m = estimate_model_checked(f, s, oe, nullptr);
+        BOOST_REQUIRE(m.valid);
+        std::printf("[sic-qa] s1-boundary nominal-vs-measured: nominal support "
+                    "len=%lld (measured interferer len=%lld) over-reach=%lld\n",
+                    static_cast<long long>(m.predicted_support_hi -
+                                           m.predicted_support_lo),
+                    static_cast<long long>(gen20.preamble.size()),
+                    static_cast<long long>((m.predicted_support_hi -
+                                            m.predicted_support_lo) -
+                                           static_cast<int64_t>(gen20.preamble.size())));
+        BOOST_CHECK_EQUAL(m.predicted_support_hi - m.predicted_support_lo,
+                          64 * static_cast<int64_t>(kSps) + 100);
+        BOOST_CHECK_GT((m.predicted_support_hi - m.predicted_support_lo),
+                       20 * static_cast<int64_t>(kSps));
+    }
+
+    // Window clipping: a window shorter than the nominal preamble clips the
+    // prediction to [0,n) but still commits and rebuilds the visible part.
+    {
+        Fixture f = make_fixture(10, 64, static_cast<int64_t>(kPre), 64, 64, 4, 8, 8,
+                                 100);
+        const std::vector<Path> paths = { { 0.0, cplx(1.f, 0.f) } };
+        Signal s = build_signal(f.model, f.n, f.comm_start, paths, 0.0, kQaNoise, 430);
+        const int64_t oe = f.comm_start + 8 * static_cast<int64_t>(kSps);
+        f.cfg.observed_end_sample = oe;
+        SicModel m = estimate_model_checked(f, s, oe, nullptr);
+        BOOST_REQUIRE(m.valid);
+        // A deliberately short apply chunk must stay inside the chunk.
+        std::vector<cplx> out(1000, cplx(0.f, 0.f));
+        std::vector<cplx> ih(1000, cplx(0.f, 0.f));
+        const int64_t off = f.comm_start - 100;
+        BOOST_REQUIRE(sic::apply_model(m, s.y.data() + off, 1000, off,
+                                       f.templates(), f.cfg, f.scratch, out.data(),
+                                       ih.data(), nullptr));
+        size_t changed = 0;
+        for (size_t k = 0; k < 1000; ++k)
+            changed += (out[k] != s.y[static_cast<size_t>(off) + k]) ? 1 : 0;
+        std::printf("[sic-qa] s1-boundary clipped-chunk: 1000-sample chunk at "
+                    "offset %lld changed %zu samples\n",
+                    static_cast<long long>(off), changed);
+        BOOST_CHECK_GT(changed, size_t(0));
+        // Outside the mask the chunk is byte-identical.
+        for (size_t k = 0; k < 1000; ++k) {
+            const int64_t abs = off + static_cast<int64_t>(k);
+            if (abs < m.sub_lo || abs >= m.sub_hi)
+                BOOST_CHECK_EQUAL(out[k], s.y[static_cast<size_t>(abs)]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// S1-7. Extrapolation mismatch: the model must NOT just "commit"; the
+// over-subtraction and the target damage must be MEASURED.
+// ---------------------------------------------------------------------------
+namespace {
+struct ExtrapMetrics {
+    double over_sub_db = -300.0;   // i_hat energy where i_true is absent
+    double damage_db = -300.0;     // ||out - (y - i_true)||^2 / ||target||^2
+    double cancel_db = -300.0;     // i_true removed inside the active region
+};
+
+ExtrapMetrics measure_extrap(const Signal& s, const std::vector<cplx>& target,
+                             const std::vector<cplx>& ihat,
+                             const std::vector<cplx>& out, size_t lo, size_t hi)
+{
+    ExtrapMetrics m;
+    double i_mean = region_energy(s.i, lo, hi) / static_cast<double>(hi - lo);
+    double e_ih_off = 0.0, e_i_on = 0.0, e_ih_on = 0.0;
+    for (size_t k = lo; k < hi; ++k) {
+        if (std::norm(s.i[k]) < 1e-6 * i_mean) {
+            e_ih_off += std::norm(ihat[k]);
+        } else {
+            e_i_on += std::norm(s.i[k]);
+            e_ih_on += std::norm(ihat[k]);
+        }
+    }
+    double e_tgt = 0.0, e_dmg = 0.0;
+    for (size_t k = lo; k < hi; ++k) {
+        e_tgt += std::norm(target[k]);
+        e_dmg += std::norm(out[k] - (s.y[k] - s.i[k]));
+    }
+    m.over_sub_db = 10.0 * std::log10((e_ih_off + 1e-30) / (e_i_on + 1e-30));
+    m.damage_db = 10.0 * std::log10((e_dmg + 1e-30) / (e_tgt + 1e-30));
+    m.cancel_db = 10.0 * std::log10((e_i_on + 1e-30) / (e_dmg + 1e-30));
+    (void)e_ih_on;
+    return m;
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(test_sic_s1_extrapolation_mismatch)
+{
+    const size_t reps = 64;
+    const int64_t oe_off = 8 * static_cast<int64_t>(kSps);
+    struct Case {
+        const char* name;
+        // 0 = matched, 1 = short preamble, 2 = burst interruption,
+        // 3 = phase jump, 4 = time-varying channel gain.
+        int kind;
+    };
+    const Case cases[] = { { "matched", 0 },  { "short_preamble", 1 },
+                           { "burst", 2 },    { "phase_jump", 3 },
+                           { "time_varying_gain", 4 } };
+    double matched_cancel = 0.0;
+    for (const Case& c : cases) {
+        Fixture f = make_fixture(10, reps, static_cast<int64_t>(kPre), 64, 64, 4, 8, 8,
+                                 100);
+        const size_t gen_reps = (c.kind == 1) ? 20 : reps;
+        Model gen = build_model(10, gen_reps);
+        const std::vector<Path> paths = { { 0.0, cplx(1.f, 0.f) } };
+        Signal s = build_signal(gen, f.n, f.comm_start, paths, 0.0, kQaNoise,
+                                500 + static_cast<uint64_t>(c.kind));
+        // Deterministic target (sensing stand-in) at ISR = 10 dB.
+        std::vector<cplx> target(s.y.size(), cplx(0.f, 0.f));
+        {
+            std::mt19937_64 rng(900 + static_cast<uint64_t>(c.kind));
+            std::normal_distribution<double> nd(0.0, 1.0);
+            double pi = 0.0;
+            for (size_t k = 0; k < s.y.size(); ++k) {
+                cplx v(static_cast<float>(nd(rng)), static_cast<float>(nd(rng)));
+                target[k] = v;
+                pi += std::norm(v);
+            }
+            const double rms_i = std::sqrt(region_energy(s.i, 0, f.n) /
+                                           static_cast<double>(f.n));
+            const double rms_t = std::sqrt(pi / static_cast<double>(f.n));
+            const double scale = (rms_t > 0.0)
+                ? rms_i / std::pow(10.0, 10.0 / 20.0) / rms_t
+                : 0.0;
+            for (auto& v : target)
+                v = cplx(static_cast<float>(v.real() * scale),
+                         static_cast<float>(v.imag() * scale));
+        }
+        // Rebuild y = target + modified interferer + noise.
+        std::vector<cplx> i_mod = s.i;
+        switch (c.kind) {
+        case 2: // burst interruption: the interferer stops after 32 symbols
+            for (size_t k = static_cast<size_t>(f.comm_start) + 32 * kSps;
+                 k < i_mod.size(); ++k)
+                i_mod[k] = cplx(0.f, 0.f);
+            break;
+        case 3: // phase jump of 1.0 rad after 32 symbols
+            for (size_t k = static_cast<size_t>(f.comm_start) + 32 * kSps;
+                 k < i_mod.size(); ++k)
+                i_mod[k] = i_mod[k] *
+                    cplx(static_cast<float>(std::cos(1.0)),
+                         static_cast<float>(std::sin(1.0)));
+            break;
+        case 4: // time-varying channel gain: amplitude + phase drift
+            for (size_t k = 0; k < i_mod.size(); ++k) {
+                const double x = static_cast<double>(k) / static_cast<double>(f.n);
+                const double amp = 1.0 + 0.4 * std::sin(2.0 * kPi * 2.0 * x);
+                const double ph = 1.2 * kPi * x;
+                i_mod[k] = i_mod[k] * cplx(static_cast<float>(amp * std::cos(ph)),
+                                           static_cast<float>(amp * std::sin(ph)));
+            }
+            break;
+        default:
+            break;
+        }
+        {
+            std::mt19937_64 rng(777 + static_cast<uint64_t>(c.kind));
+            std::normal_distribution<double> nd(0.0, kQaNoise);
+            for (size_t k = 0; k < f.n; ++k) {
+                s.i[k] = i_mod[k];
+                s.y[k] = i_mod[k] + target[k] +
+                    cplx(static_cast<float>(nd(rng)), static_cast<float>(nd(rng)));
+            }
+        }
+        const int64_t oe = f.comm_start + oe_off;
+        f.cfg.observed_end_sample = oe;
+        SicResult r = run(f, s);
+        const size_t lo = static_cast<size_t>(oe);
+        const size_t hi = static_cast<size_t>(f.comm_start) + reps * kSps;
+        const ExtrapMetrics mt = measure_extrap(s, target, f.ihat, f.out, lo, hi);
+        std::printf("[sic-qa] s1-extrap '%-18s' state=%s fit_res=%.4f | "
+                    "cancel=%.2f dB damage=%.2f dB over_sub=%.2f dB\n",
+                    c.name, state_name(r.state), r.fit_residual, mt.cancel_db,
+                    mt.damage_db, mt.over_sub_db);
+        if (c.kind == 0) {
+            BOOST_CHECK_EQUAL(static_cast<int>(r.state),
+                              static_cast<int>(SicState::Committed));
+            BOOST_CHECK_LT(mt.damage_db, -10.0);   // target essentially intact
+            BOOST_CHECK_LT(mt.over_sub_db, -10.0); // nothing subtracted where i=0
+            BOOST_CHECK_GT(mt.cancel_db, 20.0);
+            matched_cancel = mt.cancel_db;
+        } else {
+            // The point of the case: the mismatch is MEASURED.  Over-subtraction
+            // energy and target damage are real numbers, not a "detected" flag.
+            // Every mismatch degrades cancellation relative to the matched case
+            // and leaves measurable target damage.
+            BOOST_CHECK_GT(mt.damage_db, -6.0);   // >= 25% of target energy hit
+            BOOST_CHECK_LT(mt.cancel_db, matched_cancel - 20.0);
+            if (c.kind == 1 || c.kind == 2)       // phantom region really exists
+                BOOST_CHECK_GT(mt.over_sub_db, -20.0);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// S1-8. Bypass bit-exactness for an UNTRUSTED model and for save-region
+// mismatches; and apply_model with a model that was never committed.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_sic_s1_bypass_untrusted_model)
+{
+    Fixture f = make_fixture(10, 64, static_cast<int64_t>(kPre), 64, 64, 4, 8, 8, 100);
+    const std::vector<Path> paths = { { 0.0, cplx(1.f, 0.f) } };
+    Signal s = build_signal(f.model, f.n, f.comm_start, paths, 0.0, kQaNoise, 601);
+    const int64_t oe = f.comm_start + 8 * static_cast<int64_t>(kSps);
+    f.cfg.observed_end_sample = oe;
+
+    // (a) A withdrawn/untrusted model (valid=false) must not touch the output.
+    {
+        SicModel m;
+        m.valid = false;
+        std::vector<cplx> out(s.y.size(), cplx(0.f, 0.f));
+        std::vector<cplx> ih(s.y.size(), cplx(0.f, 0.f));
+        const bool ok = sic::apply_model(m, s.y.data(), s.y.size(), 0, f.templates(),
+                                         f.cfg, f.scratch, out.data(), ih.data(),
+                                         nullptr);
+        BOOST_CHECK(ok);
+        BOOST_CHECK_EQUAL_COLLECTIONS(out.begin(), out.end(), s.y.begin(), s.y.end());
+        for (size_t k = 0; k < ih.size(); ++k)
+            BOOST_CHECK_EQUAL(ih[k], cplx(0.f, 0.f));
+    }
+
+    // (b) No interference at all: detection must not commit and out == y.
+    {
+        Signal n0;
+        n0.y.assign(f.n, cplx(0.f, 0.f));
+        n0.i.assign(f.n, cplx(0.f, 0.f));
+        std::mt19937_64 rng(602);
+        std::normal_distribution<double> nd(0.0, kQaNoise);
+        for (size_t k = 0; k < f.n; ++k)
+            n0.y[k] = cplx(static_cast<float>(nd(rng)), static_cast<float>(nd(rng)));
+        SicResult r = run(f, n0);
+        BOOST_CHECK_NE(static_cast<int>(r.state),
+                       static_cast<int>(SicState::Committed));
+        BOOST_CHECK_EQUAL_COLLECTIONS(f.out.begin(), f.out.end(), n0.y.begin(),
+                                      n0.y.end());
+    }
+
+    // (c) Committed model but a save region entirely outside it: the persistence
+    //     of the bypass is guaranteed by the model's own sub region, checked by
+    //     applying where the model never overlaps.
+    {
+        SicModel m = estimate_model_checked(f, s, oe, nullptr);
+        BOOST_REQUIRE(m.valid);
+        std::vector<cplx> out(512, cplx(0.f, 0.f));
+        std::vector<cplx> ih(512, cplx(0.f, 0.f));
+        const int64_t off = static_cast<int64_t>(f.n) - 512; // after the mask
+        BOOST_REQUIRE(sic::apply_model(m, s.y.data() + off, 512, off, f.templates(),
+                                       f.cfg, f.scratch, out.data(), ih.data(),
+                                       nullptr));
+        for (size_t k = 0; k < 512; ++k)
+            BOOST_CHECK_EQUAL(out[k], s.y[static_cast<size_t>(off) + k]);
+    }
+
+    // (d) sub_roi disjoint from the predicted support -> bypass, out == y.
+    {
+        Fixture g = make_fixture(10, 64, static_cast<int64_t>(kPre), 64, 64, 4, 8, 8,
+                                 100);
+        const int64_t sensing_hi = g.comm_start - 2000;
+        g.cfg.sub_roi_lo = 0;
+        g.cfg.sub_roi_hi = std::max<int64_t>(1, sensing_hi);
+        Signal t = build_signal(g.model, g.n, g.comm_start, paths, 0.0, kQaNoise, 603);
+        g.cfg.observed_end_sample = g.comm_start + 8 * static_cast<int64_t>(kSps);
+        SicResult r = run(g, t);
+        std::printf("[sic-qa] s1-bypass: disjoint-sub-roi state=%s reason=%s "
+                    "sub_overlap=%lld\n",
+                    state_name(r.state),
+                    r.bypass_reason ? r.bypass_reason : "-",
+                    static_cast<long long>(r.sub_overlap));
+        BOOST_CHECK_EQUAL(static_cast<int>(r.state),
+                          static_cast<int>(SicState::Bypassed));
+        BOOST_CHECK_EQUAL(std::string(r.bypass_reason ? r.bypass_reason : ""),
+                          std::string("outside_sensing_roi"));
+        BOOST_CHECK_EQUAL_COLLECTIONS(g.out.begin(), g.out.end(), t.y.begin(),
+                                      t.y.end());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// S1-9. Strict-prefix memory guard: the estimation must not read at or past the
+// declared visibility limit (a guard page catches a vectorised overread beyond a
+// 64-sample slack; the mutation test above catches any read within the slack).
+// ---------------------------------------------------------------------------
+#if defined(__linux__)
+BOOST_AUTO_TEST_CASE(test_sic_s1_prefix_guard_page)
+{
+    Fixture f = make_fixture(10, 64, static_cast<int64_t>(kPre), 64, 64, 4, 8, 8, 100);
+    const std::vector<Path> paths = { { 0.0, cplx(1.f, 0.f) } };
+    Signal s = build_signal(f.model, f.n, f.comm_start, paths, 0.0, kQaNoise, 700);
+    const int64_t oe = f.comm_start + 8 * static_cast<int64_t>(kSps);
+    f.cfg.observed_end_sample = oe;
+
+    SicModel ref = estimate_model_checked(f, s, oe, nullptr);
+
+    const size_t slack = 64;                       // readable samples past oe
+    const size_t payload = static_cast<size_t>(oe) + slack;
+    const size_t page = 4096;
+    const size_t bytes = payload * sizeof(cplx);
+    const size_t map = ((bytes + page - 1) / page + 1) * page;
+    void* p = ::mmap(nullptr, map, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    BOOST_REQUIRE(p != MAP_FAILED);
+    uint8_t* base = static_cast<uint8_t*>(p);
+    const size_t data_off = map - page - bytes;
+    cplx* yp = reinterpret_cast<cplx*>(base + data_off);
+    for (size_t k = 0; k < payload; ++k)
+        yp[k] = s.y[k];
+    BOOST_REQUIRE_EQUAL(::mprotect(base + map - page, page, PROT_NONE), 0);
+
+    SicModel m;
+    SicResult r;
+    const bool ok = sic::estimate_model(yp, f.n, oe, f.templates(), f.cfg, f.scratch,
+                                        m, nullptr, &r);
+    BOOST_CHECK(ok);
+    check_models_identical(ref, m, "guard-page");
+    std::printf("[sic-qa] s1-prefix-guard-page: observed_end=%lld slack=%zu "
+                "PROT_NONE after payload -> estimate identical\n",
+                static_cast<long long>(oe), slack);
+    ::munmap(p, map);
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // 18. golden cross-check (optional; skipped when the directory is absent)
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(test_sic_core_golden_crosscheck)
@@ -1742,6 +2605,46 @@ BOOST_AUTO_TEST_CASE(test_sic_core_golden_crosscheck)
         if (json_number(meta, "validate_threshold", v))
             cfg.validate_threshold = v;
 
+        // ------------------------------------------------------------------
+        // S1 legacy replay.
+        //
+        // The committed S0 vectors were emitted with the S0 contract: support =
+        // confirmed repetitions, and the commit gate = disjoint-holdout residual.
+        // They carry no support_mode/observed_end keys.  Replaying them through
+        // the S1 default (nominal support, no holdout wait) would compare against
+        // a different contract, so an S0-era vector is replayed in the EXPLICIT
+        // legacy mode it was generated with.  A vector that declares support_mode
+        // (future S1 vectors) is honored literally.
+        //
+        // The one unavoidable difference: S1 estimates the CFO from the TRAINING
+        // repetitions only (8 symbols), while S0 averaged over fit+validation.
+        // The stored i_hat/out therefore predate the strict 8-symbol CFO
+        // estimator; the measured NMSE of that difference is printed and the
+        // stored tolerances are widened for the legacy replay only.  Everything
+        // else (detection, delays, gains, mask, byte-exactness outside the mask)
+        // is still compared with the stored values.
+        // ------------------------------------------------------------------
+        bool legacy_replay = true;
+        std::string smode;
+        cfg.support_mode = SicSupportMode::ConfirmedLegacy;
+        cfg.online_validation_reps = cfg.validation_reps;
+        if (json_string(meta, "support_mode", smode)) {
+            if (smode == "configured_nominal" || smode == "ConfiguredNominal") {
+                cfg.support_mode = SicSupportMode::ConfiguredNominal;
+                cfg.online_validation_reps = 0;
+                legacy_replay = false;
+            } else if (smode == "confirmed_legacy" ||
+                       smode == "ConfirmedLegacy") {
+                cfg.support_mode = SicSupportMode::ConfirmedLegacy;
+                cfg.online_validation_reps = cfg.validation_reps;
+                legacy_replay = false;
+            }
+        }
+        if (json_number(meta, "observed_end_sample", v))
+            cfg.observed_end_sample = static_cast<int64_t>(v);
+        if (json_number(meta, "online_validation_reps", v))
+            cfg.online_validation_reps = static_cast<size_t>(v);
+
         // Tolerances: explicit keys win; fall back to the README guidance.
         double tol_ihat = 1e-3, tol_out = 1e-3, tol_ds = 1.0;
         double estimate_nmse_max = -1.0, suppression_min_db = -1.0;
@@ -1754,6 +2657,10 @@ BOOST_AUTO_TEST_CASE(test_sic_core_golden_crosscheck)
         json_number(meta, "detected_start", expected_ds);
         const bool require_commit =
             json_bool(meta, "require_commit", b) ? b : false;
+        if (legacy_replay) {
+            tol_ihat = std::max(tol_ihat, 5e-3);
+            tol_out = std::max(tol_out, 2e-2);
+        }
 
         SicScratch scratch;
         std::string err;
@@ -1775,11 +2682,14 @@ BOOST_AUTO_TEST_CASE(test_sic_core_golden_crosscheck)
         BOOST_REQUIRE_MESSAGE(ok, name << ": sic_one returned false");
         ++cases;
         std::printf("[sic-qa] golden '%s': state=%s detected_start=%lld np=%zu "
-                    "cfo=%.1f res=%.4f i_hat=%s out=%s\n",
+                    "cfo=%.1f res=%.4f fit_res=%.4f i_hat=%s out=%s%s\n",
                     name.c_str(), state_name(r.state),
                     static_cast<long long>(r.detected_start), r.n_paths, r.cfo_hz,
-                    r.residual_corr, have_ihat ? "yes" : "no",
-                    have_out ? "yes" : "no");
+                    r.residual_corr, r.fit_residual, have_ihat ? "yes" : "no",
+                    have_out ? "yes" : "no",
+                    legacy_replay ? "  [S0 legacy replay: strict 8-symbol CFO, "
+                                    "tolerances widened]"
+                                  : "");
         if (require_commit)
             BOOST_CHECK_EQUAL(static_cast<int>(r.state),
                               static_cast<int>(SicState::Committed));

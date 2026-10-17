@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace gr {
@@ -67,6 +68,17 @@ inline double sinc_pi(double t)
         return 1.0;
     const double p = kPi * t;
     return std::sin(p) / p;
+}
+
+// Floor division (b > 0): needed to map a possibly-negative absolute phase index
+// onto the fixed CFO block grid.
+inline int64_t floor_div(int64_t a, int64_t b)
+{
+    int64_t q = a / b;
+    const int64_t rr = a % b;
+    if (rr != 0 && ((rr < 0) != (b < 0)))
+        --q;
+    return q;
 }
 
 // Windowed-sinc taps for sub-sample phase ph/kPreUpPhases (DC-normalized, so
@@ -306,62 +318,87 @@ inline void fill_rot(dcp* rot, size_t count, int64_t idx0, double w)
     }
 }
 
-// One block of the float32 CFO ramp base.  Kept a power of two; the phase is
-// re-anchored absolutely every block (see fill_rot_f), so this only trades the
-// number of VOLK calls against the sincos count and does not affect accuracy.
+// CFO ramp block size (complex samples).  Kept a power of two; the phase grid is
+// aligned to absolute multiples of it (see fill_rot_f_abs), which is what makes
+// apply_model() chunk-invariant.
 constexpr size_t kRotBlock = 1024;
+// Fixed absolute reconstruction block (samples) for apply_model().  The block
+// grid is absolute, the bounds come from the model, and each block is rebuilt
+// into scratch.ihat[0..len): that is what makes apply bit-identical for every
+// chunking while keeping the VOLK combine.
+constexpr size_t kReconBlock = 4096;
 
-// out[i] = exp(j*w*(idx0+i)) as complex<float>, VOLK-vectorized.
-//
-// rot[0..count) = blockphase_b * base[0..B) with base[j] = exp(j*w*j) and
-// blockphase_b = exp(j*w*(idx0 + b*B)).  base is computed in double by a short
-// recurrence over one block, and each block phase is re-anchored ABSOLUTELY
-// from std::exp(dcp(0,w*(idx0+b*B))) -- no cross-block recurrence, so the block
-// phase carries no accumulated drift.  Only the per-sample write is float32.
-// Each block is then a single VOLK 32fc scalar multiply, so the old serial
-// 65k-step double recurrence -- the single hottest loop in reconstruct -- is
-// gone.  `base` must hold at least min(count, kRotBlock) entries.
-inline void fill_rot_f(cplx* out, size_t count, int64_t idx0, double w, cplx* base)
+// out[i] = exp(j*w*(p0+i)) where p = abs - phase_reference is the ABSOLUTE
+// phase index of the frozen model.  The block grid is aligned to multiples of
+// kRotBlock IN p (never to the chunk origin), and base[j] is rebuilt from the
+// same recurrence in w only, so the value written for a given absolute sample is
+// BIT-IDENTICAL for every chunking of the same window.  That is what makes
+// apply_model chunk-invariant (no cross-chunk phase recurrence state): the only
+// per-sample work is one float32 complex multiply, and there is one exp per
+// kRotBlock samples plus at most two chunk-edge exp calls.
+inline void fill_rot_f_abs(cplx* out, size_t count, int64_t p0, double w,
+                           cplx* base)
 {
     if (count == 0 || !out)
         return;
-    const size_t nb = std::min(count, kRotBlock);
     const dcp step(std::cos(w), std::sin(w));
     dcp cur(1.0, 0.0);
-    for (size_t j = 0; j < nb; ++j) {
-        base[j] = cplx(static_cast<float>(cur.real()), static_cast<float>(cur.imag()));
+    for (size_t j = 0; j < kRotBlock; ++j) {
+        base[j] = cplx(static_cast<float>(cur.real()),
+                       static_cast<float>(cur.imag()));
         cur *= step;
     }
-    for (size_t b0 = 0; b0 < count; b0 += kRotBlock) {
-        const size_t n = std::min(kRotBlock, count - b0);
+    size_t i = 0;
+    int64_t p = p0;
+    while (i < count) {
+        const int64_t b = floor_div(p, static_cast<int64_t>(kRotBlock));
+        const size_t j0 =
+            static_cast<size_t>(p - b * static_cast<int64_t>(kRotBlock));
+        const size_t nb = std::min(kRotBlock - j0, count - i);
         const dcp blk = std::exp(
-            dcp(0.0, w * static_cast<double>(idx0 + static_cast<int64_t>(b0))));
+            dcp(0.0, w * static_cast<double>(b * static_cast<int64_t>(kRotBlock))));
         const cplx bf(static_cast<float>(blk.real()), static_cast<float>(blk.imag()));
-        volk_32fc_s32fc_multiply_32fc(reinterpret_cast<lv_32fc_t*>(out + b0),
-                                      reinterpret_cast<const lv_32fc_t*>(base), bf,
-                                      static_cast<unsigned>(n));
+        volk_32fc_s32fc_multiply_32fc(reinterpret_cast<lv_32fc_t*>(out + i),
+                                      reinterpret_cast<const lv_32fc_t*>(base + j0),
+                                      bf, static_cast<unsigned>(nb));
+        i += nb;
+        p += static_cast<int64_t>(nb);
     }
 }
 
-// out[i] = acc[i] * exp(j*w*(idx0+i)) for i in [0,count): narrow the double
-// path-major accumulation to float32 (VOLK 64f->32f over the interleaved
-// components) and multiply by the VOLK-built float CFO ramp.  This is the
-// reconstruction combine; it replaces a scalar double per-sample complex
-// multiply plus scalar rotation.  The mask/region semantics are untouched -- the
-// caller still zeroes i_hat outside the mask.
-inline void reconstruct_combine(cplx* out, const dcp* acc, size_t count,
-                                int64_t idx0, double w, cplx* rotf, cplx* base)
+// ---------------------------------------------------------------------------
+// reconstruct_region: i_hat over the ABSOLUTE window [lo, lo+len) from a FROZEN
+// model, written to `dst` (complex<float>, caller buffer of len samples).  This
+// is the single reconstruction kernel used by estimate (training residual and
+// holdout gate) and by apply (cancellation region), so the QA's training
+// residual is literally the same arithmetic the output path performs.
+// ---------------------------------------------------------------------------
+inline bool reconstruct_region(int64_t lo, size_t len, const SicModel& m,
+                               const cplx* up, size_t plen, SicScratch& s,
+                               cplx* dst)
 {
-    if (count == 0)
-        return;
-    fill_rot_f(rotf, count, idx0, w, base);
-    volk_64f_convert_32f(reinterpret_cast<float*>(out),
-                         reinterpret_cast<const double*>(acc),
-                         static_cast<unsigned>(2 * count));
-    volk_32fc_x2_multiply_32fc(reinterpret_cast<lv_32fc_t*>(out),
-                               reinterpret_cast<const lv_32fc_t*>(out),
-                               reinterpret_cast<const lv_32fc_t*>(rotf),
-                               static_cast<unsigned>(count));
+    if (len == 0)
+        return true;
+    if (!dst || !up || len > s.cap_region || len > s.acc.size() ||
+        len > s.rot_f.size() || !(m.sample_rate > 0.0))
+        return false;
+    std::fill(s.acc.begin(), s.acc.begin() + static_cast<std::ptrdiff_t>(len),
+              dcp(0.0, 0.0));
+    for (size_t k = 0; k < m.n_paths && k < kSicMaxPaths; ++k) {
+        accum_shifted(s.acc.data(), len, up, plen, lo, m.tau_abs[k],
+                      dcp(m.gain[k]));
+    }
+    const double w = 2.0 * kPi * m.cfo_hz / m.sample_rate;
+    fill_rot_f_abs(s.rot_f.data(), len, lo - m.phase_reference_sample, w,
+                   s.rot_base.data());
+    volk_64f_convert_32f(reinterpret_cast<float*>(dst),
+                         reinterpret_cast<const double*>(s.acc.data()),
+                         static_cast<unsigned>(2 * len));
+    volk_32fc_x2_multiply_32fc(reinterpret_cast<lv_32fc_t*>(dst),
+                               reinterpret_cast<const lv_32fc_t*>(dst),
+                               reinterpret_cast<const lv_32fc_t*>(s.rot_f.data()),
+                               static_cast<unsigned>(len));
+    return true;
 }
 
 // cond2 (2-norm condition number) of a K x K complex matrix given column-major,
@@ -589,6 +626,12 @@ void reset_result(SicResult& r, cplx* outbuf, cplx* ihatbuf)
     r.correlations = 0;
     r.roi_samples = 0;
     r.reject_reason = nullptr;
+    // S1 diagnostics (a reused SicResult must not carry stale values).
+    r.support_source = nullptr;
+    r.fit_residual = 0.0;
+    r.training_reps_confirmed = 0;
+    r.observed_end_sample = 0;
+    r.model_id = 0;
     r.timings = SicTimings{};
     r.out = outbuf;
     r.i_hat = ihatbuf;
@@ -691,6 +734,13 @@ bool prepare_sic_core(const SicConfig& cfg,
         return fail("validate_threshold out of [0,1]");
     if (!(cfg.sample_rate > 0.0) || !std::isfinite(cfg.sample_rate))
         return fail("sample_rate must be finite and > 0");
+    // S1 policy domain: an out-of-domain enum value must fail closed BEFORE any
+    // decision depends on it (a switch over it has no default on purpose).
+    if (static_cast<uint8_t>(cfg.support_mode) > 1)
+        return fail("support_mode out of domain (ConfiguredNominal|ConfirmedLegacy)");
+    if (!std::isfinite(cfg.fit_residual_max) || !(cfg.fit_residual_max > 0.0) ||
+        !(cfg.fit_residual_max <= 1.0))
+        return fail("fit_residual_max out of (0,1]");
 
     scratch.sync_norm.assign(sync, sync + sync_len);
     double e = 0.0;
@@ -709,6 +759,29 @@ bool prepare_sic_core(const SicConfig& cfg,
     for (size_t i = 0; i < preamble_len; ++i) {
         if (!finite_cplx(scratch.preamble[i]))
             return fail("preamble contains non-finite samples");
+    }
+
+    // Template identity: FNV-1a-64 over lengths + raw float bytes.  Deterministic
+    // across processes (no pointers), so a frozen model's model_id can bind the
+    // exact template that produced it.
+    {
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&h](const void* data, size_t bytes) {
+            const uint8_t* p = static_cast<const uint8_t*>(data);
+            for (size_t i = 0; i < bytes; ++i) {
+                h ^= static_cast<uint64_t>(p[i]);
+                h *= 1099511628211ull;
+            }
+        };
+        const uint64_t tag = 0x533154504c415445ull; // "S1TPLATE"
+        mix(&tag, sizeof(tag));
+        mix(&sync_len, sizeof(sync_len));
+        if (sync_len)
+            mix(sync, sync_len * sizeof(cplx));
+        mix(&preamble_len, sizeof(preamble_len));
+        if (preamble_len)
+            mix(preamble, preamble_len * sizeof(cplx));
+        scratch.template_hash = h;
     }
 
     // ----- polyphase-upsampled preamble (the one fractional-delay operator) --
@@ -836,6 +909,1012 @@ bool prepare_sic_core(const SicConfig& cfg,
     scratch.prepared = true;
     return true;
 }
+namespace {
+
+// Visibility limit resolution: 0 => the whole window is visible (legacy
+// callers), a positive value is clamped to n, a negative value is invalid.
+inline int64_t resolve_visible_end(size_t n, int64_t observed_end)
+{
+    if (observed_end == 0)
+        return static_cast<int64_t>(n);
+    if (observed_end < 0)
+        return -1;
+    return std::min<int64_t>(observed_end, static_cast<int64_t>(n));
+}
+
+inline uint64_t fnv1a64(uint64_t h, const void* data, size_t bytes)
+{
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < bytes; ++i) {
+        h ^= static_cast<uint64_t>(p[i]);
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+inline uint64_t hash_mix_u64(uint64_t h, uint64_t v)
+{
+    return fnv1a64(h, &v, sizeof(v));
+}
+
+inline uint64_t hash_mix_i64(uint64_t h, int64_t v)
+{
+    return hash_mix_u64(h, static_cast<uint64_t>(v));
+}
+
+inline uint64_t hash_mix_double(uint64_t h, double v)
+{
+    uint64_t b = 0;
+    std::memcpy(&b, &v, sizeof(b));
+    return hash_mix_u64(h, b);
+}
+
+inline uint64_t hash_mix_cplx(uint64_t h, cplx v)
+{
+    const float re = v.real();
+    const float im = v.imag();
+    h = fnv1a64(h, &re, sizeof(re));
+    return fnv1a64(h, &im, sizeof(im));
+}
+
+// Hash of every estimation-relevant config field.  Two runs with the same
+// config hash and the same template hash are the same operating point; the ROI,
+// visibility limit and support/validation policy are part of it on purpose.
+uint64_t sic_config_hash(const SicConfig& cfg)
+{
+    uint64_t h = 1469598103934665603ull;
+    h = hash_mix_u64(h, 0x5331434f4e464947ull); // "S1CONFIG"
+    h = hash_mix_u64(h, static_cast<uint64_t>(cfg.support_mode));
+    h = hash_mix_u64(h, cfg.comm_code);
+    h = hash_mix_u64(h, cfg.sync_reps);
+    h = hash_mix_u64(h, cfg.samples_per_symbol);
+    h = hash_mix_double(h, cfg.sample_rate);
+    h = hash_mix_u64(h, cfg.k_paths);
+    h = hash_mix_u64(h, cfg.fit_reps);
+    h = hash_mix_u64(h, cfg.validation_reps);
+    h = hash_mix_u64(h, cfg.online_validation_reps);
+    h = hash_mix_i64(h, cfg.roi_lo);
+    h = hash_mix_i64(h, cfg.roi_hi);
+    h = hash_mix_i64(h, cfg.observed_end_sample);
+    h = hash_mix_u64(h, cfg.coarse_stride);
+    h = hash_mix_u64(h, cfg.path_min_spacing);
+    h = hash_mix_u64(h, cfg.post_tail);
+    h = hash_mix_u64(h, cfg.enable_fractional ? 1u : 0u);
+    h = hash_mix_u64(h, cfg.enable_cfo ? 1u : 0u);
+    h = hash_mix_double(h, cfg.detect_threshold);
+    h = hash_mix_double(h, cfg.fit_residual_max);
+    return h;
+}
+
+// Hash of the FROZEN model fields (the whole fixed-size arrays, so an untouched
+// tail slot cannot hide a difference).
+uint64_t sic_model_hash(const SicModel& m)
+{
+    uint64_t h = 1469598103934665603ull;
+    h = hash_mix_u64(h, 0x53314d4f44454c31ull); // "S1MODEL1"
+    h = hash_mix_u64(h, m.template_hash);
+    h = hash_mix_u64(h, m.config_hash);
+    h = hash_mix_i64(h, m.origin);
+    h = hash_mix_double(h, m.cfo_hz);
+    h = hash_mix_u64(h, m.n_paths);
+    for (size_t k = 0; k < kSicMaxPaths; ++k) {
+        h = hash_mix_double(h, m.tau_abs[k]);
+        h = hash_mix_cplx(h, m.gain[k]);
+    }
+    h = hash_mix_double(h, m.gain_condition);
+    h = hash_mix_double(h, m.fit_residual);
+    h = hash_mix_i64(h, m.training_lo);
+    h = hash_mix_i64(h, m.training_hi);
+    h = hash_mix_i64(h, m.observed_end_sample);
+    h = hash_mix_i64(h, m.estimation_ready_sample);
+    h = hash_mix_i64(h, m.predicted_support_lo);
+    h = hash_mix_i64(h, m.predicted_support_hi);
+    h = fnv1a64(h, m.support_source, std::strlen(m.support_source) + 1);
+    h = hash_mix_i64(h, m.sub_lo);
+    h = hash_mix_i64(h, m.sub_hi);
+    h = hash_mix_u64(h, m.training_reps_confirmed);
+    h = hash_mix_u64(h, m.nominal_sync_reps);
+    h = hash_mix_u64(h, m.samples_per_symbol);
+    h = hash_mix_double(h, m.sample_rate);
+    h = hash_mix_i64(h, m.phase_reference_sample);
+    return h;
+}
+
+void model_set_terminal(SicModel& m, SicState st, const char* status,
+                        const char* reason)
+{
+    m.state = st;
+    m.status = status;
+    m.reason = reason;
+    m.valid = (st == SicState::Committed);
+    m.model_id = sic_model_hash(m);
+}
+
+// ---------------------------------------------------------------------------
+// estimate_impl: the S1 estimation stage.
+//
+// STRICT PREFIX: every read of `y` is bounded by `visible_end`:
+//   * detect_coarse / detect_fine / walk-back / repetition confirmation use
+//     norm_at(), which returns 0 for any d with d+Ls > visible_end;
+//   * the |y|^2 prefix is filled only up to visible_end;
+//   * CFO uses training repetition pairs only;
+//   * the CIR taps require pos+Ls <= min(training_hi, visible_end);
+//   * the LS / fractional-refine rows are the first
+//     min(fit_reps*sps, visible_end-origin) samples of the training span.
+// Nothing here receives the injected comm start.
+// ---------------------------------------------------------------------------
+void estimate_impl(const cplx* y,
+                   size_t n,
+                   int64_t visible_end,
+                   const SicConfig& cfg,
+                   SicScratch& scratch,
+                   SicModel& model,
+                   SicResult& r)
+{
+    const size_t Ls = scratch.sync_len;
+    const size_t sps = scratch.sps;
+    const size_t plen = scratch.preamble_len;
+    const cplx* const syncn = scratch.sync_norm.data();
+    const cplx* const up = scratch.pre_up.data();
+    const size_t K = cfg.k_paths;
+    const double fs = cfg.sample_rate;
+    const double detect_thr = cfg.detect_threshold;
+    const int64_t n_i64 = static_cast<int64_t>(n);
+
+    model.observed_end_sample = visible_end;
+    model.nominal_sync_reps = cfg.sync_reps;
+    model.samples_per_symbol = sps;
+    model.sample_rate = fs;
+    model.template_hash = scratch.template_hash;
+    model.config_hash = sic_config_hash(cfg);
+    r.observed_end_sample = visible_end;
+
+    auto finish = [&](SicState st, const char* status, const char* bypass_reason,
+                      const char* reject_reason) {
+        model_set_terminal(model, st, status, reject_reason);
+        r.state = st;
+        r.committed = (st == SicState::Committed);
+        r.ambiguous = (st == SicState::Ambiguous);
+        r.detected_start = model.origin;
+        r.support_lo = model.predicted_support_lo;
+        r.support_hi = model.predicted_support_hi;
+        r.support_source = model.support_source;
+        r.model_id = model.model_id;
+        r.fit_residual = model.fit_residual;
+        r.training_reps_confirmed = model.training_reps_confirmed;
+        r.bypass_reason = bypass_reason;
+        r.reject_reason = reject_reason;
+    };
+
+    // ---- 0. policy domain checks (fail-closed, before the value is used) ----
+    const uint8_t smv = static_cast<uint8_t>(cfg.support_mode);
+    if (smv > 1) {
+        finish(SicState::Failed, "failed", "invalid_support_mode",
+               "invalid_support_mode");
+        return;
+    }
+    if (cfg.observed_end_sample < 0) {
+        finish(SicState::Failed, "failed", "invalid_observed_end",
+               "invalid_observed_end");
+        return;
+    }
+    if (!std::isfinite(cfg.fit_residual_max) ||
+        !(cfg.fit_residual_max > 0.0) || !(cfg.fit_residual_max <= 1.0)) {
+        finish(SicState::Failed, "failed", "invalid_fit_residual_max",
+               "invalid_fit_residual_max");
+        return;
+    }
+    if (cfg.online_validation_reps > scratch.validation_reps) {
+        finish(SicState::Failed, "failed",
+               "online_validation_reps_exceeds_prepared",
+               "online_validation_reps_exceeds_prepared");
+        return;
+    }
+    // Repetitions whose correlation rows may be counted: the training span, plus
+    // (legacy support only) the optional online-validation span.  The estimate
+    // itself never uses more than `fit_reps` for CFO/CIR/gain.
+    const size_t confirm_reps = (cfg.support_mode == SicSupportMode::ConfirmedLegacy)
+        ? cfg.fit_reps + cfg.online_validation_reps
+        : cfg.fit_reps;
+    if (confirm_reps > kMaxReps) {
+        finish(SicState::Failed, "failed", "rep_scratch_exceeds_ceiling",
+               "rep_scratch_exceeds_ceiling");
+        return;
+    }
+
+    // ---- 1. ROI (clipped to the VISIBLE prefix) ----------------------------
+    int64_t roi_lo = cfg.roi_lo;
+    int64_t roi_hi = cfg.roi_hi;
+    if (roi_hi <= roi_lo) {
+        roi_lo = 0;
+        roi_hi = visible_end;
+    }
+    roi_hi = std::min<int64_t>(roi_hi, visible_end - static_cast<int64_t>(Ls) + 1);
+    roi_lo = std::max<int64_t>(roi_lo, 0);
+    r.roi_samples = (roi_hi > roi_lo) ? static_cast<size_t>(roi_hi - roi_lo) : 0;
+    const int64_t stride = std::max<int64_t>(1, static_cast<int64_t>(cfg.coarse_stride));
+
+    // |<sync, seg>| / (||seg|| * ||sync||)  (sync_norm has unit energy)
+    double* const energy =
+        scratch.energy_prefix.empty() ? nullptr : scratch.energy_prefix.data();
+    size_t energy_fill = 0;
+    auto norm_at = [&](int64_t d, cplx* corr_out) -> double {
+        // STRICT PREFIX: the whole correlation row must be visible.
+        if (d < 0 || d + static_cast<int64_t>(Ls) > visible_end) {
+            if (corr_out)
+                *corr_out = cplx(0.f, 0.f);
+            return 0.0;
+        }
+        const cplx* const seg = y + d;
+        const unsigned np = static_cast<unsigned>(Ls);
+        cplx dot(0.f, 0.f);
+        volk_32fc_x2_conjugate_dot_prod_32fc_u(&dot, seg, syncn, np);
+        const size_t ehi = static_cast<size_t>(d) + Ls;
+        double e = 0.0;
+        if (energy && ehi <= energy_fill) {
+            e = std::sqrt(energy[ehi] - energy[static_cast<size_t>(d)]);
+        } else {
+            cplx self(0.f, 0.f);
+            volk_32fc_x2_conjugate_dot_prod_32fc_u(&self, seg, seg, np);
+            e = std::sqrt(static_cast<double>(self.real()));
+        }
+        if (corr_out)
+            *corr_out = dot;
+        return (e > 0.0) ? static_cast<double>(std::abs(dot)) / e : 0.0;
+    };
+
+    // ---- 2. detect_coarse (public coarse ROI only; no injected-start seed) --
+    int64_t coarse_pos = -1;
+    double coarse_nrm = 0.0;
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (energy) {
+            // STRICT PREFIX: the self-energy prefix may only cover visible IQ.
+            energy_fill = std::min<size_t>(scratch.energy_prefix.size() - 1,
+                                           static_cast<size_t>(visible_end));
+            double acc = 0.0;
+            energy[0] = 0.0;
+            for (size_t i = 0; i < energy_fill; ++i) {
+                const cplx v = y[i];
+                acc += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
+                       static_cast<double>(v.imag()) * static_cast<double>(v.imag());
+                energy[i + 1] = acc;
+            }
+        }
+        for (int64_t d = roi_lo; d < roi_hi; d += stride) {
+            const double nrm = norm_at(d, nullptr);
+            ++r.coarse_candidates;
+            ++r.correlations;
+            if (nrm > coarse_nrm) {
+                coarse_nrm = nrm;
+                coarse_pos = d;
+            }
+        }
+        r.timings.detect_coarse_us = us_since(t0);
+    }
+
+    // ---- 2b. detect_fine ---------------------------------------------------
+    int64_t detected_start = coarse_pos;
+    double peak_norm = coarse_nrm;
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (coarse_pos >= 0) {
+            const int64_t lo = std::max(roi_lo, coarse_pos - stride);
+            const int64_t hi = std::min(roi_hi, coarse_pos + stride + 1);
+            for (int64_t d = lo; d < hi; ++d) {
+                const double nrm = norm_at(d, nullptr);
+                ++r.fine_candidates;
+                ++r.correlations;
+                if (nrm > peak_norm) {
+                    peak_norm = nrm;
+                    detected_start = d;
+                }
+            }
+        }
+        r.timings.detect_fine_us = us_since(t0);
+    }
+
+    // ---- 2c. period-ambiguity walk-back + snap -----------------------------
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (detected_start >= 0) {
+            int64_t origin = detected_start;
+            const int64_t floor_lo = std::max<int64_t>(roi_lo, 0);
+            while (origin - static_cast<int64_t>(sps) >= floor_lo) {
+                const int64_t d = origin - static_cast<int64_t>(sps);
+                const double nrm = norm_at(d, nullptr);
+                ++r.correlations;
+                if (nrm >= detect_thr)
+                    origin = d;
+                else
+                    break;
+            }
+            const int64_t lo = std::max(roi_lo, origin - stride);
+            const int64_t hi = std::min(roi_hi, origin + stride + 1);
+            for (int64_t d = lo; d < hi; ++d) {
+                const double nrm = norm_at(d, nullptr);
+                ++r.fine_candidates;
+                ++r.correlations;
+                if (nrm > peak_norm) {
+                    origin = d;
+                    peak_norm = nrm;
+                }
+            }
+            detected_start = origin;
+        }
+        r.timings.detect_fine_us += us_since(t0);
+    }
+    if (detected_start < 0 || peak_norm < detect_thr) {
+        finish(SicState::Bypassed, "bypassed", "below_detect_threshold",
+               "below_detect_threshold");
+        return;
+    }
+    r.detected = true;
+    r.detected_start = detected_start;
+    model.origin = detected_start;
+    model.phase_reference_sample = detected_start;
+
+    // ---- 3. repetition confirmation INSIDE the training span --------------
+    // Only repetitions whose correlation row is FULLY inside the visible prefix
+    // are counted; a row that would cross the prefix is dropped, never read.
+    cplx rep_corr[kMaxReps];
+    double rep_norms[kMaxReps];
+    size_t confirmed = 0;
+    size_t training_confirmed = 0;
+    for (size_t k = 0; k < confirm_reps; ++k) {
+        const int64_t d = detected_start + static_cast<int64_t>(k * sps);
+        cplx c(0.f, 0.f);
+        const double nrm = (d + static_cast<int64_t>(Ls) <= visible_end)
+            ? norm_at(d, &c)
+            : 0.0;
+        rep_corr[k] = c;
+        rep_norms[k] = nrm;
+        ++r.correlations;
+        if (nrm >= detect_thr) {
+            ++confirmed;
+            if (k < cfg.fit_reps)
+                ++training_confirmed;
+        }
+    }
+    model.training_reps_confirmed = training_confirmed;
+    r.training_reps_confirmed = training_confirmed;
+    if (confirmed < 2) {
+        finish(SicState::Ambiguous, "ambiguous", "repetition_not_confirmed",
+               "repetition_not_confirmed");
+        return;
+    }
+    if (training_confirmed < cfg.fit_reps)
+        r.partial = true;
+
+    // ---- 4. cfo (training-span repeated-peak phases only) ------------------
+    double cfo = 0.0;
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (cfg.enable_cfo) {
+            dcp z(0.0, 0.0);
+            size_t cnt = 0;
+            const size_t ntrain = cfg.fit_reps;
+            const size_t k_lo = (ntrain >= 3) ? 1 : 0;
+            for (size_t k = k_lo; k + 1 < ntrain; ++k) {
+                if (rep_norms[k] >= detect_thr && rep_norms[k + 1] >= detect_thr) {
+                    dcp t = dcp(rep_corr[k + 1]) * std::conj(dcp(rep_corr[k]));
+                    const double a = std::abs(t);
+                    if (a > 0.0) {
+                        z += t / a;
+                        ++cnt;
+                    }
+                }
+            }
+            if (cnt > 0) {
+                const double dphi = std::arg(z);
+                cfo = dphi / (2.0 * kPi * static_cast<double>(sps) / fs);
+            }
+        }
+        r.timings.cfo_us = us_since(t0);
+    }
+    r.cfo_hz = cfo;
+    model.cfo_hz = cfo;
+    const double w = 2.0 * kPi * cfo / fs;
+
+    // ---- 5. training span (prefix-clipped) --------------------------------
+    const int64_t fit_lo = detected_start;
+    const int64_t fit_end_ideal = detected_start + static_cast<int64_t>(scratch.fit_len);
+    const int64_t fit_end_avail = std::min<int64_t>(fit_end_ideal, visible_end);
+    const size_t Mfit = (fit_end_avail > fit_lo)
+        ? static_cast<size_t>(fit_end_avail - fit_lo)
+        : 0;
+    model.training_lo = fit_lo;
+    model.training_hi = fit_end_avail;
+    model.estimation_ready_sample = fit_end_avail;
+
+    // ---- 5b. cir (taps whose whole row is inside the training span) --------
+    const int64_t dmin = -kCirPre;
+    const int64_t dmax = static_cast<int64_t>(cfg.post_tail) + kCirPre;
+    const size_t nd = static_cast<size_t>(dmax - dmin);
+    if (nd > scratch.cir.size()) {
+        finish(SicState::Failed, "failed", "capacity_overflow",
+               "capacity_overflow");
+        return;
+    }
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        for (size_t idx = 0; idx < nd; ++idx) {
+            const int64_t pos = detected_start + dmin + static_cast<int64_t>(idx);
+            cplx c(0.f, 0.f);
+            // STRICT: a CIR tap may not read past the training span or prefix.
+            if (pos >= 0 && pos + static_cast<int64_t>(Ls) <= fit_end_avail) {
+                dcp acc(0.0, 0.0);
+                for (size_t k = 0; k < Ls; ++k)
+                    acc += dcp(std::conj(syncn[k])) * dcp(y[pos + static_cast<int64_t>(k)]);
+                c = cplx(static_cast<float>(acc.real()), static_cast<float>(acc.imag()));
+            }
+            scratch.cir[idx] = c;
+            scratch.cir_mag[idx] = static_cast<float>(std::abs(c));
+        }
+        r.timings.cir_us = us_since(t0);
+    }
+
+    // ---- 6. path_select ----------------------------------------------------
+    double tau_abs[kSicMaxPaths];
+    size_t nsel = 0;
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        size_t nc = 0;
+        for (size_t i = 1; i + 1 < nd; ++i) {
+            const double m = scratch.cir_mag[i];
+            if (m > scratch.cir_mag[i - 1] && m >= scratch.cir_mag[i + 1]) {
+                scratch.cand_delay[nc] = static_cast<int64_t>(i);
+                scratch.cand_mag[nc] = m;
+                ++nc;
+            }
+        }
+        for (size_t a = 0; a < nc; ++a) {
+            size_t bi = a;
+            for (size_t b = a + 1; b < nc; ++b)
+                if (scratch.cand_mag[b] > scratch.cand_mag[bi])
+                    bi = b;
+            if (bi != a) {
+                std::swap(scratch.cand_mag[a], scratch.cand_mag[bi]);
+                std::swap(scratch.cand_delay[a], scratch.cand_delay[bi]);
+            }
+        }
+        r.n_path_candidates = nc;
+        double mmax = 0.0;
+        for (size_t i = 0; i < nd; ++i)
+            mmax = std::max(mmax, static_cast<double>(scratch.cir_mag[i]));
+        const double floor = kPathPeakFloor * mmax;
+        const size_t spacing = scratch.min_spacing;
+        int64_t sel_idx[kSicMaxPaths];
+        for (size_t c = 0; c < nc && nsel < K; ++c) {
+            if (scratch.cand_mag[c] < floor)
+                continue;
+            bool ok = true;
+            for (size_t s = 0; s < nsel; ++s) {
+                const int64_t diff = scratch.cand_delay[c] - sel_idx[s];
+                const int64_t ad = diff < 0 ? -diff : diff;
+                if (ad < static_cast<int64_t>(spacing)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok)
+                continue;
+            sel_idx[nsel] = scratch.cand_delay[c];
+            tau_abs[nsel] =
+                static_cast<double>(detected_start + dmin + scratch.cand_delay[c]);
+            ++nsel;
+        }
+        r.timings.path_select_us = us_since(t0);
+    }
+    if (nsel == 0) {
+        finish(SicState::Failed, "failed", "no_paths", "no_paths");
+        return;
+    }
+    r.n_paths = nsel;
+    r.n_taus = nsel;
+    for (size_t k = 0; k < nsel; ++k)
+        r.taus[k] = tau_abs[k];
+
+    // ---- 7. support: PREDICTED (nominal) vs CONFIRMED (legacy) -------------
+    // The nominal prediction uses only the PUBLIC profile (configured sync_reps,
+    // sps, post_tail) and the detected origin.  It is deliberately NOT clamped
+    // to the confirmed repetition count, and it is NOT a measured 64-SYNC
+    // boundary (support_source says so).
+    if (cfg.support_mode == SicSupportMode::ConfiguredNominal) {
+        model.predicted_support_lo = std::max<int64_t>(0, detected_start);
+        const int64_t nominal_hi = detected_start +
+            static_cast<int64_t>(cfg.sync_reps) * static_cast<int64_t>(sps) +
+            static_cast<int64_t>(cfg.post_tail);
+        model.predicted_support_hi = std::min<int64_t>(n_i64, nominal_hi);
+        model.support_source = "configured_nominal_prediction";
+    } else {
+        model.predicted_support_lo = std::max<int64_t>(0, detected_start);
+        const int64_t legacy_hi = detected_start +
+            static_cast<int64_t>(confirmed) * static_cast<int64_t>(sps) +
+            static_cast<int64_t>(cfg.post_tail);
+        model.predicted_support_hi = std::min<int64_t>(n_i64, legacy_hi);
+        model.support_source = "confirmed_repetition_legacy";
+        if (confirmed < confirm_reps)
+            r.partial = true;
+    }
+    r.support_lo = model.predicted_support_lo;
+    r.support_hi = model.predicted_support_hi;
+
+    // ---- 7b. permitted cancellation region + sub_roi overlap gate ----------
+    int64_t sub_lo = 0;
+    int64_t sub_hi = 0;
+    if (cfg.sub_roi_hi > cfg.sub_roi_lo) {
+        const int64_t lo = std::max<int64_t>(model.predicted_support_lo, cfg.sub_roi_lo);
+        const int64_t hi = std::min<int64_t>(model.predicted_support_hi, cfg.sub_roi_hi);
+        const int64_t overlap = (hi > lo) ? (hi - lo) : 0;
+        r.sub_overlap = overlap;
+        const int64_t need = std::max<int64_t>(
+            1, static_cast<int64_t>(cfg.sub_min_overlap));
+        if (overlap < need) {
+            finish(SicState::Bypassed, "bypassed", "outside_sensing_roi",
+                   "outside_sensing_roi");
+            return;
+        }
+        sub_lo = lo;
+        sub_hi = hi;
+    } else {
+        r.sub_overlap = -1;
+        // The legacy mask is the predicted support ∩ the search ROI clipped to
+        // the window.
+        //   * ConfiguredNominal uses the CONFIGURED public ROI (the sensing
+        //     processing region), NOT the prefix-clipped detection ROI: the
+        //     cancellation region must not inherit the visibility clip, or the
+        //     un-observed part of the preamble could never be cleaned.
+        //   * ConfirmedLegacy reproduces S0 byte-for-byte, including its
+        //     n-Ls+1 correlation-row clip of a configured search ROI.
+        const bool roi_set = (cfg.roi_hi > cfg.roi_lo);
+        int64_t mask_hi = n_i64;
+        if (cfg.support_mode == SicSupportMode::ConfirmedLegacy && roi_set)
+            mask_hi = roi_hi; // S0 clipped search ROI
+        else if (roi_set)
+            mask_hi = std::min<int64_t>(cfg.roi_hi, n_i64);
+        sub_lo = std::max<int64_t>(
+            0, std::max<int64_t>(model.predicted_support_lo,
+                                 std::max<int64_t>(cfg.roi_lo, 0)));
+        sub_hi = std::min<int64_t>(mask_hi, model.predicted_support_hi);
+    }
+    model.sub_lo = sub_lo;
+    model.sub_hi = std::max<int64_t>(sub_lo, sub_hi);
+
+    // ---- 8. fractional_refine (training rows only) -------------------------
+    dcp h[kSicMaxPaths];
+    for (size_t k = 0; k < nsel; ++k)
+        h[k] = dcp(0.0, 0.0);
+    double cond = 0.0;
+    if (Mfit < nsel) {
+        finish(SicState::Failed, "failed", "training_window_unavailable",
+               "training_window_unavailable");
+        return;
+    }
+    if (cfg.enable_fractional && Mfit >= nsel) {
+        const auto t0 = std::chrono::steady_clock::now();
+        // Phase frame: p = abs - phase_reference (= origin), so the fitted gains
+        // are already in the frozen model's frame.
+        fill_rot(scratch.rot.data(), Mfit, fit_lo - model.phase_reference_sample, w);
+        for (size_t k = 0; k < nsel; ++k)
+            build_column(scratch.A.data() + k * Mfit, Mfit, up, plen,
+                         fit_lo, tau_abs[k], scratch.rot.data());
+        for (size_t m = 0; m < Mfit; ++m)
+            scratch.hh_b[m] = dcp(y[fit_lo + static_cast<int64_t>(m)]);
+        if (qr_factor_rhs(scratch.A.data(), Mfit, nsel, scratch.hh_b.data(),
+                          scratch.hh_v.data()) &&
+            qr_solve(scratch.A.data(), Mfit, nsel, scratch.hh_b.data(), h)) {
+            cplx* const colf = scratch.col_f.data();
+            cplx* const qf = scratch.q_f.data();
+            const unsigned np = static_cast<unsigned>(Mfit);
+            for (size_t k = 0; k < nsel; ++k) {
+                for (size_t m = 0; m < Mfit; ++m)
+                    scratch.resid[m] = dcp(y[fit_lo + static_cast<int64_t>(m)]);
+                for (size_t j = 0; j < nsel; ++j) {
+                    if (j == k)
+                        continue;
+                    build_column(scratch.col.data(), Mfit, up, plen,
+                                 fit_lo, tau_abs[j], scratch.rot.data());
+                    for (size_t m = 0; m < Mfit; ++m)
+                        scratch.resid[m] -= h[j] * scratch.col[m];
+                }
+                for (size_t m = 0; m < Mfit; ++m) {
+                    const dcp ro = scratch.rot[m];
+                    const dcp rv = scratch.resid[m];
+                    qf[m] = cplx(
+                        static_cast<float>(ro.real() * rv.real() +
+                                           ro.imag() * rv.imag()),
+                        static_cast<float>(ro.real() * rv.imag() -
+                                           ro.imag() * rv.real()));
+                }
+                double best_tau = tau_abs[k];
+                double best_score = -1.0;
+                for (int oi = 0; oi <= 20; ++oi) {
+                    const double delta = -0.5 + 0.05 * oi;
+                    build_shifted_f(colf, Mfit, up, plen, fit_lo,
+                                    tau_abs[k] + delta);
+                    cplx num(0.f, 0.f), self(0.f, 0.f);
+                    volk_32fc_x2_conjugate_dot_prod_32fc_u(&num, colf, qf, np);
+                    volk_32fc_x2_conjugate_dot_prod_32fc_u(&self, colf, colf, np);
+                    const double den = static_cast<double>(self.real());
+                    const double score =
+                        (den > 0.0) ? std::norm(dcp(num)) / den : 0.0;
+                    if (score > best_score) {
+                        best_score = score;
+                        best_tau = tau_abs[k] + delta;
+                    }
+                }
+                tau_abs[k] = best_tau;
+            }
+        }
+        r.timings.fractional_refine_us = us_since(t0);
+    }
+
+    // ---- 9a. matrix_build --------------------------------------------------
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        fill_rot(scratch.rot.data(), Mfit, fit_lo - model.phase_reference_sample, w);
+        for (size_t k = 0; k < nsel; ++k)
+            build_column(scratch.A.data() + k * Mfit, Mfit, up, plen,
+                         fit_lo, tau_abs[k], scratch.rot.data());
+        for (size_t m = 0; m < Mfit; ++m)
+            scratch.hh_b[m] = dcp(y[fit_lo + static_cast<int64_t>(m)]);
+        r.timings.matrix_build_us = us_since(t0);
+    }
+
+    // ---- 9b. gain_fit (Householder QR; cond2(A) from the SVD of R) ---------
+    bool basis_finite = true;
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        for (size_t k = 0; k < nsel * Mfit; ++k) {
+            if (!std::isfinite(scratch.A[k].real()) ||
+                !std::isfinite(scratch.A[k].imag())) {
+                basis_finite = false;
+                break;
+            }
+        }
+        const bool solve_ok = detail::qr_cond_solve(
+            scratch.A.data(), Mfit, nsel, scratch.hh_b.data(), h,
+            scratch.hh_v.data(), &cond);
+        r.gain_condition = solve_ok ? cond : 0.0;
+        r.timings.gain_fit_us = us_since(t0);
+        if (!solve_ok || !basis_finite) {
+            finish(SicState::Failed, "failed", "gain_fit_failed", "gain_fit_failed");
+            return;
+        }
+    }
+
+    // ---- 10. FREEZE the model (all fields below are immutable afterwards) --
+    model.n_paths = nsel;
+    model.gain_condition = cond;
+    for (size_t k = 0; k < nsel; ++k) {
+        model.tau_abs[k] = tau_abs[k];
+        model.gain[k] = cplx(static_cast<float>(h[k].real()),
+                             static_cast<float>(h[k].imag()));
+    }
+    model.origin = detected_start;
+    model.phase_reference_sample = detected_start;
+    r.n_taus = nsel;
+    for (size_t k = 0; k < nsel; ++k)
+        r.taus[k] = tau_abs[k];
+
+    // fit_residual = normalized TRAINING-region residual of the FROZEN (float)
+    // model, i.e. exactly what apply will subtract over the training span.
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        double e_num = 0.0;
+        double e_den = 0.0;
+        if (Mfit > 0 &&
+            !reconstruct_region(fit_lo, Mfit, model, up, plen, scratch,
+                                scratch.ihat.data())) {
+            finish(SicState::Failed, "failed", "capacity_overflow",
+                   "capacity_overflow");
+            return;
+        }
+        for (size_t m = 0; m < Mfit; ++m) {
+            const int64_t abs_idx = fit_lo + static_cast<int64_t>(m);
+            const dcp d = dcp(y[abs_idx]) - dcp(scratch.ihat[m]);
+            e_num += std::norm(d);
+            e_den += std::norm(dcp(y[abs_idx]));
+        }
+        model.fit_residual = (e_den > 0.0) ? (e_num / e_den) : 0.0;
+        r.fit_residual = model.fit_residual;
+        r.timings.model_prepare_us = us_since(t0);
+    }
+
+    // ---- 11. commit gate ---------------------------------------------------
+    bool commit = true;
+    const char* reject = nullptr;
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        // finite parameters
+        bool finite_ok = std::isfinite(cond) && std::isfinite(model.cfo_hz) &&
+                         std::isfinite(model.fit_residual);
+        for (size_t k = 0; k < nsel && finite_ok; ++k)
+            finite_ok = std::isfinite(model.tau_abs[k]) && finite_cplx(model.gain[k]);
+        if (!finite_ok) {
+            commit = false;
+            reject = "non_finite_model";
+        } else if (!(cond < kMaxGainCond)) {
+            commit = false;
+            reject = "gain_condition_too_high";
+        } else if (cfg.support_mode == SicSupportMode::ConfiguredNominal &&
+                   !(model.fit_residual <= cfg.fit_residual_max)) {
+            // Default S1 gate: no holdout wait, only the training fit quality.
+            commit = false;
+            reject = "fit_residual_high";
+        }
+        if (commit && cfg.online_validation_reps > 0) {
+            // EXPLICIT conservative mode: the S0 disjoint-holdout residual gate
+            // over [origin+fit_reps*sps, +online_validation_reps*sps).  It must
+            // also be inside the VISIBLE prefix (online, not retrospective).
+            const int64_t hstart = detected_start + static_cast<int64_t>(scratch.fit_len);
+            const int64_t hend = hstart +
+                static_cast<int64_t>(cfg.online_validation_reps * sps);
+            if (hend > visible_end) {
+                r.residual_corr = std::numeric_limits<double>::quiet_NaN();
+                commit = false;
+                reject = "validation_window_unavailable";
+            } else {
+                const size_t Mv = static_cast<size_t>(hend - hstart);
+                bool ok = reconstruct_region(hstart, Mv, model, up, plen, scratch,
+                                             scratch.ihat.data());
+                if (!ok) {
+                    commit = false;
+                    reject = "validation_reconstruction_overflow";
+                } else {
+                    double e_in = 0.0;
+                    for (size_t m = 0; m < Mv; ++m) {
+                        const int64_t abs_idx = hstart + static_cast<int64_t>(m);
+                        scratch.resid[m] = dcp(y[abs_idx]) - dcp(scratch.ihat[m]);
+                        e_in += std::norm(scratch.resid[m]);
+                    }
+                    fill_rot(scratch.rot.data(), Mv,
+                             hstart - model.phase_reference_sample, w);
+                    build_column(scratch.col.data(), Mv, up, plen, hstart,
+                                 static_cast<double>(detected_start),
+                                 scratch.rot.data());
+                    dcp num(0.0, 0.0);
+                    double ec = 0.0;
+                    for (size_t m = 0; m < Mv; ++m) {
+                        num += std::conj(scratch.col[m]) * scratch.resid[m];
+                        ec += std::norm(scratch.col[m]);
+                    }
+                    const double den = std::sqrt(e_in) * std::sqrt(ec);
+                    const double rc = (den > 0.0) ? std::abs(num) / den : 1.0;
+                    r.residual_corr = rc;
+                    if (!(rc < cfg.validate_threshold)) {
+                        commit = false;
+                        reject = "holdout_residual_high";
+                    }
+                }
+            }
+        } else if (cfg.online_validation_reps == 0) {
+            // Not evaluated by design in the default path.
+            r.residual_corr = std::numeric_limits<double>::quiet_NaN();
+        }
+        r.timings.validate_commit_us = us_since(t0);
+    }
+
+    if (!commit) {
+        finish(SicState::Bypassed, "bypassed", "not_committed",
+               reject ? reject : "not_committed");
+        return;
+    }
+    finish(SicState::Committed, "model_ready", nullptr, nullptr);
+}
+
+} // namespace
+
+bool estimate_model(const cplx* y,
+                    size_t n,
+                    int64_t observed_end,
+                    const SicTemplates& templates,
+                    const SicConfig& cfg,
+                    SicScratch& scratch,
+                    SicModel& model,
+                    SicTimings* timings,
+                    SicResult* diag)
+{
+    model = SicModel{};
+    model.status = "not_estimated";
+    model.state = SicState::Failed;
+    if (timings)
+        *timings = SicTimings{};
+    if (!y || n == 0) {
+        model.reason = "invalid_input";
+        model.model_id = sic_model_hash(model);
+        return false;
+    }
+    if (!scratch.prepared) {
+        model.reason = "not_prepared";
+        model.model_id = sic_model_hash(model);
+        return false;
+    }
+    if (templates.sync != scratch.orig_sync ||
+        templates.preamble != scratch.orig_preamble ||
+        templates.sync_len != scratch.sync_len ||
+        templates.preamble_len != scratch.preamble_len ||
+        cfg.samples_per_symbol != scratch.sps || cfg.k_paths != scratch.k_paths ||
+        cfg.fit_reps != scratch.fit_reps ||
+        cfg.validation_reps != scratch.validation_reps ||
+        cfg.post_tail != scratch.post_tail) {
+        model.reason = "template_or_geometry_mismatch";
+        model.model_id = sic_model_hash(model);
+        return false;
+    }
+    const uint8_t mv = static_cast<uint8_t>(cfg.mode);
+    if (mv > 2) {
+        model.reason = "invalid_mode";
+        model.model_id = sic_model_hash(model);
+        return false;
+    }
+    if (cfg.mode == SicMode::Off) {
+        model.state = SicState::Bypassed;
+        model.status = "bypassed";
+        model.reason = "mode_off";
+        model.model_id = sic_model_hash(model);
+        return true;
+    }
+    if (cfg.mode == SicMode::Oracle) {
+        model.state = SicState::Failed;
+        model.status = "failed";
+        model.reason = "oracle_bypasses_estimation";
+        model.model_id = sic_model_hash(model);
+        return true;
+    }
+    if (!(cfg.detect_threshold > 0.0) || !(cfg.validate_threshold > 0.0)) {
+        model.state = SicState::Failed;
+        model.status = "failed";
+        model.reason = !(cfg.detect_threshold > 0.0)
+            ? "uncalibrated_detect_threshold"
+            : "uncalibrated_validate_threshold";
+        model.model_id = sic_model_hash(model);
+        return true;
+    }
+    const int64_t visible_end = resolve_visible_end(n, observed_end);
+    if (visible_end < 0) {
+        model.state = SicState::Failed;
+        model.status = "failed";
+        model.reason = "invalid_observed_end";
+        model.model_id = sic_model_hash(model);
+        return true;
+    }
+
+    SicResult local;
+    reset_result(local, nullptr, nullptr);
+    local.observed_end_sample = visible_end;
+    estimate_impl(y, n, visible_end, cfg, scratch, model, local);
+    if (timings)
+        *timings = local.timings;
+    if (diag) {
+        cplx* o = diag->out;
+        cplx* ih = diag->i_hat;
+        *diag = local;
+        diag->out = o;
+        diag->i_hat = ih;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// apply_model: apply the frozen model to one chunk.  See the header for the
+// chunk-invariance and fail-closed contract.
+// ---------------------------------------------------------------------------
+bool apply_model(const SicModel& model,
+                 const cplx* y,
+                 size_t n,
+                 int64_t offset,
+                 const SicTemplates& templates,
+                 const SicConfig& cfg,
+                 SicScratch& scratch,
+                 cplx* out,
+                 cplx* i_hat,
+                 SicTimings* timings)
+{
+    if (!out)
+        return false;
+    if (n == 0)
+        return true;
+    if (!y)
+        return false;
+
+    const auto t_all0 = std::chrono::steady_clock::now();
+    std::copy(y, y + n, out);
+    if (i_hat)
+        std::fill(i_hat, i_hat + n, cplx(0.f, 0.f));
+
+    // Fail-closed: any inconsistency (invalid model, unprepared/mismatched
+    // scratch, negative chunk origin, non-positive sample rate) leaves out == y.
+    const bool usable = model.valid &&
+        model.n_paths > 0 && model.n_paths <= kSicMaxPaths &&
+        std::isfinite(model.cfo_hz) && model.sample_rate > 0.0 &&
+        model.samples_per_symbol == scratch.sps &&
+        model.nominal_sync_reps == cfg.sync_reps &&
+        offset >= 0 && scratch.prepared &&
+        templates.sync == scratch.orig_sync &&
+        templates.preamble == scratch.orig_preamble &&
+        templates.sync_len == scratch.sync_len &&
+        templates.preamble_len == scratch.preamble_len &&
+        cfg.samples_per_symbol == scratch.sps &&
+        cfg.post_tail == scratch.post_tail &&
+        cfg.sync_reps == model.nominal_sync_reps;
+    if (!usable) {
+        if (timings)
+            timings->apply_us += us_since(t_all0);
+        return true;
+    }
+
+    const cplx* const up = scratch.pre_up.data();
+    const size_t plen = scratch.preamble_len;
+    const int64_t chunk_lo = offset;
+    const int64_t chunk_hi = offset + static_cast<int64_t>(n);
+
+    // Union of the delayed finite-template supports (all paths), used only to
+    // make the published i_hat diagnostic cover the whole reconstruction.
+    int64_t union_lo = static_cast<int64_t>(std::floor(model.tau_abs[0]));
+    int64_t union_hi = static_cast<int64_t>(std::ceil(model.tau_abs[0])) +
+                       static_cast<int64_t>(plen);
+    for (size_t k = 1; k < model.n_paths; ++k) {
+        union_lo = std::min<int64_t>(union_lo,
+                                     static_cast<int64_t>(std::floor(model.tau_abs[k])));
+        union_hi = std::max<int64_t>(union_hi,
+                                     static_cast<int64_t>(std::ceil(model.tau_abs[k])) +
+                                         static_cast<int64_t>(plen));
+    }
+
+    // Model-global reconstruction region and a FIXED absolute block grid.  The
+    // region bounds and every block's length come from the MODEL only (never
+    // from the chunk), and each block is reconstructed into scratch.ihat[0..len)
+    // -- so the VOLK calls always see the same buffers, the same length and the
+    // same absolute phase, and the value of an absolute sample is bit-identical
+    // for every chunking.  Only the blocks that intersect this chunk are built.
+    const int64_t g_lo = std::min<int64_t>(union_lo, model.predicted_support_lo);
+    const int64_t g_hi = std::max<int64_t>(union_hi, model.predicted_support_hi);
+    const size_t blk =
+        std::max<size_t>(1, std::min<size_t>(kReconBlock, scratch.cap_region));
+
+    const int64_t b_start = std::max<int64_t>(g_lo, chunk_lo);
+    const int64_t b_end = std::min<int64_t>(g_hi, chunk_hi);
+    if (b_end > b_start) {
+        const auto tr0 = std::chrono::steady_clock::now();
+        for (int64_t b0 = floor_div(b_start, static_cast<int64_t>(blk)) *
+                          static_cast<int64_t>(blk);
+             b0 < b_end; b0 += static_cast<int64_t>(blk)) {
+            const int64_t full_hi =
+                std::min<int64_t>(b0 + static_cast<int64_t>(blk), g_hi);
+            const size_t full_len = static_cast<size_t>(full_hi - b0);
+            if (!reconstruct_region(b0, full_len, model, up, plen, scratch,
+                                    scratch.ihat.data())) {
+                // Fail-closed; out stays == y (already copied).
+                if (timings)
+                    timings->apply_us += us_since(t_all0);
+                return true;
+            }
+            const int64_t lo = std::max<int64_t>(chunk_lo, b0);
+            const int64_t hi = std::min<int64_t>(chunk_hi, full_hi);
+            if (hi <= lo)
+                continue;
+            if (i_hat) {
+                std::copy(scratch.ihat.begin() + static_cast<std::ptrdiff_t>(lo - b0),
+                          scratch.ihat.begin() + static_cast<std::ptrdiff_t>(hi - b0),
+                          i_hat + (lo - chunk_lo));
+            }
+            // Masked subtraction: ONLY inside [sub_lo, sub_hi) ∩ this chunk.
+            const int64_t slo = std::max<int64_t>(lo, model.sub_lo);
+            const int64_t shi = std::min<int64_t>(hi, model.sub_hi);
+            for (int64_t idx = slo; idx < shi; ++idx) {
+                out[idx - chunk_lo] = out[idx - chunk_lo] -
+                    scratch.ihat[static_cast<size_t>(idx - b0)];
+            }
+        }
+        if (timings)
+            timings->reconstruct_us += us_since(tr0);
+    }
+    if (timings)
+        timings->apply_us += us_since(t_all0);
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // sic_one
@@ -918,15 +1997,11 @@ bool sic_one(const cplx* y,
         }
     }
 
-    const size_t Ls = scratch.sync_len;
     const size_t sps = scratch.sps;
     const size_t plen = scratch.preamble_len;
-    const cplx* const syncn = scratch.sync_norm.data();
     const cplx* const up = scratch.pre_up.data();
-    const size_t K = cfg.k_paths;
-    const size_t Mfit = scratch.fit_len;
     const double fs = cfg.sample_rate;
-    const double detect_thr = cfg.detect_threshold;
+    const int64_t n_i64 = static_cast<int64_t>(n);
 
     // ---- Oracle: diagnostic upper bound from explicit truth -----------------
     if (cfg.mode == SicMode::Oracle) {
@@ -950,12 +2025,13 @@ bool sic_one(const cplx* y,
         out.cfo_hz = truth->cfo_hz;
         out.n_paths = ns;
         out.n_taus = ns;
+        out.support_source = "oracle_truth";
         for (size_t k = 0; k < ns; ++k)
             out.taus[k] = truth->start_sample + truth->tau[k];
         const double w = 2.0 * kPi * truth->cfo_hz / fs;
         const int64_t ih_lo = std::max<int64_t>(0, start - kInterpHalf);
         const int64_t ih_hi = std::min<int64_t>(
-            static_cast<int64_t>(n), start + static_cast<int64_t>(plen) + 8);
+            n_i64, start + static_cast<int64_t>(plen) + 8);
         const size_t ih_len = (ih_hi > ih_lo) ? size_t(ih_hi - ih_lo) : 0;
         if (ih_len > scratch.cap_region) {
             out.state = SicState::Failed;
@@ -981,8 +2057,7 @@ bool sic_one(const cplx* y,
         }
         const int64_t sup_lo = std::max<int64_t>(0, start);
         const int64_t sup_hi =
-            std::min<int64_t>(static_cast<int64_t>(n),
-                              start + static_cast<int64_t>(cfg.sync_reps * sps));
+            std::min<int64_t>(n_i64, start + static_cast<int64_t>(cfg.sync_reps * sps));
         out.support_lo = sup_lo;
         out.support_hi = sup_hi;
         for (size_t i = 0; i < ih_len; ++i) {
@@ -998,577 +2073,49 @@ bool sic_one(const cplx* y,
         return true;
     }
 
-    // ======================= Estimate =======================================
-    int64_t roi_lo = cfg.roi_lo;
-    int64_t roi_hi = cfg.roi_hi;
-    if (roi_hi <= roi_lo) {
-        roi_lo = 0;
-        roi_hi = static_cast<int64_t>(n);
-    }
-    roi_hi = std::min<int64_t>(roi_hi, static_cast<int64_t>(n) -
-                                           static_cast<int64_t>(Ls) + 1);
-    roi_lo = std::max<int64_t>(roi_lo, 0);
-    out.roi_samples = (roi_hi > roi_lo) ? static_cast<size_t>(roi_hi - roi_lo) : 0;
-    const int64_t stride = std::max<int64_t>(1, static_cast<int64_t>(cfg.coarse_stride));
-
-    // |<sync, seg>| / (||seg|| * ||sync||)  (sync_norm has unit energy)
-    //
-    // detect_coarse evaluates this at ~(ROI/stride) positions, each a 1016-tap
-    // complex conjugate dot.  The TEMPLATE correlation stays a single VOLK
-    // kernel (unaligned dispatcher: `seg = y + d` has no alignment guarantee).
-    // The segment self-energy is NOT a second per-lag dot any more: it is the
-    // difference of two entries of the double-precision |y|^2 prefix
-    // `energy_prefix`, built once per window over the queried range below.  That
-    // removes ~half the per-lag work; the normalization is mathematically the
-    // same sum (double-accumulated instead of the legacy float self-dot), so the
-    // detection decisions are unchanged.
-    double* const energy =
-        scratch.energy_prefix.empty() ? nullptr : scratch.energy_prefix.data();
-    size_t energy_fill = 0;
-    auto norm_at = [&](int64_t d, cplx* corr_out) -> double {
-        if (d < 0 || d + static_cast<int64_t>(Ls) > static_cast<int64_t>(n)) {
-            if (corr_out)
-                *corr_out = cplx(0.f, 0.f);
-            return 0.0;
-        }
-        const cplx* const seg = y + d;
-        const unsigned np = static_cast<unsigned>(Ls);
-        cplx dot(0.f, 0.f);
-        volk_32fc_x2_conjugate_dot_prod_32fc_u(&dot, seg, syncn, np);
-        const size_t ehi = static_cast<size_t>(d) + Ls;
-        double e = 0.0;
-        if (energy && ehi <= energy_fill) {
-            e = std::sqrt(energy[ehi] - energy[static_cast<size_t>(d)]);
-        } else {
-            // Out-of-range query (runtime ROI/reps beyond the prepared prefix):
-            // exact legacy path, one VOLK self conjugate dot, real part = energy.
-            cplx self(0.f, 0.f);
-            volk_32fc_x2_conjugate_dot_prod_32fc_u(&self, seg, seg, np);
-            e = std::sqrt(static_cast<double>(self.real()));
-        }
-        if (corr_out)
-            *corr_out = dot;
-        return (e > 0.0) ? static_cast<double>(std::abs(dot)) / e : 0.0;
-    };
-
-    // ---- 1. detect_coarse --------------------------------------------------
-    int64_t coarse_pos = -1;
-    double coarse_nrm = 0.0;
-    {
-        const auto t0 = std::chrono::steady_clock::now();
-        // One double-precision |y|^2 prefix pass over the range the search can
-        // reach; every lag energy is then a single difference.  The chosen
-        // (double) summation order is fixed, so results are deterministic.
-        if (energy) {
-            energy_fill = std::min(scratch.energy_prefix.size() - 1, n);
-            double acc = 0.0;
-            energy[0] = 0.0;
-            for (size_t i = 0; i < energy_fill; ++i) {
-                const cplx v = y[i];
-                acc += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
-                       static_cast<double>(v.imag()) * static_cast<double>(v.imag());
-                energy[i + 1] = acc;
-            }
-        }
-        for (int64_t d = roi_lo; d < roi_hi; d += stride) {
-            const double nrm = norm_at(d, nullptr);
-            ++out.coarse_candidates;
-            ++out.correlations;
-            if (nrm > coarse_nrm) {
-                coarse_nrm = nrm;
-                coarse_pos = d;
-            }
-        }
-        out.timings.detect_coarse_us = us_since(t0);
-    }
-
-    // ---- 1b. detect_fine ---------------------------------------------------
-    int64_t detected_start = coarse_pos;
-    double peak_norm = coarse_nrm;
-    {
-        const auto t0 = std::chrono::steady_clock::now();
-        if (coarse_pos >= 0) {
-            const int64_t lo = std::max(roi_lo, coarse_pos - stride);
-            const int64_t hi = std::min(roi_hi, coarse_pos + stride + 1);
-            for (int64_t d = lo; d < hi; ++d) {
-                const double nrm = norm_at(d, nullptr);
-                ++out.fine_candidates;
-                ++out.correlations;
-                if (nrm > peak_norm) {
-                    peak_norm = nrm;
-                    detected_start = d;
-                }
-            }
-        }
-        out.timings.detect_fine_us = us_since(t0);
-    }
-
-    // ---- 2. repetition confirmation (period-ambiguity resolution) ----------
-    {
-        const auto t0 = std::chrono::steady_clock::now();
-        if (detected_start >= 0) {
-            int64_t origin = detected_start;
-            const int64_t floor_lo = std::max<int64_t>(roi_lo, 0);
-            while (origin - static_cast<int64_t>(sps) >= floor_lo) {
-                const int64_t d = origin - static_cast<int64_t>(sps);
-                const double nrm = (d + static_cast<int64_t>(Ls) <=
-                                    static_cast<int64_t>(n))
-                    ? norm_at(d, nullptr)
-                    : 0.0;
-                ++out.correlations;
-                if (nrm >= detect_thr)
-                    origin = d;
-                else
-                    break;
-            }
-            const int64_t lo = std::max(roi_lo, origin - stride);
-            const int64_t hi = std::min(roi_hi, origin + stride + 1);
-            for (int64_t d = lo; d < hi; ++d) {
-                const double nrm = norm_at(d, nullptr);
-                ++out.fine_candidates;
-                ++out.correlations;
-                if (nrm > peak_norm) {
-                    origin = d;
-                    peak_norm = nrm;
-                }
-            }
-            detected_start = origin;
-        }
-        out.timings.detect_fine_us += us_since(t0);
-    }
-    if (detected_start < 0 || peak_norm < detect_thr) {
-        out.state = SicState::Bypassed;
-        out.bypass_reason = "below_detect_threshold";
-        finish();
-        return true;
-    }
-    out.detected = true;
-    out.detected_start = detected_start;
-
-    // ---- repetition confirmation -------------------------------------------
-    const size_t rtot = cfg.fit_reps + cfg.validation_reps;
-    cplx rep_corr[kMaxReps];
-    double rep_norms[kMaxReps];
-    size_t confirmed = 0;
-    {
-        for (size_t k = 0; k < rtot; ++k) {
-            const int64_t d = detected_start + static_cast<int64_t>(k * sps);
-            cplx c(0.f, 0.f);
-            const double nrm = (d + static_cast<int64_t>(Ls) <= static_cast<int64_t>(n))
-                ? norm_at(d, &c)
-                : 0.0;
-            rep_corr[k] = c;
-            rep_norms[k] = nrm;
-            ++out.correlations;
-            if (nrm >= detect_thr)
-                ++confirmed;
-        }
-    }
-    if (confirmed < 2) {
-        out.state = SicState::Ambiguous;
-        out.ambiguous = true;
-        out.bypass_reason = "repetition_not_confirmed";
-        out.reject_reason = "repetition_not_confirmed";
-        finish();
-        return true;
-    }
-    if (confirmed < rtot)
-        out.partial = true;
-
-    // ---- 3. cfo (steady-state repeated symbols only) -----------------------
-    double cfo = 0.0;
-    {
-        const auto t0 = std::chrono::steady_clock::now();
-        if (cfg.enable_cfo) {
-            dcp z(0.0, 0.0);
-            size_t cnt = 0;
-            const size_t k_lo = (rtot >= 3) ? 1 : 0;
-            for (size_t k = k_lo; k + 1 < rtot; ++k) {
-                if (rep_norms[k] >= detect_thr && rep_norms[k + 1] >= detect_thr) {
-                    dcp t = dcp(rep_corr[k + 1]) * std::conj(dcp(rep_corr[k]));
-                    const double a = std::abs(t);
-                    if (a > 0.0) {
-                        z += t / a;
-                        ++cnt;
-                    }
-                }
-            }
-            if (cnt > 0) {
-                const double dphi = std::arg(z);
-                cfo = dphi / (2.0 * kPi * static_cast<double>(sps) / fs);
-            }
-        }
-        out.timings.cfo_us = us_since(t0);
-    }
-    out.cfo_hz = cfo;
-    const double w = 2.0 * kPi * cfo / fs;
-
-    // ---- 4. cir ------------------------------------------------------------
-    const int64_t dmin = -kCirPre;
-    const int64_t dmax = static_cast<int64_t>(cfg.post_tail) + kCirPre;
-    const size_t nd = static_cast<size_t>(dmax - dmin);
-    if (nd > scratch.cir.size()) {
+    // ======================= Estimate + frozen apply ========================
+    const int64_t visible_end = resolve_visible_end(n, cfg.observed_end_sample);
+    if (visible_end < 0) {
         out.state = SicState::Failed;
-        out.reject_reason = "capacity_overflow";
-        finish();
-        return true;
-    }
-    {
-        const auto t0 = std::chrono::steady_clock::now();
-        for (size_t idx = 0; idx < nd; ++idx) {
-            const int64_t pos = detected_start + dmin + static_cast<int64_t>(idx);
-            cplx c(0.f, 0.f);
-            if (pos >= 0 && pos + static_cast<int64_t>(Ls) <= static_cast<int64_t>(n)) {
-                dcp acc(0.0, 0.0);
-                for (size_t k = 0; k < Ls; ++k)
-                    acc += dcp(std::conj(syncn[k])) * dcp(y[pos + static_cast<int64_t>(k)]);
-                c = cplx(static_cast<float>(acc.real()), static_cast<float>(acc.imag()));
-            }
-            scratch.cir[idx] = c;
-            scratch.cir_mag[idx] = static_cast<float>(std::abs(c));
-        }
-        out.timings.cir_us = us_since(t0);
-    }
-
-    // ---- path_select -------------------------------------------------------
-    double tau_abs[kSicMaxPaths];
-    size_t nsel = 0;
-    {
-        const auto t0 = std::chrono::steady_clock::now();
-        size_t nc = 0;
-        for (size_t i = 1; i + 1 < nd; ++i) {
-            const double m = scratch.cir_mag[i];
-            if (m > scratch.cir_mag[i - 1] && m >= scratch.cir_mag[i + 1]) {
-                scratch.cand_delay[nc] = static_cast<int64_t>(i);
-                scratch.cand_mag[nc] = m;
-                ++nc;
-            }
-        }
-        // selection sort by magnitude descending
-        for (size_t a = 0; a < nc; ++a) {
-            size_t bi = a;
-            for (size_t b = a + 1; b < nc; ++b)
-                if (scratch.cand_mag[b] > scratch.cand_mag[bi])
-                    bi = b;
-            if (bi != a) {
-                std::swap(scratch.cand_mag[a], scratch.cand_mag[bi]);
-                std::swap(scratch.cand_delay[a], scratch.cand_delay[bi]);
-            }
-        }
-        out.n_path_candidates = nc;
-        double mmax = 0.0;
-        for (size_t i = 0; i < nd; ++i)
-            mmax = std::max(mmax, static_cast<double>(scratch.cir_mag[i]));
-        const double floor = kPathPeakFloor * mmax;
-        const size_t spacing = scratch.min_spacing;
-        int64_t sel_idx[kSicMaxPaths];
-        for (size_t c = 0; c < nc && nsel < K; ++c) {
-            if (scratch.cand_mag[c] < floor)
-                continue;
-            bool ok = true;
-            for (size_t s = 0; s < nsel; ++s) {
-                const int64_t diff = scratch.cand_delay[c] - sel_idx[s];
-                const int64_t ad = diff < 0 ? -diff : diff;
-                if (ad < static_cast<int64_t>(spacing)) {
-                    ok = false;
-                    break;
-                }
-            }
-            if (!ok)
-                continue;
-            sel_idx[nsel] = scratch.cand_delay[c];
-            tau_abs[nsel] =
-                static_cast<double>(detected_start + dmin + scratch.cand_delay[c]);
-            ++nsel;
-        }
-        out.timings.path_select_us = us_since(t0);
-    }
-    if (nsel == 0) {
-        out.state = SicState::Failed;
-        out.bypass_reason = "no_paths";
-        out.reject_reason = "no_paths";
-        finish();
-        return true;
-    }
-    out.n_paths = nsel;
-    out.support_lo = std::max<int64_t>(0, detected_start);
-    out.support_hi = std::min<int64_t>(
-        static_cast<int64_t>(n),
-        detected_start + static_cast<int64_t>(confirmed * sps + cfg.post_tail));
-
-    // ---- 4b. subtraction / commit ROI overlap gate --------------------------
-    // The SEARCH ROI (cfg.roi_lo/roi_hi) is deliberately wide so the natural
-    // preamble/multipath tail is never clipped by the candidate-start range
-    // (R02).  The SUBTRACTION / COMMIT ROI (cfg.sub_roi_lo/sub_roi_hi) is a
-    // separate, sensing-owned region: the SIC may only alter samples that
-    // overlap the region the sensing receiver actually processes (its preamble /
-    // CIR).  A template-consistent comm detected ENTIRELY OUTSIDE that region is
-    // real but NOT actionable -- subtracting it would change the output while
-    // removing nothing from the sensing signal, which the R01/R10 negative
-    // contract counts as a false commit.  Fail-closed: BYPASS (out == y).
-    // When no sub_roi is configured the legacy subtraction mask (clipped to the
-    // search ROI) is kept so existing callers are byte-for-byte unchanged.
-    int64_t sub_lo = 0;
-    int64_t sub_hi = 0;
-    if (cfg.sub_roi_hi > cfg.sub_roi_lo) {
-        const int64_t lo = std::max<int64_t>(out.support_lo, cfg.sub_roi_lo);
-        const int64_t hi = std::min<int64_t>(out.support_hi, cfg.sub_roi_hi);
-        const int64_t overlap = (hi > lo) ? (hi - lo) : 0;
-        out.sub_overlap = overlap;
-        const int64_t need = std::max<int64_t>(
-            1, static_cast<int64_t>(cfg.sub_min_overlap));
-        if (overlap < need) {
-            out.state = SicState::Bypassed;
-            out.bypass_reason = "outside_sensing_roi";
-            out.reject_reason = "outside_sensing_roi";
-            finish();
-            return true;
-        }
-        sub_lo = lo;
-        sub_hi = hi;
-    } else {
-        out.sub_overlap = -1;
-        sub_lo = std::max<int64_t>(0, std::max<int64_t>(detected_start, roi_lo));
-        sub_hi = std::min<int64_t>(static_cast<int64_t>(n),
-                                   std::min<int64_t>(out.support_hi, roi_hi));
-    }
-
-    const int64_t fit_lo = detected_start;
-    const int64_t fit_hi = detected_start + static_cast<int64_t>(Mfit);
-
-    // ---- 5. fractional_refine ---------------------------------------------
-    dcp h[kSicMaxPaths];
-    for (size_t k = 0; k < nsel; ++k)
-        h[k] = dcp(0.0, 0.0);
-    double cond = 0.0;
-    if (cfg.enable_fractional && fit_hi <= static_cast<int64_t>(n) && Mfit >= nsel) {
-        const auto t0 = std::chrono::steady_clock::now();
-        fill_rot(scratch.rot.data(), Mfit, fit_lo, w);
-        for (size_t k = 0; k < nsel; ++k)
-            build_column(scratch.A.data() + k * Mfit, Mfit, up, plen,
-                         static_cast<int64_t>(fit_lo), tau_abs[k],
-                         scratch.rot.data());
-        for (size_t m = 0; m < Mfit; ++m)
-            scratch.hh_b[m] = dcp(y[fit_lo + static_cast<int64_t>(m)]);
-        if (qr_factor_rhs(scratch.A.data(), Mfit, nsel, scratch.hh_b.data(),
-                          scratch.hh_v.data()) &&
-            qr_solve(scratch.A.data(), Mfit, nsel, scratch.hh_b.data(), h)) {
-            // The projection score |<col, r>|^2 / ||col||^2 with
-            // col = u * rot is invariant if both the column and the residual
-            // are un-rotated: <u*rot, r> = <u, conj(rot)*r> and ||u*rot|| =
-            // ||u||.  So the candidate loop builds the (float32, un-rotated)
-            // shifted template `u` and projects it onto the float residual
-            // q = conj(rot)*r with two VOLK 32fc kernels -- no double column
-            // rebuild and no per-candidate CFO multiply.  The residual itself
-            // is still accumulated in double (unchanged path).
-            cplx* const colf = scratch.col_f.data();
-            cplx* const qf = scratch.q_f.data();
-            const unsigned np = static_cast<unsigned>(Mfit);
-            for (size_t k = 0; k < nsel; ++k) {
-                // residual from all other paths (coordinate descent)
-                for (size_t m = 0; m < Mfit; ++m)
-                    scratch.resid[m] = dcp(y[fit_lo + static_cast<int64_t>(m)]);
-                for (size_t j = 0; j < nsel; ++j) {
-                    if (j == k)
-                        continue;
-                    build_column(scratch.col.data(), Mfit, up, plen,
-                                 static_cast<int64_t>(fit_lo), tau_abs[j],
-                                 scratch.rot.data());
-                    for (size_t m = 0; m < Mfit; ++m)
-                        scratch.resid[m] -= h[j] * scratch.col[m];
-                }
-                for (size_t m = 0; m < Mfit; ++m) {
-                    const dcp ro = scratch.rot[m];
-                    const dcp rv = scratch.resid[m];
-                    qf[m] = cplx(
-                        static_cast<float>(ro.real() * rv.real() +
-                                           ro.imag() * rv.imag()),
-                        static_cast<float>(ro.real() * rv.imag() -
-                                           ro.imag() * rv.real()));
-                }
-                double best_tau = tau_abs[k];
-                double best_score = -1.0;
-                for (int oi = 0; oi <= 20; ++oi) {
-                    const double delta = -0.5 + 0.05 * oi;
-                    build_shifted_f(colf, Mfit, up, plen,
-                                    static_cast<int64_t>(fit_lo),
-                                    tau_abs[k] + delta);
-                    cplx num(0.f, 0.f), self(0.f, 0.f);
-                    volk_32fc_x2_conjugate_dot_prod_32fc_u(&num, colf, qf, np);
-                    volk_32fc_x2_conjugate_dot_prod_32fc_u(&self, colf, colf, np);
-                    const double den = static_cast<double>(self.real());
-                    const double score =
-                        (den > 0.0) ? std::norm(dcp(num)) / den : 0.0;
-                    if (score > best_score) {
-                        best_score = score;
-                        best_tau = tau_abs[k] + delta;
-                    }
-                }
-                tau_abs[k] = best_tau;
-            }
-        }
-        out.timings.fractional_refine_us = us_since(t0);
-    }
-
-    // ---- 6a. matrix_build --------------------------------------------------
-    {
-        const auto t0 = std::chrono::steady_clock::now();
-        fill_rot(scratch.rot.data(), Mfit, fit_lo, w);
-        for (size_t k = 0; k < nsel; ++k)
-            build_column(scratch.A.data() + k * Mfit, Mfit, up, plen,
-                         static_cast<int64_t>(fit_lo), tau_abs[k],
-                         scratch.rot.data());
-        for (size_t m = 0; m < Mfit; ++m)
-            scratch.hh_b[m] = dcp(y[fit_lo + static_cast<int64_t>(m)]);
-        out.timings.matrix_build_us = us_since(t0);
-    }
-
-    // ---- 6b. gain_fit (Householder QR of A; cond(A) from the SVD of R) ------
-    bool basis_finite = true;
-    {
-        const auto t0 = std::chrono::steady_clock::now();
-        for (size_t k = 0; k < nsel * Mfit; ++k) {
-            if (!std::isfinite(scratch.A[k].real()) ||
-                !std::isfinite(scratch.A[k].imag())) {
-                basis_finite = false;
-                break;
-            }
-        }
-        // Householder QR solves the M x K least squares directly -- no normal
-        // equations, so no cond(A)^2 amplification -- and `gain_condition` is
-        // cond2(A) computed from the singular values of the factor R (see
-        // detail::qr_cond_solve).  The old max|R_kk|/min|R_kk| pivot ratio was
-        // NOT cond(A): it underestimated it (e.g. 666669.93 vs 1333333.33 for
-        // A = [[1,1],[0,1.5e-6]]) and let ill-conditioned fits through the
-        // ceiling.  Any failure here is fail-closed.
-        const bool solve_ok = detail::qr_cond_solve(
-            scratch.A.data(), Mfit, nsel, scratch.hh_b.data(), h,
-            scratch.hh_v.data(), &cond);
-        out.gain_condition = solve_ok ? cond : 0.0;
-        out.timings.gain_fit_us = us_since(t0);
-        if (!solve_ok || !basis_finite) {
-            out.state = SicState::Failed;
-            out.reject_reason = "gain_fit_failed";
-            finish();
-            return true;
-        }
-    }
-
-    // Expose the final (fractionally refined) absolute fit delays for direct
-    // cross-checking against sic_reference.py's result["taus"].
-    out.n_taus = nsel;
-    for (size_t k = 0; k < nsel; ++k)
-        out.taus[k] = tau_abs[k];
-
-    // ---- 7. reconstruct over the union of delayed-preamble support ---------
-    // Paths are magnitude-sorted, so tau_abs[0] is NOT necessarily the smallest
-    // delay: take the min/max over ALL selected paths.
-    int64_t union_lo = static_cast<int64_t>(std::floor(tau_abs[0]));
-    int64_t union_hi = static_cast<int64_t>(std::ceil(tau_abs[0])) +
-                       static_cast<int64_t>(plen);
-    for (size_t k = 1; k < nsel; ++k) {
-        union_lo = std::min<int64_t>(union_lo,
-                                     static_cast<int64_t>(std::floor(tau_abs[k])));
-        union_hi = std::max<int64_t>(
-            union_hi, static_cast<int64_t>(std::ceil(tau_abs[k])) +
-                          static_cast<int64_t>(plen));
-    }
-    // sub_lo/sub_hi were resolved by the subtraction/commit ROI gate in step 4b:
-    // support ∩ sub_roi when a sensing sub_roi is configured, else the legacy
-    // support ∩ search-ROI mask.
-    int64_t ih_lo = std::max<int64_t>(0, std::min<int64_t>(union_lo, sub_lo));
-    int64_t ih_hi = std::min<int64_t>(
-        static_cast<int64_t>(n), std::max<int64_t>(union_hi, sub_hi));
-    if (ih_hi < ih_lo)
-        ih_hi = ih_lo;
-    const size_t ih_len = static_cast<size_t>(ih_hi - ih_lo);
-    if (ih_len > scratch.cap_region) {
-        out.state = SicState::Failed;
-        out.reject_reason = "capacity_overflow";
-        finish();
-        return true;
-    }
-    {
-        const auto t0 = std::chrono::steady_clock::now();
-        std::fill(scratch.acc.begin(), scratch.acc.begin() + ih_len, dcp(0.0, 0.0));
-        for (size_t k = 0; k < nsel; ++k)
-            accum_shifted(scratch.acc.data(), ih_len, up, plen, ih_lo, tau_abs[k],
-                          h[k]);
-        // CFO rotate + complex combine, VOLK 32fc (same mask semantics: the
-        // rotation/combine is applied to the full reconstruction window, and the
-        // caller only subtracts inside the subtraction mask).
-        reconstruct_combine(scratch.ihat.data(), scratch.acc.data(), ih_len,
-                            ih_lo, w, scratch.rot_f.data(),
-                            scratch.rot_base.data());
-        out.timings.reconstruct_us = us_since(t0);
-    }
-    if (ihatbuf) {
-        for (size_t i = 0; i < ih_len; ++i)
-            ihatbuf[static_cast<size_t>(ih_lo + static_cast<int64_t>(i))] =
-                scratch.ihat[i];
-    }
-
-    // ---- 8. validate_commit (disjoint holdout reps) ------------------------
-    bool commit = false;
-    {
-        const auto t0 = std::chrono::steady_clock::now();
-        const int64_t hstart = detected_start + static_cast<int64_t>(Mfit);
-        const int64_t hend = hstart + static_cast<int64_t>(cfg.validation_reps * sps);
-        // cond is cond2(A) (SVD of the QR factor R), the honest condition
-        // number, so this gate is exactly `numpy.linalg.cond(A) < 1e6`.
-        const bool cond_ok = cond < kMaxGainCond;
-        if (hend <= static_cast<int64_t>(n) && cond_ok) {
-            const size_t Mv = static_cast<size_t>(hend - hstart);
-            double e_in = 0.0;
-            for (size_t m = 0; m < Mv; ++m) {
-                const int64_t abs_idx = hstart + static_cast<int64_t>(m);
-                const cplx ih = (abs_idx >= ih_lo &&
-                                 abs_idx < ih_hi)
-                    ? scratch.ihat[static_cast<size_t>(abs_idx - ih_lo)]
-                    : cplx(0.f, 0.f);
-                scratch.resid[m] = dcp(y[abs_idx]) - dcp(ih);
-                e_in += std::norm(scratch.resid[m]);
-            }
-            // normalized correlation with the delay-0 template over the holdout
-            fill_rot(scratch.rot.data(), Mv, hstart, w);
-            build_column(scratch.col.data(), Mv, up, plen, hstart,
-                         static_cast<double>(detected_start), scratch.rot.data());
-            dcp num(0.0, 0.0);
-            double ec = 0.0;
-            for (size_t m = 0; m < Mv; ++m) {
-                num += std::conj(scratch.col[m]) * scratch.resid[m];
-                ec += std::norm(scratch.col[m]);
-            }
-            const double den = std::sqrt(e_in) * std::sqrt(ec);
-            const double rc = (den > 0.0) ? std::abs(num) / den : 1.0;
-            out.residual_corr = rc;
-            commit = rc < cfg.validate_threshold;
-            if (!commit)
-                out.reject_reason = "holdout_residual_high";
-        } else {
-            out.residual_corr = std::numeric_limits<double>::quiet_NaN();
-            out.reject_reason = "validation_window_unavailable";
-        }
-        out.timings.validate_commit_us = us_since(t0);
-    }
-
-    if (!commit) {
-        out.state = SicState::Bypassed;
-        out.bypass_reason = "not_committed";
-        if (!out.reject_reason)
-            out.reject_reason = "not_committed";
+        out.reject_reason = "invalid_observed_end";
         finish();
         return true;
     }
 
-    const int64_t mlo = std::max<int64_t>(0, sub_lo);
-    const int64_t mhi = std::min<int64_t>(static_cast<int64_t>(n), sub_hi);
-    for (int64_t abs_idx = mlo; abs_idx < mhi; ++abs_idx) {
-        const cplx ih = (abs_idx >= ih_lo && abs_idx < ih_hi)
-            ? scratch.ihat[static_cast<size_t>(abs_idx - ih_lo)]
-            : cplx(0.f, 0.f);
-        outbuf[static_cast<size_t>(abs_idx)] =
-            outbuf[static_cast<size_t>(abs_idx)] - ih;
+    SicModel model;
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        estimate_impl(y, n, visible_end, cfg, scratch, model, out);
+        out.timings.estimate_total_us = us_since(t0);
+    }
+    if (!model.valid) {
+        // estimate_impl already set state / bypass_reason / reject_reason.
+        finish();
+        return true;
+    }
+
+    // Backfill the already-observed prefix, then clean forward.  Both passes use
+    // the same frozen model and the same absolute phase/template indexing, so
+    // the boundary needs no special case.
+    const int64_t backfill_end = std::min<int64_t>(visible_end, n_i64);
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (backfill_end > 0) {
+            apply_model(model, y, static_cast<size_t>(backfill_end), 0, templates,
+                        cfg, scratch, outbuf, ihatbuf, &out.timings);
+        }
+        out.timings.backfill_us = us_since(t0);
+    }
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        const size_t fwd0 = static_cast<size_t>(backfill_end);
+        const size_t fwd = n - fwd0;
+        if (fwd > 0) {
+            apply_model(model, y + fwd0, fwd, static_cast<int64_t>(fwd0),
+                        templates, cfg, scratch, outbuf + fwd0,
+                        ihatbuf ? ihatbuf + fwd0 : nullptr, &out.timings);
+        }
+        out.timings.apply_forward_us = us_since(t0);
     }
     out.state = SicState::Committed;
     out.committed = true;

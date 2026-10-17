@@ -869,7 +869,9 @@ void bind_preamble_sic(py::module& m)
              py::arg("path_min_spacing") = size_t(0),
              py::arg("post_tail") = size_t(100),
              py::arg("max_window_samples") = size_t(0),
-             py::arg("pending_bypass_max") = size_t(0))
+             py::arg("pending_bypass_max") = size_t(0),
+             py::arg("support_mode") = std::string("configured_nominal"),
+             py::arg("online_validation_reps") = size_t(0))
         .def_static("make",
                     &Blk::make,
                     py::arg("sync_template_path"),
@@ -896,7 +898,9 @@ void bind_preamble_sic(py::module& m)
                     py::arg("path_min_spacing") = size_t(0),
                     py::arg("post_tail") = size_t(100),
                     py::arg("max_window_samples") = size_t(0),
-                    py::arg("pending_bypass_max") = size_t(0))
+                    py::arg("pending_bypass_max") = size_t(0),
+                    py::arg("support_mode") = std::string("configured_nominal"),
+                    py::arg("online_validation_reps") = size_t(0))
         .def_static("make_from_templates",
                     &Blk::make_from_templates,
                     py::arg("sync"),
@@ -923,7 +927,9 @@ void bind_preamble_sic(py::module& m)
                     py::arg("path_min_spacing") = size_t(0),
                     py::arg("post_tail") = size_t(100),
                     py::arg("max_window_samples") = size_t(0),
-                    py::arg("pending_bypass_max") = size_t(0))
+                    py::arg("pending_bypass_max") = size_t(0),
+                    py::arg("support_mode") = std::string("configured_nominal"),
+                    py::arg("online_validation_reps") = size_t(0))
         .def("windows_offered", &Blk::windows_offered)
         .def("windows_admitted", &Blk::windows_admitted)
         .def("windows_completed", &Blk::windows_completed)
@@ -954,6 +960,9 @@ void bind_preamble_sic(py::module& m)
         .def("post_tail", &Blk::post_tail)
         .def("max_window_samples", &Blk::max_window_samples)
         .def("pending_bypass_max", &Blk::pending_bypass_max)
+        .def("support_mode", &Blk::support_mode)
+        .def("model_mode", &Blk::model_mode)
+        .def("online_validation_reps", &Blk::online_validation_reps)
         .def("truth_port_enabled", &Blk::truth_port_enabled);
 }
 

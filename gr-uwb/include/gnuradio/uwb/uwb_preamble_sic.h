@@ -85,6 +85,64 @@
  * measured through PMT construction; the pub-inclusive mirrors are on `status`
  * (a message cannot carry the duration of its own enqueue).
  *
+ * ================= S1 frozen 8-SYNC model metadata (additive) ===============
+ * Every `out` meta also carries the frozen-model publication produced by the S1
+ * core (`estimate_model` + `apply_model`, composed exactly like `sic_one`):
+ *   sic_model_mode            "estimate8_frozen" | "confirmed_legacy"
+ *   sic_model_id              FNV-1a-64 of the frozen model fields
+ *   sic_model_fingerprint     lower-case hex ("0x%016llx") of sic_model_id
+ *   sic_observed_end_sample   DECLARED estimation visibility limit (0 = whole
+ *                             window); see sic_observed_end_source
+ *   sic_observed_end_source   "observed_end_sample" | "visible_end_sample" |
+ *                             "whole_window_default"
+ *   sic_visible_end_sample    RESOLVED visibility limit actually used by the
+ *                             core (== window length for whole-window mode)
+ *   sic_training_lo/hi        training span the fit actually read
+ *   sic_estimation_ready_sample  last sample the estimator required (== hi)
+ *   sic_support_source        "configured_nominal_prediction" | ... | "none"
+ *   sic_support_coverage      (support_hi-support_lo)/(sync_reps*sps+post_tail)
+ *   sic_sub_lo/sub_hi         permitted cancellation region [lo, hi)
+ *   sic_phase_reference       CFO phase anchor (== origin)
+ *   sic_fit_residual          normalized training residual
+ *   sic_cond2                 cond2(A) of the final gain-fit design
+ *   sic_apply_refit_count     ALWAYS 0 (apply never re-fits); asserted by QA
+ *   sic_apply_param_deltas    ALWAYS 0 (no param update in apply); asserted
+ *   sic_nominal_sync_reps / sic_samples_per_symbol / sic_sample_rate
+ * The essentials are mirrored on the `status` event dict.
+ *
+ * ==================== S1 per-path frozen-model tables (additive) ============
+ * The frozen model's per-path tables are ALWAYS present on `out` (and on the
+ * diagnostic `i_hat` meta), so an absent key never has to be guessed at:
+ *   sic_tau        f64vector, length n_paths: ABSOLUTE work-sample delays
+ *                  (SicModel::tau_abs); index 0..n_paths-1 follows the model's
+ *                  own (magnitude-sorted) path selection order
+ *   sic_gain_re    f64vector, length n_paths: real part of the complex gains
+ *   sic_gain_im    f64vector, length n_paths: imag part of the complex gains
+ *                  (SAME index order as sic_tau: gain[k] belongs to tau[k])
+ *   sic_path_count size_t: number of published per-path entries
+ *                  (== sic_tau.size()); on a committed window it also equals
+ *                  sic_n_paths, the core's detected selection count
+ *   sic_gain_cond  double: cond2(A) of the final gain-fit design
+ *                  (SicModel::gain_condition; == sic_cond2 when a model exists)
+ * The values come from the SicModel returned by estimate_model (authoritative),
+ * not from SicResult::taus.  On every window where no frozen model was APPLIED
+ * (off/oracle, bypass, failure) the three vectors are published PRESENT but
+ * EMPTY (length 0) and sic_path_count is 0, so "no paths" is distinguishable
+ * from "not published".  sic_n_paths keeps its earlier meaning (paths selected
+ * by detection) and is therefore only equal to sic_path_count when a model was
+ * frozen and committed.  sic_path_count / sic_gain_cond are mirrored on
+ * `status` (together with sic_n_paths).
+ *
+ * ===================== observed_end_sample plumbing ========================
+ * The per-window estimation visibility limit is taken FROM THE PDU META:
+ * `observed_end_sample` (preferred) or `visible_end_sample`, both int64.  When
+ * neither key is present the adapter passes 0 = "the whole window is visible"
+ * and records sic_observed_end_sample=0 with
+ * sic_observed_end_source="whole_window_default" (the legacy-visible contract).
+ * A declared positive prefix is passed through unchanged and is NEVER widened to
+ * the whole window.  Estimation still only ever reads that prefix; `apply`
+ * always cancels over the whole window (S1 API doc §2/§6.2).
+ *
  * =========================== Oracle truth dict =============================
  * The `truth` port exists ONLY when mode == "oracle".  In estimate/off it is
  * not registered and no truth object is stored on the block.  Posted keyed by
@@ -153,6 +211,14 @@ public:
      *                               from the first window).
      * \param pending_bypass_max     bound on the pending-bypass FIFO
      *                               (0 = in_flight_max + queue_capacity).
+     * \param support_mode           S1 cancellation-support mode:
+     *                               "configured_nominal" (default, the frozen
+     *                               8-SYNC estimate cancels the whole nominal
+     *                               preamble) or "confirmed_legacy" (explicit
+     *                               S0-comparison support + holdout gate).
+     * \param online_validation_reps 0 (default) = cancel as soon as the 8-SYNC
+     *                               model is frozen; > 0 = explicit conservative
+     *                               holdout wait (must be <= validation_reps).
      */
     static sptr make(const std::string& sync_template_path,
                      const std::string& preamble_template_path,
@@ -178,7 +244,9 @@ public:
                      size_t path_min_spacing = 0,
                      size_t post_tail = 100,
                      size_t max_window_samples = 0,
-                     size_t pending_bypass_max = 0);
+                     size_t pending_bypass_max = 0,
+                     const std::string& support_mode = "configured_nominal",
+                     size_t online_validation_reps = 0);
 
     /**
      * Python / in-memory path: same as make() but the two comm templates are
@@ -208,7 +276,10 @@ public:
                                     size_t path_min_spacing = 0,
                                     size_t post_tail = 100,
                                     size_t max_window_samples = 0,
-                                    size_t pending_bypass_max = 0);
+                                    size_t pending_bypass_max = 0,
+                                    const std::string& support_mode =
+                                        "configured_nominal",
+                                    size_t online_validation_reps = 0);
 
     ~UwbPreambleSic() override;
 
@@ -293,6 +364,15 @@ public:
     size_t pending_bypass_max() const { return d_pending_bypass_max_; }
     //! True only in oracle mode (the truth port exists only then).
     bool truth_port_enabled() const { return d_truth_oracle_; }
+    //! Configured S1 support mode ("configured_nominal" | "confirmed_legacy").
+    const std::string& support_mode() const { return d_support_mode_name_; }
+    //! Published frozen-model mode ("estimate8_frozen" | "confirmed_legacy").
+    const std::string& model_mode() const { return d_model_mode_name_; }
+    //! Explicit conservative holdout repetitions (0 = cancel with no holdout).
+    size_t online_validation_reps() const
+    {
+        return d_cfg_.online_validation_reps;
+    }
 
 protected:
     UwbPreambleSic(const std::vector<gr_complex>& sync,
@@ -319,7 +399,9 @@ protected:
                    size_t path_min_spacing,
                    size_t post_tail,
                    size_t max_window_samples,
-                   size_t pending_bypass_max);
+                   size_t pending_bypass_max,
+                   const std::string& support_mode,
+                   size_t online_validation_reps);
 
     bool start() override;
     bool stop() override;
@@ -359,6 +441,10 @@ private:
     sic::SicConfig d_cfg_;
     sic::SicScratch d_scratch_;
     std::string d_mode_name_;
+    //! Configured S1 support-mode label (ctor argument, verbatim).
+    std::string d_support_mode_name_ = "configured_nominal";
+    //! Canonical model label published as sic_model_mode.
+    std::string d_model_mode_name_ = "estimate8_frozen";
     size_t d_in_flight_max_ = 8;
     size_t d_iq_budget_bytes_ = (size_t(64) << 20);
     size_t d_queue_capacity_ = 8;
