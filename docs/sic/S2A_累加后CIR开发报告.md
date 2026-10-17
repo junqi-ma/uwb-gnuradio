@@ -376,6 +376,11 @@ docs/sic/S2A_累加后CIR开发报告.md                新增（本文件）
 docs/sic/figures/s2a/*.png                      新增（5 张）
 ```
 
+提交：`db145dc`（主实现 + 报告）、`8f274fa`（verifier 拒绝 QA 加固）、
+`f230218`（README 状态修正）。运行时的 `run_manifest.git` 记为基线 `93c80b3`、
+`dirty=true`（结果在提交前生成），因此可复现性以 manifest 里
+`inputs_hashed` 的**逐文件 sha256** 为准（第 2 节已列出），比 dirty 标记更强。
+
 共享 SIC 核心/adapter 与旧 QA、`tools/sic/sic_reference.py` **未修改**。
 `.gitignore`/`AGENTS.md` 的改动来自本轮任务交接文件，不是本实现引入的算法改动。
 
