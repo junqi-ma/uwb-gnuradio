@@ -675,9 +675,14 @@ def check_summary(art):
                     continue
                 if int(row["n_defined"]) != int(entry[roi]["n_defined"]):
                     badcsv.append((cell, key, roi, "n_defined"))
-                if entry[roi]["mean"] is not None and abs(
-                        float(row["c_cir_db_mean"])
-                        - float(entry[roi]["mean"])) > 1e-6:
+                want = entry[roi]["mean"]
+                got = str(row["c_cir_db_mean"]).strip()
+                if want is None:
+                    # an N/A cell must never carry a fabricated number
+                    if got not in ("na", "", "None"):
+                        badcsv.append((cell, key, roi, "fabricated_mean"))
+                elif got in ("na", "", "None") or abs(
+                        float(got) - float(want)) > 1e-6:
                     badcsv.append((cell, key, roi, "mean"))
     ok(("summary", "cells_summary.csv agrees with summary.json"), not badcsv,
        str(badcsv[:5]))
@@ -819,9 +824,13 @@ def reject_qa(src_run, workdir, verbose=False):
     def _m_flip(dst):
         p = os.path.join(dst, "windows.jsonl")
         recs = [json.loads(x) for x in open(p).read().splitlines() if x]
-        rec = recs[0]
-        e = rec["accum"]["full"]["8"]
-        e["c_cir_db"]["full"] = float(e["c_cir_db"]["full"]) + 1.0
+        e = recs[0]["accum"]["full"]["8"]
+        if e["c_cir_db"]["full"] is None:
+            # N/A run (e.g. bypass): fabricate a residual energy instead, which
+            # the verifier recomputes from the archived arrays.
+            e["e_raw"]["full"] = 1.0
+        else:
+            e["c_cir_db"]["full"] = float(e["c_cir_db"]["full"]) + 1.0
         with open(p, "w") as fh:
             for r in recs:
                 fh.write(json.dumps(r, allow_nan=True) + "\n")
@@ -854,12 +863,17 @@ def reject_qa(src_run, workdir, verbose=False):
         o["repetition_sets"]["full_N"] = [1, 2, 3, 4]
         json.dump(o, open(p, "w"), indent=2)
 
-    @mutation("tamper one summary mean")
+    @mutation("tamper one summary mean (falls back to a wrong denominator)")
     def _m_sum(dst):
         p = os.path.join(dst, "summary.json")
         s = json.load(open(p))
         cell = s["cells"][0]
-        s["per_cell"][cell]["accum"]["full/8"]["full"]["mean"] += 2.0
+        entry = s["per_cell"][cell]["accum"]["full/8"]["full"]
+        if entry["mean"] is None:
+            s["per_cell"][cell]["windows"] = int(
+                s["per_cell"][cell]["windows"]) + 1
+        else:
+            entry["mean"] = float(entry["mean"]) + 2.0
         json.dump(s, open(p, "w"), indent=2, allow_nan=True)
 
     @mutation("point the loaded library outside the worktree")
@@ -900,18 +914,22 @@ def reject_qa(src_run, workdir, verbose=False):
         d, f, _z = _first_archive(dst)
         os.remove(os.path.join(d, f))
 
-    @mutation("tamper cells_summary.csv")
+    @mutation("tamper cells_summary.csv (fabricate a mean / wrong denominator)")
     def _m_csv(dst):
         p = os.path.join(dst, "cells_summary.csv")
         with open(p, newline="") as fh:
             rows = list(_csv.DictReader(fh))
-            fields = rows[0].keys()
+            fields = list(rows[0].keys())
         for r in rows:
-            if r["roi"] == "full" and r["c_cir_db_mean"] not in ("", "na"):
-                r["c_cir_db_mean"] = repr(float(r["c_cir_db_mean"]) + 1.0)
+            if r["roi"] == "full":
+                if r["c_cir_db_mean"] in ("", "na"):
+                    r["c_cir_db_mean"] = repr(12.0)   # fabricate on an N/A cell
+                else:
+                    r["c_cir_db_mean"] = repr(
+                        float(r["c_cir_db_mean"]) + 1.0)
                 break
         with open(p, "w", newline="") as fh:
-            w = _csv.DictWriter(fh, fieldnames=list(fields))
+            w = _csv.DictWriter(fh, fieldnames=fields)
             w.writeheader()
             w.writerows(rows)
 

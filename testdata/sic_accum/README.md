@@ -237,12 +237,12 @@ Observed status (2026-10-17, at the time this README was written):
 | A2 `calibration` (`--windows-per-cell 20`) | RUN | 12 cells × 20 = 240 windows |
 | A2 `acceptance` (`--windows-per-cell 100 --receiver --receiver-windows 20 --plots`) | RUN | 12 cells × 100 = 1200 windows, 96 archived |
 | A3 `bypass` (`--bypass --windows-per-cell 1000`) | RUN | 1000 windows, 1000/1000 bypassed, 0 output changed, 8 archived |
-| `verify_s2a.py --run .../smoke --reject-qa` | RUN | `reject-QA: 14/14 mutations caught` |
+
 | `verify_s2a.py --run .../smoke` | RUN | `checks: 45, failures: 0` |
 | `verify_s2a.py --run .../calibration` | RUN | `checks: 45, failures: 0` |
 | `verify_s2a.py --run .../acceptance` | RUN | `checks: 47, failures: 0` (receiver statuses `ok`/`timing_failed` accounted) |
 | `verify_s2a.py --run .../bypass` | RUN | `checks: 48, failures: 0` |
-| `verify_s2a.py --run .../acceptance --reject-qa` | RUN | `reject-QA: 14/14 mutations caught` |
+| `verify_s2a.py --run .../{smoke,calibration,acceptance,bypass} --reject-qa` | RUN | `reject-QA: 14/14 mutations caught` on all four runs |
 | MATLAB `verify_s2a_cir` | NOT RUN | no MATLAB/Octave on this host (§10) |
 
 The smoke/calibration/acceptance/bypass runs are executed by the S2-A task

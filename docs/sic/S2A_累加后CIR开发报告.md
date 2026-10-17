@@ -298,14 +298,14 @@ target-to-background proxy（receiver tap 域 ROI [51,60) / 背景 [80,116)）�
 | `tools/sic/verify_s2a.py --self-test` | 0 failures（稀疏 MF vs 暴力、码布局、eta/lag 参考） |
 | `testdata/sic_accum/qa_s2a.py --run .../smoke` | `qa_s2a: 0 failure(s)`：三个 self-test + 合成两径窗（真实 code-9 chips）验证固定算子 peak=2/target=39/幅度比 0.25 + verifier/reject-QA |
 | verifier：smoke / calibration / acceptance / bypass | 45 / 45 / 47 / 48 项检查，**failures = 0** |
-| 拒绝 QA（对真实 acceptance run 做 14 种篡改） | **14/14 全部被拒** |
+| 拒绝 QA（对 4 个真实 run 各做 14 种篡改：smoke/calibration/acceptance/bypass） | **4×14/14 全部被拒**（含 bypass 上“在 N/A cell 上伪造均值”、漏窗、改阵列、改 ROI/N、改库路径、删 MATLAB 未跑声明、标用真值、改 seed、删归档、改 CSV） |
 | `ctest -R "preamble_sic\|radar_cir"` | 5/5 通过（未改旧门槛） |
 | 从 archive 独立复算 | 96 个归档窗的 `H_clean/H_raw/H_sic`、accumulation 表、目标、相干指标全部复现（容差 1e-9/1e-6） |
 | 聚合复算 | `summary.json` 与 `cells_summary.csv` 由 `windows.jsonl` 逐项复算一致（N/A/±Inf/失败均入分母） |
 | 数据纪律 | 每窗 `uses_truth=False`、`apply_refit_count=0`、seed 公式/集合/唯一性、archive 为“按序号前 8 窗”、库在 worktree |
 | 重算 vs 归档 | verifier 从 IQ 重算的 `H` 与归档张量逐元素一致（max abs 差 ≤1e-9 相对） |
 
-QA 日志：`gr-uwb/build-sic-accum/results/s2a/qa/00..07_*.txt`。
+QA 日志：`gr-uwb/build-sic-accum/results/s2a/qa/00..07_*.txt`（`05_reject_qa_<run>.txt` 为逐 run 的拒绝 QA）。
 
 ## 9. 未达效果、失败与未运行项（如实列出）
 
