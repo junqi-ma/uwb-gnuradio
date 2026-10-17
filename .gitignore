@@ -1,7 +1,9 @@
 # MATLAB full demodulation pipeline (out of scope for this repo)
 UWB_demodulation/
+/UWB_demodulation
 
 # Build trees
+.worktrees/
 gr-uwb/build/
 gr-uwb/build-sic/
 **/build/

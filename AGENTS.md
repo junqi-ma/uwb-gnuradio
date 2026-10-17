@@ -1,3 +1,19 @@
+# 当前最高优先级：S2-A accumulation 后 sensing CIR 评价
+
+本 worktree 从 `93c80b3` 创建；当前仅执行 S2-A，不继续旧 S1 收尾或 TWR。
+必须先完整阅读：
+1. `docs/sic/S2_并行开发共同约定.md`
+2. `docs/sic/OpenCode开发指示_S2A_累加后CIR评价.md`
+3. 根目录 `UWB_Preamble_SIC_GNU_Radio_Design.md`、S1 模型 API 与开发报告（理解基线）。
+
+当前指示优先于下方继承的“当前任务”描述；下方通用开发/安全规范仍有效。
+SIC 共享核心先冻结；只修改本 worktree，不修改父仓库和另一 session 工作目录。
+本地 `UWB_demodulation` 为共享 MATLAB 资料软链接，**只读，禁止写入**。
+独立 build/results 路径、资源互斥、验收矩阵、交付文件以以上两份 S2 指示为准。
+任务开始先补设计与针对性 QA；计划与真实运行结果分开。未达效果/未运行项目如实列明。
+
+---
+
 # UWB GNU Radio Project
 
 ## 当前分支：SIC 论文研究（优先执行，2026-10-16）
