@@ -225,7 +225,7 @@ env -u LD_LIBRARY_PATH python3 tools/sic/verify_s2a.py \
   --run gr-uwb/build-sic-accum/results/s2a/smoke --reject-qa
 ```
 
-Observed status (2026-10-17, at the time this README was written):
+Observed status (final, 2026-10-18; all runs regenerated with the committed code):
 
 | command | status | observed |
 |---|---|---|
@@ -237,7 +237,6 @@ Observed status (2026-10-17, at the time this README was written):
 | A2 `calibration` (`--windows-per-cell 20`) | RUN | 12 cells × 20 = 240 windows |
 | A2 `acceptance` (`--windows-per-cell 100 --receiver --receiver-windows 20 --plots`) | RUN | 12 cells × 100 = 1200 windows, 96 archived |
 | A3 `bypass` (`--bypass --windows-per-cell 1000`) | RUN | 1000 windows, 1000/1000 bypassed, 0 output changed, 8 archived |
-
 | `verify_s2a.py --run .../smoke` | RUN | `checks: 45, failures: 0` |
 | `verify_s2a.py --run .../calibration` | RUN | `checks: 45, failures: 0` |
 | `verify_s2a.py --run .../acceptance` | RUN | `checks: 47, failures: 0` (receiver statuses `ok`/`timing_failed` accounted) |
@@ -245,10 +244,10 @@ Observed status (2026-10-17, at the time this README was written):
 | `verify_s2a.py --run .../{smoke,calibration,acceptance,bypass} --reject-qa` | RUN | `reject-QA: 14/14 mutations caught` on all four runs |
 | MATLAB `verify_s2a_cir` | NOT RUN | no MATLAB/Octave on this host (§10) |
 
-The smoke/calibration/acceptance/bypass runs are executed by the S2-A task
-author; the three `--self-test` checks, the two smoke verifications, the
-acceptance verification, and the fixture export (§10) were executed while
-writing these fixtures and documents.
+Every row marked RUN was executed by the S2-A task author in this worktree with
+`env -u LD_LIBRARY_PATH`; the full log bundle is
+`gr-uwb/build-sic-accum/results/s2a/qa/00..07_*.txt`. MATLAB (§10) and the native
+grid are the only NOT RUN items.
 
 ## 9. Archive policy and its limitation
 
