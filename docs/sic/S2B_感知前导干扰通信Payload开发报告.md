@@ -1,5 +1,12 @@
 # S2-B 开发报告：感知前导干扰通信 payload
 
+> **整改状态（2026-10-18）**：本报告为**初版**（评审 `05165a3`）。经整改书
+> `docs/sic/S2B_整改意见_2026-10-18.md` 复核后：§7/§8/§9 的 **PER Wilson 置信区间口径错误**
+> （用成功率区间冒充 PER 区间），其点估计与救回/损伤计数经复算**不变**，但**所有误差带/图**
+> 以整改开发报告 `docs/sic/S2B_整改开发报告_2026-10-18.md` 与
+> `gr-uwb/build-sic-payload/results/s2b_matrix_ci_fix/` 为准；B3 cell 数与 four-path profile
+> 亦被 B-R02 取代。本报告的"CLOSED/PARTIAL"表述以整改报告为准。
+
 日期：2026-10-17。分支：`feature/sic-payload-collision`。基线提交：`93c80b3`。
 回交对象：`docs/sic/OpenCode开发指示_S2B_感知前导干扰通信Payload.md`（下称"指示"）。
 契约：`docs/sic/S2B_设计与测试契约.md`（本轮设计与测试契约，先于代码）。
@@ -14,7 +21,7 @@
 > **一句话结论**：S2-B 的角色反转（desired=code10 完整包、干扰=code9 感知前导-only）、
 > 真实 payload 内碰撞、单次 FCS、真值防火墙、逐包配对与独立复算**均已实现并实测通过**：
 > 无干扰 clean 逐包 100/100；名义点（SNR30/ISR10/center/CFO0/single）SIC 逐包 **100/100**
-> 对 raw 实测 **48/100**（目标达成）；SIC 实际抑制度中位数 ~40+ dB；mask 外逐位不变；
+> 对 raw 实测 **52/100 失败（48 成功）**（目标达成）；SIC 实际抑制度中位数 ~40+ dB；mask 外逐位不变；
 > 负样本（no_sensing / wrong_code11 / no_overlap）**全部旁路、误提交 0**。
 > **但**：B2 的 raw PER 在 ISR10 由**干扰主导**、几乎不随 SNR 改善（~50% 地板），
 > clean/SIC 的 SNR 瀑布位于 **SNR≈-4 dB**（-5 全错、-3.5 仅 3.8%）且极陡；CFO=±50 kHz 与四径困难条件的
@@ -82,8 +89,8 @@ GNU Radio block **未新增**（沿用 S1 的 `uwb.preamble_sic` 与 `uwb.realti
 
 ## 3. 包几何与 FCS 契约（真实 PHY）
 
-工作网格 `Fs=998.4e6`，`sps=1016`，2 样点/chip。**PSDU=96 B（不含 FCS 也是 96，
-含 FCS）→ 见表**。96 B wire = 94 随机数据 + 2 B FCS。字段区间：
+工作网格 `Fs=998.4e6`，`sps=1016`，2 样点/chip。**wire PSDU = 96 B = 94 B 随机数据 +
+2 B FCS**（PHR 声明 96）。字段区间：
 
 | 段 | 样点 |
 |---|---:|

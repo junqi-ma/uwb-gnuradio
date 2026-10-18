@@ -54,6 +54,55 @@ def find_build(repo, discover_build=None):
 
 
 # ---------------------------------------------------------------------------
+def qa_per_ci_reference(repo):
+    """B-R01: PER CI must be the Wilson interval of the ERROR count, not the
+    success interval.  Independent closed-form reference + literal anchors."""
+    sys.path.insert(0, os.path.join(repo, "tools", "sic"))
+    import payload_metrics as PM
+
+    def ref_wilson(k, n, z=1.96):
+        if n <= 0:
+            return (None, None)
+        p = k / n
+        d = 1.0 + z * z / n
+        c = (p + z * z / (2 * n)) / d
+        h = (z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)) / d
+        return (max(0.0, c - h), min(1.0, c + h))
+
+    okc = True
+    detail = []
+    for k, n in [(0, 100), (100, 100), (52, 100), (0, 1000), (7, 30), (1, 1)]:
+        got = PM.per_ci(k, n)
+        want = ref_wilson(k, n)
+        if abs(got[0] - want[0]) > 1e-9 or abs(got[1] - want[1]) > 1e-9:
+            okc = False
+            detail.append("k=%d n=%d got=%s want=%s" % (k, n, got, want))
+    # literal anchors (documented in the rectification review)
+    anchors = {(0, 100): (0.0, 0.036995), (100, 100): (0.963005, 1.0)}
+    for (k, n), (lo, hi) in anchors.items():
+        got = PM.per_ci(k, n)
+        if abs(got[0] - lo) > 1e-5 or abs(got[1] - hi) > 1e-5:
+            okc = False
+            detail.append("anchor %d/%d got=%s" % (k, n, got))
+    # must NOT be the success interval (the B-R01 defect): for 0/100 the PER
+    # interval is wilson(0,100) while the success interval is wilson(100,100).
+    if PM.per_ci(0, 100) == PM.wilson_ci(100, 100):
+        okc = False
+        detail.append("per_ci(0/100) == success interval(100/100)")
+    if PM.per_ci(52, 100) == PM.wilson_ci(48, 100):
+        okc = False
+        detail.append("per_ci(52/100) == success interval(48/100)")
+    # degenerate / invalid
+    if PM.per_ci(0, 0) != (None, None) or PM.per_ci(5, 4) != (None, None) \
+            or PM.per_ci(-1, 4) != (None, None):
+        okc = False
+        detail.append("degenerate/invalid not None")
+    if okc:
+        _ok("per_ci_error_direction_reference", "anchors+independent ok")
+    else:
+        _fail("per_ci_error_direction_reference", "; ".join(detail))
+
+
 def qa_crc_and_fcs():
     canon = S.hex_to_bytes(S.DEFAULT_PSDU_HEX)
     crc = PL.crc16_802154(canon[:-2])
@@ -336,6 +385,7 @@ def qa_build(repo, build_dir):
 def run_all(repo, discover_build=None):
     del RESULTS[:]
     print("== S2-B targeted QA ==", flush=True)
+    qa_per_ci_reference(repo)
     qa_crc_and_fcs()
     qa_random_psdu_markers()
     qa_geometry(repo)

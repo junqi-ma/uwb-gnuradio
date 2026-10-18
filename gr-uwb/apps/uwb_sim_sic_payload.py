@@ -55,9 +55,20 @@ import pmt
 from gnuradio import gr
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "tools", "sic"))
 import sic_preamble_sim as S            # noqa: E402
 import sic_payload_sim as PL            # noqa: E402
 import uwb_sim_preamble_sic as S1       # noqa: E402  (reuse plumbing)
+import payload_metrics as PM            # noqa: E402
+
+# Official four-path channel profile (testdata/sic_preamble/cases/main.json).
+# Delays/gains are the frozen S0/S1 profile; bound by hash in every manifest.
+FOUR_PATH_PROFILE = [[0, [1.0, 0.0]], [7.4, [0.0, 0.5]],
+                     [23, [0.276, -0.116]], [51.2, [0.2, 0.0]]]
+# Old custom integer-spaced diagnostic (kept ONLY as a named non-official mode).
+CUSTOM_INTEGER_FOUR = [[0, [1.0, 0.0]], [37, [0.8, 0.0]],
+                       [74, [0.64, 0.0]], [111, [0.512, 0.0]]]
 
 SCHEMA_VERSION = 2
 S2B_SCHEMA = "sic-s2b-payload/1"
@@ -74,6 +85,14 @@ SUBSTREAM_STRIDE = 100000
 DEFAULT_COARSE_STRIDE = 2
 DEFAULT_DETECT_THRESHOLD = 0.40
 DEFAULT_VALIDATE_THRESHOLD = 0.25
+
+# Online SIC input meta whitelist (no injection truth).  Declared per window so
+# the verifier can check the online interface stayed truth-free.
+SIC_INPUT_META_KEYS = ("packet_id", "window_id", "predicted_start_sample",
+                       "window_start_sample", "sample_count", "sample_rate",
+                       "code_index", "sync_repetitions", "sfd_mode",
+                       "observed_end_sample", "sensing_roi_lo",
+                       "sensing_roi_hi")
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +313,8 @@ def run_window(rt, gen, *, wid, seed, payload_seed, start_offset,
            "psdu_wire_hex": truth["psdu_wire_hex"],
            "psdu_wire_sha256": hashlib.sha256(
                bytes.fromhex(truth["psdu_wire_hex"])).hexdigest(),
+           "input_sha256": hashlib.sha256(
+               np.ascontiguousarray(y, dtype=np.complex64).tobytes()).hexdigest(),
            "psdu_wire_len": truth["psdu_wire_len"],
            "overlap": truth["overlap"],
            "i_start": truth["interferer"]["start_sample"],
@@ -301,6 +322,7 @@ def run_window(rt, gen, *, wid, seed, payload_seed, start_offset,
            "i_template_len": truth["interferer"]["template_len"],
            "i_paths": [p["delay_samples"]
                        for p in truth["interferer"]["paths"]],
+           "online_meta_keys": list(SIC_INPUT_META_KEYS),
            "training_span": list(gen.training_span(int(start_offset))),
            "rois": {k: rois[k] for k in rois},
            "demod": {}, "sic": {}, "timing": {"gen_us": int(t_gen_us),
@@ -381,14 +403,26 @@ def run_window(rt, gen, *, wid, seed, payload_seed, start_offset,
 
 
 def channel_paths(spec, seed):
-    """Deterministic channel model. ``single`` = one unit-gain path; ``four`` =
-    four integer-delay paths with decaying complex gains (the B3 stress)."""
+    """Deterministic channel model.
+
+    ``single`` = one unit-gain path.  ``four`` = the OFFICIAL frozen profile from
+    ``testdata/sic_preamble/cases/main.json`` (bound by hash in the manifest).
+    ``custom_integer_four`` = the old integer-spaced diagnostic, explicitly NOT
+    the official four-path channel.
+    """
     if spec == "single":
         return [[0, [1.0, 0.0]]]
-    delays = [0, 37, 74, 111]
-    return [[int(d), [float(0.8 ** k) * math.cos(0.3 * k),
-                      float(0.8 ** k) * math.sin(0.3 * k)]]
-            for k, d in enumerate(delays)]
+    if spec == "four":
+        return [list(p) for p in FOUR_PATH_PROFILE]
+    if spec == "custom_integer_four":
+        return [list(p) for p in CUSTOM_INTEGER_FOUR]
+    raise SystemExit("unknown channel spec %r" % spec)
+
+
+def channel_profile_id(spec):
+    return {"single": "single_int", "four": "four_path_main_json",
+            "custom_integer_four": "custom_integer_four_diagnostic"}.get(
+        spec, "unknown")
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +441,49 @@ def seed_streams(seed_set, windows, step=1):
     return out
 
 
+def effective_case_config(args):
+    """The deterministic signal/SIC/demod configuration of one run (hashed)."""
+    return {
+        "phase": args.phase, "snr_db": args.snr_db, "isr_db": args.isr_db,
+        "position": args.position, "cfo_hz": args.cfo_hz,
+        "comm_channel": args.comm_channel,
+        "comm_channel_profile": channel_profile_id(args.comm_channel),
+        "interferer_paths": args.interferer_paths,
+        "interferer_paths_profile": channel_profile_id(args.interferer_paths),
+        "interferer": args.interferer, "wrong_code": args.wrong_code,
+        "sic": args.sic, "comm_code": args.comm_code,
+        "sensing_code": args.sensing_code, "sync_reps": args.sync_reps,
+        "sfd_mode": args.sfd_mode, "psdu_bytes": args.psdu_bytes,
+        "pulse_shape": args.pulse_shape, "seed_set": args.seed_set,
+        "seed_step": args.seed_step,
+        "sic_k_paths": args.sic_k_paths, "sic_fit_reps": args.sic_fit_reps,
+        "sic_validation_reps": args.sic_validation_reps,
+        "sic_post_tail": args.sic_post_tail,
+        "sic_coarse_stride": args.sic_coarse_stride,
+        "sic_detect_threshold": args.sic_detect_threshold,
+        "sic_validate_threshold": args.sic_validate_threshold,
+        "start_jitter": args.start_jitter, "guard": args.guard,
+        "demod_stride": args.demod_stride,
+        "four_path_profile": FOUR_PATH_PROFILE if args.interferer_paths in
+        ("four",) or args.comm_channel == "four" else None,
+    }
+
+
+def window_params(args, gen, st):
+    """Deterministic per-window injection params (single source of truth)."""
+    jrng = np.random.default_rng(st["jitter"])
+    jitter = (int(jrng.integers(-args.start_jitter, args.start_jitter + 1))
+              if args.start_jitter > 0 else 0)
+    no_overlap = (args.position == "no_overlap")
+    if no_overlap:
+        start_offset = (gen.comm_start + gen.fields["packet_len"] + 500
+                        - gen.i_nominal_start)
+    else:
+        start_offset = jitter
+    i_paths = channel_paths(args.interferer_paths, st["path"])
+    return start_offset, i_paths, no_overlap
+
+
 def run_single(args, repo):
     uwb = S.load_uwb(args.build_dir)
     os.makedirs(args.output, exist_ok=True)
@@ -415,7 +492,7 @@ def run_single(args, repo):
     recon_dir = os.path.join(args.output, "recon")
     os.makedirs(recon_dir, exist_ok=True)
 
-    comm_paths = channel_paths("single", 0)
+    comm_paths = channel_paths(args.comm_channel, 0)
     pos_for_gen = "center" if args.position == "no_overlap" else args.position
     gen = PL.SicPayloadSignalGenerator(
         uwb, comm_code=args.comm_code, sensing_code=args.sensing_code,
@@ -452,12 +529,6 @@ def run_single(args, repo):
     rois = gen.public_rois(start_jitter=args.start_jitter,
                            post_tail=args.sic_post_tail,
                            fit_reps=args.sic_fit_reps)
-    # no_overlap injection: place the (real) interferer in the post-packet tail
-    # so the SIC has no actionable overlap with the public payload ROI.
-    no_overlap_offset = None
-    if args.position == "no_overlap":
-        no_overlap_offset = (gen.comm_start + gen.fields["packet_len"] + 500
-                             - gen.i_nominal_start)
 
     sic_cfg = None
     if args.sic != "off":
@@ -482,23 +553,41 @@ def run_single(args, repo):
     rt.start()
 
     streams = seed_streams(args.seed_set, int(args.windows), int(args.seed_step))
-    archive_idx = set(range(min(int(args.archive_windows), len(streams))))
-    # worst-failure window is archived after the loop (fixed rule, no peeking).
+    planned = len(streams)
+    plan_dir = args.output
+    case_cfg = effective_case_config(args)
+    case_cfg_hash = S1.stdin_hash(case_cfg)
+    plan = {
+        "schema": S2B_SCHEMA, "phase": args.phase,
+        "planned_windows": planned,
+        "window_ids": list(range(planned)),
+        "seeds": streams,
+        "case_config": case_cfg, "case_config_hash": case_cfg_hash,
+        "rois": {k: rois[k] for k in rois},
+        "channel_four_path_profile": [list(p) for p in FOUR_PATH_PROFILE],
+        "templates": {"comm_sync_sha256": S1.file_sha256(comm_sync_path),
+                      "sensing_sync_sha256": S1.file_sha256(i_sync_path),
+                      "sensing_preamble_sha256": S1.file_sha256(i_pre_path)},
+        "generator": {"comm_code": gen.comm_code,
+                      "sensing_code": gen.sensing_code,
+                      "psdu_bytes": gen.psdu_bytes, "sync_reps": gen.sync_reps,
+                      "geometry": gen.fields, "n": gen.n, "pre_guard": gen.pre,
+                      "payload_abs": [gen.payload_lo, gen.payload_hi],
+                      "interferer_template_len": gen.i_template_len,
+                      "interferer_nominal_start": gen.i_nominal_start},
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    S1.write_json(os.path.join(plan_dir, "plan.json"), plan)
+
+    archive_idx = set(range(min(int(args.archive_windows), planned)))
     records = []
-    arch_store = {}
+    arch_fixed = {}
     windows_path = os.path.join(args.output, "windows.jsonl")
-    stage_rows = []
     t_run0 = time.monotonic_ns()
     try:
         with open(windows_path, "w") as fh:
             for i, st in enumerate(streams):
-                jrng = np.random.default_rng(st["jitter"])
-                jitter = int(jrng.integers(-args.start_jitter,
-                                           args.start_jitter + 1)) \
-                    if args.start_jitter > 0 else 0
-                no_overlap = (args.position == "no_overlap")
-                start_offset = no_overlap_offset if no_overlap else jitter
-                i_paths = channel_paths(args.interferer_paths, st["path"])
+                start_offset, i_paths, no_overlap = window_params(args, gen, st)
                 arch = (i in archive_idx)
                 rec = run_window(
                     rt, gen, wid=i, seed=st["noise"], payload_seed=st["payload"],
@@ -511,34 +600,33 @@ def run_single(args, repo):
                     i_paths=i_paths, archive=arch, rois=rois)
                 arc = rec.pop("_archive", None)
                 if arc is not None:
-                    arch_store[i] = arc
+                    arch_fixed[i] = arc
                 records.append(rec)
                 fh.write(json.dumps(rec, sort_keys=True) + "\n")
                 fh.flush()
-                stage_rows.append((rec,))
                 if args.progress and (i + 1) % max(1, int(args.progress)) == 0:
-                    print("  window %d/%d" % (i + 1, len(streams)), flush=True)
+                    print("  window %d/%d" % (i + 1, planned), flush=True)
+        # B-R04: really archive the rule-selected "worst" windows (not just a
+        # marker).  Rule (fixed BEFORE looking at the numbers, cap = 3):
+        #   (1) lowest suppression_db_overlap among committed windows,
+        #   (2) first window whose SIC PSDU failed,
+        #   (3) first raw_ok_sic_fail damage window.
+        # The pooled statistics always use ALL rows; these are extra evidence.
+        worst_ids = select_worst_windows(records, args.sic != "off", cap=3)
+        arch_worst = {}
+        for wid in worst_ids:
+            if wid in arch_fixed:
+                continue
+            arc = rerun_archive_window(rt, gen, args, rois, wrong_template,
+                                       wid, streams, records[wid])
+            if arc is not None:
+                arch_worst[wid] = arc
     finally:
         rt.stop()
 
     run_wall_us = (time.monotonic_ns() - t_run0) // 1000
-    # Archive the fixed 8 windows (+ the single worst raw-fail/sic-fail window
-    # by the pre-declared rule; chosen after the fact only for evidence, not for
-    # any statistic -- the verifier recomputes the pooled numbers from ALL rows).
-    worst = None
-    for r in records:
-        raw_fail = not (r["demod"]["raw"].get("psdu_match") is True)
-        sic_fail = not (r["demod"].get("sic", {}).get("psdu_match") is True) \
-            if args.sic != "off" else False
-        if raw_fail and sic_fail:
-            worst = r["window_id"]
-            break
-    if worst is not None and worst not in arch_store:
-        arch_store[worst] = None  # marker; re-run not needed if not archived
     archive_files = []
-    for wid, arc in arch_store.items():
-        if arc is None:
-            continue
+    for wid, arc in list(arch_fixed.items()) + list(arch_worst.items()):
         np.savez_compressed(
             os.path.join(recon_dir, "window_%04d.npz" % wid),
             i_true=np.asarray(arc["i_true"], dtype=np.complex64),
@@ -550,27 +638,35 @@ def run_single(args, repo):
         archive_files.append("recon/window_%04d.npz" % wid)
     index = {
         "schema": S2B_SCHEMA, "phase": args.phase, "windows": len(records),
+        "planned_windows": planned,
         "seed_set": args.seed_set, "snr_db": args.snr_db, "isr_db": args.isr_db,
         "position": args.position, "cfo_hz": args.cfo_hz,
         "interferer": args.interferer, "sic": args.sic,
-        "archived_windows": sorted(w for w, a in arch_store.items()
-                                   if a is not None),
+        "case_config_hash": case_cfg_hash,
+        "archive_fixed_windows": sorted(arch_fixed),
+        "archive_worst_windows": sorted(arch_worst),
+        "worst_rule": ("lowest suppression_db_overlap among committed; first SIC "
+                       "PSDU failure; first raw_ok_sic_fail damage; cap 3"),
+        "archived_windows": sorted(list(arch_fixed) + list(arch_worst)),
         "archive_policy": {
-            "archived": len(archive_files), "total": len(records),
-            "rule": ("first %d windows by index, fixed before the run; the "
-                     "archived set cannot reproduce the full pooled statistic "
-                     "and is not used as the distribution"
-                     % min(int(args.archive_windows), len(records))),
+            "archived": len(archive_files), "total": planned,
+            "fixed": len(arch_fixed), "worst": len(arch_worst),
+            "rule": ("first %d planned windows (fixed before the run) plus up to "
+                     "3 rule-selected worst windows; the archived subset cannot "
+                     "reproduce the pooled statistic and is not the distribution"
+                     % min(int(args.archive_windows), planned)),
         },
     }
     with open(os.path.join(args.output, "index.json"), "w") as fh:
         json.dump(index, fh, indent=2, sort_keys=True)
 
-    summary = summarize_run(records, args, gen, rois, run_wall_us)
+    summary = summarize_run(records, args, gen, rois, run_wall_us,
+                            planned=planned, case_cfg_hash=case_cfg_hash)
     S1.write_json(os.path.join(args.output, "summary.json"), summary)
     write_stage_csv(os.path.join(args.output, "stage_times.csv"), records)
     manifest = build_manifest(args, repo, gen, rois, comm_sync_path,
-                              i_sync_path, i_pre_path, rt, records)
+                              i_sync_path, i_pre_path, rt, records,
+                              planned=planned, case_cfg_hash=case_cfg_hash)
     S1.write_json(os.path.join(args.output, "run_manifest.json"), manifest)
     try:
         S1.update_results_index(args.output)
@@ -578,6 +674,78 @@ def run_single(args, repo):
         sys.stderr.write("index update failed: %r\n" % (exc,))
     print("summary:", json.dumps(summary["per"], sort_keys=True), flush=True)
     print("output:", args.output, flush=True)
+    return run_exit_code(records, planned, args)
+
+
+def select_worst_windows(records, sic_on, cap=3):
+    """Rule-selected worst windows (fixed rule; used ONLY for extra archiving)."""
+    out = []
+    if sic_on:
+        committed = [r for r in records
+                     if r.get("sic", {}).get("committed")
+                     and r.get("suppression_db_overlap") is not None]
+        if committed:
+            out.append(min(committed,
+                           key=lambda r: r["suppression_db_overlap"])["window_id"])
+        for r in records:
+            if not (r.get("sic", {}).get("committed")):
+                continue
+            if r["demod"].get("sic", {}).get("psdu_match") is not True:
+                out.append(r["window_id"])
+                break
+        for r in records:
+            raw_ok = r["demod"]["raw"].get("psdu_match") is True
+            sic_ok = r["demod"].get("sic", {}).get("psdu_match") is True
+            if raw_ok and not sic_ok:
+                out.append(r["window_id"])
+                break
+    dedup = []
+    for w in out:
+        if w not in dedup:
+            dedup.append(w)
+    return dedup[:cap]
+
+
+def rerun_archive_window(rt, gen, args, rois, wrong_template, wid, streams, rec):
+    """Regenerate one window, verify its input hash, run SIC, return arrays.
+
+    Refuses to archive if the regenerated input does not match the recorded
+    per-window input hash (no fake archiving).
+    """
+    st = streams[wid]
+    start_offset, i_paths, no_overlap = window_params(args, gen, st)
+    win = gen.build(seed=st["noise"], payload_seed=st["payload"],
+                    cfo_hz=args.cfo_hz, isr_db=args.isr_db, snr_db=args.snr_db,
+                    start_offset=start_offset,
+                    interferer_present=(args.interferer != "off"),
+                    interferer_template=wrong_template, i_paths=i_paths)
+    y = win["y"]
+    got = hashlib.sha256(
+        np.ascontiguousarray(y, dtype=np.complex64).tobytes()).hexdigest()
+    if got != rec.get("input_sha256"):
+        sys.stderr.write("refusing to archive window %d: input hash mismatch\n"
+                         % wid)
+        return None
+    pid = 3 * wid + 2
+    before = rt.sink_out.count
+    rt.post_sic(_sic_meta(pid, gen, rois, y.size, gen.sensing_code,
+                          gen.sync_reps, gen.sfd_mode), y)
+    rt.wait_keys(rt.sink_out, [pid], deadline_s=60.0)
+    o = rt.sink_out.get(pid)
+    out = o.get("__c32") if o is not None else None
+    return {"i_true": win["i"], "clean": win["clean"], "raw": y, "out": out}
+
+
+def run_exit_code(records, planned, args):
+    """Nonzero on any required-run failure (B-R04)."""
+    if len(records) != planned:
+        return 3
+    for r in records:
+        for path in (["clean", "raw"]
+                     + (["sic"] if args.sic != "off" else [])):
+            d = r["demod"].get(path)
+            if d is None or str(d.get("status")) == "timeout":
+                return 4
     return 0
 
 
@@ -589,7 +757,7 @@ def _wilson(k, n, z=1.96):
 
 
 def per_metric(rows, path):
-    """Return (errors, total, per, ci_lo, ci_hi) for one clean/raw/sic path."""
+    """(errors, total, per, per_ci_lo, per_ci_hi, success_lo, success_hi)."""
     err = 0
     ok = 0
     n = 0
@@ -601,21 +769,26 @@ def per_metric(rows, path):
         else:
             err += 1
     per = (err / n) if n else None
-    lo, hi = _wilson(ok, n) if n else (None, None)
-    return err, n, per, lo, hi
+    plo, phi = PM.per_ci(err, n)
+    slo, shi = PM.wilson_ci(ok, n)
+    return err, n, per, plo, phi, slo, shi
 
 
-def summarize_run(records, args, gen, rois, run_wall_us):
+def summarize_run(records, args, gen, rois, run_wall_us, planned=None,
+                  case_cfg_hash=None):
     per = {}
     paths = ["clean", "raw"] + (["sic"] if args.sic != "off" else [])
     for path in paths:
         if not records:
             continue
-        err, n, p, lo, hi = per_metric(records, path)
-        per[path] = {"errors": err, "total": n, "per": p,
-                     "per_wilson95": [lo, hi],
-                     "fcs_pass": sum(1 for r in records
-                                     if r["demod"][path].get("fcs_pass")),
+        err, n, p, plo, phi, slo, shi = per_metric(records, path)
+        fcs = PM.per_fcs(records, path)
+        per[path] = {"errors": err, "success": n - err, "total": n, "per": p,
+                     "per_wilson95": [plo, phi],
+                     "success_wilson95": [slo, shi],
+                     "per_fcs_errors": fcs["errors"], "per_fcs": fcs["per"],
+                     "per_fcs_wilson95": fcs["per_wilson95"],
+                     "fcs_pass": fcs.get("fcs_pass"),
                      "status_counts": _count_status(records, path)}
     rescued = damaged = None
     if args.sic != "off":
@@ -634,18 +807,13 @@ def summarize_run(records, args, gen, rois, run_wall_us):
     return {
         "schema": S2B_SCHEMA, "phase": args.phase,
         "run_id": os.path.basename(os.path.normpath(args.output)),
-        "windows_expected": len(records), "windows_ok": len(records),
-        "config": {
-            "snr_db": args.snr_db, "isr_db": args.isr_db,
-            "position": args.position, "cfo_hz": args.cfo_hz,
-            "interferer": args.interferer, "sic": args.sic,
-            "comm_code": args.comm_code, "sensing_code": args.sensing_code,
-            "psdu_bytes": args.psdu_bytes, "seed_set": args.seed_set,
-            "sic_coarse_stride": args.sic_coarse_stride,
-            "sic_detect_threshold": args.sic_detect_threshold,
-            "sic_fit_reps": args.sic_fit_reps,
-            "start_jitter": args.start_jitter,
-        },
+        "windows_expected": int(planned) if planned is not None
+        else len(records),
+        "windows_ok": len(records),
+        "windows_missing": ((int(planned) - len(records))
+                            if planned is not None else 0),
+        "case_config_hash": case_cfg_hash,
+        "config": effective_case_config(args),
         "per": per,
         "paired": {"raw_fail_sic_ok": rescued, "raw_ok_sic_fail": damaged},
         "sic": {"detected": detects, "committed": commits,
@@ -688,6 +856,7 @@ def _not_run(args):
     if args.sic == "off":
         nr.append("summary.paired.* (sic_mode=off)")
     nr.append("MATLAB cross-check (matlab.status=未实跑)")
+    nr.append("BER (decoder exposes no aligned bits): N/A / 未实现")
     nr.append("formal benchmark/throughput (serial, separate run)")
     return nr
 
@@ -710,7 +879,7 @@ def write_stage_csv(path, records):
 
 
 def build_manifest(args, repo, gen, rois, comm_sync_path, i_sync_path,
-                   i_pre_path, rt, records):
+                   i_pre_path, rt, records, planned=None, case_cfg_hash=None):
     try:
         prov = S1.git_worktree_provenance(repo)
     except Exception as exc:
@@ -720,14 +889,41 @@ def build_manifest(args, repo, gen, rois, comm_sync_path, i_sync_path,
     except Exception:
         lib = None
     libsha = S1.file_sha256(lib) if lib and os.path.exists(lib) else None
+    # B-R03 item 2: bind EVERY source that determines the signal/score, not just
+    # the driver.
+    here = os.path.dirname(os.path.abspath(__file__))
+    src_hash = {
+        "driver": S1.file_sha256(os.path.abspath(__file__)),
+        "generator": S1.file_sha256(os.path.join(here, "sic_payload_sim.py")),
+        "metrics": S1.file_sha256(os.path.join(
+            repo, "tools", "sic", "payload_metrics.py")),
+        "verifier": S1.file_sha256(os.path.join(
+            repo, "tools", "sic", "verify_s2b.py")),
+        "core_header": S1.file_sha256(os.path.join(
+            repo, "gr-uwb", "include", "gnuradio", "uwb",
+            "uwb_preamble_sic_core.h")),
+        "core_src": S1.file_sha256(os.path.join(
+            repo, "gr-uwb", "lib", "uwb_preamble_sic_core.cc")),
+        "adapter_src": S1.file_sha256(os.path.join(
+            repo, "gr-uwb", "lib", "uwb_preamble_sic.cc")),
+    }
+    bindings = None
+    import glob as _glob
+    bglob = sorted(_glob.glob(os.path.join(
+        args.build_dir, "python", "uwb", "bindings", "uwb_python*.so")))
+    if bglob:
+        bindings = {"path": bglob[-1], "sha256": S1.file_sha256(bglob[-1])}
     return {
         "schema": S2B_SCHEMA, "run_id": os.path.basename(
             os.path.normpath(args.output)),
         "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "planned_windows": planned, "completed_windows": len(records),
+        "case_config_hash": case_cfg_hash,
         "provenance": {
             "git": prov, "loaded_library": lib, "loaded_library_sha256": libsha,
             "build_dir": os.path.abspath(args.build_dir),
-            "script_sha256": S1.file_sha256(os.path.abspath(__file__)),
+            "source_sha256": src_hash, "bindings": bindings,
+            "script_sha256": src_hash["driver"],
         },
         "generator": {
             "comm_code": gen.comm_code, "sensing_code": gen.sensing_code,
@@ -755,18 +951,17 @@ def build_manifest(args, repo, gen, rois, comm_sync_path, i_sync_path,
             "appended_once_by": "generator (sic_payload_sim.append_fcs)",
             "modulator_append_fcs": False,
             "crc": "IEEE 802.15.4 CRC-16 (poly 0x8408, init 0), little-endian",
+            "wire_psdu_bytes": gen.psdu_bytes,
+            "data_bytes": gen.psdu_bytes - PL.DEFAULT_FCS_BYTES,
+            "fcs_bytes": PL.DEFAULT_FCS_BYTES,
             "decoded_psdu_contains_fcs": True,
         },
-        "effective_config": {
-            "snr_db": args.snr_db, "isr_db": args.isr_db,
-            "position": args.position, "cfo_hz": args.cfo_hz,
-            "interferer": args.interferer, "sic": args.sic,
-            "sic_coarse_stride": args.sic_coarse_stride,
-            "sic_detect_threshold": args.sic_detect_threshold,
-            "sic_validate_threshold": args.sic_validate_threshold,
-            "sic_k_paths": args.sic_k_paths, "sic_fit_reps": args.sic_fit_reps,
-            "start_jitter": args.start_jitter, "seed_set": args.seed_set,
+        "channel_profiles": {
+            "comm_channel": channel_profile_id(args.comm_channel),
+            "interferer_paths": channel_profile_id(args.interferer_paths),
+            "official_four_path": [list(p) for p in FOUR_PATH_PROFILE],
         },
+        "effective_config": effective_case_config(args),
         "archive": {"windows": len(records)},
         "not_run": _not_run(args),
     }
@@ -801,9 +996,11 @@ def build_parser():
                     choices=["early", "center", "late", "no_overlap"])
     ap.add_argument("--cfo-hz", type=float, default=0.0)
     ap.add_argument("--comm-channel", default="single",
-                    choices=["single", "four"])
+                    choices=["single", "four", "custom_integer_four"],
+                    help="desired COMM channel (official four = main.json)")
     ap.add_argument("--interferer-paths", default="single",
-                    choices=["single", "four"])
+                    choices=["single", "four", "custom_integer_four"],
+                    help="INTERFERER channel (official four = main.json)")
     ap.add_argument("--interferer", default="on",
                     choices=["on", "off", "wrong_code"])
     ap.add_argument("--wrong-code", type=int, default=11)
@@ -873,24 +1070,29 @@ def main(argv=None):
 
 
 def run_matrix(args, repo):
-    """Staged matrix: B1 + B2 waterfall + B3 boundary + B4 negatives.
+    """Staged matrix (rectification): B0 + B1 + B2 + B3(12 cells) + B4.
 
-    Formal counts (default): B1 100, B2 1000/cell, B3 500/cell, B4 1000/cell.
-    ``--exploratory`` reduces B2/B4 to 100 and B3 to 100 and labels the run as
-    exploratory in the aggregate (the formal matrix stays OPEN).
+    Formal counts: B0 100 (no interference), B1 100, B2 1000/cell, B3 500/cell
+    (12 cells per the original instruction), B4 1000/cell.  Any child rc != 0
+    makes the matrix exit nonzero (B-R04).
     """
     root = args.output
     os.makedirs(root, exist_ok=True)
     exploratory = bool(args.exploratory)
+    w_b0 = 100
     w_b1 = 100
     w_b2 = 100 if exploratory else 1000
     w_b3 = 100 if exploratory else 500
     w_b4 = 100 if exploratory else 1000
-    # Frozen SNR points (calibration scan: clean waterfall at SNR ~ -3.5 dB,
-    # raw floor at ISR 10 essentially SNR-independent).  See the report.
+    # Frozen SNR points (calibration scan; see the report/contract).
     frozen_snr = [-5.0, -3.5, 0.0, 4.0, 8.0]
+    # Calibration-frozen transition SNR (clean waterfall between -5 and -3.5).
+    transition_snr = -3.5
     cells = []
     seed_set = "acceptance"
+    cells.append(("b0_clean_snr30", dict(
+        phase="b0", position="center", interferer="off", isr_db=0.0,
+        snr_db=30.0, windows=w_b0, seed_set=seed_set)))
     cells.append(("b1_center_isr10_snr30", dict(
         phase="b1", position="center", isr_db=10.0, snr_db=30.0,
         windows=w_b1, seed_set=seed_set, interferer="on")))
@@ -899,16 +1101,21 @@ def run_matrix(args, repo):
             cells.append(("b2_snr%.1f_isr%.0f" % (snr, isr), dict(
                 phase="b2", position="center", isr_db=isr, snr_db=snr,
                 windows=w_b2, seed_set=seed_set, interferer="on")))
+    # B3 (12 cells): early/late x {transition, 30} x ISR10 x single, and
+    # CFO +-50k x ISR {0,10} x {single, four(official)}.
     for pos in ("early", "late"):
-        cells.append(("b3_pos_%s_isr10_snr30" % pos, dict(
-            phase="b3", position=pos, isr_db=10.0, snr_db=30.0,
-            windows=w_b3, seed_set=seed_set, interferer="on")))
+        for snr, tag in ((transition_snr, "trans"), (30.0, "snr30")):
+            cells.append(("b3_pos_%s_%s" % (pos, tag), dict(
+                phase="b3", position=pos, isr_db=10.0, snr_db=snr, cfo_hz=0.0,
+                interferer_paths="single", windows=w_b3, seed_set=seed_set,
+                interferer="on")))
     for cfo in (-50000.0, 50000.0):
-        for ch in ("single", "four"):
-            cells.append(("b3_cfo%d_%s" % (int(cfo), ch), dict(
-                phase="b3", position="center", cfo_hz=cfo, isr_db=10.0,
-                snr_db=30.0, windows=w_b3, seed_set=seed_set,
-                interferer="on", interferer_paths=ch)))
+        for isr in (0.0, 10.0):
+            for ch in ("single", "four"):
+                cells.append(("b3_cfo%d_isr%.0f_%s" % (int(cfo), isr, ch), dict(
+                    phase="b3", position="center", cfo_hz=cfo, isr_db=isr,
+                    snr_db=30.0, interferer_paths=ch, windows=w_b3,
+                    seed_set=seed_set, interferer="on")))
     cells.append(("b4_no_sensing", dict(
         phase="b4", position="center", interferer="off",
         isr_db=10.0, snr_db=30.0, windows=w_b4, seed_set=seed_set)))
@@ -918,6 +1125,7 @@ def run_matrix(args, repo):
     cells.append(("b4_no_overlap", dict(
         phase="b4", position="no_overlap", interferer="on",
         isr_db=10.0, snr_db=30.0, windows=w_b4, seed_set=seed_set)))
+    b3_cells = [c for c, ov in cells if ov["phase"] == "b3"]
     cell_summaries = []
     for cid, ov in cells:
         cout = os.path.join(root, "cells", cid)
@@ -952,15 +1160,19 @@ def run_matrix(args, repo):
             "sic": (summ or {}).get("sic"), "gates": (summ or {}).get("gates")})
     aggregate = {
         "schema": "sic-s2b-matrix/1", "exploratory": exploratory,
-        "frozen_snr_points": frozen_snr,
-        "counts": {"b1": w_b1, "b2": w_b2, "b3": w_b3, "b4": w_b4},
+        "frozen_snr_points": frozen_snr, "transition_snr": transition_snr,
+        "counts": {"b0": w_b0, "b1": w_b1, "b2": w_b2, "b3": w_b3, "b4": w_b4},
+        "expected_cells": [c for c, _ in cells],
+        "b3_expected_cells": b3_cells,
         "cells": cell_summaries,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
     }
     with open(os.path.join(root, "matrix.json"), "w") as fh:
         json.dump(aggregate, fh, indent=2, sort_keys=True)
-    print("matrix done:", len(cell_summaries), "cells", flush=True)
-    return 0
+    failed = [c["cell"] for c in cell_summaries if c["rc"] != 0]
+    print("matrix done:", len(cell_summaries), "cells; failed rc:",
+          failed, flush=True)
+    return 5 if failed else 0
 
 
 # ---------------------------------------------------------------------------

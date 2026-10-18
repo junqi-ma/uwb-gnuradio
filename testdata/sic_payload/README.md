@@ -59,7 +59,7 @@ only in the generator and the offline verifier.
 ## Reproduce
 
 ```bash
-# targeted QA (pure + build-dependent)
+# targeted QA (pure + build-dependent; incl. B-R01 PER-CI numeric reference)
 env -u LD_LIBRARY_PATH UWB_BUILD_DIR=gr-uwb/build-sic-payload \
     python3 gr-uwb/apps/test_sic_payload.py
 
@@ -70,12 +70,38 @@ env -u LD_LIBRARY_PATH python3 gr-uwb/apps/uwb_sim_sic_payload.py \
 env -u LD_LIBRARY_PATH python3 tools/sic/verify_s2b.py \
     --results gr-uwb/build-sic-payload/results/s2b_b0_smoke
 
-# staged matrix (B1 + exploratory B2 + B3 + B4), serial
+# staged matrix (B0 100 + B1 100 + B2 1000/cell + B3 12 cells x 500 +
+# B4 1000/cell), serial
 env -u LD_LIBRARY_PATH python3 gr-uwb/apps/uwb_sim_sic_payload.py \
     --build-dir gr-uwb/build-sic-payload --matrix \
-    --output gr-uwb/build-sic-payload/results/s2b_matrix
+    --output gr-uwb/build-sic-payload/results/s2b_matrix_rectification
+env -u LD_LIBRARY_PATH python3 tools/sic/s2b_aggregate.py \
+    --matrix gr-uwb/build-sic-payload/results/s2b_matrix_rectification
 env -u LD_LIBRARY_PATH python3 tools/sic/verify_s2b.py --self-test
 ```
+
+## Rectification (2026-10-18)
+
+* **PER CI** is the Wilson interval of the **error** proportion
+  (`payload_metrics.per_ci`); the success interval, if kept, is reported
+  separately as `success_wilson95`.  The original 21100 windows were re-derived
+  (CI/figures only) under `results/s2b_matrix_ci_fix/` (`--legacy`), with error
+  and rescue/damage counts unchanged.
+* **B3** is 12 cells (early/late × {transition −3.5 dB, 30 dB}; CFO ±50 kHz ×
+  ISR {0,10} × {single, four}).  The four-path channel is the FROZEN
+  `main.json` profile `[[0,(1,0)],[7.4,(0,0.5)],[23,(0.276,−0.116)],[51.2,(0.2,0)]]`
+  (bound by hash); the old integer-spaced profile is only `custom_integer_four`.
+* The verifier is self-contained and fail-closed (strict library/archive/packet/
+  plan/matrix checks, 17 negative mutations).  Every run writes `plan.json`
+  before the first window; `run_matrix`/`s2b_aggregate` exit non-zero on failure.
+
+## FCS / geometry contract
+
+wire PSDU `psdu_bytes = 96` = 94 random data bytes + 2-byte IEEE 802.15.4 CRC-16
+(appended exactly once by the generator; the modulator `append_fcs` stays False).
+The demodulator returns the whole 96-byte PSDU including the FCS and validates it
+(`fcs_pass`); nothing strips it.  (An earlier draft paragraph mixed this up; the
+authoritative statement is here.)
 
 ## MATLAB
 

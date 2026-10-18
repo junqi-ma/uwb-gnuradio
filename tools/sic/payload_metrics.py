@@ -35,7 +35,23 @@ def wilson_ci(k: int, n: int, z: float = 1.96) -> Tuple[Optional[float],
     return (max(0.0, centre - half), min(1.0, centre + half))
 
 
-def per_psdu(records: List[Dict], path: str) -> Dict:
+def per_ci(errors: int, total: int, z: float = 1.96
+           ) -> Tuple[Optional[float], Optional[float]]:
+    """Wilson 95% interval for the PER itself (error proportion).
+
+    B-R01: the PER interval is the Wilson interval of ``errors/total`` — NOT the
+    success-rate interval.  ``wilson_ci(successes, total)`` is only the CI of the
+    success rate and must be reported under a separate key
+    (``success_wilson95``); using it as ``per_wilson95`` is the B-R01 defect.
+    """
+    if total <= 0:
+        return (None, None)
+    if errors < 0 or errors > total:
+        return (None, None)
+    return wilson_ci(int(errors), int(total), z)
+
+
+def _per_summary(records: List[Dict], path: str, success_pred) -> Dict:
     n = 0
     ok = 0
     status_counts: Dict[str, int] = {}
@@ -44,31 +60,33 @@ def per_psdu(records: List[Dict], path: str) -> Dict:
         n += 1
         st = str(d.get("status", "missing"))
         status_counts[st] = status_counts.get(st, 0) + 1
-        if d.get("psdu_match") is True:
+        if success_pred(d):
             ok += 1
-    lo, hi = wilson_ci(ok, n)
-    return {"errors": n - ok, "success": ok, "total": n,
-            "per": ((n - ok) / n if n else None),
-            "per_wilson95": [lo, hi],
+    errors = n - ok
+    per_lo, per_hi = per_ci(errors, n)
+    ok_lo, ok_hi = wilson_ci(ok, n)
+    return {"errors": errors, "success": ok, "total": n,
+            "per": ((errors) / n if n else None),
+            "per_wilson95": [per_lo, per_hi],
+            "success_wilson95": [ok_lo, ok_hi],
             "status_counts": status_counts}
+
+
+def per_psdu(records: List[Dict], path: str) -> Dict:
+    """PER_PSDU: decoded PSDU != transmitted wire PSDU -> error."""
+    return _per_summary(records, path,
+                        lambda d: d.get("psdu_match") is True)
 
 
 def per_fcs(records: List[Dict], path: str) -> Dict:
     """PER_FCS: a packet succeeds only if status == success AND fcs_pass."""
-    n = 0
-    ok = 0
-    fcs_pass = 0
-    for r in records:
-        d = (r.get("demod") or {}).get(path) or {}
-        n += 1
-        if d.get("fcs_pass") is True:
-            fcs_pass += 1
-        if str(d.get("status")) == "success" and d.get("fcs_pass") is True:
-            ok += 1
-    lo, hi = wilson_ci(ok, n)
-    return {"errors": n - ok, "success": ok, "total": n,
-            "per": ((n - ok) / n if n else None),
-            "per_wilson95": [lo, hi], "fcs_pass": fcs_pass}
+    out = _per_summary(records, path,
+                       lambda d: (str(d.get("status")) == "success"
+                                  and d.get("fcs_pass") is True))
+    out["fcs_pass"] = sum(1 for r in records
+                          if ((r.get("demod") or {}).get(path) or {}
+                              ).get("fcs_pass") is True)
+    return out
 
 
 def paired_counts(records: List[Dict]) -> Dict:
