@@ -16,6 +16,8 @@ tag 另开 worktree，同时保留 A 与 B 的评价；本基线本身不自动�
 `docs/sic/S2_AB集成验收报告_2026-10-18.md`。
 回归命令见 `docs/sic/S2_AB集成回归入口_2026-10-18.md`。
 各方向原来的 `OPENCODE_START` 内容已并入统一入口；单方向开发指示保留为历史文件。
+2026-10-18 的集成回归绑定 code-tested SHA `2cea67b`。验收记录在上面的报告里。
+annotated tag `sic-s2-ab-integrated-20261018` 指向包含该报告的提交。
 
 必须同时保留的结论边界：
 

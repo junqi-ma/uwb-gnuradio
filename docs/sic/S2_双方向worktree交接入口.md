@@ -1,10 +1,11 @@
 # S2 双方向 worktree 交接
 
 > 2026-10-18 更新：A/B 已在集成分支 `integration/sic-s2-ab-20261018`
-> （worktree `.worktrees/sic-s2-integration`）按冻结 SHA 合并。
+> （worktree `.worktrees/sic-s2-integration`）按冻结 SHA 合并，并通过集成回归。
+> 验收记录见 **[S2_AB集成验收报告_2026-10-18.md](S2_AB集成验收报告_2026-10-18.md)**，
 > 冻结 tag 见 **[S2_AB冻结清单_2026-10-18.md](S2_AB冻结清单_2026-10-18.md)**。
-> 执行依据仍是 **[S2_AB冻结与合并执行指南_2026-10-18.md](S2_AB冻结与合并执行指南_2026-10-18.md)**。
-> `feature/sic-research` 在回归通过并快进之前保持文档 checkpoint，不提前改写。
+> 验收提交之后，`feature/sic-research` 以 fast-forward 接上该提交，annotated tag
+> `sic-s2-ab-integrated-20261018` 指向同一提交。原 A/B worktree 与冻结 tag 保留。
 > 下文是 2026-10-17 初始交接记录，保留历史语境。
 
 创建日期：2026-10-17；共同代码基线：93c80b3。S2 尚未实施。
