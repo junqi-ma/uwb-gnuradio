@@ -130,6 +130,9 @@ def main(argv=None):
                [sys.executable, "tools/sic/verify_s2a.py", "--self-test"])
     run_script("residual_budget --self-test",
                [sys.executable, "tools/sic/residual_budget.py", "--self-test"])
+    run_script("equal_condition_compare --self-test",
+               [sys.executable, "tools/sic/equal_condition_compare.py",
+                "--self-test"])
     if not args.skip_gr:
         run_script("uwb_sim_sic_accum --self-test",
                    [sys.executable, "gr-uwb/apps/uwb_sim_sic_accum.py",

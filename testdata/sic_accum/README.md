@@ -20,6 +20,14 @@ requires a new run directory and an explicit note in the development report.
 > runs use the `_rectification` suffix.  A-R03 adds
 > `gr-uwb/apps/uwb_sim_sic_error_budget.py` + `tools/sic/residual_budget.py`
 > (truth-assisted residual-source budget, offline diagnostics only).
+> Second review (2026-10-18, A-N01/A-N02): the claim "the negative far-region
+> C_CIR was a tail artifact" is **withdrawn** — an equal-N / equal-start control
+> that only extends the subtraction over the tail leaves it at -1.057 dB.  The
+> negative value comes from including repetitions r=62/63.  The `S6_full_truth`
+> variant is renamed "truth-parameter reconstruction mismatch reference" (not a
+> lower bound).  Offline controls:
+> `python3 tools/sic/equal_condition_compare.py --run <run_dir>` and
+> `--budget <budget_dir> --bounded-search` (see report section 8).
 > See `docs/sic/S2A_整改开发报告_2026-10-18.md`.
 
 ## 1. Purpose and scope
@@ -201,6 +209,12 @@ env -u LD_LIBRARY_PATH python3 testdata/sic_accum/qa_s2a.py \
   --run gr-uwb/build-sic-accum/results/s2a/smoke_rectification \
   --run gr-uwb/build-sic-accum/results/s2a/acceptance_rectification \
   --budget gr-uwb/build-sic-accum/results/s2a/budget_rectification
+
+# A-N01/A-N02 equal-condition controls (offline, archived runs only) ------- RUN
+env -u LD_LIBRARY_PATH python3 tools/sic/equal_condition_compare.py \
+  --run gr-uwb/build-sic-accum/results/s2a/acceptance_rectification --out /tmp/eq.json
+env -u LD_LIBRARY_PATH python3 tools/sic/equal_condition_compare.py \
+  --budget gr-uwb/build-sic-accum/results/s2a/budget_rectification --bounded-search
 
 # A-R03 error budget (6 classes x 100 acceptance windows) ------------------ RUN
 env -u LD_LIBRARY_PATH python3 gr-uwb/apps/uwb_sim_sic_error_budget.py \
