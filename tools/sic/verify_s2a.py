@@ -300,8 +300,21 @@ def check_contracts(art):
        "code_energy" in str(o.get("normalization", "")))
     ok(("contract", "fixed N sweep declared"),
        sets.get("full_N") == [1, 2, 4, 8, 16, 32, 64]
-       and sets.get("indep_start") == 8
-       and sets.get("indep_N") == [1, 2, 4, 8, 16, 32, 56])
+       and sets.get("indep_nominal_N") == [1, 2, 4, 8, 16, 32, 56])
+    ok(("contract", "independent region is support-disjoint by policy"),
+       sets.get("indep_policy") == "support_disjoint"
+       and sets.get("indep_strict_holdout") is True
+       and sets.get("legacy_indep_start") == 8
+       and "legacy_nominal_index" in str(sets.get("legacy_indep_note", "")))
+    ok(("contract", "schema 2 coherence contract present"),
+       (run_op.get("coherence") or {}).get("schema_version") == 2
+       and "N * ||mu||^2" in str((run_op.get("coherence") or {}).get(
+           "decomposition", {}).get("e_coherent", "")))
+    ok(("contract", "operator declares the nonzero-template support"),
+       (run_op.get("operator") or {}).get("support_source")
+       == "nonzero_template_indices"
+       and (run_op.get("operator") or {}).get("correlation_support", {}).get(
+           "nz_count") == 64)
     tgt = r.get("target_offsets") or []
     ok(("contract", "target ROI declared and non-empty"),
        len(tgt) == 2 and tgt[1] > tgt[0], str(tgt))
@@ -356,8 +369,8 @@ def check_operator(art):
        int(np.count_nonzero(np.abs(code) > 0.5)) == 64 and diag["energy"] == 64)
 
 
-def _archive_files(run_dir):
-    d = os.path.join(run_dir, "archive")
+def _archive_files(run_dir, sub="archive"):
+    d = os.path.join(run_dir, sub)
     if not os.path.isdir(d):
         return []
     return sorted(f for f in os.listdir(d) if f.endswith(".npz"))
@@ -366,10 +379,12 @@ def _archive_files(run_dir):
 def check_archive_policy(art):
     run_dir = art["dir"]
     decl = (art["summary"].get("archive") or {})
-    files = _archive_files(run_dir)
-    ok(("archive", "declared count == files on disk"),
-       int(decl.get("archived_windows", -1)) == len(files),
-       "%s vs %d" % (decl.get("archived_windows"), len(files)))
+    files = _archive_files(run_dir, "archive")
+    worst_files = _archive_files(run_dir, "archive_worst")
+    ok(("archive", "declared count == fixed + worst files on disk"),
+       int(decl.get("archived_windows", -1)) == len(files) + len(worst_files),
+       "%s vs %d+%d" % (decl.get("archived_windows"), len(files),
+                        len(worst_files)))
     n_arch = int((art["operator"].get("archive_policy") or {}).get(
         "windows_per_cell", 8))
     by_cell = {}
@@ -386,6 +401,37 @@ def check_archive_policy(art):
     ok(("archive", "every cell that was run has archived windows"),
        set(by_cell) == set(art["summary"].get("cells") or []),
        "%d vs %d cells" % (len(by_cell), len(art["summary"].get("cells") or [])))
+    # A-R04: worst-window evidence must exist (no empty markers) and must be
+    # declared as selection-biased evidence, not as an unbiased sample.
+    want = decl.get("worst_windows") or []
+    badw = []
+    for e in want:
+        cell = e.get("cell_id")
+        wid = int(e.get("window_id", -1))
+        reasons = list(e.get("reasons") or [e.get("reason")])
+        path = e.get("path")
+        if e.get("already_archived"):
+            if not os.path.exists(os.path.join(run_dir, "archive",
+                                               "%s_%05d.npz" % (cell, wid))):
+                badw.append((cell, wid, reasons, "missing_fixed"))
+            continue
+        if not path:
+            badw.append((cell, wid, reasons, "empty_marker"))
+            continue
+        full = os.path.join(run_dir, path)
+        if not os.path.exists(full):
+            badw.append((cell, wid, reasons, "missing"))
+            continue
+        z = np.load(full, allow_pickle=False)
+        meta = json.loads(bytes(z["meta_json"]).decode("utf-8"))
+        declared = str(meta.get("archive_reason") or "")
+        if any(r not in declared for r in reasons if r):
+            badw.append((cell, wid, reasons, "reason_mismatch", declared))
+    ok(("archive", "worst-window evidence archived (no empty markers)"),
+       not badw and len(want) > 0, str(badw[:3]))
+    ok(("archive", "worst windows declared as selection-biased evidence"),
+       "NOT used" in str(decl.get("worst_windows_rule", "")),
+       str(decl.get("worst_windows_rule"))[:80])
 
 
 def check_windows(art):
@@ -447,44 +493,263 @@ def check_windows(art):
        cal + 12 * stride <= acc or acc + 12 * stride <= cal)
 
 
+def _legal_run(nz_min, nz_max, origin, sps, sync_reps, tap_lo, tap_hi,
+               visible_end, sub_lo, sub_hi, n):
+    """Independent derivation of the maximal contiguous support-disjoint run."""
+    reps = []
+    excluded = {}
+    for r in range(int(sync_reps)):
+        lo = int(origin) + int(r) * int(sps) + int(tap_lo) + int(nz_min)
+        hi = int(origin) + int(r) * int(sps) + int(tap_hi) - 1 + int(nz_max) + 1
+        bad = []
+        if lo < 0 or hi > int(n):
+            bad.append("outside_window")
+        if lo < int(visible_end):
+            bad.append("reads_training_or_guard")
+        if lo < int(sub_lo) or hi > int(sub_hi):
+            bad.append("outside_applied_subtraction")
+        if bad:
+            excluded[r] = bad
+        else:
+            reps.append(r)
+    runs = []
+    for r in reps:
+        if runs and r == runs[-1][-1] + 1:
+            runs[-1].append(r)
+        else:
+            runs.append([r])
+    run = max(runs, key=len) if runs else []
+    return run, excluded
+
+
+def _truncate_n(available, nominal):
+    out = [int(n) for n in nominal if int(n) <= int(available)]
+    if int(available) >= 32 and int(available) not in out:
+        out.append(int(available))
+    return out
+
+
+def check_support(art):
+    """A-R01: every window's repetition sets must be support-disjoint.
+
+    The verifier re-derives the maximal legal run from the operator's nonzero
+    template support, the recorded visibility limit and the recorded applied
+    subtraction bounds, and requires the artifact to match exactly.  A label
+    that says "independent" but actually reads training/guard or un-subtracted
+    tail samples is rejected.
+    """
+    o = art["operator"]["operator"]
+    arrays = art["operator_arrays"]
+    bad = []
+    bad_n = []
+    bad_legacy = []
+    bad_roi = []
+    bad_cov = []
+    for w in art["windows"]:
+        sup = w.get("support") or {}
+        if not sup:
+            bad.append((w["cell_id"], w["window_id"], "missing"))
+            continue
+        code = np.asarray(arrays["sampled_code"], dtype=np.complex128)
+        nz = np.flatnonzero(np.abs(code) > 0)
+        if nz.size == 0:
+            bad.append((w["cell_id"], w["window_id"], "empty_code"))
+            continue
+        if sup.get("no_applied_subtraction") or int(sup.get("sub_hi", -1)) < 0:
+            # bypass/failed window: nothing was subtracted, so the window set
+            # must be the PUBLIC nominal cell set, and that cell set must still
+            # be the maximal legal run of its own recorded bounds.
+            cs = sup.get("cell_set") or {}
+            b = cs.get("bounds") or {}
+            if not b:
+                bad.append((w["cell_id"], w["window_id"], "no_bounds"))
+                continue
+            run, excluded = _legal_run(
+                nz[0], nz[-1], int(o["origin"]), int(o["sps"]),
+                int(o["sync_reps"]), int(o["tap_lo"]), int(o["tap_hi"]),
+                int(b["visible_end"]), int(b["sub_lo"]), int(b["sub_hi"]),
+                int(b["n"]))
+            if (int(cs["first"]) != (run[0] if run else -1)
+                    or int(cs["last"]) != (run[-1] if run else -1)
+                    or int(cs["available"]) != len(run)):
+                bad.append((w["cell_id"], w["window_id"], "cell_set"))
+            if (w.get("support") or {}).get("set_used") != "cell":
+                bad.append((w["cell_id"], w["window_id"], "bypass_not_cell"))
+            continue
+        run, excluded = _legal_run(
+            nz[0], nz[-1], int(o["origin"]), int(o["sps"]),
+            int(o["sync_reps"]), int(o["tap_lo"]), int(o["tap_hi"]),
+            int(sup["visible_end"]), int(sup["sub_lo"]), int(sup["sub_hi"]),
+            int(w["n_samples"]))
+        sets = (w.get("accum") or {}).get("sets") or {}
+        ind = sets.get("indep")
+        if not ind:
+            bad.append((w["cell_id"], w["window_id"], "missing_indep_set"))
+            continue
+        want_first = run[0] if run else -1
+        want_last = run[-1] if run else -1
+        if (int(ind["first"]) != want_first or int(ind["last"]) != want_last
+                or int(ind["available"]) != len(run)):
+            bad.append((w["cell_id"], w["window_id"], "set",
+                        [ind["first"], ind["last"], ind["available"]],
+                        [want_first, want_last, len(run)]))
+        if bool(ind.get("strict_holdout")) is not True:
+            bad.append((w["cell_id"], w["window_id"], "not_strict"))
+        # the honest N list: a prefix of the nominal list plus the real tail
+        nominal = list(ind.get("n_nominal") or [1, 2, 4, 8, 16, 32, 56])
+        if list(ind.get("n_list") or []) != _truncate_n(len(run), nominal):
+            bad_n.append((w["cell_id"], w["window_id"],
+                          ind.get("n_list"), _truncate_n(len(run), nominal)))
+        if int(ind["first"]) > 0 and (int(ind["first"]) - 1) not in excluded:
+            bad.append((w["cell_id"], w["window_id"], "first_not_maximal"))
+        if run and (int(ind["last"]) + 1) not in excluded \
+                and int(ind["last"]) + 1 < int(o["sync_reps"]):
+            bad.append((w["cell_id"], w["window_id"], "last_not_maximal"))
+        # the legacy label must be declared NOT support-disjoint
+        leg = sets.get("legacy_nominal_index")
+        if leg is not None:
+            if bool(leg.get("strict_holdout")) is not False:
+                bad_legacy.append((w["cell_id"], w["window_id"], "strict"))
+            first_leg = int(leg.get("first", 8))
+            if first_leg not in excluded:
+                # its first repetition is legal, so it cannot be used to claim
+                # legacy leakage; only a *label* problem if it claims holdout
+                pass
+        # per-ROI appendix sets must cover the main set (narrower tap span)
+        for rname, app in (w.get("roi_sets_appendix") or {}).items():
+            st = app.get("set") or {}
+            if int(st.get("first", 10 ** 9)) > int(ind["first"]) or \
+                    int(st.get("last", -1)) < int(ind["last"]):
+                bad_roi.append((w["cell_id"], w["window_id"], rname,
+                                st.get("first"), st.get("last")))
+        cov = sup.get("coverage") or {}
+        if cov.get("cir_support"):
+            lo, hi = int(cov["cir_support"][0]), int(cov["cir_support"][1])
+            slo, shi = int(sup["sub_lo"]), int(sup["sub_hi"])
+            inter = max(0, min(hi, shi) - max(lo, slo))
+            want = inter / max(1, hi - lo)
+            got = cov.get("cir_overlap_sub_ratio")
+            if got is None or abs(float(got) - want) > 1e-9:
+                bad_cov.append((w["cell_id"], w["window_id"], got, want))
+    ok(("support", "every window's indep set == the maximal legal run"), not bad,
+       str(bad[:3]))
+    ok(("support", "honest N list (prefix + real tail, no relabel)"), not bad_n,
+       str(bad_n[:3]))
+    ok(("support", "legacy [8,8+N) is declared non-holdout"), not bad_legacy,
+       str(bad_legacy[:3]))
+    ok(("support", "per-ROI appendix sets contain the main set"), not bad_roi,
+       str(bad_roi[:3]))
+    ok(("support", "CIR/subtraction coverage arithmetic consistent"),
+       not bad_cov, str(bad_cov[:3]))
+    committed = sum(1 for w in art["windows"]
+                    if (w.get("sic") or {}).get("committed"))
+    if committed > 0:
+        w0 = next(w for w in art["windows"]
+                  if (w.get("sic") or {}).get("committed"))
+        sup = w0.get("support") or {}
+        ok(("support", "training span and visibility are recorded per "
+            "committed window"),
+           int(sup.get("visible_end", -1)) > 0
+           and int(sup.get("training_hi", -1)) > 0
+           and int(sup.get("sub_hi", -1)) > int(sup.get("sub_lo", -1)),
+           str({k: sup.get(k) for k in ("visible_end", "training_lo",
+                                        "training_hi", "sub_lo", "sub_hi")}))
+    else:
+        w0 = art["windows"][0]
+        cs = (w0.get("support") or {}).get("cell_set") or {}
+        ok(("support", "bypass run: public nominal cell set is recorded with "
+            "explicit bounds"),
+           bool(cs.get("bounds")) and int(cs.get("available", 0)) > 0
+           and (w0["support"].get("no_applied_subtraction") is True),
+           str({k: w0["support"].get(k) for k in
+                ("no_applied_subtraction", "set_used")}))
+
+
+def check_coherence_energy(art):
+    """A-R02: same-dimension coherent/centered energy decomposition."""
+    bad = []
+    bad_cons = []
+    bad_eta = []
+    bad_old = []
+    for w in art["windows"]:
+        for view in ("coherence", "coherence_full_preamble"):
+            for tag in ("sic", "raw"):
+                for roi in ("target", "background", "all"):
+                    c = ((w.get(view) or {}).get(tag) or {}).get(roi) or {}
+                    if c.get("eta") is None:
+                        if c.get("coherent_fraction") is not None:
+                            bad.append((w["cell_id"], w["window_id"], view,
+                                        tag, roi, "na"))
+                        continue
+                    n = int(c["N"])
+                    mu = float(c["mu_energy"])
+                    ec = float(c["e_coherent"])
+                    ez = float(c["e_centered"])
+                    et = float(c["e_total"])
+                    if abs(ec - n * mu) > 1e-9 * max(1.0, et):
+                        bad.append((w["cell_id"], w["window_id"], view, tag,
+                                    roi, "e_coherent != N*mu"))
+                    if abs(et - (ec + ez)) > 1e-9 * max(1.0, et):
+                        bad_cons.append((w["cell_id"], w["window_id"], view,
+                                         tag, roi))
+                    if abs(float(c["coherent_fraction"]) - ec / et) > 1e-9:
+                        bad_eta.append((w["cell_id"], w["window_id"], view,
+                                        tag, roi))
+                    if c.get("mean_fraction") is not None:
+                        bad_old.append((w["cell_id"], w["window_id"], view,
+                                        tag, roi))
+                    if c.get("energy_conservation_rel") is not None and \
+                            float(c["energy_conservation_rel"]) > 1e-6:
+                        bad_cons.append((w["cell_id"], w["window_id"], view,
+                                         tag, roi, "rel"))
+    ok(("energy", "e_coherent == N * ||mu||^2 in every window"), not bad,
+       str(bad[:3]))
+    ok(("energy", "e_total == e_coherent + e_centered"), not bad_cons,
+       str(bad_cons[:3]))
+    ok(("energy", "coherent_fraction == e_coherent/e_total"), not bad_eta,
+       str(bad_eta[:3]))
+    ok(("energy", "dimensionally-wrong mean_fraction retired (None)" +
+       " with supersession", not bad_old), str(bad_old[:3]))
+
+
 def check_archived_windows(art, verbose=False):
-    """Recompute H, the accumulation table, target and coherence from arrays."""
+    """Recompute H, the accumulation table, target, and both coherence views."""
     run_dir = art["dir"]
     o = art["operator"]["operator"]
     r = art["operator"]["roi"]
-    sets = art["operator"]["repetition_sets"]
     sps = int(o["sps"])
     origin = int(o["origin"])
-    reps = int(o["sync_reps"])
+    reps_n = int(o["sync_reps"])
     tap_lo = int(o["tap_lo"])
     tap_hi = int(o["tap_hi"])
     code = np.asarray(art["operator_arrays"]["sampled_code"],
                       dtype=np.complex128)
     ecode = float(np.real(np.vdot(code, code)))
-    # ROI indices in the archived tap grid
     tgt_lo = int(r["target_offsets"][0]) - tap_lo
     tgt_hi = int(r["target_offsets"][1]) - tap_lo
     bg_lo = int(r["background_offsets"][0]) - tap_lo
     bg_hi = int(r["background_offsets"][1]) - tap_lo
     tgt_tap = int(r["target_tap_offset"]) - tap_lo
     recs = {(w["cell_id"], w["window_id"]): w for w in art["windows"]}
-    files = _archive_files(run_dir)
+    files = [("archive", f) for f in _archive_files(run_dir, "archive")]
+    files += [("archive_worst", f)
+              for f in _archive_files(run_dir, "archive_worst")]
     if not files:
         fail(("archive", "recompute: no archived windows"))
         return
-    h_bad, tab_bad, tgt_bad, coh_bad, miss = [], [], [], [], []
-    for f in files:
+    h_bad, tab_bad, tgt_bad, coh_bad, miss, iq_bad = [], [], [], [], [], []
+    for subdir, f in files:
         cell, _, rest = f.rpartition("_")
         wid = int(rest.split(".")[0])
-        z = np.load(os.path.join(run_dir, "archive", f), allow_pickle=False)
+        z = np.load(os.path.join(run_dir, subdir, f), allow_pickle=False)
         clean = np.asarray(z["clean"], dtype=np.complex128)
         raw = np.asarray(z["raw"], dtype=np.complex128)
         sic = np.asarray(z["sic"], dtype=np.complex128)
-        Hc = cir_tensor(matched_filter(clean, code, ecode), origin, sps, reps,
+        Hc = cir_tensor(matched_filter(clean, code, ecode), origin, sps, reps_n,
                         tap_lo, tap_hi)
-        Hr = cir_tensor(matched_filter(raw, code, ecode), origin, sps, reps,
+        Hr = cir_tensor(matched_filter(raw, code, ecode), origin, sps, reps_n,
                         tap_lo, tap_hi)
-        Hs = cir_tensor(matched_filter(sic, code, ecode), origin, sps, reps,
+        Hs = cir_tensor(matched_filter(sic, code, ecode), origin, sps, reps_n,
                         tap_lo, tap_hi)
         for tag, H, key in (("clean", Hc, "H_clean"), ("raw", Hr, "H_raw"),
                             ("sic", Hs, "H_sic")):
@@ -497,19 +762,28 @@ def check_archived_windows(art, verbose=False):
         if rec is None:
             miss.append((cell, wid))
             continue
-        # accumulation table
-        for set_name, n_list in (("full", sets["full_N"]),
-                                 ("indep", sets["indep_N"])):
-            start = 0 if set_name == "full" else int(sets["indep_start"])
+        sets = rec["accum"]["sets"]
+        for set_name, meta in sets.items():
+            first = int(meta["first"])
+            last = int(meta["last"])
+            n_list = [int(n) for n in (meta.get("n_list") or [])]
+            if not n_list or first < 0:
+                continue
+            avail = last - first + 1
             e1r = e1s = None
             for N in n_list:
-                hc = accum(Hc, start, N)
-                hr = accum(Hr, start, N)
-                hs = accum(Hs, start, N)
+                n_eff = min(int(N), avail)
+                idx = list(range(first, first + n_eff))
+                hc = accum(Hc, first, n_eff)
+                hr = accum(Hr, first, n_eff)
+                hs = accum(Hs, first, n_eff)
                 er = energy(hr - hc)
                 es = energy(hs - hc)
                 c, flag = ratio_db(er, es)
-                got = rec["accum"][set_name][str(N)]
+                got = rec["accum"][set_name].get(str(N))
+                if got is None:
+                    tab_bad.append((cell, wid, set_name, N, "missing"))
+                    continue
                 for name, want, have in (
                         ("e_raw", er, got["e_raw"]["full"]),
                         ("e_sic", es, got["e_sic"]["full"])):
@@ -524,7 +798,7 @@ def check_archived_windows(art, verbose=False):
                 if nm is not None and abs(nm - float(
                         got["nmse_raw"]["full"])) > 1e-6 * max(1.0, nm):
                     tab_bad.append((cell, wid, set_name, N, "nmse_raw"))
-                if N == 1:
+                if N == n_list[0]:
                     e1r, e1s = er, es
                 gr, _ = ratio_db(e1r, er)
                 gs, _ = ratio_db(e1s, es)
@@ -535,52 +809,83 @@ def check_archived_windows(art, verbose=False):
                             tab_bad.append((cell, wid, set_name, N, name))
                     elif abs(float(have) - want) > 1e-6:
                         tab_bad.append((cell, wid, set_name, N, name))
-                # target protection
-                t = rec["target"]["%s/%d" % (set_name, N)]["sic"]
-                tr = rec["target"]["%s/%d" % (set_name, N)]["raw"]
-                seg = np.abs(hs[tgt_lo:tgt_hi])
-                pk = int(np.argmax(seg)) + tgt_lo
-                pkc = int(np.argmax(np.abs(hc[tgt_lo:tgt_hi]))) + tgt_lo
-                if pk - pkc != int(t["peak_shift"]):
-                    tgt_bad.append((cell, wid, set_name, N, "peak_shift"))
-                amp = abs(hs[tgt_tap]) / abs(hc[tgt_tap])
-                want = 20.0 * math.log10(amp) if amp > 0 else None
-                if want is not None and abs(want - float(
-                        t["amp_err_db"])) > 1e-6 * max(1.0, abs(want)):
-                    tgt_bad.append((cell, wid, set_name, N, "amp_err"))
-                amp_r = abs(hr[tgt_tap]) / abs(hc[tgt_tap])
-                want_r = 20.0 * math.log10(amp_r) if amp_r > 0 else None
-                if want_r is not None and abs(want_r - float(
-                        tr["amp_err_db"])) > 1e-6 * max(1.0, abs(want_r)):
-                    tgt_bad.append((cell, wid, set_name, N, "raw_amp_err"))
-        # coherence (largest-N single-window statistics)
-        E = Hs - Hc
-        for roi, (lo, hi) in (("target", (tgt_lo, tgt_hi)),
-                              ("background", (bg_lo, bg_hi)),
-                              ("all", (0, Hs.shape[1]))):
-            c = coherence(E, lo, hi)
-            got = rec["coherence"]["sic"][roi]
-            if c["eta"] is None:
-                if got["eta"] is not None:
-                    coh_bad.append((cell, wid, roi, "eta_na"))
-            else:
-                if abs(float(got["eta"]) - c["eta"]) > 1e-9:
-                    coh_bad.append((cell, wid, roi, "eta"))
-                if c["lag1"] is not None and abs(
-                        float(got["lag"].get("1")) - c["lag1"]) > 1e-9:
-                    coh_bad.append((cell, wid, roi, "lag1"))
-                if c["centered_lag1"] is not None and abs(
-                        float(got["centered_lag"].get("1"))
-                        - c["centered_lag1"]) > 1e-9:
-                    coh_bad.append((cell, wid, roi, "centered_lag1"))
+                tkey = "%s/%d" % (set_name, N)
+                if tkey in (rec.get("target") or {}):
+                    t = rec["target"][tkey]["sic"]
+                    tr = rec["target"][tkey]["raw"]
+                    pk = int(np.argmax(np.abs(hs[tgt_lo:tgt_hi]))) + tgt_lo
+                    pkc = int(np.argmax(np.abs(hc[tgt_lo:tgt_hi]))) + tgt_lo
+                    if pk - pkc != int(t["peak_shift"]):
+                        tgt_bad.append((cell, wid, tkey, "peak_shift"))
+                    amp = abs(hs[tgt_tap]) / abs(hc[tgt_tap])
+                    want = 20.0 * math.log10(amp) if amp > 0 else None
+                    if want is not None and abs(want - float(
+                            t["amp_err_db"])) > 1e-6 * max(1.0, abs(want)):
+                        tgt_bad.append((cell, wid, tkey, "amp_err"))
+                    amp_r = abs(hr[tgt_tap]) / abs(hc[tgt_tap])
+                    want_r = 20.0 * math.log10(amp_r) if amp_r > 0 else None
+                    if want_r is not None and abs(want_r - float(
+                            tr["amp_err_db"])) > 1e-6 * max(1.0, abs(want_r)):
+                        tgt_bad.append((cell, wid, tkey, "raw_amp_err"))
+        # IQ-level actual suppression (online metric, recomputed from arrays)
+        span_lo = int(o["origin"])
+        span_hi = min(len(clean), span_lo + int(o["sync_reps"]) * int(o["sps"]))
+        for tag, (lo, hi) in (("span", (span_lo, span_hi)),
+                              ("window", (0, len(clean)))):
+            r_ = raw[lo:hi] - clean[lo:hi]
+            s_ = sic[lo:hi] - clean[lo:hi]
+            num = float(np.sum(np.abs(r_) ** 2))
+            den = float(np.sum(np.abs(s_) ** 2))
+            want, wflag = ratio_db(num, den)
+            got = rec["iq"][tag]
+            if got.get("flag") != wflag:
+                iq_bad.append((cell, wid, tag, "flag"))
+            elif wflag == "numeric" and abs(float(got["suppression_db"])
+                                            - want) > 1e-6:
+                iq_bad.append((cell, wid, tag, "db"))
+        # coherence on the exact set that was used
+        sup = rec["support"]
+        used = (sup["cell_set"] if sup.get("set_used") == "cell"
+                else sup["window_set"])
+        main_idx = list(range(int(used["first"]), int(used["last"]) + 1))
+        views = (("coherence", main_idx),
+                 ("coherence_full_preamble", list(range(reps_n))))
+        for view, idx in views:
+            E = Hs - Hc
+            for roi, (lo, hi) in (("target", (tgt_lo, tgt_hi)),
+                                  ("background", (bg_lo, bg_hi)),
+                                  ("all", (0, Hs.shape[1]))):
+                c = coherence(E[np.asarray(idx)], lo, hi)
+                got = rec[view]["sic"][roi]
+                if c["eta"] is None:
+                    if got["eta"] is not None:
+                        coh_bad.append((cell, wid, view, roi, "eta_na"))
+                    continue
+                n = len(idx)
+                ec = n * float(np.sum(np.abs(
+                    E[np.asarray(idx)][:, lo:hi].mean(axis=0)) ** 2))
+                ez = float(np.sum(np.abs(
+                    E[np.asarray(idx)][:, lo:hi]
+                    - E[np.asarray(idx)][:, lo:hi].mean(axis=0)) ** 2))
+                if abs(float(got["e_coherent"]) - ec) > 1e-9 * max(1.0, ec):
+                    coh_bad.append((cell, wid, view, roi, "e_coherent"))
+                if abs(float(got["e_centered"]) - ez) > 1e-9 * max(1.0, ez + ec):
+                    coh_bad.append((cell, wid, view, roi, "e_centered"))
+                if abs(float(got["coherent_fraction"]) - c["eta"]) > 1e-9:
+                    coh_bad.append((cell, wid, view, roi, "coherent_fraction"))
+                if abs(float(got["energy"]) - (ec + ez)) > 1e-9 * max(
+                        1.0, ec + ez):
+                    coh_bad.append((cell, wid, view, roi, "energy_total"))
     ok(("recompute", "archived H_clean/H_raw/H_sic reproduced (%d windows)"
         % len(files)), not h_bad, str(h_bad[:4]))
-    ok(("recompute", "archived accumulation tables reproduced"), not tab_bad,
-       str(tab_bad[:4]))
+    ok(("recompute", "archived accumulation tables reproduced (all sets, "
+        "honest N)"), not tab_bad, str(tab_bad[:4]))
     ok(("recompute", "archived target metrics reproduced"), not tgt_bad,
        str(tgt_bad[:4]))
-    ok(("recompute", "archived coherence metrics reproduced"), not coh_bad,
+    ok(("recompute", "coherent/centered energy fields reproduced"), not coh_bad,
        str(coh_bad[:4]))
+    ok(("recompute", "IQ-level actual suppression reproduced from arrays"),
+       not iq_bad, str(iq_bad[:4]))
     ok(("recompute", "every archived window has a jsonl record"), not miss,
        str(miss[:4]))
 
@@ -588,8 +893,9 @@ def check_archived_windows(art, verbose=False):
 def check_summary(art):
     s = art["summary"]
     wins = art["windows"]
-    op = art["operator"]["seeds"]
-    sets = art["operator"]["repetition_sets"]
+    if int(s.get("schema_version", 0)) != 2:
+        fail(("summary", "schema_version is 2 (rectification)"),
+             str(s.get("schema_version")))
     bad = []
     per_cell = {}
     for w in wins:
@@ -601,8 +907,11 @@ def check_summary(art):
             continue
         if cs["windows"] != len(recs):
             bad.append((cell, "windows", cs["windows"], len(recs)))
-        for set_name, n_list in (("full", sets["full_N"]),
-                                 ("indep", sets["indep_N"])):
+        sets = (recs[0].get("accum") or {}).get("sets") or {}
+        if cs.get("sets") != sets:
+            bad.append((cell, "sets", "summary != window record"))
+        for set_name, meta in sets.items():
+            n_list = [int(n) for n in (meta.get("n_list") or [])]
             for N in n_list:
                 key = "%s/%d" % (set_name, N)
                 for roi in ("full", "target", "background", "direct"):
@@ -627,7 +936,6 @@ def check_summary(art):
                             percentile(finite, 50)
                             - float(g["median"])) > 1e-6:
                         bad.append((cell, key, roi, "median"))
-                # accumulation gain
                 for gname in ("g_sic_db", "g_raw_db"):
                     vals = [r["accum"][set_name][str(N)][gname] for r in recs]
                     m = mean_of(vals)
@@ -636,7 +944,6 @@ def check_summary(art):
                     elif m is not None and abs(
                             m - float(cs["accum"][key][gname]["mean"])) > 1e-6:
                         bad.append((cell, key, gname, "mean"))
-                # target protection
                 amp = [abs(r["target"][key]["sic"]["amp_err_db"]) for r in recs
                        if r["target"][key]["sic"]["amp_err_db"] is not None]
                 shift = [abs(r["target"][key]["sic"]["peak_shift"])
@@ -655,8 +962,61 @@ def check_summary(art):
                     bad.append((cell, key, "target", "pass_amp"))
                 if t["pass_peak_shift_le_1"] != bool(shift and max(shift) <= 1):
                     bad.append((cell, key, "target", "pass_shift"))
-    ok(("summary", "per-cell aggregates recomputed from windows.jsonl"),
-       not bad, str(bad[:6]))
+        # support bookkeeping aggregated from the window records
+        sup = cs.get("support") or {}
+        want_mism = [r["window_id"] for r in recs
+                     if not (r.get("support") or {}).get("cell_set_contained",
+                                                         True)]
+        if intra_list_eq(sup.get("cell_set_mismatch_windows"), want_mism) is False:
+            bad.append((cell, "support", "mismatch list"))
+        if sup.get("cell_set") != (recs[0].get("support") or {}).get("cell_set"):
+            bad.append((cell, "support", "cell_set"))
+        used = sup.get("set_used_counts") or {}
+        if int(used.get("cell", -1)) + int(used.get("window", -1)) != len(recs):
+            bad.append((cell, "support", "set_used_counts"))
+        # worst-window evidence must be present and explicitly non-unbiased
+        ww = cs.get("worst_windows") or {}
+        undef = list(ww.get("selection_undefined") or [])
+        if ww.get("lowest_c_cir") is None and \
+                "lowest_c_cir" not in undef:
+            bad.append((cell, "worst_windows", "missing_lowest"))
+        if ww.get("largest_target_error") is None and \
+                "largest_target_error" not in undef:
+            bad.append((cell, "worst_windows", "missing_target"))
+        if "NOT used" not in str(ww.get("selection_rule", "")):
+            bad.append((cell, "worst_windows", "rule"))
+    ok(("summary", "per-cell aggregates recomputed from windows.jsonl "
+        "(all sets, honest N)"), not bad, str(bad[:6]))
+    # coherence aggregation
+    badc = []
+    for cell, recs in per_cell.items():
+        cs = s["per_cell"][cell]
+        for view in ("coherence", "coherence_full_preamble"):
+            for tag in ("sic", "raw"):
+                for roi in ("target", "background", "all"):
+                    key = "%s/%s/%s" % (view, tag, roi)
+                    agg = (cs.get("coherence") or {}).get(key)
+                    if not agg:
+                        badc.append((cell, key, "missing"))
+                        continue
+                    vals = [r[view][tag][roi].get("coherent_fraction")
+                            for r in recs]
+                    m = mean_of(vals)
+                    if (m is None) != (agg.get("coherent_fraction_mean")
+                                       is None):
+                        badc.append((cell, key, "none"))
+                    elif m is not None and abs(
+                            m - float(agg["coherent_fraction_mean"])) > 1e-6:
+                        badc.append((cell, key, "mean"))
+                    cons = [r[view][tag][roi].get("energy_conservation_rel")
+                            for r in recs]
+                    cm = max([c for c in cons if c is not None], default=None)
+                    if cm is not None and float(
+                            agg.get("energy_conservation_rel_max", 1e9)) \
+                            < cm - 1e-12:
+                        badc.append((cell, key, "conservation"))
+    ok(("summary", "coherence aggregation (both views, energies) reproduced"),
+       not badc, str(badc[:5]))
     # cells_summary.csv must agree with summary.json
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import csv as _csv
@@ -678,7 +1038,6 @@ def check_summary(art):
                 want = entry[roi]["mean"]
                 got = str(row["c_cir_db_mean"]).strip()
                 if want is None:
-                    # an N/A cell must never carry a fabricated number
                     if got not in ("na", "", "None"):
                         badcsv.append((cell, key, roi, "fabricated_mean"))
                 elif got in ("na", "", "None") or abs(
@@ -686,6 +1045,10 @@ def check_summary(art):
                     badcsv.append((cell, key, roi, "mean"))
     ok(("summary", "cells_summary.csv agrees with summary.json"), not badcsv,
        str(badcsv[:5]))
+
+
+def intra_list_eq(a, b):
+    return list(a or []) == list(b or [])
 
 
 def check_receiver(art):
@@ -758,7 +1121,8 @@ def verify_run(run_dir, verbose=False):
         return RESULTS
     art = load_run(run_dir)
     for fn in (check_manifest, check_contracts, check_operator,
-               check_archive_policy, check_windows, check_archived_windows,
+               check_archive_policy, check_windows, check_support,
+               check_coherence_energy, check_archived_windows,
                check_summary, check_receiver, check_bypass):
         try:
             if fn is check_archived_windows:
@@ -933,6 +1297,73 @@ def reject_qa(src_run, workdir, verbose=False):
             w.writeheader()
             w.writerows(rows)
 
+    @mutation("claim a leaked [8,..] set as support-disjoint")
+    def _m_support(dst):
+        p = os.path.join(dst, "windows.jsonl")
+        recs = [json.loads(x) for x in open(p).read().splitlines() if x]
+        for r in recs:
+            for key in ("window_set", "cell_set"):
+                if r["support"].get(key):
+                    r["support"][key]["first"] = 8
+            ind = r["accum"]["sets"]["indep"]
+            ind["first"] = 8
+            ind["available"] = int(ind["last"]) - 8 + 1
+        with open(p, "w") as fh:
+            for r in recs:
+                fh.write(json.dumps(r, allow_nan=True) + "\n")
+
+    @mutation("drop the N factor in e_coherent (missing-N energy bug)")
+    def _m_energy(dst):
+        p = os.path.join(dst, "windows.jsonl")
+        recs = [json.loads(x) for x in open(p).read().splitlines() if x]
+        for view in ("coherence", "coherence_full_preamble"):
+            for tag in ("sic", "raw"):
+                for roi in ("target", "background", "all"):
+                    c = recs[0][view][tag][roi]
+                    if c.get("mu_energy") is not None:
+                        c["e_coherent"] = float(c["mu_energy"])
+        with open(p, "w") as fh:
+            for r in recs:
+                fh.write(json.dumps(r, allow_nan=True) + "\n")
+
+    @mutation("declare the legacy index set as a strict holdout")
+    def _m_legacy(dst):
+        p = os.path.join(dst, "windows.jsonl")
+        recs = [json.loads(x) for x in open(p).read().splitlines() if x]
+        recs[0]["accum"]["sets"]["legacy_nominal_index"]["strict_holdout"] = True
+        with open(p, "w") as fh:
+            for r in recs:
+                fh.write(json.dumps(r, allow_nan=True) + "\n")
+
+    @mutation("relabel the independent N list 54 -> 56")
+    def _m_nrelabel(dst):
+        p = os.path.join(dst, "windows.jsonl")
+        recs = [json.loads(x) for x in open(p).read().splitlines() if x]
+        for r in recs:
+            ind = r["accum"]["sets"]["indep"]
+            ind["n_list"] = [1, 2, 4, 8, 16, 32, 56]
+        with open(p, "w") as fh:
+            for r in recs:
+                fh.write(json.dumps(r, allow_nan=True) + "\n")
+
+    @mutation("remove the worst-window archive declaration")
+    def _m_worst(dst):
+        p = os.path.join(dst, "summary.json")
+        s = json.load(open(p))
+        s["archive"]["worst_windows"] = []
+        json.dump(s, open(p, "w"), indent=2, allow_nan=True)
+
+    @mutation("tamper an online IQ suppression value")
+    def _m_iqmetric(dst):
+        p = os.path.join(dst, "windows.jsonl")
+        recs = [json.loads(x) for x in open(p).read().splitlines() if x]
+        if recs[0]["iq"]["span"].get("suppression_db") is not None:
+            recs[0]["iq"]["span"]["suppression_db"] = float(
+                recs[0]["iq"]["span"]["suppression_db"]) + 3.0
+        with open(p, "w") as fh:
+            for r in recs:
+                fh.write(json.dumps(r, allow_nan=True) + "\n")
+
     @mutation("declare a different seed set in summary")
     def _m_set(dst):
         p = os.path.join(dst, "summary.json")
@@ -960,6 +1391,290 @@ def reject_qa(src_run, workdir, verbose=False):
     if verbose:
         print("reject-QA: %d/%d mutations caught"
               % (len(mutations) - len(uncaught), len(mutations)))
+    return uncaught, len(mutations)
+
+
+# ---------------------------------------------------------------------------
+# A-R03 error-budget verification (independent core-operator recomputation)
+# ---------------------------------------------------------------------------
+def _poly_rows(preamble, phases=32, half=16):
+    """Independent copy of the C++ core's 32-phase polyphase table."""
+    pre = np.asarray(preamble, dtype=np.complex128)
+    plen = pre.size
+    M = 2 * half + 1
+    rows = np.zeros((int(phases), plen), dtype=np.complex64)
+    rows[0] = pre.astype(np.complex64)
+    nn = np.arange(M, dtype=np.float64)
+    win = 0.54 - 0.46 * np.cos(2.0 * np.pi * nn / (M - 1))
+    for g in range(1, int(phases)):
+        tau = float(g) / float(phases)
+        taps = np.sinc(nn - float(half) - tau) * win
+        ssum = taps.sum()
+        if abs(ssum) > 1e-12:
+            taps = taps / ssum
+        conv = np.convolve(pre, taps.astype(np.complex128))
+        rows[g] = conv[half:half + plen].astype(np.complex64)
+    return rows
+
+
+def _core_recon(model, preamble, lo, hi, rows, phases=32):
+    """Independent core-operator reconstruction over [lo, hi)."""
+    lo, hi = int(lo), int(hi)
+    m = hi - lo
+    if m <= 0:
+        return np.zeros(0, dtype=np.complex128)
+    pre = np.asarray(preamble, dtype=np.complex128)
+    plen = pre.size
+    acc = np.zeros(m, dtype=np.complex128)
+    pos = np.arange(lo, hi, dtype=np.int64)
+    for tau, g in zip(model["taus"], model["gains"]):
+        tau = float(tau)
+        ni = int(math.floor(tau))
+        fr = tau - float(ni)
+        if not (0.0 <= fr < 1.0):
+            fr = 0.0
+        beta = fr * float(phases)
+        gi = min(int(beta), int(phases) - 1)
+        alpha = min(max(beta - float(gi), 0.0), 1.0)
+        idx = pos - ni
+        okk = (idx >= 0) & (idx < plen)
+        if not okk.any():
+            continue
+        ii = idx[okk]
+        col = (1.0 - alpha) * rows[gi][ii].astype(np.complex128)
+        if alpha != 0.0:
+            if gi + 1 >= int(phases):
+                jj = ii - 1
+                okw = (jj >= 0) & (jj < plen)
+                col = col.copy()
+                col[okw] += alpha * rows[0][jj[okw]].astype(np.complex128)
+            else:
+                col = col + alpha * rows[gi + 1][ii].astype(np.complex128)
+        acc[np.flatnonzero(okk)] += complex(g) * col
+    w = 2.0 * math.pi * float(model["cfo_hz"]) / float(model["sample_rate"])
+    p = pos.astype(np.float64) - float(model["phase_reference_sample"])
+    return acc * np.exp(1j * w * p)
+
+
+BUDGET_FILES = ("run_manifest.json", "error_budget_summary.json",
+                "error_budget.jsonl", "budget_variants.csv")
+VARIANT_TRUTH_FLAGS = {"S0_model": False}
+
+
+def verify_budget(run_dir, verbose=False):
+    """Verify an A-R03 error-budget run from its archived arrays."""
+    del RESULTS[:]
+    for f in BUDGET_FILES:
+        if not os.path.exists(os.path.join(run_dir, f)):
+            fail(("budget", "required file present: %s" % f))
+    if any(not r[0] for r in RESULTS):
+        return RESULTS
+    man = load_json(os.path.join(run_dir, "run_manifest.json"))
+    summ = load_json(os.path.join(run_dir, "error_budget_summary.json"))
+    wins = load_jsonl(os.path.join(run_dir, "error_budget.jsonl"))
+    ok(("budget", "task/stage are the A-R03 rectification run"),
+       man.get("task") == "S2-A A-R03" and man.get("stage") == "rectification")
+    lib = man.get("loaded_library") or {}
+    ok(("budget", "library inside the worktree"),
+       str(lib.get("expected_lib", "")).startswith(
+           str((man.get("git") or {}).get("worktree", "")))
+       and bool(lib.get("lib_exists")))
+    iso = summ.get("truth_isolation") or {}
+    ok(("budget", "truth isolation is declared"),
+       iso.get("online_uses_truth") is False
+       and iso.get("diagnostic_uses_truth") is True)
+    ok(("budget", "mandated classes covered"),
+       set(summ.get("mandated_classes") or []) <= set(summ.get("classes") or []))
+    # per-window online/truth flags
+    bad_flag = []
+    for w in wins:
+        for name, v in (w.get("variants") or {}).items():
+            want = VARIANT_TRUTH_FLAGS.get(name, True)
+            if bool(v.get("uses_truth")) != want:
+                bad_flag.append((w["cell_id"], w["window_id"], name))
+    ok(("budget", "only S0 is an online (truth-free) variant"), not bad_flag,
+       str(bad_flag[:3]))
+    # budget identity + reconstruction faithfulness
+    bad_id, bad_recon = [], []
+    for w in wins:
+        b = w.get("budget_identity") or {}
+        if b:
+            rel = float(b.get("check_sum_identity_rel", 1.0))
+            tot = float(b.get("e_total", 0.0))
+            if b.get("e_impl_mismatch") is not None and tot > 0:
+                parts = (float(b["e_impl_mismatch"]) + float(b["e_param"])
+                         + float(b["e_cross"]))
+                rel2 = abs(parts - tot) / tot
+            else:
+                rel2 = 0.0
+            if rel > 1e-9 or rel2 > 1e-9:
+                bad_id.append((w["cell_id"], w["window_id"], rel, rel2))
+        rv = (w.get("reconstruction_validation") or {}).get(
+            "nmse_diag_vs_adapter_ihat")
+        if rv is not None and float(rv) > 1e-6:
+            bad_recon.append((w["cell_id"], w["window_id"], rv))
+    ok(("budget", "IQ budget identity e_total == ea+eb+cross"), not bad_id,
+       str(bad_id[:3]))
+    ok(("budget", "diagnostic reconstruction matches the adapter i_hat "
+        "(<=1e-6 NMSE)"), not bad_recon, str(bad_recon[:3]))
+    # independent recomputation from the archived arrays
+    files = _archive_files(run_dir, "archive")
+    ok(("budget", "archived windows present"), bool(files), str(len(files)))
+    recs = {(w["cell_id"], w["window_id"]): w for w in wins}
+    bad_va, bad_iq, bad_val = [], [], []
+    rows_by_cell = {}
+    for f in files:
+        cell, _, rest = f.rpartition("_")
+        wid = int(rest.split(".")[0])
+        z = np.load(os.path.join(run_dir, "archive", f), allow_pickle=False)
+        prm = json.loads(bytes(z["params_json"]).decode("utf-8"))
+        preamble = None
+        if cell not in rows_by_cell:
+            pf = os.path.join(run_dir, "templates", "comm_preamble_code10_998p4.cf32")
+            if os.path.exists(pf):
+                rows_by_cell[cell] = _poly_rows(
+                    np.fromfile(pf, dtype=np.complex64))
+                preamble = np.fromfile(pf, dtype=np.complex64)
+        if preamble is None:
+            continue
+        rows = rows_by_cell[cell]
+        clean = np.asarray(z["clean"], dtype=np.complex128)
+        raw = np.asarray(z["raw"], dtype=np.complex128)
+        sic = np.asarray(z["sic"], dtype=np.complex128)
+        rec = recs.get((cell, wid))
+        if rec is None:
+            continue
+        fl, fh = [int(x) for x in prm["region"]]
+        ih = np.asarray(z["ihat"], dtype=np.complex128)[fl:fh]
+        model = {"taus": [float(t) for t in prm["model_taus"]],
+                 "gains": [complex(a, b) for a, b in prm["model_gains"]],
+                 "cfo_hz": float(prm["model_cfo_hz"]),
+                 "phase_reference_sample": int(prm["model_phase_reference"]),
+                 "sample_rate": 998400000.0, "n_paths": len(prm["model_taus"])}
+        mine = _core_recon(model, preamble, fl, fh, rows)
+        den = max(1e-30, float(np.max(np.abs(ih))))
+        if float(np.max(np.abs(mine - ih))) / den > 1e-4:
+            bad_val.append((cell, wid, "model_vs_ihat"))
+        # recompute one truth-assisted variant's masked IQ energy
+        vname = "S6_full_truth"
+        vm = (prm.get("variant_models") or {}).get(vname)
+        if vm:
+            vmod = {"taus": [float(t) for t in vm["taus"]],
+                    "gains": [complex(a, b) for a, b in vm["gains"]],
+                    "cfo_hz": float(vm["cfo_hz"]),
+                    "phase_reference_sample": int(vm["phase_reference_sample"]),
+                    "sample_rate": 998400000.0,
+                    "n_paths": len(vm["taus"])}
+            recom = _core_recon(vmod, preamble, int(prm["sub_lo"]),
+                                int(prm["sub_hi"]), rows)
+            i_true = np.asarray(z["i_truth"], dtype=np.complex128)[
+                int(prm["sub_lo"]):int(prm["sub_hi"])]
+            e_iq = float(np.sum(np.abs(i_true - recom) ** 2))
+            want = (rec.get("variants") or {}).get(vname, {}).get(
+                "iq_residual_energy_vs_truth")
+            if want is None or abs(e_iq - float(want)) > 1e-6 * max(1.0, e_iq):
+                bad_iq.append((cell, wid, e_iq, want))
+    ok(("budget", "published model reproduced from arrays + code table"),
+       not bad_val, str(bad_val[:3]))
+    ok(("budget", "S6 truth-variant IQ energy recomputed independently"),
+       not bad_iq, str(bad_iq[:3]))
+    return RESULTS
+
+
+def budget_reject_qa(src_run, workdir, verbose=False):
+    """Mutations of a real budget run; each must be rejected."""
+    import shutil as _sh
+    mutations = []
+
+    def mutation(name):
+        def deco(fn):
+            mutations.append((name, fn))
+            return fn
+        return deco
+
+    @mutation("flip a variant's uses_truth flag")
+    def _m1(dst):
+        p = os.path.join(dst, "error_budget.jsonl")
+        recs = [json.loads(x) for x in open(p).read().splitlines() if x]
+        for r in recs:
+            if "S6_full_truth" in r.get("variants", {}):
+                r["variants"]["S6_full_truth"]["uses_truth"] = False
+                break
+        with open(p, "w") as fh:
+            for r in recs:
+                fh.write(json.dumps(r, allow_nan=True, default=str) + "\n")
+
+    @mutation("break the IQ budget identity")
+    def _m2(dst):
+        p = os.path.join(dst, "error_budget.jsonl")
+        recs = [json.loads(x) for x in open(p).read().splitlines() if x]
+        recs[0]["budget_identity"]["e_param"] = (
+            float(recs[0]["budget_identity"]["e_param"]) * 1.5)
+        with open(p, "w") as fh:
+            for r in recs:
+                fh.write(json.dumps(r, allow_nan=True, default=str) + "\n")
+
+    @mutation("tamper a S6 variant IQ energy")
+    def _m3(dst):
+        p = os.path.join(dst, "error_budget.jsonl")
+        recs = [json.loads(x) for x in open(p).read().splitlines() if x]
+        for r in recs:
+            v = r.get("variants", {}).get("S6_full_truth")
+            if v:
+                v["iq_residual_energy_vs_truth"] = float(
+                    v["iq_residual_energy_vs_truth"]) * 10.0 + 1.0
+                break
+        with open(p, "w") as fh:
+            for r in recs:
+                fh.write(json.dumps(r, allow_nan=True, default=str) + "\n")
+
+    @mutation("claim online metrics used truth")
+    def _m4(dst):
+        p = os.path.join(dst, "error_budget_summary.json")
+        s = json.load(open(p))
+        s["truth_isolation"]["online_uses_truth"] = True
+        json.dump(s, open(p, "w"), indent=2, allow_nan=True)
+
+    @mutation("inflate the recorded reconstruction NMSE")
+    def _m5(dst):
+        p = os.path.join(dst, "error_budget.jsonl")
+        recs = [json.loads(x) for x in open(p).read().splitlines() if x]
+        recs[0]["reconstruction_validation"][
+            "nmse_diag_vs_adapter_ihat"] = 0.5
+        with open(p, "w") as fh:
+            for r in recs:
+                fh.write(json.dumps(r, allow_nan=True, default=str) + "\n")
+
+    @mutation("tamper the archived model taus")
+    def _m6(dst):
+        d = os.path.join(dst, "archive")
+        f = sorted(x for x in os.listdir(d) if x.endswith(".npz"))[0]
+        z = dict(np.load(os.path.join(d, f), allow_pickle=False))
+        prm = json.loads(bytes(z["params_json"]).decode("utf-8"))
+        prm["model_taus"] = [float(t) + 3.0 for t in prm["model_taus"]]
+        z["params_json"] = np.frombuffer(json.dumps(prm).encode("utf-8"),
+                                         dtype=np.uint8)
+        np.savez_compressed(os.path.join(d, f), **z)
+
+    uncaught = []
+    for i, (name, fn) in enumerate(mutations):
+        dst = os.path.join(workdir, "b%02d" % i)
+        if os.path.exists(dst):
+            _sh.rmtree(dst)
+        _sh.copytree(src_run, dst)
+        try:
+            fn(dst)
+        except Exception as exc:
+            uncaught.append((name, "mutation failed: %r" % (exc,)))
+            continue
+        res = verify_budget(dst, verbose=False)
+        caught = any(not r[0] for r in res)
+        if verbose:
+            print("%-6s budget mutation: %s" % ("CAUGHT" if caught else "MISSED",
+                                                name))
+        if not caught:
+            uncaught.append((name, "verifier accepted the mutated artifact"))
+        _sh.rmtree(dst, ignore_errors=True)
     return uncaught, len(mutations)
 
 
@@ -1018,6 +1733,33 @@ def self_test(verbose=True):
           "%.4f" % coherence(noise, 0, 2)["eta"])
     check("zero-energy coherence -> N/A",
           coherence(np.zeros((8, 2)), 0, 2)["eta"] is None)
+    # A-R01: independent derivation of the support-disjoint run
+    run, excluded = _legal_run(0, 1008, 1997, 1016, 64, -32, 128, 10126,
+                               1997, 67022, 157376)
+    check("support-disjoint run is [9,62] on the real geometry",
+          run and run[0] == 9 and run[-1] == 62 and len(run) == 54,
+          "[%s,%s] n=%d" % (run[0] if run else -1, run[-1] if run else -1,
+                            len(run)))
+    check("r=8 excluded as training/guard read and r=63 as tail read",
+          8 in excluded and "reads_training_or_guard" in excluded[8]
+          and 63 in excluded
+          and "outside_applied_subtraction" in excluded[63])
+    check("honest N list truncates 56 -> 54",
+          _truncate_n(54, [1, 2, 4, 8, 16, 32, 56])
+          == [1, 2, 4, 8, 16, 32, 54])
+    check("short independent region truncates without padding",
+          _truncate_n(7, [1, 2, 4, 8, 16, 32, 56]) == [1, 2, 4])
+    # A-R02: same-dimension energy decomposition
+    E = np.ones((16, 3), dtype=np.complex128)
+    N = E.shape[0]
+    mu = E.mean(axis=0)
+    ec = float(N * np.sum(np.abs(mu) ** 2))
+    ez = float(np.sum(np.abs(E - mu) ** 2))
+    check("e_coherent = N*||mu||^2 and e_centered = 0 for repeats",
+          abs(ec - float(np.sum(np.abs(E) ** 2))) < 1e-12 and ez < 1e-24,
+          "%.6g %.3g" % (ec, ez))
+    check("coherent_fraction == eta == e_coherent/e_total",
+          abs(ec / (ec + ez) - 1.0) < 1e-12)
     print("self-test: %d failure(s)" % fails)
     return fails
 
@@ -1032,18 +1774,42 @@ def main(argv=None):
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--reject-qa", action="store_true",
                     help="mutate --run and require every mutation to be caught")
+    ap.add_argument("--budget", action="append", default=None,
+                    help="A-R03 error-budget run directory to verify")
+    ap.add_argument("--reject-qa-budget", action="store_true",
+                    help="mutate --budget and require every mutation to be "
+                         "caught")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
     if args.self_test:
         return self_test(True)
-    if not args.run:
-        ap.error("--run is required (or --self-test)")
+    if not args.run and not args.budget:
+        ap.error("--run and/or --budget is required (or --self-test)")
     rc = 0
-    for run in args.run:
+    for run in (args.run or []):
         print("== verifying %s" % run)
         res = verify_run(run, verbose=args.verbose)
         nf = print_results(res, verbose=args.verbose)
         rc = rc or (1 if nf else 0)
+    for bdir in (args.budget or []):
+        print("== verifying budget %s" % bdir)
+        res = verify_budget(bdir, verbose=args.verbose)
+        nf = print_results(res, verbose=args.verbose)
+        rc = rc or (1 if nf else 0)
+    if args.reject_qa_budget:
+        work = tempfile.mkdtemp(prefix="s2a_reject_budget_")
+        try:
+            for bdir in (args.budget or []):
+                print("== budget reject-QA on %s" % bdir)
+                uncaught, total = budget_reject_qa(bdir, work, verbose=True)
+                print("budget reject-QA: %d/%d caught"
+                      % (total - len(uncaught), total))
+                for name, why in uncaught:
+                    print("MISSED: %s (%s)" % (name, why))
+                if uncaught:
+                    rc = 1
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
     if args.reject_qa:
         work = tempfile.mkdtemp(prefix="s2a_reject_")
         try:

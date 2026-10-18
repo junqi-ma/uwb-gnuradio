@@ -10,6 +10,18 @@ requires a new run directory and an explicit note in the development report.
 > 命令。`operator.json`、`cells.json` 已冻结；本任务的最终结论以
 > `docs/sic/S2A_累加后CIR开发报告.md` 为准。MATLAB 对照脚本已提供但**未实跑**。
 
+> **Rectification (2026-10-18).** A-R01 replaced the `[8,8+N)` "independent"
+> label with a true **support-disjoint** set derived from the correlation
+> operator's actual read support (share `[9,62]`, 54 repetitions, honest N list
+> `1,2,4,8,16,32,54`); A-R02 replaced the dimensionally-wrong
+> `mean_fraction` with `e_coherent = N*||mu||^2` / `e_centered` /
+> `coherent_fraction`.  The schema is now **2**.  Old `*_rectification`-less run
+> dirs and this document's historical commands stay as the original record; new
+> runs use the `_rectification` suffix.  A-R03 adds
+> `gr-uwb/apps/uwb_sim_sic_error_budget.py` + `tools/sic/residual_budget.py`
+> (truth-assisted residual-source budget, offline diagnostics only).
+> See `docs/sic/S2A_整改开发报告_2026-10-18.md`.
+
 ## 1. Purpose and scope
 
 S2-A answers one question: does the roughly-28 dB nominal raw-IQ suppression of
@@ -186,7 +198,27 @@ not executed by anyone.
 ```bash
 # Whole QA suite in one command (needs the build tree) --------------------- RUN
 env -u LD_LIBRARY_PATH python3 testdata/sic_accum/qa_s2a.py \
-  --run gr-uwb/build-sic-accum/results/s2a/smoke
+  --run gr-uwb/build-sic-accum/results/s2a/smoke_rectification \
+  --run gr-uwb/build-sic-accum/results/s2a/acceptance_rectification \
+  --budget gr-uwb/build-sic-accum/results/s2a/budget_rectification
+
+# A-R03 error budget (6 classes x 100 acceptance windows) ------------------ RUN
+env -u LD_LIBRARY_PATH python3 gr-uwb/apps/uwb_sim_sic_error_budget.py \
+  --build-dir gr-uwb/build-sic-accum \
+  --output gr-uwb/build-sic-accum/results/s2a/budget \
+  --windows 100 --seed-set acceptance --plots --archive-windows 4
+
+# Rectification acceptance (support-disjoint schema 2) --------------------- RUN
+env -u LD_LIBRARY_PATH python3 gr-uwb/apps/uwb_sim_sic_accum.py \
+  --build-dir gr-uwb/build-sic-accum \
+  --output gr-uwb/build-sic-accum/results/s2a/acceptance_rectification \
+  --seed-set acceptance --windows-per-cell 100 --archive-windows 8 \
+  --receiver --receiver-windows 20 --plots
+
+# independent verifier for the error budget -------------------------------- RUN
+env -u LD_LIBRARY_PATH python3 tools/sic/verify_s2a.py \
+  --budget gr-uwb/build-sic-accum/results/s2a/budget_rectification \
+  --reject-qa-budget
 
 # QA / design checks (no build tree, no GNU Radio run)  ---------- RUN (see below)
 env -u LD_LIBRARY_PATH python3 gr-uwb/apps/uwb_sim_sic_accum.py --self-test

@@ -77,7 +77,7 @@ import sic_preamble_sim as S  # noqa: E402
 import uwb_sim_preamble_sic as APP  # noqa: E402
 import accum_metrics as AM  # noqa: E402
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SPS = S.SPS
 SFD_MODE = S.SFD_MODE
 BASE_COMMIT = "93c80b3e77c2caf53cdfab25e09683871806fad8"
@@ -370,8 +370,18 @@ def rx_meta(wid, n, sync_reps, pre_guard):
     return m
 
 
+def _rs_summary(rs):
+    """Compact JSON-safe summary of a repetition set (no numpy arrays)."""
+    return {k: rs.get(k) for k in
+            ("name", "kind", "strict_holdout", "tap_lo", "tap_hi", "available",
+             "first", "last", "n_list", "n_nominal", "n_shortened",
+             "read_lo", "read_hi", "support_source", "nz_support", "bounds",
+             "excluded_before", "excluded_after", "dropped_noncontiguous",
+             "superseded_by", "note")}
+
+
 def evaluate_window(op, frozen, cell, wid, seed, kind, win, clean, raw, sic_iq,
-                    out_meta, cir_runners=None):
+                    out_meta, cir_runners=None, support=None):
     """Compute every fixed-operator S2-A metric for one window.
 
     Returns ``(record, H_clean, H_raw, H_sic)``; the CIR tensors are returned so
@@ -390,12 +400,79 @@ def evaluate_window(op, frozen, cell, wid, seed, kind, win, clean, raw, sic_iq,
     H_raw = AM.fixed_operator_cir(raw, op)
     H_sic = AM.fixed_operator_cir(sic_iq, op)
 
-    table = AM.residual_table(H_clean, H_raw, H_sic, op)
+    # ---- A-R01: actual sample support / repetition sets -------------------
+    nz = AM.code_support(op.code)
+    vis_meta = int(dnum(out_meta, "sic_visible_end_sample", 0))
+    visible_end = vis_meta if vis_meta > 0 else (
+        int(support["bounds"]["visible_end"]) if support else n)
+    sub_lo = int(dnum(out_meta, "sic_sub_lo", -1))
+    sub_hi = int(dnum(out_meta, "sic_sub_hi", -1))
+    train_lo = int(dnum(out_meta, "sic_training_lo", -1))
+    train_hi = int(dnum(out_meta, "sic_training_hi", -1))
+    model_origin = int(dnum(out_meta, "sic_detected_start", -1))
+    has_sub = bool(sub_lo >= 0 and sub_hi > sub_lo)
+    if has_sub:
+        win_set = AM.derive_rep_set(
+            op, visible_end=visible_end, sub_lo=sub_lo, sub_hi=sub_hi, n=n,
+            tap_lo=op.tap_lo, tap_hi=op.tap_hi, name="support_disjoint",
+            kind="support_disjoint")
+    else:
+        # bypass / failed window: the adapter applied nothing, so the window
+        # has no actual subtraction region.  The analysis still uses the
+        # PUBLIC nominal cell set and the record says so explicitly.
+        win_set = dict(support) if support else AM.derive_rep_set(
+            op, visible_end=visible_end if visible_end > 0 else n,
+            sub_lo=op.origin, sub_hi=n, n=n, tap_lo=op.tap_lo,
+            tap_hi=op.tap_hi, name="support_disjoint",
+            kind="support_disjoint")
+        win_set["no_applied_subtraction"] = True
+    if support is None:
+        support = win_set
+    cell_contained = bool(not has_sub or (win_set["reps"] and support["reps"]
+                                         and win_set["first"]
+                                         <= support["first"]
+                                         and win_set["last"]
+                                         >= support["last"]))
+    set_used = support if cell_contained else win_set
+    sets = {"full": AM.full_preamble_set(op),
+            "indep": set_used,
+            "legacy_nominal_index": AM.legacy_nominal_index_set(op)}
+    table = AM.residual_table(H_clean, H_raw, H_sic, op, sets=sets)
 
+    # per-ROI independent sets: appendix only (different sample sets per ROI)
+    roi_sets = {}
+    roi_appendix = {}
+    for rname, (rlo, rhi) in (("target", (AM.TARGET_LO, AM.TARGET_HI)),
+                              ("background", (AM.BG_LO, AM.BG_HI)),
+                              ("direct", (AM.DIRECT_LO, AM.DIRECT_HI))):
+        rs = AM.derive_rep_set(
+            op, visible_end=visible_end, sub_lo=sub_lo, sub_hi=sub_hi, n=n,
+            tap_lo=rlo, tap_hi=rhi, name="support_disjoint_%s" % rname,
+            kind="support_disjoint_roi")
+        roi_sets[rname] = rs
+        sub = AM.residual_table(H_clean, H_raw, H_sic, op,
+                                sets={"indep": rs})["indep"]
+        keep = {}
+        for N, entry in sub.items():
+            keep[N] = {
+                "N": entry["N"], "n_actual": entry["n_actual"],
+                "roi_shortened": entry.get("roi_shortened", {}).get(rname),
+                "c_cir_db": entry["c_cir_db"].get(rname),
+                "c_cir_flag": entry["c_cir_flag"].get(rname),
+                "e_raw": entry["e_raw"].get(rname),
+                "e_sic": entry["e_sic"].get(rname),
+                "nmse_sic": entry["nmse_sic"].get(rname),
+            }
+        roi_appendix[rname] = {"set": _rs_summary(rs), "table": keep}
+
+    # target protection per N on the same sets as the accumulation table
     target = {}
-    for set_name, n_list in (("full", AM.FULL_N), ("indep", AM.INDEP_N)):
-        for N in n_list:
-            idx = AM.rep_indices(set_name == "full", N)
+    for set_name in ("full", "indep", "legacy_nominal_index"):
+        rs = sets[set_name]
+        for N in rs["n_list"]:
+            idx = np.asarray(rs["reps"][:int(N)], dtype=np.int64)
+            if idx.size == 0:
+                continue
             hc = AM.accumulate(H_clean, idx)
             target["%s/%d" % (set_name, N)] = {
                 "raw": AM.target_metrics(AM.accumulate(H_raw, idx), hc, op),
@@ -404,10 +481,17 @@ def evaluate_window(op, frozen, cell, wid, seed, kind, win, clean, raw, sic_iq,
 
     E_sic = H_sic - H_clean
     E_raw = H_raw - H_clean
+    # main coherence: the support-disjoint (legal) repetitions; the full
+    # preamble is kept as a separately named legacy view.
+    legal = np.asarray(set_used["reps"], dtype=np.int64)
     coh = {}
     for tag, E in (("sic", E_sic), ("raw", E_raw)):
-        coh[tag] = {roi: AM.coherence_stats(E, op, roi=roi)
+        coh[tag] = {roi: AM.coherence_stats(E[legal], op, roi=roi)
                     for roi in ("target", "background", "all")}
+    coh_full = {}
+    for tag, E in (("sic", E_sic), ("raw", E_raw)):
+        coh_full[tag] = {roi: AM.coherence_stats(E, op, roi=roi)
+                         for roi in ("target", "background", "all")}
     per_symbol = {
         "residual_sic_power": [float(v) for v in np.sum(np.abs(E_sic) ** 2,
                                                          axis=1)],
@@ -421,6 +505,9 @@ def evaluate_window(op, frozen, cell, wid, seed, kind, win, clean, raw, sic_iq,
         "window": AM.iq_suppression_db(raw, clean, sic_iq, 0, n),
         "bypass_bit_identical": bypass_identical,
         "output_changed": not bypass_identical,
+        "raw_sha256": AM.sha256_f32(raw),
+        "clean_sha256": AM.sha256_f32(clean),
+        "sic_sha256": AM.sha256_f32(sic_iq),
         "raw_minus_clean_energy": AM.energy(
             raw.astype(np.complex128) - clean.astype(np.complex128)),
         "sic_minus_clean_energy": AM.energy(
@@ -459,7 +546,43 @@ def evaluate_window(op, frozen, cell, wid, seed, kind, win, clean, raw, sic_iq,
             "residual_corr": dnum(out_meta, "sic_residual_corr", None),
             "core_total_us": dnum(out_meta, "core_total_us", 0.0),
         },
-        "iq": iq, "accum": table, "target": target, "coherence": coh,
+        "iq": iq, "accum": table, "target": target,
+        "coherence": coh, "coherence_full_preamble": coh_full,
+        "roi_sets_appendix": roi_appendix,
+        "support": {
+            "sensing_origin": int(op.origin),
+            "model_origin": model_origin,
+            "visible_end": int(visible_end),
+            "training_lo": train_lo, "training_hi": train_hi,
+            "extra_guard": (int(visible_end) - train_hi
+                            if train_hi > 0 else None),
+            "sub_lo": sub_lo, "sub_hi": sub_hi,
+            "support_lo": int(dnum(out_meta, "sic_support_lo", -1)),
+            "support_hi": int(dnum(out_meta, "sic_support_hi", -1)),
+            "nominal_support_hi": int(dnum(out_meta,
+                                          "sic_predicted_support_hi", -1)),
+            "tap_grid": [int(op.tap_lo), int(op.tap_hi)],
+            "code_nz": {"nz_min": int(nz["nz_min"]),
+                        "nz_max": int(nz["nz_max"]),
+                        "nz_count": int(nz["nz_count"]),
+                        "conservative_len": int(nz["conservative_len"])},
+            "window_set": _rs_summary(win_set),
+            "cell_set": _rs_summary(support),
+            "cell_set_contained": cell_contained,
+            "set_used": "cell" if cell_contained else "window",
+            "no_applied_subtraction": (not has_sub),
+            "no_applied_subtraction_source": (
+                None if has_sub else
+                "adapter published no applied region (bypass/failure); the "
+                "analysis uses the public nominal cell set"),
+            "excluded": win_set["excluded"],
+            "coverage": AM.coverage_report(
+                op, set_used, n=n,
+                truth_span=(win["truth"]["comm"]["start_sample_exact"],
+                            win["truth"]["comm"]["start_sample_exact"]
+                            + win["truth"]["comm"]["length_samples"])
+                if win["truth"]["comm_present"] else None),
+        },
         "per_symbol": per_symbol,
     }
     if committed and cfo_est != 0.0:
@@ -524,6 +647,73 @@ def _pct(vals, p):
     return float(np.percentile(v, p)) if v else None
 
 
+def _set_names(recs):
+    names = []
+    for r in recs:
+        for k in (r.get("accum") or {}):
+            if k in ("sets", "rois", "tap_domain"):
+                continue
+            if k not in names:
+                names.append(k)
+    return names
+
+
+def _n_lists(recs):
+    out = {}
+    for r in recs:
+        for name, meta in ((r.get("accum") or {}).get("sets") or {}).items():
+            if name not in out:
+                out[name] = list(meta.get("n_list") or [])
+    return out
+
+
+def _worst_windows(recs):
+    """Per-cell lowest C_CIR and largest target-error windows (evidence only)."""
+    if not recs:
+        return {}
+    set_names = _set_names(recs)
+    main = "indep" if "indep" in set_names else (set_names[0] if set_names
+                                                 else None)
+    if main is None:
+        return {}
+    n_list = _n_lists(recs).get(main, [])
+    if not n_list:
+        return {}
+    n_key = str(n_list[-1])
+    scored = []
+    for r in recs:
+        e = (r.get("accum") or {}).get(main, {}).get(n_key)
+        if not e:
+            continue
+        c = e["c_cir_db"]["full"]
+        amp = ((r.get("target") or {}).get("%s/%s" % (main, n_key))
+               or {}).get("sic", {}).get("amp_err_db")
+        scored.append({"window_id": r["window_id"], "seed": r["seed"],
+                       "c_cir_db": c, "amp_err_db": amp})
+    finite_c = [s for s in scored if _finite(s["c_cir_db"])]
+    finite_a = [s for s in scored if _finite(s["amp_err_db"])]
+    low = min(finite_c, key=lambda x: x["c_cir_db"]) if finite_c else None
+    high = (max(finite_a, key=lambda x: abs(x["amp_err_db"]))
+            if finite_a else None)
+    undef = []
+    if low is None:
+        undef.append("lowest_c_cir")
+    if high is None:
+        undef.append("largest_target_error")
+    return {"set": main, "N": int(n_key),
+            "selection_undefined": undef,
+            "selection_undefined_note": (
+                "an undefined entry means every window in this cell had no "
+                "finite value for that metric (e.g. a fully bypassed run); it "
+                "is an explicit declaration, not a missing file"),
+            "selection_rule": "min C_CIR and max |amp err| over the cell at "
+                              "the largest legal N; these two windows are "
+                              "evidence only and are NOT used for any "
+                              "unbiased distribution statistic",
+            "lowest_c_cir": low, "largest_target_error": high,
+            "unbiased_windows": len(recs)}
+
+
 def summarize_cell(recs):
     """Per-cell aggregation over ALL windows (failures stay in the denominator)."""
     n_win = len(recs)
@@ -545,9 +735,15 @@ def summarize_cell(recs):
         "iq_suppression_window_db_mean": _mean(
             [r["iq"]["window"]["suppression_db"] for r in recs]),
         "accum": {}, "target": {}, "coherence": {}, "receiver": {},
+        "sets": {}, "support": {},
     }
-    for set_name in ("full", "indep"):
-        for N in (AM.FULL_N if set_name == "full" else AM.INDEP_N):
+    set_names = _set_names(recs)
+    n_lists = _n_lists(recs)
+    for set_name in set_names:
+        out["sets"][set_name] = (recs[0]["accum"].get("sets") or {}).get(
+            set_name, {})
+    for set_name in set_names:
+        for N in n_lists.get(set_name, []):
             key = str(N)
             entry = {}
             for roi in ("full", "target", "background", "direct"):
@@ -588,8 +784,8 @@ def summarize_cell(recs):
                 if [v for v in g_raw if _finite(v)] else None}
             entry["g_is_sic_gain"] = False
             out["accum"]["%s/%s" % (set_name, N)] = entry
-    for set_name in ("full", "indep"):
-        for N in (AM.FULL_N if set_name == "full" else AM.INDEP_N):
+    for set_name in set_names:
+        for N in n_lists.get(set_name, []):
             key = "%s/%d" % (set_name, N)
             amp = [abs(r["target"][key]["sic"]["amp_err_db"]) for r in recs
                    if _finite(r["target"][key]["sic"]["amp_err_db"])]
@@ -617,24 +813,77 @@ def summarize_cell(recs):
                 "pass_peak_shift_le_1": bool(shift and max(shift) <= 1),
                 "threshold_amp_p95_db": 1.0, "threshold_peak_shift": 1,
             }
-    for tag in ("sic", "raw"):
-        for roi in ("target", "background", "all"):
-            vals = [r["coherence"][tag][roi]["eta"] for r in recs
-                    if _finite(r["coherence"][tag][roi]["eta"])]
-            slopes = [r["coherence"][tag][roi]["phase_slope_hz"] for r in recs
-                      if _finite(r["coherence"][tag][roi]["phase_slope_hz"])]
-            out["coherence"]["%s/%s" % (tag, roi)] = {
-                "n": len(vals), "eta_mean": _mean(vals),
-                "eta_ci": AM.bootstrap_ci(vals) if vals else None,
-                "eta_random_reference": 1.0 / AM.SYNC_REPS,
-                "lag1_mean": _mean([r["coherence"][tag][roi]["lag"].get("1")
-                                    for r in recs]),
-                "centered_lag1_mean": _mean(
-                    [r["coherence"][tag][roi]["centered_lag"].get("1")
-                     for r in recs]),
-                "phase_slope_hz_mean": _mean(slopes),
-                "phase_slope_hz_p95": _pct([abs(s) for s in slopes], 95),
-            }
+    for view in ("coherence", "coherence_full_preamble"):
+        for tag in ("sic", "raw"):
+            for roi in ("target", "background", "all"):
+                cf = [r[view][tag][roi].get("coherent_fraction") for r in recs
+                      if _finite(r[view][tag][roi].get("coherent_fraction"))]
+                slopes = [r[view][tag][roi].get("phase_slope_hz") for r in recs
+                          if _finite(r[view][tag][roi].get("phase_slope_hz"))]
+                cons = [r[view][tag][roi].get("energy_conservation_rel")
+                        for r in recs
+                        if _finite(r[view][tag][roi].get(
+                            "energy_conservation_rel"))]
+                out["coherence"]["%s/%s/%s" % (view, tag, roi)] = {
+                    "view": view,
+                    "n": len(cf), "eta_mean": _mean(cf),
+                    "coherent_fraction_mean": _mean(cf),
+                    "eta_ci": AM.bootstrap_ci(cf) if cf else None,
+                    "eta_random_reference": 1.0 / max(1, len(
+                        (recs[0]["accum"].get("sets") or {}).get(
+                            "indep", {}).get("n_list") or [64])),
+                    "e_coherent_mean": _mean(
+                        [r[view][tag][roi].get("e_coherent") for r in recs]),
+                    "e_centered_mean": _mean(
+                        [r[view][tag][roi].get("e_centered") for r in recs]),
+                    "e_total_mean": _mean(
+                        [r[view][tag][roi].get("e_total") for r in recs]),
+                    "mu_energy_mean": _mean(
+                        [r[view][tag][roi].get("mu_energy") for r in recs]),
+                    "energy_conservation_rel_max": (max(cons) if cons else None),
+                    "lag1_mean": _mean(
+                        [r[view][tag][roi]["lag"].get("1") for r in recs]),
+                    "centered_lag1_mean": _mean(
+                        [r[view][tag][roi]["centered_lag"].get("1")
+                         for r in recs]),
+                    "phase_slope_hz_mean": _mean(slopes),
+                    "phase_slope_hz_p95": _pct([abs(s) for s in slopes], 95),
+                    "mean_fraction_retired": True,
+                }
+    # ---- A-R01: support bookkeeping / coverage ---------------------------
+    cell_sets = [(r.get("support") or {}).get("cell_set") for r in recs]
+    cell_sets = [c for c in cell_sets if c]
+    mism = [r["window_id"] for r in recs
+            if not (r.get("support") or {}).get("cell_set_contained", True)]
+    cov_sub = [((r.get("support") or {}).get("coverage") or {}).get(
+        "cir_overlap_sub_ratio") for r in recs]
+    cov_truth = [((r.get("support") or {}).get("coverage") or {}).get(
+        "cir_overlap_truth_ratio") for r in recs]
+    firsts = [((r.get("support") or {}).get("window_set") or {}).get("first")
+              for r in recs]
+    lasts = [((r.get("support") or {}).get("window_set") or {}).get("last")
+             for r in recs]
+    out["support"] = {
+        "cell_set": cell_sets[0] if cell_sets else None,
+        "set_used_counts": {
+            "cell": sum(1 for r in recs
+                        if (r.get("support") or {}).get("set_used") == "cell"),
+            "window": sum(1 for r in recs
+                          if (r.get("support") or {}).get("set_used")
+                          == "window")},
+        "cell_set_mismatch_windows": mism,
+        "window_set_first_min": min([f for f in firsts if f is not None],
+                                    default=None),
+        "window_set_last_max": max([l for l in lasts if l is not None],
+                                   default=None),
+        "cir_overlap_sub_ratio_mean": _mean(cov_sub),
+        "cir_overlap_truth_ratio_mean": _mean(cov_truth),
+        "coverage_note": "truth support is an OFFLINE diagnostic only; it "
+                         "never feeds a gate or geometry choice",
+    }
+    # explicit worst-window evidence (separate from unbiased distributions)
+    worst = _worst_windows(recs)
+    out["worst_windows"] = worst
     recs_rx = [r for r in recs if "receiver" in r]
     if recs_rx:
         out["receiver"] = {"windows": len(recs_rx), "configs": {}}
@@ -677,6 +926,49 @@ def _rx_target_proxy(cfg, branch):
     return (a ** 2) / bg if bg > 0 else None
 
 
+
+def _make_window(generator, sic_runner, *, cell, cp, seed, snr_db, sensing_roi,
+                 observed_end_public, wid):
+    """Generate one paired window and run the real SIC PDU adapter on raw."""
+    win = generator.build(
+        seed=int(seed), comm_paths=cp,
+        start_offset_work=float(cell.get("start_offset_work", 0.0)),
+        cfo_hz=float(cell.get("cfo_hz", 0.0)),
+        isr_db=cell.get("isr_db"), snr_db=snr_db)
+    clean = np.ascontiguousarray(win["s"] + win["w"], dtype=np.complex64)
+    raw = np.ascontiguousarray(win["y"], dtype=np.complex64)
+    meta = rx_meta(wid, int(raw.size), S.DEFAULT_SYNC_REPS, generator.pre)
+    meta = put_int(meta, "sensing_roi_lo", sensing_roi[0])
+    meta = put_int(meta, "sensing_roi_hi", sensing_roi[1])
+    meta = put_int(meta, "observed_end_sample", observed_end_public)
+    sic_runner.post(meta, raw)
+    res = sic_runner.wait()
+    if res is None:
+        raise SystemExit("SIC adapter did not terminate window_id=%d" % wid)
+    out_meta, ihat_meta = res
+    ihat = np.ascontiguousarray(ihat_meta.get("__c32", np.zeros_like(raw)),
+                                dtype=np.complex64)
+    sic_iq = np.ascontiguousarray(out_meta.get("__c32", raw),
+                                  dtype=np.complex64)
+    return win, clean, raw, sic_iq, ihat, out_meta
+
+
+def _save_window(path, *, clean, raw, sic_iq, ihat, H_clean, H_raw, H_sic,
+                 win, rec, reason=None):
+    """Archive one window (IQ + CIR + truth sidecar + record) and return path."""
+    meta = dict(rec)
+    meta["archive_reason"] = reason
+    np.savez_compressed(
+        path, clean=clean, raw=raw, sic=sic_iq, ihat=ihat,
+        i_truth=np.asarray(win["i"], dtype=np.complex64),
+        H_clean=H_clean, H_raw=H_raw, H_sic=H_sic,
+        truth_json=np.frombuffer(json.dumps(win["truth"]).encode("utf-8"),
+                                 dtype=np.uint8),
+        meta_json=np.frombuffer(json.dumps(meta, default=str).encode("utf-8"),
+                                dtype=np.uint8))
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
@@ -686,7 +978,8 @@ def run(args) -> int:
     root = repo_root()
     t_start = time.time()
     outdir = os.path.abspath(args.output)
-    for sub in ("templates", "archive", "figures", "logs", "operator"):
+    for sub in ("templates", "archive", "archive_worst", "figures", "logs",
+                "operator"):
         os.makedirs(os.path.join(outdir, sub), exist_ok=True)
 
     if args.bypass:
@@ -755,6 +1048,27 @@ def run(args) -> int:
     sensing_roi = (int(nominal_origin),
                    int(min(generator.n, nominal_origin + S.DEFAULT_SYNC_REPS * SPS
                            + visibility_guard)))
+    # ---- A-R01: cell-common support-disjoint repetition set ----------------
+    # Derived from the PUBLIC plan only (visibility limit, nominal support and
+    # the actual sensing processing ROI), so it is fixed before any window is
+    # evaluated.  Each window then re-derives its own actual set from the
+    # adapter's published sub_lo/sub_hi and must CONTAIN this set; a mismatch is
+    # recorded and handled explicitly (never silently ignored).
+    nominal_support_hi = int(min(
+        generator.n, nominal_origin + S.DEFAULT_SYNC_REPS * SPS
+        + int(SIC_CFG["post_tail"])))
+    sub_lo_nom = int(max(nominal_origin, sensing_roi[0]))
+    sub_hi_nom = int(min(nominal_support_hi, sensing_roi[1]))
+    cell_support = AM.derive_rep_set(
+        op, visible_end=observed_end_public, sub_lo=sub_lo_nom,
+        sub_hi=sub_hi_nom, n=generator.n, tap_lo=op.tap_lo, tap_hi=op.tap_hi,
+        name="support_disjoint", kind="support_disjoint")
+    print("support-disjoint set: reps=[%d,%d] available=%d n_list=%s "
+          "(visible_end=%d sub=[%d,%d))"
+          % (cell_support["first"], cell_support["last"],
+             cell_support["available"], cell_support["n_list"],
+             observed_end_public, sub_lo_nom, sub_hi_nom), flush=True)
+
     sic_params = {
         "sync": generator.comm_sync, "preamble": generator.comm_wave,
         "comm_code": S.DEFAULT_COMM_CODE, "sync_reps": S.DEFAULT_SYNC_REPS,
@@ -790,6 +1104,7 @@ def run(args) -> int:
     table_rows = []
     all_recs = {}
     archived = []
+    worst_archived = []
     try:
         for ci, cell in enumerate(cells):
             recs = []
@@ -797,59 +1112,90 @@ def run(args) -> int:
                   if comm_present else [[0, [1.0, 0.0]]])
             for wi in range(windows_per_cell):
                 seed = window_seed(seed_base, ci, wi)
-                win = generator.build(
-                    seed=seed, comm_paths=cp,
-                    start_offset_work=float(cell.get("start_offset_work", 0.0)),
-                    cfo_hz=float(cell.get("cfo_hz", 0.0)),
-                    isr_db=cell.get("isr_db"), snr_db=snr_db)
-                clean = np.ascontiguousarray(win["s"] + win["w"],
-                                             dtype=np.complex64)
-                raw = np.ascontiguousarray(win["y"], dtype=np.complex64)
-                meta = rx_meta(wi, int(raw.size), S.DEFAULT_SYNC_REPS,
-                               generator.pre)
-                meta = put_int(meta, "sensing_roi_lo", sensing_roi[0])
-                meta = put_int(meta, "sensing_roi_hi", sensing_roi[1])
-                meta = put_int(meta, "observed_end_sample", observed_end_public)
-                sic_runner.post(meta, raw)
-                res = sic_runner.wait()
-                if res is None:
-                    raise SystemExit("SIC adapter did not terminate %s/%d"
-                                     % (cell["id"], wi))
-                out_meta, ihat_meta = res
-                ihat = np.ascontiguousarray(
-                    ihat_meta.get("__c32", np.zeros_like(raw)),
-                    dtype=np.complex64)
-                sic_iq = np.ascontiguousarray(out_meta.get("__c32", raw),
-                                              dtype=np.complex64)
+                win, clean, raw, sic_iq, ihat, out_meta = _make_window(
+                    generator, sic_runner, cell=cell, cp=cp, seed=seed,
+                    snr_db=snr_db, sensing_roi=sensing_roi,
+                    observed_end_public=observed_end_public, wid=wi)
                 use_rx = (cir_runners is not None
                           and wi < int(args.receiver_windows))
                 rec, H_clean, H_raw, H_sic = evaluate_window(
                     op, frozen_op, cell, wi, seed, args.seed_set, win, clean,
                     raw, sic_iq, out_meta,
-                    cir_runners=cir_runners if use_rx else None)
+                    cir_runners=cir_runners if use_rx else None,
+                    support=cell_support)
                 recs.append(rec)
                 windows_jsonl.write(json.dumps(rec, allow_nan=True) + "\n")
                 table_rows.extend(_table_rows(rec))
                 if wi < int(args.archive_windows):
-                    path = os.path.join(outdir, "archive", "%s_%05d.npz"
-                                        % (cell["id"], wi))
-                    np.savez_compressed(
-                        path, clean=clean, raw=raw, sic=sic_iq, ihat=ihat,
-                        i_truth=np.asarray(win["i"], dtype=np.complex64),
-                        H_clean=H_clean, H_raw=H_raw, H_sic=H_sic,
-                        truth_json=np.frombuffer(
-                            json.dumps(win["truth"]).encode("utf-8"),
-                            dtype=np.uint8),
-                        meta_json=np.frombuffer(
-                            json.dumps({k: v for k, v in rec.items()
-                                        if k not in ("_",)},
-                                       default=str).encode("utf-8"),
-                            dtype=np.uint8))
+                    path = _save_window(
+                        os.path.join(outdir, "archive", "%s_%05d.npz"
+                                     % (cell["id"], wi)),
+                        clean=clean, raw=raw, sic_iq=sic_iq, ihat=ihat,
+                        H_clean=H_clean, H_raw=H_raw, H_sic=H_sic, win=win,
+                        rec=rec, reason="first_n_by_index")
                     archived.append(os.path.relpath(path, outdir))
                 if (wi + 1) % 20 == 0 or wi + 1 == windows_per_cell:
                     print("[%s] %d/%d windows (%.1fs)"
                           % (cell["id"], wi + 1, windows_per_cell,
                              time.time() - start), flush=True)
+            # A-R04: worst-window evidence, regenerated and hash-verified.
+            # One window can be selected by both rules; it is archived ONCE with
+            # the combined reason and both declarations point at it.
+            worst = _worst_windows(recs)
+            picks = {}
+            for label in ("lowest_c_cir", "largest_target_error"):
+                wrec = worst.get(label)
+                if not wrec:
+                    continue
+                picks.setdefault(int(wrec["window_id"]), []).append(label)
+            for wid in sorted(picks):
+                reasons = sorted(picks[wid])
+                rel = os.path.join("archive_worst", "%s_%05d.npz"
+                                   % (cell["id"], wid))
+                if wid < int(args.archive_windows):
+                    for label in reasons:
+                        worst_archived.append({
+                            "cell_id": cell["id"], "window_id": wid,
+                            "reason": label, "reasons": reasons,
+                            "path": os.path.join(
+                                "archive", "%s_%05d.npz" % (cell["id"], wid)),
+                            "already_archived": True})
+                    continue
+                rec_old = recs[wid]
+                win2, clean2, raw2, sic2, ihat2, out2 = _make_window(
+                    generator, sic_runner, cell=cell, cp=cp,
+                    seed=int(rec_old["seed"]), snr_db=snr_db,
+                    sensing_roi=sensing_roi,
+                    observed_end_public=observed_end_public, wid=wid)
+                same = (AM.sha256_f32(raw2) == rec_old["iq"]["raw_sha256"]
+                        and AM.sha256_f32(clean2)
+                        == rec_old["iq"]["clean_sha256"]
+                        and AM.sha256_f32(sic2) == rec_old["iq"]["sic_sha256"])
+                if not same:
+                    for label in reasons:
+                        worst_archived.append({
+                            "cell_id": cell["id"], "window_id": wid,
+                            "reason": label, "reasons": reasons, "path": None,
+                            "already_archived": False,
+                            "error": "regeneration hash mismatch; NOT "
+                                     "archived (no empty marker)"})
+                    print("WARNING: worst-window regeneration hash mismatch "
+                          "%s/%d - not archived" % (cell["id"], wid),
+                          flush=True)
+                    continue
+                path = _save_window(
+                    os.path.join(outdir, rel), clean=clean2, raw=raw2,
+                    sic_iq=sic2, ihat=ihat2,
+                    H_clean=AM.fixed_operator_cir(clean2, op),
+                    H_raw=AM.fixed_operator_cir(raw2, op),
+                    H_sic=AM.fixed_operator_cir(sic2, op), win=win2,
+                    rec=rec_old, reason="+".join(reasons))
+                archived.append(rel)
+                for label in reasons:
+                    worst_archived.append({
+                        "cell_id": cell["id"], "window_id": wid,
+                        "reason": label, "reasons": reasons, "path": rel,
+                        "already_archived": False, "verified_hashes": True})
             all_recs[cell["id"]] = recs
     finally:
         windows_jsonl.close()
@@ -864,7 +1210,7 @@ def run(args) -> int:
         w.writerow(["cell_id", "window_id", "set", "N", "roi", "c_cir_db",
                     "c_cir_flag", "e_raw", "e_sic", "nmse_raw", "nmse_sic",
                     "g_sic_db", "g_raw_db", "residual_raw_db",
-                    "residual_sic_db"])
+                    "residual_sic_db", "n_actual", "roi_shortened"])
         w.writerows(table_rows)
 
     per_cell = {cid: summarize_cell(recs) for cid, recs in all_recs.items()}
@@ -890,10 +1236,31 @@ def run(args) -> int:
         },
         "archive": {"archived_windows": len(archived),
                     "total_windows": total_windows,
-                    "rule": "first --archive-windows windows of each cell "
-                            "(deterministic); the remaining windows cannot be "
-                            "recomputed independently from the archive",
+                    "rule": "first --archive-windows windows of each cell by "
+                            "window index (deterministic) plus the per-cell "
+                            "worst C_CIR / worst target-error windows, "
+                            "regenerated and hash-verified before archiving; "
+                            "the remaining windows cannot be recomputed "
+                            "independently from the archive",
+                    "fixed_by_index": [p for p in archived
+                                       if "archive_worst" not in p],
+                    "worst_windows": worst_archived,
+                    "worst_windows_rule": "selection is metric-driven "
+                                          "evidence only and is NOT used for "
+                                          "any unbiased distribution statistic",
                     "paths": archived},
+        "stage": args.stage,
+        "rectification": {
+            "schema_version": SCHEMA_VERSION,
+            "items": ["A-R01 support-disjoint independent region",
+                      "A-R02 same-dimension coherent/centered decomposition"],
+            "support_disjoint_cell_set": {
+                "first": cell_support["first"],
+                "last": cell_support["last"],
+                "available": cell_support["available"],
+                "n_list": list(cell_support["n_list"]),
+                "read_lo": cell_support["read_lo"],
+                "read_hi": cell_support["read_hi"]}}, 
         "operator": {"origin": int(op.origin), "energy": float(op.energy),
                      "sha256": AM.sha256_f32(op.code),
                      "recovery": op_ev["recovery"],
@@ -905,11 +1272,25 @@ def run(args) -> int:
                      "receiver_background_taps": list(AM.RX_BACKGROUND_TAPS),
                      "reciprocal_mapping": AM.RX_TAP_OFFSET,
                      "full_N": list(AM.FULL_N),
-                     "indep_start": AM.INDEP_START,
-                     "indep_N": list(AM.INDEP_N),
+                     "indep_start": cell_support["first"],
+                     "indep_N": list(cell_support["n_list"]),
+                     "indep_available": cell_support["available"],
+                     "indep_n_nominal": list(cell_support["n_nominal"]),
+                     "indep_n_shortened": cell_support["n_shortened"],
+                     "support_source": cell_support["support_source"],
+                     "legacy_indep_start": AM.LEGACY_INDEP_START,
+                     "legacy_indep_N": list(AM.INDEP_N_NOMINAL),
                      "convention": "average", "phase_rotation": "identity",
                      "code_energy_normalization": True,
-                     "roi_verification": roi_ev},
+                     "roi_verification": roi_ev,
+                     "support_disjoint_cell_set": {
+                         "first": cell_support["first"],
+                         "last": cell_support["last"],
+                         "available": cell_support["available"],
+                         "n_list": list(cell_support["n_list"]),
+                         "read_lo": cell_support["read_lo"],
+                         "read_hi": cell_support["read_hi"],
+                         "bounds": cell_support["bounds"]}},
         "not_run": {
             "matlab": "MATLAB cross-check script provided in "
                       "testdata/sic_accum/matlab/ but NOT executed",
@@ -981,6 +1362,8 @@ def run(args) -> int:
                   "payload_substream": "fixed PSDU (deterministic)",
                   "path_substream": "deterministic profile (no RNG)"},
         "inputs_hashed": _input_hashes(),
+        "stage": args.stage,
+        "rectification": summary["rectification"],
         "archive": summary["archive"], "cli": " ".join(sys.argv),
         "not_run": summary["not_run"],
     }
@@ -1033,8 +1416,10 @@ def _input_hashes():
 
 def _table_rows(rec):
     rows = []
-    for set_name in ("full", "indep"):
-        for N, entry in rec["accum"][set_name].items():
+    for set_name, table in (rec.get("accum") or {}).items():
+        if set_name in ("sets", "rois", "tap_domain"):
+            continue
+        for N, entry in table.items():
             for roi in ("full", "target", "background", "direct"):
                 rows.append([
                     rec["cell_id"], rec["window_id"], set_name, N, roi,
@@ -1045,7 +1430,9 @@ def _table_rows(rec):
                     AM.csv_cell(entry["g_sic_db"]),
                     AM.csv_cell(entry["g_raw_db"]),
                     AM.csv_cell(entry["residual_raw_db"][roi]),
-                    AM.csv_cell(entry["residual_sic_db"][roi])])
+                    AM.csv_cell(entry["residual_sic_db"][roi]),
+                    entry.get("n_actual"),
+                    entry.get("roi_shortened", {}).get(roi)])
     return rows
 
 
@@ -1190,7 +1577,9 @@ def self_test(verbose=True) -> int:
           and op["operator"]["tap_hi"] == AM.TAP_HI
           and op["operator"]["origin"] == 1997
           and op["repetition_sets"]["full_N"] == list(AM.FULL_N)
-          and op["repetition_sets"]["indep_N"] == list(AM.INDEP_N))
+          and op["repetition_sets"]["indep_nominal_N"]
+          == list(AM.INDEP_N_NOMINAL)
+          and op["repetition_sets"]["indep_policy"] == "support_disjoint")
     check("summary aggregation smoke", _summarize_smoke() == 0)
     check("independent verifier present",
           os.path.exists(os.path.join(repo_root(), "tools", "sic",
@@ -1232,7 +1621,7 @@ def _summarize_smoke() -> int:
                 "N": int(N), "start": 0, "stop": int(N)}
 
     full = {str(N): entry(N) for N in AM.FULL_N}
-    ind = {str(N): entry(N) for N in AM.INDEP_N}
+    ind = {str(N): entry(N) for N in (1, 2, 4, 8, 16, 32, 54)}
     tgt = {"%s/%d" % (s, N): {"raw": {"amp_err_db": 1.0, "peak_shift": 0,
                                       "phase_err_deg": 1.0,
                                       "bg_false_peak_ratio": 0.1,
@@ -1241,7 +1630,8 @@ def _summarize_smoke() -> int:
                                      "phase_err_deg": 0.2,
                                      "bg_false_peak_ratio": 0.05,
                                      "target_to_background_proxy": 20.0}}
-           for s, lst in (("full", AM.FULL_N), ("indep", AM.INDEP_N))
+           for s, lst in (("full", AM.FULL_N),
+                          ("indep", (1, 2, 4, 8, 16, 32, 54)))
            for N in lst}
     recs = []
     for i in range(3):
@@ -1264,13 +1654,42 @@ def _summarize_smoke() -> int:
                    "bypass_bit_identical": False, "output_changed": True,
                    "raw_minus_clean_energy": 1.0,
                    "sic_minus_clean_energy": 0.01},
-            "accum": {"full": full, "indep": ind}, "target": tgt,
-            "coherence": {t: {roi: {"eta": 0.5, "lag": {"1": 0.5},
+            "accum": {"full": full, "indep": ind,
+                      "sets": {"full": {"n_list": list(AM.FULL_N)},
+                               "indep": {"n_list": [1, 2, 4, 8, 16, 32, 54]}}},
+            "target": tgt,
+            "support": {"cell_set": {"first": 9, "last": 62, "available": 54,
+                                     "n_list": [1, 2, 4, 8, 16, 32, 54]},
+                        "cell_set_contained": True, "set_used": "cell",
+                        "coverage": {"cir_overlap_sub_ratio": 1.0,
+                                     "cir_overlap_truth_ratio": 0.9},
+                        "window_set": {"first": 9, "last": 62},
+                        "excluded": []},
+            "coherence": {t: {roi: {"eta": 0.5, "coherent_fraction": 0.5,
+                                    "lag": {"1": 0.5},
                                     "centered_lag": {"1": 0.5},
                                     "phase_slope_hz": 0.0,
+                                    "e_coherent": 1.0, "e_centered": 1.0,
+                                    "e_total": 2.0, "mu_energy": 0.1,
+                                    "energy_conservation_rel": 0.0,
                                     "eta_flag": "numeric"}
                               for roi in ("target", "background", "all")}
                           for t in ("sic", "raw")},
+            "coherence_full_preamble": {t: {roi: {"eta": 0.5,
+                                                  "coherent_fraction": 0.5,
+                                                  "lag": {"1": 0.5},
+                                                  "centered_lag": {"1": 0.5},
+                                                  "phase_slope_hz": 0.0,
+                                                  "e_coherent": 1.0,
+                                                  "e_centered": 1.0,
+                                                  "e_total": 2.0,
+                                                  "mu_energy": 0.1,
+                                                  "energy_conservation_rel":
+                                                      0.0,
+                                                  "eta_flag": "numeric"}
+                                          for roi in ("target", "background",
+                                                      "all")}
+                                      for t in ("sic", "raw")},
             "per_symbol": {"residual_sic_power": [1.0] * 64,
                            "residual_raw_power": [1.0] * 64,
                            "clean_power": [1.0] * 64},
@@ -1302,6 +1721,8 @@ def build_parser():
                     help="also run the existing radar CIR block per branch")
     ap.add_argument("--receiver-windows", type=int, default=20,
                     help="maximum windows per cell that get the receiver layer")
+    ap.add_argument("--stage", default="rectification",
+                    help="run stage tag; the run directory name must contain it")
     ap.add_argument("--plots", action="store_true")
     ap.add_argument("--bypass", action="store_true",
                     help="A3: no interference; bypass/target-protection mode")
@@ -1325,6 +1746,12 @@ def main(argv=None) -> int:
         args.i_know_this_is_calibration = True
     if not args.build_dir or not args.output:
         ap.error("--build-dir and --output are required for a run")
+    base = os.path.basename(os.path.abspath(args.output))
+    if args.stage and args.stage not in base:
+        new_out = os.path.abspath(args.output) + "_" + args.stage
+        print("run stage %r not in the output name; using %s"
+              % (args.stage, new_out), flush=True)
+        args.output = new_out
     if not args.i_know_this_is_calibration and args.seed_set == "calibration":
         raise SystemExit("--seed-set calibration requires "
                          "--i-know-this-is-calibration")

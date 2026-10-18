@@ -11,6 +11,29 @@
 
 ---
 
+> ## ⚠ 整改提示（2026-10-18，superseded）
+>
+> 本报告的**独立区定义**与**相干能量分解**已被
+> `docs/sic/S2A_整改意见_2026-10-18.md` 的 A-R01 / A-R02 修正，评价几何、schema、
+> 逐窗字段与结论以 **`docs/sic/S2A_整改开发报告_2026-10-18.md`** 为准。被取代的具体项：
+>
+> 1. **独立区**：本文使用的 `[8,8+N)` 只是 repetition **编号**标签，不是真正的
+>    support-disjoint：相关算子在 r=8 仍读取训练/可见 guard 样点（最早读 10093 <
+>    visible_end），在 r=63 读到未相减尾部（最晚 67140 > sub_hi-1）。新主结果是
+>    support-disjoint `[9,62]`（54 个 repetition），N 列表如实缩短为
+>    `1,2,4,8,16,32,54`；旧 `[8,8+N)` 仅保留为 `legacy_nominal_index` 诊断。
+> 2. **相干能量**：`coherence.mean_fraction = ||mu||²/E_total` 量纲错误（把单符号
+>    平均能量与 N 符号总能量混用）。现改为 `e_coherent = N·||mu||²`、
+>    `e_centered = Σ_r||E_r−mu||²`、`e_total = e_coherent+e_centered`、
+>    `coherent_fraction = eta`；`mean_fraction` 置空并保留 superseded 说明。
+> 3. **残余来源归因**（A-R03）为**本轮新增**（真值辅助替换 + 训练输入对照实验），
+>    本文只有“相干地板”的现象描述，没有来源结论。
+> 4. 本文的 C_CIR / eta / 相位斜率等数值**结论**已在 support-disjoint 集上重算，
+>    结果见整改报告；**原始 run 目录与图保留不变**，新 run 目录带
+>    `_rectification` 后缀。
+>
+> 仍然成立的原始发现见整改报告第 6 节“两组结论”。
+
 ## 0. 结论摘要（TL;DR）
 
 | 问题 | 结论 | 证据 |

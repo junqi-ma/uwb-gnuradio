@@ -117,6 +117,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--run", action="append", default=None,
                     help="real run directory for the verifier + reject-QA")
+    ap.add_argument("--budget", action="append", default=None,
+                    help="A-R03 error-budget run for the budget verifier + "
+                         "reject-QA")
     ap.add_argument("--skip-gr", action="store_true",
                     help="skip the GNU Radio app self-test (no build tree)")
     args = ap.parse_args(argv)
@@ -125,9 +128,14 @@ def main(argv=None):
                [sys.executable, "tools/sic/accum_metrics.py", "--self-test"])
     run_script("verify_s2a --self-test",
                [sys.executable, "tools/sic/verify_s2a.py", "--self-test"])
+    run_script("residual_budget --self-test",
+               [sys.executable, "tools/sic/residual_budget.py", "--self-test"])
     if not args.skip_gr:
         run_script("uwb_sim_sic_accum --self-test",
                    [sys.executable, "gr-uwb/apps/uwb_sim_sic_accum.py",
+                    "--self-test"])
+        run_script("uwb_sim_sic_error_budget --self-test",
+                   [sys.executable, "gr-uwb/apps/uwb_sim_sic_error_budget.py",
                     "--self-test"])
     operator_end_to_end()
     for run in (args.run or []):
@@ -136,6 +144,14 @@ def main(argv=None):
         run_script("verify_s2a --reject-qa %s" % os.path.basename(run.rstrip("/")),
                    [sys.executable, "tools/sic/verify_s2a.py", "--run", run,
                     "--reject-qa"])
+    for bdir in (args.budget or []):
+        run_script("verify_s2a --budget %s" % os.path.basename(
+            bdir.rstrip("/")),
+            [sys.executable, "tools/sic/verify_s2a.py", "--budget", bdir])
+        run_script("verify_s2a --reject-qa-budget %s" % os.path.basename(
+            bdir.rstrip("/")),
+            [sys.executable, "tools/sic/verify_s2a.py", "--budget", bdir,
+             "--reject-qa-budget"])
     print("qa_s2a: %d failure(s)" % FAILS)
     return FAILS
 

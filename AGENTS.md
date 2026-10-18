@@ -1,4 +1,14 @@
-# 当前最高优先级：S2-A accumulation 后 sensing CIR 评价
+# 当前最高优先级：S2-A 整改（2026-10-18）——**已实施并交付**
+
+整改 A-R01～A-R04 已实施、测试并交付：见 **`docs/sic/S2A_整改开发报告_2026-10-18.md`**
+（逐项状态/代码位置/QA 反例/命令/产物/新旧差异/未跑项）。需求原文保留在
+`docs/sic/S2A_整改意见_2026-10-18.md`（历史依据，已被整改报告取代）。
+原报告 **`docs/sic/S2A_累加后CIR开发报告.md`** 顶部已加 superseded 提示；
+原始 run/图保留不变，整改结果在新 run 目录（`gr-uwb/build-sic-accum/results/s2a/*_rectification`）。
+共享 SIC 核心/adapter 与旧 QA 门槛未修改；两 worktree 隔离继续有效。
+当前无未启动的整改项；下一步若继续研究，仍需按共同约定先写设计/QA 再实现。
+
+## 继承的 S2-A 初版任务
 
 本 worktree 从 `93c80b3` 创建；当前仅执行 S2-A，不继续旧 S1 收尾或 TWR。
 必须先完整阅读：

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "frozen": true,
   "task": "S2-A",
   "purpose": "Frozen fixed-operator and evaluation contract for accumulation-after-SIC sensing CIR evaluation. Everything here is frozen on the calibration seed set BEFORE the acceptance seed set is run. Changing a value after acceptance has been touched requires a new run directory and an explicit note in the development report.",
@@ -25,7 +25,15 @@
     "code_len_chips": 127,
     "chip_stride": 8,
     "spread_factor": 4,
-    "samples_per_pulse": 2
+    "samples_per_pulse": 2,
+    "support_source": "nonzero_template_indices",
+    "support_note": "the matched filter multiplies by conj(code[m]); only the 64 nonzero template indices are read, so the exact read support of repetition r over taps [tap_lo,tap_hi) is [origin+r*sps+tap_lo+nz_min, origin+r*sps+tap_hi-1+nz_max] (inclusive)",
+    "correlation_support": {
+      "nz_min": 0,
+      "nz_max": 1008,
+      "nz_count": 64,
+      "conservative_len": 1016
+    }
   },
   "roi": {
     "target_offsets": [
@@ -71,8 +79,8 @@
       64
     ],
     "full_start": 0,
-    "indep_start": 8,
-    "indep_N": [
+    "indep_policy": "support_disjoint",
+    "indep_nominal_N": [
       1,
       2,
       4,
@@ -81,7 +89,16 @@
       32,
       56
     ],
-    "indep_note": "[8,8+N) is the independent region; [8,72) is NEVER treated as 64 independent symbols"
+    "indep_strict_holdout": true,
+    "indep_legality": [
+      "origin + r*sps + tap_lo + nz_min >= visible_end",
+      "origin + r*sps + tap_hi - 1 + nz_max <= sub_hi - 1",
+      "0 <= read_lo and read_hi <= n"
+    ],
+    "indep_n_shortening": "the reported N list is a prefix of indep_nominal_N plus the actual available count when it is shorter than 56; no padding, no silent relabelling",
+    "legacy_indep_start": 8,
+    "legacy_indep_note": "the old [8,8+N) label reads training/guard samples (r=8 reads from 10093 < visible_end) and, at the far end, un-subtracted tail samples (r=63 reads up to 67140 > sub_hi-1). It is kept ONLY as legacy_nominal_index_diagnostic and never used as the main result.",
+    "shared_sample_set_note": "the main table uses one common safe set covering the full tap grid for all ROIs; per-ROI support sets are an appendix because they use different sample sets"
   },
   "sic": {
     "model_mode": "estimate8_frozen",
@@ -166,5 +183,25 @@
       "truth_json",
       "meta_json"
     ]
+  },
+  "rectification": {
+    "date": "2026-10-18",
+    "items": [
+      "A-R01 support-disjoint independent region",
+      "A-R02 same-dimension coherent/centered energy decomposition"
+    ],
+    "authority": "docs/sic/S2A_\u6574\u6539\u610f\u89c1_2026-10-18.md"
+  },
+  "coherence": {
+    "schema_version": 2,
+    "decomposition": {
+      "mu": "(1/N) sum_r E_r",
+      "e_coherent": "N * ||mu||^2",
+      "e_centered": "sum_r ||E_r - mu||^2",
+      "e_total": "e_coherent + e_centered",
+      "coherent_fraction": "e_coherent/e_total"
+    },
+    "centered_note": "e_centered is deterministic-structure energy, not proven random noise: a phase ramp lands there too",
+    "retired": "schema 1 mean_fraction = ||mu||^2/e_total mixed a per-symbol-average energy with the N-symbol total; it is now null with a supersession note and coherent_fraction is authoritative"
   }
 }

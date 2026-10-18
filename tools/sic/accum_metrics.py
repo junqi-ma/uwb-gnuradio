@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""S2-A fixed-operator accumulation metrics (NumPy reference + QA).
+"""S2-A fixed-operator accumulation metrics (NumPy reference + QA), schema 2.
 
 Scope
 -----
-This module implements ONLY the *offline* fixed-operator evaluation layer of
-S2-A (see ``docs/sic/OpenCode开发指示_S2A_累加后CIR评价.md`` section 3.1):
+Offline fixed-operator evaluation layer of S2-A
+(``docs/sic/OpenCode开发指示_S2A_累加后CIR评价.md`` section 3.1) plus the
+rectification items A-R01 (support-disjoint independent region) and A-R02
+(coherent/centered energy decomposition) of
+``docs/sic/S2A_整改意见_2026-10-18.md``:
 
     H_x[r, t] = sum_m  y_x[origin + r*SPS + t + m] * conj(code9[m]) / E_code
 
@@ -14,37 +17,46 @@ it.  It is deliberately:
 
 * **linear and input-only**: one fixed template, one fixed time origin, one
   fixed tap grid, one fixed gain normalisation and NO phase rotation, so that
-  ``H_x`` is a linear functional of the input IQ.  Nothing is picked per branch.
+  ``H_x`` is a linear functional of the input IQ.
 * **truth-free**: the origin is the public nominal sensing origin (``pre``),
   the template is the public code-9 operator; the injected comm start / CFO /
   paths / interferer IQ never enter.
-* **not a GNU Radio receiver**: the receiver layer is a separate result
-  (``receiver_N_sweep`` is a deliberately unimplemented/limited sweep here).
+* **support-aware**: the independent-region repetition set is derived from the
+  ACTUAL read support of the correlation operator (nonzero template indices),
+  the public visibility limit and the actual applied subtraction region -- not
+  from a repetition index (A-R01).
 
 It contains no GNU Radio or pybind dependency, so the independent verifier can
-import it without a build tree.  The symmetric independent re-derivation used by
-``tools/sic/verify_s2a.py`` re-implements the small amount of algebra it needs
-rather than trusting this module's helpers.
+import it without a build tree.  The verifier re-implements the algebra it needs
+rather than trusting these helpers.
 
-Conventions (frozen in ``testdata/sic_accum/operator.json``)
------------------------------------------------------------
-* ``average`` convention: ``H_x,N = (1/N) sum_{r in R_N} H_x[r]``.
-  The ``sum`` counterpart is a plain factor ``N`` and is recorded, not
-  re-declared: ``H_sum = N * H_avg``.
+Conventions (frozen in ``testdata/sic_accum/operator.json``, schema 2)
+---------------------------------------------------------------------
+* ``average``: ``H_x,N = (1/N) sum_{r in R_N} H_x[r]``; ``H_sum = N * H_avg``.
 * residual: ``E_raw,N = H_raw,N - H_clean,N``, ``E_sic,N = H_sic,N - H_clean,N``.
 * CIR SIC gain: ``C_CIR(N) = 10log10(||E_raw,N||^2 / ||E_sic,N||^2)``.
-* accumulation gain (NOT an SIC gain): ``G(N) = 10log10(P(1)/P(N))`` on the
-  nested same-start repetition sets.
+* accumulation gain (NOT an SIC gain): ``G(N) = 10log10(P(1)/P(N))`` on nested
+  same-start sets.
+* coherence on one window (A-R02, same-dimension energies)::
+
+      mu             = (1/N) sum_r E_r
+      E_coherent     = N * ||mu||^2
+      E_centered     = sum_r ||E_r - mu||^2
+      E_total        = E_coherent + E_centered
+      coherent_fraction = E_coherent / E_total = eta
+
+  ``E_centered`` is **not** "random noise": a deterministic phase ramp also lands
+  there.
 * zero numerator / denominator are reported as ``+Inf`` / ``-Inf`` / ``N/A``
-  (never replaced by an ``eps`` floor and never clipped to a "good" value).
-  ``*_clipped`` mirrors exist for plotting only, with the clip bounds recorded.
+  (never an ``eps`` floor, never clipped to a "good" value).  ``*_clipped``
+  mirrors exist for plotting only.
 """
 
 from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -52,6 +64,8 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Frozen geometry / domain constants (mirror gr-uwb/apps/sic_preamble_sim.py)
 # ---------------------------------------------------------------------------
+SCHEMA_VERSION = 2
+
 WORK_HZ = 998400000.0
 SPS = 1016                 # work samples per Ipatov SYNC symbol
 SYNC_REPS = 64
@@ -88,20 +102,17 @@ BG_HI = 100
 DIRECT_LO = -8
 DIRECT_HI = 8
 
-#: Receiver-layer (``uwb.radar_cir_estimator``) tap-domain ROIs.  These are the
-#: R04 frozen values from ``testdata/sic_preamble/cases/target_roi.json``
-#: (target ROI [51,60), target tap 55, main peak 18).  With ``cir_pre = 16`` the
-#: receiver tap domain is the fixed-operator offset domain shifted by exactly
-#: ``cir_pre``, so the same physical peak is offset 39 here and tap 55 there.
+#: Receiver-layer (``uwb.radar_cir_estimator``) tap-domain ROIs (R04 values).
 RX_TARGET_ROI = (51, 60)
 RX_TARGET_TAP = 55
 RX_BACKGROUND_TAPS = (80, 116)     # [64,100) offsets + cir_pre 16
 RX_TAP_OFFSET = 16
 
-#: Repetition sets.
+#: Repetition-set nominal N lists (truncated honestly when fewer reps are legal).
 FULL_N = (1, 2, 4, 8, 16, 32, 64)
-INDEP_START = 8
-INDEP_N = (1, 2, 4, 8, 16, 32, 56)
+INDEP_N_NOMINAL = (1, 2, 4, 8, 16, 32, 56)
+#: A-R01: the old ``[8,8+N)`` label is kept only as a legacy diagnostic.
+LEGACY_INDEP_START = 8
 
 #: Plot clip bounds (documentation only; the numeric values are never clipped).
 PLOT_FLOOR_DB = -80.0
@@ -195,6 +206,215 @@ def recover_chips(template: np.ndarray, taps: np.ndarray, *,
 
 
 # ---------------------------------------------------------------------------
+# A-R01: exact read support of the correlation operator
+# ---------------------------------------------------------------------------
+def code_support(code: np.ndarray) -> Dict:
+    """Nonzero template support of the correlation operator.
+
+    The matched filter multiplies by ``conj(code[m])``; zero taps contribute
+    exactly zero, so the samples an output actually depends on are
+    ``origin + r*sps + t + m`` for the NONZERO template indices ``m``.  Both the
+    exact support and the conservative full-window support are reported.
+    """
+    c = np.asarray(code)
+    idx = np.flatnonzero(np.abs(c) > 0.0)
+    if idx.size == 0:
+        raise ValueError("degenerate (all-zero) template")
+    return {"nz_count": int(idx.size),
+            "nz_min": int(idx[0]),
+            "nz_max": int(idx[-1]),
+            "nz_indices": idx,
+            "conservative_len": int(c.size)}
+
+
+def read_support(op: "Operator", r: int, tap_lo: int, tap_hi: int,
+                 nz: Optional[Dict] = None) -> Tuple[int, int]:
+    """Half-open absolute sample span read for repetition ``r`` over a tap ROI.
+
+    Exact (nonzero template indices) by default; ``nz=None`` uses the
+    conservative full template window.
+    """
+    if nz is None:
+        nz = code_support(op.code)
+    base = int(op.origin) + int(r) * int(op.sps)
+    lo = base + int(tap_lo) + int(nz["nz_min"])
+    hi = base + int(tap_hi) - 1 + int(nz["nz_max"]) + 1
+    return int(lo), int(hi)
+
+
+def truncate_n_list(available: int,
+                    nominal: Sequence[int] = INDEP_N_NOMINAL) -> Tuple[int, ...]:
+    """Honest N list: a prefix of ``nominal`` plus the real tail if it is short.
+
+    A-R01 §5: "数量不足56就如实缩短，不补零、不借用SFD、不悄悄换N标签".  The
+    appended tail IS the actual available count (e.g. 54), not a relabelled 56.
+    """
+    available = int(available)
+    out = [int(n) for n in nominal if int(n) <= available]
+    if available >= 32 and available not in out:
+        out.append(available)
+    return tuple(out)
+
+
+def derive_rep_set(op: "Operator", *, visible_end: int, sub_lo: int,
+                   sub_hi: int, n: int, tap_lo: int, tap_hi: int,
+                   name: str, kind: str,
+                   nominal: Sequence[int] = INDEP_N_NOMINAL,
+                   strict_holdout: bool = True) -> Dict:
+    """Derive a repetition set from the operator's ACTUAL sample support.
+
+    A repetition ``r`` is legal iff every sample the correlation reads for that
+    repetition over ``[tap_lo, tap_hi)`` is:
+
+    * at or after ``visible_end`` (the public estimation visibility limit, which
+      already includes the extra visibility guard) -- strict holdout never reads
+      training/guard samples;
+    * inside the ACTUAL applied subtraction region ``[sub_lo, sub_hi)`` -- the
+      independent region must not score un-subtracted tail samples;
+    * inside the window ``[0, n)``.
+
+    Returns a JSON-ready dict (half-open intervals throughout) with the legal
+    repetitions, the honest N list, the excluded counts/reasons and the bounds.
+    """
+    nz = code_support(op.code)
+    reps: List[int] = []
+    excluded: List[Dict] = []
+    for r in range(int(op.sync_reps)):
+        lo, hi = read_support(op, r, tap_lo, tap_hi, nz)
+        reasons = []
+        if lo < 0 or hi > int(n):
+            reasons.append("outside_window")
+        if strict_holdout and lo < int(visible_end):
+            reasons.append("reads_training_or_guard")
+        if lo < int(sub_lo) or hi > int(sub_hi):
+            reasons.append("outside_applied_subtraction")
+        if reasons:
+            excluded.append({"r": int(r), "read_lo": lo, "read_hi": hi,
+                             "reasons": reasons})
+        else:
+            reps.append(int(r))
+    # keep the longest contiguous run (the operator is period-sampled, so a
+    # non-contiguous legal set is a geometry/anomaly signal, recorded as such).
+    runs: List[List[int]] = []
+    for r in reps:
+        if runs and r == runs[-1][-1] + 1:
+            runs[-1].append(r)
+        else:
+            runs.append([r])
+    run = max(runs, key=len) if runs else []
+    dropped_noncontig = sorted(set(reps) - set(run))
+    first = int(run[0]) if run else -1
+    last = int(run[-1]) if run else -1
+    lo_read = int(read_support(op, first, tap_lo, tap_hi, nz)[0]) if run else -1
+    hi_read = int(read_support(op, last, tap_lo, tap_hi, nz)[1]) if run else -1
+    return {
+        "name": name, "kind": kind,
+        "strict_holdout": bool(strict_holdout),
+        "tap_lo": int(tap_lo), "tap_hi": int(tap_hi),
+        "available": len(run),
+        "first": first, "last": last,
+        "reps": [int(r) for r in run],
+        "n_list": list(truncate_n_list(len(run), nominal)),
+        "n_nominal": [int(x) for x in nominal],
+        "n_shortened": bool(len(run) < max(int(x) for x in nominal)),
+        "read_lo": lo_read, "read_hi": hi_read,
+        "support_source": "nonzero_template_indices",
+        "nz_support": {"nz_min": int(nz["nz_min"]), "nz_max": int(nz["nz_max"]),
+                       "nz_count": int(nz["nz_count"]),
+                       "conservative_len": int(nz["conservative_len"])},
+        "bounds": {"visible_end": int(visible_end), "sub_lo": int(sub_lo),
+                   "sub_hi": int(sub_hi), "n": int(n),
+                   "origin": int(op.origin), "sps": int(op.sps)},
+        "excluded_before": sum(1 for e in excluded if e["r"] < first
+                               and "outside_applied_subtraction" not in
+                               e["reasons"]) if run else len(excluded),
+        "excluded_after": sum(1 for e in excluded if run and e["r"] > last)
+        if run else 0,
+        "excluded": excluded,
+        "dropped_noncontiguous": dropped_noncontig,
+    }
+
+
+def legacy_nominal_index_set(op: "Operator",
+                             nominal: Sequence[int] = INDEP_N_NOMINAL) -> Dict:
+    """The OLD ``[8,8+N)`` definition, kept as an explicit legacy diagnostic.
+
+    A-R01 §4: it is NOT a support-disjoint set (its correlation windows still
+    read training/guard samples and, at the far end, un-subtracted tail
+    samples).  It is reported separately and never used as the main result.
+    """
+    reps = list(range(int(LEGACY_INDEP_START),
+                      int(LEGACY_INDEP_START) + int(max(nominal))))
+    return {
+        "name": "legacy_nominal_index", "kind": "legacy_nominal_index",
+        "strict_holdout": False, "tap_lo": int(TAP_LO), "tap_hi": int(TAP_HI),
+        "available": len(reps), "first": int(reps[0]), "last": int(reps[-1]),
+        "reps": reps, "n_list": [int(x) for x in nominal],
+        "n_nominal": [int(x) for x in nominal], "n_shortened": False,
+        "read_lo": int(op.origin) + reps[0] * int(op.sps) + int(TAP_LO),
+        "read_hi": int(op.origin) + reps[-1] * int(op.sps) + int(TAP_HI) - 1
+        + 1008 + 1,
+        "support_source": "repetition_index_only",
+        "nz_support": None, "bounds": None, "excluded_before": 0,
+        "excluded_after": 0, "excluded": [], "dropped_noncontiguous": [],
+        "superseded_by": "support_disjoint",
+        "note": "reads training/guard samples and un-subtracted tail samples; "
+                "diagnostic only",
+    }
+
+
+def full_preamble_set(op: "Operator") -> Dict:
+    """``[0,64)`` full-preamble set (kept; head/tail finite-length effects)."""
+    reps = list(range(int(op.sync_reps)))
+    return {
+        "name": "full_preamble", "kind": "full_preamble",
+        "strict_holdout": False, "tap_lo": int(TAP_LO), "tap_hi": int(TAP_HI),
+        "available": len(reps), "first": 0, "last": int(reps[-1]),
+        "reps": reps, "n_list": [int(x) for x in FULL_N],
+        "n_nominal": [int(x) for x in FULL_N], "n_shortened": False,
+        "read_lo": int(op.origin) + int(TAP_LO),
+        "read_hi": int(op.origin) + (len(reps) - 1) * int(op.sps)
+        + int(TAP_HI) - 1 + 1008 + 1,
+        "support_source": "full_preamble", "nz_support": None, "bounds": None,
+        "excluded_before": 0, "excluded_after": 0, "excluded": [],
+        "dropped_noncontiguous": [],
+        "note": "includes the first/last repetition finite-length effects and "
+                "reads training/guard samples; not a holdout",
+    }
+
+
+def coverage_report(op: "Operator", rs: Dict, *, truth_span: Optional[Tuple],
+                    n: int) -> Dict:
+    """Coverage ratios for CIR support vs applied subtraction vs truth support.
+
+    A-R01 §6: correlation support, interference truth support and the actual
+    subtraction support are separate quantities; they are intersected and
+    reported as ratios instead of scoring only inside the subtracted region.
+    ``truth_span`` is an OFFLINE diagnostic input and never feeds a decision.
+    """
+    if not rs.get("reps"):
+        return {"cir_support": None}
+    lo, hi = int(rs["read_lo"]), int(rs["read_hi"])
+    span = max(1, hi - lo)
+    out = {"cir_support": [lo, hi], "cir_support_len": span,
+           "window": [0, int(n)]}
+    b = rs.get("bounds") or {}
+    if b:
+        slo, shi = int(b["sub_lo"]), int(b["sub_hi"])
+        inter = max(0, min(hi, shi) - max(lo, slo))
+        out["applied_sub_support"] = [slo, shi]
+        out["cir_overlap_sub_ratio"] = inter / span
+        out["cir_outside_sub_samples"] = span - inter
+    if truth_span is not None:
+        tlo, thi = int(truth_span[0]), int(truth_span[1])
+        inter = max(0, min(hi, thi) - max(lo, tlo))
+        out["truth_support_diagnostic"] = [tlo, thi]
+        out["cir_overlap_truth_ratio"] = inter / span
+        out["truth_overlap_cir_ratio"] = inter / max(1, thi - tlo)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Fixed operator
 # ---------------------------------------------------------------------------
 @dataclass
@@ -232,6 +452,7 @@ class Operator:
             "convention": "average",
             "sum_conversion": "H_sum = N * H_avg",
             "code_sha256": sha256_f32(self.code),
+            "support_source": "nonzero_template_indices",
         }
 
 
@@ -242,26 +463,43 @@ def sha256_f32(a: np.ndarray) -> str:
         .tobytes()).hexdigest()
 
 
+def matched_filter(iq: np.ndarray, code: np.ndarray,
+                   energy: float) -> np.ndarray:
+    """Exact sparse matched filter ``mf[k] = sum_m y[k+m] conj(code[m]) / E``.
+
+    Uses the SPARSE nonzero template indices so the read support is exactly the
+    declared one (A-R01) and the result is bit-exact under changes outside that
+    support.  Falls back to a dense FFT convolution only for a dense template.
+    """
+    y = np.asarray(iq, dtype=np.complex128)
+    c = np.asarray(code, dtype=np.complex128)
+    out_len = int(y.size) - int(c.size) + 1
+    if out_len <= 0:
+        raise ValueError("window %d shorter than code %d" % (y.size, c.size))
+    nz = np.flatnonzero(np.abs(c) > 0.0)
+    if nz.size * 8 < int(c.size):     # sparse: exact, reads only nz indices
+        acc = np.zeros(out_len, dtype=np.complex128)
+        for m in nz:
+            acc += np.conj(c[m]) * y[m:m + out_len]
+        return acc / float(energy)
+    from scipy.signal import fftconvolve
+    return fftconvolve(y, np.conj(c[::-1]), mode="valid") / float(energy)
+
+
 def fixed_operator_cir(iq: np.ndarray, op: Operator) -> np.ndarray:
     """Per-repetition complex CIR ``H[r, t]`` for one input window.
 
-    Returns ``float64``-indexed ``H`` of shape ``(sync_reps, ntaps)`` as
-    ``complex128``.  Samples outside the correlation range come back as
-    ``NaN`` (never silently zero-padded).
+    Returns ``complex128`` of shape ``(sync_reps, ntaps)``.  Samples outside the
+    correlation range come back as ``NaN`` (never silently zero-padded).
     """
     y = np.asarray(iq, dtype=np.complex128)
     n = int(y.size)
     code = np.asarray(op.code, dtype=np.complex128)
-    ncode = int(code.size)
-    if n < ncode:
-        raise ValueError("window %d shorter than code %d" % (n, ncode))
-    from scipy.signal import fftconvolve
-    # mf[k] = sum_m y[k+m] * conj(code[m]) for k in [0, n-ncode]
-    mf = fftconvolve(y, np.conj(code[::-1]), mode="valid") / float(op.energy)
+    mf = matched_filter(y, code, op.energy)
     H = np.full((int(op.sync_reps), op.ntaps), np.nan, dtype=np.complex128)
     idx = (int(op.origin) + np.arange(int(op.sync_reps))[:, None] * int(op.sps)
            + op.taps()[None, :])
-    valid = (idx >= 0) & (idx <= n - ncode)
+    valid = (idx >= 0) & (idx <= mf.size - 1)
     H[valid] = mf[idx[valid]]
     return H
 
@@ -285,8 +523,12 @@ def rotate_by_cfo(H: np.ndarray, cfo_hz: float, *, sps: int = SPS,
 # Accumulation and residual metrics
 # ---------------------------------------------------------------------------
 def rep_indices(full: bool, n: int) -> np.ndarray:
-    """Repetition indices of a set: ``[0,N)`` or ``[INDEP_START, INDEP_START+N)``."""
-    start = 0 if full else int(INDEP_START)
+    """Legacy helper: ``[0,N)`` (full) or ``[8,8+N)`` (old independent label).
+
+    Kept for the golden/replay helpers and the legacy diagnostic; the
+    support-disjoint path uses ``derive_rep_set`` instead.
+    """
+    start = 0 if full else int(LEGACY_INDEP_START)
     return np.arange(start, start + int(n), dtype=np.int64)
 
 
@@ -337,24 +579,33 @@ def nmse(H_x: np.ndarray, H_clean: np.ndarray,
     return float(d / c)
 
 
-def residual_table(H_clean: np.ndarray, H_raw: np.ndarray, H_sic: np.ndarray,
-                   op: Operator) -> Dict:
-    """Per-N accumulation metrics on both repetition sets.
-
-    Returns a JSON-ready dict::
-
-        {"full":   {"1": {...}, "2": {...}, ...},
-         "indep":  {...},
-         "positions": {"tap_grid": [lo,hi], "roi_target": [...], ...}}
-    """
-    grid_lo, grid_hi = 0, op.ntaps
-    rois = {
-        "full": (grid_lo, grid_hi),
+def _roi_map(op: "Operator") -> Dict[str, Tuple[int, int]]:
+    return {
+        "full": (0, int(op.ntaps)),
         "target": (int(TARGET_LO - op.tap_lo), int(TARGET_HI - op.tap_lo)),
         "background": (int(BG_LO - op.tap_lo), int(BG_HI - op.tap_lo)),
         "direct": (int(DIRECT_LO - op.tap_lo), int(DIRECT_HI - op.tap_lo)),
     }
-    out: Dict = {"full": {}, "indep": {}, "rois": rois,
+
+
+def residual_table(H_clean: np.ndarray, H_raw: np.ndarray, H_sic: np.ndarray,
+                   op: Operator, sets: Optional[Dict[str, Dict]] = None,
+                   roi_reps: Optional[Dict[str, Sequence[int]]] = None) -> Dict:
+    """Per-N accumulation metrics for each repetition set and each ROI.
+
+    ``sets`` maps a set name to a ``derive_rep_set``/``legacy_nominal_index_set``
+    /``full_preamble_set`` dict.  Default (compat): full preamble + the legacy
+    ``[8,8+N)`` diagnostic.
+
+    ``roi_reps`` (appendix only) supplies a per-ROI repetition list; when a ROI
+    list is shorter than N the entry is computed with the shorter prefix and
+    flagged ``roi_shortened`` (no empty padding).
+    """
+    rois = _roi_map(op)
+    if sets is None:
+        sets = {"full": full_preamble_set(op),
+                "indep": legacy_nominal_index_set(op)}
+    out: Dict = {"sets": {}, "rois": rois,
                  "tap_domain": {"tap_lo": int(op.tap_lo),
                                 "tap_hi": int(op.tap_hi),
                                 "origin": int(op.origin),
@@ -363,15 +614,50 @@ def residual_table(H_clean: np.ndarray, H_raw: np.ndarray, H_sic: np.ndarray,
                                 "roi_target_tap": int(TARGET_OFFSET),
                                 "roi_background_offsets": [int(BG_LO),
                                                            int(BG_HI)],
-                                "receiver_tap_offset": RX_TAP_OFFSET}}
-    for set_name, n_list in (("full", FULL_N), ("indep", INDEP_N)):
-        for n in n_list:
-            idx = rep_indices(set_name == "full", n)
-            hc = accumulate(H_clean, idx)
-            hr = accumulate(H_raw, idx)
-            hs = accumulate(H_sic, idx)
-            rec: Dict = {"N": int(n), "start": int(idx[0]), "stop": int(idx[-1]) + 1}
+                                "receiver_tap_offset": RX_TAP_OFFSET,
+                                "schema_version": SCHEMA_VERSION}}
+    for set_name, rs in sets.items():
+        reps = np.asarray(rs["reps"], dtype=np.int64)
+        out["sets"][set_name] = {
+            "kind": rs.get("kind"), "first": rs.get("first"),
+            "last": rs.get("last"), "available": rs.get("available"),
+            "n_list": list(rs.get("n_list") or []),
+            "n_nominal": list(rs.get("n_nominal") or []),
+            "n_shortened": rs.get("n_shortened"),
+            "strict_holdout": rs.get("strict_holdout"),
+            "read_lo": rs.get("read_lo"), "read_hi": rs.get("read_hi"),
+            "support_source": rs.get("support_source"),
+            "bounds": rs.get("bounds"),
+            "nz_support": rs.get("nz_support"),
+            "excluded": rs.get("excluded"),
+            "dropped_noncontiguous": rs.get("dropped_noncontiguous"),
+        }
+        if reps.size == 0:
+            out[set_name] = {}
+            continue
+        e1: Dict[str, float] = {}
+        for n in (rs.get("n_list") or []):
+            n = int(n)
+            rec: Dict = {"N": n, "start": int(reps[0]),
+                         "stop": int(reps[min(n, reps.size) - 1]) + 1,
+                         "n_actual": int(min(n, reps.size))}
             for rname, (lo, hi) in rois.items():
+                if roi_reps is not None and rname in roi_reps:
+                    rreps = np.asarray(roi_reps[rname], dtype=np.int64)
+                    avail = min(n, rreps.size)
+                    shortened = avail < n
+                    idx = rreps[:avail] if avail > 0 else rreps[:0]
+                else:
+                    avail = min(n, reps.size)
+                    shortened = False
+                    idx = reps[:avail]
+                if idx.size == 0:
+                    rec.setdefault("c_cir_db", {})[rname] = None
+                    rec.setdefault("c_cir_flag", {})[rname] = "na"
+                    continue
+                hc = accumulate(H_clean, idx)
+                hr = accumulate(H_raw, idx)
+                hs = accumulate(H_sic, idx)
                 e_raw = energy(hr - hc, lo, hi)
                 e_sic = energy(hs - hc, lo, hi)
                 c, flag = _ratio_db(e_raw, e_sic)
@@ -389,39 +675,44 @@ def residual_table(H_clean: np.ndarray, H_raw: np.ndarray, H_sic: np.ndarray,
                 rec.setdefault("residual_raw_flag", {})[rname] = rf
                 rec.setdefault("residual_sic_db", {})[rname] = sr
                 rec.setdefault("residual_sic_flag", {})[rname] = sf
-            # Accumulation gain vs the same set's N=1 (nested, same start) is
-            # filled in the second pass below (needs the N=1 entry).
-            out[set_name][str(n)] = rec
-        # second pass for the accumulation gain (needs the N=1 entry)
-        e1r = out[set_name]["1"]["e_raw"]["full"]
-        e1s = out[set_name]["1"]["e_sic"]["full"]
-        for n in n_list:
-            rec = out[set_name][str(n)]
-            gr, fr = _ratio_db(e1r, rec["e_raw"]["full"])
-            gs, fs = _ratio_db(e1s, rec["e_sic"]["full"])
+                rec.setdefault("roi_shortened", {})[rname] = bool(shortened)
+            if n == 1:
+                e1["raw"] = rec["e_raw"]["full"]
+                e1["sic"] = rec["e_sic"]["full"]
+            gr, fr = _ratio_db(e1.get("raw", 0.0), rec["e_raw"]["full"])
+            gs, fs = _ratio_db(e1.get("sic", 0.0), rec["e_sic"]["full"])
             rec["g_raw_db"] = gr
             rec["g_raw_flag"] = fr
             rec["g_sic_db"] = gs
             rec["g_sic_flag"] = fs
-            # accumulation gain is NOT an SIC gain; recorded explicitly.
             rec["g_is_sic_gain"] = False
-            rec["sum_conversion"] = int(n)
+            rec["sum_conversion"] = int(rec["n_actual"])
+            out.setdefault(set_name, {})[str(n)] = rec
     return out
 
 
 # ---------------------------------------------------------------------------
-# Coherence of the per-symbol residual
+# A-R02: coherence with same-dimension energy decomposition
 # ---------------------------------------------------------------------------
 def coherence_stats(E: np.ndarray, op: Operator,
                     roi="target") -> Dict:
     """Single-window coherence of a per-symbol residual tensor ``E[r, tap]``.
 
-    * ``eta = ||sum_r E_r||^2 / (N sum_r ||E_r||^2)`` (1 for perfectly coherent,
-      ~1/N for an i.i.d. zero-mean ensemble, N/A on zero energy),
-    * uncentered and centered lag correlations (a finite-sample de-mean removes
-      the coherent part, so both are reported),
-    * mean vs random energy split, and the dominant-tap phase trajectory /
-      linear phase slope (the CFO-ramp indicator).
+    Same-dimension decomposition (A-R02)::
+
+        mu = (1/N) sum_r E_r
+        E_coherent = N * ||mu||^2
+        E_centered = sum_r ||E_r - mu||^2
+        E_total    = E_coherent + E_centered     (== sum_r ||E_r||^2)
+        coherent_fraction = E_coherent / E_total = eta
+
+    ``mu`` is the mean, so ``||mu||^2`` is a per-symbol-average energy and is
+    NOT additive with ``E_centered``; it is kept as ``mu_energy`` (and, for
+    schema compatibility, as ``mean_energy``) with that unit note.  The old
+    ``mean_fraction = ||mu||^2 / E_total`` was dimensionally wrong (it mixed a
+    single-symbol average with the N-symbol total) and is now ``None`` with a
+    ``superseded`` note.  ``E_centered`` is deterministic-structure energy, not
+    proven random noise: a phase ramp lands there too.
     """
     E = np.asarray(E, dtype=np.complex128)
     if isinstance(roi, str):
@@ -431,35 +722,44 @@ def coherence_stats(E: np.ndarray, op: Operator,
     lo, hi = int(roi[0] - op.tap_lo), int(roi[1] - op.tap_lo)
     seg = E[:, lo:hi]
     N = int(seg.shape[0])
-    total = float(np.sum(np.abs(seg) ** 2))
-    if total <= 0.0:
-        return {"N": N, "roi": list(roi), "energy": 0.0, "eta": None,
-                "eta_flag": "na", "lag": {}, "centered_lag": {},
-                "mean_energy": 0.0, "random_energy": 0.0,
-                "mean_fraction": None, "phase_slope_rad_per_symbol": None,
-                "phase_slope_hz": None, "dominant_tap": None}
-    s = seg.sum(axis=0)
-    eta = float(np.sum(np.abs(s) ** 2) / (N * total))
-    mean = seg.mean(axis=0)
-    mean_e = float(np.sum(np.abs(mean) ** 2))
-    rand = seg - mean
-    rand_e = float(np.sum(np.abs(rand) ** 2))
-    lags: Dict[str, Optional[float]] = {}
-    clags: Dict[str, Optional[float]] = {}
-    for lag in range(1, min(N - 1, 8) + 1):
-        a = seg[lag:]
-        b = seg[:-lag]
+    raw_total = float(np.sum(np.abs(seg) ** 2))
+    if raw_total <= 0.0:
+        return {"N": N, "roi": list(roi), "energy": 0.0, "e_total": 0.0,
+                "e_coherent": 0.0, "e_centered": 0.0, "eta": None,
+                "coherent_fraction": None, "eta_flag": "na",
+                "mu_energy": 0.0, "mean_energy": 0.0,
+                "mean_energy_note": "||mu||^2, per-symbol-average energy; not "
+                                    "additive with e_centered",
+                "mean_fraction": None,
+                "mean_fraction_superseded": "superseded: schema1 "
+                                            "mean_fraction was ||mu||^2/"
+                                            "E_total (dimensionally wrong); "
+                                            "use coherent_fraction",
+                "lag": {}, "centered_lag": {},
+                "phase_slope_rad_per_symbol": None,
+                "phase_slope_hz": None, "dominant_tap": None,
+                "energy_conservation_rel": None}
+    mu = seg.mean(axis=0)
+    mu_energy = float(np.sum(np.abs(mu) ** 2))
+    e_coherent = float(N * mu_energy)
+    e_centered = float(np.sum(np.abs(seg - mu) ** 2))
+    e_total = e_coherent + e_centered
+    eta = e_coherent / e_total if e_total > 0 else None
+    lag: Dict[str, Optional[float]] = {}
+    clag: Dict[str, Optional[float]] = {}
+    for lg in range(1, min(N - 1, 8) + 1):
+        a = seg[lg:]
+        b = seg[:-lg]
         num = np.vdot(a, b)
         den = math.sqrt(float(np.sum(np.abs(a) ** 2))
                         * float(np.sum(np.abs(b) ** 2)))
-        lags[str(lag)] = None if den <= 0 else float(abs(num) / den)
+        lag[str(lg)] = None if den <= 0 else float(abs(num) / den)
         ac = a - a.mean(axis=0)
         bc = b - b.mean(axis=0)
         numc = np.vdot(ac, bc)
         denc = math.sqrt(float(np.sum(np.abs(ac) ** 2))
                          * float(np.sum(np.abs(bc) ** 2)))
-        clags[str(lag)] = None if denc <= 0 else float(abs(numc) / denc)
-    # Dominant-tap phase trajectory.
+        clag[str(lg)] = None if denc <= 0 else float(abs(numc) / denc)
     mag = np.abs(seg).mean(axis=0)
     dt = int(np.argmax(mag))
     phase = np.unwrap(np.angle(seg[:, dt]))
@@ -467,13 +767,22 @@ def coherence_stats(E: np.ndarray, op: Operator,
         if N >= 2 else 0.0
     slope_hz = slope / (2.0 * math.pi * (SPS / WORK_HZ))
     return {
-        "N": N, "roi": list(roi), "energy": total, "eta": eta,
+        "N": N, "roi": list(roi), "energy": raw_total, "e_total": e_total,
+        "e_coherent": e_coherent, "e_centered": e_centered,
+        "eta": float(eta) if eta is not None else None,
+        "coherent_fraction": float(eta) if eta is not None else None,
         "eta_flag": "numeric", "eta_random_reference": 1.0 / N,
-        "lag": lags, "centered_lag": clags,
-        "mean_energy": mean_e, "random_energy": rand_e,
-        "mean_fraction": mean_e / total if total > 0 else None,
-        "phase_slope_rad_per_symbol": slope,
-        "phase_slope_hz": slope_hz,
+        "mu_energy": mu_energy, "mean_energy": mu_energy,
+        "mean_energy_note": "||mu||^2, per-symbol-average energy; not additive "
+                            "with e_centered",
+        "mean_fraction": None,
+        "mean_fraction_superseded": "superseded: schema1 mean_fraction was "
+                                    "||mu||^2/E_total (dimensionally wrong); "
+                                    "use coherent_fraction",
+        "energy_conservation_rel": (abs(e_total - raw_total) / raw_total
+                                    if raw_total > 0 else None),
+        "lag": lag, "centered_lag": clag,
+        "phase_slope_rad_per_symbol": slope, "phase_slope_hz": slope_hz,
         "dominant_tap": int(dt + lo + op.tap_lo),
     }
 
@@ -579,17 +888,6 @@ def bootstrap_ci(values: Sequence[float], *, n_boot: int = 2000,
             "n_boot": int(n_boot), "grouped": grouped is not None}
 
 
-def to_csv_rows(records: Sequence[Dict], columns: Sequence[str]) -> str:
-    import csv
-    import io
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(columns)
-    for r in records:
-        w.writerow([_csv_cell(r.get(c)) for c in columns])
-    return buf.getvalue()
-
-
 def _csv_cell(v):
     if v is None:
         return "na"
@@ -607,7 +905,7 @@ csv_cell = _csv_cell
 
 
 # ---------------------------------------------------------------------------
-# QA self-test (S2-A instruction section 5, cases 1-6)
+# QA self-test (S2-A instruction section 5, cases 1-6 + A-R01/A-R02 cases)
 # ---------------------------------------------------------------------------
 def _qa_operator(**kw) -> Operator:
     chips = np.zeros(PREAMBLE_CODE_LEN, dtype=np.int8)
@@ -634,7 +932,7 @@ def _synthetic_H(N=64, ntaps=64, seed=1, kind="independent"):
 
 
 def self_test(verbose: bool = True) -> int:
-    """Run the six S2-A fixed-operator QA cases; return the failure count."""
+    """Run the fixed-operator QA cases; return the failure count."""
     fails: List[str] = []
 
     def check(name, cond, detail=""):
@@ -731,7 +1029,7 @@ def self_test(verbose: bool = True) -> int:
     check("qa6 sum vs average conversion H_sum = N*H_avg",
           np.allclose(hsum, 4 * accumulate(d1, rep_indices(True, 4)),
                       atol=1e-12))
-    check("qa6 full and independent set boundaries",
+    check("qa6 full and legacy-index set boundaries",
           list(rep_indices(True, 8)) == list(range(8))
           and list(rep_indices(False, 8)) == list(range(8, 16)))
     # paired same-operator check with a known residual scale ratio (x2 -> 6.02 dB)
@@ -745,19 +1043,137 @@ def self_test(verbose: bool = True) -> int:
     check("qa6 residual vs clean NMSE matches by hand",
           abs(rec["nmse_raw"]["full"]
               - energy(dd[:8].mean(axis=0)) / energy(hclean[:8].mean(axis=0)))
-          < 1e-12,
-          "%.6g" % rec["nmse_raw"]["full"])
+          < 1e-12, "%.6g" % rec["nmse_raw"]["full"])
+
+    # --- 7. A-R01: support-disjoint set derivation --------------------------
+    nz = code_support(op.code)
+    check("ar01 template support is the nonzero code indices",
+          nz["nz_count"] == int(np.count_nonzero(op.code))
+          and nz["nz_min"] == 0 and nz["nz_max"] == int(
+              np.flatnonzero(np.abs(op.code) > 0)[-1]))
+    # operator on the real geometry: origin 1997, visible_end 10126, sub 67022
+    op_real = Operator(origin=PRE_GUARD_REF,
+                       code=sampled_code_from_chips(_qa_chips()),
+                       energy=64.0)
+    rs = derive_rep_set(op_real, visible_end=10126, sub_lo=1997, sub_hi=67022,
+                        n=157376, tap_lo=TAP_LO, tap_hi=TAP_HI,
+                        name="sd", kind="support_disjoint")
+    check("ar01 support-disjoint set = [9,62] (54 reps) on the real geometry",
+          rs["first"] == 9 and rs["last"] == 62 and rs["available"] == 54,
+          "[%d,%d] n=%d" % (rs["first"], rs["last"], rs["available"]))
+    check("ar01 honest N list shortens 56 -> 54",
+          rs["n_list"] == [1, 2, 4, 8, 16, 32, 54]
+          and rs["n_shortened"] is True, str(rs["n_list"]))
+    check("ar01 excluded r=8 reads below visible_end and r=63 beyond sub_hi",
+          any(e["r"] == 8 and "reads_training_or_guard" in e["reasons"]
+              for e in rs["excluded"])
+          and any(e["r"] == 63
+                  and "outside_applied_subtraction" in e["reasons"]
+                  for e in rs["excluded"]))
+    check("ar01 legacy [8,8+56) is NOT support-disjoint",
+          legacy_nominal_index_set(op_real)["strict_holdout"] is False)
+    # per-ROI sets are supersets of the full-grid set (narrower tap span)
+    rs_t = derive_rep_set(op_real, visible_end=10126, sub_lo=1997,
+                          sub_hi=67022, n=157376, tap_lo=TARGET_LO,
+                          tap_hi=TARGET_HI, name="sd_t", kind="roi")
+    rs_d = derive_rep_set(op_real, visible_end=10126, sub_lo=1997,
+                          sub_hi=67022, n=157376, tap_lo=DIRECT_LO,
+                          tap_hi=DIRECT_HI, name="sd_d", kind="roi")
+    check("ar01 target/direct ROI sets cover the full-grid set",
+          rs_t["first"] <= rs["first"] and rs_t["last"] >= rs["last"]
+          and rs_d["first"] <= rs["first"] and rs_d["last"] >= rs["last"],
+          "t=[%d,%d] d=[%d,%d] full=[%d,%d]"
+          % (rs_t["first"], rs_t["last"], rs_d["first"], rs_d["last"],
+             rs["first"], rs["last"]))
+    # insufficient-symbol case must shorten, never pad
+    rs_short = derive_rep_set(op_real, visible_end=10126, sub_lo=1997,
+                              sub_hi=1997 + 20 * SPS, n=157376,
+                              tap_lo=TAP_LO, tap_hi=TAP_HI, name="s",
+                              kind="support_disjoint")
+    check("ar01 insufficient symbols shorten the N list (no padding)",
+          rs_short["available"] == rs_short["last"] - rs_short["first"] + 1
+          and all(n <= rs_short["available"] for n in rs_short["n_list"]),
+          str(rs_short["n_list"]))
+
+    # boundary-contamination counterexample: mutate ONLY training/guard samples
+    rng = np.random.default_rng(11)
+    n = op_real.origin + op_real.sync_reps * op_real.sps + 4000
+    y = (rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 0.1
+    y2 = y.copy()
+    vlo, vhi = op_real.origin, 10126
+    y2[vlo:vhi] += (rng.standard_normal(vhi - vlo)
+                    + 1j * rng.standard_normal(vhi - vlo)) * 1.0
+    H1 = fixed_operator_cir(y, op_real)
+    H2 = fixed_operator_cir(y2, op_real)
+    legal = np.asarray(rs["reps"])
+    diff_legal = np.max(np.abs(H1[legal] - H2[legal])) if legal.size else 0.0
+    first_illegal = rs["first"] - 1
+    diff_illegal = float(np.max(np.abs(H1[first_illegal]
+                                       - H2[first_illegal])))
+    check("ar01 training/guard mutation leaves every support-disjoint row "
+          "bit-identical", diff_legal == 0.0, "max|dH|=%.3g" % diff_legal)
+    check("ar01 the old r=8 label DOES read training/guard samples",
+          diff_illegal > 0.0, "max|dH|=%.3g" % diff_illegal)
+    # negative tap / max positive tap / window clipping
+    lo_r = read_support(op_real, rs["first"], TAP_LO, TAP_HI)
+    hi_r = read_support(op_real, rs["last"], TAP_LO, TAP_HI)
+    check("ar01 read support is half-open and ordered",
+          lo_r[0] == rs["read_lo"] and hi_r[1] == rs["read_hi"]
+          and lo_r[1] > lo_r[0] and hi_r[1] > lo_r[0])
+    rs_clip = derive_rep_set(op_real, visible_end=10126, sub_lo=1997,
+                             sub_hi=67022, n=rs["read_hi"], tap_lo=TAP_LO,
+                             tap_hi=TAP_HI, name="c", kind="support_disjoint")
+    check("ar01 window clipping only removes reps, never invents them",
+          rs_clip["available"] <= rs["available"]
+          and rs_clip["last"] <= rs["last"])
+
+    # --- 8. A-R02: same-dimension energy decomposition ----------------------
+    const = np.ones((64, 4), dtype=np.complex128)
+    c1 = coherence_stats(const, op, roi="all")
+    check("ar02 coherent_fraction == 1 for 64 identical residuals",
+          abs(c1["coherent_fraction"] - 1.0) < 1e-12
+          and c1["e_centered"] < 1e-24,
+          "%.12f" % c1["coherent_fraction"])
+    check("ar02 e_coherent = N * ||mu||^2 (not ||mu||^2)",
+          abs(c1["e_coherent"] - 64 * c1["mu_energy"]) < 1e-12,
+          "%.6g vs %.6g" % (c1["e_coherent"], c1["mu_energy"]))
+    check("ar02 energy conservation e_total == sum||E||^2",
+          abs(c1["e_total"] - c1["energy"]) <= 1e-9 * c1["energy"],
+          "%.3g" % c1["energy_conservation_rel"])
+    check("ar02 old mean_fraction is retired but its supersession is recorded",
+          c1["mean_fraction"] is None
+          and "superseded" in str(c1["mean_fraction_superseded"]))
+    zero_mean = _synthetic_H(64, 4, seed=21)
+    c2 = coherence_stats(zero_mean, op, roi=("all"))
+    check("ar02 independent residual: coherent_fraction ~ 1/N",
+          c2["coherent_fraction"] < 6.0 / 64,
+          "%.4f" % c2["coherent_fraction"])
+    ramp = np.exp(1j * 0.4 * np.arange(64))[:, None] * np.ones((1, 4))
+    c3 = coherence_stats(ramp, op, roi="all")
+    check("ar02 phase ramp: conservation holds while eta is low",
+          abs(c3["e_total"] - c3["energy"]) <= 1e-9 * c3["energy"]
+          and c3["coherent_fraction"] < 0.05
+          and c3["e_centered"] > 0.9 * c3["e_total"],
+          "eta=%.4f" % c3["coherent_fraction"])
 
     if verbose:
         print("self-test: %d case(s) failed" % len(fails))
     return len(fails)
 
 
+def _qa_chips() -> np.ndarray:
+    """Public HRP code 9 chips (as recovered from the simulator modulator)."""
+    s = ("+..+...-.--..--+.+.+..-+-++.+....++-...+..-..--.-+.+.--.-+++.++...+-"
+         ".+..-.++-.+++..-+..+.+.-.++-+--+......+.....-+....-.-...--+")
+    return np.array([1 if c == "+" else (-1 if c == "-" else 0) for c in s],
+                    dtype=np.int8)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     import argparse
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--self-test", action="store_true",
-                    help="run the six fixed-operator QA cases")
+                    help="run the fixed-operator QA cases")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
     if args.self_test:
