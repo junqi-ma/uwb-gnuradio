@@ -1,3 +1,38 @@
+# 当前最高优先级：S2-A 整改（2026-10-18）——**已实施并交付**
+
+整改 A-R01～A-R04 已实施、测试并交付：见 **`docs/sic/S2A_整改开发报告_2026-10-18.md`**
+（逐项状态/代码位置/QA 反例/命令/产物/新旧差异/未跑项）。需求原文保留在
+`docs/sic/S2A_整改意见_2026-10-18.md`（历史依据，已被整改报告取代）。
+原报告 **`docs/sic/S2A_累加后CIR开发报告.md`** 顶部已加 superseded 提示；
+原始 run/图保留不变，整改结果在新 run 目录（`gr-uwb/build-sic-accum/results/s2a/*_rectification`）。
+共享 SIC 核心/adapter 与旧 QA 门槛未修改；两 worktree 隔离继续有效。
+二次复核（`docs/sic/S2A_二次复核补充意见_2026-10-18.md`，A-N01/A-N02）已整改：
+“负 C_CIR 是尾部假象”的因果断言已撤回（等 N 等起点受控复算仍为 −1.057 dB，§8.1）；
+S6 更名为“真值参数重构失配参考”，补有界搜索对照并收窄表述（§8.2）。
+A-N02 二轮复核发现的 **bounded search 相位参考 bug 已修复**（归档 `model_phase_reference`
+未保留 → 现经 `effective_gains` 正确转到 `pref=0`，并对每个归档窗做
+重建==`ihat`/online==`sic` 的 fail-closed 基线校验，24/24 通过）；
+修正后 `isr0_cfo+50k_single` 固定 4 窗 online=−31.4922 dB、best=−44.0975 dB、
+配对改善中位数=−12.6053 dB（与复核一致）。CFO=0 改为“本次有限网格与训练区 LS
+条件下未找到明显改善”，不称局部最优、不扩张到未搜索条件、不声称网格边界限制。
+当前无未启动项；下一步若继续研究，仍需按共同约定先写设计/QA 再实现。
+
+## 继承的 S2-A 初版任务
+
+本 worktree 从 `93c80b3` 创建；当前仅执行 S2-A，不继续旧 S1 收尾或 TWR。
+必须先完整阅读：
+1. `docs/sic/S2_并行开发共同约定.md`
+2. `docs/sic/OpenCode开发指示_S2A_累加后CIR评价.md`
+3. 根目录 `UWB_Preamble_SIC_GNU_Radio_Design.md`、S1 模型 API 与开发报告（理解基线）。
+
+当前指示优先于下方继承的“当前任务”描述；下方通用开发/安全规范仍有效。
+SIC 共享核心先冻结；只修改本 worktree，不修改父仓库和另一 session 工作目录。
+本地 `UWB_demodulation` 为共享 MATLAB 资料软链接，**只读，禁止写入**。
+独立 build/results 路径、资源互斥、验收矩阵、交付文件以以上两份 S2 指示为准。
+任务开始先补设计与针对性 QA；计划与真实运行结果分开。未达效果/未运行项目如实列明。
+
+---
+
 # UWB GNU Radio Project
 
 ## 当前分支：SIC 论文研究（优先执行，2026-10-16）

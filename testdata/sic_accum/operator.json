@@ -1,0 +1,207 @@
+{
+  "schema_version": 2,
+  "frozen": true,
+  "task": "S2-A",
+  "purpose": "Frozen fixed-operator and evaluation contract for accumulation-after-SIC sensing CIR evaluation. Everything here is frozen on the calibration seed set BEFORE the acceptance seed set is run. Changing a value after acceptance has been touched requires a new run directory and an explicit note in the development report.",
+  "operator": {
+    "name": "code9_sampled_code_average",
+    "sensing_code": 9,
+    "comm_code": 10,
+    "sync_reps": 64,
+    "sps": 1016,
+    "sample_rate_hz": 998400000.0,
+    "sfd_mode": "4z2",
+    "origin": 1997,
+    "origin_source": "work_fullwin_geometry(pre_us=2.0).pre_guard; public local plan, never the injected comm start",
+    "tap_lo": -32,
+    "tap_hi": 128,
+    "correlation": "H[r,t] = sum_m y[origin + r*sps + t + m] * conj(code[m]) / code_energy",
+    "correlation_direction": "matched filter with the conjugated bare code (identical to MATLAB estimateCir / the C++ radar CIR estimate_radar_cir)",
+    "template": "code-9 sampled_code recovered from the public modulator (127 ternary chips -> spread x4 -> 2 samples/pulse); NOT the shaped waveform",
+    "normalization": "fixed 1/code_energy (code_energy = 64); no per-window L2 / peak / per-branch normalization",
+    "phase_rotation": "identity (the same for all three branches); no per-symbol or per-branch derotation",
+    "convention": "average: H_N = (1/N) sum_r H[r]; sum counterpart is H_sum = N * H_avg",
+    "linearity": "H_x is a linear functional of y_x; the three branches share origin, template, tap grid, gain and symbol set",
+    "code_len_chips": 127,
+    "chip_stride": 8,
+    "spread_factor": 4,
+    "samples_per_pulse": 2,
+    "support_source": "nonzero_template_indices",
+    "support_note": "the matched filter multiplies by conj(code[m]); only the 64 nonzero template indices are read, so the exact read support of repetition r over taps [tap_lo,tap_hi) is [origin+r*sps+tap_lo+nz_min, origin+r*sps+tap_hi-1+nz_max] (inclusive)",
+    "correlation_support": {
+      "nz_min": 0,
+      "nz_max": 1008,
+      "nz_count": 64,
+      "conservative_len": 1016
+    }
+  },
+  "roi": {
+    "target_offsets": [
+      35,
+      44
+    ],
+    "target_tap_offset": 39,
+    "background_offsets": [
+      64,
+      100
+    ],
+    "direct_offsets": [
+      -8,
+      8
+    ],
+    "mapping_note": "weak sensing path = delay 37 work samples, gain 0.25, on top of the delay-0 unit path (public local sensing profile). The public causal pulse shape has centre tap +2, so the direct peak lands on offset 2 and the weak-target peak on offset 39; the R04 receiver ROI [51,60) / tap 55 is exactly this ROI / peak shifted by cir_pre=16 (receiver_tap = fixed_offset + 16). The ROI is re-verified on calibration-only seeds at run start and never re-searched on SIC results.",
+    "receiver_target_roi": [
+      51,
+      60
+    ],
+    "receiver_target_tap": 55,
+    "receiver_background_taps": [
+      80,
+      116
+    ],
+    "receiver_tap_offset": 16,
+    "roi_freeze_seeds": [
+      11020000,
+      11020001,
+      11020002,
+      11020003,
+      11020004
+    ]
+  },
+  "repetition_sets": {
+    "full_N": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32,
+      64
+    ],
+    "full_start": 0,
+    "indep_policy": "support_disjoint",
+    "indep_nominal_N": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32,
+      56
+    ],
+    "indep_strict_holdout": true,
+    "indep_legality": [
+      "origin + r*sps + tap_lo + nz_min >= visible_end",
+      "origin + r*sps + tap_hi - 1 + nz_max <= sub_hi - 1",
+      "0 <= read_lo and read_hi <= n"
+    ],
+    "indep_n_shortening": "the reported N list is a prefix of indep_nominal_N plus the actual available count when it is shorter than 56; no padding, no silent relabelling",
+    "legacy_indep_start": 8,
+    "legacy_indep_note": "the old [8,8+N) label reads training/guard samples (r=8 reads from 10093 < visible_end) and, at the far end, un-subtracted tail samples (r=63 reads up to 67140 > sub_hi-1). It is kept ONLY as legacy_nominal_index_diagnostic and never used as the main result.",
+    "shared_sample_set_note": "the main table uses one common safe set covering the full tap grid for all ROIs; per-ROI support sets are an appendix because they use different sample sets"
+  },
+  "sic": {
+    "model_mode": "estimate8_frozen",
+    "support_mode": "configured_nominal",
+    "fit_reps": 8,
+    "validation_reps": 8,
+    "online_validation_reps": 0,
+    "k_paths": 4,
+    "coarse_stride": 14,
+    "detect_threshold": 0.4,
+    "validate_threshold": 0.25,
+    "post_tail": 100,
+    "fit_residual_max": 0.8,
+    "frozen": "the S1 shared core/adapter is NOT modified by S2-A"
+  },
+  "receiver_configs": [
+    {
+      "id": "rx_default",
+      "skip": 10,
+      "count": 0,
+      "note": "existing app default: 54 repetitions [10,64)"
+    },
+    {
+      "id": "rx_count8",
+      "skip": 10,
+      "count": 8,
+      "note": "receiver-side [10,18)"
+    },
+    {
+      "id": "rx_count16",
+      "skip": 10,
+      "count": 16,
+      "note": "receiver-side [10,26)"
+    },
+    {
+      "id": "rx_count32",
+      "skip": 10,
+      "count": 32,
+      "note": "receiver-side [10,42)"
+    }
+  ],
+  "evaluation": {
+    "snr_db": 30.0,
+    "thresholds": {
+      "target_amp_err_p95_db": 1.0,
+      "target_peak_shift_work_samples": 1
+    },
+    "metric_definitions": {
+      "c_cir_db": "10log10(||E_raw,N||^2 / ||E_sic,N||^2), E_x,N = H_x,N - H_clean,N",
+      "nmse": "||H_x,N - H_clean,N||^2 / ||H_clean,N||^2",
+      "g_accum_db": "10log10(P(1)/P(N)) on the nested same-start set; this is an ACCUMULATION gain, never an SIC gain",
+      "eta": "||sum_r E_r||^2 / (N sum_r ||E_r||^2) on one window; 1 = coherent, ~1/N = i.i.d. zero mean; N/A on zero energy",
+      "iq_suppression_db": "10log10(||raw-clean||^2 / ||sic-clean||^2) on the actual output IQ"
+    },
+    "zero_handling": "exact zeros are reported as +Inf / -Inf / N/A; no eps floor and no arbitrary dB clipping. *_clipped fields exist only for figures with plot_floor_db=-80 and plot_ceil_db=140.",
+    "plot_floor_db": -80.0,
+    "plot_ceil_db": 140.0
+  },
+  "seeds": {
+    "calibration": 11000000,
+    "acceptance": 12000000,
+    "stride_per_cell": 1000,
+    "rule": "seed = base + cell_index*stride + window_index; calibration and acceptance windows are disjoint by construction and re-checked at runtime and in the verifier",
+    "substreams": {
+      "noise": "np.random.default_rng(seed) - the only RNG in SicSignalGenerator.build",
+      "payload": "fixed PSDU hex (deterministic, no RNG)",
+      "path": "deterministic profile (no RNG)"
+    }
+  },
+  "archive_policy": {
+    "windows_per_cell": 8,
+    "rule": "the first 8 windows of every cell, selected by window index only (no metric-based selection); the remaining windows cannot be recomputed from the archive",
+    "arrays": [
+      "clean",
+      "raw",
+      "sic",
+      "ihat",
+      "i_truth",
+      "H_clean",
+      "H_raw",
+      "H_sic",
+      "truth_json",
+      "meta_json"
+    ]
+  },
+  "rectification": {
+    "date": "2026-10-18",
+    "items": [
+      "A-R01 support-disjoint independent region",
+      "A-R02 same-dimension coherent/centered energy decomposition"
+    ],
+    "authority": "docs/sic/S2A_\u6574\u6539\u610f\u89c1_2026-10-18.md"
+  },
+  "coherence": {
+    "schema_version": 2,
+    "decomposition": {
+      "mu": "(1/N) sum_r E_r",
+      "e_coherent": "N * ||mu||^2",
+      "e_centered": "sum_r ||E_r - mu||^2",
+      "e_total": "e_coherent + e_centered",
+      "coherent_fraction": "e_coherent/e_total"
+    },
+    "centered_note": "e_centered is deterministic-structure energy, not proven random noise: a phase ramp lands there too",
+    "retired": "schema 1 mean_fraction = ||mu||^2/e_total mixed a per-symbol-average energy with the N-symbol total; it is now null with a supersession note and coherent_fraction is authoritative"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "frozen": true,
+  "task": "S2-A",
+  "purpose": "A1 smoke cell + A2 formal acceptance cells. ISR/CFO/offset/channel axes only; SNR is fixed at 30 dB by operator.json. The four-path profile is the existing testdata/sic_preamble/cases/main.json profile, reused verbatim (no redefinition).",
+  "snr_db": 30.0,
+  "smoke_cell": "isr10_cfo0_single",
+  "comm_paths": {
+    "single": [[0, [1.0, 0.0]]],
+    "four": [[0, [1.0, 0.0]], [7.4, [0.0, 0.5]], [23, [0.276, -0.116]], [51.2, [0.2, 0.0]]]
+  },
+  "cells": [
+    {"id": "isr0_cfo0_single",        "isr_db": 0,  "cfo_hz": 0,      "comm_paths": "single", "start_offset_work": 0.0, "axis": "isr_x_cfo"},
+    {"id": "isr0_cfo-50k_single",     "isr_db": 0,  "cfo_hz": -50000, "comm_paths": "single", "start_offset_work": 0.0, "axis": "isr_x_cfo"},
+    {"id": "isr0_cfo+50k_single",     "isr_db": 0,  "cfo_hz": 50000,  "comm_paths": "single", "start_offset_work": 0.0, "axis": "isr_x_cfo"},
+    {"id": "isr10_cfo0_single",       "isr_db": 10, "cfo_hz": 0,      "comm_paths": "single", "start_offset_work": 0.0, "axis": "isr_x_cfo"},
+    {"id": "isr10_cfo-50k_single",    "isr_db": 10, "cfo_hz": -50000, "comm_paths": "single", "start_offset_work": 0.0, "axis": "isr_x_cfo"},
+    {"id": "isr10_cfo+50k_single",    "isr_db": 10, "cfo_hz": 50000,  "comm_paths": "single", "start_offset_work": 0.0, "axis": "isr_x_cfo"},
+    {"id": "isr20_cfo0_single",       "isr_db": 20, "cfo_hz": 0,      "comm_paths": "single", "start_offset_work": 0.0, "axis": "isr_x_cfo"},
+    {"id": "isr20_cfo-50k_single",    "isr_db": 20, "cfo_hz": -50000, "comm_paths": "single", "start_offset_work": 0.0, "axis": "isr_x_cfo"},
+    {"id": "isr20_cfo+50k_single",    "isr_db": 20, "cfo_hz": 50000,  "comm_paths": "single", "start_offset_work": 0.0, "axis": "isr_x_cfo"},
+    {"id": "isr0_cfo+50k_four",       "isr_db": 0,  "cfo_hz": 50000,  "comm_paths": "four",   "start_offset_work": 0.0, "axis": "extra"},
+    {"id": "isr10_cfo0_four",         "isr_db": 10, "cfo_hz": 0,      "comm_paths": "four",   "start_offset_work": 0.0, "axis": "extra"},
+    {"id": "isr10_cfo0_off0.4_single","isr_db": 10, "cfo_hz": 0,      "comm_paths": "single", "start_offset_work": 0.4, "axis": "extra"}
+  ],
+  "bypass_cell": {
+    "id": "no_interference",
+    "note": "A3: comm_present=false, 1000 windows; the SIC must bypass with out == y byte-for-byte and the weak target must be untouched"
+  }
+}
