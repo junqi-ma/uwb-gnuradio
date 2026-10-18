@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "S2-B payload-collision configuration / case schema",
+  "description": "Field/type/domain contract for the generator (truth side), the runtime (online side) and the metrics. Mirrors docs/sic/S2B_设计与测试契约.md.",
+  "definitions": {
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["comm_code", "sensing_code", "sync_reps", "sfd_mode", "psdu_bytes", "position"],
+      "properties": {
+        "comm_code": {"type": "integer", "enum": [9, 10, 11, 12], "description": "desired packet preamble code (main = 10)"},
+        "sensing_code": {"type": "integer", "enum": [9, 10, 11, 12], "description": "interferer preamble code (main = 9)"},
+        "sync_reps": {"type": "integer", "enum": [16, 64, 1024, 4096]},
+        "sfd_mode": {"type": "string", "enum": ["4z1", "4z2", "4z3", "4z4", "ieee", "decawave"]},
+        "psdu_bytes": {"type": "integer", "minimum": 4, "maximum": 127, "description": "wire PSDU bytes incl. 2-byte FCS; main = 96"},
+        "pulse_shape": {"type": "string", "enum": ["legacy", "gaussian", "blackman"], "description": "must match between modulator, generator and SIC template"},
+        "position": {"type": "string", "enum": ["early", "center", "late", "no_overlap"]},
+        "guard": {"type": "integer", "minimum": 0, "description": "public guard around the interferer inside the payload"},
+        "start_jitter": {"type": "integer", "minimum": 0, "description": "public interferer start-jitter budget J (calibration-frozen)"},
+        "snr_db": {"type": ["number", "null"]},
+        "isr_db": {"type": ["number", "null"]},
+        "cfo_hz": {"type": "number", "description": "interferer CFO (comm CFO stays 0)"},
+        "interferer_present": {"type": "boolean"},
+        "wrong_code": {"type": ["integer", "null"], "description": "inject this code instead of sensing_code (negative)"}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sic", "demod_code", "coarse_stride", "detect_threshold"],
+      "properties": {
+        "sic": {"type": "string", "enum": ["off", "estimate"]},
+        "demod_code": {"type": "integer", "enum": [9, 10, 11, 12]},
+        "support_mode": {"type": "string", "enum": ["configured_nominal", "confirmed_legacy"]},
+        "fit_reps": {"type": "integer", "enum": [8, 16, 32]},
+        "online_validation_reps": {"type": "integer", "minimum": 0},
+        "k_paths": {"type": "integer", "enum": [1, 2, 4, 8, 16]},
+        "post_tail": {"type": "integer", "minimum": 0},
+        "coarse_stride": {"type": "integer", "minimum": 1, "description": "measured: 2 for the sharp code-9 detection mainlobe"},
+        "detect_threshold": {"type": "number", "minimum": 0, "maximum": 1},
+        "validate_threshold": {"type": "number", "minimum": 0, "maximum": 1},
+        "detect_roi_lo": {"type": "integer"},
+        "detect_roi_hi": {"type": "integer"},
+        "sub_roi_lo": {"type": "integer"},
+        "sub_roi_hi": {"type": "integer"},
+        "observed_end": {"type": "integer"},
+        "predicted_start_sample": {"type": "integer", "description": "public scheduled comm start; NOT the interferer position"}
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "PER_FCS": {"type": "object", "description": "denominator = planned sent packets"},
+        "PER_PSDU": {"type": "object", "description": "strict PSDU equality incl. FCS"},
+        "BER_all": {"type": "string", "description": "N/A unless the decoder exposes aligned bits"},
+        "conditional_BER": {"type": ["number", "null"]},
+        "suppression_db_overlap": {"type": ["number", "null"]},
+        "paired": {"type": "object", "properties": {"raw_fail_sic_ok": {"type": "integer"}, "raw_ok_sic_fail": {"type": "integer"}}}
+      }
+    }
+  }
+}

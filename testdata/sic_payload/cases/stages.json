@@ -1,0 +1,76 @@
+{
+  "schema": "sic-s2b-cases/2",
+  "note": "S2-B frozen configuration (rectification 2026-10-18). ONE authoritative config; the pre-rectification SNR points [12,15,18,22,30] were superseded by the calibration-frozen set and are listed only under superseded. Counts marked formal were actually run in the rectification matrix.",
+  "seed_sets": {
+    "calibration": {"base": 21000000, "substreams": {"noise": 0, "payload": 100000, "jitter": 200000, "path": 300000}},
+    "acceptance": {"base": 22000000, "substreams": {"noise": 0, "payload": 100000, "jitter": 200000, "path": 300000}},
+    "common_random_numbers": "Within one cell the clean/raw/sic paths share the SAME payload, noise, channel and sample grid (intentional CRN pairing, not independent samples). Across cells the acceptance seeds are also reused per window index; treat cells as correlated."
+  },
+  "frozen": {
+    "comm_code": 10, "sensing_code": 9, "sync_reps": 64, "sfd_mode": "4z2",
+    "psdu_bytes": 96, "pulse_shape": "legacy",
+    "sic": {"mode": "estimate", "model_mode": "estimate8_frozen", "support_mode": "configured_nominal",
+            "fit_reps": 8, "online_validation_reps": 0, "k_paths": 4, "post_tail": 100,
+            "coarse_stride": 2, "detect_threshold": 0.40, "validate_threshold": 0.25},
+    "snr_db_reference": "comm payload region [payload_lo, payload_hi)",
+    "isr_db_reference": "true overlap = i-support ∩ comm payload region",
+    "comm_cfo_hz": 0.0,
+    "interferer_cfo_axis_hz": [-50000, 50000],
+    "channel_profiles": {
+      "single_int": [[0, [1.0, 0.0]]],
+      "four_path": [[0, [1.0, 0.0]], [7.4, [0.0, 0.5]], [23, [0.276, -0.116]], [51.2, [0.2, 0.0]]],
+      "four_path_source": "testdata/sic_preamble/cases/main.json comm_paths.four_path",
+      "custom_integer_four": "diagnostic only, NOT the official profile: [[0,[1.0,0]],[37,[0.8,0]],[74,[0.64,0]],[111,[0.512,0]]]"
+    },
+    "frozen_snr_points_db": [-5.0, -3.5, 0.0, 4.0, 8.0],
+    "transition_snr_db": -3.5,
+    "transition_snr_evidence": "calibration clean scan: SNR=-5 100/100 fail, -3.5 1/100 fail, >=-3 0/100 (calibration base 21000000)"
+  },
+  "phases": {
+    "b0": {
+      "purpose": "no-interference high-SNR closure",
+      "windows": 100,
+      "cells": [{"id": "b0_clean_snr30", "interferer": "off", "position": "center", "snr_db": 30}]
+    },
+    "b1": {
+      "purpose": "nominal paired recovery",
+      "windows": 100,
+      "cells": [{"id": "b1_center_isr10_snr30", "position": "center", "isr_db": 10, "snr_db": 30, "cfo_hz": 0, "paths": "single"}]
+    },
+    "b2": {
+      "purpose": "PER waterfall",
+      "windows_per_cell": 1000,
+      "snr_points_db": [-5.0, -3.5, 0.0, 4.0, 8.0],
+      "isr_points": [0, 10, 20],
+      "position": "center", "cfo_hz": 0, "paths": "single"
+    },
+    "b3": {
+      "purpose": "boundary / difficult conditions",
+      "windows_per_cell": 500,
+      "cells": [
+        {"id": "b3_pos_early_trans", "position": "early", "snr_db": -3.5, "isr_db": 10, "cfo_hz": 0, "paths": "single"},
+        {"id": "b3_pos_late_trans", "position": "late", "snr_db": -3.5, "isr_db": 10, "cfo_hz": 0, "paths": "single"},
+        {"id": "b3_pos_early_snr30", "position": "early", "snr_db": 30, "isr_db": 10, "cfo_hz": 0, "paths": "single"},
+        {"id": "b3_pos_late_snr30", "position": "late", "snr_db": 30, "isr_db": 10, "cfo_hz": 0, "paths": "single"},
+        {"id": "b3_cfo-50000_isr0_single", "position": "center", "snr_db": 30, "isr_db": 0, "cfo_hz": -50000, "paths": "single"},
+        {"id": "b3_cfo50000_isr0_single", "position": "center", "snr_db": 30, "isr_db": 0, "cfo_hz": 50000, "paths": "single"},
+        {"id": "b3_cfo-50000_isr0_four", "position": "center", "snr_db": 30, "isr_db": 0, "cfo_hz": -50000, "paths": "four"},
+        {"id": "b3_cfo50000_isr0_four", "position": "center", "snr_db": 30, "isr_db": 0, "cfo_hz": 50000, "paths": "four"},
+        {"id": "b3_cfo-50000_isr10_single", "position": "center", "snr_db": 30, "isr_db": 10, "cfo_hz": -50000, "paths": "single"},
+        {"id": "b3_cfo50000_isr10_single", "position": "center", "snr_db": 30, "isr_db": 10, "cfo_hz": 50000, "paths": "single"},
+        {"id": "b3_cfo-50000_isr10_four", "position": "center", "snr_db": 30, "isr_db": 10, "cfo_hz": -50000, "paths": "four"},
+        {"id": "b3_cfo50000_isr10_four", "position": "center", "snr_db": 30, "isr_db": 10, "cfo_hz": 50000, "paths": "four"}
+      ]
+    },
+    "b4": {
+      "purpose": "negatives; false commit <= 1%; bypass bit-identical",
+      "windows": 1000,
+      "cells": [{"id": "no_sensing", "interferer": "off"}, {"id": "wrong_code11", "interferer": "wrong_code", "wrong_code": 11}, {"id": "no_overlap", "position": "no_overlap"}]
+    }
+  },
+  "superseded": {
+    "b2_snr_points_db_2026-10-17": [12, 15, 18, 22, 30],
+    "reason": "superseded by frozen_snr_points_db after the calibration clean scan located the waterfall between -5 and -3.5 dB",
+    "b3_2026-10-17": "only 6 cells (2 position@SNR30 + 4 CFO@ISR10); rectified to 12 cells with the official four_path profile"
+  }
+}

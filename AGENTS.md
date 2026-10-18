@@ -1,35 +1,36 @@
-# 当前最高优先级：S2-A 整改（2026-10-18）——**已实施并交付**
+# 已验收 A/B 集成基线（2026-10-18）
 
-整改 A-R01～A-R04 已实施、测试并交付：见 **`docs/sic/S2A_整改开发报告_2026-10-18.md`**
-（逐项状态/代码位置/QA 反例/命令/产物/新旧差异/未跑项）。需求原文保留在
-`docs/sic/S2A_整改意见_2026-10-18.md`（历史依据，已被整改报告取代）。
-原报告 **`docs/sic/S2A_累加后CIR开发报告.md`** 顶部已加 superseded 提示；
-原始 run/图保留不变，整改结果在新 run 目录（`gr-uwb/build-sic-accum/results/s2a/*_rectification`）。
-共享 SIC 核心/adapter 与旧 QA 门槛未修改；两 worktree 隔离继续有效。
-二次复核（`docs/sic/S2A_二次复核补充意见_2026-10-18.md`，A-N01/A-N02）已整改：
-“负 C_CIR 是尾部假象”的因果断言已撤回（等 N 等起点受控复算仍为 −1.057 dB，§8.1）；
-S6 更名为“真值参数重构失配参考”，补有界搜索对照并收窄表述（§8.2）。
-A-N02 二轮复核发现的 **bounded search 相位参考 bug 已修复**（归档 `model_phase_reference`
-未保留 → 现经 `effective_gains` 正确转到 `pref=0`，并对每个归档窗做
-重建==`ihat`/online==`sic` 的 fail-closed 基线校验，24/24 通过）；
-修正后 `isr0_cfo+50k_single` 固定 4 窗 online=−31.4922 dB、best=−44.0975 dB、
-配对改善中位数=−12.6053 dB（与复核一致）。CFO=0 改为“本次有限网格与训练区 LS
-条件下未找到明显改善”，不称局部最优、不扩张到未搜索条件、不声称网格边界限制。
-当前无未启动项；下一步若继续研究，仍需按共同约定先写设计/QA 再实现。
+本文件是 S2-A 与 S2-B 合并后的共同研究基线。下方 `---` 之后的 S0/S1/TWR
+条文是继承规范，不表示当前任务仍是单方向整改或 S1 实现。新的算法实验从集成
+tag 另开 worktree，同时保留 A 与 B 的评价；本基线本身不自动开始下一轮实验，
+也不上板。
 
-## 继承的 S2-A 初版任务
+| 方向 | 历史锚点 | 最终报告 | 评价 |
+|---|---|---|---|
+| A：累加后 sensing CIR | tag `sic-s2a-accepted-20261018`（`2c383d5`），worktree `.worktrees/sic-sensing-accum` | `docs/sic/S2A_整改开发报告_2026-10-18.md` | 12 格代表回归、旁路、A-N02 基线 |
+| B：sensing 前导干扰通信 payload | tag `sic-s2b-accepted-20261018`（`ac3849e`），worktree `.worktrees/sic-payload-collision` | `docs/sic/S2B_整改开发报告_2026-10-18.md` | 11 格 integration smoke，不是正式 32-cell 矩阵 |
 
-本 worktree 从 `93c80b3` 创建；当前仅执行 S2-A，不继续旧 S1 收尾或 TWR。
-必须先完整阅读：
-1. `docs/sic/S2_并行开发共同约定.md`
-2. `docs/sic/OpenCode开发指示_S2A_累加后CIR评价.md`
-3. 根目录 `UWB_Preamble_SIC_GNU_Radio_Design.md`、S1 模型 API 与开发报告（理解基线）。
+统一入口是根目录 `OPENCODE_START.md`。冻结与合并过程见
+`docs/sic/S2_AB冻结与合并执行指南_2026-10-18.md`、
+`docs/sic/S2_AB冻结清单_2026-10-18.md` 和
+`docs/sic/S2_AB集成验收报告_2026-10-18.md`。
+回归命令见 `docs/sic/S2_AB集成回归入口_2026-10-18.md`。
+各方向原来的 `OPENCODE_START` 内容已并入统一入口；单方向开发指示保留为历史文件。
 
-当前指示优先于下方继承的“当前任务”描述；下方通用开发/安全规范仍有效。
-SIC 共享核心先冻结；只修改本 worktree，不修改父仓库和另一 session 工作目录。
-本地 `UWB_demodulation` 为共享 MATLAB 资料软链接，**只读，禁止写入**。
-独立 build/results 路径、资源互斥、验收矩阵、交付文件以以上两份 S2 指示为准。
-任务开始先补设计与针对性 QA；计划与真实运行结果分开。未达效果/未运行项目如实列明。
+必须同时保留的结论边界：
+
+- 共享 SIC 核心、adapter、`tools/sic/sic_reference.py` 和原 core/adapter QA 门槛保持冻结。在线路径只接收混合 IQ、公开模板和公开粗 ROI。注入时延、CFO、路径和 IQ 真值只进 sidecar 与离线 verifier。
+- A 的名义 CIR 抑制约 28.4 dB，残余高度相干。困难 CFO 的约 12.61 dB 改善是离线有界诊断，不是新的在线结果，也不把 CFO=0 说成已经局部最优。
+- B 的 ISR=20 dB 恢复只适用于已测单径、零 CFO 条件。B-N01 之后，库信任根来自 verifier 所在源码根或显式 `--repo`/`--trusted-build`，不能由 manifest 自报的 `build_dir` 给自己背书。
+- MATLAB、native、FPGA/硬件和正式实时吞吐都未作为本基线的通过项。mean≤0.5 ms、P99≤1 ms、200 窗/s 仍是目标，不是已实现事实。功能回归通过不等于性能通过。
+- 正式性能数字必须独占 `/tmp/uwb-sic-benchmark.lock`。大 IQ、build 和冻结包不进入 Git。历史 run 不被新 run 覆盖。
+
+两个 build 都从本基线源码串行配置，不复制旧 CMakeCache，不软链旧 build，不安装到 `/usr/local`：
+
+- A：`gr-uwb/build-sic-accum`
+- B：`gr-uwb/build-sic-payload`
+
+本地 `UWB_demodulation` 仍是指向主仓库 MATLAB 资料的只读软链接，禁止写入。
 
 ---
 

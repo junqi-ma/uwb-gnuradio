@@ -285,6 +285,20 @@ set_tests_properties(uwb_qa_twr_m2a_native_phy_verify_py PROPERTIES
     TIMEOUT 300 RUN_SERIAL TRUE)
 
 ########################################################################
+# S2-B payload-collision targeted QA (pure checks + build-dependent clean
+# closure / SIC freeze).  Uses this build tree's uwb_python via UWB_BUILD_DIR.
+########################################################################
+add_test(NAME uwb_qa_sic_payload_py
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_sic_payload.py)
+set_property(TEST uwb_qa_sic_payload_py APPEND PROPERTY
+    ENVIRONMENT
+        "PYTHONPATH="
+        "PYTHONDONTWRITEBYTECODE=1"
+        "UWB_BUILD_DIR=${CMAKE_BINARY_DIR}")
+set_tests_properties(uwb_qa_sic_payload_py PROPERTIES
+    TIMEOUT 300 RUN_SERIAL TRUE)
+
+########################################################################
 # M2-A closeout: the A13 allocation/latency observation tool (G0 A.4).
 # An observation tool, not a timing gate; links only uwb_twr_phy.
 ########################################################################
