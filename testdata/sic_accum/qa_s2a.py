@@ -148,6 +148,10 @@ def main(argv=None):
                    [sys.executable, "tools/sic/verify_s2a.py", "--run", run,
                     "--reject-qa"])
     for bdir in (args.budget or []):
+        run_script("equal_condition_compare --verify-baseline %s"
+                   % os.path.basename(bdir.rstrip("/")),
+                   [sys.executable, "tools/sic/equal_condition_compare.py",
+                    "--budget", bdir, "--verify-baseline"])
         run_script("verify_s2a --budget %s" % os.path.basename(
             bdir.rstrip("/")),
             [sys.executable, "tools/sic/verify_s2a.py", "--budget", bdir])

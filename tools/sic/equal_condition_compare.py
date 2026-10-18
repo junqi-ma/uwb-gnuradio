@@ -233,6 +233,14 @@ def bounded_search(budget_dir: str, classes: Sequence[str], *,
         taus = [float(t) for t in prm["model_taus"]]
         gains = [complex(a, b) for a, b in prm["model_gains"]]
         cfo = float(prm["model_cfo_hz"])
+        # A-N02 fix: the archived gains are published in the frame anchored at
+        # ``model_phase_reference`` (non-zero, e.g. 1997).  Build the published
+        # model with that reference and convert the gains to the pref=0 frame
+        # with RB.effective_gains, otherwise the "online" baseline is NOT the
+        # model the adapter actually applied.
+        pref = int(prm["model_phase_reference"])
+        pub = RB.model_of(taus, gains, cfo_hz=cfo, phase_reference_sample=pref)
+        gains0 = RB.effective_gains(pub)
         sub_lo, sub_hi = int(prm["sub_lo"]), int(prm["sub_hi"])
         train = (int(rec["training_lo"]), int(rec["training_hi"]))
         op = operator_from_run(budget_dir)
@@ -253,7 +261,31 @@ def bounded_search(budget_dir: str, classes: Sequence[str], *,
             H = AM.fixed_operator_cir(out, op)
             return AM.energy(AM.accumulate(H, idx) - AM.accumulate(Hc, idx))
 
-        base = RB.model_of(taus, gains, cfo_hz=cfo, phase_reference_sample=0)
+        base = RB.model_of(taus, gains0, cfo_hz=cfo, phase_reference_sample=0)
+        # QA (A-N02): the baseline must reproduce the archived i_hat bit-for-bit
+        # up to complex64 rounding, and raw - recon must equal the archived sic
+        # inside the applied mask.  Fail closed otherwise.
+        chk_recon = None
+        chk_sic = None
+        if sub_hi > sub_lo:
+            ih_b = np.zeros(raw.size, dtype=np.complex128)
+            ih_b[sub_lo:sub_hi] = RB.core_reconstruct(
+                base, sub_lo, sub_hi - sub_lo, preamble)
+            ref = np.asarray(z["ihat"], dtype=np.complex128)[sub_lo:sub_hi]
+            den = max(1e-30, float(np.max(np.abs(ref))))
+            chk_recon = float(np.max(np.abs(ih_b[sub_lo:sub_hi] - ref))) / den
+            sic_ref = np.asarray(z["sic"], dtype=np.complex128)[sub_lo:sub_hi]
+            chk_sic = float(np.max(np.abs(
+                (raw[sub_lo:sub_hi] - ih_b[sub_lo:sub_hi]) - sic_ref))) \
+                / max(1e-30, float(np.max(np.abs(sic_ref))))
+        tol = 1e-5
+        if chk_recon is None or chk_recon > tol or chk_sic > tol:
+            raise SystemExit(
+                "baseline phase-reference check failed for %s/%d: "
+                "recon_rel=%.3g sic_rel=%.3g (must be <= %g). The archived "
+                "gains are in the model_phase_reference=%d frame."
+                % (cell, wid, chk_recon if chk_recon is not None else -1,
+                   chk_sic if chk_sic is not None else -1, tol, pref))
         e_online = resid_db(base)
         best = None
         for dc in dcfo_hz:
@@ -270,12 +302,20 @@ def bounded_search(budget_dir: str, classes: Sequence[str], *,
                 e = resid_db(mc)
                 if best is None or e < best[0]:
                     best = (e, dc, dt)
+        bnd = False
+        if best is not None:
+            bnd = (best[1] in (min(dcfo_hz), max(dcfo_hz))
+                   or best[2] in (min(dtau), max(dtau)))
         rows.append({"cell_id": cell, "window_id": wid,
+                     "model_phase_reference": pref,
+                     "model_cfo_hz": cfo,
+                     "baseline_recon_rel": chk_recon, "baseline_sic_rel": chk_sic,
                      "online_db": AM._ratio_db(e_online, e_clean)[0],
                      "best_db": AM._ratio_db(best[0], e_clean)[0] if best
                      else None,
                      "best_dcfo_hz": best[1] if best else None,
                      "best_dtau": best[2] if best else None,
+                     "best_on_grid_edge": bool(bnd),
                      "gain_vs_online_db": (AM._ratio_db(best[0], e_online)[0]
                                            if best else None)})
         if verbose:
@@ -288,6 +328,18 @@ def bounded_search(budget_dir: str, classes: Sequence[str], *,
                                  "mismatched reconstruction operator; it is a "
                                  "best-conditional-fit reference, not a "
                                  "statistical lower bound"),
+           "baseline_convention": ("published gains are taken with their "
+                                   "archived model_phase_reference and "
+                                   "converted to the pref=0 frame via "
+                                   "effective_gains; the baseline is verified "
+                                   "against the archived i_hat and sic before "
+                                   "the search (fail closed on >1e-5 rel)"),
+           "edge_selection_note": ("best_on_grid_edge counts windows whose best "
+                                   "grid point sits on the searched bound; a "
+                                   "median interior value is evidence AGAINST a "
+                                   "boundary-limited search, and the count is "
+                                   "reported rather than asserted"),
+           "windows": rows,
            "per_class": {}}
     for cell in sorted(set(r["cell_id"] for r in rows)):
         sub = [r for r in rows if r["cell_id"] == cell]
@@ -300,6 +352,14 @@ def bounded_search(budget_dir: str, classes: Sequence[str], *,
             "best_dcfo_hz_median": float(np.median([r["best_dcfo_hz"]
                                                     for r in sub])),
             "best_dtau_median": float(np.median([r["best_dtau"] for r in sub])),
+            "windows_best_on_grid_edge": int(sum(
+                1 for r in sub if r["best_on_grid_edge"])),
+            "baseline_recon_rel_max": float(np.max(
+                [r["baseline_recon_rel"] for r in sub])),
+            "baseline_sic_rel_max": float(np.max(
+                [r["baseline_sic_rel"] for r in sub])),
+            "model_phase_reference": sorted(set(
+                int(r["model_phase_reference"]) for r in sub)),
             "windows_improved_by_gt_0.1db": int(sum(
                 1 for r in sub if r["gain_vs_online_db"] is not None
                 and r["gain_vs_online_db"] < -0.1)),
@@ -352,6 +412,9 @@ def main(argv=None) -> int:
     ap.add_argument("--budget", default=None, help="A-R03 budget run dir")
     ap.add_argument("--classes", nargs="+", default=None)
     ap.add_argument("--bounded-search", action="store_true")
+    ap.add_argument("--verify-baseline", action="store_true",
+                    help="check the reconstructed baseline against the "
+                         "archived i_hat/sic for every archived window")
     ap.add_argument("--csv", default=None)
     ap.add_argument("--out", default=None, help="write the JSON summary here")
     ap.add_argument("--self-test", action="store_true")
@@ -391,6 +454,50 @@ def main(argv=None) -> int:
         if args.out:
             json.dump({"summary": summ, "windows": rows}, open(args.out, "w"),
                       indent=2, sort_keys=True, default=str)
+    if args.verify_baseline and args.budget:
+        import residual_budget as RB
+        preamble = np.fromfile(os.path.join(args.budget, "templates",
+                                            "comm_preamble_code10_998p4.cf32"),
+                               dtype=np.complex64)
+        bad = []
+        n = 0
+        for fname in sorted(os.listdir(os.path.join(args.budget, "archive"))):
+            if not fname.endswith(".npz"):
+                continue
+            z = np.load(os.path.join(args.budget, "archive", fname),
+                        allow_pickle=False)
+            prm = json.loads(bytes(z["params_json"]).decode("utf-8"))
+            pref = int(prm["model_phase_reference"])
+            pub = RB.model_of([float(t) for t in prm["model_taus"]],
+                             [complex(a, b) for a, b in prm["model_gains"]],
+                             cfo_hz=float(prm["model_cfo_hz"]),
+                             phase_reference_sample=pref)
+            g0 = RB.effective_gains(pub)
+            base = RB.model_of([float(t) for t in prm["model_taus"]], g0,
+                               cfo_hz=float(prm["model_cfo_hz"]),
+                               phase_reference_sample=0)
+            lo, hi = int(prm["sub_lo"]), int(prm["sub_hi"])
+            ih = np.zeros(int(pref) * 0 + np.asarray(z["raw"]).size,
+                          dtype=np.complex128)
+            ih[lo:hi] = RB.core_reconstruct(base, lo, hi - lo, preamble)
+            ref = np.asarray(z["ihat"], dtype=np.complex128)[lo:hi]
+            r1 = float(np.max(np.abs(ih[lo:hi] - ref))) \
+                / max(1e-30, float(np.max(np.abs(ref))))
+            sicref = np.asarray(z["sic"], dtype=np.complex128)[lo:hi]
+            r2 = float(np.max(np.abs(
+                (np.asarray(z["raw"], dtype=np.complex128)[lo:hi]
+                 - ih[lo:hi]) - sicref))) \
+                / max(1e-30, float(np.max(np.abs(sicref))))
+            n += 1
+            if r1 > 1e-5 or r2 > 1e-5:
+                bad.append((fname, pref, r1, r2))
+            print("  %-40s pref=%5d recon_rel=%.2e sic_rel=%.2e"
+                  % (fname, pref, r1, r2))
+        print("baseline convention check: %d windows, %d failures" % (n, len(bad)))
+        if bad:
+            for b in bad:
+                print("  FAIL", b)
+            return 1
     if args.bounded_search and args.budget:
         classes = args.classes or ["isr10_cfo0_single", "isr0_cfo+50k_single",
                                    "isr10_cfo0_off0.4_single",
