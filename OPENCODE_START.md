@@ -39,7 +39,9 @@ UWB_demodulation 是共享只读软链接；请勿覆盖。
 
 S2-B 整改 B-R01～B-R04 已实施并实测：PER 置信区间改为误差比例 Wilson；B3 补齐为 12 cell
 并使用 `testdata/sic_preamble/cases/main.json` 冻结 four-path；verifier fail-closed
-（17 个负样本）；`plan.json`/退出码/最差窗归档均已落地。详见
+（19 个负样本）；`plan.json`/退出码/最差窗归档均已落地。二次复核补充 B-N01 已关闭：
+verifier 从可信 worktree 根（`--repo`）推导允许 build/lib，拒绝联合篡改 build_dir+
+loaded_library；历史产物以 `manifest_verifier_revision` NOTE 做 review-side 验证。详见
 **docs/sic/S2B_整改开发报告_2026-10-18.md**。原报告 `S2B_感知前导干扰通信Payload开发报告.md`
 的 CI 口径已被该整改报告取代（派生重算在 `results/s2b_matrix_ci_fix/`）。MATLAB 仍未实跑。
 

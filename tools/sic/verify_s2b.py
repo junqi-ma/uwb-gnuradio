@@ -57,6 +57,11 @@ import numpy as np
 
 RESULTS = []
 
+# Frozen verifier revision.  Historical runs record an older verifier hash; the
+# verifier reports that as a version NOTE (review-side verification), never
+# silently rewriting the manifest.
+VERIFIER_REVISION = "2026-10-18b"
+
 
 def record(kind, name, detail=""):
     RESULTS.append((kind, name, detail))
@@ -232,7 +237,26 @@ def check_plan(run):
              "plan=%s others=%s" % (str(cch)[:12], [str(o)[:12] for o in others]))
 
 
-def check_manifest(run, run_dir):
+def note(name, detail=""):
+    record("NOTE", name, detail)
+
+
+def _default_trusted_root():
+    # <root>/tools/sic/verify_s2b.py -> <root>
+    return os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+
+
+def _inside(child_real, parent_real):
+    if not parent_real:
+        return False
+    try:
+        return os.path.commonpath([child_real, parent_real]) == parent_real
+    except ValueError:
+        return False
+
+
+def check_manifest(run, run_dir, trusted_root, trusted_build=None):
     m = run.get("manifest")
     if not m:
         fail("manifest_present")
@@ -243,65 +267,92 @@ def check_manifest(run, run_dir):
     prov = m.get("provenance", {})
     build_dir = prov.get("build_dir")
     lib = prov.get("loaded_library")
-    # --- strict library check ---
-    if not lib or not build_dir:
-        fail("manifest_library_strict", "missing lib/build_dir")
+    # ------------------------------------------------------------------
+    # B-N01: the allowed build/lib is derived from the TRUSTED worktree root
+    # (the repo that contains this verifier, or an explicit --repo), NOT from
+    # the run's self-reported provenance.  Tampering with both build_dir and
+    # loaded_library therefore cannot whitelist a parent/other-worktree library.
+    # ------------------------------------------------------------------
+    tr = os.path.realpath(trusted_root)
+    allowed_build = os.path.realpath(
+        trusted_build or os.path.join(tr, "gr-uwb", "build-sic-payload"))
+    rbuild = os.path.realpath(build_dir) if build_dir else None
+    if rbuild is not None and rbuild == allowed_build \
+            and os.path.isdir(rbuild):
+        ok("manifest_build_dir_trusted", rbuild)
     else:
-        rlib = os.path.realpath(lib)
-        rbuild = os.path.realpath(build_dir)
-        sep = os.sep
-        inside = (os.path.exists(rlib)
-                  and (rlib == rbuild or rlib.startswith(rbuild + sep))
-                  and (sep + "lib" + sep) in rlib + sep)
-        bad_prefix = rlib.startswith("/usr/local") or rlib.startswith("/usr/lib")
-        # reject the other worktree explicitly (the parent repo is already
-        # excluded by the strict "inside build_dir" test above)
-        other = "sic-sensing-accum" in rlib
-        if inside and not bad_prefix and not other:
-            ok("manifest_library_strict", rlib)
-        else:
-            fail("manifest_library_strict",
-                 "lib=%s inside=%s bad_prefix=%s other=%s"
-                 % (rlib, inside, bad_prefix, other))
-        # sha256 recompute
-        rec_sha = prov.get("loaded_library_sha256")
-        if rec_sha and os.path.exists(rlib):
-            if _sha256(rlib) == rec_sha:
-                ok("manifest_library_sha256")
-            else:
-                fail("manifest_library_sha256", "hash mismatch")
-        else:
-            fail("manifest_library_sha256", "recorded sha missing")
+        fail("manifest_build_dir_trusted",
+             "build_dir=%s != trusted %s" % (rbuild, allowed_build))
+    libdir = os.path.realpath(os.path.join(allowed_build, "lib"))
+    rlib = os.path.realpath(lib) if lib else None
+    if (rlib is not None and os.path.exists(rlib) and rlib != libdir
+            and _inside(rlib, libdir)):
+        ok("manifest_library_strict", rlib)
+    else:
+        fail("manifest_library_strict",
+             "lib=%s not strictly inside trusted %s" % (rlib, libdir))
+    rec_sha = prov.get("loaded_library_sha256")
+    if rlib and os.path.exists(rlib) and rec_sha and _sha256(rlib) == rec_sha:
+        ok("manifest_library_sha256")
+    else:
+        fail("manifest_library_sha256",
+             "missing/exists=%s recorded=%s"
+             % (os.path.exists(rlib) if rlib else False, bool(rec_sha)))
+    # bindings: real path inside the trusted build + real sha256
+    bind = prov.get("bindings") or {}
+    bp = bind.get("path")
+    rbp = os.path.realpath(bp) if bp else None
+    bind_dir = os.path.realpath(os.path.join(allowed_build, "python", "uwb",
+                                             "bindings"))
+    if (rbp and os.path.exists(rbp)
+            and (bind.get("sha256")
+                 and _sha256(rbp) == bind.get("sha256"))
+            and (_inside(rbp, bind_dir) or _inside(rbp, allowed_build))):
+        ok("manifest_bindings_strict", rbp)
+    else:
+        fail("manifest_bindings_strict",
+             "bindings path=%s sha=%s" % (rbp, bool(bind.get("sha256"))))
     # --- source hashes ---
     src = prov.get("source_sha256") or {}
+    # The verifier itself evolves; a recorded-vs-current verifier mismatch is a
+    # version NOTE (review-side verification of historical artifacts), never a
+    # silent manifest rewrite.  The files that DETERMINE the run (driver,
+    # generator, metrics, core/adapter) must match exactly.
     need = ["driver", "generator", "metrics", "verifier", "core_header",
             "core_src", "adapter_src"]
     missing = [k for k in need if not src.get(k)]
-    if not missing:
-        ok("manifest_source_hashes_present")
+    (ok if not missing else fail)("manifest_source_hashes_present",
+                                  "missing %s" % missing)
+    pairs = {"driver": "gr-uwb/apps/uwb_sim_sic_payload.py",
+             "generator": "gr-uwb/apps/sic_payload_sim.py",
+             "metrics": "tools/sic/payload_metrics.py",
+             "core_header": "gr-uwb/include/gnuradio/uwb/uwb_preamble_sic_core.h",
+             "core_src": "gr-uwb/lib/uwb_preamble_sic_core.cc",
+             "adapter_src": "gr-uwb/lib/uwb_preamble_sic.cc"}
+    checked = 0
+    mis = []
+    for k, rel in pairs.items():
+        p = os.path.join(tr, rel)
+        if os.path.exists(p):
+            checked += 1
+            if _sha256(p) != src[k]:
+                mis.append(k)
+    if checked == 0:
+        skip("manifest_source_hashes_recompute", "trusted root incomplete")
     else:
-        fail("manifest_source_hashes_present", "missing %s" % missing)
-    repo = _repo_root_from_run(run_dir)
-    if repo and not missing:
-        pairs = {"driver": "gr-uwb/apps/uwb_sim_sic_payload.py",
-                 "generator": "gr-uwb/apps/sic_payload_sim.py",
-                 "metrics": "tools/sic/payload_metrics.py",
-                 "verifier": "tools/sic/verify_s2b.py",
-                 "core_header": "gr-uwb/include/gnuradio/uwb/uwb_preamble_sic_core.h",
-                 "core_src": "gr-uwb/lib/uwb_preamble_sic_core.cc",
-                 "adapter_src": "gr-uwb/lib/uwb_preamble_sic.cc"}
-        mis = [k for k, rel in pairs.items()
-               if os.path.exists(os.path.join(repo, rel))
-               and _sha256(os.path.join(repo, rel)) != src[k]]
         (ok if not mis else fail)("manifest_source_hashes_recompute",
                                   "mismatch %s" % mis)
-    else:
-        skip("manifest_source_hashes_recompute", "repo not reachable")
-    bind = prov.get("bindings")
-    if bind and bind.get("path") and bind.get("sha256"):
-        ok("manifest_bindings_hash", os.path.basename(bind["path"]))
-    else:
-        fail("manifest_bindings_hash", "missing bindings hash")
+    vp = os.path.join(tr, "tools", "sic", "verify_s2b.py")
+    if os.path.exists(vp) and src.get("verifier"):
+        cur = _sha256(vp)
+        if cur == src["verifier"]:
+            ok("manifest_verifier_revision", "recorded == current")
+        else:
+            note("manifest_verifier_revision",
+                 "run recorded verifier %s.. != current %s.. (rev %s); "
+                 "review-side verification of a historical artifact; the run "
+                 "does not depend on the verifier"
+                 % (src["verifier"][:12], cur[:12], VERIFIER_REVISION))
     git = prov.get("git") or {}
     (ok if git.get("head") else fail)("manifest_git_head",
                                       str(git.get("head"))[:12])
@@ -699,14 +750,16 @@ def check_matrix_dir(run_dir):
                                                 len(b3)))
 
 
-def verify_run(run_dir, verbose=False):
+def verify_run(run_dir, verbose=False, trusted_root=None, trusted_build=None):
     del RESULTS[:]
     run = load_run(run_dir)
     if not run["records"] and not run["manifest"]:
         fail("run_readable", "no artifacts in %s" % run_dir)
         return 1
+    if trusted_root is None:
+        trusted_root = _default_trusted_root()
     check_plan(run)
-    check_manifest(run, run_dir)
+    check_manifest(run, run_dir, trusted_root, trusted_build)
     check_windows(run)
     check_packets(run)
     check_summary(run)
@@ -735,6 +788,12 @@ def _mk_good(root, n=12):
     with open(libpath, "wb") as fh:
         fh.write(b"\x7fELF fake")
     libsha = _sha256(libpath)
+    bind_path = os.path.join(root, "gr-uwb", "build-sic-payload", "python",
+                             "uwb", "bindings", "uwb_python.cpython-310.so")
+    os.makedirs(os.path.dirname(bind_path), exist_ok=True)
+    with open(bind_path, "wb") as fh:
+        fh.write(b"\x7fELF bindings")
+    bind_sha = _sha256(bind_path)
     n_samples = 4096
     rng = np.random.default_rng(0)
     recs = []
@@ -833,7 +892,7 @@ def _mk_good(root, n=12):
             "loaded_library": libpath, "loaded_library_sha256": libsha,
             "build_dir": os.path.join(root, "gr-uwb", "build-sic-payload"),
             "source_sha256": src,
-            "bindings": {"path": libpath, "sha256": libsha}},
+            "bindings": {"path": bind_path, "sha256": bind_sha}},
         "fcs_contract": {"appended_once_by": "generator",
                          "modulator_append_fcs": False,
                          "wire_psdu_bytes": 96, "data_bytes": 94, "fcs_bytes": 2},
@@ -960,6 +1019,26 @@ def mutations(base):
                                 out=np.zeros(0, dtype=np.complex64))
         return None
 
+    def co_tamper_builddir_and_library(d):
+        # B-N01: change BOTH build_dir and loaded_library to an external build
+        # WITH the correct sha256 of the external file.  The trusted-root
+        # binding must still reject it (it cannot whitelist itself).
+        ext_build = os.path.join(d, "external", "gr-uwb", "build-sic-payload")
+        ext_lib = os.path.join(ext_build, "lib", "libgnuradio-uwb.so")
+        os.makedirs(os.path.dirname(ext_lib), exist_ok=True)
+        with open(ext_lib, "wb") as fh:
+            fh.write(b"parent-repo-or-other-worktree-lib")
+        _edit_json(os.path.join(d, "run_manifest.json"),
+                   lambda m: _set_build_lib(m, ext_build, ext_lib,
+                                            _sha256(ext_lib)))
+        return None
+
+    def bindings_hash_mismatch(d):
+        _edit_json(os.path.join(d, "run_manifest.json"),
+                   lambda m: _set_bindings(m, m["provenance"]["bindings"]["path"],
+                                           "0" * 64))
+        return None
+
     return [
         ("wrong_denominator", lambda d: _edit_jsonl(win(d), wrong_denominator)),
         ("missing_failure_row", lambda d: _edit_jsonl(win(d), missing_failure)),
@@ -973,12 +1052,26 @@ def mutations(base):
         ("wrong_ci_direction", wrong_ci),
         ("forged_external_library", forged_library),
         ("library_hash_mismatch", library_hash_mismatch),
+        ("co_tamper_builddir_and_library", co_tamper_builddir_and_library),
+        ("bindings_hash_mismatch", bindings_hash_mismatch),
         ("delete_all_archives", delete_all_archives),
         ("delete_one_archive", delete_one_archive),
         ("empty_out_array", empty_out),
         ("zeroed_out_array", _zero_out),
         ("wrong_library_usrlocal", _usrlocal_lib),
     ]
+
+
+def _set_build_lib(m, build_dir, lib, sha):
+    m["provenance"]["build_dir"] = build_dir
+    m["provenance"]["loaded_library"] = lib
+    m["provenance"]["loaded_library_sha256"] = sha
+    return m
+
+
+def _set_bindings(m, path, sha):
+    m["provenance"]["bindings"] = {"path": path, "sha256": sha}
+    return m
 
 
 def _zero_out(d):
@@ -1031,7 +1124,7 @@ def self_test():
     good = os.path.join(base, "good")
     os.makedirs(good)
     _mk_good(good)
-    rc = verify_run(good)
+    rc = verify_run(good, trusted_root=good)
     if rc != 0:
         print("SELF-TEST: the GOOD set was rejected (verifier bug)", flush=True)
         return 1
@@ -1042,7 +1135,9 @@ def self_test():
             shutil.rmtree(d)
         shutil.copytree(good, d)
         fn(d)
-        rc = verify_run(d)
+        # trusted root = the mutated copy's own root, so a mutation fails on its
+        # own defect (not merely because the copy lives elsewhere)
+        rc = verify_run(d, trusted_root=d)
         if rc == 0:
             print("SELF-TEST FAIL: mutation %r NOT caught" % name, flush=True)
             all_caught = False
@@ -1072,6 +1167,11 @@ def self_test():
 def main(argv=None):
     ap = argparse.ArgumentParser(description="S2-B independent verifier")
     ap.add_argument("--results", help="run directory to verify")
+    ap.add_argument("--repo", default=None,
+                    help="trusted worktree root (default: the repo that "
+                         "contains this verifier)")
+    ap.add_argument("--trusted-build", default=None,
+                    help="explicit trusted build dir (auditable offline mode)")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args(argv)
     if args.self_test:
@@ -1081,7 +1181,12 @@ def main(argv=None):
     if not os.path.isdir(args.results):
         print("not a directory: %s" % args.results)
         return 2
-    return verify_run(args.results)
+    print("verifier revision: %s ; trusted root: %s"
+          % (VERIFIER_REVISION, os.path.realpath(args.repo or
+                                                 _default_trusted_root())),
+          flush=True)
+    return verify_run(args.results, trusted_root=args.repo,
+                      trusted_build=args.trusted_build)
 
 
 if __name__ == "__main__":
