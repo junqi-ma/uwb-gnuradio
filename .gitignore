@@ -2,6 +2,9 @@
 UWB_demodulation/
 
 # Build trees
+.worktrees/
+# S2 local freeze packages. The inventory markdown stays in docs/sic.
+/build-artifacts/
 gr-uwb/build/
 gr-uwb/build-sic/
 **/build/

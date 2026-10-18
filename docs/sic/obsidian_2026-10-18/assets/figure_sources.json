@@ -1,0 +1,583 @@
+{
+  "date": "2026-10-18",
+  "description": "Derived plots, no new simulation; diagrams are explanatory.",
+  "A_commit": "2c383d50433d939ab1fd65a9c48a8f8b4289cf6e",
+  "B_commit": "ac3849ef77db23838bd1d8d3505dbdee8f84fb09",
+  "sources": [
+    {
+      "path": ".worktrees/sic-sensing-accum/gr-uwb/build-sic-accum/results/s2a/acceptance_rectification/summary.json",
+      "sha256": "4baa3d6e1c6046b4e7fbf24332ed37eacfa1dff6a98920b690a4dbad4334e8c8"
+    },
+    {
+      "path": ".worktrees/sic-payload-collision/gr-uwb/build-sic-payload/results/s2b_matrix_rectification/matrix_cells.csv",
+      "sha256": "2727172759265a31ec2c6925c627fb66eb7aefee6a9bce3e5f97d445840b70fa"
+    },
+    {
+      "path": ".worktrees/sic-sensing-accum/docs/sic/S2A_整改开发报告_2026-10-18.md",
+      "sha256": "1280ae9ff7ce908715fdcd2692b2b94a7ac4befc7d26ff70790094f5d10bd761"
+    },
+    {
+      "path": ".worktrees/sic-payload-collision/docs/sic/S2B_整改开发报告_2026-10-18.md",
+      "sha256": "3169c7fd5053d01916f56d6693183c7bc6e2ebe8a3f0b6f80b93a73a8fe08568"
+    }
+  ],
+  "A_plotted_points": [
+    {
+      "cell": "isr10_cfo0_single",
+      "N": 1,
+      "cir_suppression_mean_db": 28.38876976459262
+    },
+    {
+      "cell": "isr10_cfo0_single",
+      "N": 2,
+      "cir_suppression_mean_db": 28.38872845692048
+    },
+    {
+      "cell": "isr10_cfo0_single",
+      "N": 4,
+      "cir_suppression_mean_db": 28.388634391283567
+    },
+    {
+      "cell": "isr10_cfo0_single",
+      "N": 8,
+      "cir_suppression_mean_db": 28.38840436405246
+    },
+    {
+      "cell": "isr10_cfo0_single",
+      "N": 16,
+      "cir_suppression_mean_db": 28.387774297008406
+    },
+    {
+      "cell": "isr10_cfo0_single",
+      "N": 32,
+      "cir_suppression_mean_db": 28.385833708938144
+    },
+    {
+      "cell": "isr10_cfo0_single",
+      "N": 54,
+      "cir_suppression_mean_db": 28.381689481688596
+    },
+    {
+      "cell": "isr10_cfo-50k_single",
+      "N": 1,
+      "cir_suppression_mean_db": 38.57020543368965
+    },
+    {
+      "cell": "isr10_cfo-50k_single",
+      "N": 2,
+      "cir_suppression_mean_db": 37.81998549514563
+    },
+    {
+      "cell": "isr10_cfo-50k_single",
+      "N": 4,
+      "cir_suppression_mean_db": 35.55152249913885
+    },
+    {
+      "cell": "isr10_cfo-50k_single",
+      "N": 8,
+      "cir_suppression_mean_db": 30.79354893351004
+    },
+    {
+      "cell": "isr10_cfo-50k_single",
+      "N": 16,
+      "cir_suppression_mean_db": 20.122852885903338
+    },
+    {
+      "cell": "isr10_cfo-50k_single",
+      "N": 32,
+      "cir_suppression_mean_db": 19.791792857643397
+    },
+    {
+      "cell": "isr10_cfo-50k_single",
+      "N": 54,
+      "cir_suppression_mean_db": 13.353729652256408
+    },
+    {
+      "cell": "isr0_cfo-50k_single",
+      "N": 1,
+      "cir_suppression_mean_db": 27.583180267423444
+    },
+    {
+      "cell": "isr0_cfo-50k_single",
+      "N": 2,
+      "cir_suppression_mean_db": 26.74979438506549
+    },
+    {
+      "cell": "isr0_cfo-50k_single",
+      "N": 4,
+      "cir_suppression_mean_db": 24.501284719271283
+    },
+    {
+      "cell": "isr0_cfo-50k_single",
+      "N": 8,
+      "cir_suppression_mean_db": 19.91373688111231
+    },
+    {
+      "cell": "isr0_cfo-50k_single",
+      "N": 16,
+      "cir_suppression_mean_db": 9.276755710209033
+    },
+    {
+      "cell": "isr0_cfo-50k_single",
+      "N": 32,
+      "cir_suppression_mean_db": 9.256800936721156
+    },
+    {
+      "cell": "isr0_cfo-50k_single",
+      "N": 54,
+      "cir_suppression_mean_db": 2.9392778629870997
+    }
+  ],
+  "B_plotted_points": [
+    {
+      "cell": "b2_snr-3.5_isr10",
+      "path": "clean",
+      "errors": "38",
+      "total": "1000",
+      "per": "0.038",
+      "per_ci_lo": "0.027808845539615407",
+      "per_ci_hi": "0.05172720875420944",
+      "success_ci_lo": "0.9482727912457906",
+      "success_ci_hi": "0.9721911544603846",
+      "per_fcs_errors": "",
+      "median_suppression_db": "25.469633771674886",
+      "raw_fail_sic_ok": "632",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr-3.5_isr10",
+      "path": "raw",
+      "errors": "670",
+      "total": "1000",
+      "per": "0.67",
+      "per_ci_lo": "0.6402538859604785",
+      "per_ci_hi": "0.6984449685201488",
+      "success_ci_lo": "0.3015550314798513",
+      "success_ci_hi": "0.3597461140395216",
+      "per_fcs_errors": "",
+      "median_suppression_db": "25.469633771674886",
+      "raw_fail_sic_ok": "632",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr-3.5_isr10",
+      "path": "sic",
+      "errors": "38",
+      "total": "1000",
+      "per": "0.038",
+      "per_ci_lo": "0.027808845539615407",
+      "per_ci_hi": "0.05172720875420944",
+      "success_ci_lo": "0.9482727912457906",
+      "success_ci_hi": "0.9721911544603846",
+      "per_fcs_errors": "",
+      "median_suppression_db": "25.469633771674886",
+      "raw_fail_sic_ok": "632",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr-3.5_isr20",
+      "path": "clean",
+      "errors": "38",
+      "total": "1000",
+      "per": "0.038",
+      "per_ci_lo": "0.027808845539615407",
+      "per_ci_hi": "0.05172720875420944",
+      "success_ci_lo": "0.9482727912457906",
+      "success_ci_hi": "0.9721911544603846",
+      "per_fcs_errors": "",
+      "median_suppression_db": "35.49396567393222",
+      "raw_fail_sic_ok": "962",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr-3.5_isr20",
+      "path": "raw",
+      "errors": "1000",
+      "total": "1000",
+      "per": "1.0",
+      "per_ci_lo": "0.9961731014136095",
+      "per_ci_hi": "1.0",
+      "success_ci_lo": "0.0",
+      "success_ci_hi": "0.003826898586390522",
+      "per_fcs_errors": "",
+      "median_suppression_db": "35.49396567393222",
+      "raw_fail_sic_ok": "962",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr-3.5_isr20",
+      "path": "sic",
+      "errors": "38",
+      "total": "1000",
+      "per": "0.038",
+      "per_ci_lo": "0.027808845539615407",
+      "per_ci_hi": "0.05172720875420944",
+      "success_ci_lo": "0.9482727912457906",
+      "success_ci_hi": "0.9721911544603846",
+      "per_fcs_errors": "",
+      "median_suppression_db": "35.49396567393222",
+      "raw_fail_sic_ok": "962",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr-5.0_isr10",
+      "path": "clean",
+      "errors": "1000",
+      "total": "1000",
+      "per": "1.0",
+      "per_ci_lo": "0.9961731014136095",
+      "per_ci_hi": "1.0",
+      "success_ci_lo": "0.0",
+      "success_ci_hi": "0.003826898586390522",
+      "per_fcs_errors": "",
+      "median_suppression_db": "24.02345117095311",
+      "raw_fail_sic_ok": "0",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr-5.0_isr10",
+      "path": "raw",
+      "errors": "1000",
+      "total": "1000",
+      "per": "1.0",
+      "per_ci_lo": "0.9961731014136095",
+      "per_ci_hi": "1.0",
+      "success_ci_lo": "0.0",
+      "success_ci_hi": "0.003826898586390522",
+      "per_fcs_errors": "",
+      "median_suppression_db": "24.02345117095311",
+      "raw_fail_sic_ok": "0",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr-5.0_isr10",
+      "path": "sic",
+      "errors": "1000",
+      "total": "1000",
+      "per": "1.0",
+      "per_ci_lo": "0.9961731014136095",
+      "per_ci_hi": "1.0",
+      "success_ci_lo": "0.0",
+      "success_ci_hi": "0.003826898586390522",
+      "per_fcs_errors": "",
+      "median_suppression_db": "24.02345117095311",
+      "raw_fail_sic_ok": "0",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr-5.0_isr20",
+      "path": "clean",
+      "errors": "1000",
+      "total": "1000",
+      "per": "1.0",
+      "per_ci_lo": "0.9961731014136095",
+      "per_ci_hi": "1.0",
+      "success_ci_lo": "0.0",
+      "success_ci_hi": "0.003826898586390522",
+      "per_fcs_errors": "",
+      "median_suppression_db": "34.03149445911561",
+      "raw_fail_sic_ok": "0",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr-5.0_isr20",
+      "path": "raw",
+      "errors": "1000",
+      "total": "1000",
+      "per": "1.0",
+      "per_ci_lo": "0.9961731014136095",
+      "per_ci_hi": "1.0",
+      "success_ci_lo": "0.0",
+      "success_ci_hi": "0.003826898586390522",
+      "per_fcs_errors": "",
+      "median_suppression_db": "34.03149445911561",
+      "raw_fail_sic_ok": "0",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr-5.0_isr20",
+      "path": "sic",
+      "errors": "1000",
+      "total": "1000",
+      "per": "1.0",
+      "per_ci_lo": "0.9961731014136095",
+      "per_ci_hi": "1.0",
+      "success_ci_lo": "0.0",
+      "success_ci_hi": "0.003826898586390522",
+      "per_fcs_errors": "",
+      "median_suppression_db": "34.03149445911561",
+      "raw_fail_sic_ok": "0",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr0.0_isr10",
+      "path": "clean",
+      "errors": "0",
+      "total": "1000",
+      "per": "0.0",
+      "per_ci_lo": "0.0",
+      "per_ci_hi": "0.003826898586390522",
+      "success_ci_lo": "0.9961731014136095",
+      "success_ci_hi": "1.0",
+      "per_fcs_errors": "",
+      "median_suppression_db": "28.82273371570167",
+      "raw_fail_sic_ok": "608",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr0.0_isr10",
+      "path": "raw",
+      "errors": "608",
+      "total": "1000",
+      "per": "0.608",
+      "per_ci_lo": "0.577383077246373",
+      "per_ci_hi": "0.6377903126589666",
+      "success_ci_lo": "0.36220968734103354",
+      "success_ci_hi": "0.42261692275362694",
+      "per_fcs_errors": "",
+      "median_suppression_db": "28.82273371570167",
+      "raw_fail_sic_ok": "608",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr0.0_isr10",
+      "path": "sic",
+      "errors": "0",
+      "total": "1000",
+      "per": "0.0",
+      "per_ci_lo": "0.0",
+      "per_ci_hi": "0.003826898586390522",
+      "success_ci_lo": "0.9961731014136095",
+      "success_ci_hi": "1.0",
+      "per_fcs_errors": "",
+      "median_suppression_db": "28.82273371570167",
+      "raw_fail_sic_ok": "608",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr0.0_isr20",
+      "path": "clean",
+      "errors": "0",
+      "total": "1000",
+      "per": "0.0",
+      "per_ci_lo": "0.0",
+      "per_ci_hi": "0.003826898586390522",
+      "success_ci_lo": "0.9961731014136095",
+      "success_ci_hi": "1.0",
+      "per_fcs_errors": "",
+      "median_suppression_db": "38.76488167573038",
+      "raw_fail_sic_ok": "1000",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr0.0_isr20",
+      "path": "raw",
+      "errors": "1000",
+      "total": "1000",
+      "per": "1.0",
+      "per_ci_lo": "0.9961731014136095",
+      "per_ci_hi": "1.0",
+      "success_ci_lo": "0.0",
+      "success_ci_hi": "0.003826898586390522",
+      "per_fcs_errors": "",
+      "median_suppression_db": "38.76488167573038",
+      "raw_fail_sic_ok": "1000",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr0.0_isr20",
+      "path": "sic",
+      "errors": "0",
+      "total": "1000",
+      "per": "0.0",
+      "per_ci_lo": "0.0",
+      "per_ci_hi": "0.003826898586390522",
+      "success_ci_lo": "0.9961731014136095",
+      "success_ci_hi": "1.0",
+      "per_fcs_errors": "",
+      "median_suppression_db": "38.76488167573038",
+      "raw_fail_sic_ok": "1000",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr4.0_isr10",
+      "path": "clean",
+      "errors": "0",
+      "total": "1000",
+      "per": "0.0",
+      "per_ci_lo": "0.0",
+      "per_ci_hi": "0.003826898586390522",
+      "success_ci_lo": "0.9961731014136095",
+      "success_ci_hi": "1.0",
+      "per_fcs_errors": "",
+      "median_suppression_db": "32.36941739756942",
+      "raw_fail_sic_ok": "572",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr4.0_isr10",
+      "path": "raw",
+      "errors": "572",
+      "total": "1000",
+      "per": "0.572",
+      "per_ci_lo": "0.541114629509388",
+      "per_ci_hi": "0.6023342970941716",
+      "success_ci_lo": "0.3976657029058284",
+      "success_ci_hi": "0.4588853704906119",
+      "per_fcs_errors": "",
+      "median_suppression_db": "32.36941739756942",
+      "raw_fail_sic_ok": "572",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr4.0_isr10",
+      "path": "sic",
+      "errors": "0",
+      "total": "1000",
+      "per": "0.0",
+      "per_ci_lo": "0.0",
+      "per_ci_hi": "0.003826898586390522",
+      "success_ci_lo": "0.9961731014136095",
+      "success_ci_hi": "1.0",
+      "per_fcs_errors": "",
+      "median_suppression_db": "32.36941739756942",
+      "raw_fail_sic_ok": "572",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr4.0_isr20",
+      "path": "clean",
+      "errors": "0",
+      "total": "1000",
+      "per": "0.0",
+      "per_ci_lo": "0.0",
+      "per_ci_hi": "0.003826898586390522",
+      "success_ci_lo": "0.9961731014136095",
+      "success_ci_hi": "1.0",
+      "per_fcs_errors": "",
+      "median_suppression_db": "42.290424152751804",
+      "raw_fail_sic_ok": "1000",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr4.0_isr20",
+      "path": "raw",
+      "errors": "1000",
+      "total": "1000",
+      "per": "1.0",
+      "per_ci_lo": "0.9961731014136095",
+      "per_ci_hi": "1.0",
+      "success_ci_lo": "0.0",
+      "success_ci_hi": "0.003826898586390522",
+      "per_fcs_errors": "",
+      "median_suppression_db": "42.290424152751804",
+      "raw_fail_sic_ok": "1000",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr4.0_isr20",
+      "path": "sic",
+      "errors": "0",
+      "total": "1000",
+      "per": "0.0",
+      "per_ci_lo": "0.0",
+      "per_ci_hi": "0.003826898586390522",
+      "success_ci_lo": "0.9961731014136095",
+      "success_ci_hi": "1.0",
+      "per_fcs_errors": "",
+      "median_suppression_db": "42.290424152751804",
+      "raw_fail_sic_ok": "1000",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr8.0_isr10",
+      "path": "clean",
+      "errors": "0",
+      "total": "1000",
+      "per": "0.0",
+      "per_ci_lo": "0.0",
+      "per_ci_hi": "0.003826898586390522",
+      "success_ci_lo": "0.9961731014136095",
+      "success_ci_hi": "1.0",
+      "per_fcs_errors": "",
+      "median_suppression_db": "35.357461867623954",
+      "raw_fail_sic_ok": "551",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr8.0_isr10",
+      "path": "raw",
+      "errors": "551",
+      "total": "1000",
+      "per": "0.551",
+      "per_ci_lo": "0.5200345669542097",
+      "per_ci_hi": "0.5815750893899785",
+      "success_ci_lo": "0.4184249106100216",
+      "success_ci_hi": "0.4799654330457903",
+      "per_fcs_errors": "",
+      "median_suppression_db": "35.357461867623954",
+      "raw_fail_sic_ok": "551",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr8.0_isr10",
+      "path": "sic",
+      "errors": "0",
+      "total": "1000",
+      "per": "0.0",
+      "per_ci_lo": "0.0",
+      "per_ci_hi": "0.003826898586390522",
+      "success_ci_lo": "0.9961731014136095",
+      "success_ci_hi": "1.0",
+      "per_fcs_errors": "",
+      "median_suppression_db": "35.357461867623954",
+      "raw_fail_sic_ok": "551",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr8.0_isr20",
+      "path": "clean",
+      "errors": "0",
+      "total": "1000",
+      "per": "0.0",
+      "per_ci_lo": "0.0",
+      "per_ci_hi": "0.003826898586390522",
+      "success_ci_lo": "0.9961731014136095",
+      "success_ci_hi": "1.0",
+      "per_fcs_errors": "",
+      "median_suppression_db": "45.261506004708444",
+      "raw_fail_sic_ok": "1000",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr8.0_isr20",
+      "path": "raw",
+      "errors": "1000",
+      "total": "1000",
+      "per": "1.0",
+      "per_ci_lo": "0.9961731014136095",
+      "per_ci_hi": "1.0",
+      "success_ci_lo": "0.0",
+      "success_ci_hi": "0.003826898586390522",
+      "per_fcs_errors": "",
+      "median_suppression_db": "45.261506004708444",
+      "raw_fail_sic_ok": "1000",
+      "raw_ok_sic_fail": "0"
+    },
+    {
+      "cell": "b2_snr8.0_isr20",
+      "path": "sic",
+      "errors": "0",
+      "total": "1000",
+      "per": "0.0",
+      "per_ci_lo": "0.0",
+      "per_ci_hi": "0.003826898586390522",
+      "success_ci_lo": "0.9961731014136095",
+      "success_ci_hi": "1.0",
+      "per_fcs_errors": "",
+      "median_suppression_db": "45.261506004708444",
+      "raw_fail_sic_ok": "1000",
+      "raw_ok_sic_fail": "0"
+    }
+  ]
+}
