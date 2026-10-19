@@ -137,6 +137,7 @@ def _summarize(case_dir):
     posts = []
     demod_sic = []
     hits = misses = chits = cmisses = 0
+    counters_seen = 0
     missing_diag = 0
     states = {}
     for row in rows:
@@ -152,13 +153,16 @@ def _summarize(case_dir):
         if demod.get("stage_total_us") is not None:
             demod_sic.append(int(demod["stage_total_us"]))
         diag = sic.get("diag")
-        if not isinstance(diag, dict) or "sic_refine_self_energy_hits" not in diag:
+        if not isinstance(diag, dict):
             missing_diag += 1
+            continue
+        if "sic_refine_self_energy_hits" not in diag:
             continue
         hits += int(diag["sic_refine_self_energy_hits"])
         misses += int(diag["sic_refine_self_energy_misses"])
         chits += int(diag.get("sic_refine_cache_hits") or 0)
         cmisses += int(diag.get("sic_refine_cache_misses") or 0)
+        counters_seen += 1
     cfg = plan.get("case_config") or {}
     gen = (manifest.get("generator") or {})
     prov = manifest.get("provenance") or {}
@@ -190,10 +194,11 @@ def _summarize(case_dir):
         "post_us": _dist(posts),
         "demod_sic_stage_us": _dist(demod_sic),
         "run_wall_us": (summary.get("runtime") or {}).get("run_wall_us"),
-        "self_energy_hits": hits,
-        "self_energy_misses": misses,
-        "column_cache_hits": chits,
-        "column_cache_misses": cmisses,
+        "cache_counters_published": counters_seen == len(rows) and len(rows) > 0,
+        "self_energy_hits": hits if counters_seen == len(rows) else None,
+        "self_energy_misses": misses if counters_seen == len(rows) else None,
+        "column_cache_hits": chits if counters_seen == len(rows) else None,
+        "column_cache_misses": cmisses if counters_seen == len(rows) else None,
         "missing_diag": missing_diag,
         "library_sha256": prov.get("loaded_library_sha256"),
         "git_head": git.get("head"),
@@ -206,7 +211,8 @@ def _summarize(case_dir):
     return extract
 
 
-def _run_case(mod, repo, build_dir, out_root, name, extra, windows):
+def _run_case(mod, repo, build_dir, out_root, name, extra, windows,
+              require_counters):
     dest = os.path.join(out_root, name)
     if os.path.exists(dest):
         raise SystemExit("refuse overwrite: %s" % dest)
@@ -225,6 +231,8 @@ def _run_case(mod, repo, build_dir, out_root, name, extra, windows):
     if extract["missing_diag"]:
         raise SystemExit("%s missing diag on %d windows" % (
             name, extract["missing_diag"]))
+    if require_counters and not extract["cache_counters_published"]:
+        raise SystemExit("%s did not publish self-energy cache counters" % name)
     if name == "bypass_no_overlap" and extract["committed"] != 0:
         raise SystemExit("bypass control committed %d windows" %
                          extract["committed"])
@@ -241,6 +249,9 @@ def run_library(argv):
     ap.add_argument("--output", required=True)
     ap.add_argument("--windows", type=int, default=32)
     ap.add_argument("--only", default=None)
+    ap.add_argument("--require-cache-counters", action="store_true",
+                    help="fail if the loaded library does not publish "
+                         "sic_refine_self_energy_hits (candidate builds do)")
     args = ap.parse_args(argv)
     repo = os.path.realpath(args.repo)
     build = os.path.realpath(args.build_dir)
@@ -257,7 +268,8 @@ def run_library(argv):
     for name, extra in selected:
         extracts[name] = {
             "committed": _run_case(mod, repo, build, out, name, extra,
-                                   args.windows)["committed"],
+                                   args.windows,
+                                   args.require_cache_counters)["committed"],
             "core_steady_mean_us": _summarize(os.path.join(out, name))[
                 "core_steady"]["mean_us"],
         }
