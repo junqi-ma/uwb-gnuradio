@@ -664,6 +664,72 @@ inline bool finite_cplx(const cplx& v)
     return std::isfinite(v.real()) && std::isfinite(v.imag());
 }
 
+// Fields that decide every byte build_shifted_f writes, given one template.
+// Clip bounds are exactly that function's lo0/hi0/lo1/hi1.  The float blend
+// is the value stored into the column, so it is compared by bits rather than
+// by the pre-cast double alpha: a difference that does not change the float
+// coefficient does not change the column, and any difference that does is a
+// miss.
+struct ShiftGeom {
+    size_t g = 0;
+    int64_t n0 = 0;
+    bool wrap = false;
+    bool second = false;
+    float a0 = 0.f;
+    float a1 = 0.f;
+    int64_t lo0 = 0;
+    int64_t hi0 = 0;
+    int64_t lo1 = 0;
+    int64_t hi1 = 0;
+};
+
+inline ShiftGeom shift_geom(double tau_abs, int64_t pos, size_t M, size_t plen)
+{
+    const PhaseSel s = select_phase(tau_abs, pos);
+    ShiftGeom c;
+    c.g = s.g;
+    c.n0 = s.n0;
+    c.wrap = s.wrap;
+    c.second = (s.alpha != 0.0);
+    c.a0 = static_cast<float>(1.0 - s.alpha);
+    c.a1 = static_cast<float>(s.alpha);
+    c.lo0 = std::max<int64_t>(0, -s.n0);
+    c.hi0 = std::min<int64_t>(static_cast<int64_t>(M),
+                             static_cast<int64_t>(plen) - s.n0);
+    const int64_t b1 = s.wrap ? s.n0 - 1 : s.n0;
+    c.lo1 = c.second ? std::max<int64_t>(0, -b1) : 0;
+    c.hi1 = c.second
+                ? std::min<int64_t>(static_cast<int64_t>(M),
+                                   static_cast<int64_t>(plen) - b1)
+                : 0;
+    return c;
+}
+
+inline bool shift_geom_equal(const ShiftGeom& a, const ShiftGeom& b)
+{
+    if (a.g != b.g || a.n0 != b.n0 || a.wrap != b.wrap || a.second != b.second)
+        return false;
+    if (std::memcmp(&a.a0, &b.a0, sizeof(float)) != 0)
+        return false;
+    if (std::memcmp(&a.a1, &b.a1, sizeof(float)) != 0)
+        return false;
+    return a.lo0 == b.lo0 && a.hi0 == b.hi0 && a.lo1 == b.lo1 && a.hi1 == b.hi1;
+}
+
+// Cached column: build_shifted_f(w0=0, tau=rel0+delta).
+// Live column:   build_shifted_f(w0=fit_lo, tau=tau_abs+delta).
+// These are not the same function of an integer origin.  When the absolute
+// sum rounds, the live phase row or the float blend changes and the cached
+// VOLK denominator must not be used.
+inline bool self_energy_column_matches(int64_t fit_lo, double rel0,
+                                      double tau_abs, double delta, size_t M,
+                                      size_t plen)
+{
+    const ShiftGeom cached = shift_geom(rel0 + delta, /*pos=*/0, M, plen);
+    const ShiftGeom live = shift_geom(tau_abs + delta, fit_lo, M, plen);
+    return shift_geom_equal(cached, live);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -699,6 +765,23 @@ bool qr_cond_solve(dcp* A, size_t M, size_t K, dcp* y, dcp* h, dcp* work,
     return true;
 }
 
+PhaseGeom phase_geom(double tau_abs, int64_t pos)
+{
+    const PhaseSel s = select_phase(tau_abs, pos);
+    PhaseGeom g;
+    g.g = s.g;
+    g.alpha = s.alpha;
+    g.n0 = s.n0;
+    g.wrap = s.wrap;
+    return g;
+}
+
+bool self_energy_geometry_matches(int64_t fit_lo, double rel0, double tau_abs,
+                                 double delta, size_t M, size_t plen)
+{
+    return self_energy_column_matches(fit_lo, rel0, tau_abs, delta, M, plen);
+}
+
 } // namespace detail
 
 namespace {
@@ -713,10 +796,11 @@ bool env_enabled(const char* name, bool def)
     return true;
 }
 
-// Geometry-only ||shifted template||^2 on the 0.05 grid.  w0 = 0 and
-// tau = relative delay match build_shifted_f(w0 = fit_lo, tau = fit_lo + rel)
-// when fit_lo is an integer, which every detected origin is.  The stored
-// value is the same VOLK reduction the search would run.
+// ||shifted template||^2 of the w0=0 column on the 0.05 grid.  This is NOT
+// assumed equal to build_shifted_f(w0=fit_lo, tau=fit_lo+rel+delta): a large
+// integer origin can change select_phase's float blend.  The search applies
+// self_energy_column_matches before reading an entry, and falls back to a
+// live VOLK self-dot otherwise.  The stored value is that same VOLK reduction.
 void fill_self_energy_table(SicScratch& scratch, const cplx* up, size_t plen)
 {
     if (scratch.self_energy.empty() || scratch.self_energy_m == 0 || !up)
@@ -738,10 +822,70 @@ void fill_self_energy_table(SicScratch& scratch, const cplx* up, size_t plen)
                 static_cast<double>(self.real());
         }
     }
+    scratch.self_energy_up = up;
+    scratch.self_energy_plen = plen;
+    scratch.self_energy_template_hash = scratch.template_hash;
     scratch.self_energy_ready = true;
 }
 
 } // namespace
+
+namespace detail {
+
+bool fill_self_energy_for_test(SicScratch& scratch)
+{
+    if (!scratch.prepared || !scratch.opt_self_energy || scratch.pre_up.empty())
+        return false;
+    if (!scratch.self_energy_ready)
+        fill_self_energy_table(scratch, scratch.pre_up.data(),
+                               scratch.preamble_len);
+    return scratch.self_energy_ready &&
+           scratch.self_energy_up == scratch.pre_up.data() &&
+           scratch.self_energy_plen == scratch.preamble_len &&
+           scratch.self_energy_template_hash == scratch.template_hash;
+}
+
+bool self_energy_denominator_probe(SicScratch& scratch, int64_t fit_lo,
+                                  double tau_abs, int oi, bool* geometry_match,
+                                  double* cached, double* live)
+{
+    if (!geometry_match || !cached || !live)
+        return false;
+    if (!scratch.self_energy_ready || !scratch.self_energy_up)
+        return false;
+    if (oi < 0 || oi > 20)
+        return false;
+    if (scratch.self_energy_m == 0 ||
+        scratch.self_energy_m > scratch.col_f.size() ||
+        scratch.self_energy_plen == 0)
+        return false;
+    const double rel = tau_abs - static_cast<double>(fit_lo);
+    if (!std::isfinite(rel) || !(rel == std::floor(rel)))
+        return false;
+    const int64_t rel_i = static_cast<int64_t>(rel);
+    const int64_t idx = rel_i - scratch.self_energy_rel_min;
+    if (idx < 0 || static_cast<size_t>(idx) >= scratch.self_energy_rel_span)
+        return false;
+    const double rel0 =
+        static_cast<double>(scratch.self_energy_rel_min + idx);
+    const double delta = -0.5 + 0.05 * static_cast<double>(oi);
+    *geometry_match = self_energy_column_matches(
+        fit_lo, rel0, tau_abs, delta, scratch.self_energy_m,
+        scratch.self_energy_plen);
+    *cached = scratch.self_energy[static_cast<size_t>(idx) * 21u +
+                                  static_cast<size_t>(oi)];
+    cplx* colf = scratch.col_f.data();
+    const size_t M = scratch.self_energy_m;
+    build_shifted_f(colf, M, scratch.self_energy_up, scratch.self_energy_plen,
+                    fit_lo, tau_abs + delta);
+    cplx self(0.f, 0.f);
+    volk_32fc_x2_conjugate_dot_prod_32fc_u(&self, colf, colf,
+                                           static_cast<unsigned>(M));
+    *live = static_cast<double>(self.real());
+    return true;
+}
+
+} // namespace detail
 
 // ---------------------------------------------------------------------------
 // prepare
@@ -1683,10 +1827,19 @@ void estimate_impl(const cplx* y,
                 double best_score = -1.0;
                 const double rel_int =
                     tau_abs[k] - static_cast<double>(fit_lo);
-                const bool rel_is_int = (rel_int == std::floor(rel_int));
+                const bool rel_is_int =
+                    std::isfinite(rel_int) && (rel_int == std::floor(rel_int));
                 int64_t rel_index = -1;
-                if (rel_is_int && scratch.self_energy_ready &&
-                    Mfit == scratch.self_energy_m && !fused) {
+                // Template stamp plus training length.  The per-delta geometry
+                // check is inside the loop: an integer relative delay is not
+                // enough, because fit_lo+delta can round the phase coefficients.
+                const bool table_ok =
+                    rel_is_int && scratch.self_energy_ready &&
+                    Mfit == scratch.self_energy_m && !fused &&
+                    up == scratch.self_energy_up &&
+                    plen == scratch.self_energy_plen &&
+                    scratch.template_hash == scratch.self_energy_template_hash;
+                if (table_ok) {
                     rel_index = static_cast<int64_t>(rel_int) -
                                 scratch.self_energy_rel_min;
                     if (rel_index < 0 ||
@@ -1694,6 +1847,11 @@ void estimate_impl(const cplx* y,
                             scratch.self_energy_rel_span)
                         rel_index = -1;
                 }
+                const double rel0 =
+                    (rel_index >= 0)
+                        ? static_cast<double>(scratch.self_energy_rel_min +
+                                              rel_index)
+                        : 0.0;
                 for (int oi = 0; oi <= 20; ++oi) {
                     const double delta = -0.5 + 0.05 * static_cast<double>(oi);
                     const auto tc = diag ? std::chrono::steady_clock::now()
@@ -1725,13 +1883,17 @@ void estimate_impl(const cplx* y,
                                              : t0;
                         volk_32fc_x2_conjugate_dot_prod_32fc_u(&num, colf, qf, np);
                         add_us(r.timings.refine_project_us, tp);
-                        if (rel_index >= 0) {
+                        if (rel_index >= 0 &&
+                            self_energy_column_matches(fit_lo, rel0, tau_abs[k],
+                                                       delta, Mfit, plen)) {
                             const double e = scratch.self_energy[
                                 static_cast<size_t>(rel_index) * 21u +
                                 static_cast<size_t>(oi)];
                             // Only a positive finite entry matches the live
                             // `den > 0` gate.  A non-positive or non-finite
                             // entry is a miss and falls through to VOLK.
+                            // Geometry mismatch also falls through, even when
+                            // the old integer-rel rule would have hit.
                             if (std::isfinite(e) && e > 0.0) {
                                 den = e;
                                 ++r.timings.refine_self_energy_hits;

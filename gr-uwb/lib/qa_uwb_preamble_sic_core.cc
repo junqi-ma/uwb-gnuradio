@@ -3225,3 +3225,348 @@ BOOST_AUTO_TEST_CASE(test_sic_perf_recon_cache_and_diag)
         BOOST_CHECK_GT(t.fractional_refine_us, uint64_t(0));
     }
 }
+
+// PERF-R01.  The self-energy table stores the w0=0 column.  An integer
+// relative delay is not enough to reuse it: at a large origin the live
+// select_phase float blend can change.  Counts are machine-specific; the
+// test requires that a mismatch exists and that a true hit is bitwise.
+BOOST_AUTO_TEST_CASE(test_sic_perf_r01_self_energy_geometry)
+{
+    const auto wrapped = sic::detail::phase_geom(-0.02, 0);
+    BOOST_CHECK(wrapped.wrap);
+    BOOST_CHECK_EQUAL(wrapped.g, size_t(31));
+    const auto plain = sic::detail::phase_geom(-0.05, 0);
+    BOOST_CHECK(!plain.wrap);
+    BOOST_CHECK(plain.g < size_t(31));
+    // Same M/plen.  The wrap bit alone must reject the cached denominator.
+    BOOST_CHECK(!sic::detail::self_energy_geometry_matches(
+        /*fit_lo=*/0, /*rel0=*/0.0, /*tau_abs=*/-0.02, /*delta=*/0.0,
+        /*M=*/64, /*plen=*/128));
+    // Both sides wrap together: the gate is allowed to hit.
+    BOOST_CHECK(sic::detail::self_energy_geometry_matches(
+        /*fit_lo=*/0, /*rel0=*/-1.0, /*tau_abs=*/-1.0, /*delta=*/-0.02,
+        /*M=*/64, /*plen=*/128));
+    const auto both = sic::detail::phase_geom(-1.02, 0);
+    BOOST_CHECK(both.wrap);
+
+    struct Scan {
+        size_t checked = 0;
+        size_t geom_hit = 0;
+        size_t geom_miss = 0;
+        size_t old_rule_wrong = 0;
+        size_t hit_bits_bad = 0;
+        size_t rel0_miss = 0;
+    };
+    auto scan_origin = [](SicScratch& sc, int64_t origin) {
+        Scan s;
+        const int64_t rel_lo = sc.self_energy_rel_min;
+        const int64_t rel_hi =
+            rel_lo + static_cast<int64_t>(sc.self_energy_rel_span);
+        for (int64_t rel = rel_lo; rel < rel_hi; ++rel) {
+            const double tau =
+                static_cast<double>(origin) + static_cast<double>(rel);
+            for (int oi = 0; oi <= 20; ++oi) {
+                bool geom = false;
+                double cached = 0.0;
+                double live = 0.0;
+                const bool ok = sic::detail::self_energy_denominator_probe(
+                    sc, origin, tau, oi, &geom, &cached, &live);
+                if (!ok) {
+                    s.checked = 0;
+                    return s;
+                }
+                ++s.checked;
+                const bool bits =
+                    std::memcmp(&cached, &live, sizeof(double)) == 0;
+                if (geom) {
+                    ++s.geom_hit;
+                    if (!bits)
+                        ++s.hit_bits_bad;
+                } else {
+                    ++s.geom_miss;
+                    if (rel == 0)
+                        ++s.rel0_miss;
+                    // The pre-fix gate would have consumed this entry: the
+                    // relative delay is an integer inside the table, and the
+                    // stored denominator is a positive finite number.
+                    if (std::isfinite(cached) && cached > 0.0 && !bits)
+                        ++s.old_rule_wrong;
+                }
+            }
+        }
+        std::printf("[sic-qa] r01 origin=%lld checked=%zu hit=%zu miss=%zu "
+                    "old_wrong=%zu hit_bits_bad=%zu rel0_miss=%zu\n",
+                    static_cast<long long>(origin), s.checked, s.geom_hit,
+                    s.geom_miss, s.old_rule_wrong, s.hit_bits_bad, s.rel0_miss);
+        return s;
+    };
+
+    Fixture base = make_fixture(10, 8, static_cast<int64_t>(kPre), 64, 64, 1,
+                                8, 8, 100);
+    BOOST_REQUIRE(sic::detail::fill_self_energy_for_test(base.scratch));
+    for (int64_t origin : { int64_t(1997), int64_t(122000), int64_t(2000000) }) {
+        const Scan s = scan_origin(base.scratch, origin);
+        BOOST_REQUIRE_GT(s.checked, size_t(0));
+        BOOST_CHECK_EQUAL(s.geom_miss, size_t(0));
+        BOOST_CHECK_EQUAL(s.hit_bits_bad, size_t(0));
+        BOOST_CHECK_GT(s.geom_hit, size_t(0));
+        BOOST_CHECK_EQUAL(s.old_rule_wrong, size_t(0));
+    }
+
+    // Random complex template, seed 42.  Not an Ipatov waveform.  The
+    // counterexample is "a mismatch can occur", not a frozen diff count.
+    {
+        std::mt19937 rng(42);
+        std::uniform_real_distribution<float> dist(-1.f, 1.f);
+        for (cplx& z : base.model.preamble)
+            z = cplx(dist(rng), dist(rng));
+        base.model.sync.assign(base.model.preamble.begin(),
+                               base.model.preamble.begin() +
+                                   static_cast<std::ptrdiff_t>(kSps));
+        std::string err;
+        BOOST_REQUIRE(sic::prepare_sic_core(
+            base.cfg, base.model.sync.data(), base.model.sync.size(),
+            base.model.preamble.data(), base.model.preamble.size(),
+            base.scratch, &err));
+        BOOST_REQUIRE(sic::detail::fill_self_energy_for_test(base.scratch));
+        for (int64_t origin :
+             { int64_t(1997), int64_t(122000), int64_t(2000000) }) {
+            const Scan s = scan_origin(base.scratch, origin);
+            BOOST_REQUIRE_GT(s.checked, size_t(0));
+            BOOST_CHECK_EQUAL(s.geom_miss, size_t(0));
+            BOOST_CHECK_EQUAL(s.hit_bits_bad, size_t(0));
+            BOOST_CHECK_GT(s.geom_hit, size_t(0));
+        }
+        const Scan far = scan_origin(base.scratch, 16777216);
+        BOOST_REQUIRE_GT(far.checked, size_t(0));
+        BOOST_CHECK_EQUAL(far.hit_bits_bad, size_t(0));
+        BOOST_CHECK_GT(far.geom_miss, size_t(0));
+        BOOST_CHECK_GT(far.old_rule_wrong, size_t(0));
+        BOOST_CHECK_GT(far.rel0_miss, size_t(0));
+        BOOST_CHECK_GT(far.geom_hit, size_t(0));
+    }
+
+    // Complex-but-still-detectable template: a valid preamble plus a small
+    // random imag/real perturbation.  Cache on and off must match, and the
+    // ordinary origin must record hits.
+    {
+        Fixture f = make_fixture(10, 8, static_cast<int64_t>(kPre), 64, 64, 1,
+                                 8, 8, 100);
+        std::mt19937 rng(42);
+        std::uniform_real_distribution<float> dist(-0.05f, 0.05f);
+        for (cplx& z : f.model.preamble) {
+            z = cplx(z.real() + dist(rng), dist(rng));
+        }
+        f.model.sync.assign(f.model.preamble.begin(),
+                            f.model.preamble.begin() +
+                                static_cast<std::ptrdiff_t>(kSps));
+        std::string err;
+        BOOST_REQUIRE(sic::prepare_sic_core(
+            f.cfg, f.model.sync.data(), f.model.sync.size(),
+            f.model.preamble.data(), f.model.preamble.size(), f.scratch, &err));
+        const std::vector<Path> paths = { { 0.0, cplx(1.f, 0.f) } };
+        Signal s = build_signal(f.model, f.n, f.comm_start, paths, 0.0,
+                                kQaNoise, 9501);
+        f.cfg.observed_end_sample =
+            f.comm_start + 8 * static_cast<int64_t>(kSps);
+        const RunSnap on = run_snap(f, s);
+        BOOST_REQUIRE_EQUAL(static_cast<int>(on.state),
+                            static_cast<int>(SicState::Committed));
+        BOOST_CHECK_GT(on.timings.refine_self_energy_hits, uint32_t(0));
+        BOOST_CHECK_EQUAL(on.timings.refine_self_energy_hits +
+                              on.timings.refine_self_energy_misses,
+                          on.timings.refine_candidates);
+
+        RunSnap off;
+        {
+            EnvSet env;
+            env.set("UWB_SIC_SELF_ENERGY", "0");
+            BOOST_REQUIRE(sic::prepare_sic_core(
+                f.cfg, f.model.sync.data(), f.model.sync.size(),
+                f.model.preamble.data(), f.model.preamble.size(), f.scratch,
+                &err));
+            off = run_snap(f, s);
+        }
+        expect_same_snap(on, off, "r01-complex-on-off");
+        BOOST_CHECK_EQUAL(off.timings.refine_self_energy_hits, uint32_t(0));
+        BOOST_CHECK_EQUAL(off.timings.refine_self_energy_misses,
+                          off.timings.refine_candidates);
+    }
+
+    // A stale stamp must not use a planted denominator.  Restoring the live
+    // VOLK path keeps the committed waveform.
+    {
+        Fixture f = make_fixture(10, 8, static_cast<int64_t>(kPre), 64, 64, 1,
+                                 8, 8, 100);
+        const std::vector<Path> paths = { { 0.0, cplx(1.f, 0.f) } };
+        Signal s = build_signal(f.model, f.n, f.comm_start, paths, 0.0,
+                                kQaNoise, 9502);
+        f.cfg.observed_end_sample =
+            f.comm_start + 8 * static_cast<int64_t>(kSps);
+        const RunSnap clean = run_snap(f, s);
+        BOOST_REQUIRE_GT(clean.timings.refine_self_energy_hits, uint32_t(0));
+        f.scratch.self_energy_template_hash ^= 0x5a5a5a5a5a5a5a5aull;
+        for (double& e : f.scratch.self_energy)
+            e = 1.0e6;
+        const RunSnap poisoned = run_snap(f, s);
+        BOOST_CHECK_EQUAL(poisoned.timings.refine_self_energy_hits, uint32_t(0));
+        BOOST_CHECK_EQUAL(poisoned.timings.refine_self_energy_misses,
+                          poisoned.timings.refine_candidates);
+        expect_same_snap(clean, poisoned, "r01-hash-poison");
+    }
+    {
+        Fixture f = make_fixture(10, 8, static_cast<int64_t>(kPre), 64, 64, 1,
+                                 8, 8, 100);
+        const std::vector<Path> paths = { { 0.0, cplx(1.f, 0.f) } };
+        Signal s = build_signal(f.model, f.n, f.comm_start, paths, 0.0,
+                                kQaNoise, 9503);
+        f.cfg.observed_end_sample =
+            f.comm_start + 8 * static_cast<int64_t>(kSps);
+        const RunSnap clean = run_snap(f, s);
+        BOOST_REQUIRE_GT(clean.timings.refine_self_energy_hits, uint32_t(0));
+        static const cplx kOtherUp[1] = { cplx(0.f, 0.f) };
+        f.scratch.self_energy_up = kOtherUp;
+        for (double& e : f.scratch.self_energy)
+            e = 1.0e6;
+        const RunSnap poisoned = run_snap(f, s);
+        BOOST_CHECK_EQUAL(poisoned.timings.refine_self_energy_hits, uint32_t(0));
+        expect_same_snap(clean, poisoned, "r01-pointer-poison");
+    }
+
+    // Training shorter than the prepared fit length: every candidate misses.
+    {
+        Fixture f = make_fixture(10, 8, static_cast<int64_t>(kPre), 64, 64, 1,
+                                 8, 8, 100);
+        f.cfg.observed_end_sample =
+            f.comm_start + 6 * static_cast<int64_t>(kSps);
+        const std::vector<Path> paths = { { 0.0, cplx(1.f, 0.f) } };
+        Signal s = build_signal(f.model, f.n, f.comm_start, paths, 0.0,
+                                kQaNoise, 9504);
+        const RunSnap a = run_snap(f, s);
+        BOOST_CHECK_EQUAL(a.timings.refine_self_energy_hits, uint32_t(0));
+        if (a.timings.refine_candidates > 0) {
+            BOOST_CHECK_EQUAL(a.timings.refine_self_energy_misses,
+                              a.timings.refine_candidates);
+        }
+    }
+
+    // Production search at 2^22.  rel=0 first mixes hits and misses here
+    // (4 of 21 grid points).  2^24 stays in the denominator probe above:
+    // that probe calls the same self_energy_column_matches the search loop
+    // calls, and a 2^24 sic_one would allocate a 16e6-sample window only to
+    // re-check that predicate.  The ROI matches the ordinary fixture so the
+    // cancellation support is the predicted preamble, not a few dozen samples.
+    {
+        const int64_t origin = 4194304; // 2^22
+        const int64_t train = 8 * static_cast<int64_t>(kSps);
+        auto make_far = [&](Fixture& f) {
+            f.model = build_model(10, 8);
+            f.comm_start = origin;
+            f.n = static_cast<size_t>(origin + train + 4000);
+            f.cfg = SicConfig{};
+            f.cfg.mode = SicMode::Estimate;
+            f.cfg.comm_code = 10;
+            f.cfg.sync_reps = 8;
+            f.cfg.samples_per_symbol = kSps;
+            f.cfg.sample_rate = kFs;
+            f.cfg.k_paths = 1;
+            f.cfg.fit_reps = 8;
+            f.cfg.validation_reps = 8;
+            f.cfg.roi_lo = origin - 64;
+            f.cfg.roi_hi = origin + train + 64;
+            f.cfg.coarse_stride = 14;
+            f.cfg.path_min_spacing = 0;
+            f.cfg.post_tail = 100;
+            f.cfg.enable_fractional = true;
+            f.cfg.enable_cfo = true;
+            f.cfg.detect_threshold = 0.5;
+            f.cfg.validate_threshold = 0.25;
+            f.cfg.observed_end_sample = origin + train;
+            f.out.assign(f.n, cplx(0.f, 0.f));
+            f.ihat.assign(f.n, cplx(0.f, 0.f));
+            std::string err;
+            BOOST_REQUIRE(sic::prepare_sic_core(
+                f.cfg, f.model.sync.data(), f.model.sync.size(),
+                f.model.preamble.data(), f.model.preamble.size(), f.scratch,
+                &err));
+        };
+        Fixture on_fx;
+        make_far(on_fx);
+        Signal s;
+        s.y.assign(on_fx.n, cplx(0.f, 0.f));
+        add_path(s.y, on_fx.model.preamble, origin, 0.0, cplx(1.f, 0.f), 0.0);
+        double emax = 0.0;
+        double dot_r = 0.0, dot_i = 0.0, e_sig = 0.0, e_tpl = 0.0;
+        const std::vector<cplx>& syn = on_fx.model.sync;
+        for (size_t k = 0; k < syn.size(); ++k) {
+            const cplx yk = s.y[static_cast<size_t>(origin) + k];
+            const cplx sk = syn[k];
+            if (k < 64)
+                emax = std::max(emax, static_cast<double>(std::norm(yk)));
+            dot_r += static_cast<double>(yk.real()) * sk.real() +
+                     static_cast<double>(yk.imag()) * sk.imag();
+            dot_i += static_cast<double>(yk.imag()) * sk.real() -
+                     static_cast<double>(yk.real()) * sk.imag();
+            e_sig += static_cast<double>(std::norm(yk));
+            e_tpl += static_cast<double>(std::norm(sk));
+        }
+        const double manual_nrm =
+            (e_sig > 0.0 && e_tpl > 0.0)
+                ? std::sqrt(dot_r * dot_r + dot_i * dot_i) /
+                      std::sqrt(e_sig * e_tpl)
+                : 0.0;
+        const SicResult raw = run(on_fx, s);
+        std::printf("[sic-qa] r01 far origin=%lld state=%s reason=%s reject=%s "
+                    "coarse=%llu fine=%llu detected=%d start=%lld emax=%.6g "
+                    "manual_nrm=%.6g n=%zu hits=%u misses=%u cand=%u\n",
+                    static_cast<long long>(origin), state_name(raw.state),
+                    raw.bypass_reason ? raw.bypass_reason : "",
+                    raw.reject_reason ? raw.reject_reason : "",
+                    static_cast<unsigned long long>(raw.coarse_candidates),
+                    static_cast<unsigned long long>(raw.fine_candidates),
+                    raw.detected ? 1 : 0,
+                    static_cast<long long>(raw.detected_start), emax, manual_nrm,
+                    s.y.size(), raw.timings.refine_self_energy_hits,
+                    raw.timings.refine_self_energy_misses,
+                    raw.timings.refine_candidates);
+        std::fflush(stdout);
+        RunSnap on;
+        on.state = raw.state;
+        on.model_id = raw.model_id;
+        on.n_paths = raw.n_paths;
+        on.cfo_hz = raw.cfo_hz;
+        for (size_t k = 0; k < raw.n_taus && k < 8; ++k)
+            on.taus[k] = raw.taus[k];
+        on.out = on_fx.out;
+        on.ihat = on_fx.ihat;
+        on.timings = raw.timings;
+        BOOST_REQUIRE_EQUAL(static_cast<int>(on.state),
+                            static_cast<int>(SicState::Committed));
+        BOOST_REQUIRE_GT(on.timings.refine_candidates, uint32_t(0));
+        BOOST_CHECK_GT(on.timings.refine_self_energy_hits, uint32_t(0));
+        BOOST_CHECK_GT(on.timings.refine_self_energy_misses, uint32_t(0));
+        BOOST_CHECK_EQUAL(on.timings.refine_self_energy_hits +
+                              on.timings.refine_self_energy_misses,
+                          on.timings.refine_candidates);
+
+        Fixture off_fx;
+        RunSnap off;
+        {
+            EnvSet env;
+            env.set("UWB_SIC_SELF_ENERGY", "0");
+            make_far(off_fx);
+            off = run_snap(off_fx, s);
+        }
+        expect_same_snap(on, off, "r01-far-on-off");
+        BOOST_REQUIRE_EQUAL(on.out.size(), off.out.size());
+        BOOST_REQUIRE_EQUAL(on.ihat.size(), off.ihat.size());
+        BOOST_CHECK(std::memcmp(on.out.data(), off.out.data(),
+                                on.out.size() * sizeof(cplx)) == 0);
+        BOOST_CHECK(std::memcmp(on.ihat.data(), off.ihat.data(),
+                                on.ihat.size() * sizeof(cplx)) == 0);
+        BOOST_CHECK(std::memcmp(on.out.data(), s.y.data(),
+                                sizeof(cplx)) == 0);
+        BOOST_CHECK(std::memcmp(&on.out.back(), &s.y.back(), sizeof(cplx)) == 0);
+        BOOST_CHECK(std::memcmp(&off.out.back(), &s.y.back(), sizeof(cplx)) == 0);
+    }
+}

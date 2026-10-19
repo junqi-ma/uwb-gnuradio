@@ -195,6 +195,7 @@ struct Options {
     std::string build_dir;
     std::string effect_run;   // effect run to bind the effective config to
     std::string check_against; // effect run whose fixtures are cross-checked
+    std::string repo;          // explicit worktree root; must match the binary
     std::string case_id = "nominal";
     std::string seed_set = "acceptance"; // acceptance | calibration
     bool generate_inputs = false;
@@ -220,7 +221,7 @@ usage(const char* argv0)
         "          --windows N --rounds R --output DIR\n"
         "          [--input-source real|synthetic] [--inputs DIR]\n"
         "          [--generate-inputs] [--build-dir DIR]\n"
-        "          [--effect-run DIR] [--check-against DIR]\n"
+        "          [--effect-run DIR] [--check-against DIR] [--repo DIR]\n"
         "          [--distinct N] [--case-id NAME]\n"
         "          [--seed-set acceptance|calibration] [--seed-start N]\n"
         "          [--fit-reps N --validation-reps N --online-validation-reps N\n"
@@ -270,6 +271,8 @@ parse_args(int argc, char** argv, Options& o)
             o.effect_run = need("--effect-run");
         else if (a == "--check-against")
             o.check_against = need("--check-against");
+        else if (a == "--repo")
+            o.repo = need("--repo");
         else if (a == "--case-id")
             o.case_id = need("--case-id");
         else if (a == "--seed-set")
@@ -647,30 +650,98 @@ loaded_lib_path(const std::string& needle)
     return std::string();
 }
 
-// Find the repository root: the directory that holds
-// gr-uwb/apps/sic_preamble_sim.py.  Walks up from cwd and the executable.
+// Walk up to a worktree that contains the benchmark source.  Empty if none.
 std::string
-find_repo_root()
+walk_repo_root(std::filesystem::path p)
 {
     namespace fs = std::filesystem;
-    std::vector<fs::path> starts;
-    starts.push_back(fs::current_path());
-    const std::string exe = self_exe_path();
-    if (!exe.empty())
-        starts.push_back(fs::path(exe).parent_path());
-    const char* env = std::getenv("UWB_REPO_ROOT");
-    if (env && env[0])
-        starts.push_back(fs::path(env));
-    for (const auto& s : starts) {
-        fs::path p = fs::absolute(s);
-        for (int i = 0; i < 10 && p.has_parent_path(); ++i) {
-            if (fs::exists(p / "gr-uwb" / "apps" / "sic_preamble_sim.py"))
-                return p.string();
-            if (p == p.root_path())
-                break;
-            p = p.parent_path();
-        }
+    std::error_code ec;
+    p = fs::absolute(p, ec);
+    if (ec)
+        return std::string();
+    for (int i = 0; i < 12; ++i) {
+        if (fs::exists(p / "gr-uwb" / "apps" / "sic_preamble_sim.py") &&
+            fs::exists(p / "gr-uwb" / "apps" / "benchmark_preamble_sic.cc"))
+            return fs::weakly_canonical(p).string();
+        if (p == p.root_path() || !p.has_parent_path())
+            break;
+        p = p.parent_path();
     }
+    return std::string();
+}
+
+bool
+same_path(const std::string& a, const std::string& b)
+{
+    if (a.empty() || b.empty())
+        return false;
+    std::error_code ec;
+    return std::filesystem::equivalent(a, b, ec);
+}
+
+// A child path is the parent or lives under it.  Both are canonicalized.
+bool
+path_inside(const std::string& child, const std::string& parent)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path c = fs::weakly_canonical(child, ec);
+    if (ec)
+        return false;
+    const fs::path p = fs::weakly_canonical(parent, ec);
+    if (ec)
+        return false;
+    auto cs = c.generic_string();
+    auto ps = p.generic_string();
+    if (!ps.empty() && ps.back() != '/')
+        ps.push_back('/');
+    return cs == p.generic_string() || cs.compare(0, ps.size(), ps) == 0;
+}
+
+// Source root for this process.  The executable's worktree wins.  A cwd or
+// UWB_REPO_ROOT or --repo that resolves to a different worktree is refused.
+// A cwd that is not inside any worktree does not override the executable.
+std::string
+resolve_repo_root(const std::string& explicit_repo)
+{
+    const std::string exe = self_exe_path();
+    const std::string exe_root =
+        exe.empty() ? std::string()
+                    : walk_repo_root(std::filesystem::path(exe).parent_path());
+    const std::string cwd_root = walk_repo_root(std::filesystem::current_path());
+    const char* env = std::getenv("UWB_REPO_ROOT");
+    const std::string env_root =
+        (env && env[0]) ? walk_repo_root(env) : std::string();
+    if (!explicit_repo.empty()) {
+        const std::string asked = walk_repo_root(explicit_repo);
+        if (asked.empty())
+            throw std::runtime_error("--repo is not a worktree root: " +
+                                     explicit_repo);
+        if (!exe_root.empty() && !same_path(asked, exe_root))
+            throw std::runtime_error(
+                "--repo conflicts with the executable worktree (" + exe_root +
+                ")");
+        if (!cwd_root.empty() && !same_path(asked, cwd_root))
+            throw std::runtime_error(
+                "--repo conflicts with the cwd worktree (" + cwd_root + ")");
+        if (!env_root.empty() && !same_path(asked, env_root))
+            throw std::runtime_error(
+                "--repo conflicts with UWB_REPO_ROOT (" + env_root + ")");
+        return asked;
+    }
+    if (!exe_root.empty() && !cwd_root.empty() && !same_path(exe_root, cwd_root))
+        throw std::runtime_error(
+            "cwd worktree " + cwd_root +
+            " conflicts with the executable worktree " + exe_root +
+            "; start this process from its own worktree");
+    if (!exe_root.empty() && !env_root.empty() && !same_path(exe_root, env_root))
+        throw std::runtime_error("UWB_REPO_ROOT conflicts with the executable "
+                                 "worktree (" +
+                                 exe_root + ")");
+    if (!exe_root.empty())
+        return exe_root;
+    if (!cwd_root.empty())
+        return cwd_root;
     return std::string();
 }
 
@@ -1396,6 +1467,9 @@ struct EffectRun {
     bool s1_pass = false;
     long long windows_completed = 0;
     bool config_match = false;
+    std::string lib_sha;  // provenance.libgnuradio_uwb_sha256 of THAT run
+    std::string lib_path;
+    bool lib_match = false;
     std::vector<std::string> mismatch;
     std::string error;
 
@@ -1455,6 +1529,14 @@ load_effect_run(const std::string& dir, EffectRun& e)
     }
     if (const JsonValue* v = sum.find("windows_completed"))
         e.windows_completed = v->int_or(0);
+    // The effect run records the library that produced it.  A missing hash
+    // cannot be treated as a match.
+    if (const JsonValue* prov = man.find("provenance")) {
+        if (const JsonValue* v = prov->find("libgnuradio_uwb_sha256"))
+            e.lib_sha = v->str_or("");
+        if (const JsonValue* v = prov->find("libgnuradio_uwb_path"))
+            e.lib_path = v->str_or("");
+    }
     return true;
 }
 
@@ -2852,6 +2934,7 @@ public:
     {
         return sic_ ? sic_->inflight_high_watermark() : 0;
     }
+    uint64_t prepare_us() const { return prepare_us_; }
     size_t queue_hwm() const { return sic_ ? sic_->queue_high_watermark() : 0; }
     size_t consumer_queue_hwm() const
     {
@@ -3154,6 +3237,7 @@ private:
     sic::SicTemplates core_tpl_{};
     std::vector<cplx> core_out_;
     bool core_ready_ = false;
+    uint64_t prepare_us_ = 0;
     double core_checksum_ = 0.0;
     StageTimes last_core_t_;
 };
@@ -3250,11 +3334,14 @@ Pipeline::run_core_one(const std::vector<cplx>& y)
         cfg.detect_threshold = c_.detect_threshold;
         cfg.validate_threshold = c_.validate_threshold;
         std::string err;
+        const auto t_prep = std::chrono::steady_clock::now();
         if (!sic::prepare_sic_core(cfg, c_.comm_sync.data(), c_.comm_sync.size(),
                                    c_.comm_preamble.data(),
                                    c_.comm_preamble.size(), core_scratch_,
                                    &err))
             throw std::runtime_error("prepare_sic_core: " + err);
+        prepare_us_ = static_cast<uint64_t>(
+            elapsed_us(t_prep, std::chrono::steady_clock::now()));
         core_cfg_ = cfg;
         core_tpl_.sync = c_.comm_sync.data();
         core_tpl_.sync_len = c_.comm_sync.size();
@@ -3470,6 +3557,10 @@ struct RunResult {
     double mean_residual_corr = 0.0;
     std::map<std::string, uint64_t> fail_reasons;
     std::string first_fail;
+    uint64_t cold_core_us = 0; // first warmup window, not in the timed mean
+    uint64_t sum_se_hits = 0, sum_se_misses = 0;
+    uint64_t refine_m_seen = 0;
+    std::map<uint64_t, uint64_t> refine_k_counts;
 };
 
 RunResult
@@ -3483,7 +3574,9 @@ run_pipeline(const Options& o, const Corpus& c, Pipeline& pipe,
     std::printf("warmup: 200 windows (excluded)\n");
     std::fflush(stdout);
     for (size_t w = 0; w < 200; ++w) {
-        pipe.submit(100000000ull + w, w % nwin, timeout_us);
+        Outcome warm = pipe.submit(100000000ull + w, w % nwin, timeout_us);
+        if (w == 0)
+            res.cold_core_us = warm.sic.core_total_us;
         ++res.warmup;
     }
     pipe.reset_sinks();
@@ -3535,6 +3628,12 @@ run_pipeline(const Options& o, const Corpus& c, Pipeline& pipe,
             }
             acc_all.add(out);
             acc_class[out.collision_class].add(out);
+            if (out.sic.has_timings && out.sic.refine_candidates > 0) {
+                res.refine_k_counts[out.sic.refine_k]++;
+                res.refine_m_seen = out.sic.refine_m;
+                res.sum_se_hits += out.sic.refine_self_energy_hits;
+                res.sum_se_misses += out.sic.refine_self_energy_misses;
+            }
             ++res.class_windows[out.collision_class];
             const std::string& st = out.sic.sic_state;
             if (st == "committed") {
@@ -3674,6 +3773,71 @@ run_pipeline(const Options& o, const Corpus& c, Pipeline& pipe,
 } // namespace
 
 // ===========================================================================
+// Same rule as the SIC core: a leading 0/n/N/f/F disables the switch.
+// Empty or unset keeps the default.  These are NOT part of model_id.
+bool
+switch_enabled(const char* name, bool def, bool* from_env, std::string* raw)
+{
+    const char* v = std::getenv(name);
+    if (!v || !v[0]) {
+        if (from_env)
+            *from_env = false;
+        if (raw)
+            raw->clear();
+        return def;
+    }
+    if (from_env)
+        *from_env = true;
+    if (raw)
+        *raw = v;
+    if (v[0] == '0' || v[0] == 'n' || v[0] == 'N' || v[0] == 'f' || v[0] == 'F')
+        return false;
+    return true;
+}
+
+std::string
+cmake_cache_value(const std::string& build_dir, const std::string& key)
+{
+    std::ifstream in(build_dir + "/CMakeCache.txt");
+    std::string line;
+    const std::string prefix = key + ":";
+    while (std::getline(in, line)) {
+        if (line.compare(0, prefix.size(), prefix) != 0)
+            continue;
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos)
+            continue;
+        return line.substr(eq + 1);
+    }
+    return std::string();
+}
+
+std::string
+bindings_sha256(const std::string& build_dir)
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::path(build_dir) / "python" / "uwb" / "bindings";
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec))
+        return std::string();
+    std::string best;
+    std::string best_sha;
+    for (const auto& ent : fs::directory_iterator(dir, ec)) {
+        const std::string name = ent.path().filename().string();
+        if (name.find("uwb_python") == std::string::npos ||
+            name.find(".so") == std::string::npos)
+            continue;
+        const fs::path real = fs::weakly_canonical(ent.path(), ec);
+        if (ec)
+            continue;
+        if (best.empty() || real.string().size() > best.size()) {
+            best = real.string();
+            best_sha = shell_sha256(best);
+        }
+    }
+    return best_sha;
+}
+
 int
 main(int argc, char** argv)
 {
@@ -3682,10 +3846,10 @@ main(int argc, char** argv)
         if (!parse_args(argc, argv, o))
             return 2;
 
-        const std::string repo = find_repo_root();
+        const std::string repo = resolve_repo_root(o.repo);
         if (repo.empty())
             throw std::runtime_error(
-                "cannot locate repo root (gr-uwb/apps/sic_preamble_sim.py)");
+                "cannot locate repo root (gr-uwb/apps/benchmark_preamble_sic.cc)");
         std::string build_dir = o.build_dir;
         if (build_dir.empty()) {
             const std::string exe = self_exe_path();
@@ -3697,6 +3861,14 @@ main(int argc, char** argv)
             else
                 build_dir = repo + "/gr-uwb/build-sic";
         }
+        if (!path_inside(build_dir, repo))
+            throw std::runtime_error("build_dir is outside the resolved repo: " +
+                                     build_dir);
+        const std::string loaded_lib = loaded_lib_path("libgnuradio-uwb.so");
+        if (loaded_lib.empty() || !path_inside(loaded_lib, build_dir))
+            throw std::runtime_error(
+                "loaded libgnuradio-uwb is not inside build_dir (lib='" +
+                loaded_lib + "' build_dir='" + build_dir + "')");
         auto parent_of = [](const std::string& p) {
             const size_t slash = p.find_last_of('/');
             return (slash == std::string::npos) ? std::string(".")
@@ -3844,10 +4016,27 @@ main(int argc, char** argv)
                 eff.config_match = eff.mismatch.empty();
             }
         }
+        // Library identity is checked on the run we actually kept, including
+        // one selected by the exact-config fallback.  A missing hash is not a
+        // match.  ok() stays the config/gate check; effect_verified adds this.
+        if (eff.found) {
+            const std::string loaded_sha =
+                shell_sha256(loaded_lib_path("libgnuradio-uwb.so"));
+            eff.lib_match = !eff.lib_sha.empty() && !loaded_sha.empty() &&
+                            eff.lib_sha == loaded_sha;
+            if (!eff.lib_match)
+                eff.mismatch.push_back(
+                    "effect run libgnuradio_uwb_sha256 does not match the "
+                    "loaded library (effect=" +
+                    (eff.lib_sha.empty() ? std::string("<missing>") : eff.lib_sha) +
+                    " loaded=" +
+                    (loaded_sha.empty() ? std::string("<missing>") : loaded_sha) +
+                    ")");
+        }
         const bool legacy_or_control =
             (o.model_mode != "estimate8_frozen" || o.online_validation_reps != 0 ||
              o.cover_preamble || o.nonproduction_control);
-        const bool effect_verified = eff.ok() &&
+        const bool effect_verified = eff.ok() && eff.lib_match &&
                                      c.effective_config_json == eff.config_json &&
                                      (c.effective_config_hash ==
                                       eff.effective_config_hash);
@@ -4153,6 +4342,9 @@ main(int argc, char** argv)
              << eff.effective_config_hash_recomputed
              << "\",\"hash_ok\":" << (eff.hash_ok ? "true" : "false")
              << ",\"config_match\":" << (eff.config_match ? "true" : "false")
+             << ",\"lib_sha256\":\"" << json_escape(eff.lib_sha)
+             << "\",\"lib_path\":\"" << json_escape(eff.lib_path)
+             << "\",\"lib_match\":" << (eff.lib_match ? "true" : "false")
              << ",\"verified\":"
              << (effect_verified ? "true" : "false") << ",\"mismatch\":[";
         for (size_t i = 0; i < eff.mismatch.size(); ++i)
@@ -4211,8 +4403,61 @@ main(int argc, char** argv)
              << (c.model_mode == "confirmed_legacy"
                      ? "whole_window_default"
                      : "effect_run_observed_end_public")
-             << "\",\"benchmark_build_lib_verified_by\":\"ldd "
-                "gr-uwb/build-sic/libgnuradio-uwb.so\""
+             << "\",\"loaded_lib_inside_build_dir\":true"
+             << ",\"bindings_sha256\":\"" << bindings_sha256(build_dir)
+             << "\",\"compile\":{\"build_type\":\""
+             << json_escape(cmake_cache_value(build_dir, "CMAKE_BUILD_TYPE"))
+             << "\",\"cxx_flags\":\""
+             << json_escape(cmake_cache_value(build_dir, "CMAKE_CXX_FLAGS"))
+             << "\",\"cxx_flags_release\":\""
+             << json_escape(cmake_cache_value(build_dir, "CMAKE_CXX_FLAGS_RELEASE"))
+             << "\"},\"opt_switches\":[";
+        {
+            static const struct {
+                const char* name;
+                bool def;
+            } kSwitches[] = {
+                { "UWB_SIC_REFINE_DIAG", true },
+                { "UWB_SIC_COL_CACHE", true },
+                { "UWB_SIC_ROT_BASE_CACHE", true },
+                { "UWB_SIC_RECON_CACHE", true },
+                { "UWB_SIC_SELF_ENERGY", true },
+                { "UWB_SIC_INCR_RESID", false },
+                { "UWB_SIC_FUSED_SCORE", false },
+            };
+            bool first_sw = true;
+            for (const auto& sw : kSwitches) {
+                bool from_env = false;
+                std::string raw;
+                const bool value =
+                    switch_enabled(sw.name, sw.def, &from_env, &raw);
+                json << (first_sw ? "" : ",") << "{\"name\":\"" << sw.name
+                     << "\",\"value\":" << (value ? "true" : "false")
+                     << ",\"default\":" << (sw.def ? "true" : "false")
+                     << ",\"source\":\"" << (from_env ? "environment" : "default")
+                     << "\",\"raw\":\"" << json_escape(raw) << "\"}";
+                first_sw = false;
+            }
+        }
+        json << "],\"geometry\":{\"k_paths\":" << c.k_paths
+             << ",\"fit_reps\":" << c.fit_reps << ",\"sps\":" << kSps
+             << ",\"fit_len_m\":"
+             << (static_cast<long long>(c.fit_reps) *
+                 static_cast<long long>(kSps))
+             << ",\"window_len\":" << c.n << ",\"refine_m_seen\":"
+             << res.refine_m_seen << ",\"self_energy_hits\":" << res.sum_se_hits
+             << ",\"self_energy_misses\":" << res.sum_se_misses
+             << ",\"refine_k_counts\":{";
+        {
+            bool first_k = true;
+            for (const auto& kv : res.refine_k_counts) {
+                json << (first_k ? "" : ",") << "\"" << kv.first
+                     << "\":" << kv.second;
+                first_k = false;
+            }
+        }
+        json << "},\"prepare_us\":" << pipe.prepare_us()
+             << ",\"cold_core_us\":" << res.cold_core_us << "}"
              << ",\"crosscheck_templates_match\":"
              << (c.crosscheck_templates_match ? "true" : "false")
              << ",\"crosscheck_fixture_y_match\":"

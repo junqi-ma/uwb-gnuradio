@@ -502,13 +502,21 @@ struct SicScratch {
     double recon_tau[kSicMaxPaths] = {};
     std::complex<float> recon_gain[kSicMaxPaths] = {};
 
-    // ||u(relative delay, 0.05-grid delta)||^2 for the prepared training
-    // length.  NaN until filled.  A clipped training window does not use it.
+    // ||u||^2 of the w0=0 column on the 0.05 grid, for the prepared training
+    // length.  NaN until filled.  A hit still requires the live column
+    // (w0=fit_lo, tau=tau_abs+delta) to share polyphase row, float blend,
+    // n0, wrap and clip with that cached column, plus this template stamp.
+    // A clipped training window (M != self_energy_m) does not use it.
+    // Integer translation is not assumed: a large fit_lo can change the
+    // float phase coefficients even when the relative delay is an integer.
     std::vector<double> self_energy;
     bool self_energy_ready = false;
     int64_t self_energy_rel_min = 0;
     size_t self_energy_rel_span = 0;
     size_t self_energy_m = 0;
+    const std::complex<float>* self_energy_up = nullptr;
+    size_t self_energy_plen = 0;
+    uint64_t self_energy_template_hash = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -544,6 +552,48 @@ UWB_API bool qr_cond_solve(std::complex<double>* A,
                            std::complex<double>* h,
                            std::complex<double>* work,
                            double* cond);
+
+// Polyphase decision for one absolute delay.  QA uses this to show a phase
+// wrap without going through a full window.  sic_one uses the same
+// select_phase implementation.
+struct PhaseGeom {
+    size_t g = 0;
+    double alpha = 0.0;
+    int64_t n0 = 0;
+    bool wrap = false;
+};
+
+UWB_API PhaseGeom phase_geom(double tau_abs, int64_t pos);
+
+// Production self-energy hit predicate.  True only when
+// build_shifted_f(w0=0, tau=rel0+delta) and
+// build_shifted_f(w0=fit_lo, tau=tau_abs+delta) choose the same row, the
+// same float blend coefficients (compared by bits), the same integer base,
+// the same phase wrap and the same clip range.  M and plen are part of the
+// clip.  A mismatch must not reuse the cached denominator.
+UWB_API bool self_energy_geometry_matches(int64_t fit_lo,
+                                         double rel0,
+                                         double tau_abs,
+                                         double delta,
+                                         size_t M,
+                                         size_t plen);
+
+// Fill the production table when it is empty.  Same function estimate uses.
+// Returns false when the scratch cannot hold the table.
+UWB_API bool fill_self_energy_for_test(SicScratch& scratch);
+
+// One grid point: cached table value versus a fresh VOLK self-dot of the
+// live column.  *geometry_match is the production predicate above.  Returns
+// false when the table is not ready, the relative delay is not an in-range
+// integer, or oi is outside 0..20.  The live column is built from the
+// template stamp recorded at fill time.
+UWB_API bool self_energy_denominator_probe(SicScratch& scratch,
+                                          int64_t fit_lo,
+                                          double tau_abs,
+                                          int oi,
+                                          bool* geometry_match,
+                                          double* cached,
+                                          double* live);
 
 } // namespace detail
 
