@@ -1,3 +1,13 @@
+# SIC 性能优化（feature/sic-perf，2026-10-19）
+
+本 worktree 从 annotated tag `sic-s2-ab-integrated-20261018`（`794056c`）创建，分支 `feature/sic-perf`。任务文件是 `docs/sic/Grok开发指示_SIC性能优化_2026-10-19.md`。
+
+冻结基线的算法、阈值、种子、指标和信道仍然约束历史对照。只有本性能分支可以按该任务改共享 SIC 核心。不要把本分支自动合并回 `feature/sic-research`，不要移动 tag，不要推送。
+
+只读对照 worktree 是 `.worktrees/sic-perf-baseline`（detached `794056c`）。两边各自构建 `gr-uwb/build-sic-accum` 与 `gr-uwb/build-sic-payload`，不覆盖旧集成 build，不复制 CMakeCache。mean≤0.5 ms、P99≤1 ms、200 窗/s 仍是未达成目标，不是本轮承诺。
+
+---
+
 # 已验收 A/B 集成基线（2026-10-18）
 
 本文件是 S2-A 与 S2-B 合并后的共同研究基线。下方 `---` 之后的 S0/S1/TWR

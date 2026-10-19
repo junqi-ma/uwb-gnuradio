@@ -808,6 +808,16 @@ struct Snap {
     uint64_t estimate_us = 0, model_prepare_us = 0;
     uint64_t apply_us = 0, backfill_us = 0, apply_forward_us = 0;
     uint64_t adapter_wrap_us = 0;
+    // Refine children.  Not added into estimate8 or core_total.
+    uint64_t refine_init_rot_us = 0, refine_init_columns_us = 0;
+    uint64_t refine_init_qr_us = 0, refine_resid_us = 0, refine_derot_us = 0;
+    uint64_t refine_candidate_us = 0, refine_project_us = 0;
+    uint64_t refine_self_energy_us = 0;
+    uint64_t refine_k = 0, refine_m = 0, refine_candidates = 0;
+    uint64_t refine_rebuilds = 0, refine_cache_hits = 0, refine_cache_misses = 0;
+    uint64_t refine_self_energy_hits = 0, refine_self_energy_misses = 0;
+    uint64_t apply_block_builds = 0, apply_block_hits = 0;
+    uint64_t apply_rot_base_hits = 0, apply_rot_base_misses = 0;
     bool has_timings = false;
 };
 
@@ -911,6 +921,31 @@ private:
             s.backfill_us = dict_u64(meta, "sic_backfill_us", 0);
             s.apply_forward_us = dict_u64(meta, "sic_apply_forward_us", 0);
             s.adapter_wrap_us = dict_u64(meta, "output_wrap_publish_us", 0);
+            s.refine_init_rot_us = dict_u64(meta, "sic_refine_init_rot_us", 0);
+            s.refine_init_columns_us =
+                dict_u64(meta, "sic_refine_init_columns_us", 0);
+            s.refine_init_qr_us = dict_u64(meta, "sic_refine_init_qr_us", 0);
+            s.refine_resid_us = dict_u64(meta, "sic_refine_resid_us", 0);
+            s.refine_derot_us = dict_u64(meta, "sic_refine_derot_us", 0);
+            s.refine_candidate_us = dict_u64(meta, "sic_refine_candidate_us", 0);
+            s.refine_project_us = dict_u64(meta, "sic_refine_project_us", 0);
+            s.refine_self_energy_us =
+                dict_u64(meta, "sic_refine_self_energy_us", 0);
+            s.refine_k = dict_u64(meta, "sic_refine_k", 0);
+            s.refine_m = dict_u64(meta, "sic_refine_m", 0);
+            s.refine_candidates = dict_u64(meta, "sic_refine_candidates", 0);
+            s.refine_rebuilds = dict_u64(meta, "sic_refine_rebuilds", 0);
+            s.refine_cache_hits = dict_u64(meta, "sic_refine_cache_hits", 0);
+            s.refine_cache_misses = dict_u64(meta, "sic_refine_cache_misses", 0);
+            s.refine_self_energy_hits =
+                dict_u64(meta, "sic_refine_self_energy_hits", 0);
+            s.refine_self_energy_misses =
+                dict_u64(meta, "sic_refine_self_energy_misses", 0);
+            s.apply_block_builds = dict_u64(meta, "sic_apply_block_builds", 0);
+            s.apply_block_hits = dict_u64(meta, "sic_apply_block_hits", 0);
+            s.apply_rot_base_hits = dict_u64(meta, "sic_apply_rot_base_hits", 0);
+            s.apply_rot_base_misses =
+                dict_u64(meta, "sic_apply_rot_base_misses", 0);
             s.has_timings = pmt::dict_has_key(meta, pmt::mp("sic_estimate_us"));
         }
         {
@@ -3267,6 +3302,26 @@ Pipeline::run_core_one(const std::vector<cplx>& y)
     s.apply_us = r.timings.apply_us;
     s.backfill_us = r.timings.backfill_us;
     s.apply_forward_us = r.timings.apply_forward_us;
+    s.refine_init_rot_us = r.timings.refine_init_rot_us;
+    s.refine_init_columns_us = r.timings.refine_init_columns_us;
+    s.refine_init_qr_us = r.timings.refine_init_qr_us;
+    s.refine_resid_us = r.timings.refine_resid_us;
+    s.refine_derot_us = r.timings.refine_derot_us;
+    s.refine_candidate_us = r.timings.refine_candidate_us;
+    s.refine_project_us = r.timings.refine_project_us;
+    s.refine_self_energy_us = r.timings.refine_self_energy_us;
+    s.refine_k = r.timings.refine_k;
+    s.refine_m = r.timings.refine_m;
+    s.refine_candidates = r.timings.refine_candidates;
+    s.refine_rebuilds = r.timings.refine_rebuilds;
+    s.refine_cache_hits = r.timings.refine_cache_hits;
+    s.refine_cache_misses = r.timings.refine_cache_misses;
+    s.refine_self_energy_hits = r.timings.refine_self_energy_hits;
+    s.refine_self_energy_misses = r.timings.refine_self_energy_misses;
+    s.apply_block_builds = r.timings.apply_block_builds;
+    s.apply_block_hits = r.timings.apply_block_hits;
+    s.apply_rot_base_hits = r.timings.apply_rot_base_hits;
+    s.apply_rot_base_misses = r.timings.apply_rot_base_misses;
     s.has_timings = true;
     last_core_t_ = stage_times_from_core(r.timings, static_cast<size_t>(c_.n),
                                          static_cast<size_t>(c_.observed_end));
@@ -3570,7 +3625,28 @@ run_pipeline(const Options& o, const Corpus& c, Pipeline& pipe,
                 << out.t.forward_samples << ',' << out.t.backfill_samples << ','
                 << apply_ns_per_sample << ',' << apply_msps << ','
                 << apply_flops_per_sample(static_cast<size_t>(c.k_paths)) << ','
-                << out.t.handler << ',' << out.t.queue_wait << '\n';
+                << out.t.handler << ',' << out.t.queue_wait
+                // Refine children and counts.  Not part of estimate8_us.
+                << ',' << out.sic.refine_init_rot_us
+                << ',' << out.sic.refine_init_columns_us
+                << ',' << out.sic.refine_init_qr_us
+                << ',' << out.sic.refine_resid_us
+                << ',' << out.sic.refine_derot_us
+                << ',' << out.sic.refine_candidate_us
+                << ',' << out.sic.refine_project_us
+                << ',' << out.sic.refine_self_energy_us
+                << ',' << out.sic.refine_k
+                << ',' << out.sic.refine_m
+                << ',' << out.sic.refine_candidates
+                << ',' << out.sic.refine_rebuilds
+                << ',' << out.sic.refine_cache_hits
+                << ',' << out.sic.refine_cache_misses
+                << ',' << out.sic.refine_self_energy_hits
+                << ',' << out.sic.refine_self_energy_misses
+                << ',' << out.sic.apply_block_builds
+                << ',' << out.sic.apply_block_hits
+                << ',' << out.sic.apply_rot_base_hits
+                << ',' << out.sic.apply_rot_base_misses << '\n';
         }
     }
     cpu_out = cpu_seconds() - cpu0;
@@ -3851,7 +3927,13 @@ main(int argc, char** argv)
                "backfill_us,apply_forward_us,apply_us,adapter_wrap_us,"
                "forward_samples,backfill_samples,apply_ns_per_sample,"
                "apply_msamples_per_s,apply_flops_per_sample,handler_us,"
-               "queue_wait_us\n";
+               "queue_wait_us,refine_init_rot_us,refine_init_columns_us,"
+               "refine_init_qr_us,refine_resid_us,refine_derot_us,"
+               "refine_candidate_us,refine_project_us,refine_self_energy_us,"
+               "refine_k,refine_m,refine_candidates,refine_rebuilds,"
+               "refine_cache_hits,refine_cache_misses,refine_self_energy_hits,"
+               "refine_self_energy_misses,apply_block_builds,apply_block_hits,"
+               "apply_rot_base_hits,apply_rot_base_misses\n";
 
         Pipeline pipe(o, c);
         pipe.start();

@@ -918,7 +918,7 @@ UwbPreambleSic::process(Pending& p)
                     if (backfill_end > 0)
                         sic::apply_model(model, y, backfill_end, 0, tpl, cfg,
                                          d_scratch_, d_out_.data(), r.i_hat,
-                                         &r.timings);
+                                         &r.timings, true);
                     r.timings.backfill_us =
                         elapsed_us(t_bf0, std::chrono::steady_clock::now());
                     const auto t_fw0 = std::chrono::steady_clock::now();
@@ -929,7 +929,7 @@ UwbPreambleSic::process(Pending& p)
                                          static_cast<int64_t>(fwd0), tpl, cfg,
                                          d_scratch_, d_out_.data() + fwd0,
                                          r.i_hat ? r.i_hat + fwd0 : nullptr,
-                                         &r.timings);
+                                         &r.timings, true);
                     r.timings.apply_forward_us =
                         elapsed_us(t_fw0, std::chrono::steady_clock::now());
                 }
@@ -1176,6 +1176,34 @@ UwbPreambleSic::process(Pending& p)
     put_u64("sic_apply_us", have_core ? tt.apply_us : 0);
     put_u64("sic_backfill_us", have_core ? tt.backfill_us : 0);
     put_u64("sic_apply_forward_us", have_core ? tt.apply_forward_us : 0);
+    // Refine children and cache counts.  Not members of SIC_CORE_STAGES: the
+    // sim must not copy them into scope=sic stage rows (that sum is checked
+    // against core_total_us).  They are diagnostic only.
+    put_u64("sic_refine_init_rot_us", have_core ? tt.refine_init_rot_us : 0);
+    put_u64("sic_refine_init_columns_us",
+            have_core ? tt.refine_init_columns_us : 0);
+    put_u64("sic_refine_init_qr_us", have_core ? tt.refine_init_qr_us : 0);
+    put_u64("sic_refine_resid_us", have_core ? tt.refine_resid_us : 0);
+    put_u64("sic_refine_derot_us", have_core ? tt.refine_derot_us : 0);
+    put_u64("sic_refine_candidate_us", have_core ? tt.refine_candidate_us : 0);
+    put_u64("sic_refine_project_us", have_core ? tt.refine_project_us : 0);
+    put_u64("sic_refine_self_energy_us",
+            have_core ? tt.refine_self_energy_us : 0);
+    put_u64("sic_refine_k", have_core ? tt.refine_k : 0);
+    put_u64("sic_refine_m", have_core ? tt.refine_m : 0);
+    put_u64("sic_refine_candidates", have_core ? tt.refine_candidates : 0);
+    put_u64("sic_refine_rebuilds", have_core ? tt.refine_rebuilds : 0);
+    put_u64("sic_refine_cache_hits", have_core ? tt.refine_cache_hits : 0);
+    put_u64("sic_refine_cache_misses", have_core ? tt.refine_cache_misses : 0);
+    put_u64("sic_refine_self_energy_hits",
+            have_core ? tt.refine_self_energy_hits : 0);
+    put_u64("sic_refine_self_energy_misses",
+            have_core ? tt.refine_self_energy_misses : 0);
+    put_u64("sic_apply_block_builds", have_core ? tt.apply_block_builds : 0);
+    put_u64("sic_apply_block_hits", have_core ? tt.apply_block_hits : 0);
+    put_u64("sic_apply_rot_base_hits", have_core ? tt.apply_rot_base_hits : 0);
+    put_u64("sic_apply_rot_base_misses",
+            have_core ? tt.apply_rot_base_misses : 0);
 
     // Byte-exact bypass: reuse the producer's c32vector PMT unchanged.  A
     // committed window is a fresh vector copied from the cleaned output buffer.
