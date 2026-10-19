@@ -1992,6 +1992,22 @@ def paced_input_meta_base(*, sensing_code, sync_reps, sensing_roi,
     return meta
 
 
+def paced_target_stage(consumer):
+    """Admission terminal for a paced run.
+
+    ``sic`` completes on the SIC status message and does not build CIR or
+    demod. ``both`` keeps the historical CIR terminal. Unknown values fail
+    closed rather than silently measuring demod.
+    """
+    if consumer == "sic":
+        return "sic"
+    if consumer in ("cir", "both"):
+        return "cir"
+    if consumer == "demod":
+        return "demod"
+    raise ValueError("unknown paced consumer %r" % (consumer,))
+
+
 # ---------------------------------------------------------------------------
 # Simulator runtime
 # ---------------------------------------------------------------------------
@@ -2010,8 +2026,7 @@ class SimRuntime:
         # measured 0-us service).
         if paced is not None:
             if paced_target_consumer is None:
-                paced_target_consumer = "cir" if consumers in ("cir", "both") \
-                    else "demod"
+                paced_target_consumer = paced_target_stage(consumers)
             self.consumers = str(paced_target_consumer)
         self.paced_target_consumer = (None if paced is None
                                       else str(paced_target_consumer))
@@ -3393,7 +3408,9 @@ def main(argv=None):
     ap.add_argument("--sic-validate-threshold", type=float, default=0.25,
                     help="SIC holdout commit threshold")
     ap.add_argument("--consumer", default="both",
-                    choices=["cir", "demod", "both"])
+                    choices=["sic", "cir", "demod", "both"],
+                    help="paced target. sic releases admission credit on the "
+                         "SIC status and builds no CIR or demod block")
     ap.add_argument("--windows", type=int, default=None)
     ap.add_argument("--rate", type=float, default=None,
                     help="paced replay rate (Hz).  In estimate8_frozen the "
@@ -4298,7 +4315,7 @@ def main(argv=None):
             predicted_start=int(generator.pre),
             template_id="sync_template_code%d_998p4" % sensing_code,
             sensing_profile_id=sensing_profile_id)
-        target_stage = ("cir" if args.consumer in ("cir", "both") else "demod")
+        target_stage = paced_target_stage(args.consumer)
         pacer = PipelinedPacer(
             rate_hz=pace_rate, planned=planned,
             in_flight_max=int(sic_cfg["in_flight_max"]),
