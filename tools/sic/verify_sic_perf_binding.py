@@ -9,6 +9,12 @@ for both binaries.  It refuses a summary whose repo root, source hash, or
 effect-run library does not match the files on disk.  It does not rewrite
 the summary.
 
+The recorded git head must equal HEAD.  After a later commit, pass
+``--code-tested-sha`` equal to the recorded head.  That commit must be an
+ancestor of HEAD, and ``gr-uwb/lib``, ``gr-uwb/include`` and
+``benchmark_preamble_sic.cc`` must be unchanged.  The flag does not turn
+the check off.
+
 Exit 0 when the requested verdict holds.  Exit 1 otherwise.
 """
 
@@ -32,6 +38,14 @@ SWITCHES = (
     "UWB_SIC_INCR_RESID",
     "UWB_SIC_FUSED_SCORE",
 )
+# Identity of a core/GR benchmark.  A docs or pacer-only commit may follow
+# the measurement; a change here must fail re-verification.
+PERF_TREE_PATHS = (
+    "gr-uwb/lib",
+    "gr-uwb/include",
+    "gr-uwb/apps/benchmark_preamble_sic.cc",
+)
+
 SWITCH_DEFAULTS = {
     "UWB_SIC_REFINE_DIAG": True,
     "UWB_SIC_COL_CACHE": True,
@@ -90,6 +104,90 @@ def git_dirty(repo):
     if proc.returncode != 0:
         return True
     return bool(proc.stdout.strip())
+
+
+def git_commit(repo, rev):
+    proc = subprocess.run(
+        ["git", "-C", repo, "rev-parse", "--verify", rev + "^{commit}"],
+        capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+def git_is_ancestor(repo, older, newer):
+    proc = subprocess.run(
+        ["git", "-C", repo, "merge-base", "--is-ancestor", older, newer],
+        capture_output=True, text=True, check=False)
+    return proc.returncode == 0
+
+
+def git_diff_names(repo, older, newer, paths):
+    proc = subprocess.run(
+        ["git", "-C", repo, "diff", "--name-only", older, newer, "--", *paths],
+        capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        return None
+    return [ln for ln in proc.stdout.splitlines() if ln.strip()]
+
+
+def check_recorded_head(repo, recorded, code_tested):
+    """Commit check for one archived summary.
+
+    Returns ``(errors, info)``.  Exact equality with HEAD passes.  A later
+    HEAD passes only when ``code_tested`` is the recorded commit, that
+    commit is an ancestor of HEAD, and the performance sources are unchanged.
+    """
+    head = git_head(repo)
+    info = {
+        "git_head": head,
+        "recorded_git_head": recorded or "",
+        "code_tested_sha": "",
+        "relation": "",
+        "perf_sources_changed": [],
+    }
+    errors = []
+    if not recorded:
+        errors.append("provenance.git_head missing")
+        return errors, info
+    recorded_full = git_commit(repo, recorded)
+    if recorded == head or (recorded_full and recorded_full == head):
+        if code_tested:
+            tested = git_commit(repo, code_tested)
+            if not tested or tested != recorded_full:
+                errors.append(
+                    "code-tested SHA %s != recorded git_head %s" % (
+                        code_tested, recorded_full or recorded))
+        info["relation"] = "equal"
+        info["code_tested_sha"] = recorded_full or recorded
+        return errors, info
+    if not code_tested:
+        errors.append("provenance.git_head %s != %s" % (recorded, head))
+        return errors, info
+    tested = git_commit(repo, code_tested)
+    info["code_tested_sha"] = tested
+    if not tested or not recorded_full:
+        errors.append("code-tested SHA or recorded git_head is not a commit")
+        return errors, info
+    if tested != recorded_full:
+        errors.append("code-tested SHA %s != recorded git_head %s" % (
+            tested, recorded_full))
+        return errors, info
+    if not git_is_ancestor(repo, tested, head):
+        errors.append("code-tested SHA %s is not an ancestor of HEAD %s" % (
+            tested, head))
+        return errors, info
+    changed = git_diff_names(repo, tested, head, PERF_TREE_PATHS)
+    if changed is None:
+        errors.append("git diff of performance sources failed")
+        return errors, info
+    info["relation"] = "ancestor"
+    info["perf_sources_changed"] = changed
+    if changed:
+        errors.append(
+            "performance sources changed since code-tested SHA: %s" % (
+                ", ".join(changed),))
+    return errors, info
 
 
 def switch_from_env(env):
@@ -163,6 +261,12 @@ def main(argv):
                     help="with --expect-refused, summary.effect_verified "
                          "must be false (candidate binary)")
     ap.add_argument("--require-clean", action="store_true")
+    ap.add_argument("--code-tested-sha", default="",
+                    help="recorded measurement commit.  Required when HEAD "
+                         "has moved.  It must equal provenance.git_head, be "
+                         "an ancestor of HEAD, and leave gr-uwb/lib, "
+                         "gr-uwb/include and benchmark_preamble_sic.cc "
+                         "unchanged.  Omitting it keeps the exact HEAD check.")
     ap.add_argument("--require-switches", action="store_true",
                     help="the summary itself must archive UWB_SIC_* switches")
     ap.add_argument("--env-json", default="",
@@ -207,10 +311,10 @@ def main(argv):
     if build_dir and not inside(build_dir, repo):
         errors.append("build_dir is outside repo")
 
-    head = git_head(repo)
-    if prov.get("git_head") != head:
-        errors.append("provenance.git_head %s != %s" % (
-            prov.get("git_head"), head))
+    head_errors, head_info = check_recorded_head(
+        repo, prov.get("git_head") or "", args.code_tested_sha)
+    errors.extend(head_errors)
+    head = head_info["git_head"]
     dirty = git_dirty(repo)
     if args.require_clean and dirty:
         errors.append("repo is dirty")
@@ -267,6 +371,10 @@ def main(argv):
         "summary_sha256": summary_sha,
         "repo": repo,
         "git_head": head,
+        "git_head_relation": head_info["relation"],
+        "code_tested_sha": head_info["code_tested_sha"],
+        "recorded_git_head": head_info["recorded_git_head"],
+        "perf_sources_changed": head_info["perf_sources_changed"],
         "git_dirty": dirty,
         "source_sha256": source_sha,
         "build_dir": build_dir,
