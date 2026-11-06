@@ -1,6 +1,12 @@
-# 当前任务：FIR 乘加融合优化（待执行）
+# 当前任务：FIR 乘加融合优化已交付
 
-优先执行 `docs/sic/OpenCode_FIR乘加融合优化_2026-11-07.md`。仅优化离散 CIR 的 FIR 乘加，复用现有 tap 数实验；最小实现、针对性 QA、同轮旧/新计时，每阶段反馈证据与下一步。本次交付为任务书，尚未修改生产代码。下方为历史开发记录。
+结果见 `docs/sic/DiscreteCIR_FIR乘加融合报告_2026-11-07.md`，code-tested SHA
+`ddf335d`。融合 `dst += h*src` 后，12 tap 纯 FIR mean 1.072→0.548 ms
+（比值 0.511），3 tap FIR 0.296→0.161 ms，3 tap wrapper 1.199→1.085 ms；
+所有 tap 数 FIR/channel/wrapper mean 与 P95 下降。独立 double 卷积最大相对
+L2 1.3524e-7（门槛 2e-5），针对性 QA 通过。新 build
+`gr-uwb/build-sic-fullpacket-fused`，旧 build 未覆盖；未改估计器、tap 选择、
+CFO、FCS/ROI 或默认后端，未上板，不宣称实时目标通过。下方为历史开发记录。
 
 # 当前任务：离散等效 CIR full-packet 后端已交付
 
