@@ -102,11 +102,14 @@ struct Engine {
   if(mode=="preamble") {
    // First output chunk contains only available samples. Future chunks are applied after arrival.
    t=Clock::now();size_t prefix=cfg.observed_end_sample;
-   sic::apply_model(model,y.data(),prefix,0,templ,cfg,scratch,out.data(),ihat.data());
-   r.channel+=us(t,Clock::now());r.first=us(epoch,Clock::now());
+   sic::SicTimings back;
+   sic::apply_model(model,y.data(),prefix,0,templ,cfg,scratch,out.data(),ihat.data(),&back);
+   double back_wall=us(t,Clock::now());r.channel+=back.reconstruct_us;
+   r.subtract+=std::max(0.,back_wall-double(back.reconstruct_us));r.first=us(epoch,Clock::now());
    wait_sample(n);
-   t=Clock::now();sic::apply_model(model,y.data()+prefix,n-prefix,prefix,templ,cfg,scratch,out.data()+prefix,ihat.data()+prefix);
-   r.channel+=us(t,Clock::now());r.committed=model.valid;r.reason=model.reason?model.reason:model.status;
+   sic::SicTimings forward;t=Clock::now();sic::apply_model(model,y.data()+prefix,n-prefix,prefix,templ,cfg,scratch,out.data()+prefix,ihat.data()+prefix,&forward);
+   double forward_wall=us(t,Clock::now());r.channel+=forward.reconstruct_us;
+   r.subtract+=std::max(0.,forward_wall-double(forward.reconstruct_us));r.committed=model.valid;r.reason=model.reason?model.reason:model.status;
    r.lo=model.valid?model.sub_lo:0;r.hi=model.valid?model.sub_hi:0;
   } else {
    wait_sample(n);t=Clock::now();demod::DemodResult decoded;
@@ -141,7 +144,7 @@ int main(int argc,char**argv)try {
   auto order=modes;if(j%2)std::reverse(order.begin(),order.end());
   for(auto&m:order){auto arrival=Clock::now();auto r=e.process(y,j,src,m,t0,arrival,false,us(t0,arrival),us(t0,arrival));emit(log,r);if(a.dump){std::ostringstream p;p<<'w'<<std::setfill('0')<<std::setw(6)<<j<<'_'<<m<<".cf32";write_iq(a.out/p.str(),e.out);}++submitted;++completed;}
  }} else {
-  if(a.mode=="both")throw std::runtime_error("paced modes must run separately");
+  if(a.mode!="preamble" && a.mode!="full")throw std::runtime_error("paced modes must be preamble or full separately");
   // Only raw input pool preloaded. Online worker sees no truth or decoded packets.
   size_t pool=std::min<size_t>(16,windows.size());std::vector<std::vector<C>> inputs;for(size_t j=0;j<pool;++j)inputs.push_back(read_iq(windows[j]/"raw.cf32"));
   struct Job {size_t id,src;Clock::time_point arrival;double submit,scheduled;};std::deque<Job> q;std::mutex mu,output;std::condition_variable cv;bool done=false;size_t bound=2;
