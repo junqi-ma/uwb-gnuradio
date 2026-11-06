@@ -1,3 +1,7 @@
+# 当前任务：通信解码加速（待执行）
+
+优先执行 `docs/sic/OpenCode_通信解码加速任务书_2026-11-07.md`，分析依据 `docs/sic/通信解码实现与优化分析_2026-11-07.md`，基线 `c13253b`。主 agent 冻结接口后调度3个 subagent：同步/SFD、CFO旋转、按PHR长度生成soft chips；共享核心头文件只由主 agent 集成。必要QA与一次功能/性能对照，不重复历史smoke；每阶段反馈证据和下一步。本次只交付任务书，未开始算法修改。以下为历史记录。
+
 # 当前任务：FIR 乘加融合优化已交付
 
 结果见 `docs/sic/DiscreteCIR_FIR乘加融合报告_2026-11-07.md`，code-tested SHA
