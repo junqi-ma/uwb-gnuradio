@@ -309,3 +309,10 @@ target_link_libraries(twr_m2a_bench PRIVATE
     uwb_twr_phy Volk::volk Threads::Threads)
 target_compile_definitions(twr_m2a_bench PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
+add_executable(benchmark_fullpacket_compare benchmark_fullpacket_compare.cc)
+target_link_libraries(benchmark_fullpacket_compare gnuradio-uwb)
+
+add_test(NAME uwb_qa_fullpacket_compare_py
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/sic/qa_fullpacket_compare.py)
+set_tests_properties(uwb_qa_fullpacket_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)

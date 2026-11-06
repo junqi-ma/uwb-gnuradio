@@ -113,5 +113,7 @@ install(FILES
     # reuses the hrp_mod / resampler / demod cores above, so it installs and an
     # isolated consumer can drive a full-frame native round trip.
     uwb_twr_phy.h
+    uwb_fullpacket_sic_core.h
+    uwb_preamble_sic_core.h
     DESTINATION include/gnuradio/uwb
 )

@@ -1,3 +1,7 @@
+# 当前实验：Full-packet 与 preamble-only SIC 比较
+
+执行 docs/sic/FullPacket_vs_PreambleOnly_开发计划_2026-11-06.md。仅本实验分支允许新增整包路径；原 preamble 行为与历史基线保持。主 agent 与三个 subagent 按文件所有权协作。
+
 # 已验收 A/B 集成基线（2026-10-18）
 
 本文件是 S2-A 与 S2-B 合并后的共同研究基线。下方 `---` 之后的 S0/S1/TWR

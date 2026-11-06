@@ -79,6 +79,7 @@ list(APPEND uwb_sources
     uwb_cir_writer.cc
     uwb_realtime_echo_timer.cc
     uwb_echo_timer_stream.cc
+    uwb_fullpacket_sic_core.cc
     uwb_preamble_sic_core.cc
     uwb_preamble_sic.cc
 )
@@ -226,6 +227,7 @@ list(APPEND test_uwb_sources
     qa_uwb_radar_e2e.cc
     qa_uwb_uhd_backend.cc
     qa_uwb_hrp_mod_core.cc
+    qa_uwb_fullpacket_sic_core.cc
     qa_uwb_preamble_sic_core.cc
     qa_uwb_preamble_sic.cc
     qa_uwb_hrp_packet_source.cc
