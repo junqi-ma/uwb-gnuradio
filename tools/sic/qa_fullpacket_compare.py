@@ -66,6 +66,22 @@ def main():
             changed = copy.deepcopy(native)
             change(changed)
             assert not evaluate(changed)["passed"], name+" escaped"
+        # Cached-prefix accounting is diagnostic work saved, not a second
+        # time contribution. Retain archive compatibility when fields absent.
+        cached = copy.deepcopy(rows)
+        for row in cached:
+            row["reconstruction"] = "payload_cached"
+        cached[1]["reconstruction_stats"] = dict(
+            phase_filter_us=.25, path_accum_us=.25, cfo_check_us=.25,
+            prefix_cache_used=True, key_changed=False, cached_samples=64,
+            phase_calls=4, nonzero_phase_calls=3, cache_hits=2, cache_misses=1,
+            fir_output_samples=512, reference_fir_output_samples=768)
+        cached_summary = evaluate(cached)
+        assert cached_summary["passed"], cached_summary["errors"]
+        assert cached_summary["modes"]["full"]["reconstruction_stats"]["cache_hits"]["mean"] == 2
+        bad_work = copy.deepcopy(cached)
+        bad_work[1]["reconstruction_stats"]["fir_output_samples"] = 769
+        assert not evaluate(bad_work)["passed"], "invalid FIR work accounting escaped"
         evaluate(rows)  # archived records without RX metadata remain supported
         for name, mutate in [
             ("support", lambda r: r[1].update(support=[0,1])),

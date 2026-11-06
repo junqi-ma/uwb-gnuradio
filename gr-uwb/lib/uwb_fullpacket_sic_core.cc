@@ -12,6 +12,13 @@ using cd = std::complex<double>;
 using Clock = std::chrono::steady_clock;
 constexpr double pi = 3.14159265358979323846;
 constexpr size_t phases = 32, half = 16, taps_count = 33, rot_block = 1024;
+// The continuous convolutional encoder feeds PHR19 then payload bits, but
+// emits21 physical PHR symbols. Its last two symbols therefore depend on the
+// first payload bits. Keep those symbols, a conservative shaping guard and the
+// fractional FIR's future halo in the dynamic tail.
+constexpr size_t variable_phr_start = 64 * 1016 + 8 * 1016 + 19 * 1024;
+constexpr size_t prefix_input = variable_phr_start - 64;
+constexpr size_t prefix_output = prefix_input - half;
 double us(Clock::time_point t) {
     return std::chrono::duration<double, std::micro>(Clock::now() - t).count();
 }
@@ -46,6 +53,32 @@ void phase_row(const cf* wave, size_t n, size_t g, cf* row, cd* tmp) {
     }
     for(size_t j=0;j<n;++j) row[j]=cf(float(tmp[j].real()),float(tmp[j].imag()));
 }
+// Compute the SAME output samples as phase_row, but only [first,last).
+// Source indices remain packet-global: the dynamic tail sees both sides of the
+// split, rather than treating the payload boundary as a new zero-padded signal.
+void phase_row_range(const cf* wave, size_t n, size_t g, cf* row, cd* tmp,
+                     size_t first, size_t last) {
+    if (!g) { std::copy(wave+first,wave+last,row+first); return; }
+    double taps[taps_count], sum=0;
+    const double tau=double(g)/phases;
+    for (size_t p=0;p<taps_count;++p) {
+        const double j=double(p)-half, x=j-tau;
+        taps[p] = (std::abs(x)<1e-12 ? 1.0 : std::sin(pi*x)/(pi*x)) *
+            (0.54-0.46*std::cos(2*pi*p/(taps_count-1)));
+        sum += taps[p];
+    }
+    for (auto& t:taps) t *= 1.0/sum;
+    std::fill(tmp+first,tmp+last,cd(0));
+    for (size_t p=0;p<taps_count;++p) {
+        const int64_t shift=int64_t(p)-half;
+        const int64_t lo=std::max<int64_t>(int64_t(first),std::max<int64_t>(0,shift));
+        const int64_t hi=std::min<int64_t>(int64_t(last),std::min<int64_t>(n,int64_t(n)+shift));
+        for(int64_t j=lo;j<hi;++j) tmp[j] += cd(wave[j-shift])*taps[p];
+    }
+    // Preserve double accumulation and the original float32 row rounding.
+    for(size_t j=first;j<last;++j) row[j]=cf(float(tmp[j].real()),float(tmp[j].imag()));
+}
+
 int64_t floordiv(int64_t a,int64_t b) {
     return a/b-((a%b)<0 ? 1 : 0);
 }
@@ -58,6 +91,20 @@ void FullPacketScratch::reserve(size_t max_samples) {
     phase0.resize(max_samples); phase1.resize(max_samples);
     accum.resize(max_samples); phase_tmp.resize(max_samples);
     expected_phr.reserve(19);
+    prefix_cache_enabled=false;prefix_key_valid=false;prefix_phase_mask=0;
+    prefix_input_len=0;prefix_output_len=0;
+}
+
+bool FullPacketScratch::prepare_prefix_cache() {
+    prefix_cache_enabled=false;prefix_key_valid=false;prefix_phase_mask=0;
+    prefix_input_len=0;prefix_output_len=0;
+    if(capacity<prefix_input || waveform.size()<capacity || phase_tmp.size()<capacity)
+        return false;
+    prefix_key.resize(prefix_input);
+    prefix_rows.resize(phases*prefix_output);
+    prefix_input_len=prefix_input;prefix_output_len=prefix_output;
+    prefix_cache_enabled=true;
+    return true;
 }
 
 FullPacketResult fullpacket_cancel(
@@ -131,14 +178,55 @@ FullPacketResult fullpacket_cancel(
     if(lo<0 || hi>int64_t(n)) {r.reason="context_truncated";r.channel_us=us(tc);return r;}
     r.sub_lo=std::max(lo,roi_lo);r.sub_hi=std::min(hi,roi_hi);
     if(r.sub_hi<=r.sub_lo) {r.reason="no_overlap";r.channel_us=us(tc);return r;}
+    if(s.prefix_cache_enabled) {
+        if(s.prefix_input_len!=prefix_input || s.prefix_output_len!=prefix_output ||
+           s.prefix_key.size()<prefix_input || s.prefix_rows.size()<phases*prefix_output ||
+           plen<prefix_input) {
+            r.reason="prefix_cache_unprepared";r.channel_us=us(tc);return r;
+        }
+        r.prefix_cache_used=true;r.prefix_cached_samples=prefix_output;
+        // Exact bytes include actual packet normalization and PHR. A new
+        // length, amplitude or prefix waveform invalidates all phase rows.
+        if(!s.prefix_key_valid ||
+           std::memcmp(s.prefix_key.data(),s.waveform.data(),prefix_input*sizeof(cf))) {
+            std::copy(s.waveform.begin(),s.waveform.begin()+prefix_input,s.prefix_key.begin());
+            s.prefix_phase_mask=0;s.prefix_key_valid=true;r.prefix_key_changed=true;
+        }
+    }
+    auto build_phase=[&](size_t g,cf* row) {
+        const auto tp=Clock::now();
+        ++r.phase_calls;
+        if(g) {
+            ++r.nonzero_phase_calls;r.reference_fir_output_samples+=plen;
+        }
+        if(!s.prefix_cache_enabled || !g) {
+            phase_row(s.waveform.data(),plen,g,row,s.phase_tmp.data());
+            if(g) r.fir_output_samples+=plen;
+        } else {
+            const uint32_t bit=uint32_t(1)<<g;
+            cf* const cached=s.prefix_rows.data()+g*prefix_output;
+            if(s.prefix_phase_mask&bit) {
+                ++r.prefix_cache_hits;
+            } else {
+                phase_row_range(s.waveform.data(),plen,g,cached,s.phase_tmp.data(),0,prefix_output);
+                s.prefix_phase_mask|=bit;
+                ++r.prefix_cache_misses;r.fir_output_samples+=prefix_output;
+            }
+            std::copy(cached,cached+prefix_output,row);
+            phase_row_range(s.waveform.data(),plen,g,row,s.phase_tmp.data(),prefix_output,plen);
+            r.fir_output_samples+=plen-prefix_output;
+        }
+        r.phase_filter_us+=us(tp);
+    };
     std::fill(s.accum.begin(),s.accum.begin()+n,cd(0));
     for(size_t k=0;k<m.n_paths;++k) {
         const int64_t ni=int64_t(std::floor(m.tau_abs[k]));
         const double beta=(m.tau_abs[k]-double(ni))*phases;
         const size_t g=std::min<size_t>(phases-1,size_t(beta));
         const double alpha=std::clamp(beta-double(g),0.0,1.0);
-        phase_row(s.waveform.data(),plen,g,s.phase0.data(),s.phase_tmp.data());
-        if(alpha!=0) phase_row(s.waveform.data(),plen,(g+1)%phases,s.phase1.data(),s.phase_tmp.data());
+        build_phase(g,s.phase0.data());
+        if(alpha!=0) build_phase((g+1)%phases,s.phase1.data());
+        const auto ta=Clock::now();
         const cd gain=cd(m.gain[k])*r.waveform_scale;
         // Match preamble core's double row-AXPY accumulation ordering.
         for(int64_t j=lo;j<hi;++j) {
@@ -149,7 +237,9 @@ FullPacketResult fullpacket_cancel(
             const int64_t q=j-ni-(g+1==phases ? 1 : 0);
             if(q>=0 && q<int64_t(plen)) s.accum[j]+=cd(s.phase1[q])*gain*alpha;
         }
+        r.path_accum_us+=us(ta);
     }
+    const auto t_cfo=Clock::now();
     std::array<cf,rot_block> base;
     const double omega=2*pi*m.cfo_hz/m.sample_rate;
     const cd step=std::exp(cd(0,omega));cd cur=1;
@@ -161,11 +251,12 @@ FullPacketResult fullpacket_cancel(
         for(size_t z=0;z<count;++z) {
             s.model[j+z]=cf(s.accum[j+z])*(base[j0+z]*block);
             if(!finite(s.model[j+z]) || !finite(y[j+z]-s.model[j+z])) {
-                r.reason="nonfinite_reconstruction";r.channel_us=us(tc);return r;
+                r.reason="nonfinite_reconstruction";r.cfo_check_us=us(t_cfo);r.channel_us=us(tc);return r;
             }
         }
         j+=count;
     }
+    r.cfo_check_us=us(t_cfo);
     r.channel_us=us(tc);
     const auto ts=Clock::now();
     for(int64_t j=r.sub_lo;j<r.sub_hi;++j) out[j]=y[j]-s.model[j];

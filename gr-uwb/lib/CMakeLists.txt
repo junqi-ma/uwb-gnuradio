@@ -227,6 +227,7 @@ list(APPEND test_uwb_sources
     qa_uwb_radar_e2e.cc
     qa_uwb_uhd_backend.cc
     qa_uwb_hrp_mod_core.cc
+    qa_uwb_fullpacket_payload_cache.cc
     qa_uwb_fullpacket_fast_rx.cc
     qa_uwb_fullpacket_sic_core.cc
     qa_uwb_preamble_sic_core.cc

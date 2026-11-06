@@ -85,7 +85,7 @@ def library_binding(binary, build, env):
     return completed.stdout, loaded
 
 
-def provenance(binary, build, env, rx_pipeline):
+def provenance(binary, build, env, rx_pipeline, reconstruction):
     flags_file = build / "apps/CMakeFiles" / (binary.name + ".dir") / "flags.make"
     if not flags_file.is_file():
         raise RuntimeError(f"selected runner compile flags missing: {flags_file}")
@@ -115,6 +115,7 @@ def provenance(binary, build, env, rx_pipeline):
                 git_dirty=bool(status), git_status=status.splitlines(),
                 build_dir=str(build), binary={"path": str(binary), "sha256": sha256(binary)},
                 requested_rx_pipeline=rx_pipeline,
+                requested_reconstruction=reconstruction,
                 expected_rx_avx2=rx_pipeline == "fast",
                 compile_flags=dict(path=str(flags_file), sha256=sha256(flags_file),
                                    content=flags_text),
@@ -177,7 +178,13 @@ def check_rx_metadata(record, expected, label):
     return {"rx_pipeline": record["rx_pipeline"], "rx_avx2": record["rx_avx2"]}
 
 
-def annotate(run, source_windows, source_hashes, rx_pipeline):
+def check_reconstruction_metadata(record, expected, label):
+    if record.get("reconstruction") != expected:
+        raise RuntimeError(f"{label}: reconstruction {record.get('reconstruction')!r} != requested {expected!r}")
+    return record["reconstruction"]
+
+
+def annotate(run, source_windows, source_hashes, rx_pipeline, reconstruction):
     log = run / "windows.jsonl"
     original = run / "windows.runner.jsonl"
     log.rename(original)
@@ -185,6 +192,7 @@ def annotate(run, source_windows, source_hashes, rx_pipeline):
         for line in src:
             row = json.loads(line)
             check_rx_metadata(row, rx_pipeline, f"{run.name}/row {row.get('window_id')}")
+            check_reconstruction_metadata(row, reconstruction, f"{run.name}/row {row.get('window_id')}")
             source = row["source_window"]
             if not isinstance(source, int) or not 0 <= source < len(source_windows):
                 raise ValueError("runner source_window outside declared pool")
@@ -260,6 +268,8 @@ def main(argv=None):
     parser.add_argument("--kind", required=True, choices=DEFAULT_CELLS)
     parser.add_argument("--rx-pipeline", choices=("portable", "fast"), default="fast",
                         help="fast uses the mature native AVX2/FMA RX; portable keeps the baseline runner")
+    parser.add_argument("--reconstruction", choices=("full", "payload_cached"), default="full",
+                        help="full reference FIR or exact cached-prefix plus payload/boundary FIR")
     parser.add_argument("--cell", action="append", help="repeat to select multiple cells")
     parser.add_argument("--windows", type=int, help="input source windows when generating; existing cases reused intact")
     parser.add_argument("--seed", type=int, default=2000000)
@@ -287,7 +297,7 @@ def main(argv=None):
         parser.error(f"runner missing: {binary}")
     env = clean_env()
     out.mkdir(parents=True, exist_ok=True)
-    prov = provenance(binary, build, env, args.rx_pipeline)
+    prov = provenance(binary, build, env, args.rx_pipeline, args.reconstruction)
     write_json(out / "provenance.json", prov)
     plans = []
     for cell in cells:
@@ -304,7 +314,7 @@ def main(argv=None):
         if len(windows) != source_count:
             print(f"reuse {cell}: {len(windows)} existing sources (requested generation size {source_count})", flush=True)
         plans.append((cell, case, pub, windows, hashes, templates))
-    write_json(out / "experiment_plan.json", dict(kind=args.kind, rx_pipeline=args.rx_pipeline, cells=cells, seed=args.seed,
+    write_json(out / "experiment_plan.json", dict(kind=args.kind, rx_pipeline=args.rx_pipeline, reconstruction=args.reconstruction, cells=cells, seed=args.seed,
         source_windows_requested=source_count, observations=args.observations,
         rounds=args.rounds, warmup_per_mode_per_round=args.warmup,
         paced_rate=args.rate, paced_seconds=args.seconds,
@@ -327,7 +337,8 @@ def main(argv=None):
                 for label, mode, count, warmup in jobs:
                     run = out / cell / label
                     command = [binary, "--case", case, "--out", run,
-                               "--mode", mode, "--warmup", str(warmup)]
+                               "--mode", mode, "--warmup", str(warmup),
+                               "--reconstruction", args.reconstruction]
                     if count is not None:
                         command += ["--repeat", str(count)]
                     if args.kind == "paced":
@@ -339,6 +350,7 @@ def main(argv=None):
                         input_case=str(case), source_count=len(windows), template_hashes=templates,
                         public_profile=pub, provenance_file=str(out / "provenance.json"),
                         requested_rx_pipeline=args.rx_pipeline,
+                        requested_reconstruction=args.reconstruction,
                         expected_rx_avx2=args.rx_pipeline == "fast",
                         service_observations_are_unique_packets=args.kind not in ("timing", "paced"),
                         full_context_arrival_policy="whole_public_context")
@@ -351,7 +363,9 @@ def main(argv=None):
                         runner_summary = json.loads((run / "runner_summary.json").read_text())
                         item["rx_kernel"] = check_rx_metadata(runner_summary, args.rx_pipeline,
                                                               str(run / "runner_summary.json"))
-                        annotate(run, windows, actual_hashes, args.rx_pipeline)
+                        item["reconstruction"] = check_reconstruction_metadata(
+                            runner_summary, args.reconstruction, str(run / "runner_summary.json"))
+                        annotate(run, windows, actual_hashes, args.rx_pipeline, args.reconstruction)
                         if mode in ("raw", "clean"):
                             item["reference_summary"] = reference_summary(run, windows, mode)
                         else:
@@ -368,12 +382,12 @@ def main(argv=None):
                         item["runner_summary"] = runner_summary
                     results.append(item)
                     write_json(out / "experiment_summary.json", dict(
-                        schema="fullpacket-experiment/1", kind=args.kind, rx_pipeline=args.rx_pipeline,
+                        schema="fullpacket-experiment/1", kind=args.kind, rx_pipeline=args.rx_pipeline, reconstruction=args.reconstruction,
                         complete=False, results=results, provenance=str(out / "provenance.json")))
                     print(f"{cell}/{label}: runner={rc} verifier={item.get('verifier_rc', 'not-run')}", flush=True)
     except BaseException:
         write_json(out / "experiment_summary.json", dict(
-            schema="fullpacket-experiment/1", kind=args.kind, rx_pipeline=args.rx_pipeline,
+            schema="fullpacket-experiment/1", kind=args.kind, rx_pipeline=args.rx_pipeline, reconstruction=args.reconstruction,
             complete=False, results=results, provenance=str(out / "provenance.json")))
         raise
     passed = all(r["runner_rc"] == 0 and
@@ -381,7 +395,7 @@ def main(argv=None):
                   if "reference_summary" in r else r.get("verifier_rc") == 0)
                  for r in results)
     write_json(out / "experiment_summary.json", dict(schema="fullpacket-experiment/1",
-        kind=args.kind, rx_pipeline=args.rx_pipeline, complete=True, passed=passed, results=results,
+        kind=args.kind, rx_pipeline=args.rx_pipeline, reconstruction=args.reconstruction, complete=True, passed=passed, results=results,
         provenance=str(out / "provenance.json"),
         repeated_exposure_note="timing/paced reuse a finite raw IQ pool; do not treat observations as independent packets",
         rate_aggregation="per-run verifier unique_source_rates; repeated rounds must not be pooled as independent trials"))

@@ -32,9 +32,10 @@ std::vector<C> read_iq(const fs::path& p) {
 void write_iq(const fs::path& p,const std::vector<C>& a) { std::ofstream f(p,std::ios::binary); f.write(reinterpret_cast<const char*>(a.data()),a.size()*sizeof(C)); if(!f) throw std::runtime_error("write IQ"); }
 std::string hex(const std::vector<uint8_t>& b) { std::ostringstream o; o<<std::hex<<std::setfill('0'); for(auto x:b)o<<std::setw(2)<<int(x);return o.str(); }
 std::string quote(const std::string& s) { std::ostringstream o;o<<'"';for(char c:s){if(c=='"'||c=='\\')o<<'\\';if(c=='\n')o<<"\\n";else o<<c;}o<<'"';return o.str(); }
-struct Options {fs::path input,out; size_t repeat=0,warmup=0; double rate=0,seconds=10;std::string mode="both";bool dump=false;};
+struct Options {fs::path input,out; size_t repeat=0,warmup=0; double rate=0,seconds=10;std::string mode="both",reconstruction="full";bool dump=false;};
 struct Row {
- size_t id=0,source=0,n=0;std::string mode,reason="not_run"; bool committed=false,valid=false,rejected=false;
+ size_t id=0,source=0,n=0;std::string mode,reason="not_run",reconstruction="full";
+ sic::FullPacketResult recon_stats; bool committed=false,valid=false,rejected=false;
  uint64_t model_id=0; int64_t observed=0,required=0,lo=0,hi=0,origin=-1;
  bool comm_fcs=false,sense_fcs=false;std::string comm_hex,sense_hex;int sense_status=-1,comm_status=-1,cir_status=-1;
  std::array<double,7> comm_stages{};
@@ -43,6 +44,7 @@ struct Row {
 };
 void emit(std::ostream& o,const Row&r){
  o<<std::setprecision(12)<<"{\"window_id\":"<<r.id<<",\"source_window\":"<<r.source<<",\"mode\":"<<quote(r.mode)
+ <<",\"reconstruction\":"<<quote(r.reconstruction)
  <<",\"rx_pipeline\":"<<quote(experiment::FastRxPipeline::avx2_enabled()?"fast":"portable")
  <<",\"rx_avx2\":"<<(experiment::FastRxPipeline::avx2_enabled()?"true":"false")
  <<",\"n\":"<<r.n<<",\"committed\":"<<(r.committed?"true":"false")<<",\"reason\":"<<quote(r.reason)
@@ -51,7 +53,17 @@ void emit(std::ostream& o,const Row&r){
  <<",\"comm_fcs\":"<<(r.mode=="preamble"?"null":r.comm_fcs?"true":"false")<<",\"comm_status\":"<<r.comm_status
  <<",\"comm_psdu_hex\":"<<quote(r.comm_hex)<<",\"sensing_fcs\":"<<(r.sense_fcs?"true":"false")
  <<",\"sensing_psdu_hex\":"<<quote(r.sense_hex)<<",\"sensing_status\":"<<r.sense_status<<",\"cir_status\":"<<r.cir_status
- <<",\"comm_stage_us\":{";
+ <<",\"reconstruction_stats\":{";
+ if(r.mode=="full" && !r.rejected) {
+  const auto& f=r.recon_stats;
+  o<<"\"phase_filter_us\":"<<f.phase_filter_us<<",\"path_accum_us\":"<<f.path_accum_us
+   <<",\"cfo_check_us\":"<<f.cfo_check_us<<",\"prefix_cache_used\":"<<(f.prefix_cache_used?"true":"false")
+   <<",\"key_changed\":"<<(f.prefix_key_changed?"true":"false")<<",\"cached_samples\":"<<f.prefix_cached_samples
+   <<",\"phase_calls\":"<<f.phase_calls<<",\"nonzero_phase_calls\":"<<f.nonzero_phase_calls
+   <<",\"cache_hits\":"<<f.prefix_cache_hits<<",\"cache_misses\":"<<f.prefix_cache_misses
+   <<",\"fir_output_samples\":"<<f.fir_output_samples<<",\"reference_fir_output_samples\":"<<f.reference_fir_output_samples;
+ }
+ o<<"},\"comm_stage_us\":{";
  if(r.mode=="full" && !r.rejected) {
   const char* names[]={"timing","cfo","sfd","cir","ns_sfd","phr","payload"};
   for(size_t k=0;k<7;++k){if(k)o<<',';o<<quote(names[k])<<':'<<r.comm_stages[k];}
@@ -70,8 +82,8 @@ struct Engine {
  std::vector<C> sync,pre,ssync,out,ihat;
  std::unique_ptr<experiment::FastRxPipeline> comm_rx,sensing_rx;
  radar::RadarCirConfig rc;radar::RadarCirCoreScratch rs;
- int64_t sense_seed;size_t n;double fsamp=998400000.;
- Engine(const fs::path& p) {
+ int64_t sense_seed;size_t n;double fsamp=998400000.;bool cached_prefix=false;
+ Engine(const fs::path& p,bool use_prefix_cache=false) {
   boost::property_tree::read_json((p/"public.json").string(),pub);
   if(pub.get<int>("comm_code",10)!=10 || pub.get<int>("sensing_code",9)!=9 || pub.get<int>("sync_reps",64)!=64 || pub.get<std::string>("sfd_mode","4z2")!="4z2" || pub.get<std::string>("pulse_shape","legacy")!="legacy")throw std::runtime_error("unsupported public PHY");
   n=pub.get<size_t>("n");fsamp=pub.get<double>("sample_rate");
@@ -85,6 +97,8 @@ struct Engine {
   std::string err;if(!sic::prepare_sic_core(cfg,sync.data(),sync.size(),pre.data(),pre.size(),scratch,&err))throw std::runtime_error(err);
   templ.sync=sync.data();templ.sync_len=sync.size();templ.preamble=pre.data();templ.preamble_len=pre.size();
   out.resize(n);ihat.resize(n);full.reserve(n);
+  cached_prefix=use_prefix_cache;
+  if(cached_prefix && !full.prepare_prefix_cache())throw std::runtime_error("prefix cache preparation failed");
   comm_rx=std::make_unique<experiment::FastRxPipeline>(n,10);
   sensing_rx=std::make_unique<experiment::FastRxPipeline>(n,9);
   sense_seed=pub.get<int64_t>("sensing_seed");
@@ -96,7 +110,7 @@ struct Engine {
              Clock::time_point epoch,Clock::time_point arrival,bool realtime,double submit,double scheduled) {
   if(y.size()!=n)throw std::runtime_error("input length mismatch");
   const double cpu_begin=cpu_us();
-  Row r;r.id=id;r.source=source;r.mode=mode;r.n=n;r.observed=cfg.observed_end_sample;r.submit=submit;r.scheduled=scheduled;
+  Row r;r.reconstruction=cached_prefix?"payload_cached":"full";r.id=id;r.source=source;r.mode=mode;r.n=n;r.observed=cfg.observed_end_sample;r.submit=submit;r.scheduled=scheduled;
   r.lateness=std::max(0.,submit-scheduled);
   r.required=(mode=="preamble"?cfg.observed_end_sample:int64_t(n));
   auto wait_sample=[&](size_t k){if(realtime)std::this_thread::sleep_until(arrival+std::chrono::nanoseconds(int64_t(k*1e9/fsamp)));};
@@ -130,7 +144,7 @@ struct Engine {
    r.comm_stages={double(decoded.stage_timing_us),double(decoded.stage_cfo_us),double(decoded.stage_sfd_us),double(decoded.stage_cir_us),double(decoded.stage_ns_sfd_us),double(decoded.stage_phr_us),double(decoded.stage_payload_us)};
    r.comm_status=int(decoded.status);r.comm_fcs=model.valid&&decoded.payload.fcs_pass;r.comm_hex=hex(decoded.payload.bytes);
    t=Clock::now();auto f=sic::fullpacket_cancel(y.data(),n,decoded.phr.phr_bits,decoded.payload.bytes,r.comm_fcs,modcfg,model,sync.data(),sync.size(),cfg.sub_roi_lo,cfg.sub_roi_hi,full,out.data(),ihat.data());
-   double full_wall=us(t,Clock::now());r.validate=f.validate_us;r.tx=f.tx_us;r.channel=f.channel_us;r.subtract=f.subtract_us;
+   r.recon_stats=f;double full_wall=us(t,Clock::now());r.validate=f.validate_us;r.tx=f.tx_us;r.channel=f.channel_us;r.subtract=f.subtract_us;
    r.copy=std::max(0.,full_wall-r.validate-r.tx-r.channel-r.subtract);
    r.committed=f.committed;r.reason=f.reason;r.lo=f.sub_lo;r.hi=f.sub_hi;r.first=us(epoch,Clock::now());
   }
@@ -144,12 +158,13 @@ struct Engine {
 };
 int main(int argc,char**argv)try {
  Options a;for(int k=1;k<argc;++k){std::string v=argv[k];auto next=[&](){if(++k>=argc)throw std::runtime_error("missing argument");return std::string(argv[k]);};
- if(v=="--case")a.input=next();else if(v=="--out")a.out=next();else if(v=="--repeat")a.repeat=std::stoull(next());else if(v=="--warmup")a.warmup=std::stoull(next());else if(v=="--mode")a.mode=next();else if(v=="--paced-rate")a.rate=std::stod(next());else if(v=="--paced-seconds")a.seconds=std::stod(next());else if(v=="--dump-iq")a.dump=true;else throw std::runtime_error("unknown argument "+v);}
+ if(v=="--case")a.input=next();else if(v=="--out")a.out=next();else if(v=="--repeat")a.repeat=std::stoull(next());else if(v=="--warmup")a.warmup=std::stoull(next());else if(v=="--mode")a.mode=next();else if(v=="--reconstruction")a.reconstruction=next();else if(v=="--paced-rate")a.rate=std::stod(next());else if(v=="--paced-seconds")a.seconds=std::stod(next());else if(v=="--dump-iq")a.dump=true;else throw std::runtime_error("unknown argument "+v);}
+ if(!(a.reconstruction=="full"||a.reconstruction=="payload_cached"))throw std::runtime_error("invalid reconstruction mode");
  if(a.input.empty()||a.out.empty()||!(a.mode=="both"||a.mode=="full"||a.mode=="preamble"||a.mode=="raw"||a.mode=="clean")||a.rate<0||a.seconds<=0)throw std::runtime_error("invalid arguments");
  if(fs::exists(a.out/"windows.jsonl"))throw std::runtime_error("output exists; choose new run");
  fs::create_directories(a.out);
  std::vector<fs::path>windows;for(auto& d:fs::directory_iterator(a.input/"windows"))if(d.is_directory()&&fs::exists(d.path()/"raw.cf32"))windows.push_back(d.path());std::sort(windows.begin(),windows.end());if(windows.empty())throw std::runtime_error("no input windows");
- Engine e(a.input);std::ofstream log(a.out/"windows.jsonl");std::vector<std::string> modes=a.mode=="both"?std::vector<std::string>{"preamble","full"}:std::vector<std::string>{a.mode};
+ auto init_t0=Clock::now();Engine e(a.input,a.reconstruction=="payload_cached");double engine_init_us=us(init_t0,Clock::now());std::ofstream log(a.out/"windows.jsonl");std::vector<std::string> modes=a.mode=="both"?std::vector<std::string>{"preamble","full"}:std::vector<std::string>{a.mode};
  auto t0=Clock::now();auto first=read_iq(windows.front()/"raw.cf32");for(size_t j=0;j<a.warmup;++j)for(auto&m:modes)e.process(first,0,0,m,t0,t0,false,0,0);
  t0=Clock::now();size_t submitted=0,completed=0,rejected=0,source_late=0;
  if(a.rate==0){size_t count=a.repeat?a.repeat:windows.size();for(size_t j=0;j<count;++j){size_t src=j%windows.size();auto y=read_iq(windows[src]/(a.mode=="clean"?"clean.cf32":"raw.cf32"));
@@ -168,9 +183,9 @@ int main(int argc,char**argv)try {
    }}catch(...){worker_error=std::current_exception();}});
   size_t total=size_t(a.rate*a.seconds);for(size_t j=0;j<total;++j){auto arrival=t0+std::chrono::nanoseconds(int64_t(j*1e9/a.rate));auto admission=arrival+std::chrono::nanoseconds(int64_t(e.cfg.observed_end_sample*1e9/e.fsamp));std::this_thread::sleep_until(admission);auto now=Clock::now();double scheduled=us(t0,admission),submit=us(t0,now);if(submit-scheduled>1e6/a.rate)++source_late;
    bool full;{std::lock_guard<std::mutex>lk(mu);full=q.size()>=bound;if(!full)q.push_back({j,j%pool,arrival,submit,scheduled});}++submitted;
-   if(full){Row r;r.id=j;r.source=j%pool;r.mode=a.mode;r.n=e.n;r.observed=e.cfg.observed_end_sample;r.required=a.mode=="preamble"?r.observed:e.n;r.reason="queue_full";r.rejected=true;r.submit=r.start=r.finish=r.result=r.first=submit;r.scheduled=scheduled;r.lateness=submit-scheduled;r.ready=us(t0,arrival)+r.required*1e6/e.fsamp;std::lock_guard<std::mutex>lk(output);emit(log,r);++rejected;}else cv.notify_one();
+   if(full){Row r;r.reconstruction=a.reconstruction;r.id=j;r.source=j%pool;r.mode=a.mode;r.n=e.n;r.observed=e.cfg.observed_end_sample;r.required=a.mode=="preamble"?r.observed:e.n;r.reason="queue_full";r.rejected=true;r.submit=r.start=r.finish=r.result=r.first=submit;r.scheduled=scheduled;r.lateness=submit-scheduled;r.ready=us(t0,arrival)+r.required*1e6/e.fsamp;std::lock_guard<std::mutex>lk(output);emit(log,r);++rejected;}else cv.notify_one();
   }{std::lock_guard<std::mutex>lk(mu);done=true;}cv.notify_one();worker.join();if(worker_error)std::rethrow_exception(worker_error);
  }
- log.close();std::ofstream summary(a.out/"runner_summary.json");summary<<"{\"schema\":\"fullpacket-compare/1\",\"rx_pipeline\":"<<quote(experiment::FastRxPipeline::avx2_enabled()?"fast":"portable")<<",\"rx_avx2\":"<<(experiment::FastRxPipeline::avx2_enabled()?"true":"false")<<",\"submitted\":"<<submitted<<",\"completed\":"<<completed<<",\"rejected\":"<<rejected<<",\"source_late\":"<<source_late<<",\"paced_rate\":"<<a.rate<<",\"full_wait_policy\":\"whole_public_context\",\"queue_capacity\":2,\"input_pool\":"<<(a.rate?std::min<size_t>(16,windows.size()):windows.size())<<",\"first_output\":\"first_clean_us\",\"time_reference\":\"run_steady_clock_epoch\"}\n";
+ log.close();std::ofstream summary(a.out/"runner_summary.json");summary<<"{\"schema\":\"fullpacket-compare/1\",\"reconstruction\":"<<quote(a.reconstruction)<<",\"engine_init_us\":"<<engine_init_us<<",\"prefix_cache_capacity_bytes\":"<<8*(e.full.prefix_key.capacity()+e.full.prefix_rows.capacity())<<",\"rx_pipeline\":"<<quote(experiment::FastRxPipeline::avx2_enabled()?"fast":"portable")<<",\"rx_avx2\":"<<(experiment::FastRxPipeline::avx2_enabled()?"true":"false")<<",\"submitted\":"<<submitted<<",\"completed\":"<<completed<<",\"rejected\":"<<rejected<<",\"source_late\":"<<source_late<<",\"paced_rate\":"<<a.rate<<",\"full_wait_policy\":\"whole_public_context\",\"queue_capacity\":2,\"input_pool\":"<<(a.rate?std::min<size_t>(16,windows.size()):windows.size())<<",\"first_output\":\"first_clean_us\",\"time_reference\":\"run_steady_clock_epoch\"}\n";
  std::cout<<"submitted="<<submitted<<" completed="<<completed<<" rejected="<<rejected<<"\n";return 0;
 }catch(const std::exception& ex){std::cerr<<ex.what()<<'\n';return 1;}

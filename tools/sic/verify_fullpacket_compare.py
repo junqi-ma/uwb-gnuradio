@@ -22,6 +22,10 @@ MODES = {"preamble": "preamble", "preamble_only": "preamble",
 STAGES = ("estimate", "comm_demod", "validate", "tx", "channel", "subtract",
           "copy", "sic_total", "cir", "sensing_demod", "service")
 COMM_STAGES = ("timing", "cfo", "sfd", "cir", "ns_sfd", "phr", "payload")
+RECON_TIMES = ("phase_filter_us", "path_accum_us", "cfo_check_us")
+RECON_COUNTS = ("cached_samples", "phase_calls", "nonzero_phase_calls", "cache_hits",
+                "cache_misses", "fir_output_samples", "reference_fir_output_samples")
+RECON_BOOLS = ("prefix_cache_used", "key_changed")
 
 
 def sha256(path):
@@ -219,6 +223,34 @@ def validate_record(row, public):
                 # exclude wrapper overhead. They are diagnostics, never added
                 # again to SIC service time.
                 check(sum(detail.values()) <= parent + 10., "comm stage counters exceed parent")
+    if "reconstruction" in row:
+        check(row["reconstruction"] in ("full", "payload_cached"), "reconstruction mode")
+    if "reconstruction_stats" in row:
+        detail = row["reconstruction_stats"]
+        check(isinstance(detail, dict), "reconstruction stats type")
+        if isinstance(detail, dict) and detail:
+            check(mode == "full" and not rejected, "reconstruction stats without execution")
+            check(row.get("reconstruction") in ("full", "payload_cached"), "reconstruction stats missing mode")
+            check(set(detail) == set(RECON_TIMES + RECON_COUNTS + RECON_BOOLS), "reconstruction stat names")
+            valid_times = all(type(detail.get(k)) in (int,float) and math.isfinite(detail[k]) and detail[k] >= 0 for k in RECON_TIMES)
+            valid_counts = all(type(detail.get(k)) is int and detail[k] >= 0 for k in RECON_COUNTS)
+            check(valid_times, "reconstruction subtime")
+            check(valid_counts, "reconstruction counter")
+            check(all(type(detail.get(k)) is bool for k in RECON_BOOLS), "reconstruction boolean")
+            parent = times.get("channel")
+            if valid_times and type(parent) in (int,float) and math.isfinite(parent):
+                check(sum(detail[k] for k in RECON_TIMES) <= parent + 10., "reconstruction subtime exceeds channel")
+            if valid_counts:
+                check(detail["nonzero_phase_calls"] <= detail["phase_calls"], "nonzero phase count")
+                check(detail["cached_samples"] <= public["n"], "cached prefix bounds")
+                check(detail["fir_output_samples"] <= detail["reference_fir_output_samples"], "FIR work exceeds reference")
+                if row.get("reconstruction") == "full":
+                    check(detail.get("prefix_cache_used") is False, "reference unexpectedly uses cache")
+                    check(detail["cache_hits"] == 0 and detail["cache_misses"] == 0, "reference cache counters")
+                    check(detail["fir_output_samples"] == detail["reference_fir_output_samples"], "reference FIR work mismatch")
+                elif row.get("reconstruction") == "payload_cached" and row.get("committed"):
+                    check(detail.get("prefix_cache_used") is True, "committed cached mode did not use cache")
+                    check(detail["cache_hits"] + detail["cache_misses"] == detail["nonzero_phase_calls"], "cache phase accounting")
     events = row.get("events", {})
     try:
         values = [float(events[k]) for k in ("submit_us", "start_us", "finish_us", "result_us")]
@@ -286,7 +318,7 @@ def verify(case, run, summary_only=False, require_provenance=False):
             warnings.append(label+": missing recorded input hash; current source hash computed only")
         if row.get("input_hash") and row["input_hash"] != raw_hash:
             errors.append(label+": input hash mismatch")
-        paired[(row.get("window_id"), str(row["source_window"]))].append((mode, raw_hash, row.get("model_id"), row.get("origin"), row.get("model_valid"), row.get("rx_pipeline"), row.get("rx_avx2")))
+        paired[(row.get("window_id"), str(row["source_window"]))].append((mode, raw_hash, row.get("model_id"), row.get("origin"), row.get("model_valid"), row.get("rx_pipeline"), row.get("rx_avx2"), row.get("reconstruction")))
         if summary_only:
             continue
         raw, clean = read_iq(source/"raw.cf32"), read_iq(source/"clean.cf32")
@@ -328,6 +360,8 @@ def verify(case, run, summary_only=False, require_provenance=False):
                 errors.append(f"unpaired estimation model: {key}")
             if len({(v[5],v[6]) for v in values}) > 1:
                 errors.append(f"unpaired RX pipeline: {key}")
+            if len({v[7] for v in values}) > 1:
+                errors.append(f"unpaired reconstruction mode: {key}")
     if runner_summary is not None:
         submitted, completed, rejected = (runner_summary.get(k) for k in ("submitted", "completed", "rejected"))
         actual_rejected = sum(bool(r.get("rejected", r.get("reason") == "queue_full")) for r in rows)
@@ -335,7 +369,7 @@ def verify(case, run, summary_only=False, require_provenance=False):
             errors.append("runner summary count types")
         elif submitted != completed + rejected or submitted != len(rows) or rejected != actual_rejected:
             errors.append("runner summary terminal accounting")
-        for field in ("rx_pipeline", "rx_avx2"):
+        for field in ("rx_pipeline", "rx_avx2", "reconstruction"):
             if field in runner_summary and any(row.get(field) != runner_summary[field] for row in rows):
                 errors.append("runner summary "+field+" mismatch")
     else:
@@ -380,6 +414,19 @@ def verify(case, run, summary_only=False, require_provenance=False):
         if rx:
             stats["rx_configurations"] = [dict(rx_pipeline=p, rx_avx2=a)
                                           for p,a in sorted(rx, key=repr)]
+        recon = [r["reconstruction_stats"] for r in accepted
+                 if isinstance(r.get("reconstruction_stats"), dict) and r["reconstruction_stats"]]
+        stats["reconstruction_stats"] = {
+            k: distribution([d[k] for d in recon if type(d.get(k)) in (int,float)
+                             and math.isfinite(d[k]) and d[k] >= 0])
+            for k in RECON_TIMES + RECON_COUNTS} if recon else {}
+        if recon:
+            stats["reconstruction_stats"]["cache_used_count"] = sum(d.get("prefix_cache_used") is True for d in recon)
+            stats["reconstruction_stats"]["key_changed_count"] = sum(d.get("key_changed") is True for d in recon)
+            stats["reconstruction_stats_note"] = "channel diagnostic children; cache misses included; not additive to SIC total"
+        configurations = {r["reconstruction"] for r in group if "reconstruction" in r}
+        if configurations:
+            stats["reconstruction_modes"] = sorted(configurations)
         latency = defaultdict(list)
         for row in accepted:
             event = row.get("events", {})

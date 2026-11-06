@@ -10,6 +10,12 @@ struct FullPacketScratch {
     std::vector<int8_t> expected_phr;
     size_t capacity = 0;
     UWB_API void reserve(size_t max_samples);
+    // Optional exact prefix phase cache. Allocated explicitly before hot calls.
+    bool prefix_cache_enabled = false, prefix_key_valid = false;
+    size_t prefix_input_len = 0, prefix_output_len = 0;
+    uint32_t prefix_phase_mask = 0;
+    std::vector<std::complex<float>> prefix_key, prefix_rows;
+    UWB_API bool prepare_prefix_cache();
 };
 struct FullPacketResult {
     bool committed = false;
@@ -18,6 +24,11 @@ struct FullPacketResult {
     int64_t sub_lo = 0, sub_hi = 0;
     double waveform_scale = 0;
     double validate_us = 0, tx_us = 0, channel_us = 0, subtract_us = 0;
+    double phase_filter_us = 0, path_accum_us = 0, cfo_check_us = 0;
+    bool prefix_cache_used = false, prefix_key_changed = false;
+    size_t prefix_cached_samples = 0, phase_calls = 0, nonzero_phase_calls = 0;
+    size_t prefix_cache_hits = 0, prefix_cache_misses = 0;
+    uint64_t fir_output_samples = 0, reference_fir_output_samples = 0;
 };
 // Independent apply support; never changes the frozen preamble model.
 // Input wire PSDU includes FCS; only supported PHR/profile is accepted.
