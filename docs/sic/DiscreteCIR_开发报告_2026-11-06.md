@@ -8,7 +8,7 @@ core/adapter、`tools/sic/sic_reference.py` 未改；新后端只作为
 
 **结论先说**：在本轮有限样本上，`discrete_cir` 值得作为 full-packet 路径的
 替换候选。10 格×16 源窗配对中 comm/sensing 正确解码数不低于旧路径，目标区抑制
-和 CIR 恢复全部不劣于旧路径（多数持平，`sync_base`/`payload_four_frac` 改善）；
+和 CIR 恢复全部在 1 dB 容差内（多数持平，`sync_base`/`payload_four_frac` 改善）；
 两格正式串行计时中配对总 SIC mean 降到旧路径的 **30.8% / 34.3%**，P95/P99
 同时下降。但 `payload_four_frac` 的 12 个 active taps 使重构仍比单径重，且本轮
 只覆盖有限信道/无硬件，不能据此直接改默认。
@@ -84,8 +84,9 @@ core/adapter、`tools/sic/sic_reference.py` 未改；新后端只作为
   不是总体解码率证明。
 - `sync_base` 的改善来自峰值组 active 支持：旧连续宽支持会把 sensing 前导
   拟合进 h，新路径只保留 comm 粗 CIR 峰。
-- `payload_four_frac` 是离 1 dB 限制最近的格：目标区 +0.89 dB、CIR +5.10 dB；
-  其余 payload 格与旧路径基本逐位一致。
+- 四径分数格 `payload_four_frac` 目标区 +0.90 dB、CIR +5.10 dB；其余 payload
+  格与旧路径基本持平。全部格里相对旧路径的最小 delta 是 `payload_cfo_m50k` 的
+  CIR -0.01 dB，远小于 1 dB 容差；没有格接近失败边界。
 - 目标区/CIR 数值由本轮独立 verifier 对旧/新同时复算；与历史报告使用不同
   verifier，绝对数值不可直接与历史表拼接。
 
