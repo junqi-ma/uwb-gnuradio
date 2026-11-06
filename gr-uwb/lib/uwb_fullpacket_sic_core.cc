@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <gnuradio/uwb/uwb_fullpacket_sic_core.h>
 #include <array>
+#include <volk/volk.h>
 #include <chrono>
 #include <cstring>
 #include <limits>
@@ -240,7 +241,7 @@ FullPacketResult fullpacket_cancel(
         r.path_accum_us+=us(ta);
     }
     const auto t_cfo=Clock::now();
-    std::array<cf,rot_block> base;
+    std::array<cf,rot_block> base, rotation;
     const double omega=2*pi*m.cfo_hz/m.sample_rate;
     const cd step=std::exp(cd(0,omega));cd cur=1;
     for(size_t j=0;j<rot_block;++j){base[j]=cf(cur);cur*=step;}
@@ -248,8 +249,17 @@ FullPacketResult fullpacket_cancel(
         const int64_t p=j-m.phase_reference_sample,b=floordiv(p,rot_block);
         const size_t j0=size_t(p-b*rot_block), count=std::min<size_t>(rot_block-j0,hi-j);
         const cf block(std::exp(cd(0,omega*double(b*int64_t(rot_block)))));
+        // Keep the absolute 1024-sample phase grid; use the same dispatched
+        // VOLK kernels as the preamble operator, without stateful float drift.
+        // Stack storage and existing model scratch avoid hot-path allocation.
+        volk_32fc_s32fc_multiply_32fc(rotation.data(),base.data()+j0,block,
+                                    static_cast<unsigned>(count));
+        volk_64f_convert_32f(reinterpret_cast<float*>(s.model.data()+j),
+                            reinterpret_cast<const double*>(s.accum.data()+j),
+                            static_cast<unsigned>(2*count));
+        volk_32fc_x2_multiply_32fc(s.model.data()+j,s.model.data()+j,rotation.data(),
+                                  static_cast<unsigned>(count));
         for(size_t z=0;z<count;++z) {
-            s.model[j+z]=cf(s.accum[j+z])*(base[j0+z]*block);
             if(!finite(s.model[j+z]) || !finite(y[j+z]-s.model[j+z])) {
                 r.reason="nonfinite_reconstruction";r.cfo_check_us=us(t_cfo);r.channel_us=us(tc);return r;
             }

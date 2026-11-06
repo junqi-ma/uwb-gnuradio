@@ -2,6 +2,7 @@
 #include <boost/test/unit_test.hpp>
 #include <gnuradio/uwb/uwb_fullpacket_sic_core.h>
 #include <cstring>
+#include <array>
 #include <limits>
 
 namespace {
@@ -115,4 +116,48 @@ BOOST_AUTO_TEST_CASE(fullpacket_truncated_tail_and_wrong_template_bypass) {
     const auto mismatch=f.run();
     BOOST_CHECK(!mismatch.committed);
     BOOST_CHECK_EQUAL(std::string(mismatch.reason),"template_scale_mismatch");f.exact_bypass();
+}
+
+BOOST_AUTO_TEST_CASE(fullpacket_cfo_matches_scalar_absolute_phase) {
+    // Cover negative relative phase, block edges and fractional multipath.
+    for(double cfo:{0.0,-50000.0,50000.0}) {
+        Fixture f;
+        f.m.cfo_hz=cfo;f.m.phase_reference_sample=2048;
+        f.m.n_paths=2;f.m.tau_abs[0]=128.4;f.m.tau_abs[1]=151.99;
+        f.m.gain[1]={.2f,.1f};
+        const auto r=f.run();BOOST_REQUIRE_MESSAGE(r.committed,r.reason);
+        std::array<cf,1024> base;
+        const double w=2*3.14159265358979323846*cfo/f.m.sample_rate;
+        std::complex<double> cur=1,step=std::exp(std::complex<double>(0,w));
+        for(auto& v:base){v=cf(cur);cur*=step;}
+        float worst=0;
+        for(size_t j=0;j<f.y.size();++j) {
+            const int64_t p=int64_t(j)-f.m.phase_reference_sample;
+            const int64_t b=p/1024-((p%1024)<0?1:0);
+            const cf block(std::exp(std::complex<double>(0,w*double(b*1024))));
+            const cf expected=cf(f.s.accum[j])*(base[size_t(p-b*1024)]*block);
+            worst=std::max(worst,std::abs(f.ihat[j]-expected));
+        }
+        BOOST_CHECK_LT(worst,2e-7f);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(fullpacket_conversion_and_subtraction_overflow_bypass) {
+    Fixture conversion;
+    for(auto& v:conversion.sync)v*=1e30f;
+    conversion.m.gain[0]={1e30f,0};
+    const auto a=conversion.run();
+    BOOST_CHECK(!a.committed);
+    BOOST_CHECK_EQUAL(std::string(a.reason),"nonfinite_reconstruction");
+    conversion.exact_bypass();
+    Fixture trial;
+    trial.m.cfo_hz=0;
+    trial.m.gain[0]={std::numeric_limits<float>::max()*.8f,0};
+    const auto peak=std::max_element(trial.wave.begin(),trial.wave.end(),
+        [](cf a,cf b){return a.real()<b.real();});
+    trial.y[128+size_t(peak-trial.wave.begin())]={-std::numeric_limits<float>::max(),0};
+    const auto b=trial.run();
+    BOOST_CHECK(!b.committed);
+    BOOST_CHECK_EQUAL(std::string(b.reason),"nonfinite_reconstruction");
+    trial.exact_bypass();
 }
