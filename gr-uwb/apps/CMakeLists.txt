@@ -340,3 +340,8 @@ target_compile_options(benchmark_fullpacket_segment_diag PRIVATE -fPIC)
 add_test(NAME uwb_qa_fullpacket_segment_diag
     COMMAND benchmark_fullpacket_segment_diag --self-test)
 set_tests_properties(uwb_qa_fullpacket_segment_diag PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+
+# Controlled tap-count sweep using the unchanged production discrete backend.
+add_executable(benchmark_discrete_cir_taps benchmark_discrete_cir_taps.cc)
+target_link_libraries(benchmark_discrete_cir_taps gnuradio-uwb)
+target_compile_options(benchmark_discrete_cir_taps PRIVATE -fPIC)
