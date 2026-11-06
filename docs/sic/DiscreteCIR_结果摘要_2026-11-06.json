@@ -1,0 +1,692 @@
+{
+  "binary_sha256": "84ddef9f2dd7ac9518c9eef8e739a5389bba399bb966b5db399c15b58267ef7b",
+  "build": "gr-uwb/build-sic-fullpacket-discrete",
+  "code_tested_commit": "10b660b0f4007864fcb0e6a57ab5f0a86a0a3447",
+  "functional": {
+    "cells": [
+      {
+        "cell": "sync_base",
+        "cir_recovery_new_db": 36.158922721193846,
+        "cir_recovery_old_db": 29.049508301250096,
+        "comm_exact_new": 16,
+        "comm_exact_old": 16,
+        "comm_fcs_new": 16,
+        "comm_fcs_old": 16,
+        "discrete": {
+          "active_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          },
+          "condition": {
+            "max": 3.9398085742,
+            "mean": 3.9398085742,
+            "min": 3.9398085742
+          },
+          "estimate_total_us": {
+            "max": 860.412,
+            "mean": 498.3088125,
+            "min": 445.676
+          },
+          "fit_residual": {
+            "max": 0.0921624852551,
+            "mean": 0.09030263023698125,
+            "min": 0.0852437239716
+          },
+          "tap_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          }
+        },
+        "passed": true,
+        "sensing_exact_new": 16,
+        "sensing_exact_old": 16,
+        "sensing_fcs_new": 16,
+        "sensing_fcs_old": 16,
+        "source_windows": 16,
+        "target_suppression_new_db": 35.737807743072196,
+        "target_suppression_old_db": 29.6771890625951,
+        "weak_target_abs_error_new_db": 0.023361615884288367,
+        "weak_target_abs_error_old_db": 0.06643907713444323
+      },
+      {
+        "cell": "payload_base",
+        "cir_recovery_new_db": 47.74106868163124,
+        "cir_recovery_old_db": 47.744003535634825,
+        "comm_exact_new": 16,
+        "comm_exact_old": 16,
+        "comm_fcs_new": 16,
+        "comm_fcs_old": 16,
+        "discrete": {
+          "active_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          },
+          "condition": {
+            "max": 3.9398085742,
+            "mean": 3.9398085742,
+            "min": 3.9398085742
+          },
+          "estimate_total_us": {
+            "max": 858.293,
+            "mean": 490.3444375,
+            "min": 447.672
+          },
+          "fit_residual": {
+            "max": 0.000101639747895,
+            "mean": 9.999559961776251e-05,
+            "min": 9.75168829263e-05
+          },
+          "tap_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          }
+        },
+        "passed": true,
+        "sensing_exact_new": 16,
+        "sensing_exact_old": 16,
+        "sensing_fcs_new": 16,
+        "sensing_fcs_old": 16,
+        "source_windows": 16,
+        "target_suppression_new_db": 48.23367392174346,
+        "target_suppression_old_db": 48.23058655215035,
+        "weak_target_abs_error_new_db": 3.2699339728050765e-05,
+        "weak_target_abs_error_old_db": 4.2956612479405884e-05
+      },
+      {
+        "cell": "payload_len16",
+        "cir_recovery_new_db": 48.56132388956048,
+        "cir_recovery_old_db": 48.55808354333214,
+        "comm_exact_new": 16,
+        "comm_exact_old": 16,
+        "comm_fcs_new": 16,
+        "comm_fcs_old": 16,
+        "discrete": {
+          "active_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          },
+          "condition": {
+            "max": 3.9398085742,
+            "mean": 3.9398085742,
+            "min": 3.9398085742
+          },
+          "estimate_total_us": {
+            "max": 843.313,
+            "mean": 528.5813750000001,
+            "min": 443.875
+          },
+          "fit_residual": {
+            "max": 0.000101639747895,
+            "mean": 9.999559961776251e-05,
+            "min": 9.75168829263e-05
+          },
+          "tap_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          }
+        },
+        "passed": true,
+        "sensing_exact_new": 16,
+        "sensing_exact_old": 16,
+        "sensing_fcs_new": 16,
+        "sensing_fcs_old": 16,
+        "source_windows": 16,
+        "target_suppression_new_db": 48.926230229749066,
+        "target_suppression_old_db": 48.92288107859144,
+        "weak_target_abs_error_new_db": 2.3939484986280447e-05,
+        "weak_target_abs_error_old_db": 3.225707817830514e-05
+      },
+      {
+        "cell": "payload_len127",
+        "cir_recovery_new_db": 43.966246238175806,
+        "cir_recovery_old_db": 43.96641617059731,
+        "comm_exact_new": 16,
+        "comm_exact_old": 16,
+        "comm_fcs_new": 16,
+        "comm_fcs_old": 16,
+        "discrete": {
+          "active_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          },
+          "condition": {
+            "max": 3.9398085742,
+            "mean": 3.9398085742,
+            "min": 3.9398085742
+          },
+          "estimate_total_us": {
+            "max": 846.096,
+            "mean": 489.5681875,
+            "min": 436.886
+          },
+          "fit_residual": {
+            "max": 0.000102078594051,
+            "mean": 0.000100040260715375,
+            "min": 9.79306434474e-05
+          },
+          "tap_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          }
+        },
+        "passed": true,
+        "sensing_exact_new": 16,
+        "sensing_exact_old": 16,
+        "sensing_fcs_new": 16,
+        "sensing_fcs_old": 16,
+        "source_windows": 16,
+        "target_suppression_new_db": 43.36242110582571,
+        "target_suppression_old_db": 43.361216965079656,
+        "weak_target_abs_error_new_db": 6.406082776669905e-05,
+        "weak_target_abs_error_old_db": 5.928780435389524e-05
+      },
+      {
+        "cell": "payload_snr8",
+        "cir_recovery_new_db": 25.74250843122241,
+        "cir_recovery_old_db": 25.744943472299173,
+        "comm_exact_new": 16,
+        "comm_exact_old": 16,
+        "comm_fcs_new": 16,
+        "comm_fcs_old": 16,
+        "discrete": {
+          "active_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          },
+          "condition": {
+            "max": 3.9398085742,
+            "mean": 3.9398085742,
+            "min": 3.9398085742
+          },
+          "estimate_total_us": {
+            "max": 882.723,
+            "mean": 480.640375,
+            "min": 431.205
+          },
+          "fit_residual": {
+            "max": 0.0158818772459,
+            "mean": 0.015609682436512498,
+            "min": 0.0152497418597
+          },
+          "tap_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          }
+        },
+        "passed": true,
+        "sensing_exact_new": 16,
+        "sensing_exact_old": 16,
+        "sensing_fcs_new": 16,
+        "sensing_fcs_old": 16,
+        "source_windows": 16,
+        "target_suppression_new_db": 26.23469803235387,
+        "target_suppression_old_db": 26.23163802773881,
+        "weak_target_abs_error_new_db": 0.0006871216561981734,
+        "weak_target_abs_error_old_db": 0.0005940909184596973
+      },
+      {
+        "cell": "payload_isr0",
+        "cir_recovery_new_db": 37.74103472096104,
+        "cir_recovery_old_db": 37.74384890382724,
+        "comm_exact_new": 16,
+        "comm_exact_old": 16,
+        "comm_fcs_new": 16,
+        "comm_fcs_old": 16,
+        "discrete": {
+          "active_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          },
+          "condition": {
+            "max": 3.9398085742,
+            "mean": 3.9398085742,
+            "min": 3.9398085742
+          },
+          "estimate_total_us": {
+            "max": 899.281,
+            "mean": 515.474375,
+            "min": 439.617
+          },
+          "fit_residual": {
+            "max": 0.00101579431098,
+            "mean": 0.0009991443600336875,
+            "min": 0.000974654922484
+          },
+          "tap_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          }
+        },
+        "passed": true,
+        "sensing_exact_new": 16,
+        "sensing_exact_old": 16,
+        "sensing_fcs_new": 16,
+        "sensing_fcs_old": 16,
+        "source_windows": 16,
+        "target_suppression_new_db": 38.233576394590855,
+        "target_suppression_old_db": 38.23050387475803,
+        "weak_target_abs_error_new_db": 3.4716195307346106e-05,
+        "weak_target_abs_error_old_db": 4.4280117142679945e-05
+      },
+      {
+        "cell": "payload_isr20",
+        "cir_recovery_new_db": 57.74113711314826,
+        "cir_recovery_old_db": 57.74406907118969,
+        "comm_exact_new": 16,
+        "comm_exact_old": 16,
+        "comm_fcs_new": 16,
+        "comm_fcs_old": 16,
+        "discrete": {
+          "active_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          },
+          "condition": {
+            "max": 3.9398085742,
+            "mean": 3.9398085742,
+            "min": 3.9398085742
+          },
+          "estimate_total_us": {
+            "max": 1046.781,
+            "mean": 500.81475,
+            "min": 444.063
+          },
+          "fit_residual": {
+            "max": 1.01638726031e-05,
+            "mean": 1.0000186045455625e-05,
+            "min": 9.75146495664e-06
+          },
+          "tap_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          }
+        },
+        "passed": true,
+        "sensing_exact_new": 16,
+        "sensing_exact_old": 16,
+        "sensing_fcs_new": 16,
+        "sensing_fcs_old": 16,
+        "source_windows": 16,
+        "target_suppression_new_db": 58.23377343236197,
+        "target_suppression_old_db": 58.23063856670694,
+        "weak_target_abs_error_new_db": 3.2603671465334045e-05,
+        "weak_target_abs_error_old_db": 4.251834272795068e-05
+      },
+      {
+        "cell": "payload_cfo_m50k",
+        "cir_recovery_new_db": 43.711786244754904,
+        "cir_recovery_old_db": 43.72168093018739,
+        "comm_exact_new": 16,
+        "comm_exact_old": 16,
+        "comm_fcs_new": 16,
+        "comm_fcs_old": 16,
+        "discrete": {
+          "active_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          },
+          "condition": {
+            "max": 3.9398085742,
+            "mean": 3.9398085742,
+            "min": 3.9398085742
+          },
+          "estimate_total_us": {
+            "max": 864.019,
+            "mean": 494.51812499999994,
+            "min": 440.943
+          },
+          "fit_residual": {
+            "max": 0.0385725585248,
+            "mean": 0.03854169669142501,
+            "min": 0.038500055365
+          },
+          "tap_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          }
+        },
+        "passed": true,
+        "sensing_exact_new": 16,
+        "sensing_exact_old": 16,
+        "sensing_fcs_new": 16,
+        "sensing_fcs_old": 16,
+        "source_windows": 16,
+        "target_suppression_new_db": 44.30287640374154,
+        "target_suppression_old_db": 44.30165051128299,
+        "weak_target_abs_error_new_db": 0.001063112656233562,
+        "weak_target_abs_error_old_db": 0.0010751099836823197
+      },
+      {
+        "cell": "payload_cfo_p50k",
+        "cir_recovery_new_db": 44.19148385696314,
+        "cir_recovery_old_db": 44.18965171225392,
+        "comm_exact_new": 16,
+        "comm_exact_old": 16,
+        "comm_fcs_new": 16,
+        "comm_fcs_old": 16,
+        "discrete": {
+          "active_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          },
+          "condition": {
+            "max": 3.9398085742,
+            "mean": 3.9398085742,
+            "min": 3.9398085742
+          },
+          "estimate_total_us": {
+            "max": 1281.19,
+            "mean": 574.442,
+            "min": 445.052
+          },
+          "fit_residual": {
+            "max": 0.0385727672864,
+            "mean": 0.038538840752256255,
+            "min": 0.0385102894028
+          },
+          "tap_count": {
+            "max": 3,
+            "mean": 3.0,
+            "min": 3
+          }
+        },
+        "passed": true,
+        "sensing_exact_new": 16,
+        "sensing_exact_old": 16,
+        "sensing_fcs_new": 16,
+        "sensing_fcs_old": 16,
+        "source_windows": 16,
+        "target_suppression_new_db": 44.56168421176528,
+        "target_suppression_old_db": 44.561264324513544,
+        "weak_target_abs_error_new_db": 0.0008514763309803458,
+        "weak_target_abs_error_old_db": 0.0008569814026448291
+      },
+      {
+        "cell": "payload_four_frac",
+        "cir_recovery_new_db": 33.034954939545344,
+        "cir_recovery_old_db": 27.935917519128477,
+        "comm_exact_new": 16,
+        "comm_exact_old": 16,
+        "comm_fcs_new": 16,
+        "comm_fcs_old": 16,
+        "discrete": {
+          "active_count": {
+            "max": 12,
+            "mean": 12.0,
+            "min": 12
+          },
+          "condition": {
+            "max": 4.18990098573,
+            "mean": 4.18990098573,
+            "min": 4.18990098573
+          },
+          "estimate_total_us": {
+            "max": 1906.179,
+            "mean": 1483.9598125000002,
+            "min": 1407.962
+          },
+          "fit_residual": {
+            "max": 0.00288125053719,
+            "mean": 0.002871749393204375,
+            "min": 0.00285642325208
+          },
+          "tap_count": {
+            "max": 55,
+            "mean": 55.0,
+            "min": 55
+          }
+        },
+        "passed": true,
+        "sensing_exact_new": 16,
+        "sensing_exact_old": 16,
+        "sensing_fcs_new": 16,
+        "sensing_fcs_old": 16,
+        "source_windows": 16,
+        "target_suppression_new_db": 25.89486960453152,
+        "target_suppression_old_db": 24.995771054469294,
+        "weak_target_abs_error_new_db": 0.00742469130844298,
+        "weak_target_abs_error_old_db": 0.011884826262990677
+      }
+    ],
+    "passed": true,
+    "path": "gr-uwb/build-sic-fullpacket-discrete/results/functional_discrete_20261106_r2"
+  },
+  "library_sha256": [
+    "43e12c18629b9a11c254f85820b0b11e87d4c41312735aae363faed2f5e5ed29"
+  ],
+  "negative": {
+    "cells": [
+      {
+        "byte_identical_rows": 1,
+        "cell": "no_interference",
+        "committed_rows": 0,
+        "passed": true,
+        "rows": 1,
+        "target_only": false
+      },
+      {
+        "byte_identical_rows": 1,
+        "cell": "no_overlap",
+        "committed_rows": 1,
+        "passed": true,
+        "rows": 1,
+        "target_only": true
+      }
+    ],
+    "passed": true,
+    "path": "gr-uwb/build-sic-fullpacket-discrete/results/negative_discrete_20261106_r2"
+  },
+  "notes": [
+    "finite-sample functional gate, not a general decode-rate proof",
+    "timing is prebuffered service wall time; not an end-to-end paced arrival result",
+    "old path = path_fractional --reconstruction full; new = discrete_cir"
+  ],
+  "schema": "sic-discrete-cir-result-summary/1",
+  "timing": {
+    "cells": [
+      {
+        "cell": "sync_base",
+        "gate": {
+          "passed": true,
+          "rounds": 2,
+          "rounds_passed": 2
+        },
+        "pooled": {
+          "new": {
+            "max": 6887.406,
+            "mean": 3791.632,
+            "min": 3463.611,
+            "n": 256,
+            "p50": 3715.439,
+            "p95": 4203.722,
+            "p99": 5013.015
+          },
+          "old": {
+            "max": 19897.135,
+            "mean": 12317.926,
+            "min": 7270.254,
+            "n": 256,
+            "p50": 11399.328,
+            "p95": 18958.727,
+            "p99": 19556.123
+          }
+        },
+        "rounds": [
+          {
+            "gate": {
+              "mean_limit_us": 11015.74918125,
+              "mean_passed": true,
+              "mean_ratio": 0.3115466200029544,
+              "p95_passed": true,
+              "passed": true
+            },
+            "new": {
+              "mean": 3813.244,
+              "n": 128,
+              "p50": 3715.708,
+              "p95": 4251.163,
+              "p99": 6096.587
+            },
+            "old": {
+              "mean": 12239.721,
+              "n": 128,
+              "p50": 11399.328,
+              "p95": 18939.098,
+              "p99": 19358.201
+            },
+            "order": [
+              "old",
+              "new"
+            ],
+            "passed": true,
+            "round": 1
+          },
+          {
+            "gate": {
+              "mean_limit_us": 11156.5183359375,
+              "mean_passed": true,
+              "mean_ratio": 0.30412879817098687,
+              "p95_passed": true,
+              "passed": true
+            },
+            "new": {
+              "mean": 3770.021,
+              "n": 128,
+              "p50": 3712.51,
+              "p95": 4176.874,
+              "p99": 4848.688
+            },
+            "old": {
+              "mean": 12396.131,
+              "n": 128,
+              "p50": 11376.817,
+              "p95": 18924.805,
+              "p99": 19660.784
+            },
+            "order": [
+              "new",
+              "old"
+            ],
+            "passed": true,
+            "round": 2
+          }
+        ]
+      },
+      {
+        "cell": "payload_base",
+        "gate": {
+          "passed": true,
+          "rounds": 2,
+          "rounds_passed": 2
+        },
+        "pooled": {
+          "new": {
+            "max": 6092.095,
+            "mean": 4637.1,
+            "min": 4222.02,
+            "n": 256,
+            "p50": 4586.688,
+            "p95": 5064.988,
+            "p99": 5614.06
+          },
+          "old": {
+            "max": 16949.88,
+            "mean": 13500.327,
+            "min": 9185.013,
+            "n": 256,
+            "p50": 14533.735,
+            "p95": 15404.096,
+            "p99": 16013.644
+          }
+        },
+        "rounds": [
+          {
+            "gate": {
+              "mean_limit_us": 12209.634984375,
+              "mean_passed": true,
+              "mean_ratio": 0.34699554113282716,
+              "p95_passed": true,
+              "passed": true
+            },
+            "new": {
+              "mean": 4707.432,
+              "n": 128,
+              "p50": 4648.888,
+              "p95": 5138.024,
+              "p99": 5529.078
+            },
+            "old": {
+              "mean": 13566.261,
+              "n": 128,
+              "p50": 14536.092,
+              "p95": 15493.099,
+              "p99": 16065.483
+            },
+            "order": [
+              "old",
+              "new"
+            ],
+            "passed": true,
+            "round": 1
+          },
+          {
+            "gate": {
+              "mean_limit_us": 12090.95343984375,
+              "mean_passed": true,
+              "mean_ratio": 0.3399310324356533,
+              "p95_passed": true,
+              "passed": true
+            },
+            "new": {
+              "mean": 4566.767,
+              "n": 128,
+              "p50": 4527.49,
+              "p95": 5017.795,
+              "p99": 5567.783
+            },
+            "old": {
+              "mean": 13434.393,
+              "n": 128,
+              "p50": 14523.995,
+              "p95": 15230.701,
+              "p99": 15910.682
+            },
+            "order": [
+              "new",
+              "old"
+            ],
+            "passed": true,
+            "round": 2
+          }
+        ]
+      }
+    ],
+    "gate": "new mean <= 0.90*old mean and new p95 <= old p95; 128 observations x 2 rounds, 16 warmup, AB/BA",
+    "passed": true,
+    "path": "gr-uwb/build-sic-fullpacket-discrete/results/timing_discrete_20261106_r2"
+  },
+  "unverified": [
+    "MATLAB",
+    "native resampler",
+    "FPGA/hardware",
+    "TWR",
+    "real-time throughput target 0.5 ms mean / 1 ms P99 / 200 windows/s"
+  ]
+}

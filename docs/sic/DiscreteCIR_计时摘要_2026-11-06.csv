@@ -1,0 +1,13 @@
+cell,scope,variant,n,mean_us,p50_us,p95_us,p99_us,round_passed
+sync_base,pooled,old,256,12317.926,11399.328,18958.727,19556.123,True
+sync_base,pooled,new,256,3791.632,3715.439,4203.722,5013.015,True
+sync_base,round1,old,128,12239.721,11399.328,18939.098,19358.201,True
+sync_base,round1,new,128,3813.244,3715.708,4251.163,6096.587,True
+sync_base,round2,old,128,12396.131,11376.817,18924.805,19660.784,True
+sync_base,round2,new,128,3770.021,3712.51,4176.874,4848.688,True
+payload_base,pooled,old,256,13500.327,14533.735,15404.096,16013.644,True
+payload_base,pooled,new,256,4637.1,4586.688,5064.988,5614.06,True
+payload_base,round1,old,128,13566.261,14536.092,15493.099,16065.483,True
+payload_base,round1,new,128,4707.432,4648.888,5138.024,5529.078,True
+payload_base,round2,old,128,13434.393,14523.995,15230.701,15910.682,True
+payload_base,round2,new,128,4566.767,4527.49,5017.795,5567.783,True

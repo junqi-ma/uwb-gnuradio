@@ -50,7 +50,17 @@
     `benchmark_fullpacket_compare --reconstruction discrete_cir` 接线；
     新 QA + 原 fullpacket/preamble core QA 4/4 通过；10 格×16 源窗功能对照 PASS，
     负样本 no_interference/no_overlap PASS；配对 comm/sensing 16/16 不低旧路径。
-    证据：构建日志、`/tmp/disc_func_all/experiment_summary.json`（正式 run 将在
-    干净提交后重跑并归档小型摘要）。
-    问题：无。
-    下一步：提交代码，正式功能/计时绑定干净 SHA。
+    证据：`docs/sic/DiscreteCIR_开发报告_2026-11-06.md`、
+    `gr-uwb/build-sic-fullpacket-discrete/results/functional_discrete_20261106_r2`。
+    问题：初版连续支持在 sync_base 会拟合 sensing；已用峰值组 active 集合修复。
+    下一步：干净提交后正式功能/计时。
+
+    [阶段 S3 / 负责人 主 agent] 完成
+    完成内容：code-tested `10b660b` 上重跑正式功能、负样本和串行配对计时；
+    两格 mean 比为 0.308/0.343，P95/P99 同时下降，质量门全部通过。
+    证据：`results/functional_discrete_20261106_r2`、
+    `results/negative_discrete_20261106_r2`、`results/timing_discrete_20261106_r2`；
+    `docs/sic/DiscreteCIR_结果摘要_2026-11-06.json`、
+    `docs/sic/DiscreteCIR_计时摘要_2026-11-06.csv`。
+    问题：当前主瓶颈已转为 comm demod 约 2.0–2.6 ms；事务双拷贝约 0.14–0.25 ms。
+    下一步：不自动改默认；若继续，先做 paced 到达与双拷贝优化，扩大信道覆盖。

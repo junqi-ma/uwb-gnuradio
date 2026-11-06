@@ -1,6 +1,13 @@
-# 当前任务：离散等效 CIR 估计器规划已交付，待执行
+# 当前任务：离散等效 CIR full-packet 后端已交付
 
-执行 `docs/sic/FullPacket_离散CIR估计开发任务书_2026-11-06.md`。本任务优先于下方历史入口。基线 `887e7bb` 已提交且保留；下一轮在本实验 worktree 新增 `discrete_cir`，直接用前 8 SYNC 拟合离散 FIR，冻结 preamble 路径不变。主 agent 先冻结接口，再调度估计器/重构器/评价工具三个 subagent 并行开发。每环节输出完成证据与下一步；只做针对性 QA、一次功能对照和质量通过后的串行配对计时，不重复无意义 smoke。详细目标、数学约定、文件所有权和验收标准以任务书为准。本次仅规划，未实现新算法。
+执行 `docs/sic/FullPacket_离散CIR估计开发任务书_2026-11-06.md`。本任务优先于下方历史入口。
+code-tested SHA `10b660b`，新 build `gr-uwb/build-sic-fullpacket-discrete`。新
+`discrete_cir` 用前 8 SYNC 直接拟合整数 lag 离散 FIR，冻结 preamble 路径与原
+`path_fractional` 保持；不新增 GNU Radio block，不上板。正式结果见
+`docs/sic/DiscreteCIR_开发报告_2026-11-06.md`：10 格×16 源窗功能 PASS，
+负样本 PASS；两格串行配对总 SIC mean 为旧路径的 0.308/0.343，P95/P99 同时下降。
+当前主瓶颈已转为 comm demod（约 2.0–2.6 ms）。`discrete_cir` 仍是显式实验选项，
+不自动改默认；MATLAB/native/FPGA/硬件与 paced 到达未验证。
 
 # 当前任务：SYNC+SFD / PHR / payload 分段实验已交付
 
