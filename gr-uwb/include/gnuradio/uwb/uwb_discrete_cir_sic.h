@@ -157,7 +157,7 @@ struct DiscreteCirScratch {
     std::vector<std::complex<float>> waveform;       // remodulated packet
     std::vector<std::complex<float>> scaled_waveform; // waveform scaled once by apply
     std::vector<std::complex<float>> accumulator;     // tap-major FIR accumulator
-    std::vector<std::complex<float>> fir_tmp;          // VOLK scalar-multiply temp
+    std::vector<std::complex<float>> fir_tmp;          // CFO scalar-multiply temp
     std::vector<int8_t> expected_phr;
     mod::HrpModScratch modulator;
 

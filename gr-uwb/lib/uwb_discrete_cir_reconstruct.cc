@@ -68,6 +68,36 @@ int64_t floordiv(int64_t a, int64_t b)
     return a / b - ((a % b) < 0 ? 1 : 0);
 }
 
+// Fused complex AXPY for one tap: dst[i] += h * src[i].
+//
+// This replaces multiply-into-tmp followed by add (two full passes over the
+// destination) with a single read/modify/write pass, removing one vector
+// write and one vector read per tap.  The scalar float form is deliberate:
+// GCC lowers std::complex operator* through a NaN-preserving __mulsc3 call,
+// which defeats vectorization, while this component form compiles to packed
+// SSE with the project's baseline flags.  The helper stays out of line
+// because inlining it into the large apply transaction suppressed the loop
+// vectorizer; one call per active tap is negligible against O(N) samples.
+// `dst` and `src` live in distinct preallocated scratch buffers, hence
+// __restrict; per-sample tap order is unchanged because the caller still
+// runs one tap at a time in ascending active order.
+void __attribute__((noinline))
+fused_axpy(cf* __restrict dst, const cf* __restrict src, cf h, size_t count)
+{
+    float* __restrict d = reinterpret_cast<float*>(dst);
+    const float* __restrict s = reinterpret_cast<const float*>(src);
+    const float hr = h.real();
+    const float hi = h.imag();
+    // No loop-carried dependence: each sample updates only its own two floats.
+#pragma GCC ivdep
+    for (size_t i = 0; i < count; ++i) {
+        const float sr = s[2 * i];
+        const float si = s[2 * i + 1];
+        d[2 * i] += hr * sr - hi * si;
+        d[2 * i + 1] += hi * sr + hr * si;
+    }
+}
+
 // Fail-closed model gate shared by apply and the transactional wrapper.  A
 // frozen model is usable only with an integer origin, the matching phase
 // anchor, a finite hull strictly shorter than one SYNC period, a finite CFO
@@ -272,15 +302,15 @@ bool apply_discrete_cir(const std::complex<float>* y,
 
     // --- direct O(N * active_count) FIR, tap-major contiguous passes ------
     // Each active tap is one contiguous run over j.  The inner loop is a
-    // vectorizable complex AXPY with no per-sample bounds branch; the
-    // accumulator lives in preallocated scratch, so the hot path never
+    // vectorized fused complex multiply-add with no per-sample bounds branch;
+    // the accumulator lives in preallocated scratch, so the hot path never
     // allocates.  Only the active lags contribute (inactive hull taps are 0).
+    // fir_tmp is still used by the CFO stage below.
     const auto t_conv = Clock::now();
     cf* const recon = ihat ? ihat : out;
     const int64_t x_n = int64_t(waveform_n);
     const int64_t len = hi - lo;
     cf* const acc = scratch.accumulator.data();
-    cf* const tmp = scratch.fir_tmp.data();
     std::fill(acc, acc + len, cf(0.f, 0.f));
     const size_t active = model.active_count;
     for (size_t a = 0; a < active; ++a) {
@@ -293,16 +323,13 @@ bool apply_discrete_cir(const std::complex<float>* y,
             continue;
         const cf* const src = scaled + (j0 - q - lag);
         cf* const dst = acc + (j0 - lo);
-        const unsigned count = static_cast<unsigned>(j1 - j0);
-        // VOLK dispatches to the widest SIMD implementation available on this
-        // host (the old path uses the same dependency for its CFO ramps).
-        volk_32fc_s32fc_multiply_32fc(tmp, src, h, count);
-        volk_32fc_x2_add_32fc(dst, dst, tmp, count);
+        fused_axpy(dst, src, h, static_cast<size_t>(j1 - j0));
     }
     r.convolution_us = us(t_conv);
 
     // --- block-anchored absolute CFO grid and finite checks -----------------
     const auto t_cfo = Clock::now();
+    cf* const tmp = scratch.fir_tmp.data(); // shared scalar-multiply temp
     const double omega = 2.0 * kPi * model.cfo_hz / kWorkRateHz;
     std::array<cf, kCfoBlock> rotation;
     {
