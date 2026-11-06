@@ -1,0 +1,486 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/*
+ * Discrete equivalent CIR full-packet reconstruction.
+ *
+ * Implements the reconstruction half of uwb_discrete_cir_sic.h:
+ *
+ *   ihat[j] = exp(j*w*(j-r)) * sum_{l in active} h[l] * (s*x)[j-q-l]
+ *
+ * r == q, x is the COMPLETE packet waveform produced by the public modulator,
+ * and h is the frozen finite FIR from estimate_discrete_cir (h already
+ * contains the packet amplitude because it was fitted against the public
+ * shaped SYNC train).  Only the ACTIVE lags of the dense hull are multiplied;
+ * the inactive hull taps are exactly zero by contract.
+ *
+ * The ONE waveform scale s is recomputed here from the public reference SYNC
+ * and applied to the complete waveform in a single pass before the FIR; the
+ * taps are never scaled again.  The direct O(N * active_count) FIR accumulates
+ * in std::complex<float> and the CFO rotation uses a 1024-sample block-anchored
+ * ABSOLUTE phase grid (double block base, float rotation), so no float phase
+ * drift can accumulate.
+ *
+ * Fail-closed: every failure leaves out == y byte-for-byte and ihat == 0.
+ * The only code that modifies out is the final ROI subtraction of a committed
+ * result.  Nothing here reads sidecar/truth data and there is no fallback to
+ * the fractional-path backend.
+ */
+#include <gnuradio/uwb/uwb_discrete_cir_sic.h>
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <complex>
+#include <cstring>
+#include <volk/volk.h>
+
+namespace gr {
+namespace uwb {
+namespace sic {
+namespace {
+
+using cf = std::complex<float>;
+using cd = std::complex<double>;
+using Clock = std::chrono::steady_clock;
+
+constexpr double kPi = 3.14159265358979323846;
+// Full-packet coordinates are frozen on the 998.4 MS/s work grid.  The frozen
+// model carries a CFO in Hz but no rate, and the scratch carries only sps, so
+// this public constant is the only admissible Hz -> rad/sample conversion.
+// A model CFO at or beyond Nyquist is rejected instead of silently aliasing.
+constexpr double kWorkRateHz = radar_meta::kWorkRateHz;
+constexpr size_t kCfoBlock = 1024;
+constexpr double kScaleImagMaxRel = 1e-6;
+constexpr double kTemplateErrorMaxRel = 1e-10;
+
+double us(Clock::time_point t)
+{
+    return std::chrono::duration<double, std::micro>(Clock::now() - t).count();
+}
+
+bool finite(cf v)
+{
+    return std::isfinite(v.real()) && std::isfinite(v.imag());
+}
+
+int64_t floordiv(int64_t a, int64_t b)
+{
+    return a / b - ((a % b) < 0 ? 1 : 0);
+}
+
+// Fail-closed model gate shared by apply and the transactional wrapper.  A
+// frozen model is usable only with an integer origin, the matching phase
+// anchor, a finite hull strictly shorter than one SYNC period, a finite CFO
+// inside Nyquist, a non-empty ACTIVE set that is sorted, inside the hull and
+// backed by finite dense taps.  This reads no estimator state.
+const char* model_failure(const DiscreteCirModel& m, size_t sps, size_t n)
+{
+    if (!m.valid || sps < 2)
+        return "invalid_model";
+    if (m.q < 0 || m.q >= int64_t(n))
+        return "invalid_model";
+    if (m.phase_reference_sample != m.q)
+        return "invalid_model";
+    if (m.tap_count == 0 || m.tap_count > kDiscreteCirMaxTaps)
+        return "invalid_model";
+    if (m.tap_count >= sps)
+        return "invalid_model";
+    if (m.lag_lo < -int64_t(sps) || m.lag_lo > int64_t(sps))
+        return "invalid_model";
+    if (m.lag_lo + int64_t(m.tap_count) > int64_t(sps))
+        return "invalid_model";
+    if (!std::isfinite(m.cfo_hz) || !(std::fabs(m.cfo_hz) < 0.5 * kWorkRateHz))
+        return "invalid_model";
+    // The dense hull is zero outside the active groups, so every hull entry
+    // must be finite even though only the active ones are multiplied.
+    for (size_t i = 0; i < m.tap_count; ++i)
+        if (!finite(m.taps[i]))
+            return "invalid_model";
+    if (m.active_count == 0 || m.active_count > kDiscreteCirMaxActive ||
+        m.active_count > m.tap_count)
+        return "invalid_model";
+    for (size_t a = 0; a < m.active_count; ++a) {
+        const int64_t lag = int64_t(m.active_lags[a]);
+        if (lag < m.lag_lo || lag >= m.lag_lo + int64_t(m.tap_count))
+            return "invalid_model";
+        if (a && lag <= int64_t(m.active_lags[a - 1]))
+            return "invalid_model"; // must be strictly increasing
+        if (!finite(m.taps[static_cast<size_t>(lag - m.lag_lo)]))
+            return "invalid_model";
+    }
+    return nullptr;
+}
+
+// Capacity contract.  prepare_discrete_cir/reserve own every allocation on
+// this path, so an undersized buffer is a hard failure, never a hidden resize.
+// `max_packet_samples` is only the estimator's planning bound: the hot call is
+// sized by the ACTUAL waveform_n/packet_n, so a stale or zero bound cannot
+// reject a waveform that fits the real buffers.
+const char* apply_scratch_failure(const DiscreteCirScratch& s,
+                                  size_t n,
+                                  size_t waveform_n)
+{
+    if (!s.prepared)
+        return "scratch_unprepared";
+    if (s.sps == 0 || s.max_window_samples < n)
+        return "scratch_capacity";
+    if (s.scaled_waveform.size() < waveform_n ||
+        s.accumulator.size() < n || s.fir_tmp.size() < n)
+        return "scratch_capacity";
+    return nullptr;
+}
+
+const char* transaction_scratch_failure(const DiscreteCirScratch& s, size_t n)
+{
+    if (!s.prepared)
+        return "scratch_unprepared";
+    if (s.sps == 0 || s.max_window_samples < n)
+        return "scratch_capacity";
+    // modulate_one() is sized by the real buffer length; an empty buffer can
+    // never hold a packet.
+    if (s.waveform.empty())
+        return "scratch_capacity";
+    // encode_phr19() resizes its output vector to 19 entries.  Requiring the
+    // capacity up front keeps the transactional path allocation-free.
+    if (s.expected_phr.capacity() < 19)
+        return "scratch_capacity";
+    return nullptr;
+}
+
+} // namespace
+
+bool apply_discrete_cir(const std::complex<float>* y,
+                        size_t n,
+                        const std::complex<float>* waveform,
+                        size_t waveform_n,
+                        const std::complex<float>* reference_sync,
+                        size_t sync_n,
+                        const DiscreteCirModel& model,
+                        int64_t roi_lo,
+                        int64_t roi_hi,
+                        DiscreteCirScratch& scratch,
+                        std::complex<float>* out,
+                        std::complex<float>* ihat,
+                        DiscreteCirResult* result)
+{
+    const auto t_apply = Clock::now();
+    DiscreteCirResult local;
+    DiscreteCirResult& r = result ? *result : local;
+    r = DiscreteCirResult();
+    auto fail = [&](const char* reason) {
+        r.committed = false;
+        r.reason = reason;
+        r.apply_total_us = us(t_apply);
+        return false;
+    };
+
+    // Establish the bypass image before any other check so that every later
+    // failure returns out == y and ihat == 0 exactly.
+    if (!y || !out || n == 0 || (ihat && (ihat == y || ihat == out)))
+        return fail("invalid_buffers");
+    std::copy(y, y + n, out);
+    if (ihat)
+        std::fill(ihat, ihat + n, cf(0.f, 0.f));
+    if (!waveform || !reference_sync || waveform_n == 0 || sync_n == 0 ||
+        waveform_n < sync_n)
+        return fail("invalid_buffers");
+
+    const char* sf = apply_scratch_failure(scratch, n, waveform_n);
+    if (sf)
+        return fail(sf);
+    const char* mf = model_failure(model, scratch.sps, n);
+    if (mf)
+        return fail(mf);
+    if (roi_lo < 0 || roi_hi > int64_t(n) || roi_hi <= roi_lo)
+        return fail("invalid_roi");
+    if (sync_n != scratch.sps)
+        return fail("invalid_template");
+    for (size_t i = 0; i < n; ++i)
+        if (!finite(y[i]))
+            return fail("nonfinite_input");
+
+    r.model_id = model.model_id;
+    r.q = model.q;
+    r.cfo_hz = model.cfo_hz;
+    r.tap_count = model.tap_count;
+    r.fit_residual = model.fit_residual;
+    r.gain_condition = model.gain_condition;
+
+    const int64_t q = model.q;
+    const int64_t lo = q + model.lag_lo;
+    const int64_t hi = lo + int64_t(model.tap_count) + int64_t(waveform_n);
+    r.support_lo = lo;
+    r.support_hi = hi;
+
+    const auto t_channel = Clock::now();
+
+    // --- the ONE waveform scale, against the public reference SYNC ----------
+    const auto t_scale = Clock::now();
+    cd cross(0.0, 0.0);
+    double energy = 0.0, ref_energy = 0.0;
+    for (size_t i = 0; i < sync_n; ++i) {
+        if (!finite(waveform[i]) || !finite(reference_sync[i]))
+            return fail("nonfinite_input");
+        const cd w = cd(waveform[i]);
+        const cd ref = cd(reference_sync[i]);
+        cross += std::conj(w) * ref;
+        energy += std::norm(w);
+        ref_energy += std::norm(ref);
+    }
+    const cd scale = energy > 0.0 ? cross / energy : cd(0.0, 0.0);
+    const double scale_real = scale.real();
+    if (!(scale_real > 0.0) || !std::isfinite(scale_real) ||
+        !std::isfinite(scale.imag()) ||
+        std::fabs(scale.imag()) > kScaleImagMaxRel * scale_real ||
+        !(ref_energy > 0.0))
+        return fail("template_scale_mismatch");
+    double template_error = 0.0;
+    for (size_t i = 0; i < sync_n; ++i)
+        template_error += std::norm(cd(waveform[i]) * scale - cd(reference_sync[i]));
+    if (!std::isfinite(template_error) ||
+        template_error > kTemplateErrorMaxRel * ref_energy)
+        return fail("template_scale_mismatch");
+    // Pre-scale the COMPLETE waveform exactly once.  h already contains the
+    // packet amplitude, so the taps are never scaled again.  Reading through
+    // `waveform` and writing `scaled_waveform` element by element also stays
+    // correct if the caller handed in the same scratch buffer.
+    const float scale_f = static_cast<float>(scale_real);
+    cf* const scaled = scratch.scaled_waveform.data();
+    for (size_t i = 0; i < waveform_n; ++i) {
+        const cf v = waveform[i];
+        if (!finite(v))
+            return fail("nonfinite_input");
+        scaled[i] = v * scale_f;
+    }
+    r.waveform_scale = scale_real;
+    r.scale_us = us(t_scale);
+
+    // --- support and consumer ROI ------------------------------------------
+    // A complete observed packet is mandatory; truncation never clips.
+    if (lo < 0 || hi > int64_t(n)) {
+        r.channel_us = us(t_channel);
+        return fail("context_truncated");
+    }
+    const int64_t sub_lo = std::max(lo, roi_lo);
+    const int64_t sub_hi = std::min(hi, roi_hi);
+    if (sub_hi <= sub_lo) {
+        r.channel_us = us(t_channel);
+        return fail("no_overlap");
+    }
+    r.sub_lo = sub_lo;
+    r.sub_hi = sub_hi;
+
+    // --- direct O(N * active_count) FIR, tap-major contiguous passes ------
+    // Each active tap is one contiguous run over j.  The inner loop is a
+    // vectorizable complex AXPY with no per-sample bounds branch; the
+    // accumulator lives in preallocated scratch, so the hot path never
+    // allocates.  Only the active lags contribute (inactive hull taps are 0).
+    const auto t_conv = Clock::now();
+    cf* const recon = ihat ? ihat : out;
+    const int64_t x_n = int64_t(waveform_n);
+    const int64_t len = hi - lo;
+    cf* const acc = scratch.accumulator.data();
+    cf* const tmp = scratch.fir_tmp.data();
+    std::fill(acc, acc + len, cf(0.f, 0.f));
+    const size_t active = model.active_count;
+    for (size_t a = 0; a < active; ++a) {
+        const int64_t lag = int64_t(model.active_lags[a]);
+        const cf h =
+            model.taps[static_cast<size_t>(lag - model.lag_lo)];
+        const int64_t j0 = std::max<int64_t>(lo, q + lag);
+        const int64_t j1 = std::min<int64_t>(hi, q + lag + x_n);
+        if (j1 <= j0)
+            continue;
+        const cf* const src = scaled + (j0 - q - lag);
+        cf* const dst = acc + (j0 - lo);
+        const unsigned count = static_cast<unsigned>(j1 - j0);
+        // VOLK dispatches to the widest SIMD implementation available on this
+        // host (the old path uses the same dependency for its CFO ramps).
+        volk_32fc_s32fc_multiply_32fc(tmp, src, h, count);
+        volk_32fc_x2_add_32fc(dst, dst, tmp, count);
+    }
+    r.convolution_us = us(t_conv);
+
+    // --- block-anchored absolute CFO grid and finite checks -----------------
+    const auto t_cfo = Clock::now();
+    const double omega = 2.0 * kPi * model.cfo_hz / kWorkRateHz;
+    std::array<cf, kCfoBlock> rotation;
+    {
+        cd cur(1.0, 0.0);
+        const cd step = std::exp(cd(0.0, omega));
+        for (size_t k = 0; k < kCfoBlock; ++k) {
+            rotation[k] = cf(static_cast<float>(cur.real()),
+                             static_cast<float>(cur.imag()));
+            cur *= step;
+        }
+    }
+    const int64_t anchor = model.phase_reference_sample; // == q by the gate
+    for (int64_t j = lo; j < hi;) {
+        const int64_t p = j - anchor;
+        const int64_t b = floordiv(p, int64_t(kCfoBlock));
+        const size_t j0 = static_cast<size_t>(p - b * int64_t(kCfoBlock));
+        const size_t count =
+            std::min<size_t>(kCfoBlock - j0, static_cast<size_t>(hi - j));
+        const cd base_phase =
+            std::exp(cd(0.0, omega * static_cast<double>(b * int64_t(kCfoBlock))));
+        const cf block(static_cast<float>(base_phase.real()),
+                       static_cast<float>(base_phase.imag()));
+        const cf* const src = acc + (j - lo);
+        const unsigned nrot = static_cast<unsigned>(count);
+        volk_32fc_s32fc_multiply_32fc(tmp, rotation.data() + j0, block, nrot);
+        volk_32fc_x2_multiply_32fc(recon + j, src, tmp, nrot);
+        j += static_cast<int64_t>(count);
+    }
+    for (int64_t j = lo; j < hi; ++j) {
+        if (!finite(recon[j]) || !finite(y[j] - recon[j])) {
+            // Restore the bypass image.  out was untouched unless the caller
+            // passed ihat == nullptr, in which case it held the trial result.
+            if (ihat)
+                std::fill(ihat, ihat + n, cf(0.f, 0.f));
+            else
+                std::copy(y, y + n, out);
+            r.cfo_us = us(t_cfo);
+            r.channel_us = us(t_channel);
+            return fail("nonfinite_reconstruction");
+        }
+    }
+    r.cfo_us = us(t_cfo);
+    r.channel_us = us(t_channel);
+
+    // --- subtract only the consumer ROI ------------------------------------
+    const auto t_subtract = Clock::now();
+    for (int64_t j = sub_lo; j < sub_hi; ++j)
+        out[j] = y[j] - recon[j];
+    if (!ihat) {
+        // The trial reconstruction used `out`: the contract still requires
+        // out == y outside the subtraction interval.
+        for (int64_t j = lo; j < sub_lo; ++j)
+            out[j] = y[j];
+        for (int64_t j = sub_hi; j < hi; ++j)
+            out[j] = y[j];
+    }
+    r.subtract_us = us(t_subtract);
+
+    r.packet_samples = waveform_n;
+    r.committed = true;
+    r.reason = "committed";
+    r.apply_total_us = us(t_apply);
+    return true;
+}
+
+DiscreteCirResult fullpacket_cancel_discrete(
+    const std::complex<float>* y,
+    size_t n,
+    const std::vector<uint8_t>& phr_bits,
+    const std::vector<uint8_t>& wire_psdu,
+    bool fcs_pass,
+    const mod::HrpModConfig& profile,
+    const DiscreteCirModel& model,
+    const std::complex<float>* reference_sync,
+    size_t sync_n,
+    int64_t roi_lo,
+    int64_t roi_hi,
+    DiscreteCirScratch& scratch,
+    std::complex<float>* out,
+    std::complex<float>* ihat)
+{
+    DiscreteCirResult r;
+    const auto t_validate = Clock::now();
+    auto fail = [&](const char* reason) {
+        r.committed = false;
+        r.reason = reason;
+        r.validate_us = us(t_validate);
+        return r;
+    };
+
+    // Bypass image first: modulation, apply or any validation failure below
+    // must leave out == y and ihat == 0 exactly.
+    if (!y || !out || n == 0 || (ihat && (ihat == y || ihat == out)))
+        return fail("invalid_buffers");
+    std::copy(y, y + n, out);
+    if (ihat)
+        std::fill(ihat, ihat + n, cf(0.f, 0.f));
+
+    const char* sf = transaction_scratch_failure(scratch, n);
+    if (sf)
+        return fail(sf);
+    if (!reference_sync || sync_n != scratch.sps)
+        return fail("invalid_template");
+    if (!fcs_pass)
+        return fail("fcs_failed");
+    if (profile.code_index != 10 || profile.sync_repetitions != 64 ||
+        profile.insert_sts || !profile.sfd_mode ||
+        std::strcmp(profile.sfd_mode, "4z2") != 0 || profile.ranging ||
+        profile.pulse.shape != mod::PulseShape::Legacy)
+        return fail("unsupported_profile");
+    if (phr_bits.size() != 19 || wire_psdu.size() < 2 ||
+        wire_psdu.size() > radar_meta::kMaxPsduBytes)
+        return fail("invalid_frame_length");
+    const size_t crc_len = wire_psdu.size() - 2;
+    const uint16_t crc_expected =
+        static_cast<uint16_t>(wire_psdu[crc_len]) |
+        static_cast<uint16_t>(static_cast<uint16_t>(wire_psdu[crc_len + 1]) << 8);
+    if (demod::core::detail::crc16_802154(wire_psdu.data(), crc_len) != crc_expected)
+        return fail("fcs_failed");
+    mod::detail::encode_phr19(wire_psdu.size(),
+                              profile.sync_repetitions,
+                              profile.ranging,
+                              scratch.expected_phr);
+    for (size_t i = 0; i < 19; ++i)
+        if (phr_bits[i] > 1 ||
+            phr_bits[i] != static_cast<uint8_t>(scratch.expected_phr[i]))
+            return fail("unsupported_phr");
+
+    const char* mf = model_failure(model, scratch.sps, n);
+    if (mf)
+        return fail(mf);
+    if (roi_lo < 0 || roi_hi > int64_t(n) || roi_hi <= roi_lo)
+        return fail("invalid_roi");
+    for (size_t i = 0; i < n; ++i)
+        if (!finite(y[i]))
+            return fail("nonfinite_input");
+    r.validate_us = us(t_validate);
+
+    // Remodulate the decoded wire PSDU once into the scratch packet buffer.
+    // The capacity is the REAL buffer length, not the estimator's planning
+    // bound, so a stale max_packet_samples cannot reject a fitting packet.
+    const auto t_tx = Clock::now();
+    size_t packet_n = 0;
+    if (!mod::modulate_one(wire_psdu.data(),
+                           wire_psdu.size(),
+                           profile,
+                           scratch.modulator,
+                           scratch.waveform.data(),
+                           scratch.waveform.size(),
+                           packet_n) ||
+        packet_n == 0 || packet_n > scratch.waveform.size()) {
+        r.reason = "tx_failed";
+        r.tx_us = us(t_tx);
+        return r;
+    }
+    const double tx_us = us(t_tx);
+
+    DiscreteCirResult applied;
+    apply_discrete_cir(y,
+                       n,
+                       scratch.waveform.data(),
+                       packet_n,
+                       reference_sync,
+                       sync_n,
+                       model,
+                       roi_lo,
+                       roi_hi,
+                       scratch,
+                       out,
+                       ihat,
+                       &applied);
+    // apply() owns channel_us/subtract_us/apply_total_us; the wrapper owns the
+    // validation and remodulation stages (never double-counted as children).
+    applied.validate_us = r.validate_us;
+    applied.tx_us = tx_us;
+    return applied;
+}
+
+} // namespace sic
+} // namespace uwb
+} // namespace gr

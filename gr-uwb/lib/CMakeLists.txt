@@ -80,6 +80,8 @@ list(APPEND uwb_sources
     uwb_realtime_echo_timer.cc
     uwb_echo_timer_stream.cc
     uwb_fullpacket_sic_core.cc
+    uwb_discrete_cir_estimator.cc
+    uwb_discrete_cir_reconstruct.cc
     uwb_preamble_sic_core.cc
     uwb_preamble_sic.cc
 )
@@ -231,6 +233,8 @@ list(APPEND test_uwb_sources
     qa_uwb_fullpacket_payload_cache.cc
     qa_uwb_fullpacket_fast_rx.cc
     qa_uwb_fullpacket_sic_core.cc
+    qa_uwb_discrete_cir_estimator.cc
+    qa_uwb_discrete_cir_reconstruct.cc
     qa_uwb_preamble_sic_core.cc
     qa_uwb_preamble_sic.cc
     qa_uwb_hrp_packet_source.cc

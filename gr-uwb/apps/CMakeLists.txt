@@ -317,6 +317,10 @@ add_test(NAME uwb_qa_fullpacket_compare_py
     COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/sic/qa_fullpacket_compare.py)
 set_tests_properties(uwb_qa_fullpacket_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 
+add_test(NAME uwb_qa_discrete_cir_compare_py
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/sic/verify_discrete_cir_compare.py --self-test)
+set_tests_properties(uwb_qa_discrete_cir_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+
 # Mature RX uses the existing AVX2/FMA FIR and compiler vectorization.
 # Keep the portable executable for same-source, same-library paired measurement.
 add_executable(benchmark_fullpacket_compare_fast_rx benchmark_fullpacket_compare.cc)
