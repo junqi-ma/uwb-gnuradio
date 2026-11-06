@@ -327,3 +327,12 @@ target_compile_options(benchmark_fullpacket_compare_fast_rx PRIVATE -march=nativ
 add_executable(benchmark_fullpacket_cfo_diag benchmark_fullpacket_cfo_diag.cc)
 target_link_libraries(benchmark_fullpacket_cfo_diag gnuradio-uwb)
 target_compile_options(benchmark_fullpacket_cfo_diag PRIVATE -fPIC)
+
+# Offline-only copy of reconstruction, split by waveform fields for timing.
+add_executable(benchmark_fullpacket_segment_diag
+    benchmark_fullpacket_segment_diag.cc fullpacket_segment_diagnostics.cc)
+target_link_libraries(benchmark_fullpacket_segment_diag gnuradio-uwb)
+target_compile_options(benchmark_fullpacket_segment_diag PRIVATE -fPIC)
+add_test(NAME uwb_qa_fullpacket_segment_diag
+    COMMAND benchmark_fullpacket_segment_diag --self-test)
+set_tests_properties(uwb_qa_fullpacket_segment_diag PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
