@@ -1,14 +1,14 @@
 # 当前任务：通信解码加速已交付
 
 结果见 `docs/sic/通信解码加速开发报告_2026-11-07.md`，code-tested SHA
-`d2d18be`。A/B/C 三个显式选项：SFD VOLK 点积 + 模板缓存 + 尾部 ±8 seed、
+`f753f17`。A/B/C 三个显式选项：SFD VOLK 点积 + 模板缓存 + 尾部 ±8 seed、
 CFO 1024 点块旋转、按 PHR 长度两阶段 soft-chip。正式三格配对 comm demod mean：
-`sync_base` 2226.8→1718.9 µs（0.772）、`payload_base` 2816.0→1933.1 µs
-（0.686）、`payload_four_frac` 2658.3→1715.7 µs（0.645）；P95 均未增加。
-8 格×16 源窗逐窗 comm/sensing PSDU、FCS、status 一致，0 次 soft-chip fallback。
-默认选项全关，旧 build `gr-uwb/build-sic-fullpacket-fused` 未覆盖；MATLAB、
-native、FPGA/硬件、paced 到达与 mean≤0.5 ms/P99≤1 ms/200 窗/s 未验证、未宣称。
-以下为历史记录。
+`sync_base` 2025.9→1656.6 µs（0.818）、`payload_base` 2764.8→1925.5 µs
+（0.696）、`payload_four_frac` 2762.3→1757.4 µs（0.636）；P95 均未增加。
+8 格×16 源窗逐窗 comm/sensing PSDU、FCS、status 一致，0 次 soft-chip fallback；
+补充 16/127 B 两格 comm mean 为 0.576/0.809。默认选项全关，旧 build
+`gr-uwb/build-sic-fullpacket-fused` 未覆盖；MATLAB、native、FPGA/硬件、
+paced 到达与 mean≤0.5 ms/P99≤1 ms/200 窗/s 未验证、未宣称。以下为历史记录。
 
 # 当前任务：FIR 乘加融合优化已交付
 
