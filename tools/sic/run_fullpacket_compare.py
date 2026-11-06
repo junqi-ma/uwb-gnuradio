@@ -85,7 +85,11 @@ def library_binding(binary, build, env):
     return completed.stdout, loaded
 
 
-def provenance(binary, build, env):
+def provenance(binary, build, env, rx_pipeline):
+    flags_file = build / "apps/CMakeFiles" / (binary.name + ".dir") / "flags.make"
+    if not flags_file.is_file():
+        raise RuntimeError(f"selected runner compile flags missing: {flags_file}")
+    flags_text = flags_file.read_text()
     ldd, libraries = library_binding(binary, build, env)
     status = git_output("status", "--porcelain=v1", "--untracked-files=normal")
     cpu = "unknown"
@@ -98,6 +102,7 @@ def provenance(binary, build, env):
         pass
     sources = [ROOT / p for p in (
         "gr-uwb/apps/benchmark_fullpacket_compare.cc",
+        "gr-uwb/apps/fullpacket_rx_pipeline.h",
         "gr-uwb/include/gnuradio/uwb/uwb_fullpacket_sic_core.h",
         "gr-uwb/lib/uwb_fullpacket_sic_core.cc",
         "gr-uwb/lib/uwb_preamble_sic_core.cc",
@@ -109,6 +114,10 @@ def provenance(binary, build, env):
                 repo=str(ROOT), git_head=git_output("rev-parse", "HEAD"),
                 git_dirty=bool(status), git_status=status.splitlines(),
                 build_dir=str(build), binary={"path": str(binary), "sha256": sha256(binary)},
+                requested_rx_pipeline=rx_pipeline,
+                expected_rx_avx2=rx_pipeline == "fast",
+                compile_flags=dict(path=str(flags_file), sha256=sha256(flags_file),
+                                   content=flags_text),
                 libraries=libraries, ldd=ldd,
                 bindings=[{"path": str(p.resolve()), "sha256": sha256(p)}
                           for p in sorted((build / "python/uwb/bindings").glob("uwb_python*.so"))],
@@ -159,13 +168,23 @@ def check_input(case):
     return pub, windows, hashes, actual_templates
 
 
-def annotate(run, source_windows, source_hashes):
+def check_rx_metadata(record, expected, label):
+    """Bind selected executable to the kernel it actually reports using."""
+    if record.get("rx_pipeline") != expected:
+        raise RuntimeError(f"{label}: RX pipeline {record.get('rx_pipeline')!r} != requested {expected!r}")
+    if type(record.get("rx_avx2")) is not bool or record["rx_avx2"] != (expected == "fast"):
+        raise RuntimeError(f"{label}: RX AVX2/FMA metadata does not match requested {expected}")
+    return {"rx_pipeline": record["rx_pipeline"], "rx_avx2": record["rx_avx2"]}
+
+
+def annotate(run, source_windows, source_hashes, rx_pipeline):
     log = run / "windows.jsonl"
     original = run / "windows.runner.jsonl"
     log.rename(original)
     with original.open() as src, log.open("w") as dst:
         for line in src:
             row = json.loads(line)
+            check_rx_metadata(row, rx_pipeline, f"{run.name}/row {row.get('window_id')}")
             source = row["source_window"]
             if not isinstance(source, int) or not 0 <= source < len(source_windows):
                 raise ValueError("runner source_window outside declared pool")
@@ -239,6 +258,8 @@ def main(argv=None):
     parser.add_argument("--inputs", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--kind", required=True, choices=DEFAULT_CELLS)
+    parser.add_argument("--rx-pipeline", choices=("portable", "fast"), default="fast",
+                        help="fast uses the mature native AVX2/FMA RX; portable keeps the baseline runner")
     parser.add_argument("--cell", action="append", help="repeat to select multiple cells")
     parser.add_argument("--windows", type=int, help="input source windows when generating; existing cases reused intact")
     parser.add_argument("--seed", type=int, default=2000000)
@@ -257,14 +278,16 @@ def main(argv=None):
     if len(cells) != len(set(cells)):
         parser.error("duplicate --cell")
     inputs, out, build = args.inputs.resolve(), args.out.resolve(), args.build_dir.resolve()
-    binary = build / "apps/benchmark_fullpacket_compare"
+    binary_name = ("benchmark_fullpacket_compare_fast_rx" if args.rx_pipeline == "fast"
+                   else "benchmark_fullpacket_compare")
+    binary = build / "apps" / binary_name
     if out.exists() and any(out.iterdir()):
         parser.error(f"output is not empty; choose a new run: {out}")
     if not binary.is_file():
         parser.error(f"runner missing: {binary}")
     env = clean_env()
     out.mkdir(parents=True, exist_ok=True)
-    prov = provenance(binary, build, env)
+    prov = provenance(binary, build, env, args.rx_pipeline)
     write_json(out / "provenance.json", prov)
     plans = []
     for cell in cells:
@@ -281,7 +304,7 @@ def main(argv=None):
         if len(windows) != source_count:
             print(f"reuse {cell}: {len(windows)} existing sources (requested generation size {source_count})", flush=True)
         plans.append((cell, case, pub, windows, hashes, templates))
-    write_json(out / "experiment_plan.json", dict(kind=args.kind, cells=cells, seed=args.seed,
+    write_json(out / "experiment_plan.json", dict(kind=args.kind, rx_pipeline=args.rx_pipeline, cells=cells, seed=args.seed,
         source_windows_requested=source_count, observations=args.observations,
         rounds=args.rounds, warmup_per_mode_per_round=args.warmup,
         paced_rate=args.rate, paced_seconds=args.seconds,
@@ -315,6 +338,8 @@ def main(argv=None):
                     command_record = dict(argv=[str(x) for x in command], cwd=str(ROOT),
                         input_case=str(case), source_count=len(windows), template_hashes=templates,
                         public_profile=pub, provenance_file=str(out / "provenance.json"),
+                        requested_rx_pipeline=args.rx_pipeline,
+                        expected_rx_avx2=args.rx_pipeline == "fast",
                         service_observations_are_unique_packets=args.kind not in ("timing", "paced"),
                         full_context_arrival_policy="whole_public_context")
                     write_json(run / "command.json", command_record)
@@ -323,7 +348,10 @@ def main(argv=None):
                     if rc == 0:
                         actual_hashes = ({w.name: sha256(w / "clean.cf32") for w in windows}
                                          if mode == "clean" else hashes)
-                        annotate(run, windows, actual_hashes)
+                        runner_summary = json.loads((run / "runner_summary.json").read_text())
+                        item["rx_kernel"] = check_rx_metadata(runner_summary, args.rx_pipeline,
+                                                              str(run / "runner_summary.json"))
+                        annotate(run, windows, actual_hashes, args.rx_pipeline)
                         if mode in ("raw", "clean"):
                             item["reference_summary"] = reference_summary(run, windows, mode)
                         else:
@@ -337,15 +365,15 @@ def main(argv=None):
                                 verification = json.loads(result_path.read_text())
                                 # Detailed windows stay in per-job verification.json.
                                 item["verification"] = {k: v for k, v in verification.items() if k != "windows"}
-                        item["runner_summary"] = json.loads((run / "runner_summary.json").read_text())
+                        item["runner_summary"] = runner_summary
                     results.append(item)
                     write_json(out / "experiment_summary.json", dict(
-                        schema="fullpacket-experiment/1", kind=args.kind,
+                        schema="fullpacket-experiment/1", kind=args.kind, rx_pipeline=args.rx_pipeline,
                         complete=False, results=results, provenance=str(out / "provenance.json")))
                     print(f"{cell}/{label}: runner={rc} verifier={item.get('verifier_rc', 'not-run')}", flush=True)
     except BaseException:
         write_json(out / "experiment_summary.json", dict(
-            schema="fullpacket-experiment/1", kind=args.kind,
+            schema="fullpacket-experiment/1", kind=args.kind, rx_pipeline=args.rx_pipeline,
             complete=False, results=results, provenance=str(out / "provenance.json")))
         raise
     passed = all(r["runner_rc"] == 0 and
@@ -353,7 +381,7 @@ def main(argv=None):
                   if "reference_summary" in r else r.get("verifier_rc") == 0)
                  for r in results)
     write_json(out / "experiment_summary.json", dict(schema="fullpacket-experiment/1",
-        kind=args.kind, complete=True, passed=passed, results=results,
+        kind=args.kind, rx_pipeline=args.rx_pipeline, complete=True, passed=passed, results=results,
         provenance=str(out / "provenance.json"),
         repeated_exposure_note="timing/paced reuse a finite raw IQ pool; do not treat observations as independent packets",
         rate_aggregation="per-run verifier unique_source_rates; repeated rounds must not be pooled as independent trials"))

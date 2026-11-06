@@ -49,6 +49,24 @@ def main():
         assert baseline["passed"], baseline["errors"]
         assert baseline["modes"]["full"]["comm_exact"]["rate"] == 1.
         assert baseline["iq_effects_verified"]
+        # Native RX metadata and lap counters remain independent diagnostics.
+        native = copy.deepcopy(rows)
+        for row in native:
+            row.update(rx_pipeline="mature_native", rx_avx2=True)
+        native[1]["comm_stage_us"] = dict.fromkeys(V.COMM_STAGES, 0)
+        native[1]["comm_stage_us"]["timing"] = 1
+        native_summary = evaluate(native)
+        assert native_summary["passed"], native_summary["errors"]
+        assert native_summary["modes"]["full"]["comm_stage_us"]["timing"]["mean"] == 1
+        for name, change in [
+            ("negative comm lap", lambda r: r[1]["comm_stage_us"].update(cir=-1)),
+            ("comm laps above parent", lambda r: r[1]["comm_stage_us"].update(cir=20)),
+            ("paired RX kernel", lambda r: r[1].update(rx_avx2=False)),
+        ]:
+            changed = copy.deepcopy(native)
+            change(changed)
+            assert not evaluate(changed)["passed"], name+" escaped"
+        evaluate(rows)  # archived records without RX metadata remain supported
         for name, mutate in [
             ("support", lambda r: r[1].update(support=[0,1])),
             ("bypass", lambda r: r[1].update(committed=False)),

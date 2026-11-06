@@ -316,3 +316,9 @@ target_link_libraries(benchmark_fullpacket_compare gnuradio-uwb)
 add_test(NAME uwb_qa_fullpacket_compare_py
     COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/sic/qa_fullpacket_compare.py)
 set_tests_properties(uwb_qa_fullpacket_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+
+# Mature RX uses the existing AVX2/FMA FIR and compiler vectorization.
+# Keep the portable executable for same-source, same-library paired measurement.
+add_executable(benchmark_fullpacket_compare_fast_rx benchmark_fullpacket_compare.cc)
+target_link_libraries(benchmark_fullpacket_compare_fast_rx gnuradio-uwb)
+target_compile_options(benchmark_fullpacket_compare_fast_rx PRIVATE -march=native)

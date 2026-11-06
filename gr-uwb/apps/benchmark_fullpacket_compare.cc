@@ -1,6 +1,6 @@
 // Offline paired SIC and bounded, real-clock arrival replay. No GNU Radio block.
 #include <gnuradio/uwb/uwb_fullpacket_sic_core.h>
-#include <gnuradio/uwb/uwb_demod_core.h>
+#include "fullpacket_rx_pipeline.h"
 #include <gnuradio/uwb/uwb_radar_cir_core.h>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/json_parser.hpp>
@@ -16,6 +16,8 @@
 #include <sstream>
 #include <thread>
 #include <ctime>
+#include <memory>
+#include <array>
 using namespace gr::uwb;
 using C = std::complex<float>;
 using Clock = std::chrono::steady_clock;
@@ -35,18 +37,26 @@ struct Row {
  size_t id=0,source=0,n=0;std::string mode,reason="not_run"; bool committed=false,valid=false,rejected=false;
  uint64_t model_id=0; int64_t observed=0,required=0,lo=0,hi=0,origin=-1;
  bool comm_fcs=false,sense_fcs=false;std::string comm_hex,sense_hex;int sense_status=-1,comm_status=-1,cir_status=-1;
+ std::array<double,7> comm_stages{};
  double thread_cpu=0,estimate=0,comm=0,validate=0,tx=0,channel=0,subtract=0,copy=0,sic=0,cir=0,sense=0,service=0;
  double submit=0,start=0,finish=0,result=0,first=0,ready=0,scheduled=0,lateness=0;
 };
 void emit(std::ostream& o,const Row&r){
  o<<std::setprecision(12)<<"{\"window_id\":"<<r.id<<",\"source_window\":"<<r.source<<",\"mode\":"<<quote(r.mode)
+ <<",\"rx_pipeline\":"<<quote(experiment::FastRxPipeline::avx2_enabled()?"fast":"portable")
+ <<",\"rx_avx2\":"<<(experiment::FastRxPipeline::avx2_enabled()?"true":"false")
  <<",\"n\":"<<r.n<<",\"committed\":"<<(r.committed?"true":"false")<<",\"reason\":"<<quote(r.reason)
  <<",\"model_valid\":"<<(r.valid?"true":"false")<<",\"model_id\":"<<r.model_id<<",\"origin\":"<<r.origin
  <<",\"observed_end\":"<<r.observed<<",\"support\":["<<r.lo<<","<<r.hi<<"],\"rejected\":"<<(r.rejected?"true":"false")
  <<",\"comm_fcs\":"<<(r.mode=="preamble"?"null":r.comm_fcs?"true":"false")<<",\"comm_status\":"<<r.comm_status
  <<",\"comm_psdu_hex\":"<<quote(r.comm_hex)<<",\"sensing_fcs\":"<<(r.sense_fcs?"true":"false")
  <<",\"sensing_psdu_hex\":"<<quote(r.sense_hex)<<",\"sensing_status\":"<<r.sense_status<<",\"cir_status\":"<<r.cir_status
- <<",\"times_us\":{\"thread_cpu\":"<<r.thread_cpu<<",\"estimate\":"<<r.estimate<<",\"comm_demod\":"<<r.comm<<",\"validate\":"<<r.validate
+ <<",\"comm_stage_us\":{";
+ if(r.mode=="full" && !r.rejected) {
+  const char* names[]={"timing","cfo","sfd","cir","ns_sfd","phr","payload"};
+  for(size_t k=0;k<7;++k){if(k)o<<',';o<<quote(names[k])<<':'<<r.comm_stages[k];}
+ }
+ o<<"},\"times_us\":{\"thread_cpu\":"<<r.thread_cpu<<",\"estimate\":"<<r.estimate<<",\"comm_demod\":"<<r.comm<<",\"validate\":"<<r.validate
  <<",\"tx\":"<<r.tx<<",\"channel\":"<<r.channel<<",\"subtract\":"<<r.subtract<<",\"copy\":"<<r.copy
  <<",\"sic_total\":"<<r.sic<<",\"cir\":"<<r.cir<<",\"sensing_demod\":"<<r.sense<<",\"service\":"<<r.service
  <<"},\"events\":{\"required_sample\":"<<r.required<<",\"submit_us\":"<<r.submit<<",\"start_us\":"<<r.start
@@ -57,8 +67,9 @@ struct Engine {
  boost::property_tree::ptree pub;
  sic::SicConfig cfg; sic::SicScratch scratch; sic::SicTemplates templ;
  sic::FullPacketScratch full; mod::HrpModConfig modcfg;
- std::vector<C> sync,pre,ssync,out,ihat; demod::core::DemodScratch dc,ds;
- demod::Qm35825Profile cp,sp;radar::RadarCirConfig rc;radar::RadarCirCoreScratch rs;
+ std::vector<C> sync,pre,ssync,out,ihat;
+ std::unique_ptr<experiment::FastRxPipeline> comm_rx,sensing_rx;
+ radar::RadarCirConfig rc;radar::RadarCirCoreScratch rs;
  int64_t sense_seed;size_t n;double fsamp=998400000.;
  Engine(const fs::path& p) {
   boost::property_tree::read_json((p/"public.json").string(),pub);
@@ -73,9 +84,9 @@ struct Engine {
   if(cfg.observed_end_sample<=0 || cfg.observed_end_sample>int64_t(n))throw std::runtime_error("invalid observation limit");
   std::string err;if(!sic::prepare_sic_core(cfg,sync.data(),sync.size(),pre.data(),pre.size(),scratch,&err))throw std::runtime_error(err);
   templ.sync=sync.data();templ.sync_len=sync.size();templ.preamble=pre.data();templ.preamble_len=pre.size();
-  out.resize(n);ihat.resize(n);full.reserve(n);dc.reserve(n);ds.reserve(n);
-  cp.code_index=10;cp.timing_search_margin=256;cp.timing_coarse_stride=1;
-  sp.code_index=9;sp.timing_search_margin=256;sp.timing_coarse_stride=1;
+  out.resize(n);ihat.resize(n);full.reserve(n);
+  comm_rx=std::make_unique<experiment::FastRxPipeline>(n,10);
+  sensing_rx=std::make_unique<experiment::FastRxPipeline>(n,9);
   sense_seed=pub.get<int64_t>("sensing_seed");
   modcfg.code_index=10;modcfg.sync_repetitions=64;modcfg.sfd_mode="4z2";modcfg.peak_amplitude=.8f;
   rc.use_predicted_timing=true;
@@ -113,9 +124,11 @@ struct Engine {
    r.lo=model.valid?model.sub_lo:0;r.hi=model.valid?model.sub_hi:0;
   } else {
    wait_sample(n);t=Clock::now();demod::DemodResult decoded;
-   if(model.valid)decoded=demod::core::demodulate_one(y.data(),n,cp,id,model.origin,0,sync,dc);
+   if(model.valid)decoded=comm_rx->run(y.data(),n,id,model.origin,sync);
    else decoded.status=demod::DemodStatus::InvalidInput;
-   r.comm=us(t,Clock::now());r.comm_status=int(decoded.status);r.comm_fcs=model.valid&&decoded.payload.fcs_pass;r.comm_hex=hex(decoded.payload.bytes);
+   r.comm=us(t,Clock::now());
+   r.comm_stages={double(decoded.stage_timing_us),double(decoded.stage_cfo_us),double(decoded.stage_sfd_us),double(decoded.stage_cir_us),double(decoded.stage_ns_sfd_us),double(decoded.stage_phr_us),double(decoded.stage_payload_us)};
+   r.comm_status=int(decoded.status);r.comm_fcs=model.valid&&decoded.payload.fcs_pass;r.comm_hex=hex(decoded.payload.bytes);
    t=Clock::now();auto f=sic::fullpacket_cancel(y.data(),n,decoded.phr.phr_bits,decoded.payload.bytes,r.comm_fcs,modcfg,model,sync.data(),sync.size(),cfg.sub_roi_lo,cfg.sub_roi_hi,full,out.data(),ihat.data());
    double full_wall=us(t,Clock::now());r.validate=f.validate_us;r.tx=f.tx_us;r.channel=f.channel_us;r.subtract=f.subtract_us;
    r.copy=std::max(0.,full_wall-r.validate-r.tx-r.channel-r.subtract);
@@ -125,7 +138,7 @@ struct Engine {
   }
   r.finish=us(epoch,Clock::now());r.ready=us(epoch,arrival)+(realtime?r.required*1e6/fsamp:0);
   t=Clock::now();radar::RadarCirResult cr;radar::radar_cir_one(out.data(),n,sense_seed+64*1016,rc,rs,cr);r.cir=us(t,Clock::now());r.cir_status=int(cr.status);
-  t=Clock::now();auto sd=demod::core::demodulate_one(out.data(),n,sp,id,sense_seed,0,ssync,ds);r.sense=us(t,Clock::now());r.sense_status=int(sd.status);r.sense_fcs=sd.payload.fcs_pass;r.sense_hex=hex(sd.payload.bytes);
+  t=Clock::now();auto sd=sensing_rx->run(out.data(),n,id,sense_seed,ssync);r.sense=us(t,Clock::now());r.sense_status=int(sd.status);r.sense_fcs=sd.payload.fcs_pass;r.sense_hex=hex(sd.payload.bytes);
   service=r.sic+r.cir+r.sense;r.service=service;r.result=us(epoch,Clock::now());r.thread_cpu=cpu_us()-cpu_begin;return r;
  }
 };
@@ -158,6 +171,6 @@ int main(int argc,char**argv)try {
    if(full){Row r;r.id=j;r.source=j%pool;r.mode=a.mode;r.n=e.n;r.observed=e.cfg.observed_end_sample;r.required=a.mode=="preamble"?r.observed:e.n;r.reason="queue_full";r.rejected=true;r.submit=r.start=r.finish=r.result=r.first=submit;r.scheduled=scheduled;r.lateness=submit-scheduled;r.ready=us(t0,arrival)+r.required*1e6/e.fsamp;std::lock_guard<std::mutex>lk(output);emit(log,r);++rejected;}else cv.notify_one();
   }{std::lock_guard<std::mutex>lk(mu);done=true;}cv.notify_one();worker.join();if(worker_error)std::rethrow_exception(worker_error);
  }
- log.close();std::ofstream summary(a.out/"runner_summary.json");summary<<"{\"schema\":\"fullpacket-compare/1\",\"submitted\":"<<submitted<<",\"completed\":"<<completed<<",\"rejected\":"<<rejected<<",\"source_late\":"<<source_late<<",\"paced_rate\":"<<a.rate<<",\"full_wait_policy\":\"whole_public_context\",\"queue_capacity\":2,\"input_pool\":"<<(a.rate?std::min<size_t>(16,windows.size()):windows.size())<<",\"first_output\":\"first_clean_us\",\"time_reference\":\"run_steady_clock_epoch\"}\n";
+ log.close();std::ofstream summary(a.out/"runner_summary.json");summary<<"{\"schema\":\"fullpacket-compare/1\",\"rx_pipeline\":"<<quote(experiment::FastRxPipeline::avx2_enabled()?"fast":"portable")<<",\"rx_avx2\":"<<(experiment::FastRxPipeline::avx2_enabled()?"true":"false")<<",\"submitted\":"<<submitted<<",\"completed\":"<<completed<<",\"rejected\":"<<rejected<<",\"source_late\":"<<source_late<<",\"paced_rate\":"<<a.rate<<",\"full_wait_policy\":\"whole_public_context\",\"queue_capacity\":2,\"input_pool\":"<<(a.rate?std::min<size_t>(16,windows.size()):windows.size())<<",\"first_output\":\"first_clean_us\",\"time_reference\":\"run_steady_clock_epoch\"}\n";
  std::cout<<"submitted="<<submitted<<" completed="<<completed<<" rejected="<<rejected<<"\n";return 0;
 }catch(const std::exception& ex){std::cerr<<ex.what()<<'\n';return 1;}

@@ -227,6 +227,7 @@ list(APPEND test_uwb_sources
     qa_uwb_radar_e2e.cc
     qa_uwb_uhd_backend.cc
     qa_uwb_hrp_mod_core.cc
+    qa_uwb_fullpacket_fast_rx.cc
     qa_uwb_fullpacket_sic_core.cc
     qa_uwb_preamble_sic_core.cc
     qa_uwb_preamble_sic.cc
@@ -509,3 +510,6 @@ add_test(NAME uwb_uhd_burst_dry_run_rejects_invalid_config
     COMMAND uwb_uhd_burst_dry_run --pri-num 0)
 set_tests_properties(uwb_uhd_burst_dry_run_rejects_invalid_config
     PROPERTIES WILL_FAIL TRUE)
+
+# Compile the wrapper QA with the SAME native RX configuration as the fast app.
+target_compile_options(uwb_qa_uwb_fullpacket_fast_rx.cc PRIVATE -march=native)

@@ -1,0 +1,68 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#pragma once
+
+#include <gnuradio/uwb/uwb_demod_core.h>
+
+#include <stdexcept>
+
+namespace gr {
+namespace uwb {
+namespace experiment {
+
+// Reuses the mature RX core, including its timing/CFO/SFD refinements and
+// soft-chip FIR. Native and portable executables compile this SAME pipeline;
+// the existing CIR FIR header selects AVX2/FMA only when actually enabled.
+// The caller supplies the observed IQ and a public/estimated seed. This layer
+// neither crops the input nor consumes injected timing, payload or channel.
+class FastRxPipeline {
+public:
+    FastRxPipeline(size_t max_samples, size_t code)
+        : capacity_(max_samples), profile_(demod::Qm35825Profile::Default())
+    {
+        if (max_samples == 0 || code < 9 || code > 12)
+            throw std::invalid_argument("unsupported RX capacity/code");
+        profile_.code_index = code;
+        profile_.timing_search_margin = 256;
+        profile_.timing_coarse_stride = 1;
+        scratch_.reserve(max_samples);
+    }
+
+    demod::DemodResult run(const std::complex<float>* iq,
+                          size_t n,
+                          uint64_t packet_id,
+                          int64_t seed,
+                          const std::vector<std::complex<float>>& sync)
+    {
+        if (!iq || n == 0 || n > capacity_ || seed < 0 ||
+            seed >= static_cast<int64_t>(n) || sync.size() != 1016) {
+            demod::DemodResult result;
+            result.status = demod::DemodStatus::InvalidInput;
+            result.packet_id = packet_id;
+            result.predicted_start_sample = seed;
+            result.window_start_sample = 0;
+            result.input_sample_count = n;
+            return result;
+        }
+        return demod::core::demodulate_one(
+            iq, n, profile_, packet_id, seed, 0, sync, scratch_);
+    }
+
+    static constexpr bool avx2_enabled()
+    {
+        return UWB_CIR_FIR_HAVE_AVX2 != 0;
+    }
+
+    static constexpr const char* pipeline_name()
+    {
+        return avx2_enabled() ? "mature_rx_avx2_fma" : "mature_rx_portable";
+    }
+
+private:
+    size_t capacity_;
+    demod::Qm35825Profile profile_;
+    demod::core::DemodScratch scratch_;
+};
+
+} // namespace experiment
+} // namespace uwb
+} // namespace gr

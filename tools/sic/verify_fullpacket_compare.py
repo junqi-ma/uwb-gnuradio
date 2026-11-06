@@ -21,6 +21,7 @@ MODES = {"preamble": "preamble", "preamble_only": "preamble",
          "full": "full", "full_packet_decode8": "full"}
 STAGES = ("estimate", "comm_demod", "validate", "tx", "channel", "subtract",
           "copy", "sic_total", "cir", "sensing_demod", "service")
+COMM_STAGES = ("timing", "cfo", "sfd", "cir", "ns_sfd", "phr", "payload")
 
 
 def sha256(path):
@@ -199,6 +200,25 @@ def validate_record(row, public):
     for field in ("thread_cpu", "thread_cpu_us"):
         if field in times:
             check(isinstance(times[field], (int,float)) and math.isfinite(times[field]) and times[field] >= 0, "thread CPU time")
+    # New RX metadata is optional for archived runs, but complete when emitted.
+    if "rx_pipeline" in row or "rx_avx2" in row:
+        check(isinstance(row.get("rx_pipeline"), str) and bool(row.get("rx_pipeline")), "RX pipeline metadata")
+        check(type(row.get("rx_avx2")) is bool, "RX AVX2 metadata")
+    if "comm_stage_us" in row:
+        detail = row["comm_stage_us"]
+        check(isinstance(detail, dict), "comm stage counters type")
+        if isinstance(detail, dict) and detail:
+            check(mode == "full" and not rejected, "comm counters without decoding")
+            check(set(detail) == set(COMM_STAGES), "comm stage counter names")
+            valid_detail = all(type(v) in (int, float) and math.isfinite(v) and v >= 0
+                               for v in detail.values())
+            check(valid_detail, "comm stage counter value")
+            parent = times.get("comm_demod")
+            if valid_detail and type(parent) in (int, float) and math.isfinite(parent):
+                # Existing counters round each lap to integer microseconds and
+                # exclude wrapper overhead. They are diagnostics, never added
+                # again to SIC service time.
+                check(sum(detail.values()) <= parent + 10., "comm stage counters exceed parent")
     events = row.get("events", {})
     try:
         values = [float(events[k]) for k in ("submit_us", "start_us", "finish_us", "result_us")]
@@ -266,7 +286,7 @@ def verify(case, run, summary_only=False, require_provenance=False):
             warnings.append(label+": missing recorded input hash; current source hash computed only")
         if row.get("input_hash") and row["input_hash"] != raw_hash:
             errors.append(label+": input hash mismatch")
-        paired[(row.get("window_id"), str(row["source_window"]))].append((mode, raw_hash, row.get("model_id"), row.get("origin"), row.get("model_valid")))
+        paired[(row.get("window_id"), str(row["source_window"]))].append((mode, raw_hash, row.get("model_id"), row.get("origin"), row.get("model_valid"), row.get("rx_pipeline"), row.get("rx_avx2")))
         if summary_only:
             continue
         raw, clean = read_iq(source/"raw.cf32"), read_iq(source/"clean.cf32")
@@ -306,6 +326,8 @@ def verify(case, run, summary_only=False, require_provenance=False):
                 errors.append(f"unpaired input hashes: {key}")
             if len({(v[2],v[3],v[4]) for v in values}) > 1:
                 errors.append(f"unpaired estimation model: {key}")
+            if len({(v[5],v[6]) for v in values}) > 1:
+                errors.append(f"unpaired RX pipeline: {key}")
     if runner_summary is not None:
         submitted, completed, rejected = (runner_summary.get(k) for k in ("submitted", "completed", "rejected"))
         actual_rejected = sum(bool(r.get("rejected", r.get("reason") == "queue_full")) for r in rows)
@@ -313,6 +335,9 @@ def verify(case, run, summary_only=False, require_provenance=False):
             errors.append("runner summary count types")
         elif submitted != completed + rejected or submitted != len(rows) or rejected != actual_rejected:
             errors.append("runner summary terminal accounting")
+        for field in ("rx_pipeline", "rx_avx2"):
+            if field in runner_summary and any(row.get(field) != runner_summary[field] for row in rows):
+                errors.append("runner summary "+field+" mismatch")
     else:
         warnings.append("runner_summary.json absent; submitted/completed/rejected accounting unavailable")
     if require_provenance and not provenance_verified:
@@ -343,6 +368,18 @@ def verify(case, run, summary_only=False, require_provenance=False):
                  "processing_n": len(accepted), "rejected_n": len(rejected_rows),
                  "times_us": {k: distribution([r["times_us"][k] for r in accepted if isinstance(r.get("times_us", {}).get(k), (int,float))]) for k in STAGES},
                  "sic_success_us": distribution([r["times_us"]["sic_total"] for r in group if r.get("committed") and "sic_total" in r.get("times_us", {})])}
+        detailed = [r["comm_stage_us"] for r in accepted
+                    if isinstance(r.get("comm_stage_us"), dict) and r["comm_stage_us"]]
+        stats["comm_stage_us"] = {
+            k: distribution([d[k] for d in detailed if type(d.get(k)) in (int,float)
+                             and math.isfinite(d[k]) and d[k] >= 0])
+            for k in COMM_STAGES} if detailed else {}
+        stats["comm_stage_note"] = "diagnostic children of comm_demod; not additive to SIC total"
+        rx = {(r.get("rx_pipeline"), r.get("rx_avx2")) for r in group
+              if "rx_pipeline" in r or "rx_avx2" in r}
+        if rx:
+            stats["rx_configurations"] = [dict(rx_pipeline=p, rx_avx2=a)
+                                          for p,a in sorted(rx, key=repr)]
         latency = defaultdict(list)
         for row in accepted:
             event = row.get("events", {})
