@@ -697,7 +697,10 @@ def compare(case, old_run, new_run, require_provenance=False, summary_only=False
                 sources.append(source_index(row.get("source_window")))
             except (ValueError, TypeError):
                 continue
-        if set(sources) != set(expected_sources):
+        if summary_only:
+            if not sources or not set(sources) <= set(expected_sources):
+                errors.append(f"{side} run references sources outside the case")
+        elif set(sources) != set(expected_sources):
             errors.append(f"{side} run does not cover the case source windows")
         if not summary_only:
             if sorted(sources) != sources:
@@ -786,7 +789,13 @@ def compare(case, old_run, new_run, require_provenance=False, summary_only=False
         errors.append("new run repeats accepted source windows")
     paired_sources = sorted((set(old_by_source) & set(new_by_source))
                             & set(expected_sources))
-    if set(old_by_source) != set(expected_sources) or \
+    if summary_only:
+        # Timing repeats a finite pool; a short smoke may cover only part of
+        # it. Both variants must still describe the same sources.
+        if not paired_sources or set(old_by_source) != set(new_by_source) or \
+                not set(old_by_source) <= set(expected_sources):
+            errors.append("paired source coverage is incomplete")
+    elif set(old_by_source) != set(expected_sources) or \
             set(new_by_source) != set(expected_sources):
         errors.append("paired source coverage is incomplete")
 

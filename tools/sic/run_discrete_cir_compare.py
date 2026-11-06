@@ -283,6 +283,7 @@ def provenance_summary(path, prov):
         "git_dirty": prov["git_dirty"],
         "binary_sha256": prov["binary"]["sha256"],
         "libraries": [dict(item) for item in prov["libraries"]],
+        "sources": dict(prov.get("sources") or {}),
         "lock_path": prov["lock_path"],
     }
 
@@ -446,7 +447,9 @@ def validate_run(run, expected_reconstruction, public, windows, mode="full",
         elif isinstance(row.get("discrete_cir"), dict):
             errors.append(f"row {position}: old path unexpectedly carries discrete_cir")
     if allow_repeats:
-        if set(sources) != set(range(len(windows))):
+        # Timing repeats a finite pool; a short smoke need not cover every
+        # source, but every recorded source must exist in the pool.
+        if not sources or not set(sources) <= set(range(len(windows))):
             errors.append("source window coverage mismatch")
     else:
         if len(sources) != len(set(sources)):
@@ -895,8 +898,19 @@ def check_quality_summary(path, gate_cells, binary_sha, prov, library_hashes):
         raise RuntimeError(
             "quality summary was produced with a different binary; rerun the "
             "functional comparison for this build")
-    if recorded.get("git_head") != prov["git_head"]:
-        raise RuntimeError("quality summary commit does not match HEAD")
+    # The binary hash is the primary binding.  Accept a later commit only when
+    # the measurement-relevant C++/generator sources are byte-identical; tool
+    # script edits do not change the measured binary.
+    def measurement_sources(sources):
+        return {name: digest for name, digest in (sources or {}).items()
+                if name.startswith("gr-uwb/")}
+    same_head = recorded.get("git_head") == prov["git_head"]
+    same_sources = (measurement_sources(recorded.get("sources")) ==
+                    measurement_sources(prov.get("sources")))
+    if not (same_head or same_sources):
+        raise RuntimeError(
+            "quality summary commit and C++ source hashes do not match the "
+            "current tree; rerun the functional comparison for this build")
     recorded_libraries = sorted(item.get("sha256")
                                 for item in recorded.get("libraries") or [])
     if recorded_libraries != sorted(library_hashes):
@@ -918,6 +932,8 @@ def check_quality_summary(path, gate_cells, binary_sha, prov, library_hashes):
     return {"path": str(path.resolve()), "sha256": sha256(path),
             "git_head": recorded.get("git_head"),
             "binary_sha256": recorded.get("binary_sha256"),
+            "head_match": bool(same_head),
+            "sources_match": bool(same_sources),
             "cells": list(gate_cells),
             "source_windows": {cell: by_cell[cell].get("source_windows")
                                for cell in gate_cells},
