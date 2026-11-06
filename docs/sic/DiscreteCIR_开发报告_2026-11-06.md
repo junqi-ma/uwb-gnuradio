@@ -142,6 +142,22 @@ channel 的 FIR/CFO（约 0.34/0.21 ms）和事务双拷贝（约 0.14–0.25 ms
 若下一轮继续优化，应优先减少重复 y/out 拷贝和 support 选择成本，而不是继续压
 FIR；本轮不扩大优化范围。
 
+缓存/冷启动、失败路径和 scratch：
+
+- `engine_init_us` 在 timing run 中为 48.6–56.4 ms/进程，包含模板 Gram/factor
+  cache 构建、RX/radar scratch 和读模板；在 SIC service 计时窗口之外，不摊入
+  mean/P95。
+- 每次计时 run 的每个变体每轮先做 16 次 warmup，warmup 行不进入统计；正式
+  128 行是热态。首窗冷态单次实测约 7.9 ms（payload_base），明显高于热态均值，
+  故不把冷态混入热态分布。
+- 失败/旁路：`no_interference` 的 `below_detect_threshold` 路径 `sic_total`
+  约 0.678 ms；`no_overlap` 正常提交（在 target 外消除）约 7.60 ms（含 comm
+  demod 等完整工作）。失败路径不会被伪造成成功延迟。
+- scratch 容量在 `reserve/prepare` 固定；按当前 capacity 估算，算法缓冲约
+  15 MB（Gram 1.0 MB、16 槽 factor cache 1.0 MB、energy prefix 1.9 MB、
+  z 3.8 MB、waveform/scaled/accumulator/fir_tmp 各约 1.9 MB，另加 modulator
+  和输入输出缓冲）。未测进程 RSS 峰值，不把估算容量称为总内存。
+
 ## 5. 复现
 
 ```bash
