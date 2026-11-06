@@ -270,7 +270,8 @@ try {
         << ",\"all_outputs_byte_exact_to_library\":true,\"all_outputs_postvalidated\":true,\"variants\":{";
     bool comma = false;
     for (const auto variant : variants) {
-        if (comma) summary << ','; comma = true;
+        if (comma) summary << ',';
+        comma = true;
         const auto& group = records[size_t(variant)];
         std::vector<double> values; values.reserve(group.size());
         diag::Timings mean; double checksum = 0;

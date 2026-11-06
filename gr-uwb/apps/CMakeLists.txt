@@ -326,3 +326,4 @@ target_compile_options(benchmark_fullpacket_compare_fast_rx PRIVATE -march=nativ
 # Isolated generic-ISA CFO replay: diagnostic only, production kernel unchanged.
 add_executable(benchmark_fullpacket_cfo_diag benchmark_fullpacket_cfo_diag.cc)
 target_link_libraries(benchmark_fullpacket_cfo_diag gnuradio-uwb)
+target_compile_options(benchmark_fullpacket_cfo_diag PRIVATE -fPIC)
