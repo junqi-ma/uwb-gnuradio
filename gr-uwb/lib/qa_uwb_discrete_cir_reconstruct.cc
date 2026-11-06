@@ -346,6 +346,24 @@ BOOST_AUTO_TEST_CASE(discrete_apply_matches_independent_direct_convolution)
     }
 }
 
+BOOST_AUTO_TEST_CASE(discrete_apply_tail_and_unaligned_offsets)
+{
+    // 1019 = 254 four-wide vectors + one two-wide + one scalar remainder.
+    // Lags -1/0/1 shift src/dst off the 16-byte vector boundary, so this
+    // checks the fused AXPY remainder path and unaligned loads/stores against
+    // the independent double convolution.
+    ApplyRig rig(1019, 2048);
+    sic::DiscreteCirResult r;
+    BOOST_REQUIRE_MESSAGE(rig.run(r), r.reason);
+    BOOST_CHECK(r.committed);
+    const std::vector<cf> want =
+        independent_reconstruction(rig.wave, rig.model, double(kRefScale), rig.n);
+    float worst = 0.f;
+    for (size_t j = 0; j < rig.n; ++j)
+        worst = std::max(worst, std::abs(rig.ihat[j] - want[j]));
+    BOOST_CHECK_LT(worst, 1e-6f);
+}
+
 BOOST_AUTO_TEST_CASE(discrete_apply_truncation_roi_and_packet_tail)
 {
     Packet pkt(24, 13);
