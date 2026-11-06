@@ -63,6 +63,14 @@ struct TimingResult {
     // timing work (setup, local refine, grid probes and SYNC tracking).
     uint64_t coarse_search_us = 0;
     uint64_t fine_track_us = 0;
+    // Experimental narrow seed search (timing_seed_refine_radius != 0).
+    // seed_search_us is the first seeded refine (child of fine_track_us, not
+    // included in coarse_search_us).  Attempts/success/fallbacks count one
+    // seeded call each, not SYNC symbols.
+    uint64_t seed_search_us = 0;
+    uint32_t seed_refine_narrow_attempts = 0;
+    uint32_t seed_refine_narrow_success = 0;
+    uint32_t seed_refine_fallbacks = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -81,6 +89,10 @@ struct CfoResult {
     int64_t fit_first_peak_sample = -1;
     int64_t fit_last_peak_sample = -1;
     float fit_residual = 0.0f;      // residual of the phase linear fit
+    // Rotation-kernel diagnostics: fit vs frame derotation are independent.
+    uint64_t fit_us = 0;
+    uint64_t rotate_us = 0;
+    uint32_t rotation_kernel = 0;   // 0=legacy four-chain, 1=block vector
 };
 
 // ---------------------------------------------------------------------------
@@ -126,6 +138,13 @@ struct CirResult {
     uint64_t cir_estimate_us = 0;       // spread build + SYNC average + taps
     uint64_t soft_fir_us = 0;           // chip-grid matched-filter FIR
     uint64_t postprocess_us = 0;        // phase align + rotate + real/max/norm
+    // On-demand soft-chip experiment: initial prefix vs extension.  Zero
+    // values mean the legacy full-stream path was used.
+    uint64_t soft_extend_us = 0;        // extension FIR + renormalization
+    uint32_t initial_chip_count = 0;    // prefix chips before PHR decode
+    uint32_t extended_chip_count = 0;   // total chips after PHR-driven extend
+    uint32_t on_demand_extended = 0;    // 1 if the stream was extended
+    uint32_t on_demand_fallbacks = 0;   // full-path retries for this packet
 };
 
 // ---------------------------------------------------------------------------
@@ -206,6 +225,17 @@ struct DemodResult {
     uint64_t stage_phr_us = 0;
     uint64_t stage_payload_us = 0;
     uint64_t stage_total_us = 0;        // sum of the above (== demod_latency_us)
+    // Diagnostic child sub-timers for the CFO and soft-chip stages.  They are
+    // already included in their parent stage above and must never be added to
+    // stage_total_us.  stage_cfo_fit_us/stage_cfo_rotate_us sum BOTH CFO calls
+    // (initial + SFD-refit) unless noted otherwise.
+    uint64_t stage_cfo_fit_us = 0;
+    uint64_t stage_cfo_rotate_us = 0;
+    uint32_t stage_cfo_rotation_kernels = 0; // bit0=initial block, bit1=refit block
+    uint32_t stage_softchip_fallbacks = 0;   // full-path retries (diagnostic)
+    uint64_t stage_softchip_fallback_us = 0; // time of those retries
+    uint32_t stage_tail_retrack_fallbacks = 0; // legacy-radius tail retries
+    uint64_t stage_sfd_tail_retrack_fallback_us = 0; // included in tail timer
     // `stage_sfd` runs once for bootstrap CFO anchoring and once after the
     // MATLAB-aligned CFO refit.  Preserve both actual search counts.
     uint64_t sfd_bootstrap_windows = 0;

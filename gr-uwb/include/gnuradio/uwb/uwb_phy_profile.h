@@ -105,6 +105,20 @@ struct Qm35825Profile {
     size_t timing_track_radius = 8;
     size_t post_guard_samples = 4096;
 
+    // ---- Experimental RX fast paths (explicit opt-in) --------------------
+    // Defaults keep the legacy algorithms so existing callers are unchanged.
+    // The full-packet experiment wrapper selects these per run, allowing the
+    // old and new paths to be timed from the same binary.
+    bool rx_fast_sfd = false;            // cached SFD template + VOLK dot
+    bool rx_fast_cfo_rotation = false;   // block-anchored vector derotation
+    bool rx_seed_refine_tail = false;    // narrow first tail-SYNC search
+    bool rx_softchip_on_demand = false;  // prefix chips + PHR-length extend
+    // First seeded SYNC refine half-width.  0 keeps the legacy
+    // max(256, timing_coarse_stride) radius.  A nonzero value is used only
+    // when the caller explicitly supplies it (the SFD-anchored tail profile)
+    // and always falls back to the legacy radius if the narrow search misses.
+    size_t timing_seed_refine_radius = 0;
+
     static Qm35825Profile Default() { return Qm35825Profile{}; }
 };
 

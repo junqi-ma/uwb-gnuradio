@@ -22,6 +22,9 @@
 #include <gnuradio/uwb/uwb_demod_result.h>
 #include <gnuradio/uwb/uwb_detector_core.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
+#include <gnuradio/uwb/uwb_rx_cfo_opt.h>
+#include <gnuradio/uwb/uwb_rx_sync_opt.h>
+#include <gnuradio/uwb/uwb_rx_softchip_opt.h>
 
 #include <algorithm>
 #include <array>
@@ -128,6 +131,31 @@ struct DemodScratch {
     std::vector<float> cir_taps;                // CIR estimate
     std::vector<int64_t> peaks;                 // SYNC peak positions
     std::vector<float> peak_values;             // per-peak complex correlation
+    // On-demand soft-chip FIR output.  Kept separate from `corr` because the
+    // extension call re-runs the (cheap) CIR estimate, which temporarily uses
+    // `corr` for the coherent SYNC average while the prefix FIR values must
+    // survive.  Unused by the legacy path.
+    std::vector<std::complex<float>> softchip_corr;
+
+    // ---- Experimental RX fast-path state ---------------------------------
+    // Cached normalized SFD waveform (kron(sfd_sequence, template_wf)).
+    // The key covers the template + SFD content, so the cache does not depend
+    // on the temporary contents of work/corr surviving between calls.
+    std::vector<std::complex<float>> sfd_template;
+    uint64_t sfd_template_key = 0;
+
+    // Two-phase soft-chip state.  Only populated when
+    // profile.rx_softchip_on_demand is enabled; the legacy full-stream path
+    // never reads it.  The extension re-runs the cheap CIR estimate and
+    // deterministically rebuilds the same taps/grid, so only the prefix
+    // boundary and its normalization maximum must persist.
+    struct SoftChipState {
+        bool prepared = false;
+        size_t generated = 0;
+        float prefix_max = 0.0f;
+
+        void reset() { *this = SoftChipState{}; }
+    } softchip;
 
     void reserve(size_t n)
     {
@@ -136,10 +164,12 @@ struct DemodScratch {
         energy.reserve(n);
         metric.reserve(n);
         corr.reserve(n);
+        softchip_corr.reserve(n);
         soft_chips.reserve(n);
         cir_taps.reserve(64);
         peaks.reserve(256);
         peak_values.reserve(256);
+        sfd_template.reserve(8 * kQm35SamplesPerSymbol);
     }
 };
 
@@ -272,12 +302,41 @@ inline bool stage_timing(const std::complex<float>* rx,
         // the DW1000 preamble_start land ~6 SYNCs late.  The seed-nearby
         // result is authoritative; the wide scan is only a fallback.
         bool seed_acquired = false;
-        {
+        const int64_t legacy_seed_radius =
+            std::max<int64_t>(256, stride);
+        if (profile.timing_seed_refine_radius != 0) {
+            const int64_t narrow = rxopt::seed_refine_radius(
+                profile.timing_seed_refine_radius, stride);
+            if (narrow < legacy_seed_radius) {
+                const auto narrow_begin = std::chrono::steady_clock::now();
+                int64_t pos = -1;
+                float met = 0.0f;
+                std::complex<float> corr(0.0f, 0.0f);
+                const bool narrow_ok =
+                    local_best(seed, narrow, thr, &pos, &met, &corr);
+                out.seed_search_us = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - narrow_begin).count());
+                ++out.seed_refine_narrow_attempts;
+                if (narrow_ok) {
+                    first_start = pos;
+                    first_metric = met;
+                    first_corr = corr;
+                    seed_acquired = true;
+                    ++out.seed_refine_narrow_success;
+                } else {
+                    ++out.seed_refine_fallbacks;
+                }
+            }
+        }
+        if (!seed_acquired) {
+            // Legacy first seeded refine.  Also the fallback after a failed
+            // narrow search: a recovered packet must not be lost just because
+            // the local peak was outside the narrow radius.
             int64_t pos = -1;
             float met = 0.0f;
             std::complex<float> corr(0.0f, 0.0f);
-            if (local_best(seed, std::max<int64_t>(256, stride), thr, &pos, &met,
-                           &corr)) {
+            if (local_best(seed, legacy_seed_radius, thr, &pos, &met, &corr)) {
                 first_start = pos;
                 first_metric = met;
                 first_corr = corr;
@@ -479,6 +538,7 @@ inline bool stage_cfo(const std::complex<float>* rx,
     // Gather per-peak carrier phases from the SYNC matched-filter values (the
     // noise-averaged correlation phase, NOT the raw rx[peak] sample).  Falls
     // back to the raw sample if the timing stage did not populate peak_corr.
+    const auto cfo_fit_begin = std::chrono::steady_clock::now();
     const bool have_corr = timing.peak_corr.size() >= np;
     scratch.metric.resize(nfit);
     for (size_t k = 0; k < nfit; ++k) {
@@ -517,6 +577,10 @@ inline bool stage_cfo(const std::complex<float>* rx,
     out.cfo_hz = slope / (2.0 * M_PI);
     out.peaks_used = nfit;
     out.ok = true;
+    out.fit_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - cfo_fit_begin).count());
+    const auto cfo_rotate_begin = std::chrono::steady_clock::now();
 
     // Derotate a copy: out[i] = rx[i] * e^{-j w i}.  A naive per-sample sin/cos
     // (2 transcendentals / sample), a recursion rot *= e^{-j w}, or an
@@ -528,36 +592,47 @@ inline bool stage_cfo(const std::complex<float>* rx,
     // absolute phase, so float precision drift never accumulates.
     scratch.derotated.resize(n);
     const double w = 2.0 * M_PI * out.cfo_hz / profile.sample_rate;
-    const float cw = static_cast<float>(w);
-    constexpr size_t kB = 1024;
-    const float s4r = std::cos(-4.0f * cw); // e^{-j w*4}: chain advance
-    const float s4i = std::sin(-4.0f * cw);
-    for (size_t b0 = 0; b0 < n; b0 += kB) {
-        const size_t b1 = std::min(n, b0 + kB);
-        const float ph0 = cw * static_cast<float>(b0);
-        float cr[4], ci[4];
-        for (int c = 0; c < 4; ++c) {
-            const float ph = -ph0 - cw * static_cast<float>(c);
-            cr[c] = std::cos(ph);
-            ci[c] = std::sin(ph);
-        }
-        size_t i = b0;
-        for (; i + 4 <= b1; i += 4) {
+    if (profile.rx_fast_cfo_rotation) {
+        // Opt-in vector kernel: 1024-sample absolute-phase blocks + VOLK
+        // complex multiplies.  Same sign and absolute coordinates.
+        rxopt::derotate_block(scratch.derotated, rx, n, w);
+        out.rotation_kernel = 1;
+    } else {
+        const float cw = static_cast<float>(w);
+        constexpr size_t kB = 1024;
+        const float s4r = std::cos(-4.0f * cw); // e^{-j w*4}: chain advance
+        const float s4i = std::sin(-4.0f * cw);
+        for (size_t b0 = 0; b0 < n; b0 += kB) {
+            const size_t b1 = std::min(n, b0 + kB);
+            const float ph0 = cw * static_cast<float>(b0);
+            float cr[4], ci[4];
             for (int c = 0; c < 4; ++c) {
-                scratch.derotated[i + c] =
-                    rx[i + c] * std::complex<float>(cr[c], ci[c]);
-                const float nr = cr[c] * s4r - ci[c] * s4i;
-                const float ni = cr[c] * s4i + ci[c] * s4r;
-                cr[c] = nr;
-                ci[c] = ni;
+                const float ph = -ph0 - cw * static_cast<float>(c);
+                cr[c] = std::cos(ph);
+                ci[c] = std::sin(ph);
+            }
+            size_t i = b0;
+            for (; i + 4 <= b1; i += 4) {
+                for (int c = 0; c < 4; ++c) {
+                    scratch.derotated[i + c] =
+                        rx[i + c] * std::complex<float>(cr[c], ci[c]);
+                    const float nr = cr[c] * s4r - ci[c] * s4i;
+                    const float ni = cr[c] * s4i + ci[c] * s4r;
+                    cr[c] = nr;
+                    ci[c] = ni;
+                }
+            }
+            for (; i < b1; ++i) { // tail (1..3 samples): exact phase
+                const float ph = -ph0 - cw * static_cast<float>(i - b0);
+                scratch.derotated[i] =
+                    rx[i] * std::complex<float>(std::cos(ph), std::sin(ph));
             }
         }
-        for (; i < b1; ++i) { // tail (1..3 samples): exact phase
-            const float ph = -ph0 - cw * static_cast<float>(i - b0);
-            scratch.derotated[i] =
-                rx[i] * std::complex<float>(std::cos(ph), std::sin(ph));
-        }
+        out.rotation_kernel = 0;
     }
+    out.rotate_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - cfo_rotate_begin).count());
     return true;
 }
 
@@ -585,22 +660,54 @@ inline bool stage_sfd(const std::complex<float>* rx,
         return false;
     const size_t sym = kQm35SamplesPerSymbol;
 
-    // Build the SFD template: kron(sfd_sequence, preamble_waveform), then
-    // L2-normalize — same as MATLAB refineTimingWithNsSfd.
+    // Build (or reuse) the SFD template: kron(sfd_sequence, preamble_waveform),
+    // then L2-normalize — same as MATLAB refineTimingWithNsSfd.  The fast path
+    // caches the normalized template in scratch across packets; the legacy
+    // path keeps constructing it in scratch.corr exactly as before.
     const size_t len = sfd_sequence.size();
-    scratch.corr.clear();
-    scratch.corr.reserve(len * sym);
-    for (size_t i = 0; i < len; ++i) {
-        const int8_t s = sfd_sequence[i];
-        for (size_t k = 0; k < sym; ++k)
-            scratch.corr.push_back(
-                std::complex<float>(static_cast<float>(s) *
-                                        template_wf[k].real(),
-                                    static_cast<float>(s) *
-                                        template_wf[k].imag()));
+    const std::complex<float>* sfd_tmpl = nullptr;
+    size_t sfd_len = 0;
+    if (profile.rx_fast_sfd) {
+        const uint64_t key =
+            rxopt::sfd_template_key(template_wf, sfd_sequence);
+        if (key != scratch.sfd_template_key ||
+            scratch.sfd_template.size() != len * sym) {
+            rxopt::build_sfd_template(template_wf, sfd_sequence,
+                                      scratch.sfd_template);
+            scratch.sfd_template_key =
+                (scratch.sfd_template.size() == len * sym) ? key : 0;
+        }
+        sfd_tmpl = scratch.sfd_template.data();
+        sfd_len = scratch.sfd_template.size();
+    } else {
+        scratch.corr.clear();
+        scratch.corr.reserve(len * sym);
+        for (size_t i = 0; i < len; ++i) {
+            const int8_t s = sfd_sequence[i];
+            for (size_t k = 0; k < sym; ++k)
+                scratch.corr.push_back(
+                    std::complex<float>(static_cast<float>(s) *
+                                            template_wf[k].real(),
+                                        static_cast<float>(s) *
+                                            template_wf[k].imag()));
+        }
+        gr::uwb::core::uwb_l2_normalize(scratch.corr);
+        sfd_tmpl = scratch.corr.data();
+        sfd_len = scratch.corr.size();
     }
-    gr::uwb::core::uwb_l2_normalize(scratch.corr);
-    const size_t sfd_len = scratch.corr.size();
+    if (sfd_len == 0)
+        return false;
+
+    // Candidate correlation: legacy scalar loop by default, VOLK dot when the
+    // explicit fast path is enabled.  Candidate set/threshold/order unchanged.
+    auto sfd_dot = [&](size_t j) -> std::complex<float> {
+        if (profile.rx_fast_sfd)
+            return rxopt::conjugate_dot(rx + j, sfd_tmpl, sfd_len);
+        std::complex<float> acc(0.0f, 0.0f);
+        for (size_t k = 0; k < sfd_len; ++k)
+            acc += rx[j + k] * std::conj(sfd_tmpl[k]);
+        return acc;
+    };
 
     // MATLAB strategy (refineTimingWithNsSfd): SFD start = preamble start +
     // preamble_repetitions × measured_period.  This is physically correct even
@@ -652,10 +759,8 @@ inline bool stage_sfd(const std::complex<float>* rx,
                     pwr += std::norm(rx[j + sfd_len - 1 - k]) -
                            std::norm(rx[j - 1 - k]);
             }
-            std::complex<float> acc(0.0f, 0.0f);
             ++out.coarse_correlations;
-            for (size_t k = 0; k < sfd_len; ++k)
-                acc += rx[j + k] * std::conj(scratch.corr[k]);
+            const std::complex<float> acc = sfd_dot(j);
             const float m = std::norm(acc) / (pwr + 1e-12f);
             if (m > window_best) {
                 window_best = m;
@@ -676,10 +781,8 @@ inline bool stage_sfd(const std::complex<float>* rx,
             if (j > r_lo)
                 pwr += std::norm(rx[j + sfd_len - 1]) -
                        std::norm(rx[j - 1]);
-            std::complex<float> acc(0.0f, 0.0f);
             ++out.fine_correlations;
-            for (size_t k = 0; k < sfd_len; ++k)
-                acc += rx[j + k] * std::conj(scratch.corr[k]);
+            const std::complex<float> acc = sfd_dot(j);
             const float m = std::norm(acc) / (pwr + 1e-12f);
             if (m > window_best) {
                 window_best = m;
@@ -750,9 +853,21 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
                                 const TimingResult& timing,
                                 const std::vector<int8_t>& preamble_code,
                                 CirResult& out,
-                                DemodScratch& scratch)
+                                DemodScratch& scratch,
+                                size_t max_chips = 0,
+                                size_t begin_chip = 0)
 {
     out = CirResult{};
+    // On-demand experiment: max_chips != 0 limits this call to a prefix or an
+    // extension.  begin_chip > 0 means the prefix [0, begin_chip) was already
+    // produced and normalized by an earlier call; only [begin_chip, num_chips)
+    // is computed here.  Defaults (0, 0) preserve the legacy full-stream path.
+    const bool on_demand = profile.rx_softchip_on_demand && max_chips != 0;
+    const bool extending = on_demand && begin_chip != 0;
+    if (extending && !scratch.softchip.prepared)
+        return false;
+    if (on_demand && !extending)
+        scratch.softchip.reset();
     auto t_cir0 = std::chrono::steady_clock::now();
     const size_t pre = profile.cir_pre_samples;
     const size_t post = profile.cir_post_samples;
@@ -860,6 +975,12 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     const size_t n_guard = 8 * kQm35ChipsPerSymbol;
     size_t n_chips = n_shr + n_phr_head + n_extra + n_guard;
     n_chips = static_cast<size_t>(std::ceil((double)n_chips * 1.05));
+    if (on_demand) {
+        if (max_chips < 2)
+            return false;
+        if (n_chips > max_chips)
+            n_chips = max_chips;
+    }
 
     const int64_t chip_start = start + static_cast<int64_t>(tap_count) -
                                static_cast<int64_t>(pre) - 1; // = start + post - 1
@@ -876,12 +997,29 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         static_cast<size_t>(std::floor(
             static_cast<double>(last_pos - chip_start) / spc)) + 1;
 
+    if (extending && num_chips <= begin_chip) {
+        // The PHR-derived range already fits in the prefix.  Nothing to do;
+        // the existing normalized prefix remains the final stream.
+        out.soft_chip_count = begin_chip;
+        out.initial_chip_count = static_cast<uint32_t>(begin_chip);
+        out.extended_chip_count = static_cast<uint32_t>(begin_chip);
+        out.on_demand_extended = 0;
+        out.samples_per_chip = spc;
+        out.ok = true;
+        return true;
+    }
+
     // Causal FIR on the chip grid, rewritten for contiguous forward access:
     //   chip = sum_k conj(values[T-1-k]) * rx[base-k]
     //        = sum_q conj(values[q])     * rx[base-(T-1)+q]
     // Pre-conjugated taps h[q]=conj(values[q]) once outside the chip loop.
     // Kernels: multi-acc / VOLK / fixed-38 AVX2 (see uwb_cir_fir_simd.h).
-    scratch.corr.resize(num_chips);
+    //
+    // On-demand uses a separate output buffer: the prefix must survive the
+    // extension call's CIR re-estimate (which temporarily uses scratch.corr).
+    std::vector<std::complex<float>>& fir_out =
+        on_demand ? scratch.softchip_corr : scratch.corr;
+    fir_out.resize(num_chips);
     const int64_t fwd = static_cast<int64_t>(tap_count) - 1;
 
     // Stack buffers — no heap alloc in the FIR hot path.
@@ -924,6 +1062,11 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
             rake_weights[i] = h_conj[order[i]];
         }
     }
+    // The on-demand experiment is limited to the production integer-grid,
+    // full-tap kernel.  Fractional SFO grids, sparse RAKE and bypass keep the
+    // complete legacy path, so their semantics are not changed or rounded.
+    if (on_demand && (fractional_grid || bypass_filter || rake_k > 0))
+        return false;
 
     size_t checked = 0;
     if (fractional_grid) {
@@ -957,7 +1100,7 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
             const float frac = static_cast<float>(pd - std::floor(pd));
             const std::complex<float> y0 = dot_at(p0);
             const std::complex<float> y1 = dot_at(p0 + 1);
-            scratch.corr[i] = y0 + frac * (y1 - y0);
+            fir_out[i] = y0 + frac * (y1 - y0);
         }
         checked = num_chips; // fractional path completed the whole stream
     } else if (chip_start < fwd) {
@@ -965,13 +1108,17 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         checked = std::min(num_chips,
                            static_cast<size_t>((gap + spc_i - 1) / spc_i));
     }
+    if (extending)
+        checked = std::min(num_chips, begin_chip);
     // Edge chips: FIR window may clip below sample 0 (bounds-checked scalar).
-    for (size_t i = 0; !fractional_grid && i < checked; ++i) {
+    // A prefix call handles them once; an extension starts after them.
+    for (size_t i = extending ? checked : 0;
+         !fractional_grid && i < checked; ++i) {
         const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
         if (bypass_filter) {
             const int64_t idx =
                 p - fwd + static_cast<int64_t>(peak_idx);
-            scratch.corr[i] = idx >= 0 && idx < static_cast<int64_t>(n)
+            fir_out[i] = idx >= 0 && idx < static_cast<int64_t>(n)
                 ? rx[static_cast<size_t>(idx)]
                 : std::complex<float>(0.0f, 0.0f);
             continue;
@@ -986,7 +1133,7 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
                 continue;
             acc += h_conj[q] * rx[static_cast<size_t>(idx)];
         }
-        scratch.corr[i] = acc;
+        fir_out[i] = acc;
     }
     // Main body: full tap window is in-bounds.  Call the selected kernel
     // directly (no per-chip switch) so the fixed-38 AVX2 path fully inlines.
@@ -999,7 +1146,7 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
                     chip_start + static_cast<int64_t>(i) * spc_i;
                 const size_t idx = static_cast<size_t>(
                     p - fwd + static_cast<int64_t>(peak_idx));
-                scratch.corr[i] = rx0[idx];
+                fir_out[i] = rx0[idx];
             }
         } else if (rake_k > 0 && rake_k < tap_count) {
             size_t i = checked;
@@ -1018,18 +1165,18 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
                     if (rake_k == 4)
                         cir_fir::dot_topk_x4_avx2<4>(
                             rx0 + win, rake_indices, rake_weights,
-                            scratch.corr.data() + i);
+                            fir_out.data() + i);
                     else
                         cir_fir::dot_topk_x4_avx2<8>(
                             rx0 + win, rake_indices, rake_weights,
-                            scratch.corr.data() + i);
+                            fir_out.data() + i);
                 }
             }
 #endif
             for (; i < num_chips; ++i) {
                 const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
                 const size_t win = static_cast<size_t>(p - fwd);
-                scratch.corr[i] = cir_fir::dot_topk(
+                fir_out[i] = cir_fir::dot_topk(
                     rx0 + win, rake_indices, rake_weights, rake_k);
             }
         } else if (fir_k == cir_fir::Kernel::Avx2Fixed &&
@@ -1037,21 +1184,21 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
             for (size_t i = checked; i < num_chips; ++i) {
                 const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
                 const size_t win = static_cast<size_t>(p - fwd);
-                scratch.corr[i] =
+                fir_out[i] =
                     cir_fir::dot_avx2_fixed38(rx0 + win, h_conj, tap_count);
             }
         } else if (fir_k == cir_fir::Kernel::Volk) {
             for (size_t i = checked; i < num_chips; ++i) {
                 const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
                 const size_t win = static_cast<size_t>(p - fwd);
-                scratch.corr[i] =
+                fir_out[i] =
                     cir_fir::dot_volk(rx0 + win, values_nat, tap_count);
             }
         } else {
             for (size_t i = checked; i < num_chips; ++i) {
                 const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
                 const size_t win = static_cast<size_t>(p - fwd);
-                scratch.corr[i] =
+                fir_out[i] =
                     cir_fir::dot_multi_acc8(rx0 + win, h_conj, tap_count);
             }
         }
@@ -1076,7 +1223,7 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         size_t s = 0;
         for (size_t i = 0; i < phase_len; ++i) {
             gain += static_cast<float>(spread[s]) *
-                    scratch.corr[phase_first + i];
+                    fir_out[phase_first + i];
             if (++s == kQm35ChipsPerSymbol)
                 s = 0;
         }
@@ -1090,20 +1237,57 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     // max|real|, then normalize into soft_chips. No later stage consumes the
     // rotated complex corr stream, so writing it back wastes ~1.2 MB/packet.
     scratch.soft_chips.resize(num_chips);
-    float mx = 0.0f;
-    for (size_t i = 0; i < num_chips; ++i) {
-        // (cr+j ci)*(rr+j ri) → real = cr*rr - ci*ri
-        const float cr = scratch.corr[i].real();
-        const float ci = scratch.corr[i].imag();
-        const float r = cr * rr - ci * ri;
-        scratch.soft_chips[i] = r;                    // temp; normalized below
-        const float ar = (r >= 0.0f) ? r : -r;
-        if (ar > mx)
-            mx = ar;
+    if (!extending) {
+        float mx = 0.0f;
+        for (size_t i = 0; i < num_chips; ++i) {
+            // (cr+j ci)*(rr+j ri) → real = cr*rr - ci*ri
+            const float cr = fir_out[i].real();
+            const float ci = fir_out[i].imag();
+            const float r = cr * rr - ci * ri;
+            scratch.soft_chips[i] = r;                // temp; normalized below
+            const float ar = (r >= 0.0f) ? r : -r;
+            if (ar > mx)
+                mx = ar;
+        }
+        const float inv_denom = 1.0f / (mx + 1e-12f);
+        for (size_t i = 0; i < num_chips; ++i)
+            scratch.soft_chips[i] *= inv_denom;
+        if (on_demand) {
+            scratch.softchip.prefix_max = mx;
+            scratch.softchip.generated = num_chips;
+            scratch.softchip.prepared = true;
+            out.initial_chip_count = static_cast<uint32_t>(num_chips);
+            out.extended_chip_count = 0;
+            out.on_demand_extended = 0;
+        }
+    } else {
+        // Extension: rotate only the new chips, then put the whole stream on
+        // one denominator.  rescale_prefix() multiplies the already-normalized
+        // prefix by (prefix_max+eps)/(final_max+eps); the new tail is scaled by
+        // 1/(final_max+eps).  This equals the one-shot raw/final_max result up
+        // to one float rounding on the prefix.
+        float ext_mx = 0.0f;
+        for (size_t i = begin_chip; i < num_chips; ++i) {
+            const float cr = fir_out[i].real();
+            const float ci = fir_out[i].imag();
+            const float r = cr * rr - ci * ri;
+            scratch.soft_chips[i] = r;
+            const float ar = (r >= 0.0f) ? r : -r;
+            if (ar > ext_mx)
+                ext_mx = ar;
+        }
+        const float final_max = std::max(scratch.softchip.prefix_max, ext_mx);
+        rxopt::rescale_prefix(scratch.soft_chips, begin_chip,
+                              scratch.softchip.prefix_max, final_max);
+        const float inv_denom = 1.0f / (final_max + 1e-12f);
+        for (size_t i = begin_chip; i < num_chips; ++i)
+            scratch.soft_chips[i] *= inv_denom;
+        scratch.softchip.prefix_max = final_max;
+        scratch.softchip.generated = num_chips;
+        out.initial_chip_count = static_cast<uint32_t>(begin_chip);
+        out.extended_chip_count = static_cast<uint32_t>(num_chips);
+        out.on_demand_extended = 1;
     }
-    const float inv_denom = 1.0f / (mx + 1e-12f);
-    for (size_t i = 0; i < num_chips; ++i)
-        scratch.soft_chips[i] *= inv_denom;
     out.postprocess_us = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - t_post0)
@@ -2151,6 +2335,17 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         res.stage_total_us += dst;
         t_prev = now;
     };
+    // Add (rather than replace) elapsed time.  Used for the on-demand extension
+    // and failure fallback, which are not single sequential stage laps.
+    auto add_elapsed = [&](uint64_t& dst) {
+        const auto now = std::chrono::steady_clock::now();
+        const uint64_t dt = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(now - t_prev)
+                .count());
+        dst += dt;
+        res.stage_total_us += dt;
+        t_prev = now;
+    };
 
     // Stage 1: timing (seed = rel_seed if inside this window, else -1)
     const bool t_ok = stage_timing(rx, n, profile, template_wf, rel_seed,
@@ -2166,11 +2361,17 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     // Stage 2: CFO
     if (!stage_cfo(rx, n, profile, res.timing, res.cfo, scratch)) {
         lap(res.stage_cfo_us);
+        res.stage_cfo_fit_us += res.cfo.fit_us;
+        res.stage_cfo_rotate_us += res.cfo.rotate_us;
+        res.stage_cfo_rotation_kernels |= (res.cfo.rotation_kernel ? 1u : 0u);
         res.status = DemodStatus::CfoFailed;
         rebase();
         return res;
     }
     lap(res.stage_cfo_us);
+    res.stage_cfo_fit_us += res.cfo.fit_us;
+    res.stage_cfo_rotate_us += res.cfo.rotate_us;
+    res.stage_cfo_rotation_kernels |= (res.cfo.rotation_kernel ? 1u : 0u);
     // Stage 3: bootstrap SFD timing.  Timing acquisition can start several
     // SYNCs late when a weak leading repetition falls below its tracking
     // threshold.  Its 64-point phase train would then spill into the SFD and
@@ -2224,84 +2425,137 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     cfo_anchor_profile.timing_coarse_stride = 1;
     cfo_anchor_profile.timing_max_backtrack_symbols = 0;
     cfo_anchor_profile.timing_track_radius = 8;
+    // Opt-in: the SFD anchor predicts this tail origin to within a few samples;
+    // try ±8 first and fall back to the legacy ±max(256,stride) search below.
+    cfo_anchor_profile.timing_seed_refine_radius =
+        profile.rx_seed_refine_tail ? 8 : 0;
     // MATLAB's per-SYNC floor is 0.20 of the candidate energy.
     cfo_anchor_profile.radar_verification_threshold = 0.20f;
 
+    const int64_t bootstrap_sfd_start = res.sfd.sfd_start_sample;
     const double period_hint = res.timing.measured_period;
-    const int64_t tail_start = res.sfd.sfd_start_sample -
+    const int64_t tail_start = bootstrap_sfd_start -
         static_cast<int64_t>(std::llround(
             static_cast<double>(tail_repetitions) * period_hint));
-    TimingResult tail_timing;
-    const auto sfd_tail_t0 = std::chrono::steady_clock::now();
-    const bool tail_timing_ok = stage_timing(
-        rx, n, cfo_anchor_profile, template_wf, tail_start, tail_timing,
-        scratch);
-    res.stage_sfd_tail_retrack_us = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - sfd_tail_t0).count());
-    if (!tail_timing_ok || tail_timing.detected_peaks != tail_repetitions) {
-        lap(res.stage_sfd_us);
-        res.status = DemodStatus::CfoFailed;
-        rebase();
-        return res;
-    }
-
-    const double tail_period = tail_timing.measured_period;
-    if (!(tail_period > 0.0)) {
-        lap(res.stage_sfd_us);
-        res.status = DemodStatus::CfoFailed;
-        rebase();
-        return res;
-    }
-
-    // Keep the SFD-anchored full-frame grid on the original timing estimate.
-    // The tail peak coordinates themselves remain the CFO fit input; using a
-    // short-tail period fit for the CIR grid can shift the payload chip grid
-    // on otherwise clean captures.
-    const double measured_period = period_hint;
-
-    // Keep the public timing geometry at the full-frame origin.  Only the
-    // tail peaks have matched-filter measurements; leading peaks are generated
-    // from the SFD-anchored grid and are skipped by the CFO fit / CIR warmup.
-    TimingResult cfo_timing;
-    const int64_t full_start = res.sfd.sfd_start_sample -
-        static_cast<int64_t>(std::llround(
-            static_cast<double>(full_repetitions) * measured_period));
-    const size_t tail_first = full_repetitions - tail_repetitions;
     const size_t template_len = template_wf.size();
-    cfo_timing.ok = true;
-    cfo_timing.preamble_start_sample = full_start;
-    cfo_timing.preamble_start_uncropped = full_start;
-    cfo_timing.measured_period = measured_period;
-    cfo_timing.metric = tail_timing.metric;
-    cfo_timing.detected_peaks = full_repetitions;
-    cfo_timing.expected_peaks = full_repetitions;
-    cfo_timing.coarse_search_us = tail_timing.coarse_search_us;
-    cfo_timing.fine_track_us = tail_timing.fine_track_us;
-    cfo_timing.peak_samples.resize(full_repetitions);
-    cfo_timing.peak_metrics.assign(full_repetitions, 0.0f);
-    cfo_timing.peak_corr.assign(
-        full_repetitions, std::complex<float>(0.0f, 0.0f));
-    for (size_t k = 0; k < full_repetitions; ++k) {
-        cfo_timing.peak_samples[k] = full_start +
-            static_cast<int64_t>(std::llround(
-                static_cast<double>(k) * measured_period)) +
-            static_cast<int64_t>(template_len - 1);
-    }
-    for (size_t k = 0; k < tail_repetitions; ++k) {
-        const size_t dst = tail_first + k;
-        cfo_timing.peak_samples[dst] = tail_timing.peak_samples[k];
-        cfo_timing.peak_metrics[dst] = tail_timing.peak_metrics[k];
-        cfo_timing.peak_corr[dst] = tail_timing.peak_corr[k];
-    }
 
-    const auto sfd_cfo_t0 = std::chrono::steady_clock::now();
-    const bool cfo_refit_ok = stage_cfo(rx, n, profile, cfo_timing, res.cfo,
-                                        scratch);
-    res.stage_sfd_cfo_refit_us = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - sfd_cfo_t0).count());
-    if (!cfo_refit_ok) {
+    // Tail re-track + CFO refit.  `seed_radius` is 0 for the legacy wide first
+    // search or 8 for the SFD-anchored narrow experiment.  A failed narrow
+    // search or an incomplete tail train falls back to 0 once inside.
+    auto run_tail_and_cfo_refit = [&](size_t seed_radius,
+                                      TimingResult& tail_timing,
+                                      TimingResult& cfo_timing) -> bool {
+        Qm35825Profile anchor = cfo_anchor_profile;
+        anchor.timing_seed_refine_radius = seed_radius;
+        const auto sfd_tail_t0 = std::chrono::steady_clock::now();
+        bool tail_timing_ok = stage_timing(
+            rx, n, anchor, template_wf, tail_start, tail_timing, scratch);
+        if ((!tail_timing_ok ||
+             tail_timing.detected_peaks != tail_repetitions) &&
+            seed_radius != 0) {
+            const auto retry_t0 = std::chrono::steady_clock::now();
+            anchor.timing_seed_refine_radius = 0;
+            TimingResult retry_timing;
+            const bool retry_ok = stage_timing(
+                rx, n, anchor, template_wf, tail_start, retry_timing, scratch);
+            res.stage_sfd_tail_retrack_fallback_us += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - retry_t0).count());
+            ++res.stage_tail_retrack_fallbacks;
+            if (retry_ok &&
+                retry_timing.detected_peaks == tail_repetitions) {
+                // Keep the narrow-attempt diagnostics visible even though the
+                // legacy retry (radius 0) produced the accepted timing.
+                retry_timing.seed_search_us += tail_timing.seed_search_us;
+                retry_timing.seed_refine_narrow_attempts +=
+                    tail_timing.seed_refine_narrow_attempts;
+                retry_timing.seed_refine_narrow_success +=
+                    tail_timing.seed_refine_narrow_success;
+                retry_timing.seed_refine_fallbacks +=
+                    tail_timing.seed_refine_fallbacks;
+                tail_timing = std::move(retry_timing);
+                tail_timing_ok = true;
+            }
+        }
+        res.stage_sfd_tail_retrack_us += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - sfd_tail_t0).count());
+        if (!tail_timing_ok ||
+            tail_timing.detected_peaks != tail_repetitions)
+            return false;
+        if (!(tail_timing.measured_period > 0.0))
+            return false;
+
+        // Keep the SFD-anchored full-frame grid on the original timing
+        // estimate.  Only the tail peaks have matched-filter measurements;
+        // leading peaks are generated from the SFD-anchored grid.
+        const double measured_period = period_hint;
+        const int64_t full_start = bootstrap_sfd_start -
+            static_cast<int64_t>(std::llround(
+                static_cast<double>(full_repetitions) * measured_period));
+        const size_t tail_first = full_repetitions - tail_repetitions;
+        cfo_timing.ok = true;
+        cfo_timing.preamble_start_sample = full_start;
+        cfo_timing.preamble_start_uncropped = full_start;
+        cfo_timing.measured_period = measured_period;
+        cfo_timing.metric = tail_timing.metric;
+        cfo_timing.detected_peaks = full_repetitions;
+        cfo_timing.expected_peaks = full_repetitions;
+        cfo_timing.coarse_search_us = tail_timing.coarse_search_us;
+        cfo_timing.fine_track_us = tail_timing.fine_track_us;
+        cfo_timing.seed_search_us = tail_timing.seed_search_us;
+        cfo_timing.seed_refine_narrow_attempts =
+            tail_timing.seed_refine_narrow_attempts;
+        cfo_timing.seed_refine_narrow_success =
+            tail_timing.seed_refine_narrow_success;
+        cfo_timing.seed_refine_fallbacks = tail_timing.seed_refine_fallbacks;
+        cfo_timing.peak_samples.resize(full_repetitions);
+        cfo_timing.peak_metrics.assign(full_repetitions, 0.0f);
+        cfo_timing.peak_corr.assign(
+            full_repetitions, std::complex<float>(0.0f, 0.0f));
+        for (size_t k = 0; k < full_repetitions; ++k) {
+            cfo_timing.peak_samples[k] = full_start +
+                static_cast<int64_t>(std::llround(
+                    static_cast<double>(k) * measured_period)) +
+                static_cast<int64_t>(template_len - 1);
+        }
+        for (size_t k = 0; k < tail_repetitions; ++k) {
+            const size_t dst = tail_first + k;
+            cfo_timing.peak_samples[dst] = tail_timing.peak_samples[k];
+            cfo_timing.peak_metrics[dst] = tail_timing.peak_metrics[k];
+            cfo_timing.peak_corr[dst] = tail_timing.peak_corr[k];
+        }
+
+        const auto sfd_cfo_t0 = std::chrono::steady_clock::now();
+        const bool cfo_refit_ok =
+            stage_cfo(rx, n, profile, cfo_timing, res.cfo, scratch);
+        res.stage_cfo_fit_us += res.cfo.fit_us;
+        res.stage_cfo_rotate_us += res.cfo.rotate_us;
+        res.stage_cfo_rotation_kernels |=
+            (res.cfo.rotation_kernel ? 2u : 0u);
+        res.stage_sfd_cfo_refit_us += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - sfd_cfo_t0).count());
+        return cfo_refit_ok;
+    };
+
+    // Final full-rate SFD verification on the current CFO compensation.
+    auto run_final_sfd = [&]() -> bool {
+        sfd_rx = scratch.derotated.empty() ? rx : scratch.derotated.data();
+        const auto sfd_final_t0 = std::chrono::steady_clock::now();
+        const bool ok = stage_sfd(
+            sfd_rx, n, profile, res.timing, sfd_seq, template_wf,
+            res.sfd, scratch);
+        res.stage_sfd_final_us += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - sfd_final_t0).count());
+        return ok;
+    };
+
+    TimingResult tail_timing;
+    TimingResult cfo_timing;
+    const size_t first_seed_radius = profile.rx_seed_refine_tail ? 8 : 0;
+    if (!run_tail_and_cfo_refit(first_seed_radius, tail_timing, cfo_timing)) {
         lap(res.stage_sfd_us);
         res.status = DemodStatus::CfoFailed;
         rebase();
@@ -2309,20 +2563,31 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     }
     res.timing = std::move(cfo_timing);
 
-    // Restore the full-preamble profile for the final SFD verification.
-    cfo_anchor_profile = profile;
-
     // Re-run SFD on the final MATLAB-aligned CFO compensation.  This removes
     // any bootstrap-CFO bias from the SFD/CIR path while retaining the same
     // full-rate refinement contract as MATLAB refineTimingWithNsSfd.
-    sfd_rx = scratch.derotated.empty() ? rx : scratch.derotated.data();
-    const auto sfd_final_t0 = std::chrono::steady_clock::now();
-    const bool final_sfd_ok = stage_sfd(
-        sfd_rx, n, cfo_anchor_profile, res.timing, sfd_seq, template_wf,
-        res.sfd, scratch);
-    res.stage_sfd_final_us = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - sfd_final_t0).count());
+    bool final_sfd_ok = run_final_sfd();
+    if (!final_sfd_ok && profile.rx_seed_refine_tail) {
+        // The narrow tail seed can pick a wrong local peak and still pass the
+        // per-SYNC threshold.  On a final-SFD/period inconsistency, retry the
+        // complete tail -> CFO refit -> final SFD chain with the legacy radius.
+        ++res.stage_tail_retrack_fallbacks;
+        TimingResult retry_tail;
+        TimingResult retry_cfo;
+        if (run_tail_and_cfo_refit(0, retry_tail, retry_cfo)) {
+            // Preserve the first (narrow) chain's seed diagnostics: the
+            // radius-0 retry reports zero attempts of its own.
+            retry_cfo.seed_search_us += res.timing.seed_search_us;
+            retry_cfo.seed_refine_narrow_attempts +=
+                res.timing.seed_refine_narrow_attempts;
+            retry_cfo.seed_refine_narrow_success +=
+                res.timing.seed_refine_narrow_success;
+            retry_cfo.seed_refine_fallbacks +=
+                res.timing.seed_refine_fallbacks;
+            res.timing = std::move(retry_cfo);
+            final_sfd_ok = run_final_sfd();
+        }
+    }
     res.sfd_final_windows = res.sfd.search_windows;
     res.sfd_final_coarse_correlations = res.sfd.coarse_correlations;
     res.sfd_final_fine_correlations = res.sfd.fine_correlations;
@@ -2354,6 +2619,124 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     // Stage 4: CIR + soft chips on the CFO-compensated frame.
     const int8_t* pc = GetPreambleCode(profile.code_index);
     std::vector<int8_t> pcode(pc, pc + kQm35CodeLength);
+    const auto nsfd_seq = gr::uwb::demod::GetSfdSequence(profile.sfd_mode);
+    if (profile.rx_softchip_on_demand) {
+        // Experimental two-phase path: generate only the SYNC/SFD/PHR prefix,
+        // decode the validated PHR length, then extend to the payload range.
+        // Any unsupported grid or failure retries the complete legacy path once
+        // and records the fallback.  No injected/sidecar length is used.
+        bool ok = stage_cir_softchips(scratch.derotated.data(), n, profile,
+                                      res.timing, pcode, res.cir, scratch,
+                                      rxopt::initial_chip_budget(profile), 0);
+        lap(res.stage_cir_us);
+        const size_t prefix_chips = res.cir.soft_chip_count;
+        if (ok) {
+            ok = stage_ns_sfd(scratch.soft_chips, profile, nsfd_seq,
+                              kQm35ChipsPerSymbol, res.ns_sfd, scratch);
+            lap(res.stage_ns_sfd_us);
+        }
+        if (ok) {
+            ok = stage_phr(scratch.soft_chips, profile, res.ns_sfd,
+                           kQm35ChipsPerSymbol, res.phr, scratch);
+            lap(res.stage_phr_us);
+        }
+        if (ok && res.phr.secded_corrected) {
+            // The legacy PHR path can inspect the full-range tail energy when
+            // SECDED corrected a longer length.  The prefix cannot, so retry
+            // the complete stream rather than silently changing that decision.
+            ok = false;
+        }
+        if (ok) {
+            const size_t final_budget = rxopt::final_chip_budget(
+                profile, res.ns_sfd.sfd_end_chip, res.phr.psdu_length);
+            if (final_budget > prefix_chips) {
+                CirResult ext;
+                const bool ext_ok = stage_cir_softchips(
+                    scratch.derotated.data(), n, profile, res.timing, pcode,
+                    ext, scratch, final_budget, prefix_chips);
+                add_elapsed(res.stage_cir_us);
+                if (ext_ok) {
+                    res.cir.soft_extend_us =
+                        ext.soft_fir_us + ext.postprocess_us;
+                    res.cir.soft_fir_us += ext.soft_fir_us;
+                    res.cir.postprocess_us += ext.postprocess_us;
+                    res.cir.soft_chip_count = ext.soft_chip_count;
+                    res.cir.extended_chip_count = ext.extended_chip_count;
+                    res.cir.on_demand_extended = ext.on_demand_extended;
+                    res.cir.samples_per_chip = ext.samples_per_chip;
+                } else {
+                    ok = false;
+                }
+            }
+        }
+        if (ok) {
+            ok = stage_payload_fcs(scratch.soft_chips, profile, res.phr,
+                                   res.ns_sfd, kQm35ChipsPerSymbol,
+                                   res.payload, scratch);
+            lap(res.stage_payload_us);
+            if (ok && !res.payload.fcs_pass)
+                ok = false;
+        }
+        if (!ok) {
+            // Single full-stream retry on the legacy path.  Measure it as a
+            // separate diagnostic bucket so the first-pass stage timings are
+            // not silently replaced or double-counted.
+            ++res.stage_softchip_fallbacks;
+            const auto fallback_t0 = std::chrono::steady_clock::now();
+            CirResult full_cir;
+            NsSfdResult full_ns;
+            PhrResult full_phr;
+            PayloadResult full_payload;
+            const bool full_cir_ok = stage_cir_softchips(
+                scratch.derotated.data(), n, profile, res.timing, pcode,
+                full_cir, scratch);
+            const bool full_ns_ok =
+                full_cir_ok &&
+                stage_ns_sfd(scratch.soft_chips, profile, nsfd_seq,
+                             kQm35ChipsPerSymbol, full_ns, scratch);
+            const bool full_phr_ok =
+                full_ns_ok &&
+                stage_phr(scratch.soft_chips, profile, full_ns,
+                          kQm35ChipsPerSymbol, full_phr, scratch);
+            const bool full_payload_ok =
+                full_phr_ok &&
+                stage_payload_fcs(scratch.soft_chips, profile, full_phr,
+                                  full_ns, kQm35ChipsPerSymbol, full_payload,
+                                  scratch);
+            res.stage_softchip_fallback_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - fallback_t0).count());
+            res.stage_total_us += res.stage_softchip_fallback_us;
+            t_prev = std::chrono::steady_clock::now();
+            if (full_cir_ok && full_ns_ok && full_phr_ok && full_payload_ok) {
+                res.cir = std::move(full_cir);
+                res.cir.on_demand_fallbacks = 1;
+                res.ns_sfd = std::move(full_ns);
+                res.phr = std::move(full_phr);
+                res.payload = std::move(full_payload);
+                res.status = (res.payload.ok && res.payload.fcs_pass)
+                                 ? DemodStatus::Success
+                                 : DemodStatus::FcsFailed;
+                rebase();
+                return res;
+            }
+            if (!full_cir_ok)
+                res.status = DemodStatus::CirFailed;
+            else if (!full_ns_ok)
+                res.status = DemodStatus::SfdFailed;
+            else if (!full_phr_ok)
+                res.status = DemodStatus::PhrFailed;
+            else
+                res.status = DemodStatus::PayloadFailed;
+            rebase();
+            return res;
+        }
+        res.status = (res.payload.ok && res.payload.fcs_pass)
+                         ? DemodStatus::Success
+                         : DemodStatus::FcsFailed;
+        rebase();
+        return res;
+    }
     if (!stage_cir_softchips(scratch.derotated.data(), n, profile, res.timing,
                              pcode, res.cir, scratch)) {
         lap(res.stage_cir_us);
@@ -2363,7 +2746,6 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     }
     lap(res.stage_cir_us);
     // Stage 5: NS-SFD location in the soft-chip stream.
-    const auto nsfd_seq = gr::uwb::demod::GetSfdSequence(profile.sfd_mode);
     if (!stage_ns_sfd(scratch.soft_chips, profile, nsfd_seq, kQm35ChipsPerSymbol,
                       res.ns_sfd, scratch)) {
         lap(res.stage_ns_sfd_us);
@@ -2446,7 +2828,9 @@ bool stage_cir_softchips(const std::complex<float>* rx,
                          const TimingResult& timing,
                          const std::vector<int8_t>& preamble_code,
                          CirResult& out,
-                         DemodScratch& scratch);
+                         DemodScratch& scratch,
+                         size_t max_chips,
+                         size_t begin_chip);
 
 // ---------------------------------------------------------------------------
 // Stage 5 — NS-SFD location in the soft-chip stream.

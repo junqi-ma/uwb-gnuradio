@@ -146,6 +146,86 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_timing_matches_golden)
                           0.1);
 }
 
+BOOST_AUTO_TEST_CASE(test_demod_core_tail_seed_refine_radius_fallback)
+{
+    // SFD-anchored tail profile: the first tail SYNC prediction is within a
+    // few samples, so the experiment tries +/-8 before the legacy wide search.
+    // A miss at +12 samples must fall back and still recover all 40 peaks.
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+    BOOST_REQUIRE_EQUAL(tmpl.size(), size_t(1016));
+
+    auto prof = Qm35825Profile::Default();
+    prof.preamble_repetitions = 40;
+    prof.timing_search_margin = 0;
+    prof.timing_coarse_stride = 1;
+    prof.timing_max_backtrack_symbols = 0;
+    prof.timing_track_radius = 8;
+    prof.radar_verification_threshold = 0.20f;
+    prof.timing_seed_refine_radius = 8;
+    const int64_t tail_start =
+        9984 + 24 * static_cast<int64_t>(kQm35SamplesPerSymbol);
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    TimingResult narrow;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl,
+                                     tail_start, narrow, scratch));
+    BOOST_CHECK_EQUAL(narrow.detected_peaks, size_t(40));
+    BOOST_CHECK_EQUAL(narrow.seed_refine_narrow_attempts, 1u);
+    BOOST_CHECK_EQUAL(narrow.seed_refine_narrow_success, 1u);
+    BOOST_CHECK_EQUAL(narrow.seed_refine_fallbacks, 0u);
+
+    TimingResult fallback;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl,
+                                     tail_start + 12, fallback, scratch));
+    BOOST_CHECK_EQUAL(fallback.detected_peaks, size_t(40));
+    BOOST_CHECK_EQUAL(fallback.seed_refine_narrow_attempts, 1u);
+    BOOST_CHECK_EQUAL(fallback.seed_refine_narrow_success, 0u);
+    BOOST_CHECK_EQUAL(fallback.seed_refine_fallbacks, 1u);
+
+    prof.timing_seed_refine_radius = 0;
+    TimingResult legacy;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl,
+                                     tail_start, legacy, scratch));
+    BOOST_CHECK_EQUAL(legacy.detected_peaks, size_t(40));
+    BOOST_CHECK_EQUAL(legacy.seed_refine_narrow_attempts, 0u);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_rxopt_on_demand_rejects_fractional_grid)
+{
+    // The on-demand experiment must not round a fractional SFO chip grid or
+    // change RAKE/bypass semantics; it declines and leaves the full legacy
+    // path available.
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+    auto prof = Qm35825Profile::Default();
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    TimingResult tr;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984, tr,
+                                     scratch));
+    TimingResult fractional = tr;
+    fractional.measured_period += 0.5;
+    const int8_t* pc = GetPreambleCode(prof.code_index);
+    std::vector<int8_t> pcode(pc, pc + kQm35CodeLength);
+    prof.rx_softchip_on_demand = true;
+    CirResult prefix;
+    BOOST_CHECK(!core::stage_cir_softchips(
+        iq.data(), iq.size(), prof, fractional, pcode, prefix, scratch,
+        rxopt::initial_chip_budget(prof), 0));
+    BOOST_CHECK(!scratch.softchip.prepared);
+
+    prof.rx_softchip_on_demand = false;
+    CirResult full;
+    BOOST_REQUIRE(core::stage_cir_softchips(
+        iq.data(), iq.size(), prof, fractional, pcode, full, scratch));
+    BOOST_CHECK_GT(full.soft_chip_count, 0u);
+    BOOST_CHECK_GT(full.samples_per_chip, 0.0);
+}
+
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_backtracks_weak_qm35_first_sync)
 {
     std::vector<gr_complex> tmpl;
@@ -1707,6 +1787,32 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r7_robust_awgn_representative)
             ++pass;
     }
     BOOST_CHECK_GE(pass, 2); // at least 2/3 at 20 dB
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_rxopt_cfo_block_rotation_boundaries)
+{
+    // Experimental CFO kernel: 1024-sample blocks, non-multiple lengths and
+    // positive/negative CFO.  Check against the independent double reference.
+    std::vector<gr_complex> src(4097);
+    for (size_t i = 0; i < src.size(); ++i) {
+        src[i] = gr_complex(std::sin(0.013f * static_cast<float>(i)) + 0.2f,
+                            std::cos(0.021f * static_cast<float>(i)) - 0.1f);
+    }
+    for (size_t n : { size_t(1000), size_t(1024), size_t(1025),
+                      size_t(4097) }) {
+        for (double cfo_hz : { 50000.0, -50000.0, 300000.0 }) {
+            const double w = 2.0 * M_PI * cfo_hz / kQm35SampleRate;
+            std::vector<gr_complex> got, ref(n);
+            rxopt::derotate_block(got, src.data(), n, w);
+            rxopt::derotate_reference(ref.data(), src.data(), n, w);
+            double max_err = 0.0;
+            for (size_t i = 0; i < n; ++i)
+                max_err = std::max(max_err,
+                                   static_cast<double>(std::abs(got[i] - ref[i])));
+            BOOST_CHECK_LT(max_err, 2e-5);
+            BOOST_CHECK_LT(std::abs(got[0] - src[0]), 1e-7f);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r7_robust_multipath_representative)

@@ -16,7 +16,28 @@ namespace experiment {
 // neither crops the input nor consumes injected timing, payload or channel.
 class FastRxPipeline {
 public:
-    FastRxPipeline(size_t max_samples, size_t code)
+    // Explicit experimental RX options.  Every flag defaults to false so the
+    // existing caller path (and all historical runs) keep the legacy kernels.
+    struct Options {
+        bool fast_sfd;
+        bool fast_cfo_rotation;
+        bool seed_refine_tail;
+        bool softchip_on_demand;
+
+        Options()
+            : fast_sfd(false), fast_cfo_rotation(false),
+              seed_refine_tail(false), softchip_on_demand(false)
+        {
+        }
+        Options(bool sfd, bool cfo, bool seed, bool soft)
+            : fast_sfd(sfd), fast_cfo_rotation(cfo),
+              seed_refine_tail(seed), softchip_on_demand(soft)
+        {
+        }
+    };
+
+    FastRxPipeline(size_t max_samples, size_t code,
+                   const Options& options = Options{})
         : capacity_(max_samples), profile_(demod::Qm35825Profile::Default())
     {
         if (max_samples == 0 || code < 9 || code > 12)
@@ -24,6 +45,10 @@ public:
         profile_.code_index = code;
         profile_.timing_search_margin = 256;
         profile_.timing_coarse_stride = 1;
+        profile_.rx_fast_sfd = options.fast_sfd;
+        profile_.rx_fast_cfo_rotation = options.fast_cfo_rotation;
+        profile_.rx_seed_refine_tail = options.seed_refine_tail;
+        profile_.rx_softchip_on_demand = options.softchip_on_demand;
         scratch_.reserve(max_samples);
     }
 
