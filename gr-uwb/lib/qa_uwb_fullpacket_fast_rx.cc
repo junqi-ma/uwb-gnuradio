@@ -126,6 +126,12 @@ BOOST_AUTO_TEST_CASE(fullpacket_fast_rx_on_demand_falls_back_on_phr_failure)
                             22, Packet::seed, packet.sync);
     BOOST_CHECK_EQUAL(int(a.status), int(b.status));
     BOOST_CHECK_EQUAL(b.stage_softchip_fallbacks, 1u);
+    // The failed fallback must publish the legacy attempt's fields, not the
+    // discarded prefix.  Otherwise the reported chip count/NS-SFD belongs to a
+    // different run than the final status.
+    BOOST_CHECK_EQUAL(b.cir.soft_chip_count, a.cir.soft_chip_count);
+    BOOST_CHECK_EQUAL(b.cir.on_demand_fallbacks, 1u);
+    BOOST_CHECK_EQUAL(b.ns_sfd.sfd_start_chip, a.ns_sfd.sfd_start_chip);
 }
 
 BOOST_AUTO_TEST_CASE(fullpacket_fast_rx_on_demand_chips_match_legacy_prefix)

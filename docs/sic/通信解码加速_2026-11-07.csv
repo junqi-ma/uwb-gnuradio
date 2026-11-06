@@ -1,0 +1,9 @@
+cell,functional_windows,comm_fcs_old,comm_fcs_new,sensing_fcs_old,sensing_fcs_new,comm_mean_old_us,comm_mean_new_us,comm_mean_ratio,comm_p95_old_us,comm_p95_new_us,comm_p95_ratio,sfd_mean_old_us,sfd_mean_new_us,cfo_mean_old_us,cfo_mean_new_us,cir_mean_old_us,cir_mean_new_us,soft_fir_mean_old_us,soft_fir_mean_new_us,soft_extend_mean_new_us,chips_mean_old,chips_mean_new,softchip_fallbacks,tail_fallbacks
+sync_base,16,16,16,16,16,2226.767,1718.870,0.771913,4030.895,1983.953,0.492187,853.402,435.848,157.316,105.035,669.699,689.000,504.898,490.391,86.977,68822.4,67871.0,0,0
+payload_base,16,16,16,16,16,2815.960,1933.148,0.686497,4183.625,3572.137,0.853838,958.445,504.488,278.371,193.207,1080.977,727.332,870.109,517.910,95.234,117174.4,67871.0,0,0
+payload_four_frac,16,16,16,16,16,2658.273,1715.651,0.645401,2925.076,1890.107,0.646174,899.871,450.562,268.840,167.797,1007.961,622.699,808.324,437.094,81.309,117174.4,67871.0,0,0
+payload_cfo_m50k,16,16,16,16,16,,,,,,,,,,,,,,,,,,,
+payload_cfo_p50k,16,16,16,16,16,,,,,,,,,,,,,,,,,,,
+payload_len16,16,16,16,16,16,,,,,,,,,,,,,,,,,,,
+payload_len127,16,16,16,16,16,,,,,,,,,,,,,,,,,,,
+payload_snr8,16,16,16,16,16,,,,,,,,,,,,,,,,,,,

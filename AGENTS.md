@@ -1,6 +1,14 @@
-# 当前任务：通信解码加速（待执行）
+# 当前任务：通信解码加速已交付
 
-优先执行 `docs/sic/OpenCode_通信解码加速任务书_2026-11-07.md`，分析依据 `docs/sic/通信解码实现与优化分析_2026-11-07.md`，基线 `c13253b`。主 agent 冻结接口后调度3个 subagent：同步/SFD、CFO旋转、按PHR长度生成soft chips；共享核心头文件只由主 agent 集成。必要QA与一次功能/性能对照，不重复历史smoke；每阶段反馈证据和下一步。本次只交付任务书，未开始算法修改。以下为历史记录。
+结果见 `docs/sic/通信解码加速开发报告_2026-11-07.md`，code-tested SHA
+`d2d18be`。A/B/C 三个显式选项：SFD VOLK 点积 + 模板缓存 + 尾部 ±8 seed、
+CFO 1024 点块旋转、按 PHR 长度两阶段 soft-chip。正式三格配对 comm demod mean：
+`sync_base` 2226.8→1718.9 µs（0.772）、`payload_base` 2816.0→1933.1 µs
+（0.686）、`payload_four_frac` 2658.3→1715.7 µs（0.645）；P95 均未增加。
+8 格×16 源窗逐窗 comm/sensing PSDU、FCS、status 一致，0 次 soft-chip fallback。
+默认选项全关，旧 build `gr-uwb/build-sic-fullpacket-fused` 未覆盖；MATLAB、
+native、FPGA/硬件、paced 到达与 mean≤0.5 ms/P99≤1 ms/200 窗/s 未验证、未宣称。
+以下为历史记录。
 
 # 当前任务：FIR 乘加融合优化已交付
 

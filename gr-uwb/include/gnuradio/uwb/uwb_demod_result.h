@@ -224,16 +224,18 @@ struct DemodResult {
     uint64_t stage_ns_sfd_us = 0;
     uint64_t stage_phr_us = 0;
     uint64_t stage_payload_us = 0;
-    uint64_t stage_total_us = 0;        // sum of the above (== demod_latency_us)
-    // Diagnostic child sub-timers for the CFO and soft-chip stages.  They are
-    // already included in their parent stage above and must never be added to
-    // stage_total_us.  stage_cfo_fit_us/stage_cfo_rotate_us sum BOTH CFO calls
-    // (initial + SFD-refit) unless noted otherwise.
+    uint64_t stage_total_us = 0;        // sum of parents + fallback bucket
+    // Diagnostic child sub-timers for the CFO and soft-chip stages.
+    // stage_cfo_fit_us/stage_cfo_rotate_us are already included in their parent
+    // stage above and must never be added to stage_total_us.  They sum BOTH CFO
+    // calls (initial + SFD-refit) unless noted otherwise.
+    // stage_softchip_fallback_us is different: it is NOT part of stage_cir_us;
+    // it is a separate eighth bucket that is included in stage_total_us.
     uint64_t stage_cfo_fit_us = 0;
     uint64_t stage_cfo_rotate_us = 0;
     uint32_t stage_cfo_rotation_kernels = 0; // bit0=initial block, bit1=refit block
     uint32_t stage_softchip_fallbacks = 0;   // full-path retries (diagnostic)
-    uint64_t stage_softchip_fallback_us = 0; // time of those retries
+    uint64_t stage_softchip_fallback_us = 0; // separate total bucket (not a child)
     uint32_t stage_tail_retrack_fallbacks = 0; // legacy-radius tail retries
     uint64_t stage_sfd_tail_retrack_fallback_us = 0; // included in tail timer
     // `stage_sfd` runs once for bootstrap CFO anchoring and once after the

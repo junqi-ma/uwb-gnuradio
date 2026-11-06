@@ -153,6 +153,9 @@ struct DemodScratch {
         bool prepared = false;
         size_t generated = 0;
         float prefix_max = 0.0f;
+        // Phase rotation frozen by the prefix pass: the phase alignment is
+        // estimated once per packet and reused by the extension.
+        std::complex<float> rot{ 1.0f, 0.0f };
 
         void reset() { *this = SoftChipState{}; }
     } softchip;
@@ -996,6 +999,9 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     const size_t num_chips =
         static_cast<size_t>(std::floor(
             static_cast<double>(last_pos - chip_start) / spc)) + 1;
+    if (on_demand &&
+        num_chips > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+        return false; // result chip counters are uint32_t
 
     if (extending && num_chips <= begin_chip) {
         // The PHR-derived range already fits in the prefix.  Nothing to do;
@@ -1108,6 +1114,8 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         checked = std::min(num_chips,
                            static_cast<size_t>((gap + spc_i - 1) / spc_i));
     }
+    if (extending && begin_chip < checked)
+        return false; // [begin_chip, checked) would never be generated
     if (extending)
         checked = std::min(num_chips, begin_chip);
     // Edge chips: FIR window may clip below sample 0 (bounds-checked scalar).
@@ -1218,8 +1226,12 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         return false; // chip stream shorter than the configured preamble
     // spread[] is real ±1/0, so conj(spread)*corr = spread*corr.  Avoid % by
     // walking the 508-chip period with a running index.
-    std::complex<float> gain(0.0f, 0.0f);
-    {
+    std::complex<float> rot(1.0f, 0.0f);
+    if (extending) {
+        // Frozen by the prefix pass: phase alignment runs once per packet.
+        rot = scratch.softchip.rot;
+    } else {
+        std::complex<float> gain(0.0f, 0.0f);
         size_t s = 0;
         for (size_t i = 0; i < phase_len; ++i) {
             gain += static_cast<float>(spread[s]) *
@@ -1227,11 +1239,13 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
             if (++s == kQm35ChipsPerSymbol)
                 s = 0;
         }
+        const float ang = std::arg(gain);
+        rot = std::complex<float>(std::cos(-ang), std::sin(-ang));
+        if (on_demand)
+            scratch.softchip.rot = rot;
     }
-    const float ang = std::arg(gain);
-    const float rr = std::cos(-ang);
-    const float ri = std::sin(-ang);
-    const std::complex<float> rot(rr, ri);
+    const float rr = rot.real();
+    const float ri = rot.imag();
 
     // Merged postprocess: compute only the rotated real component and track
     // max|real|, then normalize into soft_chips. No later stage consumes the
@@ -2660,6 +2674,9 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                         ext.soft_fir_us + ext.postprocess_us;
                     res.cir.soft_fir_us += ext.soft_fir_us;
                     res.cir.postprocess_us += ext.postprocess_us;
+                    // The extension re-runs the deterministic CIR estimate;
+                    // count it so cir_estimate_us is the true total.
+                    res.cir.cir_estimate_us += ext.cir_estimate_us;
                     res.cir.soft_chip_count = ext.soft_chip_count;
                     res.cir.extended_chip_count = ext.extended_chip_count;
                     res.cir.on_demand_extended = ext.on_demand_extended;
@@ -2708,12 +2725,16 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                     std::chrono::steady_clock::now() - fallback_t0).count());
             res.stage_total_us += res.stage_softchip_fallback_us;
             t_prev = std::chrono::steady_clock::now();
+            // Publish the fallback attempt even when it fails: the status
+            // below is decided by this legacy run, so the reported CIR /
+            // NS-SFD / PHR / payload must describe the same run.  Otherwise a
+            // short prefix result is paired with a full-stream failure status.
+            res.cir = std::move(full_cir);
+            res.cir.on_demand_fallbacks = 1;
+            res.ns_sfd = std::move(full_ns);
+            res.phr = std::move(full_phr);
+            res.payload = std::move(full_payload);
             if (full_cir_ok && full_ns_ok && full_phr_ok && full_payload_ok) {
-                res.cir = std::move(full_cir);
-                res.cir.on_demand_fallbacks = 1;
-                res.ns_sfd = std::move(full_ns);
-                res.phr = std::move(full_phr);
-                res.payload = std::move(full_payload);
                 res.status = (res.payload.ok && res.payload.fcs_pass)
                                  ? DemodStatus::Success
                                  : DemodStatus::FcsFailed;

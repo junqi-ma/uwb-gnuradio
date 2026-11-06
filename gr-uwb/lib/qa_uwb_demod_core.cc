@@ -826,12 +826,14 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r3_sfd_child_subtimers_are_consistent)
     BOOST_CHECK_GT(res.stage_sfd_final_us, uint64_t(0));
 
     // (b) `stage_total_us` is the sum of exactly the fields written by the
-    // `lap()` lambda (timing, cfo, sfd, cir, ns_sfd, phr, payload).  The SFD
-    // children are NOT separately accumulated, so this equality would fail if
-    // they leaked into the total.
+    // `lap()` lambda (timing, cfo, sfd, cir, ns_sfd, phr, payload) plus the
+    // separately timed soft-chip fallback bucket.  The SFD children are NOT
+    // separately accumulated, so this equality would fail if they leaked into
+    // the total.
     const uint64_t parent_sum = res.stage_timing_us + res.stage_cfo_us +
         res.stage_sfd_us + res.stage_cir_us + res.stage_ns_sfd_us +
-        res.stage_phr_us + res.stage_payload_us;
+        res.stage_phr_us + res.stage_payload_us +
+        res.stage_softchip_fallback_us;
     BOOST_CHECK_EQUAL(res.stage_total_us, parent_sum);
 }
 
