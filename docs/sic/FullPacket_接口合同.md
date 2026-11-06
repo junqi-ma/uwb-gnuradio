@@ -16,3 +16,5 @@ Online C++ reads only raw IQ, public.json and templates in SIC modes. Explicit r
 Stage timers are steady-clock service wall times. times_us.thread_cpu is total pipeline thread CPU from CLOCK_THREAD_CPUTIME_ID (includes consumer, excludes producer/queue/I/O). Both modes independently estimate every window. Timing/paced reuse16 independent source IQ windows for processing observations; rates and confidence bounds count unique packets separately. Do not interpret1024 replay observations as1024 independent payload trials.
 
 The output region is the full context. Thus no_overlap means no overlap with desired target region; cancellation outside that region is allowed and should not be confused with no-interference exact bypass.
+
+Rejected rows emit status only: their first_clean_us placeholder is not an IQ output timestamp and must be excluded from causality/latency output statistics. Accepted rows retain sample-ready causality checks. Archived paced results were rechecked with the corrected verifier without rerunning measurement.

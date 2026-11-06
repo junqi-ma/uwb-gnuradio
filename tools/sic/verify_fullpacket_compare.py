@@ -208,7 +208,9 @@ def validate_record(row, public):
         check(isinstance(sample, (int, float)) and 0 <= sample <= public["n"], "required sample")
         if mode == "full" and not rejected:
             check(sample == public["n"], "full context observation policy")
-        if "first_clean_us" in events and "sample_ready_us" in events:
+        # Rejection publishes only immediate status: first_clean_us is then a
+        # placeholder, not an IQ output event. Accepted rows retain causality.
+        if not rejected and "first_clean_us" in events and "sample_ready_us" in events:
             check(events["first_clean_us"] + 1e-6 >= events["sample_ready_us"], "early clean before samples")
     except (KeyError, TypeError, ValueError):
         errors.append("events missing/invalid")

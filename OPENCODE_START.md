@@ -1,5 +1,7 @@
 # 当前实验：Full-packet 与 preamble-only SIC 比较
 
+本轮已交付，结果见 `docs/sic/FullPacket_开发报告_2026-11-06.md`。正式测量绑定 `5dd2cfb`；不要自动重跑或进入下一轮优化。
+
 执行 docs/sic/FullPacket_vs_PreambleOnly_开发计划_2026-11-06.md。仅本实验分支允许新增整包路径；原 preamble 行为与历史基线保持。主 agent 与三个 subagent 按文件所有权协作。
 
 # S2 A/B 集成基线入口

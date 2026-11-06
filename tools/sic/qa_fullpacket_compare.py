@@ -61,6 +61,18 @@ def main():
             mutate(values)
             assert not evaluate(values)["passed"], name+" mutation escaped"
             mutations += 1
+        # Immediate rejection status may precede availability of the full
+        # context. The same timestamp on an accepted output is invalid.
+        immediate = copy.deepcopy(full)
+        immediate.update(committed=False, model_valid=False, comm_fcs=False,
+                         comm_psdu_hex="", sensing_fcs=False, sensing_psdu_hex="",
+                         support=[0,0], reason="queue_full", rejected=True, times_us={})
+        immediate["events"] = dict(required_sample=256, submit_us=1., start_us=1.,
+                                   finish_us=1., result_us=1., first_clean_us=1., sample_ready_us=2.)
+        assert not V.validate_record(immediate, public)
+        accepted_early = copy.deepcopy(full)
+        accepted_early["events"].update(first_clean_us=1., sample_ready_us=2.)
+        assert "early clean before samples" in V.validate_record(accepted_early, public)
         evaluate(rows)
         summary = V.verify(case, run, summary_only=True)
         assert summary["passed"] and not summary["iq_effects_verified"]
@@ -76,7 +88,7 @@ def main():
         assert fs["unique_source_rates"]["comm_exact"]["n"] == 1
         assert V.rate(0,16)["ci95"][1] > 0
         assert V.rate(1,1)["ci95"][0] < 1
-    print(f"qa_fullpacket_compare: baseline + {mutations} mutations + summary-only PASS")
+    print(f"qa_fullpacket_compare: baseline + {mutations} mutations + rejection causality + summary-only PASS")
     return 0
 
 
