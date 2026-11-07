@@ -61,7 +61,8 @@ TIMING_METRICS = (
     "comm_demod", "sic_total", "stage_cir", "stage_phr", "stage_payload",
     "phr_path", "payload_path", "prefix_fir", "soft_extend",
     "phr_fused_template", "phr_fused_correlate", "phr_fused_decode",
-    "fused_template", "fused_correlate", "fused_decode", "chips",
+    "phr_fused_decode_ns", "fused_template", "fused_correlate",
+    "fused_decode", "fused_decode_ns", "chips",
     "chips_initial",
 )
 
@@ -272,6 +273,8 @@ def metric_value(row: dict, metric: str, variant: str) -> float:
     if metric == "phr_fused_decode":
         return diag_float(row, "phr_fused_decode_us",
                           "stage_phr_fused_decode_us")
+    if metric == "phr_fused_decode_ns":
+        return diag_float(row, "phr_fused_decode_ns")
     if metric == "fused_template":
         return diag_float(row, "fused_template_us",
                           "stage_fused_template_us")
@@ -280,6 +283,8 @@ def metric_value(row: dict, metric: str, variant: str) -> float:
                           "stage_fused_correlate_us")
     if metric == "fused_decode":
         return diag_float(row, "fused_decode_us", "stage_fused_decode_us")
+    if metric == "fused_decode_ns":
+        return diag_float(row, "fused_decode_ns")
     if metric == "chips":
         return diag_float(row, "softchip_final")
     if metric == "chips_initial":

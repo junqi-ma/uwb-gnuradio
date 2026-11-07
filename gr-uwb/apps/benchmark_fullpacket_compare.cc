@@ -42,9 +42,9 @@ struct RxDiag {
  uint32_t rotation_kernels=0,softchip_initial=0,softchip_final=0,softchip_fallbacks=0,tail_fallbacks=0;
  uint32_t seed_narrow_attempts=0,seed_narrow_success=0,seed_fallbacks=0;
  uint32_t fused_attempts=0,fused_fallbacks=0,fused_symbols=0;
- uint64_t fused_template_us=0,fused_correlate_us=0,fused_decode_us=0;
+ uint64_t fused_template_us=0,fused_correlate_us=0,fused_decode_us=0,fused_decode_ns=0;
  uint32_t phr_fused_attempts=0,phr_fused_fallbacks=0,phr_fused_symbols=0;
- uint64_t phr_fused_template_us=0,phr_fused_correlate_us=0,phr_fused_decode_us=0;
+ uint64_t phr_fused_template_us=0,phr_fused_correlate_us=0,phr_fused_decode_us=0,phr_fused_decode_ns=0;
  uint32_t diag_fir_valid=0,diag_fir_preamble_chips=0,diag_fir_sfd_chips=0,
           diag_fir_phr_chips=0,diag_fir_payload_chips=0,diag_fir_extra_chips=0;
  uint64_t diag_fir_preamble_us=0,diag_fir_sfd_us=0,diag_fir_phr_us=0,
@@ -78,12 +78,13 @@ void fill_rx_diag(const demod::DemodResult& d,RxDiag& r){
  r.fused_attempts=d.stage_fused_attempts;r.fused_fallbacks=d.stage_fused_fallbacks;
  r.fused_symbols=d.stage_fused_symbols;
  r.fused_template_us=d.stage_fused_template_us;r.fused_correlate_us=d.stage_fused_correlate_us;
- r.fused_decode_us=d.stage_fused_decode_us;
+ r.fused_decode_us=d.stage_fused_decode_us;r.fused_decode_ns=d.stage_fused_decode_ns;
  r.phr_fused_attempts=d.stage_phr_fused_attempts;r.phr_fused_fallbacks=d.stage_phr_fused_fallbacks;
  r.phr_fused_symbols=d.stage_phr_fused_symbols;
  r.phr_fused_template_us=d.stage_phr_fused_template_us;
  r.phr_fused_correlate_us=d.stage_phr_fused_correlate_us;
  r.phr_fused_decode_us=d.stage_phr_fused_decode_us;
+ r.phr_fused_decode_ns=d.stage_phr_fused_decode_ns;
  r.diag_fir_valid=d.diag_fir_valid;
  r.diag_fir_preamble_us=d.diag_fir_preamble_us;r.diag_fir_sfd_us=d.diag_fir_sfd_us;
  r.diag_fir_phr_us=d.diag_fir_phr_us;r.diag_fir_payload_us=d.diag_fir_payload_us;
@@ -165,12 +166,14 @@ void emit(std::ostream& o,const Row&r){
    <<",\"fused_template_us\":"<<r.rx.fused_template_us
    <<",\"fused_correlate_us\":"<<r.rx.fused_correlate_us
    <<",\"fused_decode_us\":"<<r.rx.fused_decode_us
+   <<",\"fused_decode_ns\":"<<r.rx.fused_decode_ns
    <<",\"phr_fused_attempts\":"<<r.rx.phr_fused_attempts
    <<",\"phr_fused_fallbacks\":"<<r.rx.phr_fused_fallbacks
    <<",\"phr_fused_symbols\":"<<r.rx.phr_fused_symbols
    <<",\"phr_fused_template_us\":"<<r.rx.phr_fused_template_us
    <<",\"phr_fused_correlate_us\":"<<r.rx.phr_fused_correlate_us
    <<",\"phr_fused_decode_us\":"<<r.rx.phr_fused_decode_us
+   <<",\"phr_fused_decode_ns\":"<<r.rx.phr_fused_decode_ns
    <<",\"diag_fir_valid\":"<<r.rx.diag_fir_valid
    <<",\"diag_fir_preamble_us\":"<<r.rx.diag_fir_preamble_us
    <<",\"diag_fir_sfd_us\":"<<r.rx.diag_fir_sfd_us

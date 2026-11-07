@@ -2287,21 +2287,20 @@ inline bool stage_phr_fused_cmf(const std::complex<float>* rx,
                                 uint64_t& template_us,
                                 uint64_t& correlate_us,
                                 uint64_t& decode_us,
+                                uint64_t& decode_ns,
                                 size_t& symbols_out)
 {
     out = PhrResult{};
     template_us = 0;
     correlate_us = 0;
     decode_us = 0;
+    decode_ns = 0;
     symbols_out = 0;
     if (!rx || !ns_sfd.ok || ns_sfd.sfd_end_chip < 0)
         return false;
     const int64_t phr_start = ns_sfd.sfd_end_chip + 1;
-    const int64_t phr_chips =
-        static_cast<int64_t>(rxfusion::kPhrSymbols) *
-        static_cast<int64_t>(rxfusion::kPhrChipsPerSymbol);
-    if (phr_start < 0 || static_cast<size_t>(phr_start + phr_chips) >
-                             prefix_soft_chips.size())
+    if (phr_start < 0 ||
+        static_cast<size_t>(phr_start) > prefix_soft_chips.size())
         return false;
 
     const size_t tap_count = cir.cir_filter_taps.size();
@@ -2354,10 +2353,11 @@ inline bool stage_phr_fused_cmf(const std::complex<float>* rx,
     const bool decoded = decode_phr_decisions(
         scratch.fused_phr.g0, scratch.fused_phr.g1, prefix_soft_chips,
         ns_sfd, out);
-    decode_us = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
+    decode_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - t_decode0)
             .count());
+    decode_us = decode_ns / 1000;
     symbols_out = rxfusion::kPhrSymbols;
     if (!decoded) {
         scratch.fused_phr.reset_decisions();
@@ -2543,10 +2543,10 @@ inline bool prepare_fused_payload_pn(DemodScratch& scratch,
 }
 
 // Experimental fused payload metrics + hard FEC/FCS decode.  Reuses the PHR
-// already decoded from the prefix soft-chip stream and the CIR/phase frozen by
-// that same prefix pass.  When `phr_g0`/`phr_g1` are supplied by the fused PHR
-// stage, the joint Viterbi consumes those raw 21 decisions directly instead of
-// re-running bprf_demod() on soft chips.  Returns false on any unsupported
+// decisions and the CIR/phase frozen by the prefix pass.  When `phr_g0`/
+// `phr_g1` are supplied by the fused PHR stage, the joint Viterbi consumes
+// those raw 21 decisions directly and the prefix does not need PHR soft chips;
+// otherwise it re-runs bprf_demod() from the legacy prefix.  Returns false on any unsupported
 // configuration, range/short-window violation, fused-decode failure or FCS
 // failure; the caller then retries the complete legacy stream once.
 // `template_us`, `correlate_us` and `decode_us` are populated even when a later
@@ -2564,6 +2564,7 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
                                     uint64_t& template_us,
                                     uint64_t& correlate_us,
                                     uint64_t& decode_us,
+                                    uint64_t& decode_ns,
                                     size_t& symbols_out,
                                     const std::vector<int8_t>* phr_g0 = nullptr,
                                     const std::vector<int8_t>* phr_g1 = nullptr)
@@ -2572,6 +2573,7 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
     template_us = 0;
     correlate_us = 0;
     decode_us = 0;
+    decode_ns = 0;
     symbols_out = 0;
     if (!rx || !phr.ok || !ns_sfd.ok || phr.psdu_length == 0 ||
         phr.psdu_length > profile.max_psdu_bytes)
@@ -2583,9 +2585,14 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
                        static_cast<int64_t>(rxopt::kPhrChipsPerSymbol);
     if (phr_start < 0 || payload_start < 0)
         return false;
-    if (static_cast<size_t>(phr_start) +
-            rxopt::kPhrSymbols * rxopt::kPhrChipsPerSymbol >
-        prefix_soft_chips.size())
+    // When the fused PHR stage supplies the raw 21 g0/g1 decisions, the
+    // payload path does not need the PHR soft chips in the prefix.  Otherwise
+    // it must reproduce the legacy bprf_demod() admission exactly.
+    const bool have_phr_decisions = phr_g0 && phr_g1;
+    if (!have_phr_decisions &&
+        static_cast<size_t>(phr_start) +
+                rxopt::kPhrSymbols * rxopt::kPhrChipsPerSymbol >
+            prefix_soft_chips.size())
         return false;
 
     const size_t psdu_bits = static_cast<size_t>(phr.psdu_length) * 8;
@@ -2680,20 +2687,22 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
     const std::vector<int8_t>* g1p = phr_g1;
     if (g0p || g1p) {
         if (!g0p || !g1p || g0p->size() != 21 || g1p->size() != 21) {
-            decode_us = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(
+            decode_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - t_decode0)
                     .count());
+            decode_us = decode_ns / 1000;
             return false;
         }
     } else {
         if (!detail::bprf_demod(prefix_soft_chips, phr_start,
                                 profile.code_index, 21, 64, 512, 0, pol,
                                 local_g0p, local_g1p)) {
-            decode_us = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(
+            decode_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - t_decode0)
                     .count());
+            decode_us = decode_ns / 1000;
             return false;
         }
         g0p = &local_g0p;
@@ -2702,10 +2711,11 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
     rxfusion::decide_bpm(scratch.fused.metrics, g0, g1);
     const bool decoded =
         detail::decode_payload_hard(*g0p, *g1p, g0, g1, psdu_bits, out);
-    decode_us = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
+    decode_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - t_decode0)
             .count());
+    decode_us = decode_ns / 1000;
     if (!decoded)
         return false;
     return out.ok && out.fcs_pass;
@@ -3110,8 +3120,9 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                                 profile.rx_fused_payload_cmf ||
                                 profile.rx_fused_phr_cmf;
     if (on_demand_path) {
-        // Experimental two-phase path: generate only the SYNC/SFD/PHR prefix,
-        // decode the validated PHR length, then extend to the payload range.
+        // Experimental two-phase path: generate only the prefix required by
+        // the active decoder.  Payload fusion needs SYNC/SFD/PHR soft chips;
+        // PHR fusion stops at the NS-SFD end because PHR is read from raw IQ.
         // Any unsupported grid or failure retries the complete legacy path once
         // and records the fallback.  No injected/sidecar length is used.
         const bool phr_fusion_requested = profile.rx_fused_phr_cmf;
@@ -3148,15 +3159,17 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                     uint64_t phr_template_us = 0;
                     uint64_t phr_correlate_us = 0;
                     uint64_t phr_decode_us = 0;
+                    uint64_t phr_decode_ns = 0;
                     size_t phr_symbols = 0;
                     const bool fused_ok = stage_phr_fused_cmf(
                         scratch.derotated.data(), n, profile, res.timing,
                         res.cir, scratch.soft_chips, res.ns_sfd, res.phr,
                         scratch, phr_template_us, phr_correlate_us,
-                        phr_decode_us, phr_symbols);
+                        phr_decode_us, phr_decode_ns, phr_symbols);
                     res.stage_phr_fused_template_us += phr_template_us;
                     res.stage_phr_fused_correlate_us += phr_correlate_us;
                     res.stage_phr_fused_decode_us += phr_decode_us;
+                    res.stage_phr_fused_decode_ns += phr_decode_ns;
                     res.stage_phr_fused_symbols =
                         static_cast<uint32_t>(phr_symbols);
                     lap(res.stage_phr_us);
@@ -3209,6 +3222,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                 uint64_t fused_template_us = 0;
                 uint64_t fused_correlate_us = 0;
                 uint64_t fused_decode_us = 0;
+                uint64_t fused_decode_ns = 0;
                 size_t fused_symbols = 0;
                 const std::vector<int8_t>* cached_g0 =
                     (phr_fused_used && scratch.fused_phr.decisions_valid)
@@ -3222,10 +3236,12 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                     scratch.derotated.data(), n, profile, res.timing, res.cir,
                     scratch.soft_chips, res.ns_sfd, res.phr, res.payload,
                     scratch, fused_template_us, fused_correlate_us,
-                    fused_decode_us, fused_symbols, cached_g0, cached_g1);
+                    fused_decode_us, fused_decode_ns, fused_symbols,
+                    cached_g0, cached_g1);
                 res.stage_fused_template_us += fused_template_us;
                 res.stage_fused_correlate_us += fused_correlate_us;
                 res.stage_fused_decode_us += fused_decode_us;
+                res.stage_fused_decode_ns += fused_decode_ns;
                 res.stage_fused_symbols = static_cast<uint32_t>(fused_symbols);
                 lap(res.stage_payload_us);
                 if (fused_ok && res.payload.fcs_pass) {

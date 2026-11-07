@@ -698,8 +698,8 @@ BOOST_AUTO_TEST_CASE(phr_fused_pipeline_decodes_same_psdu)
                           static_cast<uint32_t>(rxfusion::kPhrSymbols));
         BOOST_CHECK_EQUAL(b.stage_fused_attempts, 1u);
         BOOST_CHECK_EQUAL(b.stage_fused_fallbacks, 0u);
-        BOOST_CHECK_GT(b.stage_phr_fused_decode_us, 0u);
-        BOOST_CHECK_GT(b.stage_fused_decode_us, 0u);
+        BOOST_CHECK_GT(b.stage_phr_fused_decode_ns, 0u);
+        BOOST_CHECK_GT(b.stage_fused_decode_ns, 0u);
 
         // PHR fusion shrinks the on-demand prefix; the payload fusion path
         // must not extend it.
@@ -711,6 +711,21 @@ BOOST_AUTO_TEST_CASE(phr_fused_pipeline_decodes_same_psdu)
                            << " budget=" << budget);
         BOOST_CHECK_LT(b.cir.soft_chip_count, baseline_res.cir.soft_chip_count);
         BOOST_CHECK_LE(b.cir.soft_chip_count, budget);
+        // The PHR soft-chip range starts at sfd_end_chip + 1.  NS-SFD still
+        // searches +8 chips past the nominal boundary, so the necessary
+        // prefix retains at most that 8-chip halo plus one budget-mapping
+        // entry.  It must not contain a full PHR symbol (512 chips).
+        const size_t phr_start =
+            static_cast<size_t>(b.ns_sfd.sfd_end_chip + 1);
+        const size_t retained_phr_halo =
+            b.cir.soft_chip_count > phr_start
+                ? b.cir.soft_chip_count - phr_start
+                : 0;
+        BOOST_TEST_MESSAGE("PHR retained soft-chip halo=" << retained_phr_halo
+                           << " chips");
+        BOOST_CHECK_LE(retained_phr_halo, size_t(9));
+        BOOST_CHECK_LT(b.cir.soft_chip_count,
+                       phr_start + rxfusion::kPhrChipsPerSymbol);
         BOOST_CHECK_EQUAL(b.cir.extended_chip_count, 0u);
         BOOST_CHECK_EQUAL(b.cir.on_demand_extended, 0u);
         BOOST_CHECK_EQUAL(b.cir.on_demand_fallbacks, 0u);

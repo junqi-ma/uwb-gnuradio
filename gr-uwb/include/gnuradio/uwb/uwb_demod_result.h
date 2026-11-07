@@ -251,6 +251,7 @@ struct DemodResult {
     uint64_t stage_fused_template_us = 0; // per-packet template build
     uint64_t stage_fused_correlate_us = 0; // four-candidate correlations
     uint64_t stage_fused_decode_us = 0;  // PHR cache + BPM/FEC/FCS decode
+    uint64_t stage_fused_decode_ns = 0;  // same interval, nanosecond resolution
     // Experimental fused PHR CMF/despread path.  These sub-timers are
     // CHILDREN of `stage_phr_us`, like the payload ones above.
     uint32_t stage_phr_fused_attempts = 0;
@@ -259,6 +260,7 @@ struct DemodResult {
     uint64_t stage_phr_fused_template_us = 0;
     uint64_t stage_phr_fused_correlate_us = 0;
     uint64_t stage_phr_fused_decode_us = 0;
+    uint64_t stage_phr_fused_decode_ns = 0; // nanosecond resolution
     // Diagnostic-only FIR segmentation from the replay helper.  `valid=1`
     // means the ranges below partition `cir.soft_chip_count` at the decoded
     // boundaries.  These values are never production exact attribution.

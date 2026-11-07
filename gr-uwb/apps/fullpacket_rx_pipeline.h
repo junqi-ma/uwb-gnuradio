@@ -44,10 +44,11 @@ public:
         {
         }
 
-        // The fused paths consume the SYNC/SFD/PHR prefix.  PHR fusion also
-        // requires the payload fusion.  Return the effective configuration so
-        // callers can log exactly what the profile will do rather than a
-        // potentially contradictory set of requested switches.
+        // The fused paths consume the on-demand prefix.  Payload fusion needs
+        // SYNC/SFD/PHR soft chips; PHR fusion stops the prefix at the NS-SFD
+        // end and also requires payload fusion.  Return the effective
+        // configuration so callers can log exactly what the profile will do
+        // rather than a potentially contradictory set of request switches.
         Options normalized() const
         {
             Options out = *this;
@@ -71,9 +72,9 @@ public:
         profile_.rx_fast_sfd = effective.fast_sfd;
         profile_.rx_fast_cfo_rotation = effective.fast_cfo_rotation;
         profile_.rx_seed_refine_tail = effective.seed_refine_tail;
-        // The fused payload/PHR paths consume the same SYNC/SFD/PHR prefix as
-        // the on-demand option.  Selecting either therefore implies the prefix
-        // path; the other options retain their explicit values.
+        // The fused payload/PHR paths consume the on-demand prefix.  Selecting
+        // either therefore implies the prefix path; PHR fusion additionally
+        // implies payload fusion.  The other options retain their values.
         profile_.rx_softchip_on_demand = effective.softchip_on_demand;
         profile_.rx_fused_payload_cmf = effective.fused_payload_cmf;
         profile_.rx_fused_phr_cmf = effective.fused_phr_cmf;
