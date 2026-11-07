@@ -1,4 +1,17 @@
-# 当前任务：通信解码加速已交付
+# 当前任务：CMF 与解扩融合可行性已交付
+
+结果见 `docs/sic/CMF解扩融合可行性报告_2026-11-07.md`，code-tested SHA
+`9cb2c3d`。新增显式 `--rx-fused-payload-cmf`（默认关闭）：前缀 PHR/CIR/相位
+不变，payload 用 52 点融合模板 + 四候选相关直接产生 BPM 指标；分数 spc、
+RAKE、bypass 和失败路径保留旧流一次。6 格×16 源窗逐窗 comm/sensing
+PSDU/FCS/status 一致，0 次正常格回退；损坏包 16/16 融合尝试、16 次回退、
+0 误提交。正式三格 `payload_path` mean 105.1→70.1（0.666）、106.3→61.0
+（0.574）、711.5→201.5 µs（0.283）；comm mean 1.013/0.989/0.810，总 SIC
+mean 0.983/1.001/0.924。`payload_base` 的 comm P95 为 1.140，不能宣称
+32 B 通信整体加速；`stage_payload` 单独约 1.96× 旧值，收益来自不再扩展
+payload soft-chip。MATLAB、native、FPGA/硬件、paced 与实时目标未验证。
+
+# 历史任务：通信解码加速已交付
 
 结果见 `docs/sic/通信解码加速开发报告_2026-11-07.md`，code-tested SHA
 `f753f17`。A/B/C 三个显式选项：SFD VOLK 点积 + 模板缓存 + 尾部 ±8 seed、

@@ -1,13 +1,16 @@
-# 当前任务：CMF 与解扩融合可行性验证
+# 当前任务：CMF 与解扩融合可行性已交付
 
-执行 [开发任务书](docs/sic/OpenCode_CMF解扩融合可行性任务书_2026-11-07.md)。
-先冻结接口，主 agent + 3 个 subagent 并行；先证明 payload 融合内核的数值等价与含模板更新的收益，再最小接入。
-以当前四项快速 RX + discrete_cir + 融合 FIR 为对照，默认关闭新选项。每阶段反馈结论和下一步。
-本任务优先于下方历史入口，不重跑大矩阵。
+结果见 [报告](docs/sic/CMF解扩融合可行性报告_2026-11-07.md)，code-tested SHA
+`9cb2c3d`。新增 `--rx-fused-payload-cmf`（默认关闭）：前缀保持，payload 用
+52 点融合模板 + 四候选相关；6 格×16 源窗功能一致，损坏包回退不误提交；
+正式三格 `payload_path` mean 比值 0.666/0.574/0.283，comm mean 1.013/0.989/
+0.810，总 SIC mean 0.983/1.001/0.924。`payload_base` comm P95 1.140，且
+`stage_payload` 单独约 1.96× 旧值；收益边界见报告。MATLAB/native/FPGA/
+硬件/paced/实时目标未验证。
 
 ---
 
-# 当前任务：通信解码加速已交付
+# 历史任务：通信解码加速已交付
 
 结果见 `docs/sic/通信解码加速开发报告_2026-11-07.md`，code-tested SHA
 `f753f17`。三项显式实验路径：A 同步/SFD（VOLK 点积、模板缓存、尾部 ±8 seed
