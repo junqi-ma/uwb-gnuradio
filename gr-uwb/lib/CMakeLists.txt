@@ -232,6 +232,7 @@ list(APPEND test_uwb_sources
     qa_uwb_fullpacket_cfo_diag.cc
     qa_uwb_fullpacket_payload_cache.cc
     qa_uwb_fullpacket_fast_rx.cc
+    qa_uwb_rx_fused_cmf.cc
     qa_uwb_fullpacket_sic_core.cc
     qa_uwb_discrete_cir_estimator.cc
     qa_uwb_discrete_cir_reconstruct.cc

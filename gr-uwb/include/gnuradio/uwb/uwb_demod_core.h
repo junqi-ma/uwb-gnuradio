@@ -25,6 +25,7 @@
 #include <gnuradio/uwb/uwb_rx_cfo_opt.h>
 #include <gnuradio/uwb/uwb_rx_sync_opt.h>
 #include <gnuradio/uwb/uwb_rx_softchip_opt.h>
+#include <gnuradio/uwb/uwb_rx_fused_cmf.h>
 
 #include <algorithm>
 #include <array>
@@ -160,6 +161,24 @@ struct DemodScratch {
         void reset() { *this = SoftChipState{}; }
     } softchip;
 
+    // Experimental fused payload CMF/despread state.  PN depends only on the
+    // selected code and the decoded payload length, so it survives packets;
+    // the per-packet channel templates live in kernel.templates and are
+    // rebuilt for every packet (counted in stage_fused_template_us).
+    struct FusedCmfState {
+        size_t code_index = 0;
+        size_t symbols = 0;
+        std::vector<int8_t> pn;
+        rxfusion::Metrics metrics;
+        rxfusion::Scratch kernel;
+
+        void reset_metrics()
+        {
+            rxfusion::Metrics empty;
+            metrics = std::move(empty);
+        }
+    } fused;
+
     void reserve(size_t n)
     {
         work.reserve(n);
@@ -173,6 +192,11 @@ struct DemodScratch {
         peaks.reserve(256);
         peak_values.reserve(256);
         sfd_template.reserve(8 * kQm35SamplesPerSymbol);
+        fused.pn.reserve(8 * 2048);
+        fused.metrics.complex_value.reserve(
+            rxfusion::kCandidateCount * 2048);
+        fused.metrics.signed_value.reserve(
+            rxfusion::kCandidateCount * 2048);
     }
 };
 
@@ -958,8 +982,11 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     out.post_samples = post;
     out.cir_peak_metric = peak_mag;
     out.cir_values.resize(tap_count);
-    for (size_t i = 0; i < tap_count; ++i)
+    out.cir_filter_taps.resize(tap_count);
+    for (size_t i = 0; i < tap_count; ++i) {
         out.cir_values[i] = values[i].real(); // golden CIR is real (Q=0 channel)
+        out.cir_filter_taps[i] = std::conj(values[i]);
+    }
     out.cir_estimate_us = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - t_cir0)
@@ -1881,6 +1908,69 @@ inline bool rs_decode_stream(const std::vector<int8_t>& coded,
     return data_out.size() == data_bits;
 }
 
+// Shared hard-decision payload backend: concatenate the 21 PHR symbols and the
+// payload symbols, run the truncated CL-3 Viterbi, remove the 19 systematic PHR
+// bits and the two tail bits, RS-decode, pack LSB-first and compute the FCS.
+// This is the exact first attempt of stage_payload_fcs(); the fused payload
+// path calls it with g0/g1 produced by rxfusion, so both paths share the same
+// FEC/FCS implementation and length conventions.
+inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
+                                const std::vector<int8_t>& g1p,
+                                const std::vector<int8_t>& g0,
+                                const std::vector<int8_t>& g1,
+                                size_t psdu_bits,
+                                PayloadResult& out)
+{
+    out = PayloadResult{};
+    if (g0p.size() != 21 || g1p.size() != 21 || g0.empty() ||
+        g0.size() != g1.size())
+        return false;
+
+    const size_t total = 21 + g0.size();
+    std::vector<int8_t> rx_bits(2 * total);
+    for (size_t s = 0; s < 21; ++s) {
+        rx_bits[2 * s] = g0p[s];
+        rx_bits[2 * s + 1] = g1p[s];
+    }
+    for (size_t s = 0; s < g0.size(); ++s) {
+        rx_bits[2 * (s + 21)] = g0[s];
+        rx_bits[2 * (s + 21) + 1] = g1[s];
+    }
+    std::vector<int8_t> decoded;
+    vitdec_cl3(rx_bits.data(), total, decoded);
+    if (decoded.size() < total)
+        return false;
+
+    std::vector<int8_t> rs_cw(decoded.begin() + 19,
+                              decoded.begin() + (total - 2));
+    if (rs_cw.size() != g0.size())
+        return false;
+    std::vector<int8_t> psdu_bits_out;
+    if (!rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out))
+        return false;
+
+    out.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
+    out.bytes.resize(psdu_bits_out.size() / 8);
+    for (size_t i = 0; i < out.bytes.size(); ++i) {
+        uint8_t b = 0;
+        for (int bit = 0; bit < 8; ++bit)
+            b |= static_cast<uint8_t>(psdu_bits_out[8 * i + bit]) << bit;
+        out.bytes[i] = b;
+    }
+    if (out.bytes.size() >= 2) {
+        out.calculated_fcs =
+            crc16_802154(out.bytes.data(), out.bytes.size() - 2);
+        out.received_fcs = static_cast<uint16_t>(
+                               out.bytes[out.bytes.size() - 2]) |
+                           (static_cast<uint16_t>(
+                                out.bytes[out.bytes.size() - 1])
+                            << 8);
+        out.fcs_pass = (out.received_fcs == out.calculated_fcs);
+    }
+    out.ok = true;
+    return true;
+}
+
 } // namespace detail
 
 // ---------------------------------------------------------------------------
@@ -2138,52 +2228,10 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
                                64, 512, 0, pol, g0p, g1p) &&
             detail::bprf_demod(soft_chips, payload_start, profile.code_index,
                                nsym, 8, 64, 1344, pol, g0, g1)) {
-            const size_t total = 21 + nsym;
-            std::vector<int8_t> rx_bits(2 * total);
-            for (size_t s = 0; s < 21; ++s) {
-                rx_bits[2 * s] = g0p[s];
-                rx_bits[2 * s + 1] = g1p[s];
-            }
-            for (size_t s = 0; s < nsym; ++s) {
-                rx_bits[2 * (s + 21)] = g0[s];
-                rx_bits[2 * (s + 21) + 1] = g1[s];
-            }
-            std::vector<int8_t> decoded;
-            detail::vitdec_cl3(rx_bits.data(), total, decoded);
-            if (decoded.size() >= total) {
-                std::vector<int8_t> rs_cw(decoded.begin() + 19,
-                                          decoded.begin() + (total - 2));
-                std::vector<int8_t> psdu_bits_out;
-                if (rs_cw.size() == nsym &&
-                    detail::rs_decode_stream(rs_cw, psdu_bits,
-                                             psdu_bits_out)) {
-                    out.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
-                    out.bytes.resize(psdu_bits_out.size() / 8);
-                    for (size_t i = 0; i < out.bytes.size(); ++i) {
-                        uint8_t b = 0;
-                        for (int bit = 0; bit < 8; ++bit)
-                            b |= static_cast<uint8_t>(
-                                     psdu_bits_out[8 * i + bit])
-                                 << bit;
-                        out.bytes[i] = b;
-                    }
-                    if (out.bytes.size() >= 2) {
-                        out.calculated_fcs = detail::crc16_802154(
-                            out.bytes.data(), out.bytes.size() - 2);
-                        out.received_fcs =
-                            static_cast<uint16_t>(
-                                out.bytes[out.bytes.size() - 2]) |
-                            (static_cast<uint16_t>(
-                                 out.bytes[out.bytes.size() - 1])
-                             << 8);
-                        out.fcs_pass =
-                            (out.received_fcs == out.calculated_fcs);
-                    }
-                    out.ok = true;
-                    any_ok = true;
-                    if (out.fcs_pass)
-                        return true;
-                }
+            if (detail::decode_payload_hard(g0p, g1p, g0, g1, psdu_bits, out)) {
+                any_ok = true;
+                if (out.fcs_pass)
+                    return true;
             }
         }
     }
@@ -2285,6 +2333,134 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
         }
     }
     return any_ok;
+}
+
+// Build (or reuse) the BPRF payload spreading stream for the fused kernel.
+// The PN sequence depends only on the code index and the decoded symbol count,
+// so it is cached across packets; the channel template is still rebuilt for
+// every packet and counted separately.
+inline bool prepare_fused_payload_pn(DemodScratch& scratch,
+                                     size_t code_index,
+                                     size_t symbols)
+{
+    const size_t nbits = symbols * rxfusion::kChipsPerBurst;
+    if (scratch.fused.code_index == code_index &&
+        scratch.fused.symbols == symbols &&
+        scratch.fused.pn.size() == nbits)
+        return true;
+    if (!detail::bprf_spreading(scratch.fused.pn, code_index, 1344, nbits)) {
+        scratch.fused.code_index = 0;
+        scratch.fused.symbols = 0;
+        scratch.fused.pn.clear();
+        return false;
+    }
+    scratch.fused.code_index = code_index;
+    scratch.fused.symbols = symbols;
+    return true;
+}
+
+// Experimental fused payload metrics + hard FEC/FCS decode.  Reuses the PHR
+// already decoded from the prefix soft-chip stream and the CIR/phase frozen by
+// that same prefix pass.  Returns false on any unsupported configuration,
+// range/short-window violation, fused-decode failure or FCS failure; the
+// caller then retries the complete legacy stream once.  `template_us` and
+// `correlate_us` are populated even when a later stage fails so the attempted
+// work is not hidden.
+inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
+                                    size_t n,
+                                    const Qm35825Profile& profile,
+                                    const TimingResult& timing,
+                                    const CirResult& cir,
+                                    const std::vector<float>& prefix_soft_chips,
+                                    const NsSfdResult& ns_sfd,
+                                    const PhrResult& phr,
+                                    PayloadResult& out,
+                                    DemodScratch& scratch,
+                                    uint64_t& template_us,
+                                    uint64_t& correlate_us,
+                                    size_t& symbols_out)
+{
+    out = PayloadResult{};
+    template_us = 0;
+    correlate_us = 0;
+    symbols_out = 0;
+    if (!rx || !phr.ok || !ns_sfd.ok || phr.psdu_length == 0 ||
+        phr.psdu_length > profile.max_psdu_bytes)
+        return false;
+
+    const int64_t phr_start = ns_sfd.sfd_end_chip + 1;
+    const int64_t payload_start =
+        phr_start + static_cast<int64_t>(rxopt::kPhrSymbols) *
+                       static_cast<int64_t>(rxopt::kPhrChipsPerSymbol);
+    if (phr_start < 0 || payload_start < 0)
+        return false;
+    if (static_cast<size_t>(phr_start) +
+            rxopt::kPhrSymbols * rxopt::kPhrChipsPerSymbol >
+        prefix_soft_chips.size())
+        return false;
+
+    const size_t psdu_bits = static_cast<size_t>(phr.psdu_length) * 8;
+    const size_t num_blocks = (psdu_bits + 329) / 330;
+    const size_t symbols = psdu_bits + 48 * num_blocks;
+    if (symbols == 0)
+        return false;
+    symbols_out = symbols;
+
+    const size_t tap_count = cir.cir_filter_taps.size();
+    if (tap_count == 0 || tap_count > rxfusion::kMaxTapCount)
+        return false;
+    if (std::abs(cir.samples_per_chip -
+                 static_cast<double>(rxfusion::kSamplesPerChip)) > 1e-9)
+        return false;
+    if (profile.cir_pre_samples > tap_count)
+        return false;
+    if (!scratch.softchip.prepared || std::norm(scratch.softchip.rot) <= 0.0f)
+        return false;
+
+    const int64_t chip_start =
+        timing.preamble_start_sample + static_cast<int64_t>(tap_count) -
+        static_cast<int64_t>(profile.cir_pre_samples) - 1;
+    if (chip_start < 0 || static_cast<int64_t>(n) <= chip_start)
+        return false;
+    const int64_t max_chip =
+        (static_cast<int64_t>(n) - 1 - chip_start) /
+        static_cast<int64_t>(rxfusion::kSamplesPerChip);
+    // Same admission as bprf_demod() on the full soft-chip stream: the nominal
+    // payload span must fit, not merely the four candidate windows.  This
+    // keeps a short window from being accepted by the fused path and then
+    // rejected by the legacy fallback (or vice versa).
+    if (payload_start + static_cast<int64_t>(symbols) *
+                            static_cast<int64_t>(rxopt::kPayloadChipsPerSymbol) >
+        max_chip + 1)
+        return false;
+
+    const auto t_plan0 = std::chrono::steady_clock::now();
+    if (!prepare_fused_payload_pn(scratch, profile.code_index, symbols))
+        return false;
+    const auto t_plan1 = std::chrono::steady_clock::now();
+    const uint64_t plan_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(t_plan1 - t_plan0)
+            .count());
+
+    const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
+    rxfusion::Timings timings;
+    if (!rxfusion::correlate_payload(
+            scratch.derotated.data(), n, cir.cir_filter_taps.data(),
+            tap_count, chip_start, rxfusion::kSamplesPerChip, payload_start,
+            scratch.fused.pn.data(), symbols, pol, scratch.softchip.rot,
+            scratch.fused.metrics, scratch.fused.kernel, &timings))
+        return false;
+    template_us = plan_us + timings.template_update_us;
+    correlate_us = timings.correlate_us;
+
+    std::vector<int8_t> g0p, g1p, g0, g1;
+    if (!detail::bprf_demod(prefix_soft_chips, phr_start, profile.code_index,
+                            21, 64, 512, 0, pol, g0p, g1p))
+        return false;
+    rxfusion::decide_bpm(scratch.fused.metrics, g0, g1);
+    if (!detail::decode_payload_hard(g0p, g1p, g0, g1, psdu_bits, out))
+        return false;
+    return out.ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -2659,6 +2835,45 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             // SECDED corrected a longer length.  The prefix cannot, so retry
             // the complete stream rather than silently changing that decision.
             ok = false;
+        }
+        // Experimental fused payload path: after the validated PHR, produce the
+        // four BPM metrics directly from the CFO-compensated IQ instead of
+        // extending the soft-chip stream to the payload range.  Only the full
+        // integer-grid CMF is supported; fractional SFO, RAKE and bypass keep
+        // the legacy on-demand extension.  Any failure retries the complete
+        // legacy stream once through the existing fallback block below.
+        if (ok && profile.rx_fused_payload_cmf) {
+            const bool fused_supported =
+                !res.cir.cir_filter_taps.empty() &&
+                std::abs(res.cir.samples_per_chip -
+                         static_cast<double>(rxfusion::kSamplesPerChip)) <=
+                    1e-9 &&
+                profile.cir_rake_top_k == 0 &&
+                profile.cir_soft_chip_mode != CirSoftChipMode::Rake &&
+                profile.cir_soft_chip_mode != CirSoftChipMode::Bypass &&
+                scratch.softchip.prepared;
+            if (fused_supported) {
+                ++res.stage_fused_attempts;
+                uint64_t fused_template_us = 0;
+                uint64_t fused_correlate_us = 0;
+                size_t fused_symbols = 0;
+                const bool fused_ok = stage_payload_fused_cmf(
+                    scratch.derotated.data(), n, profile, res.timing, res.cir,
+                    scratch.soft_chips, res.ns_sfd, res.phr, res.payload,
+                    scratch, fused_template_us, fused_correlate_us,
+                    fused_symbols);
+                res.stage_fused_template_us += fused_template_us;
+                res.stage_fused_correlate_us += fused_correlate_us;
+                res.stage_fused_symbols = static_cast<uint32_t>(fused_symbols);
+                lap(res.stage_payload_us);
+                if (fused_ok && res.payload.fcs_pass) {
+                    res.status = DemodStatus::Success;
+                    rebase();
+                    return res;
+                }
+                ++res.stage_fused_fallbacks;
+                ok = false;
+            }
         }
         if (ok) {
             const size_t final_budget = rxopt::final_chip_budget(

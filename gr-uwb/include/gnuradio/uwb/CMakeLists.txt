@@ -115,6 +115,7 @@ install(FILES
     uwb_rx_sync_opt.h
     uwb_rx_cfo_opt.h
     uwb_rx_softchip_opt.h
+    uwb_rx_fused_cmf.h
     # M2-A: the offline native-rate PHY closed loop.  Header-only entry that
     # reuses the hrp_mod / resampler / demod cores above, so it installs and an
     # isolated consumer can drive a full-frame native round trip.

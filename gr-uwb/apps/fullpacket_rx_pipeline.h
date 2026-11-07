@@ -23,15 +23,18 @@ public:
         bool fast_cfo_rotation;
         bool seed_refine_tail;
         bool softchip_on_demand;
+        bool fused_payload_cmf;
 
         Options()
             : fast_sfd(false), fast_cfo_rotation(false),
-              seed_refine_tail(false), softchip_on_demand(false)
+              seed_refine_tail(false), softchip_on_demand(false),
+              fused_payload_cmf(false)
         {
         }
-        Options(bool sfd, bool cfo, bool seed, bool soft)
+        Options(bool sfd, bool cfo, bool seed, bool soft, bool fused = false)
             : fast_sfd(sfd), fast_cfo_rotation(cfo),
-              seed_refine_tail(seed), softchip_on_demand(soft)
+              seed_refine_tail(seed), softchip_on_demand(soft),
+              fused_payload_cmf(fused)
         {
         }
     };
@@ -48,7 +51,12 @@ public:
         profile_.rx_fast_sfd = options.fast_sfd;
         profile_.rx_fast_cfo_rotation = options.fast_cfo_rotation;
         profile_.rx_seed_refine_tail = options.seed_refine_tail;
-        profile_.rx_softchip_on_demand = options.softchip_on_demand;
+        // The fused payload path consumes the same SYNC/SFD/PHR prefix as the
+        // on-demand option.  Selecting it therefore implies the prefix path;
+        // the other four options retain their explicit values.
+        profile_.rx_softchip_on_demand =
+            options.softchip_on_demand || options.fused_payload_cmf;
+        profile_.rx_fused_payload_cmf = options.fused_payload_cmf;
         scratch_.reserve(max_samples);
     }
 

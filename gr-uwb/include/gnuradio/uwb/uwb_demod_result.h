@@ -130,6 +130,10 @@ struct CirResult {
     size_t post_samples = 0;            // CIR window after first path
     float cir_peak_metric = 0.0f;       // peak CIR magnitude
     std::vector<float> cir_values;      // CIR tap magnitudes (diagnostics only)
+    // Pre-conjugated CMF coefficients h[q] = conj(values[q]) exactly as used by
+    // the soft-chip FIR.  Populated for the experimental fused payload path and
+    // for diagnostics; the default path does not read it.
+    std::vector<std::complex<float>> cir_filter_taps;
     size_t soft_chip_count = 0;         // number of soft chips produced
     double samples_per_chip = 0.0;      // measured chip period
 
@@ -236,6 +240,16 @@ struct DemodResult {
     uint32_t stage_cfo_rotation_kernels = 0; // bit0=initial block, bit1=refit block
     uint32_t stage_softchip_fallbacks = 0;   // full-path retries (diagnostic)
     uint64_t stage_softchip_fallback_us = 0; // separate total bucket (not a child)
+    // Experimental fused payload CMF/despread path.  The two sub-timers are
+    // CHILDREN of `stage_payload_us` and must never be added to the total.
+    // `stage_fused_fallbacks` counts a fused attempt that failed and then ran
+    // the full legacy stream once; that retry's wall time is recorded in the
+    // existing `stage_softchip_fallback_us` bucket (also not a child of CIR).
+    uint32_t stage_fused_attempts = 0;   // kernels actually run
+    uint32_t stage_fused_fallbacks = 0;  // fused attempt -> full legacy retry
+    uint32_t stage_fused_symbols = 0;    // BPRF payload symbols correlated
+    uint64_t stage_fused_template_us = 0; // per-packet template build
+    uint64_t stage_fused_correlate_us = 0; // four-candidate correlations
     uint32_t stage_tail_retrack_fallbacks = 0; // legacy-radius tail retries
     uint64_t stage_sfd_tail_retrack_fallback_us = 0; // included in tail timer
     // `stage_sfd` runs once for bootstrap CFO anchoring and once after the

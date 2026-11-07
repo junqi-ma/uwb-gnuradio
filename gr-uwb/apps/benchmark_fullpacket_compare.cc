@@ -35,12 +35,14 @@ std::string hex(const std::vector<uint8_t>& b) { std::ostringstream o; o<<std::h
 std::string quote(const std::string& s) { std::ostringstream o;o<<'"';for(char c:s){if(c=='"'||c=='\\')o<<'\\';if(c=='\n')o<<"\\n";else o<<c;}o<<'"';return o.str(); }
 struct Options {fs::path input,out; size_t repeat=0,warmup=0; double rate=0,seconds=10;std::string mode="both",reconstruction="full";bool dump=false;
  double lambda=1e-6,peak_floor=0.15;int64_t lag_lo=-8;size_t tap_count=64,peak_min_spacing=5,active_radius=1;
- bool rx_fast_sfd=false,rx_fast_cfo=false,rx_seed_refine_tail=false,rx_softchip_on_demand=false;};
+ bool rx_fast_sfd=false,rx_fast_cfo=false,rx_seed_refine_tail=false,rx_softchip_on_demand=false,rx_fused_payload_cmf=false;};
 struct RxDiag {
  uint64_t sfd_bootstrap_us=0,sfd_tail_us=0,sfd_cfo_refit_us=0,sfd_final_us=0,sfd_other_us=0;
  uint64_t cfo_fit_us=0,cfo_rotate_us=0,cir_est_us=0,soft_fir_us=0,post_us=0,soft_extend_us=0,seed_search_us=0;
  uint32_t rotation_kernels=0,softchip_initial=0,softchip_final=0,softchip_fallbacks=0,tail_fallbacks=0;
  uint32_t seed_narrow_attempts=0,seed_narrow_success=0,seed_fallbacks=0;
+ uint32_t fused_attempts=0,fused_fallbacks=0,fused_symbols=0;
+ uint64_t fused_template_us=0,fused_correlate_us=0;
  double spc=0.0;
 };
 struct Row {
@@ -50,6 +52,7 @@ struct Row {
  sic::DiscreteCirTimings discrete_timings;
  uint64_t model_id=0; int64_t observed=0,required=0,lo=0,hi=0,origin=-1;
  bool comm_fcs=false,sense_fcs=false;std::string comm_hex,sense_hex;int sense_status=-1,comm_status=-1,cir_status=-1;
+ uint32_t phr_length=0;
  std::array<double,7> comm_stages{}; RxDiag rx;
  double thread_cpu=0,estimate=0,comm=0,validate=0,tx=0,channel=0,subtract=0,copy=0,sic=0,cir=0,sense=0,service=0;
  double submit=0,start=0,finish=0,result=0,first=0,ready=0,scheduled=0,lateness=0;
@@ -65,6 +68,9 @@ void fill_rx_diag(const demod::DemodResult& d,RxDiag& r){
  r.softchip_fallbacks=d.stage_softchip_fallbacks;r.tail_fallbacks=d.stage_tail_retrack_fallbacks;
  r.seed_narrow_attempts=d.timing.seed_refine_narrow_attempts;r.seed_narrow_success=d.timing.seed_refine_narrow_success;
  r.seed_fallbacks=d.timing.seed_refine_fallbacks;r.spc=d.cir.samples_per_chip;
+ r.fused_attempts=d.stage_fused_attempts;r.fused_fallbacks=d.stage_fused_fallbacks;
+ r.fused_symbols=d.stage_fused_symbols;
+ r.fused_template_us=d.stage_fused_template_us;r.fused_correlate_us=d.stage_fused_correlate_us;
 }
 void emit(std::ostream& o,const Row&r){
  o<<std::setprecision(12)<<"{\"window_id\":"<<r.id<<",\"source_window\":"<<r.source<<",\"mode\":"<<quote(r.mode)
@@ -75,7 +81,8 @@ void emit(std::ostream& o,const Row&r){
  <<",\"model_valid\":"<<(r.valid?"true":"false")<<",\"model_id\":"<<r.model_id<<",\"origin\":"<<r.origin
  <<",\"observed_end\":"<<r.observed<<",\"support\":["<<r.lo<<","<<r.hi<<"],\"rejected\":"<<(r.rejected?"true":"false")
  <<",\"comm_fcs\":"<<(r.mode=="preamble"?"null":r.comm_fcs?"true":"false")<<",\"comm_status\":"<<r.comm_status
- <<",\"comm_psdu_hex\":"<<quote(r.comm_hex)<<",\"sensing_fcs\":"<<(r.sense_fcs?"true":"false")
+ <<",\"comm_psdu_hex\":"<<quote(r.comm_hex)<<",\"comm_phr_length\":"<<r.phr_length
+ <<",\"sensing_fcs\":"<<(r.sense_fcs?"true":"false")
  <<",\"sensing_psdu_hex\":"<<quote(r.sense_hex)<<",\"sensing_status\":"<<r.sense_status<<",\"cir_status\":"<<r.cir_status
  <<",\"reconstruction_stats\":{";
  if(r.mode=="full" && !r.rejected) {
@@ -125,6 +132,11 @@ void emit(std::ostream& o,const Row&r){
    <<",\"tail_fallbacks\":"<<r.rx.tail_fallbacks
    <<",\"softchip_initial\":"<<r.rx.softchip_initial<<",\"softchip_final\":"<<r.rx.softchip_final
    <<",\"softchip_fallbacks\":"<<r.rx.softchip_fallbacks
+   <<",\"fused_attempts\":"<<r.rx.fused_attempts
+   <<",\"fused_fallbacks\":"<<r.rx.fused_fallbacks
+   <<",\"fused_symbols\":"<<r.rx.fused_symbols
+   <<",\"fused_template_us\":"<<r.rx.fused_template_us
+   <<",\"fused_correlate_us\":"<<r.rx.fused_correlate_us
    <<",\"spc\":"<<r.rx.spc;
  }
  o<<"},\"times_us\":{\"thread_cpu\":"<<r.thread_cpu<<",\"estimate\":"<<r.estimate<<",\"comm_demod\":"<<r.comm<<",\"validate\":"<<r.validate
@@ -219,7 +231,7 @@ struct Engine {
     decoded=comm_rx->run(y.data(),n,id,dm.q,sync);
     r.comm=us(t,Clock::now());fill_rx_diag(decoded,r.rx);
     r.comm_stages={double(decoded.stage_timing_us),double(decoded.stage_cfo_us),double(decoded.stage_sfd_us),double(decoded.stage_cir_us),double(decoded.stage_ns_sfd_us),double(decoded.stage_phr_us),double(decoded.stage_payload_us)};
-    r.comm_status=int(decoded.status);r.comm_fcs=decoded.payload.fcs_pass;r.comm_hex=hex(decoded.payload.bytes);
+    r.comm_status=int(decoded.status);r.comm_fcs=decoded.payload.fcs_pass;r.comm_hex=hex(decoded.payload.bytes);r.phr_length=decoded.phr.psdu_length;
     t=Clock::now();auto f=sic::fullpacket_cancel_discrete(y.data(),n,decoded.phr.phr_bits,decoded.payload.bytes,r.comm_fcs,modcfg,dm,sync.data(),sync.size(),cfg.sub_roi_lo,cfg.sub_roi_hi,dscratch,out.data(),ihat.data());
     r.discrete_result=f;double full_wall=us(t,Clock::now());r.validate=f.validate_us;r.tx=f.tx_us;r.channel=f.channel_us;r.subtract=f.subtract_us;
     r.copy=std::max(0.,full_wall-r.validate-r.tx-r.channel-r.subtract);
@@ -251,7 +263,7 @@ struct Engine {
    else decoded.status=demod::DemodStatus::InvalidInput;
    r.comm=us(t,Clock::now());fill_rx_diag(decoded,r.rx);
    r.comm_stages={double(decoded.stage_timing_us),double(decoded.stage_cfo_us),double(decoded.stage_sfd_us),double(decoded.stage_cir_us),double(decoded.stage_ns_sfd_us),double(decoded.stage_phr_us),double(decoded.stage_payload_us)};
-   r.comm_status=int(decoded.status);r.comm_fcs=model.valid&&decoded.payload.fcs_pass;r.comm_hex=hex(decoded.payload.bytes);
+   r.comm_status=int(decoded.status);r.comm_fcs=model.valid&&decoded.payload.fcs_pass;r.comm_hex=hex(decoded.payload.bytes);r.phr_length=decoded.phr.psdu_length;
    t=Clock::now();auto f=sic::fullpacket_cancel(y.data(),n,decoded.phr.phr_bits,decoded.payload.bytes,r.comm_fcs,modcfg,model,sync.data(),sync.size(),cfg.sub_roi_lo,cfg.sub_roi_hi,full,out.data(),ihat.data());
    r.recon_stats=f;double full_wall=us(t,Clock::now());r.validate=f.validate_us;r.tx=f.tx_us;r.channel=f.channel_us;r.subtract=f.subtract_us;
    r.copy=std::max(0.,full_wall-r.validate-r.tx-r.channel-r.subtract);
@@ -270,6 +282,7 @@ int main(int argc,char**argv)try {
  if(v=="--case")a.input=next();else if(v=="--out")a.out=next();else if(v=="--repeat")a.repeat=std::stoull(next());else if(v=="--warmup")a.warmup=std::stoull(next());else if(v=="--mode")a.mode=next();else if(v=="--reconstruction")a.reconstruction=next();else if(v=="--paced-rate")a.rate=std::stod(next());else if(v=="--paced-seconds")a.seconds=std::stod(next());else if(v=="--lambda")a.lambda=std::stod(next());else if(v=="--peak-floor")a.peak_floor=std::stod(next());else if(v=="--lag-lo")a.lag_lo=std::stoll(next());else if(v=="--tap-count")a.tap_count=std::stoull(next());else if(v=="--peak-min-spacing")a.peak_min_spacing=std::stoull(next());else if(v=="--active-radius")a.active_radius=std::stoull(next());else if(v=="--dump-iq")a.dump=true;
  else if(v=="--rx-fast-sfd")a.rx_fast_sfd=true;else if(v=="--rx-fast-cfo")a.rx_fast_cfo=true;
  else if(v=="--rx-seed-refine-tail")a.rx_seed_refine_tail=true;else if(v=="--rx-softchip-on-demand")a.rx_softchip_on_demand=true;
+ else if(v=="--rx-fused-payload-cmf")a.rx_fused_payload_cmf=true;
  else throw std::runtime_error("unknown argument "+v);}
  if(a.reconstruction=="path_fractional")a.reconstruction="full";
  if(!(a.reconstruction=="full"||a.reconstruction=="payload_cached"||a.reconstruction=="discrete_cir"))throw std::runtime_error("invalid reconstruction mode");
@@ -280,7 +293,7 @@ int main(int argc,char**argv)try {
  std::vector<fs::path>windows;for(auto& d:fs::directory_iterator(a.input/"windows"))if(d.is_directory()&&fs::exists(d.path()/"raw.cf32"))windows.push_back(d.path());std::sort(windows.begin(),windows.end());if(windows.empty())throw std::runtime_error("no input windows");
  const bool discrete=a.reconstruction=="discrete_cir";
  const bool need_old=!discrete || a.mode=="preamble" || a.mode=="both";
- auto init_t0=Clock::now();Engine e(a.input,a.reconstruction=="payload_cached",discrete,need_old,a.lambda,a.peak_floor,a.lag_lo,a.tap_count,a.peak_min_spacing,a.active_radius,experiment::FastRxPipeline::Options(a.rx_fast_sfd,a.rx_fast_cfo,a.rx_seed_refine_tail,a.rx_softchip_on_demand));double engine_init_us=us(init_t0,Clock::now());std::ofstream log(a.out/"windows.jsonl");std::vector<std::string> modes=a.mode=="both"?std::vector<std::string>{"preamble","full"}:std::vector<std::string>{a.mode};
+ auto init_t0=Clock::now();Engine e(a.input,a.reconstruction=="payload_cached",discrete,need_old,a.lambda,a.peak_floor,a.lag_lo,a.tap_count,a.peak_min_spacing,a.active_radius,experiment::FastRxPipeline::Options(a.rx_fast_sfd,a.rx_fast_cfo,a.rx_seed_refine_tail,a.rx_softchip_on_demand,a.rx_fused_payload_cmf));double engine_init_us=us(init_t0,Clock::now());std::ofstream log(a.out/"windows.jsonl");std::vector<std::string> modes=a.mode=="both"?std::vector<std::string>{"preamble","full"}:std::vector<std::string>{a.mode};
  auto t0=Clock::now();auto first=read_iq(windows.front()/"raw.cf32");for(size_t j=0;j<a.warmup;++j)for(auto&m:modes)e.process(first,0,0,m,t0,t0,false,0,0);
  t0=Clock::now();size_t submitted=0,completed=0,rejected=0,source_late=0;
  if(a.rate==0){size_t count=a.repeat?a.repeat:windows.size();for(size_t j=0;j<count;++j){size_t src=j%windows.size();auto y=read_iq(windows[src]/(a.mode=="clean"?"clean.cf32":"raw.cf32"));
@@ -302,6 +315,6 @@ int main(int argc,char**argv)try {
    if(full){Row r;r.reconstruction=a.reconstruction;r.id=j;r.source=j%pool;r.mode=a.mode;r.n=e.n;r.observed=e.cfg.observed_end_sample;r.required=a.mode=="preamble"?r.observed:e.n;r.reason="queue_full";r.rejected=true;r.submit=r.start=r.finish=r.result=r.first=submit;r.scheduled=scheduled;r.lateness=submit-scheduled;r.ready=us(t0,arrival)+r.required*1e6/e.fsamp;std::lock_guard<std::mutex>lk(output);emit(log,r);++rejected;}else cv.notify_one();
   }{std::lock_guard<std::mutex>lk(mu);done=true;}cv.notify_one();worker.join();if(worker_error)std::rethrow_exception(worker_error);
  }
- log.close();std::ofstream summary(a.out/"runner_summary.json");summary<<"{\"schema\":\"fullpacket-compare/1\",\"reconstruction\":"<<quote(a.reconstruction)<<",\"engine_init_us\":"<<engine_init_us<<",\"prefix_cache_capacity_bytes\":"<<8*(e.full.prefix_key.capacity()+e.full.prefix_rows.capacity())<<",\"rx_pipeline\":"<<quote(experiment::FastRxPipeline::avx2_enabled()?"fast":"portable")<<",\"rx_avx2\":"<<(experiment::FastRxPipeline::avx2_enabled()?"true":"false")<<",\"rx_options\":{\"fast_sfd\":"<<(a.rx_fast_sfd?"true":"false")<<",\"fast_cfo_rotation\":"<<(a.rx_fast_cfo?"true":"false")<<",\"seed_refine_tail\":"<<(a.rx_seed_refine_tail?"true":"false")<<",\"softchip_on_demand\":"<<(a.rx_softchip_on_demand?"true":"false")<<"},\"submitted\":"<<submitted<<",\"completed\":"<<completed<<",\"rejected\":"<<rejected<<",\"source_late\":"<<source_late<<",\"paced_rate\":"<<a.rate<<",\"full_wait_policy\":\"whole_public_context\",\"queue_capacity\":2,\"input_pool\":"<<(a.rate?std::min<size_t>(16,windows.size()):windows.size())<<",\"first_output\":\"first_clean_us\",\"time_reference\":\"run_steady_clock_epoch\"}\n";
+ log.close();std::ofstream summary(a.out/"runner_summary.json");summary<<"{\"schema\":\"fullpacket-compare/1\",\"reconstruction\":"<<quote(a.reconstruction)<<",\"engine_init_us\":"<<engine_init_us<<",\"prefix_cache_capacity_bytes\":"<<8*(e.full.prefix_key.capacity()+e.full.prefix_rows.capacity())<<",\"rx_pipeline\":"<<quote(experiment::FastRxPipeline::avx2_enabled()?"fast":"portable")<<",\"rx_avx2\":"<<(experiment::FastRxPipeline::avx2_enabled()?"true":"false")<<",\"rx_options\":{\"fast_sfd\":"<<(a.rx_fast_sfd?"true":"false")<<",\"fast_cfo_rotation\":"<<(a.rx_fast_cfo?"true":"false")<<",\"seed_refine_tail\":"<<(a.rx_seed_refine_tail?"true":"false")<<",\"softchip_on_demand\":"<<(a.rx_softchip_on_demand?"true":"false")<<",\"fused_payload_cmf\":"<<(a.rx_fused_payload_cmf?"true":"false")<<"},\"submitted\":"<<submitted<<",\"completed\":"<<completed<<",\"rejected\":"<<rejected<<",\"source_late\":"<<source_late<<",\"paced_rate\":"<<a.rate<<",\"full_wait_policy\":\"whole_public_context\",\"queue_capacity\":2,\"input_pool\":"<<(a.rate?std::min<size_t>(16,windows.size()):windows.size())<<",\"first_output\":\"first_clean_us\",\"time_reference\":\"run_steady_clock_epoch\"}\n";
  std::cout<<"submitted="<<submitted<<" completed="<<completed<<" rejected="<<rejected<<"\n";return 0;
 }catch(const std::exception& ex){std::cerr<<ex.what()<<'\n';return 1;}
