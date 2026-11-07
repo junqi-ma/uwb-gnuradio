@@ -1,7 +1,16 @@
-# 当前任务：PHR 解扩与 CMF 融合（待开发）
+# 当前任务：PHR 解扩与 CMF 融合已交付
 
-执行 [PHR 开发任务书](docs/sic/OpenCode_PHR解扩CMF融合开发任务书_2026-11-07.md)。
-在现有 payload 融合基础上新增 PHR 融合，缩短必要 soft-chip 前缀，缓存 PHR 判决供联合译码，并独立统计 PHR/payload 成本。主 agent 先确定接口，再调度三个 subagent；只做针对性验证和三格配对计时。起始 HEAD `9ff3be1`，默认开关保持关闭。
+结果见 [报告](docs/sic/PHR解扩CMF融合开发报告_2026-11-07.md)，code-tested SHA
+`609dfca`。新增显式 `--rx-fused-phr-cmf`（默认关闭）：在 payload 融合基础上把
+PHR 改为 164 点融合模板 + 四候选相关，缓存 21 对 g0/g1 供联合 Viterbi，并把
+soft-chip 前缀从 59,740 缩到 36,585 chip（只保留 NS-SFD +8 halo 的 9 个名义
+PHR chip）。6 格×16 源窗逐窗 PHR bits/长度/纠错、comm/sensing PSDU/FCS/status、
+committed/reason 一致，96/96 PHR 融合、0 回退；损坏包 16/16 融合尝试、16 次
+完整回退、0 误提交。正式三格 `phr_path_with_diag` 87.1/84.3/89.5→18.0/17.5/
+17.5 µs（0.206/0.208/0.196），通信 mean 0.8575/0.9065/0.8735，总 SIC mean
+0.9375/0.9842/0.9487，prefix FIR 0.5741/0.6555/0.5848。PHR 内核单独（不含旧
+FIR）约为旧解扩/译码的 2.0–2.2 倍，收益来自移除 PHR soft-chip FIR 和冗余前缀。
+MATLAB、native、FPGA/硬件、paced、P99 与实时目标未验证。
 
 ---
 
