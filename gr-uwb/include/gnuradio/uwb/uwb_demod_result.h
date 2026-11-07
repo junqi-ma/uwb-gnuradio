@@ -250,6 +250,29 @@ struct DemodResult {
     uint32_t stage_fused_symbols = 0;    // BPRF payload symbols correlated
     uint64_t stage_fused_template_us = 0; // per-packet template build
     uint64_t stage_fused_correlate_us = 0; // four-candidate correlations
+    uint64_t stage_fused_decode_us = 0;  // PHR cache + BPM/FEC/FCS decode
+    // Experimental fused PHR CMF/despread path.  These sub-timers are
+    // CHILDREN of `stage_phr_us`, like the payload ones above.
+    uint32_t stage_phr_fused_attempts = 0;
+    uint32_t stage_phr_fused_fallbacks = 0;
+    uint32_t stage_phr_fused_symbols = 0;
+    uint64_t stage_phr_fused_template_us = 0;
+    uint64_t stage_phr_fused_correlate_us = 0;
+    uint64_t stage_phr_fused_decode_us = 0;
+    // Diagnostic-only FIR segmentation from the replay helper.  `valid=1`
+    // means the ranges below partition `cir.soft_chip_count` at the decoded
+    // boundaries.  These values are never production exact attribution.
+    uint32_t diag_fir_valid = 0;
+    uint64_t diag_fir_preamble_us = 0;
+    uint64_t diag_fir_sfd_us = 0;
+    uint64_t diag_fir_phr_us = 0;
+    uint64_t diag_fir_payload_us = 0;
+    uint64_t diag_fir_extra_us = 0;
+    uint32_t diag_fir_preamble_chips = 0;
+    uint32_t diag_fir_sfd_chips = 0;
+    uint32_t diag_fir_phr_chips = 0;
+    uint32_t diag_fir_payload_chips = 0;
+    uint32_t diag_fir_extra_chips = 0;
     uint32_t stage_tail_retrack_fallbacks = 0; // legacy-radius tail retries
     uint64_t stage_sfd_tail_retrack_fallback_us = 0; // included in tail timer
     // `stage_sfd` runs once for bootstrap CFO anchoring and once after the

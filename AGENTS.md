@@ -1,4 +1,11 @@
-# 当前任务：CMF 与解扩融合可行性已交付
+# 当前任务：PHR 解扩与 CMF 融合（待开发）
+
+执行 [PHR 开发任务书](docs/sic/OpenCode_PHR解扩CMF融合开发任务书_2026-11-07.md)。
+在现有 payload 融合基础上新增 PHR 融合，缩短必要 soft-chip 前缀，缓存 PHR 判决供联合译码，并独立统计 PHR/payload 成本。主 agent 先确定接口，再调度三个 subagent；只做针对性验证和三格配对计时。起始 HEAD `9ff3be1`，默认开关保持关闭。
+
+---
+
+# 历史任务：CMF 与解扩融合可行性已交付
 
 结果见 `docs/sic/CMF解扩融合可行性报告_2026-11-07.md`，code-tested SHA
 `57f97d5`。新增显式 `--rx-fused-payload-cmf`（默认关闭）：前缀 PHR/CIR/相位

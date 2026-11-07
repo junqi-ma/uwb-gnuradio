@@ -35,14 +35,20 @@ std::string hex(const std::vector<uint8_t>& b) { std::ostringstream o; o<<std::h
 std::string quote(const std::string& s) { std::ostringstream o;o<<'"';for(char c:s){if(c=='"'||c=='\\')o<<'\\';if(c=='\n')o<<"\\n";else o<<c;}o<<'"';return o.str(); }
 struct Options {fs::path input,out; size_t repeat=0,warmup=0; double rate=0,seconds=10;std::string mode="both",reconstruction="full";bool dump=false;
  double lambda=1e-6,peak_floor=0.15;int64_t lag_lo=-8;size_t tap_count=64,peak_min_spacing=5,active_radius=1;
- bool rx_fast_sfd=false,rx_fast_cfo=false,rx_seed_refine_tail=false,rx_softchip_on_demand=false,rx_fused_payload_cmf=false;};
+ bool rx_fast_sfd=false,rx_fast_cfo=false,rx_seed_refine_tail=false,rx_softchip_on_demand=false,rx_fused_payload_cmf=false,rx_fused_phr_cmf=false,rx_diagnose_fir_segments=false;};
 struct RxDiag {
  uint64_t sfd_bootstrap_us=0,sfd_tail_us=0,sfd_cfo_refit_us=0,sfd_final_us=0,sfd_other_us=0;
  uint64_t cfo_fit_us=0,cfo_rotate_us=0,cir_est_us=0,soft_fir_us=0,post_us=0,soft_extend_us=0,seed_search_us=0;
  uint32_t rotation_kernels=0,softchip_initial=0,softchip_final=0,softchip_fallbacks=0,tail_fallbacks=0;
  uint32_t seed_narrow_attempts=0,seed_narrow_success=0,seed_fallbacks=0;
  uint32_t fused_attempts=0,fused_fallbacks=0,fused_symbols=0;
- uint64_t fused_template_us=0,fused_correlate_us=0;
+ uint64_t fused_template_us=0,fused_correlate_us=0,fused_decode_us=0;
+ uint32_t phr_fused_attempts=0,phr_fused_fallbacks=0,phr_fused_symbols=0;
+ uint64_t phr_fused_template_us=0,phr_fused_correlate_us=0,phr_fused_decode_us=0;
+ uint32_t diag_fir_valid=0,diag_fir_preamble_chips=0,diag_fir_sfd_chips=0,
+          diag_fir_phr_chips=0,diag_fir_payload_chips=0,diag_fir_extra_chips=0;
+ uint64_t diag_fir_preamble_us=0,diag_fir_sfd_us=0,diag_fir_phr_us=0,
+          diag_fir_payload_us=0,diag_fir_extra_us=0;
  double spc=0.0;
 };
 struct Row {
@@ -52,7 +58,8 @@ struct Row {
  sic::DiscreteCirTimings discrete_timings;
  uint64_t model_id=0; int64_t observed=0,required=0,lo=0,hi=0,origin=-1;
  bool comm_fcs=false,sense_fcs=false;std::string comm_hex,sense_hex;int sense_status=-1,comm_status=-1,cir_status=-1;
- uint32_t phr_length=0;
+ uint32_t phr_length=0; bool phr_secded_corrected=false,phr_secded_uncorrectable=false;
+ std::vector<uint8_t> phr_bits; float phr_rate=0.0f;
  std::array<double,7> comm_stages{}; RxDiag rx;
  double thread_cpu=0,estimate=0,comm=0,validate=0,tx=0,channel=0,subtract=0,copy=0,sic=0,cir=0,sense=0,service=0;
  double submit=0,start=0,finish=0,result=0,first=0,ready=0,scheduled=0,lateness=0;
@@ -71,6 +78,20 @@ void fill_rx_diag(const demod::DemodResult& d,RxDiag& r){
  r.fused_attempts=d.stage_fused_attempts;r.fused_fallbacks=d.stage_fused_fallbacks;
  r.fused_symbols=d.stage_fused_symbols;
  r.fused_template_us=d.stage_fused_template_us;r.fused_correlate_us=d.stage_fused_correlate_us;
+ r.fused_decode_us=d.stage_fused_decode_us;
+ r.phr_fused_attempts=d.stage_phr_fused_attempts;r.phr_fused_fallbacks=d.stage_phr_fused_fallbacks;
+ r.phr_fused_symbols=d.stage_phr_fused_symbols;
+ r.phr_fused_template_us=d.stage_phr_fused_template_us;
+ r.phr_fused_correlate_us=d.stage_phr_fused_correlate_us;
+ r.phr_fused_decode_us=d.stage_phr_fused_decode_us;
+ r.diag_fir_valid=d.diag_fir_valid;
+ r.diag_fir_preamble_us=d.diag_fir_preamble_us;r.diag_fir_sfd_us=d.diag_fir_sfd_us;
+ r.diag_fir_phr_us=d.diag_fir_phr_us;r.diag_fir_payload_us=d.diag_fir_payload_us;
+ r.diag_fir_extra_us=d.diag_fir_extra_us;
+ r.diag_fir_preamble_chips=d.diag_fir_preamble_chips;
+ r.diag_fir_sfd_chips=d.diag_fir_sfd_chips;r.diag_fir_phr_chips=d.diag_fir_phr_chips;
+ r.diag_fir_payload_chips=d.diag_fir_payload_chips;
+ r.diag_fir_extra_chips=d.diag_fir_extra_chips;
 }
 void emit(std::ostream& o,const Row&r){
  o<<std::setprecision(12)<<"{\"window_id\":"<<r.id<<",\"source_window\":"<<r.source<<",\"mode\":"<<quote(r.mode)
@@ -82,6 +103,12 @@ void emit(std::ostream& o,const Row&r){
  <<",\"observed_end\":"<<r.observed<<",\"support\":["<<r.lo<<","<<r.hi<<"],\"rejected\":"<<(r.rejected?"true":"false")
  <<",\"comm_fcs\":"<<(r.mode=="preamble"?"null":r.comm_fcs?"true":"false")<<",\"comm_status\":"<<r.comm_status
  <<",\"comm_psdu_hex\":"<<quote(r.comm_hex)<<",\"comm_phr_length\":"<<r.phr_length
+ <<",\"comm_phr_bits\":[";
+ for(size_t i=0;i<r.phr_bits.size();++i){if(i)o<<',';o<<int(r.phr_bits[i]);}
+ o<<"]"
+ <<",\"comm_phr_secded_corrected\":"<<(r.phr_secded_corrected?"true":"false")
+ <<",\"comm_phr_secded_uncorrectable\":"<<(r.phr_secded_uncorrectable?"true":"false")
+ <<",\"comm_phr_data_rate_mbps\":"<<r.phr_rate
  <<",\"sensing_fcs\":"<<(r.sense_fcs?"true":"false")
  <<",\"sensing_psdu_hex\":"<<quote(r.sense_hex)<<",\"sensing_status\":"<<r.sense_status<<",\"cir_status\":"<<r.cir_status
  <<",\"reconstruction_stats\":{";
@@ -137,6 +164,24 @@ void emit(std::ostream& o,const Row&r){
    <<",\"fused_symbols\":"<<r.rx.fused_symbols
    <<",\"fused_template_us\":"<<r.rx.fused_template_us
    <<",\"fused_correlate_us\":"<<r.rx.fused_correlate_us
+   <<",\"fused_decode_us\":"<<r.rx.fused_decode_us
+   <<",\"phr_fused_attempts\":"<<r.rx.phr_fused_attempts
+   <<",\"phr_fused_fallbacks\":"<<r.rx.phr_fused_fallbacks
+   <<",\"phr_fused_symbols\":"<<r.rx.phr_fused_symbols
+   <<",\"phr_fused_template_us\":"<<r.rx.phr_fused_template_us
+   <<",\"phr_fused_correlate_us\":"<<r.rx.phr_fused_correlate_us
+   <<",\"phr_fused_decode_us\":"<<r.rx.phr_fused_decode_us
+   <<",\"diag_fir_valid\":"<<r.rx.diag_fir_valid
+   <<",\"diag_fir_preamble_us\":"<<r.rx.diag_fir_preamble_us
+   <<",\"diag_fir_sfd_us\":"<<r.rx.diag_fir_sfd_us
+   <<",\"diag_fir_phr_us\":"<<r.rx.diag_fir_phr_us
+   <<",\"diag_fir_payload_us\":"<<r.rx.diag_fir_payload_us
+   <<",\"diag_fir_extra_us\":"<<r.rx.diag_fir_extra_us
+   <<",\"diag_fir_preamble_chips\":"<<r.rx.diag_fir_preamble_chips
+   <<",\"diag_fir_sfd_chips\":"<<r.rx.diag_fir_sfd_chips
+   <<",\"diag_fir_phr_chips\":"<<r.rx.diag_fir_phr_chips
+   <<",\"diag_fir_payload_chips\":"<<r.rx.diag_fir_payload_chips
+   <<",\"diag_fir_extra_chips\":"<<r.rx.diag_fir_extra_chips
    <<",\"spc\":"<<r.rx.spc;
  }
  o<<"},\"times_us\":{\"thread_cpu\":"<<r.thread_cpu<<",\"estimate\":"<<r.estimate<<",\"comm_demod\":"<<r.comm<<",\"validate\":"<<r.validate
@@ -232,6 +277,8 @@ struct Engine {
     r.comm=us(t,Clock::now());fill_rx_diag(decoded,r.rx);
     r.comm_stages={double(decoded.stage_timing_us),double(decoded.stage_cfo_us),double(decoded.stage_sfd_us),double(decoded.stage_cir_us),double(decoded.stage_ns_sfd_us),double(decoded.stage_phr_us),double(decoded.stage_payload_us)};
     r.comm_status=int(decoded.status);r.comm_fcs=decoded.payload.fcs_pass;r.comm_hex=hex(decoded.payload.bytes);r.phr_length=decoded.phr.psdu_length;
+    r.phr_secded_corrected=decoded.phr.secded_corrected;r.phr_secded_uncorrectable=decoded.phr.secded_uncorrectable;
+    r.phr_bits=decoded.phr.phr_bits;r.phr_rate=decoded.phr.data_rate_mbps;
     t=Clock::now();auto f=sic::fullpacket_cancel_discrete(y.data(),n,decoded.phr.phr_bits,decoded.payload.bytes,r.comm_fcs,modcfg,dm,sync.data(),sync.size(),cfg.sub_roi_lo,cfg.sub_roi_hi,dscratch,out.data(),ihat.data());
     r.discrete_result=f;double full_wall=us(t,Clock::now());r.validate=f.validate_us;r.tx=f.tx_us;r.channel=f.channel_us;r.subtract=f.subtract_us;
     r.copy=std::max(0.,full_wall-r.validate-r.tx-r.channel-r.subtract);
@@ -264,6 +311,8 @@ struct Engine {
    r.comm=us(t,Clock::now());fill_rx_diag(decoded,r.rx);
    r.comm_stages={double(decoded.stage_timing_us),double(decoded.stage_cfo_us),double(decoded.stage_sfd_us),double(decoded.stage_cir_us),double(decoded.stage_ns_sfd_us),double(decoded.stage_phr_us),double(decoded.stage_payload_us)};
    r.comm_status=int(decoded.status);r.comm_fcs=model.valid&&decoded.payload.fcs_pass;r.comm_hex=hex(decoded.payload.bytes);r.phr_length=decoded.phr.psdu_length;
+   r.phr_secded_corrected=decoded.phr.secded_corrected;r.phr_secded_uncorrectable=decoded.phr.secded_uncorrectable;
+   r.phr_bits=decoded.phr.phr_bits;r.phr_rate=decoded.phr.data_rate_mbps;
    t=Clock::now();auto f=sic::fullpacket_cancel(y.data(),n,decoded.phr.phr_bits,decoded.payload.bytes,r.comm_fcs,modcfg,model,sync.data(),sync.size(),cfg.sub_roi_lo,cfg.sub_roi_hi,full,out.data(),ihat.data());
    r.recon_stats=f;double full_wall=us(t,Clock::now());r.validate=f.validate_us;r.tx=f.tx_us;r.channel=f.channel_us;r.subtract=f.subtract_us;
    r.copy=std::max(0.,full_wall-r.validate-r.tx-r.channel-r.subtract);
@@ -283,6 +332,8 @@ int main(int argc,char**argv)try {
  else if(v=="--rx-fast-sfd")a.rx_fast_sfd=true;else if(v=="--rx-fast-cfo")a.rx_fast_cfo=true;
  else if(v=="--rx-seed-refine-tail")a.rx_seed_refine_tail=true;else if(v=="--rx-softchip-on-demand")a.rx_softchip_on_demand=true;
  else if(v=="--rx-fused-payload-cmf")a.rx_fused_payload_cmf=true;
+ else if(v=="--rx-fused-phr-cmf")a.rx_fused_phr_cmf=true;
+ else if(v=="--rx-diagnose-fir-segments")a.rx_diagnose_fir_segments=true;
  else throw std::runtime_error("unknown argument "+v);}
  if(a.reconstruction=="path_fractional")a.reconstruction="full";
  if(!(a.reconstruction=="full"||a.reconstruction=="payload_cached"||a.reconstruction=="discrete_cir"))throw std::runtime_error("invalid reconstruction mode");
@@ -293,7 +344,7 @@ int main(int argc,char**argv)try {
  std::vector<fs::path>windows;for(auto& d:fs::directory_iterator(a.input/"windows"))if(d.is_directory()&&fs::exists(d.path()/"raw.cf32"))windows.push_back(d.path());std::sort(windows.begin(),windows.end());if(windows.empty())throw std::runtime_error("no input windows");
  const bool discrete=a.reconstruction=="discrete_cir";
  const bool need_old=!discrete || a.mode=="preamble" || a.mode=="both";
- auto init_t0=Clock::now();Engine e(a.input,a.reconstruction=="payload_cached",discrete,need_old,a.lambda,a.peak_floor,a.lag_lo,a.tap_count,a.peak_min_spacing,a.active_radius,experiment::FastRxPipeline::Options(a.rx_fast_sfd,a.rx_fast_cfo,a.rx_seed_refine_tail,a.rx_softchip_on_demand,a.rx_fused_payload_cmf));double engine_init_us=us(init_t0,Clock::now());std::ofstream log(a.out/"windows.jsonl");std::vector<std::string> modes=a.mode=="both"?std::vector<std::string>{"preamble","full"}:std::vector<std::string>{a.mode};
+ auto init_t0=Clock::now();Engine e(a.input,a.reconstruction=="payload_cached",discrete,need_old,a.lambda,a.peak_floor,a.lag_lo,a.tap_count,a.peak_min_spacing,a.active_radius,experiment::FastRxPipeline::Options(a.rx_fast_sfd,a.rx_fast_cfo,a.rx_seed_refine_tail,a.rx_softchip_on_demand,a.rx_fused_payload_cmf,a.rx_fused_phr_cmf,a.rx_diagnose_fir_segments));double engine_init_us=us(init_t0,Clock::now());std::ofstream log(a.out/"windows.jsonl");std::vector<std::string> modes=a.mode=="both"?std::vector<std::string>{"preamble","full"}:std::vector<std::string>{a.mode};
  auto t0=Clock::now();auto first=read_iq(windows.front()/"raw.cf32");for(size_t j=0;j<a.warmup;++j)for(auto&m:modes)e.process(first,0,0,m,t0,t0,false,0,0);
  t0=Clock::now();size_t submitted=0,completed=0,rejected=0,source_late=0;
  if(a.rate==0){size_t count=a.repeat?a.repeat:windows.size();for(size_t j=0;j<count;++j){size_t src=j%windows.size();auto y=read_iq(windows[src]/(a.mode=="clean"?"clean.cf32":"raw.cf32"));
@@ -315,6 +366,6 @@ int main(int argc,char**argv)try {
    if(full){Row r;r.reconstruction=a.reconstruction;r.id=j;r.source=j%pool;r.mode=a.mode;r.n=e.n;r.observed=e.cfg.observed_end_sample;r.required=a.mode=="preamble"?r.observed:e.n;r.reason="queue_full";r.rejected=true;r.submit=r.start=r.finish=r.result=r.first=submit;r.scheduled=scheduled;r.lateness=submit-scheduled;r.ready=us(t0,arrival)+r.required*1e6/e.fsamp;std::lock_guard<std::mutex>lk(output);emit(log,r);++rejected;}else cv.notify_one();
   }{std::lock_guard<std::mutex>lk(mu);done=true;}cv.notify_one();worker.join();if(worker_error)std::rethrow_exception(worker_error);
  }
- log.close();std::ofstream summary(a.out/"runner_summary.json");summary<<"{\"schema\":\"fullpacket-compare/1\",\"reconstruction\":"<<quote(a.reconstruction)<<",\"engine_init_us\":"<<engine_init_us<<",\"prefix_cache_capacity_bytes\":"<<8*(e.full.prefix_key.capacity()+e.full.prefix_rows.capacity())<<",\"rx_pipeline\":"<<quote(experiment::FastRxPipeline::avx2_enabled()?"fast":"portable")<<",\"rx_avx2\":"<<(experiment::FastRxPipeline::avx2_enabled()?"true":"false")<<",\"rx_options\":{\"fast_sfd\":"<<(a.rx_fast_sfd?"true":"false")<<",\"fast_cfo_rotation\":"<<(a.rx_fast_cfo?"true":"false")<<",\"seed_refine_tail\":"<<(a.rx_seed_refine_tail?"true":"false")<<",\"softchip_on_demand\":"<<(a.rx_softchip_on_demand?"true":"false")<<",\"fused_payload_cmf\":"<<(a.rx_fused_payload_cmf?"true":"false")<<"},\"submitted\":"<<submitted<<",\"completed\":"<<completed<<",\"rejected\":"<<rejected<<",\"source_late\":"<<source_late<<",\"paced_rate\":"<<a.rate<<",\"full_wait_policy\":\"whole_public_context\",\"queue_capacity\":2,\"input_pool\":"<<(a.rate?std::min<size_t>(16,windows.size()):windows.size())<<",\"first_output\":\"first_clean_us\",\"time_reference\":\"run_steady_clock_epoch\"}\n";
+ log.close();std::ofstream summary(a.out/"runner_summary.json");summary<<"{\"schema\":\"fullpacket-compare/1\",\"reconstruction\":"<<quote(a.reconstruction)<<",\"engine_init_us\":"<<engine_init_us<<",\"prefix_cache_capacity_bytes\":"<<8*(e.full.prefix_key.capacity()+e.full.prefix_rows.capacity())<<",\"rx_pipeline\":"<<quote(experiment::FastRxPipeline::avx2_enabled()?"fast":"portable")<<",\"rx_avx2\":"<<(experiment::FastRxPipeline::avx2_enabled()?"true":"false")<<",\"rx_options_requested\":{\"fast_sfd\":"<<(a.rx_fast_sfd?"true":"false")<<",\"fast_cfo_rotation\":"<<(a.rx_fast_cfo?"true":"false")<<",\"seed_refine_tail\":"<<(a.rx_seed_refine_tail?"true":"false")<<",\"softchip_on_demand\":"<<(a.rx_softchip_on_demand?"true":"false")<<",\"fused_payload_cmf\":"<<(a.rx_fused_payload_cmf?"true":"false")<<",\"fused_phr_cmf\":"<<(a.rx_fused_phr_cmf?"true":"false")<<",\"diagnose_fir_segments\":"<<(a.rx_diagnose_fir_segments?"true":"false")<<"},\"rx_options\":{\"fast_sfd\":"<<(a.rx_fast_sfd?"true":"false")<<",\"fast_cfo_rotation\":"<<(a.rx_fast_cfo?"true":"false")<<",\"seed_refine_tail\":"<<(a.rx_seed_refine_tail?"true":"false")<<",\"softchip_on_demand\":"<<((a.rx_softchip_on_demand||a.rx_fused_payload_cmf||a.rx_fused_phr_cmf)?"true":"false")<<",\"fused_payload_cmf\":"<<((a.rx_fused_payload_cmf||a.rx_fused_phr_cmf)?"true":"false")<<",\"fused_phr_cmf\":"<<(a.rx_fused_phr_cmf?"true":"false")<<",\"diagnose_fir_segments\":"<<(a.rx_diagnose_fir_segments?"true":"false")<<"},\"submitted\":"<<submitted<<",\"completed\":"<<completed<<",\"rejected\":"<<rejected<<",\"source_late\":"<<source_late<<",\"paced_rate\":"<<a.rate<<",\"full_wait_policy\":\"whole_public_context\",\"queue_capacity\":2,\"input_pool\":"<<(a.rate?std::min<size_t>(16,windows.size()):windows.size())<<",\"first_output\":\"first_clean_us\",\"time_reference\":\"run_steady_clock_epoch\"}\n";
  std::cout<<"submitted="<<submitted<<" completed="<<completed<<" rejected="<<rejected<<"\n";return 0;
 }catch(const std::exception& ex){std::cerr<<ex.what()<<'\n';return 1;}

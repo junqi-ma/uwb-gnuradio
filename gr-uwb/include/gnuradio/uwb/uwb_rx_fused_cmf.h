@@ -4,40 +4,55 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Experimental payload CMF + PN-despreading fusion.
+ * Experimental CMF + PN-despreading fusion for the HRP payload and PHR
+ * fields.
  *
- * The legacy payload metric first computes one complex CMF output on every
- * chip of the payload field and then correlates the eight chips of each BPM
- * burst with the BPRF spreading sequence:
+ * The legacy metric first computes one complex CMF output on every chip of
+ * the field and then correlates the chips of each BPM burst with the BPRF
+ * spreading sequence:
  *
  *   y[k]        = sum_q h[q] * rx[win(k) + q]          (h = conj(CIR taps))
  *   metric(s,p) = sum_c a[s,c] * Re(rot * y[base(s)+p+c])
  *
- * where p selects one of the four BPM candidates:
+ * where p selects one of the four BPM candidates (two hops x two BPM halves):
  *
- *   p = 0  -> hop 0, BPM half 0   (chip offset  0)
- *   p = 1  -> hop 0, BPM half 1   (chip offset 32)
- *   p = 2  -> hop 1, BPM half 0   (chip offset  8)
- *   p = 3  -> hop 1, BPM half 1   (chip offset 40)
+ *   p = 0  -> hop 0, BPM half 0
+ *   p = 1  -> hop 0, BPM half 1
+ *   p = 2  -> hop 1, BPM half 0
+ *   p = 3  -> hop 1, BPM half 1
  *
- * Both hops and both BPM halves use the SAME eight-chip spreading segment
- * a[s, 0..7] (bprf_demod() uses `sp[c]` for all four candidates).  Exchanging
- * the two sums gives a finite template
+ * Both hops and both BPM halves use the SAME spreading segment
+ * a[s, 0..burst-1] (bprf_demod() uses `sp[c]` for all four candidates).
+ * Exchanging the two sums gives a finite per-symbol template
  *
- *   t[m] = sum_{q + 2c = m} h[q] * a[s,c],   m = 0 .. tap_count + 13
+ *   t[m] = sum_{q + spc*c = m} h[q] * a[s,c],   m = 0 .. len-1
  *   M(s,p) = sum_m t[m] * rx[base(s) + p_offset + m]
  *
- * so one 8-chip template (52 complex values for the production 38-tap CMF)
- * replaces the per-chip FIR plus the eight-chip despread.  A common positive
+ * with len = tap_count + spc * (chips_per_burst - 1).  One template replaces
+ * the per-chip FIR plus the burst despread.  Two geometries are provided:
+ *
+ *   payload   8 chips/burst, 64 chips/symbol, PN scrambler offset 1344,
+ *             candidates at chip offsets {0, 32, 8, 40}; 38 taps give the
+ *             52-point template of the verified payload fast path.
+ *   PHR      64 chips/burst, 512 chips/symbol, PN scrambler offset 0,
+ *             candidates at chip offsets {0, 256, 64, 320}; 38 taps give a
+ *             164-point template.
+ *
+ * correlate_payload() and correlate_phr() are thin wrappers over the generic
+ * correlate_field().  The payload wrapper keeps the original 52-point fixed
+ * kernel and arithmetic order bit-for-bit; other template lengths use a
+ * bounds-safe AVX2/FMA dot with a scalar tail.  A common positive
  * normalization scale (the legacy global max|soft|) cancels in the hard BPM
  * decision, so this kernel deliberately returns unnormalized metrics; the
- * caller may apply any positive scale.  Phase rotation and NS-SFD polarity are
- * applied here because the sign of g1 depends on them.
+ * caller may apply any positive scale.  Phase rotation and NS-SFD polarity
+ * are applied here because the sign of g1 depends on them.
  *
  * This header is pure math: no GNU Radio block, no allocation inside the
- * block loop (Scratch owns the template buffer), and no fake/known packet
+ * symbol loop (Scratch owns the template buffer), and no fake/known packet
  * metadata.  Fractional chip grids, RAKE and bypass are rejected by the core
- * integration and keep the legacy path.
+ * integration and keep the legacy path.  Any candidate window that is not
+ * fully readable is rejected; the caller retries the legacy stream once and
+ * the fused path must not silently truncate a field or zero-pad its tail.
  */
 
 #pragma once
@@ -50,6 +65,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace gr {
@@ -72,6 +88,34 @@ inline constexpr size_t kBlockSymbols = 64;
 //   2: hop 1, BPM half 0
 //   3: hop 1, BPM half 1
 inline constexpr size_t kCandidateChipOffset[kCandidateCount] = { 0, 32, 8, 40 };
+
+// PHR geometry (850 kb/s).  bprf_demod() again reuses one 64-chip spreading
+// segment for both hops and both BPM halves, so the candidate order stays
+// (hop 0, half 0), (hop 0, half 1), (hop 1, half 0), (hop 1, half 1) with
+// offsets 0, cps/2 = 256, cpb = 64 and cps/2 + cpb = 320 chips.
+inline constexpr size_t kPhrChipsPerBurst = 64;
+inline constexpr size_t kPhrChipsPerSymbol = 512;
+inline constexpr size_t kPhrSymbols = 21;
+inline constexpr size_t kPhrScramOffset = 0;
+inline constexpr size_t kPhrCandidateChipOffset[kCandidateCount] = { 0, 256, 64, 320 };
+
+// Field geometry consumed by correlate_field().  `candidate_chip_offset`
+// points at kCandidateCount entries in the fixed candidate order above.
+struct Geometry {
+    size_t chips_per_burst;
+    size_t chips_per_symbol;
+    size_t candidate_count;
+    const size_t* candidate_chip_offset;
+};
+
+inline constexpr Geometry kPayloadGeometry = { kChipsPerBurst,
+                                               kChipsPerSymbol,
+                                               kCandidateCount,
+                                               kCandidateChipOffset };
+inline constexpr Geometry kPhrGeometry = { kPhrChipsPerBurst,
+                                           kPhrChipsPerSymbol,
+                                           kCandidateCount,
+                                           kPhrCandidateChipOffset };
 
 struct Metrics {
     size_t symbols = 0;
@@ -110,24 +154,35 @@ struct Scratch {
     }
 };
 
-// Template construction for one symbol: t[q + 2c] += a[c] * h[q].
-// `pn` points at the eight spreading chips of this symbol.  h is the
-// pre-conjugated CMF vector (the same `h_conj` used by stage_cir_softchips).
-inline void build_template(std::complex<float>* out,
-                           const std::complex<float>* h,
-                           size_t tap_count,
-                           const int8_t* pn)
+// Length in complex samples of one fused template:
+//   tap_count + samples_per_chip * (chips_per_burst - 1).
+inline size_t template_length(size_t tap_count,
+                              size_t samples_per_chip,
+                              size_t chips_per_burst)
 {
-    const size_t len = tap_count +
-                       kSamplesPerChip * (kChipsPerBurst - 1);
+    return tap_count + samples_per_chip * (chips_per_burst - 1);
+}
+
+// Template construction for one symbol:
+//   t[q + samples_per_chip * c] += pn[c] * h[q].
+// `pn` points at chips_per_burst spreading chips.  h is the pre-conjugated
+// CMF vector (the same `h_conj` used by stage_cir_softchips).
+inline void build_template_geometry(std::complex<float>* out,
+                                    const std::complex<float>* h,
+                                    size_t tap_count,
+                                    const int8_t* pn,
+                                    size_t chips_per_burst,
+                                    size_t samples_per_chip)
+{
+    const size_t len =
+        template_length(tap_count, samples_per_chip, chips_per_burst);
     std::fill(out, out + len, std::complex<float>(0.0f, 0.0f));
 #if UWB_CIR_FIR_HAVE_AVX2
     const float* hp = reinterpret_cast<const float*>(h);
     const size_t floats = 2 * tap_count;
-    for (size_t c = 0; c < kChipsPerBurst; ++c) {
+    for (size_t c = 0; c < chips_per_burst; ++c) {
         const float sign = (pn[c] < 0) ? -1.0f : 1.0f;
-        float* dp = reinterpret_cast<float*>(
-            out + kSamplesPerChip * c);
+        float* dp = reinterpret_cast<float*>(out + samples_per_chip * c);
         const __m256 vsign = _mm256_set1_ps(sign);
         size_t k = 0;
         for (; k + 8 <= floats; k += 8) {
@@ -139,13 +194,23 @@ inline void build_template(std::complex<float>* out,
             dp[k] += sign * hp[k];
     }
 #else
-    for (size_t c = 0; c < kChipsPerBurst; ++c) {
+    for (size_t c = 0; c < chips_per_burst; ++c) {
         const float sign = (pn[c] < 0) ? -1.0f : 1.0f;
-        std::complex<float>* dst = out + kSamplesPerChip * c;
+        std::complex<float>* dst = out + samples_per_chip * c;
         for (size_t q = 0; q < tap_count; ++q)
             dst[q] += sign * h[q];
     }
 #endif
+}
+
+// Payload wrapper: eight spreading chips per burst, spc = 2.
+inline void build_template(std::complex<float>* out,
+                           const std::complex<float>* h,
+                           size_t tap_count,
+                           const int8_t* pn)
+{
+    build_template_geometry(out, h, tap_count, pn, kChipsPerBurst,
+                            kSamplesPerChip);
 }
 
 // Fixed 52-tap complex dot for the production 38-tap CMF (38 + 7*2).
@@ -182,6 +247,56 @@ dot_fixed52(const std::complex<float>* rx_win,
 #endif
 }
 
+// Generic complex dot for a template of `len` complex values.  Full groups of
+// four complex samples use the AVX2/FMA kernel with two accumulators; the
+// remaining 0..3 complex samples use a scalar tail.  Only indices below `len`
+// are ever loaded, so a template tail never overreads the IQ window.
+inline std::complex<float>
+dot_generic(const std::complex<float>* rx_win,
+            const std::complex<float>* taps,
+            size_t len)
+{
+#if UWB_CIR_FIR_HAVE_AVX2
+    const float* xp = reinterpret_cast<const float*>(rx_win);
+    const float* hp = reinterpret_cast<const float*>(taps);
+    const size_t groups = len / 4;
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    size_t g = 0;
+    // Two groups (8 complex) per iteration; both offsets stay below `groups`.
+    for (; g + 2 <= groups; g += 2) {
+        acc0 = _mm256_add_ps(
+            acc0, cir_fir::cir_fir_avx2_group4(
+                      xp, hp, static_cast<int>(8 * g)));
+        acc1 = _mm256_add_ps(
+            acc1, cir_fir::cir_fir_avx2_group4(
+                      xp, hp, static_cast<int>(8 * (g + 1))));
+    }
+    for (; g < groups; ++g)
+        acc0 = _mm256_add_ps(
+            acc0, cir_fir::cir_fir_avx2_group4(
+                      xp, hp, static_cast<int>(8 * g)));
+
+    const __m256 acc = _mm256_add_ps(acc0, acc1);
+    const __m128 lo = _mm256_castps256_ps128(acc);
+    const __m128 hi = _mm256_extractf128_ps(acc, 1);
+    const __m128 s = _mm_add_ps(lo, hi);
+    const __m128 s2 = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    float re = _mm_cvtss_f32(s2);
+    float im = _mm_cvtss_f32(_mm_shuffle_ps(s2, s2, 1));
+    // Scalar tail: no speculative load past len.
+    for (size_t i = 4 * groups; i < len; ++i) {
+        re += rx_win[i].real() * taps[i].real() -
+              rx_win[i].imag() * taps[i].imag();
+        im += rx_win[i].real() * taps[i].imag() +
+              rx_win[i].imag() * taps[i].real();
+    }
+    return std::complex<float>(re, im);
+#else
+    return cir_fir::dot_multi_acc8(rx_win, taps, len);
+#endif
+}
+
 inline std::complex<float>
 dot_template(const std::complex<float>* rx_win,
              const std::complex<float>* taps,
@@ -189,76 +304,117 @@ dot_template(const std::complex<float>* rx_win,
 {
     if (len == 52)
         return dot_fixed52(rx_win, taps);
-    return cir_fir::dot_multi_acc8(rx_win, taps, len);
+    return dot_generic(rx_win, taps, len);
 }
 
-// Correlate all payload symbols against the fused templates.
+// Correlate all `symbols` symbols of one field against the fused templates.
 //
 // Inputs:
-//   rx             CFO-compensated IQ, 0-based window coordinates
-//   fir_taps       h[q] = conj(normalized CIR values), tap_count entries
-//   chip_start     chip-stream origin: sample of chip 0 (preamble_start +
-//                  tap_count - cir_pre_samples - 1)
-//   payload_start  chip index of the first payload symbol
-//   pn             BPRF spreading stream at scrambler offset 1344, indexed
-//                  pn[s*8 + c] for c = 0..7
-//   symbols        number of BPRF payload symbols (nsym)
-//   polarity       NS-SFD polarity (+1/-1)
-//   rot            frozen prefix phase rotation (exp(-j*arg(gain)))
+//   rx                 CFO-compensated IQ, 0-based window coordinates
+//   n                  number of readable samples in rx
+//   fir_taps           h[q] = conj(normalized CIR values), tap_count entries
+//   chip_start         chip-stream origin: sample of chip 0 (preamble_start +
+//                      tap_count - cir_pre_samples - 1)
+//   samples_per_chip   must be kSamplesPerChip (integer grid only)
+//   field_start        chip index of the first symbol of this field
+//   pn                 spreading stream, indexed pn[s*chips_per_burst + c]
+//   symbols            number of symbols to correlate
+//   geometry           burst/symbol lengths and the four candidate offsets
+//   polarity           NS-SFD polarity (+1/-1)
+//   rot                frozen prefix phase rotation (exp(-j*arg(gain)))
 //
-// Returns false, leaving Metrics unspecified, if any candidate window is not
-// fully readable.  The caller retries the legacy full stream once; the fused
-// path must not silently truncate a payload or zero-pad its tail.
-inline bool correlate_payload(const std::complex<float>* rx,
-                              size_t n,
-                              const std::complex<float>* fir_taps,
-                              size_t tap_count,
-                              int64_t chip_start,
-                              size_t samples_per_chip,
-                              int64_t payload_start,
-                              const int8_t* pn,
-                              size_t symbols,
-                              int8_t polarity,
-                              std::complex<float> rot,
-                              Metrics& out,
-                              Scratch& scratch,
-                              Timings* timings = nullptr)
+// Returns false, leaving Metrics unspecified, if the geometry is unsupported
+// or any candidate window is not fully readable.  The caller retries the
+// legacy full stream once; the fused path must not silently truncate a field
+// or zero-pad its tail.
+inline bool correlate_field(const std::complex<float>* rx,
+                            size_t n,
+                            const std::complex<float>* fir_taps,
+                            size_t tap_count,
+                            int64_t chip_start,
+                            size_t samples_per_chip,
+                            int64_t field_start,
+                            const int8_t* pn,
+                            size_t symbols,
+                            const Geometry& geometry,
+                            int8_t polarity,
+                            std::complex<float> rot,
+                            Metrics& out,
+                            Scratch& scratch,
+                            Timings* timings = nullptr)
 {
     if (!rx || !fir_taps || !pn || symbols == 0 || tap_count == 0 ||
         tap_count > kMaxTapCount)
         return false;
     if (samples_per_chip != kSamplesPerChip)
         return false;
-    if (chip_start < 0 || payload_start < 0)
+    if (chip_start < 0 || field_start < 0)
         return false;
     if (polarity != 1 && polarity != -1)
+        return false;
+    if (geometry.candidate_count != kCandidateCount ||
+        !geometry.candidate_chip_offset)
+        return false;
+    if (geometry.chips_per_burst == 0 || geometry.chips_per_symbol == 0)
+        return false;
+    // Every candidate burst must lie inside its symbol.  Compare with
+    // subtraction so the addition cannot wrap.
+    const size_t burst_span = geometry.chips_per_burst - 1;
+    if (burst_span > geometry.chips_per_symbol)
+        return false;
+    for (size_t p = 0; p < kCandidateCount; ++p) {
+        if (geometry.candidate_chip_offset[p] >
+            geometry.chips_per_symbol - burst_span)
+            return false;
+    }
+    // Bound the template length without overflowing size_t.  The support
+    // limit is the 64-chip PHR burst: 38 taps give 164 complex samples and
+    // the absolute maximum is 64 + 2*63 = 190.
+    const size_t max_len =
+        kMaxTapCount + kSamplesPerChip * (kPhrChipsPerBurst - 1);
+    if (geometry.chips_per_burst - 1 >
+        (max_len - tap_count) / samples_per_chip)
+        return false;
+    if (geometry.chips_per_symbol > (static_cast<size_t>(1) << 30))
         return false;
     if (symbols > (static_cast<size_t>(1) << 20))
         return false;
     // The PN contract is a +/-1 sequence.  A zero would silently be treated
-    // as +1 by build_template(), so reject it before producing metrics.
-    for (size_t i = 0; i < symbols * kChipsPerBurst; ++i) {
+    // as +1 by build_template_geometry(), so reject it before producing
+    // metrics.
+    for (size_t i = 0; i < symbols * geometry.chips_per_burst; ++i) {
         if (pn[i] != 1 && pn[i] != -1)
             return false;
     }
 
-    const size_t len = tap_count +
-                       samples_per_chip * (kChipsPerBurst - 1);
+    const size_t len =
+        template_length(tap_count, samples_per_chip, geometry.chips_per_burst);
+    const int64_t spc = static_cast<int64_t>(samples_per_chip);
+    // Guard the sample-coordinate product before it enters int64.  Real
+    // fields use small chip indices; this only rejects absurd offsets.
+    if (field_start >
+        (std::numeric_limits<int64_t>::max() - chip_start) / spc)
+        return false;
     // Window for symbol 0, hop 0, half 0, chip c=0.  The last candidate is
-    // symbol symbols-1, hop 1, half 1; its first chip is offset 40, and the
-    // template then spans through 40 + spc*(cpb-1) + tap_count - 1.
-    const int64_t base0 = chip_start +
-                          payload_start * static_cast<int64_t>(samples_per_chip) -
+    // symbol symbols-1 with the last geometry offset; its template then
+    // spans len samples.
+    const int64_t base0 = chip_start + field_start * spc -
                           static_cast<int64_t>(tap_count) + 1;
+    if (base0 < 0)
+        return false;
     const int64_t last_start_chip =
         static_cast<int64_t>(symbols - 1) *
-            static_cast<int64_t>(kChipsPerSymbol) +
-        static_cast<int64_t>(kCandidateChipOffset[kCandidateCount - 1]);
-    const int64_t last = base0 +
-                         last_start_chip *
-                             static_cast<int64_t>(samples_per_chip) +
-                         static_cast<int64_t>(len) - 1;
-    if (base0 < 0 || last >= static_cast<int64_t>(n))
+            static_cast<int64_t>(geometry.chips_per_symbol) +
+        static_cast<int64_t>(
+            geometry.candidate_chip_offset[kCandidateCount - 1]);
+    // Compare as unsigned int64/u64 indices; base0 is non-negative and the
+    // geometry bounds above keep this addition far from wrapping.
+    const uint64_t add = static_cast<uint64_t>(last_start_chip) *
+                             static_cast<uint64_t>(spc) +
+                         static_cast<uint64_t>(len) - 1;
+    const uint64_t last = static_cast<uint64_t>(base0) + add;
+    if (last < static_cast<uint64_t>(base0) ||
+        last >= static_cast<uint64_t>(n))
         return false;
 
     out.reset(symbols);
@@ -272,8 +428,10 @@ inline bool correlate_payload(const std::complex<float>* rx,
         const size_t count = std::min(kBlockSymbols, symbols - start);
         auto t0 = std::chrono::steady_clock::now();
         for (size_t i = 0; i < count; ++i) {
-            build_template(scratch.templates.data() + i * len,
-                           fir_taps, tap_count, pn + (start + i) * kChipsPerBurst);
+            build_template_geometry(
+                scratch.templates.data() + i * len, fir_taps, tap_count,
+                pn + (start + i) * geometry.chips_per_burst,
+                geometry.chips_per_burst, samples_per_chip);
         }
         auto t1 = std::chrono::steady_clock::now();
         t_template += t1 - t0;
@@ -282,14 +440,15 @@ inline bool correlate_payload(const std::complex<float>* rx,
             const size_t s = start + i;
             const std::complex<float>* taps =
                 scratch.templates.data() + i * len;
-            const int64_t win0 = base0 +
-                                 static_cast<int64_t>(s) *
-                                     static_cast<int64_t>(kChipsPerSymbol) *
-                                     static_cast<int64_t>(samples_per_chip);
+            const int64_t win0 =
+                base0 + static_cast<int64_t>(s) *
+                            static_cast<int64_t>(geometry.chips_per_symbol) *
+                            spc;
             for (size_t p = 0; p < kCandidateCount; ++p) {
-                const int64_t off = static_cast<int64_t>(
-                    kCandidateChipOffset[p]) *
-                    static_cast<int64_t>(samples_per_chip);
+                const int64_t off =
+                    static_cast<int64_t>(
+                        geometry.candidate_chip_offset[p]) *
+                    spc;
                 const std::complex<float> m =
                     dot_template(rx + win0 + off, taps, len);
                 out.complex_value[kCandidateCount * s + p] = m;
@@ -312,6 +471,52 @@ inline bool correlate_payload(const std::complex<float>* rx,
                 .count());
     }
     return true;
+}
+
+// Payload wrapper.  Signature and arithmetic are unchanged from the verified
+// payload fast path: 8 chips/burst, 64 chips/symbol, PN scrambler offset
+// 1344, four candidates {0, 32, 8, 40} and the 52-point fixed dot for 38
+// taps.
+inline bool correlate_payload(const std::complex<float>* rx,
+                              size_t n,
+                              const std::complex<float>* fir_taps,
+                              size_t tap_count,
+                              int64_t chip_start,
+                              size_t samples_per_chip,
+                              int64_t payload_start,
+                              const int8_t* pn,
+                              size_t symbols,
+                              int8_t polarity,
+                              std::complex<float> rot,
+                              Metrics& out,
+                              Scratch& scratch,
+                              Timings* timings = nullptr)
+{
+    return correlate_field(rx, n, fir_taps, tap_count, chip_start,
+                           samples_per_chip, payload_start, pn, symbols,
+                           kPayloadGeometry, polarity, rot, out, scratch,
+                           timings);
+}
+
+// PHR wrapper: 21 symbols of 64 chips/burst and 512 chips/symbol starting at
+// `phr_start` (sfd_end_chip + 1), PN scrambler offset 0.
+inline bool correlate_phr(const std::complex<float>* rx,
+                          size_t n,
+                          const std::complex<float>* fir_taps,
+                          size_t tap_count,
+                          int64_t chip_start,
+                          size_t samples_per_chip,
+                          int64_t phr_start,
+                          const int8_t* pn,
+                          int8_t polarity,
+                          std::complex<float> rot,
+                          Metrics& out,
+                          Scratch& scratch,
+                          Timings* timings = nullptr)
+{
+    return correlate_field(rx, n, fir_taps, tap_count, chip_start,
+                           samples_per_chip, phr_start, pn, kPhrSymbols,
+                           kPhrGeometry, polarity, rot, out, scratch, timings);
 }
 
 // Reproduce bprf_demod()'s hard decision exactly from the four signed

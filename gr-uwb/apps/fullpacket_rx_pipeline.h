@@ -24,18 +24,37 @@ public:
         bool seed_refine_tail;
         bool softchip_on_demand;
         bool fused_payload_cmf;
+        bool fused_phr_cmf;
+        bool diagnose_fir_segments;
 
         Options()
             : fast_sfd(false), fast_cfo_rotation(false),
               seed_refine_tail(false), softchip_on_demand(false),
-              fused_payload_cmf(false)
+              fused_payload_cmf(false), fused_phr_cmf(false),
+              diagnose_fir_segments(false)
         {
         }
-        Options(bool sfd, bool cfo, bool seed, bool soft, bool fused = false)
+        Options(bool sfd, bool cfo, bool seed, bool soft,
+                bool fused_payload = false, bool fused_phr = false,
+                bool diagnose_fir = false)
             : fast_sfd(sfd), fast_cfo_rotation(cfo),
               seed_refine_tail(seed), softchip_on_demand(soft),
-              fused_payload_cmf(fused)
+              fused_payload_cmf(fused_payload), fused_phr_cmf(fused_phr),
+              diagnose_fir_segments(diagnose_fir)
         {
+        }
+
+        // The fused paths consume the SYNC/SFD/PHR prefix.  PHR fusion also
+        // requires the payload fusion.  Return the effective configuration so
+        // callers can log exactly what the profile will do rather than a
+        // potentially contradictory set of requested switches.
+        Options normalized() const
+        {
+            Options out = *this;
+            out.softchip_on_demand = softchip_on_demand ||
+                                     fused_payload_cmf || fused_phr_cmf;
+            out.fused_payload_cmf = fused_payload_cmf || fused_phr_cmf;
+            return out;
         }
     };
 
@@ -45,18 +64,20 @@ public:
     {
         if (max_samples == 0 || code < 9 || code > 12)
             throw std::invalid_argument("unsupported RX capacity/code");
+        const Options effective = options.normalized();
         profile_.code_index = code;
         profile_.timing_search_margin = 256;
         profile_.timing_coarse_stride = 1;
-        profile_.rx_fast_sfd = options.fast_sfd;
-        profile_.rx_fast_cfo_rotation = options.fast_cfo_rotation;
-        profile_.rx_seed_refine_tail = options.seed_refine_tail;
-        // The fused payload path consumes the same SYNC/SFD/PHR prefix as the
-        // on-demand option.  Selecting it therefore implies the prefix path;
-        // the other four options retain their explicit values.
-        profile_.rx_softchip_on_demand =
-            options.softchip_on_demand || options.fused_payload_cmf;
-        profile_.rx_fused_payload_cmf = options.fused_payload_cmf;
+        profile_.rx_fast_sfd = effective.fast_sfd;
+        profile_.rx_fast_cfo_rotation = effective.fast_cfo_rotation;
+        profile_.rx_seed_refine_tail = effective.seed_refine_tail;
+        // The fused payload/PHR paths consume the same SYNC/SFD/PHR prefix as
+        // the on-demand option.  Selecting either therefore implies the prefix
+        // path; the other options retain their explicit values.
+        profile_.rx_softchip_on_demand = effective.softchip_on_demand;
+        profile_.rx_fused_payload_cmf = effective.fused_payload_cmf;
+        profile_.rx_fused_phr_cmf = effective.fused_phr_cmf;
+        profile_.rx_diagnose_fir_segments = effective.diagnose_fir_segments;
         scratch_.reserve(max_samples);
     }
 

@@ -233,6 +233,7 @@ list(APPEND test_uwb_sources
     qa_uwb_fullpacket_payload_cache.cc
     qa_uwb_fullpacket_fast_rx.cc
     qa_uwb_rx_fused_cmf.cc
+    qa_uwb_rx_fused_phr.cc
     qa_uwb_fullpacket_sic_core.cc
     qa_uwb_discrete_cir_estimator.cc
     qa_uwb_discrete_cir_reconstruct.cc
@@ -523,3 +524,5 @@ target_compile_options(uwb_qa_uwb_fullpacket_fast_rx.cc PRIVATE -march=native)
 # The fused kernel QA must exercise the same AVX2/FMA path as the fast runner,
 # not only the portable multi-accumulator fallback.
 target_compile_options(uwb_qa_uwb_rx_fused_cmf.cc PRIVATE -march=native)
+# The fused PHR kernel QA uses the same native AVX2/FMA path.
+target_compile_options(uwb_qa_uwb_rx_fused_phr.cc PRIVATE -march=native)

@@ -155,6 +155,32 @@ inline size_t initial_chip_budget(const Qm35825Profile& profile)
 }
 
 // ---------------------------------------------------------------------------
+// PHR-fusion prefix budget.  The fused PHR kernel consumes raw CFO-compensated
+// IQ, but NS-SFD still needs the soft-chip stream through the PHR field:
+//   * phase alignment ends at preamble_repetitions * 508 chips;
+//   * NS-SFD searches +/-8 chips around that point and spans 8 SFD symbols;
+//   * the 21 PHR symbols span 21 * 512 chips.
+// The worst-case NS-SFD shift is +8 chips, so the last PHR chip is at
+//   expected + 8 + 8*508 + 21*512 - 1.
+// stage_cir_softchips() maps a chip budget B to B-1 generated chips for the
+// production integer grid (it computes last_pos = base + ceil((B-1)*spc) - 1),
+// so add two entries.  This is still capped by the legacy budget and is only
+// used when the explicit PHR-fusion option is on.
+// Default profile: 32512 + 8 + 4064 + 10752 + 2 = 47338 chips.
+// ---------------------------------------------------------------------------
+inline size_t fused_phr_prefix_budget(const Qm35825Profile& profile)
+{
+    const size_t expected =
+        profile.preamble_repetitions * kQm35ChipsPerSymbol;
+    const size_t ns_sfd_positive_shift = 8;
+    const size_t sfd_len = kSfdSymbols * kQm35ChipsPerSymbol;
+    const size_t phr_len = kPhrSymbols * kPhrChipsPerSymbol;
+    size_t budget = expected + ns_sfd_positive_shift + sfd_len + phr_len + 2;
+    const size_t cap = legacy_chip_budget(profile);
+    return std::min(budget, cap);
+}
+
+// ---------------------------------------------------------------------------
 // Total chips needed once the PHR has been decoded:
 //   sfd_end_chip + 1                      (PHR start)
 //   + payload_chips_needed(psdu_length+2) (includes PHR + longest length

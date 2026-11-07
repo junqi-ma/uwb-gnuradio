@@ -117,6 +117,13 @@ struct Qm35825Profile {
     // prefix (SYNC/SFD/PHR) and the full integer-grid CMF; unsupported grids
     // keep the legacy path.  Default off.
     bool rx_fused_payload_cmf = false;
+    // Experimental fused PHR CMF + PN despread.  Requires the payload fusion
+    // and the on-demand prefix; it shortens the prefix to the SYNC/SFD/PHR
+    // range.  Default off.
+    bool rx_fused_phr_cmf = false;
+    // Diagnostic-only replay of the legacy soft-chip FIR, segmented at the
+    // decoded SFD/PHR/payload boundaries.  Never part of a formal timing run.
+    bool rx_diagnose_fir_segments = false;
     // First seeded SYNC refine half-width.  0 keeps the legacy
     // max(256, timing_coarse_stride) radius.  A nonzero value is used only
     // when the caller explicitly supplies it (the SFD-anchored tail profile)
