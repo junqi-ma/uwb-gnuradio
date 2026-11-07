@@ -1,12 +1,12 @@
 # 当前任务：CMF 与解扩融合可行性已交付
 
 结果见 [报告](docs/sic/CMF解扩融合可行性报告_2026-11-07.md)，code-tested SHA
-`9cb2c3d`。新增 `--rx-fused-payload-cmf`（默认关闭）：前缀保持，payload 用
+`57f97d5`。新增 `--rx-fused-payload-cmf`（默认关闭）：前缀保持，payload 用
 52 点融合模板 + 四候选相关；6 格×16 源窗功能一致，损坏包回退不误提交；
-正式三格 `payload_path` mean 比值 0.666/0.574/0.283，comm mean 1.013/0.989/
-0.810，总 SIC mean 0.983/1.001/0.924。`payload_base` comm P95 1.140，且
-`stage_payload` 单独约 1.96× 旧值；收益边界见报告。MATLAB/native/FPGA/
-硬件/paced/实时目标未验证。
+正式三格 `payload_path` mean 比值 0.573/0.581/0.317，comm mean 0.945/0.955/
+0.801，总 SIC mean 0.968/0.992/0.921，P95 同向下降。`stage_payload` 单独
+约 1.90× 旧值；收益边界见报告。独立复核发现的尾部差一 chip 已修复。
+MATLAB/native/FPGA/硬件/paced/实时目标未验证。
 
 ---
 
