@@ -520,3 +520,6 @@ set_tests_properties(uwb_uhd_burst_dry_run_rejects_invalid_config
 
 # Compile the wrapper QA with the SAME native RX configuration as the fast app.
 target_compile_options(uwb_qa_uwb_fullpacket_fast_rx.cc PRIVATE -march=native)
+# The fused kernel QA must exercise the same AVX2/FMA path as the fast runner,
+# not only the portable multi-accumulator fallback.
+target_compile_options(uwb_qa_uwb_rx_fused_cmf.cc PRIVATE -march=native)

@@ -223,13 +223,18 @@ BOOST_AUTO_TEST_CASE(fused_cmf_rejects_unsupported_and_out_of_range)
         rx, n, h, kTap, in.chip_start, 2, in.payload_start, pn, in.symbols,
         0, in.rot[0], out, scratch));
 
-    // Exact last readable window succeeds; one sample shorter fails.
+    // Exact last readable window succeeds; one sample shorter fails.  The
+    // last candidate starts at chip offset 40 (hop 1, BPM half 1); its
+    // template then spans len samples.
     const int64_t base0 = in.chip_start + in.payload_start * 2 - kTap + 1;
     const int64_t last_chip =
-        static_cast<int64_t>(in.symbols - 1) * 64 + 32 + 8 - 1;
+        static_cast<int64_t>(in.symbols - 1) * 64 +
+        static_cast<int64_t>(
+            rxfusion::kCandidateChipOffset[rxfusion::kCandidateCount - 1]);
     const size_t len = kTap + 2 * 7;
     const int64_t needed = base0 + last_chip * 2 + len;
     BOOST_REQUIRE_GT(needed, 0);
+    BOOST_REQUIRE_LE(needed, static_cast<int64_t>(in.rx.size()));
     BOOST_CHECK(rxfusion::correlate_payload(
         rx, static_cast<size_t>(needed), h, kTap, in.chip_start, 2,
         in.payload_start, pn, in.symbols, 1, in.rot[0], out, scratch));
@@ -290,6 +295,37 @@ struct Packet {
     }
 };
 } // namespace
+
+BOOST_AUTO_TEST_CASE(fused_cmf_skips_rake_and_bypass)
+{
+    Packet packet(32, 10);
+    for (auto mode : { demod::CirSoftChipMode::Rake,
+                       demod::CirSoftChipMode::Bypass }) {
+        auto profile = demod::Qm35825Profile::Default();
+        profile.code_index = 10;
+        profile.timing_search_margin = 256;
+        profile.timing_coarse_stride = 1;
+        profile.rx_softchip_on_demand = true;
+        profile.rx_fused_payload_cmf = true;
+        profile.cir_soft_chip_mode = mode;
+        profile.cir_rake_top_k =
+            (mode == demod::CirSoftChipMode::Rake) ? 4 : 0;
+        demod::core::DemodScratch scratch;
+        scratch.reserve(packet.iq.size());
+        const auto r = demod::core::demodulate_one(
+            packet.iq.data(), packet.iq.size(), profile, 61, Packet::seed, 0,
+            packet.sync, scratch);
+        BOOST_REQUIRE_EQUAL(int(r.status), int(demod::DemodStatus::Success));
+        BOOST_CHECK(r.payload.fcs_pass);
+        // The fused kernel only supports the full integer-grid CMF; RAKE and
+        // bypass must keep the legacy path and not count a fused attempt.
+        // The on-demand prefix itself rejects these modes and performs one
+        // full-stream retry, so softchip_fallbacks is 1.
+        BOOST_CHECK_EQUAL(r.stage_fused_attempts, 0u);
+        BOOST_CHECK_EQUAL(r.stage_softchip_fallbacks, 1u);
+        BOOST_CHECK_EQUAL(r.stage_fused_fallbacks, 0u);
+    }
+}
 
 BOOST_AUTO_TEST_CASE(fused_cmf_pipeline_decodes_same_psdu)
 {

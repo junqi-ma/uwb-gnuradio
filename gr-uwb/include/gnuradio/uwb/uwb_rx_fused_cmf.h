@@ -24,7 +24,7 @@
  * a[s, 0..7] (bprf_demod() uses `sp[c]` for all four candidates).  Exchanging
  * the two sums gives a finite template
  *
- *   t[m] = sum_{q + 2c = m} h[q] * a[s,c],   m = 0 .. tap_count + 14
+ *   t[m] = sum_{q + 2c = m} h[q] * a[s,c],   m = 0 .. tap_count + 13
  *   M(s,p) = sum_m t[m] * rx[base(s) + p_offset + m]
  *
  * so one 8-chip template (52 complex values for the production 38-tap CMF)
@@ -233,25 +233,32 @@ inline bool correlate_payload(const std::complex<float>* rx,
         return false;
     if (polarity != 1 && polarity != -1)
         return false;
+    if (symbols > (static_cast<size_t>(1) << 20))
+        return false;
+    // The PN contract is a +/-1 sequence.  A zero would silently be treated
+    // as +1 by build_template(), so reject it before producing metrics.
+    for (size_t i = 0; i < symbols * kChipsPerBurst; ++i) {
+        if (pn[i] != 1 && pn[i] != -1)
+            return false;
+    }
 
     const size_t len = tap_count +
                        samples_per_chip * (kChipsPerBurst - 1);
     // Window for symbol 0, hop 0, half 0, chip c=0.  The last candidate is
-    // symbol symbols-1, hop 1, half 1, chip c=7.
+    // symbol symbols-1, hop 1, half 1; its first chip is offset 40, and the
+    // template then spans through 40 + spc*(cpb-1) + tap_count - 1.
     const int64_t base0 = chip_start +
                           payload_start * static_cast<int64_t>(samples_per_chip) -
                           static_cast<int64_t>(tap_count) + 1;
-    const int64_t last_chip = static_cast<int64_t>(symbols - 1) *
-                                  static_cast<int64_t>(kChipsPerSymbol) +
-                              static_cast<int64_t>(kBpmHalfOffset) +
-                              static_cast<int64_t>(kChipsPerBurst) - 1;
+    const int64_t last_start_chip =
+        static_cast<int64_t>(symbols - 1) *
+            static_cast<int64_t>(kChipsPerSymbol) +
+        static_cast<int64_t>(kCandidateChipOffset[kCandidateCount - 1]);
     const int64_t last = base0 +
-                         last_chip * static_cast<int64_t>(samples_per_chip) +
+                         last_start_chip *
+                             static_cast<int64_t>(samples_per_chip) +
                          static_cast<int64_t>(len) - 1;
     if (base0 < 0 || last >= static_cast<int64_t>(n))
-        return false;
-    // Cheap overflow guard before any multiplication below.
-    if (symbols > (static_cast<size_t>(1) << 20))
         return false;
 
     out.reset(symbols);

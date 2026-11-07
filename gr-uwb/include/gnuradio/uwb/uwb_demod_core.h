@@ -197,6 +197,10 @@ struct DemodScratch {
             rxfusion::kCandidateCount * 2048);
         fused.metrics.signed_value.reserve(
             rxfusion::kCandidateCount * 2048);
+        fused.kernel.templates.reserve(
+            rxfusion::kBlockSymbols * (rxfusion::kMaxTapCount +
+                                       rxfusion::kSamplesPerChip *
+                                           (rxfusion::kChipsPerBurst - 1)));
     }
 };
 
@@ -2409,12 +2413,16 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
     const size_t tap_count = cir.cir_filter_taps.size();
     if (tap_count == 0 || tap_count > rxfusion::kMaxTapCount)
         return false;
+    if (tap_count != profile.cir_pre_samples + profile.cir_post_samples)
+        return false;
     if (std::abs(cir.samples_per_chip -
                  static_cast<double>(rxfusion::kSamplesPerChip)) > 1e-9)
         return false;
     if (profile.cir_pre_samples > tap_count)
         return false;
-    if (!scratch.softchip.prepared || std::norm(scratch.softchip.rot) <= 0.0f)
+    if (!scratch.softchip.prepared || std::norm(scratch.softchip.rot) <= 0.0f ||
+        !std::isfinite(scratch.softchip.rot.real()) ||
+        !std::isfinite(scratch.softchip.rot.imag()))
         return false;
 
     const int64_t chip_start =
@@ -2425,13 +2433,37 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
     const int64_t max_chip =
         (static_cast<int64_t>(n) - 1 - chip_start) /
         static_cast<int64_t>(rxfusion::kSamplesPerChip);
-    // Same admission as bprf_demod() on the full soft-chip stream: the nominal
-    // payload span must fit, not merely the four candidate windows.  This
-    // keeps a short window from being accepted by the fused path and then
-    // rejected by the legacy fallback (or vice versa).
+    if (max_chip < 0)
+        return false;
+
+    // Reproduce the exact length of the soft-chip stream that the legacy
+    // on-demand path would have produced (prefix + optional extension).  The
+    // legacy bprf_demod() admission is `payload_start + 64*nsym <= stream`,
+    // which is 16 chips stricter than the last actually used chip.  Using only
+    // the raw-IQ length here would be a different contract if the chip budget
+    // ever became the limiting factor.
+    const size_t prefix_chips = cir.soft_chip_count;
+    size_t stream_chips = prefix_chips;
+    const size_t final_budget = rxopt::final_chip_budget(
+        profile, ns_sfd.sfd_end_chip, phr.psdu_length);
+    if (final_budget > prefix_chips) {
+        const double spc = cir.samples_per_chip;
+        const int64_t last_by_budget =
+            chip_start + static_cast<int64_t>(std::ceil(
+                             static_cast<double>(final_budget - 1) * spc));
+        const int64_t last_chip_sample =
+            std::min<int64_t>(static_cast<int64_t>(n), last_by_budget);
+        const int64_t last_pos = last_chip_sample - 1;
+        if (last_pos < chip_start)
+            return false;
+        stream_chips = static_cast<size_t>(
+                           std::floor(static_cast<double>(last_pos - chip_start) /
+                                      spc)) +
+                       1;
+    }
     if (payload_start + static_cast<int64_t>(symbols) *
                             static_cast<int64_t>(rxopt::kPayloadChipsPerSymbol) >
-        max_chip + 1)
+        static_cast<int64_t>(stream_chips))
         return false;
 
     const auto t_plan0 = std::chrono::steady_clock::now();
@@ -2452,6 +2484,10 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
         return false;
     template_us = plan_us + timings.template_update_us;
     correlate_us = timings.correlate_us;
+    for (float v : scratch.fused.metrics.signed_value) {
+        if (!std::isfinite(v))
+            return false;
+    }
 
     std::vector<int8_t> g0p, g1p, g0, g1;
     if (!detail::bprf_demod(prefix_soft_chips, phr_start, profile.code_index,
@@ -2460,7 +2496,7 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
     rxfusion::decide_bpm(scratch.fused.metrics, g0, g1);
     if (!detail::decode_payload_hard(g0p, g1p, g0, g1, psdu_bits, out))
         return false;
-    return out.ok;
+    return out.ok && out.fcs_pass;
 }
 
 // ---------------------------------------------------------------------------
