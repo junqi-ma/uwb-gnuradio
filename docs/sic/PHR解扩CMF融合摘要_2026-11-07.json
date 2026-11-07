@@ -173,13 +173,32 @@
     "reconstruction": "discrete_cir"
   },
   "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+  "repeatability": {
+    "comm_mean_ratio": [
+      0.872,
+      0.906,
+      0.917
+    ],
+    "note": "same code at docs HEAD 24d141d; conclusion unchanged, run-to-run variation visible",
+    "phr_path_with_diag_mean_ratio": [
+      0.23,
+      0.183,
+      0.198
+    ],
+    "sic_mean_ratio": [
+      0.929,
+      0.95,
+      0.969
+    ]
+  },
   "runner_sha256": "52fbcc2aa664d8dfe1799de902de25d65a4eb8b30ae23dc2c2382a6428114220",
   "runs": {
     "corruption": "gr-uwb/build-sic-fullpacket-fused-phr/results/fused_phr_corrupt2_20261107",
     "functional": "gr-uwb/build-sic-fullpacket-fused-phr/results/fused_phr_functional4_20261107",
     "retained_but_not_headline": "gr-uwb/build-sic-fullpacket-fused-phr/results/fused_phr_formal_20261107",
     "timing": "gr-uwb/build-sic-fullpacket-fused-phr/results/fused_phr_formal3_20261107",
-    "timing_provenance": "gr-uwb/build-sic-fullpacket-fused-phr/results/fused_phr_formal3_20261107/provenance.json"
+    "timing_provenance": "gr-uwb/build-sic-fullpacket-fused-phr/results/fused_phr_formal3_20261107/provenance.json",
+    "timing_repeat": "gr-uwb/build-sic-fullpacket-fused-phr/results/fused_phr_formal4_20261107"
   },
   "schema": "fused-phr-compare-summary/1",
   "task_book": "docs/sic/OpenCode_PHR解扩CMF融合开发任务书_2026-11-07.md",
