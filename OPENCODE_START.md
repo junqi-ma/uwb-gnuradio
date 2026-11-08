@@ -1,16 +1,22 @@
-# 最新优化：AGY SIC 非同步深度优化与复核收口（2026-11-08）
+# 最新优化：AGY SIC 非同步深度优化与复核整改闭环（2026-11-08）
 
-执行 `docs/sic/AGY_SIC优化执行任务书_2026-11-08.md`。完整开发与测试报告详见 `docs/sic/AGY_SIC优化开发报告_2026-11-08.md`。
+执行 `docs/sic/AGY_SIC优化执行任务书_2026-11-08.md` 及复核整改 `docs/sic/AGY_SIC优化验收复核_2026-11-08.md`。完整开发报告见 `docs/sic/AGY_SIC优化开发报告_2026-11-08.md`，复核整改证明详见 `docs/sic/AGY_SIC优化验收整改证明_2026-11-08.md`。
 涵盖：
 1. **Task A (RX 数据量与零乘精简)**：CFO 旋转解耦支持区间补偿（样点 0 严格为相位原点），覆盖 Bootstrap SFD 候选及 Final SFD/CIR/PHR/Payload，消除冗余样点旋转；`stage_cir_softchips` 改为三元码非零位置（64 点）稀疏互相关，消除 1016 点稠密零乘。
 2. **Task B (重构与输出写入)**：延迟旁路拷贝至失败分支，成功路径仅复制相减 ROI 两侧且直接计算 `out = y - recon` 消除双写；内部可信脉冲列表（`transaction_prepared == true`）免去 8,384 事件二次线性扫描；实现 20-tap 专用 AVX2/FMA 脉冲加减内核。
 3. **Task C (参数估计与 TX 调制)**：合并前缀有限性扫描与能量累加至单遍循环；三元训练序列单周期（1016 点）预测残差；`HrpModScratch` 缓存扩频 PN 序列；修复 `prepare_discrete_cir` 中死字段引发的无效二次 reserve。
 4. **Task D (复核遗留收口)**：彻底关闭 `PHR解扩CMF融合_验收复核_2026-11-07.md` 登记的 R1–R3 缺陷（R1 最大 offset 尾界及防下溢、R2 诊断重放右端范围越界防护、R3 逐轮逐观测完整功能字段校验）。
+5. **复核整改 R01–R04 闭环**：
+   - R01：纠正原报告历史参考口径，使用同输入、同选项 fast-runner ABBA 持锁实测配对数据。
+   - R02：`uwb_rx_cfo_opt.h` 恢复 4 路 ILP 浮点递推核 `derotate_range_recurrence`，彻底消除默认配置感知解码 57.7% 的严重回退，感知解码耗时由 2276.1 µs 压至 2148.5 µs（比基线快 5.6%），端到端服务链耗时由 4564.2 µs 降至 3994.0 µs（-12.5%）。
+   - R03：修复 B3 内核动态切换，增加平台/编译器宏保护，单测实证 20-tap 零 CFO 严格逐位一致，隔离对照证实 B3 AVX2 带来 2.31x 卷积加速（256.3 µs → 110.8 µs）。
+   - R04：回退全窗旋转耗时前移纳入 `stage_softchip_fallback_us` 与 `stage_total_us` 父计时，满足父子守恒。
+   - 范围证据：增加非整数网格显式全窗回退，并在 `DemodResult` 中新增样点数与旋转区间统计。
 
 验证与配对性能：
-- 单测与反例：`uwb_qa_uwb_demod_core`（50项）、`discrete_cir_reconstruct`（10项）、`discrete_cir_estimator`、`hrp_mod_core`、`rx_fused_cmf`（12项）、`rx_fused_phr` 针对性测试 100% 通过；R3 扰动反例准确拒绝；损坏包旁路输出与输入保持逐位一致（Bit-exact）。
+- 单测与反例：`uwb_qa_uwb_demod_core`（52项）、`discrete_cir_reconstruct`（10项）、`discrete_cir_estimator`、`hrp_mod_core`、`rx_fused_cmf`（12项）、`rx_fused_phr` 针对性测试 100% 通过（2.47 s）；R3 扰动反例准确拒绝；损坏包旁路输出与输入保持逐位一致（Bit-exact）。
 - 数值等价：紧凑四径主场景下输出 IQ 最大相对 L2 误差为 `1.944e-07`（门槛 ≤ 2e-05），全窗消减抑制比 `28.183925 dB`（差异 `1.89e-07 dB`，门槛 ≤ 0.01 dB），所有 FCS 与 committed 100% 保持一致。
-- 计时结果（持锁 ABBA 配对，20-tap `lag_lo=-1`）：SIC 均值由 `2692.4 µs` 降至 **`1572.0 µs`**（P95 **`1803.7 µs`**），降低 **41.6%**；通信解码由 `1369.4 µs` 降至 **`1098.2 µs`**；脉冲重构卷积仅 **`58.6 µs`**。产物位于 `gr-uwb/build-sic-fullpacket-agy-opt/results/agy_opt_timing_20261108_121619`。
+- 计时结果（持锁 ABBA 配对，20-tap `lag_lo=-1`，old: `build-sic-fullpacket-no-input-scan` vs new: `build-sic-fullpacket-agy-opt`）：SIC 均值由 `1828.2 µs` 降至 **`1402.7 µs`**（P95 **`1680.7 µs`**），降低 **23.3%**；通信解码由 `1158.4 µs` 降至 **`967.2 µs`**（-16.5%）；重构卷积由 `200.3 µs` 降至 **`110.8 µs`**（-44.7%）；下游感知解码由 `2276.1 µs` 降至 **`2148.5 µs`**（-5.6%）；完整端到端 service 耗时由 `4564.2 µs` 降至 **`3994.0 µs`**（-12.5%）。产物位于 `gr-uwb/build-sic-fullpacket-agy-opt/results/rectification_20261108_123827`。
 
 ---
 

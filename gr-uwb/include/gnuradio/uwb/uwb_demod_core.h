@@ -677,7 +677,7 @@ inline void derotate_cfo_range(const std::complex<float>* rx,
             rxopt::derotate_range_block(scratch.derotated.data(), rx, n, lo, hi, w);
             rotation_kernel = 1;
         } else {
-            rxopt::derotate_range_scalar(scratch.derotated.data(), rx, n, lo, hi, w);
+            rxopt::derotate_range_recurrence(scratch.derotated.data(), rx, n, lo, hi, w);
             rotation_kernel = 0;
         }
     } else {
@@ -2900,6 +2900,9 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                        sfd1_range.second, scratch, rot1_us, rk1);
     res.cfo.rotate_us = rot1_us;
     res.cfo.rotation_kernel = rk1;
+    res.stage_cfo_rotated_samples +=
+        (sfd1_range.second > sfd1_range.first ? (sfd1_range.second - sfd1_range.first) : 0);
+    ++res.stage_cfo_rotation_passes;
     lap(res.stage_cfo_us);
     res.stage_cfo_fit_us += res.cfo.fit_us;
     res.stage_cfo_rotate_us += rot1_us;
@@ -3098,9 +3101,12 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                                profile.rx_fused_payload_cmf ||
                                profile.rx_fused_phr_cmf;
 
+        const double nominal_spc = profile.sample_rate / 499.2e6;
+        const bool is_integer_grid = (std::abs(nominal_spc - 2.0) < 1e-6);
+
         size_t sec_lo = 0;
         size_t sec_hi = n;
-        if (on_demand) {
+        if (on_demand && is_integer_grid) {
             // Second rotation covers final SFD, CIR, phase estimation, and through PHR.
             // initial_chip_budget(profile) covers SYNC alignment, NS-SFD, and the 21 PHR symbols.
             const size_t prefix_budget = rxopt::initial_chip_budget(profile);
@@ -3131,6 +3137,8 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         res.cfo.rotation_kernel = rk2;
         res.stage_cfo_rotate_us += rot2_us;
         res.stage_cfo_rotation_kernels |= (rk2 ? 2u : 0u);
+        res.stage_cfo_rotated_samples += (sec_hi > sec_lo ? (sec_hi - sec_lo) : 0);
+        ++res.stage_cfo_rotation_passes;
         res.stage_sfd_cfo_refit_us += rot2_us;
         sec_derotated_hi = sec_hi;
         return true;
@@ -3349,6 +3357,8 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                     derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, pay_lo,
                                        pay_hi, scratch, rot_pay_us, rk_pay);
                     res.stage_cfo_rotate_us += rot_pay_us;
+                    res.stage_cfo_rotated_samples += (pay_hi - pay_lo);
+                    ++res.stage_cfo_rotation_passes;
                     sec_derotated_hi = std::max(sec_derotated_hi, pay_hi);
                 }
 
@@ -3409,6 +3419,8 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                     derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, pay_lo,
                                        pay_hi, scratch, rot_pay_us, rk_pay);
                     res.stage_cfo_rotate_us += rot_pay_us;
+                    res.stage_cfo_rotated_samples += (pay_hi - pay_lo);
+                    ++res.stage_cfo_rotation_passes;
                     sec_derotated_hi = std::max(sec_derotated_hi, pay_hi);
                 }
 
@@ -3447,14 +3459,18 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             // separate diagnostic bucket so the first-pass stage timings are
             // not silently replaced or double-counted.
             ++res.stage_softchip_fallbacks;
-            // Fallback: compensate full window on legacy retry (Task A1)
+            // Fallback: compensate full window on legacy retry (Task A1).
+            // Record fallback_t0 before rotation so entire fallback cost is
+            // captured in stage_softchip_fallback_us and stage_total_us.
+            const auto fallback_t0 = std::chrono::steady_clock::now();
             uint64_t rot_fb_us = 0;
             uint32_t rk_fb = 0;
             derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, 0, n, scratch,
                                rot_fb_us, rk_fb);
             res.stage_cfo_rotate_us += rot_fb_us;
+            res.stage_cfo_rotated_samples += n;
+            ++res.stage_cfo_rotation_passes;
             sec_derotated_hi = n;
-            const auto fallback_t0 = std::chrono::steady_clock::now();
             CirResult full_cir;
             NsSfdResult full_ns;
             PhrResult full_phr;

@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -42,6 +43,23 @@
 namespace gr {
 namespace uwb {
 namespace sic {
+
+static std::atomic<int> s_force_disable_b3(-1);
+
+void set_b3_simd_disabled(int disabled)
+{
+    s_force_disable_b3.store(disabled, std::memory_order_relaxed);
+}
+
+bool is_b3_simd_disabled()
+{
+    const int forced = s_force_disable_b3.load(std::memory_order_relaxed);
+    if (forced >= 0)
+        return forced != 0;
+    const char* env = std::getenv("UWB_SIC_DISABLE_B3");
+    return (env != nullptr && *env != '\0' && *env != '0');
+}
+
 namespace {
 
 using cf = std::complex<float>;
@@ -783,7 +801,8 @@ static bool apply_discrete_cir_pulses_impl(
     r.phase_us = us(t_phase);
 
     const auto t_conv = Clock::now();
-    static const bool disable_b3 = (std::getenv("UWB_SIC_DISABLE_B3") != nullptr);
+    const bool disable_b3 = is_b3_simd_disabled();
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
     if (!disable_b3 && has_avx2_fma() && model.tap_count == 20) {
         if (model.cfo_hz == 0.0) {
             accumulate_pulses_zero_cfo_20tap_avx2(
@@ -792,7 +811,9 @@ static bool apply_discrete_cir_pulses_impl(
             accumulate_pulses_cfo_20tap_avx2(
                 recon + lo, taps, pulses.events, pulses.count, rotation, omega);
         }
-    } else {
+    } else
+#endif
+    {
         if (model.cfo_hz == 0.0) {
             // Zero CFO: sign_i is real; the dedicated add/sub keeps the old
             // unit-real accumulation order and is bit-comparable to it.

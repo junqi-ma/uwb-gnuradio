@@ -1156,8 +1156,8 @@ BOOST_AUTO_TEST_CASE(b2_b3_sparse_pulse_avx2_fma_20tap_and_fallback_parity)
                 m.active_lags[t] = static_cast<int16_t>(m.lag_lo + int64_t(t));
             }
 
-            // Run with B3 (default)
-            ::unsetenv("UWB_SIC_DISABLE_B3");
+            // Run with B3 SIMD enabled
+            sic::set_b3_simd_disabled(0);
             std::vector<cf> out_opt(n), ihat_opt(n);
             sic::DiscreteCirResult r_opt;
             BOOST_REQUIRE(sic::apply_discrete_cir_pulses(
@@ -1165,15 +1165,15 @@ BOOST_AUTO_TEST_CASE(b2_b3_sparse_pulse_avx2_fma_20tap_and_fallback_parity)
                 m, 0, int64_t(n), s, out_opt.data(), ihat_opt.data(), &r_opt));
             BOOST_CHECK(r_opt.committed);
 
-            // Run with B3 disabled (generic fallback path)
-            ::setenv("UWB_SIC_DISABLE_B3", "1", 1);
+            // Run with B3 SIMD disabled (generic fallback path)
+            sic::set_b3_simd_disabled(1);
             std::vector<cf> out_fallback(n), ihat_fallback(n);
             sic::DiscreteCirResult r_fallback;
             BOOST_REQUIRE(sic::apply_discrete_cir_pulses(
                 y.data(), n, pl, s.impulse_sync.data(), s.impulse_sync.size(),
                 m, 0, int64_t(n), s, out_fallback.data(), ihat_fallback.data(), &r_fallback));
             BOOST_CHECK(r_fallback.committed);
-            ::unsetenv("UWB_SIC_DISABLE_B3");
+            sic::set_b3_simd_disabled(-1);
 
             if (cfo == 0.0) {
                 // Zero CFO must be bit-for-bit identical between AVX2 and fallback!

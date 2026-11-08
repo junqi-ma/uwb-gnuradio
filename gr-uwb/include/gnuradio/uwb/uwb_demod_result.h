@@ -241,6 +241,8 @@ struct DemodResult {
     uint64_t stage_cfo_fit_us = 0;
     uint64_t stage_cfo_rotate_us = 0;
     uint32_t stage_cfo_rotation_kernels = 0; // bit0=initial block, bit1=refit block
+    uint64_t stage_cfo_rotated_samples = 0; // total samples derotated across passes
+    uint32_t stage_cfo_rotation_passes = 0;  // count of derotate_cfo_range invocations
     uint32_t stage_softchip_fallbacks = 0;   // full-path retries (diagnostic)
     uint64_t stage_softchip_fallback_us = 0; // separate total bucket (not a child)
     // Experimental fused payload CMF/despread path.  The two sub-timers are

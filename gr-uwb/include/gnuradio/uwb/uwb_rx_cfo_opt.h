@@ -150,8 +150,64 @@ inline void derotate_range_block(std::complex<float>* dst,
     }
 }
 
-// Scalar reference / fallback range derotation.  Phase origin is strictly
+// 4-chain recurrence with 1024-sample block re-anchoring.
+// Matches the legacy scalar stage_cfo rotation speed and accuracy, generalized
+// to operate on an arbitrary absolute range [lo, hi) where phase origin is sample 0.
+inline void derotate_range_recurrence(std::complex<float>* dst,
+                                      const std::complex<float>* src,
+                                      std::size_t n,
+                                      std::size_t lo,
+                                      std::size_t hi,
+                                      double w)
+{
+    if (n == 0 || src == nullptr || dst == nullptr)
+        return;
+    hi = std::min(hi, n);
+    if (lo >= hi)
+        return;
+
+    constexpr std::size_t kB = 1024;
+    const double cw = w;
+    const double s4_phase = -4.0 * cw;
+    const float s4r = static_cast<float>(std::cos(s4_phase));
+    const float s4i = static_cast<float>(std::sin(s4_phase));
+
+    for (std::size_t b0 = lo; b0 < hi; b0 += kB) {
+        const std::size_t b1 = std::min(hi, b0 + kB);
+        const double ph0 = -cw * static_cast<double>(b0);
+        float cr[4], ci[4];
+        for (int c = 0; c < 4; ++c) {
+            const double ph = ph0 - cw * static_cast<double>(c);
+            cr[c] = static_cast<float>(std::cos(ph));
+            ci[c] = static_cast<float>(std::sin(ph));
+        }
+        std::size_t i = b0;
+        for (; i + 4 <= b1; i += 4) {
+            for (int c = 0; c < 4; ++c) {
+                const float sr = src[i + c].real();
+                const float si = src[i + c].imag();
+                dst[i + c] = std::complex<float>(sr * cr[c] - si * ci[c],
+                                                 sr * ci[c] + si * cr[c]);
+                const float nr = cr[c] * s4r - ci[c] * s4i;
+                const float ni = cr[c] * s4i + ci[c] * s4r;
+                cr[c] = nr;
+                ci[c] = ni;
+            }
+        }
+        for (; i < b1; ++i) {
+            const double ph = -cw * static_cast<double>(i);
+            const float c = static_cast<float>(std::cos(ph));
+            const float s = static_cast<float>(std::sin(ph));
+            const float sr = src[i].real();
+            const float si = src[i].imag();
+            dst[i] = std::complex<float>(sr * c - si * s, sr * s + si * c);
+        }
+    }
+}
+
+// Scalar reference range derotation.  Phase origin is strictly
 // sample 0 (i.e. base sample index has phase -w * i, not treating lo as 0).
+// Kept for QA and numerical verification; not used on hot demod paths.
 inline void derotate_range_scalar(std::complex<float>* dst,
                                   const std::complex<float>* src,
                                   std::size_t n,

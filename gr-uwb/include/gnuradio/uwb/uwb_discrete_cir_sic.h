@@ -319,6 +319,12 @@ UWB_API DiscreteCirResult fullpacket_cancel_discrete(
     std::complex<float>* out,
     std::complex<float>* ihat);
 
+// Controls whether AVX2/FMA kernel B3 is disabled (for QA / benchmarking).
+// Default (-1) evaluates environment variable UWB_SIC_DISABLE_B3 on query.
+// Setting 0 forces enabled; setting 1 forces disabled.
+UWB_API void set_b3_simd_disabled(int disabled);
+UWB_API bool is_b3_simd_disabled();
+
 } // namespace sic
 } // namespace uwb
 } // namespace gr

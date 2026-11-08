@@ -1906,33 +1906,41 @@ BOOST_AUTO_TEST_CASE(test_demod_core_task_a1_cfo_range_absolute_phase_origin)
         const double w = 2.0 * M_PI * cfo_hz / kQm35SampleRate;
         for (const auto& iv : intervals) {
             std::vector<gr_complex> dst_block(n, sentinel);
+            std::vector<gr_complex> dst_recurrence(n, sentinel);
             std::vector<gr_complex> dst_scalar(n, sentinel);
             std::vector<gr_complex> ref(n, sentinel);
 
             rxopt::derotate_range_block(dst_block.data(), src.data(), n, iv.lo, iv.hi, w);
+            rxopt::derotate_range_recurrence(dst_recurrence.data(), src.data(), n, iv.lo, iv.hi, w);
             rxopt::derotate_range_scalar(dst_scalar.data(), src.data(), n, iv.lo, iv.hi, w);
             rxopt::derotate_range_reference(ref.data(), src.data(), n, iv.lo, iv.hi, w);
 
             // 1. Outside [lo, hi), sentinel must be strictly preserved
             for (size_t i = 0; i < iv.lo; ++i) {
                 BOOST_CHECK_EQUAL(dst_block[i], sentinel);
+                BOOST_CHECK_EQUAL(dst_recurrence[i], sentinel);
                 BOOST_CHECK_EQUAL(dst_scalar[i], sentinel);
             }
             for (size_t i = iv.hi; i < n; ++i) {
                 BOOST_CHECK_EQUAL(dst_block[i], sentinel);
+                BOOST_CHECK_EQUAL(dst_recurrence[i], sentinel);
                 BOOST_CHECK_EQUAL(dst_scalar[i], sentinel);
             }
 
             // 2. Inside [lo, hi), verify against independent reference
             double max_err_block = 0.0;
+            double max_err_recurrence = 0.0;
             double max_err_scalar = 0.0;
             for (size_t i = iv.lo; i < iv.hi; ++i) {
                 max_err_block = std::max(max_err_block,
                     static_cast<double>(std::abs(dst_block[i] - ref[i])));
+                max_err_recurrence = std::max(max_err_recurrence,
+                    static_cast<double>(std::abs(dst_recurrence[i] - ref[i])));
                 max_err_scalar = std::max(max_err_scalar,
                     static_cast<double>(std::abs(dst_scalar[i] - ref[i])));
             }
             BOOST_CHECK_LT(max_err_block, 2e-5);
+            BOOST_CHECK_LT(max_err_recurrence, 2e-5);
             BOOST_CHECK_LT(max_err_scalar, 1e-6);
 
             // 3. Strict verification of phase origin = sample 0 (not lo!):
@@ -1943,8 +1951,10 @@ BOOST_AUTO_TEST_CASE(test_demod_core_task_a1_cfo_range_absolute_phase_origin)
                     gr_complex(static_cast<float>(std::cos(expected_phase)),
                                static_cast<float>(std::sin(expected_phase)));
                 BOOST_CHECK_LT(std::abs(dst_block[iv.lo] - expected_lo), 2e-5f);
+                BOOST_CHECK_LT(std::abs(dst_recurrence[iv.lo] - expected_lo), 2e-5f);
                 // If lo were wrongly treated as phase 0, dst[lo] would equal src[lo]
                 BOOST_CHECK_GT(std::abs(dst_block[iv.lo] - src[iv.lo]), 1e-3f);
+                BOOST_CHECK_GT(std::abs(dst_recurrence[iv.lo] - src[iv.lo]), 1e-3f);
             }
         }
     }
@@ -2040,5 +2050,75 @@ BOOST_AUTO_TEST_CASE(test_demod_core_task_a1_a2_full_pipeline_range_cfo)
         BOOST_CHECK_EQUAL(res.payload.received_fcs, uint16_t(0x584b));
         BOOST_CHECK_CLOSE(res.cfo.cfo_hz, cfo_hz, 200.0); // within 200 Hz
         BOOST_CHECK_GT(res.stage_cfo_rotate_us, 0u);
+        BOOST_CHECK_GT(res.stage_cfo_rotated_samples, 0u);
+        BOOST_CHECK_GE(res.stage_cfo_rotation_passes, 2u);
     }
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_default_rx_recurrence)
+{
+    // Verify that default RX configuration (rx_fast_cfo_rotation = false)
+    // succeeds using the fast 4-chain recurrence kernel.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+
+    const double cfo_hz = 30000.0;
+    std::vector<gr_complex> rx(iq.size());
+    const double w = 2.0 * M_PI * cfo_hz / kQm35SampleRate;
+    for (size_t i = 0; i < iq.size(); ++i) {
+        const double phase = w * static_cast<double>(i);
+        rx[i] = iq[i] * gr_complex(static_cast<float>(std::cos(phase)),
+                                   static_cast<float>(std::sin(phase)));
+    }
+
+    auto prof = Qm35825Profile::Default();
+    prof.sfd_mode = "ieee";
+    prof.rx_fast_cfo_rotation = false; // test recurrence path
+    prof.rx_fast_sfd = true;
+
+    core::DemodScratch scratch;
+    scratch.reserve(rx.size());
+    auto res = core::demodulate_one(rx.data(), rx.size(), prof, 1, 9984, 0,
+                                    load_reference_template(), scratch);
+    BOOST_CHECK(res.status == DemodStatus::Success);
+    BOOST_CHECK(res.payload.fcs_pass);
+    BOOST_CHECK_EQUAL(res.cfo.rotation_kernel, 0u);
+    BOOST_CHECK_CLOSE(res.cfo.cfo_hz, cfo_hz, 200.0);
+    BOOST_CHECK_GT(res.stage_cfo_rotated_samples, 0u);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_softchip_fallback_timing_accounting)
+{
+    // Test that on softchip fallback retry:
+    // 1. Fallback rotation is included in stage_softchip_fallback_us and stage_total_us
+    // 2. Full window is derotated and counted
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+
+    // Corrupt payload region so fused CMF fails FCS and forces fallback retry
+    std::vector<gr_complex> rx = iq;
+    // Preamble + SFD + PHR is ~104000 samples, corrupt payload after sample 110000
+    for (size_t i = 110000; i < rx.size(); ++i) {
+        rx[i] = gr_complex(0.0f, 0.0f);
+    }
+
+    auto prof = Qm35825Profile::Default();
+    prof.sfd_mode = "ieee";
+    prof.rx_fast_sfd = true;
+    prof.rx_fast_cfo_rotation = true;
+    prof.rx_softchip_on_demand = true;
+    prof.rx_fused_payload_cmf = true;
+    prof.rx_fused_phr_cmf = true;
+
+    core::DemodScratch scratch;
+    scratch.reserve(rx.size());
+    auto res = core::demodulate_one(rx.data(), rx.size(), prof, 1, 9984, 0,
+                                    load_reference_template(), scratch);
+    // Fallback must have been triggered
+    BOOST_CHECK_EQUAL(res.stage_softchip_fallbacks, 1u);
+    BOOST_CHECK_GT(res.stage_softchip_fallback_us, 0u);
+    // stage_total_us must be at least stage_softchip_fallback_us
+    BOOST_CHECK_GE(res.stage_total_us, res.stage_softchip_fallback_us);
+    // Full window was rotated in fallback
+    BOOST_CHECK_GE(res.stage_cfo_rotated_samples, rx.size());
 }
