@@ -738,6 +738,154 @@ BOOST_AUTO_TEST_CASE(discrete_transaction_length_edges_16_and_127)
     long_rig.expect_bypass();
 }
 
+BOOST_AUTO_TEST_CASE(sparse_pulse_apply_matches_approximate_cfo_reference)
+{
+    auto wire=mod::make_random_psdu(30,909,true);
+    mod::HrpModConfig unit;
+    unit.code_index=10; unit.sync_repetitions=64; unit.sfd_mode="4z2";
+    unit.peak_amplitude=1.f;
+    unit.pulse.shape=mod::PulseShape::External;
+    unit.pulse.external_n_taps=2; unit.external_taps={1.f,0.f};
+    mod::HrpModScratch ms;
+    const size_t cap=300000;
+    ms.reserve(127,cap);
+    mod::PulseList pl;
+    BOOST_REQUIRE(mod::modulate_pulse_list(wire.data(),wire.size(),unit,ms,cap,pl));
+    std::vector<mod::PulseEvent> events(pl.events,pl.events+pl.count);
+    pl.events=events.data();
+
+    const int64_t q=2048;
+    const size_t n=pl.packet_samples+4096;
+    const int8_t* code=demod::GetPreambleCode(10);
+    for (double cfo : {0.0,-50000.0,50000.0}) {
+        sic::DiscreteCirModel m=make_model(q,-2,10);
+        m.impulse_template=true;
+        m.cfo_hz=cfo;
+        set_active(m,{{-2,cf(0.9f,-0.2f)},{0,cf(0.4f,0.25f)},
+                      {7,cf(-0.15f,0.1f)}});
+        sic::DiscreteCirScratch s;
+        s.prepared=true; s.sps=kSps; s.max_window_samples=n;
+        s.ipatov_correlation=true; s.sparse_pulse_reconstruct=true;
+        s.max_packet_samples=pl.packet_samples+64;
+        s.waveform.assign(s.max_packet_samples,cf{});
+        s.scaled_waveform.assign(s.max_packet_samples,cf{});
+        s.accumulator.assign(n,cf{});
+        s.fir_tmp.assign(n,cf{});
+        s.impulse_sync.assign(kSps,cf{});
+        for (size_t c=0;c<demod::kQm35CodeLength;++c)
+            s.impulse_sync[8*c]=cf(float(code[c]),0.f);
+
+        std::vector<cf> y(n,cf(0.01f,-0.02f)),out(n),ihat(n);
+        sic::DiscreteCirResult r;
+        BOOST_REQUIRE_MESSAGE(sic::apply_discrete_cir_pulses(
+                                  y.data(),n,pl,s.impulse_sync.data(),
+                                  s.impulse_sync.size(),m,0,int64_t(n),s,
+                                  out.data(),ihat.data(),&r),
+                              r.reason);
+        BOOST_CHECK(r.committed);
+        BOOST_CHECK_EQUAL(std::string(r.reason),"committed");
+        BOOST_CHECK_EQUAL(r.cfo_us,0.0);
+        BOOST_CHECK_EQUAL(r.pulse_event_count,pl.count);
+        BOOST_CHECK_EQUAL(r.pulse_packet_samples,pl.packet_samples);
+
+        // Independent double scalar implementation of the approximate form
+        // c_i = sign_i*exp(j*w*(q+m_i-anchor)); yhat[q+m_i+lag] += c_i*taps.
+        std::vector<cd> want(n,cd{});
+        const double omega=2.0*kPi*cfo/kWorkRateHz;
+        for (const auto& e : events) {
+            const cd c=double(e.sign)*std::polar(
+                1.0,omega*double(q+int64_t(e.sample_offset)-
+                                 m.phase_reference_sample));
+            for (size_t d=0;d<m.tap_count;++d) {
+                const int64_t j=q+int64_t(e.sample_offset)+m.lag_lo+
+                               int64_t(d);
+                if (j>=0 && j<int64_t(n))
+                    want[static_cast<size_t>(j)] += c*cd(m.taps[d]);
+            }
+        }
+        float worst=0.f;
+        for (size_t j=0;j<n;++j)
+            worst=std::max(worst,std::abs(ihat[j]-cf(want[j])));
+        BOOST_CHECK_LT(worst,2e-5f);
+        const int64_t lo=q+m.lag_lo;
+        const int64_t hi=lo+int64_t(m.tap_count)+int64_t(pl.packet_samples);
+        for (int64_t j=0;j<int64_t(n);++j) {
+            if (j<lo || j>=hi) {
+                BOOST_CHECK_EQUAL(ihat[static_cast<size_t>(j)],cf{});
+            }
+            if (j<lo || j>=hi)
+                BOOST_CHECK_EQUAL(out[static_cast<size_t>(j)],y[static_cast<size_t>(j)]);
+            else
+                BOOST_CHECK_LT(std::abs(out[static_cast<size_t>(j)]-
+                                        (y[static_cast<size_t>(j)]-
+                                         ihat[static_cast<size_t>(j)])),1e-6f);
+        }
+
+        // Optional ihat: the same reconstruction must be produced and the
+        // support flanks outside the consumer ROI must still equal y.
+        std::vector<cf> out_only(n);
+        sic::DiscreteCirResult rn;
+        BOOST_REQUIRE_MESSAGE(sic::apply_discrete_cir_pulses(
+                                  y.data(),n,pl,s.impulse_sync.data(),
+                                  s.impulse_sync.size(),m,0,int64_t(n),s,
+                                  out_only.data(),nullptr,&rn),
+                              rn.reason);
+        BOOST_CHECK(rn.committed);
+        for (int64_t j=0;j<int64_t(n);++j) {
+            const size_t u=static_cast<size_t>(j);
+            if (j<lo || j>=hi)
+                BOOST_CHECK_EQUAL(out_only[u],y[u]);
+            else
+                BOOST_CHECK_LT(std::abs(out_only[u]-
+                                        (y[u]-ihat[u])),1e-6f);
+        }
+    }
+
+    // Representation failures must bypass transactionally.
+    {
+        sic::DiscreteCirModel m=make_model(q,-2,10);
+        m.impulse_template=true;
+        set_active(m,{{0,cf(0.5f,0.0f)}});
+        sic::DiscreteCirScratch s;
+        s.prepared=true; s.sps=kSps; s.max_window_samples=n;
+        s.ipatov_correlation=true; s.sparse_pulse_reconstruct=true;
+        s.impulse_sync.assign(kSps,cf{});
+        for (size_t c=0;c<demod::kQm35CodeLength;++c)
+            s.impulse_sync[8*c]=cf(float(code[c]),0.f);
+        std::vector<cf> y(n,cf(0.02f,0.01f)),out(n),ihat(n);
+        auto check_fail=[&](const mod::PulseList& bad,const char* reason){
+            sic::DiscreteCirResult r;
+            BOOST_CHECK(!sic::apply_discrete_cir_pulses(
+                y.data(),n,bad,s.impulse_sync.data(),s.impulse_sync.size(),
+                m,0,int64_t(n),s,out.data(),ihat.data(),&r));
+            BOOST_CHECK_EQUAL(std::string(r.reason),reason);
+            BOOST_CHECK_EQUAL(std::memcmp(y.data(),out.data(),n*sizeof(cf)),0);
+            BOOST_CHECK_EQUAL(count_nonzero(ihat,0,0),0);
+        };
+        auto duplicate=events;
+        if (duplicate.size()>1) duplicate[1].sample_offset=duplicate[0].sample_offset;
+        mod::PulseList bad{duplicate.data(),duplicate.size(),pl.packet_samples};
+        check_fail(bad,"invalid_pulse_list");
+
+        auto wrong_sync=events;
+        wrong_sync[0].sign=static_cast<int8_t>(-wrong_sync[0].sign);
+        mod::PulseList bad_sync{wrong_sync.data(),wrong_sync.size(),
+                                pl.packet_samples};
+        check_fail(bad_sync,"pulse_template_mismatch");
+
+        auto far=m;
+        far.q=int64_t(n)-1;
+        far.phase_reference_sample=far.q;
+        sic::DiscreteCirResult rf;
+        BOOST_CHECK(!sic::apply_discrete_cir_pulses(
+            y.data(),n,pl,s.impulse_sync.data(),s.impulse_sync.size(),far,
+            0,int64_t(n),s,out.data(),ihat.data(),&rf));
+        BOOST_CHECK_EQUAL(std::string(rf.reason),"context_truncated");
+        BOOST_CHECK_EQUAL(std::memcmp(y.data(),out.data(),n*sizeof(cf)),0);
+        BOOST_CHECK_EQUAL(count_nonzero(ihat,0,0),0);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(discrete_numeric_safety_and_scratch_capacity_bypass)
 {
     ApplyRig rig(4096, 1024);

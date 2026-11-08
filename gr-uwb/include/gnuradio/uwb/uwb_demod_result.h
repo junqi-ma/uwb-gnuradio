@@ -140,6 +140,9 @@ struct CirResult {
     // Sub-stage wall-clock timing (µs), so CIR estimate vs soft-chip FIR vs
     // postprocess can be ranked separately (P0 diagnostics).
     uint64_t cir_estimate_us = 0;       // spread build + SYNC average + taps
+    uint32_t soft_fir_first_chip = 0;   // absolute coordinate; skipped prefix is zero
+    uint32_t soft_fir_computed_chips = 0;
+    uint64_t sync_phase_us = 0;         // child of postprocess_us
     uint64_t soft_fir_us = 0;           // chip-grid matched-filter FIR
     uint64_t postprocess_us = 0;        // phase align + rotate + real/max/norm
     // On-demand soft-chip experiment: initial prefix vs extension.  Zero

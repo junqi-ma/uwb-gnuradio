@@ -1144,6 +1144,14 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     if (on_demand && (fractional_grid || bypass_filter || rake_k > 0))
         return false;
 
+    // Only NS-SFD still consumes a soft-chip stream on the fused PHR path.
+    // Keep its -8-chip search halo, not a filtered copy of every SYNC.
+    const bool skip_sync_fir = on_demand && !extending &&
+        profile.rx_fused_phr_cmf && profile.rx_fused_payload_cmf && spc_i == 2;
+    const size_t sync_end = profile.preamble_repetitions * kQm35ChipsPerSymbol;
+    const size_t fir_first = skip_sync_fir && sync_end > 8 ? sync_end - 8 : 0;
+    if (fir_first >= num_chips)
+        return false;
     size_t checked = 0;
     if (fractional_grid) {
         // MATLAB keeps measured_period/chips_per_symbol as a fractional
@@ -1191,7 +1199,7 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     // Edge chips: FIR window may clip below sample 0 (bounds-checked scalar).
     // A prefix call handles them once; an extension starts after them.
     for (size_t i = extending ? checked : 0;
-         !fractional_grid && i < checked; ++i) {
+         !fractional_grid && !skip_sync_fir && i < checked; ++i) {
         const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
         if (bypass_filter) {
             const int64_t idx =
@@ -1213,6 +1221,11 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         }
         fir_out[i] = acc;
     }
+    if (skip_sync_fir)
+        checked = std::max(checked, fir_first);
+    out.soft_fir_first_chip = static_cast<uint32_t>(checked);
+    out.soft_fir_computed_chips = static_cast<uint32_t>(
+        num_chips - (skip_sync_fir ? fir_first : (extending ? begin_chip : 0)));
     // Main body: full tap window is in-bounds.  Call the selected kernel
     // directly (no per-chip switch) so the fixed-38 AVX2 path fully inlines.
     {
@@ -1300,6 +1313,19 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     if (extending) {
         // Frozen by the prefix pass: phase alignment runs once per packet.
         rot = scratch.softchip.rot;
+    } else if (skip_sync_fir) {
+        const auto phase_begin = std::chrono::steady_clock::now();
+        std::complex<float> gain{};
+        if (!rxopt::sync_phase_gain(rx, n,
+                chip_start - fwd + static_cast<int64_t>(2 * phase_first),
+                h_conj, tap_count, spread, phase_reps, scratch.work, gain))
+            return false;
+        const float ang = std::arg(gain);
+        rot = std::complex<float>(std::cos(-ang), std::sin(-ang));
+        scratch.softchip.rot = rot;
+        out.sync_phase_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - phase_begin).count());
     } else {
         std::complex<float> gain(0.0f, 0.0f);
         size_t s = 0;
@@ -1322,8 +1348,13 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     // rotated complex corr stream, so writing it back wastes ~1.2 MB/packet.
     scratch.soft_chips.resize(num_chips);
     if (!extending) {
+        // Preserve absolute chip coordinates; the skipped prefix is not data.
+        // NS-SFD uses normalized correlation, invariant to this common scale.
+        const size_t post_first = skip_sync_fir ? fir_first : 0;
+        std::fill(scratch.soft_chips.begin(),
+                  scratch.soft_chips.begin() + post_first, 0.0f);
         float mx = 0.0f;
-        for (size_t i = 0; i < num_chips; ++i) {
+        for (size_t i = post_first; i < num_chips; ++i) {
             // (cr+j ci)*(rr+j ri) → real = cr*rr - ci*ri
             const float cr = fir_out[i].real();
             const float ci = fir_out[i].imag();
@@ -1334,7 +1365,7 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
                 mx = ar;
         }
         const float inv_denom = 1.0f / (mx + 1e-12f);
-        for (size_t i = 0; i < num_chips; ++i)
+        for (size_t i = post_first; i < num_chips; ++i)
             scratch.soft_chips[i] *= inv_denom;
         if (on_demand) {
             scratch.softchip.prefix_max = mx;

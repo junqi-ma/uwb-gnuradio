@@ -13,7 +13,10 @@
  *
  *   y_hat[n] = exp(j*w*(n-r)) * sum_l h[l] * x[n-q-l]
  *
- * x is the COMPLETE pulse-shaped waveform produced by the HRP modulator, not
+ * With cfg.ipatov_correlation, x is a UNIT impulse packet and h includes
+ * shaping; the estimator averages visible SYNC windows and correlates with
+ * the sparse Ipatov code, retaining absolute gain (no norm-to-one).
+ * Otherwise x is the COMPLETE pulse-shaped waveform produced by the HRP modulator, not
  * the chip sequence and not a correlator output.  h is a finite integer-lag
  * FIR estimated ONLY from the first fit_reps SYNC symbols visible before
  * observed_end:
@@ -54,9 +57,20 @@ namespace sic {
 // Maximum finite lag support the estimator will ever prepare.  A support must
 // also stay strictly shorter than one SYNC period (samples_per_symbol).
 constexpr size_t kDiscreteCirMaxTaps = 256;
-constexpr size_t kDiscreteCirMaxActive = 64;
+// Correlation responses retain the complete finite pulse/channel response.
+// The legacy LS estimator still caps its active solve at 64 columns.
+constexpr size_t kDiscreteCirMaxActive = kDiscreteCirMaxTaps;
 
 struct DiscreteCirConfig {
+    // Ipatov forward correlation / code energy, no projection or LS.
+    // The resulting response includes TX shaping; apply uses unit impulses.
+    bool ipatov_correlation = false;
+    // Experimental sparse-pulse reconstruction.  Valid only with
+    // ipatov_correlation: the decoded packet is represented as non-zero
+    // positions/signs and the frozen CIR is added at each event with the
+    // event's CFO phase.  The legacy unit-real waveform path stays available
+    // for paired runs.
+    bool sparse_pulse_reconstruct = false;
     // Public profile.  The estimator never receives injected delay/CFO/paths.
     size_t comm_code = 10;
     size_t sync_reps = 64;
@@ -160,11 +174,17 @@ struct DiscreteCirScratch {
     std::vector<std::complex<float>> fir_tmp;          // CFO scalar-multiply temp
     std::vector<int8_t> expected_phr;
     mod::HrpModScratch modulator;
+    bool ipatov_correlation = false;
+    bool sparse_pulse_reconstruct = false;
+    std::vector<std::complex<float>> impulse_sync;
+    mod::HrpModConfig impulse_profile;
 
     UWB_API void reserve(size_t max_window_samples);
 };
 
 struct DiscreteCirModel {
+    bool impulse_template = false; // taps include shaping; never convolve shaped TX
+    size_t cir_repetitions = 0;    // complete visible correlation windows
     bool valid = false;
     const char* status = "not_estimated";
     const char* reason = nullptr;
@@ -210,6 +230,13 @@ struct DiscreteCirResult {
     double validate_us = 0, tx_us = 0;
     double scale_us = 0, convolution_us = 0, cfo_us = 0;
     double channel_us = 0, subtract_us = 0, apply_total_us = 0;
+    // Sparse-pulse sub-timings.  They are children of channel_us (which is the
+    // parent) and are never added to it a second time.  phase_us covers the
+    // absolute phase-table setup; the per-event phase multiply is inside
+    // convolution_us.
+    double zero_us = 0, phase_us = 0, check_us = 0;
+    size_t pulse_event_count = 0;
+    size_t pulse_packet_samples = 0;
     uint64_t model_id = 0;
     int64_t q = -1;
     double cfo_hz = 0.0;
@@ -249,6 +276,29 @@ UWB_API bool apply_discrete_cir(const std::complex<float>* y,
                                 std::complex<float>* out,
                                 std::complex<float>* ihat,
                                 DiscreteCirResult* result = nullptr);
+
+// Sparse-pulse apply.  `pulses` must be the unit-impulse packet produced by
+// mod::modulate_pulse_list from the same Ipatov profile.  The reconstruction
+// uses the approximate form
+//
+//   c_i = sign_i * exp(j*w*(q + m_i - anchor))
+//   y_hat[q + m_i + lag_lo + j] += c_i * taps[j]
+//
+// i.e. the CFO phase is evaluated once per pulse and intentionally not varied
+// across the CIR support.  No complete-packet CFO rotation is performed.
+UWB_API bool apply_discrete_cir_pulses(
+    const std::complex<float>* y,
+    size_t n,
+    const mod::PulseList& pulses,
+    const std::complex<float>* reference_sync,
+    size_t sync_n,
+    const DiscreteCirModel& model,
+    int64_t roi_lo,
+    int64_t roi_hi,
+    DiscreteCirScratch& scratch,
+    std::complex<float>* out,
+    std::complex<float>* ihat,
+    DiscreteCirResult* result = nullptr);
 
 // Transactional full-packet wrapper: validates FCS/PHR/profile, remodulates
 // the decoded wire PSDU once, applies the frozen discrete model and subtracts

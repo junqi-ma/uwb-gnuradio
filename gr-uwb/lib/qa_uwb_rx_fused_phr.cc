@@ -730,6 +730,10 @@ BOOST_AUTO_TEST_CASE(phr_fused_pipeline_decodes_same_psdu)
         BOOST_CHECK_EQUAL(b.cir.on_demand_extended, 0u);
         BOOST_CHECK_EQUAL(b.cir.on_demand_fallbacks, 0u);
         BOOST_CHECK_EQUAL(b.stage_softchip_fallbacks, 0u);
+        BOOST_CHECK_EQUAL(b.cir.soft_fir_first_chip, 32504u);
+        BOOST_CHECK_EQUAL(b.cir.soft_fir_computed_chips, 4081u);
+        BOOST_CHECK_EQUAL(a.ns_sfd.sfd_start_chip, b.ns_sfd.sfd_start_chip);
+        BOOST_CHECK_EQUAL(a.ns_sfd.polarity, b.ns_sfd.polarity);
     }
 }
 
@@ -930,4 +934,45 @@ BOOST_AUTO_TEST_CASE(phr_fused_diag_replay_partitions_prefix)
                        << r.diag_fir_payload_chips
                        << " extra=" << r.diag_fir_extra_us << "us/"
                        << r.diag_fir_extra_chips);
+}
+
+// Independent double reference for the reordered SYNC phase statistic.
+BOOST_AUTO_TEST_CASE(sync_phase_without_chip_fir_matches_reference)
+{
+    std::mt19937 rng(8204);
+    std::uniform_real_distribution<float> d(-1.0f, 1.0f);
+    std::vector<cf> iq(34000), taps(38), sum;
+    std::vector<int8_t> spread(508);
+    for (auto& v : iq) v = cf(d(rng), d(rng));
+    for (auto& v : taps) v = cf(d(rng), d(rng));
+    for (size_t i = 0; i < spread.size(); ++i)
+        spread[i] = i % 16 == 0 ? (i % 32 == 0 ? 1 : -1) : 0;
+    for (int64_t base : {int64_t(-8), int64_t(17)}) {
+        cf gain;
+        BOOST_REQUIRE(rxopt::sync_phase_gain(iq.data(), iq.size(), base,
+            taps.data(), taps.size(), spread, 32, sum, gain));
+        std::complex<double> ref{};
+        double scale = 0;
+        for (size_t r = 0; r < 32; ++r)
+            for (size_t c = 0; c < spread.size(); ++c) {
+                std::complex<double> v{};
+                for (size_t q = 0; q < taps.size(); ++q) {
+                    const int64_t k = base + r * 1016 + c * 2 + q;
+                    if (k >= 0)
+                        v += std::complex<double>(taps[q]) *
+                             std::complex<double>(iq[k]);
+                }
+                ref += double(spread[c]) * v;
+                scale += std::abs(double(spread[c]) * v);
+            }
+        BOOST_CHECK_LT(std::abs(std::complex<double>(gain) - ref) /
+                           std::max(std::abs(ref), 1.0), 2e-5);
+        BOOST_CHECK_GT(scale, 0.0);
+    }
+    cf gain;
+    const size_t exact = 17 + 31 * 1016 + 2 * 507 + 38;
+    BOOST_CHECK(rxopt::sync_phase_gain(iq.data(), exact, 17,
+        taps.data(), taps.size(), spread, 32, sum, gain));
+    BOOST_CHECK(!rxopt::sync_phase_gain(iq.data(), exact-1, 17,
+        taps.data(), taps.size(), spread, 32, sum, gain));
 }

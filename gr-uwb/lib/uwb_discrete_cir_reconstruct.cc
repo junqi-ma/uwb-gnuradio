@@ -98,6 +98,30 @@ fused_axpy(cf* __restrict dst, const cf* __restrict src, cf h, size_t count)
     }
 }
 
+// Zero-CFO dedicated accumulation.  A unit sign does not need a complex
+// multiply; this preserves the old unit-real path's per-tap accumulation
+// order while removing the two zero multiplies in fused_axpy.
+void __attribute__((noinline))
+fused_addsub(cf* __restrict dst, const cf* __restrict src, int sign,
+             size_t count)
+{
+    float* __restrict d = reinterpret_cast<float*>(dst);
+    const float* __restrict s = reinterpret_cast<const float*>(src);
+    if (sign > 0) {
+#pragma GCC ivdep
+        for (size_t i = 0; i < count; ++i) {
+            d[2 * i] += s[2 * i];
+            d[2 * i + 1] += s[2 * i + 1];
+        }
+    } else {
+#pragma GCC ivdep
+        for (size_t i = 0; i < count; ++i) {
+            d[2 * i] -= s[2 * i];
+            d[2 * i + 1] -= s[2 * i + 1];
+        }
+    }
+}
+
 // Fail-closed model gate shared by apply and the transactional wrapper.  A
 // frozen model is usable only with an integer origin, the matching phase
 // anchor, a finite hull strictly shorter than one SYNC period, a finite CFO
@@ -177,9 +201,56 @@ const char* transaction_scratch_failure(const DiscreteCirScratch& s, size_t n)
     return nullptr;
 }
 
+// Sparse event-list gate.  It validates the representation itself (strictly
+// increasing unit signs, complete packet length) and checks the first SYNC
+// against the prepared unit template.  It never regenerates the full packet
+// waveform.  The linear scan is over events, not samples.
+const char* pulse_list_failure(const mod::PulseList& p,
+                               size_t n,
+                               const DiscreteCirScratch& s,
+                               size_t sync_n)
+{
+    if (!s.prepared || s.sps == 0 ||
+        sync_n != s.sps || s.impulse_sync.size() != sync_n ||
+        s.max_window_samples < n)
+        return "scratch_capacity";
+    if (!s.sparse_pulse_reconstruct || !s.ipatov_correlation)
+        return "sparse_pulse_unprepared";
+    if (!p.events || p.count == 0 || p.packet_samples == 0 ||
+        p.packet_samples > mod::kMaxHrpTxSamples)
+        return "invalid_pulse_list";
+
+    uint32_t last = 0;
+    size_t first_sync_events = 0;
+    for (size_t i = 0; i < p.count; ++i) {
+        const mod::PulseEvent& e = p.events[i];
+        if (e.sign != 1 && e.sign != -1)
+            return "invalid_pulse_list";
+        if (e.sample_offset >= p.packet_samples)
+            return "invalid_pulse_list";
+        if (i && e.sample_offset <= last)
+            return "invalid_pulse_list";
+        last = e.sample_offset;
+        if (e.sample_offset < sync_n) {
+            const cf expected = s.impulse_sync[e.sample_offset];
+            if (expected.imag() != 0.f ||
+                expected.real() != static_cast<float>(e.sign))
+                return "pulse_template_mismatch";
+            ++first_sync_events;
+        }
+    }
+    size_t first_sync_nonzero = 0;
+    for (size_t i = 0; i < sync_n; ++i)
+        if (s.impulse_sync[i] != cf(0.f, 0.f))
+            ++first_sync_nonzero;
+    if (first_sync_events != first_sync_nonzero)
+        return "pulse_template_mismatch";
+    return nullptr;
+}
+
 } // namespace
 
-bool apply_discrete_cir(const std::complex<float>* y,
+static bool apply_discrete_cir_impl(const std::complex<float>* y,
                         size_t n,
                         const std::complex<float>* waveform,
                         size_t waveform_n,
@@ -191,7 +262,8 @@ bool apply_discrete_cir(const std::complex<float>* y,
                         DiscreteCirScratch& scratch,
                         std::complex<float>* out,
                         std::complex<float>* ihat,
-                        DiscreteCirResult* result)
+                        DiscreteCirResult* result,
+                        const float* real_impulses)
 {
     const auto t_apply = Clock::now();
     DiscreteCirResult local;
@@ -211,7 +283,7 @@ bool apply_discrete_cir(const std::complex<float>* y,
     std::copy(y, y + n, out);
     if (ihat)
         std::fill(ihat, ihat + n, cf(0.f, 0.f));
-    if (!waveform || !reference_sync || waveform_n == 0 || sync_n == 0 ||
+    if ((!waveform && !real_impulses) || !reference_sync || waveform_n == 0 || sync_n == 0 ||
         waveform_n < sync_n)
         return fail("invalid_buffers");
 
@@ -228,6 +300,15 @@ bool apply_discrete_cir(const std::complex<float>* y,
     for (size_t i = 0; i < n; ++i)
         if (!finite(y[i]))
             return fail("nonfinite_input");
+
+    if (model.impulse_template != scratch.ipatov_correlation ||
+        (real_impulses && !model.impulse_template))
+        return fail("template_kind_mismatch");
+    if (model.impulse_template) {
+        if (scratch.impulse_sync.size() != sync_n)
+            return fail("impulse_template_unprepared");
+        reference_sync = scratch.impulse_sync.data();
+    }
 
     r.model_id = model.model_id;
     r.q = model.q;
@@ -246,43 +327,55 @@ bool apply_discrete_cir(const std::complex<float>* y,
 
     // --- the ONE waveform scale, against the public reference SYNC ----------
     const auto t_scale = Clock::now();
-    cd cross(0.0, 0.0);
-    double energy = 0.0, ref_energy = 0.0;
-    for (size_t i = 0; i < sync_n; ++i) {
-        if (!finite(waveform[i]) || !finite(reference_sync[i]))
-            return fail("nonfinite_input");
-        const cd w = cd(waveform[i]);
-        const cd ref = cd(reference_sync[i]);
-        cross += std::conj(w) * ref;
-        energy += std::norm(w);
-        ref_energy += std::norm(ref);
-    }
-    const cd scale = energy > 0.0 ? cross / energy : cd(0.0, 0.0);
-    const double scale_real = scale.real();
-    if (!(scale_real > 0.0) || !std::isfinite(scale_real) ||
-        !std::isfinite(scale.imag()) ||
-        std::fabs(scale.imag()) > kScaleImagMaxRel * scale_real ||
-        !(ref_energy > 0.0))
-        return fail("template_scale_mismatch");
-    double template_error = 0.0;
-    for (size_t i = 0; i < sync_n; ++i)
-        template_error += std::norm(cd(waveform[i]) * scale - cd(reference_sync[i]));
-    if (!std::isfinite(template_error) ||
-        template_error > kTemplateErrorMaxRel * ref_energy)
-        return fail("template_scale_mismatch");
-    // Pre-scale the COMPLETE waveform exactly once.  h already contains the
-    // packet amplitude, so the taps are never scaled again.  Reading through
-    // `waveform` and writing `scaled_waveform` element by element also stays
-    // correct if the caller handed in the same scratch buffer.
-    const float scale_f = static_cast<float>(scale_real);
     cf* const scaled = scratch.scaled_waveform.data();
-    for (size_t i = 0; i < waveform_n; ++i) {
-        const cf v = waveform[i];
-        if (!finite(v))
-            return fail("nonfinite_input");
-        scaled[i] = v * scale_f;
+    if (real_impulses) {
+        // Private input from modulate_unit_impulses: validated unit pulse
+        // profile + integer BPRF symbols guarantee finite {-1,0,+1} samples.
+        // Match the public unit reference without constructing/scaling a
+        // complete complex waveform. Absolute amplitude remains in the CIR.
+        for (size_t i=0; i<sync_n; ++i)
+            if (real_impulses[i] != reference_sync[i].real() ||
+                reference_sync[i].imag() != 0.f)
+                return fail("template_scale_mismatch");
+        r.waveform_scale = 1.0;
+    } else {
+        cd cross(0.0, 0.0);
+        double energy = 0.0, ref_energy = 0.0;
+        for (size_t i = 0; i < sync_n; ++i) {
+            if (!finite(waveform[i]) || !finite(reference_sync[i]))
+                return fail("nonfinite_input");
+            const cd w = cd(waveform[i]);
+            const cd ref = cd(reference_sync[i]);
+            cross += std::conj(w) * ref;
+            energy += std::norm(w);
+            ref_energy += std::norm(ref);
+        }
+        const cd scale = energy > 0.0 ? cross / energy : cd(0.0, 0.0);
+        const double scale_real = scale.real();
+        if (!(scale_real > 0.0) || !std::isfinite(scale_real) ||
+            !std::isfinite(scale.imag()) ||
+            std::fabs(scale.imag()) > kScaleImagMaxRel * scale_real ||
+            !(ref_energy > 0.0))
+            return fail("template_scale_mismatch");
+        double template_error = 0.0;
+        for (size_t i = 0; i < sync_n; ++i)
+            template_error += std::norm(cd(waveform[i]) * scale - cd(reference_sync[i]));
+        if (!std::isfinite(template_error) ||
+            template_error > kTemplateErrorMaxRel * ref_energy)
+            return fail("template_scale_mismatch");
+        // Pre-scale the COMPLETE waveform exactly once.  h already contains the
+        // packet amplitude, so the taps are never scaled again.  Reading through
+        // `waveform` and writing `scaled_waveform` element by element also stays
+        // correct if the caller handed in the same scratch buffer.
+        const float scale_f = static_cast<float>(scale_real);
+        for (size_t i = 0; i < waveform_n; ++i) {
+            const cf v = waveform[i];
+            if (!finite(v))
+                return fail("nonfinite_input");
+            scaled[i] = v * scale_f;
+        }
+        r.waveform_scale = scale_real;
     }
-    r.waveform_scale = scale_real;
     r.scale_us = us(t_scale);
 
     // --- support and consumer ROI ------------------------------------------
@@ -313,7 +406,16 @@ bool apply_discrete_cir(const std::complex<float>* y,
     cf* const acc = scratch.accumulator.data();
     std::fill(acc, acc + len, cf(0.f, 0.f));
     const size_t active = model.active_count;
-    for (size_t a = 0; a < active; ++a) {
+    if (model.impulse_template) {
+        // The unit impulse packet is sparse. Add a contiguous response per
+        // nonzero impulse, avoiding N * response_width zero multiplications.
+        for (int64_t i=0; i<x_n; ++i) {
+            const cf impulse = real_impulses ? cf(real_impulses[i],0.f) : scaled[i];
+            if (impulse==cf{}) continue;
+            const int64_t base=q+i+model.lag_lo;
+            fused_axpy(acc+(base-lo),model.taps.data(),impulse,model.tap_count);
+        }
+    } else for (size_t a = 0; a < active; ++a) {
         const int64_t lag = int64_t(model.active_lags[a]);
         const cf h =
             model.taps[static_cast<size_t>(lag - model.lag_lo)];
@@ -395,6 +497,208 @@ bool apply_discrete_cir(const std::complex<float>* y,
     return true;
 }
 
+
+bool apply_discrete_cir(const std::complex<float>* y, size_t n,
+                        const std::complex<float>* waveform, size_t waveform_n,
+                        const std::complex<float>* reference_sync, size_t sync_n,
+                        const DiscreteCirModel& model, int64_t roi_lo, int64_t roi_hi,
+                        DiscreteCirScratch& scratch, std::complex<float>* out,
+                        std::complex<float>* ihat, DiscreteCirResult* result)
+{
+    return apply_discrete_cir_impl(y,n,waveform,waveform_n,reference_sync,sync_n,
+                                  model,roi_lo,roi_hi,scratch,out,ihat,result,nullptr);
+}
+
+static bool apply_discrete_cir_pulses_impl(
+    const std::complex<float>* y,
+    size_t n,
+    const mod::PulseList& pulses,
+    const std::complex<float>* reference_sync,
+    size_t sync_n,
+    const DiscreteCirModel& model,
+    int64_t roi_lo,
+    int64_t roi_hi,
+    DiscreteCirScratch& scratch,
+    std::complex<float>* out,
+    std::complex<float>* ihat,
+    DiscreteCirResult* result,
+    bool transaction_prepared)
+{
+    const auto t_apply = Clock::now();
+    DiscreteCirResult local;
+    DiscreteCirResult& r = result ? *result : local;
+    r = DiscreteCirResult();
+    auto fail = [&](const char* reason) {
+        r.committed = false;
+        r.reason = reason;
+        r.apply_total_us = us(t_apply);
+        return false;
+    };
+
+    // Bypass image first: every later failure returns out == y and ihat == 0.
+    if (!y || !out || n == 0 || (ihat && (ihat == y || ihat == out)))
+        return fail("invalid_buffers");
+    // Only the private transactional call may reuse the wrapper's bypass
+    // image and input-validation policy. Public calls prepare their own.
+    if (!transaction_prepared) {
+        std::copy(y, y + n, out);
+        if (ihat)
+            std::fill(ihat, ihat + n, cf(0.f, 0.f));
+    }
+
+    const char* pf = pulse_list_failure(pulses, n, scratch, sync_n);
+    if (pf)
+        return fail(pf);
+    const char* mf = model_failure(model, scratch.sps, n);
+    if (mf)
+        return fail(mf);
+    if (!reference_sync || sync_n != scratch.sps ||
+        scratch.impulse_sync.size() != sync_n)
+        return fail("invalid_template");
+    if (!model.impulse_template || !scratch.ipatov_correlation)
+        return fail("template_kind_mismatch");
+    if (roi_lo < 0 || roi_hi > int64_t(n) || roi_hi <= roi_lo)
+        return fail("invalid_roi");
+    if (!transaction_prepared)
+        for (size_t i = 0; i < n; ++i)
+            if (!finite(y[i]))
+                return fail("nonfinite_input");
+
+    r.model_id = model.model_id;
+    r.q = model.q;
+    r.cfo_hz = model.cfo_hz;
+    r.tap_count = model.tap_count;
+    r.fit_residual = model.fit_residual;
+    r.gain_condition = model.gain_condition;
+    r.pulse_event_count = pulses.count;
+    r.pulse_packet_samples = pulses.packet_samples;
+
+    const int64_t q = model.q;
+    const int64_t lo = q + model.lag_lo;
+    const int64_t hi = lo + int64_t(model.tap_count) +
+                       int64_t(pulses.packet_samples);
+    r.support_lo = lo;
+    r.support_hi = hi;
+
+    const auto t_channel = Clock::now();
+
+    // --- unit template identity and zero-filled reconstruction buffer ------
+    const auto t_scale = Clock::now();
+    // The pulse list's first SYNC was checked against impulse_sync above; the
+    // public reference is intentionally bypassed here, exactly like the unit
+    // real path.  Absolute amplitude lives in the frozen CIR.
+    r.waveform_scale = 1.0;
+    r.scale_us = us(t_scale);
+
+    if (lo < 0 || hi > int64_t(n)) {
+        r.channel_us = us(t_channel);
+        return fail("context_truncated");
+    }
+    const int64_t sub_lo = std::max(lo, roi_lo);
+    const int64_t sub_hi = std::min(hi, roi_hi);
+    if (sub_hi <= sub_lo) {
+        r.channel_us = us(t_channel);
+        return fail("no_overlap");
+    }
+    r.sub_lo = sub_lo;
+    r.sub_hi = sub_hi;
+
+    const auto t_zero = Clock::now();
+    cf* const recon = ihat ? ihat : out;
+    // The wrapper has already cleared the entire ihat buffer. Without ihat,
+    // recon aliases the bypass output and its support must still be cleared.
+    if (!transaction_prepared || !ihat)
+        std::fill(recon + lo, recon + hi, cf(0.f, 0.f));
+    r.zero_us = us(t_zero);
+
+    // --- one absolute-phase multiply per event, no whole-packet rotation ----
+    const auto t_phase = Clock::now();
+    const double omega = 2.0 * kPi * model.cfo_hz / kWorkRateHz;
+    std::array<cf, kCfoBlock> rotation;
+    const cf* const taps = model.taps.data();
+    if (model.cfo_hz != 0.0) {
+        cd cur(1.0, 0.0);
+        const cd step = std::exp(cd(0.0, omega));
+        for (size_t k = 0; k < kCfoBlock; ++k) {
+            rotation[k] = cf(static_cast<float>(cur.real()),
+                             static_cast<float>(cur.imag()));
+            cur *= step;
+        }
+    }
+    r.phase_us = us(t_phase);
+
+    const auto t_conv = Clock::now();
+    if (model.cfo_hz == 0.0) {
+        // Zero CFO: sign_i is real; the dedicated add/sub keeps the old
+        // unit-real accumulation order and is bit-comparable to it.
+        for (size_t i = 0; i < pulses.count; ++i) {
+            const mod::PulseEvent& e = pulses.events[i];
+            fused_addsub(recon + lo + int64_t(e.sample_offset), taps,
+                         int(e.sign), model.tap_count);
+        }
+    } else {
+        int64_t block = -1;
+        cf block_base(1.f, 0.f);
+        for (size_t i = 0; i < pulses.count; ++i) {
+            const mod::PulseEvent& e = pulses.events[i];
+            const int64_t b = int64_t(e.sample_offset) / int64_t(kCfoBlock);
+            if (b != block) {
+                block = b;
+                const cd base = std::exp(
+                    cd(0.0, omega * static_cast<double>(b *
+                                                        int64_t(kCfoBlock))));
+                block_base = cf(static_cast<float>(base.real()),
+                                static_cast<float>(base.imag()));
+            }
+            const cf phase =
+                block_base *
+                rotation[static_cast<size_t>(e.sample_offset) % kCfoBlock];
+            const cf c = phase * static_cast<float>(e.sign);
+            fused_axpy(recon + lo + int64_t(e.sample_offset), taps, c,
+                       model.tap_count);
+        }
+    }
+    r.convolution_us = us(t_conv);
+    r.cfo_us = 0.0; // CFO was folded into each pulse; no packet rotation.
+
+    // Sparse experiment: skip the full-packet finite scan. Input/model
+    // validation above remains enabled; finite-value overflow during
+    // accumulation/subtraction is intentionally not detected on this path.
+    r.check_us = 0.0;
+    r.channel_us = us(t_channel);
+
+    // --- subtract only the consumer ROI ------------------------------------
+    const auto t_subtract = Clock::now();
+    for (int64_t j = sub_lo; j < sub_hi; ++j)
+        out[j] = y[j] - recon[j];
+    if (!ihat) {
+        // The trial reconstruction used `out`: restore the support flanks.
+        for (int64_t j = lo; j < sub_lo; ++j)
+            out[j] = y[j];
+        for (int64_t j = sub_hi; j < hi; ++j)
+            out[j] = y[j];
+    }
+    r.subtract_us = us(t_subtract);
+
+    r.packet_samples = pulses.packet_samples;
+    r.committed = true;
+    r.reason = "committed";
+    r.apply_total_us = us(t_apply);
+    return true;
+}
+
+// Public standalone entry retains its own bypass preparation and IQ scan.
+bool apply_discrete_cir_pulses(
+    const std::complex<float>* y, size_t n, const mod::PulseList& pulses,
+    const std::complex<float>* reference_sync, size_t sync_n,
+    const DiscreteCirModel& model, int64_t roi_lo, int64_t roi_hi,
+    DiscreteCirScratch& scratch, std::complex<float>* out,
+    std::complex<float>* ihat, DiscreteCirResult* result)
+{
+    return apply_discrete_cir_pulses_impl(y, n, pulses, reference_sync, sync_n,
+        model, roi_lo, roi_hi, scratch, out, ihat, result, false);
+}
+
 DiscreteCirResult fullpacket_cancel_discrete(
     const std::complex<float>* y,
     size_t n,
@@ -463,24 +767,56 @@ DiscreteCirResult fullpacket_cancel_discrete(
         return fail(mf);
     if (roi_lo < 0 || roi_hi > int64_t(n) || roi_hi <= roi_lo)
         return fail("invalid_roi");
-    for (size_t i = 0; i < n; ++i)
-        if (!finite(y[i]))
-            return fail("nonfinite_input");
+    // Sparse SIC experiment trusts the receiver IQ: do not scan the entire
+    // window for NaN/Inf. Keep frame/model/bounds validation and the standalone
+    // public apply input check. Legacy waveform transactions retain the scan.
+    if (!(model.impulse_template && scratch.sparse_pulse_reconstruct))
+        for (size_t i = 0; i < n; ++i)
+            if (!finite(y[i]))
+                return fail("nonfinite_input");
     r.validate_us = us(t_validate);
 
     // Remodulate the decoded wire PSDU once into the scratch packet buffer.
     // The capacity is the REAL buffer length, not the estimator's planning
     // bound, so a stale max_packet_samples cannot reject a fitting packet.
     const auto t_tx = Clock::now();
+    if (model.impulse_template != scratch.ipatov_correlation) {
+        r.reason = "template_kind_mismatch";
+        return r;
+    }
+    const bool real_only = model.impulse_template;
+    if (real_only && scratch.sparse_pulse_reconstruct) {
+        // Sparse experiment: the decoded packet is generated as positions and
+        // signs only.  No real/complex waveform is materialized.
+        mod::PulseList pulses;
+        const bool tx_ok = mod::modulate_pulse_list(
+            wire_psdu.data(), wire_psdu.size(), scratch.impulse_profile,
+            scratch.modulator, scratch.waveform.size(), pulses);
+        if (!tx_ok || pulses.count == 0) {
+            r.reason = "tx_failed";
+            r.tx_us = us(t_tx);
+            return r;
+        }
+        const double tx_us = us(t_tx);
+
+        DiscreteCirResult applied;
+        apply_discrete_cir_pulses_impl(y, n, pulses, reference_sync, sync_n, model,
+                                  roi_lo, roi_hi, scratch, out, ihat,
+                                  &applied, true);
+        applied.validate_us = r.validate_us;
+        applied.tx_us = tx_us;
+        return applied;
+    }
+
     size_t packet_n = 0;
-    if (!mod::modulate_one(wire_psdu.data(),
-                           wire_psdu.size(),
-                           profile,
-                           scratch.modulator,
-                           scratch.waveform.data(),
-                           scratch.waveform.size(),
-                           packet_n) ||
-        packet_n == 0 || packet_n > scratch.waveform.size()) {
+    const bool tx_ok = real_only
+        ? mod::modulate_unit_impulses(wire_psdu.data(), wire_psdu.size(),
+                                    scratch.impulse_profile, scratch.modulator,
+                                    scratch.waveform.size(), packet_n)
+        : mod::modulate_one(wire_psdu.data(), wire_psdu.size(), profile,
+                            scratch.modulator, scratch.waveform.data(),
+                            scratch.waveform.size(), packet_n);
+    if (!tx_ok || packet_n == 0 || packet_n > scratch.waveform.size()) {
         r.reason = "tx_failed";
         r.tx_us = us(t_tx);
         return r;
@@ -488,9 +824,9 @@ DiscreteCirResult fullpacket_cancel_discrete(
     const double tx_us = us(t_tx);
 
     DiscreteCirResult applied;
-    apply_discrete_cir(y,
+    apply_discrete_cir_impl(y,
                        n,
-                       scratch.waveform.data(),
+                       real_only ? nullptr : scratch.waveform.data(),
                        packet_n,
                        reference_sync,
                        sync_n,
@@ -500,7 +836,8 @@ DiscreteCirResult fullpacket_cancel_discrete(
                        scratch,
                        out,
                        ihat,
-                       &applied);
+                       &applied,
+                       real_only ? scratch.modulator.iq_re.data() : nullptr);
     // apply() owns channel_us/subtract_us/apply_total_us; the wrapper owns the
     // validation and remodulation stages (never double-counted as children).
     applied.validate_us = r.validate_us;

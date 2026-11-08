@@ -643,3 +643,152 @@ BOOST_AUTO_TEST_CASE(discrete_cir_peak_groups_reject_second_preamble)
     // is expected because the second preamble is deliberately excluded.
     BOOST_CHECK_GT(m.fit_residual, 1e-6);
 }
+
+// Ipatov correlation must retain pulse shaping in the response.  Compare
+// against an independent forward correlation, then apply to UNIT impulses.
+BOOST_AUTO_TEST_CASE(ipatov_cir_response_and_impulse_reconstruction)
+{
+    Packet p;
+    const size_t q = 256, n = p.wave.size() + 1024;
+    auto cfg = make_cfg(n, q, 128);
+    cfg.ipatov_correlation = true;
+    const cf gain(0.7f, 0.3f);
+    std::vector<cf> y(n, cf{});
+    for (size_t i = 0; i < p.wave.size(); ++i) y[q+i] = gain*p.wave[i];
+    sic::DiscreteCirScratch s;
+    sic::DiscreteCirModel m;
+    sic::DiscreteCirTimings dt;
+    const int64_t observed = q + kTrainLen;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(prepare_ok(p,cfg,s,err),err);
+    BOOST_REQUIRE_MESSAGE(estimate_ok(p, cfg, y, observed, s, m, &dt),
+                          m.status << " " << reason_of(m));
+    BOOST_REQUIRE(m.impulse_template);
+    BOOST_CHECK_EQUAL(m.tap_count, 128u);
+    BOOST_CHECK_EQUAL(dt.projection_us, 0.0);
+    BOOST_CHECK_EQUAL(dt.solve_us, 0.0);
+    const int8_t* code = demod::GetPreambleCode(10);
+    double energy = 0;
+    for (size_t c=0;c<127;++c) energy += code[c]*code[c];
+    for (size_t d=0;d<m.tap_count;++d) {
+        cd ref{}; size_t reps=0;
+        for (size_t k=1;k<kReps;++k) {
+            const int64_t lo=m.q+int64_t(k*kSps)+cfg.lag_lo;
+            if (lo<0 || lo+int64_t(kSps+cfg.tap_count-1)>observed) continue;
+            cd one{};
+            for (size_t c=0;c<127;++c)
+                one += double(code[c])*cd(y[size_t(lo+int64_t(d+8*c))]);
+            ref += one; ++reps;
+        }
+        ref /= energy*reps;
+        BOOST_CHECK_LT(std::abs(cd(m.taps[d])-ref), 2e-5);
+    }
+    auto altered=y;
+    for(size_t i=size_t(observed);i<n;++i) altered[i]=cf(123,-37);
+    sic::DiscreteCirModel other;
+    BOOST_REQUIRE(sic::estimate_discrete_cir(altered.data(),n,observed,
+                       templates_of(p),cfg,s,other));
+    BOOST_CHECK_EQUAL(m.model_id,other.model_id);
+    const size_t original_z_size=s.z.size();
+    s.z.resize(kTrainLen-8); // satisfies legacy rows, too short for raw fit check
+    BOOST_CHECK(!sic::estimate_discrete_cir(y.data(),n,observed,
+                       templates_of(p),cfg,s,other));
+    BOOST_CHECK_EQUAL(reason_of(other),"scratch_capacity");
+    s.z.resize(original_z_size);
+    std::vector<cf> out(n),ihat(n);
+    // A complete decoded packet exercises the impulse remodulator too.
+    auto wire=mod::make_random_psdu(30,1010,true);
+    mod::detail::encode_phr19(wire.size(),64,false,s.expected_phr);
+    const std::vector<uint8_t> phr(s.expected_phr.begin(),s.expected_phr.end());
+    // The unit-real wrapper must not read/write obsolete complex packet
+    // intermediates. Leave them poisoned to catch accidental reuse.
+    const cf poison(std::numeric_limits<float>::quiet_NaN(),0.f);
+    std::fill(s.waveform.begin(),s.waveform.end(),poison);
+    std::fill(s.scaled_waveform.begin(),s.scaled_waveform.end(),poison);
+    auto result=sic::fullpacket_cancel_discrete(y.data(),n,phr,wire,true,
+                 p.profile,m,p.sync.data(),p.sync.size(),0,n,s,out.data(),ihat.data());
+    BOOST_REQUIRE_MESSAGE(result.committed,result.reason);
+    double num=0,den=0;
+    for(size_t i=0;i<n;++i) {num+=std::norm(out[i]);den+=std::norm(y[i]);}
+    BOOST_CHECK_LT(num/den,0.01); // >=20 dB, including finite-code sidelobes
+    BOOST_CHECK_CLOSE(result.waveform_scale,1.0,0.001);
+    BOOST_CHECK(std::all_of(s.waveform.begin(),s.waveform.end(),
+                           [](cf x){return std::isnan(x.real());}));
+    BOOST_CHECK(std::all_of(s.scaled_waveform.begin(),s.scaled_waveform.end(),
+                           [](cf x){return std::isnan(x.real());}));
+
+    // Sparse pulse-list path with the same public observation/model geometry.
+    // The zero-CFO case must match the unit-real reconstruction exactly.
+    {
+        auto sparse_cfg=cfg; sparse_cfg.sparse_pulse_reconstruct=true;
+        sic::DiscreteCirScratch ss; sic::DiscreteCirModel sm;
+        BOOST_REQUIRE_MESSAGE(prepare_ok(p,sparse_cfg,ss,err),err);
+        BOOST_REQUIRE_MESSAGE(estimate_ok(p,sparse_cfg,y,observed,ss,sm),
+                              sm.status << " " << reason_of(sm));
+        BOOST_REQUIRE(sm.impulse_template);
+        BOOST_CHECK_EQUAL(sm.q,m.q);
+        BOOST_CHECK_EQUAL(sm.cfo_hz,m.cfo_hz);
+        BOOST_CHECK_EQUAL(sm.tap_count,m.tap_count);
+        BOOST_CHECK_EQUAL(std::memcmp(sm.taps.data(),m.taps.data(),
+                                     m.tap_count*sizeof(cf)),0);
+        std::fill(ss.waveform.begin(),ss.waveform.end(),poison);
+        std::fill(ss.scaled_waveform.begin(),ss.scaled_waveform.end(),poison);
+        std::vector<cf> out2(n),ihat2(n);
+        auto result2=sic::fullpacket_cancel_discrete(y.data(),n,phr,wire,true,
+                     p.profile,sm,p.sync.data(),p.sync.size(),0,n,ss,
+                     out2.data(),ihat2.data());
+        BOOST_REQUIRE_MESSAGE(result2.committed,result2.reason);
+        BOOST_CHECK_GT(result2.pulse_event_count,0u);
+        BOOST_CHECK_EQUAL(result2.pulse_packet_samples,p.wave.size());
+        BOOST_CHECK_EQUAL(std::memcmp(ihat.data(),ihat2.data(),n*sizeof(cf)),0);
+        // Transaction reuse must also work without ihat and preserve bypass
+        // on early frame/input rejection, even with dirty destination buffers.
+        std::vector<cf> out_only(n,cf(7.f,8.f));
+        auto ro=sic::fullpacket_cancel_discrete(y.data(),n,phr,wire,true,
+                     p.profile,sm,p.sync.data(),p.sync.size(),0,n,ss,
+                     out_only.data(),nullptr);
+        BOOST_REQUIRE_MESSAGE(ro.committed,ro.reason);
+        BOOST_CHECK_EQUAL(std::memcmp(out2.data(),out_only.data(),n*sizeof(cf)),0);
+        // The sparse transaction intentionally skips a whole-window finite
+        // scan. A nonfinite sample outside reconstruction support is passed
+        // through; it must not trigger the former nonfinite_input rejection.
+        auto unchecked_y=y;
+        unchecked_y.back()=poison;
+        auto ru=sic::fullpacket_cancel_discrete(unchecked_y.data(),n,phr,wire,true,
+                     p.profile,sm,p.sync.data(),p.sync.size(),0,n,ss,
+                     out2.data(),ihat2.data());
+        BOOST_REQUIRE_MESSAGE(ru.committed,ru.reason);
+        BOOST_CHECK(std::isnan(out2.back().real()));
+        std::fill(ihat2.begin(),ihat2.end(),cf(7.f,8.f));
+        auto rf=sic::fullpacket_cancel_discrete(y.data(),n,phr,wire,false,
+                     p.profile,sm,p.sync.data(),p.sync.size(),0,n,ss,
+                     out2.data(),ihat2.data());
+        BOOST_CHECK_EQUAL(std::string(rf.reason),"fcs_failed");
+        BOOST_CHECK_EQUAL(std::memcmp(y.data(),out2.data(),n*sizeof(cf)),0);
+        BOOST_CHECK(std::all_of(ihat2.begin(),ihat2.end(),[](cf x){return x==cf{};}));
+
+        auto truncated=sm;
+        truncated.q=int64_t(n)-1;
+        truncated.phase_reference_sample=truncated.q;
+        std::fill(out2.begin(),out2.end(),cf(7.f,8.f));
+        std::fill(ihat2.begin(),ihat2.end(),cf(7.f,8.f));
+        auto rt=sic::fullpacket_cancel_discrete(y.data(),n,phr,wire,true,
+                     p.profile,truncated,p.sync.data(),p.sync.size(),0,n,ss,
+                     out2.data(),ihat2.data());
+        BOOST_CHECK_EQUAL(std::string(rt.reason),"context_truncated");
+        BOOST_CHECK_EQUAL(std::memcmp(y.data(),out2.data(),n*sizeof(cf)),0);
+        BOOST_CHECK(std::all_of(ihat2.begin(),ihat2.end(),[](cf x){return x==cf{};}));
+        BOOST_CHECK(std::all_of(ss.waveform.begin(),ss.waveform.end(),
+                               [](cf x){return std::isnan(x.real());}));
+        BOOST_CHECK(std::all_of(ss.scaled_waveform.begin(),
+                               ss.scaled_waveform.end(),
+                               [](cf x){return std::isnan(x.real());}));
+    }
+
+    auto impossible=cfg; impossible.fit_residual_max=1e-14;
+    sic::DiscreteCirScratch rejected; sic::DiscreteCirModel bad;
+    BOOST_REQUIRE_MESSAGE(prepare_ok(p,impossible,rejected,err),err);
+    auto damaged=y; damaged[q+17]+=cf(0.1f,-0.1f);
+    BOOST_CHECK(!estimate_ok(p,impossible,damaged,observed,rejected,bad));
+    BOOST_CHECK(!bad.valid);
+}

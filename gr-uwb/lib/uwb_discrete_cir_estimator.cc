@@ -62,7 +62,7 @@ constexpr size_t kMinSps = 64;
 constexpr size_t kMaxSps = 4096;
 constexpr size_t kMaxFitReps = 64;
 constexpr size_t kMaxTaps = kDiscreteCirMaxTaps;
-constexpr size_t kMaxActive = kDiscreteCirMaxActive;
+constexpr size_t kMaxActive = 64; // unchanged legacy LS solve bound
 constexpr size_t kFactorCacheSlots = 16;
 constexpr int kJacobiSweeps = 24;
 constexpr uint64_t kFnvOffset = 14695981039346656037ull;
@@ -139,6 +139,8 @@ uint64_t config_identity(const DiscreteCirConfig& cfg)
 {
     uint64_t h = kFnvOffset;
     hash_u64(h, kHashDomain ^ 0x43464731ull); // "CFG1"
+    hash_u64(h, cfg.ipatov_correlation);
+    hash_u64(h, cfg.sparse_pulse_reconstruct);
     hash_u64(h, static_cast<uint64_t>(cfg.comm_code));
     hash_u64(h, static_cast<uint64_t>(cfg.sync_reps));
     hash_u64(h, static_cast<uint64_t>(cfg.samples_per_symbol));
@@ -314,6 +316,9 @@ void DiscreteCirScratch::reserve(size_t max_window_samples_)
     peak_min_spacing = 5;
     active_radius = 1;
 
+    ipatov_correlation = false;
+    sparse_pulse_reconstruct = false;
+    impulse_sync.clear();
     sync_norm.clear();
     train.clear();
     gram.clear();
@@ -542,6 +547,45 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
     if (max_packet > scratch.scaled_waveform.size())
         scratch.scaled_waveform.resize(max_packet);
     scratch.max_packet_samples = max_packet;
+
+    scratch.ipatov_correlation = cfg.ipatov_correlation;
+    scratch.sparse_pulse_reconstruct = false;
+    if (cfg.sparse_pulse_reconstruct && !cfg.ipatov_correlation)
+        return fail("sparse_pulse_requires_ipatov");
+    if (cfg.ipatov_correlation) {
+        if (sps != demod::kQm35SamplesPerSymbol || cfg.fit_reps < 3 ||
+            cfg.sample_rate != radar_meta::kWorkRateHz || cfg.sync_reps != 64)
+            return fail("unsupported Ipatov geometry");
+        if (!radar_meta::code_index_supported(cfg.comm_code))
+            return fail("unsupported Ipatov code");
+        const int8_t* code = demod::GetPreambleCode(cfg.comm_code);
+        if (!code) return fail("unsupported Ipatov code");
+        scratch.impulse_sync.assign(sps, cf{});
+        for (size_t c = 0; c < demod::kQm35CodeLength; ++c)
+            scratch.impulse_sync[8*c] = cf(float(code[c]), 0.f);
+        scratch.impulse_profile = mod::HrpModConfig{};
+        auto& raw = scratch.impulse_profile;
+        raw.code_index = cfg.comm_code;
+        raw.sync_repetitions = cfg.sync_reps;
+        raw.sfd_mode = "4z2";
+        raw.peak_amplitude = 1.f;
+        raw.pulse.shape = mod::PulseShape::External;
+        raw.external_taps = {1.f, 0.f}; // unit impulses, 2 samples/chip
+        raw.pulse.external_n_taps = 2;
+        // Ensure pulse storage/cache allocation happens only in preparation.
+        if (!mod::ensure_pulse(raw, scratch.modulator))
+            return fail("impulse pulse preparation failed");
+        scratch.sparse_pulse_reconstruct = cfg.sparse_pulse_reconstruct;
+        if (cfg.sparse_pulse_reconstruct) {
+            const size_t max_events =
+                max_packet / demod::kQm35SamplesPerChip + 2;
+            if (scratch.modulator.pulse_events.capacity() < max_events ||
+                scratch.modulator.prefix.events.capacity() < max_events)
+                return fail("sparse_pulse_event_capacity");
+        }
+        scratch.prepared = true;
+        return true;
+    }
 
     // ---- full max-support Gram over the legal training rows --------------
     scratch.gram.assign(max_taps * max_taps, cd(0.0, 0.0));
@@ -869,6 +913,115 @@ bool estimate_discrete_cir(const std::complex<float>* y,
     if (!std::isfinite(cfo))
         return finish("failed", "nonfinite_cfo");
     model.cfo_hz = cfo;
+
+    if (cfg.ipatov_correlation) {
+        const auto t_support = Clock::now();
+        if (!scratch.ipatov_correlation || scratch.impulse_sync.size() != sps)
+            return finish("failed", "impulse_template_unprepared");
+        const size_t taps = cfg.tap_count;
+        const size_t width = sps + taps - 1;
+        std::array<cd, kMaxSps + kMaxTaps> avg{};
+        size_t valid = 0;
+        const double omega = 2.0*kPi*cfo/fs;
+        // Skip the first finite-train transient. Every accepted window is
+        // wholly inside both the first fit_reps and the visible IQ prefix.
+        const int64_t training_end = std::min(visible_end,
+                              q + int64_t(cfg.fit_reps*sps));
+        for (size_t k=1; k<cfg.fit_reps; ++k) {
+            const int64_t lo = q + int64_t(k*sps) + cfg.lag_lo;
+            if (lo < 0 || lo + int64_t(width) > training_end) continue;
+            cd phase = std::polar(1.0,-omega*double(lo-q));
+            const cd step = std::polar(1.0,-omega);
+            for (size_t j=0;j<width;++j) {
+                if ((j&1023u)==0)
+                    phase=std::polar(1.0,-omega*double(lo-q+int64_t(j)));
+                avg[j] += cd(y[size_t(lo)+j])*phase;
+                phase *= step;
+            }
+            ++valid;
+        }
+        if (!valid) return finish("failed", "short_correlation_prefix");
+        double code_energy=0;
+        for (const auto v:scratch.impulse_sync) code_energy+=std::norm(v);
+        if (!(code_energy>0)) return finish("failed", "empty_impulse_code");
+        for (size_t d=0;d<taps;++d) {
+            cd acc{};
+            for (size_t c=0;c<demod::kQm35CodeLength;++c) {
+                const float sign=scratch.impulse_sync[8*c].real();
+                if (sign!=0) acc+=double(sign)*avg[d+8*c];
+            }
+            model.taps[d]=cf(acc/(code_energy*valid));
+            if (!finite_cf(model.taps[d]))
+                return finish("failed", "nonfinite_correlation");
+            model.active_lags[d]=int16_t(cfg.lag_lo+int64_t(d));
+        }
+        model.impulse_template=true;
+        model.cir_repetitions=valid;
+        model.lag_lo=cfg.lag_lo;
+        model.tap_count=model.active_count=taps;
+        model.support_source="ipatov_correlation";
+        model.training_lo=q;
+        model.training_hi=training_end;
+        if (timings) timings->support_us=us_since(t_support);
+
+        // Validate the frozen float response against UNIT impulse training.
+        // No projection, Gram solve or re-fit. Keep physical amplitude/phase.
+        const auto t_fit=Clock::now();
+        const size_t rows=size_t(training_end-q);
+        if (scratch.z.size()<rows) return finish("failed","scratch_capacity");
+        std::fill(scratch.z.begin(),scratch.z.begin()+rows,cd{});
+        for(size_t k=0;k<cfg.fit_reps;++k) {
+            for(size_t c=0;c<demod::kQm35CodeLength;++c) {
+                const double sign=scratch.impulse_sync[8*c].real();
+                if(sign==0) continue;
+                const int64_t pos=int64_t(k*sps+8*c)+cfg.lag_lo;
+                for(size_t d=0;d<taps;++d) {
+                    const int64_t j=pos+int64_t(d);
+                    if(j>=0 && j<int64_t(rows))
+                        scratch.z[size_t(j)]+=sign*cd(model.taps[d]);
+                }
+            }
+        }
+        double num=0,den=0;
+        cd phase(1,0); const cd step=std::polar(1.0,omega);
+        for(size_t m=0;m<rows;++m) {
+            if((m&1023u)==0) phase=std::polar(1.0,omega*double(m));
+            const cd obs(y[size_t(q)+m]);
+            num+=std::norm(obs-scratch.z[m]*phase);
+            den+=std::norm(obs);
+            phase*=step;
+        }
+        model.fit_residual=den>0?num/den:std::numeric_limits<double>::infinity();
+        if(timings) timings->fit_check_us=us_since(t_fit);
+        if(!std::isfinite(model.fit_residual))
+            return finish("failed","nonfinite_fit_residual");
+        if(model.fit_residual>cfg.fit_residual_max)
+            return finish("rejected","fit_residual_exceeded");
+    uint64_t id = kFnvOffset;
+    hash_u64(id, kHashDomain ^ 0x4d4f4431ull); // "MOD1"
+    hash_u64(id, model.impulse_template);
+    hash_u64(id, model.cir_repetitions);
+    hash_i64(id, model.q);
+    hash_double(id, model.cfo_hz);
+    hash_i64(id, model.observed_end_sample);
+    hash_i64(id, model.lag_lo);
+    hash_u64(id, static_cast<uint64_t>(model.tap_count));
+    hash_double(id, model.lambda);
+    for (size_t i = 0; i < model.tap_count; ++i) {
+        hash_float(id, model.taps[i].real());
+        hash_float(id, model.taps[i].imag());
+    }
+    hash_double(id, model.fit_residual);
+    hash_double(id, model.gain_condition);
+    hash_u64(id, static_cast<uint64_t>(model.active_count));
+    for (size_t i = 0; i < model.active_count; ++i)
+        hash_i64(id, static_cast<int64_t>(model.active_lags[i]));
+    hash_u64(id, model.template_hash);
+    hash_u64(id, model.config_hash);
+    model.model_id = id;
+
+        return succeed();
+    }
 
     // ---- 5. de-CFO training prefix, folded coarse CIR, peak groups -------
     const size_t M = scratch.training_rows;
@@ -1286,6 +1439,8 @@ bool estimate_discrete_cir(const std::complex<float>* y,
 
     uint64_t id = kFnvOffset;
     hash_u64(id, kHashDomain ^ 0x4d4f4431ull); // "MOD1"
+    hash_u64(id, model.impulse_template);
+    hash_u64(id, model.cir_repetitions);
     hash_i64(id, model.q);
     hash_double(id, model.cfo_hz);
     hash_i64(id, model.observed_end_sample);

@@ -25,8 +25,12 @@ SYNC_REPS = 64
 COMM_NOMINAL = 2048
 SEARCH_HALF = 256
 JITTER_HALF = 64
-FOUR = [[0, [1.0, 0.0]], [7.4, [0.0, 0.5]],
-        [23, [0.276, -0.116]], [51.2, [0.2, 0.0]]]
+# Compact propagation channel; gains unchanged from the historical wide case.
+# Pulse shaping remains in make_packet and is not shortened by this setting.
+FOUR = [[0, [1.0, 0.0]], [2.4, [0.0, 0.5]],
+        [5, [0.276, -0.116]], [9.2, [0.2, 0.0]]]
+FOUR_WIDE = [[0, [1.0, 0.0]], [7.4, [0.0, 0.5]],
+             [23, [0.276, -0.116]], [51.2, [0.2, 0.0]]]
 SENSING_PATHS = [[0, [1.0, 0.0]], [37, [0.25, 0.0]]]
 
 # The 10 cells are fixed before observing outcomes. Extra cells are ONLY
@@ -44,6 +48,7 @@ CELLS = {
     "payload_four_frac": dict(position="payload", channel="four", frac=0.4),
 }
 EXTRA = {
+    "payload_four_frac_wide": dict(position="payload", channel="four_wide", frac=0.4),
     "sync_isr20": dict(position="sync", isr_db=20.0),
     "no_overlap": dict(position="none"),
     "no_interference": dict(position="sync", present=False),
@@ -131,7 +136,8 @@ def realize(uwb, cfg, public, seed: int, window_id: int):
     interference = np.zeros(n, dtype=np.complex64)
     jitter = int(timing_rng.integers(-JITTER_HALF, JITTER_HALF + 1))
     comm_start = COMM_NOMINAL + jitter
-    paths = FOUR if cfg["channel"] == "four" else [[0, [1.0, 0.0]]]
+    paths = (FOUR if cfg["channel"] == "four" else
+             FOUR_WIDE if cfg["channel"] == "four_wide" else [[0, [1.0, 0.0]]])
     for delay, gain in paths:
         S.apply_path(interference, comm_tx, comm_start, float(delay) + cfg["frac"],
                      complex(*gain), cfg["frac_model"])

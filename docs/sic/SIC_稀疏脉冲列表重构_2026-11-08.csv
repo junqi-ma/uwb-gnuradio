@@ -1,0 +1,32 @@
+kind,cell,metric,old_mean_db_or_us,old_p95_us,new_mean_db_or_us,new_p95_us,new_over_old_mean,delta_old_minus_new_db,note
+timing,payload_cfo_p50k,tx_event_generation,60.713781,78.285450,33.851836,43.907850,0.557564,,clean repeat 20261108_5
+timing,payload_cfo_p50k,channel_reconstruct,723.041383,895.052850,603.618523,695.316950,0.834833,,clean repeat 20261108_5
+timing,payload_cfo_p50k,sic_total,2759.378805,3057.742600,2568.377742,2796.405700,0.930781,,clean repeat 20261108_5
+timing,payload_cfo_p50k,convolution,504.441055,636.411200,436.337945,498.277500,0.864993,,clean repeat 20261108_5
+timing,payload_cfo_p50k,cfo_rotation,217.238016,274.742800,0.000000,0.000000,0.000000,,clean repeat 20261108_5
+timing,payload_cfo_p50k,zero,0.000000,0.000000,19.019023,26.103900,,,clean repeat 20261108_5
+timing,payload_cfo_p50k,phase,0.000000,0.000000,3.364313,3.494600,,,clean repeat 20261108_5
+timing,payload_cfo_p50k,check,0.000000,0.000000,144.422656,163.586400,,,clean repeat 20261108_5
+timing,payload_cfo_p50k,subtract,78.687766,101.991100,74.707758,90.825200,0.949420,,clean repeat 20261108_5
+timing,payload_four_frac,tx_event_generation,56.819500,69.397800,35.101844,42.001600,0.617778,,clean repeat 20261108_5
+timing,payload_four_frac,channel_reconstruct,712.274375,896.411250,600.621539,675.920300,0.843245,,clean repeat 20261108_5
+timing,payload_four_frac,sic_total,2713.658617,3049.511700,2559.702625,2780.856300,0.943266,,clean repeat 20261108_5
+timing,payload_four_frac,convolution,497.073805,625.980250,429.914039,459.772550,0.864890,,clean repeat 20261108_5
+timing,payload_four_frac,cfo_rotation,213.815344,260.855400,0.000000,0.000000,0.000000,,clean repeat 20261108_5
+timing,payload_four_frac,zero,0.000000,0.000000,18.376719,23.227650,,,clean repeat 20261108_5
+timing,payload_four_frac,phase,0.000000,0.000000,3.012406,3.350750,,,clean repeat 20261108_5
+timing,payload_four_frac,check,0.000000,0.000000,148.814656,178.099450,,,clean repeat 20261108_5
+timing,payload_four_frac,subtract,77.784883,98.853850,73.740367,89.609450,0.948004,,clean repeat 20261108_5
+functional,corrupt,corrupt,,,,,,,"zero commits, exact bypass"
+functional,payload_base,all_suppression_db,52.941200,,52.941314,,,-0.000114,worst_window_all_delta=0.000002
+functional,payload_base,target_suppression_db,50.501563,,50.501679,,,-0.000116,
+functional,payload_cfo_m50k,all_suppression_db,49.996330,,49.868065,,,0.128265,worst_window_all_delta=-1.446069
+functional,payload_cfo_m50k,target_suppression_db,46.940281,,46.916544,,,0.023738,
+functional,payload_cfo_p50k,all_suppression_db,48.559435,,47.818787,,,0.740648,worst_window_all_delta=-1.664528
+functional,payload_cfo_p50k,target_suppression_db,45.295623,,44.720245,,,0.575378,
+functional,payload_four_frac,all_suppression_db,28.254447,,28.254449,,,-0.000002,worst_window_all_delta=-0.000001
+functional,payload_four_frac,target_suppression_db,25.087332,,25.087333,,,-0.000001,
+functional,payload_len127,all_suppression_db,45.995942,,45.996040,,,-0.000098,worst_window_all_delta=0.000042
+functional,payload_len127,target_suppression_db,46.807136,,46.807261,,,-0.000125,
+functional,sync_base,all_suppression_db,19.322462,,19.322462,,,-0.000000,worst_window_all_delta=-0.000001
+functional,sync_base,target_suppression_db,19.344945,,19.344945,,,-0.000000,

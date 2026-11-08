@@ -54,6 +54,47 @@ namespace uwb {
 namespace demod {
 namespace rxopt {
 
+// Compute the legacy SYNC phase statistic without generating SYNC soft chips.
+// Sum corresponding IQ samples across repetitions first, then contract the
+// one-symbol sum with the sparse spreading code and CMF. Linearity preserves
+// the old statistic, apart from floating-point summation order.
+inline bool sync_phase_gain(const std::complex<float>* rx, size_t n,
+                            int64_t base, const std::complex<float>* h,
+                            size_t taps, const std::vector<int8_t>& spread,
+                            size_t reps, std::vector<std::complex<float>>& sum,
+                            std::complex<float>& gain)
+{
+    gain = {};
+    if (!rx || !h || taps == 0 || taps > 64 || spread.empty() ||
+        spread.size() > 508 || reps == 0 || reps > 32 || base < -64)
+        return false;
+    const size_t stride = 2 * spread.size();
+    const size_t span = 2 * (spread.size() - 1) + taps;
+    const size_t extent = (reps - 1) * stride + span;
+    // Avoid additions to a caller-controlled signed coordinate.
+    if (base >= 0 && (static_cast<uint64_t>(base) > n ||
+        extent > n - static_cast<size_t>(base)))
+        return false;
+    if (base < 0 && extent > n + static_cast<size_t>(-base))
+        return false;
+    sum.assign(span, std::complex<float>{});
+    for (size_t r = 0; r < reps; ++r) {
+        const int64_t first = base + static_cast<int64_t>(r * stride);
+        const size_t lo = first < 0 ? static_cast<size_t>(-first) : 0;
+        for (size_t m = lo; m < span; ++m)
+            sum[m] += rx[static_cast<size_t>(first + static_cast<int64_t>(m))];
+    }
+    for (size_t c = 0; c < spread.size(); ++c) {
+        if (!spread[c])
+            continue;
+        std::complex<float> v{};
+        for (size_t q = 0; q < taps; ++q)
+            v += h[q] * sum[2 * c + q];
+        gain += static_cast<float>(spread[c]) * v;
+    }
+    return std::isfinite(gain.real()) && std::isfinite(gain.imag());
+}
+
 // Geometry used by stage_phr()/stage_payload_fcs() (6.81 Mb/s payload).
 inline constexpr size_t kPhrSymbols = 21;
 inline constexpr size_t kPhrChipsPerSymbol = 512;

@@ -291,6 +291,24 @@ struct HrpModConfig {
     std::vector<float> external_taps;
 };
 
+// One non-zero unit impulse of the BPRF chip sequence.  Positions are relative
+// to the packet origin on the work grid; every impulse is exactly +/-1 and the
+// expansion places it at `sample_offset`, never at an interpolated position.
+struct PulseEvent {
+    uint32_t sample_offset = 0;
+    int8_t sign = 1;
+};
+
+// Read-only view returned by modulate_pulse_list().  The storage is owned by
+// HrpModScratch and stays valid until the next modulation call on that scratch.
+// packet_samples is the complete packet length (including any trailing zero
+// region), NOT the last event offset.
+struct PulseList {
+    const PulseEvent* events = nullptr;
+    size_t count = 0;
+    size_t packet_samples = 0;
+};
+
 struct HrpPrefixCache {
     bool valid = false;
     size_t code_index = 0;
@@ -302,6 +320,12 @@ struct HrpPrefixCache {
     uint64_t pulse_generation = 0;
     char sfd_mode[16] = {};
     std::vector<float> samples;
+    // Sparse form of the same prefix.  It shares the key fields above; the
+    // waveform and event caches are valid independently so a caller may use
+    // either representation without forcing a regeneration of the other.
+    std::vector<PulseEvent> events;
+    size_t event_count = 0;
+    bool events_valid = false;
 };
 
 struct HrpModScratch {
@@ -316,6 +340,11 @@ struct HrpModScratch {
     std::vector<float> iq_re;
     std::vector<float> iq_im; // zeros for VOLK interleave
     HrpPrefixCache prefix;
+    // Sparse output of modulate_pulse_list().  Capacity is reserved once by
+    // reserve(); the hot call only writes into the existing storage.
+    std::vector<PulseEvent> pulse_events;
+    size_t pulse_count = 0;
+    size_t pulse_packet_samples = 0;
 
     // Active pulse taps.  Empty for Legacy (uses static kPulse48).
     std::vector<float> pulse_taps;
@@ -351,6 +380,10 @@ struct HrpModScratch {
         iq_re.reserve(max_samples);
         iq_im.assign(max_samples, 0.f);
         prefix.samples.reserve(max_samples);
+        const size_t max_events =
+            max_samples / demod::kQm35SamplesPerChip + 2;
+        pulse_events.reserve(max_events);
+        prefix.events.reserve(max_events);
     }
 };
 
@@ -815,6 +848,99 @@ inline void bpm_add_pulses(float* y,
     }
 }
 
+// Append one sparse impulse.  Positions must strictly increase: overlapping
+// chips at the same sample are a programming/config error, never silently
+// merged.  Capacity is a hard contract; the caller reserves it up front.
+inline bool add_pulse_event(PulseEvent* events,
+                            size_t capacity,
+                            size_t& count,
+                            size_t sample_offset,
+                            int sign)
+{
+    if (!events || count >= capacity || sample_offset > 0xffffffffu)
+        return false;
+    if (sign != 1 && sign != -1)
+        return false;
+    if (count && sample_offset <= events[count - 1].sample_offset)
+        return false;
+    events[count].sample_offset = static_cast<uint32_t>(sample_offset);
+    events[count].sign = static_cast<int8_t>(sign);
+    ++count;
+    return true;
+}
+
+inline bool add_sync_symbol_events(PulseEvent* events,
+                                   size_t capacity,
+                                   size_t& count,
+                                   size_t symbol_index,
+                                   int8_t polarity,
+                                   const int8_t* pc)
+{
+    if (polarity == 0)
+        return true;
+    const size_t chip0 = symbol_index * demod::kQm35ChipsPerSymbol;
+    for (size_t c = 0; c < demod::kQm35CodeLength; ++c) {
+        if (pc[c] == 0)
+            continue;
+        const size_t chip = chip0 + c * demod::kQm35SpreadingFactor;
+        if (!add_pulse_event(events, capacity, count,
+                             chip * demod::kQm35SamplesPerChip,
+                             static_cast<int>(polarity) *
+                                 static_cast<int>(pc[c])))
+            return false;
+    }
+    return true;
+}
+
+inline bool add_sts_events(PulseEvent* events,
+                           size_t capacity,
+                           size_t& count,
+                           size_t chip0)
+{
+    size_t off = chip0 + kStsGapChips;
+    for (size_t blk = 0; blk < kStsDrbgBlocksBprf; ++blk) {
+        for (size_t byte = 0; byte < 16; ++byte) {
+            const uint8_t v = kStsDrbgBprf[blk][byte];
+            for (int b = 7; b >= 0; --b) {
+                const int sign = ((v >> b) & 1) ? -1 : 1;
+                if (!add_pulse_event(events, capacity, count,
+                                     off * demod::kQm35SamplesPerChip, sign))
+                    return false;
+                off += kStsSpreadingBprf;
+            }
+        }
+    }
+    return true;
+}
+
+inline bool bpm_add_pulse_events(PulseEvent* events,
+                                 size_t capacity,
+                                 size_t& count,
+                                 size_t chip0,
+                                 size_t nsym,
+                                 size_t cpb,
+                                 size_t cps,
+                                 const int8_t* spread,
+                                 const int8_t* g0,
+                                 const int8_t* g1)
+{
+    for (size_t s = 0; s < nsym; ++s) {
+        const int8_t* sp = spread + s * cpb;
+        const size_t hop = (sp[0] < 0) ? 1u : 0u;
+        const size_t half = (g0[s] & 1) ? (cps / 2) : 0u;
+        const size_t pos = chip0 + s * cps + half + hop * cpb;
+        const int pol = (g1[s] & 1) ? -1 : 1;
+        for (size_t c = 0; c < cpb; ++c) {
+            if (!add_pulse_event(events, capacity, count,
+                                 (pos + c) * demod::kQm35SamplesPerChip,
+                                 pol * static_cast<int>(sp[c])))
+                return false;
+        }
+    }
+    return true;
+}
+
+
 inline float abs_peak(const float* y, size_t n)
 {
     float peak = 0.f;
@@ -830,11 +956,12 @@ inline float abs_peak(const float* y, size_t n)
     return peak;
 }
 
-inline bool prefix_matches(const HrpPrefixCache& p,
-                           const HrpModConfig& cfg,
-                           size_t n_sfd)
+inline bool prefix_key_matches(const HrpPrefixCache& p,
+                               const HrpModConfig& cfg,
+                               size_t n_sfd,
+                               uint64_t pulse_generation)
 {
-    if (!p.valid)
+    if (p.pulse_generation != pulse_generation)
         return false;
     if (p.code_index != cfg.code_index ||
         p.sync_repetitions != cfg.sync_repetitions ||
@@ -849,6 +976,27 @@ inline bool prefix_matches(const HrpPrefixCache& p,
     return std::strcmp(p.sfd_mode, mode) == 0;
 }
 
+// Update the common key when the public profile changed.  Both cached
+// representations are invalidated together; otherwise a waveform regenerate
+// could leave stale events (or vice versa) under a matching key.
+inline void prefix_key_update(HrpPrefixCache& p,
+                              const HrpModConfig& cfg,
+                              size_t n_sfd,
+                              uint64_t pulse_generation)
+{
+    p.code_index = cfg.code_index;
+    p.sync_repetitions = cfg.sync_repetitions;
+    p.insert_sts = cfg.insert_sts;
+    p.pulse = cfg.pulse;
+    p.pulse_generation = pulse_generation;
+    p.n_sfd = n_sfd;
+    copy_sfd_key(p.sfd_mode, sizeof(p.sfd_mode), cfg.sfd_mode);
+    p.valid = false;
+    p.n_samples = 0;
+    p.events_valid = false;
+    p.event_count = 0;
+}
+
 inline bool ensure_prefix(const HrpModConfig& cfg,
                           const int8_t* sfd,
                           size_t n_sfd,
@@ -856,8 +1004,11 @@ inline bool ensure_prefix(const HrpModConfig& cfg,
                           const float* taps,
                           size_t n_taps)
 {
-    if (prefix_matches(scratch.prefix, cfg, n_sfd) &&
-        scratch.prefix.pulse_generation == scratch.pulse_generation)
+    if (!prefix_key_matches(scratch.prefix, cfg, n_sfd,
+                            scratch.pulse_generation))
+        prefix_key_update(scratch.prefix, cfg, n_sfd,
+                          scratch.pulse_generation);
+    if (scratch.prefix.valid)
         return true;
     const int8_t* pc = demod::GetPreambleCode(cfg.code_index);
     const size_t sync_chips =
@@ -880,60 +1031,87 @@ inline bool ensure_prefix(const HrpModConfig& cfg,
     if (cfg.insert_sts)
         add_sts_pulses(y, shaped, sync_chips + sfd_chips, taps, n_taps);
     scratch.prefix.valid = true;
-    scratch.prefix.code_index = cfg.code_index;
-    scratch.prefix.sync_repetitions = cfg.sync_repetitions;
-    scratch.prefix.insert_sts = cfg.insert_sts;
-    scratch.prefix.pulse = cfg.pulse;
-    scratch.prefix.pulse_generation = scratch.pulse_generation;
-    scratch.prefix.n_sfd = n_sfd;
     scratch.prefix.n_samples = shaped;
-    copy_sfd_key(scratch.prefix.sfd_mode, sizeof(scratch.prefix.sfd_mode),
-                 cfg.sfd_mode);
+    return true;
+}
+
+// Sparse twin of ensure_prefix().  It caches the same SYNC/SFD/STS events and
+// never builds the full waveform.  The event key shares the waveform key.
+inline bool ensure_prefix_events(const HrpModConfig& cfg,
+                                 const int8_t* sfd,
+                                 size_t n_sfd,
+                                 HrpModScratch& scratch)
+{
+    if (!prefix_key_matches(scratch.prefix, cfg, n_sfd,
+                            scratch.pulse_generation))
+        prefix_key_update(scratch.prefix, cfg, n_sfd,
+                          scratch.pulse_generation);
+    if (scratch.prefix.events_valid)
+        return true;
+    const int8_t* pc = demod::GetPreambleCode(cfg.code_index);
+    const size_t sync_chips =
+        cfg.sync_repetitions * demod::kQm35ChipsPerSymbol;
+    const size_t sfd_chips = n_sfd * demod::kQm35ChipsPerSymbol;
+    const size_t sts_chips = cfg.insert_sts ? kStsChipsBprf : 0;
+    const size_t prefix_samples =
+        (sync_chips + sfd_chips + sts_chips) * demod::kQm35SamplesPerChip;
+    const size_t capacity = scratch.prefix.events.capacity();
+    if (prefix_samples == 0 || capacity == 0 ||
+        prefix_samples / demod::kQm35SamplesPerChip > capacity)
+        return false;
+    scratch.prefix.events.resize(prefix_samples /
+                                 demod::kQm35SamplesPerChip);
+    size_t count = 0;
+    PulseEvent* const events = scratch.prefix.events.data();
+    for (size_t r = 0; r < cfg.sync_repetitions; ++r)
+        if (!add_sync_symbol_events(events, capacity, count, r, 1, pc))
+            return false;
+    for (size_t s = 0; s < n_sfd; ++s)
+        if (!add_sync_symbol_events(events, capacity, count,
+                                    cfg.sync_repetitions + s, sfd[s], pc))
+            return false;
+    if (cfg.insert_sts &&
+        !add_sts_events(events, capacity, count, sync_chips + sfd_chips))
+        return false;
+    scratch.prefix.event_count = count;
+    scratch.prefix.events_valid = true;
+    scratch.prefix.events.resize(count);
     return true;
 }
 
 } // namespace detail
 
-inline bool modulate_one(const uint8_t* psdu,
-                         size_t psdu_len,
-                         const HrpModConfig& cfg,
-                         HrpModScratch& scratch,
-                         std::complex<float>* out,
-                         size_t out_cap,
-                         size_t& out_n)
+namespace detail {
+struct HrpCodedGeometry {
+    size_t n_base = 0;
+    size_t n_out = 0;
+    size_t nsym = 0;
+    size_t n_enc_sym = 0;
+    size_t sync_chips = 0;
+    size_t sfd_chips = 0;
+    size_t sts_chips = 0;
+    size_t phr_chips = 0;
+    size_t pay_chips = 0;
+    size_t n_chips = 0;
+    size_t phr_chip0 = 0;
+};
+
+// Shared RS/PHR/convolution/spreading decision.  Both the waveform and pulse
+// list entries use this exact code path; only the final placement differs.
+inline bool encode_hrp_packet(const uint8_t* psdu,
+                              size_t psdu_len,
+                              const HrpModConfig& cfg,
+                              HrpModScratch& scratch,
+                              const int8_t* sfd,
+                              size_t n_sfd,
+                              HrpCodedGeometry& g)
 {
-    out_n = 0;
-    if (!out || (psdu_len > 0 && !psdu))
-        return false;
-    if (psdu_len > radar_meta::kMaxPsduBytes)
-        return false;
-    if (!radar_meta::code_index_supported(cfg.code_index))
-        return false;
-    if (!radar_meta::sync_reps_supported(cfg.sync_repetitions))
-        return false;
-    if (cfg.insert_sts && !sfd_mode_is_4z(cfg.sfd_mode))
-        return false;
-    if (!(cfg.peak_amplitude > 0.f) || !std::isfinite(cfg.peak_amplitude))
-        return false;
-    if (!pulse_spec_valid(cfg.pulse))
-        return false;
-
-    const int8_t* sfd = nullptr;
-    size_t n_sfd = 0;
-    if (!detail::sfd_lookup(cfg.sfd_mode, sfd, n_sfd) || n_sfd == 0)
-        return false;
-
-    if (!ensure_pulse(cfg, scratch))
-        return false;
-    const float* taps = scratch.pulse_data();
-    const size_t n_taps = scratch.pulse_len();
-
-    const size_t n_base = packet_samples_998p4(
+    g = HrpCodedGeometry{};
+    g.n_base = packet_samples_998p4(
         cfg.sync_repetitions, n_sfd, psdu_len, cfg.insert_sts);
-    const size_t n_out = packet_samples_998p4(
+    g.n_out = packet_samples_998p4(
         cfg.sync_repetitions, n_sfd, psdu_len, cfg.insert_sts, &cfg.pulse);
-    if (n_base == 0 || n_out == 0 || n_out > out_cap ||
-        n_out > kMaxHrpTxSamples)
+    if (g.n_base == 0 || g.n_out == 0 || g.n_out > kMaxHrpTxSamples)
         return false;
 
     detail::bytes_to_lsb_bits(psdu, psdu_len, scratch.psdu_bits);
@@ -956,23 +1134,82 @@ inline bool modulate_one(const uint8_t* psdu,
     detail::convenc_cl3(scratch.conv_in.data(), scratch.conv_in.size(),
                         scratch.coded);
 
-    const size_t nsym = scratch.rs_cw.size();
-    const size_t n_enc_sym = scratch.conv_in.size(); // 19+nsym+2
-    if (n_enc_sym != kPhrSymbols + nsym)
+    g.nsym = scratch.rs_cw.size();
+    g.n_enc_sym = scratch.conv_in.size(); // 19+nsym+2
+    if (g.n_enc_sym != kPhrSymbols + g.nsym)
         return false;
 
-    const size_t sync_chips =
-        cfg.sync_repetitions * demod::kQm35ChipsPerSymbol;
-    const size_t sfd_chips = n_sfd * demod::kQm35ChipsPerSymbol;
-    const size_t sts_chips = cfg.insert_sts ? kStsChipsBprf : 0;
-    const size_t phr_chips = kPhrSymbols * kPhrChipsPerSymbol;
-    const size_t pay_chips = nsym * kPayloadChipsPerSymbol;
-    const size_t n_chips =
-        sync_chips + sfd_chips + sts_chips + phr_chips + pay_chips;
-    if (n_chips * demod::kQm35SamplesPerChip != n_base)
+    g.sync_chips = cfg.sync_repetitions * demod::kQm35ChipsPerSymbol;
+    g.sfd_chips = n_sfd * demod::kQm35ChipsPerSymbol;
+    g.sts_chips = cfg.insert_sts ? kStsChipsBprf : 0;
+    g.phr_chips = kPhrSymbols * kPhrChipsPerSymbol;
+    g.pay_chips = g.nsym * kPayloadChipsPerSymbol;
+    g.n_chips = g.sync_chips + g.sfd_chips + g.sts_chips + g.phr_chips +
+                g.pay_chips;
+    if (g.n_chips * demod::kQm35SamplesPerChip != g.n_base)
         return false;
-    if (n_base + pulse_tail_extra(cfg.pulse) != n_out)
+    if (g.n_base + pulse_tail_extra(cfg.pulse) != g.n_out)
         return false;
+    g.phr_chip0 = g.sync_chips + g.sfd_chips + g.sts_chips;
+
+    scratch.g0.resize(g.n_enc_sym);
+    scratch.g1.resize(g.n_enc_sym);
+    for (size_t s = 0; s < g.n_enc_sym; ++s) {
+        scratch.g0[s] = scratch.coded[2 * s];
+        scratch.g1[s] = scratch.coded[2 * s + 1];
+    }
+    return true;
+}
+
+inline bool modulate_one_impl(const uint8_t* psdu,
+                         size_t psdu_len,
+                         const HrpModConfig& cfg,
+                         HrpModScratch& scratch,
+                         std::complex<float>* out,
+                         size_t out_cap,
+                         size_t& out_n,
+                         bool unit_real)
+{
+    out_n = 0;
+    if ((!out && !unit_real) || (psdu_len > 0 && !psdu))
+        return false;
+    if (psdu_len > radar_meta::kMaxPsduBytes)
+        return false;
+    if (!radar_meta::code_index_supported(cfg.code_index))
+        return false;
+    if (!radar_meta::sync_reps_supported(cfg.sync_repetitions))
+        return false;
+    if (cfg.insert_sts && !sfd_mode_is_4z(cfg.sfd_mode))
+        return false;
+    if (!(cfg.peak_amplitude > 0.f) || !std::isfinite(cfg.peak_amplitude))
+        return false;
+    if (!pulse_spec_valid(cfg.pulse))
+        return false;
+    // The real-only SIC path is valid only for unit impulses.  Its absolute
+    // receive amplitude and pulse shaping already live in the estimated CIR.
+    if (unit_real && (cfg.peak_amplitude != 1.f ||
+        cfg.pulse.shape != PulseShape::External ||
+        cfg.pulse.external_n_taps != 2 || cfg.external_taps.size() != 2 ||
+        cfg.external_taps[0] != 1.f || cfg.external_taps[1] != 0.f))
+        return false;
+
+    const int8_t* sfd = nullptr;
+    size_t n_sfd = 0;
+    if (!detail::sfd_lookup(cfg.sfd_mode, sfd, n_sfd) || n_sfd == 0)
+        return false;
+
+    if (!ensure_pulse(cfg, scratch))
+        return false;
+    const float* taps = scratch.pulse_data();
+    const size_t n_taps = scratch.pulse_len();
+
+    HrpCodedGeometry g;
+    if (!encode_hrp_packet(psdu, psdu_len, cfg, scratch, sfd, n_sfd, g))
+        return false;
+    const size_t n_out = g.n_out;
+    if (n_out > out_cap)
+        return false;
+    const size_t nsym = g.nsym;
 
     if (!detail::ensure_prefix(cfg, sfd, n_sfd, scratch, taps, n_taps))
         return false;
@@ -983,27 +1220,19 @@ inline bool modulate_one(const uint8_t* psdu,
 
     if (scratch.iq_re.size() < n_out)
         scratch.iq_re.resize(n_out);
-    if (scratch.iq_im.size() < n_out)
+    if (!unit_real && scratch.iq_im.size() < n_out)
         scratch.iq_im.assign(n_out, 0.f);
     float* y = scratch.iq_re.data();
     std::memcpy(y, scratch.prefix.samples.data(), prefix_n * sizeof(float));
     if (prefix_n < n_out)
         std::memset(y + prefix_n, 0, (n_out - prefix_n) * sizeof(float));
 
-    scratch.g0.resize(n_enc_sym);
-    scratch.g1.resize(n_enc_sym);
-    for (size_t s = 0; s < n_enc_sym; ++s) {
-        scratch.g0[s] = scratch.coded[2 * s];
-        scratch.g1[s] = scratch.coded[2 * s + 1];
-    }
-
-    const size_t phr_chip0 = sync_chips + sfd_chips + sts_chips;
     scratch.spread.resize(kPhrChipsPerBurst * kPhrSymbols);
     if (!detail::fill_bprf_spread(scratch.spread.data(),
                                   kPhrChipsPerBurst * kPhrSymbols,
                                   cfg.code_index, 0))
         return false;
-    detail::bpm_add_pulses(y, n_out, phr_chip0, kPhrSymbols,
+    detail::bpm_add_pulses(y, n_out, g.phr_chip0, kPhrSymbols,
                            kPhrChipsPerBurst, kPhrChipsPerSymbol,
                            scratch.spread.data(), scratch.g0.data(),
                            scratch.g1.data(), taps, n_taps);
@@ -1013,11 +1242,19 @@ inline bool modulate_one(const uint8_t* psdu,
         if (!detail::fill_bprf_spread(scratch.spread.data(), n_spread,
                                       cfg.code_index, kPayloadScramblerOffset))
             return false;
-        detail::bpm_add_pulses(y, n_out, phr_chip0 + phr_chips, nsym,
+        detail::bpm_add_pulses(y, n_out, g.phr_chip0 + g.phr_chips, nsym,
                                kPayloadChipsPerBurst, kPayloadChipsPerSymbol,
                                scratch.spread.data(),
                                scratch.g0.data() + kPhrSymbols,
                                scratch.g1.data() + kPhrSymbols, taps, n_taps);
+    }
+
+    if (unit_real) {
+        // BPRF places one +/-1 impulse per selected chip, without overlap.
+        // Keep the real scratch buffer; no peak scan, normalization or IQ
+        // interleave. The caller consumes iq_re[0:out_n] directly.
+        out_n = n_out;
+        return true;
     }
 
     const float peak = detail::abs_peak(y, n_out);
@@ -1031,6 +1268,139 @@ inline bool modulate_one(const uint8_t* psdu,
                                 static_cast<unsigned int>(n_out));
     out_n = n_out;
     return true;
+}
+
+inline bool modulate_pulse_list_impl(const uint8_t* psdu,
+                                     size_t psdu_len,
+                                     const HrpModConfig& cfg,
+                                     HrpModScratch& scratch,
+                                     size_t sample_cap,
+                                     PulseList& out)
+{
+    out = PulseList{};
+    scratch.pulse_count = 0;
+    scratch.pulse_packet_samples = 0;
+    if (psdu_len > 0 && !psdu)
+        return false;
+    if (psdu_len > radar_meta::kMaxPsduBytes)
+        return false;
+    if (!radar_meta::code_index_supported(cfg.code_index))
+        return false;
+    if (!radar_meta::sync_reps_supported(cfg.sync_repetitions))
+        return false;
+    if (cfg.insert_sts && !sfd_mode_is_4z(cfg.sfd_mode))
+        return false;
+    if (!(cfg.peak_amplitude > 0.f) || !std::isfinite(cfg.peak_amplitude))
+        return false;
+    if (!pulse_spec_valid(cfg.pulse))
+        return false;
+    // The sparse event list is the unit-impulse representation only.  Any
+    // transmit shaping belongs to the estimated CIR, not to remodulation.
+    if (cfg.peak_amplitude != 1.f ||
+        cfg.pulse.shape != PulseShape::External ||
+        cfg.pulse.external_n_taps != 2 || cfg.external_taps.size() != 2 ||
+        cfg.external_taps[0] != 1.f || cfg.external_taps[1] != 0.f)
+        return false;
+
+    const int8_t* sfd = nullptr;
+    size_t n_sfd = 0;
+    if (!detail::sfd_lookup(cfg.sfd_mode, sfd, n_sfd) || n_sfd == 0)
+        return false;
+    if (!ensure_pulse(cfg, scratch))
+        return false;
+
+    HrpCodedGeometry g;
+    if (!encode_hrp_packet(psdu, psdu_len, cfg, scratch, sfd, n_sfd, g))
+        return false;
+    if (g.n_out > sample_cap || g.n_out > kMaxHrpTxSamples)
+        return false;
+    if (!detail::ensure_prefix_events(cfg, sfd, n_sfd, scratch))
+        return false;
+
+    const size_t phr_events = kPhrSymbols * kPhrChipsPerBurst;
+    const size_t pay_events = g.nsym * kPayloadChipsPerBurst;
+    const size_t total_events = scratch.prefix.event_count + phr_events +
+                                pay_events;
+    if (total_events > scratch.pulse_events.capacity())
+        return false;
+    if (scratch.prefix.event_count == 0)
+        return false;
+
+    scratch.pulse_events.resize(total_events);
+    PulseEvent* const events = scratch.pulse_events.data();
+    std::memcpy(events, scratch.prefix.events.data(),
+                scratch.prefix.event_count * sizeof(PulseEvent));
+    size_t count = scratch.prefix.event_count;
+
+    // PHR: same BPM hop/half/polarity placement as the waveform path.
+    scratch.spread.resize(kPhrChipsPerBurst * kPhrSymbols);
+    if (!detail::fill_bprf_spread(scratch.spread.data(),
+                                  kPhrChipsPerBurst * kPhrSymbols,
+                                  cfg.code_index, 0))
+        return false;
+    if (!detail::bpm_add_pulse_events(events, total_events, count,
+                                      g.phr_chip0, kPhrSymbols,
+                                      kPhrChipsPerBurst,
+                                      kPhrChipsPerSymbol,
+                                      scratch.spread.data(),
+                                      scratch.g0.data(), scratch.g1.data()))
+        return false;
+
+    // payload: same spreading decision, appended after the PHR segment.
+    if (g.nsym > 0) {
+        const size_t n_spread = kPayloadChipsPerBurst * g.nsym;
+        scratch.spread.resize(n_spread);
+        if (!detail::fill_bprf_spread(scratch.spread.data(), n_spread,
+                                      cfg.code_index, kPayloadScramblerOffset))
+            return false;
+        if (!detail::bpm_add_pulse_events(
+                events, total_events, count,
+                g.phr_chip0 + g.phr_chips, g.nsym,
+                kPayloadChipsPerBurst, kPayloadChipsPerSymbol,
+                scratch.spread.data(), scratch.g0.data() + kPhrSymbols,
+                scratch.g1.data() + kPhrSymbols))
+            return false;
+    }
+    if (count != total_events)
+        return false;
+
+    scratch.pulse_count = count;
+    scratch.pulse_packet_samples = g.n_out;
+    out.events = events;
+    out.count = count;
+    out.packet_samples = g.n_out;
+    return true;
+}
+
+} // namespace detail
+
+inline bool modulate_one(const uint8_t* psdu, size_t psdu_len,
+                         const HrpModConfig& cfg, HrpModScratch& scratch,
+                         std::complex<float>* out, size_t out_cap, size_t& out_n)
+{
+    return detail::modulate_one_impl(psdu, psdu_len, cfg, scratch,
+                                     out, out_cap, out_n, false);
+}
+
+// Dedicated SIC entry: returns unit real impulses in scratch.iq_re, retaining
+// normal HRP coding/spreading and the existing prefix cache.
+inline bool modulate_unit_impulses(const uint8_t* psdu, size_t psdu_len,
+                                  const HrpModConfig& cfg, HrpModScratch& scratch,
+                                  size_t out_cap, size_t& out_n)
+{
+    return detail::modulate_one_impl(psdu, psdu_len, cfg, scratch,
+                                     nullptr, out_cap, out_n, true);
+}
+
+// Sparse SIC entry: returns the complete packet as strictly increasing
+// non-zero +/-1 events.  It never materializes the real or complex waveform.
+inline bool modulate_pulse_list(const uint8_t* psdu, size_t psdu_len,
+                                const HrpModConfig& cfg,
+                                HrpModScratch& scratch, size_t sample_cap,
+                                PulseList& out)
+{
+    return detail::modulate_pulse_list_impl(psdu, psdu_len, cfg, scratch,
+                                            sample_cap, out);
 }
 
 } // namespace mod
