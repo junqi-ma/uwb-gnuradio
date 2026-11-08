@@ -357,15 +357,19 @@ inline bool correlate_field(const std::complex<float>* rx,
         return false;
     if (geometry.chips_per_burst == 0 || geometry.chips_per_symbol == 0)
         return false;
-    // Every candidate burst must lie inside its symbol.  Compare with
-    // subtraction so the addition cannot wrap.
-    const size_t burst_span = geometry.chips_per_burst - 1;
-    if (burst_span > geometry.chips_per_symbol)
+    // Every candidate burst must lie inside its symbol (offset + chips_per_burst <= chips_per_symbol).
+    // Compare with subtraction so the addition cannot wrap.
+    if (geometry.chips_per_burst > geometry.chips_per_symbol)
         return false;
+    const size_t max_allowed_offset =
+        geometry.chips_per_symbol - geometry.chips_per_burst;
+    size_t max_candidate_offset = 0;
     for (size_t p = 0; p < kCandidateCount; ++p) {
-        if (geometry.candidate_chip_offset[p] >
-            geometry.chips_per_symbol - burst_span)
+        const size_t off = geometry.candidate_chip_offset[p];
+        if (off > max_allowed_offset)
             return false;
+        if (off > max_candidate_offset)
+            max_candidate_offset = off;
     }
     // Bound the template length without overflowing size_t.  The support
     // limit is the 64-chip PHR burst: 38 taps give 164 complex samples and
@@ -395,9 +399,9 @@ inline bool correlate_field(const std::complex<float>* rx,
     if (field_start >
         (std::numeric_limits<int64_t>::max() - chip_start) / spc)
         return false;
-    // Window for symbol 0, hop 0, half 0, chip c=0.  The last candidate is
-    // symbol symbols-1 with the last geometry offset; its template then
-    // spans len samples.
+    // Window for symbol 0, hop 0, half 0, chip c=0.  The furthest candidate is
+    // symbol symbols-1 with the maximum geometry offset across all candidates;
+    // its template then spans len samples.
     const int64_t base0 = chip_start + field_start * spc -
                           static_cast<int64_t>(tap_count) + 1;
     if (base0 < 0)
@@ -405,8 +409,7 @@ inline bool correlate_field(const std::complex<float>* rx,
     const int64_t last_start_chip =
         static_cast<int64_t>(symbols - 1) *
             static_cast<int64_t>(geometry.chips_per_symbol) +
-        static_cast<int64_t>(
-            geometry.candidate_chip_offset[kCandidateCount - 1]);
+        static_cast<int64_t>(max_candidate_offset);
     // Compare as unsigned int64/u64 indices; base0 is non-negative and the
     // geometry bounds above keep this addition far from wrapping.
     const uint64_t add = static_cast<uint64_t>(last_start_chip) *

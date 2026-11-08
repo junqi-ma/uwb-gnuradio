@@ -148,11 +148,25 @@ inline bool diagnose_softchip_fir_segments(
                     const std::complex<float> y1 = scalar_dot(p0 + 1);
                     return y0 + frac * (y1 - y0);
                 }
+                // Guard arithmetic overflow on p
+                if (spc_i > 0 &&
+                    i > (std::numeric_limits<int64_t>::max() - 1000 - chip_start) /
+                            static_cast<int64_t>(spc_i))
+                    return scalar_dot(chip_start);
                 const int64_t p =
                     chip_start + i * static_cast<int64_t>(spc_i);
-                if (p - fwd < 0)
+                if (p < fwd)
                     return scalar_dot(p);
-                const size_t win = static_cast<size_t>(p - fwd);
+                const int64_t p_sub_fwd = p - fwd;
+                if (static_cast<uint64_t>(p_sub_fwd) >
+                    std::numeric_limits<size_t>::max() - tap_count)
+                    return scalar_dot(p);
+                const size_t win = static_cast<size_t>(p_sub_fwd);
+                // Bounded edge calculation: if the FIR window extends past the right
+                // IQ bound (win + tap_count > n), safely fall back to scalar_dot()
+                // which only accumulates valid in-bounds samples.
+                if (win + tap_count > n)
+                    return scalar_dot(p);
                 if (fir_k == cir_fir::Kernel::Avx2Fixed &&
                     tap_count == cir_fir::kDefaultTapCount)
                     return cir_fir::dot_avx2_fixed38(

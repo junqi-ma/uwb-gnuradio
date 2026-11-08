@@ -39,6 +39,8 @@
 
 #pragma once
 
+#include <gnuradio/uwb/uwb_demod_result.h>
+#include <gnuradio/uwb/uwb_phy_profile.h>
 #include <volk/volk.h>
 
 #include <algorithm>
@@ -46,6 +48,8 @@
 #include <cmath>
 #include <complex>
 #include <cstddef>
+#include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace gr {
@@ -96,6 +100,80 @@ inline void build_cfo_table(std::array<std::complex<float>, kCfoDerotateBlock>& 
 
 } // namespace detail
 
+// dst[i] = src[i] * exp(-j*w*i) for absolute i in [lo, hi), w in rad/sample.
+// Phase origin is strictly sample 0 (not lo). dst may not alias src.
+inline void derotate_range_block(std::complex<float>* dst,
+                                 const std::complex<float>* src,
+                                 std::size_t n,
+                                 std::size_t lo,
+                                 std::size_t hi,
+                                 double w)
+{
+    if (n == 0 || src == nullptr || dst == nullptr)
+        return;
+    hi = std::min(hi, n);
+    if (lo >= hi)
+        return;
+
+    std::array<std::complex<float>, kCfoDerotateBlock> table;
+    detail::build_cfo_table(table, w);
+
+    const std::size_t b_start = (lo / kCfoDerotateBlock) * kCfoDerotateBlock;
+    for (std::size_t b0 = b_start; b0 < hi; b0 += kCfoDerotateBlock) {
+        const std::size_t k_start = (b0 < lo) ? (lo - b0) : 0;
+        const std::size_t k_end =
+            std::min(hi - b0, std::min(kCfoDerotateBlock, n - b0));
+        if (k_start >= k_end)
+            continue;
+        const std::size_t len = k_end - k_start;
+
+        const std::complex<float>* src_ptr = src + b0 + k_start;
+        std::complex<float>* dst_ptr = dst + b0 + k_start;
+        const std::complex<float>* table_ptr = table.data() + k_start;
+
+        volk_32fc_x2_multiply_32fc(
+            reinterpret_cast<lv_32fc_t*>(dst_ptr),
+            reinterpret_cast<const lv_32fc_t*>(src_ptr),
+            reinterpret_cast<const lv_32fc_t*>(table_ptr),
+            static_cast<unsigned>(len));
+
+        if (b0 != 0) {
+            const double phase = -w * static_cast<double>(b0);
+            const float ar = static_cast<float>(std::cos(phase));
+            const float ai = static_cast<float>(std::sin(phase));
+            volk_32fc_s32fc_multiply_32fc(
+                reinterpret_cast<lv_32fc_t*>(dst_ptr),
+                reinterpret_cast<const lv_32fc_t*>(dst_ptr),
+                lv_cmake(ar, ai),
+                static_cast<unsigned>(len));
+        }
+    }
+}
+
+// Scalar reference / fallback range derotation.  Phase origin is strictly
+// sample 0 (i.e. base sample index has phase -w * i, not treating lo as 0).
+inline void derotate_range_scalar(std::complex<float>* dst,
+                                  const std::complex<float>* src,
+                                  std::size_t n,
+                                  std::size_t lo,
+                                  std::size_t hi,
+                                  double w)
+{
+    if (n == 0 || src == nullptr || dst == nullptr)
+        return;
+    hi = std::min(hi, n);
+    if (lo >= hi)
+        return;
+    for (std::size_t i = lo; i < hi; ++i) {
+        const double phase = -w * static_cast<double>(i);
+        const float c = static_cast<float>(std::cos(phase));
+        const float s = static_cast<float>(std::sin(phase));
+        const float re = src[i].real();
+        const float im = src[i].imag();
+        dst[i] = std::complex<float>(re * c - im * s, re * s + im * c);
+    }
+}
+
 // dst[i] = src[i] * exp(-j*w*i) for absolute i, w in rad/sample.
 // Replaces the legacy scalar four-chain rotation in stage_cfo when
 // profile.rx_fast_cfo_rotation is enabled.  dst may not alias src.
@@ -105,51 +183,7 @@ inline void derotate_block(std::vector<std::complex<float>>& dst,
                            double w)
 {
     dst.resize(n);
-    if (n == 0 || src == nullptr)
-        return;
-
-    std::array<std::complex<float>, kCfoDerotateBlock> table;
-    detail::build_cfo_table(table, w);
-
-    // Double-precision block anchor exp(-j*w*b0).  One complex multiply per
-    // block, with an exact sin/cos re-anchor every kCfoAnchorReanchorBlocks.
-    const double block_step_r =
-        std::cos(-w * static_cast<double>(kCfoDerotateBlock));
-    const double block_step_i =
-        std::sin(-w * static_cast<double>(kCfoDerotateBlock));
-    double ar = 1.0;
-    double ai = 0.0;
-    std::size_t block = 0;
-
-    for (std::size_t b0 = 0; b0 < n; b0 += kCfoDerotateBlock, ++block) {
-        if (block != 0) {
-            if ((block % kCfoAnchorReanchorBlocks) == 0) {
-                const double phase = -w * static_cast<double>(b0);
-                ar = std::cos(phase);
-                ai = std::sin(phase);
-            } else {
-                const double nr = ar * block_step_r - ai * block_step_i;
-                const double ni = ar * block_step_i + ai * block_step_r;
-                ar = nr;
-                ai = ni;
-            }
-        }
-        const std::size_t len = std::min(kCfoDerotateBlock, n - b0);
-        volk_32fc_x2_multiply_32fc(
-            reinterpret_cast<lv_32fc_t*>(dst.data() + b0),
-            reinterpret_cast<const lv_32fc_t*>(src + b0),
-            reinterpret_cast<const lv_32fc_t*>(table.data()),
-            static_cast<unsigned>(len));
-        if (block != 0) {
-            // Fold the absolute block phase into the same pass result.  In
-            // place is safe: VOLK loads before it stores each element.
-            volk_32fc_s32fc_multiply_32fc(
-                reinterpret_cast<lv_32fc_t*>(dst.data() + b0),
-                reinterpret_cast<const lv_32fc_t*>(dst.data() + b0),
-                lv_cmake(static_cast<float>(ar), static_cast<float>(ai)),
-                static_cast<unsigned>(len));
-        }
-    }
+    derotate_range_block(dst.data(), src, n, 0, n, w);
 }
 
 // QA-only independent reference: per-sample double-precision cos/sin and
@@ -159,7 +193,7 @@ inline void derotate_reference(std::complex<float>* dst,
                                std::size_t n,
                                double w)
 {
-    if (n == 0)
+    if (n == 0 || src == nullptr || dst == nullptr)
         return;
     for (std::size_t i = 0; i < n; ++i) {
         const double phase = -w * static_cast<double>(i);
@@ -169,6 +203,131 @@ inline void derotate_reference(std::complex<float>* dst,
         const double im = static_cast<double>(src[i].imag());
         dst[i] = std::complex<float>(static_cast<float>(re * c - im * s),
                                      static_cast<float>(re * s + im * c));
+    }
+}
+
+// QA-only independent range reference: exact double precision cos/sin over [lo, hi).
+inline void derotate_range_reference(std::complex<float>* dst,
+                                     const std::complex<float>* src,
+                                     std::size_t n,
+                                     std::size_t lo,
+                                     std::size_t hi,
+                                     double w)
+{
+    if (n == 0 || src == nullptr || dst == nullptr)
+        return;
+    hi = std::min(hi, n);
+    if (lo >= hi)
+        return;
+    for (std::size_t i = lo; i < hi; ++i) {
+        const double phase = -w * static_cast<double>(i);
+        const double c = std::cos(phase);
+        const double s = std::sin(phase);
+        const double re = static_cast<double>(src[i].real());
+        const double im = static_cast<double>(src[i].imag());
+        dst[i] = std::complex<float>(static_cast<float>(re * c - im * s),
+                                     static_cast<float>(re * s + im * c));
+    }
+}
+
+// Computes the absolute sample range [lo, hi) covering all SFD search candidates,
+// ±4 symbol backtrack, ±64 search halo, and the full SFD template length.
+inline std::pair<size_t, size_t> compute_sfd_search_range(
+    size_t n,
+    const TimingResult& timing,
+    size_t preamble_repetitions,
+    size_t sfd_len,
+    size_t sym = kQm35SamplesPerSymbol)
+{
+    constexpr int64_t kSfdNarrowHalf = 64;
+    constexpr int kSfdSymbolOffsets = 4;
+    const int64_t period =
+        (timing.measured_period > 0.0)
+            ? static_cast<int64_t>(std::llround(timing.measured_period))
+            : static_cast<int64_t>(sym);
+    const int64_t expected = timing.preamble_start_sample +
+        static_cast<int64_t>(preamble_repetitions) * period;
+
+    const int64_t center_min = expected -
+        static_cast<int64_t>(kSfdSymbolOffsets) * static_cast<int64_t>(sym);
+    const int64_t center_max = expected +
+        static_cast<int64_t>(kSfdSymbolOffsets) * static_cast<int64_t>(sym);
+
+    const int64_t lo = std::max<int64_t>(0, center_min - kSfdNarrowHalf);
+    const int64_t hi = std::min<int64_t>(
+        static_cast<int64_t>(n),
+        center_max + kSfdNarrowHalf + static_cast<int64_t>(sfd_len));
+    if (hi <= lo)
+        return { 0, 0 };
+    return { static_cast<size_t>(lo), static_cast<size_t>(hi) };
+}
+
+// Sparse ternary code template for CIR estimation (Task A2).
+// Iterates only non-zero positions (+-1) against accumulated IQ, preserving
+// tap order, position, and energy normalization.
+struct SparseCirEntry {
+    size_t pos = 0;      // sample index in [0, 1016), always even: 2 * j
+    int8_t sign = 0;     // +1 or -1
+};
+
+struct SparseCirTemplate {
+    uint64_t key = 0;
+    std::vector<SparseCirEntry> entries;
+    float code_energy = 0.0f;
+
+    void reset()
+    {
+        key = 0;
+        entries.clear();
+        code_energy = 0.0f;
+    }
+};
+
+inline uint64_t cir_template_key(const int8_t* code, size_t code_len)
+{
+    uint64_t h = 14695981039346656037ULL;
+    for (size_t i = 0; i < code_len; ++i) {
+        h ^= static_cast<uint8_t>(code[i]);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+inline void build_sparse_cir_template(const int8_t* code,
+                                      size_t code_len,
+                                      SparseCirTemplate& tmpl)
+{
+    tmpl.reset();
+    tmpl.key = cir_template_key(code, code_len);
+    const std::vector<int8_t> spread = BuildSampledCode(code, code_len);
+    tmpl.entries.reserve(code_len);
+    for (size_t j = 0; j < spread.size(); ++j) {
+        if (spread[j] != 0) {
+            tmpl.entries.push_back({ 2 * j, spread[j] });
+        }
+    }
+    tmpl.code_energy = static_cast<float>(tmpl.entries.size());
+}
+
+inline void correlate_cir_sparse(const std::complex<float>* corr,
+                                 const SparseCirTemplate& tmpl,
+                                 size_t tap_count,
+                                 std::vector<std::complex<float>>& values)
+{
+    values.resize(tap_count);
+    if (tmpl.code_energy <= 0.0f)
+        return;
+    for (size_t nn = 0; nn < tap_count; ++nn) {
+        std::complex<float> acc(0.0f, 0.0f);
+        const std::complex<float>* pcorr = corr + nn;
+        for (const auto& e : tmpl.entries) {
+            const std::complex<float>& s = pcorr[e.pos];
+            if (e.sign > 0)
+                acc += s;
+            else
+                acc -= s;
+        }
+        values[nn] = acc / tmpl.code_energy;
     }
 }
 

@@ -446,8 +446,6 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
         scratch.accumulator.size() < cfg.max_window_samples ||
         scratch.fir_tmp.size() < cfg.max_window_samples ||
         scratch.b.size() < kMaxActive || scratch.work.size() < kMaxActive ||
-        scratch.factor_work.size() < kMaxActive * kMaxActive ||
-        scratch.factor_eigen.size() < kMaxActive ||
         scratch.factor_cache.size() < kFactorCacheSlots)
         scratch.reserve(cfg.max_window_samples);
 
@@ -726,12 +724,6 @@ bool estimate_discrete_cir(const std::complex<float>* y,
     if (visible_end <= 0)
         return finish("failed", "invalid_observed_end");
 
-    // ---- finite prefix only ----------------------------------------------
-    for (int64_t i = 0; i < visible_end; ++i) {
-        if (!finite_cf(y[static_cast<size_t>(i)]))
-            return finish("failed", "nonfinite_input");
-    }
-
     const size_t Ls = scratch.sync_len;
     const size_t sps = scratch.sps;
     const size_t fit_reps = scratch.fit_reps;
@@ -740,6 +732,21 @@ bool estimate_discrete_cir(const std::complex<float>* y,
     const double detect_thr = cfg.detect_threshold;
     const cf* const syncn = scratch.sync_norm.data();
     double* const energy = scratch.energy_prefix.data();
+
+    // ---- finite prefix and self-energy prefix in a single pass -----------
+    const size_t energy_fill = static_cast<size_t>(visible_end);
+    double acc = 0.0;
+    energy[0] = 0.0;
+    for (size_t i = 0; i < energy_fill; ++i) {
+        const cf v = y[i];
+        if (!finite_cf(v))
+            return finish("failed", "nonfinite_input");
+        acc += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
+               static_cast<double>(v.imag()) * static_cast<double>(v.imag());
+        energy[i + 1] = acc;
+    }
+    if (!std::isfinite(acc))
+        return finish("failed", "nonfinite_energy");
 
     // ---- 1. public ROI clipped to the visible prefix ----------------------
     int64_t roi_lo = cfg.roi_lo;
@@ -756,7 +763,6 @@ bool estimate_discrete_cir(const std::complex<float>* y,
     const int64_t stride =
         std::max<int64_t>(1, static_cast<int64_t>(cfg.coarse_stride));
 
-    size_t energy_fill = 0;
     auto norm_at = [&](int64_t d, cf* corr_out) -> double {
         // STRICT PREFIX: the whole correlation row must be visible.
         if (d < 0 || d + static_cast<int64_t>(Ls) > visible_end) {
@@ -791,22 +797,6 @@ bool estimate_discrete_cir(const std::complex<float>* y,
     double peak_norm = 0.0;
     {
         const auto t0 = Clock::now();
-        // Self-energy prefix over the visible prefix only.
-        energy_fill = std::min<size_t>(
-            scratch.energy_prefix.size() - 1, static_cast<size_t>(visible_end));
-        double acc = 0.0;
-        energy[0] = 0.0;
-        for (size_t i = 0; i < energy_fill; ++i) {
-            const cf v = y[i];
-            acc += static_cast<double>(v.real()) *
-                       static_cast<double>(v.real()) +
-                   static_cast<double>(v.imag()) *
-                       static_cast<double>(v.imag());
-            energy[i + 1] = acc;
-        }
-        if (!std::isfinite(acc))
-            return finish("failed", "nonfinite_energy");
-
         for (int64_t d = roi_lo; d < roi_hi; d += stride) {
             const double nrm = norm_at(d, nullptr);
             if (nrm > coarse_nrm) {
@@ -969,16 +959,72 @@ bool estimate_discrete_cir(const std::complex<float>* y,
         const auto t_fit=Clock::now();
         const size_t rows=size_t(training_end-q);
         if (scratch.z.size()<rows) return finish("failed","scratch_capacity");
-        std::fill(scratch.z.begin(),scratch.z.begin()+rows,cd{});
-        for(size_t k=0;k<cfg.fit_reps;++k) {
-            for(size_t c=0;c<demod::kQm35CodeLength;++c) {
-                const double sign=scratch.impulse_sync[8*c].real();
-                if(sign==0) continue;
-                const int64_t pos=int64_t(k*sps+8*c)+cfg.lag_lo;
-                for(size_t d=0;d<taps;++d) {
-                    const int64_t j=pos+int64_t(d);
-                    if(j>=0 && j<int64_t(rows))
-                        scratch.z[size_t(j)]+=sign*cd(model.taps[d]);
+
+        bool use_periodic = (sps == 1016 && rows == cfg.fit_reps * sps && cfg.fit_reps >= 2);
+        int64_t p_min = std::numeric_limits<int64_t>::max();
+        int64_t p_max = std::numeric_limits<int64_t>::min();
+        if (use_periodic) {
+            for (size_t c = 0; c < demod::kQm35CodeLength; ++c) {
+                const float s = scratch.impulse_sync[8 * c].real();
+                if (s != 0.f) {
+                    const int64_t p = int64_t(8 * c) + cfg.lag_lo;
+                    p_min = std::min(p_min, p);
+                    p_max = std::max(p_max, p + int64_t(taps) - 1);
+                }
+            }
+            if (p_min > p_max || p_min < -int64_t(sps) || p_max >= 2 * int64_t(sps)) {
+                use_periodic = false;
+            }
+        }
+
+        if (use_periodic) {
+            const int64_t spill_head_hi = std::max<int64_t>(0, p_max - int64_t(sps) + 1);
+            const int64_t spill_tail_lo = (p_min < 0) ? (int64_t(sps) + p_min) : int64_t(sps);
+            alignas(64) std::array<cd, 1016> z_per{};
+            alignas(64) std::array<cd, 1016> head_spill{};
+            alignas(64) std::array<cd, 1016> tail_spill{};
+            for (size_t c = 0; c < demod::kQm35CodeLength; ++c) {
+                const double sign = scratch.impulse_sync[8 * c].real();
+                if (sign == 0.0) continue;
+                const int64_t pos = int64_t(8 * c) + cfg.lag_lo;
+                for (size_t d = 0; d < taps; ++d) {
+                    const int64_t p = pos + int64_t(d);
+                    const cd term = sign * cd(model.taps[d]);
+                    if (p >= 0 && p < int64_t(sps)) {
+                        z_per[size_t(p)] += term;
+                    } else if (p < 0) {
+                        const size_t t = size_t(p + int64_t(sps));
+                        z_per[t] += term;
+                        tail_spill[t] += term;
+                    } else {
+                        const size_t t = size_t(p - int64_t(sps));
+                        z_per[t] += term;
+                        head_spill[t] += term;
+                    }
+                }
+            }
+            for (size_t k = 0; k < cfg.fit_reps; ++k) {
+                std::memcpy(scratch.z.data() + k * sps, z_per.data(), sps * sizeof(cd));
+            }
+            for (int64_t t = 0; t < spill_head_hi; ++t) {
+                scratch.z[size_t(t)] -= head_spill[size_t(t)];
+            }
+            const size_t last_sym_base = (cfg.fit_reps - 1) * sps;
+            for (int64_t t = spill_tail_lo; t < int64_t(sps); ++t) {
+                scratch.z[last_sym_base + size_t(t)] -= tail_spill[size_t(t)];
+            }
+        } else {
+            std::fill(scratch.z.begin(), scratch.z.begin() + rows, cd{});
+            for (size_t k = 0; k < cfg.fit_reps; ++k) {
+                for (size_t c = 0; c < demod::kQm35CodeLength; ++c) {
+                    const double sign = scratch.impulse_sync[8 * c].real();
+                    if (sign == 0) continue;
+                    const int64_t pos = int64_t(k * sps + 8 * c) + cfg.lag_lo;
+                    for (size_t d = 0; d < taps; ++d) {
+                        const int64_t j = pos + int64_t(d);
+                        if (j >= 0 && j < int64_t(rows))
+                            scratch.z[size_t(j)] += sign * cd(model.taps[d]);
+                    }
                 }
             }
         }

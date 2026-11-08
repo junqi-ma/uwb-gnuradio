@@ -747,3 +747,66 @@ BOOST_AUTO_TEST_CASE(pulse_list_matches_unit_real_impulses)
         BOOST_CHECK_EQUAL(rejected.count,0u);
     }
 }
+
+BOOST_AUTO_TEST_CASE(test_hrp_mod_pn_cache_lifecycle)
+{
+    namespace mod = gr::uwb::mod;
+    const size_t cap = 300000;
+    mod::HrpModScratch scratch;
+    scratch.reserve(127, cap);
+    BOOST_CHECK(!scratch.pn_valid);
+    BOOST_CHECK_EQUAL(scratch.pn_code_index, 0u);
+    const size_t initial_spread_cap = scratch.spread.capacity();
+    BOOST_CHECK_GE(initial_spread_cap, size_t(11008));
+
+    // Modulate code 10 packet
+    mod::HrpModConfig cfg10;
+    cfg10.code_index = 10;
+    cfg10.sync_repetitions = 64;
+    cfg10.sfd_mode = "4z2";
+    cfg10.peak_amplitude = 1.f;
+    cfg10.pulse.shape = mod::PulseShape::External;
+    cfg10.pulse.external_n_taps = 2;
+    cfg10.external_taps = {1.f, 0.f};
+    const auto wire1 = mod::make_random_psdu(32, 42, true);
+    mod::PulseList list1;
+    BOOST_REQUIRE(mod::modulate_pulse_list(wire1.data(), wire1.size(), cfg10, scratch, cap, list1));
+    BOOST_CHECK(scratch.pn_valid);
+    BOOST_CHECK_EQUAL(scratch.pn_code_index, 10u);
+    BOOST_CHECK_EQUAL(scratch.spread.capacity(), initial_spread_cap);
+
+    // Verify PHR and payload spreading slices against independent direct fill_bprf_spread
+    std::vector<int8_t> ref_phr(1344);
+    BOOST_REQUIRE(mod::detail::fill_bprf_spread(ref_phr.data(), 1344, 10, 0));
+    BOOST_CHECK_EQUAL(std::memcmp(scratch.spread.data(), ref_phr.data(), 1344), 0);
+
+    const size_t n_pay = 8 * 300;
+    std::vector<int8_t> ref_pay(n_pay);
+    BOOST_REQUIRE(mod::detail::fill_bprf_spread(ref_pay.data(), n_pay, 10, 1344));
+    BOOST_CHECK_EQUAL(std::memcmp(scratch.spread.data() + 1344, ref_pay.data(), n_pay), 0);
+
+    // Modulate second packet with same code 10: must hit cache without re-allocating
+    const auto* spread_ptr = scratch.spread.data();
+    const auto wire2 = mod::make_random_psdu(64, 43, true);
+    mod::PulseList list2;
+    BOOST_REQUIRE(mod::modulate_pulse_list(wire2.data(), wire2.size(), cfg10, scratch, cap, list2));
+    BOOST_CHECK(scratch.pn_valid);
+    BOOST_CHECK_EQUAL(scratch.pn_code_index, 10u);
+    BOOST_CHECK_EQUAL(scratch.spread.data(), spread_ptr);
+
+    // Change to code 9: must invalidate and re-generate
+    mod::HrpModConfig cfg9 = cfg10;
+    cfg9.code_index = 9;
+    mod::PulseList list3;
+    BOOST_REQUIRE(mod::modulate_pulse_list(wire1.data(), wire1.size(), cfg9, scratch, cap, list3));
+    BOOST_CHECK(scratch.pn_valid);
+    BOOST_CHECK_EQUAL(scratch.pn_code_index, 9u);
+
+    std::vector<int8_t> ref_code9(1344);
+    BOOST_REQUIRE(mod::detail::fill_bprf_spread(ref_code9.data(), 1344, 9, 0));
+    BOOST_CHECK_EQUAL(std::memcmp(scratch.spread.data(), ref_code9.data(), 1344), 0);
+
+    // Explicit invalidate
+    scratch.invalidate_pn();
+    BOOST_CHECK(!scratch.pn_valid);
+}

@@ -335,6 +335,8 @@ struct HrpModScratch {
     std::vector<int8_t> coded;
     std::vector<int8_t> phr19;
     std::vector<int8_t> spread;
+    size_t pn_code_index = 0;
+    bool pn_valid = false;
     std::vector<int8_t> g0;
     std::vector<int8_t> g1;
     std::vector<float> iq_re;
@@ -362,6 +364,12 @@ struct HrpModScratch {
         return pulse_taps.empty() ? kPulseTaps : pulse_taps.size();
     }
 
+    void invalidate_pn()
+    {
+        pn_valid = false;
+        pn_code_index = 0;
+    }
+
     void reserve(size_t max_psdu_bytes, size_t max_samples)
     {
         const size_t max_bits = max_psdu_bytes * 8;
@@ -375,8 +383,12 @@ struct HrpModScratch {
         phr19.reserve(19);
         g0.reserve(max_conv);
         g1.reserve(max_conv);
-        spread.reserve(std::max(kPhrChipsPerBurst * kPhrSymbols,
-                                kPayloadChipsPerBurst * max_nsym));
+        const size_t max_spread =
+            kPayloadScramblerOffset + kPayloadChipsPerBurst * max_nsym;
+        spread.reserve(max_spread);
+        spread.resize(max_spread);
+        pn_code_index = 0;
+        pn_valid = false;
         iq_re.reserve(max_samples);
         iq_im.assign(max_samples, 0.f);
         prefix.samples.reserve(max_samples);
@@ -783,6 +795,26 @@ inline bool fill_bprf_spread(int8_t* out,
         (void)next_bit();
     for (size_t i = 0; i < nbits; ++i)
         out[i] = next_bit() ? int8_t(-1) : int8_t(1);
+    return true;
+}
+
+inline bool ensure_pn(HrpModScratch& scratch, size_t code_index, size_t min_len)
+{
+    if (scratch.pn_valid && scratch.pn_code_index == code_index &&
+        scratch.spread.size() >= min_len) {
+        return true;
+    }
+    const size_t target_len = std::max(scratch.spread.capacity(), min_len);
+    if (scratch.spread.size() < target_len)
+        scratch.spread.resize(target_len);
+    if (!fill_bprf_spread(scratch.spread.data(), scratch.spread.size(),
+                          code_index, 0)) {
+        scratch.pn_valid = false;
+        scratch.pn_code_index = 0;
+        return false;
+    }
+    scratch.pn_code_index = code_index;
+    scratch.pn_valid = true;
     return true;
 }
 
@@ -1227,24 +1259,18 @@ inline bool modulate_one_impl(const uint8_t* psdu,
     if (prefix_n < n_out)
         std::memset(y + prefix_n, 0, (n_out - prefix_n) * sizeof(float));
 
-    scratch.spread.resize(kPhrChipsPerBurst * kPhrSymbols);
-    if (!detail::fill_bprf_spread(scratch.spread.data(),
-                                  kPhrChipsPerBurst * kPhrSymbols,
-                                  cfg.code_index, 0))
+    const size_t n_pay_spread = (nsym > 0) ? (kPayloadChipsPerBurst * nsym) : 0;
+    const size_t total_spread_needed = kPayloadScramblerOffset + n_pay_spread;
+    if (!detail::ensure_pn(scratch, cfg.code_index, total_spread_needed))
         return false;
     detail::bpm_add_pulses(y, n_out, g.phr_chip0, kPhrSymbols,
                            kPhrChipsPerBurst, kPhrChipsPerSymbol,
                            scratch.spread.data(), scratch.g0.data(),
                            scratch.g1.data(), taps, n_taps);
     if (nsym > 0) {
-        const size_t n_spread = kPayloadChipsPerBurst * nsym;
-        scratch.spread.resize(n_spread);
-        if (!detail::fill_bprf_spread(scratch.spread.data(), n_spread,
-                                      cfg.code_index, kPayloadScramblerOffset))
-            return false;
         detail::bpm_add_pulses(y, n_out, g.phr_chip0 + g.phr_chips, nsym,
                                kPayloadChipsPerBurst, kPayloadChipsPerSymbol,
-                               scratch.spread.data(),
+                               scratch.spread.data() + kPayloadScramblerOffset,
                                scratch.g0.data() + kPhrSymbols,
                                scratch.g1.data() + kPhrSymbols, taps, n_taps);
     }
@@ -1333,10 +1359,9 @@ inline bool modulate_pulse_list_impl(const uint8_t* psdu,
     size_t count = scratch.prefix.event_count;
 
     // PHR: same BPM hop/half/polarity placement as the waveform path.
-    scratch.spread.resize(kPhrChipsPerBurst * kPhrSymbols);
-    if (!detail::fill_bprf_spread(scratch.spread.data(),
-                                  kPhrChipsPerBurst * kPhrSymbols,
-                                  cfg.code_index, 0))
+    const size_t n_pay_spread = (g.nsym > 0) ? (kPayloadChipsPerBurst * g.nsym) : 0;
+    const size_t total_spread_needed = kPayloadScramblerOffset + n_pay_spread;
+    if (!detail::ensure_pn(scratch, cfg.code_index, total_spread_needed))
         return false;
     if (!detail::bpm_add_pulse_events(events, total_events, count,
                                       g.phr_chip0, kPhrSymbols,
@@ -1348,16 +1373,12 @@ inline bool modulate_pulse_list_impl(const uint8_t* psdu,
 
     // payload: same spreading decision, appended after the PHR segment.
     if (g.nsym > 0) {
-        const size_t n_spread = kPayloadChipsPerBurst * g.nsym;
-        scratch.spread.resize(n_spread);
-        if (!detail::fill_bprf_spread(scratch.spread.data(), n_spread,
-                                      cfg.code_index, kPayloadScramblerOffset))
-            return false;
         if (!detail::bpm_add_pulse_events(
                 events, total_events, count,
                 g.phr_chip0 + g.phr_chips, g.nsym,
                 kPayloadChipsPerBurst, kPayloadChipsPerSymbol,
-                scratch.spread.data(), scratch.g0.data() + kPhrSymbols,
+                scratch.spread.data() + kPayloadScramblerOffset,
+                scratch.g0.data() + kPhrSymbols,
                 scratch.g1.data() + kPhrSymbols))
             return false;
     }

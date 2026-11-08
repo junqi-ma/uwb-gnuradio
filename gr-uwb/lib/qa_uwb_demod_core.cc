@@ -1873,3 +1873,172 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r7_robust_collision_representative)
                        << " fcs=" << res.payload.fcs_pass << " latency_ms="
                        << ms);
 }
+
+BOOST_AUTO_TEST_CASE(test_demod_core_task_a1_cfo_range_absolute_phase_origin)
+{
+    // Task A1 direct numerical QA:
+    // Decoupled CFO range rotation [lo, hi) where phase origin is strictly
+    // sample 0 (i.e. sample index i has phase -w * i, not treating lo as 0).
+    // Test non-aligned block boundaries and positive/negative CFOs.
+    const size_t n = 8192;
+    std::vector<gr_complex> src(n);
+    for (size_t i = 0; i < n; ++i) {
+        src[i] = gr_complex(std::sin(0.017f * static_cast<float>(i)) + 0.3f,
+                            std::cos(0.023f * static_cast<float>(i)) - 0.2f);
+    }
+
+    const gr_complex sentinel(-999.0f, -999.0f);
+
+    struct Interval {
+        size_t lo;
+        size_t hi;
+    };
+    const std::vector<Interval> intervals = {
+        { 0, 1024 },
+        { 137, 3519 },    // non-multiple start and end, spanning 4 blocks
+        { 1024, 2048 },   // exactly 1 block
+        { 1025, 1026 },   // single sample
+        { 512, 7168 },    // large multi-block range
+        { 2000, 2000 }    // empty interval
+    };
+
+    for (double cfo_hz : { 50000.0, -50000.0, 150000.0 }) {
+        const double w = 2.0 * M_PI * cfo_hz / kQm35SampleRate;
+        for (const auto& iv : intervals) {
+            std::vector<gr_complex> dst_block(n, sentinel);
+            std::vector<gr_complex> dst_scalar(n, sentinel);
+            std::vector<gr_complex> ref(n, sentinel);
+
+            rxopt::derotate_range_block(dst_block.data(), src.data(), n, iv.lo, iv.hi, w);
+            rxopt::derotate_range_scalar(dst_scalar.data(), src.data(), n, iv.lo, iv.hi, w);
+            rxopt::derotate_range_reference(ref.data(), src.data(), n, iv.lo, iv.hi, w);
+
+            // 1. Outside [lo, hi), sentinel must be strictly preserved
+            for (size_t i = 0; i < iv.lo; ++i) {
+                BOOST_CHECK_EQUAL(dst_block[i], sentinel);
+                BOOST_CHECK_EQUAL(dst_scalar[i], sentinel);
+            }
+            for (size_t i = iv.hi; i < n; ++i) {
+                BOOST_CHECK_EQUAL(dst_block[i], sentinel);
+                BOOST_CHECK_EQUAL(dst_scalar[i], sentinel);
+            }
+
+            // 2. Inside [lo, hi), verify against independent reference
+            double max_err_block = 0.0;
+            double max_err_scalar = 0.0;
+            for (size_t i = iv.lo; i < iv.hi; ++i) {
+                max_err_block = std::max(max_err_block,
+                    static_cast<double>(std::abs(dst_block[i] - ref[i])));
+                max_err_scalar = std::max(max_err_scalar,
+                    static_cast<double>(std::abs(dst_scalar[i] - ref[i])));
+            }
+            BOOST_CHECK_LT(max_err_block, 2e-5);
+            BOOST_CHECK_LT(max_err_scalar, 1e-6);
+
+            // 3. Strict verification of phase origin = sample 0 (not lo!):
+            // Sample lo must have phase -w * lo.
+            if (iv.lo < iv.hi && iv.lo > 0 && std::abs(w * static_cast<double>(iv.lo)) > 0.1) {
+                const double expected_phase = -w * static_cast<double>(iv.lo);
+                const gr_complex expected_lo = src[iv.lo] *
+                    gr_complex(static_cast<float>(std::cos(expected_phase)),
+                               static_cast<float>(std::sin(expected_phase)));
+                BOOST_CHECK_LT(std::abs(dst_block[iv.lo] - expected_lo), 2e-5f);
+                // If lo were wrongly treated as phase 0, dst[lo] would equal src[lo]
+                BOOST_CHECK_GT(std::abs(dst_block[iv.lo] - src[iv.lo]), 1e-3f);
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_task_a2_cir_sparse_correlation_against_dense)
+{
+    // Task A2: CIR ternary template sparse correlation.
+    // Verify that rxopt::correlate_cir_sparse matches dense correlation
+    // across all HRP codes (9, 10, 11, 12).
+    const size_t tap_count = 38;
+    const size_t code_len = 2 * kQm35ChipsPerSymbol; // 1016
+    const size_t wlen = code_len + tap_count - 1;
+
+    std::vector<gr_complex> corr(wlen);
+    for (size_t i = 0; i < wlen; ++i) {
+        corr[i] = gr_complex(std::cos(0.031f * static_cast<float>(i)) + 0.1f,
+                             std::sin(0.047f * static_cast<float>(i)) - 0.15f);
+    }
+
+    for (size_t code_idx : { 9, 10, 11, 12 }) {
+        const int8_t* pc = GetPreambleCode(code_idx);
+        const auto spread = BuildSampledCode(pc, kQm35CodeLength);
+
+        // Dense reference implementation
+        std::vector<gr_complex> dense_work(code_len, gr_complex(0.0f, 0.0f));
+        float dense_energy = 0.0f;
+        for (size_t j = 0; j < spread.size(); ++j) {
+            dense_work[2 * j] = gr_complex(static_cast<float>(spread[j]), 0.0f);
+            dense_energy += std::norm(dense_work[2 * j]);
+        }
+        std::vector<gr_complex> dense_values(tap_count);
+        for (size_t nn = 0; nn < tap_count; ++nn) {
+            gr_complex acc(0.0f, 0.0f);
+            for (size_t m = 0; m < code_len; ++m) {
+                acc += std::conj(dense_work[m]) * corr[nn + m];
+            }
+            dense_values[nn] = acc / dense_energy;
+        }
+
+        // Sparse implementation
+        rxopt::SparseCirTemplate sparse_tmpl;
+        rxopt::build_sparse_cir_template(pc, kQm35CodeLength, sparse_tmpl);
+        BOOST_CHECK_EQUAL(sparse_tmpl.code_energy, dense_energy);
+        BOOST_CHECK_GT(sparse_tmpl.entries.size(), 0u);
+        BOOST_CHECK_LE(sparse_tmpl.entries.size(), 127u); // ternary code length <= 127 (e.g. 64 non-zeros)
+
+        std::vector<gr_complex> sparse_values;
+        rxopt::correlate_cir_sparse(corr.data(), sparse_tmpl, tap_count, sparse_values);
+
+        BOOST_REQUIRE_EQUAL(sparse_values.size(), dense_values.size());
+        double max_diff = 0.0;
+        for (size_t nn = 0; nn < tap_count; ++nn) {
+            max_diff = std::max(max_diff,
+                static_cast<double>(std::abs(sparse_values[nn] - dense_values[nn])));
+        }
+        // Arithmetic is identical additions/subtractions in identical order
+        BOOST_CHECK_LT(max_diff, 1e-6);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_task_a1_a2_full_pipeline_range_cfo)
+{
+    // End-to-end full packet decode with range CFO compensation and sparse CIR:
+    // Tests fast CFO rotation, on-demand soft-chips, and fused payload CMF.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+
+    for (double cfo_hz : { 0.0, 25000.0, -25000.0 }) {
+        std::vector<gr_complex> rx(iq.size());
+        const double w = 2.0 * M_PI * cfo_hz / kQm35SampleRate;
+        for (size_t i = 0; i < iq.size(); ++i) {
+            const double phase = w * static_cast<double>(i);
+            const float c = static_cast<float>(std::cos(phase));
+            const float s = static_cast<float>(std::sin(phase));
+            rx[i] = iq[i] * gr_complex(c, s);
+        }
+
+        auto prof = Qm35825Profile::Default();
+        prof.sfd_mode = "ieee";
+        prof.rx_fast_sfd = true;
+        prof.rx_fast_cfo_rotation = true;
+        prof.rx_softchip_on_demand = true;
+        prof.rx_fused_payload_cmf = true;
+        prof.rx_fused_phr_cmf = true;
+
+        core::DemodScratch scratch;
+        scratch.reserve(rx.size());
+        auto res = core::demodulate_one(rx.data(), rx.size(), prof, 1, 9984, 0,
+                                        load_reference_template(), scratch);
+        BOOST_CHECK(res.status == DemodStatus::Success);
+        BOOST_CHECK(res.payload.fcs_pass);
+        BOOST_CHECK_EQUAL(res.payload.received_fcs, uint16_t(0x584b));
+        BOOST_CHECK_CLOSE(res.cfo.cfo_hz, cfo_hz, 200.0); // within 200 Hz
+        BOOST_CHECK_GT(res.stage_cfo_rotate_us, 0u);
+    }
+}

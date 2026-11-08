@@ -1,3 +1,19 @@
+# 最新优化：AGY SIC 非同步深度优化与复核收口（2026-11-08）
+
+执行 `docs/sic/AGY_SIC优化执行任务书_2026-11-08.md`。完整开发与测试报告详见 `docs/sic/AGY_SIC优化开发报告_2026-11-08.md`。
+涵盖：
+1. **Task A (RX 数据量与零乘精简)**：CFO 旋转解耦支持区间补偿（样点 0 严格为相位原点），覆盖 Bootstrap SFD 候选及 Final SFD/CIR/PHR/Payload，消除冗余样点旋转；`stage_cir_softchips` 改为三元码非零位置（64 点）稀疏互相关，消除 1016 点稠密零乘。
+2. **Task B (重构与输出写入)**：延迟旁路拷贝至失败分支，成功路径仅复制相减 ROI 两侧且直接计算 `out = y - recon` 消除双写；内部可信脉冲列表（`transaction_prepared == true`）免去 8,384 事件二次线性扫描；实现 20-tap 专用 AVX2/FMA 脉冲加减内核。
+3. **Task C (参数估计与 TX 调制)**：合并前缀有限性扫描与能量累加至单遍循环；三元训练序列单周期（1016 点）预测残差；`HrpModScratch` 缓存扩频 PN 序列；修复 `prepare_discrete_cir` 中死字段引发的无效二次 reserve。
+4. **Task D (复核遗留收口)**：彻底关闭 `PHR解扩CMF融合_验收复核_2026-11-07.md` 登记的 R1–R3 缺陷（R1 最大 offset 尾界及防下溢、R2 诊断重放右端范围越界防护、R3 逐轮逐观测完整功能字段校验）。
+
+验证与配对性能：
+- 单测与反例：`uwb_qa_uwb_demod_core`（50项）、`discrete_cir_reconstruct`（10项）、`discrete_cir_estimator`、`hrp_mod_core`、`rx_fused_cmf`（12项）、`rx_fused_phr` 针对性测试 100% 通过；R3 扰动反例准确拒绝；损坏包旁路输出与输入保持逐位一致（Bit-exact）。
+- 数值等价：紧凑四径主场景下输出 IQ 最大相对 L2 误差为 `1.944e-07`（门槛 ≤ 2e-05），全窗消减抑制比 `28.183925 dB`（差异 `1.89e-07 dB`，门槛 ≤ 0.01 dB），所有 FCS 与 committed 100% 保持一致。
+- 计时结果（持锁 ABBA 配对，20-tap `lag_lo=-1`）：SIC 均值由 `2692.4 µs` 降至 **`1572.0 µs`**（P95 **`1803.7 µs`**），降低 **41.6%**；通信解码由 `1369.4 µs` 降至 **`1098.2 µs`**；脉冲重构卷积仅 **`58.6 µs`**。产物位于 `gr-uwb/build-sic-fullpacket-agy-opt/results/agy_opt_timing_20261108_121619`。
+
+---
+
 # 当前提交快照：整包 SIC 稀疏重构与验证精简（2026-11-08）
 
 本次提交汇总当前实验代码与报告。紧凑四径、32 B、20 tap、lag_lo=-1：总 SIC mean 1.822 ms，调制+重构 227.7 µs。相较最初整包版本历史 21.83 ms 约快 12 倍；不同信道/运行的阶段对比，详见 `docs/sic/SIC_首版至当前性能对比_2026-11-08.md`。下方“未提交”为各轮测量时的历史状态。PHR R1–R3 与 SYNC 碰撞退化仍未关闭；实验选项不自动替代默认路径。

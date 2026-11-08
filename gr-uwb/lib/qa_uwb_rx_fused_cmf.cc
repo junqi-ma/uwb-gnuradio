@@ -4,6 +4,7 @@
 #include "../apps/fullpacket_rx_pipeline.h"
 #include <gnuradio/uwb/uwb_hrp_mod_core.h>
 #include <gnuradio/uwb/uwb_rx_fused_cmf.h>
+#include <gnuradio/uwb/uwb_softchip_fir_diag.h>
 
 #include <algorithm>
 #include <cmath>
@@ -408,4 +409,131 @@ BOOST_AUTO_TEST_CASE(fused_cmf_option_implies_prefix_path)
     BOOST_CHECK(r.payload.bytes == packet.wire);
     BOOST_CHECK_EQUAL(r.stage_fused_attempts, 1u);
     BOOST_CHECK_EQUAL(r.cir.extended_chip_count, 0u);
+}
+
+BOOST_AUTO_TEST_CASE(r1_non_last_candidate_max_offset_bounds_check)
+{
+    // R1: candidate 1 is max offset (320), candidate 3 is 0.
+    // len = 164. base0 = 0 (chip_start=37, tap_count=38).
+    // Candidate 1 requires up to sample index 803 (n >= 804).
+    // Candidate 3 only requires up to sample index 163 (n >= 164).
+    const size_t offsets[rxfusion::kCandidateCount] = { 0, 320, 64, 0 };
+    rxfusion::Geometry geom;
+    geom.chips_per_burst = 64;
+    geom.chips_per_symbol = 512;
+    geom.candidate_count = rxfusion::kCandidateCount;
+    geom.candidate_chip_offset = offsets;
+
+    std::vector<cf> rx(1024, cf(1.0f, 0.0f));
+    std::vector<cf> taps(38, cf(1.0f, 0.0f));
+    std::vector<int8_t> pn(64, 1);
+    rxfusion::Metrics out;
+    rxfusion::Scratch scratch;
+
+    // With n = 164, candidate 3 would pass, but candidate 1 requires 804 samples.
+    // Must return false.
+    BOOST_CHECK(!rxfusion::correlate_field(
+        rx.data(), 164, taps.data(), 38, 37, 2, 0, pn.data(), 1, geom,
+        1, cf(1.0f, 0.0f), out, scratch));
+
+    // With n = 804, all candidates fit. Must return true.
+    BOOST_CHECK(rxfusion::correlate_field(
+        rx.data(), 804, taps.data(), 38, 37, 2, 0, pn.data(), 1, geom,
+        1, cf(1.0f, 0.0f), out, scratch));
+}
+
+BOOST_AUTO_TEST_CASE(r1_burst_crossing_symbol_boundary)
+{
+    // R1: chips_per_burst=64, chips_per_symbol=512.
+    // Max offset within symbol is 512 - 64 = 448.
+    // Candidate at 448 exactly fits inside symbol (offset + chips_per_burst == 512).
+    // Candidate at 449 crosses symbol boundary by 1 chip (offset + chips_per_burst == 513).
+    rxfusion::Geometry geom_exact;
+    const size_t offsets_exact[rxfusion::kCandidateCount] = { 0, 64, 128, 448 };
+    geom_exact.chips_per_burst = 64;
+    geom_exact.chips_per_symbol = 512;
+    geom_exact.candidate_count = rxfusion::kCandidateCount;
+    geom_exact.candidate_chip_offset = offsets_exact;
+
+    rxfusion::Geometry geom_cross;
+    const size_t offsets_cross[rxfusion::kCandidateCount] = { 0, 64, 128, 449 };
+    geom_cross.chips_per_burst = 64;
+    geom_cross.chips_per_symbol = 512;
+    geom_cross.candidate_count = rxfusion::kCandidateCount;
+    geom_cross.candidate_chip_offset = offsets_cross;
+
+    std::vector<cf> rx(2048, cf(1.0f, 0.0f));
+    std::vector<cf> taps(38, cf(1.0f, 0.0f));
+    std::vector<int8_t> pn(64, 1);
+    rxfusion::Metrics out;
+    rxfusion::Scratch scratch;
+
+    BOOST_CHECK(rxfusion::correlate_field(
+        rx.data(), rx.size(), taps.data(), 38, 37, 2, 0, pn.data(), 1, geom_exact,
+        1, cf(1.0f, 0.0f), out, scratch));
+
+    // Exactly crosses boundary by 1 chip -> rejected!
+    BOOST_CHECK(!rxfusion::correlate_field(
+        rx.data(), rx.size(), taps.data(), 38, 37, 2, 0, pn.data(), 1, geom_cross,
+        1, cf(1.0f, 0.0f), out, scratch));
+}
+
+BOOST_AUTO_TEST_CASE(r2_fir_diag_iq_boundary_and_short_by_one)
+{
+    // R2: test diagnose_softchip_fir_segments right boundary and out-of-bounds isolation.
+    std::vector<cf> rx(64, cf(1.0f, 0.0f));
+    std::vector<cf> taps(38, cf(1.0f, 0.0f));
+    demod::NsSfdResult ns_sfd;
+    ns_sfd.ok = true;
+    ns_sfd.sfd_start_chip = 0;
+    ns_sfd.sfd_end_chip = 0;
+    demod::PhrResult phr;
+    phr.ok = true;
+    std::vector<cf> work;
+    demod::core::detail::SoftFirSegments seg;
+
+    // Case 1: total_chips=1, tap_count=38, chip_start=37, spc=2.
+    // For chip 0: p = 37, fwd = 37, win = 0.
+    // win + tap_count = 38.
+    // When n = 38 (exact boundary):
+    BOOST_REQUIRE(demod::core::detail::diagnose_softchip_fir_segments(
+        rx.data(), 38, taps.data(), 38, 37, 1, 2.0, ns_sfd, phr, 0, work, seg));
+    BOOST_CHECK_EQUAL(work[0], cf(38.0f, 0.0f));
+
+    // Changing rx[38] (which is outside n=38) must not change the result with n=38.
+    rx[38] = cf(999.0f, 999.0f);
+    BOOST_REQUIRE(demod::core::detail::diagnose_softchip_fir_segments(
+        rx.data(), 38, taps.data(), 38, 37, 1, 2.0, ns_sfd, phr, 0, work, seg));
+    BOOST_CHECK_EQUAL(work[0], cf(38.0f, 0.0f));
+
+    // When n = 37 (short by 1 sample):
+    // win + tap_count = 38 > 37, falls back safely to scalar_dot which only sums 37 taps (0..36).
+    BOOST_REQUIRE(demod::core::detail::diagnose_softchip_fir_segments(
+        rx.data(), 37, taps.data(), 38, 37, 1, 2.0, ns_sfd, phr, 0, work, seg));
+    BOOST_CHECK_EQUAL(work[0], cf(37.0f, 0.0f));
+
+    // Changing rx[37] (outside n=37) must not change the result with n=37.
+    rx[37] = cf(777.0f, 777.0f);
+    BOOST_REQUIRE(demod::core::detail::diagnose_softchip_fir_segments(
+        rx.data(), 37, taps.data(), 38, 37, 1, 2.0, ns_sfd, phr, 0, work, seg));
+    BOOST_CHECK_EQUAL(work[0], cf(37.0f, 0.0f));
+
+    // Case 2: Counterexample from review doc:
+    // 38 taps, chip_start=37, spc=2, total_chips=10, n=40. Physical allocation 56.
+    std::vector<cf> rx_buf(56, cf(1.0f, 0.0f));
+    std::vector<cf> work1, work2;
+    demod::core::detail::SoftFirSegments seg1, seg2;
+    BOOST_REQUIRE(demod::core::detail::diagnose_softchip_fir_segments(
+        rx_buf.data(), 40, taps.data(), 38, 37, 10, 2.0, ns_sfd, phr, 0, work1, seg1));
+
+    // Modify samples beyond n=40:
+    for (size_t i = 40; i < 56; ++i)
+        rx_buf[i] = cf(100.0f, -50.0f);
+    BOOST_REQUIRE(demod::core::detail::diagnose_softchip_fir_segments(
+        rx_buf.data(), 40, taps.data(), 38, 37, 10, 2.0, ns_sfd, phr, 0, work2, seg2));
+
+    BOOST_REQUIRE_EQUAL(work1.size(), work2.size());
+    for (size_t i = 0; i < work1.size(); ++i) {
+        BOOST_CHECK_EQUAL(work1[i], work2[i]);
+    }
 }

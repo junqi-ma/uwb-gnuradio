@@ -792,3 +792,60 @@ BOOST_AUTO_TEST_CASE(ipatov_cir_response_and_impulse_reconstruction)
     BOOST_CHECK(!estimate_ok(p,impossible,damaged,observed,rejected,bad));
     BOOST_CHECK(!bad.valid);
 }
+
+BOOST_AUTO_TEST_CASE(test_discrete_cir_c1_c2_c4_optimizations)
+{
+    Packet p(10, 32);
+    const size_t q = 1200;
+    const size_t n = q + p.wave.size() + 200;
+    auto cfg = make_cfg(n, q, 20);
+    cfg.lag_lo = -1;
+    cfg.ipatov_correlation = true;
+    cfg.sparse_pulse_reconstruct = true;
+
+    // C4: verify prepare_discrete_cir does NOT re-reserve if already sized
+    sic::DiscreteCirScratch scratch;
+    scratch.reserve(cfg.max_window_samples);
+    const auto* factor_cache_ptr = scratch.factor_cache.data();
+    const auto* z_ptr = scratch.z.data();
+    std::string err;
+    auto tmpl = templates_of(p);
+    BOOST_REQUIRE_MESSAGE(sic::prepare_discrete_cir(cfg, tmpl, scratch, &err), err);
+    // Capacity check must not trigger re-reserve
+    BOOST_CHECK_EQUAL(scratch.factor_cache.data(), factor_cache_ptr);
+    BOOST_CHECK_EQUAL(scratch.z.data(), z_ptr);
+
+    // Create a clean received signal with packet placed at q
+    std::vector<cf> y(n, cf(0.f, 0.f));
+    std::copy(p.wave.begin(), p.wave.end(), y.begin() + q);
+
+    const int64_t observed_end = static_cast<int64_t>(q + 8 * kSps);
+
+    // C1: NaN inside visible_end must fail with nonfinite_input
+    {
+        auto bad_y = y;
+        bad_y[q / 2] = cf(std::numeric_limits<float>::quiet_NaN(), 0.f);
+        sic::DiscreteCirModel m;
+        BOOST_CHECK(!sic::estimate_discrete_cir(bad_y.data(), n, observed_end, tmpl, cfg, scratch, m));
+        BOOST_CHECK_EQUAL(reason_of(m), "nonfinite_input");
+    }
+
+    // C1: NaN outside visible_end must NOT trigger nonfinite_input
+    {
+        auto pass_y = y;
+        pass_y[static_cast<size_t>(observed_end) + 10] = cf(std::numeric_limits<float>::quiet_NaN(), 0.f);
+        sic::DiscreteCirModel m;
+        BOOST_CHECK(sic::estimate_discrete_cir(pass_y.data(), n, observed_end, tmpl, cfg, scratch, m));
+        BOOST_CHECK(m.valid);
+    }
+
+    // C2: Periodic residual prediction
+    {
+        sic::DiscreteCirModel m;
+        BOOST_REQUIRE(sic::estimate_discrete_cir(y.data(), n, observed_end, tmpl, cfg, scratch, m));
+        BOOST_CHECK(m.valid);
+        BOOST_CHECK_EQUAL(std::string(m.status), "model_ready");
+        BOOST_CHECK_LE(m.fit_residual, cfg.fit_residual_max);
+        BOOST_CHECK_GT(m.fit_residual, 0.0);
+    }
+}

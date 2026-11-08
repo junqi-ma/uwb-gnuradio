@@ -671,33 +671,53 @@ def timing_protocol(runs: list[dict], repeats: int, windows: int,
         problems.append("missing functional field(s): "
                         + ", ".join(sorted(missing_fields)))
 
-    # Timing-only runs must still fail correctness on a decoded-payload
-    # mismatch.  Compare the first old/new observation for each window id;
-    # repetitions of a source are separate observations, not duplicates.
-    old_by_id = {}
-    new_by_id = {}
+    # Timing-only runs must still fail correctness on any decoded-payload
+    # mismatch.  Bind reference results by source_window from the first
+    # accepted old observation (falling back to new if needed).
+    ref_by_source = {}
     for row in old_rows:
-        window_id = as_int(row.get("window_id"))
-        if window_id is not None and window_id not in old_by_id:
-            old_by_id[window_id] = row
-    for row in new_rows:
-        window_id = as_int(row.get("window_id"))
-        if window_id is not None and window_id not in new_by_id:
-            new_by_id[window_id] = row
-    decode_mismatches = []
-    for window_id in sorted(set(old_by_id) & set(new_by_id)):
-        for field in FUNCTIONAL_FIELDS:
-            if field not in old_by_id[window_id] or \
-                    field not in new_by_id[window_id]:
+        if row.get("rejected"):
+            continue
+        source = as_int(row.get("source_window"))
+        if source is not None and source not in ref_by_source:
+            ref_by_source[source] = row
+    if not ref_by_source:
+        for row in new_rows:
+            if row.get("rejected"):
                 continue
-            if old_by_id[window_id][field] != new_by_id[window_id][field]:
-                decode_mismatches.append({
-                    "window_id": window_id, "field": field,
-                    "old": old_by_id[window_id][field],
-                    "new": new_by_id[window_id][field]})
+            source = as_int(row.get("source_window"))
+            if source is not None and source not in ref_by_source:
+                ref_by_source[source] = row
+
+    decode_mismatches = []
+    # Verify every observation across all rounds against the source_window reference.
+    for run in runs:
+        variant = run.get("variant", "unknown")
+        round_idx = run.get("round")
+        for row in run.get("rows", []):
+            if row.get("rejected"):
+                continue
+            source = as_int(row.get("source_window"))
+            window_id = as_int(row.get("window_id"))
+            if source is None or source not in ref_by_source:
+                continue
+            ref_row = ref_by_source[source]
+            for field in FUNCTIONAL_FIELDS:
+                if field not in row or field not in ref_row:
+                    continue
+                if row[field] != ref_row[field]:
+                    decode_mismatches.append({
+                        "round": round_idx,
+                        "variant": variant,
+                        "window_id": window_id,
+                        "source_window": source,
+                        "field": field,
+                        "old": ref_row[field],
+                        "new": row[field],
+                    })
     if decode_mismatches:
         problems.append(f"{len(decode_mismatches)} decoded-field mismatch(es) "
-                        "between old/new timing observations")
+                        "between timing observations and source reference")
 
     return {
         "passed": not problems,

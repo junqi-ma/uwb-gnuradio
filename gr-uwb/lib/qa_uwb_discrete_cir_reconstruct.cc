@@ -15,6 +15,7 @@
 #include <array>
 #include <cmath>
 #include <complex>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <random>
@@ -1048,5 +1049,144 @@ BOOST_AUTO_TEST_CASE(discrete_numeric_safety_and_scratch_capacity_bypass)
                                              rig.ihat.data(), &rt));
         BOOST_CHECK_EQUAL(std::string(rt.reason), "template_scale_mismatch");
         rig.expect_bypass();
+    }
+}
+
+BOOST_AUTO_TEST_CASE(b1_avoid_out_double_write_and_ihat_semantics)
+{
+    ApplyRig rig(4096, 1024);
+    const int64_t roi_lo = 1500;
+    const int64_t roi_hi = 3000;
+    sic::DiscreteCirResult r;
+    BOOST_REQUIRE(sic::apply_discrete_cir(
+        rig.y.data(), rig.n, rig.wave.data(), rig.wave.size(),
+        rig.ref.data(), rig.ref.size(), rig.model, roi_lo, roi_hi,
+        rig.scratch, rig.out.data(), rig.ihat.data(), &r));
+    BOOST_CHECK(r.committed);
+    BOOST_CHECK_EQUAL(r.sub_lo, roi_lo);
+    BOOST_CHECK_EQUAL(r.sub_hi, roi_hi);
+
+    // 1. Outside [sub_lo, sub_hi), out must be byte-identical to y.
+    BOOST_CHECK_EQUAL(std::memcmp(rig.out.data(), rig.y.data(), roi_lo * sizeof(cf)), 0);
+    BOOST_CHECK_EQUAL(std::memcmp(rig.out.data() + roi_hi, rig.y.data() + roi_hi,
+                                  (rig.n - roi_hi) * sizeof(cf)), 0);
+
+    // 2. Inside [sub_lo, sub_hi), out == y - ihat.
+    for (int64_t j = roi_lo; j < roi_hi; ++j) {
+        BOOST_CHECK_EQUAL(rig.out[j], rig.y[j] - rig.ihat[j]);
+    }
+
+    // 3. ihat must be strictly zero outside [support_lo, support_hi).
+    for (int64_t j = 0; j < r.support_lo; ++j) {
+        BOOST_CHECK_EQUAL(rig.ihat[j], cf(0.f, 0.f));
+    }
+    for (int64_t j = r.support_hi; j < int64_t(rig.n); ++j) {
+        BOOST_CHECK_EQUAL(rig.ihat[j], cf(0.f, 0.f));
+    }
+
+    // 4. In-place y == out test:
+    std::vector<cf> in_place = rig.y;
+    sic::DiscreteCirResult r_ip;
+    BOOST_REQUIRE(sic::apply_discrete_cir(
+        in_place.data(), rig.n, rig.wave.data(), rig.wave.size(),
+        rig.ref.data(), rig.ref.size(), rig.model, roi_lo, roi_hi,
+        rig.scratch, in_place.data(), nullptr, &r_ip));
+    BOOST_CHECK(r_ip.committed);
+    BOOST_CHECK_EQUAL(std::memcmp(in_place.data(), rig.out.data(), rig.n * sizeof(cf)), 0);
+
+    // 5. Failure restore test:
+    std::vector<cf> out_fail(rig.n, cf(999.f, -999.f));
+    std::vector<cf> ihat_fail(rig.n, cf(999.f, -999.f));
+    rig.model.cfo_hz = 998.4e6; // beyond Nyquist -> invalid_model
+    BOOST_CHECK(!sic::apply_discrete_cir(
+        rig.y.data(), rig.n, rig.wave.data(), rig.wave.size(),
+        rig.ref.data(), rig.ref.size(), rig.model, roi_lo, roi_hi,
+        rig.scratch, out_fail.data(), ihat_fail.data(), &r));
+    BOOST_CHECK(!r.committed);
+    BOOST_CHECK_EQUAL(std::memcmp(out_fail.data(), rig.y.data(), rig.n * sizeof(cf)), 0);
+    BOOST_CHECK_EQUAL(count_nonzero(ihat_fail, 0, 0), 0);
+}
+
+BOOST_AUTO_TEST_CASE(b2_b3_sparse_pulse_avx2_fma_20tap_and_fallback_parity)
+{
+    auto wire = mod::make_random_psdu(30, 909, true);
+    mod::HrpModConfig unit;
+    unit.code_index = 10;
+    unit.sync_repetitions = 64;
+    unit.sfd_mode = "4z2";
+    unit.peak_amplitude = 1.f;
+    unit.pulse.shape = mod::PulseShape::External;
+    unit.pulse.external_n_taps = 2;
+    unit.external_taps = { 1.f, 0.f };
+    mod::HrpModScratch ms;
+    const size_t cap = 300000;
+    ms.reserve(127, cap);
+    mod::PulseList pl;
+    BOOST_REQUIRE(mod::modulate_pulse_list(wire.data(), wire.size(), unit, ms, cap, pl));
+    std::vector<mod::PulseEvent> events(pl.events, pl.events + pl.count);
+    pl.events = events.data();
+
+    const int64_t q = 2048;
+    const size_t n = pl.packet_samples + 4096;
+    const int8_t* code = demod::GetPreambleCode(10);
+
+    sic::DiscreteCirScratch s;
+    s.reserve(n);
+    s.prepared = true;
+    s.sps = kSps;
+    s.ipatov_correlation = true;
+    s.sparse_pulse_reconstruct = true;
+    s.impulse_sync.assign(kSps, cf{});
+    for (size_t c = 0; c < demod::kQm35CodeLength; ++c)
+        s.impulse_sync[8 * c] = cf(float(code[c]), 0.f);
+
+    std::vector<cf> y(n, cf(0.01f, -0.02f));
+
+    // Test both 20-tap (B3 fast path) and 19-tap (generic fallback)
+    for (size_t tap_count : { 20UL, 19UL }) {
+        for (double cfo : { 0.0, 35000.0 }) {
+            sic::DiscreteCirModel m = make_model(q, -1, tap_count);
+            m.impulse_template = true;
+            m.cfo_hz = cfo;
+            for (size_t t = 0; t < tap_count; ++t) {
+                m.taps[t] = cf(0.1f * float(t + 1), -0.05f * float(t));
+            }
+            m.active_count = tap_count;
+            for (size_t t = 0; t < tap_count; ++t) {
+                m.active_lags[t] = static_cast<int16_t>(m.lag_lo + int64_t(t));
+            }
+
+            // Run with B3 (default)
+            ::unsetenv("UWB_SIC_DISABLE_B3");
+            std::vector<cf> out_opt(n), ihat_opt(n);
+            sic::DiscreteCirResult r_opt;
+            BOOST_REQUIRE(sic::apply_discrete_cir_pulses(
+                y.data(), n, pl, s.impulse_sync.data(), s.impulse_sync.size(),
+                m, 0, int64_t(n), s, out_opt.data(), ihat_opt.data(), &r_opt));
+            BOOST_CHECK(r_opt.committed);
+
+            // Run with B3 disabled (generic fallback path)
+            ::setenv("UWB_SIC_DISABLE_B3", "1", 1);
+            std::vector<cf> out_fallback(n), ihat_fallback(n);
+            sic::DiscreteCirResult r_fallback;
+            BOOST_REQUIRE(sic::apply_discrete_cir_pulses(
+                y.data(), n, pl, s.impulse_sync.data(), s.impulse_sync.size(),
+                m, 0, int64_t(n), s, out_fallback.data(), ihat_fallback.data(), &r_fallback));
+            BOOST_CHECK(r_fallback.committed);
+            ::unsetenv("UWB_SIC_DISABLE_B3");
+
+            if (cfo == 0.0) {
+                // Zero CFO must be bit-for-bit identical between AVX2 and fallback!
+                BOOST_CHECK_EQUAL(std::memcmp(out_opt.data(), out_fallback.data(), n * sizeof(cf)), 0);
+                BOOST_CHECK_EQUAL(std::memcmp(ihat_opt.data(), ihat_fallback.data(), n * sizeof(cf)), 0);
+            } else {
+                // Non-zero CFO uses FMA vs non-FMA, should agree within float numerical precision
+                float max_err = 0.f;
+                for (size_t j = 0; j < n; ++j) {
+                    max_err = std::max(max_err, std::abs(out_opt[j] - out_fallback[j]));
+                }
+                BOOST_CHECK_LT(max_err, 1e-5f);
+            }
+        }
     }
 }
