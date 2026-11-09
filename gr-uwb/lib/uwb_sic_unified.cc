@@ -441,6 +441,35 @@ bool reconstruct_and_subtract_unified(
         DiscreteCirResult dres;
 
         if (level == SicCancellationLevel::L1_Preamble) {
+            // Check if sparse pulse reconstruction is enabled for Ipatov backend
+            if (dm.impulse_template && scratch.discrete.sparse_pulse_reconstruct) {
+                mod::PulseList pulses;
+                const bool tx_ok = mod::modulate_prefix_pulse_list(
+                    scratch.discrete.impulse_profile, scratch.discrete.modulator,
+                    scratch.discrete.waveform.size(), pulses);
+                if (tx_ok && pulses.count > 0) {
+                    bool ok = apply_discrete_cir_pulses(
+                        y, n, pulses, templates.sync, templates.sync_len, dm,
+                        cfg.sub_roi_lo, cfg.sub_roi_hi, scratch.discrete, out, i_hat, &dres);
+                    result.timings.reconstruct_us = dres.channel_us;
+                    result.timings.subtract_us = dres.subtract_us;
+                    result.waveform_scale = dres.waveform_scale;
+                    if (!ok || !dres.committed) {
+                        return fail_closed(dres.reason ? dres.reason : "apply_discrete_pulses_failed");
+                    }
+                    result.committed = true;
+                    result.reason = "committed_preamble_sparse_pulse";
+                    result.level = SicCancellationLevel::L1_Preamble;
+                    result.cancelled_fields = known_fields;
+                    result.support_lo = dres.support_lo;
+                    result.support_hi = dres.support_hi;
+                    result.sub_lo = dres.sub_lo;
+                    result.sub_hi = dres.sub_hi;
+                    result.sub_overlap = (result.sub_hi > result.sub_lo) ? (result.sub_hi - result.sub_lo) : 0;
+                    return true;
+                }
+            }
+
             const std::complex<float>* wf = s_known ? s_known : templates.preamble;
             size_t wf_n = s_known ? s_known_len : templates.preamble_len;
 
