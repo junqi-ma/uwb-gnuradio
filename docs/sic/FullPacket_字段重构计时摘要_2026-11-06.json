@@ -1,0 +1,264 @@
+{
+  "schema": "fullpacket-segment-results/1",
+  "code_tested_sha": "32473f28a421bdf6f3f63eeba77fff807b28beca",
+  "library": [
+    {
+      "path": "/home/junqima/workspace/uwb-gnuradio/.worktrees/sic-fullpacket-compare/gr-uwb/build-sic-fullpacket-volk/lib/libgnuradio-uwb.so.1.0.0.0",
+      "sha256": "3cf40db33eb69649af496763226c2f0e50e46e96ae41689a1229ed34518cc3d1"
+    }
+  ],
+  "waveform_cuts": [
+    0,
+    73152,
+    94656,
+    133568
+  ],
+  "sample_rate": 998400000,
+  "profile": "32B wire PSDU,code10/64SYNC/4z2,legacy shaping,payload_cached,VOLK",
+  "scope": "channel reconstruction only; no estimator/decode/validation/remodulation/subtraction",
+  "field_attribution": "phase output in transmit-waveform coordinates; path/CFO output-time bins anchored to floor(min estimated path tau), last bin includes delayed tail; full wave/filter halo retained",
+  "observations_per_variant_per_round": 128,
+  "rounds": 2,
+  "warmup": 16,
+  "source_pool_per_cell": 16,
+  "aggregate": {
+    "sync_base": {
+      "steady": {
+        "production": {
+          "observations": 256,
+          "independent_sources": 16,
+          "cache_hits": 624,
+          "cache_misses": 0,
+          "channel_ms": 3.2361555078125015,
+          "common_ms": 0.0,
+          "phase_total_ms": 1.6760433281249991,
+          "path_total_ms": 1.1142457304687503,
+          "cfo_total_ms": 0.2926094960937498,
+          "fields": {}
+        },
+        "segmented": {
+          "observations": 256,
+          "independent_sources": 16,
+          "cache_hits": 624,
+          "cache_misses": 0,
+          "channel_ms": 3.1180272851562503,
+          "common_ms": 0.15882783593750002,
+          "phase_total_ms": 1.6671857578124996,
+          "path_total_ms": 1.0067043125000006,
+          "cfo_total_ms": 0.29196410546874996,
+          "fields": {
+            "sync_sfd": {
+              "phase_ms": 0.13760585546875004,
+              "path_ms": 0.5546744179687492,
+              "cfo_ms": 0.1651688046875,
+              "total_ms": 0.8574490781249993,
+              "share_of_channel_pct": 27.499729787708734
+            },
+            "phr": {
+              "phase_ms": 0.11009201953125002,
+              "path_ms": 0.15861342968750006,
+              "cfo_ms": 0.04500424609374999,
+              "total_ms": 0.31370969531250004,
+              "share_of_channel_pct": 10.061159400559237
+            },
+            "payload": {
+              "phase_ms": 1.4180632187499997,
+              "path_ms": 0.29282445312500016,
+              "cfo_ms": 0.07715300390625,
+              "total_ms": 1.78804067578125,
+              "share_of_channel_pct": 57.34525429887788
+            }
+          }
+        },
+        "diagnostic_vs_production_pct": -3.650264097972866
+      },
+      "cold": {
+        "production": {
+          "observations": 16,
+          "independent_sources": 16,
+          "cache_hits": 4,
+          "cache_misses": 35,
+          "channel_ms": 8.722259125,
+          "common_ms": 0.0,
+          "phase_total_ms": 6.9408494375,
+          "path_total_ms": 1.2526932499999999,
+          "cfo_total_ms": 0.33632418750000004,
+          "fields": {}
+        },
+        "segmented": {
+          "observations": 16,
+          "independent_sources": 16,
+          "cache_hits": 4,
+          "cache_misses": 35,
+          "channel_ms": 7.549976437500001,
+          "common_ms": 0.2332918749999999,
+          "phase_total_ms": 5.845116375,
+          "path_total_ms": 1.1453946874999998,
+          "cfo_total_ms": 0.3352024999999999,
+          "fields": {
+            "sync_sfd": {
+              "phase_ms": 3.448815125,
+              "path_ms": 0.6405510625,
+              "cfo_ms": 0.19451500000000002,
+              "total_ms": 4.2838811875,
+              "share_of_channel_pct": 56.74032525747202
+            },
+            "phr": {
+              "phase_ms": 0.7796368125,
+              "path_ms": 0.181622375,
+              "cfo_ms": 0.0490128125,
+              "total_ms": 1.010272,
+              "share_of_channel_pct": 13.381127853354311
+            },
+            "payload": {
+              "phase_ms": 1.6144896874999997,
+              "path_ms": 0.3220225625,
+              "cfo_ms": 0.086019125,
+              "total_ms": 2.022531375,
+              "share_of_channel_pct": 26.788578636540937
+            }
+          }
+        },
+        "diagnostic_vs_production_pct": -13.4401268146227
+      }
+    },
+    "payload_base": {
+      "steady": {
+        "production": {
+          "observations": 256,
+          "independent_sources": 16,
+          "cache_hits": 640,
+          "cache_misses": 0,
+          "channel_ms": 3.4358348828125003,
+          "common_ms": 0.0,
+          "phase_total_ms": 1.7363594453125006,
+          "path_total_ms": 1.1434713984375,
+          "cfo_total_ms": 0.30116464062499987,
+          "fields": {}
+        },
+        "segmented": {
+          "observations": 256,
+          "independent_sources": 16,
+          "cache_hits": 640,
+          "cache_misses": 0,
+          "channel_ms": 3.2797380937499985,
+          "common_ms": 0.24880122265625,
+          "phase_total_ms": 1.7117280078125006,
+          "path_total_ms": 1.0228317460937497,
+          "cfo_total_ms": 0.3030654179687502,
+          "fields": {
+            "sync_sfd": {
+              "phase_ms": 0.14311661718750002,
+              "path_ms": 0.5605770429687498,
+              "cfo_ms": 0.17010896484375002,
+              "total_ms": 0.8738026249999998,
+              "share_of_channel_pct": 26.642451318449893
+            },
+            "phr": {
+              "phase_ms": 0.11255225781249996,
+              "path_ms": 0.16239696093750003,
+              "cfo_ms": 0.04573767578124995,
+              "total_ms": 0.32068689453124993,
+              "share_of_channel_pct": 9.777820221143996
+            },
+            "payload": {
+              "phase_ms": 1.4545356601562505,
+              "path_ms": 0.2992290976562499,
+              "cfo_ms": 0.08268259374999999,
+              "total_ms": 1.8364473515625004,
+              "share_of_channel_pct": 55.99371959188171
+            }
+          }
+        },
+        "diagnostic_vs_production_pct": -4.543198214889898
+      },
+      "cold": {
+        "production": {
+          "observations": 16,
+          "independent_sources": 16,
+          "cache_hits": 5,
+          "cache_misses": 35,
+          "channel_ms": 7.362982125,
+          "common_ms": 0.0,
+          "phase_total_ms": 5.6829384375,
+          "path_total_ms": 1.127504875,
+          "cfo_total_ms": 0.29870081249999997,
+          "fields": {}
+        },
+        "segmented": {
+          "observations": 16,
+          "independent_sources": 16,
+          "cache_hits": 5,
+          "cache_misses": 35,
+          "channel_ms": 6.987546999999999,
+          "common_ms": 0.3055556874999999,
+          "phase_total_ms": 5.3128480625,
+          "path_total_ms": 1.0801521250000001,
+          "cfo_total_ms": 0.2960475,
+          "fields": {
+            "sync_sfd": {
+              "phase_ms": 3.2012415,
+              "path_ms": 0.5727786250000001,
+              "cfo_ms": 0.165805,
+              "total_ms": 3.9398251250000005,
+              "share_of_channel_pct": 56.38352235770294
+            },
+            "phr": {
+              "phase_ms": 0.6693885625,
+              "path_ms": 0.16957106249999998,
+              "cfo_ms": 0.0430083125,
+              "total_ms": 0.8819679375,
+              "share_of_channel_pct": 12.621996496052192
+            },
+            "payload": {
+              "phase_ms": 1.4403890624999998,
+              "path_ms": 0.337111125,
+              "cfo_ms": 0.0826980625,
+              "total_ms": 1.8601982499999998,
+              "share_of_channel_pct": 26.621620577292717
+            }
+          }
+        },
+        "diagnostic_vs_production_pct": -5.098954725494476
+      }
+    }
+  },
+  "verification": {
+    "sync_base": {
+      "schema": "fullpacket-segment-diagnostic/1",
+      "sources": 16,
+      "observations_per_variant_per_round": 128,
+      "rounds": 2,
+      "warmup_per_variant": 16,
+      "verified_outputs_including_cold_and_warmup": 576,
+      "bit_exact_models": 504,
+      "max_model_abs_error": 2.3283064365387e-10,
+      "max_model_relative_l2_error": 1.23370166830342e-12,
+      "waveform_cuts": [
+        0,
+        73152,
+        94656,
+        133568
+      ],
+      "all_outputs_valid": true
+    },
+    "payload_base": {
+      "schema": "fullpacket-segment-diagnostic/1",
+      "sources": 16,
+      "observations_per_variant_per_round": 128,
+      "rounds": 2,
+      "warmup_per_variant": 16,
+      "verified_outputs_including_cold_and_warmup": 576,
+      "bit_exact_models": 468,
+      "max_model_abs_error": 2.91038304567337e-11,
+      "max_model_relative_l2_error": 1.54285682381327e-13,
+      "waveform_cuts": [
+        0,
+        73152,
+        94656,
+        133568
+      ],
+      "all_outputs_valid": true
+    }
+  }
+}

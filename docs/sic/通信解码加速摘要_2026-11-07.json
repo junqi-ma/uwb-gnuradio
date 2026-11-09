@@ -1,0 +1,476 @@
+{
+  "schema": "rx-opt-summary/1",
+  "code_tested_sha": "f753f17875f5f6534ddc122c9fb37887d0ba3fd4",
+  "git_dirty": false,
+  "build_dir": "/home/junqima/workspace/uwb-gnuradio/.worktrees/sic-fullpacket-compare/gr-uwb/build-sic-fullpacket-rxopt",
+  "runner_sha256": "0f7e14730f266c042399fe049ebca21bfc40dccbfcfec621c98fad09a9ae939d",
+  "library_sha256": "c488a76f575a41550cafea4273b3f18106ef19186ddd4da06543e8701a182564",
+  "cpu": "12th Gen Intel(R) Core(TM) i7-12700",
+  "experiment": {
+    "functional_cells": [
+      "sync_base",
+      "payload_base",
+      "payload_four_frac",
+      "payload_cfo_m50k",
+      "payload_cfo_p50k",
+      "payload_len16",
+      "payload_len127",
+      "payload_snr8"
+    ],
+    "functional_windows_per_cell": 16,
+    "functional_mismatches": 0,
+    "formal_timing_cells": [
+      "sync_base",
+      "payload_base",
+      "payload_four_frac"
+    ],
+    "supplementary_timing_cells": [
+      "payload_len16",
+      "payload_len127"
+    ],
+    "observations_per_variant_per_round": 128,
+    "warmup_per_variant_per_round": 16,
+    "rounds": 2,
+    "order": "old->new->new->old",
+    "new_args": [
+      "--rx-fast-sfd",
+      "--rx-fast-cfo",
+      "--rx-seed-refine-tail",
+      "--rx-softchip-on-demand"
+    ],
+    "lock_path": "/tmp/uwb-sic-benchmark.lock",
+    "supplementary_observations": 64,
+    "supplementary_warmup": 8,
+    "supplementary_rounds": 2
+  },
+  "formal_timing": {
+    "sync_base": {
+      "comm_demod": {
+        "old_mean_us": 2025.85,
+        "new_mean_us": 1656.597,
+        "old_p95_us": 2385.185,
+        "new_p95_us": 1963.928,
+        "mean_ratio": 0.817729,
+        "p95_ratio": 0.823386
+      },
+      "stage_sfd": {
+        "old_mean_us": 788.457,
+        "new_mean_us": 424.172,
+        "old_p95_us": 969.0,
+        "new_p95_us": 505.0,
+        "mean_ratio": 0.537977,
+        "p95_ratio": 0.521156
+      },
+      "stage_cfo": {
+        "old_mean_us": 149.777,
+        "new_mean_us": 101.125,
+        "old_p95_us": 172.0,
+        "new_p95_us": 116.0,
+        "mean_ratio": 0.675169,
+        "p95_ratio": 0.674419
+      },
+      "stage_cir": {
+        "old_mean_us": 612.023,
+        "new_mean_us": 630.176,
+        "old_p95_us": 761.0,
+        "new_p95_us": 748.0,
+        "mean_ratio": 1.02966,
+        "p95_ratio": 0.982917
+      },
+      "soft_fir": {
+        "old_mean_us": 472.598,
+        "new_mean_us": 456.832,
+        "old_p95_us": 570.0,
+        "new_p95_us": 530.0,
+        "mean_ratio": 0.96664,
+        "p95_ratio": 0.929825
+      },
+      "soft_extend": {
+        "old_mean_us": 0.0,
+        "new_mean_us": 75.73,
+        "old_p95_us": 0.0,
+        "new_p95_us": 79.0,
+        "mean_ratio": 0.0,
+        "p95_ratio": 0.0
+      },
+      "post": {
+        "old_mean_us": 98.723,
+        "new_mean_us": 97.676,
+        "old_p95_us": 118.0,
+        "new_p95_us": 112.0,
+        "mean_ratio": 0.989396,
+        "p95_ratio": 0.949153
+      },
+      "seed_search": {
+        "old_mean_us": 0.0,
+        "new_mean_us": 3.809,
+        "old_p95_us": 0.0,
+        "new_p95_us": 4.0,
+        "mean_ratio": 0.0,
+        "p95_ratio": 0.0
+      },
+      "cfo_rotate": {
+        "old_mean_us": 288.469,
+        "new_mean_us": 166.238,
+        "old_p95_us": 338.0,
+        "new_p95_us": 200.0,
+        "mean_ratio": 0.576278,
+        "p95_ratio": 0.591716
+      },
+      "chips": {
+        "old_mean_us": 68822.375,
+        "new_mean_us": 67871.0,
+        "old_p95_us": 68848.0,
+        "new_p95_us": 67871.0,
+        "mean_ratio": 0.986176,
+        "p95_ratio": 0.985809
+      }
+    },
+    "payload_base": {
+      "comm_demod": {
+        "old_mean_us": 2764.785,
+        "new_mean_us": 1925.505,
+        "old_p95_us": 4438.669,
+        "new_p95_us": 3491.459,
+        "mean_ratio": 0.696439,
+        "p95_ratio": 0.7866
+      },
+      "stage_sfd": {
+        "old_mean_us": 923.023,
+        "new_mean_us": 502.707,
+        "old_p95_us": 1033.0,
+        "new_p95_us": 678.0,
+        "mean_ratio": 0.544631,
+        "p95_ratio": 0.656341
+      },
+      "stage_cfo": {
+        "old_mean_us": 272.738,
+        "new_mean_us": 209.148,
+        "old_p95_us": 298.0,
+        "new_p95_us": 254.0,
+        "mean_ratio": 0.766847,
+        "p95_ratio": 0.852349
+      },
+      "stage_cir": {
+        "old_mean_us": 1077.594,
+        "new_mean_us": 697.445,
+        "old_p95_us": 1458.0,
+        "new_p95_us": 926.0,
+        "mean_ratio": 0.647225,
+        "p95_ratio": 0.635117
+      },
+      "soft_fir": {
+        "old_mean_us": 843.973,
+        "new_mean_us": 505.496,
+        "old_p95_us": 1067.0,
+        "new_p95_us": 673.0,
+        "mean_ratio": 0.598948,
+        "p95_ratio": 0.63074
+      },
+      "soft_extend": {
+        "old_mean_us": 0.0,
+        "new_mean_us": 76.844,
+        "old_p95_us": 0.0,
+        "new_p95_us": 81.0,
+        "mean_ratio": 0.0,
+        "p95_ratio": 0.0
+      },
+      "post": {
+        "old_mean_us": 190.129,
+        "new_mean_us": 107.707,
+        "old_p95_us": 183.0,
+        "new_p95_us": 121.0,
+        "mean_ratio": 0.566495,
+        "p95_ratio": 0.661202
+      },
+      "seed_search": {
+        "old_mean_us": 0.0,
+        "new_mean_us": 3.816,
+        "old_p95_us": 0.0,
+        "new_p95_us": 4.0,
+        "mean_ratio": 0.0,
+        "p95_ratio": 0.0
+      },
+      "cfo_rotate": {
+        "old_mean_us": 518.617,
+        "new_mean_us": 336.543,
+        "old_p95_us": 567.0,
+        "new_p95_us": 447.0,
+        "mean_ratio": 0.648924,
+        "p95_ratio": 0.78836
+      },
+      "chips": {
+        "old_mean_us": 117174.375,
+        "new_mean_us": 67871.0,
+        "old_p95_us": 117200.0,
+        "new_p95_us": 67871.0,
+        "mean_ratio": 0.579231,
+        "p95_ratio": 0.579104
+      }
+    },
+    "payload_four_frac": {
+      "comm_demod": {
+        "old_mean_us": 2762.255,
+        "new_mean_us": 1757.363,
+        "old_p95_us": 4123.427,
+        "new_p95_us": 2121.405,
+        "mean_ratio": 0.636206,
+        "p95_ratio": 0.514476
+      },
+      "stage_sfd": {
+        "old_mean_us": 978.809,
+        "new_mean_us": 459.461,
+        "old_p95_us": 1331.0,
+        "new_p95_us": 522.0,
+        "mean_ratio": 0.469408,
+        "p95_ratio": 0.392186
+      },
+      "stage_cfo": {
+        "old_mean_us": 266.984,
+        "new_mean_us": 181.184,
+        "old_p95_us": 312.0,
+        "new_p95_us": 228.0,
+        "mean_ratio": 0.67863,
+        "p95_ratio": 0.730769
+      },
+      "stage_cir": {
+        "old_mean_us": 1036.738,
+        "new_mean_us": 635.777,
+        "old_p95_us": 1238.0,
+        "new_p95_us": 781.0,
+        "mean_ratio": 0.613248,
+        "p95_ratio": 0.630856
+      },
+      "soft_fir": {
+        "old_mean_us": 826.926,
+        "new_mean_us": 452.891,
+        "old_p95_us": 1000.0,
+        "new_p95_us": 493.0,
+        "mean_ratio": 0.54768,
+        "p95_ratio": 0.493
+      },
+      "soft_extend": {
+        "old_mean_us": 0.0,
+        "new_mean_us": 67.441,
+        "old_p95_us": 0.0,
+        "new_p95_us": 78.0,
+        "mean_ratio": 0.0,
+        "p95_ratio": 0.0
+      },
+      "post": {
+        "old_mean_us": 169.398,
+        "new_mean_us": 103.742,
+        "old_p95_us": 195.0,
+        "new_p95_us": 121.0,
+        "mean_ratio": 0.612415,
+        "p95_ratio": 0.620513
+      },
+      "seed_search": {
+        "old_mean_us": 0.0,
+        "new_mean_us": 3.953,
+        "old_p95_us": 0.0,
+        "new_p95_us": 4.0,
+        "mean_ratio": 0.0,
+        "p95_ratio": 0.0
+      },
+      "cfo_rotate": {
+        "old_mean_us": 532.379,
+        "new_mean_us": 302.988,
+        "old_p95_us": 637.0,
+        "new_p95_us": 394.0,
+        "mean_ratio": 0.569121,
+        "p95_ratio": 0.618524
+      },
+      "chips": {
+        "old_mean_us": 117174.375,
+        "new_mean_us": 67871.0,
+        "old_p95_us": 117200.0,
+        "new_p95_us": 67871.0,
+        "mean_ratio": 0.579231,
+        "p95_ratio": 0.579104
+      }
+    }
+  },
+  "supplementary_timing": {
+    "payload_len16": {
+      "comm_demod": {
+        "old_mean_us": 2770.988,
+        "new_mean_us": 1597.32,
+        "old_p95_us": 3268.808,
+        "new_p95_us": 1873.963,
+        "mean_ratio": 0.576444,
+        "p95_ratio": 0.573286
+      },
+      "stage_sfd": {
+        "old_mean_us": 942.594,
+        "new_mean_us": 463.633,
+        "old_p95_us": 1116.0,
+        "new_p95_us": 572.0,
+        "mean_ratio": 0.491869,
+        "p95_ratio": 0.512545
+      },
+      "stage_cfo": {
+        "old_mean_us": 264.758,
+        "new_mean_us": 164.438,
+        "old_p95_us": 331.0,
+        "new_p95_us": 208.0,
+        "mean_ratio": 0.621086,
+        "p95_ratio": 0.628399
+      },
+      "stage_cir": {
+        "old_mean_us": 1070.617,
+        "new_mean_us": 510.086,
+        "old_p95_us": 1236.0,
+        "new_p95_us": 653.0,
+        "mean_ratio": 0.476441,
+        "p95_ratio": 0.528317
+      },
+      "soft_fir": {
+        "old_mean_us": 854.75,
+        "new_mean_us": 383.406,
+        "old_p95_us": 1014.0,
+        "new_p95_us": 428.0,
+        "mean_ratio": 0.44856,
+        "p95_ratio": 0.422091
+      },
+      "soft_extend": {
+        "old_mean_us": 0.0,
+        "new_mean_us": 0.0,
+        "old_p95_us": 0.0,
+        "new_p95_us": 0.0,
+        "mean_ratio": 0.0,
+        "p95_ratio": 0.0
+      },
+      "post": {
+        "old_mean_us": 176.133,
+        "new_mean_us": 85.805,
+        "old_p95_us": 206.0,
+        "new_p95_us": 98.0,
+        "mean_ratio": 0.487159,
+        "p95_ratio": 0.475728
+      },
+      "seed_search": {
+        "old_mean_us": 0.0,
+        "new_mean_us": 4.031,
+        "old_p95_us": 0.0,
+        "new_p95_us": 4.0,
+        "mean_ratio": 0.0,
+        "p95_ratio": 0.0
+      },
+      "cfo_rotate": {
+        "old_mean_us": 526.102,
+        "new_mean_us": 290.117,
+        "old_p95_us": 658.0,
+        "new_p95_us": 385.0,
+        "mean_ratio": 0.551447,
+        "p95_ratio": 0.585106
+      },
+      "chips": {
+        "old_mean_us": 117174.375,
+        "new_mean_us": 59740.0,
+        "old_p95_us": 117200.0,
+        "new_p95_us": 59740.0,
+        "mean_ratio": 0.509838,
+        "p95_ratio": 0.509727
+      }
+    },
+    "payload_len127": {
+      "comm_demod": {
+        "old_mean_us": 2848.901,
+        "new_mean_us": 2304.055,
+        "old_p95_us": 3270.735,
+        "new_p95_us": 2594.855,
+        "mean_ratio": 0.808752,
+        "p95_ratio": 0.793355
+      },
+      "stage_sfd": {
+        "old_mean_us": 944.297,
+        "new_mean_us": 483.805,
+        "old_p95_us": 1144.0,
+        "new_p95_us": 601.0,
+        "mean_ratio": 0.512344,
+        "p95_ratio": 0.52535
+      },
+      "stage_cfo": {
+        "old_mean_us": 275.008,
+        "new_mean_us": 175.086,
+        "old_p95_us": 328.0,
+        "new_p95_us": 203.0,
+        "mean_ratio": 0.636658,
+        "p95_ratio": 0.618902
+      },
+      "stage_cir": {
+        "old_mean_us": 1089.953,
+        "new_mean_us": 1104.688,
+        "old_p95_us": 1272.0,
+        "new_p95_us": 1266.0,
+        "mean_ratio": 1.013518,
+        "p95_ratio": 0.995283
+      },
+      "soft_fir": {
+        "old_mean_us": 873.125,
+        "new_mean_us": 840.984,
+        "old_p95_us": 1034.0,
+        "new_p95_us": 984.0,
+        "mean_ratio": 0.963189,
+        "p95_ratio": 0.951644
+      },
+      "soft_extend": {
+        "old_mean_us": 0.0,
+        "new_mean_us": 556.688,
+        "old_p95_us": 0.0,
+        "new_p95_us": 711.0,
+        "mean_ratio": 0.0,
+        "p95_ratio": 0.0
+      },
+      "post": {
+        "old_mean_us": 175.68,
+        "new_mean_us": 185.977,
+        "old_p95_us": 225.0,
+        "new_p95_us": 205.0,
+        "mean_ratio": 1.058612,
+        "p95_ratio": 0.911111
+      },
+      "seed_search": {
+        "old_mean_us": 0.0,
+        "new_mean_us": 3.938,
+        "old_p95_us": 0.0,
+        "new_p95_us": 4.0,
+        "mean_ratio": 0.0,
+        "p95_ratio": 0.0
+      },
+      "cfo_rotate": {
+        "old_mean_us": 535.289,
+        "new_mean_us": 305.203,
+        "old_p95_us": 611.0,
+        "new_p95_us": 386.0,
+        "mean_ratio": 0.570165,
+        "p95_ratio": 0.631751
+      },
+      "chips": {
+        "old_mean_us": 126678.375,
+        "new_mean_us": 124703.0,
+        "old_p95_us": 126704.0,
+        "new_p95_us": 124703.0,
+        "mean_ratio": 0.984406,
+        "p95_ratio": 0.984207
+      }
+    }
+  },
+  "gates": {
+    "payload_base_mean_ratio_max": 0.8,
+    "payload_base_mean_ratio": 0.696439,
+    "payload_base_p95_ratio": 0.7866,
+    "other_cells_mean_ratio_max": 1.05,
+    "all_formal_timing_cells_no_regression": true,
+    "all_supplementary_cells_no_regression": true,
+    "functional_all_cells_no_mismatch": true
+  },
+  "boundaries": [
+    "software offline replay on the declared 16-source-window pool; repeated exposures are not independent packets",
+    "MATLAB, native resampler, FPGA/UHD/hardware, TWR and paced real arrival were not run",
+    "mean<=0.5 ms, P99<=1 ms and 200 windows/s are targets, not results",
+    "soft-chip on-demand normalization is an experimental behavior change; prefix values match the legacy stream within 1.2e-7 absolute / 2.4e-7 relative after the global scale",
+    "default FastRxPipeline options remain off"
+  ]
+}

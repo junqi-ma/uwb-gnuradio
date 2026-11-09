@@ -79,6 +79,9 @@ list(APPEND uwb_sources
     uwb_cir_writer.cc
     uwb_realtime_echo_timer.cc
     uwb_echo_timer_stream.cc
+    uwb_fullpacket_sic_core.cc
+    uwb_discrete_cir_estimator.cc
+    uwb_discrete_cir_reconstruct.cc
     uwb_preamble_sic_core.cc
     uwb_preamble_sic.cc
 )
@@ -226,6 +229,14 @@ list(APPEND test_uwb_sources
     qa_uwb_radar_e2e.cc
     qa_uwb_uhd_backend.cc
     qa_uwb_hrp_mod_core.cc
+    qa_uwb_fullpacket_cfo_diag.cc
+    qa_uwb_fullpacket_payload_cache.cc
+    qa_uwb_fullpacket_fast_rx.cc
+    qa_uwb_rx_fused_cmf.cc
+    qa_uwb_rx_fused_phr.cc
+    qa_uwb_fullpacket_sic_core.cc
+    qa_uwb_discrete_cir_estimator.cc
+    qa_uwb_discrete_cir_reconstruct.cc
     qa_uwb_preamble_sic_core.cc
     qa_uwb_preamble_sic.cc
     qa_uwb_hrp_packet_source.cc
@@ -507,3 +518,11 @@ add_test(NAME uwb_uhd_burst_dry_run_rejects_invalid_config
     COMMAND uwb_uhd_burst_dry_run --pri-num 0)
 set_tests_properties(uwb_uhd_burst_dry_run_rejects_invalid_config
     PROPERTIES WILL_FAIL TRUE)
+
+# Compile the wrapper QA with the SAME native RX configuration as the fast app.
+target_compile_options(uwb_qa_uwb_fullpacket_fast_rx.cc PRIVATE -march=native)
+# The fused kernel QA must exercise the same AVX2/FMA path as the fast runner,
+# not only the portable multi-accumulator fallback.
+target_compile_options(uwb_qa_uwb_rx_fused_cmf.cc PRIVATE -march=native)
+# The fused PHR kernel QA uses the same native AVX2/FMA path.
+target_compile_options(uwb_qa_uwb_rx_fused_phr.cc PRIVATE -march=native)

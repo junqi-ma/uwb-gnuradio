@@ -309,3 +309,39 @@ target_link_libraries(twr_m2a_bench PRIVATE
     uwb_twr_phy Volk::volk Threads::Threads)
 target_compile_definitions(twr_m2a_bench PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
+add_executable(benchmark_fullpacket_compare benchmark_fullpacket_compare.cc)
+target_link_libraries(benchmark_fullpacket_compare gnuradio-uwb)
+
+add_test(NAME uwb_qa_fullpacket_compare_py
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/sic/qa_fullpacket_compare.py)
+set_tests_properties(uwb_qa_fullpacket_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+
+add_test(NAME uwb_qa_discrete_cir_compare_py
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/sic/verify_discrete_cir_compare.py --self-test)
+set_tests_properties(uwb_qa_discrete_cir_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+
+# Mature RX uses the existing AVX2/FMA FIR and compiler vectorization.
+# Keep the portable executable for same-source, same-library paired measurement.
+add_executable(benchmark_fullpacket_compare_fast_rx benchmark_fullpacket_compare.cc)
+target_link_libraries(benchmark_fullpacket_compare_fast_rx gnuradio-uwb)
+target_compile_options(benchmark_fullpacket_compare_fast_rx PRIVATE -march=native)
+
+# Isolated generic-ISA CFO replay: diagnostic only, production kernel unchanged.
+add_executable(benchmark_fullpacket_cfo_diag benchmark_fullpacket_cfo_diag.cc)
+target_link_libraries(benchmark_fullpacket_cfo_diag gnuradio-uwb)
+target_compile_options(benchmark_fullpacket_cfo_diag PRIVATE -fPIC)
+
+# Offline-only copy of reconstruction, split by waveform fields for timing.
+add_executable(benchmark_fullpacket_segment_diag
+    benchmark_fullpacket_segment_diag.cc fullpacket_segment_diagnostics.cc)
+target_link_libraries(benchmark_fullpacket_segment_diag gnuradio-uwb)
+target_compile_options(benchmark_fullpacket_segment_diag PRIVATE -fPIC)
+add_test(NAME uwb_qa_fullpacket_segment_diag
+    COMMAND benchmark_fullpacket_segment_diag --self-test)
+set_tests_properties(uwb_qa_fullpacket_segment_diag PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+
+# Controlled tap-count sweep using the unchanged production discrete backend.
+add_executable(benchmark_discrete_cir_taps benchmark_discrete_cir_taps.cc)
+target_link_libraries(benchmark_discrete_cir_taps gnuradio-uwb)
+target_compile_options(benchmark_discrete_cir_taps PRIVATE -fPIC)

@@ -63,6 +63,14 @@ struct TimingResult {
     // timing work (setup, local refine, grid probes and SYNC tracking).
     uint64_t coarse_search_us = 0;
     uint64_t fine_track_us = 0;
+    // Experimental narrow seed search (timing_seed_refine_radius != 0).
+    // seed_search_us is the first seeded refine (child of fine_track_us, not
+    // included in coarse_search_us).  Attempts/success/fallbacks count one
+    // seeded call each, not SYNC symbols.
+    uint64_t seed_search_us = 0;
+    uint32_t seed_refine_narrow_attempts = 0;
+    uint32_t seed_refine_narrow_success = 0;
+    uint32_t seed_refine_fallbacks = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -81,6 +89,10 @@ struct CfoResult {
     int64_t fit_first_peak_sample = -1;
     int64_t fit_last_peak_sample = -1;
     float fit_residual = 0.0f;      // residual of the phase linear fit
+    // Rotation-kernel diagnostics: fit vs frame derotation are independent.
+    uint64_t fit_us = 0;
+    uint64_t rotate_us = 0;
+    uint32_t rotation_kernel = 0;   // 0=legacy four-chain, 1=block vector
 };
 
 // ---------------------------------------------------------------------------
@@ -118,14 +130,28 @@ struct CirResult {
     size_t post_samples = 0;            // CIR window after first path
     float cir_peak_metric = 0.0f;       // peak CIR magnitude
     std::vector<float> cir_values;      // CIR tap magnitudes (diagnostics only)
+    // Pre-conjugated CMF coefficients h[q] = conj(values[q]) exactly as used by
+    // the soft-chip FIR.  Populated for the experimental fused payload path and
+    // for diagnostics; the default path does not read it.
+    std::vector<std::complex<float>> cir_filter_taps;
     size_t soft_chip_count = 0;         // number of soft chips produced
     double samples_per_chip = 0.0;      // measured chip period
 
     // Sub-stage wall-clock timing (µs), so CIR estimate vs soft-chip FIR vs
     // postprocess can be ranked separately (P0 diagnostics).
     uint64_t cir_estimate_us = 0;       // spread build + SYNC average + taps
+    uint32_t soft_fir_first_chip = 0;   // absolute coordinate; skipped prefix is zero
+    uint32_t soft_fir_computed_chips = 0;
+    uint64_t sync_phase_us = 0;         // child of postprocess_us
     uint64_t soft_fir_us = 0;           // chip-grid matched-filter FIR
     uint64_t postprocess_us = 0;        // phase align + rotate + real/max/norm
+    // On-demand soft-chip experiment: initial prefix vs extension.  Zero
+    // values mean the legacy full-stream path was used.
+    uint64_t soft_extend_us = 0;        // extension FIR + renormalization
+    uint32_t initial_chip_count = 0;    // prefix chips before PHR decode
+    uint32_t extended_chip_count = 0;   // total chips after PHR-driven extend
+    uint32_t on_demand_extended = 0;    // 1 if the stream was extended
+    uint32_t on_demand_fallbacks = 0;   // full-path retries for this packet
 };
 
 // ---------------------------------------------------------------------------
@@ -205,7 +231,57 @@ struct DemodResult {
     uint64_t stage_ns_sfd_us = 0;
     uint64_t stage_phr_us = 0;
     uint64_t stage_payload_us = 0;
-    uint64_t stage_total_us = 0;        // sum of the above (== demod_latency_us)
+    uint64_t stage_total_us = 0;        // sum of parents + fallback bucket
+    // Diagnostic child sub-timers for the CFO and soft-chip stages.
+    // stage_cfo_fit_us/stage_cfo_rotate_us are already included in their parent
+    // stage above and must never be added to stage_total_us.  They sum BOTH CFO
+    // calls (initial + SFD-refit) unless noted otherwise.
+    // stage_softchip_fallback_us is different: it is NOT part of stage_cir_us;
+    // it is a separate eighth bucket that is included in stage_total_us.
+    uint64_t stage_cfo_fit_us = 0;
+    uint64_t stage_cfo_rotate_us = 0;
+    uint32_t stage_cfo_rotation_kernels = 0; // bit0=initial block, bit1=refit block
+    uint64_t stage_cfo_rotated_samples = 0; // total samples derotated across passes
+    uint32_t stage_cfo_rotation_passes = 0;  // count of derotate_cfo_range invocations
+    uint32_t stage_softchip_fallbacks = 0;   // full-path retries (diagnostic)
+    uint64_t stage_softchip_fallback_us = 0; // separate total bucket (not a child)
+    // Experimental fused payload CMF/despread path.  The two sub-timers are
+    // CHILDREN of `stage_payload_us` and must never be added to the total.
+    // `stage_fused_fallbacks` counts a fused attempt that failed and then ran
+    // the full legacy stream once; that retry's wall time is recorded in the
+    // existing `stage_softchip_fallback_us` bucket (also not a child of CIR).
+    uint32_t stage_fused_attempts = 0;   // kernels actually run
+    uint32_t stage_fused_fallbacks = 0;  // fused attempt -> full legacy retry
+    uint32_t stage_fused_symbols = 0;    // BPRF payload symbols correlated
+    uint64_t stage_fused_template_us = 0; // per-packet template build
+    uint64_t stage_fused_correlate_us = 0; // four-candidate correlations
+    uint64_t stage_fused_decode_us = 0;  // PHR cache + BPM/FEC/FCS decode
+    uint64_t stage_fused_decode_ns = 0;  // same interval, nanosecond resolution
+    // Experimental fused PHR CMF/despread path.  These sub-timers are
+    // CHILDREN of `stage_phr_us`, like the payload ones above.
+    uint32_t stage_phr_fused_attempts = 0;
+    uint32_t stage_phr_fused_fallbacks = 0;
+    uint32_t stage_phr_fused_symbols = 0;
+    uint64_t stage_phr_fused_template_us = 0;
+    uint64_t stage_phr_fused_correlate_us = 0;
+    uint64_t stage_phr_fused_decode_us = 0;
+    uint64_t stage_phr_fused_decode_ns = 0; // nanosecond resolution
+    // Diagnostic-only FIR segmentation from the replay helper.  `valid=1`
+    // means the ranges below partition `cir.soft_chip_count` at the decoded
+    // boundaries.  These values are never production exact attribution.
+    uint32_t diag_fir_valid = 0;
+    uint64_t diag_fir_preamble_us = 0;
+    uint64_t diag_fir_sfd_us = 0;
+    uint64_t diag_fir_phr_us = 0;
+    uint64_t diag_fir_payload_us = 0;
+    uint64_t diag_fir_extra_us = 0;
+    uint32_t diag_fir_preamble_chips = 0;
+    uint32_t diag_fir_sfd_chips = 0;
+    uint32_t diag_fir_phr_chips = 0;
+    uint32_t diag_fir_payload_chips = 0;
+    uint32_t diag_fir_extra_chips = 0;
+    uint32_t stage_tail_retrack_fallbacks = 0; // legacy-radius tail retries
+    uint64_t stage_sfd_tail_retrack_fallback_us = 0; // included in tail timer
     // `stage_sfd` runs once for bootstrap CFO anchoring and once after the
     // MATLAB-aligned CFO refit.  Preserve both actual search counts.
     uint64_t sfd_bootstrap_windows = 0;

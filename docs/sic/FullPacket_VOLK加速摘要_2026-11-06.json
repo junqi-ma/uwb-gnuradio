@@ -1,0 +1,342 @@
+{
+  "schema": "fullpacket-volk-cfo/1",
+  "code_tested_sha": "1adf4012422a217ab964661d0a0146be5961330d",
+  "baseline_library_code": "cea0fc3 (unchanged library in 4b5da96)",
+  "libraries": {
+    "old_r1": [
+      {
+        "path": "/home/junqima/workspace/uwb-gnuradio/.worktrees/sic-fullpacket-compare/gr-uwb/build-sic-fullpacket-payload-cache/lib/libgnuradio-uwb.so.1.0.0.0",
+        "sha256": "512224833f7ebb0c05c6e54617c26091cfe4f1975d1ff0296fea763f3de841e1"
+      }
+    ],
+    "volk_r1": [
+      {
+        "path": "/home/junqima/workspace/uwb-gnuradio/.worktrees/sic-fullpacket-compare/gr-uwb/build-sic-fullpacket-volk/lib/libgnuradio-uwb.so.1.0.0.0",
+        "sha256": "3cf40db33eb69649af496763226c2f0e50e46e96ae41689a1229ed34518cc3d1"
+      }
+    ],
+    "volk_r2": [
+      {
+        "path": "/home/junqima/workspace/uwb-gnuradio/.worktrees/sic-fullpacket-compare/gr-uwb/build-sic-fullpacket-volk/lib/libgnuradio-uwb.so.1.0.0.0",
+        "sha256": "3cf40db33eb69649af496763226c2f0e50e46e96ae41689a1229ed34518cc3d1"
+      }
+    ],
+    "old_r2": [
+      {
+        "path": "/home/junqima/workspace/uwb-gnuradio/.worktrees/sic-fullpacket-compare/gr-uwb/build-sic-fullpacket-payload-cache/lib/libgnuradio-uwb.so.1.0.0.0",
+        "sha256": "512224833f7ebb0c05c6e54617c26091cfe4f1975d1ff0296fea763f3de841e1"
+      }
+    ]
+  },
+  "order": "old,volk,volk,old",
+  "observations_per_round_per_mode": 256,
+  "rounds": 2,
+  "warmup_per_mode": 32,
+  "source_pool": 16,
+  "functional": [
+    {
+      "cell": "sync_base",
+      "sources": 16,
+      "comm_exact": 16,
+      "sensing_exact": 16
+    },
+    {
+      "cell": "payload_base",
+      "sources": 16,
+      "comm_exact": 16,
+      "sensing_exact": 16
+    },
+    {
+      "cell": "payload_len16",
+      "sources": 16,
+      "comm_exact": 16,
+      "sensing_exact": 16
+    },
+    {
+      "cell": "payload_len127",
+      "sources": 16,
+      "comm_exact": 16,
+      "sensing_exact": 16
+    },
+    {
+      "cell": "payload_snr8",
+      "sources": 16,
+      "comm_exact": 16,
+      "sensing_exact": 16
+    },
+    {
+      "cell": "payload_isr0",
+      "sources": 16,
+      "comm_exact": 16,
+      "sensing_exact": 16
+    },
+    {
+      "cell": "payload_isr20",
+      "sources": 16,
+      "comm_exact": 16,
+      "sensing_exact": 16
+    },
+    {
+      "cell": "payload_cfo_m50k",
+      "sources": 16,
+      "comm_exact": 16,
+      "sensing_exact": 16
+    },
+    {
+      "cell": "payload_cfo_p50k",
+      "sources": 16,
+      "comm_exact": 16,
+      "sensing_exact": 16
+    },
+    {
+      "cell": "payload_four_frac",
+      "sources": 16,
+      "comm_exact": 16,
+      "sensing_exact": 16
+    }
+  ],
+  "iq_outputs": 320,
+  "bit_identical_outputs": 163,
+  "max_iq_abs_error": 9.536761353939188e-07,
+  "max_iq_relative_l2_error": 4.914573540778204e-07,
+  "aggregate": {
+    "sync_base": {
+      "old": {
+        "estimate_mean_ms": 1.8007058554687498,
+        "comm_demod_mean_ms": 2.1280418574218753,
+        "validate_mean_ms": 0.18257178320312495,
+        "tx_mean_ms": 0.31517642187500006,
+        "channel_mean_ms": 5.329876564453125,
+        "subtract_mean_ms": 0.18891235156250002,
+        "sic_total_mean_ms": 9.947412544921876,
+        "cir_mean_ms": 0.5050987968750001,
+        "sensing_demod_mean_ms": 2.085902804687501,
+        "service_mean_ms": 12.53841414648437,
+        "phase_filter_mean_ms": 1.701036279296874,
+        "path_accum_mean_ms": 1.1230371523437506,
+        "cfo_check_mean_ms": 2.3378049785156243
+      },
+      "volk": {
+        "estimate_mean_ms": 1.7756664648437517,
+        "comm_demod_mean_ms": 2.0877670683593745,
+        "validate_mean_ms": 0.17508104882812495,
+        "tx_mean_ms": 0.3026406113281251,
+        "channel_mean_ms": 3.3547009179687484,
+        "subtract_mean_ms": 0.171534017578125,
+        "sic_total_mean_ms": 7.869004097656251,
+        "cir_mean_ms": 0.46334975781250015,
+        "sensing_demod_mean_ms": 2.089319363281251,
+        "service_mean_ms": 10.421673218749998,
+        "phase_filter_mean_ms": 1.7643054687500002,
+        "path_accum_mean_ms": 1.117234814453125,
+        "cfo_check_mean_ms": 0.30675024609374996
+      },
+      "cfo_check_speedup": 7.621200009734099,
+      "cfo_check_reduction_pct": 86.87870678209782,
+      "channel_speedup": 1.5887784618607175,
+      "channel_reduction_pct": 37.05856266273665,
+      "sic_total_speedup": 1.2641259836025083,
+      "sic_total_reduction_pct": 20.893960493542075
+    },
+    "payload_base": {
+      "old": {
+        "estimate_mean_ms": 1.885902431640626,
+        "comm_demod_mean_ms": 2.7868016601562493,
+        "validate_mean_ms": 0.33048804882812516,
+        "tx_mean_ms": 0.31636395703125,
+        "channel_mean_ms": 5.551769197265624,
+        "subtract_mean_ms": 0.18875696484375,
+        "sic_total_mean_ms": 11.0619842578125,
+        "cir_mean_ms": 0.521428162109375,
+        "sensing_demod_mean_ms": 2.3440031425781243,
+        "service_mean_ms": 13.927415562500002,
+        "phase_filter_mean_ms": 1.8025465097656257,
+        "path_accum_mean_ms": 1.1677495527343749,
+        "cfo_check_mean_ms": 2.315568533203125
+      },
+      "volk": {
+        "estimate_mean_ms": 1.8533679726562502,
+        "comm_demod_mean_ms": 2.7290834843750007,
+        "validate_mean_ms": 0.30380023242187504,
+        "tx_mean_ms": 0.3086820371093748,
+        "channel_mean_ms": 3.518489244140624,
+        "subtract_mean_ms": 0.17760241601562488,
+        "sic_total_mean_ms": 8.892782365234373,
+        "cir_mean_ms": 0.47326345898437494,
+        "sensing_demod_mean_ms": 2.3300212519531254,
+        "service_mean_ms": 11.696067076171875,
+        "phase_filter_mean_ms": 1.8084445468749992,
+        "path_accum_mean_ms": 1.1565127187499997,
+        "cfo_check_mean_ms": 0.2966331953125001
+      },
+      "cfo_check_speedup": 7.806167919823325,
+      "cfo_check_reduction_pct": 87.18961710443665,
+      "channel_speedup": 1.5778843736728887,
+      "channel_reduction_pct": 36.62400004176034,
+      "sic_total_speedup": 1.2439283683651643,
+      "sic_total_reduction_pct": 19.609518889399368
+    }
+  },
+  "timing": [
+    {
+      "variant": "old_r1",
+      "cell": "sync_base",
+      "observations": 256,
+      "independent_sources": 16,
+      "estimate_mean_ms": 1.8155305234375003,
+      "comm_demod_mean_ms": 2.165599945312501,
+      "validate_mean_ms": 0.18598969531249993,
+      "tx_mean_ms": 0.321518859375,
+      "channel_mean_ms": 5.343237078124998,
+      "subtract_mean_ms": 0.19049133203125002,
+      "sic_total_mean_ms": 10.02524606640625,
+      "cir_mean_ms": 0.5130047539062502,
+      "sensing_demod_mean_ms": 2.116117453125001,
+      "service_mean_ms": 12.6543682734375,
+      "phase_filter_mean_ms": 1.6478304726562485,
+      "path_accum_mean_ms": 1.129680160156251,
+      "cfo_check_mean_ms": 2.3979368515624992,
+      "sic_p99_ms": 17.3012052
+    },
+    {
+      "variant": "old_r1",
+      "cell": "payload_base",
+      "observations": 256,
+      "independent_sources": 16,
+      "estimate_mean_ms": 1.8729652734375017,
+      "comm_demod_mean_ms": 2.790133035156249,
+      "validate_mean_ms": 0.31523350000000017,
+      "tx_mean_ms": 0.31820425390624985,
+      "channel_mean_ms": 5.546805105468749,
+      "subtract_mean_ms": 0.19119035937499992,
+      "sic_total_mean_ms": 11.036276980468747,
+      "cir_mean_ms": 0.5187304218750002,
+      "sensing_demod_mean_ms": 2.3484633007812494,
+      "service_mean_ms": 13.903470703124999,
+      "phase_filter_mean_ms": 1.7935670976562503,
+      "path_accum_mean_ms": 1.1621033515624997,
+      "cfo_check_mean_ms": 2.3198758710937497,
+      "sic_p99_ms": 15.536521199999983
+    },
+    {
+      "variant": "volk_r1",
+      "cell": "sync_base",
+      "observations": 256,
+      "independent_sources": 16,
+      "estimate_mean_ms": 1.7936881718750015,
+      "comm_demod_mean_ms": 2.1374589492187517,
+      "validate_mean_ms": 0.17937533203125,
+      "tx_mean_ms": 0.3071053554687501,
+      "channel_mean_ms": 3.4317448476562475,
+      "subtract_mean_ms": 0.1738684726562501,
+      "sic_total_mean_ms": 8.025154351562504,
+      "cir_mean_ms": 0.4657473906250002,
+      "sensing_demod_mean_ms": 2.1158550468750015,
+      "service_mean_ms": 10.606756789062493,
+      "phase_filter_mean_ms": 1.7800444960937492,
+      "path_accum_mean_ms": 1.138370628906251,
+      "cfo_check_mean_ms": 0.3324788007812501,
+      "sic_p99_ms": 12.704728449999998
+    },
+    {
+      "variant": "volk_r1",
+      "cell": "payload_base",
+      "observations": 256,
+      "independent_sources": 16,
+      "estimate_mean_ms": 1.8469540625,
+      "comm_demod_mean_ms": 2.71942396484375,
+      "validate_mean_ms": 0.2968885195312501,
+      "tx_mean_ms": 0.30150938281249984,
+      "channel_mean_ms": 3.5270291718749984,
+      "subtract_mean_ms": 0.17472444921874997,
+      "sic_total_mean_ms": 8.868316917968748,
+      "cir_mean_ms": 0.47513061718749994,
+      "sensing_demod_mean_ms": 2.3294346562500006,
+      "service_mean_ms": 11.67288219140625,
+      "phase_filter_mean_ms": 1.8183219804687492,
+      "path_accum_mean_ms": 1.1644693164062492,
+      "cfo_check_mean_ms": 0.29218460937499996,
+      "sic_p99_ms": 14.070709899999981
+    },
+    {
+      "variant": "volk_r2",
+      "cell": "sync_base",
+      "observations": 256,
+      "independent_sources": 16,
+      "estimate_mean_ms": 1.7576447578125018,
+      "comm_demod_mean_ms": 2.038075187499998,
+      "validate_mean_ms": 0.1707867656249999,
+      "tx_mean_ms": 0.29817586718750005,
+      "channel_mean_ms": 3.2776569882812487,
+      "subtract_mean_ms": 0.1691995624999999,
+      "sic_total_mean_ms": 7.712853843749999,
+      "cir_mean_ms": 0.4609521250000001,
+      "sensing_demod_mean_ms": 2.0627836796875,
+      "service_mean_ms": 10.236589648437501,
+      "phase_filter_mean_ms": 1.7485664414062512,
+      "path_accum_mean_ms": 1.096098999999999,
+      "cfo_check_mean_ms": 0.28102169140624983,
+      "sic_p99_ms": 11.4738992
+    },
+    {
+      "variant": "volk_r2",
+      "cell": "payload_base",
+      "observations": 256,
+      "independent_sources": 16,
+      "estimate_mean_ms": 1.8597818828125003,
+      "comm_demod_mean_ms": 2.7387430039062512,
+      "validate_mean_ms": 0.3107119453124999,
+      "tx_mean_ms": 0.3158546914062498,
+      "channel_mean_ms": 3.50994931640625,
+      "subtract_mean_ms": 0.1804803828124998,
+      "sic_total_mean_ms": 8.917247812499998,
+      "cir_mean_ms": 0.47139630078124994,
+      "sensing_demod_mean_ms": 2.3306078476562497,
+      "service_mean_ms": 11.719251960937498,
+      "phase_filter_mean_ms": 1.798567113281249,
+      "path_accum_mean_ms": 1.14855612109375,
+      "cfo_check_mean_ms": 0.30108178125000024,
+      "sic_p99_ms": 13.410489899999986
+    },
+    {
+      "variant": "old_r2",
+      "cell": "sync_base",
+      "observations": 256,
+      "independent_sources": 16,
+      "estimate_mean_ms": 1.7858811874999991,
+      "comm_demod_mean_ms": 2.0904837695312497,
+      "validate_mean_ms": 0.17915387109374994,
+      "tx_mean_ms": 0.3088339843750001,
+      "channel_mean_ms": 5.31651605078125,
+      "subtract_mean_ms": 0.18733337109375006,
+      "sic_total_mean_ms": 9.869579023437502,
+      "cir_mean_ms": 0.4971928398437501,
+      "sensing_demod_mean_ms": 2.055688156250001,
+      "service_mean_ms": 12.422460019531242,
+      "phase_filter_mean_ms": 1.7542420859374996,
+      "path_accum_mean_ms": 1.1163941445312504,
+      "cfo_check_mean_ms": 2.2776731054687493,
+      "sic_p99_ms": 13.483931199999999
+    },
+    {
+      "variant": "old_r2",
+      "cell": "payload_base",
+      "observations": 256,
+      "independent_sources": 16,
+      "estimate_mean_ms": 1.8988395898437502,
+      "comm_demod_mean_ms": 2.783470285156249,
+      "validate_mean_ms": 0.34574259765625015,
+      "tx_mean_ms": 0.31452366015625005,
+      "channel_mean_ms": 5.556733289062498,
+      "subtract_mean_ms": 0.1863235703125001,
+      "sic_total_mean_ms": 11.087691535156251,
+      "cir_mean_ms": 0.52412590234375,
+      "sensing_demod_mean_ms": 2.3395429843749995,
+      "service_mean_ms": 13.951360421875007,
+      "phase_filter_mean_ms": 1.8115259218750013,
+      "path_accum_mean_ms": 1.1733957539062498,
+      "cfo_check_mean_ms": 2.3112611953125,
+      "sic_p99_ms": 16.722732549999996
+    }
+  ]
+}

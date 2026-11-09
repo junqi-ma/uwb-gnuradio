@@ -109,9 +109,19 @@ install(FILES
     uwb_demod_result.h
     uwb_phy_profile.h
     uwb_cir_fir_simd.h
+    # Experimental RX fast-path helpers included by uwb_demod_core.h.
+    # They are header-only and must ship with the core header so an isolated
+    # installed consumer still compiles.
+    uwb_rx_sync_opt.h
+    uwb_rx_cfo_opt.h
+    uwb_rx_softchip_opt.h
+    uwb_rx_fused_cmf.h
+    uwb_softchip_fir_diag.h
     # M2-A: the offline native-rate PHY closed loop.  Header-only entry that
     # reuses the hrp_mod / resampler / demod cores above, so it installs and an
     # isolated consumer can drive a full-frame native round trip.
     uwb_twr_phy.h
+    uwb_fullpacket_sic_core.h
+    uwb_preamble_sic_core.h
     DESTINATION include/gnuradio/uwb
 )

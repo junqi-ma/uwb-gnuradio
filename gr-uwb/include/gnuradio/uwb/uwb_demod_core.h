@@ -22,6 +22,11 @@
 #include <gnuradio/uwb/uwb_demod_result.h>
 #include <gnuradio/uwb/uwb_detector_core.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
+#include <gnuradio/uwb/uwb_rx_cfo_opt.h>
+#include <gnuradio/uwb/uwb_rx_sync_opt.h>
+#include <gnuradio/uwb/uwb_rx_softchip_opt.h>
+#include <gnuradio/uwb/uwb_rx_fused_cmf.h>
+#include <gnuradio/uwb/uwb_softchip_fir_diag.h>
 
 #include <algorithm>
 #include <array>
@@ -128,6 +133,77 @@ struct DemodScratch {
     std::vector<float> cir_taps;                // CIR estimate
     std::vector<int64_t> peaks;                 // SYNC peak positions
     std::vector<float> peak_values;             // per-peak complex correlation
+    // On-demand soft-chip FIR output.  Kept separate from `corr` because the
+    // extension call re-runs the (cheap) CIR estimate, which temporarily uses
+    // `corr` for the coherent SYNC average while the prefix FIR values must
+    // survive.  Unused by the legacy path.
+    std::vector<std::complex<float>> softchip_corr;
+
+    // ---- Experimental RX fast-path state ---------------------------------
+    // Cached normalized SFD waveform (kron(sfd_sequence, template_wf)).
+    // The key covers the template + SFD content, so the cache does not depend
+    // on the temporary contents of work/corr surviving between calls.
+    std::vector<std::complex<float>> sfd_template;
+    uint64_t sfd_template_key = 0;
+
+    // Cached sparse ternary CIR template (Task A2).
+    rxopt::SparseCirTemplate cir_template;
+
+    // Two-phase soft-chip state.  Only populated when
+    // profile.rx_softchip_on_demand is enabled; the legacy full-stream path
+    // never reads it.  The extension re-runs the cheap CIR estimate and
+    // deterministically rebuilds the same taps/grid, so only the prefix
+    // boundary and its normalization maximum must persist.
+    struct SoftChipState {
+        bool prepared = false;
+        size_t generated = 0;
+        float prefix_max = 0.0f;
+        // Phase rotation frozen by the prefix pass: the phase alignment is
+        // estimated once per packet and reused by the extension.
+        std::complex<float> rot{ 1.0f, 0.0f };
+
+        void reset() { *this = SoftChipState{}; }
+    } softchip;
+
+    // Experimental fused payload CMF/despread state.  PN depends only on the
+    // selected code and the decoded payload length, so it survives packets;
+    // the per-packet channel templates live in kernel.templates and are
+    // rebuilt for every packet (counted in stage_fused_template_us).
+    struct FusedCmfState {
+        size_t code_index = 0;
+        size_t symbols = 0;
+        std::vector<int8_t> pn;
+        rxfusion::Metrics metrics;
+        rxfusion::Scratch kernel;
+
+        void reset_metrics()
+        {
+            rxfusion::Metrics empty;
+            metrics = std::move(empty);
+        }
+    } fused;
+
+    // Experimental fused PHR CMF/despread state.  PN depends only on the
+    // selected code (fixed 21 symbols, scrambler offset 0); the per-packet
+    // channel templates live in kernel.templates.  The 21 raw g0/g1 decisions
+    // are cached for the joint payload Viterbi, which must not re-run the
+    // soft-chip PHR demod when the PHR was produced by the fused kernel.
+    struct FusedPhrState {
+        size_t code_index = 0;
+        std::vector<int8_t> pn;
+        std::vector<int8_t> g0;
+        std::vector<int8_t> g1;
+        bool decisions_valid = false;
+        rxfusion::Metrics metrics;
+        rxfusion::Scratch kernel;
+
+        void reset_decisions()
+        {
+            decisions_valid = false;
+            g0.clear();
+            g1.clear();
+        }
+    } fused_phr;
 
     void reserve(size_t n)
     {
@@ -136,10 +212,34 @@ struct DemodScratch {
         energy.reserve(n);
         metric.reserve(n);
         corr.reserve(n);
+        softchip_corr.reserve(n);
         soft_chips.reserve(n);
         cir_taps.reserve(64);
         peaks.reserve(256);
         peak_values.reserve(256);
+        sfd_template.reserve(8 * kQm35SamplesPerSymbol);
+        fused.pn.reserve(8 * 2048);
+        fused.metrics.complex_value.reserve(
+            rxfusion::kCandidateCount * 2048);
+        fused.metrics.signed_value.reserve(
+            rxfusion::kCandidateCount * 2048);
+        fused.kernel.templates.reserve(
+            rxfusion::kBlockSymbols * (rxfusion::kMaxTapCount +
+                                       rxfusion::kSamplesPerChip *
+                                           (rxfusion::kChipsPerBurst - 1)));
+        fused_phr.pn.reserve(rxfusion::kPhrSymbols *
+                             rxfusion::kPhrChipsPerBurst);
+        fused_phr.g0.reserve(rxfusion::kPhrSymbols);
+        fused_phr.g1.reserve(rxfusion::kPhrSymbols);
+        fused_phr.metrics.complex_value.reserve(
+            rxfusion::kCandidateCount * rxfusion::kPhrSymbols);
+        fused_phr.metrics.signed_value.reserve(
+            rxfusion::kCandidateCount * rxfusion::kPhrSymbols);
+        fused_phr.kernel.templates.reserve(
+            rxfusion::kBlockSymbols *
+            (rxfusion::kMaxTapCount +
+             rxfusion::kSamplesPerChip *
+                 (rxfusion::kPhrChipsPerBurst - 1)));
     }
 };
 
@@ -272,12 +372,41 @@ inline bool stage_timing(const std::complex<float>* rx,
         // the DW1000 preamble_start land ~6 SYNCs late.  The seed-nearby
         // result is authoritative; the wide scan is only a fallback.
         bool seed_acquired = false;
-        {
+        const int64_t legacy_seed_radius =
+            std::max<int64_t>(256, stride);
+        if (profile.timing_seed_refine_radius != 0) {
+            const int64_t narrow = rxopt::seed_refine_radius(
+                profile.timing_seed_refine_radius, stride);
+            if (narrow < legacy_seed_radius) {
+                const auto narrow_begin = std::chrono::steady_clock::now();
+                int64_t pos = -1;
+                float met = 0.0f;
+                std::complex<float> corr(0.0f, 0.0f);
+                const bool narrow_ok =
+                    local_best(seed, narrow, thr, &pos, &met, &corr);
+                out.seed_search_us = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - narrow_begin).count());
+                ++out.seed_refine_narrow_attempts;
+                if (narrow_ok) {
+                    first_start = pos;
+                    first_metric = met;
+                    first_corr = corr;
+                    seed_acquired = true;
+                    ++out.seed_refine_narrow_success;
+                } else {
+                    ++out.seed_refine_fallbacks;
+                }
+            }
+        }
+        if (!seed_acquired) {
+            // Legacy first seeded refine.  Also the fallback after a failed
+            // narrow search: a recovered packet must not be lost just because
+            // the local peak was outside the narrow radius.
             int64_t pos = -1;
             float met = 0.0f;
             std::complex<float> corr(0.0f, 0.0f);
-            if (local_best(seed, std::max<int64_t>(256, stride), thr, &pos, &met,
-                           &corr)) {
+            if (local_best(seed, legacy_seed_radius, thr, &pos, &met, &corr)) {
                 first_start = pos;
                 first_metric = met;
                 first_corr = corr;
@@ -450,12 +579,14 @@ inline bool stage_timing(const std::complex<float>* rx,
 // exp(-j2pi*f*n/fs) and phase-resolved against the preamble waveform. Golden
 // reference: CFO = 0 Hz for the clean baseband signal.
 // ---------------------------------------------------------------------------
-inline bool stage_cfo(const std::complex<float>* rx,
-                      size_t n,
-                      const Qm35825Profile& profile,
-                      const TimingResult& timing,
-                      CfoResult& out,
-                      DemodScratch& scratch)
+// Decoupled CFO estimation (Task A1).
+// Fits the CFO frequency from SYNC peaks without derotating samples.
+inline bool fit_cfo(const std::complex<float>* rx,
+                    size_t n,
+                    const Qm35825Profile& profile,
+                    const TimingResult& timing,
+                    CfoResult& out,
+                    DemodScratch& scratch)
 {
     out = CfoResult{};
     const size_t np = timing.peak_samples.size();
@@ -479,6 +610,7 @@ inline bool stage_cfo(const std::complex<float>* rx,
     // Gather per-peak carrier phases from the SYNC matched-filter values (the
     // noise-averaged correlation phase, NOT the raw rx[peak] sample).  Falls
     // back to the raw sample if the timing stage did not populate peak_corr.
+    const auto cfo_fit_begin = std::chrono::steady_clock::now();
     const bool have_corr = timing.peak_corr.size() >= np;
     scratch.metric.resize(nfit);
     for (size_t k = 0; k < nfit; ++k) {
@@ -517,47 +649,57 @@ inline bool stage_cfo(const std::complex<float>* rx,
     out.cfo_hz = slope / (2.0 * M_PI);
     out.peaks_used = nfit;
     out.ok = true;
+    out.fit_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - cfo_fit_begin).count());
+    return true;
+}
 
-    // Derotate a copy: out[i] = rx[i] * e^{-j w i}.  A naive per-sample sin/cos
-    // (2 transcendentals / sample), a recursion rot *= e^{-j w}, or an
-    // elementwise table multiply all leave the loop scalar (serial chain, or
-    // std::complex mul that GCC won't SIMD).  Instead use 4 INDEPENDENT float
-    // rotation chains, each advancing by step^4 — the chains have no data
-    // dependency, so the compiler interleaves them (4x ILP) instead of stalling
-    // on one serial accumulator.  Re-anchor every kB samples to the exact
-    // absolute phase, so float precision drift never accumulates.
-    scratch.derotated.resize(n);
-    const double w = 2.0 * M_PI * out.cfo_hz / profile.sample_rate;
-    const float cw = static_cast<float>(w);
-    constexpr size_t kB = 1024;
-    const float s4r = std::cos(-4.0f * cw); // e^{-j w*4}: chain advance
-    const float s4i = std::sin(-4.0f * cw);
-    for (size_t b0 = 0; b0 < n; b0 += kB) {
-        const size_t b1 = std::min(n, b0 + kB);
-        const float ph0 = cw * static_cast<float>(b0);
-        float cr[4], ci[4];
-        for (int c = 0; c < 4; ++c) {
-            const float ph = -ph0 - cw * static_cast<float>(c);
-            cr[c] = std::cos(ph);
-            ci[c] = std::sin(ph);
+// Decoupled CFO range rotation (Task A1).
+// Compensates [lo, hi) where phase origin is strictly sample 0.
+inline void derotate_cfo_range(const std::complex<float>* rx,
+                               size_t n,
+                               const Qm35825Profile& profile,
+                               double cfo_hz,
+                               size_t lo,
+                               size_t hi,
+                               DemodScratch& scratch,
+                               uint64_t& rotate_us,
+                               uint32_t& rotation_kernel)
+{
+    const auto cfo_rotate_begin = std::chrono::steady_clock::now();
+    if (scratch.derotated.size() < n)
+        scratch.derotated.resize(n);
+    hi = std::min(hi, n);
+    const double w = 2.0 * M_PI * cfo_hz / profile.sample_rate;
+    if (lo < hi) {
+        if (profile.rx_fast_cfo_rotation) {
+            rxopt::derotate_range_block(scratch.derotated.data(), rx, n, lo, hi, w);
+            rotation_kernel = 1;
+        } else {
+            rxopt::derotate_range_recurrence(scratch.derotated.data(), rx, n, lo, hi, w);
+            rotation_kernel = 0;
         }
-        size_t i = b0;
-        for (; i + 4 <= b1; i += 4) {
-            for (int c = 0; c < 4; ++c) {
-                scratch.derotated[i + c] =
-                    rx[i + c] * std::complex<float>(cr[c], ci[c]);
-                const float nr = cr[c] * s4r - ci[c] * s4i;
-                const float ni = cr[c] * s4i + ci[c] * s4r;
-                cr[c] = nr;
-                ci[c] = ni;
-            }
-        }
-        for (; i < b1; ++i) { // tail (1..3 samples): exact phase
-            const float ph = -ph0 - cw * static_cast<float>(i - b0);
-            scratch.derotated[i] =
-                rx[i] * std::complex<float>(std::cos(ph), std::sin(ph));
-        }
+    } else {
+        rotation_kernel = profile.rx_fast_cfo_rotation ? 1 : 0;
     }
+    rotate_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - cfo_rotate_begin).count());
+}
+
+inline bool stage_cfo(const std::complex<float>* rx,
+                      size_t n,
+                      const Qm35825Profile& profile,
+                      const TimingResult& timing,
+                      CfoResult& out,
+                      DemodScratch& scratch)
+{
+    if (!fit_cfo(rx, n, profile, timing, out, scratch))
+        return false;
+    uint32_t rk = 0;
+    derotate_cfo_range(rx, n, profile, out.cfo_hz, 0, n, scratch, out.rotate_us, rk);
+    out.rotation_kernel = rk;
     return true;
 }
 
@@ -585,22 +727,54 @@ inline bool stage_sfd(const std::complex<float>* rx,
         return false;
     const size_t sym = kQm35SamplesPerSymbol;
 
-    // Build the SFD template: kron(sfd_sequence, preamble_waveform), then
-    // L2-normalize — same as MATLAB refineTimingWithNsSfd.
+    // Build (or reuse) the SFD template: kron(sfd_sequence, preamble_waveform),
+    // then L2-normalize — same as MATLAB refineTimingWithNsSfd.  The fast path
+    // caches the normalized template in scratch across packets; the legacy
+    // path keeps constructing it in scratch.corr exactly as before.
     const size_t len = sfd_sequence.size();
-    scratch.corr.clear();
-    scratch.corr.reserve(len * sym);
-    for (size_t i = 0; i < len; ++i) {
-        const int8_t s = sfd_sequence[i];
-        for (size_t k = 0; k < sym; ++k)
-            scratch.corr.push_back(
-                std::complex<float>(static_cast<float>(s) *
-                                        template_wf[k].real(),
-                                    static_cast<float>(s) *
-                                        template_wf[k].imag()));
+    const std::complex<float>* sfd_tmpl = nullptr;
+    size_t sfd_len = 0;
+    if (profile.rx_fast_sfd) {
+        const uint64_t key =
+            rxopt::sfd_template_key(template_wf, sfd_sequence);
+        if (key != scratch.sfd_template_key ||
+            scratch.sfd_template.size() != len * sym) {
+            rxopt::build_sfd_template(template_wf, sfd_sequence,
+                                      scratch.sfd_template);
+            scratch.sfd_template_key =
+                (scratch.sfd_template.size() == len * sym) ? key : 0;
+        }
+        sfd_tmpl = scratch.sfd_template.data();
+        sfd_len = scratch.sfd_template.size();
+    } else {
+        scratch.corr.clear();
+        scratch.corr.reserve(len * sym);
+        for (size_t i = 0; i < len; ++i) {
+            const int8_t s = sfd_sequence[i];
+            for (size_t k = 0; k < sym; ++k)
+                scratch.corr.push_back(
+                    std::complex<float>(static_cast<float>(s) *
+                                            template_wf[k].real(),
+                                        static_cast<float>(s) *
+                                            template_wf[k].imag()));
+        }
+        gr::uwb::core::uwb_l2_normalize(scratch.corr);
+        sfd_tmpl = scratch.corr.data();
+        sfd_len = scratch.corr.size();
     }
-    gr::uwb::core::uwb_l2_normalize(scratch.corr);
-    const size_t sfd_len = scratch.corr.size();
+    if (sfd_len == 0)
+        return false;
+
+    // Candidate correlation: legacy scalar loop by default, VOLK dot when the
+    // explicit fast path is enabled.  Candidate set/threshold/order unchanged.
+    auto sfd_dot = [&](size_t j) -> std::complex<float> {
+        if (profile.rx_fast_sfd)
+            return rxopt::conjugate_dot(rx + j, sfd_tmpl, sfd_len);
+        std::complex<float> acc(0.0f, 0.0f);
+        for (size_t k = 0; k < sfd_len; ++k)
+            acc += rx[j + k] * std::conj(sfd_tmpl[k]);
+        return acc;
+    };
 
     // MATLAB strategy (refineTimingWithNsSfd): SFD start = preamble start +
     // preamble_repetitions × measured_period.  This is physically correct even
@@ -652,10 +826,8 @@ inline bool stage_sfd(const std::complex<float>* rx,
                     pwr += std::norm(rx[j + sfd_len - 1 - k]) -
                            std::norm(rx[j - 1 - k]);
             }
-            std::complex<float> acc(0.0f, 0.0f);
             ++out.coarse_correlations;
-            for (size_t k = 0; k < sfd_len; ++k)
-                acc += rx[j + k] * std::conj(scratch.corr[k]);
+            const std::complex<float> acc = sfd_dot(j);
             const float m = std::norm(acc) / (pwr + 1e-12f);
             if (m > window_best) {
                 window_best = m;
@@ -676,10 +848,8 @@ inline bool stage_sfd(const std::complex<float>* rx,
             if (j > r_lo)
                 pwr += std::norm(rx[j + sfd_len - 1]) -
                        std::norm(rx[j - 1]);
-            std::complex<float> acc(0.0f, 0.0f);
             ++out.fine_correlations;
-            for (size_t k = 0; k < sfd_len; ++k)
-                acc += rx[j + k] * std::conj(scratch.corr[k]);
+            const std::complex<float> acc = sfd_dot(j);
             const float m = std::norm(acc) / (pwr + 1e-12f);
             if (m > window_best) {
                 window_best = m;
@@ -750,9 +920,24 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
                                 const TimingResult& timing,
                                 const std::vector<int8_t>& preamble_code,
                                 CirResult& out,
-                                DemodScratch& scratch)
+                                DemodScratch& scratch,
+                                size_t max_chips = 0,
+                                size_t begin_chip = 0)
 {
     out = CirResult{};
+    // On-demand experiment: max_chips != 0 limits this call to a prefix or an
+    // extension.  begin_chip > 0 means the prefix [0, begin_chip) was already
+    // produced and normalized by an earlier call; only [begin_chip, num_chips)
+    // is computed here.  Defaults (0, 0) preserve the legacy full-stream path.
+    const bool on_demand =
+        (profile.rx_softchip_on_demand || profile.rx_fused_payload_cmf ||
+         profile.rx_fused_phr_cmf) &&
+        max_chips != 0;
+    const bool extending = on_demand && begin_chip != 0;
+    if (extending && !scratch.softchip.prepared)
+        return false;
+    if (on_demand && !extending)
+        scratch.softchip.reset();
     auto t_cir0 = std::chrono::steady_clock::now();
     const size_t pre = profile.cir_pre_samples;
     const size_t post = profile.cir_post_samples;
@@ -766,13 +951,13 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     //      odd samples), matching MATLAB buildUwbReference.sampled_code. ----
     const std::vector<int8_t> spread =
         BuildSampledCode(preamble_code.data(), preamble_code.size());
-    scratch.work.assign(2 * kQm35ChipsPerSymbol, std::complex<float>(0.0f, 0.0f));
-    for (size_t j = 0; j < spread.size(); ++j)
-        scratch.work[2 * j] = std::complex<float>((float)spread[j], 0.0f);
-    const size_t code_len = scratch.work.size(); // 1016
-    float code_energy = 0.0f;
-    for (size_t m = 0; m < code_len; ++m)
-        code_energy += std::norm(scratch.work[m]);
+    const uint64_t ckey =
+        rxopt::cir_template_key(preamble_code.data(), preamble_code.size());
+    if (scratch.cir_template.key != ckey) {
+        rxopt::build_sparse_cir_template(
+            preamble_code.data(), preamble_code.size(), scratch.cir_template);
+    }
+    const size_t code_len = 2 * kQm35ChipsPerSymbol; // 1016
 
     // ---- Coherently average the aligned SYNC windows. ----
     const size_t available =
@@ -808,14 +993,10 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     for (size_t m = 0; m < wlen; ++m)
         scratch.corr[m] *= inv;
 
-    // ---- CIR taps: forward-order code correlation (NOT time-reversed). ----
-    std::vector<std::complex<float>> values(tap_count);
-    for (size_t nn = 0; nn < tap_count; ++nn) {
-        std::complex<float> acc(0.0f, 0.0f);
-        for (size_t m = 0; m < code_len; ++m)
-            acc += std::conj(scratch.work[m]) * scratch.corr[nn + m];
-        values[nn] = acc / code_energy;
-    }
+    // ---- CIR taps: sparse ternary template correlation (Task A2). ----
+    std::vector<std::complex<float>> values;
+    rxopt::correlate_cir_sparse(scratch.corr.data(), scratch.cir_template,
+                                tap_count, values);
     float nrm = 0.0f;
     for (size_t i = 0; i < tap_count; ++i)
         nrm += std::norm(values[i]);
@@ -840,8 +1021,11 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     out.post_samples = post;
     out.cir_peak_metric = peak_mag;
     out.cir_values.resize(tap_count);
-    for (size_t i = 0; i < tap_count; ++i)
+    out.cir_filter_taps.resize(tap_count);
+    for (size_t i = 0; i < tap_count; ++i) {
         out.cir_values[i] = values[i].real(); // golden CIR is real (Q=0 channel)
+        out.cir_filter_taps[i] = std::conj(values[i]);
+    }
     out.cir_estimate_us = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - t_cir0)
@@ -860,6 +1044,12 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     const size_t n_guard = 8 * kQm35ChipsPerSymbol;
     size_t n_chips = n_shr + n_phr_head + n_extra + n_guard;
     n_chips = static_cast<size_t>(std::ceil((double)n_chips * 1.05));
+    if (on_demand) {
+        if (max_chips < 2)
+            return false;
+        if (n_chips > max_chips)
+            n_chips = max_chips;
+    }
 
     const int64_t chip_start = start + static_cast<int64_t>(tap_count) -
                                static_cast<int64_t>(pre) - 1; // = start + post - 1
@@ -875,13 +1065,33 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     const size_t num_chips =
         static_cast<size_t>(std::floor(
             static_cast<double>(last_pos - chip_start) / spc)) + 1;
+    if (on_demand &&
+        num_chips > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+        return false; // result chip counters are uint32_t
+
+    if (extending && num_chips <= begin_chip) {
+        // The PHR-derived range already fits in the prefix.  Nothing to do;
+        // the existing normalized prefix remains the final stream.
+        out.soft_chip_count = begin_chip;
+        out.initial_chip_count = static_cast<uint32_t>(begin_chip);
+        out.extended_chip_count = static_cast<uint32_t>(begin_chip);
+        out.on_demand_extended = 0;
+        out.samples_per_chip = spc;
+        out.ok = true;
+        return true;
+    }
 
     // Causal FIR on the chip grid, rewritten for contiguous forward access:
     //   chip = sum_k conj(values[T-1-k]) * rx[base-k]
     //        = sum_q conj(values[q])     * rx[base-(T-1)+q]
     // Pre-conjugated taps h[q]=conj(values[q]) once outside the chip loop.
     // Kernels: multi-acc / VOLK / fixed-38 AVX2 (see uwb_cir_fir_simd.h).
-    scratch.corr.resize(num_chips);
+    //
+    // On-demand uses a separate output buffer: the prefix must survive the
+    // extension call's CIR re-estimate (which temporarily uses scratch.corr).
+    std::vector<std::complex<float>>& fir_out =
+        on_demand ? scratch.softchip_corr : scratch.corr;
+    fir_out.resize(num_chips);
     const int64_t fwd = static_cast<int64_t>(tap_count) - 1;
 
     // Stack buffers — no heap alloc in the FIR hot path.
@@ -924,7 +1134,20 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
             rake_weights[i] = h_conj[order[i]];
         }
     }
+    // The on-demand experiment is limited to the production integer-grid,
+    // full-tap kernel.  Fractional SFO grids, sparse RAKE and bypass keep the
+    // complete legacy path, so their semantics are not changed or rounded.
+    if (on_demand && (fractional_grid || bypass_filter || rake_k > 0))
+        return false;
 
+    // Only NS-SFD still consumes a soft-chip stream on the fused PHR path.
+    // Keep its -8-chip search halo, not a filtered copy of every SYNC.
+    const bool skip_sync_fir = on_demand && !extending &&
+        profile.rx_fused_phr_cmf && profile.rx_fused_payload_cmf && spc_i == 2;
+    const size_t sync_end = profile.preamble_repetitions * kQm35ChipsPerSymbol;
+    const size_t fir_first = skip_sync_fir && sync_end > 8 ? sync_end - 8 : 0;
+    if (fir_first >= num_chips)
+        return false;
     size_t checked = 0;
     if (fractional_grid) {
         // MATLAB keeps measured_period/chips_per_symbol as a fractional
@@ -957,7 +1180,7 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
             const float frac = static_cast<float>(pd - std::floor(pd));
             const std::complex<float> y0 = dot_at(p0);
             const std::complex<float> y1 = dot_at(p0 + 1);
-            scratch.corr[i] = y0 + frac * (y1 - y0);
+            fir_out[i] = y0 + frac * (y1 - y0);
         }
         checked = num_chips; // fractional path completed the whole stream
     } else if (chip_start < fwd) {
@@ -965,13 +1188,19 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         checked = std::min(num_chips,
                            static_cast<size_t>((gap + spc_i - 1) / spc_i));
     }
+    if (extending && begin_chip < checked)
+        return false; // [begin_chip, checked) would never be generated
+    if (extending)
+        checked = std::min(num_chips, begin_chip);
     // Edge chips: FIR window may clip below sample 0 (bounds-checked scalar).
-    for (size_t i = 0; !fractional_grid && i < checked; ++i) {
+    // A prefix call handles them once; an extension starts after them.
+    for (size_t i = extending ? checked : 0;
+         !fractional_grid && !skip_sync_fir && i < checked; ++i) {
         const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
         if (bypass_filter) {
             const int64_t idx =
                 p - fwd + static_cast<int64_t>(peak_idx);
-            scratch.corr[i] = idx >= 0 && idx < static_cast<int64_t>(n)
+            fir_out[i] = idx >= 0 && idx < static_cast<int64_t>(n)
                 ? rx[static_cast<size_t>(idx)]
                 : std::complex<float>(0.0f, 0.0f);
             continue;
@@ -986,8 +1215,13 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
                 continue;
             acc += h_conj[q] * rx[static_cast<size_t>(idx)];
         }
-        scratch.corr[i] = acc;
+        fir_out[i] = acc;
     }
+    if (skip_sync_fir)
+        checked = std::max(checked, fir_first);
+    out.soft_fir_first_chip = static_cast<uint32_t>(checked);
+    out.soft_fir_computed_chips = static_cast<uint32_t>(
+        num_chips - (skip_sync_fir ? fir_first : (extending ? begin_chip : 0)));
     // Main body: full tap window is in-bounds.  Call the selected kernel
     // directly (no per-chip switch) so the fixed-38 AVX2 path fully inlines.
     {
@@ -999,7 +1233,7 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
                     chip_start + static_cast<int64_t>(i) * spc_i;
                 const size_t idx = static_cast<size_t>(
                     p - fwd + static_cast<int64_t>(peak_idx));
-                scratch.corr[i] = rx0[idx];
+                fir_out[i] = rx0[idx];
             }
         } else if (rake_k > 0 && rake_k < tap_count) {
             size_t i = checked;
@@ -1018,18 +1252,18 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
                     if (rake_k == 4)
                         cir_fir::dot_topk_x4_avx2<4>(
                             rx0 + win, rake_indices, rake_weights,
-                            scratch.corr.data() + i);
+                            fir_out.data() + i);
                     else
                         cir_fir::dot_topk_x4_avx2<8>(
                             rx0 + win, rake_indices, rake_weights,
-                            scratch.corr.data() + i);
+                            fir_out.data() + i);
                 }
             }
 #endif
             for (; i < num_chips; ++i) {
                 const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
                 const size_t win = static_cast<size_t>(p - fwd);
-                scratch.corr[i] = cir_fir::dot_topk(
+                fir_out[i] = cir_fir::dot_topk(
                     rx0 + win, rake_indices, rake_weights, rake_k);
             }
         } else if (fir_k == cir_fir::Kernel::Avx2Fixed &&
@@ -1037,21 +1271,21 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
             for (size_t i = checked; i < num_chips; ++i) {
                 const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
                 const size_t win = static_cast<size_t>(p - fwd);
-                scratch.corr[i] =
+                fir_out[i] =
                     cir_fir::dot_avx2_fixed38(rx0 + win, h_conj, tap_count);
             }
         } else if (fir_k == cir_fir::Kernel::Volk) {
             for (size_t i = checked; i < num_chips; ++i) {
                 const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
                 const size_t win = static_cast<size_t>(p - fwd);
-                scratch.corr[i] =
+                fir_out[i] =
                     cir_fir::dot_volk(rx0 + win, values_nat, tap_count);
             }
         } else {
             for (size_t i = checked; i < num_chips; ++i) {
                 const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
                 const size_t win = static_cast<size_t>(p - fwd);
-                scratch.corr[i] =
+                fir_out[i] =
                     cir_fir::dot_multi_acc8(rx0 + win, h_conj, tap_count);
             }
         }
@@ -1071,39 +1305,100 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         return false; // chip stream shorter than the configured preamble
     // spread[] is real ±1/0, so conj(spread)*corr = spread*corr.  Avoid % by
     // walking the 508-chip period with a running index.
-    std::complex<float> gain(0.0f, 0.0f);
-    {
+    std::complex<float> rot(1.0f, 0.0f);
+    if (extending) {
+        // Frozen by the prefix pass: phase alignment runs once per packet.
+        rot = scratch.softchip.rot;
+    } else if (skip_sync_fir) {
+        const auto phase_begin = std::chrono::steady_clock::now();
+        std::complex<float> gain{};
+        if (!rxopt::sync_phase_gain(rx, n,
+                chip_start - fwd + static_cast<int64_t>(2 * phase_first),
+                h_conj, tap_count, spread, phase_reps, scratch.work, gain))
+            return false;
+        const float ang = std::arg(gain);
+        rot = std::complex<float>(std::cos(-ang), std::sin(-ang));
+        scratch.softchip.rot = rot;
+        out.sync_phase_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - phase_begin).count());
+    } else {
+        std::complex<float> gain(0.0f, 0.0f);
         size_t s = 0;
         for (size_t i = 0; i < phase_len; ++i) {
             gain += static_cast<float>(spread[s]) *
-                    scratch.corr[phase_first + i];
+                    fir_out[phase_first + i];
             if (++s == kQm35ChipsPerSymbol)
                 s = 0;
         }
+        const float ang = std::arg(gain);
+        rot = std::complex<float>(std::cos(-ang), std::sin(-ang));
+        if (on_demand)
+            scratch.softchip.rot = rot;
     }
-    const float ang = std::arg(gain);
-    const float rr = std::cos(-ang);
-    const float ri = std::sin(-ang);
-    const std::complex<float> rot(rr, ri);
+    const float rr = rot.real();
+    const float ri = rot.imag();
 
     // Merged postprocess: compute only the rotated real component and track
     // max|real|, then normalize into soft_chips. No later stage consumes the
     // rotated complex corr stream, so writing it back wastes ~1.2 MB/packet.
     scratch.soft_chips.resize(num_chips);
-    float mx = 0.0f;
-    for (size_t i = 0; i < num_chips; ++i) {
-        // (cr+j ci)*(rr+j ri) → real = cr*rr - ci*ri
-        const float cr = scratch.corr[i].real();
-        const float ci = scratch.corr[i].imag();
-        const float r = cr * rr - ci * ri;
-        scratch.soft_chips[i] = r;                    // temp; normalized below
-        const float ar = (r >= 0.0f) ? r : -r;
-        if (ar > mx)
-            mx = ar;
+    if (!extending) {
+        // Preserve absolute chip coordinates; the skipped prefix is not data.
+        // NS-SFD uses normalized correlation, invariant to this common scale.
+        const size_t post_first = skip_sync_fir ? fir_first : 0;
+        std::fill(scratch.soft_chips.begin(),
+                  scratch.soft_chips.begin() + post_first, 0.0f);
+        float mx = 0.0f;
+        for (size_t i = post_first; i < num_chips; ++i) {
+            // (cr+j ci)*(rr+j ri) → real = cr*rr - ci*ri
+            const float cr = fir_out[i].real();
+            const float ci = fir_out[i].imag();
+            const float r = cr * rr - ci * ri;
+            scratch.soft_chips[i] = r;                // temp; normalized below
+            const float ar = (r >= 0.0f) ? r : -r;
+            if (ar > mx)
+                mx = ar;
+        }
+        const float inv_denom = 1.0f / (mx + 1e-12f);
+        for (size_t i = post_first; i < num_chips; ++i)
+            scratch.soft_chips[i] *= inv_denom;
+        if (on_demand) {
+            scratch.softchip.prefix_max = mx;
+            scratch.softchip.generated = num_chips;
+            scratch.softchip.prepared = true;
+            out.initial_chip_count = static_cast<uint32_t>(num_chips);
+            out.extended_chip_count = 0;
+            out.on_demand_extended = 0;
+        }
+    } else {
+        // Extension: rotate only the new chips, then put the whole stream on
+        // one denominator.  rescale_prefix() multiplies the already-normalized
+        // prefix by (prefix_max+eps)/(final_max+eps); the new tail is scaled by
+        // 1/(final_max+eps).  This equals the one-shot raw/final_max result up
+        // to one float rounding on the prefix.
+        float ext_mx = 0.0f;
+        for (size_t i = begin_chip; i < num_chips; ++i) {
+            const float cr = fir_out[i].real();
+            const float ci = fir_out[i].imag();
+            const float r = cr * rr - ci * ri;
+            scratch.soft_chips[i] = r;
+            const float ar = (r >= 0.0f) ? r : -r;
+            if (ar > ext_mx)
+                ext_mx = ar;
+        }
+        const float final_max = std::max(scratch.softchip.prefix_max, ext_mx);
+        rxopt::rescale_prefix(scratch.soft_chips, begin_chip,
+                              scratch.softchip.prefix_max, final_max);
+        const float inv_denom = 1.0f / (final_max + 1e-12f);
+        for (size_t i = begin_chip; i < num_chips; ++i)
+            scratch.soft_chips[i] *= inv_denom;
+        scratch.softchip.prefix_max = final_max;
+        scratch.softchip.generated = num_chips;
+        out.initial_chip_count = static_cast<uint32_t>(begin_chip);
+        out.extended_chip_count = static_cast<uint32_t>(num_chips);
+        out.on_demand_extended = 1;
     }
-    const float inv_denom = 1.0f / (mx + 1e-12f);
-    for (size_t i = 0; i < num_chips; ++i)
-        scratch.soft_chips[i] *= inv_denom;
     out.postprocess_us = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - t_post0)
@@ -1683,6 +1978,69 @@ inline bool rs_decode_stream(const std::vector<int8_t>& coded,
     return data_out.size() == data_bits;
 }
 
+// Shared hard-decision payload backend: concatenate the 21 PHR symbols and the
+// payload symbols, run the truncated CL-3 Viterbi, remove the 19 systematic PHR
+// bits and the two tail bits, RS-decode, pack LSB-first and compute the FCS.
+// This is the exact first attempt of stage_payload_fcs(); the fused payload
+// path calls it with g0/g1 produced by rxfusion, so both paths share the same
+// FEC/FCS implementation and length conventions.
+inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
+                                const std::vector<int8_t>& g1p,
+                                const std::vector<int8_t>& g0,
+                                const std::vector<int8_t>& g1,
+                                size_t psdu_bits,
+                                PayloadResult& out)
+{
+    out = PayloadResult{};
+    if (g0p.size() != 21 || g1p.size() != 21 || g0.empty() ||
+        g0.size() != g1.size())
+        return false;
+
+    const size_t total = 21 + g0.size();
+    std::vector<int8_t> rx_bits(2 * total);
+    for (size_t s = 0; s < 21; ++s) {
+        rx_bits[2 * s] = g0p[s];
+        rx_bits[2 * s + 1] = g1p[s];
+    }
+    for (size_t s = 0; s < g0.size(); ++s) {
+        rx_bits[2 * (s + 21)] = g0[s];
+        rx_bits[2 * (s + 21) + 1] = g1[s];
+    }
+    std::vector<int8_t> decoded;
+    vitdec_cl3(rx_bits.data(), total, decoded);
+    if (decoded.size() < total)
+        return false;
+
+    std::vector<int8_t> rs_cw(decoded.begin() + 19,
+                              decoded.begin() + (total - 2));
+    if (rs_cw.size() != g0.size())
+        return false;
+    std::vector<int8_t> psdu_bits_out;
+    if (!rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out))
+        return false;
+
+    out.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
+    out.bytes.resize(psdu_bits_out.size() / 8);
+    for (size_t i = 0; i < out.bytes.size(); ++i) {
+        uint8_t b = 0;
+        for (int bit = 0; bit < 8; ++bit)
+            b |= static_cast<uint8_t>(psdu_bits_out[8 * i + bit]) << bit;
+        out.bytes[i] = b;
+    }
+    if (out.bytes.size() >= 2) {
+        out.calculated_fcs =
+            crc16_802154(out.bytes.data(), out.bytes.size() - 2);
+        out.received_fcs = static_cast<uint16_t>(
+                               out.bytes[out.bytes.size() - 2]) |
+                           (static_cast<uint16_t>(
+                                out.bytes[out.bytes.size() - 1])
+                            << 8);
+        out.fcs_pass = (out.received_fcs == out.calculated_fcs);
+    }
+    out.ok = true;
+    return true;
+}
+
 } // namespace detail
 
 // ---------------------------------------------------------------------------
@@ -1766,27 +2124,21 @@ inline bool stage_ns_sfd(const std::vector<float>& soft_chips,
 //   * SECDED single-bit correction / double-bit detection -> PSDU length.
 // Golden: coded/decoded PHR match MATLAB, psdu_length=127, secded_pass=1.
 // ---------------------------------------------------------------------------
-inline bool stage_phr(const std::vector<float>& soft_chips,
-                      const Qm35825Profile& profile,
-                      const NsSfdResult& ns_sfd,
-                      size_t chips_per_symbol,
-                      PhrResult& out,
-                      DemodScratch& scratch)
+// Shared PHR Viterbi/SECDED parser.  The legacy stage_phr() and the fused PHR
+// kernel both feed their 21 raw g0/g1 pairs here, so the FEC convention and the
+// SECDED tail-energy guard are identical.  `soft_chips` is only read by the
+// guard when a corrected length grows; callers with a short prefix therefore
+// keep the same conservative "return the corrected result and let the caller
+// retry the full stream once" behaviour as the existing on-demand path.
+inline bool decode_phr_decisions(const std::vector<int8_t>& g0,
+                                 const std::vector<int8_t>& g1,
+                                 const std::vector<float>& soft_chips,
+                                 const NsSfdResult& ns_sfd,
+                                 PhrResult& out)
 {
     out = PhrResult{};
-    if (soft_chips.empty() || !ns_sfd.ok || ns_sfd.sfd_end_chip < 0)
-        return false;
-    const size_t cpb = 64, cps = 512, nsym = 21;
-    const int64_t phr_start = ns_sfd.sfd_end_chip + 1;
-    if (phr_start < 0 ||
-        static_cast<size_t>(phr_start + static_cast<int64_t>(cps * nsym)) >
-            soft_chips.size())
-        return false;
-    const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
-
-    std::vector<int8_t> g0, g1;
-    if (!detail::bprf_demod(soft_chips, phr_start, profile.code_index, nsym,
-                            cpb, cps, 0, pol, g0, g1))
+    const size_t nsym = 21;
+    if (g0.size() != nsym || g1.size() != nsym)
         return false;
 
     std::vector<int8_t> rx(2 * nsym);
@@ -1830,7 +2182,7 @@ inline bool stage_phr(const std::vector<float>& soft_chips,
     // rate, phr(3:9) -> PSDU length.
     //
     // Guard against SECDED mis-correction on real RF.  A false single-bit
-    // flip can inflate PSDU length (e.g. 13 → 45 on DW1000 captures) past
+    // flip can inflate PSDU length (e.g. 13 -> 45 on DW1000 captures) past
     // the RF energy while the soft-chip *buffer* is still long enough.  If
     // the corrected length needs a long tail whose soft-chip energy is near
     // the noise floor relative to the uncorrected body, keep uncorrected.
@@ -1849,7 +2201,8 @@ inline bool stage_phr(const std::vector<float>& soft_chips,
     };
     const uint32_t len_uncorr = length_of(sys13); // sys13 is never flipped
     const uint32_t len_corr = length_of(phr19);
-    if (out.secded_corrected && len_corr > len_uncorr) {
+    if (out.secded_corrected && len_corr > len_uncorr &&
+        ns_sfd.sfd_end_chip >= 0) {
         const int64_t phr_start = ns_sfd.sfd_end_chip + 1;
         const size_t need_c = chips_needed(len_corr);
         const size_t need_u = chips_needed(len_uncorr);
@@ -1892,6 +2245,151 @@ inline bool stage_phr(const std::vector<float>& soft_chips,
     for (int i = 0; i < 19; ++i)
         out.phr_bits.push_back(static_cast<uint8_t>(phr19[i]));
     out.ok = true;
+    return true;
+}
+
+inline bool stage_phr(const std::vector<float>& soft_chips,
+                      const Qm35825Profile& profile,
+                      const NsSfdResult& ns_sfd,
+                      size_t chips_per_symbol,
+                      PhrResult& out,
+                      DemodScratch& scratch)
+{
+    out = PhrResult{};
+    if (soft_chips.empty() || !ns_sfd.ok || ns_sfd.sfd_end_chip < 0)
+        return false;
+    const size_t cpb = 64, cps = 512, nsym = 21;
+    const int64_t phr_start = ns_sfd.sfd_end_chip + 1;
+    if (phr_start < 0 ||
+        static_cast<size_t>(phr_start + static_cast<int64_t>(cps * nsym)) >
+            soft_chips.size())
+        return false;
+    const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
+
+    std::vector<int8_t> g0, g1;
+    if (!detail::bprf_demod(soft_chips, phr_start, profile.code_index, nsym,
+                            cpb, cps, 0, pol, g0, g1))
+        return false;
+    return decode_phr_decisions(g0, g1, soft_chips, ns_sfd, out);
+}
+
+// Build (or reuse) the PHR spreading stream.  The PN depends only on the code
+// index and the fixed 21-symbol geometry; the channel template is rebuilt per
+// packet by stage_phr_fused_cmf().
+inline bool prepare_fused_phr_pn(DemodScratch& scratch, size_t code_index)
+{
+    const size_t nbits =
+        rxfusion::kPhrSymbols * rxfusion::kPhrChipsPerBurst;
+    if (scratch.fused_phr.code_index == code_index &&
+        scratch.fused_phr.pn.size() == nbits)
+        return true;
+    if (!detail::bprf_spreading(scratch.fused_phr.pn, code_index,
+                                rxfusion::kPhrScramOffset, nbits)) {
+        scratch.fused_phr.code_index = 0;
+        scratch.fused_phr.pn.clear();
+        scratch.fused_phr.reset_decisions();
+        return false;
+    }
+    scratch.fused_phr.code_index = code_index;
+    scratch.fused_phr.reset_decisions();
+    return true;
+}
+
+// Experimental fused PHR metrics + the shared PHR FEC/SECDED parser.  The PHR
+// field is generated directly from CFO-compensated IQ with 164-point templates
+// (38 taps), so no PHR soft-chip FIR is required.  The 21 raw g0/g1 decisions
+// are cached for the payload joint Viterbi.  Returns false on unsupported
+// geometry, range violations, non-finite metrics or decode failure; the caller
+// retries the complete legacy stream once.  Timings are always reported when
+// the corresponding work was performed.
+inline bool stage_phr_fused_cmf(const std::complex<float>* rx,
+                                size_t n,
+                                const Qm35825Profile& profile,
+                                const TimingResult& timing,
+                                const CirResult& cir,
+                                const std::vector<float>& prefix_soft_chips,
+                                const NsSfdResult& ns_sfd,
+                                PhrResult& out,
+                                DemodScratch& scratch,
+                                uint64_t& template_us,
+                                uint64_t& correlate_us,
+                                uint64_t& decode_us,
+                                uint64_t& decode_ns,
+                                size_t& symbols_out)
+{
+    out = PhrResult{};
+    template_us = 0;
+    correlate_us = 0;
+    decode_us = 0;
+    decode_ns = 0;
+    symbols_out = 0;
+    if (!rx || !ns_sfd.ok || ns_sfd.sfd_end_chip < 0)
+        return false;
+    const int64_t phr_start = ns_sfd.sfd_end_chip + 1;
+    if (phr_start < 0 ||
+        static_cast<size_t>(phr_start) > prefix_soft_chips.size())
+        return false;
+
+    const size_t tap_count = cir.cir_filter_taps.size();
+    if (tap_count == 0 || tap_count > rxfusion::kMaxTapCount)
+        return false;
+    if (tap_count != profile.cir_pre_samples + profile.cir_post_samples)
+        return false;
+    if (std::abs(cir.samples_per_chip -
+                 static_cast<double>(rxfusion::kSamplesPerChip)) > 1e-9)
+        return false;
+    if (profile.cir_pre_samples > tap_count)
+        return false;
+    if (!scratch.softchip.prepared || !std::isfinite(scratch.softchip.rot.real()) ||
+        !std::isfinite(scratch.softchip.rot.imag()))
+        return false;
+
+    const int64_t chip_start =
+        timing.preamble_start_sample + static_cast<int64_t>(tap_count) -
+        static_cast<int64_t>(profile.cir_pre_samples) - 1;
+    if (chip_start < 0 || static_cast<int64_t>(n) <= chip_start)
+        return false;
+
+    const auto t_plan0 = std::chrono::steady_clock::now();
+    if (!prepare_fused_phr_pn(scratch, profile.code_index))
+        return false;
+    const auto t_plan1 = std::chrono::steady_clock::now();
+    const uint64_t plan_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(t_plan1 - t_plan0)
+            .count());
+
+    const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
+    rxfusion::Timings timings;
+    if (!rxfusion::correlate_phr(
+            scratch.derotated.data(), n, cir.cir_filter_taps.data(), tap_count,
+            chip_start, rxfusion::kSamplesPerChip, phr_start,
+            scratch.fused_phr.pn.data(), pol, scratch.softchip.rot,
+            scratch.fused_phr.metrics, scratch.fused_phr.kernel, &timings))
+        return false;
+    template_us = plan_us + timings.template_update_us;
+    correlate_us = timings.correlate_us;
+    for (float v : scratch.fused_phr.metrics.signed_value) {
+        if (!std::isfinite(v))
+            return false;
+    }
+
+    const auto t_decode0 = std::chrono::steady_clock::now();
+    rxfusion::decide_bpm(scratch.fused_phr.metrics, scratch.fused_phr.g0,
+                         scratch.fused_phr.g1);
+    scratch.fused_phr.decisions_valid = true;
+    const bool decoded = decode_phr_decisions(
+        scratch.fused_phr.g0, scratch.fused_phr.g1, prefix_soft_chips,
+        ns_sfd, out);
+    decode_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - t_decode0)
+            .count());
+    decode_us = decode_ns / 1000;
+    symbols_out = rxfusion::kPhrSymbols;
+    if (!decoded) {
+        scratch.fused_phr.reset_decisions();
+        return false;
+    }
     return true;
 }
 
@@ -1940,52 +2438,10 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
                                64, 512, 0, pol, g0p, g1p) &&
             detail::bprf_demod(soft_chips, payload_start, profile.code_index,
                                nsym, 8, 64, 1344, pol, g0, g1)) {
-            const size_t total = 21 + nsym;
-            std::vector<int8_t> rx_bits(2 * total);
-            for (size_t s = 0; s < 21; ++s) {
-                rx_bits[2 * s] = g0p[s];
-                rx_bits[2 * s + 1] = g1p[s];
-            }
-            for (size_t s = 0; s < nsym; ++s) {
-                rx_bits[2 * (s + 21)] = g0[s];
-                rx_bits[2 * (s + 21) + 1] = g1[s];
-            }
-            std::vector<int8_t> decoded;
-            detail::vitdec_cl3(rx_bits.data(), total, decoded);
-            if (decoded.size() >= total) {
-                std::vector<int8_t> rs_cw(decoded.begin() + 19,
-                                          decoded.begin() + (total - 2));
-                std::vector<int8_t> psdu_bits_out;
-                if (rs_cw.size() == nsym &&
-                    detail::rs_decode_stream(rs_cw, psdu_bits,
-                                             psdu_bits_out)) {
-                    out.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
-                    out.bytes.resize(psdu_bits_out.size() / 8);
-                    for (size_t i = 0; i < out.bytes.size(); ++i) {
-                        uint8_t b = 0;
-                        for (int bit = 0; bit < 8; ++bit)
-                            b |= static_cast<uint8_t>(
-                                     psdu_bits_out[8 * i + bit])
-                                 << bit;
-                        out.bytes[i] = b;
-                    }
-                    if (out.bytes.size() >= 2) {
-                        out.calculated_fcs = detail::crc16_802154(
-                            out.bytes.data(), out.bytes.size() - 2);
-                        out.received_fcs =
-                            static_cast<uint16_t>(
-                                out.bytes[out.bytes.size() - 2]) |
-                            (static_cast<uint16_t>(
-                                 out.bytes[out.bytes.size() - 1])
-                             << 8);
-                        out.fcs_pass =
-                            (out.received_fcs == out.calculated_fcs);
-                    }
-                    out.ok = true;
-                    any_ok = true;
-                    if (out.fcs_pass)
-                        return true;
-                }
+            if (detail::decode_payload_hard(g0p, g1p, g0, g1, psdu_bits, out)) {
+                any_ok = true;
+                if (out.fcs_pass)
+                    return true;
             }
         }
     }
@@ -2089,6 +2545,209 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
     return any_ok;
 }
 
+// Build (or reuse) the BPRF payload spreading stream for the fused kernel.
+// The PN sequence depends only on the code index and the decoded symbol count,
+// so it is cached across packets; the channel template is still rebuilt for
+// every packet and counted separately.
+inline bool prepare_fused_payload_pn(DemodScratch& scratch,
+                                     size_t code_index,
+                                     size_t symbols)
+{
+    const size_t nbits = symbols * rxfusion::kChipsPerBurst;
+    if (scratch.fused.code_index == code_index &&
+        scratch.fused.symbols == symbols &&
+        scratch.fused.pn.size() == nbits)
+        return true;
+    if (!detail::bprf_spreading(scratch.fused.pn, code_index, 1344, nbits)) {
+        scratch.fused.code_index = 0;
+        scratch.fused.symbols = 0;
+        scratch.fused.pn.clear();
+        return false;
+    }
+    scratch.fused.code_index = code_index;
+    scratch.fused.symbols = symbols;
+    return true;
+}
+
+// Experimental fused payload metrics + hard FEC/FCS decode.  Reuses the PHR
+// decisions and the CIR/phase frozen by the prefix pass.  When `phr_g0`/
+// `phr_g1` are supplied by the fused PHR stage, the joint Viterbi consumes
+// those raw 21 decisions directly and the prefix does not need PHR soft chips;
+// otherwise it re-runs bprf_demod() from the legacy prefix.  Returns false on any unsupported
+// configuration, range/short-window violation, fused-decode failure or FCS
+// failure; the caller then retries the complete legacy stream once.
+// `template_us`, `correlate_us` and `decode_us` are populated even when a later
+// stage fails so the attempted work is not hidden.
+inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
+                                    size_t n,
+                                    const Qm35825Profile& profile,
+                                    const TimingResult& timing,
+                                    const CirResult& cir,
+                                    const std::vector<float>& prefix_soft_chips,
+                                    const NsSfdResult& ns_sfd,
+                                    const PhrResult& phr,
+                                    PayloadResult& out,
+                                    DemodScratch& scratch,
+                                    uint64_t& template_us,
+                                    uint64_t& correlate_us,
+                                    uint64_t& decode_us,
+                                    uint64_t& decode_ns,
+                                    size_t& symbols_out,
+                                    const std::vector<int8_t>* phr_g0 = nullptr,
+                                    const std::vector<int8_t>* phr_g1 = nullptr)
+{
+    out = PayloadResult{};
+    template_us = 0;
+    correlate_us = 0;
+    decode_us = 0;
+    decode_ns = 0;
+    symbols_out = 0;
+    if (!rx || !phr.ok || !ns_sfd.ok || phr.psdu_length == 0 ||
+        phr.psdu_length > profile.max_psdu_bytes)
+        return false;
+
+    const int64_t phr_start = ns_sfd.sfd_end_chip + 1;
+    const int64_t payload_start =
+        phr_start + static_cast<int64_t>(rxopt::kPhrSymbols) *
+                       static_cast<int64_t>(rxopt::kPhrChipsPerSymbol);
+    if (phr_start < 0 || payload_start < 0)
+        return false;
+    // When the fused PHR stage supplies the raw 21 g0/g1 decisions, the
+    // payload path does not need the PHR soft chips in the prefix.  Otherwise
+    // it must reproduce the legacy bprf_demod() admission exactly.
+    const bool have_phr_decisions = phr_g0 && phr_g1;
+    if (!have_phr_decisions &&
+        static_cast<size_t>(phr_start) +
+                rxopt::kPhrSymbols * rxopt::kPhrChipsPerSymbol >
+            prefix_soft_chips.size())
+        return false;
+
+    const size_t psdu_bits = static_cast<size_t>(phr.psdu_length) * 8;
+    const size_t num_blocks = (psdu_bits + 329) / 330;
+    const size_t symbols = psdu_bits + 48 * num_blocks;
+    if (symbols == 0)
+        return false;
+    symbols_out = symbols;
+
+    const size_t tap_count = cir.cir_filter_taps.size();
+    if (tap_count == 0 || tap_count > rxfusion::kMaxTapCount)
+        return false;
+    if (tap_count != profile.cir_pre_samples + profile.cir_post_samples)
+        return false;
+    if (std::abs(cir.samples_per_chip -
+                 static_cast<double>(rxfusion::kSamplesPerChip)) > 1e-9)
+        return false;
+    if (profile.cir_pre_samples > tap_count)
+        return false;
+    if (!scratch.softchip.prepared || std::norm(scratch.softchip.rot) <= 0.0f ||
+        !std::isfinite(scratch.softchip.rot.real()) ||
+        !std::isfinite(scratch.softchip.rot.imag()))
+        return false;
+
+    const int64_t chip_start =
+        timing.preamble_start_sample + static_cast<int64_t>(tap_count) -
+        static_cast<int64_t>(profile.cir_pre_samples) - 1;
+    if (chip_start < 0 || static_cast<int64_t>(n) <= chip_start)
+        return false;
+    const int64_t max_chip =
+        (static_cast<int64_t>(n) - 1 - chip_start) /
+        static_cast<int64_t>(rxfusion::kSamplesPerChip);
+    if (max_chip < 0)
+        return false;
+
+    // Reproduce the exact length of the soft-chip stream that the legacy
+    // on-demand path would have produced (prefix + optional extension).  The
+    // legacy bprf_demod() admission is `payload_start + 64*nsym <= stream`,
+    // which is 16 chips stricter than the last actually used chip.  Using only
+    // the raw-IQ length here would be a different contract if the chip budget
+    // ever became the limiting factor.
+    const size_t prefix_chips = cir.soft_chip_count;
+    size_t stream_chips = prefix_chips;
+    const size_t final_budget = rxopt::final_chip_budget(
+        profile, ns_sfd.sfd_end_chip, phr.psdu_length);
+    if (final_budget > prefix_chips) {
+        const double spc = cir.samples_per_chip;
+        const int64_t last_by_budget =
+            chip_start + static_cast<int64_t>(std::ceil(
+                             static_cast<double>(final_budget - 1) * spc));
+        const int64_t last_chip_sample =
+            std::min<int64_t>(static_cast<int64_t>(n), last_by_budget);
+        const int64_t last_pos = last_chip_sample - 1;
+        if (last_pos < chip_start)
+            return false;
+        stream_chips = static_cast<size_t>(
+                           std::floor(static_cast<double>(last_pos - chip_start) /
+                                      spc)) +
+                       1;
+    }
+    if (payload_start + static_cast<int64_t>(symbols) *
+                            static_cast<int64_t>(rxopt::kPayloadChipsPerSymbol) >
+        static_cast<int64_t>(stream_chips))
+        return false;
+
+    const auto t_plan0 = std::chrono::steady_clock::now();
+    if (!prepare_fused_payload_pn(scratch, profile.code_index, symbols))
+        return false;
+    const auto t_plan1 = std::chrono::steady_clock::now();
+    const uint64_t plan_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(t_plan1 - t_plan0)
+            .count());
+
+    const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
+    rxfusion::Timings timings;
+    if (!rxfusion::correlate_payload(
+            scratch.derotated.data(), n, cir.cir_filter_taps.data(),
+            tap_count, chip_start, rxfusion::kSamplesPerChip, payload_start,
+            scratch.fused.pn.data(), symbols, pol, scratch.softchip.rot,
+            scratch.fused.metrics, scratch.fused.kernel, &timings))
+        return false;
+    template_us = plan_us + timings.template_update_us;
+    correlate_us = timings.correlate_us;
+    for (float v : scratch.fused.metrics.signed_value) {
+        if (!std::isfinite(v))
+            return false;
+    }
+
+    const auto t_decode0 = std::chrono::steady_clock::now();
+    std::vector<int8_t> local_g0p, local_g1p, g0, g1;
+    const std::vector<int8_t>* g0p = phr_g0;
+    const std::vector<int8_t>* g1p = phr_g1;
+    if (g0p || g1p) {
+        if (!g0p || !g1p || g0p->size() != 21 || g1p->size() != 21) {
+            decode_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - t_decode0)
+                    .count());
+            decode_us = decode_ns / 1000;
+            return false;
+        }
+    } else {
+        if (!detail::bprf_demod(prefix_soft_chips, phr_start,
+                                profile.code_index, 21, 64, 512, 0, pol,
+                                local_g0p, local_g1p)) {
+            decode_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - t_decode0)
+                    .count());
+            decode_us = decode_ns / 1000;
+            return false;
+        }
+        g0p = &local_g0p;
+        g1p = &local_g1p;
+    }
+    rxfusion::decide_bpm(scratch.fused.metrics, g0, g1);
+    const bool decoded =
+        detail::decode_payload_hard(*g0p, *g1p, g0, g1, psdu_bits, out);
+    decode_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - t_decode0)
+            .count());
+    decode_us = decode_ns / 1000;
+    if (!decoded)
+        return false;
+    return out.ok && out.fcs_pass;
+}
+
 // ---------------------------------------------------------------------------
 // Full pipeline (R1-R4): timing + CFO + SFD + CIR/soft chips + NS-SFD + PHR +
 // payload/FCS.
@@ -2106,6 +2765,9 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     res.packet_id = packet_id;
     res.predicted_start_sample = predicted_start;
     res.window_start_sample = window_start;
+    // The fused PHR decisions are packet-scoped; never let the joint payload
+    // Viterbi consume a previous packet's cache.
+    scratch.fused_phr.reset_decisions();
 
     // predicted_start is ABSOLUTE.  The core stages index rx as a 0-based
     // window buffer, so seed with the window-relative position.  All stage
@@ -2151,6 +2813,62 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         res.stage_total_us += dst;
         t_prev = now;
     };
+    // Add (rather than replace) elapsed time.  Used for the on-demand extension
+    // and failure fallback, which are not single sequential stage laps.
+    auto add_elapsed = [&](uint64_t& dst) {
+        const auto now = std::chrono::steady_clock::now();
+        const uint64_t dt = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(now - t_prev)
+                .count());
+        dst += dt;
+        res.stage_total_us += dt;
+        t_prev = now;
+    };
+
+    // Diagnostic-only segmented FIR replay.  It is intentionally outside the
+    // lap/add_elapsed parents and only runs when the explicit diagnostic
+    // profile flag is set; formal timing runs leave it off.
+    auto maybe_diagnose_fir = [&]() {
+        if (!profile.rx_diagnose_fir_segments)
+            return;
+        if (!(res.cir.ok && res.ns_sfd.ok && res.phr.ok && res.payload.ok))
+            return;
+        const size_t tap_count = res.cir.cir_filter_taps.size();
+        if (tap_count == 0 || tap_count > 64 || res.cir.soft_chip_count == 0)
+            return;
+        const int64_t chip_start =
+            res.timing.preamble_start_sample + static_cast<int64_t>(tap_count) -
+            static_cast<int64_t>(profile.cir_pre_samples) - 1;
+        if (chip_start < 0)
+            return;
+        size_t payload_symbols = 0;
+        if (res.phr.psdu_length > 0) {
+            const size_t psdu_bits =
+                static_cast<size_t>(res.phr.psdu_length) * 8;
+            const size_t num_blocks = (psdu_bits + 329) / 330;
+            payload_symbols = psdu_bits + 48 * num_blocks;
+        }
+        detail::SoftFirSegments segments;
+        if (!detail::diagnose_softchip_fir_segments(
+                scratch.derotated.data(), n, res.cir.cir_filter_taps.data(),
+                tap_count, chip_start, res.cir.soft_chip_count,
+                res.cir.samples_per_chip, res.ns_sfd, res.phr,
+                payload_symbols, scratch.corr, segments))
+            return;
+        res.diag_fir_valid = 1;
+        res.diag_fir_preamble_us = segments.preamble_us;
+        res.diag_fir_sfd_us = segments.sfd_us;
+        res.diag_fir_phr_us = segments.phr_us;
+        res.diag_fir_payload_us = segments.payload_us;
+        res.diag_fir_extra_us = segments.extra_us;
+        res.diag_fir_preamble_chips = static_cast<uint32_t>(
+            segments.preamble_chips);
+        res.diag_fir_sfd_chips = static_cast<uint32_t>(segments.sfd_chips);
+        res.diag_fir_phr_chips = static_cast<uint32_t>(segments.phr_chips);
+        res.diag_fir_payload_chips = static_cast<uint32_t>(
+            segments.payload_chips);
+        res.diag_fir_extra_chips = static_cast<uint32_t>(segments.extra_chips);
+    };
 
     // Stage 1: timing (seed = rel_seed if inside this window, else -1)
     const bool t_ok = stage_timing(rx, n, profile, template_wf, rel_seed,
@@ -2163,21 +2881,38 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         rebase();
         return res;
     }
-    // Stage 2: CFO
-    if (!stage_cfo(rx, n, profile, res.timing, res.cfo, scratch)) {
+    // Stage 2: CFO fit + bootstrap SFD search window rotation (Task A1)
+    if (!fit_cfo(rx, n, profile, res.timing, res.cfo, scratch)) {
         lap(res.stage_cfo_us);
+        res.stage_cfo_fit_us += res.cfo.fit_us;
         res.status = DemodStatus::CfoFailed;
         rebase();
         return res;
     }
+    const auto sfd_seq = gr::uwb::demod::GetSfdSequence(profile.sfd_mode);
+    const size_t sfd_len = sfd_seq.size() * kQm35SamplesPerSymbol;
+    const auto sfd1_range = rxopt::compute_sfd_search_range(
+        n, res.timing, profile.preamble_repetitions, sfd_len,
+        kQm35SamplesPerSymbol);
+    uint64_t rot1_us = 0;
+    uint32_t rk1 = 0;
+    derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, sfd1_range.first,
+                       sfd1_range.second, scratch, rot1_us, rk1);
+    res.cfo.rotate_us = rot1_us;
+    res.cfo.rotation_kernel = rk1;
+    res.stage_cfo_rotated_samples +=
+        (sfd1_range.second > sfd1_range.first ? (sfd1_range.second - sfd1_range.first) : 0);
+    ++res.stage_cfo_rotation_passes;
     lap(res.stage_cfo_us);
+    res.stage_cfo_fit_us += res.cfo.fit_us;
+    res.stage_cfo_rotate_us += rot1_us;
+    res.stage_cfo_rotation_kernels |= (rk1 ? 1u : 0u);
     // Stage 3: bootstrap SFD timing.  Timing acquisition can start several
     // SYNCs late when a weak leading repetition falls below its tracking
     // threshold.  Its 64-point phase train would then spill into the SFD and
     // corrupt a CFO fit, even though the SFD search can recover the true frame
     // origin by testing earlier hypotheses.  Use this first SFD only to anchor
     // the preamble; the final reported CFO is re-fitted below from that anchor.
-    const auto sfd_seq = gr::uwb::demod::GetSfdSequence(profile.sfd_mode);
     const std::complex<float>* sfd_rx =
         scratch.derotated.empty() ? rx : scratch.derotated.data();
     const auto sfd_bootstrap_t0 = std::chrono::steady_clock::now();
@@ -2224,84 +2959,208 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     cfo_anchor_profile.timing_coarse_stride = 1;
     cfo_anchor_profile.timing_max_backtrack_symbols = 0;
     cfo_anchor_profile.timing_track_radius = 8;
+    // Opt-in: the SFD anchor predicts this tail origin to within a few samples;
+    // try ±8 first and fall back to the legacy ±max(256,stride) search below.
+    cfo_anchor_profile.timing_seed_refine_radius =
+        profile.rx_seed_refine_tail ? 8 : 0;
     // MATLAB's per-SYNC floor is 0.20 of the candidate energy.
     cfo_anchor_profile.radar_verification_threshold = 0.20f;
 
+    const int64_t bootstrap_sfd_start = res.sfd.sfd_start_sample;
     const double period_hint = res.timing.measured_period;
-    const int64_t tail_start = res.sfd.sfd_start_sample -
+    const int64_t tail_start = bootstrap_sfd_start -
         static_cast<int64_t>(std::llround(
             static_cast<double>(tail_repetitions) * period_hint));
-    TimingResult tail_timing;
-    const auto sfd_tail_t0 = std::chrono::steady_clock::now();
-    const bool tail_timing_ok = stage_timing(
-        rx, n, cfo_anchor_profile, template_wf, tail_start, tail_timing,
-        scratch);
-    res.stage_sfd_tail_retrack_us = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - sfd_tail_t0).count());
-    if (!tail_timing_ok || tail_timing.detected_peaks != tail_repetitions) {
-        lap(res.stage_sfd_us);
-        res.status = DemodStatus::CfoFailed;
-        rebase();
-        return res;
-    }
-
-    const double tail_period = tail_timing.measured_period;
-    if (!(tail_period > 0.0)) {
-        lap(res.stage_sfd_us);
-        res.status = DemodStatus::CfoFailed;
-        rebase();
-        return res;
-    }
-
-    // Keep the SFD-anchored full-frame grid on the original timing estimate.
-    // The tail peak coordinates themselves remain the CFO fit input; using a
-    // short-tail period fit for the CIR grid can shift the payload chip grid
-    // on otherwise clean captures.
-    const double measured_period = period_hint;
-
-    // Keep the public timing geometry at the full-frame origin.  Only the
-    // tail peaks have matched-filter measurements; leading peaks are generated
-    // from the SFD-anchored grid and are skipped by the CFO fit / CIR warmup.
-    TimingResult cfo_timing;
-    const int64_t full_start = res.sfd.sfd_start_sample -
-        static_cast<int64_t>(std::llround(
-            static_cast<double>(full_repetitions) * measured_period));
-    const size_t tail_first = full_repetitions - tail_repetitions;
     const size_t template_len = template_wf.size();
-    cfo_timing.ok = true;
-    cfo_timing.preamble_start_sample = full_start;
-    cfo_timing.preamble_start_uncropped = full_start;
-    cfo_timing.measured_period = measured_period;
-    cfo_timing.metric = tail_timing.metric;
-    cfo_timing.detected_peaks = full_repetitions;
-    cfo_timing.expected_peaks = full_repetitions;
-    cfo_timing.coarse_search_us = tail_timing.coarse_search_us;
-    cfo_timing.fine_track_us = tail_timing.fine_track_us;
-    cfo_timing.peak_samples.resize(full_repetitions);
-    cfo_timing.peak_metrics.assign(full_repetitions, 0.0f);
-    cfo_timing.peak_corr.assign(
-        full_repetitions, std::complex<float>(0.0f, 0.0f));
-    for (size_t k = 0; k < full_repetitions; ++k) {
-        cfo_timing.peak_samples[k] = full_start +
-            static_cast<int64_t>(std::llround(
-                static_cast<double>(k) * measured_period)) +
-            static_cast<int64_t>(template_len - 1);
-    }
-    for (size_t k = 0; k < tail_repetitions; ++k) {
-        const size_t dst = tail_first + k;
-        cfo_timing.peak_samples[dst] = tail_timing.peak_samples[k];
-        cfo_timing.peak_metrics[dst] = tail_timing.peak_metrics[k];
-        cfo_timing.peak_corr[dst] = tail_timing.peak_corr[k];
-    }
 
-    const auto sfd_cfo_t0 = std::chrono::steady_clock::now();
-    const bool cfo_refit_ok = stage_cfo(rx, n, profile, cfo_timing, res.cfo,
-                                        scratch);
-    res.stage_sfd_cfo_refit_us = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - sfd_cfo_t0).count());
-    if (!cfo_refit_ok) {
+    size_t sec_derotated_hi = 0;
+
+    // Tail re-track + CFO refit.  `seed_radius` is 0 for the legacy wide first
+    // search or 8 for the SFD-anchored narrow experiment.  A failed narrow
+    // search or an incomplete tail train falls back to 0 once inside.
+    auto run_tail_and_cfo_refit = [&](size_t seed_radius,
+                                      TimingResult& tail_timing,
+                                      TimingResult& cfo_timing) -> bool {
+        Qm35825Profile anchor = cfo_anchor_profile;
+        anchor.timing_seed_refine_radius = seed_radius;
+        const auto sfd_tail_t0 = std::chrono::steady_clock::now();
+        bool tail_timing_ok = stage_timing(
+            rx, n, anchor, template_wf, tail_start, tail_timing, scratch);
+        if ((!tail_timing_ok ||
+             tail_timing.detected_peaks != tail_repetitions) &&
+            seed_radius != 0) {
+            const auto retry_t0 = std::chrono::steady_clock::now();
+            anchor.timing_seed_refine_radius = 0;
+            TimingResult retry_timing;
+            const bool retry_ok = stage_timing(
+                rx, n, anchor, template_wf, tail_start, retry_timing, scratch);
+            res.stage_sfd_tail_retrack_fallback_us += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - retry_t0).count());
+            ++res.stage_tail_retrack_fallbacks;
+            if (retry_ok &&
+                retry_timing.detected_peaks == tail_repetitions) {
+                // Keep the narrow-attempt diagnostics visible even though the
+                // legacy retry (radius 0) produced the accepted timing.
+                retry_timing.seed_search_us += tail_timing.seed_search_us;
+                retry_timing.seed_refine_narrow_attempts +=
+                    tail_timing.seed_refine_narrow_attempts;
+                retry_timing.seed_refine_narrow_success +=
+                    tail_timing.seed_refine_narrow_success;
+                retry_timing.seed_refine_fallbacks +=
+                    tail_timing.seed_refine_fallbacks;
+                tail_timing = std::move(retry_timing);
+                tail_timing_ok = true;
+            }
+        }
+        res.stage_sfd_tail_retrack_us += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - sfd_tail_t0).count());
+        if (!tail_timing_ok ||
+            tail_timing.detected_peaks != tail_repetitions)
+            return false;
+        if (!(tail_timing.measured_period > 0.0))
+            return false;
+
+        // Keep the SFD-anchored full-frame grid on the original timing
+        // estimate.  Only the tail peaks have matched-filter measurements;
+        // leading peaks are generated from the SFD-anchored grid.
+        const double measured_period = period_hint;
+        const int64_t full_start = bootstrap_sfd_start -
+            static_cast<int64_t>(std::llround(
+                static_cast<double>(full_repetitions) * measured_period));
+        const size_t tail_first = full_repetitions - tail_repetitions;
+        cfo_timing.ok = true;
+        cfo_timing.preamble_start_sample = full_start;
+        cfo_timing.preamble_start_uncropped = full_start;
+        cfo_timing.measured_period = measured_period;
+        cfo_timing.metric = tail_timing.metric;
+        cfo_timing.detected_peaks = full_repetitions;
+        cfo_timing.expected_peaks = full_repetitions;
+        cfo_timing.coarse_search_us = tail_timing.coarse_search_us;
+        cfo_timing.fine_track_us = tail_timing.fine_track_us;
+        cfo_timing.seed_search_us = tail_timing.seed_search_us;
+        cfo_timing.seed_refine_narrow_attempts =
+            tail_timing.seed_refine_narrow_attempts;
+        cfo_timing.seed_refine_narrow_success =
+            tail_timing.seed_refine_narrow_success;
+        cfo_timing.seed_refine_fallbacks = tail_timing.seed_refine_fallbacks;
+        cfo_timing.peak_samples.resize(full_repetitions);
+        cfo_timing.peak_metrics.assign(full_repetitions, 0.0f);
+        cfo_timing.peak_corr.assign(
+            full_repetitions, std::complex<float>(0.0f, 0.0f));
+        for (size_t k = 0; k < full_repetitions; ++k) {
+            cfo_timing.peak_samples[k] = full_start +
+                static_cast<int64_t>(std::llround(
+                    static_cast<double>(k) * measured_period)) +
+                static_cast<int64_t>(template_len - 1);
+        }
+        for (size_t k = 0; k < tail_repetitions; ++k) {
+            const size_t dst = tail_first + k;
+            cfo_timing.peak_samples[dst] = tail_timing.peak_samples[k];
+            cfo_timing.peak_metrics[dst] = tail_timing.peak_metrics[k];
+            cfo_timing.peak_corr[dst] = tail_timing.peak_corr[k];
+        }
+
+        const auto sfd_cfo_t0 = std::chrono::steady_clock::now();
+        const bool cfo_fit_ok =
+            fit_cfo(rx, n, profile, cfo_timing, res.cfo, scratch);
+        res.stage_cfo_fit_us += res.cfo.fit_us;
+        res.stage_sfd_cfo_refit_us += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - sfd_cfo_t0).count());
+        if (!cfo_fit_ok)
+            return false;
+
+        // Second rotation (Task A1): covers final SFD, CIR (54 SYNCs starting
+        // from 10th), phase estimation, and initial soft-chips / PHR.
+        const size_t sym = kQm35SamplesPerSymbol;
+        const auto final_sfd_range = rxopt::compute_sfd_search_range(
+            n, cfo_timing, full_repetitions, sfd_len, sym);
+        const size_t pre = profile.cir_pre_samples;
+        const size_t post = profile.cir_post_samples;
+        const size_t tap_count = pre + post;
+        const size_t first_rep = profile.cir_skip_initial_repetitions;
+        const size_t rep_count = (profile.cir_repetitions > 0)
+            ? std::min(profile.cir_repetitions,
+                       full_repetitions > first_rep
+                           ? full_repetitions - first_rep
+                           : 0)
+            : 0;
+        const double period = cfo_timing.measured_period > 0.0
+            ? cfo_timing.measured_period
+            : static_cast<double>(sym);
+        const int64_t start = cfo_timing.preamble_start_sample;
+        const int64_t cir_lo = (rep_count > 0)
+            ? start + static_cast<int64_t>(std::llround(
+                          static_cast<double>(first_rep) * period)) -
+                  static_cast<int64_t>(pre)
+            : start;
+
+        const bool on_demand = profile.rx_softchip_on_demand ||
+                               profile.rx_fused_payload_cmf ||
+                               profile.rx_fused_phr_cmf;
+
+        const double nominal_spc = profile.sample_rate / 499.2e6;
+        const bool is_integer_grid = (std::abs(nominal_spc - 2.0) < 1e-6);
+
+        size_t sec_lo = 0;
+        size_t sec_hi = n;
+        if (on_demand && is_integer_grid) {
+            // Second rotation covers final SFD, CIR, phase estimation, and through PHR.
+            // initial_chip_budget(profile) covers SYNC alignment, NS-SFD, and the 21 PHR symbols.
+            const size_t prefix_budget = rxopt::initial_chip_budget(profile);
+            const int64_t spc_i = 2;
+            const int64_t chip_start = start + static_cast<int64_t>(post) - 1;
+            const bool skip_sync_fir =
+                profile.rx_fused_phr_cmf && profile.rx_fused_payload_cmf;
+
+            int64_t req_lo = cir_lo;
+            if (!skip_sync_fir)
+                req_lo = std::min(req_lo, start - static_cast<int64_t>(pre));
+            req_lo = std::min(req_lo, static_cast<int64_t>(final_sfd_range.first));
+            sec_lo = static_cast<size_t>(std::max<int64_t>(0, req_lo));
+
+            int64_t req_hi = chip_start +
+                static_cast<int64_t>(prefix_budget) * spc_i +
+                static_cast<int64_t>(tap_count) + 128;
+            req_hi = std::max(req_hi, static_cast<int64_t>(final_sfd_range.second));
+            sec_hi = static_cast<size_t>(
+                std::min<int64_t>(static_cast<int64_t>(n), req_hi));
+        }
+
+        uint64_t rot2_us = 0;
+        uint32_t rk2 = 0;
+        derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, sec_lo, sec_hi,
+                           scratch, rot2_us, rk2);
+        res.cfo.rotate_us = rot2_us;
+        res.cfo.rotation_kernel = rk2;
+        res.stage_cfo_rotate_us += rot2_us;
+        res.stage_cfo_rotation_kernels |= (rk2 ? 2u : 0u);
+        res.stage_cfo_rotated_samples += (sec_hi > sec_lo ? (sec_hi - sec_lo) : 0);
+        ++res.stage_cfo_rotation_passes;
+        res.stage_sfd_cfo_refit_us += rot2_us;
+        sec_derotated_hi = sec_hi;
+        return true;
+    };
+
+    // Final full-rate SFD verification on the current CFO compensation.
+    auto run_final_sfd = [&]() -> bool {
+        sfd_rx = scratch.derotated.empty() ? rx : scratch.derotated.data();
+        const auto sfd_final_t0 = std::chrono::steady_clock::now();
+        const bool ok = stage_sfd(
+            sfd_rx, n, profile, res.timing, sfd_seq, template_wf,
+            res.sfd, scratch);
+        res.stage_sfd_final_us += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - sfd_final_t0).count());
+        return ok;
+    };
+
+    TimingResult tail_timing;
+    TimingResult cfo_timing;
+    const size_t first_seed_radius = profile.rx_seed_refine_tail ? 8 : 0;
+    if (!run_tail_and_cfo_refit(first_seed_radius, tail_timing, cfo_timing)) {
         lap(res.stage_sfd_us);
         res.status = DemodStatus::CfoFailed;
         rebase();
@@ -2309,20 +3168,31 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     }
     res.timing = std::move(cfo_timing);
 
-    // Restore the full-preamble profile for the final SFD verification.
-    cfo_anchor_profile = profile;
-
     // Re-run SFD on the final MATLAB-aligned CFO compensation.  This removes
     // any bootstrap-CFO bias from the SFD/CIR path while retaining the same
     // full-rate refinement contract as MATLAB refineTimingWithNsSfd.
-    sfd_rx = scratch.derotated.empty() ? rx : scratch.derotated.data();
-    const auto sfd_final_t0 = std::chrono::steady_clock::now();
-    const bool final_sfd_ok = stage_sfd(
-        sfd_rx, n, cfo_anchor_profile, res.timing, sfd_seq, template_wf,
-        res.sfd, scratch);
-    res.stage_sfd_final_us = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - sfd_final_t0).count());
+    bool final_sfd_ok = run_final_sfd();
+    if (!final_sfd_ok && profile.rx_seed_refine_tail) {
+        // The narrow tail seed can pick a wrong local peak and still pass the
+        // per-SYNC threshold.  On a final-SFD/period inconsistency, retry the
+        // complete tail -> CFO refit -> final SFD chain with the legacy radius.
+        ++res.stage_tail_retrack_fallbacks;
+        TimingResult retry_tail;
+        TimingResult retry_cfo;
+        if (run_tail_and_cfo_refit(0, retry_tail, retry_cfo)) {
+            // Preserve the first (narrow) chain's seed diagnostics: the
+            // radius-0 retry reports zero attempts of its own.
+            retry_cfo.seed_search_us += res.timing.seed_search_us;
+            retry_cfo.seed_refine_narrow_attempts +=
+                res.timing.seed_refine_narrow_attempts;
+            retry_cfo.seed_refine_narrow_success +=
+                res.timing.seed_refine_narrow_success;
+            retry_cfo.seed_refine_fallbacks +=
+                res.timing.seed_refine_fallbacks;
+            res.timing = std::move(retry_cfo);
+            final_sfd_ok = run_final_sfd();
+        }
+    }
     res.sfd_final_windows = res.sfd.search_windows;
     res.sfd_final_coarse_correlations = res.sfd.coarse_correlations;
     res.sfd_final_fine_correlations = res.sfd.fine_correlations;
@@ -2354,6 +3224,313 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     // Stage 4: CIR + soft chips on the CFO-compensated frame.
     const int8_t* pc = GetPreambleCode(profile.code_index);
     std::vector<int8_t> pcode(pc, pc + kQm35CodeLength);
+    const auto nsfd_seq = gr::uwb::demod::GetSfdSequence(profile.sfd_mode);
+    const bool on_demand_path = profile.rx_softchip_on_demand ||
+                                profile.rx_fused_payload_cmf ||
+                                profile.rx_fused_phr_cmf;
+    if (on_demand_path) {
+        // Experimental two-phase path: generate only the prefix required by
+        // the active decoder.  Payload fusion needs SYNC/SFD/PHR soft chips;
+        // PHR fusion stops at the NS-SFD end because PHR is read from raw IQ.
+        // Any unsupported grid or failure retries the complete legacy path once
+        // and records the fallback.  No injected/sidecar length is used.
+        const bool phr_fusion_requested = profile.rx_fused_phr_cmf;
+        const bool phr_fusion_cfg_supported =
+            profile.rx_fused_payload_cmf &&
+            profile.cir_rake_top_k == 0 &&
+            profile.cir_soft_chip_mode != CirSoftChipMode::Rake &&
+            profile.cir_soft_chip_mode != CirSoftChipMode::Bypass;
+        const size_t prefix_budget =
+            phr_fusion_requested ? rxopt::fused_phr_prefix_budget(profile)
+                                 : rxopt::initial_chip_budget(profile);
+        bool ok = stage_cir_softchips(scratch.derotated.data(), n, profile,
+                                      res.timing, pcode, res.cir, scratch,
+                                      prefix_budget, 0);
+        lap(res.stage_cir_us);
+        const size_t prefix_chips = res.cir.soft_chip_count;
+        if (ok) {
+            ok = stage_ns_sfd(scratch.soft_chips, profile, nsfd_seq,
+                              kQm35ChipsPerSymbol, res.ns_sfd, scratch);
+            lap(res.stage_ns_sfd_us);
+        }
+        bool phr_fused_used = false;
+        if (ok) {
+            if (phr_fusion_requested) {
+                const bool supported =
+                    phr_fusion_cfg_supported &&
+                    !res.cir.cir_filter_taps.empty() &&
+                    std::abs(res.cir.samples_per_chip -
+                             static_cast<double>(rxfusion::kSamplesPerChip)) <=
+                        1e-9 &&
+                    scratch.softchip.prepared;
+                if (supported) {
+                    ++res.stage_phr_fused_attempts;
+                    uint64_t phr_template_us = 0;
+                    uint64_t phr_correlate_us = 0;
+                    uint64_t phr_decode_us = 0;
+                    uint64_t phr_decode_ns = 0;
+                    size_t phr_symbols = 0;
+                    const bool fused_ok = stage_phr_fused_cmf(
+                        scratch.derotated.data(), n, profile, res.timing,
+                        res.cir, scratch.soft_chips, res.ns_sfd, res.phr,
+                        scratch, phr_template_us, phr_correlate_us,
+                        phr_decode_us, phr_decode_ns, phr_symbols);
+                    res.stage_phr_fused_template_us += phr_template_us;
+                    res.stage_phr_fused_correlate_us += phr_correlate_us;
+                    res.stage_phr_fused_decode_us += phr_decode_us;
+                    res.stage_phr_fused_decode_ns += phr_decode_ns;
+                    res.stage_phr_fused_symbols =
+                        static_cast<uint32_t>(phr_symbols);
+                    lap(res.stage_phr_us);
+                    // A SECDED correction needs the full-stream tail-energy
+                    // guard.  The reduced prefix cannot reproduce it, so keep
+                    // the existing conservative full-stream retry.
+                    if (fused_ok && res.phr.ok &&
+                        !res.phr.secded_corrected) {
+                        phr_fused_used = true;
+                    } else {
+                        ++res.stage_phr_fused_fallbacks;
+                        ok = false;
+                    }
+                } else {
+                    // The explicit option only supports the full integer-grid
+                    // CMF.  Do not mix a fused PHR request with the legacy PHR
+                    // kernel; let the single full-stream retry below decide.
+                    ok = false;
+                }
+            } else {
+                ok = stage_phr(scratch.soft_chips, profile, res.ns_sfd,
+                               kQm35ChipsPerSymbol, res.phr, scratch);
+                lap(res.stage_phr_us);
+            }
+        }
+        if (ok && !phr_fused_used && res.phr.secded_corrected) {
+            // The legacy PHR path can inspect the full-range tail energy when
+            // SECDED corrected a longer length.  The prefix cannot, so retry
+            // the complete stream rather than silently changing that decision.
+            ok = false;
+        }
+        // Experimental fused payload path: after the validated PHR, produce the
+        // four BPM metrics directly from the CFO-compensated IQ instead of
+        // extending the soft-chip stream to the payload range.  Only the full
+        // integer-grid CMF is supported; fractional SFO, RAKE and bypass keep
+        // the legacy on-demand extension.  Any failure retries the complete
+        // legacy stream once through the existing fallback block below.
+        if (ok && profile.rx_fused_payload_cmf) {
+            const bool fused_supported =
+                !res.cir.cir_filter_taps.empty() &&
+                std::abs(res.cir.samples_per_chip -
+                         static_cast<double>(rxfusion::kSamplesPerChip)) <=
+                    1e-9 &&
+                profile.cir_rake_top_k == 0 &&
+                profile.cir_soft_chip_mode != CirSoftChipMode::Rake &&
+                profile.cir_soft_chip_mode != CirSoftChipMode::Bypass &&
+                scratch.softchip.prepared;
+            if (fused_supported) {
+                // Compensate payload interval with refit CFO (Task A1)
+                const size_t psdu_bits =
+                    static_cast<size_t>(res.phr.psdu_length) * 8;
+                const size_t num_blocks = (psdu_bits + 329) / 330;
+                const size_t nsym = psdu_bits + 48 * num_blocks;
+                const int64_t phr_start = res.ns_sfd.sfd_end_chip + 1;
+                const int64_t payload_start = phr_start + 21 * 512;
+                const int64_t chip_start =
+                    res.timing.preamble_start_sample +
+                    static_cast<int64_t>(res.cir.cir_filter_taps.size()) -
+                    static_cast<int64_t>(profile.cir_pre_samples) - 1;
+                const int64_t base0 = chip_start + payload_start * 2 -
+                    static_cast<int64_t>(res.cir.cir_filter_taps.size()) + 1;
+                const int64_t last_chip =
+                    static_cast<int64_t>(nsym - 1) * 64 + 40;
+                const size_t len =
+                    res.cir.cir_filter_taps.size() + 2 * (8 - 1);
+                const int64_t last_sample =
+                    base0 + last_chip * 2 + static_cast<int64_t>(len);
+                const size_t pay_lo = std::min(
+                    sec_derotated_hi,
+                    static_cast<size_t>(std::max<int64_t>(0, base0)));
+                const size_t pay_hi = static_cast<size_t>(
+                    std::min<int64_t>(static_cast<int64_t>(n), last_sample + 64));
+                if (pay_lo < pay_hi) {
+                    uint64_t rot_pay_us = 0;
+                    uint32_t rk_pay = 0;
+                    derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, pay_lo,
+                                       pay_hi, scratch, rot_pay_us, rk_pay);
+                    res.stage_cfo_rotate_us += rot_pay_us;
+                    res.stage_cfo_rotated_samples += (pay_hi - pay_lo);
+                    ++res.stage_cfo_rotation_passes;
+                    sec_derotated_hi = std::max(sec_derotated_hi, pay_hi);
+                }
+
+                ++res.stage_fused_attempts;
+                uint64_t fused_template_us = 0;
+                uint64_t fused_correlate_us = 0;
+                uint64_t fused_decode_us = 0;
+                uint64_t fused_decode_ns = 0;
+                size_t fused_symbols = 0;
+                const std::vector<int8_t>* cached_g0 =
+                    (phr_fused_used && scratch.fused_phr.decisions_valid)
+                        ? &scratch.fused_phr.g0
+                        : nullptr;
+                const std::vector<int8_t>* cached_g1 =
+                    (phr_fused_used && scratch.fused_phr.decisions_valid)
+                        ? &scratch.fused_phr.g1
+                        : nullptr;
+                const bool fused_ok = stage_payload_fused_cmf(
+                    scratch.derotated.data(), n, profile, res.timing, res.cir,
+                    scratch.soft_chips, res.ns_sfd, res.phr, res.payload,
+                    scratch, fused_template_us, fused_correlate_us,
+                    fused_decode_us, fused_decode_ns, fused_symbols,
+                    cached_g0, cached_g1);
+                res.stage_fused_template_us += fused_template_us;
+                res.stage_fused_correlate_us += fused_correlate_us;
+                res.stage_fused_decode_us += fused_decode_us;
+                res.stage_fused_decode_ns += fused_decode_ns;
+                res.stage_fused_symbols = static_cast<uint32_t>(fused_symbols);
+                lap(res.stage_payload_us);
+                if (fused_ok && res.payload.fcs_pass) {
+                    res.status = DemodStatus::Success;
+                    maybe_diagnose_fir();
+                    rebase();
+                    return res;
+                }
+                ++res.stage_fused_fallbacks;
+                ok = false;
+            }
+        }
+        if (ok) {
+            const size_t final_budget = rxopt::final_chip_budget(
+                profile, res.ns_sfd.sfd_end_chip, res.phr.psdu_length);
+            if (final_budget > prefix_chips) {
+                // Compensate extension interval with refit CFO (Task A1)
+                const int64_t chip_start =
+                    res.timing.preamble_start_sample +
+                    static_cast<int64_t>(res.cir.cir_filter_taps.size()) -
+                    static_cast<int64_t>(profile.cir_pre_samples) - 1;
+                const int64_t last_pos =
+                    chip_start + static_cast<int64_t>(final_budget) * 2 +
+                    static_cast<int64_t>(res.cir.cir_filter_taps.size()) + 64;
+                const size_t pay_lo = sec_derotated_hi;
+                const size_t pay_hi = static_cast<size_t>(
+                    std::min<int64_t>(static_cast<int64_t>(n), last_pos));
+                if (pay_lo < pay_hi) {
+                    uint64_t rot_pay_us = 0;
+                    uint32_t rk_pay = 0;
+                    derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, pay_lo,
+                                       pay_hi, scratch, rot_pay_us, rk_pay);
+                    res.stage_cfo_rotate_us += rot_pay_us;
+                    res.stage_cfo_rotated_samples += (pay_hi - pay_lo);
+                    ++res.stage_cfo_rotation_passes;
+                    sec_derotated_hi = std::max(sec_derotated_hi, pay_hi);
+                }
+
+                CirResult ext;
+                const bool ext_ok = stage_cir_softchips(
+                    scratch.derotated.data(), n, profile, res.timing, pcode,
+                    ext, scratch, final_budget, prefix_chips);
+                add_elapsed(res.stage_cir_us);
+                if (ext_ok) {
+                    res.cir.soft_extend_us =
+                        ext.soft_fir_us + ext.postprocess_us;
+                    res.cir.soft_fir_us += ext.soft_fir_us;
+                    res.cir.postprocess_us += ext.postprocess_us;
+                    // The extension re-runs the deterministic CIR estimate;
+                    // count it so cir_estimate_us is the true total.
+                    res.cir.cir_estimate_us += ext.cir_estimate_us;
+                    res.cir.soft_chip_count = ext.soft_chip_count;
+                    res.cir.extended_chip_count = ext.extended_chip_count;
+                    res.cir.on_demand_extended = ext.on_demand_extended;
+                    res.cir.samples_per_chip = ext.samples_per_chip;
+                } else {
+                    ok = false;
+                }
+            }
+        }
+        if (ok) {
+            ok = stage_payload_fcs(scratch.soft_chips, profile, res.phr,
+                                   res.ns_sfd, kQm35ChipsPerSymbol,
+                                   res.payload, scratch);
+            lap(res.stage_payload_us);
+            if (ok && !res.payload.fcs_pass)
+                ok = false;
+        }
+        if (!ok) {
+            // Single full-stream retry on the legacy path.  Measure it as a
+            // separate diagnostic bucket so the first-pass stage timings are
+            // not silently replaced or double-counted.
+            ++res.stage_softchip_fallbacks;
+            // Fallback: compensate full window on legacy retry (Task A1).
+            // Record fallback_t0 before rotation so entire fallback cost is
+            // captured in stage_softchip_fallback_us and stage_total_us.
+            const auto fallback_t0 = std::chrono::steady_clock::now();
+            uint64_t rot_fb_us = 0;
+            uint32_t rk_fb = 0;
+            derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, 0, n, scratch,
+                               rot_fb_us, rk_fb);
+            res.stage_cfo_rotate_us += rot_fb_us;
+            res.stage_cfo_rotated_samples += n;
+            ++res.stage_cfo_rotation_passes;
+            sec_derotated_hi = n;
+            CirResult full_cir;
+            NsSfdResult full_ns;
+            PhrResult full_phr;
+            PayloadResult full_payload;
+            const bool full_cir_ok = stage_cir_softchips(
+                scratch.derotated.data(), n, profile, res.timing, pcode,
+                full_cir, scratch);
+            const bool full_ns_ok =
+                full_cir_ok &&
+                stage_ns_sfd(scratch.soft_chips, profile, nsfd_seq,
+                             kQm35ChipsPerSymbol, full_ns, scratch);
+            const bool full_phr_ok =
+                full_ns_ok &&
+                stage_phr(scratch.soft_chips, profile, full_ns,
+                          kQm35ChipsPerSymbol, full_phr, scratch);
+            const bool full_payload_ok =
+                full_phr_ok &&
+                stage_payload_fcs(scratch.soft_chips, profile, full_phr,
+                                  full_ns, kQm35ChipsPerSymbol, full_payload,
+                                  scratch);
+            res.stage_softchip_fallback_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - fallback_t0).count());
+            res.stage_total_us += res.stage_softchip_fallback_us;
+            t_prev = std::chrono::steady_clock::now();
+            // Publish the fallback attempt even when it fails: the status
+            // below is decided by this legacy run, so the reported CIR /
+            // NS-SFD / PHR / payload must describe the same run.  Otherwise a
+            // short prefix result is paired with a full-stream failure status.
+            res.cir = std::move(full_cir);
+            res.cir.on_demand_fallbacks = 1;
+            res.ns_sfd = std::move(full_ns);
+            res.phr = std::move(full_phr);
+            res.payload = std::move(full_payload);
+            if (full_cir_ok && full_ns_ok && full_phr_ok && full_payload_ok) {
+                res.status = (res.payload.ok && res.payload.fcs_pass)
+                                 ? DemodStatus::Success
+                                 : DemodStatus::FcsFailed;
+                maybe_diagnose_fir();
+                rebase();
+                return res;
+            }
+            if (!full_cir_ok)
+                res.status = DemodStatus::CirFailed;
+            else if (!full_ns_ok)
+                res.status = DemodStatus::SfdFailed;
+            else if (!full_phr_ok)
+                res.status = DemodStatus::PhrFailed;
+            else
+                res.status = DemodStatus::PayloadFailed;
+            rebase();
+            return res;
+        }
+        res.status = (res.payload.ok && res.payload.fcs_pass)
+                         ? DemodStatus::Success
+                         : DemodStatus::FcsFailed;
+        maybe_diagnose_fir();
+        rebase();
+        return res;
+    }
     if (!stage_cir_softchips(scratch.derotated.data(), n, profile, res.timing,
                              pcode, res.cir, scratch)) {
         lap(res.stage_cir_us);
@@ -2363,7 +3540,6 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     }
     lap(res.stage_cir_us);
     // Stage 5: NS-SFD location in the soft-chip stream.
-    const auto nsfd_seq = gr::uwb::demod::GetSfdSequence(profile.sfd_mode);
     if (!stage_ns_sfd(scratch.soft_chips, profile, nsfd_seq, kQm35ChipsPerSymbol,
                       res.ns_sfd, scratch)) {
         lap(res.stage_ns_sfd_us);
@@ -2393,6 +3569,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     res.status = (res.payload.ok && res.payload.fcs_pass)
                      ? DemodStatus::Success
                      : DemodStatus::FcsFailed;
+    maybe_diagnose_fir();
     rebase();
     return res;
 }
@@ -2446,7 +3623,9 @@ bool stage_cir_softchips(const std::complex<float>* rx,
                          const TimingResult& timing,
                          const std::vector<int8_t>& preamble_code,
                          CirResult& out,
-                         DemodScratch& scratch);
+                         DemodScratch& scratch,
+                         size_t max_chips,
+                         size_t begin_chip);
 
 // ---------------------------------------------------------------------------
 // Stage 5 — NS-SFD location in the soft-chip stream.

@@ -1,0 +1,336 @@
+{
+  "schema": "fullpacket-delivery-summary/1",
+  "functional_code_sha": "fab0f680e2e88c95992fe536f834023e2b70360d",
+  "timing_code_sha": "5dd2cfb1e191bddd17b767047c949965a9ec3962",
+  "measurement_library": [
+    {
+      "path": "/home/junqima/workspace/uwb-gnuradio/.worktrees/sic-fullpacket-compare/gr-uwb/build-sic-fullpacket/lib/libgnuradio-uwb.so.1.0.0.0",
+      "sha256": "bcba46a84664265a51909e6d08641d6c7ea3ffab876e95e821a87f832bd329e0"
+    }
+  ],
+  "formal_timing": [
+    {
+      "cell": "sync_base",
+      "round": "round1",
+      "mode": "full",
+      "source_n": 16,
+      "observations": 1024,
+      "estimate_mean_ms": 1.7388301992187498,
+      "comm_demod_mean_ms": 4.016547827148438,
+      "validate_mean_ms": 0.17628579687499998,
+      "tx_mean_ms": 0.301002509765625,
+      "channel_mean_ms": 9.8123867421875,
+      "subtract_mean_ms": 0.1782746953125,
+      "sic_total_mean_ms": 16.224864368164063,
+      "cir_mean_ms": 0.29091491894531246,
+      "sensing_demod_mean_ms": 4.06912161328125,
+      "service_mean_ms": 20.584900900390625,
+      "thread_cpu_mean_ms": 20.596613142578125,
+      "sic_p99_ms": 23.93899373
+    },
+    {
+      "cell": "sync_base",
+      "round": "round1",
+      "mode": "preamble",
+      "source_n": 16,
+      "observations": 1024,
+      "estimate_mean_ms": 1.7393777646484376,
+      "comm_demod_mean_ms": 0.0,
+      "validate_mean_ms": 0.0,
+      "tx_mean_ms": 0.0,
+      "channel_mean_ms": 0.4335576171875,
+      "subtract_mean_ms": 0.09641714550781251,
+      "sic_total_mean_ms": 2.2693525273437505,
+      "cir_mean_ms": 0.27428853124999997,
+      "sensing_demod_mean_ms": 2.5509561748046874,
+      "service_mean_ms": 5.094597233398438,
+      "thread_cpu_mean_ms": 5.098177272460937,
+      "sic_p99_ms": 3.1440550999999997
+    },
+    {
+      "cell": "sync_base",
+      "round": "round2",
+      "mode": "full",
+      "source_n": 16,
+      "observations": 1024,
+      "estimate_mean_ms": 2.0118405615234374,
+      "comm_demod_mean_ms": 4.50155399609375,
+      "validate_mean_ms": 0.2029601943359375,
+      "tx_mean_ms": 0.3400579033203125,
+      "channel_mean_ms": 11.059527526367187,
+      "subtract_mean_ms": 0.204539189453125,
+      "sic_total_mean_ms": 18.32361352246094,
+      "cir_mean_ms": 0.3171405966796875,
+      "sensing_demod_mean_ms": 4.569561820312501,
+      "service_mean_ms": 23.210315939453125,
+      "thread_cpu_mean_ms": 23.235556745117183,
+      "sic_p99_ms": 29.733917440000003
+    },
+    {
+      "cell": "sync_base",
+      "round": "round2",
+      "mode": "preamble",
+      "source_n": 16,
+      "observations": 1024,
+      "estimate_mean_ms": 1.9866107783203126,
+      "comm_demod_mean_ms": 0.0,
+      "validate_mean_ms": 0.0,
+      "tx_mean_ms": 0.0,
+      "channel_mean_ms": 0.5004267578125,
+      "subtract_mean_ms": 0.11814311523437498,
+      "sic_total_mean_ms": 2.6051806513671876,
+      "cir_mean_ms": 0.3072976689453125,
+      "sensing_demod_mean_ms": 2.883298162109375,
+      "service_mean_ms": 5.795776482421876,
+      "thread_cpu_mean_ms": 5.808283459960938,
+      "sic_p99_ms": 6.17387736
+    },
+    {
+      "cell": "payload_base",
+      "round": "round1",
+      "mode": "full",
+      "source_n": 16,
+      "observations": 1024,
+      "estimate_mean_ms": 2.0727810732421874,
+      "comm_demod_mean_ms": 7.042829889648438,
+      "validate_mean_ms": 0.379246814453125,
+      "tx_mean_ms": 0.3564649892578125,
+      "channel_mean_ms": 11.758141828125002,
+      "subtract_mean_ms": 0.22945932812499997,
+      "sic_total_mean_ms": 21.840884592773435,
+      "cir_mean_ms": 0.33383478515625,
+      "sensing_demod_mean_ms": 5.018354372070313,
+      "service_mean_ms": 27.19307375,
+      "thread_cpu_mean_ms": 27.214996063476562,
+      "sic_p99_ms": 31.80367562
+    },
+    {
+      "cell": "payload_base",
+      "round": "round1",
+      "mode": "preamble",
+      "source_n": 16,
+      "observations": 1024,
+      "estimate_mean_ms": 2.1187947958984377,
+      "comm_demod_mean_ms": 0.0,
+      "validate_mean_ms": 0.0,
+      "tx_mean_ms": 0.0,
+      "channel_mean_ms": 0.540890625,
+      "subtract_mean_ms": 0.19132834765625,
+      "sic_total_mean_ms": 2.8510137685546875,
+      "cir_mean_ms": 0.34736559179687504,
+      "sensing_demod_mean_ms": 0.275377390625,
+      "service_mean_ms": 3.473756750976562,
+      "thread_cpu_mean_ms": 3.4809109589843747,
+      "sic_p99_ms": 6.531978599999998
+    },
+    {
+      "cell": "payload_base",
+      "round": "round2",
+      "mode": "full",
+      "source_n": 16,
+      "observations": 1024,
+      "estimate_mean_ms": 2.066648428710937,
+      "comm_demod_mean_ms": 7.028049,
+      "validate_mean_ms": 0.3703186484375,
+      "tx_mean_ms": 0.3527641201171875,
+      "channel_mean_ms": 11.797000110351563,
+      "subtract_mean_ms": 0.20919781835937498,
+      "sic_total_mean_ms": 21.82604760253906,
+      "cir_mean_ms": 0.35876516796875,
+      "sensing_demod_mean_ms": 5.095807004882812,
+      "service_mean_ms": 27.280619775390626,
+      "thread_cpu_mean_ms": 27.304209443359373,
+      "sic_p99_ms": 32.121033919999995
+    },
+    {
+      "cell": "payload_base",
+      "round": "round2",
+      "mode": "preamble",
+      "source_n": 16,
+      "observations": 1024,
+      "estimate_mean_ms": 2.1445597890625,
+      "comm_demod_mean_ms": 0.0,
+      "validate_mean_ms": 0.0,
+      "tx_mean_ms": 0.0,
+      "channel_mean_ms": 0.539048828125,
+      "subtract_mean_ms": 0.2031946748046875,
+      "sic_total_mean_ms": 2.8868032919921873,
+      "cir_mean_ms": 0.34292947167968746,
+      "sensing_demod_mean_ms": 0.27100889941406253,
+      "service_mean_ms": 3.500741663085937,
+      "thread_cpu_mean_ms": 3.5064999609375,
+      "sic_p99_ms": 7.056391749999998
+    }
+  ],
+  "representative": [
+    {
+      "cell": "sync_base",
+      "n": 16,
+      "comm_exact": 16,
+      "raw_sensing_exact": 0,
+      "clean_sensing_exact": 16,
+      "preamble_sensing_exact": 0,
+      "full_sensing_exact": 16,
+      "cir_recovery_db": {
+        "full": 33.45493535582946,
+        "preamble": 33.45493538757107
+      }
+    },
+    {
+      "cell": "payload_base",
+      "n": 16,
+      "comm_exact": 16,
+      "raw_sensing_exact": 0,
+      "clean_sensing_exact": 16,
+      "preamble_sensing_exact": 0,
+      "full_sensing_exact": 16,
+      "cir_recovery_db": {
+        "full": 52.17555111490306,
+        "preamble": 0.0
+      }
+    },
+    {
+      "cell": "payload_len16",
+      "n": 16,
+      "comm_exact": 16,
+      "raw_sensing_exact": 0,
+      "clean_sensing_exact": 16,
+      "preamble_sensing_exact": 0,
+      "full_sensing_exact": 16,
+      "cir_recovery_db": {
+        "full": 52.77440568936335,
+        "preamble": 0.0
+      }
+    },
+    {
+      "cell": "payload_len127",
+      "n": 16,
+      "comm_exact": 16,
+      "raw_sensing_exact": 0,
+      "clean_sensing_exact": 16,
+      "preamble_sensing_exact": 0,
+      "full_sensing_exact": 16,
+      "cir_recovery_db": {
+        "full": 47.43485316185097,
+        "preamble": 0.0
+      }
+    },
+    {
+      "cell": "payload_snr8",
+      "n": 16,
+      "comm_exact": 16,
+      "raw_sensing_exact": 0,
+      "clean_sensing_exact": 16,
+      "preamble_sensing_exact": 0,
+      "full_sensing_exact": 16,
+      "cir_recovery_db": {
+        "full": 30.194833437069395,
+        "preamble": 0.0
+      }
+    },
+    {
+      "cell": "payload_isr0",
+      "n": 16,
+      "comm_exact": 16,
+      "raw_sensing_exact": 16,
+      "clean_sensing_exact": 16,
+      "preamble_sensing_exact": 16,
+      "full_sensing_exact": 16,
+      "cir_recovery_db": {
+        "full": 42.17872003007645,
+        "preamble": 0.0
+      }
+    },
+    {
+      "cell": "payload_isr20",
+      "n": 16,
+      "comm_exact": 16,
+      "raw_sensing_exact": 0,
+      "clean_sensing_exact": 16,
+      "preamble_sensing_exact": 0,
+      "full_sensing_exact": 16,
+      "cir_recovery_db": {
+        "full": 62.174426116046945,
+        "preamble": 0.0
+      }
+    },
+    {
+      "cell": "payload_cfo_m50k",
+      "n": 16,
+      "comm_exact": 16,
+      "raw_sensing_exact": 0,
+      "clean_sensing_exact": 16,
+      "preamble_sensing_exact": 0,
+      "full_sensing_exact": 16,
+      "cir_recovery_db": {
+        "full": 51.90665442531041,
+        "preamble": 0.0
+      }
+    },
+    {
+      "cell": "payload_cfo_p50k",
+      "n": 16,
+      "comm_exact": 16,
+      "raw_sensing_exact": 0,
+      "clean_sensing_exact": 16,
+      "preamble_sensing_exact": 0,
+      "full_sensing_exact": 16,
+      "cir_recovery_db": {
+        "full": 52.878719996985225,
+        "preamble": 0.0
+      }
+    },
+    {
+      "cell": "payload_four_frac",
+      "n": 16,
+      "comm_exact": 16,
+      "raw_sensing_exact": 0,
+      "clean_sensing_exact": 16,
+      "preamble_sensing_exact": 0,
+      "full_sensing_exact": 16,
+      "cir_recovery_db": {
+        "full": 27.94809530358682,
+        "preamble": 0.0
+      }
+    }
+  ],
+  "paced": [
+    {
+      "cell": "payload_base",
+      "mode": "full",
+      "submitted": 2000,
+      "completed": 425,
+      "rejected": 1575,
+      "result_p99_ms": 79.79288876307712,
+      "queue_mean_ms": 44.59996632705883
+    },
+    {
+      "cell": "payload_base",
+      "mode": "preamble",
+      "submitted": 2000,
+      "completed": 2000,
+      "rejected": 0,
+      "result_p99_ms": 5.474199303076285,
+      "queue_mean_ms": 0.060985122000001585
+    },
+    {
+      "cell": "sync_base",
+      "mode": "full",
+      "submitted": 2000,
+      "completed": 486,
+      "rejected": 1514,
+      "result_p99_ms": 77.562035423077,
+      "queue_mean_ms": 38.690958927983544
+    },
+    {
+      "cell": "sync_base",
+      "mode": "preamble",
+      "submitted": 2000,
+      "completed": 1891,
+      "rejected": 109,
+      "result_p99_ms": 22.03844792307713,
+      "queue_mean_ms": 6.957369951348502
+    }
+  ],
+  "verifier_sha256": "9720e8fc32628db8652c5de73d40a21180e3b430f5aff1a5e36181c8a4dffa6d"
+}
