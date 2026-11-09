@@ -456,7 +456,7 @@ bool reconstruct_and_subtract_unified(
             result.committed = true;
             result.reason = "committed_preamble_discrete";
             result.level = SicCancellationLevel::L1_Preamble;
-            result.cancelled_fields = SicKnownFields::Preamble;
+            result.cancelled_fields = known_fields;
             result.support_lo = dres.support_lo;
             result.support_hi = dres.support_hi;
             result.sub_lo = dres.sub_lo;
@@ -541,29 +541,74 @@ bool sic_process_unified(
         return true;
     }
 
-    // 2. Cancellation Policy & Comm RX Demodulation
+    // 2. Cancellation Policy & Comm RX Demodulation (SYNC + SFD for both PreambleOnly and FullPacket)
     SicCancellationLevel target_level = SicCancellationLevel::L0_Bypass;
     SicKnownFields target_fields = SicKnownFields::None;
+    const std::complex<float>* s_known_ptr = templates.preamble;
+    size_t s_known_len = templates.preamble_len;
+
+    std::vector<std::complex<float>> sync_vec(templates.sync, templates.sync + templates.sync_len);
+
+    auto demod_prof = demod::Qm35825Profile::Default();
+    demod_prof.code_index = cfg.comm_code;
+    demod_prof.timing_search_margin = 256;
+    demod_prof.timing_coarse_stride = 1;
+    demod_prof.sfd_mode = cfg.sfd_mode;
+    demod_prof.rx_fast_sfd = cfg.rx_fast_sfd;
+    demod_prof.rx_fast_cfo_rotation = cfg.rx_fast_cfo;
+    demod_prof.rx_seed_refine_tail = cfg.rx_seed_refine_tail;
+    demod_prof.rx_softchip_on_demand = cfg.rx_softchip_on_demand;
+    demod_prof.rx_fused_payload_cmf = cfg.rx_fused_payload_cmf;
+    demod_prof.rx_fused_phr_cmf = cfg.rx_fused_phr_cmf;
 
     if (cfg.policy == SicPolicy::PreambleOnly) {
-        target_level = SicCancellationLevel::L1_Preamble;
-        target_fields = SicKnownFields::Preamble;
+        // Preamble-only: run the exact same SYNC + SFD detection flow as full packet!
+        // Early terminate right after Final SFD verification to avoid CIR/PHR/payload overhead.
+        demod_prof.rx_stop_after_sfd = true;
+        const auto t_rx = Clock::now();
+        demod::DemodResult decoded = demod::core::demodulate_one(
+            y, n, demod_prof, 0, channel.q, 0, sync_vec, scratch.demod);
+        result.timings.comm_rx_us = us(t_rx);
+        result.timings.rx_timing_us = static_cast<double>(decoded.stage_timing_us);
+        result.timings.rx_cfo_us = static_cast<double>(decoded.stage_cfo_us);
+        result.timings.rx_sfd_us = static_cast<double>(decoded.stage_sfd_us);
+
+        result.comm_detected = (decoded.status != demod::DemodStatus::TimingFailed &&
+                                decoded.status != demod::DemodStatus::InvalidInput);
+
+        const bool sfd_ok = (decoded.status == demod::DemodStatus::Success && decoded.sfd.ok);
+        if (sfd_ok) {
+            // High-precision SYNC+SFD preamble model
+            target_level = SicCancellationLevel::L1_Preamble;
+            target_fields = SicKnownFields::PreambleSfd;
+
+            // Generate the exact SYNC + SFD known waveform
+            mod::HrpModConfig modcfg = cfg.to_hrp_mod_config();
+            size_t n_prefix = 0;
+            if (mod::modulate_prefix_waveform(modcfg, scratch.modulator,
+                                              scratch.work_waveform.data(),
+                                              scratch.work_waveform.size(),
+                                              n_prefix) && n_prefix > 0) {
+                s_known_ptr = scratch.work_waveform.data();
+                s_known_len = n_prefix;
+            }
+        } else {
+            // SFD detection failed on preamble-only
+            if (result.out != y) {
+                std::copy(y, y + n, result.out);
+            }
+            if (result.i_hat) {
+                std::fill(result.i_hat, result.i_hat + n, std::complex<float>(0.f, 0.f));
+            }
+            result.reason = "sfd_detect_failed";
+            result.level = SicCancellationLevel::L0_Bypass;
+            result.cancelled_fields = SicKnownFields::None;
+            result.timings.core_total_us = us(t_core_start);
+            return true;
+        }
     } else {
         // FullPacket or AutoFallback: attempt fast comm demodulation
-        std::vector<std::complex<float>> sync_vec(templates.sync, templates.sync + templates.sync_len);
-
-        auto demod_prof = demod::Qm35825Profile::Default();
-        demod_prof.code_index = cfg.comm_code;
-        demod_prof.timing_search_margin = 256;
-        demod_prof.timing_coarse_stride = 1;
-        demod_prof.sfd_mode = cfg.sfd_mode;
-        demod_prof.rx_fast_sfd = cfg.rx_fast_sfd;
-        demod_prof.rx_fast_cfo_rotation = cfg.rx_fast_cfo;
-        demod_prof.rx_seed_refine_tail = cfg.rx_seed_refine_tail;
-        demod_prof.rx_softchip_on_demand = cfg.rx_softchip_on_demand;
-        demod_prof.rx_fused_payload_cmf = cfg.rx_fused_payload_cmf;
-        demod_prof.rx_fused_phr_cmf = cfg.rx_fused_phr_cmf;
-
+        demod_prof.rx_stop_after_sfd = false;
         const auto t_rx = Clock::now();
         demod::DemodResult decoded = demod::core::demodulate_one(
             y, n, demod_prof, 0, channel.q, 0, sync_vec, scratch.demod);
@@ -621,7 +666,17 @@ bool sic_process_unified(
                 // AutoFallback: gracefully degrade to L1 Preamble!
                 result.fallback_reason = fb;
                 target_level = SicCancellationLevel::L1_Preamble;
-                target_fields = SicKnownFields::Preamble;
+                target_fields = SicKnownFields::PreambleSfd;
+
+                mod::HrpModConfig modcfg = cfg.to_hrp_mod_config();
+                size_t n_prefix = 0;
+                if (mod::modulate_prefix_waveform(modcfg, scratch.modulator,
+                                                  scratch.work_waveform.data(),
+                                                  scratch.work_waveform.size(),
+                                                  n_prefix) && n_prefix > 0) {
+                    s_known_ptr = scratch.work_waveform.data();
+                    s_known_len = n_prefix;
+                }
             }
         }
     }
@@ -629,7 +684,7 @@ bool sic_process_unified(
     // 3. Reconstruction and Subtraction
     bool ok = reconstruct_and_subtract_unified(
         y, n, channel, target_level, target_fields,
-        templates.preamble, templates.preamble_len,
+        s_known_ptr, s_known_len,
         templates, cfg, scratch, result.out, result.i_hat, result);
 
     if (!ok) {

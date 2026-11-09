@@ -1424,6 +1424,74 @@ inline bool modulate_pulse_list(const uint8_t* psdu, size_t psdu_len,
                                             sample_cap, out);
 }
 
+// Dedicated prefix-only (SYNC + SFD) pulse event generator.
+// Avoids PHR / Payload encoding while reusing the cached prefix events.
+inline bool modulate_prefix_pulse_list(const HrpModConfig& cfg,
+                                       HrpModScratch& scratch,
+                                       size_t sample_cap,
+                                       PulseList& out)
+{
+    out = PulseList{};
+    if (cfg.code_index < 9 || cfg.code_index > 12)
+        return false;
+    if (cfg.sync_repetitions == 0)
+        return false;
+
+    const int8_t* sfd = nullptr;
+    size_t n_sfd = 0;
+    if (!detail::sfd_lookup(cfg.sfd_mode, sfd, n_sfd))
+        return false;
+
+    if (!ensure_pulse(cfg, scratch))
+        return false;
+    if (!detail::ensure_prefix_events(cfg, sfd, n_sfd, scratch))
+        return false;
+
+    const size_t prefix_samples = packet_samples_998p4(
+        cfg.sync_repetitions, n_sfd, 0, cfg.insert_sts, &cfg.pulse);
+    if (prefix_samples > sample_cap || prefix_samples > kMaxHrpTxSamples)
+        return false;
+
+    out.events = scratch.prefix.events.data();
+    out.count = scratch.prefix.event_count;
+    out.packet_samples = prefix_samples;
+    return true;
+}
+
+// Dedicated prefix-only (SYNC + SFD) waveform generator.
+// Materializes shaped float complex samples into out buffer.
+inline bool modulate_prefix_waveform(const HrpModConfig& cfg,
+                                     HrpModScratch& scratch,
+                                     std::complex<float>* out,
+                                     size_t out_cap,
+                                     size_t& out_n)
+{
+    out_n = 0;
+    if (!out || cfg.code_index < 9 || cfg.code_index > 12 || cfg.sync_repetitions == 0)
+        return false;
+
+    const int8_t* sfd = nullptr;
+    size_t n_sfd = 0;
+    if (!detail::sfd_lookup(cfg.sfd_mode, sfd, n_sfd))
+        return false;
+
+    if (!ensure_pulse(cfg, scratch))
+        return false;
+    if (!detail::ensure_prefix(cfg, sfd, n_sfd, scratch, scratch.pulse_data(), scratch.pulse_len()))
+        return false;
+
+    const size_t prefix_samples = scratch.prefix.n_samples;
+    if (prefix_samples > out_cap)
+        return false;
+
+    const float* const re = scratch.prefix.samples.data();
+    for (size_t i = 0; i < prefix_samples; ++i) {
+        out[i] = std::complex<float>(re[i], 0.f);
+    }
+    out_n = prefix_samples;
+    return true;
+}
+
 } // namespace mod
 } // namespace uwb
 } // namespace gr

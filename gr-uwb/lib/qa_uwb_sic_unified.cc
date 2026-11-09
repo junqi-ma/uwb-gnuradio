@@ -251,6 +251,7 @@ BOOST_AUTO_TEST_CASE(test_unified_process_preamble_only)
     BOOST_CHECK(res.committed);
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(res.level), static_cast<uint8_t>(SicCancellationLevel::L1_Preamble));
     BOOST_CHECK(has_field(res.cancelled_fields, SicKnownFields::Preamble));
+    BOOST_CHECK(has_field(res.cancelled_fields, SicKnownFields::Sfd)); // Now covers SFD!
     BOOST_CHECK(!has_field(res.cancelled_fields, SicKnownFields::Payload));
     BOOST_CHECK_GT(res.suppression_db, 20.0); // Clean synthetic packet has high suppression
 }
@@ -301,6 +302,7 @@ BOOST_AUTO_TEST_CASE(test_unified_auto_fallback_on_corrupted_payload)
     BOOST_CHECK(res.committed);
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(res.level), static_cast<uint8_t>(SicCancellationLevel::L1_Preamble));
     BOOST_CHECK(has_field(res.cancelled_fields, SicKnownFields::Preamble));
+    BOOST_CHECK(has_field(res.cancelled_fields, SicKnownFields::Sfd)); // Now covers SFD!
     BOOST_CHECK(!has_field(res.cancelled_fields, SicKnownFields::Payload));
     BOOST_CHECK(res.fallback_reason != nullptr); // Fallback reason is explicitly recorded
     BOOST_CHECK_GT(res.suppression_db, 15.0); // Preamble is still successfully eliminated!

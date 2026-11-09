@@ -3106,7 +3106,10 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
 
         size_t sec_lo = 0;
         size_t sec_hi = n;
-        if (on_demand && is_integer_grid) {
+        if (profile.rx_stop_after_sfd) {
+            sec_lo = static_cast<size_t>(std::max<int64_t>(0, static_cast<int64_t>(final_sfd_range.first)));
+            sec_hi = static_cast<size_t>(std::min<int64_t>(static_cast<int64_t>(n), static_cast<int64_t>(final_sfd_range.second)));
+        } else if (on_demand && is_integer_grid) {
             // Second rotation covers final SFD, CIR, phase estimation, and through PHR.
             // initial_chip_budget(profile) covers SYNC alignment, NS-SFD, and the 21 PHR symbols.
             const size_t prefix_budget = rxopt::initial_chip_budget(profile);
@@ -3221,6 +3224,15 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                 ? res.stage_sfd_us - sfd_children_us
                 : 0;
     }
+
+    // Early termination if caller only requested preamble (SYNC + SFD) detection.
+    if (profile.rx_stop_after_sfd) {
+        res.status = DemodStatus::Success;
+        rebase();
+        res.stage_total_us = res.stage_timing_us + res.stage_cfo_us + res.stage_sfd_us;
+        return res;
+    }
+
     // Stage 4: CIR + soft chips on the CFO-compensated frame.
     const int8_t* pc = GetPreambleCode(profile.code_index);
     std::vector<int8_t> pcode(pc, pc + kQm35CodeLength);

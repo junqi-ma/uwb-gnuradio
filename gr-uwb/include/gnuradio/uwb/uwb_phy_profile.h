@@ -130,6 +130,10 @@ struct Qm35825Profile {
     // and always falls back to the legacy radius if the narrow search misses.
     size_t timing_seed_refine_radius = 0;
 
+    // Early termination: stop receiver processing right after Final SFD is verified
+    // and preamble_start_sample / CFO are anchored. Skips CIR, PHR, and Payload.
+    bool rx_stop_after_sfd = false;
+
     static Qm35825Profile Default() { return Qm35825Profile{}; }
 };
 
