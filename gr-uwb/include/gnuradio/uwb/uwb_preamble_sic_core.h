@@ -288,6 +288,30 @@ struct SicTimings {
     uint64_t apply_us = 0;
     uint64_t backfill_us = 0;
     uint64_t apply_forward_us = 0;
+    // Children of fractional_refine_us only. They are NOT stage children of
+    // core_total_us and must not be added to fractional_refine_us, to the
+    // stage-child sum, or to core_total_us. Clocks stay zero when
+    // SicScratch::refine_diag is false; the counts below are still filled.
+    uint64_t refine_init_rot_us = 0;
+    uint64_t refine_init_columns_us = 0;
+    uint64_t refine_init_qr_us = 0;
+    uint64_t refine_resid_us = 0;
+    uint64_t refine_derot_us = 0;
+    uint64_t refine_candidate_us = 0;
+    uint64_t refine_project_us = 0;
+    uint64_t refine_self_energy_us = 0;
+    uint32_t refine_k = 0;
+    uint32_t refine_m = 0;
+    uint32_t refine_candidates = 0;
+    uint32_t refine_rebuilds = 0;
+    uint32_t refine_cache_hits = 0;
+    uint32_t refine_cache_misses = 0;
+    uint32_t refine_self_energy_hits = 0;
+    uint32_t refine_self_energy_misses = 0;
+    uint32_t apply_block_builds = 0;
+    uint32_t apply_block_hits = 0;
+    uint32_t apply_rot_base_hits = 0;
+    uint32_t apply_rot_base_misses = 0;
 };
 
 struct SicResult {
@@ -430,6 +454,69 @@ struct SicScratch {
     // falls back to the exact legacy VOLK self-dot, so a runtime ROI/window
     // change stays correct.  Size is O(ROI + reps*sps) doubles.
     std::vector<double> energy_prefix;
+
+    // ---------------------------------------------------------------------
+    // feature/sic-perf.  These are NOT part of the frozen model hash.  They
+    // are fixed when prepare_sic_core() runs, from the environment below, so
+    // a paired benchmark can toggle one item without a second binary.
+    //   UWB_SIC_REFINE_DIAG     default 1  (sub-clocks inside fractional_refine)
+    //   UWB_SIC_COL_CACHE       default 1  (E0 path-column cache)
+    //   UWB_SIC_ROT_BASE_CACHE  default 1  (E0 CFO base-table cache)
+    //   UWB_SIC_RECON_CACHE     default 1  (E0 absolute reconstruction block)
+    //   UWB_SIC_SELF_ENERGY     default 1  (E0 geometry self-energy table)
+    //   UWB_SIC_INCR_RESID      default 0  (E1 incremental residual)
+    //   UWB_SIC_FUSED_SCORE     default 0  (E1 fused candidate score)
+    // A value starting with 0/n/N/f/F disables the item.
+    // ---------------------------------------------------------------------
+    bool refine_diag = true;
+    bool opt_column_cache = true;
+    bool opt_rot_base_cache = true;
+    bool opt_recon_cache = true;
+    bool opt_self_energy = true;
+    bool opt_incr_resid = false;
+    bool opt_fused_score = false;
+
+    std::vector<std::complex<double>> col_cache;    // k_paths * work_len
+    std::vector<std::complex<double>> sync_conj_d;  // conj(sync) in double
+    bool train_rot_ready = false;
+    bool train_columns_ready = false;
+    int64_t train_rot_idx0 = 0;
+    size_t train_rot_count = 0;
+    double train_rot_w = 0.0;
+    size_t train_col_m = 0;
+    size_t train_col_k = 0;
+
+    bool rot_base_valid = false;
+    double rot_base_w = 0.0;
+
+    // Last absolute reconstruction block written into ihat[0, recon_len).
+    // The key is the model parameters themselves, not model_id alone.
+    bool recon_valid = false;
+    int64_t recon_b0 = 0;
+    size_t recon_len = 0;
+    uint64_t recon_template_hash = 0;
+    double recon_cfo = 0.0;
+    double recon_fs = 0.0;
+    int64_t recon_phase_ref = 0;
+    size_t recon_n_paths = 0;
+    double recon_tau[kSicMaxPaths] = {};
+    std::complex<float> recon_gain[kSicMaxPaths] = {};
+
+    // ||u||^2 of the w0=0 column on the 0.05 grid, for the prepared training
+    // length.  NaN until filled.  A hit still requires the live column
+    // (w0=fit_lo, tau=tau_abs+delta) to share polyphase row, float blend,
+    // n0, wrap and clip with that cached column, plus this template stamp.
+    // A clipped training window (M != self_energy_m) does not use it.
+    // Integer translation is not assumed: a large fit_lo can change the
+    // float phase coefficients even when the relative delay is an integer.
+    std::vector<double> self_energy;
+    bool self_energy_ready = false;
+    int64_t self_energy_rel_min = 0;
+    size_t self_energy_rel_span = 0;
+    size_t self_energy_m = 0;
+    const std::complex<float>* self_energy_up = nullptr;
+    size_t self_energy_plen = 0;
+    uint64_t self_energy_template_hash = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -465,6 +552,48 @@ UWB_API bool qr_cond_solve(std::complex<double>* A,
                            std::complex<double>* h,
                            std::complex<double>* work,
                            double* cond);
+
+// Polyphase decision for one absolute delay.  QA uses this to show a phase
+// wrap without going through a full window.  sic_one uses the same
+// select_phase implementation.
+struct PhaseGeom {
+    size_t g = 0;
+    double alpha = 0.0;
+    int64_t n0 = 0;
+    bool wrap = false;
+};
+
+UWB_API PhaseGeom phase_geom(double tau_abs, int64_t pos);
+
+// Production self-energy hit predicate.  True only when
+// build_shifted_f(w0=0, tau=rel0+delta) and
+// build_shifted_f(w0=fit_lo, tau=tau_abs+delta) choose the same row, the
+// same float blend coefficients (compared by bits), the same integer base,
+// the same phase wrap and the same clip range.  M and plen are part of the
+// clip.  A mismatch must not reuse the cached denominator.
+UWB_API bool self_energy_geometry_matches(int64_t fit_lo,
+                                         double rel0,
+                                         double tau_abs,
+                                         double delta,
+                                         size_t M,
+                                         size_t plen);
+
+// Fill the production table when it is empty.  Same function estimate uses.
+// Returns false when the scratch cannot hold the table.
+UWB_API bool fill_self_energy_for_test(SicScratch& scratch);
+
+// One grid point: cached table value versus a fresh VOLK self-dot of the
+// live column.  *geometry_match is the production predicate above.  Returns
+// false when the table is not ready, the relative delay is not an in-range
+// integer, or oi is outside 0..20.  The live column is built from the
+// template stamp recorded at fill time.
+UWB_API bool self_energy_denominator_probe(SicScratch& scratch,
+                                          int64_t fit_lo,
+                                          double tau_abs,
+                                          int oi,
+                                          bool* geometry_match,
+                                          double* cached,
+                                          double* live);
 
 } // namespace detail
 
@@ -539,6 +668,12 @@ UWB_API bool estimate_model(const std::complex<float>* y,
 // `out` is null or `n > 0` with `y == nullptr` (no defined output possible).
 //
 // `timings` (optional) accumulates reconstruct_us and apply_us.
+//
+// `out_preinitialized`: the caller has already copied `y` into `out` and, when
+// `i_hat` is non-null, filled that chunk with zeros.  apply then skips those
+// two writes.  The public default is false, so a caller that does not
+// preinitialize still gets the fail-closed `out == y` copy.  Passing true
+// without having done both initializations is a caller bug.
 // ---------------------------------------------------------------------------
 UWB_API bool apply_model(const SicModel& model,
                          const std::complex<float>* y,
@@ -549,7 +684,8 @@ UWB_API bool apply_model(const SicModel& model,
                          SicScratch& scratch,
                          std::complex<float>* out,
                          std::complex<float>* i_hat,
-                         SicTimings* timings = nullptr);
+                         SicTimings* timings = nullptr,
+                         bool out_preinitialized = false);
 
 // ---------------------------------------------------------------------------
 // sic_one: the hot path.  No allocation, no vector growth, no file I/O.

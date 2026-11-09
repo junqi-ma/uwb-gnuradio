@@ -1,3 +1,13 @@
+# SIC 全包与前导优化统一集成基线（2026-11-09）
+
+本分支为 `integration/sic-unified-20261109`，由 `feature/sic-fullpacket-compare`（全包 SIC 与离散 CIR）与 `feature/sic-perf`（Preamble-only 核心优化与 PMT/dcons 优化）合并而成。
+
+- **全包与离散 CIR 基线**：包含 Full-packet SIC、离散等效 CIR 估计（`discrete_cir`）、快速通信接收机（Fast SFD/CFO/Softchip、Fused CMF/PHR）以及 AVX2 脉冲重构内核。
+- **前导核心与系统开销优化**：包含 Preamble SIC 核心的列/旋转/self-energy 预计算缓存加速，以及 GNU Radio PDU 块的 PMT 静态符号表缓存和 O(1) dcons 前插优化。
+- **统一模型愿景**：Preamble-only 被视为已知字段覆盖仅为 SYNC 的全包 SIC 特例。
+
+---
+
 # 当前提交快照：整包 SIC 稀疏重构与验证精简（2026-11-08）
 
 本次提交汇总当前实验代码与报告。紧凑四径、32 B、20 tap、lag_lo=-1：总 SIC mean 1.822 ms，调制+重构 227.7 µs。相较最初整包版本历史 21.83 ms 约快 12 倍；不同信道/运行的阶段对比，详见 `docs/sic/SIC_首版至当前性能对比_2026-11-08.md`。下方“未提交”为各轮测量时的历史状态。PHR R1–R3 与 SYNC 碰撞退化仍未关闭；实验选项不自动替代默认路径。
@@ -101,6 +111,18 @@ code-tested SHA `10b660b`，新 build `gr-uwb/build-sic-fullpacket-discrete`。�
 本轮结果见 `docs/sic/FullPacket_payload滤波对照报告_2026-11-06.md`，正式代码 `cea0fc3`；不自动开始下一轮优化。用户已授权测试仅对payload及边界区逐包滤波，固定前缀相位行按实际波形缓存；完整包仍逐路径处理和消除。新build `gr-uwb/build-sic-fullpacket-payload-cache` 保留旧build与结果，不上板。快速RX接入与复测已交付：`docs/sic/FullPacket_快速RX复测报告_2026-11-06.md`，正式代码 `28c7734`；不自动进入重构优化。历史报告 `docs/sic/FullPacket_开发报告_2026-11-06.md` 与 `5dd2cfb` 结果保留；新run独立归档。仅调整实验runner的RX路径，不改冻结SIC数学，不上板。
 
 执行 docs/sic/FullPacket_vs_PreambleOnly_开发计划_2026-11-06.md。仅本实验分支允许新增整包路径；原 preamble 行为与历史基线保持。主 agent 与三个 subagent 按文件所有权协作。
+
+---
+
+# SIC 性能优化（feature/sic-perf，2026-10-19）
+
+本 worktree 从 annotated tag `sic-s2-ab-integrated-20261018`（`794056c`）创建，分支 `feature/sic-perf`。任务文件是 `docs/sic/Grok开发指示_SIC性能优化_2026-10-19.md`。
+
+冻结基线的算法、阈值、种子、指标和信道仍然约束历史对照。只有本性能分支可以按该任务改共享 SIC 核心。不要把本分支自动合并回 `feature/sic-research`，不要移动 tag，不要推送。
+
+只读对照 worktree 是 `.worktrees/sic-perf-baseline`（detached `794056c`）。两边各自构建 `gr-uwb/build-sic-accum` 与 `gr-uwb/build-sic-payload`，不覆盖旧集成 build，不复制 CMakeCache。mean≤0.5 ms、P99≤1 ms、200 窗/s 仍是未达成目标，不是本轮承诺。
+
+---
 
 # 已验收 A/B 集成基线（2026-10-18）
 

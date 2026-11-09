@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -337,16 +338,21 @@ constexpr size_t kReconBlock = 4096;
 // per-sample work is one float32 complex multiply, and there is one exp per
 // kRotBlock samples plus at most two chunk-edge exp calls.
 inline void fill_rot_f_abs(cplx* out, size_t count, int64_t p0, double w,
-                           cplx* base)
+                           cplx* base, bool rebuild_base)
 {
     if (count == 0 || !out)
         return;
-    const dcp step(std::cos(w), std::sin(w));
-    dcp cur(1.0, 0.0);
-    for (size_t j = 0; j < kRotBlock; ++j) {
-        base[j] = cplx(static_cast<float>(cur.real()),
-                       static_cast<float>(cur.imag()));
-        cur *= step;
+    // The 1024-point base is a function of w only.  Rebuilding it on every
+    // call repeats the same recurrence; a cache hit keeps the absolute phase
+    // anchor below (the block phase is still exp(j*w*b*kRotBlock)).
+    if (rebuild_base) {
+        const dcp step(std::cos(w), std::sin(w));
+        dcp cur(1.0, 0.0);
+        for (size_t j = 0; j < kRotBlock; ++j) {
+            base[j] = cplx(static_cast<float>(cur.real()),
+                           static_cast<float>(cur.imag()));
+            cur *= step;
+        }
     }
     size_t i = 0;
     int64_t p = p0;
@@ -375,13 +381,17 @@ inline void fill_rot_f_abs(cplx* out, size_t count, int64_t p0, double w,
 // ---------------------------------------------------------------------------
 inline bool reconstruct_region(int64_t lo, size_t len, const SicModel& m,
                                const cplx* up, size_t plen, SicScratch& s,
-                               cplx* dst)
+                               cplx* dst, SicTimings* rot_stats = nullptr)
 {
     if (len == 0)
         return true;
     if (!dst || !up || len > s.cap_region || len > s.acc.size() ||
         len > s.rot_f.size() || !(m.sample_rate > 0.0))
         return false;
+    // This call overwrites ihat whenever dst aliases it.  Drop the apply
+    // block-cache key before the write so a later apply cannot reuse a
+    // partially updated buffer.
+    s.recon_valid = false;
     std::fill(s.acc.begin(), s.acc.begin() + static_cast<std::ptrdiff_t>(len),
               dcp(0.0, 0.0));
     for (size_t k = 0; k < m.n_paths && k < kSicMaxPaths; ++k) {
@@ -389,8 +399,20 @@ inline bool reconstruct_region(int64_t lo, size_t len, const SicModel& m,
                       dcp(m.gain[k]));
     }
     const double w = 2.0 * kPi * m.cfo_hz / m.sample_rate;
+    const bool base_hit = s.opt_rot_base_cache && s.rot_base_valid &&
+                          s.rot_base_w == w;
+    if (!base_hit) {
+        s.rot_base_valid = true;
+        s.rot_base_w = w;
+    }
+    if (rot_stats) {
+        if (base_hit)
+            ++rot_stats->apply_rot_base_hits;
+        else
+            ++rot_stats->apply_rot_base_misses;
+    }
     fill_rot_f_abs(s.rot_f.data(), len, lo - m.phase_reference_sample, w,
-                   s.rot_base.data());
+                   s.rot_base.data(), !base_hit);
     volk_64f_convert_32f(reinterpret_cast<float*>(dst),
                          reinterpret_cast<const double*>(s.acc.data()),
                          static_cast<unsigned>(2 * len));
@@ -642,6 +664,72 @@ inline bool finite_cplx(const cplx& v)
     return std::isfinite(v.real()) && std::isfinite(v.imag());
 }
 
+// Fields that decide every byte build_shifted_f writes, given one template.
+// Clip bounds are exactly that function's lo0/hi0/lo1/hi1.  The float blend
+// is the value stored into the column, so it is compared by bits rather than
+// by the pre-cast double alpha: a difference that does not change the float
+// coefficient does not change the column, and any difference that does is a
+// miss.
+struct ShiftGeom {
+    size_t g = 0;
+    int64_t n0 = 0;
+    bool wrap = false;
+    bool second = false;
+    float a0 = 0.f;
+    float a1 = 0.f;
+    int64_t lo0 = 0;
+    int64_t hi0 = 0;
+    int64_t lo1 = 0;
+    int64_t hi1 = 0;
+};
+
+inline ShiftGeom shift_geom(double tau_abs, int64_t pos, size_t M, size_t plen)
+{
+    const PhaseSel s = select_phase(tau_abs, pos);
+    ShiftGeom c;
+    c.g = s.g;
+    c.n0 = s.n0;
+    c.wrap = s.wrap;
+    c.second = (s.alpha != 0.0);
+    c.a0 = static_cast<float>(1.0 - s.alpha);
+    c.a1 = static_cast<float>(s.alpha);
+    c.lo0 = std::max<int64_t>(0, -s.n0);
+    c.hi0 = std::min<int64_t>(static_cast<int64_t>(M),
+                             static_cast<int64_t>(plen) - s.n0);
+    const int64_t b1 = s.wrap ? s.n0 - 1 : s.n0;
+    c.lo1 = c.second ? std::max<int64_t>(0, -b1) : 0;
+    c.hi1 = c.second
+                ? std::min<int64_t>(static_cast<int64_t>(M),
+                                   static_cast<int64_t>(plen) - b1)
+                : 0;
+    return c;
+}
+
+inline bool shift_geom_equal(const ShiftGeom& a, const ShiftGeom& b)
+{
+    if (a.g != b.g || a.n0 != b.n0 || a.wrap != b.wrap || a.second != b.second)
+        return false;
+    if (std::memcmp(&a.a0, &b.a0, sizeof(float)) != 0)
+        return false;
+    if (std::memcmp(&a.a1, &b.a1, sizeof(float)) != 0)
+        return false;
+    return a.lo0 == b.lo0 && a.hi0 == b.hi0 && a.lo1 == b.lo1 && a.hi1 == b.hi1;
+}
+
+// Cached column: build_shifted_f(w0=0, tau=rel0+delta).
+// Live column:   build_shifted_f(w0=fit_lo, tau=tau_abs+delta).
+// These are not the same function of an integer origin.  When the absolute
+// sum rounds, the live phase row or the float blend changes and the cached
+// VOLK denominator must not be used.
+inline bool self_energy_column_matches(int64_t fit_lo, double rel0,
+                                      double tau_abs, double delta, size_t M,
+                                      size_t plen)
+{
+    const ShiftGeom cached = shift_geom(rel0 + delta, /*pos=*/0, M, plen);
+    const ShiftGeom live = shift_geom(tau_abs + delta, fit_lo, M, plen);
+    return shift_geom_equal(cached, live);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -674,6 +762,126 @@ bool qr_cond_solve(dcp* A, size_t M, size_t K, dcp* y, dcp* h, dcp* work,
         return false;
     if (cond)
         *cond = c2;
+    return true;
+}
+
+PhaseGeom phase_geom(double tau_abs, int64_t pos)
+{
+    const PhaseSel s = select_phase(tau_abs, pos);
+    PhaseGeom g;
+    g.g = s.g;
+    g.alpha = s.alpha;
+    g.n0 = s.n0;
+    g.wrap = s.wrap;
+    return g;
+}
+
+bool self_energy_geometry_matches(int64_t fit_lo, double rel0, double tau_abs,
+                                 double delta, size_t M, size_t plen)
+{
+    return self_energy_column_matches(fit_lo, rel0, tau_abs, delta, M, plen);
+}
+
+} // namespace detail
+
+namespace {
+
+bool env_enabled(const char* name, bool def)
+{
+    const char* v = std::getenv(name);
+    if (!v || !v[0])
+        return def;
+    if (v[0] == '0' || v[0] == 'n' || v[0] == 'N' || v[0] == 'f' || v[0] == 'F')
+        return false;
+    return true;
+}
+
+// ||shifted template||^2 of the w0=0 column on the 0.05 grid.  This is NOT
+// assumed equal to build_shifted_f(w0=fit_lo, tau=fit_lo+rel+delta): a large
+// integer origin can change select_phase's float blend.  The search applies
+// self_energy_column_matches before reading an entry, and falls back to a
+// live VOLK self-dot otherwise.  The stored value is that same VOLK reduction.
+void fill_self_energy_table(SicScratch& scratch, const cplx* up, size_t plen)
+{
+    if (scratch.self_energy.empty() || scratch.self_energy_m == 0 || !up)
+        return;
+    if (scratch.self_energy_m > scratch.col_f.size())
+        return;
+    cplx* colf = scratch.col_f.data();
+    const size_t M = scratch.self_energy_m;
+    const unsigned np = static_cast<unsigned>(M);
+    for (size_t ri = 0; ri < scratch.self_energy_rel_span; ++ri) {
+        const double rel0 = static_cast<double>(
+            scratch.self_energy_rel_min + static_cast<int64_t>(ri));
+        for (int oi = 0; oi <= 20; ++oi) {
+            const double delta = -0.5 + 0.05 * static_cast<double>(oi);
+            build_shifted_f(colf, M, up, plen, 0, rel0 + delta);
+            cplx self(0.f, 0.f);
+            volk_32fc_x2_conjugate_dot_prod_32fc_u(&self, colf, colf, np);
+            scratch.self_energy[ri * 21u + static_cast<size_t>(oi)] =
+                static_cast<double>(self.real());
+        }
+    }
+    scratch.self_energy_up = up;
+    scratch.self_energy_plen = plen;
+    scratch.self_energy_template_hash = scratch.template_hash;
+    scratch.self_energy_ready = true;
+}
+
+} // namespace
+
+namespace detail {
+
+bool fill_self_energy_for_test(SicScratch& scratch)
+{
+    if (!scratch.prepared || !scratch.opt_self_energy || scratch.pre_up.empty())
+        return false;
+    if (!scratch.self_energy_ready)
+        fill_self_energy_table(scratch, scratch.pre_up.data(),
+                               scratch.preamble_len);
+    return scratch.self_energy_ready &&
+           scratch.self_energy_up == scratch.pre_up.data() &&
+           scratch.self_energy_plen == scratch.preamble_len &&
+           scratch.self_energy_template_hash == scratch.template_hash;
+}
+
+bool self_energy_denominator_probe(SicScratch& scratch, int64_t fit_lo,
+                                  double tau_abs, int oi, bool* geometry_match,
+                                  double* cached, double* live)
+{
+    if (!geometry_match || !cached || !live)
+        return false;
+    if (!scratch.self_energy_ready || !scratch.self_energy_up)
+        return false;
+    if (oi < 0 || oi > 20)
+        return false;
+    if (scratch.self_energy_m == 0 ||
+        scratch.self_energy_m > scratch.col_f.size() ||
+        scratch.self_energy_plen == 0)
+        return false;
+    const double rel = tau_abs - static_cast<double>(fit_lo);
+    if (!std::isfinite(rel) || !(rel == std::floor(rel)))
+        return false;
+    const int64_t rel_i = static_cast<int64_t>(rel);
+    const int64_t idx = rel_i - scratch.self_energy_rel_min;
+    if (idx < 0 || static_cast<size_t>(idx) >= scratch.self_energy_rel_span)
+        return false;
+    const double rel0 =
+        static_cast<double>(scratch.self_energy_rel_min + idx);
+    const double delta = -0.5 + 0.05 * static_cast<double>(oi);
+    *geometry_match = self_energy_column_matches(
+        fit_lo, rel0, tau_abs, delta, scratch.self_energy_m,
+        scratch.self_energy_plen);
+    *cached = scratch.self_energy[static_cast<size_t>(idx) * 21u +
+                                  static_cast<size_t>(oi)];
+    cplx* colf = scratch.col_f.data();
+    const size_t M = scratch.self_energy_m;
+    build_shifted_f(colf, M, scratch.self_energy_up, scratch.self_energy_plen,
+                    fit_lo, tau_abs + delta);
+    cplx self(0.f, 0.f);
+    volk_32fc_x2_conjugate_dot_prod_32fc_u(&self, colf, colf,
+                                           static_cast<unsigned>(M));
+    *live = static_cast<double>(self.real());
     return true;
 }
 
@@ -856,6 +1064,27 @@ bool prepare_sic_core(const SicConfig& cfg,
     scratch.col.assign(M, dcp(0.0, 0.0));
     scratch.col_f.assign(M, cplx(0.f, 0.f));
     scratch.q_f.assign(M, cplx(0.f, 0.f));
+    scratch.col_cache.assign(M * K, dcp(0.0, 0.0));
+    scratch.sync_conj_d.resize(sync_len);
+    for (size_t i = 0; i < sync_len; ++i)
+        scratch.sync_conj_d[i] = dcp(std::conj(scratch.sync_norm[i]));
+    scratch.refine_diag = env_enabled("UWB_SIC_REFINE_DIAG", true);
+    scratch.opt_column_cache = env_enabled("UWB_SIC_COL_CACHE", true);
+    scratch.opt_rot_base_cache = env_enabled("UWB_SIC_ROT_BASE_CACHE", true);
+    scratch.opt_recon_cache = env_enabled("UWB_SIC_RECON_CACHE", true);
+    scratch.opt_self_energy = env_enabled("UWB_SIC_SELF_ENERGY", true);
+    scratch.opt_incr_resid = env_enabled("UWB_SIC_INCR_RESID", false);
+    scratch.opt_fused_score = env_enabled("UWB_SIC_FUSED_SCORE", false);
+    // CIR delays live in [-kCirPre, post_tail + kCirPre).  One extra bin on
+    // the low side covers a -0.5 grid step that floors below the integer tap.
+    scratch.self_energy_rel_min = -kCirPre - 1;
+    scratch.self_energy_rel_span =
+        cfg.post_tail + static_cast<size_t>(2 * kCirPre + 2);
+    scratch.self_energy_m = scratch.fit_len;
+    if (scratch.opt_self_energy) {
+        scratch.self_energy.assign(scratch.self_energy_rel_span * 21u,
+                                   std::numeric_limits<double>::quiet_NaN());
+    }
     scratch.resid.assign(M, dcp(0.0, 0.0));
     scratch.rot.assign(std::max(M, scratch.cap_region), dcp(0.0, 0.0));
     scratch.rot_f.assign(scratch.cap_region, cplx(0.f, 0.f));
@@ -905,7 +1134,10 @@ bool prepare_sic_core(const SicConfig& cfg,
         scratch.rot_base.size() * sizeof(cplx) +
         scratch.cand_delay.size() * sizeof(int64_t) +
         scratch.cand_mag.size() * sizeof(double) +
-        scratch.energy_prefix.size() * sizeof(double);
+        scratch.energy_prefix.size() * sizeof(double) +
+        scratch.col_cache.size() * sizeof(dcp) +
+        scratch.sync_conj_d.size() * sizeof(dcp) +
+        scratch.self_energy.size() * sizeof(double);
     scratch.prepared = true;
     return true;
 }
@@ -1060,6 +1292,10 @@ void estimate_impl(const cplx* y,
     const double fs = cfg.sample_rate;
     const double detect_thr = cfg.detect_threshold;
     const int64_t n_i64 = static_cast<int64_t>(n);
+
+    // A reused scratch must not apply the previous window's training columns.
+    scratch.train_rot_ready = false;
+    scratch.train_columns_ready = false;
 
     model.observed_end_sample = visible_end;
     model.nominal_sync_reps = cfg.sync_reps;
@@ -1344,8 +1580,10 @@ void estimate_impl(const cplx* y,
             // STRICT: a CIR tap may not read past the training span or prefix.
             if (pos >= 0 && pos + static_cast<int64_t>(Ls) <= fit_end_avail) {
                 dcp acc(0.0, 0.0);
+                const dcp* sc = scratch.sync_conj_d.data();
+                const cplx* yy = y + pos;
                 for (size_t k = 0; k < Ls; ++k)
-                    acc += dcp(std::conj(syncn[k])) * dcp(y[pos + static_cast<int64_t>(k)]);
+                    acc += sc[k] * dcp(yy[k]);
                 c = cplx(static_cast<float>(acc.real()), static_cast<float>(acc.imag()));
             }
             scratch.cir[idx] = c;
@@ -1491,52 +1729,187 @@ void estimate_impl(const cplx* y,
                "training_window_unavailable");
         return;
     }
+    // The self-energy table is a function of the template and fit_len only.
+    // Fill it outside the refine timer so the one-time cost is not reported
+    // as a per-window search cost.  Warmup windows absorb it.
+    if (cfg.enable_fractional && Mfit >= nsel && scratch.opt_self_energy &&
+        !scratch.self_energy_ready && Mfit == scratch.self_energy_m)
+        fill_self_energy_table(scratch, up, plen);
     if (cfg.enable_fractional && Mfit >= nsel) {
+        const bool diag = scratch.refine_diag;
         const auto t0 = std::chrono::steady_clock::now();
+        auto add_us = [&](uint64_t& slot,
+                          const std::chrono::steady_clock::time_point& ts) {
+            if (diag)
+                slot += us_since(ts);
+        };
         // Phase frame: p = abs - phase_reference (= origin), so the fitted gains
         // are already in the frozen model's frame.
-        fill_rot(scratch.rot.data(), Mfit, fit_lo - model.phase_reference_sample, w);
-        for (size_t k = 0; k < nsel; ++k)
-            build_column(scratch.A.data() + k * Mfit, Mfit, up, plen,
-                         fit_lo, tau_abs[k], scratch.rot.data());
+        const int64_t rot_idx0 = fit_lo - model.phase_reference_sample;
+        {
+            const auto ts = std::chrono::steady_clock::now();
+            fill_rot(scratch.rot.data(), Mfit, rot_idx0, w);
+            add_us(r.timings.refine_init_rot_us, ts);
+        }
+        scratch.train_rot_ready = true;
+        scratch.train_rot_idx0 = rot_idx0;
+        scratch.train_rot_count = Mfit;
+        scratch.train_rot_w = w;
+        const size_t stride = scratch.work_len;
+        const bool use_cache = scratch.opt_column_cache &&
+                               scratch.col_cache.size() >= nsel * stride;
+        dcp* const cache = scratch.col_cache.data();
+        {
+            const auto ts = std::chrono::steady_clock::now();
+            for (size_t k = 0; k < nsel; ++k) {
+                if (use_cache) {
+                    // Build into col, then copy.  A is overwritten by QR;
+                    // the cache is not.  The bytes written to A match a direct
+                    // build_column into A.
+                    build_column(scratch.col.data(), Mfit, up, plen, fit_lo,
+                                 tau_abs[k], scratch.rot.data());
+                    std::memcpy(cache + k * stride, scratch.col.data(),
+                                Mfit * sizeof(dcp));
+                    std::memcpy(scratch.A.data() + k * Mfit, scratch.col.data(),
+                                Mfit * sizeof(dcp));
+                } else {
+                    build_column(scratch.A.data() + k * Mfit, Mfit, up, plen,
+                                 fit_lo, tau_abs[k], scratch.rot.data());
+                }
+            }
+            add_us(r.timings.refine_init_columns_us, ts);
+        }
+        if (use_cache) {
+            scratch.train_columns_ready = true;
+            scratch.train_col_m = Mfit;
+            scratch.train_col_k = nsel;
+        }
         for (size_t m = 0; m < Mfit; ++m)
             scratch.hh_b[m] = dcp(y[fit_lo + static_cast<int64_t>(m)]);
-        if (qr_factor_rhs(scratch.A.data(), Mfit, nsel, scratch.hh_b.data(),
-                          scratch.hh_v.data()) &&
-            qr_solve(scratch.A.data(), Mfit, nsel, scratch.hh_b.data(), h)) {
+        bool qr_ok = false;
+        {
+            const auto ts = std::chrono::steady_clock::now();
+            qr_ok = qr_factor_rhs(scratch.A.data(), Mfit, nsel,
+                                  scratch.hh_b.data(), scratch.hh_v.data()) &&
+                    qr_solve(scratch.A.data(), Mfit, nsel, scratch.hh_b.data(), h);
+            add_us(r.timings.refine_init_qr_us, ts);
+        }
+        if (qr_ok) {
             cplx* const colf = scratch.col_f.data();
             cplx* const qf = scratch.q_f.data();
             const unsigned np = static_cast<unsigned>(Mfit);
-            for (size_t k = 0; k < nsel; ++k) {
-                for (size_t m = 0; m < Mfit; ++m)
-                    scratch.resid[m] = dcp(y[fit_lo + static_cast<int64_t>(m)]);
-                for (size_t j = 0; j < nsel; ++j) {
-                    if (j == k)
-                        continue;
-                    build_column(scratch.col.data(), Mfit, up, plen,
-                                 fit_lo, tau_abs[j], scratch.rot.data());
-                    for (size_t m = 0; m < Mfit; ++m)
-                        scratch.resid[m] -= h[j] * scratch.col[m];
-                }
-                for (size_t m = 0; m < Mfit; ++m) {
-                    const dcp ro = scratch.rot[m];
-                    const dcp rv = scratch.resid[m];
-                    qf[m] = cplx(
-                        static_cast<float>(ro.real() * rv.real() +
-                                           ro.imag() * rv.imag()),
-                        static_cast<float>(ro.real() * rv.imag() -
-                                           ro.imag() * rv.real()));
+            const bool fused = scratch.opt_fused_score;
+            r.timings.refine_k = static_cast<uint32_t>(nsel);
+            r.timings.refine_m = static_cast<uint32_t>(Mfit);
+            r.timings.refine_candidates =
+                static_cast<uint32_t>(nsel * 21u);
+            // Leave-one-out residual, derotation, 21-point score, then (when
+            // the cache is on) rebuild only the column whose delay just changed.
+            // Path order is the original order.  Rtot != nullptr selects the
+            // E1 incremental update; the default passes nullptr and subtracts
+            // cached columns in the original j order.
+            auto search_one = [&](size_t k, dcp* Rtot) {
+                {
+                    const auto ts = diag ? std::chrono::steady_clock::now()
+                                         : t0;
+                    for (size_t m = 0; m < Mfit; ++m) {
+                        const dcp ro = scratch.rot[m];
+                        const dcp rv = scratch.resid[m];
+                        qf[m] = cplx(
+                            static_cast<float>(ro.real() * rv.real() +
+                                               ro.imag() * rv.imag()),
+                            static_cast<float>(ro.real() * rv.imag() -
+                                               ro.imag() * rv.real()));
+                    }
+                    add_us(r.timings.refine_derot_us, ts);
                 }
                 double best_tau = tau_abs[k];
                 double best_score = -1.0;
+                const double rel_int =
+                    tau_abs[k] - static_cast<double>(fit_lo);
+                const bool rel_is_int =
+                    std::isfinite(rel_int) && (rel_int == std::floor(rel_int));
+                int64_t rel_index = -1;
+                // Template stamp plus training length.  The per-delta geometry
+                // check is inside the loop: an integer relative delay is not
+                // enough, because fit_lo+delta can round the phase coefficients.
+                const bool table_ok =
+                    rel_is_int && scratch.self_energy_ready &&
+                    Mfit == scratch.self_energy_m && !fused &&
+                    up == scratch.self_energy_up &&
+                    plen == scratch.self_energy_plen &&
+                    scratch.template_hash == scratch.self_energy_template_hash;
+                if (table_ok) {
+                    rel_index = static_cast<int64_t>(rel_int) -
+                                scratch.self_energy_rel_min;
+                    if (rel_index < 0 ||
+                        static_cast<size_t>(rel_index) >=
+                            scratch.self_energy_rel_span)
+                        rel_index = -1;
+                }
+                const double rel0 =
+                    (rel_index >= 0)
+                        ? static_cast<double>(scratch.self_energy_rel_min +
+                                              rel_index)
+                        : 0.0;
                 for (int oi = 0; oi <= 20; ++oi) {
-                    const double delta = -0.5 + 0.05 * oi;
+                    const double delta = -0.5 + 0.05 * static_cast<double>(oi);
+                    const auto tc = diag ? std::chrono::steady_clock::now()
+                                         : t0;
                     build_shifted_f(colf, Mfit, up, plen, fit_lo,
                                     tau_abs[k] + delta);
-                    cplx num(0.f, 0.f), self(0.f, 0.f);
-                    volk_32fc_x2_conjugate_dot_prod_32fc_u(&num, colf, qf, np);
-                    volk_32fc_x2_conjugate_dot_prod_32fc_u(&self, colf, colf, np);
-                    const double den = static_cast<double>(self.real());
+                    add_us(r.timings.refine_candidate_us, tc);
+                    cplx num(0.f, 0.f);
+                    double den = 0.0;
+                    if (fused) {
+                        const auto tp = diag ? std::chrono::steady_clock::now()
+                                             : t0;
+                        float nr = 0.f, ni = 0.f, en = 0.f;
+                        for (size_t m = 0; m < Mfit; ++m) {
+                            const float ur = colf[m].real();
+                            const float ui = colf[m].imag();
+                            const float qr = qf[m].real();
+                            const float qi = qf[m].imag();
+                            nr += ur * qr + ui * qi;
+                            ni += ur * qi - ui * qr;
+                            en += ur * ur + ui * ui;
+                        }
+                        num = cplx(nr, ni);
+                        den = static_cast<double>(en);
+                        add_us(r.timings.refine_project_us, tp);
+                        ++r.timings.refine_self_energy_misses;
+                    } else {
+                        const auto tp = diag ? std::chrono::steady_clock::now()
+                                             : t0;
+                        volk_32fc_x2_conjugate_dot_prod_32fc_u(&num, colf, qf, np);
+                        add_us(r.timings.refine_project_us, tp);
+                        if (rel_index >= 0 &&
+                            self_energy_column_matches(fit_lo, rel0, tau_abs[k],
+                                                       delta, Mfit, plen)) {
+                            const double e = scratch.self_energy[
+                                static_cast<size_t>(rel_index) * 21u +
+                                static_cast<size_t>(oi)];
+                            // Only a positive finite entry matches the live
+                            // `den > 0` gate.  A non-positive or non-finite
+                            // entry is a miss and falls through to VOLK.
+                            // Geometry mismatch also falls through, even when
+                            // the old integer-rel rule would have hit.
+                            if (std::isfinite(e) && e > 0.0) {
+                                den = e;
+                                ++r.timings.refine_self_energy_hits;
+                            }
+                        }
+                        if (!(den > 0.0)) {
+                            const auto te = diag ? std::chrono::steady_clock::now()
+                                                 : t0;
+                            cplx self(0.f, 0.f);
+                            volk_32fc_x2_conjugate_dot_prod_32fc_u(
+                                &self, colf, colf, np);
+                            den = static_cast<double>(self.real());
+                            add_us(r.timings.refine_self_energy_us, te);
+                            ++r.timings.refine_self_energy_misses;
+                        }
+                    }
                     const double score =
                         (den > 0.0) ? std::norm(dcp(num)) / den : 0.0;
                     if (score > best_score) {
@@ -1545,6 +1918,79 @@ void estimate_impl(const cplx* y,
                     }
                 }
                 tau_abs[k] = best_tau;
+                if (!use_cache)
+                    return;
+                if (Rtot) {
+                    const dcp* oldc = cache + k * stride;
+                    for (size_t m = 0; m < Mfit; ++m)
+                        Rtot[m] += h[k] * oldc[m];
+                }
+                build_column(scratch.col.data(), Mfit, up, plen, fit_lo,
+                             tau_abs[k], scratch.rot.data());
+                std::memcpy(cache + k * stride, scratch.col.data(),
+                            Mfit * sizeof(dcp));
+                ++r.timings.refine_rebuilds;
+                if (Rtot) {
+                    for (size_t m = 0; m < Mfit; ++m)
+                        Rtot[m] -= h[k] * scratch.col[m];
+                }
+            };
+            const bool incr = scratch.opt_incr_resid && use_cache;
+            if (incr) {
+                // E1: one total residual, then add the held-out column back.
+                // Summation order differs from the leave-one-out subtract.
+                dcp* Rtot = scratch.A.data();
+                {
+                    const auto ts = diag ? std::chrono::steady_clock::now()
+                                         : t0;
+                    for (size_t m = 0; m < Mfit; ++m)
+                        Rtot[m] = dcp(y[fit_lo + static_cast<int64_t>(m)]);
+                    for (size_t j = 0; j < nsel; ++j) {
+                        const dcp* col = cache + j * stride;
+                        for (size_t m = 0; m < Mfit; ++m)
+                            Rtot[m] -= h[j] * col[m];
+                    }
+                    add_us(r.timings.refine_resid_us, ts);
+                }
+                for (size_t k = 0; k < nsel; ++k) {
+                    const auto ts = diag ? std::chrono::steady_clock::now()
+                                         : t0;
+                    const dcp* colk = cache + k * stride;
+                    for (size_t m = 0; m < Mfit; ++m)
+                        scratch.resid[m] = Rtot[m] + h[k] * colk[m];
+                    if (nsel > 0)
+                        r.timings.refine_cache_hits +=
+                            static_cast<uint32_t>(nsel - 1);
+                    add_us(r.timings.refine_resid_us, ts);
+                    search_one(k, Rtot);
+                }
+            } else {
+                for (size_t k = 0; k < nsel; ++k) {
+                    const auto ts = diag ? std::chrono::steady_clock::now()
+                                         : t0;
+                    for (size_t m = 0; m < Mfit; ++m)
+                        scratch.resid[m] =
+                            dcp(y[fit_lo + static_cast<int64_t>(m)]);
+                    for (size_t j = 0; j < nsel; ++j) {
+                        if (j == k)
+                            continue;
+                        if (use_cache) {
+                            const dcp* col = cache + j * stride;
+                            for (size_t m = 0; m < Mfit; ++m)
+                                scratch.resid[m] -= h[j] * col[m];
+                            ++r.timings.refine_cache_hits;
+                        } else {
+                            build_column(scratch.col.data(), Mfit, up, plen,
+                                         fit_lo, tau_abs[j], scratch.rot.data());
+                            for (size_t m = 0; m < Mfit; ++m)
+                                scratch.resid[m] -= h[j] * scratch.col[m];
+                            ++r.timings.refine_cache_misses;
+                            ++r.timings.refine_rebuilds;
+                        }
+                    }
+                    add_us(r.timings.refine_resid_us, ts);
+                    search_one(k, nullptr);
+                }
             }
         }
         r.timings.fractional_refine_us = us_since(t0);
@@ -1553,10 +1999,29 @@ void estimate_impl(const cplx* y,
     // ---- 9a. matrix_build --------------------------------------------------
     {
         const auto t0 = std::chrono::steady_clock::now();
-        fill_rot(scratch.rot.data(), Mfit, fit_lo - model.phase_reference_sample, w);
-        for (size_t k = 0; k < nsel; ++k)
-            build_column(scratch.A.data() + k * Mfit, Mfit, up, plen,
-                         fit_lo, tau_abs[k], scratch.rot.data());
+        const int64_t rot_idx0 = fit_lo - model.phase_reference_sample;
+        const bool reuse = scratch.opt_column_cache &&
+                           scratch.train_columns_ready &&
+                           scratch.train_rot_ready &&
+                           scratch.train_col_m == Mfit &&
+                           scratch.train_col_k == nsel &&
+                           scratch.train_rot_count == Mfit &&
+                           scratch.train_rot_idx0 == rot_idx0 &&
+                           scratch.train_rot_w == w;
+        if (!reuse)
+            fill_rot(scratch.rot.data(), Mfit, rot_idx0, w);
+        const size_t stride = scratch.work_len;
+        for (size_t k = 0; k < nsel; ++k) {
+            if (reuse) {
+                std::memcpy(scratch.A.data() + k * Mfit,
+                            scratch.col_cache.data() + k * stride,
+                            Mfit * sizeof(dcp));
+                ++r.timings.refine_cache_hits;
+            } else {
+                build_column(scratch.A.data() + k * Mfit, Mfit, up, plen,
+                             fit_lo, tau_abs[k], scratch.rot.data());
+            }
+        }
         for (size_t m = 0; m < Mfit; ++m)
             scratch.hh_b[m] = dcp(y[fit_lo + static_cast<int64_t>(m)]);
         r.timings.matrix_build_us = us_since(t0);
@@ -1810,7 +2275,8 @@ bool apply_model(const SicModel& model,
                  SicScratch& scratch,
                  cplx* out,
                  cplx* i_hat,
-                 SicTimings* timings)
+                 SicTimings* timings,
+                 bool out_preinitialized)
 {
     if (!out)
         return false;
@@ -1820,9 +2286,13 @@ bool apply_model(const SicModel& model,
         return false;
 
     const auto t_all0 = std::chrono::steady_clock::now();
-    std::copy(y, y + n, out);
-    if (i_hat)
-        std::fill(i_hat, i_hat + n, cplx(0.f, 0.f));
+    // Public default copies.  sic_one / the adapter pass true only after they
+    // have already copied this chunk's y into out and zeroed i_hat.
+    if (!out_preinitialized) {
+        std::copy(y, y + n, out);
+        if (i_hat)
+            std::fill(i_hat, i_hat + n, cplx(0.f, 0.f));
+    }
 
     // Fail-closed: any inconsistency (invalid model, unprepared/mismatched
     // scratch, negative chunk origin, non-positive sample rate, or a
@@ -1894,12 +2364,58 @@ bool apply_model(const SicModel& model,
             const int64_t full_hi =
                 std::min<int64_t>(b0 + static_cast<int64_t>(blk), g_hi);
             const size_t full_len = static_cast<size_t>(full_hi - b0);
-            if (!reconstruct_region(b0, full_len, model, up, plen, scratch,
-                                    scratch.ihat.data())) {
-                // Fail-closed; out stays == y (already copied).
+            // The cached block is the exact ihat[0, full_len) reconstruct_region
+            // last wrote.  The key is the template bytes plus every parameter
+            // the kernel reads, not model_id alone.  A miss rebuilds; a hit
+            // reuses those bytes, so every chunking stays bit-identical.
+            bool recon_hit = false;
+            if (scratch.opt_recon_cache && scratch.recon_valid &&
+                scratch.recon_b0 == b0 && scratch.recon_len == full_len &&
+                scratch.recon_template_hash == scratch.template_hash &&
+                scratch.recon_template_hash == model.template_hash &&
+                scratch.recon_cfo == model.cfo_hz &&
+                scratch.recon_fs == model.sample_rate &&
+                scratch.recon_phase_ref == model.phase_reference_sample &&
+                scratch.recon_n_paths == model.n_paths) {
+                recon_hit = true;
+                for (size_t k = 0; k < model.n_paths; ++k) {
+                    if (scratch.recon_tau[k] != model.tau_abs[k] ||
+                        scratch.recon_gain[k] != model.gain[k]) {
+                        recon_hit = false;
+                        break;
+                    }
+                }
+            }
+            if (recon_hit) {
+                if (timings)
+                    ++timings->apply_block_hits;
+            } else if (!reconstruct_region(b0, full_len, model, up, plen,
+                                           scratch, scratch.ihat.data(),
+                                           timings)) {
+                // Fail-closed; out stays == y (already copied, or the caller
+                // preinitialized it to y).
                 if (timings)
                     timings->apply_us += us_since(t_all0);
                 return true;
+            } else {
+                if (timings)
+                    ++timings->apply_block_builds;
+                if (scratch.opt_recon_cache &&
+                    scratch.template_hash == model.template_hash &&
+                    model.n_paths <= kSicMaxPaths) {
+                    scratch.recon_valid = true;
+                    scratch.recon_b0 = b0;
+                    scratch.recon_len = full_len;
+                    scratch.recon_template_hash = scratch.template_hash;
+                    scratch.recon_cfo = model.cfo_hz;
+                    scratch.recon_fs = model.sample_rate;
+                    scratch.recon_phase_ref = model.phase_reference_sample;
+                    scratch.recon_n_paths = model.n_paths;
+                    for (size_t k = 0; k < model.n_paths; ++k) {
+                        scratch.recon_tau[k] = model.tau_abs[k];
+                        scratch.recon_gain[k] = model.gain[k];
+                    }
+                }
             }
             const int64_t lo = std::max<int64_t>(chunk_lo, b0);
             const int64_t hi = std::min<int64_t>(chunk_hi, full_hi);
@@ -2051,6 +2567,9 @@ bool sic_one(const cplx* y,
         }
         {
             const auto t0 = std::chrono::steady_clock::now();
+            // Oracle writes ihat directly.  Drop any apply-block key so a later
+            // estimate apply cannot reuse this buffer.
+            scratch.recon_valid = false;
             std::fill(scratch.acc.begin(), scratch.acc.begin() + ih_len,
                       dcp(0.0, 0.0));
             for (size_t k = 0; k < ns; ++k)
@@ -2112,7 +2631,7 @@ bool sic_one(const cplx* y,
         const auto t0 = std::chrono::steady_clock::now();
         if (backfill_end > 0) {
             apply_model(model, y, static_cast<size_t>(backfill_end), 0, templates,
-                        cfg, scratch, outbuf, ihatbuf, &out.timings);
+                        cfg, scratch, outbuf, ihatbuf, &out.timings, true);
         }
         out.timings.backfill_us = us_since(t0);
     }
@@ -2123,7 +2642,7 @@ bool sic_one(const cplx* y,
         if (fwd > 0) {
             apply_model(model, y + fwd0, fwd, static_cast<int64_t>(fwd0),
                         templates, cfg, scratch, outbuf + fwd0,
-                        ihatbuf ? ihatbuf + fwd0 : nullptr, &out.timings);
+                        ihatbuf ? ihatbuf + fwd0 : nullptr, &out.timings, true);
         }
         out.timings.apply_forward_us = us_since(t0);
     }

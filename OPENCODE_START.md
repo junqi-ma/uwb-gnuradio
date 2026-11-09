@@ -1,3 +1,13 @@
+# SIC 全包与前导统一集成入口（2026-11-09）
+
+本分支为 `integration/sic-unified-20261109`，由 `feature/sic-fullpacket-compare`（全包 SIC 与离散 CIR）与 `feature/sic-perf`（Preamble-only 核心优化与 PMT/dcons 优化）合并而成。
+
+- **全包与离散 CIR 基线**：包含 Full-packet SIC、离散等效 CIR 估计（`discrete_cir`）、快速通信接收机（Fast SFD/CFO/Softchip、Fused CMF/PHR）以及 AVX2 脉冲重构内核。
+- **前导核心与系统开销优化**：包含 Preamble SIC 核心的列/旋转/self-energy 预计算缓存加速，以及 GNU Radio PDU 块的 PMT 静态符号表缓存和 O(1) dcons 前插优化。
+- **统一模型愿景**：Preamble-only 被视为已知字段覆盖仅为 SYNC 的全包 SIC 特例。
+
+---
+
 # 最新优化：AGY SIC 非同步深度优化与复核整改闭环（2026-11-08）
 
 执行 `docs/sic/AGY_SIC优化执行任务书_2026-11-08.md` 及复核整改 `docs/sic/AGY_SIC优化验收复核_2026-11-08.md`。完整开发报告见 `docs/sic/AGY_SIC优化开发报告_2026-11-08.md`，复核整改证明详见 `docs/sic/AGY_SIC优化验收整改证明_2026-11-08.md`。
@@ -185,6 +195,16 @@ code-tested SHA `10b660b`，新 build `gr-uwb/build-sic-fullpacket-discrete`。�
 本轮结果见 `docs/sic/FullPacket_payload滤波对照报告_2026-11-06.md`，正式代码 `cea0fc3`；不自动开始下一轮优化。用户已授权测试仅对payload及边界区逐包滤波，固定前缀相位行按实际波形缓存；完整包仍逐路径处理和消除。新build `gr-uwb/build-sic-fullpacket-payload-cache` 保留旧build与结果，不上板。快速RX接入与复测已交付：`docs/sic/FullPacket_快速RX复测报告_2026-11-06.md`，正式代码 `28c7734`；不自动进入重构优化。历史报告 `docs/sic/FullPacket_开发报告_2026-11-06.md` 与 `5dd2cfb` 结果保留；新run独立归档。仅调整实验runner的RX路径，不改冻结SIC数学，不上板。
 
 执行 docs/sic/FullPacket_vs_PreambleOnly_开发计划_2026-11-06.md。仅本实验分支允许新增整包路径；原 preamble 行为与历史基线保持。主 agent 与三个 subagent 按文件所有权协作。
+
+---
+
+# SIC 性能优化入口（2026-10-19）
+
+当前分支 `feature/sic-perf`，起点是 tag `sic-s2-ab-integrated-20261018`。先读 `docs/sic/Grok开发指示_SIC性能优化_2026-10-19.md`，再读下面的集成基线入口。
+
+冻结约束继续绑定历史基线。共享 SIC 核心只允许在本性能分支、按该任务修改。不要自动合并，不要上板，不要进入 TWR。
+
+---
 
 # S2 A/B 集成基线入口
 

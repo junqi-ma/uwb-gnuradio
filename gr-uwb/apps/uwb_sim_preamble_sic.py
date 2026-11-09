@@ -1406,7 +1406,10 @@ class CreditTracker:
 #                  and never skips ahead: when the bounded credit is not
 #                  available AT the planned deadline the window is counted as
 #                  ``missed_submission`` (reason recorded) and the schedule moves
-#                  on to the next absolute deadline.
+#                  on to the next absolute deadline.  A post that returns more
+#                  than one inter-arrival period after its planned time is also
+#                  ``missed_submission`` (reason ``source_late``).  The PDU is
+#                  still posted; the slip is not hidden by re-timing.
 #   * SIC adapter: the block's own single C++ worker thread (in-process).
 #   * consumer   : the CIR/demod block's own C++ worker thread.
 #   * handlers   : Python message handlers on the block threads
@@ -1536,7 +1539,7 @@ class PipelinedPacer:
         self.admitted = 0
         self.missed_submission = 0
         self.miss_reasons = {"in_flight_limit": 0, "iq_budget": 0,
-                             "post_error": 0}
+                             "post_error": 0, "source_late": 0}
         self.not_submitted = 0
         self.completed = 0
         self.terminal_timeouts = 0
@@ -1575,11 +1578,18 @@ class PipelinedPacer:
             return True, None
 
     def _release(self, wid, t_ns, state):
-        """Terminal for ``wid``: record it and give the credit back."""
+        """Terminal for ``wid``: record it and give the credit back.
+
+        The first terminal is the only one that counts.  A later duplicate
+        status or consumer result returns False and does not move
+        ``deadline_misses``.  SIC-status and consumer-result paths both come
+        through here, so a SIC-only run counts the same deadline.
+        """
         with self._lock:
             if self.terminal_ns[wid] is not None:
                 return False
-            self.terminal_ns[wid] = int(t_ns)
+            t_ns = int(t_ns)
+            self.terminal_ns[wid] = t_ns
             self.terminal_state[wid] = state
             self.completed += 1
             if wid in self._outstanding:
@@ -1587,7 +1597,35 @@ class PipelinedPacer:
             if self.in_flight > 0:
                 self.in_flight -= 1
             self.pending_bytes = max(0, self.pending_bytes - self.window_bytes)
+            planned = self.planned_ns[wid]
+            if planned is not None and \
+                    (t_ns - int(planned)) / 1000.0 > self.deadline_us:
+                self.deadline_misses += 1
             return True
+
+    def _period_ns(self):
+        return int(round(1e9 / self.rate_hz))
+
+    def _note_submit(self, wid, planned_ns, t_done_ns):
+        """Record one finished post.
+
+        Returns True the first time.  A repeat is ignored.  Slipping by more
+        than one inter-arrival period is ``source_late``: the PDU was posted,
+        and the slip still counts as ``missed_submission``.
+        """
+        if self.submit_ns[wid] is not None:
+            return False
+        done = int(t_done_ns)
+        planned = int(planned_ns)
+        self.submit_ns[wid] = done
+        if (done - planned) > self._period_ns():
+            self.submit_state[wid] = "source_late"
+            with self._lock:
+                self.missed_submission += 1
+                self.miss_reasons["source_late"] += 1
+        else:
+            self.submit_state[wid] = "submitted"
+        return True
 
     def _expire_stale(self, now_ns):
         """Release windows whose terminal never arrived (recorded, not hidden)."""
@@ -1639,11 +1677,6 @@ class PipelinedPacer:
         if 0 <= wid < self.planned:
             state = _msg_str(meta, "status", "unknown")
             self._release(wid, t_ns, state)
-            planned = self.planned_ns[wid]
-            if planned is not None and \
-                    (t_ns - planned) / 1000.0 > self.deadline_us:
-                with self._lock:
-                    self.deadline_misses += 1
         self._record_handler("consumer", t0)
 
     def on_consumer_status(self, msg, t_ns):
@@ -1717,8 +1750,7 @@ class PipelinedPacer:
                 continue
             t_done = time.monotonic_ns()
             self.prepare_us[wid] = (t_done - t_prep0) / 1e3
-            self.submit_ns[wid] = int(t_done)
-            self.submit_state[wid] = "submitted"
+            self._note_submit(wid, planned, t_done)
             with self._lock:
                 if wid in self._outstanding:
                     self._outstanding[wid] = int(t_done)
@@ -1828,6 +1860,12 @@ class PipelinedPacer:
             "admitted": int(self.admitted),
             "missed_submission": int(self.missed_submission),
             "miss_reasons": dict(self.miss_reasons),
+            "source_late": int(self.miss_reasons["source_late"]),
+            "source_late_period_us": float(1e6 / self.rate_hz),
+            "source_late_criterion": (
+                "actual submit more than one inter-arrival period after "
+                "the planned time; the PDU is still posted, and the slip "
+                "counts as missed_submission"),
             "not_submitted": int(self.not_submitted),
             "completed": int(self.completed),
             "failed": int(self.terminal_timeouts),
@@ -1847,7 +1885,11 @@ class PipelinedPacer:
                 self._summ(gaps_us),
                 description="actual_submit - ABSOLUTE planned_submit "
                             "(>0 = posted late; the schedule is never re-timed)"),
-            "submit_late": {"n": int(sum(1 for v in gaps_us if v > 0))},
+            "submit_late": {
+                "n": int(sum(1 for v in gaps_us if v > 0)),
+                "source_late_n": int(self.miss_reasons["source_late"]),
+                "period_us": float(1e6 / self.rate_hz),
+            },
             "sic_stage_latency_us": dict(
                 sic_stage,
                 description="PDU submit -> the SIC `out`/`status` completion "
@@ -1992,6 +2034,22 @@ def paced_input_meta_base(*, sensing_code, sync_reps, sensing_roi,
     return meta
 
 
+def paced_target_stage(consumer):
+    """Admission terminal for a paced run.
+
+    ``sic`` completes on the SIC status message and does not build CIR or
+    demod. ``both`` keeps the historical CIR terminal. Unknown values fail
+    closed rather than silently measuring demod.
+    """
+    if consumer == "sic":
+        return "sic"
+    if consumer in ("cir", "both"):
+        return "cir"
+    if consumer == "demod":
+        return "demod"
+    raise ValueError("unknown paced consumer %r" % (consumer,))
+
+
 # ---------------------------------------------------------------------------
 # Simulator runtime
 # ---------------------------------------------------------------------------
@@ -2010,8 +2068,7 @@ class SimRuntime:
         # measured 0-us service).
         if paced is not None:
             if paced_target_consumer is None:
-                paced_target_consumer = "cir" if consumers in ("cir", "both") \
-                    else "demod"
+                paced_target_consumer = paced_target_stage(consumers)
             self.consumers = str(paced_target_consumer)
         self.paced_target_consumer = (None if paced is None
                                       else str(paced_target_consumer))
@@ -3393,7 +3450,9 @@ def main(argv=None):
     ap.add_argument("--sic-validate-threshold", type=float, default=0.25,
                     help="SIC holdout commit threshold")
     ap.add_argument("--consumer", default="both",
-                    choices=["cir", "demod", "both"])
+                    choices=["sic", "cir", "demod", "both"],
+                    help="paced target. sic releases admission credit on the "
+                         "SIC status and builds no CIR or demod block")
     ap.add_argument("--windows", type=int, default=None)
     ap.add_argument("--rate", type=float, default=None,
                     help="paced replay rate (Hz).  In estimate8_frozen the "
@@ -4298,7 +4357,7 @@ def main(argv=None):
             predicted_start=int(generator.pre),
             template_id="sync_template_code%d_998p4" % sensing_code,
             sensing_profile_id=sensing_profile_id)
-        target_stage = ("cir" if args.consumer in ("cir", "both") else "demod")
+        target_stage = paced_target_stage(args.consumer)
         pacer = PipelinedPacer(
             rate_hz=pace_rate, planned=planned,
             in_flight_max=int(sic_cfg["in_flight_max"]),
@@ -5905,10 +5964,12 @@ def main(argv=None):
                            % (paced_stats["not_submitted"], planned))
         if paced_stats["missed_submission"] > 0:
             not_run.append(
-                "paced load: %d of %d planned deadlines could not be posted "
-                "within the bounded credit (missed_submission, reasons %s); "
-                "the achieved rate is NOT substituted for the planned load and "
-                "the target is NOT met"
+                "paced load: missed_submission=%d of %d offered "
+                "(reasons %s). source_late windows were posted more than "
+                "one inter-arrival period after their planned time and "
+                "still count as missed admission. in_flight_limit and "
+                "iq_budget were not posted. The achieved rate is NOT "
+                "substituted for the planned load and the target is NOT met"
                 % (paced_stats["missed_submission"], paced_stats["offered"],
                    json.dumps(paced_stats["miss_reasons"], sort_keys=True)))
         if paced_stats["deadline_misses"] > 0:

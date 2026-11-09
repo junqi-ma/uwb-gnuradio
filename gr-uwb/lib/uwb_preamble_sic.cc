@@ -41,11 +41,371 @@ inline uint64_t elapsed_us(std::chrono::steady_clock::time_point t0,
         std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
 }
 
-int64_t dict_i64(pmt::pmt_t dict, const char* key, int64_t def)
+struct SicPmtSymbols {
+    // Ports
+    pmt::pmt_t port_in;
+    pmt::pmt_t port_out;
+    pmt::pmt_t port_status;
+    pmt::pmt_t port_truth;
+    pmt::pmt_t port_i_hat;
+
+    // Common keys and values
+    pmt::pmt_t key_window_id;
+    pmt::pmt_t key_event;
+    pmt::pmt_t key_reason;
+    pmt::pmt_t key_sample_count;
+    pmt::pmt_t key_planned_publish_ns;
+    pmt::pmt_t key_sensing_roi_lo;
+    pmt::pmt_t key_sensing_roi_hi;
+    pmt::pmt_t key_sensing_min_overlap;
+    pmt::pmt_t key_observed_end_sample;
+    pmt::pmt_t key_visible_end_sample;
+    pmt::pmt_t key_start_sample;
+    pmt::pmt_t key_cfo_hz;
+    pmt::pmt_t key_tau;
+    pmt::pmt_t key_gain_re;
+    pmt::pmt_t key_gain_im;
+    pmt::pmt_t key_n_paths;
+
+    // Status event names & values
+    pmt::pmt_t sym_empty;
+    pmt::pmt_t sym_none;
+    pmt::pmt_t sym_window;
+    pmt::pmt_t sym_stopped;
+    pmt::pmt_t sym_invalid_input;
+    pmt::pmt_t sym_invalid_truth;
+    pmt::pmt_t sym_truth_ready;
+    pmt::pmt_t sym_queue_overflow;
+    pmt::pmt_t sym_bypass_fifo_full;
+    pmt::pmt_t sym_in_flight_limit;
+    pmt::pmt_t sym_iq_budget;
+    pmt::pmt_t sym_queue_full;
+    pmt::pmt_t sym_pool_capacity_exceeded;
+    pmt::pmt_t sym_sic_estimate_failed;
+    pmt::pmt_t sym_sic_one_failed;
+    pmt::pmt_t sym_whole_window_default;
+    pmt::pmt_t sym_fingerprint_zero;
+
+    // States
+    pmt::pmt_t sym_bypassed;
+    pmt::pmt_t sym_committed;
+    pmt::pmt_t sym_failed;
+    pmt::pmt_t sym_ambiguous;
+
+    // SIC output metadata keys
+    pmt::pmt_t key_sic_state;
+    pmt::pmt_t key_sic_detected;
+    pmt::pmt_t key_sic_committed;
+    pmt::pmt_t key_sic_partial;
+    pmt::pmt_t key_sic_ambiguous;
+    pmt::pmt_t key_sic_bypass_reason;
+    pmt::pmt_t key_sic_uses_truth;
+    pmt::pmt_t key_sic_missed_admission;
+    pmt::pmt_t key_sic_detected_start;
+    pmt::pmt_t key_sic_cfo_hz;
+    pmt::pmt_t key_sic_n_paths;
+    pmt::pmt_t key_sic_support_lo;
+    pmt::pmt_t key_sic_support_hi;
+    pmt::pmt_t key_sic_sub_overlap;
+    pmt::pmt_t key_sic_residual_corr;
+    pmt::pmt_t key_sic_model_mode;
+    pmt::pmt_t key_sic_model_id;
+    pmt::pmt_t key_sic_model_fingerprint;
+    pmt::pmt_t key_sic_observed_end_sample;
+    pmt::pmt_t key_sic_observed_end_source;
+    pmt::pmt_t key_sic_visible_end_sample;
+    pmt::pmt_t key_sic_training_lo;
+    pmt::pmt_t key_sic_training_hi;
+    pmt::pmt_t key_sic_estimation_ready_sample;
+    pmt::pmt_t key_sic_support_source;
+    pmt::pmt_t key_sic_support_coverage;
+    pmt::pmt_t key_sic_sub_lo;
+    pmt::pmt_t key_sic_sub_hi;
+    pmt::pmt_t key_sic_phase_reference;
+    pmt::pmt_t key_sic_fit_residual;
+    pmt::pmt_t key_sic_cond2;
+    pmt::pmt_t key_sic_tau;
+    pmt::pmt_t key_sic_gain_re;
+    pmt::pmt_t key_sic_gain_im;
+    pmt::pmt_t key_sic_path_count;
+    pmt::pmt_t key_sic_gain_cond;
+    pmt::pmt_t key_sic_apply_refit_count;
+    pmt::pmt_t key_sic_apply_param_deltas;
+    pmt::pmt_t key_sic_nominal_sync_reps;
+    pmt::pmt_t key_sic_samples_per_symbol;
+    pmt::pmt_t key_sic_sample_rate;
+
+    // Timer & Diagnostic keys
+    pmt::pmt_t key_handler_us;
+    pmt::pmt_t key_queue_wait_us;
+    pmt::pmt_t key_core_total_us;
+    pmt::pmt_t key_sic_detect_coarse_us;
+    pmt::pmt_t key_sic_detect_fine_us;
+    pmt::pmt_t key_sic_cfo_us;
+    pmt::pmt_t key_sic_cir_us;
+    pmt::pmt_t key_sic_path_select_us;
+    pmt::pmt_t key_sic_fractional_refine_us;
+    pmt::pmt_t key_sic_matrix_build_us;
+    pmt::pmt_t key_sic_gain_fit_us;
+    pmt::pmt_t key_sic_reconstruct_us;
+    pmt::pmt_t key_sic_validate_commit_us;
+    pmt::pmt_t key_sic_estimate_us;
+    pmt::pmt_t key_sic_model_prepare_us;
+    pmt::pmt_t key_sic_apply_us;
+    pmt::pmt_t key_sic_backfill_us;
+    pmt::pmt_t key_sic_apply_forward_us;
+    pmt::pmt_t key_sic_refine_init_rot_us;
+    pmt::pmt_t key_sic_refine_init_columns_us;
+    pmt::pmt_t key_sic_refine_init_qr_us;
+    pmt::pmt_t key_sic_refine_resid_us;
+    pmt::pmt_t key_sic_refine_derot_us;
+    pmt::pmt_t key_sic_refine_candidate_us;
+    pmt::pmt_t key_sic_refine_project_us;
+    pmt::pmt_t key_sic_refine_self_energy_us;
+    pmt::pmt_t key_sic_refine_k;
+    pmt::pmt_t key_sic_refine_m;
+    pmt::pmt_t key_sic_refine_candidates;
+    pmt::pmt_t key_sic_refine_rebuilds;
+    pmt::pmt_t key_sic_refine_cache_hits;
+    pmt::pmt_t key_sic_refine_cache_misses;
+    pmt::pmt_t key_sic_refine_self_energy_hits;
+    pmt::pmt_t key_sic_refine_self_energy_misses;
+    pmt::pmt_t key_sic_apply_block_builds;
+    pmt::pmt_t key_sic_apply_block_hits;
+    pmt::pmt_t key_sic_apply_rot_base_hits;
+    pmt::pmt_t key_sic_apply_rot_base_misses;
+    pmt::pmt_t key_output_wrap_publish_us;
+    pmt::pmt_t key_completion_latency_us;
+    pmt::pmt_t key_sic_pool_capacity_exceeded;
+
+    // Status counters
+    pmt::pmt_t key_windows_offered;
+    pmt::pmt_t key_windows_admitted;
+    pmt::pmt_t key_windows_completed;
+    pmt::pmt_t key_windows_failed;
+    pmt::pmt_t key_windows_bypassed;
+    pmt::pmt_t key_windows_dropped;
+    pmt::pmt_t key_windows_invalid;
+    pmt::pmt_t key_windows_missed_admission;
+    pmt::pmt_t key_missed_admission;
+
+    // Mode name symbols
+    pmt::pmt_t sym_estimate8_frozen;
+    pmt::pmt_t sym_confirmed_legacy;
+    pmt::pmt_t sym_configured_nominal;
+
+    SicPmtSymbols()
+        : port_in(pmt::string_to_symbol("in")),
+          port_out(pmt::string_to_symbol("out")),
+          port_status(pmt::string_to_symbol("status")),
+          port_truth(pmt::string_to_symbol("truth")),
+          port_i_hat(pmt::string_to_symbol("i_hat")),
+          key_window_id(pmt::string_to_symbol("window_id")),
+          key_event(pmt::string_to_symbol("event")),
+          key_reason(pmt::string_to_symbol("reason")),
+          key_sample_count(pmt::string_to_symbol("sample_count")),
+          key_planned_publish_ns(pmt::string_to_symbol("planned_publish_ns")),
+          key_sensing_roi_lo(pmt::string_to_symbol("sensing_roi_lo")),
+          key_sensing_roi_hi(pmt::string_to_symbol("sensing_roi_hi")),
+          key_sensing_min_overlap(pmt::string_to_symbol("sensing_min_overlap")),
+          key_observed_end_sample(pmt::string_to_symbol("observed_end_sample")),
+          key_visible_end_sample(pmt::string_to_symbol("visible_end_sample")),
+          key_start_sample(pmt::string_to_symbol("start_sample")),
+          key_cfo_hz(pmt::string_to_symbol("cfo_hz")),
+          key_tau(pmt::string_to_symbol("tau")),
+          key_gain_re(pmt::string_to_symbol("gain_re")),
+          key_gain_im(pmt::string_to_symbol("gain_im")),
+          key_n_paths(pmt::string_to_symbol("n_paths")),
+          sym_empty(pmt::string_to_symbol("")),
+          sym_none(pmt::string_to_symbol("none")),
+          sym_window(pmt::string_to_symbol("window")),
+          sym_stopped(pmt::string_to_symbol("stopped")),
+          sym_invalid_input(pmt::string_to_symbol("invalid_input")),
+          sym_invalid_truth(pmt::string_to_symbol("invalid_truth")),
+          sym_truth_ready(pmt::string_to_symbol("truth_ready")),
+          sym_queue_overflow(pmt::string_to_symbol("queue_overflow")),
+          sym_bypass_fifo_full(pmt::string_to_symbol("bypass_fifo_full")),
+          sym_in_flight_limit(pmt::string_to_symbol("in_flight_limit")),
+          sym_iq_budget(pmt::string_to_symbol("iq_budget")),
+          sym_queue_full(pmt::string_to_symbol("queue_full")),
+          sym_pool_capacity_exceeded(pmt::string_to_symbol("pool_capacity_exceeded")),
+          sym_sic_estimate_failed(pmt::string_to_symbol("sic_estimate_failed")),
+          sym_sic_one_failed(pmt::string_to_symbol("sic_one_failed")),
+          sym_whole_window_default(pmt::string_to_symbol("whole_window_default")),
+          sym_fingerprint_zero(pmt::string_to_symbol("0x0000000000000000")),
+          sym_bypassed(pmt::string_to_symbol("bypassed")),
+          sym_committed(pmt::string_to_symbol("committed")),
+          sym_failed(pmt::string_to_symbol("failed")),
+          sym_ambiguous(pmt::string_to_symbol("ambiguous")),
+          key_sic_state(pmt::string_to_symbol("sic_state")),
+          key_sic_detected(pmt::string_to_symbol("sic_detected")),
+          key_sic_committed(pmt::string_to_symbol("sic_committed")),
+          key_sic_partial(pmt::string_to_symbol("sic_partial")),
+          key_sic_ambiguous(pmt::string_to_symbol("sic_ambiguous")),
+          key_sic_bypass_reason(pmt::string_to_symbol("sic_bypass_reason")),
+          key_sic_uses_truth(pmt::string_to_symbol("sic_uses_truth")),
+          key_sic_missed_admission(pmt::string_to_symbol("sic_missed_admission")),
+          key_sic_detected_start(pmt::string_to_symbol("sic_detected_start")),
+          key_sic_cfo_hz(pmt::string_to_symbol("sic_cfo_hz")),
+          key_sic_n_paths(pmt::string_to_symbol("sic_n_paths")),
+          key_sic_support_lo(pmt::string_to_symbol("sic_support_lo")),
+          key_sic_support_hi(pmt::string_to_symbol("sic_support_hi")),
+          key_sic_sub_overlap(pmt::string_to_symbol("sic_sub_overlap")),
+          key_sic_residual_corr(pmt::string_to_symbol("sic_residual_corr")),
+          key_sic_model_mode(pmt::string_to_symbol("sic_model_mode")),
+          key_sic_model_id(pmt::string_to_symbol("sic_model_id")),
+          key_sic_model_fingerprint(pmt::string_to_symbol("sic_model_fingerprint")),
+          key_sic_observed_end_sample(pmt::string_to_symbol("sic_observed_end_sample")),
+          key_sic_observed_end_source(pmt::string_to_symbol("sic_observed_end_source")),
+          key_sic_visible_end_sample(pmt::string_to_symbol("sic_visible_end_sample")),
+          key_sic_training_lo(pmt::string_to_symbol("sic_training_lo")),
+          key_sic_training_hi(pmt::string_to_symbol("sic_training_hi")),
+          key_sic_estimation_ready_sample(pmt::string_to_symbol("sic_estimation_ready_sample")),
+          key_sic_support_source(pmt::string_to_symbol("sic_support_source")),
+          key_sic_support_coverage(pmt::string_to_symbol("sic_support_coverage")),
+          key_sic_sub_lo(pmt::string_to_symbol("sic_sub_lo")),
+          key_sic_sub_hi(pmt::string_to_symbol("sic_sub_hi")),
+          key_sic_phase_reference(pmt::string_to_symbol("sic_phase_reference")),
+          key_sic_fit_residual(pmt::string_to_symbol("sic_fit_residual")),
+          key_sic_cond2(pmt::string_to_symbol("sic_cond2")),
+          key_sic_tau(pmt::string_to_symbol("sic_tau")),
+          key_sic_gain_re(pmt::string_to_symbol("sic_gain_re")),
+          key_sic_gain_im(pmt::string_to_symbol("sic_gain_im")),
+          key_sic_path_count(pmt::string_to_symbol("sic_path_count")),
+          key_sic_gain_cond(pmt::string_to_symbol("sic_gain_cond")),
+          key_sic_apply_refit_count(pmt::string_to_symbol("sic_apply_refit_count")),
+          key_sic_apply_param_deltas(pmt::string_to_symbol("sic_apply_param_deltas")),
+          key_sic_nominal_sync_reps(pmt::string_to_symbol("sic_nominal_sync_reps")),
+          key_sic_samples_per_symbol(pmt::string_to_symbol("sic_samples_per_symbol")),
+          key_sic_sample_rate(pmt::string_to_symbol("sic_sample_rate")),
+          key_handler_us(pmt::string_to_symbol("handler_us")),
+          key_queue_wait_us(pmt::string_to_symbol("queue_wait_us")),
+          key_core_total_us(pmt::string_to_symbol("core_total_us")),
+          key_sic_detect_coarse_us(pmt::string_to_symbol("sic_detect_coarse_us")),
+          key_sic_detect_fine_us(pmt::string_to_symbol("sic_detect_fine_us")),
+          key_sic_cfo_us(pmt::string_to_symbol("sic_cfo_us")),
+          key_sic_cir_us(pmt::string_to_symbol("sic_cir_us")),
+          key_sic_path_select_us(pmt::string_to_symbol("sic_path_select_us")),
+          key_sic_fractional_refine_us(pmt::string_to_symbol("sic_fractional_refine_us")),
+          key_sic_matrix_build_us(pmt::string_to_symbol("sic_matrix_build_us")),
+          key_sic_gain_fit_us(pmt::string_to_symbol("sic_gain_fit_us")),
+          key_sic_reconstruct_us(pmt::string_to_symbol("sic_reconstruct_us")),
+          key_sic_validate_commit_us(pmt::string_to_symbol("sic_validate_commit_us")),
+          key_sic_estimate_us(pmt::string_to_symbol("sic_estimate_us")),
+          key_sic_model_prepare_us(pmt::string_to_symbol("sic_model_prepare_us")),
+          key_sic_apply_us(pmt::string_to_symbol("sic_apply_us")),
+          key_sic_backfill_us(pmt::string_to_symbol("sic_backfill_us")),
+          key_sic_apply_forward_us(pmt::string_to_symbol("sic_apply_forward_us")),
+          key_sic_refine_init_rot_us(pmt::string_to_symbol("sic_refine_init_rot_us")),
+          key_sic_refine_init_columns_us(pmt::string_to_symbol("sic_refine_init_columns_us")),
+          key_sic_refine_init_qr_us(pmt::string_to_symbol("sic_refine_init_qr_us")),
+          key_sic_refine_resid_us(pmt::string_to_symbol("sic_refine_resid_us")),
+          key_sic_refine_derot_us(pmt::string_to_symbol("sic_refine_derot_us")),
+          key_sic_refine_candidate_us(pmt::string_to_symbol("sic_refine_candidate_us")),
+          key_sic_refine_project_us(pmt::string_to_symbol("sic_refine_project_us")),
+          key_sic_refine_self_energy_us(pmt::string_to_symbol("sic_refine_self_energy_us")),
+          key_sic_refine_k(pmt::string_to_symbol("sic_refine_k")),
+          key_sic_refine_m(pmt::string_to_symbol("sic_refine_m")),
+          key_sic_refine_candidates(pmt::string_to_symbol("sic_refine_candidates")),
+          key_sic_refine_rebuilds(pmt::string_to_symbol("sic_refine_rebuilds")),
+          key_sic_refine_cache_hits(pmt::string_to_symbol("sic_refine_cache_hits")),
+          key_sic_refine_cache_misses(pmt::string_to_symbol("sic_refine_cache_misses")),
+          key_sic_refine_self_energy_hits(pmt::string_to_symbol("sic_refine_self_energy_hits")),
+          key_sic_refine_self_energy_misses(pmt::string_to_symbol("sic_refine_self_energy_misses")),
+          key_sic_apply_block_builds(pmt::string_to_symbol("sic_apply_block_builds")),
+          key_sic_apply_block_hits(pmt::string_to_symbol("sic_apply_block_hits")),
+          key_sic_apply_rot_base_hits(pmt::string_to_symbol("sic_apply_rot_base_hits")),
+          key_sic_apply_rot_base_misses(pmt::string_to_symbol("sic_apply_rot_base_misses")),
+          key_output_wrap_publish_us(pmt::string_to_symbol("output_wrap_publish_us")),
+          key_completion_latency_us(pmt::string_to_symbol("completion_latency_us")),
+          key_sic_pool_capacity_exceeded(pmt::string_to_symbol("sic_pool_capacity_exceeded")),
+          key_windows_offered(pmt::string_to_symbol("windows_offered")),
+          key_windows_admitted(pmt::string_to_symbol("windows_admitted")),
+          key_windows_completed(pmt::string_to_symbol("windows_completed")),
+          key_windows_failed(pmt::string_to_symbol("windows_failed")),
+          key_windows_bypassed(pmt::string_to_symbol("windows_bypassed")),
+          key_windows_dropped(pmt::string_to_symbol("windows_dropped")),
+          key_windows_invalid(pmt::string_to_symbol("windows_invalid")),
+          key_windows_missed_admission(pmt::string_to_symbol("windows_missed_admission")),
+          key_missed_admission(pmt::string_to_symbol("missed_admission")),
+          sym_estimate8_frozen(pmt::string_to_symbol("estimate8_frozen")),
+          sym_confirmed_legacy(pmt::string_to_symbol("confirmed_legacy")),
+          sym_configured_nominal(pmt::string_to_symbol("configured_nominal"))
+    {
+    }
+
+    static const SicPmtSymbols& get()
+    {
+        static const SicPmtSymbols instance;
+        return instance;
+    }
+
+    pmt::pmt_t event_symbol(const std::string& event) const
+    {
+        if (event == "window") return sym_window;
+        if (event == "stopped") return sym_stopped;
+        if (event == "invalid_input") return sym_invalid_input;
+        if (event == "invalid_truth") return sym_invalid_truth;
+        if (event == "truth_ready") return sym_truth_ready;
+        if (event == "queue_overflow") return sym_queue_overflow;
+        return pmt::string_to_symbol(event);
+    }
+
+    pmt::pmt_t reason_symbol(const char* reason) const
+    {
+        if (reason == nullptr || *reason == '\0') return sym_empty;
+        if (std::strcmp(reason, "queue_overflow") == 0) return sym_queue_overflow;
+        if (std::strcmp(reason, "bypass_fifo_full") == 0) return sym_bypass_fifo_full;
+        if (std::strcmp(reason, "in_flight_limit") == 0) return sym_in_flight_limit;
+        if (std::strcmp(reason, "iq_budget") == 0) return sym_iq_budget;
+        if (std::strcmp(reason, "queue_full") == 0) return sym_queue_full;
+        if (std::strcmp(reason, "pool_capacity_exceeded") == 0) return sym_pool_capacity_exceeded;
+        if (std::strcmp(reason, "sic_estimate_failed") == 0) return sym_sic_estimate_failed;
+        if (std::strcmp(reason, "sic_one_failed") == 0) return sym_sic_one_failed;
+        return pmt::string_to_symbol(reason);
+    }
+
+    pmt::pmt_t state_symbol(sic::SicState s) const
+    {
+        switch (s) {
+        case sic::SicState::Bypassed: return sym_bypassed;
+        case sic::SicState::Committed: return sym_committed;
+        case sic::SicState::Failed: return sym_failed;
+        case sic::SicState::Ambiguous: return sym_ambiguous;
+        }
+        return sym_failed;
+    }
+
+    pmt::pmt_t mode_symbol(const std::string& mode) const
+    {
+        if (mode == "estimate8_frozen") return sym_estimate8_frozen;
+        if (mode == "confirmed_legacy") return sym_confirmed_legacy;
+        return pmt::string_to_symbol(mode);
+    }
+
+    pmt::pmt_t support_source_symbol(const char* s) const
+    {
+        if (s == nullptr || *s == '\0' || std::strcmp(s, "none") == 0) return sym_none;
+        if (std::strcmp(s, "configured_nominal") == 0) return sym_configured_nominal;
+        if (std::strcmp(s, "confirmed_legacy") == 0) return sym_confirmed_legacy;
+        return pmt::string_to_symbol(s);
+    }
+
+    pmt::pmt_t observed_end_source_symbol(const char* s) const
+    {
+        if (s == nullptr || *s == '\0') return sym_empty;
+        if (std::strcmp(s, "whole_window_default") == 0) return sym_whole_window_default;
+        if (std::strcmp(s, "observed_end_sample") == 0) return key_observed_end_sample;
+        if (std::strcmp(s, "visible_end_sample") == 0) return key_visible_end_sample;
+        return pmt::string_to_symbol(s);
+    }
+};
+
+int64_t dict_i64(pmt::pmt_t dict, const pmt::pmt_t& key, int64_t def)
 {
     if (!pmt::is_dict(dict))
         return def;
-    pmt::pmt_t v = pmt::dict_ref(dict, pmt::mp(key), pmt::from_long(def));
+    pmt::pmt_t v = pmt::dict_ref(dict, key, pmt::from_long(def));
     if (pmt::is_uint64(v))
         return static_cast<int64_t>(pmt::to_uint64(v));
     if (pmt::is_integer(v))
@@ -53,11 +413,11 @@ int64_t dict_i64(pmt::pmt_t dict, const char* key, int64_t def)
     return def;
 }
 
-uint64_t dict_u64(pmt::pmt_t dict, const char* key, uint64_t def)
+uint64_t dict_u64(pmt::pmt_t dict, const pmt::pmt_t& key, uint64_t def)
 {
     if (!pmt::is_dict(dict))
         return def;
-    pmt::pmt_t v = pmt::dict_ref(dict, pmt::mp(key), pmt::from_uint64(def));
+    pmt::pmt_t v = pmt::dict_ref(dict, key, pmt::from_uint64(def));
     if (pmt::is_uint64(v))
         return pmt::to_uint64(v);
     if (pmt::is_integer(v))
@@ -65,33 +425,14 @@ uint64_t dict_u64(pmt::pmt_t dict, const char* key, uint64_t def)
     return def;
 }
 
-double dict_f64(pmt::pmt_t dict, const char* key, double def)
+double dict_f64(pmt::pmt_t dict, const pmt::pmt_t& key, double def)
 {
     if (!pmt::is_dict(dict))
         return def;
-    pmt::pmt_t v = pmt::dict_ref(dict, pmt::mp(key), pmt::from_double(def));
+    pmt::pmt_t v = pmt::dict_ref(dict, key, pmt::from_double(def));
     if (pmt::is_real(v) || pmt::is_integer(v) || pmt::is_uint64(v))
         return pmt::to_double(v);
     return def;
-}
-
-// Copy an input meta dict (the sensing description) into a fresh dict so the
-// adapter's own keys can be added without mutating the producer's object.  Every
-// input key is preserved verbatim: code_index / sync_repetitions / sfd_mode /
-// pulse_id / window ids are the SENSING description and must pass through
-// untouched (the comm profile is block config and never overwrites them).
-pmt::pmt_t copy_dict(pmt::pmt_t in)
-{
-    pmt::pmt_t out = pmt::make_dict();
-    if (!pmt::is_dict(in))
-        return out;
-    pmt::pmt_t items = pmt::dict_items(in);
-    const size_t n = pmt::length(items);
-    for (size_t i = 0; i < n; ++i) {
-        pmt::pmt_t kv = pmt::nth(i, items);
-        out = pmt::dict_add(out, pmt::car(kv), pmt::cdr(kv));
-    }
-    return out;
 }
 
 // S1 cancellation-support mode label -> core enumerator.  Explicit: an unknown
@@ -116,13 +457,14 @@ bool parse_support_mode(const std::string& s, sic::SicSupportMode& out)
 // records which input produced the value (adapter meta key, or the default).
 int64_t declared_observed_end(pmt::pmt_t meta, const char** source)
 {
-    if (pmt::dict_has_key(meta, pmt::mp("observed_end_sample"))) {
+    const auto& sym = SicPmtSymbols::get();
+    if (pmt::dict_has_key(meta, sym.key_observed_end_sample)) {
         *source = "observed_end_sample";
-        return dict_i64(meta, "observed_end_sample", 0);
+        return dict_i64(meta, sym.key_observed_end_sample, 0);
     }
-    if (pmt::dict_has_key(meta, pmt::mp("visible_end_sample"))) {
+    if (pmt::dict_has_key(meta, sym.key_visible_end_sample)) {
         *source = "visible_end_sample";
-        return dict_i64(meta, "visible_end_sample", 0);
+        return dict_i64(meta, sym.key_visible_end_sample, 0);
     }
     *source = "whole_window_default";
     return 0;
@@ -327,20 +669,21 @@ UwbPreambleSic::UwbPreambleSic(const std::vector<gr_complex>& sync,
             "thresholds");
     }
 
-    message_port_register_in(pmt::mp("in"));
+    const auto& sym = SicPmtSymbols::get();
+    message_port_register_in(sym.port_in);
     // The truth port is oracle-only: in estimate/off it does not exist and no
     // truth object is ever stored on the block.
     if (d_truth_oracle_) {
-        message_port_register_in(pmt::mp("truth"));
-        set_msg_handler(pmt::mp("truth"),
+        message_port_register_in(sym.port_truth);
+        set_msg_handler(sym.port_truth,
                         [this](pmt::pmt_t msg) { handle_truth(msg); });
     }
-    message_port_register_out(pmt::mp("out"));
-    message_port_register_out(pmt::mp("status"));
+    message_port_register_out(sym.port_out);
+    message_port_register_out(sym.port_status);
     if (d_publish_reconstruction_)
-        message_port_register_out(pmt::mp("i_hat"));
+        message_port_register_out(sym.port_i_hat);
 
-    set_msg_handler(pmt::mp("in"),
+    set_msg_handler(sym.port_in,
                     [this](pmt::pmt_t msg) { handle_in(msg); });
 }
 
@@ -565,9 +908,10 @@ UwbPreambleSic::handle_in(pmt::pmt_t msg)
         publish_status("invalid_input");
         return;
     }
+    const auto& sym = SicPmtSymbols::get();
     // "wrong length": a declared sample_count must agree with the vector.
-    if (pmt::dict_has_key(meta_in, pmt::mp("sample_count"))) {
-        const int64_t sc = dict_i64(meta_in, "sample_count", -1);
+    if (pmt::dict_has_key(meta_in, sym.key_sample_count)) {
+        const int64_t sc = dict_i64(meta_in, sym.key_sample_count, -1);
         if (sc < 0 || static_cast<uint64_t>(sc) != static_cast<uint64_t>(n)) {
             d_invalid_.fetch_add(1, std::memory_order_relaxed);
             publish_status("invalid_input");
@@ -587,8 +931,8 @@ UwbPreambleSic::handle_in(pmt::pmt_t msg)
     p.iq_in = data;
     p.n = n;
     p.bytes = n * sizeof(gr_complex);
-    if (pmt::dict_has_key(meta_in, pmt::mp("planned_publish_ns"))) {
-        const int64_t plan_ns = dict_i64(meta_in, "planned_publish_ns", 0);
+    if (pmt::dict_has_key(meta_in, sym.key_planned_publish_ns)) {
+        const int64_t plan_ns = dict_i64(meta_in, sym.key_planned_publish_ns, 0);
         p.offered_at = (plan_ns > 0)
             ? std::chrono::steady_clock::time_point(
                   std::chrono::nanoseconds(plan_ns))
@@ -655,16 +999,16 @@ UwbPreambleSic::handle_in(pmt::pmt_t msg)
         d_queue_overflow_.fetch_add(1, std::memory_order_relaxed);
         d_dropped_.fetch_add(1, std::memory_order_relaxed);
         pmt::pmt_t extra = pmt::make_dict();
-        extra = pmt::dict_add(extra, pmt::mp("window_id"),
-                              pmt::from_uint64(dict_u64(meta_in,
-                                                        "window_id", 0)));
-        extra = pmt::dict_add(extra, pmt::mp("sic_state"),
-                              pmt::mp("queue_overflow"));
-        extra = pmt::dict_add(extra, pmt::mp("reason"),
-                              pmt::mp("bypass_fifo_full"));
-        extra = pmt::dict_add(extra, pmt::mp("handler_us"),
-                              pmt::from_uint64(elapsed_us(
-                                  t0, std::chrono::steady_clock::now())));
+        extra = pmt::dcons(
+            pmt::cons(sym.key_window_id,
+                      pmt::from_uint64(dict_u64(meta_in, sym.key_window_id, 0))),
+            extra);
+        extra = pmt::dcons(pmt::cons(sym.key_sic_state, sym.sym_queue_overflow), extra);
+        extra = pmt::dcons(pmt::cons(sym.key_reason, sym.sym_bypass_fifo_full), extra);
+        extra = pmt::dcons(
+            pmt::cons(sym.key_handler_us,
+                      pmt::from_uint64(elapsed_us(t0, std::chrono::steady_clock::now()))),
+            extra);
         publish_status("queue_overflow", extra);
         return;
     }
@@ -674,40 +1018,41 @@ UwbPreambleSic::handle_in(pmt::pmt_t msg)
 void
 UwbPreambleSic::handle_truth(pmt::pmt_t msg)
 {
+    const auto& sym = SicPmtSymbols::get();
     // Oracle-only diagnostic sidecar.  Never consulted in Estimate mode.
-    if (!pmt::is_dict(msg) || !pmt::dict_has_key(msg, pmt::mp("window_id"))) {
+    if (!pmt::is_dict(msg) || !pmt::dict_has_key(msg, sym.key_window_id)) {
         publish_status("invalid_truth");
         return;
     }
     sic::SicTruth t;
     t.valid = true;
-    t.start_sample = dict_f64(msg, "start_sample", 0.0);
-    t.cfo_hz = dict_f64(msg, "cfo_hz", 0.0);
+    t.start_sample = dict_f64(msg, sym.key_start_sample, 0.0);
+    t.cfo_hz = dict_f64(msg, sym.key_cfo_hz, 0.0);
 
     size_t nt = 0;
     const double* tau = nullptr;
-    if (pmt::dict_has_key(msg, pmt::mp("tau"))) {
-        pmt::pmt_t v = pmt::dict_ref(msg, pmt::mp("tau"), pmt::PMT_NIL);
+    if (pmt::dict_has_key(msg, sym.key_tau)) {
+        pmt::pmt_t v = pmt::dict_ref(msg, sym.key_tau, pmt::PMT_NIL);
         if (pmt::is_f64vector(v))
             tau = pmt::f64vector_elements(v, nt);
     }
     size_t ng = 0, ni = 0;
     const double* gr = nullptr;
     const double* gi = nullptr;
-    if (pmt::dict_has_key(msg, pmt::mp("gain_re"))) {
-        pmt::pmt_t v = pmt::dict_ref(msg, pmt::mp("gain_re"), pmt::PMT_NIL);
+    if (pmt::dict_has_key(msg, sym.key_gain_re)) {
+        pmt::pmt_t v = pmt::dict_ref(msg, sym.key_gain_re, pmt::PMT_NIL);
         if (pmt::is_f64vector(v))
             gr = pmt::f64vector_elements(v, ng);
     }
-    if (pmt::dict_has_key(msg, pmt::mp("gain_im"))) {
-        pmt::pmt_t v = pmt::dict_ref(msg, pmt::mp("gain_im"), pmt::PMT_NIL);
+    if (pmt::dict_has_key(msg, sym.key_gain_im)) {
+        pmt::pmt_t v = pmt::dict_ref(msg, sym.key_gain_im, pmt::PMT_NIL);
         if (pmt::is_f64vector(v))
             gi = pmt::f64vector_elements(v, ni);
     }
     const size_t avail =
         std::min({ nt, ng, ni, static_cast<size_t>(sic::kSicMaxPaths) });
     size_t np = static_cast<size_t>(
-        std::max<int64_t>(0, dict_i64(msg, "n_paths", (int64_t)avail)));
+        std::max<int64_t>(0, dict_i64(msg, sym.key_n_paths, (int64_t)avail)));
     np = std::min(np, avail);
     t.n_paths = np;
     for (size_t k = 0; k < np; ++k) {
@@ -718,7 +1063,7 @@ UwbPreambleSic::handle_truth(pmt::pmt_t msg)
                                         static_cast<float>(im));
     }
 
-    const uint64_t wid = dict_u64(msg, "window_id", 0);
+    const uint64_t wid = dict_u64(msg, sym.key_window_id, 0);
     {
         std::lock_guard<std::mutex> lock(d_truth_mutex_);
         d_truth_[wid] = t;
@@ -728,8 +1073,7 @@ UwbPreambleSic::handle_truth(pmt::pmt_t msg)
     // `in` gives no cross-port ordering guarantee.  A producer that needs the
     // sidecar to be visible before the window can wait for this event.
     pmt::pmt_t extra = pmt::make_dict();
-    extra = pmt::dict_add(extra, pmt::mp("window_id"),
-                          pmt::from_uint64(wid));
+    extra = pmt::dcons(pmt::cons(sym.key_window_id, pmt::from_uint64(wid)), extra);
     publish_status("truth_ready", extra);
 }
 
@@ -810,6 +1154,7 @@ UwbPreambleSic::state_name(sic::SicState s)
 void
 UwbPreambleSic::process(Pending& p)
 {
+    const auto& sym = SicPmtSymbols::get();
     const auto t_worker0 = std::chrono::steady_clock::now();
     const uint64_t queue_wait_us = elapsed_us(p.enqueued_at, t_worker0);
 
@@ -852,12 +1197,12 @@ UwbPreambleSic::process(Pending& p)
         // bypassed instead of committed (out == y).  Absent keys leave the gate
         // disabled (legacy behaviour: subtraction = support ∩ search ROI).
         sic::SicConfig cfg = d_cfg_;
-        if (pmt::dict_has_key(p.meta_in, pmt::mp("sensing_roi_lo")) ||
-            pmt::dict_has_key(p.meta_in, pmt::mp("sensing_roi_hi"))) {
-            cfg.sub_roi_lo = dict_i64(p.meta_in, "sensing_roi_lo", 0);
-            cfg.sub_roi_hi = dict_i64(p.meta_in, "sensing_roi_hi", 0);
+        if (pmt::dict_has_key(p.meta_in, sym.key_sensing_roi_lo) ||
+            pmt::dict_has_key(p.meta_in, sym.key_sensing_roi_hi)) {
+            cfg.sub_roi_lo = dict_i64(p.meta_in, sym.key_sensing_roi_lo, 0);
+            cfg.sub_roi_hi = dict_i64(p.meta_in, sym.key_sensing_roi_hi, 0);
             cfg.sub_min_overlap =
-                dict_u64(p.meta_in, "sensing_min_overlap", d_cfg_.sub_min_overlap);
+                dict_u64(p.meta_in, sym.key_sensing_min_overlap, d_cfg_.sub_min_overlap);
         }
         // S1: per-window estimation visibility.  `observed_end_sample` (or the
         // `visible_end_sample` alias) is taken from the meta when the caller
@@ -918,7 +1263,7 @@ UwbPreambleSic::process(Pending& p)
                     if (backfill_end > 0)
                         sic::apply_model(model, y, backfill_end, 0, tpl, cfg,
                                          d_scratch_, d_out_.data(), r.i_hat,
-                                         &r.timings);
+                                         &r.timings, true);
                     r.timings.backfill_us =
                         elapsed_us(t_bf0, std::chrono::steady_clock::now());
                     const auto t_fw0 = std::chrono::steady_clock::now();
@@ -929,7 +1274,7 @@ UwbPreambleSic::process(Pending& p)
                                          static_cast<int64_t>(fwd0), tpl, cfg,
                                          d_scratch_, d_out_.data() + fwd0,
                                          r.i_hat ? r.i_hat + fwd0 : nullptr,
-                                         &r.timings);
+                                         &r.timings, true);
                     r.timings.apply_forward_us =
                         elapsed_us(t_fw0, std::chrono::steady_clock::now());
                 }
@@ -946,7 +1291,7 @@ UwbPreambleSic::process(Pending& p)
             sic::SicTruth truth;
             const sic::SicTruth* truth_ptr = nullptr;
             if (d_cfg_.mode == sic::SicMode::Oracle) {
-                const uint64_t wid = dict_u64(p.meta_in, "window_id", 0);
+                const uint64_t wid = dict_u64(p.meta_in, sym.key_window_id, 0);
                 std::lock_guard<std::mutex> lock(d_truth_mutex_);
                 auto it = d_truth_.find(wid);
                 if (it != d_truth_.end()) {
@@ -987,50 +1332,48 @@ UwbPreambleSic::process(Pending& p)
 
     // ---- wrap + publish ---------------------------------------------------
     const auto t_wrap0 = std::chrono::steady_clock::now();
-    pmt::pmt_t meta = copy_dict(p.meta_in);
-    auto put_u64 = [&meta](const char* k, uint64_t v) {
-        meta = pmt::dict_add(meta, pmt::mp(k), pmt::from_uint64(v));
+    pmt::pmt_t meta = pmt::is_dict(p.meta_in) ? p.meta_in : pmt::make_dict();
+    auto put_u64 = [&meta](const pmt::pmt_t& k, uint64_t v) {
+        meta = pmt::dcons(pmt::cons(k, pmt::from_uint64(v)), meta);
     };
-    auto put_i64 = [&meta](const char* k, int64_t v) {
-        meta = pmt::dict_add(meta, pmt::mp(k), pmt::from_long(v));
+    auto put_i64 = [&meta](const pmt::pmt_t& k, int64_t v) {
+        meta = pmt::dcons(pmt::cons(k, pmt::from_long(v)), meta);
     };
-    auto put_f64 = [&meta](const char* k, double v) {
-        meta = pmt::dict_add(meta, pmt::mp(k), pmt::from_double(v));
+    auto put_f64 = [&meta](const pmt::pmt_t& k, double v) {
+        meta = pmt::dcons(pmt::cons(k, pmt::from_double(v)), meta);
     };
-    auto put_bool = [&meta](const char* k, bool v) {
-        meta = pmt::dict_add(meta, pmt::mp(k), pmt::from_bool(v));
+    auto put_bool = [&meta](const pmt::pmt_t& k, bool v) {
+        meta = pmt::dcons(pmt::cons(k, pmt::from_bool(v)), meta);
     };
 
     const sic::SicState st =
         (p.admitted && sic_ran) ? r.state : sic::SicState::Bypassed;
 
-    meta = pmt::dict_add(meta, pmt::mp("sic_state"),
-                         pmt::string_to_symbol(state_name(st)));
-    put_bool("sic_detected", p.admitted && sic_ran && r.detected);
-    put_bool("sic_committed", committed);
-    put_bool("sic_partial", p.admitted && sic_ran && r.partial);
-    put_bool("sic_ambiguous", p.admitted && sic_ran && r.ambiguous);
-    meta = pmt::dict_add(
-        meta, pmt::mp("sic_bypass_reason"),
-        (reason != nullptr) ? pmt::string_to_symbol(reason) : pmt::mp(""));
-    put_bool("sic_uses_truth", uses_truth);
+    meta = pmt::dcons(pmt::cons(sym.key_sic_state, sym.state_symbol(st)), meta);
+    put_bool(sym.key_sic_detected, p.admitted && sic_ran && r.detected);
+    put_bool(sym.key_sic_committed, committed);
+    put_bool(sym.key_sic_partial, p.admitted && sic_ran && r.partial);
+    put_bool(sym.key_sic_ambiguous, p.admitted && sic_ran && r.ambiguous);
+    meta = pmt::dcons(
+        pmt::cons(sym.key_sic_bypass_reason, sym.reason_symbol(reason)), meta);
+    put_bool(sym.key_sic_uses_truth, uses_truth);
     // Additive diagnostic: true when this window was rejected by admission and
     // passed through unchanged (the reason is in sic_bypass_reason).
-    put_bool("sic_missed_admission", !p.admitted);
-    put_i64("sic_detected_start",
+    put_bool(sym.key_sic_missed_admission, !p.admitted);
+    put_i64(sym.key_sic_detected_start,
             (p.admitted && sic_ran) ? r.detected_start : int64_t(-1));
-    put_f64("sic_cfo_hz", (p.admitted && sic_ran) ? r.cfo_hz : 0.0);
-    put_u64("sic_n_paths",
+    put_f64(sym.key_sic_cfo_hz, (p.admitted && sic_ran) ? r.cfo_hz : 0.0);
+    put_u64(sym.key_sic_n_paths,
             (p.admitted && sic_ran) ? static_cast<uint64_t>(r.n_paths) : 0);
-    put_i64("sic_support_lo",
+    put_i64(sym.key_sic_support_lo,
             (p.admitted && sic_ran) ? r.support_lo : int64_t(-1));
-    put_i64("sic_support_hi",
+    put_i64(sym.key_sic_support_hi,
             (p.admitted && sic_ran) ? r.support_hi : int64_t(-1));
     // Actionable overlap of the detected support with the sensing processing ROI
     // (the subtraction/commit gate).  -1 when no sensing ROI was supplied.
-    put_i64("sic_sub_overlap",
+    put_i64(sym.key_sic_sub_overlap,
             (p.admitted && sic_ran) ? r.sub_overlap : int64_t(-1));
-    put_f64("sic_residual_corr",
+    put_f64(sym.key_sic_residual_corr,
             (p.admitted && sic_ran) ? r.residual_corr : 0.0);
 
     const bool have_core = p.admitted && sic_ran;
@@ -1068,31 +1411,40 @@ UwbPreambleSic::process(Pending& p)
         if (support_coverage < 0.0)
             support_coverage = 0.0;
     }
-    meta = pmt::dict_add(meta, pmt::mp("sic_model_mode"),
-                         pmt::string_to_symbol(d_model_mode_name_));
-    put_u64("sic_model_id", have_model ? model.model_id : uint64_t(0));
-    meta = pmt::dict_add(
-        meta, pmt::mp("sic_model_fingerprint"),
-        pmt::string_to_symbol(hex_u64(have_model ? model.model_id : 0)));
-    put_i64("sic_observed_end_sample", declared_end);
-    meta = pmt::dict_add(meta, pmt::mp("sic_observed_end_source"),
-                         pmt::string_to_symbol(observed_end_source));
-    put_i64("sic_visible_end_sample", resolved_end);
-    put_i64("sic_training_lo", have_model ? model.training_lo : int64_t(-1));
-    put_i64("sic_training_hi", have_model ? model.training_hi : int64_t(-1));
-    put_i64("sic_estimation_ready_sample",
+    meta = pmt::dcons(
+        pmt::cons(sym.key_sic_model_mode, sym.mode_symbol(d_model_mode_name_)),
+        meta);
+    put_u64(sym.key_sic_model_id, have_model ? model.model_id : uint64_t(0));
+    meta = pmt::dcons(
+        pmt::cons(
+            sym.key_sic_model_fingerprint,
+            (have_model && model.model_id != 0)
+                ? pmt::string_to_symbol(hex_u64(model.model_id))
+                : sym.sym_fingerprint_zero),
+        meta);
+    put_i64(sym.key_sic_observed_end_sample, declared_end);
+    meta = pmt::dcons(
+        pmt::cons(sym.key_sic_observed_end_source,
+                  sym.observed_end_source_symbol(observed_end_source)),
+        meta);
+    put_i64(sym.key_sic_visible_end_sample, resolved_end);
+    put_i64(sym.key_sic_training_lo, have_model ? model.training_lo : int64_t(-1));
+    put_i64(sym.key_sic_training_hi, have_model ? model.training_hi : int64_t(-1));
+    put_i64(sym.key_sic_estimation_ready_sample,
             have_model ? model.estimation_ready_sample : int64_t(-1));
-    meta = pmt::dict_add(meta, pmt::mp("sic_support_source"),
-                         pmt::string_to_symbol(support_source_pub));
-    put_f64("sic_support_coverage", support_coverage);
-    put_i64("sic_sub_lo", have_model ? model.sub_lo : int64_t(-1));
-    put_i64("sic_sub_hi", have_model ? model.sub_hi : int64_t(-1));
-    put_i64("sic_phase_reference",
+    meta = pmt::dcons(
+        pmt::cons(sym.key_sic_support_source,
+                  sym.support_source_symbol(support_source_pub)),
+        meta);
+    put_f64(sym.key_sic_support_coverage, support_coverage);
+    put_i64(sym.key_sic_sub_lo, have_model ? model.sub_lo : int64_t(-1));
+    put_i64(sym.key_sic_sub_hi, have_model ? model.sub_hi : int64_t(-1));
+    put_i64(sym.key_sic_phase_reference,
             have_model ? model.phase_reference_sample : int64_t(-1));
-    put_f64("sic_fit_residual",
+    put_f64(sym.key_sic_fit_residual,
             have_model ? model.fit_residual
                        : (have_core ? r.fit_residual : 0.0));
-    put_f64("sic_cond2",
+    put_f64(sym.key_sic_cond2,
             have_model ? model.gain_condition
                        : (have_core ? r.gain_condition : 0.0));
 
@@ -1121,61 +1473,89 @@ UwbPreambleSic::process(Pending& p)
         gre_tbl[k] = static_cast<double>(model.gain[k].real());
         gim_tbl[k] = static_cast<double>(model.gain[k].imag());
     }
-    meta = pmt::dict_add(meta, pmt::mp("sic_tau"),
-                         pmt::init_f64vector(n_tbl, tau_tbl));
-    meta = pmt::dict_add(meta, pmt::mp("sic_gain_re"),
-                         pmt::init_f64vector(n_tbl, gre_tbl));
-    meta = pmt::dict_add(meta, pmt::mp("sic_gain_im"),
-                         pmt::init_f64vector(n_tbl, gim_tbl));
-    put_u64("sic_path_count", static_cast<uint64_t>(n_tbl));
-    put_f64("sic_gain_cond",
+    meta = pmt::dcons(
+        pmt::cons(sym.key_sic_tau, pmt::init_f64vector(n_tbl, tau_tbl)), meta);
+    meta = pmt::dcons(
+        pmt::cons(sym.key_sic_gain_re, pmt::init_f64vector(n_tbl, gre_tbl)), meta);
+    meta = pmt::dcons(
+        pmt::cons(sym.key_sic_gain_im, pmt::init_f64vector(n_tbl, gim_tbl)), meta);
+    put_u64(sym.key_sic_path_count, static_cast<uint64_t>(n_tbl));
+    put_f64(sym.key_sic_gain_cond,
             have_model ? model.gain_condition
                        : (have_core ? r.gain_condition : 0.0));
     // apply_model takes the model by const reference and has no re-fit path, so
     // the frozen parameters cannot change during apply.  These are the contract
     // witnesses the QA asserts on every committed window.
-    put_u64("sic_apply_refit_count", uint64_t(0));
-    put_u64("sic_apply_param_deltas", uint64_t(0));
-    put_u64("sic_nominal_sync_reps",
+    put_u64(sym.key_sic_apply_refit_count, uint64_t(0));
+    put_u64(sym.key_sic_apply_param_deltas, uint64_t(0));
+    put_u64(sym.key_sic_nominal_sync_reps,
             have_model ? static_cast<uint64_t>(model.nominal_sync_reps)
                        : static_cast<uint64_t>(d_cfg_.sync_reps));
-    put_u64("sic_samples_per_symbol",
+    put_u64(sym.key_sic_samples_per_symbol,
             have_model ? static_cast<uint64_t>(model.samples_per_symbol)
                        : static_cast<uint64_t>(d_cfg_.samples_per_symbol));
-    put_f64("sic_sample_rate",
+    put_f64(sym.key_sic_sample_rate,
             have_model ? model.sample_rate : d_cfg_.sample_rate);
 
     // Adapter timers.  Values written here are measured through CONSTRUCTION:
     // a message cannot carry the duration of its own enqueue.  The
     // pub-inclusive mirrors are published on the `status` event below.
-    put_u64("handler_us", p.handler_us);
-    put_u64("queue_wait_us", queue_wait_us);
-    put_u64("core_total_us", have_core ? r.timings.core_total_us : 0);
+    put_u64(sym.key_handler_us, p.handler_us);
+    put_u64(sym.key_queue_wait_us, queue_wait_us);
+    put_u64(sym.key_core_total_us, have_core ? r.timings.core_total_us : 0);
 
     // Core stage timers (children of core_total_us; never double counted).
     const sic::SicTimings& tt = r.timings;
-    put_u64("sic_detect_coarse_us", have_core ? tt.detect_coarse_us : 0);
-    put_u64("sic_detect_fine_us", have_core ? tt.detect_fine_us : 0);
-    put_u64("sic_cfo_us", have_core ? tt.cfo_us : 0);
-    put_u64("sic_cir_us", have_core ? tt.cir_us : 0);
-    put_u64("sic_path_select_us", have_core ? tt.path_select_us : 0);
-    put_u64("sic_fractional_refine_us",
+    put_u64(sym.key_sic_detect_coarse_us, have_core ? tt.detect_coarse_us : 0);
+    put_u64(sym.key_sic_detect_fine_us, have_core ? tt.detect_fine_us : 0);
+    put_u64(sym.key_sic_cfo_us, have_core ? tt.cfo_us : 0);
+    put_u64(sym.key_sic_cir_us, have_core ? tt.cir_us : 0);
+    put_u64(sym.key_sic_path_select_us, have_core ? tt.path_select_us : 0);
+    put_u64(sym.key_sic_fractional_refine_us,
             have_core ? tt.fractional_refine_us : 0);
-    put_u64("sic_matrix_build_us", have_core ? tt.matrix_build_us : 0);
-    put_u64("sic_gain_fit_us", have_core ? tt.gain_fit_us : 0);
-    put_u64("sic_reconstruct_us", have_core ? tt.reconstruct_us : 0);
-    put_u64("sic_validate_commit_us", have_core ? tt.validate_commit_us : 0);
+    put_u64(sym.key_sic_matrix_build_us, have_core ? tt.matrix_build_us : 0);
+    put_u64(sym.key_sic_gain_fit_us, have_core ? tt.gain_fit_us : 0);
+    put_u64(sym.key_sic_reconstruct_us, have_core ? tt.reconstruct_us : 0);
+    put_u64(sym.key_sic_validate_commit_us, have_core ? tt.validate_commit_us : 0);
 
     // S1 decomposition.  These describe the estimate/apply split and are NOT
     // summed into core_total_us (estimate_total_us is itself the parent of the
     // stage children above; model_prepare_us is inside estimate_total_us;
     // apply_us == backfill_us + apply_forward_us).  No parent/child is added
     // twice anywhere.
-    put_u64("sic_estimate_us", have_core ? tt.estimate_total_us : 0);
-    put_u64("sic_model_prepare_us", have_core ? tt.model_prepare_us : 0);
-    put_u64("sic_apply_us", have_core ? tt.apply_us : 0);
-    put_u64("sic_backfill_us", have_core ? tt.backfill_us : 0);
-    put_u64("sic_apply_forward_us", have_core ? tt.apply_forward_us : 0);
+    put_u64(sym.key_sic_estimate_us, have_core ? tt.estimate_total_us : 0);
+    put_u64(sym.key_sic_model_prepare_us, have_core ? tt.model_prepare_us : 0);
+    put_u64(sym.key_sic_apply_us, have_core ? tt.apply_us : 0);
+    put_u64(sym.key_sic_backfill_us, have_core ? tt.backfill_us : 0);
+    put_u64(sym.key_sic_apply_forward_us, have_core ? tt.apply_forward_us : 0);
+    // Refine children and cache counts.  Not members of SIC_CORE_STAGES: the
+    // sim must not copy them into scope=sic stage rows (that sum is checked
+    // against core_total_us).  They are diagnostic only.
+    put_u64(sym.key_sic_refine_init_rot_us, have_core ? tt.refine_init_rot_us : 0);
+    put_u64(sym.key_sic_refine_init_columns_us,
+            have_core ? tt.refine_init_columns_us : 0);
+    put_u64(sym.key_sic_refine_init_qr_us, have_core ? tt.refine_init_qr_us : 0);
+    put_u64(sym.key_sic_refine_resid_us, have_core ? tt.refine_resid_us : 0);
+    put_u64(sym.key_sic_refine_derot_us, have_core ? tt.refine_derot_us : 0);
+    put_u64(sym.key_sic_refine_candidate_us, have_core ? tt.refine_candidate_us : 0);
+    put_u64(sym.key_sic_refine_project_us, have_core ? tt.refine_project_us : 0);
+    put_u64(sym.key_sic_refine_self_energy_us,
+            have_core ? tt.refine_self_energy_us : 0);
+    put_u64(sym.key_sic_refine_k, have_core ? tt.refine_k : 0);
+    put_u64(sym.key_sic_refine_m, have_core ? tt.refine_m : 0);
+    put_u64(sym.key_sic_refine_candidates, have_core ? tt.refine_candidates : 0);
+    put_u64(sym.key_sic_refine_rebuilds, have_core ? tt.refine_rebuilds : 0);
+    put_u64(sym.key_sic_refine_cache_hits, have_core ? tt.refine_cache_hits : 0);
+    put_u64(sym.key_sic_refine_cache_misses, have_core ? tt.refine_cache_misses : 0);
+    put_u64(sym.key_sic_refine_self_energy_hits,
+            have_core ? tt.refine_self_energy_hits : 0);
+    put_u64(sym.key_sic_refine_self_energy_misses,
+            have_core ? tt.refine_self_energy_misses : 0);
+    put_u64(sym.key_sic_apply_block_builds, have_core ? tt.apply_block_builds : 0);
+    put_u64(sym.key_sic_apply_block_hits, have_core ? tt.apply_block_hits : 0);
+    put_u64(sym.key_sic_apply_rot_base_hits, have_core ? tt.apply_rot_base_hits : 0);
+    put_u64(sym.key_sic_apply_rot_base_misses,
+            have_core ? tt.apply_rot_base_misses : 0);
 
     // Byte-exact bypass: reuse the producer's c32vector PMT unchanged.  A
     // committed window is a fresh vector copied from the cleaned output buffer.
@@ -1188,14 +1568,14 @@ UwbPreambleSic::process(Pending& p)
     // Pre-publish timers go into the out meta (see note above).
     {
         const auto t_now = std::chrono::steady_clock::now();
-        put_u64("output_wrap_publish_us", elapsed_us(t_wrap0, t_now));
-        put_u64("completion_latency_us", elapsed_us(p.offered_at, t_now));
-        put_bool("sic_pool_capacity_exceeded", pool_exceeded);
+        put_u64(sym.key_output_wrap_publish_us, elapsed_us(t_wrap0, t_now));
+        put_u64(sym.key_completion_latency_us, elapsed_us(p.offered_at, t_now));
+        put_bool(sym.key_sic_pool_capacity_exceeded, pool_exceeded);
     }
 
-    message_port_pub(pmt::mp("out"), pmt::cons(meta, out_vec));
+    message_port_pub(sym.port_out, pmt::cons(meta, out_vec));
     if (can_publish_ihat)
-        message_port_pub(pmt::mp("i_hat"), pmt::cons(meta, ihat_vec));
+        message_port_pub(sym.port_i_hat, pmt::cons(meta, ihat_vec));
     const auto t_pub_done = std::chrono::steady_clock::now();
     // Pub-inclusive adapter timers: output_wrap_publish_us spans PMT
     // construction AND the actual message_port_pub calls; completion_latency_us
@@ -1206,74 +1586,62 @@ UwbPreambleSic::process(Pending& p)
     // ---- status + counters ----------------------------------------------
     {
         pmt::pmt_t extra = pmt::make_dict();
-        extra = pmt::dict_add(extra, pmt::mp("window_id"),
-                              pmt::from_uint64(dict_u64(p.meta_in,
-                                                        "window_id", 0)));
-        extra = pmt::dict_add(extra, pmt::mp("sic_state"),
-                              pmt::string_to_symbol(state_name(st)));
-        extra = pmt::dict_add(
-            extra, pmt::mp("sic_bypass_reason"),
-            (reason != nullptr) ? pmt::string_to_symbol(reason) : pmt::mp(""));
-        extra = pmt::dict_add(extra, pmt::mp("missed_admission"),
-                              pmt::from_bool(!p.admitted));
-        extra = pmt::dict_add(extra, pmt::mp("handler_us"),
-                              pmt::from_uint64(p.handler_us));
-        extra = pmt::dict_add(extra, pmt::mp("queue_wait_us"),
-                              pmt::from_uint64(queue_wait_us));
-        extra = pmt::dict_add(
-            extra, pmt::mp("core_total_us"),
-            pmt::from_uint64(have_core ? tt.core_total_us : 0));
-        extra = pmt::dict_add(extra, pmt::mp("output_wrap_publish_us"),
-                              pmt::from_uint64(wrap_full_us));
-        extra = pmt::dict_add(extra, pmt::mp("completion_latency_us"),
-                              pmt::from_uint64(latency_full_us));
+        auto put_extra_u64 = [&extra](const pmt::pmt_t& k, uint64_t v) {
+            extra = pmt::dcons(pmt::cons(k, pmt::from_uint64(v)), extra);
+        };
+        auto put_extra_i64 = [&extra](const pmt::pmt_t& k, int64_t v) {
+            extra = pmt::dcons(pmt::cons(k, pmt::from_long(v)), extra);
+        };
+        auto put_extra_f64 = [&extra](const pmt::pmt_t& k, double v) {
+            extra = pmt::dcons(pmt::cons(k, pmt::from_double(v)), extra);
+        };
+        auto put_extra_bool = [&extra](const pmt::pmt_t& k, bool v) {
+            extra = pmt::dcons(pmt::cons(k, pmt::from_bool(v)), extra);
+        };
+
+        put_extra_u64(sym.key_window_id, dict_u64(p.meta_in, sym.key_window_id, 0));
+        extra = pmt::dcons(pmt::cons(sym.key_sic_state, sym.state_symbol(st)), extra);
+        extra = pmt::dcons(
+            pmt::cons(sym.key_sic_bypass_reason, sym.reason_symbol(reason)), extra);
+        put_extra_bool(sym.key_missed_admission, !p.admitted);
+        put_extra_u64(sym.key_handler_us, p.handler_us);
+        put_extra_u64(sym.key_queue_wait_us, queue_wait_us);
+        put_extra_u64(sym.key_core_total_us, have_core ? tt.core_total_us : 0);
+        put_extra_u64(sym.key_output_wrap_publish_us, wrap_full_us);
+        put_extra_u64(sym.key_completion_latency_us, latency_full_us);
         // S1 frozen-model essentials mirrored on status.
-        extra = pmt::dict_add(extra, pmt::mp("sic_model_mode"),
-                              pmt::string_to_symbol(d_model_mode_name_));
-        extra = pmt::dict_add(
-            extra, pmt::mp("sic_model_id"),
-            pmt::from_uint64(have_model ? model.model_id : uint64_t(0)));
-        extra = pmt::dict_add(
-            extra, pmt::mp("sic_observed_end_sample"),
-            pmt::from_long(declared_end));
-        extra = pmt::dict_add(extra, pmt::mp("sic_support_source"),
-                              pmt::string_to_symbol(support_source_pub));
-        extra = pmt::dict_add(extra, pmt::mp("sic_support_lo"),
-                              pmt::from_long(support_lo_pub));
-        extra = pmt::dict_add(extra, pmt::mp("sic_support_hi"),
-                              pmt::from_long(support_hi_pub));
-        extra = pmt::dict_add(extra, pmt::mp("sic_sub_lo"),
-                              pmt::from_long(have_model ? model.sub_lo : int64_t(-1)));
-        extra = pmt::dict_add(extra, pmt::mp("sic_sub_hi"),
-                              pmt::from_long(have_model ? model.sub_hi : int64_t(-1)));
-        extra = pmt::dict_add(extra, pmt::mp("sic_apply_refit_count"),
-                              pmt::from_uint64(0));
-        extra = pmt::dict_add(extra, pmt::mp("sic_apply_param_deltas"),
-                              pmt::from_uint64(0));
+        extra = pmt::dcons(
+            pmt::cons(sym.key_sic_model_mode, sym.mode_symbol(d_model_mode_name_)),
+            extra);
+        put_extra_u64(sym.key_sic_model_id, have_model ? model.model_id : uint64_t(0));
+        put_extra_i64(sym.key_sic_observed_end_sample, declared_end);
+        extra = pmt::dcons(
+            pmt::cons(sym.key_sic_support_source,
+                      sym.support_source_symbol(support_source_pub)),
+            extra);
+        put_extra_i64(sym.key_sic_support_lo, support_lo_pub);
+        put_extra_i64(sym.key_sic_support_hi, support_hi_pub);
+        put_extra_i64(sym.key_sic_sub_lo, have_model ? model.sub_lo : int64_t(-1));
+        put_extra_i64(sym.key_sic_sub_hi, have_model ? model.sub_hi : int64_t(-1));
+        put_extra_u64(sym.key_sic_apply_refit_count, 0);
+        put_extra_u64(sym.key_sic_apply_param_deltas, 0);
         // S1 per-path table counts (mirrors of the `out` meta; the tables
         // themselves stay on `out`).  sic_path_count is the number of PUBLISHED
         // per-path entries (len(sic_tau)); sic_n_paths is the core's detected
         // selection count.  They are equal on a committed window and both 0 on
         // a window where no frozen model was applied.
-        extra = pmt::dict_add(
-            extra, pmt::mp("sic_path_count"),
-            pmt::from_uint64(static_cast<uint64_t>(n_tbl)));
-        extra = pmt::dict_add(
-            extra, pmt::mp("sic_n_paths"),
-            pmt::from_uint64(have_core ? static_cast<uint64_t>(r.n_paths)
-                                       : uint64_t(0)));
-        extra = pmt::dict_add(
-            extra, pmt::mp("sic_gain_cond"),
-            pmt::from_double(have_model ? model.gain_condition
-                                        : (have_core ? r.gain_condition : 0.0)));
-        extra = pmt::dict_add(extra, pmt::mp("sic_estimate_us"),
-                              pmt::from_uint64(have_core ? tt.estimate_total_us : 0));
-        extra = pmt::dict_add(extra, pmt::mp("sic_model_prepare_us"),
-                              pmt::from_uint64(have_core ? tt.model_prepare_us : 0));
-        extra = pmt::dict_add(extra, pmt::mp("sic_backfill_us"),
-                              pmt::from_uint64(have_core ? tt.backfill_us : 0));
-        extra = pmt::dict_add(extra, pmt::mp("sic_apply_forward_us"),
-                              pmt::from_uint64(have_core ? tt.apply_forward_us : 0));
+        put_extra_u64(sym.key_sic_path_count, static_cast<uint64_t>(n_tbl));
+        put_extra_u64(sym.key_sic_n_paths,
+                      have_core ? static_cast<uint64_t>(r.n_paths) : uint64_t(0));
+        put_extra_f64(sym.key_sic_gain_cond,
+                      have_model ? model.gain_condition
+                                 : (have_core ? r.gain_condition : 0.0));
+        put_extra_u64(sym.key_sic_estimate_us, have_core ? tt.estimate_total_us : 0);
+        put_extra_u64(sym.key_sic_model_prepare_us,
+                      have_core ? tt.model_prepare_us : 0);
+        put_extra_u64(sym.key_sic_backfill_us, have_core ? tt.backfill_us : 0);
+        put_extra_u64(sym.key_sic_apply_forward_us,
+                      have_core ? tt.apply_forward_us : 0);
         publish_status("window", extra);
     }
 
@@ -1296,34 +1664,22 @@ UwbPreambleSic::process(Pending& p)
 void
 UwbPreambleSic::publish_status(const std::string& event, pmt::pmt_t extra)
 {
-    pmt::pmt_t meta = pmt::make_dict();
-    meta = pmt::dict_add(meta, pmt::mp("event"),
-                         pmt::string_to_symbol(event));
-    meta = pmt::dict_add(meta, pmt::mp("windows_offered"),
-                         pmt::from_uint64(windows_offered()));
-    meta = pmt::dict_add(meta, pmt::mp("windows_admitted"),
-                         pmt::from_uint64(windows_admitted()));
-    meta = pmt::dict_add(meta, pmt::mp("windows_completed"),
-                         pmt::from_uint64(windows_completed()));
-    meta = pmt::dict_add(meta, pmt::mp("windows_failed"),
-                         pmt::from_uint64(windows_failed()));
-    meta = pmt::dict_add(meta, pmt::mp("windows_bypassed"),
-                         pmt::from_uint64(windows_bypassed()));
-    meta = pmt::dict_add(meta, pmt::mp("windows_dropped"),
-                         pmt::from_uint64(windows_dropped()));
-    meta = pmt::dict_add(meta, pmt::mp("windows_invalid"),
-                         pmt::from_uint64(windows_invalid()));
-    meta = pmt::dict_add(meta, pmt::mp("windows_missed_admission"),
-                         pmt::from_uint64(windows_missed_admission()));
-    if (pmt::is_dict(extra)) {
-        pmt::pmt_t items = pmt::dict_items(extra);
-        const size_t n = pmt::length(items);
-        for (size_t i = 0; i < n; ++i) {
-            pmt::pmt_t kv = pmt::nth(i, items);
-            meta = pmt::dict_add(meta, pmt::car(kv), pmt::cdr(kv));
-        }
-    }
-    message_port_pub(pmt::mp("status"), meta);
+    const auto& sym = SicPmtSymbols::get();
+    pmt::pmt_t meta = pmt::is_dict(extra) ? extra : pmt::PMT_NIL;
+    auto put_u64 = [&meta](const pmt::pmt_t& k, uint64_t v) {
+        meta = pmt::dcons(pmt::cons(k, pmt::from_uint64(v)), meta);
+    };
+    put_u64(sym.key_windows_missed_admission, windows_missed_admission());
+    put_u64(sym.key_windows_invalid, windows_invalid());
+    put_u64(sym.key_windows_dropped, windows_dropped());
+    put_u64(sym.key_windows_bypassed, windows_bypassed());
+    put_u64(sym.key_windows_failed, windows_failed());
+    put_u64(sym.key_windows_completed, windows_completed());
+    put_u64(sym.key_windows_admitted, windows_admitted());
+    put_u64(sym.key_windows_offered, windows_offered());
+    meta = pmt::dcons(pmt::cons(sym.key_event, sym.event_symbol(event)), meta);
+
+    message_port_pub(sym.port_status, meta);
 }
 
 } // namespace uwb
