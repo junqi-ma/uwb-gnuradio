@@ -219,9 +219,9 @@ struct SicUnifiedChannel {
  * @brief Configuration parameters for unified SIC processing.
  */
 struct SicUnifiedConfig {
-    // Policy and Backend
+    // Policy and Backend (Fixed to historical baseline: Ipatov backend + AutoFallback)
     SicPolicy policy = SicPolicy::AutoFallback;
-    SicEstimatorBackend backend = SicEstimatorBackend::DiscreteCir;
+    SicEstimatorBackend backend = SicEstimatorBackend::Ipatov;
 
     // Physical Layer Profile
     size_t comm_code = 10;
@@ -245,14 +245,14 @@ struct SicUnifiedConfig {
     double fit_residual_max = 0.80;       ///< Commit ceiling on normalized training residual
     double gain_condition_max = 1e8;      ///< Maximum acceptable condition number
 
-    // Discrete CIR Backend Specific Options
-    int64_t lag_lo = -8;
-    size_t tap_count = 64;
+    // Discrete CIR / Ipatov Backend Specific Options (Fixed to 20-tap historical baseline)
+    int64_t lag_lo = -1;                  ///< Compact lag origin (-1)
+    size_t tap_count = 20;                ///< 20-tap compact support
     double peak_floor = 0.15;
     size_t peak_min_spacing = 5;
     size_t active_radius = 1;
     double lambda = 1e-6;                 ///< Ridge regularization parameter
-    bool sparse_pulse_reconstruct = false;///< Experimental sparse pulse reconstruction (Ipatov)
+    bool sparse_pulse_reconstruct = true; ///< Fast single-pass AVX2 pulse accumulator (historical baseline)
 
     // Path Fractional Backend Specific Options
     size_t k_paths = 4;
