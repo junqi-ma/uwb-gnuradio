@@ -123,5 +123,6 @@ install(FILES
     uwb_twr_phy.h
     uwb_fullpacket_sic_core.h
     uwb_preamble_sic_core.h
+    uwb_sic_unified.h
     DESTINATION include/gnuradio/uwb
 )

@@ -84,6 +84,7 @@ list(APPEND uwb_sources
     uwb_discrete_cir_reconstruct.cc
     uwb_preamble_sic_core.cc
     uwb_preamble_sic.cc
+    uwb_sic_unified.cc
 )
 if(UWB_HAVE_UHD)
     list(APPEND uwb_sources uwb_uhd_burst_backend.cc)
@@ -239,6 +240,7 @@ list(APPEND test_uwb_sources
     qa_uwb_discrete_cir_reconstruct.cc
     qa_uwb_preamble_sic_core.cc
     qa_uwb_preamble_sic.cc
+    qa_uwb_sic_unified.cc
     qa_uwb_hrp_packet_source.cc
     qa_uwb_twr_config.cc
     qa_uwb_twr_frame.cc
