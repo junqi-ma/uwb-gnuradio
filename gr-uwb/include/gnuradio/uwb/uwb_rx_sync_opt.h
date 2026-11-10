@@ -377,6 +377,26 @@ inline void vector_accumulate_complex_avx2(std::complex<float>* dst,
 }
 
 __attribute__((target("avx2")))
+inline void vector_sub_complex_avx2(std::complex<float>* dst,
+                                    const std::complex<float>* src,
+                                    size_t count)
+{
+    float* d = reinterpret_cast<float*>(dst);
+    const float* s = reinterpret_cast<const float*>(src);
+    const size_t num_floats = 2 * count;
+    size_t i = 0;
+    const size_t limit = num_floats & ~size_t(7);
+    for (; i < limit; i += 8) {
+        __m256 vd = _mm256_loadu_ps(d + i);
+        __m256 vs = _mm256_loadu_ps(s + i);
+        _mm256_storeu_ps(d + i, _mm256_sub_ps(vd, vs));
+    }
+    for (; i < num_floats; ++i) {
+        d[i] -= s[i];
+    }
+}
+
+__attribute__((target("avx2")))
 inline void vector_scale_complex_avx2(std::complex<float>* dst,
                                       float scale,
                                       size_t count)
@@ -408,6 +428,54 @@ inline void vector_accumulate_complex(std::complex<float>* dst,
 #endif
     for (size_t m = 0; m < count; ++m)
         dst[m] += src[m];
+}
+
+inline void vector_sub_complex(std::complex<float>* dst,
+                               const std::complex<float>* src,
+                               size_t count)
+{
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+    if (has_avx2_fma()) {
+        vector_sub_complex_avx2(dst, src, count);
+        return;
+    }
+#endif
+    for (size_t m = 0; m < count; ++m)
+        dst[m] -= src[m];
+}
+
+inline void fold_sfd_window(const std::complex<float>* rx_base,
+                            size_t sym,
+                            const int8_t* sfd_seq,
+                            size_t sfd_len,
+                            size_t fold_len,
+                            std::complex<float>* out)
+{
+    if (!rx_base || !sfd_seq || !out || sym == 0 || sfd_len == 0 || fold_len == 0)
+        return;
+    size_t i = 0;
+    while (i < sfd_len && sfd_seq[i] == 0)
+        ++i;
+    if (i == sfd_len) {
+        std::fill(out, out + fold_len, std::complex<float>(0.0f, 0.0f));
+        return;
+    }
+    const int8_t first_s = sfd_seq[i];
+    if (first_s == 1) {
+        std::memcpy(out, rx_base + i * sym, fold_len * sizeof(std::complex<float>));
+    } else {
+        std::fill(out, out + fold_len, std::complex<float>(0.0f, 0.0f));
+        vector_sub_complex(out, rx_base + i * sym, fold_len);
+    }
+    ++i;
+    for (; i < sfd_len; ++i) {
+        const int8_t s = sfd_seq[i];
+        if (s == 1) {
+            vector_accumulate_complex(out, rx_base + i * sym, fold_len);
+        } else if (s == -1) {
+            vector_sub_complex(out, rx_base + i * sym, fold_len);
+        }
+    }
 }
 
 inline void vector_scale_complex(std::complex<float>* dst,

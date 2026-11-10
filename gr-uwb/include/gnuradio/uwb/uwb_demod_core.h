@@ -160,18 +160,43 @@ struct DemodScratch {
         std::vector<int8_t> sfd_seq;
         std::vector<int8_t> sampled_pcode;
 
+        struct SparseSfdEntry {
+            uint32_t offset;
+            int8_t sign;
+        };
+        std::vector<SparseSfdEntry> ns_sfd_sparse;
+        size_t ns_sfd_total_chips = 0;
+        float ns_sfd_norm = 0.0f;
+
         void update(size_t new_code_index, const char* new_sfd_mode)
         {
-            if (code_index != new_code_index) {
+            const char* cur = new_sfd_mode ? new_sfd_mode : "";
+            const bool code_changed = (code_index != new_code_index);
+            const bool mode_changed = (sfd_mode != cur);
+            if (code_changed) {
                 code_index = new_code_index;
                 const int8_t* pc = GetPreambleCode(code_index);
                 pcode.assign(pc, pc + kQm35CodeLength);
                 sampled_pcode = BuildSampledCode(pcode.data(), pcode.size());
             }
-            const char* cur = new_sfd_mode ? new_sfd_mode : "";
-            if (sfd_mode != cur) {
+            if (mode_changed) {
                 sfd_mode = cur;
                 sfd_seq = gr::uwb::demod::GetSfdSequence(new_sfd_mode);
+            }
+            if (code_changed || mode_changed || ns_sfd_sparse.empty()) {
+                ns_sfd_sparse.clear();
+                ns_sfd_total_chips = sfd_seq.size() * sampled_pcode.size();
+                for (size_t i = 0; i < sfd_seq.size(); ++i) {
+                    const int8_t si = sfd_seq[i];
+                    if (si == 0) continue;
+                    for (size_t j = 0; j < sampled_pcode.size(); ++j) {
+                        const int8_t pj = sampled_pcode[j];
+                        if (pj == 0) continue;
+                        const int8_t val = static_cast<int8_t>(si * pj);
+                        ns_sfd_sparse.push_back({ static_cast<uint32_t>(i * sampled_pcode.size() + j), val });
+                    }
+                }
+                ns_sfd_norm = std::sqrt(static_cast<float>(ns_sfd_sparse.size()));
             }
         }
 
@@ -182,8 +207,17 @@ struct DemodScratch {
             pcode.clear();
             sfd_seq.clear();
             sampled_pcode.clear();
+            ns_sfd_sparse.clear();
+            ns_sfd_total_chips = 0;
+            ns_sfd_norm = 0.0f;
         }
     } cached_seq;
+
+    // Buffer for SFD window pre-folding.
+    std::vector<std::complex<float>> sfd_folded;
+
+    // Retained initial timing for tail re-track conditional equivalence.
+    TimingResult initial_timing;
 
     // Two-phase soft-chip state.  Only populated when
     // profile.rx_softchip_on_demand is enabled; the legacy full-stream path
@@ -815,39 +849,9 @@ inline bool stage_sfd(const std::complex<float>* rx,
     // path keeps constructing it in scratch.corr exactly as before.
     const size_t len = sfd_sequence.size();
     const std::complex<float>* sfd_tmpl = nullptr;
-    size_t sfd_len = 0;
-    if (profile.rx_fast_sfd) {
-        const uint64_t key =
-            rxopt::sfd_template_key(template_wf, sfd_sequence);
-        if (key != scratch.sfd_template_key ||
-            scratch.sfd_template.size() != len * sym) {
-            rxopt::build_sfd_template(template_wf, sfd_sequence,
-                                      scratch.sfd_template);
-            scratch.sfd_template_key =
-                (scratch.sfd_template.size() == len * sym) ? key : 0;
-        }
-        sfd_tmpl = scratch.sfd_template.data();
-        sfd_len = scratch.sfd_template.size();
-    } else {
-        scratch.corr.clear();
-        scratch.corr.reserve(len * sym);
-        for (size_t i = 0; i < len; ++i) {
-            const int8_t s = sfd_sequence[i];
-            for (size_t k = 0; k < sym; ++k)
-                scratch.corr.push_back(
-                    std::complex<float>(static_cast<float>(s) *
-                                            template_wf[k].real(),
-                                        static_cast<float>(s) *
-                                            template_wf[k].imag()));
-        }
-        gr::uwb::core::uwb_l2_normalize(scratch.corr);
-        sfd_tmpl = scratch.corr.data();
-        sfd_len = scratch.corr.size();
-    }
-    if (sfd_len == 0)
-        return false;
-
+    size_t sfd_len = len * sym;
     float sfd_scale = 1.0f;
+
     if (profile.rx_fast_sfd) {
         if (!scratch.real_sync_template.is_real ||
             scratch.real_sync_template.length != sym) {
@@ -859,6 +863,39 @@ inline bool stage_sfd(const std::complex<float>* rx,
         if (sfd_norm_sq > 0.0f && scratch.real_sync_template.energy > 0.0f) {
             sfd_scale = 1.0f / std::sqrt(sfd_norm_sq * scratch.real_sync_template.energy);
         }
+    }
+
+    if (!profile.rx_fast_sfd || !scratch.real_sync_template.is_real) {
+        if (profile.rx_fast_sfd) {
+            const uint64_t key =
+                rxopt::sfd_template_key(template_wf, sfd_sequence);
+            if (key != scratch.sfd_template_key ||
+                scratch.sfd_template.size() != len * sym) {
+                rxopt::build_sfd_template(template_wf, sfd_sequence,
+                                          scratch.sfd_template);
+                scratch.sfd_template_key =
+                    (scratch.sfd_template.size() == len * sym) ? key : 0;
+            }
+            sfd_tmpl = scratch.sfd_template.data();
+            sfd_len = scratch.sfd_template.size();
+        } else {
+            scratch.corr.clear();
+            scratch.corr.reserve(len * sym);
+            for (size_t i = 0; i < len; ++i) {
+                const int8_t s = sfd_sequence[i];
+                for (size_t k = 0; k < sym; ++k)
+                    scratch.corr.push_back(
+                        std::complex<float>(static_cast<float>(s) *
+                                                template_wf[k].real(),
+                                            static_cast<float>(s) *
+                                                template_wf[k].imag()));
+            }
+            gr::uwb::core::uwb_l2_normalize(scratch.corr);
+            sfd_tmpl = scratch.corr.data();
+            sfd_len = scratch.corr.size();
+        }
+        if (sfd_len == 0)
+            return false;
     }
 
     // Candidate correlation: legacy scalar loop by default, VOLK dot when the
@@ -920,6 +957,17 @@ inline bool stage_sfd(const std::complex<float>* rx,
         float pwr = 0.0f;
         for (size_t k = 0; k < sfd_len; ++k)
             pwr += std::norm(rx[j_lo + k]);
+        const bool use_real_sfd_fast =
+            profile.rx_fast_sfd && scratch.real_sync_template.is_real;
+        const float* taps_dup = use_real_sfd_fast ? scratch.real_sync_template.taps_dup.data() : nullptr;
+
+        const size_t fold_len = (j_end - j_lo) + sym;
+        if (use_real_sfd_fast) {
+            if (scratch.sfd_folded.size() < fold_len)
+                scratch.sfd_folded.resize(fold_len);
+            rxopt::fold_sfd_window(rx + j_lo, sym, sfd_sequence.data(), len, fold_len, scratch.sfd_folded.data());
+        }
+
         // Coarse pass.
         for (size_t j = j_lo; j <= j_end; j += kSfdStride) {
             if (j > j_lo) {
@@ -928,7 +976,9 @@ inline bool stage_sfd(const std::complex<float>* rx,
                            std::norm(rx[j - 1 - k]);
             }
             ++out.coarse_correlations;
-            const std::complex<float> acc = sfd_dot(j);
+            const std::complex<float> acc = use_real_sfd_fast
+                ? rxopt::real_template_dot_single(scratch.sfd_folded.data() + (j - j_lo), taps_dup, sym) * sfd_scale
+                : sfd_dot(j);
             const float m = std::norm(acc) / (pwr + 1e-12f);
             if (m > window_best) {
                 window_best = m;
@@ -946,17 +996,16 @@ inline bool stage_sfd(const std::complex<float>* rx,
         for (size_t k = 0; k < sfd_len; ++k)
             pwr += std::norm(rx[r_lo + k]);
 
-        const bool use_real_sfd_4lag =
-            profile.rx_fast_sfd && scratch.real_sync_template.is_real;
-        const float* taps_dup = scratch.real_sync_template.taps_dup.data();
-
         size_t j = r_lo;
-        if (use_real_sfd_4lag) {
+        if (use_real_sfd_fast) {
             for (; j + 3 <= r_hi; j += 4) {
                 std::complex<float> acc4[4];
-                rxopt::sfd_real_dot_4lag(rx + j, taps_dup, sym,
-                                         sfd_sequence.data(), len,
-                                         sfd_scale, acc4);
+                rxopt::real_template_dot_4lag(
+                    scratch.sfd_folded.data() + (j - j_lo), taps_dup, sym, acc4);
+                acc4[0] *= sfd_scale;
+                acc4[1] *= sfd_scale;
+                acc4[2] *= sfd_scale;
+                acc4[3] *= sfd_scale;
                 for (int m = 0; m < 4; ++m) {
                     const size_t cur_j = j + static_cast<size_t>(m);
                     if (cur_j > r_lo)
@@ -970,17 +1019,32 @@ inline bool stage_sfd(const std::complex<float>* rx,
                     }
                 }
             }
-        }
-        for (; j <= r_hi; ++j) {
-            if (j > r_lo)
-                pwr += std::norm(rx[j + sfd_len - 1]) -
-                       std::norm(rx[j - 1]);
-            ++out.fine_correlations;
-            const std::complex<float> acc = sfd_dot(j);
-            const float m = std::norm(acc) / (pwr + 1e-12f);
-            if (m > window_best) {
-                window_best = m;
-                window_best_j = j;
+            for (; j <= r_hi; ++j) {
+                if (j > r_lo)
+                    pwr += std::norm(rx[j + sfd_len - 1]) -
+                           std::norm(rx[j - 1]);
+                ++out.fine_correlations;
+                const std::complex<float> acc =
+                    rxopt::real_template_dot_single(
+                        scratch.sfd_folded.data() + (j - j_lo), taps_dup, sym) * sfd_scale;
+                const float m = std::norm(acc) / (pwr + 1e-12f);
+                if (m > window_best) {
+                    window_best = m;
+                    window_best_j = j;
+                }
+            }
+        } else {
+            for (; j <= r_hi; ++j) {
+                if (j > r_lo)
+                    pwr += std::norm(rx[j + sfd_len - 1]) -
+                           std::norm(rx[j - 1]);
+                ++out.fine_correlations;
+                const std::complex<float> acc = sfd_dot(j);
+                const float m = std::norm(acc) / (pwr + 1e-12f);
+                if (m > window_best) {
+                    window_best = m;
+                    window_best_j = j;
+                }
             }
         }
         if (window_best > best) {
@@ -2193,22 +2257,32 @@ inline bool stage_ns_sfd(const std::vector<float>& soft_chips,
         return false;
 
     // spread = kron(sfd_sequence, spread_code); both real ternary -> real.
+    const char* cur_mode = profile.sfd_mode ? profile.sfd_mode : "";
     if (scratch.cached_seq.code_index != profile.code_index ||
+        scratch.cached_seq.sfd_mode != cur_mode ||
         scratch.cached_seq.sampled_pcode.empty()) {
         scratch.cached_seq.update(profile.code_index, profile.sfd_mode);
     }
-    const std::vector<int8_t>& spread_code = scratch.cached_seq.sampled_pcode;
-    const size_t sfd_len = sfd_sequence.size() * spread_code.size();
-    scratch.work.assign(sfd_len, std::complex<float>(0.0f, 0.0f));
-    for (size_t i = 0; i < sfd_sequence.size(); ++i)
-        for (size_t j = 0; j < spread_code.size(); ++j)
-            scratch.work[i * spread_code.size() + j] = std::complex<float>(
-                static_cast<float>(sfd_sequence[i] * spread_code[j]), 0.0f);
-    float spread_norm = 0.0f;
-    for (size_t i = 0; i < sfd_len; ++i)
-        spread_norm += std::norm(scratch.work[i]);
-    spread_norm = std::sqrt(spread_norm);
+    if (scratch.cached_seq.sfd_seq != sfd_sequence ||
+        scratch.cached_seq.ns_sfd_sparse.empty()) {
+        scratch.cached_seq.sfd_seq = sfd_sequence;
+        scratch.cached_seq.ns_sfd_sparse.clear();
+        const std::vector<int8_t>& sc = scratch.cached_seq.sampled_pcode;
+        scratch.cached_seq.ns_sfd_total_chips = sfd_sequence.size() * sc.size();
+        for (size_t i = 0; i < sfd_sequence.size(); ++i) {
+            const int8_t si = sfd_sequence[i];
+            if (si == 0) continue;
+            for (size_t j = 0; j < sc.size(); ++j) {
+                const int8_t pj = sc[j];
+                if (pj == 0) continue;
+                const int8_t val = static_cast<int8_t>(si * pj);
+                scratch.cached_seq.ns_sfd_sparse.push_back({ static_cast<uint32_t>(i * sc.size() + j), val });
+            }
+        }
+        scratch.cached_seq.ns_sfd_norm = std::sqrt(static_cast<float>(scratch.cached_seq.ns_sfd_sparse.size()));
+    }
 
+    const size_t sfd_len = sfd_sequence.size() * chips_per_symbol;
     const int64_t expected =
         static_cast<int64_t>(profile.preamble_repetitions) *
         static_cast<int64_t>(chips_per_symbol);
@@ -2223,21 +2297,72 @@ inline bool stage_ns_sfd(const std::vector<float>& soft_chips,
     float best = -1.0f;
     int64_t best_k = lo;
     int pol = 1;
-    for (int64_t k = lo; k <= hi; ++k) {
-        float seg_norm = 0.0f, corr = 0.0f;
+
+    if (chips_per_symbol == scratch.cached_seq.sampled_pcode.size() &&
+        scratch.cached_seq.ns_sfd_total_chips == sfd_len &&
+        !scratch.cached_seq.ns_sfd_sparse.empty()) {
+        const float spread_norm = scratch.cached_seq.ns_sfd_norm;
+        double win_energy = 0.0;
         for (size_t i = 0; i < sfd_len; ++i) {
-            const float v = soft_chips[static_cast<size_t>(k + (int64_t)i)];
-            seg_norm += v * v;
-            corr += scratch.work[i].real() * v;
+            const double v = static_cast<double>(
+                soft_chips[static_cast<size_t>(lo + static_cast<int64_t>(i))]);
+            win_energy += v * v;
         }
-        seg_norm = std::sqrt(seg_norm);
-        const float m = std::abs(corr) / (spread_norm * seg_norm + 1e-12f);
-        if (m > best) {
-            best = m;
-            best_k = k;
-            pol = (corr >= 0.0f) ? 1 : -1;
+        if (!std::isfinite(win_energy) || win_energy < 0.0)
+            return false;
+
+        for (int64_t k = lo; k <= hi; ++k) {
+            if (k > lo) {
+                const double v_in = static_cast<double>(
+                    soft_chips[static_cast<size_t>(k + static_cast<int64_t>(sfd_len) - 1)]);
+                const double v_out = static_cast<double>(
+                    soft_chips[static_cast<size_t>(k - 1)]);
+                win_energy += v_in * v_in - v_out * v_out;
+                if (!std::isfinite(win_energy))
+                    return false;
+            }
+            const float seg_norm = std::sqrt(std::max(0.0, win_energy));
+            float corr = 0.0f;
+            for (const auto& entry : scratch.cached_seq.ns_sfd_sparse) {
+                const float v = soft_chips[static_cast<size_t>(k + static_cast<int64_t>(entry.offset))];
+                corr += (entry.sign > 0) ? v : -v;
+            }
+            const float m = std::abs(corr) / (spread_norm * seg_norm + 1e-12f);
+            if (m > best) {
+                best = m;
+                best_k = k;
+                pol = (corr >= 0.0f) ? 1 : -1;
+            }
+        }
+    } else {
+        const std::vector<int8_t>& spread_code = scratch.cached_seq.sampled_pcode;
+        scratch.work.assign(sfd_len, std::complex<float>(0.0f, 0.0f));
+        for (size_t i = 0; i < sfd_sequence.size(); ++i)
+            for (size_t j = 0; j < spread_code.size(); ++j)
+                scratch.work[i * spread_code.size() + j] = std::complex<float>(
+                    static_cast<float>(sfd_sequence[i] * spread_code[j]), 0.0f);
+        float spread_norm = 0.0f;
+        for (size_t i = 0; i < sfd_len; ++i)
+            spread_norm += std::norm(scratch.work[i]);
+        spread_norm = std::sqrt(spread_norm);
+
+        for (int64_t k = lo; k <= hi; ++k) {
+            float seg_norm = 0.0f, corr = 0.0f;
+            for (size_t i = 0; i < sfd_len; ++i) {
+                const float v = soft_chips[static_cast<size_t>(k + (int64_t)i)];
+                seg_norm += v * v;
+                corr += scratch.work[i].real() * v;
+            }
+            seg_norm = std::sqrt(seg_norm);
+            const float m = std::abs(corr) / (spread_norm * seg_norm + 1e-12f);
+            if (m > best) {
+                best = m;
+                best_k = k;
+                pol = (corr >= 0.0f) ? 1 : -1;
+            }
         }
     }
+
     if (best < profile.sfd_detection_threshold)
         return false;
 
@@ -3048,6 +3173,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     // corrupt a CFO fit, even though the SFD search can recover the true frame
     // origin by testing earlier hypotheses.  Use this first SFD only to anchor
     // the preamble; the final reported CFO is re-fitted below from that anchor.
+    scratch.initial_timing = res.timing;
     const std::complex<float>* sfd_rx =
         scratch.derotated.empty() ? rx : scratch.derotated.data();
     const auto sfd_bootstrap_t0 = std::chrono::steady_clock::now();
@@ -3119,33 +3245,123 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         Qm35825Profile anchor = cfo_anchor_profile;
         anchor.timing_seed_refine_radius = seed_radius;
         const auto sfd_tail_t0 = std::chrono::steady_clock::now();
-        bool tail_timing_ok = stage_timing(
-            rx, n, anchor, template_wf, tail_start, tail_timing, scratch);
-        if ((!tail_timing_ok ||
-             tail_timing.detected_peaks != tail_repetitions) &&
-            seed_radius != 0) {
-            const auto retry_t0 = std::chrono::steady_clock::now();
-            anchor.timing_seed_refine_radius = 0;
-            TimingResult retry_timing;
-            const bool retry_ok = stage_timing(
-                rx, n, anchor, template_wf, tail_start, retry_timing, scratch);
-            res.stage_sfd_tail_retrack_fallback_us += static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::steady_clock::now() - retry_t0).count());
-            ++res.stage_tail_retrack_fallbacks;
-            if (retry_ok &&
-                retry_timing.detected_peaks == tail_repetitions) {
-                // Keep the narrow-attempt diagnostics visible even though the
-                // legacy retry (radius 0) produced the accepted timing.
-                retry_timing.seed_search_us += tail_timing.seed_search_us;
-                retry_timing.seed_refine_narrow_attempts +=
-                    tail_timing.seed_refine_narrow_attempts;
-                retry_timing.seed_refine_narrow_success +=
-                    tail_timing.seed_refine_narrow_success;
-                retry_timing.seed_refine_fallbacks +=
-                    tail_timing.seed_refine_fallbacks;
-                tail_timing = std::move(retry_timing);
-                tail_timing_ok = true;
+
+        bool tail_timing_ok = false;
+        const size_t tail_first = (full_repetitions >= tail_repetitions)
+            ? (full_repetitions - tail_repetitions) : 0;
+        const int64_t start1 = (!scratch.initial_timing.peak_samples.empty() && template_len > 0)
+            ? scratch.initial_timing.peak_samples[0] - static_cast<int64_t>(template_len - 1)
+            : -1;
+        const int64_t expected_tail_start = (start1 >= 0)
+            ? start1 + static_cast<int64_t>(tail_first * kQm35SamplesPerSymbol)
+            : -2;
+        const int64_t actual_tail_first_start = (tail_first < scratch.initial_timing.peak_samples.size() && template_len > 0)
+            ? scratch.initial_timing.peak_samples[tail_first] - static_cast<int64_t>(template_len - 1)
+            : -3;
+
+        bool can_reuse = (seed_radius == 8) &&
+                         scratch.initial_timing.ok &&
+                         (scratch.initial_timing.detected_peaks == full_repetitions) &&
+                         (scratch.initial_timing.peak_samples.size() == full_repetitions) &&
+                         (scratch.initial_timing.peak_metrics.size() == full_repetitions) &&
+                         (scratch.initial_timing.peak_corr.size() == full_repetitions) &&
+                         (template_len > 0) &&
+                         (tail_repetitions > 0 && tail_repetitions <= full_repetitions) &&
+                         (tail_first > 0) &&
+                         (profile.timing_track_radius == 8) &&
+                         (anchor.timing_track_radius == 8) &&
+                         (anchor.timing_max_backtrack_symbols == 0) &&
+                         (tail_start == expected_tail_start) &&
+                         (actual_tail_first_start == tail_start);
+
+        if (can_reuse) {
+            for (size_t k = tail_first; k < full_repetitions; ++k) {
+                const float m = scratch.initial_timing.peak_metrics[k];
+                if (!std::isfinite(m) || m < anchor.radar_verification_threshold) {
+                    can_reuse = false;
+                    break;
+                }
+            }
+        }
+
+        if (can_reuse) {
+            tail_timing.peak_samples.assign(
+                scratch.initial_timing.peak_samples.begin() + tail_first,
+                scratch.initial_timing.peak_samples.end());
+            tail_timing.peak_metrics.assign(
+                scratch.initial_timing.peak_metrics.begin() + tail_first,
+                scratch.initial_timing.peak_metrics.end());
+            tail_timing.peak_corr.assign(
+                scratch.initial_timing.peak_corr.begin() + tail_first,
+                scratch.initial_timing.peak_corr.end());
+            tail_timing.detected_peaks = tail_repetitions;
+            tail_timing.expected_peaks = tail_repetitions;
+            tail_timing.metric = tail_timing.peak_metrics[0];
+            tail_timing.coarse_search_us = 0;
+            tail_timing.fine_track_us = 0;
+            tail_timing.seed_search_us = 0;
+            tail_timing.seed_refine_narrow_attempts = 0;
+            tail_timing.seed_refine_narrow_success = 0;
+            tail_timing.seed_refine_fallbacks = 0;
+
+            const size_t np = tail_repetitions;
+            const int64_t period = static_cast<int64_t>(kQm35SamplesPerSymbol);
+            if (np >= 2) {
+                double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+                for (size_t k = 0; k < np; ++k) {
+                    const double x = static_cast<double>(k);
+                    const double y = static_cast<double>(tail_timing.peak_samples[k]);
+                    sx += x;
+                    sy += y;
+                    sxx += x * x;
+                    sxy += x * y;
+                }
+                const double denom = static_cast<double>(np) * sxx - sx * sx;
+                if (std::abs(denom) > 1e-12) {
+                    tail_timing.measured_period = (static_cast<double>(np) * sxy - sx * sy) / denom;
+                    const double intercept_end = (sy - tail_timing.measured_period * sx) / np;
+                    tail_timing.preamble_start_sample = std::max<int64_t>(
+                        0, static_cast<int64_t>(std::llround(intercept_end)) -
+                               (static_cast<int64_t>(template_len) - 1));
+                } else {
+                    tail_timing.measured_period = static_cast<double>(period);
+                    tail_timing.preamble_start_sample = tail_start;
+                }
+            } else {
+                tail_timing.measured_period = static_cast<double>(period);
+                tail_timing.preamble_start_sample = tail_start;
+            }
+            tail_timing.ok = true;
+            tail_timing_ok = true;
+        } else {
+            tail_timing_ok = stage_timing(
+                rx, n, anchor, template_wf, tail_start, tail_timing, scratch);
+            if ((!tail_timing_ok ||
+                 tail_timing.detected_peaks != tail_repetitions) &&
+                seed_radius != 0) {
+                const auto retry_t0 = std::chrono::steady_clock::now();
+                anchor.timing_seed_refine_radius = 0;
+                TimingResult retry_timing;
+                const bool retry_ok = stage_timing(
+                    rx, n, anchor, template_wf, tail_start, retry_timing, scratch);
+                res.stage_sfd_tail_retrack_fallback_us += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - retry_t0).count());
+                ++res.stage_tail_retrack_fallbacks;
+                if (retry_ok &&
+                    retry_timing.detected_peaks == tail_repetitions) {
+                    // Keep the narrow-attempt diagnostics visible even though the
+                    // legacy retry (radius 0) produced the accepted timing.
+                    retry_timing.seed_search_us += tail_timing.seed_search_us;
+                    retry_timing.seed_refine_narrow_attempts +=
+                        tail_timing.seed_refine_narrow_attempts;
+                    retry_timing.seed_refine_narrow_success +=
+                        tail_timing.seed_refine_narrow_success;
+                    retry_timing.seed_refine_fallbacks +=
+                        tail_timing.seed_refine_fallbacks;
+                    tail_timing = std::move(retry_timing);
+                    tail_timing_ok = true;
+                }
             }
         }
         res.stage_sfd_tail_retrack_us += static_cast<uint64_t>(
@@ -3164,7 +3380,6 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         const int64_t full_start = bootstrap_sfd_start -
             static_cast<int64_t>(std::llround(
                 static_cast<double>(full_repetitions) * measured_period));
-        const size_t tail_first = full_repetitions - tail_repetitions;
         cfo_timing.ok = true;
         cfo_timing.preamble_start_sample = full_start;
         cfo_timing.preamble_start_uncropped = full_start;

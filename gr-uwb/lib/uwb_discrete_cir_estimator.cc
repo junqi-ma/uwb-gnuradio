@@ -907,7 +907,17 @@ bool estimate_discrete_cir(const std::complex<float>* y,
         return std::sqrt(std::max(0.0, sum));
     };
 
+    int64_t last_norm_d = -1;
+    double last_norm_val = 0.0;
+    cf last_norm_corr(0.f, 0.f);
+    bool last_norm_valid = false;
+
     auto norm_at = [&](int64_t d, cf* corr_out) -> double {
+        if (last_norm_valid && d == last_norm_d) {
+            if (corr_out)
+                *corr_out = last_norm_corr;
+            return last_norm_val;
+        }
         // STRICT PREFIX: the whole correlation row must be visible.
         if (d < 0 || d + static_cast<int64_t>(Ls) > visible_end) {
             if (corr_out)
@@ -924,9 +934,14 @@ bool estimate_discrete_cir(const std::complex<float>* y,
                 &dot, seg, syncn, static_cast<unsigned>(Ls));
         }
         const double e = get_energy(d, Ls);
+        const double nrm = (e > 0.0) ? static_cast<double>(std::abs(dot)) / e : 0.0;
         if (corr_out)
             *corr_out = dot;
-        return (e > 0.0) ? static_cast<double>(std::abs(dot)) / e : 0.0;
+        last_norm_d = d;
+        last_norm_val = nrm;
+        last_norm_corr = dot;
+        last_norm_valid = true;
+        return nrm;
     };
 
     // ---- 2. detection (independent copy of the frozen profile semantics) -
@@ -1085,16 +1100,42 @@ bool estimate_discrete_cir(const std::complex<float>* y,
         // wholly inside both the first fit_reps and the visible IQ prefix.
         const int64_t training_end = std::min(visible_end,
                               q + int64_t(cfg.fit_reps*sps));
-        for (size_t k=1; k<cfg.fit_reps; ++k) {
-            const int64_t lo = q + int64_t(k*sps) + cfg.lag_lo;
+        const size_t rows_train = (training_end > q) ? size_t(training_end - q) : 0;
+        const size_t max_rot_len = std::max(rows_train, cfg.fit_reps * sps);
+        if (cfo != 0.0) {
+            build_cfo_rotation(cfo, fs, max_rot_len, scratch.cfo_rot);
+        }
+
+        for (size_t k = 1; k < cfg.fit_reps; ++k) {
+            const int64_t lo = q + int64_t(k * sps) + cfg.lag_lo;
             if (lo < 0 || lo + int64_t(width) > training_end) continue;
-            cd phase = std::polar(1.0,-omega*double(lo-q));
-            const cd step = std::polar(1.0,-omega);
-            for (size_t j=0;j<width;++j) {
-                if ((j&1023u)==0)
-                    phase=std::polar(1.0,-omega*double(lo-q+int64_t(j)));
-                avg[j] += cd(y[size_t(lo)+j])*phase;
-                phase *= step;
+            const int64_t rel_lo = lo - q;
+            if (cfo == 0.0) {
+                for (size_t j = 0; j < width; ++j) {
+                    avg[j] += cd(y[size_t(lo) + j]);
+                }
+            } else if (rel_lo >= 0 && size_t(rel_lo + width) <= scratch.cfo_rot.size()) {
+                const cd* const rot_base = scratch.cfo_rot.data() + rel_lo;
+                size_t j = 0;
+                const size_t lim = (width >= 4) ? (width - 3) : 0;
+                for (; j < lim; j += 4) {
+                    avg[j + 0] += cd(y[size_t(lo) + j + 0]) * rot_base[j + 0];
+                    avg[j + 1] += cd(y[size_t(lo) + j + 1]) * rot_base[j + 1];
+                    avg[j + 2] += cd(y[size_t(lo) + j + 2]) * rot_base[j + 2];
+                    avg[j + 3] += cd(y[size_t(lo) + j + 3]) * rot_base[j + 3];
+                }
+                for (; j < width; ++j) {
+                    avg[j] += cd(y[size_t(lo) + j]) * rot_base[j];
+                }
+            } else {
+                cd phase = std::polar(1.0, -omega * double(rel_lo));
+                const cd step = std::polar(1.0, -omega);
+                for (size_t j = 0; j < width; ++j) {
+                    if ((j & 1023u) == 0)
+                        phase = std::polar(1.0, -omega * double(rel_lo + int64_t(j)));
+                    avg[j] += cd(y[size_t(lo) + j]) * phase;
+                    phase *= step;
+                }
             }
             ++valid;
         }
@@ -1196,38 +1237,70 @@ bool estimate_discrete_cir(const std::complex<float>* y,
                 }
             }
         }
-        build_cfo_rotation(cfo, fs, std::max(rows, cfg.fit_reps * sps), scratch.cfo_rot);
-        const cd* const rot = scratch.cfo_rot.data();
-        double num0 = 0.0, num1 = 0.0, num2 = 0.0, num3 = 0.0;
-        double den0 = 0.0, den1 = 0.0, den2 = 0.0, den3 = 0.0;
-        size_t m = 0;
-        const size_t limit = (rows >= 4) ? (rows - 3) : 0;
-        for (; m < limit; m += 4) {
-            const cd obs0(y[size_t(q) + m]);
-            const cd obs1(y[size_t(q) + m + 1]);
-            const cd obs2(y[size_t(q) + m + 2]);
-            const cd obs3(y[size_t(q) + m + 3]);
-            const cd diff0 = obs0 - scratch.z[m] * std::conj(rot[m]);
-            const cd diff1 = obs1 - scratch.z[m + 1] * std::conj(rot[m + 1]);
-            const cd diff2 = obs2 - scratch.z[m + 2] * std::conj(rot[m + 2]);
-            const cd diff3 = obs3 - scratch.z[m + 3] * std::conj(rot[m + 3]);
-            num0 += std::norm(diff0);
-            num1 += std::norm(diff1);
-            num2 += std::norm(diff2);
-            num3 += std::norm(diff3);
-            den0 += std::norm(obs0);
-            den1 += std::norm(obs1);
-            den2 += std::norm(obs2);
-            den3 += std::norm(obs3);
+        if (cfo == 0.0) {
+            double num0 = 0.0, num1 = 0.0, num2 = 0.0, num3 = 0.0;
+            double den0 = 0.0, den1 = 0.0, den2 = 0.0, den3 = 0.0;
+            size_t m = 0;
+            const size_t limit = (rows >= 4) ? (rows - 3) : 0;
+            for (; m < limit; m += 4) {
+                const cd obs0(y[size_t(q) + m]);
+                const cd obs1(y[size_t(q) + m + 1]);
+                const cd obs2(y[size_t(q) + m + 2]);
+                const cd obs3(y[size_t(q) + m + 3]);
+                const cd diff0 = obs0 - scratch.z[m];
+                const cd diff1 = obs1 - scratch.z[m + 1];
+                const cd diff2 = obs2 - scratch.z[m + 2];
+                const cd diff3 = obs3 - scratch.z[m + 3];
+                num0 += std::norm(diff0);
+                num1 += std::norm(diff1);
+                num2 += std::norm(diff2);
+                num3 += std::norm(diff3);
+                den0 += std::norm(obs0);
+                den1 += std::norm(obs1);
+                den2 += std::norm(obs2);
+                den3 += std::norm(obs3);
+            }
+            double num = (num0 + num1) + (num2 + num3);
+            double den = (den0 + den1) + (den2 + den3);
+            for (; m < rows; ++m) {
+                const cd obs(y[size_t(q) + m]);
+                num += std::norm(obs - scratch.z[m]);
+                den += std::norm(obs);
+            }
+            model.fit_residual = den > 0 ? num / den : std::numeric_limits<double>::infinity();
+        } else {
+            const cd* const rot = scratch.cfo_rot.data();
+            double num0 = 0.0, num1 = 0.0, num2 = 0.0, num3 = 0.0;
+            double den0 = 0.0, den1 = 0.0, den2 = 0.0, den3 = 0.0;
+            size_t m = 0;
+            const size_t limit = (rows >= 4) ? (rows - 3) : 0;
+            for (; m < limit; m += 4) {
+                const cd obs0(y[size_t(q) + m]);
+                const cd obs1(y[size_t(q) + m + 1]);
+                const cd obs2(y[size_t(q) + m + 2]);
+                const cd obs3(y[size_t(q) + m + 3]);
+                const cd diff0 = obs0 - scratch.z[m] * std::conj(rot[m]);
+                const cd diff1 = obs1 - scratch.z[m + 1] * std::conj(rot[m + 1]);
+                const cd diff2 = obs2 - scratch.z[m + 2] * std::conj(rot[m + 2]);
+                const cd diff3 = obs3 - scratch.z[m + 3] * std::conj(rot[m + 3]);
+                num0 += std::norm(diff0);
+                num1 += std::norm(diff1);
+                num2 += std::norm(diff2);
+                num3 += std::norm(diff3);
+                den0 += std::norm(obs0);
+                den1 += std::norm(obs1);
+                den2 += std::norm(obs2);
+                den3 += std::norm(obs3);
+            }
+            double num = (num0 + num1) + (num2 + num3);
+            double den = (den0 + den1) + (den2 + den3);
+            for (; m < rows; ++m) {
+                const cd obs(y[size_t(q) + m]);
+                num += std::norm(obs - scratch.z[m] * std::conj(rot[m]));
+                den += std::norm(obs);
+            }
+            model.fit_residual = den > 0 ? num / den : std::numeric_limits<double>::infinity();
         }
-        double num = (num0 + num1) + (num2 + num3);
-        double den = (den0 + den1) + (den2 + den3);
-        for (; m < rows; ++m) {
-            const cd obs(y[size_t(q) + m]);
-            num += std::norm(obs - scratch.z[m] * std::conj(rot[m]));
-            den += std::norm(obs);
-        }
-        model.fit_residual=den>0?num/den:std::numeric_limits<double>::infinity();
         if(timings) timings->fit_check_us=us_since(t_fit);
         if(!std::isfinite(model.fit_residual))
             return finish("failed","nonfinite_fit_residual");

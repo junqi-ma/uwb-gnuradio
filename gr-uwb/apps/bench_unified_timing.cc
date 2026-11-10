@@ -116,7 +116,11 @@ int main() {
         std::vector<double> rx_pays;
 
         for (int i = 0; i < kRounds; ++i) {
-            sic_process_unified(y.data(), n, t, cfg, scratch, res);
+            const bool ok = sic_process_unified(y.data(), n, t, cfg, scratch, res);
+            if (!ok || !res.committed || !std::isfinite(res.suppression_db)) {
+                std::cerr << "Fatal: benchmark round " << i << " failed closed\n";
+                std::exit(1);
+            }
             totals.push_back(res.timings.core_total_us);
             estimates.push_back(res.timings.estimate_us);
             comms.push_back(res.timings.comm_rx_us);
@@ -129,6 +133,10 @@ int main() {
             rx_phrs.push_back(res.timings.rx_phr_us);
             rx_pays.push_back(res.timings.rx_payload_us);
         }
+
+        std::cout << "RAW_TOTALS:";
+        for (double v : totals) std::cout << " " << v;
+        std::cout << "\n";
 
         auto stats = [](std::vector<double>& v) {
             std::sort(v.begin(), v.end());

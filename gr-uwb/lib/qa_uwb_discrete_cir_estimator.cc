@@ -1064,3 +1064,63 @@ BOOST_AUTO_TEST_CASE(test_discrete_cir_nonzero_cfo_model_and_residual)
     BOOST_REQUIRE(dense_tap_at(m, 0 - shift) != nullptr);
     BOOST_REQUIRE(dense_tap_at(m, 7 - shift) != nullptr);
 }
+
+BOOST_AUTO_TEST_CASE(test_discrete_cir_zero_cfo_bypass)
+{
+    Packet p(10, 32);
+    const size_t q = 350;
+    const size_t n = q + kTrainLen + 512;
+    const int64_t observed_end = static_cast<int64_t>(q + kTrainLen + 64);
+
+    const double cfo_hz = 0.0;
+    const std::vector<std::pair<int64_t, cf>> paths = {
+        {0, cf(1.00f, 0.00f)},
+        {7, cf(0.50f, 0.20f)}
+    };
+    std::vector<cf> y = make_integer_trace(n, q, p.train, paths, cfo_hz);
+
+    auto cfg = make_cfg(n, q, 30);
+    sic::DiscreteCirScratch s;
+    std::string err;
+    BOOST_REQUIRE(sic::prepare_discrete_cir(cfg, templates_of(p), s, &err));
+
+    sic::DiscreteCirModel m;
+    BOOST_REQUIRE(sic::estimate_discrete_cir(
+        y.data(), n, observed_end, templates_of(p), cfg, s, m));
+    BOOST_REQUIRE(m.valid);
+    BOOST_CHECK_SMALL(m.cfo_hz, 50.0);
+    BOOST_CHECK_LE(m.fit_residual, cfg.fit_residual_max);
+
+    const double residual = dense_normalized_residual(m, y, p.train);
+    BOOST_CHECK_LT(residual, 1e-2);
+}
+
+BOOST_AUTO_TEST_CASE(test_discrete_cir_negative_cfo)
+{
+    Packet p(10, 32);
+    const size_t q = 350;
+    const size_t n = q + kTrainLen + 512;
+    const int64_t observed_end = static_cast<int64_t>(q + kTrainLen + 64);
+
+    const double cfo_hz = -35000.0;
+    const std::vector<std::pair<int64_t, cf>> paths = {
+        {0, cf(1.00f, 0.00f)},
+        {7, cf(0.50f, 0.20f)}
+    };
+    std::vector<cf> y = make_integer_trace(n, q, p.train, paths, cfo_hz);
+
+    auto cfg = make_cfg(n, q, 30);
+    sic::DiscreteCirScratch s;
+    std::string err;
+    BOOST_REQUIRE(sic::prepare_discrete_cir(cfg, templates_of(p), s, &err));
+
+    sic::DiscreteCirModel m;
+    BOOST_REQUIRE(sic::estimate_discrete_cir(
+        y.data(), n, observed_end, templates_of(p), cfg, s, m));
+    BOOST_REQUIRE(m.valid);
+    BOOST_CHECK_LT(std::abs(m.cfo_hz - cfo_hz), 300.0);
+    BOOST_CHECK_LE(m.fit_residual, cfg.fit_residual_max);
+
+    const double residual = dense_normalized_residual(m, y, p.train);
+    BOOST_CHECK_LT(residual, 1e-2);
+}
