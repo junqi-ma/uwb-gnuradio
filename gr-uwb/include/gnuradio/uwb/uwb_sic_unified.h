@@ -422,16 +422,64 @@ struct SicUnifiedScratch {
     std::vector<uint8_t> work_phr_bits;
     std::vector<uint8_t> work_wire_psdu;
 
+    // Fixed preamble and pulse event caches (C1 optimization)
+    bool preamble_cache_valid = false;
+    uint64_t preamble_cache_config_hash = 0;
+    uint64_t preamble_cache_template_hash = 0;
+    size_t cached_preamble_samples = 0;
+    std::vector<std::complex<float>> cached_sync_vec;
+    std::vector<std::complex<float>> cached_preamble_waveform;
+    std::vector<mod::PulseEvent> cached_preamble_events;
+
     /**
      * @brief Preallocates all scratch buffers to handle windows up to max_window_samples
      *        and packet waveforms up to max_packet_samples.
      */
     UWB_API void reserve(size_t max_window_samples, size_t max_packet_samples = 0);
+
+    /**
+     * @brief Checks if cached preamble matches current config and templates.
+     */
+    UWB_API bool cache_matches(const SicUnifiedConfig& cfg, const SicUnifiedTemplates& tmpl) const;
+
+    /**
+     * @brief Invalidates the preamble and pulse event cache.
+     */
+    UWB_API void invalidate_cache();
 };
 
 // ---------------------------------------------------------------------------
 // 8. Unified Core API
 // ---------------------------------------------------------------------------
+
+/**
+ * @brief Computes configuration identity hash for preamble and estimation caching.
+ */
+UWB_API uint64_t compute_unified_config_hash(const SicUnifiedConfig& cfg);
+
+/**
+ * @brief Computes template identity hash for preamble caching.
+ */
+UWB_API uint64_t compute_unified_template_hash(const SicUnifiedTemplates& tmpl);
+
+/**
+ * @brief Computes squared energy of complex float signals over [start, end)
+ *        using SIMD (AVX2/FMA when available) with double-precision accumulation.
+ *
+ * @param y First complex vector (typically input signal).
+ * @param out Second complex vector (typically cleaned output signal).
+ * @param start Start index in y and out.
+ * @param end End index (exclusive) in y and out.
+ * @param e_y Output accumulated double-precision energy for y.
+ * @param e_out Output accumulated double-precision energy for out.
+ */
+UWB_API void compute_roi_energies(
+    const std::complex<float>* y,
+    const std::complex<float>* out,
+    int64_t start,
+    int64_t end,
+    double& e_y,
+    double& e_out);
 
 /**
  * @brief Prepares and pre-allocates unified SIC scratch structures.

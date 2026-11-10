@@ -144,7 +144,7 @@ inline void real_template_dot_4lag_avx2(const std::complex<float>* rx,
     __m256 a3 = _mm256_setzero_ps();
 
     size_t k = 0;
-    const size_t limit = (L >= 4) ? (L - 3) : 0;
+    const size_t limit = L & ~size_t(3);
     for (; k < limit; k += 4) {
         __m256 t0 = _mm256_loadu_ps(taps_dup + 2 * k);
         __m256 r0 = _mm256_loadu_ps(rx0 + 2 * k);
@@ -196,7 +196,7 @@ inline std::complex<float> real_template_dot_single_avx2(const std::complex<floa
     const float* rx0 = reinterpret_cast<const float*>(rx);
     __m256 a0 = _mm256_setzero_ps();
     size_t k = 0;
-    const size_t limit = (L >= 4) ? (L - 3) : 0;
+    const size_t limit = L & ~size_t(3);
     for (; k < limit; k += 4) {
         __m256 t0 = _mm256_loadu_ps(taps_dup + 2 * k);
         __m256 r0 = _mm256_loadu_ps(rx0 + 2 * k);
@@ -250,6 +250,178 @@ inline std::complex<float> real_template_dot_single(const std::complex<float>* r
         acc += rx[k] * taps_dup[2 * k];
     }
     return acc;
+}
+
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+__attribute__((target("avx2,fma")))
+inline void sfd_real_dot_4lag_avx2(const std::complex<float>* rx,
+                                   const float* taps_dup,
+                                   size_t sym,
+                                   const int8_t* sfd_seq,
+                                   size_t sfd_len,
+                                   float sfd_scale,
+                                   std::complex<float> out[4])
+{
+    out[0] = out[1] = out[2] = out[3] = std::complex<float>(0.0f, 0.0f);
+    if (!rx || !taps_dup || !sfd_seq || sym == 0 || sfd_len == 0)
+        return;
+
+    for (size_t i = 0; i < sfd_len; ++i) {
+        const int8_t s = sfd_seq[i];
+        if (s == 0)
+            continue;
+        std::complex<float> sym_dots[4];
+        real_template_dot_4lag_avx2(rx + i * sym, taps_dup, sym, sym_dots);
+        if (s > 0) {
+            out[0] += sym_dots[0];
+            out[1] += sym_dots[1];
+            out[2] += sym_dots[2];
+            out[3] += sym_dots[3];
+        } else {
+            out[0] -= sym_dots[0];
+            out[1] -= sym_dots[1];
+            out[2] -= sym_dots[2];
+            out[3] -= sym_dots[3];
+        }
+    }
+    out[0] *= sfd_scale;
+    out[1] *= sfd_scale;
+    out[2] *= sfd_scale;
+    out[3] *= sfd_scale;
+}
+#endif
+
+inline void sfd_real_dot_4lag(const std::complex<float>* rx,
+                              const float* taps_dup,
+                              size_t sym,
+                              const int8_t* sfd_seq,
+                              size_t sfd_len,
+                              float sfd_scale,
+                              std::complex<float> out[4])
+{
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+    if (has_avx2_fma()) {
+        sfd_real_dot_4lag_avx2(rx, taps_dup, sym, sfd_seq, sfd_len, sfd_scale, out);
+        return;
+    }
+#endif
+    out[0] = out[1] = out[2] = out[3] = std::complex<float>(0.0f, 0.0f);
+    if (!rx || !taps_dup || !sfd_seq || sym == 0 || sfd_len == 0)
+        return;
+
+    for (size_t i = 0; i < sfd_len; ++i) {
+        const int8_t s = sfd_seq[i];
+        if (s == 0)
+            continue;
+        std::complex<float> sym_dots[4];
+        real_template_dot_4lag(rx + i * sym, taps_dup, sym, sym_dots);
+        if (s > 0) {
+            out[0] += sym_dots[0];
+            out[1] += sym_dots[1];
+            out[2] += sym_dots[2];
+            out[3] += sym_dots[3];
+        } else {
+            out[0] -= sym_dots[0];
+            out[1] -= sym_dots[1];
+            out[2] -= sym_dots[2];
+            out[3] -= sym_dots[3];
+        }
+    }
+    out[0] *= sfd_scale;
+    out[1] *= sfd_scale;
+    out[2] *= sfd_scale;
+    out[3] *= sfd_scale;
+}
+
+inline std::complex<float> sfd_real_dot_single(const std::complex<float>* rx,
+                                               const float* taps_dup,
+                                               size_t sym,
+                                               const int8_t* sfd_seq,
+                                               size_t sfd_len,
+                                               float sfd_scale)
+{
+    std::complex<float> acc(0.0f, 0.0f);
+    if (!rx || !taps_dup || !sfd_seq || sym == 0 || sfd_len == 0)
+        return acc;
+
+    for (size_t i = 0; i < sfd_len; ++i) {
+        const int8_t s = sfd_seq[i];
+        if (s == 0)
+            continue;
+        const std::complex<float> sym_dot =
+            real_template_dot_single(rx + i * sym, taps_dup, sym);
+        acc += (s > 0 ? sym_dot : -sym_dot);
+    }
+    return acc * sfd_scale;
+}
+
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+__attribute__((target("avx2")))
+inline void vector_accumulate_complex_avx2(std::complex<float>* dst,
+                                           const std::complex<float>* src,
+                                           size_t count)
+{
+    float* d = reinterpret_cast<float*>(dst);
+    const float* s = reinterpret_cast<const float*>(src);
+    const size_t num_floats = 2 * count;
+    size_t i = 0;
+    const size_t limit = num_floats & ~size_t(7);
+    for (; i < limit; i += 8) {
+        __m256 vd = _mm256_loadu_ps(d + i);
+        __m256 vs = _mm256_loadu_ps(s + i);
+        _mm256_storeu_ps(d + i, _mm256_add_ps(vd, vs));
+    }
+    for (; i < num_floats; ++i) {
+        d[i] += s[i];
+    }
+}
+
+__attribute__((target("avx2")))
+inline void vector_scale_complex_avx2(std::complex<float>* dst,
+                                      float scale,
+                                      size_t count)
+{
+    float* d = reinterpret_cast<float*>(dst);
+    const size_t num_floats = 2 * count;
+    size_t i = 0;
+    const size_t limit = num_floats & ~size_t(7);
+    __m256 vs = _mm256_set1_ps(scale);
+    for (; i < limit; i += 8) {
+        __m256 vd = _mm256_loadu_ps(d + i);
+        _mm256_storeu_ps(d + i, _mm256_mul_ps(vd, vs));
+    }
+    for (; i < num_floats; ++i) {
+        d[i] *= scale;
+    }
+}
+#endif
+
+inline void vector_accumulate_complex(std::complex<float>* dst,
+                                      const std::complex<float>* src,
+                                      size_t count)
+{
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+    if (has_avx2_fma()) {
+        vector_accumulate_complex_avx2(dst, src, count);
+        return;
+    }
+#endif
+    for (size_t m = 0; m < count; ++m)
+        dst[m] += src[m];
+}
+
+inline void vector_scale_complex(std::complex<float>* dst,
+                                 float scale,
+                                 size_t count)
+{
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+    if (has_avx2_fma()) {
+        vector_scale_complex_avx2(dst, scale, count);
+        return;
+    }
+#endif
+    for (size_t m = 0; m < count; ++m)
+        dst[m] *= scale;
 }
 
 namespace detail {

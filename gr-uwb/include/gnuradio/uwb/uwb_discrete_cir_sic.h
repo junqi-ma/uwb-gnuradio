@@ -42,6 +42,7 @@
 
 #include <gnuradio/uwb/api.h>
 #include <gnuradio/uwb/uwb_hrp_mod_core.h>
+#include <gnuradio/uwb/uwb_rx_sync_opt.h>
 
 #include <array>
 #include <complex>
@@ -158,11 +159,13 @@ struct DiscreteCirScratch {
     size_t active_radius = 1;
 
     std::vector<std::complex<float>> sync_norm;
+    demod::rxopt::RealSyncTemplate sync_real;
     std::vector<std::complex<float>> train;
     std::vector<std::complex<double>> gram;   // full max-support Gram
     std::vector<DiscreteCirActiveFactor> factor_cache;
     size_t factor_cache_next = 0;
     std::vector<double> energy_prefix;        // visible-prefix |y|^2
+    std::vector<std::complex<double>> cfo_rot; // per-packet CFO rotation table
     std::vector<std::complex<double>> z;      // training target
     std::vector<std::complex<double>> b;      // X^H z (active set)
     std::vector<std::complex<double>> work;   // triangular solve / condition

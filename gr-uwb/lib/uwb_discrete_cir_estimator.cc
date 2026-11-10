@@ -35,6 +35,9 @@
 #include <gnuradio/uwb/uwb_discrete_cir_sic.h>
 
 #include <volk/volk.h>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -82,6 +85,92 @@ bool finite_cf(const cf& v)
 bool finite_cd(const cd& v)
 {
     return std::isfinite(v.real()) && std::isfinite(v.imag());
+}
+
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+__attribute__((target("avx2")))
+bool scan_finite_avx2(const float* data, size_t count)
+{
+    const __m256i exp_mask = _mm256_set1_epi32(0x7F800000);
+    __m256i or_acc = _mm256_setzero_si256();
+    size_t i = 0;
+    const size_t limit32 = (count >= 32) ? (count - 31) : 0;
+    for (; i < limit32; i += 32) {
+        __m256i v0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
+        __m256i v1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + 8));
+        __m256i v2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + 16));
+        __m256i v3 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + 24));
+        __m256i m0 = _mm256_cmpeq_epi32(_mm256_and_si256(v0, exp_mask), exp_mask);
+        __m256i m1 = _mm256_cmpeq_epi32(_mm256_and_si256(v1, exp_mask), exp_mask);
+        __m256i m2 = _mm256_cmpeq_epi32(_mm256_and_si256(v2, exp_mask), exp_mask);
+        __m256i m3 = _mm256_cmpeq_epi32(_mm256_and_si256(v3, exp_mask), exp_mask);
+        or_acc = _mm256_or_si256(or_acc, _mm256_or_si256(_mm256_or_si256(m0, m1), _mm256_or_si256(m2, m3)));
+    }
+    const size_t limit8 = (count >= 8) ? (count - 7) : 0;
+    for (; i < limit8; i += 8) {
+        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
+        __m256i m = _mm256_cmpeq_epi32(_mm256_and_si256(v, exp_mask), exp_mask);
+        or_acc = _mm256_or_si256(or_acc, m);
+    }
+    if (!_mm256_testz_si256(or_acc, or_acc))
+        return false;
+    for (; i < count; ++i) {
+        if (!std::isfinite(data[i]))
+            return false;
+    }
+    return true;
+}
+#endif
+
+bool scan_finite(const cf* y, size_t count)
+{
+    const float* data = reinterpret_cast<const float*>(y);
+    const size_t total_floats = count * 2;
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+    if (__builtin_cpu_supports("avx2")) {
+        return scan_finite_avx2(data, total_floats);
+    }
+#endif
+    for (size_t i = 0; i < total_floats; ++i) {
+        if (!std::isfinite(data[i]))
+            return false;
+    }
+    return true;
+}
+
+void build_cfo_rotation(double cfo_hz, double fs, size_t count, std::vector<cd>& cfo_rot)
+{
+    if (cfo_rot.size() < count)
+        cfo_rot.resize(count);
+    const double w = 2.0 * kPi * cfo_hz / fs;
+    const cd step1 = std::polar(1.0, -w);
+    const cd step2 = step1 * step1;
+    const cd step3 = step2 * step1;
+    const cd step4 = step2 * step2;
+
+    for (size_t block = 0; block < count; block += 1024) {
+        const size_t blk_len = std::min<size_t>(1024, count - block);
+        cd cur0 = std::polar(1.0, -w * static_cast<double>(block));
+        cd cur1 = cur0 * step1;
+        cd cur2 = cur0 * step2;
+        cd cur3 = cur0 * step3;
+        size_t i = 0;
+        const size_t limit = (blk_len >= 4) ? (blk_len - 3) : 0;
+        for (; i < limit; i += 4) {
+            cfo_rot[block + i + 0] = cur0;
+            cfo_rot[block + i + 1] = cur1;
+            cfo_rot[block + i + 2] = cur2;
+            cfo_rot[block + i + 3] = cur3;
+            cur0 *= step4;
+            cur1 *= step4;
+            cur2 *= step4;
+            cur3 *= step4;
+        }
+        for (; i < blk_len; ++i) {
+            cfo_rot[block + i] = cur0;
+            cur0 *= step1;
+        }
+    }
 }
 
 void hash_bytes(uint64_t& h, const void* data, size_t bytes)
@@ -320,11 +409,13 @@ void DiscreteCirScratch::reserve(size_t max_window_samples_)
     sparse_pulse_reconstruct = false;
     impulse_sync.clear();
     sync_norm.clear();
+    sync_real.reset();
     train.clear();
     gram.clear();
     factor_cache.clear();
     factor_cache_next = 0;
     energy_prefix.clear();
+    cfo_rot.clear();
     z.clear();
     b.clear();
     work.clear();
@@ -337,6 +428,7 @@ void DiscreteCirScratch::reserve(size_t max_window_samples_)
 
     factor_cache.resize(kFactorCacheSlots);
     energy_prefix.resize(max_window_samples + 1);
+    cfo_rot.resize(max_window_samples);
     z.resize(max_window_samples);
     b.resize(kMaxTaps);
     work.resize(kMaxTaps);
@@ -440,6 +532,7 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
     // ---- capacity ---------------------------------------------------------
     if (scratch.max_window_samples < cfg.max_window_samples ||
         scratch.energy_prefix.size() < cfg.max_window_samples + 1 ||
+        scratch.cfo_rot.size() < cfg.max_window_samples ||
         scratch.z.size() < cfg.max_window_samples ||
         scratch.waveform.size() < cfg.max_window_samples ||
         scratch.scaled_waveform.size() < cfg.max_window_samples ||
@@ -473,6 +566,29 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
     const float sync_inv = static_cast<float>(1.0 / std::sqrt(sync_energy));
     for (size_t i = 0; i < sps; ++i)
         scratch.sync_norm[i] *= sync_inv;
+
+    // ---- prepare real-valued sync template if imaginary part is zero ------
+    scratch.sync_real.reset();
+    bool is_real = true;
+    for (size_t i = 0; i < sps; ++i) {
+        if (std::abs(scratch.sync_norm[i].imag()) > 1e-6f) {
+            is_real = false;
+            break;
+        }
+    }
+    scratch.sync_real.is_real = is_real;
+    scratch.sync_real.length = sps;
+    if (is_real) {
+        scratch.sync_real.taps_dup.resize(2 * sps);
+        float e = 0.0f;
+        for (size_t i = 0; i < sps; ++i) {
+            const float r = scratch.sync_norm[i].real();
+            scratch.sync_real.taps_dup[2 * i] = r;
+            scratch.sync_real.taps_dup[2 * i + 1] = r;
+            e += r * r;
+        }
+        scratch.sync_real.energy = e;
+    }
 
     scratch.train.assign(templates.train, templates.train + train_len);
     for (size_t i = 0; i < train_len; ++i) {
@@ -733,20 +849,9 @@ bool estimate_discrete_cir(const std::complex<float>* y,
     const cf* const syncn = scratch.sync_norm.data();
     double* const energy = scratch.energy_prefix.data();
 
-    // ---- finite prefix and self-energy prefix in a single pass -----------
-    const size_t energy_fill = static_cast<size_t>(visible_end);
-    double acc = 0.0;
-    energy[0] = 0.0;
-    for (size_t i = 0; i < energy_fill; ++i) {
-        const cf v = y[i];
-        if (!finite_cf(v))
-            return finish("failed", "nonfinite_input");
-        acc += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
-               static_cast<double>(v.imag()) * static_cast<double>(v.imag());
-        energy[i + 1] = acc;
-    }
-    if (!std::isfinite(acc))
-        return finish("failed", "nonfinite_energy");
+    // ---- finite prefix check with AVX2 scan ------------------------------
+    if (!scan_finite(y, static_cast<size_t>(visible_end)))
+        return finish("failed", "nonfinite_input");
 
     // ---- 1. public ROI clipped to the visible prefix ----------------------
     int64_t roi_lo = cfg.roi_lo;
@@ -763,6 +868,45 @@ bool estimate_discrete_cir(const std::complex<float>* y,
     const int64_t stride =
         std::max<int64_t>(1, static_cast<int64_t>(cfg.coarse_stride));
 
+    // ---- localized self-energy prefix sum covering ROI and confirmation ---
+    const int64_t energy_base = roi_lo;
+    const int64_t max_confirm_end =
+        roi_hi + static_cast<int64_t>((confirm_reps - 1) * sps + Ls);
+    const int64_t energy_end =
+        std::max(energy_base, std::min<int64_t>(visible_end, max_confirm_end));
+    const size_t local_energy_len =
+        static_cast<size_t>(energy_end - energy_base);
+
+    double acc = 0.0;
+    energy[0] = 0.0;
+    for (size_t i = 0; i < local_energy_len; ++i) {
+        const cf v = y[static_cast<size_t>(energy_base) + i];
+        acc += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
+               static_cast<double>(v.imag()) * static_cast<double>(v.imag());
+        energy[i + 1] = acc;
+    }
+    if (!std::isfinite(acc))
+        return finish("failed", "nonfinite_energy");
+
+    auto get_energy = [&](int64_t d, size_t L) -> double {
+        if (d >= energy_base &&
+            d + static_cast<int64_t>(L) <= energy_end) {
+            const size_t lo = static_cast<size_t>(d - energy_base);
+            const size_t hi =
+                static_cast<size_t>(d + static_cast<int64_t>(L) - energy_base);
+            return std::sqrt(std::max(0.0, energy[hi] - energy[lo]));
+        }
+        if (d < 0 || d + static_cast<int64_t>(L) > visible_end)
+            return 0.0;
+        double sum = 0.0;
+        for (size_t k = 0; k < L; ++k) {
+            const cf v = y[static_cast<size_t>(d) + k];
+            sum += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
+                   static_cast<double>(v.imag()) * static_cast<double>(v.imag());
+        }
+        return std::sqrt(std::max(0.0, sum));
+    };
+
     auto norm_at = [&](int64_t d, cf* corr_out) -> double {
         // STRICT PREFIX: the whole correlation row must be visible.
         if (d < 0 || d + static_cast<int64_t>(Ls) > visible_end) {
@@ -772,19 +916,14 @@ bool estimate_discrete_cir(const std::complex<float>* y,
         }
         const cf* const seg = y + d;
         cf dot(0.f, 0.f);
-        volk_32fc_x2_conjugate_dot_prod_32fc_u(
-            &dot, seg, syncn, static_cast<unsigned>(Ls));
-        const size_t ehi = static_cast<size_t>(d) + Ls;
-        double e = 0.0;
-        if (ehi <= energy_fill)
-            e = std::sqrt(
-                std::max(0.0, energy[ehi] - energy[static_cast<size_t>(d)]));
-        else {
-            cf self(0.f, 0.f);
+        if (scratch.sync_real.is_real) {
+            dot = demod::rxopt::real_template_dot_single(
+                seg, scratch.sync_real.taps_dup.data(), Ls);
+        } else {
             volk_32fc_x2_conjugate_dot_prod_32fc_u(
-                &self, seg, seg, static_cast<unsigned>(Ls));
-            e = std::sqrt(std::max(0.0, static_cast<double>(self.real())));
+                &dot, seg, syncn, static_cast<unsigned>(Ls));
         }
+        const double e = get_energy(d, Ls);
         if (corr_out)
             *corr_out = dot;
         return (e > 0.0) ? static_cast<double>(std::abs(dot)) / e : 0.0;
@@ -797,11 +936,40 @@ bool estimate_discrete_cir(const std::complex<float>* y,
     double peak_norm = 0.0;
     {
         const auto t0 = Clock::now();
-        for (int64_t d = roi_lo; d < roi_hi; d += stride) {
-            const double nrm = norm_at(d, nullptr);
-            if (nrm > coarse_nrm) {
-                coarse_nrm = nrm;
-                coarse_pos = d;
+        if (stride == 1 && scratch.sync_real.is_real) {
+            int64_t d = roi_lo;
+            const float* const taps_dup = scratch.sync_real.taps_dup.data();
+            for (; d + 4 <= roi_hi; d += 4) {
+                if (d < 0 || d + 3 + static_cast<int64_t>(Ls) > visible_end) {
+                    break;
+                }
+                cf dots[4];
+                demod::rxopt::real_template_dot_4lag(y + d, taps_dup, Ls, dots);
+                for (int j = 0; j < 4; ++j) {
+                    const int64_t cur_d = d + j;
+                    const double e = get_energy(cur_d, Ls);
+                    const double nrm =
+                        (e > 0.0) ? static_cast<double>(std::abs(dots[j])) / e : 0.0;
+                    if (nrm > coarse_nrm) {
+                        coarse_nrm = nrm;
+                        coarse_pos = cur_d;
+                    }
+                }
+            }
+            for (; d < roi_hi; ++d) {
+                const double nrm = norm_at(d, nullptr);
+                if (nrm > coarse_nrm) {
+                    coarse_nrm = nrm;
+                    coarse_pos = d;
+                }
+            }
+        } else {
+            for (int64_t d = roi_lo; d < roi_hi; d += stride) {
+                const double nrm = norm_at(d, nullptr);
+                if (nrm > coarse_nrm) {
+                    coarse_nrm = nrm;
+                    coarse_pos = d;
+                }
             }
         }
 
@@ -1028,14 +1196,36 @@ bool estimate_discrete_cir(const std::complex<float>* y,
                 }
             }
         }
-        double num=0,den=0;
-        cd phase(1,0); const cd step=std::polar(1.0,omega);
-        for(size_t m=0;m<rows;++m) {
-            if((m&1023u)==0) phase=std::polar(1.0,omega*double(m));
-            const cd obs(y[size_t(q)+m]);
-            num+=std::norm(obs-scratch.z[m]*phase);
-            den+=std::norm(obs);
-            phase*=step;
+        build_cfo_rotation(cfo, fs, std::max(rows, cfg.fit_reps * sps), scratch.cfo_rot);
+        const cd* const rot = scratch.cfo_rot.data();
+        double num0 = 0.0, num1 = 0.0, num2 = 0.0, num3 = 0.0;
+        double den0 = 0.0, den1 = 0.0, den2 = 0.0, den3 = 0.0;
+        size_t m = 0;
+        const size_t limit = (rows >= 4) ? (rows - 3) : 0;
+        for (; m < limit; m += 4) {
+            const cd obs0(y[size_t(q) + m]);
+            const cd obs1(y[size_t(q) + m + 1]);
+            const cd obs2(y[size_t(q) + m + 2]);
+            const cd obs3(y[size_t(q) + m + 3]);
+            const cd diff0 = obs0 - scratch.z[m] * std::conj(rot[m]);
+            const cd diff1 = obs1 - scratch.z[m + 1] * std::conj(rot[m + 1]);
+            const cd diff2 = obs2 - scratch.z[m + 2] * std::conj(rot[m + 2]);
+            const cd diff3 = obs3 - scratch.z[m + 3] * std::conj(rot[m + 3]);
+            num0 += std::norm(diff0);
+            num1 += std::norm(diff1);
+            num2 += std::norm(diff2);
+            num3 += std::norm(diff3);
+            den0 += std::norm(obs0);
+            den1 += std::norm(obs1);
+            den2 += std::norm(obs2);
+            den3 += std::norm(obs3);
+        }
+        double num = (num0 + num1) + (num2 + num3);
+        double den = (den0 + den1) + (den2 + den3);
+        for (; m < rows; ++m) {
+            const cd obs(y[size_t(q) + m]);
+            num += std::norm(obs - scratch.z[m] * std::conj(rot[m]));
+            den += std::norm(obs);
         }
         model.fit_residual=den>0?num/den:std::numeric_limits<double>::infinity();
         if(timings) timings->fit_check_us=us_since(t_fit);
@@ -1093,26 +1283,22 @@ bool estimate_discrete_cir(const std::complex<float>* y,
         if (scratch.train_len < fit_reps * sps)
             return finish("failed", "short_training_prefix");
 
-        const double w = 2.0 * kPi * cfo / fs;
-        const cd zstep = std::polar(1.0, -w);
         const size_t fold_len = fit_reps * sps;
+        build_cfo_rotation(cfo, fs, fold_len, scratch.cfo_rot);
 
         // folded[t] = sum_k z[k*sps + t]; z is stored only for the LS rows.
         cd folded[kMaxSps];
         for (size_t t = 0; t < sps; ++t)
             folded[t] = cd(0.0, 0.0);
-        cd zcur(1.0, 0.0);
         cd* const zdata = scratch.z.data();
+        const cd* const rot = scratch.cfo_rot.data();
         for (size_t m = 0; m < fold_len; ++m) {
-            if ((m & 1023u) == 0)
-                zcur = std::polar(1.0, -w * static_cast<double>(m));
             const cd val =
                 cd(y[static_cast<size_t>(q + static_cast<int64_t>(m))]) *
-                zcur;
+                rot[m];
             folded[m % sps] += val;
             if (m < M)
                 zdata[m] = val;
-            zcur *= zstep;
         }
 
         double cir_mag[kMaxTaps];
@@ -1421,13 +1607,45 @@ bool estimate_discrete_cir(const std::complex<float>* y,
         const auto t0 = Clock::now();
         const cf* const train = scratch.train.data();
         const int64_t train_len_i = static_cast<int64_t>(scratch.train_len);
-        const double w = 2.0 * kPi * cfo / fs;
-        cd acur(1.0, 0.0);
-        double num = 0.0;
-        double den = 0.0;
-        for (int64_t m = 0; m < static_cast<int64_t>(M); ++m) {
-            if ((m & 1023) == 0)
-                acur = std::polar(1.0, w * static_cast<double>(m));
+        const cd* const rot = scratch.cfo_rot.data();
+        double num0 = 0.0, num1 = 0.0, num2 = 0.0, num3 = 0.0;
+        double den0 = 0.0, den1 = 0.0, den2 = 0.0, den3 = 0.0;
+        int64_t m = 0;
+        const int64_t limit = (static_cast<int64_t>(M) >= 4) ? (static_cast<int64_t>(M) - 3) : 0;
+        for (; m < limit; m += 4) {
+            cd yhat0(0.0, 0.0), yhat1(0.0, 0.0), yhat2(0.0, 0.0), yhat3(0.0, 0.0);
+            for (size_t d = 0; d < hull_width; ++d) {
+                const int64_t lag = hull_start + static_cast<int64_t>(d);
+                const cd fd = cd(fitted[d]);
+                const int64_t xi0 = m - lag;
+                const int64_t xi1 = m + 1 - lag;
+                const int64_t xi2 = m + 2 - lag;
+                const int64_t xi3 = m + 3 - lag;
+                if (xi0 >= 0 && xi0 < train_len_i) yhat0 += fd * cd(train[static_cast<size_t>(xi0)]);
+                if (xi1 >= 0 && xi1 < train_len_i) yhat1 += fd * cd(train[static_cast<size_t>(xi1)]);
+                if (xi2 >= 0 && xi2 < train_len_i) yhat2 += fd * cd(train[static_cast<size_t>(xi2)]);
+                if (xi3 >= 0 && xi3 < train_len_i) yhat3 += fd * cd(train[static_cast<size_t>(xi3)]);
+            }
+            yhat0 *= std::conj(rot[static_cast<size_t>(m)]);
+            yhat1 *= std::conj(rot[static_cast<size_t>(m + 1)]);
+            yhat2 *= std::conj(rot[static_cast<size_t>(m + 2)]);
+            yhat3 *= std::conj(rot[static_cast<size_t>(m + 3)]);
+            const cd obs0 = cd(y[static_cast<size_t>(q + m)]);
+            const cd obs1 = cd(y[static_cast<size_t>(q + m + 1)]);
+            const cd obs2 = cd(y[static_cast<size_t>(q + m + 2)]);
+            const cd obs3 = cd(y[static_cast<size_t>(q + m + 3)]);
+            num0 += std::norm(obs0 - yhat0);
+            num1 += std::norm(obs1 - yhat1);
+            num2 += std::norm(obs2 - yhat2);
+            num3 += std::norm(obs3 - yhat3);
+            den0 += std::norm(obs0);
+            den1 += std::norm(obs1);
+            den2 += std::norm(obs2);
+            den3 += std::norm(obs3);
+        }
+        double num = (num0 + num1) + (num2 + num3);
+        double den = (den0 + den1) + (den2 + den3);
+        for (; m < static_cast<int64_t>(M); ++m) {
             cd yhat(0.0, 0.0);
             for (size_t d = 0; d < hull_width; ++d) {
                 const int64_t xi =
@@ -1437,7 +1655,7 @@ bool estimate_discrete_cir(const std::complex<float>* y,
                 yhat += cd(fitted[d]) *
                         cd(train[static_cast<size_t>(xi)]);
             }
-            yhat *= acur;
+            yhat *= std::conj(rot[static_cast<size_t>(m)]);
             const cd obs = cd(y[static_cast<size_t>(q + m)]);
             num += std::norm(obs - yhat);
             den += std::norm(obs);

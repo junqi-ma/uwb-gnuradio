@@ -344,4 +344,260 @@ BOOST_AUTO_TEST_CASE(test_unified_fail_closed_on_invalid_input)
     }
 }
 
+BOOST_AUTO_TEST_CASE(test_scratch_reuse_no_realloc)
+{
+    TestPacket p(10, 32);
+    SicUnifiedTemplates t = make_templates(p);
+
+    const size_t q = 300;
+    const size_t n = p.wave.size() + 1000;
+    std::vector<cf> y(n, cf(0.f, 0.f));
+    std::copy(p.wave.begin(), p.wave.end(), y.begin() + q);
+
+    SicUnifiedConfig cfg;
+    cfg.policy = SicPolicy::PreambleOnly;
+    cfg.backend = SicEstimatorBackend::Ipatov;
+    cfg.sparse_pulse_reconstruct = true;
+    cfg.comm_code = 10;
+    cfg.samples_per_symbol = kSps;
+    cfg.sample_rate = kFs;
+    cfg.roi_lo = q - 32;
+    cfg.roi_hi = q + 32;
+    cfg.sub_roi_lo = q;
+    cfg.sub_roi_hi = q + 64 * kSps;
+    cfg.max_window_samples = n;
+    cfg.max_packet_samples = n;
+
+    SicUnifiedScratch scratch;
+    BOOST_REQUIRE(prepare_sic_unified(cfg, t, scratch));
+    BOOST_CHECK(scratch.preamble_cache_valid);
+
+    const void* const p_events = scratch.cached_preamble_events.data();
+    const void* const p_sync = scratch.cached_sync_vec.data();
+    const void* const p_wf = scratch.cached_preamble_waveform.data();
+    const size_t cap_events = scratch.cached_preamble_events.capacity();
+    const size_t cap_sync = scratch.cached_sync_vec.capacity();
+    const size_t cap_wf = scratch.cached_preamble_waveform.capacity();
+
+    std::vector<cf> out(n);
+    std::vector<cf> i_hat(n);
+
+    // Repeated calls with same config reuse scratch without re-allocation
+    for (int iter = 0; iter < 5; ++iter) {
+        SicUnifiedResult res;
+        res.out = out.data();
+        res.i_hat = i_hat.data();
+        BOOST_REQUIRE(sic_process_unified(y.data(), n, t, cfg, scratch, res));
+        BOOST_CHECK(res.committed);
+
+        BOOST_CHECK_EQUAL(scratch.cached_preamble_events.data(), p_events);
+        BOOST_CHECK_EQUAL(scratch.cached_sync_vec.data(), p_sync);
+        BOOST_CHECK_EQUAL(scratch.cached_preamble_waveform.data(), p_wf);
+        BOOST_CHECK_EQUAL(scratch.cached_preamble_events.capacity(), cap_events);
+        BOOST_CHECK_EQUAL(scratch.cached_sync_vec.capacity(), cap_sync);
+        BOOST_CHECK_EQUAL(scratch.cached_preamble_waveform.capacity(), cap_wf);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_config_change_invalidates_and_regenerates)
+{
+    TestPacket p10(10, 32);
+    SicUnifiedTemplates t10 = make_templates(p10);
+
+    const size_t q = 300;
+    const size_t n = p10.wave.size() + 1000;
+    std::vector<cf> y(n, cf(0.f, 0.f));
+    std::copy(p10.wave.begin(), p10.wave.end(), y.begin() + q);
+
+    SicUnifiedConfig cfg;
+    cfg.policy = SicPolicy::PreambleOnly;
+    cfg.backend = SicEstimatorBackend::Ipatov;
+    cfg.sparse_pulse_reconstruct = true;
+    cfg.comm_code = 10;
+    cfg.samples_per_symbol = kSps;
+    cfg.sample_rate = kFs;
+    cfg.roi_lo = q - 32;
+    cfg.roi_hi = q + 32;
+    cfg.sub_roi_lo = q;
+    cfg.sub_roi_hi = q + 64 * kSps;
+    cfg.max_window_samples = n;
+    cfg.max_packet_samples = n;
+
+    SicUnifiedScratch scratch;
+    BOOST_REQUIRE(prepare_sic_unified(cfg, t10, scratch));
+    BOOST_CHECK(scratch.preamble_cache_valid);
+
+    const uint64_t hash10 = scratch.config_hash;
+    std::vector<mod::PulseEvent> events10 = scratch.cached_preamble_events;
+    BOOST_CHECK(!events10.empty());
+
+    // Changing comm_code without re-preparing must cause cache_matches to return false
+    cfg.comm_code = 9;
+    BOOST_CHECK(!scratch.cache_matches(cfg, t10));
+
+    std::vector<cf> out(n);
+    SicUnifiedResult res;
+    res.out = out.data();
+
+    // Hot path rejects config mismatch fail-closed
+    BOOST_CHECK(!sic_process_unified(y.data(), n, t10, cfg, scratch, res));
+    BOOST_CHECK_EQUAL(std::string(res.reason), "config_or_template_mismatch");
+
+    // Cleanly re-prepare with code 9
+    TestPacket p9(9, 32);
+    SicUnifiedTemplates t9 = make_templates(p9);
+    BOOST_REQUIRE(prepare_sic_unified(cfg, t9, scratch));
+    BOOST_CHECK(scratch.preamble_cache_valid);
+    BOOST_CHECK(scratch.cache_matches(cfg, t9));
+    BOOST_CHECK_NE(scratch.config_hash, hash10);
+
+    // Code 9 cached pulse events must differ from code 10
+    const auto& events9 = scratch.cached_preamble_events;
+    BOOST_CHECK(!events9.empty());
+    bool different = (events9.size() != events10.size());
+    if (!different) {
+        for (size_t i = 0; i < events9.size(); ++i) {
+            if (events9[i].sample_offset != events10[i].sample_offset ||
+                events9[i].sign != events10[i].sign) {
+                different = true;
+                break;
+            }
+        }
+    }
+    BOOST_CHECK(different);
+}
+
+BOOST_AUTO_TEST_CASE(test_fullpacket_modulation_does_not_corrupt_cached_events)
+{
+    TestPacket p(10, 32);
+    SicUnifiedTemplates t = make_templates(p);
+
+    const size_t q = 300;
+    const size_t n = p.wave.size() + 1000;
+    std::vector<cf> y(n, cf(0.f, 0.f));
+    std::copy(p.wave.begin(), p.wave.end(), y.begin() + q);
+
+    SicUnifiedConfig cfg;
+    cfg.policy = SicPolicy::FullPacket;
+    cfg.backend = SicEstimatorBackend::Ipatov;
+    cfg.sparse_pulse_reconstruct = true;
+    cfg.comm_code = 10;
+    cfg.samples_per_symbol = kSps;
+    cfg.sample_rate = kFs;
+    cfg.roi_lo = q - 32;
+    cfg.roi_hi = q + 32;
+    cfg.sub_roi_lo = q;
+    cfg.sub_roi_hi = q + p.wave.size();
+    cfg.max_window_samples = n;
+    cfg.max_packet_samples = n;
+
+    SicUnifiedScratch scratch;
+    BOOST_REQUIRE(prepare_sic_unified(cfg, t, scratch));
+    BOOST_CHECK(scratch.preamble_cache_valid);
+
+    const std::vector<mod::PulseEvent> golden_events = scratch.cached_preamble_events;
+    const size_t golden_samples = scratch.cached_preamble_samples;
+    BOOST_REQUIRE(!golden_events.empty());
+
+    std::vector<cf> out(n);
+    std::vector<cf> i_hat(n);
+    SicUnifiedResult res;
+    res.out = out.data();
+    res.i_hat = i_hat.data();
+
+    // Process full-packet cancellation (triggers full PSDU modulation and pulse generation)
+    BOOST_REQUIRE(sic_process_unified(y.data(), n, t, cfg, scratch, res));
+    BOOST_CHECK(res.committed);
+    BOOST_CHECK_EQUAL(static_cast<uint8_t>(res.level), static_cast<uint8_t>(SicCancellationLevel::L2_FullPacket));
+
+    // Verify cached preamble events were NOT corrupted by full packet modulation
+    BOOST_CHECK_EQUAL(scratch.cached_preamble_events.size(), golden_events.size());
+    BOOST_CHECK_EQUAL(scratch.cached_preamble_samples, golden_samples);
+    for (size_t i = 0; i < golden_events.size(); ++i) {
+        BOOST_CHECK_EQUAL(scratch.cached_preamble_events[i].sample_offset, golden_events[i].sample_offset);
+        BOOST_CHECK_EQUAL(scratch.cached_preamble_events[i].sign, golden_events[i].sign);
+    }
+
+    // Now switch to PreambleOnly policy to confirm it still works seamlessly using untainted cache
+    cfg.policy = SicPolicy::PreambleOnly;
+    SicUnifiedResult res_pre;
+    res_pre.out = out.data();
+    res_pre.i_hat = i_hat.data();
+    BOOST_REQUIRE(sic_process_unified(y.data(), n, t, cfg, scratch, res_pre));
+    BOOST_CHECK(res_pre.committed);
+    BOOST_CHECK_EQUAL(static_cast<uint8_t>(res_pre.level), static_cast<uint8_t>(SicCancellationLevel::L1_Preamble));
+}
+
+BOOST_AUTO_TEST_CASE(test_simd_roi_energy_reduction)
+{
+    constexpr size_t kTotal = 8192;
+    std::vector<cf> y(kTotal);
+    std::vector<cf> out(kTotal);
+
+    for (size_t i = 0; i < kTotal; ++i) {
+        float f1 = static_cast<float>(std::sin(0.017 * static_cast<double>(i)));
+        float f2 = static_cast<float>(std::cos(0.023 * static_cast<double>(i)));
+        float f3 = 0.1f * static_cast<float>(std::sin(0.031 * static_cast<double>(i)));
+        float f4 = 0.1f * static_cast<float>(std::cos(0.047 * static_cast<double>(i)));
+        y[i] = cf(f1, f2);
+        out[i] = cf(f3, f4);
+    }
+
+    // Test different slice ranges (aligned, unaligned, odd, large)
+    const std::vector<std::pair<int64_t, int64_t>> ranges = {
+        {0, 0},         // Empty
+        {10, 10},       // Empty offset
+        {0, 1},         // Single sample
+        {0, 3},         // 3 samples (sub-vector tail)
+        {0, 4},         // 4 samples
+        {0, 7},         // 7 samples
+        {0, 8},         // 8 samples (1 unroll group)
+        {0, 15},        // 15 samples
+        {0, 16},        // 16 samples
+        {3, 19},        // Unaligned start and end (16 samples)
+        {7, 101},       // Unaligned start and end (94 samples)
+        {0, 1016},      // Standard symbol length
+        {128, 5000},    // Large slice
+        {0, static_cast<int64_t>(kTotal)} // Full vector
+    };
+
+    for (const auto& r : ranges) {
+        int64_t start = r.first;
+        int64_t end = r.second;
+
+        double e_y_simd = 0.0;
+        double e_out_simd = 0.0;
+        compute_roi_energies(y.data(), out.data(), start, end, e_y_simd, e_out_simd);
+
+        // Scalar double reference loop
+        double e_y_ref = 0.0;
+        double e_out_ref = 0.0;
+        for (int64_t i = start; i < end; ++i) {
+            e_y_ref += std::norm(y[i]);
+            e_out_ref += std::norm(out[i]);
+        }
+
+        if (e_y_ref > 0.0) {
+            const double rel_err_y = std::abs(e_y_simd - e_y_ref) / e_y_ref;
+            BOOST_CHECK_LE(rel_err_y, 1e-6);
+        } else {
+            BOOST_CHECK_EQUAL(e_y_simd, 0.0);
+        }
+
+        if (e_out_ref > 0.0) {
+            const double rel_err_out = std::abs(e_out_simd - e_out_ref) / e_out_ref;
+            BOOST_CHECK_LE(rel_err_out, 1e-6);
+        } else {
+            BOOST_CHECK_EQUAL(e_out_simd, 0.0);
+        }
+    }
+
+    // Test non-finite input handling
+    y[50] = cf(std::numeric_limits<float>::quiet_NaN(), 0.f);
+    double e_y_nan = 0.0;
+    double e_out_nan = 0.0;
+    compute_roi_energies(y.data(), out.data(), 0, 100, e_y_nan, e_out_nan);
+    BOOST_CHECK(!std::isfinite(e_y_nan));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

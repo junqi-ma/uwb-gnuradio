@@ -152,6 +152,39 @@ struct DemodScratch {
     // Cached pre-duplicated real SYNC template for AVX2 fast dot.
     rxopt::RealSyncTemplate real_sync_template;
 
+    // Cached sequence data for fixed preamble code and SFD mode (Task B2).
+    struct CachedSequenceState {
+        size_t code_index = std::numeric_limits<size_t>::max();
+        std::string sfd_mode;
+        std::vector<int8_t> pcode;
+        std::vector<int8_t> sfd_seq;
+        std::vector<int8_t> sampled_pcode;
+
+        void update(size_t new_code_index, const char* new_sfd_mode)
+        {
+            if (code_index != new_code_index) {
+                code_index = new_code_index;
+                const int8_t* pc = GetPreambleCode(code_index);
+                pcode.assign(pc, pc + kQm35CodeLength);
+                sampled_pcode = BuildSampledCode(pcode.data(), pcode.size());
+            }
+            const char* cur = new_sfd_mode ? new_sfd_mode : "";
+            if (sfd_mode != cur) {
+                sfd_mode = cur;
+                sfd_seq = gr::uwb::demod::GetSfdSequence(new_sfd_mode);
+            }
+        }
+
+        void invalidate()
+        {
+            code_index = std::numeric_limits<size_t>::max();
+            sfd_mode.clear();
+            pcode.clear();
+            sfd_seq.clear();
+            sampled_pcode.clear();
+        }
+    } cached_seq;
+
     // Two-phase soft-chip state.  Only populated when
     // profile.rx_softchip_on_demand is enabled; the legacy full-stream path
     // never reads it.  The extension re-runs the cheap CIR estimate and
@@ -221,6 +254,9 @@ struct DemodScratch {
         peaks.reserve(256);
         peak_values.reserve(256);
         sfd_template.reserve(8 * kQm35SamplesPerSymbol);
+        cached_seq.pcode.reserve(kQm35CodeLength);
+        cached_seq.sfd_seq.reserve(64);
+        cached_seq.sampled_pcode.reserve(2 * kQm35ChipsPerSymbol);
         fused.pn.reserve(8 * 2048);
         fused.metrics.complex_value.reserve(
             rxfusion::kCandidateCount * 2048);
@@ -829,19 +865,9 @@ inline bool stage_sfd(const std::complex<float>* rx,
     // explicit fast path is enabled.  Candidate set/threshold/order unchanged.
     auto sfd_dot = [&](size_t j) -> std::complex<float> {
         if (profile.rx_fast_sfd && scratch.real_sync_template.is_real) {
-            std::complex<float> acc(0.0f, 0.0f);
-            for (size_t i = 0; i < len; ++i) {
-                const int8_t s = sfd_sequence[i];
-                if (s == 0)
-                    continue;
-                const std::complex<float> sym_dot =
-                    rxopt::real_template_dot_single(
-                        rx + j + i * sym,
-                        scratch.real_sync_template.taps_dup.data(),
-                        sym);
-                acc += (s > 0 ? sym_dot : -sym_dot);
-            }
-            return acc * sfd_scale;
+            return rxopt::sfd_real_dot_single(
+                rx + j, scratch.real_sync_template.taps_dup.data(),
+                sym, sfd_sequence.data(), len, sfd_scale);
         }
         if (profile.rx_fast_sfd)
             return rxopt::conjugate_dot(rx + j, sfd_tmpl, sfd_len);
@@ -919,7 +945,33 @@ inline bool stage_sfd(const std::complex<float>* rx,
         pwr = 0.0f;
         for (size_t k = 0; k < sfd_len; ++k)
             pwr += std::norm(rx[r_lo + k]);
-        for (size_t j = r_lo; j <= r_hi; ++j) {
+
+        const bool use_real_sfd_4lag =
+            profile.rx_fast_sfd && scratch.real_sync_template.is_real;
+        const float* taps_dup = scratch.real_sync_template.taps_dup.data();
+
+        size_t j = r_lo;
+        if (use_real_sfd_4lag) {
+            for (; j + 3 <= r_hi; j += 4) {
+                std::complex<float> acc4[4];
+                rxopt::sfd_real_dot_4lag(rx + j, taps_dup, sym,
+                                         sfd_sequence.data(), len,
+                                         sfd_scale, acc4);
+                for (int m = 0; m < 4; ++m) {
+                    const size_t cur_j = j + static_cast<size_t>(m);
+                    if (cur_j > r_lo)
+                        pwr += std::norm(rx[cur_j + sfd_len - 1]) -
+                               std::norm(rx[cur_j - 1]);
+                    ++out.fine_correlations;
+                    const float metric = std::norm(acc4[m]) / (pwr + 1e-12f);
+                    if (metric > window_best) {
+                        window_best = metric;
+                        window_best_j = cur_j;
+                    }
+                }
+            }
+        }
+        for (; j <= r_hi; ++j) {
             if (j > r_lo)
                 pwr += std::norm(rx[j + sfd_len - 1]) -
                        std::norm(rx[j - 1]);
@@ -1022,10 +1074,13 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     if (period <= 0.0 || start < 0 || preamble_code.empty() || tap_count == 0)
         return false;
 
-    // ---- Build the sparse sampled code (508 spread x2 -> 1016, zeros on the
+    // ---- Build (or reuse) the sparse sampled code (508 spread x2 -> 1016, zeros on the
     //      odd samples), matching MATLAB buildUwbReference.sampled_code. ----
-    const std::vector<int8_t> spread =
-        BuildSampledCode(preamble_code.data(), preamble_code.size());
+    if (scratch.cached_seq.code_index != profile.code_index ||
+        scratch.cached_seq.sampled_pcode.empty()) {
+        scratch.cached_seq.update(profile.code_index, profile.sfd_mode);
+    }
+    const std::vector<int8_t>& spread = scratch.cached_seq.sampled_pcode;
     const uint64_t ckey =
         rxopt::cir_template_key(preamble_code.data(), preamble_code.size());
     if (scratch.cir_template.key != ckey) {
@@ -1058,15 +1113,16 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         const int64_t hi = lo + static_cast<int64_t>(wlen);
         if (lo < 0 || hi > static_cast<int64_t>(n))
             continue; // drop SYNCs clipped by the buffer edge (like MATLAB)
-        for (size_t m = 0; m < wlen; ++m)
-            scratch.corr[m] += rx[static_cast<size_t>(lo + (int64_t)m)];
+        rxopt::vector_accumulate_complex(
+            scratch.corr.data(),
+            rx + static_cast<size_t>(lo),
+            wlen);
         ++valid;
     }
     if (valid == 0)
         return false;
     const float inv = 1.0f / static_cast<float>(valid);
-    for (size_t m = 0; m < wlen; ++m)
-        scratch.corr[m] *= inv;
+    rxopt::vector_scale_complex(scratch.corr.data(), inv, wlen);
 
     // ---- CIR taps: sparse ternary template correlation (Task A2). ----
     std::vector<std::complex<float>> values;
@@ -2137,8 +2193,11 @@ inline bool stage_ns_sfd(const std::vector<float>& soft_chips,
         return false;
 
     // spread = kron(sfd_sequence, spread_code); both real ternary -> real.
-    const int8_t* pc = GetPreambleCode(profile.code_index);
-    const std::vector<int8_t> spread_code = BuildSampledCode(pc, kQm35CodeLength);
+    if (scratch.cached_seq.code_index != profile.code_index ||
+        scratch.cached_seq.sampled_pcode.empty()) {
+        scratch.cached_seq.update(profile.code_index, profile.sfd_mode);
+    }
+    const std::vector<int8_t>& spread_code = scratch.cached_seq.sampled_pcode;
     const size_t sfd_len = sfd_sequence.size() * spread_code.size();
     scratch.work.assign(sfd_len, std::complex<float>(0.0f, 0.0f));
     for (size_t i = 0; i < sfd_sequence.size(); ++i)
@@ -2964,7 +3023,8 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         rebase();
         return res;
     }
-    const auto sfd_seq = gr::uwb::demod::GetSfdSequence(profile.sfd_mode);
+    scratch.cached_seq.update(profile.code_index, profile.sfd_mode);
+    const std::vector<int8_t>& sfd_seq = scratch.cached_seq.sfd_seq;
     const size_t sfd_len = sfd_seq.size() * kQm35SamplesPerSymbol;
     const auto sfd1_range = rxopt::compute_sfd_search_range(
         n, res.timing, profile.preamble_repetitions, sfd_len,
@@ -3309,9 +3369,8 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     }
 
     // Stage 4: CIR + soft chips on the CFO-compensated frame.
-    const int8_t* pc = GetPreambleCode(profile.code_index);
-    std::vector<int8_t> pcode(pc, pc + kQm35CodeLength);
-    const auto nsfd_seq = gr::uwb::demod::GetSfdSequence(profile.sfd_mode);
+    const std::vector<int8_t>& pcode = scratch.cached_seq.pcode;
+    const std::vector<int8_t>& nsfd_seq = scratch.cached_seq.sfd_seq;
     const bool on_demand_path = profile.rx_softchip_on_demand ||
                                 profile.rx_fused_payload_cmf ||
                                 profile.rx_fused_phr_cmf;
