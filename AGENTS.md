@@ -1,3 +1,13 @@
+# 当前提交快照：前导码与 SFD 互相关向量化优化（2026-11-10）
+
+已交付前导码与 SFD 专用向量化优化（AVX2 4 滞后实数展开点积与 SFD 符号级 Kronecker 分解），绑定提交 `4697980`，测试报告详见 `docs/sic/前导码与SFD互相关优化开发报告_2026-11-10.md`。
+- **Preamble-Only SIC 突破 1 ms**：核心耗时均值从 1.15–1.25 ms 降低至 **828.12 µs**（P50 812.35 µs，P95 999.00 µs），抑制比保持 **63.29 dB**。
+- **Full-Packet SIC 进一步优化**：核心耗时均值从 1.58 ms 降至 **1,142.42 µs**（P50 1,128.12 µs，P95 1,276.16 µs），抑制比保持 **63.33 dB**。
+- **通信前导解调提速**：`stage_timing` 从 ~380 µs 降至 97.7 µs（3.9×），`stage_sfd` 从 ~340 µs 降至 212 µs（1.6×）。
+- **验证与数值安全**：实数展开 AVX2/FMA 点积与 VOLK 误差 $< 4.8 \times 10^{-7}$，9/9 项 CTest 全部通过。
+
+---
+
 # SIC 全包与前导优化统一集成基线（2026-11-09）
 
 本分支为 `integration/sic-unified-20261109`，由 `feature/sic-fullpacket-compare`（全包 SIC 与离散 CIR）与 `feature/sic-perf`（Preamble-only 核心优化与 PMT/dcons 优化）合并而成。
