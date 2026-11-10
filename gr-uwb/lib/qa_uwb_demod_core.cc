@@ -2318,3 +2318,77 @@ BOOST_AUTO_TEST_CASE(test_demod_core_vector_accumulate_scale)
         BOOST_CHECK_CLOSE(dst_simd[i].imag(), dst_scalar[i].imag(), 1e-4f);
     }
 }
+
+BOOST_AUTO_TEST_CASE(test_demod_core_sfd_fold_window_equivalence)
+{
+    const size_t sym = kQm35SamplesPerSymbol; // 1016
+    const auto sfd_seq = gr::uwb::demod::GetSfdSequence("4z2");
+    const size_t len = sfd_seq.size(); // 8
+
+    std::vector<gr_complex> tmpl(sym);
+    for (size_t i = 0; i < sym; ++i) {
+        tmpl[i] = gr_complex(std::cos(static_cast<float>(i) * 0.12f), 0.0f);
+    }
+    rxopt::RealSyncTemplate real_tmpl;
+    rxopt::build_real_sync_template(tmpl, real_tmpl);
+
+    float sfd_norm_sq = 0.0f;
+    for (int8_t s : sfd_seq) sfd_norm_sq += static_cast<float>(s * s);
+    const float sfd_scale = 1.0f / std::sqrt(sfd_norm_sq * real_tmpl.energy);
+
+    // Synthetic rx of length 16 * sym
+    const size_t rx_len = 16 * sym;
+    std::vector<gr_complex> rx(rx_len);
+    for (size_t i = 0; i < rx_len; ++i) {
+        rx[i] = gr_complex(std::sin(static_cast<float>(i) * 0.05f),
+                           std::cos(static_cast<float>(i) * 0.07f));
+    }
+
+    const size_t j_lo = 100;
+    const size_t j_end = 228;
+    const size_t fold_len = (j_end - j_lo) + sym;
+    std::vector<gr_complex> folded(fold_len);
+    rxopt::fold_sfd_window(rx.data() + j_lo, sym, sfd_seq.data(), len, fold_len, folded.data());
+
+    for (size_t j = j_lo; j <= j_end; j += 7) {
+        const gr_complex dot_direct = rxopt::sfd_real_dot_single(
+            rx.data() + j, real_tmpl.taps_dup.data(), sym, sfd_seq.data(), len, sfd_scale);
+        const gr_complex dot_folded = rxopt::real_template_dot_single(
+            folded.data() + (j - j_lo), real_tmpl.taps_dup.data(), sym) * sfd_scale;
+
+        BOOST_CHECK_SMALL(std::abs(dot_direct.real() - dot_folded.real()), 1e-5f);
+        BOOST_CHECK_SMALL(std::abs(dot_direct.imag() - dot_folded.imag()), 1e-5f);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_ns_sfd_sparse_sliding_equivalence)
+{
+    auto prof = Qm35825Profile::Default();
+    prof.code_index = 10;
+    prof.sfd_mode = "4z2";
+
+    const auto sfd_seq = gr::uwb::demod::GetSfdSequence(prof.sfd_mode);
+    const size_t total_chips = 80 * kQm35ChipsPerSymbol;
+
+    std::vector<float> soft_chips(total_chips, 0.0f);
+    const int64_t target_start = 64 * kQm35ChipsPerSymbol + 2;
+
+    core::DemodScratch scratch;
+    scratch.cached_seq.update(prof.code_index, prof.sfd_mode);
+    const auto& sc = scratch.cached_seq.sampled_pcode;
+
+    // Inject target NS-SFD pattern with polarity +1
+    for (size_t i = 0; i < sfd_seq.size(); ++i) {
+        const int8_t s = sfd_seq[i];
+        for (size_t j = 0; j < sc.size(); ++j) {
+            soft_chips[target_start + i * sc.size() + j] = static_cast<float>(s * sc[j]);
+        }
+    }
+
+    NsSfdResult res;
+    BOOST_REQUIRE(core::stage_ns_sfd(soft_chips, prof, sfd_seq, kQm35ChipsPerSymbol, res, scratch));
+    BOOST_CHECK(res.ok);
+    BOOST_CHECK_EQUAL(res.sfd_start_chip, target_start);
+    BOOST_CHECK_EQUAL(res.polarity, 1);
+    BOOST_CHECK_GE(res.metric, 0.95f);
+}

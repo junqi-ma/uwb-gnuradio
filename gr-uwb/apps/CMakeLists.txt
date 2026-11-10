@@ -345,3 +345,8 @@ set_tests_properties(uwb_qa_fullpacket_segment_diag PROPERTIES TIMEOUT 60 RUN_SE
 add_executable(benchmark_discrete_cir_taps benchmark_discrete_cir_taps.cc)
 target_link_libraries(benchmark_discrete_cir_taps gnuradio-uwb)
 target_compile_options(benchmark_discrete_cir_taps PRIVATE -fPIC)
+
+# Unified SIC timing benchmark.
+add_executable(bench_unified_timing bench_unified_timing.cc)
+target_link_libraries(bench_unified_timing gnuradio-uwb)
+target_compile_options(bench_unified_timing PRIVATE -O3 -march=native)

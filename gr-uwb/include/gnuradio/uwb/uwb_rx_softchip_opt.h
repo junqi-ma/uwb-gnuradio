@@ -41,6 +41,7 @@
 #pragma once
 
 #include <gnuradio/uwb/uwb_phy_profile.h>
+#include <gnuradio/uwb/uwb_rx_sync_opt.h>
 
 #include <algorithm>
 #include <cmath>
@@ -81,8 +82,12 @@ inline bool sync_phase_gain(const std::complex<float>* rx, size_t n,
     for (size_t r = 0; r < reps; ++r) {
         const int64_t first = base + static_cast<int64_t>(r * stride);
         const size_t lo = first < 0 ? static_cast<size_t>(-first) : 0;
-        for (size_t m = lo; m < span; ++m)
-            sum[m] += rx[static_cast<size_t>(first + static_cast<int64_t>(m))];
+        if (lo == 0 && static_cast<uint64_t>(first + span) <= n) {
+            vector_accumulate_complex(sum.data(), rx + first, span);
+        } else {
+            for (size_t m = lo; m < span; ++m)
+                sum[m] += rx[static_cast<size_t>(first + static_cast<int64_t>(m))];
+        }
     }
     for (size_t c = 0; c < spread.size(); ++c) {
         if (!spread[c])
