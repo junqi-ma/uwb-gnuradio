@@ -589,6 +589,7 @@ bool sic_process_unified(
     demod_prof.rx_softchip_on_demand = cfg.rx_softchip_on_demand;
     demod_prof.rx_fused_payload_cmf = cfg.rx_fused_payload_cmf;
     demod_prof.rx_fused_phr_cmf = cfg.rx_fused_phr_cmf;
+    demod_prof.timing_seed_refine_radius = 16;
 
     if (cfg.policy == SicPolicy::PreambleOnly) {
         // Preamble-only: run the exact same SYNC + SFD detection flow as full packet!

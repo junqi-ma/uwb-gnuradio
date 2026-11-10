@@ -149,6 +149,9 @@ struct DemodScratch {
     // Cached sparse ternary CIR template (Task A2).
     rxopt::SparseCirTemplate cir_template;
 
+    // Cached pre-duplicated real SYNC template for AVX2 fast dot.
+    rxopt::RealSyncTemplate real_sync_template;
+
     // Two-phase soft-chip state.  Only populated when
     // profile.rx_softchip_on_demand is enabled; the legacy full-stream path
     // never reads it.  The extension re-runs the cheap CIR estimate and
@@ -278,6 +281,7 @@ inline bool stage_timing(const std::complex<float>* rx,
     scratch.work.assign(template_wf.begin(), template_wf.end());
     gr::uwb::core::uwb_l2_normalize(scratch.work);
     const float Et = gr::uwb::core::uwb_template_energy(scratch.work);
+    rxopt::build_real_sync_template(scratch.work, scratch.real_sync_template);
 
     // Determine the ROI around the seed (absolute coordinates).
     size_t roi_start = 0;
@@ -310,22 +314,61 @@ inline bool stage_timing(const std::complex<float>* rx,
         std::complex<float> best_acc(0.0f, 0.0f);
         // Adjacent candidate windows overlap by L-1 samples.  Compute power
         // once, then update it in O(1); correlation remains an exact long dot
-        // product handled by VOLK.  No allocation occurs in this hot loop.
+        // product handled by VOLK or AVX2.  No allocation occurs in this hot loop.
         float pw = 0.0f;
         for (size_t k = 0; k < L; ++k)
             pw += std::norm(rx[w0 + static_cast<int64_t>(k)]);
-        for (int64_t j = w0; j < w1; ++j) {
-            const std::complex<float> acc =
-                detail::timing_conjugate_dot(rx + j, scratch.work.data(), L);
-            const float m = std::norm(acc) / (pw * Et + 1e-12f);
-            if (m > bm) {
-                bm = m;
-                bp = j;
-                best_acc = acc;
+
+        const bool use_real_opt = scratch.real_sync_template.is_real;
+        const float* taps_dup = scratch.real_sync_template.taps_dup.data();
+
+        int64_t j = w0;
+        if (use_real_opt) {
+            for (; j + 3 < w1; j += 4) {
+                std::complex<float> acc[4];
+                rxopt::real_template_dot_4lag(rx + j, taps_dup, L, acc);
+                for (int m = 0; m < 4; ++m) {
+                    const float metric = std::norm(acc[m]) / (pw * Et + 1e-12f);
+                    if (metric > bm) {
+                        bm = metric;
+                        bp = j + m;
+                        best_acc = acc[m];
+                    }
+                    if (j + m + 1 < w1) {
+                        pw += std::norm(rx[j + m + static_cast<int64_t>(L)]) -
+                              std::norm(rx[j + m]);
+                    }
+                }
             }
-            if (j + 1 < w1)
-                pw += std::norm(rx[j + static_cast<int64_t>(L)]) -
-                      std::norm(rx[j]);
+            for (; j < w1; ++j) {
+                const std::complex<float> acc =
+                    rxopt::real_template_dot_single(rx + j, taps_dup, L);
+                const float metric = std::norm(acc) / (pw * Et + 1e-12f);
+                if (metric > bm) {
+                    bm = metric;
+                    bp = j;
+                    best_acc = acc;
+                }
+                if (j + 1 < w1) {
+                    pw += std::norm(rx[j + static_cast<int64_t>(L)]) -
+                          std::norm(rx[j]);
+                }
+            }
+        } else {
+            for (; j < w1; ++j) {
+                const std::complex<float> acc =
+                    detail::timing_conjugate_dot(rx + j, scratch.work.data(), L);
+                const float metric = std::norm(acc) / (pw * Et + 1e-12f);
+                if (metric > bm) {
+                    bm = metric;
+                    bp = j;
+                    best_acc = acc;
+                }
+                if (j + 1 < w1) {
+                    pw += std::norm(rx[j + static_cast<int64_t>(L)]) -
+                          std::norm(rx[j]);
+                }
+            }
         }
         if (bm < min_metric)
             return false;
@@ -427,8 +470,11 @@ inline bool stage_timing(const std::complex<float>* rx,
             for (int64_t j = j_lo; j <= j_hi; ++j) {
                 if (((j - j_lo) % stride) == 0) {
                     const std::complex<float> acc =
-                        detail::timing_conjugate_dot(
-                            rx + j, scratch.work.data(), L);
+                        scratch.real_sync_template.is_real
+                            ? rxopt::real_template_dot_single(
+                                  rx + j, scratch.real_sync_template.taps_dup.data(), L)
+                            : detail::timing_conjugate_dot(
+                                  rx + j, scratch.work.data(), L);
                     const float m = std::norm(acc) / (pw * Et + 1e-12f);
                     if (m > best_coarse_m) {
                         best_coarse_m = m;
@@ -765,9 +811,38 @@ inline bool stage_sfd(const std::complex<float>* rx,
     if (sfd_len == 0)
         return false;
 
+    float sfd_scale = 1.0f;
+    if (profile.rx_fast_sfd) {
+        if (!scratch.real_sync_template.is_real ||
+            scratch.real_sync_template.length != sym) {
+            rxopt::build_real_sync_template(template_wf, scratch.real_sync_template);
+        }
+        float sfd_norm_sq = 0.0f;
+        for (int8_t s : sfd_sequence)
+            sfd_norm_sq += static_cast<float>(s * s);
+        if (sfd_norm_sq > 0.0f && scratch.real_sync_template.energy > 0.0f) {
+            sfd_scale = 1.0f / std::sqrt(sfd_norm_sq * scratch.real_sync_template.energy);
+        }
+    }
+
     // Candidate correlation: legacy scalar loop by default, VOLK dot when the
     // explicit fast path is enabled.  Candidate set/threshold/order unchanged.
     auto sfd_dot = [&](size_t j) -> std::complex<float> {
+        if (profile.rx_fast_sfd && scratch.real_sync_template.is_real) {
+            std::complex<float> acc(0.0f, 0.0f);
+            for (size_t i = 0; i < len; ++i) {
+                const int8_t s = sfd_sequence[i];
+                if (s == 0)
+                    continue;
+                const std::complex<float> sym_dot =
+                    rxopt::real_template_dot_single(
+                        rx + j + i * sym,
+                        scratch.real_sync_template.taps_dup.data(),
+                        sym);
+                acc += (s > 0 ? sym_dot : -sym_dot);
+            }
+            return acc * sfd_scale;
+        }
         if (profile.rx_fast_sfd)
             return rxopt::conjugate_dot(rx + j, sfd_tmpl, sfd_len);
         std::complex<float> acc(0.0f, 0.0f);

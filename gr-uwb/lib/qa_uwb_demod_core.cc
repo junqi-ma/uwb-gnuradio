@@ -2122,3 +2122,45 @@ BOOST_AUTO_TEST_CASE(test_demod_core_softchip_fallback_timing_accounting)
     // Full window was rotated in fallback
     BOOST_CHECK_GE(res.stage_cfo_rotated_samples, rx.size());
 }
+
+BOOST_AUTO_TEST_CASE(test_demod_core_real_sync_dot_numeric_equivalence)
+{
+    const size_t L = 1016;
+    std::vector<gr_complex> tmpl = load_reference_template();
+    BOOST_REQUIRE_EQUAL(tmpl.size(), L);
+
+    rxopt::RealSyncTemplate real_tmpl;
+    rxopt::build_real_sync_template(tmpl, real_tmpl);
+    BOOST_CHECK(real_tmpl.is_real);
+    BOOST_CHECK_EQUAL(real_tmpl.length, L);
+    BOOST_CHECK_GT(real_tmpl.energy, 0.0f);
+
+    // Generate test rx signal with synthetic multipath + noise
+    std::vector<gr_complex> rx(L + 128);
+    for (size_t i = 0; i < rx.size(); ++i) {
+        rx[i] = gr_complex(std::sin(static_cast<float>(i) * 0.13f) + 0.1f * std::cos(static_cast<float>(i) * 0.37f),
+                           std::cos(static_cast<float>(i) * 0.17f) - 0.2f * std::sin(static_cast<float>(i) * 0.29f));
+    }
+
+    // Verify 4-lag AVX2 dot vs VOLK across 64 candidate offsets
+    for (size_t lag = 0; lag < 64; lag += 4) {
+        gr_complex v_out[4];
+        for (size_t j = 0; j < 4; ++j) {
+            v_out[j] = rxopt::conjugate_dot(rx.data() + lag + j, tmpl.data(), L);
+        }
+
+        gr_complex a_out[4];
+        rxopt::real_template_dot_4lag(rx.data() + lag, real_tmpl.taps_dup.data(), L, a_out);
+
+        for (size_t j = 0; j < 4; ++j) {
+            const float diff = std::abs(v_out[j] - a_out[j]);
+            BOOST_CHECK_LT(diff, 1e-5f);
+
+            // Also test single lag dot
+            const gr_complex s_out = rxopt::real_template_dot_single(
+                rx.data() + lag + j, real_tmpl.taps_dup.data(), L);
+            const float s_diff = std::abs(v_out[j] - s_out);
+            BOOST_CHECK_LT(s_diff, 1e-5f);
+        }
+    }
+}

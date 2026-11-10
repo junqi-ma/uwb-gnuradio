@@ -21,6 +21,9 @@
 #include <gnuradio/uwb/uwb_phy_profile.h>   // kQm35SamplesPerSymbol
 
 #include <volk/volk.h>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 
 #include <algorithm>
 #include <complex>
@@ -58,6 +61,194 @@ inline std::complex<float> conjugate_dot(const std::complex<float>* input,
         reinterpret_cast<const lv_32fc_t*>(input),
         reinterpret_cast<const lv_32fc_t*>(taps),
         static_cast<unsigned int>(count));
+    return acc;
+}
+
+// ---------------------------------------------------------------------------
+// Pre-duplicated real-valued SYNC template for AVX2 fast dot product.
+// In IEEE 802.15.4z baseband, the pulse-shaped SYNC sequence is purely real.
+// Storing [t0, t0, t1, t1, t2, t2, ...] allows direct FMA with interleaved
+// complex rx [re0, im0, re1, im1, ...] without unpacking or cross-multiplies.
+// ---------------------------------------------------------------------------
+struct RealSyncTemplate {
+    uint64_t key = 0;
+    bool is_real = false;
+    size_t length = 0;
+    std::vector<float> taps_dup;
+    float energy = 0.0f;
+
+    void reset()
+    {
+        key = 0;
+        is_real = false;
+        length = 0;
+        taps_dup.clear();
+        energy = 0.0f;
+    }
+};
+
+inline void build_real_sync_template(const std::vector<std::complex<float>>& template_wf,
+                                     RealSyncTemplate& out)
+{
+    out.reset();
+    if (template_wf.empty())
+        return;
+    const size_t L = template_wf.size();
+    bool real_only = true;
+    for (size_t k = 0; k < L; ++k) {
+        if (std::abs(template_wf[k].imag()) > 1e-7f) {
+            real_only = false;
+            break;
+        }
+    }
+    out.is_real = real_only;
+    out.length = L;
+    if (real_only) {
+        out.taps_dup.resize(2 * L);
+        float e = 0.0f;
+        for (size_t k = 0; k < L; ++k) {
+            const float r = template_wf[k].real();
+            out.taps_dup[2 * k] = r;
+            out.taps_dup[2 * k + 1] = r;
+            e += r * r;
+        }
+        out.energy = e;
+    }
+}
+
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+inline bool has_avx2_fma()
+{
+    static const bool s_has =
+        __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+    return s_has;
+}
+
+__attribute__((target("avx2,fma")))
+inline void real_template_dot_4lag_avx2(const std::complex<float>* rx,
+                                        const float* taps_dup,
+                                        size_t L,
+                                        std::complex<float> out[4])
+{
+    if (L == 0 || L > 65536) {
+        out[0] = out[1] = out[2] = out[3] = std::complex<float>(0.f, 0.f);
+        return;
+    }
+    const float* rx0 = reinterpret_cast<const float*>(rx);
+    const float* rx1 = reinterpret_cast<const float*>(rx + 1);
+    const float* rx2 = reinterpret_cast<const float*>(rx + 2);
+    const float* rx3 = reinterpret_cast<const float*>(rx + 3);
+    __m256 a0 = _mm256_setzero_ps();
+    __m256 a1 = _mm256_setzero_ps();
+    __m256 a2 = _mm256_setzero_ps();
+    __m256 a3 = _mm256_setzero_ps();
+
+    size_t k = 0;
+    const size_t limit = (L >= 4) ? (L - 3) : 0;
+    for (; k < limit; k += 4) {
+        __m256 t0 = _mm256_loadu_ps(taps_dup + 2 * k);
+        __m256 r0 = _mm256_loadu_ps(rx0 + 2 * k);
+        __m256 r1 = _mm256_loadu_ps(rx1 + 2 * k);
+        __m256 r2 = _mm256_loadu_ps(rx2 + 2 * k);
+        __m256 r3 = _mm256_loadu_ps(rx3 + 2 * k);
+
+        a0 = _mm256_fmadd_ps(r0, t0, a0);
+        a1 = _mm256_fmadd_ps(r1, t0, a1);
+        a2 = _mm256_fmadd_ps(r2, t0, a2);
+        a3 = _mm256_fmadd_ps(r3, t0, a3);
+    }
+
+    alignas(32) float tmp0[8], tmp1[8], tmp2[8], tmp3[8];
+    _mm256_storeu_ps(tmp0, a0);
+    _mm256_storeu_ps(tmp1, a1);
+    _mm256_storeu_ps(tmp2, a2);
+    _mm256_storeu_ps(tmp3, a3);
+
+    float s0_re = tmp0[0] + tmp0[2] + tmp0[4] + tmp0[6];
+    float s0_im = tmp0[1] + tmp0[3] + tmp0[5] + tmp0[7];
+    float s1_re = tmp1[0] + tmp1[2] + tmp1[4] + tmp1[6];
+    float s1_im = tmp1[1] + tmp1[3] + tmp1[5] + tmp1[7];
+    float s2_re = tmp2[0] + tmp2[2] + tmp2[4] + tmp2[6];
+    float s2_im = tmp2[1] + tmp2[3] + tmp2[5] + tmp2[7];
+    float s3_re = tmp3[0] + tmp3[2] + tmp3[4] + tmp3[6];
+    float s3_im = tmp3[1] + tmp3[3] + tmp3[5] + tmp3[7];
+
+    for (; k < L; ++k) {
+        float t = taps_dup[2 * k];
+        s0_re += rx0[2 * k] * t; s0_im += rx0[2 * k + 1] * t;
+        s1_re += rx1[2 * k] * t; s1_im += rx1[2 * k + 1] * t;
+        s2_re += rx2[2 * k] * t; s2_im += rx2[2 * k + 1] * t;
+        s3_re += rx3[2 * k] * t; s3_im += rx3[2 * k + 1] * t;
+    }
+    out[0] = std::complex<float>(s0_re, s0_im);
+    out[1] = std::complex<float>(s1_re, s1_im);
+    out[2] = std::complex<float>(s2_re, s2_im);
+    out[3] = std::complex<float>(s3_re, s3_im);
+}
+
+__attribute__((target("avx2,fma")))
+inline std::complex<float> real_template_dot_single_avx2(const std::complex<float>* rx,
+                                                         const float* taps_dup,
+                                                         size_t L)
+{
+    if (L == 0 || L > 65536)
+        return std::complex<float>(0.f, 0.f);
+    const float* rx0 = reinterpret_cast<const float*>(rx);
+    __m256 a0 = _mm256_setzero_ps();
+    size_t k = 0;
+    const size_t limit = (L >= 4) ? (L - 3) : 0;
+    for (; k < limit; k += 4) {
+        __m256 t0 = _mm256_loadu_ps(taps_dup + 2 * k);
+        __m256 r0 = _mm256_loadu_ps(rx0 + 2 * k);
+        a0 = _mm256_fmadd_ps(r0, t0, a0);
+    }
+    alignas(32) float tmp0[8];
+    _mm256_storeu_ps(tmp0, a0);
+    float s0_re = tmp0[0] + tmp0[2] + tmp0[4] + tmp0[6];
+    float s0_im = tmp0[1] + tmp0[3] + tmp0[5] + tmp0[7];
+    for (; k < L; ++k) {
+        float t = taps_dup[2 * k];
+        s0_re += rx0[2 * k] * t;
+        s0_im += rx0[2 * k + 1] * t;
+    }
+    return std::complex<float>(s0_re, s0_im);
+}
+#endif
+
+inline void real_template_dot_4lag(const std::complex<float>* rx,
+                                   const float* taps_dup,
+                                   size_t L,
+                                   std::complex<float> out[4])
+{
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+    if (has_avx2_fma()) {
+        real_template_dot_4lag_avx2(rx, taps_dup, L, out);
+        return;
+    }
+#endif
+    out[0] = out[1] = out[2] = out[3] = std::complex<float>(0.f, 0.f);
+    for (size_t k = 0; k < L; ++k) {
+        float t = taps_dup[2 * k];
+        out[0] += rx[k + 0] * t;
+        out[1] += rx[k + 1] * t;
+        out[2] += rx[k + 2] * t;
+        out[3] += rx[k + 3] * t;
+    }
+}
+
+inline std::complex<float> real_template_dot_single(const std::complex<float>* rx,
+                                                    const float* taps_dup,
+                                                    size_t L)
+{
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+    if (has_avx2_fma()) {
+        return real_template_dot_single_avx2(rx, taps_dup, L);
+    }
+#endif
+    std::complex<float> acc(0.f, 0.f);
+    for (size_t k = 0; k < L; ++k) {
+        acc += rx[k] * taps_dup[2 * k];
+    }
     return acc;
 }
 
