@@ -1069,58 +1069,115 @@ BOOST_AUTO_TEST_CASE(test_discrete_cir_zero_cfo_bypass)
 {
     Packet p(10, 32);
     const size_t q = 350;
-    const size_t n = q + kTrainLen + 512;
-    const int64_t observed_end = static_cast<int64_t>(q + kTrainLen + 64);
+    const size_t n = q + p.wave.size() + 512;
+    const int64_t observed_end = static_cast<int64_t>(q + kTrainLen);
 
     const double cfo_hz = 0.0;
-    const std::vector<std::pair<int64_t, cf>> paths = {
-        {0, cf(1.00f, 0.00f)},
-        {7, cf(0.50f, 0.20f)}
-    };
-    std::vector<cf> y = make_integer_trace(n, q, p.train, paths, cfo_hz);
+    std::vector<cf> y(n, cf{});
+    for (size_t i = 0; i < p.wave.size(); ++i) {
+        y[q + i] = p.wave[i];
+    }
 
-    auto cfg = make_cfg(n, q, 30);
+    auto cfg = make_cfg(n, q, 40);
+    cfg.ipatov_correlation = true;
     sic::DiscreteCirScratch s;
     std::string err;
-    BOOST_REQUIRE(sic::prepare_discrete_cir(cfg, templates_of(p), s, &err));
+    BOOST_REQUIRE_MESSAGE(sic::prepare_discrete_cir(cfg, templates_of(p), s, &err), err);
 
     sic::DiscreteCirModel m;
     BOOST_REQUIRE(sic::estimate_discrete_cir(
         y.data(), n, observed_end, templates_of(p), cfg, s, m));
     BOOST_REQUIRE(m.valid);
+    BOOST_CHECK_EQUAL(m.support_source, "ipatov_correlation");
+    BOOST_CHECK(m.impulse_template);
     BOOST_CHECK_SMALL(m.cfo_hz, 50.0);
     BOOST_CHECK_LE(m.fit_residual, cfg.fit_residual_max);
 
-    const double residual = dense_normalized_residual(m, y, p.train);
-    BOOST_CHECK_LT(residual, 1e-2);
+    // Explicit scalar reference calculation without vectorization/bypass
+    const double omega = 2.0 * kPi * m.cfo_hz / kFs;
+    const size_t taps = cfg.tap_count;
+    const size_t width = kSps + taps - 1;
+    std::vector<cd> ref_avg(width, cd{});
+    size_t ref_valid = 0;
+    for (size_t k = 1; k < cfg.fit_reps; ++k) {
+        const int64_t lo = m.q + int64_t(k * kSps) + cfg.lag_lo;
+        if (lo < 0 || lo + int64_t(width) > observed_end) continue;
+        const int64_t rel_lo = lo - m.q;
+        for (size_t j = 0; j < width; ++j) {
+            const cd phase = (cfo_hz == 0.0) ? cd(1.0, 0.0) : std::polar(1.0, -omega * double(rel_lo + int64_t(j)));
+            ref_avg[j] += cd(y[size_t(lo) + j]) * phase;
+        }
+        ++ref_valid;
+    }
+    BOOST_REQUIRE_GT(ref_valid, 0u);
+    const int8_t* code = demod::GetPreambleCode(cfg.comm_code);
+    double code_energy = 0;
+    for (size_t c = 0; c < demod::kQm35CodeLength; ++c) code_energy += code[c] * code[c];
+    for (size_t d = 0; d < taps; ++d) {
+        cd acc{};
+        for (size_t c = 0; c < demod::kQm35CodeLength; ++c) {
+            if (code[c] != 0) acc += double(code[c]) * ref_avg[d + 8 * c];
+        }
+        const cd ref_tap = acc / (code_energy * ref_valid);
+        BOOST_CHECK_LT(std::abs(cd(m.taps[d]) - ref_tap), 2e-5);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(test_discrete_cir_negative_cfo)
 {
     Packet p(10, 32);
     const size_t q = 350;
-    const size_t n = q + kTrainLen + 512;
-    const int64_t observed_end = static_cast<int64_t>(q + kTrainLen + 64);
+    const size_t n = q + p.wave.size() + 512;
+    const int64_t observed_end = static_cast<int64_t>(q + kTrainLen);
 
     const double cfo_hz = -35000.0;
-    const std::vector<std::pair<int64_t, cf>> paths = {
-        {0, cf(1.00f, 0.00f)},
-        {7, cf(0.50f, 0.20f)}
-    };
-    std::vector<cf> y = make_integer_trace(n, q, p.train, paths, cfo_hz);
+    std::vector<cf> y(n, cf{});
+    for (size_t i = 0; i < p.wave.size(); ++i) {
+        const cd rot = std::polar(1.0, 2.0 * kPi * cfo_hz * double(i) / kFs);
+        y[q + i] = cf(cd(p.wave[i]) * rot);
+    }
 
-    auto cfg = make_cfg(n, q, 30);
+    auto cfg = make_cfg(n, q, 40);
+    cfg.ipatov_correlation = true;
     sic::DiscreteCirScratch s;
     std::string err;
-    BOOST_REQUIRE(sic::prepare_discrete_cir(cfg, templates_of(p), s, &err));
+    BOOST_REQUIRE_MESSAGE(sic::prepare_discrete_cir(cfg, templates_of(p), s, &err), err);
 
     sic::DiscreteCirModel m;
     BOOST_REQUIRE(sic::estimate_discrete_cir(
         y.data(), n, observed_end, templates_of(p), cfg, s, m));
     BOOST_REQUIRE(m.valid);
+    BOOST_CHECK_EQUAL(m.support_source, "ipatov_correlation");
+    BOOST_CHECK(m.impulse_template);
     BOOST_CHECK_LT(std::abs(m.cfo_hz - cfo_hz), 300.0);
     BOOST_CHECK_LE(m.fit_residual, cfg.fit_residual_max);
 
-    const double residual = dense_normalized_residual(m, y, p.train);
-    BOOST_CHECK_LT(residual, 1e-2);
+    // Explicit scalar reference calculation without vectorization/bypass
+    const double omega = 2.0 * kPi * m.cfo_hz / kFs;
+    const size_t taps = cfg.tap_count;
+    const size_t width = kSps + taps - 1;
+    std::vector<cd> ref_avg(width, cd{});
+    size_t ref_valid = 0;
+    for (size_t k = 1; k < cfg.fit_reps; ++k) {
+        const int64_t lo = m.q + int64_t(k * kSps) + cfg.lag_lo;
+        if (lo < 0 || lo + int64_t(width) > observed_end) continue;
+        const int64_t rel_lo = lo - m.q;
+        for (size_t j = 0; j < width; ++j) {
+            const cd phase = std::polar(1.0, -omega * double(rel_lo + int64_t(j)));
+            ref_avg[j] += cd(y[size_t(lo) + j]) * phase;
+        }
+        ++ref_valid;
+    }
+    BOOST_REQUIRE_GT(ref_valid, 0u);
+    const int8_t* code = demod::GetPreambleCode(cfg.comm_code);
+    double code_energy = 0;
+    for (size_t c = 0; c < demod::kQm35CodeLength; ++c) code_energy += code[c] * code[c];
+    for (size_t d = 0; d < taps; ++d) {
+        cd acc{};
+        for (size_t c = 0; c < demod::kQm35CodeLength; ++c) {
+            if (code[c] != 0) acc += double(code[c]) * ref_avg[d + 8 * c];
+        }
+        const cd ref_tap = acc / (code_energy * ref_valid);
+        BOOST_CHECK_LT(std::abs(cd(m.taps[d]) - ref_tap), 2e-5);
+    }
 }

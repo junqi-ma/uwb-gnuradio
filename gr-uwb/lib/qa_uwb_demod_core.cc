@@ -2392,3 +2392,55 @@ BOOST_AUTO_TEST_CASE(test_demod_core_ns_sfd_sparse_sliding_equivalence)
     BOOST_CHECK_EQUAL(res.polarity, 1);
     BOOST_CHECK_GE(res.metric, 0.95f);
 }
+
+BOOST_AUTO_TEST_CASE(test_demod_core_tail_reuse_equivalence_and_fallback)
+{
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+
+    // 1. Nominal reuse run: default profile with rx_seed_refine_tail = true (narrow search = 8).
+    // All 5 admission conditions are satisfied, so run_tail_and_cfo_refit executes tail reuse.
+    core::DemodScratch scratch_reuse;
+    scratch_reuse.reserve(iq.size());
+    auto prof_reuse = Qm35825Profile::Default();
+    prof_reuse.sfd_mode = "ieee";
+    prof_reuse.rx_seed_refine_tail = true;
+    auto res_reuse = core::demodulate_one(iq.data(), iq.size(), prof_reuse, 1, 9984, 0, tmpl, scratch_reuse);
+    BOOST_CHECK(res_reuse.status == DemodStatus::Success);
+
+    // 2. Explicit full re-search reference run: set rx_seed_refine_tail = false (seed_radius = 0).
+    // This forces run_tail_and_cfo_refit to bypass can_reuse and execute full stage_timing.
+    core::DemodScratch scratch_legacy;
+    scratch_legacy.reserve(iq.size());
+    auto prof_legacy = Qm35825Profile::Default();
+    prof_legacy.sfd_mode = "ieee";
+    prof_legacy.rx_seed_refine_tail = false;
+    auto res_legacy = core::demodulate_one(iq.data(), iq.size(), prof_legacy, 1, 9984, 0, tmpl, scratch_legacy);
+    BOOST_CHECK(res_legacy.status == DemodStatus::Success);
+
+    // Equivalence checks between reuse and explicit re-search
+    BOOST_CHECK_EQUAL(res_reuse.timing.detected_peaks, res_legacy.timing.detected_peaks);
+    BOOST_CHECK_EQUAL(res_reuse.timing.peak_samples.size(), res_legacy.timing.peak_samples.size());
+    BOOST_REQUIRE_GE(res_reuse.timing.peak_samples.size(), size_t(64));
+    // Verify that the tail 40 peaks in reuse exactly match the explicit tracking
+    for (size_t k = 24; k < 64; ++k) {
+        BOOST_CHECK_EQUAL(res_reuse.timing.peak_samples[k], res_legacy.timing.peak_samples[k]);
+    }
+    // Estimated CFO must match closely (within < 15 Hz)
+    BOOST_CHECK_SMALL(std::abs(res_reuse.cfo.cfo_hz - res_legacy.cfo.cfo_hz), 15.0);
+    BOOST_CHECK_EQUAL(res_reuse.phr.psdu_length, res_legacy.phr.psdu_length);
+
+    // 3. Fallback test: violate an admission condition.
+    // Setting timing_track_radius = 12 (not 8) causes can_reuse == false.
+    core::DemodScratch scratch_fb;
+    scratch_fb.reserve(iq.size());
+    auto prof_fb = Qm35825Profile::Default();
+    prof_fb.sfd_mode = "ieee";
+    prof_fb.rx_seed_refine_tail = true;
+    prof_fb.timing_track_radius = 12; // Incompatible with radius 8 reuse condition
+    auto res_fb = core::demodulate_one(iq.data(), iq.size(), prof_fb, 1, 9984, 0, tmpl, scratch_fb);
+    BOOST_CHECK(res_fb.status == DemodStatus::Success);
+    BOOST_CHECK_EQUAL(res_fb.timing.detected_peaks, size_t(64));
+    BOOST_CHECK_SMALL(std::abs(res_fb.cfo.cfo_hz - res_legacy.cfo.cfo_hz), 25.0);
+}

@@ -8,6 +8,8 @@ using std::isnan;
 #include <numeric>
 #include <algorithm>
 #include <iomanip>
+#include <fstream>
+#include <cstdlib>
 
 using namespace gr::uwb;
 using namespace gr::uwb::sic;
@@ -121,6 +123,13 @@ int main() {
                 std::cerr << "Fatal: benchmark round " << i << " failed closed\n";
                 std::exit(1);
             }
+            // Strict sample-by-sample finiteness check
+            for (size_t s = 0; s < n; ++s) {
+                if (!std::isfinite(out[s].real()) || !std::isfinite(out[s].imag())) {
+                    std::cerr << "Fatal: nonfinite sample in out at " << s << " in round " << i << "\n";
+                    std::exit(1);
+                }
+            }
             totals.push_back(res.timings.core_total_us);
             estimates.push_back(res.timings.estimate_us);
             comms.push_back(res.timings.comm_rx_us);
@@ -134,9 +143,21 @@ int main() {
             rx_pays.push_back(res.timings.rx_payload_us);
         }
 
-        std::cout << "RAW_TOTALS:";
-        for (double v : totals) std::cout << " " << v;
-        std::cout << "\n";
+        double out_energy = 0.0;
+        for (size_t s = 0; s < n; ++s) {
+            out_energy += double(std::norm(out[s]));
+        }
+        const double out_l2 = std::sqrt(out_energy);
+
+        const char* dump_dir = std::getenv("SIC_DUMP_OUTPUT_DIR");
+        if (dump_dir) {
+            std::string pol_name = (policy == SicPolicy::PreambleOnly) ? "preamble" : "fullpacket";
+            std::string path = std::string(dump_dir) + "/sic_out_" + pol_name + ".bin";
+            std::ofstream ofs(path, std::ios::binary);
+            if (ofs) {
+                ofs.write(reinterpret_cast<const char*>(out.data()), sizeof(cf) * n);
+            }
+        }
 
         auto stats = [](std::vector<double>& v) {
             std::sort(v.begin(), v.end());
@@ -163,6 +184,11 @@ int main() {
         std::cout << "  Committed: " << (res.committed ? "YES" : "NO") 
                   << " | Suppression: " << std::fixed << std::setprecision(2) << res.suppression_db << " dB\n";
         std::cout << "  Level: " << static_cast<int>(res.level) << " | Cancelled Mask: " << static_cast<uint32_t>(res.cancelled_fields) << "\n";
+        std::cout << "  OUTPUT_FINITE: ALL_FINITE (n=" << n << ")\n";
+        std::cout << "  OUTPUT_L2: " << std::fixed << std::setprecision(8) << out_l2 << "\n";
+        std::cout << "  RAW_TOTALS:";
+        for (double v : totals) std::cout << " " << v;
+        std::cout << "\n";
         std::cout << "-------------------------------------------------------\n";
         std::cout << "  STAGE                    MEAN (us)    P50 (us)    P95 (us)\n";
         std::cout << "  1. estimate_channel      " << std::setw(9) << est_m << "   " << std::setw(9) << est_50 << "   " << std::setw(9) << est_95 << "\n";
