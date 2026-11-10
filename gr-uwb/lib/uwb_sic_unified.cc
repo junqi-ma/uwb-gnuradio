@@ -15,6 +15,10 @@
 #include <cstring>
 #include <limits>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
+
 namespace gr {
 namespace uwb {
 namespace sic {
@@ -26,6 +30,35 @@ using Clock = std::chrono::steady_clock;
 double us(Clock::time_point t)
 {
     return std::chrono::duration<double, std::micro>(Clock::now() - t).count();
+}
+
+constexpr uint64_t kFnvOffset = 14695981039346656037ull;
+constexpr uint64_t kFnvPrime  = 1099511628211ull;
+
+inline void hash_u64(uint64_t& h, uint64_t v)
+{
+    h = (h ^ v) * kFnvPrime;
+}
+
+inline void hash_bytes(uint64_t& h, const void* data, size_t n)
+{
+    const auto* p = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < n; ++i) {
+        h = (h ^ static_cast<uint64_t>(p[i])) * kFnvPrime;
+    }
+}
+
+inline void hash_words64(uint64_t& h, const void* data, size_t n)
+{
+    const auto* p64 = static_cast<const uint64_t*>(data);
+    const size_t n64 = n / 8;
+    for (size_t i = 0; i < n64; ++i) {
+        h = (h ^ p64[i]) * kFnvPrime;
+    }
+    const auto* p8 = static_cast<const uint8_t*>(data) + n64 * 8;
+    for (size_t i = 0; i < (n & 7); ++i) {
+        h = (h ^ static_cast<uint64_t>(p8[i])) * kFnvPrime;
+    }
 }
 
 } // namespace
@@ -226,7 +259,51 @@ DiscreteCirTemplates SicUnifiedTemplates::to_discrete_cir_templates() const
 }
 
 // ---------------------------------------------------------------------------
-// SicUnifiedScratch Reservation
+// Hash Identity Computations
+// ---------------------------------------------------------------------------
+
+uint64_t compute_unified_config_hash(const SicUnifiedConfig& cfg)
+{
+    uint64_t h = kFnvOffset;
+    hash_u64(h, 0x534943554e494631ull); // "SICUNIF1"
+    hash_u64(h, static_cast<uint64_t>(cfg.comm_code));
+    hash_u64(h, static_cast<uint64_t>(cfg.sync_reps));
+    hash_u64(h, static_cast<uint64_t>(cfg.samples_per_symbol));
+    uint64_t fs_bits = 0;
+    std::memcpy(&fs_bits, &cfg.sample_rate, sizeof(double));
+    hash_u64(h, fs_bits);
+    if (cfg.sfd_mode) {
+        hash_bytes(h, cfg.sfd_mode, std::strlen(cfg.sfd_mode));
+    }
+    hash_u64(h, static_cast<uint64_t>(cfg.backend));
+    hash_u64(h, cfg.sparse_pulse_reconstruct ? 1ull : 0ull);
+    hash_u64(h, static_cast<uint64_t>(cfg.fit_reps));
+    hash_u64(h, static_cast<uint64_t>(cfg.lag_lo));
+    hash_u64(h, static_cast<uint64_t>(cfg.tap_count));
+    hash_u64(h, static_cast<uint64_t>(cfg.k_paths));
+    hash_u64(h, static_cast<uint64_t>(cfg.post_tail));
+    return h;
+}
+
+uint64_t compute_unified_template_hash(const SicUnifiedTemplates& tmpl)
+{
+    uint64_t h = kFnvOffset;
+    hash_u64(h, 0x54454d504c415431ull); // "TEMPLAT1"
+    hash_u64(h, static_cast<uint64_t>(tmpl.sync_len));
+    if (tmpl.sync && tmpl.sync_len > 0) {
+        hash_words64(h, tmpl.sync, tmpl.sync_len * sizeof(std::complex<float>));
+    }
+    hash_u64(h, static_cast<uint64_t>(tmpl.preamble_len));
+    hash_u64(h, reinterpret_cast<uintptr_t>(tmpl.preamble));
+    hash_u64(h, static_cast<uint64_t>(tmpl.impulse_sync_len));
+    if (tmpl.impulse_sync && tmpl.impulse_sync_len > 0) {
+        hash_words64(h, tmpl.impulse_sync, tmpl.impulse_sync_len * sizeof(std::complex<float>));
+    }
+    return h;
+}
+
+// ---------------------------------------------------------------------------
+// SicUnifiedScratch Reservation & Cache Management
 // ---------------------------------------------------------------------------
 
 void SicUnifiedScratch::reserve(size_t max_window_samples, size_t max_packet_samples)
@@ -234,19 +311,68 @@ void SicUnifiedScratch::reserve(size_t max_window_samples, size_t max_packet_sam
     if (max_packet_samples == 0) {
         max_packet_samples = max_window_samples;
     }
-    capacity_window_samples = max_window_samples;
-    capacity_packet_samples = max_packet_samples;
+    if (max_window_samples > capacity_window_samples) {
+        capacity_window_samples = max_window_samples;
+    }
+    if (max_packet_samples > capacity_packet_samples) {
+        capacity_packet_samples = max_packet_samples;
+    }
 
-    discrete.reserve(max_window_samples);
-    fullpacket.reserve(max_window_samples);
-    modulator.reserve(127, max_packet_samples);
-    demod.reserve(max_window_samples);
+    discrete.reserve(capacity_window_samples);
+    fullpacket.reserve(capacity_window_samples);
+    modulator.reserve(127, capacity_packet_samples);
+    demod.reserve(capacity_window_samples);
 
-    work_waveform.resize(max_packet_samples);
-    work_accum.resize(max_window_samples);
-    work_rot.resize(max_window_samples);
+    if (work_waveform.capacity() < capacity_packet_samples) {
+        work_waveform.reserve(capacity_packet_samples);
+    }
+    work_waveform.resize(capacity_packet_samples);
+
+    if (work_accum.capacity() < capacity_window_samples) {
+        work_accum.reserve(capacity_window_samples);
+    }
+    work_accum.resize(capacity_window_samples);
+
+    if (work_rot.capacity() < capacity_window_samples) {
+        work_rot.reserve(capacity_window_samples);
+    }
+    work_rot.resize(capacity_window_samples);
+
+    if (work_phr_bits.capacity() < 19) {
+        work_phr_bits.reserve(19);
+    }
     work_phr_bits.resize(19);
+
+    if (work_wire_psdu.capacity() < radar_meta::kMaxPsduBytes) {
+        work_wire_psdu.reserve(radar_meta::kMaxPsduBytes);
+    }
     work_wire_psdu.resize(radar_meta::kMaxPsduBytes);
+}
+
+bool SicUnifiedScratch::cache_matches(const SicUnifiedConfig& cfg, const SicUnifiedTemplates& tmpl) const
+{
+    if (!prepared || !preamble_cache_valid) {
+        return false;
+    }
+    const uint64_t ch = compute_unified_config_hash(cfg);
+    const uint64_t th = compute_unified_template_hash(tmpl);
+    return (config_hash == ch && template_hash == th &&
+            preamble_cache_config_hash == ch &&
+            preamble_cache_template_hash == th);
+}
+
+void SicUnifiedScratch::invalidate_cache()
+{
+    preamble_cache_valid = false;
+    preamble_cache_config_hash = 0;
+    preamble_cache_template_hash = 0;
+    cached_preamble_samples = 0;
+    cached_sync_vec.clear();
+    cached_preamble_waveform.clear();
+    cached_preamble_events.clear();
+    config_hash = 0;
+    template_hash = 0;
+    prepared = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +385,8 @@ bool prepare_sic_unified(
     SicUnifiedScratch& scratch,
     std::string* err)
 {
+    scratch.invalidate_cache();
+
     if (!templates.sync || templates.sync_len != cfg.samples_per_symbol) {
         if (err) *err = "invalid_sync_template";
         return false;
@@ -285,6 +413,55 @@ bool prepare_sic_unified(
         }
     }
 
+    // 1. Cached sync_vec for receiver demod
+    scratch.cached_sync_vec.assign(templates.sync, templates.sync + templates.sync_len);
+
+    // 2. Materialized prefix complex waveform (SYNC + SFD)
+    mod::HrpModConfig modcfg = cfg.to_hrp_mod_config();
+    if (scratch.cached_preamble_waveform.capacity() < scratch.capacity_packet_samples) {
+        scratch.cached_preamble_waveform.reserve(scratch.capacity_packet_samples);
+    }
+    scratch.cached_preamble_waveform.resize(scratch.capacity_packet_samples);
+    size_t n_prefix = 0;
+    if (mod::modulate_prefix_waveform(modcfg, scratch.modulator,
+                                      scratch.cached_preamble_waveform.data(),
+                                      scratch.cached_preamble_waveform.size(),
+                                      n_prefix) && n_prefix > 0) {
+        scratch.cached_preamble_waveform.resize(n_prefix);
+    } else {
+        scratch.cached_preamble_waveform.clear();
+    }
+
+    // 3. Dedicated cached preamble pulse events for sparse pulse reconstruction
+    mod::HrpModConfig imp_cfg = modcfg;
+    imp_cfg.peak_amplitude = 1.f;
+    imp_cfg.pulse.shape = mod::PulseShape::External;
+    imp_cfg.external_taps = {1.f, 0.f};
+    imp_cfg.pulse.external_n_taps = 2;
+
+    const mod::HrpModConfig& prof = (cfg.backend == SicEstimatorBackend::Ipatov &&
+                                     scratch.discrete.impulse_profile.code_index != 0)
+        ? scratch.discrete.impulse_profile
+        : imp_cfg;
+    auto& mod_scratch = (cfg.backend == SicEstimatorBackend::Ipatov)
+        ? scratch.discrete.modulator
+        : scratch.modulator;
+
+    mod::PulseList pulses;
+    if (mod::modulate_prefix_pulse_list(prof, mod_scratch,
+                                        scratch.capacity_packet_samples, pulses) && pulses.count > 0) {
+        scratch.cached_preamble_events.assign(pulses.events, pulses.events + pulses.count);
+        scratch.cached_preamble_samples = pulses.packet_samples;
+    } else {
+        scratch.cached_preamble_events.clear();
+        scratch.cached_preamble_samples = 0;
+    }
+
+    scratch.config_hash = compute_unified_config_hash(cfg);
+    scratch.template_hash = compute_unified_template_hash(templates);
+    scratch.preamble_cache_config_hash = scratch.config_hash;
+    scratch.preamble_cache_template_hash = scratch.template_hash;
+    scratch.preamble_cache_valid = true;
     scratch.prepared = true;
     return true;
 }
@@ -444,10 +621,19 @@ bool reconstruct_and_subtract_unified(
             // Check if sparse pulse reconstruction is enabled for Ipatov backend
             if (dm.impulse_template && scratch.discrete.sparse_pulse_reconstruct) {
                 mod::PulseList pulses;
-                const bool tx_ok = mod::modulate_prefix_pulse_list(
-                    scratch.discrete.impulse_profile, scratch.discrete.modulator,
-                    scratch.discrete.waveform.size(), pulses);
-                if (tx_ok && pulses.count > 0) {
+                if (scratch.preamble_cache_valid && !scratch.cached_preamble_events.empty()) {
+                    pulses.events = scratch.cached_preamble_events.data();
+                    pulses.count = scratch.cached_preamble_events.size();
+                    pulses.packet_samples = scratch.cached_preamble_samples;
+                } else {
+                    const bool tx_ok = mod::modulate_prefix_pulse_list(
+                        scratch.discrete.impulse_profile, scratch.discrete.modulator,
+                        scratch.discrete.waveform.size(), pulses);
+                    if (!tx_ok || pulses.count == 0) {
+                        pulses = mod::PulseList{};
+                    }
+                }
+                if (pulses.count > 0) {
                     bool ok = apply_discrete_cir_pulses(
                         y, n, pulses, templates.sync, templates.sync_len, dm,
                         cfg.sub_roi_lo, cfg.sub_roi_hi, scratch.discrete, out, i_hat, &dres);
@@ -521,6 +707,108 @@ bool reconstruct_and_subtract_unified(
 }
 
 // ---------------------------------------------------------------------------
+// compute_roi_energies (SIMD float load + double accumulation)
+// ---------------------------------------------------------------------------
+
+void compute_roi_energies(
+    const std::complex<float>* y,
+    const std::complex<float>* out,
+    int64_t start,
+    int64_t end,
+    double& e_y,
+    double& e_out)
+{
+    e_y = 0.0;
+    e_out = 0.0;
+    if (!y || !out || end <= start || start < 0) {
+        return;
+    }
+    const size_t count = static_cast<size_t>(end - start);
+
+#if defined(__AVX2__)
+    const float* py = reinterpret_cast<const float*>(y + start);
+    const float* pout = reinterpret_cast<const float*>(out + start);
+
+    __m256d y_acc0 = _mm256_setzero_pd();
+    __m256d y_acc1 = _mm256_setzero_pd();
+    __m256d y_acc2 = _mm256_setzero_pd();
+    __m256d y_acc3 = _mm256_setzero_pd();
+
+    __m256d out_acc0 = _mm256_setzero_pd();
+    __m256d out_acc1 = _mm256_setzero_pd();
+    __m256d out_acc2 = _mm256_setzero_pd();
+    __m256d out_acc3 = _mm256_setzero_pd();
+
+    size_t i = 0;
+    const size_t unroll8 = count & ~size_t(7);
+    for (; i < unroll8; i += 8) {
+        __m256 vy0 = _mm256_loadu_ps(py + 2 * i);
+        __m256 vy1 = _mm256_loadu_ps(py + 2 * i + 8);
+        __m256 vout0 = _mm256_loadu_ps(pout + 2 * i);
+        __m256 vout1 = _mm256_loadu_ps(pout + 2 * i + 8);
+
+        __m256 vy0_sq = _mm256_mul_ps(vy0, vy0);
+        __m256 vy1_sq = _mm256_mul_ps(vy1, vy1);
+        __m256 vout0_sq = _mm256_mul_ps(vout0, vout0);
+        __m256 vout1_sq = _mm256_mul_ps(vout1, vout1);
+
+        y_acc0 = _mm256_add_pd(y_acc0, _mm256_cvtps_pd(_mm256_castps256_ps128(vy0_sq)));
+        y_acc1 = _mm256_add_pd(y_acc1, _mm256_cvtps_pd(_mm256_extractf128_ps(vy0_sq, 1)));
+        y_acc2 = _mm256_add_pd(y_acc2, _mm256_cvtps_pd(_mm256_castps256_ps128(vy1_sq)));
+        y_acc3 = _mm256_add_pd(y_acc3, _mm256_cvtps_pd(_mm256_extractf128_ps(vy1_sq, 1)));
+
+        out_acc0 = _mm256_add_pd(out_acc0, _mm256_cvtps_pd(_mm256_castps256_ps128(vout0_sq)));
+        out_acc1 = _mm256_add_pd(out_acc1, _mm256_cvtps_pd(_mm256_extractf128_ps(vout0_sq, 1)));
+        out_acc2 = _mm256_add_pd(out_acc2, _mm256_cvtps_pd(_mm256_castps256_ps128(vout1_sq)));
+        out_acc3 = _mm256_add_pd(out_acc3, _mm256_cvtps_pd(_mm256_extractf128_ps(vout1_sq, 1)));
+    }
+
+    if (i + 4 <= count) {
+        __m256 vy0 = _mm256_loadu_ps(py + 2 * i);
+        __m256 vout0 = _mm256_loadu_ps(pout + 2 * i);
+
+        __m256 vy0_sq = _mm256_mul_ps(vy0, vy0);
+        __m256 vout0_sq = _mm256_mul_ps(vout0, vout0);
+
+        y_acc0 = _mm256_add_pd(y_acc0, _mm256_cvtps_pd(_mm256_castps256_ps128(vy0_sq)));
+        y_acc1 = _mm256_add_pd(y_acc1, _mm256_cvtps_pd(_mm256_extractf128_ps(vy0_sq, 1)));
+
+        out_acc0 = _mm256_add_pd(out_acc0, _mm256_cvtps_pd(_mm256_castps256_ps128(vout0_sq)));
+        out_acc1 = _mm256_add_pd(out_acc1, _mm256_cvtps_pd(_mm256_extractf128_ps(vout0_sq, 1)));
+        i += 4;
+    }
+
+    __m256d y_sum = _mm256_add_pd(_mm256_add_pd(y_acc0, y_acc1),
+                                  _mm256_add_pd(y_acc2, y_acc3));
+    alignas(32) double y_buf[4];
+    _mm256_storeu_pd(y_buf, y_sum);
+    double sum_y = y_buf[0] + y_buf[1] + y_buf[2] + y_buf[3];
+
+    __m256d out_sum = _mm256_add_pd(_mm256_add_pd(out_acc0, out_acc1),
+                                    _mm256_add_pd(out_acc2, out_acc3));
+    alignas(32) double out_buf[4];
+    _mm256_storeu_pd(out_buf, out_sum);
+    double sum_out = out_buf[0] + out_buf[1] + out_buf[2] + out_buf[3];
+
+    for (; i < count; ++i) {
+        sum_y += std::norm(y[start + i]);
+        sum_out += std::norm(out[start + i]);
+    }
+    e_y = sum_y;
+    e_out = sum_out;
+#else
+    double sum_y = 0.0;
+    double sum_out = 0.0;
+    for (size_t i = 0; i < count; ++i) {
+        sum_y += std::norm(y[start + i]);
+        sum_out += std::norm(out[start + i]);
+    }
+    e_y = sum_y;
+    e_out = sum_out;
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // sic_process_unified
 // ---------------------------------------------------------------------------
 
@@ -540,8 +828,11 @@ bool sic_process_unified(
     result.suppression_db = 0.0;
     result.fallback_reason = nullptr;
 
-    if (!y || !result.out || n == 0 || !scratch.prepared) {
-        result.reason = "invalid_buffers_or_scratch";
+    if (!y || !result.out || n == 0 || !scratch.prepared ||
+        !scratch.cache_matches(cfg, templates)) {
+        result.reason = (!y || !result.out || n == 0 || !scratch.prepared)
+                            ? "invalid_buffers_or_scratch"
+                            : "config_or_template_mismatch";
         if (result.out && y && n > 0 && result.out != y) {
             std::copy(y, y + n, result.out);
         }
@@ -576,7 +867,7 @@ bool sic_process_unified(
     const std::complex<float>* s_known_ptr = templates.preamble;
     size_t s_known_len = templates.preamble_len;
 
-    std::vector<std::complex<float>> sync_vec(templates.sync, templates.sync + templates.sync_len);
+    const std::vector<std::complex<float>>& sync_vec = scratch.cached_sync_vec;
 
     auto demod_prof = demod::Qm35825Profile::Default();
     demod_prof.code_index = cfg.comm_code;
@@ -612,15 +903,19 @@ bool sic_process_unified(
             target_level = SicCancellationLevel::L1_Preamble;
             target_fields = SicKnownFields::PreambleSfd;
 
-            // Generate the exact SYNC + SFD known waveform
-            mod::HrpModConfig modcfg = cfg.to_hrp_mod_config();
-            size_t n_prefix = 0;
-            if (mod::modulate_prefix_waveform(modcfg, scratch.modulator,
-                                              scratch.work_waveform.data(),
-                                              scratch.work_waveform.size(),
-                                              n_prefix) && n_prefix > 0) {
-                s_known_ptr = scratch.work_waveform.data();
-                s_known_len = n_prefix;
+            if (scratch.preamble_cache_valid && !scratch.cached_preamble_waveform.empty()) {
+                s_known_ptr = scratch.cached_preamble_waveform.data();
+                s_known_len = scratch.cached_preamble_waveform.size();
+            } else {
+                mod::HrpModConfig modcfg = cfg.to_hrp_mod_config();
+                size_t n_prefix = 0;
+                if (mod::modulate_prefix_waveform(modcfg, scratch.modulator,
+                                                  scratch.work_waveform.data(),
+                                                  scratch.work_waveform.size(),
+                                                  n_prefix) && n_prefix > 0) {
+                    s_known_ptr = scratch.work_waveform.data();
+                    s_known_len = n_prefix;
+                }
             }
         } else {
             // SFD detection failed on preamble-only
@@ -668,7 +963,7 @@ bool sic_process_unified(
 
         const bool demod_success = (decoded.status == demod::DemodStatus::Success &&
                                     decoded.payload.fcs_pass &&
-                                    decoded.phr.phr_bits.size() == 19);
+                                     decoded.phr.phr_bits.size() == 19);
 
         if (demod_success) {
             target_level = SicCancellationLevel::L2_FullPacket;
@@ -698,14 +993,19 @@ bool sic_process_unified(
                 target_level = SicCancellationLevel::L1_Preamble;
                 target_fields = SicKnownFields::PreambleSfd;
 
-                mod::HrpModConfig modcfg = cfg.to_hrp_mod_config();
-                size_t n_prefix = 0;
-                if (mod::modulate_prefix_waveform(modcfg, scratch.modulator,
-                                                  scratch.work_waveform.data(),
-                                                  scratch.work_waveform.size(),
-                                                  n_prefix) && n_prefix > 0) {
-                    s_known_ptr = scratch.work_waveform.data();
-                    s_known_len = n_prefix;
+                if (scratch.preamble_cache_valid && !scratch.cached_preamble_waveform.empty()) {
+                    s_known_ptr = scratch.cached_preamble_waveform.data();
+                    s_known_len = scratch.cached_preamble_waveform.size();
+                } else {
+                    mod::HrpModConfig modcfg = cfg.to_hrp_mod_config();
+                    size_t n_prefix = 0;
+                    if (mod::modulate_prefix_waveform(modcfg, scratch.modulator,
+                                                      scratch.work_waveform.data(),
+                                                      scratch.work_waveform.size(),
+                                                      n_prefix) && n_prefix > 0) {
+                        s_known_ptr = scratch.work_waveform.data();
+                        s_known_len = n_prefix;
+                    }
                 }
             }
         }
@@ -727,11 +1027,8 @@ bool sic_process_unified(
         result.sub_lo >= 0 && result.sub_hi <= static_cast<int64_t>(n)) {
         double e_y = 0.0;
         double e_out = 0.0;
-        for (int64_t i = result.sub_lo; i < result.sub_hi; ++i) {
-            e_y += std::norm(y[i]);
-            e_out += std::norm(result.out[i]);
-        }
-        if (e_y > 0.0 && e_out > 0.0) {
+        compute_roi_energies(y, result.out, result.sub_lo, result.sub_hi, e_y, e_out);
+        if (std::isfinite(e_y) && std::isfinite(e_out) && e_y > 0.0 && e_out > 0.0) {
             result.suppression_db = 10.0 * std::log10(e_y / e_out);
         }
     }

@@ -2164,3 +2164,157 @@ BOOST_AUTO_TEST_CASE(test_demod_core_real_sync_dot_numeric_equivalence)
         }
     }
 }
+
+BOOST_AUTO_TEST_CASE(test_demod_core_sfd_dot_numeric_equivalence)
+{
+    const size_t sym = kQm35SamplesPerSymbol; // 1016
+    std::vector<gr_complex> tmpl = load_reference_template();
+    BOOST_REQUIRE_EQUAL(tmpl.size(), sym);
+
+    rxopt::RealSyncTemplate real_tmpl;
+    rxopt::build_real_sync_template(tmpl, real_tmpl);
+    BOOST_REQUIRE(real_tmpl.is_real);
+
+    // Test with IEEE SFD and SFD 4z2
+    const char* modes[] = { "ieee", "4z2" };
+    for (const char* mode : modes) {
+        const std::vector<int8_t> sfd_seq = gr::uwb::demod::GetSfdSequence(mode);
+        const size_t len = sfd_seq.size();
+        BOOST_REQUIRE_GT(len, 0);
+
+        float sfd_norm_sq = 0.0f;
+        for (int8_t s : sfd_seq)
+            sfd_norm_sq += static_cast<float>(s * s);
+        BOOST_REQUIRE_GT(sfd_norm_sq, 0.0f);
+        const float sfd_scale = 1.0f / std::sqrt(sfd_norm_sq * real_tmpl.energy);
+
+        // Generate synthetic test rx signal covering full SFD plus margin
+        const size_t total_sfd_samples = len * sym;
+        std::vector<gr_complex> rx(total_sfd_samples + 256);
+        for (size_t i = 0; i < rx.size(); ++i) {
+            rx[i] = gr_complex(
+                std::sin(static_cast<float>(i) * 0.07f) + 0.3f * std::cos(static_cast<float>(i) * 0.23f),
+                std::cos(static_cast<float>(i) * 0.11f) - 0.2f * std::sin(static_cast<float>(i) * 0.19f));
+        }
+
+        // Test over 64 candidate offsets, testing both 4-lag batch and single-lag
+        for (size_t lag = 0; lag < 64; lag += 4) {
+            gr_complex a4[4];
+            rxopt::sfd_real_dot_4lag(rx.data() + lag,
+                                     real_tmpl.taps_dup.data(),
+                                     sym,
+                                     sfd_seq.data(),
+                                     len,
+                                     sfd_scale,
+                                     a4);
+
+            for (size_t j = 0; j < 4; ++j) {
+                const gr_complex s_out = rxopt::sfd_real_dot_single(
+                    rx.data() + lag + j,
+                    real_tmpl.taps_dup.data(),
+                    sym,
+                    sfd_seq.data(),
+                    len,
+                    sfd_scale);
+
+                const float diff = std::abs(a4[j] - s_out);
+                const float mag = std::abs(s_out);
+                const float rel_err = (mag > 1e-12f) ? (diff / mag) : diff;
+                BOOST_CHECK_LT(rel_err, 2e-5f);
+                BOOST_CHECK_LT(diff, 2e-5f);
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_cached_sequence_invalidation)
+{
+    core::DemodScratch scratch;
+    // Initially invalid
+    BOOST_CHECK_EQUAL(scratch.cached_seq.code_index, std::numeric_limits<size_t>::max());
+    BOOST_CHECK(scratch.cached_seq.pcode.empty());
+    BOOST_CHECK(scratch.cached_seq.sampled_pcode.empty());
+    BOOST_CHECK(scratch.cached_seq.sfd_seq.empty());
+
+    // Update with code 9, "4z2"
+    scratch.cached_seq.update(9, "4z2");
+    BOOST_CHECK_EQUAL(scratch.cached_seq.code_index, 9);
+    BOOST_CHECK_EQUAL(scratch.cached_seq.sfd_mode, "4z2");
+    BOOST_CHECK_EQUAL(scratch.cached_seq.pcode.size(), kQm35CodeLength);
+    const int8_t* pc9 = GetPreambleCode(9);
+    for (size_t i = 0; i < kQm35CodeLength; ++i) {
+        BOOST_CHECK_EQUAL(scratch.cached_seq.pcode[i], pc9[i]);
+    }
+    const std::vector<int8_t> expected_sampled9 = BuildSampledCode(pc9, kQm35CodeLength);
+    BOOST_CHECK_EQUAL(scratch.cached_seq.sampled_pcode.size(), expected_sampled9.size());
+    for (size_t i = 0; i < expected_sampled9.size(); ++i) {
+        BOOST_CHECK_EQUAL(scratch.cached_seq.sampled_pcode[i], expected_sampled9[i]);
+    }
+    const std::vector<int8_t> expected_sfd4z2 = gr::uwb::demod::GetSfdSequence("4z2");
+    BOOST_CHECK_EQUAL(scratch.cached_seq.sfd_seq.size(), expected_sfd4z2.size());
+    for (size_t i = 0; i < expected_sfd4z2.size(); ++i) {
+        BOOST_CHECK_EQUAL(scratch.cached_seq.sfd_seq[i], expected_sfd4z2[i]);
+    }
+
+    // Repeated update with same parameters should not reallocate/change
+    const int8_t* pcode_ptr = scratch.cached_seq.pcode.data();
+    scratch.cached_seq.update(9, "4z2");
+    BOOST_CHECK_EQUAL(scratch.cached_seq.pcode.data(), pcode_ptr);
+
+    // Update with code 10 (code change, SFD mode unchanged)
+    scratch.cached_seq.update(10, "4z2");
+    BOOST_CHECK_EQUAL(scratch.cached_seq.code_index, 10);
+    const int8_t* pc10 = GetPreambleCode(10);
+    BOOST_CHECK_EQUAL(scratch.cached_seq.pcode[0], pc10[0]);
+    const std::vector<int8_t> expected_sampled10 = BuildSampledCode(pc10, kQm35CodeLength);
+    BOOST_CHECK_EQUAL(scratch.cached_seq.sampled_pcode[0], expected_sampled10[0]);
+
+    // Update with "ieee" (SFD mode change, code unchanged)
+    scratch.cached_seq.update(10, "ieee");
+    BOOST_CHECK_EQUAL(scratch.cached_seq.sfd_mode, "ieee");
+    const std::vector<int8_t> expected_ieee = gr::uwb::demod::GetSfdSequence("ieee");
+    BOOST_CHECK_EQUAL(scratch.cached_seq.sfd_seq.size(), expected_ieee.size());
+    for (size_t i = 0; i < expected_ieee.size(); ++i) {
+        BOOST_CHECK_EQUAL(scratch.cached_seq.sfd_seq[i], expected_ieee[i]);
+    }
+
+    // Explicit invalidate
+    scratch.cached_seq.invalidate();
+    BOOST_CHECK_EQUAL(scratch.cached_seq.code_index, std::numeric_limits<size_t>::max());
+    BOOST_CHECK(scratch.cached_seq.pcode.empty());
+    BOOST_CHECK(scratch.cached_seq.sampled_pcode.empty());
+    BOOST_CHECK(scratch.cached_seq.sfd_seq.empty());
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_vector_accumulate_scale)
+{
+    const size_t N = 1053;
+    std::vector<gr_complex> dst_simd(N, gr_complex(0.0f, 0.0f));
+    std::vector<gr_complex> dst_scalar(N, gr_complex(0.0f, 0.0f));
+
+    // Test accumulation of 16 blocks of random-ish data
+    for (size_t b = 0; b < 16; ++b) {
+        std::vector<gr_complex> src(N);
+        for (size_t i = 0; i < N; ++i) {
+            src[i] = gr_complex(std::sin(static_cast<float>(b * N + i) * 0.1f),
+                                std::cos(static_cast<float>(b * N + i) * 0.17f));
+            dst_scalar[i] += src[i];
+        }
+        rxopt::vector_accumulate_complex(dst_simd.data(), src.data(), N);
+    }
+
+    for (size_t i = 0; i < N; ++i) {
+        BOOST_CHECK_CLOSE(dst_simd[i].real(), dst_scalar[i].real(), 1e-4f);
+        BOOST_CHECK_CLOSE(dst_simd[i].imag(), dst_scalar[i].imag(), 1e-4f);
+    }
+
+    const float scale = 1.0f / 16.0f;
+    for (size_t i = 0; i < N; ++i)
+        dst_scalar[i] *= scale;
+    rxopt::vector_scale_complex(dst_simd.data(), scale, N);
+
+    for (size_t i = 0; i < N; ++i) {
+        BOOST_CHECK_CLOSE(dst_simd[i].real(), dst_scalar[i].real(), 1e-4f);
+        BOOST_CHECK_CLOSE(dst_simd[i].imag(), dst_scalar[i].imag(), 1e-4f);
+    }
+}

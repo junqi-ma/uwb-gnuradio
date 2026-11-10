@@ -849,3 +849,218 @@ BOOST_AUTO_TEST_CASE(test_discrete_cir_c1_c2_c4_optimizations)
         BOOST_CHECK_GT(m.fit_residual, 0.0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Track A QA: Real vs Complex Template Equivalence
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_discrete_cir_real_vs_complex_template_equivalence)
+{
+    Packet p(10, 32);
+    const size_t q = 400;
+    const size_t n = q + p.wave.size() + 512;
+    const int64_t observed_end = static_cast<int64_t>(q + kTrainLen + 64);
+
+    std::vector<cf> y(n, cf(0.f, 0.f));
+    std::copy(p.wave.begin(), p.wave.end(), y.begin() + q);
+
+    auto cfg = make_cfg(n, q, 30);
+    sic::DiscreteCirScratch scratch_real;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(prepare_ok(p, cfg, scratch_real, err), err);
+    BOOST_REQUIRE(scratch_real.sync_real.is_real);
+
+    // Direct comparison of real_template_dot_single / 4lag vs VOLK complex dot
+    const size_t Ls = scratch_real.sync_len;
+    for (size_t lag = 0; lag + 4 + Ls <= y.size(); lag += 7) {
+        cf dot_c[4];
+        for (size_t j = 0; j < 4; ++j) {
+            volk_32fc_x2_conjugate_dot_prod_32fc_u(
+                &dot_c[j], y.data() + lag + j, scratch_real.sync_norm.data(), static_cast<unsigned>(Ls));
+        }
+
+        cf dot_single[4];
+        for (size_t j = 0; j < 4; ++j) {
+            dot_single[j] = demod::rxopt::real_template_dot_single(
+                y.data() + lag + j, scratch_real.sync_real.taps_dup.data(), Ls);
+        }
+
+        cf dot_4lag[4];
+        demod::rxopt::real_template_dot_4lag(
+            y.data() + lag, scratch_real.sync_real.taps_dup.data(), Ls, dot_4lag);
+
+        for (size_t j = 0; j < 4; ++j) {
+            const double err_single = std::abs(dot_single[j] - dot_c[j]);
+            const double norm_c = std::abs(dot_c[j]);
+            if (norm_c > 0.05) {
+                BOOST_CHECK_LT(err_single / norm_c, 2e-5);
+            }
+            const double err_4lag = std::abs(dot_4lag[j] - dot_c[j]);
+            if (norm_c > 0.05) {
+                BOOST_CHECK_LT(err_4lag / norm_c, 2e-5);
+            }
+            BOOST_CHECK_LT(err_single, 1e-5);
+            BOOST_CHECK_LT(err_4lag, 1e-5);
+            BOOST_CHECK_LT(std::abs(dot_4lag[j] - dot_single[j]), 1e-5);
+        }
+    }
+
+    // Now verify end-to-end model estimation
+    sic::DiscreteCirModel m_real;
+    BOOST_REQUIRE(sic::estimate_discrete_cir(
+        y.data(), n, observed_end, templates_of(p), cfg, scratch_real, m_real));
+    BOOST_REQUIRE(m_real.valid);
+
+    // Forced complex template path (non-zero imaginary part > 1e-6f)
+    std::vector<cf> comp_sync = p.sync;
+    for (size_t i = 0; i < comp_sync.size(); ++i) {
+        comp_sync[i] += cf(0.f, 0.01f * comp_sync[i].real());
+    }
+    sic::DiscreteCirTemplates tmpl_comp;
+    tmpl_comp.sync = comp_sync.data();
+    tmpl_comp.sync_len = comp_sync.size();
+    tmpl_comp.train = p.train.data();
+    tmpl_comp.train_len = p.train.size();
+
+    sic::DiscreteCirScratch scratch_comp;
+    BOOST_REQUIRE(sic::prepare_discrete_cir(cfg, tmpl_comp, scratch_comp, &err));
+    BOOST_REQUIRE(!scratch_comp.sync_real.is_real);
+
+    sic::DiscreteCirModel m_comp;
+    BOOST_REQUIRE(sic::estimate_discrete_cir(
+        y.data(), n, observed_end, tmpl_comp, cfg, scratch_comp, m_comp));
+    BOOST_REQUIRE(m_comp.valid);
+    BOOST_CHECK_EQUAL(m_comp.q, m_real.q);
+    BOOST_CHECK_LT(std::abs(m_comp.detection_metric - m_real.detection_metric), 1e-2);
+}
+
+// ---------------------------------------------------------------------------
+// Track A QA: Localized Energy Prefix Sum & Scratch Isolation
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_discrete_cir_localized_energy_scratch_isolation)
+{
+    Packet p(10, 32);
+    const size_t q = 500;
+    const size_t n = q + p.wave.size() + 512;
+    const int64_t observed_end = static_cast<int64_t>(q + kTrainLen + 64);
+
+    std::vector<cf> y(n, cf(0.f, 0.f));
+    std::copy(p.wave.begin(), p.wave.end(), y.begin() + q);
+
+    auto cfg = make_cfg(n, q, 25);
+
+    // 1. Clean scratch run
+    sic::DiscreteCirScratch s_clean;
+    std::string err;
+    BOOST_REQUIRE(sic::prepare_discrete_cir(cfg, templates_of(p), s_clean, &err));
+    sic::DiscreteCirModel m_clean;
+    BOOST_REQUIRE(sic::estimate_discrete_cir(
+        y.data(), n, observed_end, templates_of(p), cfg, s_clean, m_clean));
+    BOOST_REQUIRE(m_clean.valid);
+
+    // 2. Poisoned scratch run (simulate previous dirty packet)
+    sic::DiscreteCirScratch s_dirty;
+    BOOST_REQUIRE(sic::prepare_discrete_cir(cfg, templates_of(p), s_dirty, &err));
+    std::fill(s_dirty.energy_prefix.begin(), s_dirty.energy_prefix.end(),
+              std::numeric_limits<double>::quiet_NaN());
+    std::fill(s_dirty.cfo_rot.begin(), s_dirty.cfo_rot.end(),
+              cd(std::numeric_limits<double>::quiet_NaN(), 0.0));
+
+    sic::DiscreteCirModel m_dirty;
+    BOOST_REQUIRE(sic::estimate_discrete_cir(
+        y.data(), n, observed_end, templates_of(p), cfg, s_dirty, m_dirty));
+    BOOST_REQUIRE(m_dirty.valid);
+
+    // Models must match identically, not reading contaminated scratch
+    BOOST_CHECK_EQUAL(m_dirty.model_id, m_clean.model_id);
+    BOOST_CHECK_EQUAL(m_dirty.q, m_clean.q);
+    BOOST_CHECK_LT(std::abs(m_dirty.detection_metric - m_clean.detection_metric), 1e-9);
+    BOOST_CHECK_LT(std::abs(m_dirty.fit_residual - m_clean.fit_residual), 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// Track A QA: Visible Prefix NaN/Inf Detection
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_discrete_cir_visible_prefix_nan_inf_detection)
+{
+    Packet p(10, 32);
+    const size_t q = 300;
+    const size_t n = q + p.wave.size() + 512;
+    const int64_t observed_end = static_cast<int64_t>(q + kTrainLen + 64);
+
+    std::vector<cf> y(n, cf(0.f, 0.f));
+    std::copy(p.wave.begin(), p.wave.end(), y.begin() + q);
+
+    auto cfg = make_cfg(n, q, 25);
+    sic::DiscreteCirScratch s;
+    std::string err;
+    BOOST_REQUIRE(sic::prepare_discrete_cir(cfg, templates_of(p), s, &err));
+
+    const float qnan = std::numeric_limits<float>::quiet_NaN();
+    const float pinf = std::numeric_limits<float>::infinity();
+    const float ninf = -std::numeric_limits<float>::infinity();
+
+    const std::vector<std::pair<size_t, cf>> test_cases = {
+        {0, cf(qnan, 0.f)},
+        {0, cf(0.f, qnan)},
+        {q / 2, cf(pinf, 0.f)},
+        {q + 10, cf(0.f, ninf)},
+        {static_cast<size_t>(observed_end - 1), cf(qnan, 0.f)},
+        {static_cast<size_t>(observed_end - 1), cf(0.f, pinf)}
+    };
+
+    for (const auto& tc : test_cases) {
+        auto bad_y = y;
+        bad_y[tc.first] = tc.second;
+        sic::DiscreteCirModel m;
+        BOOST_CHECK(!sic::estimate_discrete_cir(
+            bad_y.data(), n, observed_end, templates_of(p), cfg, s, m));
+        BOOST_CHECK_EQUAL(reason_of(m), "nonfinite_input");
+    }
+
+    // Outside visible prefix must be ignored
+    auto pass_y = y;
+    pass_y[static_cast<size_t>(observed_end)] = cf(qnan, 0.f);
+    pass_y[static_cast<size_t>(observed_end + 10)] = cf(pinf, 0.f);
+    sic::DiscreteCirModel m_pass;
+    BOOST_CHECK(sic::estimate_discrete_cir(
+        pass_y.data(), n, observed_end, templates_of(p), cfg, s, m_pass));
+    BOOST_CHECK(m_pass.valid);
+}
+
+// ---------------------------------------------------------------------------
+// Track A QA: Non-Zero CFO Model & Residual
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_discrete_cir_nonzero_cfo_model_and_residual)
+{
+    Packet p(10, 32);
+    const size_t q = 350;
+    const size_t n = q + kTrainLen + 512;
+    const int64_t observed_end = static_cast<int64_t>(q + kTrainLen + 64);
+
+    const double cfo_hz = 35000.0;
+    const std::vector<std::pair<int64_t, cf>> paths = {
+        {0, cf(1.00f, 0.00f)},
+        {7, cf(0.50f, 0.20f)}
+    };
+    std::vector<cf> y = make_integer_trace(n, q, p.train, paths, cfo_hz);
+
+    auto cfg = make_cfg(n, q, 30);
+    sic::DiscreteCirScratch s;
+    std::string err;
+    BOOST_REQUIRE(sic::prepare_discrete_cir(cfg, templates_of(p), s, &err));
+
+    sic::DiscreteCirModel m;
+    BOOST_REQUIRE(sic::estimate_discrete_cir(
+        y.data(), n, observed_end, templates_of(p), cfg, s, m));
+    BOOST_REQUIRE(m.valid);
+    BOOST_CHECK_LT(std::abs(m.cfo_hz - cfo_hz), 300.0);
+    BOOST_CHECK_LE(m.fit_residual, cfg.fit_residual_max);
+    BOOST_CHECK_GT(m.fit_residual, 0.0);
+
+    const double residual = dense_normalized_residual(m, y, p.train);
+    BOOST_CHECK_LT(residual, 1e-2);
+
+    const int64_t shift = m.q - static_cast<int64_t>(q);
+    BOOST_REQUIRE(dense_tap_at(m, 0 - shift) != nullptr);
+    BOOST_REQUIRE(dense_tap_at(m, 7 - shift) != nullptr);
+}
