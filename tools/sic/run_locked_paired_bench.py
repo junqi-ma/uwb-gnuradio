@@ -7,8 +7,8 @@ import sys
 import numpy as np
 
 LOCK_PATH = "/tmp/uwb-sic-benchmark.lock"
-OLD_BUILD = "/home/junqima/workspace/uwb-gnuradio/.worktrees/sic-unified/gr-uwb/build-sic-unified"
-NEW_BUILD = "/home/junqima/workspace/uwb-gnuradio/.worktrees/sic-unified/gr-uwb/build-sic-unified-round2"
+OLD_BUILD = "/home/junqima/workspace/uwb-gnuradio/.worktrees/sic-unified/gr-uwb/build-sic-unified-round2"
+NEW_BUILD = "/home/junqima/workspace/uwb-gnuradio/.worktrees/sic-unified/gr-uwb/build-sic-unified-round3"
 
 def run_bench(build_dir):
     exe = os.path.join(build_dir, "apps/bench_unified_timing")
@@ -20,15 +20,13 @@ def run_bench(build_dir):
 
 def parse_output(text):
     data = {}
-    sections = text.split("=======================================================")
-    for sec in sections:
-        if "Benchmark:" not in sec:
-            continue
-        policy_match = re.search(r"Benchmark:\s+([^\n]+)", sec)
-        if not policy_match:
-            continue
-        policy = policy_match.group(1).strip()
+    # Pattern to match: RAW_TOTALS ... Benchmark: <title> ... TOTAL CORE TIME ...
+    blocks = re.findall(r'(?:RAW_TOTALS:\s+([0-9\.\s]+))?[\s\S]*?Benchmark:\s+([^\n]+)([\s\S]*?)(?=(?:RAW_TOTALS:|Benchmark:|\Z))', text)
+    for raw_str, policy, sec in blocks:
+        policy = policy.strip()
         data[policy] = {}
+        if raw_str and raw_str.strip():
+            data[policy]["raw_totals"] = [float(x) for x in raw_str.strip().split()]
 
         # Committed & Suppression
         comm_match = re.search(r"Committed:\s+(\w+)\s+\|\s+Suppression:\s+([0-9\.]+)\s+dB", sec)
@@ -40,7 +38,7 @@ def parse_output(text):
         for line in sec.splitlines():
             line = line.strip()
             # Stage lines like: 1. estimate_channel         105.27      102.02      129.30
-            m = re.match(r"([0-9]+\.\s+[a-zA-Z0-9_\(\)/\s-]+)\s+([0-9\.]+)\s+([0-9\.]+)\s+([0-9\.]+)", line)
+            m = re.match(r"([0-9]+\.\s+[a-zA-Z0-9_&/()\s-]+)\s+([0-9\.]+)\s+([0-9\.]+)\s+([0-9\.]+)", line)
             if m:
                 name = m.group(1).strip()
                 data[policy][name] = {
@@ -57,7 +55,7 @@ def parse_output(text):
                     "p95": float(m_tot.group(3))
                 }
             # Sub-stages like: - timing                  99.62
-            m_sub = re.match(r"-\s+([a-zA-Z0-9_\(\)/\s-]+)\s+([0-9\.]+)", line)
+            m_sub = re.match(r"-\s+([a-zA-Z0-9_&/()\s-]+)\s+([0-9\.]+)", line)
             if m_sub:
                 name = "-" + m_sub.group(1).strip()
                 data[policy][name] = {
@@ -121,6 +119,10 @@ def main():
                 new_p95_str = f"{((out_new1[p][s]['p95'] + out_new2[p][s]['p95'])/2.0):.2f}" if "p95" in out_new1[p][s] else "-"
 
                 print(f"  {s:<26} | {old_m:>10.2f} | {new_m:>10.2f} | {speedup:>7.2f}x | {old_p95_str:>10} | {new_p95_str:>10}")
+
+            if "raw_totals" in out_new1[p] and "raw_totals" in out_new2[p]:
+                merged_new = np.array(out_new1[p]["raw_totals"] + out_new2[p]["raw_totals"])
+                print(f"  * Merged 100-run NEW TOTAL: mean={np.mean(merged_new):.2f} us, P50={np.percentile(merged_new, 50):.2f} us, P95={np.percentile(merged_new, 95):.2f} us")
 
 if __name__ == "__main__":
     main()
