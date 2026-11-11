@@ -7,6 +7,8 @@
  * QA: rational resampler burst-mode optimisations, round 2 (2026-11-11).
  *
  * Phase A1 — lazy multi-worker schedule tables.
+ * Phase C  — kernel candidates C1 (fixed-phase schedule) and C2 (conversion
+ *            cache), both explicit switches and both default OFF.
  *
  * The constructor of RationalResamplerLmCore used to do
  *     sched_arm_buf_.resize(1 << 20);   // 1 MiB (vector<uint8_t>)
@@ -36,6 +38,11 @@
  *      shows the same lazy behaviour and the same bit-exact MT/serial match;
  *   7. the pre-existing contract is untouched: expected_output_length, the
  *      produced/consumed counts, and reset/flush semantics.
+ *
+ * Phase C adds the candidate gate (see the big comment above the candidate
+ * helpers): default vs C1 vs C2 vs both must be BIT-identical, plus the C1
+ * descriptor table is recomputed here from first principles for every legal
+ * starting phase and compared field by field.
  *
  * Taps come from the real files under testdata/; nothing here synthesises a
  * filter, so a wrong taps path fails loudly instead of silently degrading
@@ -770,10 +777,564 @@ void check_length_contract(const std::vector<float>& taps,
                            << Core::expected_output_length(4096, T));
 }
 
+// ===========================================================================
+//  Phase C (2026-11-11): resampler kernel candidates C1 / C2
+//
+//  C1 = set_fixed_phase_schedule(true)  : per-phase 4-output descriptor table
+//       (arm tap offsets + window offsets relative to the macroblock base +
+//       precomputed win[j]==win[j-1] reuse mask) and 4-way FIR kernels
+//       compile-time specialised for H_pad == 24 / 48, generic otherwise.
+//  C2 = set_convert_cache(true)         : one int16->float conversion of the
+//       per-macroblock span into a persistent 64-byte-aligned buffer, then a
+//       float-input 4-way FIR kernel.
+//
+//  Both default OFF.  The gate is bit-identity with the DEFAULT path: every
+//  real and imag float equal plus a whole-vector memcmp, over
+//    * all four switch combinations (none / C1 / C2 / both),
+//    * both shipped profiles (H_pad 24 realtime, H_pad 48 quality),
+//    * both rates that share the 65/48-style schedule (65/48, 65/32) and the
+//      48/65 TX direction (H_pad 64 => the generic fallback),
+//    * both scale modes (UnitRange 1/32768, RawInteger 1.0),
+//    * pinned full-scale rails (+32767, -32767, -32768), zero, random, a
+//      single full-scale impulse, short windows (n < H), tail-only runs and
+//      lengths that are not whole multiples of Decim,
+//    * chunked streaming, tiny max_out grants, and EVERY legal starting phase
+//      of a full macroblock (phase-primed with max_out == 1 calls).
+// ===========================================================================
+
+using Variant = int;
+constexpr Variant kVariantDefault = 0;
+constexpr Variant kVariantC1 = 1;
+constexpr Variant kVariantC2 = 2;
+constexpr Variant kVariantBoth = 3;
+
+const char* variant_switch_name(Variant v)
+{
+    switch (v) {
+    case kVariantC1:
+        return "c1_fixed_phase";
+    case kVariantC2:
+        return "c2_convert_cache";
+    case kVariantBoth:
+        return "c1c2_fixed_phase_convert_cache";
+    default:
+        return "default";
+    }
+}
+
+template <typename Core>
+void apply_variant(Core& core, Variant v)
+{
+    core.set_fixed_phase_schedule(v == kVariantC1 || v == kVariantBoth);
+    core.set_convert_cache(v == kVariantC2 || v == kVariantBoth);
+}
+
+// Samples compared bit-for-bit by the Phase-C gate (reported at the end).
+uint64_t g_candidate_samples = 0;
+uint64_t g_candidate_comparisons = 0;
+
+/** Bit-identity gate that also counts what it compared. */
+void require_bit_identical_counted(const std::vector<gr_complex>& got,
+                                   const std::vector<gr_complex>& ref,
+                                   const std::string& what)
+{
+    require_bit_identical(got, ref, what);
+    g_candidate_samples += static_cast<uint64_t>(got.size());
+    ++g_candidate_comparisons;
+}
+
+/** SC16 input patterns: pins the values the gates name explicitly. */
+enum class Pattern { Random, Rails, Zero, Impulse };
+
+std::vector<sc16> make_pattern(size_t n, Pattern p, uint32_t seed)
+{
+    if (p == Pattern::Random)
+        return make_sc16_input(n, seed);
+    std::vector<sc16> v(n, sc16(0, 0));
+    if (n == 0)
+        return v;
+    switch (p) {
+    case Pattern::Rails: {
+        // Full-scale positive, both negative rails (incl. the -32767
+        // asymmetric one) and zero, interleaved so every FIR window sees all.
+        static const int16_t rails[] = { 32767, -32768, -32767, 0 };
+        for (size_t i = 0; i < n; ++i)
+            v[i] = sc16(rails[i % 4], rails[(i + 2) % 4]);
+        break;
+    }
+    case Pattern::Zero:
+        break;
+    case Pattern::Impulse:
+        v[n / 2] = sc16(32767, -32768);
+        break;
+    case Pattern::Random:
+        break;
+    }
+    return v;
+}
+
+const char* pattern_name(Pattern p)
+{
+    switch (p) {
+    case Pattern::Rails:
+        return "rails";
+    case Pattern::Zero:
+        return "zero";
+    case Pattern::Impulse:
+        return "impulse";
+    default:
+        return "random";
+    }
+}
+
+/**
+ * Feed `in` through `core` in one call with output cap `max_out`, collecting
+ * the produced samples; never flushes.  Used to prime a phase and then to run
+ * the rest of the stream into the macroblock path.
+ */
+template <typename Core>
+std::vector<gr_complex> feed_sc16(Core& core,
+                                  const std::vector<sc16>& in,
+                                  float scale,
+                                  size_t max_out)
+{
+    std::vector<gr_complex> acc;
+    std::vector<gr_complex> buf(std::max<size_t>(max_out, 1));
+    size_t off = 0;
+    while (off < in.size()) {
+        size_t cur = in.size() - off;
+        while (cur > 0) {
+            auto r = core.process_sc16(in.data() + off, cur, scale, buf.data(),
+                                       buf.size());
+            acc.insert(acc.end(), buf.begin(), buf.begin() + r.produced);
+            off += r.consumed;
+            cur -= r.consumed;
+            BOOST_REQUIRE_MESSAGE(r.produced > 0 || r.consumed > 0,
+                                  "candidate feed made no progress");
+        }
+    }
+    return acc;
+}
+
+/** Drain the flush tail with a generous grant. */
+template <typename Core>
+void drain_sc16(Core& core, std::vector<gr_complex>& acc)
+{
+    std::vector<gr_complex> buf(tail_capacity(core));
+    size_t n = 0;
+    while ((n = core.flush(buf.data(), buf.size())) > 0)
+        acc.insert(acc.end(), buf.begin(), buf.begin() + n);
+}
+
+/**
+ * Run one scenario (a callable taking Core&) on the default path and on the
+ * three candidate combinations, and require bit-identity.  Also requires that
+ * the requested candidate is the one the core actually dispatches to, so a
+ * silently-ignored switch cannot pass this gate.
+ */
+template <typename Core, typename Fn>
+void check_scenario(const std::vector<float>& taps,
+                    const std::string& tag,
+                    Fn&& scenario)
+{
+    Core ref(taps);
+    apply_variant(ref, kVariantDefault);
+    BOOST_REQUIRE_EQUAL(std::string(ref.sc16_kernel_variant()), "default");
+    const std::vector<gr_complex> y_ref = scenario(ref);
+
+    const Variant variants[] = { kVariantC1, kVariantC2, kVariantBoth };
+    for (Variant v : variants) {
+        Core cand(taps);
+        apply_variant(cand, v);
+        BOOST_REQUIRE_EQUAL(std::string(cand.sc16_kernel_variant()),
+                            variant_switch_name(v));
+        const std::vector<gr_complex> y = scenario(cand);
+        require_bit_identical_counted(y, y_ref,
+                                      tag + " [" + variant_switch_name(v) + "]");
+    }
+}
+
+/** 10. Defaults, switch semantics, C1 table contents, C2 geometry. */
+template <typename Core>
+void check_candidate_api(const std::vector<float>& taps, const std::string& tag)
+{
+    Core core(taps);
+
+    // ---- defaults: both candidates OFF ----
+    BOOST_CHECK_EQUAL(core.fixed_phase_schedule(), false);
+    BOOST_CHECK_EQUAL(core.convert_cache(), false);
+    BOOST_CHECK_EQUAL(std::string(core.sc16_kernel_variant()), "default");
+    BOOST_CHECK_EQUAL(core.fixed_phase_table_built(), false);
+    BOOST_CHECK_EQUAL(core.convert_cache_span(), 0u);
+    BOOST_CHECK_EQUAL(core.convert_cache_floats(), 0u);
+    BOOST_CHECK_EQUAL(core.convert_cache_aligned(), false);
+
+    // ---- C2 geometry: span = round_up(Decim + H_pad, 4) complex samples ----
+    apply_variant(core, kVariantC2);
+    const size_t H_pad = core.arm_length_pad();
+    const size_t expect_span =
+        (static_cast<size_t>(Core::kDecim) + H_pad + 3u) & ~size_t(3u);
+    BOOST_CHECK_EQUAL(core.convert_cache_span(), expect_span);
+    BOOST_CHECK_EQUAL(core.convert_cache_floats(), 2 * expect_span);
+    BOOST_CHECK_MESSAGE(core.convert_cache_aligned(),
+                        tag + ": C2 buffer is not 64-byte aligned");
+    // The union of the macroblock windows is [0, Decim + H_pad) complex.
+    BOOST_CHECK_GE(core.convert_cache_span(),
+                   static_cast<size_t>(Core::kDecim) + H_pad);
+    BOOST_TEST_MESSAGE(tag << ": C2 span " << core.convert_cache_span()
+                           << " complex (" << core.convert_cache_floats()
+                           << " floats, H_pad " << H_pad << ")");
+
+    // Idempotent: enabling again must not reallocate or change geometry.
+    const size_t span = core.convert_cache_span();
+    const size_t floats = core.convert_cache_floats();
+    apply_variant(core, kVariantBoth);
+    BOOST_CHECK_EQUAL(core.convert_cache_span(), span);
+    BOOST_CHECK_EQUAL(core.convert_cache_floats(), floats);
+    BOOST_CHECK(core.convert_cache_aligned());
+
+    // Disabling is reversible and never frees the (persistent) buffer.
+    apply_variant(core, kVariantDefault);
+    BOOST_CHECK_EQUAL(core.fixed_phase_schedule(), false);
+    BOOST_CHECK_EQUAL(core.convert_cache(), false);
+    BOOST_CHECK_EQUAL(std::string(core.sc16_kernel_variant()), "default");
+
+    // ---- C1 table: rebuilt from first principles here ----
+    apply_variant(core, kVariantC1);
+    BOOST_CHECK(core.fixed_phase_table_built());
+    BOOST_CHECK_GE(Core::kInterp, 1u);
+    const uint32_t G = Core::macroblock_groups();
+    const uint32_t T = Core::macroblock_tail();
+    BOOST_CHECK_EQUAL(4 * G + T, Core::kInterp);
+
+    for (uint32_t p = 0; p < Core::kInterp; ++p) {
+        uint32_t arm = p;   // (p + o*Decim) mod Interp
+        uint32_t win = 0;   // floor((p + o*Decim) / Interp)
+        for (uint32_t g = 0; g < G; ++g) {
+            const auto& d = core.fixed_phase_group(p, g);
+            uint8_t reuse = 0;
+            for (uint32_t j = 0; j < 4; ++j) {
+                BOOST_REQUIRE_EQUAL(d.win[j], static_cast<uint16_t>(win));
+                BOOST_REQUIRE_EQUAL(
+                    d.tap[j],
+                    static_cast<uint16_t>(static_cast<size_t>(arm) * 2 * H_pad));
+                if (j > 0 && d.win[j] == d.win[j - 1])
+                    reuse |= static_cast<uint8_t>(1u << j);
+                // advance exactly like the production schedule tables
+                arm += Core::kDecim;
+                while (arm >= Core::kInterp) {
+                    arm -= Core::kInterp;
+                    ++win;
+                }
+            }
+            BOOST_REQUIRE_EQUAL(d.reuse, reuse);
+            BOOST_REQUIRE_EQUAL(d.pad[0], 0);
+        }
+        for (uint32_t t = 0; t < T; ++t) {
+            const auto& d = core.fixed_phase_tail(p, t);
+            BOOST_REQUIRE_EQUAL(d.win, static_cast<uint16_t>(win));
+            BOOST_REQUIRE_EQUAL(
+                d.tap,
+                static_cast<uint16_t>(static_cast<size_t>(arm) * 2 * H_pad));
+            arm += Core::kDecim;
+            while (arm >= Core::kInterp) {
+                arm -= Core::kInterp;
+                ++win;
+            }
+        }
+        // After all Interp outputs: cursor advanced by exactly Decim and the
+        // phase is unchanged (that is why ctr_ survives a macroblock).
+        BOOST_REQUIRE_EQUAL(win, static_cast<uint32_t>(Core::kDecim));
+        BOOST_REQUIRE_EQUAL(arm, p);
+    }
+
+    // Tap offsets must point at real polyphase arms: the descriptor's tap[j]
+    // is arm * 2 * H_pad and the second output of phase 0 uses the arm the
+    // upfirdn recurrence reaches after one Decim step.
+    {
+        const auto& d0 = core.fixed_phase_group(0, 0);
+        BOOST_CHECK_EQUAL(d0.win[0], 0u);
+        BOOST_CHECK_EQUAL(d0.tap[0], 0u);
+        uint32_t arm1 = Core::kDecim;
+        while (arm1 >= Core::kInterp)
+            arm1 -= Core::kInterp;
+        BOOST_CHECK_EQUAL(core.fixed_phase_group(0, 0).tap[1],
+                          static_cast<uint16_t>(arm1 * 2 * H_pad));
+    }
+
+    // set_kernel() to a non-AVX2 kernel makes the candidates inert; the
+    // variant string must say so instead of pretending they are active.
+    {
+        Core scalar(taps);
+        scalar.set_kernel("scalar");
+        apply_variant(scalar, kVariantBoth);
+        BOOST_CHECK_EQUAL(std::string(scalar.sc16_kernel_variant()), "default");
+    }
+}
+
+/** 11. Full bit-identity matrix: patterns x lengths x scales x variants. */
+template <typename Core>
+void check_candidate_matrix(const std::vector<float>& taps,
+                            const std::string& tag)
+{
+    std::vector<size_t> lengths;
+    {
+        Core probe(taps);
+        const size_t H = probe.arm_length();
+        // short windows (n < H), exactly H, H+1, non-macroblock lengths
+        // (Decim = 48 => +1, +23, +47 remainders), plus a large window.
+        const size_t base = 48 * 25; // 1200
+        lengths = { 0,   1,   2,   3,      H / 2, H - 1, H,   H + 1,
+                    H + 7, base, base + 1, base + 23, base + 47,
+                    4096, 4096 + 31, 4000 };
+    }
+    const Pattern patterns[] = { Pattern::Random, Pattern::Rails,
+                                 Pattern::Zero, Pattern::Impulse };
+    const float scales[] = { kUnitScale, kRawScale };
+
+    for (size_t n : lengths) {
+        if (n == 0)
+            continue; // no process() call at all; flush-only is covered below
+        for (Pattern p : patterns) {
+            for (float scale : scales) {
+                const std::string st =
+                    tag + " n=" + std::to_string(n) + " " + pattern_name(p) +
+                    ((scale == kRawScale) ? " raw" : " unit");
+                auto in = make_pattern(n, p, 0x51ed270bu + static_cast<uint32_t>(n));
+                check_scenario<Core>(taps, st, [&](Core& c) {
+                    return run_oneshot_sc16(c, in, scale);
+                });
+            }
+        }
+    }
+
+    // N == 0: the pure filter tail (flush without any process call).
+    {
+        auto in = make_pattern(0, Pattern::Zero, 1u);
+        check_scenario<Core>(taps, tag + " n=0 tail-only", [&](Core& c) {
+            return run_oneshot_sc16(c, in, kUnitScale);
+        });
+    }
+
+    // Production window sizes: 56000 native samples is the pipeline's
+    // 56 ms @ 998.4 MS/s burst window (and 56000 + 17 keeps it off the
+    // macroblock grid).
+    for (size_t n : { 56000ul, 56017ul }) {
+        auto in = make_sc16_input(n, 0xfeedfaceu + static_cast<uint32_t>(n));
+        for (float scale : { kUnitScale, kRawScale }) {
+            check_scenario<Core>(
+                taps,
+                tag + " production n=" + std::to_string(n) +
+                    ((scale == kRawScale) ? " raw" : " unit"),
+                [&](Core& c) { return run_oneshot_sc16(c, in, scale); });
+        }
+    }
+}
+
+/** 12. Every legal starting phase, tiny grants, chunked streaming. */
+template <typename Core>
+void check_candidate_phases(const std::vector<float>& taps, const std::string& tag)
+{
+    const size_t N = 4096;
+    auto in = make_sc16_input(N, 0x2f0f5d3du);
+    const std::vector<size_t> chunks = { 1, 5, 96, 47, 1000, 2947 };
+
+    for (float scale : { kUnitScale, kRawScale }) {
+        const std::string st = tag + ((scale == kRawScale) ? " raw" : " unit");
+
+        // ---- tiny max_out grants: many process calls, tiny remainder paths
+        // followed by full macroblocks; the phase at each call is whatever the
+        // stream gives, so this also covers non-phase-0 macroblock starts.
+        for (size_t cap : { 1u, 2u, 3u, 63u, 64u, 65u, 66u, 67u, 130u }) {
+            check_scenario<Core>(
+                taps, st + " max_out=" + std::to_string(cap), [&](Core& c) {
+                    return run_stream_sc16(c, in, scale, cap, {}).out;
+                });
+        }
+
+        // ---- chunked streaming with a large grant (macroblock starts on a
+        // mid-stream phase because the chunk sizes are not multiples of Decim)
+        check_scenario<Core>(taps, st + " 6-chunk", [&](Core& c) {
+            return run_stream_sc16(c, in, scale, 4096, chunks).out;
+        });
+        check_scenario<Core>(taps, st + " sample-at-a-time", [&](Core& c) {
+            return run_stream_sc16(c, in, scale, 4096, { 1 }).out;
+        });
+
+        // ---- EVERY starting phase p in [0, Interp) is exercised as the
+        // first phase of a full macroblock.  Priming with max_out == 1 forces
+        // the remainder path one output at a time until ctr_ == p; the rest of
+        // the stream is then handed over with a large grant, so the macroblock
+        // loop starts at phase p with all 4*G+T outputs hitting the candidate
+        // kernels/schedule for that phase.
+        for (uint32_t p = 0; p < Core::kInterp; ++p) {
+            // k outputs land on phase p  <=>  (k*Decim) mod Interp == p
+            uint32_t k = 0;
+            for (uint32_t cand = 0; cand < Core::kInterp; ++cand) {
+                if ((cand * Core::kDecim) % Core::kInterp == p) {
+                    k = cand;
+                    break;
+                }
+            }
+            check_scenario<Core>(
+                taps, st + " phase=" + std::to_string(p), [&](Core& c) {
+                    std::vector<gr_complex> y;
+                    std::vector<gr_complex> one(1);
+                    size_t off = 0;
+                    // Prime: exactly k outputs, one output per call, with a
+                    // few input samples per call so the local input is not
+                    // exhausted and the phase wrap always completes.
+                    while (c.output_items() < k) {
+                        const size_t avail = std::min<size_t>(4, in.size() - off);
+                        BOOST_REQUIRE_GT(avail, 0u);
+                        auto r = c.process_sc16(in.data() + off, avail, scale,
+                                                one.data(), 1);
+                        if (r.produced > 0)
+                            y.push_back(one[0]);
+                        off += r.consumed;
+                    }
+                    // ctr_ < Interp is only invariant for Decim <= Interp: for
+                    // Decim > Interp the documented exhaustion path may return
+                    // from the middle of the phase wrap (process_sc16() and
+                    // flush have an explicit repair for that), so the exact
+                    // phase is asserted only for the RX directions.
+                    if (Core::kDecim <= Core::kInterp)
+                        BOOST_REQUIRE_EQUAL(c.phase(), p);
+                    std::vector<sc16> rest(in.begin() + off, in.end());
+                    auto mid = feed_sc16(c, rest, scale, 4096);
+                    y.insert(y.end(), mid.begin(), mid.end());
+                    drain_sc16(c, y);
+                    return y;
+                });
+        }
+    }
+
+    // ---- the candidate switches are stream-safe: toggling them mid-stream
+    // (which only changes kernel selection, never state) is bit-identical to
+    // keeping one default core for the whole stream.
+    check_scenario<Core>(taps, tag + " mid-stream toggle", [&](Core& c) {
+        std::vector<gr_complex> y;
+        size_t off = 0;
+        const size_t c0 = N / 4;
+        for (int phase = 0; phase < 4; ++phase) {
+            const size_t n = std::min(c0, N - off);
+            if (n == 0)
+                break;
+            std::vector<sc16> part(in.begin() + off, in.begin() + off + n);
+            auto yp = feed_sc16(c, part, kUnitScale, 4096);
+            y.insert(y.end(), yp.begin(), yp.end());
+            off += n;
+            // flip the switches (default -> C1 -> C2 -> both -> default)
+            static const Variant seq[4] = { kVariantC1, kVariantC2,
+                                            kVariantBoth, kVariantDefault };
+            apply_variant(c, seq[phase % 4]);
+        }
+        drain_sc16(c, y);
+        return y;
+    });
+}
+
+/** 13. The multi-worker schedule and the FC32 path are untouched by C1/C2. */
+template <typename Core>
+void check_candidate_other_paths(const std::vector<float>& taps,
+                                 const std::string& tag)
+{
+    const size_t N = 4096;
+    auto in = make_sc16_input(N, 0x0d15ea5eu);
+
+    // run_mt_sc16 keeps the pre-existing per-output schedule; the candidates
+    // must not change it.
+    {
+        Core serial(taps);
+        apply_variant(serial, kVariantDefault);
+        auto y_ref = run_oneshot_sc16(serial, in, kUnitScale);
+
+        for (Variant v : { kVariantC1, kVariantC2, kVariantBoth }) {
+            Core mt(taps);
+            apply_variant(mt, v);
+            auto y = run_oneshot_sc16(mt, in, kUnitScale, /*nworkers=*/4);
+            require_bit_identical_counted(
+                y, y_ref, tag + " MT(4) [" + variant_switch_name(v) + "]");
+        }
+    }
+
+    // FC32 process(): unchanged by the SC16-only candidates.
+    {
+        auto fin = to_cf32(make_sc16_input(N, 0x1234abcdu), kUnitScale);
+        Core ref(taps);
+        auto y_ref = run_oneshot_cf32(ref, fin);
+        for (Variant v : { kVariantC1, kVariantC2, kVariantBoth }) {
+            Core c(taps);
+            apply_variant(c, v);
+            auto y = run_oneshot_cf32(c, fin);
+            require_bit_identical_counted(
+                y, y_ref, tag + " FC32 [" + variant_switch_name(v) + "]");
+        }
+    }
+}
+
 } // namespace
 
-BOOST_AUTO_TEST_CASE(test_lazy_tables_construction)
+BOOST_AUTO_TEST_CASE(test_candidate_api_and_geometry)
 {
+    check_candidate_api<RationalResampler65_48Core>(taps_65_48_realtime(),
+                                                   "65/48 rt");
+    check_candidate_api<RationalResampler65_48Core>(taps_65_48_quality(),
+                                                    "65/48 q");
+    check_candidate_api<RationalResampler65_32Core>(taps_65_32_realtime(),
+                                                    "65/32 rt");
+    check_candidate_api<RationalResampler65_32Core>(taps_65_32_quality(),
+                                                    "65/32 q");
+    check_candidate_api<RationalResampler48_65Core>(taps_48_65_tx(), "48/65 tx");
+}
+
+BOOST_AUTO_TEST_CASE(test_candidate_bit_identity_matrix)
+{
+    check_candidate_matrix<RationalResampler65_48Core>(taps_65_48_realtime(),
+                                                       "65/48 rt");
+    check_candidate_matrix<RationalResampler65_48Core>(taps_65_48_quality(),
+                                                       "65/48 q");
+    check_candidate_matrix<RationalResampler65_32Core>(taps_65_32_realtime(),
+                                                       "65/32 rt");
+    check_candidate_matrix<RationalResampler48_65Core>(taps_48_65_tx(),
+                                                       "48/65 tx");
+}
+
+BOOST_AUTO_TEST_CASE(test_candidate_all_phases_and_streaming)
+{
+    check_candidate_phases<RationalResampler65_48Core>(taps_65_48_realtime(),
+                                                       "65/48 rt");
+    check_candidate_phases<RationalResampler65_48Core>(taps_65_48_quality(),
+                                                       "65/48 q");
+    check_candidate_phases<RationalResampler65_32Core>(taps_65_32_realtime(),
+                                                       "65/32 rt");
+    check_candidate_phases<RationalResampler48_65Core>(taps_48_65_tx(),
+                                                       "48/65 tx");
+}
+
+BOOST_AUTO_TEST_CASE(test_candidate_mt_and_fc32_unchanged)
+{
+    check_candidate_other_paths<RationalResampler65_48Core>(
+        taps_65_48_realtime(), "65/48 rt");
+    check_candidate_other_paths<RationalResampler65_48Core>(
+        taps_65_48_quality(), "65/48 q");
+    check_candidate_other_paths<RationalResampler65_32Core>(
+        taps_65_32_quality(), "65/32 q");
+}
+
+BOOST_AUTO_TEST_CASE(test_candidate_bit_identity_summary)
+{
+    BOOST_TEST_MESSAGE(
+        "Phase-C candidates: " << g_candidate_comparisons
+                               << " bit-identical comparisons, "
+                               << g_candidate_samples
+                               << " output samples compared float-by-float "
+                                  "and by memcmp");
+    BOOST_CHECK_GT(g_candidate_comparisons, 0u);
+    BOOST_CHECK_GT(g_candidate_samples, 0u);
+}
+
+BOOST_AUTO_TEST_CASE(test_lazy_tables_construction){
     check_construction<RationalResampler65_48Core>(taps_65_48_realtime(),
                                                    "65/48 rt");
     check_construction<RationalResampler65_48Core>(taps_65_48_quality(),
