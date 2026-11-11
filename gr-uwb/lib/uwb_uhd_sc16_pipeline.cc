@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -739,6 +740,18 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
         worker_ready_.assign(static_cast<size_t>(n_workers), WorkerReadyInfo{});
     }
 
+    // B2: make sure the diagnostic IQ dump directory exists before any worker
+    // tries to write into it (single-threaded here, so no creation race).
+    if (!cfg_.iq_dump_dir.empty() && cfg_.iq_dump_windows > 0) {
+        std::error_code ec;
+        std::filesystem::create_directories(cfg_.iq_dump_dir, ec);
+        if (ec) {
+            std::cerr << "UhdSc16Pipeline: cannot create iq_dump_dir '"
+                      << cfg_.iq_dump_dir << "': " << ec.message()
+                      << " (IQ dumps will fail)\n";
+        }
+    }
+
     if (!source_->open()) {
         return false;
     }
@@ -1034,6 +1047,39 @@ void UhdSc16Pipeline::reset_diagnostics()
     zero(commit_acc_.lock_wait_ns);
     zero(commit_acc_.reorder_ns);
     zero(commit_acc_.callback_ns);
+
+    zero(iq_dump_started_);
+    zero(iq_dump_written_);
+}
+
+bool UhdSc16Pipeline::write_iq_dump(uint64_t window_id,
+                                    const std::complex<float>* data,
+                                    size_t n) const
+{
+    // Diagnostic dumps carry their own, non-parsing-hostile tag: the comparison
+    // tool requires win_<id>_<tag>.cf32 with a non-empty tag.
+    const std::string tag = cfg_.iq_dump_tag.empty() ? std::string("dump") : cfg_.iq_dump_tag;
+    const std::string path = cfg_.iq_dump_dir + "/win_" + std::to_string(window_id) +
+                             "_" + tag + ".cf32";
+
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        std::cerr << "UhdSc16Pipeline: cannot open IQ dump '" << path << "'\n";
+        return false;
+    }
+    f.write(reinterpret_cast<const char*>(data),
+            static_cast<std::streamsize>(n * sizeof(std::complex<float>)));
+    if (!f) {
+        std::cerr << "UhdSc16Pipeline: failed writing IQ dump '" << path << "' ("
+                  << n << " samples)\n";
+        return false;
+    }
+    f.close();
+    if (!f) {
+        std::cerr << "UhdSc16Pipeline: failed closing IQ dump '" << path << "'\n";
+        return false;
+    }
+    return true;
 }
 
 void UhdSc16Pipeline::rx_producer_loop()
@@ -1061,12 +1107,56 @@ void UhdSc16Pipeline::rx_producer_loop()
     const uint64_t max_win = cfg_.max_windows;
     const int n_workers = effective_dsp_workers();
 
-    std::vector<std::complex<int16_t>> stream_buf;
-    int64_t stream_pos_abs = 0;
-    int64_t buf_start_abs = 0;
-    uint64_t k = 0;
-
+    // ---------------------------------------------------------------------
+    // Phase B RX buffering: ONE fixed allocation plus an explicit valid
+    // cursor.  The historical code grew/shrunk a vector per read (paying a
+    // full value-initialisation of the region the source was about to
+    // overwrite) and memmoved the residue with erase().
+    //
+    // State (all indices are into `storage`, all absolute values are native
+    // sample indices on the same axis as cfg_.schedule_t0):
+    //   storage           : allocated once, exactly storage_cap samples
+    //   valid_begin       : index of the first valid (already read) sample
+    //   valid_n           : number of valid samples
+    //   valid_start_abs   : absolute index of storage[valid_begin]
+    //   read_end_abs      : valid_start_abs + valid_n == absolute read end
+    // Nothing outside [valid_begin, valid_begin + valid_n) is ever read or
+    // copied: the tail past valid_n is uninitialised scratch space that the
+    // source overwrites directly.
+    //
+    // Sizing formula (documented contract):
+    //   read_slice  = kReadChunk                      (>= 1)
+    //   reserve     = max(read_slice, ceil(capacity/2))
+    //   storage_cap = capacity + 2 * reserve
+    // Why that is sufficient: a window needs at most `capacity` samples and
+    // one read overshoots by at most read_slice, so the live region never
+    // exceeds capacity + read_slice.  storage_cap leaves at least `reserve`
+    // samples of headroom even in that worst case, so after one compaction a
+    // full read slice always fits: one bounded, low-frequency memmove instead
+    // of an erase per window.  Adjacent windows (period >= capacity, the
+    // measured production geometry) drop the whole live region every window
+    // and therefore never compact at all.
+    // ---------------------------------------------------------------------
     const size_t kReadChunk = 16384;
+    const size_t read_slice = std::max<size_t>(kReadChunk, 1);
+    const size_t reserve = std::max(read_slice, (capacity + 1) / 2);
+    const size_t storage_cap = capacity + 2 * reserve;
+
+    std::vector<std::complex<int16_t>> storage(storage_cap);
+    if (diag) {
+        // Truthful accounting: one allocation that value-initialises the whole
+        // storage once per run (the old code did this per read).
+        rx_acc_.stream_buf_resize_count.fetch_add(1, std::memory_order_relaxed);
+        rx_acc_.stream_buf_zero_init_bytes.fetch_add(
+            static_cast<uint64_t>(storage_cap) * sizeof(std::complex<int16_t>),
+            std::memory_order_relaxed);
+    }
+
+    size_t valid_begin = 0;
+    size_t valid_n = 0;
+    int64_t valid_start_abs = 0;
+    int64_t read_end_abs = 0;
+    uint64_t k = 0;
 
     while (!stop_requested_) {
         if (max_win > 0 && k >= max_win) {
@@ -1080,20 +1170,55 @@ void UhdSc16Pipeline::rx_producer_loop()
         }
         int64_t win_end = win_start + static_cast<int64_t>(capacity);
 
+        // Window starts are monotone, so everything strictly before this
+        // window's start can be released.  When the source has already been
+        // read past win_start (overlap) the surplus is kept; when the schedule
+        // jumps ahead of the read end (gap) the live region is simply emptied
+        // and the gap is read through in bounded slices below -- the storage
+        // never grows with the gap.
+        if (win_start > valid_start_abs) {
+            const int64_t keep_from = std::min<int64_t>(win_start, read_end_abs);
+            const size_t drop = static_cast<size_t>(keep_from - valid_start_abs);
+            valid_begin += drop;
+            valid_n -= drop;
+            valid_start_abs = keep_from;
+            read_end_abs = valid_start_abs + static_cast<int64_t>(valid_n);
+            if (valid_n == 0) {
+                // Nothing live: restart at index 0 for free (no move, no copy).
+                valid_begin = 0;
+            }
+        }
+
         bool eof_hit = false;
-        while (stream_pos_abs < win_end && !stop_requested_) {
-            size_t needed = static_cast<size_t>(win_end - stream_pos_abs);
-            size_t to_read = std::max(kReadChunk, needed);
-            size_t curr_size = stream_buf.size();
-            // Grows the buffer by the full read size.  vector::resize
-            // value-initialises that tail (all zero) even though the source
-            // immediately overwrites it -- instrumentation for Phase B.
-            stream_buf.resize(curr_size + to_read);
-            if (diag) {
-                rx_acc_.stream_buf_resize_count.fetch_add(1, std::memory_order_relaxed);
-                rx_acc_.stream_buf_zero_init_bytes.fetch_add(
-                    static_cast<uint64_t>(to_read) * sizeof(std::complex<int16_t>),
-                    std::memory_order_relaxed);
+        while (read_end_abs < win_end && !stop_requested_) {
+            const size_t needed = static_cast<size_t>(win_end - read_end_abs);
+            size_t to_read = std::max(read_slice, needed);
+            size_t room = storage_cap - (valid_begin + valid_n);
+            if (room < to_read && valid_begin > 0) {
+                // Compact: move ONLY the live tail that future windows still
+                // need, and account for exactly those bytes.
+                const size_t moved_bytes =
+                    valid_n * sizeof(std::complex<int16_t>);
+                std::chrono::steady_clock::time_point t_move{};
+                if (diag) {
+                    t_move = std::chrono::steady_clock::now();
+                }
+                if (moved_bytes > 0) {
+                    std::memmove(storage.data(), storage.data() + valid_begin, moved_bytes);
+                }
+                if (diag) {
+                    rx_acc_.assemble_ns.fetch_add(
+                        elapsed_ns(t_move, std::chrono::steady_clock::now()),
+                        std::memory_order_relaxed);
+                    rx_acc_.compact_move_bytes.fetch_add(
+                        static_cast<uint64_t>(moved_bytes), std::memory_order_relaxed);
+                }
+                valid_begin = 0;
+                room = storage_cap - valid_n;
+            }
+            if (to_read > room) {
+                // Bounded slice: the read loop simply runs another iteration.
+                to_read = room;
             }
 
             std::chrono::steady_clock::time_point t_read{};
@@ -1101,7 +1226,10 @@ void UhdSc16Pipeline::rx_producer_loop()
                 t_read = std::chrono::steady_clock::now();
             }
             StreamReadMeta meta;
-            size_t n_read = source_->read_samples(stream_buf.data() + curr_size, to_read, meta);
+            // Read straight into the uninitialised tail: no value
+            // initialisation of the bytes the source is about to write.
+            size_t n_read = source_->read_samples(
+                storage.data() + valid_begin + valid_n, to_read, meta);
             if (diag) {
                 rx_acc_.read_ns.fetch_add(
                     elapsed_ns(t_read, std::chrono::steady_clock::now()),
@@ -1112,15 +1240,12 @@ void UhdSc16Pipeline::rx_producer_loop()
                     static_cast<uint64_t>(n_read) * sizeof(std::complex<int16_t>),
                     std::memory_order_relaxed);
             }
-            stream_buf.resize(curr_size + n_read);
+            valid_n += n_read;
+            read_end_abs += static_cast<int64_t>(n_read);
             if (diag) {
-                if (n_read != to_read) {
-                    rx_acc_.stream_buf_resize_count.fetch_add(1, std::memory_order_relaxed);
-                }
                 note_peak(rx_acc_.max_buffered_samples,
-                          static_cast<uint64_t>(stream_buf.size()));
+                          static_cast<uint64_t>(valid_n));
             }
-            stream_pos_abs += static_cast<int64_t>(n_read);
 
             {
                 ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
@@ -1149,7 +1274,26 @@ void UhdSc16Pipeline::rx_producer_loop()
             break;
         }
 
-        if (stream_pos_abs < win_end && eof_hit) {
+        if (read_end_abs < win_end && eof_hit) {
+            ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
+            ledger_.offered_windows++;
+            ledger_.cancelled_windows++;
+            break;
+        }
+
+        // Contract: only already-written samples may be copied out.  This is
+        // guaranteed by construction (the read loop only exits once
+        // read_end_abs >= win_end, and the cursor never advances past
+        // win_start); the explicit check turns a future regression into a loud
+        // cancelled window instead of a silent copy out of uninitialised
+        // storage.
+        if (win_start < valid_start_abs ||
+            static_cast<size_t>(win_start - valid_start_abs) + capacity > valid_n) {
+            std::cerr << "UhdSc16Pipeline: internal RX buffer invariant violated for "
+                         "window "
+                      << k << " (win_start=" << win_start
+                      << " valid_start_abs=" << valid_start_abs
+                      << " valid_n=" << valid_n << "); window cancelled\n";
             ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
             ledger_.offered_windows++;
             ledger_.cancelled_windows++;
@@ -1227,8 +1371,13 @@ void UhdSc16Pipeline::rx_producer_loop()
             if (diag) {
                 t_copy = std::chrono::steady_clock::now();
             }
-            size_t offset = static_cast<size_t>(win_start - buf_start_abs);
-            std::memcpy(slot->sc16_samples.data(), stream_buf.data() + offset,
+            // The window is fully inside the live region: the read loop above
+            // stopped only at read_end_abs >= win_end, and release_data()
+            // guarantees valid_start_abs <= win_start.  Copy exactly
+            // `capacity` samples; nothing uninitialised is ever touched.
+            const size_t src_off =
+                valid_begin + static_cast<size_t>(win_start - valid_start_abs);
+            std::memcpy(slot->sc16_samples.data(), storage.data() + src_off,
                         capacity * sizeof(std::complex<int16_t>));
             if (diag) {
                 rx_acc_.slot_copy_ns.fetch_add(
@@ -1252,31 +1401,10 @@ void UhdSc16Pipeline::rx_producer_loop()
             }
         }
 
-        int64_t next_pred = static_cast<int64_t>(std::llround(t0 + static_cast<double>(k + 1) * period_samples));
-        int64_t next_win_start = std::max<int64_t>(0, next_pred - static_cast<int64_t>(cfg_.pre_guard_samples));
-        if (next_win_start > buf_start_abs) {
-            size_t discard = static_cast<size_t>(next_win_start - buf_start_abs);
-            if (discard >= 32768 && discard <= stream_buf.size()) {
-                // Phase B replaces this with a cursor over pre-allocated
-                // storage.  Until then, instrument exactly what the historical
-                // erase() costs: the surviving tail is shifted left.
-                const size_t moved_samples = stream_buf.size() - discard;
-                std::chrono::steady_clock::time_point t_erase{};
-                if (diag) {
-                    t_erase = std::chrono::steady_clock::now();
-                }
-                stream_buf.erase(stream_buf.begin(), stream_buf.begin() + discard);
-                if (diag) {
-                    rx_acc_.assemble_ns.fetch_add(
-                        elapsed_ns(t_erase, std::chrono::steady_clock::now()),
-                        std::memory_order_relaxed);
-                    rx_acc_.compact_move_bytes.fetch_add(
-                        static_cast<uint64_t>(moved_samples) * sizeof(std::complex<int16_t>),
-                        std::memory_order_relaxed);
-                }
-                buf_start_abs += static_cast<int64_t>(discard);
-            }
-        }
+        // No post-window compaction here any more: the release step at the top
+        // of the next iteration drops exactly the samples that window will
+        // never need again, and the storage is compacted only when a read
+        // would otherwise not fit (counted in compact_move_bytes).
 
         ++k;
     }
@@ -1461,6 +1589,10 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
 
     const float scale = (cfg_.scale_mode == Sc16ScaleMode::UnitRange) ? (1.0f / 32768.0f) : 1.0f;
 
+    // B2: one boolean, evaluated once per worker, so the disabled path costs a
+    // single predictable test per window.
+    const bool dump_enabled = (!cfg_.iq_dump_dir.empty() && cfg_.iq_dump_windows > 0);
+
     while (true) {
         Sc16WindowSlot* slot = my_pool->acquire_ready_slot();
         if (!slot) {
@@ -1560,6 +1692,26 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
             dsp_n = slot->native_count;
         }
 
+        // 2b. Diagnostic IQ dump (default off): the exact CF32 samples that
+        // SIC/radar are about to consume, written before any of that work runs.
+        // The dump duration is kept out of every service timer below and is
+        // subtracted from e2e_us (it is file I/O, not pipeline work).
+        double iq_dump_us = 0.0;
+        if (dump_enabled &&
+            (cfg_.iq_dump_window_limit == 0 ||
+             res.window_id < static_cast<uint64_t>(cfg_.iq_dump_window_limit))) {
+            if (iq_dump_started_.fetch_add(1, std::memory_order_relaxed) <
+                static_cast<uint64_t>(cfg_.iq_dump_windows)) {
+                const auto t_dump = std::chrono::steady_clock::now();
+                if (write_iq_dump(res.window_id, dsp_in, dsp_n)) {
+                    iq_dump_written_.fetch_add(1, std::memory_order_relaxed);
+                }
+                iq_dump_us = std::chrono::duration<double, std::micro>(
+                                 std::chrono::steady_clock::now() - t_dump)
+                                 .count();
+            }
+        }
+
         // 3. SIC processing
         if (cfg_.consumer_mode == ConsumerMode::SicOnly || cfg_.consumer_mode == ConsumerMode::Both) {
             auto t_sic_start = std::chrono::steady_clock::now();
@@ -1622,7 +1774,16 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
         }
 
         auto t_end = std::chrono::steady_clock::now();
-        res.timing.e2e_us = std::chrono::duration<double, std::micro>(t_end - t_start).count();
+        double e2e_us = std::chrono::duration<double, std::micro>(t_end - t_start).count();
+        if (iq_dump_us > 0.0) {
+            // The diagnostic dump is not pipeline work: keep it out of e2e_us
+            // (sic_us/sensing_us/resample_us/convert_us never included it).
+            e2e_us -= iq_dump_us;
+            if (e2e_us < 0.0) {
+                e2e_us = 0.0;
+            }
+        }
+        res.timing.e2e_us = e2e_us;
         res.worker_end_time = t_end;
         res.state = WindowTerminalState::Completed;
 

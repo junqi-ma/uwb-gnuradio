@@ -252,6 +252,29 @@ struct PipelineConfig {
     // synchronisation).
     std::function<void(int worker_id)> test_worker_init_hook;
 
+    // ------------------------------------------------------------------
+    // Diagnostic per-window IQ dump (default off)
+    // ------------------------------------------------------------------
+    // Dumps the exact CF32 samples handed to SIC/radar: the post-resample
+    // buffer (or the direct SC16->CF32 buffer when no resampling is needed)
+    // with exactly dsp_n samples, for the first `iq_dump_windows` COMPLETED
+    // windows whose window_id is < iq_dump_window_limit.
+    //
+    // Files: <iq_dump_dir>/win_<window_id>_<tag>.cf32, raw little-endian
+    // complex<float> (real/imag float32 pairs).  An empty tag is written as
+    // "dump" so the name always parses as win_<id>_<tag>.cf32.
+    // Selection uses an atomic completion counter, so with dsp_workers > 1 the
+    // chosen set follows completion order; dsp_workers == 1 is deterministic.
+    //
+    // The write happens on the worker thread after the resampler/flush produced
+    // dsp_n and before the SIC call.  Its duration is excluded from resample_us,
+    // convert_us and e2e_us, and it costs one boolean test per window when
+    // iq_dump_dir is empty.
+    std::string iq_dump_dir;         // empty = disabled
+    std::string iq_dump_tag;         // filename suffix, e.g. "control" / "B"
+    size_t iq_dump_windows = 0;      // 0 = disabled
+    size_t iq_dump_window_limit = 0; // only window_id < this (0 = no limit)
+
     uint64_t max_windows = 0; // 0 = unlimited
     uint64_t max_samples = 0; // 0 = unlimited
 
@@ -455,6 +478,14 @@ public:
     const CommitDiagnostics& commit_diagnostics() const;
     void reset_diagnostics();
 
+    // Number of per-window IQ dump files actually written by this pipeline
+    // (0 when PipelineConfig::iq_dump_dir / iq_dump_windows is empty).  Reset by
+    // reset_diagnostics().  Read it after wait().
+    uint64_t iq_dumps_written() const
+    {
+        return iq_dump_written_.load(std::memory_order_relaxed);
+    }
+
     void set_result_callback(ResultCallback cb) { result_cb_ = std::move(cb); }
 
     const PipelineLedger& ledger() const { return ledger_; }
@@ -479,6 +510,10 @@ private:
     // Post-join safety net: settle any slot still sitting in a ring pool so
     // every admitted window reaches a terminal state.
     void recover_orphaned_windows();
+    // Diagnostic per-window CF32 dump (worker thread, never in the DSP timers).
+    bool write_iq_dump(uint64_t window_id,
+                       const std::complex<float>* data,
+                       size_t n) const;
 
     PipelineConfig cfg_;
     std::unique_ptr<ISc16StreamSource> source_;
@@ -533,6 +568,11 @@ private:
 
     RxDiagAcc rx_acc_{};
     CommitDiagAcc commit_acc_{};
+    // Diagnostic IQ dump bookkeeping (worker threads, relaxed atomics).
+    //   iq_dump_started_ : eligible windows that consumed a dump slot
+    //   iq_dump_written_ : files actually written (exposed to the runner)
+    std::atomic<uint64_t> iq_dump_started_{ 0 };
+    std::atomic<uint64_t> iq_dump_written_{ 0 };
     // Snapshots handed out by rx_diagnostics() / commit_diagnostics().  They
     // are refilled on every call; the frozen contract only allows reading them
     // after wait(), so no extra locking is required.
