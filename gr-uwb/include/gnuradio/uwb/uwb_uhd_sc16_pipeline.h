@@ -485,13 +485,39 @@ public:
     // Failed / timeout / stop return false.  Safe to call after wait(): it then
     // simply reports the current state.
     bool wait_ready(unsigned timeout_ms = 0);
-    bool ready_ok() const;  // all Ready and none Failed
-    bool failed() const;    // any worker Failed
+    // WORKER readiness only: every DSP worker published Ready and none
+    // published Failed.  This deliberately says nothing about the stream
+    // source -- a run whose start_stream() failed can still report
+    // ready_ok() == true.  Combine it with source_started()/source_failed()
+    // (below) when deciding whether a run actually succeeded.
+    bool ready_ok() const;
+    // Overall failure state: any worker Failed, OR the stream source failed
+    // (start_stream() returned false, or the RX thread recorded a fatal
+    // source error).  Read it after wait().
+    bool failed() const;
     // Publish-ordered snapshot of every worker.  Every state and every
     // affinity_* field is written before that worker becomes Ready/Failed, so
     // reading it after wait_ready() / wait() needs no further synchronisation.
     const std::vector<WorkerReadyInfo>& worker_ready_info() const { return worker_ready_; }
-    std::string init_error() const; // first failure reason, empty == no failure
+    // First worker failure reason; when no worker failed this falls back to
+    // source_error().  Empty == no failure at all.
+    std::string init_error() const;
+
+    // ------------------------------------------------------------------
+    // Source lifecycle (round-2 review R2).
+    //
+    // start_stream() runs on the RX thread only after the worker-ready
+    // barrier, so "the source never started" and "the source started and
+    // then failed" are different states and must not be conflated:
+    //   source_started() == false && source_failed()  -> start failed
+    //   source_started() == true  && source_failed()  -> fatal RX error
+    // The two booleans are acquire/release atomics; source_error() takes the
+    // internal mutex, so it is safe to call while the RX thread runs.  The
+    // canonical read point is after wait(), once the RX thread has joined.
+    // ------------------------------------------------------------------
+    bool source_started() const;      // start_stream() returned true
+    bool source_failed() const;       // start_stream() failed, or a fatal RX error
+    std::string source_error() const; // empty unless source_failed()
 
     // Experiment string applied by worker w (empty before start / unknown worker).
     //
@@ -558,6 +584,22 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> rx_finished_{false};
+
+    // --- source lifecycle (round-2 review R2) ------------------------------
+    // Source-only state, kept out of the worker-ready ledger on purpose: the
+    // ready barrier describes DSP workers, and conflating the two would make
+    // ready_ok() report a source failure as "workers not ready".
+    // The RX thread is the only writer (message under source_error_mutex_,
+    // then source_failed_ with release); the caller reads after wait().
+    // Both flags and the message are reset by start() (new run epoch) and
+    // after a successful source_->open() in initialize().
+    std::atomic<bool> source_started_{ false }; // start_stream() returned true
+    std::atomic<bool> source_failed_{ false };  // start failure or fatal RX error
+    mutable std::mutex source_error_mutex_;
+    std::string source_error_; // first fatal source message, empty == healthy
+    // Records a fatal source error and raises source_failed_.  The first
+    // message wins so a later symptom cannot hide the root cause.
+    void set_source_error(const std::string& msg);
 
     // --- ready barrier (A2) ------------------------------------------------
     // Guards worker_ready_ and the ready-epoch handshake with stop().  Workers

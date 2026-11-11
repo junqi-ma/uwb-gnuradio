@@ -361,6 +361,34 @@ if(UWB_HAVE_UHD)
     target_link_libraries(uwb_uhd_sc16_pipeline_runner UHD::UHD)
 endif()
 
+########################################################################
+# Round-2 review R2: the runner used to `return 0` unconditionally, so a
+# failed run (no source, source start failure, broken ledger) looked like
+# success to every caller.  It now exits non-zero when runtime_ok is false and
+# keeps 0 for a normal EOF / stop after a successful start.
+#
+# The shell case pins the promise end to end:
+#   1. nonexistent --file  -> non-zero (initialize failure)
+#   2. one valid 56k window from the replay fixture -> 0, with
+#      source_started=true, source_failed=false, ledger_invariants_ok=true.
+# The start_stream() == false variant cannot be produced by a file source and
+# is covered by the library QA (fake source with set_start_stream_result(false)).
+#
+# `CMAKE_TESTING_ENABLED` is set by enable_testing() (CMake >= 3.10, and this
+# project calls it unconditionally); `ENABLE_TESTING` covers older CMake
+# minimums.  Either way the case is only registered when testing is enabled.
+########################################################################
+if(CMAKE_TESTING_ENABLED OR ENABLE_TESTING)
+    add_test(NAME uwb_qa_sc16_pipeline_runner_exit
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/qa_uwb_uhd_sc16_pipeline_runner_exit.sh
+                --runner $<TARGET_FILE:uwb_uhd_sc16_pipeline_runner>
+                --fixture ${CMAKE_SOURCE_DIR}/../testdata/uhd_sc16/sim_preamble_sc16_737m28_rate.bin
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(uwb_qa_sc16_pipeline_runner_exit PROPERTIES TIMEOUT 120)
+    message(STATUS "UWB CTest: registered uwb_qa_sc16_pipeline_runner_exit "
+                   "(runner exit-code QA, R2)")
+endif()
+
 # 2026-11-11 round 2: pure-core resampler benchmark (owner: subagent A).
 add_executable(benchmark_sc16_burst_core benchmark_sc16_burst_core.cc)
 target_link_libraries(benchmark_sc16_burst_core gnuradio-uwb Threads::Threads)

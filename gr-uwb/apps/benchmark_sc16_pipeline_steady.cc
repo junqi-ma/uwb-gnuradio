@@ -20,7 +20,11 @@
  * flow control lives in this benchmark feeder only; it is never present in the
  * production RX path.  It is reported explicitly (`flow_waits`,
  * `flow_wait_us`, `flow_in_flight`), so an input-limited result cannot be
- * mistaken for a capacity result.
+ * mistaken for a capacity result.  The file I/O of the feeder is reported
+ * separately (`feeder_read_us`, `feeder_read_calls`, `feeder_read_bytes`);
+ * `flow_wait_us` covers only the in-flight gate and `feeder_read_us` covers
+ * only the ::read() syscalls, so neither is a stand-in for the pipeline's
+ * `rx.read_us` (which spans the whole `read_samples()` call).
  */
 
 #include <gnuradio/uwb/uwb_uhd_sc16_pipeline.h>
@@ -196,6 +200,16 @@ public:
     uint64_t delivered_samples() const { return delivered_; }
     int64_t file_samples() const { return file_samples_; }
 
+    // File I/O cost of the feeder, kept strictly separate from the flow-control
+    // wait above.  `read_samples()` blocks both on the in-flight gate and in
+    // ::read(); the pipeline-side `rx.read_us` covers the whole call, so it
+    // cannot be read as a page-cache/bandwidth limit.  These three counters
+    // measure only the ::read() syscalls made by this feeder.  A call rejected
+    // by the EOF/zero-length guard performs no ::read() and is not counted.
+    uint64_t read_calls() const { return read_calls_; }
+    uint64_t read_bytes() const { return read_bytes_; }
+    double read_us() const { return read_us_; }
+
     size_t read_samples(std::complex<int16_t>* dest,
                         size_t max_samples,
                         StreamReadMeta& meta) override
@@ -211,8 +225,17 @@ public:
         const size_t want_bytes = max_samples * sizeof(std::complex<int16_t>);
         char* p = reinterpret_cast<char*>(dest);
         size_t got = 0;
+        // Time only the ::read() syscalls.  The flow-control wait above and the
+        // ::lseek() loop restart are deliberately excluded, so this is file I/O
+        // and not the in-flight gate.
+        bool did_read = false;
+        double read_us_local = 0.0;
         while (got < want_bytes) {
+            const auto read_t0 = Clock::now();
             ssize_t n = ::read(fd_, p + got, want_bytes - got);
+            read_us_local +=
+                std::chrono::duration<double, std::micro>(Clock::now() - read_t0).count();
+            did_read = true;
             if (n > 0) {
                 got += static_cast<size_t>(n);
                 continue;
@@ -234,6 +257,11 @@ public:
             }
             meta.error_code = errno;
             break;
+        }
+        if (did_read) {
+            ++read_calls_;
+            read_bytes_ += got;
+            read_us_ += read_us_local;
         }
 
         const size_t samples = got / sizeof(std::complex<int16_t>);
@@ -315,6 +343,9 @@ private:
     std::condition_variable* flow_gate_cv_ = nullptr;
     uint64_t flow_waits_ = 0;
     double flow_wait_us_ = 0.0;
+    uint64_t read_calls_ = 0;
+    uint64_t read_bytes_ = 0;
+    double read_us_ = 0.0;
 };
 
 bool file_exists(const std::string& path)
@@ -778,6 +809,10 @@ int main(int argc, char* argv[])
               << "  feeder waits:    " << source_raw->flow_waits()
               << " / " << std::fixed << std::setprecision(3)
               << source_raw->flow_wait_us() * 1e-3 << " ms\n"
+              << "  feeder reads:    " << source_raw->read_calls()
+              << " / " << source_raw->read_bytes() << " B / "
+              << std::fixed << std::setprecision(3)
+              << source_raw->read_us() * 1e-3 << " ms\n"
               << "\n--- ledger (invariants "
               << (inv_ok ? "PASS" : "FAIL: " + inv_err) << ") ---\n"
               << "  offered=" << ledger.offered_windows
@@ -886,6 +921,9 @@ int main(int argc, char* argv[])
     meta.emplace_back("feeder_loops", bench::json_number(source_raw->loops()));
     meta.emplace_back("feeder_flow_waits", bench::json_number(source_raw->flow_waits()));
     meta.emplace_back("feeder_flow_wait_us", bench::json_number(source_raw->flow_wait_us()));
+    meta.emplace_back("feeder_read_us", bench::json_number(source_raw->read_us()));
+    meta.emplace_back("feeder_read_calls", bench::json_number(source_raw->read_calls()));
+    meta.emplace_back("feeder_read_bytes", bench::json_number(source_raw->read_bytes()));
     meta.emplace_back("resample_us_mean", bench::json_number(st_resample.mean));
     meta.emplace_back("resample_us_p50", bench::json_number(st_resample.p50));
     meta.emplace_back("resample_us_p95", bench::json_number(st_resample.p95));

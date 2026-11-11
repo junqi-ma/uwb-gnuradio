@@ -945,6 +945,15 @@ int main(int argc, char* argv[])
     pipeline.wait();
     auto end_time = std::chrono::steady_clock::now();
 
+    // Source lifecycle (round-2 review R2).  ready_ok() only describes the DSP
+    // workers, so the source half of the run must be read explicitly; a
+    // start_stream() failure or a fatal RX error is otherwise invisible here.
+    // All three are stable once wait() returned (the RX thread has joined);
+    // source_error() takes the pipeline's own mutex, so it is safe to call.
+    const bool source_started = pipeline.source_started();
+    const bool source_failed = pipeline.source_failed();
+    const std::string source_error = pipeline.source_error();
+
     double total_elapsed_s = std::chrono::duration<double>(end_time - start_time).count();
     double startup_ready_ms =
         std::chrono::duration<double, std::milli>(ready_time - start_time).count();
@@ -953,6 +962,14 @@ int main(int argc, char* argv[])
     const auto& ledger = pipeline.ledger();
     std::string inv_err;
     bool inv_ok = ledger.verify_invariants(&inv_err);
+
+    // Overall verdict.  `ready_ok` covers the DSP workers, `failed()` covers
+    // worker AND source failures, `inv_ok` covers the ledger, and the source
+    // pair separates "never started" from "started and then broke".  A normal
+    // EOF / user stop after a successful start keeps source_started == true and
+    // source_failed == false, so it stays a successful run.
+    const bool runtime_ok =
+        ready_ok && !pipeline.failed() && inv_ok && source_started && !source_failed;
 
     // Filter completed windows
     std::vector<WindowResult> completed_windows;
@@ -1159,7 +1176,11 @@ int main(int argc, char* argv[])
     std::cout << "\n================================================================================\n"
               << "                    UHD SC16 Direct RX Pipeline Results\n"
               << "================================================================================\n"
-              << "Ledger Invariants Check: " << (inv_ok ? "PASS" : "FAIL (" + inv_err + ")") << "\n\n"
+              << "Ledger Invariants Check: " << (inv_ok ? "PASS" : "FAIL (" + inv_err + ")") << "\n"
+              << "Source State: started=" << (source_started ? "yes" : "no")
+              << " failed=" << (source_failed ? "yes" : "no")
+              << " error=" << (source_error.empty() ? std::string("<none>") : source_error) << "\n"
+              << "Runtime Verdict: " << (runtime_ok ? "PASS" : "FAIL") << "\n\n"
               << "Pipeline Summary:\n"
               << "  Offered Windows:                   " << std::setw(10) << ledger.offered_windows << "\n"
               << "  Admitted Windows:                  " << std::setw(10) << ledger.admitted_windows << "\n"
@@ -1325,6 +1346,13 @@ int main(int argc, char* argv[])
     meta.emplace_back("diag_rx", bench::meta_bool(cfg.enable_rx_diagnostics));
     meta.emplace_back("diag_commit", bench::meta_bool(cfg.enable_commit_diagnostics));
     meta.emplace_back("ready_ok", bench::meta_bool(ready_ok && !pipeline.failed()));
+    // R2: the source half of the lifecycle, next to the worker half above.
+    // source_started=false + source_failed=true is a start_stream() failure;
+    // source_started=true + source_failed=true is a fatal RX error.  Either
+    // makes the process exit non-zero (see the runtime_ok check at the end).
+    meta.emplace_back("source_started", bench::meta_bool(source_started));
+    meta.emplace_back("source_failed", bench::meta_bool(source_failed));
+    meta.emplace_back("source_error", bench::meta_string(source_error));
     meta.emplace_back("ledger_invariants_ok", bench::meta_bool(inv_ok));
     meta.emplace_back("cold_total_s", bench::json_number(total_elapsed_s));
     meta.emplace_back("startup_ready_ms", bench::json_number(startup_ready_ms));
@@ -1368,6 +1396,28 @@ int main(int argc, char* argv[])
     }
     if (!bench::write_results_csv(csv_out, collected_results)) {
         std::cerr << "Error: cannot write " << csv_out << "\n";
+        return 1;
+    }
+
+    // R2: failure must reach the process exit code.  The JSON/CSV above are
+    // written FIRST so the failure evidence survives this return, and a normal
+    // EOF / user stop after a successful start still exits 0.
+    if (!runtime_ok) {
+        std::cerr << "Error: pipeline run FAILED: ready_ok=" << (ready_ok ? "true" : "false")
+                  << " failed=" << (pipeline.failed() ? "true" : "false")
+                  << " ledger_ok=" << (inv_ok ? "true" : "false")
+                  << " source_started=" << (source_started ? "true" : "false")
+                  << " source_failed=" << (source_failed ? "true" : "false")
+                  << " source_error=\"" << source_error << "\"";
+        if (!inv_ok) {
+            std::cerr << " ledger_error=\"" << inv_err << "\"";
+        }
+        std::cerr << "\n"
+                  << "Error: the failure report above is why this run exits non-zero.\n";
+        if (!json_out.empty()) {
+            std::cerr << "Error: results were written before the verdict, see " << json_out
+                      << "\n";
+        }
         return 1;
     }
 

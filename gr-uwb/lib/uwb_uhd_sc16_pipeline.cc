@@ -839,6 +839,16 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
         return false;
     }
 
+    // R2: a successful open() starts a fresh source lifecycle -- it has neither
+    // started streaming nor failed yet, and any message from an earlier run on
+    // this object is stale.
+    source_started_.store(false, std::memory_order_relaxed);
+    source_failed_.store(false, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lk(source_error_mutex_);
+        source_error_.clear();
+    }
+
     return true;
 }
 
@@ -877,6 +887,15 @@ void UhdSc16Pipeline::start()
     // Reset before any thread is spawned; release/acquire pairing with the
     // producer store and the worker load below.
     rx_finished_.store(false, std::memory_order_relaxed);
+
+    // R2: every start() is a new run epoch for the source too.  Worker readiness
+    // is reset above; the source has not started yet and cannot have failed.
+    source_started_.store(false, std::memory_order_relaxed);
+    source_failed_.store(false, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lk(source_error_mutex_);
+        source_error_.clear();
+    }
 
     // Restart safety: drop any thread handles left over from a previous run.
     dsp_threads_.clear();
@@ -968,27 +987,80 @@ bool UhdSc16Pipeline::any_failed_locked() const
     return false;
 }
 
+// R2: ready_ok() answers exactly one question -- did the DSP workers finish
+// their readiness barrier?  It deliberately says nothing about the source:
+// "all workers ready" stays true even after a source that started later died.
+// Callers that gate on overall health must combine it with failed().
 bool UhdSc16Pipeline::ready_ok() const
 {
     std::lock_guard<std::mutex> lk(ready_mutex_);
     return all_ready_locked() && !any_failed_locked();
 }
 
+// R2: overall failure state.  A worker Failed state and a fatal source error
+// are independent facts that both make the run unusable, so failed() reports
+// either of them.
 bool UhdSc16Pipeline::failed() const
 {
-    std::lock_guard<std::mutex> lk(ready_mutex_);
-    return any_failed_locked();
+    {
+        std::lock_guard<std::mutex> lk(ready_mutex_);
+        if (any_failed_locked()) {
+            return true;
+        }
+    }
+    return source_failed();
 }
 
 std::string UhdSc16Pipeline::init_error() const
 {
-    std::lock_guard<std::mutex> lk(ready_mutex_);
-    for (const auto& info : worker_ready_) {
-        if (info.state == WorkerReadyState::Failed) {
-            return info.error;
+    {
+        std::lock_guard<std::mutex> lk(ready_mutex_);
+        for (const auto& info : worker_ready_) {
+            if (info.state == WorkerReadyState::Failed) {
+                return info.error;
+            }
         }
     }
-    return std::string();
+    // R2: no worker error -- fall back to a source start/fatal error so
+    // init_error() is never silently empty when the run actually failed.
+    return source_error();
+}
+
+// ---------------------------------------------------------------------------
+// R2: source lifecycle (started / failed / error)
+//
+// start_stream() runs on the RX thread behind the worker-ready barrier, so a
+// UHD stream-command failure used to be visible only as a stderr line.  These
+// accessors separate "the source never started" from "the source started and
+// then failed" and are safe to read after wait() (the RX thread writes the
+// message under source_error_mutex_ and publishes source_failed_ with release).
+// ---------------------------------------------------------------------------
+bool UhdSc16Pipeline::source_started() const
+{
+    return source_started_.load(std::memory_order_acquire);
+}
+
+bool UhdSc16Pipeline::source_failed() const
+{
+    return source_failed_.load(std::memory_order_acquire);
+}
+
+std::string UhdSc16Pipeline::source_error() const
+{
+    std::lock_guard<std::mutex> lk(source_error_mutex_);
+    return source_error_;
+}
+
+void UhdSc16Pipeline::set_source_error(const std::string& msg)
+{
+    {
+        std::lock_guard<std::mutex> lk(source_error_mutex_);
+        // Keep the first (root cause) message; later symptoms must not hide it.
+        if (source_error_.empty()) {
+            source_error_ = msg;
+        }
+    }
+    source_failed_.store(true, std::memory_order_release);
 }
 
 std::string UhdSc16Pipeline::applied_resampler_experiment(int worker_id) const
@@ -1200,9 +1272,15 @@ void UhdSc16Pipeline::rx_producer_loop()
     if (!source_->start_stream()) {
         std::cerr << "UhdSc16Pipeline: source start_stream() failed; no windows "
                      "will be produced\n";
+        // R2: a start failure is a fatal run failure, not an empty-but-healthy
+        // run.  Ready states stay terminal (workers are untouched); the source
+        // failure is what failed()/init_error() now report.
+        set_source_error("source start_stream() failed");
         rx_finished_.store(true, std::memory_order_release);
         return;
     }
+    // R2: publish "streaming" only after the source accepted the start request.
+    source_started_.store(true, std::memory_order_release);
 
     const bool diag = cfg_.enable_rx_diagnostics;
     std::atomic<uint64_t>* ledger_wait_ns = diag ? &rx_acc_.ledger_wait_ns : nullptr;
@@ -1263,6 +1341,40 @@ void UhdSc16Pipeline::rx_producer_loop()
     int64_t read_end_abs = 0;
     uint64_t k = 0;
 
+    // R1: the ONE release point.  Drop every live sample strictly before
+    // min(limit_abs, read_end_abs) and keep the cursor bookkeeping consistent:
+    //   valid_start_abs advances to the first sample that is still needed,
+    //   valid_n shrinks by exactly the number of dropped samples,
+    //   read_end_abs stays valid_start_abs + valid_n (never past what was read),
+    //   valid_begin is rebased to 0 for free when nothing is live any more.
+    // limit_abs is always a window start, and window starts are monotone, so
+    // nothing that a future window needs is ever dropped.  Callers: once per
+    // window and once at the top of EVERY read iteration below.
+    auto release_before = [&](int64_t limit_abs) {
+        if (limit_abs <= valid_start_abs) {
+            return;
+        }
+        const int64_t keep_from = std::min<int64_t>(limit_abs, read_end_abs);
+        if (keep_from <= valid_start_abs) {
+            return;
+        }
+        const size_t drop = static_cast<size_t>(keep_from - valid_start_abs);
+        valid_begin += drop;
+        valid_n -= drop;
+        valid_start_abs = keep_from;
+        read_end_abs = valid_start_abs + static_cast<int64_t>(valid_n);
+        if (valid_n == 0) {
+            // Nothing live: restart at index 0 for free (no move, no copy).
+            valid_begin = 0;
+        }
+    };
+
+    // R1: a source that keeps answering "no samples, not EOF" must not spin
+    // this thread forever.  Sixteen consecutive zero-progress reads is far
+    // above anything a real source does while catching up (each call is
+    // blocking) and still bounds the run.
+    constexpr int kMaxZeroProgressReads = 16;
+
     while (!stop_requested_) {
         if (max_win > 0 && k >= max_win) {
             break;
@@ -1277,25 +1389,26 @@ void UhdSc16Pipeline::rx_producer_loop()
 
         // Window starts are monotone, so everything strictly before this
         // window's start can be released.  When the source has already been
-        // read past win_start (overlap) the surplus is kept; when the schedule
-        // jumps ahead of the read end (gap) the live region is simply emptied
-        // and the gap is read through in bounded slices below -- the storage
-        // never grows with the gap.
-        if (win_start > valid_start_abs) {
-            const int64_t keep_from = std::min<int64_t>(win_start, read_end_abs);
-            const size_t drop = static_cast<size_t>(keep_from - valid_start_abs);
-            valid_begin += drop;
-            valid_n -= drop;
-            valid_start_abs = keep_from;
-            read_end_abs = valid_start_abs + static_cast<int64_t>(valid_n);
-            if (valid_n == 0) {
-                // Nothing live: restart at index 0 for free (no move, no copy).
-                valid_begin = 0;
-            }
-        }
+        // read past win_start (overlap) the surplus is kept.
+        //
+        // R1 invariant (and the reason a gap larger than the whole buffer is
+        // harmless): the live region is released before EVERY read, so it never
+        // exceeds `capacity` (plus the current read slice) no matter how far
+        // apart the scheduled windows are.  Reading through a gap therefore
+        // recycles the same storage slice after slice; it is dropped again at
+        // the top of the next iteration, long before `room` can reach 0.
+        release_before(win_start);
 
         bool eof_hit = false;
+        bool source_fatal = false;
+        int zero_progress_reads = 0;
         while (read_end_abs < win_end && !stop_requested_) {
+            // R1: release again on entry to every read iteration.  Without this
+            // the gap samples pile up until `room` hits 0 and `to_read` becomes
+            // 0, which ReplaySc16Source reports as EOF (permanent, wrong) and
+            // which makes a zero-progress fake source spin forever.
+            release_before(win_start);
+
             const size_t needed = static_cast<size_t>(win_end - read_end_abs);
             size_t to_read = std::max(read_slice, needed);
             size_t room = storage_cap - (valid_begin + valid_n);
@@ -1324,6 +1437,22 @@ void UhdSc16Pipeline::rx_producer_loop()
             if (to_read > room) {
                 // Bounded slice: the read loop simply runs another iteration.
                 to_read = room;
+            }
+            if (to_read == 0) {
+                // R1: never ask the source for zero samples.  ReplaySc16Source
+                // treats max_samples == 0 as EOF and latches eof_ forever, so a
+                // zero-length "probe" silently truncates a run that still has
+                // data.  Reaching this point with the release helper above means
+                // a state that must not happen (no room even after compaction);
+                // fail loudly instead of pretending the input ended.
+                std::cerr << "UhdSc16Pipeline: RX storage cannot fit a read for "
+                             "window "
+                          << k << " (storage_cap=" << storage_cap
+                          << " valid_begin=" << valid_begin
+                          << " valid_n=" << valid_n << "); aborting the run\n";
+                set_source_error("RX storage produced a zero-length read request");
+                source_fatal = true;
+                break;
             }
 
             std::chrono::steady_clock::time_point t_read{};
@@ -1363,13 +1492,45 @@ void UhdSc16Pipeline::rx_producer_loop()
                 }
             }
 
+            // R2: a failed source is fatal, never a normal end of input.  Check
+            // it before is_eof so a source that reports both (the fatal error
+            // that made it return 0) is not silently downgraded to "drained".
+            if (source_failed()) {
+                source_fatal = true;
+                break;
+            }
             if (meta.is_eof) {
                 eof_hit = true;
                 break;
             }
-            if (n_read == 0 && !meta.is_eof) {
+            if (n_read == 0) {
+                // R1: bounded tolerance for non-EOF zero-progress reads.
+                ++zero_progress_reads;
+                if (zero_progress_reads >= kMaxZeroProgressReads) {
+                    std::cerr << "UhdSc16Pipeline: source made no progress after "
+                              << zero_progress_reads
+                              << " consecutive reads for window " << k
+                              << "; aborting the run\n";
+                    set_source_error(
+                        "source returned no samples and no EOF for " +
+                        std::to_string(zero_progress_reads) + " consecutive reads");
+                    source_fatal = true;
+                    break;
+                }
                 std::this_thread::yield();
+            } else {
+                zero_progress_reads = 0;
             }
+        }
+
+        if (source_fatal) {
+            // Offered + cancelled: the window was scheduled but never admitted,
+            // and the run stops so the caller sees a failed (non-zero) process
+            // instead of a short, seemingly-successful one.
+            ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
+            ledger_.offered_windows++;
+            ledger_.cancelled_windows++;
+            break;
         }
 
         if (stop_requested_) {

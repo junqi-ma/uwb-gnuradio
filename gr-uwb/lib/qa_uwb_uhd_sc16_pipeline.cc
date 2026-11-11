@@ -1212,6 +1212,13 @@ public:
         meta = StreamReadMeta{};
         meta.start_sample_abs = pos_.load(std::memory_order_relaxed);
         if (!dest || max_samples == 0) {
+            // R1 witness: a zero-length request is how a real source
+            // (ReplaySc16Source) latches EOF, so the pipeline must never issue
+            // one.  Counted through shared ownership because the pipeline owns
+            // and destroys this source before the QA reads the counter.
+            if (max_samples == 0) {
+                zero_length_reads_->fetch_add(1, std::memory_order_relaxed);
+            }
             eof_.store(true, std::memory_order_relaxed);
             meta.is_eof = true;
             return 0;
@@ -1283,6 +1290,16 @@ public:
     {
         return gate_timeouts_;
     }
+    // Same shared-ownership pattern for the R1 witness: number of read_samples()
+    // calls that were made with max_samples == 0.  Must always be 0.
+    std::shared_ptr<const std::atomic<int>> zero_length_reads_counter() const
+    {
+        return zero_length_reads_;
+    }
+    int zero_length_reads() const
+    {
+        return zero_length_reads_->load(std::memory_order_relaxed);
+    }
     int64_t position() const { return pos_.load(std::memory_order_relaxed); }
     bool closed() const { return closed_.load(std::memory_order_relaxed); }
     void set_start_stream_result(bool ok) { start_stream_result_ = ok; }
@@ -1301,6 +1318,8 @@ private:
     // Shared ownership: the counter must stay alive even if the pipeline (and
     // therefore this source) is destroyed before the QA inspects the result.
     std::shared_ptr<std::atomic<int>> gate_timeouts_ =
+        std::make_shared<std::atomic<int>>(0);
+    std::shared_ptr<std::atomic<int>> zero_length_reads_ =
         std::make_shared<std::atomic<int>>(0);
     std::atomic<int> ready_workers_{0};
     int expected_workers_ = 0;
@@ -1705,6 +1724,18 @@ BOOST_AUTO_TEST_CASE(test_pipeline_normal_drain)
     BOOST_CHECK_EQUAL(ledger.invalid_gap_after_admission, 0u);
     BOOST_CHECK_EQUAL(ledger.processing_failed, 0u);
 
+    // R2: a run that simply reached its max_windows limit is healthy: the source
+    // did start, did not fail, and the pipeline reports no failure at all.
+    BOOST_CHECK_MESSAGE(pipeline.source_started(),
+                        "source_started() must be true after a normal start");
+    BOOST_CHECK_MESSAGE(!pipeline.source_failed(),
+                        "source_failed() must be false on a clean run: "
+                            << pipeline.source_error());
+    BOOST_CHECK_MESSAGE(!pipeline.failed(), "failed() must be false on a clean run");
+    BOOST_CHECK_MESSAGE(pipeline.ready_ok(), "ready_ok() must be true");
+    BOOST_CHECK_MESSAGE(pipeline.source_error().empty(), "source_error() must be empty");
+    BOOST_CHECK_MESSAGE(pipeline.init_error().empty(), "init_error() must be empty");
+
     const std::vector<WindowResult>& results = pipeline.results();
     BOOST_REQUIRE_EQUAL(results.size(), static_cast<size_t>(kWindows));
     BOOST_CHECK_EQUAL(results.size(),
@@ -1989,6 +2020,24 @@ BOOST_AUTO_TEST_CASE(test_pipeline_rx_window_boundaries)
                              1000 * 5 + 1400, 5, {} };
         scenarios.push_back(sc);
     }
+    {
+        // 8. R1: the schedule step is far larger than the whole RX storage
+        //    (period 100000 vs storage_cap 33768 for capacity 1000).  The gap
+        //    must be read through in bounded slices with the live region
+        //    released before every read; storing the gap would fill `room`,
+        //    make `to_read` 0 and ReplaySc16Source answer EOF.  Starts are
+        //    0 / 100000 / 200000.
+        BoundaryScenario sc{ "gap_gt_storage", 1000, 0, 0, 100000.0, 0.0,
+                             201000, 3, {} };
+        scenarios.push_back(sc);
+    }
+    {
+        // 9. R1: same, but the FIRST window already starts beyond the storage
+        //    (t0 = 100000).  Starts are 100000 / 200000.
+        BoundaryScenario sc{ "t0_gt_storage", 1000, 0, 0, 100000.0, 100000.0,
+                             201000, 2, {} };
+        scenarios.push_back(sc);
+    }
 
     size_t radar_nonzero = 0;
     size_t sic_committed_windows = 0;
@@ -2038,9 +2087,19 @@ BOOST_AUTO_TEST_CASE(test_pipeline_rx_window_boundaries)
         // use-after-free and the assertion would prove nothing.
         const std::shared_ptr<const std::atomic<int>> gate_timeouts =
             source->gate_timeouts_counter();
+        // R1 witness, same ASan-safe pattern: the pipeline owns the source and
+        // destroys it inside qa_run_pipeline().  A source that really received a
+        // zero-length read latches EOF, so counting the calls is what proves the
+        // zero-length "probe" path is gone rather than merely harmless here.
+        const std::shared_ptr<const std::atomic<int>> zero_length_reads =
+            source->zero_length_reads_counter();
         const std::vector<WindowResult> run_a =
             qa_run_pipeline(cfg, std::move(source), name + " (predictive source)");
         BOOST_CHECK_EQUAL(gate_timeouts->load(std::memory_order_relaxed), 0);
+        BOOST_CHECK_MESSAGE(zero_length_reads->load(std::memory_order_relaxed) == 0,
+                            name << ": pipeline issued "
+                                 << zero_length_reads->load(std::memory_order_relaxed)
+                                 << " zero-length read_samples() call(s)");
 
         BOOST_REQUIRE_MESSAGE(run_a.size() == expected_windows,
                               name << ": expected " << expected_windows << " window(s), got "
@@ -2101,6 +2160,205 @@ BOOST_AUTO_TEST_CASE(test_pipeline_rx_window_boundaries)
     BOOST_CHECK_MESSAGE(radar_nonzero > 0 || sic_committed_windows > 0,
                         "the deterministic content signature produced no content-derived "
                         "metric; the differential check would be vacuous");
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 20: test_pipeline_source_start_failure  (R2)
+//   start_stream() runs behind the ready barrier, so its failure used to be
+//   only a stderr line: ready_ok() stayed true and failed() stayed false, which
+//   let the runner exit 0 on a run that never produced a single window.  The
+//   source lifecycle must be observable and must count as a failure, while
+//   ready_ok() keeps meaning "the DSP workers are ready".
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_source_start_failure)
+{
+    const int kWorkers = 2;
+    const size_t kCapture = 2000;
+    const uint64_t kWindows = 4;
+    const int64_t kTotal = static_cast<int64_t>(kCapture * (kWindows + 1));
+
+    auto source = std::make_unique<PredictiveSc16Source>(kTotal);
+    PredictiveSc16Source* src = source.get();
+    src->set_expected_workers(kWorkers);
+    src->set_start_stream_result(false);
+    // The gate is deliberately left closed: a start failure must end the run
+    // before any read_samples() call.  A regression that reads anyway would
+    // block up to the source's 5 s gate timeout and show up in gate_timeouts.
+    const std::shared_ptr<const std::atomic<int>> gate_timeouts =
+        src->gate_timeouts_counter();
+
+    PipelineConfig cfg = make_qa_pipeline_cfg(kCapture, 0, 0, kWorkers,
+                                              /*pool*/ 2, kWindows,
+                                              static_cast<double>(kCapture));
+    std::atomic<int> hooks_done{0};
+    cfg.test_worker_init_hook = [&](int) {
+        hooks_done.fetch_add(1, std::memory_order_relaxed);
+        src->note_worker_ready();
+    };
+
+    UhdSc16Pipeline pipeline(cfg);
+    BOOST_REQUIRE(pipeline.initialize(std::move(source)));
+
+    const auto t_start = std::chrono::steady_clock::now();
+    pipeline.start();
+    const bool ready = pipeline.wait_ready(2000);
+    pipeline.wait();
+    const double elapsed_ms = qa_elapsed_ms(t_start);
+
+    BOOST_CHECK_MESSAGE(ready,
+                        "wait_ready() must still succeed: worker readiness is "
+                        "independent of whether the source started");
+    BOOST_CHECK_LT(elapsed_ms, 5000.0);
+    BOOST_CHECK_EQUAL(hooks_done.load(std::memory_order_relaxed), kWorkers);
+    BOOST_CHECK_EQUAL(gate_timeouts->load(std::memory_order_relaxed), 0);
+
+    // Source-side ordering witness: start_stream() saw every worker Ready.
+    BOOST_CHECK_EQUAL(src->start_stream_calls(), 1);
+    BOOST_CHECK(src->start_stream_all_ready());
+
+    // Pipeline side: started is false, failed is true, and the message exists.
+    BOOST_CHECK_MESSAGE(pipeline.source_started() == false,
+                        "source_started() must be false when start_stream() failed");
+    BOOST_CHECK_MESSAGE(pipeline.source_failed(),
+                        "source_failed() must be true when start_stream() failed");
+    BOOST_CHECK_MESSAGE(pipeline.failed(),
+                        "failed() must include a source start failure");
+    BOOST_CHECK_MESSAGE(!pipeline.source_error().empty(),
+                        "source_error() must explain the start failure");
+    BOOST_CHECK_MESSAGE(pipeline.init_error() == pipeline.source_error(),
+                        "init_error() must fall back to source_error() when no "
+                        "worker failed");
+    // Documented separation: the workers really did reach Ready.
+    BOOST_CHECK_MESSAGE(pipeline.ready_ok(),
+                        "ready_ok() is worker readiness only and must stay true");
+
+    const PipelineLedger& ledger = pipeline.ledger();
+    std::string err;
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+    BOOST_CHECK_EQUAL(ledger.offered_windows, 0u);
+    BOOST_CHECK_EQUAL(ledger.admitted_windows, 0u);
+    BOOST_CHECK_EQUAL(ledger.completed_windows, 0u);
+    BOOST_CHECK_EQUAL(ledger.cancelled_windows, 0u);
+    BOOST_CHECK(pipeline.results().empty());
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 21: test_pipeline_zero_read_recovery  (R1)
+//   A source that answers "0 samples, not EOF" twice and then delivers data is
+//   a legal (if impolite) source: the RX loop must retry, keep the ledger
+//   read_timeouts counter honest and never turn the stall into EOF.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_zero_read_recovery)
+{
+    const int kWorkers = 1;
+    const size_t kCapture = 2000;
+    const uint64_t kWindows = 4;
+    const int64_t kTotal = static_cast<int64_t>(kCapture * (kWindows + 2));
+
+    // Cycle of read sizes: 0, 0, 137, 0, 0, 137, ...  Never 16 in a row.
+    auto source = std::make_unique<PredictiveSc16Source>(
+        kTotal, std::vector<size_t>{ 0, 0, 137 });
+    PredictiveSc16Source* src = source.get();
+    src->open_gate();
+
+    PipelineConfig cfg = make_qa_pipeline_cfg(kCapture, 0, 0, kWorkers,
+                                              /*pool*/ kWindows + 2, kWindows,
+                                              static_cast<double>(kCapture));
+
+    UhdSc16Pipeline pipeline(cfg);
+    BOOST_REQUIRE(pipeline.initialize(std::move(source)));
+    pipeline.start();
+    BOOST_REQUIRE_MESSAGE(pipeline.wait_ready(5000),
+                          "zero-read recovery: wait_ready(5000) failed");
+    pipeline.wait();
+
+    BOOST_CHECK_MESSAGE(pipeline.source_started(), "source must have started");
+    BOOST_CHECK_MESSAGE(!pipeline.source_failed(),
+                        "a bounded zero-progress stall must not fail the source: "
+                        << pipeline.source_error());
+    BOOST_CHECK_MESSAGE(!pipeline.failed(), "failed() must stay false");
+    BOOST_CHECK_MESSAGE(pipeline.source_error().empty(), "source_error() must be empty");
+
+    const PipelineLedger& ledger = pipeline.ledger();
+    std::string err;
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+    BOOST_CHECK_EQUAL(ledger.offered_windows, kWindows);
+    BOOST_CHECK_EQUAL(ledger.admitted_windows, kWindows);
+    BOOST_CHECK_EQUAL(ledger.completed_windows, kWindows);
+    BOOST_CHECK_EQUAL(ledger.cancelled_windows, 0u);
+    BOOST_CHECK_EQUAL(ledger.dropped_admission, 0u);
+    BOOST_CHECK_MESSAGE(ledger.read_timeouts > 0,
+                        "the zero-length read attempts must be counted as "
+                        "read_timeouts, got "
+                            << ledger.read_timeouts);
+
+    const std::vector<WindowResult>& results = pipeline.results();
+    BOOST_REQUIRE_EQUAL(results.size(), static_cast<size_t>(kWindows));
+    for (size_t i = 0; i < results.size(); ++i) {
+        BOOST_CHECK_EQUAL(results[i].window_id, i);
+        BOOST_CHECK_EQUAL(static_cast<int>(results[i].state),
+                          static_cast<int>(WindowTerminalState::Completed));
+        BOOST_CHECK_EQUAL(results[i].native_start_abs,
+                          static_cast<int64_t>(i * kCapture));
+        BOOST_CHECK_EQUAL(results[i].native_sample_count, kCapture);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 22: test_pipeline_zero_read_forever  (R1)
+//   A source that never makes progress and never reports EOF must not hang the
+//   RX thread: the bounded consecutive-zero-progress counter turns it into a
+//   fatal source failure with a cancelled window.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_zero_read_forever)
+{
+    const int kWorkers = 1;
+    const size_t kCapture = 2000;
+    const uint64_t kWindows = 2;
+    const int64_t kTotal = static_cast<int64_t>(kCapture * 4);
+
+    auto source = std::make_unique<PredictiveSc16Source>(
+        kTotal, std::vector<size_t>{ 0 });
+    PredictiveSc16Source* src = source.get();
+    src->open_gate();
+
+    PipelineConfig cfg = make_qa_pipeline_cfg(kCapture, 0, 0, kWorkers,
+                                              /*pool*/ 4, kWindows,
+                                              static_cast<double>(kCapture));
+
+    UhdSc16Pipeline pipeline(cfg);
+    BOOST_REQUIRE(pipeline.initialize(std::move(source)));
+
+    const auto t_start = std::chrono::steady_clock::now();
+    pipeline.start();
+    BOOST_REQUIRE_MESSAGE(pipeline.wait_ready(5000),
+                          "zero-read forever: wait_ready(5000) failed");
+    pipeline.wait();
+    const double elapsed_ms = qa_elapsed_ms(t_start);
+
+    BOOST_CHECK_MESSAGE(elapsed_ms < 5000.0,
+                        "the pipeline must terminate on a non-progressing source, "
+                        "took "
+                            << elapsed_ms << " ms");
+    BOOST_CHECK_MESSAGE(pipeline.source_started(), "source must have started");
+    BOOST_CHECK_MESSAGE(pipeline.source_failed(),
+                        "unbounded zero-progress reads must be a fatal source failure");
+    BOOST_CHECK_MESSAGE(pipeline.failed(), "failed() must include the source failure");
+    BOOST_CHECK_MESSAGE(!pipeline.source_error().empty(),
+                        "source_error() must explain the zero-progress abort");
+
+    const PipelineLedger& ledger = pipeline.ledger();
+    std::string err;
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+    BOOST_CHECK_EQUAL(ledger.offered_windows, 1u);
+    BOOST_CHECK_EQUAL(ledger.cancelled_windows, 1u);
+    BOOST_CHECK_EQUAL(ledger.admitted_windows, 0u);
+    BOOST_CHECK_EQUAL(ledger.completed_windows, 0u);
+    BOOST_CHECK_EQUAL(ledger.dropped_admission, 0u);
+    BOOST_CHECK_MESSAGE(ledger.read_timeouts > 0,
+                        "the zero-progress reads must be counted, got "
+                            << ledger.read_timeouts);
+    BOOST_CHECK(pipeline.results().empty());
 }
 
 // ---------------------------------------------------------------------------
