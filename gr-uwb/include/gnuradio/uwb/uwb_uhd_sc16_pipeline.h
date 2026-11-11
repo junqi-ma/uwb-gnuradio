@@ -92,6 +92,9 @@ struct WindowTimingStats {
 
 struct WindowResult {
     uint64_t window_id = 0;
+    // Burst-level multi-core contract: index of the DSP worker that produced
+    // this window, in [0, dsp_workers).  Always 0 when dsp_workers == 1.
+    int worker_id = 0;
     WindowTerminalState state = WindowTerminalState::Completed;
     int64_t native_start_abs = 0;
     size_t native_sample_count = 0;
@@ -146,6 +149,18 @@ struct PipelineConfig {
     int cpu_core_rx = -1;
     int cpu_core_dsp = -1;
     Sc16ScaleMode scale_mode = Sc16ScaleMode::UnitRange;
+
+    // ------------------------------------------------------------------
+    // Burst-level multi-core consumer contract (run-to-completion)
+    // ------------------------------------------------------------------
+    // Number of independent DSP consumer threads.  Each worker owns a
+    // private SPSC ring pool, a private resampler core and private SIC /
+    // radar scratch, and processes one whole burst on a single core using
+    // the flat AVX2 4-way macroblock kernel.  1 = legacy single-consumer.
+    int dsp_workers = 1;
+    // Optional explicit affinity list for the DSP workers.  When non-empty
+    // it overrides cpu_core_dsp and must have exactly dsp_workers entries.
+    std::vector<int> cpu_cores_dsp;
 
     // Resampler configuration
     std::string resampler_profile = "quality_minorder";
@@ -320,23 +335,41 @@ public:
 
 private:
     void rx_producer_loop();
-    void dsp_consumer_loop();
+    // Each DSP worker runs this loop over its own private ring pool.
+    void dsp_consumer_loop(int worker_id);
+    // Effective worker count actually instantiated (>= 1).
+    int effective_dsp_workers() const;
+    // In-order commit of a finished window result: buffers out-of-order
+    // completions and flushes them strictly by window_id.
+    void commit_result(int worker_id, const WindowResult& res);
 
     PipelineConfig cfg_;
     std::unique_ptr<ISc16StreamSource> source_;
-    std::unique_ptr<Sc16WindowRingPool> pool_;
+    // One lock-free SPSC ring pool per DSP worker.  The RX producer thread is
+    // the only producer and never touches a pool concurrently with itself, so
+    // each pool stays a strict 1P/1C SPSC structure.
+    std::vector<std::unique_ptr<Sc16WindowRingPool>> pools_;
 
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> rx_finished_{false};
 
     std::thread rx_thread_;
-    std::thread dsp_thread_;
+    std::vector<std::thread> dsp_threads_;
 
     PipelineLedger ledger_;
     std::vector<WindowResult> results_;
     ResultCallback result_cb_;
-    std::mutex results_mutex_;
+    // Guards multi-threaded ledger mutations (DSP workers run concurrently).
+    std::mutex ledger_mutex_;
+    // Guards the reorder buffer, results_ and callback invocation so that
+    // external observers always see strictly increasing window_id order.
+    // The result callback must not re-enter the pipeline.
+    std::mutex commit_mutex_;
+    std::vector<std::unique_ptr<WindowResult>> pending_results_;
+    uint64_t next_commit_id_ = 0;
+    // Drain any still-buffered results after all threads have joined.
+    void flush_pending_results();
 };
 
 } // namespace pipeline
