@@ -162,9 +162,16 @@ public:
             }
         }
 
-        const size_t kMaxOutScratch = 1u << 20;
-        sched_arm_buf_.resize(kMaxOutScratch);
-        sched_win_buf_.resize(kMaxOutScratch);
+        // 2026-11-11 round 2 (A1): the two multi-worker schedule tables are
+        // NOT sized here.  They are read only by fir_parallel()/
+        // fir_parallel_sc16(), reachable only from run_mt()/run_mt_sc16(),
+        // i.e. only when the effective worker count is > 1.  Burst workers
+        // force set_num_workers(1), so the old unconditional
+        //     sched_arm_buf_.resize(1 << 20);   // 1 MiB
+        //     sched_win_buf_.resize(1 << 20);   // 4 MiB
+        // made every single-core instance pay 5 MiB of zero-initialisation it
+        // never used.  ensure_schedule_scratch() now sizes them on the first
+        // true MT call and reuses that capacity afterwards.
 
         select_default_kernel();
     }
@@ -618,6 +625,30 @@ public:
     size_t history_extra() const { return H_ > 0 ? H_ - 1 : 0; }
     const char* kernel_name() const { return kernel_name_; }
 
+    // --- lazy multi-worker schedule-table diagnostics (2026-11-11 round 2) ---
+    //
+    // Names are frozen by
+    // docs/performance/接口冻结_UHD_SC16第二轮优化_2026-11-11.md and used by the
+    // verification agent, so do not rename them.
+    //
+    //   schedule_scratch_entries()   entries in ONE table (they are always
+    //                                sized together); 0 means "never sized",
+    //                                which is what a single-core instance
+    //                                must report.
+    //   schedule_scratch_bytes()     bytes held by BOTH tables
+    //                                (1 B uint8_t arm + 4 B uint32_t window
+    //                                 per entry).
+    //   schedule_scratch_allocated() entries != 0.
+    size_t schedule_scratch_entries() const { return sched_arm_buf_.size(); }
+
+    size_t schedule_scratch_bytes() const
+    {
+        return sched_arm_buf_.size() * sizeof(uint8_t) +
+               sched_win_buf_.size() * sizeof(uint32_t);
+    }
+
+    bool schedule_scratch_allocated() const { return !sched_arm_buf_.empty(); }
+
     const std::vector<float>& arms_rev_pad() const { return arms_rev_pad_; }
     const std::vector<float>& arms_rev_dup() const { return arms_rev_dup_; }
     const std::vector<float>& arms_rev_dup_scaled() const { return arms_rev_dup_scaled_; }
@@ -679,6 +710,37 @@ private:
 
     enum class FirKind { Scalar, Volk, Avx2 };
     enum class LoopKind { Legacy, Macroblock };
+
+    // Lazy MT schedule-scratch geometry (2026-11-11 round 2, A1).
+    //
+    // Fixed (not derived from max_out) so that the capacity — and therefore
+    // schedule_scratch_entries() — is deterministic and stable for the whole
+    // lifetime of the instance: the first MT call sizes it, every later call
+    // reuses exactly the same buffers.  64 Ki entries bounds one MT sub-batch
+    // to 64 Ki outputs; run_mt()/run_mt_sc16() simply loop again, so this only
+    // changes the granularity of pool dispatches, never the arithmetic.
+    static constexpr size_t kScheduleScratchEntries = 1u << 16;
+
+    /**
+     * Size the two MT schedule tables on first use.
+     *
+     * Grow-only and idempotent: once sched_arm_buf_ holds
+     * kScheduleScratchEntries entries this is a single size() comparison, so
+     * repeated MT calls never reallocate or re-zero the tables.  Called at the
+     * top of run_mt()/run_mt_sc16() BEFORE they derive their batch bound from
+     * sched_arm_buf_.size(), which is why the bound can never be 0 (a zero
+     * bound would spin the batch loop with zero progress).
+     */
+    void ensure_schedule_scratch()
+    {
+        if (sched_arm_buf_.size() >= kScheduleScratchEntries) {
+            return;
+        }
+        // The two tables are indexed together: entry i of sched_arm_buf_ pairs
+        // with entry i of sched_win_buf_.  Size both, always.
+        sched_arm_buf_.resize(kScheduleScratchEntries);
+        sched_win_buf_.resize(kScheduleScratchEntries);
+    }
 
     size_t T_;
     size_t H_;
@@ -1455,6 +1517,11 @@ private:
     {
         // Process in sub-batches bounded by schedule scratch capacity so large
         // grants never truncate mid-call.
+        //
+        // Lazy sizing (2026-11-11 round 2, A1): this is the only consumer of
+        // the schedule tables, so guarantee capacity here — before the batch
+        // bound is read from it — and keep it for every later call.
+        ensure_schedule_scratch();
         size_t produced_total = 0;
         bool exhausted = false;
         const size_t scratch = sched_arm_buf_.size();
@@ -1755,6 +1822,9 @@ private:
                               size_t max_out,
                               int nworkers)
     {
+        // Lazy sizing (2026-11-11 round 2, A1) — see run_mt().  The batch bound
+        // must never be 0, hence the ensure before it is read.
+        ensure_schedule_scratch();
         size_t produced_total = 0;
         bool exhausted = false;
         const size_t scratch = sched_arm_buf_.size();

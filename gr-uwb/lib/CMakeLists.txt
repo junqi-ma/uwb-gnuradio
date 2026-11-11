@@ -243,6 +243,9 @@ list(APPEND test_uwb_sources
     qa_uwb_preamble_sic.cc
     qa_uwb_sic_unified.cc
     qa_uwb_uhd_sc16_pipeline.cc
+    # 2026-11-11 round 2: resampler burst-mode optimisations (lazy schedule
+    # tables, kernel A/B).  Owner: subagent A.
+    qa_uwb_resampler_burst_opt.cc
     qa_uwb_hrp_packet_source.cc
     qa_uwb_twr_config.cc
     qa_uwb_twr_frame.cc
@@ -535,6 +538,7 @@ target_compile_options(uwb_qa_uwb_rx_fused_cmf.cc PRIVATE -march=native)
 target_compile_options(uwb_qa_uwb_rx_fused_phr.cc PRIVATE -march=native)
 target_compile_options(uwb_qa_uwb_uhd_sc16_pipeline.cc PRIVATE -O3 -march=native)
 target_compile_options(uwb_qa_uwb_rational_resampler_core.cc PRIVATE -O3 -march=native)
+target_compile_options(uwb_qa_uwb_resampler_burst_opt.cc PRIVATE -O3 -march=native)
 target_compile_options(uwb_qa_uwb_rational_resampler_core_65_32.cc PRIVATE -O3 -march=native)
 set_source_files_properties(
     uwb_uhd_sc16_pipeline.cc
