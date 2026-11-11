@@ -104,8 +104,30 @@ std::vector<std::complex<float>> load_cf32_file(const std::string& rel)
 // Load one shaped SYNC waveform (1016 samples) from the shared test data.
 // The returned vector is always exactly 1016 samples long; each DSP worker
 // calls this to obtain its own private copy (contract C4: no shared state).
-void load_sync_pulse_template(std::vector<std::complex<float>>& tmpl)
+// `override_path` (when non-empty) is loaded verbatim and must already hold
+// one SYNC symbol on the 998.4 MS/s work grid.
+void load_sync_pulse_template(std::vector<std::complex<float>>& tmpl,
+                              const std::string& override_path = std::string())
 {
+    if (!override_path.empty()) {
+        tmpl.clear();
+        std::ifstream f(override_path, std::ios::binary | std::ios::ate);
+        if (f) {
+            const auto bytes = static_cast<size_t>(f.tellg());
+            if (bytes % sizeof(std::complex<float>) == 0) {
+                f.seekg(0);
+                tmpl.resize(bytes / sizeof(std::complex<float>));
+                f.read(reinterpret_cast<char*>(tmpl.data()),
+                       static_cast<std::streamsize>(bytes));
+            }
+        }
+        if (tmpl.size() >= 1016) {
+            tmpl.resize(1016);
+            return;
+        }
+        tmpl.assign(1016, std::complex<float>(1.0f, 0.0f));
+        return;
+    }
     tmpl = load_cf32_file("reference_preamble.bin");
     if (tmpl.empty()) {
         tmpl = load_cf32_file("uwb_radar/tx_998p4.cf32");
@@ -890,6 +912,14 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
         if (std::abs(cfg_.native_rate - 737.28e6) < 1e5) {
             auto taps = load_resampler_taps("resampler_65_48", profile);
             if (taps.empty()) {
+                // Historical fallback.  It is a flat boxcar, NOT the designed
+                // 65/48 filter: it doubles the resample cost and destroys the
+                // passband, so every downstream detector fails.  Make the
+                // silent degradation at least visible.
+                std::cerr << "UhdSc16Pipeline: warning: resampler_65_48 profile '"
+                          << profile << "' taps not found (cwd-dependent); falling back to a "
+                          << "flat " << (65 * 64) << "-tap placeholder filter, DSP output "
+                          << "will be wrong\n";
                 taps.resize(65 * 64, 1.0f / 48.0f);
             }
             resamp_65_48 = std::make_unique<core::RationalResampler65_48Core>(taps);
@@ -925,7 +955,7 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
     std::vector<std::complex<float>> sic_preamble_tmpl;
 
     if (cfg_.consumer_mode == ConsumerMode::SicOnly || cfg_.consumer_mode == ConsumerMode::Both) {
-        load_sync_pulse_template(sic_sync_tmpl);
+        load_sync_pulse_template(sic_sync_tmpl, cfg_.sic_sync_template_file);
 
         sic_preamble_tmpl.reserve(64 * 1016);
         for (int rep = 0; rep < 64; ++rep) {

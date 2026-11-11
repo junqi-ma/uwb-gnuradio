@@ -345,6 +345,12 @@ void print_help(const char* prog_name)
               << "  --max-windows <n>           Maximum windows to process (default: 100)\n"
               << "  --resampler-profile <name>  Resampler profile (quality_minorder|realtime_minorder|quality|realtime, default: quality_minorder)\n"
               << "  --resampler-workers <n>     Resampler thread worker count (default: 1)\n"
+              << "  --sic-policy <p>            SIC policy: preamble|fullpacket|auto (default: auto)\n"
+              << "  --sic-backend <b>           SIC estimator: ipatov|discrete|fractional (default: ipatov)\n"
+              << "  --sic-comm-code <n>         Comm SYNC code index for SIC (default: 10)\n"
+              << "  --sic-sync-template <path>  One SYNC symbol CF32 @998.4M (default: testdata/reference_preamble.bin, code 9)\n"
+              << "  --sic-roi-margin <n>        SIC coarse-search half-width around the expected preamble (default: 64)\n"
+              << "  --sic-tap-count <n>         SIC discrete-CIR tap count (default: 20)\n"
               << "  --benchmark                 Acquire exclusive lock /tmp/uwb-sic-benchmark.lock\n"
               << "  --help, -h                  Show this help message and exit\n"
               << "\n"
@@ -375,6 +381,9 @@ int main(int argc, char* argv[])
     std::string consumer_str = "sic";
     std::string replay_mode_str = "fullspeed";
     bool benchmark_mode = false;
+    // SIC coarse-search ROI half-width in work samples, relative to the
+    // expected preamble position (pre_guard mapped to the work grid).
+    long long sic_roi_margin = 64;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -554,6 +563,72 @@ int main(int argc, char* argv[])
                 return 1;
             }
             cfg.resampler_workers = std::stoi(argv[++i]);
+        } else if (arg == "--sic-policy") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --sic-policy requires an argument (preamble|fullpacket|auto)\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            const std::string v = argv[++i];
+            if (v == "preamble") {
+                cfg.sic_cfg.policy = gr::uwb::sic::SicPolicy::PreambleOnly;
+            } else if (v == "fullpacket") {
+                cfg.sic_cfg.policy = gr::uwb::sic::SicPolicy::FullPacket;
+            } else if (v == "auto") {
+                cfg.sic_cfg.policy = gr::uwb::sic::SicPolicy::AutoFallback;
+            } else {
+                std::cerr << "Error: Invalid --sic-policy '" << v
+                          << "'. Expected preamble|fullpacket|auto.\n";
+                print_help(argv[0]);
+                return 1;
+            }
+        } else if (arg == "--sic-backend") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --sic-backend requires an argument (ipatov|discrete|fractional)\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            const std::string v = argv[++i];
+            if (v == "ipatov") {
+                cfg.sic_cfg.backend = gr::uwb::sic::SicEstimatorBackend::Ipatov;
+            } else if (v == "discrete") {
+                cfg.sic_cfg.backend = gr::uwb::sic::SicEstimatorBackend::DiscreteCir;
+            } else if (v == "fractional") {
+                cfg.sic_cfg.backend = gr::uwb::sic::SicEstimatorBackend::PathFractional;
+            } else {
+                std::cerr << "Error: Invalid --sic-backend '" << v
+                          << "'. Expected ipatov|discrete|fractional.\n";
+                print_help(argv[0]);
+                return 1;
+            }
+        } else if (arg == "--sic-comm-code") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --sic-comm-code requires a code index\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.sic_cfg.comm_code = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--sic-sync-template") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --sic-sync-template requires a cf32 file path\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.sic_sync_template_file = argv[++i];
+        } else if (arg == "--sic-roi-margin") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --sic-roi-margin requires a sample count\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            sic_roi_margin = std::stoll(argv[++i]);
+        } else if (arg == "--sic-tap-count") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --sic-tap-count requires a tap count\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.sic_cfg.tap_count = static_cast<size_t>(std::stoul(argv[++i]));
         } else if (arg == "--uhd-args") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --uhd-args requires argument string\n";
@@ -648,6 +723,47 @@ int main(int argc, char* argv[])
     }
     cfg.period_s = period_samples / cfg.native_rate;
 
+    // ------------------------------------------------------------------
+    // Derive the SIC geometry from the window layout.  Without this the
+    // default SicUnifiedConfig has a zero-width search ROI and zero-sized
+    // scratch, so sic_process_unified() can only ever fail closed.
+    // ------------------------------------------------------------------
+    {
+        const size_t native_cap = cfg.native_window_capacity();
+        const double rate_ratio = cfg.work_rate / cfg.native_rate;
+        const size_t work_cap =
+            static_cast<size_t>(std::ceil(static_cast<double>(native_cap) * rate_ratio)) + 512;
+
+        cfg.sic_cfg.sample_rate = cfg.work_rate;
+        cfg.sic_cfg.samples_per_symbol = 1016;
+        cfg.sic_cfg.sync_reps = 64;
+        cfg.sic_cfg.max_window_samples = work_cap;
+        cfg.sic_cfg.max_packet_samples = work_cap;
+
+        // Expected preamble origin on the work grid: the pre-guard region is
+        // exactly the lead-in before the scheduled packet.
+        const int64_t q = static_cast<int64_t>(
+            std::llround(static_cast<double>(cfg.pre_guard_samples) * rate_ratio));
+        int64_t roi_lo = q - sic_roi_margin;
+        int64_t roi_hi = q + sic_roi_margin;
+        if (roi_lo < 0) {
+            roi_lo = 0;
+        }
+        if (roi_hi > static_cast<int64_t>(work_cap)) {
+            roi_hi = static_cast<int64_t>(work_cap);
+        }
+        cfg.sic_cfg.roi_lo = roi_lo;
+        cfg.sic_cfg.roi_hi = roi_hi;
+        // sub_roi must be a non-empty range that also stays inside the actual
+        // resampled window (apply_discrete_cir rejects roi_hi > n).  Use the
+        // floor of the rate conversion, which is always <= the produced
+        // length, and let the estimator clamp it to the real support.
+        const int64_t work_floor = static_cast<int64_t>(
+            std::floor(static_cast<double>(native_cap) * rate_ratio));
+        cfg.sic_cfg.sub_roi_lo = 0;
+        cfg.sic_cfg.sub_roi_hi = work_floor;
+    }
+
     // Handle replay file path
     if (cfg.source_type == StreamSourceType::Replay) {
         if (!file_path.empty()) {
@@ -696,6 +812,19 @@ int main(int argc, char* argv[])
         (cfg.dsp_workers > 1) ? std::string("1 (forced, burst-level multi-core)")
                               : std::to_string(cfg.resampler_workers);
 
+    const char* sic_policy_str = "auto";
+    switch (cfg.sic_cfg.policy) {
+    case gr::uwb::sic::SicPolicy::PreambleOnly: sic_policy_str = "preamble"; break;
+    case gr::uwb::sic::SicPolicy::FullPacket:   sic_policy_str = "fullpacket"; break;
+    case gr::uwb::sic::SicPolicy::AutoFallback: sic_policy_str = "auto"; break;
+    }
+    const char* sic_backend_str = "ipatov";
+    switch (cfg.sic_cfg.backend) {
+    case gr::uwb::sic::SicEstimatorBackend::Ipatov:         sic_backend_str = "ipatov"; break;
+    case gr::uwb::sic::SicEstimatorBackend::DiscreteCir:    sic_backend_str = "discrete"; break;
+    case gr::uwb::sic::SicEstimatorBackend::PathFractional: sic_backend_str = "fractional"; break;
+    }
+
     std::cout << "Starting UHD SC16 Pipeline...\n"
               << "  Source:        " << (cfg.source_type == StreamSourceType::Replay ? "Replay (" + cfg.replay_file + ")" : "UHD Device") << "\n"
               << "  Native Rate:   " << cfg.native_rate / 1e6 << " MS/s\n"
@@ -710,6 +839,14 @@ int main(int argc, char* argv[])
               << "  DSP Workers:   " << cfg.dsp_workers << "\n"
               << "  DSP Affinity:  " << dsp_affinity_str << "\n"
               << "  Resampler:     profile=" << cfg.resampler_profile << ", workers=" << resampler_workers_str << "\n"
+              << "  SIC:           policy=" << sic_policy_str << ", backend=" << sic_backend_str
+              << ", code=" << cfg.sic_cfg.comm_code
+              << ", roi=[" << cfg.sic_cfg.roi_lo << "," << cfg.sic_cfg.roi_hi << ")"
+              << ", taps=" << cfg.sic_cfg.tap_count << "\n"
+              << "  SIC Template:  "
+              << (cfg.sic_sync_template_file.empty() ? std::string("reference_preamble.bin (default)")
+                                                     : cfg.sic_sync_template_file)
+              << "\n"
               << "  Affinity:      RX=" << cfg.cpu_core_rx << ", DSP=" << cfg.cpu_core_dsp << "\n"
               << std::endl;
 

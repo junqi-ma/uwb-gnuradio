@@ -182,6 +182,12 @@ struct PipelineConfig {
     // DSP configs
     gr::uwb::sic::SicUnifiedConfig sic_cfg;
     gr::uwb::core::RadarCirConfig radar_cfg;
+    // Optional override for the public SYNC template used by SIC (one shaped
+    // SYNC symbol, 1016 CF32 samples at 998.4 MS/s).  Empty keeps the
+    // historical `testdata/reference_preamble.bin` (sensing code 9).  A SIC
+    // run against a comm packet of a different code MUST set this, otherwise
+    // the comm demodulator correlates against the wrong SYNC waveform.
+    std::string sic_sync_template_file;
 
     size_t native_window_capacity() const {
         return pre_guard_samples + capture_samples + post_guard_samples;
