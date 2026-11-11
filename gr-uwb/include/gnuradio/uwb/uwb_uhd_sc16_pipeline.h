@@ -237,6 +237,30 @@ struct PipelineConfig {
     std::string resampler_profile = "quality_minorder";
     int resampler_workers = 1;
 
+    // Phase-C kernel experiments (resampler core).  Each non-"none" value is
+    // BIT-IDENTICAL in output to "none"; these are performance experiments.
+    //
+    // "fixed_phase" is the measured default for this pipeline: 5 ABBA pairs on
+    // the burst pipeline gave -9.1% (56k realtime N=1), -5.2% (56k quality
+    // N=1), -5.7% (4k realtime N=1) and -3.7% (4k quality N=1) steady
+    // us/window, resample mean -11.6%/-6.1%/-4.6%/-3.9%, and P95/P99 worse in
+    // no cell.  The core's own default stays off, so other users of
+    // RationalResamplerLmCore are unaffected; `none` opts back out here.
+    //
+    // "convert_cache" was measured and NOT retained (its sign flips with
+    // profile/window size: -7.6% .. +7.6% in core screening); it stays
+    // selectable for experiments.
+    // Each DSP worker applies the switch to its own private resampler core, so
+    // the choice is per-worker state and never shared.  Accepted values:
+    //   "none"          default kernel (no setter is called at all)
+    //   "fixed_phase"   core.set_fixed_phase_schedule(true)
+    //   "convert_cache" core.set_convert_cache(true)
+    //   "both"          both setters
+    // Any other non-empty value is a configuration error: initialize() prints
+    // one diagnostic line and fails closed to "none" (it is never silently
+    // accepted as an unknown experiment).
+    std::string resampler_experiment = "fixed_phase"; // none|fixed_phase|convert_cache|both
+
     // ------------------------------------------------------------------
     // Phase 0 diagnostics (frozen contract §1)
     // ------------------------------------------------------------------
@@ -469,6 +493,15 @@ public:
     const std::vector<WorkerReadyInfo>& worker_ready_info() const { return worker_ready_; }
     std::string init_error() const; // first failure reason, empty == no failure
 
+    // Experiment string applied by worker w (empty before start / unknown worker).
+    //
+    // Reports the canonical PipelineConfig::resampler_experiment value that the
+    // worker actually pushed into its own resampler core ("none" when it has no
+    // resampler core, e.g. when native_rate == work_rate, and "none" when the
+    // configured value was rejected).  Written by the worker before it publishes
+    // Ready, so it is stable once wait_ready() / wait() returned.
+    std::string applied_resampler_experiment(int worker_id) const;
+
     // ------------------------------------------------------------------
     // Diagnostics (frozen contract §3).  Counters are written by the RX and
     // worker threads; read them after wait() only, and call
@@ -533,6 +566,10 @@ private:
     mutable std::mutex ready_mutex_;
     std::condition_variable ready_cv_;
     std::vector<WorkerReadyInfo> worker_ready_;
+    // Per-worker record of the resampler experiment actually applied, guarded
+    // by ready_mutex_ (written by the worker before it publishes Ready, read
+    // only after wait()); empty entries mean "not started yet".
+    std::vector<std::string> applied_resampler_experiment_;
 
     // --- Phase 0 diagnostics accumulators ----------------------------------
     // Relaxed atomics: the RX counters have a single writer (the RX thread),

@@ -96,7 +96,11 @@ def build_cmd(binary, name, args):
             "--dsp-workers", str(workers),
             "--cpu-rx", CPU_RX,
             "--cpu-dsp", CPU_DSP[workers],
-            "--pool-size", "128",
+            # The runner has no feeder flow control, so the pool must be able to
+            # hold EVERY window of the cold run; otherwise RX outruns the
+            # workers and the run turns into a drop storm (observed: 131/400
+            # drops with pool=128 on the 4k path).
+            "--pool-size", str((400 if window == "4k" else args.cold_windows) + 16),
             "--max-windows", str(400 if window == "4k" else args.cold_windows),
             "--label", args.run_label,
             "--benchmark",
@@ -121,12 +125,17 @@ def build_cmd(binary, name, args):
         "--cpu-rx", CPU_RX,
         "--cpu-dsp", CPU_DSP[workers],
         "--pool-size", "16",
-        "--flow-in-flight", str(4 * workers),
+        # 8 x workers gives the feeder enough slack that the gate is not the
+        # bottleneck at 4k window sizes, while staying under the per-worker
+        # pool depth (16) so the run is still zero-drop.
+        "--flow-in-flight", str(8 * workers),
         "--warmup-windows", str(args.warmup),
         "--measure-windows", str(args.measure),
         "--label", args.run_label,
         "--benchmark",
     ]
+    if args.experiment:
+        cmd += ["--resampler-experiment", args.experiment]
     if args.diag_rx:
         cmd.append("--diag-rx")
     if args.diag_commit:
@@ -151,6 +160,10 @@ def main():
     ap.add_argument("--warmup", type=int, default=0)
     ap.add_argument("--measure", type=int, default=10000)
     ap.add_argument("--configs", default="", help="comma separated subset; empty = all")
+    ap.add_argument("--experiment", default="",
+                    help="resampler experiment for the CANDIDATE variant (steady driver only)")
+    ap.add_argument("--control-experiment", default="",
+                    help="resampler experiment for the CONTROL variant (default: none)")
     ap.add_argument("--driver", choices=["steady", "runner"], default="steady",
                     help="steady = benchmark_sc16_pipeline_steady (warmup/measure region); "
                          "runner = uwb_uhd_sc16_pipeline_runner (historical cold start)")
@@ -186,6 +199,7 @@ def main():
                     warmup=args.warmup, measure=args.measure,
                     run_label=f"{cfg_name}/{tag}/{run_id}",
                     driver=args.driver, cold_windows=args.cold_windows,
+                    experiment=(args.control_experiment if v == 0 else args.experiment),
                     diag_rx=args.diag_rx, diag_commit=args.diag_commit))
                 argv += ["--json-out" if args.driver == "runner" else "--json", json_path]
                 printable = " ".join(argv)

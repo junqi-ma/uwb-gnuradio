@@ -357,6 +357,11 @@ void print_help(const char* prog_name)
               << "  --csv-out <path>            Write window-by-window results CSV\n"
               << "  --resampler-profile <name>  Resampler profile (quality_minorder|realtime_minorder|quality|realtime, default: quality_minorder)\n"
               << "  --resampler-workers <n>     Resampler thread worker count (default: 1)\n"
+              << "  --resampler-experiment <e>  Kernel experiment: none|fixed_phase|convert_cache|both\n"
+              << "  --iq-dump-dir <dir>         Diagnostic post-resample IQ dump directory\n"
+              << "  --iq-dump-tag <tag>         Dump filename suffix (default: none)\n"
+              << "  --iq-dump-windows <n>       Windows to dump (default: 0)\n"
+              << "  --iq-dump-window-limit <n>  Only window_id < n (default: 0 = no limit)\n"
               << "  --sic-policy <p>            SIC policy: preamble|fullpacket|auto (default: auto)\n"
               << "  --sic-backend <b>           SIC estimator: ipatov|discrete|fractional (default: ipatov)\n"
               << "  --sic-comm-code <n>         Comm SYNC code index for SIC (default: 10)\n"
@@ -615,6 +620,36 @@ int main(int argc, char* argv[])
                 return 1;
             }
             cfg.resampler_profile = argv[++i];
+        } else if (arg == "--resampler-experiment") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --resampler-experiment requires a value\n";
+                return 1;
+            }
+            cfg.resampler_experiment = argv[++i];
+        } else if (arg == "--iq-dump-dir") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --iq-dump-dir requires a path\n";
+                return 1;
+            }
+            cfg.iq_dump_dir = argv[++i];
+        } else if (arg == "--iq-dump-tag") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --iq-dump-tag requires a value\n";
+                return 1;
+            }
+            cfg.iq_dump_tag = argv[++i];
+        } else if (arg == "--iq-dump-windows") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --iq-dump-windows requires a count\n";
+                return 1;
+            }
+            cfg.iq_dump_windows = static_cast<size_t>(std::stoull(argv[++i]));
+        } else if (arg == "--iq-dump-window-limit") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --iq-dump-window-limit requires a count\n";
+                return 1;
+            }
+            cfg.iq_dump_window_limit = static_cast<size_t>(std::stoull(argv[++i]));
         } else if (arg == "--resampler-workers") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --resampler-workers requires worker count\n";
@@ -865,7 +900,8 @@ int main(int argc, char* argv[])
               << "  Max Windows:   " << cfg.max_windows << "\n"
               << "  DSP Workers:   " << cfg.dsp_workers << "\n"
               << "  DSP Affinity:  " << dsp_affinity_str << "\n"
-              << "  Resampler:     profile=" << cfg.resampler_profile << ", workers=" << resampler_workers_str << "\n"
+              << "  Resampler:     profile=" << cfg.resampler_profile << ", workers=" << resampler_workers_str
+              << ", experiment=" << cfg.resampler_experiment << "\n"
               << "  SIC:           policy=" << sic_policy_str << ", backend=" << sic_backend_str
               << ", code=" << cfg.sic_cfg.comm_code
               << ", roi=[" << cfg.sic_cfg.roi_lo << "," << cfg.sic_cfg.roi_hi << ")"
@@ -1280,6 +1316,7 @@ int main(int argc, char* argv[])
     meta.emplace_back("dsp_workers", bench::json_number(static_cast<int64_t>(cfg.dsp_workers)));
     meta.emplace_back("pool_capacity", bench::json_number(static_cast<uint64_t>(cfg.pool_capacity)));
     meta.emplace_back("resampler_profile", bench::meta_string(cfg.resampler_profile));
+    meta.emplace_back("resampler_experiment", bench::meta_string(cfg.resampler_experiment));
     meta.emplace_back("consumer", bench::meta_string(consumer_str));
     meta.emplace_back("max_windows", bench::json_number(static_cast<uint64_t>(cfg.max_windows)));
     meta.emplace_back("warmup_windows", bench::json_number(warmup_windows));

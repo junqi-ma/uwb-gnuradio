@@ -201,6 +201,68 @@ inline void note_peak(std::atomic<uint64_t>& peak, uint64_t value)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase-C resampler kernel experiment selector
+// ---------------------------------------------------------------------------
+// These are switches on HOW the 65 outputs are computed inside the resampler
+// core, never on WHAT is computed; every non-"none" variant must remain
+// bit-identical to the default kernel.  The selector is validated once in
+// initialize() and re-parsed (cheaply) by each worker.
+enum class ResamplerExperiment {
+    None,
+    FixedPhase,
+    ConvertCache,
+    Both,
+    Invalid
+};
+
+ResamplerExperiment parse_resampler_experiment(const std::string& name)
+{
+    if (name.empty() || name == "none") {
+        return ResamplerExperiment::None;
+    }
+    if (name == "fixed_phase") {
+        return ResamplerExperiment::FixedPhase;
+    }
+    if (name == "convert_cache") {
+        return ResamplerExperiment::ConvertCache;
+    }
+    if (name == "both") {
+        return ResamplerExperiment::Both;
+    }
+    return ResamplerExperiment::Invalid;
+}
+
+const char* resampler_experiment_name(ResamplerExperiment exp)
+{
+    switch (exp) {
+    case ResamplerExperiment::FixedPhase:
+        return "fixed_phase";
+    case ResamplerExperiment::ConvertCache:
+        return "convert_cache";
+    case ResamplerExperiment::Both:
+        return "both";
+    case ResamplerExperiment::None:
+    case ResamplerExperiment::Invalid:
+        break;
+    }
+    return "none";
+}
+
+// Apply the already-validated experiment to one worker's private core.  With
+// the default "none" no setter is called, so the default path stays
+// instruction-for-instruction identical to the pre-experiment pipeline.
+template <typename ResamplerCore>
+void apply_resampler_experiment(ResamplerCore& core, bool fixed_phase, bool convert_cache)
+{
+    if (fixed_phase) {
+        core.set_fixed_phase_schedule(true);
+    }
+    if (convert_cache) {
+        core.set_convert_cache(true);
+    }
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -689,6 +751,23 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
         return false;
     }
 
+    // Phase-C resampler kernel experiment selector: fail closed and loud.  An
+    // unknown value is reported exactly once here (not once per worker) and
+    // normalised to the default, so it can never be silently accepted as some
+    // other experiment.
+    {
+        const ResamplerExperiment exp =
+            parse_resampler_experiment(cfg_.resampler_experiment);
+        if (exp == ResamplerExperiment::Invalid) {
+            std::cerr << "UhdSc16Pipeline: unknown resampler_experiment '"
+                      << cfg_.resampler_experiment
+                      << "' (expected none|fixed_phase|convert_cache|both); "
+                         "falling back to 'none'"
+                      << std::endl;
+        }
+        cfg_.resampler_experiment = resampler_experiment_name(exp);
+    }
+
     if (custom_source) {
         source_ = std::move(custom_source);
     } else {
@@ -738,6 +817,10 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
     {
         std::lock_guard<std::mutex> lk(ready_mutex_);
         worker_ready_.assign(static_cast<size_t>(n_workers), WorkerReadyInfo{});
+        // Empty until a worker actually applies its experiment switch, so
+        // applied_resampler_experiment() reports "empty before start".
+        applied_resampler_experiment_.assign(static_cast<size_t>(n_workers),
+                                             std::string());
     }
 
     // B2: make sure the diagnostic IQ dump directory exists before any worker
@@ -778,6 +861,16 @@ void UhdSc16Pipeline::start()
         } else {
             for (auto& info : worker_ready_) {
                 info = WorkerReadyInfo{};
+            }
+        }
+        // Same epoch reset for the experiment record: a restarted run must not
+        // report the previous run's applied value before its workers republish.
+        if (static_cast<int>(applied_resampler_experiment_.size()) != n_workers) {
+            applied_resampler_experiment_.assign(static_cast<size_t>(n_workers),
+                                                 std::string());
+        } else {
+            for (auto& applied : applied_resampler_experiment_) {
+                applied.clear();
             }
         }
     }
@@ -896,6 +989,18 @@ std::string UhdSc16Pipeline::init_error() const
         }
     }
     return std::string();
+}
+
+std::string UhdSc16Pipeline::applied_resampler_experiment(int worker_id) const
+{
+    if (worker_id < 0) {
+        return std::string();
+    }
+    std::lock_guard<std::mutex> lk(ready_mutex_);
+    if (static_cast<size_t>(worker_id) >= applied_resampler_experiment_.size()) {
+        return std::string();
+    }
+    return applied_resampler_experiment_[static_cast<size_t>(worker_id)];
 }
 
 bool UhdSc16Pipeline::wait_ready(unsigned timeout_ms)
@@ -1482,6 +1587,22 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
     const size_t native_capacity = cfg_.native_window_capacity();
     const bool need_resample = (std::abs(cfg_.native_rate - cfg_.work_rate) > 1e3);
 
+    // Phase-C experiment selector: initialize() already validated and
+    // normalised cfg_.resampler_experiment.  Resolved once per worker; with the
+    // default "none" no setter is called below, so the default path stays
+    // instruction-for-instruction identical.
+    const ResamplerExperiment resampler_experiment =
+        parse_resampler_experiment(cfg_.resampler_experiment);
+    const bool exp_fixed_phase = (resampler_experiment == ResamplerExperiment::FixedPhase ||
+                                  resampler_experiment == ResamplerExperiment::Both);
+    const bool exp_convert_cache =
+        (resampler_experiment == ResamplerExperiment::ConvertCache ||
+         resampler_experiment == ResamplerExperiment::Both);
+    // True once this worker owns a resampler core that received the switch.
+    // A worker with no core (native == work, or a rate without a dedicated
+    // kernel) reports "none" because nothing was actually applied.
+    bool experiment_applied_to_core = false;
+
     std::unique_ptr<core::RationalResampler65_48Core> resamp_65_48;
     std::unique_ptr<core::RationalResampler65_32Core> resamp_65_32;
     size_t work_capacity = native_capacity;
@@ -1526,6 +1647,10 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
                 // thread pool.  num_workers == 1 forces the flat
                 // run_macroblock_sc16 + fir_avx2_sc16_4x path on this core.
                 resamp_65_48->set_num_workers(1);
+                // Phase-C experiment switch (default "none" => no call).
+                apply_resampler_experiment(
+                    *resamp_65_48, exp_fixed_phase, exp_convert_cache);
+                experiment_applied_to_core = true;
                 work_capacity = core::RationalResampler65_48Core::expected_output_length(
                     native_capacity, taps.size()) + 256;
             } else if (std::abs(cfg_.native_rate - 491.52e6) < 1e5) {
@@ -1535,6 +1660,10 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
                 }
                 resamp_65_32 = std::make_unique<core::RationalResampler65_32Core>(taps);
                 resamp_65_32->set_num_workers(1);
+                // Phase-C experiment switch (default "none" => no call).
+                apply_resampler_experiment(
+                    *resamp_65_32, exp_fixed_phase, exp_convert_cache);
+                experiment_applied_to_core = true;
                 work_capacity = core::RationalResampler65_32Core::expected_output_length(
                     native_capacity, taps.size()) + 256;
             } else {
@@ -1585,6 +1714,21 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
 
     // Everything this worker needs is in place: from here on the RX producer
     // may read the source and hand windows over.
+    //
+    // Record what this worker ACTUALLY applied before the ready handshake, so
+    // applied_resampler_experiment(w) is stable for readers that only
+    // synchronise through wait_ready() / wait().
+    {
+        const std::string applied =
+            experiment_applied_to_core
+                ? std::string(resampler_experiment_name(resampler_experiment))
+                : std::string("none");
+        std::lock_guard<std::mutex> lk(ready_mutex_);
+        if (static_cast<size_t>(worker_id) >= applied_resampler_experiment_.size()) {
+            applied_resampler_experiment_.resize(static_cast<size_t>(worker_id) + 1);
+        }
+        applied_resampler_experiment_[static_cast<size_t>(worker_id)] = applied;
+    }
     publish_worker_state(worker_id, WorkerReadyState::Ready, std::string());
 
     const float scale = (cfg_.scale_mode == Sc16ScaleMode::UnitRange) ? (1.0f / 32768.0f) : 1.0f;

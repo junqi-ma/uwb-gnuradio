@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -168,16 +169,25 @@ public:
     // Window-level in-flight limit.  `period` is the scheduled window spacing
     // in native samples; `completed` is maintained by the driver's result
     // callback.  Never used by the production RX path.
+    //
+    // The gate is a condition variable, not a yield() spin: at 4k windows the
+    // per-window budget is ~5 us, so a scheduler round-trip on every restart
+    // would dominate the measurement and mask real RX changes.
     void set_flow_control(int64_t period,
                           int64_t max_in_flight,
-                          const std::atomic<uint64_t>* completed,
+                          std::atomic<uint64_t>* completed,
+                          std::mutex* gate_mutex,
+                          std::condition_variable* gate_cv,
                           double timeout_ms)
     {
         flow_period_ = period;
         flow_max_in_flight_ = max_in_flight;
         flow_completed_ = completed;
+        flow_gate_mutex_ = gate_mutex;
+        flow_gate_cv_ = gate_cv;
         flow_timeout_ms_ = timeout_ms;
-        flow_enabled_ = (period > 0 && max_in_flight > 0 && completed != nullptr);
+        flow_enabled_ = (period > 0 && max_in_flight > 0 && completed != nullptr &&
+                         gate_mutex != nullptr && gate_cv != nullptr);
     }
 
     uint64_t flow_waits() const { return flow_waits_; }
@@ -262,15 +272,24 @@ private:
         }
         const auto t0 = Clock::now();
         ++flow_waits_;
+        // Adaptive gate: spin briefly first (a 4k window costs ~5 us, so a
+        // futex round-trip would dominate and mask real RX changes), then fall
+        // back to sleeping so a long backlog never burns a core.
+        constexpr double kSpinUs = 25.0;
         while (in_flight() > flow_max_in_flight_) {
-            const double waited_us =
+            const double spun_us =
                 std::chrono::duration<double, std::micro>(Clock::now() - t0).count();
-            if (waited_us > flow_timeout_ms_ * 1000.0) {
-                // Fail-open: never deadlock the benchmark feeder.  The RX side
-                // will then drop, and the run reports it.
+            if (spun_us > kSpinUs) {
                 break;
             }
             std::this_thread::yield();
+        }
+        if (in_flight() > flow_max_in_flight_) {
+            std::unique_lock<std::mutex> lk(*flow_gate_mutex_);
+            flow_gate_cv_->wait_for(
+                lk, std::chrono::milliseconds(static_cast<long long>(flow_timeout_ms_)),
+                [this, &in_flight] { return in_flight() <= flow_max_in_flight_; });
+            lk.unlock();
         }
         flow_wait_us_ +=
             std::chrono::duration<double, std::micro>(Clock::now() - t0).count();
@@ -291,7 +310,9 @@ private:
     int64_t flow_period_ = 0;
     int64_t flow_max_in_flight_ = 0;
     double flow_timeout_ms_ = 2000.0;
-    const std::atomic<uint64_t>* flow_completed_ = nullptr;
+    std::atomic<uint64_t>* flow_completed_ = nullptr;
+    std::mutex* flow_gate_mutex_ = nullptr;
+    std::condition_variable* flow_gate_cv_ = nullptr;
     uint64_t flow_waits_ = 0;
     double flow_wait_us_ = 0.0;
 };
@@ -317,6 +338,11 @@ void print_help(const char* prog)
         << "  --t0 <samples>             schedule t0 (default 0)\n"
         << "  --consumer <sic|sensing|both>  (default sic)\n"
         << "  --resampler-profile <name> (default realtime_minorder)\n"
+        << "  --resampler-experiment <none|fixed_phase|convert_cache|both>\n"
+        << "  --iq-dump-dir <dir>        diagnostic post-resample IQ dump directory\n"
+        << "  --iq-dump-tag <tag>        filename suffix (default: none)\n"
+        << "  --iq-dump-windows <n>      number of windows to dump (default 0)\n"
+        << "  --iq-dump-window-limit <n> only window_id < n (default 0 = no limit)\n"
         << "  --dsp-workers <n>          (default 1)\n"
         << "  --cpu-rx <core>            (default -1)\n"
         << "  --cpu-dsp <core[,core]>    (default -1)\n"
@@ -389,6 +415,16 @@ int main(int argc, char* argv[])
             consumer = need(i);
         } else if (a == "--resampler-profile") {
             cfg.resampler_profile = need(i);
+        } else if (a == "--resampler-experiment") {
+            cfg.resampler_experiment = need(i);
+        } else if (a == "--iq-dump-dir") {
+            cfg.iq_dump_dir = need(i);
+        } else if (a == "--iq-dump-tag") {
+            cfg.iq_dump_tag = need(i);
+        } else if (a == "--iq-dump-windows") {
+            cfg.iq_dump_windows = static_cast<size_t>(std::stoull(need(i)));
+        } else if (a == "--iq-dump-window-limit") {
+            cfg.iq_dump_window_limit = static_cast<size_t>(std::stoull(need(i)));
         } else if (a == "--dsp-workers") {
             cfg.dsp_workers = std::stoi(need(i));
         } else if (a == "--cpu-rx") {
@@ -559,16 +595,22 @@ int main(int argc, char* argv[])
               << " timeout=" << flow_timeout_ms << " ms\n"
               << "  diag:         rx=" << (cfg.enable_rx_diagnostics ? 1 : 0)
               << " commit=" << (cfg.enable_commit_diagnostics ? 1 : 0) << "\n"
+              << "  experiment:   " << cfg.resampler_experiment << "\n"
               << std::endl;
 
+    // Feeder gate: the result callback advances the completed counter and
+    // wakes the RX thread, which is blocked only when the pipeline is behind.
     std::atomic<uint64_t> completed_counter{ 0 };
+    std::mutex flow_gate_mutex;
+    std::condition_variable flow_gate_cv;
 
     auto source = std::make_unique<LoopingReplaySc16Source>(file, cfg.native_rate, true);
     LoopingReplaySc16Source* source_raw = source.get();
 
     UhdSc16Pipeline pipeline(cfg);
-    pipeline.set_result_callback([&completed_counter](const WindowResult&) {
+    pipeline.set_result_callback([&](const WindowResult&) {
         completed_counter.fetch_add(1, std::memory_order_relaxed);
+        flow_gate_cv.notify_one();
     });
 
     if (!pipeline.initialize(std::move(source))) {
@@ -577,7 +619,8 @@ int main(int argc, char* argv[])
     }
 
     source_raw->set_flow_control(static_cast<int64_t>(std::llround(period_samples)),
-                                 flow_in_flight, &completed_counter, flow_timeout_ms);
+                                 flow_in_flight, &completed_counter,
+                                 &flow_gate_mutex, &flow_gate_cv, flow_timeout_ms);
 
     const auto t_before_start = std::chrono::steady_clock::now();
     pipeline.start();
@@ -820,6 +863,7 @@ int main(int argc, char* argv[])
     meta.emplace_back("dsp_workers", bench::json_number(static_cast<int64_t>(cfg.dsp_workers)));
     meta.emplace_back("pool_capacity", bench::json_number(static_cast<uint64_t>(cfg.pool_capacity)));
     meta.emplace_back("resampler_profile", bench::meta_string(cfg.resampler_profile));
+    meta.emplace_back("resampler_experiment", bench::meta_string(cfg.resampler_experiment));
     meta.emplace_back("consumer", bench::meta_string(consumer));
     meta.emplace_back("warmup_windows", bench::json_number(warmup));
     meta.emplace_back("measure_windows_requested", bench::json_number(measure));
