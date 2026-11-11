@@ -350,3 +350,13 @@ target_compile_options(benchmark_discrete_cir_taps PRIVATE -fPIC)
 add_executable(bench_unified_timing bench_unified_timing.cc)
 target_link_libraries(bench_unified_timing gnuradio-uwb)
 target_compile_options(bench_unified_timing PRIVATE -O3 -march=native)
+
+# UHD SC16 Direct RX and Multi-Core Stream Pipeline Runner
+add_executable(uwb_uhd_sc16_pipeline_runner uwb_uhd_sc16_pipeline_runner.cc)
+target_link_libraries(uwb_uhd_sc16_pipeline_runner gnuradio-uwb Threads::Threads)
+target_compile_options(uwb_uhd_sc16_pipeline_runner PRIVATE -O3 -march=native)
+target_compile_definitions(uwb_uhd_sc16_pipeline_runner PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+if(UWB_HAVE_UHD)
+    target_link_libraries(uwb_uhd_sc16_pipeline_runner UHD::UHD)
+endif()

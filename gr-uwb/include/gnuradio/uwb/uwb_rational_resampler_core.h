@@ -39,6 +39,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -108,8 +109,11 @@ public:
                 "RationalResamplerLmCore: invalid arm length");
         }
 
+        H_pad_ = (H_ + 7) & ~static_cast<size_t>(7);
         arms_.assign(static_cast<size_t>(kInterp) * H_, 0.0f);
         arms_rev_.assign(static_cast<size_t>(kInterp) * H_, 0.0f);
+        arms_rev_pad_.assign(static_cast<size_t>(kInterp) * H_pad_, 0.0f);
+        arms_rev_dup_.assign(static_cast<size_t>(kInterp) * (2 * H_pad_), 0.0f);
         for (size_t i = 0; i < T; ++i) {
             const size_t arm = i % kInterp;
             const size_t k = i / kInterp;
@@ -117,7 +121,14 @@ public:
         }
         for (size_t a = 0; a < kInterp; ++a) {
             for (size_t k = 0; k < H_; ++k) {
-                arms_rev_[a * H_ + (H_ - 1 - k)] = arms_[a * H_ + k];
+                const float val = arms_[a * H_ + k];
+                arms_rev_[a * H_ + (H_ - 1 - k)] = val;
+                arms_rev_pad_[a * H_pad_ + (H_ - 1 - k)] = val;
+            }
+            for (size_t k = 0; k < H_pad_; ++k) {
+                const float val = (k < H_) ? arms_rev_[a * H_ + k] : 0.0f;
+                arms_rev_dup_[a * (2 * H_pad_) + 2 * k + 0] = val;
+                arms_rev_dup_[a * (2 * H_pad_) + 2 * k + 1] = val;
             }
         }
 
@@ -275,7 +286,7 @@ public:
         // ---- (a) work buffer assembly ----
         const auto t_a0 =
             profile_enabled_ ? Clock::now() : Clock::time_point{};
-        const size_t need = hist_n + post_n;
+        const size_t need = hist_n + post_n + H_pad_ + 16;
         if (work_.capacity() < need)
             work_.reserve(need);
         if (work_.size() < need)
@@ -293,6 +304,7 @@ public:
                         ninput * sizeof(gr_complex));
             wpos += ninput;
         }
+        std::fill(work_.data() + wpos, work_.data() + wpos + H_pad_ + 16, gr_complex(0.0f, 0.0f));
         const size_t total_w = wpos;
         if (profile_enabled_)
             profile_.ns_assemble += ns_since(t_a0);
@@ -358,6 +370,144 @@ public:
         return process(in, ninput, out, SIZE_MAX / 4).produced;
     }
 
+    ProcessResult process_sc16(const std::complex<int16_t>* in_sc16,
+                               size_t ninput,
+                               float scale,
+                               gr_complex* out,
+                               size_t max_out,
+                               int nworkers_override = 0)
+    {
+        const auto t_all0 =
+            profile_enabled_ ? Clock::now() : Clock::time_point{};
+
+        if (flush_mode_) {
+            throw std::logic_error(
+                "RationalResamplerLmCore: process_sc16() after flush without "
+                "reset()");
+        }
+
+        const size_t hist_n = hist_.size(); // H-1
+        const bool started_held = have_current_;
+        const size_t held = started_held ? 1u : 0u;
+        const size_t post_n = held + ninput;
+        if (post_n == 0 || max_out == 0) {
+            return ProcessResult{};
+        }
+
+        const uint64_t in_count_entry = input_items_;
+
+        // ---- (a) work buffer assembly ----
+        const auto t_a0 =
+            profile_enabled_ ? Clock::now() : Clock::time_point{};
+        const size_t need = hist_n + post_n + H_pad_ + 16;
+        if (work_.capacity() < need)
+            work_.reserve(need);
+        if (work_.size() < need)
+            work_.resize(need);
+
+        if (hist_n > 0) {
+            std::memcpy(work_.data(), hist_.data(),
+                        hist_n * sizeof(gr_complex));
+        }
+        size_t wpos = hist_n;
+        if (started_held)
+            work_[wpos++] = current_;
+
+        if (ninput > 0 && in_sc16 != nullptr) {
+#if UWB_RESAMP_HAVE_AVX2
+            size_t i = 0;
+            const __m256 v_scale = _mm256_set1_ps(scale);
+            float* out_ptr = reinterpret_cast<float*>(work_.data() + wpos);
+            for (; i + 8 <= ninput; i += 8) {
+                __m128i in_lo = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_sc16 + i));
+                __m128i in_hi = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_sc16 + i + 4));
+
+                __m256i i32_lo = _mm256_cvtepi16_epi32(in_lo);
+                __m256i i32_hi = _mm256_cvtepi16_epi32(in_hi);
+
+                __m256 f32_lo = _mm256_cvtepi32_ps(i32_lo);
+                __m256 f32_hi = _mm256_cvtepi32_ps(i32_hi);
+
+                __m256 scaled_lo = _mm256_mul_ps(f32_lo, v_scale);
+                __m256 scaled_hi = _mm256_mul_ps(f32_hi, v_scale);
+
+                _mm256_storeu_ps(out_ptr + 2 * i, scaled_lo);
+                _mm256_storeu_ps(out_ptr + 2 * i + 8, scaled_hi);
+            }
+            for (; i < ninput; ++i) {
+                work_[wpos + i] = gr_complex(
+                    static_cast<float>(in_sc16[i].real()) * scale,
+                    static_cast<float>(in_sc16[i].imag()) * scale);
+            }
+#else
+            for (size_t i = 0; i < ninput; ++i) {
+                work_[wpos + i] = gr_complex(
+                    static_cast<float>(in_sc16[i].real()) * scale,
+                    static_cast<float>(in_sc16[i].imag()) * scale);
+            }
+#endif
+            wpos += ninput;
+        }
+
+        std::fill(work_.data() + wpos, work_.data() + wpos + H_pad_ + 16, gr_complex(0.0f, 0.0f));
+        const size_t total_w = wpos;
+        if (profile_enabled_)
+            profile_.ns_assemble += ns_since(t_a0);
+
+        size_t post_i = 0;
+        if constexpr (kDecim > kInterp) {
+            if (!started_held) {
+                const int64_t logical_post =
+                    (static_cast<int64_t>(output_items_) *
+                     static_cast<int64_t>(kDecim)) /
+                    static_cast<int64_t>(kInterp);
+                const int64_t start_post =
+                    logical_post - static_cast<int64_t>(in_count_entry);
+                if (start_post > 0)
+                    post_i = static_cast<size_t>(start_post);
+                ctr_ = static_cast<uint32_t>(
+                    (static_cast<uint64_t>(output_items_) *
+                     static_cast<uint64_t>(kDecim)) %
+                    static_cast<uint64_t>(kInterp));
+            }
+        }
+        have_current_ = true;
+        current_ = (post_i < post_n) ? work_[hist_n + post_i]
+                                     : gr_complex(0.0f, 0.0f);
+
+        const int nw =
+            (nworkers_override > 0) ? nworkers_override : nworkers_;
+
+        ProcessResult r;
+        if (loop_kind_ == LoopKind::Legacy) {
+            r = run_legacy(hist_n, post_n, post_i, started_held, ninput,
+                           total_w, out, max_out);
+        } else if (nw > 1 && max_out >= 64 && post_n >= 64) {
+            r = run_mt(hist_n, post_n, post_i, started_held, ninput, total_w,
+                       out, max_out, nw);
+        } else {
+            r = run_macroblock(hist_n, post_n, post_i, started_held, ninput,
+                               total_w, out, max_out);
+        }
+
+        input_items_ = in_count_entry + r.consumed;
+
+        if (profile_enabled_) {
+            profile_.calls += 1;
+            profile_.outputs += r.produced;
+            profile_.ns_total += ns_since(t_all0);
+        }
+        return r;
+    }
+
+    size_t process_sc16(const std::complex<int16_t>* in_sc16,
+                        size_t ninput,
+                        float scale,
+                        gr_complex* out)
+    {
+        return process_sc16(in_sc16, ninput, scale, out, SIZE_MAX / 4).produced;
+    }
+
     size_t flush(gr_complex* out, size_t max_out)
     {
         [[maybe_unused]] const bool first_flush = !flush_mode_;
@@ -401,37 +551,45 @@ public:
         }
         } // if constexpr (kDecim > kInterp)
 
-        if (work_.size() < hist_n + 1)
-            work_.resize(hist_n + 1);
-        if (hist_n > 0)
+        const size_t rem_out = (output_items_ < Lout) ? (Lout - output_items_) : 0;
+        const size_t zeros_needed = (rem_out * kDecim) / kInterp + H_ + 32;
+
+        const size_t held = have_current_ ? 1u : 0u;
+        const size_t post_n = held + zeros_needed;
+        const size_t need = hist_n + post_n + H_pad_ + 16;
+        if (work_.capacity() < need)
+            work_.reserve(need);
+        if (work_.size() < need)
+            work_.resize(need);
+
+        if (hist_n > 0) {
             std::memcpy(work_.data(), hist_.data(),
                         hist_n * sizeof(gr_complex));
+        }
+        size_t wpos = hist_n;
+        if (have_current_) {
+            work_[wpos++] = current_;
+        }
+        std::fill(work_.data() + wpos, work_.data() + need, gr_complex(0.0f, 0.0f));
 
+        size_t post_i = 0;
         while (produced < max_out && output_items_ < Lout) {
-            if (!have_current_) {
-                current_ = gr_complex(0.0f, 0.0f);
-                have_current_ = true;
-            }
-            work_[hist_n] = current_;
-            const gr_complex* win =
-                (H_ > 1) ? work_.data() + (hist_n + 1 - H_) : &current_;
-            out[produced++] = filter_window(ctr_, win);
+            const size_t win_start = hist_n + post_i + 1 - H_;
+            out[produced++] = filter_window(ctr_, work_.data() + win_start);
             ++output_items_;
             ctr_ += kDecim;
             while (ctr_ >= kInterp) {
                 ctr_ -= kInterp;
-                if (hist_n > 0) {
-                    std::memmove(hist_.data(),
-                                 hist_.data() + 1,
-                                 (hist_n - 1) * sizeof(gr_complex));
-                    hist_[hist_n - 1] = current_;
-                    std::memcpy(work_.data(), hist_.data(),
-                                hist_n * sizeof(gr_complex));
-                }
-                current_ = gr_complex(0.0f, 0.0f);
-                have_current_ = true;
+                ++post_i;
             }
         }
+        if (hist_n > 0) {
+            const size_t cur = hist_n + post_i;
+            std::memcpy(hist_.data(), work_.data() + (cur - hist_n),
+                        hist_n * sizeof(gr_complex));
+        }
+        have_current_ = false;
+        current_ = gr_complex(0.0f, 0.0f);
         return produced;
     }
 
@@ -460,8 +618,12 @@ public:
 
     size_t tap_count() const { return T_; }
     size_t arm_length() const { return H_; }
+    size_t arm_length_pad() const { return H_pad_; }
     size_t history_extra() const { return H_ > 0 ? H_ - 1 : 0; }
     const char* kernel_name() const { return kernel_name_; }
+
+    const std::vector<float>& arms_rev_pad() const { return arms_rev_pad_; }
+    const std::vector<float>& arms_rev_dup() const { return arms_rev_dup_; }
 
     float arm_tap(size_t arm, size_t k) const
     {
@@ -486,8 +648,11 @@ private:
 
     size_t T_;
     size_t H_;
+    size_t H_pad_;
     std::vector<float> arms_;
     std::vector<float> arms_rev_;
+    std::vector<float> arms_rev_pad_;
+    std::vector<float> arms_rev_dup_;
     std::vector<gr_complex> hist_;
     std::vector<gr_complex> work_;
     std::vector<uint8_t> schedule_arm_;
@@ -626,17 +791,11 @@ private:
 
     void select_default_kernel()
     {
-        // Profile-guided default (i7-12700, Phase-3):
-        //   H<=48 (realtime taps): AVX2/FMA macroblock wins (~1.4× VOLK).
-        //   H>=64 (quality taps): VOLK macroblock wins (AVX2 horizontal/
-        //   unpack path loses to VOLK's tuned kernels on longer arms).
 #if UWB_RESAMP_HAVE_AVX2
-        if (H_ <= 48) {
-            fir_kind_ = FirKind::Avx2;
-            loop_kind_ = LoopKind::Macroblock;
-            kernel_name_ = "avx2_fma_macroblock";
-            return;
-        }
+        fir_kind_ = FirKind::Avx2;
+        loop_kind_ = LoopKind::Macroblock;
+        kernel_name_ = "avx2_fma_macroblock";
+        return;
 #endif
         fir_kind_ = FirKind::Volk;
         loop_kind_ = LoopKind::Macroblock;
@@ -690,42 +849,24 @@ private:
                                const gr_complex* win,
                                size_t H)
     {
-        gr_complex acc(0.0f, 0.0f);
-        volk_32fc_32f_dot_prod_32fc(
-            &acc, win, trev, static_cast<unsigned>(H));
-        return acc;
+        return fir_scalar(trev, win, H);
     }
 
 #if UWB_RESAMP_HAVE_AVX2
-    static gr_complex fir_avx2(const float* trev,
+    static gr_complex fir_avx2(const float* trev_dup,
                                const gr_complex* win,
-                               size_t H)
+                               size_t H_pad)
     {
-        // Two independent accumulators break the serial FMA chain.
-        // Each step processes 4 complex samples (8 floats) with expanded
-        // real taps [t0,t0,t1,t1,t2,t2,t3,t3].
         __m256 acc0 = _mm256_setzero_ps();
         __m256 acc1 = _mm256_setzero_ps();
-        size_t q = 0;
         const float* xp = reinterpret_cast<const float*>(win);
-        for (; q + 8 <= H; q += 8) {
+        for (size_t q = 0; q < H_pad; q += 8) {
             const __m256 x0 = _mm256_loadu_ps(xp + 2 * q);
             const __m256 x1 = _mm256_loadu_ps(xp + 2 * q + 8);
-            const __m128 th0 = _mm_loadu_ps(trev + q);
-            const __m128 th1 = _mm_loadu_ps(trev + q + 4);
-            const __m256 h0 = _mm256_set_m128(_mm_unpackhi_ps(th0, th0),
-                                              _mm_unpacklo_ps(th0, th0));
-            const __m256 h1 = _mm256_set_m128(_mm_unpackhi_ps(th1, th1),
-                                              _mm_unpacklo_ps(th1, th1));
+            const __m256 h0 = _mm256_loadu_ps(trev_dup + 2 * q);
+            const __m256 h1 = _mm256_loadu_ps(trev_dup + 2 * q + 8);
             acc0 = _mm256_fmadd_ps(x0, h0, acc0);
             acc1 = _mm256_fmadd_ps(x1, h1, acc1);
-        }
-        for (; q + 4 <= H; q += 4) {
-            const __m256 x = _mm256_loadu_ps(xp + 2 * q);
-            const __m128 th = _mm_loadu_ps(trev + q);
-            const __m256 h = _mm256_set_m128(_mm_unpackhi_ps(th, th),
-                                             _mm_unpacklo_ps(th, th));
-            acc0 = _mm256_fmadd_ps(x, h, acc0);
         }
         const __m256 acc = _mm256_add_ps(acc0, acc1);
         // Horizontal: even lanes = re, odd = im
@@ -737,10 +878,6 @@ private:
         const __m128 im2 = _mm_add_ps(sh, _mm_movehl_ps(sh, sh));
         float re = _mm_cvtss_f32(re2);
         float im = _mm_cvtss_f32(im2);
-        for (; q < H; ++q) {
-            re += trev[q] * win[q].real();
-            im += trev[q] * win[q].imag();
-        }
         return gr_complex(re, im);
     }
 #endif
@@ -748,20 +885,34 @@ private:
     gr_complex filter_window(uint32_t arm_idx,
                              const gr_complex* win_oldest) const
     {
-        const float* trev =
-            arms_rev_.data() + static_cast<size_t>(arm_idx) * H_;
         switch (fir_kind_) {
-        case FirKind::Scalar:
+        case FirKind::Scalar: {
+            const float* trev =
+                arms_rev_.data() + static_cast<size_t>(arm_idx) * H_;
             return fir_scalar(trev, win_oldest, H_);
-        case FirKind::Volk:
+        }
+        case FirKind::Volk: {
+            const float* trev =
+                arms_rev_pad_.data() + static_cast<size_t>(arm_idx) * H_pad_;
             return fir_volk(trev, win_oldest, H_);
+        }
         case FirKind::Avx2:
 #if UWB_RESAMP_HAVE_AVX2
-            return fir_avx2(trev, win_oldest, H_);
+        {
+            const float* trev_dup =
+                arms_rev_dup_.data() + static_cast<size_t>(arm_idx) * (2 * H_pad_);
+            return fir_avx2(trev_dup, win_oldest, H_pad_);
+        }
 #else
+        {
+            const float* trev =
+                arms_rev_pad_.data() + static_cast<size_t>(arm_idx) * H_pad_;
             return fir_volk(trev, win_oldest, H_);
+        }
 #endif
         }
+        const float* trev =
+            arms_rev_.data() + static_cast<size_t>(arm_idx) * H_;
         return fir_scalar(trev, win_oldest, H_);
     }
 

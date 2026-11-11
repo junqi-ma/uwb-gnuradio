@@ -85,6 +85,7 @@ list(APPEND uwb_sources
     uwb_preamble_sic_core.cc
     uwb_preamble_sic.cc
     uwb_sic_unified.cc
+    uwb_uhd_sc16_pipeline.cc
 )
 if(UWB_HAVE_UHD)
     list(APPEND uwb_sources uwb_uhd_burst_backend.cc)
@@ -241,6 +242,7 @@ list(APPEND test_uwb_sources
     qa_uwb_preamble_sic_core.cc
     qa_uwb_preamble_sic.cc
     qa_uwb_sic_unified.cc
+    qa_uwb_uhd_sc16_pipeline.cc
     qa_uwb_hrp_packet_source.cc
     qa_uwb_twr_config.cc
     qa_uwb_twr_frame.cc
@@ -408,6 +410,9 @@ target_compile_definitions(uwb_qa_uwb_radar_sfd_core.cc PRIVATE
 target_compile_definitions(uwb_qa_uwb_radar_cir_estimator.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
+target_compile_definitions(uwb_qa_uwb_uhd_sc16_pipeline.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
 target_compile_definitions(uwb_qa_uwb_radar_timing_core.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
@@ -528,3 +533,12 @@ target_compile_options(uwb_qa_uwb_fullpacket_fast_rx.cc PRIVATE -march=native)
 target_compile_options(uwb_qa_uwb_rx_fused_cmf.cc PRIVATE -march=native)
 # The fused PHR kernel QA uses the same native AVX2/FMA path.
 target_compile_options(uwb_qa_uwb_rx_fused_phr.cc PRIVATE -march=native)
+target_compile_options(uwb_qa_uwb_uhd_sc16_pipeline.cc PRIVATE -O3 -march=native)
+target_compile_options(uwb_qa_uwb_rational_resampler_core.cc PRIVATE -O3 -march=native)
+target_compile_options(uwb_qa_uwb_rational_resampler_core_65_32.cc PRIVATE -O3 -march=native)
+set_source_files_properties(
+    uwb_uhd_sc16_pipeline.cc
+    uwb_rational_resampler_ccf_65_48.cc
+    uwb_pdu_rational_resampler_ccf_65_48.cc
+    PROPERTIES COMPILE_OPTIONS "-O3;-march=native"
+)
