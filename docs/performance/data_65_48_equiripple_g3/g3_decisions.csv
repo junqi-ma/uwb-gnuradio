@@ -1,0 +1,9 @@
+pair,window,identical,differing,sic_status_base,sic_status_cand,suppression_base,suppression_cand,detected_start_base,detected_start_cand
+realtime,0,True,,below_detect_threshold,below_detect_threshold,0,0,-1,-1
+realtime,1,True,,below_detect_threshold,below_detect_threshold,0,0,-1,-1
+realtime,2,True,,below_detect_threshold,below_detect_threshold,0,0,-1,-1
+realtime,3,True,,fit_residual_exceeded,fit_residual_exceeded,0,0,-1,-1
+quality,0,True,,below_detect_threshold,below_detect_threshold,0,0,-1,-1
+quality,1,True,,below_detect_threshold,below_detect_threshold,0,0,-1,-1
+quality,2,True,,below_detect_threshold,below_detect_threshold,0,0,-1,-1
+quality,3,True,,fit_residual_exceeded,fit_residual_exceeded,0,0,-1,-1

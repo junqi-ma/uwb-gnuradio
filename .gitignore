@@ -60,3 +60,8 @@ venv/
 # Runtime artifacts from x410_uwb_radar_validate
 err.txt
 plan.json
+
+# Equiripple 65/48 experiment: raw per-run JSON and IQ dumps stay local.
+docs/performance/data_65_48_equiripple*/raw/
+docs/performance/data_65_48_equiripple_g3/*_base/
+docs/performance/data_65_48_equiripple_g3/*_cand/

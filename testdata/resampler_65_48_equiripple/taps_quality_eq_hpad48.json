@@ -1,0 +1,17 @@
+{
+  "Hpad": 48,
+  "H": 44,
+  "ws": 329.1233711258909,
+  "ripple_db": 0.03501611519525248,
+  "rel_stop_db": -97.1268967852229,
+  "rel_stop_vs_max_db": -97.16191290041817,
+  "dc_err": 1.7586944522918202e-07,
+  "design_target_ripple_db": 0.09,
+  "design_target_stop_db": -72.0,
+  "group_delay_out_samples": 29.145833333333332,
+  "profile": "quality",
+  "tag": "hpad48",
+  "taps": 2799,
+  "sha256": "760d49c65ac697bb92dafaf077941e6a56c8b0f1668041186da149dc0cb8b73e",
+  "file": "taps_quality_eq_hpad48.txt"
+}

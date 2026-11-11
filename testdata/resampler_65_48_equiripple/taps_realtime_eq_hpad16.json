@@ -1,0 +1,17 @@
+{
+  "Hpad": 16,
+  "H": 16,
+  "ws": 27.042435617901717,
+  "ripple_db": 0.08675758861088007,
+  "rel_stop_db": -74.56355580804365,
+  "rel_stop_vs_max_db": -74.65031339665452,
+  "dc_err": -3.25488144881092e-07,
+  "design_target_ripple_db": 0.09,
+  "design_target_stop_db": -72.0,
+  "group_delay_out_samples": 10.8125,
+  "profile": "realtime",
+  "tag": "hpad16",
+  "taps": 1039,
+  "sha256": "72c34dd29b0e2ad038d7e65dda4c46e8f5e172ef722000312d89b2d3e01f62c6",
+  "file": "taps_realtime_eq_hpad16.txt"
+}

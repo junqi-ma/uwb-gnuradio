@@ -1,0 +1,17 @@
+{
+  "Hpad": 40,
+  "H": 40,
+  "ws": 329.29066495933466,
+  "ripple_db": 0.06369095437770368,
+  "rel_stop_db": -92.03515997090503,
+  "rel_stop_vs_max_db": -92.09885092528273,
+  "dc_err": 2.0292614522077201e-07,
+  "design_target_ripple_db": 0.09,
+  "design_target_stop_db": -72.0,
+  "group_delay_out_samples": 27.0625,
+  "profile": "quality",
+  "tag": "hpad40",
+  "taps": 2599,
+  "sha256": "00e2df7803cf4c34fa9cc4fae3f322e0e8d0d968db6764fa6e5561db73522a49",
+  "file": "taps_quality_eq_hpad40.txt"
+}

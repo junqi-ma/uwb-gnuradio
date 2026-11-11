@@ -1,0 +1,37 @@
+{
+  "ref": "docs/performance/data_65_48_equiripple_g3/realtime_base/win_1_dump.cf32",
+  "test": "docs/performance/data_65_48_equiripple_g3/realtime_cand/win_1_dump.cf32",
+  "taps_ref": 1319,
+  "taps_test": 1039,
+  "len_ref": 76943,
+  "len_test": 76937,
+  "len_diff": 6,
+  "theoretical_group_delay_diff_samples": 2.9166666666666665,
+  "unaligned": {
+    "compared": 76937,
+    "rel_l2": 1.534397356345701,
+    "evm_pct": 153.4397356345701,
+    "max_abs": 1.2466858625411987,
+    "peak": 0.8572355508804321,
+    "fit_gain_db": -14.672656699764106,
+    "fit_phase_deg": 180.0,
+    "rel_l2_after_gain": 0.9829921696390922,
+    "evm_pct_after_gain": 98.2992169639092
+  },
+  "aligned": {
+    "compared": 76937,
+    "rel_l2": 0.009111392605313767,
+    "evm_pct": 0.9111392605313767,
+    "max_abs": 0.013279027998561002,
+    "peak": 0.8572355508804321,
+    "fit_gain_db": 0.047412296808992185,
+    "fit_phase_deg": 1.6957039725688303e-11,
+    "rel_l2_after_gain": 0.007306537928586333,
+    "evm_pct_after_gain": 0.7306537928586332
+  },
+  "xcorr_aligned": {
+    "peak_lag_samples": 0,
+    "peak_corr": 0.999973306895488,
+    "amplitude_ratio_db": 0.04764415326337955
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "Hpad": 40,
+  "H": 40,
+  "ws": 6.131854326101042,
+  "ripple_db": 0.009704945729451584,
+  "rel_stop_db": -73.87110639394174,
+  "rel_stop_vs_max_db": -73.88081133967118,
+  "dc_err": 1.520679688837845e-07,
+  "design_target_ripple_db": 0.09,
+  "design_target_stop_db": -72.0,
+  "group_delay_out_samples": 27.0625,
+  "profile": "quality",
+  "tag": "conservative",
+  "taps": 2599,
+  "sha256": "ee922cd4a43fb35956bc98d4e189505edcf7147b5add8ddf2a4c6f850230124d",
+  "file": "taps_quality_eq_conservative.txt"
+}
