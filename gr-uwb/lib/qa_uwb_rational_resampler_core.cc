@@ -518,3 +518,130 @@ BOOST_AUTO_TEST_CASE(test_core_multiworker_chunked_and_profile)
               << " outs=" << prof.profile_stats().outputs
               << " mblocks=" << prof.profile_stats().macroblocks << "\n";
 }
+
+BOOST_AUTO_TEST_CASE(test_core_process_sc16_precision_and_chunking)
+{
+    const std::vector<std::string> tap_files = {
+        "testdata/resampler_65_48/taps_realtime_minorder.txt",
+        "testdata/resampler_65_48/taps_quality_minorder.txt"
+    };
+
+    const std::vector<size_t> test_sizes = {
+        1, 7, 8, 13, 16, 31, 32, 47, 48, 49, 64, 65, 128, 1024, 4000
+    };
+
+    const std::vector<float> scales = {
+        1.0f / 32768.0f,
+        1.0f
+    };
+
+    const std::vector<size_t> chunk_sizes = {
+        1, 7, 13, 48, 64, 65, 128, 512, 1000, 4000
+    };
+
+    for (const auto& tap_file : tap_files) {
+        const auto taps = load_f32(find_path(tap_file));
+        BOOST_REQUIRE(!taps.empty());
+
+        // 1. Point-by-point accuracy test: process_sc16 vs process (pre-converted cf32)
+        for (float scale : scales) {
+            for (size_t n : test_sizes) {
+                std::vector<std::complex<int16_t>> in_sc16(n);
+                std::vector<gr_complex> in_cf32(n);
+                for (size_t i = 0; i < n; ++i) {
+                    int16_t re = static_cast<int16_t>(std::sin(0.05 * i) * 29000.0);
+                    int16_t im = static_cast<int16_t>(std::cos(0.07 * i) * 29000.0);
+                    in_sc16[i] = std::complex<int16_t>(re, im);
+                    in_cf32[i] = gr_complex(static_cast<float>(re) * scale,
+                                            static_cast<float>(im) * scale);
+                }
+
+                RationalResampler65_48Core core_ref(taps);
+                const size_t max_out = RationalResampler65_48Core::expected_output_length(n, taps.size()) + 256;
+                std::vector<gr_complex> out_ref(max_out);
+                auto res_ref = core_ref.process(in_cf32.data(), n, out_ref.data(), max_out);
+
+                RationalResampler65_48Core core_sc16(taps);
+                std::vector<gr_complex> out_sc16(max_out);
+                auto res_sc16 = core_sc16.process_sc16(in_sc16.data(), n, scale, out_sc16.data(), max_out);
+
+                BOOST_REQUIRE_EQUAL(res_ref.produced, res_sc16.produced);
+                BOOST_REQUIRE_EQUAL(res_ref.consumed, res_sc16.consumed);
+
+                float max_diff = 0.0f;
+                for (size_t i = 0; i < res_ref.produced; ++i) {
+                    float diff = std::max(std::abs(out_ref[i].real() - out_sc16[i].real()),
+                                          std::abs(out_ref[i].imag() - out_sc16[i].imag()));
+                    if (diff > max_diff)
+                        max_diff = diff;
+                }
+                BOOST_CHECK_MESSAGE(max_diff == 0.0f,
+                                    "process_sc16 vs process difference > 0 on " + tap_file +
+                                    " n=" + std::to_string(n) + " max_diff=" + std::to_string(max_diff));
+
+                // Flush equality
+                std::vector<gr_complex> flush_ref(500);
+                std::vector<gr_complex> flush_sc16(500);
+                size_t nf_ref = core_ref.flush(flush_ref.data(), flush_ref.size());
+                size_t nf_sc16 = core_sc16.flush(flush_sc16.data(), flush_sc16.size());
+                BOOST_REQUIRE_EQUAL(nf_ref, nf_sc16);
+                for (size_t i = 0; i < nf_ref; ++i) {
+                    float diff = std::max(std::abs(flush_ref[i].real() - flush_sc16[i].real()),
+                                          std::abs(flush_ref[i].imag() - flush_sc16[i].imag()));
+                    BOOST_CHECK_EQUAL(diff, 0.0f);
+                }
+            }
+        }
+
+        // 2. Chunked streaming vs one-shot consistency
+        const size_t total_samples = 8000;
+        const float scale = 1.0f / 32768.0f;
+        std::vector<std::complex<int16_t>> stream_in(total_samples);
+        for (size_t i = 0; i < total_samples; ++i) {
+            int16_t re = static_cast<int16_t>(std::sin(0.03 * i) * 27000.0);
+            int16_t im = static_cast<int16_t>(std::cos(0.04 * i) * 27000.0);
+            stream_in[i] = std::complex<int16_t>(re, im);
+        }
+
+        RationalResampler65_48Core core_gold(taps);
+        const size_t max_gold = RationalResampler65_48Core::expected_output_length(total_samples, taps.size()) + 500;
+        std::vector<gr_complex> gold_out;
+        gold_out.reserve(max_gold);
+        std::vector<gr_complex> gold_proc(max_gold);
+        auto r_gold = core_gold.process_sc16(stream_in.data(), total_samples, scale, gold_proc.data(), max_gold);
+        gold_out.insert(gold_out.end(), gold_proc.begin(), gold_proc.begin() + r_gold.produced);
+        std::vector<gr_complex> gold_flush(500);
+        size_t nf_gold = core_gold.flush(gold_flush.data(), gold_flush.size());
+        gold_out.insert(gold_out.end(), gold_flush.begin(), gold_flush.begin() + nf_gold);
+
+        for (size_t ch : chunk_sizes) {
+            RationalResampler65_48Core core_ch(taps);
+            std::vector<gr_complex> ch_out;
+            ch_out.reserve(max_gold);
+            size_t off = 0;
+            while (off < total_samples) {
+                size_t cur_sz = std::min(ch, total_samples - off);
+                size_t max_ch_out = (cur_sz * 65 + 47) / 48 + 200;
+                std::vector<gr_complex> tmp(max_ch_out);
+                auto r = core_ch.process_sc16(stream_in.data() + off, cur_sz, scale, tmp.data(), max_ch_out);
+                ch_out.insert(ch_out.end(), tmp.begin(), tmp.begin() + r.produced);
+                off += r.consumed;
+            }
+            std::vector<gr_complex> fl(500);
+            size_t nf = core_ch.flush(fl.data(), fl.size());
+            ch_out.insert(ch_out.end(), fl.begin(), fl.begin() + nf);
+
+            BOOST_REQUIRE_EQUAL(ch_out.size(), gold_out.size());
+            float max_diff = 0.0f;
+            for (size_t i = 0; i < gold_out.size(); ++i) {
+                float diff = std::max(std::abs(ch_out[i].real() - gold_out[i].real()),
+                                      std::abs(ch_out[i].imag() - gold_out[i].imag()));
+                if (diff > max_diff)
+                    max_diff = diff;
+            }
+            BOOST_CHECK_MESSAGE(max_diff == 0.0f,
+                                "Chunked streaming chunk=" + std::to_string(ch) + " differed from one-shot on " +
+                                tap_file + ": max_diff=" + std::to_string(max_diff));
+        }
+    }
+}

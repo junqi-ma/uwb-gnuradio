@@ -498,11 +498,13 @@ BOOST_AUTO_TEST_CASE(test_resampler_process_sc16_precision)
 {
     using gr::uwb::core::RationalResampler65_48Core;
 
-    const auto taps = load_taps_data("resampler_65_48/taps_quality_minorder.txt");
-    BOOST_REQUIRE(!taps.empty());
+    const std::vector<std::string> tap_files = {
+        "resampler_65_48/taps_realtime_minorder.txt",
+        "resampler_65_48/taps_quality_minorder.txt"
+    };
 
     const std::vector<size_t> test_sizes = {
-        32, 64, 128, 4000, 56000
+        1, 7, 8, 13, 15, 16, 31, 32, 47, 48, 49, 64, 65, 127, 128, 256, 1024, 4000, 56000
     };
 
     const std::vector<float> scales = {
@@ -510,47 +512,119 @@ BOOST_AUTO_TEST_CASE(test_resampler_process_sc16_precision)
         1.0f
     };
 
-    for (float scale : scales) {
-        for (size_t n : test_sizes) {
-            std::vector<std::complex<int16_t>> in_sc16(n);
-            for (size_t i = 0; i < n; ++i) {
-                int16_t re = static_cast<int16_t>(std::sin(2.0 * M_PI * i / 37.0) * 30000.0);
-                int16_t im = static_cast<int16_t>(std::cos(2.0 * M_PI * i / 43.0) * 30000.0);
-                in_sc16[i] = std::complex<int16_t>(re, im);
-            }
+    const std::vector<int16_t> boundary_values = {
+        -32768, -32767, -1, 0, 1, 32766, 32767
+    };
 
-            // Reference step-by-step path: sc16_to_cf32 + process
-            std::vector<std::complex<float>> cf32_input(n);
-            sc16_to_cf32(in_sc16.data(), cf32_input.data(), n, scale);
+    float global_max_abs_fused_vs_ref = 0.0f;
+    float global_max_abs_fused_vs_scalar = 0.0f;
 
-            RationalResampler65_48Core resamp_ref(taps.data(), taps.size());
-            const size_t max_out = (n * 65 + 47) / 48 + 200;
-            std::vector<std::complex<float>> out_ref(max_out);
-            auto res_ref = resamp_ref.process(cf32_input.data(), n, out_ref.data(), max_out);
+    for (const auto& tap_file : tap_files) {
+        const auto taps = load_taps_data(tap_file);
+        BOOST_REQUIRE_MESSAGE(!taps.empty(), "Failed to load taps: " + tap_file);
 
-            // Fused path: process_sc16
-            RationalResampler65_48Core resamp_fused(taps.data(), taps.size());
-            std::vector<std::complex<float>> out_fused(max_out);
-            auto res_fused = resamp_fused.process_sc16(in_sc16.data(), n, scale, out_fused.data(), max_out);
-
-            BOOST_REQUIRE_EQUAL(res_ref.produced, res_fused.produced);
-            BOOST_REQUIRE_EQUAL(res_ref.consumed, res_fused.consumed);
-
-            float max_abs_diff = 0.0f;
-            for (size_t i = 0; i < res_ref.produced; ++i) {
-                float diff_re = std::abs(out_ref[i].real() - out_fused[i].real());
-                float diff_im = std::abs(out_ref[i].imag() - out_fused[i].imag());
-                float diff = std::max(diff_re, diff_im);
-                if (diff > max_abs_diff) {
-                    max_abs_diff = diff;
+        for (float scale : scales) {
+            for (size_t n : test_sizes) {
+                // Generate input with both sinusoidal variations and boundary/extreme values
+                std::vector<std::complex<int16_t>> in_sc16(n);
+                for (size_t i = 0; i < n; ++i) {
+                    if (i % 8 == 0) {
+                        int16_t b_re = boundary_values[(i / 8) % boundary_values.size()];
+                        int16_t b_im = boundary_values[(i / 8 + 3) % boundary_values.size()];
+                        in_sc16[i] = std::complex<int16_t>(b_re, b_im);
+                    } else {
+                        int16_t re = static_cast<int16_t>(std::sin(2.0 * M_PI * i / 37.0) * 30000.0);
+                        int16_t im = static_cast<int16_t>(std::cos(2.0 * M_PI * i / 43.0) * 30000.0);
+                        in_sc16[i] = std::complex<int16_t>(re, im);
+                    }
                 }
+
+                // Reference step-by-step path: sc16_to_cf32 + process
+                std::vector<std::complex<float>> cf32_input(n);
+                sc16_to_cf32(in_sc16.data(), cf32_input.data(), n, scale);
+
+                RationalResampler65_48Core resamp_ref(taps.data(), taps.size());
+                const size_t max_out = (n * 65 + 47) / 48 + 300;
+                std::vector<std::complex<float>> out_ref(max_out);
+                auto res_ref = resamp_ref.process(cf32_input.data(), n, out_ref.data(), max_out);
+
+                std::vector<std::complex<float>> flush_ref(max_out);
+                size_t flush_ref_n = resamp_ref.flush(flush_ref.data(), max_out);
+
+                // Fused path: process_sc16
+                RationalResampler65_48Core resamp_fused(taps.data(), taps.size());
+                std::vector<std::complex<float>> out_fused(max_out);
+                auto res_fused = resamp_fused.process_sc16(in_sc16.data(), n, scale, out_fused.data(), max_out);
+
+                std::vector<std::complex<float>> flush_fused(max_out);
+                size_t flush_fused_n = resamp_fused.flush(flush_fused.data(), max_out);
+
+                // Scalar baseline reference path for numerical verification
+                RationalResampler65_48Core resamp_scalar(taps.data(), taps.size());
+                resamp_scalar.force_scalar_kernel();
+                std::vector<std::complex<float>> cf32_scalar(n);
+                sc16_to_cf32_scalar(in_sc16.data(), cf32_scalar.data(), n, scale);
+                std::vector<std::complex<float>> out_scalar(max_out);
+                auto res_scalar = resamp_scalar.process(cf32_scalar.data(), n, out_scalar.data(), max_out);
+
+                // Check production and consumption counts
+                BOOST_REQUIRE_EQUAL(res_ref.produced, res_fused.produced);
+                BOOST_REQUIRE_EQUAL(res_ref.consumed, res_fused.consumed);
+                BOOST_REQUIRE_EQUAL(res_ref.produced, res_scalar.produced);
+                BOOST_REQUIRE_EQUAL(flush_ref_n, flush_fused_n);
+
+                // 1. Bit-exact comparison: process_sc16 vs (sc16_to_cf32 + process)
+                float max_abs_diff_ref = 0.0f;
+                for (size_t i = 0; i < res_ref.produced; ++i) {
+                    float diff_re = std::abs(out_ref[i].real() - out_fused[i].real());
+                    float diff_im = std::abs(out_ref[i].imag() - out_fused[i].imag());
+                    float diff = std::max(diff_re, diff_im);
+                    if (diff > max_abs_diff_ref) {
+                        max_abs_diff_ref = diff;
+                    }
+                }
+                for (size_t i = 0; i < flush_ref_n; ++i) {
+                    float diff_re = std::abs(flush_ref[i].real() - flush_fused[i].real());
+                    float diff_im = std::abs(flush_ref[i].imag() - flush_fused[i].imag());
+                    float diff = std::max(diff_re, diff_im);
+                    if (diff > max_abs_diff_ref) {
+                        max_abs_diff_ref = diff;
+                    }
+                }
+                if (max_abs_diff_ref > global_max_abs_fused_vs_ref) {
+                    global_max_abs_fused_vs_ref = max_abs_diff_ref;
+                }
+                BOOST_CHECK_MESSAGE(max_abs_diff_ref == 0.0f,
+                                    "Bit-exact mismatch between process_sc16 and (sc16_to_cf32 + process) on " +
+                                    tap_file + " n=" + std::to_string(n) +
+                                    " max_diff=" + std::to_string(max_abs_diff_ref));
+
+                // 2. Comparison against scalar baseline: verify within float machine precision (< 1e-6 relative to peak scale)
+                float max_abs_diff_scalar = 0.0f;
+                for (size_t i = 0; i < res_ref.produced; ++i) {
+                    float diff_re = std::abs(out_scalar[i].real() - out_fused[i].real());
+                    float diff_im = std::abs(out_scalar[i].imag() - out_fused[i].imag());
+                    float diff = std::max(diff_re, diff_im);
+                    if (diff > max_abs_diff_scalar) {
+                        max_abs_diff_scalar = diff;
+                    }
+                }
+                const float normalized_scalar_err = max_abs_diff_scalar / std::max(1.0f, scale * 32768.0f);
+                if (normalized_scalar_err > global_max_abs_fused_vs_scalar) {
+                    global_max_abs_fused_vs_scalar = normalized_scalar_err;
+                }
+                BOOST_CHECK_MESSAGE(normalized_scalar_err < 1e-6f,
+                                    "Precision test vs scalar reference failed for " + tap_file +
+                                    " n=" + std::to_string(n) +
+                                    " normalized_scalar_err=" + std::to_string(normalized_scalar_err));
             }
-            BOOST_CHECK_MESSAGE(max_abs_diff < 1e-6f,
-                                "Precision test failed for n=" + std::to_string(n) +
-                                " scale=" + std::to_string(scale) +
-                                " max_abs_diff=" + std::to_string(max_abs_diff));
         }
     }
+
+    std::cout << "[QA Precision] Global max abs diff (process_sc16 vs sc16_to_cf32+process): "
+              << global_max_abs_fused_vs_ref << " (bit-exact 0.00e+00)\n";
+    std::cout << "[QA Precision] Global max abs diff (process_sc16 vs scalar baseline): "
+              << global_max_abs_fused_vs_scalar << " (< 1e-6)\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -560,88 +634,158 @@ BOOST_AUTO_TEST_CASE(test_resampler_process_sc16_chunking_and_streaming)
 {
     using gr::uwb::core::RationalResampler65_48Core;
 
-    const auto taps = load_taps_data("resampler_65_48/taps_quality_minorder.txt");
-    BOOST_REQUIRE(!taps.empty());
+    const std::vector<std::string> tap_files = {
+        "resampler_65_48/taps_realtime_minorder.txt",
+        "resampler_65_48/taps_quality_minorder.txt"
+    };
 
-    const size_t total_samples = 10000;
+    const size_t total_samples = 12000;
     const float scale = 1.0f / 32768.0f;
+
+    const std::vector<int16_t> boundary_values = {
+        -32768, -32767, -1, 0, 1, 32766, 32767
+    };
 
     std::vector<std::complex<int16_t>> in_sc16(total_samples);
     for (size_t i = 0; i < total_samples; ++i) {
-        int16_t re = static_cast<int16_t>(std::sin(2.0 * M_PI * i / 23.0) * 28000.0);
-        int16_t im = static_cast<int16_t>(std::cos(2.0 * M_PI * i / 29.0) * 28000.0);
-        in_sc16[i] = std::complex<int16_t>(re, im);
-    }
-
-    // 1. One-shot execution as gold reference
-    RationalResampler65_48Core resamp_oneshot(taps.data(), taps.size());
-    const size_t max_out_total = (total_samples * 65 + 47) / 48 + 500;
-    std::vector<std::complex<float>> out_oneshot(max_out_total);
-    auto res_oneshot = resamp_oneshot.process_sc16(in_sc16.data(), total_samples, scale,
-                                                  out_oneshot.data(), max_out_total);
-    std::vector<std::complex<float>> flush_oneshot(500);
-    size_t flush_oneshot_n = resamp_oneshot.flush(flush_oneshot.data(), flush_oneshot.size());
-
-    // 2. Chunked streaming execution via process_sc16
-    RationalResampler65_48Core resamp_chunked(taps.data(), taps.size());
-    std::vector<std::complex<float>> out_chunked;
-    out_chunked.reserve(max_out_total);
-
-    const std::vector<size_t> chunk_sizes = {128, 256, 512, 1024, 384, 768, 64, 2048, 1500};
-    size_t chunk_idx = 0;
-    size_t offset = 0;
-    size_t total_consumed_chunked = 0;
-
-    while (offset < total_samples) {
-        size_t c_size = std::min(chunk_sizes[chunk_idx % chunk_sizes.size()], total_samples - offset);
-        chunk_idx++;
-
-        size_t chunk_max_out = (c_size * 65 + 47) / 48 + 100;
-        std::vector<std::complex<float>> chunk_out(chunk_max_out);
-
-        auto res = resamp_chunked.process_sc16(in_sc16.data() + offset, c_size, scale,
-                                              chunk_out.data(), chunk_max_out);
-
-        out_chunked.insert(out_chunked.end(), chunk_out.begin(), chunk_out.begin() + res.produced);
-        offset += res.consumed;
-        total_consumed_chunked += res.consumed;
-    }
-
-    std::vector<std::complex<float>> flush_chunked(500);
-    size_t flush_chunked_n = resamp_chunked.flush(flush_chunked.data(), flush_chunked.size());
-
-    // Verify produced & consumed totals
-    BOOST_CHECK_EQUAL(total_consumed_chunked, res_oneshot.consumed);
-    BOOST_CHECK_EQUAL(out_chunked.size(), res_oneshot.produced);
-    BOOST_CHECK_EQUAL(flush_chunked_n, flush_oneshot_n);
-
-    // Verify sample-by-sample equivalence between chunked streaming and one-shot
-    float max_diff = 0.0f;
-    for (size_t i = 0; i < out_chunked.size(); ++i) {
-        float diff_re = std::abs(out_chunked[i].real() - out_oneshot[i].real());
-        float diff_im = std::abs(out_chunked[i].imag() - out_oneshot[i].imag());
-        float diff = std::max(diff_re, diff_im);
-        if (diff > max_diff) {
-            max_diff = diff;
+        if (i % 16 == 0) {
+            int16_t b_re = boundary_values[(i / 16) % boundary_values.size()];
+            int16_t b_im = boundary_values[(i / 16 + 2) % boundary_values.size()];
+            in_sc16[i] = std::complex<int16_t>(b_re, b_im);
+        } else {
+            int16_t re = static_cast<int16_t>(std::sin(2.0 * M_PI * i / 23.0) * 28000.0);
+            int16_t im = static_cast<int16_t>(std::cos(2.0 * M_PI * i / 29.0) * 28000.0);
+            in_sc16[i] = std::complex<int16_t>(re, im);
         }
     }
-    BOOST_CHECK_MESSAGE(max_diff < 1e-6f,
-                        "Chunked streaming output differs from one-shot: max_diff=" +
-                        std::to_string(max_diff));
 
-    // Verify flushed samples equivalence
-    float flush_diff = 0.0f;
-    for (size_t i = 0; i < flush_chunked_n; ++i) {
-        float diff_re = std::abs(flush_chunked[i].real() - flush_oneshot[i].real());
-        float diff_im = std::abs(flush_chunked[i].imag() - flush_oneshot[i].imag());
-        float diff = std::max(diff_re, diff_im);
-        if (diff > flush_diff) {
-            flush_diff = diff;
+    // Specific chunk sizes to thoroughly test:
+    // small prime chunks (1, 7, 13), boundary sizes (32, 48, 64, 65, 128), and larger windows (512, 1000, 4000)
+    const std::vector<size_t> fixed_chunk_sizes = {
+        1, 7, 13, 32, 48, 64, 65, 128, 512, 1000, 4000
+    };
+
+    // Mixed variable chunk pattern
+    const std::vector<size_t> mixed_chunk_pattern = {
+        1, 7, 13, 64, 65, 128, 4000, 3, 16, 48, 100, 256, 384, 512, 768, 1024, 2048, 1500
+    };
+
+    for (const auto& tap_file : tap_files) {
+        const auto taps = load_taps_data(tap_file);
+        BOOST_REQUIRE_MESSAGE(!taps.empty(), "Failed to load taps: " + tap_file);
+
+        // 1. One-shot execution as gold reference (process_sc16 + flush)
+        RationalResampler65_48Core resamp_oneshot(taps.data(), taps.size());
+        const size_t max_out_total = RationalResampler65_48Core::expected_output_length(total_samples, taps.size()) + 500;
+        std::vector<std::complex<float>> out_gold;
+        out_gold.reserve(max_out_total);
+
+        std::vector<std::complex<float>> proc_oneshot(max_out_total);
+        auto res_oneshot = resamp_oneshot.process_sc16(in_sc16.data(), total_samples, scale,
+                                                      proc_oneshot.data(), max_out_total);
+        out_gold.insert(out_gold.end(), proc_oneshot.begin(), proc_oneshot.begin() + res_oneshot.produced);
+
+        std::vector<std::complex<float>> flush_oneshot(500);
+        size_t flush_oneshot_n = resamp_oneshot.flush(flush_oneshot.data(), flush_oneshot.size());
+        out_gold.insert(out_gold.end(), flush_oneshot.begin(), flush_oneshot.begin() + flush_oneshot_n);
+
+        BOOST_CHECK_EQUAL(res_oneshot.consumed, total_samples);
+        BOOST_CHECK(resamp_oneshot.flush_complete());
+        BOOST_CHECK_EQUAL(out_gold.size(), RationalResampler65_48Core::expected_output_length(total_samples, taps.size()));
+
+        // 2. Fixed chunk size streaming tests
+        for (size_t chunk_sz : fixed_chunk_sizes) {
+            RationalResampler65_48Core resamp_chunked(taps.data(), taps.size());
+            std::vector<std::complex<float>> out_chunked;
+            out_chunked.reserve(max_out_total);
+
+            size_t offset = 0;
+            size_t total_consumed = 0;
+            while (offset < total_samples) {
+                size_t c_size = std::min(chunk_sz, total_samples - offset);
+                size_t chunk_max_out = (c_size * 65 + 47) / 48 + 200;
+                std::vector<std::complex<float>> chunk_out(chunk_max_out);
+
+                auto res = resamp_chunked.process_sc16(in_sc16.data() + offset, c_size, scale,
+                                                      chunk_out.data(), chunk_max_out);
+                out_chunked.insert(out_chunked.end(), chunk_out.begin(), chunk_out.begin() + res.produced);
+                offset += res.consumed;
+                total_consumed += res.consumed;
+            }
+
+            std::vector<std::complex<float>> flush_chunked(500);
+            size_t flush_chunked_n = resamp_chunked.flush(flush_chunked.data(), flush_chunked.size());
+            out_chunked.insert(out_chunked.end(), flush_chunked.begin(), flush_chunked.begin() + flush_chunked_n);
+
+            BOOST_CHECK_EQUAL(total_consumed, total_samples);
+            BOOST_CHECK(resamp_chunked.flush_complete());
+            BOOST_REQUIRE_EQUAL(out_chunked.size(), out_gold.size());
+
+            float max_diff = 0.0f;
+            for (size_t i = 0; i < out_gold.size(); ++i) {
+                float diff_re = std::abs(out_chunked[i].real() - out_gold[i].real());
+                float diff_im = std::abs(out_chunked[i].imag() - out_gold[i].imag());
+                float diff = std::max(diff_re, diff_im);
+                if (diff > max_diff) {
+                    max_diff = diff;
+                }
+            }
+            BOOST_CHECK_MESSAGE(max_diff == 0.0f,
+                                "Fixed chunk size " + std::to_string(chunk_sz) +
+                                " streaming output differs from one-shot on " + tap_file +
+                                ": max_diff=" + std::to_string(max_diff));
         }
+
+        // 3. Mixed variable chunk size streaming test
+        {
+            RationalResampler65_48Core resamp_mixed(taps.data(), taps.size());
+            std::vector<std::complex<float>> out_mixed;
+            out_mixed.reserve(max_out_total);
+
+            size_t chunk_idx = 0;
+            size_t offset = 0;
+            size_t total_consumed = 0;
+
+            while (offset < total_samples) {
+                size_t c_size = std::min(mixed_chunk_pattern[chunk_idx % mixed_chunk_pattern.size()],
+                                         total_samples - offset);
+                chunk_idx++;
+
+                size_t chunk_max_out = (c_size * 65 + 47) / 48 + 200;
+                std::vector<std::complex<float>> chunk_out(chunk_max_out);
+
+                auto res = resamp_mixed.process_sc16(in_sc16.data() + offset, c_size, scale,
+                                                    chunk_out.data(), chunk_max_out);
+                out_mixed.insert(out_mixed.end(), chunk_out.begin(), chunk_out.begin() + res.produced);
+                offset += res.consumed;
+                total_consumed += res.consumed;
+            }
+
+            std::vector<std::complex<float>> flush_mixed(500);
+            size_t flush_mixed_n = resamp_mixed.flush(flush_mixed.data(), flush_mixed.size());
+            out_mixed.insert(out_mixed.end(), flush_mixed.begin(), flush_mixed.begin() + flush_mixed_n);
+
+            BOOST_CHECK_EQUAL(total_consumed, total_samples);
+            BOOST_CHECK(resamp_mixed.flush_complete());
+            BOOST_REQUIRE_EQUAL(out_mixed.size(), out_gold.size());
+
+            float max_diff = 0.0f;
+            for (size_t i = 0; i < out_gold.size(); ++i) {
+                float diff_re = std::abs(out_mixed[i].real() - out_gold[i].real());
+                float diff_im = std::abs(out_mixed[i].imag() - out_gold[i].imag());
+                float diff = std::max(diff_re, diff_im);
+                if (diff > max_diff) {
+                    max_diff = diff;
+                }
+            }
+            BOOST_CHECK_MESSAGE(max_diff == 0.0f,
+                                "Mixed chunk streaming output differs from one-shot on " + tap_file +
+                                ": max_diff=" + std::to_string(max_diff));
+        }
+
+        std::cout << "[QA Chunking] " << tap_file
+                  << " successfully verified across all fixed and mixed chunk patterns (max_diff=0.00e+00)\n";
     }
-    BOOST_CHECK_MESSAGE(flush_diff < 1e-6f,
-                        "Chunked flush output differs from one-shot: flush_diff=" +
-                        std::to_string(flush_diff));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

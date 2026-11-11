@@ -132,10 +132,17 @@ public:
             }
         }
 
+        arms_rev_dup_scaled_.assign(static_cast<size_t>(kInterp) * (2 * H_pad_), 0.0f);
+        last_scale_ = 0.0f;
+
         hist_.assign(H_ > 0 ? H_ - 1 : 0, gr_complex(0.0f, 0.0f));
+        hist_sc16_.assign(H_ > 0 ? H_ - 1 : 0, std::complex<int16_t>(0, 0));
+        current_sc16_ = std::complex<int16_t>(0, 0);
 
         work_.reserve(H_ + (1u << 20));
         work_.resize(H_);
+        work_sc16_.reserve(H_ + (1u << 20));
+        work_sc16_.resize(H_);
 
         schedule_arm_.resize(static_cast<size_t>(kInterp) * kInterp);
         schedule_adv_.resize(static_cast<size_t>(kInterp) * kInterp);
@@ -272,6 +279,8 @@ public:
                 "reset()");
         }
 
+        is_sc16_mode_ = false;
+
         const size_t hist_n = hist_.size(); // H-1
         const bool started_held = have_current_;
         const size_t held = started_held ? 1u : 0u;
@@ -386,7 +395,10 @@ public:
                 "reset()");
         }
 
-        const size_t hist_n = hist_.size(); // H-1
+        is_sc16_mode_ = true;
+        ensure_scaled_taps(scale);
+
+        const size_t hist_n = hist_sc16_.size(); // H-1
         const bool started_held = have_current_;
         const size_t held = started_held ? 1u : 0u;
         const size_t post_n = held + ninput;
@@ -400,56 +412,27 @@ public:
         const auto t_a0 =
             profile_enabled_ ? Clock::now() : Clock::time_point{};
         const size_t need = hist_n + post_n + H_pad_ + 16;
-        if (work_.capacity() < need)
-            work_.reserve(need);
-        if (work_.size() < need)
-            work_.resize(need);
+        if (work_sc16_.capacity() < need)
+            work_sc16_.reserve(need);
+        if (work_sc16_.size() < need)
+            work_sc16_.resize(need);
 
         if (hist_n > 0) {
-            std::memcpy(work_.data(), hist_.data(),
-                        hist_n * sizeof(gr_complex));
+            std::memcpy(work_sc16_.data(), hist_sc16_.data(),
+                        hist_n * sizeof(std::complex<int16_t>));
         }
         size_t wpos = hist_n;
         if (started_held)
-            work_[wpos++] = current_;
+            work_sc16_[wpos++] = current_sc16_;
 
         if (ninput > 0 && in_sc16 != nullptr) {
-#if UWB_RESAMP_HAVE_AVX2
-            size_t i = 0;
-            const __m256 v_scale = _mm256_set1_ps(scale);
-            float* out_ptr = reinterpret_cast<float*>(work_.data() + wpos);
-            for (; i + 8 <= ninput; i += 8) {
-                __m128i in_lo = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_sc16 + i));
-                __m128i in_hi = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_sc16 + i + 4));
-
-                __m256i i32_lo = _mm256_cvtepi16_epi32(in_lo);
-                __m256i i32_hi = _mm256_cvtepi16_epi32(in_hi);
-
-                __m256 f32_lo = _mm256_cvtepi32_ps(i32_lo);
-                __m256 f32_hi = _mm256_cvtepi32_ps(i32_hi);
-
-                __m256 scaled_lo = _mm256_mul_ps(f32_lo, v_scale);
-                __m256 scaled_hi = _mm256_mul_ps(f32_hi, v_scale);
-
-                _mm256_storeu_ps(out_ptr + 2 * i, scaled_lo);
-                _mm256_storeu_ps(out_ptr + 2 * i + 8, scaled_hi);
-            }
-            for (; i < ninput; ++i) {
-                work_[wpos + i] = gr_complex(
-                    static_cast<float>(in_sc16[i].real()) * scale,
-                    static_cast<float>(in_sc16[i].imag()) * scale);
-            }
-#else
-            for (size_t i = 0; i < ninput; ++i) {
-                work_[wpos + i] = gr_complex(
-                    static_cast<float>(in_sc16[i].real()) * scale,
-                    static_cast<float>(in_sc16[i].imag()) * scale);
-            }
-#endif
+            std::memcpy(work_sc16_.data() + wpos, in_sc16,
+                        ninput * sizeof(std::complex<int16_t>));
             wpos += ninput;
         }
 
-        std::fill(work_.data() + wpos, work_.data() + wpos + H_pad_ + 16, gr_complex(0.0f, 0.0f));
+        std::fill(work_sc16_.data() + wpos, work_sc16_.data() + wpos + H_pad_ + 16,
+                  std::complex<int16_t>(0, 0));
         const size_t total_w = wpos;
         if (profile_enabled_)
             profile_.ns_assemble += ns_since(t_a0);
@@ -472,22 +455,22 @@ public:
             }
         }
         have_current_ = true;
-        current_ = (post_i < post_n) ? work_[hist_n + post_i]
-                                     : gr_complex(0.0f, 0.0f);
+        current_sc16_ = (post_i < post_n) ? work_sc16_[hist_n + post_i]
+                                           : std::complex<int16_t>(0, 0);
 
         const int nw =
             (nworkers_override > 0) ? nworkers_override : nworkers_;
 
         ProcessResult r;
         if (loop_kind_ == LoopKind::Legacy) {
-            r = run_legacy(hist_n, post_n, post_i, started_held, ninput,
-                           total_w, out, max_out);
+            r = run_legacy_sc16(hist_n, post_n, post_i, started_held, ninput,
+                                total_w, out, max_out);
         } else if (nw > 1 && max_out >= 64 && post_n >= 64) {
-            r = run_mt(hist_n, post_n, post_i, started_held, ninput, total_w,
-                       out, max_out, nw);
+            r = run_mt_sc16(hist_n, post_n, post_i, started_held, ninput,
+                            total_w, out, max_out, nw);
         } else {
-            r = run_macroblock(hist_n, post_n, post_i, started_held, ninput,
-                               total_w, out, max_out);
+            r = run_macroblock_sc16(hist_n, post_n, post_i, started_held, ninput,
+                                    total_w, out, max_out);
         }
 
         input_items_ = in_count_entry + r.consumed;
@@ -515,6 +498,10 @@ public:
         const uint64_t N = input_items_;
         const size_t Lout = expected_output_length(N, T_);
         size_t produced = 0;
+
+        if (is_sc16_mode_) {
+            return flush_sc16_internal(out, max_out, first_flush, N, Lout);
+        }
 
         const size_t hist_n = hist_.size();
 
@@ -593,6 +580,12 @@ public:
         return produced;
     }
 
+    size_t flush_sc16(gr_complex* out, size_t max_out)
+    {
+        is_sc16_mode_ = true;
+        return flush(out, max_out);
+    }
+
     bool flush_complete() const
     {
         return flush_mode_ &&
@@ -602,9 +595,12 @@ public:
     void reset()
     {
         std::fill(hist_.begin(), hist_.end(), gr_complex(0.0f, 0.0f));
+        std::fill(hist_sc16_.begin(), hist_sc16_.end(), std::complex<int16_t>(0, 0));
         ctr_ = 0;
         have_current_ = false;
         current_ = gr_complex(0.0f, 0.0f);
+        current_sc16_ = std::complex<int16_t>(0, 0);
+        is_sc16_mode_ = false;
         input_items_ = 0;
         output_items_ = 0;
         flush_mode_ = false;
@@ -624,6 +620,44 @@ public:
 
     const std::vector<float>& arms_rev_pad() const { return arms_rev_pad_; }
     const std::vector<float>& arms_rev_dup() const { return arms_rev_dup_; }
+    const std::vector<float>& arms_rev_dup_scaled() const { return arms_rev_dup_scaled_; }
+    float last_scale() const { return last_scale_; }
+    const std::vector<std::complex<int16_t>>& hist_sc16() const { return hist_sc16_; }
+    std::complex<int16_t> current_sc16() const { return current_sc16_; }
+    bool is_sc16_mode() const { return is_sc16_mode_; }
+
+    void ensure_scaled_taps(float scale)
+    {
+        if (scale == last_scale_) {
+            return;
+        }
+        const size_t sz = arms_rev_dup_.size();
+        if (arms_rev_dup_scaled_.size() != sz) {
+            arms_rev_dup_scaled_.resize(sz);
+        }
+        if (scale == 1.0f) {
+            std::memcpy(arms_rev_dup_scaled_.data(), arms_rev_dup_.data(),
+                        sz * sizeof(float));
+        } else {
+#if UWB_RESAMP_HAVE_AVX2
+            const __m256 v_scale = _mm256_set1_ps(scale);
+            size_t i = 0;
+            for (; i + 8 <= sz; i += 8) {
+                __m256 val = _mm256_loadu_ps(arms_rev_dup_.data() + i);
+                _mm256_storeu_ps(arms_rev_dup_scaled_.data() + i,
+                                 _mm256_mul_ps(val, v_scale));
+            }
+            for (; i < sz; ++i) {
+                arms_rev_dup_scaled_[i] = arms_rev_dup_[i] * scale;
+            }
+#else
+            for (size_t i = 0; i < sz; ++i) {
+                arms_rev_dup_scaled_[i] = arms_rev_dup_[i] * scale;
+            }
+#endif
+        }
+        last_scale_ = scale;
+    }
 
     float arm_tap(size_t arm, size_t k) const
     {
@@ -653,8 +687,14 @@ private:
     std::vector<float> arms_rev_;
     std::vector<float> arms_rev_pad_;
     std::vector<float> arms_rev_dup_;
+    std::vector<float> arms_rev_dup_scaled_;
+    float last_scale_ = 0.0f;
     std::vector<gr_complex> hist_;
     std::vector<gr_complex> work_;
+    std::vector<std::complex<int16_t>> hist_sc16_;
+    std::vector<std::complex<int16_t>> work_sc16_;
+    std::complex<int16_t> current_sc16_{0, 0};
+    bool is_sc16_mode_ = false;
     std::vector<uint8_t> schedule_arm_;
     std::vector<uint8_t> schedule_adv_;
     std::vector<uint8_t> sched_arm_buf_;
@@ -819,6 +859,24 @@ private:
         }
     }
 
+    void update_hist_from_work_sc16(size_t total_w)
+    {
+        const size_t hist_n = hist_sc16_.size();
+        if (hist_n == 0)
+            return;
+        if (total_w >= hist_n) {
+            std::memcpy(hist_sc16_.data(),
+                        work_sc16_.data() + (total_w - hist_n),
+                        hist_n * sizeof(std::complex<int16_t>));
+        } else {
+            std::fill(hist_sc16_.begin(), hist_sc16_.end(),
+                      std::complex<int16_t>(0, 0));
+            std::memcpy(hist_sc16_.data() + (hist_n - total_w),
+                        work_sc16_.data(),
+                        total_w * sizeof(std::complex<int16_t>));
+        }
+    }
+
     static gr_complex fir_scalar(const float* trev,
                                  const gr_complex* win,
                                  size_t H)
@@ -845,6 +903,37 @@ private:
         return gr_complex(acc_re, acc_im);
     }
 
+    static inline gr_complex fir_scalar_sc16(const float* trev_dup_scaled,
+                                             const std::complex<int16_t>* win,
+                                             size_t H) noexcept
+    {
+        float r0 = 0, r1 = 0, r2 = 0, r3 = 0;
+        float i0 = 0, i1 = 0, i2 = 0, i3 = 0;
+        size_t q = 0;
+        for (; q + 4 <= H; q += 4) {
+            const float h0 = trev_dup_scaled[2 * (q + 0)];
+            const float h1 = trev_dup_scaled[2 * (q + 1)];
+            const float h2 = trev_dup_scaled[2 * (q + 2)];
+            const float h3 = trev_dup_scaled[2 * (q + 3)];
+            r0 += h0 * static_cast<float>(win[q + 0].real());
+            i0 += h0 * static_cast<float>(win[q + 0].imag());
+            r1 += h1 * static_cast<float>(win[q + 1].real());
+            i1 += h1 * static_cast<float>(win[q + 1].imag());
+            r2 += h2 * static_cast<float>(win[q + 2].real());
+            i2 += h2 * static_cast<float>(win[q + 2].imag());
+            r3 += h3 * static_cast<float>(win[q + 3].real());
+            i3 += h3 * static_cast<float>(win[q + 3].imag());
+        }
+        float acc_re = (r0 + r1) + (r2 + r3);
+        float acc_im = (i0 + i1) + (i2 + i3);
+        for (; q < H; ++q) {
+            const float h = trev_dup_scaled[2 * q];
+            acc_re += h * static_cast<float>(win[q].real());
+            acc_im += h * static_cast<float>(win[q].imag());
+        }
+        return gr_complex(acc_re, acc_im);
+    }
+
     static gr_complex fir_volk(const float* trev,
                                const gr_complex* win,
                                size_t H)
@@ -853,6 +942,13 @@ private:
     }
 
 #if UWB_RESAMP_HAVE_AVX2
+    static inline __m256 load_sc16_x4_as_ps(const std::complex<int16_t>* p) noexcept
+    {
+        const __m128i v16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+        const __m256i v32 = _mm256_cvtepi16_epi32(v16);
+        return _mm256_cvtepi32_ps(v32);
+    }
+
     static gr_complex fir_avx2(const float* trev_dup,
                                const gr_complex* win,
                                size_t H_pad)
@@ -880,7 +976,204 @@ private:
         float im = _mm_cvtss_f32(im2);
         return gr_complex(re, im);
     }
+
+    static inline gr_complex fir_avx2_sc16(const float* trev_dup_scaled,
+                                           const std::complex<int16_t>* win,
+                                           size_t H_pad) noexcept
+    {
+        __m256 acc0 = _mm256_setzero_ps();
+        __m256 acc1 = _mm256_setzero_ps();
+        for (size_t q = 0; q < H_pad; q += 8) {
+            const __m256 x0 = load_sc16_x4_as_ps(win + q);
+            const __m256 x1 = load_sc16_x4_as_ps(win + q + 4);
+            const __m256 h0 = _mm256_loadu_ps(trev_dup_scaled + 2 * q);
+            const __m256 h1 = _mm256_loadu_ps(trev_dup_scaled + 2 * q + 8);
+            acc0 = _mm256_fmadd_ps(x0, h0, acc0);
+            acc1 = _mm256_fmadd_ps(x1, h1, acc1);
+        }
+        const __m256 acc = _mm256_add_ps(acc0, acc1);
+        const __m128 lo = _mm256_castps256_ps128(acc);
+        const __m128 hi = _mm256_extractf128_ps(acc, 1);
+        const __m128 s = _mm_add_ps(lo, hi);
+        const __m128 sh = _mm_movehdup_ps(s);
+        const __m128 re2 = _mm_add_ps(s, _mm_movehl_ps(s, s));
+        const __m128 im2 = _mm_add_ps(sh, _mm_movehl_ps(sh, sh));
+        float re = _mm_cvtss_f32(re2);
+        float im = _mm_cvtss_f32(im2);
+        return gr_complex(re, im);
+    }
+
+    static inline void fir_avx2_sc16_4x(const float* h_base,
+                                        size_t h_stride,
+                                        uint8_t arm0, const std::complex<int16_t>* win0,
+                                        uint8_t arm1, const std::complex<int16_t>* win1,
+                                        uint8_t arm2, const std::complex<int16_t>* win2,
+                                        uint8_t arm3, const std::complex<int16_t>* win3,
+                                        size_t H_pad,
+                                        gr_complex* dest4) noexcept
+    {
+        const float* h0_ptr = h_base + static_cast<size_t>(arm0) * h_stride;
+        const float* h1_ptr = h_base + static_cast<size_t>(arm1) * h_stride;
+        const float* h2_ptr = h_base + static_cast<size_t>(arm2) * h_stride;
+        const float* h3_ptr = h_base + static_cast<size_t>(arm3) * h_stride;
+
+        __m256 acc0_lo = _mm256_setzero_ps(), acc0_hi = _mm256_setzero_ps();
+        __m256 acc1_lo = _mm256_setzero_ps(), acc1_hi = _mm256_setzero_ps();
+        __m256 acc2_lo = _mm256_setzero_ps(), acc2_hi = _mm256_setzero_ps();
+        __m256 acc3_lo = _mm256_setzero_ps(), acc3_hi = _mm256_setzero_ps();
+
+        const bool w1_same = (win1 == win0);
+        const bool w2_same = (win2 == win1);
+        const bool w3_same = (win3 == win2);
+
+        for (size_t q = 0; q < H_pad; q += 8) {
+            __m256 x0_lo = load_sc16_x4_as_ps(win0 + q);
+            __m256 x0_hi = load_sc16_x4_as_ps(win0 + q + 4);
+            acc0_lo = _mm256_fmadd_ps(x0_lo, _mm256_loadu_ps(h0_ptr + 2 * q), acc0_lo);
+            acc0_hi = _mm256_fmadd_ps(x0_hi, _mm256_loadu_ps(h0_ptr + 2 * q + 8), acc0_hi);
+
+            __m256 x1_lo = w1_same ? x0_lo : load_sc16_x4_as_ps(win1 + q);
+            __m256 x1_hi = w1_same ? x0_hi : load_sc16_x4_as_ps(win1 + q + 4);
+            acc1_lo = _mm256_fmadd_ps(x1_lo, _mm256_loadu_ps(h1_ptr + 2 * q), acc1_lo);
+            acc1_hi = _mm256_fmadd_ps(x1_hi, _mm256_loadu_ps(h1_ptr + 2 * q + 8), acc1_hi);
+
+            __m256 x2_lo = w2_same ? x1_lo : load_sc16_x4_as_ps(win2 + q);
+            __m256 x2_hi = w2_same ? x1_hi : load_sc16_x4_as_ps(win2 + q + 4);
+            acc2_lo = _mm256_fmadd_ps(x2_lo, _mm256_loadu_ps(h2_ptr + 2 * q), acc2_lo);
+            acc2_hi = _mm256_fmadd_ps(x2_hi, _mm256_loadu_ps(h2_ptr + 2 * q + 8), acc2_hi);
+
+            __m256 x3_lo = w3_same ? x2_lo : load_sc16_x4_as_ps(win3 + q);
+            __m256 x3_hi = w3_same ? x2_hi : load_sc16_x4_as_ps(win3 + q + 4);
+            acc3_lo = _mm256_fmadd_ps(x3_lo, _mm256_loadu_ps(h3_ptr + 2 * q), acc3_lo);
+            acc3_hi = _mm256_fmadd_ps(x3_hi, _mm256_loadu_ps(h3_ptr + 2 * q + 8), acc3_hi);
+        }
+
+        __m256 a0 = _mm256_add_ps(acc0_lo, acc0_hi);
+        __m256 a1 = _mm256_add_ps(acc1_lo, acc1_hi);
+        __m256 a2 = _mm256_add_ps(acc2_lo, acc2_hi);
+        __m256 a3 = _mm256_add_ps(acc3_lo, acc3_hi);
+
+        __m128 s0 = _mm_add_ps(_mm256_castps256_ps128(a0), _mm256_extractf128_ps(a0, 1));
+        __m128 s1 = _mm_add_ps(_mm256_castps256_ps128(a1), _mm256_extractf128_ps(a1, 1));
+        __m128 s2 = _mm_add_ps(_mm256_castps256_ps128(a2), _mm256_extractf128_ps(a2, 1));
+        __m128 s3 = _mm_add_ps(_mm256_castps256_ps128(a3), _mm256_extractf128_ps(a3, 1));
+
+        __m128 out01 = _mm_add_ps(
+            _mm_castpd_ps(_mm_unpacklo_pd(_mm_castps_pd(s0), _mm_castps_pd(s1))),
+            _mm_castpd_ps(_mm_unpackhi_pd(_mm_castps_pd(s0), _mm_castps_pd(s1))));
+        __m128 out23 = _mm_add_ps(
+            _mm_castpd_ps(_mm_unpacklo_pd(_mm_castps_pd(s2), _mm_castps_pd(s3))),
+            _mm_castpd_ps(_mm_unpackhi_pd(_mm_castps_pd(s2), _mm_castps_pd(s3))));
+
+        _mm_storeu_ps(reinterpret_cast<float*>(dest4), out01);
+        _mm_storeu_ps(reinterpret_cast<float*>(dest4 + 2), out23);
+    }
+
+    static inline void fir_avx2_4x(const float* h_base,
+                                   size_t h_stride,
+                                   uint8_t arm0, const gr_complex* win0,
+                                   uint8_t arm1, const gr_complex* win1,
+                                   uint8_t arm2, const gr_complex* win2,
+                                   uint8_t arm3, const gr_complex* win3,
+                                   size_t H_pad,
+                                   gr_complex* dest4) noexcept
+    {
+        const float* h0_ptr = h_base + static_cast<size_t>(arm0) * h_stride;
+        const float* h1_ptr = h_base + static_cast<size_t>(arm1) * h_stride;
+        const float* h2_ptr = h_base + static_cast<size_t>(arm2) * h_stride;
+        const float* h3_ptr = h_base + static_cast<size_t>(arm3) * h_stride;
+
+        const float* xp0 = reinterpret_cast<const float*>(win0);
+        const float* xp1 = reinterpret_cast<const float*>(win1);
+        const float* xp2 = reinterpret_cast<const float*>(win2);
+        const float* xp3 = reinterpret_cast<const float*>(win3);
+
+        __m256 acc0_lo = _mm256_setzero_ps(), acc0_hi = _mm256_setzero_ps();
+        __m256 acc1_lo = _mm256_setzero_ps(), acc1_hi = _mm256_setzero_ps();
+        __m256 acc2_lo = _mm256_setzero_ps(), acc2_hi = _mm256_setzero_ps();
+        __m256 acc3_lo = _mm256_setzero_ps(), acc3_hi = _mm256_setzero_ps();
+
+        const bool w1_same = (win1 == win0);
+        const bool w2_same = (win2 == win1);
+        const bool w3_same = (win3 == win2);
+
+        for (size_t q = 0; q < H_pad; q += 8) {
+            __m256 x0_lo = _mm256_loadu_ps(xp0 + 2 * q);
+            __m256 x0_hi = _mm256_loadu_ps(xp0 + 2 * q + 8);
+            acc0_lo = _mm256_fmadd_ps(x0_lo, _mm256_loadu_ps(h0_ptr + 2 * q), acc0_lo);
+            acc0_hi = _mm256_fmadd_ps(x0_hi, _mm256_loadu_ps(h0_ptr + 2 * q + 8), acc0_hi);
+
+            __m256 x1_lo = w1_same ? x0_lo : _mm256_loadu_ps(xp1 + 2 * q);
+            __m256 x1_hi = w1_same ? x0_hi : _mm256_loadu_ps(xp1 + 2 * q + 8);
+            acc1_lo = _mm256_fmadd_ps(x1_lo, _mm256_loadu_ps(h1_ptr + 2 * q), acc1_lo);
+            acc1_hi = _mm256_fmadd_ps(x1_hi, _mm256_loadu_ps(h1_ptr + 2 * q + 8), acc1_hi);
+
+            __m256 x2_lo = w2_same ? x1_lo : _mm256_loadu_ps(xp2 + 2 * q);
+            __m256 x2_hi = w2_same ? x1_hi : _mm256_loadu_ps(xp2 + 2 * q + 8);
+            acc2_lo = _mm256_fmadd_ps(x2_lo, _mm256_loadu_ps(h2_ptr + 2 * q), acc2_lo);
+            acc2_hi = _mm256_fmadd_ps(x2_hi, _mm256_loadu_ps(h2_ptr + 2 * q + 8), acc2_hi);
+
+            __m256 x3_lo = w3_same ? x2_lo : _mm256_loadu_ps(xp3 + 2 * q);
+            __m256 x3_hi = w3_same ? x2_hi : _mm256_loadu_ps(xp3 + 2 * q + 8);
+            acc3_lo = _mm256_fmadd_ps(x3_lo, _mm256_loadu_ps(h3_ptr + 2 * q), acc3_lo);
+            acc3_hi = _mm256_fmadd_ps(x3_hi, _mm256_loadu_ps(h3_ptr + 2 * q + 8), acc3_hi);
+        }
+
+        __m256 a0 = _mm256_add_ps(acc0_lo, acc0_hi);
+        __m256 a1 = _mm256_add_ps(acc1_lo, acc1_hi);
+        __m256 a2 = _mm256_add_ps(acc2_lo, acc2_hi);
+        __m256 a3 = _mm256_add_ps(acc3_lo, acc3_hi);
+
+        __m128 s0 = _mm_add_ps(_mm256_castps256_ps128(a0), _mm256_extractf128_ps(a0, 1));
+        __m128 s1 = _mm_add_ps(_mm256_castps256_ps128(a1), _mm256_extractf128_ps(a1, 1));
+        __m128 s2 = _mm_add_ps(_mm256_castps256_ps128(a2), _mm256_extractf128_ps(a2, 1));
+        __m128 s3 = _mm_add_ps(_mm256_castps256_ps128(a3), _mm256_extractf128_ps(a3, 1));
+
+        __m128 out01 = _mm_add_ps(
+            _mm_castpd_ps(_mm_unpacklo_pd(_mm_castps_pd(s0), _mm_castps_pd(s1))),
+            _mm_castpd_ps(_mm_unpackhi_pd(_mm_castps_pd(s0), _mm_castps_pd(s1))));
+        __m128 out23 = _mm_add_ps(
+            _mm_castpd_ps(_mm_unpacklo_pd(_mm_castps_pd(s2), _mm_castps_pd(s3))),
+            _mm_castpd_ps(_mm_unpackhi_pd(_mm_castps_pd(s2), _mm_castps_pd(s3))));
+
+        _mm_storeu_ps(reinterpret_cast<float*>(dest4), out01);
+        _mm_storeu_ps(reinterpret_cast<float*>(dest4 + 2), out23);
+    }
 #endif
+
+    gr_complex filter_window_sc16(uint32_t arm_idx,
+                                  const std::complex<int16_t>* win_oldest) const
+    {
+        switch (fir_kind_) {
+        case FirKind::Scalar:
+        case FirKind::Volk: {
+            const float* trev_dup_scaled =
+                arms_rev_dup_scaled_.data() +
+                static_cast<size_t>(arm_idx) * (2 * H_pad_);
+            return fir_scalar_sc16(trev_dup_scaled, win_oldest, H_);
+        }
+        case FirKind::Avx2:
+#if UWB_RESAMP_HAVE_AVX2
+        {
+            const float* trev_dup_scaled =
+                arms_rev_dup_scaled_.data() +
+                static_cast<size_t>(arm_idx) * (2 * H_pad_);
+            return fir_avx2_sc16(trev_dup_scaled, win_oldest, H_pad_);
+        }
+#else
+        {
+            const float* trev_dup_scaled =
+                arms_rev_dup_scaled_.data() +
+                static_cast<size_t>(arm_idx) * (2 * H_pad_);
+            return fir_scalar_sc16(trev_dup_scaled, win_oldest, H_);
+        }
+#endif
+        }
+        const float* trev_dup_scaled =
+            arms_rev_dup_scaled_.data() +
+            static_cast<size_t>(arm_idx) * (2 * H_pad_);
+        return fir_scalar_sc16(trev_dup_scaled, win_oldest, H_);
+    }
 
     gr_complex filter_window(uint32_t arm_idx,
                              const gr_complex* win_oldest) const
@@ -1020,10 +1313,46 @@ private:
             const auto t_f0 =
                 profile_enabled_ ? Clock::now() : Clock::time_point{};
             gr_complex* dest = out + produced;
-            for (uint32_t o = 0; o < kInterp; ++o) {
-                const size_t win_start = hist_n + cur_post + 1 - H_;
-                dest[o] = filter_window(arms[o], work_.data() + win_start);
-                cur_post += advs[o];
+#if UWB_RESAMP_HAVE_AVX2
+            if (fir_kind_ == FirKind::Avx2) {
+                const float* h_base = arms_rev_dup_.data();
+                const size_t h_stride = 2 * H_pad_;
+
+                uint32_t o = 0;
+                for (; o + 4 <= kInterp; o += 4) {
+                    const gr_complex* win0 =
+                        work_.data() + (hist_n + cur_post + 1 - H_);
+                    cur_post += advs[o];
+                    const gr_complex* win1 =
+                        work_.data() + (hist_n + cur_post + 1 - H_);
+                    cur_post += advs[o + 1];
+                    const gr_complex* win2 =
+                        work_.data() + (hist_n + cur_post + 1 - H_);
+                    cur_post += advs[o + 2];
+                    const gr_complex* win3 =
+                        work_.data() + (hist_n + cur_post + 1 - H_);
+                    cur_post += advs[o + 3];
+
+                    fir_avx2_4x(h_base, h_stride,
+                                arms[o], win0,
+                                arms[o + 1], win1,
+                                arms[o + 2], win2,
+                                arms[o + 3], win3,
+                                H_pad_, dest + o);
+                }
+                for (; o < kInterp; ++o) {
+                    const size_t win_start = hist_n + cur_post + 1 - H_;
+                    dest[o] = filter_window(arms[o], work_.data() + win_start);
+                    cur_post += advs[o];
+                }
+            } else
+#endif
+            {
+                for (uint32_t o = 0; o < kInterp; ++o) {
+                    const size_t win_start = hist_n + cur_post + 1 - H_;
+                    dest[o] = filter_window(arms[o], work_.data() + win_start);
+                    cur_post += advs[o];
+                }
             }
             if (profile_enabled_) {
                 profile_.ns_fir += ns_since(t_f0);
@@ -1196,6 +1525,382 @@ private:
         r.produced = produced_total;
         r.consumed = consumed;
         return r;
+    }
+
+    ProcessResult run_legacy_sc16(size_t hist_n,
+                                  size_t post_n,
+                                  size_t post_i,
+                                  bool started_held,
+                                  size_t ninput,
+                                  size_t total_w,
+                                  gr_complex* out,
+                                  size_t max_out)
+    {
+        const auto t_f0 =
+            profile_enabled_ ? Clock::now() : Clock::time_point{};
+        size_t produced = 0;
+        while (produced < max_out) {
+            const size_t win_start = hist_n + post_i + 1 - H_;
+            out[produced++] =
+                filter_window_sc16(ctr_, work_sc16_.data() + win_start);
+            ++output_items_;
+            ctr_ += kDecim;
+            while (ctr_ >= kInterp) {
+                ctr_ -= kInterp;
+                ++post_i;
+                if (post_i >= post_n) {
+                    if (profile_enabled_)
+                        profile_.ns_fir += ns_since(t_f0);
+                    const auto t_st =
+                        profile_enabled_ ? Clock::now() : Clock::time_point{};
+                    update_hist_from_work_sc16(total_w);
+                    have_current_ = false;
+                    if (profile_enabled_)
+                        profile_.ns_state += ns_since(t_st);
+                    ProcessResult r;
+                    r.produced = produced;
+                    r.consumed = ninput;
+                    return r;
+                }
+                current_sc16_ = work_sc16_[hist_n + post_i];
+                have_current_ = true;
+            }
+        }
+        if (profile_enabled_)
+            profile_.ns_fir += ns_since(t_f0);
+
+        const auto t_st =
+            profile_enabled_ ? Clock::now() : Clock::time_point{};
+        if (hist_n > 0) {
+            const size_t cur = hist_n + post_i;
+            std::memcpy(hist_sc16_.data(),
+                        work_sc16_.data() + (cur - hist_n),
+                        hist_n * sizeof(std::complex<int16_t>));
+        }
+        have_current_ = true;
+        current_sc16_ = work_sc16_[hist_n + post_i];
+        if (profile_enabled_)
+            profile_.ns_state += ns_since(t_st);
+
+        ProcessResult r;
+        r.produced = produced;
+        r.consumed = consumed_from_posts(started_held, post_i + 1, ninput,
+                                         /*exhausted=*/false);
+        return r;
+    }
+
+    ProcessResult run_macroblock_sc16(size_t hist_n,
+                                      size_t post_n,
+                                      size_t post_i,
+                                      bool started_held,
+                                      size_t ninput,
+                                      size_t total_w,
+                                      gr_complex* out,
+                                      size_t max_out)
+    {
+        size_t produced = 0;
+
+        while (produced + kInterp <= max_out &&
+               post_i + static_cast<size_t>(kDecim) < post_n) {
+            const auto t_s0 =
+                profile_enabled_ ? Clock::now() : Clock::time_point{};
+            const size_t sched_base =
+                static_cast<size_t>(ctr_) * static_cast<size_t>(kInterp);
+            const uint8_t* arms = schedule_arm_.data() + sched_base;
+            const uint8_t* advs = schedule_adv_.data() + sched_base;
+            size_t cur_post = post_i;
+            if (profile_enabled_)
+                profile_.ns_schedule += ns_since(t_s0);
+
+            const auto t_f0 =
+                profile_enabled_ ? Clock::now() : Clock::time_point{};
+            gr_complex* dest = out + produced;
+
+#if UWB_RESAMP_HAVE_AVX2
+            if (fir_kind_ == FirKind::Avx2) {
+                const float* h_base = arms_rev_dup_scaled_.data();
+                const size_t h_stride = 2 * H_pad_;
+
+                uint32_t o = 0;
+                for (; o + 4 <= kInterp; o += 4) {
+                    const std::complex<int16_t>* win0 =
+                        work_sc16_.data() + (hist_n + cur_post + 1 - H_);
+                    cur_post += advs[o];
+                    const std::complex<int16_t>* win1 =
+                        work_sc16_.data() + (hist_n + cur_post + 1 - H_);
+                    cur_post += advs[o + 1];
+                    const std::complex<int16_t>* win2 =
+                        work_sc16_.data() + (hist_n + cur_post + 1 - H_);
+                    cur_post += advs[o + 2];
+                    const std::complex<int16_t>* win3 =
+                        work_sc16_.data() + (hist_n + cur_post + 1 - H_);
+                    cur_post += advs[o + 3];
+
+                    fir_avx2_sc16_4x(h_base, h_stride,
+                                     arms[o], win0,
+                                     arms[o + 1], win1,
+                                     arms[o + 2], win2,
+                                     arms[o + 3], win3,
+                                     H_pad_, dest + o);
+                }
+                for (; o < kInterp; ++o) {
+                    const size_t win_start = hist_n + cur_post + 1 - H_;
+                    dest[o] = filter_window_sc16(arms[o], work_sc16_.data() + win_start);
+                    cur_post += advs[o];
+                }
+            } else
+#endif
+            {
+                for (uint32_t o = 0; o < kInterp; ++o) {
+                    const size_t win_start = hist_n + cur_post + 1 - H_;
+                    dest[o] = filter_window_sc16(arms[o], work_sc16_.data() + win_start);
+                    cur_post += advs[o];
+                }
+            }
+
+            if (profile_enabled_) {
+                profile_.ns_fir += ns_since(t_f0);
+                profile_.macroblocks += 1;
+            }
+
+            produced += kInterp;
+            output_items_ += kInterp;
+            post_i += kDecim;
+            current_sc16_ = work_sc16_[hist_n + post_i];
+            have_current_ = true;
+        }
+
+        // Remainder: per-output.
+        const auto t_f1 =
+            profile_enabled_ ? Clock::now() : Clock::time_point{};
+        while (produced < max_out) {
+            const size_t win_start = hist_n + post_i + 1 - H_;
+            out[produced++] =
+                filter_window_sc16(ctr_, work_sc16_.data() + win_start);
+            ++output_items_;
+            ctr_ += kDecim;
+            while (ctr_ >= kInterp) {
+                ctr_ -= kInterp;
+                ++post_i;
+                if (post_i >= post_n) {
+                    if (profile_enabled_)
+                        profile_.ns_fir += ns_since(t_f1);
+                    const auto t_st =
+                        profile_enabled_ ? Clock::now() : Clock::time_point{};
+                    update_hist_from_work_sc16(total_w);
+                    have_current_ = false;
+                    if (profile_enabled_)
+                        profile_.ns_state += ns_since(t_st);
+                    ProcessResult r;
+                    r.produced = produced;
+                    r.consumed = ninput;
+                    return r;
+                }
+                current_sc16_ = work_sc16_[hist_n + post_i];
+                have_current_ = true;
+            }
+        }
+        if (profile_enabled_)
+            profile_.ns_fir += ns_since(t_f1);
+
+        const auto t_st =
+            profile_enabled_ ? Clock::now() : Clock::time_point{};
+        if (hist_n > 0) {
+            const size_t cur = hist_n + post_i;
+            std::memcpy(hist_sc16_.data(),
+                        work_sc16_.data() + (cur - hist_n),
+                        hist_n * sizeof(std::complex<int16_t>));
+        }
+        have_current_ = true;
+        current_sc16_ = work_sc16_[hist_n + post_i];
+        if (profile_enabled_)
+            profile_.ns_state += ns_since(t_st);
+
+        ProcessResult r;
+        r.produced = produced;
+        r.consumed = consumed_from_posts(started_held, post_i + 1, ninput,
+                                         /*exhausted=*/false);
+        return r;
+    }
+
+    void fir_parallel_sc16(gr_complex* out,
+                           size_t n_out,
+                           int nworkers)
+    {
+        const int nw = std::max(1, nworkers);
+        if (nw == 1 || n_out < 1024) {
+            for (size_t i = 0; i < n_out; ++i) {
+                out[i] = filter_window_sc16(sched_arm_buf_[i],
+                                            work_sc16_.data() + sched_win_buf_[i]);
+            }
+            return;
+        }
+        if (pool_size_ != nw)
+            start_pool(nw);
+        pool_parallel_for(n_out, [this, out](size_t lo, size_t hi) {
+            for (size_t i = lo; i < hi; ++i) {
+                out[i] = filter_window_sc16(sched_arm_buf_[i],
+                                            work_sc16_.data() + sched_win_buf_[i]);
+            }
+        });
+    }
+
+    ProcessResult run_mt_sc16(size_t hist_n,
+                              size_t post_n,
+                              size_t post_i,
+                              bool started_held,
+                              size_t ninput,
+                              size_t total_w,
+                              gr_complex* out,
+                              size_t max_out,
+                              int nworkers)
+    {
+        size_t produced_total = 0;
+        bool exhausted = false;
+        const size_t scratch = sched_arm_buf_.size();
+
+        while (produced_total < max_out && !exhausted) {
+            const auto t_s0 =
+                profile_enabled_ ? Clock::now() : Clock::time_point{};
+
+            size_t n_out = 0;
+            const size_t batch_cap =
+                std::min(scratch, max_out - produced_total);
+            while (n_out < batch_cap) {
+                sched_arm_buf_[n_out] = static_cast<uint8_t>(ctr_);
+                sched_win_buf_[n_out] =
+                    static_cast<uint32_t>(hist_n + post_i + 1 - H_);
+                ++n_out;
+                ctr_ += kDecim;
+                while (ctr_ >= kInterp) {
+                    ctr_ -= kInterp;
+                    ++post_i;
+                    if (post_i >= post_n) {
+                        exhausted = true;
+                        break;
+                    }
+                }
+                if (exhausted)
+                    break;
+            }
+            if (profile_enabled_)
+                profile_.ns_schedule += ns_since(t_s0);
+
+            if (n_out == 0)
+                break;
+
+            const auto t_f0 =
+                profile_enabled_ ? Clock::now() : Clock::time_point{};
+            fir_parallel_sc16(out + produced_total, n_out, nworkers);
+            if (profile_enabled_)
+                profile_.ns_fir += ns_since(t_f0);
+
+            produced_total += n_out;
+            output_items_ += n_out;
+        }
+
+        const auto t_st =
+            profile_enabled_ ? Clock::now() : Clock::time_point{};
+        size_t consumed;
+        if (exhausted) {
+            update_hist_from_work_sc16(total_w);
+            have_current_ = false;
+            consumed = ninput;
+        } else {
+            if (hist_n > 0) {
+                const size_t cur = hist_n + post_i;
+                std::memcpy(hist_sc16_.data(),
+                            work_sc16_.data() + (cur - hist_n),
+                            hist_n * sizeof(std::complex<int16_t>));
+            }
+            have_current_ = true;
+            current_sc16_ = work_sc16_[hist_n + post_i];
+            consumed = consumed_from_posts(started_held, post_i + 1, ninput,
+                                           /*exhausted=*/false);
+        }
+        if (profile_enabled_)
+            profile_.ns_state += ns_since(t_st);
+
+        ProcessResult r;
+        r.produced = produced_total;
+        r.consumed = consumed;
+        return r;
+    }
+
+    size_t flush_sc16_internal(gr_complex* out,
+                               size_t max_out,
+                               bool first_flush,
+                               uint64_t N,
+                               size_t Lout)
+    {
+        size_t produced = 0;
+        const size_t hist_n = hist_sc16_.size();
+
+        if constexpr (kDecim > kInterp) {
+            if (first_flush && hist_n > 0) {
+                ctr_ = static_cast<uint32_t>(
+                    (static_cast<uint64_t>(output_items_) *
+                     static_cast<uint64_t>(kDecim)) %
+                    static_cast<uint64_t>(kInterp));
+                const int64_t logical_post =
+                    (static_cast<int64_t>(output_items_) *
+                     static_cast<int64_t>(kDecim)) /
+                    static_cast<int64_t>(kInterp);
+                const int64_t overshoot =
+                    logical_post - static_cast<int64_t>(N);
+                if (overshoot > 0) {
+                    const size_t sh = static_cast<size_t>(
+                        std::min<int64_t>(overshoot,
+                                          static_cast<int64_t>(hist_n)));
+                    std::memmove(hist_sc16_.data(), hist_sc16_.data() + sh,
+                                 (hist_n - sh) * sizeof(std::complex<int16_t>));
+                    std::fill(hist_sc16_.data() + (hist_n - sh),
+                              hist_sc16_.data() + hist_n, std::complex<int16_t>(0, 0));
+                }
+            }
+        }
+
+        const size_t rem_out = (output_items_ < Lout) ? (Lout - output_items_) : 0;
+        const size_t zeros_needed = (rem_out * kDecim) / kInterp + H_ + 32;
+
+        const size_t held = have_current_ ? 1u : 0u;
+        const size_t post_n = held + zeros_needed;
+        const size_t need = hist_n + post_n + H_pad_ + 16;
+        if (work_sc16_.capacity() < need)
+            work_sc16_.reserve(need);
+        if (work_sc16_.size() < need)
+            work_sc16_.resize(need);
+
+        if (hist_n > 0) {
+            std::memcpy(work_sc16_.data(), hist_sc16_.data(),
+                        hist_n * sizeof(std::complex<int16_t>));
+        }
+        size_t wpos = hist_n;
+        if (have_current_) {
+            work_sc16_[wpos++] = current_sc16_;
+        }
+        std::fill(work_sc16_.data() + wpos, work_sc16_.data() + need,
+                  std::complex<int16_t>(0, 0));
+
+        size_t post_i = 0;
+        while (produced < max_out && output_items_ < Lout) {
+            const size_t win_start = hist_n + post_i + 1 - H_;
+            out[produced++] = filter_window_sc16(ctr_, work_sc16_.data() + win_start);
+            ++output_items_;
+            ctr_ += kDecim;
+            while (ctr_ >= kInterp) {
+                ctr_ -= kInterp;
+                ++post_i;
+            }
+        }
+        if (hist_n > 0) {
+            const size_t cur = hist_n + post_i;
+            std::memcpy(hist_sc16_.data(), work_sc16_.data() + (cur - hist_n),
+                        hist_n * sizeof(std::complex<int16_t>));
+        }
+        have_current_ = false;
+        current_sc16_ = std::complex<int16_t>(0, 0);
+        return produced;
     }
 };
 
