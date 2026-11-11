@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <complex>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -70,6 +71,60 @@ enum class Sc16ScaleMode {
     RawInteger // 1.0f
 };
 
+// ---------------------------------------------------------------------------
+// DSP worker readiness / failure propagation (frozen contract §3)
+// ---------------------------------------------------------------------------
+// A worker starts Pending, publishes Ready after affinity + every allocation /
+// template load / scratch preparation succeeded, and publishes Failed (with a
+// human readable reason) instead of dying when that preparation throws.
+enum class WorkerReadyState {
+    Pending,
+    Ready,
+    Failed
+};
+
+struct WorkerReadyInfo {
+    WorkerReadyState state = WorkerReadyState::Pending;
+    std::string error; // non-empty when state == Failed
+    bool affinity_requested = false;
+    bool affinity_applied = false;
+    int affinity_core = -1;
+};
+
+// RX-side counters.  Only accumulated when
+// PipelineConfig::enable_rx_diagnostics is true; `enabled` records that fact so
+// a caller can tell "zero because nothing happened" from "not measured".
+struct RxDiagnostics {
+    bool enabled = false;
+    uint64_t read_calls = 0;
+    uint64_t samples_read = 0; // complex samples actually returned by the source
+    uint64_t bytes_read = 0;   // samples_read * sizeof(complex<int16_t>)
+    uint64_t windows_published = 0;
+    uint64_t windows_dropped = 0;
+    uint64_t slot_copy_bytes = 0;
+    uint64_t stream_buf_resize_count = 0;    // resizes that changed the length
+    uint64_t stream_buf_zero_init_bytes = 0; // value-initialised tail bytes
+    uint64_t compact_move_bytes = 0;         // bytes moved by the existing erase()
+    uint64_t max_buffered_samples = 0;       // peak valid samples in stream_buf
+    double read_us = 0.0;                    // source_->read_samples
+    double assemble_us = 0.0;                // stream_buf compaction / erase
+    double slot_copy_us = 0.0;               // slot memcpy
+    double dispatch_us = 0.0;                // pool probing + publish
+    double ledger_wait_us = 0.0;             // RX-side ledger_mutex_ wait
+};
+
+// Commit-path counters.  Only accumulated when
+// PipelineConfig::enable_commit_diagnostics is true.
+struct CommitDiagnostics {
+    bool enabled = false;
+    uint64_t commit_calls = 0;
+    uint64_t results_emitted = 0;
+    uint64_t max_out_of_order_span = 0; // max(window_id - next_commit_id_) seen
+    double lock_wait_us = 0.0;          // waiting for commit_mutex_
+    double reorder_us = 0.0;            // insertion + in-order flush, no callback
+    double callback_us = 0.0;           // user result callback
+};
+
 struct StreamReadMeta {
     int64_t start_sample_abs = 0;
     bool has_time_spec = false;
@@ -100,6 +155,21 @@ struct WindowResult {
     int64_t native_start_abs = 0;
     size_t native_sample_count = 0;
     WindowTimingStats timing;
+
+    // Monotonic (steady_clock) stage boundaries, used by the runner to delimit
+    // the steady-state measurement interval (frozen contract §2).
+    //   rx_push_time     : sampled just before publish_ready_slot(); identical
+    //                      value to Sc16WindowSlot::push_time, so queue_us keeps
+    //                      its historical meaning.
+    //   worker_start_time: worker picked the slot up.
+    //   worker_end_time  : DSP finished, slot about to be released.
+    //   commit_time      : commit_result finished the in-order emit (callback
+    //                      included).
+    // DroppedAdmission results only carry rx_push_time.
+    std::chrono::steady_clock::time_point rx_push_time{};
+    std::chrono::steady_clock::time_point worker_start_time{};
+    std::chrono::steady_clock::time_point worker_end_time{};
+    std::chrono::steady_clock::time_point commit_time{};
 
     // SIC result
     bool sic_executed = false;
@@ -166,6 +236,21 @@ struct PipelineConfig {
     // Resampler configuration
     std::string resampler_profile = "quality_minorder";
     int resampler_workers = 1;
+
+    // ------------------------------------------------------------------
+    // Phase 0 diagnostics (frozen contract §1)
+    // ------------------------------------------------------------------
+    // Both default to false.  While false the only cost on the hot path is a
+    // single boolean test; no clock reads, no extra synchronisation.
+    bool enable_rx_diagnostics = false;
+    bool enable_commit_diagnostics = false;
+
+    // QA-only injection hook, called on each DSP worker thread after the
+    // affinity is applied and before any allocation.  Throwing moves that
+    // worker to WorkerReadyState::Failed and propagates the message; the
+    // production path leaves it empty (then it costs nothing, not even a
+    // synchronisation).
+    std::function<void(int worker_id)> test_worker_init_hook;
 
     uint64_t max_windows = 0; // 0 = unlimited
     uint64_t max_samples = 0; // 0 = unlimited
@@ -264,7 +349,13 @@ private:
 class UWB_API ISc16StreamSource {
 public:
     virtual ~ISc16StreamSource() = default;
+    // Open the device/file.  Must NOT begin acquisition: the pipeline calls
+    // start_stream() only after every DSP worker published Ready, so a device
+    // cannot queue samples behind the ready barrier.
     virtual bool open() = 0;
+    // Begin acquisition.  Called once per run, from the RX thread, after the
+    // worker-ready barrier.  Default is a no-op for passive/file sources.
+    virtual bool start_stream() { return true; }
     virtual void close() = 0;
     virtual size_t read_samples(std::complex<int16_t>* dest,
                                 size_t max_samples,
@@ -305,6 +396,9 @@ public:
 
     bool open() override;
     void close() override;
+    // Issues STREAM_MODE_START_CONTINUOUS.  Split out of open() so the device
+    // does not start streaming while the DSP workers are still initialising.
+    bool start_stream() override;
     size_t read_samples(std::complex<int16_t>* dest,
                         size_t max_samples,
                         StreamReadMeta& meta) override;
@@ -335,6 +429,32 @@ public:
     void stop();
     void wait();
 
+    // ------------------------------------------------------------------
+    // Worker readiness / failure (frozen contract §3, A2)
+    // ------------------------------------------------------------------
+    // Blocks until every DSP worker published Ready, any worker published
+    // Failed, or stop() was called.  timeout_ms == 0 waits indefinitely (still
+    // interruptible by stop()).  Returns true only when all workers are Ready;
+    // Failed / timeout / stop return false.  Safe to call after wait(): it then
+    // simply reports the current state.
+    bool wait_ready(unsigned timeout_ms = 0);
+    bool ready_ok() const;  // all Ready and none Failed
+    bool failed() const;    // any worker Failed
+    // Publish-ordered snapshot of every worker.  Every state and every
+    // affinity_* field is written before that worker becomes Ready/Failed, so
+    // reading it after wait_ready() / wait() needs no further synchronisation.
+    const std::vector<WorkerReadyInfo>& worker_ready_info() const { return worker_ready_; }
+    std::string init_error() const; // first failure reason, empty == no failure
+
+    // ------------------------------------------------------------------
+    // Diagnostics (frozen contract §3).  Counters are written by the RX and
+    // worker threads; read them after wait() only, and call
+    // reset_diagnostics() either before start() or after wait().
+    // ------------------------------------------------------------------
+    const RxDiagnostics& rx_diagnostics() const;
+    const CommitDiagnostics& commit_diagnostics() const;
+    void reset_diagnostics();
+
     void set_result_callback(ResultCallback cb) { result_cb_ = std::move(cb); }
 
     const PipelineLedger& ledger() const { return ledger_; }
@@ -350,6 +470,16 @@ private:
     // completions and flushes them strictly by window_id.
     void commit_result(int worker_id, const WindowResult& res);
 
+    // --- ready barrier helpers (all *locked variants need ready_mutex_) ---
+    bool all_ready_locked() const;
+    bool any_failed_locked() const;
+    // RX-side block until the barrier resolves; false == abort acquisition.
+    bool wait_for_workers_ready();
+    void publish_worker_state(int worker_id, WorkerReadyState state, const std::string& err);
+    // Post-join safety net: settle any slot still sitting in a ring pool so
+    // every admitted window reaches a terminal state.
+    void recover_orphaned_windows();
+
     PipelineConfig cfg_;
     std::unique_ptr<ISc16StreamSource> source_;
     // One lock-free SPSC ring pool per DSP worker.  The RX producer thread is
@@ -360,6 +490,54 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> rx_finished_{false};
+
+    // --- ready barrier (A2) ------------------------------------------------
+    // Guards worker_ready_ and the ready-epoch handshake with stop().  Workers
+    // publish under it and notify; wait_ready() / the RX thread wait on it.
+    // Never held while running DSP work.
+    mutable std::mutex ready_mutex_;
+    std::condition_variable ready_cv_;
+    std::vector<WorkerReadyInfo> worker_ready_;
+
+    // --- Phase 0 diagnostics accumulators ----------------------------------
+    // Relaxed atomics: the RX counters have a single writer (the RX thread),
+    // the commit counters are shared by all DSP workers.  Read them after
+    // wait() only.  Deliberately NOT under ledger_mutex_, so instrumentation can
+    // never extend ledger lock hold time.
+    struct RxDiagAcc {
+        std::atomic<uint64_t> read_calls{ 0 };
+        std::atomic<uint64_t> samples_read{ 0 };
+        std::atomic<uint64_t> bytes_read{ 0 };
+        std::atomic<uint64_t> windows_published{ 0 };
+        std::atomic<uint64_t> windows_dropped{ 0 };
+        std::atomic<uint64_t> slot_copy_bytes{ 0 };
+        std::atomic<uint64_t> stream_buf_resize_count{ 0 };
+        std::atomic<uint64_t> stream_buf_zero_init_bytes{ 0 };
+        std::atomic<uint64_t> compact_move_bytes{ 0 };
+        std::atomic<uint64_t> max_buffered_samples{ 0 };
+        std::atomic<uint64_t> read_ns{ 0 };
+        std::atomic<uint64_t> assemble_ns{ 0 };
+        std::atomic<uint64_t> slot_copy_ns{ 0 };
+        std::atomic<uint64_t> dispatch_ns{ 0 };
+        std::atomic<uint64_t> ledger_wait_ns{ 0 };
+    };
+
+    struct CommitDiagAcc {
+        std::atomic<uint64_t> commit_calls{ 0 };
+        std::atomic<uint64_t> results_emitted{ 0 };
+        std::atomic<uint64_t> max_out_of_order_span{ 0 };
+        std::atomic<uint64_t> lock_wait_ns{ 0 };
+        std::atomic<uint64_t> reorder_ns{ 0 };
+        std::atomic<uint64_t> callback_ns{ 0 };
+    };
+
+    RxDiagAcc rx_acc_{};
+    CommitDiagAcc commit_acc_{};
+    // Snapshots handed out by rx_diagnostics() / commit_diagnostics().  They
+    // are refilled on every call; the frozen contract only allows reading them
+    // after wait(), so no extra locking is required.
+    mutable RxDiagnostics rx_diag_view_{};
+    mutable CommitDiagnostics commit_diag_view_{};
 
     std::thread rx_thread_;
     std::vector<std::thread> dsp_threads_;

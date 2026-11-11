@@ -21,7 +21,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1127,6 +1130,960 @@ BOOST_AUTO_TEST_CASE(test_pipeline_multicore_stop_and_backpressure)
     BOOST_CHECK_EQUAL(admitted_results, static_cast<size_t>(ledger.admitted_windows));
 
     std::remove(tmp_file.c_str());
+}
+
+// ===========================================================================
+// Round-2 A2 / lifecycle / RX-boundary QA (2026-11-11)
+//
+// Frozen interface and measurement contract:
+//   docs/performance/接口冻结_UHD_SC16第二轮优化_2026-11-11.md
+//   docs/performance/OpenCode_UHD_SC16重采样与流水线优化任务书_2026-11-11.md
+//     §5 (A3), §6, §8, §9
+//
+// Everything below is deliberately scheduler-agnostic: it asserts terminal
+// state semantics, ledger conservation, bounded shutdown and absolute sample
+// coordinates.  It never re-freezes scheduling-dependent counts such as
+// "exactly 8 admitted windows" (task book §5 A3 forbids that).
+// ===========================================================================
+namespace {
+
+// Deterministic in-memory source.  Sample k is a pure function of its absolute
+// index, so every window is completely described by
+// (native_start_abs, native_sample_count) and the QA needs no files, no
+// testdata directory and no working-directory assumption.
+//
+// The optional `read_sizes` vector forces adversarial short reads: the RX
+// buffer has to assemble one window out of several reads.
+class PredictiveSc16Source : public ISc16StreamSource
+{
+public:
+    explicit PredictiveSc16Source(int64_t total_samples,
+                                  std::vector<size_t> read_sizes = std::vector<size_t>(),
+                                  double rate = 1.0e6)
+        : total_(total_samples), sizes_(std::move(read_sizes)), rate_(rate)
+    {
+    }
+
+    // real = index & 0x7fff, imag = (index >> 15) & 0x7fff
+    static std::complex<int16_t> sample_at(int64_t index)
+    {
+        const uint64_t u = static_cast<uint64_t>(index);
+        return std::complex<int16_t>(static_cast<int16_t>(u & 0x7fffu),
+                                     static_cast<int16_t>((u >> 15) & 0x7fffu));
+    }
+
+    static std::vector<std::complex<int16_t>> make_pattern(int64_t total_samples)
+    {
+        std::vector<std::complex<int16_t>> data(static_cast<size_t>(total_samples));
+        for (int64_t i = 0; i < total_samples; ++i) {
+            data[static_cast<size_t>(i)] = sample_at(i);
+        }
+        return data;
+    }
+
+    // --- ISc16StreamSource ---------------------------------------------------
+    bool open() override
+    {
+        pos_.store(0, std::memory_order_relaxed);
+        eof_.store(false, std::memory_order_relaxed);
+        closed_.store(false, std::memory_order_relaxed);
+        return true;
+    }
+
+    void close() override { closed_.store(true, std::memory_order_relaxed); }
+
+    // The pipeline must call this only after every DSP worker published Ready.
+    bool start_stream() override
+    {
+        start_stream_calls_.fetch_add(1, std::memory_order_relaxed);
+        start_stream_all_ready_ =
+            ready_workers_.load(std::memory_order_acquire) >= expected_workers_;
+        return start_stream_result_;
+    }
+
+    double actual_rx_rate() const override { return rate_; }
+
+    bool is_eof() const override { return eof_.load(std::memory_order_relaxed); }
+
+    size_t read_samples(std::complex<int16_t>* dest,
+                        size_t max_samples,
+                        StreamReadMeta& meta) override
+    {
+        meta = StreamReadMeta{};
+        meta.start_sample_abs = pos_.load(std::memory_order_relaxed);
+        if (!dest || max_samples == 0) {
+            eof_.store(true, std::memory_order_relaxed);
+            meta.is_eof = true;
+            return 0;
+        }
+
+        // QA gate: the readiness cases must be able to inspect the ledger
+        // before the RX thread is allowed to run ahead.  Bounded, so a failing
+        // assertion can never hang the suite.
+        if (!gate_open_.load(std::memory_order_acquire)) {
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(5000);
+            while (!gate_open_.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::yield();
+            }
+        }
+        if (!gate_open_.load(std::memory_order_acquire)) {
+            gate_timeouts_.fetch_add(1, std::memory_order_relaxed);
+            return 0; // reported as a read timeout, never as EOF
+        }
+
+        // Source-side ordering witness: the first read must not happen before
+        // every worker finished its injected initialisation.
+        if (ready_workers_.load(std::memory_order_acquire) < expected_workers_) {
+            read_before_all_ready_ = true;
+        }
+
+        const int64_t pos = pos_.load(std::memory_order_relaxed);
+        if (pos >= total_) {
+            eof_.store(true, std::memory_order_relaxed);
+            meta.is_eof = true;
+            return 0;
+        }
+
+        size_t n = max_samples;
+        if (!sizes_.empty()) {
+            const size_t slot = static_cast<size_t>(call_index_ % sizes_.size());
+            n = std::min(n, sizes_[slot]);
+        }
+        n = std::min<size_t>(n, static_cast<size_t>(total_ - pos));
+        for (size_t i = 0; i < n; ++i) {
+            dest[i] = sample_at(pos + static_cast<int64_t>(i));
+        }
+        ++call_index_;
+        pos_.store(pos + static_cast<int64_t>(n), std::memory_order_relaxed);
+        if (pos + static_cast<int64_t>(n) >= total_) {
+            // Same semantics as ReplaySc16Source: the read that exhausts the
+            // input returns its samples and reports EOF at the same time.
+            eof_.store(true, std::memory_order_relaxed);
+            meta.is_eof = true;
+        }
+        return n;
+    }
+
+    // --- QA observation points ----------------------------------------------
+    void set_expected_workers(int n) { expected_workers_ = n; }
+    void note_worker_ready() { ready_workers_.fetch_add(1, std::memory_order_release); }
+    void open_gate() { gate_open_.store(true, std::memory_order_release); }
+    bool gate_open() const { return gate_open_.load(std::memory_order_acquire); }
+    bool read_before_all_ready() const { return read_before_all_ready_; }
+    bool start_stream_all_ready() const { return start_stream_all_ready_; }
+    int start_stream_calls() const { return start_stream_calls_.load(std::memory_order_relaxed); }
+    int gate_timeouts() const { return gate_timeouts_.load(std::memory_order_relaxed); }
+    int64_t position() const { return pos_.load(std::memory_order_relaxed); }
+    bool closed() const { return closed_.load(std::memory_order_relaxed); }
+    void set_start_stream_result(bool ok) { start_stream_result_ = ok; }
+
+private:
+    const int64_t total_;
+    const std::vector<size_t> sizes_;
+    const double rate_;
+
+    std::atomic<int64_t> pos_{0};
+    std::atomic<bool> eof_{false};
+    std::atomic<bool> closed_{false};
+    size_t call_index_ = 0; // RX-thread only
+
+    std::atomic<bool> gate_open_{false};
+    std::atomic<int> gate_timeouts_{0};
+    std::atomic<int> ready_workers_{0};
+    int expected_workers_ = 0;
+    bool read_before_all_ready_ = false;
+    bool start_stream_all_ready_ = false;
+    std::atomic<int> start_stream_calls_{0};
+    bool start_stream_result_ = true;
+};
+
+double qa_elapsed_ms(std::chrono::steady_clock::time_point since)
+{
+    return std::chrono::duration<double, std::milli>(
+               std::chrono::steady_clock::now() - since)
+        .count();
+}
+
+// Native rate == work rate keeps these cases free of resampling, so the window
+// geometry assertions and the lifecycle timings are not perturbed by the 65/48
+// kernel.  Resampling behaviour is covered by the existing cases above.
+PipelineConfig make_qa_pipeline_cfg(size_t capture,
+                                    size_t pre_guard,
+                                    size_t post_guard,
+                                    int workers,
+                                    size_t pool_capacity,
+                                    uint64_t max_windows,
+                                    double period_samples,
+                                    ConsumerMode mode = ConsumerMode::SicOnly,
+                                    double t0 = 0.0)
+{
+    PipelineConfig cfg;
+    cfg.source_type = StreamSourceType::Replay;
+    cfg.paced_replay = false;
+    cfg.native_rate = 1.0e6;
+    cfg.work_rate = 1.0e6;
+    cfg.schedule_t0 = t0;
+    cfg.period_s = period_samples / cfg.native_rate;
+    cfg.pre_guard_samples = pre_guard;
+    cfg.capture_samples = capture;
+    cfg.post_guard_samples = post_guard;
+    cfg.pool_capacity = pool_capacity;
+    cfg.consumer_mode = mode;
+    cfg.dsp_workers = workers;
+    cfg.cpu_cores_dsp.clear();
+    cfg.max_windows = max_windows;
+    return cfg;
+}
+
+std::vector<WindowResult> qa_run_pipeline(const PipelineConfig& cfg,
+                                          std::unique_ptr<ISc16StreamSource> custom_source,
+                                          const std::string& context)
+{
+    UhdSc16Pipeline pipeline(cfg);
+    BOOST_REQUIRE_MESSAGE(pipeline.initialize(std::move(custom_source)),
+                          context + ": initialize() failed");
+    pipeline.start();
+    BOOST_REQUIRE_MESSAGE(pipeline.wait_ready(5000), context + ": wait_ready(5000) failed");
+    pipeline.wait();
+    return pipeline.results();
+}
+
+// The 11 functional WindowResult fields of the frozen contract (§7.4).
+void qa_check_same_window(const WindowResult& a,
+                          const WindowResult& b,
+                          const std::string& what)
+{
+    BOOST_CHECK_MESSAGE(a.window_id == b.window_id, what << ": window_id");
+    BOOST_CHECK_MESSAGE(static_cast<int>(a.state) == static_cast<int>(b.state),
+                        what << ": state");
+    BOOST_CHECK_MESSAGE(a.native_start_abs == b.native_start_abs,
+                        what << ": native_start_abs");
+    BOOST_CHECK_MESSAGE(a.native_sample_count == b.native_sample_count,
+                        what << ": native_sample_count");
+    BOOST_CHECK_MESSAGE(a.sic_executed == b.sic_executed, what << ": sic_executed");
+    BOOST_CHECK_MESSAGE(a.sic_committed == b.sic_committed, what << ": sic_committed");
+    BOOST_CHECK_MESSAGE(a.actual_suppression_db == b.actual_suppression_db,
+                        what << ": actual_suppression_db");
+    BOOST_CHECK_MESSAGE(a.sic_status == b.sic_status, what << ": sic_status");
+    BOOST_CHECK_MESSAGE(a.radar_executed == b.radar_executed, what << ": radar_executed");
+    BOOST_CHECK_MESSAGE(a.radar_sfd_found == b.radar_sfd_found, what << ": radar_sfd_found");
+    BOOST_CHECK_MESSAGE(a.radar_peak_metric == b.radar_peak_metric,
+                        what << ": radar_peak_metric");
+    BOOST_CHECK_MESSAGE(a.radar_detected_start == b.radar_detected_start,
+                        what << ": radar_detected_start");
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Test Case 12: test_pipeline_ready_barrier_slow_init  (A3 a, A2)
+//   A 30 ms worker initialisation must not break wait_ready(), and no window
+//   may be admitted before every worker published Ready.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_ready_barrier_slow_init)
+{
+    const int kWorkers = 4;
+    const size_t kCapture = 2000;
+    const size_t kPre = 100;
+    const size_t kPost = 100;
+    const size_t kCapacity = kPre + kCapture + kPost;
+    const uint64_t kWindows = 6;
+
+    auto source = std::make_unique<PredictiveSc16Source>(
+        static_cast<int64_t>(kCapacity * (kWindows + 4)));
+    PredictiveSc16Source* src = source.get();
+    src->set_expected_workers(kWorkers);
+    // The RX thread stays blocked in read_samples() until the assertions on the
+    // ready barrier have been made, so "admitted == 0" cannot be raced.
+    BOOST_REQUIRE(!src->gate_open());
+
+    PipelineConfig cfg = make_qa_pipeline_cfg(kCapture, kPre, kPost, kWorkers,
+                                              /*pool*/ 4, kWindows,
+                                              static_cast<double>(kCapacity));
+
+    std::atomic<int> hooks_done{0};
+    cfg.test_worker_init_hook = [&](int worker_id) {
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(worker_id == 1 ? 30 : 1));
+        hooks_done.fetch_add(1, std::memory_order_relaxed);
+        // Witness for "all injected initialisation finished".  The pipeline
+        // publishes Ready only after its own remaining allocations, i.e. later
+        // than this counter, so a read that observes a smaller count is a
+        // barrier violation.
+        src->note_worker_ready();
+    };
+
+    UhdSc16Pipeline pipeline(cfg);
+    BOOST_REQUIRE(pipeline.initialize(std::move(source)));
+
+    const auto t_start = std::chrono::steady_clock::now();
+    pipeline.start();
+    const bool ready = pipeline.wait_ready(2000);
+    const double ready_ms = qa_elapsed_ms(t_start);
+
+    BOOST_REQUIRE_MESSAGE(ready,
+                          "wait_ready(2000) must succeed even with a 30 ms worker init");
+    BOOST_CHECK_LE(ready_ms, 2000.0);
+    BOOST_CHECK_GE(ready_ms, 20.0); // the slow worker really delayed readiness
+
+    BOOST_CHECK(pipeline.ready_ok());
+    BOOST_CHECK(!pipeline.failed());
+    BOOST_CHECK(pipeline.init_error().empty());
+    BOOST_REQUIRE_EQUAL(pipeline.worker_ready_info().size(),
+                        static_cast<size_t>(kWorkers));
+    for (int w = 0; w < kWorkers; ++w) {
+        BOOST_CHECK_EQUAL(static_cast<int>(pipeline.worker_ready_info()[w].state),
+                          static_cast<int>(WorkerReadyState::Ready));
+        BOOST_CHECK(pipeline.worker_ready_info()[w].error.empty());
+    }
+    BOOST_CHECK_EQUAL(hooks_done.load(), kWorkers);
+
+    // The contractual gate: nothing may have been admitted before all workers
+    // were Ready.  The RX thread is still parked inside read_samples().
+    BOOST_CHECK_EQUAL(pipeline.ledger().admitted_windows, 0u);
+    BOOST_CHECK_EQUAL(pipeline.ledger().offered_windows, 0u);
+    BOOST_CHECK_EQUAL(pipeline.ledger().completed_windows, 0u);
+
+    src->open_gate();
+    pipeline.wait();
+
+    // start_stream() is only legal after the barrier, and it must have been
+    // invoked exactly once for this run.
+    BOOST_CHECK_EQUAL(src->start_stream_calls(), 1);
+    BOOST_CHECK_MESSAGE(src->start_stream_all_ready(),
+                        "start_stream() ran before every worker reported Ready");
+    BOOST_CHECK_MESSAGE(!src->read_before_all_ready(),
+                        "read_samples() ran before every worker finished initialising");
+    BOOST_CHECK_EQUAL(src->gate_timeouts(), 0);
+
+    const PipelineLedger& ledger = pipeline.ledger();
+    std::string err;
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+    BOOST_CHECK_EQUAL(ledger.offered_windows, kWindows);
+    BOOST_CHECK_EQUAL(ledger.admitted_windows + ledger.dropped_admission, kWindows);
+    BOOST_CHECK_EQUAL(ledger.completed_windows, ledger.admitted_windows);
+    BOOST_CHECK_EQUAL(pipeline.results().size(),
+                      static_cast<size_t>(ledger.admitted_windows +
+                                          ledger.dropped_admission));
+
+    for (size_t i = 0; i < pipeline.results().size(); ++i) {
+        BOOST_CHECK_EQUAL(pipeline.results()[i].window_id, i);
+        // The first window is clipped at sample 0 by the negative pre-guard.
+        const int64_t expected_start = std::max<int64_t>(
+            0, static_cast<int64_t>(i) * static_cast<int64_t>(kCapacity) -
+                   static_cast<int64_t>(kPre));
+        BOOST_CHECK_EQUAL(pipeline.results()[i].native_start_abs, expected_start);
+        BOOST_CHECK_EQUAL(pipeline.results()[i].native_sample_count, kCapacity);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 13: test_pipeline_init_failure_propagation  (A3 b, A2)
+//   One worker throws during initialisation: wait_ready() must return false,
+//   the failure must be visible, nothing may be admitted or faked as
+//   Completed, and stop()/wait() must still terminate quickly.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_init_failure_propagation)
+{
+    const int kWorkers = 2;
+    const size_t kCapture = 2000;
+    const size_t kPre = 100;
+    const size_t kPost = 100;
+    const size_t kCapacity = kPre + kCapture + kPost;
+
+    auto source = std::make_unique<PredictiveSc16Source>(200000);
+    PredictiveSc16Source* src = source.get();
+    src->open_gate();
+    src->set_expected_workers(kWorkers);
+
+    PipelineConfig cfg = make_qa_pipeline_cfg(kCapture, kPre, kPost, kWorkers,
+                                              /*pool*/ 4, /*windows*/ 100,
+                                              static_cast<double>(kCapacity));
+    cfg.test_worker_init_hook = [](int worker_id) {
+        if (worker_id == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            return;
+        }
+        throw std::runtime_error("qa injected worker init failure");
+    };
+
+    UhdSc16Pipeline pipeline(cfg);
+    BOOST_REQUIRE(pipeline.initialize(std::move(source)));
+
+    const auto t_start = std::chrono::steady_clock::now();
+    pipeline.start();
+    const bool ready = pipeline.wait_ready(2000);
+    const double ready_ms = qa_elapsed_ms(t_start);
+
+    BOOST_CHECK_MESSAGE(!ready, "wait_ready() must report the failed worker");
+    BOOST_CHECK_LE(ready_ms, 2000.0);
+    BOOST_CHECK(pipeline.failed());
+    BOOST_CHECK(!pipeline.ready_ok());
+    BOOST_CHECK_MESSAGE(!pipeline.init_error().empty(),
+                        "init_error() must carry the failure reason");
+    BOOST_CHECK_NE(pipeline.init_error().find("injected"), std::string::npos);
+
+    const auto& info = pipeline.worker_ready_info();
+    BOOST_REQUIRE_EQUAL(info.size(), static_cast<size_t>(kWorkers));
+    BOOST_CHECK_EQUAL(static_cast<int>(info[1].state),
+                      static_cast<int>(WorkerReadyState::Failed));
+    BOOST_CHECK(!info[1].error.empty());
+
+    // Nothing may be admitted before readiness, so the ledger is trivially
+    // conserved and no window may be Completed or fabricated.
+    const PipelineLedger& ledger = pipeline.ledger();
+    std::string err;
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+    BOOST_CHECK_EQUAL(ledger.offered_windows, 0u);
+    BOOST_CHECK_EQUAL(ledger.admitted_windows, 0u);
+    BOOST_CHECK_EQUAL(ledger.completed_windows, 0u);
+    BOOST_CHECK_EQUAL(ledger.dropped_admission, 0u);
+    BOOST_CHECK_EQUAL(ledger.cancelled_windows, 0u);
+    BOOST_CHECK(pipeline.results().empty());
+    BOOST_CHECK_EQUAL(src->start_stream_calls(), 0);
+    BOOST_CHECK_EQUAL(src->position(), 0);
+
+    const auto t_stop = std::chrono::steady_clock::now();
+    pipeline.stop();
+    pipeline.wait();
+    BOOST_CHECK_LE(qa_elapsed_ms(t_stop), 2000.0);
+
+    // Shutdown must not back-fill a fake terminal state.
+    BOOST_CHECK_EQUAL(ledger.completed_windows, 0u);
+    for (const auto& result : pipeline.results()) {
+        BOOST_CHECK(result.state != WindowTerminalState::Completed);
+    }
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 14: test_pipeline_stop_during_ready_wait  (A3 c, A2)
+//   stop() must interrupt wait_ready() promptly while a worker is still
+//   initialising, and the shutdown must stay bounded.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_stop_during_ready_wait)
+{
+    const int kWorkers = 2;
+    const size_t kCapture = 2000;
+    const size_t kPre = 100;
+    const size_t kPost = 100;
+    const size_t kCapacity = kPre + kCapture + kPost;
+
+    auto source = std::make_unique<PredictiveSc16Source>(200000);
+    PredictiveSc16Source* src = source.get();
+    src->open_gate();
+
+    PipelineConfig cfg = make_qa_pipeline_cfg(kCapture, kPre, kPost, kWorkers,
+                                              /*pool*/ 4, /*windows*/ 100,
+                                              static_cast<double>(kCapacity));
+    cfg.test_worker_init_hook = [](int) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    };
+
+    UhdSc16Pipeline pipeline(cfg);
+    BOOST_REQUIRE(pipeline.initialize(std::move(source)));
+    pipeline.start();
+
+    const auto t_stop = std::chrono::steady_clock::now();
+    pipeline.stop();
+    const bool ready = pipeline.wait_ready(5000);
+    const double ready_ms = qa_elapsed_ms(t_stop);
+
+    BOOST_CHECK_MESSAGE(!ready, "wait_ready() must return false when stop() interrupts it");
+    BOOST_CHECK_LE(ready_ms, 1500.0);
+    BOOST_CHECK(!pipeline.ready_ok());
+
+    pipeline.wait();
+    BOOST_CHECK_LE(qa_elapsed_ms(t_stop), 2000.0);
+
+    const PipelineLedger& ledger = pipeline.ledger();
+    std::string err;
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+    BOOST_CHECK_EQUAL(ledger.completed_windows, 0u);
+    BOOST_CHECK_EQUAL(ledger.admitted_windows, 0u);
+    BOOST_CHECK_EQUAL(src->start_stream_calls(), 0);
+    BOOST_CHECK_EQUAL(src->position(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 15: test_pipeline_eof_shorter_than_one_window  (A3 d)
+//   A source that ends before the first window is complete must produce no
+//   Completed result -- only a cancellation -- with conserved accounting.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_eof_shorter_than_one_window)
+{
+    const size_t kCapture = 2000;
+    const size_t kPre = 100;
+    const size_t kPost = 100;
+    const size_t kCapacity = kPre + kCapture + kPost;
+
+    auto source = std::make_unique<PredictiveSc16Source>(
+        static_cast<int64_t>(kCapacity / 4));
+    PredictiveSc16Source* src = source.get();
+    src->open_gate();
+
+    PipelineConfig cfg = make_qa_pipeline_cfg(kCapture, kPre, kPost, /*workers*/ 1,
+                                              /*pool*/ 4, /*max_windows*/ 0,
+                                              static_cast<double>(kCapacity));
+
+    UhdSc16Pipeline pipeline(cfg);
+    BOOST_REQUIRE(pipeline.initialize(std::move(source)));
+    pipeline.start();
+    BOOST_REQUIRE(pipeline.wait_ready(2000));
+    pipeline.wait();
+
+    const PipelineLedger& ledger = pipeline.ledger();
+    std::string err;
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+    BOOST_CHECK_EQUAL(ledger.completed_windows, 0u);
+    BOOST_CHECK_EQUAL(ledger.admitted_windows, 0u);
+    BOOST_CHECK_EQUAL(ledger.dropped_admission, 0u);
+    BOOST_CHECK_MESSAGE(ledger.offered_windows == 0u ||
+                            ledger.cancelled_windows == ledger.offered_windows,
+                        "a short EOF may only produce cancellations, never admissions");
+    for (const auto& result : pipeline.results()) {
+        BOOST_CHECK(result.state != WindowTerminalState::Completed);
+    }
+    BOOST_CHECK_EQUAL(src->position(), static_cast<int64_t>(kCapacity / 4));
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 16: test_pipeline_normal_drain  (A3 e, plus the diagnostics API)
+//   Drop-free run: every window is Completed exactly once, in order, and the
+//   RX/commit counters stay consistent with the ledger.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_normal_drain)
+{
+    const int kWorkers = 4;
+    const size_t kCapture = 2000;
+    // No guards here: start(k) == k * capacity exactly, which makes the
+    // geometry assertion independent of the negative-guard clipping rule.
+    const size_t kPre = 0;
+    const size_t kPost = 0;
+    const size_t kCapacity = kPre + kCapture + kPost;
+    const uint64_t kWindows = 12;
+
+    auto source = std::make_unique<PredictiveSc16Source>(
+        static_cast<int64_t>(kCapacity * (kWindows + 1)));
+    PredictiveSc16Source* src = source.get();
+    src->open_gate();
+
+    PipelineConfig cfg = make_qa_pipeline_cfg(kCapture, kPre, kPost, kWorkers,
+                                              /*pool*/ kWindows, kWindows,
+                                              static_cast<double>(kCapacity));
+    cfg.enable_rx_diagnostics = true;
+    cfg.enable_commit_diagnostics = true;
+
+    UhdSc16Pipeline pipeline(cfg);
+    BOOST_REQUIRE(pipeline.initialize(std::move(source)));
+    pipeline.start();
+    BOOST_REQUIRE(pipeline.wait_ready(2000));
+    pipeline.wait();
+
+    const PipelineLedger& ledger = pipeline.ledger();
+    std::string err;
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+    BOOST_CHECK_EQUAL(ledger.offered_windows, kWindows);
+    BOOST_CHECK_EQUAL(ledger.admitted_windows, kWindows);
+    BOOST_CHECK_EQUAL(ledger.completed_windows, kWindows);
+    BOOST_CHECK_EQUAL(ledger.dropped_admission, 0u);
+    BOOST_CHECK_EQUAL(ledger.cancelled_windows, 0u);
+    BOOST_CHECK_EQUAL(ledger.invalid_gap_before_admission, 0u);
+    BOOST_CHECK_EQUAL(ledger.invalid_gap_after_admission, 0u);
+    BOOST_CHECK_EQUAL(ledger.processing_failed, 0u);
+
+    const std::vector<WindowResult>& results = pipeline.results();
+    BOOST_REQUIRE_EQUAL(results.size(), static_cast<size_t>(kWindows));
+    BOOST_CHECK_EQUAL(results.size(),
+                      static_cast<size_t>(ledger.admitted_windows +
+                                          ledger.dropped_admission));
+    for (size_t i = 0; i < results.size(); ++i) {
+        BOOST_CHECK_EQUAL(results[i].window_id, i);
+        BOOST_CHECK_EQUAL(static_cast<int>(results[i].state),
+                          static_cast<int>(WindowTerminalState::Completed));
+        BOOST_CHECK_EQUAL(results[i].native_start_abs,
+                          static_cast<int64_t>(i * kCapacity));
+        BOOST_CHECK_EQUAL(results[i].native_sample_count, kCapacity);
+        BOOST_CHECK(results[i].worker_id >= 0 && results[i].worker_id < kWorkers);
+        BOOST_CHECK(results[i].rx_push_time.time_since_epoch().count() > 0);
+        BOOST_CHECK(results[i].worker_start_time >= results[i].rx_push_time);
+        BOOST_CHECK(results[i].worker_end_time >= results[i].worker_start_time);
+        BOOST_CHECK(results[i].commit_time >= results[i].worker_end_time);
+    }
+
+    const RxDiagnostics& rx = pipeline.rx_diagnostics();
+    BOOST_CHECK(rx.enabled);
+    BOOST_CHECK_GT(rx.read_calls, 0u);
+    BOOST_CHECK_GE(rx.samples_read, static_cast<uint64_t>(kWindows * kCapacity));
+    BOOST_CHECK_EQUAL(rx.bytes_read,
+                      rx.samples_read * sizeof(std::complex<int16_t>));
+    BOOST_CHECK_EQUAL(rx.windows_published, kWindows);
+    BOOST_CHECK_EQUAL(rx.windows_dropped, 0u);
+    BOOST_CHECK_EQUAL(rx.slot_copy_bytes,
+                      kWindows * kCapacity * sizeof(std::complex<int16_t>));
+
+    const CommitDiagnostics& commit = pipeline.commit_diagnostics();
+    BOOST_CHECK(commit.enabled);
+    BOOST_CHECK_EQUAL(commit.commit_calls, kWindows);
+    BOOST_CHECK_EQUAL(commit.results_emitted, kWindows);
+
+    // reset_diagnostics() is only legal before start() or after wait(); this
+    // is the after-wait() path and it must not alter functional state.
+    pipeline.reset_diagnostics();
+    const RxDiagnostics& rx_reset = pipeline.rx_diagnostics();
+    BOOST_CHECK_EQUAL(rx_reset.read_calls, 0u);
+    BOOST_CHECK_EQUAL(rx_reset.samples_read, 0u);
+    BOOST_CHECK_EQUAL(rx_reset.windows_published, 0u);
+    BOOST_CHECK_EQUAL(rx_reset.slot_copy_bytes, 0u);
+    BOOST_CHECK_EQUAL(pipeline.commit_diagnostics().commit_calls, 0u);
+    BOOST_CHECK_EQUAL(pipeline.results().size(), static_cast<size_t>(kWindows));
+    BOOST_CHECK_EQUAL(ledger.completed_windows, kWindows);
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 17: test_pipeline_small_pool_overload  (A3 f)
+//   A 2-slot pool with 4 workers must drop instead of back-pressuring.  Only
+//   conservation, liveness and terminal-state semantics are asserted; the
+//   admitted/dropped split is explicitly NOT frozen here.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_small_pool_overload)
+{
+    const int kWorkers = 4;
+    const size_t kCapture = 1000;
+    const size_t kPre = 100;
+    const size_t kPost = 100;
+    const size_t kCapacity = kPre + kCapture + kPost;
+    const uint64_t kWindows = 200;
+
+    auto source = std::make_unique<PredictiveSc16Source>(
+        static_cast<int64_t>(kCapacity * (kWindows + 1)));
+    PredictiveSc16Source* src = source.get();
+    src->open_gate();
+
+    PipelineConfig cfg = make_qa_pipeline_cfg(kCapture, kPre, kPost, kWorkers,
+                                              /*pool*/ 2, kWindows,
+                                              static_cast<double>(kCapacity));
+
+    UhdSc16Pipeline pipeline(cfg);
+    BOOST_REQUIRE(pipeline.initialize(std::move(source)));
+    const auto t_start = std::chrono::steady_clock::now();
+    pipeline.start();
+    BOOST_REQUIRE(pipeline.wait_ready(5000));
+    pipeline.wait();
+    BOOST_CHECK_LE(qa_elapsed_ms(t_start), 30000.0);
+
+    const PipelineLedger& ledger = pipeline.ledger();
+    std::string err;
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+    BOOST_CHECK_EQUAL(ledger.offered_windows, kWindows);
+    BOOST_CHECK_EQUAL(ledger.admitted_windows + ledger.dropped_admission +
+                          ledger.invalid_gap_before_admission +
+                          ledger.cancelled_windows,
+                      ledger.offered_windows);
+    BOOST_CHECK_EQUAL(ledger.completed_windows + ledger.processing_failed +
+                          ledger.invalid_gap_after_admission,
+                      ledger.admitted_windows);
+
+    const std::vector<WindowResult>& results = pipeline.results();
+    BOOST_CHECK_EQUAL(results.size(),
+                      static_cast<size_t>(ledger.admitted_windows +
+                                          ledger.dropped_admission +
+                                          ledger.invalid_gap_before_admission));
+
+    std::vector<int> seen(static_cast<size_t>(kWindows), 0);
+    for (size_t i = 0; i < results.size(); ++i) {
+        BOOST_REQUIRE_LT(results[i].window_id, kWindows);
+        seen[static_cast<size_t>(results[i].window_id)]++;
+        if (i > 0) {
+            BOOST_CHECK_LT(results[i - 1].window_id, results[i].window_id);
+        }
+    }
+    for (uint64_t k = 0; k < kWindows; ++k) {
+        BOOST_CHECK_LE(seen[static_cast<size_t>(k)], 1);
+    }
+
+    BOOST_TEST_MESSAGE("overload ledger: offered=" << ledger.offered_windows
+                       << " admitted=" << ledger.admitted_windows
+                       << " completed=" << ledger.completed_windows
+                       << " dropped=" << ledger.dropped_admission
+                       << " cancelled=" << ledger.cancelled_windows);
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 18: test_pipeline_unique_terminal_state  (A3 g)
+//   Under overload every window_id must still have exactly one terminal state,
+//   and the per-state counts must match the ledger.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_unique_terminal_state)
+{
+    const int kWorkers = 4;
+    const size_t kCapture = 1000;
+    const size_t kPre = 100;
+    const size_t kPost = 100;
+    const size_t kCapacity = kPre + kCapture + kPost;
+    const uint64_t kWindows = 80;
+
+    auto source = std::make_unique<PredictiveSc16Source>(
+        static_cast<int64_t>(kCapacity * (kWindows + 1)));
+    PredictiveSc16Source* src = source.get();
+    src->open_gate();
+
+    PipelineConfig cfg = make_qa_pipeline_cfg(kCapture, kPre, kPost, kWorkers,
+                                              /*pool*/ 2, kWindows,
+                                              static_cast<double>(kCapacity));
+
+    UhdSc16Pipeline pipeline(cfg);
+    BOOST_REQUIRE(pipeline.initialize(std::move(source)));
+    pipeline.start();
+    BOOST_REQUIRE(pipeline.wait_ready(5000));
+    pipeline.wait();
+
+    const PipelineLedger& ledger = pipeline.ledger();
+    std::string err;
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+
+    std::map<uint64_t, int> state_by_id;
+    size_t completed = 0;
+    size_t dropped = 0;
+    size_t failed = 0;
+    size_t invalid_gap = 0;
+    for (const auto& result : pipeline.results()) {
+        const auto inserted = state_by_id.insert(
+            std::make_pair(result.window_id, static_cast<int>(result.state)));
+        BOOST_CHECK_MESSAGE(inserted.second,
+                            "window_id " << result.window_id
+                                         << " appears more than once in results()");
+        switch (result.state) {
+        case WindowTerminalState::Completed:
+            ++completed;
+            break;
+        case WindowTerminalState::DroppedAdmission:
+            ++dropped;
+            break;
+        case WindowTerminalState::ProcessingFailed:
+            ++failed;
+            break;
+        case WindowTerminalState::InvalidGap:
+            ++invalid_gap;
+            break;
+        case WindowTerminalState::Cancelled:
+            break;
+        }
+    }
+    BOOST_CHECK_EQUAL(completed, ledger.completed_windows);
+    BOOST_CHECK_EQUAL(dropped, ledger.dropped_admission);
+    BOOST_CHECK_EQUAL(failed, ledger.processing_failed);
+    BOOST_CHECK_EQUAL(invalid_gap,
+                      ledger.invalid_gap_before_admission +
+                          ledger.invalid_gap_after_admission);
+    BOOST_CHECK_EQUAL(state_by_id.size(),
+                      static_cast<size_t>(ledger.admitted_windows +
+                                          ledger.dropped_admission +
+                                          ledger.invalid_gap_before_admission));
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 19: test_pipeline_rx_window_boundaries  (A3 h, Phase B contract)
+//   Overlapping / adjacent / gap-separated windows, adversarial short reads,
+//   several reads per window, EOF inside a window and negative-guard clipping
+//   must all deliver the exact absolute sample range.
+//
+//   Verification strategy: the deterministic source encodes the absolute sample
+//   index into every sample, so each window is fully described by
+//   (native_start_abs, native_sample_count, content).  The exact coordinates are
+//   asserted directly.  The content is verified by re-running the identical
+//   absolute data through ReplaySc16Source (one large read per window) and
+//   requiring all 11 functional WindowResult fields to be bit-identical: those
+//   fields are computed from the slot samples, so any stale / shifted / missing
+//   sample in the adversarial run shows up as a differing field.
+//
+//   NOTE: the frozen interface does not expose the raw Sc16WindowSlot contents
+//   to a caller, so whole-slot byte equality cannot be asserted here.  The
+//   benchmark driver's per-window IQ dump (checked by
+//   tools/performance/compare_pipeline_windows.py --iq-dir) is the direct
+//   sample-level check for the final numbers.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct BoundaryScenario {
+    const char* name;
+    size_t capture;
+    size_t pre_guard;
+    size_t post_guard;
+    double period_samples;
+    double t0;
+    int64_t total_samples;
+    uint64_t max_windows; // 0 = unlimited, terminated by EOF
+    std::vector<size_t> read_sizes;
+};
+
+int64_t boundary_window_start(const BoundaryScenario& sc, uint64_t k)
+{
+    const int64_t pred = static_cast<int64_t>(
+        std::llround(sc.t0 + static_cast<double>(k) * sc.period_samples));
+    const int64_t start = pred - static_cast<int64_t>(sc.pre_guard);
+    return start < 0 ? 0 : start;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(test_pipeline_rx_window_boundaries)
+{
+    const double kRate = 1.0e6;
+
+    std::vector<BoundaryScenario> scenarios;
+    {
+        // 1. Adjacent windows: period == capacity and no guard, so consecutive
+        //    windows share no sample at all.
+        BoundaryScenario sc{ "adjacent", 2000, 0, 0, 2000.0, 0.0,
+                             2000 * 7, 6, {} };
+        scenarios.push_back(sc);
+    }
+    {
+        // 2. Heavy overlap: period 1200 < capacity 2800.
+        BoundaryScenario sc{ "overlap", 2000, 400, 400, 1200.0, 0.0,
+                             1200 * 6 + 2800, 6, {} };
+        scenarios.push_back(sc);
+    }
+    {
+        // 3. Gap wider than a window: period 5000 > capacity 2200.
+        BoundaryScenario sc{ "gap", 2000, 100, 100, 5000.0, 0.0,
+                             5000 * 5 + 2200, 5, {} };
+        scenarios.push_back(sc);
+    }
+    {
+        // 4. Adversarial short reads (prime / tiny / huge / odd sizes).
+        BoundaryScenario sc{ "short_read", 2000, 100, 100, 2200.0, 0.0,
+                             2200 * 7, 6, { 37, 1, 4096, 7 } };
+        scenarios.push_back(sc);
+    }
+    {
+        // 5. Several reads before one window completes: 64 samples per read.
+        BoundaryScenario sc{ "many_reads", 2000, 400, 400, 1200.0, 0.0,
+                             1200 * 6 + 2800, 6, { 64 } };
+        scenarios.push_back(sc);
+    }
+    {
+        // 6. EOF in the middle of a window: 4 complete windows + 1 cancelled.
+        BoundaryScenario sc{ "eof_incomplete", 2000, 100, 100, 2200.0, 0.0,
+                             2200 * 4 + 1100, 0, { 128 } };
+        scenarios.push_back(sc);
+    }
+    {
+        // 7. First window clipped by the negative guard (t0=50, pre_guard=200).
+        BoundaryScenario sc{ "negative_guard", 1000, 200, 200, 1000.0, 50.0,
+                             1000 * 5 + 1400, 5, {} };
+        scenarios.push_back(sc);
+    }
+
+    size_t radar_nonzero = 0;
+    size_t sic_committed_windows = 0;
+
+    for (const BoundaryScenario& sc : scenarios) {
+        const std::string name(sc.name);
+        const size_t capacity = sc.pre_guard + sc.capture + sc.post_guard;
+        BOOST_REQUIRE_GT(capacity, 0u);
+
+        // How many windows are complete given the available samples?
+        size_t available = 0;
+        while (boundary_window_start(sc, static_cast<uint64_t>(available)) +
+                   static_cast<int64_t>(capacity) <=
+               sc.total_samples) {
+            ++available;
+        }
+        const size_t expected_windows =
+            (sc.max_windows == 0) ? available
+                                  : std::min<size_t>(available, static_cast<size_t>(sc.max_windows));
+        BOOST_REQUIRE_GT(expected_windows, 0u);
+
+        PipelineConfig cfg = make_qa_pipeline_cfg(sc.capture, sc.pre_guard, sc.post_guard,
+                                                  /*workers*/ 1,
+                                                  /*pool*/ expected_windows + 2,
+                                                  sc.max_windows,
+                                                  sc.period_samples,
+                                                  ConsumerMode::Both,
+                                                  sc.t0);
+        cfg.native_rate = kRate;
+        cfg.work_rate = kRate;
+        // Keep the radar CIR inside a small window and make it content-derived:
+        // the timed path uses the predicted origin instead of an SFD search, so
+        // peak_abs is a real function of the slot samples.
+        cfg.radar_cfg.sync_repetitions = 1;
+        cfg.radar_cfg.cir_skip_initial = 0;
+        cfg.radar_cfg.cir_repetitions = 1;
+        cfg.radar_cfg.use_predicted_timing = true;
+
+        // --- Run A: adversarial in-memory source ---------------------------
+        auto source = std::make_unique<PredictiveSc16Source>(sc.total_samples, sc.read_sizes,
+                                                             kRate);
+        PredictiveSc16Source* src = source.get();
+        src->open_gate();
+        const std::vector<WindowResult> run_a =
+            qa_run_pipeline(cfg, std::move(source), name + " (predictive source)");
+        BOOST_CHECK_EQUAL(src->gate_timeouts(), 0);
+
+        BOOST_REQUIRE_MESSAGE(run_a.size() == expected_windows,
+                              name << ": expected " << expected_windows << " window(s), got "
+                                   << run_a.size());
+        for (size_t i = 0; i < run_a.size(); ++i) {
+            const WindowResult& res = run_a[i];
+            BOOST_CHECK_MESSAGE(res.window_id == i, name << ": window_id " << res.window_id);
+            BOOST_CHECK_MESSAGE(static_cast<int>(res.state) ==
+                                    static_cast<int>(WindowTerminalState::Completed),
+                                name << ": window " << i << " is not Completed");
+            BOOST_CHECK_MESSAGE(res.native_start_abs == boundary_window_start(sc, i),
+                                name << ": window " << i << " native_start_abs="
+                                     << res.native_start_abs << " expected "
+                                     << boundary_window_start(sc, i));
+            BOOST_CHECK_MESSAGE(res.native_sample_count == capacity,
+                                name << ": window " << i << " native_sample_count="
+                                     << res.native_sample_count << " expected " << capacity);
+            BOOST_CHECK_MESSAGE(res.sic_executed, name << ": sic_executed false");
+            BOOST_CHECK_MESSAGE(res.radar_executed, name << ": radar_executed false");
+            if (res.radar_peak_metric != 0.0f) {
+                ++radar_nonzero;
+            }
+            if (res.sic_committed) {
+                ++sic_committed_windows;
+            }
+        }
+
+        // --- Run B: same absolute data through the file-backed reference ---
+        const std::vector<std::complex<int16_t>> pattern =
+            PredictiveSc16Source::make_pattern(sc.total_samples);
+        const std::string tmp_file =
+            write_multicore_sc16_file("boundary_" + name, pattern);
+
+        PipelineConfig replay_cfg = cfg;
+        replay_cfg.source_type = StreamSourceType::Replay;
+        replay_cfg.replay_file = tmp_file;
+        replay_cfg.paced_replay = false;
+
+        const std::vector<WindowResult> run_b =
+            qa_run_pipeline(replay_cfg, nullptr, name + " (replay reference)");
+        std::remove(tmp_file.c_str());
+
+        BOOST_REQUIRE_MESSAGE(run_b.size() == run_a.size(),
+                              name << ": replay reference produced " << run_b.size()
+                                   << " window(s), predictive run produced " << run_a.size());
+        for (size_t i = 0; i < run_a.size(); ++i) {
+            qa_check_same_window(run_a[i], run_b[i], name + " window " + std::to_string(i));
+        }
+    }
+
+    BOOST_TEST_MESSAGE("boundary content signature: " << radar_nonzero
+                       << " window(s) with a non-zero radar metric, "
+                       << sic_committed_windows << " window(s) with a committed SIC result");
+    // Harness capability check, not a pipeline requirement: if the radar CIR
+    // produced no metric at all, the differential comparison below would only
+    // prove "both sources feed the same stream" and could not catch a single
+    // wrong slot sample.  Fail loudly instead of degrading silently.
+    BOOST_CHECK_MESSAGE(radar_nonzero > 0 || sic_committed_windows > 0,
+                        "the deterministic content signature produced no content-derived "
+                        "metric; the differential check would be vacuous");
 }
 
 // ---------------------------------------------------------------------------

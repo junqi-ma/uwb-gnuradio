@@ -14,6 +14,9 @@ using std::isnan;
 
 #include <gnuradio/uwb/uwb_uhd_sc16_pipeline.h>
 
+#include "pipeline_bench_setup.h"
+#include "pipeline_result_json.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -86,6 +89,7 @@ struct PhaseStats {
     double mean = 0.0;
     double p50 = 0.0;
     double p95 = 0.0;
+    double p99 = 0.0;
     double min = 0.0;
     double max = 0.0;
 };
@@ -117,6 +121,7 @@ PhaseStats compute_phase_stats(std::vector<double>& values)
 
     s.p50 = at(0.50);
     s.p95 = at(0.95);
+    s.p99 = at(0.99);
     return s;
 }
 
@@ -343,6 +348,13 @@ void print_help(const char* prog_name)
               << "  --dsp-workers <n>           Burst-level DSP worker threads, run-to-completion (default: 1)\n"
               << "  --pool-size <n>             Ring pool slot capacity per DSP worker (default: 8)\n"
               << "  --max-windows <n>           Maximum windows to process (default: 100)\n"
+              << "  --warmup-windows <n>        Completed windows excluded from steady stats (default: 0)\n"
+              << "  --measure-windows <n>       Completed windows in the steady region (default: 0 = all remaining)\n"
+              << "  --diag-rx                   Enable RX diagnostics counters\n"
+              << "  --diag-commit               Enable commit diagnostics counters\n"
+              << "  --label <name>              Run label written into the JSON meta\n"
+              << "  --json-out <path>           Write window-by-window results JSON\n"
+              << "  --csv-out <path>            Write window-by-window results CSV\n"
               << "  --resampler-profile <name>  Resampler profile (quality_minorder|realtime_minorder|quality|realtime, default: quality_minorder)\n"
               << "  --resampler-workers <n>     Resampler thread worker count (default: 1)\n"
               << "  --sic-policy <p>            SIC policy: preamble|fullpacket|auto (default: auto)\n"
@@ -384,6 +396,14 @@ int main(int argc, char* argv[])
     // SIC coarse-search ROI half-width in work samples, relative to the
     // expected preamble position (pre_guard mapped to the work grid).
     long long sic_roi_margin = 64;
+    // 2026-11-11 round 2 measurement contract: steady region selection and
+    // machine-readable output.  Defaults keep the historical cold-start
+    // protocol (all completed windows are reported).
+    long long warmup_windows = 0;
+    long long measure_windows = 0;
+    std::string label = "runner";
+    std::string json_out;
+    std::string csv_out;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -549,6 +569,45 @@ int main(int argc, char* argv[])
                 return 1;
             }
             cfg.max_windows = static_cast<uint64_t>(std::stoull(argv[++i]));
+        } else if (arg == "--warmup-windows") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --warmup-windows requires a window count\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            warmup_windows = std::stoll(argv[++i]);
+        } else if (arg == "--measure-windows") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --measure-windows requires a window count\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            measure_windows = std::stoll(argv[++i]);
+        } else if (arg == "--diag-rx") {
+            cfg.enable_rx_diagnostics = true;
+        } else if (arg == "--diag-commit") {
+            cfg.enable_commit_diagnostics = true;
+        } else if (arg == "--label") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --label requires a name\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            label = argv[++i];
+        } else if (arg == "--json-out") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --json-out requires a path\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            json_out = argv[++i];
+        } else if (arg == "--csv-out") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --csv-out requires a path\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            csv_out = argv[++i];
         } else if (arg == "--resampler-profile") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --resampler-profile requires a profile name\n";
@@ -727,42 +786,10 @@ int main(int argc, char* argv[])
     // Derive the SIC geometry from the window layout.  Without this the
     // default SicUnifiedConfig has a zero-width search ROI and zero-sized
     // scratch, so sic_process_unified() can only ever fail closed.
+    // Shared with benchmark_sc16_pipeline_steady so the two drivers cannot
+    // drift apart (pipeline_bench_setup.h).
     // ------------------------------------------------------------------
-    {
-        const size_t native_cap = cfg.native_window_capacity();
-        const double rate_ratio = cfg.work_rate / cfg.native_rate;
-        const size_t work_cap =
-            static_cast<size_t>(std::ceil(static_cast<double>(native_cap) * rate_ratio)) + 512;
-
-        cfg.sic_cfg.sample_rate = cfg.work_rate;
-        cfg.sic_cfg.samples_per_symbol = 1016;
-        cfg.sic_cfg.sync_reps = 64;
-        cfg.sic_cfg.max_window_samples = work_cap;
-        cfg.sic_cfg.max_packet_samples = work_cap;
-
-        // Expected preamble origin on the work grid: the pre-guard region is
-        // exactly the lead-in before the scheduled packet.
-        const int64_t q = static_cast<int64_t>(
-            std::llround(static_cast<double>(cfg.pre_guard_samples) * rate_ratio));
-        int64_t roi_lo = q - sic_roi_margin;
-        int64_t roi_hi = q + sic_roi_margin;
-        if (roi_lo < 0) {
-            roi_lo = 0;
-        }
-        if (roi_hi > static_cast<int64_t>(work_cap)) {
-            roi_hi = static_cast<int64_t>(work_cap);
-        }
-        cfg.sic_cfg.roi_lo = roi_lo;
-        cfg.sic_cfg.roi_hi = roi_hi;
-        // sub_roi must be a non-empty range that also stays inside the actual
-        // resampled window (apply_discrete_cir rejects roi_hi > n).  Use the
-        // floor of the rate conversion, which is always <= the produced
-        // length, and let the estimator clamp it to the real support.
-        const int64_t work_floor = static_cast<int64_t>(
-            std::floor(static_cast<double>(native_cap) * rate_ratio));
-        cfg.sic_cfg.sub_roi_lo = 0;
-        cfg.sic_cfg.sub_roi_hi = work_floor;
-    }
+    bench::derive_sic_geometry(cfg, sic_roi_margin);
 
     // Handle replay file path
     if (cfg.source_type == StreamSourceType::Replay) {
@@ -853,11 +880,17 @@ int main(int argc, char* argv[])
     // Instantiate pipeline
     UhdSc16Pipeline pipeline(cfg);
 
-    std::vector<WindowResult> collected_results;
-    std::mutex results_mutex;
+    // Authoritative, post-wait() copy of every terminal window.
+    const std::vector<WindowResult>& collected_results = pipeline.results();
+    std::atomic<uint64_t> callback_count{ 0 };
+    // The callback still runs inside commit_result (so its cost stays in
+    // cold_total, exactly as in the historical protocol), but the authoritative
+    // per-window records are read from pipeline.results() after wait(): the
+    // callback fires BEFORE commit_time is stamped on the stored result, so a
+    // copy taken here would always carry a default-initialised commit_time.
     pipeline.set_result_callback([&](const WindowResult& res) {
-        std::lock_guard<std::mutex> lock(results_mutex);
-        collected_results.push_back(res);
+        (void)res;
+        callback_count.fetch_add(1, std::memory_order_relaxed);
     });
 
     if (!pipeline.initialize()) {
@@ -867,10 +900,18 @@ int main(int argc, char* argv[])
 
     auto start_time = std::chrono::steady_clock::now();
     pipeline.start();
+    // Freeze the measurement contract: startup_ready ends when every DSP
+    // worker has published Ready (or the pipeline failed).  This call is a
+    // no-op for the historical cold-start number because wait() would have
+    // waited for readiness anyway.
+    const bool ready_ok = pipeline.wait_ready(30000);
+    auto ready_time = std::chrono::steady_clock::now();
     pipeline.wait();
     auto end_time = std::chrono::steady_clock::now();
 
     double total_elapsed_s = std::chrono::duration<double>(end_time - start_time).count();
+    double startup_ready_ms =
+        std::chrono::duration<double, std::milli>(ready_time - start_time).count();
 
     // Verify ledger invariants
     const auto& ledger = pipeline.ledger();
@@ -935,6 +976,99 @@ int main(int argc, char* argv[])
     PhaseStats st_sic = compute_phase_stats(v_sic);
     PhaseStats st_sensing = compute_phase_stats(v_sensing);
     PhaseStats st_e2e = compute_phase_stats(v_e2e);
+
+    // ------------------------------------------------------------------
+    // Steady-region accounting (2026-11-11 round 2 measurement contract).
+    // The historical cold-start numbers above are NOT redefined.  The steady
+    // region is a contiguous slice of COMPLETED windows in commit order:
+    // [--warmup-windows, +--measure-windows).  No window inside it is skipped,
+    // so a drop or a slow window can never be filtered out.
+    // ------------------------------------------------------------------
+    std::vector<double> m_convert, m_resample, m_sic, m_sensing, m_e2e;
+    size_t measured_begin =
+        (warmup_windows > 0)
+            ? std::min<size_t>(static_cast<size_t>(warmup_windows),
+                               completed_windows.size())
+            : 0;
+    size_t measured_end = completed_windows.size();
+    if (measure_windows > 0) {
+        measured_end =
+            std::min<size_t>(measured_begin + static_cast<size_t>(measure_windows),
+                             completed_windows.size());
+    }
+    for (size_t i = measured_begin; i < measured_end; ++i) {
+        const auto& r = completed_windows[i];
+        m_convert.push_back(r.timing.convert_us);
+        m_resample.push_back(r.timing.resample_us);
+        m_sic.push_back(r.timing.sic_us);
+        m_sensing.push_back(r.timing.sensing_us);
+        m_e2e.push_back(r.timing.e2e_us);
+    }
+    const PhaseStats mst_convert = compute_phase_stats(m_convert);
+    const PhaseStats mst_resample = compute_phase_stats(m_resample);
+    const PhaseStats mst_sic = compute_phase_stats(m_sic);
+    const PhaseStats mst_sensing = compute_phase_stats(m_sensing);
+    const PhaseStats mst_e2e = compute_phase_stats(m_e2e);
+
+    // Steady interval boundary: the commit timestamps of the FIRST and LAST
+    // measured windows.  The completed-window count for that interval is
+    // (n-1), because n commit stamps delimit n-1 inter-completion intervals.
+    // Using commit cadence instead of the RX push of the first window removes
+    // the RX read-ahead that happened BEFORE the region's processing, which
+    // otherwise inflates us/window by the look-ahead depth.
+    bool have_steady = false;
+    std::chrono::steady_clock::time_point t_first_push{};
+    std::chrono::steady_clock::time_point t_first_commit{};
+    std::chrono::steady_clock::time_point t_last_commit{};
+    for (size_t i = measured_begin; i < measured_end; ++i) {
+        const auto& r = completed_windows[i];
+        if (r.commit_time == std::chrono::steady_clock::time_point{}) {
+            continue;
+        }
+        if (!have_steady) {
+            t_first_commit = r.commit_time;
+            t_last_commit = r.commit_time;
+            t_first_push = r.rx_push_time;
+            have_steady = true;
+        } else {
+            if (r.commit_time < t_first_commit) {
+                t_first_commit = r.commit_time;
+            }
+            if (r.commit_time > t_last_commit) {
+                t_last_commit = r.commit_time;
+            }
+            if (r.rx_push_time < t_first_push) {
+                t_first_push = r.rx_push_time;
+            }
+        }
+    }
+    const size_t measured_n = measured_end - measured_begin;
+    const size_t steady_span_windows = (measured_n > 1) ? (measured_n - 1) : 0;
+    const double steady_s =
+        have_steady
+            ? std::chrono::duration<double>(t_last_commit - t_first_commit).count()
+            : 0.0;
+    const double steady_lookahead_ms =
+        have_steady
+            ? std::chrono::duration<double, std::milli>(t_first_commit - t_first_push).count()
+            : 0.0;
+    const double steady_window_us =
+        (steady_s > 0.0) ? steady_s * 1e6 / static_cast<double>(steady_span_windows) : 0.0;
+    const double steady_window_rate =
+        (steady_s > 0.0) ? static_cast<double>(steady_span_windows) / steady_s : 0.0;
+    const double steady_sample_msps =
+        (steady_s > 0.0)
+            ? static_cast<double>(steady_span_windows) *
+                  static_cast<double>(cfg.native_window_capacity()) / steady_s / 1e6
+            : 0.0;
+    const double drain_tail_ms =
+        have_steady
+            ? std::chrono::duration<double, std::milli>(end_time - t_last_commit).count()
+            : 0.0;
+    const double rx_read_msps =
+        (total_elapsed_s > 0.0)
+            ? static_cast<double>(ledger.total_samples_received) / total_elapsed_s / 1e6
+            : 0.0;
 
     // Aggregate per DSP worker for the Burst-level multi-core report.  Timing
     // means only use Completed windows; drops/cancelled land in the
@@ -1029,6 +1163,84 @@ int main(int argc, char* argv[])
 
     std::cout << "  --------------------------------------------------------------------------------\n\n";
 
+    // Lifecycle + steady-region report (new fields; the cold-start numbers
+    // above keep their historical meaning).
+    std::cout << "Lifecycle / Measurement Contract:\n"
+              << "  startup_ready_ms:                  " << std::fixed << std::setprecision(3)
+              << startup_ready_ms << (ready_ok ? "" : "  [READY FAILED]") << "\n"
+              << "  drain_tail_ms:                     " << std::fixed << std::setprecision(3)
+              << drain_tail_ms << "\n"
+              << "  rx_total_received_samples:         " << ledger.total_samples_received << "\n"
+              << "  rx_read_msps (over cold_total):    " << std::fixed << std::setprecision(2)
+              << rx_read_msps << " MS/s\n"
+              << "  warmup_windows:                    " << warmup_windows << "\n"
+              << "  measure_windows_requested:         " << measure_windows << "\n"
+              << "  measure_windows_actual:            " << measured_n << "\n"
+              << "  steady_interval_s:                 " << std::fixed << std::setprecision(6)
+              << steady_s << "\n"
+              << "  steady_interval_boundary:          first measured commit_time .. last measured commit_time\n"
+              << "  steady_span_windows:               " << steady_span_windows << "\n"
+              << "  steady_lookahead_ms:               " << std::fixed << std::setprecision(3)
+              << steady_lookahead_ms << " (first push -> first measured commit)\n"
+              << "  steady_window_us:                  " << std::fixed << std::setprecision(2)
+              << steady_window_us << " us/window\n"
+              << "  steady_window_rate:                " << std::fixed << std::setprecision(2)
+              << steady_window_rate << " win/s\n"
+              << "  steady_window_sample_throughput:   " << std::fixed << std::setprecision(2)
+              << steady_sample_msps << " MS/s\n"
+              << "\n";
+
+    std::cout << "Steady-Region Service Times (Completed Windows: " << measured_n << "):\n"
+              << "  --------------------------------------------------------------------------------\n"
+              << "  Phase                  Mean (us)     P50 (us)     P95 (us)     P99 (us)     n\n"
+              << "  --------------------------------------------------------------------------------\n";
+    auto print_steady_row = [](const char* name, const PhaseStats& st) {
+        std::cout << "  " << std::left << std::setw(18) << name << " "
+                  << std::right << std::fixed << std::setprecision(2)
+                  << std::setw(11) << st.mean << "  "
+                  << std::setw(11) << st.p50 << "  "
+                  << std::setw(11) << st.p95 << "  "
+                  << std::setw(11) << st.p99 << "  "
+                  << std::setw(8) << st.n << "\n";
+    };
+    print_steady_row("convert_us", mst_convert);
+    print_steady_row("resample_us", mst_resample);
+    print_steady_row("sic_us", mst_sic);
+    print_steady_row("sensing_us", mst_sensing);
+    print_steady_row("e2e_us", mst_e2e);
+    std::cout << "  --------------------------------------------------------------------------------\n\n";
+
+    if (cfg.enable_rx_diagnostics) {
+        const auto& rx = pipeline.rx_diagnostics();
+        std::cout << "RX Diagnostics (cumulative):\n"
+                  << "  read_calls=" << rx.read_calls
+                  << " samples=" << rx.samples_read
+                  << " bytes=" << rx.bytes_read << "\n"
+                  << "  published=" << rx.windows_published
+                  << " dropped=" << rx.windows_dropped
+                  << " slot_copy_bytes=" << rx.slot_copy_bytes << "\n"
+                  << "  stream_buf_resize_count=" << rx.stream_buf_resize_count
+                  << " zero_init_bytes=" << rx.stream_buf_zero_init_bytes
+                  << " compact_move_bytes=" << rx.compact_move_bytes
+                  << " max_buffered_samples=" << rx.max_buffered_samples << "\n"
+                  << "  read_us=" << std::fixed << std::setprecision(1) << rx.read_us
+                  << " assemble_us=" << rx.assemble_us
+                  << " slot_copy_us=" << rx.slot_copy_us
+                  << " dispatch_us=" << rx.dispatch_us
+                  << " ledger_wait_us=" << rx.ledger_wait_us << "\n\n";
+    }
+    if (cfg.enable_commit_diagnostics) {
+        const auto& cm = pipeline.commit_diagnostics();
+        std::cout << "Commit Diagnostics:\n"
+                  << "  commit_calls=" << cm.commit_calls
+                  << " results_emitted=" << cm.results_emitted
+                  << " max_out_of_order_span=" << cm.max_out_of_order_span << "\n"
+                  << "  lock_wait_us=" << std::fixed << std::setprecision(1) << cm.lock_wait_us
+                  << " reorder_us=" << cm.reorder_us
+                  << " callback_us=" << cm.callback_us << "\n\n";
+    }
+
+
     // Burst-level multi-core throughput and per-worker distribution
     print_system_throughput(cfg.dsp_workers,
                             completed_windows.size(),
@@ -1053,6 +1265,74 @@ int main(int argc, char* argv[])
               << " (" << std::fixed << std::setprecision(1) << radar_sfd_rate << "%)\n"
               << "================================================================================\n"
               << std::endl;
+
+    // ---- machine-readable output (same schema as the steady driver) ----
+    bench::MetaList meta;
+    meta.emplace_back("driver", bench::meta_string("uwb_uhd_sc16_pipeline_runner"));
+    meta.emplace_back("label", bench::meta_string(label));
+    meta.emplace_back("file", bench::meta_string(cfg.replay_file));
+    meta.emplace_back("native_rate", bench::json_number(cfg.native_rate));
+    meta.emplace_back("work_rate", bench::json_number(cfg.work_rate));
+    meta.emplace_back("capture_samples", bench::json_number(static_cast<uint64_t>(cfg.capture_samples)));
+    meta.emplace_back("pre_guard_samples", bench::json_number(static_cast<uint64_t>(cfg.pre_guard_samples)));
+    meta.emplace_back("post_guard_samples", bench::json_number(static_cast<uint64_t>(cfg.post_guard_samples)));
+    meta.emplace_back("period_samples", bench::json_number(period_samples));
+    meta.emplace_back("dsp_workers", bench::json_number(static_cast<int64_t>(cfg.dsp_workers)));
+    meta.emplace_back("pool_capacity", bench::json_number(static_cast<uint64_t>(cfg.pool_capacity)));
+    meta.emplace_back("resampler_profile", bench::meta_string(cfg.resampler_profile));
+    meta.emplace_back("consumer", bench::meta_string(consumer_str));
+    meta.emplace_back("max_windows", bench::json_number(static_cast<uint64_t>(cfg.max_windows)));
+    meta.emplace_back("warmup_windows", bench::json_number(warmup_windows));
+    meta.emplace_back("measure_windows_requested", bench::json_number(measure_windows));
+    meta.emplace_back("measure_windows_actual", bench::json_number(static_cast<uint64_t>(measured_n)));
+    meta.emplace_back("diag_rx", bench::meta_bool(cfg.enable_rx_diagnostics));
+    meta.emplace_back("diag_commit", bench::meta_bool(cfg.enable_commit_diagnostics));
+    meta.emplace_back("ready_ok", bench::meta_bool(ready_ok && !pipeline.failed()));
+    meta.emplace_back("ledger_invariants_ok", bench::meta_bool(inv_ok));
+    meta.emplace_back("cold_total_s", bench::json_number(total_elapsed_s));
+    meta.emplace_back("startup_ready_ms", bench::json_number(startup_ready_ms));
+    meta.emplace_back("drain_tail_ms", bench::json_number(drain_tail_ms));
+    meta.emplace_back("steady_interval_s", bench::json_number(steady_s));
+    meta.emplace_back("steady_span_windows", bench::json_number(static_cast<uint64_t>(steady_span_windows)));
+    meta.emplace_back("steady_lookahead_ms", bench::json_number(steady_lookahead_ms));
+    meta.emplace_back("steady_window_us", bench::json_number(steady_window_us));
+    meta.emplace_back("steady_window_rate", bench::json_number(steady_window_rate));
+    meta.emplace_back("steady_window_sample_msps", bench::json_number(steady_sample_msps));
+    meta.emplace_back("rx_read_msps", bench::json_number(rx_read_msps));
+    meta.emplace_back("resample_us_mean", bench::json_number(st_resample.mean));
+    meta.emplace_back("resample_us_p50", bench::json_number(st_resample.p50));
+    meta.emplace_back("resample_us_p95", bench::json_number(st_resample.p95));
+    meta.emplace_back("sic_us_mean", bench::json_number(st_sic.mean));
+    meta.emplace_back("e2e_us_mean", bench::json_number(st_e2e.mean));
+    meta.emplace_back("e2e_us_p50", bench::json_number(st_e2e.p50));
+    meta.emplace_back("e2e_us_p95", bench::json_number(st_e2e.p95));
+    meta.emplace_back("rx_read_us", bench::json_number(pipeline.rx_diagnostics().read_us));
+    meta.emplace_back("rx_assemble_us", bench::json_number(pipeline.rx_diagnostics().assemble_us));
+    meta.emplace_back("rx_slot_copy_us", bench::json_number(pipeline.rx_diagnostics().slot_copy_us));
+    meta.emplace_back("rx_dispatch_us", bench::json_number(pipeline.rx_diagnostics().dispatch_us));
+    meta.emplace_back("rx_stream_buf_resize_count",
+                      bench::json_number(pipeline.rx_diagnostics().stream_buf_resize_count));
+    meta.emplace_back("rx_zero_init_bytes",
+                      bench::json_number(pipeline.rx_diagnostics().stream_buf_zero_init_bytes));
+    meta.emplace_back("rx_compact_move_bytes",
+                      bench::json_number(pipeline.rx_diagnostics().compact_move_bytes));
+    meta.emplace_back("commit_lock_wait_us",
+                      bench::json_number(pipeline.commit_diagnostics().lock_wait_us));
+    meta.emplace_back("commit_reorder_us",
+                      bench::json_number(pipeline.commit_diagnostics().reorder_us));
+    meta.emplace_back("commit_callback_us",
+                      bench::json_number(pipeline.commit_diagnostics().callback_us));
+    meta.emplace_back("commit_max_out_of_order_span",
+                      bench::json_number(pipeline.commit_diagnostics().max_out_of_order_span));
+
+    if (!bench::write_results_json(json_out, meta, ledger, collected_results)) {
+        std::cerr << "Error: cannot write " << json_out << "\n";
+        return 1;
+    }
+    if (!bench::write_results_csv(csv_out, collected_results)) {
+        std::cerr << "Error: cannot write " << csv_out << "\n";
+        return 1;
+    }
 
     return 0;
 }

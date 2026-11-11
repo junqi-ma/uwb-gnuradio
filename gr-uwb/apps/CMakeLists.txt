@@ -360,3 +360,20 @@ target_compile_definitions(uwb_uhd_sc16_pipeline_runner PRIVATE
 if(UWB_HAVE_UHD)
     target_link_libraries(uwb_uhd_sc16_pipeline_runner UHD::UHD)
 endif()
+
+# 2026-11-11 round 2: pure-core resampler benchmark (owner: subagent A).
+add_executable(benchmark_sc16_burst_core benchmark_sc16_burst_core.cc)
+target_link_libraries(benchmark_sc16_burst_core gnuradio-uwb Threads::Threads)
+target_compile_options(benchmark_sc16_burst_core PRIVATE -O3 -march=native)
+target_compile_definitions(benchmark_sc16_burst_core PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
+# 2026-11-11 round 2: steady-state pipeline benchmark driver (owner: main agent).
+add_executable(benchmark_sc16_pipeline_steady benchmark_sc16_pipeline_steady.cc)
+target_link_libraries(benchmark_sc16_pipeline_steady gnuradio-uwb Threads::Threads)
+target_compile_options(benchmark_sc16_pipeline_steady PRIVATE -O3 -march=native)
+target_compile_definitions(benchmark_sc16_pipeline_steady PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+if(UWB_HAVE_UHD)
+    target_link_libraries(benchmark_sc16_pipeline_steady UHD::UHD)
+endif()

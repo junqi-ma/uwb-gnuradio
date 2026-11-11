@@ -1,0 +1,35 @@
+# Phase 0 environment record (2026-11-11)
+
+date: 2026-11-11T17:29:23+08:00
+host: Linux 6.18.33.2-microsoft-standard-WSL2 x86_64
+distro: Ubuntu 22.04.5 LTS
+HEAD: 7ddea4c8faae82d995029918681d26d0d58b553b
+branch: feature/sic-research
+
+g++: g++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0
+cmake: cmake version 3.22.1
+python3: Python 3.10.12
+
+model-name: 12th Gen Intel(R) Core(TM) i7-12700
+thread(s)-per-core: 2
+core(s)-per-socket: 10
+socket(s): 1
+cpu(s): 20
+numa-node(s): 1
+l1d-cache: 480 KiB (10 instances)
+l2-cache: 12.5 MiB (10 instances)
+l3-cache: 25 MiB (1 instance)
+hypervisor-vendor: wsl
+loadavg: 0.15 0.25 0.23 1/583 173969
+scaling-governor: unavailable-in-vm
+mem: Mem:            31Gi       1.7Gi        26Gi       9.0Mi       3.0Gi        29Gi
+
+cmake-args: -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTING=ON -DENABLE_PYTHON=ON -DENABLE_GRC=ON
+
+inputs-and-taps:
+  testdata/uhd_sc16/sim_preamble_sc16_737m28_rate.bin  24000000 bytes  sha256=b300ebae1ea3e332d93c8ed4982f07f6
+  /tmp/opencode/bench/steady_4000.bin  16000000 bytes  sha256=6796dfc0e9660825998eb4821f7d932e
+  /tmp/opencode/bench/steady_56000.bin  22400000 bytes  sha256=288c8e1a246f8b85442775ec00e96742
+  testdata/resampler_65_48/taps_realtime_minorder.txt  5276 bytes  sha256=cdd1b59e2ebec45057f99e93705305c1
+  testdata/resampler_65_48/taps_quality_minorder.txt  10828 bytes  sha256=07b09983f072a06604ec08a1fee19317
+  testdata/reference_preamble.bin  8128 bytes  sha256=3fc4c3e1a1acb63e827b2674292c9136
