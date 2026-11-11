@@ -1229,7 +1229,7 @@ public:
             }
         }
         if (!gate_open_.load(std::memory_order_acquire)) {
-            gate_timeouts_.fetch_add(1, std::memory_order_relaxed);
+            gate_timeouts_->fetch_add(1, std::memory_order_relaxed);
             return 0; // reported as a read timeout, never as EOF
         }
 
@@ -1274,7 +1274,15 @@ public:
     bool read_before_all_ready() const { return read_before_all_ready_; }
     bool start_stream_all_ready() const { return start_stream_all_ready_; }
     int start_stream_calls() const { return start_stream_calls_.load(std::memory_order_relaxed); }
-    int gate_timeouts() const { return gate_timeouts_.load(std::memory_order_relaxed); }
+    int gate_timeouts() const { return gate_timeouts_->load(std::memory_order_relaxed); }
+    // Reference-counted view of the gate-timeout counter.  A caller that hands
+    // the source to an owner which destroys it before returning must capture
+    // this instead of a raw pointer into the source, so the assertion still
+    // reads live memory and is still able to fail.
+    std::shared_ptr<const std::atomic<int>> gate_timeouts_counter() const
+    {
+        return gate_timeouts_;
+    }
     int64_t position() const { return pos_.load(std::memory_order_relaxed); }
     bool closed() const { return closed_.load(std::memory_order_relaxed); }
     void set_start_stream_result(bool ok) { start_stream_result_ = ok; }
@@ -1290,7 +1298,10 @@ private:
     size_t call_index_ = 0; // RX-thread only
 
     std::atomic<bool> gate_open_{false};
-    std::atomic<int> gate_timeouts_{0};
+    // Shared ownership: the counter must stay alive even if the pipeline (and
+    // therefore this source) is destroyed before the QA inspects the result.
+    std::shared_ptr<std::atomic<int>> gate_timeouts_ =
+        std::make_shared<std::atomic<int>>(0);
     std::atomic<int> ready_workers_{0};
     int expected_workers_ = 0;
     bool read_before_all_ready_ = false;
@@ -2019,11 +2030,17 @@ BOOST_AUTO_TEST_CASE(test_pipeline_rx_window_boundaries)
         // --- Run A: adversarial in-memory source ---------------------------
         auto source = std::make_unique<PredictiveSc16Source>(sc.total_samples, sc.read_sizes,
                                                              kRate);
-        PredictiveSc16Source* src = source.get();
-        src->open_gate();
+        source->open_gate();
+        // qa_run_pipeline() takes ownership and destroys the pipeline (and with
+        // it the source) before returning, so the gate counter is captured as a
+        // shared snapshot up front rather than through a raw pointer into the
+        // source.  Reading `src->gate_timeouts()` afterwards would be a
+        // use-after-free and the assertion would prove nothing.
+        const std::shared_ptr<const std::atomic<int>> gate_timeouts =
+            source->gate_timeouts_counter();
         const std::vector<WindowResult> run_a =
             qa_run_pipeline(cfg, std::move(source), name + " (predictive source)");
-        BOOST_CHECK_EQUAL(src->gate_timeouts(), 0);
+        BOOST_CHECK_EQUAL(gate_timeouts->load(std::memory_order_relaxed), 0);
 
         BOOST_REQUIRE_MESSAGE(run_a.size() == expected_windows,
                               name << ": expected " << expected_windows << " window(s), got "
