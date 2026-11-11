@@ -101,6 +101,37 @@ std::vector<std::complex<float>> load_cf32_file(const std::string& rel)
     return data;
 }
 
+// Load one shaped SYNC waveform (1016 samples) from the shared test data.
+// The returned vector is always exactly 1016 samples long; each DSP worker
+// calls this to obtain its own private copy (contract C4: no shared state).
+void load_sync_pulse_template(std::vector<std::complex<float>>& tmpl)
+{
+    tmpl = load_cf32_file("reference_preamble.bin");
+    if (tmpl.empty()) {
+        tmpl = load_cf32_file("uwb_radar/tx_998p4.cf32");
+    }
+    if (tmpl.size() >= 1016) {
+        tmpl.resize(1016);
+    } else {
+        tmpl.assign(1016, std::complex<float>(1.0f, 0.0f));
+    }
+}
+
+// Resolve the resampler tap file for a profile, falling back to the two
+// historical defaults exactly like the single-consumer implementation did.
+std::vector<float> load_resampler_taps(const std::string& dir,
+                                       const std::string& profile)
+{
+    auto taps = load_taps_f32(dir + "/taps_" + profile + ".txt");
+    if (taps.empty()) {
+        taps = load_taps_f32(dir + "/taps_quality_minorder.txt");
+    }
+    if (taps.empty()) {
+        taps = load_taps_f32(dir + "/taps_quality.txt");
+    }
+    return taps;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -538,10 +569,31 @@ UhdSc16Pipeline::~UhdSc16Pipeline()
     wait();
 }
 
+int UhdSc16Pipeline::effective_dsp_workers() const
+{
+    return cfg_.dsp_workers > 1 ? cfg_.dsp_workers : 1;
+}
+
 bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_source)
 {
     // Ensure VOLK alignment mask is initialized when running outside GNU Radio scheduler
     (void)volk_get_alignment();
+
+    const int n_workers = effective_dsp_workers();
+
+    // Fail closed (contract §1.4): an explicit affinity list must describe
+    // exactly one core per DSP worker.  Silently degrading (e.g. pinning only
+    // the first N workers) would hide a configuration error and destroy the
+    // core isolation the caller asked for.
+    if (!cfg_.cpu_cores_dsp.empty() &&
+        static_cast<int>(cfg_.cpu_cores_dsp.size()) != n_workers) {
+        std::cerr << "UhdSc16Pipeline: cpu_cores_dsp has "
+                  << cfg_.cpu_cores_dsp.size() << " entries but dsp_workers="
+                  << n_workers
+                  << "; exactly one affinity entry per DSP worker is required"
+                  << std::endl;
+        return false;
+    }
 
     if (custom_source) {
         source_ = std::move(custom_source);
@@ -556,8 +608,36 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
         }
     }
 
-    size_t slot_cap = cfg_.native_window_capacity();
-    pool_ = std::make_unique<Sc16WindowRingPool>(cfg_.pool_capacity, slot_cap);
+    // Contract C1: one lock-free SPSC ring per worker.  pools_[w] is produced
+    // only by rx_thread_ and consumed only by dsp_threads_[w], so the
+    // single-producer / single-consumer guarantee is preserved per pool.
+    const size_t slot_cap = cfg_.native_window_capacity();
+    pools_.clear();
+    pools_.reserve(static_cast<size_t>(n_workers));
+    for (int w = 0; w < n_workers; ++w) {
+        pools_.push_back(
+            std::make_unique<Sc16WindowRingPool>(cfg_.pool_capacity, slot_cap));
+    }
+
+    // Contract C3: burst workers run the flat single-threaded AVX2 macroblock
+    // kernel, so the nested resampler pool is not only useless but harmful
+    // (futex wake-up tax plus a lost 4-way register reuse).  Say so once.
+    if (n_workers > 1 && cfg_.resampler_workers > 1) {
+        std::cerr << "UhdSc16Pipeline: dsp_workers=" << n_workers
+                  << " disables the nested resampler worker pool "
+                     "(resampler_workers="
+                  << cfg_.resampler_workers
+                  << " ignored); each DSP worker uses the single-threaded "
+                     "macroblock kernel"
+                  << std::endl;
+    }
+
+    // Restart safety: the reorder buffer starts empty and anchored at window 0.
+    {
+        std::lock_guard<std::mutex> lk(commit_mutex_);
+        next_commit_id_ = 0;
+        pending_results_.clear();
+    }
 
     if (!source_->open()) {
         return false;
@@ -572,7 +652,12 @@ void UhdSc16Pipeline::start()
         return;
     }
     stop_requested_ = false;
-    rx_finished_ = false;
+    // Reset before any thread is spawned; release/acquire pairing with the
+    // producer store and the worker load below.
+    rx_finished_.store(false, std::memory_order_relaxed);
+
+    // Restart safety: drop any thread handles left over from a previous run.
+    dsp_threads_.clear();
 
     rx_thread_ = std::thread(&UhdSc16Pipeline::rx_producer_loop, this);
 #if defined(__linux__) && defined(_GNU_SOURCE)
@@ -584,15 +669,28 @@ void UhdSc16Pipeline::start()
     }
 #endif
 
-    dsp_thread_ = std::thread(&UhdSc16Pipeline::dsp_consumer_loop, this);
+    const int n_workers = effective_dsp_workers();
+    dsp_threads_.reserve(static_cast<size_t>(n_workers));
+    for (int w = 0; w < n_workers; ++w) {
+        dsp_threads_.emplace_back(&UhdSc16Pipeline::dsp_consumer_loop, this, w);
 #if defined(__linux__) && defined(_GNU_SOURCE)
-    if (cfg_.cpu_core_dsp >= 0) {
-        cpu_set_t cpuset;
-        CPU_ZERO(&cpuset);
-        CPU_SET(cfg_.cpu_core_dsp, &cpuset);
-        pthread_setaffinity_np(dsp_thread_.native_handle(), sizeof(cpu_set_t), &cpuset);
-    }
+        // Contract §1.4: explicit list wins, otherwise derive
+        // cpu_core_dsp + w, otherwise stay unpinned.
+        int core = -1;
+        if (static_cast<size_t>(w) < cfg_.cpu_cores_dsp.size()) {
+            core = cfg_.cpu_cores_dsp[static_cast<size_t>(w)];
+        } else if (cfg_.cpu_core_dsp >= 0) {
+            core = cfg_.cpu_core_dsp + w;
+        }
+        if (core >= 0) {
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            CPU_SET(core, &cpuset);
+            pthread_setaffinity_np(dsp_threads_.back().native_handle(),
+                                   sizeof(cpu_set_t), &cpuset);
+        }
 #endif
+    }
 }
 
 void UhdSc16Pipeline::stop()
@@ -605,9 +703,17 @@ void UhdSc16Pipeline::wait()
     if (rx_thread_.joinable()) {
         rx_thread_.join();
     }
-    if (dsp_thread_.joinable()) {
-        dsp_thread_.join();
+    for (auto& th : dsp_threads_) {
+        if (th.joinable()) {
+            th.join();
+        }
     }
+    dsp_threads_.clear();
+
+    // Contract §1.3: after every thread has stopped, force out any tail holes
+    // left by max_windows / stop() in ascending window_id order.
+    flush_pending_results();
+
     running_ = false;
     if (source_) {
         source_->close();
@@ -620,6 +726,7 @@ void UhdSc16Pipeline::rx_producer_loop()
     const double period_samples = cfg_.period_s * cfg_.native_rate;
     const double t0 = cfg_.schedule_t0;
     const uint64_t max_win = cfg_.max_windows;
+    const int n_workers = effective_dsp_workers();
 
     std::vector<std::complex<int16_t>> stream_buf;
     int64_t stream_pos_abs = 0;
@@ -651,52 +758,84 @@ void UhdSc16Pipeline::rx_producer_loop()
             size_t n_read = source_->read_samples(stream_buf.data() + curr_size, to_read, meta);
             stream_buf.resize(curr_size + n_read);
             stream_pos_abs += static_cast<int64_t>(n_read);
-            ledger_.total_samples_received += n_read;
 
-            if (meta.is_gap) {
-                ledger_.read_overflows++;
+            {
+                std::lock_guard<std::mutex> lk(ledger_mutex_);
+                ledger_.total_samples_received += n_read;
+                if (meta.is_gap) {
+                    ledger_.read_overflows++;
+                }
+                if (n_read == 0 && !meta.is_eof) {
+                    ledger_.read_timeouts++;
+                }
             }
+
             if (meta.is_eof) {
                 eof_hit = true;
                 break;
             }
             if (n_read == 0 && !meta.is_eof) {
-                ledger_.read_timeouts++;
                 std::this_thread::yield();
             }
         }
 
         if (stop_requested_) {
+            std::lock_guard<std::mutex> lk(ledger_mutex_);
             ledger_.offered_windows++;
             ledger_.cancelled_windows++;
             break;
         }
 
         if (stream_pos_abs < win_end && eof_hit) {
+            std::lock_guard<std::mutex> lk(ledger_mutex_);
             ledger_.offered_windows++;
             ledger_.cancelled_windows++;
             break;
         }
 
-        ledger_.offered_windows++;
+        {
+            std::lock_guard<std::mutex> lk(ledger_mutex_);
+            ledger_.offered_windows++;
+        }
 
-        Sc16WindowSlot* slot = pool_->acquire_filling_slot();
+        // ------------------------------------------------------------------
+        // Dispatch (contract §1.2): prefer pools_[k % N], then probe the
+        // remaining pools in order.  Only a fully saturated ring set counts
+        // as a dropped admission.  rx_thread_ is the sole producer, so every
+        // pool stays a strict 1P/1C SPSC ring and no CAS is needed.
+        // ------------------------------------------------------------------
+        Sc16WindowSlot* slot = nullptr;
+        int pool_idx = -1;
+        for (int probe = 0; probe < n_workers; ++probe) {
+            const int cand = static_cast<int>(
+                (k + static_cast<uint64_t>(probe)) % static_cast<uint64_t>(n_workers));
+            Sc16WindowSlot* candidate =
+                pools_[static_cast<size_t>(cand)]->acquire_filling_slot();
+            if (candidate) {
+                slot = candidate;
+                pool_idx = cand;
+                break;
+            }
+        }
+
         if (!slot) {
-            ledger_.dropped_admission++;
+            {
+                std::lock_guard<std::mutex> lk(ledger_mutex_);
+                ledger_.dropped_admission++;
+            }
             WindowResult drop_res;
             drop_res.window_id = k;
             drop_res.state = WindowTerminalState::DroppedAdmission;
             drop_res.native_start_abs = win_start;
             drop_res.native_sample_count = capacity;
-            {
-                std::lock_guard<std::mutex> lock(results_mutex_);
-                results_.push_back(drop_res);
-            }
-            if (result_cb_) {
-                result_cb_(drop_res);
-            }
+            // commit_result() stamps worker_id = -1 for producer-side drops
+            // and keeps the drop in window_id order with the DSP results.
+            commit_result(-1, drop_res);
         } else {
-            ledger_.admitted_windows++;
+            {
+                std::lock_guard<std::mutex> lk(ledger_mutex_);
+                ledger_.admitted_windows++;
+            }
             slot->window_id = k;
             slot->native_start_abs = win_start;
             slot->native_count = capacity;
@@ -707,7 +846,8 @@ void UhdSc16Pipeline::rx_producer_loop()
             size_t offset = static_cast<size_t>(win_start - buf_start_abs);
             std::memcpy(slot->sc16_samples.data(), stream_buf.data() + offset,
                         capacity * sizeof(std::complex<int16_t>));
-            pool_->publish_ready_slot(slot);
+            // Publish on the pool the slot actually came from.
+            pools_[static_cast<size_t>(pool_idx)]->publish_ready_slot(slot);
         }
 
         int64_t next_pred = static_cast<int64_t>(std::llround(t0 + static_cast<double>(k + 1) * period_samples));
@@ -723,11 +863,20 @@ void UhdSc16Pipeline::rx_producer_loop()
         ++k;
     }
 
-    rx_finished_ = true;
+    // Release: everything this producer admitted has already been published
+    // to the ring pools, so any worker that observes this flag is guaranteed
+    // to see those slots and can drain them before exiting.
+    rx_finished_.store(true, std::memory_order_release);
 }
 
-void UhdSc16Pipeline::dsp_consumer_loop()
+void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
 {
+    // Contract C1: this thread is the only consumer of its own ring pool and
+    // never touches another worker's pool.  Contract C4: every piece of DSP
+    // state below is a function-local object owned by this worker, so there is
+    // zero shared write and zero false sharing between workers.
+    Sc16WindowRingPool* my_pool = pools_[static_cast<size_t>(worker_id)].get();
+
     const size_t native_capacity = cfg_.native_window_capacity();
     const bool need_resample = (std::abs(cfg_.native_rate - cfg_.work_rate) > 1e3);
 
@@ -736,37 +885,27 @@ void UhdSc16Pipeline::dsp_consumer_loop()
     size_t work_capacity = native_capacity;
 
     if (need_resample) {
-        std::string profile = cfg_.resampler_profile.empty() ? "quality_minorder" : cfg_.resampler_profile;
+        const std::string profile =
+            cfg_.resampler_profile.empty() ? "quality_minorder" : cfg_.resampler_profile;
         if (std::abs(cfg_.native_rate - 737.28e6) < 1e5) {
-            std::string path = "resampler_65_48/taps_" + profile + ".txt";
-            auto taps = load_taps_f32(path);
-            if (taps.empty()) {
-                taps = load_taps_f32("resampler_65_48/taps_quality_minorder.txt");
-            }
-            if (taps.empty()) {
-                taps = load_taps_f32("resampler_65_48/taps_quality.txt");
-            }
+            auto taps = load_resampler_taps("resampler_65_48", profile);
             if (taps.empty()) {
                 taps.resize(65 * 64, 1.0f / 48.0f);
             }
             resamp_65_48 = std::make_unique<core::RationalResampler65_48Core>(taps);
-            resamp_65_48->set_num_workers(cfg_.resampler_workers);
+            // Contract C3: a burst worker must never nest the resampler
+            // thread pool.  num_workers == 1 forces the flat
+            // run_macroblock_sc16 + fir_avx2_sc16_4x path on this core.
+            resamp_65_48->set_num_workers(1);
             work_capacity = core::RationalResampler65_48Core::expected_output_length(
                 native_capacity, taps.size()) + 256;
         } else if (std::abs(cfg_.native_rate - 491.52e6) < 1e5) {
-            std::string path = "resampler_65_32/taps_" + profile + ".txt";
-            auto taps = load_taps_f32(path);
-            if (taps.empty()) {
-                taps = load_taps_f32("resampler_65_32/taps_quality_minorder.txt");
-            }
-            if (taps.empty()) {
-                taps = load_taps_f32("resampler_65_32/taps_quality.txt");
-            }
+            auto taps = load_resampler_taps("resampler_65_32", profile);
             if (taps.empty()) {
                 taps.resize(65 * 64, 1.0f / 32.0f);
             }
             resamp_65_32 = std::make_unique<core::RationalResampler65_32Core>(taps);
-            resamp_65_32->set_num_workers(cfg_.resampler_workers);
+            resamp_65_32->set_num_workers(1);
             work_capacity = core::RationalResampler65_32Core::expected_output_length(
                 native_capacity, taps.size()) + 256;
         } else {
@@ -786,15 +925,7 @@ void UhdSc16Pipeline::dsp_consumer_loop()
     std::vector<std::complex<float>> sic_preamble_tmpl;
 
     if (cfg_.consumer_mode == ConsumerMode::SicOnly || cfg_.consumer_mode == ConsumerMode::Both) {
-        sic_sync_tmpl = load_cf32_file("reference_preamble.bin");
-        if (sic_sync_tmpl.empty()) {
-            sic_sync_tmpl = load_cf32_file("uwb_radar/tx_998p4.cf32");
-        }
-        if (sic_sync_tmpl.size() >= 1016) {
-            sic_sync_tmpl.resize(1016);
-        } else {
-            sic_sync_tmpl.assign(1016, std::complex<float>(1.0f, 0.0f));
-        }
+        load_sync_pulse_template(sic_sync_tmpl);
 
         sic_preamble_tmpl.reserve(64 * 1016);
         for (int rep = 0; rep < 64; ++rep) {
@@ -814,15 +945,7 @@ void UhdSc16Pipeline::dsp_consumer_loop()
     std::vector<std::complex<float>> radar_sync_tmpl;
 
     if (cfg_.consumer_mode == ConsumerMode::SensingCir || cfg_.consumer_mode == ConsumerMode::Both) {
-        radar_sync_tmpl = load_cf32_file("reference_preamble.bin");
-        if (radar_sync_tmpl.empty()) {
-            radar_sync_tmpl = load_cf32_file("uwb_radar/tx_998p4.cf32");
-        }
-        if (radar_sync_tmpl.size() >= 1016) {
-            radar_sync_tmpl.resize(1016);
-        } else {
-            radar_sync_tmpl.assign(1016, std::complex<float>(1.0f, 0.0f));
-        }
+        load_sync_pulse_template(radar_sync_tmpl);
 
         prepare_radar_cir_core(cfg_.radar_cfg, radar_sync_tmpl.data(),
                                cfg_.radar_cfg.samples_per_symbol,
@@ -834,10 +957,18 @@ void UhdSc16Pipeline::dsp_consumer_loop()
     const float scale = (cfg_.scale_mode == Sc16ScaleMode::UnitRange) ? (1.0f / 32768.0f) : 1.0f;
 
     while (true) {
-        Sc16WindowSlot* slot = pool_->acquire_ready_slot();
+        Sc16WindowSlot* slot = my_pool->acquire_ready_slot();
         if (!slot) {
-            if (rx_finished_ || stop_requested_) {
-                slot = pool_->acquire_ready_slot();
+            // Exit gate is rx_finished_ ONLY.  stop_requested_ must not stop
+            // a worker: the RX producer may already be past its own stop
+            // check and still admit+publish one more window into this pool.
+            // Leaving it unprocessed would break the ledger invariant
+            // admitted == completed + failed + invalid_gap_after.
+            if (rx_finished_.load(std::memory_order_acquire)) {
+                // Double-check after observing the finish flag: the producer
+                // publishes slots before setting rx_finished_, but a slot
+                // could have been published between our two reads.
+                slot = my_pool->acquire_ready_slot();
                 if (!slot) {
                     break;
                 }
@@ -850,6 +981,7 @@ void UhdSc16Pipeline::dsp_consumer_loop()
         auto t_start = std::chrono::steady_clock::now();
         WindowResult res;
         res.window_id = slot->window_id;
+        res.worker_id = worker_id;
         res.native_start_abs = slot->native_start_abs;
         res.native_sample_count = slot->native_count;
         res.timing.queue_us = std::chrono::duration<double, std::micro>(t_start - slot->push_time).count();
@@ -983,17 +1115,96 @@ void UhdSc16Pipeline::dsp_consumer_loop()
         auto t_end = std::chrono::steady_clock::now();
         res.timing.e2e_us = std::chrono::duration<double, std::micro>(t_end - t_start).count();
         res.state = WindowTerminalState::Completed;
-        ledger_.completed_windows++;
 
-        pool_->release_reading_slot(slot);
+        // Release the slot before committing: the RX producer may refill this
+        // ring immediately while this worker is busy ordering the result.
+        my_pool->release_reading_slot(slot);
 
         {
-            std::lock_guard<std::mutex> lock(results_mutex_);
-            results_.push_back(res);
+            std::lock_guard<std::mutex> lk(ledger_mutex_);
+            ledger_.completed_windows++;
         }
+
+        // Contract §1.3: never hold ledger_mutex_ while committing (no lock
+        // nesting); commit_result owns commit_mutex_ and the reorder buffer.
+        commit_result(worker_id, res);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// In-order result commit (reorder buffer)
+// ---------------------------------------------------------------------------
+void UhdSc16Pipeline::commit_result(int worker_id, const WindowResult& res)
+{
+    std::lock_guard<std::mutex> lk(commit_mutex_);
+
+    // pending_results_ is indexed relative to next_commit_id_, so index 0 is
+    // always the next window_id to emit and the buffer base never needs to be
+    // stored separately.  That keeps the ordering cursor and the buffer base
+    // identical, bounds memory to the worker skew, and preserves the
+    // invariant "next_commit_id_ == first uncommitted window_id".
+    if (res.window_id < next_commit_id_) {
+        // Already emitted (cannot happen: each window commits exactly once).
+        return;
+    }
+    const size_t rel = static_cast<size_t>(res.window_id - next_commit_id_);
+    if (pending_results_.size() <= rel) {
+        pending_results_.resize(rel + 1);
+    }
+    auto stored = std::make_unique<WindowResult>(res);
+    stored->worker_id = worker_id;
+    pending_results_[rel] = std::move(stored);
+
+    // Flush every contiguous entry, strictly by ascending window_id.
+    size_t flushed = 0;
+    while (flushed < pending_results_.size() && pending_results_[flushed]) {
+        WindowResult copy = *pending_results_[flushed];
+        pending_results_[flushed].reset();
+        ++flushed;
+        ++next_commit_id_;
+        results_.push_back(copy);
         if (result_cb_) {
-            result_cb_(res);
+            // Invoked while commit_mutex_ is held so observers always see
+            // strict window_id order.  The callback must not re-enter the
+            // pipeline (set_result_callback / stop / wait / results / ledger).
+            result_cb_(copy);
         }
+    }
+
+    // Drop the consumed prefix: it is all null by construction, so this only
+    // rebases the buffer index space and keeps memory proportional to the
+    // live out-of-order window rather than to the absolute window count.
+    if (flushed > 0) {
+        pending_results_.erase(pending_results_.begin(),
+                               pending_results_.begin() + static_cast<ptrdiff_t>(flushed));
+    }
+}
+
+void UhdSc16Pipeline::flush_pending_results()
+{
+    std::lock_guard<std::mutex> lk(commit_mutex_);
+
+    // Contract §1.3: after all threads have joined, force out whatever is
+    // still buffered (max_windows tail / stop()) in ascending window_id order.
+    // Holes are windows that never produced a result (cancelled before
+    // admission); they are skipped without shifting later results.
+    size_t advanced = 0;
+    for (size_t i = 0; i < pending_results_.size(); ++i) {
+        if (!pending_results_[i]) {
+            continue;
+        }
+        WindowResult copy = *pending_results_[i];
+        pending_results_[i].reset();
+        results_.push_back(copy);
+        if (result_cb_) {
+            result_cb_(copy);
+        }
+        advanced = i + 1;
+    }
+    if (advanced > 0) {
+        pending_results_.erase(pending_results_.begin(),
+                               pending_results_.begin() + static_cast<ptrdiff_t>(advanced));
+        next_commit_id_ += advanced;
     }
 }
 

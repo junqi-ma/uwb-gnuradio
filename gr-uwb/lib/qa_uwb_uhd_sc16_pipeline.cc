@@ -788,4 +788,394 @@ BOOST_AUTO_TEST_CASE(test_resampler_process_sc16_chunking_and_streaming)
     }
 }
 
+// ===========================================================================
+// Burst-level multi-core QA (dev plan 2026-11-11, contract clauses C1-C8)
+// ===========================================================================
+namespace {
+
+// Deterministic SC16 stimulus shared by the multi-core cases: two
+// incommensurate sinusoids, a small LCG dither (broadband content, so the fused
+// 65/48 kernel is not fed a degenerate single tone) and periodic int16
+// boundary values.
+std::vector<std::complex<int16_t>> make_multicore_sc16_data(size_t n)
+{
+    static const int16_t kBoundary[] = { -32768, -32767, -1, 0, 1, 32766, 32767 };
+    const size_t kBoundaryCount = sizeof(kBoundary) / sizeof(kBoundary[0]);
+
+    std::vector<std::complex<int16_t>> data(n);
+    uint32_t lcg = 0x12345678u;
+    for (size_t i = 0; i < n; ++i) {
+        lcg = lcg * 1664525u + 1013904223u;
+        if (i % 1024 == 0) {
+            data[i] = std::complex<int16_t>(
+                kBoundary[(i / 1024) % kBoundaryCount],
+                kBoundary[(i / 1024 + 3) % kBoundaryCount]);
+            continue;
+        }
+        const long tone_re =
+            std::lround(std::sin(2.0 * M_PI * static_cast<double>(i) / 64.0) * 20000.0);
+        const long tone_im =
+            std::lround(std::cos(2.0 * M_PI * static_cast<double>(i) / 96.0) * 20000.0);
+        const int16_t dither_re = static_cast<int16_t>((lcg >> 16) & 0x0FFFu) - 2048;
+        const int16_t dither_im = static_cast<int16_t>((lcg >> 4) & 0x0FFFu) - 2048;
+        data[i] = std::complex<int16_t>(static_cast<int16_t>(tone_re + dither_re),
+                                        static_cast<int16_t>(tone_im + dither_im));
+    }
+    return data;
+}
+
+// Unique temp file per test invocation; the caller owns std::remove().
+std::string write_multicore_sc16_file(const std::string& tag,
+                                      const std::vector<std::complex<int16_t>>& data)
+{
+    const std::string path = "/tmp/test_qa_mc_" + tag + "_" +
+        std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + ".bin";
+    {
+        std::ofstream ofs(path, std::ios::binary);
+        BOOST_REQUIRE_MESSAGE(ofs.is_open(), "Cannot create " + path);
+        ofs.write(reinterpret_cast<const char*>(data.data()),
+                  static_cast<std::streamsize>(data.size() * sizeof(std::complex<int16_t>)));
+        ofs.close();
+        BOOST_REQUIRE_MESSAGE(ofs.good(), "Short write on " + path);
+    }
+    return path;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Test Case 8: test_pipeline_multicore_bit_exactness
+//   C2 (dsp_workers<=1 stays the reference), C4 (private per-worker state) and
+//   acceptance gate 3.2: every WindowResult field must be bit-identical for
+//   dsp_workers in {1,2,4} on the 56,000-sample 737.28e6 -> 998.4e6 path.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_multicore_bit_exactness)
+{
+    const size_t kWindowSamples = 56000;
+    const size_t kWindows = 8;
+    const int kWorkerCounts[] = { 1, 2, 4 };
+    const size_t kRunCount = sizeof(kWorkerCounts) / sizeof(kWorkerCounts[0]);
+
+    // 8 x 56,000 samples plus a small tail margin so the last window can never
+    // be cancelled by an EOF short read.
+    const std::string tmp_file = write_multicore_sc16_file(
+        "exact", make_multicore_sc16_data(kWindowSamples * kWindows + 1024));
+
+    PipelineConfig base;
+    base.source_type = StreamSourceType::Replay;
+    base.replay_file = tmp_file;
+    base.paced_replay = false;
+    base.native_rate = 737.28e6;
+    base.work_rate = 998.4e6;
+    base.schedule_t0 = 0.0;
+    base.pre_guard_samples = 0;
+    base.capture_samples = kWindowSamples;
+    base.post_guard_samples = 0;
+    base.period_s = 56000.0 / 737.28e6;
+    // The pool holds one slot per window on purpose.  A file-backed replay
+    // producer is ~30x faster than a 56,000-sample resample+SIC+radar burst, so
+    // a 4-slot pool legitimately drops windows 4..7 of the single-worker
+    // reference run and the bit-exactness comparison would compare
+    // DroppedAdmission records instead of DSP output.  Drop/backpressure
+    // behaviour is covered by test_pipeline_multicore_stop_and_backpressure.
+    base.pool_capacity = kWindows;
+    base.consumer_mode = ConsumerMode::Both;
+    base.resampler_profile = "realtime_minorder";
+    base.max_windows = kWindows;
+
+    std::vector<std::vector<WindowResult>> runs;
+    runs.reserve(kRunCount);
+
+    for (size_t r = 0; r < kRunCount; ++r) {
+        PipelineConfig cfg = base;
+        cfg.dsp_workers = kWorkerCounts[r];
+        cfg.cpu_cores_dsp.clear();
+
+        UhdSc16Pipeline pipeline(cfg);
+        BOOST_REQUIRE_MESSAGE(pipeline.initialize(),
+                              "initialize() failed for dsp_workers=" +
+                                  std::to_string(kWorkerCounts[r]));
+        pipeline.start();
+        pipeline.wait();
+
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(pipeline.ledger().verify_invariants(&err),
+                              "dsp_workers=" + std::to_string(kWorkerCounts[r]) +
+                                  ": " + err);
+        BOOST_REQUIRE_MESSAGE(pipeline.results().size() == kWindows,
+                              "dsp_workers=" + std::to_string(kWorkerCounts[r]) +
+                                  ": expected " + std::to_string(kWindows) +
+                                  " results, got " + std::to_string(pipeline.results().size()));
+
+        runs.push_back(pipeline.results());
+    }
+
+    // Every window is drop-free by construction, so results() is final here.
+    std::remove(tmp_file.c_str());
+
+    // Per-run contract checks: in-order ids, Completed state, worker provenance.
+    for (size_t r = 0; r < kRunCount; ++r) {
+        std::string worker_ids;
+        for (size_t i = 0; i < runs[r].size(); ++i) {
+            const WindowResult& res = runs[r][i];
+            BOOST_CHECK_EQUAL(res.window_id, i);
+            BOOST_CHECK_EQUAL(static_cast<int>(res.state),
+                              static_cast<int>(WindowTerminalState::Completed));
+            if (kWorkerCounts[r] == 1) {
+                BOOST_CHECK_EQUAL(res.worker_id, 0);
+            } else {
+                BOOST_CHECK(res.worker_id >= 0 && res.worker_id < 4);
+            }
+            worker_ids += std::to_string(res.worker_id);
+            worker_ids += (i + 1 == runs[r].size()) ? "" : ",";
+        }
+        BOOST_TEST_MESSAGE("dsp_workers=" << kWorkerCounts[r]
+                           << " window worker_ids=[" << worker_ids << "]");
+    }
+
+    // Bit-exact window-by-window comparison against the single-worker reference.
+    const std::vector<WindowResult>& ref = runs[0];
+    for (size_t r = 1; r < kRunCount; ++r) {
+        BOOST_REQUIRE_EQUAL(runs[r].size(), ref.size());
+        for (size_t i = 0; i < ref.size(); ++i) {
+            const WindowResult& a = ref[i];
+            const WindowResult& b = runs[r][i];
+
+            BOOST_CHECK_EQUAL(b.window_id, a.window_id);
+            BOOST_CHECK_EQUAL(static_cast<int>(b.state), static_cast<int>(a.state));
+            BOOST_CHECK_EQUAL(b.native_start_abs, a.native_start_abs);
+            BOOST_CHECK_EQUAL(b.native_sample_count, a.native_sample_count);
+            BOOST_CHECK_EQUAL(b.sic_executed, a.sic_executed);
+            BOOST_CHECK_EQUAL(b.sic_committed, a.sic_committed);
+            BOOST_CHECK_EQUAL(b.actual_suppression_db, a.actual_suppression_db);
+            BOOST_CHECK_EQUAL(b.radar_executed, a.radar_executed);
+            BOOST_CHECK_EQUAL(b.radar_sfd_found, a.radar_sfd_found);
+            BOOST_CHECK_EQUAL(b.radar_peak_metric, a.radar_peak_metric);
+            BOOST_CHECK_EQUAL(b.radar_detected_start, a.radar_detected_start);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 9: test_pipeline_multicore_load_balance_and_ledger
+//   C1 (one SPSC pool per worker), C5 (strictly increasing window_id) and C6
+//   (ledger conservation): 16 drop-free windows must be admitted, completed and
+//   re-ordered while every one of the 4 workers actually participates.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_multicore_load_balance_and_ledger)
+{
+    const size_t kWindowSamples = 4000;
+    const size_t kWindows = 16;
+    const int kWorkers = 4;
+
+    // No resampling (native_rate == work_rate), so this case stays cheap and
+    // purely exercises dispatch / ledger / reorder behaviour.
+    const std::string tmp_file = write_multicore_sc16_file(
+        "balance", make_multicore_sc16_data(kWindowSamples * kWindows + 4096));
+
+    PipelineConfig cfg;
+    cfg.source_type = StreamSourceType::Replay;
+    cfg.replay_file = tmp_file;
+    cfg.paced_replay = false;
+    cfg.native_rate = 998.4e6;
+    cfg.work_rate = 998.4e6;
+    cfg.schedule_t0 = 0.0;
+    cfg.period_s = 4000.0 / 998.4e6;
+    cfg.pre_guard_samples = 0;
+    cfg.capture_samples = kWindowSamples;
+    cfg.post_guard_samples = 0;
+    cfg.pool_capacity = 4;
+    cfg.consumer_mode = ConsumerMode::SensingCir;
+    cfg.dsp_workers = kWorkers;
+    cfg.max_windows = kWindows;
+
+    UhdSc16Pipeline pipeline(cfg);
+    BOOST_REQUIRE(pipeline.initialize());
+    pipeline.start();
+    pipeline.wait();
+
+    const PipelineLedger& ledger = pipeline.ledger();
+    std::string err;
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+
+    BOOST_CHECK_EQUAL(ledger.offered_windows, static_cast<uint64_t>(kWindows));
+    BOOST_CHECK_EQUAL(ledger.admitted_windows, static_cast<uint64_t>(kWindows));
+    BOOST_CHECK_EQUAL(ledger.completed_windows, static_cast<uint64_t>(kWindows));
+    BOOST_CHECK_EQUAL(ledger.dropped_admission, 0u);
+    BOOST_CHECK_EQUAL(ledger.invalid_gap_before_admission, 0u);
+    BOOST_CHECK_EQUAL(ledger.invalid_gap_after_admission, 0u);
+    BOOST_CHECK_EQUAL(ledger.processing_failed, 0u);
+    BOOST_CHECK_EQUAL(ledger.cancelled_windows, 0u);
+
+    const std::vector<WindowResult>& results = pipeline.results();
+    BOOST_REQUIRE_EQUAL(results.size(), kWindows);
+
+    std::vector<size_t> per_worker(static_cast<size_t>(kWorkers), 0);
+    for (size_t i = 0; i < results.size(); ++i) {
+        // Strictly ascending window_id proves the reorder buffer.
+        BOOST_CHECK_EQUAL(results[i].window_id, i);
+        BOOST_CHECK(results[i].worker_id >= 0 && results[i].worker_id < kWorkers);
+        if (results[i].worker_id >= 0 && results[i].worker_id < kWorkers) {
+            per_worker[static_cast<size_t>(results[i].worker_id)]++;
+        }
+    }
+
+    size_t worker_sum = 0;
+    for (int w = 0; w < kWorkers; ++w) {
+        BOOST_TEST_MESSAGE("dsp worker " << w << " processed " << per_worker[w]
+                           << " of " << kWindows << " windows");
+        // Round-robin-with-fallback dispatch: only participation is contractual,
+        // an exact 4/4/4/4 split is not.
+        BOOST_CHECK_GE(per_worker[static_cast<size_t>(w)], 1u);
+        worker_sum += per_worker[static_cast<size_t>(w)];
+    }
+    BOOST_CHECK_EQUAL(worker_sum, kWindows);
+
+    std::remove(tmp_file.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 10: test_pipeline_multicore_stop_and_backpressure
+//   C6 (ledger conservation under drops), C7 (bounded, non-blocking dispatch)
+//   and C8 (bounded shutdown): a deliberately tiny 2-slot pool with 4 workers
+//   must drop instead of back-pressuring, must conserve the ledger and must
+//   still terminate every admitted window exactly once.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_multicore_stop_and_backpressure)
+{
+    const size_t num_samples = 200000;
+
+    const std::string tmp_file =
+        write_multicore_sc16_file("stop", make_multicore_sc16_data(num_samples));
+
+    PipelineConfig cfg;
+    cfg.source_type = StreamSourceType::Replay;
+    cfg.replay_file = tmp_file;
+    cfg.paced_replay = false;
+    cfg.native_rate = 998.4e6;
+    cfg.work_rate = 998.4e6;
+    cfg.schedule_t0 = 0.0;
+    cfg.period_s = 1000.0 / 998.4e6;
+    cfg.pre_guard_samples = 100;
+    cfg.capture_samples = 800;
+    cfg.post_guard_samples = 100;
+    cfg.pool_capacity = 2; // tiny: forces drops / admission backpressure
+    cfg.consumer_mode = ConsumerMode::SicOnly;
+    cfg.dsp_workers = 4;
+    cfg.max_windows = 200;
+
+    UhdSc16Pipeline pipeline(cfg);
+    BOOST_REQUIRE(pipeline.initialize());
+    pipeline.start();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    const auto t_stop_start = std::chrono::steady_clock::now();
+    pipeline.stop();
+    pipeline.wait();
+    const auto t_stop_end = std::chrono::steady_clock::now();
+    const double stop_elapsed_ms =
+        std::chrono::duration<double, std::milli>(t_stop_end - t_stop_start).count();
+
+    BOOST_CHECK_LE(stop_elapsed_ms, 2000.0);
+
+    const PipelineLedger& ledger = pipeline.ledger();
+    std::string err;
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+
+    BOOST_CHECK_GT(ledger.offered_windows, 0u);
+
+    // Invariant 1, spelled out for a clearer failure message.
+    BOOST_CHECK_EQUAL(ledger.admitted_windows + ledger.dropped_admission +
+                          ledger.invalid_gap_before_admission + ledger.cancelled_windows,
+                      ledger.offered_windows);
+    // Invariant 2, spelled out for a clearer failure message.
+    BOOST_CHECK_EQUAL(ledger.completed_windows + ledger.processing_failed +
+                          ledger.invalid_gap_after_admission,
+                      ledger.admitted_windows);
+
+    BOOST_TEST_MESSAGE("ledger: offered=" << ledger.offered_windows
+                       << " admitted=" << ledger.admitted_windows
+                       << " completed=" << ledger.completed_windows
+                       << " dropped=" << ledger.dropped_admission
+                       << " invalid_before=" << ledger.invalid_gap_before_admission
+                       << " invalid_after=" << ledger.invalid_gap_after_admission
+                       << " cancelled=" << ledger.cancelled_windows);
+
+    // Every offered window that was not cancelled must yield exactly one result
+    // (dev plan 1.3: DroppedAdmission is committed through the same reorder
+    // buffer, so drops are present in results() as well).
+    const uint64_t expected_results = ledger.admitted_windows +
+                                      ledger.dropped_admission +
+                                      ledger.invalid_gap_before_admission;
+    const std::vector<WindowResult>& results = pipeline.results();
+    BOOST_CHECK_EQUAL(results.size(), static_cast<size_t>(expected_results));
+    BOOST_CHECK_GE(results.size(), static_cast<size_t>(ledger.admitted_windows));
+
+    // Exactly one result per admitted window: no loss, no duplication, and the
+    // committed ids stay strictly increasing (C5) even with interleaved drops.
+    size_t admitted_results = 0;
+    for (size_t i = 0; i < results.size(); ++i) {
+        if (results[i].state != WindowTerminalState::DroppedAdmission) {
+            admitted_results++;
+            BOOST_CHECK(results[i].worker_id >= 0 && results[i].worker_id < 4);
+        }
+        if (i > 0) {
+            BOOST_CHECK_LT(results[i - 1].window_id, results[i].window_id);
+        }
+    }
+    BOOST_CHECK_EQUAL(admitted_results, static_cast<size_t>(ledger.admitted_windows));
+
+    std::remove(tmp_file.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 11: test_pipeline_multicore_affinity_validation
+//   C4/1.4 affinity rule: a cpu_cores_dsp list whose length differs from
+//   dsp_workers must fail closed instead of silently degrading.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_multicore_affinity_validation)
+{
+    const std::string tmp_file =
+        write_multicore_sc16_file("affinity", make_multicore_sc16_data(4096));
+
+    PipelineConfig cfg;
+    cfg.source_type = StreamSourceType::Replay;
+    cfg.replay_file = tmp_file;
+    cfg.paced_replay = false;
+    cfg.native_rate = 998.4e6;
+    cfg.work_rate = 998.4e6;
+    cfg.schedule_t0 = 0.0;
+    cfg.period_s = 1000.0 / 998.4e6;
+    cfg.pre_guard_samples = 0;
+    cfg.capture_samples = 1000;
+    cfg.post_guard_samples = 0;
+    cfg.pool_capacity = 2;
+    cfg.consumer_mode = ConsumerMode::SicOnly;
+    cfg.dsp_workers = 4;
+    cfg.cpu_cores_dsp = { 1, 2 };
+
+    // Mismatched affinity list: initialize() must refuse (fail-closed).
+    {
+        UhdSc16Pipeline pipeline(cfg);
+        BOOST_CHECK_MESSAGE(!pipeline.initialize(),
+                            "initialize() must fail closed when cpu_cores_dsp.size() (2) "
+                            "!= dsp_workers (4)");
+    }
+
+    // Matching affinity list: initialize() must accept.  The pipeline copies the
+    // config in its constructor, so a fresh instance is required here.
+    PipelineConfig good_cfg = cfg;
+    good_cfg.cpu_cores_dsp = { 1, 2, 3, 4 };
+    {
+        UhdSc16Pipeline pipeline(good_cfg);
+        BOOST_CHECK_MESSAGE(pipeline.initialize(),
+                            "initialize() must accept cpu_cores_dsp with exactly "
+                            "dsp_workers entries");
+        // No start(): the destructor must tear down a never-started pipeline.
+    }
+
+    std::remove(tmp_file.c_str());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

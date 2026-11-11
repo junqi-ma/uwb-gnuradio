@@ -94,6 +94,7 @@ struct WindowResult {
     uint64_t window_id = 0;
     // Burst-level multi-core contract: index of the DSP worker that produced
     // this window, in [0, dsp_workers).  Always 0 when dsp_workers == 1.
+    // Windows that never reached a worker (DroppedAdmission) carry -1.
     int worker_id = 0;
     WindowTerminalState state = WindowTerminalState::Completed;
     int64_t native_start_abs = 0;
