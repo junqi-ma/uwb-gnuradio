@@ -1,0 +1,5 @@
+pair,window,identical,differing,sic_status_base,sic_status_cand,suppression_base,suppression_cand,detected_start_base,detected_start_cand
+realtime,0,True,,committed_preamble_sparse_pulse,committed_preamble_sparse_pulse,41.3954887,41.0205841,-1,-1
+realtime,1,True,,committed_preamble_sparse_pulse,committed_preamble_sparse_pulse,41.3954887,41.0205841,-1,-1
+quality,0,True,,committed_preamble_sparse_pulse,committed_preamble_sparse_pulse,44.1054573,42.0493355,-1,-1
+quality,1,True,,committed_preamble_sparse_pulse,committed_preamble_sparse_pulse,44.1054573,42.0493355,-1,-1
