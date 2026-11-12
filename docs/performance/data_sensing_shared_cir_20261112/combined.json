@@ -1,0 +1,366 @@
+{
+  "binary": "/home/junqima/workspace/uwb-gnuradio/.worktrees/sensing-shared-cir/gr-uwb/build-sensing-shared-cir/bench/benchmark_shared_cir",
+  "sessions": 3,
+  "groups": 5,
+  "iters_per_slot": 52,
+  "warmup": 40,
+  "observations_per_arm_per_session": 520,
+  "provenance": {
+    "session1": [
+      "benchmark_shared_cir (shared SYNC-CIR kernel / shared preamble front-end)",
+      "session=1/3 groups=5 iters_per_slot=52 warmup=40",
+      "git_sha=068d21e03b55f8c4f2e665728f31e5ab3df8daef dirty_entries=21",
+      "binary=/home/junqima/workspace/uwb-gnuradio/.worktrees/sensing-shared-cir/gr-uwb/build-sensing-shared-cir/bench/benchmark_shared_cir",
+      "nproc_online=20 nproc_conf=20 affinity=2 sched_getcpu_samples=2|2|2|2|2|2|2|2",
+      "sample_rate_hz=998400000 sync_period_samples=1016 cir_pre=16 cir_post=100 taps=116 cir_skip_initial=10 sfd_mode=4z2 code_index=9 pulse=legacy48 peak_amplitude=0.8",
+      "thresholds: sfd=0.3 sync_refine=0.3 sfd_search_margin=64 sync_refine_margin=8 timing_search_margin(front-end)=64 timing_coarse_stride=1 timing_track_radius=8",
+      "fixture=sync64_psdu32 sync_reps=64 psdu_bytes=32 psdu_sha_fnv1a=35cae5dc461aa14e pre_guard=1997 packet_samples=133568 window_samples=139661 predicted_sfd=67021 cir_axis=1997 window_fnv1a=cd056a2e6f7b546d cir_union_samples=54979 valid_repetitions=54 sync_template_rel_l2_vs_testdata=0.000",
+      "fixture=sync256_psdu127 sync_reps=256 psdu_bytes=127 psdu_sha_fnv1a=3858a5d239cdba55 pre_guard=1997 packet_samples=444352 window_samples=450445 predicted_sfd=262093 cir_axis=1997 window_fnv1a=9b86d67bae9afecb cir_union_samples=250051 valid_repetitions=246 sync_template_rel_l2_vs_testdata=0.000",
+      "comm_arm: demodulate_one on sync64_psdu32; legacy_profile=all rx_fast_* off (full-stream soft chips), fast_profile=production flags on",
+      "frontend_diag=sync64_psdu32 ok=1 timing_us=90 cfo_us=14 sfd_us=491 coverage_us=0 | cfo_fit_us=0 cfo_rotate_us=72 cfo_rotated_samples=83776 cfo_rotation_passes=2 | sfd_bootstrap_us=173 sfd_tail_retrack_us=84 sfd_cfo_refit_us=58 sfd_final_us=173 | covered=[12013,79405) final_cfo_hz=0.000 (single untimed call; diagnostics only)",
+      "frontend_diag=sync256_psdu127 ok=1 timing_us=347 cfo_us=15 sfd_us=664 coverage_us=0 | cfo_fit_us=2 cfo_rotate_us=240 cfo_rotated_samples=278848 cfo_rotation_passes=2 | sfd_bootstrap_us=173 sfd_tail_retrack_us=86 sfd_cfo_refit_us=227 sfd_final_us=173 | covered=[12013,274477) final_cfo_hz=0.000 (single untimed call; diagnostics only)"
+    ],
+    "session2": [
+      "benchmark_shared_cir (shared SYNC-CIR kernel / shared preamble front-end)",
+      "session=2/3 groups=5 iters_per_slot=52 warmup=40",
+      "git_sha=068d21e03b55f8c4f2e665728f31e5ab3df8daef dirty_entries=21",
+      "binary=/home/junqima/workspace/uwb-gnuradio/.worktrees/sensing-shared-cir/gr-uwb/build-sensing-shared-cir/bench/benchmark_shared_cir",
+      "nproc_online=20 nproc_conf=20 affinity=2 sched_getcpu_samples=2|2|2|2|2|2|2|2",
+      "sample_rate_hz=998400000 sync_period_samples=1016 cir_pre=16 cir_post=100 taps=116 cir_skip_initial=10 sfd_mode=4z2 code_index=9 pulse=legacy48 peak_amplitude=0.8",
+      "thresholds: sfd=0.3 sync_refine=0.3 sfd_search_margin=64 sync_refine_margin=8 timing_search_margin(front-end)=64 timing_coarse_stride=1 timing_track_radius=8",
+      "fixture=sync64_psdu32 sync_reps=64 psdu_bytes=32 psdu_sha_fnv1a=35cae5dc461aa14e pre_guard=1997 packet_samples=133568 window_samples=139661 predicted_sfd=67021 cir_axis=1997 window_fnv1a=cd056a2e6f7b546d cir_union_samples=54979 valid_repetitions=54 sync_template_rel_l2_vs_testdata=0.000",
+      "fixture=sync256_psdu127 sync_reps=256 psdu_bytes=127 psdu_sha_fnv1a=3858a5d239cdba55 pre_guard=1997 packet_samples=444352 window_samples=450445 predicted_sfd=262093 cir_axis=1997 window_fnv1a=9b86d67bae9afecb cir_union_samples=250051 valid_repetitions=246 sync_template_rel_l2_vs_testdata=0.000",
+      "comm_arm: demodulate_one on sync64_psdu32; legacy_profile=all rx_fast_* off (full-stream soft chips), fast_profile=production flags on",
+      "frontend_diag=sync64_psdu32 ok=1 timing_us=88 cfo_us=14 sfd_us=494 coverage_us=0 | cfo_fit_us=0 cfo_rotate_us=72 cfo_rotated_samples=83776 cfo_rotation_passes=2 | sfd_bootstrap_us=173 sfd_tail_retrack_us=86 sfd_cfo_refit_us=58 sfd_final_us=175 | covered=[12013,79405) final_cfo_hz=0.000 (single untimed call; diagnostics only)",
+      "frontend_diag=sync256_psdu127 ok=1 timing_us=357 cfo_us=16 sfd_us=666 coverage_us=0 | cfo_fit_us=2 cfo_rotate_us=241 cfo_rotated_samples=278848 cfo_rotation_passes=2 | sfd_bootstrap_us=177 sfd_tail_retrack_us=84 sfd_cfo_refit_us=228 sfd_final_us=173 | covered=[12013,274477) final_cfo_hz=0.000 (single untimed call; diagnostics only)"
+    ],
+    "session3": [
+      "benchmark_shared_cir (shared SYNC-CIR kernel / shared preamble front-end)",
+      "session=3/3 groups=5 iters_per_slot=52 warmup=40",
+      "git_sha=068d21e03b55f8c4f2e665728f31e5ab3df8daef dirty_entries=21",
+      "binary=/home/junqima/workspace/uwb-gnuradio/.worktrees/sensing-shared-cir/gr-uwb/build-sensing-shared-cir/bench/benchmark_shared_cir",
+      "nproc_online=20 nproc_conf=20 affinity=2 sched_getcpu_samples=2|2|2|2|2|2|2|2",
+      "sample_rate_hz=998400000 sync_period_samples=1016 cir_pre=16 cir_post=100 taps=116 cir_skip_initial=10 sfd_mode=4z2 code_index=9 pulse=legacy48 peak_amplitude=0.8",
+      "thresholds: sfd=0.3 sync_refine=0.3 sfd_search_margin=64 sync_refine_margin=8 timing_search_margin(front-end)=64 timing_coarse_stride=1 timing_track_radius=8",
+      "fixture=sync64_psdu32 sync_reps=64 psdu_bytes=32 psdu_sha_fnv1a=35cae5dc461aa14e pre_guard=1997 packet_samples=133568 window_samples=139661 predicted_sfd=67021 cir_axis=1997 window_fnv1a=cd056a2e6f7b546d cir_union_samples=54979 valid_repetitions=54 sync_template_rel_l2_vs_testdata=0.000",
+      "fixture=sync256_psdu127 sync_reps=256 psdu_bytes=127 psdu_sha_fnv1a=3858a5d239cdba55 pre_guard=1997 packet_samples=444352 window_samples=450445 predicted_sfd=262093 cir_axis=1997 window_fnv1a=9b86d67bae9afecb cir_union_samples=250051 valid_repetitions=246 sync_template_rel_l2_vs_testdata=0.000",
+      "comm_arm: demodulate_one on sync64_psdu32; legacy_profile=all rx_fast_* off (full-stream soft chips), fast_profile=production flags on",
+      "frontend_diag=sync64_psdu32 ok=1 timing_us=91 cfo_us=15 sfd_us=487 coverage_us=0 | cfo_fit_us=0 cfo_rotate_us=74 cfo_rotated_samples=83776 cfo_rotation_passes=2 | sfd_bootstrap_us=169 sfd_tail_retrack_us=87 sfd_cfo_refit_us=60 sfd_final_us=169 | covered=[12013,79405) final_cfo_hz=0.000 (single untimed call; diagnostics only)",
+      "frontend_diag=sync256_psdu127 ok=1 timing_us=361 cfo_us=15 sfd_us=674 coverage_us=0 | cfo_fit_us=2 cfo_rotate_us=240 cfo_rotated_samples=278848 cfo_rotation_passes=2 | sfd_bootstrap_us=181 sfd_tail_retrack_us=88 sfd_cfo_refit_us=227 sfd_final_us=173 | covered=[12013,274477) final_cfo_hz=0.000 (single untimed call; diagnostics only)"
+    ]
+  },
+  "combined": {
+    "sync64_psdu32|control|total": {
+      "n": 520.0,
+      "mean": 855.7736666666666,
+      "p50": 831.038,
+      "p95": 985.736,
+      "min": 781.6700000000001,
+      "max": 2471.5913333333333,
+      "mean_session_range": [
+        854.1842,
+        857.5279
+      ]
+    },
+    "sync64_psdu32|control|sfd": {
+      "n": 520.0,
+      "mean": 667.8463666666665,
+      "p50": 648.6933333333333,
+      "p95": 768.6393333333334,
+      "min": 610.646,
+      "max": 2033.4836666666667,
+      "mean_session_range": [
+        663.8711,
+        670.4676
+      ]
+    },
+    "sync64_psdu32|control|refine": {
+      "n": 520.0,
+      "mean": 13.041233333333333,
+      "p50": 11.682,
+      "p95": 15.347,
+      "min": 11.064333333333332,
+      "max": 438.07666666666665,
+      "mean_session_range": [
+        12.1823,
+        14.4879
+      ]
+    },
+    "sync64_psdu32|control|cir_scalar_kernel": {
+      "n": 520.0,
+      "mean": 174.88603333333333,
+      "p50": 168.24133333333333,
+      "p95": 211.23833333333334,
+      "min": 158.55233333333334,
+      "max": 514.1076666666667,
+      "mean_session_range": [
+        173.955,
+        175.8252
+      ]
+    },
+    "sync64_psdu32|candidate|total": {
+      "n": 520.0,
+      "mean": 648.0711333333333,
+      "p50": 628.1186666666666,
+      "p95": 761.3469999999999,
+      "min": 591.8206666666666,
+      "max": 1845.2803333333334,
+      "mean_session_range": [
+        641.1838,
+        652.313
+      ]
+    },
+    "sync64_psdu32|candidate|frontend_timing": {
+      "n": 520.0,
+      "mean": 95.82113333333332,
+      "p50": 91.66666666666667,
+      "p95": 112.0,
+      "min": 85.0,
+      "max": 425.3333333333333,
+      "mean_session_range": [
+        93.8519,
+        97.5
+      ]
+    },
+    "sync64_psdu32|candidate|frontend_cfo": {
+      "n": 520.0,
+      "mean": 15.310899999999998,
+      "p50": 14.666666666666666,
+      "p95": 19.0,
+      "min": 14.0,
+      "max": 75.66666666666667,
+      "mean_session_range": [
+        15.1423,
+        15.45
+      ]
+    },
+    "sync64_psdu32|candidate|frontend_sfd": {
+      "n": 520.0,
+      "mean": 521.6109,
+      "p50": 505.6666666666667,
+      "p95": 622.3333333333334,
+      "min": 477.3333333333333,
+      "max": 1647.6666666666667,
+      "mean_session_range": [
+        517.0577,
+        524.0942
+      ]
+    },
+    "sync64_psdu32|candidate|coverage": {
+      "n": 520.0,
+      "mean": 0.003833333333333333,
+      "p50": 0.0,
+      "p95": 0.0,
+      "min": 0.0,
+      "max": 2.0,
+      "mean_session_range": [
+        0.0,
+        0.0115
+      ]
+    },
+    "sync64_psdu32|candidate|cir_us_reported": {
+      "n": 520.0,
+      "mean": 12.4532,
+      "p50": 12.0,
+      "p95": 17.666666666666668,
+      "min": 11.0,
+      "max": 60.0,
+      "mean_session_range": [
+        12.2846,
+        12.5673
+      ]
+    },
+    "sync64_psdu32|candidate|cir_shared_kernel": {
+      "n": 520.0,
+      "mean": 13.026666666666666,
+      "p50": 12.322333333333333,
+      "p95": 15.784,
+      "min": 11.798333333333334,
+      "max": 98.03733333333332,
+      "mean_session_range": [
+        12.7986,
+        13.2435
+      ]
+    },
+    "sync256_psdu127|control|total": {
+      "n": 520.0,
+      "mean": 899.247,
+      "p50": 873.235,
+      "p95": 1068.834,
+      "min": 814.7413333333334,
+      "max": 2900.110666666667,
+      "mean_session_range": [
+        891.7681,
+        905.7248
+      ]
+    },
+    "sync256_psdu127|control|sfd": {
+      "n": 520.0,
+      "mean": 668.9716999999999,
+      "p50": 647.9716666666667,
+      "p95": 789.596,
+      "min": 605.7406666666667,
+      "max": 2640.2803333333336,
+      "mean_session_range": [
+        664.7732,
+        675.2504
+      ]
+    },
+    "sync256_psdu127|control|refine": {
+      "n": 520.0,
+      "mean": 12.452766666666667,
+      "p50": 11.784999999999998,
+      "p95": 15.673666666666668,
+      "min": 11.019333333333334,
+      "max": 85.724,
+      "mean_session_range": [
+        12.2795,
+        12.6633
+      ]
+    },
+    "sync256_psdu127|control|cir_scalar_kernel": {
+      "n": 520.0,
+      "mean": 217.82253333333335,
+      "p50": 208.99033333333333,
+      "p95": 265.68966666666665,
+      "min": 193.11333333333334,
+      "max": 525.0993333333333,
+      "mean_session_range": [
+        214.7153,
+        220.9411
+      ]
+    },
+    "sync256_psdu127|candidate|total": {
+      "n": 520.0,
+      "mean": 1176.6051333333332,
+      "p50": 1134.3653333333334,
+      "p95": 1393.656,
+      "min": 1051.8203333333333,
+      "max": 4251.014666666667,
+      "mean_session_range": [
+        1168.4343,
+        1187.9721
+      ]
+    },
+    "sync256_psdu127|candidate|frontend_timing": {
+      "n": 520.0,
+      "mean": 387.92883333333333,
+      "p50": 370.6666666666667,
+      "p95": 466.3333333333333,
+      "min": 337.3333333333333,
+      "max": 2383.6666666666665,
+      "mean_session_range": [
+        380.8442,
+        396.2981
+      ]
+    },
+    "sync256_psdu127|candidate|frontend_cfo": {
+      "n": 520.0,
+      "mean": 17.02756666666667,
+      "p50": 16.0,
+      "p95": 21.666666666666668,
+      "min": 15.0,
+      "max": 97.33333333333333,
+      "mean_session_range": [
+        16.7327,
+        17.2865
+      ]
+    },
+    "sync256_psdu127|candidate|frontend_sfd": {
+      "n": 520.0,
+      "mean": 716.4994,
+      "p50": 689.0,
+      "p95": 860.3333333333334,
+      "min": 647.3333333333334,
+      "max": 2533.3333333333335,
+      "mean_session_range": [
+        710.9462,
+        720.0058
+      ]
+    },
+    "sync256_psdu127|candidate|coverage": {
+      "n": 520.0,
+      "mean": 0.1673,
+      "p50": 0.0,
+      "p95": 1.0,
+      "min": 0.0,
+      "max": 24.666666666666668,
+      "mean_session_range": [
+        0.1058,
+        0.2173
+      ]
+    },
+    "sync256_psdu127|candidate|cir_us_reported": {
+      "n": 520.0,
+      "mean": 51.239066666666666,
+      "p50": 45.666666666666664,
+      "p95": 78.0,
+      "min": 41.0,
+      "max": 454.3333333333333,
+      "mean_session_range": [
+        50.3365,
+        52.1269
+      ]
+    },
+    "sync256_psdu127|candidate|cir_shared_kernel": {
+      "n": 520.0,
+      "mean": 46.66843333333333,
+      "p50": 42.56,
+      "p95": 65.769,
+      "min": 38.474,
+      "max": 219.0626666666667,
+      "mean_session_range": [
+        45.9683,
+        47.6673
+      ]
+    },
+    "comm64_psdu32|comm_legacy_profile|total": {
+      "n": 520.0,
+      "mean": 1311.0257666666666,
+      "p50": 1272.7833333333335,
+      "p95": 1476.2476666666669,
+      "min": 1212.3113333333333,
+      "max": 3761.855,
+      "mean_session_range": [
+        1292.0917,
+        1342.6191
+      ]
+    },
+    "comm64_psdu32|comm_legacy_profile|stage_cir": {
+      "n": 520.0,
+      "mean": 551.1641,
+      "p50": 535.0,
+      "p95": 640.3333333333334,
+      "min": 509.0,
+      "max": 2106.3333333333335,
+      "mean_session_range": [
+        543.1712,
+        562.2346
+      ]
+    },
+    "comm64_psdu32|comm_fast_profile|total": {
+      "n": 520.0,
+      "mean": 344.2401333333334,
+      "p50": 327.9876666666667,
+      "p95": 429.045,
+      "min": 311.3756666666667,
+      "max": 1395.375,
+      "mean_session_range": [
+        342.1228,
+        348.0704
+      ]
+    },
+    "comm64_psdu32|comm_fast_profile|stage_cir": {
+      "n": 520.0,
+      "mean": 51.64483333333334,
+      "p50": 48.666666666666664,
+      "p95": 65.0,
+      "min": 47.0,
+      "max": 212.66666666666666,
+      "mean_session_range": [
+        50.8865,
+        52.4692
+      ]
+    }
+  }
+}

@@ -42,7 +42,7 @@ const std::vector<std::string> detail_names={
     "est_detect_us","est_cfo_us","est_cir_us","est_solve_us","est_fit_us","est_other_us",
     "sic_rx_timing_us","sic_rx_cfo_us","sic_rx_sfd_us","sic_rx_other_us",
     "recon_scale_us","recon_conv_us","recon_phase_us","recon_other_us",
-    "sense_sfd_us","sense_refine_us","sense_estimate_us","sense_other_us",
+    "sense_timing_us","sense_cfo_us","sense_sfd_us","sense_coverage_us","sense_cir_us","sense_other_us",
     "comm_timing_us","comm_cfo_us","comm_sfd_us","comm_cir_us","comm_ns_sfd_us","comm_phr_us","comm_payload_us","comm_soft_fallback_us","comm_other_us",
     "comm_cir_estimate_us","comm_cir_fir_us","comm_cir_post_us","comm_cir_other_us",
     "resample_reset_us","resample_process_us","resample_flush_us"
@@ -51,34 +51,14 @@ struct Record {
     size_t id=0; int worker=0;
     double start=0,end=0,resample=0,sic=0,sensing=0,comm=0,total=0;
     bool committed=false,radar=false,fcs=false,exact=false;
-    std::array<double,39> details{};
+    std::array<double,41> details{};
     unsigned soft_fallbacks=0,payload_fallbacks=0,phr_fallbacks=0;
 };
 
-// Success-path decomposition using exactly the production radar primitives.
-// Warmup compares the complete result and raw/norm taps against radar_cir_one.
-radar::RadarCirResult detailed_radar(const cf* data,size_t n,int64_t predicted,
-        const radar::RadarCirConfig& cfg,radar::RadarCirCoreScratch& scratch,
-        std::array<double,3>& times) {
-    radar::RadarCirResult out;out.predicted_sfd_start=predicted;
-    radar::RadarSfdResult sfd;auto t0=Clock::now();
-    if(!radar::search_sfd(data,n,predicted,cfg.sfd_search_margin,cfg.sfd_threshold,sfd,scratch.sfd))
-        throw std::runtime_error("detailed radar SFD failure");
-    auto t1=Clock::now();radar::RadarTimingResult timing;
-    if(!radar::refine_sync_origin(data,n,sfd.sfd_start_sample,cfg.sync_repetitions,1016,
-            cfg.sync_refine_margin,cfg.sync_refine_threshold,scratch.sync_template.data(),
-            scratch.sync_template.size(),timing)) throw std::runtime_error("detailed timing failure");
-    auto t2=Clock::now();radar::RadarCirEstimate cir;
-    const int64_t origin=radar::nominal_preamble_start(predicted,cfg.sync_repetitions,1016);
-    if(!radar::estimate_radar_cir(data,n,origin,1016,cfg.cir_pre,cfg.cir_post,cfg.cir_skip_initial,
-            cfg.cir_repetitions,cfg.sync_repetitions,cir,scratch.cir)) throw std::runtime_error("detailed CIR failure");
-    auto t3=Clock::now();times={elapsed(t0,t1),elapsed(t1,t2),elapsed(t2,t3)};
-    out.status=radar::RadarCirStatus::Ok;out.sfd_start_sample=sfd.sfd_start_sample;
-    out.sfd_metric=sfd.metric;out.preamble_start_sample=timing.preamble_start_sample;out.sync_metric=timing.metric;
-    out.cir_origin_sample=origin;out.tap_count=cir.tap_count;out.peak_tap=cir.peak_tap;
-    out.peak_abs=cir.peak_abs;out.raw_l2_norm=cir.raw_l2_norm;out.valid_repetitions=cir.valid_repetitions;
-    return out;
-}
+// The sensing stage is measured by the PRODUCTION entry point only.  There is
+// no hand-rolled decomposition any more (workstream C): every sub-timing below
+// is reported by radar::RadarCirResult from the shared preamble front-end and
+// the shared SYNC-CIR kernel.
 struct Worker {
     core::RationalResampler65_48Core resampler;
     sic::SicUnifiedConfig cfg;
@@ -117,6 +97,7 @@ struct Worker {
         radar_cfg.cir_repetitions=target_reps-radar_cfg.cir_skip_initial;
         if(!radar::prepare_radar_cir_core(radar_cfg,target_sync.data(),1016,16,100,radar_scratch))
             throw std::runtime_error("radar preparation failed");
+        radar::reserve_radar_cir_core(expected+512,radar_scratch);
         profile.code_index=9;profile.timing_coarse_stride=1;
         profile.preamble_repetitions=target_reps;
         profile.cir_repetitions=target_reps-profile.cir_skip_initial_repetitions;
@@ -146,9 +127,8 @@ struct Worker {
         auto t2=Clock::now();
         const cf* data=result.committed?out.data():work.data();
         radar::RadarCirResult radar_result;
-        std::array<double,3> sense_times{};
-        if(task=="sensing_detail") radar_result=detailed_radar(data,expected,542+radar_cfg.sync_repetitions*1016,radar_cfg,radar_scratch,sense_times);
-        else if(task!="comm") radar::radar_cir_one(data,expected,542+radar_cfg.sync_repetitions*1016,radar_cfg,radar_scratch,radar_result);
+        const int64_t predicted_sfd=542+radar_cfg.sync_repetitions*1016;
+        if(task!="comm") radar::radar_cir_one(data,expected,predicted_sfd,radar_cfg,radar_scratch,radar_result);
         auto t3=Clock::now();
         demod::DemodResult decoded;
         if(task=="all"||task=="comm") decoded=demod::core::demodulate_one(data,expected,profile,0,542,0,target_sync,demod_scratch);
@@ -166,12 +146,21 @@ struct Worker {
         const double recon_children=t.recon_scale_us+t.recon_conv_us+t.recon_cfo_rot_us;
         const double comm_children=decoded.stage_timing_us+decoded.stage_cfo_us+decoded.stage_sfd_us+decoded.stage_cir_us+
             decoded.stage_ns_sfd_us+decoded.stage_phr_us+decoded.stage_payload_us+decoded.stage_softchip_fallback_us;
+        // Sensing sub-timings come from the production RadarCirResult.  They are
+        // children of r.sensing (the wall time of the radar_cir_one call) and
+        // are never added to it.
+        const double sense_timing=double(radar_result.frontend_timing_us);
+        const double sense_cfo=double(radar_result.frontend_cfo_us);
+        const double sense_sfd=double(radar_result.frontend_sfd_us);
+        const double sense_coverage=double(radar_result.coverage_us);
+        const double sense_cir=double(radar_result.cir_us);
         r.details={t.estimate_us,t.comm_rx_us,t.reconstruct_us,t.subtract_us,
             r.sic-t.estimate_us-t.comm_rx_us-t.reconstruct_us-t.subtract_us,
             t.est_detect_us,t.est_cfo_us,t.est_cir_us,t.est_solve_us,t.est_fit_check_us,t.estimate_us-est_children,
             t.rx_timing_us,t.rx_cfo_us,t.rx_sfd_us,t.comm_rx_us-rx_children,
             t.recon_scale_us,t.recon_conv_us,t.recon_cfo_rot_us,t.reconstruct_us-recon_children,
-            sense_times[0],sense_times[1],sense_times[2],r.sensing-sense_times[0]-sense_times[1]-sense_times[2],
+            sense_timing,sense_cfo,sense_sfd,sense_coverage,sense_cir,
+            r.sensing-sense_timing-sense_cfo-sense_sfd-sense_coverage-sense_cir,
             double(decoded.stage_timing_us),double(decoded.stage_cfo_us),double(decoded.stage_sfd_us),double(decoded.stage_cir_us),
             double(decoded.stage_ns_sfd_us),double(decoded.stage_phr_us),double(decoded.stage_payload_us),double(decoded.stage_softchip_fallback_us),r.comm-comm_children,
             double(decoded.cir.cir_estimate_us),double(decoded.cir.soft_fir_us),double(decoded.cir.postprocess_us),
@@ -179,16 +168,25 @@ struct Worker {
             elapsed(t0,tr),elapsed(tr,tp),elapsed(tp,t1)};
         r.soft_fallbacks=decoded.stage_softchip_fallbacks;r.payload_fallbacks=decoded.stage_fused_fallbacks;r.phr_fallbacks=decoded.stage_phr_fused_fallbacks;
         if(task=="sensing_detail" && check_reference) {
-            const auto raw=radar_scratch.cir.raw_taps,norm=radar_scratch.cir.norm_taps;
+            // Self-check: the published taps and every published field must be
+            // reproduced by a second production call on the same input.  There
+            // is no separate decomposition to diverge from production any more.
+            const size_t taps=radar_result.tap_count;
+            const std::vector<cf> raw(radar_scratch.cir.raw_taps.begin(),radar_scratch.cir.raw_taps.begin()+taps);
+            const std::vector<cf> norm(radar_scratch.cir.norm_taps.begin(),radar_scratch.cir.norm_taps.begin()+taps);
             radar::RadarCirResult ref;
-            if(!radar::radar_cir_one(data,expected,542+radar_cfg.sync_repetitions*1016,radar_cfg,radar_scratch,ref) ||
+            if(!radar::radar_cir_one(data,expected,predicted_sfd,radar_cfg,radar_scratch,ref) ||
                 ref.status!=radar_result.status || ref.sfd_start_sample!=radar_result.sfd_start_sample ||
                 ref.preamble_start_sample!=radar_result.preamble_start_sample || ref.peak_tap!=radar_result.peak_tap ||
                 ref.peak_abs!=radar_result.peak_abs || ref.valid_repetitions!=radar_result.valid_repetitions ||
                 ref.sfd_metric!=radar_result.sfd_metric || ref.sync_metric!=radar_result.sync_metric ||
                 ref.cir_origin_sample!=radar_result.cir_origin_sample || ref.tap_count!=radar_result.tap_count ||
-                raw!=radar_scratch.cir.raw_taps || norm!=radar_scratch.cir.norm_taps)
-                throw std::runtime_error("radar decomposition differs from production result");
+                ref.detected_sync_origin!=radar_result.detected_sync_origin ||
+                ref.cir_axis_origin!=radar_result.cir_axis_origin ||
+                ref.final_cfo_hz!=radar_result.final_cfo_hz || ref.cfo_epoch!=radar_result.cfo_epoch ||
+                raw!=std::vector<cf>(radar_scratch.cir.raw_taps.begin(),radar_scratch.cir.raw_taps.begin()+ref.tap_count) ||
+                norm!=std::vector<cf>(radar_scratch.cir.norm_taps.begin(),radar_scratch.cir.norm_taps.begin()+ref.tap_count))
+                throw std::runtime_error("radar production result is not reproducible");
         }
         return r;
     }

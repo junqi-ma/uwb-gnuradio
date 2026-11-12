@@ -9,6 +9,17 @@
  * Ports MATLAB +uwbdecoder/estimateCir.m and testdata/uwb_radar
  * local_estimate_cir (0-based).  Input is a known preamble origin; output
  * is complex raw CIR plus L2-normalized CIR.  Not a GNU Radio block.
+ *
+ * STATUS AFTER WORKSTREAM C (2026-11-12): this is NO LONGER the online
+ * sensing CIR algorithm.  `radar_cir_one()` (uwb_radar_cir_core.h) now runs the
+ * shared preamble front-end and the shared `sync_cir::estimate_sync_cir`
+ * kernel, which is what comm uses.  The scalar math here survives for exactly
+ * two purposes:
+ *   1. `estimate_radar_cir_repetition()` — the explicit per-repetition
+ *      emission diagnostic (one window, no averaging, no CFO compensation);
+ *   2. the independent legacy cross-check in QA (float64 accumulation
+ *      reference for the shared kernel: relative L2 <= 2e-5, same peak tap).
+ * Do not add a third online caller.
  */
 
 #pragma once

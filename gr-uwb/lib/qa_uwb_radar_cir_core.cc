@@ -480,9 +480,16 @@ BOOST_AUTO_TEST_CASE(test_radar_cir_timing_failed_zeroed_sync)
                                   cfg, scratch, out);
     BOOST_REQUIRE(!ok);
     BOOST_CHECK(out.status == RadarCirStatus::TimingFailed);
-    BOOST_CHECK_EQUAL(out.sfd_start_sample, pkt.sfd_start);
+    // Detection source changed (workstream C): the shared preamble front-end
+    // stops at the timing stage and never runs the SFD search, so no partial
+    // coordinate is published.  The pre-refactor radar ran search_sfd first and
+    // could report the SFD it found before the (failed) SYNC refine; publishing
+    // it now would be a seed-only result, which the fail-closed contract
+    // forbids.  Everything else (status, empty CIR, no prediction leak) holds.
+    BOOST_CHECK_EQUAL(out.sfd_start_sample, int64_t(-1));
     BOOST_CHECK_EQUAL(out.preamble_start_sample, int64_t(-1));
     BOOST_CHECK_EQUAL(out.cir_origin_sample, int64_t(-1));
+    BOOST_CHECK_EQUAL(out.detected_sync_origin, int64_t(-1));
     BOOST_CHECK(out.preamble_start_sample != pkt.origin);
     assert_empty_cir(out);
 }
@@ -503,9 +510,16 @@ BOOST_AUTO_TEST_CASE(test_radar_cir_timing_failed_origin_clipped)
     const bool ok =
         radar_cir_one(rx.data(), rx.size(), sfd_start, cfg, scratch, out);
     BOOST_REQUIRE(!ok);
-    BOOST_CHECK(out.status == RadarCirStatus::TimingFailed);
-    BOOST_CHECK_EQUAL(out.sfd_start_sample, sfd_start);
+    // Detection source changed (workstream C): the TX-time CIR axis is
+    // nominal_preamble_start(32, 64, 1016) = -64992, i.e. not representable, so
+    // the CIR request itself is invalid and the shared front-end's coverage
+    // plan fails closed before any detection runs.  The pre-refactor radar
+    // reported TimingFailed from its SYNC refine; the fail-closed outcome
+    // (no taps, no coordinates) is unchanged.
+    BOOST_CHECK(out.status == RadarCirStatus::CirFailed);
+    BOOST_CHECK_EQUAL(out.sfd_start_sample, int64_t(-1));
     BOOST_CHECK_EQUAL(out.preamble_start_sample, int64_t(-1));
+    BOOST_CHECK_EQUAL(out.cir_origin_sample, int64_t(-1));
     assert_empty_cir(out);
 }
 
@@ -523,9 +537,15 @@ BOOST_AUTO_TEST_CASE(test_radar_cir_cir_failed_skip_too_large)
                                   cfg, scratch, out);
     BOOST_REQUIRE(!ok);
     BOOST_CHECK(out.status == RadarCirStatus::CirFailed);
-    BOOST_CHECK_EQUAL(out.sfd_start_sample, pkt.sfd_start);
-    BOOST_CHECK_EQUAL(out.preamble_start_sample, pkt.origin);
-    BOOST_CHECK_EQUAL(out.cir_origin_sample, pkt.origin);
+    // Detection source changed (workstream C): skip_initial >= sync_repetitions
+    // makes the CIR request invalid, and the shared front-end's CirOnly
+    // coverage plan fails closed BEFORE detection.  No partial coordinate may
+    // be published for a request the kernel can never satisfy (the
+    // pre-refactor code detected first and then failed, which leaked the
+    // coordinates of a frame it refused to measure).
+    BOOST_CHECK_EQUAL(out.sfd_start_sample, int64_t(-1));
+    BOOST_CHECK_EQUAL(out.preamble_start_sample, int64_t(-1));
+    BOOST_CHECK_EQUAL(out.cir_origin_sample, int64_t(-1));
     assert_empty_cir(out);
 }
 

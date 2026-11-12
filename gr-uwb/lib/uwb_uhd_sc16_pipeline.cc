@@ -1863,6 +1863,9 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
                                    cfg_.radar_cfg.cir_pre,
                                    cfg_.radar_cfg.cir_post,
                                    radar_scratch);
+            // Reserve the shared preamble front-end scratch for the largest
+            // window this worker will see (no allocation in the hot path).
+            radar::reserve_radar_cir_core(work_capacity, radar_scratch);
         }
     } catch (const std::exception& e) {
         publish_worker_state(worker_id, WorkerReadyState::Failed, e.what());
@@ -2076,6 +2079,17 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
                 res.radar_peak_metric = 0.0f;
                 res.radar_detected_start = -1;
             }
+            // Provenance is published for both outcomes: a failed window keeps
+            // cfo_epoch == 0 / origins == -1, which is itself the diagnostic
+            // (no stale value from the previous window is ever carried over).
+            res.radar_cfo_hz = cir_res.final_cfo_hz;
+            res.radar_cir_origin = cir_res.cir_axis_origin;
+            res.radar_detected_origin = cir_res.detected_sync_origin;
+            res.radar_valid_reps = cir_res.valid_repetitions;
+            res.radar_frontend_us = static_cast<double>(
+                cir_res.frontend_timing_us + cir_res.frontend_cfo_us +
+                cir_res.frontend_sfd_us + cir_res.coverage_us);
+            res.radar_cir_us = static_cast<double>(cir_res.cir_us);
         }
 
         auto t_end = std::chrono::steady_clock::now();

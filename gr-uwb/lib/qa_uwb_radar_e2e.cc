@@ -1758,7 +1758,12 @@ BOOST_AUTO_TEST_CASE(e2e_missing_sfd)
     BOOST_CHECK_LE(std::llabs(j0.sfd - kSfdClean), 2);
 
     const JsonlLine j1 = parse_jsonl(lines[1]);
-    BOOST_CHECK_EQUAL(j1.status, "sfd_failed");
+    // Detection source changed (workstream C): a silent packet has neither SYNC
+    // nor SFD, and the shared preamble front-end acquires SYNC first, so the
+    // first failing stage is timing (the pre-refactor radar searched the SFD
+    // first and reported sfd_failed).  Fail-closed output is unchanged: no
+    // taps, no offset advance, sfd == -1.
+    BOOST_CHECK_EQUAL(j1.status, "timing_failed");
     BOOST_CHECK_EQUAL(j1.pulse_id, 1u);
     BOOST_CHECK_EQUAL(j1.tap_count, 0u);
     // offset must not advance on a failed frame

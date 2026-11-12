@@ -1,4 +1,53 @@
-# 当前提交快照：Ipatov 前导重构 `template_scale_mismatch` 修复（2026-11-12）
+# 当前提交快照：Sensing 与 Comm 统一接收前端和 CIR（2026-11-12）
+
+已交付公共 SYNC-CIR 内核与公共前导接收前端，sensing 与 comm 真实共用代码；
+sensing 首次估计并补偿目标 CFO。报告见
+`docs/performance/Sensing与Comm统一前端和CIR_开发报告_2026-11-12.md` 与
+`docs/performance/Sensing与Comm统一前端和CIR_性能报告_2026-11-12.md`，契约
+`docs/performance/接口契约_统一SYNC_CIR核与公共前导前端_2026-11-12.md`，原始数据
+`docs/performance/data_sensing_shared_cir_20261112/`。任务书
+`docs/performance/OpenCode_Sensing与Comm统一前端和CIR_开发方案_2026-11-12.md`。
+分支 `feature/sensing-shared-cir`（worktree `.worktrees/sensing-shared-cir`），
+新 build `gr-uwb/build-sensing-shared-cir`，基线 `bd311cd`。
+- **全量 CTest 83 项：79 通过、3 失败、1 跳过**（`uwb_qa_install_consumer` 按设计
+  跳开，118–121 s）。3 项失败（`pdu_rational_resampler_65_32_workers`、
+  `fullpacket_cfo_diag`、`preamble_sic_core`）**在未修改基线上逐字节复现**，与本次
+  改动无关。干净重建复验同一结果。
+- **comm 逐位不变**：10 个配置（64/256 SYNC、38/116 tap、整数/分数周期、on-demand
+  前缀、fused payload+PHR、code-9/10/11、125 B PSDU）的 `cir_values`、
+  `cir_filter_taps`、soft-chip FNV、payload FNV/PSDU/FCS 全部逐字节相同。
+- **关闭了方案 §4 的覆盖缺口**：final CFO 的第二次旋转现在按 `CirOnly` 的 CIR
+  窗口并集 + final SFD 区间一次覆盖；覆盖不足 fail-closed 为 `CirFailed` 且
+  `derotated_valid=false`；旋转始终从 raw 重算，`cfo_epoch`（1=bootstrap、
+  2=final）与 `[covered_lo,covered_hi)` 必须由调用方校验。
+- **三个原点分离**：`detected_sync_origin`（检测）、`cir_axis_origin`（发送时序/
+  公开预测轴，**不按检测峰重新居中**）、`phase_reference_sample`（去 CFO 锚点）。
+- **raw/norm 分离**：`raw` 保留真实幅度与相位，`norm` 单位 L2 且不覆盖 `raw`；
+  不再复用只有实部的 `cir_values` 或已归一化的 `cir_filter_taps`。
+- **性能**：116-tap 共享内核比旧标量核快 **13.4×（64/32）/ 4.7×（256/127）**；
+  sensing 接收阶段 64/32 **−24.3%**（通过 ≥10% 门槛），256/127 **+30.8%（未通过）**。
+  256/127 已拆解到 µs：内核 −166.6、窄窗 SFD −179.8，但整条 256-SYNC 训练序列
+  跟踪 **+375.5**、新增最终 CFO 旋转 **+240.3**。这是采用 comm 检测前端换取非零
+  CFO 能力的正确性成本，不是内核缺陷。缓解项
+  `timing_seed_refine_radius=8`/`timing_max_backtrack_symbols=0` 把
+  `frontend_timing` 414.43→387.93 µs，但未关闭缺口。
+- **新增 QA**：`qa_uwb_sync_cir_core.cc`（13 例，含独立 float64 参考与 comm 逐位
+  守卫）、`qa_uwb_preamble_frontend.cc`（6 例，CFO 覆盖/epoch 失效/覆盖不足）、
+  `qa_uwb_radar_shared_cir.cc`（5 例，±50 kHz 补偿、距离轴、幅度相位、失败路径）。
+- **`qa_uwb_pdu_roi_cir_65_32.cc` fixture 换成真实帧**：原「LCG 噪声 + 孤立脉冲」
+  靠 `sfd_threshold=1e-6` 通过检测；共享前端要求相干 SYNC 训练，噪声不再可能通过。
+  改后 ROI 与 FULL 的 raw/norm taps **逐位相同**（`max|diff|=0`）。
+- **未验证**：方案 §7.7 端到端功能矩阵（64/32 与 256/127 × work/native × 单径/
+  分数多径 × 两个码方向 × 目标/干扰 CFO 0/±50k × ISR 0/10/20）未跑；非零 CFO 的
+  PSLR/ISLR/弱目标保护未测；comm 的跨 build control/candidate 计时对照未做；
+  SIC-only 成本未测；逐重复发射仍未做 CFO 补偿；`WindowResult` 新字段未导出 JSON；
+  `apps/benchmark_radar_pipeline.cc` 仍手工拆分 SFD/refine/CIR。未上板、未做 paced
+  到达、8 worker、MATLAB 交叉验证、65/48 与 65/32 native 网格。绝对 648/1177 µs
+  仍未达 mean≤0.5 ms / P99≤1 ms / 200 窗/s。
+
+---
+
+# 历史提交快照：Ipatov 前导重构 `template_scale_mismatch` 修复（2026-11-12）
 
 已交付单 worker 测试配置修正后的重构错误定位与修复。报告见
 `docs/performance/单worker配置修正_Ipatov前导重构错误定位与修复报告_2026-11-12.md`，

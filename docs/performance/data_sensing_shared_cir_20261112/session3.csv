@@ -1,0 +1,39 @@
+# benchmark_shared_cir (shared SYNC-CIR kernel / shared preamble front-end)
+# session=3/3 groups=5 iters_per_slot=52 warmup=40
+# git_sha=068d21e03b55f8c4f2e665728f31e5ab3df8daef dirty_entries=21
+# binary=/home/junqima/workspace/uwb-gnuradio/.worktrees/sensing-shared-cir/gr-uwb/build-sensing-shared-cir/bench/benchmark_shared_cir
+# nproc_online=20 nproc_conf=20 affinity=2 sched_getcpu_samples=2|2|2|2|2|2|2|2
+# sample_rate_hz=998400000 sync_period_samples=1016 cir_pre=16 cir_post=100 taps=116 cir_skip_initial=10 sfd_mode=4z2 code_index=9 pulse=legacy48 peak_amplitude=0.8
+# thresholds: sfd=0.3 sync_refine=0.3 sfd_search_margin=64 sync_refine_margin=8 timing_search_margin(front-end)=64 timing_coarse_stride=1 timing_track_radius=8
+# fixture=sync64_psdu32 sync_reps=64 psdu_bytes=32 psdu_sha_fnv1a=35cae5dc461aa14e pre_guard=1997 packet_samples=133568 window_samples=139661 predicted_sfd=67021 cir_axis=1997 window_fnv1a=cd056a2e6f7b546d cir_union_samples=54979 valid_repetitions=54 sync_template_rel_l2_vs_testdata=0.000
+# fixture=sync256_psdu127 sync_reps=256 psdu_bytes=127 psdu_sha_fnv1a=3858a5d239cdba55 pre_guard=1997 packet_samples=444352 window_samples=450445 predicted_sfd=262093 cir_axis=1997 window_fnv1a=9b86d67bae9afecb cir_union_samples=250051 valid_repetitions=246 sync_template_rel_l2_vs_testdata=0.000
+# comm_arm: demodulate_one on sync64_psdu32; legacy_profile=all rx_fast_* off (full-stream soft chips), fast_profile=production flags on
+# frontend_diag=sync64_psdu32 ok=1 timing_us=91 cfo_us=15 sfd_us=487 coverage_us=0 | cfo_fit_us=0 cfo_rotate_us=74 cfo_rotated_samples=83776 cfo_rotation_passes=2 | sfd_bootstrap_us=169 sfd_tail_retrack_us=87 sfd_cfo_refit_us=60 sfd_final_us=169 | covered=[12013,79405) final_cfo_hz=0.000 (single untimed call; diagnostics only)
+# frontend_diag=sync256_psdu127 ok=1 timing_us=361 cfo_us=15 sfd_us=674 coverage_us=0 | cfo_fit_us=2 cfo_rotate_us=240 cfo_rotated_samples=278848 cfo_rotation_passes=2 | sfd_bootstrap_us=181 sfd_tail_retrack_us=88 sfd_cfo_refit_us=227 sfd_final_us=173 | covered=[12013,274477) final_cfo_hz=0.000 (single untimed call; diagnostics only)
+record_type,session,config,arm,metric,n,mean_us,p50_us,p95_us,min_us,max_us,ratio_vs_control
+summary,3,sync64_psdu32,control,total,520,855.6089,832.5640,997.4460,777.7530,2381.3690,
+summary,3,sync64_psdu32,control,sfd,520,669.2004,648.8380,786.6290,605.8290,2132.2950,
+summary,3,sync64_psdu32,control,refine,520,12.4535,11.5970,15.4130,10.9890,138.9300,
+summary,3,sync64_psdu32,control,cir_scalar_kernel,520,173.9550,167.9780,209.7220,157.3230,562.6810,
+summary,3,sync64_psdu32,candidate,total,520,641.1838,624.3590,746.1510,591.7580,1855.0330,0.749389
+summary,3,sync64_psdu32,candidate,frontend_timing,520,93.8519,91.0000,111.0000,85.0000,216.0000,
+summary,3,sync64_psdu32,candidate,frontend_cfo,520,15.1423,14.0000,18.0000,14.0000,82.0000,
+summary,3,sync64_psdu32,candidate,frontend_sfd,520,517.0577,503.0000,608.0000,477.0000,1735.0000,
+summary,3,sync64_psdu32,candidate,coverage,520,0.0000,0.0000,0.0000,0.0000,0.0000,
+summary,3,sync64_psdu32,candidate,cir_us_reported,520,12.2846,12.0000,17.0000,11.0000,72.0000,
+summary,3,sync64_psdu32,candidate,cir_shared_kernel,520,13.2435,12.1840,14.9620,11.7430,177.7270,0.076132
+summary,3,sync256_psdu127,control,total,520,905.7248,875.6960,1078.4800,820.9020,4318.8470,
+summary,3,sync256_psdu127,control,sfd,520,675.2504,650.0270,797.6030,606.0340,4042.4130,
+summary,3,sync256_psdu127,control,refine,520,12.6633,11.8410,15.9510,11.0420,147.1200,
+summary,3,sync256_psdu127,control,cir_scalar_kernel,520,217.8112,209.5610,260.5680,194.1060,403.0480,
+summary,3,sync256_psdu127,candidate,total,520,1173.4090,1136.3850,1371.6780,1044.7720,4577.8910,1.295547
+summary,3,sync256_psdu127,candidate,frontend_timing,520,380.8442,370.0000,459.0000,336.0000,657.0000,
+summary,3,sync256_psdu127,candidate,frontend_cfo,520,17.2865,16.0000,23.0000,15.0000,114.0000,
+summary,3,sync256_psdu127,candidate,frontend_sfd,520,720.0058,690.0000,860.0000,647.0000,4151.0000,
+summary,3,sync256_psdu127,candidate,coverage,520,0.1058,0.0000,1.0000,0.0000,1.0000,
+summary,3,sync256_psdu127,candidate,cir_us_reported,520,51.2538,46.0000,75.0000,41.0000,408.0000,
+summary,3,sync256_psdu127,candidate,cir_shared_kernel,520,46.3697,42.3560,65.8560,38.4110,249.0500,0.212890
+summary,3,comm64_psdu32,comm_legacy_profile,total,520,1292.0917,1262.7990,1446.8240,1214.2880,2580.7890,
+summary,3,comm64_psdu32,comm_legacy_profile,stage_cir,520,548.0865,532.0000,645.0000,508.0000,1801.0000,
+summary,3,comm64_psdu32,comm_fast_profile,total,520,342.1228,325.8030,452.5850,310.4270,1235.8630,0.264782
+summary,3,comm64_psdu32,comm_fast_profile,stage_cir,520,52.4692,48.0000,70.0000,47.0000,350.0000,0.095732

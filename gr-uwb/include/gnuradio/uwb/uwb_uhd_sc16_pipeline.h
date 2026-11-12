@@ -182,6 +182,15 @@ struct WindowResult {
     bool radar_sfd_found = false;
     float radar_peak_metric = 0.0f;
     int64_t radar_detected_start = -1;
+    // Sensing provenance (plan §2): the target CFO the shared front-end
+    // estimated and compensated, the three distinct origins, and the shared
+    // front-end / CIR sub-timings (children of timing.sensing_us).
+    double radar_cfo_hz = 0.0;
+    int64_t radar_cir_origin = -1;
+    int64_t radar_detected_origin = -1;
+    size_t radar_valid_reps = 0;
+    double radar_frontend_us = 0.0;
+    double radar_cir_us = 0.0;
 };
 
 struct UWB_API PipelineLedger {

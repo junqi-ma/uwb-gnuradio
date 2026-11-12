@@ -582,6 +582,10 @@ UwbRadarCirEstimator::handle_rx(pmt::pmt_t msg)
         publish_status("invalid_input");
         return;
     }
+    // Give the shared preamble front-end scratch room for this window size so
+    // the worker never grows a vector inside the hot path.  reserve() is a
+    // no-op once the capacity is large enough and never shrinks.
+    radar::reserve_radar_cir_core(n, d_scratch_);
     d_received_.fetch_add(1, std::memory_order_relaxed);
 
     const uint64_t pulse_id = dict_u64(meta, radar_meta::kPulseId, 0);
@@ -823,6 +827,11 @@ UwbRadarCirEstimator::worker_loop()
 
         if (d_emit_individual_repetitions_ &&
             r.status == radar::RadarCirStatus::Ok) {
+            // Per-repetition emission is an explicit diagnostic: it reads the
+            // caller's RAW window through the legacy scalar estimator (one
+            // window per repetition, no averaging).  It is therefore NOT
+            // target-CFO compensated; use the averaged frame (cir/cir_avg) for
+            // any CFO-sensitive measurement.
             const size_t first = d_cfg_.cir_skip_initial;
             const size_t count = std::min(d_cfg_.cir_repetitions,
                                           d_cfg_.sync_repetitions - first);
@@ -946,10 +955,39 @@ UwbRadarCirEstimator::make_common_frame_meta(
                          pmt::from_long(r.preamble_start_sample));
     meta = pmt::dict_add(meta, pmt::mp("cir_origin_sample"),
                          pmt::from_long(r.cir_origin_sample));
+    // Three distinct origins (plan §2).  cir_origin_sample is the legacy name
+    // of cir_axis_origin; both are published so old consumers keep working.
+    meta = pmt::dict_add(meta, pmt::mp("detected_sync_origin"),
+                         pmt::from_long(r.detected_sync_origin));
+    meta = pmt::dict_add(meta, pmt::mp("cir_axis_origin"),
+                         pmt::from_long(r.cir_axis_origin));
+    meta = pmt::dict_add(meta, pmt::mp("phase_reference_sample"),
+                         pmt::from_long(r.phase_reference_sample));
+    // Target-CFO provenance: final_cfo_hz == 0 with cfo_epoch == 0 means the
+    // timed path explicitly ASSUMED zero (no detection available), never that
+    // a zero CFO was estimated.
+    meta = pmt::dict_add(meta, pmt::mp("final_cfo_hz"),
+                         pmt::from_double(r.final_cfo_hz));
+    meta = pmt::dict_add(meta, pmt::mp("cfo_epoch"),
+                         pmt::from_uint64(static_cast<uint64_t>(r.cfo_epoch)));
+    meta = pmt::dict_add(meta, pmt::mp("cir_samples_per_symbol"),
+                         pmt::from_double(r.cir_samples_per_symbol));
     meta = pmt::dict_add(meta, pmt::mp("sfd_metric"),
                          pmt::from_double(r.sfd_metric));
     meta = pmt::dict_add(meta, pmt::mp("sync_metric"),
                          pmt::from_double(r.sync_metric));
+    // Front-end sub-timings: children of the caller's sensing stage.  They are
+    // diagnostics and must never be added to a parent timer.
+    meta = pmt::dict_add(meta, pmt::mp("frontend_timing_us"),
+                         pmt::from_uint64(r.frontend_timing_us));
+    meta = pmt::dict_add(meta, pmt::mp("frontend_cfo_us"),
+                         pmt::from_uint64(r.frontend_cfo_us));
+    meta = pmt::dict_add(meta, pmt::mp("frontend_sfd_us"),
+                         pmt::from_uint64(r.frontend_sfd_us));
+    meta = pmt::dict_add(meta, pmt::mp("coverage_us"),
+                         pmt::from_uint64(r.coverage_us));
+    meta = pmt::dict_add(meta, pmt::mp("cir_us"),
+                         pmt::from_uint64(r.cir_us));
 
     meta = pmt::dict_add(meta, pmt::mp("cir_pre_samples"),
                          pmt::from_uint64(static_cast<uint64_t>(
@@ -1084,25 +1122,26 @@ UwbRadarCirEstimator::publish_alongside_average(
     const size_t count = d_cfg_.sync_repetitions > skip
                              ? d_cfg_.sync_repetitions - skip
                              : 0;
-    radar::RadarCirEstimate avg;
-    if (count == 0 || rx == nullptr ||
-        !radar::estimate_radar_cir(
-            rx, n, r.cir_origin_sample, d_cfg_.samples_per_symbol,
-            d_cfg_.cir_pre, d_cfg_.cir_post, skip, count,
-            d_cfg_.sync_repetitions, avg, d_scratch_.cir)) {
+    // Same kernel as the production path.  When radar_cir_one consumed the
+    // final-CFO compensated buffer, the extra average must consume it too
+    // (the raw window is not CFO compensated and a second scalar averaging
+    // path is exactly what workstream C removed).
+    const gr_complex* avg_rx =
+        radar::detail::radar_cir_uses_derotated(d_cfg_)
+            ? d_scratch_.demod.derotated.data()
+            : rx;
+    if (count == 0 || avg_rx == nullptr ||
+        !radar::radar_cir_average_range(
+            avg_rx, n, d_cfg_, r.cir_origin_sample,
+            r.cir_samples_per_symbol > 0.0 ? r.cir_samples_per_symbol
+                                           : static_cast<double>(kSps),
+            skip, count, d_scratch_, avg_result)) {
         avg_result.status = radar::RadarCirStatus::CirFailed;
         avg_result.tap_count = 0;
         avg_result.peak_tap = 0;
         avg_result.peak_abs = 0.f;
         avg_result.raw_l2_norm = 0.f;
         avg_result.valid_repetitions = 0;
-    } else {
-        avg_result.status = radar::RadarCirStatus::Ok;
-        avg_result.tap_count = avg.tap_count;
-        avg_result.peak_tap = avg.peak_tap;
-        avg_result.peak_abs = avg.peak_abs;
-        avg_result.raw_l2_norm = avg.raw_l2_norm;
-        avg_result.valid_repetitions = avg.valid_repetitions;
     }
     publish_frame(job, avg_result, queue_us, service_us, -1, 0, 0,
                   common_meta, "cir_avg", true, false);

@@ -9,7 +9,8 @@
  *
  * WHAT THIS TEST PROVES
  * ---------------------
- * Given ONE deterministic FC32 native-rate (491.52 MS/s) window, feeding
+ * Given ONE deterministic FC32 native-rate (491.52 MS/s) window that holds a
+ * REAL 64-SYNC code-9 4z2 frame, feeding
  *   FULL: sample_count = full_N, payload = whole window
  *   ROI : sample_count = full_N, payload = first K samples,
  *         published_samples = K
@@ -23,6 +24,31 @@
  * This is asserted both for the predicted-timing path
  * (use_predicted_timing=true) and for the require-SFD path
  * (use_predicted_timing=false).
+ *
+ * THE FIXTURE IS A FRAME, NOT NOISE
+ * ---------------------------------
+ * The require-SFD path now runs the shared comm preamble front-end
+ * (demod::acquire_preamble, PreamblePurpose::CirOnly), which needs a coherent
+ * SYNC train: the tail re-track verifies every SYNC against a hard-coded 0.20
+ * per-SYNC floor.  LCG noise cannot satisfy that, so the window is built from
+ * a real modulated packet:
+ *
+ *   uwb_hrp_mod_core::modulate_one (998.4 MS/s work grid, code 9, 64 SYNC,
+ *   4z2, 20-byte PSDU, Legacy pulse)
+ *        --core::RationalResampler32_65Core (998.4 -> 491.52 MS/s)-->
+ *   kFullNative-sample native window
+ *
+ * Geometry.  The estimator derives its prediction from the resampler's
+ * MAPPED output metadata, not from the raw input metadata:
+ *   window_start_sample = map(0)              = 42
+ *   pre_guard_samples   = map(16) - map(0)    = 33
+ *   predicted_sfd       = 42 + 33 + 0 + 64*1016 = 65099
+ * with map(p) = round((p*65 + (T-1)/2)/32) and T = 2707 taps.  The frame's
+ * SYNC origin therefore has to land on work sample map(16) = 75 and its SFD
+ * on 65099.  The 32/65 core places the frame origin at native sample 21, so
+ * the window starts kNativeHeadDrop = 5 native samples into the frame; that
+ * is 10 work samples = 5 chips of the first SYNC symbol, and the detected
+ * coordinates land on 74 / 65098 (map() rounds to whole work samples).
  *
  * WHY IT HOLDS (and what is assumed)
  * ----------------------------------
@@ -40,9 +66,11 @@
  *   estimator consumes is bit-identical between the two chains.
  * - FC32 input only: this QA does not exercise the SC16 scale policy (SA-A).
  * - The implementation rejects sfd_threshold / sync_refine_threshold <= 0
- *   (finite_positive gate), so the require-SFD variant uses a tiny positive
- *   threshold (1e-6) instead of 0.  The synthetic LCG+pulse window only
- *   needs to be deterministic and nonzero; this test does NOT claim DW3000
+ *   (finite_positive gate), so the require-SFD variant keeps the tiny
+ *   positive threshold (1e-6).  The fixture is a real frame, so detection
+ *   succeeds on its own merit; the low threshold is kept only so that a
+ *   failure here means "the ROI prefix does not reproduce the FULL window",
+ *   never "the threshold was mistuned".  This test does NOT claim DW3000
  *   detection sensitivity.
  * - This proves "the ROI prefix covers the CIR / SFD read range" under the
  *   frozen metadata contract.  The safety upper bound for arbitrary
@@ -60,9 +88,11 @@
 #include <gnuradio/blocks/message_debug.h>
 #include <gnuradio/gr_complex.h>
 #include <gnuradio/top_block.h>
+#include <gnuradio/uwb/uwb_hrp_mod_core.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_32.h>
 #include <gnuradio/uwb/uwb_radar_cir_estimator_block.h>
+#include <gnuradio/uwb/uwb_rational_resampler_core.h>
 #include <pmt/pmt.h>
 
 #include <algorithm>
@@ -70,6 +100,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -101,12 +132,20 @@ constexpr size_t kFullNative = 65536;
 // ROI prefix payload.  40960 native -> 83283 work samples at 65/32, which
 // covers the whole SFD search + SYNC refine + CIR averaging read span.
 constexpr size_t kRoiNative = 40960;
-// The core rejects non-positive thresholds; use a tiny positive value so the
-// require-SFD code path runs and passes deterministically on synthetic data.
+// The core rejects non-positive thresholds; keep a tiny positive value so the
+// require-SFD code path runs.  The fixture is a real frame, so detection does
+// not depend on this number.
 constexpr float kLowThreshold = 1e-6f;
 // Cross-resampler tap comparison tolerance (chains are expected bit-identical;
 // this only absorbs a theoretical kernel-scheduling difference).
 constexpr double kTapTolAbs = 1e-5;
+// Real-frame fixture: 20-byte PSDU (18 data bytes + FCS) and the number of
+// native samples the window starts into the frame (see the file header).
+constexpr size_t kPsduBytes = 20;
+constexpr size_t kNativeHeadDrop = 5;
+// Work-grid length needed to fill the native window through the 32/65 core;
+// the +100 covers the FIR tail (H = ceil(2707/32) = 85 input samples).
+constexpr size_t kTxWorkLen = ((kFullNative + kNativeHeadDrop) * 65) / 32 + 100;
 
 std::string
 testdata_path(const std::string& rel)
@@ -161,37 +200,55 @@ load_f32(const std::string& path, std::vector<float>& out)
     return static_cast<bool>(f);
 }
 
-// Deterministic window: 64-bit LCG noise + a few strong bounded pulses.
-// Reproducible across platforms (integer LCG, explicit float conversion).
+// Real-frame native fixture.  A 64-SYNC code-9 4z2 packet is modulated on the
+// 998.4 MS/s work grid and converted to the 491.52 MS/s native grid with the
+// same 32/65 core (and the same taps) the production TX path uses, so the
+// require-SFD front-end sees a coherent SYNC train instead of noise.
+//
+// The frame is placed at work sample 0 of the TX segment (the resampler's
+// zero history is then exactly the true signal) and the native window starts
+// kNativeHeadDrop samples into it, which puts the SYNC origin on the work
+// sample the estimator's mapped prediction names (map(16) = 75).
 std::vector<gr_complex>
-make_synthetic_window(size_t n)
+make_frame_window_native(const std::vector<float>& taps)
 {
-    std::vector<gr_complex> x(n, gr_complex(0.0f, 0.0f));
-    uint64_t state = 0x123456789abcdef0ULL;
-    auto next = [&state]() {
-        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-        return state;
-    };
-    auto noise = [&next]() {
-        const uint32_t u = static_cast<uint32_t>(next() >> 32);
-        return static_cast<float>(
-            (static_cast<int64_t>(u) - 2147483648LL) / 2147483648.0);
-    };
-    for (size_t i = 0; i < n; ++i)
-        x[i] = gr_complex(0.05f * noise(), 0.05f * noise());
+    const std::vector<uint8_t> psdu = gr::uwb::mod::make_random_psdu(
+        kPsduBytes - 2, 4242u, /*append_fcs=*/true);
+    BOOST_REQUIRE_EQUAL(psdu.size(), kPsduBytes);
 
-    auto add_pulse = [&x, n](size_t pos, float amp) {
-        if (pos < n)
-            x[pos] += gr_complex(amp, 0.0f);
-        if (pos + 1 < n)
-            x[pos + 1] += gr_complex(0.0f, 0.5f * amp);
-        if (pos + 2 < n)
-            x[pos + 2] += gr_complex(-0.25f * amp, 0.0f);
-    };
-    add_pulse(n / 2, 8.0f);
-    add_pulse(n / 4, 4.0f);
-    add_pulse((3 * n) / 4, 4.0f);
-    return x;
+    gr::uwb::mod::HrpModConfig cfg;
+    cfg.code_index = 9;
+    cfg.sync_repetitions = kSyncReps;
+    cfg.sfd_mode = "4z2";
+
+    const size_t frame_len =
+        gr::uwb::mod::packet_samples_998p4(kSyncReps, kSfdSymbols, psdu.size());
+    BOOST_REQUIRE_LE(frame_len, kTxWorkLen);
+
+    gr::uwb::mod::HrpModScratch scratch;
+    scratch.reserve(psdu.size(), frame_len);
+    std::vector<gr_complex> tx(frame_len, gr_complex(0.0f, 0.0f));
+    size_t tx_n = 0;
+    BOOST_REQUIRE(gr::uwb::mod::modulate_one(psdu.data(), psdu.size(), cfg,
+                                             scratch, tx.data(), tx.size(),
+                                             tx_n));
+    BOOST_REQUIRE_EQUAL(tx_n, frame_len);
+
+    std::vector<gr_complex> work(kTxWorkLen, gr_complex(0.0f, 0.0f));
+    std::copy(tx.begin(), tx.end(), work.begin());
+
+    // 998.4 MS/s -> 491.52 MS/s (32/65), the production TX direction.
+    gr::uwb::core::RationalResampler32_65Core down(taps.data(), taps.size());
+    std::vector<gr_complex> native(kTxWorkLen, gr_complex(0.0f, 0.0f));
+    const size_t native_n =
+        down.process(work.data(), work.size(), native.data(), native.size())
+            .produced;
+    BOOST_REQUIRE_GE(native_n, kFullNative + kNativeHeadDrop);
+
+    std::vector<gr_complex> win(kFullNative, gr_complex(0.0f, 0.0f));
+    std::copy(native.begin() + kNativeHeadDrop,
+              native.begin() + kNativeHeadDrop + kFullNative, win.begin());
+    return win;
 }
 
 pmt::pmt_t
@@ -437,6 +494,8 @@ check_vec(const std::vector<gr_complex>& a,
     BOOST_CHECK_MESSAGE(max_diff <= kTapTolAbs * std::max(1.0, max_mag),
                         tag << " " << what << " max|diff|=" << max_diff
                             << " at " << arg << " ref_mag=" << max_mag);
+    BOOST_TEST_MESSAGE(tag << " " << what << " max|diff|=" << max_diff
+                           << " ref_mag=" << max_mag);
 }
 
 void
@@ -490,7 +549,7 @@ compare_full_vs_roi(bool use_predicted_timing)
                                                  : "require_sfd";
     const float threshold = use_predicted_timing ? 0.3f : kLowThreshold;
 
-    const std::vector<gr_complex> x = make_synthetic_window(kFullNative);
+    const std::vector<gr_complex> x = make_frame_window_native(taps);
     const pmt::pmt_t full_pdu = make_full_pdu(x);
     const pmt::pmt_t roi_pdu = make_roi_pdu(x, kRoiNative);
 
@@ -527,6 +586,21 @@ compare_full_vs_roi(bool use_predicted_timing)
                            << " cir_need=" << cir_need);
     BOOST_REQUIRE_GE(static_cast<int64_t>(roi.resampled.size()), sfd_need);
     BOOST_REQUIRE_GE(static_cast<int64_t>(roi.resampled.size()), cir_need);
+
+    // The fixture must be a real frame sitting on the predicted coordinate,
+    // otherwise "FULL == ROI" would only prove that two chains agree on
+    // garbage.  The prediction is built from the resampler's mapped metadata
+    // (map(16) + 64*1016 = 65099); map() rounds to whole work samples, so the
+    // detected SFD and SYNC origin may sit one sample away.
+    BOOST_TEST_MESSAGE(tag << ": sfd=" << full.frame.sfd_start
+                           << " origin=" << full.frame.preamble_start
+                           << " peak_tap=" << full.frame.peak_tap
+                           << " peak_metric=" << full.frame.peak_metric);
+    BOOST_REQUIRE_LE(std::llabs(full.frame.sfd_start - full.frame.predicted),
+                     2);
+    BOOST_REQUIRE_LE(std::llabs(full.frame.preamble_start -
+                                full.frame.cir_origin),
+                     2);
 
     check_frames_equal(full.frame, roi.frame, tag);
 
@@ -565,16 +639,18 @@ compare_full_vs_roi(bool use_predicted_timing)
 
 } // namespace
 
-// Predicted-timing path (timed monostatic echo: no SFD gate).
+// Predicted-timing path (timed monostatic echo: no SFD gate).  The CIR is
+// taken at the predicted origin, so this case proves the ROI prefix carries
+// the whole CIR union of a real frame.
 BOOST_AUTO_TEST_CASE(test_roi_prefix_matches_full_predicted_timing)
 {
     compare_full_vs_roi(/*use_predicted_timing=*/true);
 }
 
-// require-SFD semantic (use_predicted_timing=false).  The synthetic input is
-// deterministic, not a real DW3000 burst; the thresholds are lowered to a
-// tiny positive value (0 is rejected by the core) so the SFD search + SYNC
-// refine + CIR path runs and must agree between FULL and ROI.
+// require-SFD semantic (use_predicted_timing=false).  The shared comm preamble
+// front-end must detect the real 64-SYNC frame (tail re-track with the 0.20
+// per-SYNC floor), and the ROI prefix must reproduce the FULL window's SFD,
+// SYNC origin and CIR exactly.
 BOOST_AUTO_TEST_CASE(test_roi_prefix_matches_full_require_sfd)
 {
     compare_full_vs_roi(/*use_predicted_timing=*/false);

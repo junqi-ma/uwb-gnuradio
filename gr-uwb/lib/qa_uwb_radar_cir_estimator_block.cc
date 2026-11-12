@@ -679,7 +679,12 @@ BOOST_AUTO_TEST_CASE(test_estimator_failed_frames_no_taps)
 
     pmt::pmt_t m1 = dbg->get_message(0);
     FrameCheck f1 = check_common(m1, 1);
-    BOOST_CHECK_EQUAL(f1.status, "sfd_failed");
+    // Detection source changed (workstream C): the shared preamble front-end
+    // acquires SYNC first, so an all-zero window fails at timing.  The
+    // pre-refactor radar searched the SFD first and reported sfd_failed.  The
+    // fail-closed outcome (no taps, no coordinates, no normalized_taps) is
+    // unchanged.
+    BOOST_CHECK_EQUAL(f1.status, "timing_failed");
     BOOST_CHECK_EQUAL(f1.tap_count, 0u);
     BOOST_CHECK_EQUAL(pmt::length(pmt::cdr(m1)), 0u);
     BOOST_CHECK_EQUAL(pmt::to_long(pmt::dict_ref(
@@ -699,10 +704,13 @@ BOOST_AUTO_TEST_CASE(test_estimator_failed_frames_no_taps)
     FrameCheck f2 = check_common(m2, 2);
     BOOST_CHECK_EQUAL(f2.status, "timing_failed");
     BOOST_CHECK_EQUAL(f2.tap_count, 0u);
+    // Detection source changed (workstream C): the shared front-end stops at
+    // the failed timing stage and never runs the SFD search, so it publishes no
+    // partial SFD coordinate (the pre-refactor radar searched the SFD first).
     BOOST_CHECK_EQUAL(pmt::to_long(pmt::dict_ref(
                           pmt::car(m2), pmt::mp("sfd_start_sample"),
                           pmt::from_long(0))),
-                      sfd_truth);
+                      -1);
     BOOST_CHECK_EQUAL(pmt::to_long(pmt::dict_ref(
                           pmt::car(m2), pmt::mp("preamble_start_sample"),
                           pmt::from_long(0))),
@@ -716,11 +724,16 @@ BOOST_AUTO_TEST_CASE(test_estimator_failed_frames_no_taps)
     BOOST_CHECK_EQUAL(f3.status, "cir_failed");
     BOOST_CHECK_EQUAL(f3.tap_count, 0u);
     BOOST_CHECK_EQUAL(pmt::length(pmt::cdr(m3)), 0u);
-    BOOST_CHECK(pmt::to_bool(pmt::dict_ref(pmt::car(m3), pmt::mp("sfd_ok"),
-                                           pmt::PMT_F)));
-    BOOST_CHECK(pmt::to_bool(pmt::dict_ref(pmt::car(m3),
-                                           pmt::mp("timing_ok"),
-                                           pmt::PMT_F)));
+    // Detection source changed (workstream C): zeroing repetitions 10..63 also
+    // destroys the 40-SYNC tail the shared front-end uses for its final CFO
+    // refit, so the front-end fails closed BEFORE the CIR kernel runs and
+    // publishes no coordinates.  The status stays cir_failed (a CFO/coverage
+    // failure has no CIR to report) and the frame still carries zero taps.
+    BOOST_CHECK(!pmt::to_bool(pmt::dict_ref(pmt::car(m3), pmt::mp("sfd_ok"),
+                                            pmt::PMT_T)));
+    BOOST_CHECK(!pmt::to_bool(pmt::dict_ref(pmt::car(m3),
+                                            pmt::mp("timing_ok"),
+                                            pmt::PMT_T)));
 }
 
 // ---------------------------------------------------------------------------
