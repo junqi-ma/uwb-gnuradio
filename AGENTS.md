@@ -1,4 +1,37 @@
-# 当前提交快照：65/48 等波纹 FIR 设计实验（2026-11-11）
+# 当前提交快照：Ipatov 前导重构 `template_scale_mismatch` 修复（2026-11-12）
+
+已交付单 worker 测试配置修正后的重构错误定位与修复。报告见
+`docs/performance/单worker配置修正_Ipatov前导重构错误定位与修复报告_2026-11-12.md`，
+原始数据 `docs/performance/data_sic_ipatov_prefix_fix_20261112/`，任务书
+`docs/performance/OpenCode_单worker测试配置修正_2026-11-12.md`。code-tested SHA
+`80ac19e`（文档 `314d48c`）。
+- **根因是三段链**：`modulate_prefix_pulse_list()` 用 `packet_samples_998p4(...,0,...)`
+  把 PHR 的 21504 样点算进「前缀」（报 94656 vs 实际 73152）→ 窗口容量 77429
+  小于它 → 事件缓存被清空、稀疏分支跳过 → 非稀疏分支把**成形**前缀喂给
+  **单位冲激**参考，尺度检查报 `template_scale_mismatch`。安全检查本身没错，
+  拦下的是错误输入。
+- **第二个独立缺陷**：Ipatov 非稀疏 L1 路径原本**永远不可能提交**，只是
+  `sparse_pulse_reconstruct` 默认 true 掩盖了它。现在冷路径一次性展开单位冲激
+  前缀（585 KB/scratch），提交原因 `committed_preamble_ipatov`，缓存缺失时
+  fail-closed 为 `impulse_prefix_unavailable`。
+- **两个入口此前都没有 QA**，这是缺陷进主干的原因；已补
+  `prefix_pulse_list_span_is_sync_plus_sfd` 与
+  `test_unified_ipatov_preamble_uses_unit_impulse_prefix`。
+- **验证**：全量 CTest **80 项 79 通过 1 跳过**（`uwb_qa_install_consumer` 按设计
+  跳过，122.85 s）。任务书单配置检查 **30/30 提交、44.11 dB**（修复前 0/30、
+  0.00 dB）；discrete 对照 30/30、32.54 dB。cost-split 12 次全部提交
+  （41.02–44.11 dB）；g3 4/4 窗功能字段一致，EVM 0.730%/0.425%，lag 0。
+- **`sensing SFD 30/30 → 0/30` 不是检测退化**：该 fixture 是同一个 code-9 包的
+  重复，`both` 模式下包被消掉；`--consumer sensing`（不跑 SIC）仍 3/3 检出。
+- **耗时口径**：修复前 307 µs 是失败退出耗时，不能当基线；修复后 413 µs 才是
+  真实消除负载。`queue_us`（16.7–26.3 ms）是全速回放排队，不是 paced 延迟。
+- **未验证**：混合码（sensing 9 / comm 10）重叠、SIC 后 sensing CIR/弱目标保护、
+  PSDU/FCS/PER、上板、MATLAB 交叉验证、paced 到达、8 Worker。L2 离散事务仍硬编码
+  `code_index==10` + Legacy 脉冲，code 9 整包路径仍会被 `unsupported_profile` 拒绝。
+
+---
+
+# 历史提交快照：65/48 等波纹 FIR 设计实验（2026-11-11）
 
 已交付等波纹（Remez）重设计实验：设计脚本、独立频响验证、独立 float64 参考、
 候选系数、ABBA 性能矩阵与应用层波形对照。报告见
