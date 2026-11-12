@@ -80,6 +80,10 @@ def main():
     ap.add_argument("--only", default=None,
                     help="comma separated config names")
     ap.add_argument("--variants", default="K,EQ")
+    ap.add_argument("--length-override", type=int, default=None,
+                    help="replace every config's window length (e.g. a full "
+                         "256-SYNC + 127 B packet = 328137 native samples)")
+    ap.add_argument("--reps-override", type=int, default=None)
     ap.add_argument("--cpu", type=int, default=None,
                     help="pin every run to this CPU (taskset -c)")
     ap.add_argument("--binary-map", default="",
@@ -96,6 +100,13 @@ def main():
     os.makedirs(raw_dir, exist_ok=True)
 
     configs = CONFIGS
+    if args.length_override:
+        configs = [dict(c) for c in configs]
+        for c in configs:
+            c["length"] = args.length_override
+            c["name"] = c["name"].split("_")[0] + f"_{args.length_override}"
+            if args.reps_override:
+                c["reps"] = args.reps_override
     if args.only:
         want = set(args.only.split(","))
         configs = [c for c in configs if c["name"] in want]

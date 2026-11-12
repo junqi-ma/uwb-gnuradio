@@ -13,9 +13,10 @@ CANNOT: measure SIC suppression, PSDU/FCS or packet error rate.  The
       repository's SIC scenario fixtures are generated on the 998.4 MS/s
       *work* grid (gr-uwb/apps/sic_preamble_sim.py), so using them would
       bypass the very resampler under test -- which the task book forbids.
-      The only native-grid fixture does not trigger detection, so SIC
-      suppression has no measurable value here.  Those items are reported as
-      unverified rather than guessed.
+      The native-grid fixture is a repeated code-9 packet, not a mixed
+      interference scenario. Detection requires its 140982-sample period and
+      a complete pre-guard. Successful SIC reconstruction must be checked
+      separately; a completed pipeline window alone is not a successful SIC.
 
 Usage
 -----
@@ -47,7 +48,11 @@ DECISION_FIELDS = ["state", "sic_executed", "sic_committed", "sic_status",
 def run(binary, profile, dump_dir, out_json, args, env):
     cmd = [binary, "--file", FIXTURE,
            "--native-rate", "737280000", "--work-rate", "998400000",
+           "--benchmark", "--dsp-workers", "1",
+           "--pool-size", str(max(8, args.windows)),
+           "--t0", str(args.t0),
            "--period", str(args.period), "--capture", str(args.capture),
+           "--sic-comm-code", "9", "--sic-policy", args.sic_policy,
            "--max-windows", str(args.windows), "--consumer", "both",
            "--resampler-profile", profile,
            "--iq-dump-dir", dump_dir,
@@ -83,7 +88,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--period", type=int, default=100000)
+    # Skip the boundary packet so the pre-guard is present in every window.
+    ap.add_argument("--period", type=int, default=140982)
+    ap.add_argument("--t0", type=int, default=140982)
+    ap.add_argument("--sic-policy", choices=["preamble", "fullpacket", "auto"],
+                    default="preamble")
     ap.add_argument("--capture", type=int, default=56000)
     ap.add_argument("--windows", type=int, default=4)
     args = ap.parse_args()
