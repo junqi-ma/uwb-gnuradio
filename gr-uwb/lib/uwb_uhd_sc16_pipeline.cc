@@ -1841,8 +1841,8 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
         if (cfg_.consumer_mode == ConsumerMode::SicOnly || cfg_.consumer_mode == ConsumerMode::Both) {
             load_sync_pulse_template(sic_sync_tmpl, cfg_.sic_sync_template_file);
 
-            sic_preamble_tmpl.reserve(64 * 1016);
-            for (int rep = 0; rep < 64; ++rep) {
+            sic_preamble_tmpl.reserve(cfg_.sic_cfg.sync_reps * 1016);
+            for (size_t rep = 0; rep < cfg_.sic_cfg.sync_reps; ++rep) {
                 sic_preamble_tmpl.insert(sic_preamble_tmpl.end(),
                                          sic_sync_tmpl.begin(), sic_sync_tmpl.end());
             }

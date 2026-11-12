@@ -1,0 +1,70 @@
+{
+  "commit": "bf5a5be467facf87bf26321842fd9cff2b3307f3",
+  "cores": [
+    4,
+    6,
+    8,
+    10,
+    12,
+    14,
+    16,
+    18
+  ],
+  "rx_core": 2,
+  "coordinator_core": 0,
+  "parameters": {
+    "build": "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2",
+    "out": "docs/performance/data_chain_workers_256_127_20261112",
+    "measure": 512,
+    "warmup": 128,
+    "reps": 3,
+    "sync_reps": 256,
+    "sic_sync_reps": 256,
+    "psdu_bytes": 127
+  },
+  "binaries": {
+    "experiment_preamble_recovery": {
+      "path": "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/experiment_preamble_recovery",
+      "sha256": "42db5f6cde774927d7fcf365c4baa9cf55fead0a3196ac817b40a1bd8ce0f4bd",
+      "ldd": "\tlinux-vdso.so.1 (0x00007819ea347000)\n\tlibgnuradio-uwb.so.1.0.0 => /home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/lib/libgnuradio-uwb.so.1.0.0 (0x00007819ea0ed000)\n\tlibvolk.so.2.5 => /lib/x86_64-linux-gnu/libvolk.so.2.5 (0x00007819e9e00000)\n\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007819e9a00000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007819e9d19000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007819e9cf9000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007819e9600000)\n\tlibgnuradio-filter.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-filter.so.3.10.1 (0x00007819e992b000)\n\tlibgnuradio-runtime.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-runtime.so.3.10.1 (0x00007819e948d000)\n\tlibgnuradio-pmt.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-pmt.so.3.10.1 (0x00007819e9c9e000)\n\tlibspdlog.so.1 => /lib/x86_64-linux-gnu/libspdlog.so.1 (0x00007819e98b0000)\n\tlibfmt.so.8 => /lib/x86_64-linux-gnu/libfmt.so.8 (0x00007819e9c7d000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007819ea349000)\n\tliborc-0.4.so.0 => /lib/x86_64-linux-gnu/liborc-0.4.so.0 (0x00007819e982b000)\n\tlibgnuradio-fft.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-fft.so.3.10.1 (0x00007819e9c31000)\n\tlibboost_program_options.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_program_options.so.1.74.0 (0x00007819e9448000)\n\tlibboost_thread.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_thread.so.1.74.0 (0x00007819e9426000)\n\tlibgmp.so.10 => /lib/x86_64-linux-gnu/libgmp.so.10 (0x00007819e93a4000)\n\tlibunwind.so.8 => /lib/x86_64-linux-gnu/libunwind.so.8 (0x00007819e9389000)\n\tlibpython3.10.so.1.0 => /lib/x86_64-linux-gnu/libpython3.10.so.1.0 (0x00007819e8c00000)\n\tlibthrift-0.16.0.so => /lib/x86_64-linux-gnu/libthrift-0.16.0.so (0x00007819e92f0000)\n\tlibfftw3f.so.3 => /lib/x86_64-linux-gnu/libfftw3f.so.3 (0x00007819e8800000)\n\tlibfftw3f_threads.so.3 => /lib/x86_64-linux-gnu/libfftw3f_threads.so.3 (0x00007819ea0d1000)\n\tliblzma.so.5 => /lib/x86_64-linux-gnu/liblzma.so.5 (0x00007819e92c5000)\n\tlibexpat.so.1 => /lib/x86_64-linux-gnu/libexpat.so.1 (0x00007819e9293000)\n\tlibz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x00007819e9277000)\n\tlibssl.so.3 => /lib/x86_64-linux-gnu/libssl.so.3 (0x00007819e8b5b000)\n\tlibcrypto.so.3 => /lib/x86_64-linux-gnu/libcrypto.so.3 (0x00007819e8200000)\n",
+      "libraries": {
+        "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/lib/libgnuradio-uwb.so.1.0.0": "1cf0864104c2bce1dba942a2c204c8ad7c708870c9c976c06494cde0abc6c421"
+      }
+    },
+    "benchmark_sc16_pipeline_steady": {
+      "path": "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "sha256": "a90c39f31c1cfe9aee9318feccd81ff7fc7b891443724c2f2dfa92481cd8a03a",
+      "ldd": "\tlinux-vdso.so.1 (0x00007583c6965000)\n\tlibgnuradio-uwb.so.1.0.0 => /home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/lib/libgnuradio-uwb.so.1.0.0 (0x00007583c6745000)\n\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007583c6400000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007583c6652000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007583c6632000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007583c6000000)\n\tlibgnuradio-filter.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-filter.so.3.10.1 (0x00007583c632b000)\n\tlibgnuradio-runtime.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-runtime.so.3.10.1 (0x00007583c5e8d000)\n\tlibgnuradio-pmt.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-pmt.so.3.10.1 (0x00007583c62d0000)\n\tlibspdlog.so.1 => /lib/x86_64-linux-gnu/libspdlog.so.1 (0x00007583c6255000)\n\tlibfmt.so.8 => /lib/x86_64-linux-gnu/libfmt.so.8 (0x00007583c6234000)\n\tlibvolk.so.2.5 => /lib/x86_64-linux-gnu/libvolk.so.2.5 (0x00007583c5a00000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007583c6967000)\n\tlibgnuradio-fft.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-fft.so.3.10.1 (0x00007583c5e41000)\n\tlibboost_program_options.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_program_options.so.1.74.0 (0x00007583c5dfc000)\n\tlibboost_thread.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_thread.so.1.74.0 (0x00007583c5dda000)\n\tlibgmp.so.10 => /lib/x86_64-linux-gnu/libgmp.so.10 (0x00007583c5d58000)\n\tlibunwind.so.8 => /lib/x86_64-linux-gnu/libunwind.so.8 (0x00007583c5d3d000)\n\tlibpython3.10.so.1.0 => /lib/x86_64-linux-gnu/libpython3.10.so.1.0 (0x00007583c5400000)\n\tlibthrift-0.16.0.so => /lib/x86_64-linux-gnu/libthrift-0.16.0.so (0x00007583c5367000)\n\tliborc-0.4.so.0 => /lib/x86_64-linux-gnu/liborc-0.4.so.0 (0x00007583c52e2000)\n\tlibfftw3f.so.3 => /lib/x86_64-linux-gnu/libfftw3f.so.3 (0x00007583c5000000)\n\tlibfftw3f_threads.so.3 => /lib/x86_64-linux-gnu/libfftw3f_threads.so.3 (0x00007583c622a000)\n\tliblzma.so.5 => /lib/x86_64-linux-gnu/liblzma.so.5 (0x00007583c5d10000)\n\tlibexpat.so.1 => /lib/x86_64-linux-gnu/libexpat.so.1 (0x00007583c5cde000)\n\tlibz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x00007583c59e4000)\n\tlibssl.so.3 => /lib/x86_64-linux-gnu/libssl.so.3 (0x00007583c523d000)\n\tlibcrypto.so.3 => /lib/x86_64-linux-gnu/libcrypto.so.3 (0x00007583c4a00000)\n",
+      "libraries": {
+        "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/lib/libgnuradio-uwb.so.1.0.0": "1cf0864104c2bce1dba942a2c204c8ad7c708870c9c976c06494cde0abc6c421"
+      }
+    },
+    "benchmark_chain_workers": {
+      "path": "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "sha256": "713704af1d3f9257626d74dc98326a183b24ccc3c1db9f2f942fae8277d0c512",
+      "ldd": "\tlinux-vdso.so.1 (0x00007da096dc7000)\n\tlibgnuradio-uwb.so.1.0.0 => /home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/lib/libgnuradio-uwb.so.1.0.0 (0x00007da096b76000)\n\tlibvolk.so.2.5 => /lib/x86_64-linux-gnu/libvolk.so.2.5 (0x00007da096800000)\n\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007da096400000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007da096719000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007da096b4a000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007da096000000)\n\tlibgnuradio-filter.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-filter.so.3.10.1 (0x00007da096644000)\n\tlibgnuradio-runtime.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-runtime.so.3.10.1 (0x00007da09628d000)\n\tlibgnuradio-pmt.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-pmt.so.3.10.1 (0x00007da096aed000)\n\tlibspdlog.so.1 => /lib/x86_64-linux-gnu/libspdlog.so.1 (0x00007da095f85000)\n\tlibfmt.so.8 => /lib/x86_64-linux-gnu/libfmt.so.8 (0x00007da096acc000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007da096dc9000)\n\tliborc-0.4.so.0 => /lib/x86_64-linux-gnu/liborc-0.4.so.0 (0x00007da095f00000)\n\tlibgnuradio-fft.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-fft.so.3.10.1 (0x00007da096241000)\n\tlibboost_program_options.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_program_options.so.1.74.0 (0x00007da095ebb000)\n\tlibboost_thread.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_thread.so.1.74.0 (0x00007da095e99000)\n\tlibgmp.so.10 => /lib/x86_64-linux-gnu/libgmp.so.10 (0x00007da095e17000)\n\tlibunwind.so.8 => /lib/x86_64-linux-gnu/libunwind.so.8 (0x00007da095dfc000)\n\tlibpython3.10.so.1.0 => /lib/x86_64-linux-gnu/libpython3.10.so.1.0 (0x00007da095800000)\n\tlibthrift-0.16.0.so => /lib/x86_64-linux-gnu/libthrift-0.16.0.so (0x00007da095767000)\n\tlibfftw3f.so.3 => /lib/x86_64-linux-gnu/libfftw3f.so.3 (0x00007da095400000)\n\tlibfftw3f_threads.so.3 => /lib/x86_64-linux-gnu/libfftw3f_threads.so.3 (0x00007da09663a000)\n\tliblzma.so.5 => /lib/x86_64-linux-gnu/liblzma.so.5 (0x00007da09573c000)\n\tlibexpat.so.1 => /lib/x86_64-linux-gnu/libexpat.so.1 (0x00007da09570a000)\n\tlibz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x00007da095de0000)\n\tlibssl.so.3 => /lib/x86_64-linux-gnu/libssl.so.3 (0x00007da095665000)\n\tlibcrypto.so.3 => /lib/x86_64-linux-gnu/libcrypto.so.3 (0x00007da094e00000)\n",
+      "libraries": {
+        "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/lib/libgnuradio-uwb.so.1.0.0": "1cf0864104c2bce1dba942a2c204c8ad7c708870c9c976c06494cde0abc6c421"
+      }
+    }
+  },
+  "sources": {
+    "/home/junqima/workspace/uwb-gnuradio/tools/sic/run_chain_workers.py": "a2994f69ec08d9d91b42030c3ff08482b9104c00f25a33909ceebd5ce4ad95e3",
+    "tools/sic/benchmark_chain_workers.cc": "b835fad8f8d247526390c7407b1cba12188a30e4ca59cd58a1da68cc97293674",
+    "tools/sic/experiment_preamble_recovery.cc": "f9138f2dddf61c5e62f4aef39b623e309bc72e41b2acdc0eabae2643503e3e43"
+  },
+  "topology": "CPU CORE SOCKET ONLINE\n  0    0      0    yes\n  1    0      0    yes\n  2    1      0    yes\n  3    1      0    yes\n  4    2      0    yes\n  5    2      0    yes\n  6    3      0    yes\n  7    3      0    yes\n  8    4      0    yes\n  9    4      0    yes\n 10    5      0    yes\n 11    5      0    yes\n 12    6      0    yes\n 13    6      0    yes\n 14    7      0    yes\n 15    7      0    yes\n 16    8      0    yes\n 17    8      0    yes\n 18    9      0    yes\n 19    9      0    yes\n",
+  "scenario": "complete code9 target 256 SYNC/127 PSDU bytes incl FCS + code10 256 SYNC/SFD-only interference; ISR20, SNR20, zero CFO; 16 PSDUs/noise/origins",
+  "cir_repetitions": 246,
+  "sic_fit_repetitions": 8,
+  "full_dsp_scope": "SC16 resampler + preamble SIC + sensing CIR + complete comm decode/FCS, direct pull jobs; excludes RX/queue/commit",
+  "pipeline_scope": "production RX+assembly+queue+SC16 resampler+preamble SIC+sensing CIR+ordered commit; excludes complete comm decode",
+  "production_and_qa_sha256": {
+    "gr-uwb/lib/uwb_discrete_cir_estimator.cc": "0959dc07449a14488c1c0cd1345b6f0519c990fae5fa45af2ef6fd852cd4bd87",
+    "gr-uwb/lib/uwb_sic_unified.cc": "5fa1138ea7f17a0b1640b8e1a476805320c02071741bff326cfa4d29699cfa85",
+    "gr-uwb/lib/uwb_uhd_sc16_pipeline.cc": "f53e9548a51f1c31f780216a38a89ffc25872bc512e85fdc805774f0d80636cb",
+    "gr-uwb/apps/pipeline_bench_setup.h": "45439a97daa941a57cfdf0067ea3cf8ea27f3e13a42864f62ecdd65917d827d4",
+    "gr-uwb/apps/benchmark_sc16_pipeline_steady.cc": "050fefd972460f0fab6bc07f48e4f9f860509c2137d5e0f5048d9022d8e69b95",
+    "gr-uwb/lib/qa_uwb_sic_unified.cc": "cc6b94140cee430af0a2b9630bc43d4296c2f2b719a3f4bad052791daebf7f83"
+  }
+}

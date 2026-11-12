@@ -1,0 +1,67 @@
+{
+  "commit": "bf5a5be467facf87bf26321842fd9cff2b3307f3",
+  "binary": "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/experiment_preamble_recovery",
+  "binary_sha256": "13eaab53d5d66626e96028780341a5f371404314f26dfd6df344c642b8deb482",
+  "ldd": "\tlinux-vdso.so.1 (0x000075cfdf78c000)\n\tlibgnuradio-uwb.so.1.0.0 => /home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/lib/libgnuradio-uwb.so.1.0.0 (0x000075cfdf534000)\n\tlibvolk.so.2.5 => /lib/x86_64-linux-gnu/libvolk.so.2.5 (0x000075cfdf200000)\n\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x000075cfdee00000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x000075cfdf119000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x000075cfdf508000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x000075cfdea00000)\n\tlibgnuradio-filter.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-filter.so.3.10.1 (0x000075cfdf044000)\n\tlibgnuradio-runtime.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-runtime.so.3.10.1 (0x000075cfdec8d000)\n\tlibgnuradio-pmt.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-pmt.so.3.10.1 (0x000075cfdec32000)\n\tlibspdlog.so.1 => /lib/x86_64-linux-gnu/libspdlog.so.1 (0x000075cfde985000)\n\tlibfmt.so.8 => /lib/x86_64-linux-gnu/libfmt.so.8 (0x000075cfdf4e5000)\n\t/lib64/ld-linux-x86-64.so.2 (0x000075cfdf78e000)\n\tliborc-0.4.so.0 => /lib/x86_64-linux-gnu/liborc-0.4.so.0 (0x000075cfde900000)\n\tlibgnuradio-fft.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-fft.so.3.10.1 (0x000075cfde8b4000)\n\tlibboost_program_options.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_program_options.so.1.74.0 (0x000075cfde86f000)\n\tlibboost_thread.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_thread.so.1.74.0 (0x000075cfde84d000)\n\tlibgmp.so.10 => /lib/x86_64-linux-gnu/libgmp.so.10 (0x000075cfde7cb000)\n\tlibunwind.so.8 => /lib/x86_64-linux-gnu/libunwind.so.8 (0x000075cfdf4c6000)\n\tlibpython3.10.so.1.0 => /lib/x86_64-linux-gnu/libpython3.10.so.1.0 (0x000075cfde000000)\n\tlibthrift-0.16.0.so => /lib/x86_64-linux-gnu/libthrift-0.16.0.so (0x000075cfde732000)\n\tlibfftw3f.so.3 => /lib/x86_64-linux-gnu/libfftw3f.so.3 (0x000075cfddc00000)\n\tlibfftw3f_threads.so.3 => /lib/x86_64-linux-gnu/libfftw3f_threads.so.3 (0x000075cfdf03a000)\n\tliblzma.so.5 => /lib/x86_64-linux-gnu/liblzma.so.5 (0x000075cfde707000)\n\tlibexpat.so.1 => /lib/x86_64-linux-gnu/libexpat.so.1 (0x000075cfde6d5000)\n\tlibz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x000075cfde6b9000)\n\tlibssl.so.3 => /lib/x86_64-linux-gnu/libssl.so.3 (0x000075cfde614000)\n\tlibcrypto.so.3 => /lib/x86_64-linux-gnu/libcrypto.so.3 (0x000075cfdd600000)\n",
+  "seeds": 16,
+  "grid": "SC16 737.28M -> process_sc16 + flush 65/48 -> CF32 998.4M",
+  "generator": "scipy resample_poly 48/65, 8193-tap Kaiser beta10, delay compensated",
+  "quantization": "common scale per clean/raw pair; round-to-nearest; 90% component headroom; zero clipping",
+  "time_origin": "q + (T-1)/96 output samples; round public acquisition seed only; output unshifted",
+  "source_origins": "q=512+seed%16 work samples; 16 fractional native-grid phases; public configured origins",
+  "comparison": "raw/SIC CIR versus same-profile resampled clean; clean CIR versus ideal work reference",
+  "sources": {
+    "/home/junqima/workspace/uwb-gnuradio/tools/sic/run_native_preamble_recovery.py": "f327491b3113f275443e58a1966547ac061b97ac5caa104ef943fdcd0d74831d",
+    "tools/sic/experiment_preamble_recovery.cc": "254bcdafe61aedc1bbc9995888d880b2d7f7918cb1a78c2b230de350ae0819c3"
+  },
+  "libraries": {
+    "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/lib/libgnuradio-uwb.so.1.0.0": "6da2ca6537967586ff9e96ea2d0d0bac82555becad7c846e5b9a24e0f9e183fa"
+  },
+  "profiles": {
+    "realtime_minorder": {
+      "file": "testdata/resampler_65_48/taps_realtime_minorder.txt",
+      "sha256": "cdd1b59e2ebec45057f99e93705305c118f6ccb41a71f04ccd9e38feb3e2766b",
+      "taps": 1319,
+      "group_delay_outputs": 13.729166666666666
+    },
+    "realtime_eq16": {
+      "file": "testdata/resampler_65_48/taps_realtime_eq16.txt",
+      "sha256": "72c34dd29b0e2ad038d7e65dda4c46e8f5e172ef722000312d89b2d3e01f62c6",
+      "taps": 1039,
+      "group_delay_outputs": 10.8125
+    },
+    "quality_minorder": {
+      "file": "testdata/resampler_65_48/taps_quality_minorder.txt",
+      "sha256": "07b09983f072a06604ec08a1fee19317e010b2b10d2bf79077b6f2b6a39a2667",
+      "taps": 2707,
+      "group_delay_outputs": 28.1875
+    },
+    "quality_eq32": {
+      "file": "testdata/resampler_65_48/taps_quality_eq32.txt",
+      "sha256": "23a5298db2b9cf5bba86dcffeaadf0559d3276f7a16d29e5d33ecead3b93d988",
+      "taps": 2079,
+      "group_delay_outputs": 21.645833333333332
+    },
+    "realtime_eq_conservative": {
+      "file": "testdata/resampler_65_48_equiripple/taps_realtime_eq_conservative.txt",
+      "sha256": "a84c82aac2dfa004dbc343e0a2f0eb7ca2d60a992dec06442d2d7c44df4d988a",
+      "taps": 1559,
+      "group_delay_outputs": 16.229166666666668
+    },
+    "quality_eq_conservative": {
+      "file": "testdata/resampler_65_48_equiripple/taps_quality_eq_conservative.txt",
+      "sha256": "ee922cd4a43fb35956bc98d4e189505edcf7147b5add8ddf2a4c6f850230124d",
+      "taps": 2599,
+      "group_delay_outputs": 27.0625
+    }
+  },
+  "software_versions": {
+    "python": "3.10.12",
+    "numpy": "1.21.5",
+    "scipy": "1.8.0"
+  },
+  "generator_passband_ripple_db": {
+    "290000000": 4.6188304883613675e-05,
+    "330000000": 8.2796563141375e-05
+  }
+}

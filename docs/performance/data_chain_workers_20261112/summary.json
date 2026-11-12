@@ -1,0 +1,6374 @@
+[
+  {
+    "kind": "pipeline",
+    "profile": "quality_minorder",
+    "workers": 1,
+    "rep": 1,
+    "interval_us": 2259.47244,
+    "startup_ms": 16.801589,
+    "resample_us": {
+      "mean": 575.989412109375,
+      "p50": 493.9225,
+      "p95": 967.262
+    },
+    "sic_us": {
+      "mean": 603.610306640625,
+      "p50": 501.0565,
+      "p95": 1244.406
+    },
+    "sensing_us": {
+      "mean": 1059.64827734375,
+      "p50": 944.4195,
+      "p95": 2147.62
+    },
+    "e2e_us": {
+      "mean": 2242.533771484375,
+      "p50": 1980.4085,
+      "p95": 3559.014
+    },
+    "queue_us": {
+      "mean": 17949.405400390624,
+      "p50": 17677.466500000002,
+      "p95": 21520.589
+    },
+    "queue_plus_service_us": {
+      "mean": 20191.939171875,
+      "p50": 19950.226000000002,
+      "p95": 24435.476
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_minorder",
+      "--dsp-workers",
+      "1",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "8",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_minorder_n1_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_minorder",
+    "workers": 1,
+    "rep": 1,
+    "interval_us": 2839.0700175762177,
+    "resample_us": {
+      "mean": 574.75655078125,
+      "p50": 498.26300000000003,
+      "p95": 866.529
+    },
+    "sic_us": {
+      "mean": 574.918751953125,
+      "p50": 517.775,
+      "p95": 762.105
+    },
+    "sensing_us": {
+      "mean": 1261.4872265625,
+      "p50": 1131.8315,
+      "p95": 2484.784
+    },
+    "comm_us": {
+      "mean": 426.94651953125,
+      "p50": 370.9665,
+      "p95": 609.158
+    },
+    "total_us": {
+      "mean": 2838.109048828125,
+      "p50": 2593.376,
+      "p95": 4246.679
+    },
+    "worker_jobs": {
+      "0": 512
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_minorder.txt",
+      "101829",
+      "4",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_minorder",
+    "workers": 2,
+    "rep": 1,
+    "interval_us": 1063.95859,
+    "startup_ms": 14.705052,
+    "resample_us": {
+      "mean": 539.54041796875,
+      "p50": 507.04650000000004,
+      "p95": 692.628
+    },
+    "sic_us": {
+      "mean": 548.542884765625,
+      "p50": 526.4265,
+      "p95": 691.068
+    },
+    "sensing_us": {
+      "mean": 1023.36082421875,
+      "p50": 965.2395,
+      "p95": 1224.111
+    },
+    "e2e_us": {
+      "mean": 2112.1709765625,
+      "p50": 2021.0165,
+      "p95": 2654.513
+    },
+    "queue_us": {
+      "mean": 14983.3613203125,
+      "p50": 15622.99,
+      "p95": 18128.648
+    },
+    "queue_plus_service_us": {
+      "mean": 17095.532296875,
+      "p50": 17704.636,
+      "p95": 20533.620000000003
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_minorder",
+      "--dsp-workers",
+      "2",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "16",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_minorder_n2_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_minorder",
+    "workers": 2,
+    "rep": 1,
+    "interval_us": 1325.9759863242507,
+    "resample_us": {
+      "mean": 532.24932421875,
+      "p50": 496.5055,
+      "p95": 858.872
+    },
+    "sic_us": {
+      "mean": 544.66565625,
+      "p50": 516.8805,
+      "p95": 710.405
+    },
+    "sensing_us": {
+      "mean": 1196.475474609375,
+      "p50": 1131.746,
+      "p95": 1887.433
+    },
+    "comm_us": {
+      "mean": 375.131962890625,
+      "p50": 360.7025,
+      "p95": 469.783
+    },
+    "total_us": {
+      "mean": 2648.5224179687502,
+      "p50": 2532.8005000000003,
+      "p95": 3729.307
+    },
+    "worker_jobs": {
+      "0": 255,
+      "1": 257
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_minorder.txt",
+      "101829",
+      "4,6",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_minorder",
+    "workers": 4,
+    "rep": 1,
+    "interval_us": 603.610049,
+    "startup_ms": 22.245685,
+    "resample_us": {
+      "mean": 584.90406640625,
+      "p50": 513.1835,
+      "p95": 992.926
+    },
+    "sic_us": {
+      "mean": 604.98048046875,
+      "p50": 563.0415,
+      "p95": 857.443
+    },
+    "sensing_us": {
+      "mean": 1078.833888671875,
+      "p50": 971.3315,
+      "p95": 1876.434
+    },
+    "e2e_us": {
+      "mean": 2269.388359375,
+      "p50": 2065.4275,
+      "p95": 3715.338
+    },
+    "queue_us": {
+      "mean": 11523.160509765625,
+      "p50": 12697.013500000001,
+      "p95": 22656.138
+    },
+    "queue_plus_service_us": {
+      "mean": 13792.548869140624,
+      "p50": 14817.193,
+      "p95": 25755.325
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_minorder",
+      "--dsp-workers",
+      "4",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "32",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_minorder_n4_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_minorder",
+    "workers": 4,
+    "rep": 1,
+    "interval_us": 745.1626210957766,
+    "resample_us": {
+      "mean": 584.886927734375,
+      "p50": 516.2719999999999,
+      "p95": 985.972
+    },
+    "sic_us": {
+      "mean": 664.551208984375,
+      "p50": 613.9705,
+      "p95": 883.06
+    },
+    "sensing_us": {
+      "mean": 1255.79073828125,
+      "p50": 1151.938,
+      "p95": 1984.799
+    },
+    "comm_us": {
+      "mean": 464.60546484375,
+      "p50": 424.92999999999995,
+      "p95": 588.504
+    },
+    "total_us": {
+      "mean": 2969.83433984375,
+      "p50": 2735.3165,
+      "p95": 4637.287
+    },
+    "worker_jobs": {
+      "0": 134,
+      "3": 127,
+      "1": 124,
+      "2": 127
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_minorder.txt",
+      "101829",
+      "4,6,8,10",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_minorder",
+    "workers": 8,
+    "rep": 1,
+    "interval_us": 370.250937,
+    "startup_ms": 39.90349,
+    "resample_us": {
+      "mean": 703.312998046875,
+      "p50": 534.9445000000001,
+      "p95": 1025.662
+    },
+    "sic_us": {
+      "mean": 709.504955078125,
+      "p50": 639.048,
+      "p95": 938.531
+    },
+    "sensing_us": {
+      "mean": 1333.47922265625,
+      "p50": 998.7535,
+      "p95": 1960.076
+    },
+    "e2e_us": {
+      "mean": 2747.088958984375,
+      "p50": 2201.308,
+      "p95": 3906.161
+    },
+    "queue_us": {
+      "mean": 10253.2071640625,
+      "p50": 10624.611499999999,
+      "p95": 23475.597
+    },
+    "queue_plus_service_us": {
+      "mean": 13000.296123046875,
+      "p50": 13220.788,
+      "p95": 26658.644
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_minorder",
+      "--dsp-workers",
+      "8",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10,12,14,16,18",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "64",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_minorder_n8_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_minorder",
+    "workers": 8,
+    "rep": 1,
+    "interval_us": 413.85635156184435,
+    "resample_us": {
+      "mean": 662.88316015625,
+      "p50": 523.0625,
+      "p95": 1090.566
+    },
+    "sic_us": {
+      "mean": 738.291095703125,
+      "p50": 645.9535000000001,
+      "p95": 1045.257
+    },
+    "sensing_us": {
+      "mean": 1371.7809921875,
+      "p50": 1162.595,
+      "p95": 2075.237
+    },
+    "comm_us": {
+      "mean": 506.52815625,
+      "p50": 449.49,
+      "p95": 724.745
+    },
+    "total_us": {
+      "mean": 3279.483404296875,
+      "p50": 2810.634,
+      "p95": 4768.897
+    },
+    "worker_jobs": {
+      "0": 64,
+      "3": 69,
+      "1": 66,
+      "2": 65,
+      "5": 60,
+      "4": 60,
+      "6": 63,
+      "7": 65
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_minorder.txt",
+      "101829",
+      "4,6,8,10,12,14,16,18",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_eq32",
+    "workers": 1,
+    "rep": 1,
+    "interval_us": 2061.92507,
+    "startup_ms": 8.902471,
+    "resample_us": {
+      "mean": 448.20087890625,
+      "p50": 389.71349999999995,
+      "p95": 548.656
+    },
+    "sic_us": {
+      "mean": 556.58576171875,
+      "p50": 505.179,
+      "p95": 695.554
+    },
+    "sensing_us": {
+      "mean": 1039.145162109375,
+      "p50": 950.5645,
+      "p95": 1520.718
+    },
+    "e2e_us": {
+      "mean": 2044.602091796875,
+      "p50": 1876.7289999999998,
+      "p95": 3235.028
+    },
+    "queue_us": {
+      "mean": 16396.44996484375,
+      "p50": 15766.1365,
+      "p95": 19677.426
+    },
+    "queue_plus_service_us": {
+      "mean": 18441.052056640627,
+      "p50": 17771.693,
+      "p95": 21994.668
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_eq32",
+      "--dsp-workers",
+      "1",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "8",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_eq32_n1_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_eq32",
+    "workers": 1,
+    "rep": 1,
+    "interval_us": 2651.5353789031506,
+    "resample_us": {
+      "mean": 418.90425,
+      "p50": 374.869,
+      "p95": 530.258
+    },
+    "sic_us": {
+      "mean": 594.679591796875,
+      "p50": 520.9865,
+      "p95": 953.623
+    },
+    "sensing_us": {
+      "mean": 1235.568685546875,
+      "p50": 1126.754,
+      "p95": 2294.559
+    },
+    "comm_us": {
+      "mean": 401.368935546875,
+      "p50": 368.5125,
+      "p95": 531.735
+    },
+    "total_us": {
+      "mean": 2650.521462890625,
+      "p50": 2441.9415,
+      "p95": 3979.111
+    },
+    "worker_jobs": {
+      "0": 512
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_eq32.txt",
+      "101829",
+      "4",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_eq32",
+    "workers": 2,
+    "rep": 1,
+    "interval_us": 973.242585,
+    "startup_ms": 13.024724,
+    "resample_us": {
+      "mean": 405.430724609375,
+      "p50": 390.10400000000004,
+      "p95": 475.208
+    },
+    "sic_us": {
+      "mean": 538.584896484375,
+      "p50": 518.9895,
+      "p95": 671.644
+    },
+    "sensing_us": {
+      "mean": 985.784564453125,
+      "p50": 961.213,
+      "p95": 1094.631
+    },
+    "e2e_us": {
+      "mean": 1930.467076171875,
+      "p50": 1887.2575000000002,
+      "p95": 2195.345
+    },
+    "queue_us": {
+      "mean": 11732.51265625,
+      "p50": 11866.237000000001,
+      "p95": 16144.227
+    },
+    "queue_plus_service_us": {
+      "mean": 13662.979732421874,
+      "p50": 13804.377,
+      "p95": 18160.790999999997
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_eq32",
+      "--dsp-workers",
+      "2",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "16",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_eq32_n2_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_eq32",
+    "workers": 2,
+    "rep": 1,
+    "interval_us": 1256.8902011737227,
+    "resample_us": {
+      "mean": 398.114943359375,
+      "p50": 378.751,
+      "p95": 456.662
+    },
+    "sic_us": {
+      "mean": 538.486494140625,
+      "p50": 515.8055,
+      "p95": 669.263
+    },
+    "sensing_us": {
+      "mean": 1185.505880859375,
+      "p50": 1132.321,
+      "p95": 1347.47
+    },
+    "comm_us": {
+      "mean": 388.96124609375,
+      "p50": 366.282,
+      "p95": 503.313
+    },
+    "total_us": {
+      "mean": 2511.068564453125,
+      "p50": 2417.7805,
+      "p95": 2986.624
+    },
+    "worker_jobs": {
+      "0": 256,
+      "1": 256
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_eq32.txt",
+      "101829",
+      "4,6",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_eq32",
+    "workers": 4,
+    "rep": 1,
+    "interval_us": 547.821094,
+    "startup_ms": 15.950051,
+    "resample_us": {
+      "mean": 426.2915234375,
+      "p50": 392.6675,
+      "p95": 712.659
+    },
+    "sic_us": {
+      "mean": 563.639791015625,
+      "p50": 534.7055,
+      "p95": 752.459
+    },
+    "sensing_us": {
+      "mean": 1059.04965234375,
+      "p50": 970.206,
+      "p95": 1816.062
+    },
+    "e2e_us": {
+      "mean": 2049.613841796875,
+      "p50": 1907.81,
+      "p95": 3298.772
+    },
+    "queue_us": {
+      "mean": 6354.851529296875,
+      "p50": 2298.2870000000003,
+      "p95": 19229.707
+    },
+    "queue_plus_service_us": {
+      "mean": 8404.46537109375,
+      "p50": 4308.5265,
+      "p95": 21577.73
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_eq32",
+      "--dsp-workers",
+      "4",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "32",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_eq32_n4_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_eq32",
+    "workers": 4,
+    "rep": 1,
+    "interval_us": 695.2123613283038,
+    "resample_us": {
+      "mean": 435.92376953125,
+      "p50": 396.23,
+      "p95": 732.488
+    },
+    "sic_us": {
+      "mean": 636.857421875,
+      "p50": 606.6705,
+      "p95": 846.344
+    },
+    "sensing_us": {
+      "mean": 1246.093119140625,
+      "p50": 1154.1125000000002,
+      "p95": 1997.328
+    },
+    "comm_us": {
+      "mean": 447.897802734375,
+      "p50": 425.318,
+      "p95": 587.59
+    },
+    "total_us": {
+      "mean": 2766.77211328125,
+      "p50": 2599.636,
+      "p95": 4193.507
+    },
+    "worker_jobs": {
+      "2": 126,
+      "0": 126,
+      "3": 131,
+      "1": 129
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_eq32.txt",
+      "101829",
+      "4,6,8,10",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_eq32",
+    "workers": 8,
+    "rep": 1,
+    "interval_us": 367.614022,
+    "startup_ms": 34.775048,
+    "resample_us": {
+      "mean": 545.820162109375,
+      "p50": 431.4815,
+      "p95": 845.252
+    },
+    "sic_us": {
+      "mean": 788.26787109375,
+      "p50": 687.9169999999999,
+      "p95": 1102.497
+    },
+    "sensing_us": {
+      "mean": 1270.723994140625,
+      "p50": 1001.884,
+      "p95": 1976.58
+    },
+    "e2e_us": {
+      "mean": 2605.7428125,
+      "p50": 2140.6885,
+      "p95": 3972.982
+    },
+    "queue_us": {
+      "mean": 8750.565392578124,
+      "p50": 6734.091,
+      "p95": 23401.542
+    },
+    "queue_plus_service_us": {
+      "mean": 11356.308205078125,
+      "p50": 9336.418000000001,
+      "p95": 28674.845999999998
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_eq32",
+      "--dsp-workers",
+      "8",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10,12,14,16,18",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "64",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_eq32_n8_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_eq32",
+    "workers": 8,
+    "rep": 1,
+    "interval_us": 450.7441562488675,
+    "resample_us": {
+      "mean": 609.8910078125,
+      "p50": 447.391,
+      "p95": 870.348
+    },
+    "sic_us": {
+      "mean": 817.858171875,
+      "p50": 747.1890000000001,
+      "p95": 1143.188
+    },
+    "sensing_us": {
+      "mean": 1559.519841796875,
+      "p50": 1240.6915,
+      "p95": 2401.6
+    },
+    "comm_us": {
+      "mean": 587.940751953125,
+      "p50": 506.63800000000003,
+      "p95": 906.303
+    },
+    "total_us": {
+      "mean": 3575.2097734375,
+      "p50": 3266.032,
+      "p95": 5363.438
+    },
+    "worker_jobs": {
+      "1": 63,
+      "6": 68,
+      "7": 66,
+      "4": 67,
+      "5": 62,
+      "0": 60,
+      "2": 62,
+      "3": 64
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_eq32.txt",
+      "101829",
+      "4,6,8,10,12,14,16,18",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_minorder",
+    "workers": 1,
+    "rep": 1,
+    "interval_us": 1941.74628,
+    "startup_ms": 9.696588,
+    "resample_us": {
+      "mean": 336.80363671875,
+      "p50": 319.1075,
+      "p95": 413.752
+    },
+    "sic_us": {
+      "mean": 570.386931640625,
+      "p50": 544.4495,
+      "p95": 686.486
+    },
+    "sensing_us": {
+      "mean": 1017.1871953125,
+      "p50": 976.844,
+      "p95": 1137.595
+    },
+    "e2e_us": {
+      "mean": 1925.372498046875,
+      "p50": 1863.623,
+      "p95": 2145.386
+    },
+    "queue_us": {
+      "mean": 15472.352455078126,
+      "p50": 15198.3875,
+      "p95": 17849.839
+    },
+    "queue_plus_service_us": {
+      "mean": 17397.724953125,
+      "p50": 17105.1795,
+      "p95": 20201.123
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_minorder",
+      "--dsp-workers",
+      "1",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "8",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_minorder_n1_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_minorder",
+    "workers": 1,
+    "rep": 1,
+    "interval_us": 2410.889800786972,
+    "resample_us": {
+      "mean": 302.75226171875,
+      "p50": 283.8265,
+      "p95": 384.498
+    },
+    "sic_us": {
+      "mean": 539.868064453125,
+      "p50": 522.7950000000001,
+      "p95": 653.993
+    },
+    "sensing_us": {
+      "mean": 1170.25295703125,
+      "p50": 1133.723,
+      "p95": 1324.923
+    },
+    "comm_us": {
+      "mean": 397.062322265625,
+      "p50": 368.2415,
+      "p95": 486.86
+    },
+    "total_us": {
+      "mean": 2409.93560546875,
+      "p50": 2337.469,
+      "p95": 2830.264
+    },
+    "worker_jobs": {
+      "0": 512
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_minorder.txt",
+      "101829",
+      "4",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_minorder",
+    "workers": 2,
+    "rep": 1,
+    "interval_us": 1041.95142,
+    "startup_ms": 12.098025,
+    "resample_us": {
+      "mean": 354.316990234375,
+      "p50": 311.22900000000004,
+      "p95": 525.836
+    },
+    "sic_us": {
+      "mean": 570.336228515625,
+      "p50": 524.221,
+      "p95": 741.562
+    },
+    "sensing_us": {
+      "mean": 1129.831767578125,
+      "p50": 961.9105,
+      "p95": 1813.942
+    },
+    "e2e_us": {
+      "mean": 2055.243923828125,
+      "p50": 1820.6405,
+      "p95": 3066.876
+    },
+    "queue_us": {
+      "mean": 9698.747564453124,
+      "p50": 11597.147,
+      "p95": 21153.934
+    },
+    "queue_plus_service_us": {
+      "mean": 11753.99148828125,
+      "p50": 14118.0945,
+      "p95": 23662.941
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_minorder",
+      "--dsp-workers",
+      "2",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "16",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_minorder_n2_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_minorder",
+    "workers": 2,
+    "rep": 1,
+    "interval_us": 1228.4577460959554,
+    "resample_us": {
+      "mean": 308.0570703125,
+      "p50": 287.854,
+      "p95": 428.957
+    },
+    "sic_us": {
+      "mean": 555.277615234375,
+      "p50": 534.7819999999999,
+      "p95": 690.038
+    },
+    "sensing_us": {
+      "mean": 1197.451462890625,
+      "p50": 1139.465,
+      "p95": 1395.136
+    },
+    "comm_us": {
+      "mean": 390.170802734375,
+      "p50": 374.2895,
+      "p95": 493.261
+    },
+    "total_us": {
+      "mean": 2450.956951171875,
+      "p50": 2367.684,
+      "p95": 2891.108
+    },
+    "worker_jobs": {
+      "0": 258,
+      "1": 254
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_minorder.txt",
+      "101829",
+      "4,6",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_minorder",
+    "workers": 4,
+    "rep": 1,
+    "interval_us": 525.097697,
+    "startup_ms": 15.837137,
+    "resample_us": {
+      "mean": 338.788408203125,
+      "p50": 311.8615,
+      "p95": 534.041
+    },
+    "sic_us": {
+      "mean": 579.346533203125,
+      "p50": 535.1590000000001,
+      "p95": 792.515
+    },
+    "sensing_us": {
+      "mean": 1078.5463203125,
+      "p50": 968.848,
+      "p95": 1853.167
+    },
+    "e2e_us": {
+      "mean": 1997.269322265625,
+      "p50": 1831.0230000000001,
+      "p95": 3155.736
+    },
+    "queue_us": {
+      "mean": 10020.180103515626,
+      "p50": 10830.7075,
+      "p95": 17882.253
+    },
+    "queue_plus_service_us": {
+      "mean": 12017.44942578125,
+      "p50": 12701.019,
+      "p95": 20439.398
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_minorder",
+      "--dsp-workers",
+      "4",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "32",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_minorder_n4_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_minorder",
+    "workers": 4,
+    "rep": 1,
+    "interval_us": 665.6361367180943,
+    "resample_us": {
+      "mean": 334.311384765625,
+      "p50": 291.0235,
+      "p95": 543.346
+    },
+    "sic_us": {
+      "mean": 603.556478515625,
+      "p50": 553.973,
+      "p95": 825.428
+    },
+    "sensing_us": {
+      "mean": 1288.7961640625,
+      "p50": 1144.7469999999998,
+      "p95": 2005.54
+    },
+    "comm_us": {
+      "mean": 423.0663984375,
+      "p50": 388.798,
+      "p95": 567.127
+    },
+    "total_us": {
+      "mean": 2649.73042578125,
+      "p50": 2392.01,
+      "p95": 3856.007
+    },
+    "worker_jobs": {
+      "3": 129,
+      "2": 132,
+      "0": 123,
+      "1": 128
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_minorder.txt",
+      "101829",
+      "4,6,8,10",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_minorder",
+    "workers": 8,
+    "rep": 1,
+    "interval_us": 308.68819,
+    "startup_ms": 26.198062,
+    "resample_us": {
+      "mean": 408.05458984375,
+      "p50": 329.70000000000005,
+      "p95": 606.391
+    },
+    "sic_us": {
+      "mean": 734.315234375,
+      "p50": 664.656,
+      "p95": 971.387
+    },
+    "sensing_us": {
+      "mean": 1235.9197421875,
+      "p50": 995.1030000000001,
+      "p95": 1960.225
+    },
+    "e2e_us": {
+      "mean": 2379.1599140625,
+      "p50": 2004.42,
+      "p95": 3467.37
+    },
+    "queue_us": {
+      "mean": 6663.1987578125,
+      "p50": 4206.906000000001,
+      "p95": 20585.226
+    },
+    "queue_plus_service_us": {
+      "mean": 9042.358671875,
+      "p50": 6761.5515,
+      "p95": 23928.969
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_minorder",
+      "--dsp-workers",
+      "8",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10,12,14,16,18",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "64",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_minorder_n8_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_minorder",
+    "workers": 8,
+    "rep": 1,
+    "interval_us": 394.0141738280654,
+    "resample_us": {
+      "mean": 394.7926484375,
+      "p50": 314.122,
+      "p95": 608.829
+    },
+    "sic_us": {
+      "mean": 774.333390625,
+      "p50": 665.913,
+      "p95": 1058.339
+    },
+    "sensing_us": {
+      "mean": 1418.548578125,
+      "p50": 1168.504,
+      "p95": 2112.544
+    },
+    "comm_us": {
+      "mean": 533.450818359375,
+      "p50": 470.947,
+      "p95": 753.984
+    },
+    "total_us": {
+      "mean": 3121.125435546875,
+      "p50": 2611.492,
+      "p95": 4432.993
+    },
+    "worker_jobs": {
+      "4": 60,
+      "3": 57,
+      "6": 65,
+      "2": 70,
+      "1": 67,
+      "5": 59,
+      "0": 71,
+      "7": 63
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_minorder.txt",
+      "101829",
+      "4,6,8,10,12,14,16,18",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_eq16",
+    "workers": 1,
+    "rep": 1,
+    "interval_us": 1774.04927,
+    "startup_ms": 11.678646,
+    "resample_us": {
+      "mean": 258.30746484375,
+      "p50": 244.2775,
+      "p95": 345.951
+    },
+    "sic_us": {
+      "mean": 525.867509765625,
+      "p50": 503.447,
+      "p95": 633.642
+    },
+    "sensing_us": {
+      "mean": 973.20455859375,
+      "p50": 943.8965000000001,
+      "p95": 1143.137
+    },
+    "e2e_us": {
+      "mean": 1758.022232421875,
+      "p50": 1709.6145000000001,
+      "p95": 2093.318
+    },
+    "queue_us": {
+      "mean": 14118.894728515625,
+      "p50": 13878.0965,
+      "p95": 15842.965
+    },
+    "queue_plus_service_us": {
+      "mean": 15876.9169609375,
+      "p50": 15613.5615,
+      "p95": 17780.162
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_eq16",
+      "--dsp-workers",
+      "1",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "8",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_eq16_n1_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_eq16",
+    "workers": 1,
+    "rep": 1,
+    "interval_us": 2294.0027070343494,
+    "resample_us": {
+      "mean": 251.102962890625,
+      "p50": 240.1015,
+      "p95": 289.62
+    },
+    "sic_us": {
+      "mean": 515.3575390625,
+      "p50": 499.093,
+      "p95": 634.219
+    },
+    "sensing_us": {
+      "mean": 1160.44306640625,
+      "p50": 1114.5845,
+      "p95": 1369.8
+    },
+    "comm_us": {
+      "mean": 366.487767578125,
+      "p50": 354.1835,
+      "p95": 437.283
+    },
+    "total_us": {
+      "mean": 2293.3913359375,
+      "p50": 2235.3329999999996,
+      "p95": 2589.043
+    },
+    "worker_jobs": {
+      "0": 512
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_eq16.txt",
+      "101829",
+      "4",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_eq16",
+    "workers": 2,
+    "rep": 1,
+    "interval_us": 917.506857,
+    "startup_ms": 12.219762,
+    "resample_us": {
+      "mean": 272.753814453125,
+      "p50": 246.6505,
+      "p95": 330.285
+    },
+    "sic_us": {
+      "mean": 550.22130859375,
+      "p50": 524.5235,
+      "p95": 675.448
+    },
+    "sensing_us": {
+      "mean": 1002.632275390625,
+      "p50": 964.769,
+      "p95": 1157.568
+    },
+    "e2e_us": {
+      "mean": 1826.244470703125,
+      "p50": 1754.8845000000001,
+      "p95": 2160.92
+    },
+    "queue_us": {
+      "mean": 11013.714681640626,
+      "p50": 13272.122,
+      "p95": 14977.148
+    },
+    "queue_plus_service_us": {
+      "mean": 12839.95915234375,
+      "p50": 14943.7375,
+      "p95": 16783.397
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_eq16",
+      "--dsp-workers",
+      "2",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "16",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_eq16_n2_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_eq16",
+    "workers": 2,
+    "rep": 1,
+    "interval_us": 1206.8696855455637,
+    "resample_us": {
+      "mean": 270.468404296875,
+      "p50": 243.4675,
+      "p95": 380.87
+    },
+    "sic_us": {
+      "mean": 553.74401171875,
+      "p50": 514.294,
+      "p95": 747.083
+    },
+    "sensing_us": {
+      "mean": 1195.327443359375,
+      "p50": 1126.711,
+      "p95": 1498.029
+    },
+    "comm_us": {
+      "mean": 392.2084765625,
+      "p50": 365.2395,
+      "p95": 553.371
+    },
+    "total_us": {
+      "mean": 2411.7483359375,
+      "p50": 2271.6530000000002,
+      "p95": 3211.334
+    },
+    "worker_jobs": {
+      "1": 259,
+      "0": 253
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_eq16.txt",
+      "101829",
+      "4,6",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_eq16",
+    "workers": 4,
+    "rep": 1,
+    "interval_us": 500.420734,
+    "startup_ms": 14.855511,
+    "resample_us": {
+      "mean": 282.974841796875,
+      "p50": 252.5025,
+      "p95": 474.929
+    },
+    "sic_us": {
+      "mean": 598.50268359375,
+      "p50": 564.2975,
+      "p95": 794.716
+    },
+    "sensing_us": {
+      "mean": 1072.529671875,
+      "p50": 971.395,
+      "p95": 1849.244
+    },
+    "e2e_us": {
+      "mean": 1954.686068359375,
+      "p50": 1802.6480000000001,
+      "p95": 3109.381
+    },
+    "queue_us": {
+      "mean": 6875.217068359375,
+      "p50": 5267.5255,
+      "p95": 16912.758
+    },
+    "queue_plus_service_us": {
+      "mean": 8829.90313671875,
+      "p50": 7243.7519999999995,
+      "p95": 19579.394
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_eq16",
+      "--dsp-workers",
+      "4",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "32",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_eq16_n4_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_eq16",
+    "workers": 4,
+    "rep": 1,
+    "interval_us": 639.6244238317013,
+    "resample_us": {
+      "mean": 281.5033046875,
+      "p50": 255.6465,
+      "p95": 389.879
+    },
+    "sic_us": {
+      "mean": 600.87409765625,
+      "p50": 567.6700000000001,
+      "p95": 796.915
+    },
+    "sensing_us": {
+      "mean": 1227.33543359375,
+      "p50": 1147.0785,
+      "p95": 1798.508
+    },
+    "comm_us": {
+      "mean": 439.65569140625,
+      "p50": 403.3885,
+      "p95": 594.61
+    },
+    "total_us": {
+      "mean": 2549.36852734375,
+      "p50": 2391.432,
+      "p95": 3845.834
+    },
+    "worker_jobs": {
+      "1": 132,
+      "2": 129,
+      "3": 130,
+      "0": 121
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_eq16.txt",
+      "101829",
+      "4,6,8,10",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_eq16",
+    "workers": 8,
+    "rep": 1,
+    "interval_us": 311.523037,
+    "startup_ms": 29.660334,
+    "resample_us": {
+      "mean": 353.92923046875,
+      "p50": 266.41150000000005,
+      "p95": 535.021
+    },
+    "sic_us": {
+      "mean": 733.462421875,
+      "p50": 636.3355,
+      "p95": 1027.745
+    },
+    "sensing_us": {
+      "mean": 1251.5336015625,
+      "p50": 987.027,
+      "p95": 1945.954
+    },
+    "e2e_us": {
+      "mean": 2339.6994140625,
+      "p50": 1888.9075,
+      "p95": 3470.295
+    },
+    "queue_us": {
+      "mean": 9680.418720703125,
+      "p50": 10072.187,
+      "p95": 19461.051
+    },
+    "queue_plus_service_us": {
+      "mean": 12020.118134765626,
+      "p50": 12519.0625,
+      "p95": 21673.537
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_eq16",
+      "--dsp-workers",
+      "8",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10,12,14,16,18",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "64",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_eq16_n8_r1.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_eq16",
+    "workers": 8,
+    "rep": 1,
+    "interval_us": 387.76787109673023,
+    "resample_us": {
+      "mean": 358.4745546875,
+      "p50": 279.736,
+      "p95": 554.984
+    },
+    "sic_us": {
+      "mean": 740.87351953125,
+      "p50": 647.6915,
+      "p95": 1023.918
+    },
+    "sensing_us": {
+      "mean": 1445.799640625,
+      "p50": 1159.8670000000002,
+      "p95": 2092.372
+    },
+    "comm_us": {
+      "mean": 519.6259921875,
+      "p50": 457.4035,
+      "p95": 688.69
+    },
+    "total_us": {
+      "mean": 3064.77370703125,
+      "p50": 2545.6549999999997,
+      "p95": 4346.113
+    },
+    "worker_jobs": {
+      "3": 61,
+      "2": 71,
+      "1": 62,
+      "4": 65,
+      "5": 72,
+      "6": 62,
+      "7": 59,
+      "0": 60
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_eq16.txt",
+      "101829",
+      "4,6,8,10,12,14,16,18",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_minorder",
+    "workers": 8,
+    "rep": 2,
+    "interval_us": 356.673511,
+    "startup_ms": 26.802905,
+    "resample_us": {
+      "mean": 718.1549296875,
+      "p50": 572.4745,
+      "p95": 1160.454
+    },
+    "sic_us": {
+      "mean": 750.698515625,
+      "p50": 651.0405000000001,
+      "p95": 1037.47
+    },
+    "sensing_us": {
+      "mean": 1285.874630859375,
+      "p50": 990.862,
+      "p95": 1948.209
+    },
+    "e2e_us": {
+      "mean": 2755.518375,
+      "p50": 2210.7110000000002,
+      "p95": 4106.281
+    },
+    "queue_us": {
+      "mean": 9485.5132421875,
+      "p50": 8144.3255,
+      "p95": 22824.154
+    },
+    "queue_plus_service_us": {
+      "mean": 12241.0316171875,
+      "p50": 10797.277,
+      "p95": 25308.453
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_minorder",
+      "--dsp-workers",
+      "8",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10,12,14,16,18",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "64",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_minorder_n8_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_minorder",
+    "workers": 8,
+    "rep": 2,
+    "interval_us": 450.0095644518733,
+    "resample_us": {
+      "mean": 724.341439453125,
+      "p50": 549.227,
+      "p95": 1178.657
+    },
+    "sic_us": {
+      "mean": 805.905625,
+      "p50": 701.2355,
+      "p95": 1108.033
+    },
+    "sensing_us": {
+      "mean": 1452.818716796875,
+      "p50": 1171.9795,
+      "p95": 2082.685
+    },
+    "comm_us": {
+      "mean": 556.8592734375,
+      "p50": 490.188,
+      "p95": 759.005
+    },
+    "total_us": {
+      "mean": 3539.9250546875,
+      "p50": 2945.3855,
+      "p95": 4989.665
+    },
+    "worker_jobs": {
+      "5": 60,
+      "1": 70,
+      "4": 61,
+      "6": 68,
+      "2": 65,
+      "3": 63,
+      "0": 68,
+      "7": 57
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_minorder.txt",
+      "101829",
+      "4,6,8,10,12,14,16,18",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_minorder",
+    "workers": 4,
+    "rep": 2,
+    "interval_us": 568.230738,
+    "startup_ms": 16.895805,
+    "resample_us": {
+      "mean": 577.446220703125,
+      "p50": 556.828,
+      "p95": 926.14
+    },
+    "sic_us": {
+      "mean": 619.549990234375,
+      "p50": 583.308,
+      "p95": 811.233
+    },
+    "sensing_us": {
+      "mean": 1029.73043359375,
+      "p50": 969.454,
+      "p95": 1543.065
+    },
+    "e2e_us": {
+      "mean": 2227.447494140625,
+      "p50": 2104.366,
+      "p95": 3484.398
+    },
+    "queue_us": {
+      "mean": 7367.457712890625,
+      "p50": 2635.309,
+      "p95": 20786.3
+    },
+    "queue_plus_service_us": {
+      "mean": 9594.90520703125,
+      "p50": 5125.610000000001,
+      "p95": 22913.236
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_minorder",
+      "--dsp-workers",
+      "4",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "32",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_minorder_n4_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_minorder",
+    "workers": 4,
+    "rep": 2,
+    "interval_us": 761.0084941387177,
+    "resample_us": {
+      "mean": 642.534166015625,
+      "p50": 552.2004999999999,
+      "p95": 1090.401
+    },
+    "sic_us": {
+      "mean": 629.069296875,
+      "p50": 571.6765,
+      "p95": 916.548
+    },
+    "sensing_us": {
+      "mean": 1310.9135078125,
+      "p50": 1141.1345000000001,
+      "p95": 2004.413
+    },
+    "comm_us": {
+      "mean": 445.81378710937497,
+      "p50": 402.37199999999996,
+      "p95": 621.15
+    },
+    "total_us": {
+      "mean": 3028.3307578125,
+      "p50": 2671.6535,
+      "p95": 4593.599
+    },
+    "worker_jobs": {
+      "3": 129,
+      "2": 129,
+      "1": 128,
+      "0": 126
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_minorder.txt",
+      "101829",
+      "4,6,8,10",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_minorder",
+    "workers": 2,
+    "rep": 2,
+    "interval_us": 1147.83777,
+    "startup_ms": 11.533584,
+    "resample_us": {
+      "mean": 600.20311328125,
+      "p50": 550.4495,
+      "p95": 981.836
+    },
+    "sic_us": {
+      "mean": 581.81871484375,
+      "p50": 531.0264999999999,
+      "p95": 813.59
+    },
+    "sensing_us": {
+      "mean": 1101.155849609375,
+      "p50": 962.2149999999999,
+      "p95": 1881.91
+    },
+    "e2e_us": {
+      "mean": 2283.8521953125,
+      "p50": 2045.165,
+      "p95": 3675.543
+    },
+    "queue_us": {
+      "mean": 16146.50200390625,
+      "p50": 16024.9845,
+      "p95": 24949.534
+    },
+    "queue_plus_service_us": {
+      "mean": 18430.35419921875,
+      "p50": 18081.4745,
+      "p95": 28637.49
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_minorder",
+      "--dsp-workers",
+      "2",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "16",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_minorder_n2_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_minorder",
+    "workers": 2,
+    "rep": 2,
+    "interval_us": 1310.5015136748552,
+    "resample_us": {
+      "mean": 527.072083984375,
+      "p50": 491.236,
+      "p95": 773.418
+    },
+    "sic_us": {
+      "mean": 530.485501953125,
+      "p50": 508.346,
+      "p95": 689.378
+    },
+    "sensing_us": {
+      "mean": 1178.967255859375,
+      "p50": 1119.289,
+      "p95": 1604.942
+    },
+    "comm_us": {
+      "mean": 380.879138671875,
+      "p50": 358.62649999999996,
+      "p95": 487.737
+    },
+    "total_us": {
+      "mean": 2617.40398046875,
+      "p50": 2490.4539999999997,
+      "p95": 3530.487
+    },
+    "worker_jobs": {
+      "0": 254,
+      "1": 258
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_minorder.txt",
+      "101829",
+      "4,6",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_minorder",
+    "workers": 1,
+    "rep": 2,
+    "interval_us": 2038.12351,
+    "startup_ms": 9.455316,
+    "resample_us": {
+      "mean": 518.1934296875,
+      "p50": 490.4445,
+      "p95": 668.304
+    },
+    "sic_us": {
+      "mean": 524.47158203125,
+      "p50": 501.929,
+      "p95": 655.387
+    },
+    "sensing_us": {
+      "mean": 978.08284375,
+      "p50": 938.405,
+      "p95": 1190.682
+    },
+    "e2e_us": {
+      "mean": 2021.43198046875,
+      "p50": 1948.3780000000002,
+      "p95": 2402.265
+    },
+    "queue_us": {
+      "mean": 16222.270626953125,
+      "p50": 15837.8505,
+      "p95": 19733.753
+    },
+    "queue_plus_service_us": {
+      "mean": 18243.702607421874,
+      "p50": 17830.239,
+      "p95": 21782.019
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_minorder",
+      "--dsp-workers",
+      "1",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "8",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_minorder_n1_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_minorder",
+    "workers": 1,
+    "rep": 2,
+    "interval_us": 2594.4989296868443,
+    "resample_us": {
+      "mean": 518.5316484375,
+      "p50": 500.717,
+      "p95": 608.438
+    },
+    "sic_us": {
+      "mean": 532.575884765625,
+      "p50": 511.767,
+      "p95": 658.729
+    },
+    "sensing_us": {
+      "mean": 1158.367572265625,
+      "p50": 1118.538,
+      "p95": 1315.245
+    },
+    "comm_us": {
+      "mean": 384.286990234375,
+      "p50": 362.8205,
+      "p95": 478.736
+    },
+    "total_us": {
+      "mean": 2593.762095703125,
+      "p50": 2526.2455,
+      "p95": 2916.982
+    },
+    "worker_jobs": {
+      "0": 512
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_minorder.txt",
+      "101829",
+      "4",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_eq32",
+    "workers": 8,
+    "rep": 2,
+    "interval_us": 353.603714,
+    "startup_ms": 31.515115,
+    "resample_us": {
+      "mean": 544.595298828125,
+      "p50": 413.673,
+      "p95": 821.89
+    },
+    "sic_us": {
+      "mean": 762.986017578125,
+      "p50": 638.227,
+      "p95": 1053.681
+    },
+    "sensing_us": {
+      "mean": 1294.901671875,
+      "p50": 987.8985,
+      "p95": 1961.771
+    },
+    "e2e_us": {
+      "mean": 2603.440716796875,
+      "p50": 2044.465,
+      "p95": 4109.137
+    },
+    "queue_us": {
+      "mean": 8427.34374609375,
+      "p50": 6236.3715,
+      "p95": 24704.771
+    },
+    "queue_plus_service_us": {
+      "mean": 11030.784462890624,
+      "p50": 8460.698,
+      "p95": 27644.455
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_eq32",
+      "--dsp-workers",
+      "8",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10,12,14,16,18",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "64",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_eq32_n8_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_eq32",
+    "workers": 8,
+    "rep": 2,
+    "interval_us": 414.88204491883516,
+    "resample_us": {
+      "mean": 535.00130078125,
+      "p50": 420.3425,
+      "p95": 854.977
+    },
+    "sic_us": {
+      "mean": 779.74355859375,
+      "p50": 682.7355,
+      "p95": 1056.542
+    },
+    "sensing_us": {
+      "mean": 1429.322080078125,
+      "p50": 1171.988,
+      "p95": 2108.167
+    },
+    "comm_us": {
+      "mean": 541.122607421875,
+      "p50": 478.70050000000003,
+      "p95": 744.37
+    },
+    "total_us": {
+      "mean": 3285.189546875,
+      "p50": 2770.071,
+      "p95": 4700.175
+    },
+    "worker_jobs": {
+      "4": 59,
+      "7": 69,
+      "0": 62,
+      "1": 69,
+      "3": 61,
+      "5": 67,
+      "2": 64,
+      "6": 61
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_eq32.txt",
+      "101829",
+      "4,6,8,10,12,14,16,18",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_eq32",
+    "workers": 4,
+    "rep": 2,
+    "interval_us": 554.203479,
+    "startup_ms": 17.174339,
+    "resample_us": {
+      "mean": 466.72284375,
+      "p50": 409.0585,
+      "p95": 738.775
+    },
+    "sic_us": {
+      "mean": 629.964921875,
+      "p50": 586.8064999999999,
+      "p95": 849.227
+    },
+    "sensing_us": {
+      "mean": 1063.683048828125,
+      "p50": 977.292,
+      "p95": 1852.089
+    },
+    "e2e_us": {
+      "mean": 2161.43105859375,
+      "p50": 1997.465,
+      "p95": 3538.107
+    },
+    "queue_us": {
+      "mean": 8653.027490234375,
+      "p50": 7527.396000000001,
+      "p95": 20610.216
+    },
+    "queue_plus_service_us": {
+      "mean": 10814.458548828125,
+      "p50": 9577.2555,
+      "p95": 22883.023
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_eq32",
+      "--dsp-workers",
+      "4",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "32",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_eq32_n4_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_eq32",
+    "workers": 4,
+    "rep": 2,
+    "interval_us": 722.0034628883004,
+    "resample_us": {
+      "mean": 481.002185546875,
+      "p50": 415.6125,
+      "p95": 754.208
+    },
+    "sic_us": {
+      "mean": 629.814498046875,
+      "p50": 569.0965,
+      "p95": 885.604
+    },
+    "sensing_us": {
+      "mean": 1325.699154296875,
+      "p50": 1150.9855,
+      "p95": 2033.796
+    },
+    "comm_us": {
+      "mean": 440.409095703125,
+      "p50": 402.269,
+      "p95": 603.194
+    },
+    "total_us": {
+      "mean": 2876.92493359375,
+      "p50": 2547.8464999999997,
+      "p95": 4193.116
+    },
+    "worker_jobs": {
+      "3": 130,
+      "1": 124,
+      "0": 127,
+      "2": 131
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_eq32.txt",
+      "101829",
+      "4,6,8,10",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_eq32",
+    "workers": 2,
+    "rep": 2,
+    "interval_us": 1019.66037,
+    "startup_ms": 15.592785,
+    "resample_us": {
+      "mean": 425.061498046875,
+      "p50": 399.26800000000003,
+      "p95": 568.787
+    },
+    "sic_us": {
+      "mean": 583.0965625,
+      "p50": 540.0564999999999,
+      "p95": 730.445
+    },
+    "sensing_us": {
+      "mean": 1017.51498046875,
+      "p50": 968.9735000000001,
+      "p95": 1255.606
+    },
+    "e2e_us": {
+      "mean": 2026.375583984375,
+      "p50": 1928.2815,
+      "p95": 2688.087
+    },
+    "queue_us": {
+      "mean": 14236.727583984375,
+      "p50": 15013.504,
+      "p95": 17378.803
+    },
+    "queue_plus_service_us": {
+      "mean": 16263.10316796875,
+      "p50": 16927.3815,
+      "p95": 19513.486
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_eq32",
+      "--dsp-workers",
+      "2",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "16",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_eq32_n2_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_eq32",
+    "workers": 2,
+    "rep": 2,
+    "interval_us": 1226.4956816360354,
+    "resample_us": {
+      "mean": 383.698052734375,
+      "p50": 374.03200000000004,
+      "p95": 435.747
+    },
+    "sic_us": {
+      "mean": 530.15709765625,
+      "p50": 510.50649999999996,
+      "p95": 629.542
+    },
+    "sensing_us": {
+      "mean": 1161.232400390625,
+      "p50": 1126.1305,
+      "p95": 1279.96
+    },
+    "comm_us": {
+      "mean": 376.714998046875,
+      "p50": 358.4225,
+      "p95": 461.46
+    },
+    "total_us": {
+      "mean": 2451.802548828125,
+      "p50": 2386.694,
+      "p95": 2818.512
+    },
+    "worker_jobs": {
+      "1": 258,
+      "0": 254
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_eq32.txt",
+      "101829",
+      "4,6",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_eq32",
+    "workers": 1,
+    "rep": 2,
+    "interval_us": 1947.49983,
+    "startup_ms": 9.327917,
+    "resample_us": {
+      "mean": 412.248533203125,
+      "p50": 397.2075,
+      "p95": 510.641
+    },
+    "sic_us": {
+      "mean": 535.868658203125,
+      "p50": 520.1835,
+      "p95": 645.382
+    },
+    "sensing_us": {
+      "mean": 981.97584375,
+      "p50": 954.9884999999999,
+      "p95": 1092.635
+    },
+    "e2e_us": {
+      "mean": 1930.825875,
+      "p50": 1898.7075,
+      "p95": 2134.762
+    },
+    "queue_us": {
+      "mean": 15488.560494140625,
+      "p50": 15382.842499999999,
+      "p95": 16678.893
+    },
+    "queue_plus_service_us": {
+      "mean": 17419.386369140626,
+      "p50": 17320.277000000002,
+      "p95": 18645.544
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_eq32",
+      "--dsp-workers",
+      "1",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "8",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_eq32_n1_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_eq32",
+    "workers": 1,
+    "rep": 2,
+    "interval_us": 2466.8735117167234,
+    "resample_us": {
+      "mean": 404.575595703125,
+      "p50": 379.885,
+      "p95": 505.353
+    },
+    "sic_us": {
+      "mean": 535.924240234375,
+      "p50": 509.3615,
+      "p95": 663.886
+    },
+    "sensing_us": {
+      "mean": 1146.543052734375,
+      "p50": 1115.9935,
+      "p95": 1325.113
+    },
+    "comm_us": {
+      "mean": 379.02061328125,
+      "p50": 362.05600000000004,
+      "p95": 476.466
+    },
+    "total_us": {
+      "mean": 2466.063501953125,
+      "p50": 2391.2155000000002,
+      "p95": 2812.727
+    },
+    "worker_jobs": {
+      "0": 512
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_eq32.txt",
+      "101829",
+      "4",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_minorder",
+    "workers": 8,
+    "rep": 2,
+    "interval_us": 307.124973,
+    "startup_ms": 27.15772,
+    "resample_us": {
+      "mean": 403.71055859375,
+      "p50": 328.6825,
+      "p95": 598.337
+    },
+    "sic_us": {
+      "mean": 731.1415,
+      "p50": 651.5165,
+      "p95": 987.323
+    },
+    "sensing_us": {
+      "mean": 1227.8005859375,
+      "p50": 984.819,
+      "p95": 1928.079
+    },
+    "e2e_us": {
+      "mean": 2363.45941796875,
+      "p50": 1972.629,
+      "p95": 3456.819
+    },
+    "queue_us": {
+      "mean": 6451.933662109375,
+      "p50": 3440.6059999999998,
+      "p95": 20472.207
+    },
+    "queue_plus_service_us": {
+      "mean": 8815.393080078125,
+      "p50": 6083.699500000001,
+      "p95": 22645.552
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_minorder",
+      "--dsp-workers",
+      "8",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10,12,14,16,18",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "64",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_minorder_n8_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_minorder",
+    "workers": 8,
+    "rep": 2,
+    "interval_us": 380.77192187309265,
+    "resample_us": {
+      "mean": 389.571123046875,
+      "p50": 309.86,
+      "p95": 596.27
+    },
+    "sic_us": {
+      "mean": 723.12984765625,
+      "p50": 655.4635000000001,
+      "p95": 978.29
+    },
+    "sensing_us": {
+      "mean": 1404.12023828125,
+      "p50": 1161.495,
+      "p95": 2078.736
+    },
+    "comm_us": {
+      "mean": 511.458953125,
+      "p50": 455.7855,
+      "p95": 683.56
+    },
+    "total_us": {
+      "mean": 3028.280162109375,
+      "p50": 2588.8755,
+      "p95": 4262.54
+    },
+    "worker_jobs": {
+      "6": 58,
+      "5": 66,
+      "3": 69,
+      "2": 58,
+      "4": 65,
+      "7": 66,
+      "0": 66,
+      "1": 64
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_minorder.txt",
+      "101829",
+      "4,6,8,10,12,14,16,18",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_minorder",
+    "workers": 4,
+    "rep": 2,
+    "interval_us": 502.568252,
+    "startup_ms": 16.863861,
+    "resample_us": {
+      "mean": 346.037841796875,
+      "p50": 316.07399999999996,
+      "p95": 497.541
+    },
+    "sic_us": {
+      "mean": 589.275791015625,
+      "p50": 569.1510000000001,
+      "p95": 786.925
+    },
+    "sensing_us": {
+      "mean": 1032.221939453125,
+      "p50": 971.3835,
+      "p95": 1620.048
+    },
+    "e2e_us": {
+      "mean": 1968.26748828125,
+      "p50": 1863.8899999999999,
+      "p95": 3027.398
+    },
+    "queue_us": {
+      "mean": 10823.463083984376,
+      "p50": 11852.861499999999,
+      "p95": 16175.478
+    },
+    "queue_plus_service_us": {
+      "mean": 12791.730572265626,
+      "p50": 13897.008,
+      "p95": 18132.859
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_minorder",
+      "--dsp-workers",
+      "4",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "32",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_minorder_n4_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_minorder",
+    "workers": 4,
+    "rep": 2,
+    "interval_us": 667.0323769524693,
+    "resample_us": {
+      "mean": 332.847986328125,
+      "p50": 297.187,
+      "p95": 566.553
+    },
+    "sic_us": {
+      "mean": 636.462654296875,
+      "p50": 584.9390000000001,
+      "p95": 902.135
+    },
+    "sensing_us": {
+      "mean": 1256.2900234375,
+      "p50": 1148.717,
+      "p95": 2003.283
+    },
+    "comm_us": {
+      "mean": 432.51552734375,
+      "p50": 408.43899999999996,
+      "p95": 615.593
+    },
+    "total_us": {
+      "mean": 2658.11619140625,
+      "p50": 2451.7285,
+      "p95": 4058.713
+    },
+    "worker_jobs": {
+      "2": 128,
+      "0": 128,
+      "1": 127,
+      "3": 129
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_minorder.txt",
+      "101829",
+      "4,6,8,10",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_minorder",
+    "workers": 2,
+    "rep": 2,
+    "interval_us": 981.635888,
+    "startup_ms": 10.442615,
+    "resample_us": {
+      "mean": 348.464048828125,
+      "p50": 304.6895,
+      "p95": 494.141
+    },
+    "sic_us": {
+      "mean": 534.1545078125,
+      "p50": 505.669,
+      "p95": 693.055
+    },
+    "sensing_us": {
+      "mean": 1046.846822265625,
+      "p50": 944.74,
+      "p95": 1772.419
+    },
+    "e2e_us": {
+      "mean": 1930.039822265625,
+      "p50": 1767.9475,
+      "p95": 2958.967
+    },
+    "queue_us": {
+      "mean": 12224.229126953125,
+      "p50": 13719.412,
+      "p95": 20401.649
+    },
+    "queue_plus_service_us": {
+      "mean": 14154.26894921875,
+      "p50": 15474.552,
+      "p95": 22553.383
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_minorder",
+      "--dsp-workers",
+      "2",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "16",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_minorder_n2_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_minorder",
+    "workers": 2,
+    "rep": 2,
+    "interval_us": 1260.0459707081318,
+    "resample_us": {
+      "mean": 318.99891796875,
+      "p50": 286.9855,
+      "p95": 480.52
+    },
+    "sic_us": {
+      "mean": 569.3354140625,
+      "p50": 535.891,
+      "p95": 727.05
+    },
+    "sensing_us": {
+      "mean": 1226.50438671875,
+      "p50": 1141.9985000000001,
+      "p95": 1948.083
+    },
+    "comm_us": {
+      "mean": 402.3633359375,
+      "p50": 384.176,
+      "p95": 508.49
+    },
+    "total_us": {
+      "mean": 2517.2020546875,
+      "p50": 2379.5765,
+      "p95": 3582.49
+    },
+    "worker_jobs": {
+      "0": 258,
+      "1": 254
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_minorder.txt",
+      "101829",
+      "4,6",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_minorder",
+    "workers": 1,
+    "rep": 2,
+    "interval_us": 1824.40088,
+    "startup_ms": 9.805219,
+    "resample_us": {
+      "mean": 322.9628515625,
+      "p50": 303.2505,
+      "p95": 398.522
+    },
+    "sic_us": {
+      "mean": 522.4869765625,
+      "p50": 504.4335,
+      "p95": 639.083
+    },
+    "sensing_us": {
+      "mean": 962.611359375,
+      "p50": 942.8455,
+      "p95": 1097.478
+    },
+    "e2e_us": {
+      "mean": 1808.7468046875001,
+      "p50": 1767.156,
+      "p95": 2039.453
+    },
+    "queue_us": {
+      "mean": 14515.294861328124,
+      "p50": 14333.301500000001,
+      "p95": 15485.016
+    },
+    "queue_plus_service_us": {
+      "mean": 16324.041666015624,
+      "p50": 16126.132,
+      "p95": 17349.97
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_minorder",
+      "--dsp-workers",
+      "1",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "8",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_minorder_n1_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_minorder",
+    "workers": 1,
+    "rep": 2,
+    "interval_us": 2365.200822263956,
+    "resample_us": {
+      "mean": 305.302068359375,
+      "p50": 280.0385,
+      "p95": 406.207
+    },
+    "sic_us": {
+      "mean": 529.624322265625,
+      "p50": 508.3695,
+      "p95": 655.609
+    },
+    "sensing_us": {
+      "mean": 1147.8524609375,
+      "p50": 1112.9825,
+      "p95": 1327.722
+    },
+    "comm_us": {
+      "mean": 381.5319296875,
+      "p50": 360.7605,
+      "p95": 483.294
+    },
+    "total_us": {
+      "mean": 2364.31078125,
+      "p50": 2292.3905,
+      "p95": 2771.905
+    },
+    "worker_jobs": {
+      "0": 512
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_minorder.txt",
+      "101829",
+      "4",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_eq16",
+    "workers": 8,
+    "rep": 2,
+    "interval_us": 312.780728,
+    "startup_ms": 24.581894,
+    "resample_us": {
+      "mean": 347.742873046875,
+      "p50": 272.4655,
+      "p95": 562.121
+    },
+    "sic_us": {
+      "mean": 757.58685546875,
+      "p50": 674.0405,
+      "p95": 1092.22
+    },
+    "sensing_us": {
+      "mean": 1183.311328125,
+      "p50": 992.2729999999999,
+      "p95": 1902.273
+    },
+    "e2e_us": {
+      "mean": 2289.48173046875,
+      "p50": 1946.902,
+      "p95": 3449.944
+    },
+    "queue_us": {
+      "mean": 7729.8179453125,
+      "p50": 6412.0205,
+      "p95": 21136.462
+    },
+    "queue_plus_service_us": {
+      "mean": 10019.29967578125,
+      "p50": 8915.473,
+      "p95": 23596.486
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_eq16",
+      "--dsp-workers",
+      "8",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10,12,14,16,18",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "64",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_eq16_n8_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_eq16",
+    "workers": 8,
+    "rep": 2,
+    "interval_us": 377.3840468749404,
+    "resample_us": {
+      "mean": 338.94637109375,
+      "p50": 277.005,
+      "p95": 551.384
+    },
+    "sic_us": {
+      "mean": 727.0410078125,
+      "p50": 653.6110000000001,
+      "p95": 1004.232
+    },
+    "sensing_us": {
+      "mean": 1415.199025390625,
+      "p50": 1163.256,
+      "p95": 2091.546
+    },
+    "comm_us": {
+      "mean": 523.052099609375,
+      "p50": 461.813,
+      "p95": 714.617
+    },
+    "total_us": {
+      "mean": 3004.23850390625,
+      "p50": 2562.585,
+      "p95": 4296.462
+    },
+    "worker_jobs": {
+      "6": 67,
+      "4": 64,
+      "1": 60,
+      "7": 61,
+      "3": 68,
+      "5": 66,
+      "2": 56,
+      "0": 70
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_eq16.txt",
+      "101829",
+      "4,6,8,10,12,14,16,18",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_eq16",
+    "workers": 4,
+    "rep": 2,
+    "interval_us": 486.042728,
+    "startup_ms": 17.351547,
+    "resample_us": {
+      "mean": 272.744521484375,
+      "p50": 254.1905,
+      "p95": 454.595
+    },
+    "sic_us": {
+      "mean": 569.703517578125,
+      "p50": 535.4704999999999,
+      "p95": 736.844
+    },
+    "sensing_us": {
+      "mean": 1066.2197890625,
+      "p50": 967.1990000000001,
+      "p95": 1855.083
+    },
+    "e2e_us": {
+      "mean": 1909.26922265625,
+      "p50": 1768.7465000000002,
+      "p95": 3013.846
+    },
+    "queue_us": {
+      "mean": 10511.9654921875,
+      "p50": 11062.7505,
+      "p95": 16735.217
+    },
+    "queue_plus_service_us": {
+      "mean": 12421.23471484375,
+      "p50": 12941.491999999998,
+      "p95": 18688.296
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_eq16",
+      "--dsp-workers",
+      "4",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "32",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_eq16_n4_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_eq16",
+    "workers": 4,
+    "rep": 2,
+    "interval_us": 679.8141308575869,
+    "resample_us": {
+      "mean": 318.629333984375,
+      "p50": 259.6285,
+      "p95": 533.885
+    },
+    "sic_us": {
+      "mean": 622.8259765625,
+      "p50": 561.607,
+      "p95": 880.245
+    },
+    "sensing_us": {
+      "mean": 1330.254306640625,
+      "p50": 1148.931,
+      "p95": 2026.773
+    },
+    "comm_us": {
+      "mean": 438.544005859375,
+      "p50": 397.44849999999997,
+      "p95": 601.82
+    },
+    "total_us": {
+      "mean": 2710.253623046875,
+      "p50": 2381.2650000000003,
+      "p95": 3976.711
+    },
+    "worker_jobs": {
+      "1": 134,
+      "3": 124,
+      "2": 134,
+      "0": 120
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_eq16.txt",
+      "101829",
+      "4,6,8,10",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_eq16",
+    "workers": 2,
+    "rep": 2,
+    "interval_us": 947.351358,
+    "startup_ms": 10.908057,
+    "resample_us": {
+      "mean": 276.24995703125,
+      "p50": 253.879,
+      "p95": 394.931
+    },
+    "sic_us": {
+      "mean": 560.771916015625,
+      "p50": 534.74,
+      "p95": 735.416
+    },
+    "sensing_us": {
+      "mean": 1028.912087890625,
+      "p50": 966.3969999999999,
+      "p95": 1636.701
+    },
+    "e2e_us": {
+      "mean": 1866.6370898437501,
+      "p50": 1776.105,
+      "p95": 2588.865
+    },
+    "queue_us": {
+      "mean": 11150.150484375,
+      "p50": 13284.2965,
+      "p95": 17242.654
+    },
+    "queue_plus_service_us": {
+      "mean": 13016.78757421875,
+      "p50": 15202.356000000002,
+      "p95": 19114.527000000002
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_eq16",
+      "--dsp-workers",
+      "2",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "16",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_eq16_n2_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_eq16",
+    "workers": 2,
+    "rep": 2,
+    "interval_us": 1220.898755863309,
+    "resample_us": {
+      "mean": 276.426876953125,
+      "p50": 252.673,
+      "p95": 427.221
+    },
+    "sic_us": {
+      "mean": 556.469869140625,
+      "p50": 519.6475,
+      "p95": 754.463
+    },
+    "sensing_us": {
+      "mean": 1205.11278125,
+      "p50": 1125.9585,
+      "p95": 1785.141
+    },
+    "comm_us": {
+      "mean": 401.661912109375,
+      "p50": 372.65700000000004,
+      "p95": 545.671
+    },
+    "total_us": {
+      "mean": 2439.671439453125,
+      "p50": 2282.7484999999997,
+      "p95": 3362.13
+    },
+    "worker_jobs": {
+      "0": 252,
+      "1": 260
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_eq16.txt",
+      "101829",
+      "4,6",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_eq16",
+    "workers": 1,
+    "rep": 2,
+    "interval_us": 1742.28302,
+    "startup_ms": 9.68861,
+    "resample_us": {
+      "mean": 255.436302734375,
+      "p50": 240.20600000000002,
+      "p95": 324.71
+    },
+    "sic_us": {
+      "mean": 514.536203125,
+      "p50": 495.86,
+      "p95": 605.739
+    },
+    "sensing_us": {
+      "mean": 957.084650390625,
+      "p50": 939.821,
+      "p95": 1073.421
+    },
+    "e2e_us": {
+      "mean": 1727.712798828125,
+      "p50": 1691.5135,
+      "p95": 1929.373
+    },
+    "queue_us": {
+      "mean": 13877.6027578125,
+      "p50": 13794.367,
+      "p95": 14618.909
+    },
+    "queue_plus_service_us": {
+      "mean": 15605.315556640626,
+      "p50": 15525.3285,
+      "p95": 16470.38
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_eq16",
+      "--dsp-workers",
+      "1",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "8",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_eq16_n1_r2.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_eq16",
+    "workers": 1,
+    "rep": 2,
+    "interval_us": 2343.6708085909486,
+    "resample_us": {
+      "mean": 259.336435546875,
+      "p50": 241.665,
+      "p95": 302.122
+    },
+    "sic_us": {
+      "mean": 538.614669921875,
+      "p50": 505.861,
+      "p95": 626.447
+    },
+    "sensing_us": {
+      "mean": 1159.6106953125,
+      "p50": 1110.903,
+      "p95": 1299.822
+    },
+    "comm_us": {
+      "mean": 385.4258984375,
+      "p50": 358.38149999999996,
+      "p95": 474.096
+    },
+    "total_us": {
+      "mean": 2342.98769921875,
+      "p50": 2247.2695000000003,
+      "p95": 2957.837
+    },
+    "worker_jobs": {
+      "0": 512
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_eq16.txt",
+      "101829",
+      "4",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_minorder",
+    "workers": 1,
+    "rep": 3,
+    "interval_us": 2093.59001,
+    "startup_ms": 10.552891,
+    "resample_us": {
+      "mean": 547.304154296875,
+      "p50": 518.1804999999999,
+      "p95": 686.423
+    },
+    "sic_us": {
+      "mean": 535.98019140625,
+      "p50": 513.2384999999999,
+      "p95": 676.068
+    },
+    "sensing_us": {
+      "mean": 993.45392578125,
+      "p50": 952.953,
+      "p95": 1164.643
+    },
+    "e2e_us": {
+      "mean": 2077.517095703125,
+      "p50": 2010.135,
+      "p95": 2478.828
+    },
+    "queue_us": {
+      "mean": 16658.203150390626,
+      "p50": 16367.833999999999,
+      "p95": 19452.872
+    },
+    "queue_plus_service_us": {
+      "mean": 18735.72024609375,
+      "p50": 18484.229,
+      "p95": 21630.259
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_minorder",
+      "--dsp-workers",
+      "1",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "8",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_minorder_n1_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_minorder",
+    "workers": 1,
+    "rep": 3,
+    "interval_us": 2642.9902148395777,
+    "resample_us": {
+      "mean": 520.767287109375,
+      "p50": 495.1375,
+      "p95": 628.907
+    },
+    "sic_us": {
+      "mean": 562.91105859375,
+      "p50": 516.0029999999999,
+      "p95": 700.902
+    },
+    "sensing_us": {
+      "mean": 1173.62328125,
+      "p50": 1121.366,
+      "p95": 1376.079
+    },
+    "comm_us": {
+      "mean": 384.795482421875,
+      "p50": 363.4135,
+      "p95": 490.036
+    },
+    "total_us": {
+      "mean": 2642.097109375,
+      "p50": 2543.8775,
+      "p95": 3208.358
+    },
+    "worker_jobs": {
+      "0": 512
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_minorder.txt",
+      "101829",
+      "4",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_minorder",
+    "workers": 2,
+    "rep": 3,
+    "interval_us": 1131.58556,
+    "startup_ms": 11.23115,
+    "resample_us": {
+      "mean": 583.77300390625,
+      "p50": 504.1405,
+      "p95": 944.5
+    },
+    "sic_us": {
+      "mean": 570.2102421875,
+      "p50": 521.8505,
+      "p95": 770.007
+    },
+    "sensing_us": {
+      "mean": 1075.7932265625,
+      "p50": 964.8985,
+      "p95": 1802.809
+    },
+    "e2e_us": {
+      "mean": 2230.5002421875,
+      "p50": 2004.9535,
+      "p95": 3441.462
+    },
+    "queue_us": {
+      "mean": 15546.22255859375,
+      "p50": 15677.919,
+      "p95": 23147.881
+    },
+    "queue_plus_service_us": {
+      "mean": 17776.72280078125,
+      "p50": 17732.127,
+      "p95": 25443.686999999998
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_minorder",
+      "--dsp-workers",
+      "2",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "16",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_minorder_n2_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_minorder",
+    "workers": 2,
+    "rep": 3,
+    "interval_us": 1358.0642304718494,
+    "resample_us": {
+      "mean": 539.17094921875,
+      "p50": 503.183,
+      "p95": 765.498
+    },
+    "sic_us": {
+      "mean": 572.6130390625,
+      "p50": 544.4655,
+      "p95": 741.848
+    },
+    "sensing_us": {
+      "mean": 1195.5456328125001,
+      "p50": 1135.3405,
+      "p95": 1635.963
+    },
+    "comm_us": {
+      "mean": 405.91467578125,
+      "p50": 384.40250000000003,
+      "p95": 508.298
+    },
+    "total_us": {
+      "mean": 2713.244296875,
+      "p50": 2601.615,
+      "p95": 3476.205
+    },
+    "worker_jobs": {
+      "1": 254,
+      "0": 258
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_minorder.txt",
+      "101829",
+      "4,6",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_minorder",
+    "workers": 4,
+    "rep": 3,
+    "interval_us": 543.677274,
+    "startup_ms": 16.648521,
+    "resample_us": {
+      "mean": 550.87993359375,
+      "p50": 504.052,
+      "p95": 914.786
+    },
+    "sic_us": {
+      "mean": 571.760697265625,
+      "p50": 537.0725,
+      "p95": 728.345
+    },
+    "sensing_us": {
+      "mean": 1027.833111328125,
+      "p50": 966.11,
+      "p95": 1427.145
+    },
+    "e2e_us": {
+      "mean": 2151.087998046875,
+      "p50": 2022.21,
+      "p95": 3056.265
+    },
+    "queue_us": {
+      "mean": 7889.69047265625,
+      "p50": 6469.2545,
+      "p95": 17610.438
+    },
+    "queue_plus_service_us": {
+      "mean": 10040.778470703124,
+      "p50": 8787.442,
+      "p95": 19899.201
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_minorder",
+      "--dsp-workers",
+      "4",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "32",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_minorder_n4_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_minorder",
+    "workers": 4,
+    "rep": 3,
+    "interval_us": 735.838386721909,
+    "resample_us": {
+      "mean": 606.835455078125,
+      "p50": 512.2705000000001,
+      "p95": 1006.103
+    },
+    "sic_us": {
+      "mean": 619.33635546875,
+      "p50": 567.989,
+      "p95": 862.217
+    },
+    "sensing_us": {
+      "mean": 1271.59121484375,
+      "p50": 1144.758,
+      "p95": 1993.795
+    },
+    "comm_us": {
+      "mean": 432.86891796875,
+      "p50": 400.9635,
+      "p95": 592.777
+    },
+    "total_us": {
+      "mean": 2930.631943359375,
+      "p50": 2651.0935,
+      "p95": 4450.425
+    },
+    "worker_jobs": {
+      "2": 134,
+      "3": 127,
+      "1": 125,
+      "0": 126
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_minorder.txt",
+      "101829",
+      "4,6,8,10",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_minorder",
+    "workers": 8,
+    "rep": 3,
+    "interval_us": 358.970217,
+    "startup_ms": 27.442871,
+    "resample_us": {
+      "mean": 688.30939453125,
+      "p50": 536.0795,
+      "p95": 1048.464
+    },
+    "sic_us": {
+      "mean": 782.293140625,
+      "p50": 682.2235000000001,
+      "p95": 1066.271
+    },
+    "sensing_us": {
+      "mean": 1283.876517578125,
+      "p50": 996.5989999999999,
+      "p95": 1967.815
+    },
+    "e2e_us": {
+      "mean": 2755.351578125,
+      "p50": 2220.042,
+      "p95": 4035.75
+    },
+    "queue_us": {
+      "mean": 10383.121544921874,
+      "p50": 10439.308,
+      "p95": 23344.158
+    },
+    "queue_plus_service_us": {
+      "mean": 13138.473123046875,
+      "p50": 13302.874,
+      "p95": 26334.654
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_minorder",
+      "--dsp-workers",
+      "8",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10,12,14,16,18",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "64",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_minorder_n8_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_minorder",
+    "workers": 8,
+    "rep": 3,
+    "interval_us": 433.0612539052963,
+    "resample_us": {
+      "mean": 674.865787109375,
+      "p50": 539.5225,
+      "p95": 1053.778
+    },
+    "sic_us": {
+      "mean": 781.536931640625,
+      "p50": 687.9649999999999,
+      "p95": 1094.645
+    },
+    "sensing_us": {
+      "mean": 1435.61651953125,
+      "p50": 1173.2510000000002,
+      "p95": 2082.952
+    },
+    "comm_us": {
+      "mean": 541.529859375,
+      "p50": 478.047,
+      "p95": 749.218
+    },
+    "total_us": {
+      "mean": 3433.54909765625,
+      "p50": 2912.774,
+      "p95": 4823.325
+    },
+    "worker_jobs": {
+      "3": 66,
+      "0": 66,
+      "2": 61,
+      "4": 65,
+      "1": 62,
+      "6": 62,
+      "5": 65,
+      "7": 65
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_minorder.txt",
+      "101829",
+      "4,6,8,10,12,14,16,18",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_eq32",
+    "workers": 1,
+    "rep": 3,
+    "interval_us": 1936.70891,
+    "startup_ms": 9.940916,
+    "resample_us": {
+      "mean": 427.69873828125,
+      "p50": 399.237,
+      "p95": 532.121
+    },
+    "sic_us": {
+      "mean": 521.738498046875,
+      "p50": 507.969,
+      "p95": 630.54
+    },
+    "sensing_us": {
+      "mean": 970.464609375,
+      "p50": 947.0505,
+      "p95": 1107.713
+    },
+    "e2e_us": {
+      "mean": 1920.540205078125,
+      "p50": 1891.6129999999998,
+      "p95": 2170.118
+    },
+    "queue_us": {
+      "mean": 15405.68847265625,
+      "p50": 15358.542000000001,
+      "p95": 16772.834
+    },
+    "queue_plus_service_us": {
+      "mean": 17326.228677734376,
+      "p50": 17266.452,
+      "p95": 18860.305
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_eq32",
+      "--dsp-workers",
+      "1",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "8",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_eq32_n1_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_eq32",
+    "workers": 1,
+    "rep": 3,
+    "interval_us": 2476.3822675794363,
+    "resample_us": {
+      "mean": 399.688203125,
+      "p50": 380.798,
+      "p95": 469.032
+    },
+    "sic_us": {
+      "mean": 537.352140625,
+      "p50": 511.163,
+      "p95": 659.676
+    },
+    "sensing_us": {
+      "mean": 1156.55805859375,
+      "p50": 1123.1105,
+      "p95": 1319.163
+    },
+    "comm_us": {
+      "mean": 381.911904296875,
+      "p50": 360.09000000000003,
+      "p95": 479.052
+    },
+    "total_us": {
+      "mean": 2475.510306640625,
+      "p50": 2408.9555,
+      "p95": 2853.311
+    },
+    "worker_jobs": {
+      "0": 512
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_eq32.txt",
+      "101829",
+      "4",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_eq32",
+    "workers": 2,
+    "rep": 3,
+    "interval_us": 1015.37667,
+    "startup_ms": 11.392884,
+    "resample_us": {
+      "mean": 437.3413515625,
+      "p50": 383.595,
+      "p95": 704.883
+    },
+    "sic_us": {
+      "mean": 537.8017265625,
+      "p50": 500.78,
+      "p95": 705.928
+    },
+    "sensing_us": {
+      "mean": 1047.18773828125,
+      "p50": 941.4315,
+      "p95": 1795.865
+    },
+    "e2e_us": {
+      "mean": 2022.8814453125,
+      "p50": 1838.6185,
+      "p95": 3192.699
+    },
+    "queue_us": {
+      "mean": 13840.174740234375,
+      "p50": 14512.3875,
+      "p95": 20437.46
+    },
+    "queue_plus_service_us": {
+      "mean": 15863.056185546875,
+      "p50": 16383.9925,
+      "p95": 22935.767
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_eq32",
+      "--dsp-workers",
+      "2",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "16",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_eq32_n2_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_eq32",
+    "workers": 2,
+    "rep": 3,
+    "interval_us": 1297.7192714884877,
+    "resample_us": {
+      "mean": 415.85348046875,
+      "p50": 382.9945,
+      "p95": 605.353
+    },
+    "sic_us": {
+      "mean": 576.391236328125,
+      "p50": 538.5015,
+      "p95": 803.098
+    },
+    "sensing_us": {
+      "mean": 1194.21271484375,
+      "p50": 1138.2675,
+      "p95": 1582.383
+    },
+    "comm_us": {
+      "mean": 407.770765625,
+      "p50": 380.659,
+      "p95": 550.078
+    },
+    "total_us": {
+      "mean": 2594.228197265625,
+      "p50": 2463.1245,
+      "p95": 3398.387
+    },
+    "worker_jobs": {
+      "1": 256,
+      "0": 256
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_eq32.txt",
+      "101829",
+      "4,6",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_eq32",
+    "workers": 4,
+    "rep": 3,
+    "interval_us": 551.102325,
+    "startup_ms": 18.245062,
+    "resample_us": {
+      "mean": 442.915787109375,
+      "p50": 394.2125,
+      "p95": 741.155
+    },
+    "sic_us": {
+      "mean": 585.86987109375,
+      "p50": 543.201,
+      "p95": 804.366
+    },
+    "sensing_us": {
+      "mean": 1065.52958203125,
+      "p50": 966.117,
+      "p95": 1823.34
+    },
+    "e2e_us": {
+      "mean": 2094.9238515625,
+      "p50": 1913.494,
+      "p95": 3352.426
+    },
+    "queue_us": {
+      "mean": 7793.3674296875,
+      "p50": 4166.613,
+      "p95": 19754.775
+    },
+    "queue_plus_service_us": {
+      "mean": 9888.29128125,
+      "p50": 6243.9665,
+      "p95": 22515.981
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_eq32",
+      "--dsp-workers",
+      "4",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "32",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_eq32_n4_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_eq32",
+    "workers": 4,
+    "rep": 3,
+    "interval_us": 658.611046873033,
+    "resample_us": {
+      "mean": 418.348271484375,
+      "p50": 383.3815,
+      "p95": 677.667
+    },
+    "sic_us": {
+      "mean": 594.789166015625,
+      "p50": 548.826,
+      "p95": 766.949
+    },
+    "sensing_us": {
+      "mean": 1212.074064453125,
+      "p50": 1137.9895000000001,
+      "p95": 1786.757
+    },
+    "comm_us": {
+      "mean": 403.8788046875,
+      "p50": 385.01300000000003,
+      "p95": 529.718
+    },
+    "total_us": {
+      "mean": 2629.090306640625,
+      "p50": 2476.737,
+      "p95": 3589.589
+    },
+    "worker_jobs": {
+      "1": 129,
+      "3": 130,
+      "0": 131,
+      "2": 122
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_eq32.txt",
+      "101829",
+      "4,6,8,10",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "quality_eq32",
+    "workers": 8,
+    "rep": 3,
+    "interval_us": 343.671268,
+    "startup_ms": 30.141319,
+    "resample_us": {
+      "mean": 543.102271484375,
+      "p50": 417.7635,
+      "p95": 794.727
+    },
+    "sic_us": {
+      "mean": 737.23044140625,
+      "p50": 647.6285,
+      "p95": 988.902
+    },
+    "sensing_us": {
+      "mean": 1314.18829296875,
+      "p50": 991.659,
+      "p95": 1925.789
+    },
+    "e2e_us": {
+      "mean": 2595.287951171875,
+      "p50": 2076.297,
+      "p95": 3696.696
+    },
+    "queue_us": {
+      "mean": 9401.320013671875,
+      "p50": 8383.951000000001,
+      "p95": 23336.318
+    },
+    "queue_plus_service_us": {
+      "mean": 11996.60796484375,
+      "p50": 10960.8895,
+      "p95": 26117.909
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "quality_eq32",
+      "--dsp-workers",
+      "8",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10,12,14,16,18",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "64",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_quality_eq32_n8_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "quality_eq32",
+    "workers": 8,
+    "rep": 3,
+    "interval_us": 422.91362304985523,
+    "resample_us": {
+      "mean": 561.52820703125,
+      "p50": 416.204,
+      "p95": 838.235
+    },
+    "sic_us": {
+      "mean": 772.798775390625,
+      "p50": 671.5485,
+      "p95": 1046.937
+    },
+    "sensing_us": {
+      "mean": 1487.94739453125,
+      "p50": 1175.288,
+      "p95": 2078.435
+    },
+    "comm_us": {
+      "mean": 542.68094140625,
+      "p50": 477.9415,
+      "p95": 735.984
+    },
+    "total_us": {
+      "mean": 3364.955318359375,
+      "p50": 2759.1629999999996,
+      "p95": 4565.627
+    },
+    "worker_jobs": {
+      "7": 75,
+      "3": 69,
+      "1": 65,
+      "5": 68,
+      "2": 57,
+      "6": 54,
+      "0": 64,
+      "4": 60
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_quality_eq32.txt",
+      "101829",
+      "4,6,8,10,12,14,16,18",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_minorder",
+    "workers": 1,
+    "rep": 3,
+    "interval_us": 1911.83183,
+    "startup_ms": 10.082584,
+    "resample_us": {
+      "mean": 332.992638671875,
+      "p50": 302.476,
+      "p95": 421.927
+    },
+    "sic_us": {
+      "mean": 538.818404296875,
+      "p50": 508.1175,
+      "p95": 701.11
+    },
+    "sensing_us": {
+      "mean": 1018.75656640625,
+      "p50": 943.6645000000001,
+      "p95": 1272.433
+    },
+    "e2e_us": {
+      "mean": 1895.3938515625,
+      "p50": 1781.6425,
+      "p95": 2479.031
+    },
+    "queue_us": {
+      "mean": 15199.11327734375,
+      "p50": 14765.2575,
+      "p95": 18044.913
+    },
+    "queue_plus_service_us": {
+      "mean": 17094.50712890625,
+      "p50": 16631.879,
+      "p95": 20113.576
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_minorder",
+      "--dsp-workers",
+      "1",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "8",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_minorder_n1_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_minorder",
+    "workers": 1,
+    "rep": 3,
+    "interval_us": 2392.372566409409,
+    "resample_us": {
+      "mean": 298.448171875,
+      "p50": 275.442,
+      "p95": 348.077
+    },
+    "sic_us": {
+      "mean": 554.26274609375,
+      "p50": 494.1225,
+      "p95": 685.712
+    },
+    "sensing_us": {
+      "mean": 1167.91128515625,
+      "p50": 1107.9389999999999,
+      "p95": 1323.205
+    },
+    "comm_us": {
+      "mean": 371.091923828125,
+      "p50": 351.4175,
+      "p95": 445.453
+    },
+    "total_us": {
+      "mean": 2391.714126953125,
+      "p50": 2249.4674999999997,
+      "p95": 3106.43
+    },
+    "worker_jobs": {
+      "0": 512
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_minorder.txt",
+      "101829",
+      "4",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_minorder",
+    "workers": 2,
+    "rep": 3,
+    "interval_us": 957.980978,
+    "startup_ms": 10.741268,
+    "resample_us": {
+      "mean": 334.71505078125,
+      "p50": 309.41200000000003,
+      "p95": 479.138
+    },
+    "sic_us": {
+      "mean": 546.8545234375,
+      "p50": 520.4580000000001,
+      "p95": 689.629
+    },
+    "sensing_us": {
+      "mean": 1013.2733125,
+      "p50": 961.8644999999999,
+      "p95": 1378.137
+    },
+    "e2e_us": {
+      "mean": 1895.44581640625,
+      "p50": 1810.1815000000001,
+      "p95": 2383.888
+    },
+    "queue_us": {
+      "mean": 11168.44930859375,
+      "p50": 13560.015500000001,
+      "p95": 17248.684
+    },
+    "queue_plus_service_us": {
+      "mean": 13063.895125000001,
+      "p50": 15576.375,
+      "p95": 19193.983999999997
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_minorder",
+      "--dsp-workers",
+      "2",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "16",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_minorder_n2_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_minorder",
+    "workers": 2,
+    "rep": 3,
+    "interval_us": 1217.992226563394,
+    "resample_us": {
+      "mean": 311.497646484375,
+      "p50": 283.738,
+      "p95": 406.067
+    },
+    "sic_us": {
+      "mean": 556.418466796875,
+      "p50": 528.809,
+      "p95": 718.022
+    },
+    "sensing_us": {
+      "mean": 1170.6451328125,
+      "p50": 1127.752,
+      "p95": 1389.904
+    },
+    "comm_us": {
+      "mean": 395.96391796875,
+      "p50": 375.721,
+      "p95": 537.112
+    },
+    "total_us": {
+      "mean": 2434.5251640625,
+      "p50": 2347.7709999999997,
+      "p95": 3099.641
+    },
+    "worker_jobs": {
+      "1": 254,
+      "0": 258
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_minorder.txt",
+      "101829",
+      "4,6",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_minorder",
+    "workers": 4,
+    "rep": 3,
+    "interval_us": 516.825865,
+    "startup_ms": 24.169121,
+    "resample_us": {
+      "mean": 344.993212890625,
+      "p50": 318.853,
+      "p95": 487.871
+    },
+    "sic_us": {
+      "mean": 601.463673828125,
+      "p50": 580.556,
+      "p95": 766.2
+    },
+    "sensing_us": {
+      "mean": 1043.525103515625,
+      "p50": 971.049,
+      "p95": 1767.972
+    },
+    "e2e_us": {
+      "mean": 1990.770126953125,
+      "p50": 1881.778,
+      "p95": 2975.515
+    },
+    "queue_us": {
+      "mean": 8406.1455859375,
+      "p50": 8925.133,
+      "p95": 16661.836
+    },
+    "queue_plus_service_us": {
+      "mean": 10396.915712890624,
+      "p50": 10821.0995,
+      "p95": 19416.754
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_minorder",
+      "--dsp-workers",
+      "4",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "32",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_minorder_n4_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_minorder",
+    "workers": 4,
+    "rep": 3,
+    "interval_us": 664.5333710983396,
+    "resample_us": {
+      "mean": 335.357978515625,
+      "p50": 289.76099999999997,
+      "p95": 540.203
+    },
+    "sic_us": {
+      "mean": 600.25496875,
+      "p50": 550.1865,
+      "p95": 835.391
+    },
+    "sensing_us": {
+      "mean": 1281.4007265625,
+      "p50": 1141.702,
+      "p95": 2000.448
+    },
+    "comm_us": {
+      "mean": 433.327216796875,
+      "p50": 391.7315,
+      "p95": 588.567
+    },
+    "total_us": {
+      "mean": 2650.340890625,
+      "p50": 2398.431,
+      "p95": 3953.047
+    },
+    "worker_jobs": {
+      "0": 127,
+      "2": 133,
+      "1": 125,
+      "3": 127
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_minorder.txt",
+      "101829",
+      "4,6,8,10",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_minorder",
+    "workers": 8,
+    "rep": 3,
+    "interval_us": 348.192436,
+    "startup_ms": 26.781843,
+    "resample_us": {
+      "mean": 433.5056875,
+      "p50": 343.8455,
+      "p95": 615.88
+    },
+    "sic_us": {
+      "mean": 808.32487109375,
+      "p50": 684.594,
+      "p95": 1088.384
+    },
+    "sensing_us": {
+      "mean": 1357.738119140625,
+      "p50": 1009.8645,
+      "p95": 1953.515
+    },
+    "e2e_us": {
+      "mean": 2600.674892578125,
+      "p50": 2056.038,
+      "p95": 3574.643
+    },
+    "queue_us": {
+      "mean": 8714.993,
+      "p50": 7272.6755,
+      "p95": 23301.49
+    },
+    "queue_plus_service_us": {
+      "mean": 11315.667892578125,
+      "p50": 9701.8375,
+      "p95": 26093.688000000002
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_minorder",
+      "--dsp-workers",
+      "8",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10,12,14,16,18",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "64",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_minorder_n8_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_minorder",
+    "workers": 8,
+    "rep": 3,
+    "interval_us": 386.0449335947633,
+    "resample_us": {
+      "mean": 384.545580078125,
+      "p50": 309.4655,
+      "p95": 617.521
+    },
+    "sic_us": {
+      "mean": 741.12712109375,
+      "p50": 654.105,
+      "p95": 1012.529
+    },
+    "sensing_us": {
+      "mean": 1413.832556640625,
+      "p50": 1162.807,
+      "p95": 2099.337
+    },
+    "comm_us": {
+      "mean": 517.6774375,
+      "p50": 455.1515,
+      "p95": 697.586
+    },
+    "total_us": {
+      "mean": 3057.1826953125,
+      "p50": 2589.917,
+      "p95": 4332.164
+    },
+    "worker_jobs": {
+      "2": 70,
+      "1": 60,
+      "5": 60,
+      "3": 66,
+      "4": 61,
+      "6": 70,
+      "7": 68,
+      "0": 57
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_minorder.txt",
+      "101829",
+      "4,6,8,10,12,14,16,18",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_eq16",
+    "workers": 1,
+    "rep": 3,
+    "interval_us": 1753.34868,
+    "startup_ms": 9.724611,
+    "resample_us": {
+      "mean": 255.146162109375,
+      "p50": 242.4065,
+      "p95": 339.979
+    },
+    "sic_us": {
+      "mean": 519.962138671875,
+      "p50": 501.4475,
+      "p95": 639.145
+    },
+    "sensing_us": {
+      "mean": 961.99526953125,
+      "p50": 941.592,
+      "p95": 1046.633
+    },
+    "e2e_us": {
+      "mean": 1737.873423828125,
+      "p50": 1698.8135,
+      "p95": 2016.453
+    },
+    "queue_us": {
+      "mean": 13948.57237109375,
+      "p50": 13846.658500000001,
+      "p95": 15046.759
+    },
+    "queue_plus_service_us": {
+      "mean": 15686.445794921876,
+      "p50": 15594.5625,
+      "p95": 16830.801
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_eq16",
+      "--dsp-workers",
+      "1",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "8",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_eq16_n1_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_eq16",
+    "workers": 1,
+    "rep": 3,
+    "interval_us": 2408.197365231812,
+    "resample_us": {
+      "mean": 259.785548828125,
+      "p50": 242.8595,
+      "p95": 359.814
+    },
+    "sic_us": {
+      "mean": 554.688107421875,
+      "p50": 508.534,
+      "p95": 734.508
+    },
+    "sensing_us": {
+      "mean": 1188.6484609375,
+      "p50": 1113.426,
+      "p95": 1586.674
+    },
+    "comm_us": {
+      "mean": 404.25666015625,
+      "p50": 361.8525,
+      "p95": 548.284
+    },
+    "total_us": {
+      "mean": 2407.37877734375,
+      "p50": 2268.4015,
+      "p95": 3363.173
+    },
+    "worker_jobs": {
+      "0": 512
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_eq16.txt",
+      "101829",
+      "4",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_eq16",
+    "workers": 2,
+    "rep": 3,
+    "interval_us": 894.815483,
+    "startup_ms": 11.165889,
+    "resample_us": {
+      "mean": 261.488501953125,
+      "p50": 251.552,
+      "p95": 331.102
+    },
+    "sic_us": {
+      "mean": 529.62660546875,
+      "p50": 512.998,
+      "p95": 618.588
+    },
+    "sensing_us": {
+      "mean": 984.32447265625,
+      "p50": 956.6165,
+      "p95": 1092.5
+    },
+    "e2e_us": {
+      "mean": 1776.030548828125,
+      "p50": 1727.6585,
+      "p95": 2006.708
+    },
+    "queue_us": {
+      "mean": 12315.536099609375,
+      "p50": 12499.243,
+      "p95": 15142.513
+    },
+    "queue_plus_service_us": {
+      "mean": 14091.5666484375,
+      "p50": 14286.0065,
+      "p95": 16911.052
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_eq16",
+      "--dsp-workers",
+      "2",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "16",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_eq16_n2_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_eq16",
+    "workers": 2,
+    "rep": 3,
+    "interval_us": 1247.772912107408,
+    "resample_us": {
+      "mean": 284.741240234375,
+      "p50": 262.303,
+      "p95": 428.209
+    },
+    "sic_us": {
+      "mean": 580.9530390625,
+      "p50": 554.2394999999999,
+      "p95": 798.448
+    },
+    "sensing_us": {
+      "mean": 1205.991607421875,
+      "p50": 1135.0715,
+      "p95": 1799.331
+    },
+    "comm_us": {
+      "mean": 419.658208984375,
+      "p50": 393.322,
+      "p95": 548.497
+    },
+    "total_us": {
+      "mean": 2491.344095703125,
+      "p50": 2369.245,
+      "p95": 3543.978
+    },
+    "worker_jobs": {
+      "1": 258,
+      "0": 254
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_eq16.txt",
+      "101829",
+      "4,6",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_eq16",
+    "workers": 4,
+    "rep": 3,
+    "interval_us": 553.775423,
+    "startup_ms": 17.168992,
+    "resample_us": {
+      "mean": 297.458279296875,
+      "p50": 252.2635,
+      "p95": 506.756
+    },
+    "sic_us": {
+      "mean": 591.505654296875,
+      "p50": 541.454,
+      "p95": 812.467
+    },
+    "sensing_us": {
+      "mean": 1135.284251953125,
+      "p50": 967.5105,
+      "p95": 1846.167
+    },
+    "e2e_us": {
+      "mean": 2024.872419921875,
+      "p50": 1773.827,
+      "p95": 3154.479
+    },
+    "queue_us": {
+      "mean": 7079.98268359375,
+      "p50": 3197.5305,
+      "p95": 20570.86
+    },
+    "queue_plus_service_us": {
+      "mean": 9104.855103515625,
+      "p50": 5271.06,
+      "p95": 22605.971999999998
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_eq16",
+      "--dsp-workers",
+      "4",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "32",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_eq16_n4_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_eq16",
+    "workers": 4,
+    "rep": 3,
+    "interval_us": 674.3290488272905,
+    "resample_us": {
+      "mean": 304.298625,
+      "p50": 263.0325,
+      "p95": 519.061
+    },
+    "sic_us": {
+      "mean": 651.667900390625,
+      "p50": 576.9515,
+      "p95": 946.193
+    },
+    "sensing_us": {
+      "mean": 1268.449482421875,
+      "p50": 1148.15,
+      "p95": 1962.461
+    },
+    "comm_us": {
+      "mean": 466.053306640625,
+      "p50": 412.06550000000004,
+      "p95": 680.422
+    },
+    "total_us": {
+      "mean": 2690.469314453125,
+      "p50": 2411.0635,
+      "p95": 4116.334
+    },
+    "worker_jobs": {
+      "3": 129,
+      "0": 127,
+      "1": 130,
+      "2": 126
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_eq16.txt",
+      "101829",
+      "4,6,8,10",
+      "32",
+      "512",
+      "16"
+    ]
+  },
+  {
+    "kind": "pipeline",
+    "profile": "realtime_eq16",
+    "workers": 8,
+    "rep": 3,
+    "interval_us": 319.217812,
+    "startup_ms": 30.604482,
+    "resample_us": {
+      "mean": 349.619203125,
+      "p50": 274.52700000000004,
+      "p95": 538.53
+    },
+    "sic_us": {
+      "mean": 739.627357421875,
+      "p50": 667.9045,
+      "p95": 1042.524
+    },
+    "sensing_us": {
+      "mean": 1229.718203125,
+      "p50": 997.635,
+      "p95": 1937.768
+    },
+    "e2e_us": {
+      "mean": 2319.784408203125,
+      "p50": 1938.298,
+      "p95": 3416.435
+    },
+    "queue_us": {
+      "mean": 7509.02398046875,
+      "p50": 6355.495,
+      "p95": 20726.932
+    },
+    "queue_plus_service_us": {
+      "mean": 9828.808388671876,
+      "p50": 8726.1545,
+      "p95": 23465.381999999998
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_sc16_pipeline_steady",
+      "--file",
+      "/tmp/uwb-chain-workers-u3qhsvjb/mixture.sc16",
+      "--native-rate",
+      "737280000",
+      "--work-rate",
+      "998400000",
+      "--capture",
+      "101029",
+      "--pre-guard",
+      "400",
+      "--post-guard",
+      "400",
+      "--period",
+      "101829",
+      "--t0",
+      "400",
+      "--consumer",
+      "both",
+      "--sic-policy",
+      "preamble",
+      "--sic-backend",
+      "ipatov",
+      "--sic-comm-code",
+      "10",
+      "--sic-sync-template",
+      "/tmp/uwb-chain-workers-u3qhsvjb/sync_10.bin",
+      "--resampler-profile",
+      "realtime_eq16",
+      "--dsp-workers",
+      "8",
+      "--cpu-rx",
+      "2",
+      "--cpu-dsp",
+      "4,6,8,10,12,14,16,18",
+      "--pool-size",
+      "16",
+      "--flow-in-flight",
+      "64",
+      "--warmup-windows",
+      "128",
+      "--measure-windows",
+      "512",
+      "--json",
+      "docs/performance/data_chain_workers_20261112/pipeline_realtime_eq16_n8_r3.json"
+    ]
+  },
+  {
+    "kind": "full_dsp",
+    "profile": "realtime_eq16",
+    "workers": 8,
+    "rep": 3,
+    "interval_us": 375.8263613283634,
+    "resample_us": {
+      "mean": 341.03367578125,
+      "p50": 273.8535,
+      "p95": 552.731
+    },
+    "sic_us": {
+      "mean": 725.42833984375,
+      "p50": 649.9984999999999,
+      "p95": 995.432
+    },
+    "sensing_us": {
+      "mean": 1417.2115234375,
+      "p50": 1163.262,
+      "p95": 2082.269
+    },
+    "comm_us": {
+      "mean": 501.076103515625,
+      "p50": 451.451,
+      "p95": 680.65
+    },
+    "total_us": {
+      "mean": 2984.749642578125,
+      "p50": 2556.944,
+      "p95": 4250.645
+    },
+    "worker_jobs": {
+      "1": 60,
+      "2": 64,
+      "5": 65,
+      "7": 60,
+      "4": 70,
+      "3": 62,
+      "6": 68,
+      "0": 63
+    },
+    "command": [
+      "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "/tmp/uwb-chain-workers-u3qhsvjb",
+      "testdata/resampler_65_48/taps_realtime_eq16.txt",
+      "101829",
+      "4,6,8,10,12,14,16,18",
+      "32",
+      "512",
+      "16"
+    ]
+  }
+]

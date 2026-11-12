@@ -1,0 +1,19 @@
+{
+  "compared_runs": 48,
+  "windows_per_run": 640,
+  "fields": [
+    "window_id",
+    "state",
+    "native_start_abs",
+    "native_sample_count",
+    "sic_executed",
+    "sic_committed",
+    "actual_suppression_db",
+    "sic_status",
+    "radar_executed",
+    "radar_sfd_found",
+    "radar_peak_metric",
+    "radar_detected_start"
+  ],
+  "differences": []
+}

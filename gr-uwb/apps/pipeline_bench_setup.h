@@ -37,7 +37,7 @@ inline void derive_sic_geometry(PipelineConfig& cfg, long long sic_roi_margin)
 
     cfg.sic_cfg.sample_rate = cfg.work_rate;
     cfg.sic_cfg.samples_per_symbol = 1016;
-    cfg.sic_cfg.sync_reps = 64;
+    // Preserve the caller's configured preamble length (default remains 64).
     cfg.sic_cfg.max_window_samples = work_cap;
     cfg.sic_cfg.max_packet_samples = work_cap;
 

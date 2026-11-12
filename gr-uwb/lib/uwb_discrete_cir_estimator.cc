@@ -645,13 +645,13 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
     scratch.factor_cache_next = 0;
 
     // Safe upper bound for the remodulated packet.  The frozen experiment
-    // profile is 64 SYNC / 8 SFD / 127 B / legacy pulse; +64 covers shaping
+    // profile uses configured SYNC / 8 SFD / 127 B / legacy pulse; +64 covers shaping
     // and the modulator's convention.  A public capacity never exceeds the
     // prepared window.
     const mod::PulseSpec default_pulse{};
     size_t max_packet = cfg.max_packet_samples;
     if (max_packet == 0) {
-        max_packet = mod::packet_samples_998p4(64, 8, 127, false,
+        max_packet = mod::packet_samples_998p4(cfg.sync_reps, 8, 127, false,
                                                &default_pulse) +
                      64;
     }
@@ -668,7 +668,8 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
         return fail("sparse_pulse_requires_ipatov");
     if (cfg.ipatov_correlation) {
         if (sps != demod::kQm35SamplesPerSymbol || cfg.fit_reps < 3 ||
-            cfg.sample_rate != radar_meta::kWorkRateHz || cfg.sync_reps != 64)
+            cfg.sample_rate != radar_meta::kWorkRateHz ||
+            (cfg.sync_reps != 64 && cfg.sync_reps != 256))
             return fail("unsupported Ipatov geometry");
         if (!radar_meta::code_index_supported(cfg.comm_code))
             return fail("unsupported Ipatov code");

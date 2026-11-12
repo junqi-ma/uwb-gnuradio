@@ -368,6 +368,8 @@ void print_help(const char* prog)
         << "  --period <n>               schedule period in native samples (default = capacity)\n"
         << "  --t0 <samples>             schedule t0 (default 0)\n"
         << "  --consumer <sic|sensing|both>  (default sic)\n"
+        << "  --target-sync-reps <64|256> target preamble (default 64); CIR uses reps-10\n"
+        << "  --sic-sync-reps <64|256>    interference preamble (default 64)\n"
         << "  --resampler-profile <name> (default realtime_minorder)\n"
         << "  --resampler-experiment <none|fixed_phase|convert_cache|both>\n"
         << "  --iq-dump-dir <dir>        diagnostic post-resample IQ dump directory\n"
@@ -444,6 +446,15 @@ int main(int argc, char* argv[])
             cfg.schedule_t0 = std::stod(need(i));
         } else if (a == "--consumer") {
             consumer = need(i);
+        } else if (a == "--target-sync-reps") {
+            const size_t reps=std::stoull(need(i));
+            if(reps!=64 && reps!=256) { std::cerr<<"Error: target SYNC must be 64 or 256\n";return 1; }
+            cfg.radar_cfg.sync_repetitions=reps;
+            cfg.radar_cfg.cir_repetitions=reps-cfg.radar_cfg.cir_skip_initial;
+        } else if (a == "--sic-sync-reps") {
+            const size_t reps=std::stoull(need(i));
+            if(reps!=64 && reps!=256) { std::cerr<<"Error: SIC SYNC must be 64 or 256\n";return 1; }
+            cfg.sic_cfg.sync_reps=reps;
         } else if (a == "--resampler-profile") {
             cfg.resampler_profile = need(i);
         } else if (a == "--resampler-experiment") {

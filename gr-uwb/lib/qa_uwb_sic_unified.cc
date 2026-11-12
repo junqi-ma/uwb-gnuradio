@@ -38,15 +38,15 @@ struct TestPacket {
     std::vector<cf> sync;
     std::vector<uint8_t> psdu;
 
-    explicit TestPacket(size_t code = 10, size_t psdu_len = 32)
+    explicit TestPacket(size_t code = 10, size_t psdu_len = 32, size_t sync_reps = 64)
     {
         profile.code_index = code;
-        profile.sync_repetitions = 64;
+        profile.sync_repetitions = sync_reps;
         profile.sfd_mode = "4z2";
         profile.peak_amplitude = 0.8f;
 
         psdu = mod::make_random_psdu(psdu_len - 2, static_cast<uint32_t>(1000 + code), true);
-        const size_t cap = mod::packet_samples_998p4(64, 8, psdu.size(), false, &profile.pulse) + 512;
+        const size_t cap = mod::packet_samples_998p4(sync_reps, 8, psdu.size(), false, &profile.pulse) + 512;
         mod_scratch.reserve(127, cap);
         wave.resize(cap);
         size_t plen = 0;
@@ -487,6 +487,38 @@ BOOST_AUTO_TEST_CASE(test_unified_ipatov_preamble_uses_unit_impulse_prefix)
     BOOST_CHECK_EQUAL(std::string(res_sparse.reason),
                       "committed_preamble_sparse_pulse");
     BOOST_CHECK_GT(res_sparse.suppression_db, 20.0);
+}
+
+BOOST_AUTO_TEST_CASE(test_ipatov_256_sync_cancels_tail_without_extending_training)
+{
+    TestPacket packet(10,127,256);
+    auto templates=make_templates(packet);
+    const size_t q=300,n=packet.wave.size()+1024;
+    std::vector<cf> y(n),out(n),ihat(n);
+    std::copy(packet.wave.begin(),packet.wave.end(),y.begin()+q);
+    SicUnifiedConfig cfg;
+    cfg.policy=SicPolicy::PreambleOnly;cfg.backend=SicEstimatorBackend::Ipatov;
+    cfg.comm_code=10;cfg.sync_reps=256;cfg.fit_reps=8;
+    cfg.roi_lo=q-32;cfg.roi_hi=q+32;cfg.sub_roi_lo=q;cfg.sub_roi_hi=q+256*kSps;
+    cfg.max_window_samples=n;cfg.max_packet_samples=n;
+    SicUnifiedScratch scratch;std::string error;
+    BOOST_REQUIRE_MESSAGE(prepare_sic_unified(cfg,templates,scratch,&error),error);
+    BOOST_CHECK_EQUAL(scratch.cached_preamble_samples,(256+8)*kSps);
+    SicUnifiedResult result;result.out=out.data();result.i_hat=ihat.data();
+    BOOST_REQUIRE(sic_process_unified(y.data(),n,templates,cfg,scratch,result));
+    BOOST_REQUIRE(result.committed);
+    BOOST_CHECK_EQUAL(std::string(result.reason),"committed_preamble_sparse_pulse");
+    BOOST_CHECK_GT(result.suppression_db,20.0);
+    BOOST_CHECK_LE(result.channel.training_hi,static_cast<int64_t>(q+8*kSps));
+    double original_tail=0,residual_tail=0;
+    for(size_t j=q+252*kSps;j<q+256*kSps;++j) {
+        original_tail+=std::norm(y[j]);residual_tail+=std::norm(out[j]);
+    }
+    BOOST_CHECK_LT(residual_tail,original_tail*.01);
+    for(size_t j=q+256*kSps;j<n;++j) BOOST_REQUIRE_EQUAL(out[j],y[j]);
+    cfg.sync_reps=128;
+    BOOST_CHECK(!prepare_sic_unified(cfg,templates,scratch,&error));
+    BOOST_CHECK_EQUAL(error,"unsupported Ipatov geometry");
 }
 
 BOOST_AUTO_TEST_CASE(test_config_change_invalidates_and_regenerates)

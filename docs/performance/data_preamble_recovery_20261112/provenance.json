@@ -1,0 +1,27 @@
+{
+  "command": [
+    "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/experiment_preamble_recovery",
+    "16"
+  ],
+  "commit": "bf5a5be467facf87bf26321842fd9cff2b3307f3",
+  "git_diff": " gr-uwb/apps/CMakeLists.txt | 7 +++++++\n 1 file changed, 7 insertions(+)\n",
+  "binary_sha256": "ca4a8dedeb15d3200d53b151d0bd65eeca7dea10eb516532f76eda656f78936d",
+  "ldd": "\tlinux-vdso.so.1 (0x0000782887538000)\n\tlibgnuradio-uwb.so.1.0.0 => /home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/lib/libgnuradio-uwb.so.1.0.0 (0x00007828872f0000)\n\tlibvolk.so.2.5 => /lib/x86_64-linux-gnu/libvolk.so.2.5 (0x0000782887000000)\n\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x0000782886c00000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x0000782886f19000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x0000782886ef9000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x0000782886800000)\n\tlibgnuradio-filter.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-filter.so.3.10.1 (0x0000782886b2b000)\n\tlibgnuradio-runtime.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-runtime.so.3.10.1 (0x000078288668d000)\n\tlibgnuradio-pmt.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-pmt.so.3.10.1 (0x0000782886e9e000)\n\tlibspdlog.so.1 => /lib/x86_64-linux-gnu/libspdlog.so.1 (0x0000782886ab0000)\n\tlibfmt.so.8 => /lib/x86_64-linux-gnu/libfmt.so.8 (0x0000782886e7d000)\n\t/lib64/ld-linux-x86-64.so.2 (0x000078288753a000)\n\tliborc-0.4.so.0 => /lib/x86_64-linux-gnu/liborc-0.4.so.0 (0x0000782886a2b000)\n\tlibgnuradio-fft.so.3.10.1 => /lib/x86_64-linux-gnu/libgnuradio-fft.so.3.10.1 (0x0000782886e31000)\n\tlibboost_program_options.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_program_options.so.1.74.0 (0x0000782886648000)\n\tlibboost_thread.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_thread.so.1.74.0 (0x0000782886626000)\n\tlibgmp.so.10 => /lib/x86_64-linux-gnu/libgmp.so.10 (0x00007828865a4000)\n\tlibunwind.so.8 => /lib/x86_64-linux-gnu/libunwind.so.8 (0x0000782886589000)\n\tlibpython3.10.so.1.0 => /lib/x86_64-linux-gnu/libpython3.10.so.1.0 (0x0000782885e00000)\n\tlibthrift-0.16.0.so => /lib/x86_64-linux-gnu/libthrift-0.16.0.so (0x00007828864f0000)\n\tlibfftw3f.so.3 => /lib/x86_64-linux-gnu/libfftw3f.so.3 (0x0000782885a00000)\n\tlibfftw3f_threads.so.3 => /lib/x86_64-linux-gnu/libfftw3f_threads.so.3 (0x00007828872d4000)\n\tliblzma.so.5 => /lib/x86_64-linux-gnu/liblzma.so.5 (0x00007828864c5000)\n\tlibexpat.so.1 => /lib/x86_64-linux-gnu/libexpat.so.1 (0x0000782886493000)\n\tlibz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x0000782886477000)\n\tlibssl.so.3 => /lib/x86_64-linux-gnu/libssl.so.3 (0x0000782885d5b000)\n\tlibcrypto.so.3 => /lib/x86_64-linux-gnu/libcrypto.so.3 (0x0000782885400000)\n",
+  "input_grid": "998.4 MS/s work grid; resampler not exercised",
+  "profile": "64 SYNC, 4z2, Legacy pulse, 32-byte PSDU including FCS",
+  "channel": "single path; common nominal origin 512; other-code interference",
+  "noise": "20 dB desired-packet-average SNR; paired clean/raw/SIC noise",
+  "isr": "power ratio over first 64 SYNC symbols",
+  "online_inputs": "mixed IQ, public templates, configured coarse ROI +/-64; no truth IQ",
+  "scope": "functional recovery; seeds vary PSDU and noise, fixed timing/channel/phase per cell",
+  "libraries": [
+    {
+      "path": "/home/junqima/workspace/uwb-gnuradio/gr-uwb/build-sc16-r1r2/lib/libgnuradio-uwb.so.1.0.0.0",
+      "sha256": "6da2ca6537967586ff9e96ea2d0d0bac82555becad7c846e5b9a24e0f9e183fa"
+    }
+  ],
+  "source_sha256": {
+    "tools/sic/experiment_preamble_recovery.cc": "be5f4788facfc322272a1319f2cd26068d0ec6f96a95c6aea872161ec2257ce9",
+    "/home/junqima/workspace/uwb-gnuradio/tools/sic/run_preamble_recovery.py": "451baa9a483bdb7df9ce1902f40295f6f6d690e9ddd913565906f264e48076c9"
+  }
+}

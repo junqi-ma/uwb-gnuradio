@@ -351,6 +351,17 @@ add_executable(bench_unified_timing bench_unified_timing.cc)
 target_link_libraries(bench_unified_timing gnuradio-uwb)
 target_compile_options(bench_unified_timing PRIVATE -O3 -march=native)
 
+# Offline paired recovery experiment: desired complete packet + other-code
+# SYNC/SFD-only interference. Does not change the production pipeline.
+add_executable(experiment_preamble_recovery
+    ../../tools/sic/experiment_preamble_recovery.cc)
+target_link_libraries(experiment_preamble_recovery gnuradio-uwb)
+target_compile_options(experiment_preamble_recovery PRIVATE -O3 -march=native)
+
+add_executable(benchmark_chain_workers ../../tools/sic/benchmark_chain_workers.cc)
+target_link_libraries(benchmark_chain_workers gnuradio-uwb)
+target_compile_options(benchmark_chain_workers PRIVATE -O3 -march=native)
+
 # UHD SC16 Direct RX and Multi-Core Stream Pipeline Runner
 add_executable(uwb_uhd_sc16_pipeline_runner uwb_uhd_sc16_pipeline_runner.cc)
 target_link_libraries(uwb_uhd_sc16_pipeline_runner gnuradio-uwb Threads::Threads)

@@ -665,6 +665,9 @@ bool reconstruct_and_subtract_unified(
                         cfg.sub_roi_lo, cfg.sub_roi_hi, scratch.discrete, out, i_hat, &dres);
                     result.timings.reconstruct_us = dres.channel_us;
                     result.timings.subtract_us = dres.subtract_us;
+                    result.timings.recon_scale_us = dres.scale_us;
+                    result.timings.recon_conv_us = dres.convolution_us;
+                    result.timings.recon_cfo_rot_us = dres.phase_us + dres.cfo_us;
                     result.waveform_scale = dres.waveform_scale;
                     if (!ok || !dres.committed) {
                         return fail_closed(dres.reason ? dres.reason : "apply_discrete_pulses_failed");
@@ -703,6 +706,9 @@ bool reconstruct_and_subtract_unified(
                 cfg.sub_roi_lo, cfg.sub_roi_hi, scratch.discrete, out, i_hat, &dres);
             result.timings.reconstruct_us = dres.channel_us;
             result.timings.subtract_us = dres.subtract_us;
+            result.timings.recon_scale_us = dres.scale_us;
+            result.timings.recon_conv_us = dres.convolution_us;
+            result.timings.recon_cfo_rot_us = dres.phase_us + dres.cfo_us;
             result.waveform_scale = dres.waveform_scale;
             if (!ok || !dres.committed) {
                 return fail_closed(dres.reason ? dres.reason : "apply_discrete_failed");
@@ -910,6 +916,9 @@ bool sic_process_unified(
 
     auto demod_prof = demod::Qm35825Profile::Default();
     demod_prof.code_index = cfg.comm_code;
+    demod_prof.preamble_repetitions = cfg.sync_reps;
+    if (cfg.sync_reps > demod_prof.cir_skip_initial_repetitions)
+        demod_prof.cir_repetitions = cfg.sync_reps - demod_prof.cir_skip_initial_repetitions;
     demod_prof.timing_search_margin = 256;
     demod_prof.timing_coarse_stride = 1;
     demod_prof.sfd_mode = cfg.sfd_mode;
