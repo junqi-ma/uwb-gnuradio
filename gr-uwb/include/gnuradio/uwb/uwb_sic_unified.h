@@ -430,6 +430,11 @@ struct SicUnifiedScratch {
     std::vector<std::complex<float>> cached_sync_vec;
     std::vector<std::complex<float>> cached_preamble_waveform;
     std::vector<mod::PulseEvent> cached_preamble_events;
+    // Ipatov backend only: the SYNC + SFD prefix as UNIT impulses (+-1 at the
+    // pulse positions, 0 elsewhere).  The Ipatov model is fitted against the
+    // unit reference SYNC and its taps already contain the pulse shaping, so
+    // the reconstruction input must be this waveform, never the shaped one.
+    std::vector<std::complex<float>> cached_preamble_unit_waveform;
 
     /**
      * @brief Preallocates all scratch buffers to handle windows up to max_window_samples

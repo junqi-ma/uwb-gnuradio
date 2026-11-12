@@ -1426,6 +1426,12 @@ inline bool modulate_pulse_list(const uint8_t* psdu, size_t psdu_len,
 
 // Dedicated prefix-only (SYNC + SFD) pulse event generator.
 // Avoids PHR / Payload encoding while reusing the cached prefix events.
+//
+// `out.packet_samples` is the SYNC + SFD (+STS) span, i.e. exactly the same
+// span `modulate_prefix_waveform()` reports.  It must NOT include the PHR or a
+// payload: no event exists past the last SFD chip, and a consumer that sizes
+// its reconstruction support from this value would otherwise claim a support
+// that is longer than the window it is cancelling in.
 inline bool modulate_prefix_pulse_list(const HrpModConfig& cfg,
                                        HrpModScratch& scratch,
                                        size_t sample_cap,
@@ -1447,9 +1453,19 @@ inline bool modulate_prefix_pulse_list(const HrpModConfig& cfg,
     if (!detail::ensure_prefix_events(cfg, sfd, n_sfd, scratch))
         return false;
 
-    const size_t prefix_samples = packet_samples_998p4(
-        cfg.sync_repetitions, n_sfd, 0, cfg.insert_sts, &cfg.pulse);
-    if (prefix_samples > sample_cap || prefix_samples > kMaxHrpTxSamples)
+    const size_t sync_chips =
+        cfg.sync_repetitions * demod::kQm35ChipsPerSymbol;
+    const size_t sfd_chips = n_sfd * demod::kQm35ChipsPerSymbol;
+    const size_t sts_chips = cfg.insert_sts ? kStsChipsBprf : 0;
+    const size_t prefix_samples =
+        (sync_chips + sfd_chips + sts_chips) * demod::kQm35SamplesPerChip;
+    if (prefix_samples == 0 || prefix_samples > sample_cap ||
+        prefix_samples > kMaxHrpTxSamples)
+        return false;
+    // The event list must fit strictly inside the declared span.
+    if (scratch.prefix.event_count == 0 ||
+        scratch.prefix.events[scratch.prefix.event_count - 1].sample_offset >=
+            prefix_samples)
         return false;
 
     out.events = scratch.prefix.events.data();

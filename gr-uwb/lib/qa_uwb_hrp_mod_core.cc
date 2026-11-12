@@ -748,6 +748,89 @@ BOOST_AUTO_TEST_CASE(pulse_list_matches_unit_real_impulses)
     }
 }
 
+BOOST_AUTO_TEST_CASE(prefix_pulse_list_span_is_sync_plus_sfd)
+{
+    using namespace gr::uwb;
+    mod::HrpModConfig cfg;
+    cfg.code_index = 9;
+    cfg.sync_repetitions = 64;
+    cfg.sfd_mode = "4z2";
+    cfg.peak_amplitude = 1.f;
+    cfg.pulse.shape = mod::PulseShape::External;
+    cfg.pulse.external_n_taps = 2;
+    cfg.external_taps = { 1.f, 0.f };
+
+    const size_t cap = 300000;
+    mod::HrpModScratch s;
+    s.reserve(127, cap);
+
+    // SYNC + SFD span only: the PHR/payload is NOT part of a prefix-only
+    // cancellation, and claiming it would make the declared support longer
+    // than the window the caller is cancelling in.
+    const size_t expected_span =
+        64 * demod::kQm35SamplesPerSymbol + 8 * demod::kQm35SamplesPerSymbol;
+
+    mod::PulseList prefix;
+    BOOST_REQUIRE_MESSAGE(
+        mod::modulate_prefix_pulse_list(cfg, s, cap, prefix),
+        "prefix pulse list modulation failed");
+    BOOST_CHECK_EQUAL(prefix.packet_samples, expected_span);
+    BOOST_CHECK_GT(prefix.count, 0u);
+    BOOST_CHECK_LT(size_t(prefix.events[prefix.count - 1].sample_offset),
+                   prefix.packet_samples);
+
+    // The prefix events must be exactly the prefix part of the complete
+    // packet's unit-impulse event list for the same profile.
+    const auto wire = mod::make_random_psdu(32, 77, true);
+    mod::HrpModScratch full_s;
+    full_s.reserve(127, cap);
+    mod::PulseList full;
+    BOOST_REQUIRE(mod::modulate_pulse_list(wire.data(), wire.size(), cfg,
+                                           full_s, cap, full));
+    size_t prefix_events = 0;
+    for (size_t i = 0; i < full.count; ++i)
+        if (full.events[i].sample_offset < prefix.packet_samples)
+            ++prefix_events;
+    BOOST_REQUIRE_EQUAL(prefix.count, prefix_events);
+    for (size_t i = 0; i < prefix.count; ++i) {
+        BOOST_CHECK_EQUAL(prefix.events[i].sample_offset,
+                          full.events[i].sample_offset);
+        BOOST_CHECK_EQUAL(prefix.events[i].sign, full.events[i].sign);
+    }
+
+    // The events must reproduce the materialized prefix waveform exactly.
+    mod::HrpModScratch wave_s;
+    wave_s.reserve(127, cap);
+    std::vector<gr_complex> wave(cap);
+    size_t wave_n = 0;
+    BOOST_REQUIRE(mod::modulate_prefix_waveform(cfg, wave_s, wave.data(), cap,
+                                                wave_n));
+    BOOST_REQUIRE_GE(wave_n, prefix.packet_samples);
+    std::vector<float> expanded(prefix.packet_samples, 0.f);
+    for (size_t i = 0; i < prefix.count; ++i)
+        expanded[prefix.events[i].sample_offset] =
+            static_cast<float>(prefix.events[i].sign);
+    for (size_t i = 0; i < prefix.packet_samples; ++i) {
+        BOOST_REQUIRE_EQUAL(wave[i].imag(), 0.f);
+        BOOST_REQUIRE_EQUAL(wave[i].real(), expanded[i]);
+    }
+
+    // The declared span is a hard capacity contract: one sample short fails,
+    // exactly the span succeeds.
+    mod::PulseList rejected;
+    mod::HrpModScratch short_s;
+    short_s.reserve(127, cap);
+    BOOST_CHECK(!mod::modulate_prefix_pulse_list(cfg, short_s,
+                                                 expected_span - 1, rejected));
+    BOOST_CHECK_EQUAL(rejected.count, 0u);
+    BOOST_CHECK(rejected.events == nullptr);
+    mod::HrpModScratch exact_s;
+    exact_s.reserve(127, cap);
+    BOOST_CHECK(mod::modulate_prefix_pulse_list(cfg, exact_s, expected_span,
+                                                rejected));
+    BOOST_CHECK_EQUAL(rejected.packet_samples, expected_span);
+}
+
 BOOST_AUTO_TEST_CASE(test_hrp_mod_pn_cache_lifecycle)
 {
     namespace mod = gr::uwb::mod;

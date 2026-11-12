@@ -370,6 +370,7 @@ void SicUnifiedScratch::invalidate_cache()
     cached_sync_vec.clear();
     cached_preamble_waveform.clear();
     cached_preamble_events.clear();
+    cached_preamble_unit_waveform.clear();
     config_hash = 0;
     template_hash = 0;
     prepared = false;
@@ -455,6 +456,31 @@ bool prepare_sic_unified(
     } else {
         scratch.cached_preamble_events.clear();
         scratch.cached_preamble_samples = 0;
+    }
+
+    // 4. Ipatov unit-impulse prefix waveform (SYNC + SFD)
+    // The Ipatov model is fitted against the unit impulse reference and its
+    // taps already contain the pulse shaping, so the L1 reconstruction input
+    // is the unit impulse prefix, not the shaped one.  Materializing it here
+    // keeps the hot path allocation-free and lets the non-sparse apply path
+    // run the same transaction as the shaped discrete backend.
+    scratch.cached_preamble_unit_waveform.clear();
+    if (cfg.backend == SicEstimatorBackend::Ipatov &&
+        scratch.cached_preamble_samples > 0 &&
+        !scratch.cached_preamble_events.empty()) {
+        scratch.cached_preamble_unit_waveform.assign(
+            scratch.cached_preamble_samples, std::complex<float>(0.f, 0.f));
+        bool ok = true;
+        for (const mod::PulseEvent& e : scratch.cached_preamble_events) {
+            if (e.sample_offset >= scratch.cached_preamble_samples) {
+                ok = false;
+                break;
+            }
+            scratch.cached_preamble_unit_waveform[e.sample_offset] =
+                std::complex<float>(static_cast<float>(e.sign), 0.f);
+        }
+        if (!ok)
+            scratch.cached_preamble_unit_waveform.clear();
     }
 
     scratch.config_hash = compute_unified_config_hash(cfg);
@@ -656,8 +682,21 @@ bool reconstruct_and_subtract_unified(
                 }
             }
 
+            // Ipatov: the reconstruction input must be the UNIT impulse prefix
+            // (the taps already contain the shaping).  Using the shaped prefix
+            // here would fail the waveform-scale consistency check against the
+            // unit reference SYNC, so it is never a valid fallback.
             const std::complex<float>* wf = s_known ? s_known : templates.preamble;
             size_t wf_n = s_known ? s_known_len : templates.preamble_len;
+            const char* commit_reason = "committed_preamble_discrete";
+            if (dm.impulse_template) {
+                if (scratch.cached_preamble_unit_waveform.empty()) {
+                    return fail_closed("impulse_prefix_unavailable");
+                }
+                wf = scratch.cached_preamble_unit_waveform.data();
+                wf_n = scratch.cached_preamble_unit_waveform.size();
+                commit_reason = "committed_preamble_ipatov";
+            }
 
             bool ok = apply_discrete_cir(
                 y, n, wf, wf_n, templates.sync, templates.sync_len, dm,
@@ -669,7 +708,7 @@ bool reconstruct_and_subtract_unified(
                 return fail_closed(dres.reason ? dres.reason : "apply_discrete_failed");
             }
             result.committed = true;
-            result.reason = "committed_preamble_discrete";
+            result.reason = commit_reason;
             result.level = SicCancellationLevel::L1_Preamble;
             result.cancelled_fields = known_fields;
             result.support_lo = dres.support_lo;

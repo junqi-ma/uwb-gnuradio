@@ -16,6 +16,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace {
@@ -397,6 +398,95 @@ BOOST_AUTO_TEST_CASE(test_scratch_reuse_no_realloc)
         BOOST_CHECK_EQUAL(scratch.cached_sync_vec.capacity(), cap_sync);
         BOOST_CHECK_EQUAL(scratch.cached_preamble_waveform.capacity(), cap_wf);
     }
+}
+
+BOOST_AUTO_TEST_CASE(test_unified_ipatov_preamble_uses_unit_impulse_prefix)
+{
+    TestPacket p(10, 32);
+    SicUnifiedTemplates t = make_templates(p);
+
+    const size_t q = 300;
+    const size_t n = p.wave.size() + 1000;
+    std::vector<cf> y(n, cf(0.f, 0.f));
+    std::copy(p.wave.begin(), p.wave.end(), y.begin() + q);
+
+    SicUnifiedConfig cfg;
+    cfg.policy = SicPolicy::PreambleOnly;
+    cfg.backend = SicEstimatorBackend::Ipatov;
+    cfg.sparse_pulse_reconstruct = false; // exercise the non-sparse apply path
+    cfg.comm_code = 10;
+    cfg.samples_per_symbol = kSps;
+    cfg.sample_rate = kFs;
+    cfg.roi_lo = q - 32;
+    cfg.roi_hi = q + 32;
+    cfg.sub_roi_lo = q;
+    cfg.sub_roi_hi = q + 64 * kSps;
+    cfg.max_window_samples = n;
+    cfg.max_packet_samples = n;
+
+    SicUnifiedScratch scratch;
+    BOOST_REQUIRE(prepare_sic_unified(cfg, t, scratch));
+
+    // The cached Ipatov prefix must be the UNIT impulse SYNC + SFD span, not
+    // the shaped waveform and not the PHR-extended span.
+    const size_t prefix_span = 64 * kSps + 8 * kSps;
+    BOOST_REQUIRE_EQUAL(scratch.cached_preamble_samples, prefix_span);
+    BOOST_REQUIRE_EQUAL(scratch.cached_preamble_unit_waveform.size(),
+                        prefix_span);
+    const int8_t* code = demod::GetPreambleCode(10);
+    BOOST_REQUIRE(code != nullptr);
+    for (size_t i = 0; i < kSps; ++i) {
+        const float want = (i % 8 == 0 && i / 8 < demod::kQm35CodeLength)
+                               ? static_cast<float>(code[i / 8])
+                               : 0.f;
+        BOOST_REQUIRE_EQUAL(scratch.cached_preamble_unit_waveform[i].imag(), 0.f);
+        BOOST_REQUIRE_EQUAL(scratch.cached_preamble_unit_waveform[i].real(), want);
+    }
+
+    std::vector<cf> out(n);
+    std::vector<cf> i_hat(n);
+    SicUnifiedResult res;
+    res.out = out.data();
+    res.i_hat = i_hat.data();
+
+    BOOST_REQUIRE(sic_process_unified(y.data(), n, t, cfg, scratch, res));
+
+    BOOST_CHECK(res.committed);
+    BOOST_CHECK_EQUAL(std::string(res.reason), "committed_preamble_ipatov");
+    BOOST_CHECK_EQUAL(static_cast<uint8_t>(res.level),
+                      static_cast<uint8_t>(SicCancellationLevel::L1_Preamble));
+    BOOST_CHECK(has_field(res.cancelled_fields, SicKnownFields::Preamble));
+    BOOST_CHECK(has_field(res.cancelled_fields, SicKnownFields::Sfd));
+    BOOST_CHECK(!has_field(res.cancelled_fields, SicKnownFields::Payload));
+    // The unit impulse prefix is matched exactly against the unit reference,
+    // so the single waveform scale must be exactly 1.
+    BOOST_CHECK_CLOSE(res.waveform_scale, 1.0, 1e-6);
+    BOOST_CHECK_GT(res.suppression_db, 20.0);
+
+    // Committed transaction: out == y - i_hat inside the subtraction ROI and
+    // untouched outside it.
+    BOOST_REQUIRE(res.sub_hi > res.sub_lo);
+    for (int64_t j = 0; j < static_cast<int64_t>(n); ++j) {
+        const size_t s = static_cast<size_t>(j);
+        if (j < res.sub_lo || j >= res.sub_hi) {
+            BOOST_CHECK_EQUAL(out[s], y[s]);
+        } else {
+            BOOST_CHECK_LT(std::abs(out[s] - (y[s] - i_hat[s])), 1e-6f);
+        }
+    }
+
+    // The same configuration with the sparse representation must also commit;
+    // the two paths are distinct reasons, never a silent substitution.
+    cfg.sparse_pulse_reconstruct = true;
+    BOOST_REQUIRE(prepare_sic_unified(cfg, t, scratch));
+    SicUnifiedResult res_sparse;
+    res_sparse.out = out.data();
+    res_sparse.i_hat = i_hat.data();
+    BOOST_REQUIRE(sic_process_unified(y.data(), n, t, cfg, scratch, res_sparse));
+    BOOST_CHECK(res_sparse.committed);
+    BOOST_CHECK_EQUAL(std::string(res_sparse.reason),
+                      "committed_preamble_sparse_pulse");
+    BOOST_CHECK_GT(res_sparse.suppression_db, 20.0);
 }
 
 BOOST_AUTO_TEST_CASE(test_config_change_invalidates_and_regenerates)
