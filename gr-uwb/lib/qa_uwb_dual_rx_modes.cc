@@ -1131,4 +1131,43 @@ BOOST_AUTO_TEST_CASE(test_sc16_pipeline_dual_mode_worker_determinism)
     }
 }
 
+// 5. SIC bypass transparency (Track A contract).
+//
+// The pipeline runs SIC with `copy_input_on_bypass = false`: on a non-committed
+// result the consumer must read the ORIGINAL input, not a copy buffer.  The
+// observable invariant is that a clean window produces bit-identical sensing
+// results whether SIC ran and bypassed, or did not run at all.
+BOOST_AUTO_TEST_CASE(test_sic_bypass_is_transparent_to_sensing)
+{
+    const DualWindowFixtures fix = build_pair1_sc16_fixtures();
+    const TempCf32File sensing_sync_file(fix.sensing_sync_l2);
+    const TempCf32File comm_sync_file(fix.comm_sync_l2);
+
+    auto cfg_sic = make_mode_a_pipeline_cfg(fix, comm_sync_file.path(),
+                                            sensing_sync_file.path(), 2, 1);
+    auto cfg_raw = cfg_sic;
+    cfg_raw.consumer_mode = pipeline::ConsumerMode::SensingCir;
+
+    const auto res_sic = run_memory_pipeline(cfg_sic, fix.mode_a_stream);
+    const auto res_raw = run_memory_pipeline(cfg_raw, fix.mode_a_stream);
+    BOOST_REQUIRE_EQUAL(res_sic.size(), 2u);
+    BOOST_REQUIRE_EQUAL(res_raw.size(), 2u);
+
+    // Window 1 carries no interferer, so SIC must bypass (committed == false).
+    BOOST_CHECK(res_sic[1].sic_executed);
+    BOOST_CHECK(!res_sic[1].sic_committed);
+    BOOST_CHECK(!res_raw[1].sic_executed);
+
+    BOOST_CHECK(res_raw[1].radar_sfd_found);
+    BOOST_CHECK_EQUAL(res_sic[1].radar_sfd_found, res_raw[1].radar_sfd_found);
+    BOOST_CHECK_EQUAL(res_sic[1].radar_peak_metric, res_raw[1].radar_peak_metric);
+    BOOST_CHECK_EQUAL(res_sic[1].radar_detected_start,
+                      res_raw[1].radar_detected_start);
+    BOOST_CHECK_EQUAL(res_sic[1].radar_cfo_hz, res_raw[1].radar_cfo_hz);
+    BOOST_CHECK_EQUAL(res_sic[1].radar_cir_origin, res_raw[1].radar_cir_origin);
+    BOOST_CHECK_EQUAL(res_sic[1].radar_detected_origin,
+                      res_raw[1].radar_detected_origin);
+    BOOST_CHECK_EQUAL(res_sic[1].radar_valid_reps, res_raw[1].radar_valid_reps);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

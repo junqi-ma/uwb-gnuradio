@@ -529,6 +529,11 @@ Metrics compute_metrics(const Observation& obs, const Observation& clean, const 
 struct Cell {
     size_t sync_reps = 64;
     size_t psdu_bytes = 32;
+    // 0 => the interferer uses `sync_reps` (historical behaviour).  The E2E
+    // benchmark scenario is a long target preamble (256 SYNC) with the
+    // documented 64-SYNC code-10 interferer, so the two lengths must be
+    // settable independently.
+    size_t interferer_sync_reps = 0;
     size_t target_code = 9;
     size_t interferer_code = 10;
     std::string multipath = "single";
@@ -557,6 +562,7 @@ struct Cell {
 struct Options {
     std::vector<size_t> sync_reps{64};
     std::vector<size_t> psdu_bytes{32};
+    size_t interferer_sync_reps = 0; // 0 => same as the target
     std::vector<size_t> target_codes{9};
     std::vector<size_t> interferer_codes{10};
     std::vector<std::string> multipath{"single"};
@@ -604,6 +610,7 @@ std::vector<Cell> enumerate(const Options& o)
                             Cell cell;
                             cell.sync_reps = reps;
                             cell.psdu_bytes = psdu;
+                            cell.interferer_sync_reps = o.interferer_sync_reps;
                             cell.target_code = tgt;
                             cell.interferer_code = itf;
                             cell.multipath = mp;
@@ -713,7 +720,10 @@ struct Scene {
     Scene(const Cell& cell, unsigned seed, bool native_phase, bool noise, bool dual,
           double weak_delay, double weak_gain_db, size_t interference_offset)
         : target(cell.target_code, 1000 + seed, cell.sync_reps, cell.psdu_bytes),
-          interferer(cell.interferer_code, 2000 + seed, cell.sync_reps, cell.psdu_bytes)
+          interferer(cell.interferer_code, 2000 + seed,
+                     cell.interferer_sync_reps ? cell.interferer_sync_reps
+                                               : cell.sync_reps,
+                     cell.psdu_bytes)
     {
         mix = build_mixture(cell, seed, native_phase, noise, dual, weak_delay,
                             weak_gain_db, interference_offset, target, interferer);
@@ -1382,6 +1392,7 @@ void usage()
         "usage: experiment_preamble_recovery [options]\n"
         "  --sync-reps N[,N]        SYNC repetitions per config (zips with --psdu-bytes)\n"
         "  --psdu-bytes N[,N]       PSDU length INCLUDING the 2-byte FCS (zips)\n"
+        "  --interferer-sync-reps N interferer preamble length (default: same as target)\n"
         "  --target-code N[,N]      target preamble code (zips with --interferer-code)\n"
         "  --interferer-code N[,N]  interferer preamble code (zips)\n"
         "  --multipath LIST         single | fractional (0.6*e^{j0.7} at +7.3 samples)\n"
@@ -1425,6 +1436,8 @@ Options parse_cli(int argc, char** argv)
             if (!seen_sync) { o.sync_reps.clear(); seen_sync = true; }
             for (const auto& p : split_list(need("--sync-reps")))
                 o.sync_reps.push_back(std::stoull(p));
+        } else if (a == "--interferer-sync-reps") {
+            o.interferer_sync_reps = static_cast<size_t>(std::stoul(need("--interferer-sync-reps")));
         } else if (a == "--psdu-bytes") {
             if (!seen_psdu) { o.psdu_bytes.clear(); seen_psdu = true; }
             for (const auto& p : split_list(need("--psdu-bytes")))
