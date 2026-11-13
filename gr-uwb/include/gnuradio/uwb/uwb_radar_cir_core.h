@@ -132,6 +132,8 @@ struct RadarCirConfig {
     size_t sync_repetitions = 64;
     size_t samples_per_symbol = 1016;
     const char* sfd_mode = "4z2";
+    size_t timing_coarse_stride = 1;
+    bool full_window_search = false;
     uint32_t tx_profile_id = 0;     // 0 = unspecified; nonzero must match prepare
     int64_t sfd_search_margin = 64; // software default; NOT a hardware freeze
     int64_t sync_refine_margin = 8;
@@ -188,6 +190,8 @@ struct PreparedRadarProfile {
     // [coverage_skip_initial, coverage_skip_initial + coverage_repetitions).
     size_t coverage_skip_initial = 0;
     size_t coverage_repetitions = 0;
+    size_t timing_coarse_stride = 1;
+    bool full_window_search = false;
 };
 
 struct RadarCirResult {
@@ -392,6 +396,13 @@ inline void coverage_union(const RadarCirConfig& cfg, size_t& skip, size_t& coun
     count = hi - lo;
 }
 
+inline size_t resolved_coarse_stride(const RadarCirConfig& cfg)
+{
+    return (cfg.timing_coarse_stride > 0)
+               ? cfg.timing_coarse_stride
+               : (cfg.full_window_search ? size_t(8) : size_t(1));
+}
+
 inline bool profile_matches(const PreparedRadarProfile& p,
                             const RadarCirConfig& cfg)
 {
@@ -406,6 +417,10 @@ inline bool profile_matches(const PreparedRadarProfile& p,
     if (std::strcmp(p.sfd_mode, cfg.sfd_mode) != 0)
         return false;
     if (p.tx_profile_id != cfg.tx_profile_id)
+        return false;
+    if (p.timing_coarse_stride != resolved_coarse_stride(cfg))
+        return false;
+    if (p.full_window_search != cfg.full_window_search)
         return false;
     if (cfg.cir_pre > p.max_pre || cfg.cir_post > p.max_post)
         return false;
@@ -683,8 +698,11 @@ inline bool prepare_radar_cir_core(const RadarCirConfig& cfg,
     size_t cov_skip = 0;
     size_t cov_count = 0;
     detail::coverage_union(cfg, cov_skip, cov_count);
+    const size_t eff_stride = detail::resolved_coarse_stride(cfg);
     scratch.prepared.coverage_skip_initial = cov_skip;
     scratch.prepared.coverage_repetitions = cov_count;
+    scratch.prepared.timing_coarse_stride = eff_stride;
+    scratch.prepared.full_window_search = cfg.full_window_search;
 
     // ---- build the shared front-end profile ------------------------------
     demod::Qm35825Profile& p = scratch.demod_profile;
@@ -702,7 +720,7 @@ inline bool prepare_radar_cir_core(const RadarCirConfig& cfg,
         (cfg.sfd_search_margin > 0)
             ? static_cast<size_t>(cfg.sfd_search_margin)
             : size_t(0);
-    p.timing_coarse_stride = 1; // score every integer start, as radar did
+    p.timing_coarse_stride = eff_stride;
     // The caller supplies a trusted predicted SYNC origin (the public coarse
     // ROI), so the seed search is a local refinement, not an acquisition: the
     // legacy radar path refined within `sync_refine_margin` and never
@@ -779,25 +797,30 @@ inline bool radar_cir_one(const std::complex<float>* rx,
         scratch.cir_scratch.norm.size() >= want_taps;
     const bool margin_ok =
         cfg.use_predicted_timing ||
-        (cfg.sfd_search_margin >= 0 && cfg.sync_refine_margin >= 0);
+        ((cfg.full_window_search || cfg.sfd_search_margin >= 0) &&
+         cfg.sync_refine_margin >= 0);
     // A known CFO must be a usable number; a NaN/Inf would poison the whole
     // derotated buffer, so it is a caller-contract error, not a detection miss.
     const bool cfo_ok =
         !(cfg.use_predicted_timing && cfg.compensate_target_cfo &&
           cfg.target_cfo_known) ||
         std::isfinite(cfg.target_cfo_hz);
+    const bool prediction_ok =
+        cfg.full_window_search || (predicted_sfd_start >= 0);
+    const bool mode_ok = !(cfg.full_window_search && cfg.use_predicted_timing);
 
-    if (!rx || n == 0 || predicted_sfd_start < 0 || !identity_ok || !thr_ok ||
-        !scratch_ok || !taps_ok || !margin_ok || !cfo_ok) {
+    if (!rx || n == 0 || !prediction_ok || !identity_ok || !thr_ok ||
+        !scratch_ok || !taps_ok || !margin_ok || !cfo_ok || !mode_ok) {
         out.status = RadarCirStatus::InvalidInput;
         out.status_reason = !rx || n == 0            ? "null_input"
-                            : predicted_sfd_start < 0 ? "invalid_prediction"
+                            : !prediction_ok          ? "invalid_prediction"
                             : !identity_ok            ? "profile_mismatch"
                             : !thr_ok                 ? "invalid_threshold"
                             : !scratch_ok             ? "scratch_unprepared"
                             : !taps_ok                ? "invalid_tap_window"
                             : !margin_ok              ? "invalid_margin"
-                                                      : "invalid_known_cfo";
+                            : !cfo_ok                 ? "invalid_known_cfo"
+                                                      : "conflicting_timing_modes";
         detail::zero_cir_taps(scratch.cir);
         return false;
     }
@@ -806,11 +829,14 @@ inline bool radar_cir_one(const std::complex<float>* rx,
     const size_t sync_reps = scratch.prepared.sync_repetitions;
     const size_t sps = scratch.prepared.samples_per_symbol;
 
-    // CIR delay axis = public TX-time prediction.  Computed before any
-    // detection so the physical delay can never be re-zeroed.
+    // CIR delay axis = public TX-time prediction in triggered mode.  In blind
+    // full-window mode (`full_window_search`), the axis is anchored from the
+    // detected SYNC origin once preamble acquisition succeeds.
     const int64_t cir_axis =
-        nominal_preamble_start(predicted_sfd_start, sync_reps, sps);
-    if (cir_axis < 0) {
+        cfg.full_window_search
+            ? -1
+            : nominal_preamble_start(predicted_sfd_start, sync_reps, sps);
+    if (!cfg.full_window_search && cir_axis < 0) {
         out.status = RadarCirStatus::CirFailed;
         out.status_reason = "cir_axis_out_of_range";
         detail::zero_cir_taps(scratch.cir);
@@ -974,10 +1000,25 @@ inline bool radar_cir_one(const std::complex<float>* rx,
         }
     } else {
         // Shared preamble front-end (timing -> CFO -> SFD -> final CFO
-        // coverage).  The seed is the predicted SYNC origin, not the SFD.
+        // coverage).  In triggered mode the seed is the predicted SYNC origin;
+        // in blind full-window mode search from the window midpoint across
+        // [0, n) and anchor the CIR axis at the detected SYNC origin.
+        const int64_t search_seed = cfg.full_window_search
+                                        ? static_cast<int64_t>(n / 2)
+                                        : cir_axis;
+        demod::Qm35825Profile local_profile = scratch.demod_profile;
+        if (cfg.full_window_search) {
+            local_profile.timing_search_margin =
+                std::max(local_profile.timing_search_margin, n);
+            local_profile.timing_max_backtrack_symbols = sync_reps + 32;
+            local_profile.timing_seed_refine_radius = 0;
+        }
+        const demod::Qm35825Profile& active_profile =
+            cfg.full_window_search ? local_profile : scratch.demod_profile;
+
         demod::PreambleRxContext ctx;
         const bool pre_ok = demod::acquire_preamble(
-            rx, n, scratch.demod_profile, scratch.sync_pulse, cir_axis,
+            rx, n, active_profile, scratch.sync_pulse, search_seed,
             demod::PreamblePurpose::CirOnly, &cov_req, scratch.demod, ctx,
             static_cast<double>(sps));
 
@@ -1000,9 +1041,11 @@ inline bool radar_cir_one(const std::complex<float>* rx,
         // probes +/-4 SYMBOLS for comm robustness, so a hit outside the
         // requested ROI is a different hypothesis, not the echo the caller
         // asked about: reject it instead of silently accepting a far-away
-        // false peak.
-        if (std::llabs(ctx.sfd.sfd_start_sample - predicted_sfd_start) >
-            cfg.sfd_search_margin) {
+        // false peak.  Disabled in blind full-window mode where no predicted
+        // SFD exists.
+        if (!cfg.full_window_search &&
+            std::llabs(ctx.sfd.sfd_start_sample - predicted_sfd_start) >
+                cfg.sfd_search_margin) {
             out.status = RadarCirStatus::SfdFailed;
             out.status_reason = "sfd_outside_roi";
             detail::zero_cir_taps(scratch.cir);
@@ -1016,6 +1059,10 @@ inline bool radar_cir_one(const std::complex<float>* rx,
             return false;
         }
 
+        const int64_t effective_cir_axis =
+            cfg.full_window_search ? ctx.detected_sync_origin : cir_axis;
+        req.cir_axis_origin = effective_cir_axis;
+
         // Detected origin / SFD / metrics are published only on success, so a
         // failed call can never leak a seed-only or stale coordinate.
         out.sfd_start_sample = ctx.sfd.sfd_start_sample;
@@ -1027,8 +1074,8 @@ inline bool radar_cir_one(const std::complex<float>* rx,
         out.bootstrap_cfo_hz = ctx.bootstrap_cfo_hz;
         out.cfo_epoch = ctx.cfo_epoch;
         out.phase_reference_sample = ctx.phase_reference_sample;
-        out.cir_axis_origin = cir_axis;
-        out.cir_origin_sample = cir_axis;
+        out.cir_axis_origin = effective_cir_axis;
+        out.cir_origin_sample = effective_cir_axis;
 
         // Unified period: the front-end's measured period, falling back to the
         // configured integer grid.  Used as a double, never rounded twice.  The

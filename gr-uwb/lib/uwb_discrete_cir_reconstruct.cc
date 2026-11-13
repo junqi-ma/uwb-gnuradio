@@ -924,10 +924,17 @@ DiscreteCirResult fullpacket_cancel_discrete(
         return fail("invalid_template");
     if (!fcs_pass)
         return fail("fcs_failed");
-    if (profile.code_index != 10 || profile.sync_repetitions != 64 ||
-        profile.insert_sts || !profile.sfd_mode ||
-        std::strcmp(profile.sfd_mode, "4z2") != 0 || profile.ranging ||
-        profile.pulse.shape != mod::PulseShape::Legacy)
+    if (profile.insert_sts || profile.ranging ||
+        !radar_meta::code_index_supported(profile.code_index) ||
+        !radar_meta::sync_reps_supported(profile.sync_repetitions) ||
+        profile.pulse.shape == mod::PulseShape::External ||
+        !mod::pulse_spec_valid(profile.pulse))
+        return fail("unsupported_profile");
+    const int8_t* sfd_ptr = nullptr;
+    size_t n_sfd = 0;
+    if (!profile.sfd_mode ||
+        !mod::detail::sfd_lookup(profile.sfd_mode, sfd_ptr, n_sfd) ||
+        n_sfd == 0)
         return fail("unsupported_profile");
     if (phr_bits.size() != 19 || wire_psdu.size() < 2 ||
         wire_psdu.size() > radar_meta::kMaxPsduBytes)

@@ -268,6 +268,16 @@ struct SicUnifiedConfig {
     bool rx_fused_payload_cmf = true;
     bool rx_fused_phr_cmf = true;
 
+    mod::PulseSpec pulse;
+    bool full_window_search = false;
+    size_t comm_timing_search_margin = 256;
+    size_t comm_timing_coarse_stride = 1;
+    bool autocorr_prefilter = true;
+    double autocorr_threshold = 0.20;
+    bool autocorr_search_inside_target = false;
+    int64_t target_preamble_lo = -1;
+    int64_t target_preamble_hi = -1;
+
     // Kernel SIMD controls
     bool enable_b3_simd = true;
 

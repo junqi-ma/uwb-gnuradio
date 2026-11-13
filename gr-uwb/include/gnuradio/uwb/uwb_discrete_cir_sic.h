@@ -104,6 +104,19 @@ struct DiscreteCirConfig {
     double fit_residual_max = 0.8;
     double gain_condition_max = 1e8;
 
+    // Optional segmented delay-sps autocorrelation prefilter for wide ROIs.
+    // Skips blank/PSDU segments in O(N) when roi_hi - roi_lo > 8*sps, and
+    // optionally prioritizes active segments outside [target_preamble_lo, hi)
+    // before discriminating inside the locked target preamble.
+    bool autocorr_prefilter = true;
+    double autocorr_threshold = 0.20;
+    bool autocorr_search_inside_target = false;
+    int64_t target_preamble_lo = -1;
+    int64_t target_preamble_hi = -1;
+
+    const char* sfd_mode = "4z2";
+    mod::PulseSpec pulse;
+
     // Prepared capacities.  max_window_samples is the largest y/out window
     // (the benchmark passes public.n); max_packet_samples bounds the
     // remodulated waveform and is derived when zero.
@@ -181,6 +194,10 @@ struct DiscreteCirScratch {
     bool sparse_pulse_reconstruct = false;
     std::vector<std::complex<float>> impulse_sync;
     mod::HrpModConfig impulse_profile;
+    std::vector<std::complex<double>> ac_seg_corr;
+    std::vector<double> ac_seg_ea;
+    std::vector<double> ac_seg_eb;
+    std::vector<uint8_t> ac_seg_active;
 
     UWB_API void reserve(size_t max_window_samples);
 };

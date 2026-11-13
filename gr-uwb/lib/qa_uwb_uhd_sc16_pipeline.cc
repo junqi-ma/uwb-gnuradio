@@ -2418,4 +2418,76 @@ BOOST_AUTO_TEST_CASE(test_pipeline_multicore_affinity_validation)
     std::remove(tmp_file.c_str());
 }
 
+// ---------------------------------------------------------------------------
+// Test Case 12: test_pipeline_default_fastest_resampler_profile
+//   Verify PipelineConfig defaults to the fastest equiripple resampler profile
+//   ("realtime_eq16") for 737.28M->998.4M and cleanly runs both explicit and
+//   empty-profile fallback on 65/48 and 65/32 paths.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_default_fastest_resampler_profile)
+{
+    PipelineConfig default_cfg;
+    BOOST_CHECK_EQUAL(default_cfg.resampler_profile, "realtime_eq16");
+
+    const std::string tmp_file =
+        write_multicore_sc16_file("default_profile", make_multicore_sc16_data(4096));
+
+    // Verify 65/48 path executes with the default profile ("realtime_eq16") and empty override.
+    for (const std::string& profile : { PipelineConfig{}.resampler_profile, std::string("") }) {
+        PipelineConfig cfg;
+        cfg.source_type = StreamSourceType::Replay;
+        cfg.replay_file = tmp_file;
+        cfg.paced_replay = false;
+        cfg.native_rate = 737.28e6;
+        cfg.work_rate = 998.4e6;
+        cfg.schedule_t0 = 0.0;
+        cfg.period_s = 4096.0 / 737.28e6;
+        cfg.pre_guard_samples = 0;
+        cfg.capture_samples = 4096;
+        cfg.post_guard_samples = 0;
+        cfg.pool_capacity = 2;
+        cfg.consumer_mode = ConsumerMode::SicOnly;
+        cfg.resampler_profile = profile;
+        cfg.max_windows = 1;
+
+        UhdSc16Pipeline pipeline(cfg);
+        BOOST_REQUIRE(pipeline.initialize());
+        pipeline.start();
+        pipeline.wait();
+
+        BOOST_REQUIRE_EQUAL(pipeline.results().size(), 1u);
+        BOOST_CHECK_EQUAL(static_cast<int>(pipeline.results()[0].state),
+                          static_cast<int>(WindowTerminalState::Completed));
+    }
+
+    // Verify 65/32 path (491.52M->998.4M) falls back cleanly from realtime_eq16 to realtime_minorder.
+    {
+        PipelineConfig cfg;
+        cfg.source_type = StreamSourceType::Replay;
+        cfg.replay_file = tmp_file;
+        cfg.paced_replay = false;
+        cfg.native_rate = 491.52e6;
+        cfg.work_rate = 998.4e6;
+        cfg.schedule_t0 = 0.0;
+        cfg.period_s = 4096.0 / 491.52e6;
+        cfg.pre_guard_samples = 0;
+        cfg.capture_samples = 4096;
+        cfg.post_guard_samples = 0;
+        cfg.pool_capacity = 2;
+        cfg.consumer_mode = ConsumerMode::SicOnly;
+        cfg.max_windows = 1;
+
+        UhdSc16Pipeline pipeline(cfg);
+        BOOST_REQUIRE(pipeline.initialize());
+        pipeline.start();
+        pipeline.wait();
+
+        BOOST_REQUIRE_EQUAL(pipeline.results().size(), 1u);
+        BOOST_CHECK_EQUAL(static_cast<int>(pipeline.results()[0].state),
+                          static_cast<int>(WindowTerminalState::Completed));
+    }
+
+    std::remove(tmp_file.c_str());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

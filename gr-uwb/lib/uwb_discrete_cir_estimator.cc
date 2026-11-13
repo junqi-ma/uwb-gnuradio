@@ -222,6 +222,23 @@ uint64_t template_identity(const cf* sync, size_t sync_len, const cf* train,
     return h;
 }
 
+const char* canonical_sfd_mode(const char* sfd_mode)
+{
+    if (!sfd_mode || !sfd_mode[0] || std::strcmp(sfd_mode, "4z2") == 0)
+        return "4z2";
+    if (std::strcmp(sfd_mode, "4z1") == 0)
+        return "4z1";
+    if (std::strcmp(sfd_mode, "4z3") == 0)
+        return "4z3";
+    if (std::strcmp(sfd_mode, "4z4") == 0)
+        return "4z4";
+    if (std::strcmp(sfd_mode, "ieee") == 0)
+        return "ieee";
+    if (std::strcmp(sfd_mode, "decawave") == 0)
+        return "decawave";
+    return sfd_mode;
+}
+
 // Algorithmic preparation key.  The public per-call ROI and capacity fields
 // are excluded: they do not change any cached factor.
 uint64_t config_identity(const DiscreteCirConfig& cfg)
@@ -234,6 +251,13 @@ uint64_t config_identity(const DiscreteCirConfig& cfg)
     hash_u64(h, static_cast<uint64_t>(cfg.sync_reps));
     hash_u64(h, static_cast<uint64_t>(cfg.samples_per_symbol));
     hash_double(h, cfg.sample_rate);
+    const char* eff_sfd = canonical_sfd_mode(cfg.sfd_mode);
+    hash_bytes(h, eff_sfd, std::strlen(eff_sfd));
+    hash_u64(h, static_cast<uint64_t>(cfg.pulse.shape));
+    hash_float(h, cfg.pulse.gaussian_sigma_ns);
+    hash_float(h, cfg.pulse.blackman_bw_mhz);
+    hash_u64(h, static_cast<uint64_t>(cfg.pulse.external_n_taps));
+    hash_u64(h, static_cast<uint64_t>(cfg.pulse.external_center));
     hash_u64(h, static_cast<uint64_t>(cfg.fit_reps));
     hash_i64(h, cfg.lag_lo);
     hash_u64(h, static_cast<uint64_t>(cfg.tap_count));
@@ -245,6 +269,8 @@ uint64_t config_identity(const DiscreteCirConfig& cfg)
     hash_double(h, cfg.detect_threshold);
     hash_double(h, cfg.fit_residual_max);
     hash_double(h, cfg.gain_condition_max);
+    hash_u64(h, cfg.autocorr_prefilter ? 1ull : 0ull);
+    hash_double(h, cfg.autocorr_threshold);
     return h;
 }
 
@@ -437,6 +463,11 @@ void DiscreteCirScratch::reserve(size_t max_window_samples_)
     accumulator.resize(max_window_samples);
     fir_tmp.resize(max_window_samples);
     expected_phr.resize(19);
+    const size_t max_ac_segs = (max_window_samples / 64) + 16;
+    ac_seg_corr.resize(max_ac_segs);
+    ac_seg_ea.resize(max_ac_segs);
+    ac_seg_eb.resize(max_ac_segs);
+    ac_seg_active.resize(max_ac_segs);
 
     modulator.reserve(127, max_window_samples);
 }
@@ -644,15 +675,21 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
     }
     scratch.factor_cache_next = 0;
 
-    // Safe upper bound for the remodulated packet.  The frozen experiment
-    // profile uses configured SYNC / 8 SFD / 127 B / legacy pulse; +64 covers shaping
-    // and the modulator's convention.  A public capacity never exceeds the
-    // prepared window.
-    const mod::PulseSpec default_pulse{};
+    const char* eff_sfd = canonical_sfd_mode(cfg.sfd_mode);
+    const int8_t* sfd_ptr = nullptr;
+    size_t n_sfd = 0;
+    if (!mod::detail::sfd_lookup(eff_sfd, sfd_ptr, n_sfd))
+        return fail("unsupported sfd_mode");
+    if (!mod::pulse_spec_valid(cfg.pulse))
+        return fail("invalid pulse spec");
+
+    // Safe upper bound for the remodulated packet, sized from the configured
+    // SYNC, SFD mode, 127 B PSDU, and pulse spec (+64 headroom).
     size_t max_packet = cfg.max_packet_samples;
     if (max_packet == 0) {
-        max_packet = mod::packet_samples_998p4(cfg.sync_reps, 8, 127, false,
-                                               &default_pulse) +
+        max_packet = mod::packet_samples_998p4(
+                         cfg.sync_reps, n_sfd, radar_meta::kMaxPsduBytes,
+                         false, &cfg.pulse) +
                      64;
     }
     max_packet = std::min(max_packet, cfg.max_window_samples);
@@ -660,6 +697,12 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
         scratch.waveform.resize(max_packet);
     if (max_packet > scratch.scaled_waveform.size())
         scratch.scaled_waveform.resize(max_packet);
+    const size_t max_events = max_packet / demod::kQm35SamplesPerChip + 2;
+    if (scratch.modulator.iq_re.capacity() < max_packet ||
+        scratch.modulator.pulse_events.capacity() < max_events ||
+        scratch.modulator.prefix.events.capacity() < max_events) {
+        scratch.modulator.reserve(radar_meta::kMaxPsduBytes, max_packet);
+    }
     scratch.max_packet_samples = max_packet;
 
     scratch.ipatov_correlation = cfg.ipatov_correlation;
@@ -668,8 +711,9 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
         return fail("sparse_pulse_requires_ipatov");
     if (cfg.ipatov_correlation) {
         if (sps != demod::kQm35SamplesPerSymbol || cfg.fit_reps < 3 ||
+            cfg.fit_reps > cfg.sync_reps ||
             cfg.sample_rate != radar_meta::kWorkRateHz ||
-            (cfg.sync_reps != 64 && cfg.sync_reps != 256))
+            !radar_meta::sync_reps_supported(cfg.sync_reps))
             return fail("unsupported Ipatov geometry");
         if (!radar_meta::code_index_supported(cfg.comm_code))
             return fail("unsupported Ipatov code");
@@ -682,8 +726,10 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
         auto& raw = scratch.impulse_profile;
         raw.code_index = cfg.comm_code;
         raw.sync_repetitions = cfg.sync_reps;
-        raw.sfd_mode = "4z2";
+        raw.sfd_mode = eff_sfd;
         raw.peak_amplitude = 1.f;
+        // Ipatov CIR already absorbs TX pulse shaping; modulate_unit_impulses /
+        // modulate_pulse_list require External unit-impulse taps {1.f, 0.f}.
         raw.pulse.shape = mod::PulseShape::External;
         raw.external_taps = {1.f, 0.f}; // unit impulses, 2 samples/chip
         raw.pulse.external_n_taps = 2;
@@ -692,8 +738,6 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
             return fail("impulse pulse preparation failed");
         scratch.sparse_pulse_reconstruct = cfg.sparse_pulse_reconstruct;
         if (cfg.sparse_pulse_reconstruct) {
-            const size_t max_events =
-                max_packet / demod::kQm35SamplesPerChip + 2;
             if (scratch.modulator.pulse_events.capacity() < max_events ||
                 scratch.modulator.prefix.events.capacity() < max_events)
                 return fail("sparse_pulse_event_capacity");
@@ -945,53 +989,482 @@ bool estimate_discrete_cir(const std::complex<float>* y,
         return nrm;
     };
 
-    // ---- 2. detection (independent copy of the frozen profile semantics) -
+    // ---- 2. detection (with segmented delay-sps autocorr prefilter) ------
     int64_t coarse_pos = -1;
     double coarse_nrm = 0.0;
     int64_t detected_start = -1;
     double peak_norm = 0.0;
     {
         const auto t0 = Clock::now();
-        if (stride == 1 && scratch.sync_real.is_real) {
-            int64_t d = roi_lo;
-            const float* const taps_dup = scratch.sync_real.taps_dup.data();
-            for (; d + 4 <= roi_hi; d += 4) {
-                if (d < 0 || d + 3 + static_cast<int64_t>(Ls) > visible_end) {
-                    break;
+        struct SearchInterval {
+            int64_t lo = 0;
+            int64_t hi = 0;
+        };
+        constexpr size_t kMaxIntervals = 64;
+        std::array<SearchInterval, kMaxIntervals> outside_ivs{};
+        size_t outside_count = 0;
+        std::array<SearchInterval, kMaxIntervals> inside_ivs{};
+        size_t inside_count = 0;
+
+        auto push_interval = [](std::array<SearchInterval, kMaxIntervals>& arr,
+                                size_t& cnt,
+                                int64_t lo,
+                                int64_t hi) {
+            if (hi <= lo)
+                return;
+            if (cnt > 0 && lo <= arr[cnt - 1].hi) {
+                arr[cnt - 1].hi = std::max(arr[cnt - 1].hi, hi);
+                return;
+            }
+            if (cnt < kMaxIntervals) {
+                arr[cnt++] = {lo, hi};
+            } else {
+                arr[cnt - 1].hi = std::max(arr[cnt - 1].hi, hi);
+            }
+        };
+
+        auto range_energy_sq = [&](int64_t d, size_t L) -> double {
+            if (d >= energy_base && d + static_cast<int64_t>(L) <= energy_end) {
+                const size_t lo = static_cast<size_t>(d - energy_base);
+                const size_t hi =
+                    static_cast<size_t>(d + static_cast<int64_t>(L) - energy_base);
+                return std::max(0.0, energy[hi] - energy[lo]);
+            }
+            if (d < 0 || d + static_cast<int64_t>(L) > visible_end)
+                return 0.0;
+            double sum = 0.0;
+            for (size_t k = 0; k < L; ++k) {
+                const cf v = y[static_cast<size_t>(d) + k];
+                sum += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
+                       static_cast<double>(v.imag()) * static_cast<double>(v.imag());
+            }
+            return sum;
+        };
+
+        std::array<SearchInterval, kMaxIntervals> active_ivs{};
+        size_t active_count = 0;
+        bool prefilter_ran = false;
+        const int64_t sps_i64 = static_cast<int64_t>(sps);
+        if (cfg.autocorr_prefilter &&
+            (roi_hi - roi_lo) > 8 * sps_i64 &&
+            cfg.autocorr_threshold > 0.0) {
+            const size_t seg_len = std::max<size_t>(64, sps / 2);
+            const int64_t seg_len_i64 = static_cast<int64_t>(seg_len);
+            const int64_t max_seg_start =
+                std::min(roi_hi, visible_end - sps_i64 - seg_len_i64 + 1);
+            const size_t num_segs =
+                (max_seg_start > roi_lo)
+                    ? static_cast<size_t>((max_seg_start - roi_lo + seg_len_i64 - 1) / seg_len_i64)
+                    : 0;
+            const size_t box_segs = std::min<size_t>(4, num_segs);
+            if (num_segs >= 2 && box_segs >= 1 &&
+                scratch.ac_seg_corr.size() >= num_segs &&
+                scratch.ac_seg_ea.size() >= num_segs &&
+                scratch.ac_seg_eb.size() >= num_segs) {
+                prefilter_ran = true;
+                for (size_t s = 0; s < num_segs; ++s) {
+                    const int64_t pos = roi_lo + static_cast<int64_t>(s) * seg_len_i64;
+                    const size_t rem =
+                        static_cast<size_t>(visible_end - sps_i64 - pos);
+                    const size_t len = std::min(seg_len, rem);
+                    cf cs(0.f, 0.f);
+                    volk_32fc_x2_conjugate_dot_prod_32fc_u(
+                        &cs, y + pos, y + pos + sps_i64, static_cast<unsigned>(len));
+                    scratch.ac_seg_corr[s] = cd(cs);
+                    scratch.ac_seg_ea[s] = range_energy_sq(pos, len);
+                    scratch.ac_seg_eb[s] = range_energy_sq(pos + sps_i64, len);
                 }
-                cf dots[4];
-                demod::rxopt::real_template_dot_4lag(y + d, taps_dup, Ls, dots);
-                for (int j = 0; j < 4; ++j) {
-                    const int64_t cur_d = d + j;
-                    const double e = get_energy(cur_d, Ls);
-                    const double nrm =
-                        (e > 0.0) ? static_cast<double>(std::abs(dots[j])) / e : 0.0;
-                    if (nrm > coarse_nrm) {
-                        coarse_nrm = nrm;
-                        coarse_pos = cur_d;
+
+                cd cw(0.0, 0.0);
+                double eaw = 0.0;
+                double ebw = 0.0;
+                for (size_t j = 0; j < box_segs; ++j) {
+                    cw += scratch.ac_seg_corr[j];
+                    eaw += scratch.ac_seg_ea[j];
+                    ebw += scratch.ac_seg_eb[j];
+                }
+                const double thr_sq = cfg.autocorr_threshold * cfg.autocorr_threshold;
+                for (size_t s = 0;; ++s) {
+                    if (eaw > 1e-12 && ebw > 1e-12 &&
+                        std::norm(cw) >= thr_sq * eaw * ebw) {
+                        const int64_t seg_start =
+                            roi_lo + static_cast<int64_t>(s) * seg_len_i64;
+                        const int64_t hit_lo = std::max(roi_lo, seg_start - sps_i64);
+                        const int64_t hit_hi = std::min(
+                            roi_hi,
+                            seg_start + static_cast<int64_t>(box_segs) * seg_len_i64 +
+                                2 * sps_i64);
+                        push_interval(active_ivs, active_count, hit_lo, hit_hi);
                     }
-                }
-            }
-            for (; d < roi_hi; ++d) {
-                const double nrm = norm_at(d, nullptr);
-                if (nrm > coarse_nrm) {
-                    coarse_nrm = nrm;
-                    coarse_pos = d;
-                }
-            }
-        } else {
-            for (int64_t d = roi_lo; d < roi_hi; d += stride) {
-                const double nrm = norm_at(d, nullptr);
-                if (nrm > coarse_nrm) {
-                    coarse_nrm = nrm;
-                    coarse_pos = d;
+                    if (s + box_segs >= num_segs)
+                        break;
+                    cw += scratch.ac_seg_corr[s + box_segs] - scratch.ac_seg_corr[s];
+                    eaw += scratch.ac_seg_ea[s + box_segs] - scratch.ac_seg_ea[s];
+                    ebw += scratch.ac_seg_eb[s + box_segs] - scratch.ac_seg_eb[s];
                 }
             }
         }
 
-        detected_start = coarse_pos;
-        peak_norm = coarse_nrm;
-        if (coarse_pos >= 0) {
+        if (prefilter_ran && active_count == 0) {
+            model.coarse_peak = 0.0;
+            model.detection_metric = 0.0;
+            if (timings)
+                timings->detect_us = us_since(t0);
+            return finish("bypassed", "no_autocorr_preamble");
+        }
+        if (!prefilter_ran) {
+            push_interval(active_ivs, active_count, roi_lo, roi_hi);
+        }
+
+        if (cfg.target_preamble_lo >= 0 &&
+            cfg.target_preamble_hi > cfg.target_preamble_lo) {
+            const int64_t t_lo = cfg.target_preamble_lo;
+            const int64_t t_hi = cfg.target_preamble_hi;
+            for (size_t i = 0; i < active_count; ++i) {
+                const int64_t a_lo = active_ivs[i].lo;
+                const int64_t a_hi = active_ivs[i].hi;
+                if (a_lo < t_lo) {
+                    push_interval(outside_ivs, outside_count, a_lo, std::min(a_hi, t_lo));
+                }
+                if (a_hi > a_lo && std::min(a_hi, t_hi) > std::max(a_lo, t_lo)) {
+                    push_interval(inside_ivs, inside_count,
+                                  std::max(a_lo, t_lo), std::min(a_hi, t_hi));
+                }
+                if (a_hi > t_hi) {
+                    push_interval(outside_ivs, outside_count, std::max(a_lo, t_hi), a_hi);
+                }
+            }
+            if (prefilter_ran && outside_count == 0 && !cfg.autocorr_search_inside_target) {
+                model.coarse_peak = 0.0;
+                model.detection_metric = 0.0;
+                if (timings)
+                    timings->detect_us = us_since(t0);
+                return finish("bypassed", "no_outside_autocorr_preamble");
+            }
+        } else {
+            for (size_t i = 0; i < active_count; ++i) {
+                push_interval(outside_ivs, outside_count,
+                              active_ivs[i].lo, active_ivs[i].hi);
+            }
+        }
+
+        struct CoarseCandidate {
+            int64_t pos = -1;
+            double nrm = -1.0;
+        };
+        if (stride == 1 && scratch.sync_real.is_real) {
+            const float* const taps_dup = scratch.sync_real.taps_dup.data();
+            auto scan_stride1_iv = [&](int64_t iv_lo, int64_t iv_hi) {
+                int64_t d = iv_lo;
+                for (; d + 4 <= iv_hi; d += 4) {
+                    if (d < 0 || d + 3 + static_cast<int64_t>(Ls) > visible_end) {
+                        break;
+                    }
+                    cf dots[4];
+                    demod::rxopt::real_template_dot_4lag(y + d, taps_dup, Ls, dots);
+                    for (int j = 0; j < 4; ++j) {
+                        const int64_t cur_d = d + j;
+                        const double e = get_energy(cur_d, Ls);
+                        const double nrm =
+                            (e > 0.0) ? static_cast<double>(std::abs(dots[j])) / e : 0.0;
+                        if (nrm > coarse_nrm) {
+                            coarse_nrm = nrm;
+                            coarse_pos = cur_d;
+                        }
+                    }
+                }
+                for (; d < iv_hi; ++d) {
+                    const double nrm = norm_at(d, nullptr);
+                    if (nrm > coarse_nrm) {
+                        coarse_nrm = nrm;
+                        coarse_pos = d;
+                    }
+                }
+            };
+            for (size_t i = 0; i < outside_count; ++i) {
+                scan_stride1_iv(outside_ivs[i].lo, outside_ivs[i].hi);
+            }
+            if (cfg.autocorr_search_inside_target && coarse_nrm < detect_thr) {
+                for (size_t i = 0; i < inside_count; ++i) {
+                    scan_stride1_iv(inside_ivs[i].lo, inside_ivs[i].hi);
+                }
+            }
+        } else {
+            constexpr size_t kTopCoarse = 16;
+            const int64_t min_sep =
+                std::max<int64_t>(2 * stride, static_cast<int64_t>(Ls / 2));
+            const size_t chain_cap =
+                std::max<size_t>(1, std::min<size_t>(cfg.fit_reps, 8));
+            const size_t min_train = std::min<size_t>(chain_cap, 4);
+
+            auto score_sync_chain = [&](int64_t start_pos, cf start_corr) -> size_t {
+                size_t chain = 1;
+                bool have_dir = false;
+                cd ref_dir(1.0, 0.0);
+                const double relaxed_thr = 0.7 * detect_thr;
+                auto walk = [&](int64_t dir_sign) {
+                    int64_t cur_pos = start_pos;
+                    cf cur_c = start_corr;
+                    while (chain < chain_cap) {
+                        const int64_t probe =
+                            cur_pos + dir_sign * static_cast<int64_t>(sps);
+                        const int64_t p_lo = std::max<int64_t>(0, probe - 8);
+                        const int64_t p_hi =
+                            std::min<int64_t>(visible_end - static_cast<int64_t>(Ls) + 1,
+                                              probe + 9);
+                        int64_t best_d = -1;
+                        double best_n = -1.0;
+                        cf best_c(0.f, 0.f);
+                        for (int64_t d = p_lo; d < p_hi; ++d) {
+                            cf c(0.f, 0.f);
+                            const double nrm = norm_at(d, &c);
+                            if (nrm > best_n) {
+                                best_n = nrm;
+                                best_d = d;
+                                best_c = c;
+                            }
+                        }
+                        if (best_d < 0 || best_n < relaxed_thr)
+                            break;
+                        const cd diff = (dir_sign > 0)
+                                            ? (cd(best_c) * std::conj(cd(cur_c)))
+                                            : (cd(cur_c) * std::conj(cd(best_c)));
+                        const double mag = std::abs(diff);
+                        if (!(mag > 0.0))
+                            break;
+                        const cd unit_d = diff / mag;
+                        if (!have_dir) {
+                            ref_dir = unit_d;
+                            have_dir = true;
+                        } else {
+                            const double cos_align =
+                                unit_d.real() * ref_dir.real() +
+                                unit_d.imag() * ref_dir.imag();
+                            if (cos_align <= 0.0)
+                                break;
+                        }
+                        ++chain;
+                        cur_pos = best_d;
+                        cur_c = best_c;
+                    }
+                };
+                walk(+1);
+                walk(-1);
+                return chain;
+            };
+
+            size_t best_chain = 0;
+            auto consider_fine = [&](int64_t pos, double nrm, size_t chain) {
+                if (nrm >= detect_thr &&
+                    (detected_start < 0 || chain > best_chain ||
+                     (chain == best_chain && nrm > peak_norm))) {
+                    best_chain = chain;
+                    peak_norm = nrm;
+                    detected_start = pos;
+                } else if (detected_start < 0 && nrm > peak_norm) {
+                    peak_norm = nrm;
+                    detected_start = pos;
+                }
+            };
+
+            auto push_top_candidate = [&](std::array<CoarseCandidate, kTopCoarse>& phase_top,
+                                          size_t& phase_count,
+                                          int64_t d,
+                                          double nrm) {
+                if (stride <= 1 || nrm < detect_thr)
+                    return;
+                for (size_t i = 0; i < phase_count; ++i) {
+                    if (std::abs(d - phase_top[i].pos) <= min_sep) {
+                        if (nrm > phase_top[i].nrm) {
+                            phase_top[i].pos = d;
+                            phase_top[i].nrm = nrm;
+                        }
+                        return;
+                    }
+                }
+                if (phase_count < kTopCoarse) {
+                    phase_top[phase_count++] = {d, nrm};
+                } else {
+                    size_t min_idx = 0;
+                    for (size_t i = 1; i < kTopCoarse; ++i) {
+                        if (phase_top[i].nrm < phase_top[min_idx].nrm)
+                            min_idx = i;
+                    }
+                    if (nrm > phase_top[min_idx].nrm) {
+                        phase_top[min_idx] = {d, nrm};
+                    }
+                }
+            };
+
+            auto refine_phase_candidates = [&](int64_t iv_lo,
+                                               int64_t iv_hi,
+                                               std::array<CoarseCandidate, kTopCoarse>& phase_top,
+                                               size_t phase_count,
+                                               int64_t phase_best_d) {
+                if (phase_count == 0) {
+                    if (phase_best_d >= 0) {
+                        const int64_t lo = std::max(iv_lo, phase_best_d - stride);
+                        const int64_t hi = std::min(iv_hi, phase_best_d + stride + 1);
+                        int64_t fpos = -1;
+                        double fnrm = -1.0;
+                        cf fcorr(0.f, 0.f);
+                        for (int64_t d = lo; d < hi; ++d) {
+                            cf c(0.f, 0.f);
+                            const double nrm = norm_at(d, &c);
+                            if (nrm > fnrm) {
+                                fnrm = nrm;
+                                fpos = d;
+                                fcorr = c;
+                            }
+                        }
+                        if (fpos >= 0) {
+                            const size_t ch = (fnrm >= detect_thr)
+                                                  ? score_sync_chain(fpos, fcorr)
+                                                  : 0;
+                            consider_fine(fpos, fnrm, ch);
+                        }
+                    }
+                    return;
+                }
+
+                std::sort(phase_top.begin(), phase_top.begin() + phase_count,
+                          [](const CoarseCandidate& a, const CoarseCandidate& b) {
+                              return a.nrm > b.nrm;
+                          });
+                for (size_t i = 0; i < phase_count; ++i) {
+                    const int64_t cpos = phase_top[i].pos;
+                    if (cpos < 0)
+                        continue;
+                    const int64_t lo = std::max(iv_lo, cpos - stride);
+                    const int64_t hi = std::min(iv_hi, cpos + stride + 1);
+                    int64_t fpos = -1;
+                    double fnrm = -1.0;
+                    cf fcorr(0.f, 0.f);
+                    for (int64_t d = lo; d < hi; ++d) {
+                        cf c(0.f, 0.f);
+                        const double nrm = norm_at(d, &c);
+                        if (nrm > fnrm) {
+                            fnrm = nrm;
+                            fpos = d;
+                            fcorr = c;
+                        }
+                    }
+                    if (fpos >= 0) {
+                        const size_t ch = (fnrm >= detect_thr)
+                                              ? score_sync_chain(fpos, fcorr)
+                                              : 0;
+                        consider_fine(fpos, fnrm, ch);
+                        if (best_chain >= chain_cap)
+                            break;
+                    }
+                }
+            };
+
+            auto scan_phase_scalar = [&](int64_t iv_lo, int64_t iv_hi, int64_t scan_lo) {
+                std::array<CoarseCandidate, kTopCoarse> phase_top{};
+                size_t phase_count = 0;
+                int64_t phase_best_d = -1;
+                double phase_best_nrm = -1.0;
+                for (int64_t d = scan_lo; d < iv_hi; d += stride) {
+                    const double nrm = norm_at(d, nullptr);
+                    if (nrm > coarse_nrm) {
+                        coarse_nrm = nrm;
+                        coarse_pos = d;
+                    }
+                    if (nrm > phase_best_nrm) {
+                        phase_best_nrm = nrm;
+                        phase_best_d = d;
+                    }
+                    push_top_candidate(phase_top, phase_count, d, nrm);
+                }
+                refine_phase_candidates(iv_lo, iv_hi, phase_top, phase_count, phase_best_d);
+            };
+
+            auto scan_phase_4lag = [&](int64_t iv_lo, int64_t iv_hi, int64_t scan_lo) {
+                std::array<CoarseCandidate, kTopCoarse> phase_top{};
+                size_t phase_count = 0;
+                int64_t phase_best_d = -1;
+                double phase_best_nrm = -1.0;
+                const float* const taps_dup = scratch.sync_real.taps_dup.data();
+                for (int64_t d = scan_lo; d < iv_hi; d += stride) {
+                    if (d + 4 <= iv_hi &&
+                        d + 3 + static_cast<int64_t>(Ls) <= visible_end) {
+                        cf dots[4];
+                        demod::rxopt::real_template_dot_4lag(y + d, taps_dup, Ls, dots);
+                        int64_t best4_d = -1;
+                        double best4_nrm = -1.0;
+                        for (int j = 0; j < 4; ++j) {
+                            const int64_t cur_d = d + j;
+                            const double e = get_energy(cur_d, Ls);
+                            const double nrm =
+                                (e > 0.0) ? static_cast<double>(std::abs(dots[j])) / e : 0.0;
+                            if (nrm > best4_nrm) {
+                                best4_nrm = nrm;
+                                best4_d = cur_d;
+                            }
+                        }
+                        if (best4_nrm > coarse_nrm) {
+                            coarse_nrm = best4_nrm;
+                            coarse_pos = best4_d;
+                        }
+                        if (best4_nrm > phase_best_nrm) {
+                            phase_best_nrm = best4_nrm;
+                            phase_best_d = best4_d;
+                        }
+                        push_top_candidate(phase_top, phase_count, best4_d, best4_nrm);
+                    } else {
+                        for (int64_t td = d; td < iv_hi; ++td) {
+                            const double nrm = norm_at(td, nullptr);
+                            if (nrm > coarse_nrm) {
+                                coarse_nrm = nrm;
+                                coarse_pos = td;
+                            }
+                            if (nrm > phase_best_nrm) {
+                                phase_best_nrm = nrm;
+                                phase_best_d = td;
+                            }
+                            push_top_candidate(phase_top, phase_count, td, nrm);
+                        }
+                    }
+                }
+                refine_phase_candidates(iv_lo, iv_hi, phase_top, phase_count, phase_best_d);
+            };
+
+            auto scan_interval = [&](int64_t iv_lo, int64_t iv_hi) {
+                if (stride >= 4 && scratch.sync_real.is_real) {
+                    for (int64_t off = 0; off < stride && best_chain < min_train; off += 4) {
+                        if (iv_lo + off < iv_hi) {
+                            scan_phase_4lag(iv_lo, iv_hi, iv_lo + off);
+                        }
+                    }
+                    return;
+                }
+                scan_phase_scalar(iv_lo, iv_hi, iv_lo);
+                if (stride >= 4 && best_chain < min_train &&
+                    iv_lo + (stride / 2) < iv_hi) {
+                    scan_phase_scalar(iv_lo, iv_hi, iv_lo + (stride / 2));
+                }
+                if (stride >= 8 && best_chain < min_train) {
+                    if (iv_lo + (stride / 4) < iv_hi)
+                        scan_phase_scalar(iv_lo, iv_hi, iv_lo + (stride / 4));
+                    if (best_chain < min_train &&
+                        iv_lo + (3 * stride) / 4 < iv_hi) {
+                        scan_phase_scalar(iv_lo, iv_hi, iv_lo + (3 * stride) / 4);
+                    }
+                }
+            };
+
+            for (size_t i = 0; i < outside_count && best_chain < chain_cap; ++i) {
+                scan_interval(outside_ivs[i].lo, outside_ivs[i].hi);
+            }
+            if (cfg.autocorr_search_inside_target && best_chain < min_train) {
+                for (size_t i = 0; i < inside_count && best_chain < chain_cap; ++i) {
+                    scan_interval(inside_ivs[i].lo, inside_ivs[i].hi);
+                }
+            }
+        }
+
+        if (stride == 1 && coarse_pos >= 0) {
             const int64_t lo = std::max(roi_lo, coarse_pos - stride);
             const int64_t hi = std::min(roi_hi, coarse_pos + stride + 1);
             for (int64_t d = lo; d < hi; ++d) {
@@ -1059,26 +1532,70 @@ bool estimate_discrete_cir(const std::complex<float>* y,
     if (confirmed < 2)
         return finish("bypassed", "repetition_not_confirmed");
 
-    // ---- 4. CFO from adjacent training-peak phases -----------------------
+    // ---- 4. OLS CFO from visible SYNC training-peak phases ----------------
+    // Fitting across all visible SYNC repetitions (up to kMaxFitReps=64) instead
+    // of only the first fit_reps=8 suppresses overlapping-signal CFO bias by an
+    // order of magnitude while respecting visible_end for strict prefix callers.
     double cfo = 0.0;
     {
         const auto t0 = Clock::now();
-        cd sum(0.0, 0.0);
-        size_t cnt = 0;
         const size_t k_lo = (fit_reps >= 3) ? 1 : 0;
-        for (size_t k = k_lo; k + 1 < fit_reps; ++k) {
-            if (rep_norms[k] >= detect_thr &&
-                rep_norms[k + 1] >= detect_thr) {
-                cd t = cd(rep_corr[k + 1]) * std::conj(cd(rep_corr[k]));
-                const double a = std::abs(t);
-                if (a > 0.0) {
-                    sum += t / a;
-                    ++cnt;
-                }
+        const size_t max_cfo_reps =
+            std::min<size_t>(kMaxFitReps, std::max(fit_reps, cfg.sync_reps));
+        std::array<size_t, kMaxFitReps> cfo_k{};
+        std::array<double, kMaxFitReps> cfo_phi{};
+        size_t m_cfo = 0;
+
+        for (size_t k = k_lo; k < max_cfo_reps; ++k) {
+            cf c(0.f, 0.f);
+            double nrm = 0.0;
+            if (k < fit_reps) {
+                c = rep_corr[k];
+                nrm = rep_norms[k];
+            } else {
+                const int64_t d = q + static_cast<int64_t>(k * sps);
+                if (d + static_cast<int64_t>(Ls) > visible_end)
+                    break;
+                nrm = norm_at(d, &c);
+            }
+            if (nrm >= detect_thr && (c.real() != 0.0f || c.imag() != 0.0f)) {
+                cfo_k[m_cfo] = k;
+                cfo_phi[m_cfo] = std::atan2(static_cast<double>(c.imag()),
+                                            static_cast<double>(c.real()));
+                ++m_cfo;
             }
         }
-        if (cnt > 0) {
-            const double dphi = std::arg(sum);
+
+        if (m_cfo >= 2) {
+            cd adj_sum(0.0, 0.0);
+            for (size_t i = 1; i < m_cfo; ++i) {
+                if (cfo_k[i] == cfo_k[i - 1] + 1)
+                    adj_sum += std::polar(1.0, cfo_phi[i] - cfo_phi[i - 1]);
+            }
+            const double dphi_hint =
+                (std::abs(adj_sum) > 0.0) ? std::arg(adj_sum) : 0.0;
+            for (size_t i = 1; i < m_cfo; ++i) {
+                const double pred = cfo_phi[i - 1] +
+                    dphi_hint * static_cast<double>(cfo_k[i] - cfo_k[i - 1]);
+                while (cfo_phi[i] - pred > kPi)
+                    cfo_phi[i] -= 2.0 * kPi;
+                while (cfo_phi[i] - pred < -kPi)
+                    cfo_phi[i] += 2.0 * kPi;
+            }
+            double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+            for (size_t i = 0; i < m_cfo; ++i) {
+                const double x = static_cast<double>(cfo_k[i] - cfo_k[0]);
+                const double y = cfo_phi[i];
+                sx += x;
+                sy += y;
+                sxx += x * x;
+                sxy += x * y;
+            }
+            const double dm = static_cast<double>(m_cfo);
+            const double denom = dm * sxx - sx * sx;
+            const double dphi = (std::abs(denom) > 1e-12)
+                                    ? ((dm * sxy - sx * sy) / denom)
+                                    : dphi_hint;
             cfo = dphi / (2.0 * kPi * static_cast<double>(sps) / fs);
         }
         if (timings)
@@ -1092,6 +1609,14 @@ bool estimate_discrete_cir(const std::complex<float>* y,
         const auto t_support = Clock::now();
         if (!scratch.ipatov_correlation || scratch.impulse_sync.size() != sps)
             return finish("failed", "impulse_template_unprepared");
+        // Align the Dirac impulse reference [lag_lo, lag_lo+taps) to the pulse
+        // shaper's main-lobe center (Legacy has an asymmetric causal tail around
+        // tap 2, whereas Gaussian/Blackman are symmetric around pulse_center_tap).
+        const int64_t pulse_lag_shift =
+            (cfg.pulse.shape == mod::PulseShape::Legacy)
+                ? 0
+                : (static_cast<int64_t>(mod::pulse_center_tap(cfg.pulse)) - 7);
+        const int64_t ipatov_lag_lo = cfg.lag_lo + pulse_lag_shift;
         const size_t taps = cfg.tap_count;
         const size_t width = sps + taps - 1;
         std::array<cd, kMaxSps + kMaxTaps> avg{};
@@ -1108,7 +1633,7 @@ bool estimate_discrete_cir(const std::complex<float>* y,
         }
 
         for (size_t k = 1; k < cfg.fit_reps; ++k) {
-            const int64_t lo = q + int64_t(k * sps) + cfg.lag_lo;
+            const int64_t lo = q + int64_t(k * sps) + ipatov_lag_lo;
             if (lo < 0 || lo + int64_t(width) > training_end) continue;
             const int64_t rel_lo = lo - q;
             if (cfo == 0.0) {
@@ -1153,11 +1678,11 @@ bool estimate_discrete_cir(const std::complex<float>* y,
             model.taps[d]=cf(acc/(code_energy*valid));
             if (!finite_cf(model.taps[d]))
                 return finish("failed", "nonfinite_correlation");
-            model.active_lags[d]=int16_t(cfg.lag_lo+int64_t(d));
+            model.active_lags[d]=int16_t(ipatov_lag_lo+int64_t(d));
         }
         model.impulse_template=true;
         model.cir_repetitions=valid;
-        model.lag_lo=cfg.lag_lo;
+        model.lag_lo=ipatov_lag_lo;
         model.tap_count=model.active_count=taps;
         model.support_source="ipatov_correlation";
         model.training_lo=q;
@@ -1177,7 +1702,7 @@ bool estimate_discrete_cir(const std::complex<float>* y,
             for (size_t c = 0; c < demod::kQm35CodeLength; ++c) {
                 const float s = scratch.impulse_sync[8 * c].real();
                 if (s != 0.f) {
-                    const int64_t p = int64_t(8 * c) + cfg.lag_lo;
+                    const int64_t p = int64_t(8 * c) + ipatov_lag_lo;
                     p_min = std::min(p_min, p);
                     p_max = std::max(p_max, p + int64_t(taps) - 1);
                 }
@@ -1196,7 +1721,7 @@ bool estimate_discrete_cir(const std::complex<float>* y,
             for (size_t c = 0; c < demod::kQm35CodeLength; ++c) {
                 const double sign = scratch.impulse_sync[8 * c].real();
                 if (sign == 0.0) continue;
-                const int64_t pos = int64_t(8 * c) + cfg.lag_lo;
+                const int64_t pos = int64_t(8 * c) + ipatov_lag_lo;
                 for (size_t d = 0; d < taps; ++d) {
                     const int64_t p = pos + int64_t(d);
                     const cd term = sign * cd(model.taps[d]);
@@ -1229,7 +1754,7 @@ bool estimate_discrete_cir(const std::complex<float>* y,
                 for (size_t c = 0; c < demod::kQm35CodeLength; ++c) {
                     const double sign = scratch.impulse_sync[8 * c].real();
                     if (sign == 0) continue;
-                    const int64_t pos = int64_t(k * sps + 8 * c) + cfg.lag_lo;
+                    const int64_t pos = int64_t(k * sps + 8 * c) + ipatov_lag_lo;
                     for (size_t d = 0; d < taps; ++d) {
                         const int64_t j = pos + int64_t(d);
                         if (j >= 0 && j < int64_t(rows))

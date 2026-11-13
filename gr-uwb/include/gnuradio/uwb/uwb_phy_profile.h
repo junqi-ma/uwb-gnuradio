@@ -64,6 +64,10 @@ struct Qm35825Profile {
     // CIR estimation window (from defaultOptions)
     size_t cir_pre_samples = 8;
     size_t cir_post_samples = 30;
+    // TX pulse center tap index on the 998.4 MS/s work grid (Legacy=2,
+    // Gaussian=12, Blackman=64).  Shifts the Dirac CIR axis and chip_start so
+    // non-Legacy symmetric shaping pulses stay centered inside [cir_pre, cir_post).
+    size_t pulse_center_sample = 2;
     size_t cir_skip_initial_repetitions = 10; // skip the first N SYNC for CIR
     size_t cir_repetitions = 54;              // preamble - skip
     // Match MATLAB compensateCarrierOffset: discard the startup transient in

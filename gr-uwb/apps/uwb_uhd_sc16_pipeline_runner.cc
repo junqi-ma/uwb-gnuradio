@@ -28,6 +28,7 @@ using std::isnan;
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <string>
@@ -341,7 +342,23 @@ void print_help(const char* prog_name)
               << "  --pre-guard <n>             Pre-guard samples per window (default: 400)\n"
               << "  --capture <n>               Capture samples per window (default: 3200)\n"
               << "  --post-guard <n>            Post-guard samples per window (default: 400)\n"
-              << "  --consumer <sic|sensing|both> Consumer pipeline mode (default: sic)\n"
+              << "  --consumer <mode>           Consumer mode: sic|sensing|both|sic_plus_sensing|comm|sic_plus_comm (default: sic)\n"
+              << "  --auto-schedule             Enable AutoAcquire + known-period OLS/PLL scheduling\n"
+              << "  --auto-guards               Derive interference-aware capture/guard geometry automatically\n"
+              << "  --period-ms <ms>            Schedule period in ms (sets period_samples & auto_schedule.period_s)\n"
+              << "  --acq-period-tol <frac>     Max relative period error tolerance in acquisition (default: 0.02)\n"
+              << "  --lock-observations <n>     Observations required to transition acquisition->locked (default: 10)\n"
+              << "  --energy-threshold <val>    Normalized energy gate threshold for acquisition (default: 0.004)\n"
+              << "  --autocorr-gate <0|1>       Use segmented SYNC autocorr gate for acquisition (default: 1)\n"
+              << "  --autocorr-threshold <val>  Normalized SYNC autocorr gate threshold (default: 0.35)\n"
+              << "  --autocorr-min-energy <val> Minimum normalized power floor for autocorr gate (default: 1e-4)\n"
+              << "  --prov-guard-us <us>        Provisional pre/post guard during lock acquisition in us (default: 150.0)\n"
+              << "  --radar-code <idx>          Sensing SYNC Ipatov code index (default: 9)\n"
+              << "  --radar-sync-reps <n>       Sensing SYNC repetition count (default: 64)\n"
+              << "  --comm-code <idx>           Comm RX SYNC Ipatov code index (default: 9)\n"
+              << "  --comm-sync-reps <n>        Comm RX SYNC repetition count (default: 64)\n"
+              << "  --sfd-mode <m>              SFD mode (4z1|4z2|4z3|4z4|decawave|ieee) for radar/comm/sic\n"
+              << "  --max-psdu-bytes <n>        Max expected target PSDU bytes for comm/auto-guards (default: 127)\n"
               << "  --replay-mode <fullspeed|paced> Replay timing mode (default: fullspeed)\n"
               << "  --cpu-rx <core>             Affinity CPU core for RX thread (-1 = unpinned)\n"
               << "  --cpu-dsp <core[,core...]>  DSP affinity: single core (-1 = unpinned) or one core per DSP worker\n"
@@ -355,7 +372,7 @@ void print_help(const char* prog_name)
               << "  --label <name>              Run label written into the JSON meta\n"
               << "  --json-out <path>           Write window-by-window results JSON\n"
               << "  --csv-out <path>            Write window-by-window results CSV\n"
-              << "  --resampler-profile <name>  Resampler profile (quality_minorder|realtime_minorder|quality|realtime, default: quality_minorder)\n"
+              << "  --resampler-profile <name>  Resampler profile (realtime_eq16|realtime_minorder|quality_eq32|quality_minorder|quality|realtime, default: realtime_eq16)\n"
               << "  --resampler-workers <n>     Resampler thread worker count (default: 1)\n"
               << "  --resampler-experiment <e>  Kernel experiment: none|fixed_phase|convert_cache|both\n"
               << "  --iq-dump-dir <dir>         Diagnostic post-resample IQ dump directory\n"
@@ -367,6 +384,10 @@ void print_help(const char* prog_name)
               << "  --sic-comm-code <n>         Comm SYNC code index for SIC (default: 10)\n"
               << "  --sic-sync-template <path>  One SYNC symbol CF32 @998.4M (default: testdata/reference_preamble.bin, code 9)\n"
               << "  --sic-roi-margin <n>        SIC coarse-search half-width around the expected preamble (default: 64)\n"
+              << "  --sic-full-window [0|1]     Search full window for SIC (default: false; auto-enabled with --auto-guards)\n"
+              << "  --sic-autocorr <0|1>        Segmented SYNC autocorr prefilter for wide SIC ROI (default: 1)\n"
+              << "  --sic-autocorr-threshold <val> Normalized SIC autocorr prefilter threshold (default: 0.20)\n"
+              << "  --sic-search-inside-target <0|1> Search inside target preamble when outside has no hit (default: 0)\n"
               << "  --sic-tap-count <n>         SIC discrete-CIR tap count (default: 20)\n"
               << "  --benchmark                 Acquire exclusive lock /tmp/uwb-sic-benchmark.lock\n"
               << "  --help, -h                  Show this help message and exit\n"
@@ -386,6 +407,17 @@ bool file_exists(const std::string& path)
     return (::stat(path.c_str(), &buffer) == 0);
 }
 
+const char* canonical_sfd_mode(const std::string& s)
+{
+    if (s == "4z1") return "4z1";
+    if (s == "4z2") return "4z2";
+    if (s == "4z3") return "4z3";
+    if (s == "4z4") return "4z4";
+    if (s == "decawave") return "decawave";
+    if (s == "ieee") return "ieee";
+    return nullptr;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -395,12 +427,17 @@ int main(int argc, char* argv[])
     std::string source_str = "replay";
     std::string file_path = "";
     double period_samples = 998400.0;
+    bool have_period_samples = false;
+    double period_ms = -1.0;
+    bool have_period_ms = false;
     std::string consumer_str = "sic";
     std::string replay_mode_str = "fullspeed";
     bool benchmark_mode = false;
     // SIC coarse-search ROI half-width in work samples, relative to the
     // expected preamble position (pre_guard mapped to the work grid).
     long long sic_roi_margin = 64;
+    bool sic_roi_margin_explicit = false;
+    bool sic_full_window_explicit = false;
     // 2026-11-11 round 2 measurement contract: steady region selection and
     // machine-readable output.  Defaults keep the historical cold-start
     // protocol (all completed windows are reported).
@@ -459,6 +496,7 @@ int main(int argc, char* argv[])
                 return 1;
             }
             period_samples = std::stod(argv[++i]);
+            have_period_samples = true;
         } else if (arg == "--pre-guard") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --pre-guard requires a sample count\n";
@@ -482,7 +520,7 @@ int main(int argc, char* argv[])
             cfg.post_guard_samples = static_cast<size_t>(std::stoul(argv[++i]));
         } else if (arg == "--consumer") {
             if (i + 1 >= argc) {
-                std::cerr << "Error: --consumer requires an argument (sic|sensing|both)\n";
+                std::cerr << "Error: --consumer requires an argument (sic|sensing|both|sic_plus_sensing|comm|sic_plus_comm)\n";
                 print_help(argv[0]);
                 return 1;
             }
@@ -716,6 +754,155 @@ int main(int argc, char* argv[])
                 return 1;
             }
             sic_roi_margin = std::stoll(argv[++i]);
+            sic_roi_margin_explicit = true;
+        } else if (arg == "--sic-full-window") {
+            sic_full_window_explicit = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                const std::string val = argv[++i];
+                if (val == "1" || val == "true") {
+                    cfg.sic_cfg.full_window_search = true;
+                } else if (val == "0" || val == "false") {
+                    cfg.sic_cfg.full_window_search = false;
+                } else {
+                    std::cerr << "Error: --sic-full-window expects 0|1|true|false\n";
+                    return 1;
+                }
+            } else {
+                cfg.sic_cfg.full_window_search = true;
+            }
+        } else if (arg == "--auto-schedule") {
+            cfg.schedule_mode = ScheduleMode::AutoAcquire;
+        } else if (arg == "--auto-guards") {
+            cfg.auto_schedule.auto_interference_guards = true;
+        } else if (arg == "--period-ms") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --period-ms requires a period in ms\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            period_ms = std::stod(argv[++i]);
+            have_period_ms = true;
+        } else if (arg == "--acq-period-tol") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --acq-period-tol requires a relative tolerance fraction\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.auto_schedule.max_period_rel_err = std::stod(argv[++i]);
+        } else if (arg == "--lock-observations") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --lock-observations requires an observation count\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.auto_schedule.lock_observations = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--energy-threshold") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --energy-threshold requires a threshold value\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.auto_schedule.energy_threshold = std::stod(argv[++i]);
+        } else if (arg == "--autocorr-gate") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --autocorr-gate requires 0 or 1\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.auto_schedule.use_autocorr_gate = (std::stoi(argv[++i]) != 0);
+        } else if (arg == "--autocorr-threshold") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --autocorr-threshold requires a threshold value\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.auto_schedule.autocorr_threshold = std::stof(argv[++i]);
+        } else if (arg == "--autocorr-min-energy") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --autocorr-min-energy requires a value\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.auto_schedule.autocorr_min_energy = std::stof(argv[++i]);
+        } else if (arg == "--sic-autocorr") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --sic-autocorr requires 0 or 1\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.sic_cfg.autocorr_prefilter = (std::stoi(argv[++i]) != 0);
+        } else if (arg == "--sic-autocorr-threshold") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --sic-autocorr-threshold requires a threshold value\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.sic_cfg.autocorr_threshold = std::stod(argv[++i]);
+        } else if (arg == "--sic-search-inside-target") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --sic-search-inside-target requires 0 or 1\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.sic_cfg.autocorr_search_inside_target = (std::stoi(argv[++i]) != 0);
+        } else if (arg == "--prov-guard-us") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --prov-guard-us requires microseconds\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.auto_schedule.provisional_guard_us = std::stod(argv[++i]);
+        } else if (arg == "--radar-code") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --radar-code requires a SYNC code index\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.radar_cfg.code_index = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--radar-sync-reps") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --radar-sync-reps requires a repetition count\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.radar_cfg.sync_repetitions = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--comm-code") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --comm-code requires a SYNC code index\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.comm_cfg.code_index = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--comm-sync-reps") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --comm-sync-reps requires a repetition count\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.comm_cfg.preamble_repetitions = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--sfd-mode") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --sfd-mode requires a mode (4z1|4z2|4z3|4z4|decawave|ieee)\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            const char* mode = canonical_sfd_mode(argv[++i]);
+            if (mode == nullptr) {
+                std::cerr << "Error: Invalid --sfd-mode. Expected 4z1|4z2|4z3|4z4|decawave|ieee\n";
+                return 1;
+            }
+            cfg.radar_cfg.sfd_mode = mode;
+            cfg.comm_cfg.sfd_mode = mode;
+            cfg.sic_cfg.sfd_mode = mode;
+        } else if (arg == "--max-psdu-bytes") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --max-psdu-bytes requires a byte count\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            const size_t max_bytes = static_cast<size_t>(std::stoul(argv[++i]));
+            cfg.comm_cfg.max_psdu_bytes = max_bytes;
+            cfg.auto_schedule.target_max_psdu_bytes = max_bytes;
         } else if (arg == "--sic-tap-count") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --sic-tap-count requires a tap count\n";
@@ -793,9 +980,15 @@ int main(int argc, char* argv[])
         cfg.consumer_mode = ConsumerMode::SensingCir;
     } else if (consumer_str == "both") {
         cfg.consumer_mode = ConsumerMode::Both;
+    } else if (consumer_str == "sic_plus_sensing") {
+        cfg.consumer_mode = ConsumerMode::SicPlusSensing;
+    } else if (consumer_str == "comm") {
+        cfg.consumer_mode = ConsumerMode::CommOnly;
+    } else if (consumer_str == "sic_plus_comm") {
+        cfg.consumer_mode = ConsumerMode::SicPlusComm;
     } else {
         std::cerr << "Error: Invalid consumer mode '" << consumer_str
-                  << "'. Expected 'sic', 'sensing', or 'both'.\n";
+                  << "'. Expected 'sic', 'sensing', 'both', 'sic_plus_sensing', 'comm', or 'sic_plus_comm'.\n";
         return 1;
     }
 
@@ -815,7 +1008,30 @@ int main(int argc, char* argv[])
         std::cerr << "Error: native rate must be positive.\n";
         return 1;
     }
-    cfg.period_s = period_samples / cfg.native_rate;
+    if (have_period_ms) {
+        if (period_ms <= 0.0) {
+            std::cerr << "Error: --period-ms must be positive.\n";
+            return 1;
+        }
+        cfg.period_s = period_ms * 1e-3;
+        cfg.auto_schedule.period_s = cfg.period_s;
+        period_samples = cfg.period_s * cfg.native_rate;
+    } else {
+        cfg.period_s = period_samples / cfg.native_rate;
+        if (have_period_samples) {
+            cfg.auto_schedule.period_s = cfg.period_s;
+        }
+    }
+
+    // When AutoAcquire uses interference-aware guards without an explicit
+    // --sic-roi-margin or --sic-full-window, enable full_window_search so
+    // random-arrival interference anywhere inside the widened window is found.
+    if (cfg.schedule_mode == ScheduleMode::AutoAcquire &&
+        cfg.auto_schedule.auto_interference_guards &&
+        !sic_full_window_explicit &&
+        !sic_roi_margin_explicit) {
+        cfg.sic_cfg.full_window_search = true;
+    }
 
     // ------------------------------------------------------------------
     // Derive the SIC geometry from the window layout.  Without this the
@@ -891,6 +1107,15 @@ int main(int argc, char* argv[])
               << "  Source:        " << (cfg.source_type == StreamSourceType::Replay ? "Replay (" + cfg.replay_file + ")" : "UHD Device") << "\n"
               << "  Native Rate:   " << cfg.native_rate / 1e6 << " MS/s\n"
               << "  Work Rate:     " << cfg.work_rate / 1e6 << " MS/s\n"
+              << "  Schedule Mode: "
+              << (cfg.schedule_mode == ScheduleMode::AutoAcquire ? "AutoAcquire" : "Fixed")
+              << (cfg.schedule_mode == ScheduleMode::AutoAcquire
+                      ? (std::string(", auto_guards=") +
+                         (cfg.auto_schedule.auto_interference_guards ? "on" : "off") +
+                         ", period_s=" + std::to_string(cfg.auto_schedule.period_s) +
+                         ", lock_obs=" + std::to_string(cfg.auto_schedule.lock_observations))
+                      : std::string())
+              << "\n"
               << "  Schedule:      t0=" << cfg.schedule_t0 << " samples, period=" << period_samples << " samples (" << cfg.period_s * 1e3 << " ms)\n"
               << "  Window Size:   pre=" << cfg.pre_guard_samples << ", cap=" << cfg.capture_samples << ", post=" << cfg.post_guard_samples
               << " (total=" << cfg.native_window_capacity() << ")\n"
@@ -997,6 +1222,10 @@ int main(int argc, char* argv[])
     size_t radar_executed_count = 0;
     size_t radar_sfd_found_count = 0;
 
+    size_t comm_attempted_count = 0;
+    size_t comm_ok_count = 0;
+    size_t comm_fcs_ok_count = 0;
+
     for (const auto& r : completed_windows) {
         v_slice.push_back(r.timing.slice_us);
         v_queue.push_back(r.timing.queue_us);
@@ -1018,6 +1247,15 @@ int main(int argc, char* argv[])
             radar_executed_count++;
             if (r.radar_sfd_found) {
                 radar_sfd_found_count++;
+            }
+        }
+        if (r.comm_attempted) {
+            comm_attempted_count++;
+            if (r.comm_ok) {
+                comm_ok_count++;
+            }
+            if (r.comm_fcs_ok) {
+                comm_fcs_ok_count++;
             }
         }
     }
@@ -1298,15 +1536,21 @@ int main(int argc, char* argv[])
     }
 
 
+    const auto as = pipeline.auto_schedule_stats();
+    const size_t effective_win_cap =
+        (as.enabled && (as.effective_pre_guard + as.effective_capture + as.effective_post_guard) > 0)
+            ? (as.effective_pre_guard + as.effective_capture + as.effective_post_guard)
+            : cfg.native_window_capacity();
+
     // Burst-level multi-core throughput and per-worker distribution
     print_system_throughput(cfg.dsp_workers,
                             completed_windows.size(),
                             total_elapsed_s,
-                            cfg.native_window_capacity(),
+                            effective_win_cap,
                             total_resample_us);
     print_worker_distribution(worker_rows, collected_results.size(), cfg.dsp_workers);
 
-    // Print SIC / Sensing metrics
+    // Print SIC / Sensing / Comm / Auto-Schedule metrics
     double mean_suppression = (sic_committed_count > 0) ? (total_suppression_db / static_cast<double>(sic_committed_count)) : 0.0;
     double sic_commit_rate = (sic_executed_count > 0) ? (100.0 * static_cast<double>(sic_committed_count) / static_cast<double>(sic_executed_count)) : 0.0;
     double radar_sfd_rate = (radar_executed_count > 0) ? (100.0 * static_cast<double>(radar_sfd_found_count) / static_cast<double>(radar_executed_count)) : 0.0;
@@ -1319,8 +1563,39 @@ int main(int argc, char* argv[])
               << "  Radar Executed Windows:            " << std::setw(10) << radar_executed_count << "\n"
               << "  Radar SFD Detection Count:         " << std::setw(10) << radar_sfd_found_count
               << " / " << radar_executed_count
-              << " (" << std::fixed << std::setprecision(1) << radar_sfd_rate << "%)\n"
-              << "================================================================================\n"
+              << " (" << std::fixed << std::setprecision(1) << radar_sfd_rate << "%)\n";
+    if (comm_attempted_count > 0 ||
+        cfg.consumer_mode == ConsumerMode::CommOnly ||
+        cfg.consumer_mode == ConsumerMode::SicPlusComm) {
+        double comm_ok_rate = (comm_attempted_count > 0)
+            ? (100.0 * static_cast<double>(comm_ok_count) / static_cast<double>(comm_attempted_count))
+            : 0.0;
+        std::cout << "  Comm Attempted Windows:            " << std::setw(10) << comm_attempted_count << "\n"
+                  << "  Comm OK / FCS OK Count:            " << std::setw(10) << comm_ok_count
+                  << " / " << comm_fcs_ok_count
+                  << " (" << std::fixed << std::setprecision(1) << comm_ok_rate << "%)\n";
+    }
+    if (as.enabled) {
+        std::cout << "\nAuto-Schedule Metrics:\n"
+                  << "  Final Lock State:                  " << as.final_state << "\n"
+                  << "  Acquisition Windows:               " << std::setw(10) << as.acq_windows << "\n"
+                  << "  Scheduled Windows:                 " << std::setw(10) << as.scheduled_windows << "\n"
+                  << "  Discontinuities:                   " << std::setw(10) << as.discontinuities << "\n"
+                  << "  Stale Feedbacks:                   " << std::setw(10) << as.stale_feedback << "\n"
+                  << "  Locked At Window ID:               ";
+        if (as.locked_at_window_id == std::numeric_limits<uint64_t>::max()) {
+            std::cout << "unlocked\n";
+        } else {
+            std::cout << as.locked_at_window_id << "\n";
+        }
+        std::cout << "  Tracked t0 / Period:               t0=" << std::fixed << std::setprecision(2) << as.t0_exact
+                  << ", P=" << as.period_samples << " samples (" << std::setprecision(6) << as.period_s * 1e3 << " ms)\n"
+                  << "  Effective Window Guards:           pre=" << as.effective_pre_guard
+                  << ", cap=" << as.effective_capture
+                  << ", post=" << as.effective_post_guard
+                  << " (total=" << (as.effective_pre_guard + as.effective_capture + as.effective_post_guard) << ")\n";
+    }
+    std::cout << "================================================================================\n"
               << std::endl;
 
     // ---- machine-readable output (same schema as the steady driver) ----
@@ -1389,6 +1664,34 @@ int main(int argc, char* argv[])
                       bench::json_number(pipeline.commit_diagnostics().callback_us));
     meta.emplace_back("commit_max_out_of_order_span",
                       bench::json_number(pipeline.commit_diagnostics().max_out_of_order_span));
+    meta.emplace_back("schedule_mode",
+                      bench::meta_string(cfg.schedule_mode == ScheduleMode::AutoAcquire ? "auto_acquire" : "fixed"));
+    meta.emplace_back("auto_schedule_enabled", bench::meta_bool(as.enabled));
+    meta.emplace_back("auto_schedule_final_state", bench::meta_string(as.final_state));
+    meta.emplace_back("auto_schedule_acq_windows", bench::json_number(as.acq_windows));
+    meta.emplace_back("auto_schedule_scheduled_windows", bench::json_number(as.scheduled_windows));
+    meta.emplace_back("auto_schedule_discontinuities", bench::json_number(as.discontinuities));
+    meta.emplace_back("auto_schedule_stale_feedback", bench::json_number(as.stale_feedback));
+    if (as.locked_at_window_id == std::numeric_limits<uint64_t>::max()) {
+        meta.emplace_back("auto_schedule_locked_at_window_id", "-1");
+    } else {
+        meta.emplace_back("auto_schedule_locked_at_window_id", bench::json_number(as.locked_at_window_id));
+    }
+    meta.emplace_back("auto_schedule_t0_exact", bench::json_number(as.t0_exact));
+    meta.emplace_back("auto_schedule_period_samples", bench::json_number(as.period_samples));
+    meta.emplace_back("auto_schedule_period_s", bench::json_number(as.period_s));
+    meta.emplace_back("auto_schedule_effective_pre_guard",
+                      bench::json_number(static_cast<uint64_t>(as.effective_pre_guard)));
+    meta.emplace_back("auto_schedule_effective_capture",
+                      bench::json_number(static_cast<uint64_t>(as.effective_capture)));
+    meta.emplace_back("auto_schedule_effective_post_guard",
+                      bench::json_number(static_cast<uint64_t>(as.effective_post_guard)));
+    meta.emplace_back("comm_attempted_count",
+                      bench::json_number(static_cast<uint64_t>(comm_attempted_count)));
+    meta.emplace_back("comm_ok_count",
+                      bench::json_number(static_cast<uint64_t>(comm_ok_count)));
+    meta.emplace_back("comm_fcs_ok_count",
+                      bench::json_number(static_cast<uint64_t>(comm_fcs_ok_count)));
 
     if (!bench::write_results_json(json_out, meta, ledger, collected_results)) {
         std::cerr << "Error: cannot write " << json_out << "\n";

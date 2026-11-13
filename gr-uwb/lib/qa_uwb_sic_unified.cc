@@ -516,7 +516,7 @@ BOOST_AUTO_TEST_CASE(test_ipatov_256_sync_cancels_tail_without_extending_trainin
     }
     BOOST_CHECK_LT(residual_tail,original_tail*.01);
     for(size_t j=q+256*kSps;j<n;++j) BOOST_REQUIRE_EQUAL(out[j],y[j]);
-    cfg.sync_reps=128;
+    cfg.sync_reps=100;
     BOOST_CHECK(!prepare_sic_unified(cfg,templates,scratch,&error));
     BOOST_CHECK_EQUAL(error,"unsupported Ipatov geometry");
 }
@@ -720,6 +720,131 @@ BOOST_AUTO_TEST_CASE(test_simd_roi_energy_reduction)
     double e_out_nan = 0.0;
     compute_roi_energies(y.data(), out.data(), 0, 100, e_y_nan, e_out_nan);
     BOOST_CHECK(!std::isfinite(e_y_nan));
+}
+
+BOOST_AUTO_TEST_CASE(test_discrete_autocorr_prefilter_and_target_discrimination)
+{
+    TestPacket p_int(10, 32, 64);
+    TestPacket p_target(9, 16, 16);
+    SicUnifiedTemplates t = make_templates(p_int);
+
+    constexpr size_t kWin = 160000;
+    SicUnifiedConfig cfg;
+    cfg.policy = SicPolicy::PreambleOnly;
+    cfg.backend = SicEstimatorBackend::DiscreteCir;
+    cfg.comm_code = 10;
+    cfg.sync_reps = 64;
+    cfg.samples_per_symbol = kSps;
+    cfg.sample_rate = kFs;
+    cfg.max_window_samples = kWin;
+    cfg.max_packet_samples = p_int.wave.size() + 4096;
+    cfg.full_window_search = true;
+    cfg.coarse_stride = 8;
+    cfg.autocorr_prefilter = true;
+    cfg.autocorr_threshold = 0.20;
+
+    SicUnifiedScratch scratch;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(prepare_sic_unified(cfg, t, scratch, &err), err);
+
+    std::vector<cf> out(kWin);
+    std::vector<cf> ihat(kWin);
+
+    // 1. Pure noise wide ROI must short-circuit via "no_autocorr_preamble".
+    {
+        std::vector<cf> y_noise(kWin);
+        uint32_t rng = 0x9E3779B9U;
+        for (size_t i = 0; i < kWin; ++i) {
+            rng = rng * 1664525U + 1013904223U;
+            const float re = static_cast<float>(static_cast<int32_t>(rng >> 16) - 32768) * 1e-6f;
+            rng = rng * 1664525U + 1013904223U;
+            const float im = static_cast<float>(static_cast<int32_t>(rng >> 16) - 32768) * 1e-6f;
+            y_noise[i] = cf(re, im);
+        }
+        SicUnifiedResult res;
+        res.out = out.data();
+        res.i_hat = ihat.data();
+        BOOST_REQUIRE(sic_process_unified(y_noise.data(), kWin, t, cfg, scratch, res));
+        BOOST_CHECK(!res.committed);
+        BOOST_CHECK_EQUAL(std::string(res.reason ? res.reason : ""), "no_autocorr_preamble");
+    }
+
+    // 2. Target inside [target_preamble_lo, target_preamble_hi) + external code-10 interferer outside.
+    {
+        std::vector<cf> y(kWin, cf(0.0f, 0.0f));
+        const size_t target_q = 12000;
+        const size_t int_q = 65000;
+        for (size_t i = 0; i < p_target.wave.size() && target_q + i < kWin; ++i) {
+            y[target_q + i] += p_target.wave[i] * 0.25f;
+        }
+        for (size_t i = 0; i < p_int.wave.size() && int_q + i < kWin; ++i) {
+            y[int_q + i] += p_int.wave[i];
+        }
+
+        SicUnifiedConfig cfg_ext = cfg;
+        cfg_ext.target_preamble_lo = 10000;
+        cfg_ext.target_preamble_hi = 32000;
+        cfg_ext.roi_lo = 10000;
+        cfg_ext.roi_hi = 150000;
+
+        SicUnifiedResult res;
+        res.out = out.data();
+        res.i_hat = ihat.data();
+        BOOST_REQUIRE(sic_process_unified(y.data(), kWin, t, cfg_ext, scratch, res));
+        BOOST_CHECK_MESSAGE(res.committed, "ext reason=" << (res.reason ? res.reason : "null"));
+        BOOST_CHECK_GT(res.suppression_db, 10.0);
+        BOOST_CHECK_LE(std::abs(res.channel.q - static_cast<int64_t>(int_q)), 8);
+    }
+
+    // 2b. Clean target-only window (no external interferer): default behavior bypasses cleanly when outside_ivs is empty.
+    {
+        std::vector<cf> y(kWin, cf(0.0f, 0.0f));
+        const size_t target_q = 12000;
+        for (size_t i = 0; i < p_target.wave.size() && target_q + i < kWin; ++i) {
+            y[target_q + i] += p_target.wave[i];
+        }
+
+        SicUnifiedConfig cfg_clean = cfg;
+        cfg_clean.target_preamble_lo = 10000;
+        cfg_clean.target_preamble_hi = 40000;
+        cfg_clean.roi_lo = 10000;
+        cfg_clean.roi_hi = 150000;
+
+        SicUnifiedResult res;
+        res.out = out.data();
+        res.i_hat = ihat.data();
+        BOOST_REQUIRE(sic_process_unified(y.data(), kWin, t, cfg_clean, scratch, res));
+        BOOST_CHECK(!res.committed);
+        BOOST_CHECK_EQUAL(std::string(res.reason ? res.reason : ""), "no_outside_autocorr_preamble");
+    }
+
+    // 3. Overlapping code-10 interferer inside [target_preamble_lo, target_preamble_hi) with explicit inside-search opt-in.
+    {
+        std::vector<cf> y(kWin, cf(0.0f, 0.0f));
+        const size_t target_q = 12000;
+        const size_t int_q = 12500;
+        for (size_t i = 0; i < p_target.wave.size() && target_q + i < kWin; ++i) {
+            y[target_q + i] += p_target.wave[i] * 0.2f;
+        }
+        for (size_t i = 0; i < p_int.wave.size() && int_q + i < kWin; ++i) {
+            y[int_q + i] += p_int.wave[i];
+        }
+
+        SicUnifiedConfig cfg_in = cfg;
+        cfg_in.autocorr_search_inside_target = true;
+        cfg_in.target_preamble_lo = 10000;
+        cfg_in.target_preamble_hi = 32000;
+        cfg_in.roi_lo = 10000;
+        cfg_in.roi_hi = 150000;
+
+        SicUnifiedResult res;
+        res.out = out.data();
+        res.i_hat = ihat.data();
+        BOOST_REQUIRE(sic_process_unified(y.data(), kWin, t, cfg_in, scratch, res));
+        BOOST_CHECK_MESSAGE(res.committed, "in reason=" << (res.reason ? res.reason : "null"));
+        BOOST_CHECK_GT(res.suppression_db, 10.0);
+        BOOST_CHECK_LE(std::abs(res.channel.q - static_cast<int64_t>(int_q)), 8);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

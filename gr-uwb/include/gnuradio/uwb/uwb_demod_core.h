@@ -376,7 +376,9 @@ inline bool stage_timing(const std::complex<float>* rx,
     size_t roi_end = n;
     if (seed_start >= 0) {
         const int64_t seed = seed_start;
-        const int64_t margin = static_cast<int64_t>(profile.timing_search_margin);
+        const int64_t margin = static_cast<int64_t>(std::min<size_t>(
+            profile.timing_search_margin,
+            static_cast<size_t>(std::numeric_limits<int64_t>::max() / 4)));
         const int64_t lo = std::max<int64_t>(0, seed - margin);
         const int64_t hi =
             std::min<int64_t>(static_cast<int64_t>(n), seed + margin + (int64_t)L);
@@ -479,8 +481,9 @@ inline bool stage_timing(const std::complex<float>* rx,
         const int64_t seed =
             (seed_start >= 0) ? seed_start
                               : (int64_t)(roi_start + (roi_end - roi_start) / 2);
-        const int64_t margin =
-            static_cast<int64_t>(profile.timing_search_margin);
+        const int64_t margin = static_cast<int64_t>(std::min<size_t>(
+            profile.timing_search_margin,
+            static_cast<size_t>(std::numeric_limits<int64_t>::max() / 4)));
         const int64_t stride = std::max<int64_t>(
             1, static_cast<int64_t>(profile.timing_coarse_stride));
         const int64_t j_lo = std::max<int64_t>(0, seed - margin);
@@ -488,12 +491,70 @@ inline bool stage_timing(const std::complex<float>* rx,
             std::min<int64_t>(static_cast<int64_t>(n) - static_cast<int64_t>(L),
                               seed + margin);
 
-        auto consider = [&](int64_t pos, float met, std::complex<float> corr) {
-            if (met >= thr && met > first_metric) {
+        size_t best_chain = 0;
+        auto consider = [&](int64_t pos, float met, std::complex<float> corr,
+                            size_t chain) {
+            if (met >= thr &&
+                (first_start < 0 || chain > best_chain ||
+                 (chain == best_chain && met > first_metric))) {
+                best_chain = chain;
                 first_metric = met;
                 first_start = pos;
                 first_corr = corr;
             }
+        };
+
+        // Score coherent SYNC repetition continuity around a refined peak so an
+        // isolated SFD symbol (+1/-1 adjacent to 0) cannot masquerade as a full
+        // SYNC train during untriggered full-window search.
+        const size_t chain_cap =
+            std::max<size_t>(1, std::min<size_t>(profile.preamble_repetitions, 8));
+        auto score_sync_chain = [&](int64_t start_pos,
+                                    std::complex<float> start_corr) -> size_t {
+            const int64_t sym = static_cast<int64_t>(kQm35SamplesPerSymbol);
+            const float relaxed = 0.7f * thr;
+            size_t chain = 1;
+            bool have_dir = false;
+            std::complex<double> ref_dir(1.0, 0.0);
+            auto walk = [&](int64_t dir_sign) {
+                int64_t cur_pos = start_pos;
+                std::complex<float> cur_c = start_corr;
+                while (chain < chain_cap) {
+                    int64_t np = -1;
+                    float nm = 0.0f;
+                    std::complex<float> nc(0.0f, 0.0f);
+                    if (!local_best(cur_pos + dir_sign * sym, 8, relaxed,
+                                    &np, &nm, &nc)) {
+                        break;
+                    }
+                    const std::complex<double> diff =
+                        (dir_sign > 0)
+                            ? (std::complex<double>(nc) *
+                               std::conj(std::complex<double>(cur_c)))
+                            : (std::complex<double>(cur_c) *
+                               std::conj(std::complex<double>(nc)));
+                    const double mag = std::abs(diff);
+                    if (!(mag > 0.0))
+                        break;
+                    const std::complex<double> unit_d = diff / mag;
+                    if (!have_dir) {
+                        ref_dir = unit_d;
+                        have_dir = true;
+                    } else {
+                        const double cos_align =
+                            unit_d.real() * ref_dir.real() +
+                            unit_d.imag() * ref_dir.imag();
+                        if (cos_align <= 0.0)
+                            break;
+                    }
+                    ++chain;
+                    cur_pos = np;
+                    cur_c = nc;
+                }
+            };
+            walk(+1);
+            walk(-1);
+            return chain;
         };
 
         // MATLAB detectSeededPreamble: prefer a narrow FULL-RATE search around
@@ -549,57 +610,146 @@ inline bool stage_timing(const std::complex<float>* rx,
         // conjugate dots at stride.
         const auto coarse_begin = std::chrono::steady_clock::now();
         if (!seed_acquired && j_hi > j_lo) {
-            float pw = 0.0f;
-            for (size_t k = 0; k < L; ++k)
-                pw += std::norm(rx[j_lo + static_cast<int64_t>(k)]);
-            float best_coarse_m = -1.0f;
-            int64_t best_coarse_j = j_lo;
-            std::complex<float> best_coarse_c(0.0f, 0.0f);
-            for (int64_t j = j_lo; j <= j_hi; ++j) {
-                if (((j - j_lo) % stride) == 0) {
-                    const std::complex<float> acc =
-                        scratch.real_sync_template.is_real
-                            ? rxopt::real_template_dot_single(
-                                  rx + j, scratch.real_sync_template.taps_dup.data(), L)
-                            : detail::timing_conjugate_dot(
-                                  rx + j, scratch.work.data(), L);
-                    const float m = std::norm(acc) / (pw * Et + 1e-12f);
-                    if (m > best_coarse_m) {
-                        best_coarse_m = m;
-                        best_coarse_j = j;
-                        best_coarse_c = acc;
+            struct CoarsePeak {
+                int64_t j = 0;
+                float m = -1.0f;
+                std::complex<float> c{0.0f, 0.0f};
+            };
+            constexpr size_t kMaxCoarsePeaks = 16;
+            const int64_t min_sep = static_cast<int64_t>(L / 2);
+
+            auto scan_coarse = [&](int64_t scan_lo) {
+                float pw = 0.0f;
+                for (size_t k = 0; k < L; ++k)
+                    pw += std::norm(rx[scan_lo + static_cast<int64_t>(k)]);
+                float best_coarse_m = -1.0f;
+                int64_t best_coarse_j = scan_lo;
+                std::complex<float> best_coarse_c(0.0f, 0.0f);
+                CoarsePeak top_peaks[kMaxCoarsePeaks];
+                size_t top_count = 0;
+
+                for (int64_t j = scan_lo; j <= j_hi; ++j) {
+                    if (((j - scan_lo) % stride) == 0) {
+                        const std::complex<float> acc =
+                            scratch.real_sync_template.is_real
+                                ? rxopt::real_template_dot_single(
+                                      rx + j, scratch.real_sync_template.taps_dup.data(), L)
+                                : detail::timing_conjugate_dot(
+                                      rx + j, scratch.work.data(), L);
+                        const float pw_pos = (pw > 0.0f) ? pw : 0.0f;
+                        const float m = std::norm(acc) / (pw_pos * Et + 1e-12f);
+                        if (m > best_coarse_m) {
+                            best_coarse_m = m;
+                            best_coarse_j = j;
+                            best_coarse_c = acc;
+                        }
+                        if (m >= thr) {
+                            size_t match_idx = top_count;
+                            for (size_t u = 0; u < top_count; ++u) {
+                                if (std::llabs(top_peaks[u].j - j) < min_sep) {
+                                    match_idx = u;
+                                    break;
+                                }
+                            }
+                            if (match_idx < top_count) {
+                                if (m > top_peaks[match_idx].m) {
+                                    top_peaks[match_idx] = CoarsePeak{j, m, acc};
+                                }
+                            } else if (top_count < kMaxCoarsePeaks) {
+                                top_peaks[top_count++] = CoarsePeak{j, m, acc};
+                            } else {
+                                size_t min_idx = 0;
+                                for (size_t u = 1; u < top_count; ++u) {
+                                    if (top_peaks[u].m < top_peaks[min_idx].m)
+                                        min_idx = u;
+                                }
+                                if (m > top_peaks[min_idx].m)
+                                    top_peaks[min_idx] = CoarsePeak{j, m, acc};
+                            }
+                        }
+                    }
+                    if (j + 1 <= j_hi) {
+                        pw += std::norm(rx[j + static_cast<int64_t>(L)]) -
+                              std::norm(rx[j]);
+                        if (pw < 0.0f)
+                            pw = 0.0f;
                     }
                 }
-                if (j + 1 <= j_hi)
-                    pw += std::norm(rx[j + static_cast<int64_t>(L)]) -
-                          std::norm(rx[j]);
+                if (top_count == 0) {
+                    int64_t pos = -1;
+                    float met = 0.0f;
+                    std::complex<float> corr(0.0f, 0.0f);
+                    if (local_best(best_coarse_j, stride, thr, &pos, &met, &corr))
+                        consider(pos, met, corr, score_sync_chain(pos, corr));
+                    else if (best_coarse_m >= thr)
+                        consider(best_coarse_j, best_coarse_m, best_coarse_c,
+                                 score_sync_chain(best_coarse_j, best_coarse_c));
+                    return;
+                }
+                // Evaluate refined peaks in descending coarse metric order and
+                // stop early once a full coherent SYNC chain is confirmed.
+                std::sort(top_peaks, top_peaks + top_count,
+                          [](const CoarsePeak& a, const CoarsePeak& b) {
+                              return a.m > b.m;
+                          });
+                for (size_t u = 0; u < top_count; ++u) {
+                    int64_t pos = -1;
+                    float met = 0.0f;
+                    std::complex<float> corr(0.0f, 0.0f);
+                    if (local_best(top_peaks[u].j, stride, thr, &pos, &met, &corr)) {
+                        const size_t chain = score_sync_chain(pos, corr);
+                        consider(pos, met, corr, chain);
+                    } else {
+                        const size_t chain =
+                            score_sync_chain(top_peaks[u].j, top_peaks[u].c);
+                        consider(top_peaks[u].j, top_peaks[u].m,
+                                 top_peaks[u].c, chain);
+                    }
+                    if (best_chain >= chain_cap)
+                        break;
+                }
+            };
+            scan_coarse(j_lo);
+            // Because 1016 % 8 == 0, every SYNC symbol shares the same offset
+            // mod stride; retry once at half-stride if a blind arrival missed
+            // or only hit a short non-SYNC fragment.
+            if ((first_start < 0 || best_chain < std::min<size_t>(chain_cap, 4)) &&
+                stride >= 4 && j_hi >= j_lo + (stride / 2)) {
+                scan_coarse(j_lo + (stride / 2));
+            }
+            if ((first_start < 0 || best_chain < std::min<size_t>(chain_cap, 4)) &&
+                stride >= 8) {
+                if (j_hi >= j_lo + (stride / 4))
+                    scan_coarse(j_lo + (stride / 4));
+                if ((first_start < 0 ||
+                     best_chain < std::min<size_t>(chain_cap, 4)) &&
+                    j_hi >= j_lo + (3 * stride) / 4) {
+                    scan_coarse(j_lo + (3 * stride) / 4);
+                }
             }
             out.coarse_search_us = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now() - coarse_begin).count());
-            // (b) Fine refine around the coarse peak.
-            int64_t pos = -1;
-            float met = 0.0f;
-            std::complex<float> corr(0.0f, 0.0f);
-            if (local_best(best_coarse_j, stride, thr, &pos, &met, &corr))
-                consider(pos, met, corr);
-            else if (best_coarse_m >= thr)
-                consider(best_coarse_j, best_coarse_m, best_coarse_c);
         }
 
         // (c) Whole-SYNC grid probes (fallback only; covers a seed that lands
         // mid-preamble and a sub-symbol confirmation that must not replace an
         // SFD-refined anchor with a stronger neighbouring SYNC).
-        if (!seed_acquired) {
+        if (!seed_acquired &&
+            (first_start < 0 || best_chain < std::min<size_t>(chain_cap, 4))) {
             int64_t pos = -1;
             float met = 0.0f;
             std::complex<float> corr(0.0f, 0.0f);
-            const int64_t grid_half = margin / kQm35SamplesPerSymbol;
-            for (int64_t n_sym = -grid_half; n_sym <= grid_half; ++n_sym) {
-                if (local_best(seed + n_sym * static_cast<int64_t>(
-                                               kQm35SamplesPerSymbol),
-                               8, thr, &pos, &met, &corr))
-                    consider(pos, met, corr);
+            const int64_t sym = static_cast<int64_t>(kQm35SamplesPerSymbol);
+            const int64_t grid_half = margin / sym;
+            const int64_t grid_lo = std::max<int64_t>(
+                -grid_half, -((seed + 8) / sym) - 1);
+            const int64_t grid_hi = std::min<int64_t>(
+                grid_half,
+                ((static_cast<int64_t>(n) - static_cast<int64_t>(L) - seed + 8) / sym) + 1);
+            for (int64_t n_sym = grid_lo; n_sym <= grid_hi; ++n_sym) {
+                if (local_best(seed + n_sym * sym, 8, thr, &pos, &met, &corr))
+                    consider(pos, met, corr, score_sync_chain(pos, corr));
             }
         }
         if (first_start < 0) {
@@ -611,8 +761,14 @@ inline bool stage_timing(const std::complex<float>* rx,
     // can score below the normal verification threshold, so the detector seeds
     // the first strong SYNC.  Once locked, walk backwards on the known grid
     // with a relaxed threshold, stopping at the first missing predecessor.
+    const size_t max_backtrack =
+        (profile.timing_max_backtrack_symbols > 0 &&
+         profile.timing_search_margin >= n)
+            ? std::max<size_t>(profile.timing_max_backtrack_symbols,
+                               profile.preamble_repetitions + 32)
+            : profile.timing_max_backtrack_symbols;
     size_t backtracked_symbols = 0;
-    for (size_t back = 0; back < profile.timing_max_backtrack_symbols; ++back) {
+    for (size_t back = 0; back < max_backtrack; ++back) {
         int64_t previous_start = -1;
         float previous_metric = 0.0f;
         std::complex<float> previous_corr(0.0f, 0.0f);
@@ -1123,6 +1279,15 @@ inline bool stage_sfd(const std::complex<float>* rx,
 // absolute.  Verified against the MATLAB golden reference: CIR max diff
 // ~6e-8, soft-chip stream max diff ~6e-7 (stage_cir.mat / stage_softchips.mat).
 // ---------------------------------------------------------------------------
+inline int64_t cir_origin_sample(const Qm35825Profile& profile,
+                                 int64_t preamble_start_sample)
+{
+    const int64_t shift = (profile.pulse_center_sample > 2)
+                              ? static_cast<int64_t>(profile.pulse_center_sample - 2)
+                              : 0;
+    return preamble_start_sample + shift;
+}
+
 inline bool stage_cir_softchips(const std::complex<float>* rx,
                                 size_t n,
                                 const Qm35825Profile& profile,
@@ -1152,7 +1317,7 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     const size_t post = profile.cir_post_samples;
     const size_t tap_count = pre + post;
     const double period = timing.measured_period;
-    const int64_t start = timing.preamble_start_sample;
+    const int64_t start = cir_origin_sample(profile, timing.preamble_start_sample);
     if (period <= 0.0 || start < 0 || preamble_code.empty() || tap_count == 0)
         return false;
     // The shared kernel derives the ternary length from the 1016-sample
@@ -1178,9 +1343,17 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     // ---- Repetition selection (identical to the pre-refactor code). ----
     const size_t available =
         std::min(timing.detected_peaks, profile.preamble_repetitions);
-    if (available == 0 || profile.cir_skip_initial_repetitions >= available)
+    if (available == 0)
         return false;
-    const size_t first_rep = profile.cir_skip_initial_repetitions;
+    size_t first_rep = profile.cir_skip_initial_repetitions;
+    if (first_rep >= available) {
+        if (profile.preamble_repetitions < 64 &&
+            profile.preamble_repetitions > profile.cir_skip_initial_repetitions) {
+            first_rep = 0;
+        } else {
+            return false;
+        }
+    }
     const size_t rep_count = std::min(profile.cir_repetitions,
                                       available - first_rep);
     if (rep_count == 0)
@@ -2628,7 +2801,8 @@ inline bool stage_phr_fused_cmf(const std::complex<float>* rx,
         return false;
 
     const int64_t chip_start =
-        timing.preamble_start_sample + static_cast<int64_t>(tap_count) -
+        cir_origin_sample(profile, timing.preamble_start_sample) +
+        static_cast<int64_t>(tap_count) -
         static_cast<int64_t>(profile.cir_pre_samples) - 1;
     if (chip_start < 0 || static_cast<int64_t>(n) <= chip_start)
         return false;
@@ -2928,7 +3102,8 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
         return false;
 
     const int64_t chip_start =
-        timing.preamble_start_sample + static_cast<int64_t>(tap_count) -
+        cir_origin_sample(profile, timing.preamble_start_sample) +
+        static_cast<int64_t>(tap_count) -
         static_cast<int64_t>(profile.cir_pre_samples) - 1;
     if (chip_start < 0 || static_cast<int64_t>(n) <= chip_start)
         return false;
@@ -3407,8 +3582,10 @@ inline bool acquire_preamble(const std::complex<float>* rx,
             tail_timing.ok = true;
             tail_timing_ok = true;
         } else {
+            const int64_t tail_seed =
+                (tail_start < 0 && tail_start >= -8) ? 0 : tail_start;
             tail_timing_ok = core::stage_timing(
-                rx, n, anchor, template_wf, tail_start, tail_timing, scratch);
+                rx, n, anchor, template_wf, tail_seed, tail_timing, scratch);
             if ((!tail_timing_ok ||
                  tail_timing.detected_peaks != tail_repetitions) &&
                 seed_radius != 0) {
@@ -3416,7 +3593,7 @@ inline bool acquire_preamble(const std::complex<float>* rx,
                 anchor.timing_seed_refine_radius = 0;
                 TimingResult retry_timing;
                 const bool retry_ok = core::stage_timing(
-                    rx, n, anchor, template_wf, tail_start, retry_timing, scratch);
+                    rx, n, anchor, template_wf, tail_seed, retry_timing, scratch);
                 out.sfd_tail_retrack_fallback_us += since_us(retry_t0);
                 ++out.tail_retrack_fallbacks;
                 if (retry_ok &&
@@ -3457,9 +3634,15 @@ inline bool acquire_preamble(const std::complex<float>* rx,
         // `compute_sfd_search_range`, `timing.detected_peaks`, the
         // `stage_cir_softchips` repetition selection and the tail-reuse check.
         const double measured_period = period_used;
-        const int64_t full_start = bootstrap_sfd_start -
+        int64_t full_start = bootstrap_sfd_start -
             static_cast<int64_t>(std::llround(
                 static_cast<double>(full_repetitions) * measured_period));
+        if (full_start < 0 && full_start >= -8 && scratch.initial_timing.ok &&
+            !scratch.initial_timing.peak_samples.empty() &&
+            scratch.initial_timing.peak_samples[0] >=
+                static_cast<int64_t>(template_len - 1)) {
+            full_start = 0;
+        }
         cfo_timing.ok = true;
         cfo_timing.preamble_start_sample = full_start;
         cfo_timing.preamble_start_uncropped = full_start;
@@ -3571,11 +3754,12 @@ inline bool acquire_preamble(const std::complex<float>* rx,
             ? cfo_timing.measured_period
             : static_cast<double>(sym);
         const int64_t start = cfo_timing.preamble_start_sample;
+        const int64_t cir_orig = core::cir_origin_sample(profile, start);
         const int64_t cir_lo = (rep_count > 0)
-            ? start + static_cast<int64_t>(std::llround(
-                          static_cast<double>(first_rep) * period)) -
+            ? cir_orig + static_cast<int64_t>(std::llround(
+                             static_cast<double>(first_rep) * period)) -
                   static_cast<int64_t>(pre)
-            : start;
+            : cir_orig;
 
         const bool on_demand = profile.rx_softchip_on_demand ||
                                profile.rx_fused_payload_cmf ||
@@ -3616,9 +3800,13 @@ inline bool acquire_preamble(const std::complex<float>* rx,
                 coverage_ok = false;
                 break;
             }
+            sync_cir::SyncCirRequest effective_cir_req = *cir_req;
+            if (effective_cir_req.cir_axis_origin < 0)
+                effective_cir_req.cir_axis_origin =
+                    cfo_timing.preamble_start_sample;
             int64_t ulo = 0;
             int64_t uhi = 0;
-            if (!sync_cir::required_input_range(*cir_req,
+            if (!sync_cir::required_input_range(effective_cir_req,
                                                 sync_cir::kSyncCirCodeLength,
                                                 n, ulo, uhi)) {
                 coverage_ok = false;
@@ -3658,13 +3846,13 @@ inline bool acquire_preamble(const std::complex<float>* rx,
                 // alignment, NS-SFD, and the 21 PHR symbols.
                 const size_t prefix_budget = rxopt::initial_chip_budget(profile);
                 const int64_t spc_i = 2;
-                const int64_t chip_start = start + static_cast<int64_t>(post) - 1;
+                const int64_t chip_start = cir_orig + static_cast<int64_t>(post) - 1;
                 const bool skip_sync_fir =
                     profile.rx_fused_phr_cmf && profile.rx_fused_payload_cmf;
 
                 int64_t req_lo = cir_lo;
                 if (!skip_sync_fir)
-                    req_lo = std::min(req_lo, start - static_cast<int64_t>(pre));
+                    req_lo = std::min(req_lo, cir_orig - static_cast<int64_t>(pre));
                 req_lo = std::min(req_lo,
                                   static_cast<int64_t>(final_sfd_range.first));
                 sec_lo = static_cast<size_t>(std::max<int64_t>(0, req_lo));
@@ -3770,6 +3958,14 @@ inline bool acquire_preamble(const std::complex<float>* rx,
         out.sfd.sfd_start_sample - static_cast<int64_t>(std::llround(
             static_cast<double>(profile.preamble_repetitions) *
             out.timing.measured_period));
+    if (out.timing.preamble_start_sample < 0 &&
+        out.timing.preamble_start_sample >= -8 &&
+        scratch.initial_timing.ok &&
+        !scratch.initial_timing.peak_samples.empty() &&
+        scratch.initial_timing.peak_samples[0] >=
+            static_cast<int64_t>(template_len - 1)) {
+        out.timing.preamble_start_sample = 0;
+    }
     lap(out.sfd_us);
     // Diagnostic remainder of the SFD parent stage.  The four child sub-timers
     // are strictly children of `sfd_us` — the parent already includes them, so
@@ -3884,7 +4080,8 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         if (tap_count == 0 || tap_count > 64 || res.cir.soft_chip_count == 0)
             return;
         const int64_t chip_start =
-            res.timing.preamble_start_sample + static_cast<int64_t>(tap_count) -
+            core::cir_origin_sample(profile, res.timing.preamble_start_sample) +
+            static_cast<int64_t>(tap_count) -
             static_cast<int64_t>(profile.cir_pre_samples) - 1;
         if (chip_start < 0)
             return;
@@ -4095,7 +4292,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                 const int64_t phr_start = res.ns_sfd.sfd_end_chip + 1;
                 const int64_t payload_start = phr_start + 21 * 512;
                 const int64_t chip_start =
-                    res.timing.preamble_start_sample +
+                    core::cir_origin_sample(profile, res.timing.preamble_start_sample) +
                     static_cast<int64_t>(res.cir.cir_filter_taps.size()) -
                     static_cast<int64_t>(profile.cir_pre_samples) - 1;
                 const int64_t base0 = chip_start + payload_start * 2 -
@@ -4164,7 +4361,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             if (final_budget > prefix_chips) {
                 // Compensate extension interval with refit CFO (Task A1)
                 const int64_t chip_start =
-                    res.timing.preamble_start_sample +
+                    core::cir_origin_sample(profile, res.timing.preamble_start_sample) +
                     static_cast<int64_t>(res.cir.cir_filter_taps.size()) -
                     static_cast<int64_t>(profile.cir_pre_samples) - 1;
                 const int64_t last_pos =

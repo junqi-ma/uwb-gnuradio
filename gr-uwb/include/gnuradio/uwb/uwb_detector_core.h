@@ -772,12 +772,19 @@ struct RingBufferT {
     // caller-owned preallocated destination.
     void copy_to(Sample* out) const
     {
-        if (logical_size == 0)
+        copy_last_to(out, logical_size);
+    }
+
+    // Copy the most recent `count` (<= logical_size) samples, oldest .. newest.
+    void copy_last_to(Sample* out, size_t count) const
+    {
+        const size_t n = std::min(count, logical_size);
+        if (n == 0)
             return;
-        const size_t start = (write_pos + capacity - logical_size) & mask;
-        const size_t first = std::min(logical_size, capacity - start);
+        const size_t start = (write_pos + capacity - n) & mask;
+        const size_t first = std::min(n, capacity - start);
         std::memcpy(out, buffer.data() + start, first * sizeof(*out));
-        const size_t second = logical_size - first;
+        const size_t second = n - first;
         if (second > 0)
             std::memcpy(out + first, buffer.data(), second * sizeof(*out));
     }
@@ -952,6 +959,288 @@ private:
     uint64_t block_acc_ = 0;
 };
 
+enum class DetectorGateMode : uint8_t {
+    Energy = 0,
+    Autocorr = 1,
+};
+
+struct AutocorrGateConfig {
+    size_t lag0 = 750;
+    size_t lag1 = 751; // 0 disables secondary fractional lag
+    size_t segment_len = 250;
+    size_t window_segments = 8;
+    float corr_threshold = 0.35f;
+    float min_mean_power = 1e-4f;
+};
+
+namespace detail {
+inline size_t next_pow2_at_least(size_t n)
+{
+    size_t p = 1;
+    while (p < n) {
+        p <<= 1;
+    }
+    return p;
+}
+} // namespace detail
+
+/**
+ * Segmented delay-lag SYNC autocorrelation gate (scale-invariant, CFO-immune).
+ * Computes normalized correlation |sum(x[n] * conj(x[n-lag]))| / sqrt(E_cur * E_del)
+ * over `window_segments` segments of length `segment_len`, optionally taking
+ * the max across dual integer lags (lag0, lag1) to tolerate fractional native
+ * symbol periods (e.g. 750.28 samples at 737.28 MS/s).
+ */
+template <typename Sample>
+class DetectorSyncAutocorrGate {
+public:
+    DetectorSyncAutocorrGate() { configure(AutocorrGateConfig{}); }
+
+    void configure(const AutocorrGateConfig& cfg)
+    {
+        cfg_ = cfg;
+        cfg_.lag0 = std::max<size_t>(1, cfg_.lag0);
+        cfg_.segment_len = std::max<size_t>(1, cfg_.segment_len);
+        cfg_.window_segments = std::max<size_t>(1, cfg_.window_segments);
+        lag_max_ = std::max(cfg_.lag0, cfg_.lag1);
+        ring_cap_ = detail::next_pow2_at_least(lag_max_ + 4);
+        ring_mask_ = ring_cap_ - 1;
+        delay_ring_.assign(ring_cap_, Sample{});
+        seg_ring_.assign(cfg_.window_segments, SegEntry{});
+        rho_sq_ = static_cast<double>(cfg_.corr_threshold) *
+                  static_cast<double>(cfg_.corr_threshold);
+        reset();
+    }
+
+    void accumulate(const Sample& s)
+    {
+        const Sample d0 = delay_ring_[(ring_pos_ - cfg_.lag0) & ring_mask_];
+        const double re = static_cast<double>(s.real());
+        const double im = static_cast<double>(s.imag());
+        const double d0r = static_cast<double>(d0.real());
+        const double d0i = static_cast<double>(d0.imag());
+        blk_.c0_re += re * d0r + im * d0i;
+        blk_.c0_im += im * d0r - re * d0i;
+        blk_.e_cur += re * re + im * im;
+        blk_.e_del0 += d0r * d0r + d0i * d0i;
+        if (cfg_.lag1 > 0) {
+            const Sample d1 = delay_ring_[(ring_pos_ - cfg_.lag1) & ring_mask_];
+            const double d1r = static_cast<double>(d1.real());
+            const double d1i = static_cast<double>(d1.imag());
+            blk_.c1_re += re * d1r + im * d1i;
+            blk_.c1_im += im * d1r - re * d1i;
+            blk_.e_del1 += d1r * d1r + d1i * d1i;
+        }
+        delay_ring_[ring_pos_ & ring_mask_] = s;
+        ++ring_pos_;
+    }
+
+    bool finish_block()
+    {
+        const SegEntry& old = seg_ring_[seg_pos_];
+        win_.c0_re += blk_.c0_re - old.c0_re;
+        win_.c0_im += blk_.c0_im - old.c0_im;
+        win_.c1_re += blk_.c1_re - old.c1_re;
+        win_.c1_im += blk_.c1_im - old.c1_im;
+        win_.e_cur += blk_.e_cur - old.e_cur;
+        win_.e_del0 += blk_.e_del0 - old.e_del0;
+        win_.e_del1 += blk_.e_del1 - old.e_del1;
+        seg_ring_[seg_pos_] = blk_;
+        blk_ = SegEntry{};
+        seg_pos_ = (seg_pos_ + 1) % cfg_.window_segments;
+        if (seg_count_ < cfg_.window_segments)
+            ++seg_count_;
+
+        if (ring_pos_ <= lag_max_ + cfg_.segment_len)
+            return false;
+
+        const double win_samples =
+            static_cast<double>(seg_count_ * cfg_.segment_len);
+        const double min_e =
+            static_cast<double>(cfg_.min_mean_power) * win_samples;
+        if (win_.e_cur < min_e || win_.e_cur <= 0.0)
+            return false;
+
+        bool hit = false;
+        if (win_.e_del0 >= min_e && win_.e_del0 > 0.0) {
+            const double n2 =
+                win_.c0_re * win_.c0_re + win_.c0_im * win_.c0_im;
+            if (n2 >= rho_sq_ * win_.e_cur * win_.e_del0)
+                hit = true;
+        }
+        if (!hit && cfg_.lag1 > 0 && win_.e_del1 >= min_e && win_.e_del1 > 0.0) {
+            const double n2 =
+                win_.c1_re * win_.c1_re + win_.c1_im * win_.c1_im;
+            if (n2 >= rho_sq_ * win_.e_cur * win_.e_del1)
+                hit = true;
+        }
+        return hit;
+    }
+
+    void reset()
+    {
+        std::fill(delay_ring_.begin(), delay_ring_.end(), Sample{});
+        std::fill(seg_ring_.begin(), seg_ring_.end(), SegEntry{});
+        blk_ = SegEntry{};
+        win_ = SegEntry{};
+        ring_pos_ = 0;
+        seg_pos_ = 0;
+        seg_count_ = 0;
+    }
+
+private:
+    struct SegEntry {
+        double c0_re = 0.0;
+        double c0_im = 0.0;
+        double c1_re = 0.0;
+        double c1_im = 0.0;
+        double e_cur = 0.0;
+        double e_del0 = 0.0;
+        double e_del1 = 0.0;
+    };
+
+    AutocorrGateConfig cfg_{};
+    size_t lag_max_ = 1;
+    size_t ring_cap_ = 2048;
+    size_t ring_mask_ = 2047;
+    std::vector<Sample> delay_ring_;
+    std::vector<SegEntry> seg_ring_;
+    SegEntry blk_{};
+    SegEntry win_{};
+    size_t ring_pos_ = 0;
+    size_t seg_pos_ = 0;
+    size_t seg_count_ = 0;
+    double rho_sq_ = 0.1225;
+};
+
+template <>
+class DetectorSyncAutocorrGate<std::complex<int16_t>> {
+public:
+    DetectorSyncAutocorrGate() { configure(AutocorrGateConfig{}); }
+
+    void configure(const AutocorrGateConfig& cfg)
+    {
+        cfg_ = cfg;
+        cfg_.lag0 = std::max<size_t>(1, cfg_.lag0);
+        cfg_.segment_len = std::max<size_t>(1, cfg_.segment_len);
+        cfg_.window_segments = std::max<size_t>(1, cfg_.window_segments);
+        lag_max_ = std::max(cfg_.lag0, cfg_.lag1);
+        ring_cap_ = detail::next_pow2_at_least(lag_max_ + 4);
+        ring_mask_ = ring_cap_ - 1;
+        delay_ring_.assign(ring_cap_, std::complex<int16_t>(0, 0));
+        seg_ring_.assign(cfg_.window_segments, SegEntry{});
+        rho_sq_ = static_cast<double>(cfg_.corr_threshold) *
+                  static_cast<double>(cfg_.corr_threshold);
+        constexpr double fs2 = 32768.0 * 32768.0;
+        min_power_fs_ = static_cast<double>(cfg_.min_mean_power) * fs2;
+        reset();
+    }
+
+    void accumulate(const std::complex<int16_t>& s)
+    {
+        const auto d0 = delay_ring_[(ring_pos_ - cfg_.lag0) & ring_mask_];
+        const int64_t re = s.real();
+        const int64_t im = s.imag();
+        const int64_t d0r = d0.real();
+        const int64_t d0i = d0.imag();
+        blk_.c0_re += re * d0r + im * d0i;
+        blk_.c0_im += im * d0r - re * d0i;
+        blk_.e_cur += static_cast<uint64_t>(re * re) + static_cast<uint64_t>(im * im);
+        blk_.e_del0 += static_cast<uint64_t>(d0r * d0r) + static_cast<uint64_t>(d0i * d0i);
+        if (cfg_.lag1 > 0) {
+            const auto d1 = delay_ring_[(ring_pos_ - cfg_.lag1) & ring_mask_];
+            const int64_t d1r = d1.real();
+            const int64_t d1i = d1.imag();
+            blk_.c1_re += re * d1r + im * d1i;
+            blk_.c1_im += im * d1r - re * d1i;
+            blk_.e_del1 += static_cast<uint64_t>(d1r * d1r) + static_cast<uint64_t>(d1i * d1i);
+        }
+        delay_ring_[ring_pos_ & ring_mask_] = s;
+        ++ring_pos_;
+    }
+
+    bool finish_block()
+    {
+        const SegEntry& old = seg_ring_[seg_pos_];
+        win_.c0_re += blk_.c0_re - old.c0_re;
+        win_.c0_im += blk_.c0_im - old.c0_im;
+        win_.c1_re += blk_.c1_re - old.c1_re;
+        win_.c1_im += blk_.c1_im - old.c1_im;
+        win_.e_cur += blk_.e_cur - old.e_cur;
+        win_.e_del0 += blk_.e_del0 - old.e_del0;
+        win_.e_del1 += blk_.e_del1 - old.e_del1;
+        seg_ring_[seg_pos_] = blk_;
+        blk_ = SegEntry{};
+        seg_pos_ = (seg_pos_ + 1) % cfg_.window_segments;
+        if (seg_count_ < cfg_.window_segments)
+            ++seg_count_;
+
+        if (ring_pos_ <= lag_max_ + cfg_.segment_len)
+            return false;
+
+        const double win_samples =
+            static_cast<double>(seg_count_ * cfg_.segment_len);
+        const double min_e = min_power_fs_ * win_samples;
+        const double e_cur = static_cast<double>(win_.e_cur);
+        if (e_cur < min_e || e_cur <= 0.0)
+            return false;
+
+        const double e_del0 = static_cast<double>(win_.e_del0);
+        if (e_del0 >= min_e && e_del0 > 0.0) {
+            const double c0r = static_cast<double>(win_.c0_re);
+            const double c0i = static_cast<double>(win_.c0_im);
+            if ((c0r * c0r + c0i * c0i) >= rho_sq_ * e_cur * e_del0)
+                return true;
+        }
+        if (cfg_.lag1 > 0) {
+            const double e_del1 = static_cast<double>(win_.e_del1);
+            if (e_del1 >= min_e && e_del1 > 0.0) {
+                const double c1r = static_cast<double>(win_.c1_re);
+                const double c1i = static_cast<double>(win_.c1_im);
+                if ((c1r * c1r + c1i * c1i) >= rho_sq_ * e_cur * e_del1)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    void reset()
+    {
+        std::fill(delay_ring_.begin(), delay_ring_.end(), std::complex<int16_t>(0, 0));
+        std::fill(seg_ring_.begin(), seg_ring_.end(), SegEntry{});
+        blk_ = SegEntry{};
+        win_ = SegEntry{};
+        ring_pos_ = 0;
+        seg_pos_ = 0;
+        seg_count_ = 0;
+    }
+
+private:
+    struct SegEntry {
+        int64_t c0_re = 0;
+        int64_t c0_im = 0;
+        int64_t c1_re = 0;
+        int64_t c1_im = 0;
+        uint64_t e_cur = 0;
+        uint64_t e_del0 = 0;
+        uint64_t e_del1 = 0;
+    };
+
+    AutocorrGateConfig cfg_{};
+    size_t lag_max_ = 1;
+    size_t ring_cap_ = 2048;
+    size_t ring_mask_ = 2047;
+    std::vector<std::complex<int16_t>> delay_ring_;
+    std::vector<SegEntry> seg_ring_;
+    SegEntry blk_{};
+    SegEntry win_{};
+    size_t ring_pos_ = 0;
+    size_t seg_pos_ = 0;
+    size_t seg_count_ = 0;
+    double rho_sq_ = 0.1225;
+    double min_power_fs_ = 100.0;
+};
+
 // ---------------------------------------------------------------------------
 // UwbDetectorStateMachine: SEARCH → IN_REGION → CAPTURE cross-chunk buffering.
 // GNU Radio independent; the caller drives process() per input chunk and owns
@@ -1063,6 +1352,20 @@ public:
         }
     }
 
+    void configure_autocorr_gate(const AutocorrGateConfig& acfg,
+                                 size_t holdoff_segments = 8)
+    {
+        gate_mode_ = DetectorGateMode::Autocorr;
+        autocorr_gate_.configure(acfg);
+        gate_decimation_ = std::max<size_t>(1, acfg.segment_len);
+        gate_window_ = std::max<size_t>(1, acfg.window_segments);
+        holdoff_decimated_ = std::max<size_t>(1, holdoff_segments);
+        d_block_phase_ = 0;
+        low_count_ = 0;
+    }
+
+    DetectorGateMode gate_mode() const { return gate_mode_; }
+
     size_t pre_trigger() const { return pre_trigger_; }
     void set_pre_trigger(size_t v)
     {
@@ -1083,6 +1386,7 @@ public:
         state_ = SEARCH;
         low_count_ = 0;
         gate_.reset();
+        autocorr_gate_.reset();
         pre_ring_.clear();
         d_block_phase_ = 0;
         d_ready_head_ = 0;
@@ -1090,6 +1394,7 @@ public:
         d_ready_count_ = 0;
         d_active_region_ = kInvalidRegion;
         capture_end_abs_ = 0;
+        pre_valid_ = 0;
         d_dropped_regions_ = 0;
         std::lock_guard<std::mutex> lock(d_pool_mutex_);
         d_free_count_ = 0;
@@ -1100,9 +1405,24 @@ public:
     }
 
 private:
+    void accumulate_gate_samples(const Sample* seg, size_t take)
+    {
+        if (gate_mode_ == DetectorGateMode::Autocorr) {
+            for (size_t j = 0; j < take; ++j)
+                autocorr_gate_.accumulate(seg[j]);
+            return;
+        }
+        const size_t energy_count =
+            (d_block_phase_ < neigh_len_)
+                ? std::min(take, neigh_len_ - d_block_phase_)
+                : 0;
+        for (size_t j = 0; j < energy_count; ++j)
+            gate_.accumulate(seg[j]);
+    }
+
     // SEARCH is block-oriented: one iteration handles up to a complete
     // D-sample gate block.  Ring maintenance is a bulk memcpy and only the
-    // first `neigh_len_` samples of each block enter the energy sum.
+    // configured gate samples enter the gate accumulator.
     size_t process_search(const Sample* in,
                           size_t n,
                           uint64_t abs_sample)
@@ -1111,14 +1431,10 @@ private:
         while (consumed < n && state_ == SEARCH) {
             const size_t block_left = gate_decimation_ - d_block_phase_;
             const size_t take = std::min(block_left, n - consumed);
-            const size_t energy_count =
-                (d_block_phase_ < neigh_len_)
-                    ? std::min(take, neigh_len_ - d_block_phase_)
-                    : 0;
-            for (size_t j = 0; j < energy_count; ++j)
-                gate_.accumulate(in[consumed + j]);
+            accumulate_gate_samples(in + consumed, take);
 
             pre_ring_.push(in + consumed, take);
+            pre_valid_ = std::min(pre_ring_.logical_size, pre_valid_ + take);
             d_block_phase_ += take;
             consumed += take;
             if (d_block_phase_ == gate_decimation_) {
@@ -1139,14 +1455,10 @@ private:
         while (consumed < n && state_ == IN_REGION) {
             const size_t block_left = gate_decimation_ - d_block_phase_;
             const size_t take = std::min(block_left, n - consumed);
-            const size_t energy_count =
-                (d_block_phase_ < neigh_len_)
-                    ? std::min(take, neigh_len_ - d_block_phase_)
-                    : 0;
-            for (size_t j = 0; j < energy_count; ++j)
-                gate_.accumulate(in[consumed + j]);
+            accumulate_gate_samples(in + consumed, take);
 
             pre_ring_.push(in + consumed, take);
+            pre_valid_ = std::min(pre_ring_.logical_size, pre_valid_ + take);
             if (d_active_region_ != kInvalidRegion) {
                 auto& samples = d_region_pool_[d_active_region_].samples;
                 if (samples.size() + take <= max_region_samples_) {
@@ -1168,9 +1480,9 @@ private:
         return consumed;
     }
 
-    // Once the energy gate closes, no more detection math is needed.  Copy in
+    // Once the gate closes, no more detection math is needed.  Copy in
     // bulk until the conservative trigger-relative horizon is present.  Since
-    // packet_start is at or before the delayed energy trigger, this contains
+    // packet_start is at or before the delayed trigger, this contains
     // every sample through packet_start + post_trigger_capture_.
     size_t process_capture(const Sample* in,
                            size_t n,
@@ -1179,6 +1491,10 @@ private:
         if (abs_sample >= capture_end_abs_) {
             finish_region();
             state_ = SEARCH;
+            if (gate_mode_ == DetectorGateMode::Autocorr) {
+                autocorr_gate_.reset();
+                d_block_phase_ = 0;
+            }
             return 0;
         }
         const uint64_t remaining64 = capture_end_abs_ - abs_sample;
@@ -1198,13 +1514,20 @@ private:
         if (abs_sample + take >= capture_end_abs_) {
             finish_region();
             state_ = SEARCH;
+            if (gate_mode_ == DetectorGateMode::Autocorr) {
+                autocorr_gate_.reset();
+                d_block_phase_ = 0;
+            }
         }
         return take;
     }
 
     void update_gate(uint64_t sample)
     {
-        const bool above_threshold = gate_.finish_block();
+        const bool above_threshold =
+            (gate_mode_ == DetectorGateMode::Autocorr)
+                ? autocorr_gate_.finish_block()
+                : gate_.finish_block();
         if (state_ == SEARCH) {
             if (!above_threshold)
                 return;
@@ -1213,9 +1536,11 @@ private:
             d_active_region_ = acquire_region();
             if (d_active_region_ != kInvalidRegion) {
                 Region& region = d_region_pool_[d_active_region_];
-                region.samples.resize(pre_ring_.logical_size);
-                pre_ring_.copy_to(region.samples.data());
-                region.candidate_offset = region.samples.size() - 1;
+                const size_t pre_len =
+                    std::min(pre_ring_.logical_size, pre_valid_);
+                region.samples.resize(pre_len);
+                pre_ring_.copy_last_to(region.samples.data(), pre_len);
+                region.candidate_offset = (pre_len > 0) ? (pre_len - 1) : 0;
                 region.start_abs = (sample >= region.candidate_offset)
                                        ? sample - region.candidate_offset
                                        : 0;
@@ -1235,6 +1560,10 @@ private:
             } else {
                 finish_region();
                 state_ = SEARCH;
+                if (gate_mode_ == DetectorGateMode::Autocorr) {
+                    autocorr_gate_.reset();
+                    d_block_phase_ = 0;
+                }
             }
             low_count_ = 0;
         }
@@ -1270,7 +1599,9 @@ private:
     size_t holdoff_decimated_;
     size_t post_trigger_capture_;
     size_t neigh_len_;   // |x|^2 samples summed per decimated block (16)
+    DetectorGateMode gate_mode_ = DetectorGateMode::Energy;
     DetectorEnergyGate<Sample> gate_;
+    DetectorSyncAutocorrGate<Sample> autocorr_gate_;
     RingBufferT<Sample> pre_ring_;
     size_t max_region_samples_;
     State state_ = SEARCH;
@@ -1287,6 +1618,7 @@ private:
     size_t d_block_phase_ = 0;
     size_t low_count_ = 0;
     uint64_t capture_end_abs_ = 0;
+    size_t pre_valid_ = 0;
 };
 
 using UwbDetectorStateMachine = UwbDetectorStateMachineT<std::complex<float>>;

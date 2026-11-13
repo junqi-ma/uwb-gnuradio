@@ -12,7 +12,6 @@
 
 #pragma once
 
-#include <gnuradio/filter/fir_filter.h>
 #include <gnuradio/uwb/uwb_defaults.h>
 #include <gnuradio/uwb/uwb_detector_core.h>
 
@@ -38,6 +37,8 @@ public:
         float backtrack_threshold = defaults::kDetectorBacktrackThreshold;
         size_t backtrack_radius = defaults::kDetectorBacktrackRadius;
         size_t max_backtrack = defaults::kDetectorMaxBacktrackSymbols;
+        size_t sync_repetitions = kUwbSyncSymbols;
+        size_t sfd_symbols = kUwbSfdSymbols;
     };
 
     struct Result {
@@ -49,7 +50,7 @@ public:
         size_t backtracked_symbols = 0;
     };
 
-    UwbPreambleVerifierSc16() : fir_(std::vector<gr_complex>()) {}
+    UwbPreambleVerifierSc16() = default;
 
     void configure(const std::vector<std::complex<float>>& known_preamble,
                    const Config& cfg)
@@ -61,20 +62,16 @@ public:
             cfg_.coarse_repetitions = 1;
         if (cfg_.coarse_stride == 0)
             cfg_.coarse_stride = 1;
+        if (cfg_.sync_repetitions == 0)
+            cfg_.sync_repetitions = kUwbSyncSymbols;
+        if (cfg_.sfd_symbols == 0)
+            cfg_.sfd_symbols = kUwbSfdSymbols;
 
         std::vector<std::complex<float>> tmpl = known_preamble;
         uwb_l2_normalize(tmpl);
         template_norm_ = tmpl;
         template_len_ = tmpl.size();
         template_energy_ = uwb_template_energy(tmpl);
-
-        // Same FIR tap construction as the historical UwbDetectorSc16
-        // publish_packet path so QA coordinates stay bit-identical.
-        std::vector<gr_complex> taps;
-        taps.reserve(tmpl.size());
-        for (auto it = tmpl.rbegin(); it != tmpl.rend(); ++it)
-            taps.push_back(std::conj(*it));
-        fir_.set_taps(taps);
 
         rebuild_decimated_template();
         rebuild_fine_scratch();
@@ -110,10 +107,13 @@ public:
 
         const size_t preamble_span =
             template_len_ *
-            (kUwbSyncSymbols + kUwbSfdSymbols + /*margin_syms=*/4);
+            (cfg_.sync_repetitions + cfg_.sfd_symbols + /*margin_syms=*/4);
         const size_t horizon =
             std::max(preamble_span, candidate_offset + preamble_span);
         const size_t coarse_scan_end = std::min(n, horizon);
+        const size_t eff_coarse_reps =
+            std::min(cfg_.coarse_repetitions,
+                     std::max<size_t>(1, cfg_.sync_repetitions / 2));
 
         float mx = 0.0f;
         uwb_coarse_peaks_sc16(
@@ -124,7 +124,7 @@ public:
             tmpl_imag_ds_q15_.data(),
             tmpl_ds_q15_.size(),
             cfg_.coarse_decimation,
-            cfg_.coarse_repetitions,
+            eff_coarse_reps,
             sym_ds_,
             cfg_.coarse_peak_rel,
             cfg_.coarse_exist_frac,
@@ -224,12 +224,11 @@ private:
         const size_t D = cfg_.coarse_decimation;
         const size_t Ld = template_len_ / D;
         sym_ds_ = Ld;
-        const auto& taps = fir_.taps(); // taps[k] = conj(template[L-1-k])
         std::vector<std::complex<float>> tmpl_ds;
         tmpl_ds.reserve(Ld);
         for (size_t j = 0; j < Ld; ++j) {
             const size_t m = j * D;
-            tmpl_ds.push_back(std::conj(taps[template_len_ - 1 - m]));
+            tmpl_ds.push_back(template_norm_[m]);
         }
         uwb_l2_normalize(tmpl_ds);
         tmpl_ds_q15_.resize(Ld);
@@ -270,7 +269,6 @@ private:
     }
 
     Config cfg_{};
-    gr::filter::kernel::fir_filter_ccc fir_{ std::vector<gr_complex>() };
     size_t template_len_ = 0;
     size_t sym_ds_ = 0;
     float template_energy_ = 0.0f;

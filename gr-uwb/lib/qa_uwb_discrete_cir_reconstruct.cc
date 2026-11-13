@@ -605,20 +605,20 @@ BOOST_AUTO_TEST_CASE(discrete_transaction_validates_fcs_phr_profile_and_length)
         rig.expect_bypass();
     }
 
-    // Unsupported profiles (same gate as the frozen full-packet core).
+    // Unsupported profiles (truly invalid code, sync_reps, SFD mode, STS/ranging, External pulse).
     {
         mod::HrpModConfig p = rig.pkt.profile;
-        p.sfd_mode = "ieee";
+        p.sfd_mode = "invalid_sfd";
         BOOST_CHECK_EQUAL(std::string(rig.cancel(true, &p).reason),
                           "unsupported_profile");
         rig.expect_bypass();
         p = rig.pkt.profile;
-        p.sync_repetitions = 16;
+        p.sync_repetitions = 100;
         BOOST_CHECK_EQUAL(std::string(rig.cancel(true, &p).reason),
                           "unsupported_profile");
         rig.expect_bypass();
         p = rig.pkt.profile;
-        p.code_index = 9;
+        p.code_index = 8;
         BOOST_CHECK_EQUAL(std::string(rig.cancel(true, &p).reason),
                           "unsupported_profile");
         rig.expect_bypass();
@@ -633,7 +633,7 @@ BOOST_AUTO_TEST_CASE(discrete_transaction_validates_fcs_phr_profile_and_length)
                           "unsupported_profile");
         rig.expect_bypass();
         p = rig.pkt.profile;
-        p.pulse.shape = mod::PulseShape::Gaussian;
+        p.pulse.shape = mod::PulseShape::External;
         BOOST_CHECK_EQUAL(std::string(rig.cancel(true, &p).reason),
                           "unsupported_profile");
         rig.expect_bypass();

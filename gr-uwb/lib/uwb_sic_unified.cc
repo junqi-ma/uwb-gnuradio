@@ -215,10 +215,20 @@ DiscreteCirConfig SicUnifiedConfig::to_discrete_cir_config() const
     c.peak_min_spacing = peak_min_spacing;
     c.active_radius = active_radius;
     c.lambda = lambda;
-    c.coarse_stride = coarse_stride;
+    c.coarse_stride = (coarse_stride == 0)
+                          ? 0
+                          : ((coarse_stride > 1) ? coarse_stride
+                                                 : (full_window_search ? 8 : coarse_stride));
     c.detect_threshold = detect_threshold;
     c.fit_residual_max = fit_residual_max;
     c.gain_condition_max = gain_condition_max;
+    c.autocorr_prefilter = autocorr_prefilter;
+    c.autocorr_threshold = autocorr_threshold;
+    c.autocorr_search_inside_target = autocorr_search_inside_target;
+    c.target_preamble_lo = target_preamble_lo;
+    c.target_preamble_hi = target_preamble_hi;
+    c.sfd_mode = (sfd_mode && sfd_mode[0]) ? sfd_mode : "4z2";
+    c.pulse = pulse;
     c.max_window_samples = max_window_samples;
     c.max_packet_samples = max_packet_samples;
     return c;
@@ -229,8 +239,9 @@ mod::HrpModConfig SicUnifiedConfig::to_hrp_mod_config() const
     mod::HrpModConfig c;
     c.code_index = comm_code;
     c.sync_repetitions = sync_reps;
-    c.sfd_mode = sfd_mode;
+    c.sfd_mode = (sfd_mode && sfd_mode[0]) ? sfd_mode : "4z2";
     c.peak_amplitude = 0.8f;
+    c.pulse = pulse;
     return c;
 }
 
@@ -272,9 +283,16 @@ uint64_t compute_unified_config_hash(const SicUnifiedConfig& cfg)
     uint64_t fs_bits = 0;
     std::memcpy(&fs_bits, &cfg.sample_rate, sizeof(double));
     hash_u64(h, fs_bits);
-    if (cfg.sfd_mode) {
-        hash_bytes(h, cfg.sfd_mode, std::strlen(cfg.sfd_mode));
-    }
+    const char* eff_sfd = (cfg.sfd_mode && cfg.sfd_mode[0]) ? cfg.sfd_mode : "4z2";
+    hash_bytes(h, eff_sfd, std::strlen(eff_sfd));
+    hash_u64(h, static_cast<uint64_t>(cfg.pulse.shape));
+    uint32_t f_bits = 0;
+    std::memcpy(&f_bits, &cfg.pulse.gaussian_sigma_ns, sizeof(float));
+    hash_u64(h, static_cast<uint64_t>(f_bits));
+    std::memcpy(&f_bits, &cfg.pulse.blackman_bw_mhz, sizeof(float));
+    hash_u64(h, static_cast<uint64_t>(f_bits));
+    hash_u64(h, static_cast<uint64_t>(cfg.pulse.external_n_taps));
+    hash_u64(h, static_cast<uint64_t>(cfg.pulse.external_center));
     hash_u64(h, static_cast<uint64_t>(cfg.backend));
     hash_u64(h, cfg.sparse_pulse_reconstruct ? 1ull : 0ull);
     hash_u64(h, static_cast<uint64_t>(cfg.fit_reps));
@@ -282,6 +300,14 @@ uint64_t compute_unified_config_hash(const SicUnifiedConfig& cfg)
     hash_u64(h, static_cast<uint64_t>(cfg.tap_count));
     hash_u64(h, static_cast<uint64_t>(cfg.k_paths));
     hash_u64(h, static_cast<uint64_t>(cfg.post_tail));
+    hash_u64(h, cfg.full_window_search ? 1ull : 0ull);
+    hash_u64(h, static_cast<uint64_t>(cfg.coarse_stride));
+    hash_u64(h, static_cast<uint64_t>(cfg.comm_timing_search_margin));
+    hash_u64(h, static_cast<uint64_t>(cfg.comm_timing_coarse_stride));
+    hash_u64(h, cfg.autocorr_prefilter ? 1ull : 0ull);
+    uint64_t ac_bits = 0;
+    std::memcpy(&ac_bits, &cfg.autocorr_threshold, sizeof(double));
+    hash_u64(h, ac_bits);
     return h;
 }
 
@@ -590,6 +616,12 @@ bool reconstruct_and_subtract_unified(
     }
 
     const auto t_recon = Clock::now();
+    const int64_t eff_sub_lo = (cfg.sub_roi_lo == 0 && cfg.sub_roi_hi == 0)
+                                   ? 0
+                                   : cfg.sub_roi_lo;
+    const int64_t eff_sub_hi = (cfg.sub_roi_lo == 0 && cfg.sub_roi_hi == 0)
+                                   ? static_cast<int64_t>(n)
+                                   : cfg.sub_roi_hi;
 
     if (channel.backend == SicEstimatorBackend::PathFractional) {
         SicModel model;
@@ -621,7 +653,7 @@ bool reconstruct_and_subtract_unified(
             FullPacketResult f = fullpacket_cancel(
                 y, n, scratch.work_phr_bits, scratch.work_wire_psdu,
                 true, modcfg, model, templates.sync, templates.sync_len,
-                cfg.sub_roi_lo, cfg.sub_roi_hi, scratch.fullpacket, out, i_hat);
+                eff_sub_lo, eff_sub_hi, scratch.fullpacket, out, i_hat);
             result.timings.reconstruct_us = f.channel_us;
             result.timings.subtract_us = f.subtract_us;
             result.waveform_scale = f.waveform_scale;
@@ -662,7 +694,7 @@ bool reconstruct_and_subtract_unified(
                 if (pulses.count > 0) {
                     bool ok = apply_discrete_cir_pulses(
                         y, n, pulses, templates.sync, templates.sync_len, dm,
-                        cfg.sub_roi_lo, cfg.sub_roi_hi, scratch.discrete, out, i_hat, &dres);
+                        eff_sub_lo, eff_sub_hi, scratch.discrete, out, i_hat, &dres);
                     result.timings.reconstruct_us = dres.channel_us;
                     result.timings.subtract_us = dres.subtract_us;
                     result.timings.recon_scale_us = dres.scale_us;
@@ -703,7 +735,7 @@ bool reconstruct_and_subtract_unified(
 
             bool ok = apply_discrete_cir(
                 y, n, wf, wf_n, templates.sync, templates.sync_len, dm,
-                cfg.sub_roi_lo, cfg.sub_roi_hi, scratch.discrete, out, i_hat, &dres);
+                eff_sub_lo, eff_sub_hi, scratch.discrete, out, i_hat, &dres);
             result.timings.reconstruct_us = dres.channel_us;
             result.timings.subtract_us = dres.subtract_us;
             result.timings.recon_scale_us = dres.scale_us;
@@ -729,7 +761,7 @@ bool reconstruct_and_subtract_unified(
             dres = fullpacket_cancel_discrete(
                 y, n, scratch.work_phr_bits, scratch.work_wire_psdu,
                 true, modcfg, dm, templates.sync, templates.sync_len,
-                cfg.sub_roi_lo, cfg.sub_roi_hi, scratch.discrete, out, i_hat);
+                eff_sub_lo, eff_sub_hi, scratch.discrete, out, i_hat);
             result.timings.tx_remod_us = dres.tx_us;
             result.timings.reconstruct_us = dres.channel_us;
             result.timings.subtract_us = dres.subtract_us;
@@ -917,11 +949,39 @@ bool sic_process_unified(
     auto demod_prof = demod::Qm35825Profile::Default();
     demod_prof.code_index = cfg.comm_code;
     demod_prof.preamble_repetitions = cfg.sync_reps;
-    if (cfg.sync_reps > demod_prof.cir_skip_initial_repetitions)
+    demod_prof.pulse_center_sample = mod::pulse_center_tap(cfg.pulse);
+    if (cfg.sync_reps < 64) {
+        const size_t skip = std::max<size_t>(1, cfg.sync_reps / 4);
+        demod_prof.cir_skip_initial_repetitions =
+            std::min<size_t>(demod_prof.cir_skip_initial_repetitions, skip);
+        demod_prof.cir_repetitions =
+            (cfg.sync_reps > demod_prof.cir_skip_initial_repetitions)
+                ? (cfg.sync_reps - demod_prof.cir_skip_initial_repetitions)
+                : 1;
+        demod_prof.cfo_skip_initial_repetitions =
+            std::min<size_t>(demod_prof.cfo_skip_initial_repetitions, skip);
+        const size_t avail_cfo =
+            (cfg.sync_reps > demod_prof.cfo_skip_initial_repetitions)
+                ? (cfg.sync_reps - demod_prof.cfo_skip_initial_repetitions)
+                : 1;
+        demod_prof.cfo_min_fit_repetitions = std::max<size_t>(
+            1, std::min<size_t>(demod_prof.cfo_min_fit_repetitions, avail_cfo));
+        demod_prof.min_valid_peaks = std::min<size_t>(
+            demod_prof.min_valid_peaks, std::max<size_t>(2, cfg.sync_reps / 2));
+        demod_prof.timing_max_backtrack_symbols = std::min<size_t>(
+            demod_prof.timing_max_backtrack_symbols, cfg.sync_reps);
+    } else if (cfg.sync_reps > demod_prof.cir_skip_initial_repetitions) {
         demod_prof.cir_repetitions = cfg.sync_reps - demod_prof.cir_skip_initial_repetitions;
-    demod_prof.timing_search_margin = 256;
-    demod_prof.timing_coarse_stride = 1;
-    demod_prof.sfd_mode = cfg.sfd_mode;
+    }
+    demod_prof.timing_search_margin =
+        (cfg.full_window_search && cfg.comm_timing_search_margin == 256)
+            ? 2048
+            : cfg.comm_timing_search_margin;
+    demod_prof.timing_coarse_stride =
+        (cfg.comm_timing_coarse_stride > 1)
+            ? cfg.comm_timing_coarse_stride
+            : (cfg.full_window_search ? 8 : cfg.comm_timing_coarse_stride);
+    demod_prof.sfd_mode = (cfg.sfd_mode && cfg.sfd_mode[0]) ? cfg.sfd_mode : "4z2";
     demod_prof.rx_fast_sfd = cfg.rx_fast_sfd;
     demod_prof.rx_fast_cfo_rotation = cfg.rx_fast_cfo;
     demod_prof.rx_seed_refine_tail = cfg.rx_seed_refine_tail;

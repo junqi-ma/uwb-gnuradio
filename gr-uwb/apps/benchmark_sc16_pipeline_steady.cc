@@ -354,6 +354,44 @@ bool file_exists(const std::string& path)
     return ::stat(path.c_str(), &st) == 0;
 }
 
+bool parse_bool_flag(const std::string& v, bool& out)
+{
+    if (v == "1" || v == "true" || v == "yes" || v == "on") {
+        out = true;
+        return true;
+    }
+    if (v == "0" || v == "false" || v == "no" || v == "off") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+bool parse_sfd_mode_literal(const std::string& v, const char*& out)
+{
+    static constexpr const char* kModes[] = {
+        "decawave", "ieee", "4z1", "4z2", "4z3", "4z4"
+    };
+    for (const char* m : kModes) {
+        if (v == m) {
+            out = m;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool parse_cli_pulse(const std::string& v, gr::uwb::mod::PulseSpec& out)
+{
+    gr::uwb::mod::PulseShape shape = gr::uwb::mod::PulseShape::Legacy;
+    if (!gr::uwb::mod::parse_pulse_shape(v, shape) ||
+        shape == gr::uwb::mod::PulseShape::External) {
+        return false;
+    }
+    out.shape = shape;
+    return true;
+}
+
 void print_help(const char* prog)
 {
     std::cout
@@ -367,9 +405,7 @@ void print_help(const char* prog)
         << "  --post-guard <n>           post-guard samples (default 0)\n"
         << "  --period <n>               schedule period in native samples (default = capacity)\n"
         << "  --t0 <samples>             schedule t0 (default 0)\n"
-        << "  --consumer <sic|sensing|both>  (default sic)\n"
-        << "  --target-sync-reps <64|256> target preamble (default 64); CIR uses reps-10\n"
-        << "  --sic-sync-reps <64|256>    interference preamble (default 64)\n"
+        << "  --consumer <sic|sensing|both|sic_sensing|comm|sic_comm>  (default sic)\n"
         << "  --resampler-profile <name> (default realtime_minorder)\n"
         << "  --resampler-experiment <none|fixed_phase|convert_cache|both>\n"
         << "  --iq-dump-dir <dir>        diagnostic post-resample IQ dump directory\n"
@@ -390,12 +426,33 @@ void print_help(const char* prog)
         << "  --json <path>              write results JSON\n"
         << "  --csv <path>               write per-window CSV\n"
         << "  --benchmark                acquire /tmp/uwb-sic-benchmark.lock\n"
-        << "  --sic-policy <p>           preamble|fullpacket|auto (default auto)\n"
+        << "  --sic-code <n>             interferer code index 9..12 (default 10)\n"
+        << "  --sic-comm-code <n>        alias for --sic-code\n"
+        << "  --sic-sync-reps <n>        interferer SYNC reps (default 64)\n"
+        << "  --sic-sfd-mode <m>         decawave|ieee|4z1|4z2|4z3|4z4 (default 4z2)\n"
+        << "  --sic-pulse <p>            legacy|gaussian|blackman (default legacy)\n"
+        << "  --sic-policy <p>           preamble|fullpacket|auto (default auto; sic_comm defaults preamble)\n"
         << "  --sic-backend <b>          ipatov|discrete|fractional (default ipatov)\n"
-        << "  --sic-comm-code <n>        (default 10)\n"
+        << "  --sic-stride <n>           SIC acquisition coarse stride (default 1)\n"
+        << "  --sic-full-window <0|1>    SIC full-window search (default 0; sic_comm defaults 1)\n"
         << "  --sic-sync-template <path> one SYNC symbol CF32 @ work rate\n"
         << "  --sic-roi-margin <n>       (default 64)\n"
         << "  --sic-tap-count <n>        (default 20)\n"
+        << "  --radar-code <n>           target sensing code 9..12 (default 9)\n"
+        << "  --radar-sync-reps <n>      target sensing SYNC reps (default 64)\n"
+        << "  --target-sync-reps <n>     alias for --radar-sync-reps\n"
+        << "  --radar-sfd-mode <m>       decawave|ieee|4z1|4z2|4z3|4z4 (default 4z2)\n"
+        << "  --radar-pulse <p>          legacy|gaussian|blackman (default legacy)\n"
+        << "  --radar-full-window <0|1>  target sensing full-window search (default 1)\n"
+        << "  --radar-stride <n>         target sensing coarse stride (default 1; full-window>=8)\n"
+        << "  --radar-sync-template <p>  optional 1-symbol SYNC override\n"
+        << "  --comm-code <n>            target comm code 9..12 (default 9)\n"
+        << "  --comm-sync-reps <n>       target comm SYNC reps (default 64)\n"
+        << "  --comm-sfd-mode <m>        decawave|ieee|4z1|4z2|4z3|4z4 (default 4z2)\n"
+        << "  --comm-pulse <p>           legacy|gaussian|blackman (default legacy)\n"
+        << "  --comm-full-window <0|1>   target comm full-window search (default 1)\n"
+        << "  --comm-stride <n>          target comm coarse stride (default 8)\n"
+        << "  --comm-sync-template <p>   optional 1-symbol SYNC override\n"
         << "  --help, -h\n";
 }
 
@@ -414,6 +471,9 @@ int main(int argc, char* argv[])
     long long flow_in_flight = 24;
     double flow_timeout_ms = 2000.0;
     long long sic_roi_margin = 64;
+    bool sic_roi_margin_explicit = false;
+    bool sic_policy_explicit = false;
+    bool sic_full_window_explicit = false;
     bool benchmark_mode = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -446,15 +506,94 @@ int main(int argc, char* argv[])
             cfg.schedule_t0 = std::stod(need(i));
         } else if (a == "--consumer") {
             consumer = need(i);
-        } else if (a == "--target-sync-reps") {
-            const size_t reps=std::stoull(need(i));
-            if(reps!=64 && reps!=256) { std::cerr<<"Error: target SYNC must be 64 or 256\n";return 1; }
-            cfg.radar_cfg.sync_repetitions=reps;
-            cfg.radar_cfg.cir_repetitions=reps-cfg.radar_cfg.cir_skip_initial;
+        } else if (a == "--target-sync-reps" || a == "--radar-sync-reps") {
+            const size_t reps = std::stoull(need(i));
+            if (reps < 8 || reps > 4096) {
+                std::cerr << "Error: radar SYNC reps must be in [8, 4096]\n";
+                return 1;
+            }
+            cfg.radar_cfg.sync_repetitions = reps;
+            cfg.radar_cfg.cir_repetitions =
+                (reps > cfg.radar_cfg.cir_skip_initial)
+                    ? (reps - cfg.radar_cfg.cir_skip_initial)
+                    : reps;
+        } else if (a == "--radar-code") {
+            const size_t code = std::stoull(need(i));
+            if (code < 9 || code > 12) {
+                std::cerr << "Error: --radar-code must be 9..12\n";
+                return 1;
+            }
+            cfg.radar_cfg.code_index = code;
+        } else if (a == "--radar-sfd-mode") {
+            if (!parse_sfd_mode_literal(need(i), cfg.radar_cfg.sfd_mode)) {
+                std::cerr << "Error: bad --radar-sfd-mode\n";
+                return 1;
+            }
+        } else if (a == "--radar-pulse") {
+            if (!parse_cli_pulse(need(i), cfg.radar_pulse)) {
+                std::cerr << "Error: bad --radar-pulse\n";
+                return 1;
+            }
+        } else if (a == "--radar-full-window") {
+            if (!parse_bool_flag(need(i), cfg.radar_full_window_search)) {
+                std::cerr << "Error: bad --radar-full-window\n";
+                return 1;
+            }
+        } else if (a == "--radar-stride") {
+            const size_t stride = std::stoull(need(i));
+            if (stride == 0) {
+                std::cerr << "Error: --radar-stride must be >= 1\n";
+                return 1;
+            }
+            cfg.radar_cfg.timing_coarse_stride = stride;
+        } else if (a == "--radar-sync-template") {
+            cfg.radar_sync_template_file = need(i);
+        } else if (a == "--comm-code") {
+            const size_t code = std::stoull(need(i));
+            if (code < 9 || code > 12) {
+                std::cerr << "Error: --comm-code must be 9..12\n";
+                return 1;
+            }
+            cfg.comm_cfg.code_index = code;
+        } else if (a == "--comm-sync-reps") {
+            const size_t reps = std::stoull(need(i));
+            if (reps < 8 || reps > 4096) {
+                std::cerr << "Error: comm SYNC reps must be in [8, 4096]\n";
+                return 1;
+            }
+            cfg.comm_cfg.preamble_repetitions = reps;
+        } else if (a == "--comm-sfd-mode") {
+            if (!parse_sfd_mode_literal(need(i), cfg.comm_cfg.sfd_mode)) {
+                std::cerr << "Error: bad --comm-sfd-mode\n";
+                return 1;
+            }
+        } else if (a == "--comm-pulse") {
+            if (!parse_cli_pulse(need(i), cfg.comm_pulse)) {
+                std::cerr << "Error: bad --comm-pulse\n";
+                return 1;
+            }
+        } else if (a == "--comm-full-window") {
+            if (!parse_bool_flag(need(i), cfg.comm_full_window_search)) {
+                std::cerr << "Error: bad --comm-full-window\n";
+                return 1;
+            }
+        } else if (a == "--comm-stride") {
+            const size_t stride = std::stoull(need(i));
+            if (stride == 0) {
+                std::cerr << "Error: --comm-stride must be >= 1\n";
+                return 1;
+            }
+            cfg.comm_timing_coarse_stride = stride;
+            cfg.comm_cfg.timing_coarse_stride = stride;
+        } else if (a == "--comm-sync-template") {
+            cfg.comm_sync_template_file = need(i);
         } else if (a == "--sic-sync-reps") {
-            const size_t reps=std::stoull(need(i));
-            if(reps!=64 && reps!=256) { std::cerr<<"Error: SIC SYNC must be 64 or 256\n";return 1; }
-            cfg.sic_cfg.sync_reps=reps;
+            const size_t reps = std::stoull(need(i));
+            if (reps < 8 || reps > 4096) {
+                std::cerr << "Error: SIC SYNC reps must be in [8, 4096]\n";
+                return 1;
+            }
+            cfg.sic_cfg.sync_reps = reps;
         } else if (a == "--resampler-profile") {
             cfg.resampler_profile = need(i);
         } else if (a == "--resampler-experiment") {
@@ -517,6 +656,7 @@ int main(int argc, char* argv[])
             benchmark_mode = true;
         } else if (a == "--sic-policy") {
             const std::string v = need(i);
+            sic_policy_explicit = true;
             if (v == "preamble") {
                 cfg.sic_cfg.policy = gr::uwb::sic::SicPolicy::PreambleOnly;
             } else if (v == "fullpacket") {
@@ -539,12 +679,41 @@ int main(int argc, char* argv[])
                 std::cerr << "Error: bad --sic-backend\n";
                 return 1;
             }
-        } else if (a == "--sic-comm-code") {
-            cfg.sic_cfg.comm_code = static_cast<size_t>(std::stoull(need(i)));
+        } else if (a == "--sic-comm-code" || a == "--sic-code") {
+            const size_t code = std::stoull(need(i));
+            if (code < 9 || code > 12) {
+                std::cerr << "Error: --sic-code must be 9..12\n";
+                return 1;
+            }
+            cfg.sic_cfg.comm_code = code;
+        } else if (a == "--sic-sfd-mode") {
+            if (!parse_sfd_mode_literal(need(i), cfg.sic_cfg.sfd_mode)) {
+                std::cerr << "Error: bad --sic-sfd-mode\n";
+                return 1;
+            }
+        } else if (a == "--sic-pulse") {
+            if (!parse_cli_pulse(need(i), cfg.sic_cfg.pulse)) {
+                std::cerr << "Error: bad --sic-pulse\n";
+                return 1;
+            }
+        } else if (a == "--sic-stride") {
+            const size_t stride = std::stoull(need(i));
+            if (stride == 0) {
+                std::cerr << "Error: --sic-stride must be >= 1\n";
+                return 1;
+            }
+            cfg.sic_cfg.coarse_stride = stride;
+        } else if (a == "--sic-full-window") {
+            if (!parse_bool_flag(need(i), cfg.sic_cfg.full_window_search)) {
+                std::cerr << "Error: bad --sic-full-window\n";
+                return 1;
+            }
+            sic_full_window_explicit = true;
         } else if (a == "--sic-sync-template") {
             cfg.sic_sync_template_file = need(i);
         } else if (a == "--sic-roi-margin") {
             sic_roi_margin = std::stoll(need(i));
+            sic_roi_margin_explicit = true;
         } else if (a == "--sic-tap-count") {
             cfg.sic_cfg.tap_count = static_cast<size_t>(std::stoull(need(i)));
         } else {
@@ -603,14 +772,27 @@ int main(int argc, char* argv[])
         cfg.consumer_mode = ConsumerMode::SicOnly;
     } else if (consumer == "sensing") {
         cfg.consumer_mode = ConsumerMode::SensingCir;
-    } else if (consumer == "both") {
-        cfg.consumer_mode = ConsumerMode::Both;
+    } else if (consumer == "both" || consumer == "sic_sensing") {
+        cfg.consumer_mode = ConsumerMode::SicPlusSensing;
+    } else if (consumer == "comm") {
+        cfg.consumer_mode = ConsumerMode::CommOnly;
+    } else if (consumer == "sic_comm") {
+        cfg.consumer_mode = ConsumerMode::SicPlusComm;
+        if (!sic_policy_explicit) {
+            cfg.sic_cfg.policy = gr::uwb::sic::SicPolicy::PreambleOnly;
+        }
+        if (!sic_full_window_explicit && !sic_roi_margin_explicit) {
+            cfg.sic_cfg.full_window_search = true;
+        }
     } else {
         std::cerr << "Error: bad --consumer\n";
         return 1;
     }
 
-    bench::derive_sic_geometry(cfg, sic_roi_margin);
+    cfg.radar_cfg.full_window_search = cfg.radar_full_window_search;
+    if (!cfg.sic_cfg.full_window_search) {
+        bench::derive_sic_geometry(cfg, sic_roi_margin);
+    }
 
     BenchLockGuard bench_guard;
     if (benchmark_mode && !bench_guard.acquire()) {
@@ -711,13 +893,14 @@ int main(int argc, char* argv[])
         measured.push_back(completed[i]);
     }
 
-    std::vector<double> v_queue, v_convert, v_resample, v_sic, v_sensing, v_e2e;
+    std::vector<double> v_queue, v_convert, v_resample, v_sic, v_sensing, v_comm, v_e2e;
     for (const auto* r : measured) {
         v_queue.push_back(r->timing.queue_us);
         v_convert.push_back(r->timing.convert_us);
         v_resample.push_back(r->timing.resample_us);
         v_sic.push_back(r->timing.sic_us);
         v_sensing.push_back(r->timing.sensing_us);
+        v_comm.push_back(r->timing.comm_us);
         v_e2e.push_back(r->timing.e2e_us);
     }
     const PhaseStats st_queue = compute_phase_stats(v_queue);
@@ -725,6 +908,7 @@ int main(int argc, char* argv[])
     const PhaseStats st_resample = compute_phase_stats(v_resample);
     const PhaseStats st_sic = compute_phase_stats(v_sic);
     const PhaseStats st_sensing = compute_phase_stats(v_sensing);
+    const PhaseStats st_comm = compute_phase_stats(v_comm);
     const PhaseStats st_e2e = compute_phase_stats(v_e2e);
 
     // Steady interval: bounded by real monotonic timestamps of the measured
@@ -779,6 +963,7 @@ int main(int argc, char* argv[])
             : 0.0;
 
     size_t sic_executed = 0, sic_committed = 0, radar_executed = 0, radar_found = 0;
+    size_t comm_attempted = 0, comm_ok = 0, comm_phr_ok = 0, comm_fcs_ok = 0;
     double suppression_sum = 0.0;
     for (const auto* r : measured) {
         if (r->sic_executed) {
@@ -792,6 +977,18 @@ int main(int argc, char* argv[])
             ++radar_executed;
             if (r->radar_sfd_found) {
                 ++radar_found;
+            }
+        }
+        if (r->comm_attempted) {
+            ++comm_attempted;
+            if (r->comm_ok) {
+                ++comm_ok;
+            }
+            if (r->comm_phr_ok) {
+                ++comm_phr_ok;
+            }
+            if (r->comm_fcs_ok) {
+                ++comm_fcs_ok;
             }
         }
     }
@@ -857,15 +1054,23 @@ int main(int argc, char* argv[])
     print_row("resample", st_resample);
     print_row("sic", st_sic);
     print_row("sensing", st_sensing);
+    print_row("comm", st_comm);
     print_row("e2e", st_e2e);
 
+    const double mean_suppression_db =
+        sic_committed > 0 ? suppression_sum / static_cast<double>(sic_committed) : 0.0;
     std::cout << "\n--- functional ---\n"
               << "  sic_executed=" << sic_executed
               << " sic_committed=" << sic_committed
               << " mean_suppression_db=" << std::fixed << std::setprecision(2)
-              << (sic_committed > 0 ? suppression_sum / static_cast<double>(sic_committed) : 0.0)
+              << mean_suppression_db
               << "\n  radar_executed=" << radar_executed
-              << " radar_sfd_found=" << radar_found << "\n";
+              << " radar_sfd_found=" << radar_found
+              << "\n  comm_attempted=" << comm_attempted
+              << " comm_ok=" << comm_ok
+              << " phr_ok=" << comm_phr_ok
+              << " fcs_ok=" << comm_fcs_ok
+              << " comm_us=" << std::fixed << std::setprecision(2) << st_comm.mean << "\n";
 
     if (cfg.enable_rx_diagnostics) {
         std::cout << "\n--- RX diagnostics (cumulative) ---\n"
@@ -940,6 +1145,32 @@ int main(int argc, char* argv[])
     meta.emplace_back("resample_us_p95", bench::json_number(st_resample.p95));
     meta.emplace_back("resample_us_p99", bench::json_number(st_resample.p99));
     meta.emplace_back("sic_us_mean", bench::json_number(st_sic.mean));
+    meta.emplace_back("sensing_us_mean", bench::json_number(st_sensing.mean));
+    meta.emplace_back("comm_us_mean", bench::json_number(st_comm.mean));
+    meta.emplace_back("comm_us_p50", bench::json_number(st_comm.p50));
+    meta.emplace_back("comm_us_p95", bench::json_number(st_comm.p95));
+    meta.emplace_back("comm_us_p99", bench::json_number(st_comm.p99));
+    meta.emplace_back("sic_executed", bench::json_number(static_cast<uint64_t>(sic_executed)));
+    meta.emplace_back("sic_committed", bench::json_number(static_cast<uint64_t>(sic_committed)));
+    meta.emplace_back("mean_suppression_db", bench::json_number(mean_suppression_db));
+    meta.emplace_back("radar_executed", bench::json_number(static_cast<uint64_t>(radar_executed)));
+    meta.emplace_back("radar_sfd_found", bench::json_number(static_cast<uint64_t>(radar_found)));
+    meta.emplace_back("comm_attempted", bench::json_number(static_cast<uint64_t>(comm_attempted)));
+    meta.emplace_back("comm_ok", bench::json_number(static_cast<uint64_t>(comm_ok)));
+    meta.emplace_back("comm_phr_ok", bench::json_number(static_cast<uint64_t>(comm_phr_ok)));
+    meta.emplace_back("comm_fcs_ok", bench::json_number(static_cast<uint64_t>(comm_fcs_ok)));
+    meta.emplace_back("sic_code", bench::json_number(static_cast<uint64_t>(cfg.sic_cfg.comm_code)));
+    meta.emplace_back("sic_sync_reps", bench::json_number(static_cast<uint64_t>(cfg.sic_cfg.sync_reps)));
+    meta.emplace_back("sic_sfd_mode", bench::meta_string(cfg.sic_cfg.sfd_mode ? cfg.sic_cfg.sfd_mode : ""));
+    meta.emplace_back("sic_pulse", bench::meta_string(gr::uwb::mod::pulse_shape_name(cfg.sic_cfg.pulse.shape)));
+    meta.emplace_back("radar_code", bench::json_number(static_cast<uint64_t>(cfg.radar_cfg.code_index)));
+    meta.emplace_back("radar_sync_reps", bench::json_number(static_cast<uint64_t>(cfg.radar_cfg.sync_repetitions)));
+    meta.emplace_back("radar_sfd_mode", bench::meta_string(cfg.radar_cfg.sfd_mode ? cfg.radar_cfg.sfd_mode : ""));
+    meta.emplace_back("radar_pulse", bench::meta_string(gr::uwb::mod::pulse_shape_name(cfg.radar_pulse.shape)));
+    meta.emplace_back("comm_code", bench::json_number(static_cast<uint64_t>(cfg.comm_cfg.code_index)));
+    meta.emplace_back("comm_sync_reps", bench::json_number(static_cast<uint64_t>(cfg.comm_cfg.preamble_repetitions)));
+    meta.emplace_back("comm_sfd_mode", bench::meta_string(cfg.comm_cfg.sfd_mode ? cfg.comm_cfg.sfd_mode : ""));
+    meta.emplace_back("comm_pulse", bench::meta_string(gr::uwb::mod::pulse_shape_name(cfg.comm_pulse.shape)));
     meta.emplace_back("e2e_us_mean", bench::json_number(st_e2e.mean));
     meta.emplace_back("e2e_us_p50", bench::json_number(st_e2e.p50));
     meta.emplace_back("e2e_us_p95", bench::json_number(st_e2e.p95));

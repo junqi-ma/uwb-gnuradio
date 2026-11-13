@@ -9,6 +9,7 @@
  */
 
 #include <gnuradio/uwb/uwb_uhd_sc16_pipeline.h>
+#include <gnuradio/uwb/uwb_detector_core.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
 #include <gnuradio/uwb/uwb_defaults.h>
 #include <volk/volk.h>
@@ -26,6 +27,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -86,7 +88,7 @@ std::vector<float> load_taps_f32(const std::string& rel)
     return taps;
 }
 
-std::vector<std::complex<float>> load_cf32_file(const std::string& rel)
+[[maybe_unused]] std::vector<std::complex<float>> load_cf32_file(const std::string& rel)
 {
     std::string path = find_testdata_file(rel);
     if (path.empty()) {
@@ -102,50 +104,231 @@ std::vector<std::complex<float>> load_cf32_file(const std::string& rel)
     return data;
 }
 
-// Load one shaped SYNC waveform (1016 samples) from the shared test data.
-// The returned vector is always exactly 1016 samples long; each DSP worker
-// calls this to obtain its own private copy (contract C4: no shared state).
-// `override_path` (when non-empty) is loaded verbatim and must already hold
-// one SYNC symbol on the 998.4 MS/s work grid.
-void load_sync_pulse_template(std::vector<std::complex<float>>& tmpl,
-                              const std::string& override_path = std::string())
+bool mode_runs_sic(ConsumerMode mode)
 {
+    return mode == ConsumerMode::SicOnly ||
+           mode == ConsumerMode::Both ||
+           mode == ConsumerMode::SicPlusComm;
+}
+
+bool mode_runs_sensing(ConsumerMode mode)
+{
+    return mode == ConsumerMode::SensingCir ||
+           mode == ConsumerMode::Both;
+}
+
+bool mode_runs_comm(ConsumerMode mode)
+{
+    return mode == ConsumerMode::CommOnly ||
+           mode == ConsumerMode::SicPlusComm;
+}
+
+uint64_t fnv1a_64(const uint8_t* data, size_t n)
+{
+    uint64_t hash = 14695981039346656037ULL;
+    for (size_t i = 0; i < n; ++i) {
+        hash ^= static_cast<uint64_t>(data[i]);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+const char* demod_status_reason(demod::DemodStatus status)
+{
+    switch (status) {
+    case demod::DemodStatus::Success:
+        return "ok";
+    case demod::DemodStatus::InvalidInput:
+        return "invalid_input";
+    case demod::DemodStatus::TimingFailed:
+        return "timing_failed";
+    case demod::DemodStatus::CfoFailed:
+        return "cfo_failed";
+    case demod::DemodStatus::SfdFailed:
+        return "sfd_failed";
+    case demod::DemodStatus::PhrFailed:
+        return "phr_failed";
+    case demod::DemodStatus::PayloadFailed:
+        return "payload_failed";
+    case demod::DemodStatus::FcsFailed:
+        return "fcs_failed";
+    case demod::DemodStatus::QueueFull:
+        return "queue_full";
+    case demod::DemodStatus::InternalError:
+        return "internal_error";
+    case demod::DemodStatus::CirFailed:
+        return "cir_failed";
+    }
+    return "unknown";
+}
+
+// Load one shaped SYNC waveform (1016 samples) from an explicit override file,
+// or synthesize an L2-normalized 1-symbol SYNC waveform from `(code_index,
+// pulse)` via `uwb_hrp_mod_core.h`.  Each DSP worker calls this independently
+// to obtain its own private copy (contract C4: no shared state).
+void load_or_synthesize_sync_template(std::vector<std::complex<float>>& tmpl,
+                                      size_t code_index,
+                                      const mod::PulseSpec& pulse,
+                                      const char* sfd_mode,
+                                      const std::string& override_path = std::string())
+{
+    constexpr size_t kSyncSamples = demod::kQm35SamplesPerSymbol; // 1016
     if (!override_path.empty()) {
         tmpl.clear();
         std::ifstream f(override_path, std::ios::binary | std::ios::ate);
-        if (f) {
-            const auto bytes = static_cast<size_t>(f.tellg());
-            if (bytes % sizeof(std::complex<float>) == 0) {
-                f.seekg(0);
-                tmpl.resize(bytes / sizeof(std::complex<float>));
-                f.read(reinterpret_cast<char*>(tmpl.data()),
-                       static_cast<std::streamsize>(bytes));
-            }
+        if (!f) {
+            throw std::runtime_error(
+                "UhdSc16Pipeline: failed to open SYNC template file '" +
+                override_path + "'");
         }
-        if (tmpl.size() >= 1016) {
-            tmpl.resize(1016);
-            return;
+        const auto bytes = static_cast<size_t>(f.tellg());
+        if (bytes < kSyncSamples * sizeof(std::complex<float>) ||
+            bytes % sizeof(std::complex<float>) != 0) {
+            throw std::runtime_error(
+                "UhdSc16Pipeline: SYNC template file '" + override_path +
+                "' is invalid or shorter than 1016 CF32 samples");
         }
-        tmpl.assign(1016, std::complex<float>(1.0f, 0.0f));
+        f.seekg(0);
+        tmpl.resize(bytes / sizeof(std::complex<float>));
+        f.read(reinterpret_cast<char*>(tmpl.data()),
+               static_cast<std::streamsize>(bytes));
+        tmpl.resize(kSyncSamples);
+        core::uwb_l2_normalize(tmpl);
         return;
     }
-    tmpl = load_cf32_file("reference_preamble.bin");
-    if (tmpl.empty()) {
-        tmpl = load_cf32_file("uwb_radar/tx_998p4.cf32");
+
+    mod::HrpModConfig mod_cfg;
+    mod_cfg.code_index = code_index;
+    mod_cfg.sync_repetitions = 1;
+    mod_cfg.sfd_mode = (sfd_mode && sfd_mode[0] != '\0') ? sfd_mode : "4z2";
+    mod_cfg.insert_sts = false;
+    mod_cfg.pulse = pulse;
+
+    mod::HrpModScratch mod_scratch;
+    std::vector<std::complex<float>> prefix_wf(40960);
+    size_t produced = 0;
+    if (!mod::modulate_prefix_waveform(mod_cfg, mod_scratch, prefix_wf.data(),
+                                       prefix_wf.size(), produced) ||
+        produced < kSyncSamples) {
+        throw std::runtime_error(
+            "UhdSc16Pipeline: failed to synthesize 1-symbol SYNC template for code_index=" +
+            std::to_string(code_index));
     }
-    if (tmpl.size() >= 1016) {
-        tmpl.resize(1016);
-    } else {
-        tmpl.assign(1016, std::complex<float>(1.0f, 0.0f));
-    }
+
+    tmpl.assign(prefix_wf.begin(),
+                prefix_wf.begin() + static_cast<std::ptrdiff_t>(kSyncSamples));
+    core::uwb_l2_normalize(tmpl);
 }
 
-// Resolve the resampler tap file for a profile, falling back to the two
-// historical defaults exactly like the single-consumer implementation did.
+sic::SicUnifiedConfig build_effective_sic_cfg(const PipelineConfig& cfg)
+{
+    sic::SicUnifiedConfig out = cfg.sic_cfg;
+    if (cfg.consumer_mode == ConsumerMode::SicPlusComm &&
+        out.policy == sic::SicPolicy::AutoFallback) {
+        // Sensing interferer in Mode B is SYNC+SFD only; default to L1 PreambleOnly.
+        out.policy = sic::SicPolicy::PreambleOnly;
+    }
+    if (out.full_window_search) {
+        out.roi_lo = 0;
+        out.roi_hi = 0;
+        out.sub_roi_lo = 0;
+        out.sub_roi_hi = 0;
+        out.observed_end_sample = 0;
+        if (out.coarse_stride <= 1) {
+            out.coarse_stride = 8;
+        }
+    }
+    return out;
+}
+
+radar::RadarCirConfig build_effective_radar_cfg(const PipelineConfig& cfg)
+{
+    radar::RadarCirConfig out = cfg.radar_cfg;
+    if (!out.use_predicted_timing &&
+        (cfg.radar_full_window_search || out.full_window_search)) {
+        out.full_window_search = true;
+        if (out.timing_coarse_stride <= 1) {
+            out.timing_coarse_stride = 8;
+        }
+    }
+    if (out.sync_repetitions < 64 && out.cir_skip_initial > out.sync_repetitions / 4) {
+        out.cir_skip_initial = out.sync_repetitions / 4;
+    } else if (out.cir_skip_initial >= out.sync_repetitions) {
+        out.cir_skip_initial = out.sync_repetitions / 4;
+    }
+    const size_t avail_reps = out.sync_repetitions - out.cir_skip_initial;
+    if (out.cir_repetitions == 0 || out.cir_repetitions > avail_reps) {
+        out.cir_repetitions = avail_reps;
+    }
+    return out;
+}
+
+demod::Qm35825Profile build_effective_comm_cfg(const PipelineConfig& cfg,
+                                              size_t dsp_n,
+                                              int64_t& out_seed)
+{
+    demod::Qm35825Profile p = cfg.comm_cfg;
+    p.pulse_center_sample = mod::pulse_center_tap(cfg.comm_pulse);
+    const size_t reps = std::max<size_t>(1, p.preamble_repetitions);
+    p.preamble_repetitions = reps;
+
+    if (reps < 64) {
+        if (p.cir_skip_initial_repetitions > reps / 4) {
+            p.cir_skip_initial_repetitions = reps / 4;
+        }
+    } else if (p.cir_skip_initial_repetitions >= reps) {
+        p.cir_skip_initial_repetitions = std::min<size_t>(10, reps / 4);
+    }
+    const size_t cir_avail = reps - p.cir_skip_initial_repetitions;
+    if (p.cir_repetitions == 0 || p.cir_repetitions > cir_avail) {
+        p.cir_repetitions = cir_avail;
+    }
+
+    if (p.cfo_min_fit_repetitions == 0 || p.cfo_min_fit_repetitions > reps) {
+        p.cfo_min_fit_repetitions = std::max<size_t>(2, std::min<size_t>(reps, 32));
+    }
+    if (reps < 64) {
+        const size_t max_cfo_fit = std::max<size_t>(2, reps / 2);
+        if (p.cfo_min_fit_repetitions > max_cfo_fit) {
+            p.cfo_min_fit_repetitions = max_cfo_fit;
+        }
+        if (p.cfo_skip_initial_repetitions + p.cfo_min_fit_repetitions > reps) {
+            p.cfo_skip_initial_repetitions =
+                reps > p.cfo_min_fit_repetitions ? (reps - p.cfo_min_fit_repetitions) : 0;
+        }
+    } else if (p.cfo_skip_initial_repetitions >= reps) {
+        p.cfo_skip_initial_repetitions =
+            reps > p.cfo_min_fit_repetitions ? (reps - p.cfo_min_fit_repetitions) : 0;
+    }
+
+    if (p.min_valid_peaks == 0 || p.min_valid_peaks > reps) {
+        p.min_valid_peaks = std::max<size_t>(2, std::min<size_t>(reps, 8));
+    } else if (reps < 64 && p.min_valid_peaks > std::max<size_t>(2, reps / 2)) {
+        p.min_valid_peaks = std::max<size_t>(2, reps / 2);
+    }
+
+    if (cfg.comm_full_window_search) {
+        out_seed = static_cast<int64_t>(dsp_n / 2);
+        p.timing_search_margin = dsp_n;
+        p.timing_coarse_stride =
+            cfg.comm_timing_coarse_stride > 0 ? cfg.comm_timing_coarse_stride : 8;
+    } else {
+        const double rate_ratio = cfg.work_rate / cfg.native_rate;
+        out_seed = static_cast<int64_t>(
+            std::llround(static_cast<double>(cfg.pre_guard_samples) * rate_ratio));
+    }
+    return p;
+}
+
+// Resolve the resampler tap file for a profile, falling back cleanly when a
+// rate directory (e.g. resampler_65_32) does not ship equiripple variants.
 std::vector<float> load_resampler_taps(const std::string& dir,
                                        const std::string& profile)
 {
     auto taps = load_taps_f32(dir + "/taps_" + profile + ".txt");
+    if (taps.empty() && profile == "realtime_eq16") {
+        taps = load_taps_f32(dir + "/taps_realtime_minorder.txt");
+    }
     if (taps.empty()) {
         taps = load_taps_f32(dir + "/taps_quality_minorder.txt");
     }
@@ -784,7 +967,93 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
     // Contract C1: one lock-free SPSC ring per worker.  pools_[w] is produced
     // only by rx_thread_ and consumed only by dsp_threads_[w], so the
     // single-producer / single-consumer guarantee is preserved per pool.
-    const size_t slot_cap = cfg_.native_window_capacity();
+    auto_sched_stats_ = AutoScheduleStats{};
+    if (cfg_.schedule_mode == ScheduleMode::AutoAcquire) {
+        if (cfg_.auto_schedule.auto_interference_guards) {
+            const sic::SicUnifiedConfig eff_sic = build_effective_sic_cfg(cfg_);
+            InterferenceGuardSpec spec;
+            spec.native_rate = cfg_.native_rate;
+            spec.work_rate = cfg_.work_rate;
+            spec.int_sync_reps = eff_sic.sync_reps;
+            spec.int_sfd_mode = (eff_sic.sfd_mode && eff_sic.sfd_mode[0] != '\0')
+                                    ? eff_sic.sfd_mode
+                                    : "4z2";
+            spec.int_pre_sfd_sync_reps = std::max(
+                cfg_.auto_schedule.early_int_pre_sfd_sync_reps, eff_sic.fit_reps);
+            spec.early_margin_work = cfg_.auto_schedule.early_int_margin_work;
+            spec.late_margin_work = cfg_.auto_schedule.late_int_margin_work;
+
+            switch (cfg_.consumer_mode) {
+            case ConsumerMode::SensingCir:
+            case ConsumerMode::SicPlusSensing:
+                spec.target_is_comm = false;
+                spec.target_sync_reps = cfg_.radar_cfg.sync_repetitions;
+                spec.target_sfd_mode =
+                    (cfg_.radar_cfg.sfd_mode && cfg_.radar_cfg.sfd_mode[0] != '\0')
+                        ? cfg_.radar_cfg.sfd_mode
+                        : "4z2";
+                spec.target_pulse = cfg_.radar_pulse;
+                break;
+            case ConsumerMode::CommOnly:
+            case ConsumerMode::SicPlusComm:
+                spec.target_is_comm = true;
+                spec.target_sync_reps = cfg_.comm_cfg.preamble_repetitions;
+                spec.target_sfd_mode =
+                    (cfg_.comm_cfg.sfd_mode && cfg_.comm_cfg.sfd_mode[0] != '\0')
+                        ? cfg_.comm_cfg.sfd_mode
+                        : "4z2";
+                spec.target_max_psdu_bytes = cfg_.auto_schedule.target_max_psdu_bytes;
+                spec.target_pulse = cfg_.comm_pulse;
+                break;
+            case ConsumerMode::SicOnly:
+                spec.target_is_comm = false;
+                spec.target_sync_reps = eff_sic.sync_reps;
+                spec.target_sfd_mode = spec.int_sfd_mode;
+                spec.target_pulse = eff_sic.pulse;
+                break;
+            }
+
+            const AutoWindowGeometry geom = compute_interference_aware_window(spec);
+            effective_pre_guard_ = geom.pre_guard_native;
+            effective_capture_ = geom.capture_native;
+            effective_post_guard_ = geom.post_guard_native;
+        } else {
+            effective_pre_guard_ = cfg_.pre_guard_samples;
+            effective_capture_ = cfg_.capture_samples;
+            effective_post_guard_ = cfg_.post_guard_samples;
+        }
+
+        const double eff_native_rate =
+            (cfg_.native_rate > 0.0) ? cfg_.native_rate : defaults::kSampleRateHz;
+        const size_t acq_pre =
+            (cfg_.auto_schedule.acq_pre_guard_samples > 0)
+                ? cfg_.auto_schedule.acq_pre_guard_samples
+                : std::max<size_t>(effective_pre_guard_, 256);
+        const size_t acq_post =
+            (cfg_.auto_schedule.acq_post_guard_samples > 0)
+                ? cfg_.auto_schedule.acq_post_guard_samples
+                : effective_post_guard_;
+        const size_t acq_cap = effective_capture_ + acq_post;
+        const size_t prov_guard_samples = static_cast<size_t>(std::llround(
+            std::max(0.0, cfg_.auto_schedule.provisional_guard_us) * 1e-6 *
+            eff_native_rate));
+        const size_t sched_max = effective_pre_guard_ + effective_capture_ +
+                                 effective_post_guard_ + 2 * prov_guard_samples;
+        const size_t acq_max = acq_pre + acq_cap;
+        effective_slot_cap_ = std::max(sched_max, acq_max);
+
+        auto_sched_stats_.enabled = true;
+        auto_sched_stats_.effective_pre_guard = effective_pre_guard_;
+        auto_sched_stats_.effective_capture = effective_capture_;
+        auto_sched_stats_.effective_post_guard = effective_post_guard_;
+    } else {
+        effective_pre_guard_ = cfg_.pre_guard_samples;
+        effective_capture_ = cfg_.capture_samples;
+        effective_post_guard_ = cfg_.post_guard_samples;
+        effective_slot_cap_ = cfg_.native_window_capacity();
+    }
+
+    const size_t slot_cap = effective_slot_capacity();
     pools_.clear();
     pools_.reserve(static_cast<size_t>(n_workers));
     for (int w = 0; w < n_workers; ++w) {
@@ -899,6 +1168,7 @@ void UhdSc16Pipeline::start()
 
     // Restart safety: drop any thread handles left over from a previous run.
     dsp_threads_.clear();
+    feedback_queue_.reset();
 
     rx_thread_ = std::thread(&UhdSc16Pipeline::rx_producer_loop, this);
 #if defined(__linux__) && defined(_GNU_SOURCE)
@@ -928,6 +1198,7 @@ void UhdSc16Pipeline::stop()
         stop_requested_.store(true, std::memory_order_relaxed);
     }
     ready_cv_.notify_all();
+    feedback_queue_.wake_all();
 }
 
 void UhdSc16Pipeline::wait()
@@ -1136,6 +1407,11 @@ void UhdSc16Pipeline::recover_orphaned_windows()
             res.worker_id = static_cast<int>(w);
             res.native_start_abs = slot->native_start_abs;
             res.native_sample_count = slot->native_count;
+            res.window_kind = slot->window_kind;
+            res.acquisition_epoch = slot->acquisition_epoch;
+            res.schedule_generation = slot->schedule_generation;
+            res.schedule_index = slot->schedule_index;
+            res.schedule_state = slot->schedule_state_name;
             res.rx_push_time = slot->push_time;
             res.state = WindowTerminalState::ProcessingFailed;
             res.sic_status = "orphaned_after_worker_exit";
@@ -1259,8 +1535,724 @@ bool UhdSc16Pipeline::write_iq_dump(uint64_t window_id,
     return true;
 }
 
+size_t UhdSc16Pipeline::effective_slot_capacity() const
+{
+    if (cfg_.schedule_mode == ScheduleMode::AutoAcquire && effective_slot_cap_ > 0) {
+        return effective_slot_cap_;
+    }
+    return cfg_.native_window_capacity();
+}
+
+AutoScheduleController::TargetProfile UhdSc16Pipeline::build_target_profile() const
+{
+    AutoScheduleController::TargetProfile tp;
+    const bool same_rate = (std::abs(cfg_.native_rate - cfg_.work_rate) <= 1.0);
+    std::string tmpl_file;
+
+    switch (cfg_.consumer_mode) {
+    case ConsumerMode::SensingCir:
+    case ConsumerMode::SicPlusSensing:
+        tp.code_index = static_cast<int>(cfg_.radar_cfg.code_index);
+        tp.sync_repetitions = cfg_.radar_cfg.sync_repetitions;
+        tp.sfd_mode = (cfg_.radar_cfg.sfd_mode && cfg_.radar_cfg.sfd_mode[0] != '\0')
+                          ? cfg_.radar_cfg.sfd_mode
+                          : "4z2";
+        tp.sfd_symbols = sfd_symbol_count_for_mode(tp.sfd_mode.c_str());
+        tp.pulse = cfg_.radar_pulse;
+        tp.is_comm = false;
+        tmpl_file = cfg_.radar_sync_template_file;
+        break;
+    case ConsumerMode::CommOnly:
+    case ConsumerMode::SicPlusComm:
+        tp.code_index = static_cast<int>(cfg_.comm_cfg.code_index);
+        tp.sync_repetitions = cfg_.comm_cfg.preamble_repetitions;
+        tp.sfd_mode = (cfg_.comm_cfg.sfd_mode && cfg_.comm_cfg.sfd_mode[0] != '\0')
+                          ? cfg_.comm_cfg.sfd_mode
+                          : "4z2";
+        tp.sfd_symbols = sfd_symbol_count_for_mode(tp.sfd_mode.c_str());
+        tp.pulse = cfg_.comm_pulse;
+        tp.is_comm = true;
+        tmpl_file = cfg_.comm_sync_template_file;
+        break;
+    case ConsumerMode::SicOnly:
+        tp.code_index = static_cast<int>(cfg_.sic_cfg.comm_code);
+        tp.sync_repetitions = cfg_.sic_cfg.sync_reps;
+        tp.sfd_mode = (cfg_.sic_cfg.sfd_mode && cfg_.sic_cfg.sfd_mode[0] != '\0')
+                          ? cfg_.sic_cfg.sfd_mode
+                          : "4z2";
+        tp.sfd_symbols = sfd_symbol_count_for_mode(tp.sfd_mode.c_str());
+        tp.pulse = cfg_.sic_cfg.pulse;
+        tp.is_comm = false;
+        tmpl_file = cfg_.sic_sync_template_file;
+        break;
+    }
+
+    if (same_rate && !tmpl_file.empty()) {
+        load_or_synthesize_sync_template(tp.native_sync_template_override,
+                                         static_cast<size_t>(tp.code_index),
+                                         tp.pulse,
+                                         tp.sfd_mode.c_str(),
+                                         tmpl_file);
+    }
+    return tp;
+}
+
+void UhdSc16Pipeline::rx_auto_schedule_loop()
+{
+    if (!wait_for_workers_ready()) {
+        rx_finished_.store(true, std::memory_order_release);
+        return;
+    }
+    if (!source_->start_stream()) {
+        std::cerr << "UhdSc16Pipeline: source start_stream() failed; no windows "
+                     "will be produced\n";
+        set_source_error("source start_stream() failed");
+        rx_finished_.store(true, std::memory_order_release);
+        return;
+    }
+    source_started_.store(true, std::memory_order_release);
+
+    AutoScheduleConfig acfg = cfg_.auto_schedule;
+    if (acfg.period_s <= 0.0) {
+        acfg.period_s = cfg_.period_s;
+    }
+
+    AutoScheduleController ctrl;
+    try {
+        ctrl.configure(acfg, build_target_profile(), cfg_.native_rate, cfg_.work_rate,
+                       effective_pre_guard_, effective_capture_, effective_post_guard_);
+    } catch (const std::exception& e) {
+        set_source_error(std::string("AutoScheduleController configure failed: ") +
+                         e.what());
+        rx_finished_.store(true, std::memory_order_release);
+        return;
+    }
+
+    const bool diag = cfg_.enable_rx_diagnostics;
+    std::atomic<uint64_t>* ledger_wait_ns = diag ? &rx_acc_.ledger_wait_ns : nullptr;
+    const int n_workers = effective_dsp_workers();
+    const size_t pool_slot_cap = effective_slot_capacity();
+    const size_t slot_cap = std::max(pool_slot_cap, ctrl.max_slot_native_capacity());
+    const size_t kReadChunk = 16384;
+    const size_t read_slice = std::max<size_t>(kReadChunk, 1);
+    const size_t reserve = std::max(read_slice, (slot_cap + 1) / 2);
+    const size_t storage_cap = slot_cap + 2 * reserve;
+
+    std::vector<std::complex<int16_t>> storage(storage_cap);
+    if (diag) {
+        rx_acc_.stream_buf_resize_count.fetch_add(1, std::memory_order_relaxed);
+        rx_acc_.stream_buf_zero_init_bytes.fetch_add(
+            static_cast<uint64_t>(storage_cap) * sizeof(std::complex<int16_t>),
+            std::memory_order_relaxed);
+    }
+
+    size_t valid_begin = 0;
+    size_t valid_n = 0;
+    int64_t valid_start_abs = 0;
+    int64_t read_end_abs = 0;
+    uint64_t next_window_id = 0;
+    uint64_t samples_read_total = 0;
+    uint64_t admitted_dynamic_slots = 0;
+    uint64_t ingested_feedback_slots = 0;
+    int acq_zero_progress_reads = 0;
+    constexpr int kMaxZeroProgressReads = 16;
+    const bool unpaced_replay =
+        (cfg_.source_type == StreamSourceType::Replay && !cfg_.paced_replay);
+    const bool pacing_for_replay =
+        unpaced_replay && cfg_.auto_schedule.sync_candidate_on_unpaced_replay;
+
+    std::vector<LockFeedback> fb_batch;
+    fb_batch.reserve(32);
+
+    auto ingest_fb_batch = [&]() {
+        if (!fb_batch.empty()) {
+            ingested_feedback_slots += static_cast<uint64_t>(fb_batch.size());
+            ctrl.ingest_feedback(fb_batch, read_end_abs);
+            fb_batch.clear();
+        }
+    };
+
+    auto release_before = [&](int64_t limit_abs) {
+        if (limit_abs <= valid_start_abs) {
+            return;
+        }
+        const int64_t keep_from = std::min<int64_t>(limit_abs, read_end_abs);
+        if (keep_from <= valid_start_abs) {
+            return;
+        }
+        const size_t drop = static_cast<size_t>(keep_from - valid_start_abs);
+        valid_begin += drop;
+        valid_n -= drop;
+        valid_start_abs = keep_from;
+        read_end_abs = valid_start_abs + static_cast<int64_t>(valid_n);
+        if (valid_n == 0) {
+            valid_begin = 0;
+        }
+    };
+
+    auto emit_slot = [&](int64_t win_start_abs,
+                         const std::complex<int16_t>* src_samples,
+                         size_t sample_count,
+                         WindowKind kind,
+                         int64_t pred_start_native_rel,
+                         size_t pre_guard_used,
+                         size_t search_margin_work,
+                         uint64_t acq_epoch,
+                         uint64_t sched_gen,
+                         uint64_t sched_idx,
+                         const char* state_name) {
+        const uint64_t win_id = next_window_id++;
+        {
+            ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
+            ledger_.offered_windows++;
+        }
+
+        Sc16WindowSlot* slot = nullptr;
+        int pool_idx = -1;
+        std::chrono::steady_clock::time_point t_probe{};
+        if (diag) {
+            t_probe = std::chrono::steady_clock::now();
+        }
+        auto probe_pools = [&]() {
+            for (int probe = 0; probe < n_workers; ++probe) {
+                const int cand = static_cast<int>(
+                    (win_id + static_cast<uint64_t>(probe)) %
+                    static_cast<uint64_t>(n_workers));
+                Sc16WindowSlot* candidate =
+                    pools_[static_cast<size_t>(cand)]->acquire_filling_slot();
+                if (candidate) {
+                    slot = candidate;
+                    pool_idx = cand;
+                    break;
+                }
+            }
+        };
+        probe_pools();
+        while (!slot && pacing_for_replay && !stop_requested_) {
+            feedback_queue_.drain(fb_batch);
+            ingest_fb_batch();
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+            probe_pools();
+        }
+        if (diag) {
+            rx_acc_.dispatch_ns.fetch_add(
+                elapsed_ns(t_probe, std::chrono::steady_clock::now()),
+                std::memory_order_relaxed);
+        }
+
+        if (!slot) {
+            {
+                ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
+                ledger_.dropped_admission++;
+            }
+            if (diag) {
+                rx_acc_.windows_dropped.fetch_add(1, std::memory_order_relaxed);
+            }
+            WindowResult drop_res;
+            drop_res.window_id = win_id;
+            drop_res.state = WindowTerminalState::DroppedAdmission;
+            drop_res.native_start_abs = win_start_abs;
+            drop_res.native_sample_count = sample_count;
+            drop_res.rx_push_time = std::chrono::steady_clock::now();
+            drop_res.window_kind = kind;
+            drop_res.acquisition_epoch = acq_epoch;
+            drop_res.schedule_generation = sched_gen;
+            drop_res.schedule_index = sched_idx;
+            drop_res.schedule_state = state_name ? state_name : "fixed";
+            commit_result(-1, drop_res);
+            return;
+        }
+
+        {
+            ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
+            ledger_.admitted_windows++;
+        }
+        ++admitted_dynamic_slots;
+        slot->window_id = win_id;
+        slot->native_start_abs = win_start_abs;
+        slot->native_count = sample_count;
+        slot->native_rate = cfg_.native_rate;
+        slot->work_rate = cfg_.work_rate;
+        slot->push_time = std::chrono::steady_clock::now();
+        slot->use_dynamic_slot = true;
+        slot->window_kind = kind;
+        slot->acquisition_epoch = acq_epoch;
+        slot->schedule_generation = sched_gen;
+        slot->schedule_index = sched_idx;
+        slot->predicted_start_native_rel = pred_start_native_rel;
+        slot->pre_guard_used = pre_guard_used;
+        slot->search_margin_work = search_margin_work;
+        slot->schedule_state_name = state_name ? state_name : "fixed";
+
+        std::chrono::steady_clock::time_point t_copy{};
+        if (diag) {
+            t_copy = std::chrono::steady_clock::now();
+        }
+        std::memcpy(slot->sc16_samples.data(), src_samples,
+                    sample_count * sizeof(std::complex<int16_t>));
+        if (diag) {
+            rx_acc_.slot_copy_ns.fetch_add(
+                elapsed_ns(t_copy, std::chrono::steady_clock::now()),
+                std::memory_order_relaxed);
+            rx_acc_.slot_copy_bytes.fetch_add(
+                static_cast<uint64_t>(sample_count) * sizeof(std::complex<int16_t>),
+                std::memory_order_relaxed);
+            t_copy = std::chrono::steady_clock::now();
+        }
+
+        pools_[static_cast<size_t>(pool_idx)]->publish_ready_slot(slot);
+        if (diag) {
+            rx_acc_.dispatch_ns.fetch_add(
+                elapsed_ns(t_copy, std::chrono::steady_clock::now()),
+                std::memory_order_relaxed);
+            rx_acc_.windows_published.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+
+    while (!stop_requested_) {
+        if (cfg_.max_windows > 0 && next_window_id >= cfg_.max_windows) {
+            break;
+        }
+
+        feedback_queue_.drain(fb_batch);
+        ingest_fb_batch();
+
+        if (ctrl.scheduled_path_active()) {
+            AutoScheduleController::ScheduledSlotPlan plan;
+            if (!ctrl.next_scheduled_slot(read_end_abs, plan)) {
+                continue;
+            }
+            release_before(plan.win_start_abs);
+
+            const int64_t eff_win_start = std::max(plan.win_start_abs, valid_start_abs);
+            if (eff_win_start >= plan.win_end_abs ||
+                plan.predicted_start_abs < eff_win_start) {
+                ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
+                ledger_.offered_windows++;
+                ledger_.cancelled_windows++;
+                continue;
+            }
+            const size_t copy_n = static_cast<size_t>(plan.win_end_abs - eff_win_start);
+            if (copy_n > pool_slot_cap) {
+                ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
+                ledger_.offered_windows++;
+                ledger_.cancelled_windows++;
+                continue;
+            }
+
+            bool eof_hit = false;
+            bool source_fatal = false;
+            bool discontinuity_aborted = false;
+            int zero_progress_reads = 0;
+
+            while (read_end_abs < plan.win_end_abs && !stop_requested_) {
+                release_before(eff_win_start);
+
+                if (cfg_.max_samples > 0 && samples_read_total >= cfg_.max_samples) {
+                    eof_hit = true;
+                    break;
+                }
+
+                const size_t needed = static_cast<size_t>(plan.win_end_abs - read_end_abs);
+                size_t to_read = std::max(read_slice, needed);
+                size_t room = storage_cap - (valid_begin + valid_n);
+                if (room < to_read && valid_begin > 0) {
+                    const size_t moved_bytes =
+                        valid_n * sizeof(std::complex<int16_t>);
+                    std::chrono::steady_clock::time_point t_move{};
+                    if (diag) {
+                        t_move = std::chrono::steady_clock::now();
+                    }
+                    if (moved_bytes > 0) {
+                        std::memmove(storage.data(), storage.data() + valid_begin,
+                                     moved_bytes);
+                    }
+                    if (diag) {
+                        rx_acc_.assemble_ns.fetch_add(
+                            elapsed_ns(t_move, std::chrono::steady_clock::now()),
+                            std::memory_order_relaxed);
+                        rx_acc_.compact_move_bytes.fetch_add(
+                            static_cast<uint64_t>(moved_bytes),
+                            std::memory_order_relaxed);
+                    }
+                    valid_begin = 0;
+                    room = storage_cap - valid_n;
+                }
+                if (to_read > room) {
+                    to_read = room;
+                }
+                if (to_read == 0) {
+                    set_source_error("RX auto-schedule storage produced a zero-length read request");
+                    source_fatal = true;
+                    break;
+                }
+
+                std::chrono::steady_clock::time_point t_read{};
+                if (diag) {
+                    t_read = std::chrono::steady_clock::now();
+                }
+                StreamReadMeta meta;
+                const int64_t pre_read_abs = read_end_abs;
+                const size_t n_read = source_->read_samples(
+                    storage.data() + valid_begin + valid_n, to_read, meta);
+                if (diag) {
+                    rx_acc_.read_ns.fetch_add(
+                        elapsed_ns(t_read, std::chrono::steady_clock::now()),
+                        std::memory_order_relaxed);
+                    rx_acc_.read_calls.fetch_add(1, std::memory_order_relaxed);
+                    rx_acc_.samples_read.fetch_add(n_read, std::memory_order_relaxed);
+                    rx_acc_.bytes_read.fetch_add(
+                        static_cast<uint64_t>(n_read) * sizeof(std::complex<int16_t>),
+                        std::memory_order_relaxed);
+                }
+                valid_n += n_read;
+                read_end_abs += static_cast<int64_t>(n_read);
+                samples_read_total += n_read;
+                if (diag) {
+                    note_peak(rx_acc_.max_buffered_samples,
+                              static_cast<uint64_t>(valid_n));
+                }
+
+                {
+                    ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
+                    ledger_.total_samples_received += n_read;
+                    if (meta.is_gap) {
+                        ledger_.read_overflows++;
+                    }
+                    if (n_read == 0 && !meta.is_eof) {
+                        ledger_.read_timeouts++;
+                    }
+                }
+
+                const bool disc = ctrl.handle_stream_meta(
+                    pre_read_abs, n_read, meta.has_time_spec, meta.time_spec_s,
+                    meta.is_gap, meta.gap_samples, read_end_abs);
+                if (disc) {
+                    valid_begin = 0;
+                    valid_n = 0;
+                    valid_start_abs = read_end_abs;
+                    if (!ctrl.scheduled_path_active()) {
+                        discontinuity_aborted = true;
+                        break;
+                    }
+                    discontinuity_aborted = true;
+                    break;
+                }
+
+                if (source_failed()) {
+                    source_fatal = true;
+                    break;
+                }
+                if (meta.is_eof ||
+                    (cfg_.max_samples > 0 && samples_read_total >= cfg_.max_samples)) {
+                    eof_hit = true;
+                    break;
+                }
+                if (n_read == 0) {
+                    ++zero_progress_reads;
+                    if (zero_progress_reads >= kMaxZeroProgressReads) {
+                        set_source_error(
+                            "source returned no samples and no EOF for " +
+                            std::to_string(zero_progress_reads) + " consecutive reads");
+                        source_fatal = true;
+                        break;
+                    }
+                    std::this_thread::yield();
+                } else {
+                    zero_progress_reads = 0;
+                }
+            }
+
+            if (discontinuity_aborted) {
+                ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
+                ledger_.offered_windows++;
+                ledger_.cancelled_windows++;
+                continue;
+            }
+            if (source_fatal || stop_requested_ ||
+                (read_end_abs < plan.win_end_abs && eof_hit)) {
+                ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
+                ledger_.offered_windows++;
+                ledger_.cancelled_windows++;
+                break;
+            }
+            if (eff_win_start < valid_start_abs ||
+                static_cast<size_t>(eff_win_start - valid_start_abs) + copy_n > valid_n) {
+                ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
+                ledger_.offered_windows++;
+                ledger_.cancelled_windows++;
+                break;
+            }
+
+            const size_t src_off =
+                valid_begin + static_cast<size_t>(eff_win_start - valid_start_abs);
+            const int64_t pred_rel = plan.predicted_start_abs - eff_win_start;
+            emit_slot(eff_win_start,
+                      storage.data() + src_off,
+                      copy_n,
+                      WindowKind::Scheduled,
+                      pred_rel,
+                      static_cast<size_t>(pred_rel),
+                      plan.search_margin_work,
+                      plan.acquisition_epoch,
+                      plan.schedule_generation,
+                      plan.schedule_index,
+                      core::qm35_lock_state_name(ctrl.state()));
+            if (pacing_for_replay && ctrl.state() != core::Qm35LockState::Locked) {
+                if (feedback_queue_.wait_and_drain(
+                        fb_batch, cfg_.auto_schedule.candidate_wait_timeout_ms)) {
+                    ingest_fb_batch();
+                }
+            }
+        } else {
+            // Acquisition mode: feed live uninspected samples & poll verified candidates.
+            const int64_t scan_cur = ctrl.scan_cursor_abs();
+            if (read_end_abs > scan_cur && scan_cur >= valid_start_abs) {
+                const size_t feed_off =
+                    valid_begin + static_cast<size_t>(scan_cur - valid_start_abs);
+                const size_t feed_n = static_cast<size_t>(read_end_abs - scan_cur);
+                ctrl.feed_acquisition(storage.data() + feed_off, feed_n, scan_cur);
+            }
+            release_before(ctrl.scan_cursor_abs());
+
+            AutoScheduleController::EmittedAcqSlot acq;
+            if (ctrl.poll_verified_candidate(acq)) {
+                if (cfg_.max_windows > 0 && next_window_id >= cfg_.max_windows) {
+                    ctrl.release_held_regions();
+                    break;
+                }
+                const size_t copy_n = std::min(acq.sample_count, pool_slot_cap);
+                const int64_t pred_rel =
+                    std::max<int64_t>(0, acq.predicted_start_abs - acq.win_start_abs);
+                emit_slot(acq.win_start_abs,
+                          acq.samples,
+                          copy_n,
+                          WindowKind::Acquisition,
+                          pred_rel,
+                          static_cast<size_t>(pred_rel),
+                          cfg_.auto_schedule.acquisition_search_margin_work,
+                          acq.acquisition_epoch,
+                          acq.schedule_generation,
+                          0,
+                          core::qm35_lock_state_name(ctrl.state()));
+                ctrl.release_held_regions();
+
+                if (pacing_for_replay && ctrl.waiting_candidate_verify()) {
+                    const auto cand_deadline =
+                        std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(
+                            cfg_.auto_schedule.candidate_wait_timeout_ms);
+                    while (!stop_requested_ && ctrl.waiting_candidate_verify()) {
+                        const auto now = std::chrono::steady_clock::now();
+                        if (now >= cand_deadline) {
+                            break;
+                        }
+                        const auto rem_ms = static_cast<uint32_t>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                cand_deadline - now)
+                                .count());
+                        if (feedback_queue_.wait_and_drain(
+                                fb_batch, std::max<uint32_t>(1, rem_ms))) {
+                            ingest_fb_batch();
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if (cfg_.max_samples > 0 && samples_read_total >= cfg_.max_samples) {
+                ctrl.flush_acquisition();
+                while (!stop_requested_ &&
+                       (cfg_.max_windows == 0 || next_window_id < cfg_.max_windows) &&
+                       ctrl.poll_verified_candidate(acq)) {
+                    const size_t copy_n = std::min(acq.sample_count, pool_slot_cap);
+                    const int64_t pred_rel =
+                        std::max<int64_t>(0, acq.predicted_start_abs - acq.win_start_abs);
+                    emit_slot(acq.win_start_abs,
+                              acq.samples,
+                              copy_n,
+                              WindowKind::Acquisition,
+                              pred_rel,
+                              static_cast<size_t>(pred_rel),
+                              cfg_.auto_schedule.acquisition_search_margin_work,
+                              acq.acquisition_epoch,
+                              acq.schedule_generation,
+                              0,
+                              core::qm35_lock_state_name(ctrl.state()));
+                    ctrl.release_held_regions();
+                }
+                break;
+            }
+
+            size_t to_read = read_slice;
+            size_t room = storage_cap - (valid_begin + valid_n);
+            if (room < to_read && valid_begin > 0) {
+                const size_t moved_bytes = valid_n * sizeof(std::complex<int16_t>);
+                std::chrono::steady_clock::time_point t_move{};
+                if (diag) {
+                    t_move = std::chrono::steady_clock::now();
+                }
+                if (moved_bytes > 0) {
+                    std::memmove(storage.data(), storage.data() + valid_begin,
+                                 moved_bytes);
+                }
+                if (diag) {
+                    rx_acc_.assemble_ns.fetch_add(
+                        elapsed_ns(t_move, std::chrono::steady_clock::now()),
+                        std::memory_order_relaxed);
+                    rx_acc_.compact_move_bytes.fetch_add(
+                        static_cast<uint64_t>(moved_bytes),
+                        std::memory_order_relaxed);
+                }
+                valid_begin = 0;
+                room = storage_cap - valid_n;
+            }
+            if (to_read > room) {
+                to_read = room;
+            }
+            if (to_read == 0) {
+                set_source_error("RX acquisition storage produced a zero-length read request");
+                break;
+            }
+
+            std::chrono::steady_clock::time_point t_read{};
+            if (diag) {
+                t_read = std::chrono::steady_clock::now();
+            }
+            StreamReadMeta meta;
+            const int64_t pre_read_abs = read_end_abs;
+            const size_t n_read = source_->read_samples(
+                storage.data() + valid_begin + valid_n, to_read, meta);
+            if (diag) {
+                rx_acc_.read_ns.fetch_add(
+                    elapsed_ns(t_read, std::chrono::steady_clock::now()),
+                    std::memory_order_relaxed);
+                rx_acc_.read_calls.fetch_add(1, std::memory_order_relaxed);
+                rx_acc_.samples_read.fetch_add(n_read, std::memory_order_relaxed);
+                rx_acc_.bytes_read.fetch_add(
+                    static_cast<uint64_t>(n_read) * sizeof(std::complex<int16_t>),
+                    std::memory_order_relaxed);
+            }
+            valid_n += n_read;
+            read_end_abs += static_cast<int64_t>(n_read);
+            samples_read_total += n_read;
+            if (diag) {
+                note_peak(rx_acc_.max_buffered_samples,
+                          static_cast<uint64_t>(valid_n));
+            }
+
+            {
+                ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
+                ledger_.total_samples_received += n_read;
+                if (meta.is_gap) {
+                    ledger_.read_overflows++;
+                }
+                if (n_read == 0 && !meta.is_eof) {
+                    ledger_.read_timeouts++;
+                }
+            }
+
+            const bool disc = ctrl.handle_stream_meta(
+                pre_read_abs, n_read, meta.has_time_spec, meta.time_spec_s,
+                meta.is_gap, meta.gap_samples, read_end_abs);
+            if (disc) {
+                valid_begin = 0;
+                valid_n = 0;
+                valid_start_abs = read_end_abs;
+            } else if (n_read > 0) {
+                const int64_t cur = ctrl.scan_cursor_abs();
+                if (read_end_abs > cur && cur >= valid_start_abs) {
+                    const size_t feed_off =
+                        valid_begin + static_cast<size_t>(cur - valid_start_abs);
+                    const size_t feed_n = static_cast<size_t>(read_end_abs - cur);
+                    ctrl.feed_acquisition(storage.data() + feed_off, feed_n, cur);
+                }
+                release_before(ctrl.scan_cursor_abs());
+            }
+
+            if (source_failed()) {
+                break;
+            }
+            if (meta.is_eof ||
+                (cfg_.max_samples > 0 && samples_read_total >= cfg_.max_samples)) {
+                ctrl.flush_acquisition();
+                while (!stop_requested_ &&
+                       (cfg_.max_windows == 0 || next_window_id < cfg_.max_windows) &&
+                       ctrl.poll_verified_candidate(acq)) {
+                    const size_t copy_n = std::min(acq.sample_count, pool_slot_cap);
+                    const int64_t pred_rel =
+                        std::max<int64_t>(0, acq.predicted_start_abs - acq.win_start_abs);
+                    emit_slot(acq.win_start_abs,
+                              acq.samples,
+                              copy_n,
+                              WindowKind::Acquisition,
+                              pred_rel,
+                              static_cast<size_t>(pred_rel),
+                              cfg_.auto_schedule.acquisition_search_margin_work,
+                              acq.acquisition_epoch,
+                              acq.schedule_generation,
+                              0,
+                              core::qm35_lock_state_name(ctrl.state()));
+                    ctrl.release_held_regions();
+                }
+                break;
+            }
+            if (n_read == 0) {
+                ++acq_zero_progress_reads;
+                if (acq_zero_progress_reads >= kMaxZeroProgressReads) {
+                    set_source_error(
+                        "source returned no samples and no EOF for " +
+                        std::to_string(acq_zero_progress_reads) + " consecutive reads");
+                    break;
+                }
+                std::this_thread::yield();
+            } else {
+                acq_zero_progress_reads = 0;
+            }
+        }
+    }
+
+    ctrl.release_held_regions();
+
+    if (pacing_for_replay) {
+        const auto wait_deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+        while (!stop_requested_ &&
+               ingested_feedback_slots < admitted_dynamic_slots &&
+               std::chrono::steady_clock::now() < wait_deadline) {
+            if (feedback_queue_.wait_and_drain(fb_batch, 50)) {
+                ingest_fb_batch();
+            } else {
+                feedback_queue_.drain(fb_batch);
+                ingest_fb_batch();
+            }
+        }
+    }
+
+    auto_sched_stats_.enabled = true;
+    auto_sched_stats_.final_state = core::qm35_lock_state_name(ctrl.state());
+    auto_sched_stats_.acq_windows = ctrl.acq_windows();
+    auto_sched_stats_.scheduled_windows = ctrl.scheduled_windows();
+    auto_sched_stats_.discontinuities = ctrl.discontinuities();
+    auto_sched_stats_.stale_feedback = ctrl.stale_feedback();
+    auto_sched_stats_.locked_at_window_id = ctrl.locked_at_window_id();
+    auto_sched_stats_.t0_exact = ctrl.t0_exact();
+    auto_sched_stats_.period_samples = ctrl.period_samples();
+    auto_sched_stats_.period_s = ctrl.period_s();
+    auto_sched_stats_.effective_pre_guard = effective_pre_guard_;
+    auto_sched_stats_.effective_capture = effective_capture_;
+    auto_sched_stats_.effective_post_guard = effective_post_guard_;
+
+    rx_finished_.store(true, std::memory_order_release);
+}
+
 void UhdSc16Pipeline::rx_producer_loop()
 {
+    if (cfg_.schedule_mode == ScheduleMode::AutoAcquire) {
+        rx_auto_schedule_loop();
+        return;
+    }
+
     // A2 ready barrier: do not touch the source -- and in particular do not let
     // a UHD device start streaming -- until every DSP worker published Ready.
     // A failed worker (or a stop() while waiting) aborts before any read, so
@@ -1745,7 +2737,7 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
     // zero shared write and zero false sharing between workers.
     Sc16WindowRingPool* my_pool = pools_[static_cast<size_t>(worker_id)].get();
 
-    const size_t native_capacity = cfg_.native_window_capacity();
+    const size_t native_capacity = effective_slot_capacity();
     const bool need_resample = (std::abs(cfg_.native_rate - cfg_.work_rate) > 1e3);
 
     // Phase-C experiment selector: initialize() already validated and
@@ -1775,11 +2767,16 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
 
     sic::SicUnifiedScratch sic_scratch;
     sic::SicUnifiedTemplates sic_templates;
+    sic::SicUnifiedConfig effective_sic_cfg = build_effective_sic_cfg(cfg_);
     std::vector<std::complex<float>> sic_sync_tmpl;
     std::vector<std::complex<float>> sic_preamble_tmpl;
 
     radar::RadarCirCoreScratch radar_scratch;
+    radar::RadarCirConfig effective_radar_cfg = build_effective_radar_cfg(cfg_);
     std::vector<std::complex<float>> radar_sync_tmpl;
+
+    demod::core::DemodScratch comm_scratch;
+    std::vector<std::complex<float>> comm_sync_tmpl;
 
     try {
         // QA-only failure injection point (default empty => no-op, no lock).
@@ -1789,7 +2786,7 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
 
         if (need_resample) {
             const std::string profile =
-                cfg_.resampler_profile.empty() ? "quality_minorder" : cfg_.resampler_profile;
+                cfg_.resampler_profile.empty() ? "realtime_eq16" : cfg_.resampler_profile;
             if (std::abs(cfg_.native_rate - 737.28e6) < 1e5) {
                 auto taps = load_resampler_taps("resampler_65_48", profile);
                 if (taps.empty()) {
@@ -1838,11 +2835,21 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
         sic_out.assign(work_capacity, std::complex<float>(0.0f, 0.0f));
         sic_ihat.assign(work_capacity, std::complex<float>(0.0f, 0.0f));
 
-        if (cfg_.consumer_mode == ConsumerMode::SicOnly || cfg_.consumer_mode == ConsumerMode::Both) {
-            load_sync_pulse_template(sic_sync_tmpl, cfg_.sic_sync_template_file);
+        if (mode_runs_sic(cfg_.consumer_mode)) {
+            if (cfg_.schedule_mode == ScheduleMode::AutoAcquire) {
+                effective_sic_cfg.max_window_samples =
+                    std::max(effective_sic_cfg.max_window_samples, work_capacity);
+                effective_sic_cfg.max_packet_samples =
+                    std::max(effective_sic_cfg.max_packet_samples, work_capacity);
+            }
+            load_or_synthesize_sync_template(sic_sync_tmpl,
+                                             effective_sic_cfg.comm_code,
+                                             effective_sic_cfg.pulse,
+                                             effective_sic_cfg.sfd_mode,
+                                             cfg_.sic_sync_template_file);
 
-            sic_preamble_tmpl.reserve(cfg_.sic_cfg.sync_reps * 1016);
-            for (size_t rep = 0; rep < cfg_.sic_cfg.sync_reps; ++rep) {
+            sic_preamble_tmpl.reserve(effective_sic_cfg.sync_reps * 1016);
+            for (size_t rep = 0; rep < effective_sic_cfg.sync_reps; ++rep) {
                 sic_preamble_tmpl.insert(sic_preamble_tmpl.end(),
                                          sic_sync_tmpl.begin(), sic_sync_tmpl.end());
             }
@@ -1852,20 +2859,38 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
             sic_templates.preamble = sic_preamble_tmpl.data();
             sic_templates.preamble_len = sic_preamble_tmpl.size();
 
-            prepare_sic_unified(cfg_.sic_cfg, sic_templates, sic_scratch);
+            prepare_sic_unified(effective_sic_cfg, sic_templates, sic_scratch);
         }
 
-        if (cfg_.consumer_mode == ConsumerMode::SensingCir || cfg_.consumer_mode == ConsumerMode::Both) {
-            load_sync_pulse_template(radar_sync_tmpl);
+        if (mode_runs_sensing(cfg_.consumer_mode)) {
+            if (cfg_.schedule_mode == ScheduleMode::AutoAcquire) {
+                effective_radar_cfg.full_window_search = false;
+                effective_radar_cfg.use_predicted_timing = false;
+                effective_radar_cfg.timing_coarse_stride = 1;
+            }
+            load_or_synthesize_sync_template(radar_sync_tmpl,
+                                             effective_radar_cfg.code_index,
+                                             cfg_.radar_pulse,
+                                             effective_radar_cfg.sfd_mode,
+                                             cfg_.radar_sync_template_file);
 
-            prepare_radar_cir_core(cfg_.radar_cfg, radar_sync_tmpl.data(),
-                                   cfg_.radar_cfg.samples_per_symbol,
-                                   cfg_.radar_cfg.cir_pre,
-                                   cfg_.radar_cfg.cir_post,
+            prepare_radar_cir_core(effective_radar_cfg, radar_sync_tmpl.data(),
+                                   effective_radar_cfg.samples_per_symbol,
+                                   effective_radar_cfg.cir_pre,
+                                   effective_radar_cfg.cir_post,
                                    radar_scratch);
             // Reserve the shared preamble front-end scratch for the largest
             // window this worker will see (no allocation in the hot path).
             radar::reserve_radar_cir_core(work_capacity, radar_scratch);
+        }
+
+        if (mode_runs_comm(cfg_.consumer_mode)) {
+            load_or_synthesize_sync_template(comm_sync_tmpl,
+                                             cfg_.comm_cfg.code_index,
+                                             cfg_.comm_pulse,
+                                             cfg_.comm_cfg.sfd_mode,
+                                             cfg_.comm_sync_template_file);
+            comm_scratch.reserve(work_capacity);
         }
     } catch (const std::exception& e) {
         publish_worker_state(worker_id, WorkerReadyState::Failed, e.what());
@@ -1929,11 +2954,59 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
         res.worker_id = worker_id;
         res.native_start_abs = slot->native_start_abs;
         res.native_sample_count = slot->native_count;
+        res.window_kind = slot->window_kind;
+        res.acquisition_epoch = slot->acquisition_epoch;
+        res.schedule_generation = slot->schedule_generation;
+        res.schedule_index = slot->schedule_index;
+        res.schedule_state =
+            slot->schedule_state_name ? slot->schedule_state_name : "fixed";
         // Same clock reading that commit_result()/queue_us use: the RX thread
         // stored it in the slot right before publishing.
         res.rx_push_time = slot->push_time;
         res.worker_start_time = t_start;
         res.timing.queue_us = std::chrono::duration<double, std::micro>(t_start - slot->push_time).count();
+
+        double filter_delay = 0.0;
+        int64_t target_seed_work = -1;
+        if (slot->use_dynamic_slot) {
+            if (need_resample && resamp_65_48) {
+                target_seed_work = resamp_65_48->map_input_offset_to_output(
+                    slot->predicted_start_native_rel);
+                filter_delay = 0.5 * static_cast<double>(
+                    resamp_65_48->tap_count() > 0 ? resamp_65_48->tap_count() - 1 : 0);
+            } else if (need_resample && resamp_65_32) {
+                target_seed_work = resamp_65_32->map_input_offset_to_output(
+                    slot->predicted_start_native_rel);
+                filter_delay = 0.5 * static_cast<double>(
+                    resamp_65_32->tap_count() > 0 ? resamp_65_32->tap_count() - 1 : 0);
+            } else if (need_resample) {
+                const double native_r =
+                    (slot->native_rate > 0.0) ? slot->native_rate : cfg_.native_rate;
+                const double work_r =
+                    (slot->work_rate > 0.0) ? slot->work_rate : cfg_.work_rate;
+                target_seed_work = static_cast<int64_t>(std::llround(
+                    static_cast<double>(slot->predicted_start_native_rel) *
+                    (work_r / native_r)));
+                filter_delay = 0.0;
+            } else {
+                target_seed_work = slot->predicted_start_native_rel;
+                filter_delay = 0.0;
+            }
+        }
+
+        LockFeedback fb;
+        if (slot->use_dynamic_slot) {
+            fb.window_id = slot->window_id;
+            fb.acquisition_epoch = slot->acquisition_epoch;
+            fb.schedule_generation = slot->schedule_generation;
+            fb.schedule_index = slot->schedule_index;
+            fb.window_kind = slot->window_kind;
+            fb.slot_native_start_abs = slot->native_start_abs;
+            fb.work_rate = (slot->work_rate > 0.0) ? slot->work_rate : cfg_.work_rate;
+            fb.native_rate =
+                (slot->native_rate > 0.0) ? slot->native_rate : cfg_.native_rate;
+            fb.resample_filter_delay = filter_delay;
+        }
 
         // 1 & 2. Fused SC16 -> Work Resample or Direct SC16 -> CF32 Convert
         const std::complex<float>* dsp_in = nullptr;
@@ -2021,7 +3094,7 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
         }
 
         // 3. SIC processing
-        if (cfg_.consumer_mode == ConsumerMode::SicOnly || cfg_.consumer_mode == ConsumerMode::Both) {
+        if (mode_runs_sic(cfg_.consumer_mode)) {
             auto t_sic_start = std::chrono::steady_clock::now();
             res.sic_executed = true;
 
@@ -2036,8 +3109,35 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
             sic_res.out = sic_out.data();
             sic_res.i_hat = sic_ihat.data();
 
+            sic::SicUnifiedConfig slot_sic_cfg = effective_sic_cfg;
+            if (slot->use_dynamic_slot && target_seed_work >= 0 &&
+                (mode_runs_sensing(cfg_.consumer_mode) ||
+                 mode_runs_comm(cfg_.consumer_mode))) {
+                const uint32_t target_sync_reps =
+                    mode_runs_sensing(cfg_.consumer_mode)
+                        ? effective_radar_cfg.sync_repetitions
+                        : cfg_.comm_cfg.preamble_repetitions;
+                const char* target_sfd_str =
+                    mode_runs_sensing(cfg_.consumer_mode)
+                        ? (effective_radar_cfg.sfd_mode ? effective_radar_cfg.sfd_mode : "4z2")
+                        : (cfg_.comm_cfg.sfd_mode ? cfg_.comm_cfg.sfd_mode : "4z2");
+                const size_t target_sfd_syms = sfd_symbol_count_for_mode(target_sfd_str);
+                const int64_t lo_margin =
+                    static_cast<int64_t>(slot->search_margin_work) + 1024;
+                const int64_t hi_margin =
+                    static_cast<int64_t>(slot->search_margin_work) +
+                    3 * static_cast<int64_t>(demod::kQm35SamplesPerSymbol);
+                slot_sic_cfg.target_preamble_lo =
+                    std::max<int64_t>(0, target_seed_work - lo_margin);
+                slot_sic_cfg.target_preamble_hi =
+                    target_seed_work +
+                    static_cast<int64_t>(target_sync_reps + target_sfd_syms) *
+                        demod::kQm35SamplesPerSymbol +
+                    hi_margin;
+            }
+
             bool sic_ok = sic::sic_process_unified(
-                dsp_in, dsp_n, sic_templates, cfg_.sic_cfg, sic_scratch, sic_res);
+                dsp_in, dsp_n, sic_templates, slot_sic_cfg, sic_scratch, sic_res);
 
             auto t_sic_end = std::chrono::steady_clock::now();
             res.timing.sic_us = std::chrono::duration<double, std::micro>(t_sic_end - t_sic_start).count();
@@ -2052,20 +3152,46 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
             } else {
                 res.sic_status = "sic_process_failed";
             }
+
+            if (slot->use_dynamic_slot) {
+                fb.timing_ok = sic_ok && sic_res.channel.valid &&
+                               (sic_res.channel.q >= 0);
+                fb.detected_start_work_rel = fb.timing_ok ? sic_res.channel.q : -1;
+                fb.identity_ok = fb.timing_ok && sic_res.committed;
+                fb.fcs_pass = sic_res.comm_fcs_pass;
+                fb.code_index = static_cast<int>(effective_sic_cfg.comm_code);
+                fb.preamble_repetitions = static_cast<int>(effective_sic_cfg.sync_reps);
+                fb.sfd_mode = effective_sic_cfg.sfd_mode ? effective_sic_cfg.sfd_mode : "4z2";
+            }
         }
 
-        // 4. Sensing CIR processing
-        if (cfg_.consumer_mode == ConsumerMode::SensingCir || cfg_.consumer_mode == ConsumerMode::Both) {
+        // 4. Sensing CIR processing (Mode A)
+        if (mode_runs_sensing(cfg_.consumer_mode)) {
             auto t_sens_start = std::chrono::steady_clock::now();
             res.radar_executed = true;
 
-            double rate_ratio = cfg_.work_rate / cfg_.native_rate;
-            int64_t pred_sfd = static_cast<int64_t>(std::llround(static_cast<double>(cfg_.pre_guard_samples) * rate_ratio)) +
-                               static_cast<int64_t>(cfg_.radar_cfg.sync_repetitions * cfg_.radar_cfg.samples_per_symbol);
+            radar::RadarCirConfig dyn_radar_cfg = effective_radar_cfg;
+            int64_t pred_sfd = -1;
+            if (slot->use_dynamic_slot) {
+                dyn_radar_cfg.full_window_search = false;
+                dyn_radar_cfg.use_predicted_timing = false;
+                dyn_radar_cfg.timing_coarse_stride = 1;
+                dyn_radar_cfg.sfd_search_margin =
+                    static_cast<int64_t>(slot->search_margin_work);
+                radar_scratch.demod_profile.timing_search_margin =
+                    slot->search_margin_work;
+                pred_sfd = target_seed_work +
+                           static_cast<int64_t>(dyn_radar_cfg.sync_repetitions *
+                                                dyn_radar_cfg.samples_per_symbol);
+            } else {
+                double rate_ratio = cfg_.work_rate / cfg_.native_rate;
+                pred_sfd = static_cast<int64_t>(std::llround(static_cast<double>(cfg_.pre_guard_samples) * rate_ratio)) +
+                           static_cast<int64_t>(effective_radar_cfg.sync_repetitions * effective_radar_cfg.samples_per_symbol);
+            }
 
             radar::RadarCirResult cir_res;
             bool cir_ok = radar::radar_cir_one(
-                dsp_in, dsp_n, pred_sfd, cfg_.radar_cfg, radar_scratch, cir_res);
+                dsp_in, dsp_n, pred_sfd, dyn_radar_cfg, radar_scratch, cir_res);
 
             auto t_sens_end = std::chrono::steady_clock::now();
             res.timing.sensing_us = std::chrono::duration<double, std::micro>(t_sens_end - t_sens_start).count();
@@ -2103,6 +3229,72 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
             // the signal that a child was double counted.
             res.radar_other_us = res.timing.sensing_us - res.radar_frontend_us -
                                  res.radar_cir_us;
+
+            if (slot->use_dynamic_slot) {
+                fb.timing_ok = res.radar_sfd_found && (res.radar_detected_origin >= 0);
+                fb.detected_start_work_rel = res.radar_detected_origin;
+                fb.identity_ok = fb.timing_ok;
+                fb.fcs_pass = false;
+                fb.code_index = static_cast<int>(dyn_radar_cfg.code_index);
+                fb.preamble_repetitions =
+                    static_cast<int>(dyn_radar_cfg.sync_repetitions);
+                fb.sfd_mode = dyn_radar_cfg.sfd_mode ? dyn_radar_cfg.sfd_mode : "4z2";
+            }
+        }
+
+        // 5. Pure C++ Comm RX processing (Mode B)
+        if (mode_runs_comm(cfg_.consumer_mode)) {
+            auto t_comm_start = std::chrono::steady_clock::now();
+            res.comm_attempted = true;
+
+            int64_t comm_seed = -1;
+            demod::Qm35825Profile effective_comm_cfg =
+                build_effective_comm_cfg(cfg_, dsp_n, comm_seed);
+            if (slot->use_dynamic_slot) {
+                effective_comm_cfg.timing_search_margin = slot->search_margin_work;
+                effective_comm_cfg.timing_coarse_stride = 1;
+                comm_seed = target_seed_work;
+            }
+
+            const demod::DemodResult demod_res = demod::core::demodulate_one(
+                dsp_in, dsp_n, effective_comm_cfg, res.window_id,
+                comm_seed, /*window_start=*/0, comm_sync_tmpl, comm_scratch);
+
+            auto t_comm_end = std::chrono::steady_clock::now();
+            res.timing.comm_us =
+                std::chrono::duration<double, std::micro>(t_comm_end - t_comm_start).count();
+            res.comm_us = res.timing.comm_us;
+
+            res.comm_ok = (demod_res.status == demod::DemodStatus::Success);
+            res.comm_status_reason = demod_status_reason(demod_res.status);
+            res.comm_sync_origin = demod_res.timing.ok ? demod_res.timing.preamble_start_sample : -1;
+            res.comm_sfd_start = demod_res.sfd.ok ? demod_res.sfd.sfd_start_sample : -1;
+            res.comm_cfo_hz = demod_res.cfo.ok ? demod_res.cfo.cfo_hz : 0.0;
+            res.comm_phr_ok = demod_res.phr.ok;
+            res.comm_phr_length = demod_res.phr.ok
+                ? static_cast<uint16_t>(std::min<uint32_t>(demod_res.phr.psdu_length, 65535U))
+                : 0;
+            res.comm_fcs_ok = demod_res.payload.fcs_pass;
+            res.comm_payload_bytes = demod_res.payload.bytes.size();
+            res.comm_psdu_fnv1a = demod_res.payload.bytes.empty()
+                ? 0ULL
+                : fnv1a_64(demod_res.payload.bytes.data(),
+                           demod_res.payload.bytes.size());
+
+            if (slot->use_dynamic_slot) {
+                fb.timing_ok =
+                    (res.comm_sync_origin >= 0) && (res.comm_sfd_start >= 0);
+                fb.detected_start_work_rel = res.comm_sync_origin;
+                fb.identity_ok =
+                    res.comm_ok ||
+                    (!cfg_.auto_schedule.require_fcs_pass && fb.timing_ok);
+                fb.fcs_pass = res.comm_fcs_ok;
+                fb.code_index = static_cast<int>(effective_comm_cfg.code_index);
+                fb.preamble_repetitions =
+                    static_cast<int>(effective_comm_cfg.preamble_repetitions);
+                fb.sfd_mode =
+                    effective_comm_cfg.sfd_mode ? effective_comm_cfg.sfd_mode : "4z2";
+            }
         }
 
         auto t_end = std::chrono::steady_clock::now();
@@ -2118,6 +3310,10 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
         res.timing.e2e_us = e2e_us;
         res.worker_end_time = t_end;
         res.state = WindowTerminalState::Completed;
+
+        if (slot->use_dynamic_slot) {
+            feedback_queue_.push(fb);
+        }
 
         // Release the slot before committing: the RX producer may refill this
         // ring immediately while this worker is busy ordering the result.

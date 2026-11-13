@@ -124,9 +124,17 @@ FullPacketResult fullpacket_cancel(
        s.phase0.size()<s.capacity || s.phase1.size()<s.capacity)
         return fail("scratch_capacity");
     if(!fcs_pass) return fail("fcs_failed");
-    if(profile.code_index!=10 || profile.sync_repetitions!=64 || profile.insert_sts ||
-       !profile.sfd_mode || std::strcmp(profile.sfd_mode,"4z2") ||
-       profile.ranging || profile.pulse.shape!=mod::PulseShape::Legacy)
+    if(profile.insert_sts || profile.ranging ||
+       !radar_meta::code_index_supported(profile.code_index) ||
+       !radar_meta::sync_reps_supported(profile.sync_repetitions) ||
+       profile.pulse.shape==mod::PulseShape::External ||
+       !mod::pulse_spec_valid(profile.pulse))
+        return fail("unsupported_profile");
+    const int8_t* sfd_ptr=nullptr;
+    size_t n_sfd=0;
+    if(!profile.sfd_mode ||
+       !mod::detail::sfd_lookup(profile.sfd_mode,sfd_ptr,n_sfd) ||
+       n_sfd==0)
         return fail("unsupported_profile");
     if(phr.size()!=19 || psdu.size()<2 || psdu.size()>127)
         return fail("invalid_frame_length");
@@ -137,7 +145,7 @@ FullPacketResult fullpacket_cancel(
         if(phr[i]>1 || phr[i]!=uint8_t(s.expected_phr[i])) return fail("unsupported_phr");
     if(!m.valid || m.state!=SicState::Committed || !m.n_paths || m.n_paths>kSicMaxPaths ||
        m.sample_rate!=998.4e6 || m.samples_per_symbol!=1016 ||
-       m.nominal_sync_reps!=64 || !std::isfinite(m.cfo_hz) ||
+       m.nominal_sync_reps!=profile.sync_repetitions || !std::isfinite(m.cfo_hz) ||
        m.phase_reference_sample<0 || m.phase_reference_sample>int64_t(n) ||
        !reference_sync || sync_n!=1016 || roi_lo<0 || roi_hi<=roi_lo || roi_hi>int64_t(n))
         return fail("invalid_model_or_roi");
@@ -179,7 +187,10 @@ FullPacketResult fullpacket_cancel(
     if(lo<0 || hi>int64_t(n)) {r.reason="context_truncated";r.channel_us=us(tc);return r;}
     r.sub_lo=std::max(lo,roi_lo);r.sub_hi=std::min(hi,roi_hi);
     if(r.sub_hi<=r.sub_lo) {r.reason="no_overlap";r.channel_us=us(tc);return r;}
-    if(s.prefix_cache_enabled) {
+    const bool use_prefix_cache =
+        s.prefix_cache_enabled && profile.sync_repetitions == 64 &&
+        n_sfd == 8 && profile.pulse.shape == mod::PulseShape::Legacy;
+    if(use_prefix_cache) {
         if(s.prefix_input_len!=prefix_input || s.prefix_output_len!=prefix_output ||
            s.prefix_key.size()<prefix_input || s.prefix_rows.size()<phases*prefix_output ||
            plen<prefix_input) {
@@ -200,7 +211,7 @@ FullPacketResult fullpacket_cancel(
         if(g) {
             ++r.nonzero_phase_calls;r.reference_fir_output_samples+=plen;
         }
-        if(!s.prefix_cache_enabled || !g) {
+        if(!use_prefix_cache || !g) {
             phase_row(s.waveform.data(),plen,g,row,s.phase_tmp.data());
             if(g) r.fir_output_samples+=plen;
         } else {

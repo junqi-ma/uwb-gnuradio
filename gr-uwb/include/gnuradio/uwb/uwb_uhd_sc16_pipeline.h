@@ -11,6 +11,9 @@
 #pragma once
 
 #include <gnuradio/uwb/api.h>
+#include <gnuradio/uwb/uwb_auto_schedule_controller.h>
+#include <gnuradio/uwb/uwb_demod_core.h>
+#include <gnuradio/uwb/uwb_hrp_mod_core.h>
 #include <gnuradio/uwb/uwb_radar_cir_core.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor_core.h>
 #include <gnuradio/uwb/uwb_sic_unified.h>
@@ -48,7 +51,10 @@ enum class StreamSourceType {
 enum class ConsumerMode {
     SicOnly,
     SensingCir,
-    Both
+    Both,
+    SicPlusSensing = Both,
+    CommOnly,
+    SicPlusComm
 };
 
 enum class WindowTerminalState {
@@ -142,6 +148,7 @@ struct WindowTimingStats {
     double resample_us = 0.0;
     double sic_us = 0.0;
     double sensing_us = 0.0;
+    double comm_us = 0.0;
     double e2e_us = 0.0;
 };
 
@@ -218,6 +225,43 @@ struct WindowResult {
     // integer sub-timers.  Reported, never clamped to 0 -- a grossly negative
     // value means a child was double counted or a parent is missing.
     double radar_other_us = 0.0;
+
+    // Mode B pure C++ Comm RX result (mapped from demod::DemodResult)
+    bool comm_attempted = false;
+    bool comm_ok = false;
+    const char* comm_status_reason = "";
+    int64_t comm_sync_origin = -1;
+    int64_t comm_sfd_start = -1;
+    double comm_cfo_hz = 0.0;
+    bool comm_phr_ok = false;
+    uint16_t comm_phr_length = 0;
+    bool comm_fcs_ok = false;
+    size_t comm_payload_bytes = 0;
+    uint64_t comm_psdu_fnv1a = 0;
+    double comm_us = 0.0;
+
+    // Auto-schedule observability (default Fixed leaves legacy fields unchanged)
+    WindowKind window_kind = WindowKind::Fixed;
+    uint64_t acquisition_epoch = 0;
+    uint64_t schedule_generation = 0;
+    uint64_t schedule_index = 0;
+    const char* schedule_state = "fixed";
+};
+
+struct AutoScheduleStats {
+    bool enabled = false;
+    std::string final_state = "fixed";
+    uint64_t acq_windows = 0;
+    uint64_t scheduled_windows = 0;
+    uint64_t discontinuities = 0;
+    uint64_t stale_feedback = 0;
+    uint64_t locked_at_window_id = std::numeric_limits<uint64_t>::max();
+    double t0_exact = 0.0;
+    double period_samples = 0.0;
+    double period_s = 0.0;
+    size_t effective_pre_guard = 0;
+    size_t effective_capture = 0;
+    size_t effective_post_guard = 0;
 };
 
 struct UWB_API PipelineLedger {
@@ -270,7 +314,7 @@ struct PipelineConfig {
     std::vector<int> cpu_cores_dsp;
 
     // Resampler configuration
-    std::string resampler_profile = "quality_minorder";
+    std::string resampler_profile = "realtime_eq16";
     int resampler_workers = 1;
 
     // Phase-C kernel experiments (resampler core).  Each non-"none" value is
@@ -347,15 +391,39 @@ struct PipelineConfig {
     std::string uhd_clock_source;
     std::string uhd_time_source;
 
+    static demod::Qm35825Profile make_default_comm_rx_profile()
+    {
+        demod::Qm35825Profile p;
+        p.rx_fast_sfd = true;
+        p.rx_fast_cfo_rotation = true;
+        p.rx_seed_refine_tail = true;
+        p.rx_softchip_on_demand = true;
+        p.rx_fused_payload_cmf = true;
+        p.rx_fused_phr_cmf = true;
+        return p;
+    }
+
     // DSP configs
     gr::uwb::sic::SicUnifiedConfig sic_cfg;
     gr::uwb::core::RadarCirConfig radar_cfg;
-    // Optional override for the public SYNC template used by SIC (one shaped
-    // SYNC symbol, 1016 CF32 samples at 998.4 MS/s).  Empty keeps the
-    // historical `testdata/reference_preamble.bin` (sensing code 9).  A SIC
-    // run against a comm packet of a different code MUST set this, otherwise
-    // the comm demodulator correlates against the wrong SYNC waveform.
+    demod::Qm35825Profile comm_cfg = make_default_comm_rx_profile();
+    mod::PulseSpec comm_pulse;
+    mod::PulseSpec radar_pulse;
+    bool comm_full_window_search = false;
+    bool radar_full_window_search = false;
+    size_t comm_timing_coarse_stride = 8;
+
+    // Dynamic auto-acquisition + known-period OLS/PLL scheduling.
+    // Default keeps Fixed mode for 100% backward compatibility.
+    ScheduleMode schedule_mode = ScheduleMode::Fixed;
+    AutoScheduleConfig auto_schedule;
+    // Optional overrides for the 1-symbol (1016 CF32 samples at 998.4 MS/s)
+    // SYNC templates.  When empty, each template is synthesized directly from
+    // its respective (code_index, PulseSpec) via uwb_hrp_mod_core.h and L2
+    // normalized.
     std::string sic_sync_template_file;
+    std::string radar_sync_template_file;
+    std::string comm_sync_template_file;
 
     size_t native_window_capacity() const {
         return pre_guard_samples + capture_samples + post_guard_samples;
@@ -370,6 +438,15 @@ struct Sc16WindowSlot {
     double native_rate = 0.0;
     double work_rate = 0.0;
     std::chrono::steady_clock::time_point push_time;
+    bool use_dynamic_slot = false;
+    WindowKind window_kind = WindowKind::Fixed;
+    uint64_t acquisition_epoch = 0;
+    uint64_t schedule_generation = 0;
+    uint64_t schedule_index = 0;
+    int64_t predicted_start_native_rel = 0;
+    size_t pre_guard_used = 0;
+    size_t search_margin_work = 256;
+    const char* schedule_state_name = "fixed";
     std::vector<std::complex<int16_t>> sc16_samples;
 };
 
@@ -585,9 +662,13 @@ public:
 
     const PipelineLedger& ledger() const { return ledger_; }
     const std::vector<WindowResult>& results() const { return results_; }
+    const AutoScheduleStats& auto_schedule_stats() const { return auto_sched_stats_; }
 
 private:
     void rx_producer_loop();
+    void rx_auto_schedule_loop();
+    AutoScheduleController::TargetProfile build_target_profile() const;
+    size_t effective_slot_capacity() const;
     // Each DSP worker runs this loop over its own private ring pool.
     void dsp_consumer_loop(int worker_id);
     // Effective worker count actually instantiated (>= 1).
@@ -696,6 +777,13 @@ private:
 
     std::thread rx_thread_;
     std::vector<std::thread> dsp_threads_;
+
+    BoundedFeedbackQueue feedback_queue_{256};
+    AutoScheduleStats auto_sched_stats_{};
+    size_t effective_pre_guard_ = 0;
+    size_t effective_capture_ = 0;
+    size_t effective_post_guard_ = 0;
+    size_t effective_slot_cap_ = 0;
 
     PipelineLedger ledger_;
     std::vector<WindowResult> results_;

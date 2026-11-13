@@ -166,6 +166,18 @@ inline void append_window_json(std::ostream& os, const WindowResult& r)
        << ", \"radar_frontend_us\": " << json_number(r.radar_frontend_us)
        << ", \"radar_cir_us\": " << json_number(r.radar_cir_us)
        << ", \"radar_other_us\": " << json_number(r.radar_other_us)
+       << ", \"comm_attempted\": " << (r.comm_attempted ? "true" : "false")
+       << ", \"comm_ok\": " << (r.comm_ok ? "true" : "false")
+       << ", \"comm_status_reason\": \"" << json_escape(r.comm_status_reason ? r.comm_status_reason : "") << "\""
+       << ", \"comm_sync_origin\": " << r.comm_sync_origin
+       << ", \"comm_sfd_start\": " << r.comm_sfd_start
+       << ", \"comm_cfo_hz\": " << json_number(r.comm_cfo_hz)
+       << ", \"comm_phr_ok\": " << (r.comm_phr_ok ? "true" : "false")
+       << ", \"comm_phr_length\": " << r.comm_phr_length
+       << ", \"comm_fcs_ok\": " << (r.comm_fcs_ok ? "true" : "false")
+       << ", \"comm_payload_bytes\": " << r.comm_payload_bytes
+       << ", \"comm_psdu_fnv1a\": " << r.comm_psdu_fnv1a
+       << ", \"comm_us\": " << json_number(r.comm_us)
        << ", \"timing\": {"
        << "\"slice_us\": " << json_number(r.timing.slice_us)
        << ", \"queue_us\": " << json_number(r.timing.queue_us)
@@ -173,6 +185,7 @@ inline void append_window_json(std::ostream& os, const WindowResult& r)
        << ", \"resample_us\": " << json_number(r.timing.resample_us)
        << ", \"sic_us\": " << json_number(r.timing.sic_us)
        << ", \"sensing_us\": " << json_number(r.timing.sensing_us)
+       << ", \"comm_us\": " << json_number(r.timing.comm_us)
        << ", \"e2e_us\": " << json_number(r.timing.e2e_us)
        << "}}";
 }
@@ -229,11 +242,14 @@ inline bool write_results_csv(const std::string& path,
         return false;
     }
     f << "window_id,worker_id,state,native_start_abs,native_sample_count,"
-         "queue_us,convert_us,resample_us,sic_us,sensing_us,e2e_us,"
+         "queue_us,convert_us,resample_us,sic_us,sensing_us,comm_us,e2e_us,"
          "sic_executed,sic_committed,actual_suppression_db,"
          "radar_executed,radar_sfd_found,radar_peak_metric,radar_detected_start,"
          "radar_cfo_hz,radar_cir_origin,radar_detected_origin,radar_valid_reps,"
-         "radar_frontend_us,radar_cir_us,radar_other_us\n";
+         "radar_frontend_us,radar_cir_us,radar_other_us,"
+         "comm_attempted,comm_ok,comm_status_reason,comm_sync_origin,comm_sfd_start,"
+         "comm_cfo_hz,comm_phr_ok,comm_phr_length,comm_fcs_ok,comm_payload_bytes,"
+         "comm_psdu_fnv1a\n";
     f << std::setprecision(6) << std::fixed;
     for (const auto& r : windows) {
         f << r.window_id << ',' << r.worker_id << ','
@@ -241,7 +257,7 @@ inline bool write_results_csv(const std::string& path,
           << r.native_start_abs << ',' << r.native_sample_count << ','
           << r.timing.queue_us << ',' << r.timing.convert_us << ','
           << r.timing.resample_us << ',' << r.timing.sic_us << ','
-          << r.timing.sensing_us << ',' << r.timing.e2e_us << ','
+          << r.timing.sensing_us << ',' << r.timing.comm_us << ',' << r.timing.e2e_us << ','
           << (r.sic_executed ? 1 : 0) << ',' << (r.sic_committed ? 1 : 0) << ','
           << r.actual_suppression_db << ','
           << (r.radar_executed ? 1 : 0) << ',' << (r.radar_sfd_found ? 1 : 0) << ','
@@ -249,7 +265,13 @@ inline bool write_results_csv(const std::string& path,
           << r.radar_cfo_hz << ',' << r.radar_cir_origin << ','
           << r.radar_detected_origin << ',' << r.radar_valid_reps << ','
           << r.radar_frontend_us << ',' << r.radar_cir_us << ','
-          << r.radar_other_us << '\n';
+          << r.radar_other_us << ','
+          << (r.comm_attempted ? 1 : 0) << ',' << (r.comm_ok ? 1 : 0) << ','
+          << (r.comm_status_reason ? r.comm_status_reason : "") << ','
+          << r.comm_sync_origin << ',' << r.comm_sfd_start << ','
+          << r.comm_cfo_hz << ',' << (r.comm_phr_ok ? 1 : 0) << ','
+          << r.comm_phr_length << ',' << (r.comm_fcs_ok ? 1 : 0) << ','
+          << r.comm_payload_bytes << ',' << r.comm_psdu_fnv1a << '\n';
     }
     return static_cast<bool>(f);
 }
