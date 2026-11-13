@@ -1,4 +1,43 @@
-# 当前提交快照：统一前导前端最小整改（2026-11-13）
+# 当前提交快照：单窗端到端低垂果实优化（2026-11-14）
+
+按 `docs/performance/OpenCode_单窗端到端低垂果实优化_多Agent开发方案_2026-11-14.md`
+以 3 个文件严格隔离的并行 Agent（Track A/B/C）+ 集成/ABBA Agent（Track D）交付。
+报告 `docs/performance/单窗端到端低垂果实优化开发报告_2026-11-14.md`，原始数据
+`docs/performance/data_low_hanging_20261114/{n1,n8_unpinned}/`。分支
+`feature/sensing-shared-cir`；control `bd49267`（只读 worktree `.worktrees/lf-control`），
+treatment `f9f8e06`（build `gr-uwb/build-sensing-shared-cir-r3`）。
+- **Track A（`fcb1f1a`+`f9f8e06`）**：`SicUnifiedConfig::copy_input_on_bypass`
+  （默认 true 保持历史语义，**故意不进** config hash）；5 个顶层 L0 出口统一
+  `bypass_outputs()`；流水线置 false + `i_hat=nullptr`，删除 `sic_ihat`，
+  `cf32_native` 只在无专用重采样核时预分配。clean 窗 SIC 117.6→48.2 µs（A64）、
+  311.1→79.5（A256）。
+- **Track B（`5a16898`）**：自相关命中改为**证据区间 vs 归因带**判定
+  （`[seg_start-sps, seg_start+box*sps/2+2*sps)` 与 `[t_lo-sps, t_hi+sps)`），
+  搜索区间构造未改；`energy_prefix` 惰性 + AVX2（double 累加，552128 点最大相对
+  误差 **2.5351e-08**）。**该快速剔除只在调用方设 `target_preamble_lo/hi` 且
+  `autocorr_search_inside_target=false` 时触发；Fixed 调度流水线不设该带，所以
+  生产 clean 窗仍是 `below_detect_threshold`**——它是归因正确性修正，不是流水线
+  加速项。实测 SIC 收益来自 AVX2 前缀。
+- **Track C（`2427edd`）**：`RealSyncTemplate::key` 改为内容键并缓存归一化模板
+  （不再覆盖 `work`）；`local_best` 初始窗能量 AVX2/FMA；`w==0` 去旋转直接 memcpy
+  （逐位相同）。否决并记录 CFO 表缓存（实测只 3.33 µs）与冗余去旋转。
+- **配对性能**（A/B/B/A；N=1 `taskset -c 2,4` 4 组×48 窗；N=8 不绑定 3 组×96 窗）：
+  clean e2e **A64 0.818 / A256 0.775 / B64 0.895 / B256 0.887**；
+  N=8 稳态 **A256 0.812 / B256 0.747**；jam e2e 0.915–0.987（N=1）、
+  0.851–0.904（N=8）。resample/comm 在噪声内。
+- **功能零变化**：两臂 17 个确定性逐窗字段全等，4 个浮点字段最大绝对差 **0.0**
+  （clean+jam 各 480/720 窗）；jam 两臂均 100 % 提交、抑制比相同。
+- **测试**：88 项 87 通过 1 跳过 0 失败（123.44 s）。新增
+  `test_sic_bypass_is_transparent_to_sensing`（在 `bd49267` 上即通过，是守卫不是
+  期望）、`copy_input_on_bypass` 契约、`i_hat=nullptr`、模板身份缓存、
+  自相关归因 24 例、AVX2 vs 标量前缀、`local_best` 向量一致性、零 CFO 旁路。
+- **未验证**：上板/paced/UHD recv 溢出/AVX-512/MATLAB；PSLR/ISLR、非零 CFO 感知
+  质量、跨窗相位、弱目标保护、三 session 矩阵、6912 例矩阵。N=8 只报相对比，
+  不宣称绝对窗率。候选不标记为全面验收通过，不合并主分支。
+
+---
+
+# 历史提交快照：统一前导前端最小整改（2026-11-13）
 
 按 `docs/performance/OpenCode_统一前导前端最终评审整改规划书_2026-11-13.md`
 **最小整改**范围交付（R01/R02/R04），并关闭一个已落地的 P1。报告见
