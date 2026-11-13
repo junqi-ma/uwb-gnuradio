@@ -138,6 +138,135 @@ bool scan_finite(const cf* y, size_t count)
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Energy kernels.
+//
+// Two DIFFERENT consumers exist and they must not be coupled:
+//   * the segmented lag-sps autocorrelation prefilter needs only the energies
+//     of its own segments, so it must not force the (much larger) prefix
+//     build.  On a clean window the prefilter rejects before any prefix is
+//     needed, so the prefix is built LAZILY, after the prefilter has decided
+//     not to reject (`sum_sq_range` below serves the prefilter);
+//   * the coarse scan / `norm_at` need random-access range energies, which is
+//     what the prefix sum is for (`energy_prefix_build`).
+//
+// The prefix accumulates in DOUBLE.  A float accumulator over a long packet
+// (>= 5e5 samples) loses the small samples that follow a large packet, which
+// would perturb `get_energy` differences and therefore the normalised
+// detection metric.  The AVX2 prefix squares four complex samples in float
+// (one rounding per product), widens them to double, forms the within-group
+// prefix in double and adds the running double total once per group of four,
+// so the relative error against the scalar double loop stays ~1e-16.
+//
+// The vectorisation is selected with a function-level `target("avx2")`
+// attribute plus `__builtin_cpu_supports("avx2")`, matching `scan_finite`:
+// this TU is built without a global -mavx2, so `__AVX2__` is not defined and
+// the scalar kernels are the compiled fallback on non-x86 / non-GCC hosts.
+// ---------------------------------------------------------------------------
+double sum_sq_range_scalar(const cf* y, size_t len)
+{
+    double acc = 0.0;
+    for (size_t i = 0; i < len; ++i) {
+        const cf v = y[i];
+        acc += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
+               static_cast<double>(v.imag()) * static_cast<double>(v.imag());
+    }
+    return acc;
+}
+
+void energy_prefix_scalar(const cf* y, size_t len, double* energy)
+{
+    energy[0] = 0.0;
+    double acc = 0.0;
+    for (size_t i = 0; i < len; ++i) {
+        const cf v = y[i];
+        acc += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
+               static_cast<double>(v.imag()) * static_cast<double>(v.imag());
+        energy[i + 1] = acc;
+    }
+}
+
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+__attribute__((target("avx2")))
+double sum_sq_range_avx2(const cf* y, size_t len)
+{
+    const float* const p = reinterpret_cast<const float*>(y);
+    const size_t nf = len * 2;
+    __m256d s0 = _mm256_setzero_pd();
+    __m256d s1 = _mm256_setzero_pd();
+    size_t i = 0;
+    for (; i + 8 <= nf; i += 8) {
+        const __m256 v = _mm256_loadu_ps(p + i);
+        const __m256 sq = _mm256_mul_ps(v, v);
+        s0 = _mm256_add_pd(s0, _mm256_cvtps_pd(_mm256_castps256_ps128(sq)));
+        s1 = _mm256_add_pd(s1, _mm256_cvtps_pd(_mm256_extractf128_ps(sq, 1)));
+    }
+    const __m256d s = _mm256_add_pd(s0, s1);
+    double lane[4];
+    _mm256_storeu_pd(lane, s);
+    double acc = (lane[0] + lane[1]) + (lane[2] + lane[3]);
+    for (; i < nf; ++i) {
+        const double v = static_cast<double>(p[i]);
+        acc += v * v;
+    }
+    return acc;
+}
+
+__attribute__((target("avx2")))
+void energy_prefix_avx2(const cf* y, size_t len, double* energy)
+{
+    const float* const p = reinterpret_cast<const float*>(y);
+    const __m256d zero = _mm256_setzero_pd();
+    energy[0] = 0.0;
+    double acc = 0.0;
+    size_t i = 0;
+    for (; i + 4 <= len; i += 4) {
+        const __m256 v = _mm256_loadu_ps(p + 2 * i);
+        const __m256 sq = _mm256_mul_ps(v, v);
+        const __m256d lo = _mm256_cvtps_pd(_mm256_castps256_ps128(sq));
+        const __m256d hi = _mm256_cvtps_pd(_mm256_extractf128_ps(sq, 1));
+        // [s0, s2, s1, s3] then reordered to [s0, s1, s2, s3].
+        const __m256d h = _mm256_hadd_pd(lo, hi);
+        const __m256d s = _mm256_permute4x64_pd(h, _MM_SHUFFLE(3, 1, 2, 0));
+        // 4-lane inclusive prefix sum inside the group.
+        const __m256d sh1 =
+            _mm256_blend_pd(zero, _mm256_permute4x64_pd(s, _MM_SHUFFLE(2, 1, 0, 0)), 0xE);
+        const __m256d p1 = _mm256_add_pd(s, sh1);
+        const __m256d sh2 =
+            _mm256_blend_pd(zero, _mm256_permute4x64_pd(p1, _MM_SHUFFLE(1, 0, 0, 0)), 0xC);
+        const __m256d pref = _mm256_add_pd(p1, sh2);
+        _mm256_storeu_pd(energy + i + 1, _mm256_add_pd(_mm256_set1_pd(acc), pref));
+        acc += _mm256_cvtsd_f64(_mm256_permute4x64_pd(pref, _MM_SHUFFLE(3, 3, 3, 3)));
+    }
+    for (; i < len; ++i) {
+        const cf v = y[i];
+        acc += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
+               static_cast<double>(v.imag()) * static_cast<double>(v.imag());
+        energy[i + 1] = acc;
+    }
+}
+#endif
+
+double sum_sq_range(const cf* y, size_t len)
+{
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+    if (__builtin_cpu_supports("avx2"))
+        return sum_sq_range_avx2(y, len);
+#endif
+    return sum_sq_range_scalar(y, len);
+}
+
+void energy_prefix_build(const cf* y, size_t len, double* energy)
+{
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+    if (__builtin_cpu_supports("avx2")) {
+        energy_prefix_avx2(y, len, energy);
+        return;
+    }
+#endif
+    energy_prefix_scalar(y, len, energy);
+}
+
 void build_cfo_rotation(double cfo_hz, double fs, size_t count, std::vector<cd>& cfo_rot)
 {
     if (cfo_rot.size() < count)
@@ -914,6 +1043,11 @@ bool estimate_discrete_cir(const std::complex<float>* y,
         std::max<int64_t>(1, static_cast<int64_t>(cfg.coarse_stride));
 
     // ---- localized self-energy prefix sum covering ROI and confirmation ---
+    // LAZY: `energy` is only filled once the autocorr prefilter has decided NOT
+    // to reject (see "lazy localized self-energy prefix sum" below).  Clean
+    // windows therefore never pay the O(roi) prefix build.  The numeric
+    // definition (double accumulation over [energy_base, energy_end)) and the
+    // `nonfinite_energy` gate are unchanged.
     const int64_t energy_base = roi_lo;
     const int64_t max_confirm_end =
         roi_hi + static_cast<int64_t>((confirm_reps - 1) * sps + Ls);
@@ -921,17 +1055,6 @@ bool estimate_discrete_cir(const std::complex<float>* y,
         std::max(energy_base, std::min<int64_t>(visible_end, max_confirm_end));
     const size_t local_energy_len =
         static_cast<size_t>(energy_end - energy_base);
-
-    double acc = 0.0;
-    energy[0] = 0.0;
-    for (size_t i = 0; i < local_energy_len; ++i) {
-        const cf v = y[static_cast<size_t>(energy_base) + i];
-        acc += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
-               static_cast<double>(v.imag()) * static_cast<double>(v.imag());
-        energy[i + 1] = acc;
-    }
-    if (!std::isfinite(acc))
-        return finish("failed", "nonfinite_energy");
 
     auto get_energy = [&](int64_t d, size_t L) -> double {
         if (d >= energy_base &&
@@ -1024,26 +1147,28 @@ bool estimate_discrete_cir(const std::complex<float>* y,
         };
 
         auto range_energy_sq = [&](int64_t d, size_t L) -> double {
-            if (d >= energy_base && d + static_cast<int64_t>(L) <= energy_end) {
-                const size_t lo = static_cast<size_t>(d - energy_base);
-                const size_t hi =
-                    static_cast<size_t>(d + static_cast<int64_t>(L) - energy_base);
-                return std::max(0.0, energy[hi] - energy[lo]);
-            }
+            // Prefilter-local energy: computed directly over the segment, NOT
+            // from the (lazily built) prefix, so that a clean window can be
+            // rejected before the prefix exists.
             if (d < 0 || d + static_cast<int64_t>(L) > visible_end)
                 return 0.0;
-            double sum = 0.0;
-            for (size_t k = 0; k < L; ++k) {
-                const cf v = y[static_cast<size_t>(d) + k];
-                sum += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
-                       static_cast<double>(v.imag()) * static_cast<double>(v.imag());
-            }
-            return sum;
+            return sum_sq_range(y + d, L);
         };
 
         std::array<SearchInterval, kMaxIntervals> active_ivs{};
         size_t active_count = 0;
         bool prefilter_ran = false;
+        // Decision counter for the fast reject.  It is deliberately SEPARATE
+        // from `outside_count` below: `outside_ivs` still decides where the
+        // cross-correlation is searched (legacy padded split), while
+        // `outside_evidence` decides whether the window may be rejected.
+        size_t outside_evidence = 0;
+        // Public target attribution band.  -1 disables attribution (then the
+        // legacy "search everything" path is taken and nothing is rejected).
+        const bool have_target_band = cfg.target_preamble_lo >= 0 &&
+                                      cfg.target_preamble_hi > cfg.target_preamble_lo;
+        const int64_t t_lo = have_target_band ? cfg.target_preamble_lo : 0;
+        const int64_t t_hi = have_target_band ? cfg.target_preamble_hi : 0;
         const int64_t sps_i64 = static_cast<int64_t>(sps);
         if (cfg.autocorr_prefilter &&
             (roi_hi - roi_lo) > 8 * sps_i64 &&
@@ -1095,6 +1220,34 @@ bool estimate_discrete_cir(const std::complex<float>* y,
                             seg_start + static_cast<int64_t>(box_segs) * seg_len_i64 +
                                 2 * sps_i64);
                         push_interval(active_ivs, active_count, hit_lo, hit_hi);
+
+                        // ---- OUTSIDE-EVIDENCE ATTRIBUTION RULE --------------
+                        // The preamble is periodic with period sps, so a
+                        // lag-sps autocorrelation hit at `seg_start` means
+                        // "periodic content exists around seg_start".  The
+                        // whole periodic region is the evidence interval
+                        //   [seg_start - sps,
+                        //    seg_start + box_segs*seg_len + 2*sps)
+                        // and the target's own preamble lives in
+                        // [t_lo, t_hi).  A hit whose evidence region still
+                        // OVERLAPS the attribution band [t_lo - sps, t_hi + sps)
+                        // is explainable by the target itself and must not
+                        // count as outside interference; only a hit whose
+                        // evidence region is ENTIRELY outside the band is
+                        // genuine outside interference.  The padded
+                        // `hit_lo/hit_hi` split below is unchanged: it only
+                        // decides WHERE the cross-correlation is searched.
+                        if (have_target_band) {
+                            const int64_t ev_lo = seg_start - sps_i64;
+                            const int64_t ev_hi =
+                                seg_start +
+                                static_cast<int64_t>(box_segs) * seg_len_i64 +
+                                2 * sps_i64;
+                            const int64_t band_lo = t_lo - sps_i64;
+                            const int64_t band_hi = t_hi + sps_i64;
+                            if (ev_hi <= band_lo || ev_lo >= band_hi)
+                                ++outside_evidence;
+                        }
                     }
                     if (s + box_segs >= num_segs)
                         break;
@@ -1116,10 +1269,7 @@ bool estimate_discrete_cir(const std::complex<float>* y,
             push_interval(active_ivs, active_count, roi_lo, roi_hi);
         }
 
-        if (cfg.target_preamble_lo >= 0 &&
-            cfg.target_preamble_hi > cfg.target_preamble_lo) {
-            const int64_t t_lo = cfg.target_preamble_lo;
-            const int64_t t_hi = cfg.target_preamble_hi;
+        if (have_target_band) {
             for (size_t i = 0; i < active_count; ++i) {
                 const int64_t a_lo = active_ivs[i].lo;
                 const int64_t a_hi = active_ivs[i].hi;
@@ -1134,7 +1284,15 @@ bool estimate_discrete_cir(const std::complex<float>* y,
                     push_interval(outside_ivs, outside_count, std::max(a_lo, t_hi), a_hi);
                 }
             }
-            if (prefilter_ran && outside_count == 0 && !cfg.autocorr_search_inside_target) {
+            // Fast reject.  Reachable ONLY when the caller sets
+            // target_preamble_lo/hi and leaves autocorr_search_inside_target
+            // false: without a band the `else` branch below keeps the legacy
+            // "search every hit" behaviour and nothing is rejected.  The
+            // decision uses `outside_evidence`, not the padded `outside_ivs`
+            // split, so the target's own preamble/SFD hits (whose evidence
+            // region still overlaps the band) no longer block the reject.
+            if (prefilter_ran && outside_evidence == 0 &&
+                !cfg.autocorr_search_inside_target) {
                 model.coarse_peak = 0.0;
                 model.detection_metric = 0.0;
                 if (timings)
@@ -1147,6 +1305,17 @@ bool estimate_discrete_cir(const std::complex<float>* y,
                               active_ivs[i].lo, active_ivs[i].hi);
             }
         }
+
+        // ---- lazy localized self-energy prefix sum ------------------------
+        // Reached only when the prefilter did not reject (or did not run), i.e.
+        // only when the cross-correlation below will actually read `energy`.
+        // Numeric definition unchanged: double accumulation over
+        // [energy_base, energy_end).  The `nonfinite_energy` gate is the same
+        // test on the same total, just evaluated at the point of first use.
+        energy_prefix_build(y + static_cast<size_t>(energy_base), local_energy_len,
+                            energy);
+        if (!std::isfinite(energy[local_energy_len]))
+            return finish("failed", "nonfinite_energy");
 
         struct CoarseCandidate {
             int64_t pos = -1;

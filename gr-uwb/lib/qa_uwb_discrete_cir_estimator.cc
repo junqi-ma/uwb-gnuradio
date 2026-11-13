@@ -15,6 +15,7 @@
 #include <gnuradio/uwb/uwb_hrp_mod_core.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -51,16 +52,16 @@ struct Packet {
     std::vector<cf> train;
     std::vector<cf> sync;
 
-    explicit Packet(size_t code = 10, size_t psdu_len = 32)
+    explicit Packet(size_t code = 10, size_t psdu_len = 32, size_t reps = 64)
     {
         profile.code_index = code;
-        profile.sync_repetitions = 64;
+        profile.sync_repetitions = reps;
         profile.sfd_mode = "4z2";
         profile.peak_amplitude = 0.8f;
         std::vector<uint8_t> psdu = mod::make_random_psdu(
             psdu_len - 2, static_cast<uint32_t>(1000 + code), true);
         const size_t cap = mod::packet_samples_998p4(
-                               64, 8, psdu.size(), false, &profile.pulse) +
+                               reps, 8, psdu.size(), false, &profile.pulse) +
                            512;
         mod_scratch.reserve(127, cap);
         wave.resize(cap);
@@ -1180,4 +1181,568 @@ BOOST_AUTO_TEST_CASE(test_discrete_cir_negative_cfo)
         const cd ref_tap = acc / (code_energy * ref_valid);
         BOOST_CHECK_LT(std::abs(cd(m.taps[d]) - ref_tap), 2e-5);
     }
+}
+
+
+// ===========================================================================
+// Track B QA: autocorr prefilter attribution (B1) and the lazy / vectorised
+// energy prefix (B2).
+//
+// Scenario convention (matches the SIC pipeline): the estimator is configured
+// with the COMM template (code 10) and must locate the comm preamble, while
+// `target_preamble_lo/hi` is the PUBLIC band of the sensing TARGET (code 9)
+// whose own preamble must not be mistaken for outside interference.
+//
+// CONFIGURATION CAVEAT (read this before reading any "fast reject" result as a
+// pipeline property): the reject can only fire when the caller SETS
+// `target_preamble_lo/hi` AND leaves `autocorr_search_inside_target` false.
+// The current Fixed-schedule pipeline path does NOT set the band
+// (`slot->use_dynamic_slot == false`), so it takes the legacy `else` branch
+// that puts every hit into `outside_ivs` and never rejects.  These cases
+// therefore prove the ATTRIBUTION RULE, not that the production pipeline
+// fast-rejects clean windows.
+//
+// The band the pipeline computes for a DYNAMIC slot (uwb_uhd_sc16_pipeline.cc)
+// is
+//   [seed - (search_margin + 1024),
+//    seed + (sync_reps + sfd_syms)*sps + (search_margin + 3*sps))
+// i.e. it covers the target preamble, its SFD and three extra symbols.  The
+// "tight" band below is exactly that formula with search_margin = 0; the
+// "loose" band widens both edges.  Nothing is tuned: autocorr_threshold stays
+// at the calibrated 0.20 and no detection threshold is touched.
+// ===========================================================================
+namespace {
+
+// Add `wave` at `q` (gain applied) on top of an existing window.
+void place_wave(std::vector<cf>& y, const std::vector<cf>& wave, size_t q, float gain)
+{
+    for (size_t i = 0; i < wave.size() && q + i < y.size(); ++i)
+        y[q + i] += gain * wave[i];
+}
+
+// Deterministic complex noise, `sigma` per component.
+void add_noise(std::vector<cf>& y, float sigma, uint32_t seed)
+{
+    uint32_t rng = seed;
+    for (size_t i = 0; i < y.size(); ++i) {
+        rng = rng * 1664525U + 1013904223U;
+        const float re = (static_cast<float>(rng >> 16) / 32768.0f - 1.0f) * sigma;
+        rng = rng * 1664525U + 1013904223U;
+        const float im = (static_cast<float>(rng >> 16) / 32768.0f - 1.0f) * sigma;
+        y[i] += cf(re, im);
+    }
+}
+
+// Wide-ROI config: the segmented prefilter only runs when
+// roi_hi - roi_lo > 8*sps, so the ROI must be wide.
+sic::DiscreteCirConfig make_wide_cfg(size_t n,
+                                     int64_t roi_lo,
+                                     int64_t roi_hi,
+                                     int64_t t_lo,
+                                     int64_t t_hi)
+{
+    sic::DiscreteCirConfig c = make_cfg(n, static_cast<size_t>(roi_lo), 40);
+    c.roi_lo = roi_lo;
+    c.roi_hi = roi_hi;
+    c.target_preamble_lo = t_lo;
+    c.target_preamble_hi = t_hi;
+    c.autocorr_prefilter = true;
+    c.autocorr_threshold = 0.20;
+    c.autocorr_search_inside_target = false;
+    return c;
+}
+
+struct ModelSnapshot {
+    std::string status;
+    std::string reason;
+    bool valid = false;
+    int64_t q = -1;
+    int64_t lag_lo = 0;
+    size_t tap_count = 0;
+    size_t active_count = 0;
+    std::vector<cf> taps;
+};
+
+ModelSnapshot snapshot_of(const sic::DiscreteCirModel& m)
+{
+    ModelSnapshot s;
+    s.status = m.status ? m.status : "";
+    s.reason = reason_of(m);
+    s.valid = m.valid;
+    s.q = m.q;
+    s.lag_lo = m.lag_lo;
+    s.tap_count = m.tap_count;
+    s.active_count = m.active_count;
+    s.taps.assign(m.taps.begin(), m.taps.begin() + m.tap_count);
+    return s;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// B1 (a): a PURE CLEAN target packet (no comm interferer) must take the fast
+// reject `no_outside_autocorr_preamble` on 100% of trials, at tight and loose
+// public ROI margins and at more than one SNR.
+//
+// Before the fix the target's own padded hits always spilled into the
+// "outside" intervals, so `outside_count != 0` and the reject never fired for
+// the tight band (measured on the pre-change code: 12/24 overall — the loose
+// band rejected, the tight band did not).  Those trials paid the eager prefix
+// build plus the full-window cross-correlation before failing with
+// `below_detect_threshold`.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_discrete_cir_clean_target_fast_reject)
+{
+    Packet p_comm(10, 32);      // estimator template: comm code 10
+    Packet p_target(9, 16, 16); // clean sensing target: code 9, 16 SYNC
+
+    constexpr size_t n = 160000;
+    constexpr size_t kSfdSyms = 8; // "4z2" = 8 SFD symbols
+    const size_t target_q = 12000;
+    const int64_t preamble_end =
+        static_cast<int64_t>(target_q) + 16 * static_cast<int64_t>(kSps);
+    const int64_t band_body =
+        preamble_end + static_cast<int64_t>(kSfdSyms) * static_cast<int64_t>(kSps);
+
+    struct Band {
+        int64_t lo;
+        int64_t hi;
+        const char* name;
+    };
+    const Band bands[] = {
+        { static_cast<int64_t>(target_q) - 1024, band_body + 3 * static_cast<int64_t>(kSps), "tight" },
+        { static_cast<int64_t>(target_q) - 4096, band_body + 8 * static_cast<int64_t>(kSps), "loose" }
+    };
+    // sigma is per-component AWGN on top of a 0.25-scaled packet (peak 0.2).
+    const float sigmas[] = { 0.0f, 0.01f, 0.03f };
+
+    size_t trials = 0;
+    size_t rejected = 0;
+    size_t prefix_untouched = 0;
+    for (const Band& band : bands) {
+        // One prepare per band; the config is identical across sigma/seed.
+        sic::DiscreteCirConfig cfg =
+            make_wide_cfg(n, 10000, 150000, band.lo, band.hi);
+        sic::DiscreteCirScratch s;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(prepare_ok(p_comm, cfg, s, err), err);
+        for (float sigma : sigmas) {
+            for (uint32_t seed = 1; seed <= 4; ++seed) {
+                std::vector<cf> y(n, cf(0.f, 0.f));
+                place_wave(y, p_target.wave, target_q, 0.25f);
+                if (sigma > 0.0f)
+                    add_noise(y, sigma, seed * 7919u + 13u);
+
+                // Poison the prefix: a fast reject must NOT build it (B2).
+                std::fill(s.energy_prefix.begin(), s.energy_prefix.end(), -12345.0);
+
+                sic::DiscreteCirModel m;
+                estimate_ok(p_comm, cfg, y, static_cast<int64_t>(n), s, m);
+                ++trials;
+                const bool took_reject =
+                    !m.valid && reason_of(m) == "no_outside_autocorr_preamble";
+                if (took_reject)
+                    ++rejected;
+                if (s.energy_prefix[1] == -12345.0)
+                    ++prefix_untouched;
+                BOOST_TEST_MESSAGE("band=" << band.name << " sigma=" << sigma
+                                           << " seed=" << seed << " status="
+                                           << (m.status ? m.status : "")
+                                           << " reason=" << reason_of(m));
+            }
+        }
+    }
+    BOOST_TEST_MESSAGE("clean-target fast reject " << rejected << "/" << trials);
+    BOOST_CHECK_EQUAL(rejected, trials);
+    // The lazy prefix must not be built on a rejected window.
+    BOOST_CHECK_EQUAL(prefix_untouched, trials);
+
+    // INDICATIVE ONLY (no assertion, not a benchmark): cost of the reject path
+    // vs the pre-change path on the same clean window.  The coordinator owns
+    // all performance measurement; this only shows the direction.
+    {
+        std::vector<cf> y(n, cf(0.f, 0.f));
+        place_wave(y, p_target.wave, target_q, 0.25f);
+        sic::DiscreteCirConfig cfg_on =
+            make_wide_cfg(n, 10000, 150000, bands[0].lo, bands[0].hi);
+        sic::DiscreteCirConfig cfg_off = cfg_on;
+        cfg_off.autocorr_prefilter = false;
+        sic::DiscreteCirScratch s_on;
+        sic::DiscreteCirScratch s_off;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(prepare_ok(p_comm, cfg_on, s_on, err), err);
+        BOOST_REQUIRE_MESSAGE(prepare_ok(p_comm, cfg_off, s_off, err), err);
+        constexpr int kIters = 5;
+        const auto t_on0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < kIters; ++i) {
+            sic::DiscreteCirModel m;
+            estimate_ok(p_comm, cfg_on, y, static_cast<int64_t>(n), s_on, m);
+        }
+        const double on_us = std::chrono::duration<double, std::micro>(
+                                 std::chrono::steady_clock::now() - t_on0)
+                                 .count() /
+                             kIters;
+        const auto t_off0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < kIters; ++i) {
+            sic::DiscreteCirModel m;
+            estimate_ok(p_comm, cfg_off, y, static_cast<int64_t>(n), s_off, m);
+        }
+        const double off_us = std::chrono::duration<double, std::micro>(
+                                  std::chrono::steady_clock::now() - t_off0)
+                                  .count() /
+                              kIters;
+        BOOST_TEST_MESSAGE("INDICATIVE (n=" << n << ", roi=140k): reject path "
+                                            << on_us << " us, pre-change path "
+                                            << off_us << " us");
+    }
+
+    // DOCUMENTED BOUNDARY (unchanged by this fix): if the public band stops at
+    // the PREAMBLE end, the target's own SFD (8 "4z2" symbols with repeated
+    // -1 runs) is genuine periodic content beyond the band, so neither the old
+    // rule (`outside_count`) nor the new rule (`outside_evidence`) can reject.
+    // The pipeline never uses such a band; it always covers preamble + SFD.
+    {
+        std::vector<cf> y(n, cf(0.f, 0.f));
+        place_wave(y, p_target.wave, target_q, 0.25f);
+        sic::DiscreteCirConfig cfg =
+            make_wide_cfg(n, 10000, 150000,
+                          static_cast<int64_t>(target_q) - 64, preamble_end + 64);
+        sic::DiscreteCirScratch s;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(prepare_ok(p_comm, cfg, s, err), err);
+        sic::DiscreteCirModel m;
+        estimate_ok(p_comm, cfg, y, static_cast<int64_t>(n), s, m);
+        BOOST_TEST_MESSAGE("preamble-only band: reason=" << reason_of(m));
+        BOOST_CHECK_NE(reason_of(m), "no_outside_autocorr_preamble");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B1 (b): an interferer fully LEFT, fully RIGHT, or PARTIALLY OVERLAPPING the
+// target preamble by 20/50/80% must NEVER be fast-rejected, and the resulting
+// model must be identical to the pre-change path (`autocorr_prefilter=false`).
+//
+// The control below proves the test is not vacuous: the SAME window without
+// the interferer does take the fast reject, so the interferer is exactly what
+// flips the decision.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_discrete_cir_outside_evidence_never_misses_interferer)
+{
+    Packet p_comm(10, 32);      // interferer: 64 SYNC = 65024 samples
+    Packet p_target(9, 16, 16); // target: 16 SYNC = 16256 samples
+
+    constexpr size_t n = 200000;
+    constexpr size_t kSfdSyms = 8;
+    const size_t target_q = 80000;
+    const int64_t preamble_end =
+        static_cast<int64_t>(target_q) + 16 * static_cast<int64_t>(kSps);
+    const int64_t t_lo = static_cast<int64_t>(target_q) - 1024;
+    const int64_t t_hi = preamble_end +
+                         static_cast<int64_t>(kSfdSyms) * static_cast<int64_t>(kSps) +
+                         3 * static_cast<int64_t>(kSps);
+    const size_t int_len = 64 * kSps;
+    const size_t left_edge = target_q - int_len; // interferer end == target_q
+
+    struct Case {
+        const char* name;
+        size_t int_q;
+    };
+    const Case cases[] = {
+        { "left", 6000 },
+        { "right", 105000 },
+        { "overlap20", left_edge + (16 * kSps * 20) / 100 },
+        { "overlap50", left_edge + (16 * kSps * 50) / 100 },
+        { "overlap80", left_edge + (16 * kSps * 80) / 100 }
+    };
+
+    // Control: the clean target alone must be rejected with this exact band.
+    {
+        std::vector<cf> y(n, cf(0.f, 0.f));
+        place_wave(y, p_target.wave, target_q, 0.25f);
+        sic::DiscreteCirConfig cfg = make_wide_cfg(n, 0, 198000, t_lo, t_hi);
+        sic::DiscreteCirScratch s;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(prepare_ok(p_comm, cfg, s, err), err);
+        sic::DiscreteCirModel m;
+        estimate_ok(p_comm, cfg, y, static_cast<int64_t>(n), s, m);
+        BOOST_TEST_MESSAGE("control (target only): reason=" << reason_of(m));
+        BOOST_CHECK_EQUAL(reason_of(m), "no_outside_autocorr_preamble");
+    }
+
+    size_t missed = 0;
+    size_t equivalent = 0;
+    for (const Case& c : cases) {
+        std::vector<cf> y(n, cf(0.f, 0.f));
+        place_wave(y, p_target.wave, target_q, 0.25f);
+        place_wave(y, p_comm.wave, c.int_q, 1.0f);
+
+        sic::DiscreteCirConfig cfg_on = make_wide_cfg(n, 0, 198000, t_lo, t_hi);
+        sic::DiscreteCirConfig cfg_off = cfg_on;
+        cfg_off.autocorr_prefilter = false;
+
+        sic::DiscreteCirScratch s_on;
+        sic::DiscreteCirScratch s_off;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(prepare_ok(p_comm, cfg_on, s_on, err), err);
+        BOOST_REQUIRE_MESSAGE(prepare_ok(p_comm, cfg_off, s_off, err), err);
+
+        sic::DiscreteCirModel m_on;
+        sic::DiscreteCirModel m_off;
+        estimate_ok(p_comm, cfg_on, y, static_cast<int64_t>(n), s_on, m_on);
+        estimate_ok(p_comm, cfg_off, y, static_cast<int64_t>(n), s_off, m_off);
+
+        BOOST_TEST_MESSAGE(c.name << ": on status="
+                                   << (m_on.status ? m_on.status : "")
+                                   << " reason=" << reason_of(m_on)
+                                   << " q=" << m_on.q << " valid=" << m_on.valid
+                                   << " | off status="
+                                   << (m_off.status ? m_off.status : "")
+                                   << " reason=" << reason_of(m_off)
+                                   << " q=" << m_off.q
+                                   << " valid=" << m_off.valid);
+
+        // (1) never fast-rejected
+        if (reason_of(m_on) == "no_outside_autocorr_preamble") {
+            ++missed;
+            BOOST_ERROR(c.name << " was fast-rejected");
+            continue;
+        }
+        // (2) the interferer is actually detected
+        BOOST_CHECK_MESSAGE(m_on.valid,
+                            c.name << " not detected: " << reason_of(m_on));
+        BOOST_CHECK_LE(std::abs(m_on.q - static_cast<int64_t>(c.int_q)), 8);
+        BOOST_CHECK(m_off.valid);
+
+        // (3) equivalent to the pre-change path
+        const ModelSnapshot a = snapshot_of(m_on);
+        const ModelSnapshot b = snapshot_of(m_off);
+        bool same = a.status == b.status && a.reason == b.reason &&
+                    a.valid == b.valid && a.q == b.q && a.lag_lo == b.lag_lo &&
+                    a.tap_count == b.tap_count && a.active_count == b.active_count &&
+                    a.taps.size() == b.taps.size();
+        if (same) {
+            // Exact comparison: both runs are deterministic and must produce
+            // bit-identical dense taps.
+            for (size_t i = 0; i < a.taps.size(); ++i) {
+                if (a.taps[i] != b.taps[i]) {
+                    same = false;
+                    break;
+                }
+            }
+        }
+        if (same)
+            ++equivalent;
+        BOOST_CHECK_MESSAGE(same, c.name << " differs from the prefilter-off path:"
+                                         << " q " << a.q << "/" << b.q
+                                         << " taps " << a.tap_count << "/"
+                                         << b.tap_count << " active "
+                                         << a.active_count << "/" << b.active_count);
+    }
+    BOOST_TEST_MESSAGE("interferer cases: missed=" << missed
+                                                   << " equivalent=" << equivalent
+                                                   << "/" << (sizeof(cases) / sizeof(cases[0])));
+    BOOST_CHECK_EQUAL(missed, 0u);
+    BOOST_CHECK_EQUAL(equivalent, sizeof(cases) / sizeof(cases[0]));
+}
+
+// ---------------------------------------------------------------------------
+// B1 (c): IN-BAND INTERFERER.  An interferer whose entire periodic region lies
+// inside the attribution band cannot be told apart from the target by a
+// lag-sps autocorrelation alone.
+//
+// Measured difference against the pre-change rule (do not read this as "no
+// behaviour change"): the OLD rule did NOT reject this window (the target's
+// own preamble hit one segment before t_lo spilled into `outside_ivs`, so
+// `outside_count != 0`) and it ended in `below_detect_threshold`; the NEW rule
+// rejects it as `no_outside_autocorr_preamble`.
+//
+// The OUTCOME is nevertheless unchanged, and that is asserted below: with a
+// band set and `autocorr_search_inside_target == false` the cross-correlation
+// only scans `outside_ivs`, which excludes the band, so an in-band interferer
+// was never detected in this configuration either.  The prefilter only avoids
+// the wasted scan and reports a more accurate reason.  Callers that must catch
+// an in-band (co-located) interferer have to opt in with
+// `autocorr_search_inside_target`, which is exercised at the end.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_discrete_cir_inside_band_interferer_is_documented_reject)
+{
+    Packet p_comm(10, 32, 8);   // 8 SYNC = 8128 samples: fits inside the band
+    Packet p_target(9, 16, 16);
+
+    constexpr size_t n = 200000;
+    constexpr size_t kSfdSyms = 8;
+    const size_t target_q = 80000;
+    const int64_t preamble_end =
+        static_cast<int64_t>(target_q) + 16 * static_cast<int64_t>(kSps);
+    const int64_t t_lo = static_cast<int64_t>(target_q) - 1024;
+    const int64_t t_hi = preamble_end +
+                         static_cast<int64_t>(kSfdSyms) * static_cast<int64_t>(kSps) +
+                         3 * static_cast<int64_t>(kSps);
+    const size_t int_q = target_q + 2000; // entirely inside [t_lo, t_hi)
+
+    std::vector<cf> y(n, cf(0.f, 0.f));
+    place_wave(y, p_target.wave, target_q, 0.25f);
+    place_wave(y, p_comm.wave, int_q, 1.0f);
+
+    sic::DiscreteCirConfig cfg = make_wide_cfg(n, 0, 198000, t_lo, t_hi);
+    sic::DiscreteCirScratch s;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(prepare_ok(p_comm, cfg, s, err), err);
+    sic::DiscreteCirModel m;
+    estimate_ok(p_comm, cfg, y, static_cast<int64_t>(n), s, m);
+    BOOST_TEST_MESSAGE("in-band interferer: reason=" << reason_of(m));
+    BOOST_CHECK_EQUAL(reason_of(m), "no_outside_autocorr_preamble");
+
+    // Outcome equivalence with the pre-change search path: turning the
+    // prefilter off (the old code path) must ALSO fail to detect, because the
+    // search excludes the band.  This is what makes the reject safe here.
+    sic::DiscreteCirConfig cfg_off = cfg;
+    cfg_off.autocorr_prefilter = false;
+    sic::DiscreteCirScratch s_off;
+    BOOST_REQUIRE_MESSAGE(prepare_ok(p_comm, cfg_off, s_off, err), err);
+    sic::DiscreteCirModel m_off;
+    estimate_ok(p_comm, cfg_off, y, static_cast<int64_t>(n), s_off, m_off);
+    BOOST_TEST_MESSAGE("in-band interferer, prefilter off: status="
+                       << (m_off.status ? m_off.status : "")
+                       << " reason=" << reason_of(m_off) << " q=" << m_off.q);
+    BOOST_CHECK(!m_off.valid);
+
+    // Explicit opt-in recovers the in-band interferer.
+    sic::DiscreteCirConfig cfg_in = cfg;
+    cfg_in.autocorr_search_inside_target = true;
+    sic::DiscreteCirScratch s_in;
+    BOOST_REQUIRE_MESSAGE(prepare_ok(p_comm, cfg_in, s_in, err), err);
+    sic::DiscreteCirModel m_in;
+    estimate_ok(p_comm, cfg_in, y, static_cast<int64_t>(n), s_in, m_in);
+    BOOST_TEST_MESSAGE("in-band opt-in: status="
+                       << (m_in.status ? m_in.status : "")
+                       << " reason=" << reason_of(m_in) << " q=" << m_in.q);
+    BOOST_CHECK_MESSAGE(m_in.valid, "in-band opt-in: " << reason_of(m_in));
+    BOOST_CHECK_LE(std::abs(m_in.q - static_cast<int64_t>(int_q)), 8);
+
+    // Plan §4.3 "Mode A" red line: a FULL-LENGTH code-10 interferer preamble
+    // sitting exactly ON TOP of a full-length code-9 target preamble must
+    // still be detected when the caller opts in.  The reject cannot fire at
+    // all with `autocorr_search_inside_target == true`, so this is the
+    // supported configuration for the co-located case.
+    {
+        Packet p_comm64(10, 32);      // 64 SYNC
+        Packet p_target64(9, 16, 64); // 64 SYNC
+        const size_t co_q = 40000;
+        std::vector<cf> yc(n, cf(0.f, 0.f));
+        place_wave(yc, p_target64.wave, co_q, 0.25f);
+        place_wave(yc, p_comm64.wave, co_q, 1.0f);
+
+        const int64_t co_lo = static_cast<int64_t>(co_q) - 1024;
+        const int64_t co_hi =
+            static_cast<int64_t>(co_q) +
+            (64 + static_cast<int64_t>(kSfdSyms)) * static_cast<int64_t>(kSps) +
+            3 * static_cast<int64_t>(kSps);
+        sic::DiscreteCirConfig cfg_co = make_wide_cfg(n, 0, 198000, co_lo, co_hi);
+        cfg_co.autocorr_search_inside_target = true;
+        sic::DiscreteCirScratch s_co;
+        BOOST_REQUIRE_MESSAGE(prepare_ok(p_comm64, cfg_co, s_co, err), err);
+        sic::DiscreteCirModel m_co;
+        estimate_ok(p_comm64, cfg_co, yc, static_cast<int64_t>(n), s_co, m_co);
+        BOOST_TEST_MESSAGE("co-located 64-SYNC opt-in: status="
+                           << (m_co.status ? m_co.status : "")
+                           << " reason=" << reason_of(m_co) << " q=" << m_co.q);
+        BOOST_CHECK_MESSAGE(m_co.valid, "co-located opt-in: " << reason_of(m_co));
+        BOOST_CHECK_LE(std::abs(m_co.q - static_cast<int64_t>(co_q)), 8);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B2: the AVX2 prefix must match an independent scalar DOUBLE reference
+// point-by-point over >= 5e5 samples.  The window carries a large-amplitude
+// packet (prefix ~5e9) followed by a tiny tail (|v|^2 ~ 1e-4): a float
+// accumulator has ~512 ulp at 5e9 and would erase the tail entirely, so this
+// case also proves the double accumulation.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_discrete_cir_energy_prefix_avx2_matches_scalar)
+{
+    Packet p_comm(10, 32);
+    constexpr size_t n = 560000;
+    const size_t q = 1000;
+
+    std::vector<cf> y(n, cf(0.f, 0.f));
+    place_wave(y, p_comm.wave, q, 300.0f);
+    uint32_t rng = 0x1234567u;
+    for (size_t i = 100000; i < n; ++i) {
+        rng = rng * 1664525u + 1013904223u;
+        const float re = (static_cast<float>(rng >> 16) / 32768.0f - 1.0f) * 0.003f;
+        rng = rng * 1664525u + 1013904223u;
+        const float im = (static_cast<float>(rng >> 16) / 32768.0f - 1.0f) * 0.003f;
+        y[i] += cf(re, im);
+    }
+
+    // target band disabled -> the prefilter never rejects, so the lazy prefix
+    // is built and can be inspected.
+    sic::DiscreteCirConfig cfg = make_wide_cfg(n, 0, 544000, -1, -1);
+    sic::DiscreteCirScratch s;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(prepare_ok(p_comm, cfg, s, err), err);
+    sic::DiscreteCirModel m;
+    const bool ok = estimate_ok(p_comm, cfg, y, static_cast<int64_t>(n), s, m);
+    BOOST_REQUIRE_MESSAGE(ok, "status=" << (m.status ? m.status : "")
+                                        << " reason=" << reason_of(m));
+
+    // Reproduce the estimator's prefix window [energy_base, energy_end).
+    const int64_t visible_end = static_cast<int64_t>(n);
+    const int64_t roi_hi_clipped =
+        std::min<int64_t>(cfg.roi_hi, visible_end - static_cast<int64_t>(kSps) + 1);
+    const int64_t energy_base = cfg.roi_lo;
+    const int64_t energy_end = std::max<int64_t>(
+        energy_base,
+        std::min<int64_t>(visible_end,
+                          roi_hi_clipped +
+                              static_cast<int64_t>(kReps - 1) * static_cast<int64_t>(kSps) +
+                              static_cast<int64_t>(kSps)));
+    const size_t len = static_cast<size_t>(energy_end - energy_base);
+    BOOST_REQUIRE(len >= 500000u);
+    BOOST_REQUIRE(s.energy_prefix.size() > len);
+
+    // Independent scalar reference: the compiled fallback kernel's algorithm.
+    std::vector<double> ref(len + 1, 0.0);
+    double acc = 0.0;
+    for (size_t i = 0; i < len; ++i) {
+        const cf v = y[static_cast<size_t>(energy_base) + i];
+        acc += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
+               static_cast<double>(v.imag()) * static_cast<double>(v.imag());
+        ref[i + 1] = acc;
+    }
+
+    double max_rel = 0.0;
+    size_t monotone_breaks = 0;
+    for (size_t i = 0; i <= len; ++i) {
+        BOOST_REQUIRE(std::isfinite(s.energy_prefix[i]));
+        const double d = std::abs(s.energy_prefix[i] - ref[i]);
+        const double denom = std::max(1.0, std::abs(ref[i]));
+        max_rel = std::max(max_rel, d / denom);
+        if (i > 0 && s.energy_prefix[i] < s.energy_prefix[i - 1])
+            ++monotone_breaks;
+    }
+    BOOST_CHECK_EQUAL(monotone_breaks, 0u);
+    BOOST_CHECK_LT(max_rel, 1e-7);
+
+    // The tiny tail must survive the large prefix.  The packet ends near
+    // sample 250k, so [300k, len) is pure tiny noise.  A float accumulator
+    // would quantise this contribution away completely (it is far below one
+    // float ulp of the total, see the sensitivity check below); the double
+    // accumulator keeps it, and both kernels must agree on it.
+    const size_t tail_lo = 300000;
+    const double sim_delta = s.energy_prefix[len] - s.energy_prefix[tail_lo];
+    const double ref_delta = ref[len] - ref[tail_lo];
+    BOOST_REQUIRE_GT(ref_delta, 0.0);
+    BOOST_CHECK_GT(sim_delta, 0.99 * ref_delta);
+    BOOST_CHECK_LT(sim_delta, 1.01 * ref_delta);
+    // Sensitivity of the check above: the tail is far below one float ulp of
+    // the accumulated total (~6e-8 relative), so a float accumulator would
+    // lose it completely.
+    BOOST_CHECK_LT(ref_delta / ref[len], 1e-8);
+
+    BOOST_TEST_MESSAGE("energy prefix: len=" << len << " max_rel=" << max_rel
+                                             << " tail_delta=" << ref_delta
+                                             << " tail_sim=" << sim_delta
+                                             << " tail/total=" << ref_delta / ref[len]);
 }
