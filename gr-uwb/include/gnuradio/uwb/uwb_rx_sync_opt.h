@@ -528,6 +528,105 @@ inline uint64_t fnv1a_u64(uint64_t h, uint64_t v)
 } // namespace detail
 
 // ---------------------------------------------------------------------------
+// Content key for the cached real SYNC template.
+//
+// FNV-1a over the raw template bytes plus its length, consumed 8 bytes at a
+// time (a byte-at-a-time walk over 8 KB is a ~24k-cycle serial multiply chain;
+// the word-wise variant costs ~3k cycles and is still a full-content key).
+// The key deliberately does NOT look at pointer identity or at any scratch
+// buffer, so it survives scratch reuse and reallocation.
+//
+// Callers must also require a length match before reuse: a key of 0 is also
+// the "never built" state.
+// ---------------------------------------------------------------------------
+inline uint64_t
+real_sync_template_key(const std::vector<std::complex<float>>& template_wf)
+{
+    static_assert(sizeof(float) == 4, "SYNC cache key assumes 32-bit float");
+    uint64_t h = detail::kFnvOffsetBasis;
+    h = detail::fnv1a_u64(h, static_cast<uint64_t>(template_wf.size()));
+    if (template_wf.empty())
+        return h;
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(template_wf.data());
+    const size_t bytes = template_wf.size() * sizeof(std::complex<float>);
+    size_t i = 0;
+    for (; i + 8 <= bytes; i += 8) {
+        uint64_t w = 0;
+        std::memcpy(&w, p + i, sizeof(w)); // unaligned-safe, one load on x86
+        h ^= w;
+        h *= detail::kFnvPrime;
+    }
+    for (; i < bytes; ++i) {
+        h ^= static_cast<uint64_t>(p[i]);
+        h *= detail::kFnvPrime;
+    }
+    return h;
+}
+
+// ---------------------------------------------------------------------------
+// Window energy: sum_{k < count} |rx[k]|^2.
+//
+// `stage_timing`'s local_best recomputes this 1016-sample sum once per SYNC
+// repetition (255 times for a 256-SYNC preamble).  The legacy scalar loop is a
+// serial float add chain, so its cost is comparable to the 17 matched-filter
+// dots it feeds.  The AVX2 kernel below keeps float accumulation (no double
+// promotion) and only changes the summation order: eight independent lanes,
+// combined pairwise at the end.
+//
+// `window_energy_scalar` is the unchanged legacy loop; it is the fallback for
+// hosts without AVX2/FMA and the reference the QA compares against.  The two
+// are deliberately NOT bit-identical: reassociating a float reduction moves
+// the result by a few 1e-7 relative (measured 8.3e-7 worst case over the
+// golden fixture's tracking windows, up to ~3e-6 on a noisy variant).  That is
+// far below the resolution the timing metric needs and the returned peak
+// POSITION is unchanged, but callers must not expect bit equality.
+// ---------------------------------------------------------------------------
+inline float window_energy_scalar(const std::complex<float>* rx, size_t count)
+{
+    float pw = 0.0f;
+    for (size_t k = 0; k < count; ++k)
+        pw += std::norm(rx[k]);
+    return pw;
+}
+
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+__attribute__((target("avx2,fma")))
+inline float window_energy_avx2(const std::complex<float>* rx, size_t count)
+{
+    const float* p = reinterpret_cast<const float*>(rx);
+    __m256 a0 = _mm256_setzero_ps();
+    __m256 a1 = _mm256_setzero_ps();
+    size_t k = 0;
+    const size_t limit = count & ~size_t(7);
+    for (; k < limit; k += 8) { // 8 complex = 16 floats = two vectors
+        const __m256 v0 = _mm256_loadu_ps(p + 2 * k);
+        const __m256 v1 = _mm256_loadu_ps(p + 2 * k + 8);
+        a0 = _mm256_fmadd_ps(v0, v0, a0);
+        a1 = _mm256_fmadd_ps(v1, v1, a1);
+    }
+    a0 = _mm256_add_ps(a0, a1);
+    alignas(32) float lane[8];
+    _mm256_store_ps(lane, a0);
+    // Fixed pairwise tree: reproducible for a given input, independent of the
+    // compiler's choice for the scalar loop.
+    float s = ((lane[0] + lane[2]) + (lane[4] + lane[6])) +
+              ((lane[1] + lane[3]) + (lane[5] + lane[7]));
+    for (; k < count; ++k)
+        s += std::norm(rx[k]);
+    return s;
+}
+#endif
+
+inline float window_energy(const std::complex<float>* rx, size_t count)
+{
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+    if (has_avx2_fma())
+        return window_energy_avx2(rx, count);
+#endif
+    return window_energy_scalar(rx, count);
+}
+
+// ---------------------------------------------------------------------------
 // Cache key for the normalized SFD template.
 //
 // Covers, in order: template length, every template sample's raw float bit

@@ -40,6 +40,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -168,7 +169,22 @@ struct DemodScratch {
     uint32_t sync_cir_prepares = 0;
 
     // Cached pre-duplicated real SYNC template for AVX2 fast dot.
+    //
+    // `key` is the cache identity: a content hash of the raw template bytes
+    // plus its length (rxopt::real_sync_template_key).  It is committed only
+    // after a successful build from the L2-NORMALIZED template, so a hit means
+    // "taps_dup/energy/length already describe this template".  stage_sfd may
+    // rebuild this object from the RAW template when the length differs from
+    // one symbol; build_real_sync_template resets key to 0, which invalidates
+    // the cache and forces the next stage_timing to rebuild.  Everything is
+    // per-worker scratch: no globals, no locks.
     rxopt::RealSyncTemplate real_sync_template;
+
+    // L2-normalized SYNC template and its energy, cached alongside
+    // `real_sync_template` under the same key.  Kept out of `work` so the
+    // shared scratch buffer keeps its other users' semantics.
+    std::vector<std::complex<float>> sync_template_norm;
+    float sync_template_energy = 0.0f;
 
     // Cached sequence data for fixed preamble code and SFD mode (Task B2).
     struct CachedSequenceState {
@@ -306,6 +322,7 @@ struct DemodScratch {
         peaks.reserve(256);
         peak_values.reserve(256);
         sfd_template.reserve(8 * kQm35SamplesPerSymbol);
+        sync_template_norm.reserve(4 * kQm35SamplesPerSymbol);
         cached_seq.pcode.reserve(kQm35CodeLength);
         cached_seq.sfd_seq.reserve(64);
         cached_seq.sampled_pcode.reserve(2 * kQm35ChipsPerSymbol);
@@ -366,10 +383,31 @@ inline bool stage_timing(const std::complex<float>* rx,
     }
 
     // Copy + L2-normalize the template (own copy so callers may pass raw).
-    scratch.work.assign(template_wf.begin(), template_wf.end());
-    gr::uwb::core::uwb_l2_normalize(scratch.work);
-    const float Et = gr::uwb::core::uwb_template_energy(scratch.work);
-    rxopt::build_real_sync_template(scratch.work, scratch.real_sync_template);
+    //
+    // Persistent cache: a stream passes the same template for every window, so
+    // the copy + normalize + energy + real-template build used to be repeated
+    // per window.  `real_sync_template.key` is a content key over the RAW
+    // template bytes, so a hit is safe regardless of which scratch buffer the
+    // caller used in between.  The normalized copy lives in
+    // `scratch.sync_template_norm` (not `work`) so `work` keeps its meaning for
+    // the other stage_timing users.
+    const uint64_t tmpl_key = rxopt::real_sync_template_key(template_wf);
+    if (tmpl_key == 0 || tmpl_key != scratch.real_sync_template.key ||
+        scratch.real_sync_template.length != L ||
+        scratch.sync_template_norm.size() != L) {
+        scratch.sync_template_norm.assign(template_wf.begin(), template_wf.end());
+        gr::uwb::core::uwb_l2_normalize(scratch.sync_template_norm);
+        scratch.sync_template_energy =
+            gr::uwb::core::uwb_template_energy(scratch.sync_template_norm);
+        rxopt::build_real_sync_template(scratch.sync_template_norm,
+                                        scratch.real_sync_template);
+        // Commit the key only when the cached object is usable (a failed build
+        // leaves length 0), so a broken build can never look like a hit.
+        scratch.real_sync_template.key =
+            (tmpl_key != 0 && scratch.real_sync_template.length == L) ? tmpl_key
+                                                                     : 0;
+    }
+    const float Et = scratch.sync_template_energy;
 
     // Determine the ROI around the seed (absolute coordinates).
     size_t roi_start = 0;
@@ -405,9 +443,9 @@ inline bool stage_timing(const std::complex<float>* rx,
         // Adjacent candidate windows overlap by L-1 samples.  Compute power
         // once, then update it in O(1); correlation remains an exact long dot
         // product handled by VOLK or AVX2.  No allocation occurs in this hot loop.
-        float pw = 0.0f;
-        for (size_t k = 0; k < L; ++k)
-            pw += std::norm(rx[w0 + static_cast<int64_t>(k)]);
+        // The initial window energy is the only O(L) term left here and it runs
+        // once per SYNC repetition, so it uses the vectorised kernel.
+        float pw = rxopt::window_energy(rx + w0, L);
 
         const bool use_real_opt = scratch.real_sync_template.is_real;
         const float* taps_dup = scratch.real_sync_template.taps_dup.data();
@@ -447,7 +485,8 @@ inline bool stage_timing(const std::complex<float>* rx,
         } else {
             for (; j < w1; ++j) {
                 const std::complex<float> acc =
-                    detail::timing_conjugate_dot(rx + j, scratch.work.data(), L);
+                    detail::timing_conjugate_dot(
+                        rx + j, scratch.sync_template_norm.data(), L);
                 const float metric = std::norm(acc) / (pw * Et + 1e-12f);
                 if (metric > bm) {
                     bm = metric;
@@ -619,9 +658,7 @@ inline bool stage_timing(const std::complex<float>* rx,
             const int64_t min_sep = static_cast<int64_t>(L / 2);
 
             auto scan_coarse = [&](int64_t scan_lo) {
-                float pw = 0.0f;
-                for (size_t k = 0; k < L; ++k)
-                    pw += std::norm(rx[scan_lo + static_cast<int64_t>(k)]);
+                float pw = rxopt::window_energy(rx + scan_lo, L);
                 float best_coarse_m = -1.0f;
                 int64_t best_coarse_j = scan_lo;
                 std::complex<float> best_coarse_c(0.0f, 0.0f);
@@ -635,7 +672,8 @@ inline bool stage_timing(const std::complex<float>* rx,
                                 ? rxopt::real_template_dot_single(
                                       rx + j, scratch.real_sync_template.taps_dup.data(), L)
                                 : detail::timing_conjugate_dot(
-                                      rx + j, scratch.work.data(), L);
+                                      rx + j,
+                                      scratch.sync_template_norm.data(), L);
                         const float pw_pos = (pw > 0.0f) ? pw : 0.0f;
                         const float m = std::norm(acc) / (pw_pos * Et + 1e-12f);
                         if (m > best_coarse_m) {
@@ -963,7 +1001,20 @@ inline void derotate_cfo_range(const std::complex<float>* rx,
     hi = std::min(hi, n);
     const double w = 2.0 * M_PI * cfo_hz / profile.sample_rate;
     if (lo < hi) {
-        if (profile.rx_fast_cfo_rotation) {
+        if (w == 0.0) {
+            // Zero-CFO bypass (C3).  exp(-j*0*i) is exactly (1, 0) for every i,
+            // and the block anchor is exactly (1, 0) as well, so the whole
+            // rotation is a bit-identical copy: (a+bi)*(1+0i) == (a, b) in
+            // IEEE float with no rounding.  Skipping the table build and the
+            // two VOLK passes therefore cannot change a single output bit.
+            //
+            // `rotation_kernel` keeps the value the kernel that would have run
+            // reports, so every existing consumer of `cfo_rotation_kernels`
+            // sees the same number.
+            std::memcpy(scratch.derotated.data() + lo, rx + lo,
+                        (hi - lo) * sizeof(std::complex<float>));
+            rotation_kernel = profile.rx_fast_cfo_rotation ? 1 : 0;
+        } else if (profile.rx_fast_cfo_rotation) {
             rxopt::derotate_range_block(scratch.derotated.data(), rx, n, lo, hi, w);
             rotation_kernel = 1;
         } else {

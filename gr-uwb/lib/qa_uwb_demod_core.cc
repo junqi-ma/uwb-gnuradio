@@ -2444,3 +2444,293 @@ BOOST_AUTO_TEST_CASE(test_demod_core_tail_reuse_equivalence_and_fallback)
     BOOST_CHECK_EQUAL(res_fb.timing.detected_peaks, size_t(64));
     BOOST_CHECK_SMALL(std::abs(res_fb.cfo.cfo_hz - res_legacy.cfo.cfo_hz), 25.0);
 }
+
+// ---------------------------------------------------------------------------
+// Track C (lf-c) guards.
+//
+// C1: the normalized SYNC template + real-template build are cached inside
+//     DemodScratch under a content key.  A hit must produce a bit-identical
+//     TimingResult, must not touch `scratch.work`, and a different template
+//     must invalidate the cache.
+// C2: the local_best initial window energy is vectorised.  The reassociation
+//     must not move the winning candidate and must keep the metric within the
+//     float-reduction error envelope.
+// C3: the zero-CFO rotation bypass is a bit-identical copy.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_demod_core_real_sync_template_cache_hit_and_invalidation)
+{
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+    BOOST_REQUIRE_EQUAL(tmpl.size(), size_t(1016));
+
+    auto prof = Qm35825Profile::Default();
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+
+    // --- cold cache -------------------------------------------------------
+    TimingResult first;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984,
+                                     first, scratch));
+    const uint64_t key = scratch.real_sync_template.key;
+    BOOST_CHECK(key != 0);
+    BOOST_CHECK_EQUAL(scratch.real_sync_template.length, size_t(1016));
+    BOOST_CHECK(scratch.real_sync_template.is_real);
+    BOOST_CHECK_EQUAL(scratch.sync_template_norm.size(), size_t(1016));
+    BOOST_CHECK_GT(scratch.sync_template_energy, 0.0f);
+
+    // The cached normalized template must be exactly the L2-normalized input,
+    // and the cached energy exactly its template energy.
+    {
+        std::vector<gr_complex> ref = tmpl;
+        gr::uwb::core::uwb_l2_normalize(ref);
+        BOOST_REQUIRE_EQUAL(ref.size(), scratch.sync_template_norm.size());
+        bool same = true;
+        for (size_t k = 0; k < ref.size(); ++k)
+            same = same && (ref[k] == scratch.sync_template_norm[k]);
+        BOOST_CHECK(same);
+        BOOST_CHECK(gr::uwb::core::uwb_template_energy(ref) ==
+                    scratch.sync_template_energy);
+    }
+
+    // --- cache hit --------------------------------------------------------
+    // `work` belongs to the other stage_timing users: a hit must leave it alone.
+    const gr_complex sentinel(1234.5f, -678.25f);
+    scratch.work.assign(size_t(64), sentinel);
+
+    TimingResult second;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984,
+                                     second, scratch));
+    BOOST_CHECK_EQUAL(scratch.real_sync_template.key, key);
+    BOOST_REQUIRE_EQUAL(scratch.work.size(), size_t(64));
+    bool work_untouched = true;
+    for (const auto& v : scratch.work)
+        work_untouched = work_untouched && (v == sentinel);
+    BOOST_CHECK(work_untouched);
+
+    // A hit must reproduce the cold run bit for bit (same normalized template,
+    // same energy, same taps -> same metrics, same positions).
+    BOOST_CHECK_EQUAL(first.detected_peaks, second.detected_peaks);
+    BOOST_CHECK_EQUAL(first.preamble_start_sample, second.preamble_start_sample);
+    BOOST_CHECK(first.metric == second.metric);
+    BOOST_CHECK(first.measured_period == second.measured_period);
+    BOOST_REQUIRE_EQUAL(first.peak_samples.size(), second.peak_samples.size());
+    BOOST_REQUIRE_EQUAL(first.peak_metrics.size(), second.peak_metrics.size());
+    BOOST_REQUIRE_EQUAL(first.peak_corr.size(), second.peak_corr.size());
+    for (size_t k = 0; k < first.peak_samples.size(); ++k) {
+        BOOST_CHECK_EQUAL(first.peak_samples[k], second.peak_samples[k]);
+        BOOST_CHECK(first.peak_metrics[k] == second.peak_metrics[k]);
+        BOOST_CHECK(first.peak_corr[k] == second.peak_corr[k]);
+    }
+
+    // The clean golden window tracks the exact arithmetic SYNC grid: this is
+    // the bit-level position guard for the vectorised energy kernel.
+    for (size_t k = 0; k < first.peak_samples.size(); ++k) {
+        BOOST_CHECK_EQUAL(first.peak_samples[k],
+                          9984 + static_cast<int64_t>(k) * 1016 + 1015);
+    }
+
+    // --- invalidation -----------------------------------------------------
+    // A different template must not reuse the cached object.  The result has to
+    // match a fresh-scratch run with that template exactly.
+    std::vector<gr_complex> other = tmpl;
+    for (size_t k = 0; k < other.size(); k += 7)
+        other[k] = gr_complex(other[k].real() * 0.5f, other[k].imag() + 0.25f);
+
+    TimingResult reused;
+    const bool ok_reused = core::stage_timing(iq.data(), iq.size(), prof, other,
+                                              9984, reused, scratch);
+    BOOST_CHECK(scratch.real_sync_template.key != key);
+
+    core::DemodScratch fresh;
+    fresh.reserve(iq.size());
+    TimingResult reference;
+    const bool ok_reference = core::stage_timing(iq.data(), iq.size(), prof,
+                                                 other, 9984, reference, fresh);
+    BOOST_CHECK_EQUAL(ok_reused, ok_reference);
+    if (ok_reused && ok_reference) {
+        BOOST_CHECK_EQUAL(reused.detected_peaks, reference.detected_peaks);
+        BOOST_CHECK_EQUAL(reused.preamble_start_sample,
+                          reference.preamble_start_sample);
+        BOOST_CHECK(reused.metric == reference.metric);
+        BOOST_REQUIRE_EQUAL(reused.peak_samples.size(),
+                            reference.peak_samples.size());
+        for (size_t k = 0; k < reused.peak_samples.size(); ++k) {
+            BOOST_CHECK_EQUAL(reused.peak_samples[k], reference.peak_samples[k]);
+            BOOST_CHECK(reused.peak_metrics[k] == reference.peak_metrics[k]);
+        }
+    }
+
+    // Reverting to the first template must hit again and reproduce `first`.
+    TimingResult back;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984,
+                                     back, scratch));
+    BOOST_CHECK_EQUAL(scratch.real_sync_template.key, key);
+    BOOST_CHECK_EQUAL(first.preamble_start_sample, back.preamble_start_sample);
+    BOOST_CHECK(first.metric == back.metric);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_window_energy_vector_matches_scalar)
+{
+    const size_t L = 1016;
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+    BOOST_REQUIRE_EQUAL(tmpl.size(), L);
+    BOOST_REQUIRE_GT(iq.size(), L + 1);
+
+    // --- 1. the kernel itself --------------------------------------------
+    // Same float accumulation, different association order.  The deviation is
+    // bounded by the float reduction error, not by the signal: assert a hard
+    // envelope and report the observed value.
+    double worst_rel = 0.0;
+    size_t worst_at = 0;
+    size_t compared = 0;
+    for (size_t w0 = 0; w0 + L <= iq.size(); w0 += 37) {
+        const float s = rxopt::window_energy_scalar(iq.data() + w0, L);
+        const float v = rxopt::window_energy(iq.data() + w0, L);
+        BOOST_REQUIRE(std::isfinite(v));
+        if (!(s > 0.0f))
+            continue; // the capture has silent gaps; a relative error is undefined
+        const double rel =
+            std::abs(static_cast<double>(v) - static_cast<double>(s)) /
+            static_cast<double>(s);
+        if (rel > worst_rel) {
+            worst_rel = rel;
+            worst_at = w0;
+        }
+        ++compared;
+    }
+    BOOST_CHECK_GT(compared, size_t(1000));
+    BOOST_TEST_MESSAGE("window_energy worst relative deviation "
+                       << worst_rel << " at " << worst_at);
+    BOOST_CHECK_LT(worst_rel, 1e-5);
+
+    // --- 2. local_best's argmax ------------------------------------------
+    // Mirrors the production loop exactly (4-lag AVX2 real-template dot plus
+    // the O(1) sliding power update) with the initial-energy provider as the
+    // only difference, so a position change would be attributable to C2.
+    std::vector<gr_complex> norm = tmpl;
+    gr::uwb::core::uwb_l2_normalize(norm);
+    const float Et = gr::uwb::core::uwb_template_energy(norm);
+    rxopt::RealSyncTemplate real_t;
+    rxopt::build_real_sync_template(norm, real_t);
+    BOOST_REQUIRE(real_t.is_real);
+
+    auto argmax = [&](int64_t w0, int64_t w1, bool vector_energy, int64_t* pos,
+                      float* met) {
+        float bm = -1.0f;
+        int64_t bp = w0;
+        float pw = vector_energy
+                       ? rxopt::window_energy(iq.data() + w0, L)
+                       : rxopt::window_energy_scalar(iq.data() + w0, L);
+        int64_t j = w0;
+        for (; j + 3 < w1; j += 4) {
+            gr_complex acc[4];
+            rxopt::real_template_dot_4lag(iq.data() + j, real_t.taps_dup.data(),
+                                          L, acc);
+            for (int m = 0; m < 4; ++m) {
+                const float metric = std::norm(acc[m]) / (pw * Et + 1e-12f);
+                if (metric > bm) {
+                    bm = metric;
+                    bp = j + m;
+                }
+                if (j + m + 1 < w1)
+                    pw += std::norm(iq[j + m + static_cast<int64_t>(L)]) -
+                          std::norm(iq[j + m]);
+            }
+        }
+        for (; j < w1; ++j) {
+            const gr_complex acc = rxopt::real_template_dot_single(
+                iq.data() + j, real_t.taps_dup.data(), L);
+            const float metric = std::norm(acc) / (pw * Et + 1e-12f);
+            if (metric > bm) {
+                bm = metric;
+                bp = j;
+            }
+            if (j + 1 < w1)
+                pw += std::norm(iq[j + static_cast<int64_t>(L)]) -
+                      std::norm(iq[j]);
+        }
+        *pos = bp;
+        *met = bm;
+    };
+
+    const int64_t radius = 8; // Qm35825Profile::Default().timing_track_radius
+    double worst_metric_rel = 0.0;
+    size_t windows = 0;
+    // The 64 tracked SYNC repetitions of the golden frame (the capture has
+    // silent gaps outside it, where the metric is 0 and a relative error is
+    // undefined).
+    for (size_t k = 0; k < 64; ++k) {
+        const int64_t want = 9984 + static_cast<int64_t>(k) * 1016;
+        if (want + static_cast<int64_t>(L) + radius >=
+            static_cast<int64_t>(iq.size()))
+            break;
+        const int64_t w0 = want - radius;
+        const int64_t w1 = want + radius;
+        int64_t pos_s = -1, pos_v = -1;
+        float met_s = 0.0f, met_v = 0.0f;
+        argmax(w0, w1, false, &pos_s, &met_s);
+        argmax(w0, w1, true, &pos_v, &met_v);
+        BOOST_CHECK_EQUAL(pos_s, pos_v); // bit-level position guard
+        if (!(met_s > 0.0f))
+            continue;
+        const double rel = std::abs(static_cast<double>(met_v) -
+                                    static_cast<double>(met_s)) /
+                           static_cast<double>(met_s);
+        worst_metric_rel = std::max(worst_metric_rel, rel);
+        ++windows;
+    }
+    BOOST_CHECK_GT(windows, size_t(50));
+    BOOST_TEST_MESSAGE("local_best metric worst relative deviation "
+                       << worst_metric_rel << " over " << windows
+                       << " tracking windows");
+    BOOST_CHECK_LT(worst_metric_rel, 1e-5);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_zero_cfo_rotation_is_bit_identical)
+{
+    // C3: with cfo_hz == 0 the rotation is exp(-j*0*i) == (1, 0), so the
+    // bypass must reproduce the block/recurrence kernel output bit for bit.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE_GT(iq.size(), size_t(4096));
+
+    const size_t n = iq.size();
+    const size_t lo = 1000;
+    const size_t hi = 20000;
+
+    for (bool fast : { true, false }) {
+        auto prof = Qm35825Profile::Default();
+        prof.rx_fast_cfo_rotation = fast;
+
+        core::DemodScratch scratch;
+        scratch.reserve(n);
+        uint64_t rotate_us = 0;
+        uint32_t kernel = 99;
+        core::derotate_cfo_range(iq.data(), n, prof, 0.0, lo, hi, scratch,
+                                 rotate_us, kernel);
+        BOOST_CHECK_EQUAL(kernel, fast ? 1u : 0u);
+        BOOST_REQUIRE_GE(scratch.derotated.size(), n);
+
+        // Reference: the kernel that would have run, with w == 0.
+        std::vector<gr_complex> ref(n);
+        if (fast)
+            rxopt::derotate_range_block(ref.data(), iq.data(), n, lo, hi, 0.0);
+        else
+            rxopt::derotate_range_recurrence(ref.data(), iq.data(), n, lo, hi,
+                                             0.0);
+        bool identical = true;
+        for (size_t i = lo; i < hi; ++i)
+            identical = identical && (ref[i] == scratch.derotated[i]);
+        BOOST_CHECK(identical);
+
+        // And it is literally a copy of the raw input.
+        bool copied = true;
+        for (size_t i = lo; i < hi; ++i)
+            copied = copied && (iq[i] == scratch.derotated[i]);
+        BOOST_CHECK(copied);
+    }
+}
