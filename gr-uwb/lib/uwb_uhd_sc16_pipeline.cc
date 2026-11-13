@@ -2831,13 +2831,16 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
             } else {
                 work_capacity = static_cast<size_t>(std::ceil(
                     static_cast<double>(native_capacity) * (cfg_.work_rate / cfg_.native_rate))) + 512;
+                // No dedicated kernel: this branch converts through cf32_native,
+                // so size it here to keep the per-window path allocation-free.
+                cf32_native.assign(native_capacity, std::complex<float>(0.0f, 0.0f));
             }
         }
 
-        // cf32_native is only consumed by the no-resampler branch (and lazily by
-        // the generic rate fallback).  When a dedicated 65/48 or 65/32 kernel
-        // runs, nothing is ever converted into it, so pre-zeroing
-        // 8 * native_capacity bytes at startup is dead work.
+        // cf32_native is only consumed by the no-resampler branch (and by the
+        // generic rate fallback above, which sizes it itself).  When a dedicated
+        // 65/48 or 65/32 kernel runs, nothing is ever converted into it, so
+        // pre-zeroing 8 * native_capacity bytes at startup is dead work.
         if (!need_resample) {
             cf32_native.assign(native_capacity, std::complex<float>(0.0f, 0.0f));
         }
