@@ -2763,11 +2763,15 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
     std::vector<std::complex<float>> cf32_native;
     std::vector<std::complex<float>> cf32_work;
     std::vector<std::complex<float>> sic_out;
-    std::vector<std::complex<float>> sic_ihat;
 
     sic::SicUnifiedScratch sic_scratch;
     sic::SicUnifiedTemplates sic_templates;
     sic::SicUnifiedConfig effective_sic_cfg = build_effective_sic_cfg(cfg_);
+    // This worker owns `sic_out` and reads it only when SIC reports committed.
+    // Skipping the per-window O(n) y -> out copy on every bypass exit removes
+    // ~122 us of pure waste per clean window (plus the i_hat zero-fill, which
+    // is gone entirely because this worker never publishes i_hat).
+    effective_sic_cfg.copy_input_on_bypass = false;
     std::vector<std::complex<float>> sic_sync_tmpl;
     std::vector<std::complex<float>> sic_preamble_tmpl;
 
@@ -2830,10 +2834,18 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
             }
         }
 
-        cf32_native.assign(native_capacity, std::complex<float>(0.0f, 0.0f));
+        // cf32_native is only consumed by the no-resampler branch (and lazily by
+        // the generic rate fallback).  When a dedicated 65/48 or 65/32 kernel
+        // runs, nothing is ever converted into it, so pre-zeroing
+        // 8 * native_capacity bytes at startup is dead work.
+        if (!need_resample) {
+            cf32_native.assign(native_capacity, std::complex<float>(0.0f, 0.0f));
+        }
         cf32_work.assign(work_capacity, std::complex<float>(0.0f, 0.0f));
+        // sic_out is the committed-output buffer.  It is sized once here; the
+        // per-window guard below only grows it if a window ever exceeds
+        // work_capacity, so the steady state has no zero-fill at all.
         sic_out.assign(work_capacity, std::complex<float>(0.0f, 0.0f));
-        sic_ihat.assign(work_capacity, std::complex<float>(0.0f, 0.0f));
 
         if (mode_runs_sic(cfg_.consumer_mode)) {
             if (cfg_.schedule_mode == ScheduleMode::AutoAcquire) {
@@ -3099,15 +3111,16 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
             res.sic_executed = true;
 
             if (sic_out.size() < dsp_n) {
+                // Growth-only fallback; the startup assign() already sized this
+                // to work_capacity, so the steady state never zero-fills here.
                 sic_out.resize(dsp_n);
-            }
-            if (sic_ihat.size() < dsp_n) {
-                sic_ihat.resize(dsp_n);
             }
 
             sic::SicUnifiedResult sic_res;
             sic_res.out = sic_out.data();
-            sic_res.i_hat = sic_ihat.data();
+            // No i_hat consumer in this pipeline: leaving it null skips both the
+            // reconstruction copy and the outside-support zero fill.
+            sic_res.i_hat = nullptr;
 
             sic::SicUnifiedConfig slot_sic_cfg = effective_sic_cfg;
             if (slot->use_dynamic_slot && target_seed_work >= 0 &&
@@ -3146,6 +3159,10 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
                 res.sic_committed = sic_res.committed;
                 res.actual_suppression_db = static_cast<float>(sic_res.suppression_db);
                 res.sic_status = sic_res.reason ? sic_res.reason : "";
+                // copy_input_on_bypass == false: a non-committed result means
+                // "read the original input", i.e. keep dsp_in/dsp_n untouched.
+                // Only a committed transaction may redirect to sic_out, and that
+                // path writes the whole window (ROI plus byte-identical y).
                 if (sic_res.committed) {
                     dsp_in = sic_out.data();
                 }

@@ -847,4 +847,380 @@ BOOST_AUTO_TEST_CASE(test_discrete_autocorr_prefilter_and_target_discrimination)
     }
 }
 
+// ---------------------------------------------------------------------------
+// copy_input_on_bypass / null i_hat / template identity cache
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Deterministic sentinel: "untouched" must be distinguishable from "copied y"
+// and from any real reconstruction output.
+cf bypass_sentinel(size_t i)
+{
+    const float k = static_cast<float>(i) * 1e-3f;
+    return cf(1000.0f + k, -1000.0f - k);
+}
+
+void fill_sentinel(std::vector<cf>& v)
+{
+    for (size_t i = 0; i < v.size(); ++i) {
+        v[i] = bypass_sentinel(i);
+    }
+}
+
+bool all_sentinel(const std::vector<cf>& v)
+{
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (v[i] != bypass_sentinel(i)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+struct BypassProbe {
+    bool ok = false;          ///< sic_process_unified() return value
+    bool committed = false;
+    const char* reason = nullptr;
+    bool out_equals_y = false; ///< out was overwritten with the input
+    bool out_untouched = false;///< out still holds the sentinel
+};
+
+// Runs one window with an explicit copy_input_on_bypass setting and reports the
+// observable out-buffer contract.
+BypassProbe probe_bypass(const std::vector<cf>& y,
+                         size_t n,
+                         const SicUnifiedTemplates& t,
+                         const SicUnifiedConfig& cfg,
+                         SicUnifiedScratch& scratch,
+                         bool copy_input_on_bypass)
+{
+    std::vector<cf> out(n);
+    fill_sentinel(out);
+
+    SicUnifiedConfig c = cfg;
+    c.copy_input_on_bypass = copy_input_on_bypass;
+
+    SicUnifiedResult res;
+    res.out = out.data();
+    res.i_hat = nullptr;
+
+    BypassProbe p;
+    p.ok = sic_process_unified(y.data(), n, t, c, scratch, res);
+    p.committed = res.committed;
+    p.reason = res.reason;
+    p.out_equals_y = std::equal(out.begin(), out.end(), y.begin());
+    p.out_untouched = all_sentinel(out);
+    return p;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(test_copy_input_on_bypass_flag_contract)
+{
+    TestPacket p(10, 32);
+    SicUnifiedTemplates t = make_templates(p);
+
+    const size_t q = 300;
+    const size_t n = p.wave.size() + 1000;
+    std::vector<cf> y(n, cf(0.f, 0.f));
+    std::copy(p.wave.begin(), p.wave.end(), y.begin() + q);
+
+    SicUnifiedConfig cfg;
+    cfg.policy = SicPolicy::PreambleOnly;
+    cfg.backend = SicEstimatorBackend::Ipatov;
+    cfg.sparse_pulse_reconstruct = true;
+    cfg.comm_code = 10;
+    cfg.samples_per_symbol = kSps;
+    cfg.sample_rate = kFs;
+    cfg.roi_lo = q - 32;
+    cfg.roi_hi = q + 32;
+    cfg.sub_roi_lo = q;
+    cfg.sub_roi_hi = q + 64 * kSps;
+    cfg.max_window_samples = n;
+    cfg.max_packet_samples = n;
+
+    // The historical default must stay true: every pre-existing caller and test
+    // depends on out == y on every non-committed exit.
+    BOOST_CHECK(cfg.copy_input_on_bypass);
+
+    SicUnifiedScratch scratch;
+    BOOST_REQUIRE(prepare_sic_unified(cfg, t, scratch));
+
+    // ---- committed path: both settings must produce bit-identical out ------
+    std::vector<cf> out_copy(n);
+    std::vector<cf> out_skip(n);
+    fill_sentinel(out_skip);
+
+    SicUnifiedResult res_copy;
+    res_copy.out = out_copy.data();
+    BOOST_REQUIRE(sic_process_unified(y.data(), n, t, cfg, scratch, res_copy));
+    BOOST_CHECK(res_copy.committed);
+
+    SicUnifiedConfig cfg_skip = cfg;
+    cfg_skip.copy_input_on_bypass = false;
+    // The flag is deliberately not part of the config identity, so the very
+    // same scratch stays valid: no re-prepare, no config_or_template_mismatch.
+    BOOST_CHECK(scratch.cache_matches(cfg_skip, t));
+
+    SicUnifiedResult res_skip;
+    res_skip.out = out_skip.data();
+    BOOST_REQUIRE(sic_process_unified(y.data(), n, t, cfg_skip, scratch, res_skip));
+    BOOST_CHECK(res_skip.committed);
+
+    BOOST_CHECK_EQUAL(std::string(res_copy.reason), std::string(res_skip.reason));
+    BOOST_CHECK_EQUAL(res_copy.sub_lo, res_skip.sub_lo);
+    BOOST_CHECK_EQUAL(res_copy.sub_hi, res_skip.sub_hi);
+    BOOST_CHECK_EQUAL(res_copy.suppression_db, res_skip.suppression_db);
+    for (size_t i = 0; i < n; ++i) {
+        BOOST_CHECK_EQUAL(out_copy[i], out_skip[i]);
+    }
+    // A committed transaction writes the WHOLE window, so nothing of the
+    // sentinel survives and a caller may safely read out.
+    BOOST_CHECK(!all_sentinel(out_skip));
+    BOOST_REQUIRE(res_skip.sub_hi > res_skip.sub_lo);
+    for (size_t i = 0; i < n; ++i) {
+        const int64_t j = static_cast<int64_t>(i);
+        if (j < res_skip.sub_lo || j >= res_skip.sub_hi) {
+            BOOST_CHECK_EQUAL(out_skip[i], y[i]);
+        }
+    }
+
+    // ---- every L0 bypass exit: copy=true writes y, copy=false writes nothing
+    // Exit 2: estimation failed (all-zero window -> no autocorr preamble).
+    // Exit 4: strict FullPacket abort (preamble-only window -> FCS cannot pass).
+    // Exit 1: config_or_template_mismatch (returns false, not true).
+    struct ExitCase {
+        const char* label;
+        std::vector<cf> window;
+        SicUnifiedConfig cfg;
+        bool expect_ok;
+        const char* expect_reason;
+        SicUnifiedScratch* scratch;
+        // True for the top-level L0 bypass exits, which must leave `out`
+        // byte-untouched when copy_input_on_bypass == false.  False for the
+        // reconstruction-level fail-closed, where the frozen discrete-CIR apply
+        // API (uwb_discrete_cir_sic.h) still performs its own y -> out copy;
+        // that is harmless because committed stays false.
+        bool expect_out_untouched;
+    };
+
+    std::vector<cf> y_clean(n, cf(0.f, 0.f));
+
+    // Preamble-only window: SYNC + SFD present, no PHR/payload.
+    const size_t n_prefix = 64 * kSps + 8 * kSps;
+    BOOST_REQUIRE_GE(p.wave.size(), n_prefix);
+    std::vector<cf> y_prefix(n, cf(0.f, 0.f));
+    for (size_t i = 0; i < n_prefix; ++i) {
+        y_prefix[q + i] = p.wave[i];
+    }
+    // SYNC-only window + a mismatched SFD profile: estimation succeeds (it only
+    // reads SYNC) while the PreambleOnly SFD search cannot find its pattern.
+    std::vector<cf> y_sync_only(n, cf(0.f, 0.f));
+    for (size_t i = 0; i < 64 * kSps; ++i) {
+        y_sync_only[q + i] = p.wave[i];
+    }
+    SicUnifiedConfig cfg_sfd = cfg;
+    cfg_sfd.sfd_mode = "ieee";
+    // sfd_mode is part of the config identity, so the mismatched profile needs
+    // its own prepared scratch (the estimator itself only reads SYNC).
+    SicUnifiedScratch scratch_sfd;
+    BOOST_REQUIRE(prepare_sic_unified(cfg_sfd, t, scratch_sfd));
+
+    SicUnifiedConfig cfg_full = cfg;
+    cfg_full.policy = SicPolicy::FullPacket;
+
+    SicUnifiedConfig cfg_mismatch = cfg;
+    cfg_mismatch.comm_code = 9;
+
+    // Reconstruction-level fail-closed: a valid channel but a sub-ROI that
+    // cannot overlap the reconstructed support ("no_overlap").  This exercises
+    // the separate fail_closed() lambda inside reconstruct_and_subtract_unified.
+    SicUnifiedConfig cfg_nooverlap = cfg;
+    cfg_nooverlap.sub_roi_lo = 1;
+    cfg_nooverlap.sub_roi_hi = 2;
+
+    std::vector<ExitCase> exits;
+    exits.push_back({ "estimation_failed", y_clean, cfg, true, nullptr, &scratch, true });
+    exits.push_back({ "sfd_detect_failed", y_sync_only, cfg_sfd, true, nullptr, &scratch_sfd, true });
+    exits.push_back({ "fullpacket_strict_abort", y_prefix, cfg_full, true, nullptr, &scratch, true });
+    exits.push_back({ "reconstruct_fail_closed_no_overlap", y, cfg_nooverlap, true,
+                      "no_overlap", &scratch, false });
+    exits.push_back({ "config_or_template_mismatch", y, cfg_mismatch, false,
+                      "config_or_template_mismatch", &scratch, true });
+
+    for (const ExitCase& e : exits) {
+        const BypassProbe with_copy =
+            probe_bypass(e.window, n, t, e.cfg, *e.scratch, true);
+        const BypassProbe no_copy =
+            probe_bypass(e.window, n, t, e.cfg, *e.scratch, false);
+
+        BOOST_TEST_MESSAGE("bypass exit '" << e.label << "': reason="
+                           << (with_copy.reason ? with_copy.reason : "null"));
+        BOOST_CHECK_EQUAL(with_copy.ok, e.expect_ok);
+        BOOST_CHECK_EQUAL(no_copy.ok, e.expect_ok);
+        BOOST_CHECK(!with_copy.committed);
+        BOOST_CHECK(!no_copy.committed);
+        BOOST_CHECK_EQUAL(static_cast<uint8_t>(with_copy.committed ? 1 : 0),
+                          static_cast<uint8_t>(no_copy.committed ? 1 : 0));
+        BOOST_REQUIRE(with_copy.reason != nullptr);
+        BOOST_REQUIRE(no_copy.reason != nullptr);
+        BOOST_CHECK_EQUAL(std::string(with_copy.reason), std::string(no_copy.reason));
+        if (e.expect_reason) {
+            BOOST_CHECK_EQUAL(std::string(with_copy.reason), std::string(e.expect_reason));
+        }
+        // Default flag: out is a complete copy of the input.
+        BOOST_CHECK_MESSAGE(with_copy.out_equals_y,
+                            e.label << ": copy=true must write y into out");
+        // Optimised flag: committed==false is the contract.  The top-level L0
+        // exits additionally leave out byte-untouched.
+        if (e.expect_out_untouched) {
+            BOOST_CHECK_MESSAGE(no_copy.out_untouched,
+                                e.label << ": copy=false must leave out untouched");
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_null_ihat_is_safe_on_bypass_and_committed_paths)
+{
+    TestPacket p(10, 32);
+    SicUnifiedTemplates t = make_templates(p);
+
+    const size_t q = 300;
+    const size_t n = p.wave.size() + 1000;
+    std::vector<cf> y(n, cf(0.f, 0.f));
+    std::copy(p.wave.begin(), p.wave.end(), y.begin() + q);
+
+    SicUnifiedConfig cfg;
+    cfg.policy = SicPolicy::PreambleOnly;
+    cfg.backend = SicEstimatorBackend::Ipatov;
+    cfg.sparse_pulse_reconstruct = true;
+    cfg.comm_code = 10;
+    cfg.samples_per_symbol = kSps;
+    cfg.sample_rate = kFs;
+    cfg.roi_lo = q - 32;
+    cfg.roi_hi = q + 32;
+    cfg.sub_roi_lo = q;
+    cfg.sub_roi_hi = q + 64 * kSps;
+    cfg.max_window_samples = n;
+    cfg.max_packet_samples = n;
+
+    SicUnifiedScratch scratch;
+    BOOST_REQUIRE(prepare_sic_unified(cfg, t, scratch));
+
+    // Reference run with a real i_hat buffer (historical pipeline behaviour).
+    std::vector<cf> out_ref(n);
+    std::vector<cf> ihat_ref(n);
+    SicUnifiedResult ref;
+    ref.out = out_ref.data();
+    ref.i_hat = ihat_ref.data();
+    BOOST_REQUIRE(sic_process_unified(y.data(), n, t, cfg, scratch, ref));
+    BOOST_REQUIRE(ref.committed);
+
+    // Committed path with i_hat == nullptr and the bypass copy disabled: the
+    // reconstruction must use internal scratch and still write the whole
+    // window bit-identically.
+    std::vector<cf> out_null(n);
+    fill_sentinel(out_null);
+    SicUnifiedConfig cfg_skip = cfg;
+    cfg_skip.copy_input_on_bypass = false;
+    SicUnifiedResult null_res;
+    null_res.out = out_null.data();
+    null_res.i_hat = nullptr;
+    BOOST_REQUIRE(sic_process_unified(y.data(), n, t, cfg_skip, scratch, null_res));
+    BOOST_CHECK(null_res.committed);
+    BOOST_CHECK_EQUAL(std::string(null_res.reason), std::string(ref.reason));
+    BOOST_CHECK_EQUAL(null_res.suppression_db, ref.suppression_db);
+    BOOST_CHECK(!all_sentinel(out_null));
+    for (size_t i = 0; i < n; ++i) {
+        BOOST_CHECK_EQUAL(out_null[i], out_ref[i]);
+    }
+
+    // Bypass path with i_hat == nullptr: both flag settings must stay safe.
+    std::vector<cf> y_clean(n, cf(0.f, 0.f));
+    const BypassProbe with_copy = probe_bypass(y_clean, n, t, cfg, scratch, true);
+    BOOST_CHECK(with_copy.ok);
+    BOOST_CHECK(!with_copy.committed);
+    BOOST_CHECK(with_copy.out_equals_y);
+
+    const BypassProbe no_copy = probe_bypass(y_clean, n, t, cfg, scratch, false);
+    BOOST_CHECK(no_copy.ok);
+    BOOST_CHECK(!no_copy.committed);
+    BOOST_CHECK(no_copy.out_untouched);
+}
+
+BOOST_AUTO_TEST_CASE(test_template_identity_cache_and_invalidation)
+{
+    TestPacket p(10, 32);
+    SicUnifiedTemplates t = make_templates(p);
+
+    SicUnifiedConfig cfg;
+    cfg.policy = SicPolicy::PreambleOnly;
+    cfg.backend = SicEstimatorBackend::Ipatov;
+    cfg.comm_code = 10;
+    cfg.samples_per_symbol = kSps;
+    cfg.sample_rate = kFs;
+    cfg.max_window_samples = 4096;
+    cfg.max_packet_samples = 4096;
+
+    SicUnifiedScratch scratch;
+    BOOST_REQUIRE(prepare_sic_unified(cfg, t, scratch));
+    BOOST_CHECK(scratch.template_identity.valid);
+    BOOST_CHECK(scratch.cache_matches(cfg, t));
+    BOOST_CHECK(scratch.cache_matches(cfg, t, true)); // force path agrees
+
+    // Steady state: the digest is reused, not recomputed.
+    const uint64_t digest = scratch.template_identity.digest;
+    BOOST_CHECK_EQUAL(digest, scratch.template_hash);
+    BOOST_CHECK(scratch.cache_matches(cfg, t));
+    BOOST_CHECK_EQUAL(scratch.template_identity.digest, digest);
+
+    // A different SYNC buffer holding identical content is accepted.
+    std::vector<cf> sync_copy(p.sync.begin(), p.sync.end());
+    SicUnifiedTemplates t_copy = t;
+    t_copy.sync = sync_copy.data();
+    BOOST_CHECK(scratch.cache_matches(cfg, t_copy));
+    BOOST_CHECK_EQUAL(scratch.template_identity.digest, digest);
+
+    // A different SYNC length is rejected.
+    SicUnifiedTemplates t_len = t_copy;
+    t_len.sync_len = sync_copy.size() - 8;
+    BOOST_CHECK(!scratch.cache_matches(cfg, t_len));
+
+    // DOCUMENTED ALIASING HOLE: same pointer + same length + mutated content is
+    // invisible to the cached tuple.  This is the residual risk the header
+    // documents; the escape hatch below is what a mutating caller must use.
+    std::vector<cf> sync_mut(p.sync.begin(), p.sync.end());
+    SicUnifiedTemplates t_mut = t;
+    t_mut.sync = sync_mut.data();
+    BOOST_CHECK(scratch.cache_matches(cfg, t_mut)); // seeds the tuple
+    sync_mut[17] *= cf(0.5f, -0.25f);
+    BOOST_CHECK_MESSAGE(
+        scratch.cache_matches(cfg, t_mut),
+        "cached tuple intentionally cannot see in-place content mutation");
+
+    // invalidate_template_identity() forces a recompute and detects it.
+    scratch.invalidate_template_identity();
+    BOOST_CHECK(!scratch.cache_matches(cfg, t_mut));
+
+    // force_full_hash detects it without touching the epoch.
+    sync_mut[17] = p.sync[17];
+    BOOST_CHECK(scratch.cache_matches(cfg, t_mut, true)); // re-seeds restored content
+    sync_mut[17] *= cf(0.5f, -0.25f);
+    BOOST_CHECK(!scratch.cache_matches(cfg, t_mut, true));
+
+    // The config hash is never weakened.
+    SicUnifiedConfig cfg9 = cfg;
+    cfg9.comm_code = 9;
+    BOOST_CHECK(!scratch.cache_matches(cfg9, t));
+    BOOST_CHECK(!scratch.cache_matches(cfg9, t, true));
+
+    // invalidate_cache() bumps the epoch and forces a full refresh.
+    const uint64_t epoch_before = scratch.template_epoch;
+    scratch.invalidate_cache();
+    BOOST_CHECK_GT(scratch.template_epoch, epoch_before);
+    BOOST_CHECK(!scratch.template_identity.valid);
+    BOOST_CHECK(!scratch.cache_matches(cfg, t));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

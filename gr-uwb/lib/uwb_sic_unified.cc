@@ -375,16 +375,50 @@ void SicUnifiedScratch::reserve(size_t max_window_samples, size_t max_packet_sam
     work_wire_psdu.resize(radar_meta::kMaxPsduBytes);
 }
 
-bool SicUnifiedScratch::cache_matches(const SicUnifiedConfig& cfg, const SicUnifiedTemplates& tmpl) const
+bool SicUnifiedScratch::cache_matches(const SicUnifiedConfig& cfg,
+                                      const SicUnifiedTemplates& tmpl,
+                                      bool force_full_hash) const
 {
     if (!prepared || !preamble_cache_valid) {
         return false;
     }
+    // The config identity is cheap (a few dozen 64-bit mixes) and is NEVER
+    // weakened: it covers every field that changes the cached preamble.
     const uint64_t ch = compute_unified_config_hash(cfg);
+    if (config_hash != ch || preamble_cache_config_hash != ch) {
+        return false;
+    }
+
+    // Template identity.  The full content digest (~8 KB of SYNC samples per
+    // window) is only recomputed when the (pointer, length) tuple changes or
+    // the caller bumped template_epoch.  Residual aliasing risk: identical
+    // pointer + identical length + mutated content is NOT detectable here; such
+    // a caller must call invalidate_template_identity().
+    const bool tuple_same =
+        template_identity.valid && template_identity.epoch == template_epoch &&
+        template_identity.sync == static_cast<const void*>(tmpl.sync) &&
+        template_identity.sync_len == tmpl.sync_len &&
+        template_identity.preamble == static_cast<const void*>(tmpl.preamble) &&
+        template_identity.preamble_len == tmpl.preamble_len &&
+        template_identity.impulse_sync == static_cast<const void*>(tmpl.impulse_sync) &&
+        template_identity.impulse_sync_len == tmpl.impulse_sync_len;
+
+    if (!force_full_hash && tuple_same) {
+        return template_hash == template_identity.digest &&
+               preamble_cache_template_hash == template_identity.digest;
+    }
+
     const uint64_t th = compute_unified_template_hash(tmpl);
-    return (config_hash == ch && template_hash == th &&
-            preamble_cache_config_hash == ch &&
-            preamble_cache_template_hash == th);
+    template_identity.valid = true;
+    template_identity.epoch = template_epoch;
+    template_identity.sync = tmpl.sync;
+    template_identity.sync_len = tmpl.sync_len;
+    template_identity.preamble = tmpl.preamble;
+    template_identity.preamble_len = tmpl.preamble_len;
+    template_identity.impulse_sync = tmpl.impulse_sync;
+    template_identity.impulse_sync_len = tmpl.impulse_sync_len;
+    template_identity.digest = th;
+    return template_hash == th && preamble_cache_template_hash == th;
 }
 
 void SicUnifiedScratch::invalidate_cache()
@@ -400,6 +434,14 @@ void SicUnifiedScratch::invalidate_cache()
     config_hash = 0;
     template_hash = 0;
     prepared = false;
+    ++template_epoch;
+    template_identity.valid = false;
+}
+
+void SicUnifiedScratch::invalidate_template_identity()
+{
+    ++template_epoch;
+    template_identity.valid = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +555,17 @@ bool prepare_sic_unified(
     scratch.template_hash = compute_unified_template_hash(templates);
     scratch.preamble_cache_config_hash = scratch.config_hash;
     scratch.preamble_cache_template_hash = scratch.template_hash;
+    // Seed the cheap template identity cache so the first window after prepare
+    // does not have to re-hash the SYNC content.
+    scratch.template_identity.valid = true;
+    scratch.template_identity.epoch = scratch.template_epoch;
+    scratch.template_identity.sync = templates.sync;
+    scratch.template_identity.sync_len = templates.sync_len;
+    scratch.template_identity.preamble = templates.preamble;
+    scratch.template_identity.preamble_len = templates.preamble_len;
+    scratch.template_identity.impulse_sync = templates.impulse_sync;
+    scratch.template_identity.impulse_sync_len = templates.impulse_sync_len;
+    scratch.template_identity.digest = scratch.template_hash;
     scratch.preamble_cache_valid = true;
     scratch.prepared = true;
     return true;
@@ -598,7 +651,9 @@ bool reconstruct_and_subtract_unified(
     SicUnifiedResult& result)
 {
     auto fail_closed = [&](const char* reason) {
-        if (out && y && n > 0 && out != y) {
+        // copy_input_on_bypass == false leaves `out` untouched: the caller reads
+        // its own input because `committed` stays false.
+        if (cfg.copy_input_on_bypass && out && y && n > 0 && out != y) {
             std::copy(y, y + n, out);
         }
         if (i_hat && i_hat != y && i_hat != out) {
@@ -905,17 +960,28 @@ bool sic_process_unified(
     result.suppression_db = 0.0;
     result.fallback_reason = nullptr;
 
-    if (!y || !result.out || n == 0 || !scratch.prepared ||
-        !scratch.cache_matches(cfg, templates)) {
-        result.reason = (!y || !result.out || n == 0 || !scratch.prepared)
-                            ? "invalid_buffers_or_scratch"
-                            : "config_or_template_mismatch";
-        if (result.out && y && n > 0 && result.out != y) {
+    // L0 Bypass / fail-closed output handling.  `result.committed` is already
+    // false here, which is what tells the caller to read its own input.
+    //
+    // cfg.copy_input_on_bypass == false (UHD SC16 pipeline worker) skips the
+    // O(n) std::copy: on a 100% clean window that copy alone is ~122 us and the
+    // i_hat zero-fill another ~116 us, both pure waste because `out` is never
+    // read unless `committed` is true.
+    auto bypass_outputs = [&]() {
+        if (cfg.copy_input_on_bypass && result.out && y && n > 0 && result.out != y) {
             std::copy(y, y + n, result.out);
         }
         if (result.i_hat) {
             std::fill(result.i_hat, result.i_hat + n, std::complex<float>(0.f, 0.f));
         }
+    };
+
+    if (!y || !result.out || n == 0 || !scratch.prepared ||
+        !scratch.cache_matches(cfg, templates)) {
+        result.reason = (!y || !result.out || n == 0 || !scratch.prepared)
+                            ? "invalid_buffers_or_scratch"
+                            : "config_or_template_mismatch";
+        bypass_outputs();
         return false;
     }
 
@@ -927,12 +993,7 @@ bool sic_process_unified(
     result.channel = channel;
 
     if (!est_ok || !channel.valid) {
-        if (result.out != y) {
-            std::copy(y, y + n, result.out);
-        }
-        if (result.i_hat) {
-            std::fill(result.i_hat, result.i_hat + n, std::complex<float>(0.f, 0.f));
-        }
+        bypass_outputs();
         result.reason = channel.reason ? channel.reason : channel.status;
         result.timings.core_total_us = us(t_core_start);
         return true;
@@ -1027,12 +1088,7 @@ bool sic_process_unified(
             }
         } else {
             // SFD detection failed on preamble-only
-            if (result.out != y) {
-                std::copy(y, y + n, result.out);
-            }
-            if (result.i_hat) {
-                std::fill(result.i_hat, result.i_hat + n, std::complex<float>(0.f, 0.f));
-            }
+            bypass_outputs();
             result.reason = "sfd_detect_failed";
             result.level = SicCancellationLevel::L0_Bypass;
             result.cancelled_fields = SicKnownFields::None;
@@ -1084,12 +1140,7 @@ bool sic_process_unified(
 
             if (cfg.policy == SicPolicy::FullPacket) {
                 // Strict full-packet: abort to L0 Bypass
-                if (result.out != y) {
-                    std::copy(y, y + n, result.out);
-                }
-                if (result.i_hat) {
-                    std::fill(result.i_hat, result.i_hat + n, std::complex<float>(0.f, 0.f));
-                }
+                bypass_outputs();
                 result.reason = fb;
                 result.level = SicCancellationLevel::L0_Bypass;
                 result.cancelled_fields = SicKnownFields::None;

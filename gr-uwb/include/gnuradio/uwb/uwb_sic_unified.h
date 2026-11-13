@@ -281,6 +281,40 @@ struct SicUnifiedConfig {
     // Kernel SIMD controls
     bool enable_b3_simd = true;
 
+    // Bypass output policy
+    //
+    // When true (the historical default, kept for every existing caller and
+    // test) every L0_Bypass / fail-closed exit copies the whole window
+    // y[0, n) into result.out, so `out` is always a complete, valid window on
+    // return regardless of `committed`.
+    //
+    // When false the O(n) copy is skipped and `out` is left untouched on those
+    // exits.  `result.committed` is still false, so the caller MUST read its
+    // own input buffer instead of `out`.  This is the contract the UHD SC16
+    // pipeline worker uses: it keeps feeding the resampled input downstream
+    // unless `committed` is true, and the per-window 122 us copy plus the
+    // 116 us i_hat zero-fill disappear from the clean-window path.
+    //
+    // Precise contract with the flag false:
+    //   * committed == true  => `out` holds the complete cleaned window.
+    //   * committed == false => `out` is UNSPECIFIED and must not be read.
+    // The five top-level L0 bypass exits (invalid_buffers_or_scratch,
+    // config_or_template_mismatch, estimation failed, PreambleOnly
+    // sfd_detect_failed, strict-FullPacket abort) additionally leave `out`
+    // byte-untouched.  A reconstruction-level fail-closed may still leave `y`
+    // in `out`: the frozen discrete-CIR apply API (uwb_discrete_cir_sic.h)
+    // performs its own fail-closed copy and is not parameterised by this flag.
+    // That is harmless because `committed` stays false.
+    //
+    // The committed path is identical under both settings: `out` is fully
+    // written (subtraction ROI plus byte-identical y outside it).
+    //
+    // NOTE: this flag is deliberately NOT part of compute_unified_config_hash()
+    // because it does not change any cached preamble/template content, so a
+    // caller may prepare scratch with the default and then run with either
+    // value without tripping the config_or_template_mismatch guard.
+    bool copy_input_on_bypass = true;
+
     // Buffer Capacities
     size_t max_window_samples = 0;        ///< Maximum supported y / out window length
     size_t max_packet_samples = 0;        ///< Maximum remodulated packet length
@@ -396,7 +430,12 @@ struct SicUnifiedResult {
 
     // Caller-owned Output Buffers
     // out: cleaned window of length n. Bit-identical to y on L0 Bypass and outside [sub_lo, sub_hi).
+    //      With cfg.copy_input_on_bypass == false the L0 Bypass copy is skipped:
+    //      `committed` is then the only signal the caller needs (false => read
+    //      your own input), and `out` must not be read.
     // i_hat: optional reconstruction buffer of length n. Zero outside support.
+    //        May be nullptr: the reconstruction then uses internal scratch and no
+    //        i_hat write (including the outside-support zero fill) happens.
     std::complex<float>* out = nullptr;
     std::complex<float>* i_hat = nullptr;
 };
@@ -453,14 +492,65 @@ struct SicUnifiedScratch {
     UWB_API void reserve(size_t max_window_samples, size_t max_packet_samples = 0);
 
     /**
-     * @brief Checks if cached preamble matches current config and templates.
+     * @brief Cheap template identity cache backing cache_matches().
+     *
+     * The full template digest (FNV over the SYNC / impulse-SYNC content, i.e.
+     * ~8 KB per SYNC) is only recomputed when the (pointer, length) tuple
+     * changes or when the caller bumped template_epoch.  Steady-state windows
+     * therefore cost one short config hash and a tuple compare instead of an
+     * 8 KB hash.
+     *
+     * RESIDUAL ALIASING RISK (documented, not detectable): the same pointer
+     * with the same length and mutated CONTENT is invisible to this cache.  A
+     * caller that mutates template content in place MUST call
+     * invalidate_template_identity() (or invalidate_cache() followed by
+     * prepare_sic_unified()) before the next window.  cache_matches(cfg, tmpl,
+     * true) always recomputes the full digest and is what QA uses.
      */
-    UWB_API bool cache_matches(const SicUnifiedConfig& cfg, const SicUnifiedTemplates& tmpl) const;
+    struct TemplateIdentity {
+        const void* sync = nullptr;
+        size_t sync_len = 0;
+        const void* preamble = nullptr;
+        size_t preamble_len = 0;
+        const void* impulse_sync = nullptr;
+        size_t impulse_sync_len = 0;
+        uint64_t epoch = 0;
+        uint64_t digest = 0;
+        bool valid = false;
+    };
+
+    /// Bumped by invalidate_cache() and invalidate_template_identity().
+    uint64_t template_epoch = 0;
+    /// Mutable so the const cache_matches() can memoise the digest.
+    mutable TemplateIdentity template_identity;
+
+    /**
+     * @brief Checks if cached preamble matches current config and templates.
+     *
+     * The config hash is always recomputed in full (never weakened).  The
+     * template digest is reused while the (pointer, length) tuple and
+     * template_epoch are unchanged.
+     *
+     * @param force_full_hash Recompute the complete template content digest
+     *        even if the cached tuple matches.  QA / in-place-mutation callers.
+     */
+    UWB_API bool cache_matches(const SicUnifiedConfig& cfg,
+                               const SicUnifiedTemplates& tmpl,
+                               bool force_full_hash = false) const;
 
     /**
      * @brief Invalidates the preamble and pulse event cache.
      */
     UWB_API void invalidate_cache();
+
+    /**
+     * @brief Forces the next cache_matches() to recompute the template digest.
+     *
+     * Use this after mutating template CONTENT in place (same pointer and
+     * length).  It does not clear the prepared preamble cache, so it is much
+     * cheaper than invalidate_cache() + prepare_sic_unified().
+     */
+    UWB_API void invalidate_template_identity();
 };
 
 // ---------------------------------------------------------------------------
@@ -550,6 +640,9 @@ UWB_API bool estimate_channel_unified(
  * When level == L2_FullPacket, s_known is the full remodulated packet waveform.
  *
  * Fail-closed guarantee: any failure copies y to out bit-identically and zeroes i_hat.
+ * Exception: when cfg.copy_input_on_bypass == false the copy is skipped and `out` is
+ * left untouched; result.committed is still false, so the caller reads its own input.
+ * i_hat may be nullptr (no write, no outside-support zero fill).
  *
  * @param y Input IQ window.
  * @param n Total window sample count.
