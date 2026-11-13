@@ -14,6 +14,21 @@
  * per-block scratch prepared at make(); the hot path performs no scratch
  * allocation.  A single worker keeps pulse ordering.
  *
+ * SCRATCH OWNERSHIP (R02).  `d_scratch_` belongs exclusively to the worker
+ * thread.  The message handler never reserves, resizes or prepares it: it only
+ * validates, assembles the Job and enqueues.  Because this block has no public
+ * maximum window length, the worker grows its own scratch at the START of a
+ * job (before any DSP), and the growth is counted:
+ *
+ *   scratch_growths()          number of capacity growth events
+ *   scratch_growth_us()        total wall time spent growing (µs)
+ *   scratch_capacity_samples() largest window the scratch was sized for
+ *
+ * They are also published on "status" (scratch_growths / scratch_growth_us /
+ * scratch_capacity_samples).  Growing inside the worker cannot race with a
+ * concurrent reallocation; holding the queue mutex for the whole DSP job is
+ * NOT the solution and is not done.
+ *
  * Input (port "rx"): cons(meta, c32vector) at the 998.4 MS/s work rate.
  * Required metadata: pulse_id, sample_rate (work rate), pre_guard_samples,
  * sync_repetitions / sfd_mode / code_index (must match the prepared profile),
@@ -106,6 +121,14 @@ public:
      * \param repetition_average_skip  leading SYNC repetitions left out of
      *                        that average (default 10).  A skip that covers
      *                        the whole preamble averages every repetition.
+     * \param target_cfo_known  the caller already knows the target CFO (a
+     *                        calibrated link).  Only consulted when
+     *                        use_predicted_timing is true: it makes the timed
+     *                        path derotate with target_cfo_hz instead of
+     *                        running the shared front-end to estimate it.
+     * \param target_cfo_hz   the known target CFO (Hz at 998.4 MS/s).  A known
+     *                        ZERO is an explicit declaration and is compensated
+     *                        (an identity rotation), never "assumed".
      */
     static sptr make(const std::string& template_path,
                      size_t sync_repetitions = 64,
@@ -125,7 +148,9 @@ public:
                      bool emit_individual_repetitions = false,
                      bool batch_individual_repetitions = false,
                      bool emit_repetition_average = false,
-                     size_t repetition_average_skip = 10);
+                     size_t repetition_average_skip = 10,
+                     bool target_cfo_known = false,
+                     double target_cfo_hz = 0.0);
 
     ~UwbRadarCirEstimator() override;
 
@@ -158,6 +183,8 @@ public:
     {
         return d_repetition_average_skip_;
     }
+    bool target_cfo_known() const { return d_cfg_.target_cfo_known; }
+    double target_cfo_hz() const { return d_cfg_.target_cfo_hz; }
 
     uint64_t pdus_received() const;
     uint64_t pdus_enqueued() const;
@@ -170,6 +197,12 @@ public:
     uint64_t worker_exceptions() const;
     size_t queue_depth() const;
     size_t queue_high_watermark() const;
+
+    // Worker-owned scratch growth accounting (R02).  The message handler never
+    // touches the scratch, so these counters can only move inside the worker.
+    uint64_t scratch_growths() const;         // capacity growth events
+    uint64_t scratch_growth_us() const;       // total time spent growing
+    size_t scratch_capacity_samples() const;  // largest window reserved for
 
     // Whole worker service time (core + CIR records + publish) in µs.
     uint64_t service_mean_us() const;
@@ -204,7 +237,9 @@ public:
                          bool emit_individual_repetitions = false,
                          bool batch_individual_repetitions = false,
                          bool emit_repetition_average = false,
-                         size_t repetition_average_skip = 10);
+                         size_t repetition_average_skip = 10,
+                         bool target_cfo_known = false,
+                         double target_cfo_hz = 0.0);
 
 private:
     struct Job {
@@ -212,6 +247,10 @@ private:
         uint64_t schedule_index = 0;
         int64_t predicted_sfd = -1;
         int64_t zero_delay_tap = -1;
+        // Absolute sample of this window's sample 0 (0 when the PDU carries no
+        // window_start_sample).  Published so a consumer can turn the
+        // window-relative phase anchor into an absolute one.
+        int64_t window_start = 0;
         double calibration_delay_work = 0.0;
         pmt::pmt_t meta = pmt::PMT_NIL;    // input meta dict (immutable)
         pmt::pmt_t samples = pmt::PMT_NIL; // c32vector (immutable shared ref)
@@ -221,6 +260,9 @@ private:
     void handle_rx(pmt::pmt_t msg);
     bool enqueue(Job&& job);
     void worker_loop();
+    // Worker-only: grow `d_scratch_` for an `n`-sample window.  Never called
+    // from the message thread.
+    void ensure_worker_scratch(size_t n);
     pmt::pmt_t make_common_frame_meta(const Job& job,
                                       const radar::RadarCirResult& r,
                                       uint64_t queue_us) const;
@@ -298,6 +340,12 @@ private:
     std::atomic<uint64_t> d_exceptions_{ 0 };
     std::atomic<size_t> d_queue_depth_{ 0 };
     std::atomic<size_t> d_queue_high_watermark_{ 0 };
+
+    // Worker-owned scratch growth accounting (R02).  Written only by
+    // worker_loop(); the accessors are the only cross-thread readers.
+    std::atomic<uint64_t> d_scratch_growths_{ 0 };
+    std::atomic<uint64_t> d_scratch_growth_us_{ 0 };
+    std::atomic<size_t> d_scratch_capacity_samples_{ 0 };
 
     // Service-time histogram: 64 bins × 64 µs + overflow (own mutex).
     mutable std::mutex d_hist_mutex_;

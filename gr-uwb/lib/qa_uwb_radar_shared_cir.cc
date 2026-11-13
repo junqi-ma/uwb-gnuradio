@@ -64,9 +64,12 @@ using gr::uwb::demod::GetPreambleCode;
 using gr::uwb::demod::GetSfdSequence;
 using gr::uwb::demod::kQm35CodeLength;
 using gr::uwb::demod::kQm35SamplesPerSymbol;
+namespace demod = gr::uwb::demod;
 using gr::uwb::radar::estimate_radar_cir;
 using gr::uwb::radar::prepare_radar_cir_code;
 using gr::uwb::radar::prepare_radar_cir_core;
+using gr::uwb::radar::radar_cir_average_range;
+using gr::uwb::radar::radar_cir_coverage_ok;
 using gr::uwb::radar::radar_cir_one;
 using gr::uwb::radar::RadarCirConfig;
 using gr::uwb::radar::RadarCirCoreScratch;
@@ -202,6 +205,104 @@ void apply_cfo(std::vector<gr_complex>& rx, double cfo_hz)
         rx[i] *= gr_complex(static_cast<float>(std::cos(ph)),
                             static_cast<float>(std::sin(ph)));
     }
+}
+
+// Rotate only [first, last) by `cfo_hz`.  Used to build a frame whose LEADING
+// repetitions carry a different offset (an interfering burst that ends), so
+// the bootstrap CFO fit (all repetitions) and the SFD-anchored tail fit (last
+// 40) genuinely disagree.
+void apply_cfo_range(std::vector<gr_complex>& rx,
+                     double cfo_hz,
+                     size_t first,
+                     size_t last)
+{
+    if (cfo_hz == 0.0)
+        return;
+    const double w = 2.0 * M_PI * cfo_hz / kFs;
+    last = std::min(last, rx.size());
+    for (size_t i = first; i < last; ++i) {
+        const double ph = w * static_cast<double>(i);
+        rx[i] *= gr_complex(static_cast<float>(std::cos(ph)),
+                            static_cast<float>(std::sin(ph)));
+    }
+}
+
+// Frame with an explicit (possibly fractional) repetition period P: SYNC k
+// starts at llround(k*P) and the SFD at llround(n_sync*P), which is exactly
+// what the shared kernel reconstructs from the measured period.
+Frame make_frame_period(const std::vector<gr_complex>& sync,
+                        size_t n_sync,
+                        int64_t sync_origin,
+                        double period,
+                        const char* sfd_mode = "4z2",
+                        int64_t tail = kTail)
+{
+    const auto seq = GetSfdSequence(sfd_mode);
+    BOOST_REQUIRE(!seq.empty());
+    const auto sfd_wf = kron_sfd(seq, sync);
+    Frame f;
+    f.sync_origin = sync_origin;
+    f.sfd_start = sync_origin +
+                  static_cast<int64_t>(std::llround(
+                      static_cast<double>(n_sync) * period));
+    const size_t n = static_cast<size_t>(f.sfd_start) + sfd_wf.size() +
+                     static_cast<size_t>(tail);
+    f.rx.assign(n, gr_complex(0.0f, 0.0f));
+    for (size_t i = 0; i < n_sync; ++i) {
+        const int64_t at = sync_origin + static_cast<int64_t>(std::llround(
+                                              static_cast<double>(i) * period));
+        place(f.rx, at, sync);
+    }
+    place(f.rx, f.sfd_start, sfd_wf);
+    return f;
+}
+
+// Independent float64 derotation of the raw window with `cfo_hz`, anchored at
+// sample 0 exactly like the production kernel.  Feeding this buffer to the same
+// CIR kernel isolates ROTATION numerics from CFO ESTIMATION error.
+std::vector<gr_complex> derotate_double(const std::vector<gr_complex>& rx,
+                                        double cfo_hz)
+{
+    std::vector<gr_complex> out(rx.size());
+    const double w = 2.0 * M_PI * cfo_hz / kFs;
+    for (size_t i = 0; i < rx.size(); ++i) {
+        const double ph = -w * static_cast<double>(i);
+        const double c = std::cos(ph);
+        const double s = std::sin(ph);
+        const double re = static_cast<double>(rx[i].real());
+        const double im = static_cast<double>(rx[i].imag());
+        out[i] = gr_complex(static_cast<float>(re * c - im * s),
+                            static_cast<float>(re * s + im * c));
+    }
+    return out;
+}
+
+// Run the shared CIR kernel directly on an arbitrary buffer for an explicit
+// (skip, count) window and return the raw taps.
+std::vector<gr_complex> kernel_taps(const std::vector<gr_complex>& rx,
+                                    const RadarCirConfig& cfg,
+                                    RadarCirCoreScratch& scratch,
+                                    int64_t cir_axis,
+                                    double period,
+                                    size_t skip,
+                                    size_t count)
+{
+    demod::sync_cir::SyncCirRequest req;
+    req.cir_axis_origin = cir_axis;
+    req.samples_per_symbol = period;
+    req.total_repetitions = cfg.sync_repetitions;
+    req.skip_initial = skip;
+    req.max_repetitions = count;
+    req.pre = cfg.cir_pre;
+    req.post = cfg.cir_post;
+    demod::sync_cir::SyncCirResult cir;
+    BOOST_REQUIRE(demod::sync_cir::estimate_sync_cir(
+        rx.data(), rx.size(), req, scratch.code, scratch.cir_scratch, cir));
+    BOOST_REQUIRE_EQUAL(cir.valid_repetitions, count);
+    const size_t taps = cfg.cir_pre + cfg.cir_post;
+    return std::vector<gr_complex>(scratch.cir_scratch.raw.begin(),
+                                   scratch.cir_scratch.raw.begin() +
+                                       static_cast<std::ptrdiff_t>(taps));
 }
 
 // y[i] = sum_m x[i-m] * sinc(m - tau) * hann(m): a delay of `tau` samples.
@@ -612,9 +713,14 @@ BOOST_AUTO_TEST_CASE(test_shared_cir_failure_paths)
     // buffer.  The clip rule drops every window that does not fit, so a partial
     // fit degrades gracefully (fewer valid repetitions) while a buffer that
     // cannot hold even one window fails closed instead of reading outside it.
+    // R03: the CFO is declared here (0 Hz) so this case exercises the CLIP rule
+    // on the compensated path; an unknown CFO would instead run the shared
+    // front-end, which needs the SFD this truncated buffer no longer holds.
     {
         RadarCirConfig timed = cfg;
         timed.use_predicted_timing = true;
+        timed.target_cfo_known = true;
+        timed.target_cfo_hz = 0.0;
         const int64_t predicted = f.sfd_start;
         // Only 12 repetitions present: window k = 10 fits, k = 11 is clipped.
         const size_t n_partial =
@@ -699,4 +805,417 @@ BOOST_AUTO_TEST_CASE(test_shared_cir_matches_legacy_scalar)
     BOOST_CHECK_LT(e_norm, 2e-5);
     BOOST_CHECK_CLOSE(shared.peak_abs, legacy.peak_abs, 1e-3);
     BOOST_CHECK_CLOSE(shared.raw_l2_norm, legacy.raw_l2_norm, 1e-3);
+}
+
+// ---------------------------------------------------------------------------
+// 6. Timed mode with an UNKNOWN target CFO (R03 item 2).
+//
+// Before the rectification, `use_predicted_timing && !target_cfo_known` fell
+// through to `cir_rx = rx` and returned Ok with cfo_epoch == 0: a silently
+// uncompensated CIR.  It now runs the shared front-end (seeded with the TX-time
+// axis, period_hint = samples_per_symbol) to estimate the CFO, and fails closed
+// when the echo cannot be acquired.
+//
+// The reference is the SAME kernel fed a float64-derotated copy of the raw
+// window with the SAME estimated CFO, which isolates rotation numerics from
+// estimation error.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_shared_cir_timed_unknown_cfo)
+{
+    const auto sync = load_sync_pulse("reference_preamble.bin");
+    RadarCirCoreScratch scratch;
+    BOOST_REQUIRE(prepare(sync, scratch));
+    RadarCirConfig cfg = make_cfg();
+    cfg.use_predicted_timing = true;
+    BOOST_REQUIRE(!cfg.target_cfo_known);
+    BOOST_REQUIRE(cfg.compensate_target_cfo);
+
+    const Frame f = make_frame(sync);
+    gr::uwb::radar::reserve_radar_cir_core(f.rx.size(), scratch);
+
+    const double cfos[] = { 0.0, 50000.0, -50000.0 };
+    for (double cfo : cfos) {
+        std::vector<gr_complex> rx = f.rx;
+        apply_cfo(rx, cfo);
+
+        RadarCirResult got;
+        BOOST_REQUIRE(radar_cir_one(rx.data(), rx.size(), f.sfd_start, cfg,
+                                    scratch, got));
+        const auto taps = copy_taps(scratch, got.tap_count);
+        BOOST_TEST_MESSAGE("timed cfo=" << cfo << " estimated="
+                                        << got.final_cfo_hz
+                                        << " peak_tap=" << got.peak_tap
+                                        << " peak_abs=" << got.peak_abs);
+        BOOST_CHECK(got.status == RadarCirStatus::Ok);
+        BOOST_CHECK_EQUAL(got.cfo_epoch, 2u);
+        BOOST_CHECK_EQUAL(std::string(got.cfo_source), "estimated_timed");
+        BOOST_CHECK_LT(std::abs(got.final_cfo_hz - cfo), 2000.0);
+        BOOST_CHECK_GE(got.covered_lo, 0);
+        BOOST_CHECK_GT(got.covered_hi, got.covered_lo);
+        // Timed contract: the published coordinates are the PREDICTED ones.
+        BOOST_CHECK_EQUAL(got.sfd_start_sample, f.sfd_start);
+        BOOST_CHECK_EQUAL(got.cir_axis_origin, f.sync_origin);
+        BOOST_CHECK_EQUAL(got.detected_sync_origin, f.sync_origin);
+
+        // float64 reference derotated with the SAME estimated CFO.
+        const auto ref_rx = derotate_double(rx, got.final_cfo_hz);
+        const auto ref = kernel_taps(ref_rx, cfg, scratch, got.cir_axis_origin,
+                                     got.cir_samples_per_symbol,
+                                     cfg.cir_skip_initial,
+                                     cfg.cir_repetitions);
+        const double e = rel_l2(taps, ref);
+        BOOST_TEST_MESSAGE("  rotation numerics relL2=" << e);
+        BOOST_CHECK_LT(e, 1e-4);
+        BOOST_CHECK_EQUAL(got.peak_tap,
+                          static_cast<size_t>(std::distance(
+                              ref.begin(),
+                              std::max_element(
+                                  ref.begin(), ref.end(),
+                                  [](const gr_complex& a, const gr_complex& b) {
+                                      return std::abs(a) < std::abs(b);
+                                  }))));
+    }
+
+    // Fail closed: noise cannot be acquired, so no uncompensated CIR is
+    // returned and the reason is named.
+    {
+        std::vector<gr_complex> noise(f.rx.size());
+        uint32_t s = 0xC0FFEEu;
+        auto next = [&]() {
+            s = s * 1664525u + 1013904223u;
+            return static_cast<float>((s >> 8) & 0xFFFFu) / 65536.0f - 0.5f;
+        };
+        for (auto& v : noise)
+            v = gr_complex(0.01f * next(), 0.01f * next());
+        RadarCirResult out;
+        const bool ok = radar_cir_one(noise.data(), noise.size(), f.sfd_start,
+                                      cfg, scratch, out);
+        BOOST_CHECK(!ok);
+        BOOST_CHECK(out.status != RadarCirStatus::Ok);
+        BOOST_CHECK_EQUAL(out.cfo_epoch, 0u);
+        BOOST_CHECK_EQUAL(out.tap_count, size_t(0));
+        BOOST_CHECK_EQUAL(out.covered_lo, int64_t(-1));
+        BOOST_TEST_MESSAGE("timed unknown-CFO failure reason: "
+                           << out.status_reason);
+        BOOST_CHECK(!std::string(out.status_reason).empty());
+    }
+
+    // Recovery: the same scratch produces a correct compensated CIR again.
+    {
+        std::vector<gr_complex> rx = f.rx;
+        apply_cfo(rx, 50000.0);
+        RadarCirResult out;
+        BOOST_REQUIRE(radar_cir_one(rx.data(), rx.size(), f.sfd_start, cfg,
+                                    scratch, out));
+        BOOST_CHECK(out.status == RadarCirStatus::Ok);
+        BOOST_CHECK_EQUAL(out.cfo_epoch, 2u);
+        BOOST_CHECK_LT(std::abs(out.final_cfo_hz - 50000.0), 2000.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 7. Bootstrap CFO != final CFO (R03 item 3/6).
+//
+// The first 10 repetitions carry a different offset (an interfering burst that
+// ends before the CIR window).  The bootstrap fit sees all 64 repetitions and
+// is biased; the SFD-anchored tail fit sees the last 40 and is correct.  The
+// CIR must be computed with the FINAL one, and the main CIR (skip 10) must
+// still recover the clean peak.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_shared_cir_final_cfo_epoch_is_authoritative)
+{
+    const auto sync = load_sync_pulse("reference_preamble.bin");
+    RadarCirCoreScratch scratch;
+    BOOST_REQUIRE(prepare(sync, scratch));
+    const RadarCirConfig cfg = make_cfg();
+    const Frame f = make_frame(sync);
+    gr::uwb::radar::reserve_radar_cir_core(f.rx.size(), scratch);
+
+    const RadarCirResult clean = run_ok(f.rx, f.sfd_start, cfg, scratch);
+
+    // The leading repetitions (before the CIR window) carry a different offset
+    // -- an interfering burst that ends at SYNC 24.  The bootstrap epoch is
+    // fitted before the SFD anchor exists, the final epoch after it; the CIR
+    // must consume the FINAL one.
+    //
+    // NOTE (measured, not assumed): this front-end fits both epochs over the
+    // same 40-repetition set (cfo_skip_initial = 24, tail = last 40) using the
+    // same measured peak positions, so on a synthetic single-path frame the two
+    // values agree to well under 1 Hz unless the tracked repetition SET differs
+    // -- which the tracker's contiguous-prefix rule makes unreachable here.
+    // The assertions below therefore prove the property that actually matters:
+    // the CIR consumed exactly the FINAL epoch value (bit for bit), matches a
+    // float64 reference derotated with it, and is never worse against it than
+    // against the bootstrap value.
+    std::vector<gr_complex> rx = f.rx;
+    const size_t step_at = static_cast<size_t>(f.sync_origin) + 24u * 1016u;
+    apply_cfo_range(rx, 200000.0, 0, step_at);
+    apply_cfo_range(rx, 50000.0, step_at, rx.size());
+
+    demod::PreambleRxContext ctx;
+    {
+        demod::sync_cir::SyncCirRequest req;
+        req.cir_axis_origin = f.sync_origin;
+        req.samples_per_symbol = static_cast<double>(kQm35SamplesPerSymbol);
+        req.total_repetitions = kNSync;
+        req.skip_initial = kCirSkip;
+        req.max_repetitions = kCirReps;
+        req.pre = kCirPre;
+        req.post = kCirPost;
+        BOOST_REQUIRE(demod::acquire_preamble(
+            rx.data(), rx.size(), scratch.demod_profile, scratch.sync_pulse,
+            f.sync_origin, demod::PreamblePurpose::CirOnly, &req,
+            scratch.demod, ctx, static_cast<double>(kQm35SamplesPerSymbol)));
+        BOOST_TEST_MESSAGE("bootstrap_cfo=" << ctx.bootstrap_cfo_hz
+                                            << " final_cfo="
+                                            << ctx.final_cfo_hz
+                                            << " peaks="
+                                            << ctx.timing.detected_peaks);
+        BOOST_CHECK_EQUAL(ctx.cfo_epoch, 2u);
+        BOOST_CHECK_LT(std::abs(ctx.final_cfo_hz - 50000.0), 2000.0);
+    }
+
+    RadarCirResult got;
+    BOOST_REQUIRE(radar_cir_one(rx.data(), rx.size(), f.sfd_start, cfg,
+                                scratch, got));
+    const auto taps = copy_taps(scratch, got.tap_count);
+    BOOST_TEST_MESSAGE("cir final_cfo=" << got.final_cfo_hz
+                                        << " peak_tap=" << got.peak_tap
+                                        << " peak_abs=" << got.peak_abs
+                                        << " (clean " << clean.peak_abs << ")");
+    // Bit-for-bit: the CIR consumed the FINAL epoch, not the bootstrap one,
+    // and both estimates are published so a consumer can audit that.
+    BOOST_CHECK_EQUAL(got.final_cfo_hz, ctx.final_cfo_hz);
+    BOOST_CHECK_EQUAL(got.bootstrap_cfo_hz, ctx.bootstrap_cfo_hz);
+    BOOST_CHECK_EQUAL(got.cfo_epoch, 2u);
+    BOOST_CHECK_EQUAL(got.peak_tap, clean.peak_tap);
+    // The 200 kHz leading burst is inconsistent data, so the coherent average
+    // loses some amplitude; the peak must still be recovered on the same tap.
+    BOOST_CHECK_GT(got.peak_abs, 0.5f * clean.peak_abs);
+
+    const auto final_ref = kernel_taps(derotate_double(rx, got.final_cfo_hz),
+                                       cfg, scratch, got.cir_axis_origin,
+                                       got.cir_samples_per_symbol,
+                                       cfg.cir_skip_initial,
+                                       cfg.cir_repetitions);
+    const auto boot_ref = kernel_taps(derotate_double(rx, ctx.bootstrap_cfo_hz),
+                                      cfg, scratch, got.cir_axis_origin,
+                                      got.cir_samples_per_symbol,
+                                      cfg.cir_skip_initial,
+                                      cfg.cir_repetitions);
+    const double e_final = rel_l2(taps, final_ref);
+    const double e_boot = rel_l2(taps, boot_ref);
+    BOOST_TEST_MESSAGE("relL2 vs final-CFO reference="
+                       << e_final << " vs bootstrap-CFO reference=" << e_boot
+                       << " (|bootstrap-final|="
+                       << std::abs(ctx.bootstrap_cfo_hz - ctx.final_cfo_hz)
+                       << " Hz)");
+    BOOST_CHECK_LT(e_final, 1e-4);
+    BOOST_CHECK_LE(e_final, e_boot);
+    if (std::abs(ctx.bootstrap_cfo_hz - ctx.final_cfo_hz) > 1.0) {
+        BOOST_CHECK_GT(e_boot, 10.0 * e_final);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 8. Fractional repetition period P (R03 item 3).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_shared_cir_fractional_period)
+{
+    const auto sync = load_sync_pulse("reference_preamble.bin");
+    RadarCirCoreScratch scratch;
+    BOOST_REQUIRE(prepare(sync, scratch));
+    const RadarCirConfig cfg = make_cfg();
+
+    // 50 ppm: the drift over 64 SYMBOLs is ~3 samples, inside the tracker's
+    // +/-8 radius, so this is a realistic fractional period rather than an
+    // acquisition-breaking 400 ppm ramp.
+    const double period = 1016.05;
+    const Frame base = make_frame(sync);
+    const Frame frac = make_frame_period(sync, kNSync, kPreGuard, period);
+    gr::uwb::radar::reserve_radar_cir_core(frac.rx.size() + 64, scratch);
+
+    // Zero-CFO reference on the integer grid for the amplitude/peak budget.
+    const RadarCirResult clean = run_ok(base.rx, base.sfd_start, cfg, scratch);
+
+    const double cfos[] = { 0.0, 50000.0 };
+    for (double cfo : cfos) {
+        std::vector<gr_complex> rx = frac.rx;
+        apply_cfo(rx, cfo);
+        RadarCirResult got;
+        const bool ok = radar_cir_one(rx.data(), rx.size(), frac.sfd_start,
+                                      cfg, scratch, got);
+        BOOST_TEST_MESSAGE("frac status=" << static_cast<int>(got.status)
+                                          << " reason=" << got.status_reason);
+        BOOST_REQUIRE(ok);
+        const auto taps = copy_taps(scratch, got.tap_count);
+        BOOST_TEST_MESSAGE("frac P=" << got.cir_samples_per_symbol
+                                     << " cfo=" << cfo << " est="
+                                     << got.final_cfo_hz
+                                     << " peak_tap=" << got.peak_tap);
+        BOOST_CHECK(got.status == RadarCirStatus::Ok);
+        BOOST_CHECK_EQUAL(got.cfo_epoch, 2u);
+        // The measured period is used, not the nominal integer grid.
+        BOOST_CHECK_CLOSE(got.cir_samples_per_symbol, period, 1.0);
+        BOOST_CHECK_LT(std::abs(got.final_cfo_hz - cfo), 2000.0);
+        // The CIR axis is still the PUBLIC TX prediction, which uses the
+        // configured integer grid: axis = predicted_sfd - sync_reps*sps.  It is
+        // NOT re-zeroed on the detected peak, so with a fractional period it
+        // differs from the true origin by the accumulated drift (3 samples
+        // here) and the peak tap moves with it.
+        BOOST_CHECK_EQUAL(got.cir_axis_origin,
+                          frac.sfd_start -
+                              static_cast<int64_t>(kNSync) *
+                                  static_cast<int64_t>(kQm35SamplesPerSymbol));
+        BOOST_CHECK_EQUAL(physical_peak_sample(got, kCirPre),
+                          physical_peak_sample(clean, kCirPre));
+        BOOST_CHECK_LT(std::abs(db_ratio(got.peak_abs, clean.peak_abs)), 0.5);
+
+        // float64 reference with the SAME measured period and estimated CFO.
+        const auto ref_rx = derotate_double(rx, got.final_cfo_hz);
+        const auto ref = kernel_taps(ref_rx, cfg, scratch, got.cir_axis_origin,
+                                     got.cir_samples_per_symbol,
+                                     cfg.cir_skip_initial,
+                                     cfg.cir_repetitions);
+        const double e = rel_l2(taps, ref);
+        BOOST_TEST_MESSAGE("  fractional-period relL2=" << e);
+        BOOST_CHECK_LT(e, 1e-4);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 9. Per-consumer coverage union + first/middle/last SYNC compensation
+//    (R03 items 4/5/6).
+//
+// The alongside average reads skip 0 / count 64 while the main CIR reads
+// skip 10 / count 54, so its windows reach EARLIER samples.  The final rotation
+// must cover the union; reading `demod.derotated` by pointer is not proof.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_shared_cir_consumer_union_and_repetition_phases)
+{
+    const auto sync = load_sync_pulse("reference_preamble.bin");
+    RadarCirCoreScratch scratch;
+    BOOST_REQUIRE(prepare(sync, scratch));
+    RadarCirConfig cfg = make_cfg();
+    cfg.extra_cir_skip_initial = 0;
+    cfg.extra_cir_repetitions = kNSync;
+    BOOST_REQUIRE(prepare_radar_cir_core(cfg, sync.data(), sync.size(), kCirPre,
+                                         kCirPost, scratch));
+
+    const Frame f = make_frame(sync);
+    gr::uwb::radar::reserve_radar_cir_core(f.rx.size(), scratch);
+    std::vector<gr_complex> rx = f.rx;
+    apply_cfo(rx, 50000.0);
+
+    RadarCirResult main;
+    BOOST_REQUIRE(radar_cir_one(rx.data(), rx.size(), f.sfd_start, cfg, scratch,
+                                main));
+    BOOST_REQUIRE_EQUAL(main.valid_repetitions, kCirReps);
+
+    // The union really is wider than the main CIR's own first window.
+    const int64_t main_first =
+        main.cir_axis_origin + static_cast<int64_t>(kCirSkip) *
+                                   static_cast<int64_t>(kQm35SamplesPerSymbol) -
+        static_cast<int64_t>(kCirPre);
+    BOOST_TEST_MESSAGE("covered=[" << main.covered_lo << "," << main.covered_hi
+                                    << ") main_first=" << main_first);
+    BOOST_CHECK_LE(main.covered_lo, main.cir_axis_origin -
+                                        static_cast<int64_t>(kCirPre));
+    BOOST_CHECK_LT(main.covered_lo, main_first);
+
+    // The extra consumer's own windows are inside the union coverage...
+    int64_t need_lo = -1;
+    int64_t need_hi = -1;
+    BOOST_CHECK(radar_cir_coverage_ok(cfg, main.cir_axis_origin,
+                                      main.cir_samples_per_symbol, 0, kNSync,
+                                      kNSync, rx.size(), main.covered_lo,
+                                      main.covered_hi, need_lo, need_hi));
+    // ... and the old main-only plan would NOT contain them.
+    RadarCirConfig main_only = cfg;
+    main_only.extra_cir_repetitions = 0;
+    RadarCirCoreScratch scratch_main_only;
+    BOOST_REQUIRE(prepare_radar_cir_core(main_only, sync.data(), sync.size(),
+                                         kCirPre, kCirPost, scratch_main_only));
+    RadarCirResult main_only_res;
+    BOOST_REQUIRE(radar_cir_one(rx.data(), rx.size(), f.sfd_start, main_only,
+                                scratch_main_only, main_only_res));
+    BOOST_CHECK(!radar_cir_coverage_ok(
+        cfg, main_only_res.cir_axis_origin,
+        main_only_res.cir_samples_per_symbol, 0, kNSync, kNSync, rx.size(),
+        main_only_res.covered_lo, main_only_res.covered_hi, need_lo, need_hi));
+
+    // The alongside average over its OWN union is compensated and matches the
+    // float64 reference.
+    RadarCirResult avg;
+    BOOST_REQUIRE(radar_cir_average_range(
+        scratch.demod.derotated.data(), rx.size(), cfg, main.cir_axis_origin,
+        main.cir_samples_per_symbol, 0, kNSync, scratch, avg, main.covered_lo,
+        main.covered_hi));
+    BOOST_REQUIRE_EQUAL(avg.valid_repetitions, kNSync);
+    const auto avg_taps = copy_taps(scratch, avg.tap_count);
+    const auto ref_rx = derotate_double(rx, main.final_cfo_hz);
+    const auto avg_ref = kernel_taps(ref_rx, cfg, scratch, main.cir_axis_origin,
+                                     main.cir_samples_per_symbol, 0, kNSync);
+    const double e_avg = rel_l2(avg_taps, avg_ref);
+    BOOST_TEST_MESSAGE("alongside average relL2 vs float64 reference=" << e_avg);
+    BOOST_CHECK_LT(e_avg, 1e-4);
+
+    // A consumer range outside the coverage fails closed.
+    {
+        RadarCirResult bad;
+        BOOST_CHECK(!radar_cir_average_range(
+            scratch.demod.derotated.data(), rx.size(), cfg,
+            main.cir_axis_origin, main.cir_samples_per_symbol, 0, kNSync,
+            scratch, bad, main.covered_lo + 4096, main.covered_hi));
+        BOOST_CHECK(bad.status == RadarCirStatus::CirFailed);
+        BOOST_CHECK_EQUAL(std::string(bad.status_reason),
+                          "coverage_insufficient");
+        BOOST_CHECK_EQUAL(bad.tap_count, size_t(0));
+    }
+
+    // First / middle / last SYNC are all compensated with the FINAL CFO: each
+    // single-window CIR matches the float64 reference, and their cross-window
+    // PHASE agrees (which the raw, uncompensated windows do not).
+    const size_t reps[] = { 0, kNSync / 2, kNSync - 1 };
+    std::vector<std::vector<gr_complex>> compensated;
+    std::vector<std::vector<gr_complex>> raw;
+    for (size_t k : reps) {
+        RadarCirResult one;
+        BOOST_REQUIRE(radar_cir_average_range(
+            scratch.demod.derotated.data(), rx.size(), cfg,
+            main.cir_axis_origin, main.cir_samples_per_symbol, k, 1, scratch,
+            one, main.covered_lo, main.covered_hi));
+        BOOST_REQUIRE_EQUAL(one.valid_repetitions, size_t(1));
+        compensated.push_back(copy_taps(scratch, one.tap_count));
+
+        const auto ref = kernel_taps(ref_rx, cfg, scratch,
+                                     main.cir_axis_origin,
+                                     main.cir_samples_per_symbol, k, 1);
+        const double e = rel_l2(compensated.back(), ref);
+        BOOST_TEST_MESSAGE("SYNC k=" << k << " relL2 vs float64=" << e);
+        BOOST_CHECK_LT(e, 1e-4);
+
+        // Same window taken from the RAW input (no compensation).
+        RadarCirResult raw_one;
+        BOOST_REQUIRE(radar_cir_average_range(
+            rx.data(), rx.size(), cfg, main.cir_axis_origin,
+            main.cir_samples_per_symbol, k, 1, scratch, raw_one));
+        raw.push_back(copy_taps(scratch, raw_one.tap_count));
+    }
+    // Compensated: the same phase across windows, up to the residual CFO
+    // estimation error (a few hundred Hz over 32-63 symbols is ~0.1 rad; the
+    // float64 comparison above already isolates the rotation numerics).
+    BOOST_CHECK_LT(rel_l2(compensated[0], compensated[1]), 0.15);
+    BOOST_CHECK_LT(rel_l2(compensated[0], compensated[2]), 0.15);
+    // Uncompensated: the residual CFO rotates repetition k by w*k*P, so the
+    // windows disagree by ~1.4 rad at k=63.  This is exactly what the final
+    // rotation removes.
+    BOOST_CHECK_GT(rel_l2(raw[0], raw[2]), 0.5);
+    BOOST_CHECK_LT(rel_l2(compensated[0], compensated[2]),
+                   rel_l2(raw[0], raw[2]));
+    BOOST_TEST_MESSAGE("raw cross-window relL2=" << rel_l2(raw[0], raw[2])
+                                                 << " (compensated "
+                                                 << rel_l2(compensated[0],
+                                                           compensated[2])
+                                                 << ")");
 }

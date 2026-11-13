@@ -2075,6 +2075,14 @@ BOOST_AUTO_TEST_CASE(test_pipeline_rx_window_boundaries)
         cfg.radar_cfg.cir_skip_initial = 0;
         cfg.radar_cfg.cir_repetitions = 1;
         cfg.radar_cfg.use_predicted_timing = true;
+        // R03: a timed echo with an UNKNOWN target CFO now runs the shared
+        // preamble front-end to estimate it and fails closed when the echo
+        // cannot be acquired.  This fixture is synthetic SC16 content with no
+        // preamble at all, so the caller declares the (zero) CFO of its
+        // calibration instead.  This is the supported way to keep the timed
+        // path free of a detection pass; it is NOT an oracle value.
+        cfg.radar_cfg.target_cfo_known = true;
+        cfg.radar_cfg.target_cfo_hz = 0.0;
 
         // --- Run A: adversarial in-memory source ---------------------------
         auto source = std::make_unique<PredictiveSc16Source>(sc.total_samples, sc.read_sizes,

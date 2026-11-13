@@ -24,6 +24,13 @@
  * The 11 functional fields compared by the verification tool are exactly the
  * WindowResult fields a schedule change must not alter.  Timing fields and
  * worker_id are present but are never required to match.
+ *
+ * R05 (2026-11-13) appended the sensing provenance/timing fields to both the
+ * JSON window object and the CSV row -- `radar_cfo_hz`, `radar_cir_origin`,
+ * `radar_detected_origin`, `radar_valid_reps`, `radar_frontend_us`,
+ * `radar_cir_us` and the signed remainder `radar_other_us`.  They are APPENDED
+ * after the existing fields, so every pre-R05 consumer keeps working and the
+ * schema_version stays 1 (an additive change).
  */
 
 #pragma once
@@ -152,6 +159,13 @@ inline void append_window_json(std::ostream& os, const WindowResult& r)
        << ", \"radar_sfd_found\": " << (r.radar_sfd_found ? "true" : "false")
        << ", \"radar_peak_metric\": " << json_number(static_cast<double>(r.radar_peak_metric))
        << ", \"radar_detected_start\": " << r.radar_detected_start
+       << ", \"radar_cfo_hz\": " << json_number(r.radar_cfo_hz)
+       << ", \"radar_cir_origin\": " << r.radar_cir_origin
+       << ", \"radar_detected_origin\": " << r.radar_detected_origin
+       << ", \"radar_valid_reps\": " << r.radar_valid_reps
+       << ", \"radar_frontend_us\": " << json_number(r.radar_frontend_us)
+       << ", \"radar_cir_us\": " << json_number(r.radar_cir_us)
+       << ", \"radar_other_us\": " << json_number(r.radar_other_us)
        << ", \"timing\": {"
        << "\"slice_us\": " << json_number(r.timing.slice_us)
        << ", \"queue_us\": " << json_number(r.timing.queue_us)
@@ -217,7 +231,9 @@ inline bool write_results_csv(const std::string& path,
     f << "window_id,worker_id,state,native_start_abs,native_sample_count,"
          "queue_us,convert_us,resample_us,sic_us,sensing_us,e2e_us,"
          "sic_executed,sic_committed,actual_suppression_db,"
-         "radar_executed,radar_sfd_found,radar_peak_metric,radar_detected_start\n";
+         "radar_executed,radar_sfd_found,radar_peak_metric,radar_detected_start,"
+         "radar_cfo_hz,radar_cir_origin,radar_detected_origin,radar_valid_reps,"
+         "radar_frontend_us,radar_cir_us,radar_other_us\n";
     f << std::setprecision(6) << std::fixed;
     for (const auto& r : windows) {
         f << r.window_id << ',' << r.worker_id << ','
@@ -229,7 +245,11 @@ inline bool write_results_csv(const std::string& path,
           << (r.sic_executed ? 1 : 0) << ',' << (r.sic_committed ? 1 : 0) << ','
           << r.actual_suppression_db << ','
           << (r.radar_executed ? 1 : 0) << ',' << (r.radar_sfd_found ? 1 : 0) << ','
-          << r.radar_peak_metric << ',' << r.radar_detected_start << '\n';
+          << r.radar_peak_metric << ',' << r.radar_detected_start << ','
+          << r.radar_cfo_hz << ',' << r.radar_cir_origin << ','
+          << r.radar_detected_origin << ',' << r.radar_valid_reps << ','
+          << r.radar_frontend_us << ',' << r.radar_cir_us << ','
+          << r.radar_other_us << '\n';
     }
     return static_cast<bool>(f);
 }

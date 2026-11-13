@@ -990,7 +990,9 @@ void bind_radar_cir_estimator(py::module& m)
              py::arg("emit_individual_repetitions") = false,
              py::arg("batch_individual_repetitions") = false,
              py::arg("emit_repetition_average") = false,
-             py::arg("repetition_average_skip") = size_t(10))
+             py::arg("repetition_average_skip") = size_t(10),
+             py::arg("target_cfo_known") = false,
+             py::arg("target_cfo_hz") = 0.0)
         .def("template_path", &Blk::template_path)
         .def("sync_repetitions", &Blk::sync_repetitions)
         .def("sfd_mode", &Blk::sfd_mode)
@@ -1010,6 +1012,8 @@ void bind_radar_cir_estimator(py::module& m)
              &Blk::batch_individual_repetitions)
         .def("emit_repetition_average", &Blk::emit_repetition_average)
         .def("repetition_average_skip", &Blk::repetition_average_skip)
+        .def("target_cfo_known", &Blk::target_cfo_known)
+        .def("target_cfo_hz", &Blk::target_cfo_hz)
         .def("averages_published", &Blk::averages_published)
         .def("pdus_received", &Blk::pdus_received)
         .def("pdus_enqueued", &Blk::pdus_enqueued)

@@ -222,6 +222,8 @@ list(APPEND test_uwb_sources
     qa_uwb_radar_timing_core.cc
     qa_uwb_radar_cir_core.cc
     qa_uwb_sync_cir_core.cc
+    qa_uwb_sync_cir_cache.cc
+    qa_uwb_cfo_fit_coverage.cc
     qa_uwb_preamble_frontend.cc
     qa_uwb_radar_shared_cir.cc
     qa_uwb_radar_packet_source.cc

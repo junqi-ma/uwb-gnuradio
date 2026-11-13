@@ -148,7 +148,11 @@ struct Worker {
             decoded.stage_ns_sfd_us+decoded.stage_phr_us+decoded.stage_payload_us+decoded.stage_softchip_fallback_us;
         // Sensing sub-timings come from the production RadarCirResult.  They are
         // children of r.sensing (the wall time of the radar_cir_one call) and
-        // are never added to it.
+        // are never added to it.  `coverage` is a CHILD of the SFD parent timer
+        // (the coverage planning pass runs inside it), so it is subtracted from
+        // the remainder only through `sense_sfd` -- subtracting it a second time
+        // would make the remainder too small (R05 double-count fix).  The
+        // remainder is reported signed and is never clamped.
         const double sense_timing=double(radar_result.frontend_timing_us);
         const double sense_cfo=double(radar_result.frontend_cfo_us);
         const double sense_sfd=double(radar_result.frontend_sfd_us);
@@ -160,7 +164,7 @@ struct Worker {
             t.rx_timing_us,t.rx_cfo_us,t.rx_sfd_us,t.comm_rx_us-rx_children,
             t.recon_scale_us,t.recon_conv_us,t.recon_cfo_rot_us,t.reconstruct_us-recon_children,
             sense_timing,sense_cfo,sense_sfd,sense_coverage,sense_cir,
-            r.sensing-sense_timing-sense_cfo-sense_sfd-sense_coverage-sense_cir,
+            r.sensing-sense_timing-sense_cfo-sense_sfd-sense_cir,
             double(decoded.stage_timing_us),double(decoded.stage_cfo_us),double(decoded.stage_sfd_us),double(decoded.stage_cir_us),
             double(decoded.stage_ns_sfd_us),double(decoded.stage_phr_us),double(decoded.stage_payload_us),double(decoded.stage_softchip_fallback_us),r.comm-comm_children,
             double(decoded.cir.cir_estimate_us),double(decoded.cir.soft_fir_us),double(decoded.cir.postprocess_us),

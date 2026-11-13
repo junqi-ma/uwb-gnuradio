@@ -406,6 +406,12 @@ struct CandidateArm {
         uint64_t frontend_sfd_us = 0;
         uint64_t coverage_us = 0;
         uint64_t cir_us = 0; // RadarCirResult::cir_us (1 us resolution)
+        // Derived decomposition of `total_us`.  `frontend_total_us` is
+        // timing + cfo + sfd; `coverage_us` is a CHILD of sfd and is never
+        // added to it.  `other_us` is the signed remainder and is reported,
+        // never clamped.
+        double frontend_total_us = 0.0;
+        double other_us = 0.0;
         size_t peak_tap = 0;
         size_t valid_repetitions = 0;
         int64_t sfd_start = -1;
@@ -464,6 +470,19 @@ struct CandidateArm {
         t.frontend_sfd_us = res.frontend_sfd_us;
         t.coverage_us = res.coverage_us;
         t.cir_us = res.cir_us;
+        // Front-end total = timing + cfo + sfd.  `coverage_us` is a CHILD of
+        // the SFD parent timer (the coverage planning pass runs inside it), so
+        // adding it here would double count it.  The independent final-CFO
+        // derotation of the coverage interval is also inside `sfd_us`; it is
+        // reported by name in the front-end diagnostic below.
+        t.frontend_total_us = static_cast<double>(res.frontend_timing_us +
+                                                  res.frontend_cfo_us +
+                                                  res.frontend_sfd_us);
+        // Signed remainder of the outer wall clock around radar_cir_one().
+        t.other_us = t.total_us - t.frontend_total_us - static_cast<double>(res.cir_us);
+        if (t.other_us < -2.0)
+            die("sensing decomposition double counts: children exceed the "
+                "outer wall clock (other_us=" + std::to_string(t.other_us) + ")");
         t.peak_tap = res.peak_tap;
         t.valid_repetitions = res.valid_repetitions;
         t.sfd_start = res.sfd_start_sample;
@@ -559,7 +578,7 @@ struct CommArm {
 struct Series {
     std::vector<double> control_total, control_sfd, control_refine, control_cir;
     std::vector<double> cand_total, cand_kernel, cand_cir, cand_timing, cand_cfo,
-        cand_sfd, cand_coverage;
+        cand_sfd, cand_coverage, cand_frontend_total, cand_other;
     size_t observations = 0;
 };
 
@@ -780,18 +799,35 @@ int main(int argc, char** argv)
     // bootstrap rotation only; the final-CFO rotation over the whole CIR union
     // runs inside the SFD anchor pass and is therefore counted in
     // `frontend_sfd_us`.  To explain where the time actually goes we run the
-    // shared front-end ONCE per fixture on a private scratch and print its
-    // internal split.  This is a diagnostic, never part of the timed matrix.
+    // shared front-end on a private scratch and print its internal split.
+    //
+    // R05: the final-CFO derotation now has its OWN name
+    // (`coverage_rotate_us`, = the second derotation pass over exactly
+    // [covered_lo, covered_hi)) instead of being silently mixed into the SFD
+    // bucket, and the reported snapshot is the MEDIAN over several warm calls
+    // -- not the single fastest call, which is a hand-picked best case and not
+    // a production value.  Fallback counts and rotated sample counts are
+    // recorded from the same production calls.
+    //
+    // This block is diagnostic only: it never feeds the timed matrix.
     struct FrontendDiag {
         std::string config;
         uint64_t timing_us = 0, cfo_us = 0, sfd_us = 0, coverage_us = 0;
+        // Child of `sfd_us` (accumulated into sfd_cfo_refit_us): the second,
+        // independent derotation pass that puts the whole CIR input union on
+        // the FINAL CFO.  `coverage_rotate_samples` is its exact span.
+        uint64_t coverage_rotate_us = 0;
+        uint64_t coverage_rotate_samples = 0;
         uint64_t cfo_fit_us = 0, cfo_rotate_us = 0, cfo_rotated_samples = 0;
         uint32_t cfo_rotation_passes = 0;
         uint64_t sfd_bootstrap_us = 0, sfd_tail_retrack_us = 0,
                  sfd_cfo_refit_us = 0, sfd_final_us = 0;
+        uint32_t tail_retrack_fallbacks = 0;
+        uint32_t period_from_hint = 0;
         size_t covered_lo = 0, covered_hi = 0;
         double final_cfo_hz = 0.0;
         bool ok = false;
+        int reps = 0;
     };
     std::vector<FrontendDiag> diags;
     for (size_t i = 0; i < fixtures.size(); ++i) {
@@ -808,38 +844,76 @@ int main(int argc, char** argv)
         req.post = kCirPost;
         gr::uwb::demod::core::DemodScratch private_scratch;
         private_scratch.reserve(fx.window.size());
-        // Repeat so the reported split is a WARM snapshot (the first call pays
-        // page faults on every scratch buffer).  All sub-timers come from the
-        // same call: the one with the smallest parent total.
-        uint64_t best_total = std::numeric_limits<uint64_t>::max();
-        for (int rep = 0; rep < 8; ++rep) {
+        // Every sub-timer comes from ONE call, so the snapshot is internally
+        // consistent; the snapshot itself is the per-field MEDIAN over
+        // kDiagReps warm calls (see above).
+        constexpr int kDiagReps = 9;
+        std::vector<gr::uwb::demod::PreambleRxContext> snaps;
+        snaps.reserve(kDiagReps);
+        for (int rep = 0; rep < kDiagReps; ++rep) {
             gr::uwb::demod::PreambleRxContext ctx;
             const bool ok = gr::uwb::demod::acquire_preamble(
                 fx.window.data(), fx.window.size(),
                 candidates[i].scratch.demod_profile,
                 candidates[i].scratch.sync_pulse, fx.cir_axis,
-                gr::uwb::demod::PreamblePurpose::CirOnly, &req, private_scratch, ctx,
-                static_cast<double>(kSps));
-            const uint64_t total = ctx.timing_us + ctx.cfo_us + ctx.sfd_us;
-            if (rep == 0 || (ok && total < best_total)) {
-                best_total = total;
-                d.ok = ok;
-                d.timing_us = ctx.timing_us;
-                d.cfo_us = ctx.cfo_us;
-                d.sfd_us = ctx.sfd_us;
-                d.coverage_us = ctx.coverage_us;
-                d.cfo_fit_us = ctx.cfo_fit_us;
-                d.cfo_rotate_us = ctx.cfo_rotate_us;
-                d.cfo_rotated_samples = ctx.cfo_rotated_samples;
-                d.cfo_rotation_passes = ctx.cfo_rotation_passes;
-                d.sfd_bootstrap_us = ctx.sfd_bootstrap_us;
-                d.sfd_tail_retrack_us = ctx.sfd_tail_retrack_us;
-                d.sfd_cfo_refit_us = ctx.sfd_cfo_refit_us;
-                d.sfd_final_us = ctx.sfd_final_us;
-                d.covered_lo = ctx.covered_lo;
-                d.covered_hi = ctx.covered_hi;
-                d.final_cfo_hz = ctx.final_cfo_hz;
+                gr::uwb::demod::PreamblePurpose::CirOnly, &req, private_scratch,
+                ctx, static_cast<double>(kSps));
+            if (ok)
+                snaps.push_back(ctx);
+        }
+        d.reps = static_cast<int>(snaps.size());
+        d.ok = !snaps.empty();
+        if (!snaps.empty()) {
+            auto median_u64 = [&](auto get) -> uint64_t {
+                std::vector<uint64_t> v;
+                v.reserve(snaps.size());
+                for (const auto& c : snaps)
+                    v.push_back(get(c));
+                std::sort(v.begin(), v.end());
+                return v[v.size() / 2];
+            };
+            d.timing_us = median_u64([](const auto& c) { return c.timing_us; });
+            d.cfo_us = median_u64([](const auto& c) { return c.cfo_us; });
+            d.sfd_us = median_u64([](const auto& c) { return c.sfd_us; });
+            d.coverage_us = median_u64([](const auto& c) { return c.coverage_us; });
+            // The final rotation is only meaningful on an epoch-2 buffer.
+            d.coverage_rotate_us = median_u64([](const auto& c) {
+                return (c.cfo_epoch == 2u && c.derotated_valid)
+                           ? c.cfo.rotate_us
+                           : uint64_t(0);
+            });
+            d.coverage_rotate_samples = median_u64([](const auto& c) {
+                return (c.cfo_epoch == 2u && c.derotated_valid)
+                           ? static_cast<uint64_t>(c.covered_hi - c.covered_lo)
+                           : uint64_t(0);
+            });
+            d.cfo_fit_us = median_u64([](const auto& c) { return c.cfo_fit_us; });
+            d.cfo_rotate_us = median_u64([](const auto& c) { return c.cfo_rotate_us; });
+            d.cfo_rotated_samples =
+                median_u64([](const auto& c) { return c.cfo_rotated_samples; });
+            d.cfo_rotation_passes = static_cast<uint32_t>(
+                median_u64([](const auto& c) { return uint64_t(c.cfo_rotation_passes); }));
+            d.sfd_bootstrap_us =
+                median_u64([](const auto& c) { return c.sfd_bootstrap_us; });
+            d.sfd_tail_retrack_us =
+                median_u64([](const auto& c) { return c.sfd_tail_retrack_us; });
+            d.sfd_cfo_refit_us =
+                median_u64([](const auto& c) { return c.sfd_cfo_refit_us; });
+            d.sfd_final_us = median_u64([](const auto& c) { return c.sfd_final_us; });
+            // Counters are summed over the same calls: a fallback that happens
+            // on some calls is a production fact, not a value to average away.
+            uint32_t fallbacks = 0;
+            uint32_t from_hint = 0;
+            for (const auto& c : snaps) {
+                fallbacks += c.tail_retrack_fallbacks;
+                from_hint += c.period_from_hint ? 1u : 0u;
             }
+            d.tail_retrack_fallbacks = fallbacks;
+            d.period_from_hint = from_hint;
+            const auto& last = snaps.back();
+            d.covered_lo = last.covered_lo;
+            d.covered_hi = last.covered_hi;
+            d.final_cfo_hz = last.final_cfo_hz;
         }
         diags.push_back(d);
     }
@@ -927,19 +1001,32 @@ int main(int argc, char** argv)
               "fast_profile=production flags on\n";
     for (const auto& d : diags) {
         header << "# frontend_diag=" << d.config << " ok=" << (d.ok ? 1 : 0)
-               << " timing_us=" << d.timing_us << " cfo_us=" << d.cfo_us
-               << " sfd_us=" << d.sfd_us << " coverage_us=" << d.coverage_us
-               << " | cfo_fit_us=" << d.cfo_fit_us
-               << " cfo_rotate_us=" << d.cfo_rotate_us
-               << " cfo_rotated_samples=" << d.cfo_rotated_samples
-               << " cfo_rotation_passes=" << d.cfo_rotation_passes
-               << " | sfd_bootstrap_us=" << d.sfd_bootstrap_us
+               << " reps=" << d.reps << " (per-field median of warm calls)\n";
+        header << "#   parents (mutually exclusive): timing_us=" << d.timing_us
+               << " cfo_us=" << d.cfo_us << " sfd_us=" << d.sfd_us
+               << " frontend_total_us=" << (d.timing_us + d.cfo_us + d.sfd_us)
+               << " (timing+cfo+sfd; coverage is a CHILD of sfd and is NOT "
+                  "added)\n";
+        header << "#   children of sfd_us: coverage_plan_us=" << d.coverage_us
+               << " coverage_rotate_us=" << d.coverage_rotate_us
+               << " coverage_rotate_samples=" << d.coverage_rotate_samples
+               << " (final-CFO derotation of [covered_lo,covered_hi), "
+                  "accumulated in sfd_cfo_refit_us)\n";
+        header << "#   children of sfd_us (cont): sfd_bootstrap_us="
+               << d.sfd_bootstrap_us
                << " sfd_tail_retrack_us=" << d.sfd_tail_retrack_us
                << " sfd_cfo_refit_us=" << d.sfd_cfo_refit_us
-               << " sfd_final_us=" << d.sfd_final_us
-               << " | covered=[" << d.covered_lo << "," << d.covered_hi << ")"
-               << " final_cfo_hz=" << fmt(d.final_cfo_hz, 3)
-               << " (single untimed call; diagnostics only)\n";
+               << " sfd_final_us=" << d.sfd_final_us << "\n";
+        header << "#   cfo children: cfo_fit_us=" << d.cfo_fit_us
+               << " cfo_rotate_us=" << d.cfo_rotate_us
+               << " (all passes; includes coverage_rotate_us)"
+               << " cfo_rotated_samples=" << d.cfo_rotated_samples
+               << " cfo_rotation_passes=" << d.cfo_rotation_passes << "\n";
+        header << "#   production counters: tail_retrack_fallbacks="
+               << d.tail_retrack_fallbacks << "/" << d.reps
+               << " period_from_hint=" << d.period_from_hint << "/" << d.reps
+               << " covered=[" << d.covered_lo << "," << d.covered_hi << ")"
+               << " final_cfo_hz=" << fmt(d.final_cfo_hz, 3) << "\n";
     }
 
     // ---- measurement ------------------------------------------------------
@@ -978,6 +1065,8 @@ int main(int argc, char** argv)
             s.cand_cfo.push_back(static_cast<double>(t.frontend_cfo_us));
             s.cand_sfd.push_back(static_cast<double>(t.frontend_sfd_us));
             s.cand_coverage.push_back(static_cast<double>(t.coverage_us));
+            s.cand_frontend_total.push_back(t.frontend_total_us);
+            s.cand_other.push_back(t.other_us);
             ++s.observations;
         };
 
@@ -996,6 +1085,8 @@ int main(int argc, char** argv)
         s.cand_cfo.clear();
         s.cand_sfd.clear();
         s.cand_coverage.clear();
+        s.cand_frontend_total.clear();
+        s.cand_other.clear();
         s.observations = 0;
 
         for (int g = 0; g < opt.groups; ++g) {
@@ -1089,7 +1180,15 @@ int main(int argc, char** argv)
         add(cfg, "candidate", "frontend_timing", s.cand_timing, -1.0);
         add(cfg, "candidate", "frontend_cfo", s.cand_cfo, -1.0);
         add(cfg, "candidate", "frontend_sfd", s.cand_sfd, -1.0);
+        // Child of `frontend_sfd`, reported separately and never added to any
+        // parent: the coverage PLANNING pass (metric name kept as `coverage`
+        // so archived runs stay comparable; the header block states the
+        // parent/child relation explicitly).
         add(cfg, "candidate", "coverage", s.cand_coverage, -1.0);
+        // Front-end total = timing + cfo + sfd (coverage excluded).
+        add(cfg, "candidate", "frontend_total", s.cand_frontend_total, -1.0);
+        // Signed remainder of the outer wall clock; reported, never clamped.
+        add(cfg, "candidate", "frontend_other", s.cand_other, -1.0);
         add(cfg, "candidate", "cir_us_reported", s.cand_cir, -1.0);
         add(cfg, "candidate", "cir_shared_kernel", s.cand_kernel,
             ctrl_cir > 0 ? cand_cir / ctrl_cir : -1.0);

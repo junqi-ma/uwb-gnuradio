@@ -109,6 +109,13 @@ install(FILES
     uwb_demod_result.h
     uwb_phy_profile.h
     uwb_cir_fir_simd.h
+    # R05: the shared SYNC-CIR kernel.  `uwb_demod_core.h` (installed above)
+    # and `uwb_radar_cir_core.h` (installed above) both include it, so without
+    # this entry no installed consumer of either public header could compile
+    # against an isolated prefix -- the header was added in 921c38f and simply
+    # never registered here.  It is header-only and depends only on the
+    # standard library, so it installs cleanly on its own.
+    uwb_sync_cir_core.h
     # Experimental RX fast-path helpers included by uwb_demod_core.h.
     # They are header-only and must ship with the core header so an isolated
     # installed consumer still compiles.

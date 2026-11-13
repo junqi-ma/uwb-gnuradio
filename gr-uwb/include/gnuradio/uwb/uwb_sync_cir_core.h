@@ -79,6 +79,12 @@
  * run before any write, and correlate_cir_sparse's resize(tap_count) stays
  * inside the capacity reserved at prepare time.
  *
+ * A caller decides whether prepare_sync_code is needed with ready_for(): the
+ * staleness test must read PreparedSyncCode's own record (ready, fingerprint,
+ * code_index) and the reserved sizes/capacities.  It must never read a
+ * caller-side cache key derived from the same inputs, because such a key
+ * always looks fresh after being written and silently keeps a stale template.
+ *
  * Threading: SyncCirScratch / PreparedSyncCode are per worker.  Nothing here
  * is shared between workers.  The kernel does not estimate interference, does
  * not read ground truth, never rotates the input and never mutates it: `rx`
@@ -356,6 +362,50 @@ inline bool prepare_sync_code(const int8_t* code,
     scratch.raw.assign(max_taps, std::complex<float>(0.f, 0.f));
     scratch.norm.assign(max_taps, std::complex<float>(0.f, 0.f));
     return true;
+}
+
+// Pure predicate, no allocation and no mutation: true when `prepared` was
+// built for exactly this code identity AND `scratch` already reserves enough
+// room for this geometry, i.e. the hot path may skip prepare_sync_code().
+//
+// This is the ONLY sanctioned staleness test for a caller-owned scratch.  It
+// deliberately reads the shared object's own record (`ready`, `fingerprint`,
+// `code_index`) plus the reserved sizes/capacities, never a cache key the
+// caller wrote from the same inputs: such a key always looks fresh and silently
+// keeps the previous code's template.
+//
+// `fingerprint` is rxopt::cir_template_key(code, ternary_len) of the ternary
+// code about to be used, i.e. exactly what prepare_sync_code() stores.
+// `code_index` is the profile code index; it is checked separately because the
+// fingerprint only covers the code contents.
+inline bool ready_for(const PreparedSyncCode& prepared,
+                      const SyncCirScratch& scratch,
+                      uint64_t fingerprint,
+                      size_t code_index,
+                      size_t pre,
+                      size_t post)
+{
+    if (!detail::code_ready(prepared))
+        return false;
+    if (prepared.fingerprint != fingerprint ||
+        prepared.code_index != code_index)
+        return false;
+    if (detail::add_overflow(pre, post))
+        return false;
+    const size_t tap_count = pre + post;
+    if (tap_count == 0)
+        return false;
+    if (detail::add_overflow(kSyncCirCodeLength, tap_count - 1))
+        return false;
+    const size_t wlen = kSyncCirCodeLength + tap_count - 1;
+    // estimate_sync_cir needs the constructed size AND the reserved capacity
+    // for avg/raw/norm; check all six so a partially grown scratch can never
+    // reach the kernel.
+    return scratch.avg.size() >= wlen && scratch.avg.capacity() >= wlen &&
+           scratch.raw.size() >= tap_count &&
+           scratch.raw.capacity() >= tap_count &&
+           scratch.norm.size() >= tap_count &&
+           scratch.norm.capacity() >= tap_count;
 }
 
 // Pure computation, no allocation.  Returns the union envelope [lo, hi) of all

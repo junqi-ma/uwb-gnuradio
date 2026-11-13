@@ -1,4 +1,47 @@
-# 当前提交快照：Sensing 与 Comm 统一接收前端和 CIR（2026-11-12）
+# 当前提交快照：统一前导前端最小整改（2026-11-13）
+
+按 `docs/performance/OpenCode_统一前导前端最终评审整改规划书_2026-11-13.md`
+**最小整改**范围交付（R01/R02/R04），并关闭一个已落地的 P1。报告见
+`docs/performance/统一前导前端最终整改验收报告_2026-11-13.md`，数据
+`docs/performance/data_unified_frontend_r04_20261113/`。分支
+`feature/sensing-shared-cir`，候选 build `gr-uwb/build-sensing-shared-cir-r1`；
+`gr-uwb/build-sensing-shared-cir`（`921c38f`）与 `bd311cd` 干净 worktree 为只读对照。
+- **R01 共享 CIR 缓存身份**：原先用 `scratch.cir_template.key` 判断失效，而该 key
+  刚被 `build_sparse_cir_template` 用同一输入写过，导致复用 scratch 时保留上一个
+  码的模板（9→10 相对 L2 **1.73** 仍报成功）。改用共享对象自身
+  `ready`/`fingerprint`/`code_index` + `avg/raw/norm` 的 size/capacity
+  （`sync_cir::ready_for()`），并删除已无消费者的 `cir_template`。新增
+  `qa_uwb_sync_cir_cache.cc`（在 `921c38f` 上失败）；8 个同码包只 prepare **1** 次。
+- **R02 scratch 归 worker**：`handle_rx()` 不再 reserve；worker-only
+  `ensure_worker_scratch()` 在任务开始前独占扩容并记录
+  `scratch_growths/growth_us/capacity_samples`。TSAN **29 处 → 0**。
+- **R04 启用已有快速前端**：`prepare_radar_cir_core()` 置
+  `rx_fast_sfd`/`rx_fast_cfo_rotation`/`rx_seed_refine_tail = true`，阈值/ROI/
+  系数/输出坐标不变，宽搜回退保留。
+- **P1 CFO 拟合读占位相位**：`acquire_preamble()` 改为把**实测尾段视图**交给
+  `fit_cfo`。256 SYNC 原 232 个拟合峰里 216 个是零占位（`arg(0)=0`），+50 kHz 被
+  估成 **3908 Hz**、`peak_abs` 0.0127、payload 失败；现 **49995 Hz**、0.463、FCS
+  通过。64 SYNC 逐位不变。新增 `qa_uwb_cfo_fit_coverage.cc`。
+- **连带解除 TWR 限制**：`qa_uwb_twr_phy_matrix` 原先**把该缺陷写成期望**
+  （>64 SYNC 在 20 kHz 必须失败、白名单 {16,64}）。现所有长度 CFO 精确，白名单为
+  PHR 可描述性决定的 **{16, 64, 1024}**；两处断言改为更强的不变式。
+- **配对性能**（单 worker、256SYNC/127B、116 tap、A/B/B/A、每臂 192 次、单 session）：
+  sensing 接收阶段 **1234.34 → 630.68 µs**（1.96×，**−48.9%**），P50 1195.86→579.10，
+  P95 1466.03→779.24，逐次 `peak_tap`/`tap_count` 与参考一致。comm 在噪声内
+  （ratio 0.980，`stage_cir_us` +0.47%）。
+- **功能**：work 与 native 65/48 各 4 格 × 8 seed（零 CFO、ISR 20 dB、单径）：
+  clean 8/8、raw **0/8 失败关闭**、sic **8/8** PSDU/FCS 全通过。
+- **测试**：85 项 81 通过 3 失败 1 跳过；3 项为既有失败，已在 `bd311cd` 干净
+  worktree 复现。为使 R04 后 QA 确定而修正的**测试前提**（非放宽断言）：
+  estimator block 队列/生命周期用例预建 PMT 负载并等待投递完成；preamble_frontend
+  的 epoch 用例改为给前 24 个 SYNC 加额外频偏以构造真实 bootstrap≠final。
+- **未验证**：6912 例矩阵、三 session 性能矩阵、N4/N8、PSLR/ISLR 全量、跨窗相位
+  专项、非零 CFO 的感知质量、上板/paced/MATLAB。定时未知 CFO、安装隔离验证、
+  旧诊断入口整治已实现但未纳入本轮验收。候选不标记为全面验收通过。
+
+---
+
+# 历史提交快照：Sensing 与 Comm 统一接收前端和 CIR（2026-11-12）
 
 已交付公共 SYNC-CIR 内核与公共前导接收前端，sensing 与 comm 真实共用代码；
 sensing 首次估计并补偿目标 CFO。报告见

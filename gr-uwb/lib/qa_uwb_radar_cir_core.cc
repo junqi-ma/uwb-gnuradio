@@ -445,10 +445,20 @@ BOOST_AUTO_TEST_CASE(test_radar_cir_predicted_timing_ignores_zeroed_sfd)
 
     RadarCirConfig cfg = make_cfg(64);
     cfg.use_predicted_timing = true;
+    // R03: a timed echo with an UNKNOWN target CFO now runs the shared
+    // front-end to estimate it, so a destroyed SFD fails closed (covered by
+    // test_radar_cir_timed_unknown_cfo_fails_closed below).  This test keeps
+    // the original "timed mode does not gate on the SFD" property by
+    // declaring the calibrated CFO, which is the supported way to skip the
+    // front-end on a timed path.
+    cfg.target_cfo_known = true;
+    cfg.target_cfo_hz = 0.0;
     RadarCirResult out;
     BOOST_REQUIRE(radar_cir_one(pkt.rx.data(), pkt.rx.size(), pkt.sfd_start,
                                 cfg, scratch, out));
     BOOST_CHECK(out.status == RadarCirStatus::Ok);
+    BOOST_CHECK_EQUAL(out.cfo_epoch, 2u);
+    BOOST_CHECK_EQUAL(std::string(out.cfo_source), "caller_known");
     BOOST_CHECK_EQUAL(out.sfd_start_sample, pkt.sfd_start);
     BOOST_CHECK_EQUAL(out.preamble_start_sample, pkt.origin);
     BOOST_CHECK_EQUAL(out.cir_origin_sample, pkt.origin);
@@ -463,6 +473,98 @@ BOOST_AUTO_TEST_CASE(test_radar_cir_predicted_timing_ignores_zeroed_sfd)
     // SFD is not bit-exact; it must still recover the same peak.
     BOOST_CHECK_LT(rel_l2(raw, raw_clean), 1e-2);
     BOOST_CHECK_LT(rel_l2(nrm, nrm_clean), 1e-2);
+}
+
+// R03 item 2: a timed echo with an UNKNOWN target CFO must not silently return
+// an uncompensated CIR.  It runs the shared front-end; when the echo cannot be
+// acquired the call fails closed and names the reason.
+BOOST_AUTO_TEST_CASE(test_radar_cir_timed_unknown_cfo_fails_closed)
+{
+    const auto sync = load_sync_pulse();
+    RadarCirCoreScratch scratch;
+    BOOST_REQUIRE(prepare_from_sync(sync, scratch));
+    auto pkt = make_sync_sfd_packet(sync, 64);
+
+    RadarCirConfig cfg = make_cfg(64);
+    cfg.use_predicted_timing = true;
+    BOOST_REQUIRE(!cfg.target_cfo_known);
+    BOOST_REQUIRE(cfg.compensate_target_cfo);
+
+    // (a) A healthy frame: the front-end estimates the CFO (0 Hz here) and the
+    // timed path still reports the PREDICTED coordinates.
+    {
+        RadarCirResult out;
+        BOOST_REQUIRE(radar_cir_one(pkt.rx.data(), pkt.rx.size(), pkt.sfd_start,
+                                    cfg, scratch, out));
+        BOOST_CHECK(out.status == RadarCirStatus::Ok);
+        BOOST_CHECK_EQUAL(out.cfo_epoch, 2u);
+        BOOST_CHECK_EQUAL(std::string(out.cfo_source), "estimated_timed");
+        BOOST_CHECK_LT(std::abs(out.final_cfo_hz), 2000.0);
+        BOOST_CHECK_EQUAL(out.sfd_start_sample, pkt.sfd_start);
+        BOOST_CHECK_EQUAL(out.cir_origin_sample, pkt.origin);
+        BOOST_CHECK_GE(out.covered_lo, 0);
+        BOOST_CHECK_GT(out.covered_hi, out.covered_lo);
+    }
+
+    // (b) Destroyed SFD: acquisition fails, so the call fails closed with a
+    // reason instead of returning Ok with cfo_epoch == 0.
+    {
+        auto bad = pkt;
+        const size_t sfd_len = GetSfdSequence("4z2").size() * sync.size();
+        std::fill(bad.rx.begin() + bad.sfd_start,
+                  bad.rx.begin() + bad.sfd_start +
+                      static_cast<int64_t>(sfd_len),
+                  gr_complex(0.0f, 0.0f));
+        RadarCirResult out;
+        const bool ok = radar_cir_one(bad.rx.data(), bad.rx.size(),
+                                      bad.sfd_start, cfg, scratch, out);
+        BOOST_CHECK(!ok);
+        BOOST_CHECK(out.status != RadarCirStatus::Ok);
+        BOOST_CHECK_EQUAL(out.tap_count, size_t(0));
+        BOOST_CHECK_EQUAL(out.valid_repetitions, size_t(0));
+        BOOST_CHECK_EQUAL(out.cfo_epoch, 0u);
+        // Fail-closed reason: either the front-end cannot acquire the echo at
+        // all, or it locks onto a far-away peak that the public coarse-ROI gate
+        // rejects.  Both name the reason; neither returns an uncompensated CIR.
+        const std::string reason(out.status_reason ? out.status_reason : "");
+        BOOST_TEST_MESSAGE("timed unknown-CFO failure reason: " << reason);
+        BOOST_CHECK(reason == "timed_cfo_estimate_failed" ||
+                    reason == "timed_cfo_sfd_outside_roi" ||
+                    reason == "timed_cfo_unavailable");
+        BOOST_CHECK(!reason.empty());
+        BOOST_CHECK_EQUAL(out.covered_lo, int64_t(-1));
+        BOOST_CHECK_EQUAL(out.covered_hi, int64_t(-1));
+        // No stale taps may survive the failed call.
+        for (size_t i = 0; i < kCirPre + kCirPost; ++i) {
+            BOOST_CHECK_EQUAL(scratch.cir.raw_taps[i], gr_complex(0.0f, 0.0f));
+            BOOST_CHECK_EQUAL(scratch.cir.norm_taps[i], gr_complex(0.0f, 0.0f));
+        }
+    }
+
+    // (c) Recovery: the same scratch produces the good frame again.
+    {
+        RadarCirResult out;
+        BOOST_REQUIRE(radar_cir_one(pkt.rx.data(), pkt.rx.size(), pkt.sfd_start,
+                                    cfg, scratch, out));
+        BOOST_CHECK(out.status == RadarCirStatus::Ok);
+        BOOST_CHECK_EQUAL(out.cfo_epoch, 2u);
+        BOOST_CHECK_GT(out.peak_abs, 0.0f);
+    }
+
+    // (d) The explicit uncompensated control arm is still available and is
+    // labelled as such (this is the only way to get a timed CIR without CFO
+    // compensation).
+    {
+        RadarCirConfig raw_cfg = cfg;
+        raw_cfg.compensate_target_cfo = false;
+        RadarCirResult out;
+        BOOST_REQUIRE(radar_cir_one(pkt.rx.data(), pkt.rx.size(), pkt.sfd_start,
+                                    raw_cfg, scratch, out));
+        BOOST_CHECK(out.status == RadarCirStatus::Ok);
+        BOOST_CHECK_EQUAL(out.cfo_epoch, 0u);
+        BOOST_CHECK_EQUAL(std::string(out.cfo_source), "none");
+        BOOST_CHECK_EQUAL(out.covered_lo, int64_t(-1));
+    }
 }
 
 BOOST_AUTO_TEST_CASE(test_radar_cir_timing_failed_zeroed_sync)

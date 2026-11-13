@@ -38,11 +38,21 @@
  *       the raw input with `target_cfo_hz` and `cfo_epoch` is published as 2
  *       ("this buffer is final-CFO compensated").
  *   use_predicted_timing == true, target_cfo_known == false
- *       there is no detection to estimate a CFO from, so the path keeps the
- *       historical uncompensated behaviour.  This is an EXPLICIT adaptation:
- *       `final_cfo_hz == 0` and `cfo_epoch == 0` are published so a caller can
- *       tell "assumed zero" from "estimated zero".  Do not read this as
- *       "skipping SFD implies the target CFO is zero".
+ *       the timed path has no detection of its own, so it runs the SAME shared
+ *       front-end (seeded with the TX-time axis, `period_hint =
+ *       samples_per_symbol`) purely to estimate the target CFO and to build
+ *       the compensated buffer.  The published detection coordinates stay the
+ *       predicted ones (the timed contract is unchanged); `cfo_source ==
+ *       "estimated_timed"` and `cfo_epoch == 2` record what really happened.
+ *       If the front-end cannot acquire the echo (weak echo, destroyed SFD,
+ *       SFD outside the public coarse ROI, coverage too small) the call FAILS
+ *       CLOSED with `status_reason` naming the reason.  It never returns Ok
+ *       with an uncompensated CIR.
+ *   use_predicted_timing == true, compensate_target_cfo == false
+ *       the explicit uncompensated control arm: no front-end pass, the CIR
+ *       kernel consumes the RAW window, `cfo_epoch == 0` and `cfo_source ==
+ *       "none"`.  This is the only way to get a timed CIR without CFO
+ *       compensation, and it is opt-in.
  *
  * ---------------------------------------------------------------------------
  * Three distinct origins (never conflated)
@@ -57,6 +67,25 @@
  *                           `cir_origin_sample` is a legacy alias of this field.
  *   phase_reference_sample  absolute sample whose phase is the derotation
  *                           anchor (0 today: dst[i] = src[i]*exp(-j*w*i)).
+ *                           It is WINDOW-relative: the absolute phase anchor is
+ *                           `window_absolute_origin + phase_reference_sample`,
+ *                           which the block publishes as
+ *                           `phase_reference_absolute_sample`.  A single
+ *                           window's sample 0 is NOT global sample 0, so raw
+ *                           tap phase is only comparable across windows after
+ *                           accounting for the window origin.
+ *
+ * ---------------------------------------------------------------------------
+ * Per-consumer final-CFO coverage (R03)
+ * ---------------------------------------------------------------------------
+ * The front-end plans the final rotation over the union of every derotated
+ * reader, not just the main CIR: `extra_cir_skip_initial` /
+ * `extra_cir_repetitions` describe a second consumer (the block's alongside
+ * average, whose skip/count differ from the main CIR's).  The union is frozen
+ * into the prepared profile and validated on every call.  A consumer whose
+ * windows fall outside `[covered_lo, covered_hi)` must fail closed
+ * (`radar_cir_coverage_ok()`); holding a pointer into `demod.derotated` is not
+ * proof of coverage.
  *
  * Failure: tap_count=0, raw/norm taps zeroed. Do not return seed-only CIR.
  * Failed-stage sample indices stay -1. Do not copy predicted SFD/origin into
@@ -128,6 +157,18 @@ struct RadarCirConfig {
     bool target_cfo_known = false;
     // Used only when `target_cfo_known` is true (Hz, at 998.4 MS/s).
     double target_cfo_hz = 0.0;
+
+    // ---- extra derotated consumer (R03 item 4) ---------------------------
+    // A second reader of the same final-CFO buffer whose repetition window
+    // differs from the main CIR's (the estimator block's alongside average:
+    // skip 0, count = sync_repetitions, versus the main CIR's skip 10 /
+    // count 54).  The final rotation is planned over the UNION of the main
+    // CIR windows and this range, so the extra consumer can never read
+    // samples that were not compensated with the final CFO.  `0` repetitions
+    // means "no extra consumer".  Both fields are part of the prepared
+    // identity: changing them after prepare() is rejected.
+    size_t extra_cir_skip_initial = 0;
+    size_t extra_cir_repetitions = 0;
 };
 
 // Immutable identity captured at prepare(). radar_cir_one rejects any
@@ -142,6 +183,11 @@ struct PreparedRadarProfile {
     uint32_t tx_profile_id = 0;
     size_t max_pre = 0;
     size_t max_post = 0;
+    // Union of every derotated consumer's repetition window, frozen at
+    // prepare().  The front-end plans the final rotation over exactly
+    // [coverage_skip_initial, coverage_skip_initial + coverage_repetitions).
+    size_t coverage_skip_initial = 0;
+    size_t coverage_repetitions = 0;
 };
 
 struct RadarCirResult {
@@ -168,8 +214,13 @@ struct RadarCirResult {
     // Absolute sample the final derotation is anchored at (0 = buffer origin).
     int64_t phase_reference_sample = 0;
     // Final CFO the CIR kernel consumed.  0 with cfo_epoch == 0 means the
-    // explicit "assumed zero target CFO" adaptation of the timed path.
+    // explicit uncompensated control arm of the timed path.
     double final_cfo_hz = 0.0;
+    // Bootstrap (epoch 1) CFO estimate, published for provenance only: it is
+    // NEVER consumed (the final rotation is always recomputed from the raw
+    // input with `final_cfo_hz`).  A consumer can audit that the CIR used the
+    // final epoch, and how far the bootstrap estimate was from it.
+    double bootstrap_cfo_hz = 0.0;
     // 0 = no compensation applied, 2 = the CIR input is final-CFO compensated
     // (the demod front-end uses 1 for its bootstrap epoch; that epoch is never
     // published here because it is never consumed).
@@ -185,6 +236,26 @@ struct RadarCirResult {
     uint64_t frontend_sfd_us = 0;
     uint64_t coverage_us = 0;
     uint64_t cir_us = 0;
+
+    // ---- final-CFO coverage actually advertised (R03) --------------------
+    // [covered_lo, covered_hi) is the interval of `scratch.demod.derotated`
+    // that holds FINAL-CFO compensated samples.  -1/-1 means "no derotated
+    // buffer is advertised" (raw arm or a failed call).  Every derotated
+    // consumer must validate its own window range against this interval.
+    int64_t covered_lo = -1;
+    int64_t covered_hi = -1;
+
+    // Provenance of the CFO the kernel consumed:
+    //   "estimated_detected"       detected path, front-end estimate applied
+    //   "estimated_not_applied"    detected path, control arm (raw consumed)
+    //   "estimated_timed"          timed path, front-end estimate applied
+    //   "caller_known"             timed path, caller-supplied value applied
+    //   "none"                     no compensation (raw consumed)
+    const char* cfo_source = "none";
+
+    // Static string literal naming why the call failed ("" on success).  It is
+    // never allocated and never contains data-derived text.
+    const char* status_reason = "";
 };
 
 struct RadarCirCoreScratch {
@@ -266,6 +337,61 @@ inline bool copy_sfd_mode(const char* src, char* dst, size_t dst_len)
     return true;
 }
 
+// Union of every derotated consumer's repetition window, expressed as
+// (skip_initial, repetitions) on the SYNC grid.  The main CIR is
+// (cfg.cir_skip_initial, cfg.cir_repetitions) and the optional extra consumer
+// is (cfg.extra_cir_skip_initial, cfg.extra_cir_repetitions); the union is the
+// envelope of both, clamped to the preamble.  `repetitions == 0` means the
+// union is empty (an invalid CIR request, rejected later).
+inline void coverage_union(const RadarCirConfig& cfg, size_t& skip, size_t& count)
+{
+    const size_t total = cfg.sync_repetitions;
+    skip = 0;
+    count = 0;
+    if (total == 0)
+        return;
+
+    size_t main_skip = cfg.cir_skip_initial;
+    if (main_skip >= total)
+        main_skip = total; // empty main window
+    size_t main_count = 0;
+    if (main_skip < total) {
+        main_count = (cfg.cir_repetitions > 0) ? cfg.cir_repetitions
+                                               : total - main_skip;
+        if (main_count > total - main_skip)
+            main_count = total - main_skip;
+    }
+
+    size_t extra_skip = total;
+    size_t extra_count = 0;
+    if (cfg.extra_cir_repetitions > 0 && cfg.extra_cir_skip_initial < total) {
+        extra_skip = cfg.extra_cir_skip_initial;
+        extra_count = cfg.extra_cir_repetitions;
+        if (extra_count > total - extra_skip)
+            extra_count = total - extra_skip;
+    }
+
+    if (main_count == 0 && extra_count == 0) {
+        skip = (main_skip < total) ? main_skip : 0;
+        count = 0;
+        return;
+    }
+    if (main_count == 0) {
+        skip = extra_skip;
+        count = extra_count;
+        return;
+    }
+    if (extra_count == 0) {
+        skip = main_skip;
+        count = main_count;
+        return;
+    }
+    const size_t lo = std::min(main_skip, extra_skip);
+    const size_t hi = std::max(main_skip + main_count, extra_skip + extra_count);
+    skip = lo;
+    count = hi - lo;
+}
+
 inline bool profile_matches(const PreparedRadarProfile& p,
                             const RadarCirConfig& cfg)
 {
@@ -283,6 +409,18 @@ inline bool profile_matches(const PreparedRadarProfile& p,
         return false;
     if (cfg.cir_pre > p.max_pre || cfg.cir_post > p.max_post)
         return false;
+    // The final-CFO coverage was planned for the prepared union only; a
+    // runtime config that widened (or moved) any consumer's window would read
+    // samples outside it, so it is rejected instead of silently truncated.
+    // An EMPTY union means the request itself is invalid (skip >= repetitions
+    // or zero repetitions); that is reported by the dedicated skip/count check
+    // with its own status, so it is not treated as an identity mismatch here.
+    size_t skip = 0;
+    size_t count = 0;
+    coverage_union(cfg, skip, count);
+    if (count > 0 &&
+        (skip != p.coverage_skip_initial || count != p.coverage_repetitions))
+        return false;
     return true;
 }
 
@@ -298,13 +436,63 @@ inline void zero_cir_taps(RadarCirScratch& cir)
 
 // True when radar_cir_one reads `scratch.demod.derotated` (final-CFO
 // compensated) instead of the caller's raw window.
+//
+// Every compensated arm consumes the derotated buffer: the detected path
+// always, and the timed path both with a caller-supplied CFO and with the
+// front-end estimate.  Only the explicit uncompensated control arm
+// (`compensate_target_cfo == false`) reads raw.
 inline bool radar_cir_uses_derotated(const RadarCirConfig& cfg)
 {
-    if (!cfg.compensate_target_cfo)
+    return cfg.compensate_target_cfo;
+}
+
+// True when every window the kernel would read for (skip_initial,
+// max_repetitions) fits inside the advertised final-CFO coverage
+// [covered_lo, covered_hi).  `need_lo`/`need_hi` receive the unclipped
+// envelope of the accepted windows so a caller can report the shortfall.
+// A pointer into `scratch.demod.derotated` proves nothing on its own: samples
+// outside the coverage were written by an earlier epoch (bootstrap CFO) or are
+// stale, so this check is the only proof of compensation.
+inline bool coverage_contains(const demod::sync_cir::SyncCirRequest& req,
+                              size_t n,
+                              int64_t covered_lo,
+                              int64_t covered_hi,
+                              int64_t& need_lo,
+                              int64_t& need_hi)
+{
+    need_lo = -1;
+    need_hi = -1;
+    if (covered_lo < 0 || covered_hi <= covered_lo)
         return false;
-    if (cfg.use_predicted_timing)
-        return cfg.target_cfo_known;
-    return true;
+    if (!demod::sync_cir::required_input_range(
+            req, demod::sync_cir::kSyncCirCodeLength, n, need_lo, need_hi))
+        return false;
+    return need_lo >= covered_lo && need_hi <= covered_hi;
+}
+
+// Convenience wrapper for a caller that only knows its own (skip, count) --
+// the estimator block's alongside average uses this for its own window range.
+inline bool coverage_ok_for_range(const RadarCirConfig& cfg,
+                                  int64_t cir_axis_origin,
+                                  double samples_per_symbol,
+                                  size_t skip_initial,
+                                  size_t max_repetitions,
+                                  size_t total_repetitions,
+                                  size_t n,
+                                  int64_t covered_lo,
+                                  int64_t covered_hi,
+                                  int64_t& need_lo,
+                                  int64_t& need_hi)
+{
+    demod::sync_cir::SyncCirRequest req;
+    req.cir_axis_origin = cir_axis_origin;
+    req.samples_per_symbol = samples_per_symbol;
+    req.total_repetitions = total_repetitions;
+    req.skip_initial = skip_initial;
+    req.max_repetitions = max_repetitions;
+    req.pre = cfg.cir_pre;
+    req.post = cfg.cir_post;
+    return coverage_contains(req, n, covered_lo, covered_hi, need_lo, need_hi);
 }
 
 // Map the shared front-end status onto the radar status vocabulary.  There is
@@ -335,6 +523,30 @@ inline RadarCirStatus map_demod_status(demod::DemodStatus s)
 
 } // namespace detail
 
+// Public: true when every window the kernel would read for
+// (skip_initial, max_repetitions) fits inside the final-CFO coverage
+// [covered_lo, covered_hi) advertised by radar_cir_one().  Every derotated
+// consumer that is not the main CIR (the estimator block's alongside average)
+// must call this before reading `scratch.demod.derotated`; a pointer into that
+// buffer is not proof that the samples were compensated with the final CFO.
+inline bool radar_cir_coverage_ok(const RadarCirConfig& cfg,
+                                  int64_t cir_axis_origin,
+                                  double samples_per_symbol,
+                                  size_t skip_initial,
+                                  size_t max_repetitions,
+                                  size_t total_repetitions,
+                                  size_t n,
+                                  int64_t covered_lo,
+                                  int64_t covered_hi,
+                                  int64_t& need_lo,
+                                  int64_t& need_hi)
+{
+    return detail::coverage_ok_for_range(
+        cfg, cir_axis_origin, samples_per_symbol, skip_initial,
+        max_repetitions, total_repetitions, n, covered_lo, covered_hi, need_lo,
+        need_hi);
+}
+
 // May allocate. Call at init / when the TX packet profile changes.
 // Identity (code, SFD, SYNC length, sps, tx_profile_id) is frozen here;
 // radar_cir_one rejects any runtime config that disagrees.
@@ -351,8 +563,12 @@ inline RadarCirStatus map_demod_status(demod::DemodStatus s)
 //   sfd_mode                       → sfd_mode (scratch-owned copy)
 //   samples_per_symbol             → (not a profile field; 998.4 MS/s grid)
 //   cir_pre/cir_post               → cir_pre_samples / cir_post_samples
-//   cir_skip_initial               → cir_skip_initial_repetitions
-//   cir_repetitions                → cir_repetitions
+//   cir_skip_initial + cir_repetitions
+//     + extra_cir_skip_initial + extra_cir_repetitions
+//                                  → cir_skip_initial_repetitions /
+//                                    cir_repetitions = the UNION of every
+//                                    derotated consumer's window (the final
+//                                    rotation coverage plan)
 //   sfd_threshold                  → sfd_detection_threshold
 //   sync_refine_threshold          → radar_verification_threshold
 //   sfd_search_margin              → timing_search_margin
@@ -363,9 +579,10 @@ inline RadarCirStatus map_demod_status(demod::DemodStatus s)
 //                                    = profile default (40)
 //   sample_rate                    → 998.4e6 (kQm35SampleRate)
 //   rx_stop_after_sfd              → false (CirOnly must reach the CIR end)
-//   rx_fast_* / rx_seed_refine_tail→ profile defaults (off): the sensing path
-//                                    inherits the comm front-end's default
-//                                    numerics rather than a benchmark profile.
+//   rx_fast_sfd / rx_fast_cfo_rotation / rx_seed_refine_tail
+//                                  → true (R04: reuse the existing optimised
+//                                    comm front-end kernels; the wide search
+//                                    stays as an automatic fallback)
 inline bool prepare_radar_cir_core(const RadarCirConfig& cfg,
                                    const std::complex<float>* sync_pulse_shaped,
                                    size_t sync_len,
@@ -457,6 +674,18 @@ inline bool prepare_radar_cir_core(const RadarCirConfig& cfg,
     scratch.prepared.max_pre = max_pre;
     scratch.prepared.max_post = max_post;
 
+    // Final-CFO coverage union (R03 item 4).  The front-end plans the final
+    // rotation from the profile's two repetition fields, so they must describe
+    // every derotated consumer: the main CIR AND the optional alongside
+    // average, whose skip/count differ (default skip 0 / 64 reps versus the
+    // main 10 / 54).  Using the main window alone would leave the extra
+    // consumer reading samples compensated with the bootstrap CFO.
+    size_t cov_skip = 0;
+    size_t cov_count = 0;
+    detail::coverage_union(cfg, cov_skip, cov_count);
+    scratch.prepared.coverage_skip_initial = cov_skip;
+    scratch.prepared.coverage_repetitions = cov_count;
+
     // ---- build the shared front-end profile ------------------------------
     demod::Qm35825Profile& p = scratch.demod_profile;
     p = demod::Qm35825Profile{};
@@ -465,8 +694,8 @@ inline bool prepare_radar_cir_core(const RadarCirConfig& cfg,
     p.preamble_repetitions = cfg.sync_repetitions;
     p.cir_pre_samples = cfg.cir_pre;
     p.cir_post_samples = cfg.cir_post;
-    p.cir_skip_initial_repetitions = cfg.cir_skip_initial;
-    p.cir_repetitions = cfg.cir_repetitions;
+    p.cir_skip_initial_repetitions = cov_skip;
+    p.cir_repetitions = cov_count;
     p.sfd_detection_threshold = cfg.sfd_threshold;
     p.radar_verification_threshold = cfg.sync_refine_threshold;
     p.timing_search_margin =
@@ -491,6 +720,19 @@ inline bool prepare_radar_cir_core(const RadarCirConfig& cfg,
             : size_t(0);
     // CirOnly must reach the end of the CIR union, never stop at the SFD.
     p.rx_stop_after_sfd = false;
+    // R04: reuse the existing optimised comm front-end kernels instead of
+    // adding a second detection algorithm.  These three are the same switches
+    // the comm fast path uses; the sensing path was still paying the scalar
+    // SFD search, the four-chain CFO rotation and the wide tail re-track.
+    //   rx_fast_sfd            -> VOLK/AVX2 SFD correlation + template cache
+    //   rx_fast_cfo_rotation   -> 1024-sample block rotation kernel
+    //   rx_seed_refine_tail    -> SFD-anchored +/-8 tail seed with the legacy
+    //                             wide search kept as an automatic fallback
+    // No threshold, ROI, coefficient or output coordinate changes with them;
+    // the fallback path and its counters stay observable.
+    p.rx_fast_sfd = true;
+    p.rx_fast_cfo_rotation = true;
+    p.rx_seed_refine_tail = true;
     detail::rebind_demod_profile(scratch);
     return true;
 }
@@ -548,6 +790,14 @@ inline bool radar_cir_one(const std::complex<float>* rx,
     if (!rx || n == 0 || predicted_sfd_start < 0 || !identity_ok || !thr_ok ||
         !scratch_ok || !taps_ok || !margin_ok || !cfo_ok) {
         out.status = RadarCirStatus::InvalidInput;
+        out.status_reason = !rx || n == 0            ? "null_input"
+                            : predicted_sfd_start < 0 ? "invalid_prediction"
+                            : !identity_ok            ? "profile_mismatch"
+                            : !thr_ok                 ? "invalid_threshold"
+                            : !scratch_ok             ? "scratch_unprepared"
+                            : !taps_ok                ? "invalid_tap_window"
+                            : !margin_ok              ? "invalid_margin"
+                                                      : "invalid_known_cfo";
         detail::zero_cir_taps(scratch.cir);
         return false;
     }
@@ -562,6 +812,7 @@ inline bool radar_cir_one(const std::complex<float>* rx,
         nominal_preamble_start(predicted_sfd_start, sync_reps, sps);
     if (cir_axis < 0) {
         out.status = RadarCirStatus::CirFailed;
+        out.status_reason = "cir_axis_out_of_range";
         detail::zero_cir_taps(scratch.cir);
         return false;
     }
@@ -571,6 +822,7 @@ inline bool radar_cir_one(const std::complex<float>* rx,
     // publish partial coordinates either (fail closed, nothing leaked).
     if (cfg.cir_skip_initial >= sync_reps || cfg.cir_repetitions == 0) {
         out.status = RadarCirStatus::CirFailed;
+        out.status_reason = "invalid_skip_count";
         detail::zero_cir_taps(scratch.cir);
         return false;
     }
@@ -584,10 +836,22 @@ inline bool radar_cir_one(const std::complex<float>* rx,
     req.pre = cfg.cir_pre;
     req.post = cfg.cir_post;
 
+    // Coverage request: the UNION of every derotated consumer (main CIR plus
+    // the optional alongside average).  The front-end plans the final rotation
+    // from the request it is handed, so the union -- not just the main CIR --
+    // must be passed in, otherwise the extra consumer would read samples left
+    // on the bootstrap-CFO epoch.  The CIR kernel itself still uses `req`.
+    demod::sync_cir::SyncCirRequest cov_req = req;
+    cov_req.skip_initial = scratch.prepared.coverage_skip_initial;
+    cov_req.max_repetitions = scratch.prepared.coverage_repetitions;
+
     const std::complex<float>* cir_rx = rx;
 
     if (cfg.use_predicted_timing) {
-        // Timed echo: arrival is the schedule, not a detected SFD.
+        // Timed echo: arrival is the schedule, not a detected SFD, so the
+        // published detection coordinates stay the predicted ones.  The shared
+        // front-end is used ONLY to estimate the target CFO (and to build the
+        // compensated buffer) when the caller did not supply one.
         out.sfd_start_sample = predicted_sfd_start;
         out.sfd_metric = 0.f;
         out.preamble_start_sample = cir_axis;
@@ -598,14 +862,22 @@ inline bool radar_cir_one(const std::complex<float>* rx,
         out.phase_reference_sample = 0;
         out.cir_samples_per_symbol = req.samples_per_symbol;
 
-        if (cfg.compensate_target_cfo && cfg.target_cfo_known) {
+        if (!cfg.compensate_target_cfo) {
+            // Explicit uncompensated control arm: no front-end pass, the
+            // kernel consumes the RAW window.  `cfo_epoch == 0` and
+            // `cfo_source == "none"` make that unmistakable.
+            out.cfo_source = "none";
+        } else if (cfg.target_cfo_known) {
             // Caller-supplied target CFO: derotate the CIR union from the raw
-            // input (never from an already rotated buffer).
+            // input (never from an already rotated buffer).  The range is
+            // planned from the UNION request, so every derotated consumer
+            // (main CIR and the alongside average) is covered.
             int64_t lo = -1;
             int64_t hi = -1;
             if (!demod::sync_cir::required_input_range(
-                    req, demod::sync_cir::kSyncCirCodeLength, n, lo, hi)) {
+                    cov_req, demod::sync_cir::kSyncCirCodeLength, n, lo, hi)) {
                 out.status = RadarCirStatus::CirFailed;
+                out.status_reason = "coverage_plan_failed";
                 detail::zero_cir_taps(scratch.cir);
                 return false;
             }
@@ -613,6 +885,7 @@ inline bool radar_cir_one(const std::complex<float>* rx,
             hi = std::min<int64_t>(static_cast<int64_t>(n), hi);
             if (hi <= lo) {
                 out.status = RadarCirStatus::CirFailed;
+                out.status_reason = "coverage_empty";
                 detail::zero_cir_taps(scratch.cir);
                 return false;
             }
@@ -627,18 +900,85 @@ inline bool radar_cir_one(const std::complex<float>* rx,
             out.frontend_cfo_us = rot_us;
             out.final_cfo_hz = cfg.target_cfo_hz;
             out.cfo_epoch = 2; // final-CFO compensated buffer
+            out.cfo_source = "caller_known";
+            out.covered_lo = lo;
+            out.covered_hi = hi;
+            cir_rx = scratch.demod.derotated.data();
+        } else {
+            // ---- timed mode with an UNKNOWN target CFO (R03 item 2) -------
+            // There is no detection of its own, so run the shared front-end
+            // seeded with the known TX-time axis and the configured period.
+            // It is used for the CFO estimate and the compensated buffer only:
+            // the CIR axis stays the TX prediction (never re-zeroed on the
+            // detected peak).  If the echo cannot be acquired the call fails
+            // closed with a reason; it never returns Ok with an uncompensated
+            // CIR.
+            demod::PreambleRxContext ctx;
+            const bool pre_ok = demod::acquire_preamble(
+                rx, n, scratch.demod_profile, scratch.sync_pulse, cir_axis,
+                demod::PreamblePurpose::CirOnly, &cov_req, scratch.demod, ctx,
+                static_cast<double>(sps));
+
+            out.frontend_timing_us = ctx.timing_us;
+            out.frontend_cfo_us = ctx.cfo_us;
+            out.frontend_sfd_us = ctx.sfd_us;
+            out.coverage_us = ctx.coverage_us;
+
+            if (!pre_ok) {
+                out.status = detail::map_demod_status(ctx.status);
+                out.status_reason = "timed_cfo_estimate_failed";
+                detail::zero_cir_taps(scratch.cir);
+                return false;
+            }
+            // Same public coarse-ROI gate as the detected path: an SFD far
+            // outside the requested window is a different hypothesis, and its
+            // CFO estimate must not be applied to this echo.
+            if (cfg.sfd_search_margin >= 0 &&
+                std::llabs(ctx.sfd.sfd_start_sample - predicted_sfd_start) >
+                    cfg.sfd_search_margin) {
+                out.status = RadarCirStatus::SfdFailed;
+                out.status_reason = "timed_cfo_sfd_outside_roi";
+                detail::zero_cir_taps(scratch.cir);
+                return false;
+            }
+            if (ctx.cfo_epoch != 2u || !ctx.derotated_valid) {
+                out.status = RadarCirStatus::CirFailed;
+                out.status_reason = "timed_cfo_unavailable";
+                detail::zero_cir_taps(scratch.cir);
+                return false;
+            }
+            // Plan the read with the period that will actually be used (the
+            // front-end's measured P, not the nominal one) and prove the CIR
+            // union is inside the advertised final-CFO coverage.
+            req.samples_per_symbol = (ctx.samples_per_symbol > 0.0)
+                                         ? ctx.samples_per_symbol
+                                         : static_cast<double>(sps);
+            out.cir_samples_per_symbol = req.samples_per_symbol;
+            int64_t need_lo = -1;
+            int64_t need_hi = -1;
+            if (!detail::coverage_contains(req, n, ctx.covered_lo,
+                                           ctx.covered_hi, need_lo, need_hi)) {
+                out.status = RadarCirStatus::CirFailed;
+                out.status_reason = "coverage_insufficient";
+                detail::zero_cir_taps(scratch.cir);
+                return false;
+            }
+            out.final_cfo_hz = ctx.final_cfo_hz;
+            out.bootstrap_cfo_hz = ctx.bootstrap_cfo_hz;
+            out.cfo_epoch = ctx.cfo_epoch;
+            out.cfo_source = "estimated_timed";
+            out.phase_reference_sample = ctx.phase_reference_sample;
+            out.covered_lo = ctx.covered_lo;
+            out.covered_hi = ctx.covered_hi;
             cir_rx = scratch.demod.derotated.data();
         }
-        // else: explicit adaptation.  No detection is possible, so the target
-        // CFO is ASSUMED zero; final_cfo_hz stays 0 and cfo_epoch stays 0 so a
-        // consumer can tell this apart from an estimated zero.
     } else {
         // Shared preamble front-end (timing -> CFO -> SFD -> final CFO
         // coverage).  The seed is the predicted SYNC origin, not the SFD.
         demod::PreambleRxContext ctx;
         const bool pre_ok = demod::acquire_preamble(
             rx, n, scratch.demod_profile, scratch.sync_pulse, cir_axis,
-            demod::PreamblePurpose::CirOnly, &req, scratch.demod, ctx,
+            demod::PreamblePurpose::CirOnly, &cov_req, scratch.demod, ctx,
             static_cast<double>(sps));
 
         out.frontend_timing_us = ctx.timing_us;
@@ -648,6 +988,7 @@ inline bool radar_cir_one(const std::complex<float>* rx,
 
         if (!pre_ok) {
             out.status = detail::map_demod_status(ctx.status);
+            out.status_reason = "frontend_acquire_failed";
             detail::zero_cir_taps(scratch.cir);
             return false;
         }
@@ -663,12 +1004,14 @@ inline bool radar_cir_one(const std::complex<float>* rx,
         if (std::llabs(ctx.sfd.sfd_start_sample - predicted_sfd_start) >
             cfg.sfd_search_margin) {
             out.status = RadarCirStatus::SfdFailed;
+            out.status_reason = "sfd_outside_roi";
             detail::zero_cir_taps(scratch.cir);
             return false;
         }
         // A negative SYNC origin cannot be a detected absolute coordinate.
         if (ctx.detected_sync_origin < 0) {
             out.status = RadarCirStatus::TimingFailed;
+            out.status_reason = "negative_sync_origin";
             detail::zero_cir_taps(scratch.cir);
             return false;
         }
@@ -681,13 +1024,16 @@ inline bool radar_cir_one(const std::complex<float>* rx,
         out.detected_sync_origin = ctx.detected_sync_origin;
         out.sync_metric = ctx.timing.metric;
         out.final_cfo_hz = ctx.final_cfo_hz;
+        out.bootstrap_cfo_hz = ctx.bootstrap_cfo_hz;
         out.cfo_epoch = ctx.cfo_epoch;
         out.phase_reference_sample = ctx.phase_reference_sample;
         out.cir_axis_origin = cir_axis;
         out.cir_origin_sample = cir_axis;
 
         // Unified period: the front-end's measured period, falling back to the
-        // configured integer grid.  Used as a double, never rounded twice.
+        // configured integer grid.  Used as a double, never rounded twice.  The
+        // coverage plan inside the front-end used this same measured period, so
+        // planning and reading cannot disagree.
         req.samples_per_symbol = (ctx.samples_per_symbol > 0.0)
                                      ? ctx.samples_per_symbol
                                      : static_cast<double>(sps);
@@ -699,6 +1045,7 @@ inline bool radar_cir_one(const std::complex<float>* rx,
             // estimated and `cfo_epoch == 0` says it was NOT applied, so this
             // can never be mistaken for a compensated result.
             out.cfo_epoch = 0;
+            out.cfo_source = "estimated_not_applied";
             cir_rx = rx;
         } else {
             // ---- fail-closed coverage / epoch validation ------------------
@@ -708,15 +1055,21 @@ inline bool radar_cir_one(const std::complex<float>* rx,
             // window would be consumed silently.
             int64_t need_lo = -1;
             int64_t need_hi = -1;
-            const bool need_ok = demod::sync_cir::required_input_range(
-                req, demod::sync_cir::kSyncCirCodeLength, n, need_lo, need_hi);
-            if (!need_ok || ctx.cfo_epoch != 2u || !ctx.derotated_valid ||
-                need_lo < static_cast<int64_t>(ctx.covered_lo) ||
-                need_hi > static_cast<int64_t>(ctx.covered_hi)) {
+            const bool need_ok = detail::coverage_contains(
+                req, n, static_cast<int64_t>(ctx.covered_lo),
+                static_cast<int64_t>(ctx.covered_hi), need_lo, need_hi);
+            if (!need_ok || ctx.cfo_epoch != 2u || !ctx.derotated_valid) {
                 out.status = RadarCirStatus::CirFailed;
+                out.status_reason =
+                    (ctx.cfo_epoch != 2u || !ctx.derotated_valid)
+                        ? "final_cfo_unavailable"
+                        : "coverage_insufficient";
                 detail::zero_cir_taps(scratch.cir);
                 return false;
             }
+            out.cfo_source = "estimated_detected";
+            out.covered_lo = static_cast<int64_t>(ctx.covered_lo);
+            out.covered_hi = static_cast<int64_t>(ctx.covered_hi);
             cir_rx = scratch.demod.derotated.data();
         }
     }
@@ -726,6 +1079,7 @@ inline bool radar_cir_one(const std::complex<float>* rx,
     // below cannot be reached with an empty repetition set.
     if (cfg.cir_skip_initial >= sync_reps || cfg.cir_repetitions == 0) {
         out.status = RadarCirStatus::CirFailed;
+        out.status_reason = "invalid_skip_count";
         detail::zero_cir_taps(scratch.cir);
         return false;
     }
@@ -741,6 +1095,7 @@ inline bool radar_cir_one(const std::complex<float>* rx,
     if (!cir_ok || cir.status != demod::sync_cir::SyncCirStatus::Ok ||
         cir.tap_count != tap_count || tap_count == 0) {
         out.status = RadarCirStatus::CirFailed;
+        out.status_reason = "cir_kernel_failed";
         detail::zero_cir_taps(scratch.cir);
         return false;
     }
@@ -766,6 +1121,13 @@ inline bool radar_cir_one(const std::complex<float>* rx,
 // radar_cir_one consumed (i.e. scratch.demod.derotated when
 // detail::radar_cir_uses_derotated(cfg) is true).  No allocation; taps are
 // published into scratch.cir exactly like radar_cir_one does.
+//
+// `covered_lo`/`covered_hi` are the final-CFO coverage advertised by the
+// radar_cir_one call this average belongs to.  When they are >= 0 the helper
+// validates that THIS consumer's windows are inside the coverage and fails
+// closed with `status_reason == "coverage_insufficient"` otherwise; a pointer
+// into `demod.derotated` is not proof that the samples were compensated with
+// the final CFO.  Pass -1/-1 only for a raw (uncompensated) buffer.
 inline bool radar_cir_average_range(const std::complex<float>* rx,
                                     size_t n,
                                     const RadarCirConfig& cfg,
@@ -774,7 +1136,9 @@ inline bool radar_cir_average_range(const std::complex<float>* rx,
                                     size_t skip_initial,
                                     size_t max_repetitions,
                                     RadarCirCoreScratch& scratch,
-                                    RadarCirResult& out)
+                                    RadarCirResult& out,
+                                    int64_t covered_lo = -1,
+                                    int64_t covered_hi = -1)
 {
     out = RadarCirResult{};
     out.cir_axis_origin = cir_axis_origin;
@@ -787,6 +1151,7 @@ inline bool radar_cir_average_range(const std::complex<float>* rx,
         !scratch.code.ready || scratch.cir.raw_taps.size() < tap_count ||
         scratch.cir.norm_taps.size() < tap_count) {
         out.status = RadarCirStatus::InvalidInput;
+        out.status_reason = "invalid_average_request";
         detail::zero_cir_taps(scratch.cir);
         return false;
     }
@@ -800,12 +1165,27 @@ inline bool radar_cir_average_range(const std::complex<float>* rx,
     req.pre = cfg.cir_pre;
     req.post = cfg.cir_post;
 
+    if (covered_lo >= 0 || covered_hi >= 0) {
+        int64_t need_lo = -1;
+        int64_t need_hi = -1;
+        if (!detail::coverage_contains(req, n, covered_lo, covered_hi, need_lo,
+                                       need_hi)) {
+            out.status = RadarCirStatus::CirFailed;
+            out.status_reason = "coverage_insufficient";
+            detail::zero_cir_taps(scratch.cir);
+            return false;
+        }
+        out.covered_lo = covered_lo;
+        out.covered_hi = covered_hi;
+    }
+
     demod::sync_cir::SyncCirResult cir;
     if (!demod::sync_cir::estimate_sync_cir(rx, n, req, scratch.code,
                                             scratch.cir_scratch, cir) ||
         cir.status != demod::sync_cir::SyncCirStatus::Ok ||
         cir.tap_count != tap_count) {
         out.status = RadarCirStatus::CirFailed;
+        out.status_reason = "cir_kernel_failed";
         detail::zero_cir_taps(scratch.cir);
         return false;
     }

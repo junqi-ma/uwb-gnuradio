@@ -14,7 +14,10 @@
  *     → UwbRadarCirEstimator                  [single worker]
  *     → UwbCirWriter                          [single worker]
  *
- * Also splits radar_cir_one into SFD / SYNC-refine / CIR cores.
+ * Also reports the production sensing entry point (`radar::radar_cir_one`) and
+ * the sub-timers that call publishes itself.  The historical hand-rolled
+ * SFD / SYNC-refine / scalar-CIR split lives in the separately named offline
+ * control `benchmark_radar_pipeline_legacy`; it is NOT the production path.
  *
  * Usage:
  *   benchmark_radar_pipeline [rounds] [pdus]
@@ -64,18 +67,12 @@ using gr::uwb::UwbRadarCirEstimator;
 using gr::uwb::UwbRadarPacketSource;
 using gr::uwb::core::RationalResampler65_32Core;
 using gr::uwb::core::RationalResampler65_48Core;
-using gr::uwb::radar::estimate_radar_cir;
 using gr::uwb::radar::prepare_radar_cir_core;
 using gr::uwb::radar::radar_cir_one;
 using gr::uwb::radar::RadarCirConfig;
 using gr::uwb::radar::RadarCirCoreScratch;
-using gr::uwb::radar::RadarCirEstimate;
 using gr::uwb::radar::RadarCirResult;
 using gr::uwb::radar::RadarCirStatus;
-using gr::uwb::radar::RadarSfdResult;
-using gr::uwb::radar::RadarTimingResult;
-using gr::uwb::radar::refine_sync_origin;
-using gr::uwb::radar::search_sfd;
 using gr_complex = std::complex<float>;
 
 namespace {
@@ -459,6 +456,11 @@ main(int argc, char** argv)
     if (!prepare_radar_cir_core(cfg(), tx_work.data(), kSps, kCirPre, kCirPost,
                                 scratch))
         throw std::runtime_error("prepare_radar_cir_core failed");
+    // The production pipeline reserves the front-end/CIR scratch once at init
+    // (`UhdSc16Pipeline::initialize` -> reserve_radar_cir_core).  Do the same
+    // here, otherwise every reported call would pay the buffer growth and the
+    // numbers would not describe the production shape.
+    gr::uwb::radar::reserve_radar_cir_core(rx_work.size(), scratch);
 
     RadarCirResult one;
     if (!radar_cir_one(rx_work.data(), rx_work.size(), pred_work, cfg(),
@@ -473,43 +475,70 @@ main(int argc, char** argv)
                 static_cast<long>(one.cir_origin_sample), one.peak_tap);
 
     // ------------------------------------------------------------------
-    // Core microbenchmarks
+    // Production sensing entry point (no GNU Radio scheduler)
     // ------------------------------------------------------------------
-    std::printf("\n-- core (no GNU Radio scheduler) --\n");
+    // This driver reports `radar::radar_cir_one()` -- the exact call the
+    // native pipeline and the CirEstimator block make -- and the sub-timers
+    // that call publishes itself.  It deliberately does NOT re-implement the
+    // SFD search / SYNC refine / scalar CIR here: a hand-rolled split next to
+    // the production entry is a second implementation that can silently drift
+    // from it (and did: it kept the pre-refactor scalar kernels alive and
+    // reported them as if they were the production path).
+    //
+    // The historical split is preserved as an explicitly labelled offline
+    // control in `benchmark_radar_pipeline_legacy`.
+    std::printf("\n-- production sensing entry (radar_cir_one, no scheduler) --\n");
 
-    print_stats("SFD search ±64", time_loop(warmup, rounds, [&] {
-                    RadarSfdResult sfd;
-                    search_sfd(rx_work.data(), rx_work.size(), pred_work,
-                               kSfdMargin, kThr, sfd, scratch.sfd);
-                    if (sfd.status != gr::uwb::radar::SfdStatus::Ok)
-                        throw std::runtime_error("SFD failed");
-                }));
-    print_stats("SYNC refine ±8", time_loop(warmup, rounds, [&] {
-                    RadarTimingResult t;
-                    refine_sync_origin(rx_work.data(), rx_work.size(),
-                                       pred_work, kSyncReps, kSps, kSyncMargin,
-                                       kThr, scratch.sync_template.data(),
-                                       scratch.sync_template.size(), t);
-                    if (t.status != gr::uwb::radar::TimingStatus::Ok)
-                        throw std::runtime_error("timing failed");
-                }));
-    print_stats("estimateCir 54-rep", time_loop(warmup, rounds, [&] {
-                    RadarCirEstimate cir;
-                    if (!estimate_radar_cir(rx_work.data(), rx_work.size(),
-                                            static_cast<int64_t>(workg.pre),
-                                            kSps, kCirPre, kCirPost, kCirSkip,
-                                            kSyncReps - kCirSkip, kSyncReps,
-                                            cir, scratch.cir) ||
-                        cir.status != gr::uwb::radar::CirStatus::Ok)
-                        throw std::runtime_error("CIR failed");
-                }));
-    print_stats("radar_cir_one (all 3)", time_loop(warmup, rounds, [&] {
-                    RadarCirResult r;
-                    if (!radar_cir_one(rx_work.data(), rx_work.size(),
-                                       pred_work, cfg(), scratch, r) ||
-                        r.status != RadarCirStatus::Ok)
-                        throw std::runtime_error("radar_cir_one failed");
-                }));
+    // Per-round children of the production call, accumulated so the
+    // decomposition and the outer wall clock are measured on the SAME rounds.
+    std::vector<double> prod_timing_us, prod_cfo_us, prod_sfd_us,
+        prod_coverage_us, prod_cir_us;
+    prod_timing_us.reserve(rounds);
+    prod_cfo_us.reserve(rounds);
+    prod_sfd_us.reserve(rounds);
+    prod_coverage_us.reserve(rounds);
+    prod_cir_us.reserve(rounds);
+    const Stats st_prod = time_loop(warmup, rounds, [&] {
+        RadarCirResult r;
+        if (!radar_cir_one(rx_work.data(), rx_work.size(), pred_work, cfg(),
+                           scratch, r) ||
+            r.status != RadarCirStatus::Ok)
+            throw std::runtime_error("radar_cir_one failed");
+        // The three front-end parents are published separately; `coverage_us`
+        // is a CHILD of the SFD parent (the coverage planning pass runs inside
+        // it), and the independent final-CFO derotation of the coverage
+        // interval is also inside `sfd_us`, so neither is added here.
+        prod_timing_us.push_back(static_cast<double>(r.frontend_timing_us));
+        prod_cfo_us.push_back(static_cast<double>(r.frontend_cfo_us));
+        prod_sfd_us.push_back(static_cast<double>(r.frontend_sfd_us));
+        prod_coverage_us.push_back(static_cast<double>(r.coverage_us));
+        prod_cir_us.push_back(static_cast<double>(r.cir_us));
+    });
+    print_stats("radar_cir_one (production entry)", st_prod);
+
+    const double t_mean = summarize(prod_timing_us).mean_us;
+    const double c_mean = summarize(prod_cfo_us).mean_us;
+    const double s_mean = summarize(prod_sfd_us).mean_us;
+    const double cov_mean = summarize(prod_coverage_us).mean_us;
+    const double cir_mean = summarize(prod_cir_us).mean_us;
+    const double fe_mean = t_mean + c_mean + s_mean;
+    std::printf("  front-end total (timing+cfo+sfd)   mean=%8.1f us"
+                "  [timing=%.1f cfo=%.1f sfd=%.1f us, same rounds]\n",
+                fe_mean, t_mean, c_mean, s_mean);
+    std::printf("    child of sfd: coverage planning  mean=%8.1f us"
+                " (inside sfd; NOT added to the total)\n",
+                cov_mean);
+    std::printf("  shared SYNC-CIR kernel (cir_us)    mean=%8.1f us\n",
+                cir_mean);
+    const double prod_other = st_prod.mean_us - fe_mean - cir_mean;
+    std::printf("  remainder (total - children)       mean=%8.1f us"
+                "  (call overhead + 1 us truncation; never clamped)\n",
+                prod_other);
+    if (prod_other < -2.0) {
+        throw std::runtime_error(
+            "sensing stage decomposition double counts: children exceed the "
+            "outer wall clock");
+    }
 
     auto taps48 = load_taps("resampler_65_48/taps_quality_minorder.txt");
     auto taps32 = load_taps("resampler_65_32/taps_quality_minorder.txt");

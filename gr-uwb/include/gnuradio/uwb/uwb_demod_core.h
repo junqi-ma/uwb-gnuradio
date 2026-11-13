@@ -149,19 +149,23 @@ struct DemodScratch {
     std::vector<std::complex<float>> sfd_template;
     uint64_t sfd_template_key = 0;
 
-    // Cached sparse ternary CIR template (Task A2).  `key` also acts as the
-    // cache key of the shared SYNC-CIR kernel state below.
-    rxopt::SparseCirTemplate cir_template;
-
     // Shared SYNC-CIR kernel state (contract §1).  `sync_cir_code` holds the
     // prepared sparse ternary template and `sync_cir` the pre-sized
     // avg/raw/norm buffers; both are (re)built by prepare_sync_code only on a
-    // cache miss, so the hot estimate_sync_cir call never allocates.
+    // genuine identity/capacity miss, so the hot estimate_sync_cir call never
+    // allocates.  `sync_cir_code` IS the cache identity: there is deliberately
+    // no separate scratch-side key (a key written from the same inputs always
+    // looks fresh and would keep a stale template).
     //
     // Fully qualified on purpose: the member named `sync_cir` would otherwise
     // shadow the `sync_cir` namespace inside this class scope.
     gr::uwb::demod::sync_cir::PreparedSyncCode sync_cir_code;
     gr::uwb::demod::sync_cir::SyncCirScratch sync_cir;
+
+    // Diagnostic: how many times the shared kernel had to be (re)prepared on
+    // this scratch.  The hot path must only pay it on a genuine identity or
+    // capacity miss, so QA can assert "one preparation per code identity".
+    uint32_t sync_cir_prepares = 0;
 
     // Cached pre-duplicated real SYNC template for AVX2 fast dot.
     rxopt::RealSyncTemplate real_sync_template;
@@ -1165,12 +1169,11 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         scratch.cached_seq.update(profile.code_index, profile.sfd_mode);
     }
     const std::vector<int8_t>& spread = scratch.cached_seq.sampled_pcode;
+    // Identity of the ternary code the shared kernel must be prepared for.
+    // Same FNV-1a hash prepare_sync_code() records in
+    // PreparedSyncCode::fingerprint, so the two can be compared directly.
     const uint64_t ckey =
         rxopt::cir_template_key(preamble_code.data(), preamble_code.size());
-    if (scratch.cir_template.key != ckey) {
-        rxopt::build_sparse_cir_template(
-            preamble_code.data(), preamble_code.size(), scratch.cir_template);
-    }
 
     // ---- Repetition selection (identical to the pre-refactor code). ----
     const size_t available =
@@ -1190,10 +1193,13 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     // ---- Shared SYNC-CIR kernel (contract §1): coherent SYNC average +
     //      sparse ternary correlation + float normalization. ----
     // prepare_sync_code is the only allocating entry point and runs only on a
-    // cache miss: a different ternary code, or a CIR window wider than the
-    // scratch reserved by the previous prepare.  Both cases are cold.
-    if (scratch.cir_template.key != ckey ||
-        tap_count > scratch.sync_cir.raw.capacity()) {
+    // genuine cold miss.  The staleness test reads the shared object's own
+    // identity (ready + fingerprint + code_index) and the reserved sizes for
+    // avg/raw/norm, never a scratch cache key: a key written from these same
+    // inputs always compares equal and would keep the previous code's template.
+    if (!sync_cir::ready_for(scratch.sync_cir_code, scratch.sync_cir, ckey,
+                             profile.code_index, pre, post)) {
+        ++scratch.sync_cir_prepares;
         if (!sync_cir::prepare_sync_code(preamble_code.data(),
                                          sync_cir::kSyncCirCodeLength,
                                          profile.code_index, pre, post,
@@ -3439,6 +3445,17 @@ inline bool acquire_preamble(const std::complex<float>* rx,
         // Keep the SFD-anchored full-frame grid on the original timing
         // estimate.  Only the tail peaks have matched-filter measurements;
         // leading peaks are generated from the SFD-anchored grid.
+        //
+        // CONTRACT: only `peak_corr[tail_first .. full_repetitions)` is a
+        // MEASURED SYNC matched-filter value.  `peak_corr[0 .. tail_first)` is
+        // a zero placeholder (`std::complex<float>(0,0)`), so its `arg()` is
+        // 0 rad, NOT a phase measurement.  Any consumer that needs carrier
+        // phase must restrict itself to the measured tail; reading `arg()`
+        // of a leading placeholder injects a fake zero-phase observation.
+        // The CFO refit below therefore gets a measured-only VIEW of this
+        // grid (see `cfo_fit_view`), while the full grid is kept intact for
+        // `compute_sfd_search_range`, `timing.detected_peaks`, the
+        // `stage_cir_softchips` repetition selection and the tail-reuse check.
         const double measured_period = period_used;
         const int64_t full_start = bootstrap_sfd_start -
             static_cast<int64_t>(std::llround(
@@ -3476,8 +3493,60 @@ inline bool acquire_preamble(const std::complex<float>* rx,
         }
 
         const auto sfd_cfo_t0 = std::chrono::steady_clock::now();
-        const bool cfo_fit_ok =
-            core::fit_cfo(rx, n, profile, cfo_timing, out.cfo, scratch);
+        // Measured-only view for the CFO fit.
+        //
+        // `fit_cfo` applies its own startup skip to whatever it is given:
+        //   skip = min(cfo_skip_initial_repetitions, np - min_fit)
+        // With the FULL grid as input that skip is `global_skip` (a fixed
+        // number of leading repetitions), which for a long preamble lands
+        // inside the placeholder region: 256 SYNC has tail_first = 216 while
+        // global_skip is only 24, so 216 of the 232 fitted peaks used
+        // arg(0) == 0 as if it were a measurement and the estimate collapsed
+        // (a +50 kHz frame was reported as ~3.9 kHz).
+        //
+        // Fix: slice the grid to the measured tail FIRST, then let fit_cfo
+        // fit the slice with its skip disabled (the slice already applied it).
+        // For 64 SYNC this is a no-op: global_skip == tail_first == 24, so the
+        // slice is [24,64) and the fit consumes exactly the same 40 peaks in
+        // the same order with the same t0 -> bit-identical cfo_hz.
+        const size_t cfo_min_fit =
+            std::max<size_t>(2, profile.cfo_min_fit_repetitions);
+        const size_t cfo_available_to_skip =
+            full_repetitions > cfo_min_fit ? full_repetitions - cfo_min_fit : 0;
+        const size_t cfo_global_skip = std::min(
+            profile.cfo_skip_initial_repetitions, cfo_available_to_skip);
+        const size_t fit_first = std::max(cfo_global_skip, tail_first);
+
+        TimingResult cfo_fit_view;
+        cfo_fit_view.peak_samples.assign(
+            cfo_timing.peak_samples.begin() + static_cast<std::ptrdiff_t>(fit_first),
+            cfo_timing.peak_samples.end());
+        cfo_fit_view.peak_metrics.assign(
+            cfo_timing.peak_metrics.begin() + static_cast<std::ptrdiff_t>(fit_first),
+            cfo_timing.peak_metrics.end());
+        cfo_fit_view.peak_corr.assign(
+            cfo_timing.peak_corr.begin() + static_cast<std::ptrdiff_t>(fit_first),
+            cfo_timing.peak_corr.end());
+        cfo_fit_view.measured_period = cfo_timing.measured_period;
+        cfo_fit_view.preamble_start_sample = cfo_timing.preamble_start_sample;
+        cfo_fit_view.preamble_start_uncropped = cfo_timing.preamble_start_uncropped;
+        cfo_fit_view.detected_peaks = cfo_timing.detected_peaks;
+        cfo_fit_view.expected_peaks = cfo_timing.expected_peaks;
+
+        Qm35825Profile cfo_fit_profile = profile;
+        cfo_fit_profile.cfo_skip_initial_repetitions = 0;
+
+        const bool cfo_fit_ok = core::fit_cfo(
+            rx, n, cfo_fit_profile, cfo_fit_view, out.cfo, scratch);
+        if (cfo_fit_ok) {
+            // Publish the GLOBAL skip, and point the fit coordinates at the
+            // real measured peaks of the full grid (fit_cfo only knows the
+            // view, whose indices are relative to `fit_first`).
+            out.cfo.skipped_peaks = fit_first;
+            out.cfo.fit_first_peak_sample = cfo_timing.peak_samples[fit_first];
+            out.cfo.fit_last_peak_sample =
+                cfo_timing.peak_samples[full_repetitions - 1];
+        }
         out.cfo_fit_us += out.cfo.fit_us;
         out.sfd_cfo_refit_us += since_us(sfd_cfo_t0);
         if (!cfo_fit_ok)

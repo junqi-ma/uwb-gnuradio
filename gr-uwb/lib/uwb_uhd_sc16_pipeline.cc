@@ -2086,10 +2086,23 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
             res.radar_cir_origin = cir_res.cir_axis_origin;
             res.radar_detected_origin = cir_res.detected_sync_origin;
             res.radar_valid_reps = cir_res.valid_repetitions;
+            // Front-end total = timing + cfo + sfd.  `coverage_us` is NOT
+            // added: the coverage PLANNING pass runs inside the SFD parent
+            // (uwb_demod_core.h laps `sfd_us` after the coverage block), so
+            // adding it here would count it twice.  The independent final-CFO
+            // derotation of the coverage interval is also inside `sfd_us`
+            // (accumulated into `sfd_cfo_refit_us`); it is reported by name in
+            // benchmark_shared_cir.cc, not folded into this total.
             res.radar_frontend_us = static_cast<double>(
                 cir_res.frontend_timing_us + cir_res.frontend_cfo_us +
-                cir_res.frontend_sfd_us + cir_res.coverage_us);
+                cir_res.frontend_sfd_us);
             res.radar_cir_us = static_cast<double>(cir_res.cir_us);
+            // Signed remainder of the outer sensing wall clock.  The integer
+            // sub-timers are truncated to 1 us each, so a small positive value
+            // is expected; it is never clamped, because a negative remainder is
+            // the signal that a child was double counted.
+            res.radar_other_us = res.timing.sensing_us - res.radar_frontend_us -
+                                 res.radar_cir_us;
         }
 
         auto t_end = std::chrono::steady_clock::now();

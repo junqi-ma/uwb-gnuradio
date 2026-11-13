@@ -184,13 +184,40 @@ struct WindowResult {
     int64_t radar_detected_start = -1;
     // Sensing provenance (plan §2): the target CFO the shared front-end
     // estimated and compensated, the three distinct origins, and the shared
-    // front-end / CIR sub-timings (children of timing.sensing_us).
+    // front-end / CIR sub-timings.
+    //
+    // Timing contract for the sensing stage (R05).  `timing.sensing_us` is the
+    // OUTER wall clock of the whole `radar::radar_cir_one()` call and is the
+    // only value that may be compared with the stage budget.  Everything below
+    // is a CHILD of it and must never be added to it a second time:
+    //
+    //   sensing_us  = radar_frontend_us + radar_cir_us + radar_other_us
+    //   radar_frontend_us = radar::RadarCirResult::frontend_timing_us
+    //                     + frontend_cfo_us
+    //                     + frontend_sfd_us
+    //
+    // `frontend_sfd_us` is itself a parent: the coverage PLANNING pass
+    // (`RadarCirResult::coverage_us`) and the independent final-CFO derotation
+    // of the coverage interval are both timed INSIDE it (the derotation is
+    // accumulated into `sfd_cfo_refit_us`).  Adding `coverage_us` to the
+    // front-end total therefore double counts it; this field deliberately does
+    // not do that (see uwb_uhd_sc16_pipeline.cc).  The derotation has its own
+    // explicitly named timer in the shared CIR benchmark
+    // (`tools/sic/benchmark_shared_cir.cc`, the `# frontend_diag` header block:
+    // `coverage_rotate_us` / `coverage_rotate_samples`), which is the tool that
+    // reports the front-end split; `RadarCirResult` does not expose it yet, so
+    // this struct cannot publish it.
     double radar_cfo_hz = 0.0;
     int64_t radar_cir_origin = -1;
     int64_t radar_detected_origin = -1;
     size_t radar_valid_reps = 0;
-    double radar_frontend_us = 0.0;
-    double radar_cir_us = 0.0;
+    double radar_frontend_us = 0.0; // timing + cfo + sfd (children of sensing_us)
+    double radar_cir_us = 0.0;      // the shared SYNC-CIR kernel call only
+    // Signed remainder `sensing_us - radar_frontend_us - radar_cir_us`:
+    // call overhead, scratch bookkeeping and the 1 us truncation of the
+    // integer sub-timers.  Reported, never clamped to 0 -- a grossly negative
+    // value means a child was double counted or a parent is missing.
+    double radar_other_us = 0.0;
 };
 
 struct UWB_API PipelineLedger {

@@ -342,6 +342,23 @@ BOOST_AUTO_TEST_CASE(preamble_frontend_final_epoch_replaces_bootstrap_coverage)
     const double cfo_hz = 50000.0;
     std::vector<cf> iq = frame.iq;
     apply_cfo(iq, cfo_hz);
+    // Make the bootstrap fit genuinely differ from the final fit.  The final
+    // SFD-anchored refit only ever sees the MEASURED tail `[tail_first, 64)`
+    // (tail_first = 24); the bootstrap fit sees every repetition the tracker
+    // acquired with `cfo_skip_initial_repetitions = 0`.  Giving the leading 24
+    // repetitions an extra carrier offset therefore separates the two epochs
+    // for real, instead of relying on the zero-filled `peak_corr` placeholders
+    // that the measured-only CFO fit now (correctly) refuses to read.
+    {
+        const double extra_hz = 20000.0;
+        const double w = kTwoPi * extra_hz / kSampleRate;
+        const size_t lead = 24 * kSyncSamples;
+        for (size_t i = 0; i < lead && kSeed + i < iq.size(); ++i) {
+            const double ph = w * static_cast<double>(i);
+            iq[kSeed + i] *= cf(static_cast<float>(std::cos(ph)),
+                                static_cast<float>(std::sin(ph)));
+        }
+    }
 
     auto profile = Qm35825Profile::Default();
     profile.code_index = 10;
@@ -368,8 +385,9 @@ BOOST_AUTO_TEST_CASE(preamble_frontend_final_epoch_replaces_bootstrap_coverage)
     BOOST_REQUIRE(ok);
     BOOST_CHECK_EQUAL(ctx.cfo_epoch, 2u);
     BOOST_CHECK(ctx.derotated_valid);
-    // The bootstrap fit is the clean one; the final fit is the asymmetric one.
-    BOOST_CHECK_SMALL(ctx.bootstrap_cfo_hz - cfo_hz, 2000.0);
+    // The final SFD-anchored refit must land on the true target CFO; the
+    // bootstrap fit saw the extra leading offset and must disagree with it.
+    BOOST_CHECK_SMALL(ctx.final_cfo_hz - cfo_hz, 2000.0);
     BOOST_CHECK_GT(std::abs(ctx.final_cfo_hz - ctx.bootstrap_cfo_hz), 500.0);
 
     int64_t union_lo = 0;

@@ -1023,7 +1023,15 @@ BOOST_AUTO_TEST_CASE(e2e_repetition_batch_200pps)
         0.3f, true, 8,
         /*use_predicted_timing=*/true,
         /*emit_individual_repetitions=*/true,
-        /*batch_individual_repetitions=*/true);
+        /*batch_individual_repetitions=*/true,
+        /*emit_repetition_average=*/false,
+        /*repetition_average_skip=*/10,
+        // R03: the loopback echo injects exactly one CFO (0.0), so this timed
+        // path declares its calibrated CFO instead of paying for a front-end
+        // pass per pulse.  Without this the 5 ms/pulse budget below would be
+        // measuring the CFO estimator, not the repetition batch.
+        /*target_cfo_known=*/true,
+        /*target_cfo_hz=*/0.0);
     auto w = UwbCirWriter::make(dir, "cir", /*write_normalized=*/true, 32);
     auto tb = gr::make_top_block("qa_repetition_batch_200pps");
     tb->msg_connect(src, "tx", echo, "tx");

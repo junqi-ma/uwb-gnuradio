@@ -218,6 +218,21 @@ target_link_libraries(benchmark_radar_pipeline
 )
 
 ########################################################################
+# R05: legacy offline control for the pre-refactor sensing decomposition.
+# This is NOT a production receiver: it keeps `search_sfd` /
+# `refine_sync_origin` / scalar `estimate_radar_cir` measurable as a
+# historical control after `benchmark_radar_pipeline` was switched to report
+# the production entry point (`radar::radar_cir_one`) only.  The binary and
+# every line it prints say so.
+########################################################################
+add_executable(benchmark_radar_pipeline_legacy benchmark_radar_pipeline_legacy.cc)
+target_link_libraries(benchmark_radar_pipeline_legacy
+    gnuradio-uwb
+    gnuradio::gnuradio-runtime
+    Threads::Threads
+)
+
+########################################################################
 # S0-D: layered preamble-SIC benchmark (core / GR-PDU / native 65/32).
 # Measurement only; it drives the frozen core + adapter + resampler.
 ########################################################################

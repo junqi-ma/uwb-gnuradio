@@ -219,7 +219,9 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
     bool emit_individual_repetitions,
     bool batch_individual_repetitions,
     bool emit_repetition_average,
-    size_t repetition_average_skip)
+    size_t repetition_average_skip,
+    bool target_cfo_known,
+    double target_cfo_hz)
     : gr::block("uwb_radar_cir_estimator",
                 gr::io_signature::make(0, 0, 0),
                 gr::io_signature::make(0, 0, 0)),
@@ -252,6 +254,10 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
     d_cfg_.sfd_threshold = sfd_threshold;
     d_cfg_.sync_refine_threshold = sync_refine_threshold;
     d_cfg_.use_predicted_timing = use_predicted_timing;
+    // R03: the public calibration value.  Only the timed path consults it; the
+    // detected path always estimates the target CFO from the target code.
+    d_cfg_.target_cfo_known = target_cfo_known;
+    d_cfg_.target_cfo_hz = target_cfo_hz;
     // Match the demod convention: skip the first settling SYNCs and average
     // every remaining repetition.  For preambles shorter than the skip,
     // average all repetitions instead.
@@ -278,6 +284,17 @@ UwbRadarCirEstimator::UwbRadarCirEstimator(
     }
     if (d_repetition_average_skip_ >= sync_repetitions)
         d_repetition_average_skip_ = 0;
+
+    // R03 item 4: the alongside average is a SECOND derotated consumer whose
+    // window (skip 0, count = sync_repetitions by default) differs from the
+    // main CIR's (skip 10, count 54).  Declare it before prepare() so the
+    // final-CFO coverage is planned over the union and the extra average can
+    // never read samples compensated with the bootstrap CFO.
+    if (d_emit_repetition_average_) {
+        d_cfg_.extra_cir_skip_initial = d_repetition_average_skip_;
+        d_cfg_.extra_cir_repetitions =
+            sync_repetitions - d_repetition_average_skip_;
+    }
 
     std::vector<gr_complex> tmpl = load_cf32_file(d_template_path_);
     if (tmpl.size() != kSps) {
@@ -365,7 +382,9 @@ UwbRadarCirEstimator::make(const std::string& template_path,
                            bool emit_individual_repetitions,
                            bool batch_individual_repetitions,
                            bool emit_repetition_average,
-                           size_t repetition_average_skip)
+                           size_t repetition_average_skip,
+                           bool target_cfo_known,
+                           double target_cfo_hz)
 {
     return gnuradio::get_initial_sptr(new UwbRadarCirEstimator(
         template_path, sync_repetitions, sfd_mode, code_index, cir_pre,
@@ -373,7 +392,8 @@ UwbRadarCirEstimator::make(const std::string& template_path,
         sync_refine_margin, sfd_threshold, sync_refine_threshold,
         emit_normalized, queue_capacity, use_predicted_timing,
         emit_individual_repetitions, batch_individual_repetitions,
-        emit_repetition_average, repetition_average_skip));
+        emit_repetition_average, repetition_average_skip, target_cfo_known,
+        target_cfo_hz));
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +444,19 @@ size_t UwbRadarCirEstimator::queue_depth() const
 size_t UwbRadarCirEstimator::queue_high_watermark() const
 {
     return d_queue_high_watermark_.load(std::memory_order_relaxed);
+}
+
+uint64_t UwbRadarCirEstimator::scratch_growths() const
+{
+    return d_scratch_growths_.load(std::memory_order_relaxed);
+}
+uint64_t UwbRadarCirEstimator::scratch_growth_us() const
+{
+    return d_scratch_growth_us_.load(std::memory_order_relaxed);
+}
+size_t UwbRadarCirEstimator::scratch_capacity_samples() const
+{
+    return d_scratch_capacity_samples_.load(std::memory_order_relaxed);
 }
 
 uint64_t UwbRadarCirEstimator::service_mean_us() const
@@ -509,6 +542,9 @@ void UwbRadarCirEstimator::reset_stats()
     d_queue_high_watermark_.store(
         d_queue_depth_.load(std::memory_order_relaxed),
         std::memory_order_relaxed);
+    // Scratch growth counters are NOT reset: they describe the worker's
+    // scratch lifetime (capacity never shrinks), so resetting them would make
+    // the next "growth" invisible while the capacity is already large.
     d_service_max_us_.store(0, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(d_hist_mutex_);
     for (int i = 0; i < 64; ++i)
@@ -582,10 +618,11 @@ UwbRadarCirEstimator::handle_rx(pmt::pmt_t msg)
         publish_status("invalid_input");
         return;
     }
-    // Give the shared preamble front-end scratch room for this window size so
-    // the worker never grows a vector inside the hot path.  reserve() is a
-    // no-op once the capacity is large enough and never shrinks.
-    radar::reserve_radar_cir_core(n, d_scratch_);
+    // R02: the message thread must NOT reserve/resize/prepare the worker's
+    // scratch.  `radar::reserve_radar_cir_core()` used to run here, which is a
+    // concurrent reallocation against a worker that may be inside
+    // radar_cir_one().  The worker now grows its own scratch at the start of
+    // each job (see ensure_worker_scratch / worker_loop).
     d_received_.fetch_add(1, std::memory_order_relaxed);
 
     const uint64_t pulse_id = dict_u64(meta, radar_meta::kPulseId, 0);
@@ -715,6 +752,7 @@ UwbRadarCirEstimator::handle_rx(pmt::pmt_t msg)
     job.predicted_sfd = predicted;
     job.calibration_delay_work = cal_work;
     job.zero_delay_tap = zero_tap;
+    job.window_start = window_start;
     job.meta = meta;
     job.samples = payload;
     job.enqueued_at = std::chrono::steady_clock::now();
@@ -757,6 +795,24 @@ UwbRadarCirEstimator::enqueue(Job&& job)
 // ---------------------------------------------------------------------------
 
 void
+UwbRadarCirEstimator::ensure_worker_scratch(size_t n)
+{
+    // Worker thread only.  `reserve_radar_cir_core()` only reserves (never
+    // shrinks, never resizes), so a window that fits the current capacity is
+    // free.  The block has no public max-length parameter, so growth is
+    // dynamic: it happens here, exclusively, at the start of a job.
+    if (n == 0 ||
+        n <= d_scratch_capacity_samples_.load(std::memory_order_relaxed))
+        return;
+    const auto t0 = std::chrono::steady_clock::now();
+    radar::reserve_radar_cir_core(n, d_scratch_);
+    const uint64_t us = elapsed_us(t0, std::chrono::steady_clock::now());
+    d_scratch_capacity_samples_.store(n, std::memory_order_relaxed);
+    d_scratch_growths_.fetch_add(1, std::memory_order_relaxed);
+    d_scratch_growth_us_.fetch_add(us, std::memory_order_relaxed);
+}
+
+void
 UwbRadarCirEstimator::worker_loop()
 {
     d_worker_busy_.store(false, std::memory_order_relaxed);
@@ -786,6 +842,11 @@ UwbRadarCirEstimator::worker_loop()
             pmt::c32vector_elements(job.samples, n);
 
         const auto t0 = std::chrono::steady_clock::now();
+        // R02: the worker is the ONLY owner of d_scratch_.  Grow it here, at
+        // the start of the job, before any DSP touches it.  The growth cost is
+        // inside the service window AND counted separately, so a consumer can
+        // tell "this pulse paid for a reallocation" from "this pulse was slow".
+        ensure_worker_scratch(n);
         radar::RadarCirResult r;
         bool threw = false;
         std::string what;
@@ -963,13 +1024,41 @@ UwbRadarCirEstimator::make_common_frame_meta(
                          pmt::from_long(r.cir_axis_origin));
     meta = pmt::dict_add(meta, pmt::mp("phase_reference_sample"),
                          pmt::from_long(r.phase_reference_sample));
+    // Coordinate frames made explicit (R03 item 6).  `phase_reference_sample`
+    // is WINDOW-relative (0 = the window's own sample 0); the absolute anchor
+    // is window_absolute_origin + phase_reference_sample.  A single window's
+    // sample 0 is not global sample 0, so raw tap phase is only comparable
+    // across windows after accounting for this origin.
+    meta = pmt::dict_add(meta, pmt::mp("window_absolute_origin"),
+                         pmt::from_long(job.window_start));
+    meta = pmt::dict_add(
+        meta, pmt::mp("phase_reference_absolute_sample"),
+        pmt::from_long(job.window_start + r.phase_reference_sample));
     // Target-CFO provenance: final_cfo_hz == 0 with cfo_epoch == 0 means the
-    // timed path explicitly ASSUMED zero (no detection available), never that
-    // a zero CFO was estimated.
+    // CIR kernel consumed an UNCOMPENSATED buffer; `cfo_source` says which arm
+    // produced that.  The timed path never returns Ok with cfo_epoch == 0
+    // unless the caller explicitly disabled compensation.
     meta = pmt::dict_add(meta, pmt::mp("final_cfo_hz"),
                          pmt::from_double(r.final_cfo_hz));
     meta = pmt::dict_add(meta, pmt::mp("cfo_epoch"),
                          pmt::from_uint64(static_cast<uint64_t>(r.cfo_epoch)));
+    // Bootstrap (epoch 1) estimate, provenance only: it is never consumed.
+    meta = pmt::dict_add(meta, pmt::mp("bootstrap_cfo_hz"),
+                         pmt::from_double(r.bootstrap_cfo_hz));
+    meta = pmt::dict_add(meta, pmt::mp("cfo_source"),
+                         pmt::mp(r.cfo_source ? r.cfo_source : "none"));
+    meta = pmt::dict_add(meta, pmt::mp("cfo_compensated"),
+                         r.cfo_epoch == 2u ? pmt::PMT_T : pmt::PMT_F);
+    // Final-CFO coverage actually advertised by the core.  Every derotated
+    // consumer must be inside [covered_lo, covered_hi); -1 means no derotated
+    // buffer was published (raw arm or failed call).
+    meta = pmt::dict_add(meta, pmt::mp("covered_lo"),
+                         pmt::from_long(r.covered_lo));
+    meta = pmt::dict_add(meta, pmt::mp("covered_hi"),
+                         pmt::from_long(r.covered_hi));
+    // Static literal naming why a failed call failed ("" on success).
+    meta = pmt::dict_add(meta, pmt::mp("status_reason"),
+                         pmt::mp(r.status_reason ? r.status_reason : ""));
     meta = pmt::dict_add(meta, pmt::mp("cir_samples_per_symbol"),
                          pmt::from_double(r.cir_samples_per_symbol));
     meta = pmt::dict_add(meta, pmt::mp("sfd_metric"),
@@ -1010,6 +1099,8 @@ UwbRadarCirEstimator::make_common_frame_meta(
     meta = pmt::dict_add(meta, pmt::mp("use_predicted_timing"),
                          d_cfg_.use_predicted_timing ? pmt::PMT_T
                                                      : pmt::PMT_F);
+    meta = pmt::dict_add(meta, pmt::mp("target_cfo_known"),
+                         d_cfg_.target_cfo_known ? pmt::PMT_T : pmt::PMT_F);
     meta = pmt::dict_add(meta, pmt::mp("sfd_ok"),
                          r.sfd_start_sample >= 0 ? pmt::PMT_T : pmt::PMT_F);
     meta = pmt::dict_add(
@@ -1043,6 +1134,31 @@ UwbRadarCirEstimator::publish_frame(const Job& job,
             meta, pmt::mp("averaged_repetition_first"),
             pmt::from_uint64(static_cast<uint64_t>(
                 d_repetition_average_skip_)));
+    }
+    if (repetition_index >= 0) {
+        // R03 item 5: per-repetition output reads the caller's RAW window
+        // through the legacy scalar estimator (one window per repetition, no
+        // averaging, integer period).  It is NOT target-CFO compensated, so it
+        // is renamed and marked as a raw diagnostic in BOTH the field name and
+        // the metadata.  `final_cfo_hz`/`cfo_epoch` are reset to the "not
+        // compensated" values so this frame can never be mistaken for the
+        // compensated average; the pulse-level estimate is kept separately
+        // under `pulse_final_cfo_hz` for reference only.
+        meta = pmt::dict_add(meta, pmt::mp("cir_output"),
+                             pmt::mp("repetition_raw_uncompensated"));
+        meta = pmt::dict_add(meta, pmt::mp("cfo_compensated"), pmt::PMT_F);
+        meta = pmt::dict_add(meta, pmt::mp("cfo_source"), pmt::mp("none"));
+        meta = pmt::dict_add(meta, pmt::mp("pulse_final_cfo_hz"),
+                             pmt::from_double(r.final_cfo_hz));
+        meta = pmt::dict_add(meta, pmt::mp("pulse_cfo_epoch"),
+                             pmt::from_uint64(
+                                 static_cast<uint64_t>(r.cfo_epoch)));
+        meta = pmt::dict_add(meta, pmt::mp("final_cfo_hz"),
+                             pmt::from_double(0.0));
+        meta = pmt::dict_add(meta, pmt::mp("cfo_epoch"),
+                             pmt::from_uint64(0));
+        meta = pmt::dict_add(meta, pmt::mp("covered_lo"), pmt::from_long(-1));
+        meta = pmt::dict_add(meta, pmt::mp("covered_hi"), pmt::from_long(-1));
     }
 
     meta = pmt::dict_add(meta, pmt::mp("status"),
@@ -1123,20 +1239,40 @@ UwbRadarCirEstimator::publish_alongside_average(
                              ? d_cfg_.sync_repetitions - skip
                              : 0;
     // Same kernel as the production path.  When radar_cir_one consumed the
-    // final-CFO compensated buffer, the extra average must consume it too
-    // (the raw window is not CFO compensated and a second scalar averaging
-    // path is exactly what workstream C removed).
-    const gr_complex* avg_rx =
-        radar::detail::radar_cir_uses_derotated(d_cfg_)
-            ? d_scratch_.demod.derotated.data()
-            : rx;
-    if (count == 0 || avg_rx == nullptr ||
-        !radar::radar_cir_average_range(
-            avg_rx, n, d_cfg_, r.cir_origin_sample,
-            r.cir_samples_per_symbol > 0.0 ? r.cir_samples_per_symbol
-                                           : static_cast<double>(kSps),
-            skip, count, d_scratch_, avg_result)) {
+    // final-CFO compensated buffer, the extra average must consume it too --
+    // but only after PROVING that its own windows are inside the advertised
+    // coverage.  Its skip/count differ from the main CIR's (default 0/64
+    // versus 10/54), so its windows reach EARLIER samples than the main CIR's
+    // union; holding a pointer into `demod.derotated` is not proof that those
+    // samples were compensated with the final CFO.  If the coverage does not
+    // contain them this consumer fails closed instead of publishing a silently
+    // uncompensated average.
+    const bool derotated = radar::detail::radar_cir_uses_derotated(d_cfg_);
+    const gr_complex* avg_rx = derotated ? d_scratch_.demod.derotated.data()
+                                        : rx;
+    const double period = r.cir_samples_per_symbol > 0.0
+                              ? r.cir_samples_per_symbol
+                              : static_cast<double>(kSps);
+    int64_t covered_lo = -1;
+    int64_t covered_hi = -1;
+    bool covered = true;
+    if (derotated) {
+        int64_t need_lo = -1;
+        int64_t need_hi = -1;
+        covered = radar::radar_cir_coverage_ok(
+            d_cfg_, r.cir_axis_origin, period, skip, count,
+            d_cfg_.sync_repetitions, n, r.covered_lo, r.covered_hi, need_lo,
+            need_hi);
+        covered_lo = r.covered_lo;
+        covered_hi = r.covered_hi;
+    }
+    if (count == 0 || avg_rx == nullptr || !covered ||
+        !radar::radar_cir_average_range(avg_rx, n, d_cfg_, r.cir_axis_origin,
+                                        period, skip, count, d_scratch_,
+                                        avg_result, covered_lo, covered_hi)) {
         avg_result.status = radar::RadarCirStatus::CirFailed;
+        avg_result.status_reason =
+            covered ? "average_kernel_failed" : "coverage_insufficient";
         avg_result.tap_count = 0;
         avg_result.peak_tap = 0;
         avg_result.peak_abs = 0.f;
@@ -1169,6 +1305,22 @@ UwbRadarCirEstimator::publish_repetition_batch(
     meta = pmt::dict_add(meta, pmt::mp("valid_repetitions"),
                          pmt::from_uint64(count));
     meta = pmt::dict_add(meta, pmt::mp("repetition_batch"), pmt::PMT_T);
+    // R03 item 5: batched repetitions are the same RAW, uncompensated
+    // diagnostic as the single-repetition frames (see publish_frame).
+    meta = pmt::dict_add(meta, pmt::mp("cir_output"),
+                         pmt::mp("repetition_raw_uncompensated"));
+    meta = pmt::dict_add(meta, pmt::mp("cfo_compensated"), pmt::PMT_F);
+    meta = pmt::dict_add(meta, pmt::mp("cfo_source"), pmt::mp("none"));
+    meta = pmt::dict_add(meta, pmt::mp("pulse_final_cfo_hz"),
+                         pmt::from_double(r.final_cfo_hz));
+    meta = pmt::dict_add(meta, pmt::mp("pulse_cfo_epoch"),
+                         pmt::from_uint64(
+                             static_cast<uint64_t>(r.cfo_epoch)));
+    meta = pmt::dict_add(meta, pmt::mp("final_cfo_hz"),
+                         pmt::from_double(0.0));
+    meta = pmt::dict_add(meta, pmt::mp("cfo_epoch"), pmt::from_uint64(0));
+    meta = pmt::dict_add(meta, pmt::mp("covered_lo"), pmt::from_long(-1));
+    meta = pmt::dict_add(meta, pmt::mp("covered_hi"), pmt::from_long(-1));
     meta = pmt::dict_add(meta, pmt::mp("repetition_first"),
                          pmt::from_uint64(first));
     meta = pmt::dict_add(meta, pmt::mp("repetition_count"),
@@ -1217,6 +1369,13 @@ UwbRadarCirEstimator::snapshot_stats(pmt::pmt_t& meta)
                          pmt::from_uint64(invalid_inputs()));
     meta = pmt::dict_add(meta, pmt::mp("worker_exceptions"),
                          pmt::from_uint64(worker_exceptions()));
+    meta = pmt::dict_add(meta, pmt::mp("scratch_growths"),
+                         pmt::from_uint64(scratch_growths()));
+    meta = pmt::dict_add(meta, pmt::mp("scratch_growth_us"),
+                         pmt::from_uint64(scratch_growth_us()));
+    meta = pmt::dict_add(
+        meta, pmt::mp("scratch_capacity_samples"),
+        pmt::from_uint64(static_cast<uint64_t>(scratch_capacity_samples())));
     meta = pmt::dict_add(meta, pmt::mp("queue_depth"),
                          pmt::from_uint64(
                              static_cast<uint64_t>(queue_depth())));

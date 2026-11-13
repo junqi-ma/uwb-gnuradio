@@ -1259,23 +1259,30 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_128sync_cfo_cause)
                 BOOST_REQUIRE(as.res.payload.fcs_pass);
                 BOOST_CHECK(as.res.payload.bytes == stress);
             } else {
-                // 64 synthesised (zero) peaks leak into the 104-point fit.
+                // The measured-only CFO refit consumes just the measured tail,
+                // so the synthesised (zero) peaks counted above no longer bias
+                // the fit: the stock profile now behaves exactly like the old
+                // "skip the synthesised peaks" workaround.  (This branch used
+                // to assert the defect — a ~1 kHz+ estimate error and a failed
+                // 127 B decode — which is what this test was written to
+                // diagnose.)
                 BOOST_CHECK_GT(zero_corr, size_t(24));
-                // Deterministic hard fact: the estimate is badly wrong.
-                BOOST_CHECK_GT(std::abs(a.res.cfo.cfo_hz - f), 1000.0);
-                // Deterministic consequence on a standard-length PSDU.
-                BOOST_CHECK(as.res.status != DemodStatus::Success);
-                BOOST_CHECK(!as.res.payload.fcs_pass);
-                // With the skip corrected the estimate is exact again and the
-                // SAME frame decodes with a passing FCS.
+                BOOST_CHECK_CLOSE(a.res.cfo.cfo_hz, f, 0.1);
+                BOOST_REQUIRE(as.res.status == DemodStatus::Success);
+                BOOST_REQUIRE(as.res.payload.fcs_pass);
+                BOOST_CHECK(as.res.payload.bytes == stress);
+                // The explicit workaround must still agree with the stock path.
                 BOOST_REQUIRE(b.res.status == DemodStatus::Success);
                 BOOST_REQUIRE(b.res.payload.fcs_pass);
                 BOOST_CHECK_CLOSE(b.res.cfo.cfo_hz, f, 0.1);
                 BOOST_CHECK(b.res.payload.bytes == stress);
+                BOOST_CHECK_CLOSE(a.res.cfo.cfo_hz, b.res.cfo.cfo_hz, 0.1);
                 BOOST_TEST_MESSAGE("CFO reps=" << reps << " inj=" << f
+                                               << " stock_est="
+                                               << f3(a.res.cfo.cfo_hz)
                                                << " fixed_est="
                                                << f3(b.res.cfo.cfo_hz)
-                                               << " -> diagnosis confirmed");
+                                               << " -> both exact");
             }
         }
     }
@@ -1444,18 +1451,15 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_preamble_length_boundary)
         BOOST_REQUIRE_MESSAGE(o.pass0, "zero-CFO decode failed for reps="
                                            + std::to_string(o.reps));
         BOOST_CHECK_EQUAL(o.peaks0, o.reps);
-        if (o.reps <= 64) {
-            // synthesised - skipped = max(0, reps - 40 - 24) = 0, so the phase
-            // fit sees only measured peaks and the estimate is exact.
-            BOOST_REQUIRE(o.pass20k);
-            BOOST_CHECK_CLOSE(o.est20k, kCfoWhitelistHz, 0.1);
-        } else {
-            // synthesised - skipped = reps - 64 > 0: the phase fit is biased.
-            // The estimate error is the deterministic invariant; the decode
-            // failure on a 127 B PSDU is deterministic too.
-            BOOST_CHECK_GT(std::abs(o.est20k - kCfoWhitelistHz), 1000.0);
-            BOOST_CHECK(!o.pass20k);
-        }
+        // The CFO refit consumes only the MEASURED tail repetitions, so the
+        // synthesised leading peaks counted by `zero_corr0` above can no longer
+        // bias the phase fit.  Every length above the floor therefore estimates
+        // the 20 kHz offset exactly and decodes at full PSDU length.  (Before
+        // the measured-only refit, lengths > 64 were biased by arg(0)
+        // placeholders and failed here — that was a defect, not a property of
+        // long preambles.)
+        BOOST_REQUIRE(o.pass20k);
+        BOOST_CHECK_CLOSE(o.est20k, kCfoWhitelistHz, 0.1);
         // PHR self-description: only 16, 64 and 1024 are representable.
         const bool phr_ok = (advertised == o.reps);
         if (phr_ok)
@@ -1463,8 +1467,10 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_preamble_length_boundary)
     }
 
     // Final whitelist for sync_repetitions: CFO-robust AND PHR-describable.
-    // Measured result: {16, 64}.  1024 is PHR-legal but CFO-biased; 32 is
-    // CFO-exact but advertises 64; >64 has both defects; <=12 hits the CIR
+    // Measured result: {16, 64, 1024}.  CFO robustness no longer depends on
+    // length (the measured-only refit removed the long-preamble bias), so the
+    // only remaining constraint is PHR self-description: 32 and 128 advertise
+    // 64, and 256/512/2048 are not representable.  <=12 still hits the CIR
     // floor.
     for (const auto& o : obs) {
         const bool cfo_robust = o.ran && o.pass20k;
@@ -1475,7 +1481,7 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_preamble_length_boundary)
                                              << " -> "
                                              << (whitelist ? "supported"
                                                            : "unsupported"));
-        if (o.reps == 16 || o.reps == 64)
+        if (o.reps == 16 || o.reps == 64 || o.reps == 1024)
             BOOST_CHECK(whitelist);
         else
             BOOST_CHECK(!whitelist);

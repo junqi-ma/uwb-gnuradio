@@ -145,6 +145,17 @@ def main():
                                            interval_us=data['meta']['steady_window_us'], startup_ms=data['meta']['startup_ready_ms'])
                                 for field in ['resample_us','sic_us','sensing_us','e2e_us','queue_us']:
                                     row[field]=percentiles([w['timing'][field] for w in ws])
+                                # Sensing provenance/timers are top-level window
+                                # fields (not under "timing").  radar_frontend_us
+                                # is timing+cfo+sfd; coverage planning and the
+                                # final-CFO derotation are children of the SFD
+                                # parent and are never added again.
+                                for field in ['radar_frontend_us','radar_cir_us','radar_other_us']:
+                                    row[field]=percentiles([w[field] for w in ws])
+                                row['radar_cfo_hz']=percentiles([w['radar_cfo_hz'] for w in ws])
+                                row['radar_valid_reps']=sorted(set(w['radar_valid_reps'] for w in ws))
+                                row['radar_cir_origin']=sorted(set(w['radar_cir_origin'] for w in ws))
+                                row['radar_detected_origin']=sorted(set(w['radar_detected_origin'] for w in ws))
                                 row['queue_plus_service_us']=percentiles([w['timing']['queue_us']+w['timing']['e2e_us'] for w in ws])
                             else:
                                 dest=args.out/(name+'.csv')
