@@ -44,7 +44,50 @@ using namespace gr::uwb::pipeline;
 #define UWB_TESTDATA_DIR "testdata"
 #endif
 
+// ---------------------------------------------------------------------------
+// Output-writer telemetry binding
+// ---------------------------------------------------------------------------
+// `UhdSc16Pipeline::output_writer_stats()` is declared by the frozen Phase 0
+// header but DEFINED by the pipeline integration (`uwb_uhd_sc16_pipeline.cc`,
+// which this track does not own).  In a tree that does not carry that
+// definition yet a normal call would fail to link and the runner would be
+// unbuildable.
+//
+// The declaration below is therefore a weak UNDEFINED reference to the
+// Itanium-ABI mangled name.  It binds to the real definition whenever the
+// linked library provides it (i.e. once the integration lands) and stays null
+// otherwise; in that case the runner reports the writer as DISABLED
+// (enabled == false, every counter 0) and says so on stdout instead of
+// inventing numbers.  Being only a reference it can never shadow the library's
+// own definition.
+//
+// `_ZNK2gr3uwb8pipeline15UhdSc16Pipeline19output_writer_statsEv` is
+// "const member function, no arguments"; it is spelled out because a plain
+// `extern "C"` declaration cannot carry a C++ name.
+gr::uwb::pipeline::OutputWriterStats
+    pipeline_output_writer_stats_weak(const gr::uwb::pipeline::UhdSc16Pipeline*)
+        __asm__("_ZNK2gr3uwb8pipeline15UhdSc16Pipeline19output_writer_statsEv")
+            __attribute__((weak));
+
 namespace {
+
+// True when the linked library actually provides output_writer_stats().
+bool output_writer_stats_available()
+{
+    return pipeline_output_writer_stats_weak != nullptr;
+}
+
+// Must never be called before UhdSc16Pipeline::wait()/stop(): that is where the
+// writer drains, so only then is `offered == written + dropped` meaningful.
+// A missing definition reports the disabled writer rather than a fake ledger.
+gr::uwb::pipeline::OutputWriterStats
+read_output_writer_stats(const gr::uwb::pipeline::UhdSc16Pipeline& pipeline)
+{
+    if (pipeline_output_writer_stats_weak != nullptr) {
+        return pipeline_output_writer_stats_weak(&pipeline);
+    }
+    return gr::uwb::pipeline::OutputWriterStats{};
+}
 
 struct BenchmarkLockGuard {
     int fd = -1;
@@ -379,6 +422,18 @@ void print_help(const char* prog_name)
               << "  --iq-dump-tag <tag>         Dump filename suffix (default: none)\n"
               << "  --iq-dump-windows <n>       Windows to dump (default: 0)\n"
               << "  --iq-dump-window-limit <n>  Only window_id < n (default: 0 = no limit)\n"
+              << "  --output-dir <dir>          Persist per-window results to <dir> (default: off)\n"
+              << "  --cir-base <name>           .ucr4/.jsonl base name (default: cir)\n"
+              << "  --comm-base <name>          demod_results base name (default: demod_results)\n"
+              << "  --no-cir-write              Disable the sensing CIR files\n"
+              << "  --no-comm-write             Disable demod_results.jsonl\n"
+              << "  --comm-write-only-ok        Only persist decoded frames with fcs_pass\n"
+              << "  --writer-queue <n>          Bounded writer hand-off queue depth (default: 64)\n"
+              << "  --writer-agg-bytes <n>      Aggregate buffer bytes, 0 = per-frame (default: 1048576)\n"
+              << "  --writer-agg-ms <n>         Aggregate flush interval in ms (default: 50)\n"
+              << "  --live-log <off|events|all|summary>  Live console log mode (default: off)\n"
+              << "  --live-log-interval-ms <n>  Summary refresh period in ms (default: 500)\n"
+              << "  --live-log-psdu <0|1>       Include psdu_hex in the live log (default: 1)\n"
               << "  --sic-policy <p>            SIC policy: preamble|fullpacket|auto (default: auto)\n"
               << "  --sic-backend <b>           SIC estimator: ipatov|discrete|fractional (default: ipatov)\n"
               << "  --sic-comm-code <n>         Comm SYNC code index for SIC (default: 10)\n"
@@ -416,6 +471,98 @@ const char* canonical_sfd_mode(const std::string& s)
     if (s == "decawave") return "decawave";
     if (s == "ieee") return "ieee";
     return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Output-writer / live-log option helpers
+// ---------------------------------------------------------------------------
+// Strict non-negative size parse.  Rejects empty tokens, a leading '-', trailing
+// garbage and overflow instead of silently truncating them (the same rule
+// parse_non_negative_int applies to the worker-count options).
+bool parse_size_token(const std::string& token,
+                      const char* what,
+                      size_t& value,
+                      std::string& err)
+{
+    if (token.empty()) {
+        err = std::string("empty ") + what + " token";
+        return false;
+    }
+    if (token[0] == '-') {
+        err = "negative " + std::string(what) + " '" + token + "'";
+        return false;
+    }
+    size_t consumed = 0;
+    unsigned long long parsed = 0;
+    try {
+        parsed = std::stoull(token, &consumed);
+    } catch (const std::exception&) {
+        err = "non-numeric " + std::string(what) + " '" + token + "'";
+        return false;
+    }
+    if (consumed != token.size()) {
+        err = "non-numeric " + std::string(what) + " '" + token + "'";
+        return false;
+    }
+    value = static_cast<size_t>(parsed);
+    return true;
+}
+
+// 0|1 (with true/false accepted as a convenience).  Anything else is an error:
+// a typo must never be read as "off".
+bool parse_bool_token(const std::string& token,
+                      const char* what,
+                      bool& value,
+                      std::string& err)
+{
+    if (token == "0" || token == "false") {
+        value = false;
+        return true;
+    }
+    if (token == "1" || token == "true") {
+        value = true;
+        return true;
+    }
+    err = std::string("expected 0|1 for ") + what + ", got '" + token + "'";
+    return false;
+}
+
+// Explicit domain mapping for --live-log.  Returns false for an unknown value
+// so the caller can fail closed; it never falls back to Off.
+bool parse_live_log_mode(const std::string& token, LiveLogMode& mode)
+{
+    if (token == "off") {
+        mode = LiveLogMode::Off;
+        return true;
+    }
+    if (token == "events") {
+        mode = LiveLogMode::Events;
+        return true;
+    }
+    if (token == "all") {
+        mode = LiveLogMode::All;
+        return true;
+    }
+    if (token == "summary") {
+        mode = LiveLogMode::Summary;
+        return true;
+    }
+    return false;
+}
+
+// An enum's members are not its domain: a variable of enum type can hold a
+// value with no enumerator.  Every consumer must therefore test the domain
+// explicitly, and BEFORE using the value.  No `default:` label, so -Wswitch
+// still catches a newly added enumerator.
+bool live_log_mode_in_domain(LiveLogMode m)
+{
+    switch (m) {
+    case LiveLogMode::Off: return true;
+    case LiveLogMode::Events: return true;
+    case LiveLogMode::All: return true;
+    case LiveLogMode::Summary: return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -688,6 +835,128 @@ int main(int argc, char* argv[])
                 return 1;
             }
             cfg.iq_dump_window_limit = static_cast<size_t>(std::stoull(argv[++i]));
+        } else if (arg == "--output-dir") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --output-dir requires a directory path\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            cfg.output.output_dir = argv[++i];
+        } else if (arg == "--cir-base") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --cir-base requires a file base name\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            cfg.output.cir_base_name = argv[++i];
+        } else if (arg == "--comm-base") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --comm-base requires a file base name\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            cfg.output.comm_base_name = argv[++i];
+        } else if (arg == "--no-cir-write") {
+            cfg.output.write_cir = false;
+        } else if (arg == "--no-comm-write") {
+            cfg.output.write_comm = false;
+        } else if (arg == "--comm-write-only-ok") {
+            cfg.output.comm_write_only_ok = true;
+        } else if (arg == "--writer-queue") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --writer-queue requires a queue depth\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            const std::string spec = argv[++i];
+            size_t value = 0;
+            std::string err;
+            if (!parse_size_token(spec, "writer queue depth", value, err)) {
+                std::cerr << "Error: Invalid --writer-queue value '" << spec << "': " << err
+                          << "\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            cfg.output.writer_queue_capacity = value;
+        } else if (arg == "--writer-agg-bytes") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --writer-agg-bytes requires a byte count\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            const std::string spec = argv[++i];
+            size_t value = 0;
+            std::string err;
+            if (!parse_size_token(spec, "aggregate byte count", value, err)) {
+                std::cerr << "Error: Invalid --writer-agg-bytes value '" << spec << "': " << err
+                          << "\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            cfg.output.writer_aggregate_bytes = value;
+        } else if (arg == "--writer-agg-ms") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --writer-agg-ms requires a flush interval in ms\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            const std::string spec = argv[++i];
+            size_t value = 0;
+            std::string err;
+            if (!parse_size_token(spec, "aggregate flush interval", value, err)) {
+                std::cerr << "Error: Invalid --writer-agg-ms value '" << spec << "': " << err
+                          << "\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            cfg.output.writer_aggregate_window_ms = value;
+        } else if (arg == "--live-log") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --live-log requires a mode (off|events|all|summary)\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            const std::string spec = argv[++i];
+            LiveLogMode mode = LiveLogMode::Off;
+            if (!parse_live_log_mode(spec, mode)) {
+                std::cerr << "Error: Invalid --live-log value '" << spec
+                          << "'. Expected off|events|all|summary.\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            cfg.output.live_log_mode = mode;
+        } else if (arg == "--live-log-interval-ms") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --live-log-interval-ms requires a period in ms\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            const std::string spec = argv[++i];
+            size_t value = 0;
+            std::string err;
+            if (!parse_size_token(spec, "live log interval", value, err)) {
+                std::cerr << "Error: Invalid --live-log-interval-ms value '" << spec << "': "
+                          << err << "\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            cfg.output.live_log_interval_ms = value;
+        } else if (arg == "--live-log-psdu") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --live-log-psdu requires 0 or 1\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            const std::string spec = argv[++i];
+            bool value = true;
+            std::string err;
+            if (!parse_bool_token(spec, "--live-log-psdu", value, err)) {
+                std::cerr << "Error: Invalid --live-log-psdu value '" << spec << "': " << err
+                          << "\n";
+                print_help(argv[0]);
+                return 2;
+            }
+            cfg.output.live_log_psdu = value;
         } else if (arg == "--resampler-workers") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --resampler-workers requires worker count\n";
@@ -963,6 +1232,31 @@ int main(int argc, char* argv[])
                      "(burst-level multi-core).\n";
     }
 
+    // ------------------------------------------------------------------
+    // Output writer / live log validation (fail closed, before any use).
+    // The enum domain is checked first: an out-of-domain LiveLogMode must be
+    // rejected here, never silently treated as Off by a later switch.
+    // ------------------------------------------------------------------
+    if (!live_log_mode_in_domain(cfg.output.live_log_mode)) {
+        std::cerr << "Error: --live-log resolved to an out-of-domain mode ("
+                  << static_cast<int>(cfg.output.live_log_mode)
+                  << "). Expected off|events|all|summary.\n";
+        return 2;
+    }
+    if (cfg.output.writer_queue_capacity == 0) {
+        std::cerr << "Error: --writer-queue must be >= 1 (0 would drop every window); "
+                     "omit the option for the default of 64.\n";
+        return 2;
+    }
+    if (cfg.output.cir_base_name.empty()) {
+        std::cerr << "Error: --cir-base must not be empty.\n";
+        return 2;
+    }
+    if (cfg.output.comm_base_name.empty()) {
+        std::cerr << "Error: --comm-base must not be empty.\n";
+        return 2;
+    }
+
     // Configure source type
     if (source_str == "replay") {
         cfg.source_type = StreamSourceType::Replay;
@@ -1138,6 +1432,18 @@ int main(int argc, char* argv[])
               << "  Affinity:      RX=" << cfg.cpu_core_rx << ", DSP=" << cfg.cpu_core_dsp << "\n"
               << std::endl;
 
+    if (cfg.output.enabled()) {
+        std::cout << "  Output:        dir="
+                  << (cfg.output.output_dir.empty() ? std::string("<none>")
+                                                    : cfg.output.output_dir)
+                  << ", cir=" << (cfg.output.write_cir ? "on" : "off")
+                  << ", comm=" << (cfg.output.write_comm ? "on" : "off")
+                  << (cfg.output.comm_write_only_ok ? " (fcs_pass only)" : "")
+                  << ", live_log=" << live_log_mode_name(cfg.output.live_log_mode)
+                  << "\n"
+                  << std::endl;
+    }
+
     // Instantiate pipeline
     UhdSc16Pipeline pipeline(cfg);
 
@@ -1178,6 +1484,14 @@ int main(int argc, char* argv[])
     const bool source_started = pipeline.source_started();
     const bool source_failed = pipeline.source_failed();
     const std::string source_error = pipeline.source_error();
+
+    // Async output writer telemetry.  Read ONLY here, after wait(): stop()
+    // drains the writer, so `offered == written + dropped` holds at this point
+    // and nowhere earlier.
+    const OutputWriterStats out_stats = read_output_writer_stats(pipeline);
+    const bool out_stats_available = output_writer_stats_available();
+    const bool out_ledger_ok =
+        (out_stats.offered == out_stats.written + out_stats.dropped);
 
     double total_elapsed_s = std::chrono::duration<double>(end_time - start_time).count();
     double startup_ready_ms =
@@ -1595,6 +1909,39 @@ int main(int argc, char* argv[])
                   << ", post=" << as.effective_post_guard
                   << " (total=" << (as.effective_pre_guard + as.effective_capture + as.effective_post_guard) << ")\n";
     }
+    // ------------------------------------------------------------------
+    // Output writer telemetry.  The block is printed ONLY when the writer
+    // actually ran: a disabled writer must not print a table of zeros that
+    // looks like a successful run.
+    // ------------------------------------------------------------------
+    if (out_stats.enabled) {
+        std::cout << "--- output writer ---\n"
+                  << "  output_dir:                        "
+                  << (cfg.output.output_dir.empty() ? std::string("<none>")
+                                                    : cfg.output.output_dir)
+                  << "\n"
+                  << std::right
+                  << "  cir_written:                       " << std::setw(10) << out_stats.cir_written << "\n"
+                  << "  cir_failed:                        " << std::setw(10) << out_stats.cir_failed << "\n"
+                  << "  comm_written:                      " << std::setw(10) << out_stats.comm_written << "\n"
+                  << "  comm_skipped:                      " << std::setw(10) << out_stats.comm_skipped << "\n"
+                  << "  offered:                           " << std::setw(10) << out_stats.offered << "\n"
+                  << "  written:                           " << std::setw(10) << out_stats.written << "\n"
+                  << "  dropped:                           " << std::setw(10) << out_stats.dropped << "\n"
+                  << "  aggregate_flushes:                 " << std::setw(10) << out_stats.aggregate_flushes << "\n"
+                  << "  bytes_written:                     " << std::setw(10) << out_stats.bytes_written << "\n"
+                  << "  queue_high_watermark:              " << std::setw(10) << out_stats.queue_high_watermark << "\n"
+                  << "  live_log_lines:                    " << std::setw(10) << out_stats.live_log_lines << "\n"
+                  << "  ledger_ok=" << (out_ledger_ok ? "true" : "false")
+                  << " (offered == written + dropped)\n\n";
+    } else if (cfg.output.enabled()) {
+        std::cout << "Output Writer: disabled, no files written"
+                  << (out_stats_available
+                          ? std::string(" (writer start() failed)")
+                          : std::string(" (output_writer_stats() is not defined in this build)"))
+                  << "\n\n";
+    }
+
     std::cout << "================================================================================\n"
               << std::endl;
 
@@ -1692,6 +2039,34 @@ int main(int argc, char* argv[])
                       bench::json_number(static_cast<uint64_t>(comm_ok_count)));
     meta.emplace_back("comm_fcs_ok_count",
                       bench::json_number(static_cast<uint64_t>(comm_fcs_ok_count)));
+
+    // ---- output writer / live log (read after wait(), see out_stats) ----
+    meta.emplace_back("output_dir", bench::meta_string(cfg.output.output_dir));
+    meta.emplace_back("cir_base", bench::meta_string(cfg.output.cir_base_name));
+    meta.emplace_back("comm_base", bench::meta_string(cfg.output.comm_base_name));
+    meta.emplace_back("write_cir", bench::meta_bool(cfg.output.write_cir));
+    meta.emplace_back("write_comm", bench::meta_bool(cfg.output.write_comm));
+    meta.emplace_back("comm_write_only_ok", bench::meta_bool(cfg.output.comm_write_only_ok));
+    meta.emplace_back("writer_queue",
+                      bench::json_number(static_cast<uint64_t>(cfg.output.writer_queue_capacity)));
+    meta.emplace_back("writer_agg_bytes",
+                      bench::json_number(static_cast<uint64_t>(cfg.output.writer_aggregate_bytes)));
+    meta.emplace_back("writer_agg_ms", bench::json_number(
+                                           static_cast<uint64_t>(cfg.output.writer_aggregate_window_ms)));
+    meta.emplace_back("live_log", bench::meta_string(live_log_mode_name(cfg.output.live_log_mode)));
+    meta.emplace_back("live_log_interval_ms",
+                      bench::json_number(static_cast<uint64_t>(cfg.output.live_log_interval_ms)));
+    meta.emplace_back("live_log_psdu", bench::meta_bool(cfg.output.live_log_psdu));
+    meta.emplace_back("output_offered", bench::json_number(out_stats.offered));
+    meta.emplace_back("output_written", bench::json_number(out_stats.written));
+    meta.emplace_back("output_dropped", bench::json_number(out_stats.dropped));
+    meta.emplace_back("output_cir_written", bench::json_number(out_stats.cir_written));
+    meta.emplace_back("output_cir_failed", bench::json_number(out_stats.cir_failed));
+    meta.emplace_back("output_comm_written", bench::json_number(out_stats.comm_written));
+    meta.emplace_back("output_comm_skipped", bench::json_number(out_stats.comm_skipped));
+    meta.emplace_back("output_aggregate_flushes", bench::json_number(out_stats.aggregate_flushes));
+    meta.emplace_back("output_bytes_written", bench::json_number(out_stats.bytes_written));
+    meta.emplace_back("output_ledger_ok", bench::meta_bool(out_ledger_ok));
 
     if (!bench::write_results_json(json_out, meta, ledger, collected_results)) {
         std::cerr << "Error: cannot write " << json_out << "\n";
