@@ -1,0 +1,674 @@
+[
+  {
+    "profile": "quality_minorder",
+    "rep": 1,
+    "n": 40,
+    "steady_window_us": 1009.701,
+    "ledger": {
+      "offered_windows": 50,
+      "admitted_windows": 50,
+      "completed_windows": 50,
+      "processing_failed": 0,
+      "dropped_admission": 0,
+      "invalid_gap_before_admission": 0,
+      "invalid_gap_after_admission": 0,
+      "cancelled_windows": 0,
+      "total_samples_received": 4956400,
+      "short_reads": 0,
+      "read_timeouts": 0,
+      "read_overflows": 0
+    },
+    "sic_status": {
+      "below_detect_threshold": 37,
+      "fit_residual_exceeded": 3
+    },
+    "sic_committed": 0,
+    "radar_sfd_found": 0,
+    "convert_us": {
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0
+    },
+    "resample_us": {
+      "mean": 280.016525,
+      "p50": 269.58450000000005,
+      "p95": 298.862
+    },
+    "sic_us": {
+      "mean": 60.187225,
+      "p50": 54.183,
+      "p95": 88.426
+    },
+    "sensing_us": {
+      "mean": 669.038575,
+      "p50": 665.0029999999999,
+      "p95": 704.681
+    },
+    "e2e_us": {
+      "mean": 1009.6921249999999,
+      "p50": 998.9784999999999,
+      "p95": 1079.738
+    },
+    "queue_us": {
+      "mean": 23025.393425,
+      "p50": 23062.1305,
+      "p95": 37888.145
+    }
+  },
+  {
+    "profile": "realtime_minorder",
+    "rep": 1,
+    "n": 40,
+    "steady_window_us": 901.144821,
+    "ledger": {
+      "offered_windows": 50,
+      "admitted_windows": 50,
+      "completed_windows": 50,
+      "processing_failed": 0,
+      "dropped_admission": 0,
+      "invalid_gap_before_admission": 0,
+      "invalid_gap_after_admission": 0,
+      "cancelled_windows": 0,
+      "total_samples_received": 4956400,
+      "short_reads": 0,
+      "read_timeouts": 0,
+      "read_overflows": 0
+    },
+    "sic_status": {
+      "below_detect_threshold": 36,
+      "fit_residual_exceeded": 4
+    },
+    "sic_committed": 0,
+    "radar_sfd_found": 0,
+    "convert_us": {
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0
+    },
+    "resample_us": {
+      "mean": 173.2356,
+      "p50": 162.7615,
+      "p95": 204.412
+    },
+    "sic_us": {
+      "mean": 61.290274999999994,
+      "p50": 53.590500000000006,
+      "p95": 80.745
+    },
+    "sensing_us": {
+      "mean": 666.895325,
+      "p50": 654.5329999999999,
+      "p95": 719.538
+    },
+    "e2e_us": {
+      "mean": 901.820025,
+      "p50": 878.7605,
+      "p95": 998.433
+    },
+    "queue_us": {
+      "mean": 25668.1509,
+      "p50": 25708.936999999998,
+      "p95": 40636.673
+    }
+  },
+  {
+    "profile": "quality_eq32",
+    "rep": 1,
+    "n": 40,
+    "steady_window_us": 960.621359,
+    "ledger": {
+      "offered_windows": 50,
+      "admitted_windows": 50,
+      "completed_windows": 50,
+      "processing_failed": 0,
+      "dropped_admission": 0,
+      "invalid_gap_before_admission": 0,
+      "invalid_gap_after_admission": 0,
+      "cancelled_windows": 0,
+      "total_samples_received": 4956400,
+      "short_reads": 0,
+      "read_timeouts": 0,
+      "read_overflows": 0
+    },
+    "sic_status": {
+      "below_detect_threshold": 37,
+      "fit_residual_exceeded": 3
+    },
+    "sic_committed": 0,
+    "radar_sfd_found": 0,
+    "convert_us": {
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0
+    },
+    "resample_us": {
+      "mean": 224.72400000000002,
+      "p50": 208.981,
+      "p95": 272.195
+    },
+    "sic_us": {
+      "mean": 63.967175,
+      "p50": 53.141999999999996,
+      "p95": 115.42
+    },
+    "sensing_us": {
+      "mean": 671.911275,
+      "p50": 657.21,
+      "p95": 714.681
+    },
+    "e2e_us": {
+      "mean": 961.0451999999999,
+      "p50": 944.7294999999999,
+      "p95": 1085.297
+    },
+    "queue_us": {
+      "mean": 27253.620275,
+      "p50": 27305.949500000002,
+      "p95": 43183.317
+    }
+  },
+  {
+    "profile": "realtime_eq16",
+    "rep": 1,
+    "n": 40,
+    "steady_window_us": 862.205718,
+    "ledger": {
+      "offered_windows": 50,
+      "admitted_windows": 50,
+      "completed_windows": 50,
+      "processing_failed": 0,
+      "dropped_admission": 0,
+      "invalid_gap_before_admission": 0,
+      "invalid_gap_after_admission": 0,
+      "cancelled_windows": 0,
+      "total_samples_received": 4956400,
+      "short_reads": 0,
+      "read_timeouts": 0,
+      "read_overflows": 0
+    },
+    "sic_status": {
+      "below_detect_threshold": 36,
+      "fit_residual_exceeded": 4
+    },
+    "sic_committed": 0,
+    "radar_sfd_found": 0,
+    "convert_us": {
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0
+    },
+    "resample_us": {
+      "mean": 141.80397499999998,
+      "p50": 128.78050000000002,
+      "p95": 172.99
+    },
+    "sic_us": {
+      "mean": 60.63405,
+      "p50": 51.816500000000005,
+      "p95": 101.229
+    },
+    "sensing_us": {
+      "mean": 657.2536,
+      "p50": 643.5925,
+      "p95": 689.084
+    },
+    "e2e_us": {
+      "mean": 860.120275,
+      "p50": 834.683,
+      "p95": 976.308
+    },
+    "queue_us": {
+      "mean": 24476.4452,
+      "p50": 24627.814,
+      "p95": 38919.342
+    }
+  },
+  {
+    "profile": "quality_minorder",
+    "rep": 2,
+    "n": 40,
+    "steady_window_us": 992.584872,
+    "ledger": {
+      "offered_windows": 50,
+      "admitted_windows": 50,
+      "completed_windows": 50,
+      "processing_failed": 0,
+      "dropped_admission": 0,
+      "invalid_gap_before_admission": 0,
+      "invalid_gap_after_admission": 0,
+      "cancelled_windows": 0,
+      "total_samples_received": 4956400,
+      "short_reads": 0,
+      "read_timeouts": 0,
+      "read_overflows": 0
+    },
+    "sic_status": {
+      "below_detect_threshold": 37,
+      "fit_residual_exceeded": 3
+    },
+    "sic_committed": 0,
+    "radar_sfd_found": 0,
+    "convert_us": {
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0
+    },
+    "resample_us": {
+      "mean": 275.840325,
+      "p50": 268.495,
+      "p95": 334.141
+    },
+    "sic_us": {
+      "mean": 58.356449999999995,
+      "p50": 52.8245,
+      "p95": 79.366
+    },
+    "sensing_us": {
+      "mean": 658.3970999999999,
+      "p50": 641.3344999999999,
+      "p95": 712.823
+    },
+    "e2e_us": {
+      "mean": 993.0097750000001,
+      "p50": 974.0575,
+      "p95": 1106.088
+    },
+    "queue_us": {
+      "mean": 28763.380200000003,
+      "p50": 28931.745499999997,
+      "p95": 45366.179
+    }
+  },
+  {
+    "profile": "realtime_minorder",
+    "rep": 2,
+    "n": 40,
+    "steady_window_us": 914.360538,
+    "ledger": {
+      "offered_windows": 50,
+      "admitted_windows": 50,
+      "completed_windows": 50,
+      "processing_failed": 0,
+      "dropped_admission": 0,
+      "invalid_gap_before_admission": 0,
+      "invalid_gap_after_admission": 0,
+      "cancelled_windows": 0,
+      "total_samples_received": 4956400,
+      "short_reads": 0,
+      "read_timeouts": 0,
+      "read_overflows": 0
+    },
+    "sic_status": {
+      "below_detect_threshold": 36,
+      "fit_residual_exceeded": 4
+    },
+    "sic_committed": 0,
+    "radar_sfd_found": 0,
+    "convert_us": {
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0
+    },
+    "resample_us": {
+      "mean": 178.3188,
+      "p50": 167.3175,
+      "p95": 245.94
+    },
+    "sic_us": {
+      "mean": 66.6536,
+      "p50": 53.548500000000004,
+      "p95": 123.673
+    },
+    "sensing_us": {
+      "mean": 666.9897,
+      "p50": 656.2774999999999,
+      "p95": 706.664
+    },
+    "e2e_us": {
+      "mean": 912.478675,
+      "p50": 902.069,
+      "p95": 1004.127
+    },
+    "queue_us": {
+      "mean": 25781.218725,
+      "p50": 25828.7795,
+      "p95": 41023.267
+    }
+  },
+  {
+    "profile": "quality_eq32",
+    "rep": 2,
+    "n": 40,
+    "steady_window_us": 963.058256,
+    "ledger": {
+      "offered_windows": 50,
+      "admitted_windows": 50,
+      "completed_windows": 50,
+      "processing_failed": 0,
+      "dropped_admission": 0,
+      "invalid_gap_before_admission": 0,
+      "invalid_gap_after_admission": 0,
+      "cancelled_windows": 0,
+      "total_samples_received": 4956400,
+      "short_reads": 0,
+      "read_timeouts": 0,
+      "read_overflows": 0
+    },
+    "sic_status": {
+      "below_detect_threshold": 37,
+      "fit_residual_exceeded": 3
+    },
+    "sic_committed": 0,
+    "radar_sfd_found": 0,
+    "convert_us": {
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0
+    },
+    "resample_us": {
+      "mean": 221.9948,
+      "p50": 212.54000000000002,
+      "p95": 268.427
+    },
+    "sic_us": {
+      "mean": 60.87480000000001,
+      "p50": 53.691500000000005,
+      "p95": 85.331
+    },
+    "sensing_us": {
+      "mean": 677.9384,
+      "p50": 654.674,
+      "p95": 788.984
+    },
+    "e2e_us": {
+      "mean": 961.2977999999999,
+      "p50": 946.703,
+      "p95": 1085.547
+    },
+    "queue_us": {
+      "mean": 26927.998499999998,
+      "p50": 26950.597,
+      "p95": 42879.807
+    }
+  },
+  {
+    "profile": "realtime_eq16",
+    "rep": 2,
+    "n": 40,
+    "steady_window_us": 881.294949,
+    "ledger": {
+      "offered_windows": 50,
+      "admitted_windows": 50,
+      "completed_windows": 50,
+      "processing_failed": 0,
+      "dropped_admission": 0,
+      "invalid_gap_before_admission": 0,
+      "invalid_gap_after_admission": 0,
+      "cancelled_windows": 0,
+      "total_samples_received": 4956400,
+      "short_reads": 0,
+      "read_timeouts": 0,
+      "read_overflows": 0
+    },
+    "sic_status": {
+      "below_detect_threshold": 36,
+      "fit_residual_exceeded": 4
+    },
+    "sic_committed": 0,
+    "radar_sfd_found": 0,
+    "convert_us": {
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0
+    },
+    "resample_us": {
+      "mean": 137.47729999999999,
+      "p50": 132.247,
+      "p95": 157.499
+    },
+    "sic_us": {
+      "mean": 63.158975,
+      "p50": 53.8125,
+      "p95": 105.005
+    },
+    "sensing_us": {
+      "mean": 678.744875,
+      "p50": 663.8985,
+      "p95": 745.079
+    },
+    "e2e_us": {
+      "mean": 879.8652,
+      "p50": 869.4405,
+      "p95": 953.924
+    },
+    "queue_us": {
+      "mean": 24616.321825,
+      "p50": 24455.528,
+      "p95": 39075.868
+    }
+  },
+  {
+    "profile": "quality_minorder",
+    "rep": 3,
+    "n": 40,
+    "steady_window_us": 1045.87669,
+    "ledger": {
+      "offered_windows": 50,
+      "admitted_windows": 50,
+      "completed_windows": 50,
+      "processing_failed": 0,
+      "dropped_admission": 0,
+      "invalid_gap_before_admission": 0,
+      "invalid_gap_after_admission": 0,
+      "cancelled_windows": 0,
+      "total_samples_received": 4956400,
+      "short_reads": 0,
+      "read_timeouts": 0,
+      "read_overflows": 0
+    },
+    "sic_status": {
+      "below_detect_threshold": 37,
+      "fit_residual_exceeded": 3
+    },
+    "sic_committed": 0,
+    "radar_sfd_found": 0,
+    "convert_us": {
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0
+    },
+    "resample_us": {
+      "mean": 291.7391,
+      "p50": 270.7475,
+      "p95": 444.089
+    },
+    "sic_us": {
+      "mean": 69.88815,
+      "p50": 60.3765,
+      "p95": 129.428
+    },
+    "sensing_us": {
+      "mean": 682.9147,
+      "p50": 657.287,
+      "p95": 767.242
+    },
+    "e2e_us": {
+      "mean": 1045.088025,
+      "p50": 1013.3175,
+      "p95": 1196.921
+    },
+    "queue_us": {
+      "mean": 29647.117975,
+      "p50": 29878.1405,
+      "p95": 47235.965
+    }
+  },
+  {
+    "profile": "realtime_minorder",
+    "rep": 3,
+    "n": 40,
+    "steady_window_us": 887.914385,
+    "ledger": {
+      "offered_windows": 50,
+      "admitted_windows": 50,
+      "completed_windows": 50,
+      "processing_failed": 0,
+      "dropped_admission": 0,
+      "invalid_gap_before_admission": 0,
+      "invalid_gap_after_admission": 0,
+      "cancelled_windows": 0,
+      "total_samples_received": 4956400,
+      "short_reads": 0,
+      "read_timeouts": 0,
+      "read_overflows": 0
+    },
+    "sic_status": {
+      "below_detect_threshold": 36,
+      "fit_residual_exceeded": 4
+    },
+    "sic_committed": 0,
+    "radar_sfd_found": 0,
+    "convert_us": {
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0
+    },
+    "resample_us": {
+      "mean": 170.1112,
+      "p50": 162.6355,
+      "p95": 186.768
+    },
+    "sic_us": {
+      "mean": 58.892475000000005,
+      "p50": 52.3425,
+      "p95": 81.886
+    },
+    "sensing_us": {
+      "mean": 657.425825,
+      "p50": 654.7055,
+      "p95": 679.822
+    },
+    "e2e_us": {
+      "mean": 886.7616,
+      "p50": 876.5925,
+      "p95": 957.18
+    },
+    "queue_us": {
+      "mean": 25190.415125,
+      "p50": 25229.093500000003,
+      "p95": 40009.449
+    }
+  },
+  {
+    "profile": "quality_eq32",
+    "rep": 3,
+    "n": 40,
+    "steady_window_us": 971.644,
+    "ledger": {
+      "offered_windows": 50,
+      "admitted_windows": 50,
+      "completed_windows": 50,
+      "processing_failed": 0,
+      "dropped_admission": 0,
+      "invalid_gap_before_admission": 0,
+      "invalid_gap_after_admission": 0,
+      "cancelled_windows": 0,
+      "total_samples_received": 4956400,
+      "short_reads": 0,
+      "read_timeouts": 0,
+      "read_overflows": 0
+    },
+    "sic_status": {
+      "below_detect_threshold": 37,
+      "fit_residual_exceeded": 3
+    },
+    "sic_committed": 0,
+    "radar_sfd_found": 0,
+    "convert_us": {
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0
+    },
+    "resample_us": {
+      "mean": 235.98995,
+      "p50": 213.7735,
+      "p95": 318.458
+    },
+    "sic_us": {
+      "mean": 60.69902499999999,
+      "p50": 52.8995,
+      "p95": 119.711
+    },
+    "sensing_us": {
+      "mean": 671.7507499999999,
+      "p50": 660.1695,
+      "p95": 726.826
+    },
+    "e2e_us": {
+      "mean": 968.9133250000001,
+      "p50": 953.8009999999999,
+      "p95": 1087.864
+    },
+    "queue_us": {
+      "mean": 27866.799300000002,
+      "p50": 27926.015,
+      "p95": 44225.738
+    }
+  },
+  {
+    "profile": "realtime_eq16",
+    "rep": 3,
+    "n": 40,
+    "steady_window_us": 866.551205,
+    "ledger": {
+      "offered_windows": 50,
+      "admitted_windows": 50,
+      "completed_windows": 50,
+      "processing_failed": 0,
+      "dropped_admission": 0,
+      "invalid_gap_before_admission": 0,
+      "invalid_gap_after_admission": 0,
+      "cancelled_windows": 0,
+      "total_samples_received": 4956400,
+      "short_reads": 0,
+      "read_timeouts": 0,
+      "read_overflows": 0
+    },
+    "sic_status": {
+      "below_detect_threshold": 36,
+      "fit_residual_exceeded": 4
+    },
+    "sic_committed": 0,
+    "radar_sfd_found": 0,
+    "convert_us": {
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0
+    },
+    "resample_us": {
+      "mean": 137.78595,
+      "p50": 128.9905,
+      "p95": 156.783
+    },
+    "sic_us": {
+      "mean": 61.621825,
+      "p50": 51.1875,
+      "p95": 97.866
+    },
+    "sensing_us": {
+      "mean": 664.22095,
+      "p50": 644.203,
+      "p95": 717.994
+    },
+    "e2e_us": {
+      "mean": 863.9946749999999,
+      "p50": 838.0115000000001,
+      "p95": 929.809
+    },
+    "queue_us": {
+      "mean": 25973.4012,
+      "p50": 25771.475,
+      "p95": 40164.421
+    }
+  }
+]

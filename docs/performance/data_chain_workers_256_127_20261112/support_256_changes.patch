@@ -1,0 +1,163 @@
+diff --git a/gr-uwb/apps/benchmark_sc16_pipeline_steady.cc b/gr-uwb/apps/benchmark_sc16_pipeline_steady.cc
+index 1ab7dc1..7b59de0 100644
+--- a/gr-uwb/apps/benchmark_sc16_pipeline_steady.cc
++++ b/gr-uwb/apps/benchmark_sc16_pipeline_steady.cc
+@@ -368,6 +368,8 @@ void print_help(const char* prog)
+         << "  --period <n>               schedule period in native samples (default = capacity)\n"
+         << "  --t0 <samples>             schedule t0 (default 0)\n"
+         << "  --consumer <sic|sensing|both>  (default sic)\n"
++        << "  --target-sync-reps <64|256> target preamble (default 64); CIR uses reps-10\n"
++        << "  --sic-sync-reps <64|256>    interference preamble (default 64)\n"
+         << "  --resampler-profile <name> (default realtime_minorder)\n"
+         << "  --resampler-experiment <none|fixed_phase|convert_cache|both>\n"
+         << "  --iq-dump-dir <dir>        diagnostic post-resample IQ dump directory\n"
+@@ -444,6 +446,15 @@ int main(int argc, char* argv[])
+             cfg.schedule_t0 = std::stod(need(i));
+         } else if (a == "--consumer") {
+             consumer = need(i);
++        } else if (a == "--target-sync-reps") {
++            const size_t reps=std::stoull(need(i));
++            if(reps!=64 && reps!=256) { std::cerr<<"Error: target SYNC must be 64 or 256\n";return 1; }
++            cfg.radar_cfg.sync_repetitions=reps;
++            cfg.radar_cfg.cir_repetitions=reps-cfg.radar_cfg.cir_skip_initial;
++        } else if (a == "--sic-sync-reps") {
++            const size_t reps=std::stoull(need(i));
++            if(reps!=64 && reps!=256) { std::cerr<<"Error: SIC SYNC must be 64 or 256\n";return 1; }
++            cfg.sic_cfg.sync_reps=reps;
+         } else if (a == "--resampler-profile") {
+             cfg.resampler_profile = need(i);
+         } else if (a == "--resampler-experiment") {
+diff --git a/gr-uwb/apps/pipeline_bench_setup.h b/gr-uwb/apps/pipeline_bench_setup.h
+index f8d718e..7974fe1 100644
+--- a/gr-uwb/apps/pipeline_bench_setup.h
++++ b/gr-uwb/apps/pipeline_bench_setup.h
+@@ -37,7 +37,7 @@ inline void derive_sic_geometry(PipelineConfig& cfg, long long sic_roi_margin)
+ 
+     cfg.sic_cfg.sample_rate = cfg.work_rate;
+     cfg.sic_cfg.samples_per_symbol = 1016;
+-    cfg.sic_cfg.sync_reps = 64;
++    // Preserve the caller's configured preamble length (default remains 64).
+     cfg.sic_cfg.max_window_samples = work_cap;
+     cfg.sic_cfg.max_packet_samples = work_cap;
+ 
+diff --git a/gr-uwb/lib/qa_uwb_sic_unified.cc b/gr-uwb/lib/qa_uwb_sic_unified.cc
+index eeb7700..b3592c7 100644
+--- a/gr-uwb/lib/qa_uwb_sic_unified.cc
++++ b/gr-uwb/lib/qa_uwb_sic_unified.cc
+@@ -38,15 +38,15 @@ struct TestPacket {
+     std::vector<cf> sync;
+     std::vector<uint8_t> psdu;
+ 
+-    explicit TestPacket(size_t code = 10, size_t psdu_len = 32)
++    explicit TestPacket(size_t code = 10, size_t psdu_len = 32, size_t sync_reps = 64)
+     {
+         profile.code_index = code;
+-        profile.sync_repetitions = 64;
++        profile.sync_repetitions = sync_reps;
+         profile.sfd_mode = "4z2";
+         profile.peak_amplitude = 0.8f;
+ 
+         psdu = mod::make_random_psdu(psdu_len - 2, static_cast<uint32_t>(1000 + code), true);
+-        const size_t cap = mod::packet_samples_998p4(64, 8, psdu.size(), false, &profile.pulse) + 512;
++        const size_t cap = mod::packet_samples_998p4(sync_reps, 8, psdu.size(), false, &profile.pulse) + 512;
+         mod_scratch.reserve(127, cap);
+         wave.resize(cap);
+         size_t plen = 0;
+@@ -489,6 +489,38 @@ BOOST_AUTO_TEST_CASE(test_unified_ipatov_preamble_uses_unit_impulse_prefix)
+     BOOST_CHECK_GT(res_sparse.suppression_db, 20.0);
+ }
+ 
++BOOST_AUTO_TEST_CASE(test_ipatov_256_sync_cancels_tail_without_extending_training)
++{
++    TestPacket packet(10,127,256);
++    auto templates=make_templates(packet);
++    const size_t q=300,n=packet.wave.size()+1024;
++    std::vector<cf> y(n),out(n),ihat(n);
++    std::copy(packet.wave.begin(),packet.wave.end(),y.begin()+q);
++    SicUnifiedConfig cfg;
++    cfg.policy=SicPolicy::PreambleOnly;cfg.backend=SicEstimatorBackend::Ipatov;
++    cfg.comm_code=10;cfg.sync_reps=256;cfg.fit_reps=8;
++    cfg.roi_lo=q-32;cfg.roi_hi=q+32;cfg.sub_roi_lo=q;cfg.sub_roi_hi=q+256*kSps;
++    cfg.max_window_samples=n;cfg.max_packet_samples=n;
++    SicUnifiedScratch scratch;std::string error;
++    BOOST_REQUIRE_MESSAGE(prepare_sic_unified(cfg,templates,scratch,&error),error);
++    BOOST_CHECK_EQUAL(scratch.cached_preamble_samples,(256+8)*kSps);
++    SicUnifiedResult result;result.out=out.data();result.i_hat=ihat.data();
++    BOOST_REQUIRE(sic_process_unified(y.data(),n,templates,cfg,scratch,result));
++    BOOST_REQUIRE(result.committed);
++    BOOST_CHECK_EQUAL(std::string(result.reason),"committed_preamble_sparse_pulse");
++    BOOST_CHECK_GT(result.suppression_db,20.0);
++    BOOST_CHECK_LE(result.channel.training_hi,static_cast<int64_t>(q+8*kSps));
++    double original_tail=0,residual_tail=0;
++    for(size_t j=q+252*kSps;j<q+256*kSps;++j) {
++        original_tail+=std::norm(y[j]);residual_tail+=std::norm(out[j]);
++    }
++    BOOST_CHECK_LT(residual_tail,original_tail*.01);
++    for(size_t j=q+256*kSps;j<n;++j) BOOST_REQUIRE_EQUAL(out[j],y[j]);
++    cfg.sync_reps=128;
++    BOOST_CHECK(!prepare_sic_unified(cfg,templates,scratch,&error));
++    BOOST_CHECK_EQUAL(error,"unsupported Ipatov geometry");
++}
++
+ BOOST_AUTO_TEST_CASE(test_config_change_invalidates_and_regenerates)
+ {
+     TestPacket p10(10, 32);
+diff --git a/gr-uwb/lib/uwb_discrete_cir_estimator.cc b/gr-uwb/lib/uwb_discrete_cir_estimator.cc
+index e95900d..50af5a2 100644
+--- a/gr-uwb/lib/uwb_discrete_cir_estimator.cc
++++ b/gr-uwb/lib/uwb_discrete_cir_estimator.cc
+@@ -645,13 +645,13 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
+     scratch.factor_cache_next = 0;
+ 
+     // Safe upper bound for the remodulated packet.  The frozen experiment
+-    // profile is 64 SYNC / 8 SFD / 127 B / legacy pulse; +64 covers shaping
++    // profile uses configured SYNC / 8 SFD / 127 B / legacy pulse; +64 covers shaping
+     // and the modulator's convention.  A public capacity never exceeds the
+     // prepared window.
+     const mod::PulseSpec default_pulse{};
+     size_t max_packet = cfg.max_packet_samples;
+     if (max_packet == 0) {
+-        max_packet = mod::packet_samples_998p4(64, 8, 127, false,
++        max_packet = mod::packet_samples_998p4(cfg.sync_reps, 8, 127, false,
+                                                &default_pulse) +
+                      64;
+     }
+@@ -668,7 +668,8 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
+         return fail("sparse_pulse_requires_ipatov");
+     if (cfg.ipatov_correlation) {
+         if (sps != demod::kQm35SamplesPerSymbol || cfg.fit_reps < 3 ||
+-            cfg.sample_rate != radar_meta::kWorkRateHz || cfg.sync_reps != 64)
++            cfg.sample_rate != radar_meta::kWorkRateHz ||
++            (cfg.sync_reps != 64 && cfg.sync_reps != 256))
+             return fail("unsupported Ipatov geometry");
+         if (!radar_meta::code_index_supported(cfg.comm_code))
+             return fail("unsupported Ipatov code");
+diff --git a/gr-uwb/lib/uwb_sic_unified.cc b/gr-uwb/lib/uwb_sic_unified.cc
+index 56e4cbd..8030629 100644
+--- a/gr-uwb/lib/uwb_sic_unified.cc
++++ b/gr-uwb/lib/uwb_sic_unified.cc
+@@ -910,6 +910,9 @@ bool sic_process_unified(
+ 
+     auto demod_prof = demod::Qm35825Profile::Default();
+     demod_prof.code_index = cfg.comm_code;
++    demod_prof.preamble_repetitions = cfg.sync_reps;
++    if (cfg.sync_reps > demod_prof.cir_skip_initial_repetitions)
++        demod_prof.cir_repetitions = cfg.sync_reps - demod_prof.cir_skip_initial_repetitions;
+     demod_prof.timing_search_margin = 256;
+     demod_prof.timing_coarse_stride = 1;
+     demod_prof.sfd_mode = cfg.sfd_mode;
+diff --git a/gr-uwb/lib/uwb_uhd_sc16_pipeline.cc b/gr-uwb/lib/uwb_uhd_sc16_pipeline.cc
+index 203615a..aa01280 100644
+--- a/gr-uwb/lib/uwb_uhd_sc16_pipeline.cc
++++ b/gr-uwb/lib/uwb_uhd_sc16_pipeline.cc
+@@ -1841,8 +1841,8 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
+         if (cfg_.consumer_mode == ConsumerMode::SicOnly || cfg_.consumer_mode == ConsumerMode::Both) {
+             load_sync_pulse_template(sic_sync_tmpl, cfg_.sic_sync_template_file);
+ 
+-            sic_preamble_tmpl.reserve(64 * 1016);
+-            for (int rep = 0; rep < 64; ++rep) {
++            sic_preamble_tmpl.reserve(cfg_.sic_cfg.sync_reps * 1016);
++            for (size_t rep = 0; rep < cfg_.sic_cfg.sync_reps; ++rep) {
+                 sic_preamble_tmpl.insert(sic_preamble_tmpl.end(),
+                                          sic_sync_tmpl.begin(), sic_sync_tmpl.end());
+             }
