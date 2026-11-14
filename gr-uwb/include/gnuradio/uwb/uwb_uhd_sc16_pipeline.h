@@ -49,6 +49,12 @@ namespace pipeline {
 // header; uwb_uhd_sc16_pipeline.cc includes the full definition.
 class PipelineOutputWriter;
 
+// One preallocated hand-off buffer owned by the writer's pool.  Forward
+// declared for the same reason: commit_result() must carry the pointer through
+// the in-order emit section, and this header must not pull in the writer
+// header (that would create an include cycle).
+struct OutputPayloadSlot;
+
 enum class StreamSourceType {
     Replay,
     UhdDevice
@@ -695,7 +701,17 @@ private:
     int effective_dsp_workers() const;
     // In-order commit of a finished window result: buffers out-of-order
     // completions and flushes them strictly by window_id.
-    void commit_result(int worker_id, const WindowResult& res);
+    //
+    // `slot` is the optional output-persistence payload for this window (null
+    // when output persistence is disabled, when the pool was exhausted, or for
+    // producer-side drops).  It is buffered in parallel with the result and
+    // handed to the writer with try_submit() only inside the in-order emit
+    // section, so every file and log line stays strictly ascending by
+    // window_id.  Ownership transfers to the writer on a successful submit; the
+    // caller must never touch the pointer again.
+    void commit_result(int worker_id,
+                       const WindowResult& res,
+                       OutputPayloadSlot* slot = nullptr);
 
     // --- ready barrier helpers (all *locked variants need ready_mutex_) ---
     bool all_ready_locked() const;

@@ -26,6 +26,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -122,6 +123,79 @@ bool mode_runs_comm(ConsumerMode mode)
 {
     return mode == ConsumerMode::CommOnly ||
            mode == ConsumerMode::SicPlusComm;
+}
+
+// Canonical consumer-mode name written to run.json.  `SicPlusSensing` is an
+// alias of `Both`, so it must not appear as a second case label.
+const char* consumer_mode_name(ConsumerMode mode)
+{
+    switch (mode) {
+    case ConsumerMode::SicOnly:
+        return "sic";
+    case ConsumerMode::SensingCir:
+        return "sensing";
+    case ConsumerMode::Both:
+        return "both";
+    case ConsumerMode::CommOnly:
+        return "comm";
+    case ConsumerMode::SicPlusComm:
+        return "sic_plus_comm";
+    }
+    return "sic";
+}
+
+const char* sic_policy_name(sic::SicPolicy policy)
+{
+    switch (policy) {
+    case sic::SicPolicy::PreambleOnly:
+        return "preamble";
+    case sic::SicPolicy::FullPacket:
+        return "fullpacket";
+    case sic::SicPolicy::AutoFallback:
+        return "auto";
+    }
+    return "auto";
+}
+
+const char* sic_backend_name(sic::SicEstimatorBackend backend)
+{
+    switch (backend) {
+    case sic::SicEstimatorBackend::DiscreteCir:
+        return "discrete";
+    case sic::SicEstimatorBackend::PathFractional:
+        return "fractional";
+    case sic::SicEstimatorBackend::Ipatov:
+        return "ipatov";
+    }
+    return "ipatov";
+}
+
+// ---------------------------------------------------------------------------
+// Per-pipeline output-slot reorder buffer
+// ---------------------------------------------------------------------------
+// commit_result() hands each finished window's OutputPayloadSlot to the writer
+// strictly in window_id order, so the slots have to be buffered in parallel
+// with `pending_results_` (same `rel` index space).  The frozen pipeline header
+// may not grow a member for it, so the buffer lives in this side table keyed by
+// the pipeline instance.
+//
+// Cost when output persistence is disabled: zero -- commit_result() only
+// touches this table when it actually holds a slot.  Cost when enabled: one
+// short mutex acquisition per commit_result() call, and the returned reference
+// stays valid across concurrent insertions because std::map is node based.
+std::mutex g_slot_reorder_mutex;
+std::map<const void*, std::vector<OutputPayloadSlot*>> g_slot_reorder;
+
+std::vector<OutputPayloadSlot*>& slot_reorder_buffer(const void* owner)
+{
+    std::lock_guard<std::mutex> lk(g_slot_reorder_mutex);
+    return g_slot_reorder[owner];
+}
+
+void drop_slot_reorder_buffer(const void* owner)
+{
+    std::lock_guard<std::mutex> lk(g_slot_reorder_mutex);
+    g_slot_reorder.erase(owner);
 }
 
 uint64_t fnv1a_64(const uint8_t* data, size_t n)
@@ -907,6 +981,10 @@ UhdSc16Pipeline::~UhdSc16Pipeline()
 {
     stop();
     wait();
+    // The per-instance slot reorder buffer is empty by construction once wait()
+    // returned (flush_pending_results() settles every entry); drop the side
+    // table entry so a new pipeline reusing this address starts clean.
+    drop_slot_reorder_buffer(this);
 }
 
 int UhdSc16Pipeline::effective_dsp_workers() const
@@ -1080,6 +1158,12 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
         std::lock_guard<std::mutex> lk(commit_mutex_);
         next_commit_id_ = 0;
         pending_results_.clear();
+        if (output_writer_) {
+            // A previous run's slots are all settled by now (wait() drained the
+            // writer); drop any leftover bookkeeping so the index space restarts
+            // at 0 together with pending_results_.
+            slot_reorder_buffer(this).clear();
+        }
     }
 
     // A2: a fresh ready epoch.  Nothing is started here -- initialize() only
@@ -1117,6 +1201,71 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
     {
         std::lock_guard<std::mutex> lk(source_error_mutex_);
         source_error_.clear();
+    }
+
+    // ------------------------------------------------------------------
+    // Per-window result persistence + live console log (default off)
+    // ------------------------------------------------------------------
+    // Observability only.  Every failure here is fail-open: the pipeline must
+    // run exactly as before, so a writer that cannot start is reported once and
+    // then dropped (output_writer_ stays null and the hot path costs one null
+    // test).  Constructed last, after the source opened, so a failed
+    // initialize() never leaves a half-started writer behind.
+    if (output_writer_) {
+        // Restart on the same object: drain and discard the previous writer.
+        output_writer_->stop_and_drain();
+        output_writer_.reset();
+    }
+    if (cfg_.output.enabled()) {
+        const radar::RadarCirConfig eff_radar = build_effective_radar_cfg(cfg_);
+        // The shared SYNC-CIR kernel always produces exactly cir_pre + cir_post
+        // taps (uwb_radar_cir_core.h: `tap_count = cfg.cir_pre + cfg.cir_post`),
+        // so that sum is the per-slot tap capacity.
+        const size_t max_cir_taps = eff_radar.cir_pre + eff_radar.cir_post;
+        // One HRP PSDU (including its 2-byte FCS) never exceeds 127 bytes.
+        const size_t max_psdu = 127;
+
+        OutputRunMeta meta;
+        meta.consumer_mode = consumer_mode_name(cfg_.consumer_mode);
+        meta.native_rate = cfg_.native_rate;
+        meta.work_rate = cfg_.work_rate;
+        meta.uhd_center_freq = cfg_.uhd_center_freq;
+        meta.sic_policy = sic_policy_name(cfg_.sic_cfg.policy);
+        meta.sic_backend = sic_backend_name(cfg_.sic_cfg.backend);
+        meta.cir_pre = eff_radar.cir_pre;
+        meta.cir_post = eff_radar.cir_post;
+        // Report the code/repetition geometry of the consumer that actually
+        // runs; SicOnly falls back to the SIC (interferer) configuration.
+        switch (cfg_.consumer_mode) {
+        case ConsumerMode::SensingCir:
+        case ConsumerMode::Both:
+            meta.code_index = eff_radar.code_index;
+            meta.sync_repetitions = eff_radar.sync_repetitions;
+            meta.samples_per_symbol = eff_radar.samples_per_symbol;
+            break;
+        case ConsumerMode::CommOnly:
+        case ConsumerMode::SicPlusComm:
+            meta.code_index = cfg_.comm_cfg.code_index;
+            meta.sync_repetitions = cfg_.comm_cfg.preamble_repetitions;
+            meta.samples_per_symbol = static_cast<double>(demod::kQm35SamplesPerSymbol);
+            break;
+        case ConsumerMode::SicOnly:
+            meta.code_index = cfg_.sic_cfg.comm_code;
+            meta.sync_repetitions = cfg_.sic_cfg.sync_reps;
+            meta.samples_per_symbol = static_cast<double>(cfg_.sic_cfg.samples_per_symbol);
+            break;
+        }
+        meta.max_psdu_bytes = max_psdu;
+
+        auto writer = std::make_unique<PipelineOutputWriter>();
+        if (!writer->start(cfg_.output, meta, max_cir_taps, max_psdu)) {
+            std::cerr << "UhdSc16Pipeline: output writer failed to start (output_dir='"
+                      << cfg_.output.output_dir << "', live_log="
+                      << live_log_mode_name(cfg_.output.live_log_mode)
+                      << "); continuing with output persistence disabled" << std::endl;
+        } else {
+            output_writer_ = std::move(writer);
+        }
     }
 
     return true;
@@ -1221,6 +1370,16 @@ void UhdSc16Pipeline::wait()
     // Contract §1.3: after every thread has stopped, force out any tail holes
     // left by max_windows / stop() in ascending window_id order.
     flush_pending_results();
+
+    // Contract §3.5: no frame may be lost on shutdown.  Every worker has joined
+    // and the tail has been submitted above, so this is the one point where the
+    // writer can be drained: it flushes and closes every file and joins its own
+    // thread before returning.  Idempotent, so a second wait() is harmless.
+    // (stop() alone only signals and must not drain: workers may still be
+    // submitting, and draining there would drop in-flight frames.)
+    if (output_writer_) {
+        output_writer_->stop_and_drain();
+    }
 
     running_ = false;
     // Every ready state is terminal now; release any wait_ready() caller.
@@ -1429,6 +1588,13 @@ void UhdSc16Pipeline::recover_orphaned_windows()
 // ---------------------------------------------------------------------------
 // Diagnostics
 // ---------------------------------------------------------------------------
+OutputWriterStats UhdSc16Pipeline::output_writer_stats() const
+{
+    // No writer == output persistence disabled (or its start() failed
+    // fail-open), which is reported as a default, disabled stats block.
+    return output_writer_ ? output_writer_->stats() : OutputWriterStats{};
+}
+
 const RxDiagnostics& UhdSc16Pipeline::rx_diagnostics() const
 {
     auto& v = rx_diag_view_;
@@ -2942,6 +3108,16 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
     // single predictable test per window.
     const bool dump_enabled = (!cfg_.iq_dump_dir.empty() && cfg_.iq_dump_windows > 0);
 
+    // Output persistence (default off): same idea.  output_writer_ is non-null
+    // only when initialize() created AND successfully started it, so a failed
+    // start costs this one test and nothing else.
+    const bool output_enabled = (output_writer_ != nullptr);
+    // Per-worker staging for the decoded PSDU.  DemodResult is scoped to the
+    // comm block, but the output slot is filled at the very end of the window,
+    // so the bytes are copied here (only while output persistence is enabled).
+    // Declared outside the loop so the buffer keeps its capacity.
+    std::vector<uint8_t> out_psdu_buf;
+
     while (true) {
         Sc16WindowSlot* slot = my_pool->acquire_ready_slot();
         if (!slot) {
@@ -3109,6 +3285,24 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
             }
         }
 
+        // ---- output-persistence mirrors -------------------------------------
+        // Everything the writer needs that WindowResult does not publish.
+        // RadarCirResult and DemodResult are scoped to their own consumer
+        // blocks, while the slot is filled after every consumer has run, so the
+        // needed scalars are hoisted here.  They cost nothing but a few
+        // registers when output persistence is disabled.
+        float out_sfd_metric = 0.0f;
+        float out_raw_l2_norm = 0.0f;
+        size_t out_tap_count = 0;
+        bool out_sensing_ok = false;
+        int64_t out_pred_sfd = -1;
+        bool out_comm_ran = false;
+        uint16_t out_fcs_received = 0;
+        uint16_t out_fcs_calculated = 0;
+        float out_phr_rate_mbps = 0.0f;
+        bool out_phr_corrected = false;
+        bool out_phr_uncorrectable = false;
+
         // 3. SIC processing
         if (mode_runs_sic(cfg_.consumer_mode)) {
             auto t_sic_start = std::chrono::steady_clock::now();
@@ -3209,6 +3403,7 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
                 pred_sfd = static_cast<int64_t>(std::llround(static_cast<double>(cfg_.pre_guard_samples) * rate_ratio)) +
                            static_cast<int64_t>(effective_radar_cfg.sync_repetitions * effective_radar_cfg.samples_per_symbol);
             }
+            out_pred_sfd = pred_sfd;
 
             radar::RadarCirResult cir_res;
             bool cir_ok = radar::radar_cir_one(
@@ -3233,6 +3428,13 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
             res.radar_cir_origin = cir_res.cir_axis_origin;
             res.radar_detected_origin = cir_res.detected_sync_origin;
             res.radar_valid_reps = cir_res.valid_repetitions;
+            // Output-persistence mirrors: only a successful CIR publishes taps,
+            // so a failed window leaves the slot's tap vector empty instead of
+            // carrying the previous window's taps.
+            out_sensing_ok = (cir_ok && cir_res.status == radar::RadarCirStatus::Ok);
+            out_sfd_metric = cir_res.sfd_metric;
+            out_raw_l2_norm = cir_res.raw_l2_norm;
+            out_tap_count = out_sensing_ok ? cir_res.tap_count : 0;
             // Front-end total = timing + cfo + sfd.  `coverage_us` is NOT
             // added: the coverage PLANNING pass runs inside the SFD parent
             // (uwb_demod_core.h laps `sfd_us` after the coverage block), so
@@ -3302,6 +3504,21 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
                 : fnv1a_64(demod_res.payload.bytes.data(),
                            demod_res.payload.bytes.size());
 
+            // Output-persistence mirrors: the payload bytes and the FCS/PHR
+            // diagnostics live in the block-scoped DemodResult, so the PSDU is
+            // staged here (only while output persistence is enabled) and the
+            // scalars are copied out.
+            out_comm_ran = true;
+            out_fcs_received = demod_res.payload.received_fcs;
+            out_fcs_calculated = demod_res.payload.calculated_fcs;
+            out_phr_rate_mbps = demod_res.phr.data_rate_mbps;
+            out_phr_corrected = demod_res.phr.secded_corrected;
+            out_phr_uncorrectable = demod_res.phr.secded_uncorrectable;
+            if (output_enabled) {
+                out_psdu_buf.assign(demod_res.payload.bytes.begin(),
+                                    demod_res.payload.bytes.end());
+            }
+
             if (slot->use_dynamic_slot) {
                 fb.timing_ok =
                     (res.comm_sync_origin >= 0) && (res.comm_sfd_start >= 0);
@@ -3336,6 +3553,91 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
             feedback_queue_.push(fb);
         }
 
+        // ------------------------------------------------------------------
+        // Output persistence: the window is complete only now, so this is the
+        // first point where every field the writer consumes is final.  One
+        // non-blocking slot acquisition per window; on pool exhaustion the
+        // writer's ledger has already counted the drop and this window simply
+        // is not persisted (never a correctness issue, never a stall).
+        // ------------------------------------------------------------------
+        OutputPayloadSlot* out_slot = nullptr;
+        if (output_enabled) {
+            out_slot = output_writer_->try_acquire_slot();
+            if (out_slot) {
+                OutputWindowRecord rec;
+                rec.window_id = res.window_id;
+                rec.schedule_index = res.schedule_index;
+                rec.worker_id = res.worker_id;
+                rec.native_start_abs = res.native_start_abs;
+                rec.native_sample_count = res.native_sample_count;
+                // Native-grid origin of the buffer this window was computed
+                // from.  The comm path is handed the same buffer with
+                // `window_start = 0` (demodulate_one), i.e. every sample
+                // position it reports is relative to this origin.
+                rec.native_window_start = res.native_start_abs;
+                rec.predicted_start_sample = out_pred_sfd;
+
+                rec.sic_executed = res.sic_executed;
+                rec.sic_committed = res.sic_committed;
+                rec.actual_suppression_db = res.actual_suppression_db;
+                rec.sic_status = res.sic_status;
+
+                rec.radar_executed = res.radar_executed;
+                rec.radar_sfd_found = res.radar_sfd_found;
+                rec.radar_peak_metric = res.radar_peak_metric;
+                rec.radar_detected_start = res.radar_detected_start;
+                rec.radar_cfo_hz = res.radar_cfo_hz;
+                rec.radar_cir_origin = res.radar_cir_origin;
+                rec.radar_detected_origin = res.radar_detected_origin;
+                rec.radar_valid_reps = res.radar_valid_reps;
+                rec.sfd_metric = out_sfd_metric;
+                rec.raw_l2_norm = out_raw_l2_norm;
+                rec.cir_pre = effective_radar_cfg.cir_pre;
+                rec.cir_post = effective_radar_cfg.cir_post;
+
+                rec.comm_attempted = res.comm_attempted;
+                rec.comm_ok = res.comm_ok;
+                rec.comm_status_reason = res.comm_status_reason;
+                rec.comm_sync_origin = res.comm_sync_origin;
+                rec.comm_sfd_start = res.comm_sfd_start;
+                rec.comm_cfo_hz = res.comm_cfo_hz;
+                rec.comm_phr_ok = res.comm_phr_ok;
+                rec.comm_phr_length = res.comm_phr_length;
+                rec.comm_fcs_ok = res.comm_fcs_ok;
+                rec.comm_payload_bytes = res.comm_payload_bytes;
+                rec.comm_psdu_fnv1a = res.comm_psdu_fnv1a;
+                rec.fcs_received = out_fcs_received;
+                rec.fcs_calculated = out_fcs_calculated;
+                rec.phr_rate_mbps = out_phr_rate_mbps;
+                rec.phr_corrected = out_phr_corrected;
+                rec.phr_uncorrectable = out_phr_uncorrectable;
+
+                rec.resample_us = res.timing.resample_us;
+                rec.t_total_us = res.timing.comm_us;
+                rec.sensing_us = res.timing.sensing_us;
+
+                out_slot->record = rec;
+                // Taps and PSDU are rewritten from scratch every window, so a
+                // failed sensing / comm stage leaves them empty rather than
+                // carrying the previous window's payload.
+                out_slot->cir_taps.clear();
+                out_slot->psdu_bytes.clear();
+                if (out_sensing_ok && out_tap_count > 0 &&
+                    radar_scratch.cir.raw_taps.size() >= out_tap_count) {
+                    // True-amplitude taps, exactly the first tap_count entries
+                    // of the per-worker scratch the CIR kernel just filled.
+                    out_slot->cir_taps.assign(
+                        radar_scratch.cir.raw_taps.begin(),
+                        radar_scratch.cir.raw_taps.begin() +
+                            static_cast<std::ptrdiff_t>(out_tap_count));
+                }
+                if (out_comm_ran) {
+                    out_slot->psdu_bytes.assign(out_psdu_buf.begin(),
+                                                out_psdu_buf.end());
+                }
+            }
+        }
+
         // Release the slot before committing: the RX producer may refill this
         // ring immediately while this worker is busy ordering the result.
         my_pool->release_reading_slot(slot);
@@ -3347,14 +3649,16 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
 
         // Contract §1.3: never hold ledger_mutex_ while committing (no lock
         // nesting); commit_result owns commit_mutex_ and the reorder buffer.
-        commit_result(worker_id, res);
+        commit_result(worker_id, res, out_slot);
     }
 }
 
 // ---------------------------------------------------------------------------
 // In-order result commit (reorder buffer)
 // ---------------------------------------------------------------------------
-void UhdSc16Pipeline::commit_result(int worker_id, const WindowResult& res)
+void UhdSc16Pipeline::commit_result(int worker_id,
+                                    const WindowResult& res,
+                                    OutputPayloadSlot* slot)
 {
     const bool diag = cfg_.enable_commit_diagnostics;
 
@@ -3378,6 +3682,12 @@ void UhdSc16Pipeline::commit_result(int worker_id, const WindowResult& res)
     // invariant "next_commit_id_ == first uncommitted window_id".
     if (res.window_id < next_commit_id_) {
         // Already emitted (cannot happen: each window commits exactly once).
+        // The slot (if any) was acquired but will never be persisted, so give it
+        // back to the writer's pool -- release_slot() converts the matching
+        // `offered` into a `dropped` and never blocks.
+        if (slot && output_writer_) {
+            output_writer_->release_slot(slot);
+        }
         return;
     }
     const size_t rel = static_cast<size_t>(res.window_id - next_commit_id_);
@@ -3393,18 +3703,42 @@ void UhdSc16Pipeline::commit_result(int worker_id, const WindowResult& res)
     stored->worker_id = worker_id;
     pending_results_[rel] = std::move(stored);
 
+    // Parallel reorder buffer for the output payload.  It uses the same `rel`
+    // index space as pending_results_, so a slot is only handed to the writer
+    // when its window is actually emitted -- that is what makes every file and
+    // log line strictly ascending by window_id.  Only touched when output
+    // persistence is enabled, so the disabled path stays free.
+    std::vector<OutputPayloadSlot*>* slot_buf = nullptr;
+    if (output_writer_) {
+        slot_buf = &slot_reorder_buffer(this);
+        if (slot_buf->size() <= rel) {
+            slot_buf->resize(rel + 1, nullptr);
+        }
+        (*slot_buf)[rel] = slot;
+    }
+
     // Flush every contiguous entry, strictly by ascending window_id.
     size_t flushed = 0;
     uint64_t callback_ns = 0;
     while (flushed < pending_results_.size() && pending_results_[flushed]) {
         WindowResult copy = *pending_results_[flushed];
         pending_results_[flushed].reset();
-        ++flushed;
-        ++next_commit_id_;
         results_.push_back(std::move(copy));
         if (diag) {
             commit_acc_.results_emitted.fetch_add(1, std::memory_order_relaxed);
         }
+        // Hand the payload over while still inside the in-order emit section.
+        // try_submit() takes ownership on success and returns the slot to the
+        // pool on failure, so the pointer is never touched again either way.
+        if (slot_buf && flushed < slot_buf->size()) {
+            OutputPayloadSlot* emit_slot = (*slot_buf)[flushed];
+            (*slot_buf)[flushed] = nullptr;
+            if (emit_slot) {
+                output_writer_->try_submit(emit_slot);
+            }
+        }
+        ++flushed;
+        ++next_commit_id_;
         if (result_cb_) {
             // Invoked while commit_mutex_ is held so observers always see
             // strict window_id order.  The callback must not re-enter the
@@ -3436,6 +3770,10 @@ void UhdSc16Pipeline::commit_result(int worker_id, const WindowResult& res)
     if (flushed > 0) {
         pending_results_.erase(pending_results_.begin(),
                                pending_results_.begin() + static_cast<ptrdiff_t>(flushed));
+        if (slot_buf) {
+            slot_buf->erase(slot_buf->begin(),
+                            slot_buf->begin() + static_cast<ptrdiff_t>(flushed));
+        }
     }
 }
 
@@ -3443,6 +3781,9 @@ void UhdSc16Pipeline::flush_pending_results()
 {
     std::lock_guard<std::mutex> lk(commit_mutex_);
     const bool diag = cfg_.enable_commit_diagnostics;
+
+    std::vector<OutputPayloadSlot*>* slot_buf =
+        output_writer_ ? &slot_reorder_buffer(this) : nullptr;
 
     // Contract §1.3: after all threads have joined, force out whatever is
     // still buffered (max_windows tail / stop()) in ascending window_id order.
@@ -3459,6 +3800,16 @@ void UhdSc16Pipeline::flush_pending_results()
         if (diag) {
             commit_acc_.results_emitted.fetch_add(1, std::memory_order_relaxed);
         }
+        // Same in-order hand-off as commit_result(): the tail is settled in
+        // ascending window_id order, so the writer's ordering contract holds
+        // for the drain path too.
+        if (slot_buf && i < slot_buf->size()) {
+            OutputPayloadSlot* emit_slot = (*slot_buf)[i];
+            (*slot_buf)[i] = nullptr;
+            if (emit_slot) {
+                output_writer_->try_submit(emit_slot);
+            }
+        }
         if (result_cb_) {
             result_cb_(results_.back());
         }
@@ -3468,6 +3819,10 @@ void UhdSc16Pipeline::flush_pending_results()
     if (advanced > 0) {
         pending_results_.erase(pending_results_.begin(),
                                pending_results_.begin() + static_cast<ptrdiff_t>(advanced));
+        if (slot_buf) {
+            slot_buf->erase(slot_buf->begin(),
+                            slot_buf->begin() + static_cast<ptrdiff_t>(advanced));
+        }
         next_commit_id_ += advanced;
     }
 }

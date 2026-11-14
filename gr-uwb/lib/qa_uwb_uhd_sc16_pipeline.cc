@@ -20,10 +20,12 @@
 #include <complex>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -2490,4 +2492,436 @@ BOOST_AUTO_TEST_CASE(test_pipeline_default_fastest_resampler_profile)
     std::remove(tmp_file.c_str());
 }
 
+// ===========================================================================
+// Pipeline output persistence (Track 2 integration QA)
+//
+// Task: docs/performance/OpenCode_Pipeline落盘与实时日志_多Agent开发方案_2026-11-14.md
+// Plan: docs/performance/OpenCode_Pipeline落盘与实时日志_多Agent执行计划_2026-11-14.md
+//   §3 invariants 1 (disabled == zero cost / zero behaviour change),
+//   2 (non-blocking slot pool), 3 (ledger conservation), 4 (strict ordering),
+//   5 (bounded drain).
+//
+// NOTE for this worktree: `uwb_pipeline_output_writer.cc` is still the Phase 0
+// stub, whose start() always fails.  The disabled path and the "writer failed
+// to start" path are therefore fully testable here; the ordering case can only
+// be validated once Track 1 lands, so it skips with an explicit message instead
+// of being weakened.
+// ===========================================================================
+namespace {
+
+// Unique, writable output directory under /tmp.  The writer is responsible for
+// creating it (create_directories); the QA only removes it afterwards.
+std::string qa_make_output_dir(const std::string& tag)
+{
+    const std::string dir = "/tmp/qa_uwb_output_" + tag + "_" +
+        std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    return dir;
+}
+
+void qa_remove_output_dir(const std::string& dir)
+{
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+// Extract every value of `key` (an integer json field) from a jsonl file, in
+// file order.  Deliberately tiny: the QA only needs the id columns, and it must
+// not depend on the writer's own parser.
+std::vector<long long> qa_read_jsonl_int_field(const std::string& path, const char* key)
+{
+    std::vector<long long> values;
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        return values;
+    }
+    const std::string needle = std::string("\"") + key + "\"";
+    std::string line;
+    while (std::getline(f, line)) {
+        const size_t k = line.find(needle);
+        if (k == std::string::npos) {
+            continue;
+        }
+        const size_t colon = line.find(':', k + needle.size());
+        if (colon == std::string::npos) {
+            continue;
+        }
+        size_t p = colon + 1;
+        while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) {
+            ++p;
+        }
+        long long v = 0;
+        bool any = false;
+        while (p < line.size() && line[p] >= '0' && line[p] <= '9') {
+            v = v * 10 + static_cast<long long>(line[p] - '0');
+            ++p;
+            any = true;
+        }
+        if (any) {
+            values.push_back(v);
+        }
+    }
+    return values;
+}
+
+// Every deterministic WindowResult field, not just the 11 functional ones, so
+// "the disabled path changes nothing" is proven field by field.
+void qa_check_deterministic_window(const WindowResult& a,
+                                   const WindowResult& b,
+                                   const std::string& what)
+{
+    qa_check_same_window(a, b, what);
+    BOOST_CHECK_MESSAGE(a.worker_id == b.worker_id, what << ": worker_id");
+    BOOST_CHECK_MESSAGE(a.schedule_index == b.schedule_index, what << ": schedule_index");
+    BOOST_CHECK_MESSAGE(a.radar_cfo_hz == b.radar_cfo_hz, what << ": radar_cfo_hz");
+    BOOST_CHECK_MESSAGE(a.radar_cir_origin == b.radar_cir_origin, what << ": radar_cir_origin");
+    BOOST_CHECK_MESSAGE(a.radar_detected_origin == b.radar_detected_origin,
+                        what << ": radar_detected_origin");
+    BOOST_CHECK_MESSAGE(a.radar_valid_reps == b.radar_valid_reps, what << ": radar_valid_reps");
+    BOOST_CHECK_MESSAGE(a.comm_attempted == b.comm_attempted, what << ": comm_attempted");
+    BOOST_CHECK_MESSAGE(a.comm_ok == b.comm_ok, what << ": comm_ok");
+    BOOST_CHECK_MESSAGE(a.comm_sync_origin == b.comm_sync_origin, what << ": comm_sync_origin");
+    BOOST_CHECK_MESSAGE(a.comm_sfd_start == b.comm_sfd_start, what << ": comm_sfd_start");
+    BOOST_CHECK_MESSAGE(a.comm_cfo_hz == b.comm_cfo_hz, what << ": comm_cfo_hz");
+    BOOST_CHECK_MESSAGE(a.comm_phr_ok == b.comm_phr_ok, what << ": comm_phr_ok");
+    BOOST_CHECK_MESSAGE(a.comm_phr_length == b.comm_phr_length, what << ": comm_phr_length");
+    BOOST_CHECK_MESSAGE(a.comm_fcs_ok == b.comm_fcs_ok, what << ": comm_fcs_ok");
+    BOOST_CHECK_MESSAGE(a.comm_payload_bytes == b.comm_payload_bytes,
+                        what << ": comm_payload_bytes");
+    BOOST_CHECK_MESSAGE(a.comm_psdu_fnv1a == b.comm_psdu_fnv1a, what << ": comm_psdu_fnv1a");
+    const std::string a_reason = a.comm_status_reason ? a.comm_status_reason : "";
+    const std::string b_reason = b.comm_status_reason ? b.comm_status_reason : "";
+    BOOST_CHECK_MESSAGE(a_reason == b_reason, what << ": comm_status_reason");
+}
+
+// One full run, keeping the pipeline alive so output_writer_stats() can be read
+// after wait() (the only point where the ledger invariant holds).
+struct QaOutputRun {
+    std::vector<WindowResult> results;
+    OutputWriterStats stats;
+    PipelineLedger ledger;
+    bool ledger_ok = false;
+    std::string ledger_error;
+};
+
+QaOutputRun qa_run_with_output(const PipelineConfig& cfg,
+                               std::unique_ptr<ISc16StreamSource> source,
+                               const std::string& context)
+{
+    QaOutputRun out;
+    UhdSc16Pipeline pipeline(cfg);
+    BOOST_REQUIRE_MESSAGE(pipeline.initialize(std::move(source)),
+                          context + ": initialize() failed");
+    pipeline.start();
+    BOOST_REQUIRE_MESSAGE(pipeline.wait_ready(5000), context + ": wait_ready(5000) failed");
+    pipeline.wait();
+
+    out.results = pipeline.results();
+    out.stats = pipeline.output_writer_stats();
+    out.ledger = pipeline.ledger();
+    out.ledger_ok = pipeline.ledger().verify_invariants(&out.ledger_error);
+    return out;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Output case 1: disabled is inert
+//   Invariant §3.1: with the default OutputPersistenceConfig the writer is never
+//   created, nothing is offered, and every per-window field is unchanged versus
+//   a run that assigns an explicit default-constructed `output`.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_output_disabled_is_inert)
+{
+    const int64_t kTotal = 200000;
+    const size_t kCapture = 2000;
+    const size_t kWindows = 8;
+
+    PipelineConfig base = make_qa_pipeline_cfg(
+        kCapture, 100, 100, /*workers=*/1, /*pool_capacity=*/8, kWindows,
+        /*period_samples=*/kCapture, ConsumerMode::SicOnly);
+
+    // Run A: `output` is exactly the default member initialiser.
+    std::vector<WindowResult> default_run;
+    OutputWriterStats default_stats;
+    {
+        auto source = std::make_unique<PredictiveSc16Source>(kTotal);
+        source->open_gate();
+        QaOutputRun run = qa_run_with_output(base, std::move(source), "default output");
+        BOOST_REQUIRE_MESSAGE(run.ledger_ok, run.ledger_error);
+        BOOST_REQUIRE_EQUAL(run.results.size(), kWindows);
+        default_run = run.results;
+        default_stats = run.stats;
+    }
+
+    // Run B: an explicitly default-constructed config, assigned field by field.
+    PipelineConfig explicit_cfg = base;
+    explicit_cfg.output = OutputPersistenceConfig{};
+    BOOST_REQUIRE(explicit_cfg.output.output_dir.empty());
+    BOOST_CHECK(explicit_cfg.output.live_log_mode == LiveLogMode::Off);
+    BOOST_CHECK(!explicit_cfg.output.enabled());
+
+    std::vector<WindowResult> explicit_run;
+    OutputWriterStats explicit_stats;
+    {
+        auto source = std::make_unique<PredictiveSc16Source>(kTotal);
+        source->open_gate();
+        QaOutputRun run = qa_run_with_output(explicit_cfg, std::move(source), "explicit default output");
+        BOOST_REQUIRE_MESSAGE(run.ledger_ok, run.ledger_error);
+        BOOST_REQUIRE_EQUAL(run.results.size(), kWindows);
+        explicit_run = run.results;
+        explicit_stats = run.stats;
+    }
+
+    // Invariant §3.1: no writer, nothing offered, nothing written or dropped.
+    for (const OutputWriterStats* st : { &default_stats, &explicit_stats }) {
+        BOOST_CHECK_MESSAGE(!st->enabled, "disabled output must report enabled == false");
+        BOOST_CHECK_EQUAL(st->offered, 0u);
+        BOOST_CHECK_EQUAL(st->written, 0u);
+        BOOST_CHECK_EQUAL(st->dropped, 0u);
+        BOOST_CHECK_EQUAL(st->cir_written, 0u);
+        BOOST_CHECK_EQUAL(st->comm_written, 0u);
+        BOOST_CHECK_EQUAL(st->bytes_written, 0u);
+    }
+
+    // ... and the per-window results are unchanged, field by field.
+    BOOST_REQUIRE_EQUAL(explicit_run.size(), default_run.size());
+    for (size_t i = 0; i < default_run.size(); ++i) {
+        qa_check_deterministic_window(default_run[i], explicit_run[i],
+                                      "disabled output window " + std::to_string(i));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Output case 2: writer start failure is fail-open
+//   Invariant §3.1: output persistence is observability, never correctness.  A
+//   directory that cannot be created must not stop a single window, must not
+//   break the ledger, and must leave the writer disabled.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_output_start_failure_is_fail_open)
+{
+    const int64_t kTotal = 200000;
+    const size_t kCapture = 2000;
+    const size_t kWindows = 8;
+
+    PipelineConfig cfg = make_qa_pipeline_cfg(
+        kCapture, 100, 100, /*workers=*/2, /*pool_capacity=*/8, kWindows,
+        /*period_samples=*/kCapture, ConsumerMode::SicOnly);
+    // /proc is a kernel pseudo-filesystem: mkdir() there always fails, so the
+    // writer cannot create its directory on any machine (no permissions race).
+    cfg.output.output_dir = "/proc/uwb-cannot-create/output";
+    cfg.output.write_cir = true;
+    cfg.output.write_comm = true;
+    BOOST_REQUIRE(cfg.output.enabled());
+
+    auto source = std::make_unique<PredictiveSc16Source>(kTotal);
+    source->open_gate();
+    QaOutputRun run = qa_run_with_output(cfg, std::move(source), "unwritable output dir");
+
+    // The pipeline still ran every window, in order, to a terminal state.
+    BOOST_CHECK_MESSAGE(run.ledger_ok, run.ledger_error);
+    BOOST_REQUIRE_EQUAL(run.results.size(), kWindows);
+    for (size_t i = 0; i < run.results.size(); ++i) {
+        BOOST_CHECK_EQUAL(run.results[i].window_id, i);
+        BOOST_CHECK_EQUAL(static_cast<int>(run.results[i].state),
+                          static_cast<int>(WindowTerminalState::Completed));
+    }
+
+    // Ledger conservation is untouched by the failed writer.
+    BOOST_CHECK_EQUAL(run.ledger.offered_windows, static_cast<uint64_t>(kWindows));
+    BOOST_CHECK_EQUAL(run.ledger.admitted_windows, static_cast<uint64_t>(kWindows));
+    BOOST_CHECK_EQUAL(run.ledger.completed_windows, static_cast<uint64_t>(kWindows));
+    BOOST_CHECK_EQUAL(run.ledger.processing_failed, 0u);
+    BOOST_CHECK_EQUAL(run.ledger.dropped_admission, 0u);
+
+    // ... and the writer is disabled, not half-started.
+    BOOST_CHECK_MESSAGE(!run.stats.enabled,
+                        "a writer whose start() failed must report enabled == false");
+    BOOST_CHECK_EQUAL(run.stats.offered, 0u);
+    BOOST_CHECK_EQUAL(run.stats.written, 0u);
+    BOOST_CHECK_EQUAL(run.stats.dropped, 0u);
+}
+
+// ---------------------------------------------------------------------------
+// Output case 3: multi-worker strict ordering (guarded)
+//   Invariant §3.4: submissions only happen inside commit_result()'s in-order
+//   emit section, so cir.jsonl / demod_results.jsonl are strictly ascending by
+//   window_id with no gap and no duplicate -- even with 4 workers finishing out
+//   of order.
+//
+//   In this worktree the writer is the Phase 0 stub, so the case skips with an
+//   explicit message.  It is NOT weakened: the coordinator re-runs it after
+//   Track 1 merges.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_output_multicore_ordering)
+{
+    const int64_t kTotal = 400000;
+    const size_t kCapture = 4000;
+    const size_t kWindows = 16;
+    const int kWorkerCounts[] = { 4, 8 };
+
+    for (int workers : kWorkerCounts) {
+        const std::string out_dir = qa_make_output_dir("ordering" +
+            std::to_string(workers));
+
+        PipelineConfig cfg = make_qa_pipeline_cfg(
+            kCapture, 0, 0, workers, /*pool_capacity=*/16, kWindows,
+            /*period_samples=*/kCapture, ConsumerMode::Both);
+        cfg.output.output_dir = out_dir;
+        cfg.output.write_cir = true;
+        cfg.output.write_comm = true;
+        cfg.output.comm_write_only_ok = false;
+        BOOST_REQUIRE(cfg.output.enabled());
+
+        auto source = std::make_unique<PredictiveSc16Source>(kTotal);
+        source->open_gate();
+        QaOutputRun run = qa_run_with_output(
+            cfg, std::move(source), "multicore ordering (" + std::to_string(workers) + " workers)");
+
+        BOOST_CHECK_MESSAGE(run.ledger_ok, run.ledger_error);
+        BOOST_REQUIRE_EQUAL(run.results.size(), kWindows);
+
+        // The reorder buffer is what makes the files ordered; prove it held.
+        for (size_t i = 0; i < run.results.size(); ++i) {
+            BOOST_CHECK_EQUAL(run.results[i].window_id, i);
+        }
+
+        const OutputWriterStats st = run.stats;
+        if (!st.enabled) {
+            BOOST_TEST_MESSAGE("output writer unavailable in this worktree (Phase 0 stub); "
+                               "the ordering case is re-run by the coordinator after "
+                               "Track 1 merges");
+            qa_remove_output_dir(out_dir);
+            return;
+        }
+
+        // Invariant §3.3: the ledger balances after the drain.
+        BOOST_CHECK_EQUAL(st.offered, st.written + st.dropped);
+
+        const std::string cir_path = out_dir + "/cir.jsonl";
+        const std::string comm_path = out_dir + "/demod_results.jsonl";
+        const std::vector<long long> pulse_ids =
+            qa_read_jsonl_int_field(cir_path, "pulse_id");
+        const std::vector<long long> packet_ids =
+            qa_read_jsonl_int_field(comm_path, "packet_id");
+
+        BOOST_TEST_MESSAGE("workers=" << workers << " writer stats: offered=" << st.offered
+                           << " written=" << st.written << " dropped=" << st.dropped
+                           << " cir_lines=" << pulse_ids.size()
+                           << " comm_lines=" << packet_ids.size());
+
+        // Sanity: the files exist and carry one line per window when nothing was
+        // dropped (the expected outcome for 16 windows and a 64-slot queue).
+        if (st.dropped == 0) {
+            BOOST_REQUIRE_EQUAL(pulse_ids.size(), kWindows);
+            BOOST_REQUIRE_EQUAL(packet_ids.size(), kWindows);
+        }
+
+        for (const auto* pair : { &pulse_ids, &packet_ids }) {
+            const std::vector<long long>& ids = *pair;
+            std::set<long long> unique_ids;
+            for (size_t i = 0; i < ids.size(); ++i) {
+                // Exactly once.
+                BOOST_CHECK_MESSAGE(unique_ids.insert(ids[i]).second,
+                                    "duplicate id " << ids[i]);
+                if (i > 0) {
+                    // Strictly ascending.
+                    BOOST_CHECK_MESSAGE(ids[i - 1] < ids[i],
+                                        "ids not strictly ascending: " << ids[i - 1]
+                                                                        << " then " << ids[i]);
+                }
+            }
+            if (st.dropped == 0) {
+                // Gap-free from 0.
+                BOOST_REQUIRE_EQUAL(ids.size(), kWindows);
+                for (size_t i = 0; i < ids.size(); ++i) {
+                    BOOST_CHECK_EQUAL(ids[i], static_cast<long long>(i));
+                }
+            } else {
+                // Drops are allowed; whatever survived must still be ordered and
+                // inside the window range.
+                for (long long id : ids) {
+                    BOOST_CHECK(id >= 0 && id < static_cast<long long>(kWindows));
+                }
+            }
+        }
+
+        qa_remove_output_dir(out_dir);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Output case 4: pool exhaustion does not block
+//   Invariant §3.2: a full pool / full queue drops and returns immediately.  A
+//   1-slot queue with 8 workers must still finish, conserve the ledger, and
+//   balance offered == written + dropped (dropped > 0 is expected).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_output_pool_exhaustion_does_not_block)
+{
+    const int64_t kTotal = 400000;
+    const size_t kCapture = 1000;
+    const size_t kWindows = 200;
+    const int kWorkers = 8;
+
+    const std::string out_dir = qa_make_output_dir("exhaustion");
+
+    PipelineConfig cfg = make_qa_pipeline_cfg(
+        kCapture, 0, 0, kWorkers, /*pool_capacity=*/32, kWindows,
+        /*period_samples=*/kCapture, ConsumerMode::SicOnly);
+    cfg.output.output_dir = out_dir;
+    cfg.output.write_cir = true;
+    cfg.output.write_comm = false;
+    // One hand-off slot and a one-deep queue: the writer thread can never keep
+    // up with 8 workers, so most windows must be dropped instead of blocking.
+    cfg.output.writer_queue_capacity = 1;
+    BOOST_REQUIRE(cfg.output.enabled());
+
+    auto source = std::make_unique<PredictiveSc16Source>(kTotal);
+    source->open_gate();
+
+    const auto t_start = std::chrono::steady_clock::now();
+    QaOutputRun run = qa_run_with_output(cfg, std::move(source), "pool exhaustion");
+    const double elapsed_ms = qa_elapsed_ms(t_start);
+
+    // Non-blocking: the run must terminate promptly, not wait on the writer.
+    BOOST_CHECK_LE(elapsed_ms, 60000.0);
+
+    BOOST_CHECK_MESSAGE(run.ledger_ok, run.ledger_error);
+    BOOST_REQUIRE_EQUAL(run.results.size(), kWindows);
+    // Every offered window reached a terminal state.  Ring-pool admission drops
+    // are a separate, pre-existing mechanism (they are counted in
+    // dropped_admission), so this case only forbids a window that is neither
+    // completed nor explicitly dropped.
+    for (size_t i = 0; i < run.results.size(); ++i) {
+        BOOST_CHECK_EQUAL(run.results[i].window_id, i);
+        const WindowTerminalState state = run.results[i].state;
+        BOOST_CHECK_MESSAGE(state == WindowTerminalState::Completed ||
+                                state == WindowTerminalState::DroppedAdmission,
+                            "window " << i << " ended in unexpected state "
+                                      << static_cast<int>(state));
+    }
+    BOOST_CHECK_GE(run.ledger.completed_windows, 1u);
+    BOOST_CHECK_EQUAL(run.ledger.processing_failed, 0u);
+
+    const OutputWriterStats st = run.stats;
+    BOOST_TEST_MESSAGE("pool exhaustion: enabled=" << st.enabled << " offered=" << st.offered
+                       << " written=" << st.written << " dropped=" << st.dropped
+                       << " elapsed_ms=" << elapsed_ms);
+
+    if (st.enabled) {
+        // Invariant §3.3 holds even when most windows were dropped.
+        BOOST_CHECK_EQUAL(st.offered, st.written + st.dropped);
+        // The ledger must have counted the rejections, not silently lost them.
+        BOOST_CHECK_GT(st.dropped, 0u);
+    } else {
+        // Phase 0 stub: nothing was ever offered, so the balance is 0 == 0.
+        BOOST_CHECK_EQUAL(st.offered, 0u);
+        BOOST_CHECK_EQUAL(st.dropped, 0u);
+    }
+
+    qa_remove_output_dir(out_dir);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
+
