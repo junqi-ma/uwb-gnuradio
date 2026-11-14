@@ -1,4 +1,50 @@
-# 当前提交快照：单窗端到端低垂果实优化（2026-11-14）
+# 当前提交快照：纯 C++ Pipeline 落盘与实时日志（2026-11-14）
+
+按 `docs/performance/OpenCode_Pipeline落盘与实时日志_多Agent开发方案_2026-11-14.md`
+以 Phase 0 接口冻结 + 3 条文件隔离并行 Track + 集成整改交付。报告
+`docs/performance/Pipeline落盘与实时日志_开发报告_2026-11-14.md`，执行计划
+`docs/performance/OpenCode_Pipeline落盘与实时日志_多Agent执行计划_2026-11-14.md`。
+分支 `feature/sensing-shared-cir`，基线 `a5d2a9e`，交付 `5b1c67d`，build
+`gr-uwb/build-sensing-shared-cir-r3`。
+- **为什么先冻结接口**：任务书三条 Track 是硬串行依赖（T2 要 T1 的声明、T3 要 T2 的
+  config 字段），直接并行编译不过。Phase 0（`b40d048`）冻结
+  `uwb_pipeline_output_types.h` / `uwb_pipeline_output_writer.h` /
+  `PipelineConfig::output` + CMake + 可编译桩，三条 Track 才真正互不阻塞。
+- **零 GNU Radio 依赖**：新组件只用标准库；`.ucr4`+`.jsonl`+`run.json` 与
+  `UwbCirWriter`、`demod_results.jsonl` 与 `uwb_scheduled_dump_io.h` 格式兼容但代码独立。
+- **热路径零退化**：关闭时 `output_writer_ == nullptr`，只多一次空指针判断；
+  0 分配 / 0 锁 / 0 时钟读取。26 个 `WindowResult` 字段逐窗相同，统计全 0。
+- **非阻塞背压**：槽位池 + 有界队列，池空/队满立即丢弃并累加 `dropped`，
+  绝不阻塞 RX 或 DSP。`offered == written + dropped` 在所有实测运行成立
+  （含 `dropped=195` 的慢写注入）。
+- **严格顺序**：入队只发生在 `commit_result()` 按 `window_id` 递增的 emit 段内，
+  槽位缓冲 `pending_slots_` 与 `pending_results_` 同受 `commit_mutex_` 保护。
+  `dsp_workers ∈ {4,8}` × 2 种 consumer 各 **16/16 窗**，升序、无缺号、无重复。
+- **`WindowResult` 不内嵌变长数组**：taps/PSDU 只存在于预分配 `OutputPayloadSlot`，
+  写完立即归池。
+- **聚合写盘字节级等价**：逐帧写 vs 1 MiB/50 ms 聚合写，`cir.ucr4` 20640 B /
+  `cir.jsonl` 22865 B `memcmp` 全等（flush 42 vs 2）。
+- **集成阶段修掉 7 个真实缺陷**（单 Track 视角看不到）：`peak_tap` 被用 L∞ 重算而内核用
+  L2（会发布一对用两个范数量出的 tap/metric）；`sfd_start_sample` 装的是 SYNC 原点而非
+  SFD 起点；槽位缓冲是进程级全局 map（改为私有成员）；`pending_slots_` erase 越界导致
+  **每个 pipeline QA 段错误**；顺序性用例用 `ConsumerMode::Both` 却断言 comm 文件
+  （`Both` 从不跑 comm）；runner 用弱符号绑定 `output_writer_stats()`（fail-open）；
+  runner 缺 `--radar-full-window` 导致 E2E 只能产出失败帧。
+- **真实落盘（手动 E2E，各 8 窗）**：CIR `status=ok`、`tap_count=116`、`peak_tap=28`、
+  `metric=0.078909`、`file_offset_taps=0,116,…,812`；comm `fcs=PASS`、32 B、6.81 Mb/s。
+  **jam 与 clean 的 `psdu_hex`/`psdu_fnv1a` 逐字节相同**（`sic_committed=true`、
+  抑制 20.01 dB）——SIC 真的还原了包。
+- **测试**：全量 CTest **90 项 89 通过 1 跳过 0 失败**（128.48 s）。新增 writer QA 10 例、
+  pipeline QA 4 例、runner E2E 4 case、独立解析器 `verify_ucr4_output.py`（16 项检查 +
+  6 种损坏全部拒绝）。
+- **未验证**：成功路径不在 CTest（仓库 fixture 在 runner 默认搜索下不产生可检测包，
+  CTest 只钉住失败帧契约）；未上板/paced/UHD recv 溢出；未跑 MATLAB `read_uwb_cir.m`；
+  真实磁盘饱和未测（只用 1 ms/帧合成 hook）；`encode_cir_sc16` 对非有限输入零填充
+  而参考实现静默裁到 −32767（全有限输入逐位相同）。候选不标记为全面验收通过。
+
+---
+
+# 历史提交快照：单窗端到端低垂果实优化（2026-11-14）
 
 按 `docs/performance/OpenCode_单窗端到端低垂果实优化_多Agent开发方案_2026-11-14.md`
 以 3 个文件严格隔离的并行 Agent（Track A/B/C）+ 集成/ABBA Agent（Track D）交付。
