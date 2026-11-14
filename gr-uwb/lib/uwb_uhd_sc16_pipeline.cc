@@ -170,34 +170,6 @@ const char* sic_backend_name(sic::SicEstimatorBackend backend)
     return "ipatov";
 }
 
-// ---------------------------------------------------------------------------
-// Per-pipeline output-slot reorder buffer
-// ---------------------------------------------------------------------------
-// commit_result() hands each finished window's OutputPayloadSlot to the writer
-// strictly in window_id order, so the slots have to be buffered in parallel
-// with `pending_results_` (same `rel` index space).  The frozen pipeline header
-// may not grow a member for it, so the buffer lives in this side table keyed by
-// the pipeline instance.
-//
-// Cost when output persistence is disabled: zero -- commit_result() only
-// touches this table when it actually holds a slot.  Cost when enabled: one
-// short mutex acquisition per commit_result() call, and the returned reference
-// stays valid across concurrent insertions because std::map is node based.
-std::mutex g_slot_reorder_mutex;
-std::map<const void*, std::vector<OutputPayloadSlot*>> g_slot_reorder;
-
-std::vector<OutputPayloadSlot*>& slot_reorder_buffer(const void* owner)
-{
-    std::lock_guard<std::mutex> lk(g_slot_reorder_mutex);
-    return g_slot_reorder[owner];
-}
-
-void drop_slot_reorder_buffer(const void* owner)
-{
-    std::lock_guard<std::mutex> lk(g_slot_reorder_mutex);
-    g_slot_reorder.erase(owner);
-}
-
 uint64_t fnv1a_64(const uint8_t* data, size_t n)
 {
     uint64_t hash = 14695981039346656037ULL;
@@ -981,10 +953,8 @@ UhdSc16Pipeline::~UhdSc16Pipeline()
 {
     stop();
     wait();
-    // The per-instance slot reorder buffer is empty by construction once wait()
-    // returned (flush_pending_results() settles every entry); drop the side
-    // table entry so a new pipeline reusing this address starts clean.
-    drop_slot_reorder_buffer(this);
+    // pending_slots_ is empty by construction once wait() returned
+    // (flush_pending_results() settles every entry).
 }
 
 int UhdSc16Pipeline::effective_dsp_workers() const
@@ -1158,12 +1128,10 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
         std::lock_guard<std::mutex> lk(commit_mutex_);
         next_commit_id_ = 0;
         pending_results_.clear();
-        if (output_writer_) {
-            // A previous run's slots are all settled by now (wait() drained the
-            // writer); drop any leftover bookkeeping so the index space restarts
-            // at 0 together with pending_results_.
-            slot_reorder_buffer(this).clear();
-        }
+        // A previous run's slots are all settled by now (wait() drained the
+        // writer); drop any leftover bookkeeping so the index space restarts
+        // at 0 together with pending_results_.
+        pending_slots_.clear();
     }
 
     // A2: a fresh ready epoch.  Nothing is started here -- initialize() only
@@ -3294,6 +3262,12 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
         float out_sfd_metric = 0.0f;
         float out_raw_l2_norm = 0.0f;
         size_t out_tap_count = 0;
+        // The kernel's authoritative peak tap (argmax of |raw|, L2) and the
+        // RX-detected SFD start.  Both are published verbatim: recomputing
+        // peak_tap with a different norm in the writer would pair a tap with a
+        // metric measured by another norm.
+        size_t out_peak_tap = 0;
+        int64_t out_sfd_start = -1;
         bool out_sensing_ok = false;
         int64_t out_pred_sfd = -1;
         bool out_comm_ran = false;
@@ -3435,6 +3409,8 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
             out_sfd_metric = cir_res.sfd_metric;
             out_raw_l2_norm = cir_res.raw_l2_norm;
             out_tap_count = out_sensing_ok ? cir_res.tap_count : 0;
+            out_peak_tap = out_sensing_ok ? cir_res.peak_tap : 0;
+            out_sfd_start = cir_res.sfd_start_sample;
             // Front-end total = timing + cfo + sfd.  `coverage_us` is NOT
             // added: the coverage PLANNING pass runs inside the SFD parent
             // (uwb_demod_core.h laps `sfd_us` after the coverage block), so
@@ -3592,6 +3568,8 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
                 rec.radar_valid_reps = res.radar_valid_reps;
                 rec.sfd_metric = out_sfd_metric;
                 rec.raw_l2_norm = out_raw_l2_norm;
+                rec.peak_tap = out_peak_tap;
+                rec.sfd_start_sample = out_sfd_start;
                 rec.cir_pre = effective_radar_cfg.cir_pre;
                 rec.cir_post = effective_radar_cfg.cir_post;
 
@@ -3706,15 +3684,13 @@ void UhdSc16Pipeline::commit_result(int worker_id,
     // Parallel reorder buffer for the output payload.  It uses the same `rel`
     // index space as pending_results_, so a slot is only handed to the writer
     // when its window is actually emitted -- that is what makes every file and
-    // log line strictly ascending by window_id.  Only touched when output
-    // persistence is enabled, so the disabled path stays free.
-    std::vector<OutputPayloadSlot*>* slot_buf = nullptr;
+    // log line strictly ascending by window_id.  Always empty when output
+    // persistence is disabled, so the disabled path stays free.
     if (output_writer_) {
-        slot_buf = &slot_reorder_buffer(this);
-        if (slot_buf->size() <= rel) {
-            slot_buf->resize(rel + 1, nullptr);
+        if (pending_slots_.size() <= rel) {
+            pending_slots_.resize(rel + 1, nullptr);
         }
-        (*slot_buf)[rel] = slot;
+        pending_slots_[rel] = slot;
     }
 
     // Flush every contiguous entry, strictly by ascending window_id.
@@ -3730,9 +3706,9 @@ void UhdSc16Pipeline::commit_result(int worker_id,
         // Hand the payload over while still inside the in-order emit section.
         // try_submit() takes ownership on success and returns the slot to the
         // pool on failure, so the pointer is never touched again either way.
-        if (slot_buf && flushed < slot_buf->size()) {
-            OutputPayloadSlot* emit_slot = (*slot_buf)[flushed];
-            (*slot_buf)[flushed] = nullptr;
+        if (flushed < pending_slots_.size()) {
+            OutputPayloadSlot* emit_slot = pending_slots_[flushed];
+            pending_slots_[flushed] = nullptr;
             if (emit_slot) {
                 output_writer_->try_submit(emit_slot);
             }
@@ -3770,9 +3746,16 @@ void UhdSc16Pipeline::commit_result(int worker_id,
     if (flushed > 0) {
         pending_results_.erase(pending_results_.begin(),
                                pending_results_.begin() + static_cast<ptrdiff_t>(flushed));
-        if (slot_buf) {
-            slot_buf->erase(slot_buf->begin(),
-                            slot_buf->begin() + static_cast<ptrdiff_t>(flushed));
+        // pending_slots_ is only ever resized while the writer is enabled, so it
+        // can be shorter than `flushed` (or empty).  Erasing past its end would
+        // be undefined behaviour, so clamp instead of assuming the two buffers
+        // have the same length.
+        const size_t drop_slots =
+            std::min(flushed, pending_slots_.size());
+        if (drop_slots > 0) {
+            pending_slots_.erase(
+                pending_slots_.begin(),
+                pending_slots_.begin() + static_cast<ptrdiff_t>(drop_slots));
         }
     }
 }
@@ -3781,9 +3764,6 @@ void UhdSc16Pipeline::flush_pending_results()
 {
     std::lock_guard<std::mutex> lk(commit_mutex_);
     const bool diag = cfg_.enable_commit_diagnostics;
-
-    std::vector<OutputPayloadSlot*>* slot_buf =
-        output_writer_ ? &slot_reorder_buffer(this) : nullptr;
 
     // Contract §1.3: after all threads have joined, force out whatever is
     // still buffered (max_windows tail / stop()) in ascending window_id order.
@@ -3803,9 +3783,9 @@ void UhdSc16Pipeline::flush_pending_results()
         // Same in-order hand-off as commit_result(): the tail is settled in
         // ascending window_id order, so the writer's ordering contract holds
         // for the drain path too.
-        if (slot_buf && i < slot_buf->size()) {
-            OutputPayloadSlot* emit_slot = (*slot_buf)[i];
-            (*slot_buf)[i] = nullptr;
+        if (i < pending_slots_.size()) {
+            OutputPayloadSlot* emit_slot = pending_slots_[i];
+            pending_slots_[i] = nullptr;
             if (emit_slot) {
                 output_writer_->try_submit(emit_slot);
             }
@@ -3819,9 +3799,12 @@ void UhdSc16Pipeline::flush_pending_results()
     if (advanced > 0) {
         pending_results_.erase(pending_results_.begin(),
                                pending_results_.begin() + static_cast<ptrdiff_t>(advanced));
-        if (slot_buf) {
-            slot_buf->erase(slot_buf->begin(),
-                            slot_buf->begin() + static_cast<ptrdiff_t>(advanced));
+        const size_t drop_slots =
+            std::min(advanced, pending_slots_.size());
+        if (drop_slots > 0) {
+            pending_slots_.erase(
+                pending_slots_.begin(),
+                pending_slots_.begin() + static_cast<ptrdiff_t>(drop_slots));
         }
         next_commit_id_ += advanced;
     }

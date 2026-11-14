@@ -186,7 +186,9 @@ run_runner()
     set +e
     "$RUNNER" \
         --file "$FIXTURE" \
-        --period 56000 --capture 56000 --max-windows 1 \
+        --native-rate 737280000 --work-rate 998400000 \
+        --period 127572 --capture 126772 --pre-guard 400 --post-guard 400 \
+        --t0 0 --max-windows 4 \
         "$@" \
         --json-out "$json" >"$log" 2>&1
     rc=$?
@@ -287,6 +289,33 @@ if [ -z "$live_lines" ] || [ "$live_lines" -lt 1 ]; then
     fail "--live-log summary produced no live log line (live_log_lines='$live_lines')"
 fi
 echo "  ok: cir.ucr4/cir.jsonl/run.json verified, live_log_lines=$live_lines"
+
+# ---------------------------------------------------------------------------
+# Case 1b: the failure-trace contract on this fixture.
+#
+# The in-repo 737.28 MS/s fixture carries no packet that the sensing front-end
+# detects with the runner's default search, so every window is `sfd_failed`.
+# That is exactly the contract worth pinning: a failed frame leaves a JSONL
+# trace with tap_count 0, does NOT append a UCR4 record, and does NOT advance
+# file_offset_taps.  The success path (real taps -> UCR4) is covered by
+# qa_uwb_pipeline_output_writer.cc with synthetic taps and by the manual E2E
+# recorded in the development report.
+# ---------------------------------------------------------------------------
+if [ -s "$OUT1/cir.ucr4" ]; then
+    fail "a run whose windows all failed must not write any UCR4 record"
+fi
+rows=$(grep -c . "$OUT1/cir.jsonl" || true)
+[ "$rows" -ge 1 ] || fail "failed windows produced no cir.jsonl trace"
+if grep -v '"tap_count":0' "$OUT1/cir.jsonl" >/dev/null 2>&1; then
+    fail "a failed window must carry tap_count:0 in cir.jsonl"
+fi
+if grep -v '"file_offset_taps":0' "$OUT1/cir.jsonl" >/dev/null 2>&1; then
+    fail "a failed window must not advance file_offset_taps"
+fi
+if grep -v '"status":"sfd_failed"' "$OUT1/cir.jsonl" >/dev/null 2>&1; then
+    fail "expected status sfd_failed on every window of this fixture"
+fi
+echo "  ok: failure-trace contract (rows=$rows, no ucr4 record, offsets frozen)"
 
 # ---------------------------------------------------------------------------
 # Case 2: comm decode persistence.

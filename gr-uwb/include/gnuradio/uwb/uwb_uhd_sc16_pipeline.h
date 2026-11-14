@@ -836,6 +836,12 @@ private:
     // The result callback must not re-enter the pipeline.
     std::mutex commit_mutex_;
     std::vector<std::unique_ptr<WindowResult>> pending_results_;
+    // Parallel reorder buffer for the async output writer: the slot of the
+    // window at the same index as pending_results_.  A slot is handed to the
+    // writer only when its window is emitted, which is what makes every output
+    // file strictly ascending by window_id.  Always empty when output
+    // persistence is disabled, so the disabled path never touches it.
+    std::vector<OutputPayloadSlot*> pending_slots_;
     uint64_t next_commit_id_ = 0;
     // Drain any still-buffered results after all threads have joined.
     void flush_pending_results();

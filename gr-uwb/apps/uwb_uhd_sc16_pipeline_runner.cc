@@ -44,49 +44,22 @@ using namespace gr::uwb::pipeline;
 #define UWB_TESTDATA_DIR "testdata"
 #endif
 
-// ---------------------------------------------------------------------------
-// Output-writer telemetry binding
-// ---------------------------------------------------------------------------
-// `UhdSc16Pipeline::output_writer_stats()` is declared by the frozen Phase 0
-// header but DEFINED by the pipeline integration (`uwb_uhd_sc16_pipeline.cc`,
-// which this track does not own).  In a tree that does not carry that
-// definition yet a normal call would fail to link and the runner would be
-// unbuildable.
-//
-// The declaration below is therefore a weak UNDEFINED reference to the
-// Itanium-ABI mangled name.  It binds to the real definition whenever the
-// linked library provides it (i.e. once the integration lands) and stays null
-// otherwise; in that case the runner reports the writer as DISABLED
-// (enabled == false, every counter 0) and says so on stdout instead of
-// inventing numbers.  Being only a reference it can never shadow the library's
-// own definition.
-//
-// `_ZNK2gr3uwb8pipeline15UhdSc16Pipeline19output_writer_statsEv` is
-// "const member function, no arguments"; it is spelled out because a plain
-// `extern "C"` declaration cannot carry a C++ name.
-gr::uwb::pipeline::OutputWriterStats
-    pipeline_output_writer_stats_weak(const gr::uwb::pipeline::UhdSc16Pipeline*)
-        __asm__("_ZNK2gr3uwb8pipeline15UhdSc16Pipeline19output_writer_statsEv")
-            __attribute__((weak));
-
 namespace {
 
-// True when the linked library actually provides output_writer_stats().
-bool output_writer_stats_available()
-{
-    return pipeline_output_writer_stats_weak != nullptr;
-}
-
+// Output-writer telemetry.
+//
 // Must never be called before UhdSc16Pipeline::wait()/stop(): that is where the
 // writer drains, so only then is `offered == written + dropped` meaningful.
-// A missing definition reports the disabled writer rather than a fake ledger.
+//
+// This used to be a weak undefined reference to the mangled symbol, because the
+// Track 3 worktree did not carry the pipeline integration that defines it.  Now
+// that the integration is in the same tree a direct call is used: a weak
+// reference would silently report "disabled" if the runner were ever linked
+// against a stale library, which is exactly the fail-open this project forbids.
 gr::uwb::pipeline::OutputWriterStats
 read_output_writer_stats(const gr::uwb::pipeline::UhdSc16Pipeline& pipeline)
 {
-    if (pipeline_output_writer_stats_weak != nullptr) {
-        return pipeline_output_writer_stats_weak(&pipeline);
-    }
-    return gr::uwb::pipeline::OutputWriterStats{};
+    return pipeline.output_writer_stats();
 }
 
 struct BenchmarkLockGuard {
@@ -398,6 +371,7 @@ void print_help(const char* prog_name)
               << "  --prov-guard-us <us>        Provisional pre/post guard during lock acquisition in us (default: 150.0)\n"
               << "  --radar-code <idx>          Sensing SYNC Ipatov code index (default: 9)\n"
               << "  --radar-sync-reps <n>       Sensing SYNC repetition count (default: 64)\n"
+              << "  --radar-full-window [0|1]   Sensing full-window SFD search (default: 0)\n"
               << "  --comm-code <idx>           Comm RX SYNC Ipatov code index (default: 9)\n"
               << "  --comm-sync-reps <n>        Comm RX SYNC repetition count (default: 64)\n"
               << "  --sfd-mode <m>              SFD mode (4z1|4z2|4z3|4z4|decawave|ieee) for radar/comm/sic\n"
@@ -1135,6 +1109,35 @@ int main(int argc, char* argv[])
                 return 1;
             }
             cfg.radar_cfg.sync_repetitions = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--radar-full-window") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --radar-full-window expects 0|1\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            const std::string v = argv[++i];
+            if (v == "1" || v == "true") {
+                cfg.radar_full_window_search = true;
+                // Mirror benchmark_sc16_pipeline_steady: set the radar config
+                // directly as well.  build_effective_radar_cfg() only honours
+                // `radar_full_window_search` when use_predicted_timing is false,
+                // so relying on it alone silently kept the narrow predicted-SFD
+                // search and every window failed with sfd_failed.
+                cfg.radar_cfg.full_window_search = true;
+                if (cfg.radar_cfg.timing_coarse_stride <= 1) {
+                    cfg.radar_cfg.timing_coarse_stride = 8;
+                }
+            } else if (v == "0" || v == "false") {
+                cfg.radar_full_window_search = false;
+                cfg.radar_cfg.full_window_search = false;
+            } else {
+                // Explicit domain check: an unknown token must never be read as
+                // "false" (that would silently disable detection).
+                std::cerr << "Error: --radar-full-window expects 0|1|true|false, got '"
+                          << v << "'\n";
+                print_help(argv[0]);
+                return 1;
+            }
         } else if (arg == "--comm-code") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --comm-code requires a SYNC code index\n";
@@ -1489,7 +1492,6 @@ int main(int argc, char* argv[])
     // drains the writer, so `offered == written + dropped` holds at this point
     // and nowhere earlier.
     const OutputWriterStats out_stats = read_output_writer_stats(pipeline);
-    const bool out_stats_available = output_writer_stats_available();
     const bool out_ledger_ok =
         (out_stats.offered == out_stats.written + out_stats.dropped);
 
@@ -1936,9 +1938,7 @@ int main(int argc, char* argv[])
                   << " (offered == written + dropped)\n\n";
     } else if (cfg.output.enabled()) {
         std::cout << "Output Writer: disabled, no files written"
-                  << (out_stats_available
-                          ? std::string(" (writer start() failed)")
-                          : std::string(" (output_writer_stats() is not defined in this build)"))
+                  << " (writer start() failed; see the diagnostic on stderr)"
                   << "\n\n";
     }
 

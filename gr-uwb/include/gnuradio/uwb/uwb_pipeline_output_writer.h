@@ -80,6 +80,17 @@ struct OutputWindowRecord {
     int64_t radar_detected_origin = -1;
     size_t radar_valid_reps = 0;
     // Extras that RadarCirResult carries but WindowResult does not publish.
+    //
+    // `sfd_start_sample` is the RX-detected SFD start, which is a DIFFERENT
+    // quantity from the detected SYNC origin (`radar_detected_origin`); the
+    // legacy `cir.jsonl` contract means the SFD start here.
+    //
+    // `peak_tap` is the kernel's authoritative argmax of `|raw_tap|` (L2).  The
+    // writer must NOT recompute it with a different norm: `radar_peak_metric`
+    // is the L2 magnitude at this tap, so a mismatched norm would publish an
+    // inconsistent (tap, metric) pair.
+    int64_t sfd_start_sample = -1;
+    size_t peak_tap = 0;
     float sfd_metric = 0.0f;
     float raw_l2_norm = 0.0f;
     size_t cir_pre = 0;

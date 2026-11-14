@@ -463,18 +463,20 @@ struct PipelineOutputWriter::Impl {
         e.tap_count = e.ok ? n : 0;
         e.offset_before = file_offset_taps;
 
-        float peak_mag = 0.0f;
-        for (size_t i = 0; i < n; ++i) {
-            const float m = std::max(std::fabs(slot.cir_taps[i].real()),
-                                     std::fabs(slot.cir_taps[i].imag()));
-            if (m > peak_mag) {
-                peak_mag = m;
-                e.peak_tap = i;
-            }
-        }
+        // `peak_tap` is the CIR kernel's own argmax of |raw tap| (L2).  Publish
+        // it verbatim: recomputing it here with a different norm (e.g.
+        // max(|re|,|im|)) could select a different tap while `cir_peak_metric`
+        // stays the L2 magnitude, i.e. an inconsistent (tap, metric) pair.
+        // The range check is defensive only: a record whose peak index is out
+        // of the tap range is not something the kernel can produce.
+        e.peak_tap = (r.peak_tap < n) ? r.peak_tap : 0;
         e.peak_metric = r.radar_peak_metric;
-        if (!std::isfinite(e.peak_metric) || e.peak_metric <= 0.0f)
-            e.peak_metric = peak_mag;
+        if (!std::isfinite(e.peak_metric) || e.peak_metric <= 0.0f) {
+            // Fallback only for a malformed record: use the L2 magnitude at the
+            // published tap so the pair stays consistent.
+            e.peak_metric =
+                (e.peak_tap < n) ? std::abs(slot.cir_taps[e.peak_tap]) : 0.0f;
+        }
 
         if (e.ok && meta.work_rate > 0.0) {
             e.peak_delay_ns =
@@ -546,12 +548,10 @@ struct PipelineOutputWriter::Impl {
         j_f64(line, "range_m_per_tap", range_m_per_tap(), 9);
         j_f64(line, "raw_l2_norm", e.ok ? r.raw_l2_norm : 0.0, 9);
         j_i64(line, "preamble_start_sample", r.radar_detected_start);
-        // The frozen OutputWindowRecord publishes the detected SYNC origin but
-        // not the SFD start; that origin is the only detection anchor we have,
-        // so it is what `sfd_start_sample` carries here.
-        j_i64(line,
-              "sfd_start_sample",
-              r.radar_sfd_found ? r.radar_detected_origin : -1);
+        // The RX-detected SFD start, which is a different quantity from the
+        // detected SYNC origin (`radar_detected_origin`).  -1 when the SFD
+        // stage did not produce one.
+        j_i64(line, "sfd_start_sample", r.sfd_start_sample);
         j_i64(line, "cir_origin_sample", r.radar_cir_origin);
         j_bool(line, "sfd_ok", r.radar_sfd_found);
         j_bool(line, "timing_ok", r.radar_detected_origin >= 0);

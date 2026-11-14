@@ -235,6 +235,12 @@ struct FrameSpec {
     size_t cir_pre = 16;
     size_t cir_post = 100;
     size_t tap_count = 116;
+    // The kernel's authoritative peak tap and the RX-detected SFD start.  Both
+    // must be published verbatim: the writer must not recompute peak_tap with a
+    // different norm (that would pair a tap with a metric measured by another
+    // norm), and sfd_start_sample is NOT the detected SYNC origin.
+    size_t peak_tap = 28;
+    int64_t sfd_start_sample = 900;
 
     bool comm_attempted = false;
     bool comm_ok = false;
@@ -270,12 +276,14 @@ fill_slot(pl::OutputPayloadSlot& slot, const FrameSpec& f)
 
     r.radar_executed = f.radar_executed;
     r.radar_sfd_found = f.radar_sfd_found;
-    r.radar_peak_metric = 0.0f; // writer falls back to argmax(|tap|)
+    r.radar_peak_metric = 0.078909032f; // the L2 magnitude at peak_tap
     r.radar_detected_start = f.radar_detected_start;
     r.radar_cfo_hz = 1234.5;
     r.radar_cir_origin = f.radar_cir_origin;
     r.radar_detected_origin = f.radar_detected_origin;
     r.radar_valid_reps = 8;
+    r.peak_tap = f.peak_tap;
+    r.sfd_start_sample = f.sfd_start_sample;
     r.sfd_metric = 0.5f;
     r.raw_l2_norm = 1.0f;
     r.cir_pre = f.cir_pre;
@@ -937,6 +945,57 @@ BOOST_AUTO_TEST_CASE(test_summary_mode_wakes_when_idle)
 // ---------------------------------------------------------------------------
 // 9. release_slot() converts an acquired slot into a drop
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 10. peak_tap / sfd_start_sample are published VERBATIM
+//
+//   The CIR kernel owns both values: `peak_tap` is its argmax of |raw tap| (L2)
+//   and `sfd_start_sample` is the RX-detected SFD start, which is a different
+//   quantity from the detected SYNC origin.  The writer must copy them, not
+//   re-derive them -- an earlier revision recomputed peak_tap with max(|re|,|im|)
+//   and published the SYNC origin as the SFD start.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_peak_tap_and_sfd_start_are_verbatim)
+{
+    const std::string dir = make_temp_dir("verbatim");
+    FrameSpec f;
+    f.window_id = 0;
+    f.tap_count = 116;
+    f.peak_tap = 73;          // deliberately NOT the max(|re|,|im|) argmax
+    f.sfd_start_sample = 4321;
+    f.radar_detected_origin = 1000; // must NOT leak into sfd_start_sample
+    f.radar_detected_start = 1016;
+
+    const RunResult r = run_frames(dir, { f });
+    BOOST_REQUIRE_EQUAL(r.stats.written, 1u);
+
+    const std::vector<std::string> lines = read_lines(dir + "/cir.jsonl");
+    BOOST_REQUIRE_EQUAL(lines.size(), 1u);
+    const std::string& line = lines[0];
+    BOOST_CHECK_EQUAL(raw_u64(line, "peak_tap"), static_cast<uint64_t>(73));
+    BOOST_CHECK_EQUAL(static_cast<int64_t>(raw_u64(line, "sfd_start_sample")),
+                      static_cast<int64_t>(4321));
+    BOOST_CHECK_EQUAL(
+        static_cast<int64_t>(raw_u64(line, "preamble_start_sample")),
+        static_cast<int64_t>(1016));
+    // cir_peak_metric is the record's value, not the magnitude at peak_tap.
+    BOOST_CHECK_CLOSE(raw_f64(line, "cir_peak_metric"), 0.078909032, 1e-6);
+    // peak_delay_from_calibration_ns uses (peak_tap - zero_delay_tap).
+    const double expect_ns = (73.0 - 16.0) / 998.4e6 * 1.0e9;
+    BOOST_CHECK_CLOSE(raw_f64(line, "peak_delay_from_calibration_ns"), expect_ns,
+                      1e-6);
+
+    // The UCR4 header carries the same peak_tap.
+    const std::vector<char> bin = read_file(dir + "/cir.ucr4");
+    BOOST_REQUIRE_GE(bin.size(), sizeof(pl::Ucr4Header));
+    pl::Ucr4Header hdr;
+    std::memcpy(&hdr, bin.data(), sizeof(hdr));
+    BOOST_CHECK_EQUAL(hdr.peak_tap, static_cast<int32_t>(73));
+    BOOST_CHECK_EQUAL(hdr.tap_count, static_cast<uint16_t>(116));
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
 BOOST_AUTO_TEST_CASE(test_release_slot_balances_ledger)
 {
     const std::string dir = make_temp_dir("release");

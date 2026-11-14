@@ -2761,13 +2761,30 @@ BOOST_AUTO_TEST_CASE(test_pipeline_output_multicore_ordering)
     const size_t kWindows = 16;
     const int kWorkerCounts[] = { 4, 8 };
 
+    // `ConsumerMode::Both` is SicPlusSensing: it runs SIC + sensing and NEVER
+    // comm, so a `Both` run can only exercise cir.jsonl.  `SicPlusComm` is the
+    // mirror image.  Both files therefore need their own sub-case; asserting
+    // comm lines from a `Both` run would be asserting something the pipeline
+    // never does (that was the original bug in this case).
+    struct ModeCase {
+        ConsumerMode mode;
+        const char* name;
+        bool runs_sensing;
+        bool runs_comm;
+    };
+    const ModeCase kModes[] = {
+        { ConsumerMode::SicPlusSensing, "sic+sensing", true, false },
+        { ConsumerMode::SicPlusComm, "sic+comm", false, true },
+    };
+
+    for (const ModeCase& mc : kModes) {
     for (int workers : kWorkerCounts) {
-        const std::string out_dir = qa_make_output_dir("ordering" +
-            std::to_string(workers));
+        const std::string out_dir = qa_make_output_dir(
+            "ordering_" + std::string(mc.name) + "_" + std::to_string(workers));
 
         PipelineConfig cfg = make_qa_pipeline_cfg(
             kCapture, 0, 0, workers, /*pool_capacity=*/16, kWindows,
-            /*period_samples=*/kCapture, ConsumerMode::Both);
+            /*period_samples=*/kCapture, mc.mode);
         cfg.output.output_dir = out_dir;
         cfg.output.write_cir = true;
         cfg.output.write_comm = true;
@@ -2777,7 +2794,8 @@ BOOST_AUTO_TEST_CASE(test_pipeline_output_multicore_ordering)
         auto source = std::make_unique<PredictiveSc16Source>(kTotal);
         source->open_gate();
         QaOutputRun run = qa_run_with_output(
-            cfg, std::move(source), "multicore ordering (" + std::to_string(workers) + " workers)");
+            cfg, std::move(source),
+            std::string(mc.name) + " ordering (" + std::to_string(workers) + " workers)");
 
         BOOST_CHECK_MESSAGE(run.ledger_ok, run.ledger_error);
         BOOST_REQUIRE_EQUAL(run.results.size(), kWindows);
@@ -2788,13 +2806,8 @@ BOOST_AUTO_TEST_CASE(test_pipeline_output_multicore_ordering)
         }
 
         const OutputWriterStats st = run.stats;
-        if (!st.enabled) {
-            BOOST_TEST_MESSAGE("output writer unavailable in this worktree (Phase 0 stub); "
-                               "the ordering case is re-run by the coordinator after "
-                               "Track 1 merges");
-            qa_remove_output_dir(out_dir);
-            return;
-        }
+        BOOST_REQUIRE_MESSAGE(st.enabled,
+                              "the output writer must be available in the merged tree");
 
         // Invariant §3.3: the ledger balances after the drain.
         BOOST_CHECK_EQUAL(st.offered, st.written + st.dropped);
@@ -2806,16 +2819,28 @@ BOOST_AUTO_TEST_CASE(test_pipeline_output_multicore_ordering)
         const std::vector<long long> packet_ids =
             qa_read_jsonl_int_field(comm_path, "packet_id");
 
-        BOOST_TEST_MESSAGE("workers=" << workers << " writer stats: offered=" << st.offered
-                           << " written=" << st.written << " dropped=" << st.dropped
+        BOOST_TEST_MESSAGE("mode=" << mc.name << " workers=" << workers
+                           << " writer stats: offered=" << st.offered
+                           << " written=" << st.written
+                           << " dropped=" << st.dropped
                            << " cir_lines=" << pulse_ids.size()
                            << " comm_lines=" << packet_ids.size());
 
-        // Sanity: the files exist and carry one line per window when nothing was
-        // dropped (the expected outcome for 16 windows and a 64-slot queue).
+        // cir.jsonl carries one row per window whose sensing stage RAN.  A
+        // window whose sensing stage was never attempted (comm-only consumer)
+        // is not a failed CIR frame and deliberately gets no row -- writing
+        // `invalid_input` there would be misleading.  A window whose sensing
+        // stage ran but failed DOES get a `tap_count: 0` trace (asserted by the
+        // writer QA, not here).
         if (st.dropped == 0) {
-            BOOST_REQUIRE_EQUAL(pulse_ids.size(), kWindows);
+            BOOST_REQUIRE_EQUAL(pulse_ids.size(),
+                                mc.runs_sensing ? kWindows : 0u);
+        }
+        // demod_results.jsonl only carries the windows whose comm stage ran.
+        if (mc.runs_comm && st.dropped == 0) {
             BOOST_REQUIRE_EQUAL(packet_ids.size(), kWindows);
+        } else if (!mc.runs_comm) {
+            BOOST_REQUIRE_EQUAL(packet_ids.size(), 0u);
         }
 
         for (const auto* pair : { &pulse_ids, &packet_ids }) {
@@ -2831,23 +2856,19 @@ BOOST_AUTO_TEST_CASE(test_pipeline_output_multicore_ordering)
                                         "ids not strictly ascending: " << ids[i - 1]
                                                                         << " then " << ids[i]);
                 }
+                BOOST_CHECK(ids[i] >= 0 &&
+                            ids[i] < static_cast<long long>(kWindows));
             }
             if (st.dropped == 0) {
                 // Gap-free from 0.
-                BOOST_REQUIRE_EQUAL(ids.size(), kWindows);
                 for (size_t i = 0; i < ids.size(); ++i) {
                     BOOST_CHECK_EQUAL(ids[i], static_cast<long long>(i));
-                }
-            } else {
-                // Drops are allowed; whatever survived must still be ordered and
-                // inside the window range.
-                for (long long id : ids) {
-                    BOOST_CHECK(id >= 0 && id < static_cast<long long>(kWindows));
                 }
             }
         }
 
         qa_remove_output_dir(out_dir);
+    }
     }
 }
 
