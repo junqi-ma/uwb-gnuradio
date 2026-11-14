@@ -14,6 +14,7 @@
 #include <gnuradio/uwb/uwb_auto_schedule_controller.h>
 #include <gnuradio/uwb/uwb_demod_core.h>
 #include <gnuradio/uwb/uwb_hrp_mod_core.h>
+#include <gnuradio/uwb/uwb_pipeline_output_types.h>
 #include <gnuradio/uwb/uwb_radar_cir_core.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor_core.h>
 #include <gnuradio/uwb/uwb_sic_unified.h>
@@ -42,6 +43,11 @@ using gr::uwb::radar::RadarCirConfig;
 namespace gr {
 namespace uwb {
 namespace pipeline {
+
+// Async output writer (pure C++, no GNU Radio).  Declared here so
+// UhdSc16Pipeline can hold a std::unique_ptr to it without including its
+// header; uwb_uhd_sc16_pipeline.cc includes the full definition.
+class PipelineOutputWriter;
 
 enum class StreamSourceType {
     Replay,
@@ -379,6 +385,16 @@ struct PipelineConfig {
     size_t iq_dump_windows = 0;      // 0 = disabled
     size_t iq_dump_window_limit = 0; // only window_id < this (0 = no limit)
 
+    // ------------------------------------------------------------------
+    // Per-window result persistence + live console log (default off)
+    // ------------------------------------------------------------------
+    // Pure C++ async writer: the DSP workers only copy the finished payload
+    // into a preallocated pool slot and hand it to one background I/O thread.
+    // With output_dir empty and live_log_mode == Off the writer is never
+    // created, so the hot path costs one boolean test and nothing else.
+    // See uwb_pipeline_output_types.h / uwb_pipeline_output_writer.h.
+    OutputPersistenceConfig output;
+
     uint64_t max_windows = 0; // 0 = unlimited
     uint64_t max_samples = 0; // 0 = unlimited
 
@@ -660,6 +676,10 @@ public:
 
     void set_result_callback(ResultCallback cb) { result_cb_ = std::move(cb); }
 
+    // Async output writer telemetry.  Read it after wait(): stop() drains the
+    // writer, so `offered == written + dropped` holds at that point.
+    OutputWriterStats output_writer_stats() const;
+
     const PipelineLedger& ledger() const { return ledger_; }
     const std::vector<WindowResult>& results() const { return results_; }
     const AutoScheduleStats& auto_schedule_stats() const { return auto_sched_stats_; }
@@ -693,6 +713,11 @@ private:
 
     PipelineConfig cfg_;
     std::unique_ptr<ISc16StreamSource> source_;
+    // Async output writer (pure C++, no GNU Radio).  Null unless
+    // PipelineConfig::output.enabled(); created in initialize(), drained in
+    // stop().  The DSP workers only touch it through try_acquire_slot() /
+    // try_submit(), both non-blocking.
+    std::unique_ptr<PipelineOutputWriter> output_writer_;
     // One lock-free SPSC ring pool per DSP worker.  The RX producer thread is
     // the only producer and never touches a pool concurrently with itself, so
     // each pool stays a strict 1P/1C SPSC structure.

@@ -10,6 +10,7 @@
 
 #include <gnuradio/uwb/uwb_uhd_sc16_pipeline.h>
 #include <gnuradio/uwb/uwb_detector_core.h>
+#include <gnuradio/uwb/uwb_pipeline_output_writer.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
 #include <gnuradio/uwb/uwb_defaults.h>
 #include <volk/volk.h>

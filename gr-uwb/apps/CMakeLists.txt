@@ -413,6 +413,21 @@ if(CMAKE_TESTING_ENABLED OR ENABLE_TESTING)
     set_tests_properties(uwb_qa_sc16_pipeline_runner_exit PROPERTIES TIMEOUT 120)
     message(STATUS "UWB CTest: registered uwb_qa_sc16_pipeline_runner_exit "
                    "(runner exit-code QA, R2)")
+
+    # 2026-11-14: end-to-end QA for the pure C++ pipeline output writer
+    # (--output-dir / --live-log).  Exit 77 is declared as "skipped" so the
+    # Phase 0 stub can never be mistaken for a pass.
+    add_test(NAME uwb_qa_pipeline_output_runner
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/qa_uwb_pipeline_output_runner.sh
+                --runner $<TARGET_FILE:uwb_uhd_sc16_pipeline_runner>
+                --fixture ${CMAKE_SOURCE_DIR}/../testdata/uhd_sc16/sim_preamble_sc16_737m28_rate.bin
+                --verifier ${CMAKE_SOURCE_DIR}/../tools/performance/verify_ucr4_output.py
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(uwb_qa_pipeline_output_runner PROPERTIES
+        TIMEOUT 300
+        SKIP_RETURN_CODE 77)
+    message(STATUS "UWB CTest: registered uwb_qa_pipeline_output_runner "
+                   "(pipeline output writer E2E)")
 endif()
 
 # 2026-11-11 round 2: pure-core resampler benchmark (owner: subagent A).
