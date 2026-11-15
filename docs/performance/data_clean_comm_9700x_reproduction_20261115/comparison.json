@@ -1,0 +1,749 @@
+{
+  "tasks": 9216,
+  "runs": [
+    {
+      "file": "clean_comm_quality_minorder_cfo0_n1_r1.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.0,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo0_n1_r2.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.0,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo0_n1_r3.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.0,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo0_n2_r1.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.0,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo0_n2_r2.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.0,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo0_n2_r3.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.0,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo0_n4_r1.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.0,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo0_n4_r2.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.0,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo0_n4_r3.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.0,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo50000_n1_r1.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.010493923196918331,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo50000_n1_r2.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.010493923196918331,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo50000_n1_r3.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.010493923196918331,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo50000_n2_r1.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.010493923196918331,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo50000_n2_r2.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.010493923196918331,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo50000_n2_r3.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.010493923196918331,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo50000_n4_r1.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.010493923196918331,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo50000_n4_r2.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.010493923196918331,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    },
+    {
+      "file": "clean_comm_quality_minorder_cfo50000_n4_r3.csv",
+      "tasks": 512,
+      "fcs_pass": 512,
+      "psdu_exact": 512,
+      "fallbacks": {
+        "soft_fallbacks": 0,
+        "payload_fallbacks": 0,
+        "phr_fallbacks": 0
+      },
+      "cfo_max_abs_error_hz": 0.010493923196918331,
+      "sfd_origins": [
+        260636.0,
+        260637.0,
+        260638.0,
+        260639.0,
+        260640.0,
+        260641.0,
+        260642.0,
+        260643.0,
+        260644.0,
+        260645.0,
+        260646.0,
+        260647.0,
+        260648.0,
+        260649.0,
+        260650.0,
+        260651.0
+      ]
+    }
+  ],
+  "fixture_exactly_equal": true,
+  "source_matches": [
+    {
+      "path": "/home/oi/Desktop/uwb-gnuradio/tools/sic/run_clean_comm_workers.py",
+      "old_sha256": "643877e59387292e710ef220d07d813506f765b9789f844eaa09e61174e25d21",
+      "new_sha256": "643877e59387292e710ef220d07d813506f765b9789f844eaa09e61174e25d21",
+      "equal": true
+    },
+    {
+      "path": "tools/sic/benchmark_chain_workers.cc",
+      "old_sha256": "081d9de0bdc1d23d41ea05673921c079779f8a086ba0f0612ca5693af662bedb",
+      "new_sha256": "ad4f7b099e072a8f39b204a41e8e2859af80d2b31f5aaf5251ce040c36fa0afd",
+      "equal": false
+    },
+    {
+      "path": "tools/sic/experiment_preamble_recovery.cc",
+      "old_sha256": "f9138f2dddf61c5e62f4aef39b623e309bc72e41b2acdc0eabae2643503e3e43",
+      "new_sha256": "f9138f2dddf61c5e62f4aef39b623e309bc72e41b2acdc0eabae2643503e3e43",
+      "equal": true
+    }
+  ],
+  "source_hash_discrepancy_user_reply": "用户确认没有在12700测量后修改源码；差异原因未确定，不将其认定为测后修改。",
+  "comparison": [
+    {
+      "workers": 1,
+      "cfo_hz": 50000.0,
+      "metrics": {
+        "interval_us": {
+          "i12700": 2766.5553027391434,
+          "r9700x": 2206.9729784727097,
+          "time_change_pct": -20.226681306981142,
+          "speedup": 1.253551959958151
+        },
+        "total_us": {
+          "i12700": 2764.325697265625,
+          "r9700x": 2206.377328125,
+          "time_change_pct": -20.183886786297577,
+          "speedup": 1.2528798506168366
+        },
+        "resample_us": {
+          "i12700": 1677.164896484375,
+          "r9700x": 1450.5811640625,
+          "time_change_pct": -13.509925762030516,
+          "speedup": 1.1562020368355703
+        },
+        "comm_us": {
+          "i12700": 1086.36783203125,
+          "r9700x": 755.656751953125,
+          "time_change_pct": -30.441906537288922,
+          "speedup": 1.4376472243824265
+        }
+      }
+    },
+    {
+      "workers": 2,
+      "cfo_hz": 50000.0,
+      "metrics": {
+        "interval_us": {
+          "i12700": 1446.6797382831573,
+          "r9700x": 1139.5927714705467,
+          "time_change_pct": -21.22701788697512,
+          "speedup": 1.2694707921114148
+        },
+        "total_us": {
+          "i12700": 2889.6377890625,
+          "r9700x": 2275.310900390625,
+          "time_change_pct": -21.25965029240512,
+          "speedup": 1.2699968995737714
+        },
+        "resample_us": {
+          "i12700": 1717.705498046875,
+          "r9700x": 1481.23478125,
+          "time_change_pct": -13.766662391530737,
+          "speedup": 1.159644318233818
+        },
+        "comm_us": {
+          "i12700": 1170.91537890625,
+          "r9700x": 793.882837890625,
+          "time_change_pct": -32.19981117404151,
+          "speedup": 1.4749221459647799
+        }
+      }
+    },
+    {
+      "workers": 4,
+      "cfo_hz": 50000.0,
+      "metrics": {
+        "interval_us": {
+          "i12700": 818.3577538728714,
+          "r9700x": 640.2727910280228,
+          "time_change_pct": -21.761260524759862,
+          "speedup": 1.2781392015095865
+        },
+        "total_us": {
+          "i12700": 3255.1763046875,
+          "r9700x": 2554.336349609375,
+          "time_change_pct": -21.530015258126134,
+          "speedup": 1.2743726194028058
+        },
+        "resample_us": {
+          "i12700": 1863.562865234375,
+          "r9700x": 1571.34263671875,
+          "time_change_pct": -15.68072824196748,
+          "speedup": 1.185968497059199
+        },
+        "comm_us": {
+          "i12700": 1409.5406953125,
+          "r9700x": 982.6987734375,
+          "time_change_pct": -30.282341140946468,
+          "speedup": 1.434356827761063
+        }
+      }
+    },
+    {
+      "workers": 1,
+      "cfo_hz": 0.0,
+      "metrics": {
+        "interval_us": {
+          "i12700": 2756.887613296509,
+          "r9700x": 2151.9530898332596,
+          "time_change_pct": -21.94266173730265,
+          "speedup": 1.2811095308356009
+        },
+        "total_us": {
+          "i12700": 2754.699490234375,
+          "r9700x": 2151.325037109375,
+          "time_change_pct": -21.903458263378983,
+          "speedup": 1.2804664300917183
+        },
+        "resample_us": {
+          "i12700": 1683.62471484375,
+          "r9700x": 1415.5172265625,
+          "time_change_pct": -15.924421037388491,
+          "speedup": 1.1894060229364594
+        },
+        "comm_us": {
+          "i12700": 1070.171248046875,
+          "r9700x": 735.656220703125,
+          "time_change_pct": -31.25808397060372,
+          "speedup": 1.454716507425204
+        }
+      }
+    },
+    {
+      "workers": 2,
+      "cfo_hz": 0.0,
+      "metrics": {
+        "interval_us": {
+          "i12700": 1475.7049219608307,
+          "r9700x": 1134.7977578639984,
+          "time_change_pct": -23.101309687566452,
+          "speedup": 1.300412264418387
+        },
+        "total_us": {
+          "i12700": 2944.253279296875,
+          "r9700x": 2264.87871484375,
+          "time_change_pct": -23.074596510778733,
+          "speedup": 1.299960682221341
+        },
+        "resample_us": {
+          "i12700": 1740.00962109375,
+          "r9700x": 1492.982927734375,
+          "time_change_pct": -14.196857900365911,
+          "speedup": 1.1654584850037382
+        },
+        "comm_us": {
+          "i12700": 1203.4292734375,
+          "r9700x": 773.702251953125,
+          "time_change_pct": -35.708539834409535,
+          "speedup": 1.5554165318758952
+        }
+      }
+    },
+    {
+      "workers": 4,
+      "cfo_hz": 0.0,
+      "metrics": {
+        "interval_us": {
+          "i12700": 848.8587127923965,
+          "r9700x": 635.3853164315224,
+          "time_change_pct": -25.14828358875346,
+          "speedup": 1.3359747083231202
+        },
+        "total_us": {
+          "i12700": 3382.159486328125,
+          "r9700x": 2535.71444921875,
+          "time_change_pct": -25.026762946307013,
+          "speedup": 1.3338092888850965
+        },
+        "resample_us": {
+          "i12700": 1889.710341796875,
+          "r9700x": 1566.409556640625,
+          "time_change_pct": -17.108483665746988,
+          "speedup": 1.2063960755254914
+        },
+        "comm_us": {
+          "i12700": 1491.53341796875,
+          "r9700x": 968.990619140625,
+          "time_change_pct": -35.033931692911835,
+          "speedup": 1.539265074920494
+        }
+      }
+    }
+  ]
+}

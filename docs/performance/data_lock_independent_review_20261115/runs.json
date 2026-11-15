@@ -1,0 +1,1322 @@
+[
+  {
+    "variant": "old",
+    "rep": 1,
+    "command": [
+      "/tmp/uwb_dw3000_live_before_lock",
+      "--replay",
+      "/home/oi/Desktop/uwb-gnuradio/testdata/x410_fixed_tone_live_20261115/rx_ch3_rx1_1s.sc16",
+      "--workers",
+      "2",
+      "--summary",
+      "1000"
+    ],
+    "final": {
+      "completed": "200",
+      "fcs": "200/200",
+      "raw_samples": "737280000",
+      "raw_drop_samples": "0",
+      "source_errors": "0",
+      "gaps": "0",
+      "models": "50",
+      "output_omitted": "0",
+      "full_retry": "1"
+    },
+    "metrics": {
+      "compute_us": {
+        "n": 180,
+        "mean": 7773.677922222222,
+        "p50": 7400.1455,
+        "p95": 9006.044349999998,
+        "p99": 10300.327970000004,
+        "maximum": 31824.431
+      },
+      "demod_us": {
+        "n": 180,
+        "mean": 5363.679005555556,
+        "p50": 5161.593500000001,
+        "p95": 6367.4588,
+        "p99": 6591.620280000002,
+        "maximum": 7003.323
+      },
+      "resample_us": {
+        "n": 180,
+        "mean": 2281.3110444444446,
+        "p50": 2184.054,
+        "p95": 3045.9778499999998,
+        "p99": 3688.98723,
+        "maximum": 4209.711
+      },
+      "retry_us": {
+        "n": 180,
+        "mean": 128.5673611111111,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 23142.125
+      },
+      "queue_us": {
+        "n": 180,
+        "mean": 323.41284444444443,
+        "p50": 120.828,
+        "p95": 528.262599999995,
+        "p99": 5631.276660000012,
+        "maximum": 7431.109
+      },
+      "latency_ms": {
+        "n": 180,
+        "mean": 8.097072222222222,
+        "p50": 7.58,
+        "p95": 10.2464,
+        "p99": 14.306450000000005,
+        "maximum": 31.932
+      },
+      "st_timing": null,
+      "st_cir": null,
+      "st_payload": null,
+      "st_fallback": null
+    },
+    "diagnostics": {
+      "legacy_scans": 0,
+      "bounded_ok": 0,
+      "bounded_fail": 0,
+      "backtrack": 0,
+      "ondemand_fb": 0,
+      "st_fb_count": 0,
+      "full_retry": 1
+    }
+  },
+  {
+    "variant": "new_acquire",
+    "rep": 1,
+    "command": [
+      "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-cfo-tail-fix/apps/uwb_dw3000_live",
+      "--replay",
+      "/home/oi/Desktop/uwb-gnuradio/testdata/x410_fixed_tone_live_20261115/rx_ch3_rx1_1s.sc16",
+      "--workers",
+      "2",
+      "--summary",
+      "1000",
+      "--sync",
+      "acquire"
+    ],
+    "final": {
+      "completed": "200",
+      "fcs": "199/200",
+      "raw_samples": "737280000",
+      "raw_drop_samples": "0",
+      "source_errors": "0",
+      "gaps": "0",
+      "models": "50",
+      "output_omitted": "0",
+      "full_retry": "1"
+    },
+    "metrics": {
+      "compute_us": {
+        "n": 180,
+        "mean": 3633.4600666666665,
+        "p50": 3500.84,
+        "p95": 4143.563999999998,
+        "p99": 4390.513290000001,
+        "maximum": 11132.381
+      },
+      "demod_us": {
+        "n": 180,
+        "mean": 1794.3280666666667,
+        "p50": 1696.3955,
+        "p95": 2290.9950499999995,
+        "p99": 2541.2559200000005,
+        "maximum": 4109.551
+      },
+      "resample_us": {
+        "n": 180,
+        "mean": 1811.9625888888888,
+        "p50": 1783.144,
+        "p95": 1997.8585499999997,
+        "p99": 2074.93749,
+        "maximum": 2148.918
+      },
+      "retry_us": {
+        "n": 180,
+        "mean": 27.07728888888889,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 4873.912
+      },
+      "queue_us": {
+        "n": 180,
+        "mean": 113.11958888888888,
+        "p50": 107.17150000000001,
+        "p95": 168.2099499999999,
+        "p99": 201.074,
+        "maximum": 216.207
+      },
+      "latency_ms": {
+        "n": 180,
+        "mean": 3.746583333333333,
+        "p50": 3.6145,
+        "p95": 4.288599999999999,
+        "p99": 4.549760000000001,
+        "maximum": 11.241
+      },
+      "st_timing": {
+        "n": 180,
+        "mean": 422.3333333333333,
+        "p50": 390.5,
+        "p95": 543.7499999999998,
+        "p99": 660.3100000000001,
+        "maximum": 2919.0
+      },
+      "st_cir": {
+        "n": 180,
+        "mean": 820.4944444444444,
+        "p50": 801.0,
+        "p95": 943.6499999999997,
+        "p99": 1053.2500000000002,
+        "maximum": 1344.0
+      },
+      "st_payload": {
+        "n": 180,
+        "mean": 50.35,
+        "p50": 49.0,
+        "p95": 57.0,
+        "p99": 63.15000000000012,
+        "maximum": 273.0
+      },
+      "st_fallback": {
+        "n": 180,
+        "mean": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 0.0
+      }
+    },
+    "diagnostics": {
+      "legacy_scans": 0,
+      "bounded_ok": 0,
+      "bounded_fail": 0,
+      "backtrack": 10,
+      "ondemand_fb": 0,
+      "st_fb_count": 0,
+      "full_retry": 1
+    }
+  },
+  {
+    "variant": "new_locked",
+    "rep": 1,
+    "command": [
+      "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-cfo-tail-fix/apps/uwb_dw3000_live",
+      "--replay",
+      "/home/oi/Desktop/uwb-gnuradio/testdata/x410_fixed_tone_live_20261115/rx_ch3_rx1_1s.sc16",
+      "--workers",
+      "2",
+      "--summary",
+      "1000",
+      "--sync",
+      "locked"
+    ],
+    "final": {
+      "completed": "200",
+      "fcs": "199/200",
+      "raw_samples": "737280000",
+      "raw_drop_samples": "0",
+      "source_errors": "0",
+      "gaps": "0",
+      "models": "50",
+      "output_omitted": "0",
+      "full_retry": "1"
+    },
+    "metrics": {
+      "compute_us": {
+        "n": 180,
+        "mean": 3607.762661111111,
+        "p50": 3496.2655,
+        "p95": 4434.513799999998,
+        "p99": 5019.190240000001,
+        "maximum": 5105.488
+      },
+      "demod_us": {
+        "n": 180,
+        "mean": 1788.3972777777778,
+        "p50": 1704.2355,
+        "p95": 2439.015899999999,
+        "p99": 2939.3989800000004,
+        "maximum": 3052.61
+      },
+      "resample_us": {
+        "n": 180,
+        "mean": 1808.3467777777778,
+        "p50": 1786.7955000000002,
+        "p95": 2006.4678499999998,
+        "p99": 2108.15248,
+        "maximum": 2128.971
+      },
+      "retry_us": {
+        "n": 180,
+        "mean": 10.92525,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 1966.545
+      },
+      "queue_us": {
+        "n": 180,
+        "mean": 100.41683888888889,
+        "p50": 98.105,
+        "p95": 136.29249999999993,
+        "p99": 170.36223000000007,
+        "maximum": 200.117
+      },
+      "latency_ms": {
+        "n": 180,
+        "mean": 3.7081833333333334,
+        "p50": 3.593,
+        "p95": 4.563899999999998,
+        "p99": 5.15836,
+        "maximum": 5.269
+      },
+      "st_timing": {
+        "n": 180,
+        "mean": 391.15,
+        "p50": 379.0,
+        "p95": 473.49999999999983,
+        "p99": 562.7300000000001,
+        "maximum": 582.0
+      },
+      "st_cir": {
+        "n": 180,
+        "mean": 821.2444444444444,
+        "p50": 790.5,
+        "p95": 1053.249999999998,
+        "p99": 1290.8700000000003,
+        "maximum": 1501.0
+      },
+      "st_payload": {
+        "n": 180,
+        "mean": 50.07222222222222,
+        "p50": 48.0,
+        "p95": 60.04999999999998,
+        "p99": 70.47000000000006,
+        "maximum": 248.0
+      },
+      "st_fallback": {
+        "n": 180,
+        "mean": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 0.0
+      }
+    },
+    "diagnostics": {
+      "legacy_scans": 0,
+      "bounded_ok": 180,
+      "bounded_fail": 0,
+      "backtrack": 0,
+      "ondemand_fb": 0,
+      "st_fb_count": 0,
+      "full_retry": 1
+    }
+  },
+  {
+    "variant": "new_locked_fused",
+    "rep": 1,
+    "command": [
+      "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-cfo-tail-fix/apps/uwb_dw3000_live",
+      "--replay",
+      "/home/oi/Desktop/uwb-gnuradio/testdata/x410_fixed_tone_live_20261115/rx_ch3_rx1_1s.sc16",
+      "--workers",
+      "2",
+      "--summary",
+      "1000",
+      "--sync",
+      "locked",
+      "--fused",
+      "on"
+    ],
+    "final": {
+      "completed": "200",
+      "fcs": "199/200",
+      "raw_samples": "737280000",
+      "raw_drop_samples": "0",
+      "source_errors": "0",
+      "gaps": "0",
+      "models": "50",
+      "output_omitted": "0",
+      "full_retry": "1"
+    },
+    "metrics": {
+      "compute_us": {
+        "n": 180,
+        "mean": 3740.652788888889,
+        "p50": 3640.5780000000004,
+        "p95": 4336.3924,
+        "p99": 5025.403820000001,
+        "maximum": 5463.302
+      },
+      "demod_us": {
+        "n": 180,
+        "mean": 1882.6280833333333,
+        "p50": 1808.8925,
+        "p95": 2317.8772499999995,
+        "p99": 2726.3085000000005,
+        "maximum": 3055.076
+      },
+      "resample_us": {
+        "n": 180,
+        "mean": 1844.6188277777778,
+        "p50": 1809.429,
+        "p95": 2073.45205,
+        "p99": 2223.7449500000002,
+        "maximum": 2653.388
+      },
+      "retry_us": {
+        "n": 180,
+        "mean": 13.317644444444444,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 2397.176
+      },
+      "queue_us": {
+        "n": 180,
+        "mean": 101.001,
+        "p50": 91.9985,
+        "p95": 147.49489999999983,
+        "p99": 180.96519000000006,
+        "maximum": 189.748
+      },
+      "latency_ms": {
+        "n": 180,
+        "mean": 3.841711111111111,
+        "p50": 3.7395,
+        "p95": 4.47075,
+        "p99": 5.157220000000001,
+        "maximum": 5.573
+      },
+      "st_timing": {
+        "n": 180,
+        "mean": 388.7888888888889,
+        "p50": 375.0,
+        "p95": 483.04999999999995,
+        "p99": 611.4900000000006,
+        "maximum": 700.0
+      },
+      "st_cir": {
+        "n": 180,
+        "mean": 51.15555555555556,
+        "p50": 45.0,
+        "p95": 91.04999999999998,
+        "p99": 124.21000000000001,
+        "maximum": 137.0
+      },
+      "st_payload": {
+        "n": 180,
+        "mean": 1.4444444444444444,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 260.0
+      },
+      "st_fallback": {
+        "n": 180,
+        "mean": 1091.3,
+        "p50": 1060.5,
+        "p95": 1273.1999999999998,
+        "p99": 1472.5100000000027,
+        "maximum": 1734.0
+      }
+    },
+    "diagnostics": {
+      "legacy_scans": 0,
+      "bounded_ok": 180,
+      "bounded_fail": 0,
+      "backtrack": 0,
+      "ondemand_fb": 180,
+      "st_fb_count": 180,
+      "full_retry": 1
+    }
+  },
+  {
+    "variant": "new_locked_fused",
+    "rep": 2,
+    "command": [
+      "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-cfo-tail-fix/apps/uwb_dw3000_live",
+      "--replay",
+      "/home/oi/Desktop/uwb-gnuradio/testdata/x410_fixed_tone_live_20261115/rx_ch3_rx1_1s.sc16",
+      "--workers",
+      "2",
+      "--summary",
+      "1000",
+      "--sync",
+      "locked",
+      "--fused",
+      "on"
+    ],
+    "final": {
+      "completed": "200",
+      "fcs": "199/200",
+      "raw_samples": "737280000",
+      "raw_drop_samples": "0",
+      "source_errors": "0",
+      "gaps": "0",
+      "models": "50",
+      "output_omitted": "0",
+      "full_retry": "1"
+    },
+    "metrics": {
+      "compute_us": {
+        "n": 180,
+        "mean": 3748.180188888889,
+        "p50": 3620.6710000000003,
+        "p95": 4481.589649999999,
+        "p99": 5377.375540000004,
+        "maximum": 6231.268
+      },
+      "demod_us": {
+        "n": 180,
+        "mean": 1912.779188888889,
+        "p50": 1818.4955,
+        "p95": 2497.5722999999994,
+        "p99": 2870.3384200000046,
+        "maximum": 3491.136
+      },
+      "resample_us": {
+        "n": 180,
+        "mean": 1821.4759277777778,
+        "p50": 1786.3045,
+        "p95": 2063.2802999999994,
+        "p99": 2206.0023300000003,
+        "maximum": 2245.54
+      },
+      "retry_us": {
+        "n": 180,
+        "mean": 13.834394444444444,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 2490.191
+      },
+      "queue_us": {
+        "n": 180,
+        "mean": 100.60128888888889,
+        "p50": 96.8075,
+        "p95": 143.23454999999998,
+        "p99": 158.14406000000008,
+        "maximum": 186.812
+      },
+      "latency_ms": {
+        "n": 180,
+        "mean": 3.8487833333333334,
+        "p50": 3.714,
+        "p95": 4.60035,
+        "p99": 5.514470000000004,
+        "maximum": 6.388
+      },
+      "st_timing": {
+        "n": 180,
+        "mean": 394.0888888888889,
+        "p50": 379.0,
+        "p95": 493.0,
+        "p99": 634.2900000000004,
+        "maximum": 703.0
+      },
+      "st_cir": {
+        "n": 180,
+        "mean": 54.4,
+        "p50": 47.0,
+        "p95": 91.04999999999998,
+        "p99": 124.37000000000077,
+        "maximum": 257.0
+      },
+      "st_payload": {
+        "n": 180,
+        "mean": 1.5166666666666666,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 273.0
+      },
+      "st_fallback": {
+        "n": 180,
+        "mean": 1108.8555555555556,
+        "p50": 1061.5,
+        "p95": 1378.1499999999999,
+        "p99": 1762.9800000000002,
+        "maximum": 2095.0
+      }
+    },
+    "diagnostics": {
+      "legacy_scans": 0,
+      "bounded_ok": 180,
+      "bounded_fail": 0,
+      "backtrack": 0,
+      "ondemand_fb": 180,
+      "st_fb_count": 180,
+      "full_retry": 1
+    }
+  },
+  {
+    "variant": "new_locked",
+    "rep": 2,
+    "command": [
+      "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-cfo-tail-fix/apps/uwb_dw3000_live",
+      "--replay",
+      "/home/oi/Desktop/uwb-gnuradio/testdata/x410_fixed_tone_live_20261115/rx_ch3_rx1_1s.sc16",
+      "--workers",
+      "2",
+      "--summary",
+      "1000",
+      "--sync",
+      "locked"
+    ],
+    "final": {
+      "completed": "200",
+      "fcs": "199/200",
+      "raw_samples": "737280000",
+      "raw_drop_samples": "0",
+      "source_errors": "0",
+      "gaps": "0",
+      "models": "50",
+      "output_omitted": "0",
+      "full_retry": "1"
+    },
+    "metrics": {
+      "compute_us": {
+        "n": 180,
+        "mean": 3584.8375055555557,
+        "p50": 3492.639,
+        "p95": 4202.6945,
+        "p99": 5269.601740000001,
+        "maximum": 5417.615
+      },
+      "demod_us": {
+        "n": 180,
+        "mean": 1760.7140055555556,
+        "p50": 1705.873,
+        "p95": 2122.697849999999,
+        "p99": 2521.637050000001,
+        "maximum": 3196.411
+      },
+      "resample_us": {
+        "n": 180,
+        "mean": 1812.126261111111,
+        "p50": 1765.5405,
+        "p95": 2059.2989999999995,
+        "p99": 2547.1093600000004,
+        "maximum": 2680.278
+      },
+      "retry_us": {
+        "n": 180,
+        "mean": 11.913438888888889,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 2144.419
+      },
+      "queue_us": {
+        "n": 180,
+        "mean": 97.3783,
+        "p50": 91.582,
+        "p95": 157.69769999999986,
+        "p99": 196.26009000000005,
+        "maximum": 216.107
+      },
+      "latency_ms": {
+        "n": 180,
+        "mean": 3.6821777777777775,
+        "p50": 3.5785,
+        "p95": 4.324199999999999,
+        "p99": 5.3787400000000005,
+        "maximum": 5.6
+      },
+      "st_timing": {
+        "n": 180,
+        "mean": 389.1777777777778,
+        "p50": 379.5,
+        "p95": 444.04999999999995,
+        "p99": 562.7100000000012,
+        "maximum": 750.0
+      },
+      "st_cir": {
+        "n": 180,
+        "mean": 812.2666666666667,
+        "p50": 791.0,
+        "p95": 913.2499999999999,
+        "p99": 1293.9700000000005,
+        "maximum": 1411.0
+      },
+      "st_payload": {
+        "n": 180,
+        "mean": 49.916666666666664,
+        "p50": 49.0,
+        "p95": 60.0,
+        "p99": 70.84000000000003,
+        "maximum": 248.0
+      },
+      "st_fallback": {
+        "n": 180,
+        "mean": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 0.0
+      }
+    },
+    "diagnostics": {
+      "legacy_scans": 0,
+      "bounded_ok": 180,
+      "bounded_fail": 0,
+      "backtrack": 0,
+      "ondemand_fb": 0,
+      "st_fb_count": 0,
+      "full_retry": 1
+    }
+  },
+  {
+    "variant": "new_acquire",
+    "rep": 2,
+    "command": [
+      "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-cfo-tail-fix/apps/uwb_dw3000_live",
+      "--replay",
+      "/home/oi/Desktop/uwb-gnuradio/testdata/x410_fixed_tone_live_20261115/rx_ch3_rx1_1s.sc16",
+      "--workers",
+      "2",
+      "--summary",
+      "1000",
+      "--sync",
+      "acquire"
+    ],
+    "final": {
+      "completed": "200",
+      "fcs": "199/200",
+      "raw_samples": "737280000",
+      "raw_drop_samples": "0",
+      "source_errors": "0",
+      "gaps": "0",
+      "models": "50",
+      "output_omitted": "0",
+      "full_retry": "1"
+    },
+    "metrics": {
+      "compute_us": {
+        "n": 180,
+        "mean": 3752.065688888889,
+        "p50": 3593.6345,
+        "p95": 4466.171149999999,
+        "p99": 5907.749130000003,
+        "maximum": 10885.306
+      },
+      "demod_us": {
+        "n": 180,
+        "mean": 1878.379411111111,
+        "p50": 1736.9875,
+        "p95": 2612.194599999999,
+        "p99": 3770.680420000002,
+        "maximum": 4121.003
+      },
+      "resample_us": {
+        "n": 180,
+        "mean": 1846.3034944444444,
+        "p50": 1814.8335,
+        "p95": 2060.9817,
+        "p99": 2182.0707,
+        "maximum": 2461.928
+      },
+      "retry_us": {
+        "n": 180,
+        "mean": 27.267033333333334,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 4908.066
+      },
+      "queue_us": {
+        "n": 180,
+        "mean": 107.39048888888888,
+        "p50": 99.72800000000001,
+        "p95": 158.73954999999998,
+        "p99": 234.9087300000001,
+        "maximum": 315.484
+      },
+      "latency_ms": {
+        "n": 180,
+        "mean": 3.859461111111111,
+        "p50": 3.693,
+        "p95": 4.64485,
+        "p99": 5.997290000000003,
+        "maximum": 11.015
+      },
+      "st_timing": {
+        "n": 180,
+        "mean": 418.5833333333333,
+        "p50": 384.0,
+        "p95": 511.4499999999998,
+        "p99": 1044.8700000000013,
+        "maximum": 2941.0
+      },
+      "st_cir": {
+        "n": 180,
+        "mean": 852.8166666666667,
+        "p50": 817.5,
+        "p95": 1126.6999999999994,
+        "p99": 1345.4600000000003,
+        "maximum": 1389.0
+      },
+      "st_payload": {
+        "n": 180,
+        "mean": 52.23888888888889,
+        "p50": 50.0,
+        "p95": 64.14999999999995,
+        "p99": 92.08000000000038,
+        "maximum": 249.0
+      },
+      "st_fallback": {
+        "n": 180,
+        "mean": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 0.0
+      }
+    },
+    "diagnostics": {
+      "legacy_scans": 0,
+      "bounded_ok": 0,
+      "bounded_fail": 0,
+      "backtrack": 10,
+      "ondemand_fb": 0,
+      "st_fb_count": 0,
+      "full_retry": 1
+    }
+  },
+  {
+    "variant": "old",
+    "rep": 2,
+    "command": [
+      "/tmp/uwb_dw3000_live_before_lock",
+      "--replay",
+      "/home/oi/Desktop/uwb-gnuradio/testdata/x410_fixed_tone_live_20261115/rx_ch3_rx1_1s.sc16",
+      "--workers",
+      "2",
+      "--summary",
+      "1000"
+    ],
+    "final": {
+      "completed": "200",
+      "fcs": "200/200",
+      "raw_samples": "737280000",
+      "raw_drop_samples": "0",
+      "source_errors": "0",
+      "gaps": "0",
+      "models": "50",
+      "output_omitted": "0",
+      "full_retry": "1"
+    },
+    "metrics": {
+      "compute_us": {
+        "n": 180,
+        "mean": 7711.480655555555,
+        "p50": 7435.782,
+        "p95": 8785.3442,
+        "p99": 9141.43675,
+        "maximum": 30599.413
+      },
+      "demod_us": {
+        "n": 180,
+        "mean": 5347.330027777778,
+        "p50": 5172.103,
+        "p95": 6422.8768,
+        "p99": 6752.695340000002,
+        "maximum": 6963.408
+      },
+      "resample_us": {
+        "n": 180,
+        "mean": 2237.8143777777777,
+        "p50": 2201.918,
+        "p95": 2562.8706,
+        "p99": 2687.5343700000003,
+        "maximum": 3410.024
+      },
+      "retry_us": {
+        "n": 180,
+        "mean": 126.20991666666667,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 22717.785
+      },
+      "queue_us": {
+        "n": 180,
+        "mean": 312.9468333333333,
+        "p50": 118.7535,
+        "p95": 362.8268999999924,
+        "p99": 5369.397860000004,
+        "maximum": 6643.986
+      },
+      "latency_ms": {
+        "n": 180,
+        "mean": 8.024422222222222,
+        "p50": 7.5555,
+        "p95": 9.3919,
+        "p99": 14.682740000000006,
+        "maximum": 30.732
+      },
+      "st_timing": null,
+      "st_cir": null,
+      "st_payload": null,
+      "st_fallback": null
+    },
+    "diagnostics": {
+      "legacy_scans": 0,
+      "bounded_ok": 0,
+      "bounded_fail": 0,
+      "backtrack": 0,
+      "ondemand_fb": 0,
+      "st_fb_count": 0,
+      "full_retry": 1
+    }
+  },
+  {
+    "variant": "old",
+    "rep": 3,
+    "command": [
+      "/tmp/uwb_dw3000_live_before_lock",
+      "--replay",
+      "/home/oi/Desktop/uwb-gnuradio/testdata/x410_fixed_tone_live_20261115/rx_ch3_rx1_1s.sc16",
+      "--workers",
+      "2",
+      "--summary",
+      "1000"
+    ],
+    "final": {
+      "completed": "200",
+      "fcs": "200/200",
+      "raw_samples": "737280000",
+      "raw_drop_samples": "0",
+      "source_errors": "0",
+      "gaps": "0",
+      "models": "50",
+      "output_omitted": "0",
+      "full_retry": "1"
+    },
+    "metrics": {
+      "compute_us": {
+        "n": 180,
+        "mean": 7551.296627777778,
+        "p50": 7332.897999999999,
+        "p95": 8187.10975,
+        "p99": 8718.24959,
+        "maximum": 30406.689
+      },
+      "demod_us": {
+        "n": 180,
+        "mean": 5242.53715,
+        "p50": 5167.584000000001,
+        "p95": 5887.854599999999,
+        "p99": 6383.5619400000005,
+        "maximum": 6547.965
+      },
+      "resample_us": {
+        "n": 180,
+        "mean": 2180.8638111111113,
+        "p50": 2148.4215,
+        "p95": 2387.4399,
+        "p99": 2671.3644800000043,
+        "maximum": 3201.841
+      },
+      "retry_us": {
+        "n": 180,
+        "mean": 127.76417777777777,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 22997.552
+      },
+      "queue_us": {
+        "n": 180,
+        "mean": 280.1985555555556,
+        "p50": 117.06049999999999,
+        "p95": 232.24824999999987,
+        "p99": 5022.300560000005,
+        "maximum": 7235.871
+      },
+      "latency_ms": {
+        "n": 180,
+        "mean": 7.8315,
+        "p50": 7.468,
+        "p95": 8.8141,
+        "p99": 13.099920000000013,
+        "maximum": 30.511
+      },
+      "st_timing": null,
+      "st_cir": null,
+      "st_payload": null,
+      "st_fallback": null
+    },
+    "diagnostics": {
+      "legacy_scans": 0,
+      "bounded_ok": 0,
+      "bounded_fail": 0,
+      "backtrack": 0,
+      "ondemand_fb": 0,
+      "st_fb_count": 0,
+      "full_retry": 1
+    }
+  },
+  {
+    "variant": "new_acquire",
+    "rep": 3,
+    "command": [
+      "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-cfo-tail-fix/apps/uwb_dw3000_live",
+      "--replay",
+      "/home/oi/Desktop/uwb-gnuradio/testdata/x410_fixed_tone_live_20261115/rx_ch3_rx1_1s.sc16",
+      "--workers",
+      "2",
+      "--summary",
+      "1000",
+      "--sync",
+      "acquire"
+    ],
+    "final": {
+      "completed": "200",
+      "fcs": "199/200",
+      "raw_samples": "737280000",
+      "raw_drop_samples": "0",
+      "source_errors": "0",
+      "gaps": "0",
+      "models": "50",
+      "output_omitted": "0",
+      "full_retry": "1"
+    },
+    "metrics": {
+      "compute_us": {
+        "n": 180,
+        "mean": 3763.549411111111,
+        "p50": 3638.038,
+        "p95": 4480.364149999999,
+        "p99": 4886.592530000001,
+        "maximum": 10599.927
+      },
+      "demod_us": {
+        "n": 180,
+        "mean": 1842.3819722222222,
+        "p50": 1744.1305,
+        "p95": 2350.3568999999998,
+        "p99": 2984.4794600000005,
+        "maximum": 3960.451
+      },
+      "resample_us": {
+        "n": 180,
+        "mean": 1894.2880277777779,
+        "p50": 1877.5115,
+        "p95": 2129.0133499999993,
+        "p99": 2271.19711,
+        "maximum": 2323.998
+      },
+      "retry_us": {
+        "n": 180,
+        "mean": 26.77727222222222,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 4819.909
+      },
+      "queue_us": {
+        "n": 180,
+        "mean": 109.83213333333333,
+        "p50": 99.04650000000001,
+        "p95": 170.26139999999984,
+        "p99": 215.73147000000003,
+        "maximum": 501.284
+      },
+      "latency_ms": {
+        "n": 180,
+        "mean": 3.8733555555555554,
+        "p50": 3.7445,
+        "p95": 4.5798499999999995,
+        "p99": 5.02962,
+        "maximum": 10.706
+      },
+      "st_timing": {
+        "n": 180,
+        "mean": 426.8722222222222,
+        "p50": 389.5,
+        "p95": 548.05,
+        "p99": 696.7100000000012,
+        "maximum": 2921.0
+      },
+      "st_cir": {
+        "n": 180,
+        "mean": 828.0444444444445,
+        "p50": 808.0,
+        "p95": 977.0499999999996,
+        "p99": 1099.2800000000007,
+        "maximum": 1320.0
+      },
+      "st_payload": {
+        "n": 180,
+        "mean": 51.62777777777778,
+        "p50": 50.0,
+        "p95": 62.04999999999998,
+        "p99": 70.26000000000005,
+        "maximum": 256.0
+      },
+      "st_fallback": {
+        "n": 180,
+        "mean": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 0.0
+      }
+    },
+    "diagnostics": {
+      "legacy_scans": 0,
+      "bounded_ok": 0,
+      "bounded_fail": 0,
+      "backtrack": 10,
+      "ondemand_fb": 0,
+      "st_fb_count": 0,
+      "full_retry": 1
+    }
+  },
+  {
+    "variant": "new_locked",
+    "rep": 3,
+    "command": [
+      "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-cfo-tail-fix/apps/uwb_dw3000_live",
+      "--replay",
+      "/home/oi/Desktop/uwb-gnuradio/testdata/x410_fixed_tone_live_20261115/rx_ch3_rx1_1s.sc16",
+      "--workers",
+      "2",
+      "--summary",
+      "1000",
+      "--sync",
+      "locked"
+    ],
+    "final": {
+      "completed": "200",
+      "fcs": "199/200",
+      "raw_samples": "737280000",
+      "raw_drop_samples": "0",
+      "source_errors": "0",
+      "gaps": "0",
+      "models": "50",
+      "output_omitted": "0",
+      "full_retry": "1"
+    },
+    "metrics": {
+      "compute_us": {
+        "n": 180,
+        "mean": 3568.1384166666667,
+        "p50": 3465.473,
+        "p95": 4338.057,
+        "p99": 4992.27134,
+        "maximum": 5315.152
+      },
+      "demod_us": {
+        "n": 180,
+        "mean": 1775.3021833333332,
+        "p50": 1691.0259999999998,
+        "p95": 2399.9665999999993,
+        "p99": 2883.886630000002,
+        "maximum": 3213.704
+      },
+      "resample_us": {
+        "n": 180,
+        "mean": 1781.6739277777779,
+        "p50": 1760.216,
+        "p95": 1932.79715,
+        "p99": 1983.4989800000008,
+        "maximum": 2210.154
+      },
+      "retry_us": {
+        "n": 180,
+        "mean": 11.080316666666667,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 1994.457
+      },
+      "queue_us": {
+        "n": 180,
+        "mean": 95.81399444444445,
+        "p50": 90.831,
+        "p95": 129.54634999999993,
+        "p99": 170.2623400000001,
+        "maximum": 185.51
+      },
+      "latency_ms": {
+        "n": 180,
+        "mean": 3.6639833333333334,
+        "p50": 3.556,
+        "p95": 4.470099999999999,
+        "p99": 5.119250000000001,
+        "maximum": 5.449
+      },
+      "st_timing": {
+        "n": 180,
+        "mean": 396.05555555555554,
+        "p50": 386.0,
+        "p95": 464.04999999999995,
+        "p99": 603.8900000000009,
+        "maximum": 701.0
+      },
+      "st_cir": {
+        "n": 180,
+        "mean": 804.3,
+        "p50": 777.5,
+        "p95": 962.9999999999997,
+        "p99": 1318.89,
+        "maximum": 1332.0
+      },
+      "st_payload": {
+        "n": 180,
+        "mean": 48.416666666666664,
+        "p50": 46.0,
+        "p95": 57.0,
+        "p99": 75.89000000000007,
+        "maximum": 246.0
+      },
+      "st_fallback": {
+        "n": 180,
+        "mean": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 0.0
+      }
+    },
+    "diagnostics": {
+      "legacy_scans": 0,
+      "bounded_ok": 180,
+      "bounded_fail": 0,
+      "backtrack": 0,
+      "ondemand_fb": 0,
+      "st_fb_count": 0,
+      "full_retry": 1
+    }
+  },
+  {
+    "variant": "new_locked_fused",
+    "rep": 3,
+    "command": [
+      "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-cfo-tail-fix/apps/uwb_dw3000_live",
+      "--replay",
+      "/home/oi/Desktop/uwb-gnuradio/testdata/x410_fixed_tone_live_20261115/rx_ch3_rx1_1s.sc16",
+      "--workers",
+      "2",
+      "--summary",
+      "1000",
+      "--sync",
+      "locked",
+      "--fused",
+      "on"
+    ],
+    "final": {
+      "completed": "200",
+      "fcs": "199/200",
+      "raw_samples": "737280000",
+      "raw_drop_samples": "0",
+      "source_errors": "0",
+      "gaps": "0",
+      "models": "50",
+      "output_omitted": "0",
+      "full_retry": "1"
+    },
+    "metrics": {
+      "compute_us": {
+        "n": 180,
+        "mean": 3667.431344444444,
+        "p50": 3572.1989999999996,
+        "p95": 4253.117249999999,
+        "p99": 4711.1798400000025,
+        "maximum": 5390.815
+      },
+      "demod_us": {
+        "n": 180,
+        "mean": 1861.1577944444443,
+        "p50": 1784.5615,
+        "p95": 2363.3860999999997,
+        "p99": 2647.6029100000005,
+        "maximum": 3081.956
+      },
+      "resample_us": {
+        "n": 180,
+        "mean": 1792.9223555555554,
+        "p50": 1768.5865,
+        "p95": 1958.3874499999997,
+        "p99": 2091.1454599999997,
+        "maximum": 2199.653
+      },
+      "retry_us": {
+        "n": 180,
+        "mean": 13.269216666666665,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 2388.459
+      },
+      "queue_us": {
+        "n": 180,
+        "mean": 92.78310555555555,
+        "p50": 86.1375,
+        "p95": 124.41729999999986,
+        "p99": 153.80173000000002,
+        "maximum": 158.268
+      },
+      "latency_ms": {
+        "n": 180,
+        "mean": 3.7601833333333334,
+        "p50": 3.662,
+        "p95": 4.355449999999999,
+        "p99": 4.8178500000000035,
+        "maximum": 5.495
+      },
+      "st_timing": {
+        "n": 180,
+        "mean": 380.7055555555556,
+        "p50": 369.0,
+        "p95": 481.04999999999995,
+        "p99": 552.6100000000004,
+        "maximum": 586.0
+      },
+      "st_cir": {
+        "n": 180,
+        "mean": 50.605555555555554,
+        "p50": 44.5,
+        "p95": 85.04999999999998,
+        "p99": 108.03000000000034,
+        "maximum": 220.0
+      },
+      "st_payload": {
+        "n": 180,
+        "mean": 1.3888888888888888,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 250.0
+      },
+      "st_fallback": {
+        "n": 180,
+        "mean": 1087.0944444444444,
+        "p50": 1046.0,
+        "p95": 1340.3,
+        "p99": 1580.3800000000006,
+        "maximum": 1732.0
+      }
+    },
+    "diagnostics": {
+      "legacy_scans": 0,
+      "bounded_ok": 180,
+      "bounded_fail": 0,
+      "backtrack": 0,
+      "ondemand_fb": 180,
+      "st_fb_count": 180,
+      "full_retry": 1
+    }
+  }
+]

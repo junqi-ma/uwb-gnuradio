@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <gnuradio/uwb/uwb_phy_profile.h>
+
 #include <complex>
 #include <cstddef>
 #include <cstdint>
@@ -71,6 +73,17 @@ struct TimingResult {
     uint32_t seed_refine_narrow_attempts = 0;
     uint32_t seed_refine_narrow_success = 0;
     uint32_t seed_refine_fallbacks = 0;
+    // LockedBounded strategy diagnostics.  `bounded_legacy_scans` counts any
+    // escalation to the stride coarse scan / whole-SYNC grid probe / long
+    // backtrack; it MUST stay 0 under SyncStrategy::LockedBounded, and a
+    // nonzero value is a contract violation, not a tuning result.
+    uint32_t bounded_attempts = 0;
+    uint32_t bounded_success = 0;
+    uint32_t bounded_failures = 0;
+    uint32_t bounded_legacy_scans = 0;
+    uint32_t bounded_inner_used = 0; // recovered from an inner SYNC, not SYNC #0
+    size_t bounded_roi_samples = 0;
+    uint32_t backtrack_symbols = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -203,6 +216,8 @@ struct DemodResult {
     int64_t detected_start_sample = -1;
     int64_t window_start_sample = -1;
     size_t input_sample_count = 0;
+    // Synchronization strategy actually used for this packet.
+    SyncStrategy sync_strategy = SyncStrategy::AcquireLegacy;
 
     // per-stage outputs
     TimingResult timing;
@@ -250,6 +265,12 @@ struct DemodResult {
     // `stage_fused_fallbacks` counts a fused attempt that failed and then ran
     // the full legacy stream once; that retry's wall time is recorded in the
     // existing `stage_softchip_fallback_us` bucket (also not a child of CIR).
+    // Integer chip-grid admission refused this packet (see
+    // Qm35825Profile::fused_gate_ppm).  When the fused path was requested the
+    // soft-chip mode is downgraded Full->Bypass for this packet: the full
+    // 38-tap FIR over the whole payload only exists to feed the fused CMF, so
+    // running it after the fusion was refused costs ~15 ms for nothing.
+    uint32_t stage_grid_rejects = 0;
     uint32_t stage_fused_attempts = 0;   // kernels actually run
     uint32_t stage_fused_fallbacks = 0;  // fused attempt -> full legacy retry
     uint32_t stage_fused_symbols = 0;    // BPRF payload symbols correlated

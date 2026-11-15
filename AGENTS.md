@@ -1,4 +1,158 @@
-# 当前提交快照：clean comm 256 SYNC/127 B/CFO 多 worker 耗时与分解（2026-11-15）
+# 当前提交快照：X410 目标周期锁定与随机干扰双路径（2026-11-15）
+
+已按 `docs/performance/X410_目标周期锁定与随机干扰双路径修改规划_2026-11-15.md`
+交付 P0–P4 软件部分。报告
+`docs/performance/X410_目标周期锁定与随机干扰双路径开发报告_2026-11-15.md`。
+基线 `a8f0016`；未 install、未推送、**未上板**。
+- **新增原生核心**（GNU Radio 运行时无关、先 QA 再接 live，不新增 GR block）：
+  `uwb_target_lock_core.h`（`ACQUIRE→VERIFY→LOCKED→HOLDOVER→REACQUIRE`、有界反馈
+  队列、每 k 独立取整的预测、holdover 扩窗、干扰分类/去重）、
+  `uwb_timed_rx_plan.h`（设备定时计划/装配/8 种互斥终端、单音与目标窗物理区间合并）。
+- **`LockedBounded` 同步策略**：`Qm35825Profile::sync_strategy`，默认
+  `AcquireLegacy` 行为逐条不变。锁定态只在 `seed±locked_roi_samples`（默认 256）内
+  搜索，可按已知符号网格探测 `locked_inner_symbols`（默认 4）个内侧 SYNC 并换算回
+  包起点；**不**粗扫、**不**整网格探测、默认**不**回溯；ROI 失败即跟踪失败。
+  仍保留 256 SYNC 逐符号跟踪（CFO/CIR 需要）。
+- **live 入口**：`--mode continuous|timed`、`--sync acquire|locked`、`--period-ms`、
+  `--locked-roi`、`--lock-observations/--holdover/--reacquire`、`--interference`、
+  `--timed-lead-us/--timed-lookahead/--timed-alignment/--timed-t0-ms`。
+  候选分类**推迟到提交时刻**（目标窗比自相关晚约 0.46 ms 才提交），失败 slot 的
+  候选显式报 `INTERFERENCE_AMBIGUOUS` 而非丢弃。
+- **QA**：全量串行 CTest **86 项 85 通过 1 跳过**（`uwb_qa_install_consumer` 按设计
+  跳过），112.98 s。新增 `qa_uwb_target_lock_core.cc`（15 例）、
+  `qa_uwb_timed_rx_plan.cc`（10 例），并扩展
+  `tools/rx/qa_live_dw3000_console.py`（locked 策略、timed 计划、fail-closed）。
+- **实采 A/B**（`rx_ch3_rx1_1s.sc16`，4 worker，3 次配对，197 目标时隙/次）：
+  demod 均值 1838.6→1813.8 µs（−1.3%）、compute 3699.9→3671.9 µs（−0.8%）；
+  **最坏 demod 7383→3555 µs（−51.8%）、最坏 compute 12944→7469 µs（−42.3%）**；
+  FCS 199/200 vs 199/200（一次 198）。均值差异在噪声内——256 SYNC 跟踪 + CIR +
+  soft-chip 占 ~1.8 ms，策略只约束首次 SYNC 搜索，**收益在尾部不在均值**。
+- **契约计数**：locked 下 `bounded_legacy_scans=0`、`backtrack=0`（acquire 下 197
+  时隙合计回溯 136–149 符号）、`roi=256`、残差均值 −0.02 样点（−1…+2）。
+  一次 `bounded_fail` 对应残差 −301 的包：±256 ROI 的已知代价，约 0.5%。
+- **周期**：学习 3,686,299.5 vs nominal 3,686,400 = **−27.25 ppm**，与实采
+  4.999864 ms 一致；锁定耗时 3 包；1 s 内 0 重捕获 / 0 holdover / 0 gap。
+- **干扰路径**：`cand_target=197`、`cand_unknown=0`、`autocorr_dedup=197`、
+  `dedup_confirmed=194`、`dedup_ambiguous=2`，未切出第二个重复窗口。
+- **timed_burst**（paced fake device，1 s 同夹具）：197 目标时隙、0 丢弃/过期、
+  FCS 192/199（96.5%）、204 窗下发（199 完整 + 5 文件尾部分）、203 计划空档、
+  0 非预期 gap / 迟到命令 / 溢出 / 超时 / 设备时间跳变；上传样点 75,000,240 =
+  连续模式 737,280,000 的 **10.2%**（只证明主机可见窗口与负载下降，不是 ADC/RF 停止）。
+- **未做**：UHD 定时命令路径（`STREAM_MODE_NUM_SAMPS_AND_DONE`）**未实现**，
+  `--mode timed` 无 `--replay` 时 fail-closed 返回 2；timed 模式**关闭**单音消除
+  （训练窗会落在包上），设备定时单音调度只有核心算术 + QA、未接入 live source；
+  未接 SIC；`--locked-roi` 64/128 未验证；未上板/UHD 溢出/paced/8 worker/P99/
+  MATLAB 交叉验证/多径/AWGN/ISR/CFO 扫频与 SFO 均未验证。
+- **实采 vs 仿真夹具的差距已归因到根因（报告 §5.6）**：同一波形配置下 X410 实采
+  单包解调 1871 µs，仿真夹具 1086 µs（1.72×），差距几乎全在 CIR/soft-chip
+  （902 vs 115）与 SFD（489 vs 200）。**根因是采样时钟偏差，不是噪声/多径/CFO**：
+  融合 CMF 用固定 `kSamplesPerChip=2` 整数网格，门限 `|spc-2|<=1e-9`；实采
+  `spc=1.9999465`（**−26.7 ppm**，门限的 5.3 万倍）。127 B payload 共 154,624
+  样点，−26.7 ppm 累积 4.1 样点 ≈ 2.1 chip 漂移；要 <1 样点需 ≤6.5 ppm。
+  仿真夹具用 `resample_poly(x,48,65)` 从标称速率精确生成，网格恰为 2.0，所以通过。
+  该 −26.7 ppm 与独立测得的包周期 −27.25 ppm 是同一时钟偏差的两面。
+  第二个独立阻塞：`--cir auto` 映射为 `Bypass`，融合门限也显式拒绝 Bypass。
+  四次对照：`fused=off/auto` 1800 µs（无回退）；`fused=on/full` 17204 µs
+  （`st_cir` 仅 72 µs，但 spc 检查失败 → 回退 16.2 ms）；`fused=off/full`
+  17054 µs（228,422 chip × 38 抽头，不可用）；`fused=on/bypass` 1870 µs
+  （配置门限先拒）。**调松门限无用**：物理上限约 6.5 ppm，实采 26.7 ppm。
+  另修掉 `rx_softchip_on_demand` 在 `fused=off` 时每包失败再回退的白跑，
+  `--ondemand` 默认跟随 `--fused`，demod **−7.3%**（1938.6→1835.4 µs 三次同向，
+  FCS 持平）。
+- **受控实验（同波形同噪声种子，只改时钟）**：自造 0 ppm 与 −27 ppm 两份 40 包
+  夹具。demod 1225.9→1580.4 µs（+29%），其中 CIR/soft-chip 399.3→688.5
+  （+289.2，占 82%）；timing −11.7、CFO +19.5、SFD +55.1、NS-SFD/PHR/payload
+  +2.6、resample −3.6；检出 SYNC 256/256、CFO 拟合峰 40/40、FCS 39/40 两边相同。
+  **机制**：`spc≠2` → `fractional_grid=true` → 软比特 FIR 从 AVX2 整数网格内核切到
+  标量分数插值（每 chip 两次 38 抽头点积 + 线性插值）。实采与 −27 ppm 夹具残差
+  仅 +61.5 µs（+3.9%），来自真实噪声/多径/CFO。**除 CIR/soft-chip 外无实质差别。**
+- **时钟修好即可用融合路径（实测）**：0 ppm 下 `--fused on` demod 1225.9→**980.5 µs
+  （−20%）**、`st_cir` 399→95 µs、零回退、FCS 39/40；同一开关在 −27 ppm 下触发
+  15.8 ms 整条流回退。故"trim 回 ±1 ppm"可让实采 1637→约 1000 µs。
+- **X410 不能微调晶振（本机只读查询）**：clock sources `mboard internal external
+  nsync gpsdo`；master clock rate range 单点 737.28 MHz（step 0）；
+  `set_rx_rate(737.28e6)` 精确无 coercion。`get_rx_rate()` 是配置值不是测量值，
+  "0 ppm error" 不证明晶振准确；要准只能用 external 10 MHz / gpsdo / nsync。
+  本次偏差在 DW3000 发送端，trim X410 是修错的一头。
+- **重采样与单音消除：无"实机 vs 仿真"算法差异**（报告 §5.7）。
+  重采样同一夹具 0 ppm vs −27 ppm 差 0.2%（4.661 vs 4.652 ns/样点）；实采
+  4.928 相对夹具 `tone off` 的 +5.7% 可用同一夹具打开 decorator 复现（4.877），
+  即内存竞争而非数据。单音消除：孤立内核基准 38.1 ms/s，live 夹具 82.1、
+  实采 90.9（2.2–2.4×），`bypassed_samples=0` 证明两边都在真减；差距来自内存带宽
+  （环形拷贝 ≈5.9 + 重采样 ≈7.9 + 单音 ≈5.9 GB/s ≈ 19.6 GB/s）。实采比夹具再高
+  10.7%，因实采 demod 更重、worker 占更多带宽。`clean_comm` 仿真基准**不含**单音
+  消除，故两者之间没有可比的单音数字。
+- **整数 chip 网格门限已改为物理推导的漂移预算（报告 §5.8）**：原
+  `|spc-2| <= 1e-9`（0.0005 ppm）比 256 峰周期拟合的估计器噪声（实测 1.5–2.2 ppm
+  逐包 stdev）低三个数量级，**真实数据永远无法满足**。硬上限
+  `kIntegerGridCeilingPpm = 1/154624 = 6.468 ppm`（1 样点漂移），默认准入取该上限
+  （`Qm35825Profile::fused_gate_ppm`，CLI `--fused-gate-ppm`）。新增
+  `integer_chip_grid()` / `integer_chip_grid_at()`（各带显式容差重载）替换
+  `uwb_demod_core.h` 全部 5 处 `1e-9`。QA 新增
+  `integer_chip_grid_tolerance_matches_the_drift_budget`（0.66/1.24/1.4 ppm 接受、
+  1.6/27 ppm 拒绝、显式容差重载生效、边界=漂移预算、退化输入 fail-closed）。
+- **门限不能收紧到 1.5 ppm（实测反例）**：紧门限拒掉的不是坏时钟而是估计噪声，
+  且被拒的包会 `fractional_grid=true` → 软比特内核从 AVX2 整数网格切到标量分数插值
+  → 228,416 chip × 38 抽头 = **15.3 ms/包**。trim6b 实测：1.5 ppm 走融合 84%、
+  demod **3549/3693 µs**；6.468 ppm 走融合 100%、demod **1103/1128 µs**（快 3.2 倍）。
+  要收紧门限必须先有比周期拟合更准的时钟估计（CFO/载频实测 ±0.14 ppm）。
+- **顺带修的耦合缺陷**：原实现里 on-demand 前缀由 `--ondemand`（跟随 `--fused`）决定、
+  融合准入由门限决定，两者独立 → 门限拒包时前缀仍被截短到 NS-SFD，PHR 拿不到软比特
+  → FCS 失败 → 整条流重试 **16.2 ms/包**（1.5 ppm 下 16% 的包）。改为 Stage 1 之后
+  每包只判定一次 `integer_grid_ok`（用 `timing.measured_period`），同时控制第二次 CFO
+  旋转范围、on-demand 前缀、融合 PHR/payload；被拒包走完整前缀（2.6 ms）。
+- **默认配置已改为 `--fused on --cir full`（报告 §5.10）**：融合要求
+  `cir != Bypass`，两者必须同时改。trim6b，4 worker，3 次交替配对（`--sync locked`）：
+  旧默认（`fused off`+`cir auto`）demod **1560.0 µs** / `st_cir` 497.2 / p95 2385；
+  新默认 demod **1218.1 µs（−21.9%，省 342 µs）** / `st_cir` **117.2（−76%）** /
+  p95 **1721.5（−27.8%）** / FCS 同为 203/204。
+- **默认必须带降级保护（否则 27 ppm 晶振会慢 10 倍）**：门限拒包时 `--cir full`
+  仍对整帧跑 38 抽头 → 27 ppm 采集 **17,716 µs/包**（旧默认 1800）。已改为
+  `demodulate_one` 每包判定 `integer_grid_ok` 时把 `Full` 降级为 `Bypass`
+  （Full 软比特只为喂融合而存在），新增诊断字段 `grid_reject`。
+  27 ppm 实测 **1974 µs**（p99 3208、FCS 199/200、`grid_reject=197`、`fused=0`），
+  比不降级改善 9 倍且仍能解码。
+- **新默认实机复核（X410 连续流 10 s，4 worker，loadavg 1.9）**：1998 目标时隙、
+  1997 解码（99.9%）、demod mean **1177.8** / p50 1092.3 / p95 1647.5 /
+  p99 **1960.5** / max 4436.8、`st_cir` 115.4、**0 丢样点**、`grid_reject=1`、
+  `fused=1996`、锁 1 次进入 / 0 holdover / 0 重捕获 / 0 不连续、周期 −0.606 ppm、
+  FCS 2018/2021。此前实机 demod mean 在 1357–1472、p99 在 3194–4492。
+  **机器有外部并行编译负载（loadavg 5–7）时会掉 6–20% 样点、demod 抬到 2.7 ms，
+  那是环境不是算法**——实机数字必须在 loadavg < 2 下测。
+- **target lock 已在 X410 实机验证（报告 §5.9）**。1 s 实采回放 A/B（trim6b，4 worker，
+  3 次配对，每次 591 包，`--fused on --cir full`）：acquire demod mean 1169.6 /
+  p99 **4040.0** / max 5205 / `st_timing` max 3608 / backtrack 423；locked mean 1216.9 /
+  p99 **2286.1** / max 4126 / timing max 1691 / backtrack **0** →
+  **p99 −43.4%、最坏 −20.7%、timing 最坏 −53.1%、均值 +4.0%（噪声内）**。
+  契约逐条成立 591/591：`bounded_ok=591`、`bounded_fail=0`、`legacy_scans=0`、
+  `backtrack=0`、`roi=256`、`sync_strategy=locked_bounded`。
+  X410 连续流 10 s ×2：1993/1882 时隙、99.3%/99.7% 解码、**0 丢样点**、
+  `st_fused` 100%、锁 1/5 次进入、0 holdover、0 重捕获、周期 −0.63/−0.64 ppm。
+  **实机 A/B 不能比均值**：所有阶段（含策略不碰的 sfd/cir/payload）整体差 ~10%，
+  属机器状态差异；受控比较只能用同一份回放夹具。早期两次
+  `acquire + fused + cir full` 实机出现 16% 丢样点/1290 次不连续，**不可复现**
+  （第三次 0 丢样点、2034 包），不能作为"acquire 撑不住"的证据。
+- **DW3000 晶振 trim 全过程（同一 1 s 流程，`tools/rx/capture_x410_sc16.py` +
+  `check_clock_offset.py`）**：CFO 176.7→43.5→19.5→8.08→12.0(过冲)→**4.25 kHz**；
+  偏差 27.1→6.65→2.94→1.24→1.85→**0.66 ppm**；payload 漂移 4.20→**0.10 样点**；
+  FCS 99.0→90.9→95.1→99.5→95.4→**99.5%**；"恰好 2.0"的包 0%→**80%**。
+  trim6 上两个独立估计完全一致：`4.25 kHz / 6489.6 MHz = 0.66 ppm` 与
+  `spc_ppm = -0.66 ppm`。**原始 177 kHz 载波 CFO 全部来自晶振**（27 ppm × 6.4896 GHz）。
+  中间 trim2/trim5 的 FCS 回落到 90.9%/95.4% 说明 payload 失败确实由时钟偏差引起。
+- **门限放宽 + 融合路径实测收益（trim6b，4 worker，3 次配对）**：默认
+  (`--fused off --cir auto`) demod 1555.9 µs / `st_cir` 494.4；`--fused on
+  --cir full` demod **1223.7 µs（−21.3%）** / `st_cir` **118.7（−76%）** /
+  零回退 / FCS 同为 203/204。耦合：融合要求 `cir != Bypass`，故必须 `--cir full`；
+  而 `--cir full` 无融合时是 2623 µs（不可用），**门限放宽是让它可用的前提**。
+- **顺带**：新增 `--tone on|off`（关闭时不再套 decorator，避免无意义的有界环丢样）；
+  新增 `--tone-period-ms` / `--tone-training-ms`（诊断扫描用，实测对 FCS 无影响）；
+  PACKET 行新增 `spc_ppm`、SFD 子阶段（`sfd_boot/sfd_tail/sfd_cforef/sfd_final/
+  sfd_other`）、`chips/taps`，用于直接判定融合路径被拒的原因；COST_TOTAL 新增
+  `bypassed_samples/model_updates/model_rejects/training_windows`。
+
+---
+
+# 历史提交快照：clean comm 256 SYNC/127 B/CFO 多 worker 耗时与分解（2026-11-15）
 
 已交付干净通信接收（无干扰、无 SIC、无 sensing）在 256 SYNC、127 B PSDU、
 +50 kHz CFO 下 1/2/4 worker 的耗时与阶段分解。报告

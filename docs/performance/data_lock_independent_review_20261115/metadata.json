@@ -1,0 +1,20 @@
+{
+  "base_commit": "a8f0016267cdaa62a00786db66e5e296a3988f56",
+  "dirty": true,
+  "iq_sha256": "bb885e458fad18bd4a8d0c124bbac93a44a4e20e549248be31c50ae6702d71af",
+  "binaries": {
+    "old": "9bd5728c1c2c660659f95d3143960d4df581c3688bfcb4aff47facf3a3db7fb0",
+    "new_acquire": "44ae6833c20b32ae3c7c49106e58857ab1c441a664add91b148ae96b58edf04d",
+    "new_locked": "44ae6833c20b32ae3c7c49106e58857ab1c441a664add91b148ae96b58edf04d",
+    "new_locked_fused": "44ae6833c20b32ae3c7c49106e58857ab1c441a664add91b148ae96b58edf04d"
+  },
+  "workers": 2,
+  "warmup_excluded_signal_time_ms": 100,
+  "baseline_note": "a8f0016 live entrypoint compiled with current header/lib; AcquireLegacy default preserved. Not an old frozen whole build.",
+  "source_sha256": {
+    "gr-uwb/apps/uwb_dw3000_live.cc": "1c1a6eff0825244565dcef2a502b0e18a9cd62369a849b6529cfa8606b9f4c88",
+    "gr-uwb/include/gnuradio/uwb/uwb_demod_core.h": "b583b0dd74e8cb78b7f1513b8fe4496789e92ce05728094b24bd734e7f78677d",
+    "gr-uwb/include/gnuradio/uwb/uwb_target_lock_core.h": "5213e0e5c6262839c20ad4f43a031c687b2acb5bb47368a154055ea87ed9ccb2",
+    "gr-uwb/include/gnuradio/uwb/uwb_timed_rx_plan.h": "9b1ce09b9046c892686031cc2d32a7c833a9e293c46102ef03347096aa13c2c9"
+  }
+}

@@ -23,6 +23,7 @@
 #include <gnuradio/uwb/uwb_phy_profile.h>
 
 #include <algorithm>
+#include <limits>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -115,6 +116,71 @@ std::vector<gr_complex> load_reference_template()
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Integer chip-grid admission (fused CMF / AVX2 soft-chip kernel).
+//
+// The grid tolerance is derived from the worst-case payload drift, not from an
+// arbitrary epsilon.  These cases pin the two ends that matter on real
+// hardware: a 27 ppm clock must still be rejected, a sub-ppm clock accepted,
+// and the boundary must sit at the documented drift budget.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(integer_chip_grid_tolerance_matches_the_drift_budget)
+{
+    using namespace gr::uwb::demod::core;
+
+    // Default admission is 1.5 ppm = 0.23 samples of drift over a 127 B
+    // payload.  The hard ceiling is 1 sample = 6.468 ppm.
+    BOOST_CHECK_CLOSE(kIntegerGridMaxClockPpm, 1.5, 1e-9);
+    BOOST_CHECK_CLOSE(kIntegerGridCeilingPpm, 6.468, 0.1);
+    BOOST_CHECK_CLOSE(kIntegerGridRelTolerance, 1.5e-6, 1e-9);
+    BOOST_CHECK_CLOSE(kIntegerGridMaxDriftSamples, 0.232, 0.5);
+
+    // Exactly 2 samples/chip is always accepted.
+    BOOST_CHECK(integer_chip_grid(2.0));
+    BOOST_CHECK(integer_chip_grid_at(2.0, 2));
+
+    // 0.66 ppm (the best clock measured on hardware) -> 0.10 samples of
+    // drift -> accepted with 2.3x margin.
+    const double spc_066 = 2.0 * (1.0 - 0.66e-6);
+    BOOST_CHECK(integer_chip_grid(spc_066));
+    BOOST_CHECK(integer_chip_grid_at(spc_066, 2));
+
+    // 1.24 ppm (an earlier trim step) -> 0.19 samples -> still accepted.
+    BOOST_CHECK(integer_chip_grid_at(2.0 * (1.0 - 1.24e-6), 2));
+
+    // Just inside / just outside the default gate.
+    BOOST_CHECK(integer_chip_grid_at(2.0 * (1.0 - 1.4e-6), 2));
+    BOOST_CHECK(!integer_chip_grid_at(2.0 * (1.0 - 1.6e-6), 2));
+
+    // 27 ppm (the untrimmed clock) -> 4.2 samples of drift -> rejected at
+    // every tolerance up to the physical ceiling.
+    BOOST_CHECK(!integer_chip_grid_at(2.0 * (1.0 - 27.0e-6), 2));
+    BOOST_CHECK(!integer_chip_grid(2.0 * (1.0 - 27.0e-6)));
+    BOOST_CHECK(!integer_chip_grid_at(2.0 * (1.0 - 27.0e-6), 2,
+                                      kIntegerGridCeilingPpm * 1e-6));
+
+    // An explicit tolerance is honoured: the physical ceiling admits a 6 ppm
+    // clock that the default gate refuses.
+    const double spc_6 = 2.0 * (1.0 - 6.0e-6);
+    BOOST_CHECK(!integer_chip_grid(spc_6));
+    BOOST_CHECK(integer_chip_grid(spc_6, kIntegerGridCeilingPpm * 1e-6));
+
+    // Degenerate inputs fail closed.
+    BOOST_CHECK(!integer_chip_grid(0.0));
+    BOOST_CHECK(!integer_chip_grid(-2.0));
+    BOOST_CHECK(!integer_chip_grid_at(2.0, 0));
+    BOOST_CHECK(!integer_chip_grid_at(2.0, 2, 0.0));
+    BOOST_CHECK(!integer_chip_grid_at(2.0, 2, -1e-6));
+    BOOST_CHECK(!integer_chip_grid_at(2.0, 2,
+                                      std::numeric_limits<double>::quiet_NaN()));
+
+    // A different integer grid is not silently accepted as 2 samples/chip.
+    BOOST_CHECK(!integer_chip_grid_at(1.0, 2));
+    BOOST_CHECK(!integer_chip_grid_at(4.0, 2));
+    BOOST_CHECK(integer_chip_grid(1.0)); // its own nearest integer, though
+}
+
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_timing_matches_golden)
 {

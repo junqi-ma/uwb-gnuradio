@@ -39,6 +39,27 @@ enum class CirSoftChipMode : uint8_t {
 };
 
 // ---------------------------------------------------------------------------
+// First-SYNC search strategy (see Qm35825Profile::sync_strategy).
+// ---------------------------------------------------------------------------
+enum class SyncStrategy : int {
+    AcquireLegacy = 0, // narrow seed refine -> stride coarse scan -> grid
+                       // probes -> per-symbol backtrack (blind acquisition)
+    LockedBounded = 1  // bounded ROI around the predicted origin only; an ROI
+                       // miss is a tracking failure, never a wide scan
+};
+
+inline const char* sync_strategy_name(SyncStrategy s)
+{
+    switch (s) {
+    case SyncStrategy::AcquireLegacy:
+        return "acquire_legacy";
+    case SyncStrategy::LockedBounded:
+        return "locked_bounded";
+    }
+    return "unknown";
+}
+
+// ---------------------------------------------------------------------------
 // IEEE 802.15.4a/z HRP constants (QM35825 radar, BPRF 62.4 MHz)
 // ---------------------------------------------------------------------------
 inline constexpr double kQm35SampleRate = 998400000.0;
@@ -107,6 +128,35 @@ struct Qm35825Profile {
     size_t timing_track_radius = 8;
     size_t post_guard_samples = 4096;
 
+    // ---- Explicit synchronization strategy -------------------------------
+    // AcquireLegacy keeps the full acquisition behaviour: narrow seed refine,
+    // then a stride coarse scan, whole-SYNC grid probes, and per-symbol
+    // backtracking.  That is what a blind autocorrelation seed needs.
+    //
+    // LockedBounded is the locked-tracking contract: the packet origin is
+    // already predicted by the target lock, so the first SYNC is searched only
+    // inside ±locked_roi_samples of the seed.  It NEVER escalates to a wide
+    // scan or a long backtrack; an ROI miss returns a tracking failure so the
+    // lock state machine can widen the next window or reacquire.  The full
+    // per-SYNC tracking train still runs, because CFO and CIR need valid
+    // peaks.
+    //
+    // The default stays AcquireLegacy so every existing caller is unchanged.
+    SyncStrategy sync_strategy = SyncStrategy::AcquireLegacy;
+    // ± half-width (samples) of the locked ROI around the predicted origin.
+    // 256 is the conservative first value; 64/128 are only valid after the
+    // residual distribution has been measured on real captures.
+    size_t locked_roi_samples = 256;
+    // LockedBounded only: number of consecutive SYNC positions to probe inside
+    // the ROI (seed + m*symbol, m = 0..n-1).  A real QM35825 has a startup
+    // transient that can put SYNC #0 below the verification threshold; probing
+    // a few inner SYNCs and converting back on the known grid keeps the packet
+    // without ever running a wide scan.  0 disables the inner probes.
+    size_t locked_inner_symbols = 4;
+    // LockedBounded only: allow the per-symbol backtrack walk.  Default false:
+    // backtracking is exactly how a lock can silently drift onto SYNC #2/#3.
+    bool locked_allow_backtrack = false;
+
     // ---- Experimental RX fast paths (explicit opt-in) --------------------
     // Defaults keep the legacy algorithms so existing callers are unchanged.
     // The full-packet experiment wrapper selects these per run, allowing the
@@ -123,6 +173,22 @@ struct Qm35825Profile {
     // and the on-demand prefix; it shortens the prefix to the SYNC/SFD/PHR
     // range.  Default off.
     bool rx_fused_phr_cmf = false;
+    // Admission tolerance for the integer chip grid, in ppm of the sample
+    // clock.  Both the AVX2 soft-chip kernel and the fused CMF index samples
+    // on an exact kSamplesPerChip grid, so a clock offset that accumulates more
+    // than this much drift across the longest frame (127 B = 154,624 samples)
+    // is refused and the fractional/legacy path is used instead.
+    //
+    // The default is the physical ceiling, 1 sample of drift = 6.468 ppm
+    // (demod::core::kIntegerGridCeilingPpm).  It is deliberately NOT tighter:
+    // the 256-peak period estimator quantises samples_per_chip in ~2 ppm steps
+    // (measured stdev 1.5-2.2 ppm), so a tight gate rejects packets whose true
+    // clock is fine and pushes them onto the scalar fractional soft-chip
+    // kernel, which is ~10x slower.  Measured on the X410 capture: a 1.5 ppm
+    // gate refused 16% of packets and cost 15.3 ms/packet on the refused ones
+    // (demod 1171 -> 3554 us).  Tighten it only when a better clock estimate
+    // than the period fit is available.
+    double fused_gate_ppm = 6.468;
     // Diagnostic-only replay of the legacy soft-chip FIR, segmented at the
     // decoded SFD/PHR/payload boundaries.  Never part of a formal timing run.
     bool rx_diagnose_fir_segments = false;

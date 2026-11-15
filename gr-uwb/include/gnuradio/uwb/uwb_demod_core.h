@@ -45,6 +45,81 @@ namespace demod {
 namespace core {
 
 // ---------------------------------------------------------------------------
+// Integer chip-grid admission
+//
+// The AVX2 soft-chip kernel and the fused CMF both index samples on an exact
+// kSamplesPerChip grid, so the real question is not "is samples_per_chip
+// exactly 2" but "does the grid drift accumulated across the frame stay inside
+// the correlation tolerance".
+//
+// Physical ceiling.  The longest supported frame is 127 B, whose BPRF payload
+// spans 154,624 samples.  One sample of drift over that span is a sample-clock
+// offset of 1/154624 = 6.5 ppm; past that the integer grid walks off the
+// correlation peak inside a single frame.
+//
+// Default admission is deliberately tighter: 1.5 ppm = 0.23 samples of drift,
+// with 2.3x margin over the best clock measured on hardware (0.66 ppm).  The
+// 256-peak period estimator quantises samples_per_chip in ~2 ppm steps, so a
+// gate at the physical ceiling would admit a clock whose *measured* offset is
+// 3-6 ppm away from zero without any real evidence that the clock is good.
+// Callers can widen or tighten it per run through Qm35825Profile::fused_gate_ppm
+// without a rebuild.
+//
+// Measured on hardware: a 27 ppm clock drifts 4.2 samples across the payload
+// and is rejected at every setting; a 0.66 ppm clock drifts 0.10 samples and is
+// accepted.  The previous 1e-9 (0.0005 ppm) threshold was three orders of
+// magnitude BELOW the estimator noise, so real data could never satisfy it and
+// the fused path was unreachable on hardware.
+// ---------------------------------------------------------------------------
+inline constexpr double kMaxFramePayloadSamples = 154624.0; // 127 B BPRF
+// Hard ceiling: one sample of drift across the longest frame.
+inline constexpr double kIntegerGridCeilingPpm =
+    1.0 / kMaxFramePayloadSamples * 1e6;
+// Default admission (deliberately tighter than the ceiling).
+inline constexpr double kIntegerGridMaxClockPpm = 1.5;
+inline constexpr double kIntegerGridRelTolerance =
+    kIntegerGridMaxClockPpm * 1e-6;
+inline constexpr double kIntegerGridMaxDriftSamples =
+    kIntegerGridRelTolerance * kMaxFramePayloadSamples;
+
+/** True when `samples_per_chip` sits within `rel_tolerance` of `target`. */
+inline bool integer_chip_grid_at(double samples_per_chip, size_t target,
+                                 double rel_tolerance)
+{
+    if (!(samples_per_chip > 0.0) || target == 0 ||
+        !(rel_tolerance > 0.0) || !std::isfinite(rel_tolerance))
+        return false;
+    return std::abs(samples_per_chip - static_cast<double>(target)) /
+               samples_per_chip <=
+           rel_tolerance;
+}
+
+/** Default-tolerance overload (see kIntegerGridMaxClockPpm). */
+inline bool integer_chip_grid_at(double samples_per_chip, size_t target)
+{
+    return integer_chip_grid_at(samples_per_chip, target,
+                                kIntegerGridRelTolerance);
+}
+
+/** True when `samples_per_chip` sits within tolerance of its nearest integer. */
+inline bool integer_chip_grid(double samples_per_chip, double rel_tolerance)
+{
+    if (!(samples_per_chip > 0.0))
+        return false;
+    const double nearest = std::round(samples_per_chip);
+    if (nearest <= 0.0)
+        return false;
+    return integer_chip_grid_at(samples_per_chip,
+                                static_cast<size_t>(nearest), rel_tolerance);
+}
+
+/** Default-tolerance overload (see kIntegerGridMaxClockPpm). */
+inline bool integer_chip_grid(double samples_per_chip)
+{
+    return integer_chip_grid(samples_per_chip, kIntegerGridRelTolerance);
+}
+
+// ---------------------------------------------------------------------------
 // R1 implementations: Stage 1 (timing), Stage 2 (CFO), Stage 3 (SFD refine).
 // Coordinate convention: 0-based ABSOLUTE sample indices (matching detector /
 // PDU metadata and the R0 golden reference, which is stored in absolute
@@ -457,7 +532,56 @@ inline bool stage_timing(const std::complex<float>* rx,
     float first_metric = 0.0f;
     std::complex<float> first_corr(0.0f, 0.0f);
     const float thr = profile.radar_verification_threshold;
-    {
+    const bool bounded = profile.sync_strategy == SyncStrategy::LockedBounded;
+    if (bounded) {
+        // Locked tracking contract: the target lock predicted this origin, so
+        // only a bounded ROI around the seed is legal.  A miss is a tracking
+        // failure -- never a wide scan and never a long backtrack.
+        ++out.bounded_attempts;
+        if (seed_start < 0) {
+            ++out.bounded_failures;
+            finish_timing_profile();
+            return false;
+        }
+        const int64_t roi = std::max<int64_t>(
+            1, static_cast<int64_t>(profile.locked_roi_samples));
+        out.bounded_roi_samples = static_cast<size_t>(roi);
+        // Probe the predicted SYNC first, then a bounded number of inner SYNCs
+        // on the known symbol grid.  A weak startup SYNC must not cost the
+        // packet, but the probe set stays finite: this is NOT a scan.
+        const size_t inner = profile.locked_inner_symbols;
+        int64_t pos = -1;
+        float met = 0.0f;
+        std::complex<float> corr(0.0f, 0.0f);
+        size_t used_inner = 0;
+        bool found = false;
+        for (size_t m = 0; m <= inner; ++m) {
+            const int64_t want =
+                static_cast<int64_t>(seed_start) +
+                static_cast<int64_t>(m) * static_cast<int64_t>(kQm35SamplesPerSymbol);
+            if (want + static_cast<int64_t>(L) >
+                static_cast<int64_t>(n))
+                break;
+            if (local_best(want, roi, thr, &pos, &met, &corr)) {
+                used_inner = m;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            ++out.bounded_failures;
+            finish_timing_profile();
+            return false;
+        }
+        // Convert the inner-SYNC hit back to the packet start on the grid.
+        first_start = pos - static_cast<int64_t>(used_inner) *
+                                static_cast<int64_t>(kQm35SamplesPerSymbol);
+        first_metric = met;
+        first_corr = corr;
+        if (used_inner != 0)
+            ++out.bounded_inner_used;
+        ++out.bounded_success;
+    } else {
         const int64_t seed =
             (seed_start >= 0) ? seed_start
                               : (int64_t)(roi_start + (roi_end - roi_start) / 2);
@@ -593,8 +717,14 @@ inline bool stage_timing(const std::complex<float>* rx,
     // can score below the normal verification threshold, so the detector seeds
     // the first strong SYNC.  Once locked, walk backwards on the known grid
     // with a relaxed threshold, stopping at the first missing predecessor.
+    // LockedBounded disables this by default: walking backwards is exactly how
+    // a lock silently drifts onto SYNC #2/#3.
     size_t backtracked_symbols = 0;
-    for (size_t back = 0; back < profile.timing_max_backtrack_symbols; ++back) {
+    const size_t backtrack_limit =
+        (bounded && !profile.locked_allow_backtrack)
+            ? 0
+            : profile.timing_max_backtrack_symbols;
+    for (size_t back = 0; back < backtrack_limit; ++back) {
         int64_t previous_start = -1;
         float previous_metric = 0.0f;
         std::complex<float> previous_corr(0.0f, 0.0f);
@@ -609,6 +739,7 @@ inline bool stage_timing(const std::complex<float>* rx,
         } else
             break;
     }
+    out.backtrack_symbols = static_cast<uint32_t>(backtracked_symbols);
     const int64_t start = first_start;
     if (start < 0) {
         finish_timing_profile();
@@ -1255,8 +1386,10 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     if (last_pos < chip_start)
         return false;
     const int64_t spc_i = std::max<int64_t>(1, std::llround(spc));
+    // Integer grid unless the clock offset would drift the grid past the
+    // correlation tolerance across the longest frame (see integer_chip_grid).
     const bool fractional_grid =
-        std::abs(spc - static_cast<double>(spc_i)) > 1e-9;
+        !integer_chip_grid(spc, profile.fused_gate_ppm * 1e-6);
     const size_t num_chips =
         static_cast<size_t>(std::floor(
             static_cast<double>(last_pos - chip_start) / spc)) + 1;
@@ -2594,8 +2727,9 @@ inline bool stage_phr_fused_cmf(const std::complex<float>* rx,
         return false;
     if (tap_count != profile.cir_pre_samples + profile.cir_post_samples)
         return false;
-    if (std::abs(cir.samples_per_chip -
-                 static_cast<double>(rxfusion::kSamplesPerChip)) > 1e-9)
+    if (!integer_chip_grid_at(cir.samples_per_chip,
+                              rxfusion::kSamplesPerChip,
+                              profile.fused_gate_ppm * 1e-6))
         return false;
     if (profile.cir_pre_samples > tap_count)
         return false;
@@ -2893,8 +3027,9 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
         return false;
     if (tap_count != profile.cir_pre_samples + profile.cir_post_samples)
         return false;
-    if (std::abs(cir.samples_per_chip -
-                 static_cast<double>(rxfusion::kSamplesPerChip)) > 1e-9)
+    if (!integer_chip_grid_at(cir.samples_per_chip,
+                              rxfusion::kSamplesPerChip,
+                              profile.fused_gate_ppm * 1e-6))
         return false;
     if (profile.cir_pre_samples > tap_count)
         return false;
@@ -3024,6 +3159,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     res.packet_id = packet_id;
     res.predicted_start_sample = predicted_start;
     res.window_start_sample = window_start;
+    res.sync_strategy = profile.sync_strategy;
     // The fused PHR decisions are packet-scoped; never let the joint payload
     // Viterbi consume a previous packet's cache.
     scratch.fused_phr.reset_decisions();
@@ -3140,6 +3276,44 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         rebase();
         return res;
     }
+    // Integer chip-grid admission: decide ONCE per packet, from the 256-peak
+    // period fit that Stage 1 already produced.  The decision must be made here
+    // and not later, because it controls three coupled things:
+    //   * the second CFO rotation range (a narrowed range is only valid when
+    //     the on-demand prefix is actually used),
+    //   * whether the on-demand prefix is generated at all,
+    //   * whether the fused PHR/payload CMF may run.
+    // Mixing them -- e.g. narrowing the rotation and shortening the prefix but
+    // then refusing the fused CMF -- leaves the payload decoder without PHR
+    // soft chips, which fails the FCS and triggers a full-stream retry
+    // (~16 ms/packet instead of ~2.6 ms).  Measured on the X410 capture with a
+    // 1.5 ppm gate: 16% of packets hit exactly that path.
+    bool integer_grid_ok = true;
+    // Per-packet effective profile.  Only the soft-chip mode can differ from
+    // the caller's profile (see the degradation note below).
+    Qm35825Profile eff = profile;
+    if (profile.rx_softchip_on_demand || profile.rx_fused_payload_cmf ||
+        profile.rx_fused_phr_cmf) {
+        const double spc_hat =
+            (res.timing.measured_period > 0.0)
+                ? res.timing.measured_period /
+                      static_cast<double>(kQm35ChipsPerSymbol)
+                : 0.0;
+        integer_grid_ok =
+            integer_chip_grid(spc_hat, profile.fused_gate_ppm * 1e-6);
+        if (!integer_grid_ok) {
+            ++res.stage_grid_rejects;
+            // Graceful degradation.  `Full` soft chips exist only to feed the
+            // fused CMF; once that is refused they are a 38-tap matched filter
+            // over the whole payload (~15 ms).  Bypass (strongest-path chip
+            // sampling) is the cheap legacy path (~0.5 ms of CIR) and still
+            // decodes.  Without this, an untrimmed clock would turn the new
+            // default from ~1.5 ms/packet into ~15 ms/packet.
+            if (eff.cir_soft_chip_mode == CirSoftChipMode::Full)
+                eff.cir_soft_chip_mode = CirSoftChipMode::Bypass;
+        }
+    }
+
     // Stage 2: CFO fit + bootstrap SFD search window rotation (Task A1)
     if (!fit_cfo(rx, n, profile, res.timing, res.cfo, scratch)) {
         lap(res.stage_cfo_us);
@@ -3380,6 +3554,16 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         const int64_t full_start = bootstrap_sfd_start -
             static_cast<int64_t>(std::llround(
                 static_cast<double>(full_repetitions) * measured_period));
+        // The SFD-anchored grid replaces the seeded search result, but the
+        // synchronization-strategy diagnostics describe the FIRST seeded search
+        // (the only one the strategy controls), so carry them over.
+        cfo_timing.bounded_attempts = res.timing.bounded_attempts;
+        cfo_timing.bounded_success = res.timing.bounded_success;
+        cfo_timing.bounded_failures = res.timing.bounded_failures;
+        cfo_timing.bounded_legacy_scans = res.timing.bounded_legacy_scans;
+        cfo_timing.bounded_inner_used = res.timing.bounded_inner_used;
+        cfo_timing.bounded_roi_samples = res.timing.bounded_roi_samples;
+        cfo_timing.backtrack_symbols = res.timing.backtrack_symbols;
         cfo_timing.ok = true;
         cfo_timing.preamble_start_sample = full_start;
         cfo_timing.preamble_start_uncropped = full_start;
@@ -3469,7 +3653,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         if (profile.rx_stop_after_sfd) {
             sec_lo = static_cast<size_t>(std::max<int64_t>(0, static_cast<int64_t>(final_sfd_range.first)));
             sec_hi = static_cast<size_t>(std::min<int64_t>(static_cast<int64_t>(n), static_cast<int64_t>(final_sfd_range.second)));
-        } else if (on_demand && is_integer_grid) {
+        } else if (on_demand && is_integer_grid && integer_grid_ok) {
             // Second rotation covers final SFD, CIR, phase estimation, and through PHR.
             // initial_chip_budget(profile) covers SYNC alignment, NS-SFD, and the 21 PHR symbols.
             const size_t prefix_budget = rxopt::initial_chip_budget(profile);
@@ -3596,9 +3780,10 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     // Stage 4: CIR + soft chips on the CFO-compensated frame.
     const std::vector<int8_t>& pcode = scratch.cached_seq.pcode;
     const std::vector<int8_t>& nsfd_seq = scratch.cached_seq.sfd_seq;
-    const bool on_demand_path = profile.rx_softchip_on_demand ||
-                                profile.rx_fused_payload_cmf ||
-                                profile.rx_fused_phr_cmf;
+    const bool on_demand_path = integer_grid_ok &&
+                                (profile.rx_softchip_on_demand ||
+                                 profile.rx_fused_payload_cmf ||
+                                 profile.rx_fused_phr_cmf);
     if (on_demand_path) {
         // Experimental two-phase path: generate only the prefix required by
         // the active decoder.  Payload fusion needs SYNC/SFD/PHR soft chips;
@@ -3614,7 +3799,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         const size_t prefix_budget =
             phr_fusion_requested ? rxopt::fused_phr_prefix_budget(profile)
                                  : rxopt::initial_chip_budget(profile);
-        bool ok = stage_cir_softchips(scratch.derotated.data(), n, profile,
+        bool ok = stage_cir_softchips(scratch.derotated.data(), n, eff,
                                       res.timing, pcode, res.cir, scratch,
                                       prefix_budget, 0);
         lap(res.stage_cir_us);
@@ -3626,13 +3811,13 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         }
         bool phr_fused_used = false;
         if (ok) {
-            if (phr_fusion_requested) {
+            if (phr_fusion_requested && integer_grid_ok) {
                 const bool supported =
                     phr_fusion_cfg_supported &&
                     !res.cir.cir_filter_taps.empty() &&
-                    std::abs(res.cir.samples_per_chip -
-                             static_cast<double>(rxfusion::kSamplesPerChip)) <=
-                        1e-9 &&
+                    integer_chip_grid_at(res.cir.samples_per_chip,
+                                         rxfusion::kSamplesPerChip,
+                                         profile.fused_gate_ppm * 1e-6) &&
                     scratch.softchip.prepared;
                 if (supported) {
                     ++res.stage_phr_fused_attempts;
@@ -3687,12 +3872,12 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         // integer-grid CMF is supported; fractional SFO, RAKE and bypass keep
         // the legacy on-demand extension.  Any failure retries the complete
         // legacy stream once through the existing fallback block below.
-        if (ok && profile.rx_fused_payload_cmf) {
+        if (ok && profile.rx_fused_payload_cmf && integer_grid_ok) {
             const bool fused_supported =
                 !res.cir.cir_filter_taps.empty() &&
-                std::abs(res.cir.samples_per_chip -
-                         static_cast<double>(rxfusion::kSamplesPerChip)) <=
-                    1e-9 &&
+                integer_chip_grid_at(res.cir.samples_per_chip,
+                                     rxfusion::kSamplesPerChip,
+                                     profile.fused_gate_ppm * 1e-6) &&
                 profile.cir_rake_top_k == 0 &&
                 profile.cir_soft_chip_mode != CirSoftChipMode::Rake &&
                 profile.cir_soft_chip_mode != CirSoftChipMode::Bypass &&
@@ -3797,7 +3982,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
 
                 CirResult ext;
                 const bool ext_ok = stage_cir_softchips(
-                    scratch.derotated.data(), n, profile, res.timing, pcode,
+                    scratch.derotated.data(), n, eff, res.timing, pcode,
                     ext, scratch, final_budget, prefix_chips);
                 add_elapsed(res.stage_cir_us);
                 if (ext_ok) {
@@ -3902,7 +4087,9 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         rebase();
         return res;
     }
-    if (!stage_cir_softchips(scratch.derotated.data(), n, profile, res.timing,
+    // Legacy full-stream path (also the degraded path when the integer grid was
+    // refused).  Uses `eff` so the Full->Bypass downgrade applies here too.
+    if (!stage_cir_softchips(scratch.derotated.data(), n, eff, res.timing,
                              pcode, res.cir, scratch)) {
         lap(res.stage_cir_us);
         res.status = DemodStatus::CirFailed;

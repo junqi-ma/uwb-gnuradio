@@ -1,0 +1,58 @@
+{
+  "commit": "a8f0016267cdaa62a00786db66e5e296a3988f56",
+  "cores": [
+    4,
+    6,
+    8,
+    10,
+    12,
+    14,
+    16,
+    18
+  ],
+  "parameters": {
+    "build": "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-sc16-r1r2",
+    "out": "/tmp/uwb-clean-comm-9700x-20261115-r1",
+    "measure": 512,
+    "warmup": 128,
+    "reps": 3,
+    "sync_reps": 256,
+    "psdu_bytes": 127,
+    "cfo_hz": [
+      50000.0,
+      0.0
+    ],
+    "profile": "quality_minorder",
+    "workers": [
+      1,
+      2,
+      4
+    ]
+  },
+  "binaries": {
+    "experiment_preamble_recovery": {
+      "path": "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/experiment_preamble_recovery",
+      "sha256": "2a5dc7efd2bd4404390d33f933cb8c8c4f006219fa1f750518d7e92fc9a64d6a",
+      "ldd": "\tlinux-vdso.so.1 (0x00007ffd817ed000)\n\tlibgnuradio-uwb.so.1.0.0 => /home/oi/Desktop/uwb-gnuradio/gr-uwb/build-sc16-r1r2/lib/libgnuradio-uwb.so.1.0.0 (0x0000730a01a00000)\n\tlibvolk.so.3.3 => /usr/local/lib/libvolk.so.3.3 (0x0000730a01200000)\n\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x0000730a00e00000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x0000730a01c39000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x0000730a019e0000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x0000730a00a00000)\n\tlibgnuradio-filter.so.3.10.12 => /usr/local/lib/libgnuradio-filter.so.3.10.12 (0x0000730a018eb000)\n\tlibgnuradio-runtime.so.3.10.12 => /usr/local/lib/libgnuradio-runtime.so.3.10.12 (0x0000730a01098000)\n\tlibgnuradio-pmt.so.3.10.12 => /usr/local/lib/libgnuradio-pmt.so.3.10.12 (0x0000730a01893000)\n\tlibspdlog.so.1 => /lib/x86_64-linux-gnu/libspdlog.so.1 (0x0000730a00d85000)\n\tlibfmt.so.8 => /lib/x86_64-linux-gnu/libfmt.so.8 (0x0000730a01872000)\n\tlibuhd.so.4.6.0 => /usr/local/lib/libuhd.so.4.6.0 (0x00007309ff800000)\n\t/lib64/ld-linux-x86-64.so.2 (0x0000730a01da5000)\n\tlibgnuradio-fft.so.3.10.12 => /usr/local/lib/libgnuradio-fft.so.3.10.12 (0x0000730a0105b000)\n\tlibboost_thread.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_thread.so.1.74.0 (0x0000730a01039000)\n\tlibboost_program_options.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_program_options.so.1.74.0 (0x0000730a00d40000)\n\tlibgmp.so.10 => /lib/x86_64-linux-gnu/libgmp.so.10 (0x0000730a00cbe000)\n\tlibboost_chrono.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_chrono.so.1.74.0 (0x0000730a01c28000)\n\tlibboost_filesystem.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_filesystem.so.1.74.0 (0x0000730a00c9e000)\n\tlibboost_serialization.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_serialization.so.1.74.0 (0x0000730a00c5c000)\n\tlibusb-1.0.so.0 => /lib/x86_64-linux-gnu/libusb-1.0.so.0 (0x0000730a00c3e000)\n\tlibrte_hash.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_hash.so.21 (0x0000730a0185d000)\n\tlibrte_ethdev.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_ethdev.so.21 (0x0000730a00950000)\n\tlibrte_mbuf.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_mbuf.so.21 (0x0000730a00c29000)\n\tlibrte_mempool.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_mempool.so.21 (0x0000730a0102d000)\n\tlibrte_ring.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_ring.so.21 (0x0000730a0094b000)\n\tlibrte_eal.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_eal.so.21 (0x00007309ff70b000)\n\tlibpython3.10.so.1.0 => /lib/x86_64-linux-gnu/libpython3.10.so.1.0 (0x00007309ff000000)\n\tlibfftw3f.so.3 => /lib/x86_64-linux-gnu/libfftw3f.so.3 (0x00007309fec00000)\n\tlibfftw3f_threads.so.3 => /lib/x86_64-linux-gnu/libfftw3f_threads.so.3 (0x0000730a0093f000)\n\tlibudev.so.1 => /lib/x86_64-linux-gnu/libudev.so.1 (0x0000730a00915000)\n\tlibnuma.so.1 => /lib/x86_64-linux-gnu/libnuma.so.1 (0x0000730a00908000)\n\tlibfdt.so.1 => /lib/x86_64-linux-gnu/libfdt.so.1 (0x0000730a008fd000)\n\tlibrte_kvargs.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_kvargs.so.21 (0x0000730a008f8000)\n\tlibrte_telemetry.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_telemetry.so.21 (0x0000730a008eb000)\n\tlibrte_rcu.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_rcu.so.21 (0x0000730a008e4000)\n\tlibbsd.so.0 => /lib/x86_64-linux-gnu/libbsd.so.0 (0x0000730a008cc000)\n\tlibrte_net.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_net.so.21 (0x0000730a008c2000)\n\tlibrte_meter.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_meter.so.21 (0x0000730a008bd000)\n\tlibexpat.so.1 => /lib/x86_64-linux-gnu/libexpat.so.1 (0x00007309ff6d9000)\n\tlibz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x00007309ff6bd000)\n\tlibmd.so.0 => /lib/x86_64-linux-gnu/libmd.so.0 (0x00007309ff6b0000)\n",
+      "libraries": {
+        "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-sc16-r1r2/lib/libgnuradio-uwb.so.1.0.0": "ec6ebc4595e4bb123e80fba5fc416a7abde74160756a0e57373e1d23104c40cb"
+      }
+    },
+    "benchmark_chain_workers": {
+      "path": "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-sc16-r1r2/apps/benchmark_chain_workers",
+      "sha256": "4904ee048eacffafbdc4ee17cc93348b78bcc38d5cd596040c2f33c8a5e3d84f",
+      "ldd": "\tlinux-vdso.so.1 (0x00007fffc317d000)\n\tlibgnuradio-uwb.so.1.0.0 => /home/oi/Desktop/uwb-gnuradio/gr-uwb/build-sc16-r1r2/lib/libgnuradio-uwb.so.1.0.0 (0x00007fdc41800000)\n\tlibvolk.so.3.3 => /usr/local/lib/libvolk.so.3.3 (0x00007fdc41000000)\n\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007fdc40c00000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007fdc41a7b000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007fdc41a5b000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fdc40800000)\n\tlibgnuradio-filter.so.3.10.12 => /usr/local/lib/libgnuradio-filter.so.3.10.12 (0x00007fdc4170b000)\n\tlibgnuradio-runtime.so.3.10.12 => /usr/local/lib/libgnuradio-runtime.so.3.10.12 (0x00007fdc40e98000)\n\tlibgnuradio-pmt.so.3.10.12 => /usr/local/lib/libgnuradio-pmt.so.3.10.12 (0x00007fdc416b3000)\n\tlibspdlog.so.1 => /lib/x86_64-linux-gnu/libspdlog.so.1 (0x00007fdc40b85000)\n\tlibfmt.so.8 => /lib/x86_64-linux-gnu/libfmt.so.8 (0x00007fdc41a38000)\n\tlibuhd.so.4.6.0 => /usr/local/lib/libuhd.so.4.6.0 (0x00007fdc3f600000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007fdc41be0000)\n\tlibgnuradio-fft.so.3.10.12 => /usr/local/lib/libgnuradio-fft.so.3.10.12 (0x00007fdc41676000)\n\tlibboost_thread.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_thread.so.1.74.0 (0x00007fdc40e76000)\n\tlibboost_program_options.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_program_options.so.1.74.0 (0x00007fdc40e31000)\n\tlibgmp.so.10 => /lib/x86_64-linux-gnu/libgmp.so.10 (0x00007fdc40b03000)\n\tlibboost_chrono.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_chrono.so.1.74.0 (0x00007fdc41a29000)\n\tlibboost_filesystem.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_filesystem.so.1.74.0 (0x00007fdc40ae3000)\n\tlibboost_serialization.so.1.74.0 => /lib/x86_64-linux-gnu/libboost_serialization.so.1.74.0 (0x00007fdc40aa1000)\n\tlibusb-1.0.so.0 => /lib/x86_64-linux-gnu/libusb-1.0.so.0 (0x00007fdc40a83000)\n\tlibrte_hash.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_hash.so.21 (0x00007fdc41661000)\n\tlibrte_ethdev.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_ethdev.so.21 (0x00007fdc40750000)\n\tlibrte_mbuf.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_mbuf.so.21 (0x00007fdc40a6e000)\n\tlibrte_mempool.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_mempool.so.21 (0x00007fdc40a62000)\n\tlibrte_ring.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_ring.so.21 (0x00007fdc40e2c000)\n\tlibrte_eal.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_eal.so.21 (0x00007fdc3f50b000)\n\tlibpython3.10.so.1.0 => /lib/x86_64-linux-gnu/libpython3.10.so.1.0 (0x00007fdc3ee00000)\n\tlibfftw3f.so.3 => /lib/x86_64-linux-gnu/libfftw3f.so.3 (0x00007fdc3ea00000)\n\tlibfftw3f_threads.so.3 => /lib/x86_64-linux-gnu/libfftw3f_threads.so.3 (0x00007fdc40a58000)\n\tlibudev.so.1 => /lib/x86_64-linux-gnu/libudev.so.1 (0x00007fdc40a2e000)\n\tlibnuma.so.1 => /lib/x86_64-linux-gnu/libnuma.so.1 (0x00007fdc40743000)\n\tlibfdt.so.1 => /lib/x86_64-linux-gnu/libfdt.so.1 (0x00007fdc40738000)\n\tlibrte_kvargs.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_kvargs.so.21 (0x00007fdc40a29000)\n\tlibrte_telemetry.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_telemetry.so.21 (0x00007fdc4072d000)\n\tlibrte_rcu.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_rcu.so.21 (0x00007fdc40726000)\n\tlibbsd.so.0 => /lib/x86_64-linux-gnu/libbsd.so.0 (0x00007fdc4070e000)\n\tlibrte_net.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_net.so.21 (0x00007fdc40704000)\n\tlibrte_meter.so.21 => /usr/local/lib/x86_64-linux-gnu/librte_meter.so.21 (0x00007fdc406ff000)\n\tlibexpat.so.1 => /lib/x86_64-linux-gnu/libexpat.so.1 (0x00007fdc406cb000)\n\tlibz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x00007fdc3f4ef000)\n\tlibmd.so.0 => /lib/x86_64-linux-gnu/libmd.so.0 (0x00007fdc406be000)\n",
+      "libraries": {
+        "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-sc16-r1r2/lib/libgnuradio-uwb.so.1.0.0": "ec6ebc4595e4bb123e80fba5fc416a7abde74160756a0e57373e1d23104c40cb"
+      }
+    }
+  },
+  "sources": {
+    "/home/oi/Desktop/uwb-gnuradio/tools/sic/run_clean_comm_workers.py": "643877e59387292e710ef220d07d813506f765b9789f844eaa09e61174e25d21",
+    "tools/sic/benchmark_chain_workers.cc": "ad4f7b099e072a8f39b204a41e8e2859af80d2b31f5aaf5251ce040c36fa0afd",
+    "tools/sic/experiment_preamble_recovery.cc": "f9138f2dddf61c5e62f4aef39b623e309bc72e41b2acdc0eabae2643503e3e43"
+  },
+  "topology": "CPU CORE SOCKET ONLINE\n  0    0      0    yes\n  1    1      0    yes\n  2    2      0    yes\n  3    3      0    yes\n  4    4      0    yes\n  5    5      0    yes\n  6    6      0    yes\n  7    7      0    yes\n  8    0      0    yes\n  9    1      0    yes\n 10    2      0    yes\n 11    3      0    yes\n 12    4      0    yes\n 13    5      0    yes\n 14    6      0    yes\n 15    7      0    yes\n",
+  "scenario": "clean code9 packet only, no interference/noise/SIC/sensing; 256 SYNC, 127 PSDU bytes incl FCS; carrier offset injected at work rate: [50000.0, 0.0] Hz; 16 PSDUs/origins",
+  "scope": "SC16 resample 737.28->998.4 MS/s + complete comm decode/FCS per job; excludes RX, queue and commit"
+}

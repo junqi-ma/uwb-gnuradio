@@ -54,4 +54,53 @@ with tempfile.TemporaryDirectory(prefix='uwb-live-console-') as temporary:
     missing = subprocess.run([binary, '--replay', str(path)+'.missing'],
                              capture_output=True, text=True, timeout=15)
     assert missing.returncode == 2, missing.stdout + missing.stderr
-print('live console: acquisition/rejection, batch summary, SIGINT and source failure PASS')
+
+    # ------------------------------------------------------------------
+    # Target lock + LockedBounded synchronization strategy.
+    # The synthetic stream has no target, so the lock must stay in acquire and
+    # the run must still finish with the same single rejected candidate.
+    # ------------------------------------------------------------------
+    locked = subprocess.run(
+        [binary, '--replay', str(path), '--summary', '1', '--sync', 'locked',
+         '--lock-observations', '3', '--holdover', '3', '--reacquire', '8',
+         '--locked-roi', '256'],
+        capture_output=True, text=True, timeout=30)
+    assert locked.returncode == 0, locked.stderr + locked.stdout
+    assert re.search(r'^FINAL completed=1 fcs=0/1 ', locked.stdout, re.M), locked.stdout
+    assert re.search(r'^LOCK_STATS final_state=acquire ', locked.stdout, re.M), locked.stdout
+    assert re.search(r'^LOCK_STATS .*reacquire_entries=0 ', locked.stdout, re.M), locked.stdout
+    assert re.search(r'^LOCK_STATS .*unexpected_gaps=', locked.stdout) is None
+    assert re.search(r'^START .*sync=locked .*period_ms=5\.000000 ', locked.stdout), locked.stdout
+
+    # ------------------------------------------------------------------
+    # Device-timed burst on a timestamped fake source: planned gaps are not
+    # errors, no unexpected gap, and the blind grid needs an explicit anchor.
+    # ------------------------------------------------------------------
+    timed = subprocess.run(
+        [binary, '--replay', str(path), '--summary', '1', '--mode', 'timed',
+         '--sync', 'locked', '--timed-t0-ms', '1.0', '--timed-lookahead', '2',
+         '--timed-alignment', '4', '--timed-lead-us', '300'],
+        capture_output=True, text=True, timeout=60)
+    assert timed.returncode == 0, timed.stderr + timed.stdout
+    assert 'TONE_CANCEL disabled reason=timed_burst_training_unscheduled' in timed.stdout
+    plan = re.search(r'^TIMED_PLAN .*$', timed.stdout, re.M)
+    assert plan is not None, timed.stdout
+    fields = dict(part.split('=', 1) for part in plan.group(0).split()[1:] if '=' in part)
+    assert int(fields['issued']) >= 1, plan.group(0)
+    assert int(fields['unexpected_gaps']) == 0, plan.group(0)
+    assert int(fields['late_commands']) == 0, plan.group(0)
+    assert int(fields['overflows']) == 0, plan.group(0)
+    assert int(fields['device_time_jumps']) == 0, plan.group(0)
+    assert int(fields['alignment_expanded_samples']) >= 0, plan.group(0)
+    assert re.search(r'^RX_PLANNED_GAP ', timed.stdout, re.M), timed.stdout
+    assert re.search(r'^RX_GAP ', timed.stdout, re.M) is None, timed.stdout
+
+    # The device-timed UHD path is not validated on hardware: it must fail
+    # closed rather than silently fall back to a host timer.
+    no_replay = subprocess.run([binary, '--mode', 'timed'],
+                               capture_output=True, text=True, timeout=15)
+    assert no_replay.returncode == 2, no_replay.stdout + no_replay.stderr
+    assert 'timed' in no_replay.stderr.lower(), no_replay.stderr
+
+print('live console: acquisition/rejection, batch summary, SIGINT, source failure, '
+      'locked strategy and timed-burst plan PASS')

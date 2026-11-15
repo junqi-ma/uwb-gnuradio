@@ -274,6 +274,10 @@ list(APPEND test_uwb_sources
     # M2-A closeout: the test-harness channel model, verified independently
     # (G0 A.3).  Self-contained: it reads no testdata.
     qa_uwb_twr_phy_impairment.cc
+    # 2026-11-15: native periodic-target lock core + LockedBounded sync
+    # strategy + device-timed RX plan (X410 dual-path plan P1/P2/P4).
+    qa_uwb_target_lock_core.cc
+    qa_uwb_timed_rx_plan.cc
 )
 # Anything we need to link to for the unit tests go here
 list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks uwb_twr_phy)
