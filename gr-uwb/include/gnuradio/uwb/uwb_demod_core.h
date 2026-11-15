@@ -214,6 +214,12 @@ struct DemodScratch {
     // survive.  Unused by the legacy path.
     std::vector<std::complex<float>> softchip_corr;
 
+    // Diagnostic-only replay of the legacy soft-chip FIR, segmented at the
+    // decoded SFD/PHR/payload boundaries.  Never part of a formal timing run
+    // and NOT part of the public Qm35825Profile production configuration:
+    // only the experiment wrappers set this on their private scratch.
+    bool diagnose_fir_segments = false;
+
     // ---- Experimental RX fast-path state ---------------------------------
     // Cached normalized SFD waveform (kron(sfd_sequence, template_wf)).
     // The key covers the template + SFD content, so the cache does not depend
@@ -3224,7 +3230,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     // lap/add_elapsed parents and only runs when the explicit diagnostic
     // profile flag is set; formal timing runs leave it off.
     auto maybe_diagnose_fir = [&]() {
-        if (!profile.rx_diagnose_fir_segments)
+        if (!scratch.diagnose_fir_segments)
             return;
         if (!(res.cir.ok && res.ns_sfd.ok && res.phr.ok && res.payload.ok))
             return;

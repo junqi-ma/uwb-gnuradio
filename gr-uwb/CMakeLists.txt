@@ -25,29 +25,104 @@ endif()
 
 # Select the release build type by default to get optimization flags
 if(NOT CMAKE_BUILD_TYPE)
-   set(CMAKE_BUILD_TYPE "Release")
-   message(STATUS "Build type not specified: defaulting to release.")
+    set(CMAKE_BUILD_TYPE "Release")
+    message(STATUS "Build type not specified: defaulting to release.")
 endif(NOT CMAKE_BUILD_TYPE)
 set(CMAKE_BUILD_TYPE ${CMAKE_BUILD_TYPE} CACHE STRING "")
 
-# Make sure our local CMake Modules path comes first
-list(INSERT CMAKE_MODULE_PATH 0 ${CMAKE_SOURCE_DIR}/cmake/Modules)
-# Find gnuradio to get access to the cmake modules
-find_package(Gnuradio "3.10" REQUIRED COMPONENTS blocks fft filter)
-
-# Ubuntu's gnuradio packages reference sndfile::sndfile in the gr-blocks
-# imported-target interface without defining it when libsndfile1-dev is not
-# installed. The real libgnuradio-filter already links libsndfile internally,
-# so a bare stub is sufficient to resolve the interface for consumers.
-if(NOT TARGET sndfile::sndfile)
-    add_library(sndfile::sndfile INTERFACE IMPORTED)
-endif()
-
-# Set the version information here
+# Set the version information here.  MUST come before include(GrVersion)
+# below: GrVersion derives VERSION/LIBVER from these at include time, so
+# defining them afterwards produced "...0 / .." and a wrong SONAME.
 set(VERSION_MAJOR 1)
 set(VERSION_API   0)
 set(VERSION_ABI   0)
 set(VERSION_PATCH 0)
+
+########################################################################
+# Component selection (2026-11-15 native cleanup)
+#
+# UWB_BUILD_GNURADIO=ON  (default): full historical build -- the GNU Radio
+#     adapter (gr::block classes, PMT/PDU ports, Python bindings, GRC yml)
+#     is built as libgnuradio-uwb on top of the native core libraries.
+# UWB_BUILD_GNURADIO=OFF: native-only build.  No find_package(Gnuradio) and
+#     no Gr* CMake modules are executed; VOLK / Threads / Boost / UHD are
+#     discovered independently, and only the pure C++ core (uwb_core), the
+#     native RX runtime (uwb_native), the TWR archives, the native apps and
+#     the core QA are built.  This configures and builds on a machine
+#     WITHOUT the GNU Radio development package or runtime library.
+#
+# UWB_BUILD_EXPERIMENTS=ON (default): historical benchmark / diagnostic
+#     experiment apps.  OFF produces a lean production binary set.
+########################################################################
+option(UWB_BUILD_GNURADIO
+    "Build the GNU Radio adapter layer (blocks/PMT/Python bindings/GRC)" ON)
+option(UWB_BUILD_EXPERIMENTS
+    "Build historical benchmark/diagnostic experiment apps" ON)
+
+# Make sure our local CMake Modules path comes first
+list(INSERT CMAKE_MODULE_PATH 0 ${CMAKE_SOURCE_DIR}/cmake/Modules)
+
+if(UWB_BUILD_GNURADIO)
+    # Find gnuradio to get access to the cmake modules
+    find_package(Gnuradio "3.10" REQUIRED COMPONENTS blocks fft filter)
+
+    # Ubuntu's gnuradio packages reference sndfile::sndfile in the gr-blocks
+    # imported-target interface without defining it when libsndfile1-dev is not
+    # installed. The real libgnuradio-filter already links libsndfile internally,
+    # so a bare stub is sufficient to resolve the interface for consumers.
+    if(NOT TARGET sndfile::sndfile)
+        add_library(sndfile::sndfile INTERFACE IMPORTED)
+    endif()
+
+    include(GrMinReq)
+    include(GrCompilerSettings)
+    include(GrVersion)
+    include(GrPlatform) #define LIB_SUFFIX and the GR_* install dirs
+else()
+    ####################################################################
+    # Native-only mode: replicate the handful of variables the
+    # subdirectories need, WITHOUT executing any GR package discovery
+    # or Gr* module.
+    ####################################################################
+    include(GNUInstallDirs)
+    set(LIB_SUFFIX "")
+    set(GR_LIBRARY_DIR ${CMAKE_INSTALL_LIBDIR})
+    set(GR_RUNTIME_DIR ${CMAKE_INSTALL_BINDIR})
+    set(GR_DATA_DIR    ${CMAKE_INSTALL_DATADIR})
+    set(GR_DOC_DIR     ${CMAKE_INSTALL_DOCDIR})
+    set(GR_CONF_DIR    ${CMAKE_INSTALL_SYSCONFDIR})
+    set(GR_LIBEXEC_DIR ${CMAKE_INSTALL_LIBEXECDIR})
+    # Not used in native mode (no Python bindings), but referenced by the
+    # shared app CMake code paths.
+    set(GR_PYTHON_DIR  ${CMAKE_INSTALL_LIBDIR}/python3/dist-packages)
+    set(ENABLE_PYTHON  OFF)
+
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+    find_package(Volk REQUIRED)    # Volk::volk (standalone, no GNU Radio)
+    find_package(Threads REQUIRED)
+    find_package(Boost REQUIRED COMPONENTS unit_test_framework)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        set(PYTHON_EXECUTABLE ${Python3_EXECUTABLE})
+        set(PYTHONINTERP_FOUND TRUE)
+    else()
+        set(PYTHONINTERP_FOUND FALSE)
+    endif()
+    message(STATUS "UWB native-only build (UWB_BUILD_GNURADIO=OFF): "
+                   "no GNU Radio package discovery, no Gr* CMake modules")
+endif()
+
+# VERSION/LIBVER fallback for native mode (GR mode: GrVersion derives them
+# from VERSION_MAJOR/API/ABI/PATCH at include time -- those must be set BEFORE
+# include(GrVersion), see above).
+if(NOT DEFINED VERSION)
+    set(VERSION ${VERSION_MAJOR}.${VERSION_API}.${VERSION_ABI}.${VERSION_PATCH})
+endif()
+if(NOT DEFINED LIBVER)
+    set(LIBVER ${VERSION_MAJOR}.${VERSION_API}.${VERSION_ABI})
+endif()
 
 cmake_policy(SET CMP0011 NEW)
 
@@ -58,23 +133,17 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Minimum Version Requirements
 ########################################################################
 
-include(GrMinReq)
-
 ########################################################################
-# Compiler settings
+# Compiler settings (GR mode: GrCompilerSettings above; native mode:
+# plain C++17 -- the project code needs no GR-specific compiler flags)
 ########################################################################
-
-include(GrCompilerSettings)
 
 ########################################################################
 # Install directories
 ########################################################################
-include(GrVersion)
-
-include(GrPlatform) #define LIB_SUFFIX
 
 if(NOT CMAKE_MODULES_DIR)
-  set(CMAKE_MODULES_DIR lib${LIB_SUFFIX}/cmake)
+   set(CMAKE_MODULES_DIR ${GR_LIBRARY_DIR}/cmake)
 endif(NOT CMAKE_MODULES_DIR)
 
 set(GR_INCLUDE_DIR      include/gnuradio/uwb)
@@ -105,7 +174,65 @@ if(APPLE)
 endif(APPLE)
 
 ########################################################################
-# Find gnuradio build dependencies
+# Optional UHD backend discovery (both modes; unchanged AUTO/ON/OFF
+# semantics).  Sets UWB_HAVE_UHD and makes the UHD::UHD imported target.
+########################################################################
+set(ENABLE_UHD_BACKEND "AUTO" CACHE STRING
+    "Build the UHD device backends: AUTO (build when UHD found), ON (require UHD), OFF (never)")
+set_property(CACHE ENABLE_UHD_BACKEND PROPERTY STRINGS AUTO ON OFF)
+string(TOUPPER "${ENABLE_UHD_BACKEND}" ENABLE_UHD_BACKEND_UC)
+if(NOT ENABLE_UHD_BACKEND_UC MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR
+        "ENABLE_UHD_BACKEND must be AUTO, ON or OFF "
+        "(got '${ENABLE_UHD_BACKEND}')")
+endif()
+
+set(UWB_HAVE_UHD 0)
+if(NOT ENABLE_UHD_BACKEND_UC STREQUAL "OFF")
+    find_package(UHD CONFIG QUIET)
+    if(NOT UHD_FOUND)
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(UHD_PC QUIET uhd)
+        endif()
+    endif()
+    if(UHD_FOUND OR UHD_PC_FOUND)
+        set(UWB_HAVE_UHD 1)
+    elseif(ENABLE_UHD_BACKEND_UC STREQUAL "ON")
+        message(FATAL_ERROR
+            "ENABLE_UHD_BACKEND=ON but UHD was not found "
+            "(install libuhd-dev / UHD CMake or pkg-config support). "
+            "Use ENABLE_UHD_BACKEND=AUTO to skip the backend instead.")
+    else()
+        message(STATUS
+            "UHD not found: UHD device backends disabled; the native replay "
+            "chain, library and QA build and test without UHD.")
+    endif()
+endif()
+if(UWB_HAVE_UHD AND NOT TARGET UHD::UHD)
+    add_library(UHD::UHD INTERFACE IMPORTED GLOBAL)
+    if(UHD_INCLUDE_DIRS)
+        set_target_properties(UHD::UHD PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${UHD_INCLUDE_DIRS}")
+    endif()
+    set_target_properties(UHD::UHD PROPERTIES
+        INTERFACE_LINK_LIBRARIES "${UHD_LIBRARIES};${UHD_PC_LIBRARIES}")
+endif()
+message(STATUS "UHD backends (ENABLE_UHD_BACKEND=${ENABLE_UHD_BACKEND_UC}): ${UWB_HAVE_UHD}")
+
+if(UWB_HAVE_UHD)
+    # The exported uwb::uwb_native references UHD::UHD; the installed config
+    # must define that target even when the consumer's UHD package does not
+    # (some UHD packages only set UHD_LIBRARIES/UHD_INCLUDE_DIRS or pkg-config).
+    # \${...} escapes keep the consumer-time ${CMAKE_CURRENT_LIST_DIR} literal.
+    set(UWB_CONFIG_UHD_DEP
+        "include(\"\${CMAKE_CURRENT_LIST_DIR}/uwbConfigUhdDep.cmake\")")
+else()
+    set(UWB_CONFIG_UHD_DEP "# this build has no UHD dependency")
+endif()
+
+########################################################################
+# Find build dependencies
 ########################################################################
 find_package(Doxygen)
 
@@ -138,26 +265,57 @@ add_subdirectory(lib)
 add_subdirectory(apps)
 add_subdirectory(docs)
 # NOTE: manually update below to use GRC to generate C++ flowgraphs w/o python
-if(ENABLE_PYTHON)
-  message(STATUS "PYTHON and GRC components are enabled")
-  add_subdirectory(python/uwb)
-  add_subdirectory(grc)
-else(ENABLE_PYTHON)
-  message(STATUS "PYTHON and GRC components are disabled")
-endif(ENABLE_PYTHON)
+if(UWB_BUILD_GNURADIO AND ENABLE_PYTHON)
+   message(STATUS "PYTHON and GRC components are enabled")
+   add_subdirectory(python/uwb)
+   add_subdirectory(grc)
+ else()
+   message(STATUS "PYTHON and GRC components are disabled "
+                  "(UWB_BUILD_GNURADIO=${UWB_BUILD_GNURADIO})")
+ endif()
 
 ########################################################################
 # Install cmake search helper for this library
 ########################################################################
 
-install(FILES cmake/Modules/gnuradio-uwbConfig.cmake
-    DESTINATION ${GR_CMAKE_DIR}
-)
+if(UWB_BUILD_GNURADIO)
+    install(FILES cmake/Modules/gnuradio-uwbConfig.cmake
+        DESTINATION ${GR_CMAKE_DIR}
+    )
 
-include(CMakePackageConfigHelpers)
-configure_package_config_file(
-    ${PROJECT_SOURCE_DIR}/cmake/Modules/targetConfig.cmake.in
-    ${CMAKE_CURRENT_BINARY_DIR}/cmake/Modules/${target}Config.cmake
-    INSTALL_DESTINATION ${GR_CMAKE_DIR}
-)
+    include(CMakePackageConfigHelpers)
+    configure_package_config_file(
+        ${PROJECT_SOURCE_DIR}/cmake/Modules/targetConfig.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/cmake/Modules/${target}Config.cmake
+        INSTALL_DESTINATION ${GR_CMAKE_DIR}
+    )
+else()
+    # Native package config: finds NO GNU Radio.  Consumers of an installed
+    # prefix use find_package(uwb) / uwb::uwb_core / uwb::uwb_native from
+    # <prefix>/<libdir>/cmake/uwb/.
+    set(UWB_NATIVE_CMAKE_DIR ${CMAKE_MODULES_DIR}/uwb)
+    include(CMakePackageConfigHelpers)
+    configure_package_config_file(
+        ${PROJECT_SOURCE_DIR}/cmake/Modules/uwbConfig.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/cmake/Modules/uwbConfig.cmake
+        INSTALL_DESTINATION ${UWB_NATIVE_CMAKE_DIR}
+    )
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/cmake/Modules/uwbConfig.cmake
+        cmake/Modules/uwbConfigUhdDep.cmake
+        DESTINATION ${UWB_NATIVE_CMAKE_DIR}
+    )
+endif()
 
+########################################################################
+# Install the runtime resources the native live receiver needs (resampler
+# taps + preamble template), so an INSTALLED uwb_dw3000_live does not depend
+# on a source checkout, an old build tree, RPATH or PYTHONPATH.
+########################################################################
+install(FILES
+    ${CMAKE_SOURCE_DIR}/../testdata/resampler_65_48/taps_quality_minorder.txt
+    DESTINATION ${GR_PKG_DATA_DIR}/resampler_65_48
+)
+install(FILES
+    ${CMAKE_SOURCE_DIR}/../testdata/reference_preamble_code10_998p4.cf32
+    DESTINATION ${GR_PKG_DATA_DIR}
+)

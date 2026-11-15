@@ -28,6 +28,7 @@
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
 #include <gnuradio/uwb/uwb_target_lock_core.h>
 #include <gnuradio/uwb/uwb_timed_rx_plan.h>
+#include <gnuradio/uwb/uwb_uhd_sc16_pipeline.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -42,6 +43,8 @@
 #include <sstream>
 #include <thread>
 #include <ctime>
+#include <cstdlib>
+#include <filesystem>
 
 using namespace gr::uwb;
 using Clock = std::chrono::steady_clock;
@@ -102,7 +105,45 @@ struct Options {
     double timed_lead_us = 300.0;
     double timed_t0_ms = 0.0;
     size_t timed_lookahead = 4, timed_alignment = 4;
+    std::string res_dir;   // --res-dir: runtime resource root (see resolve_res_dir)
 };
+
+// Runtime resource root for the resampler taps + preamble template.
+// Resolution order (first existing directory wins):
+//   1. --res-dir <dir>
+//   2. $UWB_RESOURCE_DIR
+//   3. $UWB_TESTDATA_DIR
+//   4. the installed resource dir (UWB_INSTALL_RESOURCE_DIR, compiled in)
+//   5. the build-tree testdata fallback (UWB_TESTDATA_DIR, compiled in)
+// An installed binary therefore never depends on a source checkout, an old
+// build tree, RPATH or PYTHONPATH; the source-tree path is only a build-tree
+// convenience and never refers to another worktree.
+static std::string resolve_res_dir(const Options& o)
+{
+    namespace fs = std::filesystem;
+    const char* env_res = std::getenv("UWB_RESOURCE_DIR");
+    const char* env_td  = std::getenv("UWB_TESTDATA_DIR");
+    std::vector<std::string> candidates;
+    if (!o.res_dir.empty()) candidates.push_back(o.res_dir);
+    if (env_res && *env_res) candidates.push_back(env_res);
+    if (env_td && *env_td) candidates.push_back(env_td);
+#ifdef UWB_INSTALL_RESOURCE_DIR
+    candidates.push_back(UWB_INSTALL_RESOURCE_DIR);
+#endif
+#ifdef UWB_TESTDATA_DIR
+    candidates.push_back(UWB_TESTDATA_DIR);
+#endif
+    for (const auto& c : candidates) {
+        std::error_code ec;
+        if (fs::is_directory(c, ec))
+            return c;
+    }
+    throw std::runtime_error(
+        "resource directory not found; pass --res-dir <dir> or set "
+        "UWB_RESOURCE_DIR (looked in: " +
+        [&]{ std::string all; for (const auto& c : candidates) { all += c; all += "; "; } return all; }() +
+        ")");
+}
 
 template<class T> std::vector<T> load(const std::string& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -802,7 +843,10 @@ try {
                 "--fused-gate-ppm 6.468 (integer chip-grid admission; ceiling = 1 sample of drift)\n"
                 "--ondemand auto|on|off (on-demand soft-chip prefix, default auto = follow --fused)\n"
                 "--timed-lead-us 300 --timed-lookahead 4 --timed-alignment 4\n"
-                "--timed-t0-ms 0 (first expected target time; timed_burst has no blind acquisition)\n";
+                "--timed-t0-ms 0 (first expected target time; timed_burst has no blind acquisition)\n"
+                "--res-dir DIR (runtime resources: resampler taps + preamble template;\n"
+                "  default: $UWB_RESOURCE_DIR or $UWB_TESTDATA_DIR or the installed\n"
+                "  resource dir, then the build-tree testdata fallback)\n";
             return 0;
         } else if (key=="--args") o.args=value();
         else if (key=="--channel") o.channel=value();
@@ -836,6 +880,7 @@ try {
         else if (key=="--timed-lookahead") o.timed_lookahead=std::stoul(value());
         else if (key=="--timed-alignment") o.timed_alignment=std::stoul(value());
         else if (key=="--timed-t0-ms") o.timed_t0_ms=std::stod(value());
+        else if (key=="--res-dir") o.res_dir=value();
         else throw std::runtime_error("unknown option "+key);
     }
     if (!o.workers || o.workers>32 || !o.capacity || o.capacity>1024 ||
@@ -872,8 +917,9 @@ try {
         throw std::runtime_error("--mode timed requires --replay: the device-timed "
                                  "UHD command path is not validated on hardware yet");
     std::signal(SIGINT,on_signal); std::signal(SIGTERM,on_signal);
-    const auto taps=load<float>(std::string(UWB_TESTDATA_DIR)+"/resampler_65_48/taps_quality_minorder.txt");
-    const auto tmpl=load<std::complex<float>>(std::string(UWB_TESTDATA_DIR)+"/reference_preamble_code10_998p4.cf32");
+    const std::string res_root = resolve_res_dir(o);
+    const auto taps=load<float>(res_root+"/resampler_65_48/taps_quality_minorder.txt");
+    const auto tmpl=load<std::complex<float>>(res_root+"/reference_preamble_code10_998p4.cf32");
 
     // ---- PHY-derived target window geometry ------------------------------
     // 127 B is the maximum PSDU, so the capture capacity never depends on the

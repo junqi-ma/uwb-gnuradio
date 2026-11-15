@@ -36,17 +36,14 @@
  *       for H_pad == 24 and H_pad == 48 (the two shipped profiles) with a
  *       generic runtime-bound fallback for any other H_pad.
  *
- *   set_convert_cache(true)         — C2.  Converts the SC16 span a whole
- *       macroblock needs (Decim + H_pad complex samples, see
- *       convert_cache_span()) to float ONCE per macroblock into a persistent,
- *       64-byte-aligned per-core buffer, then runs float-input 4-way FIR
- *       kernels over it.  int16 -> float is exact, the taps stay pre-scaled
- *       and the FMA/reduction order is unchanged, so the result is
- *       bit-identical by construction.
+ * The C2 "convert_cache" candidate was measured and NOT retained
+ * (2026-11-11 round 2: its sign flips with profile/window size, -7.6% ..
+ * +7.6% in core screening), so it was REMOVED in the 2026-11-15 native
+ * cleanup; only the C1 fixed_phase schedule remains as an explicit switch.
  *
- * Neither candidate is reachable when fir_kind_ != Avx2, nor in the FC32
- * process() path, nor in the multi-worker run_mt_sc16() schedule: those keep
- * the pre-existing code.  Neither allocates in process()/flush().
+ * The remaining candidate is not reachable when fir_kind_ != Avx2, nor in
+ * the FC32 process() path, nor in the multi-worker run_mt_sc16() schedule:
+ * those keep the pre-existing code.  It never allocates in process()/flush().
  *
  * Multi-worker: process(..., nworkers) serial schedule + parallel FIR dots;
  * output equals nworkers=1 within float tolerance (prefer bitwise).
@@ -216,10 +213,6 @@ public:
     ~RationalResamplerLmCore()
     {
         stop_pool();
-        if (cc_buf_ != nullptr) {
-            std::free(cc_buf_);
-            cc_buf_ = nullptr;
-        }
     }
 
     RationalResamplerLmCore(const RationalResamplerLmCore&) = delete;
@@ -311,7 +304,7 @@ public:
     void reset_profile() { profile_.reset(); }
 
     // =====================================================================
-    // Round-2 kernel candidates C1 / C2 (explicit switches, default OFF).
+    // Round-2 kernel candidate C1 (explicit switch, default OFF; C2 removed).
     //
     // Both are experiments on HOW the 65 outputs of a full macroblock are
     // computed, never on WHAT is computed: the per-output arithmetic stays
@@ -376,37 +369,6 @@ public:
 
     bool fixed_phase_schedule() const { return fixed_phase_; }
 
-    void set_convert_cache(bool on)
-    {
-        if (on)
-            ensure_convert_cache();
-        convert_cache_ = on;
-    }
-
-    bool convert_cache() const { return convert_cache_; }
-
-    /**
-     * C2 geometry, exactly as the kernel uses it.
-     *
-     *   cc_span_ = round_up(kDecim + H_pad_, 4)   [complex samples]
-     *
-     * Decim is the largest advance the input cursor can make across one
-     * macroblock (sum of advs == kDecim), H_pad_ is what each FIR window
-     * reads (the last H_pad_ - H_ taps are the zeroed tap tail), so
-     * [base, base + kDecim + H_pad_) is the union of every window of the
-     * macroblock; the round-up to a multiple of 4 is only so the conversion
-     * loop can use whole 4-complex AVX2 groups.
-     */
-    size_t convert_cache_span() const { return cc_span_; }
-    size_t convert_cache_floats() const { return cc_floats_; }
-
-    /** True iff the C2 buffer is allocated and 64-byte aligned. */
-    bool convert_cache_aligned() const
-    {
-        return cc_buf_ != nullptr &&
-               (reinterpret_cast<uintptr_t>(cc_buf_) & 63u) == 0u;
-    }
-
     /** C1 table accessors (QA verifies every phase against a local model). */
     bool fixed_phase_table_built() const { return !fp_groups_.empty(); }
 
@@ -428,14 +390,8 @@ public:
     const char* sc16_kernel_variant() const
     {
 #if UWB_RESAMP_HAVE_AVX2
-        if (fir_kind_ == FirKind::Avx2) {
-            if (fixed_phase_ && convert_cache_)
-                return "c1c2_fixed_phase_convert_cache";
-            if (fixed_phase_)
-                return "c1_fixed_phase";
-            if (convert_cache_)
-                return "c2_convert_cache";
-        }
+        if (fir_kind_ == FirKind::Avx2 && fixed_phase_)
+            return "c1_fixed_phase";
 #endif
         return "default";
     }
@@ -931,24 +887,16 @@ private:
     std::vector<uint8_t> sched_arm_buf_;
     std::vector<uint32_t> sched_win_buf_;
 
-    // --- round-2 kernel candidates C1 / C2 (default OFF) ---
+    // --- round-2 kernel candidate C1 (default OFF; C2 removed) ---
     //
     // hp_class_ is the compile-time H_pad specialisation, chosen ONCE in the
     // constructor (H_pad_ never changes for an instance): 24 / 48 for the two
     // shipped profiles, 0 => generic runtime-bound fallback.
     uint8_t hp_class_ = 0;
     bool fixed_phase_ = false;
-    bool convert_cache_ = false;
     // C1: kInterp * kMacroblockGroups descriptors + kInterp tails.
     std::vector<FixedPhaseGroup> fp_groups_;
     std::vector<FixedPhaseTail> fp_tail_;
-    // C2: persistent 64-byte-aligned per-core conversion buffer, 2 floats per
-    // complex sample.  Allocated once by set_convert_cache(true), freed only
-    // by the destructor; process()/flush() never allocate.
-    float* cc_buf_ = nullptr;
-    size_t cc_floats_ = 0;
-    size_t cc_span_ = 0;
-
     uint64_t input_items_;
     uint64_t output_items_;
     uint64_t resets_;
@@ -1205,71 +1153,6 @@ private:
                 }
             }
         }
-    }
-
-    // ---------------------------------------------------------------------
-    // C2: per-macroblock SC16 -> float conversion cache
-    // ---------------------------------------------------------------------
-
-    /**
-     * Allocate the persistent conversion buffer (once).
-     *
-     * Geometry (see convert_cache_span()):
-     *   span   = round_up(kDecim + H_pad_, 4) complex samples
-     *   floats = 2 * span                      (interleaved re, im)
-     *   bytes  = round_up(floats * 4, 64),  std::aligned_alloc(64, ...)
-     *
-     * The buffer is 64-byte aligned so the interleaved stores land on
-     * 32-byte boundaries (float offsets are always 2*win with win a multiple
-     * of 4 for the conversion loop), and it is never reallocated afterwards.
-     */
-    void ensure_convert_cache()
-    {
-        if (cc_buf_ != nullptr)
-            return;
-        cc_span_ = (static_cast<size_t>(kDecim) + H_pad_ + 3u) & ~size_t(3u);
-        cc_floats_ = 2 * cc_span_;
-        const size_t bytes =
-            (cc_floats_ * sizeof(float) + 63u) & ~static_cast<size_t>(63u);
-        void* p = std::aligned_alloc(64, bytes);
-        if (p == nullptr) {
-            cc_span_ = 0;
-            cc_floats_ = 0;
-            throw std::bad_alloc();
-        }
-        cc_buf_ = static_cast<float*>(p);
-    }
-
-    /**
-     * Convert one macroblock span of SC16 to float.
-     *
-     * src is the macroblock base window (the oldest sample of output 0's FIR
-     * window).  Exactly cc_span_ complex samples are written, i.e. the union
-     * of all kInterp windows of the macroblock (window starts 0..kDecim, each
-     * H_pad_ long) plus at most 3 samples of rounding.
-     *
-     * Bounds: the macroblock loop only runs while
-     * post_i + kDecim < post_n, so the highest index touched here is
-     *   hist_n + post_i + cc_span_ - 1 <= hist_n + post_n + H_pad_ + 1,
-     * which is inside the H_pad_ + 16 zero-filled tail process_sc16()
-     * already maintains after work_sc16_[hist_n + post_n].  That zero tail is
-     * what the FIR reads as its implicit zero padding (the tap vectors are
-     * zero beyond H_), so the cached float copy has exactly the same content
-     * as the SC16 window the default path reads.
-     */
-    void convert_span(const std::complex<int16_t>* src) noexcept
-    {
-#if UWB_RESAMP_HAVE_AVX2
-        for (size_t i = 0; i < cc_span_; i += 4) {
-            const __m256 v = load_sc16_x4_as_ps(src + i);
-            _mm256_storeu_ps(cc_buf_ + 2 * i, v);
-        }
-#else
-        for (size_t i = 0; i < cc_span_; ++i) {
-            cc_buf_[2 * i + 0] = static_cast<float>(src[i].real());
-            cc_buf_[2 * i + 1] = static_cast<float>(src[i].imag());
-        }
-#endif
     }
 
     static gr_complex fir_scalar(const float* trev,
@@ -1621,83 +1504,6 @@ private:
         _mm_storeu_ps(reinterpret_cast<float*>(dest4 + 2), out23);
     }
 
-    /**
-     * C2 kernel: four FIR windows over the already-converted float span.
-     *
-     * Line-by-line the same as fir_avx2_sc16_4x_hp() above; the ONLY
-     * difference is the input load -- a plain 8-float load from the C2 cache
-     * instead of a 4xSC16 load plus vpmovsxwd + vcvtdq2ps.  int16 -> float is
-     * exact, so the loaded values are identical and every FMA sees identical
-     * operands in the identical order: bit-identical output.
-     *
-     * win0..win3 are float offsets into cc_buf_ (2 floats per complex sample),
-     * i.e. cc_buf_ + 2*window_offset.
-     */
-    template <size_t H_PAD>
-    static inline void fir_avx2_f32_4x(const float* h0,
-                                       const float* h1,
-                                       const float* h2,
-                                       const float* h3,
-                                       const float* win0,
-                                       const float* win1,
-                                       const float* win2,
-                                       const float* win3,
-                                       size_t hpad_rt,
-                                       uint8_t reuse,
-                                       gr_complex* dest4) noexcept
-    {
-        const size_t HP = (H_PAD != 0) ? H_PAD : hpad_rt;
-        const bool w1_same = (reuse & 2u) != 0u;
-        const bool w2_same = (reuse & 4u) != 0u;
-        const bool w3_same = (reuse & 8u) != 0u;
-
-        __m256 acc0_lo = _mm256_setzero_ps(), acc0_hi = _mm256_setzero_ps();
-        __m256 acc1_lo = _mm256_setzero_ps(), acc1_hi = _mm256_setzero_ps();
-        __m256 acc2_lo = _mm256_setzero_ps(), acc2_hi = _mm256_setzero_ps();
-        __m256 acc3_lo = _mm256_setzero_ps(), acc3_hi = _mm256_setzero_ps();
-
-        for (size_t q = 0; q < HP; q += 8) {
-            const __m256 x0_lo = _mm256_loadu_ps(win0 + 2 * q);
-            const __m256 x0_hi = _mm256_loadu_ps(win0 + 2 * q + 8);
-            acc0_lo = _mm256_fmadd_ps(x0_lo, _mm256_loadu_ps(h0 + 2 * q), acc0_lo);
-            acc0_hi = _mm256_fmadd_ps(x0_hi, _mm256_loadu_ps(h0 + 2 * q + 8), acc0_hi);
-
-            const __m256 x1_lo = w1_same ? x0_lo : _mm256_loadu_ps(win1 + 2 * q);
-            const __m256 x1_hi = w1_same ? x0_hi : _mm256_loadu_ps(win1 + 2 * q + 8);
-            acc1_lo = _mm256_fmadd_ps(x1_lo, _mm256_loadu_ps(h1 + 2 * q), acc1_lo);
-            acc1_hi = _mm256_fmadd_ps(x1_hi, _mm256_loadu_ps(h1 + 2 * q + 8), acc1_hi);
-
-            const __m256 x2_lo = w2_same ? x1_lo : _mm256_loadu_ps(win2 + 2 * q);
-            const __m256 x2_hi = w2_same ? x1_hi : _mm256_loadu_ps(win2 + 2 * q + 8);
-            acc2_lo = _mm256_fmadd_ps(x2_lo, _mm256_loadu_ps(h2 + 2 * q), acc2_lo);
-            acc2_hi = _mm256_fmadd_ps(x2_hi, _mm256_loadu_ps(h2 + 2 * q + 8), acc2_hi);
-
-            const __m256 x3_lo = w3_same ? x2_lo : _mm256_loadu_ps(win3 + 2 * q);
-            const __m256 x3_hi = w3_same ? x2_hi : _mm256_loadu_ps(win3 + 2 * q + 8);
-            acc3_lo = _mm256_fmadd_ps(x3_lo, _mm256_loadu_ps(h3 + 2 * q), acc3_lo);
-            acc3_hi = _mm256_fmadd_ps(x3_hi, _mm256_loadu_ps(h3 + 2 * q + 8), acc3_hi);
-        }
-
-        const __m256 a0 = _mm256_add_ps(acc0_lo, acc0_hi);
-        const __m256 a1 = _mm256_add_ps(acc1_lo, acc1_hi);
-        const __m256 a2 = _mm256_add_ps(acc2_lo, acc2_hi);
-        const __m256 a3 = _mm256_add_ps(acc3_lo, acc3_hi);
-
-        const __m128 s0 = _mm_add_ps(_mm256_castps256_ps128(a0), _mm256_extractf128_ps(a0, 1));
-        const __m128 s1 = _mm_add_ps(_mm256_castps256_ps128(a1), _mm256_extractf128_ps(a1, 1));
-        const __m128 s2 = _mm_add_ps(_mm256_castps256_ps128(a2), _mm256_extractf128_ps(a2, 1));
-        const __m128 s3 = _mm_add_ps(_mm256_castps256_ps128(a3), _mm256_extractf128_ps(a3, 1));
-
-        const __m128 out01 = _mm_add_ps(
-            _mm_castpd_ps(_mm_unpacklo_pd(_mm_castps_pd(s0), _mm_castps_pd(s1))),
-            _mm_castpd_ps(_mm_unpackhi_pd(_mm_castps_pd(s0), _mm_castps_pd(s1))));
-        const __m128 out23 = _mm_add_ps(
-            _mm_castpd_ps(_mm_unpacklo_pd(_mm_castps_pd(s2), _mm_castps_pd(s3))),
-            _mm_castpd_ps(_mm_unpackhi_pd(_mm_castps_pd(s2), _mm_castps_pd(s3))));
-
-        _mm_storeu_ps(reinterpret_cast<float*>(dest4), out01);
-        _mm_storeu_ps(reinterpret_cast<float*>(dest4 + 2), out23);
-    }
 #endif
 
     gr_complex filter_window_sc16(uint32_t arm_idx,
@@ -2162,12 +1968,12 @@ private:
                                       gr_complex* out,
                                       size_t max_out)
     {
-        // Round-2 kernel candidates C1/C2.  Exactly ONE predicted branch per
+        // Round-2 kernel candidate C1 (C2 was removed).  Exactly ONE predicted branch per
         // process_sc16() call (never per output) on a member that is false in
         // the default configuration, so the default instruction stream below
         // is the pre-existing one.
 #if UWB_RESAMP_HAVE_AVX2
-        if (fir_kind_ == FirKind::Avx2 && (fixed_phase_ || convert_cache_)) {
+        if (fir_kind_ == FirKind::Avx2 && fixed_phase_) {
             return run_macroblock_sc16_candidate(hist_n, post_n, post_i,
                                                  started_held, ninput, total_w,
                                                  out, max_out);
@@ -2299,7 +2105,7 @@ private:
     }
 
     // =====================================================================
-    // Round-2 kernel candidates C1 / C2 -- SC16 macroblock path
+    // Round-2 kernel candidate C1 -- SC16 macroblock path (C2 removed)
     //
     // Compiled only when the AVX2/FMA kernel exists (the candidates are
     // alternative implementations of that kernel; without it
@@ -2369,14 +2175,13 @@ private:
      * Full-macroblock loop for one candidate variant.
      *
      * FP  = C1 (descriptor table + compile-time H_pad),
-     * CC  = C2 (per-macroblock float conversion cache),
      * H_PAD = 24 / 48 (shipped profiles, fully unrolled) or 0 (generic).
      *
      * Post-condition is identical to the default loop: produced is a multiple
      * of kInterp, post_i advanced by kDecim per macroblock, ctr_ unchanged,
      * output_items_ advanced by kInterp per macroblock.
      */
-    template <bool FP, bool CC, size_t H_PAD>
+    template <bool FP, size_t H_PAD>
     size_t run_mb_sc16_candidate(size_t hist_n,
                                  size_t post_n,
                                  size_t& post_i,
@@ -2385,13 +2190,10 @@ private:
     {
         size_t produced = 0;
         const float* const h_base = arms_rev_dup_scaled_.data();
-        const size_t h_stride = 2 * H_pad_;
 
         while (produced + kInterp <= max_out &&
                post_i + static_cast<size_t>(kDecim) < post_n) {
             const size_t base_idx = hist_n + post_i + 1 - H_;
-            if constexpr (CC)
-                convert_span(work_sc16_.data() + base_idx);
             gr_complex* const dest = out + produced;
 
             if constexpr (FP) {
@@ -2400,88 +2202,29 @@ private:
                     static_cast<size_t>(ctr_) * kMacroblockGroups;
                 for (uint32_t g = 0; g < kMacroblockGroups; ++g) {
                     const FixedPhaseGroup& d = groups[g];
-                    if constexpr (CC) {
-                        fir_avx2_f32_4x<H_PAD>(
-                            h_base + d.tap[0], h_base + d.tap[1],
-                            h_base + d.tap[2], h_base + d.tap[3],
-                            cc_buf_ + 2 * static_cast<size_t>(d.win[0]),
-                            cc_buf_ + 2 * static_cast<size_t>(d.win[1]),
-                            cc_buf_ + 2 * static_cast<size_t>(d.win[2]),
-                            cc_buf_ + 2 * static_cast<size_t>(d.win[3]),
-                            H_pad_, d.reuse, dest + 4 * g);
-                    } else {
-                        fir_avx2_sc16_4x_hp<H_PAD>(
-                            h_base + d.tap[0], h_base + d.tap[1],
-                            h_base + d.tap[2], h_base + d.tap[3],
-                            work_sc16_.data() + base_idx +
-                                static_cast<size_t>(d.win[0]),
-                            work_sc16_.data() + base_idx +
-                                static_cast<size_t>(d.win[1]),
-                            work_sc16_.data() + base_idx +
-                                static_cast<size_t>(d.win[2]),
-                            work_sc16_.data() + base_idx +
-                                static_cast<size_t>(d.win[3]),
-                            H_pad_, d.reuse, dest + 4 * g);
-                    }
+                    fir_avx2_sc16_4x_hp<H_PAD>(
+                        h_base + d.tap[0], h_base + d.tap[1],
+                        h_base + d.tap[2], h_base + d.tap[3],
+                        work_sc16_.data() + base_idx +
+                            static_cast<size_t>(d.win[0]),
+                        work_sc16_.data() + base_idx +
+                            static_cast<size_t>(d.win[1]),
+                        work_sc16_.data() + base_idx +
+                            static_cast<size_t>(d.win[2]),
+                        work_sc16_.data() + base_idx +
+                            static_cast<size_t>(d.win[3]),
+                        H_pad_, d.reuse, dest + 4 * g);
                 }
                 const FixedPhaseTail* const tails =
                     fp_tail_.data() +
                     static_cast<size_t>(ctr_) * kTailStride;
                 for (uint32_t t = 0; t < kMacroblockTail; ++t) {
                     const size_t o = 4 * static_cast<size_t>(kMacroblockGroups) + t;
-                    if constexpr (CC) {
-                        dest[o] = fir_avx2(
-                            h_base + tails[t].tap,
-                            reinterpret_cast<const gr_complex*>(
-                                cc_buf_ + 2 * static_cast<size_t>(tails[t].win)),
-                            H_pad_);
-                    } else {
-                        dest[o] = fir_avx2_sc16(
-                            h_base + tails[t].tap,
-                            work_sc16_.data() + base_idx +
-                                static_cast<size_t>(tails[t].win),
-                            H_pad_);
-                    }
-                }
-            } else {
-                // C2 only: keep the production serial schedule for the
-                // window offsets, so a C2 measurement isolates the conversion
-                // cache and not the C1 schedule change.
-                const uint8_t* const arms =
-                    schedule_arm_.data() +
-                    static_cast<size_t>(ctr_) * static_cast<size_t>(kInterp);
-                const uint8_t* const advs =
-                    schedule_adv_.data() +
-                    static_cast<size_t>(ctr_) * static_cast<size_t>(kInterp);
-                size_t cur = 0;
-                uint32_t o = 0;
-                for (; o + 4 <= kInterp; o += 4) {
-                    const size_t r0 = cur;
-                    cur += advs[o];
-                    const size_t r1 = cur;
-                    cur += advs[o + 1];
-                    const size_t r2 = cur;
-                    cur += advs[o + 2];
-                    const size_t r3 = cur;
-                    cur += advs[o + 3];
-                    const uint8_t reuse = static_cast<uint8_t>(
-                        ((r1 == r0) ? 2u : 0u) | ((r2 == r1) ? 4u : 0u) |
-                        ((r3 == r2) ? 8u : 0u));
-                    fir_avx2_f32_4x<H_PAD>(
-                        h_base + static_cast<size_t>(arms[o]) * h_stride,
-                        h_base + static_cast<size_t>(arms[o + 1]) * h_stride,
-                        h_base + static_cast<size_t>(arms[o + 2]) * h_stride,
-                        h_base + static_cast<size_t>(arms[o + 3]) * h_stride,
-                        cc_buf_ + 2 * r0, cc_buf_ + 2 * r1, cc_buf_ + 2 * r2,
-                        cc_buf_ + 2 * r3, H_pad_, reuse, dest + o);
-                }
-                for (; o < kInterp; ++o) {
-                    const size_t rel = cur;
-                    dest[o] = fir_avx2(
-                        h_base + static_cast<size_t>(arms[o]) * h_stride,
-                        reinterpret_cast<const gr_complex*>(cc_buf_ + 2 * rel),
+                    dest[o] = fir_avx2_sc16(
+                        h_base + tails[t].tap,
+                        work_sc16_.data() + base_idx +
+                            static_cast<size_t>(tails[t].win),
                         H_pad_);
-                    cur += advs[o];
                 }
             }
 
@@ -2495,7 +2238,7 @@ private:
     }
 
     /**
-     * Candidate dispatcher: one switch on (C1, C2) x (H_pad class), all
+     * Candidate dispatcher: one switch on C1 x (H_pad class), all
      * outside the macroblock loop.  The H_pad class was chosen in the
      * constructor, so this is the "selected once at construction" decision.
      */
@@ -2511,36 +2254,24 @@ private:
         const auto t0 = profile_enabled_ ? Clock::now() : Clock::time_point{};
         size_t produced = 0;
         if (fixed_phase_) {
-            if (convert_cache_) {
-                if (hp_class_ == 24)
-                    produced = run_mb_sc16_candidate<true, true, 24>(
-                        hist_n, post_n, post_i, out, max_out);
-                else if (hp_class_ == 48)
-                    produced = run_mb_sc16_candidate<true, true, 48>(
-                        hist_n, post_n, post_i, out, max_out);
-                else
-                    produced = run_mb_sc16_candidate<true, true, 0>(
-                        hist_n, post_n, post_i, out, max_out);
-            } else {
-                if (hp_class_ == 24)
-                    produced = run_mb_sc16_candidate<true, false, 24>(
-                        hist_n, post_n, post_i, out, max_out);
-                else if (hp_class_ == 48)
-                    produced = run_mb_sc16_candidate<true, false, 48>(
-                        hist_n, post_n, post_i, out, max_out);
-                else
-                    produced = run_mb_sc16_candidate<true, false, 0>(
-                        hist_n, post_n, post_i, out, max_out);
-            }
-        } else {
             if (hp_class_ == 24)
-                produced = run_mb_sc16_candidate<false, true, 24>(
+                produced = run_mb_sc16_candidate<true, 24>(
                     hist_n, post_n, post_i, out, max_out);
             else if (hp_class_ == 48)
-                produced = run_mb_sc16_candidate<false, true, 48>(
+                produced = run_mb_sc16_candidate<true, 48>(
                     hist_n, post_n, post_i, out, max_out);
             else
-                produced = run_mb_sc16_candidate<false, true, 0>(
+                produced = run_mb_sc16_candidate<true, 0>(
+                    hist_n, post_n, post_i, out, max_out);
+        } else {
+            if (hp_class_ == 24)
+                produced = run_mb_sc16_candidate<false, 24>(
+                    hist_n, post_n, post_i, out, max_out);
+            else if (hp_class_ == 48)
+                produced = run_mb_sc16_candidate<false, 48>(
+                    hist_n, post_n, post_i, out, max_out);
+            else
+                produced = run_mb_sc16_candidate<false, 0>(
                     hist_n, post_n, post_i, out, max_out);
         }
         if (profile_enabled_) {

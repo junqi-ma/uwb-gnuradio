@@ -1,0 +1,197 @@
+[
+  {
+    "path": "AGENTS.md",
+    "status": 0,
+    "source_sha256": "2c3df9cccf89ec30e6dee725401fb28e4cffb83fd98a95d970cc5ce6bfb4f948"
+  },
+  {
+    "path": "gr-uwb/apps/uwb_dw3000_live.cc",
+    "status": 0,
+    "source_sha256": "fcc6d13979bdc54c412efddee16676d6e486551ed6bcb78fa8ef1e42beb96220"
+  },
+  {
+    "path": "gr-uwb/include/gnuradio/uwb/uwb_demod_core.h",
+    "status": 0,
+    "source_sha256": "c4f8c734b9b785d7041c8b9b9efe85ca2a1d002f5b13f947f0f48f75deb81f4c"
+  },
+  {
+    "path": "gr-uwb/include/gnuradio/uwb/uwb_demod_result.h",
+    "status": 0,
+    "source_sha256": "0e8cdaec577fb7067c5cb7ee15650f562f4fe2baa6074b5d89fd3f156cbd380e"
+  },
+  {
+    "path": "gr-uwb/include/gnuradio/uwb/uwb_phy_profile.h",
+    "status": 1,
+    "source_sha256": "dd833b875a4574c8f4d4f23008b13239f7908f7261f65c343b030d3b68a77b5d"
+  },
+  {
+    "path": "gr-uwb/lib/qa_uwb_demod_core.cc",
+    "status": 0,
+    "source_sha256": "0dff385d881927356370c674bc6f61460809e0046bb22eb5ebcdb0bf3f04053d"
+  },
+  {
+    "path": "docs/performance/9700X复现_clean_comm与12700对比_2026-11-15.md",
+    "status": 0,
+    "source_sha256": "6c7a6b53d71ead42b97052d7af875f9fbef3a22b92a329708732680244c566d2"
+  },
+  {
+    "path": "docs/performance/X410_目标周期锁定与随机干扰双路径开发报告_2026-11-15.md",
+    "status": 0,
+    "source_sha256": "a43cc7f70560407f8f88464aabcf1f478991733459fa208b9a3c2b2bc8c2ac69"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/ARCHIVE.md",
+    "status": 0,
+    "source_sha256": "738a673dc1a9dc1f272bc27847bdd22853ccefe0de532cfa29ff2d05e821f66c"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/aggregate.json",
+    "status": 0,
+    "source_sha256": "8d64133e43e42828c7b78268ff90055b4b325ba86cde2487325f4c39510ddead"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo0_n1_r1.csv",
+    "status": 0,
+    "source_sha256": "726dbe35495a899c9cd4bf9095dbd4e59ff19c27cbcccd3c590804e9118d0307"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo0_n1_r2.csv",
+    "status": 0,
+    "source_sha256": "548785fadf3c89637c128b9251517ce6f542fe0de2d67982648e0c4af742af40"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo0_n1_r3.csv",
+    "status": 0,
+    "source_sha256": "fce8f4e1be13b7c02005bfa9905b26e5c013eb9b7cd5fc5abbfb8208c3de3c8a"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo0_n2_r1.csv",
+    "status": 0,
+    "source_sha256": "c14f1cc231a0eb076ee1cb737e4f016fbf0461774a6dbb8028b92db25a5a8f7e"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo0_n2_r2.csv",
+    "status": 0,
+    "source_sha256": "824baefedf999934dbfc86d376a791624f1215d1f6c4ceeae884509c258eb3ea"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo0_n2_r3.csv",
+    "status": 0,
+    "source_sha256": "3a057296466e0fbbdf799b3af0b72e5bb7d8442c088f5af3c88601ed561cad5c"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo0_n4_r1.csv",
+    "status": 0,
+    "source_sha256": "75ace4b27773fb723b61ce309ccefb5fc07a43b7c698e657b94128eeb1c8e8b6"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo0_n4_r2.csv",
+    "status": 0,
+    "source_sha256": "a008d56884ea78b2cf6c56dce56b50b76debf30dfed115ffce6345c69db7ce63"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo0_n4_r3.csv",
+    "status": 0,
+    "source_sha256": "67429f1415c54c7feec81f21e277069e8d825fc1c90cb87adf1a3d8010ba27e2"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo50000_n1_r1.csv",
+    "status": 0,
+    "source_sha256": "793fd5a9dc0cb2d62d5a70e4f472b827de40eae5f206f897205f012b0a6f35be"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo50000_n1_r2.csv",
+    "status": 0,
+    "source_sha256": "e30b723c27fafce4a5fbaff2b7221626ede4ebb0f014d2c4c40e935da0a18995"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo50000_n1_r3.csv",
+    "status": 0,
+    "source_sha256": "2c66b78ddd6e51746325ff53c836c65d4a7aad55fa1f70655296062f267dd348"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo50000_n2_r1.csv",
+    "status": 0,
+    "source_sha256": "9ddbb889aa2f6849516152e457b5b38969dd867a00722a46daf3bede8e68d82e"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo50000_n2_r2.csv",
+    "status": 0,
+    "source_sha256": "b09f729e9a3d9e4753467e7d8fe2aa69566daf65cdf359d6bf35f3b0f0195cf3"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo50000_n2_r3.csv",
+    "status": 0,
+    "source_sha256": "f0de0f4b741ca175733d364b8062fdf4c4fa939d22690e95474ac9f260523373"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo50000_n4_r1.csv",
+    "status": 0,
+    "source_sha256": "6e32100222b28b29c49ada39058ad7a98ffb27a7f980303359e4f8e899694374"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo50000_n4_r2.csv",
+    "status": 0,
+    "source_sha256": "b16380df1a914d292e7b4269a26c31393ac37a03ece772812d98d537963f5f0e"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/clean_comm_quality_minorder_cfo50000_n4_r3.csv",
+    "status": 0,
+    "source_sha256": "2d2d436960b2f8c088b0644d11ff6726bfc12dc2edecd8746b37f9cf570259c3"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/comparison.json",
+    "status": 0,
+    "source_sha256": "4f2455139475caa74e2a636e9eca41f97522f62e768844732a49823346e47492"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/fixture.json",
+    "status": 0,
+    "source_sha256": "cab557969a2570e21cdd795b2abaa2e2fce6e8771766cb4a73abebdc823ad053"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/host.json",
+    "status": 0,
+    "source_sha256": "ef4bcd29c7a73284e78b3571793d3ddb4fc5b8d1e50a9b6382cc94dd221c060d"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/provenance.json",
+    "status": 0,
+    "source_sha256": "1f3cdf3e08236d1d7e5d5ec2f1034994a3e26a333ad0f5318d7f1f1609587361"
+  },
+  {
+    "path": "docs/performance/data_clean_comm_9700x_reproduction_20261115/summary.json",
+    "status": 0,
+    "source_sha256": "25cfd687764846c0e7a92b019c4457341135994d4dd389707d9ed951705db10d"
+  },
+  {
+    "path": "docs/performance/data_lock_independent_review_20261115/metadata.json",
+    "status": 0,
+    "source_sha256": "b242cf4d72f698ddaeffabc3775ff38b222b5d594603de2e9feb6199cd90d1a1"
+  },
+  {
+    "path": "docs/performance/data_lock_independent_review_20261115/run_comparison.py",
+    "status": 0,
+    "source_sha256": "5b4af556f358b32aaa787ed52fc194ddf022c0e345b2a4c8952a2be680e2c4d0"
+  },
+  {
+    "path": "docs/performance/data_lock_independent_review_20261115/runs.json",
+    "status": 0,
+    "source_sha256": "e7c6c64784983c7b329eea0ca8b233336c61b011f7d92a4a274dc5da8095d759"
+  },
+  {
+    "path": "docs/performance/data_lock_independent_review_20261115/summary.json",
+    "status": 0,
+    "source_sha256": "12dc419e4677dadba79970903db913e24cbd7a9fbeb4740c7534659e1dd6595b"
+  },
+  {
+    "path": "tools/rx/capture_x410_sc16.py",
+    "status": 0,
+    "source_sha256": "f9ea82991d46bbe759cdecfb77fae14df5fef4d825e80a1ccfb98b089c1c78b6"
+  },
+  {
+    "path": "tools/rx/check_clock_offset.py",
+    "status": 0,
+    "source_sha256": "4fa589563eaedc1dc6d640e0849445d30d77f980ba03308196a26368c3956e58"
+  }
+]

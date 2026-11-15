@@ -30,7 +30,10 @@
 
 #include <gnuradio/uwb/api.h>
 #include <gnuradio/uwb/uwb_fixed_tone_cancel_core.h>
-#include <gnuradio/uwb/uwb_uhd_sc16_pipeline.h>
+// Minimal source contract only: including the whole pipeline header here
+// would force every tone-cancel consumer to pull in the SIC / radar / demod
+// consumer headers.
+#include <gnuradio/uwb/uwb_sc16_stream_source.h>
 
 #include <atomic>
 #include <condition_variable>

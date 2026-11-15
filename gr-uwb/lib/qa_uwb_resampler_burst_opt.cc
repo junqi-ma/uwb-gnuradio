@@ -40,7 +40,8 @@
  *      produced/consumed counts, and reset/flush semantics.
  *
  * Phase C adds the candidate gate (see the big comment above the candidate
- * helpers): default vs C1 vs C2 vs both must be BIT-identical, plus the C1
+ * helpers): default vs C1 must be BIT-identical (C2/both removed 2026-11-15),
+ * plus the C1
  * descriptor table is recomputed here from first principles for every legal
  * starting phase and compared field by field.
  *
@@ -778,19 +779,20 @@ void check_length_contract(const std::vector<float>& taps,
 }
 
 // ===========================================================================
-//  Phase C (2026-11-11): resampler kernel candidates C1 / C2
+//  Phase C (2026-11-11): resampler kernel candidate C1
 //
 //  C1 = set_fixed_phase_schedule(true)  : per-phase 4-output descriptor table
 //       (arm tap offsets + window offsets relative to the macroblock base +
 //       precomputed win[j]==win[j-1] reuse mask) and 4-way FIR kernels
 //       compile-time specialised for H_pad == 24 / 48, generic otherwise.
-//  C2 = set_convert_cache(true)         : one int16->float conversion of the
-//       per-macroblock span into a persistent 64-byte-aligned buffer, then a
-//       float-input 4-way FIR kernel.
 //
-//  Both default OFF.  The gate is bit-identity with the DEFAULT path: every
+//  The C2 candidate (set_convert_cache) was measured, NOT retained and
+//  REMOVED in the 2026-11-15 native cleanup, together with its "both"
+//  combination; this QA keeps the C1 bit-identity gate.
+//
+//  C1 defaults OFF.  The gate is bit-identity with the DEFAULT path: every
 //  real and imag float equal plus a whole-vector memcmp, over
-//    * all four switch combinations (none / C1 / C2 / both),
+//    * the two switch states (none / C1),
 //    * both shipped profiles (H_pad 24 realtime, H_pad 48 quality),
 //    * both rates that share the 65/48-style schedule (65/48, 65/32) and the
 //      48/65 TX direction (H_pad 64 => the generic fallback),
@@ -805,18 +807,12 @@ void check_length_contract(const std::vector<float>& taps,
 using Variant = int;
 constexpr Variant kVariantDefault = 0;
 constexpr Variant kVariantC1 = 1;
-constexpr Variant kVariantC2 = 2;
-constexpr Variant kVariantBoth = 3;
 
 const char* variant_switch_name(Variant v)
 {
     switch (v) {
     case kVariantC1:
         return "c1_fixed_phase";
-    case kVariantC2:
-        return "c2_convert_cache";
-    case kVariantBoth:
-        return "c1c2_fixed_phase_convert_cache";
     default:
         return "default";
     }
@@ -825,8 +821,7 @@ const char* variant_switch_name(Variant v)
 template <typename Core>
 void apply_variant(Core& core, Variant v)
 {
-    core.set_fixed_phase_schedule(v == kVariantC1 || v == kVariantBoth);
-    core.set_convert_cache(v == kVariantC2 || v == kVariantBoth);
+    core.set_fixed_phase_schedule(v == kVariantC1);
 }
 
 // Samples compared bit-for-bit by the Phase-C gate (reported at the end).
@@ -942,7 +937,7 @@ void check_scenario(const std::vector<float>& taps,
     BOOST_REQUIRE_EQUAL(std::string(ref.sc16_kernel_variant()), "default");
     const std::vector<gr_complex> y_ref = scenario(ref);
 
-    const Variant variants[] = { kVariantC1, kVariantC2, kVariantBoth };
+    const Variant variants[] = { kVariantC1 };
     for (Variant v : variants) {
         Core cand(taps);
         apply_variant(cand, v);
@@ -954,50 +949,23 @@ void check_scenario(const std::vector<float>& taps,
     }
 }
 
-/** 10. Defaults, switch semantics, C1 table contents, C2 geometry. */
+/** 10. Defaults, switch semantics and C1 table contents. */
 template <typename Core>
 void check_candidate_api(const std::vector<float>& taps, const std::string& tag)
 {
     Core core(taps);
 
-    // ---- defaults: both candidates OFF ----
+    // ---- defaults: the C1 candidate is OFF ----
     BOOST_CHECK_EQUAL(core.fixed_phase_schedule(), false);
-    BOOST_CHECK_EQUAL(core.convert_cache(), false);
     BOOST_CHECK_EQUAL(std::string(core.sc16_kernel_variant()), "default");
     BOOST_CHECK_EQUAL(core.fixed_phase_table_built(), false);
-    BOOST_CHECK_EQUAL(core.convert_cache_span(), 0u);
-    BOOST_CHECK_EQUAL(core.convert_cache_floats(), 0u);
-    BOOST_CHECK_EQUAL(core.convert_cache_aligned(), false);
 
-    // ---- C2 geometry: span = round_up(Decim + H_pad, 4) complex samples ----
-    apply_variant(core, kVariantC2);
-    const size_t H_pad = core.arm_length_pad();
-    const size_t expect_span =
-        (static_cast<size_t>(Core::kDecim) + H_pad + 3u) & ~size_t(3u);
-    BOOST_CHECK_EQUAL(core.convert_cache_span(), expect_span);
-    BOOST_CHECK_EQUAL(core.convert_cache_floats(), 2 * expect_span);
-    BOOST_CHECK_MESSAGE(core.convert_cache_aligned(),
-                        tag + ": C2 buffer is not 64-byte aligned");
-    // The union of the macroblock windows is [0, Decim + H_pad) complex.
-    BOOST_CHECK_GE(core.convert_cache_span(),
-                   static_cast<size_t>(Core::kDecim) + H_pad);
-    BOOST_TEST_MESSAGE(tag << ": C2 span " << core.convert_cache_span()
-                           << " complex (" << core.convert_cache_floats()
-                           << " floats, H_pad " << H_pad << ")");
-
-    // Idempotent: enabling again must not reallocate or change geometry.
-    const size_t span = core.convert_cache_span();
-    const size_t floats = core.convert_cache_floats();
-    apply_variant(core, kVariantBoth);
-    BOOST_CHECK_EQUAL(core.convert_cache_span(), span);
-    BOOST_CHECK_EQUAL(core.convert_cache_floats(), floats);
-    BOOST_CHECK(core.convert_cache_aligned());
-
-    // Disabling is reversible and never frees the (persistent) buffer.
+    // Disabling is reversible.
     apply_variant(core, kVariantDefault);
     BOOST_CHECK_EQUAL(core.fixed_phase_schedule(), false);
-    BOOST_CHECK_EQUAL(core.convert_cache(), false);
     BOOST_CHECK_EQUAL(std::string(core.sc16_kernel_variant()), "default");
+
+    const size_t H_pad = core.arm_length_pad();
 
     // ---- C1 table: rebuilt from first principles here ----
     apply_variant(core, kVariantC1);
@@ -1067,7 +1035,7 @@ void check_candidate_api(const std::vector<float>& taps, const std::string& tag)
     {
         Core scalar(taps);
         scalar.set_kernel("scalar");
-        apply_variant(scalar, kVariantBoth);
+        apply_variant(scalar, kVariantC1);
         BOOST_CHECK_EQUAL(std::string(scalar.sc16_kernel_variant()), "default");
     }
 }
@@ -1224,9 +1192,9 @@ void check_candidate_phases(const std::vector<float>& taps, const std::string& t
             auto yp = feed_sc16(c, part, kUnitScale, 4096);
             y.insert(y.end(), yp.begin(), yp.end());
             off += n;
-            // flip the switches (default -> C1 -> C2 -> both -> default)
-            static const Variant seq[4] = { kVariantC1, kVariantC2,
-                                            kVariantBoth, kVariantDefault };
+            // flip the switch (default -> C1 -> default)
+            static const Variant seq[4] = { kVariantC1, kVariantDefault,
+                                            kVariantDefault, kVariantDefault };
             apply_variant(c, seq[phase % 4]);
         }
         drain_sc16(c, y);
@@ -1234,7 +1202,7 @@ void check_candidate_phases(const std::vector<float>& taps, const std::string& t
     });
 }
 
-/** 13. The multi-worker schedule and the FC32 path are untouched by C1/C2. */
+/** 13. The multi-worker schedule and the FC32 path are untouched by C1. */
 template <typename Core>
 void check_candidate_other_paths(const std::vector<float>& taps,
                                  const std::string& tag)
@@ -1242,14 +1210,14 @@ void check_candidate_other_paths(const std::vector<float>& taps,
     const size_t N = 4096;
     auto in = make_sc16_input(N, 0x0d15ea5eu);
 
-    // run_mt_sc16 keeps the pre-existing per-output schedule; the candidates
+    // run_mt_sc16 keeps the pre-existing per-output schedule; the candidate
     // must not change it.
     {
         Core serial(taps);
         apply_variant(serial, kVariantDefault);
         auto y_ref = run_oneshot_sc16(serial, in, kUnitScale);
 
-        for (Variant v : { kVariantC1, kVariantC2, kVariantBoth }) {
+        for (Variant v : { kVariantC1 }) {
             Core mt(taps);
             apply_variant(mt, v);
             auto y = run_oneshot_sc16(mt, in, kUnitScale, /*nworkers=*/4);
@@ -1263,7 +1231,7 @@ void check_candidate_other_paths(const std::vector<float>& taps,
         auto fin = to_cf32(make_sc16_input(N, 0x1234abcdu), kUnitScale);
         Core ref(taps);
         auto y_ref = run_oneshot_cf32(ref, fin);
-        for (Variant v : { kVariantC1, kVariantC2, kVariantBoth }) {
+        for (Variant v : { kVariantC1 }) {
             Core c(taps);
             apply_variant(c, v);
             auto y = run_oneshot_cf32(c, fin);

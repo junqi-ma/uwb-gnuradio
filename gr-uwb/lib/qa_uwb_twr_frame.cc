@@ -47,7 +47,7 @@
 
 // The one layer that appends the FCS (see uwb_hrp_packet_source.cc).
 #include <gnuradio/uwb/uwb_hrp_mod_core.h>
-#include <gnuradio/uwb/uwb_radar_pdu_meta.h>
+#include <gnuradio/uwb/uwb_radar_meta_core.h>
 #include <gnuradio/uwb/uwb_twr_frame.h>
 #include <gnuradio/uwb/uwb_twr_types.h>
 

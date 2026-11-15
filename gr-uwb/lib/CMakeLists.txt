@@ -7,57 +7,57 @@
 #
 
 ########################################################################
-# Setup library
+# Library split (2026-11-15 native cleanup)
+#
+#   uwb_core        pure C++ DSP/SIC cores; links only the C++ standard
+#                   library + VOLK (+ Threads).  No GNU Radio, no PMT, no UHD.
+#   uwb_native      native RX runtime: SC16 stream sources, replay, UHD
+#                   device source, fixed-tone decorator, bounded pipeline.
+#                   Links uwb_core + Threads (+ UHD when available).
+#   gnuradio-uwb    GNU Radio adapter (gr::block classes, PMT/PDU ports),
+#                   SHARED, built only when UWB_BUILD_GNURADIO=ON; links
+#                   uwb_native (and with it uwb_core) so every symbol that
+#                   used to live in libgnuradio-uwb still does.
+#
+# Each source file is compiled into exactly ONE of these targets, so no
+# exported implementation is duplicated across shared libraries.
+#
+# The UHD backend discovery (ENABLE_UHD_BACKEND AUTO/ON/OFF, UWB_HAVE_UHD,
+# UHD::UHD) moved to the top-level CMakeLists.txt so both build modes share
+# it.  UWB_HAVE_UHD is a PUBLIC compile definition of uwb_native so consumers
+# including uwb_uhd_burst_backend.h / uwb_uhd_sc16_pipeline.h see the guard.
 ########################################################################
-include(GrPlatform) #define LIB_SUFFIX
 
 include_directories(../include)
 
 ########################################################################
-# Optional UHD backend (Radar Step 11)
-#
-# ENABLE_UHD_BACKEND: AUTO (default) = build the UhdBurstBackend when UHD
-# is found; ON = require UHD (configure error when missing); OFF = never.
-# Without UHD the whole library (Phase A, EchoTimer, fake backend, all
-# QA) builds and tests unchanged; the UHD-dependent TU is simply not
-# compiled and uwb_uhd_burst_backend.h #errors if included directly.
+# Pure core sources (no GNU Radio, no UHD)
 ########################################################################
-set(ENABLE_UHD_BACKEND "AUTO" CACHE STRING
-    "Build the UHD burst backend: AUTO (build when UHD found), ON (require UHD), OFF (never)")
-set_property(CACHE ENABLE_UHD_BACKEND PROPERTY STRINGS AUTO ON OFF)
-string(TOUPPER "${ENABLE_UHD_BACKEND}" ENABLE_UHD_BACKEND_UC)
-if(NOT ENABLE_UHD_BACKEND_UC MATCHES "^(AUTO|ON|OFF)$")
-    message(FATAL_ERROR
-        "ENABLE_UHD_BACKEND must be AUTO, ON or OFF "
-        "(got '${ENABLE_UHD_BACKEND}')")
+set(uwb_core_sources
+    uwb_discrete_cir_estimator.cc
+    uwb_discrete_cir_reconstruct.cc
+    uwb_fixed_tone_cancel_core.cc
+    uwb_fullpacket_sic_core.cc
+    uwb_preamble_sic_core.cc
+    uwb_sic_unified.cc
+)
+
+########################################################################
+# Native runtime sources (pipeline, sources, tone decorator; UHD-gated
+# device backend)
+########################################################################
+set(uwb_native_sources
+    uwb_uhd_sc16_pipeline.cc
+    uwb_fixed_tone_cancel_source.cc
+)
+if(UWB_HAVE_UHD)
+    list(APPEND uwb_native_sources uwb_uhd_burst_backend.cc)
 endif()
 
-set(UWB_HAVE_UHD 0)
-if(NOT ENABLE_UHD_BACKEND_UC STREQUAL "OFF")
-    find_package(UHD CONFIG QUIET)
-    if(NOT UHD_FOUND)
-        find_package(PkgConfig QUIET)
-        if(PkgConfig_FOUND)
-            pkg_check_modules(UHD_PC QUIET uhd)
-        endif()
-    endif()
-    if(UHD_FOUND OR UHD_PC_FOUND)
-        set(UWB_HAVE_UHD 1)
-    elseif(ENABLE_UHD_BACKEND_UC STREQUAL "ON")
-        message(FATAL_ERROR
-            "ENABLE_UHD_BACKEND=ON but UHD was not found "
-            "(install libuhd-dev / UHD CMake or pkg-config support). "
-            "Use ENABLE_UHD_BACKEND=AUTO to skip the backend instead.")
-    else()
-        message(STATUS
-            "UHD not found: UhdBurstBackend disabled; the library, "
-            "EchoTimer fake-backend QA and dry-run build without UHD.")
-    endif()
-endif()
-message(STATUS "UHD burst backend (ENABLE_UHD_BACKEND=${ENABLE_UHD_BACKEND_UC}): "
-    "${UWB_HAVE_UHD}")
-
-list(APPEND uwb_sources
+########################################################################
+# GNU Radio adapter sources (only compiled when UWB_BUILD_GNURADIO=ON)
+########################################################################
+set(uwb_adapter_sources
     uwb_energy_detector.cc
     uwb_preamble_detector.cc
     uwb_detector.cc
@@ -79,68 +79,84 @@ list(APPEND uwb_sources
     uwb_cir_writer.cc
     uwb_realtime_echo_timer.cc
     uwb_echo_timer_stream.cc
-    uwb_fullpacket_sic_core.cc
-    uwb_discrete_cir_estimator.cc
-    uwb_discrete_cir_reconstruct.cc
-    uwb_preamble_sic_core.cc
     uwb_preamble_sic.cc
-    uwb_sic_unified.cc
-    uwb_fixed_tone_cancel_core.cc
-    uwb_fixed_tone_cancel_source.cc
-    uwb_uhd_sc16_pipeline.cc
 )
-if(UWB_HAVE_UHD)
-    list(APPEND uwb_sources uwb_uhd_burst_backend.cc)
-endif()
 
-set(uwb_sources "${uwb_sources}" PARENT_SCOPE)
-
-# Also add headers if needed for compilation
-if(NOT uwb_sources)
-    MESSAGE(STATUS "No C++ sources... skipping lib/")
-    return()
-endif(NOT uwb_sources)
+# The python bindings check this variable (GR mode only).
+set(uwb_sources "${uwb_adapter_sources}" PARENT_SCOPE)
 
 find_package(Threads REQUIRED)
 
-add_library(gnuradio-uwb SHARED ${uwb_sources})
-target_link_libraries(gnuradio-uwb
-    gnuradio::gnuradio-runtime
-    gnuradio::gnuradio-filter
-    Volk::volk
-    Threads::Threads
-)
-if(UWB_HAVE_UHD)
-    if(NOT TARGET UHD::UHD)
-        add_library(UHD::UHD INTERFACE IMPORTED GLOBAL)
-        if(UHD_INCLUDE_DIRS)
-            set_target_properties(UHD::UHD PROPERTIES
-                INTERFACE_INCLUDE_DIRECTORIES "${UHD_INCLUDE_DIRS}")
-        endif()
-        set_target_properties(UHD::UHD PROPERTIES
-            INTERFACE_LINK_LIBRARIES "${UHD_LIBRARIES};${UHD_PC_LIBRARIES}")
-    endif()
-    target_link_libraries(gnuradio-uwb UHD::UHD)
-    # Public so consumers including uwb_uhd_burst_backend.h see the guard.
-    target_compile_definitions(gnuradio-uwb PUBLIC UWB_HAVE_UHD=1)
-endif()
-target_include_directories(gnuradio-uwb
+########################################################################
+# uwb_core: pure C++ core archive
+########################################################################
+add_library(uwb_core STATIC ${uwb_core_sources})
+target_link_libraries(uwb_core PUBLIC Volk::volk Threads::Threads)
+target_include_directories(uwb_core
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
     PUBLIC $<INSTALL_INTERFACE:include>
-  )
-set_target_properties(gnuradio-uwb PROPERTIES DEFINE_SYMBOL "gnuradio_uwb_EXPORTS")
+)
+set_target_properties(uwb_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-if(APPLE)
-    set_target_properties(gnuradio-uwb PROPERTIES
-        INSTALL_NAME_DIR "${CMAKE_INSTALL_PREFIX}/lib"
+########################################################################
+# uwb_native: native RX runtime archive (pipeline + sources + decorator)
+########################################################################
+add_library(uwb_native STATIC ${uwb_native_sources})
+target_link_libraries(uwb_native PUBLIC uwb_core Threads::Threads)
+target_include_directories(uwb_native
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
+    PUBLIC $<INSTALL_INTERFACE:include>
+)
+set_target_properties(uwb_native PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(UWB_HAVE_UHD)
+    target_link_libraries(uwb_native PUBLIC UHD::UHD)
+    # Public so consumers including uwb_uhd_burst_backend.h see the guard.
+    target_compile_definitions(uwb_native PUBLIC UWB_HAVE_UHD=1)
+endif()
+
+########################################################################
+# gnuradio-uwb: the GNU Radio adapter shared library (GR mode only)
+########################################################################
+if(UWB_BUILD_GNURADIO)
+    add_library(gnuradio-uwb SHARED ${uwb_adapter_sources})
+    target_link_libraries(gnuradio-uwb
+        PUBLIC uwb_native
+        PUBLIC gnuradio::gnuradio-runtime
+        PUBLIC gnuradio::gnuradio-filter
+        PUBLIC Volk::volk
+        PUBLIC Threads::Threads
     )
-endif(APPLE)
+    target_include_directories(gnuradio-uwb
+        PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
+        PUBLIC $<INSTALL_INTERFACE:include>
+      )
+    set_target_properties(gnuradio-uwb PROPERTIES DEFINE_SYMBOL "gnuradio_uwb_EXPORTS")
 
-########################################################################
-# Install built library files
-########################################################################
-include(GrMiscUtils)
-GR_LIBRARY_FOO(gnuradio-uwb)
+    if(APPLE)
+        set_target_properties(gnuradio-uwb PROPERTIES
+            INSTALL_NAME_DIR "${CMAKE_INSTALL_PREFIX}/lib"
+        )
+    endif(APPLE)
+
+    ####################################################################
+    # Install built library files
+    ####################################################################
+    include(GrMiscUtils)
+    GR_LIBRARY_FOO(gnuradio-uwb)
+
+    # Version/SONAME regression (2026-11-15 cleanup fix A): VERSION_MAJOR/
+    # API/ABI/PATCH must be defined BEFORE include(GrVersion) so GrVersion
+    # derives VERSION=1.0.0.0 / LIBVER=1.0.0.  Pin the observable contract:
+    # the built shared library carries SONAME libgnuradio-uwb.so.<LIBVER> and
+    # the versioned file libgnuradio-uwb.so.<VERSION> exists next to it.
+    add_test(NAME uwb_qa_gnuradio_uwb_version
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/qa_uwb_gnuradio_uwb_version.sh
+                $<TARGET_FILE:gnuradio-uwb> ${LIBVER} ${VERSION})
+    set_tests_properties(uwb_qa_gnuradio_uwb_version PROPERTIES TIMEOUT 30)
+else()
+    message(STATUS "UWB_BUILD_GNURADIO=OFF: skipping the gnuradio-uwb adapter "
+                   "library; building uwb_core + uwb_native only")
+endif()
 
 ########################################################################
 # M1-B: the standalone, GNU-Radio-free / UHD-free TWR protocol core.
@@ -155,7 +171,6 @@ target_include_directories(uwb_twr_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
     $<INSTALL_INTERFACE:include>)
 set_target_properties(uwb_twr_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
-install(TARGETS uwb_twr_core ARCHIVE DESTINATION lib)
 
 add_library(uwb_twr_fake_link STATIC uwb_twr_fake_link.cc)
 target_include_directories(uwb_twr_fake_link PUBLIC
@@ -177,7 +192,31 @@ target_include_directories(uwb_twr_phy PUBLIC
     $<INSTALL_INTERFACE:include>)
 target_link_libraries(uwb_twr_phy PUBLIC Volk::volk Threads::Threads)
 set_target_properties(uwb_twr_phy PROPERTIES POSITION_INDEPENDENT_CODE ON)
-install(TARGETS uwb_twr_phy ARCHIVE DESTINATION lib)
+
+########################################################################
+# Install the static core/native/TWR archives and their export set.
+# GR mode: same export set as gnuradio-uwb (namespace gnuradio::), so the
+# exported adapter target file is self-consistent.
+# Native mode: a standalone uwb-export (namespace uwb::) installed to
+# <libdir>/cmake/uwb together with uwbConfig.cmake, which finds NO
+# GNU Radio.
+########################################################################
+if(UWB_BUILD_GNURADIO)
+    install(TARGETS uwb_core uwb_native uwb_twr_core uwb_twr_phy
+        EXPORT gnuradio-uwb-export
+        ARCHIVE DESTINATION ${GR_LIBRARY_DIR}
+    )
+else()
+    install(TARGETS uwb_core uwb_native uwb_twr_core uwb_twr_phy
+        EXPORT uwb-export
+        ARCHIVE DESTINATION ${GR_LIBRARY_DIR}
+    )
+    install(EXPORT uwb-export
+        FILE uwbTargets.cmake
+        NAMESPACE uwb::
+        DESTINATION ${CMAKE_MODULES_DIR}/uwb
+    )
+endif()
 
 ########################################################################
 # Print summary
@@ -186,100 +225,97 @@ message(STATUS "Using install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "Building for version: ${VERSION} / ${LIBVER}")
 
 ########################################################################
-# Build and register unit test
+# Build and register unit tests
+#
+# GR mode: every QA is registered with GR_ADD_CPP_TEST exactly as before
+# (GR_TEST_TARGET_DEPS pulls gnuradio-uwb, which now contains the adapter
+# classes plus the statically linked uwb_native/uwb_core objects).
+# Native mode (UWB_BUILD_GNURADIO=OFF): the core QA is registered with plain
+# add_executable/add_test against uwb_native/uwb_core/uwb_twr_phy + Boost;
+# the GR-block QA is not compiled at all (its message says so).
 ########################################################################
-include(GrTest)
+if(UWB_BUILD_GNURADIO)
+    include(GrTest)
+endif()
 
-# If your unit tests require special include paths, add them here
-#include_directories()
-# List all files that contain Boost.UTF unit tests here
-list(APPEND test_uwb_sources
-    qa_uwb_energy_detector.cc
-    qa_uwb_preamble_detector.cc
+# Core QA: no GNU Radio headers, no gnuradio-uwb link needed.
+list(APPEND uwb_core_qa_sources
+    qa_uwb_defaults.cc
+    qa_uwb_demod_core.cc
+    qa_uwb_discrete_cir_estimator.cc
+    qa_uwb_discrete_cir_reconstruct.cc
+    qa_uwb_fixed_tone_cancel_core.cc
+    qa_uwb_fixed_tone_cancel_source.cc
+    qa_uwb_fullpacket_cfo_diag.cc
+    qa_uwb_fullpacket_fast_rx.cc
+    qa_uwb_fullpacket_payload_cache.cc
+    qa_uwb_fullpacket_sic_core.cc
+    qa_uwb_hrp_mod_core.cc
+    qa_uwb_preamble_sic_core.cc
+    qa_uwb_radar_cir_core.cc
+    qa_uwb_radar_cir_estimator.cc
+    qa_uwb_radar_sfd_core.cc
+    qa_uwb_radar_timing_core.cc
+    qa_uwb_rational_resampler_core.cc
+    qa_uwb_rational_resampler_core_65_32.cc
+    qa_uwb_rational_resampler_m2a.cc
+    qa_uwb_resampler_burst_opt.cc
+    qa_uwb_rx_fused_cmf.cc
+    qa_uwb_rx_fused_phr.cc
+    qa_uwb_scheduled_dump_io.cc
+    qa_uwb_sic_unified.cc
+    qa_uwb_target_lock_core.cc
+    qa_uwb_timed_rx_plan.cc
+    qa_uwb_tone_canceller.cc
+    qa_uwb_twr_config.cc
+    qa_uwb_twr_config_parity.cc
+    qa_uwb_twr_frame.cc
+    qa_uwb_twr_math.cc
+    qa_uwb_twr_native_phy.cc
+    qa_uwb_twr_phy_impairment.cc
+    qa_uwb_twr_tof_input.cc
+    qa_uwb_uhd_sc16_pipeline.cc
+)
+
+# Adapter QA: exercises gr::block classes, PMT ports and GR flowgraphs, so it
+# is only registered in GNU Radio adapter mode.
+list(APPEND uwb_adapter_qa_sources
+    qa_uwb_auto_scheduled_extractor_sc16.cc
+    qa_uwb_cir_writer.cc
     qa_uwb_detector.cc
     qa_uwb_detector_sc16.cc
+    qa_uwb_echo_multitx_layout.cc
+    qa_uwb_echo_timer.cc
+    qa_uwb_echo_timer_stream.cc
+    qa_uwb_energy_detector.cc
+    qa_uwb_hrp_packet_source.cc
+    qa_uwb_loopback_echo.cc
     qa_uwb_packet_writer.cc
-    qa_uwb_scheduled_extractor.cc
-    qa_uwb_scheduled_extractor_sc16.cc
-    qa_uwb_auto_scheduled_extractor_sc16.cc
-    qa_uwb_demod_core.cc
-    qa_uwb_realtime_demodulator.cc
-    qa_uwb_defaults.cc
-    qa_uwb_rational_resampler_core.cc
-    qa_uwb_rational_resampler.cc
     qa_uwb_pdu_rational_resampler.cc
     qa_uwb_pdu_rational_resampler_65_32.cc
     qa_uwb_pdu_rational_resampler_65_32_workers.cc
+    qa_uwb_pdu_roi_cir_65_32.cc
     qa_uwb_pdu_sc16_scale_65_32.cc
     qa_uwb_pdu_sc16_scale_65_48.cc
-    qa_uwb_pdu_roi_cir_65_32.cc
-    qa_uwb_rational_resampler_core_65_32.cc
-    qa_uwb_rational_resampler_m2a.cc
-    qa_uwb_rational_resampler_65_32_stream.cc
     qa_uwb_pdu_window_crop.cc
-    qa_uwb_tone_canceller.cc
-    qa_uwb_scheduled_dump_io.cc
-    qa_uwb_radar_sfd_core.cc
-    qa_uwb_radar_cir_estimator.cc
-    qa_uwb_radar_timing_core.cc
-    qa_uwb_radar_cir_core.cc
-    qa_uwb_radar_packet_source.cc
-    qa_uwb_loopback_echo.cc
-    qa_uwb_radar_cir_estimator_block.cc
-    qa_uwb_cir_writer.cc
-    qa_uwb_echo_timer.cc
-    qa_uwb_echo_multitx_layout.cc
-    qa_uwb_echo_timer_stream.cc
-    qa_uwb_radar_e2e.cc
-    qa_uwb_uhd_backend.cc
-    qa_uwb_hrp_mod_core.cc
-    qa_uwb_fullpacket_cfo_diag.cc
-    qa_uwb_fullpacket_payload_cache.cc
-    qa_uwb_fullpacket_fast_rx.cc
-    qa_uwb_rx_fused_cmf.cc
-    qa_uwb_rx_fused_phr.cc
-    qa_uwb_fullpacket_sic_core.cc
-    qa_uwb_discrete_cir_estimator.cc
-    qa_uwb_discrete_cir_reconstruct.cc
-    qa_uwb_preamble_sic_core.cc
+    qa_uwb_preamble_detector.cc
     qa_uwb_preamble_sic.cc
-    qa_uwb_sic_unified.cc
-    qa_uwb_fixed_tone_cancel_core.cc
-    qa_uwb_fixed_tone_cancel_source.cc
-    qa_uwb_uhd_sc16_pipeline.cc
-    # 2026-11-11 round 2: resampler burst-mode optimisations (lazy schedule
-    # tables, kernel A/B).  Owner: subagent A.
-    qa_uwb_resampler_burst_opt.cc
-    qa_uwb_hrp_packet_source.cc
-    qa_uwb_twr_config.cc
-    qa_uwb_twr_frame.cc
+    qa_uwb_radar_cir_estimator_block.cc
+    qa_uwb_radar_e2e.cc
+    qa_uwb_radar_packet_source.cc
+    qa_uwb_rational_resampler.cc
+    qa_uwb_rational_resampler_65_32_stream.cc
+    qa_uwb_realtime_demodulator.cc
+    qa_uwb_scheduled_extractor.cc
+    qa_uwb_scheduled_extractor_sc16.cc
     qa_uwb_twr_phy_matrix.cc
     qa_uwb_twr_timing_budget.cc
-    qa_uwb_twr_timestamp.cc
-    # M0.1 R6: the ranging-input admission gate.  Self-contained -- no golden
-    # files, no radio -- so it belongs here and NOT in the UWB_TESTDATA_DIR
-    # block below.
-    qa_uwb_twr_tof_input.cc
-    # M0.1 plan 2.A item 4: the C++ half of the shared differential corpus.
-    # The Python half lives in apps/test_twr_config.py; both read the SAME
-    # testdata/twr/config_parity_corpus.json, which is why this one does need
-    # UWB_TESTDATA_DIR.
-    qa_uwb_twr_config_parity.cc
-    # M1-A: the SS/DS ToF mathematics.  Reads
-    # testdata/twr/tof_oracle_vectors.json (the independent physical-model
-    # oracle), so it needs UWB_TESTDATA_DIR as well.
-    qa_uwb_twr_math.cc
-    # M2-A: the full-frame native-rate PHY closed loop (G0 §12 A01-A14).
-    qa_uwb_twr_native_phy.cc
-    # M2-A closeout: the test-harness channel model, verified independently
-    # (G0 A.3).  Self-contained: it reads no testdata.
-    qa_uwb_twr_phy_impairment.cc
-    # 2026-11-15: native periodic-target lock core + LockedBounded sync
-    # strategy + device-timed RX plan (X410 dual-path plan P1/P2/P4).
-    qa_uwb_target_lock_core.cc
-    qa_uwb_timed_rx_plan.cc
+    qa_uwb_uhd_backend.cc
 )
-# Anything we need to link to for the unit tests go here
+
+set(test_uwb_sources ${uwb_core_qa_sources} ${uwb_adapter_qa_sources})
+
+# Anything we need to link to for the unit tests go here (GR mode)
 list(APPEND GR_TEST_TARGET_DEPS gnuradio-uwb gnuradio::gnuradio-blocks uwb_twr_phy)
 
 if(NOT test_uwb_sources)
@@ -287,11 +323,39 @@ if(NOT test_uwb_sources)
     return()
 endif(NOT test_uwb_sources)
 
-foreach(qa_file ${test_uwb_sources})
-    GR_ADD_CPP_TEST("uwb_${qa_file}"
-        ${CMAKE_CURRENT_SOURCE_DIR}/${qa_file}
-    )
-endforeach(qa_file)
+# Register one QA.  Target/test names are IDENTICAL in both modes
+# ("uwb_<file>.cc"), so the per-target compile definitions below apply
+# unchanged.
+function(uwb_register_qa qa_file)
+    if(UWB_BUILD_GNURADIO)
+        GR_ADD_CPP_TEST("uwb_${qa_file}"
+            ${CMAKE_CURRENT_SOURCE_DIR}/${qa_file}
+        )
+    else()
+        add_executable("uwb_${qa_file}" ${CMAKE_CURRENT_SOURCE_DIR}/${qa_file})
+        target_link_libraries("uwb_${qa_file}"
+            PRIVATE uwb_native uwb_core uwb_twr_phy Boost::unit_test_framework)
+        if(UWB_HAVE_UHD)
+            target_link_libraries("uwb_${qa_file}" PRIVATE UHD::UHD)
+        endif()
+        set_target_properties("uwb_${qa_file}" PROPERTIES
+            COMPILE_DEFINITIONS "BOOST_TEST_DYN_LINK;BOOST_TEST_MAIN")
+        add_test(NAME "uwb_${qa_file}" COMMAND "uwb_${qa_file}")
+    endif()
+endfunction()
+
+foreach(qa_file ${uwb_core_qa_sources})
+    uwb_register_qa(${qa_file})
+endforeach()
+
+if(UWB_BUILD_GNURADIO)
+    foreach(qa_file ${uwb_adapter_qa_sources})
+        uwb_register_qa(${qa_file})
+    endforeach()
+else()
+    message(STATUS "UWB_BUILD_GNURADIO=OFF: skipped GNU Radio adapter QA files: "
+                   "${uwb_adapter_qa_sources}")
+endif()
 
 ########################################################################
 # M1-B pure protocol-core tests.
@@ -392,9 +456,7 @@ endforeach()
 # UHD-gated runtime QA: only compiled when UHD is available; verifies the
 # device-unavailable contract without any USRP (skips when one exists).
 if(UWB_HAVE_UHD)
-    GR_ADD_CPP_TEST("uwb_qa_uwb_uhd_backend_device.cc"
-        ${CMAKE_CURRENT_SOURCE_DIR}/qa_uwb_uhd_backend_device.cc
-    )
+    uwb_register_qa(qa_uwb_uhd_backend_device.cc)
     # Device discovery can take several seconds on transport timeouts.
     set_tests_properties(uwb_qa_uwb_uhd_backend_device.cc PROPERTIES
         TIMEOUT 300)
@@ -411,9 +473,11 @@ target_compile_definitions(uwb_qa_uwb_defaults.cc PRIVATE
 
 # Keep auto-scheduled extractor QA independent of the developer's checkout
 # path while still allowing it to inspect the native template and X410 app.
+if(TARGET uwb_qa_uwb_auto_scheduled_extractor_sc16.cc)
 target_compile_definitions(uwb_qa_uwb_auto_scheduled_extractor_sc16.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\""
     "UWB_APP_DIR=\"${CMAKE_SOURCE_DIR}/apps\"")
+endif()
 
 target_compile_definitions(uwb_qa_uwb_radar_sfd_core.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
@@ -430,17 +494,25 @@ target_compile_definitions(uwb_qa_uwb_radar_timing_core.cc PRIVATE
 target_compile_definitions(uwb_qa_uwb_radar_cir_core.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
+if(TARGET uwb_qa_uwb_radar_packet_source.cc)
 target_compile_definitions(uwb_qa_uwb_radar_packet_source.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+endif()
 
+if(TARGET uwb_qa_uwb_loopback_echo.cc)
 target_compile_definitions(uwb_qa_uwb_loopback_echo.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+endif()
 
+if(TARGET uwb_qa_uwb_radar_cir_estimator_block.cc)
 target_compile_definitions(uwb_qa_uwb_radar_cir_estimator_block.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+endif()
 
+if(TARGET uwb_qa_uwb_radar_e2e.cc)
 target_compile_definitions(uwb_qa_uwb_radar_e2e.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+endif()
 
 target_compile_definitions(uwb_qa_uwb_rational_resampler_core_65_32.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
@@ -455,26 +527,38 @@ target_compile_definitions(uwb_qa_uwb_rational_resampler_m2a.cc PRIVATE
 target_compile_definitions(uwb_qa_uwb_twr_native_phy.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
+if(TARGET uwb_qa_uwb_pdu_rational_resampler_65_32.cc)
 target_compile_definitions(uwb_qa_uwb_pdu_rational_resampler_65_32.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+endif()
 
+if(TARGET uwb_qa_uwb_pdu_rational_resampler_65_32_workers.cc)
 target_compile_definitions(uwb_qa_uwb_pdu_rational_resampler_65_32_workers.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+endif()
 
+if(TARGET uwb_qa_uwb_pdu_sc16_scale_65_32.cc)
 target_compile_definitions(uwb_qa_uwb_pdu_sc16_scale_65_32.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+endif()
 
+if(TARGET uwb_qa_uwb_pdu_sc16_scale_65_48.cc)
 target_compile_definitions(uwb_qa_uwb_pdu_sc16_scale_65_48.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+endif()
 
+if(TARGET uwb_qa_uwb_pdu_roi_cir_65_32.cc)
 target_compile_definitions(uwb_qa_uwb_pdu_roi_cir_65_32.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+endif()
 
 target_compile_definitions(uwb_qa_uwb_hrp_mod_core.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
+if(TARGET uwb_qa_uwb_hrp_packet_source.cc)
 target_compile_definitions(uwb_qa_uwb_hrp_packet_source.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+endif()
 # S0-B: the preamble-SIC math core QA.  It cross-checks the optional golden
 # vectors under testdata/sic_preamble/golden/ and SKIPS that case cleanly when
 # they are absent (they are generated by a separate agent).
@@ -483,8 +567,10 @@ target_compile_definitions(uwb_qa_uwb_preamble_sic_core.cc PRIVATE
 # S0-C: the PDU adapter QA.  Synthetic by default; the OPTIONAL golden case
 # reads testdata/sic_preamble/golden/int_single/io.npz when present and skips
 # cleanly when it is not, so it needs the testdata root too.
+if(TARGET uwb_qa_uwb_preamble_sic.cc)
 target_compile_definitions(uwb_qa_uwb_preamble_sic.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+endif()
 # TWR M0: three of the five TWR QAs read goldens from testdata/twr/.
 target_compile_definitions(uwb_qa_uwb_twr_config_parity.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
@@ -499,12 +585,16 @@ target_compile_definitions(uwb_qa_uwb_twr_math.cc PRIVATE
 # libgnuradio-uwb the running process actually loaded, so a CSV generated
 # against a stale /usr/local install is visible instead of silent
 # (M0 review R7 / R8, M0.1 §2.C.2).
+if(TARGET uwb_qa_uwb_twr_phy_matrix.cc)
 target_compile_definitions(uwb_qa_uwb_twr_phy_matrix.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\""
     "UWB_BUILD_DIR=\"${PROJECT_BINARY_DIR}\"")
+endif()
+if(TARGET uwb_qa_uwb_twr_timing_budget.cc)
 target_compile_definitions(uwb_qa_uwb_twr_timing_budget.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\""
     "UWB_BUILD_DIR=\"${PROJECT_BINARY_DIR}\"")
+endif()
 # qa_uwb_twr_timestamp and qa_uwb_twr_config are self-contained (no golden
 # files) and deliberately get NO UWB_TESTDATA_DIR, so a testdata path
 # regression cannot silently degrade into a pass.
@@ -518,6 +608,7 @@ target_compile_definitions(uwb_qa_uwb_twr_timing_budget.cc PRIVATE
 ########################################################################
 add_executable(uwb_uhd_burst_dry_run uwb_uhd_dry_run.cc)
 target_compile_definitions(uwb_uhd_burst_dry_run PRIVATE UWB_NO_UHD_LINK=1)
+target_link_libraries(uwb_uhd_burst_dry_run PRIVATE uwb_core)
 
 add_test(NAME uwb_uhd_burst_dry_run
     COMMAND uwb_uhd_burst_dry_run

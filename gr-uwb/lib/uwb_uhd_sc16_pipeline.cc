@@ -220,11 +220,13 @@ inline void note_peak(std::atomic<uint64_t>& peak, uint64_t value)
 enum class ResamplerExperiment {
     None,
     FixedPhase,
-    ConvertCache,
-    Both,
     Invalid
 };
 
+// "convert_cache" and "both" (the C2 candidate and its combination with C1)
+// were measured, NOT retained and REMOVED in the 2026-11-15 native cleanup;
+// they now parse as Invalid so callers fail closed with an explicit message
+// instead of being silently accepted.
 ResamplerExperiment parse_resampler_experiment(const std::string& name)
 {
     if (name.empty() || name == "none") {
@@ -232,12 +234,6 @@ ResamplerExperiment parse_resampler_experiment(const std::string& name)
     }
     if (name == "fixed_phase") {
         return ResamplerExperiment::FixedPhase;
-    }
-    if (name == "convert_cache") {
-        return ResamplerExperiment::ConvertCache;
-    }
-    if (name == "both") {
-        return ResamplerExperiment::Both;
     }
     return ResamplerExperiment::Invalid;
 }
@@ -247,10 +243,6 @@ const char* resampler_experiment_name(ResamplerExperiment exp)
     switch (exp) {
     case ResamplerExperiment::FixedPhase:
         return "fixed_phase";
-    case ResamplerExperiment::ConvertCache:
-        return "convert_cache";
-    case ResamplerExperiment::Both:
-        return "both";
     case ResamplerExperiment::None:
     case ResamplerExperiment::Invalid:
         break;
@@ -262,13 +254,10 @@ const char* resampler_experiment_name(ResamplerExperiment exp)
 // the default "none" no setter is called, so the default path stays
 // instruction-for-instruction identical to the pre-experiment pipeline.
 template <typename ResamplerCore>
-void apply_resampler_experiment(ResamplerCore& core, bool fixed_phase, bool convert_cache)
+void apply_resampler_experiment(ResamplerCore& core, bool fixed_phase)
 {
     if (fixed_phase) {
         core.set_fixed_phase_schedule(true);
-    }
-    if (convert_cache) {
-        core.set_convert_cache(true);
     }
 }
 
@@ -783,9 +772,10 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
         const ResamplerExperiment exp =
             parse_resampler_experiment(cfg_.resampler_experiment);
         if (exp == ResamplerExperiment::Invalid) {
-            std::cerr << "UhdSc16Pipeline: unknown resampler_experiment '"
+            std::cerr << "UhdSc16Pipeline: unknown or removed resampler_experiment '"
                       << cfg_.resampler_experiment
-                      << "' (expected none|fixed_phase|convert_cache|both); "
+                      << "' (accepted: none|fixed_phase; convert_cache/both were "
+                         "removed in the 2026-11-15 native cleanup); "
                          "falling back to 'none'"
                       << std::endl;
         }
@@ -837,18 +827,10 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
             std::make_unique<Sc16WindowRingPool>(cfg_.pool_capacity, slot_cap));
     }
 
-    // Contract C3: burst workers run the flat single-threaded AVX2 macroblock
-    // kernel, so the nested resampler pool is not only useless but harmful
-    // (futex wake-up tax plus a lost 4-way register reuse).  Say so once.
-    if (n_workers > 1 && cfg_.resampler_workers > 1) {
-        std::cerr << "UhdSc16Pipeline: dsp_workers=" << n_workers
-                  << " disables the nested resampler worker pool "
-                     "(resampler_workers="
-                  << cfg_.resampler_workers
-                  << " ignored); each DSP worker uses the single-threaded "
-                     "macroblock kernel"
-                  << std::endl;
-    }
+    // Contract C3: burst workers always run the flat single-threaded AVX2
+    // macroblock kernel (set_num_workers(1) per worker core); the former
+    // resampler_workers config entry was always forced to 1 here and has been
+    // REMOVED in the 2026-11-15 native cleanup.
 
     // Restart safety: the reorder buffer starts empty and anchored at window 0.
     {
@@ -1817,11 +1799,8 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
     // instruction-for-instruction identical.
     const ResamplerExperiment resampler_experiment =
         parse_resampler_experiment(cfg_.resampler_experiment);
-    const bool exp_fixed_phase = (resampler_experiment == ResamplerExperiment::FixedPhase ||
-                                  resampler_experiment == ResamplerExperiment::Both);
-    const bool exp_convert_cache =
-        (resampler_experiment == ResamplerExperiment::ConvertCache ||
-         resampler_experiment == ResamplerExperiment::Both);
+    const bool exp_fixed_phase =
+        (resampler_experiment == ResamplerExperiment::FixedPhase);
     // True once this worker owns a resampler core that received the switch.
     // A worker with no core (native == work, or a rate without a dedicated
     // kernel) reports "none" because nothing was actually applied.
@@ -1872,8 +1851,7 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
                 // run_macroblock_sc16 + fir_avx2_sc16_4x path on this core.
                 resamp_65_48->set_num_workers(1);
                 // Phase-C experiment switch (default "none" => no call).
-                apply_resampler_experiment(
-                    *resamp_65_48, exp_fixed_phase, exp_convert_cache);
+                apply_resampler_experiment(*resamp_65_48, exp_fixed_phase);
                 experiment_applied_to_core = true;
                 work_capacity = core::RationalResampler65_48Core::expected_output_length(
                     native_capacity, taps.size()) + 256;
@@ -1885,8 +1863,7 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
                 resamp_65_32 = std::make_unique<core::RationalResampler65_32Core>(taps);
                 resamp_65_32->set_num_workers(1);
                 // Phase-C experiment switch (default "none" => no call).
-                apply_resampler_experiment(
-                    *resamp_65_32, exp_fixed_phase, exp_convert_cache);
+                apply_resampler_experiment(*resamp_65_32, exp_fixed_phase);
                 experiment_applied_to_core = true;
                 work_capacity = core::RationalResampler65_32Core::expected_output_length(
                     native_capacity, taps.size()) + 256;

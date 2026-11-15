@@ -236,7 +236,6 @@ struct Options {
     size_t warmup = 20;
     uint32_t seed = 0x1234567u;
     bool fixed_phase = false;
-    bool convert_cache = false;
 };
 
 void usage(const char* argv0)
@@ -255,7 +254,6 @@ void usage(const char* argv0)
         "  --kernel <name>        pass-through to set_kernel() "
         "(default avx2_fma_macroblock)\n"
         "  --fixed-phase <0|1>    C1 fixed-phase schedule (default 0)\n"
-        "  --convert-cache <0|1>  C2 per-macroblock float cache (default 0)\n"
         "  --input <mode>         random (default) | rails | impulse | zero\n"
         "  --seed <n>             LCG seed (default 0x1234567)\n"
         "  --json <path>          write the JSON result file\n"
@@ -348,7 +346,6 @@ int benchmark_core(const Options& opt,
     Core core(taps);
     core.set_kernel(opt.kernel);
     core.set_fixed_phase_schedule(opt.fixed_phase);
-    core.set_convert_cache(opt.convert_cache);
 
     const size_t expect =
         Core::expected_output_length(in.size(), core.tap_count());
@@ -449,8 +446,8 @@ int benchmark_core(const Options& opt,
                 core.arm_length(), core.arm_length_pad());
     std::printf("  kernel            : %s (%s)\n", core.kernel_name(),
                 core.sc16_kernel_variant());
-    std::printf("  switches          : fixed-phase=%d convert-cache=%d\n",
-                opt.fixed_phase ? 1 : 0, opt.convert_cache ? 1 : 0);
+    std::printf("  switches          : fixed-phase=%d\n",
+                opt.fixed_phase ? 1 : 0);
     std::printf("  scale             : %s (%.10g)\n", opt.scale_mode.c_str(),
                 static_cast<double>(scale));
     std::printf("  input             : %s seed=0x%08x\n", opt.input.c_str(),
@@ -514,8 +511,6 @@ int benchmark_core(const Options& opt,
         o << "  \"sc16_kernel_variant\": \"" << core.sc16_kernel_variant()
           << "\",\n";
         o << "  \"fixed_phase\": " << (opt.fixed_phase ? 1 : 0) << ",\n";
-        o << "  \"convert_cache\": " << (opt.convert_cache ? 1 : 0) << ",\n";
-        o << "  \"convert_cache_span\": " << core.convert_cache_span() << ",\n";
         o << "  \"scale_mode\": \"" << opt.scale_mode << "\",\n";
         o << "  \"scale\": " << static_cast<double>(scale) << ",\n";
         o << "  \"length\": " << opt.length << ",\n";
@@ -560,7 +555,6 @@ int benchmark_core(const Options& opt,
           << opt.length << ", \"--reps\", " << opt.reps << ", \"--warmup\", "
           << opt.warmup << ", \"--kernel\", \"" << opt.kernel
           << "\", \"--fixed-phase\", " << (opt.fixed_phase ? 1 : 0)
-          << ", \"--convert-cache\", " << (opt.convert_cache ? 1 : 0)
           << ", \"--input\", \"" << opt.input << "\", \"--seed\"," << opt.seed
           << "]";
         o << "\n}\n";
@@ -636,11 +630,9 @@ int main(int argc, char** argv)
                 return 2;
             }
         } else if (a == "--convert-cache") {
-            const std::string v = need("0|1");
-            if (!parse_bool01(v, opt.convert_cache)) {
-                std::cerr << "error: --convert-cache expects 0 or 1\n";
-                return 2;
-            }
+            std::cerr << "error: --convert-cache was removed (C2 measured, not "
+                         "retained, removed in the 2026-11-15 native cleanup)\n";
+            return 2;
         } else if (a == "--input") {
             opt.input = need("mode");
             if (opt.input != "random" && opt.input != "rails" &&

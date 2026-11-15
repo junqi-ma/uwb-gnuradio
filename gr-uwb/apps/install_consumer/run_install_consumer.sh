@@ -227,7 +227,16 @@ echo "== import the Python module from the prefix only =="
 # the resolved __file__ against the prefix, so a missing install is a hard
 # failure rather than a silent fallback.
 cd /
+# The pybind module links libgnuradio-uwb, which lives in the prefix's lib
+# dir; put it FIRST on LD_LIBRARY_PATH so a stale /usr/local copy cannot
+# shadow the prefix under test (same stale-library concern as the CTest
+# LD_LIBRARY_PATH pinning in lib/).
+UWB_PREFIX_LIB=""
+for d in "$PREFIX/lib" "$PREFIX/lib64"; do
+    if [ -d "$d" ]; then UWB_PREFIX_LIB="$d"; break; fi
+done
 UWB_INSTALL_PREFIX_PY="$PYDIR" PYTHONPATH="$PYDIR:$PYDIR/gnuradio" \
+    LD_LIBRARY_PATH="$UWB_PREFIX_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     "${PYTHON:-python3}" "$ROOT/install_consumer.py"
 
 echo

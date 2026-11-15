@@ -1,0 +1,78 @@
+{
+  "base_commit": "a8f0016267cdaa62a00786db66e5e296a3988f56",
+  "source_worktree": "/home/oi/Desktop/uwb-gnuradio",
+  "destination_worktree": "/tmp/uwb-gnuradio-native-cleanup",
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "sha256": "cdb402bcc4ad474910ca5fa4c63842f1c4150276a87ec62b9606f64904960593",
+      "source": "tracked modification"
+    },
+    {
+      "path": "gr-uwb/apps/uwb_dw3000_live.cc",
+      "sha256": "00424409e1ed748ef78b76f435105186ef712ad98963420586a10667586ebb1a",
+      "source": "tracked modification"
+    },
+    {
+      "path": "gr-uwb/include/gnuradio/uwb/uwb_demod_core.h",
+      "sha256": "b583b0dd74e8cb78b7f1513b8fe4496789e92ce05728094b24bd734e7f78677d",
+      "source": "tracked modification"
+    },
+    {
+      "path": "gr-uwb/include/gnuradio/uwb/uwb_demod_result.h",
+      "sha256": "79f16b3cf7acfed5bbd12b666561eaa9469e4b534a99485ccc1d226503bfb8ac",
+      "source": "tracked modification"
+    },
+    {
+      "path": "gr-uwb/include/gnuradio/uwb/uwb_phy_profile.h",
+      "sha256": "69d1e3d367e10008f0e5833e6e56b20fb77d1f8b99271b2b6974a32c197e93c7",
+      "source": "tracked modification"
+    },
+    {
+      "path": "gr-uwb/lib/CMakeLists.txt",
+      "sha256": "1342aa0b7cbdb9e1cf7c253306845b331a4578ad4b644731dcbcbf977f34d045",
+      "source": "tracked modification"
+    },
+    {
+      "path": "tools/rx/qa_live_dw3000_console.py",
+      "sha256": "7d1ecd01d2837535115a173134231072ff92e39dad2769eb45d8fdfbf1560bf7",
+      "source": "tracked modification"
+    },
+    {
+      "path": "gr-uwb/include/gnuradio/uwb/uwb_target_lock_core.h",
+      "sha256": "5213e0e5c6262839c20ad4f43a031c687b2acb5bb47368a154055ea87ed9ccb2",
+      "source": "untracked baseline"
+    },
+    {
+      "path": "gr-uwb/include/gnuradio/uwb/uwb_timed_rx_plan.h",
+      "sha256": "9b1ce09b9046c892686031cc2d32a7c833a9e293c46102ef03347096aa13c2c9",
+      "source": "untracked baseline"
+    },
+    {
+      "path": "gr-uwb/lib/qa_uwb_target_lock_core.cc",
+      "sha256": "74fc745965758d327fee4a12cbc3475935e5eee9a62e8460166d2fcd0f2c8f97",
+      "source": "untracked baseline"
+    },
+    {
+      "path": "gr-uwb/lib/qa_uwb_timed_rx_plan.cc",
+      "sha256": "68aabb7a8d5786e3f98e515f406ba5fee48f6ef3f7ef4d8aaec30e0547b3d7fd",
+      "source": "untracked baseline"
+    },
+    {
+      "path": "docs/performance/X410_目标周期锁定与随机干扰双路径修改规划_2026-11-15.md",
+      "sha256": "eeb67e2952297b07ccd12c734f118484597f2e8b6b07b25c20e1aa8fd3b167e8",
+      "source": "untracked baseline"
+    },
+    {
+      "path": "docs/performance/X410_目标周期锁定与随机干扰双路径开发报告_2026-11-15.md",
+      "sha256": "43c748b75e184246f524cdee6bd936c97ee26ad3da893c74a256fe18b47fcb19",
+      "source": "untracked baseline"
+    },
+    {
+      "path": "docs/performance/X410周期锁定改动_独立复核_2026-11-15.md",
+      "sha256": "d1b8d56815ba3bbf410440ebf3af7a668f6736da1c60efd1d923d305d3e8eb2b",
+      "source": "untracked baseline"
+    }
+  ],
+  "note": "Selected current source/document baseline only; large IQ, build trees, logs and unrelated untracked files were not copied. No implementation changes made."
+}

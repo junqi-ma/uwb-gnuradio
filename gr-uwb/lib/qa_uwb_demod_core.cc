@@ -18,7 +18,7 @@
 
 #include <boost/test/unit_test.hpp>
 
-#include <gnuradio/gr_complex.h>
+#include <gnuradio/uwb/uwb_gr_complex.h>
 #include <gnuradio/uwb/uwb_demod_core.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
 

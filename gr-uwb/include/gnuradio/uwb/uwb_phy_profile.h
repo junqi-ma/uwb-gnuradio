@@ -189,9 +189,10 @@ struct Qm35825Profile {
     // (demod 1171 -> 3554 us).  Tighten it only when a better clock estimate
     // than the period fit is available.
     double fused_gate_ppm = 6.468;
-    // Diagnostic-only replay of the legacy soft-chip FIR, segmented at the
-    // decoded SFD/PHR/payload boundaries.  Never part of a formal timing run.
-    bool rx_diagnose_fir_segments = false;
+    // NOTE: the diagnostic-only segmented soft-chip FIR replay
+    // (rx_diagnose_fir_segments) is NOT part of this public production
+    // profile any more; it moved to demod::core::DemodScratch and is driven
+    // only by the experiment wrappers (apps/fullpacket_rx_pipeline.h).
     // First seeded SYNC refine half-width.  0 keeps the legacy
     // max(256, timing_coarse_stride) radius.  A nonzero value is used only
     // when the caller explicitly supplies it (the SFD-anchored tail profile)

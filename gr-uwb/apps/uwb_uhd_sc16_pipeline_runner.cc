@@ -24,6 +24,7 @@ using std::isnan;
 #include <complex>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
@@ -357,8 +358,7 @@ void print_help(const char* prog_name)
               << "  --json-out <path>           Write window-by-window results JSON\n"
               << "  --csv-out <path>            Write window-by-window results CSV\n"
               << "  --resampler-profile <name>  Resampler profile (quality_minorder|realtime_minorder|quality|realtime, default: quality_minorder)\n"
-              << "  --resampler-workers <n>     Resampler thread worker count (default: 1)\n"
-              << "  --resampler-experiment <e>  Kernel experiment: none|fixed_phase|convert_cache|both\n"
+              << "  --resampler-experiment <e>  Kernel experiment: none|fixed_phase (convert_cache/both removed)\n"
               << "  --iq-dump-dir <dir>         Diagnostic post-resample IQ dump directory\n"
               << "  --iq-dump-tag <tag>         Dump filename suffix (default: none)\n"
               << "  --iq-dump-windows <n>       Windows to dump (default: 0)\n"
@@ -634,6 +634,14 @@ int main(int argc, char* argv[])
                 return 1;
             }
             cfg.resampler_experiment = argv[++i];
+            if (cfg.resampler_experiment != "none" &&
+                cfg.resampler_experiment != "fixed_phase") {
+                std::cerr << "Error: --resampler-experiment '" << cfg.resampler_experiment
+                          << "' is not accepted (accepted: none|fixed_phase; "
+                             "convert_cache/both were measured, not retained and "
+                             "removed in the 2026-11-15 native cleanup)\n";
+                return 2;
+            }
         } else if (arg == "--iq-dump-dir") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --iq-dump-dir requires a path\n";
@@ -659,12 +667,14 @@ int main(int argc, char* argv[])
             }
             cfg.iq_dump_window_limit = static_cast<size_t>(std::stoull(argv[++i]));
         } else if (arg == "--resampler-workers") {
-            if (i + 1 >= argc) {
-                std::cerr << "Error: --resampler-workers requires worker count\n";
-                print_help(argv[0]);
-                return 1;
-            }
-            cfg.resampler_workers = std::stoi(argv[++i]);
+            // Removed in the 2026-11-15 native cleanup: the pipeline always
+            // forces each DSP worker's nested resampler pool to 1, so the
+            // option never had an effect.  Fail loudly instead of silently
+            // ignoring it.
+            std::cerr << "Error: --resampler-workers was removed (each DSP worker's "
+                         "resampler is always single-threaded in burst mode); "
+                         "use --dsp-workers for parallelism\n";
+            return 2;
         } else if (arg == "--sic-policy") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --sic-policy requires an argument (preamble|fullpacket|auto)\n";
@@ -830,13 +840,6 @@ int main(int argc, char* argv[])
                   << "; the affinity list must contain exactly one core per DSP worker.\n";
         return 1;
     }
-    if (cfg.dsp_workers > 1 && cfg.resampler_workers > 1) {
-        std::cerr << "Warning: --dsp-workers " << cfg.dsp_workers
-                  << " > 1 with --resampler-workers " << cfg.resampler_workers
-                  << " > 1; the pipeline forces each DSP worker's nested resampler pool to 1 "
-                     "(burst-level multi-core).\n";
-    }
-
     // Configure source type
     if (source_str == "replay") {
         cfg.source_type = StreamSourceType::Replay;
@@ -892,8 +895,12 @@ int main(int argc, char* argv[])
         if (!file_path.empty()) {
             cfg.replay_file = file_path;
         } else {
-            // Default testdata file
-            std::string default_cand1 = std::string(UWB_TESTDATA_DIR) + "/uwb_radar/tx_998p4.sc16";
+            // Default testdata file.  A runtime $UWB_TESTDATA_DIR override
+            // lets an installed runner find fixtures without the source tree.
+            const char* env_td = std::getenv("UWB_TESTDATA_DIR");
+            const std::string td_root =
+                (env_td && *env_td) ? std::string(env_td) : std::string(UWB_TESTDATA_DIR);
+            std::string default_cand1 = td_root + "/uwb_radar/tx_998p4.sc16";
             std::string default_cand2 = "testdata/uwb_radar/tx_998p4.sc16";
             if (file_exists(default_cand1)) {
                 cfg.replay_file = default_cand1;
@@ -929,12 +936,6 @@ int main(int argc, char* argv[])
         dsp_affinity_str = "unpinned";
     }
 
-    // The pipeline forces each DSP worker's nested resampler pool to 1 so that
-    // a burst stays run-to-completion on a single core.
-    const std::string resampler_workers_str =
-        (cfg.dsp_workers > 1) ? std::string("1 (forced, burst-level multi-core)")
-                              : std::to_string(cfg.resampler_workers);
-
     const char* sic_policy_str = "auto";
     switch (cfg.sic_cfg.policy) {
     case gr::uwb::sic::SicPolicy::PreambleOnly: sic_policy_str = "preamble"; break;
@@ -961,7 +962,7 @@ int main(int argc, char* argv[])
               << "  Max Windows:   " << cfg.max_windows << "\n"
               << "  DSP Workers:   " << cfg.dsp_workers << "\n"
               << "  DSP Affinity:  " << dsp_affinity_str << "\n"
-              << "  Resampler:     profile=" << cfg.resampler_profile << ", workers=" << resampler_workers_str
+              << "  Resampler:     profile=" << cfg.resampler_profile
               << ", experiment=" << cfg.resampler_experiment << "\n"
               << "  SIC:           policy=" << sic_policy_str << ", backend=" << sic_backend_str
               << ", code=" << cfg.sic_cfg.comm_code

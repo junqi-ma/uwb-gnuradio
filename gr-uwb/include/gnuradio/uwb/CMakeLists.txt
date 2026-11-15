@@ -10,6 +10,9 @@
 ########################################################################
 install(FILES
     api.h
+    uwb_gr_complex.h
+    uwb_radar_meta_core.h
+    uwb_sc16_stream_source.h
     uwb_defaults.h
     uwb_detector_core.h
     uwb_detector.h
@@ -24,6 +27,8 @@ install(FILES
     uwb_qm35_acquisition_tracker.h
     uwb_auto_scheduled_extractor_sc16.h
     uwb_rational_resampler_core.h
+    uwb_sc16_scale.h
+    uwb_discrete_cir_sic.h
     uwb_rational_resampler_ccf_65_48.h
     uwb_pdu_rational_resampler_ccf_65_48.h
     uwb_pdu_rational_resampler_ccf_65_32.h
@@ -124,5 +129,14 @@ install(FILES
     uwb_fullpacket_sic_core.h
     uwb_preamble_sic_core.h
     uwb_sic_unified.h
+    # Native RX runtime headers (2026-11-15 cleanup): the pipeline, its
+    # minimal SC16 source contract, the fixed-tone decorator + core, and the
+    # target-lock / timed-plan cores are installed so an isolated native
+    # consumer can build against the prefix alone.
+    uwb_uhd_sc16_pipeline.h
+    uwb_fixed_tone_cancel_core.h
+    uwb_fixed_tone_cancel_source.h
+    uwb_target_lock_core.h
+    uwb_timed_rx_plan.h
     DESTINATION include/gnuradio/uwb
 )

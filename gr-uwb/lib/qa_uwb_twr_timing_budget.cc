@@ -91,7 +91,7 @@
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_32.h>
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h>
 #include <gnuradio/uwb/uwb_radar_checked_math.h>
-#include <gnuradio/uwb/uwb_radar_pdu_meta.h>
+#include <gnuradio/uwb/uwb_radar_meta_core.h>
 #include <gnuradio/uwb/uwb_twr_test_output.h>
 #include <gnuradio/uwb/uwb_uhd_backend_config.h>
 

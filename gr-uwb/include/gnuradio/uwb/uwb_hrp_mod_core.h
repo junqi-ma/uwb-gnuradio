@@ -23,7 +23,7 @@
 
 #include <gnuradio/uwb/uwb_demod_core.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
-#include <gnuradio/uwb/uwb_radar_pdu_meta.h>
+#include <gnuradio/uwb/uwb_radar_meta_core.h>
 
 #include <algorithm>
 #include <cmath>

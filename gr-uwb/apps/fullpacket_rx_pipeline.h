@@ -78,7 +78,9 @@ public:
         profile_.rx_softchip_on_demand = effective.softchip_on_demand;
         profile_.rx_fused_payload_cmf = effective.fused_payload_cmf;
         profile_.rx_fused_phr_cmf = effective.fused_phr_cmf;
-        profile_.rx_diagnose_fir_segments = effective.diagnose_fir_segments;
+        // Diagnostic hook lives on the core scratch, not on the public
+        // production profile (moved out of Qm35825Profile).
+        scratch_.diagnose_fir_segments = effective.diagnose_fir_segments;
         scratch_.reserve(max_samples);
     }
 

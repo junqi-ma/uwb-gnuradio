@@ -371,7 +371,7 @@ void print_help(const char* prog)
         << "  --target-sync-reps <64|256> target preamble (default 64); CIR uses reps-10\n"
         << "  --sic-sync-reps <64|256>    interference preamble (default 64)\n"
         << "  --resampler-profile <name> (default realtime_minorder)\n"
-        << "  --resampler-experiment <none|fixed_phase|convert_cache|both>\n"
+        << "  --resampler-experiment <none|fixed_phase> (convert_cache/both removed)\n"
         << "  --iq-dump-dir <dir>        diagnostic post-resample IQ dump directory\n"
         << "  --iq-dump-tag <tag>        filename suffix (default: none)\n"
         << "  --iq-dump-windows <n>      number of windows to dump (default 0)\n"
@@ -459,6 +459,13 @@ int main(int argc, char* argv[])
             cfg.resampler_profile = need(i);
         } else if (a == "--resampler-experiment") {
             cfg.resampler_experiment = need(i);
+            if (cfg.resampler_experiment != "none" &&
+                cfg.resampler_experiment != "fixed_phase") {
+                std::cerr << "Error: --resampler-experiment '" << cfg.resampler_experiment
+                          << "' not accepted (accepted: none|fixed_phase; convert_cache/both "
+                             "removed in the 2026-11-15 native cleanup)\n";
+                return 2;
+            }
         } else if (a == "--iq-dump-dir") {
             cfg.iq_dump_dir = need(i);
         } else if (a == "--iq-dump-tag") {

@@ -65,3 +65,6 @@ plan.json
 docs/performance/data_65_48_equiripple*/raw/
 docs/performance/data_65_48_equiripple_g3/*_base/
 docs/performance/data_65_48_equiripple_g3/*_cand/
+
+# Local delegated sessions and independent verification artifacts
+.opencode-task/

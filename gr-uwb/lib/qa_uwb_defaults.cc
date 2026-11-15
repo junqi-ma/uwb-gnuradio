@@ -11,7 +11,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <gnuradio/uwb/uwb_defaults.h>
-#include <gnuradio/uwb/uwb_radar_pdu_meta.h>
+#include <gnuradio/uwb/uwb_radar_meta_core.h>
 
 #include <cmath>
 #include <fstream>

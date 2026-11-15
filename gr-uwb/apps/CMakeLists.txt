@@ -6,26 +6,40 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 
-include(GrPython)
+########################################################################
+# App split (2026-11-15 native cleanup)
+#
+#   native apps   -> link uwb_native / uwb_core only (no gnuradio-uwb, no
+#                    GR/PMT dynamic dependency); built in BOTH modes.
+#   GR apps       -> flowgraph benchmarks that drive gr::block classes;
+#                    built only when UWB_BUILD_GNURADIO=ON.
+#   experiment    -> historical benchmark/diagnostic apps, gated by
+#                    UWB_BUILD_EXPERIMENTS (default ON); native-linked.
+#   python scripts/GRC -> GNU Radio adapter mode only.
+########################################################################
 
-GR_PYTHON_INSTALL(
-    PROGRAMS
-    x410_scheduled_capture.py
-    x410_auto_scheduled_capture.py
-    x410_cg400_hrp_echo_cir.py
-    x410_cg400_hrp_echo_cir_sweep.py
-    x410_cg400_hrp_echo_cir_jam.py
-    echo_cir_freq_plan.py
-    echo_cir_jam_plan.py
-    jam_offline_inject.py
-    prepare_uhd_eal_noret.py
-    uwb_sim_cg400_echo_cir.py
-    uwb_radar_cir_udp.py
-    cir_udp_recv.py
-    simulate_scheduled_write.py
-    benchmark_rake_modes.py
-    DESTINATION bin
-)
+if(UWB_BUILD_GNURADIO)
+    include(GrPython)
+
+    GR_PYTHON_INSTALL(
+        PROGRAMS
+        x410_scheduled_capture.py
+        x410_auto_scheduled_capture.py
+        x410_cg400_hrp_echo_cir.py
+        x410_cg400_hrp_echo_cir_sweep.py
+        x410_cg400_hrp_echo_cir_jam.py
+        echo_cir_freq_plan.py
+        echo_cir_jam_plan.py
+        jam_offline_inject.py
+        prepare_uhd_eal_noret.py
+        uwb_sim_cg400_echo_cir.py
+        uwb_radar_cir_udp.py
+        cir_udp_recv.py
+        simulate_scheduled_write.py
+        benchmark_rake_modes.py
+        DESTINATION bin
+    )
+endif()
 
 ########################################################################
 # Python QA registration (M0 review R8 / P2).
@@ -77,8 +91,8 @@ endif()
 # M1-B: the offline two-endpoint simulation demo and its independent checks.
 #
 # `twr_fake_demo` links ONLY the standalone `uwb_twr_core` archive and the
-# QA-only fake link -- never gnuradio-uwb and never UHD -- so running it is
-# itself evidence that the protocol core is radio-free (M1-B §8).
+# QA-only fake link -- never gnuradio-uwb and never UHD -- so running it is itself
+# evidence that the protocol core is radio-free (M1-B §8).
 #
 # The Python demo/QA and the independent verifier are registered here so a
 # green `ctest` covers B17 rather than only a hand run.  The demo never
@@ -145,11 +159,17 @@ endif()
 # GR_PYTHON_DIR is the configured Python install directory (dist-packages on a
 # stock local install), passed so the wrapper does not have to guess
 # site-packages.
+#
+# In native mode (UWB_BUILD_GNURADIO=OFF) the Python half is absent by design;
+# uwb_qa_native_install_consumer below is the native install gate instead.
 ########################################################################
 set(UWB_TWR_INSTALL_PREFIX "" CACHE PATH
     "Prefix of an installed gr-uwb used by the install_consumer release gate; \
 empty means the case is SKIPPED")
-if(PYTHONINTERP_FOUND AND UNIX)
+set(UWB_NATIVE_INSTALL_PREFIX "" CACHE PATH
+    "Prefix of an installed NATIVE (UWB_BUILD_GNURADIO=OFF) gr-uwb used by the \
+native install-consumer gate; empty means the case is SKIPPED")
+if(UWB_BUILD_GNURADIO AND PYTHONINTERP_FOUND AND UNIX)
     add_test(NAME uwb_qa_install_consumer
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/install_consumer/run_install_consumer.sh
                 --prefix "${UWB_TWR_INSTALL_PREFIX}"
@@ -170,84 +190,55 @@ if(PYTHONINTERP_FOUND AND UNIX)
 endif()
 
 ########################################################################
-# Standalone detector benchmark (开发需求参考.md §10)
+# Native install-consumer gate (2026-11-15 native cleanup).
+#
+# run_native_install_consumer.sh compiles uwb_native_consumer.cc against an
+# install prefix ONLY (no source tree, no build tree, no GR headers), links
+# the installed uwb_native/uwb_core archives, runs the consumer, and proves
+# with readelf/ldd that the result has NO libgnuradio-*/PMT dependency.
+# Works after a native-mode install; empty prefix => exit 77 => SKIPPED.
 ########################################################################
-add_executable(benchmark_detector benchmark_detector.cc)
-target_link_libraries(benchmark_detector
-    gnuradio-uwb
-    gnuradio::gnuradio-blocks
-    gnuradio::gnuradio-runtime
-)
-
-add_executable(benchmark_detector_sc16 benchmark_detector_sc16.cc)
-target_link_libraries(benchmark_detector_sc16
-    gnuradio-uwb
-    gnuradio::gnuradio-blocks
-    gnuradio::gnuradio-runtime
-)
-
-add_executable(benchmark_energy_gate_formats benchmark_energy_gate_formats.cc)
-target_link_libraries(benchmark_energy_gate_formats
-    gnuradio-uwb
-    gnuradio::gnuradio-runtime
-)
+if(UNIX)
+    add_test(NAME uwb_qa_native_install_consumer
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/install_consumer/run_native_install_consumer.sh
+                --prefix "${UWB_NATIVE_INSTALL_PREFIX}"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(uwb_qa_native_install_consumer PROPERTIES
+        TIMEOUT 300
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE)
+    message(STATUS "UWB CTest: registered uwb_qa_native_install_consumer "
+                   "(prefix='${UWB_NATIVE_INSTALL_PREFIX}'; empty => SKIP)")
+endif()
 
 ########################################################################
-# Level-A resampler baseline: 65/48 rational_resampler_ccf (737.28→998.4)
-# Spec: 开发方案_GNURadio软件升采样_737.28M到998.4M.md §9
+# Native apps: link uwb_native/uwb_core only -- their transitive dynamic
+# dependencies contain no libgnuradio-*/PMT (proven by the install consumer
+# and by readelf on the built binaries).
 ########################################################################
 find_package(Threads REQUIRED)
-add_executable(benchmark_resampler_65_48 benchmark_resampler_65_48.cc)
-target_link_libraries(benchmark_resampler_65_48
-    gnuradio-uwb
-    gnuradio::gnuradio-blocks
-    gnuradio::gnuradio-runtime
-    gnuradio::gnuradio-filter
-    Threads::Threads
-)
 
-########################################################################
-# Radar sensing pipeline timing (host stages + max packet-rate estimate)
-########################################################################
-add_executable(benchmark_radar_pipeline benchmark_radar_pipeline.cc)
-target_link_libraries(benchmark_radar_pipeline
-    gnuradio-uwb
-    gnuradio::gnuradio-blocks
-    gnuradio::gnuradio-runtime
-    Threads::Threads
-)
-
-########################################################################
-# S0-D: layered preamble-SIC benchmark (core / GR-PDU / native 65/32).
-# Measurement only; it drives the frozen core + adapter + resampler.
-########################################################################
-add_executable(benchmark_preamble_sic benchmark_preamble_sic.cc)
-target_link_libraries(benchmark_preamble_sic
-    gnuradio-uwb
-    gnuradio::gnuradio-blocks
-    gnuradio::gnuradio-runtime
-    Threads::Threads
-)
-
-########################################################################
 # HRP TX modulator timing (P3: 64-SYNC PSDU<=127 B >= 1000 pkt/s)
-########################################################################
 add_executable(benchmark_hrp_mod benchmark_hrp_mod.cc)
 target_link_libraries(benchmark_hrp_mod
-    gnuradio-uwb
-    gnuradio::gnuradio-runtime
+    uwb_core
     Volk::volk
 )
 add_test(NAME uwb_benchmark_hrp_mod
     COMMAND benchmark_hrp_mod 4 32)
 set_tests_properties(uwb_benchmark_hrp_mod PROPERTIES TIMEOUT 120)
 
+add_executable(benchmark_energy_gate_formats benchmark_energy_gate_formats.cc)
+target_link_libraries(benchmark_energy_gate_formats
+    uwb_core
+)
+
 ########################################################################
 # Offline dump postprocess: per-window notch + 65/48 (no UHD, no work())
 ########################################################################
 add_executable(uwb_offline_postprocess_dump uwb_offline_postprocess_dump.cc)
 target_link_libraries(uwb_offline_postprocess_dump
-    gnuradio-uwb
+    uwb_native
     Threads::Threads
 )
 install(TARGETS uwb_offline_postprocess_dump DESTINATION bin)
@@ -270,33 +261,21 @@ target_compile_definitions(twr_native_phy_demo PRIVATE
 # The verifier re-derives the frame bytes / CRC / lengths / decode verdict from
 # the manifest WITHOUT calling the C++, so it needs no build tree.  It runs the
 # demo on the fly to get a real manifest and then checks it, plus --self-test.
-add_test(NAME uwb_qa_twr_m2a_native_phy_verify_py
-    COMMAND sh -c
-        "d=$(mktemp -d ${CMAKE_CURRENT_BINARY_DIR}/m2a_verify.XXXXXX) && \
+if(PYTHONINTERP_FOUND)
+    add_test(NAME uwb_qa_twr_m2a_native_phy_verify_py
+        COMMAND sh -c
+            "d=$(mktemp -d ${CMAKE_CURRENT_BINARY_DIR}/m2a_verify.XXXXXX) && \
 $<TARGET_FILE:twr_native_phy_demo> --frame poll --native-rate 737280000 --iq cf32 \
     --output $d/out.json && \
 ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/twr/verify_m2_a_native_phy.py \
     --output $d/out.json --self-test; rc=$?; rm -rf $d; exit $rc")
-set_property(TEST uwb_qa_twr_m2a_native_phy_verify_py APPEND PROPERTY
-    ENVIRONMENT
-        "PYTHONPATH="
-        "PYTHONDONTWRITEBYTECODE=1")
-set_tests_properties(uwb_qa_twr_m2a_native_phy_verify_py PROPERTIES
-    TIMEOUT 300 RUN_SERIAL TRUE)
-
-########################################################################
-# S2-B payload-collision targeted QA (pure checks + build-dependent clean
-# closure / SIC freeze).  Uses this build tree's uwb_python via UWB_BUILD_DIR.
-########################################################################
-add_test(NAME uwb_qa_sic_payload_py
-    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_sic_payload.py)
-set_property(TEST uwb_qa_sic_payload_py APPEND PROPERTY
-    ENVIRONMENT
-        "PYTHONPATH="
-        "PYTHONDONTWRITEBYTECODE=1"
-        "UWB_BUILD_DIR=${CMAKE_BINARY_DIR}")
-set_tests_properties(uwb_qa_sic_payload_py PROPERTIES
-    TIMEOUT 300 RUN_SERIAL TRUE)
+    set_property(TEST uwb_qa_twr_m2a_native_phy_verify_py APPEND PROPERTY
+        ENVIRONMENT
+            "PYTHONPATH="
+            "PYTHONDONTWRITEBYTECODE=1")
+    set_tests_properties(uwb_qa_twr_m2a_native_phy_verify_py PROPERTIES
+        TIMEOUT 300 RUN_SERIAL TRUE)
+endif()
 
 ########################################################################
 # M2-A closeout: the A13 allocation/latency observation tool (G0 A.4).
@@ -310,61 +289,145 @@ target_link_libraries(twr_m2a_bench PRIVATE
 target_compile_definitions(twr_m2a_bench PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
-add_executable(benchmark_fullpacket_compare benchmark_fullpacket_compare.cc)
-target_link_libraries(benchmark_fullpacket_compare gnuradio-uwb)
+########################################################################
+# S2-B payload-collision targeted QA (pure checks + build-dependent clean
+# closure / SIC freeze).  Uses this build tree's uwb_python via UWB_BUILD_DIR.
+# GNU Radio adapter mode only (it imports the built Python bindings).
+########################################################################
+if(UWB_BUILD_GNURADIO AND PYTHONINTERP_FOUND)
+    add_test(NAME uwb_qa_sic_payload_py
+        COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_sic_payload.py)
+    set_property(TEST uwb_qa_sic_payload_py APPEND PROPERTY
+        ENVIRONMENT
+            "PYTHONPATH="
+            "PYTHONDONTWRITEBYTECODE=1"
+            "UWB_BUILD_DIR=${CMAKE_BINARY_DIR}")
+    set_tests_properties(uwb_qa_sic_payload_py PROPERTIES
+        TIMEOUT 300 RUN_SERIAL TRUE)
+endif()
 
-add_test(NAME uwb_qa_fullpacket_compare_py
-    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/sic/qa_fullpacket_compare.py)
-set_tests_properties(uwb_qa_fullpacket_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+########################################################################
+# GNU Radio adapter benchmarks (flowgraph drivers).  GR mode only.
+########################################################################
+if(UWB_BUILD_GNURADIO)
+    # Standalone detector benchmark (开发需求参考.md §10)
+    add_executable(benchmark_detector benchmark_detector.cc)
+    target_link_libraries(benchmark_detector
+        gnuradio-uwb
+        gnuradio::gnuradio-blocks
+        gnuradio::gnuradio-runtime
+    )
 
-add_test(NAME uwb_qa_discrete_cir_compare_py
-    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/sic/verify_discrete_cir_compare.py --self-test)
-set_tests_properties(uwb_qa_discrete_cir_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    add_executable(benchmark_detector_sc16 benchmark_detector_sc16.cc)
+    target_link_libraries(benchmark_detector_sc16
+        gnuradio-uwb
+        gnuradio::gnuradio-blocks
+        gnuradio::gnuradio-runtime
+    )
 
-# Mature RX uses the existing AVX2/FMA FIR and compiler vectorization.
-# Keep the portable executable for same-source, same-library paired measurement.
-add_executable(benchmark_fullpacket_compare_fast_rx benchmark_fullpacket_compare.cc)
-target_link_libraries(benchmark_fullpacket_compare_fast_rx gnuradio-uwb)
-target_compile_options(benchmark_fullpacket_compare_fast_rx PRIVATE -march=native)
+    # Level-A resampler baseline: 65/48 rational_resampler_ccf (737.28→998.4)
+    # Spec: 开发方案_GNURadio软件升采样_737.28M到998.4M.md §9
+    add_executable(benchmark_resampler_65_48 benchmark_resampler_65_48.cc)
+    target_link_libraries(benchmark_resampler_65_48
+        gnuradio-uwb
+        gnuradio::gnuradio-blocks
+        gnuradio::gnuradio-runtime
+        gnuradio::gnuradio-filter
+        Threads::Threads
+    )
 
-# Isolated generic-ISA CFO replay: diagnostic only, production kernel unchanged.
-add_executable(benchmark_fullpacket_cfo_diag benchmark_fullpacket_cfo_diag.cc)
-target_link_libraries(benchmark_fullpacket_cfo_diag gnuradio-uwb)
-target_compile_options(benchmark_fullpacket_cfo_diag PRIVATE -fPIC)
+    # Radar sensing pipeline timing (host stages + max packet-rate estimate)
+    add_executable(benchmark_radar_pipeline benchmark_radar_pipeline.cc)
+    target_link_libraries(benchmark_radar_pipeline
+        gnuradio-uwb
+        gnuradio::gnuradio-blocks
+        gnuradio::gnuradio-runtime
+        Threads::Threads
+    )
 
-# Offline-only copy of reconstruction, split by waveform fields for timing.
-add_executable(benchmark_fullpacket_segment_diag
-    benchmark_fullpacket_segment_diag.cc fullpacket_segment_diagnostics.cc)
-target_link_libraries(benchmark_fullpacket_segment_diag gnuradio-uwb)
-target_compile_options(benchmark_fullpacket_segment_diag PRIVATE -fPIC)
-add_test(NAME uwb_qa_fullpacket_segment_diag
-    COMMAND benchmark_fullpacket_segment_diag --self-test)
-set_tests_properties(uwb_qa_fullpacket_segment_diag PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    # S0-D: layered preamble-SIC benchmark (core / GR-PDU / native 65/32).
+    # Measurement only; it drives the frozen core + adapter + resampler.
+    add_executable(benchmark_preamble_sic benchmark_preamble_sic.cc)
+    target_link_libraries(benchmark_preamble_sic
+        gnuradio-uwb
+        gnuradio::gnuradio-blocks
+        gnuradio::gnuradio-runtime
+        Threads::Threads
+    )
+else()
+    message(STATUS "UWB_BUILD_GNURADIO=OFF: skipping GR flowgraph benchmarks "
+                   "(benchmark_detector[_sc16], benchmark_resampler_65_48, "
+                   "benchmark_radar_pipeline, benchmark_preamble_sic)")
+endif()
 
-# Controlled tap-count sweep using the unchanged production discrete backend.
-add_executable(benchmark_discrete_cir_taps benchmark_discrete_cir_taps.cc)
-target_link_libraries(benchmark_discrete_cir_taps gnuradio-uwb)
-target_compile_options(benchmark_discrete_cir_taps PRIVATE -fPIC)
+########################################################################
+# Historical benchmark / diagnostic EXPERIMENT apps (UWB_BUILD_EXPERIMENTS).
+# Native-linked; they exist for A/B measurement, not production.
+########################################################################
+if(UWB_BUILD_EXPERIMENTS)
+    add_executable(benchmark_fullpacket_compare benchmark_fullpacket_compare.cc)
+    target_link_libraries(benchmark_fullpacket_compare uwb_native)
 
-# Unified SIC timing benchmark.
-add_executable(bench_unified_timing bench_unified_timing.cc)
-target_link_libraries(bench_unified_timing gnuradio-uwb)
-target_compile_options(bench_unified_timing PRIVATE -O3 -march=native)
+    if(PYTHONINTERP_FOUND)
+        add_test(NAME uwb_qa_fullpacket_compare_py
+            COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/sic/qa_fullpacket_compare.py)
+        set_tests_properties(uwb_qa_fullpacket_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 
-# Offline paired recovery experiment: desired complete packet + other-code
-# SYNC/SFD-only interference. Does not change the production pipeline.
-add_executable(experiment_preamble_recovery
-    ../../tools/sic/experiment_preamble_recovery.cc)
-target_link_libraries(experiment_preamble_recovery gnuradio-uwb)
-target_compile_options(experiment_preamble_recovery PRIVATE -O3 -march=native)
+        add_test(NAME uwb_qa_discrete_cir_compare_py
+            COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/sic/verify_discrete_cir_compare.py --self-test)
+        set_tests_properties(uwb_qa_discrete_cir_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    endif()
 
-add_executable(benchmark_chain_workers ../../tools/sic/benchmark_chain_workers.cc)
-target_link_libraries(benchmark_chain_workers gnuradio-uwb)
-target_compile_options(benchmark_chain_workers PRIVATE -O3 -march=native)
+    # Mature RX uses the existing AVX2/FMA FIR and compiler vectorization.
+    # Keep the portable executable for same-source, same-library paired measurement.
+    add_executable(benchmark_fullpacket_compare_fast_rx benchmark_fullpacket_compare.cc)
+    target_link_libraries(benchmark_fullpacket_compare_fast_rx uwb_native)
+    target_compile_options(benchmark_fullpacket_compare_fast_rx PRIVATE -march=native)
 
+    # Isolated generic-ISA CFO replay: diagnostic only, production kernel unchanged.
+    add_executable(benchmark_fullpacket_cfo_diag benchmark_fullpacket_cfo_diag.cc)
+    target_link_libraries(benchmark_fullpacket_cfo_diag uwb_native)
+    target_compile_options(benchmark_fullpacket_cfo_diag PRIVATE -fPIC)
+
+    # Offline-only copy of reconstruction, split by waveform fields for timing.
+    add_executable(benchmark_fullpacket_segment_diag
+        benchmark_fullpacket_segment_diag.cc fullpacket_segment_diagnostics.cc)
+    target_link_libraries(benchmark_fullpacket_segment_diag uwb_native)
+    target_compile_options(benchmark_fullpacket_segment_diag PRIVATE -fPIC)
+    add_test(NAME uwb_qa_fullpacket_segment_diag
+        COMMAND benchmark_fullpacket_segment_diag --self-test)
+    set_tests_properties(uwb_qa_fullpacket_segment_diag PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+
+    # Controlled tap-count sweep using the unchanged production discrete backend.
+    add_executable(benchmark_discrete_cir_taps benchmark_discrete_cir_taps.cc)
+    target_link_libraries(benchmark_discrete_cir_taps uwb_native)
+    target_compile_options(benchmark_discrete_cir_taps PRIVATE -fPIC)
+
+    # Unified SIC timing benchmark.
+    add_executable(bench_unified_timing bench_unified_timing.cc)
+    target_link_libraries(bench_unified_timing uwb_native)
+    target_compile_options(bench_unified_timing PRIVATE -O3 -march=native)
+
+    # Offline paired recovery experiment: desired complete packet + other-code
+    # SYNC/SFD-only interference. Does not change the production pipeline.
+    add_executable(experiment_preamble_recovery
+        ../../tools/sic/experiment_preamble_recovery.cc)
+    target_link_libraries(experiment_preamble_recovery uwb_native)
+    target_compile_options(experiment_preamble_recovery PRIVATE -O3 -march=native)
+
+    add_executable(benchmark_chain_workers ../../tools/sic/benchmark_chain_workers.cc)
+    target_link_libraries(benchmark_chain_workers uwb_native)
+    target_compile_options(benchmark_chain_workers PRIVATE -O3 -march=native)
+else()
+    message(STATUS "UWB_BUILD_EXPERIMENTS=OFF: skipping historical benchmark/"
+                   "diagnostic experiment apps")
+endif()
+
+########################################################################
 # UHD SC16 Direct RX and Multi-Core Stream Pipeline Runner
+########################################################################
 add_executable(uwb_uhd_sc16_pipeline_runner uwb_uhd_sc16_pipeline_runner.cc)
-target_link_libraries(uwb_uhd_sc16_pipeline_runner gnuradio-uwb Threads::Threads)
+target_link_libraries(uwb_uhd_sc16_pipeline_runner uwb_native Threads::Threads)
 target_compile_options(uwb_uhd_sc16_pipeline_runner PRIVATE -O3 -march=native)
 target_compile_definitions(uwb_uhd_sc16_pipeline_runner PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
@@ -372,11 +435,13 @@ if(UWB_HAVE_UHD)
     target_link_libraries(uwb_uhd_sc16_pipeline_runner UHD::UHD)
 endif()
 
+########################################################################
 # UHD SC16 direct capture + native-grid packet analysis.
 # Diagnostic counterpart of the GNU Radio capture flow: same UhdDeviceSc16Source
 # the pipeline uses, then the native detector cores over the captured buffer.
+########################################################################
 add_executable(uwb_uhd_sc16_capture uwb_uhd_sc16_capture.cc)
-target_link_libraries(uwb_uhd_sc16_capture gnuradio-uwb Threads::Threads)
+target_link_libraries(uwb_uhd_sc16_capture uwb_native Threads::Threads)
 target_compile_options(uwb_uhd_sc16_capture PRIVATE -O3 -march=native)
 if(UWB_HAVE_UHD)
     target_link_libraries(uwb_uhd_sc16_capture UHD::UHD)
@@ -412,7 +477,7 @@ endif()
 
 # 2026-11-11 round 2: pure-core resampler benchmark (owner: subagent A).
 add_executable(benchmark_sc16_burst_core benchmark_sc16_burst_core.cc)
-target_link_libraries(benchmark_sc16_burst_core gnuradio-uwb Threads::Threads)
+target_link_libraries(benchmark_sc16_burst_core uwb_native Threads::Threads)
 target_compile_options(benchmark_sc16_burst_core PRIVATE -O3 -march=native)
 target_compile_definitions(benchmark_sc16_burst_core PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
@@ -422,16 +487,16 @@ target_compile_definitions(benchmark_sc16_burst_core PRIVATE
 # source decorator over a raw SC16 capture and writes the clean stream for the
 # independent Python reference.
 add_executable(benchmark_fixed_tone_cancel benchmark_fixed_tone_cancel.cc)
-target_link_libraries(benchmark_fixed_tone_cancel gnuradio-uwb Threads::Threads)
+target_link_libraries(benchmark_fixed_tone_cancel uwb_native Threads::Threads)
 target_compile_options(benchmark_fixed_tone_cancel PRIVATE -O3 -march=native)
 
 add_executable(fixed_tone_cancel_replay fixed_tone_cancel_replay.cc)
-target_link_libraries(fixed_tone_cancel_replay gnuradio-uwb Threads::Threads)
+target_link_libraries(fixed_tone_cancel_replay uwb_native Threads::Threads)
 target_compile_options(fixed_tone_cancel_replay PRIVATE -O3 -march=native)
 
 # 2026-11-11 round 2: steady-state pipeline benchmark driver (owner: main agent).
 add_executable(benchmark_sc16_pipeline_steady benchmark_sc16_pipeline_steady.cc)
-target_link_libraries(benchmark_sc16_pipeline_steady gnuradio-uwb Threads::Threads)
+target_link_libraries(benchmark_sc16_pipeline_steady uwb_native Threads::Threads)
 target_compile_options(benchmark_sc16_pipeline_steady PRIVATE -O3 -march=native)
 target_compile_definitions(benchmark_sc16_pipeline_steady PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
@@ -440,14 +505,33 @@ if(UWB_HAVE_UHD)
 endif()
 
 # Live DW3000 packet console (native UHD, bounded workers, no GR scheduler).
+#
+# Runtime resources (resampler taps, preamble template) are resolved at run
+# time: --res-dir > $UWB_RESOURCE_DIR > $UWB_TESTDATA_DIR > the installed
+# resource dir (UWB_INSTALL_RESOURCE_DIR) > the build-tree testdata fallback,
+# so an installed binary never depends on a source checkout / old build tree.
 add_executable(uwb_dw3000_live uwb_dw3000_live.cc)
-target_link_libraries(uwb_dw3000_live gnuradio-uwb Threads::Threads)
+target_link_libraries(uwb_dw3000_live uwb_native Threads::Threads)
 target_compile_options(uwb_dw3000_live PRIVATE -O3 -march=native)
 target_compile_definitions(uwb_dw3000_live PRIVATE
-    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
-if(ENABLE_TESTING)
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\""
+    "UWB_INSTALL_RESOURCE_DIR=\"${CMAKE_INSTALL_PREFIX}/${GR_PKG_DATA_DIR}\"")
+if(UWB_HAVE_UHD)
+    target_link_libraries(uwb_dw3000_live UHD::UHD)
+endif()
+# CMAKE_TESTING_ENABLED is set by the top-level enable_testing() in BOTH build
+# modes (GR mode additionally has ENABLE_TESTING from GrTest); the live
+# console QA is a no-hardware replay regression and must be registered in the
+# native build too, not only in GR mode.
+if(CMAKE_TESTING_ENABLED OR ENABLE_TESTING)
     add_test(NAME uwb_qa_dw3000_live_console
         COMMAND python3 ${CMAKE_SOURCE_DIR}/../tools/rx/qa_live_dw3000_console.py
                 $<TARGET_FILE:uwb_dw3000_live>)
     set_tests_properties(uwb_qa_dw3000_live_console PROPERTIES TIMEOUT 90)
 endif()
+
+########################################################################
+# Native apps install to bin in both build modes.
+########################################################################
+install(TARGETS uwb_uhd_sc16_pipeline_runner uwb_uhd_sc16_capture
+              uwb_dw3000_live DESTINATION bin)

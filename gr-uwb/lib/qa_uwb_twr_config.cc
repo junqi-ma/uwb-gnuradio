@@ -43,7 +43,7 @@
 // GNU Radio (and, for the UHD backend config, the echo backend), so they are
 // included HERE and never in uwb_twr_config.h itself, which must stay
 // buildable without a radio.
-#include <gnuradio/uwb/uwb_radar_pdu_meta.h>
+#include <gnuradio/uwb/uwb_radar_meta_core.h>
 #include <gnuradio/uwb/uwb_uhd_backend_config.h>
 
 #include <algorithm>

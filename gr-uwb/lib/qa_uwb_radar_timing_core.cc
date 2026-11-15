@@ -13,7 +13,7 @@
 
 #include <boost/test/unit_test.hpp>
 
-#include <gnuradio/gr_complex.h>
+#include <gnuradio/uwb/uwb_gr_complex.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
 #include <gnuradio/uwb/uwb_radar_timing_core.h>
 

@@ -13,6 +13,7 @@
 #include <gnuradio/uwb/api.h>
 #include <gnuradio/uwb/uwb_radar_cir_core.h>
 #include <gnuradio/uwb/uwb_scheduled_extractor_core.h>
+#include <gnuradio/uwb/uwb_sc16_stream_source.h>
 #include <gnuradio/uwb/uwb_sic_unified.h>
 
 #include <atomic>
@@ -130,15 +131,9 @@ struct CommitDiagnostics {
     double callback_us = 0.0;           // user result callback
 };
 
-struct StreamReadMeta {
-    int64_t start_sample_abs = 0;
-    bool has_time_spec = false;
-    double time_spec_s = 0.0;
-    bool is_gap = false;
-    int64_t gap_samples = 0;
-    bool is_eof = false;
-    int error_code = 0;
-};
+// StreamReadMeta and ISc16StreamSource live in uwb_sc16_stream_source.h so
+// the tone-cancel decorator can consume the source contract without this
+// whole pipeline header.
 
 struct WindowTimingStats {
     double slice_us = 0.0;
@@ -240,7 +235,10 @@ struct PipelineConfig {
 
     // Resampler configuration
     std::string resampler_profile = "quality_minorder";
-    int resampler_workers = 1;
+    // NOTE: the former `resampler_workers` field was removed in the
+    // 2026-11-15 native cleanup: every DSP worker already forces its private
+    // resampler core to num_workers == 1 (burst run-to-completion), so the
+    // entry was dead and misleading.
 
     // Phase-C kernel experiments (resampler core).  Each non-"none" value is
     // BIT-IDENTICAL in output to "none"; these are performance experiments.
@@ -252,19 +250,16 @@ struct PipelineConfig {
     // no cell.  The core's own default stays off, so other users of
     // RationalResamplerLmCore are unaffected; `none` opts back out here.
     //
-    // "convert_cache" was measured and NOT retained (its sign flips with
-    // profile/window size: -7.6% .. +7.6% in core screening); it stays
-    // selectable for experiments.
     // Each DSP worker applies the switch to its own private resampler core, so
     // the choice is per-worker state and never shared.  Accepted values:
     //   "none"          default kernel (no setter is called at all)
     //   "fixed_phase"   core.set_fixed_phase_schedule(true)
-    //   "convert_cache" core.set_convert_cache(true)
-    //   "both"          both setters
-    // Any other non-empty value is a configuration error: initialize() prints
-    // one diagnostic line and fails closed to "none" (it is never silently
+    // "convert_cache"/"both" were measured, NOT retained and REMOVED in the
+    // 2026-11-15 native cleanup.  Any other non-empty value (including the
+    // removed ones) is a configuration error: initialize() prints one
+    // diagnostic line and fails closed to "none" (it is never silently
     // accepted as an unknown experiment).
-    std::string resampler_experiment = "fixed_phase"; // none|fixed_phase|convert_cache|both
+    std::string resampler_experiment = "fixed_phase"; // none|fixed_phase
 
     // ------------------------------------------------------------------
     // Phase 0 diagnostics (frozen contract §1)
@@ -420,38 +415,6 @@ private:
 // ---------------------------------------------------------------------------
 // Data Sources
 // ---------------------------------------------------------------------------
-class UWB_API ISc16StreamSource {
-public:
-    virtual ~ISc16StreamSource() = default;
-    // Open the device/file.  Must NOT begin acquisition: the pipeline calls
-    // start_stream() only after every DSP worker published Ready, so a device
-    // cannot queue samples behind the ready barrier.
-    virtual bool open() = 0;
-    // Begin acquisition.  Called once per run, from the RX thread, after the
-    // worker-ready barrier.  Default is a no-op for passive/file sources.
-    virtual bool start_stream() { return true; }
-    // Ask a source to abandon a blocking read.  Called from stop().  Sources
-    // with bounded reads (UHD recv timeout, file reads) need nothing here; a
-    // source that waits on its own condition variable overrides it so stop()
-    // cannot deadlock behind a read.
-    virtual void request_stop() {}
-    virtual void close() = 0;
-    virtual size_t read_samples(std::complex<int16_t>* dest,
-                                size_t max_samples,
-                                StreamReadMeta& meta) = 0;
-    // A fatal source error must be reported here, never disguised as a normal
-    // short read or as EOF.  The RX thread checks it after every read.
-    virtual bool fatal_error(std::string* msg) const
-    {
-        if (msg) {
-            msg->clear();
-        }
-        return false;
-    }
-    virtual double actual_rx_rate() const = 0;
-    virtual bool is_eof() const = 0;
-};
-
 class UWB_API ReplaySc16Source : public ISc16StreamSource {
 public:
     ReplaySc16Source(const std::string& filepath,

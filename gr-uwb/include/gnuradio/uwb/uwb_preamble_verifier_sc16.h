@@ -12,8 +12,8 @@
 
 #pragma once
 
-#include <gnuradio/filter/fir_filter.h>
 #include <gnuradio/uwb/uwb_defaults.h>
+#include <gnuradio/uwb/uwb_gr_complex.h>
 #include <gnuradio/uwb/uwb_detector_core.h>
 
 #include <algorithm>
@@ -49,7 +49,7 @@ public:
         size_t backtracked_symbols = 0;
     };
 
-    UwbPreambleVerifierSc16() : fir_(std::vector<gr_complex>()) {}
+    UwbPreambleVerifierSc16() = default;
 
     void configure(const std::vector<std::complex<float>>& known_preamble,
                    const Config& cfg)
@@ -74,7 +74,7 @@ public:
         taps.reserve(tmpl.size());
         for (auto it = tmpl.rbegin(); it != tmpl.rend(); ++it)
             taps.push_back(std::conj(*it));
-        fir_.set_taps(taps);
+        fir_taps_ = std::move(taps);
 
         rebuild_decimated_template();
         rebuild_fine_scratch();
@@ -224,7 +224,7 @@ private:
         const size_t D = cfg_.coarse_decimation;
         const size_t Ld = template_len_ / D;
         sym_ds_ = Ld;
-        const auto& taps = fir_.taps(); // taps[k] = conj(template[L-1-k])
+        const auto& taps = fir_taps_; // taps[k] = conj(template[L-1-k])
         std::vector<std::complex<float>> tmpl_ds;
         tmpl_ds.reserve(Ld);
         for (size_t j = 0; j < Ld; ++j) {
@@ -270,7 +270,10 @@ private:
     }
 
     Config cfg_{};
-    gr::filter::kernel::fir_filter_ccc fir_{ std::vector<gr_complex>() };
+    // Tap store only: the actual correlations run through the native
+    // detector-core kernels (bit-identical to the historical path).  Kept
+    // as a plain vector so this header needs no <gnuradio/filter/*> header.
+    std::vector<gr_complex> fir_taps_;
     size_t template_len_ = 0;
     size_t sym_ds_ = 0;
     float template_energy_ = 0.0f;
