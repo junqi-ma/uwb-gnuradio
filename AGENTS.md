@@ -1,4 +1,33 @@
-# 当前提交快照：固定频率单音消除 C++ 模块集成（2026-11-15）
+# 当前提交快照：clean comm 256 SYNC/127 B/CFO 多 worker 耗时与分解（2026-11-15）
+
+已交付干净通信接收（无干扰、无 SIC、无 sensing）在 256 SYNC、127 B PSDU、
++50 kHz CFO 下 1/2/4 worker 的耗时与阶段分解。报告
+`docs/performance/clean_comm_256_127_CFO_多worker耗时与分解_2026-11-15.md`，
+数据 `docs/performance/data_clean_comm_256_127_cfo_20261115/`，驱动
+`tools/sic/run_clean_comm_workers.py`，基准新增 `clean_comm` 任务
+（`tools/sic/benchmark_chain_workers.cc`）。基线 `acffbba`。
+- **结果**：完成间隔 2766.6 / 1446.7 / 818.4 µs（1.91× / 3.38×），等效原生吞吐
+  119.8 / 229.0 / 404.9 MS/s；单包均值 2764.3 / 2889.6 / 3255.2 µs（+4.5% /
+  +17.8%）。该包在原生流中占 449.4 µs，单 worker 慢 6.16×、4 worker 仍慢 1.82×。
+- **分解（N1 均值）**：重采样 1677.2 µs（60.7%，其中 `process_sc16` 占 99.9%）
+  + comm 1086.4 µs（39.3%）。comm 内 timing 427.4（39.3%）、payload 290.9
+  （26.8%）、SFD 200.4（18.4%）、CIR 115.2（10.6%）、PHR 19.0、CFO 15.9、
+  NS-SFD 10.0、other 4.2。SFD 里 167.2 µs（83%）是锚定后第二次 CFO 拟合+去旋转；
+  CIR 里估计 60.1 / soft-chip FIR 26.9 / 后处理 27.1。去旋转跨阶段合计 267.4 µs，
+  是诊断桶，不可与父阶段相加。
+- **CFO 对照**：+50 kHz 与 0 Hz 总时间差在 ±1% 内且方向不一致（首轮串行跑 CFO 块
+  得到 2.9% 假差异，改为跨轮交替顺序后消失）。全部 18 次运行 × 512 任务 =
+  **9216 个任务 FCS 通过、PSDU 逐字节一致**，0 回退；CFO 估计精确等于注入值；
+  SFD 起点在所有 worker 数下一致。
+- **计时口径**：本路径**不含** `FixedToneCancelSc16Source`，夹具也无单音；
+  `resample_us` 只包住 `reset+process_sc16+flush`。生产 pipeline 里单音消除是
+  窗口装配前的源装饰器，有独立 `cancel_us`，不在 `resample_us`/`e2e_us` 内。
+- **未验证**：上板/UHD、RX/队列/提交/paced、`quality_eq32`/`realtime_*`、
+  多径/AWGN/ISR、CFO 扫频与 SFO、8 worker、P99、MATLAB 交叉验证。
+
+---
+
+# 历史提交快照：固定频率单音消除 C++ 模块集成（2026-11-15）
 
 已把"已知固定接收基带单音的幅度/相位估计 + 20 ms 外推 + 连续相减"接入原生
 `UhdSc16Pipeline`，作为**截窗之前**的公共前处理。报告

@@ -45,13 +45,17 @@ const std::vector<std::string> detail_names={
     "sense_sfd_us","sense_refine_us","sense_estimate_us","sense_other_us",
     "comm_timing_us","comm_cfo_us","comm_sfd_us","comm_cir_us","comm_ns_sfd_us","comm_phr_us","comm_payload_us","comm_soft_fallback_us","comm_other_us",
     "comm_cir_estimate_us","comm_cir_fir_us","comm_cir_post_us","comm_cir_other_us",
-    "resample_reset_us","resample_process_us","resample_flush_us"
+    "resample_reset_us","resample_process_us","resample_flush_us",
+    // Diagnostic CHILDREN of comm_sfd_us / comm_cfo_us (never add to parents).
+    "comm_sfd_bootstrap_us","comm_sfd_tail_retrack_us","comm_sfd_cfo_refit_us",
+    "comm_sfd_final_us","comm_sfd_anchor_other_us","comm_cfo_fit_us","comm_cfo_rotate_us"
 };
 struct Record {
     size_t id=0; int worker=0;
     double start=0,end=0,resample=0,sic=0,sensing=0,comm=0,total=0;
     bool committed=false,radar=false,fcs=false,exact=false;
-    std::array<double,39> details{};
+    double cfo_est_hz=0,detected_start=-1;
+    std::vector<double> details;
     unsigned soft_fallbacks=0,payload_fallbacks=0,phr_fallbacks=0;
 };
 
@@ -97,26 +101,31 @@ struct Worker {
         work.resize(expected);out.resize(expected);ihat.resize(expected);
         resampler.set_num_workers(1);resampler.set_fixed_phase_schedule(true);
         target_sync=load<cf>(directory+"/sync_9.bin");
-        interferer_sync=load<cf>(directory+"/sync_10.bin");
-        if(target_sync.size()!=1016||interferer_sync.size()!=1016) throw std::runtime_error("invalid sync");
+        if(target_sync.size()!=1016) throw std::runtime_error("invalid sync");
         size_t target_reps=64,interference_reps=64;
         std::ifstream geometry(directory+"/geometry.txt");
         if(geometry && !(geometry>>target_reps>>interference_reps)) throw std::runtime_error("invalid geometry");
-        for(size_t r=0;r<interference_reps;++r) preamble.insert(preamble.end(),interferer_sync.begin(),interferer_sync.end());
-        tmpl.sync=interferer_sync.data();tmpl.sync_len=1016;
-        tmpl.preamble=preamble.data();tmpl.preamble_len=preamble.size();
-        cfg.policy=sic::SicPolicy::PreambleOnly;cfg.backend=sic::SicEstimatorBackend::Ipatov;
-        cfg.comm_code=10;cfg.samples_per_symbol=1016;cfg.sync_reps=interference_reps;cfg.sample_rate=998.4e6;
-        // Same public geometry as the production pipeline: pre-guard 400 native
-        // samples -> nominal output origin 542, coarse ROI +/-64.
-        cfg.roi_lo=478;cfg.roi_hi=606;cfg.sub_roi_lo=0;cfg.sub_roi_hi=expected;
-        cfg.max_window_samples=expected+512;cfg.max_packet_samples=expected+512;
-        std::string error;
-        if(!sic::prepare_sic_unified(cfg,tmpl,sic_scratch,&error)) throw std::runtime_error(error);
-        radar_cfg.sync_repetitions=target_reps;
-        radar_cfg.cir_repetitions=target_reps-radar_cfg.cir_skip_initial;
-        if(!radar::prepare_radar_cir_core(radar_cfg,target_sync.data(),1016,16,100,radar_scratch))
-            throw std::runtime_error("radar preparation failed");
+        // clean_comm measures the receive chain of one interference-free packet:
+        // no SIC and no sensing job is prepared or executed.
+        if(task!="clean_comm") {
+            interferer_sync=load<cf>(directory+"/sync_10.bin");
+            if(interferer_sync.size()!=1016) throw std::runtime_error("invalid sync");
+            for(size_t r=0;r<interference_reps;++r) preamble.insert(preamble.end(),interferer_sync.begin(),interferer_sync.end());
+            tmpl.sync=interferer_sync.data();tmpl.sync_len=1016;
+            tmpl.preamble=preamble.data();tmpl.preamble_len=preamble.size();
+            cfg.policy=sic::SicPolicy::PreambleOnly;cfg.backend=sic::SicEstimatorBackend::Ipatov;
+            cfg.comm_code=10;cfg.samples_per_symbol=1016;cfg.sync_reps=interference_reps;cfg.sample_rate=998.4e6;
+            // Same public geometry as the production pipeline: pre-guard 400 native
+            // samples -> nominal output origin 542, coarse ROI +/-64.
+            cfg.roi_lo=478;cfg.roi_hi=606;cfg.sub_roi_lo=0;cfg.sub_roi_hi=expected;
+            cfg.max_window_samples=expected+512;cfg.max_packet_samples=expected+512;
+            std::string error;
+            if(!sic::prepare_sic_unified(cfg,tmpl,sic_scratch,&error)) throw std::runtime_error(error);
+            radar_cfg.sync_repetitions=target_reps;
+            radar_cfg.cir_repetitions=target_reps-radar_cfg.cir_skip_initial;
+            if(!radar::prepare_radar_cir_core(radar_cfg,target_sync.data(),1016,16,100,radar_scratch))
+                throw std::runtime_error("radar preparation failed");
+        }
         profile.code_index=9;profile.timing_coarse_stride=1;
         profile.preamble_repetitions=target_reps;
         profile.cir_repetitions=target_reps-profile.cir_skip_initial_repetitions;
@@ -141,25 +150,28 @@ struct Worker {
         if(produced!=expected) throw std::runtime_error("output length mismatch");
         auto t1=Clock::now();
         sic::SicUnifiedResult result;result.out=out.data();result.i_hat=ihat.data();
-        if(!sic::sic_process_unified(work.data(),expected,tmpl,cfg,sic_scratch,result))
-            throw std::runtime_error("SIC API failure");
+        if(task!="clean_comm") {
+            if(!sic::sic_process_unified(work.data(),expected,tmpl,cfg,sic_scratch,result))
+                throw std::runtime_error("SIC API failure");
+        }
         auto t2=Clock::now();
-        const cf* data=result.committed?out.data():work.data();
+        const cf* data=task=="clean_comm"?work.data():(result.committed?out.data():work.data());
         radar::RadarCirResult radar_result;
         std::array<double,3> sense_times{};
         if(task=="sensing_detail") radar_result=detailed_radar(data,expected,542+radar_cfg.sync_repetitions*1016,radar_cfg,radar_scratch,sense_times);
-        else if(task!="comm") radar::radar_cir_one(data,expected,542+radar_cfg.sync_repetitions*1016,radar_cfg,radar_scratch,radar_result);
+        else if(task!="comm" && task!="clean_comm") radar::radar_cir_one(data,expected,542+radar_cfg.sync_repetitions*1016,radar_cfg,radar_scratch,radar_result);
         auto t3=Clock::now();
         demod::DemodResult decoded;
-        if(task=="all"||task=="comm") decoded=demod::core::demodulate_one(data,expected,profile,0,542,0,target_sync,demod_scratch);
+        if(task=="all"||task=="comm"||task=="clean_comm") decoded=demod::core::demodulate_one(data,expected,profile,0,542,0,target_sync,demod_scratch);
         auto t4=Clock::now();
         r.start=elapsed(Clock::time_point{},t0);r.end=elapsed(Clock::time_point{},t4);
         r.resample=elapsed(t0,t1);r.sic=elapsed(t1,t2);r.sensing=elapsed(t2,t3);
-        r.comm=(task=="all"||task=="comm")?elapsed(t3,t4):0;
-        if(task=="comm") r.sensing=0;
+        r.comm=(task=="all"||task=="comm"||task=="clean_comm")?elapsed(t3,t4):0;
+        if(task=="comm"||task=="clean_comm") r.sensing=0;
         r.total=elapsed(t0,t4);
-        r.committed=result.committed;r.radar=radar_result.status==radar::RadarCirStatus::Ok;
+        r.committed=task=="clean_comm"?true:result.committed;r.radar=radar_result.status==radar::RadarCirStatus::Ok;
         r.fcs=decoded.payload.fcs_pass;r.exact=decoded.payload.bytes==psdu;
+        r.cfo_est_hz=decoded.cfo.cfo_hz;r.detected_start=double(decoded.sfd.sfd_start_sample);
         const auto& t=result.timings;
         const double est_children=t.est_detect_us+t.est_cfo_us+t.est_cir_us+t.est_solve_us+t.est_fit_check_us;
         const double rx_children=t.rx_timing_us+t.rx_cfo_us+t.rx_sfd_us;
@@ -176,7 +188,11 @@ struct Worker {
             double(decoded.stage_ns_sfd_us),double(decoded.stage_phr_us),double(decoded.stage_payload_us),double(decoded.stage_softchip_fallback_us),r.comm-comm_children,
             double(decoded.cir.cir_estimate_us),double(decoded.cir.soft_fir_us),double(decoded.cir.postprocess_us),
             double(decoded.stage_cir_us)-decoded.cir.cir_estimate_us-decoded.cir.soft_fir_us-decoded.cir.postprocess_us,
-            elapsed(t0,tr),elapsed(tr,tp),elapsed(tp,t1)};
+            elapsed(t0,tr),elapsed(tr,tp),elapsed(tp,t1),
+            double(decoded.stage_sfd_bootstrap_us),double(decoded.stage_sfd_tail_retrack_us),
+            double(decoded.stage_sfd_cfo_refit_us),double(decoded.stage_sfd_final_us),
+            double(decoded.stage_sfd_anchor_other_us),double(decoded.stage_cfo_fit_us),
+            double(decoded.stage_cfo_rotate_us)};
         r.soft_fallbacks=decoded.stage_softchip_fallbacks;r.payload_fallbacks=decoded.stage_fused_fallbacks;r.phr_fallbacks=decoded.stage_phr_fused_fallbacks;
         if(task=="sensing_detail" && check_reference) {
             const auto raw=radar_scratch.cir.raw_taps,norm=radar_scratch.cir.norm_taps;
@@ -195,9 +211,9 @@ struct Worker {
 };
 int main(int argc,char** argv) {
     try {
-        if(argc!=8 && argc!=9) throw std::runtime_error("usage: binary directory taps native_count cores_csv warmup_per_worker measure_jobs source_pool_size [all|sensing|sensing_detail|comm]");
+        if(argc!=8 && argc!=9) throw std::runtime_error("usage: binary directory taps native_count cores_csv warmup_per_worker measure_jobs source_pool_size [all|sensing|sensing_detail|comm|clean_comm]");
         const std::string task=argc==9?argv[8]:"all";
-        if(task!="all" && task!="sensing" && task!="sensing_detail" && task!="comm") throw std::runtime_error("unknown task");
+        if(task!="all" && task!="sensing" && task!="sensing_detail" && task!="comm" && task!="clean_comm") throw std::runtime_error("unknown task");
         const std::string directory=argv[1];
         const auto taps=load<float>(argv[2]);const size_t count=std::stoull(argv[3]);
         std::vector<int> cores;std::stringstream stream(argv[4]);std::string token;
@@ -213,7 +229,7 @@ int main(int argc,char** argv) {
         std::mutex mutex;std::condition_variable cv;size_t ready=0;bool start=false;
         std::string failure;
         auto fail=[&](const std::string& error) {std::lock_guard<std::mutex> guard(mutex);if(failure.empty())failure=error;};
-        auto bad=[&](const Record& r) {return !r.committed || (task!="comm" && !r.radar) || ((task=="all"||task=="comm") && (!r.fcs||!r.exact));};
+        auto bad=[&](const Record& r) {return !r.committed || (task!="comm" && task!="clean_comm" && !r.radar) || ((task=="all"||task=="comm"||task=="clean_comm") && (!r.fcs||!r.exact));};
         std::vector<std::thread> threads;
         for(size_t id=0;id<cores.size();++id) threads.emplace_back([&,id] {
             std::unique_ptr<Worker> worker;
@@ -241,11 +257,11 @@ int main(int argc,char** argv) {
         {std::unique_lock<std::mutex> guard(mutex);cv.wait(guard,[&]{return ready==cores.size();});start=true;cv.notify_all();}
         for(auto& thread:threads) thread.join();
         if(!failure.empty()) throw std::runtime_error(failure);
-        std::cout<<std::setprecision(16)<<"job,worker,start_us,end_us,resample_us,sic_us,sensing_us,comm_us,total_us,committed,radar_ok,fcs,psdu_exact";
+        std::cout<<std::setprecision(16)<<"job,worker,start_us,end_us,resample_us,sic_us,sensing_us,comm_us,total_us,committed,radar_ok,fcs,psdu_exact,cfo_est_hz,detected_start";
         for(const auto& name:detail_names) std::cout<<','<<name;
         std::cout<<",soft_fallbacks,payload_fallbacks,phr_fallbacks\n";
         for(const auto& r:records) {
-            std::cout<<r.id<<','<<r.worker<<','<<r.start<<','<<r.end<<','<<r.resample<<','<<r.sic<<','<<r.sensing<<','<<r.comm<<','<<r.total<<','<<r.committed<<','<<r.radar<<','<<r.fcs<<','<<r.exact;
+            std::cout<<r.id<<','<<r.worker<<','<<r.start<<','<<r.end<<','<<r.resample<<','<<r.sic<<','<<r.sensing<<','<<r.comm<<','<<r.total<<','<<r.committed<<','<<r.radar<<','<<r.fcs<<','<<r.exact<<','<<r.cfo_est_hz<<','<<r.detected_start;
             for(auto value:r.details) std::cout<<','<<value;
             std::cout<<','<<r.soft_fallbacks<<','<<r.payload_fallbacks<<','<<r.phr_fallbacks<<'\n';
         }
