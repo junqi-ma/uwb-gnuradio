@@ -1,0 +1,52 @@
+{
+  "replay_1s.log": {
+    "packets": 200,
+    "batch_summaries": 4,
+    "final": {
+      "completed": "200",
+      "fcs": "200/200",
+      "raw_samples": "737280000",
+      "raw_drop_samples": "0",
+      "source_errors": "0",
+      "gaps": "0",
+      "models": "50",
+      "output_omitted": "0",
+      "full_retry": "1"
+    },
+    "max_packet_latency_ms": 29.872
+  },
+  "x410_3s.log": {
+    "packets": 599,
+    "batch_summaries": 11,
+    "final": {
+      "completed": "599",
+      "fcs": "599/599",
+      "raw_samples": "2209021952",
+      "raw_drop_samples": "0",
+      "source_errors": "0",
+      "gaps": "0",
+      "models": "150",
+      "output_omitted": "0",
+      "full_retry": "0"
+    },
+    "max_packet_latency_ms": 12.305
+  },
+  "base_commit": "b573195ea9d0a2af41e1b2c54c6ed8d6bb5685e9",
+  "working_tree_changes": true,
+  "sha256": {
+    "gr-uwb/apps/uwb_dw3000_live.cc": "3301875b084a30130dfdf0b5248c312ccb691352907011e466aa2652705bbb48",
+    "gr-uwb/lib/uwb_uhd_sc16_pipeline.cc": "99d73efeb95d559255fd5fca6973f6c562f2dd4e804ff80c13bdb19a86c59399",
+    "gr-uwb/include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h": "3a1e528e48c997d995f230308daf37dd8e68859b0a841eba75945f89820d69aa",
+    "tools/rx/live_dw3000_packets.py": "a81922ab343f86f217df075884f88f316d9db5e638cc4988abac99cca8eac596",
+    "tools/rx/qa_live_dw3000_console.py": "83ae549d586fe83db868d626fda60c27e74e0f9585d718b1425f79598355399f",
+    "gr-uwb/build-cfo-tail-fix/apps/uwb_dw3000_live": "655122be6037218fdd9b9b313d57bb0ec4e59cd5925c1f8f9d27776f5c3d0c3b"
+  },
+  "ctest": {
+    "total": 84,
+    "passed": 83,
+    "skipped": 1,
+    "failed": 0,
+    "wall_s": 106.39
+  },
+  "hardware_log_note": "Hardware and paced replay logs precede only the final console-queue shutdown reservation change; final binary passed the full suite including live-console SIGINT/summary QA."
+}

@@ -1,0 +1,730 @@
+Consolidate compiler generated dependencies of target uwb_twr_core
+Consolidate compiler generated dependencies of target uwb_uhd_burst_dry_run
+Consolidate compiler generated dependencies of target uwb_twr_phy
+[  1%] Built target uwb_uhd_burst_dry_run
+[  2%] Built target uwb_twr_core
+[  2%] Building CXX object lib/CMakeFiles/uwb_twr_phy.dir/uwb_twr_phy.cc.o
+[  3%] Building CXX object lib/CMakeFiles/uwb_twr_phy.dir/uwb_twr_phy_impairment.cc.o
+[  8%] Built target pygen_apps_0eaa3c5ff4d83edfc432aa6b806420ae
+[  9%] Built target pygen_python_uwb_a1cd3cd84450ca0a554091c2065fa212
+[  9%] Built target copy_module_for_tests
+Consolidate compiler generated dependencies of target gnuradio-uwb
+[  9%] Built target uwb_docstrings
+Consolidate compiler generated dependencies of target uwb_twr_fake_link
+[ 10%] Built target uwb_twr_fake_link
+[ 23%] Built target gnuradio-uwb
+Consolidate compiler generated dependencies of target uwb_qa_uwb_twr_protocol_time.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_twr_fake_link.cc
+[ 24%] Built target uwb_qa_uwb_twr_protocol_time.cc
+[ 25%] Built target uwb_qa_uwb_twr_fake_link.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_twr_core.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_twr_m1b_e2e.cc
+[ 26%] Built target uwb_qa_uwb_twr_core.cc
+[ 27%] Built target uwb_qa_uwb_twr_m1b_e2e.cc
+Consolidate compiler generated dependencies of target twr_fake_demo
+[ 27%] Built target twr_fake_demo
+Consolidate compiler generated dependencies of target benchmark_detector
+Consolidate compiler generated dependencies of target benchmark_detector_sc16
+[ 28%] Linking CXX executable benchmark_detector
+[ 29%] Linking CXX executable benchmark_detector_sc16
+[ 29%] Built target benchmark_detector_sc16
+[ 29%] Built target benchmark_detector
+Consolidate compiler generated dependencies of target benchmark_energy_gate_formats
+Consolidate compiler generated dependencies of target benchmark_resampler_65_48
+[ 29%] Linking CXX executable benchmark_energy_gate_formats
+[ 30%] Linking CXX executable benchmark_resampler_65_48
+[ 31%] Built target benchmark_energy_gate_formats
+Consolidate compiler generated dependencies of target benchmark_radar_pipeline
+[ 31%] Linking CXX executable benchmark_radar_pipeline
+[ 31%] Built target benchmark_resampler_65_48
+Consolidate compiler generated dependencies of target benchmark_preamble_sic
+[ 31%] Linking CXX executable benchmark_preamble_sic
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_twr_phy.h:73,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/uwb_twr_phy.cc:61:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_twr_phy.h:73,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/uwb_twr_phy.cc:61:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_twr_phy.h:73,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/uwb_twr_phy_impairment.cc:110:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_twr_phy.h:73,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/uwb_twr_phy_impairment.cc:110:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[ 32%] Built target benchmark_radar_pipeline
+Consolidate compiler generated dependencies of target benchmark_hrp_mod
+[ 32%] Linking CXX executable benchmark_hrp_mod
+[ 33%] Built target benchmark_preamble_sic
+Consolidate compiler generated dependencies of target uwb_offline_postprocess_dump
+[ 33%] Linking CXX executable uwb_offline_postprocess_dump
+[ 33%] Built target benchmark_hrp_mod
+Consolidate compiler generated dependencies of target benchmark_fullpacket_compare
+[ 33%] Building CXX object apps/CMakeFiles/benchmark_fullpacket_compare.dir/benchmark_fullpacket_compare.cc.o
+[ 34%] Built target uwb_offline_postprocess_dump
+Consolidate compiler generated dependencies of target benchmark_fullpacket_compare_fast_rx
+[ 34%] Building CXX object apps/CMakeFiles/benchmark_fullpacket_compare_fast_rx.dir/benchmark_fullpacket_compare.cc.o
+Consolidate compiler generated dependencies of target benchmark_fullpacket_cfo_diag
+[ 34%] Building CXX object apps/CMakeFiles/benchmark_fullpacket_cfo_diag.dir/benchmark_fullpacket_cfo_diag.cc.o
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fullpacket_sic_core.h:3,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_fullpacket_compare.cc:2:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fullpacket_sic_core.h:3,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_fullpacket_compare.cc:2:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fullpacket_sic_core.h:3,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_fullpacket_compare.cc:2:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fullpacket_sic_core.h:3,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_fullpacket_compare.cc:2:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fullpacket_sic_core.h:3,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_fullpacket_cfo_diag.cc:3:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fullpacket_sic_core.h:3,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_fullpacket_cfo_diag.cc:3:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /usr/include/boost/bind.hpp:30,
+                 from /usr/include/boost/property_tree/json_parser/detail/parser.hpp:7,
+                 from /usr/include/boost/property_tree/json_parser/detail/read.hpp:13,
+                 from /usr/include/boost/property_tree/json_parser.hpp:16,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_fullpacket_compare.cc:7:
+/usr/include/boost/bind.hpp: At global scope:
+/usr/include/boost/bind.hpp:36:1: note: ‘#pragma message: The practice of declaring the Bind placeholders (_1, _2, ...) in the global namespace is deprecated. Please use <boost/bind/bind.hpp> + using namespace boost::placeholders, or define BOOST_BIND_GLOBAL_PLACEHOLDERS to retain the current behavior.’
+   36 | BOOST_PRAGMA_MESSAGE(
+      | ^~~~~~~~~~~~~~~~~~~~
+In file included from /usr/include/boost/bind.hpp:30,
+                 from /usr/include/boost/property_tree/json_parser/detail/parser.hpp:7,
+                 from /usr/include/boost/property_tree/json_parser/detail/read.hpp:13,
+                 from /usr/include/boost/property_tree/json_parser.hpp:16,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_fullpacket_compare.cc:7:
+/usr/include/boost/bind.hpp: At global scope:
+/usr/include/boost/bind.hpp:36:1: note: ‘#pragma message: The practice of declaring the Bind placeholders (_1, _2, ...) in the global namespace is deprecated. Please use <boost/bind/bind.hpp> + using namespace boost::placeholders, or define BOOST_BIND_GLOBAL_PLACEHOLDERS to retain the current behavior.’
+   36 | BOOST_PRAGMA_MESSAGE(
+      | ^~~~~~~~~~~~~~~~~~~~
+In file included from /usr/include/boost/bind.hpp:30,
+                 from /usr/include/boost/property_tree/json_parser/detail/parser.hpp:7,
+                 from /usr/include/boost/property_tree/json_parser/detail/read.hpp:13,
+                 from /usr/include/boost/property_tree/json_parser.hpp:16,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_fullpacket_cfo_diag.cc:4:
+/usr/include/boost/bind.hpp: At global scope:
+/usr/include/boost/bind.hpp:36:1: note: ‘#pragma message: The practice of declaring the Bind placeholders (_1, _2, ...) in the global namespace is deprecated. Please use <boost/bind/bind.hpp> + using namespace boost::placeholders, or define BOOST_BIND_GLOBAL_PLACEHOLDERS to retain the current behavior.’
+   36 | BOOST_PRAGMA_MESSAGE(
+      | ^~~~~~~~~~~~~~~~~~~~
+[ 35%] Linking CXX executable benchmark_fullpacket_cfo_diag
+[ 35%] Built target benchmark_fullpacket_cfo_diag
+Consolidate compiler generated dependencies of target benchmark_fullpacket_segment_diag
+[ 36%] Building CXX object apps/CMakeFiles/benchmark_fullpacket_segment_diag.dir/benchmark_fullpacket_segment_diag.cc.o
+[ 37%] Linking CXX executable benchmark_fullpacket_compare
+[ 37%] Linking CXX static library libuwb_twr_phy.a
+[ 37%] Built target uwb_twr_phy
+Consolidate compiler generated dependencies of target benchmark_discrete_cir_taps
+[ 37%] Building CXX object apps/CMakeFiles/benchmark_discrete_cir_taps.dir/benchmark_discrete_cir_taps.cc.o
+[ 37%] Built target benchmark_fullpacket_compare
+Consolidate compiler generated dependencies of target bench_unified_timing
+[ 37%] Building CXX object apps/CMakeFiles/bench_unified_timing.dir/bench_unified_timing.cc.o
+[ 37%] Linking CXX executable benchmark_fullpacket_compare_fast_rx
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fullpacket_sic_core.h:3,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/fullpacket_segment_diagnostics.h:4,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_fullpacket_segment_diag.cc:2:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fullpacket_sic_core.h:3,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/fullpacket_segment_diagnostics.h:4,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_fullpacket_segment_diag.cc:2:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[ 37%] Built target benchmark_fullpacket_compare_fast_rx
+Consolidate compiler generated dependencies of target experiment_preamble_recovery
+[ 38%] Building CXX object apps/CMakeFiles/experiment_preamble_recovery.dir/home/oi/Desktop/uwb-gnuradio/tools/sic/experiment_preamble_recovery.cc.o
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_discrete_cir_sic.h:44,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_discrete_cir_taps.cc:2:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_discrete_cir_sic.h:44,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_discrete_cir_taps.cc:2:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_discrete_cir_sic.h:44,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_sic_unified.h:82,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/bench_unified_timing.cc:4:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_discrete_cir_sic.h:44,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_sic_unified.h:82,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/bench_unified_timing.cc:4:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_discrete_cir_sic.h:44,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_sic_unified.h:82,
+                 from /home/oi/Desktop/uwb-gnuradio/tools/sic/experiment_preamble_recovery.cc:3:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_discrete_cir_sic.h:44,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_sic_unified.h:82,
+                 from /home/oi/Desktop/uwb-gnuradio/tools/sic/experiment_preamble_recovery.cc:3:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /usr/include/boost/bind.hpp:30,
+                 from /usr/include/boost/property_tree/json_parser/detail/parser.hpp:7,
+                 from /usr/include/boost/property_tree/json_parser/detail/read.hpp:13,
+                 from /usr/include/boost/property_tree/json_parser.hpp:16,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_fullpacket_segment_diag.cc:4:
+/usr/include/boost/bind.hpp: At global scope:
+/usr/include/boost/bind.hpp:36:1: note: ‘#pragma message: The practice of declaring the Bind placeholders (_1, _2, ...) in the global namespace is deprecated. Please use <boost/bind/bind.hpp> + using namespace boost::placeholders, or define BOOST_BIND_GLOBAL_PLACEHOLDERS to retain the current behavior.’
+   36 | BOOST_PRAGMA_MESSAGE(
+      | ^~~~~~~~~~~~~~~~~~~~
+[ 38%] Linking CXX executable benchmark_discrete_cir_taps
+[ 38%] Built target benchmark_discrete_cir_taps
+Consolidate compiler generated dependencies of target benchmark_chain_workers
+[ 39%] Building CXX object apps/CMakeFiles/benchmark_chain_workers.dir/home/oi/Desktop/uwb-gnuradio/tools/sic/benchmark_chain_workers.cc.o
+[ 39%] Linking CXX executable bench_unified_timing
+[ 39%] Built target bench_unified_timing
+Consolidate compiler generated dependencies of target uwb_uhd_sc16_pipeline_runner
+[ 39%] Building CXX object apps/CMakeFiles/uwb_uhd_sc16_pipeline_runner.dir/uwb_uhd_sc16_pipeline_runner.cc.o
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_discrete_cir_sic.h:44,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_sic_unified.h:82,
+                 from /home/oi/Desktop/uwb-gnuradio/tools/sic/benchmark_chain_workers.cc:3:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_discrete_cir_sic.h:44,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_sic_unified.h:82,
+                 from /home/oi/Desktop/uwb-gnuradio/tools/sic/benchmark_chain_workers.cc:3:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_discrete_cir_sic.h:44,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_sic_unified.h:82,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h:16,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/uwb_uhd_sc16_pipeline_runner.cc:15:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_detector_core.h:29,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_radar_sfd_core.h:18,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_radar_cir_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h:14,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/uwb_uhd_sc16_pipeline_runner.cc:15:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[ 40%] Linking CXX executable uwb_uhd_sc16_pipeline_runner
+[ 40%] Built target uwb_uhd_sc16_pipeline_runner
+Consolidate compiler generated dependencies of target uwb_uhd_sc16_capture
+[ 40%] Building CXX object apps/CMakeFiles/uwb_uhd_sc16_capture.dir/uwb_uhd_sc16_capture.cc.o
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_discrete_cir_sic.h:44,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_sic_unified.h:82,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h:16,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/uwb_uhd_sc16_capture.cc:29:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_detector_core.h:29,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/uwb_uhd_sc16_capture.cc:27:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[ 40%] Building CXX object apps/CMakeFiles/benchmark_fullpacket_segment_diag.dir/fullpacket_segment_diagnostics.cc.o
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fullpacket_sic_core.h:3,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/fullpacket_segment_diagnostics.h:4,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/fullpacket_segment_diagnostics.cc:3:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fullpacket_sic_core.h:3,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/fullpacket_segment_diagnostics.h:4,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/fullpacket_segment_diagnostics.cc:3:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/fullpacket_segment_diagnostics.cc: In function ‘gr::uwb::experiment::segment_diag::Result gr::uwb::experiment::segment_diag::run(const cf*, size_t, const std::vector<unsigned char>&, const std::vector<unsigned char>&, bool, const gr::uwb::mod::HrpModConfig&, const gr::uwb::sic::SicModel&, const cf*, size_t, int64_t, int64_t, gr::uwb::sic::FullPacketScratch&, gr::uwb::experiment::segment_diag::{anonymous}::cf*, gr::uwb::experiment::segment_diag::{anonymous}::cf*)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/fullpacket_segment_diagnostics.cc:248:9: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  248 |         volk_32fc_s32fc_multiply_32fc(rotation.data(),base.data()+j0,block,
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fullpacket_sic_core.h:3,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/fullpacket_segment_diagnostics.h:4,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/fullpacket_segment_diagnostics.cc:3:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[ 40%] Linking CXX executable experiment_preamble_recovery
+[ 40%] Built target experiment_preamble_recovery
+[ 41%] Linking CXX executable benchmark_fullpacket_segment_diag
+Consolidate compiler generated dependencies of target benchmark_sc16_burst_core
+[ 42%] Linking CXX executable benchmark_sc16_burst_core
+[ 42%] Built target benchmark_sc16_burst_core
+[ 43%] Linking CXX executable uwb_uhd_sc16_capture
+Consolidate compiler generated dependencies of target benchmark_fixed_tone_cancel
+[ 43%] Linking CXX executable benchmark_fixed_tone_cancel
+[ 43%] Built target benchmark_fullpacket_segment_diag
+Consolidate compiler generated dependencies of target fixed_tone_cancel_replay
+[ 44%] Building CXX object apps/CMakeFiles/fixed_tone_cancel_replay.dir/fixed_tone_cancel_replay.cc.o
+[ 44%] Built target uwb_uhd_sc16_capture
+[ 45%] Built target benchmark_fixed_tone_cancel
+Consolidate compiler generated dependencies of target benchmark_sc16_pipeline_steady
+Consolidate compiler generated dependencies of target uwb_dw3000_live
+[ 45%] Building CXX object apps/CMakeFiles/benchmark_sc16_pipeline_steady.dir/benchmark_sc16_pipeline_steady.cc.o
+[ 46%] Built target uwb_dw3000_live
+Consolidate compiler generated dependencies of target uwb_python
+[ 47%] Linking CXX shared module uwb_python.cpython-310-x86_64-linux-gnu.so
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_discrete_cir_sic.h:44,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_sic_unified.h:82,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h:16,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fixed_tone_cancel_source.h:33,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/fixed_tone_cancel_replay.cc:19:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_detector_core.h:29,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_radar_sfd_core.h:18,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_radar_cir_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h:14,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fixed_tone_cancel_source.h:33,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/fixed_tone_cancel_replay.cc:19:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+lto-wrapper: warning: using serial compilation of 13 LTRANS jobs
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_discrete_cir_sic.h:44,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_sic_unified.h:82,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h:16,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_sc16_pipeline_steady.cc:30:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_detector_core.h:29,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_radar_sfd_core.h:18,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_radar_cir_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h:14,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/benchmark_sc16_pipeline_steady.cc:30:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[ 47%] Linking CXX executable benchmark_chain_workers
+[ 47%] Built target benchmark_chain_workers
+Consolidate compiler generated dependencies of target uwb_qa_uwb_energy_detector.cc
+[ 47%] Linking CXX executable uwb_qa_uwb_energy_detector.cc
+[ 47%] Built target uwb_qa_uwb_energy_detector.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_preamble_detector.cc
+[ 48%] Linking CXX executable uwb_qa_uwb_preamble_detector.cc
+[ 48%] Linking CXX executable fixed_tone_cancel_replay
+[ 48%] Built target uwb_qa_uwb_preamble_detector.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_detector.cc
+[ 48%] Built target fixed_tone_cancel_replay
+[ 49%] Linking CXX executable uwb_qa_uwb_detector.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_detector_sc16.cc
+[ 50%] Linking CXX executable uwb_qa_uwb_detector_sc16.cc
+[ 50%] Built target uwb_qa_uwb_detector.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_packet_writer.cc
+[ 50%] Built target uwb_qa_uwb_detector_sc16.cc
+[ 50%] Linking CXX executable uwb_qa_uwb_packet_writer.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_scheduled_extractor.cc
+[ 50%] Linking CXX executable uwb_qa_uwb_scheduled_extractor.cc
+[ 51%] Built target uwb_qa_uwb_packet_writer.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_scheduled_extractor_sc16.cc
+[ 51%] Built target uwb_qa_uwb_scheduled_extractor.cc
+[ 51%] Linking CXX executable uwb_qa_uwb_scheduled_extractor_sc16.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_auto_scheduled_extractor_sc16.cc
+[ 52%] Linking CXX executable uwb_qa_uwb_auto_scheduled_extractor_sc16.cc
+[ 53%] Built target uwb_qa_uwb_scheduled_extractor_sc16.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_demod_core.cc
+[ 54%] Building CXX object lib/CMakeFiles/uwb_qa_uwb_demod_core.cc.dir/qa_uwb_demod_core.cc.o
+[ 54%] Built target uwb_qa_uwb_auto_scheduled_extractor_sc16.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_realtime_demodulator.cc
+[ 54%] Building CXX object lib/CMakeFiles/uwb_qa_uwb_realtime_demodulator.cc.dir/qa_uwb_realtime_demodulator.cc.o
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/qa_uwb_demod_core.cc:22:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/qa_uwb_demod_core.cc:22:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[ 54%] Linking CXX executable benchmark_sc16_pipeline_steady
+[ 54%] Built target benchmark_sc16_pipeline_steady
+Consolidate compiler generated dependencies of target uwb_qa_uwb_defaults.cc
+[ 54%] Linking CXX executable uwb_qa_uwb_defaults.cc
+[ 55%] Built target uwb_qa_uwb_defaults.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_rational_resampler_core.cc
+[ 55%] Linking CXX executable uwb_qa_uwb_rational_resampler_core.cc
+[ 56%] Built target uwb_qa_uwb_rational_resampler_core.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_rational_resampler.cc
+[ 57%] Linking CXX executable uwb_qa_uwb_rational_resampler.cc
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_realtime_demodulator.h:34,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/qa_uwb_realtime_demodulator.cc:21:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_realtime_demodulator.h:34,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/qa_uwb_realtime_demodulator.cc:21:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[ 57%] Built target uwb_qa_uwb_rational_resampler.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_pdu_rational_resampler.cc
+[ 58%] Building CXX object lib/CMakeFiles/uwb_qa_uwb_pdu_rational_resampler.cc.dir/qa_uwb_pdu_rational_resampler.cc.o
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_realtime_demodulator.h:34,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/qa_uwb_pdu_rational_resampler.cc:26:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rational_resampler_core.h:74,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_48.h:30,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/qa_uwb_pdu_rational_resampler.cc:23:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[ 59%] Linking CXX executable uwb_qa_uwb_realtime_demodulator.cc
+[ 59%] Built target uwb_qa_uwb_realtime_demodulator.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_pdu_rational_resampler_65_32.cc
+[ 60%] Linking CXX executable uwb_qa_uwb_pdu_rational_resampler_65_32.cc
+[ 60%] Built target uwb_qa_uwb_pdu_rational_resampler_65_32.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_pdu_rational_resampler_65_32_workers.cc
+[ 61%] Linking CXX executable uwb_qa_uwb_pdu_rational_resampler_65_32_workers.cc
+[ 61%] Built target uwb_qa_uwb_pdu_rational_resampler_65_32_workers.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_pdu_sc16_scale_65_32.cc
+[ 61%] Linking CXX executable uwb_qa_uwb_pdu_sc16_scale_65_32.cc
+[ 62%] Built target uwb_qa_uwb_pdu_sc16_scale_65_32.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_pdu_sc16_scale_65_48.cc
+[ 62%] Linking CXX executable uwb_qa_uwb_pdu_sc16_scale_65_48.cc
+[ 63%] Built target uwb_qa_uwb_pdu_sc16_scale_65_48.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_pdu_roi_cir_65_32.cc
+[ 63%] Building CXX object lib/CMakeFiles/uwb_qa_uwb_pdu_roi_cir_65_32.cc.dir/qa_uwb_pdu_roi_cir_65_32.cc.o
+[ 63%] Built target uwb_python
+Consolidate compiler generated dependencies of target uwb_qa_uwb_rational_resampler_core_65_32.cc
+[ 63%] Linking CXX executable uwb_qa_uwb_rational_resampler_core_65_32.cc
+[ 64%] Built target uwb_qa_uwb_rational_resampler_core_65_32.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_rational_resampler_m2a.cc
+[ 65%] Linking CXX executable uwb_qa_uwb_rational_resampler_m2a.cc
+[ 65%] Linking CXX executable uwb_qa_uwb_pdu_roi_cir_65_32.cc
+[ 65%] Built target uwb_qa_uwb_rational_resampler_m2a.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_rational_resampler_65_32_stream.cc
+[ 65%] Linking CXX executable uwb_qa_uwb_rational_resampler_65_32_stream.cc
+[ 65%] Built target uwb_qa_uwb_pdu_roi_cir_65_32.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_pdu_window_crop.cc
+[ 66%] Linking CXX executable uwb_qa_uwb_pdu_window_crop.cc
+[ 66%] Built target uwb_qa_uwb_rational_resampler_65_32_stream.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_tone_canceller.cc
+[ 67%] Linking CXX executable uwb_qa_uwb_tone_canceller.cc
+[ 67%] Built target uwb_qa_uwb_pdu_window_crop.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_scheduled_dump_io.cc
+[ 68%] Linking CXX executable uwb_qa_uwb_scheduled_dump_io.cc
+[ 68%] Built target uwb_qa_uwb_tone_canceller.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_radar_sfd_core.cc
+[ 68%] Linking CXX executable uwb_qa_uwb_radar_sfd_core.cc
+[ 68%] Built target uwb_qa_uwb_scheduled_dump_io.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_radar_cir_estimator.cc
+[ 69%] Linking CXX executable uwb_qa_uwb_radar_cir_estimator.cc
+[ 70%] Built target uwb_qa_uwb_radar_sfd_core.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_radar_timing_core.cc
+[ 71%] Linking CXX executable uwb_qa_uwb_radar_timing_core.cc
+[ 71%] Built target uwb_qa_uwb_radar_cir_estimator.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_radar_cir_core.cc
+[ 71%] Linking CXX executable uwb_qa_uwb_radar_cir_core.cc
+[ 71%] Built target uwb_qa_uwb_radar_timing_core.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_radar_packet_source.cc
+[ 71%] Linking CXX executable uwb_qa_uwb_radar_packet_source.cc
+[ 72%] Built target uwb_qa_uwb_radar_cir_core.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_loopback_echo.cc
+[ 72%] Linking CXX executable uwb_qa_uwb_loopback_echo.cc
+[ 72%] Linking CXX executable uwb_qa_uwb_pdu_rational_resampler.cc
+[ 73%] Built target uwb_qa_uwb_radar_packet_source.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_radar_cir_estimator_block.cc
+[ 74%] Built target uwb_qa_uwb_loopback_echo.cc
+[ 74%] Linking CXX executable uwb_qa_uwb_radar_cir_estimator_block.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_cir_writer.cc
+[ 74%] Linking CXX executable uwb_qa_uwb_cir_writer.cc
+[ 74%] Built target uwb_qa_uwb_pdu_rational_resampler.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_echo_timer.cc
+[ 74%] Built target uwb_qa_uwb_radar_cir_estimator_block.cc
+[ 75%] Linking CXX executable uwb_qa_uwb_echo_timer.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_echo_multitx_layout.cc
+[ 75%] Built target uwb_qa_uwb_cir_writer.cc
+[ 75%] Linking CXX executable uwb_qa_uwb_echo_multitx_layout.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_echo_timer_stream.cc
+[ 76%] Linking CXX executable uwb_qa_uwb_echo_timer_stream.cc
+[ 77%] Built target uwb_qa_uwb_echo_multitx_layout.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_radar_e2e.cc
+[ 77%] Linking CXX executable uwb_qa_uwb_radar_e2e.cc
+[ 77%] Built target uwb_qa_uwb_echo_timer.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_uhd_backend.cc
+[ 78%] Linking CXX executable uwb_qa_uwb_uhd_backend.cc
+[ 78%] Built target uwb_qa_uwb_echo_timer_stream.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_hrp_mod_core.cc
+[ 79%] Linking CXX executable uwb_qa_uwb_hrp_mod_core.cc
+[ 79%] Built target uwb_qa_uwb_radar_e2e.cc
+[ 79%] Built target uwb_qa_uwb_hrp_mod_core.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_fullpacket_cfo_diag.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_fullpacket_payload_cache.cc
+[ 79%] Built target uwb_qa_uwb_uhd_backend.cc
+[ 80%] Linking CXX executable uwb_qa_uwb_fullpacket_cfo_diag.cc
+[ 80%] Linking CXX executable uwb_qa_uwb_fullpacket_payload_cache.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_fullpacket_fast_rx.cc
+[ 80%] Linking CXX executable uwb_qa_uwb_fullpacket_fast_rx.cc
+[ 80%] Built target uwb_qa_uwb_fullpacket_cfo_diag.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_rx_fused_cmf.cc
+[ 80%] Linking CXX executable uwb_qa_uwb_rx_fused_cmf.cc
+[ 80%] Built target uwb_qa_uwb_fullpacket_fast_rx.cc
+[ 81%] Built target uwb_qa_uwb_fullpacket_payload_cache.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_rx_fused_phr.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_fullpacket_sic_core.cc
+[ 82%] Linking CXX executable uwb_qa_uwb_rx_fused_phr.cc
+[ 82%] Linking CXX executable uwb_qa_uwb_fullpacket_sic_core.cc
+[ 83%] Built target uwb_qa_uwb_rx_fused_cmf.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_discrete_cir_estimator.cc
+[ 83%] Linking CXX executable uwb_qa_uwb_discrete_cir_estimator.cc
+[ 83%] Built target uwb_qa_uwb_rx_fused_phr.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_discrete_cir_reconstruct.cc
+[ 84%] Built target uwb_qa_uwb_fullpacket_sic_core.cc
+[ 84%] Linking CXX executable uwb_qa_uwb_discrete_cir_reconstruct.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_preamble_sic_core.cc
+[ 84%] Linking CXX executable uwb_qa_uwb_preamble_sic_core.cc
+[ 84%] Built target uwb_qa_uwb_discrete_cir_estimator.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_preamble_sic.cc
+[ 85%] Built target uwb_qa_uwb_discrete_cir_reconstruct.cc
+[ 85%] Linking CXX executable uwb_qa_uwb_preamble_sic.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_sic_unified.cc
+[ 85%] Linking CXX executable uwb_qa_uwb_sic_unified.cc
+[ 86%] Built target uwb_qa_uwb_preamble_sic_core.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_fixed_tone_cancel_core.cc
+[ 86%] Linking CXX executable uwb_qa_uwb_fixed_tone_cancel_core.cc
+[ 86%] Built target uwb_qa_uwb_preamble_sic.cc
+[ 87%] Built target uwb_qa_uwb_sic_unified.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_fixed_tone_cancel_source.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_uhd_sc16_pipeline.cc
+[ 88%] Built target uwb_qa_uwb_fixed_tone_cancel_core.cc
+[ 89%] Building CXX object lib/CMakeFiles/uwb_qa_uwb_uhd_sc16_pipeline.cc.dir/qa_uwb_uhd_sc16_pipeline.cc.o
+[ 89%] Building CXX object lib/CMakeFiles/uwb_qa_uwb_fixed_tone_cancel_source.cc.dir/qa_uwb_fixed_tone_cancel_source.cc.o
+Consolidate compiler generated dependencies of target uwb_qa_uwb_resampler_burst_opt.cc
+[ 89%] Linking CXX executable uwb_qa_uwb_resampler_burst_opt.cc
+[ 89%] Built target uwb_qa_uwb_resampler_burst_opt.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_hrp_packet_source.cc
+[ 90%] Linking CXX executable uwb_qa_uwb_hrp_packet_source.cc
+[ 90%] Built target uwb_qa_uwb_hrp_packet_source.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_twr_config.cc
+[ 91%] Linking CXX executable uwb_qa_uwb_twr_config.cc
+[ 91%] Built target uwb_qa_uwb_twr_config.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_twr_frame.cc
+[ 92%] Linking CXX executable uwb_qa_uwb_twr_frame.cc
+[ 92%] Built target uwb_qa_uwb_twr_frame.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_twr_phy_matrix.cc
+[ 93%] Linking CXX executable uwb_qa_uwb_twr_phy_matrix.cc
+[ 93%] Built target uwb_qa_uwb_twr_phy_matrix.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_twr_timing_budget.cc
+[ 93%] Linking CXX executable uwb_qa_uwb_twr_timing_budget.cc
+[ 94%] Built target uwb_qa_uwb_twr_timing_budget.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_twr_timestamp.cc
+[ 94%] Linking CXX executable uwb_qa_uwb_twr_timestamp.cc
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_discrete_cir_sic.h:44,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_sic_unified.h:82,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h:16,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fixed_tone_cancel_source.h:33,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/qa_uwb_fixed_tone_cancel_source.cc:22:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_detector_core.h:29,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_radar_sfd_core.h:18,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_radar_cir_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h:14,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_fixed_tone_cancel_source.h:33,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/qa_uwb_fixed_tone_cancel_source.cc:22:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[ 94%] Built target uwb_qa_uwb_twr_timestamp.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_twr_tof_input.cc
+[ 94%] Linking CXX executable uwb_qa_uwb_twr_tof_input.cc
+[ 95%] Built target uwb_qa_uwb_twr_tof_input.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_twr_config_parity.cc
+[ 95%] Linking CXX executable uwb_qa_uwb_twr_config_parity.cc
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_hrp_mod_core.h:24,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_discrete_cir_sic.h:44,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_sic_unified.h:82,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h:16,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/qa_uwb_uhd_sc16_pipeline.cc:13:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_detector_core.h:29,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_radar_sfd_core.h:18,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_radar_cir_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h:14,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/qa_uwb_uhd_sc16_pipeline.cc:13:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[ 95%] Built target uwb_qa_uwb_twr_config_parity.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_twr_math.cc
+[ 95%] Linking CXX executable uwb_qa_uwb_twr_math.cc
+[ 95%] Built target uwb_qa_uwb_twr_math.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_twr_native_phy.cc
+[ 95%] Linking CXX executable uwb_qa_uwb_twr_native_phy.cc
+[ 96%] Built target uwb_qa_uwb_twr_native_phy.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_twr_phy_impairment.cc
+[ 96%] Linking CXX executable uwb_qa_uwb_twr_phy_impairment.cc
+[ 97%] Built target uwb_qa_uwb_twr_phy_impairment.cc
+Consolidate compiler generated dependencies of target uwb_qa_uwb_uhd_backend_device.cc
+[ 98%] Linking CXX executable uwb_qa_uwb_uhd_backend_device.cc
+[ 98%] Built target uwb_qa_uwb_uhd_backend_device.cc
+Consolidate compiler generated dependencies of target twr_native_phy_demo
+[ 99%] Building CXX object apps/CMakeFiles/twr_native_phy_demo.dir/twr_native_phy_demo.cc.o
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/../include/gnuradio/uwb/uwb_twr_phy.h:73,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/twr_native_phy_demo.cc:78:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/twr_native_phy_demo.cc:75:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[ 99%] Linking CXX executable uwb_qa_uwb_fixed_tone_cancel_source.cc
+[ 99%] Built target uwb_qa_uwb_fixed_tone_cancel_source.cc
+Consolidate compiler generated dependencies of target twr_m2a_bench
+[100%] Building CXX object apps/CMakeFiles/twr_m2a_bench.dir/twr_m2a_bench.cc.o
+[100%] Linking CXX executable uwb_qa_uwb_demod_core.cc
+[100%] Built target uwb_qa_uwb_demod_core.cc
+[100%] Built target copy_bindings_for_tests
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/../include/gnuradio/uwb/uwb_twr_phy.h:73,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/twr_m2a_bench.cc:40:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/../include/gnuradio/uwb/uwb_twr_phy.h:73,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/twr_m2a_bench.cc:40:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[100%] Linking CXX executable twr_native_phy_demo
+[100%] Linking CXX executable twr_m2a_bench
+[100%] Built target twr_native_phy_demo
+[100%] Built target twr_m2a_bench
+[100%] Linking CXX executable uwb_qa_uwb_uhd_sc16_pipeline.cc
+[100%] Built target uwb_qa_uwb_uhd_sc16_pipeline.cc

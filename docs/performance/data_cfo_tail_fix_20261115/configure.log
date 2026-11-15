@@ -1,0 +1,16 @@
+-- Using GMP.
+-- User set python executable /usr/bin/python3
+-- UHD burst backend (ENABLE_UHD_BACKEND=AUTO): 1
+-- Using install prefix: /usr/local
+-- Building for version: 1.0.0.0 / 1.0.0
+-- UWB CTest: pinning LD_LIBRARY_PATH=/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-cfo-tail-fix/lib for /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib tests
+-- UWB CTest: registered uwb_qa_twr_config_py (apps/test_twr_config.py)
+-- UWB CTest: registered uwb_qa_twr_fake_demo_py + uwb_qa_twr_m1b_verify_py (M1-B demo + verifier)
+-- UWB CTest: registered uwb_qa_install_consumer (prefix=''; empty => SKIP)
+-- UWB CTest: registered uwb_qa_sc16_pipeline_runner_exit (runner exit-code QA, R2)
+-- PYTHON and GRC components are enabled
+-- Python checking for pygccxml - found
+-- Found pybind11: /usr/include (found version "2.9.1")
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/oi/Desktop/uwb-gnuradio/gr-uwb/build-cfo-tail-fix

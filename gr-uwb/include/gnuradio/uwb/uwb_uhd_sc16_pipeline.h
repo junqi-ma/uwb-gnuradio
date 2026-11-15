@@ -332,6 +332,7 @@ struct PipelineConfig {
     std::string uhd_args;
     std::string uhd_subdev;
     std::string uhd_channel;
+    std::string uhd_antenna; // empty keeps the device default
     double uhd_center_freq = 3993.6e6;
     double uhd_gain = 30.0;
     std::string uhd_clock_source;

@@ -102,6 +102,8 @@ BOOST_AUTO_TEST_CASE(test_defaults_production_values)
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kDetectorPreTrigger, size_t(2032));
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kDetectorCapture, size_t(200000));
     BOOST_CHECK_CLOSE(gr::uwb::defaults::kDetectorEnergyThreshold, 0.02f, 1e-6);
+    BOOST_CHECK_CLOSE(gr::uwb::defaults::kDetectorSc16EnergyThreshold, 4e-3f,
+                      1e-6);
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kDetectorEnergyGateDecimation,
                       size_t(100));
     BOOST_CHECK_EQUAL(gr::uwb::defaults::kDetectorCoarseDecimation, size_t(4));
@@ -197,9 +199,12 @@ BOOST_AUTO_TEST_CASE(test_grc_detector_sc16_defaults_match_header)
     BOOST_CHECK(yaml_default_equals(yaml, "coarse_repetitions", "1"));
     BOOST_CHECK(yaml_default_equals(yaml, "coarse_margin", "16"));
     BOOST_CHECK(yaml_default_equals(yaml, "sample_rate", "998.4e6"));
+    BOOST_CHECK(yaml_default_equals(yaml, "energy_threshold", "0.004"));
+    BOOST_CHECK(yaml_default_equals(yaml, "fine_threshold", "0.1"));
     BOOST_CHECK(yaml_make_contains(yaml, "${coarse_repetitions}"));
     BOOST_CHECK(yaml_make_contains(yaml, "${coarse_margin}"));
     BOOST_CHECK(yaml_make_contains(yaml, "${sample_rate}"));
+    BOOST_CHECK(yaml_make_contains(yaml, "${fine_threshold}"));
     BOOST_CHECK(yaml.find("UwbDetectorSc16::make_from_file") != std::string::npos);
 }
 

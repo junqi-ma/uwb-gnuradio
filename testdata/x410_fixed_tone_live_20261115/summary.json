@@ -1,0 +1,123 @@
+{
+  "commit": "b573195ea9d0a2af41e1b2c54c6ed8d6bb5685e9",
+  "capture": {
+    "capture.json": {
+      "rate": 737280000.0,
+      "freq": 6489599999.999996,
+      "gain": 60.0,
+      "channel": 3,
+      "antenna": "RX1",
+      "requested": 73728000,
+      "got": 73728000,
+      "duration_ms": 100.0,
+      "errors": [],
+      "max_timestamp_error_samples": 3.725290298461914e-08
+    },
+    "capture_1s.json": {
+      "rate": 737280000.0,
+      "freq": 6489599999.999996,
+      "gain": 60.0,
+      "channel": 3,
+      "antenna": "RX1",
+      "requested": 737280000,
+      "got": 737280000,
+      "duration_ms": 1000.0,
+      "errors": [],
+      "max_timestamp_error_samples": 1.1920928955078125e-07
+    },
+    "raw_1s_sha256": "bb885e458fad18bd4a8d0c124bbac93a44a4e20e549248be31c50ae6702d71af"
+  },
+  "decode": {
+    "clean_tail": {
+      "windows": 200,
+      "status_histogram": {
+        "0": 200
+      },
+      "timing_ok": 200,
+      "sfd_ok": 200,
+      "phr_ok": 200,
+      "fcs_pass": 200,
+      "independent_crc_pass": 200,
+      "lengths": {
+        "127": 200
+      },
+      "diagnostic_service_us_quantiles": {
+        "min": 20691.0,
+        "p50": 21501.0,
+        "p95": 21740.45,
+        "max": 23454.0
+      }
+    },
+    "raw_tail": {
+      "windows": 200,
+      "status_histogram": {
+        "0": 193,
+        "2": 2,
+        "6": 3,
+        "4": 2
+      },
+      "timing_ok": 198,
+      "sfd_ok": 196,
+      "phr_ok": 196,
+      "fcs_pass": 193,
+      "independent_crc_pass": 193,
+      "lengths": {
+        "127": 193
+      },
+      "diagnostic_service_us_quantiles": {
+        "min": 989.0,
+        "p50": 21421.5,
+        "p95": 21762.3,
+        "max": 24270.0
+      }
+    },
+    "clean_stock": {
+      "windows": 200,
+      "status_histogram": {
+        "7": 26,
+        "6": 136,
+        "4": 38
+      },
+      "timing_ok": 200,
+      "sfd_ok": 162,
+      "phr_ok": 162,
+      "fcs_pass": 0,
+      "independent_crc_pass": 0,
+      "lengths": {},
+      "diagnostic_service_us_quantiles": {
+        "min": 1691.0,
+        "p50": 21905.0,
+        "p95": 22310.25,
+        "max": 23432.0
+      }
+    },
+    "raw_stock": {
+      "windows": 200,
+      "status_histogram": {
+        "4": 198,
+        "2": 2
+      },
+      "timing_ok": 198,
+      "sfd_ok": 0,
+      "phr_ok": 0,
+      "fcs_pass": 0,
+      "independent_crc_pass": 0,
+      "lengths": {},
+      "diagnostic_service_us_quantiles": {
+        "min": 986.0,
+        "p50": 1941.0,
+        "p95": 2009.1,
+        "max": 3391.0
+      }
+    }
+  },
+  "arrival": {
+    "qualified_count": 200,
+    "candidate_count": 325,
+    "fit_period_ms": 4.9998637601066855,
+    "fit_residual_std_us": 0.000286893951054319,
+    "fit_residual_max_abs_us": 0.000594850522854055,
+    "raw_template_metric_median": 0.309217,
+    "clean_template_metric_median": 0.6386620000000001
+  }
+}

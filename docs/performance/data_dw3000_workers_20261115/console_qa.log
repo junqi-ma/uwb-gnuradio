@@ -1,0 +1,8 @@
+Internal ctest changing into directory: /home/oi/Desktop/uwb-gnuradio/gr-uwb/build-cfo-tail-fix
+Test project /home/oi/Desktop/uwb-gnuradio/gr-uwb/build-cfo-tail-fix
+    Start 84: uwb_qa_dw3000_live_console
+1/1 Test #84: uwb_qa_dw3000_live_console .......   Passed    0.12 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   0.12 sec

@@ -183,8 +183,9 @@ void bind_detector_sc16(py::module& m)
     using gr::uwb::defaults::kDetectorCoarseMargin;
     using gr::uwb::defaults::kDetectorCoarseRepetitions;
     using gr::uwb::defaults::kDetectorEnergyGateDecimation;
-    using gr::uwb::defaults::kDetectorEnergyThreshold;
     using gr::uwb::defaults::kDetectorPreTrigger;
+    using gr::uwb::defaults::kDetectorSc16EnergyThreshold;
+    using gr::uwb::defaults::kDetectorSc16FineThreshold;
     using gr::uwb::defaults::kSampleRateHz;
 
     py::class_<gr::uwb::UwbDetectorSc16,
@@ -194,23 +195,25 @@ void bind_detector_sc16(py::module& m)
              py::arg("known_preamble"),
              py::arg("pre_trigger") = kDetectorPreTrigger,
              py::arg("capture") = kDetectorCapture,
-             py::arg("energy_threshold") = kDetectorEnergyThreshold,
+             py::arg("energy_threshold") = kDetectorSc16EnergyThreshold,
              py::arg("energy_gate_decimation") = kDetectorEnergyGateDecimation,
              py::arg("coarse_decimation") = kDetectorCoarseDecimation,
              py::arg("coarse_repetitions") = kDetectorCoarseRepetitions,
              py::arg("coarse_margin") = kDetectorCoarseMargin,
-             py::arg("sample_rate") = kSampleRateHz)
+             py::arg("sample_rate") = kSampleRateHz,
+             py::arg("fine_threshold") = kDetectorSc16FineThreshold)
         .def_static("make_from_file", &gr::uwb::UwbDetectorSc16::make_from_file,
                     py::arg("template_file"),
                     py::arg("pre_trigger") = kDetectorPreTrigger,
                     py::arg("capture") = kDetectorCapture,
-                    py::arg("energy_threshold") = kDetectorEnergyThreshold,
+                    py::arg("energy_threshold") = kDetectorSc16EnergyThreshold,
                     py::arg("energy_gate_decimation") =
                         kDetectorEnergyGateDecimation,
                     py::arg("coarse_decimation") = kDetectorCoarseDecimation,
                     py::arg("coarse_repetitions") = kDetectorCoarseRepetitions,
                     py::arg("coarse_margin") = kDetectorCoarseMargin,
-                    py::arg("sample_rate") = kSampleRateHz)
+                    py::arg("sample_rate") = kSampleRateHz,
+                     py::arg("fine_threshold") = kDetectorSc16FineThreshold)
         .def("sample_rate", &gr::uwb::UwbDetectorSc16::sample_rate)
         .def("set_sample_rate",
              &gr::uwb::UwbDetectorSc16::set_sample_rate,

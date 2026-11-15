@@ -1,0 +1,628 @@
+START mode=uhd channel=3 antenna=RX1 cir=auto workers=1 summary=50
+[INFO] [UHD] linux; GNU C++ version 11.4.0; Boost_107400; DPDK_20.11; UHD_4.6.0.HEAD-0-g50fa3baa
+[INFO] [MPMD] Initializing 1 device(s) in parallel with args: mgmt_addr=192.168.10.2,type=x4xx,product=x410,serial=2607179,name=ni-x4xx-2607179,fpga=CG_600,claimed=False,addr=192.168.10.2,recv_frame_size=8000,num_recv_frames=32768
+HEARTBEAT completed=0 fcs=0 raw_samples=0 queued=0 raw_drop_samples=0 source_errors=0 gaps=0 output_omitted=0
+[WARNING] [UDP] The current recv_buff_size of 250000000 is less than the minimum recommended size of 314572800 and may result in dropped packets on some NICs
+[INFO] [MPM.PeriphManager] init() called with device args `fpga=CG_600,mgmt_addr=192.168.10.2,name=ni-x4xx-2607179,num_recv_frames=32768,product=x410,recv_frame_size=8000,clock_source=internal,time_source=internal,initializing=True'.
+HEARTBEAT completed=0 fcs=0 raw_samples=0 queued=0 raw_drop_samples=0 source_errors=0 gaps=0 output_omitted=0
+HEARTBEAT completed=0 fcs=0 raw_samples=0 queued=0 raw_drop_samples=0 source_errors=0 gaps=0 output_omitted=0
+UHD RX configured: channel=3 antenna=RX1 rate=7.3728e+08 frequency=6.4896e+09 gain=60
+[WARNING] [UDP] The current recv_buff_size of 250000000 is less than the minimum recommended size of 314572800 and may result in dropped packets on some NICs
+STREAM_STARTED native_rate=737280000 tone_hz=-232960000 period_ms=20 training_ms=0.5
+PACKET id=1 time_ms=1.949 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.284 fit=40 fcs=1 crc=1 latency_ms=10.076 full_retry=0 worker=0 queue_us=125.833 resample_us=2428.185 demod_us=7522.235 retry_us=0.000 compute_us=9950.530 cpu_us=9945.858
+PACKET id=2 time_ms=6.949 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.020 fit=40 fcs=1 crc=1 latency_ms=12.419 full_retry=0 worker=0 queue_us=5128.634 resample_us=2048.572 demod_us=5241.844 retry_us=0.000 compute_us=7290.436 cpu_us=7290.917
+PACKET id=3 time_ms=11.949 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.754 fit=40 fcs=1 crc=1 latency_ms=13.423 full_retry=0 worker=0 queue_us=6192.603 resample_us=2092.905 demod_us=5137.901 retry_us=0.000 compute_us=7230.826 cpu_us=7231.635
+PACKET id=4 time_ms=16.949 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.059 fit=40 fcs=1 crc=1 latency_ms=15.043 full_retry=0 worker=0 queue_us=7965.686 resample_us=2098.335 demod_us=4978.946 retry_us=0.000 compute_us=7077.412 cpu_us=7078.567
+PACKET id=5 time_ms=21.949 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.907 fit=40 fcs=1 crc=1 latency_ms=15.547 full_retry=0 worker=0 queue_us=8313.320 resample_us=2093.205 demod_us=5140.776 retry_us=0.000 compute_us=7234.112 cpu_us=7235.162
+PACKET id=6 time_ms=26.948 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.119 fit=40 fcs=1 crc=1 latency_ms=16.799 full_retry=0 worker=0 queue_us=9711.728 resample_us=2147.165 demod_us=4939.664 retry_us=0.000 compute_us=7086.919 cpu_us=7087.685
+PACKET id=7 time_ms=31.948 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.204 fit=40 fcs=1 crc=1 latency_ms=17.575 full_retry=0 worker=0 queue_us=10507.501 resample_us=2051.458 demod_us=5015.765 retry_us=0.000 compute_us=7067.444 cpu_us=7068.218
+PACKET id=8 time_ms=36.948 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.101 fit=40 fcs=1 crc=1 latency_ms=16.665 full_retry=0 worker=0 queue_us=9429.055 resample_us=2111.399 demod_us=5124.006 retry_us=0.000 compute_us=7235.505 cpu_us=7236.435
+PACKET id=9 time_ms=41.948 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.759 fit=40 fcs=1 crc=1 latency_ms=16.821 full_retry=0 worker=0 queue_us=9638.863 resample_us=2107.572 demod_us=5074.353 retry_us=0.000 compute_us=7182.016 cpu_us=7182.863
+PACKET id=10 time_ms=46.948 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.163 fit=40 fcs=1 crc=1 latency_ms=16.330 full_retry=0 worker=0 queue_us=9223.755 resample_us=2074.891 demod_us=5031.504 retry_us=0.000 compute_us=7106.486 cpu_us=7107.382
+PACKET id=11 time_ms=51.948 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.166 fit=40 fcs=1 crc=1 latency_ms=15.367 full_retry=0 worker=0 queue_us=8242.359 resample_us=2115.756 demod_us=5008.963 retry_us=0.000 compute_us=7124.809 cpu_us=7125.657
+PACKET id=12 time_ms=56.948 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.118 fit=40 fcs=1 crc=1 latency_ms=16.605 full_retry=0 worker=0 queue_us=8771.939 resample_us=2148.397 demod_us=5684.634 retry_us=0.000 compute_us=7833.251 cpu_us=7834.528
+PACKET id=13 time_ms=66.948 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.324 fit=40 fcs=1 crc=1 latency_ms=7.698 full_retry=0 worker=0 queue_us=276.291 resample_us=2221.333 demod_us=5200.477 retry_us=0.000 compute_us=7421.920 cpu_us=7421.192
+PACKET id=14 time_ms=71.948 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.220 fit=40 fcs=1 crc=1 latency_ms=10.199 full_retry=0 worker=0 queue_us=2913.925 resample_us=2099.436 demod_us=5185.159 retry_us=0.000 compute_us=7284.615 cpu_us=7286.379
+PACKET id=15 time_ms=76.942 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.380 fit=40 fcs=1 crc=1 latency_ms=13.170 full_retry=0 worker=0 queue_us=5893.550 resample_us=2128.260 demod_us=5147.790 retry_us=0.000 compute_us=7276.070 cpu_us=7277.442
+HEARTBEAT completed=15 fcs=15 raw_samples=53936128 queued=2 raw_drop_samples=0 source_errors=0 gaps=0 output_omitted=0
+PACKET id=16 time_ms=81.946 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.023 fit=40 fcs=1 crc=1 latency_ms=16.746 full_retry=0 worker=0 queue_us=9349.057 resample_us=2108.543 demod_us=5288.380 retry_us=0.000 compute_us=7397.023 cpu_us=7388.110
+PACKET id=17 time_ms=86.948 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.245 fit=40 fcs=1 crc=1 latency_ms=20.107 full_retry=0 worker=0 queue_us=12873.060 resample_us=2134.722 demod_us=5099.360 retry_us=0.000 compute_us=7234.182 cpu_us=7235.012
+PACKET id=18 time_ms=91.946 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.602 fit=40 fcs=1 crc=1 latency_ms=23.924 full_retry=0 worker=0 queue_us=16610.940 resample_us=2111.339 demod_us=5201.569 retry_us=0.000 compute_us=7313.119 cpu_us=7315.203
+PACKET id=19 time_ms=96.946 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.824 fit=40 fcs=1 crc=1 latency_ms=27.241 full_retry=0 worker=0 queue_us=19935.395 resample_us=2208.098 demod_us=5097.717 retry_us=0.000 compute_us=7305.905 cpu_us=7306.866
+PACKET id=20 time_ms=101.946 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.444 fit=40 fcs=1 crc=1 latency_ms=30.638 full_retry=0 worker=0 queue_us=23450.041 resample_us=2103.805 demod_us=5083.931 retry_us=0.000 compute_us=7187.846 cpu_us=7188.995
+PACKET id=21 time_ms=106.946 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.077 fit=40 fcs=1 crc=1 latency_ms=33.710 full_retry=0 worker=0 queue_us=26519.293 resample_us=2073.629 demod_us=5117.002 retry_us=0.000 compute_us=7190.651 cpu_us=7191.720
+PACKET id=22 time_ms=111.946 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.263 fit=40 fcs=1 crc=1 latency_ms=37.347 full_retry=0 worker=0 queue_us=29950.715 resample_us=2159.217 demod_us=5236.554 retry_us=0.000 compute_us=7396.032 cpu_us=7397.016
+PACKET id=23 time_ms=116.946 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.432 fit=40 fcs=1 crc=1 latency_ms=41.072 full_retry=0 worker=0 queue_us=33508.361 resample_us=2157.323 demod_us=5406.268 retry_us=0.000 compute_us=7563.671 cpu_us=7564.732
+PACKET id=24 time_ms=121.947 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.836 fit=40 fcs=1 crc=1 latency_ms=44.117 full_retry=0 worker=0 queue_us=36820.291 resample_us=2265.815 demod_us=5030.302 retry_us=0.000 compute_us=7296.217 cpu_us=7297.209
+PACKET id=25 time_ms=126.946 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.219 fit=40 fcs=1 crc=1 latency_ms=48.131 full_retry=0 worker=0 queue_us=39971.666 resample_us=2126.897 demod_us=6032.828 retry_us=0.000 compute_us=8159.745 cpu_us=8163.166
+PACKET id=26 time_ms=131.946 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.352 fit=40 fcs=1 crc=1 latency_ms=51.929 full_retry=0 worker=0 queue_us=44337.998 resample_us=2402.127 demod_us=5188.976 retry_us=0.000 compute_us=7591.193 cpu_us=7592.143
+PACKET id=27 time_ms=136.947 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.004 fit=40 fcs=1 crc=1 latency_ms=55.539 full_retry=0 worker=0 queue_us=48175.553 resample_us=2204.130 demod_us=5159.030 retry_us=0.000 compute_us=7363.341 cpu_us=7364.204
+PACKET id=28 time_ms=141.946 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.626 fit=40 fcs=1 crc=1 latency_ms=58.797 full_retry=0 worker=0 queue_us=51486.652 resample_us=2119.564 demod_us=5191.090 retry_us=0.000 compute_us=7310.744 cpu_us=7311.646
+PACKET id=29 time_ms=146.945 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.308 fit=40 fcs=1 crc=1 latency_ms=62.539 full_retry=0 worker=0 queue_us=55003.593 resample_us=2117.801 demod_us=5417.048 retry_us=0.000 compute_us=7534.959 cpu_us=7531.479
+PACKET id=30 time_ms=151.945 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.676 fit=40 fcs=1 crc=1 latency_ms=65.769 full_retry=0 worker=0 queue_us=58496.589 resample_us=2086.413 demod_us=5186.411 retry_us=0.000 compute_us=7272.854 cpu_us=7273.805
+PACKET id=31 time_ms=156.945 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.263 fit=40 fcs=1 crc=1 latency_ms=69.325 full_retry=0 worker=0 queue_us=62220.543 resample_us=2080.180 demod_us=5024.251 retry_us=0.000 compute_us=7104.451 cpu_us=7106.330
+PACKET id=32 time_ms=161.945 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.324 fit=40 fcs=1 crc=1 latency_ms=72.495 full_retry=0 worker=0 queue_us=65169.502 resample_us=2157.103 demod_us=5168.638 retry_us=0.000 compute_us=7325.771 cpu_us=7326.574
+PACKET id=33 time_ms=166.946 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.438 fit=40 fcs=1 crc=1 latency_ms=75.948 full_retry=0 worker=0 queue_us=68744.731 resample_us=2127.859 demod_us=5075.035 retry_us=0.000 compute_us=7203.034 cpu_us=7204.374
+PACKET id=34 time_ms=171.948 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.247 fit=40 fcs=1 crc=1 latency_ms=78.631 full_retry=0 worker=0 queue_us=71237.456 resample_us=2176.248 demod_us=5217.689 retry_us=0.000 compute_us=7394.037 cpu_us=7395.644
+PACKET id=35 time_ms=176.948 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.551 fit=40 fcs=1 crc=1 latency_ms=82.062 full_retry=0 worker=0 queue_us=74937.084 resample_us=2107.131 demod_us=5017.708 retry_us=0.000 compute_us=7124.929 cpu_us=7125.826
+PACKET id=36 time_ms=181.946 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.042 fit=40 fcs=1 crc=1 latency_ms=85.289 full_retry=0 worker=0 queue_us=78183.233 resample_us=2119.333 demod_us=4986.181 retry_us=0.000 compute_us=7105.614 cpu_us=7106.721
+PACKET id=37 time_ms=186.947 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.526 fit=40 fcs=1 crc=1 latency_ms=86.163 full_retry=0 worker=0 queue_us=78932.551 resample_us=2159.117 demod_us=5070.977 retry_us=0.000 compute_us=7230.194 cpu_us=7230.995
+PACKET id=38 time_ms=191.943 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.363 fit=40 fcs=1 crc=1 latency_ms=87.787 full_retry=0 worker=0 queue_us=80787.294 resample_us=2076.204 demod_us=4923.684 retry_us=0.000 compute_us=6999.989 cpu_us=7001.112
+PACKET id=39 time_ms=196.943 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.743 fit=40 fcs=1 crc=1 latency_ms=92.231 full_retry=0 worker=0 queue_us=84051.276 resample_us=2363.806 demod_us=5815.235 retry_us=0.000 compute_us=8179.552 cpu_us=8182.302
+PACKET id=40 time_ms=201.943 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.416 fit=40 fcs=1 crc=1 latency_ms=96.488 full_retry=0 worker=0 queue_us=88503.769 resample_us=2868.099 demod_us=5116.351 retry_us=0.000 compute_us=7984.561 cpu_us=7985.503
+PACKET id=41 time_ms=206.943 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.331 fit=40 fcs=1 crc=1 latency_ms=99.812 full_retry=0 worker=0 queue_us=92517.979 resample_us=2130.534 demod_us=5163.579 retry_us=0.000 compute_us=7294.213 cpu_us=7295.465
+PACKET id=42 time_ms=211.943 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.653 fit=40 fcs=1 crc=1 latency_ms=103.652 full_retry=0 worker=0 queue_us=96339.014 resample_us=2202.597 demod_us=5109.820 retry_us=0.000 compute_us=7312.537 cpu_us=7313.520
+PACKET id=43 time_ms=216.944 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.662 fit=40 fcs=1 crc=1 latency_ms=106.420 full_retry=0 worker=0 queue_us=99267.695 resample_us=2104.365 demod_us=5047.504 retry_us=0.000 compute_us=7151.959 cpu_us=7153.157
+PACKET id=44 time_ms=221.944 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.428 fit=40 fcs=1 crc=1 latency_ms=108.755 full_retry=0 worker=0 queue_us=101467.417 resample_us=2164.698 demod_us=5122.543 retry_us=0.000 compute_us=7287.261 cpu_us=7288.373
+PACKET id=45 time_ms=226.943 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.396 fit=40 fcs=1 crc=1 latency_ms=110.863 full_retry=0 worker=0 queue_us=103647.993 resample_us=2107.512 demod_us=5107.385 retry_us=0.000 compute_us=7215.077 cpu_us=7216.056
+PACKET id=46 time_ms=231.943 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.471 fit=40 fcs=1 crc=1 latency_ms=113.094 full_retry=0 worker=0 queue_us=106006.640 resample_us=2116.348 demod_us=4970.922 retry_us=0.000 compute_us=7087.360 cpu_us=7088.166
+PACKET id=47 time_ms=236.945 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.414 fit=40 fcs=1 crc=1 latency_ms=115.423 full_retry=0 worker=0 queue_us=108075.810 resample_us=2256.838 demod_us=5090.564 retry_us=0.000 compute_us=7347.492 cpu_us=7348.214
+PACKET id=48 time_ms=241.942 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.989 fit=40 fcs=1 crc=1 latency_ms=117.623 full_retry=0 worker=0 queue_us=110427.494 resample_us=2136.906 demod_us=5058.925 retry_us=0.000 compute_us=7195.921 cpu_us=7196.960
+PACKET id=49 time_ms=246.942 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.260 fit=40 fcs=1 crc=1 latency_ms=119.699 full_retry=0 worker=0 queue_us=112665.136 resample_us=2100.138 demod_us=4933.212 retry_us=0.000 compute_us=7033.471 cpu_us=7034.966
+PACKET id=74 time_ms=371.939 status=DROPPED_QUEUE
+SUMMARY completed=50 batch=50 batch_fcs=49/50 batch_pct=98.0 total_fcs=49/50 total_pct=98.0 full_retry=0 raw_drop_samples=0 source_errors=0 gaps=0 models=15 queued=20 queue_peak=20 output_omitted=0 DROPPED_QUEUE=1
+PACKET id=50 time_ms=251.942 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.792 fit=40 fcs=1 crc=1 latency_ms=122.056 full_retry=0 worker=0 queue_us=114628.571 resample_us=2160.550 demod_us=5266.058 retry_us=0.000 compute_us=7426.939 cpu_us=7428.105
+PACKET id=51 time_ms=256.942 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.375 fit=40 fcs=1 crc=1 latency_ms=124.341 full_retry=0 worker=0 queue_us=117067.877 resample_us=2221.833 demod_us=5050.740 retry_us=0.000 compute_us=7272.673 cpu_us=7273.514
+PACKET id=77 time_ms=386.939 status=DROPPED_QUEUE
+PACKET id=52 time_ms=261.942 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.296 fit=40 fcs=1 crc=1 latency_ms=127.088 full_retry=0 worker=0 queue_us=119338.560 resample_us=2198.089 demod_us=5550.766 retry_us=0.000 compute_us=7749.085 cpu_us=7750.741
+PACKET id=53 time_ms=266.948 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.740 fit=40 fcs=1 crc=1 latency_ms=129.925 full_retry=0 worker=0 queue_us=122178.587 resample_us=2268.700 demod_us=5478.101 retry_us=0.000 compute_us=7746.901 cpu_us=7747.806
+PACKET id=80 time_ms=401.939 status=DROPPED_QUEUE
+PACKET id=54 time_ms=271.942 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.954 fit=40 fcs=1 crc=1 latency_ms=131.933 full_retry=0 worker=0 queue_us=124897.201 resample_us=2104.165 demod_us=4931.609 retry_us=0.000 compute_us=7035.965 cpu_us=7036.829
+PACKET id=55 time_ms=276.941 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.688 fit=40 fcs=1 crc=1 latency_ms=134.013 full_retry=0 worker=0 queue_us=126956.622 resample_us=2144.941 demod_us=4911.402 retry_us=0.000 compute_us=7056.433 cpu_us=7057.358
+PACKET id=83 time_ms=416.937 status=DROPPED_QUEUE
+PACKET id=56 time_ms=281.942 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.403 fit=40 fcs=1 crc=1 latency_ms=136.006 full_retry=0 worker=0 queue_us=128995.377 resample_us=2082.556 demod_us=4928.223 retry_us=0.000 compute_us=7010.869 cpu_us=7011.893
+PACKET id=57 time_ms=286.942 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.514 fit=40 fcs=1 crc=1 latency_ms=138.189 full_retry=0 worker=0 queue_us=131043.429 resample_us=2134.180 demod_us=5011.718 retry_us=0.000 compute_us=7146.008 cpu_us=7147.317
+PACKET id=86 time_ms=431.937 status=DROPPED_QUEUE
+PACKET id=58 time_ms=291.942 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.575 fit=40 fcs=1 crc=1 latency_ms=139.245 full_retry=0 worker=0 queue_us=132017.863 resample_us=2133.850 demod_us=5093.519 retry_us=0.000 compute_us=7227.459 cpu_us=7228.349
+PACKET id=59 time_ms=296.942 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.317 fit=40 fcs=1 crc=1 latency_ms=141.040 full_retry=0 worker=0 queue_us=133863.900 resample_us=2097.984 demod_us=5078.241 retry_us=0.000 compute_us=7176.315 cpu_us=7177.554
+PACKET id=60 time_ms=301.942 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.962 fit=40 fcs=1 crc=1 latency_ms=144.449 full_retry=0 worker=0 queue_us=137228.518 resample_us=2131.275 demod_us=5089.171 retry_us=0.000 compute_us=7220.587 cpu_us=7221.506
+PACKET id=90 time_ms=451.937 status=DROPPED_QUEUE
+PACKET id=61 time_ms=306.941 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.656 fit=40 fcs=1 crc=1 latency_ms=147.172 full_retry=0 worker=0 queue_us=139911.005 resample_us=2230.969 demod_us=5029.411 retry_us=0.000 compute_us=7260.540 cpu_us=7261.823
+PACKET id=62 time_ms=311.940 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.328 fit=40 fcs=1 crc=1 latency_ms=149.567 full_retry=0 worker=0 queue_us=142389.141 resample_us=2142.156 demod_us=5035.742 retry_us=0.000 compute_us=7177.918 cpu_us=7178.846
+PACKET id=93 time_ms=466.937 status=DROPPED_QUEUE
+PACKET id=63 time_ms=316.940 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.526 fit=40 fcs=1 crc=1 latency_ms=151.712 full_retry=0 worker=0 queue_us=144523.624 resample_us=2190.394 demod_us=4997.332 retry_us=0.000 compute_us=7187.946 cpu_us=7189.396
+PACKET id=64 time_ms=321.941 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.142 fit=40 fcs=1 crc=1 latency_ms=153.768 full_retry=0 worker=0 queue_us=146621.307 resample_us=2055.284 demod_us=5091.696 retry_us=0.000 compute_us=7147.080 cpu_us=7148.088
+PACKET id=65 time_ms=326.941 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.470 fit=40 fcs=1 crc=1 latency_ms=156.164 full_retry=0 worker=0 queue_us=148870.590 resample_us=2234.276 demod_us=5058.835 retry_us=0.000 compute_us=7293.222 cpu_us=7294.835
+PACKET id=96 time_ms=481.935 status=DROPPED_QUEUE
+PACKET id=66 time_ms=331.940 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.942 fit=40 fcs=1 crc=1 latency_ms=158.987 full_retry=0 worker=0 queue_us=151217.324 resample_us=2138.128 demod_us=5631.666 retry_us=0.000 compute_us=7769.894 cpu_us=7771.460
+PACKET id=67 time_ms=336.940 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.111 fit=40 fcs=1 crc=1 latency_ms=161.215 full_retry=0 worker=0 queue_us=153900.682 resample_us=2318.913 demod_us=4995.518 retry_us=0.000 compute_us=7314.521 cpu_us=7315.934
+PACKET id=68 time_ms=341.941 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.785 fit=40 fcs=1 crc=1 latency_ms=163.650 full_retry=0 worker=0 queue_us=156296.867 resample_us=2216.063 demod_us=5137.400 retry_us=0.000 compute_us=7353.554 cpu_us=7354.807
+PACKET id=101 time_ms=506.936 status=DROPPED_QUEUE
+PACKET id=69 time_ms=346.941 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.576 fit=40 fcs=1 crc=1 latency_ms=165.709 full_retry=0 worker=0 queue_us=158579.383 resample_us=2103.144 demod_us=5026.665 retry_us=0.000 compute_us=7129.899 cpu_us=7130.976
+PACKET id=103 time_ms=516.936 status=DROPPED_QUEUE
+PACKET id=70 time_ms=351.940 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.876 fit=40 fcs=1 crc=1 latency_ms=168.105 full_retry=0 worker=0 queue_us=160924.234 resample_us=2090.690 demod_us=5090.193 retry_us=0.000 compute_us=7180.973 cpu_us=7181.862
+PACKET id=71 time_ms=356.941 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.574 fit=40 fcs=1 crc=1 latency_ms=170.188 full_retry=0 worker=0 queue_us=163093.740 resample_us=2104.486 demod_us=4988.986 retry_us=0.000 compute_us=7093.833 cpu_us=7095.089
+PACKET id=72 time_ms=361.929 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.335 fit=40 fcs=1 crc=1 latency_ms=172.116 full_retry=0 worker=0 queue_us=165021.329 resample_us=2165.739 demod_us=4928.714 retry_us=0.000 compute_us=7094.553 cpu_us=7095.429
+PACKET id=73 time_ms=366.939 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.019 fit=40 fcs=1 crc=1 latency_ms=174.420 full_retry=0 worker=0 queue_us=167288.286 resample_us=2121.577 demod_us=5010.065 retry_us=0.000 compute_us=7131.752 cpu_us=7132.469
+PACKET id=75 time_ms=376.939 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.452 fit=40 fcs=1 crc=1 latency_ms=171.483 full_retry=0 worker=0 queue_us=164333.175 resample_us=2128.390 demod_us=5020.854 retry_us=0.000 compute_us=7149.335 cpu_us=7150.493
+PACKET id=76 time_ms=381.939 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.470 fit=40 fcs=1 crc=1 latency_ms=172.880 full_retry=0 worker=0 queue_us=165921.955 resample_us=2065.674 demod_us=4892.207 retry_us=0.000 compute_us=6957.971 cpu_us=6959.053
+PACKET id=78 time_ms=391.941 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.703 fit=40 fcs=1 crc=1 latency_ms=166.905 full_retry=0 worker=0 queue_us=159911.779 resample_us=2110.457 demod_us=4882.669 retry_us=0.000 compute_us=6993.216 cpu_us=6993.968
+PACKET id=79 time_ms=396.939 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.681 fit=40 fcs=1 crc=1 latency_ms=169.338 full_retry=0 worker=0 queue_us=162306.393 resample_us=2104.656 demod_us=4927.201 retry_us=0.000 compute_us=7031.957 cpu_us=7032.772
+PACKET id=81 time_ms=406.939 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.293 fit=40 fcs=1 crc=1 latency_ms=169.418 full_retry=0 worker=0 queue_us=162334.104 resample_us=2124.563 demod_us=4958.890 retry_us=0.000 compute_us=7083.543 cpu_us=7086.222
+PACKET id=82 time_ms=411.937 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.434 fit=40 fcs=1 crc=1 latency_ms=171.343 full_retry=0 worker=0 queue_us=164308.930 resample_us=2083.006 demod_us=4950.664 retry_us=0.000 compute_us=7033.761 cpu_us=7034.776
+PACKET id=84 time_ms=421.937 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.566 fit=40 fcs=1 crc=1 latency_ms=169.299 full_retry=0 worker=0 queue_us=161596.609 resample_us=2087.925 demod_us=5613.832 retry_us=0.000 compute_us=7701.967 cpu_us=7702.982
+PACKET id=85 time_ms=426.937 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.058 fit=40 fcs=1 crc=1 latency_ms=171.863 full_retry=0 worker=0 queue_us=164634.001 resample_us=2243.564 demod_us=4985.248 retry_us=0.000 compute_us=7228.983 cpu_us=7229.922
+PACKET id=87 time_ms=436.937 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.282 fit=40 fcs=1 crc=1 latency_ms=168.706 full_retry=0 worker=0 queue_us=161670.766 resample_us=2112.030 demod_us=4922.763 retry_us=0.000 compute_us=7034.883 cpu_us=7036.008
+PACKET id=88 time_ms=441.937 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.232 fit=40 fcs=1 crc=1 latency_ms=170.992 full_retry=0 worker=0 queue_us=163778.447 resample_us=2222.675 demod_us=4990.378 retry_us=0.000 compute_us=7213.153 cpu_us=7214.443
+PACKET id=89 time_ms=446.938 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.208 fit=40 fcs=1 crc=1 latency_ms=172.802 full_retry=0 worker=0 queue_us=165672.173 resample_us=2157.043 demod_us=4972.796 retry_us=0.000 compute_us=7129.919 cpu_us=7130.826
+PACKET id=91 time_ms=456.937 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.812 fit=40 fcs=1 crc=1 latency_ms=170.345 full_retry=0 worker=0 queue_us=163229.050 resample_us=2189.974 demod_us=4926.009 retry_us=0.000 compute_us=7116.084 cpu_us=7117.090
+PACKET id=120 time_ms=601.933 status=DROPPED_QUEUE
+PACKET id=92 time_ms=461.937 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.287 fit=40 fcs=1 crc=1 latency_ms=172.639 full_retry=0 worker=0 queue_us=165338.004 resample_us=2163.906 demod_us=5137.120 retry_us=0.000 compute_us=7301.136 cpu_us=7293.442
+PACKET id=122 time_ms=611.934 status=DROPPED_QUEUE
+PACKET id=94 time_ms=471.936 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.204 fit=40 fcs=1 crc=1 latency_ms=169.634 full_retry=0 worker=0 queue_us=162652.573 resample_us=2096.081 demod_us=4885.203 retry_us=0.000 compute_us=6981.374 cpu_us=6982.257
+PACKET id=124 time_ms=621.933 status=DROPPED_QUEUE
+SUMMARY completed=100 batch=50 batch_fcs=38/50 batch_pct=76.0 total_fcs=87/100 total_pct=87.0 full_retry=0 raw_drop_samples=0 source_errors=0 gaps=0 models=29 queued=22 queue_peak=23 output_omitted=0 DROPPED_QUEUE=12
+PACKET id=95 time_ms=476.936 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.457 fit=40 fcs=1 crc=1 latency_ms=171.951 full_retry=0 worker=0 queue_us=164741.350 resample_us=2104.186 demod_us=5105.471 retry_us=0.000 compute_us=7209.747 cpu_us=7210.726
+PACKET id=126 time_ms=631.933 status=DROPPED_QUEUE
+PACKET id=97 time_ms=486.936 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.295 fit=40 fcs=1 crc=1 latency_ms=160.891 full_retry=0 worker=0 queue_us=153778.937 resample_us=2117.550 demod_us=4993.935 retry_us=0.000 compute_us=7111.865 cpu_us=7112.812
+PACKET id=128 time_ms=641.933 status=DROPPED_QUEUE
+PACKET id=98 time_ms=491.936 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.077 fit=40 fcs=1 crc=1 latency_ms=164.242 full_retry=0 worker=0 queue_us=157077.513 resample_us=2175.938 demod_us=4988.775 retry_us=0.000 compute_us=7164.843 cpu_us=7165.921
+PACKET id=130 time_ms=651.931 status=DROPPED_QUEUE
+PACKET id=99 time_ms=496.936 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.736 fit=40 fcs=1 crc=1 latency_ms=167.869 full_retry=0 worker=0 queue_us=160711.220 resample_us=2087.655 demod_us=5070.356 retry_us=0.000 compute_us=7158.111 cpu_us=7159.139
+PACKET id=132 time_ms=661.931 status=DROPPED_QUEUE
+PACKET id=100 time_ms=501.936 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.347 fit=40 fcs=1 crc=1 latency_ms=171.058 full_retry=0 worker=0 queue_us=163756.477 resample_us=2275.212 demod_us=5026.395 retry_us=0.000 compute_us=7301.727 cpu_us=7302.859
+PACKET id=134 time_ms=671.931 status=DROPPED_QUEUE
+PACKET id=102 time_ms=511.936 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.725 fit=40 fcs=1 crc=1 latency_ms=170.765 full_retry=0 worker=0 queue_us=163488.611 resample_us=2156.162 demod_us=5120.569 retry_us=0.000 compute_us=7276.851 cpu_us=7278.163
+PACKET id=104 time_ms=521.936 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.378 fit=40 fcs=1 crc=1 latency_ms=169.851 full_retry=0 worker=0 queue_us=161830.110 resample_us=2159.779 demod_us=5860.839 retry_us=0.000 compute_us=8020.648 cpu_us=8021.781
+PACKET id=137 time_ms=686.931 status=DROPPED_QUEUE
+PACKET id=105 time_ms=526.936 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.267 fit=40 fcs=1 crc=1 latency_ms=170.403 full_retry=0 worker=0 queue_us=163062.813 resample_us=2174.575 demod_us=5165.974 retry_us=0.000 compute_us=7340.659 cpu_us=7334.058
+PACKET id=139 time_ms=696.930 status=DROPPED_QUEUE
+PACKET id=106 time_ms=531.934 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.641 fit=40 fcs=1 crc=1 latency_ms=171.145 full_retry=0 worker=0 queue_us=163810.166 resample_us=2133.179 demod_us=5201.218 retry_us=0.000 compute_us=7334.498 cpu_us=7335.702
+PACKET id=107 time_ms=536.934 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.561 fit=40 fcs=1 crc=1 latency_ms=170.962 full_retry=0 worker=0 queue_us=163679.785 resample_us=2216.263 demod_us=5066.239 retry_us=0.000 compute_us=7282.582 cpu_us=7283.373
+PACKET id=142 time_ms=711.931 status=DROPPED_QUEUE
+PACKET id=108 time_ms=541.934 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.000 fit=40 fcs=1 crc=1 latency_ms=170.733 full_retry=0 worker=0 queue_us=163421.477 resample_us=2148.246 demod_us=5162.978 retry_us=0.000 compute_us=7311.334 cpu_us=7312.287
+PACKET id=144 time_ms=721.930 status=DROPPED_QUEUE
+PACKET id=109 time_ms=546.934 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.598 fit=40 fcs=1 crc=1 latency_ms=169.799 full_retry=0 worker=0 queue_us=162450.599 resample_us=2256.948 demod_us=5091.336 retry_us=0.000 compute_us=7348.384 cpu_us=7349.627
+PACKET id=146 time_ms=731.930 status=DROPPED_QUEUE
+PACKET id=110 time_ms=551.934 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.959 fit=40 fcs=1 crc=1 latency_ms=169.854 full_retry=0 worker=0 queue_us=162687.308 resample_us=2087.684 demod_us=5078.341 retry_us=0.000 compute_us=7166.206 cpu_us=7168.146
+PACKET id=148 time_ms=741.930 status=DROPPED_QUEUE
+PACKET id=111 time_ms=556.934 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.739 fit=40 fcs=1 crc=1 latency_ms=169.924 full_retry=0 worker=0 queue_us=162784.768 resample_us=2088.557 demod_us=5050.109 retry_us=0.000 compute_us=7138.766 cpu_us=7139.793
+PACKET id=112 time_ms=561.935 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.854 fit=40 fcs=1 crc=1 latency_ms=170.209 full_retry=0 worker=0 queue_us=163014.123 resample_us=2117.760 demod_us=5077.079 retry_us=0.000 compute_us=7194.949 cpu_us=7195.608
+PACKET id=113 time_ms=566.934 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.885 fit=40 fcs=1 crc=1 latency_ms=163.972 full_retry=0 worker=0 queue_us=156879.827 resample_us=2103.824 demod_us=4988.415 retry_us=0.000 compute_us=7092.329 cpu_us=7093.185
+PACKET id=152 time_ms=761.928 status=DROPPED_QUEUE
+PACKET id=114 time_ms=571.934 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.603 fit=40 fcs=1 crc=1 latency_ms=163.819 full_retry=0 worker=0 queue_us=156527.244 resample_us=2112.491 demod_us=5179.428 retry_us=0.000 compute_us=7292.009 cpu_us=7281.560
+PACKET id=154 time_ms=771.928 status=DROPPED_QUEUE
+PACKET id=115 time_ms=576.934 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.001 fit=40 fcs=1 crc=1 latency_ms=164.149 full_retry=0 worker=0 queue_us=156992.586 resample_us=2112.150 demod_us=5044.047 retry_us=0.000 compute_us=7156.348 cpu_us=7157.265
+PACKET id=116 time_ms=581.933 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.582 fit=40 fcs=1 crc=1 latency_ms=164.692 full_retry=0 worker=0 queue_us=157434.423 resample_us=2187.660 demod_us=5069.665 retry_us=0.000 compute_us=7257.676 cpu_us=7258.636
+PACKET id=157 time_ms=786.928 status=DROPPED_QUEUE
+PACKET id=117 time_ms=586.933 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.405 fit=40 fcs=1 crc=1 latency_ms=167.496 full_retry=0 worker=0 queue_us=159946.114 resample_us=2116.588 demod_us=5433.017 retry_us=0.000 compute_us=7549.726 cpu_us=7551.206
+PACKET id=118 time_ms=591.933 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.315 fit=40 fcs=1 crc=1 latency_ms=171.397 full_retry=0 worker=0 queue_us=163738.664 resample_us=2395.896 demod_us=5262.692 retry_us=0.000 compute_us=7658.748 cpu_us=7661.163
+PACKET id=160 time_ms=801.929 status=DROPPED_QUEUE
+PACKET id=119 time_ms=596.935 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.872 fit=40 fcs=1 crc=1 latency_ms=174.888 full_retry=0 worker=0 queue_us=167555.600 resample_us=2268.920 demod_us=5063.794 retry_us=0.000 compute_us=7332.885 cpu_us=7333.878
+PACKET id=121 time_ms=606.933 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.558 fit=40 fcs=1 crc=1 latency_ms=174.089 full_retry=0 worker=0 queue_us=166827.913 resample_us=2215.862 demod_us=5044.839 retry_us=0.000 compute_us=7260.791 cpu_us=7261.602
+PACKET id=163 time_ms=816.927 status=DROPPED_QUEUE
+PACKET id=123 time_ms=616.933 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.648 fit=40 fcs=1 crc=1 latency_ms=173.727 full_retry=0 worker=0 queue_us=166558.775 resample_us=2101.180 demod_us=5067.070 retry_us=0.000 compute_us=7168.350 cpu_us=7169.138
+PACKET id=125 time_ms=626.933 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.004 fit=40 fcs=1 crc=1 latency_ms=173.412 full_retry=0 worker=0 queue_us=166210.019 resample_us=2127.649 demod_us=5074.123 retry_us=0.000 compute_us=7201.923 cpu_us=7203.463
+PACKET id=127 time_ms=636.934 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.154 fit=40 fcs=1 crc=1 latency_ms=173.475 full_retry=0 worker=0 queue_us=166157.492 resample_us=2211.404 demod_us=5106.163 retry_us=0.000 compute_us=7317.747 cpu_us=7313.089
+PACKET id=167 time_ms=836.926 status=DROPPED_QUEUE
+PACKET id=129 time_ms=646.932 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.165 fit=40 fcs=1 crc=1 latency_ms=173.342 full_retry=0 worker=0 queue_us=166182.217 resample_us=2111.910 demod_us=5047.274 retry_us=0.000 compute_us=7159.354 cpu_us=7160.431
+PACKET id=131 time_ms=656.931 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.199 fit=40 fcs=1 crc=1 latency_ms=172.768 full_retry=0 worker=0 queue_us=165601.082 resample_us=2242.180 demod_us=4924.527 retry_us=0.000 compute_us=7167.017 cpu_us=7168.477
+PACKET id=170 time_ms=851.925 status=DROPPED_QUEUE
+PACKET id=133 time_ms=666.931 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.894 fit=40 fcs=1 crc=1 latency_ms=172.305 full_retry=0 worker=0 queue_us=165051.204 resample_us=2161.561 demod_us=5091.966 retry_us=0.000 compute_us=7253.908 cpu_us=7254.880
+PACKET id=135 time_ms=676.931 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.044 fit=40 fcs=1 crc=1 latency_ms=170.168 full_retry=0 worker=0 queue_us=163083.321 resample_us=2176.650 demod_us=4908.086 retry_us=0.000 compute_us=7084.816 cpu_us=7085.941
+PACKET id=173 time_ms=866.925 status=DROPPED_QUEUE
+PACKET id=136 time_ms=681.932 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.189 fit=40 fcs=1 crc=1 latency_ms=171.577 full_retry=0 worker=0 queue_us=164244.811 resample_us=2150.211 demod_us=5182.103 retry_us=0.000 compute_us=7332.454 cpu_us=7334.058
+SUMMARY completed=150 batch=50 batch_fcs=31/50 batch_pct=62.0 total_fcs=118/150 total_pct=78.7 full_retry=0 raw_drop_samples=0 source_errors=0 gaps=0 models=41 queued=24 queue_peak=24 output_omitted=0 DROPPED_QUEUE=19
+PACKET id=138 time_ms=691.930 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.792 fit=40 fcs=1 crc=1 latency_ms=171.433 full_retry=0 worker=0 queue_us=164160.185 resample_us=2212.375 demod_us=5059.877 retry_us=0.000 compute_us=7272.372 cpu_us=7273.404
+PACKET id=140 time_ms=701.931 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.305 fit=40 fcs=1 crc=1 latency_ms=170.429 full_retry=0 worker=0 queue_us=163420.275 resample_us=2113.613 demod_us=4895.393 retry_us=0.000 compute_us=7009.096 cpu_us=7009.949
+PACKET id=141 time_ms=706.933 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.216 fit=40 fcs=1 crc=1 latency_ms=173.492 full_retry=0 worker=0 queue_us=166235.326 resample_us=2147.526 demod_us=5108.366 retry_us=0.000 compute_us=7256.293 cpu_us=7257.975
+PACKET id=143 time_ms=716.930 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.893 fit=40 fcs=1 crc=1 latency_ms=173.505 full_retry=0 worker=0 queue_us=165986.335 resample_us=2316.789 demod_us=5201.970 retry_us=0.000 compute_us=7518.869 cpu_us=7519.767
+PACKET id=179 time_ms=896.925 status=DROPPED_QUEUE
+PACKET id=145 time_ms=726.930 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.273 fit=40 fcs=1 crc=1 latency_ms=173.264 full_retry=0 worker=0 queue_us=165839.724 resample_us=2268.229 demod_us=5156.285 retry_us=0.000 compute_us=7424.614 cpu_us=7425.540
+PACKET id=181 time_ms=906.926 status=DROPPED_QUEUE
+PACKET id=147 time_ms=736.930 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.961 fit=40 fcs=1 crc=1 latency_ms=173.162 full_retry=0 worker=0 queue_us=165749.727 resample_us=2331.957 demod_us=5079.844 retry_us=0.000 compute_us=7411.891 cpu_us=7413.948
+PACKET id=149 time_ms=746.929 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.445 fit=40 fcs=1 crc=1 latency_ms=171.213 full_retry=0 worker=0 queue_us=163883.833 resample_us=2125.655 demod_us=5203.613 retry_us=0.000 compute_us=7329.368 cpu_us=7330.261
+PACKET id=184 time_ms=921.924 status=DROPPED_QUEUE
+PACKET id=150 time_ms=751.928 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.165 fit=40 fcs=1 crc=1 latency_ms=171.656 full_retry=0 worker=0 queue_us=164538.465 resample_us=2093.255 demod_us=5023.970 retry_us=0.000 compute_us=7117.316 cpu_us=7118.222
+PACKET id=186 time_ms=931.924 status=DROPPED_QUEUE
+PACKET id=151 time_ms=756.928 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.577 fit=40 fcs=1 crc=1 latency_ms=172.554 full_retry=0 worker=0 queue_us=165424.635 resample_us=2100.880 demod_us=5028.759 retry_us=0.000 compute_us=7129.749 cpu_us=7130.576
+PACKET id=153 time_ms=766.928 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.954 fit=40 fcs=1 crc=1 latency_ms=173.156 full_retry=0 worker=0 queue_us=165268.135 resample_us=2101.100 demod_us=5786.702 retry_us=0.000 compute_us=7888.023 cpu_us=7890.474
+PACKET id=189 time_ms=946.924 status=DROPPED_QUEUE
+PACKET id=155 time_ms=776.930 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.090 fit=40 fcs=1 crc=1 latency_ms=172.360 full_retry=0 worker=0 queue_us=164262.183 resample_us=2652.872 demod_us=5444.118 retry_us=0.000 compute_us=8097.381 cpu_us=8098.586
+PACKET id=156 time_ms=781.929 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.414 fit=40 fcs=1 crc=1 latency_ms=175.169 full_retry=0 worker=0 queue_us=167488.206 resample_us=2150.471 demod_us=5530.378 retry_us=0.000 compute_us=7680.959 cpu_us=7683.635
+PACKET id=192 time_ms=961.924 status=DROPPED_QUEUE
+PACKET id=158 time_ms=791.927 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.699 fit=40 fcs=1 crc=1 latency_ms=172.198 full_retry=0 worker=0 queue_us=164339.889 resample_us=2459.713 demod_us=5397.963 retry_us=0.000 compute_us=7857.766 cpu_us=7859.165
+PACKET id=194 time_ms=971.922 status=DROPPED_QUEUE
+PACKET id=159 time_ms=796.927 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.068 fit=40 fcs=1 crc=1 latency_ms=174.772 full_retry=0 worker=0 queue_us=167561.162 resample_us=2204.040 demod_us=5006.819 retry_us=0.000 compute_us=7210.949 cpu_us=7212.039
+PACKET id=161 time_ms=806.927 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.573 fit=40 fcs=1 crc=1 latency_ms=172.400 full_retry=0 worker=0 queue_us=165371.979 resample_us=2140.542 demod_us=4887.749 retry_us=0.000 compute_us=7028.381 cpu_us=7029.195
+PACKET id=162 time_ms=811.927 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.247 fit=40 fcs=1 crc=1 latency_ms=174.492 full_retry=0 worker=0 queue_us=167324.744 resample_us=2116.048 demod_us=5051.431 retry_us=0.000 compute_us=7167.569 cpu_us=7168.927
+PACKET id=164 time_ms=821.927 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.247 fit=40 fcs=1 crc=1 latency_ms=172.631 full_retry=0 worker=0 queue_us=164717.889 resample_us=2295.420 demod_us=5617.920 retry_us=0.000 compute_us=7913.450 cpu_us=7914.379
+PACKET id=199 time_ms=996.922 status=DROPPED_QUEUE
+PACKET id=165 time_ms=826.927 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.033 fit=40 fcs=1 crc=1 latency_ms=174.790 full_retry=0 worker=0 queue_us=167432.545 resample_us=2324.453 demod_us=5033.207 retry_us=0.000 compute_us=7357.771 cpu_us=7358.915
+PACKET id=166 time_ms=831.928 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.931 fit=40 fcs=1 crc=1 latency_ms=177.247 full_retry=0 worker=0 queue_us=169938.815 resample_us=2145.282 demod_us=5162.517 retry_us=0.000 compute_us=7307.899 cpu_us=7309.442
+PACKET id=202 time_ms=1011.922 status=DROPPED_QUEUE
+PACKET id=168 time_ms=841.927 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.114 fit=40 fcs=1 crc=1 latency_ms=174.649 full_retry=0 worker=0 queue_us=167259.145 resample_us=2206.294 demod_us=5183.937 retry_us=0.000 compute_us=7390.321 cpu_us=7391.456
+PACKET id=204 time_ms=1021.923 status=DROPPED_QUEUE
+PACKET id=169 time_ms=846.929 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.372 fit=40 fcs=1 crc=1 latency_ms=177.140 full_retry=0 worker=0 queue_us=169780.733 resample_us=2182.470 demod_us=5177.104 retry_us=0.000 compute_us=7359.664 cpu_us=7360.578
+PACKET id=171 time_ms=856.925 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.322 fit=40 fcs=1 crc=1 latency_ms=174.505 full_retry=0 worker=0 queue_us=167162.025 resample_us=2157.795 demod_us=5185.309 retry_us=0.000 compute_us=7343.204 cpu_us=7344.478
+PACKET id=207 time_ms=1036.921 status=DROPPED_QUEUE
+PACKET id=172 time_ms=861.925 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.323 fit=40 fcs=1 crc=1 latency_ms=176.795 full_retry=0 worker=0 queue_us=169479.336 resample_us=2126.617 demod_us=5188.976 retry_us=0.000 compute_us=7315.613 cpu_us=7316.565
+PACKET id=174 time_ms=871.925 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.797 fit=40 fcs=1 crc=1 latency_ms=173.798 full_retry=0 worker=0 queue_us=166709.739 resample_us=2074.561 demod_us=5013.140 retry_us=0.000 compute_us=7087.832 cpu_us=7088.937
+PACKET id=210 time_ms=1051.921 status=DROPPED_QUEUE
+PACKET id=175 time_ms=876.925 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.705 fit=40 fcs=1 crc=1 latency_ms=175.489 full_retry=0 worker=0 queue_us=168337.542 resample_us=2147.766 demod_us=5003.142 retry_us=0.000 compute_us=7151.008 cpu_us=7152.136
+PACKET id=176 time_ms=881.931 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.271 fit=40 fcs=1 crc=1 latency_ms=177.152 full_retry=0 worker=0 queue_us=169936.683 resample_us=2218.848 demod_us=4996.840 retry_us=0.000 compute_us=7215.778 cpu_us=7216.547
+PACKET id=177 time_ms=886.925 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.385 fit=40 fcs=1 crc=1 latency_ms=177.163 full_retry=0 worker=0 queue_us=170013.786 resample_us=2143.368 demod_us=5005.346 retry_us=0.000 compute_us=7148.805 cpu_us=7149.682
+PACKET id=178 time_ms=891.925 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.820 fit=40 fcs=1 crc=1 latency_ms=175.623 full_retry=0 worker=0 queue_us=168448.078 resample_us=2176.880 demod_us=4997.662 retry_us=0.000 compute_us=7174.632 cpu_us=7175.440
+PACKET id=180 time_ms=901.926 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.849 fit=40 fcs=1 crc=1 latency_ms=174.136 full_retry=0 worker=0 queue_us=166981.013 resample_us=2098.565 demod_us=5056.270 retry_us=0.000 compute_us=7154.925 cpu_us=7155.672
+PACKET id=182 time_ms=911.925 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.170 fit=40 fcs=1 crc=1 latency_ms=173.587 full_retry=0 worker=0 queue_us=166462.393 resample_us=2110.347 demod_us=5013.862 retry_us=0.000 compute_us=7124.339 cpu_us=7125.265
+PACKET id=183 time_ms=916.924 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.406 fit=40 fcs=1 crc=1 latency_ms=176.770 full_retry=0 worker=0 queue_us=169532.767 resample_us=2203.660 demod_us=5033.358 retry_us=0.000 compute_us=7237.118 cpu_us=7239.801
+PACKET id=185 time_ms=926.924 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.216 fit=40 fcs=1 crc=1 latency_ms=176.574 full_retry=0 worker=0 queue_us=169094.546 resample_us=2390.616 demod_us=5088.359 retry_us=0.000 compute_us=7479.075 cpu_us=7482.607
+PACKET id=187 time_ms=936.924 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.303 fit=40 fcs=1 crc=1 latency_ms=173.919 full_retry=0 worker=0 queue_us=166555.165 resample_us=2128.431 demod_us=5234.981 retry_us=0.000 compute_us=7363.512 cpu_us=7364.806
+PACKET id=220 time_ms=1101.919 status=DROPPED_QUEUE
+PACKET id=188 time_ms=941.924 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.504 fit=40 fcs=1 crc=1 latency_ms=175.127 full_retry=0 worker=0 queue_us=167765.135 resample_us=2207.186 demod_us=5155.033 retry_us=0.000 compute_us=7362.309 cpu_us=7363.764
+PACKET id=222 time_ms=1111.903 status=DROPPED_QUEUE
+HEARTBEAT completed=198 fcs=152 raw_samples=799866880 queued=23 raw_drop_samples=0 source_errors=0 gaps=0 output_omitted=0
+PACKET id=190 time_ms=951.924 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.344 fit=40 fcs=1 crc=1 latency_ms=172.737 full_retry=0 worker=0 queue_us=165344.925 resample_us=2160.820 demod_us=5230.813 retry_us=0.000 compute_us=7391.964 cpu_us=7392.999
+PACKET id=224 time_ms=1121.921 status=DROPPED_QUEUE
+SUMMARY completed=200 batch=50 batch_fcs=35/50 batch_pct=70.0 total_fcs=153/200 total_pct=76.5 full_retry=0 raw_drop_samples=0 source_errors=0 gaps=0 models=55 queued=23 queue_peak=24 output_omitted=0 DROPPED_QUEUE=15
+PACKET id=191 time_ms=956.924 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.919 fit=40 fcs=1 crc=1 latency_ms=174.302 full_retry=0 worker=0 queue_us=167117.787 resample_us=2109.325 demod_us=5074.985 retry_us=0.000 compute_us=7184.410 cpu_us=7185.599
+PACKET id=226 time_ms=1131.918 status=DROPPED_QUEUE
+PACKET id=193 time_ms=966.922 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.290 fit=40 fcs=1 crc=1 latency_ms=171.976 full_retry=0 worker=0 queue_us=164872.780 resample_us=2082.876 demod_us=5020.565 retry_us=0.000 compute_us=7103.591 cpu_us=7105.247
+PACKET id=228 time_ms=1141.918 status=DROPPED_QUEUE
+PACKET id=195 time_ms=976.922 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.269 fit=40 fcs=1 crc=1 latency_ms=169.152 full_retry=0 worker=0 queue_us=161689.338 resample_us=2297.503 demod_us=5164.611 retry_us=0.000 compute_us=7462.204 cpu_us=7463.832
+PACKET id=230 time_ms=1151.917 status=DROPPED_QUEUE
+PACKET id=196 time_ms=981.922 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.503 fit=40 fcs=1 crc=1 latency_ms=170.270 full_retry=0 worker=0 queue_us=163064.132 resample_us=2100.649 demod_us=5104.630 retry_us=0.000 compute_us=7205.369 cpu_us=7206.568
+PACKET id=197 time_ms=986.922 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.883 fit=40 fcs=1 crc=1 latency_ms=171.088 full_retry=0 worker=0 queue_us=164051.690 resample_us=2126.327 demod_us=4909.719 retry_us=0.000 compute_us=7036.136 cpu_us=7037.561
+PACKET id=198 time_ms=991.922 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.882 fit=40 fcs=1 crc=1 latency_ms=171.609 full_retry=0 worker=0 queue_us=164520.349 resample_us=2103.974 demod_us=4984.218 retry_us=0.000 compute_us=7088.282 cpu_us=7088.977
+PACKET id=234 time_ms=1171.918 status=DROPPED_QUEUE
+PACKET id=200 time_ms=1001.922 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.404 fit=40 fcs=1 crc=1 latency_ms=171.172 full_retry=0 worker=0 queue_us=164041.642 resample_us=2122.128 demod_us=5008.041 retry_us=0.000 compute_us=7130.280 cpu_us=7131.256
+PACKET id=201 time_ms=1006.923 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.123 fit=40 fcs=1 crc=1 latency_ms=173.936 full_retry=0 worker=0 queue_us=166825.856 resample_us=2123.972 demod_us=4985.669 retry_us=0.000 compute_us=7109.732 cpu_us=7110.578
+PACKET id=203 time_ms=1016.922 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.144 fit=40 fcs=1 crc=1 latency_ms=173.277 full_retry=0 worker=0 queue_us=166289.483 resample_us=2130.334 demod_us=4857.022 retry_us=0.000 compute_us=6987.476 cpu_us=6988.669
+PACKET id=205 time_ms=1026.920 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.993 fit=40 fcs=1 crc=1 latency_ms=170.811 full_retry=0 worker=0 queue_us=163305.209 resample_us=2281.934 demod_us=5223.210 retry_us=0.000 compute_us=7505.334 cpu_us=7507.384
+PACKET id=206 time_ms=1031.921 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.542 fit=40 fcs=1 crc=1 latency_ms=173.176 full_retry=0 worker=0 queue_us=165918.266 resample_us=2187.570 demod_us=5070.466 retry_us=0.000 compute_us=7258.127 cpu_us=7259.678
+PACKET id=208 time_ms=1041.921 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.432 fit=40 fcs=1 crc=1 latency_ms=170.646 full_retry=0 worker=0 queue_us=163230.891 resample_us=2249.384 demod_us=5165.262 retry_us=0.000 compute_us=7414.867 cpu_us=7416.032
+PACKET id=241 time_ms=1206.918 status=DROPPED_QUEUE
+PACKET id=209 time_ms=1046.921 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.950 fit=40 fcs=1 crc=1 latency_ms=172.830 full_retry=0 worker=0 queue_us=165549.003 resample_us=2209.520 demod_us=5071.789 retry_us=0.000 compute_us=7281.410 cpu_us=7282.401
+PACKET id=243 time_ms=1216.916 status=DROPPED_QUEUE
+PACKET id=211 time_ms=1056.921 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.193 fit=40 fcs=1 crc=1 latency_ms=169.290 full_retry=0 worker=0 queue_us=161935.623 resample_us=2149.779 demod_us=5204.004 retry_us=0.000 compute_us=7353.903 cpu_us=7355.218
+PACKET id=245 time_ms=1226.916 status=DROPPED_QUEUE
+PACKET id=212 time_ms=1061.926 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.213 fit=40 fcs=1 crc=1 latency_ms=169.724 full_retry=0 worker=0 queue_us=162459.663 resample_us=2121.688 demod_us=5142.209 retry_us=0.000 compute_us=7263.987 cpu_us=7264.968
+PACKET id=247 time_ms=1236.916 status=DROPPED_QUEUE
+PACKET id=213 time_ms=1066.921 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.152 fit=40 fcs=1 crc=1 latency_ms=169.777 full_retry=0 worker=0 queue_us=162432.022 resample_us=2094.388 demod_us=5250.289 retry_us=0.000 compute_us=7344.768 cpu_us=7346.261
+PACKET id=249 time_ms=1246.916 status=DROPPED_QUEUE
+PACKET id=214 time_ms=1071.920 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.339 fit=40 fcs=1 crc=1 latency_ms=169.124 full_retry=0 worker=0 queue_us=161800.453 resample_us=2145.392 demod_us=5178.216 retry_us=0.000 compute_us=7323.718 cpu_us=7324.571
+PACKET id=215 time_ms=1076.921 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.982 fit=40 fcs=1 crc=1 latency_ms=169.137 full_retry=0 worker=0 queue_us=162011.694 resample_us=2099.487 demod_us=5026.074 retry_us=0.000 compute_us=7125.661 cpu_us=7126.769
+PACKET id=252 time_ms=1261.914 status=DROPPED_QUEUE
+PACKET id=216 time_ms=1081.921 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.734 fit=40 fcs=1 crc=1 latency_ms=165.533 full_retry=0 worker=0 queue_us=158318.978 resample_us=2192.349 demod_us=5021.626 retry_us=0.000 compute_us=7214.065 cpu_us=7214.954
+PACKET id=217 time_ms=1086.921 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.612 fit=40 fcs=1 crc=1 latency_ms=168.555 full_retry=0 worker=0 queue_us=161487.864 resample_us=2112.671 demod_us=4954.071 retry_us=0.000 compute_us=7066.843 cpu_us=7068.138
+PACKET id=255 time_ms=1276.915 status=DROPPED_QUEUE
+PACKET id=218 time_ms=1091.919 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.044 fit=40 fcs=1 crc=1 latency_ms=171.282 full_retry=0 worker=0 queue_us=164176.722 resample_us=2114.715 demod_us=4990.949 retry_us=0.000 compute_us=7105.764 cpu_us=7102.682
+PACKET id=219 time_ms=1096.919 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.531 fit=40 fcs=1 crc=1 latency_ms=173.652 full_retry=0 worker=0 queue_us=166545.137 resample_us=2100.318 demod_us=5006.699 retry_us=0.000 compute_us=7107.107 cpu_us=7108.173
+PACKET id=258 time_ms=1291.915 status=DROPPED_QUEUE
+PACKET id=221 time_ms=1106.920 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.325 fit=40 fcs=1 crc=1 latency_ms=174.070 full_retry=0 worker=0 queue_us=166486.968 resample_us=2147.827 demod_us=5435.372 retry_us=0.000 compute_us=7583.389 cpu_us=7585.050
+PACKET id=223 time_ms=1116.923 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.237 fit=40 fcs=1 crc=1 latency_ms=174.173 full_retry=0 worker=0 queue_us=166127.384 resample_us=2382.901 demod_us=5662.442 retry_us=0.000 compute_us=8045.444 cpu_us=8046.427
+PACKET id=261 time_ms=1306.913 status=DROPPED_QUEUE
+PACKET id=225 time_ms=1126.922 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.445 fit=40 fcs=1 crc=1 latency_ms=174.541 full_retry=0 worker=0 queue_us=167055.351 resample_us=2143.538 demod_us=5342.090 retry_us=0.000 compute_us=7485.718 cpu_us=7486.895
+PACKET id=227 time_ms=1136.917 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.661 fit=40 fcs=1 crc=1 latency_ms=174.190 full_retry=0 worker=0 queue_us=166853.698 resample_us=2218.597 demod_us=5117.073 retry_us=0.000 compute_us=7335.881 cpu_us=7337.525
+PACKET id=264 time_ms=1321.913 status=DROPPED_QUEUE
+PACKET id=229 time_ms=1146.917 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.290 fit=40 fcs=1 crc=1 latency_ms=173.127 full_retry=0 worker=0 queue_us=165939.806 resample_us=2139.160 demod_us=5047.725 retry_us=0.000 compute_us=7186.985 cpu_us=7187.773
+PACKET id=231 time_ms=1156.919 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.724 fit=40 fcs=1 crc=1 latency_ms=172.503 full_retry=0 worker=0 queue_us=165380.411 resample_us=2153.877 demod_us=4968.979 retry_us=0.000 compute_us=7122.946 cpu_us=7123.983
+PACKET id=232 time_ms=1161.918 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.984 fit=40 fcs=1 crc=1 latency_ms=173.336 full_retry=0 worker=0 queue_us=166345.046 resample_us=2137.307 demod_us=4853.875 retry_us=0.000 compute_us=6991.282 cpu_us=6992.556
+PACKET id=233 time_ms=1166.918 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.950 fit=40 fcs=1 crc=1 latency_ms=174.475 full_retry=0 worker=0 queue_us=167146.049 resample_us=2110.537 demod_us=5218.621 retry_us=0.000 compute_us=7329.298 cpu_us=7331.192
+PACKET id=235 time_ms=1176.916 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.277 fit=40 fcs=1 crc=1 latency_ms=168.670 full_retry=0 worker=0 queue_us=161497.823 resample_us=2111.339 demod_us=5060.929 retry_us=0.000 compute_us=7172.348 cpu_us=7173.306
+PACKET id=270 time_ms=1351.912 status=DROPPED_QUEUE
+PACKET id=236 time_ms=1181.916 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.513 fit=40 fcs=1 crc=1 latency_ms=163.856 full_retry=0 worker=0 queue_us=156343.090 resample_us=2261.397 demod_us=5251.461 retry_us=0.000 compute_us=7513.009 cpu_us=7514.437
+PACKET id=272 time_ms=1361.911 status=DROPPED_QUEUE
+PACKET id=237 time_ms=1186.916 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.274 fit=40 fcs=1 crc=1 latency_ms=165.656 full_retry=0 worker=0 queue_us=158216.027 resample_us=2387.830 demod_us=5051.802 retry_us=0.000 compute_us=7439.743 cpu_us=7440.809
+PACKET id=274 time_ms=1371.912 status=DROPPED_QUEUE
+SUMMARY completed=250 batch=50 batch_fcs=33/50 batch_pct=66.0 total_fcs=186/250 total_pct=74.4 full_retry=0 raw_drop_samples=0 source_errors=0 gaps=0 models=65 queued=24 queue_peak=24 output_omitted=0 DROPPED_QUEUE=17
+PACKET id=238 time_ms=1191.916 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.185 fit=40 fcs=1 crc=1 latency_ms=168.985 full_retry=0 worker=0 queue_us=161678.467 resample_us=2182.680 demod_us=5123.976 retry_us=0.000 compute_us=7306.866 cpu_us=7308.169
+PACKET id=239 time_ms=1196.916 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.838 fit=40 fcs=1 crc=1 latency_ms=172.210 full_retry=0 worker=0 queue_us=164964.340 resample_us=2171.981 demod_us=5073.552 retry_us=0.000 compute_us=7245.624 cpu_us=7246.975
+PACKET id=277 time_ms=1386.912 status=DROPPED_QUEUE
+PACKET id=240 time_ms=1201.916 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.853 fit=40 fcs=1 crc=1 latency_ms=175.511 full_retry=0 worker=0 queue_us=168135.431 resample_us=2217.275 demod_us=5158.419 retry_us=0.000 compute_us=7375.825 cpu_us=7376.918
+PACKET id=242 time_ms=1211.916 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.708 fit=40 fcs=1 crc=1 latency_ms=176.147 full_retry=0 worker=0 queue_us=167829.705 resample_us=2225.770 demod_us=6091.126 retry_us=0.000 compute_us=8316.976 cpu_us=8317.988
+PACKET id=280 time_ms=1401.912 status=DROPPED_QUEUE
+PACKET id=244 time_ms=1221.916 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.494 fit=40 fcs=1 crc=1 latency_ms=175.017 full_retry=0 worker=0 queue_us=167570.875 resample_us=2285.381 demod_us=5160.744 retry_us=0.000 compute_us=7446.215 cpu_us=7447.161
+PACKET id=246 time_ms=1231.916 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.986 fit=40 fcs=1 crc=1 latency_ms=174.684 full_retry=0 worker=0 queue_us=167032.459 resample_us=2164.257 demod_us=5487.368 retry_us=0.000 compute_us=7651.755 cpu_us=7653.529
+PACKET id=283 time_ms=1416.910 status=DROPPED_QUEUE
+PACKET id=248 time_ms=1241.916 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.378 fit=40 fcs=1 crc=1 latency_ms=173.764 full_retry=0 worker=0 queue_us=166656.532 resample_us=2133.690 demod_us=4973.628 retry_us=0.000 compute_us=7107.468 cpu_us=7108.775
+PACKET id=250 time_ms=1251.915 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.047 fit=40 fcs=1 crc=1 latency_ms=173.581 full_retry=0 worker=0 queue_us=166256.692 resample_us=2106.350 demod_us=5217.759 retry_us=0.000 compute_us=7324.199 cpu_us=7326.223
+PACKET id=286 time_ms=1431.910 status=DROPPED_QUEUE
+PACKET id=251 time_ms=1256.915 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.129 fit=40 fcs=1 crc=1 latency_ms=176.913 full_retry=0 worker=0 queue_us=169439.374 resample_us=2367.924 demod_us=5105.151 retry_us=0.000 compute_us=7473.195 cpu_us=7474.171
+PACKET id=253 time_ms=1266.915 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.009 fit=40 fcs=1 crc=1 latency_ms=172.465 full_retry=0 worker=0 queue_us=165348.020 resample_us=2135.514 demod_us=4981.842 retry_us=0.000 compute_us=7117.456 cpu_us=7118.482
+PACKET id=289 time_ms=1446.910 status=DROPPED_QUEUE
+PACKET id=254 time_ms=1271.915 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.878 fit=40 fcs=1 crc=1 latency_ms=175.447 full_retry=0 worker=0 queue_us=168160.767 resample_us=2198.591 demod_us=5087.498 retry_us=0.000 compute_us=7286.199 cpu_us=7287.521
+PACKET id=256 time_ms=1281.915 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.684 fit=40 fcs=1 crc=1 latency_ms=173.510 full_retry=0 worker=0 queue_us=166361.637 resample_us=2143.247 demod_us=5004.926 retry_us=0.000 compute_us=7148.273 cpu_us=7149.691
+PACKET id=292 time_ms=1461.910 status=DROPPED_QUEUE
+PACKET id=257 time_ms=1286.915 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.535 fit=40 fcs=1 crc=1 latency_ms=175.740 full_retry=0 worker=0 queue_us=168357.752 resample_us=2226.712 demod_us=5155.404 retry_us=0.000 compute_us=7382.216 cpu_us=7383.611
+PACKET id=259 time_ms=1296.915 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.644 fit=40 fcs=1 crc=1 latency_ms=172.119 full_retry=0 worker=0 queue_us=164979.418 resample_us=2107.732 demod_us=5032.016 retry_us=0.000 compute_us=7139.838 cpu_us=7140.655
+PACKET id=295 time_ms=1476.909 status=DROPPED_QUEUE
+PACKET id=260 time_ms=1301.914 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.308 fit=40 fcs=1 crc=1 latency_ms=174.706 full_retry=0 worker=0 queue_us=167124.459 resample_us=2093.967 demod_us=5487.819 retry_us=0.000 compute_us=7581.977 cpu_us=7583.878
+PACKET id=262 time_ms=1311.913 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.978 fit=40 fcs=1 crc=1 latency_ms=172.750 full_retry=0 worker=0 queue_us=165417.509 resample_us=2254.894 demod_us=5077.790 retry_us=0.000 compute_us=7332.884 cpu_us=7333.998
+PACKET id=298 time_ms=1491.909 status=DROPPED_QUEUE
+PACKET id=263 time_ms=1316.913 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.024 fit=40 fcs=1 crc=1 latency_ms=175.981 full_retry=0 worker=0 queue_us=167975.224 resample_us=2186.528 demod_us=5818.552 retry_us=0.000 compute_us=8005.471 cpu_us=8007.574
+PACKET id=265 time_ms=1326.913 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.154 fit=40 fcs=1 crc=1 latency_ms=171.670 full_retry=0 worker=0 queue_us=163563.467 resample_us=2420.120 demod_us=5685.986 retry_us=0.000 compute_us=8106.247 cpu_us=8107.663
+PACKET id=266 time_ms=1331.913 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.312 fit=40 fcs=1 crc=1 latency_ms=173.646 full_retry=0 worker=0 queue_us=165601.329 resample_us=2388.361 demod_us=5656.081 retry_us=0.000 compute_us=8044.573 cpu_us=8045.987
+PACKET id=302 time_ms=1511.909 status=DROPPED_QUEUE
+PACKET id=267 time_ms=1336.913 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.478 fit=40 fcs=1 crc=1 latency_ms=174.580 full_retry=0 worker=0 queue_us=167140.890 resample_us=2364.717 demod_us=5074.575 retry_us=0.000 compute_us=7439.382 cpu_us=7440.207
+PACKET id=268 time_ms=1341.914 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.084 fit=40 fcs=1 crc=1 latency_ms=175.510 full_retry=0 worker=0 queue_us=168286.370 resample_us=2148.648 demod_us=5075.375 retry_us=0.000 compute_us=7224.114 cpu_us=7225.033
+PACKET id=305 time_ms=1526.907 status=DROPPED_QUEUE
+PACKET id=269 time_ms=1346.913 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.577 fit=40 fcs=1 crc=1 latency_ms=178.813 full_retry=0 worker=0 queue_us=171362.033 resample_us=2450.246 demod_us=5000.909 retry_us=0.000 compute_us=7451.245 cpu_us=7452.561
+PACKET id=307 time_ms=1536.907 status=DROPPED_QUEUE
+PACKET id=271 time_ms=1356.911 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.141 fit=40 fcs=1 crc=1 latency_ms=177.084 full_retry=0 worker=0 queue_us=169754.148 resample_us=2238.914 demod_us=5090.494 retry_us=0.000 compute_us=7329.508 cpu_us=7330.781
+PACKET id=273 time_ms=1366.911 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.096 fit=40 fcs=1 crc=1 latency_ms=176.656 full_retry=0 worker=0 queue_us=169306.498 resample_us=2259.453 demod_us=5090.173 retry_us=0.000 compute_us=7349.737 cpu_us=7350.870
+PACKET id=275 time_ms=1376.912 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.835 fit=40 fcs=1 crc=1 latency_ms=174.919 full_retry=0 worker=0 queue_us=167729.429 resample_us=2168.835 demod_us=5020.364 retry_us=0.000 compute_us=7189.400 cpu_us=7190.348
+PACKET id=276 time_ms=1381.912 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.044 fit=40 fcs=1 crc=1 latency_ms=178.353 full_retry=0 worker=0 queue_us=170848.203 resample_us=2281.583 demod_us=5222.799 retry_us=0.000 compute_us=7504.472 cpu_us=7505.611
+PACKET id=312 time_ms=1561.896 status=DROPPED_QUEUE
+PACKET id=278 time_ms=1391.912 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.692 fit=40 fcs=1 crc=1 latency_ms=175.543 full_retry=0 worker=0 queue_us=168299.554 resample_us=2267.238 demod_us=4975.861 retry_us=0.000 compute_us=7243.189 cpu_us=7244.048
+PACKET id=279 time_ms=1396.912 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.200 fit=40 fcs=1 crc=1 latency_ms=176.698 full_retry=0 worker=0 queue_us=169152.293 resample_us=2159.888 demod_us=5385.651 retry_us=0.000 compute_us=7545.639 cpu_us=7547.991
+PACKET id=315 time_ms=1576.909 status=DROPPED_QUEUE
+PACKET id=281 time_ms=1406.912 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.588 fit=40 fcs=1 crc=1 latency_ms=175.998 full_retry=0 worker=0 queue_us=168661.414 resample_us=2337.638 demod_us=4999.245 retry_us=0.000 compute_us=7336.973 cpu_us=7337.925
+PACKET id=282 time_ms=1411.912 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.729 fit=40 fcs=1 crc=1 latency_ms=178.126 full_retry=0 worker=0 queue_us=170722.971 resample_us=2162.964 demod_us=5240.191 retry_us=0.000 compute_us=7403.506 cpu_us=7404.761
+PACKET id=284 time_ms=1421.910 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.369 fit=40 fcs=1 crc=1 latency_ms=176.576 full_retry=0 worker=0 queue_us=168641.217 resample_us=2487.735 demod_us=5446.994 retry_us=0.000 compute_us=7934.749 cpu_us=7936.180
+PACKET id=319 time_ms=1596.906 status=DROPPED_QUEUE
+PACKET id=285 time_ms=1426.910 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.042 fit=40 fcs=1 crc=1 latency_ms=178.466 full_retry=0 worker=0 queue_us=171014.140 resample_us=2374.796 demod_us=5077.320 retry_us=0.000 compute_us=7452.296 cpu_us=7453.372
+PACKET id=287 time_ms=1436.910 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.036 fit=40 fcs=1 crc=1 latency_ms=176.378 full_retry=0 worker=0 queue_us=168879.748 resample_us=2365.519 demod_us=5132.502 retry_us=0.000 compute_us=7498.131 cpu_us=7499.149
+PACKET id=322 time_ms=1611.906 status=DROPPED_QUEUE
+PACKET id=288 time_ms=1441.910 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.553 fit=40 fcs=1 crc=1 latency_ms=178.927 full_retry=0 worker=0 queue_us=171576.341 resample_us=2163.224 demod_us=5187.694 retry_us=0.000 compute_us=7351.068 cpu_us=7352.323
+PACKET id=324 time_ms=1621.906 status=DROPPED_QUEUE
+SUMMARY completed=300 batch=50 batch_fcs=34/50 batch_pct=68.0 total_fcs=220/300 total_pct=73.3 full_retry=0 raw_drop_samples=0 source_errors=0 gaps=0 models=80 queued=24 queue_peak=24 output_omitted=0 DROPPED_QUEUE=16
+PACKET id=290 time_ms=1451.910 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.937 fit=40 fcs=1 crc=1 latency_ms=176.635 full_retry=0 worker=0 queue_us=168830.727 resample_us=2221.423 demod_us=5582.965 retry_us=0.000 compute_us=7804.569 cpu_us=7805.946
+PACKET id=326 time_ms=1631.904 status=DROPPED_QUEUE
+PACKET id=291 time_ms=1456.910 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.970 fit=40 fcs=1 crc=1 latency_ms=178.907 full_retry=0 worker=0 queue_us=171690.862 resample_us=2140.032 demod_us=5075.857 retry_us=0.000 compute_us=7215.979 cpu_us=7216.908
+PACKET id=293 time_ms=1466.910 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.171 fit=40 fcs=1 crc=1 latency_ms=176.199 full_retry=0 worker=0 queue_us=168927.456 resample_us=2093.947 demod_us=5177.214 retry_us=0.000 compute_us=7271.261 cpu_us=7272.953
+PACKET id=329 time_ms=1646.908 status=DROPPED_QUEUE
+PACKET id=294 time_ms=1471.909 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.573 fit=40 fcs=1 crc=1 latency_ms=178.588 full_retry=0 worker=0 queue_us=171261.508 resample_us=2306.240 demod_us=5020.113 retry_us=0.000 compute_us=7326.473 cpu_us=7327.666
+PACKET id=331 time_ms=1656.904 status=DROPPED_QUEUE
+PACKET id=296 time_ms=1481.909 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.391 fit=40 fcs=1 crc=1 latency_ms=175.793 full_retry=0 worker=0 queue_us=168625.027 resample_us=2094.668 demod_us=5073.342 retry_us=0.000 compute_us=7168.120 cpu_us=7170.270
+PACKET id=297 time_ms=1486.909 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.351 fit=40 fcs=1 crc=1 latency_ms=178.158 full_retry=0 worker=0 queue_us=170617.536 resample_us=2285.571 demod_us=5254.788 retry_us=0.000 compute_us=7540.449 cpu_us=7541.699
+PACKET id=334 time_ms=1671.905 status=DROPPED_QUEUE
+PACKET id=299 time_ms=1496.909 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.249 fit=40 fcs=1 crc=1 latency_ms=172.531 full_retry=0 worker=0 queue_us=165403.543 resample_us=2158.385 demod_us=4969.130 retry_us=0.000 compute_us=7127.605 cpu_us=7128.552
+PACKET id=300 time_ms=1501.909 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.378 fit=40 fcs=1 crc=1 latency_ms=174.141 full_retry=0 worker=0 queue_us=166825.325 resample_us=2180.647 demod_us=5135.077 retry_us=0.000 compute_us=7315.904 cpu_us=7317.026
+PACKET id=337 time_ms=1686.903 status=DROPPED_QUEUE
+PACKET id=301 time_ms=1506.909 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.841 fit=40 fcs=1 crc=1 latency_ms=174.744 full_retry=0 worker=0 queue_us=167496.057 resample_us=2128.039 demod_us=5119.788 retry_us=0.000 compute_us=7248.148 cpu_us=7250.241
+PACKET id=303 time_ms=1516.908 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.040 fit=40 fcs=1 crc=1 latency_ms=175.405 full_retry=0 worker=0 queue_us=166873.495 resample_us=2155.179 demod_us=6375.703 retry_us=0.000 compute_us=8531.013 cpu_us=8533.523
+PACKET id=304 time_ms=1521.907 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.569 fit=40 fcs=1 crc=1 latency_ms=179.258 full_retry=0 worker=0 queue_us=171464.503 resample_us=2417.987 demod_us=5375.872 retry_us=0.000 compute_us=7793.969 cpu_us=7794.634
+PACKET id=341 time_ms=1706.904 status=DROPPED_QUEUE
+PACKET id=306 time_ms=1531.907 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.334 fit=40 fcs=1 crc=1 latency_ms=178.697 full_retry=0 worker=0 queue_us=170593.371 resample_us=2142.086 demod_us=5961.456 retry_us=0.000 compute_us=8103.642 cpu_us=8104.656
+PACKET id=343 time_ms=1716.903 status=DROPPED_QUEUE
+PACKET id=308 time_ms=1541.907 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.024 fit=40 fcs=1 crc=1 latency_ms=176.678 full_retry=0 worker=0 queue_us=169426.991 resample_us=2157.154 demod_us=5093.880 retry_us=0.000 compute_us=7251.154 cpu_us=7251.954
+PACKET id=309 time_ms=1546.907 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.412 fit=40 fcs=1 crc=1 latency_ms=178.816 full_retry=0 worker=0 queue_us=171497.975 resample_us=2122.870 demod_us=5195.388 retry_us=0.000 compute_us=7318.469 cpu_us=7320.081
+PACKET id=346 time_ms=1731.901 status=DROPPED_QUEUE
+PACKET id=310 time_ms=1551.909 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.503 fit=40 fcs=1 crc=1 latency_ms=179.976 full_retry=0 worker=0 queue_us=172726.460 resample_us=2227.954 demod_us=5021.386 retry_us=0.000 compute_us=7249.430 cpu_us=7250.701
+PACKET id=311 time_ms=1556.908 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.652 fit=40 fcs=1 crc=1 latency_ms=178.871 full_retry=0 worker=0 queue_us=171758.798 resample_us=2109.295 demod_us=5003.203 retry_us=0.000 compute_us=7112.588 cpu_us=7113.714
+PACKET id=349 time_ms=1746.901 status=DROPPED_QUEUE
+PACKET id=313 time_ms=1566.909 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.380 fit=40 fcs=1 crc=1 latency_ms=174.974 full_retry=0 worker=0 queue_us=167649.942 resample_us=2173.323 demod_us=5150.375 retry_us=0.000 compute_us=7323.928 cpu_us=7324.871
+PACKET id=314 time_ms=1571.907 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.392 fit=40 fcs=1 crc=1 latency_ms=176.338 full_retry=0 worker=0 queue_us=168990.113 resample_us=2301.831 demod_us=5046.041 retry_us=0.000 compute_us=7348.103 cpu_us=7349.227
+PACKET id=352 time_ms=1761.901 status=DROPPED_QUEUE
+PACKET id=316 time_ms=1581.906 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.021 fit=40 fcs=1 crc=1 latency_ms=176.392 full_retry=0 worker=0 queue_us=168885.569 resample_us=2110.027 demod_us=5396.089 retry_us=0.000 compute_us=7506.196 cpu_us=7507.014
+PACKET id=317 time_ms=1586.906 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.299 fit=40 fcs=1 crc=1 latency_ms=178.151 full_retry=0 worker=0 queue_us=171226.693 resample_us=2063.971 demod_us=4860.228 retry_us=0.000 compute_us=6924.349 cpu_us=6925.349
+PACKET id=318 time_ms=1591.906 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.136 fit=40 fcs=1 crc=1 latency_ms=178.117 full_retry=0 worker=0 queue_us=170577.641 resample_us=2096.612 demod_us=5442.545 retry_us=0.000 compute_us=7539.467 cpu_us=7541.548
+PACKET id=356 time_ms=1781.900 status=DROPPED_QUEUE
+PACKET id=320 time_ms=1601.906 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.414 fit=40 fcs=1 crc=1 latency_ms=175.968 full_retry=0 worker=0 queue_us=168600.892 resample_us=2381.128 demod_us=4986.171 retry_us=0.000 compute_us=7367.479 cpu_us=7368.593
+PACKET id=321 time_ms=1606.906 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.467 fit=40 fcs=1 crc=1 latency_ms=177.832 full_retry=0 worker=0 queue_us=170516.579 resample_us=2188.531 demod_us=5126.972 retry_us=0.000 compute_us=7315.593 cpu_us=7316.485
+PACKET id=359 time_ms=1796.900 status=DROPPED_QUEUE
+PACKET id=323 time_ms=1616.908 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.921 fit=40 fcs=1 crc=1 latency_ms=177.768 full_retry=0 worker=0 queue_us=169967.643 resample_us=2457.680 demod_us=5342.620 retry_us=0.000 compute_us=7800.460 cpu_us=7801.887
+PACKET id=325 time_ms=1626.904 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.825 fit=40 fcs=1 crc=1 latency_ms=175.848 full_retry=0 worker=0 queue_us=168410.880 resample_us=2417.416 demod_us=5019.372 retry_us=0.000 compute_us=7436.878 cpu_us=7438.344
+PACKET id=362 time_ms=1811.900 status=DROPPED_QUEUE
+PACKET id=327 time_ms=1636.904 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.418 fit=40 fcs=1 crc=1 latency_ms=175.651 full_retry=0 worker=0 queue_us=168403.647 resample_us=2168.675 demod_us=5078.812 retry_us=0.000 compute_us=7247.588 cpu_us=7248.728
+PACKET id=328 time_ms=1641.906 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.228 fit=40 fcs=1 crc=1 latency_ms=177.914 full_retry=0 worker=0 queue_us=170777.773 resample_us=2108.042 demod_us=5027.908 retry_us=0.000 compute_us=7136.070 cpu_us=7136.998
+PACKET id=365 time_ms=1826.900 status=DROPPED_QUEUE
+PACKET id=330 time_ms=1651.904 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.236 fit=40 fcs=1 crc=1 latency_ms=176.742 full_retry=0 worker=0 queue_us=169339.769 resample_us=2087.305 demod_us=5315.049 retry_us=0.000 compute_us=7402.454 cpu_us=7403.238
+PACKET id=332 time_ms=1661.904 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.485 fit=40 fcs=1 crc=1 latency_ms=174.309 full_retry=0 worker=0 queue_us=167129.127 resample_us=2225.831 demod_us=4953.821 retry_us=0.000 compute_us=7179.742 cpu_us=7180.559
+PACKET id=368 time_ms=1841.884 status=DROPPED_QUEUE
+PACKET id=333 time_ms=1666.904 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.859 fit=40 fcs=1 crc=1 latency_ms=176.953 full_retry=0 worker=0 queue_us=169356.912 resample_us=2093.405 demod_us=5502.897 retry_us=0.000 compute_us=7596.402 cpu_us=7598.205
+PACKET id=335 time_ms=1676.904 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.077 fit=40 fcs=1 crc=1 latency_ms=173.969 full_retry=0 worker=0 queue_us=166646.784 resample_us=2239.506 demod_us=5083.110 retry_us=0.000 compute_us=7322.706 cpu_us=7317.788
+PACKET id=371 time_ms=1856.898 status=DROPPED_QUEUE
+PACKET id=336 time_ms=1681.904 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.832 fit=40 fcs=1 crc=1 latency_ms=176.620 full_retry=0 worker=0 queue_us=169404.791 resample_us=2119.894 demod_us=5095.023 retry_us=0.000 compute_us=7215.077 cpu_us=7216.336
+PACKET id=338 time_ms=1691.903 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.653 fit=40 fcs=1 crc=1 latency_ms=173.636 full_retry=0 worker=0 queue_us=166500.955 resample_us=2099.246 demod_us=5036.053 retry_us=0.000 compute_us=7135.399 cpu_us=7136.277
+PACKET id=374 time_ms=1871.898 status=DROPPED_QUEUE
+SUMMARY completed=350 batch=50 batch_fcs=33/50 batch_pct=66.0 total_fcs=253/350 total_pct=72.3 full_retry=0 raw_drop_samples=0 source_errors=0 gaps=0 models=90 queued=23 queue_peak=24 output_omitted=0 DROPPED_QUEUE=17
+PACKET id=339 time_ms=1696.903 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.984 fit=40 fcs=1 crc=1 latency_ms=173.241 full_retry=0 worker=0 queue_us=165977.966 resample_us=2142.637 demod_us=5119.848 retry_us=0.000 compute_us=7262.595 cpu_us=7263.615
+PACKET id=340 time_ms=1701.903 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.044 fit=40 fcs=1 crc=1 latency_ms=175.789 full_retry=0 worker=0 queue_us=168271.984 resample_us=2321.818 demod_us=5195.358 retry_us=0.000 compute_us=7517.507 cpu_us=7518.615
+PACKET id=377 time_ms=1886.898 status=DROPPED_QUEUE
+PACKET id=342 time_ms=1711.905 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.122 fit=40 fcs=1 crc=1 latency_ms=173.002 full_retry=0 worker=0 queue_us=165835.984 resample_us=2159.568 demod_us=5006.228 retry_us=0.000 compute_us=7165.906 cpu_us=7167.485
+PACKET id=344 time_ms=1721.903 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.198 fit=40 fcs=1 crc=1 latency_ms=174.126 full_retry=0 worker=0 queue_us=165619.974 resample_us=2097.483 demod_us=6408.584 retry_us=0.000 compute_us=8506.227 cpu_us=8507.595
+PACKET id=345 time_ms=1726.901 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.221 fit=40 fcs=1 crc=1 latency_ms=176.626 full_retry=0 worker=0 queue_us=169025.358 resample_us=2330.153 demod_us=5270.307 retry_us=0.000 compute_us=7600.580 cpu_us=7601.311
+PACKET id=381 time_ms=1906.886 status=DROPPED_QUEUE
+PACKET id=347 time_ms=1736.901 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.918 fit=40 fcs=1 crc=1 latency_ms=174.545 full_retry=0 worker=0 queue_us=166918.738 resample_us=2127.528 demod_us=5498.289 retry_us=0.000 compute_us=7625.917 cpu_us=7626.909
+PACKET id=383 time_ms=1916.897 status=DROPPED_QUEUE
+PACKET id=348 time_ms=1741.901 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.222 fit=40 fcs=1 crc=1 latency_ms=176.650 full_retry=0 worker=0 queue_us=169412.535 resample_us=2128.200 demod_us=5109.409 retry_us=0.000 compute_us=7237.739 cpu_us=7239.160
+PACKET id=350 time_ms=1751.901 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.528 fit=40 fcs=1 crc=1 latency_ms=173.877 full_retry=0 worker=0 queue_us=166681.429 resample_us=2128.230 demod_us=5066.760 retry_us=0.000 compute_us=7195.180 cpu_us=7196.509
+PACKET id=351 time_ms=1756.901 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.481 fit=40 fcs=1 crc=1 latency_ms=176.037 full_retry=0 worker=0 queue_us=168835.226 resample_us=2192.770 demod_us=5008.541 retry_us=0.000 compute_us=7201.432 cpu_us=7202.461
+PACKET id=387 time_ms=1936.898 status=DROPPED_QUEUE
+PACKET id=353 time_ms=1766.902 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.915 fit=40 fcs=1 crc=1 latency_ms=173.426 full_retry=0 worker=0 queue_us=166229.041 resample_us=2138.760 demod_us=5058.374 retry_us=0.000 compute_us=7197.215 cpu_us=7198.133
+PACKET id=389 time_ms=1946.897 status=DROPPED_QUEUE
+PACKET id=354 time_ms=1771.901 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.445 fit=40 fcs=1 crc=1 latency_ms=175.588 full_retry=0 worker=0 queue_us=168363.383 resample_us=2194.503 demod_us=5029.992 retry_us=0.000 compute_us=7224.595 cpu_us=7225.503
+PACKET id=355 time_ms=1776.901 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.462 fit=40 fcs=1 crc=1 latency_ms=177.516 full_retry=0 worker=0 queue_us=170193.992 resample_us=2115.156 demod_us=5206.949 retry_us=0.000 compute_us=7322.236 cpu_us=7323.298
+PACKET id=392 time_ms=1961.895 status=DROPPED_QUEUE
+PACKET id=357 time_ms=1786.900 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.251 fit=40 fcs=1 crc=1 latency_ms=175.659 full_retry=0 worker=0 queue_us=168035.417 resample_us=2194.262 demod_us=5429.462 retry_us=0.000 compute_us=7623.824 cpu_us=7625.085
+PACKET id=358 time_ms=1791.900 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.835 fit=40 fcs=1 crc=1 latency_ms=177.586 full_retry=0 worker=0 queue_us=170494.159 resample_us=2111.499 demod_us=4980.470 retry_us=0.000 compute_us=7092.069 cpu_us=7092.915
+PACKET id=360 time_ms=1801.900 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.299 fit=40 fcs=1 crc=1 latency_ms=172.682 full_retry=0 worker=0 queue_us=165575.743 resample_us=2086.062 demod_us=5019.923 retry_us=0.000 compute_us=7106.086 cpu_us=7107.783
+PACKET id=361 time_ms=1806.900 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.303 fit=40 fcs=1 crc=1 latency_ms=175.731 full_retry=0 worker=0 queue_us=168649.093 resample_us=2170.919 demod_us=4911.032 retry_us=0.000 compute_us=7082.061 cpu_us=7082.926
+PACKET id=363 time_ms=1816.900 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.318 fit=40 fcs=1 crc=1 latency_ms=174.125 full_retry=0 worker=0 queue_us=166986.135 resample_us=2165.128 demod_us=4973.117 retry_us=0.000 compute_us=7138.585 cpu_us=7139.953
+PACKET id=364 time_ms=1821.902 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.662 fit=40 fcs=1 crc=1 latency_ms=177.374 full_retry=0 worker=0 queue_us=169126.738 resample_us=2356.783 demod_us=5890.034 retry_us=0.000 compute_us=8247.028 cpu_us=8248.557
+PACKET id=366 time_ms=1831.900 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.756 fit=40 fcs=1 crc=1 latency_ms=174.980 full_retry=0 worker=0 queue_us=167471.174 resample_us=2387.710 demod_us=5120.550 retry_us=0.000 compute_us=7508.350 cpu_us=7509.358
+PACKET id=400 time_ms=2001.895 status=DROPPED_QUEUE
+PACKET id=367 time_ms=1836.900 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.542 fit=40 fcs=1 crc=1 latency_ms=177.310 full_retry=0 worker=0 queue_us=170078.981 resample_us=2146.554 demod_us=5084.603 retry_us=0.000 compute_us=7231.288 cpu_us=7232.277
+PACKET id=402 time_ms=2011.895 status=DROPPED_QUEUE
+PACKET id=369 time_ms=1846.899 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.919 fit=40 fcs=1 crc=1 latency_ms=174.572 full_retry=0 worker=0 queue_us=167304.557 resample_us=2119.694 demod_us=5147.569 retry_us=0.000 compute_us=7267.354 cpu_us=7268.264
+PACKET id=370 time_ms=1851.898 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.178 fit=40 fcs=1 crc=1 latency_ms=177.345 full_retry=0 worker=0 queue_us=169555.113 resample_us=2103.313 demod_us=5686.949 retry_us=0.000 compute_us=7790.362 cpu_us=7792.129
+PACKET id=405 time_ms=2026.894 status=DROPPED_QUEUE
+PACKET id=372 time_ms=1861.898 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.302 fit=40 fcs=1 crc=1 latency_ms=174.900 full_retry=0 worker=0 queue_us=167192.839 resample_us=2272.237 demod_us=5434.981 retry_us=0.000 compute_us=7707.339 cpu_us=7708.622
+PACKET id=407 time_ms=2036.894 status=DROPPED_QUEUE
+PACKET id=373 time_ms=1866.898 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.710 fit=40 fcs=1 crc=1 latency_ms=177.992 full_retry=0 worker=0 queue_us=170137.431 resample_us=2235.118 demod_us=5619.403 retry_us=0.000 compute_us=7854.631 cpu_us=7855.889
+PACKET id=375 time_ms=1876.898 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.477 fit=40 fcs=1 crc=1 latency_ms=175.029 full_retry=0 worker=0 queue_us=167458.882 resample_us=2404.592 demod_us=5165.122 retry_us=0.000 compute_us=7569.824 cpu_us=7570.763
+PACKET id=410 time_ms=2051.895 status=DROPPED_QUEUE
+PACKET id=376 time_ms=1881.898 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.929 fit=40 fcs=1 crc=1 latency_ms=177.939 full_retry=0 worker=0 queue_us=170447.586 resample_us=2165.759 demod_us=5325.840 retry_us=0.000 compute_us=7491.689 cpu_us=7493.377
+PACKET id=412 time_ms=2061.896 status=DROPPED_QUEUE
+PACKET id=378 time_ms=1891.898 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.789 fit=40 fcs=1 crc=1 latency_ms=175.586 full_retry=0 worker=0 queue_us=167925.878 resample_us=2464.863 demod_us=5195.138 retry_us=0.000 compute_us=7660.091 cpu_us=7661.193
+PACKET id=379 time_ms=1896.898 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.423 fit=40 fcs=1 crc=1 latency_ms=175.729 full_retry=0 worker=0 queue_us=168320.719 resample_us=2189.023 demod_us=5219.643 retry_us=0.000 compute_us=7408.776 cpu_us=7409.650
+PACKET id=415 time_ms=2076.892 status=DROPPED_QUEUE
+PACKET id=380 time_ms=1901.897 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.356 fit=40 fcs=1 crc=1 latency_ms=178.327 full_retry=0 worker=0 queue_us=170807.563 resample_us=2377.291 demod_us=5142.020 retry_us=0.000 compute_us=7519.401 cpu_us=7520.238
+PACKET id=417 time_ms=2086.892 status=DROPPED_QUEUE
+PACKET id=382 time_ms=1911.897 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.960 fit=40 fcs=1 crc=1 latency_ms=176.754 full_retry=0 worker=0 queue_us=169426.106 resample_us=2150.010 demod_us=5177.445 retry_us=0.000 compute_us=7327.605 cpu_us=7328.688
+PACKET id=384 time_ms=1921.897 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.414 fit=40 fcs=1 crc=1 latency_ms=176.321 full_retry=0 worker=0 queue_us=167653.765 resample_us=2155.320 demod_us=6511.425 retry_us=0.000 compute_us=8666.825 cpu_us=8668.025
+PACKET id=385 time_ms=1926.897 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.799 fit=40 fcs=1 crc=1 latency_ms=175.827 full_retry=0 worker=0 queue_us=168377.847 resample_us=2270.222 demod_us=5179.209 retry_us=0.000 compute_us=7449.541 cpu_us=7451.168
+PACKET id=421 time_ms=2106.894 status=DROPPED_QUEUE
+PACKET id=386 time_ms=1931.897 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.345 fit=40 fcs=1 crc=1 latency_ms=178.741 full_retry=0 worker=0 queue_us=171239.625 resample_us=2355.541 demod_us=5145.505 retry_us=0.000 compute_us=7501.136 cpu_us=7502.034
+PACKET id=388 time_ms=1941.897 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.198 fit=40 fcs=1 crc=1 latency_ms=178.551 full_retry=0 worker=0 queue_us=171108.582 resample_us=2113.813 demod_us=5327.984 retry_us=0.000 compute_us=7441.937 cpu_us=7443.744
+HEARTBEAT completed=399 fcs=287 raw_samples=1545011200 queued=23 raw_drop_samples=0 source_errors=0 gaps=0 output_omitted=0
+PACKET id=424 time_ms=2121.891 status=DROPPED_QUEUE
+SUMMARY completed=400 batch=50 batch_fcs=34/50 batch_pct=68.0 total_fcs=287/400 total_pct=71.8 full_retry=0 raw_drop_samples=0 source_errors=0 gaps=0 models=105 queued=23 queue_peak=24 output_omitted=0 DROPPED_QUEUE=16
+PACKET id=390 time_ms=1951.897 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.931 fit=40 fcs=1 crc=1 latency_ms=177.364 full_retry=0 worker=0 queue_us=168940.789 resample_us=2232.202 demod_us=6190.641 retry_us=0.000 compute_us=8423.033 cpu_us=8424.569
+PACKET id=391 time_ms=1956.894 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.653 fit=40 fcs=1 crc=1 latency_ms=180.128 full_retry=0 worker=0 queue_us=172566.721 resample_us=2416.454 demod_us=5145.155 retry_us=0.000 compute_us=7561.719 cpu_us=7562.688
+PACKET id=427 time_ms=2136.891 status=DROPPED_QUEUE
+PACKET id=393 time_ms=1966.895 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.142 fit=40 fcs=1 crc=1 latency_ms=177.968 full_retry=0 worker=0 queue_us=169787.987 resample_us=2199.322 demod_us=5979.810 retry_us=0.000 compute_us=8179.653 cpu_us=8180.610
+PACKET id=429 time_ms=2146.891 status=DROPPED_QUEUE
+PACKET id=394 time_ms=1971.895 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.313 fit=40 fcs=1 crc=1 latency_ms=179.024 full_retry=0 worker=0 queue_us=171443.622 resample_us=2344.571 demod_us=5235.292 retry_us=0.000 compute_us=7579.963 cpu_us=7581.063
+PACKET id=395 time_ms=1976.895 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.033 fit=40 fcs=1 crc=1 latency_ms=179.635 full_retry=0 worker=0 queue_us=171627.442 resample_us=2247.010 demod_us=5760.414 retry_us=0.000 compute_us=8007.544 cpu_us=8009.187
+PACKET id=432 time_ms=2161.891 status=DROPPED_QUEUE
+PACKET id=396 time_ms=1981.895 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.053 fit=40 fcs=1 crc=1 latency_ms=181.335 full_retry=0 worker=0 queue_us=173297.895 resample_us=2381.219 demod_us=5655.610 retry_us=0.000 compute_us=8036.939 cpu_us=8037.961
+PACKET id=397 time_ms=1986.895 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.964 fit=40 fcs=1 crc=1 latency_ms=179.686 full_retry=0 worker=0 queue_us=171955.940 resample_us=2226.853 demod_us=5502.867 retry_us=0.000 compute_us=7729.931 cpu_us=7731.765
+PACKET id=435 time_ms=2176.890 status=DROPPED_QUEUE
+PACKET id=398 time_ms=1991.895 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.264 fit=40 fcs=1 crc=1 latency_ms=180.878 full_retry=0 worker=0 queue_us=173420.892 resample_us=2382.651 demod_us=5074.174 retry_us=0.000 compute_us=7456.935 cpu_us=7458.421
+PACKET id=399 time_ms=1996.896 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.315 fit=40 fcs=1 crc=1 latency_ms=184.336 full_retry=0 worker=0 queue_us=176778.879 resample_us=2129.172 demod_us=5427.578 retry_us=0.000 compute_us=7556.930 cpu_us=7558.160
+PACKET id=401 time_ms=2006.873 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.777 fit=40 fcs=1 crc=1 latency_ms=183.746 full_retry=0 worker=0 queue_us=175554.773 resample_us=2188.802 demod_us=6002.562 retry_us=0.000 compute_us=8191.464 cpu_us=8192.642
+PACKET id=403 time_ms=2016.894 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.400 fit=40 fcs=1 crc=1 latency_ms=184.403 full_retry=0 worker=0 queue_us=175828.550 resample_us=2290.400 demod_us=6283.903 retry_us=0.000 compute_us=8574.404 cpu_us=8576.254
+PACKET id=440 time_ms=2201.852 status=DROPPED_QUEUE
+PACKET id=404 time_ms=2021.894 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.555 fit=40 fcs=1 crc=1 latency_ms=186.841 full_retry=0 worker=0 queue_us=179128.178 resample_us=2461.527 demod_us=5250.991 retry_us=0.000 compute_us=7712.719 cpu_us=7714.123
+PACKET id=406 time_ms=2031.894 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.107 fit=40 fcs=1 crc=1 latency_ms=184.839 full_retry=0 worker=0 queue_us=177358.943 resample_us=2228.716 demod_us=5251.312 retry_us=0.000 compute_us=7480.158 cpu_us=7481.475
+PACKET id=443 time_ms=2216.889 status=DROPPED_QUEUE
+PACKET id=408 time_ms=2041.897 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.947 fit=40 fcs=1 crc=1 latency_ms=182.530 full_retry=0 worker=0 queue_us=175087.978 resample_us=2385.036 demod_us=5056.972 retry_us=0.000 compute_us=7442.088 cpu_us=7443.233
+PACKET id=409 time_ms=2046.899 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.557 fit=40 fcs=1 crc=1 latency_ms=185.583 full_retry=0 worker=0 queue_us=178206.212 resample_us=2176.289 demod_us=5200.207 retry_us=0.000 compute_us=7376.676 cpu_us=7378.461
+PACKET id=446 time_ms=2231.888 status=DROPPED_QUEUE
+PACKET id=411 time_ms=2056.895 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.028 fit=40 fcs=1 crc=1 latency_ms=183.602 full_retry=0 worker=0 queue_us=175964.281 resample_us=2185.396 demod_us=5451.943 retry_us=0.000 compute_us=7637.429 cpu_us=7638.430
+PACKET id=448 time_ms=2241.888 status=DROPPED_QUEUE
+PACKET id=413 time_ms=2066.892 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.500 fit=40 fcs=1 crc=1 latency_ms=182.866 full_retry=0 worker=0 queue_us=175523.314 resample_us=2173.214 demod_us=5169.800 retry_us=0.000 compute_us=7343.124 cpu_us=7344.077
+PACKET id=414 time_ms=2071.892 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.501 fit=40 fcs=1 crc=1 latency_ms=185.755 full_retry=0 worker=0 queue_us=178259.400 resample_us=2106.339 demod_us=5388.516 retry_us=0.000 compute_us=7495.306 cpu_us=7497.466
+PACKET id=451 time_ms=2256.888 status=DROPPED_QUEUE
+PACKET id=416 time_ms=2081.892 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.953 fit=40 fcs=1 crc=1 latency_ms=183.482 full_retry=0 worker=0 queue_us=175875.977 resample_us=2334.612 demod_us=5270.958 retry_us=0.000 compute_us=7605.660 cpu_us=7606.671
+PACKET id=418 time_ms=2091.892 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.375 fit=40 fcs=1 crc=1 latency_ms=180.458 full_retry=0 worker=0 queue_us=173230.991 resample_us=2177.511 demod_us=5049.148 retry_us=0.000 compute_us=7226.839 cpu_us=7228.329
+PACKET id=454 time_ms=2271.888 status=DROPPED_QUEUE
+PACKET id=419 time_ms=2096.869 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.803 fit=40 fcs=1 crc=1 latency_ms=180.572 full_retry=0 worker=0 queue_us=173140.082 resample_us=2337.568 demod_us=5094.622 retry_us=0.000 compute_us=7432.290 cpu_us=7433.865
+PACKET id=456 time_ms=2281.888 status=DROPPED_QUEUE
+PACKET id=420 time_ms=2101.892 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.821 fit=40 fcs=1 crc=1 latency_ms=183.153 full_retry=0 worker=0 queue_us=175804.345 resample_us=2176.839 demod_us=5172.075 retry_us=0.000 compute_us=7349.015 cpu_us=7350.259
+PACKET id=422 time_ms=2111.891 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.975 fit=40 fcs=1 crc=1 latency_ms=182.324 full_retry=0 worker=0 queue_us=173943.189 resample_us=2274.982 demod_us=6105.293 retry_us=0.000 compute_us=8380.475 cpu_us=8382.930
+PACKET id=459 time_ms=2296.886 status=DROPPED_QUEUE
+PACKET id=423 time_ms=2116.895 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.338 fit=40 fcs=1 crc=1 latency_ms=185.185 full_retry=0 worker=0 queue_us=177689.044 resample_us=2385.346 demod_us=5110.301 retry_us=0.000 compute_us=7495.747 cpu_us=7496.934
+PACKET id=425 time_ms=2126.891 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.720 fit=40 fcs=1 crc=1 latency_ms=181.027 full_retry=0 worker=0 queue_us=173482.046 resample_us=2410.172 demod_us=5134.736 retry_us=0.000 compute_us=7544.928 cpu_us=7546.087
+PACKET id=462 time_ms=2311.886 status=DROPPED_QUEUE
+PACKET id=426 time_ms=2131.891 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.195 fit=40 fcs=1 crc=1 latency_ms=183.911 full_retry=0 worker=0 queue_us=176685.055 resample_us=2145.913 demod_us=5079.874 retry_us=0.000 compute_us=7226.008 cpu_us=7228.520
+PACKET id=428 time_ms=2141.891 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.797 fit=40 fcs=1 crc=1 latency_ms=181.260 full_retry=0 worker=0 queue_us=173740.745 resample_us=2067.367 demod_us=5451.923 retry_us=0.000 compute_us=7519.380 cpu_us=7520.438
+PACKET id=465 time_ms=2326.887 status=DROPPED_QUEUE
+PACKET id=430 time_ms=2151.891 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.299 fit=40 fcs=1 crc=1 latency_ms=179.304 full_retry=0 worker=0 queue_us=171891.672 resample_us=2170.017 demod_us=5242.495 retry_us=0.000 compute_us=7412.612 cpu_us=7413.918
+PACKET id=467 time_ms=2336.886 status=DROPPED_QUEUE
+PACKET id=431 time_ms=2156.891 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.356 fit=40 fcs=1 crc=1 latency_ms=180.541 full_retry=0 worker=0 queue_us=173237.363 resample_us=2163.515 demod_us=5139.876 retry_us=0.000 compute_us=7303.501 cpu_us=7305.895
+PACKET id=469 time_ms=2346.885 status=DROPPED_QUEUE
+PACKET id=433 time_ms=2166.891 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.661 fit=40 fcs=1 crc=1 latency_ms=177.814 full_retry=0 worker=0 queue_us=170516.035 resample_us=2264.693 demod_us=5032.967 retry_us=0.000 compute_us=7297.800 cpu_us=7299.002
+PACKET id=434 time_ms=2171.891 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.106 fit=40 fcs=1 crc=1 latency_ms=179.016 full_retry=0 worker=0 queue_us=171394.611 resample_us=2203.349 demod_us=5417.690 retry_us=0.000 compute_us=7621.299 cpu_us=7624.073
+PACKET id=472 time_ms=2361.885 status=DROPPED_QUEUE
+PACKET id=436 time_ms=2181.889 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.423 fit=40 fcs=1 crc=1 latency_ms=178.413 full_retry=0 worker=0 queue_us=170989.031 resample_us=2342.837 demod_us=5081.117 retry_us=0.000 compute_us=7424.044 cpu_us=7425.150
+PACKET id=474 time_ms=2371.885 status=DROPPED_QUEUE
+SUMMARY completed=450 batch=50 batch_fcs=32/50 batch_pct=64.0 total_fcs=319/450 total_pct=70.9 full_retry=0 raw_drop_samples=0 source_errors=0 gaps=0 models=115 queued=23 queue_peak=24 output_omitted=0 DROPPED_QUEUE=18
+PACKET id=437 time_ms=2186.889 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.395 fit=40 fcs=1 crc=1 latency_ms=179.865 full_retry=0 worker=0 queue_us=172524.894 resample_us=2213.067 demod_us=5126.581 retry_us=0.000 compute_us=7339.728 cpu_us=7340.610
+PACKET id=438 time_ms=2191.889 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.950 fit=40 fcs=1 crc=1 latency_ms=179.469 full_retry=0 worker=0 queue_us=172426.582 resample_us=2144.960 demod_us=4897.507 retry_us=0.000 compute_us=7042.587 cpu_us=7043.772
+PACKET id=439 time_ms=2196.889 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.249 fit=40 fcs=1 crc=1 latency_ms=178.600 full_retry=0 worker=0 queue_us=171591.005 resample_us=2135.373 demod_us=4873.252 retry_us=0.000 compute_us=7008.715 cpu_us=7009.558
+PACKET id=441 time_ms=2206.889 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.421 fit=40 fcs=1 crc=1 latency_ms=175.707 full_retry=0 worker=0 queue_us=168317.846 resample_us=2160.058 demod_us=5228.500 retry_us=0.000 compute_us=7388.748 cpu_us=7390.875
+PACKET id=442 time_ms=2211.890 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.947 fit=40 fcs=1 crc=1 latency_ms=178.587 full_retry=0 worker=0 queue_us=170955.258 resample_us=2333.891 demod_us=5297.567 retry_us=0.000 compute_us=7631.999 cpu_us=7633.521
+PACKET id=444 time_ms=2221.889 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.459 fit=40 fcs=1 crc=1 latency_ms=176.298 full_retry=0 worker=0 queue_us=168664.758 resample_us=2408.829 demod_us=5224.563 retry_us=0.000 compute_us=7633.482 cpu_us=7634.834
+PACKET id=445 time_ms=2226.890 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.397 fit=40 fcs=1 crc=1 latency_ms=178.966 full_retry=0 worker=0 queue_us=171623.335 resample_us=2268.069 demod_us=5074.274 retry_us=0.000 compute_us=7342.433 cpu_us=7343.385
+PACKET id=482 time_ms=2411.883 status=DROPPED_QUEUE
+PACKET id=447 time_ms=2236.888 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.179 fit=40 fcs=1 crc=1 latency_ms=176.201 full_retry=0 worker=0 queue_us=168823.902 resample_us=2226.011 demod_us=5150.705 retry_us=0.000 compute_us=7376.806 cpu_us=7377.660
+PACKET id=484 time_ms=2421.883 status=DROPPED_QUEUE
+PACKET id=449 time_ms=2246.888 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.911 fit=40 fcs=1 crc=1 latency_ms=175.422 full_retry=0 worker=0 queue_us=168160.644 resample_us=2171.971 demod_us=5088.992 retry_us=0.000 compute_us=7261.053 cpu_us=7262.323
+PACKET id=450 time_ms=2251.888 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.482 fit=40 fcs=1 crc=1 latency_ms=176.971 full_retry=0 worker=0 queue_us=169556.348 resample_us=2105.468 demod_us=5309.269 retry_us=0.000 compute_us=7414.928 cpu_us=7416.754
+PACKET id=487 time_ms=2436.883 status=DROPPED_QUEUE
+PACKET id=452 time_ms=2261.888 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.821 fit=40 fcs=1 crc=1 latency_ms=175.545 full_retry=0 worker=0 queue_us=168424.203 resample_us=2258.060 demod_us=4862.622 retry_us=0.000 compute_us=7120.772 cpu_us=7121.799
+PACKET id=489 time_ms=2446.884 status=DROPPED_QUEUE
+PACKET id=453 time_ms=2266.888 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.022 fit=40 fcs=1 crc=1 latency_ms=178.046 full_retry=0 worker=0 queue_us=170801.754 resample_us=2102.402 demod_us=5142.160 retry_us=0.000 compute_us=7244.682 cpu_us=7246.202
+PACKET id=455 time_ms=2276.888 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.687 fit=40 fcs=1 crc=1 latency_ms=177.298 full_retry=0 worker=0 queue_us=169658.627 resample_us=2123.992 demod_us=5515.210 retry_us=0.000 compute_us=7639.312 cpu_us=7641.246
+PACKET id=492 time_ms=2461.882 status=DROPPED_QUEUE
+PACKET id=457 time_ms=2286.886 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.574 fit=40 fcs=1 crc=1 latency_ms=175.595 full_retry=0 worker=0 queue_us=168310.752 resample_us=2178.573 demod_us=5105.462 retry_us=0.000 compute_us=7284.205 cpu_us=7285.877
+PACKET id=494 time_ms=2471.882 status=DROPPED_QUEUE
+PACKET id=458 time_ms=2291.858 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.321 fit=40 fcs=1 crc=1 latency_ms=175.445 full_retry=0 worker=0 queue_us=168047.284 resample_us=2111.359 demod_us=5286.116 retry_us=0.000 compute_us=7397.575 cpu_us=7399.210
+PACKET id=460 time_ms=2301.886 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.225 fit=40 fcs=1 crc=1 latency_ms=172.470 full_retry=0 worker=0 queue_us=165113.813 resample_us=2184.044 demod_us=5171.874 retry_us=0.000 compute_us=7356.009 cpu_us=7357.031
+PACKET id=497 time_ms=2486.882 status=DROPPED_QUEUE
+PACKET id=461 time_ms=2306.886 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.915 fit=40 fcs=1 crc=1 latency_ms=175.612 full_retry=0 worker=0 queue_us=168222.168 resample_us=2231.271 demod_us=5158.590 retry_us=0.000 compute_us=7389.961 cpu_us=7391.115
+PACKET id=463 time_ms=2316.887 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.365 fit=40 fcs=1 crc=1 latency_ms=175.809 full_retry=0 worker=0 queue_us=167478.972 resample_us=2226.923 demod_us=6103.018 retry_us=0.000 compute_us=8330.202 cpu_us=8332.695
+PACKET id=500 time_ms=2501.882 status=DROPPED_QUEUE
+PACKET id=464 time_ms=2321.887 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.267 fit=40 fcs=1 crc=1 latency_ms=178.264 full_retry=0 worker=0 queue_us=170700.116 resample_us=2383.973 demod_us=5179.779 retry_us=0.000 compute_us=7563.902 cpu_us=7564.842
+PACKET id=466 time_ms=2331.887 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.437 fit=40 fcs=1 crc=1 latency_ms=177.569 full_retry=0 worker=0 queue_us=170290.587 resample_us=2275.192 demod_us=5003.483 retry_us=0.000 compute_us=7278.765 cpu_us=7279.756
+PACKET id=503 time_ms=2516.880 status=DROPPED_QUEUE
+PACKET id=468 time_ms=2341.885 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.112 fit=40 fcs=1 crc=1 latency_ms=175.631 full_retry=0 worker=0 queue_us=168440.201 resample_us=2167.974 demod_us=5022.418 retry_us=0.000 compute_us=7190.482 cpu_us=7191.430
+PACKET id=505 time_ms=2526.880 status=DROPPED_QUEUE
+PACKET id=470 time_ms=2351.885 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.160 fit=40 fcs=1 crc=1 latency_ms=175.492 full_retry=0 worker=0 queue_us=167845.712 resample_us=2337.968 demod_us=5308.447 retry_us=0.000 compute_us=7646.696 cpu_us=7648.078
+PACKET id=507 time_ms=2536.880 status=DROPPED_QUEUE
+PACKET id=471 time_ms=2356.885 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.236 fit=40 fcs=1 crc=1 latency_ms=177.804 full_retry=0 worker=0 queue_us=170541.863 resample_us=2147.065 demod_us=5115.180 retry_us=0.000 compute_us=7262.365 cpu_us=7263.816
+PACKET id=473 time_ms=2366.885 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.714 fit=40 fcs=1 crc=1 latency_ms=176.243 full_retry=0 worker=0 queue_us=168911.945 resample_us=2079.409 demod_us=5251.412 retry_us=0.000 compute_us=7331.022 cpu_us=7332.015
+PACKET id=510 time_ms=2551.880 status=DROPPED_QUEUE
+PACKET id=475 time_ms=2376.885 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.159 fit=40 fcs=1 crc=1 latency_ms=172.237 full_retry=0 worker=0 queue_us=164809.149 resample_us=2383.102 demod_us=5044.759 retry_us=0.000 compute_us=7427.961 cpu_us=7428.856
+PACKET id=476 time_ms=2381.885 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.214 fit=40 fcs=1 crc=1 latency_ms=173.370 full_retry=0 worker=0 queue_us=166108.715 resample_us=2132.218 demod_us=5128.735 retry_us=0.000 compute_us=7260.973 cpu_us=7262.683
+PACKET id=477 time_ms=2386.885 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.283 fit=40 fcs=1 crc=1 latency_ms=166.236 full_retry=0 worker=0 queue_us=158909.368 resample_us=2267.818 demod_us=5059.046 retry_us=0.000 compute_us=7326.944 cpu_us=7328.147
+PACKET id=514 time_ms=2571.879 status=DROPPED_QUEUE
+PACKET id=478 time_ms=2391.885 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.247 fit=40 fcs=1 crc=1 latency_ms=167.543 full_retry=0 worker=0 queue_us=160390.680 resample_us=2159.538 demod_us=4992.322 retry_us=0.000 compute_us=7152.070 cpu_us=7153.759
+PACKET id=479 time_ms=2396.884 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.012 fit=40 fcs=1 crc=1 latency_ms=169.917 full_retry=0 worker=0 queue_us=162681.350 resample_us=2241.530 demod_us=4993.675 retry_us=0.000 compute_us=7235.395 cpu_us=7236.665
+PACKET id=517 time_ms=2586.879 status=DROPPED_QUEUE
+PACKET id=480 time_ms=2401.884 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.290 fit=40 fcs=1 crc=1 latency_ms=172.804 full_retry=0 worker=0 queue_us=165638.716 resample_us=2149.780 demod_us=5014.864 retry_us=0.000 compute_us=7164.814 cpu_us=7165.962
+PACKET id=481 time_ms=2406.883 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.148 fit=40 fcs=1 crc=1 latency_ms=176.426 full_retry=0 worker=0 queue_us=168902.848 resample_us=2101.761 demod_us=5420.926 retry_us=0.000 compute_us=7522.897 cpu_us=7524.756
+PACKET id=520 time_ms=2601.879 status=DROPPED_QUEUE
+PACKET id=483 time_ms=2416.883 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.340 fit=40 fcs=1 crc=1 latency_ms=175.377 full_retry=0 worker=0 queue_us=167783.426 resample_us=2207.015 demod_us=5386.372 retry_us=0.000 compute_us=7593.477 cpu_us=7594.849
+PACKET id=485 time_ms=2426.884 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.606 fit=40 fcs=1 crc=1 latency_ms=175.160 full_retry=0 worker=0 queue_us=167432.416 resample_us=2268.851 demod_us=5458.545 retry_us=0.000 compute_us=7727.747 cpu_us=7730.093
+PACKET id=523 time_ms=2616.878 status=DROPPED_QUEUE
+PACKET id=486 time_ms=2431.884 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.135 fit=40 fcs=1 crc=1 latency_ms=177.230 full_retry=0 worker=0 queue_us=169857.976 resample_us=2313.634 demod_us=5057.803 retry_us=0.000 compute_us=7371.558 cpu_us=7372.551
+SUMMARY completed=500 batch=50 batch_fcs=34/50 batch_pct=68.0 total_fcs=353/500 total_pct=70.6 full_retry=0 raw_drop_samples=0 source_errors=0 gaps=0 models=131 queued=24 queue_peak=24 output_omitted=0 DROPPED_QUEUE=16
+PACKET id=488 time_ms=2441.883 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.301 fit=40 fcs=1 crc=1 latency_ms=175.674 full_retry=0 worker=0 queue_us=168436.365 resample_us=2068.199 demod_us=5168.949 retry_us=0.000 compute_us=7237.258 cpu_us=7238.388
+PACKET id=526 time_ms=2631.877 status=DROPPED_QUEUE
+PACKET id=490 time_ms=2451.882 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.628 fit=40 fcs=1 crc=1 latency_ms=175.522 full_retry=0 worker=0 queue_us=168050.009 resample_us=2454.043 demod_us=5017.690 retry_us=0.000 compute_us=7471.873 cpu_us=7472.768
+PACKET id=491 time_ms=2456.882 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.648 fit=40 fcs=1 crc=1 latency_ms=177.372 full_retry=0 worker=0 queue_us=170240.805 resample_us=2150.291 demod_us=4981.292 retry_us=0.000 compute_us=7131.693 cpu_us=7132.639
+PACKET id=529 time_ms=2646.880 status=DROPPED_QUEUE
+PACKET id=493 time_ms=2466.860 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.382 fit=40 fcs=1 crc=1 latency_ms=176.740 full_retry=0 worker=0 queue_us=169459.368 resample_us=2298.035 demod_us=4982.484 retry_us=0.000 compute_us=7280.609 cpu_us=7281.359
+PACKET id=495 time_ms=2476.882 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.630 fit=40 fcs=1 crc=1 latency_ms=174.396 full_retry=0 worker=0 queue_us=167087.016 resample_us=2156.463 demod_us=5151.948 retry_us=0.000 compute_us=7308.501 cpu_us=7309.401
+PACKET id=532 time_ms=2661.879 status=DROPPED_QUEUE
+PACKET id=496 time_ms=2481.884 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.103 fit=40 fcs=1 crc=1 latency_ms=177.718 full_retry=0 worker=0 queue_us=169886.830 resample_us=2157.304 demod_us=5673.964 retry_us=0.000 compute_us=7831.368 cpu_us=7832.585
+PACKET id=498 time_ms=2491.882 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.704 fit=40 fcs=1 crc=1 latency_ms=176.768 full_retry=0 worker=0 queue_us=169646.104 resample_us=2118.642 demod_us=5003.283 retry_us=0.000 compute_us=7122.015 cpu_us=7122.791
+PACKET id=535 time_ms=2676.876 status=DROPPED_QUEUE
+PACKET id=499 time_ms=2496.882 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.362 fit=40 fcs=1 crc=1 latency_ms=176.793 full_retry=0 worker=0 queue_us=169235.715 resample_us=2097.904 demod_us=5459.447 retry_us=0.000 compute_us=7557.541 cpu_us=7558.860
+PACKET id=501 time_ms=2506.884 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.109 fit=40 fcs=1 crc=1 latency_ms=174.712 full_retry=0 worker=0 queue_us=167418.180 resample_us=2264.392 demod_us=5029.611 retry_us=0.000 compute_us=7294.113 cpu_us=7287.169
+PACKET id=538 time_ms=2691.876 status=DROPPED_QUEUE
+PACKET id=502 time_ms=2511.886 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.986 fit=40 fcs=1 crc=1 latency_ms=177.058 full_retry=0 worker=0 queue_us=169646.305 resample_us=2098.595 demod_us=5312.996 retry_us=0.000 compute_us=7411.711 cpu_us=7413.467
+PACKET id=504 time_ms=2521.866 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.669 fit=40 fcs=1 crc=1 latency_ms=176.484 full_retry=0 worker=0 queue_us=168778.769 resample_us=2344.320 demod_us=5360.304 retry_us=0.000 compute_us=7704.794 cpu_us=7706.959
+PACKET id=506 time_ms=2531.880 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.209 fit=40 fcs=1 crc=1 latency_ms=174.404 full_retry=0 worker=0 queue_us=166901.474 resample_us=2456.487 demod_us=5045.601 retry_us=0.000 compute_us=7502.188 cpu_us=7503.336
+PACKET id=542 time_ms=2711.876 status=DROPPED_QUEUE
+PACKET id=508 time_ms=2541.880 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.674 fit=40 fcs=1 crc=1 latency_ms=173.347 full_retry=0 worker=0 queue_us=165699.398 resample_us=2512.782 demod_us=5134.305 retry_us=0.000 compute_us=7647.187 cpu_us=7648.530
+PACKET id=544 time_ms=2721.874 status=DROPPED_QUEUE
+PACKET id=509 time_ms=2546.880 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.933 fit=40 fcs=1 crc=1 latency_ms=175.598 full_retry=0 worker=0 queue_us=168289.563 resample_us=2198.189 demod_us=5109.790 retry_us=0.000 compute_us=7308.099 cpu_us=7309.101
+PACKET id=511 time_ms=2556.881 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.389 fit=40 fcs=1 crc=1 latency_ms=172.950 full_retry=0 worker=0 queue_us=165584.114 resample_us=2211.134 demod_us=5155.003 retry_us=0.000 compute_us=7366.277 cpu_us=7367.911
+PACKET id=547 time_ms=2736.874 status=DROPPED_QUEUE
+PACKET id=512 time_ms=2561.879 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.052 fit=40 fcs=1 crc=1 latency_ms=175.267 full_retry=0 worker=0 queue_us=168053.897 resample_us=2156.022 demod_us=5057.312 retry_us=0.000 compute_us=7213.515 cpu_us=7215.115
+PACKET id=513 time_ms=2566.879 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.535 fit=40 fcs=1 crc=1 latency_ms=177.968 full_retry=0 worker=0 queue_us=170358.423 resample_us=2147.255 demod_us=5462.553 retry_us=0.000 compute_us=7609.898 cpu_us=7611.730
+PACKET id=550 time_ms=2751.874 status=DROPPED_QUEUE
+PACKET id=515 time_ms=2576.881 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.908 fit=40 fcs=1 crc=1 latency_ms=173.805 full_retry=0 worker=0 queue_us=166542.018 resample_us=2223.806 demod_us=5038.648 retry_us=0.000 compute_us=7262.545 cpu_us=7249.019
+PACKET id=516 time_ms=2581.879 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.311 fit=40 fcs=1 crc=1 latency_ms=176.914 full_retry=0 worker=0 queue_us=169726.473 resample_us=2152.816 demod_us=5035.031 retry_us=0.000 compute_us=7187.947 cpu_us=7189.486
+PACKET id=518 time_ms=2591.879 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.326 fit=40 fcs=1 crc=1 latency_ms=174.970 full_retry=0 worker=0 queue_us=167547.038 resample_us=2411.335 demod_us=5011.918 retry_us=0.000 compute_us=7423.333 cpu_us=7424.338
+PACKET id=554 time_ms=2771.875 status=DROPPED_QUEUE
+PACKET id=519 time_ms=2596.879 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.403 fit=40 fcs=1 crc=1 latency_ms=176.707 full_retry=0 worker=0 queue_us=169370.013 resample_us=2152.064 demod_us=5184.428 retry_us=0.000 compute_us=7336.662 cpu_us=7337.604
+PACKET id=521 time_ms=2606.879 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.554 fit=40 fcs=1 crc=1 latency_ms=174.148 full_retry=0 worker=0 queue_us=166765.531 resample_us=2243.885 demod_us=5138.232 retry_us=0.000 compute_us=7382.217 cpu_us=7383.220
+PACKET id=557 time_ms=2786.873 status=DROPPED_QUEUE
+PACKET id=522 time_ms=2611.879 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.084 fit=40 fcs=1 crc=1 latency_ms=175.351 full_retry=0 worker=0 queue_us=168209.765 resample_us=2116.608 demod_us=5024.141 retry_us=0.000 compute_us=7140.860 cpu_us=7142.157
+PACKET id=524 time_ms=2621.877 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.109 fit=40 fcs=1 crc=1 latency_ms=175.037 full_retry=0 worker=0 queue_us=166849.588 resample_us=2200.834 demod_us=5986.282 retry_us=0.000 compute_us=8187.216 cpu_us=8188.294
+PACKET id=560 time_ms=2801.858 status=DROPPED_QUEUE
+PACKET id=525 time_ms=2626.877 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.398 fit=40 fcs=1 crc=1 latency_ms=177.485 full_retry=0 worker=0 queue_us=169983.559 resample_us=2414.109 demod_us=5087.348 retry_us=0.000 compute_us=7501.557 cpu_us=7502.525
+PACKET id=527 time_ms=2636.877 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.204 fit=40 fcs=1 crc=1 latency_ms=174.597 full_retry=0 worker=0 queue_us=167454.097 resample_us=2123.110 demod_us=5019.412 retry_us=0.000 compute_us=7142.613 cpu_us=7143.520
+PACKET id=563 time_ms=2816.873 status=DROPPED_QUEUE
+PACKET id=528 time_ms=2641.877 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.004 fit=40 fcs=1 crc=1 latency_ms=177.224 full_retry=0 worker=0 queue_us=169845.673 resample_us=2181.269 demod_us=5196.530 retry_us=0.000 compute_us=7377.929 cpu_us=7379.013
+PACKET id=530 time_ms=2651.881 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.070 fit=40 fcs=1 crc=1 latency_ms=174.362 full_retry=0 worker=0 queue_us=167024.030 resample_us=2285.912 demod_us=5052.073 retry_us=0.000 compute_us=7338.075 cpu_us=7339.027
+PACKET id=566 time_ms=2831.873 status=DROPPED_QUEUE
+PACKET id=531 time_ms=2656.877 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.961 fit=40 fcs=1 crc=1 latency_ms=176.742 full_retry=0 worker=0 queue_us=169546.170 resample_us=2166.871 demod_us=5028.449 retry_us=0.000 compute_us=7195.420 cpu_us=7196.820
+PACKET id=533 time_ms=2666.876 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.154 fit=40 fcs=1 crc=1 latency_ms=173.781 full_retry=0 worker=0 queue_us=166657.031 resample_us=2117.340 demod_us=5006.869 retry_us=0.000 compute_us=7124.349 cpu_us=7125.957
+PACKET id=569 time_ms=2846.871 status=DROPPED_QUEUE
+PACKET id=534 time_ms=2671.876 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.907 fit=40 fcs=1 crc=1 latency_ms=176.078 full_retry=0 worker=0 queue_us=168854.789 resample_us=2185.206 demod_us=5037.656 retry_us=0.000 compute_us=7222.962 cpu_us=7224.121
+PACKET id=536 time_ms=2681.876 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.101 fit=40 fcs=1 crc=1 latency_ms=173.347 full_retry=0 worker=0 queue_us=166020.372 resample_us=2198.190 demod_us=5128.333 retry_us=0.000 compute_us=7326.624 cpu_us=7327.766
+PACKET id=572 time_ms=2861.871 status=DROPPED_QUEUE
+PACKET id=537 time_ms=2686.876 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.032 fit=40 fcs=1 crc=1 latency_ms=175.659 full_retry=0 worker=0 queue_us=168406.430 resample_us=2210.923 demod_us=5041.784 retry_us=0.000 compute_us=7252.837 cpu_us=7253.927
+PACKET id=539 time_ms=2696.876 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.066 fit=40 fcs=1 crc=1 latency_ms=171.668 full_retry=0 worker=0 queue_us=164603.829 resample_us=2112.010 demod_us=4952.439 retry_us=0.000 compute_us=7064.559 cpu_us=7065.494
+SUMMARY completed=550 batch=50 batch_fcs=34/50 batch_pct=68.0 total_fcs=387/550 total_pct=70.4 full_retry=0 raw_drop_samples=0 source_errors=0 gaps=0 models=141 queued=24 queue_peak=24 output_omitted=0 DROPPED_QUEUE=16
+PACKET id=540 time_ms=2701.876 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.462 fit=40 fcs=1 crc=1 latency_ms=172.863 full_retry=0 worker=0 queue_us=165802.268 resample_us=2078.939 demod_us=4982.103 retry_us=0.000 compute_us=7061.132 cpu_us=7056.536
+PACKET id=576 time_ms=2881.871 status=DROPPED_QUEUE
+PACKET id=541 time_ms=2706.876 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.408 fit=40 fcs=1 crc=1 latency_ms=174.891 full_retry=0 worker=0 queue_us=167746.397 resample_us=2144.210 demod_us=5000.237 retry_us=0.000 compute_us=7144.667 cpu_us=7145.544
+PACKET id=543 time_ms=2716.879 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.321 fit=40 fcs=1 crc=1 latency_ms=173.754 full_retry=0 worker=0 queue_us=166392.380 resample_us=2145.202 demod_us=5215.976 retry_us=0.000 compute_us=7361.288 cpu_us=7362.642
+PACKET id=579 time_ms=2896.870 status=DROPPED_QUEUE
+PACKET id=545 time_ms=2726.874 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.178 fit=40 fcs=1 crc=1 latency_ms=171.901 full_retry=0 worker=0 queue_us=164350.050 resample_us=2198.700 demod_us=5352.319 retry_us=0.000 compute_us=7551.300 cpu_us=7552.739
+PACKET id=546 time_ms=2731.875 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.081 fit=40 fcs=1 crc=1 latency_ms=174.403 full_retry=0 worker=0 queue_us=166984.728 resample_us=2274.641 demod_us=5143.462 retry_us=0.000 compute_us=7418.243 cpu_us=7419.168
+PACKET id=582 time_ms=2911.870 status=DROPPED_QUEUE
+PACKET id=548 time_ms=2741.874 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.427 fit=40 fcs=1 crc=1 latency_ms=171.813 full_retry=0 worker=0 queue_us=164536.966 resample_us=2216.534 demod_us=5059.366 retry_us=0.000 compute_us=7276.060 cpu_us=7276.981
+PACKET id=549 time_ms=2746.875 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.481 fit=40 fcs=1 crc=1 latency_ms=173.552 full_retry=0 worker=0 queue_us=166456.099 resample_us=2110.347 demod_us=4985.099 retry_us=0.000 compute_us=7095.546 cpu_us=7096.341
+PACKET id=585 time_ms=2926.870 status=DROPPED_QUEUE
+PACKET id=551 time_ms=2756.874 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.083 fit=40 fcs=1 crc=1 latency_ms=170.961 full_retry=0 worker=0 queue_us=163887.564 resample_us=2120.766 demod_us=4953.039 retry_us=0.000 compute_us=7073.925 cpu_us=7075.252
+PACKET id=552 time_ms=2761.874 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.409 fit=40 fcs=1 crc=1 latency_ms=172.982 full_retry=0 worker=0 queue_us=165726.468 resample_us=2138.469 demod_us=5116.923 retry_us=0.000 compute_us=7255.602 cpu_us=7256.772
+PACKET id=588 time_ms=2941.870 status=DROPPED_QUEUE
+PACKET id=553 time_ms=2766.874 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.112 fit=40 fcs=1 crc=1 latency_ms=175.255 full_retry=0 worker=0 queue_us=168115.461 resample_us=2107.412 demod_us=5031.705 retry_us=0.000 compute_us=7139.207 cpu_us=7140.184
+PACKET id=555 time_ms=2776.874 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.639 fit=40 fcs=1 crc=1 latency_ms=171.881 full_retry=0 worker=0 queue_us=164686.573 resample_us=2190.295 demod_us=5004.435 retry_us=0.000 compute_us=7194.820 cpu_us=7196.179
+PACKET id=556 time_ms=2781.873 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=175.871 fit=40 fcs=1 crc=1 latency_ms=174.464 full_retry=0 worker=0 queue_us=167294.852 resample_us=2084.119 demod_us=5084.442 retry_us=0.000 compute_us=7168.862 cpu_us=7170.561
+PACKET id=592 time_ms=2961.868 status=DROPPED_QUEUE
+PACKET id=558 time_ms=2791.873 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.769 fit=40 fcs=1 crc=1 latency_ms=172.027 full_retry=0 worker=0 queue_us=164796.828 resample_us=2198.209 demod_us=5031.726 retry_us=0.000 compute_us=7230.025 cpu_us=7230.874
+PACKET id=559 time_ms=2796.873 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.539 fit=40 fcs=1 crc=1 latency_ms=173.244 full_retry=0 worker=0 queue_us=166004.504 resample_us=2152.475 demod_us=5086.757 retry_us=0.000 compute_us=7239.402 cpu_us=7240.472
+PACKET id=595 time_ms=2976.870 status=DROPPED_QUEUE
+PACKET id=561 time_ms=2806.873 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.075 fit=40 fcs=1 crc=1 latency_ms=171.554 full_retry=0 worker=0 queue_us=164242.082 resample_us=2203.018 demod_us=5108.368 retry_us=0.000 compute_us=7311.476 cpu_us=7312.468
+PACKET id=562 time_ms=2811.873 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.806 fit=40 fcs=1 crc=1 latency_ms=173.700 full_retry=0 worker=0 queue_us=166594.447 resample_us=2127.719 demod_us=4977.245 retry_us=0.000 compute_us=7105.084 cpu_us=7106.050
+PACKET id=598 time_ms=2991.871 status=DROPPED_QUEUE
+PACKET id=564 time_ms=2821.873 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.138 fit=40 fcs=1 crc=1 latency_ms=171.104 full_retry=0 worker=0 queue_us=163702.624 resample_us=2161.371 demod_us=5240.011 retry_us=0.000 compute_us=7401.543 cpu_us=7403.028
+PACKET id=565 time_ms=2826.875 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.240 fit=40 fcs=1 crc=1 latency_ms=173.776 full_retry=0 worker=0 queue_us=166227.749 resample_us=2283.087 demod_us=5265.358 retry_us=0.000 compute_us=7548.545 cpu_us=7549.594
+PACKET id=567 time_ms=2836.871 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.063 fit=40 fcs=1 crc=1 latency_ms=170.572 full_retry=0 worker=0 queue_us=163733.973 resample_us=2116.658 demod_us=4721.030 retry_us=0.000 compute_us=6837.809 cpu_us=6838.597
+PACKET id=568 time_ms=2841.871 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.811 fit=40 fcs=1 crc=1 latency_ms=172.458 full_retry=0 worker=0 queue_us=165701.465 resample_us=2109.916 demod_us=4646.052 retry_us=0.000 compute_us=6756.058 cpu_us=6756.933
+PACKET id=570 time_ms=2851.871 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.040 fit=40 fcs=1 crc=1 latency_ms=169.103 full_retry=0 worker=0 queue_us=162441.621 resample_us=2032.793 demod_us=4628.409 retry_us=0.000 compute_us=6661.282 cpu_us=6662.255
+PACKET id=571 time_ms=2856.871 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.307 fit=40 fcs=1 crc=1 latency_ms=170.829 full_retry=0 worker=0 queue_us=164002.440 resample_us=2085.250 demod_us=4740.847 retry_us=0.000 compute_us=6826.187 cpu_us=6826.994
+PACKET id=573 time_ms=2866.871 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.106 fit=40 fcs=1 crc=1 latency_ms=167.721 full_retry=0 worker=0 queue_us=160936.885 resample_us=2042.652 demod_us=4741.558 retry_us=0.000 compute_us=6784.300 cpu_us=6785.026
+PACKET id=574 time_ms=2871.872 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.718 fit=40 fcs=1 crc=1 latency_ms=169.625 full_retry=0 worker=0 queue_us=162841.101 resample_us=2029.808 demod_us=4754.041 retry_us=0.000 compute_us=6783.939 cpu_us=6784.685
+PACKET id=575 time_ms=2876.872 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.639 fit=40 fcs=1 crc=1 latency_ms=171.191 full_retry=0 worker=0 queue_us=164400.978 resample_us=2049.865 demod_us=4739.845 retry_us=0.000 compute_us=6789.800 cpu_us=6790.717
+PACKET id=577 time_ms=2886.872 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.323 fit=40 fcs=1 crc=1 latency_ms=168.072 full_retry=0 worker=0 queue_us=161359.268 resample_us=2056.808 demod_us=4655.940 retry_us=0.000 compute_us=6712.838 cpu_us=6713.471
+PACKET id=578 time_ms=2891.870 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.042 fit=40 fcs=1 crc=1 latency_ms=169.830 full_retry=0 worker=0 queue_us=163048.867 resample_us=2046.197 demod_us=4734.887 retry_us=0.000 compute_us=6781.174 cpu_us=6782.090
+PACKET id=580 time_ms=2901.870 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.049 fit=40 fcs=1 crc=1 latency_ms=165.682 full_retry=0 worker=0 queue_us=158902.010 resample_us=2024.788 demod_us=4754.733 retry_us=0.000 compute_us=6779.601 cpu_us=6780.357
+PACKET id=581 time_ms=2906.870 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.408 fit=40 fcs=1 crc=1 latency_ms=168.321 full_retry=0 worker=0 queue_us=161570.349 resample_us=2045.558 demod_us=4705.431 retry_us=0.000 compute_us=6751.079 cpu_us=6751.673
+PACKET id=583 time_ms=2916.870 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.097 fit=40 fcs=1 crc=1 latency_ms=165.262 full_retry=0 worker=0 queue_us=158466.604 resample_us=2018.717 demod_us=4777.024 retry_us=0.000 compute_us=6795.841 cpu_us=6796.457
+PACKET id=584 time_ms=2921.870 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.359 fit=40 fcs=1 crc=1 latency_ms=167.069 full_retry=0 worker=0 queue_us=160188.272 resample_us=2088.125 demod_us=4792.984 retry_us=0.000 compute_us=6881.199 cpu_us=6882.128
+PACKET id=586 time_ms=2931.841 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.112 fit=40 fcs=1 crc=1 latency_ms=164.701 full_retry=0 worker=0 queue_us=157111.496 resample_us=2059.152 demod_us=5529.937 retry_us=0.000 compute_us=7589.190 cpu_us=7590.390
+PACKET id=587 time_ms=2936.870 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.535 fit=40 fcs=1 crc=1 latency_ms=166.527 full_retry=0 worker=0 queue_us=159599.031 resample_us=2177.672 demod_us=4750.464 retry_us=0.000 compute_us=6928.297 cpu_us=6928.977
+PACKET id=589 time_ms=2946.870 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.762 fit=40 fcs=1 crc=1 latency_ms=163.448 full_retry=0 worker=0 queue_us=156622.510 resample_us=2043.383 demod_us=4781.843 retry_us=0.000 compute_us=6825.316 cpu_us=6825.943
+PACKET id=590 time_ms=2951.872 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.605 fit=40 fcs=1 crc=1 latency_ms=165.404 full_retry=0 worker=0 queue_us=158633.063 resample_us=2059.933 demod_us=4711.342 retry_us=0.000 compute_us=6771.376 cpu_us=6771.881
+HEARTBEAT completed=593 fcs=422 raw_samples=2138112000 queued=23 raw_drop_samples=0 source_errors=0 gaps=0 output_omitted=0
+PACKET id=591 time_ms=2956.868 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.967 fit=40 fcs=1 crc=1 latency_ms=167.075 full_retry=0 worker=0 queue_us=160172.884 resample_us=2080.301 demod_us=4821.376 retry_us=0.000 compute_us=6901.807 cpu_us=6902.687
+PACKET id=593 time_ms=2966.868 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.016 fit=40 fcs=1 crc=1 latency_ms=164.014 full_retry=0 worker=0 queue_us=157289.335 resample_us=2044.966 demod_us=4680.075 retry_us=0.000 compute_us=6725.131 cpu_us=6725.715
+PACKET id=594 time_ms=2971.869 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.284 fit=40 fcs=1 crc=1 latency_ms=165.564 full_retry=0 worker=0 queue_us=158873.027 resample_us=2011.334 demod_us=4679.613 retry_us=0.000 compute_us=6691.037 cpu_us=6691.900
+PACKET id=596 time_ms=2981.872 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.013 fit=40 fcs=1 crc=1 latency_ms=162.546 full_retry=0 worker=0 queue_us=155703.830 resample_us=2071.956 demod_us=4770.291 retry_us=0.000 compute_us=6842.337 cpu_us=6842.945
+PACKET id=597 time_ms=2986.869 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=176.701 fit=40 fcs=1 crc=1 latency_ms=164.159 full_retry=0 worker=0 queue_us=157412.443 resample_us=2042.201 demod_us=4704.459 retry_us=0.000 compute_us=6746.880 cpu_us=6747.475
+PACKET id=599 time_ms=2996.867 status=OK sync=256 sfd=1 phr=1 len=127 cfo_khz=177.331 fit=40 fcs=1 crc=1 latency_ms=160.616 full_retry=0 worker=0 queue_us=153817.256 resample_us=2077.737 demod_us=4720.880 retry_us=0.000 compute_us=6798.717 cpu_us=6799.644
+COST_TOTAL frontend_us=500555.495 frontend_samples=2211643392 estimate_us=11471.236 cancel_us=249658.268 cancelled_samples=2211643392 reader_us=2985269.218
+SUMMARY_PARTIAL completed=599 batch=49 batch_fcs=41/49 batch_pct=83.7 total_fcs=428/599 total_pct=71.5 full_retry=0 raw_drop_samples=0 source_errors=0 gaps=0 models=150 queued=0 queue_peak=24 output_omitted=0 DROPPED_QUEUE=8
+FINAL completed=599 fcs=428/599 raw_samples=2211708928 raw_drop_samples=0 source_errors=0 gaps=0 models=150 output_omitted=0 full_retry=0

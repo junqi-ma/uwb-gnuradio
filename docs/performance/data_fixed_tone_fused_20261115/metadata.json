@@ -1,0 +1,18 @@
+{
+  "head": "0e0c2301f0e322518444deb887e568dadfa883d6",
+  "cpu": "AMD Ryzen 7 9700X",
+  "flags_avx2": "-O3 -mavx2 -mfma -std=c++17",
+  "flags_scalar_qa": "-O2 -std=c++17",
+  "compiler": "c++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+  "benchmark_lock": "/tmp/uwb-sic-benchmark.lock",
+  "first_affinity": 2,
+  "repeat_affinity": 7,
+  "scope": "Standalone prototype, not linked into production; wall-clock noisy, no real-time claims",
+  "qa": "AVX2 and scalar PASS: 216324 independent-reference components; exact alias, arbitrary chunks, guards, folding, invalid models and ties",
+  "hashes": {
+    "qa_fixed_tone_fused.cc": "847029a43f93d0c3c960a4c03c0d5c3e500b5b5c2598841d5e20fc56839d959d",
+    "benchmark_fused.cc": "cb4015d8d7b99162e6e74b68d4c052295f8eaa680545b3b3d169fd5682268d34",
+    "fixed_tone_sc16_kernel.h": "30309ed2f42480b177d0c55ead61b66e2d1e4698232c10efb72b2b42feae6bf8",
+    "summarize.py": "ddc64db06b53a0aa94b5a982b5acaec36a1e3f376220fc1e792afc0fb11f341b"
+  }
+}

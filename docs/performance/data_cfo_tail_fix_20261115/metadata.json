@@ -1,0 +1,25 @@
+{
+  "base_commit": "b573195ea9d0a2af41e1b2c54c6ed8d6bb5685e9",
+  "working_tree_changes": true,
+  "build": "gr-uwb/build-cfo-tail-fix",
+  "hardware_recaptured": false,
+  "workaround_skip_216_used": false,
+  "sha256": {
+    "gr-uwb/include/gnuradio/uwb/uwb_demod_core.h": "cdf36ba9d1cf4b1c3266fa7d9c90523b4292892aec907ad4ac2cb0feee0cf099",
+    "gr-uwb/include/gnuradio/uwb/uwb_phy_profile.h": "4bf01481973e56f86b558e50236dd76edc8659ad64818530e7980ea03e42e35c",
+    "gr-uwb/lib/qa_uwb_demod_core.cc": "0428bb5c34ce55f6287df0dac6595755b2d8cb48435365fb8ebd1e58d3b77081",
+    "gr-uwb/lib/qa_uwb_twr_phy_matrix.cc": "66efe6ff0f55b4b373cadc82dbd30849b9ffd5a722df0cb986cde6f35f807812",
+    "gr-uwb/build-cfo-tail-fix/lib/libgnuradio-uwb.so.1.0.0.0": "0948028caf617a316b6ca81b3863ae1ebf208c4c33f1462fdc12482936fdf228",
+    "gr-uwb/build-cfo-tail-fix/lib/uwb_qa_uwb_demod_core.cc": "74e7e031ae3c2ec37b30e36e26eaff9e085585f36b492ab6388b0fb1d93d99ed",
+    "gr-uwb/build-cfo-tail-fix/lib/uwb_qa_uwb_twr_phy_matrix.cc": "5d97de27a505a782c34249ffbc0e771855d159a7b478b1eb247f206399cafe7f",
+    "gr-uwb/build-cfo-tail-fix/apps/diag_dw3000_cfo_replay": "9503fb11cc4799d8f32de9dcbb1bc0c78edbeaeaae58f6f69679b324059d9dab"
+  },
+  "ctest": {
+    "total": 83,
+    "passed": 82,
+    "skipped": 1,
+    "failed": 0,
+    "wall_s": 109.8
+  },
+  "replay_executable": "gr-uwb/build-cfo-tail-fix/apps/diag_dw3000_cfo_replay"
+}

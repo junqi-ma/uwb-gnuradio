@@ -1,0 +1,13 @@
+{
+  "source_sha256": "d43d17d75780b412f7b8455edef0ffc8ed05318d797fcc3d47bf2e7d95997a19",
+  "repo_head": "0e0c2301f0e322518444deb887e568dadfa883d6",
+  "compiler": "c++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+  "compile_flags": "-O3 -mavx2 -mfma -std=c++17",
+  "cpu": "AMD Ryzen 7 9700X",
+  "affinity_cpu": 2,
+  "lock": "/tmp/uwb-sic-benchmark.lock",
+  "rounds": 17,
+  "scope": "Standalone synthetic SC16 kernel benchmark, not UHD or end-to-end real-time validation",
+  "comparison_order": "ABBA memcpy vs out-of-place cancellation; other metrics fixed per-round order",
+  "disabled_frequency_search": true
+}

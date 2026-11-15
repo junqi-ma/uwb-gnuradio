@@ -1,0 +1,1083 @@
+diff --git a/gr-uwb/apps/CMakeLists.txt b/gr-uwb/apps/CMakeLists.txt
+index bcbe9f9..cd937b7 100644
+--- a/gr-uwb/apps/CMakeLists.txt
++++ b/gr-uwb/apps/CMakeLists.txt
+@@ -438,3 +438,16 @@ target_compile_definitions(benchmark_sc16_pipeline_steady PRIVATE
+ if(UWB_HAVE_UHD)
+     target_link_libraries(benchmark_sc16_pipeline_steady UHD::UHD)
+ endif()
++
++# Live DW3000 packet console (native UHD, bounded workers, no GR scheduler).
++add_executable(uwb_dw3000_live uwb_dw3000_live.cc)
++target_link_libraries(uwb_dw3000_live gnuradio-uwb Threads::Threads)
++target_compile_options(uwb_dw3000_live PRIVATE -O3 -march=native)
++target_compile_definitions(uwb_dw3000_live PRIVATE
++    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
++if(ENABLE_TESTING)
++    add_test(NAME uwb_qa_dw3000_live_console
++        COMMAND python3 ${CMAKE_SOURCE_DIR}/../tools/rx/qa_live_dw3000_console.py
++                $<TARGET_FILE:uwb_dw3000_live>)
++    set_tests_properties(uwb_qa_dw3000_live_console PROPERTIES TIMEOUT 90)
++endif()
+diff --git a/gr-uwb/apps/x410_auto_scheduled_capture.py b/gr-uwb/apps/x410_auto_scheduled_capture.py
+index e493982..b3b4373 100644
+--- a/gr-uwb/apps/x410_auto_scheduled_capture.py
++++ b/gr-uwb/apps/x410_auto_scheduled_capture.py
+@@ -163,6 +163,9 @@ def parser():
+     p.add_argument("--frequency", type=float, default=6489.6e6)
+     p.add_argument("--gain", type=float, default=60.0)
+     p.add_argument("--antenna", default="TX/RX0")
++    p.add_argument("--rx-subdev", default="",
++                   help="RX subdevice spec, e.g. 'B:1' for UHD channel 3 "
++                        "(dboard B, RX1); empty keeps the device default")
+     p.add_argument("--packet-interval", type=float, default=INTERVAL_S)
+     p.add_argument("--pre-guard", type=int, default=0,
+                    help="demod-crop pre-guard (0 = native geom: "
+@@ -217,7 +220,12 @@ def parser():
+                    help="live capture duration; 0 = 15 s on x410, else until EOS")
+     p.add_argument("--workers", type=int, default=2,
+                    help="UwbRealtimeDemodulator worker count")
+-    p.add_argument("--energy-threshold", type=float, default=0.02)
++    p.add_argument("--energy-threshold", type=float, default=None,
++                   help="energy gate threshold (16x mean power). Default: 4e-3 "
++                        "for --capture-mode detector, 0.02 for auto")
++    p.add_argument("--fine-threshold", type=float, default=0.1,
++                   help="detector_sc16 fine confirm threshold in (0, 1]; "
++                        "only the detector capture modes use it")
+     p.add_argument("--cir-filter-mode", default="bypass")
+     p.add_argument("--template-998", default="",
+                    help="998.4 CF32 one-SYNC template for the demodulator")
+@@ -738,7 +746,8 @@ def run_detector_live(a, uwb, gr, uhd, native_geom, native, tmpl_native):
+         raise RuntimeError(f"missing 998.4 template {tmpl998_path}")
+     tmpl998 = load_cf32(tmpl998_path)
+     print(f"capture-mode=detector demod=code{code}/{reps}/{sfd} "
+-          f"detector=[{det_pre},{det_cap}] thr={a.energy_threshold}")
++          f"detector=[{det_pre},{det_cap}] thr={a.energy_threshold} "
++          f"fine={a.fine_threshold}")
+     print(f"template_998={tmpl998_path} n={tmpl998.size} "
+           f"workers={a.workers} cir={a.cir_filter_mode}")
+     print(f"device_args={dev_args}")
+@@ -753,6 +762,8 @@ def run_detector_live(a, uwb, gr, uhd, native_geom, native, tmpl_native):
+         src.set_time_source("internal")
+     except Exception as exc:
+         print(f"clock/time source warning: {exc}")
++    if a.rx_subdev:
++        src.set_subdev_spec(a.rx_subdev, 0)
+     src.set_samp_rate(native)
+     actual = float(src.get_samp_rate())
+     print(f"usrp samp_rate requested={native:.0f} actual={actual:.0f}")
+@@ -768,7 +779,8 @@ def run_detector_live(a, uwb, gr, uhd, native_geom, native, tmpl_native):
+ 
+     det = uwb.detector_sc16(
+         list(tmpl_native), det_pre, det_cap, float(a.energy_threshold),
+-        100, 4, 1, native_geom["coarse_margin"], native)
++        100, 4, 1, native_geom["coarse_margin"], native,
++        float(a.fine_threshold))
+     resampler = make_pdu_resampler(uwb, native)
+     demod = uwb.realtime_demodulator.make_from_template(
+         tmpl998.tolist(), max(1, int(a.workers)), 64, sfd, 0,
+@@ -860,6 +872,8 @@ def run_x410_live(a, tmpl_path):
+         src.set_time_source("internal")
+     except Exception as exc:
+         print(f"clock/time source warning: {exc}")
++    if a.rx_subdev:
++        src.set_subdev_spec(a.rx_subdev, 0)
+     src.set_samp_rate(native)
+     actual = float(src.get_samp_rate())
+     print(f"usrp samp_rate requested={native:.0f} actual={actual:.0f}")
+@@ -872,6 +886,7 @@ def run_x410_live(a, tmpl_path):
+         src.set_antenna(a.antenna, 0)
+     except Exception as exc:
+         print(f"antenna {a.antenna!r} rejected ({exc}); leaving default")
++    print(f"rx subdev spec={a.rx_subdev or 'default'}")
+     print(f"usrp tuned freq={src.get_center_freq(0):.1f} "
+           f"gain={src.get_gain(0)} antenna={src.get_antenna(0)}")
+ 
+@@ -1239,7 +1254,8 @@ def run_flow(a, tmpl_path, iq=None):
+             [complex(x) for x in tmpl],
+             file_geom["demod_pre"],
+             file_geom["demod_cap"] + file_geom["demod_post"],
+-            det_thr, det_egd, 4, 1, native_geom["coarse_margin"], native)
++            det_thr, det_egd, 4, 1, native_geom["coarse_margin"], native,
++            float(getattr(a, "fine_threshold", 0.1)))
+         dbg = blocks.message_debug()
+         tb = gr.top_block("x410_detector_capture")
+         if a.source in ("synthetic", "file"):
+@@ -1286,6 +1302,8 @@ def run_flow(a, tmpl_path, iq=None):
+ 
+ def main():
+     a = parser().parse_args()
++    if a.energy_threshold is None:
++        a.energy_threshold = 4e-3 if a.capture_mode == "detector" else 0.02
+     try:
+         native_geom = resolve_native_geom(a.native_rate)
+     except ValueError as exc:
+diff --git a/gr-uwb/grc/uwb_detector_sc16.block.yml b/gr-uwb/grc/uwb_detector_sc16.block.yml
+index 66207bd..777f13e 100644
+--- a/gr-uwb/grc/uwb_detector_sc16.block.yml
++++ b/gr-uwb/grc/uwb_detector_sc16.block.yml
+@@ -7,12 +7,13 @@ parameters:
+ # Production geometry defaults match gr::uwb::defaults::*
+ - {id: pre_trigger, label: Pre-trigger samples, dtype: int, default: '2032'}
+ - {id: capture_samples, label: Capture samples, dtype: int, default: '200000'}
+-- {id: energy_threshold, label: Normalized energy threshold, dtype: real, default: '0.02'}
++- {id: energy_threshold, label: Energy gate threshold (16x mean power), dtype: real, default: '0.004'}
+ - {id: energy_gate_decimation, label: Energy gate decimation, dtype: int, default: '100'}
+ - {id: coarse_decimation, label: Coarse decimation, dtype: int, default: '4'}
+ - {id: coarse_repetitions, label: Coarse repetitions, dtype: int, default: '1'}
+ - {id: coarse_margin, label: Coarse margin (samples), dtype: int, default: '16'}
+ - {id: sample_rate, label: Sample rate (Hz), dtype: real, default: '998.4e6'}
++- {id: fine_threshold, label: Fine confirm threshold (0, 1], dtype: real, default: '0.1'}
+ 
+ inputs:
+ - domain: stream
+@@ -23,11 +24,11 @@ outputs:
+ 
+ templates:
+   imports: from gnuradio import uwb
+-  make: uwb.detector_sc16.make_from_file(${template_file}, ${pre_trigger}, ${capture_samples}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation}, ${coarse_repetitions}, ${coarse_margin}, ${sample_rate})
++  make: uwb.detector_sc16.make_from_file(${template_file}, ${pre_trigger}, ${capture_samples}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation}, ${coarse_repetitions}, ${coarse_margin}, ${sample_rate}, ${fine_threshold})
+ 
+ cpp_templates:
+   includes: ['#include <gnuradio/uwb/uwb_detector_sc16.h>']
+-  make: 'this->${id} = gr::uwb::UwbDetectorSc16::make_from_file(${template_file}, ${pre_trigger}, ${capture_samples}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation}, ${coarse_repetitions}, ${coarse_margin}, ${sample_rate});'
++  make: 'this->${id} = gr::uwb::UwbDetectorSc16::make_from_file(${template_file}, ${pre_trigger}, ${capture_samples}, ${energy_threshold}, ${energy_gate_decimation}, ${coarse_decimation}, ${coarse_repetitions}, ${coarse_margin}, ${sample_rate}, ${fine_threshold});'
+   link: ['gnuradio::gnuradio-uwb']
+ 
+ documentation: |-
+@@ -36,7 +37,7 @@ documentation: |-
+   Candidate Regions are converted once to CF32 in the background worker;
+   output is a bit-exact interleaved-I/Q PMT s16vector.
+ 
+-  Defaults for pre_trigger/capture/coarse_* / sample_rate match
+-  gr::uwb::defaults in uwb_defaults.h.
++  Defaults for pre_trigger/capture/coarse_* / sample_rate / fine_threshold
++  match gr::uwb::defaults in uwb_defaults.h.
+ 
+ file_format: 1
+diff --git a/gr-uwb/include/gnuradio/uwb/uwb_defaults.h b/gr-uwb/include/gnuradio/uwb/uwb_defaults.h
+index 13b9cc7..5a57082 100644
+--- a/gr-uwb/include/gnuradio/uwb/uwb_defaults.h
++++ b/gr-uwb/include/gnuradio/uwb/uwb_defaults.h
+@@ -31,6 +31,12 @@ inline constexpr size_t kDetectorCapture = 200000;
+ // Normalized mean |x|^2 vs full-scale.  Live X410 @6489.6 MHz / 60 dB has a
+ // CW floor around 1.2e-3, so 1e-3 never closes the acquire gate.
+ inline constexpr float kDetectorEnergyThreshold = 0.02f;
++// UwbDetectorSc16 energy gate.  The gate compares 16 x mean |x|^2 (16 of every
++// 100 samples summed per block, averaged over the 32-block window), not the
++// mean power itself.  Tuned on the 2026-11-15 DW3000 capture at 737.28 MS/s:
++// noise gate metric ~3e-3, packet ~7e-3..1.2e-2; 3e-3..5e-3 gives 4/4 packets.
++// The noise floor depends on antenna and setup, so re-measure when it changes.
++inline constexpr float kDetectorSc16EnergyThreshold = 4e-3f;
+ inline constexpr size_t kDetectorEnergyGateDecimation = 100;
+ inline constexpr size_t kDetectorCoarseDecimation = 4;
+ inline constexpr size_t kDetectorCoarseRepetitions = 1;
+@@ -39,6 +45,9 @@ inline constexpr size_t kDetectorCoarseMargin = 16;
+ // the first few SYNCs, so refine the start backwards on the known symbol grid
+ // with a lower per-symbol threshold; stop at the first missing grid point.
+ inline constexpr float kDetectorFineThreshold = 0.5f;
++// UwbDetectorSc16 default fine gate.  At 737.28 MS/s, single-SYNC DW3000 peaks
++// measured 0.23-0.24 while noise-only maxima stayed near 0.02 over 20 ms.
++inline constexpr float kDetectorSc16FineThreshold = 0.1f;
+ inline constexpr float kDetectorBacktrackThreshold = 0.2f;
+ inline constexpr size_t kDetectorBacktrackRadius = 8;
+ inline constexpr size_t kDetectorMaxBacktrackSymbols = 3;
+diff --git a/gr-uwb/include/gnuradio/uwb/uwb_demod_core.h b/gr-uwb/include/gnuradio/uwb/uwb_demod_core.h
+index e1b7c00..7175907 100644
+--- a/gr-uwb/include/gnuradio/uwb/uwb_demod_core.h
++++ b/gr-uwb/include/gnuradio/uwb/uwb_demod_core.h
+@@ -3413,8 +3413,18 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
+         }
+ 
+         const auto sfd_cfo_t0 = std::chrono::steady_clock::now();
++        // Only the tail has measured correlation phases.  The reconstructed
++        // full-frame grid above contains zero placeholders for earlier SYNCs
++        // and is for downstream timing/CIR, not carrier estimation.  Startup
++        // exclusion belongs to the initial acquisition fit; this SFD-anchored
++        // tail is already the selected stable training interval.
++        Qm35825Profile tail_fit_profile = profile;
++        tail_fit_profile.cfo_skip_initial_repetitions = 0;
+         const bool cfo_fit_ok =
+-            fit_cfo(rx, n, profile, cfo_timing, res.cfo, scratch);
++            fit_cfo(rx, n, tail_fit_profile, tail_timing, res.cfo, scratch);
++        // Keep diagnostics in full-preamble coordinates, as before.
++        if (cfo_fit_ok)
++            res.cfo.skipped_peaks += tail_first;
+         res.stage_cfo_fit_us += res.cfo.fit_us;
+         res.stage_sfd_cfo_refit_us += static_cast<uint64_t>(
+             std::chrono::duration_cast<std::chrono::microseconds>(
+diff --git a/gr-uwb/include/gnuradio/uwb/uwb_detector_sc16.h b/gr-uwb/include/gnuradio/uwb/uwb_detector_sc16.h
+index 3926ae8..303c3aa 100644
+--- a/gr-uwb/include/gnuradio/uwb/uwb_detector_sc16.h
++++ b/gr-uwb/include/gnuradio/uwb/uwb_detector_sc16.h
+@@ -72,7 +72,8 @@ public:
+      *                            internally; used for the coarse + fine scans).
+      * \param pre_trigger         samples captured before the packet start.
+      * \param capture             samples captured after the packet start.
+-     * \param energy_threshold    decimated energy-gate threshold.
++     * \param energy_threshold    energy-gate threshold, compared with 16 x mean
++     *                            |x|^2 over the sampled window (default 4e-3).
+      * \param energy_gate_decimation  stride for the decimated energy gate
+      *                                (default 100).
+      * \param coarse_decimation   stride for the decimated coarse preamble scan
+@@ -83,11 +84,15 @@ public:
+      *                            peak (samples).
+      * \param sample_rate         host sample rate written into PDU metadata
+      *                            (default 998.4e6 production host rate).
++     * \param fine_threshold      full-rate normalized metric a candidate peak
++     *                            must reach to confirm a packet, in (0, 1]
++     *                            (default 0.1; backtrack stays at 0.2).
+      */
+     static sptr make(const std::vector<std::complex<float>>& known_preamble,
+                      size_t pre_trigger = defaults::kDetectorPreTrigger,
+                      size_t capture = defaults::kDetectorCapture,
+-                     float energy_threshold = defaults::kDetectorEnergyThreshold,
++                     float energy_threshold =
++                         defaults::kDetectorSc16EnergyThreshold,
+                      size_t energy_gate_decimation =
+                          defaults::kDetectorEnergyGateDecimation,
+                      size_t coarse_decimation =
+@@ -95,7 +100,9 @@ public:
+                      size_t coarse_repetitions =
+                          defaults::kDetectorCoarseRepetitions,
+                      size_t coarse_margin = defaults::kDetectorCoarseMargin,
+-                     double sample_rate = defaults::kSampleRateHz);
++                     double sample_rate = defaults::kSampleRateHz,
++                     float fine_threshold =
++                         defaults::kDetectorSc16FineThreshold);
+ 
+     /**
+      * Same as make(), but loads the template from a binary file of interleaved
+@@ -105,7 +112,7 @@ public:
+                                size_t pre_trigger = defaults::kDetectorPreTrigger,
+                                size_t capture = defaults::kDetectorCapture,
+                                float energy_threshold =
+-                                   defaults::kDetectorEnergyThreshold,
++                                   defaults::kDetectorSc16EnergyThreshold,
+                                size_t energy_gate_decimation =
+                                    defaults::kDetectorEnergyGateDecimation,
+                                size_t coarse_decimation =
+@@ -114,7 +121,9 @@ public:
+                                    defaults::kDetectorCoarseRepetitions,
+                                size_t coarse_margin =
+                                    defaults::kDetectorCoarseMargin,
+-                               double sample_rate = defaults::kSampleRateHz);
++                               double sample_rate = defaults::kSampleRateHz,
++                               float fine_threshold =
++                                    defaults::kDetectorSc16FineThreshold);
+ 
+     size_t pre_trigger() const;
+     void set_pre_trigger(size_t pre_trigger);
+@@ -145,7 +154,8 @@ protected:
+                 size_t coarse_decimation,
+                 size_t coarse_repetitions,
+                 size_t coarse_margin,
+-                double sample_rate);
++                double sample_rate,
++                float fine_threshold);
+ 
+     int work(int noutput_items,
+              gr_vector_const_void_star& input_items,
+diff --git a/gr-uwb/include/gnuradio/uwb/uwb_phy_profile.h b/gr-uwb/include/gnuradio/uwb/uwb_phy_profile.h
+index fe166b3..2a46aa8 100644
+--- a/gr-uwb/include/gnuradio/uwb/uwb_phy_profile.h
++++ b/gr-uwb/include/gnuradio/uwb/uwb_phy_profile.h
+@@ -69,6 +69,8 @@ struct Qm35825Profile {
+     // Match MATLAB compensateCarrierOffset: discard the startup transient in
+     // at most the first 24 SYNCs, while retaining at least 32 phase samples.
+     // This is intentionally separate from the CIR skip policy above.
++    // Applies to the initial acquisition fit.  The SFD-anchored refit uses
++    // all measured tail peaks directly, independent of preamble length.
+     size_t cfo_skip_initial_repetitions = 24;
+     size_t cfo_min_fit_repetitions = 32;
+     // Sparse RAKE policy: 0 keeps the full CIR matched filter; otherwise use
+diff --git a/gr-uwb/include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h b/gr-uwb/include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h
+index e019a52..3748fd5 100644
+--- a/gr-uwb/include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h
++++ b/gr-uwb/include/gnuradio/uwb/uwb_uhd_sc16_pipeline.h
+@@ -332,6 +332,7 @@ struct PipelineConfig {
+     std::string uhd_args;
+     std::string uhd_subdev;
+     std::string uhd_channel;
++    std::string uhd_antenna; // empty keeps the device default
+     double uhd_center_freq = 3993.6e6;
+     double uhd_gain = 30.0;
+     std::string uhd_clock_source;
+diff --git a/gr-uwb/lib/qa_uwb_defaults.cc b/gr-uwb/lib/qa_uwb_defaults.cc
+index 0ce2635..e76d78d 100644
+--- a/gr-uwb/lib/qa_uwb_defaults.cc
++++ b/gr-uwb/lib/qa_uwb_defaults.cc
+@@ -102,6 +102,8 @@ BOOST_AUTO_TEST_CASE(test_defaults_production_values)
+     BOOST_CHECK_EQUAL(gr::uwb::defaults::kDetectorPreTrigger, size_t(2032));
+     BOOST_CHECK_EQUAL(gr::uwb::defaults::kDetectorCapture, size_t(200000));
+     BOOST_CHECK_CLOSE(gr::uwb::defaults::kDetectorEnergyThreshold, 0.02f, 1e-6);
++    BOOST_CHECK_CLOSE(gr::uwb::defaults::kDetectorSc16EnergyThreshold, 4e-3f,
++                      1e-6);
+     BOOST_CHECK_EQUAL(gr::uwb::defaults::kDetectorEnergyGateDecimation,
+                       size_t(100));
+     BOOST_CHECK_EQUAL(gr::uwb::defaults::kDetectorCoarseDecimation, size_t(4));
+@@ -197,9 +199,12 @@ BOOST_AUTO_TEST_CASE(test_grc_detector_sc16_defaults_match_header)
+     BOOST_CHECK(yaml_default_equals(yaml, "coarse_repetitions", "1"));
+     BOOST_CHECK(yaml_default_equals(yaml, "coarse_margin", "16"));
+     BOOST_CHECK(yaml_default_equals(yaml, "sample_rate", "998.4e6"));
++    BOOST_CHECK(yaml_default_equals(yaml, "energy_threshold", "0.004"));
++    BOOST_CHECK(yaml_default_equals(yaml, "fine_threshold", "0.1"));
+     BOOST_CHECK(yaml_make_contains(yaml, "${coarse_repetitions}"));
+     BOOST_CHECK(yaml_make_contains(yaml, "${coarse_margin}"));
+     BOOST_CHECK(yaml_make_contains(yaml, "${sample_rate}"));
++    BOOST_CHECK(yaml_make_contains(yaml, "${fine_threshold}"));
+     BOOST_CHECK(yaml.find("UwbDetectorSc16::make_from_file") != std::string::npos);
+ }
+ 
+diff --git a/gr-uwb/lib/qa_uwb_demod_core.cc b/gr-uwb/lib/qa_uwb_demod_core.cc
+index 7b44890..d248050 100644
+--- a/gr-uwb/lib/qa_uwb_demod_core.cc
++++ b/gr-uwb/lib/qa_uwb_demod_core.cc
+@@ -2444,3 +2444,65 @@ BOOST_AUTO_TEST_CASE(test_demod_core_tail_reuse_equivalence_and_fallback)
+     BOOST_CHECK_EQUAL(res_fb.timing.detected_peaks, size_t(64));
+     BOOST_CHECK_SMALL(std::abs(res_fb.cfo.cfo_hz - res_legacy.cfo.cfo_hz), 25.0);
+ }
++
++BOOST_AUTO_TEST_CASE(test_demod_core_sfd_tail_cfo_uses_only_measured_peaks)
++{
++    // Keep the golden SFD/PHR/payload and vary only the SYNC train length.
++    // The full-frame timing grid deliberately still contains zero placeholders;
++    // those placeholders must never participate in the final CFO phase fit.
++    std::vector<gr_complex> golden;
++    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", golden));
++    const auto tmpl = load_reference_template();
++    constexpr size_t start = 9984;
++    constexpr size_t sym = kQm35SamplesPerSymbol;
++    constexpr size_t original_reps = 64;
++    const size_t sfd = start + original_reps * sym;
++    BOOST_REQUIRE_GT(golden.size(), sfd);
++    const std::vector<gr_complex> stable_symbol(
++        golden.begin() + sfd - sym, golden.begin() + sfd);
++
++    for (size_t reps : {size_t(16), size_t(32), size_t(64), size_t(128), size_t(256)}) {
++        std::vector<gr_complex> base(golden.begin(), golden.begin() + start);
++        if (reps > original_reps) {
++            for (size_t k = original_reps; k < reps; ++k)
++                base.insert(base.end(), stable_symbol.begin(), stable_symbol.end());
++            base.insert(base.end(), golden.begin() + start, golden.end());
++        } else {
++            base.insert(base.end(), golden.begin() + sfd - reps * sym, golden.end());
++        }
++        for (double hz : {0.0, -25000.0, 25000.0, -175000.0, 175000.0}) {
++            std::vector<gr_complex> rx(base.size());
++            for (size_t k = 0; k < base.size(); ++k) {
++                const double phase = 2.0 * M_PI * hz * k / kQm35SampleRate;
++                rx[k] = base[k] * gr_complex(std::cos(phase), std::sin(phase));
++            }
++            // Exercise both explicit tail re-tracking and the peak-reuse path.
++            for (bool reuse : {false, true}) {
++                BOOST_TEST_CONTEXT("reps=" << reps << " hz=" << hz << " reuse=" << reuse) {
++                    auto p = Qm35825Profile::Default();
++                    p.preamble_repetitions = reps;
++                    p.cir_repetitions = reps - p.cir_skip_initial_repetitions;
++                    p.sfd_mode = "ieee";
++                    p.rx_seed_refine_tail = reuse;
++                    core::DemodScratch scratch;
++                    auto r = core::demodulate_one(rx.data(), rx.size(), p, 0,
++                                                  start, 0, tmpl, scratch);
++                    BOOST_REQUIRE(r.status == DemodStatus::Success);
++                    BOOST_REQUIRE(r.payload.fcs_pass);
++                    BOOST_CHECK_EQUAL(r.payload.received_fcs, uint16_t(0x584b));
++                    const size_t measured = std::min<size_t>(reps, 40);
++                    const size_t first = reps - measured;
++                    BOOST_CHECK_EQUAL(r.cfo.peaks_used, measured);
++                    BOOST_CHECK_EQUAL(r.cfo.skipped_peaks, first);
++                    BOOST_CHECK_EQUAL(r.cfo.fit_first_peak_sample, r.timing.peak_samples[first]);
++                    BOOST_CHECK_EQUAL(r.cfo.fit_last_peak_sample, r.timing.peak_samples.back());
++                    BOOST_CHECK_SMALL(r.cfo.cfo_hz - hz, 50.0);
++                    for (size_t k = 0; k < first; ++k)
++                        BOOST_CHECK_EQUAL(std::abs(r.timing.peak_corr[k]), 0.0f);
++                    for (size_t k = first; k < reps; ++k)
++                        BOOST_CHECK_GT(std::abs(r.timing.peak_corr[k]), 0.0f);
++                }
++            }
++        }
++    }
++}
+diff --git a/gr-uwb/lib/qa_uwb_detector_sc16.cc b/gr-uwb/lib/qa_uwb_detector_sc16.cc
+index 7e391ed..a8fc4ba 100644
+--- a/gr-uwb/lib/qa_uwb_detector_sc16.cc
++++ b/gr-uwb/lib/qa_uwb_detector_sc16.cc
+@@ -11,6 +11,7 @@
+ #include <cmath>
+ #include <complex>
+ #include <cstdint>
++#include <stdexcept>
+ #include <vector>
+ 
+ namespace {
+@@ -183,8 +184,11 @@ BOOST_AUTO_TEST_CASE(test_sc16_fixed_capture_and_bit_exact_pdu)
+     }
+ 
+     auto src = gr::blocks::vector_source_s::make(interleaved, false, 2);
++    // Smooth template: at fine 0.1 a window 74 samples early reaches 0.41 on
++    // partial overlap, so this bit-exact fixture pins the original 0.5 gate.
+     auto det = gr::uwb::UwbDetectorSc16::make(
+-        tmpl, pre, capture, 1e-5f, 4, 4, 1, 8);
++        tmpl, pre, capture, 1e-5f, 4, 4, 1, 8, gr::uwb::defaults::kSampleRateHz,
++        0.5f);
+     auto dbg = gr::blocks::message_debug::make();
+     auto tb = gr::make_top_block("qa_detector_sc16");
+     tb->connect(src, 0, det, 0);
+@@ -273,7 +277,8 @@ BOOST_AUTO_TEST_CASE(test_sc16_backtracks_weak_first_sync)
+ 
+     auto src = gr::blocks::vector_source_s::make(interleaved, false, 2);
+     auto det = gr::uwb::UwbDetectorSc16::make(
+-        tmpl, 5000, 2000, 1e-5f, 4, 4, 1, 8);
++        tmpl, 5000, 2000, 1e-5f, 4, 4, 1, 8, gr::uwb::defaults::kSampleRateHz,
++        0.5f);
+     auto dbg = gr::blocks::message_debug::make();
+     auto tb = gr::make_top_block("qa_detector_sc16_weak_first");
+     tb->connect(src, 0, det, 0);
+@@ -300,6 +305,108 @@ BOOST_AUTO_TEST_CASE(test_sc16_backtracks_weak_first_sync)
+         2);
+ }
+ 
++BOOST_AUTO_TEST_CASE(test_sc16_fine_threshold_default_and_gate)
++{
++    constexpr size_t L = 1016;
++    constexpr size_t packet_start = 7000;
++    constexpr size_t reps = 4;
++    std::vector<gr_complex> tmpl(L);
++    uint32_t prng = 0x6d2b79f5U;
++    for (size_t k = 0; k < L; ++k) {
++        prng ^= prng << 13;
++        prng ^= prng >> 17;
++        prng ^= prng << 5;
++        tmpl[k] = gr_complex((prng & 1U) ? 1.0f : -1.0f,
++                             (prng & 2U) ? 1.0f : -1.0f);
++    }
++    gr::uwb::core::uwb_l2_normalize(tmpl);
++
++    std::vector<gr_complex> orth(L);
++    gr_complex projection(0.0f, 0.0f);
++    float et = 0.0f;
++    uint32_t noise_prng = 0xa341316cU;
++    for (size_t k = 0; k < L; ++k) {
++        noise_prng ^= noise_prng << 13;
++        noise_prng ^= noise_prng >> 17;
++        noise_prng ^= noise_prng << 5;
++        orth[k] = gr_complex((noise_prng & 1U) ? 1.0f : -1.0f,
++                             (noise_prng & 2U) ? 1.0f : -1.0f);
++        projection += std::conj(tmpl[k]) * orth[k];
++        et += std::norm(tmpl[k]);
++    }
++    for (size_t k = 0; k < L; ++k)
++        orth[k] -= (projection / et) * tmpl[k];
++    float eo = 0.0f;
++    for (const auto& v : orth)
++        eo += std::norm(v);
++    const float orth_scale = std::sqrt(et / eo);
++
++    // Every SYNC has normalized metric 0.5^2 = 0.25: between the default
++    // fine gate (0.1) and the previous 0.5 gate.
++    std::vector<int16_t> interleaved((packet_start + reps * L + 4096) * 2, 0);
++    for (size_t r = 0; r < reps; ++r) {
++        for (size_t k = 0; k < L; ++k) {
++            const gr_complex v = 0.5f * tmpl[k] +
++                                 std::sqrt(0.75f) * orth_scale * orth[k];
++            const size_t i = packet_start + r * L + k;
++            interleaved[2 * i] =
++                static_cast<int16_t>(std::lround(v.real() * 20000.0f));
++            interleaved[2 * i + 1] =
++                static_cast<int16_t>(std::lround(v.imag() * 20000.0f));
++        }
++    }
++
++    auto run = [&](gr::uwb::UwbDetectorSc16::sptr det, const char* name) {
++        auto src = gr::blocks::vector_source_s::make(interleaved, false, 2);
++        auto dbg = gr::blocks::message_debug::make();
++        auto tb = gr::make_top_block(name);
++        tb->connect(src, 0, det, 0);
++        tb->msg_connect(det, "packet", dbg, "store");
++        tb->run();
++        return dbg;
++    };
++
++    auto dbg_default = run(gr::uwb::UwbDetectorSc16::make(
++                               tmpl, 5000, 2000, 1e-5f, 4, 4, 1, 8),
++                           "qa_fine_default");
++    BOOST_REQUIRE_EQUAL(dbg_default->num_messages(), 1);
++    const auto meta = pmt::car(dbg_default->get_message(0));
++    BOOST_CHECK_EQUAL(
++        pmt::to_uint64(pmt::dict_ref(meta, pmt::mp("start_sample"),
++                                    pmt::PMT_NIL)),
++        packet_start);
++    BOOST_CHECK_CLOSE(
++        pmt::to_double(pmt::dict_ref(meta, pmt::mp("detection_metric"),
++                                    pmt::PMT_NIL)),
++        0.25, 1.0);
++    BOOST_CHECK_CLOSE(
++        pmt::to_double(pmt::dict_ref(meta, pmt::mp("threshold"),
++                                    pmt::PMT_NIL)),
++        0.1, 1e-4);
++
++    auto dbg_strict = run(gr::uwb::UwbDetectorSc16::make(
++                              tmpl, 5000, 2000, 1e-5f, 4, 4, 1, 8,
++                              gr::uwb::defaults::kSampleRateHz, 0.5f),
++                          "qa_fine_strict");
++    BOOST_CHECK_EQUAL(dbg_strict->num_messages(), 0);
++}
++
++BOOST_AUTO_TEST_CASE(test_sc16_fine_threshold_rejects_out_of_range)
++{
++    std::vector<gr_complex> tmpl(128, gr_complex(1.0f, 0.0f));
++    gr::uwb::core::uwb_l2_normalize(tmpl);
++    auto make_with = [&](float fine) {
++        return gr::uwb::UwbDetectorSc16::make(
++            tmpl, 5000, 2000, 1e-5f, 4, 4, 1, 8,
++            gr::uwb::defaults::kSampleRateHz, fine);
++    };
++    BOOST_CHECK_THROW(make_with(0.0f), std::invalid_argument);
++    BOOST_CHECK_THROW(make_with(-0.1f), std::invalid_argument);
++    BOOST_CHECK_THROW(make_with(1.5f), std::invalid_argument);
++    BOOST_CHECK_THROW(make_with(std::nanf("")), std::invalid_argument);
++    BOOST_CHECK_NO_THROW(make_with(1.0f));
++}
++
+ BOOST_AUTO_TEST_CASE(test_sc16_sample_rate_metadata)
+ {
+     constexpr size_t L = 128;
+diff --git a/gr-uwb/lib/qa_uwb_twr_phy_matrix.cc b/gr-uwb/lib/qa_uwb_twr_phy_matrix.cc
+index 08943e8..1cd0c60 100644
+--- a/gr-uwb/lib/qa_uwb_twr_phy_matrix.cc
++++ b/gr-uwb/lib/qa_uwb_twr_phy_matrix.cc
+@@ -26,53 +26,26 @@
+  * file (crc16_802154_ref), never by the library under test, so "observed FCS"
+  * is not the library grading its own homework (REQ-QA-01).
+  *
+- * Prior state of the art in this repo
+- * ----------------------------------
+- *   * 64 SYNC: full PHR/FCS golden (testdata/realtime_demod_golden, 127 B PSDU,
+- *     FCS 0x584b) — qa_uwb_demod_core.cc::test_demod_core_r4_payload_fcs_matches_golden
+- *   * 32/64/128 SYNC: preamble/SFD/CIR only, via UwbRadarPacketSource +
+- *     UwbRadarCirEstimator, which do NOT decode PHR/payload/FCS —
+- *     qa_uwb_radar_e2e.cc::e2e_sync_repetitions
+- * => 128 SYNC was NOT verified at PHR/payload/FCS level.  This QA closes that
+- *    gap and finds that 128 SYNC decodes at zero CFO but its CFO estimate is
+- *    badly wrong under this build's CFO fit (see
+- *    twr_phy_matrix_128sync_cfo_cause).
++ * CFO FIX UPDATE (2026-11-15): the historical CFO limitation below is fixed.
++ * The refit now consumes measured tail phases directly.  The boundary QA
++ * remeasures decode/PHR capability, including 1024 SYNC; this does not expand
++ * the production TWR configuration whitelist or establish hardware ranging.
+  *
+- * sync_repetitions whitelist (measured, see the boundary test)
+- * ----------------------------------------------------------
+- *   16  SUPPORTED.  Only length that is both CFO-robust and PHR
+- *       self-describing at the short end.  encode_phr19 emits
+- *       preamble-duration index 0 (=16) for reps <= 16, so the frame
+- *       describes itself; and because 16 <= cfo_min_fit_repetitions(32) the
+- *       whole preamble is re-measured, so no synthesised zero-phase peak can
+- *       enter the phase fit.  Measured CFO error 0.0 Hz at
+- *       0/±1/±5/±20/±100 kHz, byte-exact FCS pass on 16/26/31/127 B PSDU for
+- *       code 9..12 x all six SFD modes, and integer / fractional delay,
+- *       2-/3-tap multipath and AWGN sigma 0.05 / 0.15.  Also the SHORTEST
+- *       usable preamble, i.e. the shortest frame for the TWR turnaround
+- *       budget.  Its first-path / ToA accuracy is NOT measured here and stays
+- *       unverified.
+- *   64  SUPPORTED.  The reference profile.
+- *   32  excluded: CFO-exact, but advertises preamble duration 64.
+- *   128 / 256 / 512 / 1024 / 2048  excluded BY THIS BUILD'S SOFTWARE ONLY.
+- *       The measured cause is the CFO fit: uwb_demod_core.h re-measures only
+- *       the last max(cfo_min_fit_repetitions, 40) SYNCs while
+- *       cfo_skip_initial_repetitions stays 24, so synthesised zero-phase peaks
+- *       enter the phase fit (measured -16.2 kHz error at 128 SYNC, growing
+- *       with length).  On top of that mod::encode_phr19 maps the length onto
+- *       the 4-value preamble-duration index, so the PHR does not self-describe
+- *       (1024 excepted, and it is still CFO-biased).
+- *       This is emphatically NOT a claim about the hardware: Qorvo DW1000 and
+- *       DW3000 parts DO support 128 / 256 / 512 / 1024 preamble lengths
+- *       (DW1000 API Guide v2.7 §5.12 `txPreambLength`; DW3xxx API Guide PDF
+- *       pp. 32-34, whose preamble enumeration includes 128 / 256 / 512 as
+- *       non-standard preamble lengths).  Lifting these lengths is a decoder /
+- *       encoder change plus a re-measure, not a capability discovery, and the
+- *       rejection is recorded as reject_scope=current_software_-
+- *       implementation_limit so it can never harden into a hardware verdict.
+- *   1 / 2  excluded: stage_cfo needs at least 4 measured peaks.
+- *   4 / 8  excluded: stage_cir_softchips requires more than
+- *       cir_skip_initial_repetitions (10) repetitions.
++ * Current decode boundary after the CFO fix
++ * ----------------------------------------
++ * The final CFO fit consumes measured tail phases for every preamble length.
++ * Synthetic leading timing coordinates are still exported for CIR/timing but
++ * do not enter carrier estimation.  The regression below exercises 16/32/64/
++ * 128/256 SYNC at positive and negative offsets without a skip workaround.
++ * The independent boundary sweep also checks 512/1024/2048 SYNC.
++ *
++ * Full PHR/FCS work-grid decode plus PHR self-description is measured here
++ * for 16, 64 and 1024 SYNC.  This is QA evidence only: production TWR config
++ * whitelists and ranging qualification are not expanded by this change.
++ * The modulator still advertises 64 for 32/128/256/512 and 1024 for 2048;
++ * these lengths remain excluded from self-describing TX/RX qualification.
++ * This is a software limitation, not a hardware-capability claim.
++ * Below the CIR floor, 1/2 SYNC fail CFO's minimum count and 4/8 fail CIR.
+  *
+  * What is NOT measured here (must stay "unverified" in the M0 whitelist)
+  * --------------------------------------------------------------------
+@@ -85,7 +58,7 @@
+  *     payload with the 6.81 Mb/s geometry (64 chips/burst, 64 chips/symbol,
+  *     scrambler offset 1344).  stage_phr reports the decoded rate but the
+  *     demodulator never branches on it.
+- *   * Preamble lengths other than 16 and 64.  See the whitelist above.
++ *   * Hardware ranging at preamble lengths other than the frozen TWR profiles.
+  *   * First-path / ToA accuracy for ANY length.  This QA qualifies decode
+  *     (PHR / payload / FCS) only; the ranging-side accuracy claims belong to
+  *     M2/M3 with the independent MATLAB oracle that REQ-QA-01 requires.
+@@ -214,15 +187,12 @@ constexpr size_t kMaxPsdu = gr::uwb::radar_meta::kMaxPsduBytes; // 127
+ // grid (uwb_demod_core.h, demodulate_one).  Generated peaks carry a zero
+ // matched-filter value, so they must be excluded from the CFO fit.
+ constexpr size_t kCfoTailReps = 40; // max(cfo_min_fit_repetitions=32, 40)
+-// stage_cfo() hardcodes this as Qm35825Profile::cfo_skip_initial_repetitions.
+-constexpr size_t kCfoSkipStock = 24;
+ // stage_cir_softchips() bails out when cir_skip_initial_repetitions is not
+ // smaller than the number of available repetitions: this is the hard floor on
+ // sync_repetitions, measured as DemodStatus::CirFailed at 1/2/4/8/12 SYNC.
+ constexpr size_t kCirSkipInitial = 10;
+ 
+-// Measured CFO robustness boundary used by the whitelist rule: 64 SYNC tracks
+-// +-100 kHz exactly, and every length >= 128 is already broken at +-20 kHz.
++// Non-zero CFO used by the independent preamble-length boundary sweep.
+ constexpr double kCfoWhitelistHz = 20000.0;
+ 
+ const char*
+@@ -741,20 +711,8 @@ classify(Row& row)
+                       std::to_string(row.sync_repetitions) +
+                       "_ieee_802154a_cannot_express_this_length");
+     }
+-    // Rule 3 (measured): the re-measured tail must start at or before the
+-    // hardcoded cfo_skip_initial_repetitions, otherwise the synthesised peaks
+-    // (zero matched-filter value => phase 0) enter the phase fit and bias it.
+-    const size_t tail_first = row.sync_repetitions > kCfoTailReps
+-                                  ? row.sync_repetitions - kCfoTailReps
+-                                  : 0;
+-    if (tail_first > kCfoSkipStock) {
+-        why.push_back("cfo_fit_includes_" +
+-                      std::to_string(row.cfo_zero_peak_corr) +
+-                      "_zero_peak_corr_generated_peaks_because_cfo_skip_" +
+-                      std::to_string(kCfoSkipStock) + "_lt_tail_first_" +
+-                      std::to_string(tail_first) +
+-                      "_needs_cfo_skip_eq_preamble_minus_40");
+-    }
++    // CFO is now fitted directly on measured tail phases.  Synthetic leading
++    // coordinates in the exported timing grid are not a rejection criterion.
+     if (why.empty()) {
+         row.whitelist = "supported";
+         // Honest scope caveat: this QA proves DECODE robustness (PHR / payload /
+@@ -1013,7 +971,7 @@ struct Csv {
+              "capability row is KEYED on, NOT a measured native round trip.  "
+              "No first-path/ToA accuracy, no hardware and no vendor module was "
+              "measured for any row.\n"
+-             "# Rejections of 128/256/512/1024/2048 are limits of THIS build's "
++             "# Rejections of non-self-describing PHR preamble lengths are limits of this build's "
+              "software (reject_scope=current_software_implementation_limit), "
+              "not claims about the hardware: Qorvo DW1000 and DW3000 parts do "
+              "support those preamble lengths.  See reject_scope_note.\n";
+@@ -1124,8 +1082,8 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_64sync_roundtrip_twr_payloads)
+ // 2) 128-SYNC, identical payloads and channel.  This combination was previously
+ //    only verified at preamble/SFD/CIR level.  It DOES complete a full PHR +
+ //    payload + FCS round trip at zero CFO — the gap is real but narrower than
+-//    expected.  What is broken is CFO robustness (case 3) and the PHR
+-//    preamble-duration field (case 4).
++//    expected.  Case 3 now protects the corrected CFO robustness; the PHR
++//    preamble-duration field remains a separate limitation (case 4).
+ // ---------------------------------------------------------------------------
+ BOOST_AUTO_TEST_CASE(twr_phy_matrix_128sync_roundtrip_twr_payloads)
+ {
+@@ -1178,19 +1136,9 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_128sync_roundtrip_twr_payloads)
+ }
+ 
+ // ---------------------------------------------------------------------------
+-// 3) 128-SYNC CFO diagnosis.
+-//    uwb_demod_core.h demodulate_one() re-tracks only the last
+-//    tail_repetitions = max(cfo_min_fit_repetitions, 40) = 40 repetitions from
+-//    the SFD anchor and then SYNTHESISES the remaining peak coordinates from
+-//    the SFD-anchored grid.  Those synthesised peaks get peak_corr = (0,0), so
+-//    stage_cfo() sees a matched-filter phase of exactly 0 for them.
+-//    Qm35825Profile::cfo_skip_initial_repetitions is hardcoded to 24, which is
+-//    correct ONLY for 64 SYNC (where tail_first = 64 - 40 = 24).  For 128 SYNC
+-//    tail_first = 88, so 64 synthesised peaks enter the least-squares phase
+-//    fit and bias the slope.
+-//    Consequence: the CFO estimate is wrong for any non-zero offset, and the
+-//    decode already fails at +-20 kHz.  Setting the skip to
+-//    preamble_repetitions - tail_repetitions restores it exactly.
++// 3) SFD-anchored CFO regression across short and long preambles.
++// The full timing grid may contain synthetic coordinates, but the CFO refit
++// must use only the measured tail, without a caller-provided skip workaround.
+ // ---------------------------------------------------------------------------
+ BOOST_AUTO_TEST_CASE(twr_phy_matrix_128sync_cfo_cause)
+ {
+@@ -1199,116 +1147,38 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_128sync_cfo_cause)
+     cfg.code_index = 9;
+     cfg.sfd_mode = "4z2";
+     cfg.ranging = true;
+-    const std::vector<uint8_t> psdu =
+-        build_twr_psdu("Response", kTwrFrames[1].mac_bytes, true);
+-    // Worst-case payload for residual CFO phase drift across the field.  Used
+-    // to make the decode-outcome measurement deterministic instead of
+-    // payload-luck dependent.
+     const std::vector<uint8_t> stress = build_stress_psdu();
+-
+-    for (size_t reps : { size_t(64), size_t(128) }) {
+-        const size_t tail_first = reps - kCfoTailReps;
+-        for (double f : { kCfoWhitelistHz, -kCfoWhitelistHz }) {
++    for (size_t reps : {size_t(16), size_t(32), size_t(64), size_t(128), size_t(256)}) {
++        cfg.sync_repetitions = reps;
++        for (double f : {kCfoWhitelistHz, -kCfoWhitelistHz, 175000.0, -175000.0}) {
+             Channel ch = base;
+             ch.cfo_hz = f;
+-
+-            // (a) stock profile: cfo_skip_initial_repetitions = 24
+-            cfg.sync_repetitions = reps;
+             Qm35825Profile stock = Qm35825Profile::Default();
+-            const RoundTrip a =
+-                run_roundtrip(cfg, psdu, ch, stock, "cfostock_" +
+-                                                        std::to_string(reps));
+-            BOOST_REQUIRE_MESSAGE(a.channel_ok, a.reason);
+-            // Same stock profile, worst-case payload.
+-            const RoundTrip as =
+-                run_roundtrip(cfg, stress, ch, stock, "cfostock127_" +
+-                                                        std::to_string(reps));
+-            BOOST_REQUIRE_MESSAGE(as.channel_ok, as.reason);
+-
+-            size_t zero_corr = 0;
+-            for (const auto& c : a.res.timing.peak_corr)
+-                if (std::abs(c) == 0.0f)
+-                    ++zero_corr;
+-            BOOST_TEST_MESSAGE("CFO reps=" << reps << " inj=" << f
+-                                           << " stock_est="
+-                                           << f3(a.res.cfo.cfo_hz)
+-                                           << " err="
+-                                           << f3(a.res.cfo.cfo_hz - f)
+-                                           << " zero_peak_corr=" << zero_corr
+-                                           << " tail_first=" << tail_first
+-                                           << " status="
+-                                           << status_name(a.res.status)
+-                                           << " | 127B status="
+-                                           << status_name(as.res.status)
+-                                           << " fcs=" << as.res.payload.fcs_pass);
+-
+-            // (b) diagnostic only: skip the synthesised peaks.
+-            Qm35825Profile fixed = Qm35825Profile::Default();
+-            fixed.cfo_skip_initial_repetitions = tail_first;
+-            const RoundTrip b =
+-                run_roundtrip(cfg, stress, ch, fixed, "cfofix_" +
+-                                                       std::to_string(reps));
+-
+-            BOOST_CHECK_EQUAL(zero_corr, tail_first);
+-            if (reps == 64) {
+-                // tail_first == 24 == the stock skip: nothing is wrong here.
+-                BOOST_REQUIRE(a.res.status == DemodStatus::Success);
+-                BOOST_REQUIRE(a.res.payload.fcs_pass);
+-                BOOST_CHECK_CLOSE(a.res.cfo.cfo_hz, f, 0.1);
+-                BOOST_REQUIRE(as.res.status == DemodStatus::Success);
+-                BOOST_REQUIRE(as.res.payload.fcs_pass);
+-                BOOST_CHECK(as.res.payload.bytes == stress);
+-            } else {
+-                // 64 synthesised (zero) peaks leak into the 104-point fit.
+-                BOOST_CHECK_GT(zero_corr, size_t(24));
+-                // Deterministic hard fact: the estimate is badly wrong.
+-                BOOST_CHECK_GT(std::abs(a.res.cfo.cfo_hz - f), 1000.0);
+-                // Deterministic consequence on a standard-length PSDU.
+-                BOOST_CHECK(as.res.status != DemodStatus::Success);
+-                BOOST_CHECK(!as.res.payload.fcs_pass);
+-                // With the skip corrected the estimate is exact again and the
+-                // SAME frame decodes with a passing FCS.
+-                BOOST_REQUIRE(b.res.status == DemodStatus::Success);
+-                BOOST_REQUIRE(b.res.payload.fcs_pass);
+-                BOOST_CHECK_CLOSE(b.res.cfo.cfo_hz, f, 0.1);
+-                BOOST_CHECK(b.res.payload.bytes == stress);
+-                BOOST_TEST_MESSAGE("CFO reps=" << reps << " inj=" << f
+-                                               << " fixed_est="
+-                                               << f3(b.res.cfo.cfo_hz)
+-                                               << " -> diagnosis confirmed");
++            const RoundTrip rt = run_roundtrip(cfg, stress, ch, stock,
++                                               "cfo_tail_" + std::to_string(reps));
++            BOOST_TEST_CONTEXT("reps=" << reps << " cfo=" << f) {
++                BOOST_REQUIRE_MESSAGE(rt.channel_ok, rt.reason);
++                BOOST_REQUIRE(rt.res.status == DemodStatus::Success);
++                BOOST_REQUIRE(rt.res.payload.fcs_pass);
++                BOOST_CHECK(rt.res.payload.bytes == stress);
++                BOOST_CHECK_CLOSE(rt.res.cfo.cfo_hz, f, 0.1);
++                const size_t measured = std::min(reps, kCfoTailReps);
++                BOOST_CHECK_EQUAL(rt.res.cfo.peaks_used, measured);
++                BOOST_CHECK_EQUAL(rt.res.cfo.skipped_peaks, reps - measured);
++                BOOST_CHECK_EQUAL(rt.res.cfo.fit_first_peak_sample,
++                                   rt.res.timing.peak_samples[reps - measured]);
++                BOOST_CHECK_EQUAL(rt.res.cfo.fit_last_peak_sample,
++                                   rt.res.timing.peak_samples.back());
+             }
+         }
+     }
+ }
+ 
+ // ---------------------------------------------------------------------------
+-// 4) Preamble-length boundary.  Establishes the exact `sync_repetitions`
+-//    whitelist from measurement:
+-//
+-//      * 16 SYNC is SUPPORTED.  It is the only short length that is BOTH
+-//        CFO-robust and PHR self-describing:
+-//          - CFO: for reps <= cfo_min_fit_repetitions (32) the whole preamble
+-//            is re-measured, so tail_first = 0, no peak is synthesised
+-//            (cfo_zero_peak_corr = 0) and stage_cfo's
+-//            cfo_skip_initial_repetitions = 24 degenerates to an effective 0
+-//            because np(16) <= min_fit(32).  Measured error 0.0 Hz at
+-//            0/±1/±5/±20/±100 kHz.
+-//          - PHR: encode_phr19 emits preamble-duration index 0 (=16) for
+-//            reps <= 16, so a 16-SYNC frame DESCRIBES ITSELF.  Contrast 32 /
+-//            128 / 256 / 512 (all advertise 64) and 2048 (advertises 1024).
+-//      * 32 SYNC is CFO-exact but advertises 64, so it is not self-describing.
+-//      * every length above 64 has the structurally biased CFO fit measured in
+-//        twr_phy_matrix_128sync_cfo_cause (PHR also cannot describe it,
+-//        except 1024, which is PHR-legal but still CFO-biased).
+-//      * lengths at or below 12 SYNC fail in the CIR stage, because
+-//        stage_cir_softchips bails out when
+-//        cir_skip_initial_repetitions (10) >= the number of available
+-//        repetitions.  Measured status: CirFailed.
+-//
+-//    NOTE on scope: this QA measures DECODE robustness (PHR/payload/FCS).  It
+-//    does NOT measure first-path / ToA accuracy, so a 16-SYNC preamble's
+-//    shorter integration window is explicitly UNVERIFIED for ranging.  See the
+-//    reason string written into the CSV.
++// 4) Preamble-length boundary after measured-tail CFO fitting.
++// CFO robustness is tested independently of the modulator's PHR duration
++// mapping: only 16/64/1024 are self-describing among the lengths below.
++// The CIR floor and ranging/ToA qualification remain unchanged.
+ // ---------------------------------------------------------------------------
+ BOOST_AUTO_TEST_CASE(twr_phy_matrix_preamble_length_boundary)
+ {
+@@ -1444,18 +1314,9 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_preamble_length_boundary)
+         BOOST_REQUIRE_MESSAGE(o.pass0, "zero-CFO decode failed for reps="
+                                            + std::to_string(o.reps));
+         BOOST_CHECK_EQUAL(o.peaks0, o.reps);
+-        if (o.reps <= 64) {
+-            // synthesised - skipped = max(0, reps - 40 - 24) = 0, so the phase
+-            // fit sees only measured peaks and the estimate is exact.
+-            BOOST_REQUIRE(o.pass20k);
+-            BOOST_CHECK_CLOSE(o.est20k, kCfoWhitelistHz, 0.1);
+-        } else {
+-            // synthesised - skipped = reps - 64 > 0: the phase fit is biased.
+-            // The estimate error is the deterministic invariant; the decode
+-            // failure on a 127 B PSDU is deterministic too.
+-            BOOST_CHECK_GT(std::abs(o.est20k - kCfoWhitelistHz), 1000.0);
+-            BOOST_CHECK(!o.pass20k);
+-        }
++        // Tail-only CFO fitting is independent of the full preamble length.
++        BOOST_REQUIRE(o.pass20k);
++        BOOST_CHECK_CLOSE(o.est20k, kCfoWhitelistHz, 0.1);
+         // PHR self-description: only 16, 64 and 1024 are representable.
+         const bool phr_ok = (advertised == o.reps);
+         if (phr_ok)
+@@ -1463,9 +1324,9 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_preamble_length_boundary)
+     }
+ 
+     // Final whitelist for sync_repetitions: CFO-robust AND PHR-describable.
+-    // Measured result: {16, 64}.  1024 is PHR-legal but CFO-biased; 32 is
+-    // CFO-exact but advertises 64; >64 has both defects; <=12 hits the CIR
+-    // floor.
++    // Measured decode/PHR result after the CFO fix: {16, 64, 1024}.
++    // This QA evidence does not change the production TWR config whitelist.
++    // Other long lengths remain unrepresentable in the modulator's PHR.
+     for (const auto& o : obs) {
+         const bool cfo_robust = o.ran && o.pass20k;
+         const bool phr_ok = (phr_advertised_sync_symbols(o.pre_idx) == o.reps);
+@@ -1475,7 +1336,7 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_preamble_length_boundary)
+                                              << " -> "
+                                              << (whitelist ? "supported"
+                                                            : "unsupported"));
+-        if (o.reps == 16 || o.reps == 64)
++        if (o.reps == 16 || o.reps == 64 || o.reps == 1024)
+             BOOST_CHECK(whitelist);
+         else
+             BOOST_CHECK(!whitelist);
+@@ -1484,8 +1345,8 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_preamble_length_boundary)
+ 
+ // ---------------------------------------------------------------------------
+ // 4b) 16 SYNC given the same treatment as 64 SYNC.  REQ-PHY-01 suggests
+-//     starting from "code 9, 128 preamble"; the measurement says 128 is not
+-//     usable and 16/64 are.  16 SYNC is the SHORTEST usable preamble (shortest
++//     starting from "code 9, 128 preamble"; 128 still has a PHR
++//     self-description limitation even after the CFO fix.  16 SYNC is the SHORTEST usable preamble (shortest
+ //     frame => shortest TWR turnaround budget) so it must be qualified, not
+ //     assumed.
+ //
+@@ -2057,20 +1918,15 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_sweep_and_csv)
+     // Whitelist invariants the M0 config layer must encode.  These are derived
+     // from the measurements above, not assumed:
+     //   * a measured PASS whose PHR advertises its own length and whose
+-    //     synthesised-peak count is fully covered by the CFO skip must be
+-    //     classified "supported"
+-    //   * NO row above 64 SYNC may ever be classified "supported"
++    //     CFO fit uses measured phases must be classified "supported"
++    //   * long lengths whose PHR does not self-describe stay unsupported
+     //   * the config-rejected enumerations must stay "unsupported"
+     for (const auto& r : csv.rows) {
+         const bool phr_ok =
+             phr_advertised_sync_symbols(r.phr_preamble_idx) == r.sync_repetitions;
+-        const size_t tail_first = r.sync_repetitions > kCfoTailReps
+-                                      ? r.sync_repetitions - kCfoTailReps
+-                                      : 0;
+-        const bool cfo_ok = tail_first <= kCfoSkipStock;
+-        if (r.result == "PASS" && phr_ok && cfo_ok)
++        if (r.result == "PASS" && phr_ok)
+             BOOST_CHECK_EQUAL(r.whitelist, "supported");
+-        if (r.sync_repetitions > 64)
++        if (r.sync_repetitions > 64 && r.sync_repetitions != 1024)
+             BOOST_CHECK_NE(r.whitelist, "supported");
+         if (r.status == "config_rejected")
+             BOOST_CHECK_NE(r.whitelist, "supported");
+diff --git a/gr-uwb/lib/uwb_detector_sc16.cc b/gr-uwb/lib/uwb_detector_sc16.cc
+index 6e8299b..dee0b6b 100644
+--- a/gr-uwb/lib/uwb_detector_sc16.cc
++++ b/gr-uwb/lib/uwb_detector_sc16.cc
+@@ -31,7 +31,8 @@ UwbDetectorSc16::UwbDetectorSc16(
+     size_t coarse_decimation,
+     size_t coarse_repetitions,
+     size_t coarse_margin,
+-    double sample_rate)
++    double sample_rate,
++    float fine_threshold)
+     : gr::sync_block("uwb_detector_sc16",
+                      gr::io_signature::make(
+                          1, 1, sizeof(std::complex<int16_t>)),
+@@ -49,6 +50,9 @@ UwbDetectorSc16::UwbDetectorSc16(
+       d_capture_(capture),
+       d_sample_rate_(sample_rate)
+ {
++    if (!(fine_threshold > 0.0f && fine_threshold <= 1.0f))
++        throw std::invalid_argument(
++            "UwbDetectorSc16: fine_threshold must be in (0, 1]");
+     // Larger chunks -> fewer work() calls, less per-call flowgraph overhead.
+     // Buffer scan (benchmark_detector source-search / detector-sparse) knees
+     // near 512k–1M items; 64k was a hard self-cap that kept GR work() in the
+@@ -60,6 +64,7 @@ UwbDetectorSc16::UwbDetectorSc16(
+     vcfg.coarse_decimation = coarse_decimation;
+     vcfg.coarse_repetitions = coarse_repetitions;
+     vcfg.coarse_margin = coarse_margin;
++    vcfg.fine_threshold = fine_threshold;
+     d_verifier_.configure(known_preamble, vcfg);
+     const size_t region_prebuffer =
+         pre_trigger + 32 * energy_gate_decimation + known_preamble.size();
+@@ -79,12 +84,13 @@ UwbDetectorSc16::make(const std::vector<std::complex<float>>& known_preamble,
+                   size_t coarse_decimation,
+                   size_t coarse_repetitions,
+                   size_t coarse_margin,
+-                  double sample_rate)
++                  double sample_rate,
++                  float fine_threshold)
+ {
+     return gnuradio::get_initial_sptr(new UwbDetectorSc16(
+         known_preamble, pre_trigger, capture, energy_threshold,
+         energy_gate_decimation, coarse_decimation, coarse_repetitions,
+-        coarse_margin, sample_rate));
++        coarse_margin, sample_rate, fine_threshold));
+ }
+ 
+ std::shared_ptr<UwbDetectorSc16>
+@@ -96,7 +102,8 @@ UwbDetectorSc16::make_from_file(const std::string& template_file,
+                             size_t coarse_decimation,
+                             size_t coarse_repetitions,
+                             size_t coarse_margin,
+-                            double sample_rate)
++                            double sample_rate,
++                            float fine_threshold)
+ {
+     std::ifstream f(template_file, std::ios::binary);
+     if (!f) {
+@@ -114,7 +121,7 @@ UwbDetectorSc16::make_from_file(const std::string& template_file,
+     f.read(reinterpret_cast<char*>(tmpl.data()), bytes);
+     return make(tmpl, pre_trigger, capture, energy_threshold,
+                 energy_gate_decimation, coarse_decimation, coarse_repetitions,
+-                coarse_margin, sample_rate);
++                coarse_margin, sample_rate, fine_threshold);
+ }
+ 
+ size_t UwbDetectorSc16::pre_trigger() const { return d_pre_trigger_; }
+@@ -360,7 +367,7 @@ void UwbDetectorSc16::publish_packet(const UwbDetectorStateMachineSc16::Region&
+     meta = pmt::dict_add(meta, pmt::mp("start_backtracked_symbols"),
+                          pmt::from_long(static_cast<long>(backtracked_symbols)));
+     meta = pmt::dict_add(meta, pmt::mp("threshold"),
+-                         pmt::from_double(defaults::kDetectorFineThreshold));
++                         pmt::from_double(d_verifier_.config().fine_threshold));
+     meta = pmt::dict_add(meta, pmt::mp("pre_trigger_samples"),
+                          pmt::from_long(static_cast<long>(d_pre_trigger_)));
+     meta = pmt::dict_add(meta, pmt::mp("sample_format"), pmt::mp("sc16"));
+diff --git a/gr-uwb/lib/uwb_uhd_sc16_pipeline.cc b/gr-uwb/lib/uwb_uhd_sc16_pipeline.cc
+index 2041a55..9b28fc1 100644
+--- a/gr-uwb/lib/uwb_uhd_sc16_pipeline.cc
++++ b/gr-uwb/lib/uwb_uhd_sc16_pipeline.cc
+@@ -586,10 +586,20 @@ bool UhdDeviceSc16Source::open()
+         if (!cfg_.uhd_time_source.empty()) {
+             impl_->usrp->set_time_source(cfg_.uhd_time_source);
+         }
+-        impl_->usrp->set_rx_rate(cfg_.native_rate);
+-        actual_rate_ = impl_->usrp->get_rx_rate();
+-        impl_->usrp->set_rx_freq(cfg_.uhd_center_freq);
+-        impl_->usrp->set_rx_gain(cfg_.uhd_gain);
++        const size_t channel = cfg_.uhd_channel.empty()
++            ? 0 : static_cast<size_t>(std::stoul(cfg_.uhd_channel));
++        impl_->usrp->set_rx_rate(cfg_.native_rate, channel);
++        actual_rate_ = impl_->usrp->get_rx_rate(channel);
++        impl_->usrp->set_rx_freq(cfg_.uhd_center_freq, channel);
++        impl_->usrp->set_rx_gain(cfg_.uhd_gain, channel);
++        if (!cfg_.uhd_antenna.empty()) {
++            impl_->usrp->set_rx_antenna(cfg_.uhd_antenna, channel);
++        }
++        std::cerr << "UHD RX configured: channel=" << channel
++                  << " antenna=" << impl_->usrp->get_rx_antenna(channel)
++                  << " rate=" << actual_rate_
++                  << " frequency=" << impl_->usrp->get_rx_freq(channel)
++                  << " gain=" << impl_->usrp->get_rx_gain(channel) << std::endl;
+ 
+         uhd::stream_args_t stream_args("sc16", "sc16");
+         if (!cfg_.uhd_channel.empty()) {
+diff --git a/gr-uwb/python/uwb/bindings/python_bindings.cc b/gr-uwb/python/uwb/bindings/python_bindings.cc
+index 827121f..223b3d1 100644
+--- a/gr-uwb/python/uwb/bindings/python_bindings.cc
++++ b/gr-uwb/python/uwb/bindings/python_bindings.cc
+@@ -183,8 +183,9 @@ void bind_detector_sc16(py::module& m)
+     using gr::uwb::defaults::kDetectorCoarseMargin;
+     using gr::uwb::defaults::kDetectorCoarseRepetitions;
+     using gr::uwb::defaults::kDetectorEnergyGateDecimation;
+-    using gr::uwb::defaults::kDetectorEnergyThreshold;
+     using gr::uwb::defaults::kDetectorPreTrigger;
++    using gr::uwb::defaults::kDetectorSc16EnergyThreshold;
++    using gr::uwb::defaults::kDetectorSc16FineThreshold;
+     using gr::uwb::defaults::kSampleRateHz;
+ 
+     py::class_<gr::uwb::UwbDetectorSc16,
+@@ -194,23 +195,25 @@ void bind_detector_sc16(py::module& m)
+              py::arg("known_preamble"),
+              py::arg("pre_trigger") = kDetectorPreTrigger,
+              py::arg("capture") = kDetectorCapture,
+-             py::arg("energy_threshold") = kDetectorEnergyThreshold,
++             py::arg("energy_threshold") = kDetectorSc16EnergyThreshold,
+              py::arg("energy_gate_decimation") = kDetectorEnergyGateDecimation,
+              py::arg("coarse_decimation") = kDetectorCoarseDecimation,
+              py::arg("coarse_repetitions") = kDetectorCoarseRepetitions,
+              py::arg("coarse_margin") = kDetectorCoarseMargin,
+-             py::arg("sample_rate") = kSampleRateHz)
++             py::arg("sample_rate") = kSampleRateHz,
++             py::arg("fine_threshold") = kDetectorSc16FineThreshold)
+         .def_static("make_from_file", &gr::uwb::UwbDetectorSc16::make_from_file,
+                     py::arg("template_file"),
+                     py::arg("pre_trigger") = kDetectorPreTrigger,
+                     py::arg("capture") = kDetectorCapture,
+-                    py::arg("energy_threshold") = kDetectorEnergyThreshold,
++                    py::arg("energy_threshold") = kDetectorSc16EnergyThreshold,
+                     py::arg("energy_gate_decimation") =
+                         kDetectorEnergyGateDecimation,
+                     py::arg("coarse_decimation") = kDetectorCoarseDecimation,
+                     py::arg("coarse_repetitions") = kDetectorCoarseRepetitions,
+                     py::arg("coarse_margin") = kDetectorCoarseMargin,
+-                    py::arg("sample_rate") = kSampleRateHz)
++                    py::arg("sample_rate") = kSampleRateHz,
++                     py::arg("fine_threshold") = kDetectorSc16FineThreshold)
+         .def("sample_rate", &gr::uwb::UwbDetectorSc16::sample_rate)
+         .def("set_sample_rate",
+              &gr::uwb::UwbDetectorSc16::set_sample_rate,

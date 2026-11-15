@@ -26,53 +26,26 @@
  * file (crc16_802154_ref), never by the library under test, so "observed FCS"
  * is not the library grading its own homework (REQ-QA-01).
  *
- * Prior state of the art in this repo
- * ----------------------------------
- *   * 64 SYNC: full PHR/FCS golden (testdata/realtime_demod_golden, 127 B PSDU,
- *     FCS 0x584b) — qa_uwb_demod_core.cc::test_demod_core_r4_payload_fcs_matches_golden
- *   * 32/64/128 SYNC: preamble/SFD/CIR only, via UwbRadarPacketSource +
- *     UwbRadarCirEstimator, which do NOT decode PHR/payload/FCS —
- *     qa_uwb_radar_e2e.cc::e2e_sync_repetitions
- * => 128 SYNC was NOT verified at PHR/payload/FCS level.  This QA closes that
- *    gap and finds that 128 SYNC decodes at zero CFO but its CFO estimate is
- *    badly wrong under this build's CFO fit (see
- *    twr_phy_matrix_128sync_cfo_cause).
+ * CFO FIX UPDATE (2026-11-15): the historical CFO limitation below is fixed.
+ * The refit now consumes measured tail phases directly.  The boundary QA
+ * remeasures decode/PHR capability, including 1024 SYNC; this does not expand
+ * the production TWR configuration whitelist or establish hardware ranging.
  *
- * sync_repetitions whitelist (measured, see the boundary test)
- * ----------------------------------------------------------
- *   16  SUPPORTED.  Only length that is both CFO-robust and PHR
- *       self-describing at the short end.  encode_phr19 emits
- *       preamble-duration index 0 (=16) for reps <= 16, so the frame
- *       describes itself; and because 16 <= cfo_min_fit_repetitions(32) the
- *       whole preamble is re-measured, so no synthesised zero-phase peak can
- *       enter the phase fit.  Measured CFO error 0.0 Hz at
- *       0/±1/±5/±20/±100 kHz, byte-exact FCS pass on 16/26/31/127 B PSDU for
- *       code 9..12 x all six SFD modes, and integer / fractional delay,
- *       2-/3-tap multipath and AWGN sigma 0.05 / 0.15.  Also the SHORTEST
- *       usable preamble, i.e. the shortest frame for the TWR turnaround
- *       budget.  Its first-path / ToA accuracy is NOT measured here and stays
- *       unverified.
- *   64  SUPPORTED.  The reference profile.
- *   32  excluded: CFO-exact, but advertises preamble duration 64.
- *   128 / 256 / 512 / 1024 / 2048  excluded BY THIS BUILD'S SOFTWARE ONLY.
- *       The measured cause is the CFO fit: uwb_demod_core.h re-measures only
- *       the last max(cfo_min_fit_repetitions, 40) SYNCs while
- *       cfo_skip_initial_repetitions stays 24, so synthesised zero-phase peaks
- *       enter the phase fit (measured -16.2 kHz error at 128 SYNC, growing
- *       with length).  On top of that mod::encode_phr19 maps the length onto
- *       the 4-value preamble-duration index, so the PHR does not self-describe
- *       (1024 excepted, and it is still CFO-biased).
- *       This is emphatically NOT a claim about the hardware: Qorvo DW1000 and
- *       DW3000 parts DO support 128 / 256 / 512 / 1024 preamble lengths
- *       (DW1000 API Guide v2.7 §5.12 `txPreambLength`; DW3xxx API Guide PDF
- *       pp. 32-34, whose preamble enumeration includes 128 / 256 / 512 as
- *       non-standard preamble lengths).  Lifting these lengths is a decoder /
- *       encoder change plus a re-measure, not a capability discovery, and the
- *       rejection is recorded as reject_scope=current_software_-
- *       implementation_limit so it can never harden into a hardware verdict.
- *   1 / 2  excluded: stage_cfo needs at least 4 measured peaks.
- *   4 / 8  excluded: stage_cir_softchips requires more than
- *       cir_skip_initial_repetitions (10) repetitions.
+ * Current decode boundary after the CFO fix
+ * ----------------------------------------
+ * The final CFO fit consumes measured tail phases for every preamble length.
+ * Synthetic leading timing coordinates are still exported for CIR/timing but
+ * do not enter carrier estimation.  The regression below exercises 16/32/64/
+ * 128/256 SYNC at positive and negative offsets without a skip workaround.
+ * The independent boundary sweep also checks 512/1024/2048 SYNC.
+ *
+ * Full PHR/FCS work-grid decode plus PHR self-description is measured here
+ * for 16, 64 and 1024 SYNC.  This is QA evidence only: production TWR config
+ * whitelists and ranging qualification are not expanded by this change.
+ * The modulator still advertises 64 for 32/128/256/512 and 1024 for 2048;
+ * these lengths remain excluded from self-describing TX/RX qualification.
+ * This is a software limitation, not a hardware-capability claim.
+ * Below the CIR floor, 1/2 SYNC fail CFO's minimum count and 4/8 fail CIR.
  *
  * What is NOT measured here (must stay "unverified" in the M0 whitelist)
  * --------------------------------------------------------------------
@@ -85,7 +58,7 @@
  *     payload with the 6.81 Mb/s geometry (64 chips/burst, 64 chips/symbol,
  *     scrambler offset 1344).  stage_phr reports the decoded rate but the
  *     demodulator never branches on it.
- *   * Preamble lengths other than 16 and 64.  See the whitelist above.
+ *   * Hardware ranging at preamble lengths other than the frozen TWR profiles.
  *   * First-path / ToA accuracy for ANY length.  This QA qualifies decode
  *     (PHR / payload / FCS) only; the ranging-side accuracy claims belong to
  *     M2/M3 with the independent MATLAB oracle that REQ-QA-01 requires.
@@ -214,15 +187,12 @@ constexpr size_t kMaxPsdu = gr::uwb::radar_meta::kMaxPsduBytes; // 127
 // grid (uwb_demod_core.h, demodulate_one).  Generated peaks carry a zero
 // matched-filter value, so they must be excluded from the CFO fit.
 constexpr size_t kCfoTailReps = 40; // max(cfo_min_fit_repetitions=32, 40)
-// stage_cfo() hardcodes this as Qm35825Profile::cfo_skip_initial_repetitions.
-constexpr size_t kCfoSkipStock = 24;
 // stage_cir_softchips() bails out when cir_skip_initial_repetitions is not
 // smaller than the number of available repetitions: this is the hard floor on
 // sync_repetitions, measured as DemodStatus::CirFailed at 1/2/4/8/12 SYNC.
 constexpr size_t kCirSkipInitial = 10;
 
-// Measured CFO robustness boundary used by the whitelist rule: 64 SYNC tracks
-// +-100 kHz exactly, and every length >= 128 is already broken at +-20 kHz.
+// Non-zero CFO used by the independent preamble-length boundary sweep.
 constexpr double kCfoWhitelistHz = 20000.0;
 
 const char*
@@ -741,20 +711,8 @@ classify(Row& row)
                       std::to_string(row.sync_repetitions) +
                       "_ieee_802154a_cannot_express_this_length");
     }
-    // Rule 3 (measured): the re-measured tail must start at or before the
-    // hardcoded cfo_skip_initial_repetitions, otherwise the synthesised peaks
-    // (zero matched-filter value => phase 0) enter the phase fit and bias it.
-    const size_t tail_first = row.sync_repetitions > kCfoTailReps
-                                  ? row.sync_repetitions - kCfoTailReps
-                                  : 0;
-    if (tail_first > kCfoSkipStock) {
-        why.push_back("cfo_fit_includes_" +
-                      std::to_string(row.cfo_zero_peak_corr) +
-                      "_zero_peak_corr_generated_peaks_because_cfo_skip_" +
-                      std::to_string(kCfoSkipStock) + "_lt_tail_first_" +
-                      std::to_string(tail_first) +
-                      "_needs_cfo_skip_eq_preamble_minus_40");
-    }
+    // CFO is now fitted directly on measured tail phases.  Synthetic leading
+    // coordinates in the exported timing grid are not a rejection criterion.
     if (why.empty()) {
         row.whitelist = "supported";
         // Honest scope caveat: this QA proves DECODE robustness (PHR / payload /
@@ -1013,7 +971,7 @@ struct Csv {
              "capability row is KEYED on, NOT a measured native round trip.  "
              "No first-path/ToA accuracy, no hardware and no vendor module was "
              "measured for any row.\n"
-             "# Rejections of 128/256/512/1024/2048 are limits of THIS build's "
+             "# Rejections of non-self-describing PHR preamble lengths are limits of this build's "
              "software (reject_scope=current_software_implementation_limit), "
              "not claims about the hardware: Qorvo DW1000 and DW3000 parts do "
              "support those preamble lengths.  See reject_scope_note.\n";
@@ -1124,8 +1082,8 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_64sync_roundtrip_twr_payloads)
 // 2) 128-SYNC, identical payloads and channel.  This combination was previously
 //    only verified at preamble/SFD/CIR level.  It DOES complete a full PHR +
 //    payload + FCS round trip at zero CFO — the gap is real but narrower than
-//    expected.  What is broken is CFO robustness (case 3) and the PHR
-//    preamble-duration field (case 4).
+//    expected.  Case 3 now protects the corrected CFO robustness; the PHR
+//    preamble-duration field remains a separate limitation (case 4).
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(twr_phy_matrix_128sync_roundtrip_twr_payloads)
 {
@@ -1178,19 +1136,9 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_128sync_roundtrip_twr_payloads)
 }
 
 // ---------------------------------------------------------------------------
-// 3) 128-SYNC CFO diagnosis.
-//    uwb_demod_core.h demodulate_one() re-tracks only the last
-//    tail_repetitions = max(cfo_min_fit_repetitions, 40) = 40 repetitions from
-//    the SFD anchor and then SYNTHESISES the remaining peak coordinates from
-//    the SFD-anchored grid.  Those synthesised peaks get peak_corr = (0,0), so
-//    stage_cfo() sees a matched-filter phase of exactly 0 for them.
-//    Qm35825Profile::cfo_skip_initial_repetitions is hardcoded to 24, which is
-//    correct ONLY for 64 SYNC (where tail_first = 64 - 40 = 24).  For 128 SYNC
-//    tail_first = 88, so 64 synthesised peaks enter the least-squares phase
-//    fit and bias the slope.
-//    Consequence: the CFO estimate is wrong for any non-zero offset, and the
-//    decode already fails at +-20 kHz.  Setting the skip to
-//    preamble_repetitions - tail_repetitions restores it exactly.
+// 3) SFD-anchored CFO regression across short and long preambles.
+// The full timing grid may contain synthetic coordinates, but the CFO refit
+// must use only the measured tail, without a caller-provided skip workaround.
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(twr_phy_matrix_128sync_cfo_cause)
 {
@@ -1199,116 +1147,38 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_128sync_cfo_cause)
     cfg.code_index = 9;
     cfg.sfd_mode = "4z2";
     cfg.ranging = true;
-    const std::vector<uint8_t> psdu =
-        build_twr_psdu("Response", kTwrFrames[1].mac_bytes, true);
-    // Worst-case payload for residual CFO phase drift across the field.  Used
-    // to make the decode-outcome measurement deterministic instead of
-    // payload-luck dependent.
     const std::vector<uint8_t> stress = build_stress_psdu();
-
-    for (size_t reps : { size_t(64), size_t(128) }) {
-        const size_t tail_first = reps - kCfoTailReps;
-        for (double f : { kCfoWhitelistHz, -kCfoWhitelistHz }) {
+    for (size_t reps : {size_t(16), size_t(32), size_t(64), size_t(128), size_t(256)}) {
+        cfg.sync_repetitions = reps;
+        for (double f : {kCfoWhitelistHz, -kCfoWhitelistHz, 175000.0, -175000.0}) {
             Channel ch = base;
             ch.cfo_hz = f;
-
-            // (a) stock profile: cfo_skip_initial_repetitions = 24
-            cfg.sync_repetitions = reps;
             Qm35825Profile stock = Qm35825Profile::Default();
-            const RoundTrip a =
-                run_roundtrip(cfg, psdu, ch, stock, "cfostock_" +
-                                                        std::to_string(reps));
-            BOOST_REQUIRE_MESSAGE(a.channel_ok, a.reason);
-            // Same stock profile, worst-case payload.
-            const RoundTrip as =
-                run_roundtrip(cfg, stress, ch, stock, "cfostock127_" +
-                                                        std::to_string(reps));
-            BOOST_REQUIRE_MESSAGE(as.channel_ok, as.reason);
-
-            size_t zero_corr = 0;
-            for (const auto& c : a.res.timing.peak_corr)
-                if (std::abs(c) == 0.0f)
-                    ++zero_corr;
-            BOOST_TEST_MESSAGE("CFO reps=" << reps << " inj=" << f
-                                           << " stock_est="
-                                           << f3(a.res.cfo.cfo_hz)
-                                           << " err="
-                                           << f3(a.res.cfo.cfo_hz - f)
-                                           << " zero_peak_corr=" << zero_corr
-                                           << " tail_first=" << tail_first
-                                           << " status="
-                                           << status_name(a.res.status)
-                                           << " | 127B status="
-                                           << status_name(as.res.status)
-                                           << " fcs=" << as.res.payload.fcs_pass);
-
-            // (b) diagnostic only: skip the synthesised peaks.
-            Qm35825Profile fixed = Qm35825Profile::Default();
-            fixed.cfo_skip_initial_repetitions = tail_first;
-            const RoundTrip b =
-                run_roundtrip(cfg, stress, ch, fixed, "cfofix_" +
-                                                       std::to_string(reps));
-
-            BOOST_CHECK_EQUAL(zero_corr, tail_first);
-            if (reps == 64) {
-                // tail_first == 24 == the stock skip: nothing is wrong here.
-                BOOST_REQUIRE(a.res.status == DemodStatus::Success);
-                BOOST_REQUIRE(a.res.payload.fcs_pass);
-                BOOST_CHECK_CLOSE(a.res.cfo.cfo_hz, f, 0.1);
-                BOOST_REQUIRE(as.res.status == DemodStatus::Success);
-                BOOST_REQUIRE(as.res.payload.fcs_pass);
-                BOOST_CHECK(as.res.payload.bytes == stress);
-            } else {
-                // 64 synthesised (zero) peaks leak into the 104-point fit.
-                BOOST_CHECK_GT(zero_corr, size_t(24));
-                // Deterministic hard fact: the estimate is badly wrong.
-                BOOST_CHECK_GT(std::abs(a.res.cfo.cfo_hz - f), 1000.0);
-                // Deterministic consequence on a standard-length PSDU.
-                BOOST_CHECK(as.res.status != DemodStatus::Success);
-                BOOST_CHECK(!as.res.payload.fcs_pass);
-                // With the skip corrected the estimate is exact again and the
-                // SAME frame decodes with a passing FCS.
-                BOOST_REQUIRE(b.res.status == DemodStatus::Success);
-                BOOST_REQUIRE(b.res.payload.fcs_pass);
-                BOOST_CHECK_CLOSE(b.res.cfo.cfo_hz, f, 0.1);
-                BOOST_CHECK(b.res.payload.bytes == stress);
-                BOOST_TEST_MESSAGE("CFO reps=" << reps << " inj=" << f
-                                               << " fixed_est="
-                                               << f3(b.res.cfo.cfo_hz)
-                                               << " -> diagnosis confirmed");
+            const RoundTrip rt = run_roundtrip(cfg, stress, ch, stock,
+                                               "cfo_tail_" + std::to_string(reps));
+            BOOST_TEST_CONTEXT("reps=" << reps << " cfo=" << f) {
+                BOOST_REQUIRE_MESSAGE(rt.channel_ok, rt.reason);
+                BOOST_REQUIRE(rt.res.status == DemodStatus::Success);
+                BOOST_REQUIRE(rt.res.payload.fcs_pass);
+                BOOST_CHECK(rt.res.payload.bytes == stress);
+                BOOST_CHECK_CLOSE(rt.res.cfo.cfo_hz, f, 0.1);
+                const size_t measured = std::min(reps, kCfoTailReps);
+                BOOST_CHECK_EQUAL(rt.res.cfo.peaks_used, measured);
+                BOOST_CHECK_EQUAL(rt.res.cfo.skipped_peaks, reps - measured);
+                BOOST_CHECK_EQUAL(rt.res.cfo.fit_first_peak_sample,
+                                   rt.res.timing.peak_samples[reps - measured]);
+                BOOST_CHECK_EQUAL(rt.res.cfo.fit_last_peak_sample,
+                                   rt.res.timing.peak_samples.back());
             }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// 4) Preamble-length boundary.  Establishes the exact `sync_repetitions`
-//    whitelist from measurement:
-//
-//      * 16 SYNC is SUPPORTED.  It is the only short length that is BOTH
-//        CFO-robust and PHR self-describing:
-//          - CFO: for reps <= cfo_min_fit_repetitions (32) the whole preamble
-//            is re-measured, so tail_first = 0, no peak is synthesised
-//            (cfo_zero_peak_corr = 0) and stage_cfo's
-//            cfo_skip_initial_repetitions = 24 degenerates to an effective 0
-//            because np(16) <= min_fit(32).  Measured error 0.0 Hz at
-//            0/±1/±5/±20/±100 kHz.
-//          - PHR: encode_phr19 emits preamble-duration index 0 (=16) for
-//            reps <= 16, so a 16-SYNC frame DESCRIBES ITSELF.  Contrast 32 /
-//            128 / 256 / 512 (all advertise 64) and 2048 (advertises 1024).
-//      * 32 SYNC is CFO-exact but advertises 64, so it is not self-describing.
-//      * every length above 64 has the structurally biased CFO fit measured in
-//        twr_phy_matrix_128sync_cfo_cause (PHR also cannot describe it,
-//        except 1024, which is PHR-legal but still CFO-biased).
-//      * lengths at or below 12 SYNC fail in the CIR stage, because
-//        stage_cir_softchips bails out when
-//        cir_skip_initial_repetitions (10) >= the number of available
-//        repetitions.  Measured status: CirFailed.
-//
-//    NOTE on scope: this QA measures DECODE robustness (PHR/payload/FCS).  It
-//    does NOT measure first-path / ToA accuracy, so a 16-SYNC preamble's
-//    shorter integration window is explicitly UNVERIFIED for ranging.  See the
-//    reason string written into the CSV.
+// 4) Preamble-length boundary after measured-tail CFO fitting.
+// CFO robustness is tested independently of the modulator's PHR duration
+// mapping: only 16/64/1024 are self-describing among the lengths below.
+// The CIR floor and ranging/ToA qualification remain unchanged.
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(twr_phy_matrix_preamble_length_boundary)
 {
@@ -1444,18 +1314,9 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_preamble_length_boundary)
         BOOST_REQUIRE_MESSAGE(o.pass0, "zero-CFO decode failed for reps="
                                            + std::to_string(o.reps));
         BOOST_CHECK_EQUAL(o.peaks0, o.reps);
-        if (o.reps <= 64) {
-            // synthesised - skipped = max(0, reps - 40 - 24) = 0, so the phase
-            // fit sees only measured peaks and the estimate is exact.
-            BOOST_REQUIRE(o.pass20k);
-            BOOST_CHECK_CLOSE(o.est20k, kCfoWhitelistHz, 0.1);
-        } else {
-            // synthesised - skipped = reps - 64 > 0: the phase fit is biased.
-            // The estimate error is the deterministic invariant; the decode
-            // failure on a 127 B PSDU is deterministic too.
-            BOOST_CHECK_GT(std::abs(o.est20k - kCfoWhitelistHz), 1000.0);
-            BOOST_CHECK(!o.pass20k);
-        }
+        // Tail-only CFO fitting is independent of the full preamble length.
+        BOOST_REQUIRE(o.pass20k);
+        BOOST_CHECK_CLOSE(o.est20k, kCfoWhitelistHz, 0.1);
         // PHR self-description: only 16, 64 and 1024 are representable.
         const bool phr_ok = (advertised == o.reps);
         if (phr_ok)
@@ -1463,9 +1324,9 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_preamble_length_boundary)
     }
 
     // Final whitelist for sync_repetitions: CFO-robust AND PHR-describable.
-    // Measured result: {16, 64}.  1024 is PHR-legal but CFO-biased; 32 is
-    // CFO-exact but advertises 64; >64 has both defects; <=12 hits the CIR
-    // floor.
+    // Measured decode/PHR result after the CFO fix: {16, 64, 1024}.
+    // This QA evidence does not change the production TWR config whitelist.
+    // Other long lengths remain unrepresentable in the modulator's PHR.
     for (const auto& o : obs) {
         const bool cfo_robust = o.ran && o.pass20k;
         const bool phr_ok = (phr_advertised_sync_symbols(o.pre_idx) == o.reps);
@@ -1475,7 +1336,7 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_preamble_length_boundary)
                                              << " -> "
                                              << (whitelist ? "supported"
                                                            : "unsupported"));
-        if (o.reps == 16 || o.reps == 64)
+        if (o.reps == 16 || o.reps == 64 || o.reps == 1024)
             BOOST_CHECK(whitelist);
         else
             BOOST_CHECK(!whitelist);
@@ -1484,8 +1345,8 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_preamble_length_boundary)
 
 // ---------------------------------------------------------------------------
 // 4b) 16 SYNC given the same treatment as 64 SYNC.  REQ-PHY-01 suggests
-//     starting from "code 9, 128 preamble"; the measurement says 128 is not
-//     usable and 16/64 are.  16 SYNC is the SHORTEST usable preamble (shortest
+//     starting from "code 9, 128 preamble"; 128 still has a PHR
+//     self-description limitation even after the CFO fix.  16 SYNC is the SHORTEST usable preamble (shortest
 //     frame => shortest TWR turnaround budget) so it must be qualified, not
 //     assumed.
 //
@@ -2057,20 +1918,15 @@ BOOST_AUTO_TEST_CASE(twr_phy_matrix_sweep_and_csv)
     // Whitelist invariants the M0 config layer must encode.  These are derived
     // from the measurements above, not assumed:
     //   * a measured PASS whose PHR advertises its own length and whose
-    //     synthesised-peak count is fully covered by the CFO skip must be
-    //     classified "supported"
-    //   * NO row above 64 SYNC may ever be classified "supported"
+    //     CFO fit uses measured phases must be classified "supported"
+    //   * long lengths whose PHR does not self-describe stay unsupported
     //   * the config-rejected enumerations must stay "unsupported"
     for (const auto& r : csv.rows) {
         const bool phr_ok =
             phr_advertised_sync_symbols(r.phr_preamble_idx) == r.sync_repetitions;
-        const size_t tail_first = r.sync_repetitions > kCfoTailReps
-                                      ? r.sync_repetitions - kCfoTailReps
-                                      : 0;
-        const bool cfo_ok = tail_first <= kCfoSkipStock;
-        if (r.result == "PASS" && phr_ok && cfo_ok)
+        if (r.result == "PASS" && phr_ok)
             BOOST_CHECK_EQUAL(r.whitelist, "supported");
-        if (r.sync_repetitions > 64)
+        if (r.sync_repetitions > 64 && r.sync_repetitions != 1024)
             BOOST_CHECK_NE(r.whitelist, "supported");
         if (r.status == "config_rejected")
             BOOST_CHECK_NE(r.whitelist, "supported");

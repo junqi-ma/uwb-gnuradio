@@ -586,10 +586,20 @@ bool UhdDeviceSc16Source::open()
         if (!cfg_.uhd_time_source.empty()) {
             impl_->usrp->set_time_source(cfg_.uhd_time_source);
         }
-        impl_->usrp->set_rx_rate(cfg_.native_rate);
-        actual_rate_ = impl_->usrp->get_rx_rate();
-        impl_->usrp->set_rx_freq(cfg_.uhd_center_freq);
-        impl_->usrp->set_rx_gain(cfg_.uhd_gain);
+        const size_t channel = cfg_.uhd_channel.empty()
+            ? 0 : static_cast<size_t>(std::stoul(cfg_.uhd_channel));
+        impl_->usrp->set_rx_rate(cfg_.native_rate, channel);
+        actual_rate_ = impl_->usrp->get_rx_rate(channel);
+        impl_->usrp->set_rx_freq(cfg_.uhd_center_freq, channel);
+        impl_->usrp->set_rx_gain(cfg_.uhd_gain, channel);
+        if (!cfg_.uhd_antenna.empty()) {
+            impl_->usrp->set_rx_antenna(cfg_.uhd_antenna, channel);
+        }
+        std::cerr << "UHD RX configured: channel=" << channel
+                  << " antenna=" << impl_->usrp->get_rx_antenna(channel)
+                  << " rate=" << actual_rate_
+                  << " frequency=" << impl_->usrp->get_rx_freq(channel)
+                  << " gain=" << impl_->usrp->get_rx_gain(channel) << std::endl;
 
         uhd::stream_args_t stream_args("sc16", "sc16");
         if (!cfg_.uhd_channel.empty()) {

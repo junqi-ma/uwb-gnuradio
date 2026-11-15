@@ -3413,8 +3413,18 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         }
 
         const auto sfd_cfo_t0 = std::chrono::steady_clock::now();
+        // Only the tail has measured correlation phases.  The reconstructed
+        // full-frame grid above contains zero placeholders for earlier SYNCs
+        // and is for downstream timing/CIR, not carrier estimation.  Startup
+        // exclusion belongs to the initial acquisition fit; this SFD-anchored
+        // tail is already the selected stable training interval.
+        Qm35825Profile tail_fit_profile = profile;
+        tail_fit_profile.cfo_skip_initial_repetitions = 0;
         const bool cfo_fit_ok =
-            fit_cfo(rx, n, profile, cfo_timing, res.cfo, scratch);
+            fit_cfo(rx, n, tail_fit_profile, tail_timing, res.cfo, scratch);
+        // Keep diagnostics in full-preamble coordinates, as before.
+        if (cfo_fit_ok)
+            res.cfo.skipped_peaks += tail_first;
         res.stage_cfo_fit_us += res.cfo.fit_us;
         res.stage_sfd_cfo_refit_us += static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(

@@ -69,6 +69,8 @@ struct Qm35825Profile {
     // Match MATLAB compensateCarrierOffset: discard the startup transient in
     // at most the first 24 SYNCs, while retaining at least 32 phase samples.
     // This is intentionally separate from the CIR skip policy above.
+    // Applies to the initial acquisition fit.  The SFD-anchored refit uses
+    // all measured tail peaks directly, independent of preamble length.
     size_t cfo_skip_initial_repetitions = 24;
     size_t cfo_min_fit_repetitions = 32;
     // Sparse RAKE policy: 0 keeps the full CIR matched filter; otherwise use

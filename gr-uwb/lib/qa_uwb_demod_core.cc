@@ -2444,3 +2444,65 @@ BOOST_AUTO_TEST_CASE(test_demod_core_tail_reuse_equivalence_and_fallback)
     BOOST_CHECK_EQUAL(res_fb.timing.detected_peaks, size_t(64));
     BOOST_CHECK_SMALL(std::abs(res_fb.cfo.cfo_hz - res_legacy.cfo.cfo_hz), 25.0);
 }
+
+BOOST_AUTO_TEST_CASE(test_demod_core_sfd_tail_cfo_uses_only_measured_peaks)
+{
+    // Keep the golden SFD/PHR/payload and vary only the SYNC train length.
+    // The full-frame timing grid deliberately still contains zero placeholders;
+    // those placeholders must never participate in the final CFO phase fit.
+    std::vector<gr_complex> golden;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", golden));
+    const auto tmpl = load_reference_template();
+    constexpr size_t start = 9984;
+    constexpr size_t sym = kQm35SamplesPerSymbol;
+    constexpr size_t original_reps = 64;
+    const size_t sfd = start + original_reps * sym;
+    BOOST_REQUIRE_GT(golden.size(), sfd);
+    const std::vector<gr_complex> stable_symbol(
+        golden.begin() + sfd - sym, golden.begin() + sfd);
+
+    for (size_t reps : {size_t(16), size_t(32), size_t(64), size_t(128), size_t(256)}) {
+        std::vector<gr_complex> base(golden.begin(), golden.begin() + start);
+        if (reps > original_reps) {
+            for (size_t k = original_reps; k < reps; ++k)
+                base.insert(base.end(), stable_symbol.begin(), stable_symbol.end());
+            base.insert(base.end(), golden.begin() + start, golden.end());
+        } else {
+            base.insert(base.end(), golden.begin() + sfd - reps * sym, golden.end());
+        }
+        for (double hz : {0.0, -25000.0, 25000.0, -175000.0, 175000.0}) {
+            std::vector<gr_complex> rx(base.size());
+            for (size_t k = 0; k < base.size(); ++k) {
+                const double phase = 2.0 * M_PI * hz * k / kQm35SampleRate;
+                rx[k] = base[k] * gr_complex(std::cos(phase), std::sin(phase));
+            }
+            // Exercise both explicit tail re-tracking and the peak-reuse path.
+            for (bool reuse : {false, true}) {
+                BOOST_TEST_CONTEXT("reps=" << reps << " hz=" << hz << " reuse=" << reuse) {
+                    auto p = Qm35825Profile::Default();
+                    p.preamble_repetitions = reps;
+                    p.cir_repetitions = reps - p.cir_skip_initial_repetitions;
+                    p.sfd_mode = "ieee";
+                    p.rx_seed_refine_tail = reuse;
+                    core::DemodScratch scratch;
+                    auto r = core::demodulate_one(rx.data(), rx.size(), p, 0,
+                                                  start, 0, tmpl, scratch);
+                    BOOST_REQUIRE(r.status == DemodStatus::Success);
+                    BOOST_REQUIRE(r.payload.fcs_pass);
+                    BOOST_CHECK_EQUAL(r.payload.received_fcs, uint16_t(0x584b));
+                    const size_t measured = std::min<size_t>(reps, 40);
+                    const size_t first = reps - measured;
+                    BOOST_CHECK_EQUAL(r.cfo.peaks_used, measured);
+                    BOOST_CHECK_EQUAL(r.cfo.skipped_peaks, first);
+                    BOOST_CHECK_EQUAL(r.cfo.fit_first_peak_sample, r.timing.peak_samples[first]);
+                    BOOST_CHECK_EQUAL(r.cfo.fit_last_peak_sample, r.timing.peak_samples.back());
+                    BOOST_CHECK_SMALL(r.cfo.cfo_hz - hz, 50.0);
+                    for (size_t k = 0; k < first; ++k)
+                        BOOST_CHECK_EQUAL(std::abs(r.timing.peak_corr[k]), 0.0f);
+                    for (size_t k = first; k < reps; ++k)
+                        BOOST_CHECK_GT(std::abs(r.timing.peak_corr[k]), 0.0f);
+                }
+            }
+        }
+    }
+}

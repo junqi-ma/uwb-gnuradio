@@ -1,0 +1,9 @@
+sample_rate=737280000 tone_hz=-232960000 period_samples=288 train_samples=368640 period_samples_20ms=14745600
+integer_reference_mismatches=0 folding_coefficient_error_adc=2.831938472e-13
+estimate_0p5ms median_us=45.392 min_us=28.541 max_us=81.266
+build_288_sample_lut median_us=4.579 min_us=4.227 max_us=5.139
+memcpy_20ms median_us=3295.409 min_us=2887.748 max_us=5793.096
+cancel_20ms_out_of_place median_us=3217.78 min_us=2998.947 max_us=6213.439
+cancel_20ms_in_place median_us=2417.342 min_us=1808.278 max_us=4287.201
+estimate_build_cancel_20ms median_us=3964.401 min_us=3244.909 max_us=6552.209
+cancel_20ms_16k_chunks median_us=3435.39 min_us=3092.595 max_us=7051.096

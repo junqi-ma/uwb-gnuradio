@@ -31,7 +31,8 @@ UwbDetectorSc16::UwbDetectorSc16(
     size_t coarse_decimation,
     size_t coarse_repetitions,
     size_t coarse_margin,
-    double sample_rate)
+    double sample_rate,
+    float fine_threshold)
     : gr::sync_block("uwb_detector_sc16",
                      gr::io_signature::make(
                          1, 1, sizeof(std::complex<int16_t>)),
@@ -49,6 +50,9 @@ UwbDetectorSc16::UwbDetectorSc16(
       d_capture_(capture),
       d_sample_rate_(sample_rate)
 {
+    if (!(fine_threshold > 0.0f && fine_threshold <= 1.0f))
+        throw std::invalid_argument(
+            "UwbDetectorSc16: fine_threshold must be in (0, 1]");
     // Larger chunks -> fewer work() calls, less per-call flowgraph overhead.
     // Buffer scan (benchmark_detector source-search / detector-sparse) knees
     // near 512k–1M items; 64k was a hard self-cap that kept GR work() in the
@@ -60,6 +64,7 @@ UwbDetectorSc16::UwbDetectorSc16(
     vcfg.coarse_decimation = coarse_decimation;
     vcfg.coarse_repetitions = coarse_repetitions;
     vcfg.coarse_margin = coarse_margin;
+    vcfg.fine_threshold = fine_threshold;
     d_verifier_.configure(known_preamble, vcfg);
     const size_t region_prebuffer =
         pre_trigger + 32 * energy_gate_decimation + known_preamble.size();
@@ -79,12 +84,13 @@ UwbDetectorSc16::make(const std::vector<std::complex<float>>& known_preamble,
                   size_t coarse_decimation,
                   size_t coarse_repetitions,
                   size_t coarse_margin,
-                  double sample_rate)
+                  double sample_rate,
+                  float fine_threshold)
 {
     return gnuradio::get_initial_sptr(new UwbDetectorSc16(
         known_preamble, pre_trigger, capture, energy_threshold,
         energy_gate_decimation, coarse_decimation, coarse_repetitions,
-        coarse_margin, sample_rate));
+        coarse_margin, sample_rate, fine_threshold));
 }
 
 std::shared_ptr<UwbDetectorSc16>
@@ -96,7 +102,8 @@ UwbDetectorSc16::make_from_file(const std::string& template_file,
                             size_t coarse_decimation,
                             size_t coarse_repetitions,
                             size_t coarse_margin,
-                            double sample_rate)
+                            double sample_rate,
+                            float fine_threshold)
 {
     std::ifstream f(template_file, std::ios::binary);
     if (!f) {
@@ -114,7 +121,7 @@ UwbDetectorSc16::make_from_file(const std::string& template_file,
     f.read(reinterpret_cast<char*>(tmpl.data()), bytes);
     return make(tmpl, pre_trigger, capture, energy_threshold,
                 energy_gate_decimation, coarse_decimation, coarse_repetitions,
-                coarse_margin, sample_rate);
+                coarse_margin, sample_rate, fine_threshold);
 }
 
 size_t UwbDetectorSc16::pre_trigger() const { return d_pre_trigger_; }
@@ -360,7 +367,7 @@ void UwbDetectorSc16::publish_packet(const UwbDetectorStateMachineSc16::Region& 
     meta = pmt::dict_add(meta, pmt::mp("start_backtracked_symbols"),
                          pmt::from_long(static_cast<long>(backtracked_symbols)));
     meta = pmt::dict_add(meta, pmt::mp("threshold"),
-                         pmt::from_double(defaults::kDetectorFineThreshold));
+                         pmt::from_double(d_verifier_.config().fine_threshold));
     meta = pmt::dict_add(meta, pmt::mp("pre_trigger_samples"),
                          pmt::from_long(static_cast<long>(d_pre_trigger_)));
     meta = pmt::dict_add(meta, pmt::mp("sample_format"), pmt::mp("sc16"));

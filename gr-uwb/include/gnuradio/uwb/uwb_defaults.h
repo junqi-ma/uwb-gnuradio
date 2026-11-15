@@ -31,6 +31,12 @@ inline constexpr size_t kDetectorCapture = 200000;
 // Normalized mean |x|^2 vs full-scale.  Live X410 @6489.6 MHz / 60 dB has a
 // CW floor around 1.2e-3, so 1e-3 never closes the acquire gate.
 inline constexpr float kDetectorEnergyThreshold = 0.02f;
+// UwbDetectorSc16 energy gate.  The gate compares 16 x mean |x|^2 (16 of every
+// 100 samples summed per block, averaged over the 32-block window), not the
+// mean power itself.  Tuned on the 2026-11-15 DW3000 capture at 737.28 MS/s:
+// noise gate metric ~3e-3, packet ~7e-3..1.2e-2; 3e-3..5e-3 gives 4/4 packets.
+// The noise floor depends on antenna and setup, so re-measure when it changes.
+inline constexpr float kDetectorSc16EnergyThreshold = 4e-3f;
 inline constexpr size_t kDetectorEnergyGateDecimation = 100;
 inline constexpr size_t kDetectorCoarseDecimation = 4;
 inline constexpr size_t kDetectorCoarseRepetitions = 1;
@@ -39,6 +45,9 @@ inline constexpr size_t kDetectorCoarseMargin = 16;
 // the first few SYNCs, so refine the start backwards on the known symbol grid
 // with a lower per-symbol threshold; stop at the first missing grid point.
 inline constexpr float kDetectorFineThreshold = 0.5f;
+// UwbDetectorSc16 default fine gate.  At 737.28 MS/s, single-SYNC DW3000 peaks
+// measured 0.23-0.24 while noise-only maxima stayed near 0.02 over 20 ms.
+inline constexpr float kDetectorSc16FineThreshold = 0.1f;
 inline constexpr float kDetectorBacktrackThreshold = 0.2f;
 inline constexpr size_t kDetectorBacktrackRadius = 8;
 inline constexpr size_t kDetectorMaxBacktrackSymbols = 3;

@@ -438,3 +438,16 @@ target_compile_definitions(benchmark_sc16_pipeline_steady PRIVATE
 if(UWB_HAVE_UHD)
     target_link_libraries(benchmark_sc16_pipeline_steady UHD::UHD)
 endif()
+
+# Live DW3000 packet console (native UHD, bounded workers, no GR scheduler).
+add_executable(uwb_dw3000_live uwb_dw3000_live.cc)
+target_link_libraries(uwb_dw3000_live gnuradio-uwb Threads::Threads)
+target_compile_options(uwb_dw3000_live PRIVATE -O3 -march=native)
+target_compile_definitions(uwb_dw3000_live PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+if(ENABLE_TESTING)
+    add_test(NAME uwb_qa_dw3000_live_console
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/../tools/rx/qa_live_dw3000_console.py
+                $<TARGET_FILE:uwb_dw3000_live>)
+    set_tests_properties(uwb_qa_dw3000_live_console PROPERTIES TIMEOUT 90)
+endif()

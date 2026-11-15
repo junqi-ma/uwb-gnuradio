@@ -11,6 +11,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -183,8 +184,11 @@ BOOST_AUTO_TEST_CASE(test_sc16_fixed_capture_and_bit_exact_pdu)
     }
 
     auto src = gr::blocks::vector_source_s::make(interleaved, false, 2);
+    // Smooth template: at fine 0.1 a window 74 samples early reaches 0.41 on
+    // partial overlap, so this bit-exact fixture pins the original 0.5 gate.
     auto det = gr::uwb::UwbDetectorSc16::make(
-        tmpl, pre, capture, 1e-5f, 4, 4, 1, 8);
+        tmpl, pre, capture, 1e-5f, 4, 4, 1, 8, gr::uwb::defaults::kSampleRateHz,
+        0.5f);
     auto dbg = gr::blocks::message_debug::make();
     auto tb = gr::make_top_block("qa_detector_sc16");
     tb->connect(src, 0, det, 0);
@@ -273,7 +277,8 @@ BOOST_AUTO_TEST_CASE(test_sc16_backtracks_weak_first_sync)
 
     auto src = gr::blocks::vector_source_s::make(interleaved, false, 2);
     auto det = gr::uwb::UwbDetectorSc16::make(
-        tmpl, 5000, 2000, 1e-5f, 4, 4, 1, 8);
+        tmpl, 5000, 2000, 1e-5f, 4, 4, 1, 8, gr::uwb::defaults::kSampleRateHz,
+        0.5f);
     auto dbg = gr::blocks::message_debug::make();
     auto tb = gr::make_top_block("qa_detector_sc16_weak_first");
     tb->connect(src, 0, det, 0);
@@ -298,6 +303,108 @@ BOOST_AUTO_TEST_CASE(test_sc16_backtracks_weak_first_sync)
         pmt::to_long(pmt::dict_ref(meta, pmt::mp("start_backtracked_symbols"),
                                   pmt::from_long(0))),
         2);
+}
+
+BOOST_AUTO_TEST_CASE(test_sc16_fine_threshold_default_and_gate)
+{
+    constexpr size_t L = 1016;
+    constexpr size_t packet_start = 7000;
+    constexpr size_t reps = 4;
+    std::vector<gr_complex> tmpl(L);
+    uint32_t prng = 0x6d2b79f5U;
+    for (size_t k = 0; k < L; ++k) {
+        prng ^= prng << 13;
+        prng ^= prng >> 17;
+        prng ^= prng << 5;
+        tmpl[k] = gr_complex((prng & 1U) ? 1.0f : -1.0f,
+                             (prng & 2U) ? 1.0f : -1.0f);
+    }
+    gr::uwb::core::uwb_l2_normalize(tmpl);
+
+    std::vector<gr_complex> orth(L);
+    gr_complex projection(0.0f, 0.0f);
+    float et = 0.0f;
+    uint32_t noise_prng = 0xa341316cU;
+    for (size_t k = 0; k < L; ++k) {
+        noise_prng ^= noise_prng << 13;
+        noise_prng ^= noise_prng >> 17;
+        noise_prng ^= noise_prng << 5;
+        orth[k] = gr_complex((noise_prng & 1U) ? 1.0f : -1.0f,
+                             (noise_prng & 2U) ? 1.0f : -1.0f);
+        projection += std::conj(tmpl[k]) * orth[k];
+        et += std::norm(tmpl[k]);
+    }
+    for (size_t k = 0; k < L; ++k)
+        orth[k] -= (projection / et) * tmpl[k];
+    float eo = 0.0f;
+    for (const auto& v : orth)
+        eo += std::norm(v);
+    const float orth_scale = std::sqrt(et / eo);
+
+    // Every SYNC has normalized metric 0.5^2 = 0.25: between the default
+    // fine gate (0.1) and the previous 0.5 gate.
+    std::vector<int16_t> interleaved((packet_start + reps * L + 4096) * 2, 0);
+    for (size_t r = 0; r < reps; ++r) {
+        for (size_t k = 0; k < L; ++k) {
+            const gr_complex v = 0.5f * tmpl[k] +
+                                 std::sqrt(0.75f) * orth_scale * orth[k];
+            const size_t i = packet_start + r * L + k;
+            interleaved[2 * i] =
+                static_cast<int16_t>(std::lround(v.real() * 20000.0f));
+            interleaved[2 * i + 1] =
+                static_cast<int16_t>(std::lround(v.imag() * 20000.0f));
+        }
+    }
+
+    auto run = [&](gr::uwb::UwbDetectorSc16::sptr det, const char* name) {
+        auto src = gr::blocks::vector_source_s::make(interleaved, false, 2);
+        auto dbg = gr::blocks::message_debug::make();
+        auto tb = gr::make_top_block(name);
+        tb->connect(src, 0, det, 0);
+        tb->msg_connect(det, "packet", dbg, "store");
+        tb->run();
+        return dbg;
+    };
+
+    auto dbg_default = run(gr::uwb::UwbDetectorSc16::make(
+                               tmpl, 5000, 2000, 1e-5f, 4, 4, 1, 8),
+                           "qa_fine_default");
+    BOOST_REQUIRE_EQUAL(dbg_default->num_messages(), 1);
+    const auto meta = pmt::car(dbg_default->get_message(0));
+    BOOST_CHECK_EQUAL(
+        pmt::to_uint64(pmt::dict_ref(meta, pmt::mp("start_sample"),
+                                    pmt::PMT_NIL)),
+        packet_start);
+    BOOST_CHECK_CLOSE(
+        pmt::to_double(pmt::dict_ref(meta, pmt::mp("detection_metric"),
+                                    pmt::PMT_NIL)),
+        0.25, 1.0);
+    BOOST_CHECK_CLOSE(
+        pmt::to_double(pmt::dict_ref(meta, pmt::mp("threshold"),
+                                    pmt::PMT_NIL)),
+        0.1, 1e-4);
+
+    auto dbg_strict = run(gr::uwb::UwbDetectorSc16::make(
+                              tmpl, 5000, 2000, 1e-5f, 4, 4, 1, 8,
+                              gr::uwb::defaults::kSampleRateHz, 0.5f),
+                          "qa_fine_strict");
+    BOOST_CHECK_EQUAL(dbg_strict->num_messages(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(test_sc16_fine_threshold_rejects_out_of_range)
+{
+    std::vector<gr_complex> tmpl(128, gr_complex(1.0f, 0.0f));
+    gr::uwb::core::uwb_l2_normalize(tmpl);
+    auto make_with = [&](float fine) {
+        return gr::uwb::UwbDetectorSc16::make(
+            tmpl, 5000, 2000, 1e-5f, 4, 4, 1, 8,
+            gr::uwb::defaults::kSampleRateHz, fine);
+    };
+    BOOST_CHECK_THROW(make_with(0.0f), std::invalid_argument);
+    BOOST_CHECK_THROW(make_with(-0.1f), std::invalid_argument);
+    BOOST_CHECK_THROW(make_with(1.5f), std::invalid_argument);
+    BOOST_CHECK_THROW(make_with(std::nanf("")), std::invalid_argument);
+    BOOST_CHECK_NO_THROW(make_with(1.0f));
 }
 
 BOOST_AUTO_TEST_CASE(test_sc16_sample_rate_metadata)

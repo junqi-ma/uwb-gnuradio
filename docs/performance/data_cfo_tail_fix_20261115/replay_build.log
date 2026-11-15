@@ -1,0 +1,12 @@
+In file included from gr-uwb/include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from testdata/x410_fixed_tone_live_20261115/decode_windows.cc:1:
+gr-uwb/include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+gr-uwb/include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from gr-uwb/include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from gr-uwb/include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from testdata/x410_fixed_tone_live_20261115/decode_windows.cc:1:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -72,7 +72,8 @@ public:
      *                            internally; used for the coarse + fine scans).
      * \param pre_trigger         samples captured before the packet start.
      * \param capture             samples captured after the packet start.
-     * \param energy_threshold    decimated energy-gate threshold.
+     * \param energy_threshold    energy-gate threshold, compared with 16 x mean
+     *                            |x|^2 over the sampled window (default 4e-3).
      * \param energy_gate_decimation  stride for the decimated energy gate
      *                                (default 100).
      * \param coarse_decimation   stride for the decimated coarse preamble scan
@@ -83,11 +84,15 @@ public:
      *                            peak (samples).
      * \param sample_rate         host sample rate written into PDU metadata
      *                            (default 998.4e6 production host rate).
+     * \param fine_threshold      full-rate normalized metric a candidate peak
+     *                            must reach to confirm a packet, in (0, 1]
+     *                            (default 0.1; backtrack stays at 0.2).
      */
     static sptr make(const std::vector<std::complex<float>>& known_preamble,
                      size_t pre_trigger = defaults::kDetectorPreTrigger,
                      size_t capture = defaults::kDetectorCapture,
-                     float energy_threshold = defaults::kDetectorEnergyThreshold,
+                     float energy_threshold =
+                         defaults::kDetectorSc16EnergyThreshold,
                      size_t energy_gate_decimation =
                          defaults::kDetectorEnergyGateDecimation,
                      size_t coarse_decimation =
@@ -95,7 +100,9 @@ public:
                      size_t coarse_repetitions =
                          defaults::kDetectorCoarseRepetitions,
                      size_t coarse_margin = defaults::kDetectorCoarseMargin,
-                     double sample_rate = defaults::kSampleRateHz);
+                     double sample_rate = defaults::kSampleRateHz,
+                     float fine_threshold =
+                         defaults::kDetectorSc16FineThreshold);
 
     /**
      * Same as make(), but loads the template from a binary file of interleaved
@@ -105,7 +112,7 @@ public:
                                size_t pre_trigger = defaults::kDetectorPreTrigger,
                                size_t capture = defaults::kDetectorCapture,
                                float energy_threshold =
-                                   defaults::kDetectorEnergyThreshold,
+                                   defaults::kDetectorSc16EnergyThreshold,
                                size_t energy_gate_decimation =
                                    defaults::kDetectorEnergyGateDecimation,
                                size_t coarse_decimation =
@@ -114,7 +121,9 @@ public:
                                    defaults::kDetectorCoarseRepetitions,
                                size_t coarse_margin =
                                    defaults::kDetectorCoarseMargin,
-                               double sample_rate = defaults::kSampleRateHz);
+                               double sample_rate = defaults::kSampleRateHz,
+                               float fine_threshold =
+                                    defaults::kDetectorSc16FineThreshold);
 
     size_t pre_trigger() const;
     void set_pre_trigger(size_t pre_trigger);
@@ -145,7 +154,8 @@ protected:
                 size_t coarse_decimation,
                 size_t coarse_repetitions,
                 size_t coarse_margin,
-                double sample_rate);
+                double sample_rate,
+                float fine_threshold);
 
     int work(int noutput_items,
              gr_vector_const_void_star& input_items,

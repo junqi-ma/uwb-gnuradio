@@ -163,6 +163,9 @@ def parser():
     p.add_argument("--frequency", type=float, default=6489.6e6)
     p.add_argument("--gain", type=float, default=60.0)
     p.add_argument("--antenna", default="TX/RX0")
+    p.add_argument("--rx-subdev", default="",
+                   help="RX subdevice spec, e.g. 'B:1' for UHD channel 3 "
+                        "(dboard B, RX1); empty keeps the device default")
     p.add_argument("--packet-interval", type=float, default=INTERVAL_S)
     p.add_argument("--pre-guard", type=int, default=0,
                    help="demod-crop pre-guard (0 = native geom: "
@@ -217,7 +220,12 @@ def parser():
                    help="live capture duration; 0 = 15 s on x410, else until EOS")
     p.add_argument("--workers", type=int, default=2,
                    help="UwbRealtimeDemodulator worker count")
-    p.add_argument("--energy-threshold", type=float, default=0.02)
+    p.add_argument("--energy-threshold", type=float, default=None,
+                   help="energy gate threshold (16x mean power). Default: 4e-3 "
+                        "for --capture-mode detector, 0.02 for auto")
+    p.add_argument("--fine-threshold", type=float, default=0.1,
+                   help="detector_sc16 fine confirm threshold in (0, 1]; "
+                        "only the detector capture modes use it")
     p.add_argument("--cir-filter-mode", default="bypass")
     p.add_argument("--template-998", default="",
                    help="998.4 CF32 one-SYNC template for the demodulator")
@@ -738,7 +746,8 @@ def run_detector_live(a, uwb, gr, uhd, native_geom, native, tmpl_native):
         raise RuntimeError(f"missing 998.4 template {tmpl998_path}")
     tmpl998 = load_cf32(tmpl998_path)
     print(f"capture-mode=detector demod=code{code}/{reps}/{sfd} "
-          f"detector=[{det_pre},{det_cap}] thr={a.energy_threshold}")
+          f"detector=[{det_pre},{det_cap}] thr={a.energy_threshold} "
+          f"fine={a.fine_threshold}")
     print(f"template_998={tmpl998_path} n={tmpl998.size} "
           f"workers={a.workers} cir={a.cir_filter_mode}")
     print(f"device_args={dev_args}")
@@ -753,6 +762,8 @@ def run_detector_live(a, uwb, gr, uhd, native_geom, native, tmpl_native):
         src.set_time_source("internal")
     except Exception as exc:
         print(f"clock/time source warning: {exc}")
+    if a.rx_subdev:
+        src.set_subdev_spec(a.rx_subdev, 0)
     src.set_samp_rate(native)
     actual = float(src.get_samp_rate())
     print(f"usrp samp_rate requested={native:.0f} actual={actual:.0f}")
@@ -768,7 +779,8 @@ def run_detector_live(a, uwb, gr, uhd, native_geom, native, tmpl_native):
 
     det = uwb.detector_sc16(
         list(tmpl_native), det_pre, det_cap, float(a.energy_threshold),
-        100, 4, 1, native_geom["coarse_margin"], native)
+        100, 4, 1, native_geom["coarse_margin"], native,
+        float(a.fine_threshold))
     resampler = make_pdu_resampler(uwb, native)
     demod = uwb.realtime_demodulator.make_from_template(
         tmpl998.tolist(), max(1, int(a.workers)), 64, sfd, 0,
@@ -860,6 +872,8 @@ def run_x410_live(a, tmpl_path):
         src.set_time_source("internal")
     except Exception as exc:
         print(f"clock/time source warning: {exc}")
+    if a.rx_subdev:
+        src.set_subdev_spec(a.rx_subdev, 0)
     src.set_samp_rate(native)
     actual = float(src.get_samp_rate())
     print(f"usrp samp_rate requested={native:.0f} actual={actual:.0f}")
@@ -872,6 +886,7 @@ def run_x410_live(a, tmpl_path):
         src.set_antenna(a.antenna, 0)
     except Exception as exc:
         print(f"antenna {a.antenna!r} rejected ({exc}); leaving default")
+    print(f"rx subdev spec={a.rx_subdev or 'default'}")
     print(f"usrp tuned freq={src.get_center_freq(0):.1f} "
           f"gain={src.get_gain(0)} antenna={src.get_antenna(0)}")
 
@@ -1239,7 +1254,8 @@ def run_flow(a, tmpl_path, iq=None):
             [complex(x) for x in tmpl],
             file_geom["demod_pre"],
             file_geom["demod_cap"] + file_geom["demod_post"],
-            det_thr, det_egd, 4, 1, native_geom["coarse_margin"], native)
+            det_thr, det_egd, 4, 1, native_geom["coarse_margin"], native,
+            float(getattr(a, "fine_threshold", 0.1)))
         dbg = blocks.message_debug()
         tb = gr.top_block("x410_detector_capture")
         if a.source in ("synthetic", "file"):
@@ -1286,6 +1302,8 @@ def run_flow(a, tmpl_path, iq=None):
 
 def main():
     a = parser().parse_args()
+    if a.energy_threshold is None:
+        a.energy_threshold = 4e-3 if a.capture_mode == "detector" else 0.02
     try:
         native_geom = resolve_native_geom(a.native_rate)
     except ValueError as exc:

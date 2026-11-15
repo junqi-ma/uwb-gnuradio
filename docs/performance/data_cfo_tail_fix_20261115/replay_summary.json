@@ -1,0 +1,24 @@
+{
+  "clean": {
+    "packets": 200,
+    "fcs_pass": 200,
+    "status_histogram": {
+      "0": 200
+    },
+    "psdu_status_equal_to_previous_workaround": 200,
+    "independent_crc_pass": 200
+  },
+  "raw": {
+    "packets": 200,
+    "fcs_pass": 193,
+    "status_histogram": {
+      "0": 193,
+      "2": 2,
+      "6": 3,
+      "4": 2
+    },
+    "psdu_status_equal_to_previous_workaround": 200,
+    "independent_crc_pass": 193
+  },
+  "header_sha256": "cdf36ba9d1cf4b1c3266fa7d9c90523b4292892aec907ad4ac2cb0feee0cf099"
+}

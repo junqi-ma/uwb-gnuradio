@@ -1,0 +1,53 @@
+{
+  "block_samples": 32768,
+  "block_us": 44.44444444444445,
+  "f0_fft_hz": -232960040.1645223,
+  "training_interval_ms": [
+    0.1,
+    1.5
+  ],
+  "training_blocks": 32,
+  "fit_frequency_hz": -232960000.4487632,
+  "training_amplitude": 0.010478374468150167,
+  "background_block_amplitude_p5_p50_p95": [
+    0.01043692325653016,
+    0.010494998731393108,
+    0.010552985214305829
+  ],
+  "prediction_intervals": [
+    {
+      "interval_ms": [
+        0.1,
+        1.5
+      ],
+      "projected_tone_suppression_db": 47.7975072047338,
+      "phase_error_std_rad": 0.0036155027024158087
+    },
+    {
+      "interval_ms": [
+        5,
+        10
+      ],
+      "projected_tone_suppression_db": 34.321573555102816,
+      "phase_error_std_rad": 0.006063059792584483
+    },
+    {
+      "interval_ms": [
+        15,
+        20
+      ],
+      "projected_tone_suppression_db": 26.552613283166924,
+      "phase_error_std_rad": 0.004666565571713973
+    },
+    {
+      "interval_ms": [
+        30,
+        40
+      ],
+      "projected_tone_suppression_db": 20.01132592459948,
+      "phase_error_std_rad": 0.010627748107797721
+    }
+  ],
+  "retrospective_all_background_frequency_hz": -232959999.98036417,
+  "retrospective_projected_tone_suppression_db": 46.04610368319751
+}

@@ -1,0 +1,16 @@
+[ 92%] Built target gnuradio-uwb
+[100%] Building CXX object apps/CMakeFiles/uwb_dw3000_live.dir/uwb_dw3000_live.cc.o
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:25,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/uwb_dw3000_live.cc:3:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h: In function ‘void gr::uwb::demod::rxopt::derotate_range_block(std::complex<float>*, const std::complex<float>*, std::size_t, std::size_t, std::size_t, double)’:
+/home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_rx_cfo_opt.h:144:13: warning: ‘volk_32fc_s32fc_multiply_32fc’ is deprecated [-Wdeprecated-declarations]
+  144 |             volk_32fc_s32fc_multiply_32fc(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_cir_fir_simd.h:38,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/lib/../include/gnuradio/uwb/uwb_demod_core.h:20,
+                 from /home/oi/Desktop/uwb-gnuradio/gr-uwb/apps/uwb_dw3000_live.cc:3:
+/usr/local/include/volk/volk.h:1767:44: note: declared here
+ 1767 | extern VOLK_API p_32fc_s32fc_multiply_32fc volk_32fc_s32fc_multiply_32fc __attribute__((deprecated));
+      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[100%] Linking CXX executable uwb_dw3000_live
+[100%] Built target uwb_dw3000_live
