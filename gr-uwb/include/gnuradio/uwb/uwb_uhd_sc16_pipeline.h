@@ -40,6 +40,11 @@ namespace gr {
 namespace uwb {
 namespace pipeline {
 
+// Defined in uwb_fixed_tone_cancel_source.h.  The pipeline owns the stage
+// through source_ (as an ISc16StreamSource) and exposes a non-owning pointer
+// for diagnostics only.
+class FixedToneCancelSc16Source;
+
 enum class StreamSourceType {
     Replay,
     UhdDevice
@@ -302,6 +307,27 @@ struct PipelineConfig {
     uint64_t max_windows = 0; // 0 = unlimited
     uint64_t max_samples = 0; // 0 = unlimited
 
+    // ------------------------------------------------------------------
+    // Fixed-frequency CW (tone) cancellation, applied to the raw SC16 stream
+    // BEFORE the window assembler (see uwb_fixed_tone_cancel_source.h).
+    //
+    // Explicit opt-in: default false keeps the original source path
+    // instruction-for-instruction identical (the plain source is used directly,
+    // no decorator, no extra thread, no extra copy).
+    // ------------------------------------------------------------------
+    bool fixed_tone_cancel_enable = false;
+    // Receive baseband frequency in Hz (f_RF - f_LO), NOT the RF centre
+    // frequency.  The validated default is -232.96 MHz at 737.28 MS/s, where
+    // f0/fs == -91/288 and the complex exponential is exactly 288-periodic.
+    double fixed_tone_cancel_frequency_hz = -232.96e6;
+    double fixed_tone_cancel_period_s = 20.0e-3;
+    double fixed_tone_cancel_training_s = 0.5e-3;
+    size_t fixed_tone_cancel_crossfade_samples = 256;
+    // Bounded raw ring: whole blocks are dropped (never stalling recv) when it
+    // is full.  It must hold at least one training window.
+    size_t fixed_tone_cancel_block_samples = 65536;
+    size_t fixed_tone_cancel_queue_blocks = 32;
+
     // UHD specific
     std::string uhd_args;
     std::string uhd_subdev;
@@ -403,10 +429,24 @@ public:
     // Begin acquisition.  Called once per run, from the RX thread, after the
     // worker-ready barrier.  Default is a no-op for passive/file sources.
     virtual bool start_stream() { return true; }
+    // Ask a source to abandon a blocking read.  Called from stop().  Sources
+    // with bounded reads (UHD recv timeout, file reads) need nothing here; a
+    // source that waits on its own condition variable overrides it so stop()
+    // cannot deadlock behind a read.
+    virtual void request_stop() {}
     virtual void close() = 0;
     virtual size_t read_samples(std::complex<int16_t>* dest,
                                 size_t max_samples,
                                 StreamReadMeta& meta) = 0;
+    // A fatal source error must be reported here, never disguised as a normal
+    // short read or as EOF.  The RX thread checks it after every read.
+    virtual bool fatal_error(std::string* msg) const
+    {
+        if (msg) {
+            msg->clear();
+        }
+        return false;
+    }
     virtual double actual_rx_rate() const = 0;
     virtual bool is_eof() const = 0;
 };
@@ -419,6 +459,11 @@ public:
     ~ReplaySc16Source() override;
 
     bool open() override;
+    // Re-anchors the paced-replay time base.  open() must not start acquisition,
+    // and the paced target must be measured from the moment streaming actually
+    // begins (the pipeline opens the source long before its ready barrier), so
+    // a stale reference time would make the source burst at full speed.
+    bool start_stream() override;
     void close() override;
     size_t read_samples(std::complex<int16_t>* dest,
                         size_t max_samples,
@@ -547,6 +592,12 @@ public:
 
     void set_result_callback(ResultCallback cb) { result_cb_ = std::move(cb); }
 
+    // Non-owning access to the fixed-tone cancellation stage.  nullptr when
+    // cfg.fixed_tone_cancel_enable is false (the plain source is used) or
+    // before initialize() wrapped the source.  Read the stage's stats after
+    // wait() only.
+    FixedToneCancelSc16Source* fixed_tone_source() const { return fixed_tone_source_; }
+
     const PipelineLedger& ledger() const { return ledger_; }
     const std::vector<WindowResult>& results() const { return results_; }
 
@@ -576,6 +627,8 @@ private:
 
     PipelineConfig cfg_;
     std::unique_ptr<ISc16StreamSource> source_;
+    // Non-owning: points at source_ when the fixed-tone stage wrapped it.
+    FixedToneCancelSc16Source* fixed_tone_source_ = nullptr;
     // One lock-free SPSC ring pool per DSP worker.  The RX producer thread is
     // the only producer and never touches a pool concurrently with itself, so
     // each pool stays a strict 1P/1C SPSC structure.

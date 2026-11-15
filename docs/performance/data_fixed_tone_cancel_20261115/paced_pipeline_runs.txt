@@ -1,0 +1,681 @@
+##### final_on_r1
+[Benchmark] Waiting for exclusive lock /tmp/uwb-sic-benchmark.lock...
+[Benchmark] Acquired exclusive lock /tmp/uwb-sic-benchmark.lock
+Starting UHD SC16 Pipeline...
+  Source:        Replay (/tmp/ftc/loop_1s.sc16)
+  Native Rate:   737.28 MS/s
+  Work Rate:     998.4 MS/s
+  Schedule:      t0=0 samples, period=3.6864e+06 samples (5 ms)
+  Window Size:   pre=400, cap=3200, post=400 (total=4000)
+  Consumer:      sic
+  Replay Mode:   paced
+  Pool Size:     8
+  Max Windows:   200
+  DSP Workers:   1
+  DSP Affinity:  unpinned
+  Resampler:     profile=quality_minorder, workers=1, experiment=fixed_phase
+  SIC:           policy=auto, backend=ipatov, code=10, roi=[478,606), taps=20
+  SIC Template:  reference_preamble.bin (default)
+  Tone Cancel:   fixed f0=-232960000.000000 Hz, period=20.000000 ms, training=0.500000 ms, crossfade=256, raw queue=65536x32
+  Affinity:      RX=-1, DSP=-1
+
+
+================================================================================
+                    UHD SC16 Direct RX Pipeline Results
+================================================================================
+Ledger Invariants Check: PASS
+Source State: started=yes failed=no error=<none>
+Runtime Verdict: PASS
+
+Pipeline Summary:
+  Offered Windows:                          200
+  Admitted Windows:                         200
+  Completed Windows:                        200
+  Dropped Windows (Buffer Full):              0
+  Invalid Gap Windows:                        0
+  Cancelled Windows:                          0
+  Processing Failed:                          0
+  Total Samples Processed:            733597600
+  Sample Rate:                       737.3 MS/s
+  Total Wall Time:                   0.997 s
+
+Phase Timing Statistics (Completed Windows: 200):
+  --------------------------------------------------------------------------------
+  Phase                  Mean (us)     P50 (us)     P95 (us)     Min (us)     Max (us)
+  --------------------------------------------------------------------------------
+  slice_us                  0.00         0.00         0.00         0.00         0.00
+  queue_us                  1.62         1.32         3.25         0.58         6.32
+  convert_us                0.00         0.00         0.00         0.00         0.00
+  resample_us              20.15        18.35        32.16        16.41        38.28
+  sic_us                   20.04        17.35        32.85        14.29        53.82
+  sensing_us                0.00         0.00         0.00         0.00         0.00
+  e2e_us                   40.68        36.27        63.23        30.81        89.87
+  --------------------------------------------------------------------------------
+
+Lifecycle / Measurement Contract:
+  startup_ready_ms:                  1.295
+  drain_tail_ms:                     0.146
+  rx_total_received_samples:         733597600
+  rx_read_msps (over cold_total):    736.10 MS/s
+  warmup_windows:                    0
+  measure_windows_requested:         0
+  measure_windows_actual:            200
+  steady_interval_s:                 0.994474
+  steady_interval_boundary:          first measured commit_time .. last measured commit_time
+  steady_span_windows:               199
+  steady_lookahead_ms:               0.081 (first push -> first measured commit)
+  steady_window_us:                  4997.36 us/window
+  steady_window_rate:                200.11 win/s
+  steady_window_sample_throughput:   0.80 MS/s
+
+Steady-Region Service Times (Completed Windows: 200):
+  --------------------------------------------------------------------------------
+  Phase                  Mean (us)     P50 (us)     P95 (us)     P99 (us)     n
+  --------------------------------------------------------------------------------
+  convert_us                0.00         0.00         0.00         0.00       200
+  resample_us              20.15        18.35        32.16        35.79       200
+  sic_us                   20.04        17.35        32.85        44.99       200
+  sensing_us                0.00         0.00         0.00         0.00       200
+  e2e_us                   40.68        36.27        63.23        80.06       200
+  --------------------------------------------------------------------------------
+
+Fixed-Frequency Tone Cancellation:
+  applied_fs_hz=737280000.0 tone_hz=-232960000.000 f0/fs=-0.316 period=288 cycles=-91 Np=14745600 Nt=368640 crossfade=256
+  raw_queue=65536 x 32 samples  kernel=avx2
+  source_read_calls=11196 source_samples=733741056 source_error_reads=0
+  queued_samples=733741056 dropped_samples=0 overflow_drops=0
+  consumed_samples=733597600 pending_samples=143456 max_pending_samples=815200 conservation=PASS
+  training_windows=50 model_updates=50 model_rejects=0 partial_training_bypasses=0 epoch_resets=0
+  cancelled_samples=733597600 bypassed_samples=0 gaps_forwarded=0 gap_samples_forwarded=0
+  model_generation=50 |c|=344.6067 phase_rad=2.2486 epoch=722534400
+  read_calls=22480 empty_reads=0 estimate_cpu_us=3972.85 cancel_cpu_us=66635.28 reader_cpu_us=990659.79
+
+RX Diagnostics (cumulative):
+  read_calls=22480 samples=733597600 bytes=2934390400
+  published=200 dropped=0 slot_copy_bytes=3200000
+  stream_buf_resize_count=1 zero_init_bytes=147072 compact_move_bytes=78400 max_buffered_samples=36768
+  read_us=992227.5 assemble_us=16.3 slot_copy_us=221.4 dispatch_us=137.9 ledger_wait_us=606.9
+
+System Throughput (Burst-level multi-core):
+  DSP Workers Configured:                     1
+  Completed Windows:                        200
+  Total Wall Time:                        0.997 s
+  Effective Window Interval:            4983.02 us/window
+  Sustained Window Rate:                 200.68 win/s
+  Effective Native Sample Throughput:      0.80 MS/s
+  Effective Resample Equivalent:          20.15 us/window
+
+Per-Worker Distribution (DSP Workers: 1):
+  -----------------------------------------------------------------------------
+  Worker       Windows  Share(%)  Mean e2e(us)  Mean resample(us)  Mean sic(us)
+  -----------------------------------------------------------------------------
+  0                200     100.0         40.68              20.15         20.04
+  -----------------------------------------------------------------------------
+  Load Balance (max/min):            1.00x
+
+SIC / Sensing Metrics:
+  SIC Executed Windows:                     200
+  SIC Committed Windows:                      0 (0.0%)
+  Mean Actual Suppression:           0.00 dB
+  Radar Executed Windows:                     0
+  Radar SFD Detection Count:                  0 / 0 (0.0%)
+================================================================================
+
+[Benchmark] Released lock /tmp/uwb-sic-benchmark.lock
+##### final_off_r1
+[Benchmark] Waiting for exclusive lock /tmp/uwb-sic-benchmark.lock...
+[Benchmark] Acquired exclusive lock /tmp/uwb-sic-benchmark.lock
+Starting UHD SC16 Pipeline...
+  Source:        Replay (/tmp/ftc/loop_1s.sc16)
+  Native Rate:   737.28 MS/s
+  Work Rate:     998.4 MS/s
+  Schedule:      t0=0 samples, period=3.6864e+06 samples (5 ms)
+  Window Size:   pre=400, cap=3200, post=400 (total=4000)
+  Consumer:      sic
+  Replay Mode:   paced
+  Pool Size:     8
+  Max Windows:   200
+  DSP Workers:   1
+  DSP Affinity:  unpinned
+  Resampler:     profile=quality_minorder, workers=1, experiment=fixed_phase
+  SIC:           policy=auto, backend=ipatov, code=10, roi=[478,606), taps=20
+  SIC Template:  reference_preamble.bin (default)
+  Tone Cancel:   disabled
+  Affinity:      RX=-1, DSP=-1
+
+
+================================================================================
+                    UHD SC16 Direct RX Pipeline Results
+================================================================================
+Ledger Invariants Check: PASS
+Source State: started=yes failed=no error=<none>
+Runtime Verdict: PASS
+
+Pipeline Summary:
+  Offered Windows:                          200
+  Admitted Windows:                         200
+  Completed Windows:                        200
+  Dropped Windows (Buffer Full):              0
+  Invalid Gap Windows:                        0
+  Cancelled Windows:                          0
+  Processing Failed:                          0
+  Total Samples Processed:            733597200
+  Sample Rate:                       737.3 MS/s
+  Total Wall Time:                   0.997 s
+
+Phase Timing Statistics (Completed Windows: 200):
+  --------------------------------------------------------------------------------
+  Phase                  Mean (us)     P50 (us)     P95 (us)     Min (us)     Max (us)
+  --------------------------------------------------------------------------------
+  slice_us                  0.00         0.00         0.00         0.00         0.00
+  queue_us                  4.11         0.76         2.54         0.45       464.97
+  convert_us                0.00         0.00         0.00         0.00         0.00
+  resample_us              17.42        16.95        20.07        16.40        43.60
+  sic_us                   16.42        15.74        19.72        14.35        71.20
+  sensing_us                0.00         0.00         0.00         0.00         0.00
+  e2e_us                   34.01        32.79        40.34        30.85       115.99
+  --------------------------------------------------------------------------------
+
+Lifecycle / Measurement Contract:
+  startup_ready_ms:                  1.853
+  drain_tail_ms:                     0.166
+  rx_total_received_samples:         733597200
+  rx_read_msps (over cold_total):    735.75 MS/s
+  warmup_windows:                    0
+  measure_windows_requested:         0
+  measure_windows_actual:            200
+  steady_interval_s:                 0.994840
+  steady_interval_boundary:          first measured commit_time .. last measured commit_time
+  steady_span_windows:               199
+  steady_lookahead_ms:               0.123 (first push -> first measured commit)
+  steady_window_us:                  4999.19 us/window
+  steady_window_rate:                200.03 win/s
+  steady_window_sample_throughput:   0.80 MS/s
+
+Steady-Region Service Times (Completed Windows: 200):
+  --------------------------------------------------------------------------------
+  Phase                  Mean (us)     P50 (us)     P95 (us)     P99 (us)     n
+  --------------------------------------------------------------------------------
+  convert_us                0.00         0.00         0.00         0.00       200
+  resample_us              17.42        16.95        20.07        25.08       200
+  sic_us                   16.42        15.74        19.72        30.47       200
+  sensing_us                0.00         0.00         0.00         0.00       200
+  e2e_us                   34.01        32.79        40.34        58.12       200
+  --------------------------------------------------------------------------------
+
+System Throughput (Burst-level multi-core):
+  DSP Workers Configured:                     1
+  Completed Windows:                        200
+  Total Wall Time:                        0.997 s
+  Effective Window Interval:            4985.39 us/window
+  Sustained Window Rate:                 200.59 win/s
+  Effective Native Sample Throughput:      0.80 MS/s
+  Effective Resample Equivalent:          17.42 us/window
+
+Per-Worker Distribution (DSP Workers: 1):
+  -----------------------------------------------------------------------------
+  Worker       Windows  Share(%)  Mean e2e(us)  Mean resample(us)  Mean sic(us)
+  -----------------------------------------------------------------------------
+  0                200     100.0         34.01              17.42         16.42
+  -----------------------------------------------------------------------------
+  Load Balance (max/min):            1.00x
+
+SIC / Sensing Metrics:
+  SIC Executed Windows:                     200
+  SIC Committed Windows:                      0 (0.0%)
+  Mean Actual Suppression:           0.00 dB
+  Radar Executed Windows:                     0
+  Radar SFD Detection Count:                  0 / 0 (0.0%)
+================================================================================
+
+[Benchmark] Released lock /tmp/uwb-sic-benchmark.lock
+##### final_on_r2
+[Benchmark] Waiting for exclusive lock /tmp/uwb-sic-benchmark.lock...
+[Benchmark] Acquired exclusive lock /tmp/uwb-sic-benchmark.lock
+Starting UHD SC16 Pipeline...
+  Source:        Replay (/tmp/ftc/loop_1s.sc16)
+  Native Rate:   737.28 MS/s
+  Work Rate:     998.4 MS/s
+  Schedule:      t0=0 samples, period=3.6864e+06 samples (5 ms)
+  Window Size:   pre=400, cap=3200, post=400 (total=4000)
+  Consumer:      sic
+  Replay Mode:   paced
+  Pool Size:     8
+  Max Windows:   200
+  DSP Workers:   1
+  DSP Affinity:  unpinned
+  Resampler:     profile=quality_minorder, workers=1, experiment=fixed_phase
+  SIC:           policy=auto, backend=ipatov, code=10, roi=[478,606), taps=20
+  SIC Template:  reference_preamble.bin (default)
+  Tone Cancel:   fixed f0=-232960000.000000 Hz, period=20.000000 ms, training=0.500000 ms, crossfade=256, raw queue=65536x32
+  Affinity:      RX=-1, DSP=-1
+
+
+================================================================================
+                    UHD SC16 Direct RX Pipeline Results
+================================================================================
+Ledger Invariants Check: PASS
+Source State: started=yes failed=no error=<none>
+Runtime Verdict: PASS
+
+Pipeline Summary:
+  Offered Windows:                          200
+  Admitted Windows:                         200
+  Completed Windows:                        200
+  Dropped Windows (Buffer Full):              0
+  Invalid Gap Windows:                        0
+  Cancelled Windows:                          0
+  Processing Failed:                          0
+  Total Samples Processed:            733597600
+  Sample Rate:                       737.3 MS/s
+  Total Wall Time:                   0.997 s
+
+Phase Timing Statistics (Completed Windows: 200):
+  --------------------------------------------------------------------------------
+  Phase                  Mean (us)     P50 (us)     P95 (us)     Min (us)     Max (us)
+  --------------------------------------------------------------------------------
+  slice_us                  0.00         0.00         0.00         0.00         0.00
+  queue_us                  1.41         1.06         3.18         0.51        19.51
+  convert_us                0.00         0.00         0.00         0.00         0.00
+  resample_us              18.13        16.94        25.40        16.29        34.52
+  sic_us                   17.28        14.82        32.74        14.33        42.21
+  sensing_us                0.00         0.00         0.00         0.00         0.00
+  e2e_us                   35.63        31.88        60.91        30.71        74.46
+  --------------------------------------------------------------------------------
+
+Lifecycle / Measurement Contract:
+  startup_ready_ms:                  1.280
+  drain_tail_ms:                     0.299
+  rx_total_received_samples:         733597600
+  rx_read_msps (over cold_total):    735.98 MS/s
+  warmup_windows:                    0
+  measure_windows_requested:         0
+  measure_windows_actual:            200
+  steady_interval_s:                 0.994461
+  steady_interval_boundary:          first measured commit_time .. last measured commit_time
+  steady_span_windows:               199
+  steady_lookahead_ms:               0.075 (first push -> first measured commit)
+  steady_window_us:                  4997.29 us/window
+  steady_window_rate:                200.11 win/s
+  steady_window_sample_throughput:   0.80 MS/s
+
+Steady-Region Service Times (Completed Windows: 200):
+  --------------------------------------------------------------------------------
+  Phase                  Mean (us)     P50 (us)     P95 (us)     P99 (us)     n
+  --------------------------------------------------------------------------------
+  convert_us                0.00         0.00         0.00         0.00       200
+  resample_us              18.13        16.94        25.40        29.74       200
+  sic_us                   17.28        14.82        32.74        41.84       200
+  sensing_us                0.00         0.00         0.00         0.00       200
+  e2e_us                   35.63        31.88        60.91        69.76       200
+  --------------------------------------------------------------------------------
+
+Fixed-Frequency Tone Cancellation:
+  applied_fs_hz=737280000.0 tone_hz=-232960000.000 f0/fs=-0.316 period=288 cycles=-91 Np=14745600 Nt=368640 crossfade=256
+  raw_queue=65536 x 32 samples  kernel=avx2
+  source_read_calls=11198 source_samples=733872128 source_error_reads=0
+  queued_samples=733872128 dropped_samples=0 overflow_drops=0
+  consumed_samples=733597600 pending_samples=274528 max_pending_samples=1114112 conservation=PASS
+  training_windows=50 model_updates=50 model_rejects=0 partial_training_bypasses=0 epoch_resets=0
+  cancelled_samples=733597600 bypassed_samples=0 gaps_forwarded=0 gap_samples_forwarded=0
+  model_generation=50 |c|=344.6067 phase_rad=2.2486 epoch=722534400
+  read_calls=22469 empty_reads=0 estimate_cpu_us=4166.07 cancel_cpu_us=65624.66 reader_cpu_us=990920.93
+
+RX Diagnostics (cumulative):
+  read_calls=22469 samples=733597600 bytes=2934390400
+  published=200 dropped=0 slot_copy_bytes=3200000
+  stream_buf_resize_count=1 zero_init_bytes=147072 compact_move_bytes=78400 max_buffered_samples=36768
+  read_us=992295.9 assemble_us=16.9 slot_copy_us=185.7 dispatch_us=150.8 ledger_wait_us=585.5
+
+System Throughput (Burst-level multi-core):
+  DSP Workers Configured:                     1
+  Completed Windows:                        200
+  Total Wall Time:                        0.997 s
+  Effective Window Interval:            4983.80 us/window
+  Sustained Window Rate:                 200.65 win/s
+  Effective Native Sample Throughput:      0.80 MS/s
+  Effective Resample Equivalent:          18.13 us/window
+
+Per-Worker Distribution (DSP Workers: 1):
+  -----------------------------------------------------------------------------
+  Worker       Windows  Share(%)  Mean e2e(us)  Mean resample(us)  Mean sic(us)
+  -----------------------------------------------------------------------------
+  0                200     100.0         35.63              18.13         17.28
+  -----------------------------------------------------------------------------
+  Load Balance (max/min):            1.00x
+
+SIC / Sensing Metrics:
+  SIC Executed Windows:                     200
+  SIC Committed Windows:                      0 (0.0%)
+  Mean Actual Suppression:           0.00 dB
+  Radar Executed Windows:                     0
+  Radar SFD Detection Count:                  0 / 0 (0.0%)
+================================================================================
+
+[Benchmark] Released lock /tmp/uwb-sic-benchmark.lock
+##### final_off_r2
+[Benchmark] Waiting for exclusive lock /tmp/uwb-sic-benchmark.lock...
+[Benchmark] Acquired exclusive lock /tmp/uwb-sic-benchmark.lock
+Starting UHD SC16 Pipeline...
+  Source:        Replay (/tmp/ftc/loop_1s.sc16)
+  Native Rate:   737.28 MS/s
+  Work Rate:     998.4 MS/s
+  Schedule:      t0=0 samples, period=3.6864e+06 samples (5 ms)
+  Window Size:   pre=400, cap=3200, post=400 (total=4000)
+  Consumer:      sic
+  Replay Mode:   paced
+  Pool Size:     8
+  Max Windows:   200
+  DSP Workers:   1
+  DSP Affinity:  unpinned
+  Resampler:     profile=quality_minorder, workers=1, experiment=fixed_phase
+  SIC:           policy=auto, backend=ipatov, code=10, roi=[478,606), taps=20
+  SIC Template:  reference_preamble.bin (default)
+  Tone Cancel:   disabled
+  Affinity:      RX=-1, DSP=-1
+
+
+================================================================================
+                    UHD SC16 Direct RX Pipeline Results
+================================================================================
+Ledger Invariants Check: PASS
+Source State: started=yes failed=no error=<none>
+Runtime Verdict: PASS
+
+Pipeline Summary:
+  Offered Windows:                          200
+  Admitted Windows:                         200
+  Completed Windows:                        200
+  Dropped Windows (Buffer Full):              0
+  Invalid Gap Windows:                        0
+  Cancelled Windows:                          0
+  Processing Failed:                          0
+  Total Samples Processed:            733597200
+  Sample Rate:                       737.3 MS/s
+  Total Wall Time:                   0.997 s
+
+Phase Timing Statistics (Completed Windows: 200):
+  --------------------------------------------------------------------------------
+  Phase                  Mean (us)     P50 (us)     P95 (us)     Min (us)     Max (us)
+  --------------------------------------------------------------------------------
+  slice_us                  0.00         0.00         0.00         0.00         0.00
+  queue_us                  0.88         0.71         2.06         0.43         3.49
+  convert_us                0.00         0.00         0.00         0.00         0.00
+  resample_us              17.73        16.88        22.80        16.36        39.80
+  sic_us                   16.66        15.16        27.22        14.32        71.34
+  sensing_us                0.00         0.00         0.00         0.00         0.00
+  e2e_us                   34.58        32.17        50.34        30.90       111.91
+  --------------------------------------------------------------------------------
+
+Lifecycle / Measurement Contract:
+  startup_ready_ms:                  1.569
+  drain_tail_ms:                     0.257
+  rx_total_received_samples:         733597200
+  rx_read_msps (over cold_total):    735.87 MS/s
+  warmup_windows:                    0
+  measure_windows_requested:         0
+  measure_windows_actual:            200
+  steady_interval_s:                 0.994905
+  steady_interval_boundary:          first measured commit_time .. last measured commit_time
+  steady_span_windows:               199
+  steady_lookahead_ms:               0.118 (first push -> first measured commit)
+  steady_window_us:                  4999.52 us/window
+  steady_window_rate:                200.02 win/s
+  steady_window_sample_throughput:   0.80 MS/s
+
+Steady-Region Service Times (Completed Windows: 200):
+  --------------------------------------------------------------------------------
+  Phase                  Mean (us)     P50 (us)     P95 (us)     P99 (us)     n
+  --------------------------------------------------------------------------------
+  convert_us                0.00         0.00         0.00         0.00       200
+  resample_us              17.73        16.88        22.80        36.94       200
+  sic_us                   16.66        15.16        27.22        36.78       200
+  sensing_us                0.00         0.00         0.00         0.00       200
+  e2e_us                   34.58        32.17        50.34        74.58       200
+  --------------------------------------------------------------------------------
+
+System Throughput (Burst-level multi-core):
+  DSP Workers Configured:                     1
+  Completed Windows:                        200
+  Total Wall Time:                        0.997 s
+  Effective Window Interval:            4984.58 us/window
+  Sustained Window Rate:                 200.62 win/s
+  Effective Native Sample Throughput:      0.80 MS/s
+  Effective Resample Equivalent:          17.73 us/window
+
+Per-Worker Distribution (DSP Workers: 1):
+  -----------------------------------------------------------------------------
+  Worker       Windows  Share(%)  Mean e2e(us)  Mean resample(us)  Mean sic(us)
+  -----------------------------------------------------------------------------
+  0                200     100.0         34.58              17.73         16.66
+  -----------------------------------------------------------------------------
+  Load Balance (max/min):            1.00x
+
+SIC / Sensing Metrics:
+  SIC Executed Windows:                     200
+  SIC Committed Windows:                      0 (0.0%)
+  Mean Actual Suppression:           0.00 dB
+  Radar Executed Windows:                     0
+  Radar SFD Detection Count:                  0 / 0 (0.0%)
+================================================================================
+
+[Benchmark] Released lock /tmp/uwb-sic-benchmark.lock
+##### cap40_off
+Starting UHD SC16 Pipeline...
+  Source:        Replay (../testdata/capture_compare_20261115_ch3/rx_ch3_rx1_40ms.sc16)
+  Native Rate:   737.28 MS/s
+  Work Rate:     998.4 MS/s
+  Schedule:      t0=0 samples, period=3.6864e+06 samples (5 ms)
+  Window Size:   pre=0, cap=737280, post=0 (total=737280)
+  Consumer:      both
+  Replay Mode:   fullspeed
+  Pool Size:     8
+  Max Windows:   8
+  DSP Workers:   1
+  DSP Affinity:  unpinned
+  Resampler:     profile=quality_minorder, workers=1, experiment=fixed_phase
+  SIC:           policy=auto, backend=ipatov, code=10, roi=[0,64), taps=20
+  SIC Template:  ../testdata/reference_preamble_code10_998p4.cf32
+  Tone Cancel:   disabled
+  Affinity:      RX=-1, DSP=-1
+
+
+================================================================================
+                    UHD SC16 Direct RX Pipeline Results
+================================================================================
+Ledger Invariants Check: PASS
+Source State: started=yes failed=no error=<none>
+Runtime Verdict: PASS
+
+Pipeline Summary:
+  Offered Windows:                            8
+  Admitted Windows:                           8
+  Completed Windows:                          8
+  Dropped Windows (Buffer Full):              0
+  Invalid Gap Windows:                        0
+  Cancelled Windows:                          0
+  Processing Failed:                          0
+  Total Samples Processed:             26542080
+  Sample Rate:                       737.3 MS/s
+  Total Wall Time:                   0.105 s
+
+Phase Timing Statistics (Completed Windows: 8):
+  --------------------------------------------------------------------------------
+  Phase                  Mean (us)     P50 (us)     P95 (us)     Min (us)     Max (us)
+  --------------------------------------------------------------------------------
+  slice_us                  0.00         0.00         0.00         0.00         0.00
+  queue_us               8650.45      9433.42     18185.81       378.23     18185.81
+  convert_us                0.00         0.00         0.00         0.00         0.00
+  resample_us            3488.58      3404.24      4285.33      3309.86      4285.33
+  sic_us                 1228.75      1119.38      2189.79       740.25      2189.79
+  sensing_us              686.45       688.92       700.96       668.12       700.96
+  e2e_us                 5405.75      5213.94      6682.63      4834.75      6682.63
+  --------------------------------------------------------------------------------
+
+Lifecycle / Measurement Contract:
+  startup_ready_ms:                  52.999
+  drain_tail_ms:                     5.287
+  rx_total_received_samples:         26542080
+  rx_read_msps (over cold_total):    252.31 MS/s
+  warmup_windows:                    0
+  measure_windows_requested:         0
+  measure_windows_actual:            8
+  steady_interval_s:                 0.036610
+  steady_interval_boundary:          first measured commit_time .. last measured commit_time
+  steady_span_windows:               7
+  steady_lookahead_ms:               7.070 (first push -> first measured commit)
+  steady_window_us:                  5230.00 us/window
+  steady_window_rate:                191.20 win/s
+  steady_window_sample_throughput:   140.97 MS/s
+
+Steady-Region Service Times (Completed Windows: 8):
+  --------------------------------------------------------------------------------
+  Phase                  Mean (us)     P50 (us)     P95 (us)     P99 (us)     n
+  --------------------------------------------------------------------------------
+  convert_us                0.00         0.00         0.00         0.00         8
+  resample_us            3488.58      3404.24      4285.33      4285.33         8
+  sic_us                 1228.75      1119.38      2189.79      2189.79         8
+  sensing_us              686.45       688.92       700.96       700.96         8
+  e2e_us                 5405.75      5213.94      6682.63      6682.63         8
+  --------------------------------------------------------------------------------
+
+System Throughput (Burst-level multi-core):
+  DSP Workers Configured:                     1
+  Completed Windows:                          8
+  Total Wall Time:                        0.105 s
+  Effective Window Interval:           13149.66 us/window
+  Sustained Window Rate:                  76.05 win/s
+  Effective Native Sample Throughput:     56.07 MS/s
+  Effective Resample Equivalent:        3488.58 us/window
+
+Per-Worker Distribution (DSP Workers: 1):
+  -----------------------------------------------------------------------------
+  Worker       Windows  Share(%)  Mean e2e(us)  Mean resample(us)  Mean sic(us)
+  -----------------------------------------------------------------------------
+  0                  8     100.0       5405.75            3488.58       1228.75
+  -----------------------------------------------------------------------------
+  Load Balance (max/min):            1.00x
+
+SIC / Sensing Metrics:
+  SIC Executed Windows:                       8
+  SIC Committed Windows:                      0 (0.0%)
+  Mean Actual Suppression:           0.00 dB
+  Radar Executed Windows:                     8
+  Radar SFD Detection Count:                  0 / 8 (0.0%)
+================================================================================
+
+##### cap40_on
+Starting UHD SC16 Pipeline...
+  Source:        Replay (../testdata/capture_compare_20261115_ch3/rx_ch3_rx1_40ms.sc16)
+  Native Rate:   737.28 MS/s
+  Work Rate:     998.4 MS/s
+  Schedule:      t0=0 samples, period=3.6864e+06 samples (5 ms)
+  Window Size:   pre=0, cap=737280, post=0 (total=737280)
+  Consumer:      both
+  Replay Mode:   fullspeed
+  Pool Size:     8
+  Max Windows:   8
+  DSP Workers:   1
+  DSP Affinity:  unpinned
+  Resampler:     profile=quality_minorder, workers=1, experiment=fixed_phase
+  SIC:           policy=auto, backend=ipatov, code=10, roi=[0,64), taps=20
+  SIC Template:  ../testdata/reference_preamble_code10_998p4.cf32
+  Tone Cancel:   fixed f0=-232960000.000000 Hz, period=20.000000 ms, training=0.500000 ms, crossfade=256, raw queue=65536x128
+  Affinity:      RX=-1, DSP=-1
+
+
+================================================================================
+                    UHD SC16 Direct RX Pipeline Results
+================================================================================
+Ledger Invariants Check: PASS
+Source State: started=yes failed=no error=<none>
+Runtime Verdict: PASS
+
+Pipeline Summary:
+  Offered Windows:                            8
+  Admitted Windows:                           8
+  Completed Windows:                          8
+  Dropped Windows (Buffer Full):              0
+  Invalid Gap Windows:                        0
+  Cancelled Windows:                          0
+  Processing Failed:                          0
+  Total Samples Processed:             26542080
+  Sample Rate:                       737.3 MS/s
+  Total Wall Time:                   0.102 s
+
+Phase Timing Statistics (Completed Windows: 8):
+  --------------------------------------------------------------------------------
+  Phase                  Mean (us)     P50 (us)     P95 (us)     Min (us)     Max (us)
+  --------------------------------------------------------------------------------
+  slice_us                  0.00         0.00         0.00         0.00         0.00
+  queue_us               9035.12      9888.36     15455.51       188.05     15455.51
+  convert_us                0.00         0.00         0.00         0.00         0.00
+  resample_us            3727.34      3603.80      5046.08      3303.42      5046.08
+  sic_us                 1086.71      1077.84      2243.05       573.52      2243.05
+  sensing_us              712.85       714.85       721.45       703.64       721.45
+  e2e_us                 5529.72      5527.31      7150.81      4719.51      7150.81
+  --------------------------------------------------------------------------------
+
+Lifecycle / Measurement Contract:
+  startup_ready_ms:                  45.655
+  drain_tail_ms:                     8.798
+  rx_total_received_samples:         26542080
+  rx_read_msps (over cold_total):    260.40 MS/s
+  warmup_windows:                    0
+  measure_windows_requested:         0
+  measure_windows_actual:            8
+  steady_interval_s:                 0.037169
+  steady_interval_boundary:          first measured commit_time .. last measured commit_time
+  steady_span_windows:               7
+  steady_lookahead_ms:               7.345 (first push -> first measured commit)
+  steady_window_us:                  5309.83 us/window
+  steady_window_rate:                188.33 win/s
+  steady_window_sample_throughput:   138.85 MS/s
+
+Steady-Region Service Times (Completed Windows: 8):
+  --------------------------------------------------------------------------------
+  Phase                  Mean (us)     P50 (us)     P95 (us)     P99 (us)     n
+  --------------------------------------------------------------------------------
+  convert_us                0.00         0.00         0.00         0.00         8
+  resample_us            3727.34      3603.80      5046.08      5046.08         8
+  sic_us                 1086.71      1077.84      2243.05      2243.05         8
+  sensing_us              712.85       714.85       721.45       721.45         8
+  e2e_us                 5529.72      5527.31      7150.81      7150.81         8
+  --------------------------------------------------------------------------------
+
+Fixed-Frequency Tone Cancellation:
+  applied_fs_hz=737280000.0 tone_hz=-232960000.000 f0/fs=-0.316 period=288 cycles=-91 Np=14745600 Nt=368640 crossfade=256
+  raw_queue=65536 x 128 samples  kernel=avx2
+  source_read_calls=451 source_samples=29491200 source_error_reads=0
+  queued_samples=29491200 dropped_samples=0 overflow_drops=0
+  consumed_samples=26542080 pending_samples=2949120 max_pending_samples=2949120 conservation=PASS
+  training_windows=2 model_updates=2 model_rejects=0 partial_training_bypasses=0 epoch_resets=0
+  cancelled_samples=26542080 bypassed_samples=0 gaps_forwarded=0 gap_samples_forwarded=0
+  model_generation=2 |c|=344.6067 phase_rad=2.2486 epoch=14745600
+  read_calls=351 empty_reads=0 estimate_cpu_us=323.10 cancel_cpu_us=6080.90 reader_cpu_us=29142.60
+
+System Throughput (Burst-level multi-core):
+  DSP Workers Configured:                     1
+  Completed Windows:                          8
+  Total Wall Time:                        0.102 s
+  Effective Window Interval:           12741.09 us/window
+  Sustained Window Rate:                  78.49 win/s
+  Effective Native Sample Throughput:     57.87 MS/s
+  Effective Resample Equivalent:        3727.34 us/window
+
+Per-Worker Distribution (DSP Workers: 1):
+  -----------------------------------------------------------------------------
+  Worker       Windows  Share(%)  Mean e2e(us)  Mean resample(us)  Mean sic(us)
+  -----------------------------------------------------------------------------
+  0                  8     100.0       5529.72            3727.34       1086.71
+  -----------------------------------------------------------------------------
+  Load Balance (max/min):            1.00x
+
+SIC / Sensing Metrics:
+  SIC Executed Windows:                       8
+  SIC Committed Windows:                      0 (0.0%)
+  Mean Actual Suppression:           0.00 dB
+  Radar Executed Windows:                     8
+  Radar SFD Detection Count:                  0 / 8 (0.0%)
+================================================================================
+

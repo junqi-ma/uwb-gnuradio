@@ -9,6 +9,7 @@
  */
 
 #include <gnuradio/uwb/uwb_uhd_sc16_pipeline.h>
+#include <gnuradio/uwb/uwb_fixed_tone_cancel_source.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
 #include <gnuradio/uwb/uwb_defaults.h>
 #include <volk/volk.h>
@@ -38,6 +39,14 @@
 
 #if defined(__AVX2__) && defined(__FMA__)
 #include <immintrin.h>
+#endif
+
+#if defined(UWB_HAVE_UHD) && (UWB_HAVE_UHD)
+#include <uhd/usrp/multi_usrp.hpp>
+#include <uhd/stream.hpp>
+#include <uhd/types/metadata.hpp>
+#include <uhd/types/stream_cmd.hpp>
+#include <uhd/exception.hpp>
 #endif
 
 #ifndef UWB_TESTDATA_DIR
@@ -462,6 +471,16 @@ bool ReplaySc16Source::open()
     return true;
 }
 
+bool ReplaySc16Source::start_stream()
+{
+    // Paced replay is relative to the instant streaming starts, never to
+    // open(): the pipeline opens the source before its worker-ready barrier,
+    // so reusing open()'s timestamp would release a multi-millisecond burst at
+    // full speed.  Unpaced replay is unaffected.
+    start_time_ = std::chrono::steady_clock::now();
+    return true;
+}
+
 void ReplaySc16Source::close()
 {
     if (fd_ >= 0) {
@@ -529,11 +548,6 @@ size_t ReplaySc16Source::read_samples(std::complex<int16_t>* dest,
 // UhdDeviceSc16Source
 // ---------------------------------------------------------------------------
 #if defined(UWB_HAVE_UHD) && (UWB_HAVE_UHD)
-#include <uhd/usrp/multi_usrp.hpp>
-#include <uhd/stream.hpp>
-#include <uhd/types/metadata.hpp>
-#include <uhd/types/stream_cmd.hpp>
-#include <uhd/exception.hpp>
 
 struct UhdDeviceSc16Source::Impl {
     uhd::usrp::multi_usrp::sptr usrp;
@@ -781,6 +795,27 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
         }
     }
 
+    // Fixed-frequency CW cancellation: an explicit opt-in decorator that sits
+    // between the source and the window assembler.  When disabled nothing is
+    // wrapped, so the original data path stays bit-identical.
+    fixed_tone_source_ = nullptr;
+    if (cfg_.fixed_tone_cancel_enable) {
+        core::FixedToneCancelConfig tone_cfg;
+        tone_cfg.enable = true;
+        tone_cfg.sample_rate = cfg_.native_rate;
+        tone_cfg.tone_frequency_hz = cfg_.fixed_tone_cancel_frequency_hz;
+        tone_cfg.period_s = cfg_.fixed_tone_cancel_period_s;
+        tone_cfg.training_s = cfg_.fixed_tone_cancel_training_s;
+        tone_cfg.crossfade_samples = cfg_.fixed_tone_cancel_crossfade_samples;
+        auto stage = std::make_unique<FixedToneCancelSc16Source>(
+            std::move(source_),
+            tone_cfg,
+            cfg_.fixed_tone_cancel_block_samples,
+            cfg_.fixed_tone_cancel_queue_blocks);
+        fixed_tone_source_ = stage.get();
+        source_ = std::move(stage);
+    }
+
     // Contract C1: one lock-free SPSC ring per worker.  pools_[w] is produced
     // only by rx_thread_ and consumed only by dsp_threads_[w], so the
     // single-producer / single-consumer guarantee is preserved per pool.
@@ -928,6 +963,11 @@ void UhdSc16Pipeline::stop()
         stop_requested_.store(true, std::memory_order_relaxed);
     }
     ready_cv_.notify_all();
+    // Unblock a source that waits on its own condition variable (the
+    // fixed-tone stage does) so wait() cannot deadlock behind a read.
+    if (source_) {
+        source_->request_stop();
+    }
 }
 
 void UhdSc16Pipeline::wait()
@@ -1498,6 +1538,19 @@ void UhdSc16Pipeline::rx_producer_loop()
             if (source_failed()) {
                 source_fatal = true;
                 break;
+            }
+            // A source may also report a fatal error on its own (the
+            // fixed-tone stage wraps another source and must not disguise a
+            // reader-thread failure as a short read).
+            {
+                std::string wrapped_error;
+                if (source_->fatal_error(&wrapped_error)) {
+                    set_source_error(wrapped_error.empty()
+                                         ? std::string("stream source reported a fatal error")
+                                         : wrapped_error);
+                    source_fatal = true;
+                    break;
+                }
             }
             if (meta.is_eof) {
                 eof_hit = true;

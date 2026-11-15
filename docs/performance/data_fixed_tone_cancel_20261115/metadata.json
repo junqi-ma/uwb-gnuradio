@@ -1,0 +1,48 @@
+{
+  "task": "docs/performance/OpenCode_固定频率单音消除模块开发任务书_2026-11-15.md",
+  "report": "docs/performance/固定频率单音消除_C++模块集成开发报告_2026-11-15.md",
+  "head_at_start": "0e0c2301f0e322518444deb887e568dadfa883d6",
+  "build_dir": "gr-uwb/build-fixed-tone-cancel",
+  "install": "none (no /usr/local install performed)",
+  "cpu": "AMD Ryzen 7 9700X 8-Core (16 threads)",
+  "compiler": "c++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+  "release_flags": "-O3 -DNDEBUG (library); AVX2 kernel via __attribute__((target(\"avx2\"))), runtime dispatch",
+  "benchmark_lock": "/tmp/uwb-sic-benchmark.lock",
+  "configuration": {
+    "sample_rate_hz": 737280000.0,
+    "tone_frequency_hz": -232960000.0,
+    "frequency_ratio": -0.3159722222222222,
+    "period_samples": 288,
+    "cycles_per_period": -91,
+    "update_period_s": 0.02,
+    "period_length_samples": 14745600,
+    "training_s": 0.0005,
+    "training_samples": 368640,
+    "crossfade_samples": 256,
+    "raw_block_samples": 65536,
+    "raw_queue_blocks": 32
+  },
+  "artifacts": {
+    "benchmark_core_3sessions.txt": "production core benchmark, 3 sessions, ABBA (two-pass vs fused)",
+    "verify_capture_40ms.json": "40 ms capture: independent numpy reference diff, coherent residual, autocorr and code-10 template metrics",
+    "models_40ms.csv": "per-update model printed by the production decorator on the 40 ms capture",
+    "paced_pipeline_runs.txt": "full pipeline paced runs (disabled/enabled) + 40 ms functional runs (SIC/CIR coverage)",
+    "ctest_full_serial.txt": "full serial CTest output, final build (83 tests, 82 pass, 1 skip, 118.52 s)",
+    "verify_capture_reference.py": "independent fixed-frequency reference and metrics (no C++ core calls)"
+  },
+  "large_files_not_in_git": [
+    "/tmp/uwb_ftc_clean_40ms.sc16 (117.9 MB, clean 40 ms stream)",
+    "/tmp/uwb_ftc_loop_1s.sc16 (2.95 GB, 25x concatenated 40 ms capture used for the 1 s paced test)"
+  ],
+  "source_sha256": {
+    "gr-uwb/include/gnuradio/uwb/uwb_fixed_tone_cancel_core.h": "bdea096200b1156a54e439d44103ec6d9ea0030c367eddcb40e9c916dfe9ae02",
+    "gr-uwb/include/gnuradio/uwb/uwb_fixed_tone_cancel_source.h": "f21680335bce533254863202aeb9388671dd964ffd425a4228e47f9dfd77c7d2",
+    "gr-uwb/lib/uwb_fixed_tone_cancel_core.cc": "5dd85d48ac547c203fdc443fee2b3171576591395f6b39ca6c6349677b47f6ce",
+    "gr-uwb/lib/uwb_fixed_tone_cancel_source.cc": "b7f381949c3b1c912ed82e49be1695bdfb4b0d0d196614fbb3b58bf6b6397271"
+  },
+  "scope_notes": [
+    "Single-channel native pipeline only; no hardware run, no MATLAB cross-check.",
+    "PSDU/FCS/PER and CIR/weak-target pairing not established (SIC committed 0/8, radar SFD 0/8 on both configurations).",
+    "The 288-sample period is derived and validated from the configured rate/frequency; unsupported pairs fail closed."
+  ]
+}

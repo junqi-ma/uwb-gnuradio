@@ -372,6 +372,16 @@ if(UWB_HAVE_UHD)
     target_link_libraries(uwb_uhd_sc16_pipeline_runner UHD::UHD)
 endif()
 
+# UHD SC16 direct capture + native-grid packet analysis.
+# Diagnostic counterpart of the GNU Radio capture flow: same UhdDeviceSc16Source
+# the pipeline uses, then the native detector cores over the captured buffer.
+add_executable(uwb_uhd_sc16_capture uwb_uhd_sc16_capture.cc)
+target_link_libraries(uwb_uhd_sc16_capture gnuradio-uwb Threads::Threads)
+target_compile_options(uwb_uhd_sc16_capture PRIVATE -O3 -march=native)
+if(UWB_HAVE_UHD)
+    target_link_libraries(uwb_uhd_sc16_capture UHD::UHD)
+endif()
+
 ########################################################################
 # Round-2 review R2: the runner used to `return 0` unconditionally, so a
 # failed run (no source, source start failure, broken ledger) looked like
@@ -406,6 +416,18 @@ target_link_libraries(benchmark_sc16_burst_core gnuradio-uwb Threads::Threads)
 target_compile_options(benchmark_sc16_burst_core PRIVATE -O3 -march=native)
 target_compile_definitions(benchmark_sc16_burst_core PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
+# 2026-11-15: fixed-frequency CW cancellation.  The benchmark measures the
+# production core (two-pass vs fused, ABBA); the replay driver runs the real
+# source decorator over a raw SC16 capture and writes the clean stream for the
+# independent Python reference.
+add_executable(benchmark_fixed_tone_cancel benchmark_fixed_tone_cancel.cc)
+target_link_libraries(benchmark_fixed_tone_cancel gnuradio-uwb Threads::Threads)
+target_compile_options(benchmark_fixed_tone_cancel PRIVATE -O3 -march=native)
+
+add_executable(fixed_tone_cancel_replay fixed_tone_cancel_replay.cc)
+target_link_libraries(fixed_tone_cancel_replay gnuradio-uwb Threads::Threads)
+target_compile_options(fixed_tone_cancel_replay PRIVATE -O3 -march=native)
 
 # 2026-11-11 round 2: steady-state pipeline benchmark driver (owner: main agent).
 add_executable(benchmark_sc16_pipeline_steady benchmark_sc16_pipeline_steady.cc)

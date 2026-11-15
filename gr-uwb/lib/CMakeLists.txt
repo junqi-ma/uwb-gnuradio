@@ -85,6 +85,8 @@ list(APPEND uwb_sources
     uwb_preamble_sic_core.cc
     uwb_preamble_sic.cc
     uwb_sic_unified.cc
+    uwb_fixed_tone_cancel_core.cc
+    uwb_fixed_tone_cancel_source.cc
     uwb_uhd_sc16_pipeline.cc
 )
 if(UWB_HAVE_UHD)
@@ -242,6 +244,8 @@ list(APPEND test_uwb_sources
     qa_uwb_preamble_sic_core.cc
     qa_uwb_preamble_sic.cc
     qa_uwb_sic_unified.cc
+    qa_uwb_fixed_tone_cancel_core.cc
+    qa_uwb_fixed_tone_cancel_source.cc
     qa_uwb_uhd_sc16_pipeline.cc
     # 2026-11-11 round 2: resampler burst-mode optimisations (lazy schedule
     # tables, kernel A/B).  Owner: subagent A.

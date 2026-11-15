@@ -13,6 +13,7 @@ using std::isinf;
 using std::isnan;
 
 #include <gnuradio/uwb/uwb_uhd_sc16_pipeline.h>
+#include <gnuradio/uwb/uwb_fixed_tone_cancel_source.h>
 
 #include "pipeline_bench_setup.h"
 #include "pipeline_result_json.h"
@@ -368,6 +369,13 @@ void print_help(const char* prog_name)
               << "  --sic-sync-template <path>  One SYNC symbol CF32 @998.4M (default: testdata/reference_preamble.bin, code 9)\n"
               << "  --sic-roi-margin <n>        SIC coarse-search half-width around the expected preamble (default: 64)\n"
               << "  --sic-tap-count <n>         SIC discrete-CIR tap count (default: 20)\n"
+              << "  --tone-cancel               Enable fixed-frequency CW cancellation before windowing\n"
+              << "  --tone-cancel-frequency <hz> Configured RX baseband tone (default: -232.96e6)\n"
+              << "  --tone-cancel-period-ms <ms> Model update period (default: 20)\n"
+              << "  --tone-cancel-training-ms <ms> Training window per period (default: 0.5)\n"
+              << "  --tone-cancel-crossfade <n> Cross-fade samples between models (default: 256)\n"
+              << "  --tone-cancel-block-samples <n> Raw queue block size (default: 65536)\n"
+              << "  --tone-cancel-queue-blocks <n> Raw queue depth in blocks (default: 32)\n"
               << "  --benchmark                 Acquire exclusive lock /tmp/uwb-sic-benchmark.lock\n"
               << "  --help, -h                  Show this help message and exit\n"
               << "\n"
@@ -723,6 +731,59 @@ int main(int argc, char* argv[])
                 return 1;
             }
             cfg.sic_cfg.tap_count = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--tone-cancel") {
+            cfg.fixed_tone_cancel_enable = true;
+        } else if (arg == "--tone-cancel-frequency") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --tone-cancel-frequency requires Hz\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.fixed_tone_cancel_frequency_hz = std::stod(argv[++i]);
+            cfg.fixed_tone_cancel_enable = true;
+        } else if (arg == "--tone-cancel-period-ms") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --tone-cancel-period-ms requires ms\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.fixed_tone_cancel_period_s = std::stod(argv[++i]) * 1e-3;
+            cfg.fixed_tone_cancel_enable = true;
+        } else if (arg == "--tone-cancel-training-ms") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --tone-cancel-training-ms requires ms\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.fixed_tone_cancel_training_s = std::stod(argv[++i]) * 1e-3;
+            cfg.fixed_tone_cancel_enable = true;
+        } else if (arg == "--tone-cancel-crossfade") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --tone-cancel-crossfade requires samples\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.fixed_tone_cancel_crossfade_samples =
+                static_cast<size_t>(std::stoul(argv[++i]));
+            cfg.fixed_tone_cancel_enable = true;
+        } else if (arg == "--tone-cancel-block-samples") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --tone-cancel-block-samples requires samples\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.fixed_tone_cancel_block_samples =
+                static_cast<size_t>(std::stoul(argv[++i]));
+            cfg.fixed_tone_cancel_enable = true;
+        } else if (arg == "--tone-cancel-queue-blocks") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --tone-cancel-queue-blocks requires a block count\n";
+                print_help(argv[0]);
+                return 1;
+            }
+            cfg.fixed_tone_cancel_queue_blocks =
+                static_cast<size_t>(std::stoul(argv[++i]));
+            cfg.fixed_tone_cancel_enable = true;
         } else if (arg == "--uhd-args") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --uhd-args requires argument string\n";
@@ -910,6 +971,19 @@ int main(int argc, char* argv[])
               << (cfg.sic_sync_template_file.empty() ? std::string("reference_preamble.bin (default)")
                                                      : cfg.sic_sync_template_file)
               << "\n"
+              << "  Tone Cancel:   "
+              << (cfg.fixed_tone_cancel_enable
+                      ? ("fixed f0=" + std::to_string(cfg.fixed_tone_cancel_frequency_hz) +
+                         " Hz, period=" + std::to_string(cfg.fixed_tone_cancel_period_s * 1e3) +
+                         " ms, training=" +
+                         std::to_string(cfg.fixed_tone_cancel_training_s * 1e3) +
+                         " ms, crossfade=" +
+                         std::to_string(cfg.fixed_tone_cancel_crossfade_samples) +
+                         ", raw queue=" +
+                         std::to_string(cfg.fixed_tone_cancel_block_samples) + "x" +
+                         std::to_string(cfg.fixed_tone_cancel_queue_blocks))
+                      : std::string("disabled"))
+              << "\n"
               << "  Affinity:      RX=" << cfg.cpu_core_rx << ", DSP=" << cfg.cpu_core_dsp << "\n"
               << std::endl;
 
@@ -954,6 +1028,20 @@ int main(int argc, char* argv[])
     const bool source_failed = pipeline.source_failed();
     const std::string source_error = pipeline.source_error();
 
+    // Fixed-frequency CW cancellation stage (nullptr when disabled).
+    const FixedToneCancelSc16Source* tone_stage = pipeline.fixed_tone_source();
+    FixedToneCancelAppliedConfig tone_applied;
+    FixedToneCancelStats tone_stats;
+    bool tone_conserved = true;
+    if (tone_stage != nullptr) {
+        tone_applied = tone_stage->applied_config();
+        tone_stats = tone_stage->stats();
+        tone_conserved = tone_stats.source_samples ==
+                             tone_stats.queued_samples + tone_stats.dropped_samples &&
+                         tone_stats.queued_samples ==
+                             tone_stats.consumed_samples + tone_stats.pending_samples;
+    }
+
     double total_elapsed_s = std::chrono::duration<double>(end_time - start_time).count();
     double startup_ready_ms =
         std::chrono::duration<double, std::milli>(ready_time - start_time).count();
@@ -969,7 +1057,8 @@ int main(int argc, char* argv[])
     // EOF / user stop after a successful start keeps source_started == true and
     // source_failed == false, so it stays a successful run.
     const bool runtime_ok =
-        ready_ok && !pipeline.failed() && inv_ok && source_started && !source_failed;
+        ready_ok && !pipeline.failed() && inv_ok && source_started && !source_failed &&
+        tone_conserved;
 
     // Filter completed windows
     std::vector<WindowResult> completed_windows;
@@ -1267,8 +1356,53 @@ int main(int argc, char* argv[])
     print_steady_row("e2e_us", mst_e2e);
     std::cout << "  --------------------------------------------------------------------------------\n\n";
 
-    if (cfg.enable_rx_diagnostics) {
-        const auto& rx = pipeline.rx_diagnostics();
+    // Fixed-frequency CW cancellation report.  Only printed when the stage was
+    // actually installed; the disabled path has no stage and no counters.
+    if (tone_stage != nullptr) {
+        std::cout << "Fixed-Frequency Tone Cancellation:\n"
+                  << "  applied_fs_hz=" << std::fixed << std::setprecision(1)
+                  << tone_applied.sample_rate
+                  << " tone_hz=" << std::setprecision(3) << tone_applied.tone_frequency_hz
+                  << " f0/fs=" << tone_applied.frequency_ratio
+                  << " period=" << tone_applied.period_samples
+                  << " cycles=" << tone_applied.period_cycles
+                  << " Np=" << tone_applied.period_length_samples
+                  << " Nt=" << tone_applied.training_samples
+                  << " crossfade=" << tone_applied.crossfade_samples << "\n"
+                  << "  raw_queue=" << tone_applied.raw_block_samples << " x "
+                  << tone_applied.raw_queue_blocks << " samples  kernel="
+                  << (tone_applied.active_kernel == 2 ? "avx2" : "scalar") << "\n"
+                  << "  source_read_calls=" << tone_stats.source_read_calls
+                  << " source_samples=" << tone_stats.source_samples
+                  << " source_error_reads=" << tone_stats.source_error_reads << "\n"
+                  << "  queued_samples=" << tone_stats.queued_samples
+                  << " dropped_samples=" << tone_stats.dropped_samples
+                  << " overflow_drops=" << tone_stats.overflow_drops << "\n"
+                  << "  consumed_samples=" << tone_stats.consumed_samples
+                  << " pending_samples=" << tone_stats.pending_samples
+                  << " max_pending_samples=" << tone_stats.max_pending_samples
+                  << " conservation=" << (tone_conserved ? "PASS" : "FAIL") << "\n"
+                  << "  training_windows=" << tone_stats.training_windows
+                  << " model_updates=" << tone_stats.model_updates
+                  << " model_rejects=" << tone_stats.model_rejects
+                  << " partial_training_bypasses=" << tone_stats.partial_training_bypasses
+                  << " epoch_resets=" << tone_stats.epoch_resets << "\n"
+                  << "  cancelled_samples=" << tone_stats.cancelled_samples
+                  << " bypassed_samples=" << tone_stats.bypassed_samples
+                  << " gaps_forwarded=" << tone_stats.gaps_forwarded
+                  << " gap_samples_forwarded=" << tone_stats.gap_samples_forwarded << "\n"
+                  << "  model_generation=" << tone_stats.model_generation
+                  << " |c|=" << std::setprecision(4) << tone_stats.model_amplitude
+                  << " phase_rad=" << tone_stats.model_phase_radians
+                  << " epoch=" << tone_stats.model_epoch << "\n"
+                  << "  read_calls=" << tone_stats.read_calls
+                  << " empty_reads=" << tone_stats.empty_reads
+                  << " estimate_cpu_us=" << std::setprecision(2) << tone_stats.estimate_us
+                  << " cancel_cpu_us=" << tone_stats.cancel_us
+                  << " reader_cpu_us=" << tone_stats.reader_us << "\n\n";
+    }
+
+    if (cfg.enable_rx_diagnostics) {        const auto& rx = pipeline.rx_diagnostics();
         std::cout << "RX Diagnostics (cumulative):\n"
                   << "  read_calls=" << rx.read_calls
                   << " samples=" << rx.samples_read
@@ -1389,6 +1523,64 @@ int main(int argc, char* argv[])
                       bench::json_number(pipeline.commit_diagnostics().callback_us));
     meta.emplace_back("commit_max_out_of_order_span",
                       bench::json_number(pipeline.commit_diagnostics().max_out_of_order_span));
+
+    // Fixed-frequency CW cancellation (only meaningful when the stage exists).
+    meta.emplace_back("tone_cancel_enabled", bench::meta_bool(cfg.fixed_tone_cancel_enable));
+    meta.emplace_back("tone_cancel_stage_present", bench::meta_bool(tone_stage != nullptr));
+    if (tone_stage != nullptr) {
+        meta.emplace_back("tone_cancel_frequency_hz",
+                          bench::json_number(tone_applied.tone_frequency_hz));
+        meta.emplace_back("tone_cancel_frequency_ratio",
+                          bench::json_number(tone_applied.frequency_ratio));
+        meta.emplace_back("tone_cancel_period_samples",
+                          bench::json_number(static_cast<uint64_t>(tone_applied.period_samples)));
+        meta.emplace_back("tone_cancel_period_cycles",
+                          bench::json_number(static_cast<int64_t>(tone_applied.period_cycles)));
+        meta.emplace_back("tone_cancel_period_length_samples",
+                          bench::json_number(tone_applied.period_length_samples));
+        meta.emplace_back("tone_cancel_training_samples",
+                          bench::json_number(static_cast<uint64_t>(tone_applied.training_samples)));
+        meta.emplace_back("tone_cancel_crossfade_samples",
+                          bench::json_number(static_cast<uint64_t>(tone_applied.crossfade_samples)));
+        meta.emplace_back("tone_cancel_raw_block_samples",
+                          bench::json_number(static_cast<uint64_t>(tone_applied.raw_block_samples)));
+        meta.emplace_back("tone_cancel_raw_queue_blocks",
+                          bench::json_number(static_cast<uint64_t>(tone_applied.raw_queue_blocks)));
+        meta.emplace_back("tone_cancel_kernel",
+                          bench::json_number(static_cast<int64_t>(tone_applied.active_kernel)));
+        meta.emplace_back("tone_source_samples",
+                          bench::json_number(tone_stats.source_samples));
+        meta.emplace_back("tone_queued_samples",
+                          bench::json_number(tone_stats.queued_samples));
+        meta.emplace_back("tone_dropped_samples",
+                          bench::json_number(tone_stats.dropped_samples));
+        meta.emplace_back("tone_consumed_samples",
+                          bench::json_number(tone_stats.consumed_samples));
+        meta.emplace_back("tone_pending_samples",
+                          bench::json_number(tone_stats.pending_samples));
+        meta.emplace_back("tone_cancelled_samples",
+                          bench::json_number(tone_stats.cancelled_samples));
+        meta.emplace_back("tone_bypassed_samples",
+                          bench::json_number(tone_stats.bypassed_samples));
+        meta.emplace_back("tone_training_windows",
+                          bench::json_number(tone_stats.training_windows));
+        meta.emplace_back("tone_model_updates",
+                          bench::json_number(tone_stats.model_updates));
+        meta.emplace_back("tone_model_rejects",
+                          bench::json_number(tone_stats.model_rejects));
+        meta.emplace_back("tone_partial_training_bypasses",
+                          bench::json_number(tone_stats.partial_training_bypasses));
+        meta.emplace_back("tone_epoch_resets",
+                          bench::json_number(tone_stats.epoch_resets));
+        meta.emplace_back("tone_gaps_forwarded",
+                          bench::json_number(tone_stats.gaps_forwarded));
+        meta.emplace_back("tone_gap_samples_forwarded",
+                          bench::json_number(tone_stats.gap_samples_forwarded));
+        meta.emplace_back("tone_model_amplitude",
+                          bench::json_number(tone_stats.model_amplitude));
+        meta.emplace_back("tone_estimate_cpu_us", bench::json_number(tone_stats.estimate_us));
+        meta.emplace_back("tone_cancel_cpu_us", bench::json_number(tone_stats.cancel_us));
+    }
 
     if (!bench::write_results_json(json_out, meta, ledger, collected_results)) {
         std::cerr << "Error: cannot write " << json_out << "\n";

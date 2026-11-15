@@ -1,4 +1,51 @@
-# 当前提交快照：Ipatov 前导重构 `template_scale_mismatch` 修复（2026-11-12）
+# 当前提交快照：固定频率单音消除 C++ 模块集成（2026-11-15）
+
+已把"已知固定接收基带单音的幅度/相位估计 + 20 ms 外推 + 连续相减"接入原生
+`UhdSc16Pipeline`，作为**截窗之前**的公共前处理。报告
+`docs/performance/固定频率单音消除_C++模块集成开发报告_2026-11-15.md`，数据
+`docs/performance/data_fixed_tone_cancel_20261115/`，任务书
+`docs/performance/OpenCode_固定频率单音消除模块开发任务书_2026-11-15.md`。
+独立 build `gr-uwb/build-fixed-tone-cancel`；未 install、未推送、未上板。
+- **落点**：`UHD recv → [装饰器] 有界原始 SC16 块环(默认32×65536=8 MiB) →
+  装饰器 read_samples(训练/估计/外推 + 融合 copy_cancel) → 现有窗口拼装 → 原 DSP`。
+  `start_stream()` 仍只在 worker Ready 屏障后；`open()` 只分配。
+- **数学**：`c=(1/Nt)Σx·e^{-jωn}`，int32 折叠 + double 投影（对任意 Nt 与全窗投影
+  等价），288 点周期由 `f0·P/fs` 整数**推导并校验**（默认 −91/288），无短周期
+  显式 unsupported。LUT 量化固定 nearest-even（与 fenv 无关），分量超 int16
+  拒绝且不改旧表。热路径 = load + `_mm256_subs_epi16` + store；AVX2 运行时分派
+  （target attribute，未给全库开 AVX2），scalar/AVX2 逐位相等。
+- **语义**：每周期起点暂存并回放训练窗（不丢样、不等整 20 ms），256 样点交叉渐变；
+  gap/时间戳跳变在正确输出边界给 `is_gap` 并按新 epoch 重新训练（不跨不连续学习）；
+  EOS 训练不足 `partial_training_bypass` 原样输出；队列满非阻塞整块丢弃 + gap。
+  两层 read 计数分开，新增 `source_samples == queued+dropped`、
+  `queued == consumed+pending` 守恒并纳入 runner 的 runtime_ok。
+- **验证**：全量串行 CTest **83 项 82 通过 1 跳过**（`uwb_qa_install_consumer`
+  按设计跳过），0 失败；新增 QA：核心 12 例 + 装饰器/pipeline 8 例。
+  40 ms 实采（固定 −232.96 MHz、20 ms/0.5 ms）与**独立 numpy 固定频率参考
+  29,491,200 复样点逐字节一致（0 差异）**；1 ms 相干抑制 43.0–59.7 dB；
+  自相关中位数 0.640→0.0041；code10 模板 8/8 保留（5 组峰值时间不变，
+  3 组移动 −198/−83/−28 µs，属曲面峰值位置，不是 ToA）。
+- **性能**：核心 65536 样点融合 3.38–3.46 µs、两遍 5.16–5.19 µs
+  （ABBA −32.6…−34.7%）；估算 64.7–66.1 µs、建表 6.7 µs。
+  单通道 737.28 MS/s **paced 回放 1 s：0 丢块、0 gap、50 次模型更新**（默认 8 MiB
+  队列，不绑核，3 次 stage-only + 4 次 pipeline 全 0 丢；整进程绑单核不稳定，
+  同一命令 0 或 ~0.8% 丢）；首样点延迟 0.64–0.83 ms；完整 pipeline 窗口服务时间
+  31.8→32.1/33.0 µs（+0.9%/+3.9%）；另一时段 34.0→35.6/40.7 µs（+3.0%/+4.9%，
+  关闭基线本身也漂到 34.0–34.6 µs）；前处理 `cancel_cpu` 66–69 ms/s（6.6–6.9% 单核）。
+- **顺带修的缺陷**：`ReplaySc16Source` 的 paced 时间基准原本取自 `open()`，
+  而 pipeline 在 Ready 屏障之前 open → `start_stream()` 后全速突发补数据，
+  会打满 8 MiB 环（实测 0.08–0.5% 丢块、首样点 3.48 ms）。改为
+  `start_stream()` 重置基准后同一用例 0 丢块、首样点 0.69 ms（unpaced 路径逐位不变）。
+- **QA 反复运行暴露并修掉一个竞态**：训练窗"还没收到更多数据"曾被误判成 gap
+  （`contiguous_end` 与 `published_end` 取自两次不同 head/tail 观测）→ 模型作废、
+  epoch 前移、该周期旁路。改为同一快照的 `RunSpan`，新增 QA 连跑 12 次与全量复测全绿。
+- **未验证**：上板/UHD 真实溢出、MATLAB、PSDU/FCS/PER、CIR/弱目标保护
+  （40 ms 固定 5 ms 窗网格不对齐包 → SIC committed 0/8、SFD 0/8，两边相同，
+  不是回归证据）、8 Worker、通用 NCO 后端、训练窗碰包鲁棒性。
+
+---
+
+# 历史提交快照：Ipatov 前导重构 `template_scale_mismatch` 修复（2026-11-12）
 
 已交付单 worker 测试配置修正后的重构错误定位与修复。报告见
 `docs/performance/单worker配置修正_Ipatov前导重构错误定位与修复报告_2026-11-12.md`，

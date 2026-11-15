@@ -1,0 +1,54 @@
+##### session 1 #####
+estimate_us median=66.075 min=59.202 max=159.863
+lut_build_us median=6.923 min=5.631 max=24.437
+cell=16384 (single read block)
+  two_pass_us median=1.263 min=1.242 max=1.283
+  fused_us    median=1.012 min=1.002 max=1.042
+  paired_change_pct median=-19.1607 pairs=9
+  fused_logical_gbps=129.518
+cell=65536 (default raw block)
+  two_pass_us median=5.19 min=5.08 max=6.002
+  fused_us    median=3.376 min=3.296 max=6.472
+  paired_change_pct median=-33.9335 pairs=9
+  fused_logical_gbps=155.299
+cell=14745600 (whole 20 ms)
+  two_pass_us median=12490.9 min=8609.14 max=16123.4
+  fused_us    median=8371.62 min=5567.2 max=13486.4
+  paired_change_pct median=-23.6968 pairs=9
+  fused_logical_gbps=14.091
+##### session 2 #####
+estimate_us median=64.692 min=55.966 max=101.392
+lut_build_us median=6.662 min=5.481 max=28.874
+cell=16384 (single read block)
+  two_pass_us median=1.293 min=1.282 max=1.333
+  fused_us    median=1.042 min=1.011 max=1.082
+  paired_change_pct median=-20.1856 pairs=9
+  fused_logical_gbps=125.789
+cell=65536 (default raw block)
+  two_pass_us median=5.159 min=5.13 max=5.19
+  fused_us    median=3.366 min=3.336 max=3.377
+  paired_change_pct median=-34.7354 pairs=9
+  fused_logical_gbps=155.76
+cell=14745600 (whole 20 ms)
+  two_pass_us median=8588.96 min=5916.22 max=15060.8
+  fused_us    median=4622.64 min=3595.71 max=15059.4
+  paired_change_pct median=-39.3624 pairs=9
+  fused_logical_gbps=25.5189
+##### session 3 #####
+estimate_us median=64.783 min=57.008 max=86.624
+lut_build_us median=6.652 min=5.501 max=24.967
+cell=16384 (single read block)
+  two_pass_us median=1.263 min=1.243 max=1.303
+  fused_us    median=1.052 min=1.012 max=1.122
+  paired_change_pct median=-16.7732 pairs=9
+  fused_logical_gbps=124.593
+cell=65536 (default raw block)
+  two_pass_us median=5.19 min=5.099 max=5.451
+  fused_us    median=3.456 min=3.367 max=3.707
+  paired_change_pct median=-32.5752 pairs=9
+  fused_logical_gbps=151.704
+cell=14745600 (whole 20 ms)
+  two_pass_us median=9622.44 min=8961.28 max=12092.5
+  fused_us    median=7585.23 min=5956.42 max=10787.3
+  paired_change_pct median=-20.9781 pairs=9
+  fused_logical_gbps=15.5519
