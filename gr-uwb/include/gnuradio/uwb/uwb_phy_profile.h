@@ -156,6 +156,36 @@ struct Qm35825Profile {
     // LockedBounded only: allow the per-symbol backtrack walk.  Default false:
     // backtracking is exactly how a lock can silently drift onto SYNC #2/#3.
     bool locked_allow_backtrack = false;
+    // LockedBounded only: SYNC-train tracking strategy.
+    //   true  (grid)   -- measure a sparse set of SYNC anchors with the normal
+    //                     +/-track_radius search, fit the period from the
+    //                     anchors, then evaluate every remaining SYNC with ONE
+    //                     correlation at start + round(k*period).  The legacy
+    //                     per-symbol search is 17 lags x 1016 taps per SYNC;
+    //                     this is 1 lag x 1016 taps plus a local power sum.
+    //   false (legacy) -- the original per-SYNC +/-track_radius search.
+    // measured_period always comes from the anchor least-squares fit (never
+    // from the nominal grid), because it feeds integer_chip_grid()/spc_ppm and
+    // the fused-CMF admission.  A degenerate fit falls back to the legacy path.
+    bool locked_grid_timing = true;
+    // Anchor count for the grid fit (clamped to 4..32).  Anchors are spread
+    // from the first confirmed SYNC to the last SYNC of the train.
+    size_t locked_grid_anchor_count = 16;
+    // Minimum anchors that must be found before the grid fit is trusted.
+    size_t locked_grid_min_anchors = 4;
+    // LockedBounded failure path only: when every inner-SYNC probe (m =
+    // 0..locked_inner_symbols) misses, keep probing sparse SYNC anchors on the
+    // known symbol grid before declaring a tracking failure.  A burst
+    // interferer can sit on the first few SYNCs while the tail is clean; the
+    // old code failed the packet without ever looking at the tail.  Normal
+    // packets never execute this path.
+    bool locked_tail_probe = true;
+    // Symbol stride between tail probes (8 -> 32 probes over 256 SYNCs).
+    size_t locked_tail_probe_step = 8;
+    // A tail-probe hit must be confirmed by at least this many neighbouring
+    // grid symbols (m-1, m+1, m+2) at the same threshold, otherwise it is a
+    // +/-locked_roi_samples false alarm and probing continues.
+    size_t locked_tail_probe_confirm = 2;
 
     // ---- Experimental RX fast paths (explicit opt-in) --------------------
     // Defaults keep the legacy algorithms so existing callers are unchanged.
@@ -198,6 +228,29 @@ struct Qm35825Profile {
     // when the caller explicitly supplies it (the SFD-anchored tail profile)
     // and always falls back to the legacy radius if the narrow search misses.
     size_t timing_seed_refine_radius = 0;
+
+    // ---- SFD-anchored CFO refit policy -----------------------------------
+    // `demodulate_one` estimates the carrier offset twice: once from the
+    // Stage-1 SYNC peak train (all repetitions, minus the startup exclusion)
+    // and once from the 40-SYNC tail that the SFD anchor re-tracks.  The second
+    // fit is followed by a full-frame derotation of the whole downstream span,
+    // which is one of the largest single costs in the demodulator (measured
+    // ~200 us/packet on the X410 1 ms captures).
+    //   0 = Legacy: always refit and always run the second rotation.  This is
+    //       the default and is byte-identical to the pre-existing behaviour.
+    //   1 = Auto:   keep the Stage-2 estimate and skip the second rotation when
+    //       (a) the two fits disagree by less than `cfo_refit_skip_rad` of
+    //       accumulated phase over the downstream span, (b) the Stage-2 fit
+    //       used at least `cfo_refit_min_peaks` peaks, and (c) the predicted
+    //       single-pass rotation range provably covers the actual one.  Any
+    //       failed condition falls back to the legacy path (fail-closed).
+    //   2 = Skip:   same as Auto without (a)/(b); the range containment check
+    //       is still enforced.
+    int cfo_refit_mode = 0;
+    // Auto only: maximum |2*pi*delta_f*span/fs| (rad) accepted for the skip.
+    double cfo_refit_skip_rad = 0.10;
+    // Auto only: minimum Stage-2 peaks for the skip.
+    size_t cfo_refit_min_peaks = 64;
 
     // Early termination: stop receiver processing right after Final SFD is verified
     // and preamble_start_sample / CFO are anchored. Skips CIR, PHR, and Payload.

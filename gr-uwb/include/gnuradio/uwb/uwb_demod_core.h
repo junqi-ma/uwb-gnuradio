@@ -614,6 +614,87 @@ inline bool stage_timing(const std::complex<float>* rx,
                 break;
             }
         }
+        if (!found && profile.locked_tail_probe) {
+            // Failure path only.  The leading SYNCs are all below threshold --
+            // typically a burst interferer parked on the first symbols while
+            // the tail of the preamble is clean (measured on the 5.2 m
+            // capture: first_5_max 0.029..0.053, med_tail_32_255 0.14..0.20).
+            // The old code declared a tracking failure without ever looking
+            // past `locked_inner_symbols`.  Keep the bounded ROI (the grid is
+            // known, so only the residual is unknown) and probe sparse tail
+            // anchors on the symbol grid.
+            //
+            // The threshold is the TRACKING threshold, not the acquisition
+            // one: a low-SNR tail sits at 0.14..0.20, well under
+            // radar_verification_threshold (0.25) but far above the per-SYNC
+            // tracking floor.  The neighbour gate below is what keeps a
+            // +/-roi false alarm from being accepted at this lower threshold.
+            const float tail_thr =
+                std::min(profile.radar_verification_threshold, 0.08f);
+            const size_t reps = profile.preamble_repetitions;
+            const size_t step =
+                std::max<size_t>(1, profile.locked_tail_probe_step);
+            const size_t need_confirm =
+                std::max<size_t>(1, profile.locked_tail_probe_confirm);
+            // Two tiers: the locked residual is a few samples, so a narrow
+            // probe finds the clean tail cheaply; only when the whole narrow
+            // sweep fails do we pay for the full bounded ROI.
+            const int64_t tail_radii[2] = {std::min<int64_t>(roi, 32), roi};
+            for (int tier = 0; tier < 2 && !found; ++tier) {
+                if (tier == 1 && tail_radii[1] <= tail_radii[0])
+                    break;
+                const int64_t trad = tail_radii[tier];
+                for (size_t m = inner + 1; m < reps; m += step) {
+                    const int64_t want = static_cast<int64_t>(seed_start) +
+                        static_cast<int64_t>(m) *
+                            static_cast<int64_t>(kQm35SamplesPerSymbol);
+                    if (want + static_cast<int64_t>(L) >
+                        static_cast<int64_t>(n))
+                        break;
+                    ++out.tail_probe_attempts;
+                    int64_t cpos = -1;
+                    float cmet = 0.0f;
+                    std::complex<float> ccorr(0.0f, 0.0f);
+                    if (!local_best(want, trad, tail_thr, &cpos, &cmet, &ccorr,
+                                    /*allow_par_fallback=*/true))
+                        continue;
+                    if (cmet > out.tail_probe_best_metric)
+                        out.tail_probe_best_metric = cmet;
+                    // Consistency gate: a real grid hit is confirmed by its
+                    // neighbouring SYMBOLS.  A false alarm (wrong lag inside
+                    // the ROI) is not, so probing continues instead of
+                    // locking onto a bogus origin.
+                    size_t confirm = 0;
+                    const int64_t nb_delta[3] = {1, 2, -1};
+                    for (int64_t d : nb_delta) {
+                        const int64_t nb = static_cast<int64_t>(m) + d;
+                        if (nb < 0 || nb >= static_cast<int64_t>(reps))
+                            continue;
+                        const int64_t nb_want =
+                            static_cast<int64_t>(seed_start) +
+                            nb * static_cast<int64_t>(kQm35SamplesPerSymbol);
+                        if (nb_want + static_cast<int64_t>(L) >
+                            static_cast<int64_t>(n))
+                            continue;
+                        int64_t np = -1;
+                        float nm = 0.0f;
+                        std::complex<float> nc(0.0f, 0.0f);
+                        if (local_best(nb_want, trad, tail_thr, &np, &nm, &nc))
+                            ++confirm;
+                    }
+                    if (confirm < need_confirm)
+                        continue;
+                    ++out.tail_probe_hits;
+                    out.tail_probe_k = static_cast<int64_t>(m);
+                    pos = cpos;
+                    met = cmet;
+                    corr = ccorr;
+                    used_inner = m;
+                    found = true;
+                    break;
+                }
+            }
+        }
         if (!found) {
             ++out.bounded_failures;
             finish_timing_profile();
@@ -794,6 +875,310 @@ inline bool stage_timing(const std::complex<float>* rx,
     }
     const int64_t period = static_cast<int64_t>(kQm35SamplesPerSymbol);
 
+    // ---- LockedBounded grid tracking: sparse anchors + single point --------
+    // The locked contract already knows the symbol grid (the target lock
+    // predicted this origin), so the only unknowns are the residual origin and
+    // the residual period.  Measure a sparse set of SYNC anchors with the
+    // normal +/-track_radius search, fit period+origin from the anchors, then
+    // evaluate every other SYNC with ONE correlation at start+round(k*period).
+    // The peak train keeps the same meaning (CFO needs peak_corr phases, CIR
+    // needs the fitted period), at ~1/17 of the per-symbol search cost.
+    // measured_period MUST come from the anchor fit: it feeds
+    // integer_chip_grid()/spc_ppm and the fused-CMF admission, so a period
+    // that degenerates to the nominal 1016 would silently disable the
+    // Full->Bypass (grid_reject) protection for an untrimmed clock.
+    bool grid_applied = false;
+    double grid_period = static_cast<double>(period);
+    int64_t grid_start = start;
+    // Windowed |x|^2 with eight independent accumulators.  A single-accumulator
+    // float reduction cannot be vectorised without -ffast-math, and the power
+    // turned out to be HALF the cost of the single-point stage (measured 2x
+    // faster with eight accumulators).  The summation order differs from the
+    // scalar loop, but this value only normalises the grid metric; the legacy
+    // path keeps its own O(1) power update untouched.
+    auto window_power = [](const std::complex<float>* x, size_t count) -> float {
+        const float* f = reinterpret_cast<const float*>(x);
+        const size_t m = 2 * count;
+        float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
+        float a4 = 0.f, a5 = 0.f, a6 = 0.f, a7 = 0.f;
+        size_t i = 0;
+        for (; i + 8 <= m; i += 8) {
+            a0 += f[i + 0] * f[i + 0];
+            a1 += f[i + 1] * f[i + 1];
+            a2 += f[i + 2] * f[i + 2];
+            a3 += f[i + 3] * f[i + 3];
+            a4 += f[i + 4] * f[i + 4];
+            a5 += f[i + 5] * f[i + 5];
+            a6 += f[i + 6] * f[i + 6];
+            a7 += f[i + 7] * f[i + 7];
+        }
+        float s = ((a0 + a1) + (a2 + a3)) + ((a4 + a5) + (a6 + a7));
+        for (; i < m; ++i)
+            s += f[i] * f[i];
+        return s;
+    };
+    auto grid_track = [&]() -> bool {
+        const size_t reps = profile.preamble_repetitions;
+        if (reps < 8)
+            return false;
+        const float gthr =
+            std::min(profile.radar_verification_threshold, 0.08f);
+        const int64_t arad = std::max<int64_t>(
+            8, static_cast<int64_t>(profile.timing_track_radius));
+        const double nominal = static_cast<double>(period);
+
+        // Sparse anchor set on the symbol grid: the confirmed first SYNC, the
+        // last SYNC of the train, and evenly spaced points in between.
+        std::array<size_t, 32> ak{};
+        size_t na = 0;
+        ak[na++] = first_hit_k;
+        const size_t last_k = reps - 1;
+        if (last_k > first_hit_k) {
+            const size_t want_anchors = std::min<size_t>(
+                std::max<size_t>(4, profile.locked_grid_anchor_count), ak.size());
+            const size_t intervals = (want_anchors > 1) ? (want_anchors - 1) : 1;
+            const double span = static_cast<double>(last_k - first_hit_k);
+            for (size_t i = 1; i <= intervals && na < ak.size(); ++i) {
+                const size_t k = first_hit_k + static_cast<size_t>(std::llround(
+                    span * static_cast<double>(i) /
+                    static_cast<double>(intervals)));
+                if (k != ak[na - 1])
+                    ak[na++] = k;
+            }
+        }
+
+        // One least-squares pass over the anchors: peak(k) = start + k*period,
+        // in the same symbol-END convention as the legacy fit.
+        auto fit_anchors = [&](double period_hint, int64_t start_hint,
+                               int64_t radius, double* period_out,
+                               int64_t* start_out, float* median_out,
+                               size_t* hits_out) -> bool {
+            double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+            std::array<float, 32> mets{};
+            size_t hits = 0;
+            size_t kmin = 0, kmax = 0;
+            for (size_t i = 0; i < na; ++i) {
+                const size_t k = ak[i];
+                const int64_t want = start_hint + static_cast<int64_t>(
+                    std::llround(static_cast<double>(k) * period_hint));
+                if (want < 0 ||
+                    want + static_cast<int64_t>(L) > static_cast<int64_t>(n))
+                    continue;
+                ++out.grid_anchor_attempts;
+                int64_t pos = -1;
+                float met = 0.0f;
+                std::complex<float> c(0.0f, 0.0f);
+                if (!local_best(want, radius, gthr, &pos, &met, &c))
+                    continue;
+                const double x = static_cast<double>(k);
+                const double y = static_cast<double>(pos + (int64_t)(L - 1));
+                sx += x;
+                sy += y;
+                sxx += x * x;
+                sxy += x * y;
+                if (hits == 0) {
+                    kmin = k;
+                    kmax = k;
+                } else {
+                    kmin = std::min(kmin, k);
+                    kmax = std::max(kmax, k);
+                }
+                mets[hits++] = met;
+            }
+            *hits_out = hits;
+            if (hits < std::max<size_t>(2, profile.locked_grid_min_anchors))
+                return false;
+            if (kmax - kmin < 8)
+                return false; // anchors too bunched to measure a slope
+            const double denom = static_cast<double>(hits) * sxx - sx * sx;
+            if (!(std::abs(denom) > 1e-9))
+                return false;
+            const double p =
+                (static_cast<double>(hits) * sxy - sx * sy) / denom;
+            if (!std::isfinite(p) || !(p > 0.0))
+                return false;
+            const double intercept_end =
+                (sy - p * sx) / static_cast<double>(hits);
+            *period_out = p;
+            *start_out = std::max<int64_t>(
+                0, static_cast<int64_t>(std::llround(intercept_end)) -
+                       static_cast<int64_t>(L - 1));
+            std::sort(mets.begin(), mets.begin() + hits);
+            *median_out = mets[hits / 2];
+            return true;
+        };
+
+        double p1 = nominal;
+        int64_t s1 = start;
+        float med1 = 0.0f;
+        size_t hits1 = 0;
+        if (!fit_anchors(nominal, start, arad, &p1, &s1, &med1, &hits1))
+            return false;
+        // A fitted period outside 0.5% of the nominal work-grid SYNC period
+        // means the anchors did not land on the expected symbol indices.
+        if (std::abs(p1 - nominal) > 0.005 * nominal)
+            return false;
+        double p2 = p1;
+        int64_t s2 = s1;
+        float med2 = med1;
+        size_t hits2 = hits1;
+        // Second pass only when the nominal grid would put the last anchor
+        // more than 4 samples off (an untrimmed clock).  With a trimmed
+        // crystal the first pass is already unbiased and this costs nothing.
+        if (std::abs(p1 - nominal) * static_cast<double>(last_k) > 4.0) {
+            if (!fit_anchors(p1, s1, std::max<int64_t>(arad, 16), &p2, &s2,
+                             &med2, &hits2))
+                return false;
+            if (std::abs(p2 - nominal) > 0.005 * nominal)
+                return false;
+        }
+        out.grid_anchor_hits = static_cast<uint32_t>(hits2);
+
+        // Single-point stage: evaluate eight consecutive lags around the fitted
+        // grid position and keep the best.  The 8-lag kernel has independent
+        // accumulators and is far cheaper per lag than the single-lag kernel
+        // (which is one long FMA dependency chain), so eight lags cost barely
+        // more than one -- and taking the argmax keeps the peak positions and
+        // the CFO phases identical to the legacy per-SYNC search instead of
+        // pinning them to the fitted grid.
+        const bool use_real = scratch.real_sync_template.is_real;
+        const float* taps_dup = scratch.real_sync_template.taps_dup.data();
+        scratch.metric.assign(reps, 0.0f);
+        size_t valid = 0;
+        // Least-squares accumulators over every refined peak (see the final
+        // fit note after the loop).
+        double fsx = 0.0, fsy = 0.0, fsxx = 0.0, fsxy = 0.0;
+        size_t fn = 0;
+        for (size_t k = 0; k < reps; ++k) {
+            if (k == first_hit_k) {
+                // The bounded probe already measured this SYNC with a real
+                // +/-roi search; keep that measurement instead of
+                // re-projecting it onto the fitted grid.
+                scratch.metric[k] = first_metric;
+                ++out.grid_single_points;
+                if (first_metric >= gthr) {
+                    ++valid;
+                    out.peak_samples.push_back(start + static_cast<int64_t>(L - 1));
+                    out.peak_metrics.push_back(first_metric);
+                    out.peak_corr.push_back(first_corr);
+                    const double x = static_cast<double>(k);
+                    const double y = static_cast<double>(start + (int64_t)(L - 1));
+                    fsx += x;
+                    fsy += y;
+                    fsxx += x * x;
+                    fsxy += x * y;
+                    ++fn;
+                }
+                continue;
+            }
+            const int64_t centre = s2 + static_cast<int64_t>(
+                std::llround(static_cast<double>(k) * p2));
+            int64_t base = centre - 3;
+            int nl = 8;
+            if (base + 7 + static_cast<int64_t>(L) > static_cast<int64_t>(n)) {
+                // Window edge: fall back to the single lag at the prediction
+                // so the last SYNCs are still measured.
+                if (centre + static_cast<int64_t>(L) >
+                    static_cast<int64_t>(n))
+                    continue;
+                base = centre;
+                nl = 1;
+            }
+            if (base < 0)
+                continue;
+            float pw = window_power(rx + base, L);
+            std::complex<float> acc[8];
+            if (use_real) {
+                rxopt::real_template_dot_8lag(rx + base, taps_dup, L, acc);
+            } else {
+                for (int m = 0; m < nl; ++m)
+                    acc[m] = detail::timing_conjugate_dot(
+                        rx + base + m, scratch.work.data(), L);
+            }
+            int best_m = 0;
+            float best = std::norm(acc[0]) / (pw * Et + 1e-12f);
+            for (int m = 1; m < nl; ++m) {
+                pw += std::norm(rx[base + m - 1 + static_cast<int64_t>(L)]) -
+                      std::norm(rx[base + m - 1]);
+                const float met = std::norm(acc[m]) / (pw * Et + 1e-12f);
+                if (met > best) {
+                    best = met;
+                    best_m = m;
+                }
+            }
+            const int64_t want = base + best_m;
+            const float m = best;
+            scratch.metric[k] = m;
+            ++out.grid_single_points;
+            if (m < gthr)
+                continue;
+            ++valid;
+            out.peak_samples.push_back(want + static_cast<int64_t>(L - 1));
+            out.peak_metrics.push_back(m);
+            out.peak_corr.push_back(acc[best_m]);
+            const double x = static_cast<double>(k);
+            const double y = static_cast<double>(want + (int64_t)(L - 1));
+            fsx += x;
+            fsy += y;
+            fsxx += x * x;
+            fsxy += x * y;
+            ++fn;
+        }
+        out.grid_single_valid = static_cast<uint32_t>(valid);
+        if (valid < 4)
+            return false;
+        // Grid sanity: if the fitted grid does not land on real peaks, the
+        // single-point metrics collapse relative to the anchor peaks.  Use the
+        // 90th percentile so a weak (interfered) part of the preamble does not
+        // by itself reject a correct grid.
+        if (reps <= 512) {
+            const size_t idx = static_cast<size_t>(
+                0.9 * static_cast<double>(reps - 1));
+            std::nth_element(scratch.metric.begin(),
+                             scratch.metric.begin() + idx,
+                             scratch.metric.end());
+            if (!(scratch.metric[idx] >= 0.5f * med2))
+                return false;
+        }
+        // Final period/origin: least squares over EVERY refined peak, which is
+        // exactly the estimator the legacy 256-point fit uses.  The anchors are
+        // the bootstrap that puts the single-point windows in the right place
+        // (and the fallback if this fit is degenerate); they are not the final
+        // estimate, because a 16-anchor fit is ~4x noisier than the legacy
+        // 256-point fit and that noise measurably flips marginal payloads
+        // (measured: 1 packet / 2000 at 2.5 m).  The refined positions are real
+        // argmax measurements, NOT the quantised grid, so measured_period stays
+        // a genuine measurement and integer_chip_grid()/spc_ppm keeps working.
+        if (fn >= 8) {
+            const double denom = static_cast<double>(fn) * fsxx - fsx * fsx;
+            if (std::abs(denom) > 1e-9) {
+                const double pr =
+                    (static_cast<double>(fn) * fsxy - fsx * fsy) / denom;
+                const double intercept_end =
+                    (fsy - pr * fsx) / static_cast<double>(fn);
+                if (std::isfinite(pr) && pr > 0.0 &&
+                    std::abs(pr - p2) <= 0.01) { // 10 ppm sanity vs anchors
+                    p2 = pr;
+                    s2 = std::max<int64_t>(
+                        0, static_cast<int64_t>(std::llround(intercept_end)) -
+                               static_cast<int64_t>(L - 1));
+                }
+            }
+        }
+        grid_period = p2;
+        grid_start = s2;
+        grid_applied = true;
+        return true;
+    };
+    if (bounded && profile.locked_grid_timing) {
+        if (!grid_track()) {
+            ++out.grid_fallbacks;
+            out.peak_samples.clear();
+            out.peak_metrics.clear();
+            out.peak_corr.clear();
+        }
+    }
+
     // Track all SYNC starts: expected = start + k*period, then convert each to
     // symbol-END convention (start + L - 1) to match the detector / MATLAB.
     // When bounded inner-SYNC probing hit symbol `first_hit_k > 0`, anchor the
@@ -801,46 +1186,48 @@ inline bool stage_timing(const std::complex<float>* rx,
     // rather than restarting at k=1 (which already failed).  Also allow up to 2
     // consecutive missed SYNCs so a brief 1-2 symbol interference dip does not
     // prematurely truncate the 256-symbol train.
-    out.peak_samples.clear();
-    out.peak_metrics.clear();
-    out.peak_corr.clear();
     std::vector<size_t> peak_indices;
     peak_indices.reserve(profile.preamble_repetitions);
-    const int64_t first_hit_start =
-        start + static_cast<int64_t>(first_hit_k) * period;
-    out.peak_samples.push_back(first_hit_start + static_cast<int64_t>(L - 1));
-    out.peak_metrics.push_back(first_metric);
-    out.peak_corr.push_back(first_corr);
-    peak_indices.push_back(first_hit_k);
-    constexpr size_t kMaxConsecutiveSyncMisses = 2;
-    size_t consecutive_misses = 0;
-    for (size_t k = first_hit_k + 1; k < profile.preamble_repetitions; ++k) {
-        const int64_t want = start + static_cast<int64_t>(k * period);
-        int64_t pk = -1;
-        float pm = 0.0f;
-        std::complex<float> pk_corr(0.0f, 0.0f);
-        const float tracking_threshold =
-            bounded
-                ? std::min(profile.radar_verification_threshold, 0.08f)
-                : ((k < backtracked_symbols)
-                       ? 0.7f * profile.radar_verification_threshold
-                       : profile.radar_verification_threshold);
-        const int64_t track_rad =
-            (bounded && consecutive_misses > 0)
-                ? std::max<int64_t>(12, static_cast<int64_t>(profile.timing_track_radius))
-                : static_cast<int64_t>(profile.timing_track_radius);
-        if (!local_best(want, track_rad,
-                        tracking_threshold, &pk, &pm, &pk_corr)) {
-            ++consecutive_misses;
-            if (!bounded && consecutive_misses > kMaxConsecutiveSyncMisses)
-                break; // lost the train
-            continue;
+    if (!grid_applied) {
+        out.peak_samples.clear();
+        out.peak_metrics.clear();
+        out.peak_corr.clear();
+        const int64_t first_hit_start =
+            start + static_cast<int64_t>(first_hit_k) * period;
+        out.peak_samples.push_back(first_hit_start + static_cast<int64_t>(L - 1));
+        out.peak_metrics.push_back(first_metric);
+        out.peak_corr.push_back(first_corr);
+        peak_indices.push_back(first_hit_k);
+        constexpr size_t kMaxConsecutiveSyncMisses = 2;
+        size_t consecutive_misses = 0;
+        for (size_t k = first_hit_k + 1; k < profile.preamble_repetitions; ++k) {
+            const int64_t want = start + static_cast<int64_t>(k * period);
+            int64_t pk = -1;
+            float pm = 0.0f;
+            std::complex<float> pk_corr(0.0f, 0.0f);
+            const float tracking_threshold =
+                bounded
+                    ? std::min(profile.radar_verification_threshold, 0.08f)
+                    : ((k < backtracked_symbols)
+                           ? 0.7f * profile.radar_verification_threshold
+                           : profile.radar_verification_threshold);
+            const int64_t track_rad =
+                (bounded && consecutive_misses > 0)
+                    ? std::max<int64_t>(12, static_cast<int64_t>(profile.timing_track_radius))
+                    : static_cast<int64_t>(profile.timing_track_radius);
+            if (!local_best(want, track_rad,
+                            tracking_threshold, &pk, &pm, &pk_corr)) {
+                ++consecutive_misses;
+                if (!bounded && consecutive_misses > kMaxConsecutiveSyncMisses)
+                    break; // lost the train
+                continue;
+            }
+            consecutive_misses = 0;
+            out.peak_samples.push_back(pk + static_cast<int64_t>(L - 1));
+            out.peak_metrics.push_back(pm);
+            out.peak_corr.push_back(pk_corr);
+            peak_indices.push_back(k);
         }
-        consecutive_misses = 0;
-        out.peak_samples.push_back(pk + static_cast<int64_t>(L - 1));
-        out.peak_metrics.push_back(pm);
-        out.peak_corr.push_back(pk_corr);
-        peak_indices.push_back(k);
     }
 
     out.detected_peaks = out.peak_samples.size();
@@ -854,7 +1241,14 @@ inline bool stage_timing(const std::complex<float>* rx,
     // (2)), i.e. the start is derived from the WHOLE tracked train rather than
     // the first peak, so a slightly-off first peak does not bias the origin.
     const size_t np = out.peak_samples.size();
-    if (np >= 2) {
+    if (grid_applied) {
+        // LockedBounded grid: period and origin come from the anchor
+        // least-squares fit, NOT from the single-point train (whose positions
+        // are `period` by construction and would make integer_chip_grid()
+        // blind to a real clock offset).
+        out.measured_period = grid_period;
+        out.preamble_start_sample = grid_start;
+    } else if (np >= 2) {
         double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
         for (size_t k = 0; k < np; ++k) {
             const double x = static_cast<double>(peak_indices[k]);
@@ -1890,6 +2284,90 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
 // ---------------------------------------------------------------------------
 namespace detail {
 
+// ---------------------------------------------------------------------------
+// Payload sub-stage timing helpers (diagnostic only).
+//
+// `PayloadSubTimer` is an RAII scope guard over the whole payload stage: it
+// snapshots the four named child buckets on construction and, on destruction,
+// adds whatever is left of the enclosing interval to `other_us`.  The five
+// buckets are therefore exactly additive whatever early return the enclosing
+// function takes, and the guard costs two steady_clock reads per payload stage
+// with no allocation and no change to any algorithm path.
+//
+// `PayloadSubBucket` attributes the elapsed time of a nested scope to one named
+// bucket (e.g. the fused CMF plan + correlation).  Nested buckets are children
+// of the same struct, so the outer guard's remainder automatically shrinks by
+// the same amount: no double counting.
+// ---------------------------------------------------------------------------
+inline uint64_t payload_sub_total(const PayloadSubTimers& s)
+{
+    // Includes `other_us` so nested guards stay additive: an inner guard adds
+    // its remainder to `other_us`, and the outer guard subtracts everything
+    // already attributed (including that remainder) from its own interval.
+    return s.soft_us + s.viterbi_us + s.rs_us + s.crc_us + s.other_us;
+}
+
+// Elapsed microseconds since `t0`, truncated exactly like the parent laps.
+inline uint64_t payload_elapsed_us(std::chrono::steady_clock::time_point t0)
+{
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - t0)
+            .count());
+}
+
+class PayloadSubTimer
+{
+public:
+    explicit PayloadSubTimer(PayloadSubTimers* s)
+        : s_(s),
+          t0_(s ? std::chrono::steady_clock::now()
+                : std::chrono::steady_clock::time_point()),
+          base_(s ? payload_sub_total(*s) : 0)
+    {
+    }
+    ~PayloadSubTimer()
+    {
+        if (!s_)
+            return;
+        const uint64_t total = payload_elapsed_us(t0_);
+        const uint64_t spent = payload_sub_total(*s_) - base_;
+        if (total > spent)
+            s_->other_us += total - spent;
+    }
+    PayloadSubTimer(const PayloadSubTimer&) = delete;
+    PayloadSubTimer& operator=(const PayloadSubTimer&) = delete;
+
+private:
+    PayloadSubTimers* s_;
+    std::chrono::steady_clock::time_point t0_;
+    uint64_t base_;
+};
+
+class PayloadSubBucket
+{
+public:
+    PayloadSubBucket(PayloadSubTimers* s, uint64_t PayloadSubTimers::*member)
+        : s_(s),
+          member_(member),
+          t0_(s ? std::chrono::steady_clock::now()
+                : std::chrono::steady_clock::time_point())
+    {
+    }
+    ~PayloadSubBucket()
+    {
+        if (s_)
+            s_->*member_ += payload_elapsed_us(t0_);
+    }
+    PayloadSubBucket(const PayloadSubBucket&) = delete;
+    PayloadSubBucket& operator=(const PayloadSubBucket&) = delete;
+
+private:
+    PayloadSubTimers* s_;
+    uint64_t PayloadSubTimers::*member_;
+    std::chrono::steady_clock::time_point t0_;
+};
+
 // IEEE 802.15.4a BPRF data-scrambler spreading (lrwpan.internal.createScrambler):
 // a 15-bit LFSR with s[i] = s[i-14] ^ s[i-15].  The initial state depends
 // on the preamble code index; values below were exported from MATLAB R2025b
@@ -2463,8 +2941,10 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
                                 const std::vector<int8_t>& g0,
                                 const std::vector<int8_t>& g1,
                                 size_t psdu_bits,
-                                PayloadResult& out)
+                                PayloadResult& out,
+                                PayloadSubTimers* sub = nullptr)
 {
+    PayloadSubTimer sub_guard(sub);
     out = PayloadResult{};
     if (g0p.size() != 21 || g1p.size() != 21 || g0.empty() ||
         g0.size() != g1.size())
@@ -2481,7 +2961,10 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
         rx_bits[2 * (s + 21) + 1] = g1[s];
     }
     std::vector<int8_t> decoded;
+    const auto t_vit = std::chrono::steady_clock::now();
     vitdec_cl3(rx_bits.data(), total, decoded);
+    if (sub)
+        sub->viterbi_us += payload_elapsed_us(t_vit);
     if (decoded.size() < total)
         return false;
 
@@ -2490,9 +2973,15 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
     if (rs_cw.size() != g0.size())
         return false;
     std::vector<int8_t> psdu_bits_out;
-    if (!rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out))
+    const auto t_rs = std::chrono::steady_clock::now();
+    const bool rs_ok = rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out);
+    if (sub)
+        sub->rs_us += payload_elapsed_us(t_rs);
+    if (!rs_ok)
         return false;
 
+    // PSDU assembly + FCS: bit packing, CRC-16 and the comparison.
+    const auto t_crc = std::chrono::steady_clock::now();
     out.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
     out.bytes.resize(psdu_bits_out.size() / 8);
     for (size_t i = 0; i < out.bytes.size(); ++i) {
@@ -2511,6 +3000,8 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
                             << 8);
         out.fcs_pass = (out.received_fcs == out.calculated_fcs);
     }
+    if (sub)
+        sub->crc_us += payload_elapsed_us(t_crc);
     out.ok = true;
     return true;
 }
@@ -2949,8 +3440,17 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
                               const NsSfdResult& ns_sfd,
                               size_t chips_per_symbol,
                               PayloadResult& out,
-                              DemodScratch& scratch)
+                              DemodScratch& scratch,
+                              PayloadSubTimers* sub = nullptr)
 {
+    // Diagnostic child timing of `stage_payload_us`.  `sub_guard` attributes the
+    // remainder of this function to `other_us`; the named buckets are filled
+    // around the exact calls that produce them.  Passing `sub == nullptr`
+    // (e.g. the full-stream fallback retry, which is accounted in its own
+    // bucket) disables all of it.
+    detail::PayloadSubTimer sub_guard(sub);
+    if (sub)
+        ++sub->legacy_calls;
     out = PayloadResult{};
     if (soft_chips.empty() || !phr.ok || !ns_sfd.ok || phr.psdu_length == 0)
         return false;
@@ -2973,11 +3473,17 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
         const size_t num_blocks = (psdu_bits + 329) / 330;
         const size_t nsym = psdu_bits + 48 * num_blocks;
         std::vector<int8_t> g0p, g1p, g0, g1;
-        if (detail::bprf_demod(soft_chips, phr_start, profile.code_index, 21,
+        const auto t_soft = std::chrono::steady_clock::now();
+        const bool demod_ok =
+            detail::bprf_demod(soft_chips, phr_start, profile.code_index, 21,
                                64, 512, 0, pol, g0p, g1p) &&
             detail::bprf_demod(soft_chips, payload_start, profile.code_index,
-                               nsym, 8, 64, 1344, pol, g0, g1)) {
-            if (detail::decode_payload_hard(g0p, g1p, g0, g1, psdu_bits, out)) {
+                               nsym, 8, 64, 1344, pol, g0, g1);
+        if (sub)
+            sub->soft_us += detail::payload_elapsed_us(t_soft);
+        if (demod_ok) {
+            if (detail::decode_payload_hard(g0p, g1p, g0, g1, psdu_bits, out,
+                                            sub)) {
                 any_ok = true;
                 if (out.fcs_pass)
                     return true;
@@ -3019,13 +3525,17 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
         for (int8_t pol : pols) {
             std::vector<int8_t> g0p, g1p, g0, g1;
             std::vector<float> llr0p, llr1p, llr0, llr1;
-            if (!detail::bprf_demod_soft(soft_chips, phr_start,
-                                         profile.code_index, 21, 64, 512, 0,
-                                         pol, g0p, g1p, llr0p, llr1p))
-                continue;
-            if (!detail::bprf_demod_soft(soft_chips, payload_start,
-                                         profile.code_index, nsym, 8, 64,
-                                         1344, pol, g0, g1, llr0, llr1))
+            const auto t_soft = std::chrono::steady_clock::now();
+            const bool soft_ok =
+                detail::bprf_demod_soft(soft_chips, phr_start,
+                                        profile.code_index, 21, 64, 512, 0,
+                                        pol, g0p, g1p, llr0p, llr1p) &&
+                detail::bprf_demod_soft(soft_chips, payload_start,
+                                        profile.code_index, nsym, 8, 64,
+                                        1344, pol, g0, g1, llr0, llr1);
+            if (sub)
+                sub->soft_us += detail::payload_elapsed_us(t_soft);
+            if (!soft_ok)
                 continue;
 
             const size_t total = 21 + nsym;
@@ -3039,7 +3549,10 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
                 llr1j[s + 21] = llr1[s];
             }
             std::vector<int8_t> decoded;
+            const auto t_vit = std::chrono::steady_clock::now();
             detail::vitdec_cl3_soft(llr0j.data(), llr1j.data(), total, decoded);
+            if (sub)
+                sub->viterbi_us += detail::payload_elapsed_us(t_vit);
             if (decoded.size() < total)
                 continue;
 
@@ -3049,9 +3562,16 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
                 continue;
 
             std::vector<int8_t> psdu_bits_out;
-            if (!detail::rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out))
+            const auto t_rs = std::chrono::steady_clock::now();
+            const bool rs_ok =
+                detail::rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out);
+            if (sub)
+                sub->rs_us += detail::payload_elapsed_us(t_rs);
+            if (!rs_ok)
                 continue;
 
+            // PSDU assembly + FCS: bit packing, CRC-16 and the comparison.
+            const auto t_crc = std::chrono::steady_clock::now();
             const size_t nbytes = psdu_bits_out.size() / 8;
             PayloadResult cand;
             cand.bytes.resize(nbytes);
@@ -3073,6 +3593,8 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
                     (cand.received_fcs == cand.calculated_fcs);
             }
             cand.ok = true;
+            if (sub)
+                sub->crc_us += detail::payload_elapsed_us(t_crc);
             if (!any_ok || cand.fcs_pass) {
                 out = cand;
                 any_ok = true;
@@ -3133,8 +3655,13 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
                                     uint64_t& decode_ns,
                                     size_t& symbols_out,
                                     const std::vector<int8_t>* phr_g0 = nullptr,
-                                    const std::vector<int8_t>* phr_g1 = nullptr)
+                                    const std::vector<int8_t>* phr_g1 = nullptr,
+                                    PayloadSubTimers* sub = nullptr)
 {
+    // Diagnostic child timing of `stage_payload_us`; see stage_payload_fcs().
+    detail::PayloadSubTimer sub_guard(sub);
+    if (sub)
+        ++sub->fused_calls;
     out = PayloadResult{};
     template_us = 0;
     correlate_us = 0;
@@ -3225,59 +3752,70 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
         static_cast<int64_t>(stream_chips))
         return false;
 
-    const auto t_plan0 = std::chrono::steady_clock::now();
-    if (!prepare_fused_payload_pn(scratch, profile.code_index, symbols))
-        return false;
-    const auto t_plan1 = std::chrono::steady_clock::now();
-    const uint64_t plan_us = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(t_plan1 - t_plan0)
-            .count());
-
     const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
     rxfusion::Timings timings;
-    if (!rxfusion::correlate_payload(
-            scratch.derotated.data(), n, cir.cir_filter_taps.data(),
-            tap_count, chip_start, rxfusion::kSamplesPerChip, payload_start,
-            scratch.fused.pn.data(), symbols, pol, scratch.softchip.rot,
-            scratch.fused.metrics, scratch.fused.kernel, &timings))
-        return false;
-    template_us = plan_us + timings.template_update_us;
-    correlate_us = timings.correlate_us;
-    for (float v : scratch.fused.metrics.signed_value) {
-        if (!std::isfinite(v))
+    {
+        // PN build + four-candidate correlation is the fused "soft bit"
+        // generation; it is the soft bucket of this path.
+        detail::PayloadSubBucket soft_bucket(sub, &PayloadSubTimers::soft_us);
+        const auto t_plan0 = std::chrono::steady_clock::now();
+        if (!prepare_fused_payload_pn(scratch, profile.code_index, symbols))
             return false;
+        const auto t_plan1 = std::chrono::steady_clock::now();
+        const uint64_t plan_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(t_plan1 -
+                                                                  t_plan0)
+                .count());
+
+        if (!rxfusion::correlate_payload(
+                scratch.derotated.data(), n, cir.cir_filter_taps.data(),
+                tap_count, chip_start, rxfusion::kSamplesPerChip, payload_start,
+                scratch.fused.pn.data(), symbols, pol, scratch.softchip.rot,
+                scratch.fused.metrics, scratch.fused.kernel, &timings))
+            return false;
+        template_us = plan_us + timings.template_update_us;
+        correlate_us = timings.correlate_us;
+        for (float v : scratch.fused.metrics.signed_value) {
+            if (!std::isfinite(v))
+                return false;
+        }
     }
 
     const auto t_decode0 = std::chrono::steady_clock::now();
     std::vector<int8_t> local_g0p, local_g1p, g0, g1;
     const std::vector<int8_t>* g0p = phr_g0;
     const std::vector<int8_t>* g1p = phr_g1;
-    if (g0p || g1p) {
-        if (!g0p || !g1p || g0p->size() != 21 || g1p->size() != 21) {
-            decode_ns = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - t_decode0)
-                    .count());
-            decode_us = decode_ns / 1000;
-            return false;
+    {
+        // PHR re-demod (only when the fused PHR stage supplied no decisions) and
+        // the BPM decisions belong to the metric-generation bucket.
+        detail::PayloadSubBucket soft_bucket(sub, &PayloadSubTimers::soft_us);
+        if (g0p || g1p) {
+            if (!g0p || !g1p || g0p->size() != 21 || g1p->size() != 21) {
+                decode_ns = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t_decode0)
+                        .count());
+                decode_us = decode_ns / 1000;
+                return false;
+            }
+        } else {
+            if (!detail::bprf_demod(prefix_soft_chips, phr_start,
+                                    profile.code_index, 21, 64, 512, 0, pol,
+                                    local_g0p, local_g1p)) {
+                decode_ns = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t_decode0)
+                        .count());
+                decode_us = decode_ns / 1000;
+                return false;
+            }
+            g0p = &local_g0p;
+            g1p = &local_g1p;
         }
-    } else {
-        if (!detail::bprf_demod(prefix_soft_chips, phr_start,
-                                profile.code_index, 21, 64, 512, 0, pol,
-                                local_g0p, local_g1p)) {
-            decode_ns = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - t_decode0)
-                    .count());
-            decode_us = decode_ns / 1000;
-            return false;
-        }
-        g0p = &local_g0p;
-        g1p = &local_g1p;
+        rxfusion::decide_bpm(scratch.fused.metrics, g0, g1);
     }
-    rxfusion::decide_bpm(scratch.fused.metrics, g0, g1);
-    const bool decoded =
-        detail::decode_payload_hard(*g0p, *g1p, g0, g1, psdu_bits, out);
+    const bool decoded = detail::decode_payload_hard(*g0p, *g1p, g0, g1,
+                                                     psdu_bits, out, sub);
     decode_ns = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - t_decode0)
@@ -3317,7 +3855,20 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     // before each return, so result coordinates match the schema (absolute).
     const int64_t rel_seed =
         (predicted_start >= 0) ? predicted_start - window_start : -1;
+    // Diagnostic payload sub-stage timers.  They are children of
+    // `stage_payload_us` (never added to `stage_total_us`) and are published
+    // from `rebase()` so every exit path reports them without touching any
+    // parent lap interval.
+    PayloadSubTimers payload_sub;
     auto rebase = [&]() {
+        res.stage_payload_soft_us = payload_sub.soft_us;
+        res.stage_payload_viterbi_us = payload_sub.viterbi_us;
+        res.stage_payload_rs_us = payload_sub.rs_us;
+        res.stage_payload_crc_us = payload_sub.crc_us;
+        res.stage_payload_other_us = payload_sub.other_us;
+        res.stage_payload_derotate_us = payload_sub.other_derotate_us;
+        res.stage_payload_fused_calls = payload_sub.fused_calls;
+        res.stage_payload_legacy_calls = payload_sub.legacy_calls;
         if (window_start == 0)
             return;
         if (res.timing.ok) {
@@ -3474,14 +4025,130 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     const auto sfd1_range = rxopt::compute_sfd_search_range(
         n, res.timing, profile.preamble_repetitions, sfd_len,
         kQm35SamplesPerSymbol);
+    // Stage-2 CFO, kept so the single-pass rotation mode can restore it after
+    // the SFD-anchored refit has been evaluated (see the refit lambda below).
+    const CfoResult stage2_cfo = res.cfo;
+    res.cfo_initial_hz = stage2_cfo.cfo_hz;
+    res.cfo_initial_peaks = static_cast<uint32_t>(stage2_cfo.peaks_used);
+    // Highest sample index that any post-SFD consumer reads from
+    // `scratch.derotated`, given a frame origin.  Used twice: to predict the
+    // single-pass rotation range before the bootstrap SFD and to bound the
+    // actual second rotation afterwards.
+    //
+    // The bound is the real requirement, not the legacy 40-PHR-head budget:
+    //   * the soft-chip stage only generates the prefix the active decoder
+    //     needs (`fused_phr_prefix_budget` when the PHR is read from raw IQ,
+    //     else the full `initial_chip_budget`),
+    //   * the fused PHR kernel reads its 21 symbols straight from the
+    //     derotated IQ: 20*512 + max candidate offset (320) chips plus the
+    //     template length,
+    //   * the final SFD search range.
+    // Everything from the payload start onwards is derotated by the payload
+    // pass (`pay_lo = min(sec_hi, base0)`), so covering past that point here
+    // would derotate the payload region twice with the same CFO.
+    auto required_derotated_hi = [&](int64_t frame_start,
+                                     size_t sfd_search_hi) -> int64_t {
+        const size_t pre = profile.cir_pre_samples;
+        const size_t post = profile.cir_post_samples;
+        const size_t tap_count = pre + post;
+        const bool phr_fusion = profile.rx_fused_phr_cmf;
+        const size_t chip_prefix = phr_fusion
+            ? rxopt::fused_phr_prefix_budget(profile)
+            : rxopt::initial_chip_budget(profile);
+        const int64_t chip_start = frame_start + static_cast<int64_t>(post) - 1;
+        int64_t hi = chip_start + static_cast<int64_t>(chip_prefix) * 2 +
+                     static_cast<int64_t>(tap_count) + 128;
+        if (phr_fusion) {
+            // NS-SFD end is not known before stage_ns_sfd(); the nominal grid
+            // plus the +8-chip search covers it.
+            const int64_t sfd_end_chip_est =
+                static_cast<int64_t>(profile.preamble_repetitions +
+                                     rxopt::kSfdSymbols) *
+                    static_cast<int64_t>(kQm35ChipsPerSymbol) + 8;
+            const int64_t phr_start_est = sfd_end_chip_est + 1;
+            const int64_t phr_len =
+                static_cast<int64_t>(tap_count) +
+                2 * static_cast<int64_t>(rxfusion::kPhrChipsPerBurst - 1);
+            const int64_t phr_hi = chip_start +
+                (phr_start_est +
+                 static_cast<int64_t>((rxfusion::kPhrSymbols - 1) *
+                                      rxfusion::kPhrChipsPerSymbol) +
+                 static_cast<int64_t>(rxfusion::kPhrCandidateChipOffset[3])) * 2 +
+                phr_len + 64;
+            hi = std::max(hi, phr_hi);
+        }
+        return std::max<int64_t>(hi, static_cast<int64_t>(sfd_search_hi));
+    };
+    // Predicted single-pass rotation range.  `scratch.derotated` is the only
+    // CFO-compensated buffer that the downstream stages read, so one rotation
+    // with the Stage-2 estimate can replace the SFD-anchored second pass only
+    // if it already covers everything those stages will read.  The SFD anchor
+    // is not known yet, so the range is predicted from the Stage-1 timing with
+    // an explicit symbol/backtrack slack and re-validated against the actual
+    // [sec_lo, sec_hi) after the bootstrap SFD (a miss falls back to the legacy
+    // second rotation).
+    size_t union_lo = 0;
+    size_t union_hi = 0;
+    bool union_ok = false;
+    if (profile.cfo_refit_mode != 0) {
+        const bool u_on_demand = profile.rx_softchip_on_demand ||
+                                 profile.rx_fused_payload_cmf ||
+                                 profile.rx_fused_phr_cmf;
+        if (!profile.rx_stop_after_sfd && !u_on_demand) {
+            // The legacy path rotates the whole window, so there is nothing to
+            // predict: covering [0, n) is trivially conservative and the only
+            // saving is the redundant first pass.
+            union_lo = 0;
+            union_hi = n;
+            union_ok = n > 0;
+        } else {
+            const size_t u_pre = profile.cir_pre_samples;
+            const size_t u_first = profile.cir_skip_initial_repetitions;
+            const size_t u_full = profile.preamble_repetitions;
+            const size_t u_reps = (profile.cir_repetitions > 0)
+                ? std::min(profile.cir_repetitions,
+                           u_full > u_first ? u_full - u_first : 0)
+                : 0;
+            const double u_period = (res.timing.measured_period > 0.0)
+                ? res.timing.measured_period
+                : static_cast<double>(kQm35SamplesPerSymbol);
+            const int64_t u_start = res.timing.preamble_start_sample;
+            const int64_t u_cir_lo = (u_reps > 0)
+                ? u_start + static_cast<int64_t>(std::llround(
+                              static_cast<double>(u_first) * u_period)) -
+                      static_cast<int64_t>(u_pre)
+                : u_start;
+            // Mirror the actual sec_lo rule: the fused PHR+payload path skips
+            // the SYNC soft-chip FIR, so it does not need the preamble head.
+            const bool u_skip_sync_fir =
+                profile.rx_fused_phr_cmf && profile.rx_fused_payload_cmf;
+            int64_t u_lo = u_cir_lo;
+            if (!u_skip_sync_fir)
+                u_lo = std::min<int64_t>(u_lo,
+                                         u_start - static_cast<int64_t>(u_pre));
+            u_lo = std::min<int64_t>(u_lo,
+                                     static_cast<int64_t>(sfd1_range.first));
+            int64_t u_hi = required_derotated_hi(u_start, sfd1_range.second);
+            // Slack: the SFD anchor can move the frame origin by up to the
+            // search backtrack (4 symbols + 64 samples).
+            const int64_t u_slack =
+                static_cast<int64_t>(4 * kQm35SamplesPerSymbol + 64 + 128);
+            union_lo = static_cast<size_t>(std::max<int64_t>(0, u_lo - u_slack));
+            union_hi = static_cast<size_t>(
+                std::min<int64_t>(static_cast<int64_t>(n), u_hi + u_slack));
+            union_ok = union_hi > union_lo;
+        }
+    }
+    const size_t rot1_lo = union_ok ? union_lo : sfd1_range.first;
+    const size_t rot1_hi = union_ok ? union_hi : sfd1_range.second;
     uint64_t rot1_us = 0;
     uint32_t rk1 = 0;
-    derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, sfd1_range.first,
-                       sfd1_range.second, scratch, rot1_us, rk1);
+    derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, rot1_lo, rot1_hi,
+                       scratch, rot1_us, rk1);
     res.cfo.rotate_us = rot1_us;
     res.cfo.rotation_kernel = rk1;
     res.stage_cfo_rotated_samples +=
-        (sfd1_range.second > sfd1_range.first ? (sfd1_range.second - sfd1_range.first) : 0);
+        (rot1_hi > rot1_lo ? (rot1_hi - rot1_lo) : 0);
     ++res.stage_cfo_rotation_passes;
     lap(res.stage_cfo_us);
     res.stage_cfo_fit_us += res.cfo.fit_us;
@@ -3707,6 +4374,18 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         cfo_timing.bounded_inner_used = res.timing.bounded_inner_used;
         cfo_timing.bounded_roi_samples = res.timing.bounded_roi_samples;
         cfo_timing.backtrack_symbols = res.timing.backtrack_symbols;
+        // Diagnostic-only carry-over (no interval math): the locked-tracking
+        // diagnostics describe the FIRST seeded search, which is the only one
+        // the strategy controls, and res.timing is replaced below.
+        cfo_timing.grid_anchor_attempts = res.timing.grid_anchor_attempts;
+        cfo_timing.grid_anchor_hits = res.timing.grid_anchor_hits;
+        cfo_timing.grid_single_points = res.timing.grid_single_points;
+        cfo_timing.grid_single_valid = res.timing.grid_single_valid;
+        cfo_timing.grid_fallbacks = res.timing.grid_fallbacks;
+        cfo_timing.tail_probe_attempts = res.timing.tail_probe_attempts;
+        cfo_timing.tail_probe_hits = res.timing.tail_probe_hits;
+        cfo_timing.tail_probe_k = res.timing.tail_probe_k;
+        cfo_timing.tail_probe_best_metric = res.timing.tail_probe_best_metric;
         cfo_timing.ok = true;
         cfo_timing.preamble_start_sample = full_start;
         cfo_timing.preamble_start_uncropped = full_start;
@@ -3777,6 +4456,9 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             if (cfo_fit_ok) {
                 res.cfo = tail_cfo;
                 res.cfo.skipped_peaks += tail_first;
+                res.cfo_refit_hz = tail_cfo.cfo_hz;
+                res.cfo_refit_peaks = static_cast<uint32_t>(tail_cfo.peaks_used);
+                res.cfo_refit_fit_us = tail_cfo.fit_us;
             }
             res.stage_cfo_fit_us += res.cfo.fit_us;
         }
@@ -3793,7 +4475,6 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             n, cfo_timing, full_repetitions, sfd_len, sym);
         const size_t pre = profile.cir_pre_samples;
         const size_t post = profile.cir_post_samples;
-        const size_t tap_count = pre + post;
         const size_t first_rep = profile.cir_skip_initial_repetitions;
         const size_t rep_count = (profile.cir_repetitions > 0)
             ? std::min(profile.cir_repetitions,
@@ -3824,11 +4505,12 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             sec_lo = static_cast<size_t>(std::max<int64_t>(0, static_cast<int64_t>(final_sfd_range.first)));
             sec_hi = static_cast<size_t>(std::min<int64_t>(static_cast<int64_t>(n), static_cast<int64_t>(final_sfd_range.second)));
         } else if (on_demand && is_integer_grid && integer_grid_ok) {
-            // Second rotation covers final SFD, CIR, phase estimation, and through PHR.
-            // initial_chip_budget(profile) covers SYNC alignment, NS-SFD, and the 21 PHR symbols.
-            const size_t prefix_budget = rxopt::initial_chip_budget(profile);
-            const int64_t spc_i = 2;
-            const int64_t chip_start = start + static_cast<int64_t>(post) - 1;
+            // Second rotation covers the final SFD search, the CIR window, the
+            // phase estimation and the soft-chip prefix / fused PHR reads.
+            // `required_derotated_hi` bounds the real requirement (see its
+            // definition above): using the legacy 40-PHR-head budget here
+            // derotated ~35k samples past the payload start, which the payload
+            // pass then derotated a second time with the same CFO.
             const bool skip_sync_fir =
                 profile.rx_fused_phr_cmf && profile.rx_fused_payload_cmf;
 
@@ -3838,20 +4520,56 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             req_lo = std::min(req_lo, static_cast<int64_t>(final_sfd_range.first));
             sec_lo = static_cast<size_t>(std::max<int64_t>(0, req_lo));
 
-            int64_t req_hi = chip_start +
-                static_cast<int64_t>(prefix_budget) * spc_i +
-                static_cast<int64_t>(tap_count) + 128;
-            req_hi = std::max(req_hi, static_cast<int64_t>(final_sfd_range.second));
+            const int64_t req_hi =
+                required_derotated_hi(start, final_sfd_range.second);
             sec_hi = static_cast<size_t>(
                 std::min<int64_t>(static_cast<int64_t>(n), req_hi));
         }
 
         uint64_t rot2_us = 0;
         uint32_t rk2 = 0;
+        // ---- Single-pass rotation decision ---------------------------------
+        // The second rotation exists only because the SFD-anchored refit moves
+        // the estimate.  When the Stage-2 estimate is good enough, the pass-1
+        // rotation (already widened to the predicted union range) is the only
+        // derotation the packet needs.  Every condition below is a hard
+        // requirement; any miss keeps the legacy refit + second rotation.
+        const uint64_t refit_span =
+            (sec_hi > sec_lo) ? static_cast<uint64_t>(sec_hi - sec_lo) : 0;
+        const double refit_delta_hz = res.cfo.cfo_hz - stage2_cfo.cfo_hz;
+        const double refit_drift_rad = std::abs(
+            2.0 * M_PI * refit_delta_hz *
+            static_cast<double>(refit_span) / profile.sample_rate);
+        res.cfo_refit_span_samples = refit_span;
+        res.cfo_refit_phase_drift_rad = refit_drift_rad;
+        bool want_skip = false;
+        uint32_t skip_action = 0;
+        if (profile.cfo_refit_mode == 2) {
+            want_skip = true;
+            skip_action = 2;
+        } else if (profile.cfo_refit_mode == 1) {
+            want_skip =
+                stage2_cfo.peaks_used >= profile.cfo_refit_min_peaks &&
+                refit_drift_rad <= profile.cfo_refit_skip_rad;
+            skip_action = 1;
+        }
+        const bool union_covers =
+            union_ok && sec_lo >= union_lo && sec_hi <= union_hi;
+        if (want_skip && union_covers) {
+            // Keep the Stage-2 estimate: pass 1 already applied it to the whole
+            // predicted span, which provably contains [sec_lo, sec_hi).
+            res.cfo = stage2_cfo;
+            res.cfo_refit_action = skip_action;
+            sec_derotated_hi = union_hi;
+            return true;
+        }
+        if (profile.cfo_refit_mode != 0)
+            res.cfo_refit_action = 3; // requested skip, fell back (fail-closed)
         derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, sec_lo, sec_hi,
                            scratch, rot2_us, rk2);
         res.cfo.rotate_us = rot2_us;
         res.cfo.rotation_kernel = rk2;
+        res.cfo_refit_rotate_us = rot2_us;
         res.stage_cfo_rotate_us += rot2_us;
         res.stage_cfo_rotation_kernels |= (rk2 ? 2u : 0u);
         res.stage_cfo_rotated_samples += (sec_hi > sec_lo ? (sec_hi - sec_lo) : 0);
@@ -4078,6 +4796,12 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                 const size_t pay_hi = static_cast<size_t>(
                     std::min<int64_t>(static_cast<int64_t>(n), last_sample + 64));
                 if (pay_lo < pay_hi) {
+                    // This payload-region CFO derotation runs inside the
+                    // `stage_payload_us` lap but outside the payload decoder, so
+                    // attribute it to the payload `other` bucket explicitly;
+                    // otherwise the child sum would fall short of the parent by
+                    // the rotation cost (~36 µs on the golden window).
+                    const auto t_payrot = std::chrono::steady_clock::now();
                     uint64_t rot_pay_us = 0;
                     uint32_t rk_pay = 0;
                     derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, pay_lo,
@@ -4086,6 +4810,10 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                     res.stage_cfo_rotated_samples += (pay_hi - pay_lo);
                     ++res.stage_cfo_rotation_passes;
                     sec_derotated_hi = std::max(sec_derotated_hi, pay_hi);
+                    const uint64_t payrot_us =
+                        detail::payload_elapsed_us(t_payrot);
+                    payload_sub.other_us += payrot_us;
+                    payload_sub.other_derotate_us += payrot_us;
                 }
 
                 ++res.stage_fused_attempts;
@@ -4107,7 +4835,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                     scratch.soft_chips, res.ns_sfd, res.phr, res.payload,
                     scratch, fused_template_us, fused_correlate_us,
                     fused_decode_us, fused_decode_ns, fused_symbols,
-                    cached_g0, cached_g1);
+                    cached_g0, cached_g1, &payload_sub);
                 res.stage_fused_template_us += fused_template_us;
                 res.stage_fused_correlate_us += fused_correlate_us;
                 res.stage_fused_decode_us += fused_decode_us;
@@ -4175,7 +4903,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         if (ok) {
             ok = stage_payload_fcs(scratch.soft_chips, profile, res.phr,
                                    res.ns_sfd, kQm35ChipsPerSymbol,
-                                   res.payload, scratch);
+                                   res.payload, scratch, &payload_sub);
             lap(res.stage_payload_us);
             if (ok && !res.payload.fcs_pass)
                 ok = false;
@@ -4287,7 +5015,8 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     lap(res.stage_phr_us);
     // Stage 7: payload BPM-BPSK + RS + FCS.
     if (!stage_payload_fcs(scratch.soft_chips, profile, res.phr, res.ns_sfd,
-                           kQm35ChipsPerSymbol, res.payload, scratch)) {
+                           kQm35ChipsPerSymbol, res.payload, scratch,
+                           &payload_sub)) {
         lap(res.stage_payload_us);
         res.status = DemodStatus::PayloadFailed;
         rebase();
@@ -4384,7 +5113,8 @@ bool stage_payload_fcs(const std::vector<float>& soft_chips,
                        const NsSfdResult& ns_sfd,
                        size_t chips_per_symbol,
                        PayloadResult& out,
-                       DemodScratch& scratch);
+                       DemodScratch& scratch,
+                       PayloadSubTimers* sub);
 
 // ---------------------------------------------------------------------------
 // Full pipeline: runs all stages in order, stopping at the first failure.

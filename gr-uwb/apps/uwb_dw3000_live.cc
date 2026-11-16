@@ -106,7 +106,16 @@ struct Options {
     size_t holdover = defaults::kHoldoverMissCount;
     size_t reacquire = defaults::kReacquireMissCount;
     size_t locked_roi = 256;
+    // LockedBounded SYNC-train tracking: grid (sparse anchors + single-point
+    // correlation on the fitted grid) or legacy (per-SYNC +/-8 search).
+    std::string locked_timing = "grid";
     size_t post_guard = 8192;
+    // Pre-guard used while LOCKED.  The wide 36864 guard exists for the blind
+    // autocorrelation seed (Acquisition::scan needs a 36864-sample platform
+    // before the true packet start); once the lock predicts the origin the
+    // residual is a few samples, so only the bounded ROI plus the resampler
+    // transient has to fit in front of the packet.  See --locked-pre-guard.
+    size_t locked_pre_guard = 8192;
     bool interference = true;
     bool tone = true;        // fixed-tone cancellation (continuous mode only)
     double tone_period_ms = 20.0;   // model update cadence (diagnostic sweep)
@@ -122,6 +131,12 @@ struct Options {
     // and fell back to the full stream, costing +7.3% demod for nothing.
     std::string ondemand = "auto";
     bool ondemand_resolved = false; // set from --ondemand/--fused in main
+    // SFD-anchored CFO refit policy: legacy | auto | skip.  See
+    // Qm35825Profile::cfo_refit_mode.  Default legacy keeps the pre-existing
+    // two-pass behaviour bit-identical.
+    std::string cfo_refit = "legacy";
+    double cfo_refit_skip_rad = 0.10;
+    size_t cfo_refit_min_peaks = 64;
     double timed_lead_us = 300.0;
     double timed_t0_ms = 0.0;
     size_t timed_lookahead = 4, timed_alignment = 4;
@@ -276,7 +291,17 @@ struct Reporter {
                  << " bounded_ok=" << r->timing.bounded_success
                  << " bounded_fail=" << r->timing.bounded_failures
                  << " legacy_scans=" << r->timing.bounded_legacy_scans
-                 << " backtrack=" << r->timing.backtrack_symbols;
+                 << " backtrack=" << r->timing.backtrack_symbols
+                 << " grid_anch=" << r->timing.grid_anchor_hits
+                 << " grid_anch_try=" << r->timing.grid_anchor_attempts
+                 << " grid_pts=" << r->timing.grid_single_points
+                 << " grid_valid=" << r->timing.grid_single_valid
+                 << " grid_fb=" << r->timing.grid_fallbacks
+                 << " tail_probe=" << r->timing.tail_probe_attempts
+                 << " tail_hit=" << r->timing.tail_probe_hits
+                 << " tail_k=" << r->timing.tail_probe_k
+                 << std::fixed << std::setprecision(3)
+                 << " tail_best=" << r->timing.tail_probe_best_metric;
         // Per-stage decomposition of the demod.  Parents and children are never
         // summed together; `stage_total_us` is the authoritative total.
         if (r) s << " st_total=" << r->stage_total_us
@@ -302,6 +327,20 @@ struct Reporter {
                  << " taps=" << r->cir.cir_filter_taps.size()
                  << " grid_reject=" << r->stage_grid_rejects
                  << " st_fused=" << r->stage_fused_attempts
+                 // Payload children (already inside st_payload; never added to
+                 // st_total).  soft+viterbi+rs+crc+other equals the in-function
+                 // payload interval, so st_payload minus their sum is only the
+                 // call/lap overhead.  pay_fused_calls / pay_legacy_calls show
+                 // which payload backend ran and therefore how much of
+                 // st_payload the children actually cover.
+                 << " pay_soft=" << r->stage_payload_soft_us
+                 << " pay_vit=" << r->stage_payload_viterbi_us
+                 << " pay_rs=" << r->stage_payload_rs_us
+                 << " pay_crc=" << r->stage_payload_crc_us
+                 << " pay_other=" << r->stage_payload_other_us
+                 << " pay_derot=" << r->stage_payload_derotate_us
+                 << " pay_fused_calls=" << r->stage_payload_fused_calls
+                 << " pay_legacy_calls=" << r->stage_payload_legacy_calls
                  // SFD children (already inside st_sfd; never added again).
                  << " sfd_boot=" << r->stage_sfd_bootstrap_us
                  << " sfd_tail=" << r->stage_sfd_tail_retrack_us
@@ -309,6 +348,31 @@ struct Reporter {
                  << " sfd_final=" << r->stage_sfd_final_us
                  << " sfd_other=" << r->stage_sfd_anchor_other_us
                  << " tail_fb=" << r->stage_tail_retrack_fallbacks
+                 // SFD-anchored CFO refit diagnostics: the two estimates, the
+                 // span the second rotation covered, and why it was skipped.
+                 // cfo_act: 0=legacy refit+rotate, 1=auto skip, 2=forced skip,
+                 //          3=requested skip but fell back.
+                 << std::fixed << std::setprecision(1)
+                 << " cfo_init_hz=" << r->cfo_initial_hz
+                 << " cfo_refit_hz=" << r->cfo_refit_hz
+                 << " cfo_init_pk=" << r->cfo_initial_peaks
+                 << " cfo_refit_pk=" << r->cfo_refit_peaks
+                 << " cfo_refit_span=" << r->cfo_refit_span_samples
+                 << " cfo_rot2_us=" << r->cfo_refit_rotate_us
+                 << " cfo_drift_rad=" << r->cfo_refit_phase_drift_rad
+                 << " cfo_rot_passes=" << r->stage_cfo_rotation_passes
+                 << " cfo_rot_samples=" << r->stage_cfo_rotated_samples
+                 // In-situ cost of the derotation kernel itself: total rotation
+                 // microseconds over all passes divided by the samples rotated.
+                 // Diagnostic only (no logic depends on it); it is the number to
+                 // compare when the kernel implementation changes.
+                 << std::setprecision(3)
+                 << " cfo_rot_ns_per_sample="
+                 << (r->stage_cfo_rotated_samples > 0
+                         ? 1000.0 * static_cast<double>(r->stage_cfo_rotate_us) /
+                               static_cast<double>(r->stage_cfo_rotated_samples)
+                         : 0.0)
+                 << " cfo_act=" << r->cfo_refit_action
                  << " sfd_win=" << r->sfd.search_windows
                  << " sfd_coarse=" << r->sfd.coarse_correlations
                  << " sfd_fine=" << r->sfd.fine_correlations
@@ -395,6 +459,7 @@ struct Job {
     int64_t seed = 0;            // absolute native predicted/acquired origin
     int64_t window_start = 0;    // absolute native window origin
     int64_t predicted_rel_work = 0;
+    size_t guard = 0;            // effective pre-guard used to cut this window
     uint64_t slot_index = std::numeric_limits<uint64_t>::max();
     uint64_t generation = 0;
     bool target_slot = false;
@@ -409,6 +474,7 @@ struct PendingSubmit {
     int64_t window_start = 0;
     size_t count = 0;
     int64_t predicted_rel_work = 0;
+    size_t guard = 0;
     uint64_t slot_index = std::numeric_limits<uint64_t>::max();
     uint64_t generation = 0;
     double metric = 0.0;
@@ -466,6 +532,10 @@ struct Workers {
                         acq.rx_fused_payload_cmf = o.fused;
                         acq.rx_fused_phr_cmf = o.fused;
                         acq.fused_gate_ppm = o.fused_gate_ppm;
+                        acq.cfo_refit_mode = (o.cfo_refit == "auto") ? 1
+                                           : (o.cfo_refit == "skip") ? 2 : 0;
+                        acq.cfo_refit_skip_rad = o.cfo_refit_skip_rad;
+                        acq.cfo_refit_min_peaks = o.cfo_refit_min_peaks;
                         // Blind sparse autocorrelation seeds can precede or
                         // follow the true first SYNC by several symbols.
                         acq.timing_search_margin = 131072;
@@ -475,6 +545,7 @@ struct Workers {
                         locked.sync_strategy = demod::SyncStrategy::LockedBounded;
                         locked.locked_roi_samples = o.locked_roi;
                         locked.locked_allow_backtrack = false;
+                        locked.locked_grid_timing = (o.locked_timing == "grid");
                         locked.timing_search_margin = 0;
                         locked.timing_max_backtrack_symbols = 0;
                         { std::lock_guard<std::mutex> l(mutex); ++ready; cv.notify_all(); }
@@ -568,12 +639,14 @@ struct Workers {
                                         << " gen=" << job.generation
                                         << " pred=" << job.seed
                                         << " win=" << job.window_start
+                                        << " guard=" << job.guard
                                         << " residual=" << obs.residual;
                                 } else if (job.slot_index ==
                                            std::numeric_limits<uint64_t>::max()) {
-                                    tag << "path=acquire";
+                                    tag << "path=acquire guard=" << job.guard;
                                 } else {
                                     tag << "path=interference slot=" << job.slot_index
+                                        << " guard=" << job.guard
                                         << " offset=" << (job.seed - job.window_start);
                                 }
                                 report.result(job.id, job.seed, status_name(r.status), &r,
@@ -628,7 +701,8 @@ struct Workers {
     bool submit(uint64_t id, int64_t window_start, size_t count, int64_t seed,
                 int64_t predicted_rel_work, uint64_t slot_index, uint64_t generation,
                 bool target_slot, bool feeds_lock,
-                const std::vector<std::complex<int16_t>>& ring) {
+                const std::vector<std::complex<int16_t>>& ring,
+                size_t guard = 0) {
         size_t slot;
         { std::lock_guard<std::mutex> l(mutex);
           if (free.empty()) return false;
@@ -637,6 +711,7 @@ struct Workers {
         job.id = id; job.seed = seed; job.window_start = window_start;
         job.count = std::min(count, window);
         job.predicted_rel_work = predicted_rel_work;
+        job.guard = guard;
         job.slot_index = slot_index; job.generation = generation;
         job.target_slot = target_slot; job.feeds_lock = feeds_lock;
         job.ready = Clock::now();
@@ -652,7 +727,7 @@ struct Workers {
     bool submit_buffer(uint64_t id, int64_t window_start, const std::complex<int16_t>* src,
                        size_t count, int64_t seed, int64_t predicted_rel_work,
                        uint64_t slot_index, uint64_t generation, bool target_slot,
-                       bool feeds_lock) {
+                       bool feeds_lock, size_t guard = 0) {
         size_t slot;
         { std::lock_guard<std::mutex> l(mutex);
           if (free.empty()) return false;
@@ -661,6 +736,7 @@ struct Workers {
         job.id = id; job.seed = seed; job.window_start = window_start;
         job.count = std::min(count, window);
         job.predicted_rel_work = predicted_rel_work;
+        job.guard = guard;
         job.slot_index = slot_index; job.generation = generation;
         job.target_slot = target_slot; job.feeds_lock = feeds_lock;
         job.ready = Clock::now();
@@ -887,7 +963,12 @@ try {
                 "--mode continuous|timed (default continuous; timed needs --replay)\n"
                 "--sync acquire|locked (default acquire; locked uses a bounded target ROI)\n"
                 "--period-ms 5 --pre-guard N --post-guard N (native samples)\n"
+                "--locked-pre-guard N (pre-guard while LOCKED, default 8192; the\n"
+                "  acquire/holdover/reacquire states keep the wide --pre-guard)\n"
                 "--locked-roi N (bounded first-SYNC half-width, default 256)\n"
+                "--locked-timing grid|legacy (LockedBounded SYNC train: sparse anchors +\n"
+                "  single-point correlation on the fitted grid, or the per-SYNC +/-8\n"
+                "  search; default grid.  measured_period always comes from the anchor fit)\n"
                 "--lock-observations 3 --holdover 3 --reacquire 8\n"
                 "--interference on|off (default on)\n"
                 "--tone on|off (fixed-tone cancellation, default on)\n"
@@ -895,6 +976,12 @@ try {
                 "--fused on|off (fused payload+PHR CMF, default on)\n"
                 "--fused-gate-ppm 6.468 (integer chip-grid admission; ceiling = 1 sample of drift)\n"
                 "--ondemand auto|on|off (on-demand soft-chip prefix, default auto = follow --fused)\n"
+                "--cfo-refit legacy|auto|skip (SFD-anchored CFO refit + second full-frame\n"
+                "  derotation; default legacy = always.  auto keeps the Stage-2 estimate\n"
+                "  when the two fits differ by <= --cfo-refit-skip-rad of accumulated\n"
+                "  phase and the single-pass range covers the packet; skip forces it)\n"
+                "--cfo-refit-skip-rad 0.10 (auto threshold, rad over the rotated span)\n"
+                "--cfo-refit-min-peaks 64 (auto: minimum Stage-2 peaks)\n"
                 "--timed-lead-us 300 --timed-lookahead 4 --timed-alignment 4\n"
                 "--timed-t0-ms 0 (first expected target time; timed_burst has no blind acquisition)\n"
                 "--taps eq16|quality|eq32|realtime (resampler Hpad 16|48|32|24, default eq16)\n"
@@ -921,7 +1008,9 @@ try {
         else if (key=="--sync") o.sync=value();
         else if (key=="--period-ms") o.period_ms=std::stod(value());
         else if (key=="--post-guard") o.post_guard=std::stoul(value());
+        else if (key=="--locked-pre-guard") o.locked_pre_guard=std::stoul(value());
         else if (key=="--locked-roi") o.locked_roi=std::stoul(value());
+        else if (key=="--locked-timing") o.locked_timing=value();
         else if (key=="--lock-observations") o.lock_observations=std::stoul(value());
         else if (key=="--holdover") o.holdover=std::stoul(value());
         else if (key=="--reacquire") o.reacquire=std::stoul(value());
@@ -932,6 +1021,9 @@ try {
         else if (key=="--fused") o.fused=(value()!="off");
         else if (key=="--fused-gate-ppm") o.fused_gate_ppm=std::stod(value());
         else if (key=="--ondemand") o.ondemand=value();
+        else if (key=="--cfo-refit") o.cfo_refit=value();
+        else if (key=="--cfo-refit-skip-rad") o.cfo_refit_skip_rad=std::stod(value());
+        else if (key=="--cfo-refit-min-peaks") o.cfo_refit_min_peaks=std::stoul(value());
         else if (key=="--timed-lead-us") o.timed_lead_us=std::stod(value());
         else if (key=="--timed-lookahead") o.timed_lookahead=std::stoul(value());
         else if (key=="--timed-alignment") o.timed_alignment=std::stoul(value());
@@ -952,11 +1044,17 @@ try {
         throw std::runtime_error("--taps must be quality, eq32, realtime or eq16");
     if (o.sync!="acquire" && o.sync!="locked")
         throw std::runtime_error("--sync must be acquire or locked");
+    if (o.locked_timing!="grid" && o.locked_timing!="legacy")
+        throw std::runtime_error("--locked-timing must be grid or legacy");
     if (!(o.tone_period_ms > 0.0) || !(o.tone_training_ms > 0.0) ||
         o.tone_training_ms >= o.tone_period_ms)
         throw std::runtime_error("invalid --tone-period-ms/--tone-training-ms");
     if (o.ondemand!="auto" && o.ondemand!="on" && o.ondemand!="off")
         throw std::runtime_error("--ondemand must be auto, on or off");
+    if (o.cfo_refit!="legacy" && o.cfo_refit!="auto" && o.cfo_refit!="skip")
+        throw std::runtime_error("--cfo-refit must be legacy, auto or skip");
+    if (!(o.cfo_refit_skip_rad > 0.0) || !std::isfinite(o.cfo_refit_skip_rad))
+        throw std::runtime_error("--cfo-refit-skip-rad must be finite and > 0");
     // The gate is a drift budget: above the physical ceiling (1 sample over the
     // 127 B payload = 6.5 ppm) the integer grid cannot stay on the correlation
     // peak, so accepting it would produce silently wrong soft chips.
@@ -972,6 +1070,8 @@ try {
         o.reacquire<=o.holdover || o.timed_lookahead==0 || o.timed_alignment==0 ||
         o.timed_t0_ms<0.0 || !std::isfinite(o.timed_t0_ms))
         throw std::runtime_error("invalid lock/timed configuration");
+    if (o.locked_pre_guard == 0)
+        throw std::runtime_error("--locked-pre-guard must be > 0");
     // The timed UHD command path is NOT enabled: it must be validated on a
     // board before it can be claimed.  Failing closed here is deliberate.
     if (o.mode=="timed" && o.replay.empty())
@@ -1002,6 +1102,26 @@ try {
     const size_t post_guard = o.post_guard;
     if (pre_guard + native_span + post_guard > window)
         throw std::runtime_error("target window geometry exceeds the job buffer");
+    // The LOCKED guard only has to hold the bounded first-SYNC ROI plus the
+    // resampler transient in front of the packet.  Below that floor the cut
+    // window would start inside the search region, so refuse it instead of
+    // silently truncating the ROI.
+    const size_t locked_roi_native =
+        size_t(std::llround(double(o.locked_roi) * 48.0 / 65.0));
+    const size_t resampler_delay_native = size_t(
+        std::llround(0.5 * double(taps.size() - 1) * 48.0 / 65.0));
+    const size_t locked_pre_guard_min =
+        locked_roi_native + resampler_delay_native + 1024;
+    if (o.locked_pre_guard < locked_pre_guard_min)
+        throw std::runtime_error(
+            "--locked-pre-guard must be >= " +
+            std::to_string(locked_pre_guard_min) +
+            " (locked ROI " + std::to_string(locked_roi_native) +
+            " + resampler group delay " + std::to_string(resampler_delay_native) +
+            " + 1024 margin native samples)");
+    if (o.locked_pre_guard + native_span + post_guard > window)
+        throw std::runtime_error(
+            "locked target window geometry exceeds the job buffer");
 
     core::TargetLockConfig lock_cfg;
     lock_cfg.sample_rate = fs;
@@ -1018,9 +1138,11 @@ try {
         /*phr_span=*/size_t(std::llround(21.0 * 512.0 * 2.0 * 48.0 / 65.0)),
         /*payload_span=*/size_t(std::llround(1208.0 * 64.0 * 2.0 * 48.0 / 65.0)),
         /*pulse_halo=*/1024, pre_guard, post_guard);
+    // The job buffer is allocated once for the widest geometry; a runtime
+    // pre-guard update may only move the window inside that budget.
+    lock_cfg.window_capacity = window;
     core::TargetLockCore lock(lock_cfg);
     core::TargetLockState last_state = lock.state();
-
     Reporter report(o.summary, o.print == "packets");
     report.info("START mode="+o.mode+" sync="+o.sync+
         " channel="+o.channel+" antenna="+o.antenna+" cir="+o.cir+
@@ -1029,12 +1151,40 @@ try {
         " taps="+o.taps+" taps_n="+std::to_string(taps.size())+
         " print="+o.print+
         " pre_guard="+std::to_string(pre_guard)+
+        " locked_pre_guard="+std::to_string(o.locked_pre_guard)+
         " capture="+std::to_string(lock_cfg.geometry.capture)+
         " post_guard="+std::to_string(post_guard)+
         " window_capacity="+std::to_string(lock_cfg.geometry.capacity())+
+        " locked_window_capacity="+
+            std::to_string(o.locked_pre_guard+lock_cfg.geometry.capture+post_guard)+
         " interference="+std::string(o.interference?"on":"off")+
         " fused="+std::string(o.fused?"on":"off")+
         " ondemand="+std::string(o.ondemand_resolved?"on":"off"));
+    // Effective pre-guard for the next cut window.  It follows the lock state:
+    // the blind acquisition platform needs the wide guard, the locked
+    // predictor only needs the bounded ROI.  Every window cut (target,
+    // autocorrelation candidate, timed blind grid) must use this value so the
+    // window start and the reported plan can never disagree.
+    size_t cur_pre_guard = lock.pre_guard();
+    const auto sync_pre_guard = [&]() {
+        const size_t want = (lock.state() == core::TargetLockState::Locked)
+                                ? o.locked_pre_guard
+                                : pre_guard;
+        if (want == cur_pre_guard)
+            return;
+        if (!lock.set_pre_guard(want))
+            throw std::runtime_error(
+                "runtime pre_guard update to " + std::to_string(want) +
+                " rejected: pre_guard+capture+post_guard exceeds the job buffer "
+                "(" + std::to_string(window) + ")");
+        cur_pre_guard = want;
+        std::ostringstream s;
+        s << "PRE_GUARD state=" << core::target_lock_state_name(lock.state())
+          << " pre_guard=" << want
+          << " window_capacity="
+          << (want + lock_cfg.geometry.capture + post_guard);
+        report.info(s.str());
+    };
     Workers workers(report,lock,o,taps,tmpl); // All worker allocations before streaming.
 
     const auto emit_lock = [&](const char* why) {
@@ -1148,6 +1298,7 @@ try {
         int64_t window_start;
         size_t count;
         int64_t predicted_origin;
+        size_t guard;
     };
     std::deque<TimedPending> timed_pending;
     int64_t timed_cursor = std::llround(o.timed_t0_ms * 1e-3 * fs);
@@ -1174,6 +1325,7 @@ try {
                     tp.window_start = plan.window_start;
                     tp.count = count;
                     tp.predicted_origin = plan.predicted_origin;
+                    tp.guard = plan.pre_guard;
                     timed_pending.push_back(tp);
                     lock.commit_plan(plan);
                     ++target_slots;
@@ -1186,7 +1338,7 @@ try {
             } else {
                 // Blind grid: the packet is expected at `timed_cursor`, so the
                 // window starts one pre_guard earlier.
-                const int64_t ws = timed_cursor - int64_t(pre_guard);
+                const int64_t ws = timed_cursor - int64_t(cur_pre_guard);
                 if (timed->queue_window(ws < 0 ? 0 : ws, window,
                                         lock.generation())) {
                     TimedPending tp;
@@ -1194,8 +1346,9 @@ try {
                     tp.generation = lock.generation();
                     tp.window_start = ws < 0 ? 0 : ws;
                     tp.count = window;
-                    tp.predicted_origin = ws < 0 ? int64_t(pre_guard)
+                    tp.predicted_origin = ws < 0 ? int64_t(cur_pre_guard)
                                                  : timed_cursor;
+                    tp.guard = cur_pre_guard;
                     timed_pending.push_back(tp);
                 }
                 timed_cursor += nominal_period_samples;
@@ -1248,15 +1401,16 @@ try {
                         // this 6 ms-window autocorrelation detection.
                         if (!o.interference) {
                             ++unknown;
-                        } else if (seed-int64_t(pre_guard)<valid_begin) {
+                        } else if (seed-int64_t(cur_pre_guard)<valid_begin) {
                             report.result(id,seed,"INCOMPLETE_WINDOW");
                         } else {
                             PendingSubmit ps;
                             ps.id = id;
                             ps.seed = seed;
-                            ps.window_start = seed-int64_t(pre_guard);
+                            ps.window_start = seed-int64_t(cur_pre_guard);
                             ps.count = window;
-                            ps.predicted_rel_work = std::llround(pre_guard*65.0/48);
+                            ps.predicted_rel_work = std::llround(cur_pre_guard*65.0/48);
+                            ps.guard = cur_pre_guard;
                             ps.generation = lock.generation();
                             ps.metric = metric;
                             ps.is_candidate = true;
@@ -1269,21 +1423,22 @@ try {
                         }
                     } else if (pending_seed>=0) {
                         report.result(id,seed,"OVERLAPPING_CANDIDATE");
-                    } else if (seed-int64_t(pre_guard)<valid_begin) {
+                    } else if (seed-int64_t(cur_pre_guard)<valid_begin) {
                         report.result(id,seed,"INCOMPLETE_WINDOW");
                     } else {
                         pending_seed=seed; pending_id=id;
                     }
                 }
-                if (pending_seed>=0 && end>=pending_seed-int64_t(pre_guard)+int64_t(window)) {
-                    if (pending_seed-int64_t(pre_guard)<valid_begin) {
+                if (pending_seed>=0 && end>=pending_seed-int64_t(cur_pre_guard)+int64_t(window)) {
+                    if (pending_seed-int64_t(cur_pre_guard)<valid_begin) {
                         report.result(pending_id,pending_seed,"HISTORY_OVERRUN");
                     } else {
-                        const int64_t ws = pending_seed-int64_t(pre_guard);
+                        const int64_t ws = pending_seed-int64_t(cur_pre_guard);
                         workers.submit(pending_id, ws, window, pending_seed,
-                                       std::llround(pre_guard*65.0/48),
+                                       std::llround(cur_pre_guard*65.0/48),
                                        std::numeric_limits<uint64_t>::max(),
-                                       lock.generation(), false, true, ring);
+                                       lock.generation(), false, true, ring,
+                                       cur_pre_guard);
                     }
                     pending_seed=-1;
                 }
@@ -1325,7 +1480,7 @@ try {
                 if (!workers.submit(ps.id, ps.window_start, ps.count, ps.seed,
                                     ps.predicted_rel_work, ps.slot_index,
                                     ps.generation, ps.target_slot, ps.feeds_lock,
-                                    ring))
+                                    ring, ps.guard))
                     report.result(ps.id, ps.seed, "DROPPED_QUEUE");
             }
             pending.swap(still);
@@ -1337,6 +1492,10 @@ try {
         // (Caching the window itself cut the first post-lock slots with the
         // nominal 5 ms period and missed them by ~300 samples.)
         if (o.mode != "timed") {
+            // A lock-state change moves the guard (and with it the window
+            // start); apply it before the next plan is chosen so the plan and
+            // the cut window are always cut from the same geometry.
+            sync_pre_guard();
             if (have_pending_plan &&
                 pending_plan.generation != lock.generation()) {
                 // The grid changed under us; the old plan is void.
@@ -1363,7 +1522,7 @@ try {
                                                    plan.predicted_origin,
                                                    std::llround(rel*65.0/48),
                                                    plan.slot_index, plan.generation,
-                                                   true, true, ring);
+                                                   true, true, ring, plan.pre_guard);
                     if (!ok) {
                         lock.note_slot_outcome(plan.slot_index,
                                                core::TargetSlotOutcome::DroppedQueue);
@@ -1398,7 +1557,8 @@ try {
                 if (!workers.submit(++id, tp.window_start, tp.count,
                                     tp.predicted_origin,
                                     std::llround(rel*65.0/48), tp.slot_index,
-                                    tp.generation, target_slot, true, ring)) {
+                                    tp.generation, target_slot, true, ring,
+                                    tp.guard)) {
                     report.result(id, tp.predicted_origin, "DROPPED_QUEUE");
                     if (target_slot)
                         lock.note_slot_outcome(tp.slot_index,
@@ -1437,6 +1597,9 @@ try {
                      : lock.state() == core::TargetLockState::Holdover ? "target_miss"
                      : lock.state() == core::TargetLockState::Reacquire ? "grid_invalid"
                      : "seeded");
+            // The guard follows the state: LOCKED only needs the bounded ROI,
+            // every other state needs the wide acquisition platform.
+            sync_pre_guard();
         }
         if (Clock::now()-snapshot>std::chrono::milliseconds(100)) {
             report.snapshot(source_stats(),gaps,workers.backlog()); snapshot=Clock::now();
@@ -1494,6 +1657,7 @@ try {
           << " cand_interference=" << ls.candidates_interference
           << " cand_unknown=" << ls.candidates_unknown
           << " period_updates=" << ls.period_updates
+          << " pre_guard_updates=" << ls.pre_guard_updates
           << " lock_slots=" << ls.lock_slots
           << " period_samples=" << ls.period_samples
           << " period_ppm=" << ls.period_ppm

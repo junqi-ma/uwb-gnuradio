@@ -259,6 +259,213 @@ BOOST_AUTO_TEST_CASE(test_demod_core_tail_seed_refine_radius_fallback)
     BOOST_CHECK_EQUAL(legacy.seed_refine_narrow_attempts, 0u);
 }
 
+BOOST_AUTO_TEST_CASE(test_locked_grid_timing_matches_legacy_train)
+{
+    // LockedBounded grid tracking replaces the per-SYNC +/-8 search with a
+    // sparse anchor fit plus one correlation per SYNC.  On a clean train it
+    // must reproduce the legacy peak train and the fitted period, because CFO
+    // (peak_corr phases) and CIR (measured_period) are downstream consumers.
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+
+    auto prof = Qm35825Profile::Default();
+    prof.sync_strategy = SyncStrategy::LockedBounded;
+    prof.locked_roi_samples = 256;
+    prof.locked_inner_symbols = 4;
+    prof.locked_allow_backtrack = false;
+
+    core::DemodScratch scratch_a;
+    scratch_a.reserve(iq.size());
+    prof.locked_grid_timing = false;
+    TimingResult legacy;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984,
+                                     legacy, scratch_a));
+    BOOST_CHECK_EQUAL(legacy.grid_anchor_hits, 0u);
+    BOOST_CHECK_EQUAL(legacy.grid_single_points, 0u);
+
+    core::DemodScratch scratch_b;
+    scratch_b.reserve(iq.size());
+    prof.locked_grid_timing = true;
+    TimingResult grid;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984,
+                                     grid, scratch_b));
+    // The grid path ran (no fallback) and used real anchor searches.
+    BOOST_CHECK_EQUAL(grid.grid_fallbacks, 0u);
+    BOOST_CHECK_GE(grid.grid_anchor_hits, 8u);
+    BOOST_CHECK_EQUAL(grid.grid_single_points, uint32_t(prof.preamble_repetitions));
+    BOOST_CHECK_EQUAL(grid.grid_single_valid, uint32_t(prof.preamble_repetitions));
+    // A clean train never needs the failure-path tail probe.
+    BOOST_CHECK_EQUAL(grid.tail_probe_attempts, 0u);
+    BOOST_CHECK_EQUAL(grid.tail_probe_hits, 0u);
+    // Same train, same origin, same period as the legacy per-SYNC search.
+    BOOST_CHECK_EQUAL(grid.detected_peaks, legacy.detected_peaks);
+    BOOST_CHECK_EQUAL(grid.detected_peaks, prof.preamble_repetitions);
+    BOOST_CHECK_SMALL(std::abs(grid.measured_period - legacy.measured_period),
+                      0.02);
+    BOOST_CHECK_SMALL(std::abs(static_cast<double>(grid.preamble_start_sample) -
+                               static_cast<double>(legacy.preamble_start_sample)),
+                      2.0);
+    // Locked contract still holds: no backtrack, no legacy scan.
+    BOOST_CHECK_EQUAL(grid.backtrack_symbols, 0u);
+    BOOST_CHECK_EQUAL(grid.bounded_legacy_scans, 0u);
+    BOOST_CHECK_EQUAL(grid.bounded_success, 1u);
+
+    // End to end: the grid path must still decode the golden packet, including
+    // the SFD-anchored tail re-track (which runs stage_timing a second time on
+    // the 40-SYNC tail with the same bounded profile).
+    auto p_legacy = prof;
+    p_legacy.locked_grid_timing = false;
+    p_legacy.sfd_mode = "ieee";
+    auto p_grid = prof;
+    p_grid.locked_grid_timing = true;
+    p_grid.sfd_mode = "ieee";
+    core::DemodScratch s_legacy, s_grid;
+    s_legacy.reserve(iq.size());
+    s_grid.reserve(iq.size());
+    auto r_legacy = core::demodulate_one(iq.data(), iq.size(), p_legacy, 1,
+                                         9984, 0, tmpl, s_legacy);
+    auto r_grid = core::demodulate_one(iq.data(), iq.size(), p_grid, 1, 9984, 0,
+                                       tmpl, s_grid);
+    BOOST_CHECK(r_grid.status == DemodStatus::Success);
+    BOOST_CHECK(r_legacy.status == r_grid.status);
+    BOOST_CHECK(r_grid.payload.bytes == r_legacy.payload.bytes);
+    BOOST_CHECK(r_grid.payload.fcs_pass == r_legacy.payload.fcs_pass);
+    BOOST_CHECK_EQUAL(r_grid.timing.grid_fallbacks, 0u);
+    BOOST_CHECK_SMALL(std::abs(r_grid.timing.measured_period -
+                               r_legacy.timing.measured_period), 0.02);
+    BOOST_CHECK_SMALL(std::abs(r_grid.cfo.cfo_hz - r_legacy.cfo.cfo_hz), 15.0);
+    BOOST_CHECK_SMALL(std::abs(static_cast<double>(r_grid.sfd.sfd_start_sample) -
+                               static_cast<double>(r_legacy.sfd.sfd_start_sample)),
+                      2.0);
+}
+
+BOOST_AUTO_TEST_CASE(test_locked_grid_timing_period_is_measured_not_nominal)
+{
+    // The grid path must MEASURE the period (anchors bootstrap the grid, then a
+    // least-squares fit over every refined peak), never report the nominal 1016
+    // grid: measured_period feeds integer_chip_grid()/spc_ppm and the fused-CMF
+    // admission, so a degenerate constant would silently disable the
+    // Full->Bypass (grid_reject) protection for an untrimmed clock.
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+
+    // Compress the sample clock by 50 ppm: out[n] = in[n*rate] maps a signal
+    // feature at input index m to output index m/rate, so the SYNC period
+    // becomes 1016/rate = 1015.949 samples (drift over 63 symbols is 3.2
+    // samples, inside the +/-8 anchor radius) and the integer chip grid must
+    // be rejected.
+    const double ppm = 50.0;
+    const double rate = 1.0 + ppm * 1e-6;
+    std::vector<gr_complex> stretched;
+    stretched.resize(static_cast<size_t>(
+        std::floor(static_cast<double>(iq.size() - 1) / rate)));
+    for (size_t n = 0; n < stretched.size(); ++n) {
+        const double x = static_cast<double>(n) * rate;
+        const size_t i0 = static_cast<size_t>(x);
+        const double f = x - static_cast<double>(i0);
+        const size_t i1 = std::min(i0 + 1, iq.size() - 1);
+        stretched[n] = iq[i0] * static_cast<float>(1.0 - f) +
+                       iq[i1] * static_cast<float>(f);
+    }
+
+    auto prof = Qm35825Profile::Default();
+    prof.sync_strategy = SyncStrategy::LockedBounded;
+    prof.locked_roi_samples = 256;
+    prof.locked_inner_symbols = 4;
+    prof.locked_grid_timing = true;
+
+    core::DemodScratch scratch;
+    scratch.reserve(stretched.size());
+    TimingResult tr;
+    BOOST_REQUIRE(core::stage_timing(stretched.data(), stretched.size(), prof,
+                                     tmpl, 9984, tr, scratch));
+    BOOST_CHECK_EQUAL(tr.grid_fallbacks, 0u);
+    BOOST_CHECK_GE(tr.grid_anchor_hits, 8u);
+    const double expected = 1016.0 / rate;
+    BOOST_CHECK_SMALL(std::abs(tr.measured_period - expected), 0.05);
+    // Not the nominal grid.
+    BOOST_CHECK_GT(std::abs(tr.measured_period - 1016.0), 0.02);
+    // 50 ppm is far outside the integer chip-grid drift budget, so the fused
+    // path must still be refused (this is the Full->Bypass protection).
+    BOOST_CHECK(!core::integer_chip_grid(tr.measured_period /
+                                         double(kQm35ChipsPerSymbol)));
+}
+
+BOOST_AUTO_TEST_CASE(test_locked_tail_probe_rescues_leading_interference)
+{
+    // A burst interferer can cover only the first few SYNCs while the tail is
+    // clean (5.2 m capture: first_5_max 0.029..0.053, med_tail 0.14..0.20).
+    // The bounded probe must then keep probing sparse tail anchors instead of
+    // declaring a tracking failure, and the rescued origin must still be the
+    // true first SYNC start.
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+    constexpr size_t kStart = 9984;
+    constexpr size_t kSym = kQm35SamplesPerSymbol;
+    constexpr size_t kAtten = 20;
+
+    std::vector<gr_complex> hit = iq;
+    // Replace the leading SYNCs with uncorrelated noise of similar power: the
+    // normalised metric is scale-invariant, so attenuating them would NOT
+    // lower it.  Real burst interference decorrelates the SYNC, which is what
+    // the 5.2 m capture shows (first_5_max 0.029..0.053).
+    std::mt19937 rng(20261116u);
+    std::normal_distribution<float> nd(0.0f, 0.35f);
+    float rms = 0.0f;
+    for (size_t i = 0; i < kSym; ++i)
+        rms += std::norm(iq[kStart + i]);
+    rms = std::sqrt(rms / static_cast<float>(kSym));
+    for (size_t k = 0; k < kAtten; ++k) {
+        const size_t base = kStart + k * kSym;
+        BOOST_REQUIRE_LT(base + kSym, hit.size());
+        for (size_t i = 0; i < kSym; ++i)
+            hit[base + i] = gr_complex(nd(rng), nd(rng)) * rms;
+    }
+
+    auto prof = Qm35825Profile::Default();
+    prof.sync_strategy = SyncStrategy::LockedBounded;
+    prof.locked_roi_samples = 256;
+    prof.locked_inner_symbols = 4;
+    prof.locked_grid_timing = true;
+
+    // Without the tail probe the packet is lost: m = 0..4 are all attenuated.
+    core::DemodScratch scratch_a;
+    scratch_a.reserve(hit.size());
+    prof.locked_tail_probe = false;
+    TimingResult no_tail;
+    BOOST_CHECK(!core::stage_timing(hit.data(), hit.size(), prof, tmpl, kStart,
+                                    no_tail, scratch_a));
+    BOOST_CHECK_EQUAL(no_tail.bounded_failures, 1u);
+    BOOST_CHECK_EQUAL(no_tail.tail_probe_attempts, 0u);
+
+    // With the tail probe the clean tail rescues the packet.
+    core::DemodScratch scratch_b;
+    scratch_b.reserve(hit.size());
+    prof.locked_tail_probe = true;
+    prof.locked_tail_probe_step = 8;
+    prof.locked_tail_probe_confirm = 2;
+    TimingResult res;
+    BOOST_REQUIRE(core::stage_timing(hit.data(), hit.size(), prof, tmpl, kStart,
+                                     res, scratch_b));
+    BOOST_CHECK_EQUAL(res.bounded_failures, 0u);
+    BOOST_CHECK_EQUAL(res.tail_probe_hits, 1u);
+    BOOST_CHECK_GT(res.tail_probe_k, int64_t(kAtten));
+    BOOST_CHECK_GE(res.grid_anchor_hits, 8u);
+    // Attenuated head symbols are below threshold; the clean tail is kept.
+    BOOST_CHECK_GE(res.detected_peaks, prof.preamble_repetitions - kAtten);
+    BOOST_CHECK_LT(res.detected_peaks, prof.preamble_repetitions);
+    // The anchor fit extrapolates back to the true first SYNC start.
+    BOOST_CHECK_SMALL(std::abs(static_cast<double>(res.preamble_start_sample) -
+                               static_cast<double>(kStart)),
+                      4.0);
+    BOOST_CHECK_SMALL(std::abs(res.measured_period - 1016.0), 0.05);
+    BOOST_CHECK_EQUAL(res.backtrack_symbols, 0u);
+    BOOST_CHECK_EQUAL(res.bounded_legacy_scans, 0u);
+}
+
 BOOST_AUTO_TEST_CASE(test_demod_core_rxopt_on_demand_rejects_fractional_grid)
 {
     // The on-demand experiment must not round a fractional SFO chip grid or
@@ -901,6 +1108,224 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r3_sfd_child_subtimers_are_consistent)
         res.stage_phr_us + res.stage_payload_us +
         res.stage_softchip_fallback_us;
     BOOST_CHECK_EQUAL(res.stage_total_us, parent_sum);
+}
+
+// ---------------------------------------------------------------------------
+// SFD-anchored CFO refit policy (single-pass rotation).
+//
+// `demodulate_one` fits the carrier offset twice and derotates the downstream
+// span twice.  The second pass is the largest single cost inside `stage_sfd`.
+// `Qm35825Profile::cfo_refit_mode` can replace it with one rotation that uses
+// the Stage-2 estimate.  The contract that must hold:
+//   * legacy (default) still runs both fits and both rotations,
+//   * skip keeps the Stage-2 estimate and drops one rotation pass,
+//   * the decode verdict (status / PSDU / FCS) is unchanged,
+//   * auto falls back to the legacy path when the drift budget is exceeded.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct CfoRefitRun {
+    DemodResult res;
+    std::vector<uint8_t> psdu;
+};
+
+CfoRefitRun run_cfo_refit_case(const std::vector<gr_complex>& iq,
+                               const std::vector<gr_complex>& tmpl,
+                               int mode,
+                               double skip_rad,
+                               size_t min_peaks)
+{
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+    prof.sfd_mode = "ieee";
+    prof.cfo_refit_mode = mode;
+    prof.cfo_refit_skip_rad = skip_rad;
+    prof.cfo_refit_min_peaks = min_peaks;
+    CfoRefitRun out;
+    out.res = core::demodulate_one(iq.data(), iq.size(), prof, 1, 9984, 0,
+                                   tmpl, scratch);
+    out.psdu = out.res.payload.bytes;
+    return out;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(test_demod_core_cfo_refit_skip_matches_legacy_decode)
+{
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    const auto tmpl = load_reference_template();
+    BOOST_REQUIRE(!tmpl.empty());
+
+    // Legacy: both fits, both rotations.  The Stage-2 fit is published, the
+    // refit replaces it, and the second rotation covers the whole window.
+    const auto legacy = run_cfo_refit_case(iq, tmpl, 0, 0.10, 64);
+    BOOST_REQUIRE(legacy.res.status == DemodStatus::Success);
+    BOOST_CHECK(legacy.res.payload.fcs_pass);
+    BOOST_CHECK_EQUAL(legacy.res.cfo_refit_action, uint32_t(0));
+    BOOST_CHECK_EQUAL(legacy.res.stage_cfo_rotation_passes, uint32_t(2));
+    BOOST_CHECK_GT(legacy.res.cfo_refit_span_samples, uint64_t(0));
+    BOOST_CHECK_GT(legacy.res.cfo_initial_peaks, uint32_t(0));
+    BOOST_CHECK_GT(legacy.res.cfo_refit_peaks, uint32_t(0));
+    BOOST_CHECK_EQUAL(legacy.res.cfo.cfo_hz, legacy.res.cfo_refit_hz);
+    BOOST_CHECK(std::abs(legacy.res.cfo_initial_hz - legacy.res.cfo_refit_hz) <
+                1e4);
+
+    // Forced skip: the Stage-2 estimate survives, one rotation pass is gone,
+    // and the payload/FCS verdict is identical.
+    const auto skipped = run_cfo_refit_case(iq, tmpl, 2, 0.10, 64);
+    BOOST_REQUIRE(skipped.res.status == DemodStatus::Success);
+    BOOST_CHECK(skipped.res.payload.fcs_pass);
+    BOOST_CHECK_EQUAL(skipped.res.cfo_refit_action, uint32_t(2));
+    BOOST_CHECK_EQUAL(skipped.res.stage_cfo_rotation_passes, uint32_t(1));
+    BOOST_CHECK_EQUAL(skipped.res.cfo.cfo_hz, skipped.res.cfo_initial_hz);
+    BOOST_CHECK_EQUAL(skipped.res.cfo_refit_rotate_us, uint64_t(0));
+    // The refit is still measured (it is what the decision is based on) but it
+    // must not be applied.
+    BOOST_CHECK_GT(skipped.res.cfo_refit_peaks, uint32_t(0));
+    BOOST_CHECK_GT(skipped.res.cfo_refit_span_samples, uint64_t(0));
+    // Same PSDU and same SFD/PHR coordinates: the rotation only changes the
+    // carrier phase reference, not the frame geometry.
+    BOOST_CHECK(skipped.psdu == legacy.psdu);
+    BOOST_CHECK_EQUAL(skipped.res.ns_sfd.sfd_start_chip,
+                      legacy.res.ns_sfd.sfd_start_chip);
+    BOOST_CHECK_EQUAL(skipped.res.phr.psdu_length, legacy.res.phr.psdu_length);
+    BOOST_CHECK_EQUAL(skipped.res.timing.preamble_start_sample,
+                      legacy.res.timing.preamble_start_sample);
+    BOOST_CHECK_EQUAL(skipped.res.sfd.sfd_start_sample,
+                      legacy.res.sfd.sfd_start_sample);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_cfo_refit_auto_falls_back_on_drift)
+{
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    const auto tmpl = load_reference_template();
+    BOOST_REQUIRE(!tmpl.empty());
+
+    // A zero drift budget can never be met, so auto must keep the legacy path
+    // and report the fallback instead of silently skipping.
+    const auto strict = run_cfo_refit_case(iq, tmpl, 1, 1e-12, 64);
+    BOOST_REQUIRE(strict.res.status == DemodStatus::Success);
+    BOOST_CHECK(strict.res.payload.fcs_pass);
+    BOOST_CHECK_EQUAL(strict.res.cfo_refit_action, uint32_t(3));
+    BOOST_CHECK_EQUAL(strict.res.stage_cfo_rotation_passes, uint32_t(2));
+    BOOST_CHECK_EQUAL(strict.res.cfo.cfo_hz, strict.res.cfo_refit_hz);
+
+    // A peak-count requirement the Stage-2 fit cannot satisfy must also fall
+    // back (the fit only sees preamble_repetitions - 24 peaks).
+    const auto too_few = run_cfo_refit_case(iq, tmpl, 1, 1e9, 100000);
+    BOOST_REQUIRE(too_few.res.status == DemodStatus::Success);
+    BOOST_CHECK_EQUAL(too_few.res.cfo_refit_action, uint32_t(3));
+    BOOST_CHECK_EQUAL(too_few.res.stage_cfo_rotation_passes, uint32_t(2));
+
+    // A generous budget and a reachable peak count must skip.
+    const auto loose = run_cfo_refit_case(iq, tmpl, 1, 1e9, 1);
+    BOOST_REQUIRE(loose.res.status == DemodStatus::Success);
+    BOOST_CHECK(loose.res.payload.fcs_pass);
+    BOOST_CHECK_EQUAL(loose.res.cfo_refit_action, uint32_t(1));
+    BOOST_CHECK_EQUAL(loose.res.stage_cfo_rotation_passes, uint32_t(1));
+    BOOST_CHECK_EQUAL(loose.res.cfo.cfo_hz, loose.res.cfo_initial_hz);
+    BOOST_CHECK(loose.psdu == strict.psdu);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_cfo_refit_legacy_default_is_unchanged)
+{
+    // The default profile must keep the pre-existing two-fit / two-rotation
+    // behaviour so every historical measurement stays comparable.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    const auto tmpl = load_reference_template();
+    BOOST_REQUIRE(!tmpl.empty());
+
+    const auto dflt = run_cfo_refit_case(iq, tmpl, 0, 0.10, 64);
+    BOOST_REQUIRE(dflt.res.status == DemodStatus::Success);
+    BOOST_CHECK_EQUAL(dflt.res.cfo.skipped_peaks, size_t(24));
+    BOOST_CHECK_EQUAL(dflt.res.cfo.peaks_used, size_t(40));
+    BOOST_CHECK_EQUAL(dflt.res.cfo_refit_action, uint32_t(0));
+    BOOST_CHECK_EQUAL(dflt.res.stage_cfo_rotation_passes, uint32_t(2));
+    BOOST_CHECK(dflt.res.cfo_refit_rotate_us <= dflt.res.stage_sfd_cfo_refit_us);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_second_rotation_stops_at_payload_start)
+{
+    // The payload pass derotates from min(sec_hi, base0) onwards.  The second
+    // rotation used to run to the legacy 40-PHR-head budget, which sits PAST
+    // the payload start, so ~35k samples were derotated twice with the same
+    // CFO.  The bound must now stop at the real requirement (soft-chip prefix
+    // and fused-PHR reads) and the decode must be unchanged.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    const auto tmpl = load_reference_template();
+    BOOST_REQUIRE(!tmpl.empty());
+
+    auto prof = Qm35825Profile::Default();
+    prof.sfd_mode = "ieee";
+    prof.rx_fast_sfd = true;
+    prof.rx_fast_cfo_rotation = true;
+    prof.rx_softchip_on_demand = true;
+    prof.rx_fused_payload_cmf = true;
+    prof.rx_fused_phr_cmf = true;
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    const auto res = core::demodulate_one(iq.data(), iq.size(), prof, 1, 9984, 0,
+                                          tmpl, scratch);
+    BOOST_REQUIRE(res.status == DemodStatus::Success);
+    BOOST_CHECK(res.payload.fcs_pass);
+    BOOST_CHECK_EQUAL(res.payload.received_fcs, uint16_t(0x584b));
+
+    // The legacy budget would need 2 * initial_chip_budget samples; the real
+    // requirement is smaller because the fused PHR reads raw IQ.
+    const size_t legacy_span = 2 * rxopt::initial_chip_budget(prof);
+    BOOST_CHECK_LT(res.cfo_refit_span_samples, legacy_span);
+    BOOST_CHECK_GT(res.cfo_refit_span_samples, uint64_t(0));
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_single_pass_rotation_reduces_rotated_samples)
+{
+    // Single-pass mode must derotate strictly fewer samples than the legacy
+    // two-pass chain while producing the same PSDU.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    const auto tmpl = load_reference_template();
+    BOOST_REQUIRE(!tmpl.empty());
+
+    auto make = [&](int mode) {
+        auto prof = Qm35825Profile::Default();
+        prof.sfd_mode = "ieee";
+        prof.rx_fast_sfd = true;
+        prof.rx_fast_cfo_rotation = true;
+        prof.rx_softchip_on_demand = true;
+        prof.rx_fused_payload_cmf = true;
+        prof.rx_fused_phr_cmf = true;
+        prof.cfo_refit_mode = mode;
+        return prof;
+    };
+    auto run = [&](int mode) {
+        core::DemodScratch scratch;
+        scratch.reserve(iq.size());
+        return core::demodulate_one(iq.data(), iq.size(), make(mode), 1, 9984, 0,
+                                    tmpl, scratch);
+    };
+
+    const auto legacy = run(0);
+    const auto single = run(2);
+    BOOST_REQUIRE(legacy.status == DemodStatus::Success);
+    BOOST_REQUIRE(single.status == DemodStatus::Success);
+    BOOST_CHECK(legacy.payload.fcs_pass);
+    BOOST_CHECK(single.payload.fcs_pass);
+    BOOST_CHECK(single.payload.bytes == legacy.payload.bytes);
+    BOOST_CHECK_EQUAL(single.cfo_refit_action, uint32_t(2));
+    BOOST_CHECK_EQUAL(single.stage_cfo_rotation_passes + 1,
+                      legacy.stage_cfo_rotation_passes);
+    BOOST_CHECK_LT(single.stage_cfo_rotated_samples,
+                   legacy.stage_cfo_rotated_samples);
+    BOOST_CHECK_EQUAL(single.cfo.cfo_hz, single.cfo_initial_hz);
+    // Same frame geometry: the derotation only changes the phase reference.
+    BOOST_CHECK_EQUAL(single.ns_sfd.sfd_start_chip, legacy.ns_sfd.sfd_start_chip);
+    BOOST_CHECK_EQUAL(single.phr.psdu_length, legacy.phr.psdu_length);
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r3_bad_input_fails_cleanly)
@@ -2187,6 +2612,90 @@ BOOST_AUTO_TEST_CASE(test_demod_core_softchip_fallback_timing_accounting)
     BOOST_CHECK_GE(res.stage_total_us, res.stage_softchip_fallback_us);
     // Full window was rotated in fallback
     BOOST_CHECK_GE(res.stage_cfo_rotated_samples, rx.size());
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_payload_substage_timers_partition_parent)
+{
+    // The payload sub-stage timers (soft / viterbi / rs / crc / other) are
+    // diagnostic CHILDREN of stage_payload_us.  `other` is the exact remainder,
+    // so the five buckets must sum to the in-function payload interval and can
+    // never exceed the parent lap.  The only allowed difference is the
+    // call/lap overhead (a few µs at 1 µs clock resolution).
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+
+    auto check_partition = [&](const DemodResult& res, const char* label) {
+        BOOST_TEST_CONTEXT(label) {
+            const uint64_t sum = res.stage_payload_soft_us +
+                                 res.stage_payload_viterbi_us +
+                                 res.stage_payload_rs_us +
+                                 res.stage_payload_crc_us +
+                                 res.stage_payload_other_us;
+            BOOST_TEST_MESSAGE(label << ": payload=" << res.stage_payload_us
+                                     << " soft=" << res.stage_payload_soft_us
+                                     << " vit=" << res.stage_payload_viterbi_us
+                                     << " rs=" << res.stage_payload_rs_us
+                                     << " crc=" << res.stage_payload_crc_us
+                                     << " other=" << res.stage_payload_other_us
+                                     << " sum=" << sum
+                                     << " fused_calls="
+                                     << res.stage_payload_fused_calls
+                                     << " legacy_calls="
+                                     << res.stage_payload_legacy_calls);
+            // Decoded successfully, so the payload stage really ran.
+            BOOST_REQUIRE(res.status == DemodStatus::Success);
+            BOOST_REQUIRE(res.payload.fcs_pass);
+            BOOST_REQUIRE_GE(res.stage_payload_fused_calls +
+                                 res.stage_payload_legacy_calls,
+                             1u);
+            // Children never exceed the parent lap.
+            BOOST_CHECK_LE(sum, res.stage_payload_us);
+            // ... and the gap is only call overhead, not a missing bucket.
+            BOOST_CHECK_LE(res.stage_payload_us - sum, 20u);
+            BOOST_CHECK_GT(sum, 0u);
+            // The three dominant buckets must be attributed, not dumped into
+            // `other` (µs truncation keeps them strictly positive here).
+            BOOST_CHECK_GT(res.stage_payload_soft_us, 0u);
+            BOOST_CHECK_GT(res.stage_payload_viterbi_us, 0u);
+            BOOST_CHECK_GT(res.stage_payload_rs_us + res.stage_payload_crc_us,
+                           0u);
+        }
+    };
+
+    // Legacy payload backend.
+    {
+        auto prof = Qm35825Profile::Default();
+        prof.sfd_mode = "ieee";
+        prof.rx_fast_sfd = true;
+        prof.rx_fused_payload_cmf = false;
+        prof.rx_fused_phr_cmf = false;
+        prof.rx_softchip_on_demand = false;
+        core::DemodScratch scratch;
+        scratch.reserve(iq.size());
+        auto res = core::demodulate_one(iq.data(), iq.size(), prof, 1, 9984, 0,
+                                        load_reference_template(), scratch);
+        check_partition(res, "legacy");
+        BOOST_CHECK_GE(res.stage_payload_legacy_calls, 1u);
+        BOOST_CHECK_EQUAL(res.stage_payload_fused_calls, 0u);
+    }
+
+    // Fused CMF payload backend (the live default).
+    {
+        auto prof = Qm35825Profile::Default();
+        prof.sfd_mode = "ieee";
+        prof.rx_fast_sfd = true;
+        prof.rx_fast_cfo_rotation = true;
+        prof.rx_softchip_on_demand = true;
+        prof.rx_fused_payload_cmf = true;
+        prof.rx_fused_phr_cmf = true;
+        core::DemodScratch scratch;
+        scratch.reserve(iq.size());
+        auto res = core::demodulate_one(iq.data(), iq.size(), prof, 1, 9984, 0,
+                                        load_reference_template(), scratch);
+        check_partition(res, "fused");
+        BOOST_CHECK_EQUAL(res.stage_softchip_fallbacks, 0u);
+        BOOST_CHECK_GE(res.stage_payload_fused_calls, 1u);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_real_sync_dot_numeric_equivalence)

@@ -13,19 +13,29 @@
  * the CFO stage.
  *
  * `derotate_block` keeps that block decomposition and sign convention but
- * replaces the per-sample scalar work with two runtime-dispatched VOLK kernels
- * per block:
+ * replaces the per-sample scalar work with one fused pass per block:
  *
- *     dst[b0 + k] = src[b0 + k] * table[k]          (table[k] = e^{-j w k})
- *     dst[b0 + k] *= e^{-j w b0}                    (one anchor per block)
+ *     dst[b0 + k] = src[b0 + k] * (table[k] * e^{-j w b0})
+ *
+ * The block anchor e^{-j w b0} is folded into the table entry **in registers**,
+ * so the data array is read once and written once.  The earlier two-pass form
+ * (`dst = src * table`, then `dst *= anchor`) touched dst three times per
+ * sample; that round trip stayed in L1 because the block is only 8 KiB, but it
+ * still cost a second full-width multiply plus a load and a store per sample.
+ * Folding the anchor into the table instead of into the data removes that pass
+ * without changing the phase origin, the block decomposition or the accuracy
+ * budget (see the QA error contract in qa_uwb_cfo_derotate.cc).
  *
  * The 1024-entry table is built once per call (w changes with the frame) from
  * four independent float chains advanced by step^4 = e^{-j 4 w}; each chain is
  * re-anchored from the exact double-precision phase every
- * kCfoTableReanchorHops steps.  The block anchor is advanced in double by one
- * complex multiply per block and re-anchored from the exact absolute phase
- * every kCfoAnchorReanchorBlocks blocks, so neither table drift nor anchor
- * drift accumulates.
+ * kCfoTableReanchorHops steps.  The per-block anchor is evaluated from the
+ * exact double absolute phase -w*b0 (one sin/cos pair per 1024 samples), so no
+ * anchor drift accumulates and the table is never mutated between blocks.
+ *
+ * Both complex multiplies are elementwise, so the lane mapping cannot change
+ * the result: the AVX2 kernel below and an AVX-512 build (which compiles this
+ * header with the same -mavx2 baseline) produce bit-identical output.
  *
  * No heap allocation occurs in the block loop (`dst.resize(n)` runs once per
  * call; the table is stack storage).  `n` does not need to be a multiple of
@@ -51,6 +61,13 @@
 #include <cstdint>
 #include <utility>
 #include <vector>
+
+#if defined(__AVX2__) && defined(__FMA__)
+#include <immintrin.h>
+#define UWB_RX_CFO_HAVE_AVX2 1
+#else
+#define UWB_RX_CFO_HAVE_AVX2 0
+#endif
 
 namespace gr {
 namespace uwb {
@@ -98,6 +115,58 @@ inline void build_cfo_table(std::array<std::complex<float>, kCfoDerotateBlock>& 
     }
 }
 
+// One block of the fused derotation:
+//
+//     dst[k] = src[k] * (table[k] * anchor),  anchor = (ar, ai)
+//
+// for k in [0, len).  `table` already points at the block's first entry, so the
+// caller passes `base_table + k_start` and the absolute phase origin stays
+// sample 0.
+//
+// The anchor is folded into the table entry in registers, so `src` is read once
+// and `dst` is written once.  Both multiplies are elementwise (no reduction, no
+// cross-lane combine), therefore the AVX2 and the scalar form compute each
+// output with the same sequence of float operations and an AVX-512 build -- which
+// compiles this header with the same -mavx2 baseline -- is bit-identical.
+inline void derotate_block_anchored(std::complex<float>* dst,
+                                    const std::complex<float>* src,
+                                    const std::complex<float>* table,
+                                    std::size_t len,
+                                    float ar,
+                                    float ai)
+{
+    std::size_t k = 0;
+#if UWB_RX_CFO_HAVE_AVX2
+    // Complex multiply, interleaved [re, im, re, im, ...] lanes:
+    //   permute(x, 0xB1) swaps re/im, addsub(a, b) = (a_even - b_even,
+    //   a_odd + b_odd), which yields re = xr*yr - xi*yi, im = xi*yr + xr*yi.
+    const __m256 are = _mm256_set1_ps(ar);
+    const __m256 aim = _mm256_set1_ps(ai);
+    for (; k + 4 <= len; k += 4) {
+        const __m256 t = _mm256_loadu_ps(reinterpret_cast<const float*>(table + k));
+        const __m256 ts = _mm256_permute_ps(t, 0xB1);
+        const __m256 a =
+            _mm256_addsub_ps(_mm256_mul_ps(t, are), _mm256_mul_ps(ts, aim));
+        const __m256 s = _mm256_loadu_ps(reinterpret_cast<const float*>(src + k));
+        const __m256 ss = _mm256_permute_ps(s, 0xB1);
+        const __m256 r =
+            _mm256_addsub_ps(_mm256_mul_ps(s, _mm256_moveldup_ps(a)),
+                             _mm256_mul_ps(ss, _mm256_movehdup_ps(a)));
+        _mm256_storeu_ps(reinterpret_cast<float*>(dst + k), r);
+    }
+#endif
+    for (; k < len; ++k) {
+        const std::complex<float> t = table[k];
+        const float tr = t.real();
+        const float ti = t.imag();
+        const float yr = tr * ar - ti * ai;
+        const float yi = ti * ar + tr * ai;
+        const float sr = src[k].real();
+        const float si = src[k].imag();
+        dst[k] = std::complex<float>(sr * yr - si * yi, si * yr + sr * yi);
+    }
+}
+
 } // namespace detail
 
 // dst[i] = src[i] * exp(-j*w*i) for absolute i in [lo, hi), w in rad/sample.
@@ -127,26 +196,19 @@ inline void derotate_range_block(std::complex<float>* dst,
             continue;
         const std::size_t len = k_end - k_start;
 
-        const std::complex<float>* src_ptr = src + b0 + k_start;
-        std::complex<float>* dst_ptr = dst + b0 + k_start;
-        const std::complex<float>* table_ptr = table.data() + k_start;
+        // Exact double block anchor; b0 == 0 gives (1, 0) and the fold below is
+        // then bit-exactly the identity, matching the legacy "no second pass
+        // for the first block" behaviour.
+        const double phase = -w * static_cast<double>(b0);
+        const float ar = static_cast<float>(std::cos(phase));
+        const float ai = static_cast<float>(std::sin(phase));
 
-        volk_32fc_x2_multiply_32fc(
-            reinterpret_cast<lv_32fc_t*>(dst_ptr),
-            reinterpret_cast<const lv_32fc_t*>(src_ptr),
-            reinterpret_cast<const lv_32fc_t*>(table_ptr),
-            static_cast<unsigned>(len));
-
-        if (b0 != 0) {
-            const double phase = -w * static_cast<double>(b0);
-            const float ar = static_cast<float>(std::cos(phase));
-            const float ai = static_cast<float>(std::sin(phase));
-            volk_32fc_s32fc_multiply_32fc(
-                reinterpret_cast<lv_32fc_t*>(dst_ptr),
-                reinterpret_cast<const lv_32fc_t*>(dst_ptr),
-                lv_cmake(ar, ai),
-                static_cast<unsigned>(len));
-        }
+        detail::derotate_block_anchored(dst + b0 + k_start,
+                                        src + b0 + k_start,
+                                        table.data() + k_start,
+                                        len,
+                                        ar,
+                                        ai);
     }
 }
 

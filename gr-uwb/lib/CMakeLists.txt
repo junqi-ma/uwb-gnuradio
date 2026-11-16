@@ -269,6 +269,7 @@ endif()
 
 # Core QA: no GNU Radio headers, no gnuradio-uwb link needed.
 list(APPEND uwb_core_qa_sources
+    qa_uwb_cfo_derotate.cc
     qa_uwb_defaults.cc
     qa_uwb_demod_core.cc
     qa_uwb_demod_sic_avx512.cc

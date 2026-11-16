@@ -180,7 +180,16 @@ struct TargetLockConfig {
 
     // Interference association: a candidate within this distance of the
     // predicted target origin is a candidate for the target's own response.
+    // Fixed at construction (0 = use geometry.pre_guard) on purpose: it is a
+    // distance from the prediction, not a window budget, so a runtime guard
+    // shrink must never narrow it.
     int64_t target_association_window = 0; // 0 = use geometry.pre_guard
+
+    // Samples available in one job buffer.  set_pre_guard() rejects a geometry
+    // that does not fit; the buffer itself is allocated for the widest
+    // geometry, so a runtime update may only shrink the window.  0 = runtime
+    // guard updates are refused (fail closed).
+    size_t window_capacity = 0;
 
     // Target identity rules.  A code mismatch is interference, never a target.
     int code_index = 10;
@@ -327,6 +336,7 @@ struct TargetLockStats {
     uint64_t candidates_interference = 0;
     uint64_t candidates_unknown = 0;
     uint64_t period_updates = 0;
+    uint64_t pre_guard_updates = 0;
     // Lock acquisition cost: slots between the first confirmed target packet
     // and entering LOCKED (0 while still verifying).
     uint64_t lock_slots = 0;
@@ -401,6 +411,41 @@ public:
 
     /** Recompute the plan for a specific slot under the CURRENT model. */
     TargetSlotPlan plan_for_slot(uint64_t k) const { return make_plan(k); }
+
+    /**
+     * Runtime pre-guard update (scheduler thread only).
+     *
+     * The pre-guard is the only geometry field a running receiver needs to
+     * change: ACQUIRE/HOLDOVER/REACQUIRE must cover the whole autocorrelation
+     * platform (the seed can precede the true packet start), while LOCKED only
+     * has to cover the bounded first-SYNC ROI plus the resampler transient.
+     *
+     * The job buffer is allocated once for the widest geometry, so an update
+     * may only move the window inside that budget.  Returns false and changes
+     * nothing when `pre_guard` is zero, when the geometry is not valid, or when
+     * `pre_guard + capture + post_guard` would exceed `window_capacity`.  The
+     * caller must treat false as fatal: keeping the old guard would cut a
+     * window whose start no longer matches the plan it reports.
+     */
+    bool set_pre_guard(size_t pre_guard)
+    {
+        if (pre_guard == 0 || !cfg_.geometry.valid() || cfg_.window_capacity == 0)
+            return false;
+        if (pre_guard + cfg_.geometry.capture + cfg_.geometry.post_guard >
+            cfg_.window_capacity)
+            return false;
+        if (pre_guard == cfg_.geometry.pre_guard)
+            return true;
+        cfg_.geometry.pre_guard = pre_guard;
+        ++stats_.pre_guard_updates;
+        return true;
+    }
+
+    /** Currently effective pre-guard (native samples). */
+    size_t pre_guard() const { return cfg_.geometry.pre_guard; }
+
+    /** Largest window this core will ever cut (`window_capacity`, 0 = n/a). */
+    size_t window_capacity() const { return cfg_.window_capacity; }
 
     /** Mark a plan as handed to the DSP queue. */
     void commit_plan(const TargetSlotPlan& plan);

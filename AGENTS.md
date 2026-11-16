@@ -26,6 +26,49 @@
 
 ---
 
+# 距离接收优化：多 Subagent 并行执行（2026-11-16）
+
+执行 `docs/performance/多Subagent并行开发方案_距离接收优化_2026-11-16.md`。
+基线 `717b351`，集成分支 `exp/rx-opt-integration`，最终 `d16f6db`。
+报告 `docs/performance/距离接收优化_多Subagent执行报告_2026-11-16.md`。
+**只做软件/文件回放，未上板。**
+
+- **7 距离 ABBA（3 次配对，全部 `raw_drop_samples=0`）**：`compute` 1687.2 →
+  **1414.8（−16.1%）**、`demod` 964.3 → **749.1（−22.3%）**、`st_timing` 288.8 →
+  **157.2（−45.6%）**、`sfd_cforef` 237.9 → **159.9（−32.8%）**、`resample` 722.8 →
+  **665.7（−7.9%）**；CRC-OK 13894 → **13912**；5.2 m PRR 96.27% → **97.00%**、
+  `TIMING_FAILED` 20 → **4**。规划目标 1250–1300 未达成。
+- **建议 1（去掉 SFD 二次 CFO/全帧去旋转）不成立**：Δf p90 318–348 Hz、跨度
+  279,467 样点上漂移 p90 0.70 rad（max 1.50），只有 19% 的包在 0.10 rad 内；
+  跳过第二次旋转只是把工作搬到第一次（`st_cfo` 22→240、`st_sfd` 249→34、`demod` 不变）；
+  收紧区间后 `cforef` −27 µs 被 `st_payload` +28 µs 抵消。**去旋转只能变快不能变少**，
+  因为它是把下游要读的样点物化到 `scratch.derotated`。
+- **建议 7（周期累加捕获）在 5.2 m 无对象**：`NOWIN=50` 中 45 个是文件前导静默
+  （前 45.656 ms 文件里没有包，三条独立证据），4 个是锁定入口流水线延迟，1 个是文件尾。
+- **建议 5（锁定态 SFD 定点验证）主动取消**：`st_sfd` 的 87% 是 `sfd_cforef`，
+  搜索本身只有 ~35 µs。该 worktree 改投去旋转内核。
+- **实际交付**：①锁定态 `pre_guard` 36864→8192（`--locked-pre-guard`，按锁状态生效，
+  `set_pre_guard` 越界 fail-closed）；②payload 子阶段打点（证明 Viterbi+RS+CRC 只占
+  6.8%，热点是 fused CMF 120 µs 与 payload 去旋转 114 µs）；③锁定态稀疏锚点网格跟踪
+  （16 锚点 bootstrap + 每符号一次 8-lag argmax，`grid_fb=0`）+ 失败路径稀疏尾部重探
+  （挽救 17/21 个 5.2 m TIM）；④CFO 去旋转内核块锚点折进表、数据单遍
+  （0.250→0.190 ns/样点，max abs ≤2.67e-7、rel L2 ≤6.5e-8）。
+- **`measured_period` 的一处偏离**：任务书要求只由锚点拟合，实测 16 锚点 SE 是 256 点
+  的 4 倍、在 2.5 m 造成 1 包/2000 payload 翻转；改为「锚点 bootstrap + 全 refined 峰
+  拟合」（与 legacy 同一估计器），`integer_chip_grid`/`grid_reject` 语义不变。
+- **验收**：AVX-512 与 AVX2 各 55 项 CTest、54 通过 1 跳过；AVX2/AVX-512 逐包解码
+  0 差异（0.8 m 2035 窗、3.8 m 2006 窗的 status/PSDU/FCS 全等）；`zmm` 1770 vs 0。
+- **夹具不可逐次复现**：4 worker + locked 反馈下同一二进制两次运行 CRC-OK 差 ±1…4，
+  单次对单次比较无效，必须 ABBA 配对。负载下 2.5/5.2 m 偶发整段失锁（基线与新二进制
+  都出现）；空载 2.5 m 基线 10/10、新二进制 10/10 全 OK。
+- **未验证**：上板/UHD、paced、8 worker、负载下 P99、多径/AWGN/ISR、CFO 扫频/SFO、
+  MATLAB 交叉验证、`--locked-pre-guard` < 8192、`--locked-roi 64/128`、
+  `--cfo-refit auto|skip` 在 27 ppm 未 trim 时钟下的行为。
+- **下一步 P0**：把 CFO 相位斜坡折进 fused CMF / soft-chip 内核（按 chip 递推，
+  误差 <0.002 rad/chip），这是消除剩余约 280 µs 去旋转的唯一途径；需先立误差合同。
+
+---
+
 # AVX-512 内核合并入主分支（2026-11-16）
 
 已把 `/tmp/uwb-gnuradio-avx512`（`perf/avx512-kernels`）的两轮 AVX-512 工作
