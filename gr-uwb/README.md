@@ -1,48 +1,62 @@
 # gr-uwb
 
-GNU Radio **out-of-tree (OOT)** module for high-rate UWB packet detection,
-scheduled radar-slot extraction, capture, and realtime demodulation.
+This is the CMake source tree for native UWB DSP/UHD libraries and the optional
+GNU Radio adapter. See the [root README](../README.md) and the
+[current build/architecture guide](../docs/原生接收与GNU_Radio构建使用说明.md).
 
-This directory is the installable OOT tree. The parent repository also contains
-MATLAB references, golden test data, and design documents — see the
-[repository root README](../README.md).
+## Native build
 
-## Install
+From the repository root:
 
 ```bash
-mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . -j"$(nproc)"
-ctest --output-on-failure
-sudo cmake --install .
-sudo ldconfig
+cmake -S gr-uwb -B gr-uwb/build-native \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DUWB_BUILD_GNURADIO=OFF -DUWB_BUILD_EXPERIMENTS=OFF \
+  -DENABLE_UHD_BACKEND=ON
+cmake --build gr-uwb/build-native -j4
+ctest --test-dir gr-uwb/build-native --output-on-failure -j1
 ```
 
-**Requirements:** GNU Radio 3.10+, CMake ≥ 3.8, Boost, VOLK, Python 3 / pybind11.
+Requires C++17, CMake ≥ 3.8, standalone VOLK, Threads and Boost.Test. Python 3
+runs Python QA. `ENABLE_UHD_BACKEND=ON` requires UHD; `OFF` builds without the
+hardware backend, while `AUTO` (default) detects it. No GNU Radio/PMT dependency
+is needed for this mode.
 
-## Use
+## GNU Radio adapter build
+
+```bash
+cmake -S gr-uwb -B gr-uwb/build-gr -DCMAKE_BUILD_TYPE=Release \
+  -DUWB_BUILD_GNURADIO=ON -DUWB_BUILD_EXPERIMENTS=ON
+cmake --build gr-uwb/build-gr -j4
+ctest --test-dir gr-uwb/build-gr --output-on-failure -j1
+```
+
+Also requires GNU Radio 3.10+, Python/pybind11 for bindings. Both component
+options default to `ON`; experiments `OFF` disables a subset of benchmark and
+diagnostic apps. It does not remove core regression tests.
 
 ```python
 from gnuradio import uwb
 # GRC: category [UWB]
 ```
 
-| Block | Purpose |
-|-------|---------|
-| `detector` / `detector_sc16` | Unknown-time packet PDUs (CF32 / SC16) |
-| `scheduled_extractor` | Fixed `t0/T` radar windows |
-| `packet_writer` | SC16 IQ + JSONL metadata |
-| `realtime_demodulator` | Async worker-pool demod |
-| `energy_detector` / `preamble_detector` | Stream building blocks |
+The adapter includes detector/detector_sc16, scheduled extractor, packet writer,
+realtime demodulator, radar and SIC blocks. Examples are in
+[examples/README.md](examples/README.md).
 
-Defaults (host rate, capture geometry) are defined in
+## Install and link
+
+Set `CMAKE_INSTALL_PREFIX` when configuring and run `cmake --install <build-dir>`.
+A native install exports `find_package(uwb CONFIG REQUIRED)` with
+`uwb::uwb_core` and `uwb::uwb_native`. A GNU Radio install retains the
+`gnuradio-uwb` package. Native consumers must relink after the library split;
+replacing only the old adapter shared library does not preserve their binary ABI.
+
+The native live executable installs its taps/template resources and supports
+`--res-dir`. See [tools/rx/README.md](../tools/rx/README.md) for runtime defaults
+and replay examples. Defaults for older GR capture blocks remain in
 `include/gnuradio/uwb/uwb_defaults.h`.
-
-## Examples
-
-See `examples/` and `examples/README.md`. CLI capture helper:
-`apps/x410_scheduled_capture.py`.
 
 ## License
 
-GPL-3.0-or-later — see [`../LICENSE`](../LICENSE) for the full text.
+GPL-3.0-or-later — see [LICENSE](../LICENSE).
