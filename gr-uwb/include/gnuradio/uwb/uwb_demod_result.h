@@ -84,6 +84,25 @@ struct TimingResult {
     uint32_t bounded_inner_used = 0; // recovered from an inner SYNC, not SYNC #0
     size_t bounded_roi_samples = 0;
     uint32_t backtrack_symbols = 0;
+    // LockedBounded grid tracking (sparse anchors + single-point correlation).
+    // `grid_anchor_hits` counts anchors that produced a real +/-radius peak;
+    // `grid_single_valid` counts SYNCs whose single-point metric cleared the
+    // tracking threshold (this is what feeds detected_peaks).  `grid_fallbacks`
+    // counts packets where the grid fit was rejected and the legacy per-symbol
+    // search ran instead -- a nonzero value is a diagnostic, not a failure.
+    uint32_t grid_anchor_attempts = 0;
+    uint32_t grid_anchor_hits = 0;
+    uint32_t grid_single_points = 0;
+    uint32_t grid_single_valid = 0;
+    uint32_t grid_fallbacks = 0;
+    // LockedBounded tail re-probe (failure path only): how many sparse tail
+    // anchors were tried, and which symbol index rescued the packet (-1 = none).
+    uint32_t tail_probe_attempts = 0;
+    uint32_t tail_probe_hits = 0;
+    int64_t tail_probe_k = -1;
+    // Best metric any tail probe saw (diagnostic: distinguishes "no clean tail
+    // at all" from "clean tail but the neighbour gate rejected it").
+    float tail_probe_best_metric = 0.0f;
 };
 
 // ---------------------------------------------------------------------------
