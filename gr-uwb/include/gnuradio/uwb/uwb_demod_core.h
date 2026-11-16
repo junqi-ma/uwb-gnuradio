@@ -539,6 +539,7 @@ inline bool stage_timing(const std::complex<float>* rx,
     // coarse scan is retained only as a fallback when the seed-narrow search
     // fails (a seed that lands a whole SYNC or more off the true start).
     int64_t first_start = -1;
+    size_t first_hit_k = 0;
     float first_metric = 0.0f;
     std::complex<float> first_corr(0.0f, 0.0f);
     const float thr = profile.radar_verification_threshold;
@@ -586,6 +587,7 @@ inline bool stage_timing(const std::complex<float>* rx,
         // Convert the inner-SYNC hit back to the packet start on the grid.
         first_start = pos - static_cast<int64_t>(used_inner) *
                                 static_cast<int64_t>(kQm35SamplesPerSymbol);
+        first_hit_k = used_inner;
         first_metric = met;
         first_corr = corr;
         if (used_inner != 0)
@@ -759,13 +761,25 @@ inline bool stage_timing(const std::complex<float>* rx,
 
     // Track all SYNC starts: expected = start + k*period, then convert each to
     // symbol-END convention (start + L - 1) to match the detector / MATLAB.
+    // When bounded inner-SYNC probing hit symbol `first_hit_k > 0`, anchor the
+    // first peak at its true symbol coordinate and continue from `first_hit_k + 1`
+    // rather than restarting at k=1 (which already failed).  Also allow up to 2
+    // consecutive missed SYNCs so a brief 1-2 symbol interference dip does not
+    // prematurely truncate the 256-symbol train.
     out.peak_samples.clear();
     out.peak_metrics.clear();
     out.peak_corr.clear();
-    out.peak_samples.push_back(start + static_cast<int64_t>(L - 1));
+    std::vector<size_t> peak_indices;
+    peak_indices.reserve(profile.preamble_repetitions);
+    const int64_t first_hit_start =
+        start + static_cast<int64_t>(first_hit_k) * period;
+    out.peak_samples.push_back(first_hit_start + static_cast<int64_t>(L - 1));
     out.peak_metrics.push_back(first_metric);
     out.peak_corr.push_back(first_corr);
-    for (size_t k = 1; k < profile.preamble_repetitions; ++k) {
+    peak_indices.push_back(first_hit_k);
+    constexpr size_t kMaxConsecutiveSyncMisses = 2;
+    size_t consecutive_misses = 0;
+    for (size_t k = first_hit_k + 1; k < profile.preamble_repetitions; ++k) {
         const int64_t want = start + static_cast<int64_t>(k * period);
         int64_t pk = -1;
         float pm = 0.0f;
@@ -775,11 +789,16 @@ inline bool stage_timing(const std::complex<float>* rx,
                 ? 0.7f * profile.radar_verification_threshold
                 : profile.radar_verification_threshold;
         if (!local_best(want, static_cast<int64_t>(profile.timing_track_radius),
-                        tracking_threshold, &pk, &pm, &pk_corr))
-            break; // lost the train
+                        tracking_threshold, &pk, &pm, &pk_corr)) {
+            if (++consecutive_misses > kMaxConsecutiveSyncMisses)
+                break; // lost the train
+            continue;
+        }
+        consecutive_misses = 0;
         out.peak_samples.push_back(pk + static_cast<int64_t>(L - 1));
         out.peak_metrics.push_back(pm);
         out.peak_corr.push_back(pk_corr);
+        peak_indices.push_back(k);
     }
 
     out.detected_peaks = out.peak_samples.size();
@@ -796,7 +815,7 @@ inline bool stage_timing(const std::complex<float>* rx,
     if (np >= 2) {
         double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
         for (size_t k = 0; k < np; ++k) {
-            const double x = static_cast<double>(k);
+            const double x = static_cast<double>(peak_indices[k]);
             const double y = static_cast<double>(out.peak_samples[k]);
             sx += x;
             sy += y;
