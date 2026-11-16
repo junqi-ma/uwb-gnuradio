@@ -1198,7 +1198,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
                 ++out.fine_correlations;
         }
         bool window_passed = (window_best >= profile.sfd_detection_threshold);
-        if (!window_passed && window_best >= 0.03f &&
+        if (!window_passed && window_best >= 0.08f &&
             scratch.metric.size() == (j_end - j_lo + 1)) {
             const size_t best_off = window_best_j - j_lo;
             double bg_sum = 0.0;
@@ -3547,7 +3547,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             tail_timing_ok = stage_timing(
                 rx, n, anchor, template_wf, tail_start, tail_timing, scratch);
             if ((!tail_timing_ok ||
-                 tail_timing.detected_peaks != tail_repetitions) &&
+                 tail_timing.detected_peaks < 4) &&
                 seed_radius != 0) {
                 const auto retry_t0 = std::chrono::steady_clock::now();
                 anchor.timing_seed_refine_radius = 0;
@@ -3559,7 +3559,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                         std::chrono::steady_clock::now() - retry_t0).count());
                 ++res.stage_tail_retrack_fallbacks;
                 if (retry_ok &&
-                    retry_timing.detected_peaks == tail_repetitions) {
+                    retry_timing.detected_peaks > tail_timing.detected_peaks) {
                     // Keep the narrow-attempt diagnostics visible even though the
                     // legacy retry (radius 0) produced the accepted timing.
                     retry_timing.seed_search_us += tail_timing.seed_search_us;
@@ -3577,11 +3577,8 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         res.stage_sfd_tail_retrack_us += static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - sfd_tail_t0).count());
-        if (!tail_timing_ok ||
-            tail_timing.detected_peaks != tail_repetitions)
-            return false;
-        if (!(tail_timing.measured_period > 0.0))
-            return false;
+        const bool have_tail_peaks =
+            tail_timing_ok && tail_timing.detected_peaks >= 4;
 
         // Keep the SFD-anchored full-frame grid on the original timing
         // estimate.  Only the tail peaks have matched-filter measurements;
@@ -3604,7 +3601,8 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         cfo_timing.preamble_start_sample = full_start;
         cfo_timing.preamble_start_uncropped = full_start;
         cfo_timing.measured_period = measured_period;
-        cfo_timing.metric = tail_timing.metric;
+        cfo_timing.metric =
+            have_tail_peaks ? tail_timing.metric : res.timing.metric;
         cfo_timing.detected_peaks = full_repetitions;
         cfo_timing.expected_peaks = full_repetitions;
         cfo_timing.coarse_search_us = tail_timing.coarse_search_us;
@@ -3625,11 +3623,33 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                     static_cast<double>(k) * measured_period)) +
                 static_cast<int64_t>(template_len - 1);
         }
-        for (size_t k = 0; k < tail_repetitions; ++k) {
-            const size_t dst = tail_first + k;
-            cfo_timing.peak_samples[dst] = tail_timing.peak_samples[k];
-            cfo_timing.peak_metrics[dst] = tail_timing.peak_metrics[k];
-            cfo_timing.peak_corr[dst] = tail_timing.peak_corr[k];
+        if (have_tail_peaks) {
+            if (tail_timing.peak_samples.size() == tail_repetitions) {
+                for (size_t k = 0; k < tail_repetitions; ++k) {
+                    const size_t dst = tail_first + k;
+                    cfo_timing.peak_samples[dst] = tail_timing.peak_samples[k];
+                    cfo_timing.peak_metrics[dst] = tail_timing.peak_metrics[k];
+                    cfo_timing.peak_corr[dst] = tail_timing.peak_corr[k];
+                }
+            } else {
+                const int64_t tail_pk0 =
+                    tail_start + static_cast<int64_t>(template_len - 1);
+                for (size_t i = 0; i < tail_timing.peak_samples.size(); ++i) {
+                    const int64_t rel_sym = std::llround(
+                        static_cast<double>(tail_timing.peak_samples[i] - tail_pk0) /
+                        measured_period);
+                    if (rel_sym >= 0 &&
+                        static_cast<size_t>(rel_sym) < tail_repetitions) {
+                        const size_t dst =
+                            tail_first + static_cast<size_t>(rel_sym);
+                        cfo_timing.peak_samples[dst] =
+                            tail_timing.peak_samples[i];
+                        cfo_timing.peak_metrics[dst] =
+                            tail_timing.peak_metrics[i];
+                        cfo_timing.peak_corr[dst] = tail_timing.peak_corr[i];
+                    }
+                }
+            }
         }
 
         const auto sfd_cfo_t0 = std::chrono::steady_clock::now();
@@ -3638,18 +3658,22 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         // and is for downstream timing/CIR, not carrier estimation.  Startup
         // exclusion belongs to the initial acquisition fit; this SFD-anchored
         // tail is already the selected stable training interval.
-        Qm35825Profile tail_fit_profile = profile;
-        tail_fit_profile.cfo_skip_initial_repetitions = 0;
-        const bool cfo_fit_ok =
-            fit_cfo(rx, n, tail_fit_profile, tail_timing, res.cfo, scratch);
-        // Keep diagnostics in full-preamble coordinates, as before.
-        if (cfo_fit_ok)
-            res.cfo.skipped_peaks += tail_first;
-        res.stage_cfo_fit_us += res.cfo.fit_us;
+        if (have_tail_peaks) {
+            Qm35825Profile tail_fit_profile = profile;
+            tail_fit_profile.cfo_skip_initial_repetitions = 0;
+            CfoResult tail_cfo;
+            const bool cfo_fit_ok =
+                fit_cfo(rx, n, tail_fit_profile, tail_timing, tail_cfo, scratch);
+            if (cfo_fit_ok) {
+                res.cfo = tail_cfo;
+                res.cfo.skipped_peaks += tail_first;
+            }
+            res.stage_cfo_fit_us += res.cfo.fit_us;
+        }
         res.stage_sfd_cfo_refit_us += static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - sfd_cfo_t0).count());
-        if (!cfo_fit_ok)
+        if (!res.cfo.ok)
             return false;
 
         // Second rotation (Task A1): covers final SFD, CIR (54 SYNCs starting
