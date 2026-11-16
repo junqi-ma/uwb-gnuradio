@@ -547,6 +547,14 @@ BOOST_AUTO_TEST_CASE(test_resampler_process_sc16_precision)
                 sc16_to_cf32(in_sc16.data(), cf32_input.data(), n, scale);
 
                 RationalResampler65_48Core resamp_ref(taps.data(), taps.size());
+                RationalResampler65_48Core resamp_fused(taps.data(), taps.size());
+#if UWB_SIMD_HAVE_AVX512
+                // Force the same backend on both paths so the SC16-vs-CF32
+                // bit-exactness contract is checked against the same kernel
+                // (the default AVX-512 selection is SC16-only).
+                resamp_ref.set_kernel("avx512");
+                resamp_fused.set_kernel("avx512");
+#endif
                 const size_t max_out = (n * 65 + 47) / 48 + 300;
                 std::vector<std::complex<float>> out_ref(max_out);
                 auto res_ref = resamp_ref.process(cf32_input.data(), n, out_ref.data(), max_out);
@@ -555,7 +563,6 @@ BOOST_AUTO_TEST_CASE(test_resampler_process_sc16_precision)
                 size_t flush_ref_n = resamp_ref.flush(flush_ref.data(), max_out);
 
                 // Fused path: process_sc16
-                RationalResampler65_48Core resamp_fused(taps.data(), taps.size());
                 std::vector<std::complex<float>> out_fused(max_out);
                 auto res_fused = resamp_fused.process_sc16(in_sc16.data(), n, scale, out_fused.data(), max_out);
 

@@ -116,6 +116,7 @@ KERNEL_RESAMPLER = {
     "scalar_macroblock",
     "volk_macroblock",
     "avx2_fma_macroblock",
+    "avx512_fma_macroblock",
     "scalar_legacy",
     "volk_legacy",
 }

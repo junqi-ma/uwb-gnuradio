@@ -932,6 +932,16 @@ void check_scenario(const std::vector<float>& taps,
                     const std::string& tag,
                     Fn&& scenario)
 {
+#if !UWB_RESAMP_HAVE_AVX2
+    // The C1 candidate is an AVX2/FMA-only implementation.  In a SCALAR
+    // build the switch is inert by design, so there is no candidate to
+    // compare; skip instead of asserting a variant that cannot exist.
+    (void)taps;
+    (void)tag;
+    (void)scenario;
+    BOOST_TEST_MESSAGE("SKIP " << tag << ": C1 candidate requires AVX2/FMA");
+    return;
+#else
     Core ref(taps);
     apply_variant(ref, kVariantDefault);
     BOOST_REQUIRE_EQUAL(std::string(ref.sc16_kernel_variant()), "default");
@@ -947,6 +957,7 @@ void check_scenario(const std::vector<float>& taps,
         require_bit_identical_counted(y, y_ref,
                                       tag + " [" + variant_switch_name(v) + "]");
     }
+#endif
 }
 
 /** 10. Defaults, switch semantics and C1 table contents. */

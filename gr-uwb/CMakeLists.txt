@@ -62,6 +62,20 @@ option(UWB_BUILD_EXPERIMENTS
 # Make sure our local CMake Modules path comes first
 list(INSERT CMAKE_MODULE_PATH 0 ${CMAKE_SOURCE_DIR}/cmake/Modules)
 
+########################################################################
+# Compile-time ISA selection for the self-written DSP kernels
+# (UWB_SIMD=AUTO|AVX2|AVX512|SCALAR).  See cmake/Modules/UwbSimd.cmake and
+# docs/performance/AVX512内核与编译期CPU选择开发规划_2026-11-16.md.
+########################################################################
+include(UwbSimd)
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/gnuradio/uwb/uwb_simd_config.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/include/gnuradio/uwb/uwb_simd_config.h
+    @ONLY)
+# The generated header must be visible to every subdirectory (and to the
+# installed consumer, which gets the same file from the install rule).
+include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)
+
 if(UWB_BUILD_GNURADIO)
     # Find gnuradio to get access to the cmake modules
     find_package(Gnuradio "3.10" REQUIRED COMPONENTS blocks fft filter)
