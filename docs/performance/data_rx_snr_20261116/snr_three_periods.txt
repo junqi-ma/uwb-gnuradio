@@ -1,0 +1,32 @@
+# measure_rx_snr.py output, 2026-11-16
+# setup: DW3000 TX with 10 dB attenuation, 1.5 m, X410 ch3/RX1, 6489.6 MHz, gain 60
+testdata/x410_fixed_tone_live_20261115/rx_ch3_rx1_1s_trim6b.sc16   period 5.0 ms
+  packet 440.0 us (8.8% of the period)
+  thermal floor     -45.8 dB re 1 LSB^2/Hz  rms  139.5 LSB over 737 MHz ( -47.4 dBFS)
+  CW tone            55.2 dB  rms  576.3 LSB  (+12.3 dB vs the thermal floor)
+  signal +-250 MHz   54.7 dB  rms  541.0 LSB
+  thermal +-250 MHz   41.0 dB
+  ==> in-band SNR                 +13.62 dB
+      without tone cancellation    -0.71 dB
+      wideband (737.28 MHz)        -0.80 dB
+
+testdata/x410_fixed_tone_live_20261115/rx_2ms_1s_v3.sc16   period 2.0 ms
+  packet 445.0 us (22.2% of the period)
+  thermal floor     -45.9 dB re 1 LSB^2/Hz  rms  138.3 LSB over 737 MHz ( -47.5 dBFS)
+  CW tone            55.6 dB  rms  599.7 LSB  (+12.7 dB vs the thermal floor)
+  signal +-250 MHz   54.7 dB  rms  541.6 LSB
+  thermal +-250 MHz   41.0 dB
+  ==> in-band SNR                 +13.70 dB
+      without tone cancellation    -1.03 dB
+      wideband (737.28 MHz)        -1.11 dB
+
+testdata/x410_fixed_tone_live_20261115/rx_1ms_1s.sc16   period 1.0 ms
+  packet 445.0 us (44.5% of the period)
+  thermal floor     -45.8 dB re 1 LSB^2/Hz  rms  138.8 LSB over 737 MHz ( -47.5 dBFS)
+  CW tone            56.1 dB  rms  640.1 LSB  (+13.3 dB vs the thermal floor)
+  signal +-250 MHz   54.7 dB  rms  544.0 LSB
+  thermal +-250 MHz   41.0 dB
+  ==> in-band SNR                 +13.71 dB
+      without tone cancellation    -1.54 dB
+      wideband (737.28 MHz)        -1.61 dB
+

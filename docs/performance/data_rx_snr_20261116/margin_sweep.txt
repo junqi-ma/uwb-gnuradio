@@ -1,0 +1,29 @@
+# 链路余量：噪声注入等效额外路损（2026-11-16）
+#
+# 方法：额外路损只衰减信号、不改变接收机噪声，所以往采集里叠加
+#       P_add = P_thermal * (10^(X/10) - 1) 的高斯白噪声，就等价于 X dB 额外路损。
+#       P_thermal = 139^2（实测热噪声，每复样点功率）。
+# 夹具：rx_1ms_1s.sc16 前 200 ms（200 个 1 ms 周期），单音保留（接收机照常消除）。
+# 命令：uwb_dw3000_live --replay <file> --workers 4 --sync locked \
+#                        --period-ms 1 --raw-blocks 512 --summary 1000 --print summary
+#
+# 注入噪声校验：噪声区实测增量与预测一致（+18 dB: 实测 1,198,509 / 预测 1,199,834）。
+#
+# level  in-band SNR  completed  fcs      fcs%    candidates  lock  state
+#  0 dB     +13.7       205      204/205   99.5      189        1    locked
+#  3 dB      +8.9       202      201/202   99.5      189        1    locked
+#  6 dB      +6.7       200      199/200   99.5      189        1    locked
+# 10 dB      +3.3       201      200/201   99.5      189        1    locked
+# 14 dB      -0.5       190      177/190   93.2        1        1    locked
+# 18 dB      -4.4         0        0/0      --         0        0    acquire
+# 22 dB      -8.3         0        0/0      --         0        0    acquire
+#
+# +14 dB 的 12 个失败：SFD_FAILED=11、TIMING_FAILED=1、PAYLOAD_FAILED=1（另有 not_detected=1）
+# +18 dB 起 candidates=0、expected_slots=0：采集路径（归一化延迟自相关）从未过门限，
+#         不是解码失败。门限见 uwb_dw3000_live.cc Acquisition::scan：
+#         metric >= 0.15 起窗，peak > 0.5 且跨度 >= 36864 样点才提交候选。
+#
+# 离线复算该自相关峰值（每档 4 个包取最大，已按 live 路径先消单音）：
+#   0 dB 0.894 | 3 dB 0.852 | 6 dB 0.801 | 10 dB 0.666 | 14 dB 0.363 | 18 dB 0.221 | 22 dB 0.184
+# 注意：不消单音时该峰值偏高（0 dB 0.951 / 14 dB 0.557），因为单音在 lag=750 处
+#       恰好整周期相干（-91/288 * 750 = -237 个周期），会假性抬高相关度。

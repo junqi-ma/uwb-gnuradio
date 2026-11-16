@@ -1,3 +1,81 @@
+# 当前版本：原生 UHD/C++ 与 GNU Radio 适配层已拆分（2026-11-16）
+
+主分支 `feature/sic-research`。`4ecb4f3` 保存原主路径源码/新文档；`5d5ba26`
+回合 GNU Radio 解耦与历史路径清理。现行构建、依赖、参数与安装入口见
+[原生接收与 GNU Radio 构建使用说明](docs/原生接收与GNU_Radio构建使用说明.md)。
+
+- `uwb_core` / `uwb_native` 与 `gnuradio-uwb` adapter 拆分；
+  `UWB_BUILD_GNURADIO=OFF` 可无 GR/PMT 构建，VOLK 保留。
+- `UWB_BUILD_EXPERIMENTS=OFF` 关闭部分实验目标；两开关默认仍为 ON。
+  UHD 使用 `ENABLE_UHD_BACKEND=AUTO|ON|OFF`。
+- 已移除 `convert_cache`、`both` 和 pipeline `resampler_workers`/旧 runner 参数；
+  FIR 诊断开关在 `DemodScratch`，内部线程池和 legacy 对照尚未移除。
+- C++ live 默认 `--fused on --cir full`，每包网格拒绝时 Full→Bypass；Python
+  wrapper 仍传 `--cir auto`，完整新参数用 C++ 入口。不得删除分数网格/融合回退。
+- 主路径原生精简构建：50 项 CTest，49 通过、1 安装消费者跳过；此前同版 worktree
+  原生 53/53、GR 87/87。动态 locked 逐包一致性限制仍保留。
+- 主线连续 UHD 已有上板记录；本轮拆库未上板。timed 实际 UHD 命令仍未实现，
+  必须保持无 replay 时 fail-closed。原生消费者须重新链接新库，不保证旧二进制 ABI。
+
+以下为按阶段保留的历史快照；其中旧分支名、构建路径、未提交/未上板、默认参数和
+测试计数均以对应报告日期与范围解释。后文开发规则继续适用。
+
+---
+
+# 接收信噪比与链路余量实测（2026-11-16）
+
+- 条件：DW3000 **发送衰减 10 dB、距离 1.5 m**；X410 ch3/RX1、6489.6 MHz、增益 60、
+  737.28 MS/s；code 10、256 SYNC、127 B、6.81 Mb/s。无功率计标定，只有相对量。
+- **带内 SNR = +13.7 dB**（信号/热噪声，均在 ±250 MHz 信道 5 带宽内）。5/2/1 ms
+  三次采集 **+13.62 / +13.70 / +13.71**，信号 rms 541/542/544 LSB、热噪声
+  rms 139.5/138.3/138.8 —— **周期缩短不损失链路预算**。
+- **热噪声底 −47.5 dBFS**（rms 139 LSB），比 16 bit 量化底高 48 dB；峰值 −17.5 dBFS、
+  **0 削顶**。加接收增益不会改善 SNR。
+- **−232.96 MHz CW 单音比热噪声高 12–13 dB**，与信号同量级（rms 576–640 vs 541）。
+  不消单音带内 SNR 掉到 **−1 dB**（全带宽 −0.8…−1.6 dB）。
+- **单音消除是必需项，不是优化**：`--tone on` 99.5% FCS，`--tone off` **33%**。
+  机制不只是 SNR：单音在采集器 `lag=750` 处整周期相干（−91/288×750 = −237 周期），
+  归一化延迟自相关被持续触发，`candidates` 989→**1239**（0.8 ms holdoff 限速上限），
+  `dropped_queue=490/500`，真包窗口被假候选挤掉。
+- **链路余量 ≈ +10 dB**（噪声注入等效额外路损）：0/3/6/10 dB 均 99.5% FCS；
+  14 dB 掉到 93.2% 且 `candidates=1`（靠单个包偶然过门限）；**18 dB 时
+  `candidates=0`、`expected_slots=0`，采集彻底失效**。瓶颈是
+  `Acquisition::scan` 的固定门限（`metric>=0.15`、`peak>0.5`、跨度≥36864），
+  **不是解码器**（解码器在 −0.5 dB 带内 SNR 下仍过 93%）。
+- 噪声区另有 WiFi 6E 类宽带凸起（−178/−100/−93/−88/−58.88/+94.72 MHz，各占热噪声
+  10–20%），对 SNR 影响 <0.2 dB，但会限制远距离下限。
+- 新增 `tools/rx/measure_rx_snr.py`；数据 `docs/performance/data_rx_snr_20261116/`；
+  报告 `docs/performance/X410_接收信噪比与链路余量_2026-11-16.md`。
+- **未验证**：功率计标定、距离/衰减扫描（余量是注入等效的）、多径与遮挡、
+  余量实验只在 1 ms 复验、长时间 soak 的噪声底漂移。
+
+---
+
+# 重采样默认抽头改为 Hpad 16（2026-11-16）
+
+- **原默认不是 32 而是 Hpad 48**：`uwb_dw3000_live` 加载 `taps_quality_minorder.txt`
+  （T=2707）。内核成本正比于 `Hpad = 8*ceil(ceil(T/65)/8)`，不是 T。
+- 新增 `--taps eq16|quality|eq32|realtime`，**默认 `eq16`**（T=1039，Hpad 16，
+  纹波 0.0868 dB、全阻带 −74.56 dB、通带 290 MHz）。
+- **速度（2 ms/W=4，3 轮，`dropped_queue=0`）**：quality compute 3844.7 /
+  resample 2332.6；eq16 compute **2558.8（−33.4%）** / resample **1106.4（−52.6%）**；
+  eq32 −20.2%/−34.2%；realtime −29.6%/−47.8%。5 ms/W=1 同向：resample
+  1925.9→958.9（−50.2%）。重采样降幅与 Hpad 不成正比（3 倍 Hpad 只换 2 倍速度），
+  说明内核有固定装载/写回开销。
+- **1 ms 下这是能否跑通的分界**：W=4 每 worker 从 **92.8% 降到 64.3%**；
+  实机 1 ms 10 s 达 **99.81% FCS（8203/8219）、0 丢样点、0 丢队列**，
+  compute 2398.8 / resample 1062.7 / 每 worker 60.0%。
+- **eq16 没有系统性解码损失**：四个系数集的失败包**互不重叠**，且每个失败包的特征
+  都是该系数集下 `tmetric` 掉到 ~0.67（同包在其他系数集 ~0.70–0.79）→ 是群时延
+  对齐的边缘包（48→1353、32→1039、24→659、16→519 work 样点），不是滤波器质量。
+  ~1500 包/配置下失败 0–3 个（0–0.2%）。
+- **未验证**：SIC + eq16（等波纹报告要求 realtime 档先补 SIC 验证）、
+  多径/AWGN/ISR、MATLAB 交叉验证。`--taps quality` 可随时回退。
+- 报告 `docs/performance/X410_2ms周期收包解调报告_2026-11-15.md` §9。
+- 全量串行 CTest 87 项全部通过。未提交、未推送、未 install。
+
+---
+
 # 当前提交快照：X410 目标周期锁定与随机干扰双路径（2026-11-15）
 
 已按 `docs/performance/X410_目标周期锁定与随机干扰双路径修改规划_2026-11-15.md`

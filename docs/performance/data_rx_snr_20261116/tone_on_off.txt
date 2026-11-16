@@ -1,0 +1,23 @@
+# 单音消除开关对照（2026-11-16）
+# 同一份 rx_1ms_1s.sc16，1 ms，W=4，--sync locked，--raw-blocks 512，2 轮
+
+=== round 1  --tone on ===
+COST_TOTAL frontend_us=419789.602 frontend_samples=737280000 estimate_us=7287.040 cancel_us=293231.911 cancelled_samples=737280000 bypassed_samples=0 model_updates=50 model_rejects=0 training_windows=50 reader_us=1095859.620
+LOCK_STATS final_state=locked expected_slots=990 submitted=990 dropped_queue=0 expired=0 not_detected=0 decode_failed=0 fcs_ok=995 fcs_failed=4 observations=999 stale=0 duplicate=0 identity_rejects=4 out_of_grid=0 queue_full=0 residual_outliers=0 lock_entries=1 holdover_entries=0 reacquire_entries=0 discontinuities=0 candidates=989 cand_target=973 cand_interference=0 cand_unknown=16 period_updates=994 lock_slots=3 period_samples=737280 period_ppm=-0.371534 scheduler_target_slots=990 scheduler_target_dropped=0 scheduler_target_expired=0 autocorr_dedup=973 autocorr_dedup_confirmed=965 autocorr_dedup_ambiguous=4 autocorr_unknown=990 interference_events=0
+FINAL completed=1016 fcs=1011/1016 raw_samples=737280000 raw_drop_samples=0 source_errors=0 gaps=0 models=50 output_omitted=0 full_retry=0
+
+=== round 1  --tone off ===
+COST_TOTAL frontend_us=140348.261 frontend_samples=737280000 estimate_us=0.000 cancel_us=0.000 cancelled_samples=0 bypassed_samples=0 model_updates=0 model_rejects=0 training_windows=0 reader_us=0.000
+LOCK_STATS final_state=locked expected_slots=500 submitted=500 dropped_queue=490 expired=0 not_detected=3 decode_failed=0 fcs_ok=370 fcs_failed=13 observations=510 stale=0 duplicate=0 identity_rejects=13 out_of_grid=121 queue_full=0 residual_outliers=0 lock_entries=1 holdover_entries=0 reacquire_entries=0 discontinuities=0 candidates=1239 cand_target=70 cand_interference=0 cand_unknown=1169 period_updates=369 lock_slots=3 period_samples=737280 period_ppm=-0.434323 scheduler_target_slots=500 scheduler_target_dropped=490 scheduler_target_expired=0 autocorr_dedup=70 autocorr_dedup_confirmed=69 autocorr_dedup_ambiguous=1 autocorr_unknown=1239 interference_events=16
+FINAL completed=1680 fcs=559/1680 raw_samples=0 raw_drop_samples=0 source_errors=0 gaps=0 models=0 output_omitted=0 full_retry=0
+
+=== round 2  --tone on ===
+COST_TOTAL frontend_us=374935.851 frontend_samples=737280000 estimate_us=6596.610 cancel_us=271683.154 cancelled_samples=737280000 bypassed_samples=0 model_updates=50 model_rejects=0 training_windows=50 reader_us=1036150.582
+LOCK_STATS final_state=locked expected_slots=989 submitted=989 dropped_queue=0 expired=0 not_detected=0 decode_failed=0 fcs_ok=998 fcs_failed=1 observations=999 stale=0 duplicate=0 identity_rejects=1 out_of_grid=0 queue_full=0 residual_outliers=0 lock_entries=1 holdover_entries=0 reacquire_entries=0 discontinuities=0 candidates=988 cand_target=972 cand_interference=0 cand_unknown=16 period_updates=997 lock_slots=3 period_samples=737280 period_ppm=-0.404906 scheduler_target_slots=989 scheduler_target_dropped=0 scheduler_target_expired=0 autocorr_dedup=972 autocorr_dedup_confirmed=967 autocorr_dedup_ambiguous=1 autocorr_unknown=989 interference_events=0
+FINAL completed=1016 fcs=1014/1016 raw_samples=737280000 raw_drop_samples=0 source_errors=0 gaps=0 models=50 output_omitted=0 full_retry=0
+
+=== round 2  --tone off ===
+COST_TOTAL frontend_us=157258.895 frontend_samples=737280000 estimate_us=0.000 cancel_us=0.000 cancelled_samples=0 bypassed_samples=0 model_updates=0 model_rejects=0 training_windows=0 reader_us=0.000
+LOCK_STATS final_state=holdover expected_slots=490 submitted=490 dropped_queue=501 expired=0 not_detected=4 decode_failed=0 fcs_ok=351 fcs_failed=16 observations=500 stale=0 duplicate=0 identity_rejects=16 out_of_grid=126 queue_full=0 residual_outliers=0 lock_entries=1 holdover_entries=1 reacquire_entries=0 discontinuities=0 candidates=1239 cand_target=70 cand_interference=0 cand_unknown=1169 period_updates=350 lock_slots=3 period_samples=737280 period_ppm=-0.409779 scheduler_target_slots=490 scheduler_target_dropped=501 scheduler_target_expired=0 autocorr_dedup=70 autocorr_dedup_confirmed=69 autocorr_dedup_ambiguous=1 autocorr_unknown=1239 interference_events=18
+FINAL completed=1670 fcs=536/1670 raw_samples=0 raw_drop_samples=0 source_errors=0 gaps=0 models=0 output_omitted=0 full_retry=0
+
