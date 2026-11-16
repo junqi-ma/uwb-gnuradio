@@ -453,13 +453,18 @@ inline bool stage_timing(const std::complex<float>* rx,
     // CFO stage uses its phase).
     auto local_best = [&](int64_t want, int64_t radius, float min_metric,
                           int64_t* pos, float* met,
-                          std::complex<float>* corr_out) -> bool {
+                          std::complex<float>* corr_out,
+                          bool allow_par_fallback = false) -> bool {
         const int64_t w0 = std::max<int64_t>(0, want - radius);
         const int64_t w1 =
             std::min<int64_t>(static_cast<int64_t>(n) - static_cast<int64_t>(L),
                               want + radius);
         if (w1 <= w0)
             return false;
+        const int64_t count = w1 - w0;
+        const bool track_par =
+            allow_par_fallback && count >= 64 && count <= 1024;
+        float lag_metrics[1024];
         float bm = -1.0f;
         int64_t bp = w0;
         std::complex<float> best_acc(0.0f, 0.0f);
@@ -484,6 +489,8 @@ inline bool stage_timing(const std::complex<float>* rx,
                 rxopt::real_template_dot_8lag(rx + j, taps_dup, L, acc);
                 for (int m = 0; m < 8; ++m) {
                     const float metric = std::norm(acc[m]) / (pw * Et + 1e-12f);
+                    if (track_par)
+                        lag_metrics[(j + m) - w0] = metric;
                     if (metric > bm) {
                         bm = metric;
                         bp = j + m;
@@ -499,6 +506,8 @@ inline bool stage_timing(const std::complex<float>* rx,
                 const std::complex<float> acc =
                     rxopt::real_template_dot_single(rx + j, taps_dup, L);
                 const float metric = std::norm(acc) / (pw * Et + 1e-12f);
+                if (track_par)
+                    lag_metrics[j - w0] = metric;
                 if (metric > bm) {
                     bm = metric;
                     bp = j;
@@ -514,6 +523,8 @@ inline bool stage_timing(const std::complex<float>* rx,
                 const std::complex<float> acc =
                     detail::timing_conjugate_dot(rx + j, scratch.work.data(), L);
                 const float metric = std::norm(acc) / (pw * Et + 1e-12f);
+                if (track_par)
+                    lag_metrics[j - w0] = metric;
                 if (metric > bm) {
                     bm = metric;
                     bp = j;
@@ -525,8 +536,31 @@ inline bool stage_timing(const std::complex<float>* rx,
                 }
             }
         }
-        if (bm < min_metric)
-            return false;
+        if (bm < min_metric) {
+            constexpr float kSyncParFloor = 0.06f;
+            constexpr float kSyncParMin = 20.0f;
+            constexpr int64_t kSyncParGuard = 12;
+            bool par_accept = false;
+            if (track_par && bm >= kSyncParFloor) {
+                double bg_sum = 0.0;
+                int64_t bg_cnt = 0;
+                const int64_t bp_idx = bp - w0;
+                for (int64_t idx = 0; idx < count; ++idx) {
+                    if (std::abs(idx - bp_idx) > kSyncParGuard) {
+                        bg_sum += static_cast<double>(lag_metrics[idx]);
+                        ++bg_cnt;
+                    }
+                }
+                if (bg_cnt > 0) {
+                    const double bg_mean =
+                        std::max(bg_sum / static_cast<double>(bg_cnt), 1e-9);
+                    par_accept =
+                        (static_cast<double>(bm) / bg_mean) >= kSyncParMin;
+                }
+            }
+            if (!par_accept)
+                return false;
+        }
         *pos = bp;
         *met = bm;
         *corr_out = best_acc;
@@ -573,7 +607,8 @@ inline bool stage_timing(const std::complex<float>* rx,
             if (want + static_cast<int64_t>(L) >
                 static_cast<int64_t>(n))
                 break;
-            if (local_best(want, roi, thr, &pos, &met, &corr)) {
+            if (local_best(want, roi, thr, &pos, &met, &corr,
+                           /*allow_par_fallback=*/true)) {
                 used_inner = m;
                 found = true;
                 break;
@@ -785,9 +820,11 @@ inline bool stage_timing(const std::complex<float>* rx,
         float pm = 0.0f;
         std::complex<float> pk_corr(0.0f, 0.0f);
         const float tracking_threshold =
-            (k < backtracked_symbols)
-                ? 0.7f * profile.radar_verification_threshold
-                : profile.radar_verification_threshold;
+            bounded
+                ? std::min(profile.radar_verification_threshold, 0.08f)
+                : ((k < backtracked_symbols)
+                       ? 0.7f * profile.radar_verification_threshold
+                       : profile.radar_verification_threshold);
         if (!local_best(want, static_cast<int64_t>(profile.timing_track_radius),
                         tracking_threshold, &pk, &pm, &pk_corr)) {
             if (++consecutive_misses > kMaxConsecutiveSyncMisses)
