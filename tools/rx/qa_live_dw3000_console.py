@@ -102,5 +102,50 @@ with tempfile.TemporaryDirectory(prefix='uwb-live-console-') as temporary:
     assert no_replay.returncode == 2, no_replay.stdout + no_replay.stderr
     assert 'timed' in no_replay.stderr.lower(), no_replay.stderr
 
+    # ------------------------------------------------------------------
+    # State-dependent pre-guard.
+    # The job buffer is allocated for the widest geometry, so the LOCKED guard
+    # may only shrink inside that budget and must never fall below the bounded
+    # ROI plus the resampler transient.  Every rejected configuration must
+    # fail closed instead of silently cutting a truncated window.
+    # ------------------------------------------------------------------
+    def start_fields(stdout):
+        line = re.search(r'^START .*$', stdout, re.M)
+        assert line is not None, stdout
+        return dict(part.split('=', 1) for part in line.group(0).split()[1:]
+                    if '=' in part)
+
+    narrow = subprocess.run(
+        [binary, '--replay', str(path), '--summary', '1', '--sync', 'locked',
+         '--locked-pre-guard', '8192'],
+        capture_output=True, text=True, timeout=30)
+    assert narrow.returncode == 0, narrow.stderr + narrow.stdout
+    fields = start_fields(narrow.stdout)
+    # Acquisition keeps the wide guard; only LOCKED uses the narrow one.
+    assert fields['pre_guard'] == '36864', fields
+    assert fields['locked_pre_guard'] == '8192', fields
+    assert int(fields['locked_window_capacity']) < int(fields['window_capacity']), fields
+    assert int(fields['locked_window_capacity']) <= 450000, fields
+    # The synthetic stream never locks, so the guard must never switch.
+    assert re.search(r'^PRE_GUARD ', narrow.stdout, re.M) is None, narrow.stdout
+    candidate = re.search(r'^PACKET .*path=acquire .*$', narrow.stdout, re.M)
+    assert candidate is not None, narrow.stdout
+    assert 'guard=36864' in candidate.group(0), candidate.group(0)
+    # The window actually cut for the candidate starts one guard before the
+    # seed, i.e. the reported guard is the one that produced the window.
+    assert re.search(r'^LOCK_STATS final_state=acquire ', narrow.stdout, re.M), narrow.stdout
+    assert re.search(r'^FINAL completed=1 fcs=0/1 ', narrow.stdout, re.M), narrow.stdout
+
+    for bad, why in [('0', 'must be > 0'),
+                     ('256', 'must be >='),
+                     ('400000', 'exceeds the job buffer')]:
+        rejected = subprocess.run(
+            [binary, '--replay', str(path), '--summary', '1', '--sync', 'locked',
+             '--locked-pre-guard', bad],
+            capture_output=True, text=True, timeout=30)
+        assert rejected.returncode == 2, (bad, rejected.stdout + rejected.stderr)
+        assert why in rejected.stderr, (bad, rejected.stderr)
+        assert 'START ' not in rejected.stdout, rejected.stdout
+
 print('live console: acquisition/rejection, batch summary, SIGINT, source failure, '
-      'locked strategy and timed-burst plan PASS')
+      'locked strategy, timed-burst plan and locked pre-guard PASS')

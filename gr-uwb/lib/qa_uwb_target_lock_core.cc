@@ -62,6 +62,10 @@ TargetLockConfig make_config()
     cfg.require_fcs = true;
     cfg.geometry = gr::uwb::core::target_window_geometry(
         260096, 8128, 21504, 154624, 1024, 36864, 8192);
+    // Job buffer for the widest geometry plus the holdover cap.  The QA spans
+    // are the raw work-grid numbers, so this is larger than the live app's
+    // 450000-sample buffer; only the capacity contract matters here.
+    cfg.window_capacity = 600000;
     return cfg;
 }
 
@@ -583,4 +587,162 @@ BOOST_AUTO_TEST_CASE(slot_accounting)
     TargetSlotPlan next;
     BOOST_REQUIRE(lock.next_plan(true_origin(6) - 200000, next));
     BOOST_CHECK_GT(next.slot_index, plan.slot_index);
+}
+
+// ===========================================================================
+// 16. Runtime pre-guard update (LOCKED shrinks the window, the rest keeps it)
+// ===========================================================================
+BOOST_AUTO_TEST_CASE(runtime_pre_guard_update_keeps_plan_and_window_consistent)
+{
+    auto cfg = make_config();
+    TargetLockCore lock(cfg);
+    const size_t wide = lock.pre_guard();
+    BOOST_CHECK_EQUAL(wide, 36864u);
+    BOOST_CHECK_EQUAL(lock.window_capacity(), 600000u);
+
+    // Lock on a real grid first: the guard change happens while LOCKED.
+    for (uint64_t k = 0; k < 6; ++k)
+        feed(lock, good_obs(lock, k, true_origin(k)));
+    BOOST_REQUIRE_EQUAL(static_cast<int>(lock.state()),
+                        static_cast<int>(TargetLockState::Locked));
+
+    const size_t narrow = 8192;
+    BOOST_REQUIRE(lock.set_pre_guard(narrow));
+    BOOST_CHECK_EQUAL(lock.pre_guard(), narrow);
+    BOOST_CHECK_EQUAL(lock.stats().pre_guard_updates, 1u);
+
+    TargetSlotPlan plan;
+    BOOST_REQUIRE(lock.next_plan(true_origin(6) - 200000, plan));
+    // The window start, the plan's own guard and the predicted origin must
+    // agree: this is the invariant the live scheduler relies on.
+    BOOST_CHECK_EQUAL(plan.pre_guard, narrow);
+    BOOST_CHECK_EQUAL(plan.window_start,
+                      plan.predicted_origin - int64_t(narrow));
+    BOOST_CHECK_EQUAL(plan.window_start + int64_t(plan.pre_guard),
+                      plan.predicted_origin);
+    // The capture/post-guard side is untouched by a guard change.
+    BOOST_CHECK_EQUAL(plan.capture, cfg.geometry.capture);
+    BOOST_CHECK_EQUAL(plan.post_guard, cfg.geometry.post_guard);
+    BOOST_CHECK_EQUAL(plan.window_end,
+                      plan.predicted_origin + int64_t(plan.capture) +
+                          int64_t(plan.post_guard));
+    BOOST_CHECK_LE(static_cast<size_t>(plan.window_end - plan.window_start),
+                   lock.window_capacity());
+    // plan_for_slot must be the same geometry as next_plan.
+    const TargetSlotPlan again = lock.plan_for_slot(plan.slot_index);
+    BOOST_CHECK_EQUAL(again.window_start, plan.window_start);
+    BOOST_CHECK_EQUAL(again.window_end, plan.window_end);
+
+    // Shrinking moves the window start LATER, so a cursor that already passed
+    // the wide start still yields a window that begins at or after it.
+    const int64_t cursor = true_origin(6) - 20000;
+    TargetSlotPlan near;
+    BOOST_REQUIRE(lock.next_plan(cursor, near));
+    BOOST_CHECK_GE(near.window_start, cursor);
+
+    // A state change back to the wide guard restores the exact old geometry.
+    BOOST_REQUIRE(lock.set_pre_guard(wide));
+    BOOST_CHECK_EQUAL(lock.pre_guard(), wide);
+    BOOST_CHECK_EQUAL(lock.stats().pre_guard_updates, 2u);
+    const TargetSlotPlan restored = lock.plan_for_slot(plan.slot_index);
+    BOOST_CHECK_EQUAL(restored.window_start, plan.predicted_origin - int64_t(wide));
+    BOOST_CHECK_EQUAL(restored.window_end, plan.window_end);
+
+    // A no-op update is accepted but must not be counted as a change.
+    BOOST_CHECK(lock.set_pre_guard(wide));
+    BOOST_CHECK_EQUAL(lock.stats().pre_guard_updates, 2u);
+
+    // Holdover widening is added on top of whatever guard is effective, and
+    // the widened geometry must still fit the job buffer.
+    BOOST_REQUIRE(lock.set_pre_guard(narrow));
+    for (uint64_t k = 6; k < 9; ++k) {
+        auto miss = good_obs(lock, k, true_origin(k));
+        miss.observed_origin = -1;
+        feed(lock, miss);
+    }
+    BOOST_REQUIRE_EQUAL(static_cast<int>(lock.state()),
+                        static_cast<int>(TargetLockState::Holdover));
+    TargetSlotPlan held;
+    BOOST_REQUIRE(lock.next_plan(true_origin(9) - 100000, held));
+    BOOST_CHECK(held.widened);
+    // Growth is per consecutive miss (3 misses -> 3 * 2048, under the cap).
+    BOOST_CHECK_EQUAL(held.pre_guard, narrow + 3 * cfg.holdover_guard_growth);
+    BOOST_CHECK_EQUAL(held.window_start,
+                      held.predicted_origin - int64_t(held.pre_guard));
+    BOOST_CHECK_LE(static_cast<size_t>(held.window_end - held.window_start),
+                   lock.window_capacity());
+}
+
+// ===========================================================================
+// 17. Runtime pre-guard update fails closed outside the job buffer
+// ===========================================================================
+BOOST_AUTO_TEST_CASE(runtime_pre_guard_update_fails_closed)
+{
+    auto cfg = make_config();
+    TargetLockCore lock(cfg);
+    const size_t wide = lock.pre_guard();
+    const size_t capture = cfg.geometry.capture;
+    const size_t post = cfg.geometry.post_guard;
+
+    // Zero is never a valid guard.
+    BOOST_CHECK(!lock.set_pre_guard(0));
+    BOOST_CHECK_EQUAL(lock.pre_guard(), wide);
+    BOOST_CHECK_EQUAL(lock.stats().pre_guard_updates, 0u);
+
+    // One sample over the job buffer must be refused, not clamped.
+    const size_t fits = cfg.window_capacity - capture - post;
+    BOOST_REQUIRE(lock.set_pre_guard(fits));
+    BOOST_CHECK_EQUAL(lock.pre_guard(), fits);
+    BOOST_CHECK(!lock.set_pre_guard(fits + 1));
+    BOOST_CHECK_EQUAL(lock.pre_guard(), fits); // unchanged after the refusal
+    BOOST_CHECK_EQUAL(lock.stats().pre_guard_updates, 1u);
+
+    // A core without a declared job buffer refuses every update.
+    auto unbounded = make_config();
+    unbounded.window_capacity = 0;
+    TargetLockCore raw(unbounded);
+    BOOST_CHECK(!raw.set_pre_guard(8192));
+    BOOST_CHECK_EQUAL(raw.pre_guard(), 36864u);
+
+    // A geometry without a capture span is not a window at all.
+    auto broken = make_config();
+    broken.geometry.capture = 0;
+    TargetLockCore invalid(broken);
+    BOOST_CHECK(!invalid.set_pre_guard(8192));
+}
+
+// ===========================================================================
+// 18. The association window does not follow a guard shrink
+// ===========================================================================
+BOOST_AUTO_TEST_CASE(association_window_is_not_narrowed_by_guard_shrink)
+{
+    auto cfg = make_config();
+    TargetLockCore lock(cfg);
+    for (uint64_t k = 0; k < 6; ++k)
+        feed(lock, good_obs(lock, k, true_origin(k)));
+    BOOST_REQUIRE(lock.set_pre_guard(8192));
+
+    // Schedule slot 6 (outcome Submitted) so association can resolve.
+    TargetSlotPlan plan;
+    BOOST_REQUIRE(lock.next_plan(true_origin(6) - 200000, plan));
+    lock.commit_plan(plan);
+
+    // 20000 samples from the prediction is outside the shrunken 8192 guard but
+    // inside the association window captured at construction (36864).  The
+    // guard shrink must not reclassify the target's own response.
+    InterferenceCandidate near;
+    near.start_sample = plan.predicted_origin + 20000;
+    near.metric = 0.9;
+    const auto v = lock.classify_candidate(near);
+    BOOST_CHECK_EQUAL(static_cast<int>(v.cls),
+                      static_cast<int>(CandidateClass::TargetAssociated));
+    BOOST_CHECK_EQUAL(v.slot_index, plan.slot_index);
+    BOOST_CHECK_EQUAL(v.offset_from_target, 20000);
+
+    // Beyond the association window the verdict is still Unknown, not target.
+    InterferenceCandidate far;
+    far.start_sample = plan.predicted_origin + 40000;
+    far.metric = 0.9;
+    BOOST_CHECK_EQUAL(static_cast<int>(lock.classify_candidate(far).cls),
+                      static_cast<int>(CandidateClass::Unknown));
 }
