@@ -1,4 +1,62 @@
-# DW3000 逐包离线解码
+# DW3000 接收工具
+
+更新：2026-11-16，主分支 `feature/sic-research`，解耦回合版本 `5d5ba26`。
+完整构建、安装资源与接口边界见
+[原生接收与 GNU Radio 构建使用说明](../../docs/原生接收与GNU_Radio构建使用说明.md)。
+
+## 直接使用当前原生 C++ live
+
+在仓库根目录构建和运行：
+
+```sh
+cmake -S gr-uwb -B gr-uwb/build-native \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DUWB_BUILD_GNURADIO=OFF -DUWB_BUILD_EXPERIMENTS=OFF \
+  -DENABLE_UHD_BACKEND=ON
+cmake --build gr-uwb/build-native --target uwb_dw3000_live -j4
+gr-uwb/build-native/apps/uwb_dw3000_live \
+  --replay /path/to/capture.sc16 --workers 4 --sync locked --period-ms 5
+```
+
+省略 `--replay` 会连接 X410；SC16 输入须为 737.28 MS/s。C++ 程序默认
+`--mode continuous --sync acquire --fused on --cir full --ondemand auto`。
+整数 chip 网格准入门限约 6.468 ppm，可用 `--fused-gate-ppm` 收紧，拒绝时按包
+Full→Bypass；PACKET 的 `grid_reject` / `st_fused` 用于观察实际分支。
+单音默认开启；周期默认 5 ms，可用 `--period-ms` 改为实际发包周期。
+
+`--mode timed` 仅支持 replay，且关闭单音消除；真实 UHD 定时 RX 尚未实现。
+安装程序可通过 `--res-dir DIR` 指定 taps/template；详见上面的构建使用说明。
+当前工作区正在新增 `--taps quality|eq32|realtime|eq16`（默认 quality），重建后可用；
+其余系数尚未纳入安装资源，需在所选资源根目录提供相应文件。
+
+**入口差异**：下面的 `live_dw3000_packets.py` 仍显式默认 `--cir auto`，不等同于
+直接 C++ 程序的 `full`。它自动构建时默认开启 GR，且只转发其 argparse 列出的参数，
+未开放 `--sync`、`--fused`、`--fused-gate-ppm`、`--res-dir` 等新参数。
+需原生构建或完整控制时，直接使用 C++ 程序。
+
+`capture_x410_sc16.py` 用于硬件采集，`check_clock_offset.py` 用于回放时钟统计。
+后者目前显式默认 `--fused off`，末尾 PASS/FAIL 仍按旧 `1e-9` 门限计算，不能用于
+判断当前融合准入；以 C++ live 的逐包诊断为准。
+
+## 接收信噪比与链路余量
+
+`measure_rx_snr.py` 从原始 SC16 统计接收 SNR，不依赖解调器任何指标：按周期
+定位包与包间噪声区，噪声区 PSD 中位数作热噪声底，包区减噪声区得信号 PSD，
+在 ±250 MHz（信道 5）内积分。−232.96 MHz 的 CW 单音会先拟合减掉，积分时再挖掉。
+
+```sh
+python3 tools/rx/measure_rx_snr.py \
+  --input testdata/x410_fixed_tone_live_20261115/rx_1ms_1s.sc16 --period-ms 1
+```
+
+输出带内 SNR、全带宽 SNR、不消单音时的 SNR、热噪声底（LSB 与 dBFS）和单音电平。
+`--json` 输出机器可读结果，`--band-mhz` 改积分带宽（默认 250）。
+
+当前实测（DW3000 衰减 10 dB、1.5 m、X410 增益 60）：带内 SNR **+13.7 dB**，
+热噪声底 −47.5 dBFS，单音比热噪声高 12–13 dB。详见
+[`X410_接收信噪比与链路余量_2026-11-16.md`](../../docs/performance/X410_接收信噪比与链路余量_2026-11-16.md)。
+
+## DW3000 逐包离线解码
 
 仓库根目录执行：
 
@@ -15,7 +73,8 @@ FCS、独立 Python CRC 和失败阶段。首尾窗口不足也占一行并报�
 `time_ms` 为候选种子坐标，不是精确 ToA；`demod_us` 仅在 JSONL 中保存，属于解调
 内核诊断时间，不包含截窗、重采样或排队。
 
-本次已验证默认输入 **200/200** 成功；同窗原始数据 **193/200**：
+历史夹具验证结果为默认输入 **200/200**、同窗原始数据 **193/200**；
+这是对应夹具/配置的记录，不代表任意当前采集：
 
 ```sh
 python3 tools/rx/print_dw3000_packets.py --raw
@@ -35,7 +94,7 @@ Full CIR；可用 `--preamble`、`--sfd`、`--pre-guard`、`--window` 调整包�
 退出码：0=所有候选均完整解码并通过 FCS/独立 CRC；1=有包失败；2=参数、文件、编译
 或执行错误。默认原始数据对照 193/200，因此 `--raw` 返回 1 是预期结果。
 
-# X410 实时逐包打印，每 50 包汇总
+## Python 包装脚本：实时逐包打印，每 50 包汇总
 
 ```sh
 python3 tools/rx/live_dw3000_packets.py
@@ -83,12 +142,12 @@ SUMMARY completed=50 batch=50 batch_fcs=50/50 batch_pct=100.0 total_fcs=50/50 to
 python3 tools/rx/live_dw3000_packets.py --replay testdata/x410_fixed_tone_live_20261115/rx_ch3_rx1_1s.sc16
 ```
 
-最终默认配置已验证：该 1 秒回放自动捕获 200 包，200/200 FCS/独立 CRC 通过，其中 1 包
+早期包装脚本配置的验证记录：该 1 秒回放自动捕获 200 包，200/200 FCS/独立 CRC 通过，其中 1 包
 完整 CIR 重试；3 秒 X410 实测捕获 599 包，599/599 通过、0 源错误、0 原始队列丢样。
 开发中较长测试曾出现 UHD 不连续，因此这些结果只代表已测片段，不是长时间零溢出的保证。
 本工具不保存连续 IQ。
 
-# 单 worker / 多 worker 耗时对比
+## 单 worker / 多 worker 耗时对比
 
 实时逐包输出增加 `worker`、`queue_us`、`resample_us`、`demod_us`、`retry_us`、
 `compute_us` 和 `cpu_us`。前五个耗时及总计算耗时为墙钟时间，`cpu_us` 为当前 worker

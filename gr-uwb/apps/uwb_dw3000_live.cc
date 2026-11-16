@@ -77,6 +77,26 @@ struct Options {
     // A refused integer grid degrades Full->Bypass per packet in the demod
     // core, so an untrimmed clock costs ~1.5 ms/packet, not ~15 ms.
     std::string cir = "full";
+    // Resampler tap set.  The kernel cost is proportional to
+    // Hpad = 8*ceil(ceil(T/65)/8), not to T, so only Hpad changes matter:
+    //   quality  T=2707 Hpad=48  ripple 0.0050 dB  stopband -70.03 dB  (Kaiser)
+    //   eq32     T=2079 Hpad=32  ripple 0.0849 dB  stopband -76.03 dB  (equiripple)
+    //   realtime T=1319 Hpad=24  ripple 0.0053 dB  stopband -70.07 dB  (Kaiser)
+    //   eq16     T=1039 Hpad=16  ripple 0.0868 dB  stopband -74.56 dB  (equiripple)
+    // Default is `eq16`: 3x fewer multiply-adds than `quality` (Hpad 48 -> 16).
+    // Measured on the X410 1 s capture (5 ms, W=1): resample 1925.9 -> 958.9 us
+    // (-50.2%), demod 1024.5 -> 1011.1 us (unchanged), FCS 203/204 identical,
+    // and the demod correlation metrics are within noise
+    // (tmetric 0.7323 vs 0.7320, cirmetric 0.6359 vs 0.6365, CFO 4.26 vs
+    // 4.25 kHz).  At 1 ms / W=4 it is the difference between working and not:
+    // quality drops 182-206 of 990 slots, eq16 drops 0.
+    // Trade-off to keep in mind: eq16 has 0.0868 dB ripple (17x the Kaiser
+    // baseline) and a 290 MHz passband instead of 330 MHz, and the SIC path has
+    // not been validated with it.  `--taps quality` restores the old set.
+    std::string taps = "eq16";
+    // `packets` prints one line per packet plus the periodic summary;
+    // `summary` prints only the periodic line (much less console I/O).
+    std::string print = "packets";
     std::string mode = "continuous";   // continuous | timed
     std::string sync = "acquire";      // acquire | locked
     double freq = 6489.6e6, gain = 60, seconds = 0;
@@ -182,15 +202,30 @@ struct Reporter {
     uint64_t received = 0, source_errors = 0, raw_drops = 0, gaps = 0, models = 0;
     size_t queued = 0, queue_peak = 0, interval;
     std::map<std::string, size_t> batch_fail;
+    // Per-batch timing, so `--summary N` alone is enough to watch the pipeline:
+    // at a 1 ms packet period N=500 is one report per 0.5 s.
+    std::vector<float> batch_compute, batch_resample, batch_demod;
     bool done = false;
     std::thread thread;
-    explicit Reporter(size_t n) : interval(n) { thread = std::thread([this]{ loop(); }); }
+    bool print_packets = true;
+    explicit Reporter(size_t n, bool packets = true)
+        : interval(n), print_packets(packets)
+    { thread = std::thread([this]{ loop(); }); }
     ~Reporter() { finish(); }
     void line_locked(std::string s) {
         if (lines.size() < 4096) lines.push_back(std::move(s)); else ++omitted;
         cv.notify_one();
     }
     void info(std::string s) { std::lock_guard<std::mutex> l(mutex); line_locked(std::move(s)); }
+    static void stat(std::vector<float>& v, float& mean, float& p95)
+    {
+        if (v.empty()) { mean = 0; p95 = 0; return; }
+        std::sort(v.begin(), v.end());
+        double sum = 0;
+        for (float x : v) sum += x;
+        mean = float(sum / double(v.size()));
+        p95 = v[std::min(v.size() - 1, size_t(0.95 * double(v.size())))];
+    }
     void batch_locked(const std::string& prefix, size_t n) {
         std::ostringstream s;
         s << prefix << " completed=" << count << " batch=" << n
@@ -203,8 +238,17 @@ struct Reporter {
           << " gaps=" << gaps << " models=" << models
           << " queued=" << queued << " queue_peak=" << queue_peak
           << " output_omitted=" << omitted;
+        float cm, cp, rm, rp, dm, dp;
+        stat(batch_compute, cm, cp);
+        stat(batch_resample, rm, rp);
+        stat(batch_demod, dm, dp);
+        s << std::fixed << std::setprecision(1)
+          << " compute_mean=" << cm << " compute_p95=" << cp
+          << " resample_mean=" << rm << " resample_p95=" << rp
+          << " demod_mean=" << dm << " demod_p95=" << dp;
         for (const auto& v : batch_fail) s << ' ' << v.first << '=' << v.second;
         line_locked(s.str()); batch_pass = 0; batch_retries = 0; batch_fail.clear();
+        batch_compute.clear(); batch_resample.clear(); batch_demod.clear();
     }
     void result(uint64_t id, int64_t seed, const std::string& state,
                 const demod::DemodResult* r = nullptr, double latency_ms = 0,
@@ -288,7 +332,14 @@ struct Reporter {
                     << " resample_us=" << cost->resample_us << " demod_us=" << cost->demod_us
                     << " retry_us=" << cost->retry_us << " compute_us=" << cost->compute_us
                     << " cpu_us=" << cost->cpu_us;
-        line_locked(s.str());
+        if (cost) {
+            batch_compute.push_back(float(cost->compute_us));
+            batch_resample.push_back(float(cost->resample_us));
+            batch_demod.push_back(float(cost->demod_us));
+        }
+        // Printing one line per packet is ~1000 lines/s at a 1 ms period; that
+        // I/O is measurable.  `--print summary` keeps only the periodic report.
+        if (print_packets) line_locked(s.str());
         if (count % interval == 0) batch_locked("SUMMARY", interval);
     }
     void snapshot(const pipeline::FixedToneCancelStats& st, uint64_t gap_count, size_t q) {
@@ -829,7 +880,9 @@ try {
             std::cout << "Native DW3000 live receiver. Defaults: X410 ch3/RX1, code10/256/4z2/6M8, STS off.\n"
                 "--args DEVICE_ARGS --channel 3 --antenna RX1 --subdev SPEC --freq HZ --gain DB\n"
                 "--seconds 0 (until Ctrl+C) --workers 2 --queue 24 --raw-blocks 128\n"
-                "--summary 50 --cir full|auto|bypass (default full: the fused CMF needs it)\n"
+                "--summary 50 (report every N packets; N=100 is 0.1 s at a 1 ms period)\n"
+                "--print packets|summary (default packets; summary suppresses per-packet lines)\n"
+                "--cir full|auto|bypass (default full: the fused CMF needs it)\n"
                 "--replay FILE (paced diagnostic, no hardware)\n"
                 "--mode continuous|timed (default continuous; timed needs --replay)\n"
                 "--sync acquire|locked (default acquire; locked uses a bounded target ROI)\n"
@@ -844,6 +897,7 @@ try {
                 "--ondemand auto|on|off (on-demand soft-chip prefix, default auto = follow --fused)\n"
                 "--timed-lead-us 300 --timed-lookahead 4 --timed-alignment 4\n"
                 "--timed-t0-ms 0 (first expected target time; timed_burst has no blind acquisition)\n"
+                "--taps eq16|quality|eq32|realtime (resampler Hpad 16|48|32|24, default eq16)\n"
                 "--res-dir DIR (runtime resources: resampler taps + preamble template;\n"
                 "  default: $UWB_RESOURCE_DIR or $UWB_TESTDATA_DIR or the installed\n"
                 "  resource dir, then the build-tree testdata fallback)\n";
@@ -860,6 +914,8 @@ try {
         else if (key=="--raw-blocks") o.raw_blocks=std::stoul(value());
         else if (key=="--summary") o.summary=std::stoul(value());
         else if (key=="--cir") o.cir=value();
+        else if (key=="--taps") o.taps=value();
+        else if (key=="--print") o.print=value();
         else if (key=="--replay") o.replay=value();
         else if (key=="--mode") o.mode=value();
         else if (key=="--sync") o.sync=value();
@@ -889,6 +945,11 @@ try {
         throw std::runtime_error("invalid workers/queue/summary/duration/CIR configuration");
     if (o.mode!="continuous" && o.mode!="timed")
         throw std::runtime_error("--mode must be continuous or timed");
+    if (o.print!="packets" && o.print!="summary")
+        throw std::runtime_error("--print must be packets or summary");
+    if (o.taps!="quality" && o.taps!="eq32" && o.taps!="realtime" &&
+        o.taps!="eq16")
+        throw std::runtime_error("--taps must be quality, eq32, realtime or eq16");
     if (o.sync!="acquire" && o.sync!="locked")
         throw std::runtime_error("--sync must be acquire or locked");
     if (!(o.tone_period_ms > 0.0) || !(o.tone_training_ms > 0.0) ||
@@ -918,7 +979,12 @@ try {
                                  "UHD command path is not validated on hardware yet");
     std::signal(SIGINT,on_signal); std::signal(SIGTERM,on_signal);
     const std::string res_root = resolve_res_dir(o);
-    const auto taps=load<float>(res_root+"/resampler_65_48/taps_quality_minorder.txt");
+    const std::string taps_file =
+        (o.taps == "quality")  ? "taps_quality_minorder.txt"
+        : (o.taps == "eq32")   ? "taps_quality_eq32.txt"
+        : (o.taps == "realtime") ? "taps_realtime_minorder.txt"
+                                 : "taps_realtime_eq16.txt";
+    const auto taps = load<float>(res_root + "/resampler_65_48/" + taps_file);
     const auto tmpl=load<std::complex<float>>(res_root+"/reference_preamble_code10_998p4.cf32");
 
     // ---- PHY-derived target window geometry ------------------------------
@@ -955,11 +1021,13 @@ try {
     core::TargetLockCore lock(lock_cfg);
     core::TargetLockState last_state = lock.state();
 
-    Reporter report(o.summary);
+    Reporter report(o.summary, o.print == "packets");
     report.info("START mode="+o.mode+" sync="+o.sync+
         " channel="+o.channel+" antenna="+o.antenna+" cir="+o.cir+
         " workers="+std::to_string(o.workers)+" summary="+std::to_string(o.summary)+
         " period_ms="+std::to_string(o.period_ms)+
+        " taps="+o.taps+" taps_n="+std::to_string(taps.size())+
+        " print="+o.print+
         " pre_guard="+std::to_string(pre_guard)+
         " capture="+std::to_string(lock_cfg.geometry.capture)+
         " post_guard="+std::to_string(post_guard)+
