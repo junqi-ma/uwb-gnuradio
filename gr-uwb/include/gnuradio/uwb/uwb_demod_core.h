@@ -825,9 +825,14 @@ inline bool stage_timing(const std::complex<float>* rx,
                 : ((k < backtracked_symbols)
                        ? 0.7f * profile.radar_verification_threshold
                        : profile.radar_verification_threshold);
-        if (!local_best(want, static_cast<int64_t>(profile.timing_track_radius),
+        const int64_t track_rad =
+            (bounded && consecutive_misses > 0)
+                ? std::max<int64_t>(12, static_cast<int64_t>(profile.timing_track_radius))
+                : static_cast<int64_t>(profile.timing_track_radius);
+        if (!local_best(want, track_rad,
                         tracking_threshold, &pk, &pm, &pk_corr)) {
-            if (++consecutive_misses > kMaxConsecutiveSyncMisses)
+            ++consecutive_misses;
+            if (!bounded && consecutive_misses > kMaxConsecutiveSyncMisses)
                 break; // lost the train
             continue;
         }
@@ -932,12 +937,44 @@ inline bool fit_cfo(const std::complex<float>* rx,
             have_corr ? std::arg(timing.peak_corr[idx])
                       : std::arg(rx[timing.peak_samples[idx]]);
     }
-    // Unwrap: adjacent SYNC phases must stay within ±π.  The per-symbol CFO
-    // advance (2π·f·period/fs) stays well under π for |f| ≲ 150 kHz.
+    // Unwrap: adjacent SYNC phases must stay within ±π.  When LockedBounded
+    // bridges a multi-symbol interference gap, estimate the per-sample phase
+    // slope from adjacent 1-symbol pairs so multi-symbol gaps unwrap cleanly.
+    double unwrap_slope_rad_per_sample = 0.0;
+    {
+        std::complex<double> adj_sum(0.0, 0.0);
+        const double max_adj_dt = 1.5 * static_cast<double>(kQm35SamplesPerSymbol);
+        for (size_t k = 1; k < nfit; ++k) {
+            const size_t idx0 = skip + k - 1;
+            const size_t idx1 = skip + k;
+            const double dt = static_cast<double>(
+                timing.peak_samples[idx1] - timing.peak_samples[idx0]);
+            if (dt > 0.0 && dt <= max_adj_dt) {
+                if (have_corr) {
+                    const std::complex<double> c0(timing.peak_corr[idx0]);
+                    const std::complex<double> c1(timing.peak_corr[idx1]);
+                    adj_sum += c1 * std::conj(c0);
+                } else {
+                    const double dphi = static_cast<double>(scratch.metric[k] - scratch.metric[k - 1]);
+                    adj_sum += std::complex<double>(std::cos(dphi), std::sin(dphi));
+                }
+            }
+        }
+        if (std::norm(adj_sum) > 1e-24) {
+            unwrap_slope_rad_per_sample =
+                std::arg(adj_sum) / static_cast<double>(kQm35SamplesPerSymbol);
+        }
+    }
     for (size_t k = 1; k < nfit; ++k) {
-        while (scratch.metric[k] - scratch.metric[k - 1] > (float)M_PI)
+        const size_t idx0 = skip + k - 1;
+        const size_t idx1 = skip + k;
+        const double dt = static_cast<double>(
+            timing.peak_samples[idx1] - timing.peak_samples[idx0]);
+        const float pred = scratch.metric[k - 1] +
+                           static_cast<float>(unwrap_slope_rad_per_sample * dt);
+        while (scratch.metric[k] - pred > (float)M_PI)
             scratch.metric[k] -= 2.0f * (float)M_PI;
-        while (scratch.metric[k] - scratch.metric[k - 1] < -(float)M_PI)
+        while (scratch.metric[k] - pred < -(float)M_PI)
             scratch.metric[k] += 2.0f * (float)M_PI;
     }
 
