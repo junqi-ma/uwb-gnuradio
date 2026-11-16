@@ -3474,14 +3474,130 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     const auto sfd1_range = rxopt::compute_sfd_search_range(
         n, res.timing, profile.preamble_repetitions, sfd_len,
         kQm35SamplesPerSymbol);
+    // Stage-2 CFO, kept so the single-pass rotation mode can restore it after
+    // the SFD-anchored refit has been evaluated (see the refit lambda below).
+    const CfoResult stage2_cfo = res.cfo;
+    res.cfo_initial_hz = stage2_cfo.cfo_hz;
+    res.cfo_initial_peaks = static_cast<uint32_t>(stage2_cfo.peaks_used);
+    // Highest sample index that any post-SFD consumer reads from
+    // `scratch.derotated`, given a frame origin.  Used twice: to predict the
+    // single-pass rotation range before the bootstrap SFD and to bound the
+    // actual second rotation afterwards.
+    //
+    // The bound is the real requirement, not the legacy 40-PHR-head budget:
+    //   * the soft-chip stage only generates the prefix the active decoder
+    //     needs (`fused_phr_prefix_budget` when the PHR is read from raw IQ,
+    //     else the full `initial_chip_budget`),
+    //   * the fused PHR kernel reads its 21 symbols straight from the
+    //     derotated IQ: 20*512 + max candidate offset (320) chips plus the
+    //     template length,
+    //   * the final SFD search range.
+    // Everything from the payload start onwards is derotated by the payload
+    // pass (`pay_lo = min(sec_hi, base0)`), so covering past that point here
+    // would derotate the payload region twice with the same CFO.
+    auto required_derotated_hi = [&](int64_t frame_start,
+                                     size_t sfd_search_hi) -> int64_t {
+        const size_t pre = profile.cir_pre_samples;
+        const size_t post = profile.cir_post_samples;
+        const size_t tap_count = pre + post;
+        const bool phr_fusion = profile.rx_fused_phr_cmf;
+        const size_t chip_prefix = phr_fusion
+            ? rxopt::fused_phr_prefix_budget(profile)
+            : rxopt::initial_chip_budget(profile);
+        const int64_t chip_start = frame_start + static_cast<int64_t>(post) - 1;
+        int64_t hi = chip_start + static_cast<int64_t>(chip_prefix) * 2 +
+                     static_cast<int64_t>(tap_count) + 128;
+        if (phr_fusion) {
+            // NS-SFD end is not known before stage_ns_sfd(); the nominal grid
+            // plus the +8-chip search covers it.
+            const int64_t sfd_end_chip_est =
+                static_cast<int64_t>(profile.preamble_repetitions +
+                                     rxopt::kSfdSymbols) *
+                    static_cast<int64_t>(kQm35ChipsPerSymbol) + 8;
+            const int64_t phr_start_est = sfd_end_chip_est + 1;
+            const int64_t phr_len =
+                static_cast<int64_t>(tap_count) +
+                2 * static_cast<int64_t>(rxfusion::kPhrChipsPerBurst - 1);
+            const int64_t phr_hi = chip_start +
+                (phr_start_est +
+                 static_cast<int64_t>((rxfusion::kPhrSymbols - 1) *
+                                      rxfusion::kPhrChipsPerSymbol) +
+                 static_cast<int64_t>(rxfusion::kPhrCandidateChipOffset[3])) * 2 +
+                phr_len + 64;
+            hi = std::max(hi, phr_hi);
+        }
+        return std::max<int64_t>(hi, static_cast<int64_t>(sfd_search_hi));
+    };
+    // Predicted single-pass rotation range.  `scratch.derotated` is the only
+    // CFO-compensated buffer that the downstream stages read, so one rotation
+    // with the Stage-2 estimate can replace the SFD-anchored second pass only
+    // if it already covers everything those stages will read.  The SFD anchor
+    // is not known yet, so the range is predicted from the Stage-1 timing with
+    // an explicit symbol/backtrack slack and re-validated against the actual
+    // [sec_lo, sec_hi) after the bootstrap SFD (a miss falls back to the legacy
+    // second rotation).
+    size_t union_lo = 0;
+    size_t union_hi = 0;
+    bool union_ok = false;
+    if (profile.cfo_refit_mode != 0) {
+        const bool u_on_demand = profile.rx_softchip_on_demand ||
+                                 profile.rx_fused_payload_cmf ||
+                                 profile.rx_fused_phr_cmf;
+        if (!profile.rx_stop_after_sfd && !u_on_demand) {
+            // The legacy path rotates the whole window, so there is nothing to
+            // predict: covering [0, n) is trivially conservative and the only
+            // saving is the redundant first pass.
+            union_lo = 0;
+            union_hi = n;
+            union_ok = n > 0;
+        } else {
+            const size_t u_pre = profile.cir_pre_samples;
+            const size_t u_first = profile.cir_skip_initial_repetitions;
+            const size_t u_full = profile.preamble_repetitions;
+            const size_t u_reps = (profile.cir_repetitions > 0)
+                ? std::min(profile.cir_repetitions,
+                           u_full > u_first ? u_full - u_first : 0)
+                : 0;
+            const double u_period = (res.timing.measured_period > 0.0)
+                ? res.timing.measured_period
+                : static_cast<double>(kQm35SamplesPerSymbol);
+            const int64_t u_start = res.timing.preamble_start_sample;
+            const int64_t u_cir_lo = (u_reps > 0)
+                ? u_start + static_cast<int64_t>(std::llround(
+                              static_cast<double>(u_first) * u_period)) -
+                      static_cast<int64_t>(u_pre)
+                : u_start;
+            // Mirror the actual sec_lo rule: the fused PHR+payload path skips
+            // the SYNC soft-chip FIR, so it does not need the preamble head.
+            const bool u_skip_sync_fir =
+                profile.rx_fused_phr_cmf && profile.rx_fused_payload_cmf;
+            int64_t u_lo = u_cir_lo;
+            if (!u_skip_sync_fir)
+                u_lo = std::min<int64_t>(u_lo,
+                                         u_start - static_cast<int64_t>(u_pre));
+            u_lo = std::min<int64_t>(u_lo,
+                                     static_cast<int64_t>(sfd1_range.first));
+            int64_t u_hi = required_derotated_hi(u_start, sfd1_range.second);
+            // Slack: the SFD anchor can move the frame origin by up to the
+            // search backtrack (4 symbols + 64 samples).
+            const int64_t u_slack =
+                static_cast<int64_t>(4 * kQm35SamplesPerSymbol + 64 + 128);
+            union_lo = static_cast<size_t>(std::max<int64_t>(0, u_lo - u_slack));
+            union_hi = static_cast<size_t>(
+                std::min<int64_t>(static_cast<int64_t>(n), u_hi + u_slack));
+            union_ok = union_hi > union_lo;
+        }
+    }
+    const size_t rot1_lo = union_ok ? union_lo : sfd1_range.first;
+    const size_t rot1_hi = union_ok ? union_hi : sfd1_range.second;
     uint64_t rot1_us = 0;
     uint32_t rk1 = 0;
-    derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, sfd1_range.first,
-                       sfd1_range.second, scratch, rot1_us, rk1);
+    derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, rot1_lo, rot1_hi,
+                       scratch, rot1_us, rk1);
     res.cfo.rotate_us = rot1_us;
     res.cfo.rotation_kernel = rk1;
     res.stage_cfo_rotated_samples +=
-        (sfd1_range.second > sfd1_range.first ? (sfd1_range.second - sfd1_range.first) : 0);
+        (rot1_hi > rot1_lo ? (rot1_hi - rot1_lo) : 0);
     ++res.stage_cfo_rotation_passes;
     lap(res.stage_cfo_us);
     res.stage_cfo_fit_us += res.cfo.fit_us;
@@ -3777,6 +3893,9 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             if (cfo_fit_ok) {
                 res.cfo = tail_cfo;
                 res.cfo.skipped_peaks += tail_first;
+                res.cfo_refit_hz = tail_cfo.cfo_hz;
+                res.cfo_refit_peaks = static_cast<uint32_t>(tail_cfo.peaks_used);
+                res.cfo_refit_fit_us = tail_cfo.fit_us;
             }
             res.stage_cfo_fit_us += res.cfo.fit_us;
         }
@@ -3793,7 +3912,6 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             n, cfo_timing, full_repetitions, sfd_len, sym);
         const size_t pre = profile.cir_pre_samples;
         const size_t post = profile.cir_post_samples;
-        const size_t tap_count = pre + post;
         const size_t first_rep = profile.cir_skip_initial_repetitions;
         const size_t rep_count = (profile.cir_repetitions > 0)
             ? std::min(profile.cir_repetitions,
@@ -3824,11 +3942,12 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             sec_lo = static_cast<size_t>(std::max<int64_t>(0, static_cast<int64_t>(final_sfd_range.first)));
             sec_hi = static_cast<size_t>(std::min<int64_t>(static_cast<int64_t>(n), static_cast<int64_t>(final_sfd_range.second)));
         } else if (on_demand && is_integer_grid && integer_grid_ok) {
-            // Second rotation covers final SFD, CIR, phase estimation, and through PHR.
-            // initial_chip_budget(profile) covers SYNC alignment, NS-SFD, and the 21 PHR symbols.
-            const size_t prefix_budget = rxopt::initial_chip_budget(profile);
-            const int64_t spc_i = 2;
-            const int64_t chip_start = start + static_cast<int64_t>(post) - 1;
+            // Second rotation covers the final SFD search, the CIR window, the
+            // phase estimation and the soft-chip prefix / fused PHR reads.
+            // `required_derotated_hi` bounds the real requirement (see its
+            // definition above): using the legacy 40-PHR-head budget here
+            // derotated ~35k samples past the payload start, which the payload
+            // pass then derotated a second time with the same CFO.
             const bool skip_sync_fir =
                 profile.rx_fused_phr_cmf && profile.rx_fused_payload_cmf;
 
@@ -3838,20 +3957,56 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
             req_lo = std::min(req_lo, static_cast<int64_t>(final_sfd_range.first));
             sec_lo = static_cast<size_t>(std::max<int64_t>(0, req_lo));
 
-            int64_t req_hi = chip_start +
-                static_cast<int64_t>(prefix_budget) * spc_i +
-                static_cast<int64_t>(tap_count) + 128;
-            req_hi = std::max(req_hi, static_cast<int64_t>(final_sfd_range.second));
+            const int64_t req_hi =
+                required_derotated_hi(start, final_sfd_range.second);
             sec_hi = static_cast<size_t>(
                 std::min<int64_t>(static_cast<int64_t>(n), req_hi));
         }
 
         uint64_t rot2_us = 0;
         uint32_t rk2 = 0;
+        // ---- Single-pass rotation decision ---------------------------------
+        // The second rotation exists only because the SFD-anchored refit moves
+        // the estimate.  When the Stage-2 estimate is good enough, the pass-1
+        // rotation (already widened to the predicted union range) is the only
+        // derotation the packet needs.  Every condition below is a hard
+        // requirement; any miss keeps the legacy refit + second rotation.
+        const uint64_t refit_span =
+            (sec_hi > sec_lo) ? static_cast<uint64_t>(sec_hi - sec_lo) : 0;
+        const double refit_delta_hz = res.cfo.cfo_hz - stage2_cfo.cfo_hz;
+        const double refit_drift_rad = std::abs(
+            2.0 * M_PI * refit_delta_hz *
+            static_cast<double>(refit_span) / profile.sample_rate);
+        res.cfo_refit_span_samples = refit_span;
+        res.cfo_refit_phase_drift_rad = refit_drift_rad;
+        bool want_skip = false;
+        uint32_t skip_action = 0;
+        if (profile.cfo_refit_mode == 2) {
+            want_skip = true;
+            skip_action = 2;
+        } else if (profile.cfo_refit_mode == 1) {
+            want_skip =
+                stage2_cfo.peaks_used >= profile.cfo_refit_min_peaks &&
+                refit_drift_rad <= profile.cfo_refit_skip_rad;
+            skip_action = 1;
+        }
+        const bool union_covers =
+            union_ok && sec_lo >= union_lo && sec_hi <= union_hi;
+        if (want_skip && union_covers) {
+            // Keep the Stage-2 estimate: pass 1 already applied it to the whole
+            // predicted span, which provably contains [sec_lo, sec_hi).
+            res.cfo = stage2_cfo;
+            res.cfo_refit_action = skip_action;
+            sec_derotated_hi = union_hi;
+            return true;
+        }
+        if (profile.cfo_refit_mode != 0)
+            res.cfo_refit_action = 3; // requested skip, fell back (fail-closed)
         derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, sec_lo, sec_hi,
                            scratch, rot2_us, rk2);
         res.cfo.rotate_us = rot2_us;
         res.cfo.rotation_kernel = rk2;
+        res.cfo_refit_rotate_us = rot2_us;
         res.stage_cfo_rotate_us += rot2_us;
         res.stage_cfo_rotation_kernels |= (rk2 ? 2u : 0u);
         res.stage_cfo_rotated_samples += (sec_hi > sec_lo ? (sec_hi - sec_lo) : 0);

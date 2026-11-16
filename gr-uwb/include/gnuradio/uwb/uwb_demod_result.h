@@ -328,6 +328,26 @@ struct DemodResult {
     uint64_t stage_sfd_cfo_refit_us = 0;
     uint64_t stage_sfd_final_us = 0;
     uint64_t stage_sfd_anchor_other_us = 0;
+    // SFD-anchored CFO refit diagnostics (read-only).  The demodulator fits the
+    // carrier offset twice; these fields publish both estimates and the exact
+    // span the second rotation covered, so the "is the second pass redundant?"
+    // question can be answered from the log instead of from a model.
+    //   cfo_initial_hz   Stage-2 fit over the Stage-1 SYNC peak train
+    //   cfo_refit_hz     SFD-anchored 40-SYNC tail refit (0 when not run)
+    //   cfo_refit_span_samples  sec_hi - sec_lo of the second rotation
+    //   cfo_refit_rotate_us     second rotation only (child of st_sfd)
+    //   cfo_refit_phase_drift_rad  |2*pi*(refit-initial)*span/fs|
+    //   cfo_refit_action  0=legacy refit+rotate, 1=auto skip, 2=forced skip,
+    //                     3=requested skip but fell back to the legacy path
+    double cfo_initial_hz = 0.0;
+    double cfo_refit_hz = 0.0;
+    uint32_t cfo_initial_peaks = 0;
+    uint32_t cfo_refit_peaks = 0;
+    uint64_t cfo_refit_span_samples = 0;
+    uint64_t cfo_refit_rotate_us = 0;
+    uint64_t cfo_refit_fit_us = 0;
+    double cfo_refit_phase_drift_rad = 0.0;
+    uint32_t cfo_refit_action = 0;
     // Bootstrap preamble prediction vs final CFO-aligned SFD coordinates.
     // Both are absolute after demodulate_one() rebases the cropped PDU.
     int64_t sfd_initial_predicted_sample = -1;

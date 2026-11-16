@@ -122,6 +122,12 @@ struct Options {
     // and fell back to the full stream, costing +7.3% demod for nothing.
     std::string ondemand = "auto";
     bool ondemand_resolved = false; // set from --ondemand/--fused in main
+    // SFD-anchored CFO refit policy: legacy | auto | skip.  See
+    // Qm35825Profile::cfo_refit_mode.  Default legacy keeps the pre-existing
+    // two-pass behaviour bit-identical.
+    std::string cfo_refit = "legacy";
+    double cfo_refit_skip_rad = 0.10;
+    size_t cfo_refit_min_peaks = 64;
     double timed_lead_us = 300.0;
     double timed_t0_ms = 0.0;
     size_t timed_lookahead = 4, timed_alignment = 4;
@@ -309,6 +315,21 @@ struct Reporter {
                  << " sfd_final=" << r->stage_sfd_final_us
                  << " sfd_other=" << r->stage_sfd_anchor_other_us
                  << " tail_fb=" << r->stage_tail_retrack_fallbacks
+                 // SFD-anchored CFO refit diagnostics: the two estimates, the
+                 // span the second rotation covered, and why it was skipped.
+                 // cfo_act: 0=legacy refit+rotate, 1=auto skip, 2=forced skip,
+                 //          3=requested skip but fell back.
+                 << std::fixed << std::setprecision(1)
+                 << " cfo_init_hz=" << r->cfo_initial_hz
+                 << " cfo_refit_hz=" << r->cfo_refit_hz
+                 << " cfo_init_pk=" << r->cfo_initial_peaks
+                 << " cfo_refit_pk=" << r->cfo_refit_peaks
+                 << " cfo_refit_span=" << r->cfo_refit_span_samples
+                 << " cfo_rot2_us=" << r->cfo_refit_rotate_us
+                 << " cfo_drift_rad=" << r->cfo_refit_phase_drift_rad
+                 << " cfo_rot_passes=" << r->stage_cfo_rotation_passes
+                 << " cfo_rot_samples=" << r->stage_cfo_rotated_samples
+                 << " cfo_act=" << r->cfo_refit_action
                  << " sfd_win=" << r->sfd.search_windows
                  << " sfd_coarse=" << r->sfd.coarse_correlations
                  << " sfd_fine=" << r->sfd.fine_correlations
@@ -466,6 +487,10 @@ struct Workers {
                         acq.rx_fused_payload_cmf = o.fused;
                         acq.rx_fused_phr_cmf = o.fused;
                         acq.fused_gate_ppm = o.fused_gate_ppm;
+                        acq.cfo_refit_mode = (o.cfo_refit == "auto") ? 1
+                                           : (o.cfo_refit == "skip") ? 2 : 0;
+                        acq.cfo_refit_skip_rad = o.cfo_refit_skip_rad;
+                        acq.cfo_refit_min_peaks = o.cfo_refit_min_peaks;
                         // Blind sparse autocorrelation seeds can precede or
                         // follow the true first SYNC by several symbols.
                         acq.timing_search_margin = 131072;
@@ -895,6 +920,12 @@ try {
                 "--fused on|off (fused payload+PHR CMF, default on)\n"
                 "--fused-gate-ppm 6.468 (integer chip-grid admission; ceiling = 1 sample of drift)\n"
                 "--ondemand auto|on|off (on-demand soft-chip prefix, default auto = follow --fused)\n"
+                "--cfo-refit legacy|auto|skip (SFD-anchored CFO refit + second full-frame\n"
+                "  derotation; default legacy = always.  auto keeps the Stage-2 estimate\n"
+                "  when the two fits differ by <= --cfo-refit-skip-rad of accumulated\n"
+                "  phase and the single-pass range covers the packet; skip forces it)\n"
+                "--cfo-refit-skip-rad 0.10 (auto threshold, rad over the rotated span)\n"
+                "--cfo-refit-min-peaks 64 (auto: minimum Stage-2 peaks)\n"
                 "--timed-lead-us 300 --timed-lookahead 4 --timed-alignment 4\n"
                 "--timed-t0-ms 0 (first expected target time; timed_burst has no blind acquisition)\n"
                 "--taps eq16|quality|eq32|realtime (resampler Hpad 16|48|32|24, default eq16)\n"
@@ -932,6 +963,9 @@ try {
         else if (key=="--fused") o.fused=(value()!="off");
         else if (key=="--fused-gate-ppm") o.fused_gate_ppm=std::stod(value());
         else if (key=="--ondemand") o.ondemand=value();
+        else if (key=="--cfo-refit") o.cfo_refit=value();
+        else if (key=="--cfo-refit-skip-rad") o.cfo_refit_skip_rad=std::stod(value());
+        else if (key=="--cfo-refit-min-peaks") o.cfo_refit_min_peaks=std::stoul(value());
         else if (key=="--timed-lead-us") o.timed_lead_us=std::stod(value());
         else if (key=="--timed-lookahead") o.timed_lookahead=std::stoul(value());
         else if (key=="--timed-alignment") o.timed_alignment=std::stoul(value());
@@ -957,6 +991,10 @@ try {
         throw std::runtime_error("invalid --tone-period-ms/--tone-training-ms");
     if (o.ondemand!="auto" && o.ondemand!="on" && o.ondemand!="off")
         throw std::runtime_error("--ondemand must be auto, on or off");
+    if (o.cfo_refit!="legacy" && o.cfo_refit!="auto" && o.cfo_refit!="skip")
+        throw std::runtime_error("--cfo-refit must be legacy, auto or skip");
+    if (!(o.cfo_refit_skip_rad > 0.0) || !std::isfinite(o.cfo_refit_skip_rad))
+        throw std::runtime_error("--cfo-refit-skip-rad must be finite and > 0");
     // The gate is a drift budget: above the physical ceiling (1 sample over the
     // 127 B payload = 6.5 ppm) the integer grid cannot stay on the correlation
     // peak, so accepting it would produce silently wrong soft chips.
