@@ -349,6 +349,16 @@ struct Reporter {
                  << " cfo_drift_rad=" << r->cfo_refit_phase_drift_rad
                  << " cfo_rot_passes=" << r->stage_cfo_rotation_passes
                  << " cfo_rot_samples=" << r->stage_cfo_rotated_samples
+                 // In-situ cost of the derotation kernel itself: total rotation
+                 // microseconds over all passes divided by the samples rotated.
+                 // Diagnostic only (no logic depends on it); it is the number to
+                 // compare when the kernel implementation changes.
+                 << std::setprecision(3)
+                 << " cfo_rot_ns_per_sample="
+                 << (r->stage_cfo_rotated_samples > 0
+                         ? 1000.0 * static_cast<double>(r->stage_cfo_rotate_us) /
+                               static_cast<double>(r->stage_cfo_rotated_samples)
+                         : 0.0)
                  << " cfo_act=" << r->cfo_refit_action
                  << " sfd_win=" << r->sfd.search_windows
                  << " sfd_coarse=" << r->sfd.coarse_correlations
