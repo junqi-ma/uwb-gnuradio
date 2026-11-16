@@ -1131,6 +1131,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
             // Full-rate single pass using the 8-lag AVX-512 kernel: avoids
             // stride-8 peak-straddling misses on narrow SFD correlation peaks
             // while eliminating the second window-power initialization.
+            scratch.metric.resize(j_end - j_lo + 1);
             for (size_t j = j_lo; j <= j_end;) {
                 if (j + 7 <= j_end) {
                     std::complex<float> acc8[8];
@@ -1145,6 +1146,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
                         ++out.coarse_correlations;
                         const float metric =
                             std::norm(acc8[m] * sfd_scale) / (pwr + 1e-12f);
+                        scratch.metric[cur_j - j_lo] = metric;
                         if (metric > window_best) {
                             window_best = metric;
                             window_best_j = cur_j;
@@ -1162,6 +1164,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
                             sym) *
                         sfd_scale;
                     const float m = std::norm(acc) / (pwr + 1e-12f);
+                    scratch.metric[j - j_lo] = m;
                     if (m > window_best) {
                         window_best = m;
                         window_best_j = j;
@@ -1210,28 +1213,45 @@ inline bool stage_sfd(const std::complex<float>* rx,
                 }
             }
         }
+        bool window_passed = (window_best >= profile.sfd_detection_threshold);
+        if (!window_passed && use_real_sfd_fast && window_best >= 0.08f &&
+            scratch.metric.size() == (j_end - j_lo + 1)) {
+            const size_t best_off = window_best_j - j_lo;
+            double bg_sum = 0.0;
+            size_t bg_cnt = 0;
+            for (size_t idx = 0; idx < scratch.metric.size(); ++idx) {
+                if (idx + 12 < best_off || idx > best_off + 12) {
+                    bg_sum += static_cast<double>(scratch.metric[idx]);
+                    ++bg_cnt;
+                }
+            }
+            if (bg_cnt >= 16) {
+                const double bg_mean = bg_sum / static_cast<double>(bg_cnt);
+                const double par =
+                    static_cast<double>(window_best) / (bg_mean + 1e-12);
+                if (par >= 25.0)
+                    window_passed = true;
+            }
+        }
         if (window_best > best) {
             best = window_best;
             best_j = window_best_j;
         }
-        if (out.first_threshold_backtrack_symbols < 0 &&
-            window_best >= profile.sfd_detection_threshold) {
+        if (out.first_threshold_backtrack_symbols < 0 && window_passed) {
             out.first_threshold_backtrack_symbols = backtrack_symbols;
         }
-        return window_best >= profile.sfd_detection_threshold;
+        return window_passed;
     };
 
-    scan_window(expected, kSfdNarrowHalf, 0);
-    for (int k = 1; k <= kSfdSymbolOffsets &&
-                    best < profile.sfd_detection_threshold;
-         ++k) {
+    bool sfd_passed = scan_window(expected, kSfdNarrowHalf, 0);
+    for (int k = 1; k <= kSfdSymbolOffsets && !sfd_passed; ++k) {
         const int64_t step = static_cast<int64_t>(k) * static_cast<int64_t>(sym);
-        scan_window(expected + step, kSfdNarrowHalf, k);
-        if (best >= profile.sfd_detection_threshold)
+        sfd_passed = scan_window(expected + step, kSfdNarrowHalf, k);
+        if (sfd_passed)
             break;
-        scan_window(expected - step, kSfdNarrowHalf, k);
+        sfd_passed = scan_window(expected - step, kSfdNarrowHalf, k);
     }
-    if (best < profile.sfd_detection_threshold)
+    if (!sfd_passed)
         return false;
 
     out.ok = true;
