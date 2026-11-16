@@ -22,6 +22,26 @@ runs Python QA. `ENABLE_UHD_BACKEND=ON` requires UHD; `OFF` builds without the
 hardware backend, while `AUTO` (default) detects it. No GNU Radio/PMT dependency
 is needed for this mode.
 
+## SIMD backend
+
+`-DUWB_SIMD=AUTO|AVX2|AVX512|SCALAR` (default `AUTO`) selects the compile-time ISA
+for the hand-written DSP kernels. `AUTO` reads `/proc/cpuinfo` on a native Linux
+build and refuses to guess when cross-compiling. `AVX2` passes `-mavx2 -mfma`
+explicitly and never `-march=native`; `AVX512` adds a separate kernel translation
+unit built with `avx512f/bw/dq/vl` function target attributes while the rest of
+the program stays on the AVX2/FMA baseline; `SCALAR` disables the self-written
+SIMD kernels (VOLK's own runtime dispatch is not affected). Non-`SCALAR` binaries
+carry a target-CPU requirement, and `gr::uwb::core::simd::require_simd_backend()`
+refuses an unsupported machine with a clear error instead of SIGILL. AVX-512
+kernels are bit-identical to AVX2 and QA enforces it. Per-`H_pad` default kernels
+and configure examples are in the
+[build guide](../docs/原生接收与GNU_Radio构建使用说明.md).
+
+The generated `uwb_simd_config.h` is the single source of truth for the backend,
+so every translation unit (including the header-only resampler core) agrees on
+it. `UWB_KERNEL_BACKEND` (for example `sync=avx2,cir=avx512`) overrides one
+kernel group at a time for QA and benchmarks; it is not a production PHY switch.
+
 ## GNU Radio adapter build
 
 ```bash

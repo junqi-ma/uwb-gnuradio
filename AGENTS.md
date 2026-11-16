@@ -16,9 +16,53 @@
   原生 53/53、GR 87/87。动态 locked 逐包一致性限制仍保留。
 - 主线连续 UHD 已有上板记录；本轮拆库未上板。timed 实际 UHD 命令仍未实现，
   必须保持无 replay 时 fail-closed。原生消费者须重新链接新库，不保证旧二进制 ABI。
+- 编译期 ISA 由 `UWB_SIMD=AUTO|AVX2|AVX512|SCALAR` 统一决定（默认 AUTO，本机
+  Zen 5 解析为 `avx512`）；`-march=native` 已从构建中移除。AVX-512 只出现在独立
+  TU（函数 target attribute），输出与 AVX2 逐位一致并有 QA 守护；默认只对重采样
+  `H_pad 24/48` 与 demod/SIC 的 `sync` 组启用。
 
 以下为按阶段保留的历史快照；其中旧分支名、构建路径、未提交/未上板、默认参数和
 测试计数均以对应报告日期与范围解释。后文开发规则继续适用。
+
+---
+
+# AVX-512 内核合并入主分支（2026-11-16）
+
+已把 `/tmp/uwb-gnuradio-avx512`（`perf/avx512-kernels`）的两轮 AVX-512 工作
+合回 `feature/sic-research`：`ef247fa`（编译期 ISA 选择 + 65/48、65/32 重采样）、
+`d5598d9`（demod/SIC 内核组 + 宽内核），合并提交 `9fc9c49`。规划/报告见
+`docs/performance/AVX512内核与编译期CPU选择开发报告_2026-11-16.md` 与
+`docs/performance/解调与SIC_AVX512内核扩展开发报告_2026-11-16.md`。
+- **构建开关**：`UWB_SIMD=AUTO|AVX2|AVX512|SCALAR`（默认 AUTO）取代散落的
+  `-march=native`；生成的 `uwb_simd_config.h` 是唯一真源，header-only 内核不会
+  在不同 TU 编成不同后端。`AUTO` 原生 Linux 读 `/proc/cpuinfo`，交叉编译拒绝猜测；
+  基线 ISA 的探针对象在任何宽指令可达之前就能拒绝不支持的机器（不是 SIGILL）。
+- **逐位一致**：AVX-512 的 lane 映射、FMA 顺序、累加树与 AVX2 完全相同，输出是
+  逐位一致而非容差一致，QA 对每个已发布 `H_pad` 强制该性质；`-ffp-contract=off`
+  未改，未加 `-ffast-math`，既有 QA 容差未放宽。
+- **默认只开两处**：重采样 `H_pad 24/48`（ABBA core +9.40/+9.43% 与
+  +20.11/+21.62%），demod/SIC 的 `sync` 组（同二进制 A/B：整包 −6.13/−5.77/−5.62%、
+  preamble −7.68/−8.08/−7.32%，`timing` −25.21%，`comm_rx` −8.14%）。
+  `H_pad 16/32`（+2.22/+2.87%、+6.21/+4.39%）、`cfo`/`cir`/`sic_*` 组保持 AVX2；
+  FC32 `process()` 默认也保持 AVX2（逐宏块调用曾退化 ~8%）。
+- **被否决的候选**：融合 CMF 52 点复点积 +29%、38 抽头 CIR FIR +94%、
+  20 抽头 SIC 脉冲累加 +2%（store-forwarding 限制）。本机 Zen 5 的 512 位
+  `moveldup/movehdup/permute_ps` 半速，所以复乘减半指令数无收益。
+- **故意没动**：`timing` 的 `pw` 与 `sfd` 的 `pwr` 串行浮点功率求和。向量化会改
+  归一化分母、可能翻转近等峰 tie-break，需先立误差合同（实测 365.6 ns → 45.9 ns，
+  7.97×，两项合计约 65 µs ≈ 整包 18%）。
+- **等价性**：SIC dump `sic_out_preamble.bin` / `sic_out_fullpacket.bin` 各
+  1,084,544 B 在 A/D 之间逐字节相同，抑制比 63.29/63.33 dB 与 `OUTPUT_L2` 不变。
+- **合并后主路径复核**：`UWB_SIMD=AVX512` 与 `AVX2` 两个 in-tree 构建各
+  **54 项 CTest 全部通过**（`uwb_qa_native_install_consumer` 按设计跳过）；
+  AVX-512 构建 `libuwb_core.a` 有 1770 条 `zmm`、AVX2 构建 0 条；
+  `uwb_kernel_backend.cc` / `uwb_simd_runtime.cc` 两个基线 TU 均 0 条。
+  `UWB_SIMD=AUTO` 在本机解析为 `avx512`。
+- **未验证**：上板/UHD 实机、paced 到达、MATLAB 交叉验证、8 worker、负载下 P99、
+  多径/AWGN/ISR、CFO 扫频与 SFO。本轮只做软件/回放验收。
+- 分支带入的旧文档快照（`AGENTS.md`、`README.md`、`docs/README.md`、
+  `gr-uwb/README.md`、`tools/rx/README.md`、`开发状态.md`、`uwb_dw3000_live.cc`）
+  **未**随合并进入主分支，主线保留自己更新的版本。
 
 ---
 
