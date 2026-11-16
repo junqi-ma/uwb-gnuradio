@@ -259,6 +259,213 @@ BOOST_AUTO_TEST_CASE(test_demod_core_tail_seed_refine_radius_fallback)
     BOOST_CHECK_EQUAL(legacy.seed_refine_narrow_attempts, 0u);
 }
 
+BOOST_AUTO_TEST_CASE(test_locked_grid_timing_matches_legacy_train)
+{
+    // LockedBounded grid tracking replaces the per-SYNC +/-8 search with a
+    // sparse anchor fit plus one correlation per SYNC.  On a clean train it
+    // must reproduce the legacy peak train and the fitted period, because CFO
+    // (peak_corr phases) and CIR (measured_period) are downstream consumers.
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+
+    auto prof = Qm35825Profile::Default();
+    prof.sync_strategy = SyncStrategy::LockedBounded;
+    prof.locked_roi_samples = 256;
+    prof.locked_inner_symbols = 4;
+    prof.locked_allow_backtrack = false;
+
+    core::DemodScratch scratch_a;
+    scratch_a.reserve(iq.size());
+    prof.locked_grid_timing = false;
+    TimingResult legacy;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984,
+                                     legacy, scratch_a));
+    BOOST_CHECK_EQUAL(legacy.grid_anchor_hits, 0u);
+    BOOST_CHECK_EQUAL(legacy.grid_single_points, 0u);
+
+    core::DemodScratch scratch_b;
+    scratch_b.reserve(iq.size());
+    prof.locked_grid_timing = true;
+    TimingResult grid;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984,
+                                     grid, scratch_b));
+    // The grid path ran (no fallback) and used real anchor searches.
+    BOOST_CHECK_EQUAL(grid.grid_fallbacks, 0u);
+    BOOST_CHECK_GE(grid.grid_anchor_hits, 8u);
+    BOOST_CHECK_EQUAL(grid.grid_single_points, uint32_t(prof.preamble_repetitions));
+    BOOST_CHECK_EQUAL(grid.grid_single_valid, uint32_t(prof.preamble_repetitions));
+    // A clean train never needs the failure-path tail probe.
+    BOOST_CHECK_EQUAL(grid.tail_probe_attempts, 0u);
+    BOOST_CHECK_EQUAL(grid.tail_probe_hits, 0u);
+    // Same train, same origin, same period as the legacy per-SYNC search.
+    BOOST_CHECK_EQUAL(grid.detected_peaks, legacy.detected_peaks);
+    BOOST_CHECK_EQUAL(grid.detected_peaks, prof.preamble_repetitions);
+    BOOST_CHECK_SMALL(std::abs(grid.measured_period - legacy.measured_period),
+                      0.02);
+    BOOST_CHECK_SMALL(std::abs(static_cast<double>(grid.preamble_start_sample) -
+                               static_cast<double>(legacy.preamble_start_sample)),
+                      2.0);
+    // Locked contract still holds: no backtrack, no legacy scan.
+    BOOST_CHECK_EQUAL(grid.backtrack_symbols, 0u);
+    BOOST_CHECK_EQUAL(grid.bounded_legacy_scans, 0u);
+    BOOST_CHECK_EQUAL(grid.bounded_success, 1u);
+
+    // End to end: the grid path must still decode the golden packet, including
+    // the SFD-anchored tail re-track (which runs stage_timing a second time on
+    // the 40-SYNC tail with the same bounded profile).
+    auto p_legacy = prof;
+    p_legacy.locked_grid_timing = false;
+    p_legacy.sfd_mode = "ieee";
+    auto p_grid = prof;
+    p_grid.locked_grid_timing = true;
+    p_grid.sfd_mode = "ieee";
+    core::DemodScratch s_legacy, s_grid;
+    s_legacy.reserve(iq.size());
+    s_grid.reserve(iq.size());
+    auto r_legacy = core::demodulate_one(iq.data(), iq.size(), p_legacy, 1,
+                                         9984, 0, tmpl, s_legacy);
+    auto r_grid = core::demodulate_one(iq.data(), iq.size(), p_grid, 1, 9984, 0,
+                                       tmpl, s_grid);
+    BOOST_CHECK(r_grid.status == DemodStatus::Success);
+    BOOST_CHECK(r_legacy.status == r_grid.status);
+    BOOST_CHECK(r_grid.payload.bytes == r_legacy.payload.bytes);
+    BOOST_CHECK(r_grid.payload.fcs_pass == r_legacy.payload.fcs_pass);
+    BOOST_CHECK_EQUAL(r_grid.timing.grid_fallbacks, 0u);
+    BOOST_CHECK_SMALL(std::abs(r_grid.timing.measured_period -
+                               r_legacy.timing.measured_period), 0.02);
+    BOOST_CHECK_SMALL(std::abs(r_grid.cfo.cfo_hz - r_legacy.cfo.cfo_hz), 15.0);
+    BOOST_CHECK_SMALL(std::abs(static_cast<double>(r_grid.sfd.sfd_start_sample) -
+                               static_cast<double>(r_legacy.sfd.sfd_start_sample)),
+                      2.0);
+}
+
+BOOST_AUTO_TEST_CASE(test_locked_grid_timing_period_is_measured_not_nominal)
+{
+    // The grid path must MEASURE the period (anchors bootstrap the grid, then a
+    // least-squares fit over every refined peak), never report the nominal 1016
+    // grid: measured_period feeds integer_chip_grid()/spc_ppm and the fused-CMF
+    // admission, so a degenerate constant would silently disable the
+    // Full->Bypass (grid_reject) protection for an untrimmed clock.
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+
+    // Compress the sample clock by 50 ppm: out[n] = in[n*rate] maps a signal
+    // feature at input index m to output index m/rate, so the SYNC period
+    // becomes 1016/rate = 1015.949 samples (drift over 63 symbols is 3.2
+    // samples, inside the +/-8 anchor radius) and the integer chip grid must
+    // be rejected.
+    const double ppm = 50.0;
+    const double rate = 1.0 + ppm * 1e-6;
+    std::vector<gr_complex> stretched;
+    stretched.resize(static_cast<size_t>(
+        std::floor(static_cast<double>(iq.size() - 1) / rate)));
+    for (size_t n = 0; n < stretched.size(); ++n) {
+        const double x = static_cast<double>(n) * rate;
+        const size_t i0 = static_cast<size_t>(x);
+        const double f = x - static_cast<double>(i0);
+        const size_t i1 = std::min(i0 + 1, iq.size() - 1);
+        stretched[n] = iq[i0] * static_cast<float>(1.0 - f) +
+                       iq[i1] * static_cast<float>(f);
+    }
+
+    auto prof = Qm35825Profile::Default();
+    prof.sync_strategy = SyncStrategy::LockedBounded;
+    prof.locked_roi_samples = 256;
+    prof.locked_inner_symbols = 4;
+    prof.locked_grid_timing = true;
+
+    core::DemodScratch scratch;
+    scratch.reserve(stretched.size());
+    TimingResult tr;
+    BOOST_REQUIRE(core::stage_timing(stretched.data(), stretched.size(), prof,
+                                     tmpl, 9984, tr, scratch));
+    BOOST_CHECK_EQUAL(tr.grid_fallbacks, 0u);
+    BOOST_CHECK_GE(tr.grid_anchor_hits, 8u);
+    const double expected = 1016.0 / rate;
+    BOOST_CHECK_SMALL(std::abs(tr.measured_period - expected), 0.05);
+    // Not the nominal grid.
+    BOOST_CHECK_GT(std::abs(tr.measured_period - 1016.0), 0.02);
+    // 50 ppm is far outside the integer chip-grid drift budget, so the fused
+    // path must still be refused (this is the Full->Bypass protection).
+    BOOST_CHECK(!core::integer_chip_grid(tr.measured_period /
+                                         double(kQm35ChipsPerSymbol)));
+}
+
+BOOST_AUTO_TEST_CASE(test_locked_tail_probe_rescues_leading_interference)
+{
+    // A burst interferer can cover only the first few SYNCs while the tail is
+    // clean (5.2 m capture: first_5_max 0.029..0.053, med_tail 0.14..0.20).
+    // The bounded probe must then keep probing sparse tail anchors instead of
+    // declaring a tracking failure, and the rescued origin must still be the
+    // true first SYNC start.
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+    constexpr size_t kStart = 9984;
+    constexpr size_t kSym = kQm35SamplesPerSymbol;
+    constexpr size_t kAtten = 20;
+
+    std::vector<gr_complex> hit = iq;
+    // Replace the leading SYNCs with uncorrelated noise of similar power: the
+    // normalised metric is scale-invariant, so attenuating them would NOT
+    // lower it.  Real burst interference decorrelates the SYNC, which is what
+    // the 5.2 m capture shows (first_5_max 0.029..0.053).
+    std::mt19937 rng(20261116u);
+    std::normal_distribution<float> nd(0.0f, 0.35f);
+    float rms = 0.0f;
+    for (size_t i = 0; i < kSym; ++i)
+        rms += std::norm(iq[kStart + i]);
+    rms = std::sqrt(rms / static_cast<float>(kSym));
+    for (size_t k = 0; k < kAtten; ++k) {
+        const size_t base = kStart + k * kSym;
+        BOOST_REQUIRE_LT(base + kSym, hit.size());
+        for (size_t i = 0; i < kSym; ++i)
+            hit[base + i] = gr_complex(nd(rng), nd(rng)) * rms;
+    }
+
+    auto prof = Qm35825Profile::Default();
+    prof.sync_strategy = SyncStrategy::LockedBounded;
+    prof.locked_roi_samples = 256;
+    prof.locked_inner_symbols = 4;
+    prof.locked_grid_timing = true;
+
+    // Without the tail probe the packet is lost: m = 0..4 are all attenuated.
+    core::DemodScratch scratch_a;
+    scratch_a.reserve(hit.size());
+    prof.locked_tail_probe = false;
+    TimingResult no_tail;
+    BOOST_CHECK(!core::stage_timing(hit.data(), hit.size(), prof, tmpl, kStart,
+                                    no_tail, scratch_a));
+    BOOST_CHECK_EQUAL(no_tail.bounded_failures, 1u);
+    BOOST_CHECK_EQUAL(no_tail.tail_probe_attempts, 0u);
+
+    // With the tail probe the clean tail rescues the packet.
+    core::DemodScratch scratch_b;
+    scratch_b.reserve(hit.size());
+    prof.locked_tail_probe = true;
+    prof.locked_tail_probe_step = 8;
+    prof.locked_tail_probe_confirm = 2;
+    TimingResult res;
+    BOOST_REQUIRE(core::stage_timing(hit.data(), hit.size(), prof, tmpl, kStart,
+                                     res, scratch_b));
+    BOOST_CHECK_EQUAL(res.bounded_failures, 0u);
+    BOOST_CHECK_EQUAL(res.tail_probe_hits, 1u);
+    BOOST_CHECK_GT(res.tail_probe_k, int64_t(kAtten));
+    BOOST_CHECK_GE(res.grid_anchor_hits, 8u);
+    // Attenuated head symbols are below threshold; the clean tail is kept.
+    BOOST_CHECK_GE(res.detected_peaks, prof.preamble_repetitions - kAtten);
+    BOOST_CHECK_LT(res.detected_peaks, prof.preamble_repetitions);
+    // The anchor fit extrapolates back to the true first SYNC start.
+    BOOST_CHECK_SMALL(std::abs(static_cast<double>(res.preamble_start_sample) -
+                               static_cast<double>(kStart)),
+                      4.0);
+    BOOST_CHECK_SMALL(std::abs(res.measured_period - 1016.0), 0.05);
+    BOOST_CHECK_EQUAL(res.backtrack_symbols, 0u);
+    BOOST_CHECK_EQUAL(res.bounded_legacy_scans, 0u);
+}
+
 BOOST_AUTO_TEST_CASE(test_demod_core_rxopt_on_demand_rejects_fractional_grid)
 {
     // The on-demand experiment must not round a fractional SFO chip grid or

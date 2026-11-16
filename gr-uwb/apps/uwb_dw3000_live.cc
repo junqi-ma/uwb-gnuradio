@@ -106,6 +106,9 @@ struct Options {
     size_t holdover = defaults::kHoldoverMissCount;
     size_t reacquire = defaults::kReacquireMissCount;
     size_t locked_roi = 256;
+    // LockedBounded SYNC-train tracking: grid (sparse anchors + single-point
+    // correlation on the fitted grid) or legacy (per-SYNC +/-8 search).
+    std::string locked_timing = "grid";
     size_t post_guard = 8192;
     // Pre-guard used while LOCKED.  The wide 36864 guard exists for the blind
     // autocorrelation seed (Acquisition::scan needs a 36864-sample platform
@@ -288,7 +291,17 @@ struct Reporter {
                  << " bounded_ok=" << r->timing.bounded_success
                  << " bounded_fail=" << r->timing.bounded_failures
                  << " legacy_scans=" << r->timing.bounded_legacy_scans
-                 << " backtrack=" << r->timing.backtrack_symbols;
+                 << " backtrack=" << r->timing.backtrack_symbols
+                 << " grid_anch=" << r->timing.grid_anchor_hits
+                 << " grid_anch_try=" << r->timing.grid_anchor_attempts
+                 << " grid_pts=" << r->timing.grid_single_points
+                 << " grid_valid=" << r->timing.grid_single_valid
+                 << " grid_fb=" << r->timing.grid_fallbacks
+                 << " tail_probe=" << r->timing.tail_probe_attempts
+                 << " tail_hit=" << r->timing.tail_probe_hits
+                 << " tail_k=" << r->timing.tail_probe_k
+                 << std::fixed << std::setprecision(3)
+                 << " tail_best=" << r->timing.tail_probe_best_metric;
         // Per-stage decomposition of the demod.  Parents and children are never
         // summed together; `stage_total_us` is the authoritative total.
         if (r) s << " st_total=" << r->stage_total_us
@@ -532,6 +545,7 @@ struct Workers {
                         locked.sync_strategy = demod::SyncStrategy::LockedBounded;
                         locked.locked_roi_samples = o.locked_roi;
                         locked.locked_allow_backtrack = false;
+                        locked.locked_grid_timing = (o.locked_timing == "grid");
                         locked.timing_search_margin = 0;
                         locked.timing_max_backtrack_symbols = 0;
                         { std::lock_guard<std::mutex> l(mutex); ++ready; cv.notify_all(); }
@@ -952,6 +966,9 @@ try {
                 "--locked-pre-guard N (pre-guard while LOCKED, default 8192; the\n"
                 "  acquire/holdover/reacquire states keep the wide --pre-guard)\n"
                 "--locked-roi N (bounded first-SYNC half-width, default 256)\n"
+                "--locked-timing grid|legacy (LockedBounded SYNC train: sparse anchors +\n"
+                "  single-point correlation on the fitted grid, or the per-SYNC +/-8\n"
+                "  search; default grid.  measured_period always comes from the anchor fit)\n"
                 "--lock-observations 3 --holdover 3 --reacquire 8\n"
                 "--interference on|off (default on)\n"
                 "--tone on|off (fixed-tone cancellation, default on)\n"
@@ -993,6 +1010,7 @@ try {
         else if (key=="--post-guard") o.post_guard=std::stoul(value());
         else if (key=="--locked-pre-guard") o.locked_pre_guard=std::stoul(value());
         else if (key=="--locked-roi") o.locked_roi=std::stoul(value());
+        else if (key=="--locked-timing") o.locked_timing=value();
         else if (key=="--lock-observations") o.lock_observations=std::stoul(value());
         else if (key=="--holdover") o.holdover=std::stoul(value());
         else if (key=="--reacquire") o.reacquire=std::stoul(value());
@@ -1026,6 +1044,8 @@ try {
         throw std::runtime_error("--taps must be quality, eq32, realtime or eq16");
     if (o.sync!="acquire" && o.sync!="locked")
         throw std::runtime_error("--sync must be acquire or locked");
+    if (o.locked_timing!="grid" && o.locked_timing!="legacy")
+        throw std::runtime_error("--locked-timing must be grid or legacy");
     if (!(o.tone_period_ms > 0.0) || !(o.tone_training_ms > 0.0) ||
         o.tone_training_ms >= o.tone_period_ms)
         throw std::runtime_error("invalid --tone-period-ms/--tone-training-ms");
