@@ -107,6 +107,12 @@ struct Options {
     size_t reacquire = defaults::kReacquireMissCount;
     size_t locked_roi = 256;
     size_t post_guard = 8192;
+    // Pre-guard used while LOCKED.  The wide 36864 guard exists for the blind
+    // autocorrelation seed (Acquisition::scan needs a 36864-sample platform
+    // before the true packet start); once the lock predicts the origin the
+    // residual is a few samples, so only the bounded ROI plus the resampler
+    // transient has to fit in front of the packet.  See --locked-pre-guard.
+    size_t locked_pre_guard = 8192;
     bool interference = true;
     bool tone = true;        // fixed-tone cancellation (continuous mode only)
     double tone_period_ms = 20.0;   // model update cadence (diagnostic sweep)
@@ -395,6 +401,7 @@ struct Job {
     int64_t seed = 0;            // absolute native predicted/acquired origin
     int64_t window_start = 0;    // absolute native window origin
     int64_t predicted_rel_work = 0;
+    size_t guard = 0;            // effective pre-guard used to cut this window
     uint64_t slot_index = std::numeric_limits<uint64_t>::max();
     uint64_t generation = 0;
     bool target_slot = false;
@@ -409,6 +416,7 @@ struct PendingSubmit {
     int64_t window_start = 0;
     size_t count = 0;
     int64_t predicted_rel_work = 0;
+    size_t guard = 0;
     uint64_t slot_index = std::numeric_limits<uint64_t>::max();
     uint64_t generation = 0;
     double metric = 0.0;
@@ -568,12 +576,14 @@ struct Workers {
                                         << " gen=" << job.generation
                                         << " pred=" << job.seed
                                         << " win=" << job.window_start
+                                        << " guard=" << job.guard
                                         << " residual=" << obs.residual;
                                 } else if (job.slot_index ==
                                            std::numeric_limits<uint64_t>::max()) {
-                                    tag << "path=acquire";
+                                    tag << "path=acquire guard=" << job.guard;
                                 } else {
                                     tag << "path=interference slot=" << job.slot_index
+                                        << " guard=" << job.guard
                                         << " offset=" << (job.seed - job.window_start);
                                 }
                                 report.result(job.id, job.seed, status_name(r.status), &r,
@@ -628,7 +638,8 @@ struct Workers {
     bool submit(uint64_t id, int64_t window_start, size_t count, int64_t seed,
                 int64_t predicted_rel_work, uint64_t slot_index, uint64_t generation,
                 bool target_slot, bool feeds_lock,
-                const std::vector<std::complex<int16_t>>& ring) {
+                const std::vector<std::complex<int16_t>>& ring,
+                size_t guard = 0) {
         size_t slot;
         { std::lock_guard<std::mutex> l(mutex);
           if (free.empty()) return false;
@@ -637,6 +648,7 @@ struct Workers {
         job.id = id; job.seed = seed; job.window_start = window_start;
         job.count = std::min(count, window);
         job.predicted_rel_work = predicted_rel_work;
+        job.guard = guard;
         job.slot_index = slot_index; job.generation = generation;
         job.target_slot = target_slot; job.feeds_lock = feeds_lock;
         job.ready = Clock::now();
@@ -652,7 +664,7 @@ struct Workers {
     bool submit_buffer(uint64_t id, int64_t window_start, const std::complex<int16_t>* src,
                        size_t count, int64_t seed, int64_t predicted_rel_work,
                        uint64_t slot_index, uint64_t generation, bool target_slot,
-                       bool feeds_lock) {
+                       bool feeds_lock, size_t guard = 0) {
         size_t slot;
         { std::lock_guard<std::mutex> l(mutex);
           if (free.empty()) return false;
@@ -661,6 +673,7 @@ struct Workers {
         job.id = id; job.seed = seed; job.window_start = window_start;
         job.count = std::min(count, window);
         job.predicted_rel_work = predicted_rel_work;
+        job.guard = guard;
         job.slot_index = slot_index; job.generation = generation;
         job.target_slot = target_slot; job.feeds_lock = feeds_lock;
         job.ready = Clock::now();
@@ -887,6 +900,8 @@ try {
                 "--mode continuous|timed (default continuous; timed needs --replay)\n"
                 "--sync acquire|locked (default acquire; locked uses a bounded target ROI)\n"
                 "--period-ms 5 --pre-guard N --post-guard N (native samples)\n"
+                "--locked-pre-guard N (pre-guard while LOCKED, default 8192; the\n"
+                "  acquire/holdover/reacquire states keep the wide --pre-guard)\n"
                 "--locked-roi N (bounded first-SYNC half-width, default 256)\n"
                 "--lock-observations 3 --holdover 3 --reacquire 8\n"
                 "--interference on|off (default on)\n"
@@ -921,6 +936,7 @@ try {
         else if (key=="--sync") o.sync=value();
         else if (key=="--period-ms") o.period_ms=std::stod(value());
         else if (key=="--post-guard") o.post_guard=std::stoul(value());
+        else if (key=="--locked-pre-guard") o.locked_pre_guard=std::stoul(value());
         else if (key=="--locked-roi") o.locked_roi=std::stoul(value());
         else if (key=="--lock-observations") o.lock_observations=std::stoul(value());
         else if (key=="--holdover") o.holdover=std::stoul(value());
@@ -972,6 +988,8 @@ try {
         o.reacquire<=o.holdover || o.timed_lookahead==0 || o.timed_alignment==0 ||
         o.timed_t0_ms<0.0 || !std::isfinite(o.timed_t0_ms))
         throw std::runtime_error("invalid lock/timed configuration");
+    if (o.locked_pre_guard == 0)
+        throw std::runtime_error("--locked-pre-guard must be > 0");
     // The timed UHD command path is NOT enabled: it must be validated on a
     // board before it can be claimed.  Failing closed here is deliberate.
     if (o.mode=="timed" && o.replay.empty())
@@ -1002,6 +1020,26 @@ try {
     const size_t post_guard = o.post_guard;
     if (pre_guard + native_span + post_guard > window)
         throw std::runtime_error("target window geometry exceeds the job buffer");
+    // The LOCKED guard only has to hold the bounded first-SYNC ROI plus the
+    // resampler transient in front of the packet.  Below that floor the cut
+    // window would start inside the search region, so refuse it instead of
+    // silently truncating the ROI.
+    const size_t locked_roi_native =
+        size_t(std::llround(double(o.locked_roi) * 48.0 / 65.0));
+    const size_t resampler_delay_native = size_t(
+        std::llround(0.5 * double(taps.size() - 1) * 48.0 / 65.0));
+    const size_t locked_pre_guard_min =
+        locked_roi_native + resampler_delay_native + 1024;
+    if (o.locked_pre_guard < locked_pre_guard_min)
+        throw std::runtime_error(
+            "--locked-pre-guard must be >= " +
+            std::to_string(locked_pre_guard_min) +
+            " (locked ROI " + std::to_string(locked_roi_native) +
+            " + resampler group delay " + std::to_string(resampler_delay_native) +
+            " + 1024 margin native samples)");
+    if (o.locked_pre_guard + native_span + post_guard > window)
+        throw std::runtime_error(
+            "locked target window geometry exceeds the job buffer");
 
     core::TargetLockConfig lock_cfg;
     lock_cfg.sample_rate = fs;
@@ -1018,9 +1056,11 @@ try {
         /*phr_span=*/size_t(std::llround(21.0 * 512.0 * 2.0 * 48.0 / 65.0)),
         /*payload_span=*/size_t(std::llround(1208.0 * 64.0 * 2.0 * 48.0 / 65.0)),
         /*pulse_halo=*/1024, pre_guard, post_guard);
+    // The job buffer is allocated once for the widest geometry; a runtime
+    // pre-guard update may only move the window inside that budget.
+    lock_cfg.window_capacity = window;
     core::TargetLockCore lock(lock_cfg);
     core::TargetLockState last_state = lock.state();
-
     Reporter report(o.summary, o.print == "packets");
     report.info("START mode="+o.mode+" sync="+o.sync+
         " channel="+o.channel+" antenna="+o.antenna+" cir="+o.cir+
@@ -1029,12 +1069,40 @@ try {
         " taps="+o.taps+" taps_n="+std::to_string(taps.size())+
         " print="+o.print+
         " pre_guard="+std::to_string(pre_guard)+
+        " locked_pre_guard="+std::to_string(o.locked_pre_guard)+
         " capture="+std::to_string(lock_cfg.geometry.capture)+
         " post_guard="+std::to_string(post_guard)+
         " window_capacity="+std::to_string(lock_cfg.geometry.capacity())+
+        " locked_window_capacity="+
+            std::to_string(o.locked_pre_guard+lock_cfg.geometry.capture+post_guard)+
         " interference="+std::string(o.interference?"on":"off")+
         " fused="+std::string(o.fused?"on":"off")+
         " ondemand="+std::string(o.ondemand_resolved?"on":"off"));
+    // Effective pre-guard for the next cut window.  It follows the lock state:
+    // the blind acquisition platform needs the wide guard, the locked
+    // predictor only needs the bounded ROI.  Every window cut (target,
+    // autocorrelation candidate, timed blind grid) must use this value so the
+    // window start and the reported plan can never disagree.
+    size_t cur_pre_guard = lock.pre_guard();
+    const auto sync_pre_guard = [&]() {
+        const size_t want = (lock.state() == core::TargetLockState::Locked)
+                                ? o.locked_pre_guard
+                                : pre_guard;
+        if (want == cur_pre_guard)
+            return;
+        if (!lock.set_pre_guard(want))
+            throw std::runtime_error(
+                "runtime pre_guard update to " + std::to_string(want) +
+                " rejected: pre_guard+capture+post_guard exceeds the job buffer "
+                "(" + std::to_string(window) + ")");
+        cur_pre_guard = want;
+        std::ostringstream s;
+        s << "PRE_GUARD state=" << core::target_lock_state_name(lock.state())
+          << " pre_guard=" << want
+          << " window_capacity="
+          << (want + lock_cfg.geometry.capture + post_guard);
+        report.info(s.str());
+    };
     Workers workers(report,lock,o,taps,tmpl); // All worker allocations before streaming.
 
     const auto emit_lock = [&](const char* why) {
@@ -1148,6 +1216,7 @@ try {
         int64_t window_start;
         size_t count;
         int64_t predicted_origin;
+        size_t guard;
     };
     std::deque<TimedPending> timed_pending;
     int64_t timed_cursor = std::llround(o.timed_t0_ms * 1e-3 * fs);
@@ -1174,6 +1243,7 @@ try {
                     tp.window_start = plan.window_start;
                     tp.count = count;
                     tp.predicted_origin = plan.predicted_origin;
+                    tp.guard = plan.pre_guard;
                     timed_pending.push_back(tp);
                     lock.commit_plan(plan);
                     ++target_slots;
@@ -1186,7 +1256,7 @@ try {
             } else {
                 // Blind grid: the packet is expected at `timed_cursor`, so the
                 // window starts one pre_guard earlier.
-                const int64_t ws = timed_cursor - int64_t(pre_guard);
+                const int64_t ws = timed_cursor - int64_t(cur_pre_guard);
                 if (timed->queue_window(ws < 0 ? 0 : ws, window,
                                         lock.generation())) {
                     TimedPending tp;
@@ -1194,8 +1264,9 @@ try {
                     tp.generation = lock.generation();
                     tp.window_start = ws < 0 ? 0 : ws;
                     tp.count = window;
-                    tp.predicted_origin = ws < 0 ? int64_t(pre_guard)
+                    tp.predicted_origin = ws < 0 ? int64_t(cur_pre_guard)
                                                  : timed_cursor;
+                    tp.guard = cur_pre_guard;
                     timed_pending.push_back(tp);
                 }
                 timed_cursor += nominal_period_samples;
@@ -1248,15 +1319,16 @@ try {
                         // this 6 ms-window autocorrelation detection.
                         if (!o.interference) {
                             ++unknown;
-                        } else if (seed-int64_t(pre_guard)<valid_begin) {
+                        } else if (seed-int64_t(cur_pre_guard)<valid_begin) {
                             report.result(id,seed,"INCOMPLETE_WINDOW");
                         } else {
                             PendingSubmit ps;
                             ps.id = id;
                             ps.seed = seed;
-                            ps.window_start = seed-int64_t(pre_guard);
+                            ps.window_start = seed-int64_t(cur_pre_guard);
                             ps.count = window;
-                            ps.predicted_rel_work = std::llround(pre_guard*65.0/48);
+                            ps.predicted_rel_work = std::llround(cur_pre_guard*65.0/48);
+                            ps.guard = cur_pre_guard;
                             ps.generation = lock.generation();
                             ps.metric = metric;
                             ps.is_candidate = true;
@@ -1269,21 +1341,22 @@ try {
                         }
                     } else if (pending_seed>=0) {
                         report.result(id,seed,"OVERLAPPING_CANDIDATE");
-                    } else if (seed-int64_t(pre_guard)<valid_begin) {
+                    } else if (seed-int64_t(cur_pre_guard)<valid_begin) {
                         report.result(id,seed,"INCOMPLETE_WINDOW");
                     } else {
                         pending_seed=seed; pending_id=id;
                     }
                 }
-                if (pending_seed>=0 && end>=pending_seed-int64_t(pre_guard)+int64_t(window)) {
-                    if (pending_seed-int64_t(pre_guard)<valid_begin) {
+                if (pending_seed>=0 && end>=pending_seed-int64_t(cur_pre_guard)+int64_t(window)) {
+                    if (pending_seed-int64_t(cur_pre_guard)<valid_begin) {
                         report.result(pending_id,pending_seed,"HISTORY_OVERRUN");
                     } else {
-                        const int64_t ws = pending_seed-int64_t(pre_guard);
+                        const int64_t ws = pending_seed-int64_t(cur_pre_guard);
                         workers.submit(pending_id, ws, window, pending_seed,
-                                       std::llround(pre_guard*65.0/48),
+                                       std::llround(cur_pre_guard*65.0/48),
                                        std::numeric_limits<uint64_t>::max(),
-                                       lock.generation(), false, true, ring);
+                                       lock.generation(), false, true, ring,
+                                       cur_pre_guard);
                     }
                     pending_seed=-1;
                 }
@@ -1325,7 +1398,7 @@ try {
                 if (!workers.submit(ps.id, ps.window_start, ps.count, ps.seed,
                                     ps.predicted_rel_work, ps.slot_index,
                                     ps.generation, ps.target_slot, ps.feeds_lock,
-                                    ring))
+                                    ring, ps.guard))
                     report.result(ps.id, ps.seed, "DROPPED_QUEUE");
             }
             pending.swap(still);
@@ -1337,6 +1410,10 @@ try {
         // (Caching the window itself cut the first post-lock slots with the
         // nominal 5 ms period and missed them by ~300 samples.)
         if (o.mode != "timed") {
+            // A lock-state change moves the guard (and with it the window
+            // start); apply it before the next plan is chosen so the plan and
+            // the cut window are always cut from the same geometry.
+            sync_pre_guard();
             if (have_pending_plan &&
                 pending_plan.generation != lock.generation()) {
                 // The grid changed under us; the old plan is void.
@@ -1363,7 +1440,7 @@ try {
                                                    plan.predicted_origin,
                                                    std::llround(rel*65.0/48),
                                                    plan.slot_index, plan.generation,
-                                                   true, true, ring);
+                                                   true, true, ring, plan.pre_guard);
                     if (!ok) {
                         lock.note_slot_outcome(plan.slot_index,
                                                core::TargetSlotOutcome::DroppedQueue);
@@ -1398,7 +1475,8 @@ try {
                 if (!workers.submit(++id, tp.window_start, tp.count,
                                     tp.predicted_origin,
                                     std::llround(rel*65.0/48), tp.slot_index,
-                                    tp.generation, target_slot, true, ring)) {
+                                    tp.generation, target_slot, true, ring,
+                                    tp.guard)) {
                     report.result(id, tp.predicted_origin, "DROPPED_QUEUE");
                     if (target_slot)
                         lock.note_slot_outcome(tp.slot_index,
@@ -1437,6 +1515,9 @@ try {
                      : lock.state() == core::TargetLockState::Holdover ? "target_miss"
                      : lock.state() == core::TargetLockState::Reacquire ? "grid_invalid"
                      : "seeded");
+            // The guard follows the state: LOCKED only needs the bounded ROI,
+            // every other state needs the wide acquisition platform.
+            sync_pre_guard();
         }
         if (Clock::now()-snapshot>std::chrono::milliseconds(100)) {
             report.snapshot(source_stats(),gaps,workers.backlog()); snapshot=Clock::now();
@@ -1494,6 +1575,7 @@ try {
           << " cand_interference=" << ls.candidates_interference
           << " cand_unknown=" << ls.candidates_unknown
           << " period_updates=" << ls.period_updates
+          << " pre_guard_updates=" << ls.pre_guard_updates
           << " lock_slots=" << ls.lock_slots
           << " period_samples=" << ls.period_samples
           << " period_ppm=" << ls.period_ppm
