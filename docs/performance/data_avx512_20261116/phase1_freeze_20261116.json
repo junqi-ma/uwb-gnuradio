@@ -1,0 +1,98 @@
+{
+  "phase": 1,
+  "date": "2026-11-16",
+  "worktree": "/tmp/uwb-gnuradio-avx512",
+  "branch": "perf/avx512-kernels",
+  "git_head": "5d5ba2690907210cf874f8f7efea90983696d906",
+  "git_status_short": [
+    " M AGENTS.md",
+    " M README.md",
+    " M docs/README.md",
+    " M \"docs/performance/X410_2ms\\345\\221\\250\\346\\234\\237\\346\\224\\266\\345\\214\\205\\350\\247\\243\\350\\260\\203\\346\\212\\245\\345\\221\\212_2026-11-15.md\"",
+    " M \"docs/\\345\\275\\223\\345\\211\\215\\344\\273\\243\\347\\240\\201\\350\\267\\257\\345\\276\\204\\347\\216\\260\\347\\212\\266\\344\\270\\216\\345\\220\\216\\347\\273\\255\\345\\274\\200\\345\\217\\221\\345\\237\\272\\347\\272\\277.md\"",
+    " M gr-uwb/CMakeLists.txt",
+    " M gr-uwb/README.md",
+    " M gr-uwb/apps/CMakeLists.txt",
+    " M gr-uwb/apps/uwb_dw3000_live.cc",
+    " M gr-uwb/include/gnuradio/uwb/CMakeLists.txt",
+    " M gr-uwb/include/gnuradio/uwb/uwb_rational_resampler_core.h",
+    " M gr-uwb/lib/CMakeLists.txt",
+    " M gr-uwb/lib/qa_uwb_pdu_rational_resampler_65_32_workers.cc",
+    " M gr-uwb/lib/qa_uwb_rational_resampler_core.cc",
+    " M gr-uwb/lib/qa_uwb_resampler_burst_opt.cc",
+    " M gr-uwb/lib/qa_uwb_uhd_sc16_pipeline.cc",
+    " M tools/rx/README.md",
+    " M tools/twr/verify_m2_a_native_phy.py",
+    " M \"\\345\\274\\200\\345\\217\\221\\347\\212\\266\\346\\200\\201.md\"",
+    "?? \"docs/performance/AVX512_\\346\\265\\213\\351\\207\\217\\345\\220\\210\\345\\220\\214_2026-11-16.md\"",
+    "?? \"docs/performance/AVX512\\345\\206\\205\\346\\240\\270\\344\\270\\216\\347\\274\\226\\350\\257\\221\\346\\234\\237CPU\\351\\200\\211\\346\\213\\251\\345\\274\\200\\345\\217\\221\\346\\212\\245\\345\\221\\212_2026-11-16.md\"",
+    "?? \"docs/performance/AVX512\\345\\206\\205\\346\\240\\270\\344\\270\\216\\347\\274\\226\\350\\257\\221\\346\\234\\237CPU\\351\\200\\211\\346\\213\\251\\345\\274\\200\\345\\217\\221\\350\\247\\204\\345\\210\\222_2026-11-16.md\"",
+    "?? docs/performance/avx512_worktree_baseline_20261116.json",
+    "?? docs/performance/data_avx512_20261116/",
+    "?? \"docs/performance/\\350\\247\\243\\350\\260\\203\\344\\270\\216SIC_AVX512\\345\\206\\205\\346\\240\\270\\346\\211\\251\\345\\261\\225\\345\\274\\200\\345\\217\\221\\350\\247\\204\\345\\210\\222_2026-11-16.md\"",
+    "?? \"docs/\\345\\216\\237\\347\\224\\237\\346\\216\\245\\346\\224\\266\\344\\270\\216GNU_Radio\\346\\236\\204\\345\\273\\272\\344\\275\\277\\347\\224\\250\\350\\257\\264\\346\\230\\216.md\"",
+    "?? gr-uwb/cmake/Modules/UwbSimd.cmake",
+    "?? gr-uwb/include/gnuradio/uwb/uwb_rational_resampler_avx512.h",
+    "?? gr-uwb/include/gnuradio/uwb/uwb_simd.h",
+    "?? gr-uwb/include/gnuradio/uwb/uwb_simd_config.h.in",
+    "?? gr-uwb/lib/qa_uwb_resampler_avx512.cc",
+    "?? gr-uwb/lib/uwb_rational_resampler_avx512.cc",
+    "?? gr-uwb/lib/uwb_simd_runtime.cc",
+    "?? tools/perf/"
+  ],
+  "files": {
+    "gr-uwb/cmake/Modules/UwbSimd.cmake": "725a329ad2f34f602b186fbe9f30d6cb7710ad53fb203624b56a47119b47db6b",
+    "gr-uwb/include/gnuradio/uwb/uwb_simd_config.h.in": "8f80373ea45efb4dcd613750ffe2e557a56a90fa6e9ec5aa56193c861a2e7bc0",
+    "gr-uwb/include/gnuradio/uwb/uwb_simd.h": "dc2fb676de91555b373f7f659ca5aa148bd3f1266d456f208cd7a961bb3bf403",
+    "gr-uwb/include/gnuradio/uwb/uwb_rational_resampler_avx512.h": "a64a8d30298f5e5f39e94b3ccf6785b5ce0cbfb9bfe1263a7c4a01e113969076",
+    "gr-uwb/lib/uwb_simd_runtime.cc": "9212a4873382d4670f7ba3643dfa61d4ef9e5d29509a1446fc029a17275174da",
+    "gr-uwb/lib/uwb_rational_resampler_avx512.cc": "99d0de2072276c26a56ca0839d5581305ae947614270cc8b5b15289f10b8b018",
+    "gr-uwb/lib/qa_uwb_resampler_avx512.cc": "447a9b4048e745177f5266b96a09f566b9f1d2697abf25081dc8017371a850d1",
+    "tools/perf/run_avx512_abba.py": "5c7279f2939e754349c101a636dab62615a85956184152405ef9ed4486dbecb0",
+    "docs/performance/AVX512_\u6d4b\u91cf\u5408\u540c_2026-11-16.md": "5c4c4946f29347a00916bf4f440bf22218768cb8cd348c27d31fa36197f06629",
+    "docs/performance/AVX512\u5185\u6838\u4e0e\u7f16\u8bd1\u671fCPU\u9009\u62e9\u5f00\u53d1\u62a5\u544a_2026-11-16.md": "dd0f06feb4af0aa382101fa4f5b44f6651f21617d5b9c09b786c11e796e96a29",
+    "gr-uwb/CMakeLists.txt": "70d12a880f439df0181a2d49999052d562a1ac707d06aee7a66ab8f0fe62e21e",
+    "gr-uwb/lib/CMakeLists.txt": "b37bd9d24125b7e19e6b72ec6485ef19553b993cef36715828df22047f2d6994",
+    "gr-uwb/apps/CMakeLists.txt": "11c6f88c4136298654eafd405400423379f1aaad65d4faa781e3610793f2a7f9",
+    "gr-uwb/include/gnuradio/uwb/CMakeLists.txt": "3be9ff49f9c2fb6d12e08c3bd26f7a970109c3a3c5bb24f6a3b226c07d65401a",
+    "gr-uwb/include/gnuradio/uwb/uwb_rational_resampler_core.h": "1980f372fc15513dc8034ae67f6888e70208f19d6550ec04cbdf193a24f3448d",
+    "gr-uwb/lib/qa_uwb_rational_resampler_core.cc": "4dc8a336d21dc5e9a2b545fb351331355e162bce2e8ff643259c2104fa0edc61",
+    "gr-uwb/lib/qa_uwb_pdu_rational_resampler_65_32_workers.cc": "6aa2744bc7826f3a1b6dbfe2c00882d6dd709c59f29129fb0b74657ca32bba32",
+    "gr-uwb/lib/qa_uwb_resampler_burst_opt.cc": "de191ee9e6e2b8bda7b8e93d8919193ea8d296924ae1cbeb9edfd8fd646b689d",
+    "gr-uwb/lib/qa_uwb_uhd_sc16_pipeline.cc": "7acdde52bb6cee010742dd814f72b0064c65f73bae0f1c284258b90bc431322e",
+    "tools/twr/verify_m2_a_native_phy.py": "48aa0a8db7be26e32b110710152a389ef5427dac91dcc6c9b9300a6cee1baaed",
+    "docs/\u539f\u751f\u63a5\u6536\u4e0eGNU_Radio\u6784\u5efa\u4f7f\u7528\u8bf4\u660e.md": "dc210c04a65b200f97ec94e51df0819681ae0e31c30a09c28fdae9c61a4c50d6",
+    "gr-uwb/README.md": "b02f6c468bba897e4ea7cb5470905cacaafa602abd025fff348cc73ee9b296c9"
+  },
+  "binaries": {
+    "build-avx2/apps/benchmark_sc16_burst_core": "8987f449c7727de5793181cff5a2e3b05600923c220b5ae49da66c35bb4b9252",
+    "build-avx512/apps/benchmark_sc16_burst_core": "c0c448f4f2d500dcdaa327c5bdb78a1df261149b225195d4864ed5f6602a2b5c",
+    "build-scalar/apps/benchmark_sc16_burst_core": "2ae846f01d6ecdc69fa8956239d9a22d308a668e1243fbcc090848144c87db8b"
+  },
+  "build_configs": {
+    "build-avx2": {
+      "UWB_SIMD": "AVX2",
+      "UWB_BUILD_GNURADIO": "OFF",
+      "UWB_BUILD_EXPERIMENTS": "ON",
+      "ENABLE_UHD_BACKEND": "OFF"
+    },
+    "build-avx512": {
+      "UWB_SIMD": "AVX512",
+      "UWB_BUILD_GNURADIO": "OFF",
+      "UWB_BUILD_EXPERIMENTS": "ON",
+      "ENABLE_UHD_BACKEND": "OFF"
+    },
+    "build-scalar": {
+      "UWB_SIMD": "SCALAR",
+      "UWB_BUILD_GNURADIO": "OFF",
+      "UWB_BUILD_EXPERIMENTS": "ON",
+      "ENABLE_UHD_BACKEND": "OFF"
+    }
+  },
+  "qa": {
+    "build-avx512": "53/53 pass (install consumer included)",
+    "build-avx2": "52/53 pass + 1 skipped",
+    "build-scalar": "52/53 pass + 1 skipped"
+  },
+  "abba_final_summary": "docs/performance/data_avx512_20261116/abba_final/summary.json"
+}

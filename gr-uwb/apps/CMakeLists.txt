@@ -382,7 +382,7 @@ if(UWB_BUILD_EXPERIMENTS)
     # Keep the portable executable for same-source, same-library paired measurement.
     add_executable(benchmark_fullpacket_compare_fast_rx benchmark_fullpacket_compare.cc)
     target_link_libraries(benchmark_fullpacket_compare_fast_rx uwb_native)
-    target_compile_options(benchmark_fullpacket_compare_fast_rx PRIVATE -march=native)
+    uwb_simd_apply(benchmark_fullpacket_compare_fast_rx)
 
     # Isolated generic-ISA CFO replay: diagnostic only, production kernel unchanged.
     add_executable(benchmark_fullpacket_cfo_diag benchmark_fullpacket_cfo_diag.cc)
@@ -406,18 +406,25 @@ if(UWB_BUILD_EXPERIMENTS)
     # Unified SIC timing benchmark.
     add_executable(bench_unified_timing bench_unified_timing.cc)
     target_link_libraries(bench_unified_timing uwb_native)
-    target_compile_options(bench_unified_timing PRIVATE -O3 -march=native)
+    uwb_simd_apply(bench_unified_timing)
+
+    # Phase-2 operator-level benchmark: one demod/SIC kernel at a time, with a
+    # bit-identity gate against the AVX2 reference for every AVX-512 candidate.
+    # Plan: docs/performance/解调与SIC_AVX512内核扩展开发规划_2026-11-16.md
+    add_executable(bench_demod_sic_kernels bench_demod_sic_kernels.cc)
+    target_link_libraries(bench_demod_sic_kernels uwb_native)
+    uwb_simd_apply(bench_demod_sic_kernels)
 
     # Offline paired recovery experiment: desired complete packet + other-code
     # SYNC/SFD-only interference. Does not change the production pipeline.
     add_executable(experiment_preamble_recovery
         ../../tools/sic/experiment_preamble_recovery.cc)
     target_link_libraries(experiment_preamble_recovery uwb_native)
-    target_compile_options(experiment_preamble_recovery PRIVATE -O3 -march=native)
+    uwb_simd_apply(experiment_preamble_recovery)
 
     add_executable(benchmark_chain_workers ../../tools/sic/benchmark_chain_workers.cc)
     target_link_libraries(benchmark_chain_workers uwb_native)
-    target_compile_options(benchmark_chain_workers PRIVATE -O3 -march=native)
+    uwb_simd_apply(benchmark_chain_workers)
 else()
     message(STATUS "UWB_BUILD_EXPERIMENTS=OFF: skipping historical benchmark/"
                    "diagnostic experiment apps")
@@ -428,7 +435,7 @@ endif()
 ########################################################################
 add_executable(uwb_uhd_sc16_pipeline_runner uwb_uhd_sc16_pipeline_runner.cc)
 target_link_libraries(uwb_uhd_sc16_pipeline_runner uwb_native Threads::Threads)
-target_compile_options(uwb_uhd_sc16_pipeline_runner PRIVATE -O3 -march=native)
+uwb_simd_apply(uwb_uhd_sc16_pipeline_runner)
 target_compile_definitions(uwb_uhd_sc16_pipeline_runner PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 if(UWB_HAVE_UHD)
@@ -442,7 +449,7 @@ endif()
 ########################################################################
 add_executable(uwb_uhd_sc16_capture uwb_uhd_sc16_capture.cc)
 target_link_libraries(uwb_uhd_sc16_capture uwb_native Threads::Threads)
-target_compile_options(uwb_uhd_sc16_capture PRIVATE -O3 -march=native)
+uwb_simd_apply(uwb_uhd_sc16_capture)
 if(UWB_HAVE_UHD)
     target_link_libraries(uwb_uhd_sc16_capture UHD::UHD)
 endif()
@@ -478,7 +485,7 @@ endif()
 # 2026-11-11 round 2: pure-core resampler benchmark (owner: subagent A).
 add_executable(benchmark_sc16_burst_core benchmark_sc16_burst_core.cc)
 target_link_libraries(benchmark_sc16_burst_core uwb_native Threads::Threads)
-target_compile_options(benchmark_sc16_burst_core PRIVATE -O3 -march=native)
+uwb_simd_apply(benchmark_sc16_burst_core)
 target_compile_definitions(benchmark_sc16_burst_core PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
@@ -488,16 +495,16 @@ target_compile_definitions(benchmark_sc16_burst_core PRIVATE
 # independent Python reference.
 add_executable(benchmark_fixed_tone_cancel benchmark_fixed_tone_cancel.cc)
 target_link_libraries(benchmark_fixed_tone_cancel uwb_native Threads::Threads)
-target_compile_options(benchmark_fixed_tone_cancel PRIVATE -O3 -march=native)
+uwb_simd_apply(benchmark_fixed_tone_cancel)
 
 add_executable(fixed_tone_cancel_replay fixed_tone_cancel_replay.cc)
 target_link_libraries(fixed_tone_cancel_replay uwb_native Threads::Threads)
-target_compile_options(fixed_tone_cancel_replay PRIVATE -O3 -march=native)
+uwb_simd_apply(fixed_tone_cancel_replay)
 
 # 2026-11-11 round 2: steady-state pipeline benchmark driver (owner: main agent).
 add_executable(benchmark_sc16_pipeline_steady benchmark_sc16_pipeline_steady.cc)
 target_link_libraries(benchmark_sc16_pipeline_steady uwb_native Threads::Threads)
-target_compile_options(benchmark_sc16_pipeline_steady PRIVATE -O3 -march=native)
+uwb_simd_apply(benchmark_sc16_pipeline_steady)
 target_compile_definitions(benchmark_sc16_pipeline_steady PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 if(UWB_HAVE_UHD)
@@ -512,7 +519,7 @@ endif()
 # so an installed binary never depends on a source checkout / old build tree.
 add_executable(uwb_dw3000_live uwb_dw3000_live.cc)
 target_link_libraries(uwb_dw3000_live uwb_native Threads::Threads)
-target_compile_options(uwb_dw3000_live PRIVATE -O3 -march=native)
+uwb_simd_apply(uwb_dw3000_live)
 target_compile_definitions(uwb_dw3000_live PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\""
     "UWB_INSTALL_RESOURCE_DIR=\"${CMAKE_INSTALL_PREFIX}/${GR_PKG_DATA_DIR}\"")

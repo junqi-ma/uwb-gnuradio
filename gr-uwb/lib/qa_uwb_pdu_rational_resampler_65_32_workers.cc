@@ -328,6 +328,7 @@ BOOST_AUTO_TEST_CASE(test_65_32_worker_accessors_and_set)
     const std::string kernel(blk->resampler_kernel());
     BOOST_TEST_MESSAGE("resampler_kernel()=" << kernel);
     BOOST_CHECK(kernel == "avx2_fma_macroblock" ||
+                kernel == "avx512_fma_macroblock" ||
                 kernel == "volk_macroblock" ||
                 kernel == "scalar_macroblock");
 

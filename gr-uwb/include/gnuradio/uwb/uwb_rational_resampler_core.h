@@ -70,11 +70,29 @@
 
 #include <volk/volk.h>
 
-#if defined(__AVX2__) && defined(__FMA__)
+#include <gnuradio/uwb/uwb_simd.h>
+#include <gnuradio/uwb/uwb_simd_config.h>
+
+// The compile-time backend is chosen once by CMake (UWB_SIMD=...).  Guarding
+// the inline AVX2 kernels on the generated level instead of __AVX2__ keeps
+// every translation unit on the same backend; the #error below turns a
+// misconfigured target into a loud build failure instead of a silent scalar
+// fallback that would differ from the library (ODR hazard).
+#if UWB_SIMD_LEVEL >= 1
+#if !(defined(__AVX2__) && defined(__FMA__))
+#error "UWB_SIMD=AVX2/AVX512 requires -mavx2 -mfma on every TU that includes uwb_rational_resampler_core.h"
+#endif
 #include <immintrin.h>
 #define UWB_RESAMP_HAVE_AVX2 1
 #else
 #define UWB_RESAMP_HAVE_AVX2 0
+#endif
+
+#if UWB_SIMD_HAVE_AVX512
+#include <gnuradio/uwb/uwb_rational_resampler_avx512.h>
+#define UWB_RESAMP_HAVE_AVX512 1
+#else
+#define UWB_RESAMP_HAVE_AVX512 0
 #endif
 
 namespace gr {
@@ -122,6 +140,11 @@ public:
           nworkers_(1),
           profile_enabled_(false)
     {
+        // Refuse loudly on a machine that cannot execute the compiled backend
+        // (explicit AVX2/AVX512 builds carry a target-CPU requirement).  The
+        // check lives in a baseline-ISA TU; see uwb_simd.h.
+        simd::require_simd_backend();
+
         if (taps == nullptr || T == 0) {
             throw std::invalid_argument(
                 "RationalResamplerLmCore: taps must be non-empty");
@@ -200,7 +223,11 @@ public:
         // object, so switching a candidate on later never re-dispatches; the
         // two shipped profiles (realtime_minorder H_pad = 24,
         // quality_minorder H_pad = 48) get fully unrolled tap loops.
-        hp_class_ = (H_pad_ == 24) ? 24 : (H_pad_ == 48) ? 48 : 0;
+        hp_class_ = (H_pad_ == 16) ? 16
+                    : (H_pad_ == 24) ? 24
+                    : (H_pad_ == 32) ? 32
+                    : (H_pad_ == 48) ? 48
+                                     : 0;
 
         select_default_kernel();
     }
@@ -239,6 +266,7 @@ public:
     {
         fir_kind_ = FirKind::Scalar;
         loop_kind_ = LoopKind::Macroblock;
+        fc32_use_avx512_ = false;
         kernel_name_ = "scalar_macroblock";
     }
 
@@ -246,10 +274,11 @@ public:
     {
         fir_kind_ = FirKind::Volk;
         loop_kind_ = LoopKind::Macroblock;
+        fc32_use_avx512_ = false;
         kernel_name_ = "volk_macroblock";
     }
 
-    /** Force kernel for A/B: scalar|scalar_legacy|volk|volk_legacy|avx2|default */
+    /** Force kernel for A/B: scalar|scalar_legacy|volk|volk_legacy|avx2|avx512|default */
     void set_kernel(const std::string& name)
     {
         if (name == "scalar" || name == "scalar_macroblock") {
@@ -257,21 +286,39 @@ public:
         } else if (name == "scalar_legacy") {
             fir_kind_ = FirKind::Scalar;
             loop_kind_ = LoopKind::Legacy;
+            fc32_use_avx512_ = false;
             kernel_name_ = "scalar_legacy";
         } else if (name == "volk" || name == "volk_macroblock") {
             enable_volk_kernel();
         } else if (name == "volk_legacy") {
             fir_kind_ = FirKind::Volk;
             loop_kind_ = LoopKind::Legacy;
+            fc32_use_avx512_ = false;
             kernel_name_ = "volk_legacy";
-        } else if (name == "avx2" || name == "avx2_fma_macroblock" ||
-                   name == "default") {
+        } else if (name == "default") {
+            select_default_kernel();
+        } else if (name == "avx2" || name == "avx2_fma_macroblock") {
 #if UWB_RESAMP_HAVE_AVX2
             fir_kind_ = FirKind::Avx2;
             loop_kind_ = LoopKind::Macroblock;
+            fc32_use_avx512_ = false;
             kernel_name_ = "avx2_fma_macroblock";
 #else
             enable_volk_kernel();
+#endif
+        } else if (name == "avx512" || name == "avx512_fma_macroblock") {
+#if UWB_RESAMP_HAVE_AVX512
+            fir_kind_ = FirKind::Avx512;
+            loop_kind_ = LoopKind::Macroblock;
+            // Explicit request: use the wide kernel for FC32 too, so an
+            // A/B or a cross-path bit-exactness test can pin one backend.
+            fc32_use_avx512_ = true;
+            kernel_name_ = "avx512_fma_macroblock";
+#else
+            throw std::invalid_argument(
+                "RationalResamplerLmCore::set_kernel: 'avx512' requested but "
+                "this build has no AVX-512 backend (UWB_SIMD=" +
+                std::string(UWB_SIMD_NAME) + ")");
 #endif
         } else {
             throw std::invalid_argument(
@@ -389,8 +436,9 @@ public:
      */
     const char* sc16_kernel_variant() const
     {
-#if UWB_RESAMP_HAVE_AVX2
-        if (fir_kind_ == FirKind::Avx2 && fixed_phase_)
+#if UWB_RESAMP_HAVE_AVX2 || UWB_RESAMP_HAVE_AVX512
+        if ((fir_kind_ == FirKind::Avx2 || fir_kind_ == FirKind::Avx512) &&
+            fixed_phase_)
             return "c1_fixed_phase";
 #endif
         return "default";
@@ -833,7 +881,7 @@ public:
 private:
     using Clock = std::chrono::steady_clock;
 
-    enum class FirKind { Scalar, Volk, Avx2 };
+    enum class FirKind { Scalar, Volk, Avx2, Avx512 };
     enum class LoopKind { Legacy, Macroblock };
 
     // Lazy MT schedule-scratch geometry (2026-11-11 round 2, A1).
@@ -906,6 +954,11 @@ private:
     bool flush_mode_;
     FirKind fir_kind_ = FirKind::Volk;
     LoopKind loop_kind_ = LoopKind::Macroblock;
+    // FC32 (process()) uses AVX-512 only when explicitly forced with
+    // set_kernel("avx512").  The default AVX-512 selection is for the SC16
+    // production path; the FC32 GR path measured ~6-8% slower for H_pad
+    // 16/32, so it stays on AVX2 unless the caller asks for the wide kernel.
+    bool fc32_use_avx512_ = false;
     const char* kernel_name_ = "volk_macroblock";
     int nworkers_;
     bool profile_enabled_;
@@ -1028,6 +1081,23 @@ private:
 
     void select_default_kernel()
     {
+        fc32_use_avx512_ = false;
+#if UWB_RESAMP_HAVE_AVX512
+        // Validated range (final 2026-11-16 ABBA, 3 rounds, production 56k
+        // packet window): only H_pad 24 (realtime) and 48 (quality) clear the
+        // >=5% bar with a stable sign -- realtime +9.4..+12.1%, quality
+        // +17.0..+21.6%.  H_pad 16 (eq16, live default) gains only 1.3..3.2%
+        // and H_pad 32 (eq32) 4.4..6.6% depending on the 65/48 vs 65/32
+        // instantiation, so both stay on AVX2 per the plan's "keep AVX2 when
+        // the threshold is not met" rule.  --kernel avx512 still forces the
+        // wide kernel for every profile for experiments.
+        if (hp_class_ == 24 || hp_class_ == 48) {
+            fir_kind_ = FirKind::Avx512;
+            loop_kind_ = LoopKind::Macroblock;
+            kernel_name_ = "avx512_fma_macroblock";
+            return;
+        }
+#endif
 #if UWB_RESAMP_HAVE_AVX2
         fir_kind_ = FirKind::Avx2;
         loop_kind_ = LoopKind::Macroblock;
@@ -1533,6 +1603,22 @@ private:
             return fir_scalar_sc16(trev_dup_scaled, win_oldest, H_);
         }
 #endif
+        case FirKind::Avx512:
+#if UWB_RESAMP_HAVE_AVX512
+        {
+            const float* trev_dup_scaled =
+                arms_rev_dup_scaled_.data() +
+                static_cast<size_t>(arm_idx) * (2 * H_pad_);
+            return simd::avx512::fir_sc16(trev_dup_scaled, win_oldest, H_pad_);
+        }
+#else
+        {
+            const float* trev_dup_scaled =
+                arms_rev_dup_scaled_.data() +
+                static_cast<size_t>(arm_idx) * (2 * H_pad_);
+            return fir_scalar_sc16(trev_dup_scaled, win_oldest, H_);
+        }
+#endif
         }
         const float* trev_dup_scaled =
             arms_rev_dup_scaled_.data() +
@@ -1561,6 +1647,33 @@ private:
                 arms_rev_dup_.data() + static_cast<size_t>(arm_idx) * (2 * H_pad_);
             return fir_avx2(trev_dup, win_oldest, H_pad_);
         }
+#else
+        {
+            const float* trev =
+                arms_rev_pad_.data() + static_cast<size_t>(arm_idx) * H_pad_;
+            return fir_volk(trev, win_oldest, H_);
+        }
+#endif
+        case FirKind::Avx512:
+#if UWB_RESAMP_HAVE_AVX512
+            if (!fc32_use_avx512_) {
+#if UWB_RESAMP_HAVE_AVX2
+                const float* trev_dup = arms_rev_dup_.data() +
+                                        static_cast<size_t>(arm_idx) *
+                                            (2 * H_pad_);
+                return fir_avx2(trev_dup, win_oldest, H_pad_);
+#else
+                const float* trev = arms_rev_pad_.data() +
+                                    static_cast<size_t>(arm_idx) * H_pad_;
+                return fir_volk(trev, win_oldest, H_);
+#endif
+            }
+            {
+                const float* trev_dup = arms_rev_dup_.data() +
+                                        static_cast<size_t>(arm_idx) *
+                                            (2 * H_pad_);
+                return simd::avx512::fir_cf32(trev_dup, win_oldest, H_pad_);
+            }
 #else
         {
             const float* trev =
@@ -1659,11 +1772,52 @@ private:
                                  size_t max_out)
     {
         size_t produced = 0;
+        // FC32 backend: AVX-512 only when explicitly forced; otherwise the
+        // AVX-512 selection applies to SC16 only and FC32 stays on AVX2.
+        const bool use_avx512 =
+            (fir_kind_ == FirKind::Avx512 && fc32_use_avx512_);
+        const bool use_avx2 =
+            (fir_kind_ == FirKind::Avx2) ||
+            (fir_kind_ == FirKind::Avx512 && !fc32_use_avx512_);
+
+#if UWB_RESAMP_HAVE_AVX512        // AVX-512: batch every full macroblock of this call into ONE wide
+        // call.  The schedule is identical for every macroblock (ctr_ returns
+        // to its starting phase after L outputs), so the function only walks
+        // the work window forward by kDecim per macroblock.
+        if (use_avx512) {
+            size_t n_mb = 0;
+            while (produced + (n_mb + 1) * kInterp <= max_out &&
+                   post_i + (n_mb + 1) * static_cast<size_t>(kDecim) < post_n)
+                ++n_mb;
+            if (n_mb > 0) {
+                const size_t sched_base =
+                    static_cast<size_t>(ctr_) * static_cast<size_t>(kInterp);
+                const uint8_t* arms = schedule_arm_.data() + sched_base;
+                const uint8_t* advs = schedule_adv_.data() + sched_base;
+                const auto t_f0 = profile_enabled_ ? Clock::now()
+                                                   : Clock::time_point{};
+                simd::avx512::fir_cf32_macroblock(
+                    arms_rev_dup_.data(), 2 * H_pad_, arms, advs,
+                    work_.data() + (hist_n + post_i + 1 - H_),
+                    kDecim, n_mb, kInterp, H_pad_, out + produced);
+                if (profile_enabled_) {
+                    profile_.ns_fir += ns_since(t_f0);
+                    profile_.macroblocks += n_mb;
+                }
+                produced += n_mb * kInterp;
+                output_items_ += n_mb * kInterp;
+                post_i += n_mb * static_cast<size_t>(kDecim);
+                current_ = work_[hist_n + post_i];
+                have_current_ = true;
+            }
+        }
+#endif
 
         // Full macroblocks: need 48 advances of headroom after current and
         // 65 free output slots.  After a macroblock, phase returns to start
         // and post_i advances by exactly 48.
-        while (produced + kInterp <= max_out &&
+        while (!use_avx512 &&
+               produced + kInterp <= max_out &&
                post_i + static_cast<size_t>(kDecim) < post_n) {
             const auto t_s0 =
                 profile_enabled_ ? Clock::now() : Clock::time_point{};
@@ -1679,7 +1833,7 @@ private:
                 profile_enabled_ ? Clock::now() : Clock::time_point{};
             gr_complex* dest = out + produced;
 #if UWB_RESAMP_HAVE_AVX2
-            if (fir_kind_ == FirKind::Avx2) {
+            if (use_avx2) {
                 const float* h_base = arms_rev_dup_.data();
                 const size_t h_stride = 2 * H_pad_;
 
@@ -1710,7 +1864,8 @@ private:
                     dest[o] = filter_window(arms[o], work_.data() + win_start);
                     cur_post += advs[o];
                 }
-            } else
+            }
+            else
 #endif
             {
                 for (uint32_t o = 0; o < kInterp; ++o) {
@@ -1973,7 +2128,8 @@ private:
         // the default configuration, so the default instruction stream below
         // is the pre-existing one.
 #if UWB_RESAMP_HAVE_AVX2
-        if (fir_kind_ == FirKind::Avx2 && fixed_phase_) {
+        if ((fir_kind_ == FirKind::Avx2 || fir_kind_ == FirKind::Avx512) &&
+            fixed_phase_) {
             return run_macroblock_sc16_candidate(hist_n, post_n, post_i,
                                                  started_held, ninput, total_w,
                                                  out, max_out);
@@ -1981,7 +2137,38 @@ private:
 #endif
         size_t produced = 0;
 
-        while (produced + kInterp <= max_out &&
+#if UWB_RESAMP_HAVE_AVX512
+        if (fir_kind_ == FirKind::Avx512) {
+            size_t n_mb = 0;
+            while (produced + (n_mb + 1) * kInterp <= max_out &&
+                   post_i + (n_mb + 1) * static_cast<size_t>(kDecim) < post_n)
+                ++n_mb;
+            if (n_mb > 0) {
+                const size_t sched_base =
+                    static_cast<size_t>(ctr_) * static_cast<size_t>(kInterp);
+                const uint8_t* arms = schedule_arm_.data() + sched_base;
+                const uint8_t* advs = schedule_adv_.data() + sched_base;
+                const auto t_f0 = profile_enabled_ ? Clock::now()
+                                                   : Clock::time_point{};
+                simd::avx512::fir_sc16_macroblock(
+                    arms_rev_dup_scaled_.data(), 2 * H_pad_, arms, advs,
+                    work_sc16_.data() + (hist_n + post_i + 1 - H_),
+                    kDecim, n_mb, kInterp, H_pad_, out + produced);
+                if (profile_enabled_) {
+                    profile_.ns_fir += ns_since(t_f0);
+                    profile_.macroblocks += n_mb;
+                }
+                produced += n_mb * kInterp;
+                output_items_ += n_mb * kInterp;
+                post_i += n_mb * static_cast<size_t>(kDecim);
+                current_sc16_ = work_sc16_[hist_n + post_i];
+                have_current_ = true;
+            }
+        }
+#endif
+
+        while (fir_kind_ != FirKind::Avx512 &&
+               produced + kInterp <= max_out &&
                post_i + static_cast<size_t>(kDecim) < post_n) {
             const auto t_s0 =
                 profile_enabled_ ? Clock::now() : Clock::time_point{};
@@ -2029,7 +2216,8 @@ private:
                     dest[o] = filter_window_sc16(arms[o], work_sc16_.data() + win_start);
                     cur_post += advs[o];
                 }
-            } else
+            }
+            else
 #endif
             {
                 for (uint32_t o = 0; o < kInterp; ++o) {
@@ -2172,16 +2360,68 @@ private:
     }
 
     /**
+     * C1 4-output kernel selection.  AVX512 is a compile-time template
+     * parameter so the hot loop carries no per-group branch; the AVX-512
+     * entry points are bit-identical to the AVX2 ones (see the header).
+     */
+    template <size_t H_PAD, bool AVX512>
+    static inline void fir_sc16_4x_hp_any(
+        const float* h0, const float* h1,
+        const float* h2, const float* h3,
+        const std::complex<int16_t>* w0,
+        const std::complex<int16_t>* w1,
+        const std::complex<int16_t>* w2,
+        const std::complex<int16_t>* w3,
+        size_t hpad_rt, uint8_t reuse, gr_complex* dest4)
+    {
+#if UWB_RESAMP_HAVE_AVX512
+        if constexpr (AVX512) {
+            if constexpr (H_PAD == 16)
+                simd::avx512::fir_sc16_4x_hp16(h0, h1, h2, h3, w0, w1, w2, w3,
+                                               hpad_rt, reuse, dest4);
+            else if constexpr (H_PAD == 24)
+                simd::avx512::fir_sc16_4x_hp24(h0, h1, h2, h3, w0, w1, w2, w3,
+                                               hpad_rt, reuse, dest4);
+            else if constexpr (H_PAD == 32)
+                simd::avx512::fir_sc16_4x_hp32(h0, h1, h2, h3, w0, w1, w2, w3,
+                                               hpad_rt, reuse, dest4);
+            else if constexpr (H_PAD == 48)
+                simd::avx512::fir_sc16_4x_hp48(h0, h1, h2, h3, w0, w1, w2, w3,
+                                               hpad_rt, reuse, dest4);
+            else
+                simd::avx512::fir_sc16_4x_generic(h0, h1, h2, h3, w0, w1, w2,
+                                                  w3, hpad_rt, reuse, dest4);
+            return;
+        }
+#endif
+        fir_avx2_sc16_4x_hp<H_PAD>(h0, h1, h2, h3, w0, w1, w2, w3, hpad_rt,
+                                   reuse, dest4);
+    }
+
+    template <bool AVX512>
+    static inline gr_complex fir_sc16_any(
+        const float* taps, const std::complex<int16_t>* win, size_t hpad)
+    {
+#if UWB_RESAMP_HAVE_AVX512
+        if constexpr (AVX512)
+            return simd::avx512::fir_sc16(taps, win, hpad);
+#endif
+        return fir_avx2_sc16(taps, win, hpad);
+    }
+
+    /**
      * Full-macroblock loop for one candidate variant.
      *
-     * FP  = C1 (descriptor table + compile-time H_pad),
-     * H_PAD = 24 / 48 (shipped profiles, fully unrolled) or 0 (generic).
+     * FP     = C1 (descriptor table + compile-time H_pad),
+     * H_PAD  = 16 / 24 / 32 / 48 (shipped profiles, fully unrolled) or 0
+     *          (generic),
+     * AVX512 = use the AVX-512 kernels (bit-identical to AVX2).
      *
      * Post-condition is identical to the default loop: produced is a multiple
      * of kInterp, post_i advanced by kDecim per macroblock, ctr_ unchanged,
      * output_items_ advanced by kInterp per macroblock.
      */
-    template <bool FP, size_t H_PAD>
+    template <bool FP, size_t H_PAD, bool AVX512>
     size_t run_mb_sc16_candidate(size_t hist_n,
                                  size_t post_n,
                                  size_t& post_i,
@@ -2200,27 +2440,60 @@ private:
                 const FixedPhaseGroup* const groups =
                     fp_groups_.data() +
                     static_cast<size_t>(ctr_) * kMacroblockGroups;
-                for (uint32_t g = 0; g < kMacroblockGroups; ++g) {
-                    const FixedPhaseGroup& d = groups[g];
-                    fir_avx2_sc16_4x_hp<H_PAD>(
-                        h_base + d.tap[0], h_base + d.tap[1],
-                        h_base + d.tap[2], h_base + d.tap[3],
-                        work_sc16_.data() + base_idx +
-                            static_cast<size_t>(d.win[0]),
-                        work_sc16_.data() + base_idx +
-                            static_cast<size_t>(d.win[1]),
-                        work_sc16_.data() + base_idx +
-                            static_cast<size_t>(d.win[2]),
-                        work_sc16_.data() + base_idx +
-                            static_cast<size_t>(d.win[3]),
-                        H_pad_, d.reuse, dest + 4 * g);
+#if UWB_RESAMP_HAVE_AVX512
+                if constexpr (AVX512) {
+                    // One call per macroblock, not one per 4-output group.
+                    // The descriptor layout is shared with the AVX-512 header
+                    // (C1GroupDesc); the static_assert catches a drift.
+                    static_assert(sizeof(FixedPhaseGroup) ==
+                                      sizeof(simd::avx512::C1GroupDesc),
+                                  "C1 descriptor layout mismatch");
+                    const auto* desc =
+                        reinterpret_cast<const simd::avx512::C1GroupDesc*>(
+                            groups);
+                    const std::complex<int16_t>* const base_win =
+                        work_sc16_.data() + base_idx;
+                    if constexpr (H_PAD == 16)
+                        simd::avx512::fir_sc16_macroblock_c1_hp16(
+                            h_base, desc, kMacroblockGroups, base_win, dest);
+                    else if constexpr (H_PAD == 24)
+                        simd::avx512::fir_sc16_macroblock_c1_hp24(
+                            h_base, desc, kMacroblockGroups, base_win, dest);
+                    else if constexpr (H_PAD == 32)
+                        simd::avx512::fir_sc16_macroblock_c1_hp32(
+                            h_base, desc, kMacroblockGroups, base_win, dest);
+                    else if constexpr (H_PAD == 48)
+                        simd::avx512::fir_sc16_macroblock_c1_hp48(
+                            h_base, desc, kMacroblockGroups, base_win, dest);
+                    else
+                        simd::avx512::fir_sc16_macroblock_c1_generic(
+                            h_base, desc, kMacroblockGroups, base_win, H_pad_,
+                            dest);
+                } else
+#endif
+                {
+                    for (uint32_t g = 0; g < kMacroblockGroups; ++g) {
+                        const FixedPhaseGroup& d = groups[g];
+                        fir_sc16_4x_hp_any<H_PAD, false>(
+                            h_base + d.tap[0], h_base + d.tap[1],
+                            h_base + d.tap[2], h_base + d.tap[3],
+                            work_sc16_.data() + base_idx +
+                                static_cast<size_t>(d.win[0]),
+                            work_sc16_.data() + base_idx +
+                                static_cast<size_t>(d.win[1]),
+                            work_sc16_.data() + base_idx +
+                                static_cast<size_t>(d.win[2]),
+                            work_sc16_.data() + base_idx +
+                                static_cast<size_t>(d.win[3]),
+                            H_pad_, d.reuse, dest + 4 * g);
+                    }
                 }
                 const FixedPhaseTail* const tails =
                     fp_tail_.data() +
                     static_cast<size_t>(ctr_) * kTailStride;
                 for (uint32_t t = 0; t < kMacroblockTail; ++t) {
                     const size_t o = 4 * static_cast<size_t>(kMacroblockGroups) + t;
-                    dest[o] = fir_avx2_sc16(
+                    dest[o] = fir_sc16_any<AVX512>(
                         h_base + tails[t].tap,
                         work_sc16_.data() + base_idx +
                             static_cast<size_t>(tails[t].win),
@@ -2238,7 +2511,7 @@ private:
     }
 
     /**
-     * Candidate dispatcher: one switch on C1 x (H_pad class), all
+     * Candidate dispatcher: one switch on (ISA) x C1 x (H_pad class), all
      * outside the macroblock loop.  The H_pad class was chosen in the
      * constructor, so this is the "selected once at construction" decision.
      */
@@ -2253,26 +2526,48 @@ private:
     {
         const auto t0 = profile_enabled_ ? Clock::now() : Clock::time_point{};
         size_t produced = 0;
+        const bool avx512 = (fir_kind_ == FirKind::Avx512);
         if (fixed_phase_) {
-            if (hp_class_ == 24)
-                produced = run_mb_sc16_candidate<true, 24>(
-                    hist_n, post_n, post_i, out, max_out);
-            else if (hp_class_ == 48)
-                produced = run_mb_sc16_candidate<true, 48>(
-                    hist_n, post_n, post_i, out, max_out);
-            else
-                produced = run_mb_sc16_candidate<true, 0>(
-                    hist_n, post_n, post_i, out, max_out);
+            if (avx512) {
+#if UWB_RESAMP_HAVE_AVX512
+                if (hp_class_ == 16)
+                    produced = run_mb_sc16_candidate<true, 16, true>(
+                        hist_n, post_n, post_i, out, max_out);
+                else if (hp_class_ == 24)
+                    produced = run_mb_sc16_candidate<true, 24, true>(
+                        hist_n, post_n, post_i, out, max_out);
+                else if (hp_class_ == 32)
+                    produced = run_mb_sc16_candidate<true, 32, true>(
+                        hist_n, post_n, post_i, out, max_out);
+                else if (hp_class_ == 48)
+                    produced = run_mb_sc16_candidate<true, 48, true>(
+                        hist_n, post_n, post_i, out, max_out);
+                else
+                    produced = run_mb_sc16_candidate<true, 0, true>(
+                        hist_n, post_n, post_i, out, max_out);
+#endif
+            } else {
+                if (hp_class_ == 16)
+                    produced = run_mb_sc16_candidate<true, 16, false>(
+                        hist_n, post_n, post_i, out, max_out);
+                else if (hp_class_ == 24)
+                    produced = run_mb_sc16_candidate<true, 24, false>(
+                        hist_n, post_n, post_i, out, max_out);
+                else if (hp_class_ == 32)
+                    produced = run_mb_sc16_candidate<true, 32, false>(
+                        hist_n, post_n, post_i, out, max_out);
+                else if (hp_class_ == 48)
+                    produced = run_mb_sc16_candidate<true, 48, false>(
+                        hist_n, post_n, post_i, out, max_out);
+                else
+                    produced = run_mb_sc16_candidate<true, 0, false>(
+                        hist_n, post_n, post_i, out, max_out);
+            }
         } else {
-            if (hp_class_ == 24)
-                produced = run_mb_sc16_candidate<false, 24>(
-                    hist_n, post_n, post_i, out, max_out);
-            else if (hp_class_ == 48)
-                produced = run_mb_sc16_candidate<false, 48>(
-                    hist_n, post_n, post_i, out, max_out);
-            else
-                produced = run_mb_sc16_candidate<false, 0>(
-                    hist_n, post_n, post_i, out, max_out);
+            // Unreachable from run_macroblock_sc16() (it only dispatches here
+            // when fixed_phase_ is true), kept for completeness.
+            produced = run_mb_sc16_candidate<false, 0, false>(
+                hist_n, post_n, post_i, out, max_out);
         }
         if (profile_enabled_) {
             // The candidate loop does not split schedule from FIR; the whole
@@ -2287,6 +2582,30 @@ private:
 
 #endif // UWB_RESAMP_HAVE_AVX2
 
+    /**
+     * Per-output kernel for the multi-worker schedule.
+     *
+     * The AVX-512 backend's hot path is the batched C1 macroblock; the MT
+     * schedule is an arbitrary per-output list, so calling the out-of-line
+     * AVX-512 single-output kernel once per output would pay the call
+     * overhead 75k times per window.  Keep this path on the inlined AVX2
+     * kernel in an AVX-512 build: it is the pre-existing MT implementation and
+     * this change cannot regress it.  The C1 tail (one output per macroblock)
+     * still uses the AVX-512 single-output kernel.
+     */
+    gr_complex filter_window_sc16_mt(uint32_t arm_idx,
+                                     const std::complex<int16_t>* win) const
+    {
+#if UWB_RESAMP_HAVE_AVX512 && UWB_RESAMP_HAVE_AVX2
+        if (fir_kind_ == FirKind::Avx512) {
+            const float* taps = arms_rev_dup_scaled_.data() +
+                                static_cast<size_t>(arm_idx) * (2 * H_pad_);
+            return fir_avx2_sc16(taps, win, H_pad_);
+        }
+#endif
+        return filter_window_sc16(arm_idx, win);
+    }
+
     void fir_parallel_sc16(gr_complex* out,
                            size_t n_out,
                            int nworkers)
@@ -2294,8 +2613,9 @@ private:
         const int nw = std::max(1, nworkers);
         if (nw == 1 || n_out < 1024) {
             for (size_t i = 0; i < n_out; ++i) {
-                out[i] = filter_window_sc16(sched_arm_buf_[i],
-                                            work_sc16_.data() + sched_win_buf_[i]);
+                out[i] = filter_window_sc16_mt(
+                    sched_arm_buf_[i],
+                    work_sc16_.data() + sched_win_buf_[i]);
             }
             return;
         }
@@ -2303,8 +2623,9 @@ private:
             start_pool(nw);
         pool_parallel_for(n_out, [this, out](size_t lo, size_t hi) {
             for (size_t i = lo; i < hi; ++i) {
-                out[i] = filter_window_sc16(sched_arm_buf_[i],
-                                            work_sc16_.data() + sched_win_buf_[i]);
+                out[i] = filter_window_sc16_mt(
+                    sched_arm_buf_[i],
+                    work_sc16_.data() + sched_win_buf_[i]);
             }
         });
     }

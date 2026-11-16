@@ -1,0 +1,393 @@
+{
+  "A_reference": {
+    "benches": {
+      "Full-Packet (Complete Frame Flow)": {
+        "a_median_us": 371.89499,
+        "a_total_us": [
+          372.94186,
+          374.43199,
+          365.68728,
+          371.89499,
+          366.40468999999996
+        ],
+        "all_rounds_improve": false,
+        "b_median_us": 371.44106,
+        "b_total_us": [
+          371.44106,
+          377.34162000000003,
+          369.68468,
+          378.12964999999997,
+          368.17669
+        ],
+        "median_delta_pct": 0.7770783687579774,
+        "median_ratio": 1.0077707836875798,
+        "stage_a_us": {
+          "cfo": 6.0,
+          "cir (equalizer)": 35.06,
+          "comm_rx (demod/sfd)": 237.07656,
+          "estimate_channel": 34.53186,
+          "payload": 41.06,
+          "phr": 11.02,
+          "reconstruct (FIR)": 32.83262,
+          "sfd (tail refit)": 56.58,
+          "subtract & validate": 21.9801,
+          "timing": 79.06
+        },
+        "stage_b_us": {
+          "cfo": 6.02,
+          "cir (equalizer)": 35.0,
+          "comm_rx (demod/sfd)": 240.77148,
+          "estimate_channel": 34.12696,
+          "payload": 41.44,
+          "phr": 11.0,
+          "reconstruct (FIR)": 32.03118,
+          "sfd (tail refit)": 57.06,
+          "subtract & validate": 20.28,
+          "timing": 79.14
+        }
+      },
+      "Preamble-Only (SYNC + SFD Aligned Flow)": {
+        "a_median_us": 269.79841,
+        "a_total_us": [
+          271.705,
+          273.48231999999996,
+          266.54431,
+          269.79841,
+          267.18361000000004
+        ],
+        "all_rounds_improve": false,
+        "b_median_us": 269.5505,
+        "b_total_us": [
+          269.01853,
+          273.85168999999996,
+          264.77657,
+          273.98108,
+          269.5505
+        ],
+        "median_delta_pct": 0.13506174731880982,
+        "median_ratio": 1.001350617473188,
+        "stage_a_us": {
+          "cfo": 6.02,
+          "cir (equalizer)": 0.0,
+          "comm_rx (demod/sfd)": 116.11136,
+          "estimate_channel": 35.56316,
+          "payload": 0.0,
+          "phr": 0.0,
+          "reconstruct (FIR)": 17.3598,
+          "sfd (tail refit)": 30.12,
+          "subtract & validate": 19.73972,
+          "timing": 78.96
+        },
+        "stage_b_us": {
+          "cfo": 6.0,
+          "cir (equalizer)": 0.0,
+          "comm_rx (demod/sfd)": 116.67442,
+          "estimate_channel": 34.73084,
+          "payload": 0.0,
+          "phr": 0.0,
+          "reconstruct (FIR)": 15.61056,
+          "sfd (tail refit)": 30.12,
+          "subtract & validate": 17.46598,
+          "timing": 79.14
+        }
+      }
+    },
+    "spec_b": "sync=avx2,cir=avx2,sic_reconstruct=avx2,sic_energy=avx2"
+  },
+  "B_demod": {
+    "benches": {
+      "Full-Packet (Complete Frame Flow)": {
+        "a_median_us": 371.60907,
+        "a_total_us": [
+          378.44863,
+          375.32118,
+          371.60907,
+          370.62447,
+          371.35473
+        ],
+        "all_rounds_improve": true,
+        "b_median_us": 352.11747,
+        "b_total_us": [
+          352.11747,
+          349.46862,
+          356.73235999999997,
+          347.91663,
+          353.66565
+        ],
+        "median_delta_pct": -6.126913314709082,
+        "median_ratio": 0.9387308668529092,
+        "stage_a_us": {
+          "cfo": 6.0,
+          "cir (equalizer)": 35.08,
+          "comm_rx (demod/sfd)": 239.52868,
+          "estimate_channel": 35.4296,
+          "payload": 41.28,
+          "phr": 11.04,
+          "reconstruct (FIR)": 33.56164,
+          "sfd (tail refit)": 56.62,
+          "subtract & validate": 24.4364,
+          "timing": 79.16
+        },
+        "stage_b_us": {
+          "cfo": 6.02,
+          "cir (equalizer)": 33.98,
+          "comm_rx (demod/sfd)": 220.02484,
+          "estimate_channel": 35.10278,
+          "payload": 41.5,
+          "phr": 11.02,
+          "reconstruct (FIR)": 33.59234,
+          "sfd (tail refit)": 57.2,
+          "subtract & validate": 23.813,
+          "timing": 59.2
+        }
+      },
+      "Preamble-Only (SYNC + SFD Aligned Flow)": {
+        "a_median_us": 271.42532,
+        "a_total_us": [
+          273.72343,
+          272.3379,
+          271.27443000000005,
+          271.42532,
+          268.7958
+        ],
+        "all_rounds_improve": true,
+        "b_median_us": 251.41995,
+        "b_total_us": [
+          251.81518,
+          251.41995,
+          253.05729,
+          246.24009999999998,
+          248.92907
+        ],
+        "median_delta_pct": -7.680880993794837,
+        "median_ratio": 0.9231911900620516,
+        "stage_a_us": {
+          "cfo": 6.02,
+          "cir (equalizer)": 0.0,
+          "comm_rx (demod/sfd)": 116.25052,
+          "estimate_channel": 35.34922,
+          "payload": 0.0,
+          "phr": 0.0,
+          "reconstruct (FIR)": 17.4176,
+          "sfd (tail refit)": 30.08,
+          "subtract & validate": 20.07958,
+          "timing": 79.08
+        },
+        "stage_b_us": {
+          "cfo": 6.0,
+          "cir (equalizer)": 0.0,
+          "comm_rx (demod/sfd)": 96.1205,
+          "estimate_channel": 35.47446,
+          "payload": 0.0,
+          "phr": 0.0,
+          "reconstruct (FIR)": 17.5043,
+          "sfd (tail refit)": 29.1,
+          "subtract & validate": 19.8539,
+          "timing": 59.34
+        }
+      }
+    },
+    "spec_b": "sync=avx512,cir=avx2,sic_reconstruct=avx2,sic_energy=avx2"
+  },
+  "C_sic": {
+    "benches": {
+      "Full-Packet (Complete Frame Flow)": {
+        "a_median_us": 374.54384,
+        "a_total_us": [
+          377.06403,
+          374.00237000000004,
+          370.34989,
+          374.54384,
+          378.33141
+        ],
+        "all_rounds_improve": false,
+        "b_median_us": 371.58514,
+        "b_total_us": [
+          376.46118,
+          377.17589,
+          367.92691,
+          366.25492,
+          371.58514
+        ],
+        "median_delta_pct": -0.654240777552273,
+        "median_ratio": 0.9934575922244773,
+        "stage_a_us": {
+          "cfo": 6.04,
+          "cir (equalizer)": 35.46,
+          "comm_rx (demod/sfd)": 238.56554,
+          "estimate_channel": 34.9345,
+          "payload": 41.08,
+          "phr": 11.1,
+          "reconstruct (FIR)": 33.8253,
+          "sfd (tail refit)": 56.84,
+          "subtract & validate": 24.43576,
+          "timing": 79.14
+        },
+        "stage_b_us": {
+          "cfo": 6.0,
+          "cir (equalizer)": 34.8,
+          "comm_rx (demod/sfd)": 239.26788,
+          "estimate_channel": 34.08474,
+          "payload": 41.1,
+          "phr": 11.02,
+          "reconstruct (FIR)": 32.03032,
+          "sfd (tail refit)": 58.12,
+          "subtract & validate": 20.31292,
+          "timing": 79.08
+        }
+      },
+      "Preamble-Only (SYNC + SFD Aligned Flow)": {
+        "a_median_us": 272.04915,
+        "a_total_us": [
+          272.35378000000003,
+          270.28548,
+          269.71817999999996,
+          272.04915,
+          273.27287
+        ],
+        "all_rounds_improve": true,
+        "b_median_us": 268.87687,
+        "b_total_us": [
+          270.14412000000004,
+          270.11717999999996,
+          264.23589,
+          268.18838,
+          268.87687
+        ],
+        "median_delta_pct": -1.4191442980064473,
+        "median_ratio": 0.9858085570199355,
+        "stage_a_us": {
+          "cfo": 6.02,
+          "cir (equalizer)": 0.0,
+          "comm_rx (demod/sfd)": 116.73494,
+          "estimate_channel": 35.5548,
+          "payload": 0.0,
+          "phr": 0.0,
+          "reconstruct (FIR)": 17.56902,
+          "sfd (tail refit)": 30.1,
+          "subtract & validate": 20.08068,
+          "timing": 79.2
+        },
+        "stage_b_us": {
+          "cfo": 6.0,
+          "cir (equalizer)": 0.0,
+          "comm_rx (demod/sfd)": 116.25148,
+          "estimate_channel": 34.89554,
+          "payload": 0.0,
+          "phr": 0.0,
+          "reconstruct (FIR)": 16.80102,
+          "sfd (tail refit)": 30.08,
+          "subtract & validate": 19.39896,
+          "timing": 79.08
+        }
+      }
+    },
+    "spec_b": "sync=avx2,cir=avx512,sic_reconstruct=avx512,sic_energy=avx512"
+  },
+  "D_combined": {
+    "benches": {
+      "Full-Packet (Complete Frame Flow)": {
+        "a_median_us": 372.36147,
+        "a_total_us": [
+          364.58477,
+          372.36147,
+          371.34256,
+          377.60973,
+          376.2902
+        ],
+        "all_rounds_improve": true,
+        "b_median_us": 348.84290999999996,
+        "b_total_us": [
+          354.42866000000004,
+          345.14959999999996,
+          348.84290999999996,
+          348.7018,
+          356.91176
+        ],
+        "median_delta_pct": -6.059001155159816,
+        "median_ratio": 0.9394099884484018,
+        "stage_a_us": {
+          "cfo": 6.0,
+          "cir (equalizer)": 35.12,
+          "comm_rx (demod/sfd)": 239.19378,
+          "estimate_channel": 34.84456,
+          "payload": 41.06,
+          "phr": 11.02,
+          "reconstruct (FIR)": 33.74918,
+          "sfd (tail refit)": 57.14,
+          "subtract & validate": 24.4038,
+          "timing": 79.06
+        },
+        "stage_b_us": {
+          "cfo": 6.0,
+          "cir (equalizer)": 33.22,
+          "comm_rx (demod/sfd)": 219.09376,
+          "estimate_channel": 34.62988,
+          "payload": 41.18,
+          "phr": 11.06,
+          "reconstruct (FIR)": 31.85598,
+          "sfd (tail refit)": 57.56,
+          "subtract & validate": 20.28544,
+          "timing": 59.32
+        }
+      },
+      "Preamble-Only (SYNC + SFD Aligned Flow)": {
+        "a_median_us": 270.72686999999996,
+        "a_total_us": [
+          265.82917999999995,
+          270.97290999999996,
+          269.07372,
+          272.20682,
+          270.72686999999996
+        ],
+        "all_rounds_improve": true,
+        "b_median_us": 247.9932,
+        "b_total_us": [
+          247.9932,
+          247.93261,
+          247.63920000000002,
+          250.23523999999998,
+          250.76117
+        ],
+        "median_delta_pct": -7.966039938794456,
+        "median_ratio": 0.9203396006120554,
+        "stage_a_us": {
+          "cfo": 6.02,
+          "cir (equalizer)": 0.0,
+          "comm_rx (demod/sfd)": 116.7163,
+          "estimate_channel": 35.04266,
+          "payload": 0.0,
+          "phr": 0.0,
+          "reconstruct (FIR)": 16.4202,
+          "sfd (tail refit)": 30.24,
+          "subtract & validate": 18.42482,
+          "timing": 79.06
+        },
+        "stage_b_us": {
+          "cfo": 6.0,
+          "cir (equalizer)": 0.0,
+          "comm_rx (demod/sfd)": 96.14834,
+          "estimate_channel": 34.90606,
+          "payload": 0.0,
+          "phr": 0.0,
+          "reconstruct (FIR)": 17.09552,
+          "sfd (tail refit)": 29.12,
+          "subtract & validate": 19.56798,
+          "timing": 59.52
+        }
+      }
+    },
+    "spec_b": "sync=avx512,cir=avx512,sic_reconstruct=avx512,sic_energy=avx512"
+  },
+  "bench": "gr-uwb/build-avx512-demod-sic/apps/bench_unified_timing",
+  "loadavg": [
+    1.3056640625,
+    1.572265625,
+    2.07763671875
+  ],
+  "rounds": 5,
+  "sic_output_identity": {
+    "sic_out_fullpacket.bin": "identical (1084544 bytes)",
+    "sic_out_preamble.bin": "identical (1084544 bytes)"
+  }
+}

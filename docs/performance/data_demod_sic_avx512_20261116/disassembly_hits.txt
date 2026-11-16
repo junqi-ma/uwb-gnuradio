@@ -1,0 +1,35 @@
+# Phase-2 AVX-512 hit evidence (2026-11-16)
+
+## zmm instruction count per entry point in uwb_demod_sic_avx512.cc.o
+
+  18  <_ZN2gr3uwb4core4simd6avx51215fold_sfd_windowEPKSt7complexIfEmPKammPS5_>:
+  17  <_ZN2gr3uwb4core4simd6avx51222real_template_dot_8lagEPKSt7complexIfEPKfmPS5_>:
+   6  <_ZN2gr3uwb4core4simd6avx5129sub3_cf32EPSt7complexIfEPKS5_S8_m>:
+   6  <_ZN2gr3uwb4core4simd6avx5128sub_cf32EPSt7complexIfEPKS5_m>:
+   6  <_ZN2gr3uwb4core4simd6avx51215accumulate_cf32EPSt7complexIfEPKS5_m>:
+   5  <_ZN2gr3uwb4core4simd6avx51210scale_cf32EPSt7complexIfEfm>:
+
+## real_template_dot_8lag inner loop (zmm only)
+
+      5c:	vmovaps %zmm1,%zmm2
+      62:	vmovaps %zmm1,%zmm3
+      68:	vmovaps %zmm1,%zmm4
+      70:	vbroadcastf32x8 (%rsi,%rdx,8),%zmm0
+      77:	vfmadd231ps (%rdi,%rdx,8),%zmm0,%zmm4
+      7e:	vfmadd231ps 0x8(%rdi,%rdx,8),%zmm0,%zmm3
+      89:	vfmadd231ps 0x10(%rdi,%rdx,8),%zmm0,%zmm2
+      94:	vfmadd231ps 0x18(%rdi,%rdx,8),%zmm0,%zmm1
+      e4:	vextractf32x8 $0x1,%zmm4,%ymm4
+     17d:	vextractf32x8 $0x1,%zmm3,%ymm3
+     1f9:	vextractf32x8 $0x1,%zmm2,%ymm2
+     283:	vextractf32x8 $0x1,%zmm1,%ymm1
+     33a:	vinsertf64x4 $0x1,%ymm1,%zmm0,%zmm0
+     341:	vmovaps %zmm0,0x40(%rsp)
+     590:	vmovaps %zmm1,%zmm2
+     596:	vmovaps %zmm1,%zmm3
+     59c:	vmovaps %zmm1,%zmm4
+
+## linked binaries: total zmm instruction count
+  gr-uwb/build-avx512-demod-sic/apps/bench_unified_timing : 58
+  gr-uwb/build-avx2-demod-sic/apps/bench_unified_timing : 0
+  gr-uwb/build-scalar-demod-sic/apps/bench_unified_timing : 0

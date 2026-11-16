@@ -405,7 +405,8 @@ BOOST_AUTO_TEST_CASE(test_core_kernel_name_and_scalar_match)
     const std::string kn = core_def.kernel_name();
     BOOST_CHECK(kn.find("volk") != std::string::npos ||
                 kn.find("scalar") != std::string::npos ||
-                kn.find("avx2") != std::string::npos);
+                kn.find("avx2") != std::string::npos ||
+                kn.find("avx512") != std::string::npos);
 
     // Default (AVX2/VOLK macroblock) vs forced scalar — sample-exact within ulps.
     const auto x = load_cf32(find_golden_base("impulse") + "_in.cf32");
@@ -557,11 +558,19 @@ BOOST_AUTO_TEST_CASE(test_core_process_sc16_precision_and_chunking)
                 }
 
                 RationalResampler65_48Core core_ref(taps);
+                RationalResampler65_48Core core_sc16(taps);
+#if UWB_SIMD_HAVE_AVX512
+                // Pin the SAME backend on both paths: the default AVX-512
+                // selection is SC16-only (FC32 stays AVX2), so the
+                // cross-path bit-exactness contract must be checked with the
+                // wide kernel explicitly forced on both.
+                core_ref.set_kernel("avx512");
+                core_sc16.set_kernel("avx512");
+#endif
                 const size_t max_out = RationalResampler65_48Core::expected_output_length(n, taps.size()) + 256;
                 std::vector<gr_complex> out_ref(max_out);
                 auto res_ref = core_ref.process(in_cf32.data(), n, out_ref.data(), max_out);
 
-                RationalResampler65_48Core core_sc16(taps);
                 std::vector<gr_complex> out_sc16(max_out);
                 auto res_sc16 = core_sc16.process_sc16(in_sc16.data(), n, scale, out_sc16.data(), max_out);
 

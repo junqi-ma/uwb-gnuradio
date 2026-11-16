@@ -1,0 +1,64 @@
+{
+  "base_commit": "5d5ba2690907210cf874f8f7efea90983696d906",
+  "source_worktree": "/home/oi/Desktop/uwb-gnuradio",
+  "destination_worktree": "/tmp/uwb-gnuradio-avx512",
+  "branch": "perf/avx512-kernels",
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "sha256": "2780e2452c235c7df8e23afdd379b37299b96a40ad33c25c3bdb91db6c285a23",
+      "source": "tracked modification"
+    },
+    {
+      "path": "README.md",
+      "sha256": "7343b289d85680819283c225068812f0354a1f5c6789f3e4e9fe3c6d31544a0e",
+      "source": "tracked modification"
+    },
+    {
+      "path": "docs/README.md",
+      "sha256": "e9cbb3d83c3c00733499d448a10394c6a85a9b0d1ebfa14346208ff277e80b96",
+      "source": "tracked modification"
+    },
+    {
+      "path": "docs/performance/AVX512内核与编译期CPU选择开发规划_2026-11-16.md",
+      "sha256": "01b6d4d41912e8789320dbd12d506c05d59d2ca1cf9b156dab8a1f3139b7a5c4",
+      "source": "untracked document"
+    },
+    {
+      "path": "docs/performance/X410_2ms周期收包解调报告_2026-11-15.md",
+      "sha256": "249b7e1a5098ad541209e1759ae0272a297ba332956731a947224ff69f25bf32",
+      "source": "tracked modification"
+    },
+    {
+      "path": "docs/原生接收与GNU_Radio构建使用说明.md",
+      "sha256": "1edc0091a18aecb65b6b7538d45c7e8448dcd8e2fa0e3b4966a2e8af80454b0b",
+      "source": "untracked document"
+    },
+    {
+      "path": "docs/当前代码路径现状与后续开发基线.md",
+      "sha256": "ac6127173a0a7b0f881a764685986cffa43b7178cdfc5b64108f33e3adad9f9b",
+      "source": "tracked modification"
+    },
+    {
+      "path": "gr-uwb/README.md",
+      "sha256": "734e1baf141932c22eb68533913eff4fdb5dd7893c14822258d764d297c927df",
+      "source": "tracked modification"
+    },
+    {
+      "path": "gr-uwb/apps/uwb_dw3000_live.cc",
+      "sha256": "7d6ad0e11b5e96b4a1c94f018668b04f113c418595ea64322b815a70ae909b81",
+      "source": "tracked modification"
+    },
+    {
+      "path": "tools/rx/README.md",
+      "sha256": "b9d4b0082072fba7ba3f7476bd0ee97a350743558da1dae4b320ec5561c6e00b",
+      "source": "tracked modification"
+    },
+    {
+      "path": "开发状态.md",
+      "sha256": "b6393ad52fb5ed6594fb0467d848ca5e271a6b2417ad81f13947d164179333d0",
+      "source": "tracked modification"
+    }
+  ],
+  "note": "Inherited source/document snapshot only; no AVX-512 implementation changes. Large IQ, temporary outputs and build trees excluded."
+}

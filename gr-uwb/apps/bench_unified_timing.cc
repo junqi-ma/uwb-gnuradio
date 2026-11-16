@@ -1,6 +1,7 @@
 #include <cmath>
 using std::isinf;
 using std::isnan;
+#include <gnuradio/uwb/uwb_kernel_backend.h>
 #include <gnuradio/uwb/uwb_sic_unified.h>
 #include <chrono>
 #include <iostream>
@@ -13,6 +14,7 @@ using std::isnan;
 
 using namespace gr::uwb;
 using namespace gr::uwb::sic;
+namespace simd = gr::uwb::core::simd;
 using cf = std::complex<float>;
 
 constexpr size_t kSps = 1016;
@@ -58,6 +60,51 @@ SicUnifiedTemplates make_templates(const TestPacket& p)
 }
 
 int main() {
+    // Phase-2 A/B/C/D driver: UWB_KERNEL_BACKEND="sync=avx2,cir=avx512"
+    // pins one backend per kernel group so the same binary can be compared
+    // against itself.  Nothing in the receiver reads this; it is a benchmark
+    // and QA switch only.
+    if (const char* spec = std::getenv("UWB_KERNEL_BACKEND")) {
+        std::string s(spec);
+        size_t pos = 0;
+        while (pos <= s.size()) {
+            const size_t comma = s.find(',', pos);
+            const std::string item =
+                s.substr(pos, comma == std::string::npos ? std::string::npos
+                                                        : comma - pos);
+            const size_t eq = item.find('=');
+            if (eq != std::string::npos) {
+                const std::string group = item.substr(0, eq);
+                const std::string backend = item.substr(eq + 1);
+                bool applied = false;
+                for (int g = 0; g < static_cast<int>(simd::KernelGroup::Count);
+                     ++g) {
+                    const auto kg = static_cast<simd::KernelGroup>(g);
+                    if (group == simd::kernel_group_name(kg)) {
+                        simd::set_kernel_backend(kg, backend);
+                        applied = true;
+                        break;
+                    }
+                }
+                if (!applied) {
+                    std::cerr << "UWB_KERNEL_BACKEND: unknown group '" << group
+                              << "'\n";
+                    return 2;
+                }
+            }
+            if (comma == std::string::npos)
+                break;
+            pos = comma + 1;
+        }
+    }
+    std::cout << "kernel backends:";
+    for (int g = 0; g < static_cast<int>(simd::KernelGroup::Count); ++g) {
+        const auto kg = static_cast<simd::KernelGroup>(g);
+        std::cout << " " << simd::kernel_group_name(kg) << "="
+                  << simd::resolved_backend_name(kg);
+    }
+    std::cout << "\n";
+
     constexpr size_t kCode = 10;
     constexpr size_t kPsduBytes = 32;
     TestPacket pkt(kCode, kPsduBytes);
