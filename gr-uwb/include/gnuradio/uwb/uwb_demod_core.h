@@ -1272,7 +1272,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
                 ++out.fine_correlations;
         }
         bool window_passed = (window_best >= profile.sfd_detection_threshold);
-        if (!window_passed && window_best >= 0.08f &&
+        if (!window_passed && window_best >= 0.02f &&
             scratch.metric.size() == (j_end - j_lo + 1)) {
             const size_t best_off = window_best_j - j_lo;
             double bg_sum = 0.0;
@@ -1287,8 +1287,44 @@ inline bool stage_sfd(const std::complex<float>* rx,
                 const double bg_mean = bg_sum / static_cast<double>(bg_cnt);
                 const double par =
                     static_cast<double>(window_best) / (bg_mean + 1e-12);
-                if (par >= 25.0)
-                    window_passed = true;
+                if (par >= 25.0) {
+                    if (window_best >= 0.08f) {
+                        window_passed = true;
+                    } else if (window_best_j + len * sym <= n) {
+                        // Low-floor fallback (0.02 <= pk < 0.08): verify that
+                        // all SFD symbols coherently match sfd_sequence signs
+                        // to reject shifted-SFD sidelobes (e.g. 0.0625).
+                        std::complex<float> sym_corr[16];
+                        const size_t n_check = std::min<size_t>(len, 16);
+                        std::complex<double> coh_ref(0.0, 0.0);
+                        for (size_t si = 0; si < n_check; ++si) {
+                            const size_t pos = window_best_j + si * sym;
+                            std::complex<float> c(0.0f, 0.0f);
+                            if (use_real_sfd_fast) {
+                                c = rxopt::real_template_dot_single(
+                                    rx + pos, taps_dup, sym);
+                            } else {
+                                for (size_t k = 0; k < sym; ++k)
+                                    c += rx[pos + k] * std::conj(template_wf[k]);
+                            }
+                            sym_corr[si] = c;
+                            coh_ref += static_cast<double>(sfd_sequence[si]) *
+                                       std::complex<double>(c);
+                        }
+                        if (std::norm(coh_ref) > 1e-24) {
+                            size_t sign_ok = 0;
+                            for (size_t si = 0; si < n_check; ++si) {
+                                const double proj =
+                                    static_cast<double>(sym_corr[si].real()) * coh_ref.real() +
+                                    static_cast<double>(sym_corr[si].imag()) * coh_ref.imag();
+                                if (proj * static_cast<double>(sfd_sequence[si]) > 0.0)
+                                    ++sign_ok;
+                            }
+                            if (sign_ok == n_check)
+                                window_passed = true;
+                        }
+                    }
+                }
             }
         }
         if (window_best > best) {

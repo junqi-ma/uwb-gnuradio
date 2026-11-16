@@ -3,6 +3,7 @@
 import argparse
 import csv
 import json
+import math
 import re
 import subprocess
 from pathlib import Path
@@ -225,10 +226,15 @@ def main():
               f"{res['cir_peak']:>7.4f} {res['cir_par']:>6.1f} {res['first_5_max']:>6.3f} "
               f"{res['gt025_all']:>5d} {res['med_front']:>8.3f} {res['med_tail']:>8.3f}")
 
+    n_cases = len(results)
+    ncols = 4
+    nrows = math.ceil(n_cases / ncols)
+    fig_h = 3.2 * nrows
+
     # Plot 1: Tone-cancelled & resampled waveform envelope
-    fig1, axes1 = plt.subplots(3, 4, figsize=(18, 11), sharex=True)
+    fig1, axes1 = plt.subplots(nrows, ncols, figsize=(18, fig_h), sharex=True, squeeze=False)
     for i, (r, res) in enumerate(results):
-        ax = axes1[i // 4, i % 4]
+        ax = axes1[i // ncols, i % ncols]
         ax.plot(res['wf_x_sym'], res['wf_rms'], color='steelblue', linewidth=0.8, label='RMS')
         ax.plot(res['wf_x_sym'], res['wf_max'], color='lightsteelblue', linewidth=0.5, alpha=0.6, label='Peak')
         ax.axvspan(0, 5, color='orange', alpha=0.25, label='SYNC[0..4] search')
@@ -237,21 +243,21 @@ def main():
         ax.set_title(f"#{i+1} slot={r['slot']} t={r['time_ms']:.1f}ms lag={res['best_lag']:+d}", fontsize=9)
         if i == 0:
             ax.legend(fontsize=7, loc='upper right')
-        if i // 4 == 2:
+        if i // ncols == nrows - 1:
             ax.set_xlabel('Symbol index rel. pred')
-        if i % 4 == 0:
+        if i % ncols == 0:
             ax.set_ylabel('Amplitude |x|')
-    fig1.suptitle('12 TIMING_FAILED Windows: Tone-Cancelled & Resampled Waveform Envelope (998.4 MS/s)', fontsize=13)
+    fig1.suptitle(f'{n_cases} TIMING_FAILED Windows: Tone-Cancelled & Resampled Waveform Envelope (998.4 MS/s)', fontsize=13)
     fig1.tight_layout()
-    p1 = args.out_dir / 'timing_failed_12_waveform.png'
+    p1 = args.out_dir / 'timing_failed_waveform.png'
     fig1.savefig(p1, dpi=140)
     plt.close(fig1)
 
     # Plot 2: Per-symbol SYNC[0..255] matched filter metric
-    fig2, axes2 = plt.subplots(3, 4, figsize=(18, 11), sharex=True, sharey=True)
+    fig2, axes2 = plt.subplots(nrows, ncols, figsize=(18, fig_h), sharex=True, sharey=True, squeeze=False)
     sym_idx = np.arange(N_SYNC)
     for i, (r, res) in enumerate(results):
-        ax = axes2[i // 4, i % 4]
+        ax = axes2[i // ncols, i % ncols]
         ax.plot(sym_idx, res['sym_metrics'], color='steelblue', linewidth=0.8)
         ax.axvspan(0, 5, color='orange', alpha=0.25)
         ax.axhline(0.25, color='crimson', linestyle='--', linewidth=0.9, label='thr=0.25')
@@ -259,38 +265,38 @@ def main():
         ax.set_title(f"#{i+1} slot={r['slot']} f5max={res['first_5_max']:.2f} gt025={res['gt025_all']}/256", fontsize=9)
         if i == 0:
             ax.legend(fontsize=7, loc='upper right')
-        if i // 4 == 2:
+        if i // ncols == nrows - 1:
             ax.set_xlabel('SYNC symbol index (0..255)')
-        if i % 4 == 0:
+        if i % ncols == 0:
             ax.set_ylabel('Norm corr |dot|^2/E')
-    fig2.suptitle('12 TIMING_FAILED Windows: Per-Symbol SYNC[0..255] Matched Filter Metric (orange = m=0..4 ROI)', fontsize=13)
+    fig2.suptitle(f'{n_cases} TIMING_FAILED Windows: Per-Symbol SYNC[0..255] Matched Filter Metric (orange = m=0..4 ROI)', fontsize=13)
     fig2.tight_layout()
-    p2 = args.out_dir / 'timing_failed_12_sync_metrics.png'
+    p2 = args.out_dir / 'timing_failed_sync_metrics.png'
     fig2.savefig(p2, dpi=140)
     plt.close(fig2)
 
     # Plot 3: 256-symbol accumulated CIR across lag in [-256, +256]
-    fig3, axes3 = plt.subplots(3, 4, figsize=(18, 11), sharex=True, sharey=True)
+    fig3, axes3 = plt.subplots(nrows, ncols, figsize=(18, fig_h), sharex=True, sharey=True, squeeze=False)
     for i, (r, res) in enumerate(results):
-        ax = axes3[i // 4, i % 4]
+        ax = axes3[i // ncols, i % ncols]
         ax.plot(res['lags'], res['cir_256'], color='navy', linewidth=0.9)
         ax.axvline(res['best_lag'], color='crimson', linestyle='--', linewidth=0.8)
         ax.set_ylim(0.0, 0.55)
         ax.set_title(f"#{i+1} slot={r['slot']} lag={res['best_lag']:+d} pk={res['cir_peak']:.3f} PAR={res['cir_par']:.1f}", fontsize=9)
-        if i // 4 == 2:
+        if i // ncols == nrows - 1:
             ax.set_xlabel('Lag from pred_start (work samples)')
-        if i % 4 == 0:
+        if i % ncols == 0:
             ax.set_ylabel('256-sym mean |dot|^2/E')
-    fig3.suptitle('12 TIMING_FAILED Windows: 256-Symbol Accumulated CIR Matched Filter (lag +-256)', fontsize=13)
+    fig3.suptitle(f'{n_cases} TIMING_FAILED Windows: 256-Symbol Accumulated CIR Matched Filter (lag +-256)', fontsize=13)
     fig3.tight_layout()
-    p3 = args.out_dir / 'timing_failed_12_cir256.png'
+    p3 = args.out_dir / 'timing_failed_cir256.png'
     fig3.savefig(p3, dpi=140)
     plt.close(fig3)
 
     # Plot 4: Continuous 1D matched filter output across all 256 preamble symbols (one long line)
-    fig4, axes4 = plt.subplots(3, 4, figsize=(18, 11), sharex=True, sharey=True)
+    fig4, axes4 = plt.subplots(nrows, ncols, figsize=(18, fig_h), sharex=True, sharey=True, squeeze=False)
     for i, (r, res) in enumerate(results):
-        ax = axes4[i // 4, i % 4]
+        ax = axes4[i // ncols, i % ncols]
         ax.plot(res['cont_x_sym'], res['cont_metric'], color='steelblue', linewidth=0.35)
         ax.axvspan(0, 5, color='orange', alpha=0.25, label='m=0..4 ROI')
         ax.axhline(0.25, color='crimson', linestyle='--', linewidth=0.8, label='thr=0.25')
@@ -299,13 +305,13 @@ def main():
         ax.set_title(f"#{i+1} slot={r['slot']} f5max={res['first_5_max']:.2f} gt025={res['gt025_all']}/256", fontsize=9)
         if i == 0:
             ax.legend(fontsize=7, loc='upper right')
-        if i // 4 == 2:
+        if i // ncols == nrows - 1:
             ax.set_xlabel('Preamble time (symbol index 0..256)')
-        if i % 4 == 0:
+        if i % ncols == 0:
             ax.set_ylabel('Norm corr |dot|^2/E')
-    fig4.suptitle('12 TIMING_FAILED Windows: Continuous 1D Matched Filter Output Across All 256 Preamble Symbols', fontsize=13)
+    fig4.suptitle(f'{n_cases} TIMING_FAILED Windows: Continuous 1D Matched Filter Output Across All 256 Preamble Symbols', fontsize=13)
     fig4.tight_layout()
-    p4 = args.out_dir / 'timing_failed_12_cir_longline.png'
+    p4 = args.out_dir / 'timing_failed_cir_longline.png'
     fig4.savefig(p4, dpi=150)
     plt.close(fig4)
 
