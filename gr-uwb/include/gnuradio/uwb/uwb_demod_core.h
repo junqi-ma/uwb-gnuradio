@@ -1075,7 +1075,6 @@ inline bool stage_sfd(const std::complex<float>* rx,
     // recovers the exact sample.  Window power is a sliding sum so the inner
     // loop only accumulates the correlation.  The result (best_j, metric) is
     // identical to the exhaustive search for a unique peak.
-    constexpr size_t kSfdStride = 8;
     constexpr int64_t kSfdNarrowHalf = 64;
     constexpr int kSfdSymbolOffsets = 4;
     float best = -1.0f;
@@ -1109,71 +1108,77 @@ inline bool stage_sfd(const std::complex<float>* rx,
             rxopt::fold_sfd_window(rx + j_lo, sym, sfd_sequence.data(), len, fold_len, scratch.sfd_folded.data());
         }
 
-        // Coarse pass.
-        for (size_t j = j_lo; j <= j_end; j += kSfdStride) {
-            if (j > j_lo) {
-                for (size_t k = 0; k < kSfdStride; ++k)
-                    pwr += std::norm(rx[j + sfd_len - 1 - k]) -
-                           std::norm(rx[j - 1 - k]);
-            }
-            ++out.coarse_correlations;
-            const std::complex<float> acc = use_real_sfd_fast
-                ? rxopt::real_template_dot_single(scratch.sfd_folded.data() + (j - j_lo), taps_dup, sym) * sfd_scale
-                : sfd_dot(j);
-            const float m = std::norm(acc) / (pwr + 1e-12f);
-            if (m > window_best) {
-                window_best = m;
-                window_best_j = j;
-            }
-        }
-        // Full-rate refinement around the coarse peak.
-        const size_t r_lo =
-            (window_best_j >= j_lo + kSfdStride)
-                ? window_best_j - kSfdStride + 1
-                : j_lo;
-        const size_t r_hi =
-            std::min(j_end, window_best_j + kSfdStride - 1);
-        pwr = 0.0f;
-        for (size_t k = 0; k < sfd_len; ++k)
-            pwr += std::norm(rx[r_lo + k]);
-
-        size_t j = r_lo;
         if (use_real_sfd_fast) {
-            for (; j + 7 <= r_hi; j += 8) {
-                std::complex<float> acc8[8];
-                rxopt::real_template_dot_8lag(
-                    scratch.sfd_folded.data() + (j - j_lo), taps_dup, sym, acc8);
-                for (int m = 0; m < 8; ++m)
-                    acc8[m] *= sfd_scale;
-                for (int m = 0; m < 8; ++m) {
-                    const size_t cur_j = j + static_cast<size_t>(m);
-                    if (cur_j > r_lo)
-                        pwr += std::norm(rx[cur_j + sfd_len - 1]) -
-                               std::norm(rx[cur_j - 1]);
-                    ++out.fine_correlations;
-                    const float metric = std::norm(acc8[m]) / (pwr + 1e-12f);
-                    if (metric > window_best) {
-                        window_best = metric;
-                        window_best_j = cur_j;
+            // Full-rate single pass using the 8-lag AVX-512 kernel: avoids
+            // stride-8 peak-straddling misses on narrow SFD correlation peaks
+            // while eliminating the second window-power initialization.
+            for (size_t j = j_lo; j <= j_end;) {
+                if (j + 7 <= j_end) {
+                    std::complex<float> acc8[8];
+                    rxopt::real_template_dot_8lag(
+                        scratch.sfd_folded.data() + (j - j_lo), taps_dup, sym,
+                        acc8);
+                    for (int m = 0; m < 8; ++m) {
+                        const size_t cur_j = j + static_cast<size_t>(m);
+                        if (cur_j > j_lo)
+                            pwr += std::norm(rx[cur_j + sfd_len - 1]) -
+                                   std::norm(rx[cur_j - 1]);
+                        ++out.coarse_correlations;
+                        const float metric =
+                            std::norm(acc8[m] * sfd_scale) / (pwr + 1e-12f);
+                        if (metric > window_best) {
+                            window_best = metric;
+                            window_best_j = cur_j;
+                        }
                     }
+                    j += 8;
+                } else {
+                    if (j > j_lo)
+                        pwr += std::norm(rx[j + sfd_len - 1]) -
+                               std::norm(rx[j - 1]);
+                    ++out.fine_correlations;
+                    const std::complex<float> acc =
+                        rxopt::real_template_dot_single(
+                            scratch.sfd_folded.data() + (j - j_lo), taps_dup,
+                            sym) *
+                        sfd_scale;
+                    const float m = std::norm(acc) / (pwr + 1e-12f);
+                    if (m > window_best) {
+                        window_best = m;
+                        window_best_j = j;
+                    }
+                    ++j;
                 }
             }
-            for (; j <= r_hi; ++j) {
-                if (j > r_lo)
-                    pwr += std::norm(rx[j + sfd_len - 1]) -
-                           std::norm(rx[j - 1]);
+            if (out.fine_correlations == 0)
                 ++out.fine_correlations;
-                const std::complex<float> acc =
-                    rxopt::real_template_dot_single(
-                        scratch.sfd_folded.data() + (j - j_lo), taps_dup, sym) * sfd_scale;
+        } else {
+            // Fallback non-fast path: stride-2 coarse pass + ±1 fine pass.
+            constexpr size_t kFallbackSfdStride = 2;
+            for (size_t j = j_lo; j <= j_end; j += kFallbackSfdStride) {
+                if (j > j_lo) {
+                    for (size_t k = 0; k < kFallbackSfdStride; ++k)
+                        pwr += std::norm(rx[j + sfd_len - 1 - k]) -
+                               std::norm(rx[j - 1 - k]);
+                }
+                ++out.coarse_correlations;
+                const std::complex<float> acc = sfd_dot(j);
                 const float m = std::norm(acc) / (pwr + 1e-12f);
                 if (m > window_best) {
                     window_best = m;
                     window_best_j = j;
                 }
             }
-        } else {
-            for (; j <= r_hi; ++j) {
+            const size_t r_lo =
+                (window_best_j >= j_lo + kFallbackSfdStride)
+                    ? window_best_j - kFallbackSfdStride + 1
+                    : j_lo;
+            const size_t r_hi =
+                std::min(j_end, window_best_j + kFallbackSfdStride - 1);
+            pwr = 0.0f;
+            for (size_t k = 0; k < sfd_len; ++k)
+                pwr += std::norm(rx[r_lo + k]);
+            for (size_t j = r_lo; j <= r_hi; ++j) {
                 if (j > r_lo)
                     pwr += std::norm(rx[j + sfd_len - 1]) -
                            std::norm(rx[j - 1]);
