@@ -1890,6 +1890,90 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
 // ---------------------------------------------------------------------------
 namespace detail {
 
+// ---------------------------------------------------------------------------
+// Payload sub-stage timing helpers (diagnostic only).
+//
+// `PayloadSubTimer` is an RAII scope guard over the whole payload stage: it
+// snapshots the four named child buckets on construction and, on destruction,
+// adds whatever is left of the enclosing interval to `other_us`.  The five
+// buckets are therefore exactly additive whatever early return the enclosing
+// function takes, and the guard costs two steady_clock reads per payload stage
+// with no allocation and no change to any algorithm path.
+//
+// `PayloadSubBucket` attributes the elapsed time of a nested scope to one named
+// bucket (e.g. the fused CMF plan + correlation).  Nested buckets are children
+// of the same struct, so the outer guard's remainder automatically shrinks by
+// the same amount: no double counting.
+// ---------------------------------------------------------------------------
+inline uint64_t payload_sub_total(const PayloadSubTimers& s)
+{
+    // Includes `other_us` so nested guards stay additive: an inner guard adds
+    // its remainder to `other_us`, and the outer guard subtracts everything
+    // already attributed (including that remainder) from its own interval.
+    return s.soft_us + s.viterbi_us + s.rs_us + s.crc_us + s.other_us;
+}
+
+// Elapsed microseconds since `t0`, truncated exactly like the parent laps.
+inline uint64_t payload_elapsed_us(std::chrono::steady_clock::time_point t0)
+{
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - t0)
+            .count());
+}
+
+class PayloadSubTimer
+{
+public:
+    explicit PayloadSubTimer(PayloadSubTimers* s)
+        : s_(s),
+          t0_(s ? std::chrono::steady_clock::now()
+                : std::chrono::steady_clock::time_point()),
+          base_(s ? payload_sub_total(*s) : 0)
+    {
+    }
+    ~PayloadSubTimer()
+    {
+        if (!s_)
+            return;
+        const uint64_t total = payload_elapsed_us(t0_);
+        const uint64_t spent = payload_sub_total(*s_) - base_;
+        if (total > spent)
+            s_->other_us += total - spent;
+    }
+    PayloadSubTimer(const PayloadSubTimer&) = delete;
+    PayloadSubTimer& operator=(const PayloadSubTimer&) = delete;
+
+private:
+    PayloadSubTimers* s_;
+    std::chrono::steady_clock::time_point t0_;
+    uint64_t base_;
+};
+
+class PayloadSubBucket
+{
+public:
+    PayloadSubBucket(PayloadSubTimers* s, uint64_t PayloadSubTimers::*member)
+        : s_(s),
+          member_(member),
+          t0_(s ? std::chrono::steady_clock::now()
+                : std::chrono::steady_clock::time_point())
+    {
+    }
+    ~PayloadSubBucket()
+    {
+        if (s_)
+            s_->*member_ += payload_elapsed_us(t0_);
+    }
+    PayloadSubBucket(const PayloadSubBucket&) = delete;
+    PayloadSubBucket& operator=(const PayloadSubBucket&) = delete;
+
+private:
+    PayloadSubTimers* s_;
+    uint64_t PayloadSubTimers::*member_;
+    std::chrono::steady_clock::time_point t0_;
+};
+
 // IEEE 802.15.4a BPRF data-scrambler spreading (lrwpan.internal.createScrambler):
 // a 15-bit LFSR with s[i] = s[i-14] ^ s[i-15].  The initial state depends
 // on the preamble code index; values below were exported from MATLAB R2025b
@@ -2463,8 +2547,10 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
                                 const std::vector<int8_t>& g0,
                                 const std::vector<int8_t>& g1,
                                 size_t psdu_bits,
-                                PayloadResult& out)
+                                PayloadResult& out,
+                                PayloadSubTimers* sub = nullptr)
 {
+    PayloadSubTimer sub_guard(sub);
     out = PayloadResult{};
     if (g0p.size() != 21 || g1p.size() != 21 || g0.empty() ||
         g0.size() != g1.size())
@@ -2481,7 +2567,10 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
         rx_bits[2 * (s + 21) + 1] = g1[s];
     }
     std::vector<int8_t> decoded;
+    const auto t_vit = std::chrono::steady_clock::now();
     vitdec_cl3(rx_bits.data(), total, decoded);
+    if (sub)
+        sub->viterbi_us += payload_elapsed_us(t_vit);
     if (decoded.size() < total)
         return false;
 
@@ -2490,9 +2579,15 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
     if (rs_cw.size() != g0.size())
         return false;
     std::vector<int8_t> psdu_bits_out;
-    if (!rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out))
+    const auto t_rs = std::chrono::steady_clock::now();
+    const bool rs_ok = rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out);
+    if (sub)
+        sub->rs_us += payload_elapsed_us(t_rs);
+    if (!rs_ok)
         return false;
 
+    // PSDU assembly + FCS: bit packing, CRC-16 and the comparison.
+    const auto t_crc = std::chrono::steady_clock::now();
     out.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
     out.bytes.resize(psdu_bits_out.size() / 8);
     for (size_t i = 0; i < out.bytes.size(); ++i) {
@@ -2511,6 +2606,8 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
                             << 8);
         out.fcs_pass = (out.received_fcs == out.calculated_fcs);
     }
+    if (sub)
+        sub->crc_us += payload_elapsed_us(t_crc);
     out.ok = true;
     return true;
 }
@@ -2949,8 +3046,17 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
                               const NsSfdResult& ns_sfd,
                               size_t chips_per_symbol,
                               PayloadResult& out,
-                              DemodScratch& scratch)
+                              DemodScratch& scratch,
+                              PayloadSubTimers* sub = nullptr)
 {
+    // Diagnostic child timing of `stage_payload_us`.  `sub_guard` attributes the
+    // remainder of this function to `other_us`; the named buckets are filled
+    // around the exact calls that produce them.  Passing `sub == nullptr`
+    // (e.g. the full-stream fallback retry, which is accounted in its own
+    // bucket) disables all of it.
+    detail::PayloadSubTimer sub_guard(sub);
+    if (sub)
+        ++sub->legacy_calls;
     out = PayloadResult{};
     if (soft_chips.empty() || !phr.ok || !ns_sfd.ok || phr.psdu_length == 0)
         return false;
@@ -2973,11 +3079,17 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
         const size_t num_blocks = (psdu_bits + 329) / 330;
         const size_t nsym = psdu_bits + 48 * num_blocks;
         std::vector<int8_t> g0p, g1p, g0, g1;
-        if (detail::bprf_demod(soft_chips, phr_start, profile.code_index, 21,
+        const auto t_soft = std::chrono::steady_clock::now();
+        const bool demod_ok =
+            detail::bprf_demod(soft_chips, phr_start, profile.code_index, 21,
                                64, 512, 0, pol, g0p, g1p) &&
             detail::bprf_demod(soft_chips, payload_start, profile.code_index,
-                               nsym, 8, 64, 1344, pol, g0, g1)) {
-            if (detail::decode_payload_hard(g0p, g1p, g0, g1, psdu_bits, out)) {
+                               nsym, 8, 64, 1344, pol, g0, g1);
+        if (sub)
+            sub->soft_us += detail::payload_elapsed_us(t_soft);
+        if (demod_ok) {
+            if (detail::decode_payload_hard(g0p, g1p, g0, g1, psdu_bits, out,
+                                            sub)) {
                 any_ok = true;
                 if (out.fcs_pass)
                     return true;
@@ -3019,13 +3131,17 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
         for (int8_t pol : pols) {
             std::vector<int8_t> g0p, g1p, g0, g1;
             std::vector<float> llr0p, llr1p, llr0, llr1;
-            if (!detail::bprf_demod_soft(soft_chips, phr_start,
-                                         profile.code_index, 21, 64, 512, 0,
-                                         pol, g0p, g1p, llr0p, llr1p))
-                continue;
-            if (!detail::bprf_demod_soft(soft_chips, payload_start,
-                                         profile.code_index, nsym, 8, 64,
-                                         1344, pol, g0, g1, llr0, llr1))
+            const auto t_soft = std::chrono::steady_clock::now();
+            const bool soft_ok =
+                detail::bprf_demod_soft(soft_chips, phr_start,
+                                        profile.code_index, 21, 64, 512, 0,
+                                        pol, g0p, g1p, llr0p, llr1p) &&
+                detail::bprf_demod_soft(soft_chips, payload_start,
+                                        profile.code_index, nsym, 8, 64,
+                                        1344, pol, g0, g1, llr0, llr1);
+            if (sub)
+                sub->soft_us += detail::payload_elapsed_us(t_soft);
+            if (!soft_ok)
                 continue;
 
             const size_t total = 21 + nsym;
@@ -3039,7 +3155,10 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
                 llr1j[s + 21] = llr1[s];
             }
             std::vector<int8_t> decoded;
+            const auto t_vit = std::chrono::steady_clock::now();
             detail::vitdec_cl3_soft(llr0j.data(), llr1j.data(), total, decoded);
+            if (sub)
+                sub->viterbi_us += detail::payload_elapsed_us(t_vit);
             if (decoded.size() < total)
                 continue;
 
@@ -3049,9 +3168,16 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
                 continue;
 
             std::vector<int8_t> psdu_bits_out;
-            if (!detail::rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out))
+            const auto t_rs = std::chrono::steady_clock::now();
+            const bool rs_ok =
+                detail::rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out);
+            if (sub)
+                sub->rs_us += detail::payload_elapsed_us(t_rs);
+            if (!rs_ok)
                 continue;
 
+            // PSDU assembly + FCS: bit packing, CRC-16 and the comparison.
+            const auto t_crc = std::chrono::steady_clock::now();
             const size_t nbytes = psdu_bits_out.size() / 8;
             PayloadResult cand;
             cand.bytes.resize(nbytes);
@@ -3073,6 +3199,8 @@ inline bool stage_payload_fcs(const std::vector<float>& soft_chips,
                     (cand.received_fcs == cand.calculated_fcs);
             }
             cand.ok = true;
+            if (sub)
+                sub->crc_us += detail::payload_elapsed_us(t_crc);
             if (!any_ok || cand.fcs_pass) {
                 out = cand;
                 any_ok = true;
@@ -3133,8 +3261,13 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
                                     uint64_t& decode_ns,
                                     size_t& symbols_out,
                                     const std::vector<int8_t>* phr_g0 = nullptr,
-                                    const std::vector<int8_t>* phr_g1 = nullptr)
+                                    const std::vector<int8_t>* phr_g1 = nullptr,
+                                    PayloadSubTimers* sub = nullptr)
 {
+    // Diagnostic child timing of `stage_payload_us`; see stage_payload_fcs().
+    detail::PayloadSubTimer sub_guard(sub);
+    if (sub)
+        ++sub->fused_calls;
     out = PayloadResult{};
     template_us = 0;
     correlate_us = 0;
@@ -3225,59 +3358,70 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
         static_cast<int64_t>(stream_chips))
         return false;
 
-    const auto t_plan0 = std::chrono::steady_clock::now();
-    if (!prepare_fused_payload_pn(scratch, profile.code_index, symbols))
-        return false;
-    const auto t_plan1 = std::chrono::steady_clock::now();
-    const uint64_t plan_us = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(t_plan1 - t_plan0)
-            .count());
-
     const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
     rxfusion::Timings timings;
-    if (!rxfusion::correlate_payload(
-            scratch.derotated.data(), n, cir.cir_filter_taps.data(),
-            tap_count, chip_start, rxfusion::kSamplesPerChip, payload_start,
-            scratch.fused.pn.data(), symbols, pol, scratch.softchip.rot,
-            scratch.fused.metrics, scratch.fused.kernel, &timings))
-        return false;
-    template_us = plan_us + timings.template_update_us;
-    correlate_us = timings.correlate_us;
-    for (float v : scratch.fused.metrics.signed_value) {
-        if (!std::isfinite(v))
+    {
+        // PN build + four-candidate correlation is the fused "soft bit"
+        // generation; it is the soft bucket of this path.
+        detail::PayloadSubBucket soft_bucket(sub, &PayloadSubTimers::soft_us);
+        const auto t_plan0 = std::chrono::steady_clock::now();
+        if (!prepare_fused_payload_pn(scratch, profile.code_index, symbols))
             return false;
+        const auto t_plan1 = std::chrono::steady_clock::now();
+        const uint64_t plan_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(t_plan1 -
+                                                                  t_plan0)
+                .count());
+
+        if (!rxfusion::correlate_payload(
+                scratch.derotated.data(), n, cir.cir_filter_taps.data(),
+                tap_count, chip_start, rxfusion::kSamplesPerChip, payload_start,
+                scratch.fused.pn.data(), symbols, pol, scratch.softchip.rot,
+                scratch.fused.metrics, scratch.fused.kernel, &timings))
+            return false;
+        template_us = plan_us + timings.template_update_us;
+        correlate_us = timings.correlate_us;
+        for (float v : scratch.fused.metrics.signed_value) {
+            if (!std::isfinite(v))
+                return false;
+        }
     }
 
     const auto t_decode0 = std::chrono::steady_clock::now();
     std::vector<int8_t> local_g0p, local_g1p, g0, g1;
     const std::vector<int8_t>* g0p = phr_g0;
     const std::vector<int8_t>* g1p = phr_g1;
-    if (g0p || g1p) {
-        if (!g0p || !g1p || g0p->size() != 21 || g1p->size() != 21) {
-            decode_ns = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - t_decode0)
-                    .count());
-            decode_us = decode_ns / 1000;
-            return false;
+    {
+        // PHR re-demod (only when the fused PHR stage supplied no decisions) and
+        // the BPM decisions belong to the metric-generation bucket.
+        detail::PayloadSubBucket soft_bucket(sub, &PayloadSubTimers::soft_us);
+        if (g0p || g1p) {
+            if (!g0p || !g1p || g0p->size() != 21 || g1p->size() != 21) {
+                decode_ns = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t_decode0)
+                        .count());
+                decode_us = decode_ns / 1000;
+                return false;
+            }
+        } else {
+            if (!detail::bprf_demod(prefix_soft_chips, phr_start,
+                                    profile.code_index, 21, 64, 512, 0, pol,
+                                    local_g0p, local_g1p)) {
+                decode_ns = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t_decode0)
+                        .count());
+                decode_us = decode_ns / 1000;
+                return false;
+            }
+            g0p = &local_g0p;
+            g1p = &local_g1p;
         }
-    } else {
-        if (!detail::bprf_demod(prefix_soft_chips, phr_start,
-                                profile.code_index, 21, 64, 512, 0, pol,
-                                local_g0p, local_g1p)) {
-            decode_ns = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - t_decode0)
-                    .count());
-            decode_us = decode_ns / 1000;
-            return false;
-        }
-        g0p = &local_g0p;
-        g1p = &local_g1p;
+        rxfusion::decide_bpm(scratch.fused.metrics, g0, g1);
     }
-    rxfusion::decide_bpm(scratch.fused.metrics, g0, g1);
-    const bool decoded =
-        detail::decode_payload_hard(*g0p, *g1p, g0, g1, psdu_bits, out);
+    const bool decoded = detail::decode_payload_hard(*g0p, *g1p, g0, g1,
+                                                     psdu_bits, out, sub);
     decode_ns = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - t_decode0)
@@ -3317,7 +3461,20 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     // before each return, so result coordinates match the schema (absolute).
     const int64_t rel_seed =
         (predicted_start >= 0) ? predicted_start - window_start : -1;
+    // Diagnostic payload sub-stage timers.  They are children of
+    // `stage_payload_us` (never added to `stage_total_us`) and are published
+    // from `rebase()` so every exit path reports them without touching any
+    // parent lap interval.
+    PayloadSubTimers payload_sub;
     auto rebase = [&]() {
+        res.stage_payload_soft_us = payload_sub.soft_us;
+        res.stage_payload_viterbi_us = payload_sub.viterbi_us;
+        res.stage_payload_rs_us = payload_sub.rs_us;
+        res.stage_payload_crc_us = payload_sub.crc_us;
+        res.stage_payload_other_us = payload_sub.other_us;
+        res.stage_payload_derotate_us = payload_sub.other_derotate_us;
+        res.stage_payload_fused_calls = payload_sub.fused_calls;
+        res.stage_payload_legacy_calls = payload_sub.legacy_calls;
         if (window_start == 0)
             return;
         if (res.timing.ok) {
@@ -4233,6 +4390,12 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                 const size_t pay_hi = static_cast<size_t>(
                     std::min<int64_t>(static_cast<int64_t>(n), last_sample + 64));
                 if (pay_lo < pay_hi) {
+                    // This payload-region CFO derotation runs inside the
+                    // `stage_payload_us` lap but outside the payload decoder, so
+                    // attribute it to the payload `other` bucket explicitly;
+                    // otherwise the child sum would fall short of the parent by
+                    // the rotation cost (~36 µs on the golden window).
+                    const auto t_payrot = std::chrono::steady_clock::now();
                     uint64_t rot_pay_us = 0;
                     uint32_t rk_pay = 0;
                     derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, pay_lo,
@@ -4241,6 +4404,10 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                     res.stage_cfo_rotated_samples += (pay_hi - pay_lo);
                     ++res.stage_cfo_rotation_passes;
                     sec_derotated_hi = std::max(sec_derotated_hi, pay_hi);
+                    const uint64_t payrot_us =
+                        detail::payload_elapsed_us(t_payrot);
+                    payload_sub.other_us += payrot_us;
+                    payload_sub.other_derotate_us += payrot_us;
                 }
 
                 ++res.stage_fused_attempts;
@@ -4262,7 +4429,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                     scratch.soft_chips, res.ns_sfd, res.phr, res.payload,
                     scratch, fused_template_us, fused_correlate_us,
                     fused_decode_us, fused_decode_ns, fused_symbols,
-                    cached_g0, cached_g1);
+                    cached_g0, cached_g1, &payload_sub);
                 res.stage_fused_template_us += fused_template_us;
                 res.stage_fused_correlate_us += fused_correlate_us;
                 res.stage_fused_decode_us += fused_decode_us;
@@ -4330,7 +4497,7 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         if (ok) {
             ok = stage_payload_fcs(scratch.soft_chips, profile, res.phr,
                                    res.ns_sfd, kQm35ChipsPerSymbol,
-                                   res.payload, scratch);
+                                   res.payload, scratch, &payload_sub);
             lap(res.stage_payload_us);
             if (ok && !res.payload.fcs_pass)
                 ok = false;
@@ -4442,7 +4609,8 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     lap(res.stage_phr_us);
     // Stage 7: payload BPM-BPSK + RS + FCS.
     if (!stage_payload_fcs(scratch.soft_chips, profile, res.phr, res.ns_sfd,
-                           kQm35ChipsPerSymbol, res.payload, scratch)) {
+                           kQm35ChipsPerSymbol, res.payload, scratch,
+                           &payload_sub)) {
         lap(res.stage_payload_us);
         res.status = DemodStatus::PayloadFailed;
         rebase();
@@ -4539,7 +4707,8 @@ bool stage_payload_fcs(const std::vector<float>& soft_chips,
                        const NsSfdResult& ns_sfd,
                        size_t chips_per_symbol,
                        PayloadResult& out,
-                       DemodScratch& scratch);
+                       DemodScratch& scratch,
+                       PayloadSubTimers* sub);
 
 // ---------------------------------------------------------------------------
 // Full pipeline: runs all stages in order, stopping at the first failure.

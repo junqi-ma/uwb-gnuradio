@@ -2407,6 +2407,90 @@ BOOST_AUTO_TEST_CASE(test_demod_core_softchip_fallback_timing_accounting)
     BOOST_CHECK_GE(res.stage_cfo_rotated_samples, rx.size());
 }
 
+BOOST_AUTO_TEST_CASE(test_demod_core_payload_substage_timers_partition_parent)
+{
+    // The payload sub-stage timers (soft / viterbi / rs / crc / other) are
+    // diagnostic CHILDREN of stage_payload_us.  `other` is the exact remainder,
+    // so the five buckets must sum to the in-function payload interval and can
+    // never exceed the parent lap.  The only allowed difference is the
+    // call/lap overhead (a few µs at 1 µs clock resolution).
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+
+    auto check_partition = [&](const DemodResult& res, const char* label) {
+        BOOST_TEST_CONTEXT(label) {
+            const uint64_t sum = res.stage_payload_soft_us +
+                                 res.stage_payload_viterbi_us +
+                                 res.stage_payload_rs_us +
+                                 res.stage_payload_crc_us +
+                                 res.stage_payload_other_us;
+            BOOST_TEST_MESSAGE(label << ": payload=" << res.stage_payload_us
+                                     << " soft=" << res.stage_payload_soft_us
+                                     << " vit=" << res.stage_payload_viterbi_us
+                                     << " rs=" << res.stage_payload_rs_us
+                                     << " crc=" << res.stage_payload_crc_us
+                                     << " other=" << res.stage_payload_other_us
+                                     << " sum=" << sum
+                                     << " fused_calls="
+                                     << res.stage_payload_fused_calls
+                                     << " legacy_calls="
+                                     << res.stage_payload_legacy_calls);
+            // Decoded successfully, so the payload stage really ran.
+            BOOST_REQUIRE(res.status == DemodStatus::Success);
+            BOOST_REQUIRE(res.payload.fcs_pass);
+            BOOST_REQUIRE_GE(res.stage_payload_fused_calls +
+                                 res.stage_payload_legacy_calls,
+                             1u);
+            // Children never exceed the parent lap.
+            BOOST_CHECK_LE(sum, res.stage_payload_us);
+            // ... and the gap is only call overhead, not a missing bucket.
+            BOOST_CHECK_LE(res.stage_payload_us - sum, 20u);
+            BOOST_CHECK_GT(sum, 0u);
+            // The three dominant buckets must be attributed, not dumped into
+            // `other` (µs truncation keeps them strictly positive here).
+            BOOST_CHECK_GT(res.stage_payload_soft_us, 0u);
+            BOOST_CHECK_GT(res.stage_payload_viterbi_us, 0u);
+            BOOST_CHECK_GT(res.stage_payload_rs_us + res.stage_payload_crc_us,
+                           0u);
+        }
+    };
+
+    // Legacy payload backend.
+    {
+        auto prof = Qm35825Profile::Default();
+        prof.sfd_mode = "ieee";
+        prof.rx_fast_sfd = true;
+        prof.rx_fused_payload_cmf = false;
+        prof.rx_fused_phr_cmf = false;
+        prof.rx_softchip_on_demand = false;
+        core::DemodScratch scratch;
+        scratch.reserve(iq.size());
+        auto res = core::demodulate_one(iq.data(), iq.size(), prof, 1, 9984, 0,
+                                        load_reference_template(), scratch);
+        check_partition(res, "legacy");
+        BOOST_CHECK_GE(res.stage_payload_legacy_calls, 1u);
+        BOOST_CHECK_EQUAL(res.stage_payload_fused_calls, 0u);
+    }
+
+    // Fused CMF payload backend (the live default).
+    {
+        auto prof = Qm35825Profile::Default();
+        prof.sfd_mode = "ieee";
+        prof.rx_fast_sfd = true;
+        prof.rx_fast_cfo_rotation = true;
+        prof.rx_softchip_on_demand = true;
+        prof.rx_fused_payload_cmf = true;
+        prof.rx_fused_phr_cmf = true;
+        core::DemodScratch scratch;
+        scratch.reserve(iq.size());
+        auto res = core::demodulate_one(iq.data(), iq.size(), prof, 1, 9984, 0,
+                                        load_reference_template(), scratch);
+        check_partition(res, "fused");
+        BOOST_CHECK_EQUAL(res.stage_softchip_fallbacks, 0u);
+        BOOST_CHECK_GE(res.stage_payload_fused_calls, 1u);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(test_demod_core_real_sync_dot_numeric_equivalence)
 {
     const size_t L = 1016;

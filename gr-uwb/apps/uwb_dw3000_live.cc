@@ -314,6 +314,20 @@ struct Reporter {
                  << " taps=" << r->cir.cir_filter_taps.size()
                  << " grid_reject=" << r->stage_grid_rejects
                  << " st_fused=" << r->stage_fused_attempts
+                 // Payload children (already inside st_payload; never added to
+                 // st_total).  soft+viterbi+rs+crc+other equals the in-function
+                 // payload interval, so st_payload minus their sum is only the
+                 // call/lap overhead.  pay_fused_calls / pay_legacy_calls show
+                 // which payload backend ran and therefore how much of
+                 // st_payload the children actually cover.
+                 << " pay_soft=" << r->stage_payload_soft_us
+                 << " pay_vit=" << r->stage_payload_viterbi_us
+                 << " pay_rs=" << r->stage_payload_rs_us
+                 << " pay_crc=" << r->stage_payload_crc_us
+                 << " pay_other=" << r->stage_payload_other_us
+                 << " pay_derot=" << r->stage_payload_derotate_us
+                 << " pay_fused_calls=" << r->stage_payload_fused_calls
+                 << " pay_legacy_calls=" << r->stage_payload_legacy_calls
                  // SFD children (already inside st_sfd; never added again).
                  << " sfd_boot=" << r->stage_sfd_bootstrap_us
                  << " sfd_tail=" << r->stage_sfd_tail_retrack_us

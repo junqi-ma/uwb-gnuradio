@@ -203,6 +203,39 @@ struct PayloadResult {
 };
 
 // ---------------------------------------------------------------------------
+// Diagnostic CHILD sub-timers of `stage_payload_us`.
+//
+// The five microsecond buckets are mutually exclusive and additive: they
+// partition the interval measured *inside* stage_payload_fcs() /
+// stage_payload_fused_cmf(), and `other_us` is computed as the exact remainder
+// after the four named buckets have been subtracted.  Therefore
+//
+//     soft_us + viterbi_us + rs_us + crc_us + other_us
+//         == in-function payload interval
+//         <= stage_payload_us
+//
+// and the only difference to `stage_payload_us` is the call/lap overhead
+// (a few µs at most).  They are published for diagnostics only and must NEVER
+// be added to `stage_total_us`: the parent lap already contains them.
+// ---------------------------------------------------------------------------
+struct PayloadSubTimers {
+    uint64_t soft_us = 0;      // BPM metric generation: bprf_demod[_soft] and
+                               // the fused CMF PN build + four-candidate
+                               // correlation
+    uint64_t viterbi_us = 0;   // vitdec_cl3 / vitdec_cl3_soft (joint PHR+payload)
+    uint64_t rs_us = 0;        // rs_decode_stream
+    uint64_t crc_us = 0;       // PSDU bit packing + crc16_802154 + FCS compare
+    uint64_t other_us = 0;     // remainder: admission checks, buffer assembly
+    // Diagnostic CHILD of `other_us` (NOT a sixth additive bucket): the
+    // payload-region CFO derotation that runs inside the stage_payload_us lap
+    // but outside the payload decoder.  `other_us - other_derotate_us` is the
+    // true "everything else" remainder.
+    uint64_t other_derotate_us = 0;
+    uint32_t fused_calls = 0;  // stage_payload_fused_cmf invocations
+    uint32_t legacy_calls = 0; // stage_payload_fcs invocations
+};
+
+// ---------------------------------------------------------------------------
 // Per-job result: one per input PDU.  Any stage failure still emits a full
 // result with ok=false up to the failing stage.
 // ---------------------------------------------------------------------------
@@ -278,6 +311,24 @@ struct DemodResult {
     uint64_t stage_fused_correlate_us = 0; // four-candidate correlations
     uint64_t stage_fused_decode_us = 0;  // PHR cache + BPM/FEC/FCS decode
     uint64_t stage_fused_decode_ns = 0;  // same interval, nanosecond resolution
+    // Diagnostic CHILD sub-timers of `stage_payload_us` (see PayloadSubTimers).
+    // `stage_payload_other_us` is the exact remainder, so
+    // soft+viterbi+rs+crc+other equals the in-function payload interval and the
+    // gap to `stage_payload_us` is only call overhead.  These are NEVER added to
+    // `stage_total_us`: the parent lap already contains them.
+    // `stage_payload_fused_calls` / `stage_payload_legacy_calls` count how many
+    // times each payload backend ran, i.e. the coverage of the sub-timers.
+    uint64_t stage_payload_soft_us = 0;
+    uint64_t stage_payload_viterbi_us = 0;
+    uint64_t stage_payload_rs_us = 0;
+    uint64_t stage_payload_crc_us = 0;
+    uint64_t stage_payload_other_us = 0;
+    // CHILD of `stage_payload_other_us` (not a sixth additive bucket): the
+    // payload-region CFO derotation.  `stage_payload_other_us -
+    // stage_payload_derotate_us` is the true "everything else" remainder.
+    uint64_t stage_payload_derotate_us = 0;
+    uint32_t stage_payload_fused_calls = 0;
+    uint32_t stage_payload_legacy_calls = 0;
     // Experimental fused PHR CMF/despread path.  These sub-timers are
     // CHILDREN of `stage_phr_us`, like the payload ones above.
     uint32_t stage_phr_fused_attempts = 0;
