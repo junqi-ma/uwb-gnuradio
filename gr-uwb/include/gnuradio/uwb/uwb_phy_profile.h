@@ -199,6 +199,29 @@ struct Qm35825Profile {
     // and always falls back to the legacy radius if the narrow search misses.
     size_t timing_seed_refine_radius = 0;
 
+    // ---- SFD-anchored CFO refit policy -----------------------------------
+    // `demodulate_one` estimates the carrier offset twice: once from the
+    // Stage-1 SYNC peak train (all repetitions, minus the startup exclusion)
+    // and once from the 40-SYNC tail that the SFD anchor re-tracks.  The second
+    // fit is followed by a full-frame derotation of the whole downstream span,
+    // which is one of the largest single costs in the demodulator (measured
+    // ~200 us/packet on the X410 1 ms captures).
+    //   0 = Legacy: always refit and always run the second rotation.  This is
+    //       the default and is byte-identical to the pre-existing behaviour.
+    //   1 = Auto:   keep the Stage-2 estimate and skip the second rotation when
+    //       (a) the two fits disagree by less than `cfo_refit_skip_rad` of
+    //       accumulated phase over the downstream span, (b) the Stage-2 fit
+    //       used at least `cfo_refit_min_peaks` peaks, and (c) the predicted
+    //       single-pass rotation range provably covers the actual one.  Any
+    //       failed condition falls back to the legacy path (fail-closed).
+    //   2 = Skip:   same as Auto without (a)/(b); the range containment check
+    //       is still enforced.
+    int cfo_refit_mode = 0;
+    // Auto only: maximum |2*pi*delta_f*span/fs| (rad) accepted for the skip.
+    double cfo_refit_skip_rad = 0.10;
+    // Auto only: minimum Stage-2 peaks for the skip.
+    size_t cfo_refit_min_peaks = 64;
+
     // Early termination: stop receiver processing right after Final SFD is verified
     // and preamble_start_sample / CFO are anchored. Skips CIR, PHR, and Payload.
     bool rx_stop_after_sfd = false;
