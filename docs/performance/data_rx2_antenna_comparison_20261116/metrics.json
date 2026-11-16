@@ -1,0 +1,340 @@
+[
+  {
+    "metadata": {
+      "rate": 737280000.0,
+      "freq": 6489599999.999992,
+      "gain": 60.0,
+      "channel": 2,
+      "antenna": "RX1",
+      "requested": 737280000,
+      "got": 737280000,
+      "duration_ms": 1000.0,
+      "errors": [],
+      "chunks": 704,
+      "file": "/media/oi/Data/uwb/antenna_comparison/2026-11-16_151907/ch2_rx2_no_antenna_r02_1s.sc16"
+    },
+    "source": "/media/oi/Data/uwb/antenna_comparison/2026-11-16_151907/ch2_rx2_no_antenna_r02_1s.sc16",
+    "windows": 999,
+    "fft_bin_hz": 22500.0,
+    "full_record_welch_coverage_fraction": 0.9777777777777777,
+    "gap_window_samples": 131072,
+    "gap_phase_samples": 637604,
+    "folded_profile_contrast_db": 0.023996650696248917,
+    "tone_dbfs": -47.95707390120981,
+    "estimated_floor_dbfs_hz": -135.40453061592706,
+    "raw_rms_lsb": 212.60241811906423,
+    "peak_component_lsb": 827,
+    "clipped_components": 0,
+    "bands": [
+      {
+        "baseband_mhz": [
+          -183,
+          -173
+        ],
+        "rf_mhz": [
+          6306.6,
+          6316.6
+        ],
+        "total_dbfs": -61.41911105231482,
+        "total_over_floor_db": 3.9799942726893187,
+        "excess_dbfs": -63.63720246965782,
+        "total_dbfs_p50_p95_max": [
+          -61.42133498387058,
+          -61.22854137626096,
+          -61.0697323656769
+        ]
+      },
+      {
+        "baseband_mhz": [
+          -118,
+          -108
+        ],
+        "rf_mhz": [
+          6371.6,
+          6381.6
+        ],
+        "total_dbfs": -62.27979330055035,
+        "total_over_floor_db": 3.1290824331169045,
+        "excess_dbfs": -65.17447325774069,
+        "total_dbfs_p50_p95_max": [
+          -62.28716896785422,
+          -62.048274690301916,
+          -61.79392875770083
+        ]
+      },
+      {
+        "baseband_mhz": [
+          -105,
+          -86
+        ],
+        "rf_mhz": [
+          6384.6,
+          6403.6
+        ],
+        "total_dbfs": -59.84401875516045,
+        "total_over_floor_db": 2.7752622133964517,
+        "excess_dbfs": -63.102808028372415,
+        "total_dbfs_p50_p95_max": [
+          -59.84359678614227,
+          -59.70931273664033,
+          -59.558759767116555
+        ]
+      },
+      {
+        "baseband_mhz": [
+          -44,
+          -27
+        ],
+        "rf_mhz": [
+          6445.6,
+          6462.6
+        ],
+        "total_dbfs": -61.27828835165051,
+        "total_over_floor_db": 1.8249475668710562,
+        "excess_dbfs": -65.92419569426498,
+        "total_dbfs_p50_p95_max": [
+          -61.27951772939666,
+          -61.13300403530975,
+          -60.97457672247053
+        ]
+      },
+      {
+        "baseband_mhz": [
+          -9,
+          1
+        ],
+        "rf_mhz": [
+          6480.6,
+          6490.6
+        ],
+        "total_dbfs": -64.41719211243482,
+        "total_over_floor_db": 0.9819132125693104,
+        "excess_dbfs": -71.35601453986636,
+        "total_dbfs_p50_p95_max": [
+          -64.4159384405563,
+          -64.22813930977082,
+          -64.04023918755497
+        ]
+      }
+    ],
+    "lines": [
+      {
+        "baseband_mhz": -58.88,
+        "rf_mhz": 6430.72,
+        "excess_dbfs": null,
+        "peak_over_local_db": 0.04746843180875189
+      },
+      {
+        "baseband_mhz": 94.72,
+        "rf_mhz": 6584.320000000001,
+        "excess_dbfs": -98.42813239664028,
+        "peak_over_local_db": 0.7371778164011332
+      },
+      {
+        "baseband_mhz": 12.8,
+        "rf_mhz": 6502.400000000001,
+        "excess_dbfs": -104.33696443698341,
+        "peak_over_local_db": 0.07072520747442985
+      },
+      {
+        "baseband_mhz": 115.2,
+        "rf_mhz": 6604.8,
+        "excess_dbfs": null,
+        "peak_over_local_db": 0.03884326717215679
+      },
+      {
+        "baseband_mhz": -263.68,
+        "rf_mhz": 6225.92,
+        "excess_dbfs": null,
+        "peak_over_local_db": 0.09806513056236821
+      },
+      {
+        "baseband_mhz": 258.57,
+        "rf_mhz": 6748.17,
+        "excess_dbfs": -108.51801393848191,
+        "peak_over_local_db": 0.12601677046600873
+      },
+      {
+        "baseband_mhz": 74.24,
+        "rf_mhz": 6563.84,
+        "excess_dbfs": -65.08364681375257,
+        "peak_over_local_db": 24.456206888873567
+      },
+      {
+        "baseband_mhz": -38.4,
+        "rf_mhz": 6451.200000000001,
+        "excess_dbfs": -74.6697491750366,
+        "peak_over_local_db": 13.34793857953051
+      }
+    ]
+  },
+  {
+    "metadata": {
+      "rate": 737280000.0,
+      "freq": 6489599999.999996,
+      "gain": 60.0,
+      "channel": 3,
+      "antenna": "RX1",
+      "requested": 737280000,
+      "got": 737280000,
+      "duration_ms": 1000.0,
+      "errors": [],
+      "chunks": 704,
+      "file": "/media/oi/Data/uwb/antenna_comparison/2026-11-16_151907/ch3_rx2_with_antenna_1s.sc16"
+    },
+    "source": "/media/oi/Data/uwb/antenna_comparison/2026-11-16_151907/ch3_rx2_with_antenna_1s.sc16",
+    "windows": 1000,
+    "fft_bin_hz": 22500.0,
+    "full_record_welch_coverage_fraction": 0.9777777777777777,
+    "gap_window_samples": 131072,
+    "gap_phase_samples": 476324,
+    "folded_profile_contrast_db": 1.3955749790112275,
+    "tone_dbfs": -31.11209091822172,
+    "estimated_floor_dbfs_hz": -135.92321023725933,
+    "raw_rms_lsb": 939.4307229469645,
+    "peak_component_lsb": 2536,
+    "clipped_components": 0,
+    "bands": [
+      {
+        "baseband_mhz": [
+          -183,
+          -173
+        ],
+        "rf_mhz": [
+          6306.6,
+          6316.6
+        ],
+        "total_dbfs": -48.10192669998582,
+        "total_over_floor_db": 17.815858246350583,
+        "excess_dbfs": -48.17433929068293,
+        "total_dbfs_p50_p95_max": [
+          -48.44728283785163,
+          -44.80169031978966,
+          -43.814637680126715
+        ]
+      },
+      {
+        "baseband_mhz": [
+          -118,
+          -108
+        ],
+        "rf_mhz": [
+          6371.6,
+          6381.6
+        ],
+        "total_dbfs": -60.36551631178449,
+        "total_over_floor_db": 5.562039043215021,
+        "excess_dbfs": -61.77918711645877,
+        "total_dbfs_p50_p95_max": [
+          -60.66161209082888,
+          -58.076467545546215,
+          -56.76361425914526
+        ]
+      },
+      {
+        "baseband_mhz": [
+          -105,
+          -86
+        ],
+        "rf_mhz": [
+          6384.6,
+          6403.6
+        ],
+        "total_dbfs": -55.07405477058658,
+        "total_over_floor_db": 8.063905819302587,
+        "excess_dbfs": -55.81152700953531,
+        "total_dbfs_p50_p95_max": [
+          -59.789601184036854,
+          -55.32021620215994,
+          -38.308096598235885
+        ]
+      },
+      {
+        "baseband_mhz": [
+          -44,
+          -27
+        ],
+        "rf_mhz": [
+          6445.6,
+          6462.6
+        ],
+        "total_dbfs": -58.09697490182039,
+        "total_over_floor_db": 5.524940638033443,
+        "excess_dbfs": -59.525003653849495,
+        "total_dbfs_p50_p95_max": [
+          -62.99448477299563,
+          -62.27438263052031,
+          -40.46785341219335
+        ]
+      },
+      {
+        "baseband_mhz": [
+          -9,
+          1
+        ],
+        "rf_mhz": [
+          6480.6,
+          6490.6
+        ],
+        "total_dbfs": -61.34668655006016,
+        "total_over_floor_db": 4.571098396276232,
+        "excess_dbfs": -63.21122373884555,
+        "total_dbfs_p50_p95_max": [
+          -61.68975492598757,
+          -58.84205123653284,
+          -54.23090013101988
+        ]
+      }
+    ],
+    "lines": [
+      {
+        "baseband_mhz": -58.88,
+        "rf_mhz": 6430.72,
+        "excess_dbfs": -54.991070584476105,
+        "peak_over_local_db": 34.739154962259526
+      },
+      {
+        "baseband_mhz": 94.72,
+        "rf_mhz": 6584.320000000001,
+        "excess_dbfs": -74.73547816643479,
+        "peak_over_local_db": 16.268656722537763
+      },
+      {
+        "baseband_mhz": 12.8,
+        "rf_mhz": 6502.400000000001,
+        "excess_dbfs": -87.16825042896154,
+        "peak_over_local_db": 4.385123309010889
+      },
+      {
+        "baseband_mhz": 115.2,
+        "rf_mhz": 6604.8,
+        "excess_dbfs": -78.46369374865378,
+        "peak_over_local_db": 5.938637614225819
+      },
+      {
+        "baseband_mhz": -263.68,
+        "rf_mhz": 6225.92,
+        "excess_dbfs": -74.08232540258032,
+        "peak_over_local_db": 14.64455275138885
+      },
+      {
+        "baseband_mhz": 258.57,
+        "rf_mhz": 6748.17,
+        "excess_dbfs": -76.46932996474169,
+        "peak_over_local_db": 16.081884079971612
+      },
+      {
+        "baseband_mhz": 74.24,
+        "rf_mhz": 6563.84,
+        "excess_dbfs": null,
+        "peak_over_local_db": 0.08842542163544401
+      },
+      {
+        "baseband_mhz": -38.4,
+        "rf_mhz": 6451.200000000001,
+        "excess_dbfs": null,
+        "peak_over_local_db": 1.2935828806999008
+      }
+    ]
+  }
+]

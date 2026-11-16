@@ -1,0 +1,35 @@
+bench_demod_sic_kernels: UWB_SIMD=avx512 level=2 avx512=1
+reference arm: sync group forced to avx2
+rounds=9 iters=200 (median of batched loops)
+
+K1  real-template dot, L=1016 (timing/SFD refine)
+  kernel                                      avx2 ns    cand ns     delta  identity
+  4lag AVX2 -> 8lag AVX-512 (bcast)              39.2       26.9   -31.51%  bit-identical
+  4lag AVX2 -> 8lag AVX-512 (dup)                39.2       28.5   -27.30%  bit-identical
+
+K2  element-wise complex ops (CIR average / fold / SIC)
+  kernel                                      avx2 ns    cand ns     delta  identity
+  accumulate n=1053                              64.6       39.4   -38.99%  bit-identical
+  sub n=1053                                     64.6       38.5   -40.41%  bit-identical
+  scale n=1053                                   68.9       27.7   -59.81%  bit-identical
+  accumulate n=2032                             121.4       77.9   -35.79%  bit-identical
+  sub n=2032                                    121.5       74.5   -38.71%  bit-identical
+  scale n=2032                                  113.5       69.1   -39.10%  bit-identical
+  accumulate n=135568                         16390.7    16271.5    -0.73%  bit-identical
+  sub n=135568                                16438.2    16171.4    -1.62%  bit-identical
+  scale n=135568                              10989.6     7134.3   -35.08%  bit-identical
+
+K3  fold_sfd_window (8 SFD symbols, fold_len=700)
+  kernel                                      avx2 ns    cand ns     delta  identity
+  fold_sfd_window                               432.5      322.4   -25.47%  bit-identical
+
+K4  SIC 20-tap pulse accumulation (4096 events)
+  kernel                                      avx2 ns    cand ns     delta  identity
+  accumulate 20-tap pulses                    28165.0    28217.7    +0.19%  bit-identical
+
+K5/K6  fixed-length complex dots (payload CMF / CIR FIR)
+  kernel                                      avx2 ns    cand ns     delta  identity
+  dot_fixed52 (payload CMF)                       5.6        7.1   +26.26%  bit-identical
+  dot_fixed38 (CIR FIR)                           3.7        6.9   +88.19%  bit-identical
+
+IDENTITY: all candidates bit-identical

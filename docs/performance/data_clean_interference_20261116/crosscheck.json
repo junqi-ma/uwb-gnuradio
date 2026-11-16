@@ -1,0 +1,20 @@
+[
+  {
+    "distance": "d3p8m_period1ms",
+    "shifted_window_us": 60,
+    "band_excess_dbfs": -52.74779344456746,
+    "welch_parseval_ratio_median": 0.9919248844343165
+  },
+  {
+    "distance": "d4p2m_period1ms",
+    "shifted_window_us": 60,
+    "band_excess_dbfs": -44.61188464553659,
+    "welch_parseval_ratio_median": 1.000614173024772
+  },
+  {
+    "distance": "d5p2m_period1ms",
+    "shifted_window_us": 60,
+    "band_excess_dbfs": -45.654054525886984,
+    "welch_parseval_ratio_median": 1.000905498689606
+  }
+]

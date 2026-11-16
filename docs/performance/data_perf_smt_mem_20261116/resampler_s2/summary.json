@@ -1,0 +1,177 @@
+{
+  "bench": "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-avx512-smtcheck/apps/benchmark_sc16_burst_core",
+  "bench_sha256": "a7254dd8c69caa94ffc9649dbae0a902588b1b314412905dca18f2e972e75fa7",
+  "rounds": 3,
+  "reps": 50,
+  "warmup": 10,
+  "cells": [
+    {
+      "cell": "65_48_eq16_56000_fp1",
+      "rate": "65_48",
+      "taps": "eq16",
+      "length": 56000,
+      "fixed_phase": 1,
+      "checksum": "0x69fe2b4beba1a504",
+      "per_round": [
+        {
+          "round": 0,
+          "avx2_core_mean_us": 79.11824999999999,
+          "avx512_core_mean_us": 77.42367,
+          "avx2_total_mean_us": 79.19802999999999,
+          "avx512_total_mean_us": 77.58286000000001,
+          "core_ratio_avx512_over_avx2": 0.9785816799537402,
+          "total_ratio_avx512_over_avx2": 0.9796059321172512
+        },
+        {
+          "round": 1,
+          "avx2_core_mean_us": 78.79267,
+          "avx512_core_mean_us": 76.77283,
+          "avx2_total_mean_us": 78.87622,
+          "avx512_total_mean_us": 76.93032,
+          "core_ratio_avx512_over_avx2": 0.9743651281267661,
+          "total_ratio_avx512_over_avx2": 0.9753297001301532
+        },
+        {
+          "round": 2,
+          "avx2_core_mean_us": 78.89493999999999,
+          "avx512_core_mean_us": 76.51532,
+          "avx2_total_mean_us": 78.96581,
+          "avx512_total_mean_us": 76.67206999999999,
+          "core_ratio_avx512_over_avx2": 0.9698381163608213,
+          "total_ratio_avx512_over_avx2": 0.9709527452450623
+        }
+      ],
+      "core_ratio_median": 0.9743651281267661,
+      "core_gain_pct_median": 2.5634871873233878,
+      "total_ratio_median": 0.9753297001301532,
+      "total_gain_pct_median": 2.4670299869846812,
+      "core_ratio_all_same_direction": true
+    },
+    {
+      "cell": "65_48_realtime_56000_fp1",
+      "rate": "65_48",
+      "taps": "realtime",
+      "length": 56000,
+      "fixed_phase": 1,
+      "checksum": "0x4361a2a3c3a4a840",
+      "per_round": [
+        {
+          "round": 0,
+          "avx2_core_mean_us": 105.43473,
+          "avx512_core_mean_us": 94.94868,
+          "avx2_total_mean_us": 105.53426,
+          "avx512_total_mean_us": 95.15173999999999,
+          "core_ratio_avx512_over_avx2": 0.9005446307872178,
+          "total_ratio_avx512_over_avx2": 0.9016194361906739
+        },
+        {
+          "round": 1,
+          "avx2_core_mean_us": 105.67179,
+          "avx512_core_mean_us": 95.25978,
+          "avx2_total_mean_us": 105.77624,
+          "avx512_total_mean_us": 95.45679,
+          "core_ratio_avx512_over_avx2": 0.9014684051438895,
+          "total_ratio_avx512_over_avx2": 0.9024407560714958
+        },
+        {
+          "round": 2,
+          "avx2_core_mean_us": 105.53066000000001,
+          "avx512_core_mean_us": 95.4983,
+          "avx2_total_mean_us": 105.63158,
+          "avx512_total_mean_us": 95.69773,
+          "core_ratio_avx512_over_avx2": 0.9049341679470212,
+          "total_ratio_avx512_over_avx2": 0.9059575744299196
+        }
+      ],
+      "core_ratio_median": 0.9014684051438895,
+      "core_gain_pct_median": 9.853159485611052,
+      "total_ratio_median": 0.9024407560714958,
+      "total_gain_pct_median": 9.755924392850424,
+      "core_ratio_all_same_direction": true
+    },
+    {
+      "cell": "65_48_quality_56000_fp1",
+      "rate": "65_48",
+      "taps": "quality",
+      "length": 56000,
+      "fixed_phase": 1,
+      "checksum": "0xa4f3654771a28a06",
+      "per_round": [
+        {
+          "round": 0,
+          "avx2_core_mean_us": 221.69983000000002,
+          "avx512_core_mean_us": 160.58176,
+          "avx2_total_mean_us": 221.95402,
+          "avx512_total_mean_us": 161.00953,
+          "core_ratio_avx512_over_avx2": 0.7243206275800933,
+          "total_ratio_avx512_over_avx2": 0.725418399720807
+        },
+        {
+          "round": 1,
+          "avx2_core_mean_us": 221.1818,
+          "avx512_core_mean_us": 160.08711,
+          "avx2_total_mean_us": 221.44525,
+          "avx512_total_mean_us": 160.5117,
+          "core_ratio_avx512_over_avx2": 0.723780663689327,
+          "total_ratio_avx512_over_avx2": 0.7248369517973404
+        },
+        {
+          "round": 2,
+          "avx2_core_mean_us": 221.96332999999998,
+          "avx512_core_mean_us": 160.93601,
+          "avx2_total_mean_us": 222.235,
+          "avx512_total_mean_us": 161.3604,
+          "core_ratio_avx512_over_avx2": 0.7250567469860901,
+          "total_ratio_avx512_over_avx2": 0.7260800503971021
+        }
+      ],
+      "core_ratio_median": 0.7243206275800933,
+      "core_gain_pct_median": 27.56793724199067,
+      "total_ratio_median": 0.725418399720807,
+      "total_gain_pct_median": 27.4581600279193,
+      "core_ratio_all_same_direction": true
+    },
+    {
+      "cell": "65_32_quality_56000_fp1",
+      "rate": "65_32",
+      "taps": "quality",
+      "length": 56000,
+      "fixed_phase": 1,
+      "checksum": "0x4e1a347234f0969b",
+      "per_round": [
+        {
+          "round": 0,
+          "avx2_core_mean_us": 327.75577,
+          "avx512_core_mean_us": 233.53372000000002,
+          "avx2_total_mean_us": 328.41103999999996,
+          "avx512_total_mean_us": 234.18901,
+          "core_ratio_avx512_over_avx2": 0.7125235964572035,
+          "total_ratio_avx512_over_avx2": 0.7130972515418483
+        },
+        {
+          "round": 1,
+          "avx2_core_mean_us": 328.20939,
+          "avx512_core_mean_us": 232.9481,
+          "avx2_total_mean_us": 328.86990000000003,
+          "avx512_total_mean_us": 233.60071,
+          "core_ratio_avx512_over_avx2": 0.709754525914082,
+          "total_ratio_avx512_over_avx2": 0.710313440056387
+        },
+        {
+          "round": 2,
+          "avx2_core_mean_us": 329.97127,
+          "avx512_core_mean_us": 233.2969,
+          "avx2_total_mean_us": 330.62455,
+          "avx512_total_mean_us": 233.95323,
+          "core_ratio_avx512_over_avx2": 0.7070218567816525,
+          "total_ratio_avx512_over_avx2": 0.7076099763311586
+        }
+      ],
+      "core_ratio_median": 0.709754525914082,
+      "core_gain_pct_median": 29.024547408591804,
+      "total_ratio_median": 0.710313440056387,
+      "total_gain_pct_median": 28.968655994361303,
+      "core_ratio_all_same_direction": true
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+[
+  {
+    "channel": 2,
+    "welch_integral_over_time_domain_residual": 0.9999597596684681,
+    "raw_bytes": 2949120000
+  },
+  {
+    "channel": 3,
+    "welch_integral_over_time_domain_residual": 1.0003369061676766,
+    "raw_bytes": 2949120000
+  }
+]

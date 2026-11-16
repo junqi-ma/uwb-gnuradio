@@ -1,0 +1,1178 @@
+[
+  {
+    "folder": "/media/oi/Data/uwb/clean_distance/2026-11-16/d0p8m_period1ms",
+    "capture_metadata": {
+      "rate": 737280000.0,
+      "freq": 6489599999.999996,
+      "gain": 60.0,
+      "channel": 3,
+      "antenna": "RX1",
+      "requested": 1474560000,
+      "got": 1474560000,
+      "duration_ms": 2000.0,
+      "errors": [],
+      "chunks": 1407,
+      "file": "/media/oi/Data/uwb/clean_distance/2026-11-16/d0p8m_period1ms/rx_2s_r01.sc16"
+    },
+    "phase_samples": 428217,
+    "phase_method": "first CRC-valid preamble start modulo 1 ms",
+    "off_window_phase_samples": 158621,
+    "off_window_samples": 131072,
+    "sampled_windows": 500,
+    "step_ms": 4,
+    "fft_bin_hz": 22500.0,
+    "enbw_hz": 33750.0,
+    "thermal_psd_lsb2_hz": 2.532762664486654e-05,
+    "thermal_dbfs_hz": -136.2730537429903,
+    "tone_rms_lsb": 999.9183090486019,
+    "tone_dbfs": -30.30970828676647,
+    "distance_m": 0.8,
+    "signal_dbfs": -33.68208752650837,
+    "prior_thermal_snr_db": 15.748313575691261,
+    "bands": [
+      {
+        "baseband_mhz": [
+          -183,
+          -173
+        ],
+        "rf_mhz": [
+          6306.6,
+          6316.6
+        ],
+        "excess_dbfs": -55.23720652507396,
+        "interference_over_signal_db": -21.555118998565582,
+        "mean_total_over_floor_db": 11.360146701037852,
+        "total_over_floor_percentiles_db": {
+          "p50": 2.683766707162025,
+          "p95": 19.432012955681056,
+          "p99": 21.242041171610076,
+          "max": 21.4475216635867
+        },
+        "sampled_fraction_above_floor_6db": 0.338
+      },
+      {
+        "baseband_mhz": [
+          -118,
+          -108
+        ],
+        "rf_mhz": [
+          6371.6,
+          6381.6
+        ],
+        "excess_dbfs": -62.77755672260792,
+        "interference_over_signal_db": -29.09546919609955,
+        "mean_total_over_floor_db": 5.103626439313031,
+        "total_over_floor_percentiles_db": {
+          "p50": 5.141178307696215,
+          "p95": 6.995975441556318,
+          "p99": 7.856614050444934,
+          "max": 8.510560137803667
+        },
+        "sampled_fraction_above_floor_6db": 0.102
+      },
+      {
+        "baseband_mhz": [
+          -105,
+          -86
+        ],
+        "rf_mhz": [
+          6384.6,
+          6403.6
+        ],
+        "excess_dbfs": -54.13842415140992,
+        "interference_over_signal_db": -20.456336624901557,
+        "mean_total_over_floor_db": 9.826650112198783,
+        "total_over_floor_percentiles_db": {
+          "p50": 2.120424340625589,
+          "p95": 6.372891819487473,
+          "p99": 22.97385043807462,
+          "max": 28.4469271103572
+        },
+        "sampled_fraction_above_floor_6db": 0.078
+      },
+      {
+        "baseband_mhz": [
+          -44,
+          -27
+        ],
+        "rf_mhz": [
+          6445.6,
+          6462.6
+        ],
+        "excess_dbfs": -56.85559195030807,
+        "interference_over_signal_db": -23.173504423799702,
+        "mean_total_over_floor_db": 7.887155807352668,
+        "total_over_floor_percentiles_db": {
+          "p50": 0.7054786012460585,
+          "p95": 1.2818960340455523,
+          "p99": 24.911053619103516,
+          "max": 24.987897189596445
+        },
+        "sampled_fraction_above_floor_6db": 0.016
+      },
+      {
+        "baseband_mhz": [
+          -9,
+          1
+        ],
+        "rf_mhz": [
+          6480.6,
+          6490.6
+        ],
+        "excess_dbfs": -70.16502155309479,
+        "interference_over_signal_db": -36.48293402658641,
+        "mean_total_over_floor_db": 1.4848693617551616,
+        "total_over_floor_percentiles_db": {
+          "p50": 0.4995603046112468,
+          "p95": 5.218182532271475,
+          "p99": 6.447154097505186,
+          "max": 7.024060662351015
+        },
+        "sampled_fraction_above_floor_6db": 0.032
+      }
+    ],
+    "lines": [
+      {
+        "baseband_mhz": -58.88,
+        "rf_mhz": 6430.72,
+        "excess_dbfs": -55.71327174941163
+      },
+      {
+        "baseband_mhz": 94.72,
+        "rf_mhz": 6584.320000000001,
+        "excess_dbfs": -63.139815368372105
+      },
+      {
+        "baseband_mhz": 12.8,
+        "rf_mhz": 6502.400000000001,
+        "excess_dbfs": -76.4666846293339
+      },
+      {
+        "baseband_mhz": 115.2,
+        "rf_mhz": 6604.8,
+        "excess_dbfs": -75.2677250270898
+      },
+      {
+        "baseband_mhz": -263.68,
+        "rf_mhz": 6225.92,
+        "excess_dbfs": -73.39685131553084
+      },
+      {
+        "baseband_mhz": 258.57,
+        "rf_mhz": 6748.17,
+        "excess_dbfs": -75.9014163550495
+      }
+    ],
+    "effective_sinr_db": 11.91504817485237,
+    "median_window_sinr_db": 13.705832520315171,
+    "total_interference_excess_dbfs": -48.02279856621447
+  },
+  {
+    "folder": "/media/oi/Data/uwb/clean_distance/2026-11-16/d1p6m_period1ms",
+    "capture_metadata": {
+      "rate": 737280000.0,
+      "freq": 6489599999.999996,
+      "gain": 60.0,
+      "channel": 3,
+      "antenna": "RX1",
+      "requested": 1474560000,
+      "got": 1474560000,
+      "duration_ms": 2000.0,
+      "errors": [],
+      "chunks": 1407,
+      "file": "/media/oi/Data/uwb/clean_distance/2026-11-16/d1p6m_period1ms/rx_2s_r01.sc16"
+    },
+    "phase_samples": 709053,
+    "phase_method": "first CRC-valid preamble start modulo 1 ms",
+    "off_window_phase_samples": 439457,
+    "off_window_samples": 131072,
+    "sampled_windows": 500,
+    "step_ms": 4,
+    "fft_bin_hz": 22500.0,
+    "enbw_hz": 33750.0,
+    "thermal_psd_lsb2_hz": 2.4395500076934695e-05,
+    "thermal_dbfs_hz": -136.43590144891635,
+    "tone_rms_lsb": 1092.7144726086042,
+    "tone_dbfs": -29.538864795427294,
+    "distance_m": 1.6,
+    "signal_dbfs": -40.19306193789811,
+    "prior_thermal_snr_db": 9.427399237076479,
+    "bands": [
+      {
+        "baseband_mhz": [
+          -183,
+          -173
+        ],
+        "rf_mhz": [
+          6306.6,
+          6316.6
+        ],
+        "excess_dbfs": -52.048384671514285,
+        "interference_over_signal_db": -11.855322733616172,
+        "mean_total_over_floor_db": 14.537607867086722,
+        "total_over_floor_percentiles_db": {
+          "p50": 10.659714079384539,
+          "p95": 20.69408938171163,
+          "p99": 20.8719231936268,
+          "max": 21.074253099645418
+        },
+        "sampled_fraction_above_floor_6db": 1.0
+      },
+      {
+        "baseband_mhz": [
+          -118,
+          -108
+        ],
+        "rf_mhz": [
+          6371.6,
+          6381.6
+        ],
+        "excess_dbfs": -61.900357167340886,
+        "interference_over_signal_db": -21.70729522944278,
+        "mean_total_over_floor_db": 5.84827288557711,
+        "total_over_floor_percentiles_db": {
+          "p50": 6.05176993623386,
+          "p95": 7.083177768753569,
+          "p99": 7.979345120618416,
+          "max": 8.264819142634527
+        },
+        "sampled_fraction_above_floor_6db": 0.508
+      },
+      {
+        "baseband_mhz": [
+          -105,
+          -86
+        ],
+        "rf_mhz": [
+          6384.6,
+          6403.6
+        ],
+        "excess_dbfs": -52.779976903701524,
+        "interference_over_signal_db": -12.58691496580341,
+        "mean_total_over_floor_db": 11.212280201271554,
+        "total_over_floor_percentiles_db": {
+          "p50": 5.583423155745132,
+          "p95": 14.419928368222834,
+          "p99": 25.22272804956705,
+          "max": 27.817179049526057
+        },
+        "sampled_fraction_above_floor_6db": 0.338
+      },
+      {
+        "baseband_mhz": [
+          -44,
+          -27
+        ],
+        "rf_mhz": [
+          6445.6,
+          6462.6
+        ],
+        "excess_dbfs": -56.02226340588786,
+        "interference_over_signal_db": -15.829201467989755,
+        "mean_total_over_floor_db": 8.736064863266106,
+        "total_over_floor_percentiles_db": {
+          "p50": 0.649220601211722,
+          "p95": 1.2808690529961033,
+          "p99": 25.89231139825813,
+          "max": 26.105979770937346
+        },
+        "sampled_fraction_above_floor_6db": 0.016
+      },
+      {
+        "baseband_mhz": [
+          -9,
+          1
+        ],
+        "rf_mhz": [
+          6480.6,
+          6490.6
+        ],
+        "excess_dbfs": -68.34330275616368,
+        "interference_over_signal_db": -28.15024081826557,
+        "mean_total_over_floor_db": 2.158358042664355,
+        "total_over_floor_percentiles_db": {
+          "p50": 1.147152564772734,
+          "p95": 5.384291886116568,
+          "p99": 5.626981394690947,
+          "max": 7.059080784959662
+        },
+        "sampled_fraction_above_floor_6db": 0.002
+      }
+    ],
+    "lines": [
+      {
+        "baseband_mhz": -58.88,
+        "rf_mhz": 6430.72,
+        "excess_dbfs": -56.5502347803679
+      },
+      {
+        "baseband_mhz": 94.72,
+        "rf_mhz": 6584.320000000001,
+        "excess_dbfs": -63.733373081394944
+      },
+      {
+        "baseband_mhz": 12.8,
+        "rf_mhz": 6502.400000000001,
+        "excess_dbfs": -77.1021338605421
+      },
+      {
+        "baseband_mhz": 115.2,
+        "rf_mhz": 6604.8,
+        "excess_dbfs": -75.10178196406324
+      },
+      {
+        "baseband_mhz": -263.68,
+        "rf_mhz": 6225.92,
+        "excess_dbfs": -72.77783717356762
+      },
+      {
+        "baseband_mhz": 258.57,
+        "rf_mhz": 6748.17,
+        "excess_dbfs": -75.18520137081796
+      }
+    ],
+    "effective_sinr_db": 4.76199609822721,
+    "median_window_sinr_db": 6.609433129808227,
+    "total_interference_excess_dbfs": -46.8631667496211
+  },
+  {
+    "folder": "/media/oi/Data/uwb/clean_distance/2026-11-16/d2p5m_period1ms",
+    "capture_metadata": {
+      "rate": 737280000.0,
+      "freq": 6489599999.999996,
+      "gain": 60.0,
+      "channel": 3,
+      "antenna": "RX1",
+      "requested": 1474560000,
+      "got": 1474560000,
+      "duration_ms": 2000.0,
+      "errors": [],
+      "chunks": 1407,
+      "file": "/media/oi/Data/uwb/clean_distance/2026-11-16/d2p5m_period1ms/rx_2s_r01.sc16"
+    },
+    "phase_samples": 129090,
+    "phase_method": "first CRC-valid preamble start modulo 1 ms",
+    "off_window_phase_samples": 596774,
+    "off_window_samples": 131072,
+    "sampled_windows": 500,
+    "step_ms": 4,
+    "fft_bin_hz": 22500.0,
+    "enbw_hz": 33750.0,
+    "thermal_psd_lsb2_hz": 3.180645217071287e-05,
+    "thermal_dbfs_hz": -135.28384641196004,
+    "tone_rms_lsb": 925.4530852623888,
+    "tone_dbfs": -30.981910547045164,
+    "distance_m": 2.5,
+    "signal_dbfs": -42.776609092728876,
+    "prior_thermal_snr_db": 5.672906429034896,
+    "bands": [
+      {
+        "baseband_mhz": [
+          -183,
+          -173
+        ],
+        "rf_mhz": [
+          6306.6,
+          6316.6
+        ],
+        "excess_dbfs": -50.12170699411207,
+        "interference_over_signal_db": -7.345097901383191,
+        "mean_total_over_floor_db": 15.28720259696588,
+        "total_over_floor_percentiles_db": {
+          "p50": 11.60355667343789,
+          "p95": 20.354154381335988,
+          "p99": 20.589189173048318,
+          "max": 20.76152144903455
+        },
+        "sampled_fraction_above_floor_6db": 1.0
+      },
+      {
+        "baseband_mhz": [
+          -118,
+          -108
+        ],
+        "rf_mhz": [
+          6371.6,
+          6381.6
+        ],
+        "excess_dbfs": -61.01532712936369,
+        "interference_over_signal_db": -18.238718036634825,
+        "mean_total_over_floor_db": 5.652301596795923,
+        "total_over_floor_percentiles_db": {
+          "p50": 5.6857931917648665,
+          "p95": 7.165417293736467,
+          "p99": 7.369411649160671,
+          "max": 7.574582777098118
+        },
+        "sampled_fraction_above_floor_6db": 0.394
+      },
+      {
+        "baseband_mhz": [
+          -105,
+          -86
+        ],
+        "rf_mhz": [
+          6384.6,
+          6403.6
+        ],
+        "excess_dbfs": -53.73636738913991,
+        "interference_over_signal_db": -10.959758296411039,
+        "mean_total_over_floor_db": 9.304440934891893,
+        "total_over_floor_percentiles_db": {
+          "p50": 5.185134937427648,
+          "p95": 11.814350610929008,
+          "p99": 20.851300037256696,
+          "max": 25.997112334933625
+        },
+        "sampled_fraction_above_floor_6db": 0.392
+      },
+      {
+        "baseband_mhz": [
+          -44,
+          -27
+        ],
+        "rf_mhz": [
+          6445.6,
+          6462.6
+        ],
+        "excess_dbfs": -55.09883461461691,
+        "interference_over_signal_db": -12.32222552188804,
+        "mean_total_over_floor_db": 8.538730775304455,
+        "total_over_floor_percentiles_db": {
+          "p50": 0.615733628102335,
+          "p95": 0.877066233306787,
+          "p99": 25.700521209666864,
+          "max": 25.821276538881094
+        },
+        "sampled_fraction_above_floor_6db": 0.016
+      },
+      {
+        "baseband_mhz": [
+          -9,
+          1
+        ],
+        "rf_mhz": [
+          6480.6,
+          6490.6
+        ],
+        "excess_dbfs": -65.35197795150081,
+        "interference_over_signal_db": -22.575368858771935,
+        "mean_total_over_floor_db": 2.9736772693432374,
+        "total_over_floor_percentiles_db": {
+          "p50": 1.4367127815520788,
+          "p95": 5.948194187776174,
+          "p99": 7.760943000371281,
+          "max": 9.276181981851895
+        },
+        "sampled_fraction_above_floor_6db": 0.044
+      }
+    ],
+    "lines": [
+      {
+        "baseband_mhz": -58.88,
+        "rf_mhz": 6430.72,
+        "excess_dbfs": -55.2835644068168
+      },
+      {
+        "baseband_mhz": 94.72,
+        "rf_mhz": 6584.320000000001,
+        "excess_dbfs": -64.69604730546183
+      },
+      {
+        "baseband_mhz": 12.8,
+        "rf_mhz": 6502.400000000001,
+        "excess_dbfs": -78.40608834549963
+      },
+      {
+        "baseband_mhz": 115.2,
+        "rf_mhz": 6604.8,
+        "excess_dbfs": -79.32350247444448
+      },
+      {
+        "baseband_mhz": -263.68,
+        "rf_mhz": 6225.92,
+        "excess_dbfs": -75.64086359945667
+      },
+      {
+        "baseband_mhz": 258.57,
+        "rf_mhz": 6748.17,
+        "excess_dbfs": -74.95216789500151
+      }
+    ],
+    "effective_sinr_db": 1.3507073827878948,
+    "median_window_sinr_db": 2.7798618878161756,
+    "total_interference_excess_dbfs": -46.225293344232824
+  },
+  {
+    "folder": "/media/oi/Data/uwb/clean_distance/2026-11-16/d3p5m_period1ms",
+    "capture_metadata": {
+      "rate": 737280000.0,
+      "freq": 6489599999.999996,
+      "gain": 60.0,
+      "channel": 3,
+      "antenna": "RX1",
+      "requested": 1474560000,
+      "got": 1474560000,
+      "duration_ms": 2000.0,
+      "errors": [],
+      "chunks": 1407,
+      "file": "/media/oi/Data/uwb/clean_distance/2026-11-16/d3p5m_period1ms/rx_2s_r01.sc16"
+    },
+    "phase_samples": 732708,
+    "phase_method": "first CRC-valid preamble start modulo 1 ms",
+    "off_window_phase_samples": 463112,
+    "off_window_samples": 131072,
+    "sampled_windows": 500,
+    "step_ms": 4,
+    "fft_bin_hz": 22500.0,
+    "enbw_hz": 33750.0,
+    "thermal_psd_lsb2_hz": 2.5421604732400738e-05,
+    "thermal_dbfs_hz": -136.25696908106266,
+    "tone_rms_lsb": 918.6652155416099,
+    "tone_dbfs": -31.045853249110294,
+    "distance_m": 3.5,
+    "signal_dbfs": -44.34160708021611,
+    "prior_thermal_snr_db": 5.086128751693214,
+    "bands": [
+      {
+        "baseband_mhz": [
+          -183,
+          -173
+        ],
+        "rf_mhz": [
+          6306.6,
+          6316.6
+        ],
+        "excess_dbfs": -50.364725826950874,
+        "interference_over_signal_db": -6.023118746734774,
+        "mean_total_over_floor_db": 15.997369104995594,
+        "total_over_floor_percentiles_db": {
+          "p50": 11.739826462517467,
+          "p95": 21.68375092059868,
+          "p99": 21.79338733457365,
+          "max": 21.902043193009604
+        },
+        "sampled_fraction_above_floor_6db": 1.0
+      },
+      {
+        "baseband_mhz": [
+          -118,
+          -108
+        ],
+        "rf_mhz": [
+          6371.6,
+          6381.6
+        ],
+        "excess_dbfs": -60.94616121494791,
+        "interference_over_signal_db": -16.6045541347318,
+        "mean_total_over_floor_db": 6.434807896099416,
+        "total_over_floor_percentiles_db": {
+          "p50": 6.382936048017887,
+          "p95": 7.890981312072036,
+          "p99": 8.142450645298103,
+          "max": 8.309804440893494
+        },
+        "sampled_fraction_above_floor_6db": 0.7
+      },
+      {
+        "baseband_mhz": [
+          -105,
+          -86
+        ],
+        "rf_mhz": [
+          6384.6,
+          6403.6
+        ],
+        "excess_dbfs": -55.23230336211212,
+        "interference_over_signal_db": -10.890696281896016,
+        "mean_total_over_floor_db": 8.846351607552576,
+        "total_over_floor_percentiles_db": {
+          "p50": 5.12758102005836,
+          "p95": 7.3145665103069675,
+          "p99": 22.485135453163572,
+          "max": 25.74885825765478
+        },
+        "sampled_fraction_above_floor_6db": 0.086
+      },
+      {
+        "baseband_mhz": [
+          -44,
+          -27
+        ],
+        "rf_mhz": [
+          6445.6,
+          6462.6
+        ],
+        "excess_dbfs": -56.04750909753633,
+        "interference_over_signal_db": -11.705902017320222,
+        "mean_total_over_floor_db": 8.55976449823703,
+        "total_over_floor_percentiles_db": {
+          "p50": 0.6828735456730589,
+          "p95": 2.589629353870528,
+          "p99": 23.973789255219987,
+          "max": 26.31085339921791
+        },
+        "sampled_fraction_above_floor_6db": 0.02
+      },
+      {
+        "baseband_mhz": [
+          -9,
+          1
+        ],
+        "rf_mhz": [
+          6480.6,
+          6490.6
+        ],
+        "excess_dbfs": -64.83533256996039,
+        "interference_over_signal_db": -20.493725489744286,
+        "mean_total_over_floor_db": 3.7758789593975193,
+        "total_over_floor_percentiles_db": {
+          "p50": 2.1679966710469922,
+          "p95": 7.213921494686973,
+          "p99": 8.033743203488669,
+          "max": 9.42740154244602
+        },
+        "sampled_fraction_above_floor_6db": 0.184
+      }
+    ],
+    "lines": [
+      {
+        "baseband_mhz": -58.88,
+        "rf_mhz": 6430.72,
+        "excess_dbfs": -55.718783777654615
+      },
+      {
+        "baseband_mhz": 94.72,
+        "rf_mhz": 6584.320000000001,
+        "excess_dbfs": -66.15132871932103
+      },
+      {
+        "baseband_mhz": 12.8,
+        "rf_mhz": 6502.400000000001,
+        "excess_dbfs": -76.78806606179049
+      },
+      {
+        "baseband_mhz": 115.2,
+        "rf_mhz": 6604.8,
+        "excess_dbfs": -75.47744961494932
+      },
+      {
+        "baseband_mhz": -263.68,
+        "rf_mhz": 6225.92,
+        "excess_dbfs": -73.36054892453588
+      },
+      {
+        "baseband_mhz": 258.57,
+        "rf_mhz": 6748.17,
+        "excess_dbfs": -76.03918874135816
+      }
+    ],
+    "effective_sinr_db": 0.4734698983122107,
+    "median_window_sinr_db": 2.1383698965938174,
+    "total_interference_excess_dbfs": -46.74482604774008
+  },
+  {
+    "folder": "/media/oi/Data/uwb/clean_distance/2026-11-16/d3p8m_period1ms",
+    "capture_metadata": {
+      "rate": 737280000.0,
+      "freq": 6489599999.999996,
+      "gain": 60.0,
+      "channel": 3,
+      "antenna": "RX1",
+      "requested": 1474560000,
+      "got": 1474560000,
+      "duration_ms": 2000.0,
+      "errors": [],
+      "chunks": 1407,
+      "file": "/media/oi/Data/uwb/clean_distance/2026-11-16/d3p8m_period1ms/rx_2s_r01.sc16"
+    },
+    "phase_samples": 67939,
+    "phase_method": "first CRC-valid preamble start modulo 1 ms",
+    "off_window_phase_samples": 535623,
+    "off_window_samples": 131072,
+    "sampled_windows": 500,
+    "step_ms": 4,
+    "fft_bin_hz": 22500.0,
+    "enbw_hz": 33750.0,
+    "thermal_psd_lsb2_hz": 2.509651312720962e-05,
+    "thermal_dbfs_hz": -136.31286484486463,
+    "tone_rms_lsb": 941.2511014977126,
+    "tone_dbfs": -30.83488875036374,
+    "distance_m": 3.8,
+    "signal_dbfs": -45.52546256700978,
+    "prior_thermal_snr_db": 3.889023899523006,
+    "bands": [
+      {
+        "baseband_mhz": [
+          -183,
+          -173
+        ],
+        "rf_mhz": [
+          6306.6,
+          6316.6
+        ],
+        "excess_dbfs": -51.72463251685581,
+        "interference_over_signal_db": -6.19916994984603,
+        "mean_total_over_floor_db": 14.731418344035669,
+        "total_over_floor_percentiles_db": {
+          "p50": 10.81689384674676,
+          "p95": 21.658042595304202,
+          "p99": 21.86955615538782,
+          "max": 22.289277697742605
+        },
+        "sampled_fraction_above_floor_6db": 1.0
+      },
+      {
+        "baseband_mhz": [
+          -118,
+          -108
+        ],
+        "rf_mhz": [
+          6371.6,
+          6381.6
+        ],
+        "excess_dbfs": -63.22043240347652,
+        "interference_over_signal_db": -17.69496983646674,
+        "mean_total_over_floor_db": 4.829055185636701,
+        "total_over_floor_percentiles_db": {
+          "p50": 4.917895990094648,
+          "p95": 5.935622589323788,
+          "p99": 6.729584669817854,
+          "max": 7.761764162039841
+        },
+        "sampled_fraction_above_floor_6db": 0.048
+      },
+      {
+        "baseband_mhz": [
+          -105,
+          -86
+        ],
+        "rf_mhz": [
+          6384.6,
+          6403.6
+        ],
+        "excess_dbfs": -52.87626516124985,
+        "interference_over_signal_db": -7.350802594240063,
+        "mean_total_over_floor_db": 11.009938667534342,
+        "total_over_floor_percentiles_db": {
+          "p50": 4.225791117472436,
+          "p95": 7.48046024526444,
+          "p99": 25.7194521087168,
+          "max": 28.35915934043577
+        },
+        "sampled_fraction_above_floor_6db": 0.142
+      },
+      {
+        "baseband_mhz": [
+          -44,
+          -27
+        ],
+        "rf_mhz": [
+          6445.6,
+          6462.6
+        ],
+        "excess_dbfs": -57.003162585914865,
+        "interference_over_signal_db": -11.477700018905088,
+        "mean_total_over_floor_db": 7.797107693068874,
+        "total_over_floor_percentiles_db": {
+          "p50": 0.7358632691068763,
+          "p95": 1.54519639742443,
+          "p99": 25.068470815425023,
+          "max": 25.47993341834797
+        },
+        "sampled_fraction_above_floor_6db": 0.016
+      },
+      {
+        "baseband_mhz": [
+          -9,
+          1
+        ],
+        "rf_mhz": [
+          6480.6,
+          6490.6
+        ],
+        "excess_dbfs": -66.2951768227559,
+        "interference_over_signal_db": -20.769714255746123,
+        "mean_total_over_floor_db": 3.016435650359486,
+        "total_over_floor_percentiles_db": {
+          "p50": 1.3807177588945994,
+          "p95": 7.078554530823061,
+          "p99": 8.335111974914081,
+          "max": 10.73640229167909
+        },
+        "sampled_fraction_above_floor_6db": 0.106
+      }
+    ],
+    "lines": [
+      {
+        "baseband_mhz": -58.88,
+        "rf_mhz": 6430.72,
+        "excess_dbfs": -55.72448723474602
+      },
+      {
+        "baseband_mhz": 94.72,
+        "rf_mhz": 6584.320000000001,
+        "excess_dbfs": -62.691730674874684
+      },
+      {
+        "baseband_mhz": 12.8,
+        "rf_mhz": 6502.400000000001,
+        "excess_dbfs": -76.99470805544027
+      },
+      {
+        "baseband_mhz": 115.2,
+        "rf_mhz": 6604.8,
+        "excess_dbfs": -75.54034652616993
+      },
+      {
+        "baseband_mhz": -263.68,
+        "rf_mhz": 6225.92,
+        "excess_dbfs": -73.30104278595803
+      },
+      {
+        "baseband_mhz": 258.57,
+        "rf_mhz": 6748.17,
+        "excess_dbfs": -76.30300389384668
+      }
+    ],
+    "effective_sinr_db": -0.5470095084993997,
+    "median_window_sinr_db": 1.1270270340077106,
+    "total_interference_excess_dbfs": -46.96951433325938
+  },
+  {
+    "folder": "/media/oi/Data/uwb/clean_distance/2026-11-16/d4p2m_period1ms",
+    "capture_metadata": {
+      "rate": 737280000.0,
+      "freq": 6489599999.999996,
+      "gain": 60.0,
+      "channel": 3,
+      "antenna": "RX1",
+      "requested": 1474560000,
+      "got": 1474560000,
+      "duration_ms": 2000.0,
+      "errors": [],
+      "chunks": 1407,
+      "file": "/media/oi/Data/uwb/clean_distance/2026-11-16/d4p2m_period1ms/rx_2s_r01.sc16"
+    },
+    "phase_samples": 21797,
+    "phase_method": "first CRC-valid preamble start modulo 1 ms",
+    "off_window_phase_samples": 489481,
+    "off_window_samples": 131072,
+    "sampled_windows": 500,
+    "step_ms": 4,
+    "fft_bin_hz": 22500.0,
+    "enbw_hz": 33750.0,
+    "thermal_psd_lsb2_hz": 2.5777837436180562e-05,
+    "thermal_dbfs_hz": -136.19653389366283,
+    "tone_rms_lsb": 934.3427344405559,
+    "tone_dbfs": -30.89887444283889,
+    "distance_m": 4.2,
+    "signal_dbfs": -44.25910316867153,
+    "prior_thermal_snr_db": 5.159735376691299,
+    "bands": [
+      {
+        "baseband_mhz": [
+          -183,
+          -173
+        ],
+        "rf_mhz": [
+          6306.6,
+          6316.6
+        ],
+        "excess_dbfs": -44.55176694803225,
+        "interference_over_signal_db": -0.29266377936072263,
+        "mean_total_over_floor_db": 21.669014940319688,
+        "total_over_floor_percentiles_db": {
+          "p50": 21.974006651016534,
+          "p95": 22.22875700850291,
+          "p99": 22.311004227199817,
+          "max": 22.622571005083174
+        },
+        "sampled_fraction_above_floor_6db": 1.0
+      },
+      {
+        "baseband_mhz": [
+          -118,
+          -108
+        ],
+        "rf_mhz": [
+          6371.6,
+          6381.6
+        ],
+        "excess_dbfs": -65.95846645320009,
+        "interference_over_signal_db": -21.69936328452856,
+        "mean_total_over_floor_db": 3.1331973757361773,
+        "total_over_floor_percentiles_db": {
+          "p50": 2.6222164306313234,
+          "p95": 5.480668091034474,
+          "p99": 6.209388245797348,
+          "max": 6.5527020368464575
+        },
+        "sampled_fraction_above_floor_6db": 0.016
+      },
+      {
+        "baseband_mhz": [
+          -105,
+          -86
+        ],
+        "rf_mhz": [
+          6384.6,
+          6403.6
+        ],
+        "excess_dbfs": -52.04776811868961,
+        "interference_over_signal_db": -7.788664950018081,
+        "mean_total_over_floor_db": 11.669734892291379,
+        "total_over_floor_percentiles_db": {
+          "p50": 4.458424194603139,
+          "p95": 8.017608754188894,
+          "p99": 26.16905388318085,
+          "max": 28.481743005379872
+        },
+        "sampled_fraction_above_floor_6db": 0.196
+      },
+      {
+        "baseband_mhz": [
+          -44,
+          -27
+        ],
+        "rf_mhz": [
+          6445.6,
+          6462.6
+        ],
+        "excess_dbfs": -56.446114261165185,
+        "interference_over_signal_db": -12.187011092493652,
+        "mean_total_over_floor_db": 8.167662857811763,
+        "total_over_floor_percentiles_db": {
+          "p50": 0.6565038323764648,
+          "p95": 1.9005411429910926,
+          "p99": 25.04480763872563,
+          "max": 25.927662490547423
+        },
+        "sampled_fraction_above_floor_6db": 0.016
+      },
+      {
+        "baseband_mhz": [
+          -9,
+          1
+        ],
+        "rf_mhz": [
+          6480.6,
+          6490.6
+        ],
+        "excess_dbfs": -60.19968604239729,
+        "interference_over_signal_db": -15.94058287372576,
+        "mean_total_over_floor_db": 6.966373863939763,
+        "total_over_floor_percentiles_db": {
+          "p50": 7.026369342403508,
+          "p95": 7.770636962830838,
+          "p99": 10.622484215359325,
+          "max": 10.971948016860178
+        },
+        "sampled_fraction_above_floor_6db": 0.922
+      }
+    ],
+    "lines": [
+      {
+        "baseband_mhz": -58.88,
+        "rf_mhz": 6430.72,
+        "excess_dbfs": -55.68291826316502
+      },
+      {
+        "baseband_mhz": 94.72,
+        "rf_mhz": 6584.320000000001,
+        "excess_dbfs": -64.58353597885423
+      },
+      {
+        "baseband_mhz": 12.8,
+        "rf_mhz": 6502.400000000001,
+        "excess_dbfs": -76.4717568326368
+      },
+      {
+        "baseband_mhz": 115.2,
+        "rf_mhz": 6604.8,
+        "excess_dbfs": -74.80821071762574
+      },
+      {
+        "baseband_mhz": -263.68,
+        "rf_mhz": 6225.92,
+        "excess_dbfs": -73.24011200853361
+      },
+      {
+        "baseband_mhz": 258.57,
+        "rf_mhz": 6748.17,
+        "excess_dbfs": -76.15398143145315
+      }
+    ],
+    "effective_sinr_db": -2.2156126428851226,
+    "median_window_sinr_db": -1.7799920564887577,
+    "total_interference_excess_dbfs": -42.970279518438026
+  },
+  {
+    "folder": "/media/oi/Data/uwb/clean_distance/2026-11-16/d5p2m_period1ms",
+    "capture_metadata": {
+      "rate": 737280000.0,
+      "freq": 6489599999.999996,
+      "gain": 60.0,
+      "channel": 3,
+      "antenna": "RX1",
+      "requested": 1474560000,
+      "got": 1474560000,
+      "duration_ms": 2000.0,
+      "errors": [],
+      "chunks": 1407,
+      "file": "/media/oi/Data/uwb/clean_distance/2026-11-16/d5p2m_period1ms/rx_2s_r01.sc16"
+    },
+    "phase_samples": 483840,
+    "phase_method": "maximum folded 446 us energy, 40 periods across 2 s",
+    "off_window_phase_samples": 214244,
+    "off_window_samples": 131072,
+    "sampled_windows": 500,
+    "step_ms": 4,
+    "fft_bin_hz": 22500.0,
+    "enbw_hz": 33750.0,
+    "thermal_psd_lsb2_hz": 2.4742157620494254e-05,
+    "thermal_dbfs_hz": -136.37462300664473,
+    "tone_rms_lsb": 1003.0915367799678,
+    "tone_dbfs": -30.28218737468807,
+    "distance_m": 5.2,
+    "signal_dbfs": -47.290913148403966,
+    "prior_thermal_snr_db": 2.1659496921159223,
+    "bands": [
+      {
+        "baseband_mhz": [
+          -183,
+          -173
+        ],
+        "rf_mhz": [
+          6306.6,
+          6316.6
+        ],
+        "excess_dbfs": -45.21029575601616,
+        "interference_over_signal_db": 2.0806173923878086,
+        "mean_total_over_floor_db": 21.192033109247603,
+        "total_over_floor_percentiles_db": {
+          "p50": 21.266787769133643,
+          "p95": 21.47306770548369,
+          "p99": 21.525850576212136,
+          "max": 21.653320308499705
+        },
+        "sampled_fraction_above_floor_6db": 1.0
+      },
+      {
+        "baseband_mhz": [
+          -118,
+          -108
+        ],
+        "rf_mhz": [
+          6371.6,
+          6381.6
+        ],
+        "excess_dbfs": -59.58213940803553,
+        "interference_over_signal_db": -12.291226259631564,
+        "mean_total_over_floor_db": 7.621387108253341,
+        "total_over_floor_percentiles_db": {
+          "p50": 7.93270447394563,
+          "p95": 8.340116819957181,
+          "p99": 8.632072224867272,
+          "max": 8.81751724639137
+        },
+        "sampled_fraction_above_floor_6db": 0.876
+      },
+      {
+        "baseband_mhz": [
+          -105,
+          -86
+        ],
+        "rf_mhz": [
+          6384.6,
+          6403.6
+        ],
+        "excess_dbfs": -53.736296354925074,
+        "interference_over_signal_db": -6.44538320652111,
+        "mean_total_over_floor_db": 10.280567787069181,
+        "total_over_floor_percentiles_db": {
+          "p50": 4.820813854264719,
+          "p95": 7.312143674439349,
+          "p99": 22.142015869970283,
+          "max": 28.289062973291742
+        },
+        "sampled_fraction_above_floor_6db": 0.192
+      },
+      {
+        "baseband_mhz": [
+          -44,
+          -27
+        ],
+        "rf_mhz": [
+          6445.6,
+          6462.6
+        ],
+        "excess_dbfs": -57.16178830422838,
+        "interference_over_signal_db": -9.870875155824411,
+        "mean_total_over_floor_db": 7.716477213491169,
+        "total_over_floor_percentiles_db": {
+          "p50": 0.7989862200200399,
+          "p95": 2.2317728547594053,
+          "p99": 25.198257263418526,
+          "max": 25.310740080795608
+        },
+        "sampled_fraction_above_floor_6db": 0.014
+      },
+      {
+        "baseband_mhz": [
+          -9,
+          1
+        ],
+        "rf_mhz": [
+          6480.6,
+          6490.6
+        ],
+        "excess_dbfs": -60.867774327626556,
+        "interference_over_signal_db": -13.576861179222586,
+        "mean_total_over_floor_db": 6.579442881019931,
+        "total_over_floor_percentiles_db": {
+          "p50": 6.432247279834373,
+          "p95": 7.6482119065992284,
+          "p99": 9.092577606799976,
+          "max": 9.494539801197005
+        },
+        "sampled_fraction_above_floor_6db": 0.956
+      }
+    ],
+    "lines": [
+      {
+        "baseband_mhz": -58.88,
+        "rf_mhz": 6430.72,
+        "excess_dbfs": -55.616213334878886
+      },
+      {
+        "baseband_mhz": 94.72,
+        "rf_mhz": 6584.320000000001,
+        "excess_dbfs": -69.07298603379172
+      },
+      {
+        "baseband_mhz": 12.8,
+        "rf_mhz": 6502.400000000001,
+        "excess_dbfs": -76.1156330283783
+      },
+      {
+        "baseband_mhz": 115.2,
+        "rf_mhz": 6604.8,
+        "excess_dbfs": -75.8371821083296
+      },
+      {
+        "baseband_mhz": -263.68,
+        "rf_mhz": 6225.92,
+        "excess_dbfs": -73.58542616503057
+      },
+      {
+        "baseband_mhz": 258.57,
+        "rf_mhz": 6748.17,
+        "excess_dbfs": -75.75621544025053
+      }
+    ],
+    "effective_sinr_db": -4.666459599200545,
+    "median_window_sinr_db": -4.278376555139585,
+    "total_interference_excess_dbfs": -43.65284365509277
+  }
+]
