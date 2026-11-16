@@ -1,0 +1,71 @@
+{
+  "abba": {
+    "A_reference_full_packet_pct": [
+      0.78,
+      0.1,
+      0.18
+    ],
+    "B_demod_full_packet_pct": [
+      -6.13,
+      -5.77,
+      -5.62
+    ],
+    "B_demod_preamble_pct": [
+      -7.68,
+      -8.08,
+      -7.32
+    ],
+    "rounds_per_session": 5,
+    "sessions": 3,
+    "sic_output_identity": "byte-identical (1084544 B x 2)"
+  },
+  "binaries": {
+    "gr-uwb/build-avx2-demod-sic/apps/bench_unified_timing": "d84e824499b48e4a54d5c6292c27e609cdc58b35700f07b9e30f8c04297d7760",
+    "gr-uwb/build-avx512-demod-sic/apps/bench_demod_sic_kernels": "90141ca59cd9135e609fe64f1438bcd0227dc38fb2c7e3a0903c863ae5a94086",
+    "gr-uwb/build-avx512-demod-sic/apps/bench_unified_timing": "462e8a265d34c47d28602cb58cae8608845274e443eb0734a1829ae96acf18eb",
+    "gr-uwb/build-avx512-demod-sic/lib/uwb_qa_uwb_demod_sic_avx512.cc": "5d19fe0586b82395901585a284e61c8d5e7d80fa7c088bd851a00cf76a8cdd15",
+    "gr-uwb/build-scalar-demod-sic/apps/bench_unified_timing": "87d5c9af4884cbcfadca60e624f5402f4692ca404284867fad07385c1e423610"
+  },
+  "branch": "perf/avx512-kernels",
+  "build_config": {
+    "avx2": "UWB_SIMD=AVX2 (same otherwise)",
+    "avx512": "UWB_SIMD=AVX512 UWB_BUILD_GNURADIO=OFF UWB_BUILD_EXPERIMENTS=ON ENABLE_UHD_BACKEND=OFF",
+    "scalar": "UWB_SIMD=SCALAR (same otherwise)"
+  },
+  "date": "2026-11-16",
+  "default_policy": {
+    "cfo": "avx2",
+    "cir": "avx2",
+    "sic_energy": "avx2",
+    "sic_reconstruct": "avx2",
+    "sync": "avx512"
+  },
+  "git_head": "5d5ba2690907210cf874f8f7efea90983696d906",
+  "note": "phase-2 is uncommitted development on top of 5d5ba26; this manifest, not the SHA, identifies the sources",
+  "qa": {
+    "build-avx2-demod-sic": "54/54 passed (install consumer included)",
+    "build-avx512-demod-sic": "54/54 passed (install consumer included)",
+    "build-scalar-demod-sic": "54/54 passed (install consumer included)"
+  },
+  "sources": {
+    "docs/performance/\u89e3\u8c03\u4e0eSIC_AVX512\u5185\u6838\u6269\u5c55\u5f00\u53d1\u62a5\u544a_2026-11-16.md": "14e970df7ce595cdeb25660925d72c0804de2af5bf3cd380b9b15be565ff4374",
+    "gr-uwb/apps/CMakeLists.txt": "24d2497fd94eda083040550b9f2dbff88ec15ce7f2d90c24a28ba638e1bcd0e9",
+    "gr-uwb/apps/bench_demod_sic_kernels.cc": "f2ab152024912800d274b5e92b15e5861340bd5863fe9e35c808021c14a98fc3",
+    "gr-uwb/apps/bench_unified_timing.cc": "fc7f818066fc2226c79c4fc085738eab88ef77ea5f5313348ed41fbaf0483d13",
+    "gr-uwb/cmake/Modules/UwbSimd.cmake": "725a329ad2f34f602b186fbe9f30d6cb7710ad53fb203624b56a47119b47db6b",
+    "gr-uwb/include/gnuradio/uwb/CMakeLists.txt": "a1b362d3064ac943e1c16b2dc3410a5dd187b35d4473161cc420583097da992a",
+    "gr-uwb/include/gnuradio/uwb/uwb_demod_core.h": "cb2f043e9c97c27e56ef8c24a746dd6c8f648797b17eda851eb6521116977bdf",
+    "gr-uwb/include/gnuradio/uwb/uwb_demod_sic_avx512.h": "a8759410c4a17974d879e0e3de35e79e2789806d565b4d7ead0ce53f6110c990",
+    "gr-uwb/include/gnuradio/uwb/uwb_kernel_backend.h": "9c754b4bf1827131a899f31f75565defd49b0e2d0695ac45bb4644a4f71bbe51",
+    "gr-uwb/include/gnuradio/uwb/uwb_rx_sync_opt.h": "c827d60b97b2a2611c67afed0bf3c0aa16952a537bd722a7264f6aa476beb9a0",
+    "gr-uwb/include/gnuradio/uwb/uwb_simd.h": "dc2fb676de91555b373f7f659ca5aa148bd3f1266d456f208cd7a961bb3bf403",
+    "gr-uwb/lib/CMakeLists.txt": "fc3ed4dee5154fd9b8f543e35d458aee7c91ff041477f4071d9ef2b5f10c0cc1",
+    "gr-uwb/lib/qa_uwb_demod_sic_avx512.cc": "a3e05a19dbeeba2d1774b0c85ecd49d9c38186fb9b5b947585057b866541df97",
+    "gr-uwb/lib/uwb_demod_sic_avx512.cc": "f686fc1416776a215f4d237a2bb02bdf00c2a95fcb548c075a4fea1ab53d315b",
+    "gr-uwb/lib/uwb_discrete_cir_reconstruct.cc": "54a9027204c4e98e576bd837c05072d303058f632cb614436357152618963541",
+    "gr-uwb/lib/uwb_kernel_backend.cc": "f3250181285dea5cc01cc715443058401d12d54a650aba5796260ea5299510b5",
+    "gr-uwb/lib/uwb_simd_runtime.cc": "9212a4873382d4670f7ba3643dfa61d4ef9e5d29509a1446fc029a17275174da",
+    "tools/perf/run_demod_sic_abba.py": "0467d5ed7ecf0095da4bd2c80df1f5d84bf3e26d1d12bd282ae86fa6d5a68c4e"
+  },
+  "worktree": "/tmp/uwb-gnuradio-avx512"
+}

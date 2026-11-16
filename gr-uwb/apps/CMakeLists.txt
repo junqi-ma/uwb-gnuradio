@@ -408,6 +408,13 @@ if(UWB_BUILD_EXPERIMENTS)
     target_link_libraries(bench_unified_timing uwb_native)
     uwb_simd_apply(bench_unified_timing)
 
+    # Phase-2 operator-level benchmark: one demod/SIC kernel at a time, with a
+    # bit-identity gate against the AVX2 reference for every AVX-512 candidate.
+    # Plan: docs/performance/解调与SIC_AVX512内核扩展开发规划_2026-11-16.md
+    add_executable(bench_demod_sic_kernels bench_demod_sic_kernels.cc)
+    target_link_libraries(bench_demod_sic_kernels uwb_native)
+    uwb_simd_apply(bench_demod_sic_kernels)
+
     # Offline paired recovery experiment: desired complete packet + other-code
     # SYNC/SFD-only interference. Does not change the production pipeline.
     add_executable(experiment_preamble_recovery

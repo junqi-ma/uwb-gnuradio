@@ -29,6 +29,8 @@ install(FILES
     uwb_rational_resampler_core.h
     uwb_rational_resampler_avx512.h
     uwb_simd.h
+    uwb_kernel_backend.h
+    uwb_demod_sic_avx512.h
     uwb_sc16_scale.h
     uwb_discrete_cir_sic.h
     uwb_rational_resampler_ccf_65_48.h

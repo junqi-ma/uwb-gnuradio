@@ -45,7 +45,10 @@ set(uwb_core_sources
 # The runtime capability check MUST be compiled on the baseline ISA: it is the
 # entry point that has to run (and refuse) before any AVX-512 kernel can be
 # reached.  A separate OBJECT library keeps it out of uwb_simd_apply().
-add_library(uwb_simd_probe OBJECT uwb_simd_runtime.cc)
+# uwb_kernel_backend.cc lives here too: the per-group selector must be able to
+# answer before any wide instruction is reachable, and its override is what QA
+# uses to pin a backend.
+add_library(uwb_simd_probe OBJECT uwb_simd_runtime.cc uwb_kernel_backend.cc)
 target_include_directories(uwb_simd_probe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
     ${PROJECT_BINARY_DIR}/include)
@@ -56,7 +59,8 @@ set_target_properties(uwb_simd_probe PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # when CMake selected the AVX-512 backend.  The rest of the build stays on the
 # AVX2/FMA baseline; the wide functions carry target attributes.
 if(UWB_SIMD_HAVE_AVX512)
-    list(APPEND uwb_core_sources uwb_rational_resampler_avx512.cc)
+    list(APPEND uwb_core_sources uwb_rational_resampler_avx512.cc
+                                uwb_demod_sic_avx512.cc)
 endif()
 
 ########################################################################
@@ -267,6 +271,7 @@ endif()
 list(APPEND uwb_core_qa_sources
     qa_uwb_defaults.cc
     qa_uwb_demod_core.cc
+    qa_uwb_demod_sic_avx512.cc
     qa_uwb_discrete_cir_estimator.cc
     qa_uwb_discrete_cir_reconstruct.cc
     qa_uwb_fixed_tone_cancel_core.cc

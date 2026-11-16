@@ -18,7 +18,10 @@
 #pragma once
 
 #include <gnuradio/uwb/uwb_detector_core.h> // gr::uwb::core::uwb_l2_normalize
-#include <gnuradio/uwb/uwb_phy_profile.h>   // kQm35SamplesPerSymbol
+#include <gnuradio/uwb/uwb_demod_sic_avx512.h> // phase-2 wide kernels
+#include <gnuradio/uwb/uwb_kernel_backend.h>   // per-group backend policy
+#include <gnuradio/uwb/uwb_phy_profile.h>      // kQm35SamplesPerSymbol
+#include <gnuradio/uwb/uwb_simd_config.h>      // UWB_SIMD_HAVE_AVX2
 
 #include <volk/volk.h>
 #if defined(__x86_64__) || defined(_M_X64)
@@ -32,6 +35,17 @@
 #include <cstring>
 #include <limits>
 #include <vector>
+
+// The hand-written AVX2 kernels in this file are gated by the compile-time
+// backend, so UWB_SIMD=SCALAR really is a scalar build for the kernels this
+// file owns.  (UWB_SIMD=AVX512 keeps the AVX2 reference: the two must coexist
+// in one binary for the paired A/B runs.)
+#if (defined(__x86_64__) || defined(_M_X64)) && \
+    (defined(__GNUC__) || defined(__clang__)) && UWB_SIMD_HAVE_AVX2
+#define UWB_RXOPT_HAVE_AVX2 1
+#else
+#define UWB_RXOPT_HAVE_AVX2 0
+#endif
 
 namespace gr {
 namespace uwb {
@@ -116,7 +130,7 @@ inline void build_real_sync_template(const std::vector<std::complex<float>>& tem
     }
 }
 
-#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+#if UWB_RXOPT_HAVE_AVX2
 inline bool has_avx2_fma()
 {
     static const bool s_has =
@@ -220,13 +234,17 @@ inline void real_template_dot_4lag(const std::complex<float>* rx,
                                    size_t L,
                                    std::complex<float> out[4])
 {
-#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+#if UWB_RXOPT_HAVE_AVX2
     if (has_avx2_fma()) {
         real_template_dot_4lag_avx2(rx, taps_dup, L, out);
         return;
     }
 #endif
     out[0] = out[1] = out[2] = out[3] = std::complex<float>(0.f, 0.f);
+    // Same length contract as the AVX2 kernel: an out-of-range L is a caller
+    // bug, and the reference must not read past the buffer to report it.
+    if (L == 0 || L > 65536)
+        return;
     for (size_t k = 0; k < L; ++k) {
         float t = taps_dup[2 * k];
         out[0] += rx[k + 0] * t;
@@ -240,19 +258,21 @@ inline std::complex<float> real_template_dot_single(const std::complex<float>* r
                                                     const float* taps_dup,
                                                     size_t L)
 {
-#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+#if UWB_RXOPT_HAVE_AVX2
     if (has_avx2_fma()) {
         return real_template_dot_single_avx2(rx, taps_dup, L);
     }
 #endif
     std::complex<float> acc(0.f, 0.f);
+    if (L == 0 || L > 65536)
+        return acc;
     for (size_t k = 0; k < L; ++k) {
         acc += rx[k] * taps_dup[2 * k];
     }
     return acc;
 }
 
-#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+#if UWB_RXOPT_HAVE_AVX2
 __attribute__((target("avx2,fma")))
 inline void sfd_real_dot_4lag_avx2(const std::complex<float>* rx,
                                    const float* taps_dup,
@@ -299,7 +319,7 @@ inline void sfd_real_dot_4lag(const std::complex<float>* rx,
                               float sfd_scale,
                               std::complex<float> out[4])
 {
-#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+#if UWB_RXOPT_HAVE_AVX2
     if (has_avx2_fma()) {
         sfd_real_dot_4lag_avx2(rx, taps_dup, sym, sfd_seq, sfd_len, sfd_scale, out);
         return;
@@ -355,7 +375,7 @@ inline std::complex<float> sfd_real_dot_single(const std::complex<float>* rx,
     return acc * sfd_scale;
 }
 
-#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+#if UWB_RXOPT_HAVE_AVX2
 __attribute__((target("avx2")))
 inline void vector_accumulate_complex_avx2(std::complex<float>* dst,
                                            const std::complex<float>* src,
@@ -416,11 +436,60 @@ inline void vector_scale_complex_avx2(std::complex<float>* dst,
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// Phase-2 backend dispatch.
+//
+// resolve_backend() consults the diagnostic override first, then the measured
+// per-group default policy, then what the build/CPU can actually run.  It is a
+// plain out-of-line call (one relaxed atomic load), so it is only used at
+// batch boundaries: once per 8-lag dot, once per whole fold, once per whole
+// vector op -- never per tap, chip or sample.
+// ---------------------------------------------------------------------------
+inline bool use_avx512(const gr::uwb::core::simd::KernelGroup group)
+{
+#if UWB_SIMD_HAVE_AVX512
+    // The wide translation unit only exists in an AVX-512 build, so the call
+    // sites below are compiled out otherwise (no dangling link reference).
+    return gr::uwb::core::simd::resolve_backend(group) ==
+           gr::uwb::core::simd::Backend::Avx512;
+#else
+    (void)group;
+    return false;
+#endif
+}
+
+// Eight consecutive lags in one call.  With the AVX-512 backend this is a
+// single wide kernel (-37% per lag, bit-identical); otherwise it is two
+// unchanged AVX2 4-lag calls, so the fallback is exactly the legacy math.
+inline void real_template_dot_8lag(const std::complex<float>* rx,
+                                   const float* taps_dup,
+                                   size_t L,
+                                   std::complex<float> out[8])
+{
+#if UWB_SIMD_HAVE_AVX512
+    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
+        gr::uwb::core::simd::avx512::real_template_dot_8lag(rx, taps_dup, L,
+                                                            out);
+        return;
+    }
+#endif
+    real_template_dot_4lag(rx, taps_dup, L, out);
+    real_template_dot_4lag(rx + 4, taps_dup, L, out + 4);
+}
+
 inline void vector_accumulate_complex(std::complex<float>* dst,
                                       const std::complex<float>* src,
                                       size_t count)
 {
-#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+    if (count == 0)
+        return;
+#if UWB_SIMD_HAVE_AVX512
+    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
+        gr::uwb::core::simd::avx512::accumulate_cf32(dst, src, count);
+        return;
+    }
+#endif
+#if UWB_RXOPT_HAVE_AVX2
     if (has_avx2_fma()) {
         vector_accumulate_complex_avx2(dst, src, count);
         return;
@@ -434,7 +503,15 @@ inline void vector_sub_complex(std::complex<float>* dst,
                                const std::complex<float>* src,
                                size_t count)
 {
-#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+    if (count == 0)
+        return;
+#if UWB_SIMD_HAVE_AVX512
+    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
+        gr::uwb::core::simd::avx512::sub_cf32(dst, src, count);
+        return;
+    }
+#endif
+#if UWB_RXOPT_HAVE_AVX2
     if (has_avx2_fma()) {
         vector_sub_complex_avx2(dst, src, count);
         return;
@@ -442,6 +519,26 @@ inline void vector_sub_complex(std::complex<float>* dst,
 #endif
     for (size_t m = 0; m < count; ++m)
         dst[m] -= src[m];
+}
+
+// dst = a - b (three-operand form).  Used by the SIC transactional
+// subtraction, which cannot use the in-place kernel because out may not alias
+// the received buffer.  Element-wise, so widening is transparent.
+inline void vector_sub3_complex(std::complex<float>* dst,
+                                const std::complex<float>* a,
+                                const std::complex<float>* b,
+                                size_t count)
+{
+    if (count == 0)
+        return;
+#if UWB_SIMD_HAVE_AVX512
+    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
+        gr::uwb::core::simd::avx512::sub3_cf32(dst, a, b, count);
+        return;
+    }
+#endif
+    for (size_t m = 0; m < count; ++m)
+        dst[m] = a[m] - b[m];
 }
 
 inline void fold_sfd_window(const std::complex<float>* rx_base,
@@ -453,6 +550,15 @@ inline void fold_sfd_window(const std::complex<float>* rx_base,
 {
     if (!rx_base || !sfd_seq || !out || sym == 0 || sfd_len == 0 || fold_len == 0)
         return;
+#if UWB_SIMD_HAVE_AVX512
+    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
+        // Batched: the whole symbol loop runs inside the wide translation
+        // unit, so the fold pays one call instead of one per symbol.
+        gr::uwb::core::simd::avx512::fold_sfd_window(rx_base, sym, sfd_seq,
+                                                     sfd_len, fold_len, out);
+        return;
+    }
+#endif
     size_t i = 0;
     while (i < sfd_len && sfd_seq[i] == 0)
         ++i;
@@ -482,7 +588,15 @@ inline void vector_scale_complex(std::complex<float>* dst,
                                  float scale,
                                  size_t count)
 {
-#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+    if (count == 0)
+        return;
+#if UWB_SIMD_HAVE_AVX512
+    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
+        gr::uwb::core::simd::avx512::scale_cf32(dst, scale, count);
+        return;
+    }
+#endif
+#if UWB_RXOPT_HAVE_AVX2
     if (has_avx2_fma()) {
         vector_scale_complex_avx2(dst, scale, count);
         return;

@@ -658,8 +658,11 @@ static bool apply_discrete_cir_impl(const std::complex<float>* y,
         if (sub_hi < int64_t(n))
             std::copy(y + sub_hi, y + n, out + sub_hi);
     }
-    for (int64_t j = sub_lo; j < sub_hi; ++j)
-        out[j] = y[j] - recon[j];
+    // Element-wise out = y - recon.  Routed through the shared D1 element-wise
+    // kernel (bit-identical; AVX-512 when the Sync group selects it) instead of
+    // a bare loop the compiler only widens to 256 bits.
+    demod::rxopt::vector_sub3_complex(out + sub_lo, y + sub_lo, recon + sub_lo,
+                                      static_cast<size_t>(sub_hi - sub_lo));
     r.subtract_us = us(t_subtract);
 
     r.packet_samples = waveform_n;
@@ -862,8 +865,11 @@ static bool apply_discrete_cir_pulses_impl(
         if (sub_hi < int64_t(n))
             std::copy(y + sub_hi, y + n, out + sub_hi);
     }
-    for (int64_t j = sub_lo; j < sub_hi; ++j)
-        out[j] = y[j] - recon[j];
+    // Element-wise out = y - recon.  Routed through the shared D1 element-wise
+    // kernel (bit-identical; AVX-512 when the Sync group selects it) instead of
+    // a bare loop the compiler only widens to 256 bits.
+    demod::rxopt::vector_sub3_complex(out + sub_lo, y + sub_lo, recon + sub_lo,
+                                      static_cast<size_t>(sub_hi - sub_lo));
     r.subtract_us = us(t_subtract);
 
     r.packet_samples = pulses.packet_samples;
