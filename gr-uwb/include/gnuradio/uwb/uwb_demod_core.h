@@ -1175,46 +1175,30 @@ inline bool stage_sfd(const std::complex<float>* rx,
             if (out.fine_correlations == 0)
                 ++out.fine_correlations;
         } else {
-            // Fallback non-fast path: stride-2 coarse pass + ±1 fine pass.
-            constexpr size_t kFallbackSfdStride = 2;
-            for (size_t j = j_lo; j <= j_end; j += kFallbackSfdStride) {
-                if (j > j_lo) {
-                    for (size_t k = 0; k < kFallbackSfdStride; ++k)
-                        pwr += std::norm(rx[j + sfd_len - 1 - k]) -
-                               std::norm(rx[j - 1 - k]);
-                }
-                ++out.coarse_correlations;
-                const std::complex<float> acc = sfd_dot(j);
-                const float m = std::norm(acc) / (pwr + 1e-12f);
-                if (m > window_best) {
-                    window_best = m;
-                    window_best_j = j;
-                }
-            }
-            const size_t r_lo =
-                (window_best_j >= j_lo + kFallbackSfdStride)
-                    ? window_best_j - kFallbackSfdStride + 1
-                    : j_lo;
-            const size_t r_hi =
-                std::min(j_end, window_best_j + kFallbackSfdStride - 1);
-            pwr = 0.0f;
-            for (size_t k = 0; k < sfd_len; ++k)
-                pwr += std::norm(rx[r_lo + k]);
-            for (size_t j = r_lo; j <= r_hi; ++j) {
-                if (j > r_lo)
+            // Fallback non-fast path: full-rate pass so metric vector & PAR
+            // match the fast path identically.
+            scratch.metric.resize(j_end - j_lo + 1);
+            for (size_t j = j_lo; j <= j_end; ++j) {
+                if (j > j_lo)
                     pwr += std::norm(rx[j + sfd_len - 1]) -
                            std::norm(rx[j - 1]);
-                ++out.fine_correlations;
+                if (((j - j_lo) & 1u) == 0u)
+                    ++out.coarse_correlations;
+                else
+                    ++out.fine_correlations;
                 const std::complex<float> acc = sfd_dot(j);
                 const float m = std::norm(acc) / (pwr + 1e-12f);
+                scratch.metric[j - j_lo] = m;
                 if (m > window_best) {
                     window_best = m;
                     window_best_j = j;
                 }
             }
+            if (out.fine_correlations == 0)
+                ++out.fine_correlations;
         }
         bool window_passed = (window_best >= profile.sfd_detection_threshold);
-        if (!window_passed && use_real_sfd_fast && window_best >= 0.08f &&
+        if (!window_passed && window_best >= 0.08f &&
             scratch.metric.size() == (j_end - j_lo + 1)) {
             const size_t best_off = window_best_j - j_lo;
             double bg_sum = 0.0;
