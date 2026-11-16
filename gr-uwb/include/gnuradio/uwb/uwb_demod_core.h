@@ -1198,7 +1198,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
                 ++out.fine_correlations;
         }
         bool window_passed = (window_best >= profile.sfd_detection_threshold);
-        if (!window_passed && window_best >= 0.08f &&
+        if (!window_passed && window_best >= 0.03f &&
             scratch.metric.size() == (j_end - j_lo + 1)) {
             const size_t best_off = window_best_j - j_lo;
             double bg_sum = 0.0;
