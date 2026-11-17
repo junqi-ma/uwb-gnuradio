@@ -121,6 +121,18 @@ struct Options {
     // LockedBounded SYNC-train tracking: grid (sparse anchors + single-point
     // correlation on the fitted grid) or legacy (per-SYNC +/-8 search).
     std::string locked_timing = "grid";
+    // Target identity rule for the lock.  `on` (default) keeps the historical
+    // behaviour: an observation only confirms the target when the payload CRC
+    // passes, so a preamble+SFD success without a valid FCS is interference.
+    // `off` is for low-SNR work where the payload cannot be decoded at all:
+    // the lock then discriminates by grid residual instead of dropping every
+    // observation.  It is a lock-only switch; decoding is unaffected.
+    std::string lock_fcs = "on";
+    // Stop the demodulator after the SFD.  `off` (default) keeps the full
+    // PHR/payload path.  `on` is the low-SNR capture-only mode: the packet is
+    // reported as SFD-only, so the `--cir auto` 15 ms Full retry must not run
+    // and an FCS-less SFD success is not an interference event.
+    std::string stop_after_sfd = "off";
     size_t post_guard = 8192;
     // Pre-guard used while LOCKED.  The wide 36864 guard exists for the blind
     // autocorrelation seed (Acquisition::scan needs a 36864-sample platform
@@ -562,6 +574,10 @@ struct Workers {
                                            : (o.cfo_refit == "skip") ? 2 : 0;
                         acq.cfo_refit_skip_rad = o.cfo_refit_skip_rad;
                         acq.cfo_refit_min_peaks = o.cfo_refit_min_peaks;
+                        // Capture-only mode: stop after the SFD.  Set before
+                        // the locked profile is copied from `acq`, so both the
+                        // acquisition and the locked slots carry it.
+                        acq.rx_stop_after_sfd = (o.stop_after_sfd == "on");
                         // Blind sparse autocorrelation seeds can precede or
                         // follow the true first SYNC by several symbols.
                         acq.timing_search_margin = 131072;
@@ -607,7 +623,8 @@ struct Workers {
                                 cost.resample_us = elapsed_us(compute_start, resample_end);
                                 auto r = demod::core::demodulate_one(y.data(), made, p,
                                     job.id, job.predicted_rel_work, 0, tmpl, scratch);
-                                const bool retry = o.cir == "auto" && r.timing.ok && r.sfd.ok &&
+                                const bool retry = !p.rx_stop_after_sfd &&
+                                    o.cir == "auto" && r.timing.ok && r.sfd.ok &&
                                     (r.status != demod::DemodStatus::Success ||
                                      !r.payload.fcs_pass || !crc_ok(r.payload.bytes));
                                 const auto demod_end = Clock::now();
@@ -683,7 +700,13 @@ struct Workers {
                                 // is an interference event; a same-identity
                                 // decode far from the grid is reported as
                                 // ambiguous and never moves the lock.
-                                if (!job.target_slot && r.timing.ok && r.sfd.ok) {
+                                // With `--lock-fcs off`, or with
+                                // `--stop-after-sfd on`, there is no FCS to
+                                // compare against, so a preamble+SFD success is
+                                // not evidence of interference: TargetLockCore
+                                // discriminates by grid residual instead.
+                                if (o.lock_fcs == "on" && o.stop_after_sfd != "on" &&
+                                    !job.target_slot && r.timing.ok && r.sfd.ok) {
                                     const bool identity = r.payload.fcs_pass &&
                                         crc_ok(r.payload.bytes);
                                     if (!identity) {
@@ -1182,6 +1205,12 @@ try {
                 "  single-point correlation on the fitted grid, or the per-SYNC +/-8\n"
                 "  search; default grid.  measured_period always comes from the anchor fit)\n"
                 "--lock-observations 3 --holdover 3 --reacquire 8\n"
+                "--lock-fcs on|off (default on; off drops the FCS requirement from\n"
+                "  target identity, for low-SNR runs where the payload never decodes.\n"
+                "  The lock then discriminates by grid residual)\n"
+                "--stop-after-sfd on|off (default off; on stops demod after the SFD,\n"
+                "  skipping PHR/payload, the --cir auto Full retry and the\n"
+                "  FCS-based interference diagnostic)\n"
                 "--interference on|off (default on)\n"
                 "--tone on|off (fixed-tone cancellation, default on)\n"
                 "--tone-period-ms 20 --tone-training-ms 0.5 (model cadence)\n"
@@ -1225,6 +1254,8 @@ try {
         else if (key=="--locked-pre-guard") o.locked_pre_guard=std::stoul(value());
         else if (key=="--locked-roi") o.locked_roi=std::stoul(value());
         else if (key=="--locked-timing") o.locked_timing=value();
+        else if (key=="--lock-fcs") o.lock_fcs=value();
+        else if (key=="--stop-after-sfd") o.stop_after_sfd=value();
         else if (key=="--lock-observations") o.lock_observations=std::stoul(value());
         else if (key=="--holdover") o.holdover=std::stoul(value());
         else if (key=="--reacquire") o.reacquire=std::stoul(value());
@@ -1265,6 +1296,13 @@ try {
         throw std::runtime_error("--sync must be acquire or locked");
     if (o.locked_timing!="grid" && o.locked_timing!="legacy")
         throw std::runtime_error("--locked-timing must be grid or legacy");
+    // Strict on|off: unlike --tone/--fused (which treat anything but "off" as
+    // on) these two change what the lock and the demodulator consider a
+    // success, so a typo must fail closed instead of silently picking a mode.
+    if (o.lock_fcs!="on" && o.lock_fcs!="off")
+        throw std::runtime_error("--lock-fcs must be on or off");
+    if (o.stop_after_sfd!="on" && o.stop_after_sfd!="off")
+        throw std::runtime_error("--stop-after-sfd must be on or off");
     if (!(o.tone_period_ms > 0.0) || !(o.tone_training_ms > 0.0) ||
         o.tone_training_ms >= o.tone_period_ms)
         throw std::runtime_error("invalid --tone-period-ms/--tone-training-ms");
@@ -1358,6 +1396,10 @@ try {
     lock_cfg.code_index = 10;
     lock_cfg.preamble_repetitions = 256;
     lock_cfg.sfd_mode = "4z2";
+    // Low-SNR lock identity: with `--lock-fcs off` a preamble+SFD success
+    // confirms the target even when the payload cannot be decoded; the grid
+    // residual then discriminates target from interference.
+    lock_cfg.require_fcs = (o.lock_fcs == "on");
     lock_cfg.geometry = core::target_window_geometry(
         /*sync_span=*/size_t(std::llround(256.0 * 1016.0 * 48.0 / 65.0)),
         /*sfd_span=*/size_t(std::llround(8.0 * 1016.0 * 48.0 / 65.0)),
@@ -1390,7 +1432,9 @@ try {
         " acq_step="+std::to_string(o.acq_step)+
         " acq_persist="+std::to_string(o.acq_persist)+
         " acq_low="+std::to_string(o.acq_low)+
-        " acq_peak="+std::to_string(o.acq_peak));
+        " acq_peak="+std::to_string(o.acq_peak)+
+        " lock_fcs="+o.lock_fcs+
+        " stop_after_sfd="+o.stop_after_sfd);
     // Effective pre-guard for the next cut window.  It follows the lock state:
     // the blind acquisition platform needs the wide guard, the locked
     // predictor only needs the bounded ROI.  Every window cut (target,

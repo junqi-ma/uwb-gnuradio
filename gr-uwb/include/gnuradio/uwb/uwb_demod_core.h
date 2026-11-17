@@ -192,6 +192,280 @@ normalized_mf(const std::complex<float>* rx,
     return best;
 }
 
+// ---------------------------------------------------------------------------
+// K-symbol periodic-fold acquisition (low-SNR fallback).
+//
+// Why this exists
+// ---------------
+// The HRP preamble is N verbatim copies of ONE 1016-sample SYNC symbol, so the
+// single-symbol normalized correlation at -4..-8 dB in-band SNR has a per-SYNC
+// expectation of only ~0.1-0.2.  `radar_verification_threshold` (0.25) then
+// rejects almost every SYNC and acquisition fails even though the preamble is
+// plainly present (measured on the 256-SYNC fixture: all 256 peaks are > 0.08
+// with PAR 232..253, but only 11-24 of 256 clear 0.25).
+//
+// Coherently folding K symbol periods before correlating buys 10*log10(K) of
+// SNR (+18 dB at K=64).  Measured at -14 dB in-band: the folded metric is
+// 0.532 (min) / 0.560 (median), while the maximum over 200 pure-noise fold
+// positions is 0.0107 -- roughly 50x of margin, hence the 0.05 gate.
+//
+// The fold is PERIODIC, and so is the preamble: 256 verbatim copies of one
+// SYNC symbol carry no information that distinguishes SYNC #0 from SYNC #7, so
+// the folded metric is exactly P-periodic in the lag.  Folding over the SEARCH
+// WINDOW (fold_len = (w1-w0) + L, not one period) still matters -- it keeps the
+// fold and the correlation on the same absolute grid and lets the window be
+// searched at all -- but it does NOT by itself recover an absolute position:
+// every symbol start in the window scores the same.  The only absolute
+// reference available before the SFD is the seed, so the reported position is
+// the strongest lag within +/-P/2 of it.  The reference prototype measured the
+// same limit (docs/performance/data_low_snr_lock_20261117/fold_timing.json,
+// "coarse offset sweep": the total error stays inside +/-508 samples = half a
+// SYMBOL period and slips by whole periods beyond that).
+// ---------------------------------------------------------------------------
+inline constexpr size_t kFoldMaxSymbols = 64;
+inline constexpr size_t kFoldMinSymbols = 16;
+inline constexpr float kFoldThreshold = 0.05f;
+inline constexpr size_t kFoldAnchorGroupSymbols = 16;
+inline constexpr int64_t kFoldAnchorRefine = 8;
+
+struct FoldAcquireResult {
+    bool ok = false;
+    int64_t start = -1;          // absolute SYMBOL START of the packet
+    float metric = 0.0f;         // folded normalized correlation at `start`
+    std::complex<float> corr{ 0.0f, 0.0f };
+    size_t symbols_folded = 0;
+    size_t window_lags = 0;
+};
+
+// Fold `[w0, w1]` (a window of legal SYMBOL START positions) by up to
+// `max_symbols` periods and return the strongest normalized correlation lag
+// within +/-P/2 of `centre`.  Degrades K when the buffer cannot hold
+// `max_symbols` periods from `w0`, and refuses below kFoldMinSymbols (the gate
+// is not safe without the fold gain).
+inline FoldAcquireResult fold_acquire(const std::complex<float>* rx,
+                                      size_t n,
+                                      int64_t centre,
+                                      int64_t w0_in,
+                                      int64_t w1_in,
+                                      const std::complex<float>* tmpl,
+                                      size_t L,
+                                      float Et,
+                                      const rxopt::RealSyncTemplate& real_tmpl,
+                                      size_t max_symbols,
+                                      size_t preamble_repetitions,
+                                      float threshold)
+{
+    FoldAcquireResult res;
+    const int64_t P = static_cast<int64_t>(kQm35SamplesPerSymbol);
+    const int64_t Li = static_cast<int64_t>(L);
+    if (!rx || !tmpl || L == 0 || n < L)
+        return res;
+
+    int64_t w0 = std::max<int64_t>(0, w0_in);
+    int64_t w1 = std::min<int64_t>(w1_in, static_cast<int64_t>(n) - Li);
+    if (w1 < w0)
+        return res;
+
+    // The deepest sample the fold touches is w1 + L - 1 + (K-1)*P, so the
+    // buffer must hold K whole symbol periods starting at w0.
+    const int64_t room = static_cast<int64_t>(n) - w0 - Li;
+    if (room < 0)
+        return res;
+    int64_t k_eff = std::min<int64_t>(static_cast<int64_t>(max_symbols),
+                                      room / P + 1);
+    // Folding past the end of the preamble only adds noise, never signal.
+    k_eff = std::min<int64_t>(k_eff,
+                              static_cast<int64_t>(preamble_repetitions));
+    if (k_eff < static_cast<int64_t>(kFoldMinSymbols))
+        return res;
+    w1 = std::min<int64_t>(w1, static_cast<int64_t>(n) - Li - (k_eff - 1) * P);
+    if (w1 < w0)
+        return res;
+
+    const int64_t span = w1 - w0;
+    const size_t fold_len = static_cast<size_t>(span + Li);
+    // Rare failure path: allocation here is acceptable (this runs at most once
+    // per packet, and only for packets the single-symbol search lost).
+    std::vector<std::complex<float>> folded(fold_len,
+                                           std::complex<float>(0.0f, 0.0f));
+    for (int64_t k = 0; k < k_eff; ++k)
+        rxopt::vector_accumulate_complex(folded.data(), rx + w0 + k * P,
+                                         fold_len);
+
+    const bool use_real = real_tmpl.is_real && real_tmpl.length == L;
+    const float* taps_dup = real_tmpl.taps_dup.data();
+    float pw = 0.0f;
+    for (size_t m = 0; m < L; ++m)
+        pw += std::norm(folded[m]);
+
+    // Position ambiguity: only lags inside +/-P/2 of the seed can be told apart
+    // (see the note above).  Track the argmax of that central sub-window; the
+    // full window is still searched so the fold and the correlation share one
+    // absolute grid and the seed's own error is measurable.
+    const int64_t half_period = P / 2;
+    const int64_t lo_lag = std::max<int64_t>(0, (centre - w0) - half_period);
+    const int64_t hi_lag = std::min<int64_t>(span, (centre - w0) + half_period);
+
+    float bm = -1.0f;
+    int64_t bj = lo_lag;
+    std::complex<float> bacc(0.0f, 0.0f);
+    int64_t j = 0;
+    if (use_real) {
+        for (; j + 7 <= span; j += 8) {
+            std::complex<float> acc[8];
+            rxopt::real_template_dot_8lag(folded.data() + j, taps_dup, L, acc);
+            for (int m = 0; m < 8; ++m) {
+                const float met = std::norm(acc[m]) / (pw * Et + 1e-12f);
+                const int64_t lag = j + m;
+                if (lag >= lo_lag && lag <= hi_lag && met > bm) {
+                    bm = met;
+                    bj = lag;
+                    bacc = acc[m];
+                }
+                if (lag < span)
+                    pw += std::norm(folded[lag + Li]) - std::norm(folded[lag]);
+            }
+        }
+    }
+    for (; j <= span; ++j) {
+        const std::complex<float> acc =
+            use_real ? rxopt::real_template_dot_single(folded.data() + j,
+                                                       taps_dup, L)
+                     : timing_conjugate_dot(folded.data() + j, tmpl, L);
+        const float met = std::norm(acc) / (pw * Et + 1e-12f);
+        if (j >= lo_lag && j <= hi_lag && met > bm) {
+            bm = met;
+            bj = j;
+            bacc = acc;
+        }
+        if (j < span)
+            pw += std::norm(folded[j + Li]) - std::norm(folded[j]);
+    }
+
+    res.symbols_folded = static_cast<size_t>(k_eff);
+    res.window_lags = static_cast<size_t>(span + 1);
+    if (!(bm >= threshold) || hi_lag < lo_lag)
+        return res;
+    res.ok = true;
+    res.start = w0 + bj;
+    res.metric = bm;
+    res.corr = bacc;
+    return res;
+}
+
+// 16-SYMBOL super-anchor period/origin fit for the fold path.
+//
+// The folded metric resolves the packet origin to ~1 sample, but its period
+// would be the nominal grid by construction: the fold has no resolution along
+// the symbol index.  `measured_period` feeds integer_chip_grid()/spc_ppm and
+// the fused-CMF admission, so it must stay a genuine measurement.  Group the
+// SYNCs into `groups` blocks of kFoldAnchorGroupSymbols, coherently sum each
+// block into one super-symbol (+12 dB), refine its position with a
+// +/-kFoldAnchorRefine normalized search, then least-squares fit
+//     peak(g) = start + (g*kFoldAnchorGroupSymbols)*period + (L-1)
+// exactly like the legacy 256-peak fit (symbol-END convention; the intercept is
+// converted back to a SYMBOL START by subtracting L-1).
+inline bool fold_anchor_fit(const std::complex<float>* rx,
+                            size_t n,
+                            int64_t start,
+                            const std::complex<float>* tmpl,
+                            size_t L,
+                            float Et,
+                            const rxopt::RealSyncTemplate& real_tmpl,
+                            size_t groups,
+                            double* period_out,
+                            int64_t* preamble_start_out,
+                            std::vector<int64_t>& peak_samples,
+                            std::vector<float>& peak_metrics,
+                            std::vector<std::complex<float>>& peak_corr)
+{
+    peak_samples.clear();
+    peak_metrics.clear();
+    peak_corr.clear();
+    const int64_t P = static_cast<int64_t>(kQm35SamplesPerSymbol);
+    const int64_t Li = static_cast<int64_t>(L);
+    const int64_t refine = kFoldAnchorRefine;
+    const size_t sup_len = L + 2 * static_cast<size_t>(refine);
+    if (groups < 2 || L == 0 || !rx || !tmpl)
+        return false;
+
+    std::vector<std::complex<float>> sup(sup_len,
+                                         std::complex<float>(0.0f, 0.0f));
+    const bool use_real = real_tmpl.is_real && real_tmpl.length == L;
+    const float* taps_dup = real_tmpl.taps_dup.data();
+
+    double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    size_t used = 0;
+    for (size_t g = 0; g < groups; ++g) {
+        const int64_t base =
+            start + static_cast<int64_t>(g) *
+                        static_cast<int64_t>(kFoldAnchorGroupSymbols) * P -
+            refine;
+        if (base < 0)
+            continue;
+        if (base + static_cast<int64_t>(sup_len) +
+                static_cast<int64_t>(kFoldAnchorGroupSymbols - 1) * P >
+            static_cast<int64_t>(n))
+            continue;
+        std::fill(sup.begin(), sup.end(), std::complex<float>(0.0f, 0.0f));
+        for (int64_t j = 0; j < static_cast<int64_t>(kFoldAnchorGroupSymbols);
+             ++j)
+            rxopt::vector_accumulate_complex(sup.data(), rx + base + j * P,
+                                             sup_len);
+        float pw = 0.0f;
+        for (size_t m = 0; m < L; ++m)
+            pw += std::norm(sup[m]);
+        float bm = -1.0f;
+        int64_t bl = 0;
+        std::complex<float> bacc(0.0f, 0.0f);
+        for (int64_t lag = 0; lag <= 2 * refine; ++lag) {
+            const std::complex<float> acc =
+                use_real ? rxopt::real_template_dot_single(sup.data() + lag,
+                                                           taps_dup, L)
+                         : timing_conjugate_dot(sup.data() + lag, tmpl, L);
+            const float met = std::norm(acc) / (pw * Et + 1e-12f);
+            if (met > bm) {
+                bm = met;
+                bl = lag;
+                bacc = acc;
+            }
+            if (lag < 2 * refine)
+                pw += std::norm(sup[lag + Li]) - std::norm(sup[lag]);
+        }
+        const int64_t pos = base + bl;
+        const double x = static_cast<double>(
+            static_cast<int64_t>(g) *
+            static_cast<int64_t>(kFoldAnchorGroupSymbols));
+        const double y = static_cast<double>(pos + Li - 1);
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+        peak_samples.push_back(pos + Li - 1);
+        peak_metrics.push_back(bm);
+        peak_corr.push_back(bacc);
+        ++used;
+    }
+    if (used < 2)
+        return false;
+    const double denom = static_cast<double>(used) * sxx - sx * sx;
+    if (!(std::abs(denom) > 1e-9))
+        return false;
+    const double p = (static_cast<double>(used) * sxy - sx * sy) / denom;
+    if (!std::isfinite(p) || !(p > 0.0))
+        return false;
+    // Same 0.5% sanity gate the LockedBounded anchor fit uses: a period that
+    // far off the nominal grid means the anchors did not land on the expected
+    // symbol indices at all.
+    if (std::abs(p - static_cast<double>(P)) > 0.005 * static_cast<double>(P))
+        return false;
+    const double intercept_end = (sy - p * sx) / static_cast<double>(used);
+    *period_out = p;
+    *preamble_start_out = std::max<int64_t>(
+        0, static_cast<int64_t>(std::llround(intercept_end)) - (Li - 1));
+    return true;
+}
+
 } // namespace detail
 
 // ---------------------------------------------------------------------------
@@ -338,12 +612,16 @@ struct DemodScratch {
     // selected code (fixed 21 symbols, scrambler offset 0); the per-packet
     // channel templates live in kernel.templates.  The 21 raw g0/g1 decisions
     // are cached for the joint payload Viterbi, which must not re-run the
-    // soft-chip PHR demod when the PHR was produced by the fused kernel.
+    // soft-chip PHR demod when the PHR was produced by the fused kernel.  The
+    // per-symbol LLRs are cached alongside them so a soft-decision payload
+    // retry can reuse the PHR soft information instead of re-demodulating it.
     struct FusedPhrState {
         size_t code_index = 0;
         std::vector<int8_t> pn;
         std::vector<int8_t> g0;
         std::vector<int8_t> g1;
+        std::vector<float> llr0;
+        std::vector<float> llr1;
         bool decisions_valid = false;
         rxfusion::Metrics metrics;
         rxfusion::Scratch kernel;
@@ -353,6 +631,8 @@ struct DemodScratch {
             decisions_valid = false;
             g0.clear();
             g1.clear();
+            llr0.clear();
+            llr1.clear();
         }
     } fused_phr;
 
@@ -578,6 +858,122 @@ inline bool stage_timing(const std::complex<float>* rx,
     std::complex<float> first_corr(0.0f, 0.0f);
     const float thr = profile.radar_verification_threshold;
     const bool bounded = profile.sync_strategy == SyncStrategy::LockedBounded;
+
+    // ---- On-demand K-symbol periodic-fold acquisition ---------------------
+    // Reached ONLY after every single-symbol path failed.  The fold costs
+    // ~1 ms (fold + full-window correlation), so it must never run on a packet
+    // the normal path already acquired.  Both strategies share this helper;
+    // only the search window differs (bounded ROI vs a capped acquisition
+    // margin), and the fold keeps the absolute position because it folds over
+    // the window rather than into one symbol period.
+    bool fold_used = false;
+    // Non-bounded acquisition seed, hoisted so the post-train fold retry below
+    // can reuse the same window.
+    int64_t acq_seed = seed_start;
+    auto try_fold_acquire = [&](int64_t centre, int64_t radius) -> bool {
+        const detail::FoldAcquireResult fold = detail::fold_acquire(
+            rx, n, centre, centre - radius, centre + radius,
+            scratch.work.data(), L, Et, scratch.real_sync_template,
+            detail::kFoldMaxSymbols, profile.preamble_repetitions,
+            detail::kFoldThreshold);
+        if (!fold.ok)
+            return false;
+        // ---- Absolute-symbol disambiguation ------------------------------
+        // The preamble is 256 VERBATIM copies of one SYNC symbol, so the fold
+        // metric is exactly P-periodic: `fold.start` is only the grid phase
+        // nearest the seed, and the live frontend seed is accurate to a few
+        // SYMBOLS (measured -6.5..+4.4 SYNC periods at -14 dB in-band), not a
+        // few samples.  The one non-periodic feature available before the SFD
+        // is the preamble's leading edge: immediately before the true start
+        // there is noise (every acquisition window carries a pre-guard), while
+        // every other candidate has a SYNC before it.  Score each candidate by
+        // metric(c) - metric(c-P) and take the best.  At -14 dB in-band the
+        // single-SYNC metric is ~0.038 against ~0.001 in noise.
+        int64_t fold_start = fold.start;
+        {
+            const int64_t P = static_cast<int64_t>(kQm35SamplesPerSymbol);
+            const int64_t max_j = radius / P + 2;
+            auto ss_metric = [&](int64_t pos) -> float {
+                if (pos < 0 ||
+                    pos + static_cast<int64_t>(L) > static_cast<int64_t>(n))
+                    return -1.0f;
+                float pw = 0.0f;
+                for (size_t k = 0; k < L; ++k)
+                    pw += std::norm(rx[pos + static_cast<int64_t>(k)]);
+                const std::complex<float> acc =
+                    scratch.real_sync_template.is_real
+                        ? rxopt::real_template_dot_single(
+                              rx + pos,
+                              scratch.real_sync_template.taps_dup.data(), L)
+                        : detail::timing_conjugate_dot(rx + pos,
+                                                       scratch.work.data(), L);
+                return std::norm(acc) / (pw * Et + 1e-12f);
+            };
+            float best_score = -1e30f;
+            float max_here = 0.0f;
+            for (int64_t j = -max_j; j <= max_j; ++j) {
+                const float m = ss_metric(fold.start + j * P);
+                if (m > 0.0f)
+                    max_here = std::max(max_here, m);
+            }
+            // Leading-edge detection: scan the candidate grid from EARLY to
+            // LATE and take the first slot whose single-SYNC metric clears a
+            // noise/signal threshold.  Every slot before the true start is
+            // noise (~0.001 at -14 dB) and every slot after it is a SYNC
+            // (~0.038), so the first crossing IS the packet start.  The
+            // threshold is relative to the strongest slot seen (a noise-only
+            // window would otherwise never cross) and floored at 0.003, which
+            // is ~3x the largest of 21 exponential noise metrics (1/L * ln21).
+            const float edge_thr = std::max(0.003f, 0.2f * max_here);
+            for (int64_t j = -max_j; j <= max_j; ++j) {
+                const int64_t c = fold.start + j * P;
+                const float here = ss_metric(c);
+                if (here < 0.0f)
+                    continue;
+                if (here >= edge_thr) {
+                    fold_start = c;
+                    best_score = here;
+                    break;
+                }
+            }
+            (void)best_score;
+        }
+        // Period/origin from the 16-SYMBOL super-anchor fit.  A degenerate fit
+        // still leaves a usable origin (the refined fold argmax) with the
+        // nominal period, so the packet is not thrown away for a fit failure.
+        double period_fit = static_cast<double>(kQm35SamplesPerSymbol);
+        int64_t origin_fit = fold_start;
+        const size_t groups = std::min<size_t>(
+            detail::kFoldAnchorGroupSymbols,
+            profile.preamble_repetitions / detail::kFoldAnchorGroupSymbols);
+        if (groups >= 2) {
+            if (!detail::fold_anchor_fit(
+                    rx, n, fold_start, scratch.work.data(), L, Et,
+                    scratch.real_sync_template, groups, &period_fit,
+                    &origin_fit, out.peak_samples, out.peak_metrics,
+                    out.peak_corr)) {
+                out.peak_samples.clear();
+                out.peak_metrics.clear();
+                out.peak_corr.clear();
+            }
+        }
+        if (out.peak_samples.empty()) {
+            out.peak_samples.push_back(fold_start +
+                                       static_cast<int64_t>(L) - 1);
+            out.peak_metrics.push_back(fold.metric);
+            out.peak_corr.push_back(fold.corr);
+        }
+        out.measured_period = period_fit;
+        out.preamble_start_sample = origin_fit;
+        out.metric = fold.metric;
+        first_start = fold_start;
+        first_metric = fold.metric;
+        first_corr = fold.corr;
+        first_hit_k = 0;
+        fold_used = true;
+        return true;
+    };
+
     if (bounded) {
         // Locked tracking contract: the target lock predicted this origin, so
         // only a bounded ROI around the seed is legal.  A miss is a tracking
@@ -696,23 +1092,43 @@ inline bool stage_timing(const std::complex<float>* rx,
             }
         }
         if (!found) {
-            ++out.bounded_failures;
-            finish_timing_profile();
-            return false;
+            // Low-SNR fallback: every single-symbol probe inside the bounded
+            // ROI missed.  The fold keeps the same bounded window -- it is not
+            // an escalation to a wide scan.
+            //
+            // Gate: LockedBounded's failure-path rescue is a single opt-out
+            // tier.  `locked_tail_probe == false` is how a caller asks for the
+            // original hard-fail tracking contract (no rescue at all), so the
+            // fold honours the same switch instead of silently replacing the
+            // tail probe with a different rescue.  qa_uwb_demod_core's
+            // "tail probe rescues leading interference" case pins that
+            // contract: with rescue disabled the packet MUST stay lost.
+            if (!profile.locked_tail_probe ||
+                !try_fold_acquire(
+                    static_cast<int64_t>(seed_start),
+                    std::max<int64_t>(1, static_cast<int64_t>(
+                                             profile.locked_roi_samples)))) {
+                ++out.bounded_failures;
+                finish_timing_profile();
+                return false;
+            }
         }
-        // Convert the inner-SYNC hit back to the packet start on the grid.
-        first_start = pos - static_cast<int64_t>(used_inner) *
-                                static_cast<int64_t>(kQm35SamplesPerSymbol);
-        first_hit_k = used_inner;
-        first_metric = met;
-        first_corr = corr;
-        if (used_inner != 0)
-            ++out.bounded_inner_used;
+        if (!fold_used) {
+            // Convert the inner-SYNC hit back to the packet start on the grid.
+            first_start = pos - static_cast<int64_t>(used_inner) *
+                                    static_cast<int64_t>(kQm35SamplesPerSymbol);
+            first_hit_k = used_inner;
+            first_metric = met;
+            first_corr = corr;
+            if (used_inner != 0)
+                ++out.bounded_inner_used;
+        }
         ++out.bounded_success;
     } else {
         const int64_t seed =
             (seed_start >= 0) ? seed_start
                               : (int64_t)(roi_start + (roi_end - roi_start) / 2);
+        acq_seed = seed;
         const int64_t margin =
             static_cast<int64_t>(profile.timing_search_margin);
         const int64_t stride = std::max<int64_t>(
@@ -747,8 +1163,17 @@ inline bool stage_timing(const std::complex<float>* rx,
                 int64_t pos = -1;
                 float met = 0.0f;
                 std::complex<float> corr(0.0f, 0.0f);
+                // PAR fallback is enabled on the two NARROW local searches
+                // only.  A 256-SYNC preamble at -4..-8 dB in-band SNR has
+                // every SYNC peak above 0.08 with PAR 232..253, but only
+                // 11-24 of 256 clear the 0.25 absolute threshold, so the
+                // absolute gate alone loses the packet.  The wide stride scan
+                // and the whole-SYNC grid probes stay absolute-only: at
+                // thousands of lags a pure-noise false alarm would clear any
+                // PAR gate.
                 const bool narrow_ok =
-                    local_best(seed, narrow, thr, &pos, &met, &corr);
+                    local_best(seed, narrow, thr, &pos, &met, &corr,
+                               /*allow_par_fallback=*/true);
                 out.seed_search_us = static_cast<uint64_t>(
                     std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::steady_clock::now() - narrow_begin).count());
@@ -771,7 +1196,8 @@ inline bool stage_timing(const std::complex<float>* rx,
             int64_t pos = -1;
             float met = 0.0f;
             std::complex<float> corr(0.0f, 0.0f);
-            if (local_best(seed, legacy_seed_radius, thr, &pos, &met, &corr)) {
+            if (local_best(seed, legacy_seed_radius, thr, &pos, &met, &corr,
+                           /*allow_par_fallback=*/true)) {
                 first_start = pos;
                 first_metric = met;
                 first_corr = corr;
@@ -837,8 +1263,15 @@ inline bool stage_timing(const std::complex<float>* rx,
             }
         }
         if (first_start < 0) {
-            finish_timing_profile();
-            return false;
+            // Low-SNR fallback: narrow seed refine, legacy seed refine, stride
+            // coarse scan and whole-SYNC grid probes all missed.  Fold over a
+            // capped acquisition window (never the full 40k margin: the fold
+            // cost grows with the window and the seed is already close).
+            if (!try_fold_acquire(
+                    seed, std::min<int64_t>(margin, 8192))) {
+                finish_timing_profile();
+                return false;
+            }
         }
     }
     // A real QM35825 has a repeatable startup transient: the first few SYNCs
@@ -847,9 +1280,14 @@ inline bool stage_timing(const std::complex<float>* rx,
     // with a relaxed threshold, stopping at the first missing predecessor.
     // LockedBounded disables this by default: walking backwards is exactly how
     // a lock silently drifts onto SYNC #2/#3.
+    //
+    // The fold path disables it unconditionally: its origin came from a
+    // 64-symbol coherent fold, which is far more reliable than a single-SYNC
+    // relaxed-threshold probe, and a single SYNC at -12..-14 dB cannot clear
+    // 0.7*0.25 anyway.
     size_t backtracked_symbols = 0;
     const size_t backtrack_limit =
-        (bounded && !profile.locked_allow_backtrack)
+        (fold_used || (bounded && !profile.locked_allow_backtrack))
             ? 0
             : profile.timing_max_backtrack_symbols;
     for (size_t back = 0; back < backtrack_limit; ++back) {
@@ -1170,7 +1608,7 @@ inline bool stage_timing(const std::complex<float>* rx,
         grid_applied = true;
         return true;
     };
-    if (bounded && profile.locked_grid_timing) {
+    if (bounded && profile.locked_grid_timing && !fold_used) {
         if (!grid_track()) {
             ++out.grid_fallbacks;
             out.peak_samples.clear();
@@ -1188,49 +1626,104 @@ inline bool stage_timing(const std::complex<float>* rx,
     // prematurely truncate the 256-symbol train.
     std::vector<size_t> peak_indices;
     peak_indices.reserve(profile.preamble_repetitions);
-    if (!grid_applied) {
+    if (!grid_applied && !fold_used) {
+        constexpr size_t kMaxConsecutiveSyncMisses = 2;
+        // One tracking pass at a given floor.  `weak` selects the 0.08 floor
+        // LockedBounded already uses for its tail probe; the legacy absolute
+        // threshold is used otherwise.
+        auto track_train = [&](bool weak) {
+            out.peak_samples.clear();
+            out.peak_metrics.clear();
+            out.peak_corr.clear();
+            peak_indices.clear();
+            const int64_t first_hit_start =
+                start + static_cast<int64_t>(first_hit_k) * period;
+            out.peak_samples.push_back(first_hit_start +
+                                       static_cast<int64_t>(L - 1));
+            out.peak_metrics.push_back(first_metric);
+            out.peak_corr.push_back(first_corr);
+            peak_indices.push_back(first_hit_k);
+            size_t consecutive_misses = 0;
+            for (size_t k = first_hit_k + 1;
+                 k < profile.preamble_repetitions; ++k) {
+                const int64_t want = start + static_cast<int64_t>(k * period);
+                int64_t pk = -1;
+                float pm = 0.0f;
+                std::complex<float> pk_corr(0.0f, 0.0f);
+                const float tracking_threshold =
+                    (bounded || weak)
+                        ? std::min(profile.radar_verification_threshold,
+                                   bounded ? 0.08f : 0.06f)
+                        : ((k < backtracked_symbols)
+                               ? 0.7f * profile.radar_verification_threshold
+                               : profile.radar_verification_threshold);
+                const int64_t track_rad =
+                    (bounded && consecutive_misses > 0)
+                        ? std::max<int64_t>(
+                              12, static_cast<int64_t>(
+                                      profile.timing_track_radius))
+                        : static_cast<int64_t>(profile.timing_track_radius);
+                if (!local_best(want, track_rad, tracking_threshold, &pk, &pm,
+                                &pk_corr)) {
+                    ++consecutive_misses;
+                    if (!bounded &&
+                        consecutive_misses > kMaxConsecutiveSyncMisses)
+                        break; // lost the train
+                    continue;
+                }
+                consecutive_misses = 0;
+                out.peak_samples.push_back(pk + static_cast<int64_t>(L - 1));
+                out.peak_metrics.push_back(pm);
+                out.peak_corr.push_back(pk_corr);
+                peak_indices.push_back(k);
+            }
+            return out.peak_samples.size();
+        };
+        // First pass at the legacy threshold: high-SNR packets are complete
+        // here and pay nothing.  Only a train that the absolute threshold
+        // truncated (a low-SNR acquisition whose SYNCs all sit at the same
+        // sub-threshold level) is retried at the 0.08 floor.  Without this the
+        // packet is lost one stage later anyway (fit_cfo needs >= 4 peaks and
+        // stage_cir_softchips needs more than cir_skip_initial_repetitions).
+        const size_t min_peaks =
+            std::max<size_t>(4, profile.min_valid_peaks);
+        size_t tracked = track_train(false);
+        if (!bounded && tracked < min_peaks)
+            tracked = track_train(true);
+        (void)tracked;
+    }
+
+    // ---- Post-train fold retry -------------------------------------------
+    // "All single-symbol paths failed" is also observable one stage later: at
+    // -4..-8 dB in-band SNR the narrow PAR search DOES acquire SYNC #0 (Task 1)
+    // but the per-SYNC tracking threshold (radar_verification_threshold = 0.25)
+    // still truncates the train to a single peak.  That result is unusable --
+    // fit_cfo needs >= 4 peaks and stage_cir_softchips needs more than
+    // cir_skip_initial_repetitions -- so the packet was already lost, just at
+    // CfoFailed instead of TimingFailed.  Retry the fold, which measures a
+    // usable train directly.  profile.min_valid_peaks ("min SYNC peaks to
+    // accept timing") is the existing contract for "this train is too short to
+    // be a timing result"; it was declared but never enforced, and this is
+    // where it belongs.
+    if (!bounded && !fold_used && !grid_applied &&
+        out.peak_samples.size() <
+            std::max<size_t>(4, profile.min_valid_peaks)) {
         out.peak_samples.clear();
         out.peak_metrics.clear();
         out.peak_corr.clear();
-        const int64_t first_hit_start =
-            start + static_cast<int64_t>(first_hit_k) * period;
-        out.peak_samples.push_back(first_hit_start + static_cast<int64_t>(L - 1));
-        out.peak_metrics.push_back(first_metric);
-        out.peak_corr.push_back(first_corr);
-        peak_indices.push_back(first_hit_k);
-        constexpr size_t kMaxConsecutiveSyncMisses = 2;
-        size_t consecutive_misses = 0;
-        for (size_t k = first_hit_k + 1; k < profile.preamble_repetitions; ++k) {
-            const int64_t want = start + static_cast<int64_t>(k * period);
-            int64_t pk = -1;
-            float pm = 0.0f;
-            std::complex<float> pk_corr(0.0f, 0.0f);
-            const float tracking_threshold =
-                bounded
-                    ? std::min(profile.radar_verification_threshold, 0.08f)
-                    : ((k < backtracked_symbols)
-                           ? 0.7f * profile.radar_verification_threshold
-                           : profile.radar_verification_threshold);
-            const int64_t track_rad =
-                (bounded && consecutive_misses > 0)
-                    ? std::max<int64_t>(12, static_cast<int64_t>(profile.timing_track_radius))
-                    : static_cast<int64_t>(profile.timing_track_radius);
-            if (!local_best(want, track_rad,
-                            tracking_threshold, &pk, &pm, &pk_corr)) {
-                ++consecutive_misses;
-                if (!bounded && consecutive_misses > kMaxConsecutiveSyncMisses)
-                    break; // lost the train
-                continue;
-            }
-            consecutive_misses = 0;
-            out.peak_samples.push_back(pk + static_cast<int64_t>(L - 1));
-            out.peak_metrics.push_back(pm);
-            out.peak_corr.push_back(pk_corr);
-            peak_indices.push_back(k);
-        }
+        try_fold_acquire(
+            acq_seed,
+            std::min<int64_t>(static_cast<int64_t>(profile.timing_search_margin),
+                              8192));
     }
 
-    out.detected_peaks = out.peak_samples.size();
+    // The fold path measures `groups` super-anchors rather than every SYNC, but
+    // stage_cir_softchips derives its coherent-averaging count from
+    // detected_peaks: reporting `groups` (8 for 128 SYNCs, 16 for 256) would
+    // average 8 SYNCs instead of 54 and lose ~8 dB of CIR SNR.  Report the
+    // number of SYNC symbols the fitted grid actually covers.
+    out.detected_peaks = fold_used ? profile.preamble_repetitions
+                                   : out.peak_samples.size();
     out.expected_peaks = profile.preamble_repetitions;
     out.metric = first_metric;
 
@@ -1241,7 +1734,11 @@ inline bool stage_timing(const std::complex<float>* rx,
     // (2)), i.e. the start is derived from the WHOLE tracked train rather than
     // the first peak, so a slightly-off first peak does not bias the origin.
     const size_t np = out.peak_samples.size();
-    if (grid_applied) {
+    if (fold_used) {
+        // measured_period / preamble_start_sample were already set by the
+        // fold path's 16-super-anchor fit (see try_fold_acquire).  The legacy
+        // per-SYNC train never ran, so there is nothing to refit here.
+    } else if (grid_applied) {
         // LockedBounded grid: period and origin come from the anchor
         // least-squares fit, NOT from the single-point train (whose positions
         // are `period` by construction and would make integer_chip_grid()
@@ -1567,6 +2064,54 @@ inline bool stage_sfd(const std::complex<float>* rx,
     float best = -1.0f;
     size_t best_j = 0;
 
+    // Shared per-symbol SFD primitive.  `use_real_sfd_fast` / `taps_dup` are
+    // hoisted out of scan_window so the low-SNR discrete-grid fallback below
+    // can reuse the exact same kernels.
+    const bool use_real_sfd_fast =
+        profile.rx_fast_sfd && scratch.real_sync_template.is_real;
+    const float* taps_dup =
+        use_real_sfd_fast ? scratch.real_sync_template.taps_dup.data()
+                          : nullptr;
+
+    // Coherent sign check over the first min(len,16) SFD symbols.  This is the
+    // hard lock that keeps a low-floor / discrete-grid hit from being a
+    // shifted-SFD sidelobe or a noise coincidence: 8 random symbols all match
+    // a fixed +-1 pattern with probability 2^-8.  Shared by the existing
+    // 0.02..0.08 low-floor path and the new discrete grid.
+    auto polarity_ok = [&](int64_t pos) -> bool {
+        const size_t n_check = std::min<size_t>(len, 16);
+        if (pos < 0 ||
+            pos + static_cast<int64_t>(n_check * sym) >
+                static_cast<int64_t>(n))
+            return false;
+        std::complex<float> sym_corr[16];
+        std::complex<double> coh_ref(0.0, 0.0);
+        for (size_t si = 0; si < n_check; ++si) {
+            const size_t p = static_cast<size_t>(pos) + si * sym;
+            std::complex<float> c(0.0f, 0.0f);
+            if (use_real_sfd_fast) {
+                c = rxopt::real_template_dot_single(rx + p, taps_dup, sym);
+            } else {
+                for (size_t k = 0; k < sym; ++k)
+                    c += rx[p + k] * std::conj(template_wf[k]);
+            }
+            sym_corr[si] = c;
+            coh_ref += static_cast<double>(sfd_sequence[si]) *
+                       std::complex<double>(c);
+        }
+        if (!(std::norm(coh_ref) > 1e-24))
+            return false;
+        size_t sign_ok = 0;
+        for (size_t si = 0; si < n_check; ++si) {
+            const double proj =
+                static_cast<double>(sym_corr[si].real()) * coh_ref.real() +
+                static_cast<double>(sym_corr[si].imag()) * coh_ref.imag();
+            if (proj * static_cast<double>(sfd_sequence[si]) > 0.0)
+                ++sign_ok;
+        }
+        return sign_ok == n_check;
+    };
+
     auto scan_window = [&](int64_t center, int64_t half_width,
                            int64_t backtrack_symbols) {
         if (center < 0 || n < sfd_len)
@@ -1584,9 +2129,6 @@ inline bool stage_sfd(const std::complex<float>* rx,
         float pwr = 0.0f;
         for (size_t k = 0; k < sfd_len; ++k)
             pwr += std::norm(rx[j_lo + k]);
-        const bool use_real_sfd_fast =
-            profile.rx_fast_sfd && scratch.real_sync_template.is_real;
-        const float* taps_dup = use_real_sfd_fast ? scratch.real_sync_template.taps_dup.data() : nullptr;
 
         const size_t fold_len = (j_end - j_lo) + sym;
         if (use_real_sfd_fast) {
@@ -1684,39 +2226,11 @@ inline bool stage_sfd(const std::complex<float>* rx,
                 if (par >= 25.0) {
                     if (window_best >= 0.08f) {
                         window_passed = true;
-                    } else if (window_best_j + len * sym <= n) {
+                    } else if (polarity_ok(static_cast<int64_t>(window_best_j))) {
                         // Low-floor fallback (0.02 <= pk < 0.08): verify that
                         // all SFD symbols coherently match sfd_sequence signs
                         // to reject shifted-SFD sidelobes (e.g. 0.0625).
-                        std::complex<float> sym_corr[16];
-                        const size_t n_check = std::min<size_t>(len, 16);
-                        std::complex<double> coh_ref(0.0, 0.0);
-                        for (size_t si = 0; si < n_check; ++si) {
-                            const size_t pos = window_best_j + si * sym;
-                            std::complex<float> c(0.0f, 0.0f);
-                            if (use_real_sfd_fast) {
-                                c = rxopt::real_template_dot_single(
-                                    rx + pos, taps_dup, sym);
-                            } else {
-                                for (size_t k = 0; k < sym; ++k)
-                                    c += rx[pos + k] * std::conj(template_wf[k]);
-                            }
-                            sym_corr[si] = c;
-                            coh_ref += static_cast<double>(sfd_sequence[si]) *
-                                       std::complex<double>(c);
-                        }
-                        if (std::norm(coh_ref) > 1e-24) {
-                            size_t sign_ok = 0;
-                            for (size_t si = 0; si < n_check; ++si) {
-                                const double proj =
-                                    static_cast<double>(sym_corr[si].real()) * coh_ref.real() +
-                                    static_cast<double>(sym_corr[si].imag()) * coh_ref.imag();
-                                if (proj * static_cast<double>(sfd_sequence[si]) > 0.0)
-                                    ++sign_ok;
-                            }
-                            if (sign_ok == n_check)
-                                window_passed = true;
-                        }
+                        window_passed = true;
                     }
                 }
             }
@@ -1738,6 +2252,97 @@ inline bool stage_sfd(const std::complex<float>* rx,
         if (sfd_passed)
             break;
         sfd_passed = scan_window(expected - step, kSfdNarrowHalf, k);
+    }
+
+    // ---- Low-SNR discrete integer-symbol grid fallback --------------------
+    // Reached ONLY when the fast path above failed, so high and medium SNR
+    // (and multipath) keep the existing search bit-for-bit.  At -10..-14 dB
+    // in-band the SFD peak is 0.008..0.05, below the 0.02 low-floor gate, and
+    // the origin can be several SYMBOLS off (the low-SNR timing fold resolves
+    // the grid phase but not always the absolute SYNC index).  Scan the
+    // integer symbol grid +-36 symbols at delta = 0, refine +-1 sample around
+    // the best grid point, then gate on: peak >= 0.008, a weak discrete-grid
+    // PAR >= 1.5, and the shared 8-symbol coherent polarity check.
+    //
+    // The PAR gate is deliberately weak (the plan suggested 5.5).  Measured on
+    // this fixture the true SFD peak is only ~2x the discrete-grid background,
+    // because the background grid points sit on SYNC symbols and the 4z2
+    // sequence (sum = -4) correlates with a plain SYNC at 1/4 power, not at
+    // zero.  A 5.5 gate would therefore reject the -14 dB peak it is meant to
+    // accept.  The real false-alarm guard is the 8-symbol polarity lock
+    // (2^-8 per candidate) plus the 0.008 floor, which is 15x the pure-noise
+    // maximum (0.00053) measured over 200 windows.
+    if (!sfd_passed) {
+        constexpr int64_t kGridHalf = 36;
+        const int64_t max_pos =
+            static_cast<int64_t>(n) - static_cast<int64_t>(sfd_len);
+        auto sfd_metric_at = [&](int64_t pos) -> float {
+            float pwr = 0.0f;
+            for (size_t i = 0; i < sfd_len; ++i)
+                pwr += std::norm(rx[pos + static_cast<int64_t>(i)]);
+            const std::complex<float> acc = sfd_dot(static_cast<size_t>(pos));
+            return std::norm(acc) / (pwr + 1e-12f);
+        };
+        struct GridCand {
+            int64_t pos;
+            float metric;
+        };
+        std::array<GridCand, 2 * kGridHalf + 1> cands{};
+        size_t nc = 0;
+        if (max_pos >= 0) {
+            for (int64_t k = -kGridHalf; k <= kGridHalf; ++k) {
+                const int64_t pos = expected + k * static_cast<int64_t>(period);
+                if (pos < 0 || pos > max_pos)
+                    continue;
+                cands[nc++] = { pos, sfd_metric_at(pos) };
+            }
+        }
+        if (nc >= 8) {
+            ++out.search_windows;
+            size_t bi = 0;
+            for (size_t i = 1; i < nc; ++i)
+                if (cands[i].metric > cands[bi].metric)
+                    bi = i;
+            int64_t gpos = cands[bi].pos;
+            // Refine +-1 sample around the best grid point.  Evaluating delta=0
+            // on all 73 grid points first and refining only the winner keeps
+            // the noise maximum at 75 evaluations instead of 219.
+            int64_t best_pos = gpos;
+            float best_metric = cands[bi].metric;
+            for (int64_t d = -1; d <= 1; ++d) {
+                const int64_t pos = gpos + d;
+                if (pos < 0 || pos > max_pos)
+                    continue;
+                const float m = sfd_metric_at(pos);
+                if (m > best_metric) {
+                    best_metric = m;
+                    best_pos = pos;
+                }
+            }
+            // Background mean over the discrete grid, excluding the best grid
+            // point and its +-2 symbol neighbours.
+            double bg_sum = 0.0;
+            size_t bg_cnt = 0;
+            for (size_t i = 0; i < nc; ++i) {
+                if (std::llabs(cands[i].pos - gpos) <=
+                    2 * static_cast<int64_t>(period))
+                    continue;
+                bg_sum += static_cast<double>(cands[i].metric);
+                ++bg_cnt;
+            }
+            if (bg_cnt >= 16) {
+                const double bg_mean =
+                    std::max(bg_sum / static_cast<double>(bg_cnt), 1e-12);
+                const double par =
+                    static_cast<double>(best_metric) / bg_mean;
+                if (best_metric >= 0.008f && par >= 1.5 &&
+                    polarity_ok(best_pos)) {
+                    best = best_metric;
+                    best_j = static_cast<size_t>(best_pos);
+                    sfd_passed = true;
+                }
+            }
+        }
     }
     if (!sfd_passed)
         return false;
@@ -2930,6 +3535,53 @@ inline bool rs_decode_stream(const std::vector<int8_t>& coded,
     return data_out.size() == data_bits;
 }
 
+// Shared RS + PSDU assembly + FCS tail of the payload decoder.  Both the
+// hard-decision and the soft-decision front ends hand their RS codeword stream
+// here, so the RS(63,55) decode, the LSB-first bit packing, the IEEE 802.15.4
+// CRC-16 and the FCS comparison exist exactly once.  `out` is reset first;
+// `out.ok` is set only when the RS decode succeeded, and `out.fcs_pass` then
+// reports the CRC verdict (a false FCS is a decoded-but-rejected frame, not a
+// decoder failure).
+inline bool finish_rs_crc_payload(const std::vector<int8_t>& rs_cw,
+                                  size_t psdu_bits,
+                                  PayloadResult& out,
+                                  PayloadSubTimers* sub = nullptr)
+{
+    out = PayloadResult{};
+    std::vector<int8_t> psdu_bits_out;
+    const auto t_rs = std::chrono::steady_clock::now();
+    const bool rs_ok = rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out);
+    if (sub)
+        sub->rs_us += payload_elapsed_us(t_rs);
+    if (!rs_ok)
+        return false;
+
+    // PSDU assembly + FCS: bit packing, CRC-16 and the comparison.
+    const auto t_crc = std::chrono::steady_clock::now();
+    out.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
+    out.bytes.resize(psdu_bits_out.size() / 8);
+    for (size_t i = 0; i < out.bytes.size(); ++i) {
+        uint8_t b = 0;
+        for (int bit = 0; bit < 8; ++bit)
+            b |= static_cast<uint8_t>(psdu_bits_out[8 * i + bit]) << bit;
+        out.bytes[i] = b;
+    }
+    if (out.bytes.size() >= 2) {
+        out.calculated_fcs =
+            crc16_802154(out.bytes.data(), out.bytes.size() - 2);
+        out.received_fcs = static_cast<uint16_t>(
+                               out.bytes[out.bytes.size() - 2]) |
+                           (static_cast<uint16_t>(
+                                out.bytes[out.bytes.size() - 1])
+                            << 8);
+        out.fcs_pass = (out.received_fcs == out.calculated_fcs);
+    }
+    if (sub)
+        sub->crc_us += payload_elapsed_us(t_crc);
+    out.ok = true;
+    return true;
+}
+
 // Shared hard-decision payload backend: concatenate the 21 PHR symbols and the
 // payload symbols, run the truncated CL-3 Viterbi, remove the 19 systematic PHR
 // bits and the two tail bits, RS-decode, pack LSB-first and compute the FCS.
@@ -2972,38 +3624,52 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
                               decoded.begin() + (total - 2));
     if (rs_cw.size() != g0.size())
         return false;
-    std::vector<int8_t> psdu_bits_out;
-    const auto t_rs = std::chrono::steady_clock::now();
-    const bool rs_ok = rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out);
-    if (sub)
-        sub->rs_us += payload_elapsed_us(t_rs);
-    if (!rs_ok)
+    return finish_rs_crc_payload(rs_cw, psdu_bits, out, sub);
+}
+
+// Soft-decision twin of decode_payload_hard(): the same joint [21 PHR | payload]
+// symbol stream, but each of the two coded bits arrives as an LLR (positive
+// favours bit 0, the bprf_demod_soft()/rxfusion::decide_bpm_soft() convention)
+// instead of a hard bit.  Everything after the Viterbi is the shared
+// finish_rs_crc_payload(), so the RS/CRC/FCS contract cannot diverge, and the
+// diagnostic buckets are the same (viterbi_us / rs_us / crc_us).
+inline bool decode_payload_soft(const std::vector<float>& llr0p,
+                                const std::vector<float>& llr1p,
+                                const std::vector<float>& llr0,
+                                const std::vector<float>& llr1,
+                                size_t psdu_bits,
+                                PayloadResult& out,
+                                PayloadSubTimers* sub = nullptr)
+{
+    PayloadSubTimer sub_guard(sub);
+    out = PayloadResult{};
+    if (llr0p.size() != 21 || llr1p.size() != 21 || llr0.empty() ||
+        llr0.size() != llr1.size())
         return false;
 
-    // PSDU assembly + FCS: bit packing, CRC-16 and the comparison.
-    const auto t_crc = std::chrono::steady_clock::now();
-    out.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
-    out.bytes.resize(psdu_bits_out.size() / 8);
-    for (size_t i = 0; i < out.bytes.size(); ++i) {
-        uint8_t b = 0;
-        for (int bit = 0; bit < 8; ++bit)
-            b |= static_cast<uint8_t>(psdu_bits_out[8 * i + bit]) << bit;
-        out.bytes[i] = b;
+    const size_t total = 21 + llr0.size();
+    std::vector<float> llr0j(total), llr1j(total);
+    for (size_t s = 0; s < 21; ++s) {
+        llr0j[s] = llr0p[s];
+        llr1j[s] = llr1p[s];
     }
-    if (out.bytes.size() >= 2) {
-        out.calculated_fcs =
-            crc16_802154(out.bytes.data(), out.bytes.size() - 2);
-        out.received_fcs = static_cast<uint16_t>(
-                               out.bytes[out.bytes.size() - 2]) |
-                           (static_cast<uint16_t>(
-                                out.bytes[out.bytes.size() - 1])
-                            << 8);
-        out.fcs_pass = (out.received_fcs == out.calculated_fcs);
+    for (size_t s = 0; s < llr0.size(); ++s) {
+        llr0j[s + 21] = llr0[s];
+        llr1j[s + 21] = llr1[s];
     }
+    std::vector<int8_t> decoded;
+    const auto t_vit = std::chrono::steady_clock::now();
+    vitdec_cl3_soft(llr0j.data(), llr1j.data(), total, decoded);
     if (sub)
-        sub->crc_us += payload_elapsed_us(t_crc);
-    out.ok = true;
-    return true;
+        sub->viterbi_us += payload_elapsed_us(t_vit);
+    if (decoded.size() < total)
+        return false;
+
+    std::vector<int8_t> rs_cw(decoded.begin() + 19,
+                              decoded.begin() + (total - 2));
+    if (rs_cw.size() != llr0.size())
+        return false;
+    return finish_rs_crc_payload(rs_cw, psdu_bits, out, sub);
 }
 
 } // namespace detail
@@ -3153,30 +3819,22 @@ inline bool stage_ns_sfd(const std::vector<float>& soft_chips,
 //   * SECDED single-bit correction / double-bit detection -> PSDU length.
 // Golden: coded/decoded PHR match MATLAB, psdu_length=127, secded_pass=1.
 // ---------------------------------------------------------------------------
-// Shared PHR Viterbi/SECDED parser.  The legacy stage_phr() and the fused PHR
-// kernel both feed their 21 raw g0/g1 pairs here, so the FEC convention and the
-// SECDED tail-energy guard are identical.  `soft_chips` is only read by the
-// guard when a corrected length grows; callers with a short prefix therefore
-// keep the same conservative "return the corrected result and let the caller
-// retry the full stream once" behaviour as the existing on-demand path.
-inline bool decode_phr_decisions(const std::vector<int8_t>& g0,
-                                 const std::vector<int8_t>& g1,
-                                 const std::vector<float>& soft_chips,
-                                 const NsSfdResult& ns_sfd,
-                                 PhrResult& out)
+// Shared PHR SECDED/parser tail.  The legacy stage_phr(), the fused PHR kernel
+// and the soft-decision variants all feed their 21 decoded codeword bits here,
+// so the FEC convention and the SECDED tail-energy guard are identical and are
+// implemented exactly once.  `soft_chips` is only read by the guard when a
+// corrected length grows; callers with a short prefix therefore keep the same
+// conservative "return the corrected result and let the caller retry the full
+// stream once" behaviour as the existing on-demand path.
+// ---------------------------------------------------------------------------
+namespace detail {
+
+inline bool phr_secded_parse(const std::vector<int8_t>& decoded,
+                             const std::vector<float>& soft_chips,
+                             const NsSfdResult& ns_sfd,
+                             PhrResult& out)
 {
     out = PhrResult{};
-    const size_t nsym = 21;
-    if (g0.size() != nsym || g1.size() != nsym)
-        return false;
-
-    std::vector<int8_t> rx(2 * nsym);
-    for (size_t s = 0; s < nsym; ++s) {
-        rx[2 * s] = g0[s];
-        rx[2 * s + 1] = g1[s];
-    }
-    std::vector<int8_t> decoded;
-    detail::vitdec_cl3(rx.data(), nsym, decoded);
     if (decoded.size() < 19)
         return false;
 
@@ -3277,6 +3935,51 @@ inline bool decode_phr_decisions(const std::vector<int8_t>& g0,
     return true;
 }
 
+} // namespace detail
+
+// Hard-decision PHR entry point: 21 raw g0/g1 pairs -> CL-3 Viterbi -> the
+// shared SECDED/parser tail.
+inline bool decode_phr_decisions(const std::vector<int8_t>& g0,
+                                 const std::vector<int8_t>& g1,
+                                 const std::vector<float>& soft_chips,
+                                 const NsSfdResult& ns_sfd,
+                                 PhrResult& out)
+{
+    out = PhrResult{};
+    const size_t nsym = 21;
+    if (g0.size() != nsym || g1.size() != nsym)
+        return false;
+
+    std::vector<int8_t> rx(2 * nsym);
+    for (size_t s = 0; s < nsym; ++s) {
+        rx[2 * s] = g0[s];
+        rx[2 * s + 1] = g1[s];
+    }
+    std::vector<int8_t> decoded;
+    detail::vitdec_cl3(rx.data(), nsym, decoded);
+    return detail::phr_secded_parse(decoded, soft_chips, ns_sfd, out);
+}
+
+// Soft-decision PHR entry point: the same 21 codeword symbols as per-symbol
+// LLRs (positive favours bit 0, exactly the bprf_demod_soft()/
+// rxfusion::decide_bpm_soft() convention) -> soft CL-3 Viterbi -> the same
+// shared SECDED/parser tail.  Nothing else differs from the hard path.
+inline bool decode_phr_decisions_soft(const std::vector<float>& llr0,
+                                      const std::vector<float>& llr1,
+                                      const std::vector<float>& soft_chips,
+                                      const NsSfdResult& ns_sfd,
+                                      PhrResult& out)
+{
+    out = PhrResult{};
+    const size_t nsym = 21;
+    if (llr0.size() != nsym || llr1.size() != nsym)
+        return false;
+
+    std::vector<int8_t> decoded;
+    detail::vitdec_cl3_soft(llr0.data(), llr1.data(), nsym, decoded);
+    return detail::phr_secded_parse(decoded, soft_chips, ns_sfd, out);
+}
+
 inline bool stage_phr(const std::vector<float>& soft_chips,
                       const Qm35825Profile& profile,
                       const NsSfdResult& ns_sfd,
@@ -3295,11 +3998,16 @@ inline bool stage_phr(const std::vector<float>& soft_chips,
         return false;
     const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
 
+    // Soft-decision PHR: bprf_demod_soft() produces the same hard decisions as
+    // bprf_demod() plus the per-symbol LLRs, and the soft CL-3 Viterbi is
+    // strictly better informed than the hard one.  The SECDED/parse tail is
+    // shared, so the PHR bit/length/rate contract is unchanged.
     std::vector<int8_t> g0, g1;
-    if (!detail::bprf_demod(soft_chips, phr_start, profile.code_index, nsym,
-                            cpb, cps, 0, pol, g0, g1))
+    std::vector<float> llr0, llr1;
+    if (!detail::bprf_demod_soft(soft_chips, phr_start, profile.code_index,
+                                 nsym, cpb, cps, 0, pol, g0, g1, llr0, llr1))
         return false;
-    return decode_phr_decisions(g0, g1, soft_chips, ns_sfd, out);
+    return decode_phr_decisions_soft(llr0, llr1, soft_chips, ns_sfd, out);
 }
 
 // Build (or reuse) the PHR spreading stream.  The PN depends only on the code
@@ -3404,12 +4112,15 @@ inline bool stage_phr_fused_cmf(const std::complex<float>* rx,
     }
 
     const auto t_decode0 = std::chrono::steady_clock::now();
-    rxfusion::decide_bpm(scratch.fused_phr.metrics, scratch.fused_phr.g0,
-                         scratch.fused_phr.g1);
-    scratch.fused_phr.decisions_valid = true;
-    const bool decoded = decode_phr_decisions(
-        scratch.fused_phr.g0, scratch.fused_phr.g1, prefix_soft_chips,
+    rxfusion::decide_bpm_soft(scratch.fused_phr.metrics, scratch.fused_phr.g0,
+                              scratch.fused_phr.g1, scratch.fused_phr.llr0,
+                              scratch.fused_phr.llr1);
+    const bool decoded = decode_phr_decisions_soft(
+        scratch.fused_phr.llr0, scratch.fused_phr.llr1, prefix_soft_chips,
         ns_sfd, out);
+    // Only publish the cache once the decode succeeded: a failed PHR must not
+    // leave decisions/LLRs that a later stage could mistake for this packet's.
+    scratch.fused_phr.decisions_valid = decoded;
     decode_ns = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - t_decode0)
@@ -3630,13 +4341,16 @@ inline bool prepare_fused_payload_pn(DemodScratch& scratch,
     return true;
 }
 
-// Experimental fused payload metrics + hard FEC/FCS decode.  Reuses the PHR
+// Experimental fused payload metrics + FEC/FCS decode.  Reuses the PHR
 // decisions and the CIR/phase frozen by the prefix pass.  When `phr_g0`/
 // `phr_g1` are supplied by the fused PHR stage, the joint Viterbi consumes
 // those raw 21 decisions directly and the prefix does not need PHR soft chips;
-// otherwise it re-runs bprf_demod() from the legacy prefix.  Returns false on any unsupported
-// configuration, range/short-window violation, fused-decode failure or FCS
-// failure; the caller then retries the complete legacy stream once.
+// otherwise it re-runs bprf_demod() from the legacy prefix.  The optional
+// `phr_llr0`/`phr_llr1` pair carries the same 21 PHR symbols as soft LLRs and
+// is only consumed by the in-place soft retry (attempt 2).  Returns false on
+// any unsupported configuration, range/short-window violation, fused-decode
+// failure or FCS failure; the caller then retries the complete legacy stream
+// once.
 // `template_us`, `correlate_us` and `decode_us` are populated even when a later
 // stage fails so the attempted work is not hidden.
 inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
@@ -3656,7 +4370,9 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
                                     size_t& symbols_out,
                                     const std::vector<int8_t>* phr_g0 = nullptr,
                                     const std::vector<int8_t>* phr_g1 = nullptr,
-                                    PayloadSubTimers* sub = nullptr)
+                                    PayloadSubTimers* sub = nullptr,
+                                    const std::vector<float>* phr_llr0 = nullptr,
+                                    const std::vector<float>* phr_llr1 = nullptr)
 {
     // Diagnostic child timing of `stage_payload_us`; see stage_payload_fcs().
     detail::PayloadSubTimer sub_guard(sub);
@@ -3782,6 +4498,13 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
     }
 
     const auto t_decode0 = std::chrono::steady_clock::now();
+    auto stamp_decode = [&]() {
+        decode_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - t_decode0)
+                .count());
+        decode_us = decode_ns / 1000;
+    };
     std::vector<int8_t> local_g0p, local_g1p, g0, g1;
     const std::vector<int8_t>* g0p = phr_g0;
     const std::vector<int8_t>* g1p = phr_g1;
@@ -3791,22 +4514,14 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
         detail::PayloadSubBucket soft_bucket(sub, &PayloadSubTimers::soft_us);
         if (g0p || g1p) {
             if (!g0p || !g1p || g0p->size() != 21 || g1p->size() != 21) {
-                decode_ns = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - t_decode0)
-                        .count());
-                decode_us = decode_ns / 1000;
+                stamp_decode();
                 return false;
             }
         } else {
             if (!detail::bprf_demod(prefix_soft_chips, phr_start,
                                     profile.code_index, 21, 64, 512, 0, pol,
                                     local_g0p, local_g1p)) {
-                decode_ns = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - t_decode0)
-                        .count());
-                decode_us = decode_ns / 1000;
+                stamp_decode();
                 return false;
             }
             g0p = &local_g0p;
@@ -3814,16 +4529,53 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
         }
         rxfusion::decide_bpm(scratch.fused.metrics, g0, g1);
     }
+    // Attempt 1 — the unchanged hard-decision path.  On success this is the
+    // whole cost of a high-SNR packet: nothing below runs.
     const bool decoded = detail::decode_payload_hard(*g0p, *g1p, g0, g1,
                                                      psdu_bits, out, sub);
-    decode_ns = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - t_decode0)
-            .count());
-    decode_us = decode_ns / 1000;
-    if (!decoded)
-        return false;
-    return out.ok && out.fcs_pass;
+    if (decoded && out.fcs_pass) {
+        stamp_decode();
+        return true;
+    }
+
+    // Attempt 2 — in-place soft-decision retry on the SAME four signed metrics.
+    // No extra correlation and no extra derotation: the LLRs are a by-product
+    // of the metrics the fused kernel already produced.  The PHR LLRs come from
+    // the fused PHR cache when it is valid, otherwise from one bprf_demod_soft()
+    // pass over the legacy prefix.  This is what keeps a marginal packet out of
+    // the ~15 ms full-stream stage_softchip_fallbacks retry.
+    std::vector<int8_t> soft_g0, soft_g1;
+    std::vector<float> llr0, llr1;
+    std::vector<int8_t> local_soft_g0p, local_soft_g1p;
+    std::vector<float> local_llr0p, local_llr1p;
+    const std::vector<float>* llr0p = phr_llr0;
+    const std::vector<float>* llr1p = phr_llr1;
+    {
+        detail::PayloadSubBucket soft_bucket(sub, &PayloadSubTimers::soft_us);
+        rxfusion::decide_bpm_soft(scratch.fused.metrics, soft_g0, soft_g1,
+                                  llr0, llr1);
+        if (!llr0p || !llr1p || llr0p->size() != 21 || llr1p->size() != 21) {
+            llr0p = nullptr;
+            llr1p = nullptr;
+            if (detail::bprf_demod_soft(prefix_soft_chips, phr_start,
+                                        profile.code_index, 21, 64, 512, 0,
+                                        pol, local_soft_g0p, local_soft_g1p,
+                                        local_llr0p, local_llr1p)) {
+                llr0p = &local_llr0p;
+                llr1p = &local_llr1p;
+            }
+        }
+    }
+    if (llr0p && llr1p) {
+        const bool soft_decoded = detail::decode_payload_soft(
+            *llr0p, *llr1p, llr0, llr1, psdu_bits, out, sub);
+        if (soft_decoded && out.fcs_pass) {
+            stamp_decode();
+            return true;
+        }
+    }
+    stamp_decode();
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -4211,8 +4963,17 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     // try ±8 first and fall back to the legacy ±max(256,stride) search below.
     cfo_anchor_profile.timing_seed_refine_radius =
         profile.rx_seed_refine_tail ? 8 : 0;
-    // MATLAB's per-SYNC floor is 0.20 of the candidate energy.
-    cfo_anchor_profile.radar_verification_threshold = 0.20f;
+    // Tail tracking floor.  MATLAB's 0.20 of the candidate energy is an
+    // ABSOLUTE gate: at -3.5..-4 dB in-band SNR the tail SYNC peaks sit at
+    // 0.18..0.23, so a hard 0.20 rejects half of them and the refit dies with
+    // `detected_peaks < 4` (measured: 23/100 CFO_FAILED at -3.5 dB).  The tail
+    // origin is already pinned by bootstrap_sfd to +-8 samples, so the
+    // false-alarm risk that the absolute gate was protecting against does not
+    // apply here; use the same 0.08 floor LockedBounded uses for its bounded
+    // tail probe.  `stage_timing`'s narrow seed searches additionally enable
+    // the PAR gate (PAR >= 20, floor 0.06).
+    cfo_anchor_profile.radar_verification_threshold =
+        std::min(profile.radar_verification_threshold, 0.08f);
 
     const int64_t bootstrap_sfd_start = res.sfd.sfd_start_sample;
     const double period_hint = res.timing.measured_period;
@@ -4830,12 +5591,23 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                     (phr_fused_used && scratch.fused_phr.decisions_valid)
                         ? &scratch.fused_phr.g1
                         : nullptr;
+                // Same cache, soft form: the fused PHR LLRs feed the payload
+                // soft retry without re-demodulating the PHR field.
+                const std::vector<float>* cached_llr0 =
+                    (phr_fused_used && scratch.fused_phr.decisions_valid)
+                        ? &scratch.fused_phr.llr0
+                        : nullptr;
+                const std::vector<float>* cached_llr1 =
+                    (phr_fused_used && scratch.fused_phr.decisions_valid)
+                        ? &scratch.fused_phr.llr1
+                        : nullptr;
                 const bool fused_ok = stage_payload_fused_cmf(
                     scratch.derotated.data(), n, profile, res.timing, res.cir,
                     scratch.soft_chips, res.ns_sfd, res.phr, res.payload,
                     scratch, fused_template_us, fused_correlate_us,
                     fused_decode_us, fused_decode_ns, fused_symbols,
-                    cached_g0, cached_g1, &payload_sub);
+                    cached_g0, cached_g1, &payload_sub, cached_llr0,
+                    cached_llr1);
                 res.stage_fused_template_us += fused_template_us;
                 res.stage_fused_correlate_us += fused_correlate_us;
                 res.stage_fused_decode_us += fused_decode_us;

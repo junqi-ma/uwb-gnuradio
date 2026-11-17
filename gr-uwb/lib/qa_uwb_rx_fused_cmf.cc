@@ -268,6 +268,7 @@ namespace {
 struct Packet {
     std::vector<uint8_t> wire;
     std::vector<cf> iq, sync;
+    mod::HrpModConfig cfg;
     static constexpr size_t seed = 2048;
 
     Packet(size_t bytes, size_t code)
@@ -276,7 +277,6 @@ struct Packet {
         for (size_t j = 0; j < wire.size(); ++j)
             wire[j] = uint8_t(19 * j + code);
         mod::append_ieee_fcs(wire);
-        mod::HrpModConfig cfg;
         cfg.code_index = code;
         cfg.sync_repetitions = 64;
         cfg.sfd_mode = "4z2";
@@ -536,4 +536,352 @@ BOOST_AUTO_TEST_CASE(r2_fir_diag_iq_boundary_and_short_by_one)
     for (size_t i = 0; i < work1.size(); ++i) {
         BOOST_CHECK_EQUAL(work1[i], work2[i]);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task 1 — rxfusion::decide_bpm_soft() equivalence.
+//
+// The soft twin must reproduce decide_bpm()'s hard decisions bit-for-bit and
+// bprf_demod_soft()'s LLRs *exactly* (no tolerance): with +/-1 spreading and
+// +/-1 polarity every product is exact, so the two accumulation orders agree
+// bitwise.  The metrics are built from a random soft-chip stream with the same
+// four candidate offsets the kernel uses, over every supported code/polarity.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(fused_cmf_soft_decision_matches_bprf_demod_soft)
+{
+    const size_t symbols = 37;
+    const int64_t start = 123;
+    std::vector<float> soft(start + 64 * symbols + 128);
+    std::mt19937 rng(991);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    for (auto& x : soft)
+        x = dist(rng);
+
+    size_t checked = 0;
+    for (size_t code : { 9u, 10u, 11u, 12u }) {
+        std::vector<int8_t> spread;
+        BOOST_REQUIRE(demod::core::detail::bprf_spreading(
+            spread, code, 1344, rxfusion::kChipsPerBurst * symbols));
+        for (int8_t pol : { int8_t(1), int8_t(-1) }) {
+            std::vector<int8_t> g0_ref, g1_ref;
+            std::vector<float> llr0_ref, llr1_ref;
+            BOOST_REQUIRE(demod::core::detail::bprf_demod_soft(
+                soft, start, code, symbols, 8, 64, 1344, pol, g0_ref, g1_ref,
+                llr0_ref, llr1_ref));
+
+            rxfusion::Metrics metrics;
+            metrics.reset(symbols);
+            for (size_t s = 0; s < symbols; ++s) {
+                for (size_t p = 0; p < rxfusion::kCandidateCount; ++p) {
+                    float m = 0.0f;
+                    for (size_t c = 0; c < rxfusion::kChipsPerBurst; ++c) {
+                        const int64_t idx =
+                            start +
+                            static_cast<int64_t>(s) * rxfusion::kChipsPerSymbol +
+                            static_cast<int64_t>(
+                                rxfusion::kCandidateChipOffset[p]) +
+                            static_cast<int64_t>(c);
+                        m += static_cast<float>(
+                                 spread[s * rxfusion::kChipsPerBurst + c]) *
+                             soft[idx];
+                    }
+                    metrics.signed_value[rxfusion::kCandidateCount * s + p] =
+                        (pol < 0) ? -m : m;
+                }
+            }
+
+            std::vector<int8_t> g0, g1, sg0, sg1;
+            std::vector<float> llr0, llr1;
+            rxfusion::decide_bpm(metrics, g0, g1);
+            rxfusion::decide_bpm_soft(metrics, sg0, sg1, llr0, llr1);
+
+            // Hard decisions: identical to decide_bpm() and to bprf_demod().
+            BOOST_CHECK(sg0 == g0);
+            BOOST_CHECK(sg1 == g1);
+            BOOST_CHECK(g0 == g0_ref);
+            BOOST_CHECK(g1 == g1_ref);
+            // LLRs: bit-identical to bprf_demod_soft().
+            BOOST_REQUIRE_EQUAL(llr0.size(), llr0_ref.size());
+            BOOST_REQUIRE_EQUAL(llr1.size(), llr1_ref.size());
+            BOOST_CHECK(llr0 == llr0_ref);
+            BOOST_CHECK(llr1 == llr1_ref);
+            // LLR sign convention: > 0 favours bit 0, and llr0's sign is the
+            // BPM-half decision while llr1's sign is the BPSK decision.
+            for (size_t s = 0; s < symbols; ++s) {
+                BOOST_CHECK_EQUAL(llr0[s] >= 0.0f, sg0[s] == 0);
+                BOOST_CHECK_EQUAL(llr1[s] >= 0.0f, sg1[s] == 0);
+            }
+            ++checked;
+        }
+    }
+    BOOST_TEST_MESSAGE("decide_bpm_soft: " << checked
+                       << " code/polarity combinations, hard bits and LLRs "
+                          "bit-identical to bprf_demod_soft");
+    BOOST_CHECK_EQUAL(checked, size_t(8));
+}
+
+// Tie rules must be inherited from decide_bpm() unchanged.
+BOOST_AUTO_TEST_CASE(fused_cmf_soft_decision_ties_match_legacy)
+{
+    rxfusion::Metrics metrics;
+    metrics.reset(6);
+    auto set = [&](size_t s, float m0, float m1, float m2, float m3) {
+        metrics.signed_value[4 * s + 0] = m0;
+        metrics.signed_value[4 * s + 1] = m1;
+        metrics.signed_value[4 * s + 2] = m2;
+        metrics.signed_value[4 * s + 3] = m3;
+    };
+    set(0, 2.0f, 2.0f, 2.0f, 2.0f);   // all equal -> half0, hop0, >= 0
+    set(1, 3.0f, 0.1f, 3.0f, 0.1f);   // hop tie in half0 -> hop0
+    set(2, 0.1f, 4.0f, 0.1f, 4.0f);   // hop tie in half1 -> hop0
+    set(3, -2.0f, -2.0f, 1.0f, 1.0f); // half tie -> half0, negative
+    set(4, 0.0f, 0.0f, 0.0f, 0.0f);   // exact zeros
+    set(5, 1e-20f, -2e-20f, 1e-20f, 2e-20f);
+
+    std::vector<int8_t> g0, g1, sg0, sg1;
+    std::vector<float> llr0, llr1;
+    rxfusion::decide_bpm(metrics, g0, g1);
+    rxfusion::decide_bpm_soft(metrics, sg0, sg1, llr0, llr1);
+    BOOST_CHECK(sg0 == g0);
+    BOOST_CHECK(sg1 == g1);
+    BOOST_CHECK_EQUAL(int(sg0[0]), 0);
+    BOOST_CHECK_EQUAL(int(sg1[0]), 0);
+    BOOST_CHECK_EQUAL(int(sg0[3]), 0);
+    BOOST_CHECK_EQUAL(int(sg1[3]), 1);
+    BOOST_CHECK_EQUAL(int(sg0[5]), 1);
+    BOOST_CHECK_EQUAL(int(sg1[5]), 1);
+    // llr0 is exactly b0 - b1, llr1 exactly the selected half metric.
+    BOOST_CHECK_EQUAL(llr0[0], 0.0f);
+    BOOST_CHECK_EQUAL(llr0[3], 0.0f);
+    BOOST_CHECK_EQUAL(llr1[3], -2.0f);
+}
+
+// ---------------------------------------------------------------------------
+// Task 4.2 — high-SNR regression: the fused path must produce the exact wire
+// bytes, and the unchanged hard attempt alone must already decode them.  That
+// second assertion is what proves the in-place soft retry is never entered on
+// a clean packet (so the high-SNR cost and output are unchanged).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(fused_cmf_high_snr_psdu_matches_hard_baseline)
+{
+    for (const auto spec : { std::pair<size_t, size_t>{ 32, 10 },
+                             std::pair<size_t, size_t>{ 127, 9 } }) {
+        Packet packet(spec.first, spec.second);
+        auto profile = demod::Qm35825Profile::Default();
+        profile.code_index = spec.second;
+        profile.timing_search_margin = 256;
+        profile.timing_coarse_stride = 1;
+        profile.rx_softchip_on_demand = true;
+        profile.rx_fused_payload_cmf = true;
+        profile.rx_fused_phr_cmf = true;
+        demod::core::DemodScratch scratch;
+        scratch.reserve(packet.iq.size());
+        const auto r = demod::core::demodulate_one(
+            packet.iq.data(), packet.iq.size(), profile, 71, Packet::seed, 0,
+            packet.sync, scratch);
+        BOOST_REQUIRE_EQUAL(int(r.status), int(demod::DemodStatus::Success));
+        BOOST_REQUIRE(r.payload.fcs_pass);
+        BOOST_CHECK(r.payload.bytes == packet.wire);
+        BOOST_CHECK_EQUAL(r.stage_fused_attempts, 1u);
+        BOOST_CHECK_EQUAL(r.stage_fused_fallbacks, 0u);
+        BOOST_CHECK_EQUAL(r.stage_softchip_fallbacks, 0u);
+        BOOST_CHECK_EQUAL(r.stage_phr_fused_fallbacks, 0u);
+
+        // Hard-only baseline from the SAME four signed metrics the fused kernel
+        // produced.  If this passes, the soft retry was not needed and the
+        // early return in stage_payload_fused_cmf() was taken.
+        BOOST_REQUIRE(scratch.fused_phr.decisions_valid);
+        BOOST_REQUIRE_EQUAL(scratch.fused_phr.g0.size(), size_t(21));
+        BOOST_REQUIRE_EQUAL(scratch.fused_phr.llr0.size(), size_t(21));
+        std::vector<int8_t> g0, g1;
+        rxfusion::decide_bpm(scratch.fused.metrics, g0, g1);
+        demod::PayloadResult hard;
+        const size_t psdu_bits = static_cast<size_t>(r.phr.psdu_length) * 8;
+        BOOST_REQUIRE(demod::core::detail::decode_payload_hard(
+            scratch.fused_phr.g0, scratch.fused_phr.g1, g0, g1, psdu_bits,
+            hard));
+        BOOST_CHECK(hard.fcs_pass);
+        BOOST_CHECK(hard.bytes == packet.wire);
+        BOOST_CHECK(hard.bytes == r.payload.bytes);
+        BOOST_CHECK(hard.bits == r.payload.bits);
+        BOOST_CHECK_EQUAL(hard.received_fcs, r.payload.received_fcs);
+        BOOST_CHECK_EQUAL(hard.calculated_fcs, r.payload.calculated_fcs);
+
+        // The soft path on the same LLRs must agree byte-for-byte as well.
+        std::vector<int8_t> sg0, sg1;
+        std::vector<float> llr0, llr1;
+        rxfusion::decide_bpm_soft(scratch.fused.metrics, sg0, sg1, llr0, llr1);
+        demod::PayloadResult soft;
+        BOOST_REQUIRE(demod::core::detail::decode_payload_soft(
+            scratch.fused_phr.llr0, scratch.fused_phr.llr1, llr0, llr1,
+            psdu_bits, soft));
+        BOOST_CHECK(soft.fcs_pass);
+        BOOST_CHECK(soft.bytes == packet.wire);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 4.3a — controlled hard-vs-soft measurement on the exact transmitted
+// codeword.  The modulator's own encoder supplies the frame's coded bits, so
+// the LLRs are synthesised around ground truth with a known noise level; no
+// detector is involved and the comparison is deterministic given the seed.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(fused_cmf_soft_llr_rescues_hard_viterbi_failure)
+{
+    Packet packet(127, 9);
+    const int8_t* sfd = nullptr;
+    size_t n_sfd = 0;
+    BOOST_REQUIRE(mod::detail::sfd_lookup(packet.cfg.sfd_mode, sfd, n_sfd));
+    mod::HrpModScratch mod_scratch;
+    mod::detail::HrpCodedGeometry geom;
+    BOOST_REQUIRE(mod::detail::encode_hrp_packet(
+        packet.wire.data(), packet.wire.size(), packet.cfg, mod_scratch, sfd,
+        n_sfd, geom));
+
+    const size_t psdu_bits = packet.wire.size() * 8;
+    BOOST_REQUIRE_EQUAL(geom.nsym, psdu_bits + 48 * ((psdu_bits + 329) / 330));
+    BOOST_REQUIRE_EQUAL(geom.n_enc_sym, size_t(21) + geom.nsym);
+    BOOST_REQUIRE_EQUAL(mod_scratch.g0.size(), geom.n_enc_sym);
+    BOOST_REQUIRE_EQUAL(mod_scratch.g1.size(), geom.n_enc_sym);
+
+    std::mt19937 rng(4242);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    size_t total_hard = 0, total_soft = 0, total_rescued = 0;
+    const size_t kTrials = 200;
+
+    for (float sigma : { 0.60f, 0.70f, 0.80f, 0.90f, 1.00f, 1.10f }) {
+        size_t hard_ok = 0, soft_ok = 0, rescued = 0;
+        for (size_t trial = 0; trial < kTrials; ++trial) {
+            std::vector<float> llr0(geom.n_enc_sym), llr1(geom.n_enc_sym);
+            for (size_t s = 0; s < geom.n_enc_sym; ++s) {
+                llr0[s] = (mod_scratch.g0[s] ? -1.0f : 1.0f) + sigma * nd(rng);
+                llr1[s] = (mod_scratch.g1[s] ? -1.0f : 1.0f) + sigma * nd(rng);
+            }
+            std::vector<int8_t> h0(geom.n_enc_sym), h1(geom.n_enc_sym);
+            for (size_t s = 0; s < geom.n_enc_sym; ++s) {
+                h0[s] = (llr0[s] >= 0.0f) ? 0 : 1;
+                h1[s] = (llr1[s] >= 0.0f) ? 0 : 1;
+            }
+            const std::vector<int8_t> h0p(h0.begin(), h0.begin() + 21);
+            const std::vector<int8_t> h1p(h1.begin(), h1.begin() + 21);
+            const std::vector<int8_t> h0d(h0.begin() + 21, h0.end());
+            const std::vector<int8_t> h1d(h1.begin() + 21, h1.end());
+            const std::vector<float> l0p(llr0.begin(), llr0.begin() + 21);
+            const std::vector<float> l1p(llr1.begin(), llr1.begin() + 21);
+            const std::vector<float> l0d(llr0.begin() + 21, llr0.end());
+            const std::vector<float> l1d(llr1.begin() + 21, llr1.end());
+
+            demod::PayloadResult hard, soft;
+            const bool hd = demod::core::detail::decode_payload_hard(
+                h0p, h1p, h0d, h1d, psdu_bits, hard);
+            const bool sd = demod::core::detail::decode_payload_soft(
+                l0p, l1p, l0d, l1d, psdu_bits, soft);
+            const bool hpass = hd && hard.fcs_pass;
+            const bool spass = sd && soft.fcs_pass;
+            hard_ok += hpass ? 1 : 0;
+            soft_ok += spass ? 1 : 0;
+            if (!hpass && spass) {
+                ++rescued;
+                BOOST_CHECK(soft.bytes == packet.wire);
+            }
+        }
+        BOOST_TEST_MESSAGE("LLR sweep sigma=" << sigma << " hard=" << hard_ok
+                           << "/" << kTrials << " soft=" << soft_ok << "/"
+                           << kTrials << " rescued=" << rescued);
+        BOOST_CHECK_GE(soft_ok, hard_ok);
+        total_hard += hard_ok;
+        total_soft += soft_ok;
+        total_rescued += rescued;
+    }
+    BOOST_TEST_MESSAGE("LLR sweep totals: hard=" << total_hard << "/"
+                       << 6 * kTrials << " soft=" << total_soft << "/"
+                       << 6 * kTrials << " rescued=" << total_rescued);
+    BOOST_CHECK_GT(total_rescued, size_t(0));
+}
+
+// ---------------------------------------------------------------------------
+// Task 4.3b — end-to-end: a noisy frame the hard attempt cannot decode must
+// still be committed by the in-place soft retry, without entering the ~15 ms
+// full-stream stage_softchip_fallbacks path.
+//
+// The hard-only counterfactual is taken from the SAME four signed metrics the
+// fused kernel produced for that packet (decide_bpm + decode_payload_hard), so
+// the comparison is on identical inputs rather than on a second noisy run.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(fused_cmf_soft_retry_decodes_without_stream_fallback)
+{
+    Packet packet(127, 9);
+    const size_t psdu_bits = packet.wire.size() * 8;
+    std::mt19937 rng(20261117);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+
+    size_t committed = 0, hard_only_ok = 0, rescued = 0;
+    for (float sigma : { 0.165f, 0.170f, 0.175f, 0.180f, 0.185f, 0.190f, 0.195f }) {
+        size_t s_committed = 0, s_hard = 0, s_rescued = 0, s_phrfail = 0, s_other = 0;
+        for (int trial = 0; trial < 20; ++trial) {
+            std::vector<cf> noisy = packet.iq;
+            for (auto& v : noisy)
+                v += cf(sigma * nd(rng), sigma * nd(rng));
+
+            auto profile = demod::Qm35825Profile::Default();
+            profile.code_index = 9;
+            profile.timing_search_margin = 256;
+            profile.timing_coarse_stride = 1;
+            profile.rx_softchip_on_demand = true;
+            profile.rx_fused_payload_cmf = true;
+            profile.rx_fused_phr_cmf = true;
+            demod::core::DemodScratch scratch;
+            scratch.reserve(noisy.size());
+            const auto r = demod::core::demodulate_one(
+                noisy.data(), noisy.size(), profile, 81, Packet::seed, 0,
+                packet.sync, scratch);
+            BOOST_TEST_MESSAGE("probe sigma=" << sigma << " trial=" << trial
+                << " status=" << int(r.status) << " phr_ok=" << r.phr.ok
+                << " len=" << r.phr.psdu_length
+                << " secded=" << r.phr.secded_corrected
+                << " uncorr=" << r.phr.secded_uncorrectable
+                << " fcs=" << r.payload.fcs_pass
+                << " fused_fb=" << r.stage_fused_fallbacks
+                << " soft_fb=" << r.stage_softchip_fallbacks);
+            if (!r.payload.fcs_pass) {
+                if (!r.phr.ok) ++s_phrfail; else ++s_other;
+                continue;
+            }
+            ++committed;
+            ++s_committed;
+            BOOST_CHECK(r.payload.bytes == packet.wire);
+            BOOST_CHECK_EQUAL(r.stage_softchip_fallbacks, 0u);
+            BOOST_CHECK_EQUAL(r.stage_fused_fallbacks, 0u);
+            if (!scratch.fused_phr.decisions_valid ||
+                scratch.fused_phr.g0.size() != 21)
+                continue;
+
+            std::vector<int8_t> g0, g1;
+            rxfusion::decide_bpm(scratch.fused.metrics, g0, g1);
+            demod::PayloadResult hard;
+            const bool hd = demod::core::detail::decode_payload_hard(
+                scratch.fused_phr.g0, scratch.fused_phr.g1, g0, g1,
+                psdu_bits, hard);
+            if (hd && hard.fcs_pass) {
+                ++hard_only_ok;
+                ++s_hard;
+            } else {
+                ++rescued;
+                ++s_rescued;
+                BOOST_TEST_MESSAGE("soft rescue at sigma=" << sigma
+                                   << " trial=" << trial);
+            }
+        }
+        BOOST_TEST_MESSAGE("end-to-end AWGN sigma=" << sigma
+                           << " committed=" << s_committed << "/20 hard_only="
+                           << s_hard << " rescued=" << s_rescued
+                           << " phr_fail=" << s_phrfail << " other=" << s_other);
+    }
+    BOOST_TEST_MESSAGE("end-to-end AWGN: committed=" << committed
+                       << " hard_only_ok=" << hard_only_ok
+                       << " soft_rescued=" << rescued);
+    BOOST_CHECK_GT(committed, size_t(0));
+    // The soft retry must not have made anything worse: every committed packet
+    // is either a hard success or a genuine soft rescue.
+    BOOST_CHECK_EQUAL(committed, hard_only_ok + rescued);
 }
