@@ -162,6 +162,55 @@ with tempfile.TemporaryDirectory(prefix='uwb-live-console-') as temporary:
         assert 'START ' not in rejected.stdout, rejected.stdout
 
     # ------------------------------------------------------------------
+    # Low-SNR lock/capture switches.
+    #
+    # Both are strict on|off: they change what the lock and the demodulator
+    # consider a success, so a typo must fail closed instead of silently
+    # choosing a mode (unlike --tone/--fused, which treat anything but "off"
+    # as on).
+    # ------------------------------------------------------------------
+    for flag in ('--lock-fcs', '--stop-after-sfd'):
+        for bad in ('invalid', 'true', '1', 'ON', ''):
+            rejected = subprocess.run(
+                [binary, '--replay', str(path), '--summary', '1', flag, bad],
+                capture_output=True, text=True, timeout=30)
+            assert rejected.returncode == 2, (flag, bad, rejected.stdout + rejected.stderr)
+            assert flag + ' must be on or off' in rejected.stderr, (flag, bad, rejected.stderr)
+            assert 'START ' not in rejected.stdout, (flag, bad, rejected.stdout)
+
+    # The defaults are the historical behaviour and must stay byte-identical:
+    # the START line reports both effective modes.
+    baseline = subprocess.run(
+        [binary, '--replay', str(path), '--summary', '1'],
+        capture_output=True, text=True, timeout=30)
+    assert baseline.returncode == 0, baseline.stderr + baseline.stdout
+    fields = start_fields(baseline.stdout)
+    assert fields['lock_fcs'] == 'on', fields
+    assert fields['stop_after_sfd'] == 'off', fields
+
+    # Low-SNR capture-only smoke: FCS is dropped from lock identity and the
+    # demodulator stops after the SFD.  The synthetic DC burst is still only a
+    # rejected candidate, so the run must start, complete and exit cleanly.
+    # `--cir auto` is passed explicitly because that is the only setting where
+    # the 15 ms Full retry could fire; capture-only must suppress it.
+    capture_only = subprocess.run(
+        [binary, '--replay', str(path), '--summary', '1', '--cir', 'auto',
+         '--lock-fcs', 'off', '--stop-after-sfd', 'on'],
+        capture_output=True, text=True, timeout=60)
+    assert capture_only.returncode == 0, capture_only.stderr + capture_only.stdout
+    fields = start_fields(capture_only.stdout)
+    assert fields['lock_fcs'] == 'off', fields
+    assert fields['stop_after_sfd'] == 'on', fields
+    assert re.search(r'^FINAL completed=1 fcs=0/1 ', capture_only.stdout, re.M), \
+        capture_only.stdout
+    # No FCS means no identity comparison, so no interference event may be
+    # reported even though the candidate has a preamble+SFD-shaped metric.
+    assert 'reason=identity_mismatch' not in capture_only.stdout, capture_only.stdout
+    # And the capture-only run never pays for the --cir auto Full retry.
+    assert re.search(r'^PACKET .*full_retry=0 ', capture_only.stdout, re.M), \
+        capture_only.stdout
+
+    # ------------------------------------------------------------------
     # Triangle-peak acquisition trigger.
     #
     # The 0.3 ms DC burst is longer than the 192k window, so the delayed
@@ -192,4 +241,5 @@ with tempfile.TemporaryDirectory(prefix='uwb-live-console-') as temporary:
     assert abs(seeds[64] - seeds[3]) <= 64, seeds
 
 print('live console: acquisition/rejection, batch summary, SIGINT, source failure, '
-      'locked strategy, timed-burst plan and locked pre-guard PASS')
+      'locked strategy, timed-burst plan, locked pre-guard and low-SNR '
+      'lock/capture switches PASS')
