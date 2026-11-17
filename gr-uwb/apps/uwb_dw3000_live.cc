@@ -349,6 +349,8 @@ struct Reporter {
                  << " timing_coarse=" << r->timing.coarse_search_us
                  << " timing_fine=" << r->timing.fine_track_us
                  << " timing_seed=" << r->timing.seed_search_us
+                 << " timing0_coarse=" << r->timing.initial_coarse_search_us
+                 << " timing0_fine=" << r->timing.initial_fine_track_us
                  << " st_cfo=" << r->stage_cfo_us
                  << " st_sfd=" << r->stage_sfd_us
                  << " st_cir=" << r->stage_cir_us

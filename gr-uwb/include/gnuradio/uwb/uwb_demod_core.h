@@ -1331,36 +1331,56 @@ inline bool stage_timing(const std::complex<float>* rx,
         // conjugate dots at stride.
         const auto coarse_begin = std::chrono::steady_clock::now();
         if (!seed_acquired && j_hi > j_lo) {
-            float pw = 0.0f;
-            for (size_t k = 0; k < L; ++k)
-                pw += std::norm(rx[j_lo + static_cast<int64_t>(k)]);
+            float pw = window_power_8acc(rx + j_lo, L);
             float best_coarse_m = -1.0f;
             int64_t best_coarse_j = j_lo;
             std::complex<float> best_coarse_c(0.0f, 0.0f);
-            // `next_coarse` replaces the per-sample `(j - j_lo) % stride` test:
-            // an integer division in a 262,144-iteration loop (the live search
-            // margin is +-131,072 samples) cost ~1.5 ms/packet on its own.  The
-            // selection is identical -- both forms pick j_lo + k*stride.
-            int64_t next_coarse = j_lo;
-            for (int64_t j = j_lo; j <= j_hi; ++j) {
-                if (j == next_coarse) {
-                    next_coarse += stride;
-                    const std::complex<float> acc =
-                        scratch.real_sync_template.is_real
-                            ? rxopt::real_template_dot_single(
-                                  rx + j, scratch.real_sync_template.taps_dup.data(), L)
-                            : detail::timing_conjugate_dot(
-                                  rx + j, scratch.work.data(), L);
-                    const float m = std::norm(acc) / (pw * Et + 1e-12f);
-                    if (m > best_coarse_m) {
-                        best_coarse_m = m;
-                        best_coarse_j = j;
-                        best_coarse_c = acc;
-                    }
+            // Slide the window power forward by `cnt` samples with eight
+            // independent accumulators, so the two |x|^2 streams vectorise and
+            // only ONE serial float add per stride block remains.  The
+            // per-sample form of this update was the single most expensive loop
+            // in low-SNR acquisition: 262,144 iterations (the live search
+            // margin is +-131,072 samples) at ~8 cycles each = ~2.2 ms/packet,
+            // 85% of the whole acquisition search.  The sum is mathematically
+            // identical; only the float association order changes.
+            auto advance_power = [&](int64_t j, int64_t cnt) {
+                const float* a =
+                    reinterpret_cast<const float*>(rx + j + static_cast<int64_t>(L));
+                const float* b = reinterpret_cast<const float*>(rx + j);
+                const size_t m = static_cast<size_t>(2 * cnt);
+                float s0 = 0.f, s1 = 0.f, s2 = 0.f, s3 = 0.f;
+                float s4 = 0.f, s5 = 0.f, s6 = 0.f, s7 = 0.f;
+                size_t i = 0;
+                for (; i + 8 <= m; i += 8) {
+                    s0 += a[i + 0] * a[i + 0] - b[i + 0] * b[i + 0];
+                    s1 += a[i + 1] * a[i + 1] - b[i + 1] * b[i + 1];
+                    s2 += a[i + 2] * a[i + 2] - b[i + 2] * b[i + 2];
+                    s3 += a[i + 3] * a[i + 3] - b[i + 3] * b[i + 3];
+                    s4 += a[i + 4] * a[i + 4] - b[i + 4] * b[i + 4];
+                    s5 += a[i + 5] * a[i + 5] - b[i + 5] * b[i + 5];
+                    s6 += a[i + 6] * a[i + 6] - b[i + 6] * b[i + 6];
+                    s7 += a[i + 7] * a[i + 7] - b[i + 7] * b[i + 7];
                 }
-                if (j + 1 <= j_hi)
-                    pw += std::norm(rx[j + static_cast<int64_t>(L)]) -
-                          std::norm(rx[j]);
+                float s = ((s0 + s1) + (s2 + s3)) + ((s4 + s5) + (s6 + s7));
+                for (; i < m; ++i)
+                    s += a[i] * a[i] - b[i] * b[i];
+                pw += s;
+            };
+            for (int64_t j = j_lo; j <= j_hi; j += stride) {
+                const std::complex<float> acc =
+                    scratch.real_sync_template.is_real
+                        ? rxopt::real_template_dot_single(
+                              rx + j, scratch.real_sync_template.taps_dup.data(), L)
+                        : detail::timing_conjugate_dot(
+                              rx + j, scratch.work.data(), L);
+                const float m = std::norm(acc) / (pw * Et + 1e-12f);
+                if (m > best_coarse_m) {
+                    best_coarse_m = m;
+                    best_coarse_j = j;
+                    best_coarse_c = acc;
+                }
+                const int64_t cnt = std::min<int64_t>(stride, j_hi + 1 - j);
+                advance_power(j, cnt);
             }
             out.coarse_search_us = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
@@ -5914,6 +5934,8 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         cfo_timing.tail_probe_best_metric = res.timing.tail_probe_best_metric;
         cfo_timing.tail_probe_raw_max = res.timing.tail_probe_raw_max;
         cfo_timing.inner_probe_raw_max = res.timing.inner_probe_raw_max;
+        cfo_timing.initial_coarse_search_us = res.timing.coarse_search_us;
+        cfo_timing.initial_fine_track_us = res.timing.fine_track_us;
         cfo_timing.ok = true;
         cfo_timing.preamble_start_sample = full_start;
         cfo_timing.preamble_start_uncropped = full_start;
