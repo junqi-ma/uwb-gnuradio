@@ -282,6 +282,22 @@ inline FoldAcquireResult fold_acquire(const std::complex<float>* rx,
     if (w1 < w0)
         return res;
 
+    // Only lags inside +/-P/2 of the seed can be selected (see the note below),
+    // so the fold and the correlation only have to cover that sub-window.
+    // Clamping here instead of inside the correlation loop shrinks the fold
+    // accumulation by the same factor: under AcquireLegacy the search radius is
+    // 8192 samples, i.e. span 16384 -> 1016 lags (-93.8%), and every discarded
+    // lag was unreachable by the argmax anyway.  `room` / `k_eff` above are
+    // still derived from the ORIGINAL w0 so the fold depth (and therefore the
+    // folded vector itself) is unchanged.
+    const int64_t half_period = P / 2;
+    const int64_t c0 = std::max<int64_t>(w0, centre - half_period);
+    const int64_t c1 = std::min<int64_t>(w1, centre + half_period);
+    if (c1 < c0)
+        return res; // the seed lies entirely outside the legal window
+    w0 = c0;
+    w1 = c1;
+
     const int64_t span = w1 - w0;
     const size_t fold_len = static_cast<size_t>(span + Li);
     // Rare failure path: allocation here is acceptable (this runs at most once
@@ -299,10 +315,10 @@ inline FoldAcquireResult fold_acquire(const std::complex<float>* rx,
         pw += std::norm(folded[m]);
 
     // Position ambiguity: only lags inside +/-P/2 of the seed can be told apart
-    // (see the note above).  Track the argmax of that central sub-window; the
-    // full window is still searched so the fold and the correlation share one
-    // absolute grid and the seed's own error is measurable.
-    const int64_t half_period = P / 2;
+    // (see the note above).  The window was already clamped to exactly that
+    // sub-window, so the argmax range below normally covers all of it; the
+    // general expressions are kept because a buffer-edge clamp can still cut
+    // one side short.
     const int64_t lo_lag = std::max<int64_t>(0, (centre - w0) - half_period);
     const int64_t hi_lag = std::min<int64_t>(span, (centre - w0) + half_period);
 
@@ -418,7 +434,31 @@ inline bool fold_anchor_fit(const std::complex<float>* rx,
         float bm = -1.0f;
         int64_t bl = 0;
         std::complex<float> bacc(0.0f, 0.0f);
-        for (int64_t lag = 0; lag <= 2 * refine; ++lag) {
+        int64_t lag = 0;
+        if (use_real) {
+            // Eight lags per call: the 8-lag kernel keeps eight independent
+            // accumulators, so it costs barely more than one long FMA chain and
+            // is bit-identical per lag to real_template_dot_single().  The
+            // metric/power update order is unchanged, so the selected anchor is
+            // identical to the single-lag loop it replaces.
+            for (; lag + 7 <= 2 * refine; lag += 8) {
+                std::complex<float> acc8[8];
+                rxopt::real_template_dot_8lag(sup.data() + lag, taps_dup, L,
+                                              acc8);
+                for (int m = 0; m < 8; ++m) {
+                    const int64_t cur = lag + m;
+                    const float met = std::norm(acc8[m]) / (pw * Et + 1e-12f);
+                    if (met > bm) {
+                        bm = met;
+                        bl = cur;
+                        bacc = acc8[m];
+                    }
+                    if (cur < 2 * refine)
+                        pw += std::norm(sup[cur + Li]) - std::norm(sup[cur]);
+                }
+            }
+        }
+        for (; lag <= 2 * refine; ++lag) {
             const std::complex<float> acc =
                 use_real ? rxopt::real_template_dot_single(sup.data() + lag,
                                                            taps_dup, L)
@@ -685,6 +725,34 @@ struct DemodScratch {
 // model to get measured_period.  Peak positions are symbol-END convention
 // (first peak = start + (L-1)), matching the detector / MATLAB.
 // ---------------------------------------------------------------------------
+// Windowed |x|^2 with eight independent accumulators.  A single-accumulator
+// float reduction cannot be vectorised without -ffast-math, and the power
+// turned out to be HALF the cost of the single-point stage (measured 2x faster
+// with eight accumulators).  The summation order differs from a plain scalar
+// loop, but this value only normalises a correlation metric.
+inline float window_power_8acc(const std::complex<float>* x, size_t count)
+{
+    const float* f = reinterpret_cast<const float*>(x);
+    const size_t m = 2 * count;
+    float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
+    float a4 = 0.f, a5 = 0.f, a6 = 0.f, a7 = 0.f;
+    size_t i = 0;
+    for (; i + 8 <= m; i += 8) {
+        a0 += f[i + 0] * f[i + 0];
+        a1 += f[i + 1] * f[i + 1];
+        a2 += f[i + 2] * f[i + 2];
+        a3 += f[i + 3] * f[i + 3];
+        a4 += f[i + 4] * f[i + 4];
+        a5 += f[i + 5] * f[i + 5];
+        a6 += f[i + 6] * f[i + 6];
+        a7 += f[i + 7] * f[i + 7];
+    }
+    float s = ((a0 + a1) + (a2 + a3)) + ((a4 + a5) + (a6 + a7));
+    for (; i < m; ++i)
+        s += f[i] * f[i];
+    return s;
+}
+
 inline bool stage_timing(const std::complex<float>* rx,
                          size_t n,
                          const Qm35825Profile& profile,
@@ -734,7 +802,8 @@ inline bool stage_timing(const std::complex<float>* rx,
     auto local_best = [&](int64_t want, int64_t radius, float min_metric,
                           int64_t* pos, float* met,
                           std::complex<float>* corr_out,
-                          bool allow_par_fallback = false) -> bool {
+                          bool allow_par_fallback = false,
+                          float* raw_max_out = nullptr) -> bool {
         const int64_t w0 = std::max<int64_t>(0, want - radius);
         const int64_t w1 =
             std::min<int64_t>(static_cast<int64_t>(n) - static_cast<int64_t>(L),
@@ -751,9 +820,11 @@ inline bool stage_timing(const std::complex<float>* rx,
         // Adjacent candidate windows overlap by L-1 samples.  Compute power
         // once, then update it in O(1); correlation remains an exact long dot
         // product handled by VOLK or AVX2.  No allocation occurs in this hot loop.
-        float pw = 0.0f;
-        for (size_t k = 0; k < L; ++k)
-            pw += std::norm(rx[w0 + static_cast<int64_t>(k)]);
+        // The initial power uses the 8-accumulator reduction: for the narrow
+        // windows (17 lags) this 1016-sample sum is a large fraction of the
+        // whole call, and the legacy per-SYNC path keeps its own O(1) sliding
+        // update untouched.
+        float pw = window_power_8acc(rx + w0, L);
 
         const bool use_real_opt = scratch.real_sync_template.is_real;
         const float* taps_dup = scratch.real_sync_template.taps_dup.data();
@@ -816,6 +887,11 @@ inline bool stage_timing(const std::complex<float>* rx,
                 }
             }
         }
+        // Report the window's raw maximum before the acceptance gate: the
+        // low-SNR early-stop decisions below need to know how far the best
+        // candidate was from the threshold, not just whether it passed.
+        if (raw_max_out)
+            *raw_max_out = bm;
         if (bm < min_metric) {
             constexpr float kSyncParFloor = 0.06f;
             constexpr float kSyncParMin = 20.0f;
@@ -897,9 +973,7 @@ inline bool stage_timing(const std::complex<float>* rx,
                 if (pos < 0 ||
                     pos + static_cast<int64_t>(L) > static_cast<int64_t>(n))
                     return -1.0f;
-                float pw = 0.0f;
-                for (size_t k = 0; k < L; ++k)
-                    pw += std::norm(rx[pos + static_cast<int64_t>(k)]);
+                const float pw = window_power_8acc(rx + pos, L);
                 const std::complex<float> acc =
                     scratch.real_sync_template.is_real
                         ? rxopt::real_template_dot_single(
@@ -909,10 +983,18 @@ inline bool stage_timing(const std::complex<float>* rx,
                                                        scratch.work.data(), L);
                 return std::norm(acc) / (pw * Et + 1e-12f);
             };
-            float best_score = -1e30f;
+            // One pass over the candidate grid: the same metrics are needed
+            // twice (once for the strongest slot, once for the first crossing
+            // of the leading-edge threshold), and each is a full single-SYMBOL
+            // correlation.  Caching them halves this cost.
+            const size_t ncand = static_cast<size_t>(2 * max_j + 1);
+            std::vector<float> cand_metric(ncand, -1.0f);
             float max_here = 0.0f;
-            for (int64_t j = -max_j; j <= max_j; ++j) {
+            for (size_t i = 0; i < ncand; ++i) {
+                const int64_t j = static_cast<int64_t>(i) -
+                                  static_cast<int64_t>(max_j);
                 const float m = ss_metric(fold.start + j * P);
+                cand_metric[i] = m;
                 if (m > 0.0f)
                     max_here = std::max(max_here, m);
             }
@@ -925,18 +1007,17 @@ inline bool stage_timing(const std::complex<float>* rx,
             // window would otherwise never cross) and floored at 0.003, which
             // is ~3x the largest of 21 exponential noise metrics (1/L * ln21).
             const float edge_thr = std::max(0.003f, 0.2f * max_here);
-            for (int64_t j = -max_j; j <= max_j; ++j) {
-                const int64_t c = fold.start + j * P;
-                const float here = ss_metric(c);
+            for (size_t i = 0; i < ncand; ++i) {
+                const float here = cand_metric[i];
                 if (here < 0.0f)
                     continue;
                 if (here >= edge_thr) {
-                    fold_start = c;
-                    best_score = here;
+                    const int64_t j = static_cast<int64_t>(i) -
+                                      static_cast<int64_t>(max_j);
+                    fold_start = fold.start + j * P;
                     break;
                 }
             }
-            (void)best_score;
         }
         // Period/origin from the 16-SYMBOL super-anchor fit.  A degenerate fit
         // still leaves a usable origin (the refined fold argmax) with the
@@ -996,6 +1077,15 @@ inline bool stage_timing(const std::complex<float>* rx,
         std::complex<float> corr(0.0f, 0.0f);
         size_t used_inner = 0;
         bool found = false;
+        // Low-SNR early stop.  m = 0 keeps the full ROI (it is the predicted
+        // SYNC, so a large residual must still be catchable).  If it misses
+        // AND its raw window maximum is far below the PAR floor, the whole
+        // leading region is deep-noise / deep-low-SNR, not merely mis-seeded:
+        // the locked residual is a few samples, so the inner SYNCs can then be
+        // probed at +/-32 instead of +/-roi (4 x 513 -> 4 x 65 correlations).
+        // Anything this skips is still covered by the tail probe and, failing
+        // that, by the fold -- both of which keep the full ROI.
+        float m0_raw_max = 0.0f;
         for (size_t m = 0; m <= inner; ++m) {
             const int64_t want =
                 static_cast<int64_t>(seed_start) +
@@ -1003,94 +1093,117 @@ inline bool stage_timing(const std::complex<float>* rx,
             if (want + static_cast<int64_t>(L) >
                 static_cast<int64_t>(n))
                 break;
-            if (local_best(want, roi, thr, &pos, &met, &corr,
-                           /*allow_par_fallback=*/true)) {
+            const bool narrow_inner = (m != 0) && (m0_raw_max < 0.045f);
+            const int64_t inner_rad =
+                narrow_inner ? std::min<int64_t>(roi, 32) : roi;
+            float raw_max = 0.0f;
+            if (local_best(want, inner_rad, thr, &pos, &met, &corr,
+                           /*allow_par_fallback=*/true, &raw_max)) {
                 used_inner = m;
                 found = true;
                 break;
             }
-        }
-        if (!found && profile.locked_tail_probe) {
-            // Failure path only.  The leading SYNCs are all below threshold --
-            // typically a burst interferer parked on the first symbols while
-            // the tail of the preamble is clean (measured on the 5.2 m
-            // capture: first_5_max 0.029..0.053, med_tail_32_255 0.14..0.20).
-            // The old code declared a tracking failure without ever looking
-            // past `locked_inner_symbols`.  Keep the bounded ROI (the grid is
-            // known, so only the residual is unknown) and probe sparse tail
-            // anchors on the symbol grid.
-            //
-            // The threshold is the TRACKING threshold, not the acquisition
-            // one: a low-SNR tail sits at 0.14..0.20, well under
-            // radar_verification_threshold (0.25) but far above the per-SYNC
-            // tracking floor.  The neighbour gate below is what keeps a
-            // +/-roi false alarm from being accepted at this lower threshold.
-            const float tail_thr =
-                std::min(profile.radar_verification_threshold, 0.08f);
-            const size_t reps = profile.preamble_repetitions;
-            const size_t step =
-                std::max<size_t>(1, profile.locked_tail_probe_step);
-            const size_t need_confirm =
-                std::max<size_t>(1, profile.locked_tail_probe_confirm);
-            // Two tiers: the locked residual is a few samples, so a narrow
-            // probe finds the clean tail cheaply; only when the whole narrow
-            // sweep fails do we pay for the full bounded ROI.
-            const int64_t tail_radii[2] = {std::min<int64_t>(roi, 32), roi};
-            for (int tier = 0; tier < 2 && !found; ++tier) {
-                if (tier == 1 && tail_radii[1] <= tail_radii[0])
-                    break;
-                const int64_t trad = tail_radii[tier];
-                for (size_t m = inner + 1; m < reps; m += step) {
-                    const int64_t want = static_cast<int64_t>(seed_start) +
-                        static_cast<int64_t>(m) *
-                            static_cast<int64_t>(kQm35SamplesPerSymbol);
-                    if (want + static_cast<int64_t>(L) >
-                        static_cast<int64_t>(n))
-                        break;
-                    ++out.tail_probe_attempts;
-                    int64_t cpos = -1;
-                    float cmet = 0.0f;
-                    std::complex<float> ccorr(0.0f, 0.0f);
-                    if (!local_best(want, trad, tail_thr, &cpos, &cmet, &ccorr,
-                                    /*allow_par_fallback=*/true))
-                        continue;
-                    if (cmet > out.tail_probe_best_metric)
-                        out.tail_probe_best_metric = cmet;
-                    // Consistency gate: a real grid hit is confirmed by its
-                    // neighbouring SYMBOLS.  A false alarm (wrong lag inside
-                    // the ROI) is not, so probing continues instead of
-                    // locking onto a bogus origin.
-                    size_t confirm = 0;
-                    const int64_t nb_delta[3] = {1, 2, -1};
-                    for (int64_t d : nb_delta) {
-                        const int64_t nb = static_cast<int64_t>(m) + d;
-                        if (nb < 0 || nb >= static_cast<int64_t>(reps))
-                            continue;
-                        const int64_t nb_want =
-                            static_cast<int64_t>(seed_start) +
-                            nb * static_cast<int64_t>(kQm35SamplesPerSymbol);
-                        if (nb_want + static_cast<int64_t>(L) >
-                            static_cast<int64_t>(n))
-                            continue;
-                        int64_t np = -1;
-                        float nm = 0.0f;
-                        std::complex<float> nc(0.0f, 0.0f);
-                        if (local_best(nb_want, trad, tail_thr, &np, &nm, &nc))
-                            ++confirm;
-                    }
-                    if (confirm < need_confirm)
-                        continue;
-                    ++out.tail_probe_hits;
-                    out.tail_probe_k = static_cast<int64_t>(m);
-                    pos = cpos;
-                    met = cmet;
-                    corr = ccorr;
-                    used_inner = m;
-                    found = true;
-                    break;
-                }
+            if (m == 0) {
+                m0_raw_max = raw_max;
+                out.inner_probe_raw_max = raw_max;
             }
         }
+        // Failure path only.  The leading SYNCs are all below threshold --
+        // typically a burst interferer parked on the first symbols while the
+        // tail of the preamble is clean (measured on the 5.2 m capture:
+        // first_5_max 0.029..0.053, med_tail_32_255 0.14..0.20).  The old code
+        // declared a tracking failure without ever looking past
+        // `locked_inner_symbols`.  Keep the bounded ROI (the grid is known, so
+        // only the residual is unknown) and probe sparse tail anchors on the
+        // symbol grid.
+        //
+        // The threshold is the TRACKING threshold, not the acquisition one: a
+        // low-SNR tail sits at 0.14..0.20, well under
+        // radar_verification_threshold (0.25) but far above the per-SYNC
+        // tracking floor.  The neighbour gate is what keeps a +/-roi false
+        // alarm from being accepted at this lower threshold.
+        const float tail_thr =
+            std::min(profile.radar_verification_threshold, 0.08f);
+        const size_t reps = profile.preamble_repetitions;
+        const size_t step =
+            std::max<size_t>(1, profile.locked_tail_probe_step);
+        const size_t need_confirm =
+            std::max<size_t>(1, profile.locked_tail_probe_confirm);
+        // Two probe widths.  The locked residual is a few samples, so the
+        // narrow (+/-32) sweep finds a clean tail cheaply.  The wide sweep
+        // (+/-roi) only matters when the residual is larger than the narrow
+        // window -- and it costs 32 x 513 = 16,416 single-SYMBOL correlations,
+        // so it is NOT run before the fold: the fold covers the identical
+        // window with a 64-SYMBOL coherent gain (~18 dB more sensitive) and is
+        // the correct rescue in that regime.  The wide sweep is therefore the
+        // last resort, reached only when the fold itself could not rescue the
+        // packet.  Measured at -12 dB in-band (200 packets): the narrow sweep
+        // never produced a confirmable hit and the fold rescued every packet,
+        // so this ordering removes ~1.2 ms/packet of doomed work without
+        // changing any outcome.
+        auto tail_sweep = [&](int64_t trad) {
+            for (size_t m = inner + 1; m < reps; m += step) {
+                const int64_t want = static_cast<int64_t>(seed_start) +
+                    static_cast<int64_t>(m) *
+                        static_cast<int64_t>(kQm35SamplesPerSymbol);
+                if (want + static_cast<int64_t>(L) > static_cast<int64_t>(n))
+                    break;
+                ++out.tail_probe_attempts;
+                int64_t cpos = -1;
+                float cmet = 0.0f;
+                std::complex<float> ccorr(0.0f, 0.0f);
+                float raw_max = 0.0f;
+                const bool hit =
+                    local_best(want, trad, tail_thr, &cpos, &cmet, &ccorr,
+                               /*allow_par_fallback=*/true, &raw_max);
+                if (raw_max > out.tail_probe_raw_max)
+                    out.tail_probe_raw_max = raw_max;
+                if (!hit)
+                    continue;
+                if (cmet > out.tail_probe_best_metric)
+                    out.tail_probe_best_metric = cmet;
+                // Consistency gate: a real grid hit is confirmed by its
+                // neighbouring SYMBOLS.  A false alarm (wrong lag inside the
+                // ROI) is not, so probing continues instead of locking onto a
+                // bogus origin.
+                size_t confirm = 0;
+                const int64_t nb_delta[3] = {1, 2, -1};
+                for (int64_t d : nb_delta) {
+                    const int64_t nb = static_cast<int64_t>(m) + d;
+                    if (nb < 0 || nb >= static_cast<int64_t>(reps))
+                        continue;
+                    const int64_t nb_want =
+                        static_cast<int64_t>(seed_start) +
+                        nb * static_cast<int64_t>(kQm35SamplesPerSymbol);
+                    if (nb_want + static_cast<int64_t>(L) >
+                        static_cast<int64_t>(n))
+                        continue;
+                    int64_t np = -1;
+                    float nm = 0.0f;
+                    std::complex<float> nc(0.0f, 0.0f);
+                    float nb_raw = 0.0f;
+                    const bool nb_hit =
+                        local_best(nb_want, trad, tail_thr, &np, &nm, &nc,
+                                   /*allow_par_fallback=*/false, &nb_raw);
+                    if (nb_raw > out.tail_probe_raw_max)
+                        out.tail_probe_raw_max = nb_raw;
+                    if (nb_hit)
+                        ++confirm;
+                }
+                if (confirm < need_confirm)
+                    continue;
+                ++out.tail_probe_hits;
+                out.tail_probe_k = static_cast<int64_t>(m);
+                pos = cpos;
+                met = cmet;
+                corr = ccorr;
+                used_inner = m;
+                found = true;
+                return;
+            }
+        };
+        if (!found && profile.locked_tail_probe)
+            tail_sweep(std::min<int64_t>(roi, 32));
         if (!found) {
             // Low-SNR fallback: every single-symbol probe inside the bounded
             // ROI missed.  The fold keeps the same bounded window -- it is not
@@ -1103,11 +1216,20 @@ inline bool stage_timing(const std::complex<float>* rx,
             // tail probe with a different rescue.  qa_uwb_demod_core's
             // "tail probe rescues leading interference" case pins that
             // contract: with rescue disabled the packet MUST stay lost.
-            if (!profile.locked_tail_probe ||
-                !try_fold_acquire(
+            const bool fold_ok =
+                profile.locked_tail_probe &&
+                try_fold_acquire(
                     static_cast<int64_t>(seed_start),
                     std::max<int64_t>(1, static_cast<int64_t>(
-                                             profile.locked_roi_samples)))) {
+                                             profile.locked_roi_samples)));
+            if (!fold_ok && profile.locked_tail_probe) {
+                // Last resort (see the note above): the fold could not rescue
+                // this packet either, so the wide single-SYMBOL sweep is the
+                // only remaining option.  Paying its cost here cannot slow down
+                // any packet the fold already handles.
+                tail_sweep(roi);
+            }
+            if (!fold_ok && !found) {
                 ++out.bounded_failures;
                 finish_timing_profile();
                 return false;
@@ -1209,30 +1331,56 @@ inline bool stage_timing(const std::complex<float>* rx,
         // conjugate dots at stride.
         const auto coarse_begin = std::chrono::steady_clock::now();
         if (!seed_acquired && j_hi > j_lo) {
-            float pw = 0.0f;
-            for (size_t k = 0; k < L; ++k)
-                pw += std::norm(rx[j_lo + static_cast<int64_t>(k)]);
+            float pw = window_power_8acc(rx + j_lo, L);
             float best_coarse_m = -1.0f;
             int64_t best_coarse_j = j_lo;
             std::complex<float> best_coarse_c(0.0f, 0.0f);
-            for (int64_t j = j_lo; j <= j_hi; ++j) {
-                if (((j - j_lo) % stride) == 0) {
-                    const std::complex<float> acc =
-                        scratch.real_sync_template.is_real
-                            ? rxopt::real_template_dot_single(
-                                  rx + j, scratch.real_sync_template.taps_dup.data(), L)
-                            : detail::timing_conjugate_dot(
-                                  rx + j, scratch.work.data(), L);
-                    const float m = std::norm(acc) / (pw * Et + 1e-12f);
-                    if (m > best_coarse_m) {
-                        best_coarse_m = m;
-                        best_coarse_j = j;
-                        best_coarse_c = acc;
-                    }
+            // Slide the window power forward by `cnt` samples with eight
+            // independent accumulators, so the two |x|^2 streams vectorise and
+            // only ONE serial float add per stride block remains.  The
+            // per-sample form of this update was the single most expensive loop
+            // in low-SNR acquisition: 262,144 iterations (the live search
+            // margin is +-131,072 samples) at ~8 cycles each = ~2.2 ms/packet,
+            // 85% of the whole acquisition search.  The sum is mathematically
+            // identical; only the float association order changes.
+            auto advance_power = [&](int64_t j, int64_t cnt) {
+                const float* a =
+                    reinterpret_cast<const float*>(rx + j + static_cast<int64_t>(L));
+                const float* b = reinterpret_cast<const float*>(rx + j);
+                const size_t m = static_cast<size_t>(2 * cnt);
+                float s0 = 0.f, s1 = 0.f, s2 = 0.f, s3 = 0.f;
+                float s4 = 0.f, s5 = 0.f, s6 = 0.f, s7 = 0.f;
+                size_t i = 0;
+                for (; i + 8 <= m; i += 8) {
+                    s0 += a[i + 0] * a[i + 0] - b[i + 0] * b[i + 0];
+                    s1 += a[i + 1] * a[i + 1] - b[i + 1] * b[i + 1];
+                    s2 += a[i + 2] * a[i + 2] - b[i + 2] * b[i + 2];
+                    s3 += a[i + 3] * a[i + 3] - b[i + 3] * b[i + 3];
+                    s4 += a[i + 4] * a[i + 4] - b[i + 4] * b[i + 4];
+                    s5 += a[i + 5] * a[i + 5] - b[i + 5] * b[i + 5];
+                    s6 += a[i + 6] * a[i + 6] - b[i + 6] * b[i + 6];
+                    s7 += a[i + 7] * a[i + 7] - b[i + 7] * b[i + 7];
                 }
-                if (j + 1 <= j_hi)
-                    pw += std::norm(rx[j + static_cast<int64_t>(L)]) -
-                          std::norm(rx[j]);
+                float s = ((s0 + s1) + (s2 + s3)) + ((s4 + s5) + (s6 + s7));
+                for (; i < m; ++i)
+                    s += a[i] * a[i] - b[i] * b[i];
+                pw += s;
+            };
+            for (int64_t j = j_lo; j <= j_hi; j += stride) {
+                const std::complex<float> acc =
+                    scratch.real_sync_template.is_real
+                        ? rxopt::real_template_dot_single(
+                              rx + j, scratch.real_sync_template.taps_dup.data(), L)
+                        : detail::timing_conjugate_dot(
+                              rx + j, scratch.work.data(), L);
+                const float m = std::norm(acc) / (pw * Et + 1e-12f);
+                if (m > best_coarse_m) {
+                    best_coarse_m = m;
+                    best_coarse_j = j;
+                    best_coarse_c = acc;
+                }
+                const int64_t cnt = std::min<int64_t>(stride, j_hi + 1 - j);
+                advance_power(j, cnt);
             }
             out.coarse_search_us = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1328,33 +1476,6 @@ inline bool stage_timing(const std::complex<float>* rx,
     bool grid_applied = false;
     double grid_period = static_cast<double>(period);
     int64_t grid_start = start;
-    // Windowed |x|^2 with eight independent accumulators.  A single-accumulator
-    // float reduction cannot be vectorised without -ffast-math, and the power
-    // turned out to be HALF the cost of the single-point stage (measured 2x
-    // faster with eight accumulators).  The summation order differs from the
-    // scalar loop, but this value only normalises the grid metric; the legacy
-    // path keeps its own O(1) power update untouched.
-    auto window_power = [](const std::complex<float>* x, size_t count) -> float {
-        const float* f = reinterpret_cast<const float*>(x);
-        const size_t m = 2 * count;
-        float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
-        float a4 = 0.f, a5 = 0.f, a6 = 0.f, a7 = 0.f;
-        size_t i = 0;
-        for (; i + 8 <= m; i += 8) {
-            a0 += f[i + 0] * f[i + 0];
-            a1 += f[i + 1] * f[i + 1];
-            a2 += f[i + 2] * f[i + 2];
-            a3 += f[i + 3] * f[i + 3];
-            a4 += f[i + 4] * f[i + 4];
-            a5 += f[i + 5] * f[i + 5];
-            a6 += f[i + 6] * f[i + 6];
-            a7 += f[i + 7] * f[i + 7];
-        }
-        float s = ((a0 + a1) + (a2 + a3)) + ((a4 + a5) + (a6 + a7));
-        for (; i < m; ++i)
-            s += f[i] * f[i];
-        return s;
-    };
     auto grid_track = [&]() -> bool {
         const size_t reps = profile.preamble_repetitions;
         if (reps < 8)
@@ -1524,7 +1645,7 @@ inline bool stage_timing(const std::complex<float>* rx,
             }
             if (base < 0)
                 continue;
-            float pw = window_power(rx + base, L);
+            float pw = window_power_8acc(rx + base, L);
             std::complex<float> acc[8];
             if (use_real) {
                 rxopt::real_template_dot_8lag(rx + base, taps_dup, L, acc);
@@ -1626,7 +1747,21 @@ inline bool stage_timing(const std::complex<float>* rx,
     // prematurely truncate the 256-symbol train.
     std::vector<size_t> peak_indices;
     peak_indices.reserve(profile.preamble_repetitions);
-    if (!grid_applied && !fold_used) {
+    // LockedBounded's per-SYMBOL tracking floor.  A first peak below it cannot
+    // be the head of a usable train: the tail probe already swept 32 tail
+    // symbols at exactly this floor and found nothing confirmable, so running
+    // the 256-SYMBOL train here is provably doomed (it would truncate to a
+    // single peak and fall through to the post-train fold retry anyway).
+    // Skipping it saves 256 x 27 single-SYMBOL correlations; the fold below is
+    // the path that actually rescues these packets.  A first peak ABOVE the
+    // floor (e.g. the 5.2 m tail-probe rescue at 0.14..0.20) still runs the
+    // full train, because there the clean tail really does track.
+    const float bounded_track_floor =
+        std::min(profile.radar_verification_threshold, 0.08f);
+    const bool skip_doomed_bounded_train =
+        bounded && profile.locked_tail_probe && !grid_applied && !fold_used &&
+        (first_metric < bounded_track_floor);
+    if (!grid_applied && !fold_used && !skip_doomed_bounded_train) {
         constexpr size_t kMaxConsecutiveSyncMisses = 2;
         // One tracking pass at a given floor.  `weak` selects the 0.08 floor
         // LockedBounded already uses for its tail probe; the legacy absolute
@@ -2278,7 +2413,21 @@ inline bool stage_sfd(const std::complex<float>* rx,
     };
 
     bool sfd_passed = scan_window(expected, kSfdNarrowHalf, 0);
-    for (int k = 1; k <= kSfdSymbolOffsets && !sfd_passed; ++k) {
+    // Low-SNR early stop for the +-1..+-4 symbol offsets.  `best` is now the
+    // k = 0 window's maximum.  When it cannot even reach 75% of the 0.02 low
+    // floor, the offsets cannot pass either: the SFD correlation peak is
+    // 0.008..0.05 at -10..-14 dB in-band, so the offsets are 8 x 129 = 1,032
+    // doomed lag correlations.  The discrete grid below covers the same
+    // +-4 symbols (and +-36) with a lower, polarity-locked acceptance gate, so
+    // nothing is lost.  The `detected_peaks`/`metric` terms keep this off the
+    // high-SNR path, where a large seed error can produce a low k = 0 maximum
+    // but a perfectly good offset window.
+    const bool skip_symbol_offsets =
+        !sfd_passed && best < 0.015f &&
+        timing.detected_peaks == profile.preamble_repetitions &&
+        timing.metric < profile.radar_verification_threshold;
+    for (int k = 1;
+         k <= kSfdSymbolOffsets && !sfd_passed && !skip_symbol_offsets; ++k) {
         const int64_t step = static_cast<int64_t>(k) * static_cast<int64_t>(sym);
         sfd_passed = scan_window(expected + step, kSfdNarrowHalf, k);
         if (sfd_passed)
@@ -2308,10 +2457,67 @@ inline bool stage_sfd(const std::complex<float>* rx,
         constexpr int64_t kGridHalf = 36;
         const int64_t max_pos =
             static_cast<int64_t>(n) - static_cast<int64_t>(sfd_len);
+        // Per-SYMBOL decomposition of the SFD correlation.  SFD =
+        // kron(sfd_seq, sync), so a window at `pos` is the sfd_seq-weighted sum
+        // of `len` single-SYMBOL correlations, and its power is the sum of the
+        // same `len` single-SYMBOL powers.  The grid points are exactly
+        // `period` apart, so when period == sym the 73 grid windows share
+        // almost all of their symbols: 2*36 + len = 80 symbol positions cover
+        // every one of them.  Precomputing those 80 with the SIMD kernels
+        // replaces 73 x 8128 scalar complex multiply-accumulates and 73 x 8128
+        // scalar norms with 80 x 1016 SIMD dots, and turns each grid metric
+        // into `len` complex adds plus `len` float adds.
+        const bool sym_decompose =
+            use_real_sfd_fast && (period == static_cast<int64_t>(sym));
+        const size_t n_sym_pos = static_cast<size_t>(2 * kGridHalf) + len;
+        std::vector<std::complex<float>> sym_corr;
+        std::vector<float> sym_pwr;
+        std::vector<uint8_t> sym_valid;
+        if (sym_decompose) {
+            sym_corr.assign(n_sym_pos, std::complex<float>(0.0f, 0.0f));
+            sym_pwr.assign(n_sym_pos, 0.0f);
+            sym_valid.assign(n_sym_pos, 0);
+            for (size_t i = 0; i < n_sym_pos; ++i) {
+                const int64_t m = static_cast<int64_t>(i) -
+                                  static_cast<int64_t>(kGridHalf);
+                const int64_t spos =
+                    expected + m * static_cast<int64_t>(sym);
+                if (spos < 0 ||
+                    spos + static_cast<int64_t>(sym) >
+                        static_cast<int64_t>(n))
+                    continue;
+                sym_corr[i] =
+                    rxopt::real_template_dot_single(rx + spos, taps_dup, sym);
+                sym_pwr[i] = window_power_8acc(rx + spos, sym);
+                sym_valid[i] = 1;
+            }
+        }
         auto sfd_metric_at = [&](int64_t pos) -> float {
-            float pwr = 0.0f;
-            for (size_t i = 0; i < sfd_len; ++i)
-                pwr += std::norm(rx[pos + static_cast<int64_t>(i)]);
+            if (pos < 0 || pos > max_pos)
+                return -1.0f;
+            if (use_real_sfd_fast) {
+                // Same summation order as sfd_real_dot_single(), but the power
+                // uses the 8-accumulator window_power_8acc instead of a scalar loop.
+                float pwr = 0.0f;
+                std::complex<float> acc(0.0f, 0.0f);
+                for (size_t s = 0; s < len; ++s) {
+                    const int64_t p = pos + static_cast<int64_t>(s) *
+                                                static_cast<int64_t>(sym);
+                    pwr += window_power_8acc(rx + p, sym);
+                    const int8_t sg = sfd_sequence[s];
+                    if (sg == 0)
+                        continue;
+                    const std::complex<float> d =
+                        rxopt::real_template_dot_single(rx + p, taps_dup, sym);
+                    if (sg > 0)
+                        acc += d;
+                    else
+                        acc -= d;
+                }
+                acc *= sfd_scale;
+                return std::norm(acc) / (pwr + 1e-12f);
+            }
+            const float pwr = window_power_8acc(rx + pos, sfd_len);
             const std::complex<float> acc = sfd_dot(static_cast<size_t>(pos));
             return std::norm(acc) / (pwr + 1e-12f);
         };
@@ -2326,7 +2532,33 @@ inline bool stage_sfd(const std::complex<float>* rx,
                 const int64_t pos = expected + k * static_cast<int64_t>(period);
                 if (pos < 0 || pos > max_pos)
                     continue;
-                cands[nc++] = { pos, sfd_metric_at(pos) };
+                if (sym_decompose) {
+                    const size_t base = static_cast<size_t>(k + kGridHalf);
+                    bool ok = true;
+                    float pwr = 0.0f;
+                    std::complex<float> acc_unscaled(0.0f, 0.0f);
+                    for (size_t s = 0; s < len; ++s) {
+                        const size_t idx = base + s;
+                        if (!sym_valid[idx]) {
+                            ok = false;
+                            break;
+                        }
+                        pwr += sym_pwr[idx];
+                        const int8_t sg = sfd_sequence[s];
+                        if (sg == 0)
+                            continue;
+                        if (sg > 0)
+                            acc_unscaled += sym_corr[idx];
+                        else
+                            acc_unscaled -= sym_corr[idx];
+                    }
+                    if (!ok)
+                        continue;
+                    const std::complex<float> acc = acc_unscaled * sfd_scale;
+                    cands[nc++] = { pos, std::norm(acc) / (pwr + 1e-12f) };
+                } else {
+                    cands[nc++] = { pos, sfd_metric_at(pos) };
+                }
             }
         }
         if (nc >= 8) {
@@ -2336,12 +2568,16 @@ inline bool stage_sfd(const std::complex<float>* rx,
                 if (cands[i].metric > cands[bi].metric)
                     bi = i;
             int64_t gpos = cands[bi].pos;
-            // Refine +-1 sample around the best grid point.  Evaluating delta=0
-            // on all 73 grid points first and refining only the winner keeps
-            // the noise maximum at 75 evaluations instead of 219.
+            // Refine around the best grid point.  Evaluating delta = 0 on all
+            // 73 grid points first and refining only the winner keeps the noise
+            // maximum at 75 evaluations instead of 219.  When the +-1..+-4
+            // symbol offset windows were skipped, the winner can be several
+            // symbols off the nominal centre, so the sample refinement widens
+            // to +-4.
+            const int64_t refine_rad = skip_symbol_offsets ? 4 : 1;
             int64_t best_pos = gpos;
             float best_metric = cands[bi].metric;
-            for (int64_t d = -1; d <= 1; ++d) {
+            for (int64_t d = -refine_rad; d <= refine_rad; ++d) {
                 const int64_t pos = gpos + d;
                 if (pos < 0 || pos > max_pos)
                     continue;
@@ -3895,212 +4131,270 @@ inline bool rs_decode_block_erasures(const int8_t* coded378,
     return true;
 }
 
-// Failure-path-only per-RS-block rescue: tries 6 single and 15 pair local
-// trellis flips on the weakest merges in each failing RS block, followed by
-// RS errors-and-erasures (v = 2, 4, 6), and accepts only a full-frame CRC-16
-// match.  Never invoked when standard soft Viterbi + RS/CRC already passes.
+// Failure-path-only per-RS-block rescue.  Two phases, ordered so the cheapest
+// candidate generator runs first:
+//
+//   Phase 1 (zero Viterbi cost): every block whose trellis-decoded codeword
+//   fails RS gets up to three RS(63,55) errors-and-erasures attempts (v = 2, 4,
+//   6) built from the six least-reliable RS symbols of that block.  If every
+//   block produced at least one candidate, one combined CRC-16 check decides
+//   the packet immediately -- the 21 local Trellis-Chase re-decodes are then
+//   never run.
+//
+//   Phase 2 (only if phase 1 could not close the frame): 6 single and 15 pair
+//   local trellis flips on the weakest merges of each still-failing block.
+//
+// Only a full-frame CRC-16 match is accepted.  Never invoked when standard soft
+// Viterbi + RS/CRC already passes.
+//
+// `tr` is the caller's single soft-Viterbi trace: passing it in removes the
+// second full-length Viterbi pass this function used to run itself.
 inline bool rescue_payload_soft(const float* llr0,
                                 const float* llr1,
                                 size_t total,
                                 size_t psdu_bits,
+                                const Cl3TrellisTrace& tr,
                                 PayloadResult& out,
                                 PayloadSubTimers* sub = nullptr)
 {
     if (psdu_bits == 0 || (psdu_bits % 8) != 0)
         return false;
-    Cl3TrellisTrace tr;
-    {
-        PayloadSubBucket vit_b(sub, &PayloadSubTimers::viterbi_us);
-        vitdec_cl3_soft_trace(llr0, llr1, total, tr);
-    }
+    if (tr.bits.size() < total)
+        return false;
     const size_t num_blocks = (psdu_bits + 329) / 330;
     struct BlockCands {
         std::vector<std::array<int8_t, 330>> cands;
     };
     std::vector<BlockCands> bc(num_blocks);
-    size_t coded_off = 0;
-    size_t data_off = 0;
+    // Per-block geometry, hoisted so both phases can extract a codeword.
+    std::vector<size_t> blk_data_start(num_blocks, 0);
+    std::vector<size_t> blk_coded_start(num_blocks, 0);
+    std::vector<size_t> blk_this_data(num_blocks, 0);
+    std::vector<size_t> blk_this_coded(num_blocks, 0);
+    std::vector<uint8_t> need_flips(num_blocks, 0);
+    {
+        size_t coded_off = 0;
+        size_t data_off = 0;
+        for (size_t b = 0; b < num_blocks; ++b) {
+            const size_t this_data = std::min<size_t>(330, psdu_bits - data_off);
+            const size_t this_coded = this_data + 48;
+            if (19 + coded_off + this_coded > total)
+                return false;
+            blk_data_start[b] = 330 - this_data;
+            blk_coded_start[b] = 19 + coded_off;
+            blk_this_data[b] = this_data;
+            blk_this_coded[b] = this_coded;
+            coded_off += this_coded;
+            data_off += this_data;
+        }
+    }
 
+    auto extract_block = [&](size_t b, const std::vector<int8_t>& dec,
+                             int8_t* block378) {
+        std::fill(block378, block378 + 378, 0);
+        const size_t data_start = blk_data_start[b];
+        const size_t this_data = blk_this_data[b];
+        const size_t coded_start = blk_coded_start[b];
+        for (size_t i = 0; i < this_data; ++i)
+            block378[data_start + i] = dec[coded_start + i] & 1;
+        for (size_t i = 0; i < 48; ++i)
+            block378[330 + i] = dec[coded_start + this_data + i] & 1;
+    };
+    auto try_append = [&](size_t b, const std::array<int8_t, 330>& cand) {
+        for (const auto& ex : bc[b].cands)
+            if (ex == cand)
+                return;
+        bc[b].cands.push_back(cand);
+    };
+
+    // ---- Phase 1: RS only (no Trellis-Chase) ------------------------------
     for (size_t b = 0; b < num_blocks; ++b) {
-        const size_t this_data = std::min<size_t>(330, psdu_bits - data_off);
-        const size_t this_coded = this_data + 48;
-        if (19 + coded_off + this_coded > total)
-            return false;
-        const size_t data_start = 330 - this_data;
-
-        auto extract_block = [&](const std::vector<int8_t>& dec,
-                                 int8_t* block378) {
-            std::fill(block378, block378 + 378, 0);
-            for (size_t i = 0; i < this_data; ++i)
-                block378[data_start + i] = dec[19 + coded_off + i] & 1;
-            for (size_t i = 0; i < 48; ++i)
-                block378[330 + i] = dec[19 + coded_off + this_data + i] & 1;
-        };
-
         int8_t blk[378];
         std::array<int8_t, 330> d330{};
-        extract_block(tr.bits, blk);
+        extract_block(b, tr.bits, blk);
         if (rs_decode_block(blk, d330.data())) {
             bc[b].cands.push_back(d330);
-        } else {
-            const size_t t_b = 19 + coded_off;
-            const size_t t_e = t_b + this_coded;
-            struct StepM {
-                size_t t;
-                float m;
-            };
-            std::vector<StepM> sm;
-            sm.reserve(this_coded);
-            for (size_t t = t_b; t < t_e; ++t)
-                sm.push_back({ t, tr.margins[t] });
-            std::sort(sm.begin(), sm.end(),
-                      [](const StepM& a, const StepM& c) { return a.m < c.m; });
-            std::vector<size_t> weak;
-            for (const auto& s : sm) {
-                bool near = false;
-                for (size_t w : weak) {
-                    if (std::llabs(static_cast<int64_t>(s.t) -
-                                   static_cast<int64_t>(w)) < 3) {
-                        near = true;
-                        break;
-                    }
-                }
-                if (!near) {
-                    weak.push_back(s.t);
-                    if (weak.size() >= 6)
-                        break;
-                }
-            }
-            auto try_append = [&](const std::array<int8_t, 330>& cand) {
-                for (const auto& ex : bc[b].cands)
-                    if (ex == cand)
-                        return;
-                bc[b].cands.push_back(cand);
-            };
-            std::vector<int8_t> work_bits = tr.bits;
-            for (size_t i = 0; i < weak.size() && bc[b].cands.size() < 4; ++i) {
-                const size_t t = weak[i];
-                const size_t lo = (t > 12) ? (t - 12) : 0;
-                const size_t hi = std::min(total, t + 13);
-                std::copy(tr.bits.begin() + lo, tr.bits.begin() + hi,
-                          work_bits.begin() + lo);
-                const uint8_t fu = tr.lose_u[t];
-                local_cl3_trellis_flip(llr0, llr1, lo, hi, tr.states[lo],
-                                       tr.states[hi], &t, &fu, 1, work_bits);
-                extract_block(work_bits, blk);
-                if (rs_decode_block(blk, d330.data()))
-                    try_append(d330);
-            }
-            for (size_t i = 0; i < weak.size() && bc[b].cands.size() < 4; ++i) {
-                for (size_t j = i + 1;
-                     j < weak.size() && bc[b].cands.size() < 4; ++j) {
-                    const size_t t0 = std::min(weak[i], weak[j]);
-                    const size_t t1 = std::max(weak[i], weak[j]);
-                    const size_t lo = (t0 > 12) ? (t0 - 12) : 0;
-                    const size_t hi = std::min(total, t1 + 13);
-                    std::copy(tr.bits.begin() + lo, tr.bits.begin() + hi,
-                              work_bits.begin() + lo);
-                    const size_t ft[2] = { t0, t1 };
-                    const uint8_t fu[2] = { tr.lose_u[t0], tr.lose_u[t1] };
-                    local_cl3_trellis_flip(llr0, llr1, lo, hi, tr.states[lo],
-                                           tr.states[hi], ft, fu, 2, work_bits);
-                    extract_block(work_bits, blk);
-                    if (rs_decode_block(blk, d330.data()))
-                        try_append(d330);
-                }
-            }
-            if (bc[b].cands.empty()) {
-                extract_block(tr.bits, blk);
-                struct SymRel {
-                    int sym;
-                    float min_m;
-                };
-                std::vector<SymRel> srel;
-                const int first_sym = static_cast<int>(data_start / 6);
-                for (int sy = first_sym; sy < 63; ++sy) {
-                    float mm = 1e30f;
-                    for (int bit = 0; bit < 6; ++bit) {
-                        const size_t pos = static_cast<size_t>(sy * 6 + bit);
-                        size_t vt = 0;
-                        if (pos >= data_start && pos < 330)
-                            vt = t_b + (pos - data_start);
-                        else if (pos >= 330)
-                            vt = t_b + this_data + (pos - 330);
-                        else
-                            continue;
-                        mm = std::min(mm, tr.margins[vt]);
-                    }
-                    srel.push_back({ sy, mm });
-                }
-                std::sort(srel.begin(), srel.end(),
-                          [](const SymRel& a, const SymRel& c) {
-                              return a.min_m < c.min_m;
-                          });
-                for (int v : { 2, 4, 6 }) {
-                    if (static_cast<int>(srel.size()) < v)
-                        break;
-                    int ep[6];
-                    for (int k = 0; k < v; ++k)
-                        ep[k] = srel[k].sym;
-                    if (rs_decode_block_erasures(blk, ep, v, d330.data())) {
-                        try_append(d330);
-                        break;
-                    }
-                }
-            }
-            if (bc[b].cands.empty())
-                return false;
+            continue;
         }
-        coded_off += this_coded;
-        data_off += this_data;
+        need_flips[b] = 1;
+        // Rank the RS symbols (6 bits each) by their least-reliable bit and
+        // erase the worst 2/4/6.  `data_start`-relative bits that fall in the
+        // 48 parity bits map to the parity region of the codeword.
+        const size_t data_start = blk_data_start[b];
+        const size_t this_data = blk_this_data[b];
+        const size_t t_b = blk_coded_start[b];
+        struct SymRel {
+            int sym;
+            float min_m;
+        };
+        std::vector<SymRel> srel;
+        const int first_sym = static_cast<int>(data_start / 6);
+        for (int sy = first_sym; sy < 63; ++sy) {
+            float mm = 1e30f;
+            for (int bit = 0; bit < 6; ++bit) {
+                const size_t pos = static_cast<size_t>(sy * 6 + bit);
+                size_t vt = 0;
+                if (pos >= data_start && pos < 330)
+                    vt = t_b + (pos - data_start);
+                else if (pos >= 330)
+                    vt = t_b + this_data + (pos - 330);
+                else
+                    continue;
+                mm = std::min(mm, tr.margins[vt]);
+            }
+            srel.push_back({ sy, mm });
+        }
+        std::sort(srel.begin(), srel.end(),
+                  [](const SymRel& a, const SymRel& c) {
+                      return a.min_m < c.min_m;
+                  });
+        for (int v : { 2, 4, 6 }) {
+            if (static_cast<int>(srel.size()) < v)
+                break;
+            int ep[6];
+            for (int k = 0; k < v; ++k)
+                ep[k] = srel[k].sym;
+            if (rs_decode_block_erasures(blk, ep, v, d330.data())) {
+                try_append(b, d330);
+                break;
+            }
+        }
     }
 
     std::vector<size_t> idx(num_blocks, 0);
     std::vector<int8_t> psdu_out(psdu_bits);
     std::vector<uint8_t> bytes(psdu_bits / 8);
-    size_t iter = 0;
-    while (iter < 64) {
-        size_t doff = 0;
-        for (size_t b = 0; b < num_blocks; ++b) {
-            const size_t this_data = std::min<size_t>(330, psdu_bits - doff);
-            const size_t data_start = 330 - this_data;
-            const auto& c = bc[b].cands[idx[b]];
-            for (size_t i = 0; i < this_data; ++i)
-                psdu_out[doff + i] = c[data_start + i];
-            doff += this_data;
+    // Combined-candidate CRC search.  Returns true and fills `out` on a match.
+    auto combine_and_crc = [&](size_t max_iter) -> bool {
+        std::fill(idx.begin(), idx.end(), 0);
+        size_t iter = 0;
+        while (iter < max_iter) {
+            size_t doff = 0;
+            for (size_t b = 0; b < num_blocks; ++b) {
+                const size_t this_data = blk_this_data[b];
+                const size_t data_start = blk_data_start[b];
+                const auto& c = bc[b].cands[idx[b]];
+                for (size_t i = 0; i < this_data; ++i)
+                    psdu_out[doff + i] = c[data_start + i];
+                doff += this_data;
+            }
+            for (size_t i = 0; i < bytes.size(); ++i) {
+                uint8_t byte = 0;
+                for (int bit = 0; bit < 8; ++bit)
+                    byte |= static_cast<uint8_t>(psdu_out[8 * i + bit]) << bit;
+                bytes[i] = byte;
+            }
+            if (bytes.size() >= 2) {
+                const uint16_t calc =
+                    crc16_802154(bytes.data(), bytes.size() - 2);
+                const uint16_t rx_fcs =
+                    static_cast<uint16_t>(bytes[bytes.size() - 2]) |
+                    (static_cast<uint16_t>(bytes[bytes.size() - 1]) << 8);
+                if (calc == rx_fcs) {
+                    out = PayloadResult{};
+                    out.ok = true;
+                    out.fcs_pass = true;
+                    out.bytes = bytes;
+                    out.bits.assign(psdu_out.begin(), psdu_out.end());
+                    out.calculated_fcs = calc;
+                    out.received_fcs = rx_fcs;
+                    return true;
+                }
+            }
+            ++iter;
+            size_t pos = num_blocks;
+            while (pos-- > 0) {
+                if (++idx[pos] < bc[pos].cands.size())
+                    break;
+                idx[pos] = 0;
+            }
+            if (pos == static_cast<size_t>(-1))
+                break;
         }
-        for (size_t i = 0; i < bytes.size(); ++i) {
-            uint8_t byte = 0;
-            for (int bit = 0; bit < 8; ++bit)
-                byte |= static_cast<uint8_t>(psdu_out[8 * i + bit]) << bit;
-            bytes[i] = byte;
-        }
-        if (bytes.size() >= 2) {
-            const uint16_t calc = crc16_802154(bytes.data(), bytes.size() - 2);
-            const uint16_t rx_fcs =
-                static_cast<uint16_t>(bytes[bytes.size() - 2]) |
-                (static_cast<uint16_t>(bytes[bytes.size() - 1]) << 8);
-            if (calc == rx_fcs) {
-                out = PayloadResult{};
-                out.ok = true;
-                out.fcs_pass = true;
-                out.bytes = std::move(bytes);
-                out.bits.assign(psdu_out.begin(), psdu_out.end());
-                out.calculated_fcs = calc;
-                out.received_fcs = rx_fcs;
-                return true;
+        return false;
+    };
+
+    bool all_have_cands = true;
+    for (size_t b = 0; b < num_blocks; ++b)
+        if (bc[b].cands.empty())
+            all_have_cands = false;
+    if (all_have_cands && combine_and_crc(64))
+        return true;
+
+    // ---- Phase 2: local Trellis-Chase on the still-failing blocks ---------
+    std::vector<int8_t> work_bits;
+    for (size_t b = 0; b < num_blocks; ++b) {
+        if (!need_flips[b])
+            continue;
+        int8_t blk[378];
+        std::array<int8_t, 330> d330{};
+        const size_t t_b = blk_coded_start[b];
+        const size_t t_e = t_b + blk_this_coded[b];
+        struct StepM {
+            size_t t;
+            float m;
+        };
+        std::vector<StepM> sm;
+        sm.reserve(blk_this_coded[b]);
+        for (size_t t = t_b; t < t_e; ++t)
+            sm.push_back({ t, tr.margins[t] });
+        std::sort(sm.begin(), sm.end(),
+                  [](const StepM& a, const StepM& c) { return a.m < c.m; });
+        std::vector<size_t> weak;
+        for (const auto& s : sm) {
+            bool near = false;
+            for (size_t w : weak) {
+                if (std::llabs(static_cast<int64_t>(s.t) -
+                               static_cast<int64_t>(w)) < 3) {
+                    near = true;
+                    break;
+                }
+            }
+            if (!near) {
+                weak.push_back(s.t);
+                if (weak.size() >= 6)
+                    break;
             }
         }
-        ++iter;
-        size_t pos = num_blocks;
-        while (pos-- > 0) {
-            if (++idx[pos] < bc[pos].cands.size())
-                break;
-            idx[pos] = 0;
+        if (work_bits.empty())
+            work_bits = tr.bits;
+        for (size_t i = 0; i < weak.size() && bc[b].cands.size() < 4; ++i) {
+            const size_t t = weak[i];
+            const size_t lo = (t > 12) ? (t - 12) : 0;
+            const size_t hi = std::min(total, t + 13);
+            std::copy(tr.bits.begin() + lo, tr.bits.begin() + hi,
+                      work_bits.begin() + lo);
+            const uint8_t fu = tr.lose_u[t];
+            local_cl3_trellis_flip(llr0, llr1, lo, hi, tr.states[lo],
+                                   tr.states[hi], &t, &fu, 1, work_bits);
+            extract_block(b, work_bits, blk);
+            if (rs_decode_block(blk, d330.data()))
+                try_append(b, d330);
         }
-        if (pos == static_cast<size_t>(-1))
-            break;
+        for (size_t i = 0; i < weak.size() && bc[b].cands.size() < 4; ++i) {
+            for (size_t j = i + 1;
+                 j < weak.size() && bc[b].cands.size() < 4; ++j) {
+                const size_t t0 = std::min(weak[i], weak[j]);
+                const size_t t1 = std::max(weak[i], weak[j]);
+                const size_t lo = (t0 > 12) ? (t0 - 12) : 0;
+                const size_t hi = std::min(total, t1 + 13);
+                std::copy(tr.bits.begin() + lo, tr.bits.begin() + hi,
+                          work_bits.begin() + lo);
+                const size_t ft[2] = { t0, t1 };
+                const uint8_t fu[2] = { tr.lose_u[t0], tr.lose_u[t1] };
+                local_cl3_trellis_flip(llr0, llr1, lo, hi, tr.states[lo],
+                                       tr.states[hi], ft, fu, 2, work_bits);
+                extract_block(b, work_bits, blk);
+                if (rs_decode_block(blk, d330.data()))
+                    try_append(b, d330);
+            }
+        }
+        if (bc[b].cands.empty())
+            return false;
     }
+
+    if (combine_and_crc(64))
+        return true;
     return false;
 }
 
@@ -4135,22 +4429,27 @@ inline bool decode_payload_soft(const std::vector<float>& llr0p,
         llr1j[s + 21] = llr1[s];
     }
     std::vector<int8_t> decoded;
+    Cl3TrellisTrace tr;
     const auto t_vit = std::chrono::steady_clock::now();
-    vitdec_cl3_soft(llr0j.data(), llr1j.data(), total, decoded);
+    // One tracing Viterbi serves both the first attempt and the rescue.  The
+    // rescue needs the per-step path-metric margins, and recomputing them with
+    // a second full-length pass was pure duplication: `tr.bits` is bit-identical
+    // to what vitdec_cl3_soft() produces (same state/back-pointer updates).
+    vitdec_cl3_soft_trace(llr0j.data(), llr1j.data(), total, tr);
     if (sub)
         sub->viterbi_us += payload_elapsed_us(t_vit);
-    if (decoded.size() < total)
+    if (tr.bits.size() < total)
         return false;
 
-    std::vector<int8_t> rs_cw(decoded.begin() + 19,
-                              decoded.begin() + (total - 2));
+    std::vector<int8_t> rs_cw(tr.bits.begin() + 19,
+                              tr.bits.begin() + (total - 2));
     if (rs_cw.size() != llr0.size())
         return false;
     if (finish_rs_crc_payload(rs_cw, psdu_bits, out, sub) && out.fcs_pass)
         return true;
 
     PayloadResult rescued;
-    if (rescue_payload_soft(llr0j.data(), llr1j.data(), total, psdu_bits,
+    if (rescue_payload_soft(llr0j.data(), llr1j.data(), total, psdu_bits, tr,
                             rescued, sub)) {
         out = std::move(rescued);
         return true;
@@ -5633,6 +5932,10 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         cfo_timing.tail_probe_hits = res.timing.tail_probe_hits;
         cfo_timing.tail_probe_k = res.timing.tail_probe_k;
         cfo_timing.tail_probe_best_metric = res.timing.tail_probe_best_metric;
+        cfo_timing.tail_probe_raw_max = res.timing.tail_probe_raw_max;
+        cfo_timing.inner_probe_raw_max = res.timing.inner_probe_raw_max;
+        cfo_timing.initial_coarse_search_us = res.timing.coarse_search_us;
+        cfo_timing.initial_fine_track_us = res.timing.fine_track_us;
         cfo_timing.ok = true;
         cfo_timing.preamble_start_sample = full_start;
         cfo_timing.preamble_start_uncropped = full_start;

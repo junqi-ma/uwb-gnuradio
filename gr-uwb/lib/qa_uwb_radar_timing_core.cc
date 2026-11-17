@@ -946,3 +946,83 @@ BOOST_AUTO_TEST_CASE(test_radar_timing_nominal_outside_margin)
     BOOST_CHECK(miss_off.status == TimingStatus::TimingFailed);
     BOOST_CHECK_EQUAL(miss_off.preamble_start_sample, int64_t(-1));
 }
+
+BOOST_AUTO_TEST_CASE(test_fold_acquire_window_is_clamped_to_half_a_period)
+{
+    // Task 1 (compute-cost): fold_acquire can only ever select a lag within
+    // +/-P/2 of the seed, so it now clamps its fold + correlation window to
+    // exactly that sub-window instead of folding the whole search radius.  At
+    // AcquireLegacy's 8192-sample radius that is 16384 -> 1016 lags (-93.8%).
+    //
+    // The clamp must not change WHICH lag wins: the folded vector is indexed
+    // absolutely (folded[i] = sum_k rx[w0 + i + k*P]), so every retained lag
+    // sees the same samples as before.  This test pins both halves: the window
+    // really shrinks, and the reported start/metric still equal a direct
+    // normalised correlation at that start.
+    const auto tmpl = load_normalized_sync();
+    const size_t sym = kQm35SamplesPerSymbol;
+    auto frame = make_low_snr_frame(tmpl, kLowSnrSyncReps, 8192, 2048,
+                                    /*snr_db=*/2.0, 424242u);
+    DemodScratch scratch;
+    scratch.reserve(frame.rx.size());
+    scratch.work = tmpl;
+    gr::uwb::core::uwb_l2_normalize(scratch.work);
+    const float Et = gr::uwb::core::uwb_template_energy(scratch.work);
+    gr::uwb::demod::rxopt::build_real_sync_template(scratch.work, scratch.real_sync_template);
+    BOOST_REQUIRE(scratch.real_sync_template.is_real);
+
+    const int64_t period = static_cast<int64_t>(sym);
+    // Seed 3 SYMBOLS late: inside the fold's +/-P/2 resolution, and far enough
+    // that a wrong absolute grid phase would be visible.
+    const int64_t centre = frame.start + 3 * period;
+    const int64_t radius = 8192;
+    const auto res = gr::uwb::demod::core::detail::fold_acquire(
+        frame.rx.data(), frame.rx.size(), centre, centre - radius,
+        centre + radius, scratch.work.data(), scratch.work.size(), Et,
+        scratch.real_sync_template, gr::uwb::demod::core::detail::kFoldMaxSymbols,
+        kLowSnrSyncReps, 0.0f);
+    BOOST_REQUIRE(res.ok);
+    // Clamped window: at most P + 1 lags, not 2*radius + 1.
+    BOOST_CHECK_LE(res.window_lags, static_cast<size_t>(period + 1));
+    BOOST_CHECK_LE(res.window_lags, static_cast<size_t>(2 * radius + 1));
+    // The clamp must not move the answer outside the +/-P/2 ambiguity window.
+    BOOST_CHECK_LE(std::llabs(res.start - centre), period / 2);
+    // ... and the reported start is a real SYNC origin (the fold is
+    // P-periodic, so "true start + k*P" is the correct answer class).
+    BOOST_CHECK_LE(std::llabs((res.start - frame.start) % period), int64_t(2));
+    // The metric is the NORMALISED correlation of the K-fold coherent sum, so
+    // it is far above any single-SYMBOL metric.  Recompute it from the folded
+    // vector to prove the clamp did not change which samples were summed.
+    const int64_t w0 = centre - period / 2;
+    const int64_t j = res.start - w0;
+    BOOST_REQUIRE_GE(j, 0);
+    BOOST_REQUIRE_LT(j, period + 1);
+    std::vector<gr_complex> folded(scratch.work.size(),
+                                   gr_complex(0.0f, 0.0f));
+    for (size_t k = 0; k < res.symbols_folded; ++k)
+        for (size_t i = 0; i < folded.size(); ++i)
+            folded[i] += frame.rx[static_cast<size_t>(res.start) +
+                                  k * static_cast<size_t>(period) + i];
+    const std::complex<float> acc =
+        gr::uwb::demod::rxopt::real_template_dot_single(
+            folded.data(), scratch.real_sync_template.taps_dup.data(),
+            folded.size());
+    float pw = 0.0f;
+    for (size_t i = 0; i < folded.size(); ++i)
+        pw += std::norm(folded[i]);
+    const float direct = std::norm(acc) / (pw * Et + 1e-12f);
+    BOOST_CHECK_CLOSE(res.metric, direct, 1.0);
+
+    // A seed more than half a period outside the true start still lands on the
+    // nearest legal lag (the fold is P-periodic, so this is the documented
+    // ambiguity, not an error).
+    const int64_t far_centre = frame.start + 40 * period;
+    const auto far = gr::uwb::demod::core::detail::fold_acquire(
+        frame.rx.data(), frame.rx.size(), far_centre, far_centre - radius,
+        far_centre + radius, scratch.work.data(), scratch.work.size(), Et,
+        scratch.real_sync_template, gr::uwb::demod::core::detail::kFoldMaxSymbols,
+        kLowSnrSyncReps, 0.0f);
+    BOOST_REQUIRE(far.ok);
+    BOOST_CHECK_LE(far.window_lags, static_cast<size_t>(period + 1));
+    BOOST_CHECK_EQUAL((far.start - frame.start) % period, 0);
+}

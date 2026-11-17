@@ -339,11 +339,18 @@ struct Reporter {
                  << " tail_hit=" << r->timing.tail_probe_hits
                  << " tail_k=" << r->timing.tail_probe_k
                  << std::fixed << std::setprecision(3)
-                 << " tail_best=" << r->timing.tail_probe_best_metric;
+                 << " tail_best=" << r->timing.tail_probe_best_metric
+                 << " tail_raw=" << r->timing.tail_probe_raw_max
+                 << " inner_raw=" << r->timing.inner_probe_raw_max;
         // Per-stage decomposition of the demod.  Parents and children are never
         // summed together; `stage_total_us` is the authoritative total.
         if (r) s << " st_total=" << r->stage_total_us
                  << " st_timing=" << r->stage_timing_us
+                 << " timing_coarse=" << r->timing.coarse_search_us
+                 << " timing_fine=" << r->timing.fine_track_us
+                 << " timing_seed=" << r->timing.seed_search_us
+                 << " timing0_coarse=" << r->timing.initial_coarse_search_us
+                 << " timing0_fine=" << r->timing.initial_fine_track_us
                  << " st_cfo=" << r->stage_cfo_us
                  << " st_sfd=" << r->stage_sfd_us
                  << " st_cir=" << r->stage_cir_us
