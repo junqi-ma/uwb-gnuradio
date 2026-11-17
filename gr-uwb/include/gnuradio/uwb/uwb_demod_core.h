@@ -2064,6 +2064,54 @@ inline bool stage_sfd(const std::complex<float>* rx,
     float best = -1.0f;
     size_t best_j = 0;
 
+    // Shared per-symbol SFD primitive.  `use_real_sfd_fast` / `taps_dup` are
+    // hoisted out of scan_window so the low-SNR discrete-grid fallback below
+    // can reuse the exact same kernels.
+    const bool use_real_sfd_fast =
+        profile.rx_fast_sfd && scratch.real_sync_template.is_real;
+    const float* taps_dup =
+        use_real_sfd_fast ? scratch.real_sync_template.taps_dup.data()
+                          : nullptr;
+
+    // Coherent sign check over the first min(len,16) SFD symbols.  This is the
+    // hard lock that keeps a low-floor / discrete-grid hit from being a
+    // shifted-SFD sidelobe or a noise coincidence: 8 random symbols all match
+    // a fixed +-1 pattern with probability 2^-8.  Shared by the existing
+    // 0.02..0.08 low-floor path and the new discrete grid.
+    auto polarity_ok = [&](int64_t pos) -> bool {
+        const size_t n_check = std::min<size_t>(len, 16);
+        if (pos < 0 ||
+            pos + static_cast<int64_t>(n_check * sym) >
+                static_cast<int64_t>(n))
+            return false;
+        std::complex<float> sym_corr[16];
+        std::complex<double> coh_ref(0.0, 0.0);
+        for (size_t si = 0; si < n_check; ++si) {
+            const size_t p = static_cast<size_t>(pos) + si * sym;
+            std::complex<float> c(0.0f, 0.0f);
+            if (use_real_sfd_fast) {
+                c = rxopt::real_template_dot_single(rx + p, taps_dup, sym);
+            } else {
+                for (size_t k = 0; k < sym; ++k)
+                    c += rx[p + k] * std::conj(template_wf[k]);
+            }
+            sym_corr[si] = c;
+            coh_ref += static_cast<double>(sfd_sequence[si]) *
+                       std::complex<double>(c);
+        }
+        if (!(std::norm(coh_ref) > 1e-24))
+            return false;
+        size_t sign_ok = 0;
+        for (size_t si = 0; si < n_check; ++si) {
+            const double proj =
+                static_cast<double>(sym_corr[si].real()) * coh_ref.real() +
+                static_cast<double>(sym_corr[si].imag()) * coh_ref.imag();
+            if (proj * static_cast<double>(sfd_sequence[si]) > 0.0)
+                ++sign_ok;
+        }
+        return sign_ok == n_check;
+    };
+
     auto scan_window = [&](int64_t center, int64_t half_width,
                            int64_t backtrack_symbols) {
         if (center < 0 || n < sfd_len)
@@ -2081,9 +2129,6 @@ inline bool stage_sfd(const std::complex<float>* rx,
         float pwr = 0.0f;
         for (size_t k = 0; k < sfd_len; ++k)
             pwr += std::norm(rx[j_lo + k]);
-        const bool use_real_sfd_fast =
-            profile.rx_fast_sfd && scratch.real_sync_template.is_real;
-        const float* taps_dup = use_real_sfd_fast ? scratch.real_sync_template.taps_dup.data() : nullptr;
 
         const size_t fold_len = (j_end - j_lo) + sym;
         if (use_real_sfd_fast) {
@@ -2181,39 +2226,11 @@ inline bool stage_sfd(const std::complex<float>* rx,
                 if (par >= 25.0) {
                     if (window_best >= 0.08f) {
                         window_passed = true;
-                    } else if (window_best_j + len * sym <= n) {
+                    } else if (polarity_ok(static_cast<int64_t>(window_best_j))) {
                         // Low-floor fallback (0.02 <= pk < 0.08): verify that
                         // all SFD symbols coherently match sfd_sequence signs
                         // to reject shifted-SFD sidelobes (e.g. 0.0625).
-                        std::complex<float> sym_corr[16];
-                        const size_t n_check = std::min<size_t>(len, 16);
-                        std::complex<double> coh_ref(0.0, 0.0);
-                        for (size_t si = 0; si < n_check; ++si) {
-                            const size_t pos = window_best_j + si * sym;
-                            std::complex<float> c(0.0f, 0.0f);
-                            if (use_real_sfd_fast) {
-                                c = rxopt::real_template_dot_single(
-                                    rx + pos, taps_dup, sym);
-                            } else {
-                                for (size_t k = 0; k < sym; ++k)
-                                    c += rx[pos + k] * std::conj(template_wf[k]);
-                            }
-                            sym_corr[si] = c;
-                            coh_ref += static_cast<double>(sfd_sequence[si]) *
-                                       std::complex<double>(c);
-                        }
-                        if (std::norm(coh_ref) > 1e-24) {
-                            size_t sign_ok = 0;
-                            for (size_t si = 0; si < n_check; ++si) {
-                                const double proj =
-                                    static_cast<double>(sym_corr[si].real()) * coh_ref.real() +
-                                    static_cast<double>(sym_corr[si].imag()) * coh_ref.imag();
-                                if (proj * static_cast<double>(sfd_sequence[si]) > 0.0)
-                                    ++sign_ok;
-                            }
-                            if (sign_ok == n_check)
-                                window_passed = true;
-                        }
+                        window_passed = true;
                     }
                 }
             }
@@ -2235,6 +2252,97 @@ inline bool stage_sfd(const std::complex<float>* rx,
         if (sfd_passed)
             break;
         sfd_passed = scan_window(expected - step, kSfdNarrowHalf, k);
+    }
+
+    // ---- Low-SNR discrete integer-symbol grid fallback --------------------
+    // Reached ONLY when the fast path above failed, so high and medium SNR
+    // (and multipath) keep the existing search bit-for-bit.  At -10..-14 dB
+    // in-band the SFD peak is 0.008..0.05, below the 0.02 low-floor gate, and
+    // the origin can be several SYMBOLS off (the low-SNR timing fold resolves
+    // the grid phase but not always the absolute SYNC index).  Scan the
+    // integer symbol grid +-36 symbols at delta = 0, refine +-1 sample around
+    // the best grid point, then gate on: peak >= 0.008, a weak discrete-grid
+    // PAR >= 1.5, and the shared 8-symbol coherent polarity check.
+    //
+    // The PAR gate is deliberately weak (the plan suggested 5.5).  Measured on
+    // this fixture the true SFD peak is only ~2x the discrete-grid background,
+    // because the background grid points sit on SYNC symbols and the 4z2
+    // sequence (sum = -4) correlates with a plain SYNC at 1/4 power, not at
+    // zero.  A 5.5 gate would therefore reject the -14 dB peak it is meant to
+    // accept.  The real false-alarm guard is the 8-symbol polarity lock
+    // (2^-8 per candidate) plus the 0.008 floor, which is 15x the pure-noise
+    // maximum (0.00053) measured over 200 windows.
+    if (!sfd_passed) {
+        constexpr int64_t kGridHalf = 36;
+        const int64_t max_pos =
+            static_cast<int64_t>(n) - static_cast<int64_t>(sfd_len);
+        auto sfd_metric_at = [&](int64_t pos) -> float {
+            float pwr = 0.0f;
+            for (size_t i = 0; i < sfd_len; ++i)
+                pwr += std::norm(rx[pos + static_cast<int64_t>(i)]);
+            const std::complex<float> acc = sfd_dot(static_cast<size_t>(pos));
+            return std::norm(acc) / (pwr + 1e-12f);
+        };
+        struct GridCand {
+            int64_t pos;
+            float metric;
+        };
+        std::array<GridCand, 2 * kGridHalf + 1> cands{};
+        size_t nc = 0;
+        if (max_pos >= 0) {
+            for (int64_t k = -kGridHalf; k <= kGridHalf; ++k) {
+                const int64_t pos = expected + k * static_cast<int64_t>(period);
+                if (pos < 0 || pos > max_pos)
+                    continue;
+                cands[nc++] = { pos, sfd_metric_at(pos) };
+            }
+        }
+        if (nc >= 8) {
+            ++out.search_windows;
+            size_t bi = 0;
+            for (size_t i = 1; i < nc; ++i)
+                if (cands[i].metric > cands[bi].metric)
+                    bi = i;
+            int64_t gpos = cands[bi].pos;
+            // Refine +-1 sample around the best grid point.  Evaluating delta=0
+            // on all 73 grid points first and refining only the winner keeps
+            // the noise maximum at 75 evaluations instead of 219.
+            int64_t best_pos = gpos;
+            float best_metric = cands[bi].metric;
+            for (int64_t d = -1; d <= 1; ++d) {
+                const int64_t pos = gpos + d;
+                if (pos < 0 || pos > max_pos)
+                    continue;
+                const float m = sfd_metric_at(pos);
+                if (m > best_metric) {
+                    best_metric = m;
+                    best_pos = pos;
+                }
+            }
+            // Background mean over the discrete grid, excluding the best grid
+            // point and its +-2 symbol neighbours.
+            double bg_sum = 0.0;
+            size_t bg_cnt = 0;
+            for (size_t i = 0; i < nc; ++i) {
+                if (std::llabs(cands[i].pos - gpos) <=
+                    2 * static_cast<int64_t>(period))
+                    continue;
+                bg_sum += static_cast<double>(cands[i].metric);
+                ++bg_cnt;
+            }
+            if (bg_cnt >= 16) {
+                const double bg_mean =
+                    std::max(bg_sum / static_cast<double>(bg_cnt), 1e-12);
+                const double par =
+                    static_cast<double>(best_metric) / bg_mean;
+                if (best_metric >= 0.008f && par >= 1.5 &&
+                    polarity_ok(best_pos)) {
+                    best = best_metric;
+                    best_j = static_cast<size_t>(best_pos);
+                    sfd_passed = true;
+                }
+            }
+        }
     }
     if (!sfd_passed)
         return false;

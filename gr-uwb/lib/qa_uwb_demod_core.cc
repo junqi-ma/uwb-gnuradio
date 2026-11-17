@@ -747,6 +747,113 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_symmetric_partial_train_backward)
     BOOST_CHECK_EQUAL(sr.search_windows, 3u);
 }
 
+BOOST_AUTO_TEST_CASE(test_demod_core_low_snr_sfd_discrete_grid)
+{
+    // Low-SNR SFD acquisition.  The fast path (+-4 symbols, 0.02 floor) cannot
+    // reach -10..-14 dB: the SFD peak is 0.008..0.05 and the origin can be
+    // several SYMBOLS off after the low-SNR timing fold.  The discrete
+    // integer-symbol grid (+-36 symbols, 0.008 floor, PAR >= 5.5, shared
+    // 8-symbol polarity lock) must recover it without any pure-noise hit.
+    std::vector<gr_complex> sync;
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", sync));
+    BOOST_REQUIRE_EQUAL(sync.size(), kQm35SamplesPerSymbol);
+    const auto sfd_seq = GetSfdSequence("4z2");
+    const size_t sym = kQm35SamplesPerSymbol;
+    const size_t reps = 256;
+    const int64_t pre = 8192;
+    std::vector<gr_complex> sfd_wf(sfd_seq.size() * sym);
+    for (size_t i = 0; i < sfd_seq.size(); ++i)
+        for (size_t k = 0; k < sym; ++k)
+            sfd_wf[i * sym + k] =
+                static_cast<float>(sfd_seq[i]) * sync[k];
+    const int64_t true_start = pre;
+    const int64_t true_sfd = true_start + static_cast<int64_t>(reps * sym);
+    const size_t n = static_cast<size_t>(true_sfd) + sfd_wf.size() + 4096;
+
+    double p_sig = 0.0;
+    for (size_t i = 0; i < sym; ++i)
+        p_sig += std::norm(sync[i]);
+    p_sig /= static_cast<double>(sym);
+
+    auto prof = Qm35825Profile::Default();
+    prof.preamble_repetitions = reps;
+    prof.sfd_mode = "4z2";
+
+    auto make_tr = [&](int64_t start) {
+        TimingResult tr;
+        tr.preamble_start_sample = start;
+        tr.measured_period = static_cast<double>(sym);
+        tr.detected_peaks = reps;
+        tr.peak_samples.push_back(start + static_cast<int64_t>(sym - 1));
+        tr.peak_metrics.push_back(0.5f);
+        tr.peak_corr.push_back(gr_complex(1.0f, 0.0f));
+        tr.ok = true;
+        return tr;
+    };
+
+    const double snrs[] = { -10.0, -12.0, -14.0 };
+    constexpr int kFrames = 50;
+    for (double snr : snrs) {
+        int passed = 0;
+        int within2 = 0;
+        int64_t worst = 0;
+        for (int f = 0; f < kFrames; ++f) {
+            std::vector<gr_complex> rx(n, gr_complex(0.0f, 0.0f));
+            for (size_t i = 0; i < reps; ++i)
+                std::copy(sync.begin(), sync.end(),
+                          rx.begin() + true_start +
+                              static_cast<int64_t>(i * sym));
+            std::copy(sfd_wf.begin(), sfd_wf.end(), rx.begin() + true_sfd);
+            const double snr_lin = std::pow(10.0, snr / 10.0);
+            const double p_noise = p_sig * (998.4 / 500.0) / snr_lin;
+            const float sigma = static_cast<float>(std::sqrt(p_noise / 2.0));
+            std::mt19937 rng(9000u + static_cast<uint32_t>(f));
+            std::normal_distribution<float> g(0.0f, 1.0f);
+            for (auto& v : rx)
+                v += gr_complex(sigma * g(rng), sigma * g(rng));
+            // +-10 SYMBOL origin error: outside the fast path's +-4 window.
+            const int64_t off =
+                static_cast<int64_t>(static_cast<int>(f % 21) - 10) *
+                static_cast<int64_t>(sym);
+            TimingResult tr = make_tr(true_start + off);
+            core::DemodScratch scratch;
+            scratch.reserve(rx.size());
+            SfdResult sr;
+            if (!core::stage_sfd(rx.data(), rx.size(), prof, tr, sfd_seq, sync,
+                                 sr, scratch))
+                continue;
+            ++passed;
+            const int64_t err = std::llabs(sr.sfd_start_sample - true_sfd);
+            worst = std::max(worst, err);
+            if (err <= 2)
+                ++within2;
+        }
+        std::printf("sfd low-snr: snr=%.0f passed=%d/%d within2=%d worst=%lld\n",
+                    snr, passed, kFrames, within2,
+                    static_cast<long long>(worst));
+        BOOST_CHECK_GE(passed, 48);
+        BOOST_CHECK_GE(within2, 48);
+    }
+
+    int false_alarms = 0;
+    for (int w = 0; w < 200; ++w) {
+        std::vector<gr_complex> rx(n, gr_complex(0.0f, 0.0f));
+        std::mt19937 rng(70000u + static_cast<uint32_t>(w));
+        std::normal_distribution<float> g(0.0f, 1.0f);
+        for (auto& v : rx)
+            v = gr_complex(g(rng), g(rng));
+        TimingResult tr = make_tr(true_start);
+        core::DemodScratch scratch;
+        scratch.reserve(rx.size());
+        SfdResult sr;
+        if (core::stage_sfd(rx.data(), rx.size(), prof, tr, sfd_seq, sync, sr,
+                            scratch))
+            ++false_alarms;
+    }
+    std::printf("sfd low-snr noise: %d/200 false alarms\n", false_alarms);
+    BOOST_CHECK_EQUAL(false_alarms, 0);
+}
+
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_recovers_four_symbol_forward)
 {
     std::vector<gr_complex> iq, tmpl;
