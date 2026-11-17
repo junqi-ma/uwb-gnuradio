@@ -103,6 +103,12 @@ struct TimingResult {
     // Best metric any tail probe saw (diagnostic: distinguishes "no clean tail
     // at all" from "clean tail but the neighbour gate rejected it").
     float tail_probe_best_metric = 0.0f;
+    // Raw window maxima seen by the two low-SNR probe stages, BEFORE the
+    // acceptance gate.  These are what decide whether escalating to the wide
+    // tail tier (or a full 256-SYMBOL train) can possibly succeed, so they are
+    // the tunable inputs of the early-stop gates in stage_timing.
+    float inner_probe_raw_max = 0.0f; // m = 0 inner-SYNC probe (+/-roi)
+    float tail_probe_raw_max = 0.0f;  // Tier 0 tail probe (+/-32)
 };
 
 // ---------------------------------------------------------------------------

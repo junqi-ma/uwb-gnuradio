@@ -812,6 +812,11 @@ BOOST_AUTO_TEST_CASE(test_demod_core_low_snr_sfd_discrete_grid)
     auto prof = Qm35825Profile::Default();
     prof.preamble_repetitions = reps;
     prof.sfd_mode = "4z2";
+    // Both SFD backends must reach the same answer.  rx_fast_sfd = false uses
+    // the scalar kron template; true uses the cached real-template kernels,
+    // which also enables the per-SYMBOL decomposition of the discrete grid.
+    for (bool fast_sfd : { false, true }) {
+    prof.rx_fast_sfd = fast_sfd;
 
     auto make_tr = [&](int64_t start) {
         TimingResult tr;
@@ -862,8 +867,9 @@ BOOST_AUTO_TEST_CASE(test_demod_core_low_snr_sfd_discrete_grid)
             if (err <= 2)
                 ++within2;
         }
-        std::printf("sfd low-snr: snr=%.0f passed=%d/%d within2=%d worst=%lld\n",
-                    snr, passed, kFrames, within2,
+        std::printf("sfd low-snr: fast=%d snr=%.0f passed=%d/%d within2=%d "
+                    "worst=%lld\n",
+                    fast_sfd ? 1 : 0, snr, passed, kFrames, within2,
                     static_cast<long long>(worst));
         BOOST_CHECK_GE(passed, 48);
         BOOST_CHECK_GE(within2, 48);
@@ -884,8 +890,10 @@ BOOST_AUTO_TEST_CASE(test_demod_core_low_snr_sfd_discrete_grid)
                             scratch))
             ++false_alarms;
     }
-    std::printf("sfd low-snr noise: %d/200 false alarms\n", false_alarms);
+    std::printf("sfd low-snr noise: fast=%d %d/200 false alarms\n",
+                fast_sfd ? 1 : 0, false_alarms);
     BOOST_CHECK_EQUAL(false_alarms, 0);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_recovers_four_symbol_forward)
@@ -3262,6 +3270,40 @@ BOOST_AUTO_TEST_CASE(test_demod_core_sfd_tail_cfo_uses_only_measured_peaks)
                         BOOST_CHECK_GT(std::abs(r.timing.peak_corr[k]), 0.0f);
                 }
             }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_soft_trace_viterbi_matches_plain)
+{
+    // decode_payload_soft() now runs ONE tracing soft Viterbi and reuses its
+    // bits for the first RS/CRC attempt, instead of running the plain Viterbi
+    // and then recomputing the whole thing with margins inside the rescue.
+    // That is only sound if vitdec_cl3_soft_trace()'s surviving path is
+    // bit-identical to vitdec_cl3_soft()'s, so pin it over random LLRs.
+    std::mt19937 rng(20261117u);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    const size_t lengths[] = { 64, 257, 1229 };
+    for (size_t n : lengths) {
+        std::vector<float> l0(n), l1(n);
+        for (size_t i = 0; i < n; ++i) {
+            l0[i] = nd(rng);
+            l1[i] = nd(rng);
+        }
+        std::vector<int8_t> plain;
+        gr::uwb::demod::core::detail::vitdec_cl3_soft(l0.data(), l1.data(), n, plain);
+        gr::uwb::demod::core::detail::Cl3TrellisTrace tr;
+        gr::uwb::demod::core::detail::vitdec_cl3_soft_trace(l0.data(), l1.data(), n, tr);
+        BOOST_REQUIRE_EQUAL(tr.bits.size(), n);
+        BOOST_REQUIRE_EQUAL(plain.size(), n);
+        BOOST_CHECK(std::equal(plain.begin(), plain.end(), tr.bits.begin()));
+        // The trace must also carry usable per-step evidence for the rescue.
+        BOOST_REQUIRE_EQUAL(tr.margins.size(), n);
+        BOOST_REQUIRE_EQUAL(tr.states.size(), n + 1);
+        BOOST_REQUIRE_EQUAL(tr.lose_u.size(), n);
+        for (size_t i = 0; i < n; ++i) {
+            BOOST_CHECK(tr.margins[i] >= 0.0f);
+            BOOST_CHECK(tr.lose_u[i] <= 1);
         }
     }
 }
