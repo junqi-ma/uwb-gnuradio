@@ -192,6 +192,280 @@ normalized_mf(const std::complex<float>* rx,
     return best;
 }
 
+// ---------------------------------------------------------------------------
+// K-symbol periodic-fold acquisition (low-SNR fallback).
+//
+// Why this exists
+// ---------------
+// The HRP preamble is N verbatim copies of ONE 1016-sample SYNC symbol, so the
+// single-symbol normalized correlation at -4..-8 dB in-band SNR has a per-SYNC
+// expectation of only ~0.1-0.2.  `radar_verification_threshold` (0.25) then
+// rejects almost every SYNC and acquisition fails even though the preamble is
+// plainly present (measured on the 256-SYNC fixture: all 256 peaks are > 0.08
+// with PAR 232..253, but only 11-24 of 256 clear 0.25).
+//
+// Coherently folding K symbol periods before correlating buys 10*log10(K) of
+// SNR (+18 dB at K=64).  Measured at -14 dB in-band: the folded metric is
+// 0.532 (min) / 0.560 (median), while the maximum over 200 pure-noise fold
+// positions is 0.0107 -- roughly 50x of margin, hence the 0.05 gate.
+//
+// The fold is PERIODIC, and so is the preamble: 256 verbatim copies of one
+// SYNC symbol carry no information that distinguishes SYNC #0 from SYNC #7, so
+// the folded metric is exactly P-periodic in the lag.  Folding over the SEARCH
+// WINDOW (fold_len = (w1-w0) + L, not one period) still matters -- it keeps the
+// fold and the correlation on the same absolute grid and lets the window be
+// searched at all -- but it does NOT by itself recover an absolute position:
+// every symbol start in the window scores the same.  The only absolute
+// reference available before the SFD is the seed, so the reported position is
+// the strongest lag within +/-P/2 of it.  The reference prototype measured the
+// same limit (docs/performance/data_low_snr_lock_20261117/fold_timing.json,
+// "coarse offset sweep": the total error stays inside +/-508 samples = half a
+// SYMBOL period and slips by whole periods beyond that).
+// ---------------------------------------------------------------------------
+inline constexpr size_t kFoldMaxSymbols = 64;
+inline constexpr size_t kFoldMinSymbols = 16;
+inline constexpr float kFoldThreshold = 0.05f;
+inline constexpr size_t kFoldAnchorGroupSymbols = 16;
+inline constexpr int64_t kFoldAnchorRefine = 8;
+
+struct FoldAcquireResult {
+    bool ok = false;
+    int64_t start = -1;          // absolute SYMBOL START of the packet
+    float metric = 0.0f;         // folded normalized correlation at `start`
+    std::complex<float> corr{ 0.0f, 0.0f };
+    size_t symbols_folded = 0;
+    size_t window_lags = 0;
+};
+
+// Fold `[w0, w1]` (a window of legal SYMBOL START positions) by up to
+// `max_symbols` periods and return the strongest normalized correlation lag
+// within +/-P/2 of `centre`.  Degrades K when the buffer cannot hold
+// `max_symbols` periods from `w0`, and refuses below kFoldMinSymbols (the gate
+// is not safe without the fold gain).
+inline FoldAcquireResult fold_acquire(const std::complex<float>* rx,
+                                      size_t n,
+                                      int64_t centre,
+                                      int64_t w0_in,
+                                      int64_t w1_in,
+                                      const std::complex<float>* tmpl,
+                                      size_t L,
+                                      float Et,
+                                      const rxopt::RealSyncTemplate& real_tmpl,
+                                      size_t max_symbols,
+                                      size_t preamble_repetitions,
+                                      float threshold)
+{
+    FoldAcquireResult res;
+    const int64_t P = static_cast<int64_t>(kQm35SamplesPerSymbol);
+    const int64_t Li = static_cast<int64_t>(L);
+    if (!rx || !tmpl || L == 0 || n < L)
+        return res;
+
+    int64_t w0 = std::max<int64_t>(0, w0_in);
+    int64_t w1 = std::min<int64_t>(w1_in, static_cast<int64_t>(n) - Li);
+    if (w1 < w0)
+        return res;
+
+    // The deepest sample the fold touches is w1 + L - 1 + (K-1)*P, so the
+    // buffer must hold K whole symbol periods starting at w0.
+    const int64_t room = static_cast<int64_t>(n) - w0 - Li;
+    if (room < 0)
+        return res;
+    int64_t k_eff = std::min<int64_t>(static_cast<int64_t>(max_symbols),
+                                      room / P + 1);
+    // Folding past the end of the preamble only adds noise, never signal.
+    k_eff = std::min<int64_t>(k_eff,
+                              static_cast<int64_t>(preamble_repetitions));
+    if (k_eff < static_cast<int64_t>(kFoldMinSymbols))
+        return res;
+    w1 = std::min<int64_t>(w1, static_cast<int64_t>(n) - Li - (k_eff - 1) * P);
+    if (w1 < w0)
+        return res;
+
+    const int64_t span = w1 - w0;
+    const size_t fold_len = static_cast<size_t>(span + Li);
+    // Rare failure path: allocation here is acceptable (this runs at most once
+    // per packet, and only for packets the single-symbol search lost).
+    std::vector<std::complex<float>> folded(fold_len,
+                                           std::complex<float>(0.0f, 0.0f));
+    for (int64_t k = 0; k < k_eff; ++k)
+        rxopt::vector_accumulate_complex(folded.data(), rx + w0 + k * P,
+                                         fold_len);
+
+    const bool use_real = real_tmpl.is_real && real_tmpl.length == L;
+    const float* taps_dup = real_tmpl.taps_dup.data();
+    float pw = 0.0f;
+    for (size_t m = 0; m < L; ++m)
+        pw += std::norm(folded[m]);
+
+    // Position ambiguity: only lags inside +/-P/2 of the seed can be told apart
+    // (see the note above).  Track the argmax of that central sub-window; the
+    // full window is still searched so the fold and the correlation share one
+    // absolute grid and the seed's own error is measurable.
+    const int64_t half_period = P / 2;
+    const int64_t lo_lag = std::max<int64_t>(0, (centre - w0) - half_period);
+    const int64_t hi_lag = std::min<int64_t>(span, (centre - w0) + half_period);
+
+    float bm = -1.0f;
+    int64_t bj = lo_lag;
+    std::complex<float> bacc(0.0f, 0.0f);
+    int64_t j = 0;
+    if (use_real) {
+        for (; j + 7 <= span; j += 8) {
+            std::complex<float> acc[8];
+            rxopt::real_template_dot_8lag(folded.data() + j, taps_dup, L, acc);
+            for (int m = 0; m < 8; ++m) {
+                const float met = std::norm(acc[m]) / (pw * Et + 1e-12f);
+                const int64_t lag = j + m;
+                if (lag >= lo_lag && lag <= hi_lag && met > bm) {
+                    bm = met;
+                    bj = lag;
+                    bacc = acc[m];
+                }
+                if (lag < span)
+                    pw += std::norm(folded[lag + Li]) - std::norm(folded[lag]);
+            }
+        }
+    }
+    for (; j <= span; ++j) {
+        const std::complex<float> acc =
+            use_real ? rxopt::real_template_dot_single(folded.data() + j,
+                                                       taps_dup, L)
+                     : timing_conjugate_dot(folded.data() + j, tmpl, L);
+        const float met = std::norm(acc) / (pw * Et + 1e-12f);
+        if (j >= lo_lag && j <= hi_lag && met > bm) {
+            bm = met;
+            bj = j;
+            bacc = acc;
+        }
+        if (j < span)
+            pw += std::norm(folded[j + Li]) - std::norm(folded[j]);
+    }
+
+    res.symbols_folded = static_cast<size_t>(k_eff);
+    res.window_lags = static_cast<size_t>(span + 1);
+    if (!(bm >= threshold) || hi_lag < lo_lag)
+        return res;
+    res.ok = true;
+    res.start = w0 + bj;
+    res.metric = bm;
+    res.corr = bacc;
+    return res;
+}
+
+// 16-SYMBOL super-anchor period/origin fit for the fold path.
+//
+// The folded metric resolves the packet origin to ~1 sample, but its period
+// would be the nominal grid by construction: the fold has no resolution along
+// the symbol index.  `measured_period` feeds integer_chip_grid()/spc_ppm and
+// the fused-CMF admission, so it must stay a genuine measurement.  Group the
+// SYNCs into `groups` blocks of kFoldAnchorGroupSymbols, coherently sum each
+// block into one super-symbol (+12 dB), refine its position with a
+// +/-kFoldAnchorRefine normalized search, then least-squares fit
+//     peak(g) = start + (g*kFoldAnchorGroupSymbols)*period + (L-1)
+// exactly like the legacy 256-peak fit (symbol-END convention; the intercept is
+// converted back to a SYMBOL START by subtracting L-1).
+inline bool fold_anchor_fit(const std::complex<float>* rx,
+                            size_t n,
+                            int64_t start,
+                            const std::complex<float>* tmpl,
+                            size_t L,
+                            float Et,
+                            const rxopt::RealSyncTemplate& real_tmpl,
+                            size_t groups,
+                            double* period_out,
+                            int64_t* preamble_start_out,
+                            std::vector<int64_t>& peak_samples,
+                            std::vector<float>& peak_metrics,
+                            std::vector<std::complex<float>>& peak_corr)
+{
+    peak_samples.clear();
+    peak_metrics.clear();
+    peak_corr.clear();
+    const int64_t P = static_cast<int64_t>(kQm35SamplesPerSymbol);
+    const int64_t Li = static_cast<int64_t>(L);
+    const int64_t refine = kFoldAnchorRefine;
+    const size_t sup_len = L + 2 * static_cast<size_t>(refine);
+    if (groups < 2 || L == 0 || !rx || !tmpl)
+        return false;
+
+    std::vector<std::complex<float>> sup(sup_len,
+                                         std::complex<float>(0.0f, 0.0f));
+    const bool use_real = real_tmpl.is_real && real_tmpl.length == L;
+    const float* taps_dup = real_tmpl.taps_dup.data();
+
+    double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    size_t used = 0;
+    for (size_t g = 0; g < groups; ++g) {
+        const int64_t base =
+            start + static_cast<int64_t>(g) *
+                        static_cast<int64_t>(kFoldAnchorGroupSymbols) * P -
+            refine;
+        if (base < 0)
+            continue;
+        if (base + static_cast<int64_t>(sup_len) +
+                static_cast<int64_t>(kFoldAnchorGroupSymbols - 1) * P >
+            static_cast<int64_t>(n))
+            continue;
+        std::fill(sup.begin(), sup.end(), std::complex<float>(0.0f, 0.0f));
+        for (int64_t j = 0; j < static_cast<int64_t>(kFoldAnchorGroupSymbols);
+             ++j)
+            rxopt::vector_accumulate_complex(sup.data(), rx + base + j * P,
+                                             sup_len);
+        float pw = 0.0f;
+        for (size_t m = 0; m < L; ++m)
+            pw += std::norm(sup[m]);
+        float bm = -1.0f;
+        int64_t bl = 0;
+        std::complex<float> bacc(0.0f, 0.0f);
+        for (int64_t lag = 0; lag <= 2 * refine; ++lag) {
+            const std::complex<float> acc =
+                use_real ? rxopt::real_template_dot_single(sup.data() + lag,
+                                                           taps_dup, L)
+                         : timing_conjugate_dot(sup.data() + lag, tmpl, L);
+            const float met = std::norm(acc) / (pw * Et + 1e-12f);
+            if (met > bm) {
+                bm = met;
+                bl = lag;
+                bacc = acc;
+            }
+            if (lag < 2 * refine)
+                pw += std::norm(sup[lag + Li]) - std::norm(sup[lag]);
+        }
+        const int64_t pos = base + bl;
+        const double x = static_cast<double>(
+            static_cast<int64_t>(g) *
+            static_cast<int64_t>(kFoldAnchorGroupSymbols));
+        const double y = static_cast<double>(pos + Li - 1);
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+        peak_samples.push_back(pos + Li - 1);
+        peak_metrics.push_back(bm);
+        peak_corr.push_back(bacc);
+        ++used;
+    }
+    if (used < 2)
+        return false;
+    const double denom = static_cast<double>(used) * sxx - sx * sx;
+    if (!(std::abs(denom) > 1e-9))
+        return false;
+    const double p = (static_cast<double>(used) * sxy - sx * sy) / denom;
+    if (!std::isfinite(p) || !(p > 0.0))
+        return false;
+    // Same 0.5% sanity gate the LockedBounded anchor fit uses: a period that
+    // far off the nominal grid means the anchors did not land on the expected
+    // symbol indices at all.
+    if (std::abs(p - static_cast<double>(P)) > 0.005 * static_cast<double>(P))
+        return false;
+    const double intercept_end = (sy - p * sx) / static_cast<double>(used);
+    *period_out = p;
+    *preamble_start_out = std::max<int64_t>(
+        0, static_cast<int64_t>(std::llround(intercept_end)) - (Li - 1));
+    return true;
+}
+
 } // namespace detail
 
 // ---------------------------------------------------------------------------
@@ -578,6 +852,122 @@ inline bool stage_timing(const std::complex<float>* rx,
     std::complex<float> first_corr(0.0f, 0.0f);
     const float thr = profile.radar_verification_threshold;
     const bool bounded = profile.sync_strategy == SyncStrategy::LockedBounded;
+
+    // ---- On-demand K-symbol periodic-fold acquisition ---------------------
+    // Reached ONLY after every single-symbol path failed.  The fold costs
+    // ~1 ms (fold + full-window correlation), so it must never run on a packet
+    // the normal path already acquired.  Both strategies share this helper;
+    // only the search window differs (bounded ROI vs a capped acquisition
+    // margin), and the fold keeps the absolute position because it folds over
+    // the window rather than into one symbol period.
+    bool fold_used = false;
+    // Non-bounded acquisition seed, hoisted so the post-train fold retry below
+    // can reuse the same window.
+    int64_t acq_seed = seed_start;
+    auto try_fold_acquire = [&](int64_t centre, int64_t radius) -> bool {
+        const detail::FoldAcquireResult fold = detail::fold_acquire(
+            rx, n, centre, centre - radius, centre + radius,
+            scratch.work.data(), L, Et, scratch.real_sync_template,
+            detail::kFoldMaxSymbols, profile.preamble_repetitions,
+            detail::kFoldThreshold);
+        if (!fold.ok)
+            return false;
+        // ---- Absolute-symbol disambiguation ------------------------------
+        // The preamble is 256 VERBATIM copies of one SYNC symbol, so the fold
+        // metric is exactly P-periodic: `fold.start` is only the grid phase
+        // nearest the seed, and the live frontend seed is accurate to a few
+        // SYMBOLS (measured -6.5..+4.4 SYNC periods at -14 dB in-band), not a
+        // few samples.  The one non-periodic feature available before the SFD
+        // is the preamble's leading edge: immediately before the true start
+        // there is noise (every acquisition window carries a pre-guard), while
+        // every other candidate has a SYNC before it.  Score each candidate by
+        // metric(c) - metric(c-P) and take the best.  At -14 dB in-band the
+        // single-SYNC metric is ~0.038 against ~0.001 in noise.
+        int64_t fold_start = fold.start;
+        {
+            const int64_t P = static_cast<int64_t>(kQm35SamplesPerSymbol);
+            const int64_t max_j = radius / P + 2;
+            auto ss_metric = [&](int64_t pos) -> float {
+                if (pos < 0 ||
+                    pos + static_cast<int64_t>(L) > static_cast<int64_t>(n))
+                    return -1.0f;
+                float pw = 0.0f;
+                for (size_t k = 0; k < L; ++k)
+                    pw += std::norm(rx[pos + static_cast<int64_t>(k)]);
+                const std::complex<float> acc =
+                    scratch.real_sync_template.is_real
+                        ? rxopt::real_template_dot_single(
+                              rx + pos,
+                              scratch.real_sync_template.taps_dup.data(), L)
+                        : detail::timing_conjugate_dot(rx + pos,
+                                                       scratch.work.data(), L);
+                return std::norm(acc) / (pw * Et + 1e-12f);
+            };
+            float best_score = -1e30f;
+            float max_here = 0.0f;
+            for (int64_t j = -max_j; j <= max_j; ++j) {
+                const float m = ss_metric(fold.start + j * P);
+                if (m > 0.0f)
+                    max_here = std::max(max_here, m);
+            }
+            // Leading-edge detection: scan the candidate grid from EARLY to
+            // LATE and take the first slot whose single-SYNC metric clears a
+            // noise/signal threshold.  Every slot before the true start is
+            // noise (~0.001 at -14 dB) and every slot after it is a SYNC
+            // (~0.038), so the first crossing IS the packet start.  The
+            // threshold is relative to the strongest slot seen (a noise-only
+            // window would otherwise never cross) and floored at 0.003, which
+            // is ~3x the largest of 21 exponential noise metrics (1/L * ln21).
+            const float edge_thr = std::max(0.003f, 0.2f * max_here);
+            for (int64_t j = -max_j; j <= max_j; ++j) {
+                const int64_t c = fold.start + j * P;
+                const float here = ss_metric(c);
+                if (here < 0.0f)
+                    continue;
+                if (here >= edge_thr) {
+                    fold_start = c;
+                    best_score = here;
+                    break;
+                }
+            }
+            (void)best_score;
+        }
+        // Period/origin from the 16-SYMBOL super-anchor fit.  A degenerate fit
+        // still leaves a usable origin (the refined fold argmax) with the
+        // nominal period, so the packet is not thrown away for a fit failure.
+        double period_fit = static_cast<double>(kQm35SamplesPerSymbol);
+        int64_t origin_fit = fold_start;
+        const size_t groups = std::min<size_t>(
+            detail::kFoldAnchorGroupSymbols,
+            profile.preamble_repetitions / detail::kFoldAnchorGroupSymbols);
+        if (groups >= 2) {
+            if (!detail::fold_anchor_fit(
+                    rx, n, fold_start, scratch.work.data(), L, Et,
+                    scratch.real_sync_template, groups, &period_fit,
+                    &origin_fit, out.peak_samples, out.peak_metrics,
+                    out.peak_corr)) {
+                out.peak_samples.clear();
+                out.peak_metrics.clear();
+                out.peak_corr.clear();
+            }
+        }
+        if (out.peak_samples.empty()) {
+            out.peak_samples.push_back(fold_start +
+                                       static_cast<int64_t>(L) - 1);
+            out.peak_metrics.push_back(fold.metric);
+            out.peak_corr.push_back(fold.corr);
+        }
+        out.measured_period = period_fit;
+        out.preamble_start_sample = origin_fit;
+        out.metric = fold.metric;
+        first_start = fold_start;
+        first_metric = fold.metric;
+        first_corr = fold.corr;
+        first_hit_k = 0;
+        fold_used = true;
+        return true;
+    };
+
     if (bounded) {
         // Locked tracking contract: the target lock predicted this origin, so
         // only a bounded ROI around the seed is legal.  A miss is a tracking
@@ -696,23 +1086,43 @@ inline bool stage_timing(const std::complex<float>* rx,
             }
         }
         if (!found) {
-            ++out.bounded_failures;
-            finish_timing_profile();
-            return false;
+            // Low-SNR fallback: every single-symbol probe inside the bounded
+            // ROI missed.  The fold keeps the same bounded window -- it is not
+            // an escalation to a wide scan.
+            //
+            // Gate: LockedBounded's failure-path rescue is a single opt-out
+            // tier.  `locked_tail_probe == false` is how a caller asks for the
+            // original hard-fail tracking contract (no rescue at all), so the
+            // fold honours the same switch instead of silently replacing the
+            // tail probe with a different rescue.  qa_uwb_demod_core's
+            // "tail probe rescues leading interference" case pins that
+            // contract: with rescue disabled the packet MUST stay lost.
+            if (!profile.locked_tail_probe ||
+                !try_fold_acquire(
+                    static_cast<int64_t>(seed_start),
+                    std::max<int64_t>(1, static_cast<int64_t>(
+                                             profile.locked_roi_samples)))) {
+                ++out.bounded_failures;
+                finish_timing_profile();
+                return false;
+            }
         }
-        // Convert the inner-SYNC hit back to the packet start on the grid.
-        first_start = pos - static_cast<int64_t>(used_inner) *
-                                static_cast<int64_t>(kQm35SamplesPerSymbol);
-        first_hit_k = used_inner;
-        first_metric = met;
-        first_corr = corr;
-        if (used_inner != 0)
-            ++out.bounded_inner_used;
+        if (!fold_used) {
+            // Convert the inner-SYNC hit back to the packet start on the grid.
+            first_start = pos - static_cast<int64_t>(used_inner) *
+                                    static_cast<int64_t>(kQm35SamplesPerSymbol);
+            first_hit_k = used_inner;
+            first_metric = met;
+            first_corr = corr;
+            if (used_inner != 0)
+                ++out.bounded_inner_used;
+        }
         ++out.bounded_success;
     } else {
         const int64_t seed =
             (seed_start >= 0) ? seed_start
                               : (int64_t)(roi_start + (roi_end - roi_start) / 2);
+        acq_seed = seed;
         const int64_t margin =
             static_cast<int64_t>(profile.timing_search_margin);
         const int64_t stride = std::max<int64_t>(
@@ -747,8 +1157,17 @@ inline bool stage_timing(const std::complex<float>* rx,
                 int64_t pos = -1;
                 float met = 0.0f;
                 std::complex<float> corr(0.0f, 0.0f);
+                // PAR fallback is enabled on the two NARROW local searches
+                // only.  A 256-SYNC preamble at -4..-8 dB in-band SNR has
+                // every SYNC peak above 0.08 with PAR 232..253, but only
+                // 11-24 of 256 clear the 0.25 absolute threshold, so the
+                // absolute gate alone loses the packet.  The wide stride scan
+                // and the whole-SYNC grid probes stay absolute-only: at
+                // thousands of lags a pure-noise false alarm would clear any
+                // PAR gate.
                 const bool narrow_ok =
-                    local_best(seed, narrow, thr, &pos, &met, &corr);
+                    local_best(seed, narrow, thr, &pos, &met, &corr,
+                               /*allow_par_fallback=*/true);
                 out.seed_search_us = static_cast<uint64_t>(
                     std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::steady_clock::now() - narrow_begin).count());
@@ -771,7 +1190,8 @@ inline bool stage_timing(const std::complex<float>* rx,
             int64_t pos = -1;
             float met = 0.0f;
             std::complex<float> corr(0.0f, 0.0f);
-            if (local_best(seed, legacy_seed_radius, thr, &pos, &met, &corr)) {
+            if (local_best(seed, legacy_seed_radius, thr, &pos, &met, &corr,
+                           /*allow_par_fallback=*/true)) {
                 first_start = pos;
                 first_metric = met;
                 first_corr = corr;
@@ -837,8 +1257,15 @@ inline bool stage_timing(const std::complex<float>* rx,
             }
         }
         if (first_start < 0) {
-            finish_timing_profile();
-            return false;
+            // Low-SNR fallback: narrow seed refine, legacy seed refine, stride
+            // coarse scan and whole-SYNC grid probes all missed.  Fold over a
+            // capped acquisition window (never the full 40k margin: the fold
+            // cost grows with the window and the seed is already close).
+            if (!try_fold_acquire(
+                    seed, std::min<int64_t>(margin, 8192))) {
+                finish_timing_profile();
+                return false;
+            }
         }
     }
     // A real QM35825 has a repeatable startup transient: the first few SYNCs
@@ -847,9 +1274,14 @@ inline bool stage_timing(const std::complex<float>* rx,
     // with a relaxed threshold, stopping at the first missing predecessor.
     // LockedBounded disables this by default: walking backwards is exactly how
     // a lock silently drifts onto SYNC #2/#3.
+    //
+    // The fold path disables it unconditionally: its origin came from a
+    // 64-symbol coherent fold, which is far more reliable than a single-SYNC
+    // relaxed-threshold probe, and a single SYNC at -12..-14 dB cannot clear
+    // 0.7*0.25 anyway.
     size_t backtracked_symbols = 0;
     const size_t backtrack_limit =
-        (bounded && !profile.locked_allow_backtrack)
+        (fold_used || (bounded && !profile.locked_allow_backtrack))
             ? 0
             : profile.timing_max_backtrack_symbols;
     for (size_t back = 0; back < backtrack_limit; ++back) {
@@ -1170,7 +1602,7 @@ inline bool stage_timing(const std::complex<float>* rx,
         grid_applied = true;
         return true;
     };
-    if (bounded && profile.locked_grid_timing) {
+    if (bounded && profile.locked_grid_timing && !fold_used) {
         if (!grid_track()) {
             ++out.grid_fallbacks;
             out.peak_samples.clear();
@@ -1188,49 +1620,104 @@ inline bool stage_timing(const std::complex<float>* rx,
     // prematurely truncate the 256-symbol train.
     std::vector<size_t> peak_indices;
     peak_indices.reserve(profile.preamble_repetitions);
-    if (!grid_applied) {
+    if (!grid_applied && !fold_used) {
+        constexpr size_t kMaxConsecutiveSyncMisses = 2;
+        // One tracking pass at a given floor.  `weak` selects the 0.08 floor
+        // LockedBounded already uses for its tail probe; the legacy absolute
+        // threshold is used otherwise.
+        auto track_train = [&](bool weak) {
+            out.peak_samples.clear();
+            out.peak_metrics.clear();
+            out.peak_corr.clear();
+            peak_indices.clear();
+            const int64_t first_hit_start =
+                start + static_cast<int64_t>(first_hit_k) * period;
+            out.peak_samples.push_back(first_hit_start +
+                                       static_cast<int64_t>(L - 1));
+            out.peak_metrics.push_back(first_metric);
+            out.peak_corr.push_back(first_corr);
+            peak_indices.push_back(first_hit_k);
+            size_t consecutive_misses = 0;
+            for (size_t k = first_hit_k + 1;
+                 k < profile.preamble_repetitions; ++k) {
+                const int64_t want = start + static_cast<int64_t>(k * period);
+                int64_t pk = -1;
+                float pm = 0.0f;
+                std::complex<float> pk_corr(0.0f, 0.0f);
+                const float tracking_threshold =
+                    (bounded || weak)
+                        ? std::min(profile.radar_verification_threshold,
+                                   bounded ? 0.08f : 0.06f)
+                        : ((k < backtracked_symbols)
+                               ? 0.7f * profile.radar_verification_threshold
+                               : profile.radar_verification_threshold);
+                const int64_t track_rad =
+                    (bounded && consecutive_misses > 0)
+                        ? std::max<int64_t>(
+                              12, static_cast<int64_t>(
+                                      profile.timing_track_radius))
+                        : static_cast<int64_t>(profile.timing_track_radius);
+                if (!local_best(want, track_rad, tracking_threshold, &pk, &pm,
+                                &pk_corr)) {
+                    ++consecutive_misses;
+                    if (!bounded &&
+                        consecutive_misses > kMaxConsecutiveSyncMisses)
+                        break; // lost the train
+                    continue;
+                }
+                consecutive_misses = 0;
+                out.peak_samples.push_back(pk + static_cast<int64_t>(L - 1));
+                out.peak_metrics.push_back(pm);
+                out.peak_corr.push_back(pk_corr);
+                peak_indices.push_back(k);
+            }
+            return out.peak_samples.size();
+        };
+        // First pass at the legacy threshold: high-SNR packets are complete
+        // here and pay nothing.  Only a train that the absolute threshold
+        // truncated (a low-SNR acquisition whose SYNCs all sit at the same
+        // sub-threshold level) is retried at the 0.08 floor.  Without this the
+        // packet is lost one stage later anyway (fit_cfo needs >= 4 peaks and
+        // stage_cir_softchips needs more than cir_skip_initial_repetitions).
+        const size_t min_peaks =
+            std::max<size_t>(4, profile.min_valid_peaks);
+        size_t tracked = track_train(false);
+        if (!bounded && tracked < min_peaks)
+            tracked = track_train(true);
+        (void)tracked;
+    }
+
+    // ---- Post-train fold retry -------------------------------------------
+    // "All single-symbol paths failed" is also observable one stage later: at
+    // -4..-8 dB in-band SNR the narrow PAR search DOES acquire SYNC #0 (Task 1)
+    // but the per-SYNC tracking threshold (radar_verification_threshold = 0.25)
+    // still truncates the train to a single peak.  That result is unusable --
+    // fit_cfo needs >= 4 peaks and stage_cir_softchips needs more than
+    // cir_skip_initial_repetitions -- so the packet was already lost, just at
+    // CfoFailed instead of TimingFailed.  Retry the fold, which measures a
+    // usable train directly.  profile.min_valid_peaks ("min SYNC peaks to
+    // accept timing") is the existing contract for "this train is too short to
+    // be a timing result"; it was declared but never enforced, and this is
+    // where it belongs.
+    if (!bounded && !fold_used && !grid_applied &&
+        out.peak_samples.size() <
+            std::max<size_t>(4, profile.min_valid_peaks)) {
         out.peak_samples.clear();
         out.peak_metrics.clear();
         out.peak_corr.clear();
-        const int64_t first_hit_start =
-            start + static_cast<int64_t>(first_hit_k) * period;
-        out.peak_samples.push_back(first_hit_start + static_cast<int64_t>(L - 1));
-        out.peak_metrics.push_back(first_metric);
-        out.peak_corr.push_back(first_corr);
-        peak_indices.push_back(first_hit_k);
-        constexpr size_t kMaxConsecutiveSyncMisses = 2;
-        size_t consecutive_misses = 0;
-        for (size_t k = first_hit_k + 1; k < profile.preamble_repetitions; ++k) {
-            const int64_t want = start + static_cast<int64_t>(k * period);
-            int64_t pk = -1;
-            float pm = 0.0f;
-            std::complex<float> pk_corr(0.0f, 0.0f);
-            const float tracking_threshold =
-                bounded
-                    ? std::min(profile.radar_verification_threshold, 0.08f)
-                    : ((k < backtracked_symbols)
-                           ? 0.7f * profile.radar_verification_threshold
-                           : profile.radar_verification_threshold);
-            const int64_t track_rad =
-                (bounded && consecutive_misses > 0)
-                    ? std::max<int64_t>(12, static_cast<int64_t>(profile.timing_track_radius))
-                    : static_cast<int64_t>(profile.timing_track_radius);
-            if (!local_best(want, track_rad,
-                            tracking_threshold, &pk, &pm, &pk_corr)) {
-                ++consecutive_misses;
-                if (!bounded && consecutive_misses > kMaxConsecutiveSyncMisses)
-                    break; // lost the train
-                continue;
-            }
-            consecutive_misses = 0;
-            out.peak_samples.push_back(pk + static_cast<int64_t>(L - 1));
-            out.peak_metrics.push_back(pm);
-            out.peak_corr.push_back(pk_corr);
-            peak_indices.push_back(k);
-        }
+        try_fold_acquire(
+            acq_seed,
+            std::min<int64_t>(static_cast<int64_t>(profile.timing_search_margin),
+                              8192));
     }
 
-    out.detected_peaks = out.peak_samples.size();
+    // The fold path measures `groups` super-anchors rather than every SYNC, but
+    // stage_cir_softchips derives its coherent-averaging count from
+    // detected_peaks: reporting `groups` (8 for 128 SYNCs, 16 for 256) would
+    // average 8 SYNCs instead of 54 and lose ~8 dB of CIR SNR.  Report the
+    // number of SYNC symbols the fitted grid actually covers.
+    out.detected_peaks = fold_used ? profile.preamble_repetitions
+                                   : out.peak_samples.size();
     out.expected_peaks = profile.preamble_repetitions;
     out.metric = first_metric;
 
@@ -1241,7 +1728,11 @@ inline bool stage_timing(const std::complex<float>* rx,
     // (2)), i.e. the start is derived from the WHOLE tracked train rather than
     // the first peak, so a slightly-off first peak does not bias the origin.
     const size_t np = out.peak_samples.size();
-    if (grid_applied) {
+    if (fold_used) {
+        // measured_period / preamble_start_sample were already set by the
+        // fold path's 16-super-anchor fit (see try_fold_acquire).  The legacy
+        // per-SYNC train never ran, so there is nothing to refit here.
+    } else if (grid_applied) {
         // LockedBounded grid: period and origin come from the anchor
         // least-squares fit, NOT from the single-point train (whose positions
         // are `period` by construction and would make integer_chip_grid()

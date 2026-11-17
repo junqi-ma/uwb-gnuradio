@@ -14,6 +14,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <gnuradio/uwb/uwb_gr_complex.h>
+#include <gnuradio/uwb/uwb_demod_core.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
 #include <gnuradio/uwb/uwb_radar_timing_core.h>
 
@@ -39,6 +40,10 @@ using gr::uwb::radar::nominal_preamble_start;
 using gr::uwb::radar::RadarTimingResult;
 using gr::uwb::radar::refine_sync_origin;
 using gr::uwb::radar::TimingStatus;
+using gr::uwb::demod::SyncStrategy;
+using gr::uwb::demod::TimingResult;
+using gr::uwb::demod::core::DemodScratch;
+using gr::uwb::demod::core::stage_timing;
 
 #ifndef UWB_TESTDATA_DIR
 #define UWB_TESTDATA_DIR "../../../testdata"
@@ -253,6 +258,239 @@ void assert_exhaustive_offsets(const std::vector<gr_complex>& rx,
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Low-SNR acquisition QA: PAR fallback in the narrow seed searches and the
+// on-demand K=64 periodic-fold fallback of `demod::core::stage_timing`.
+//
+// Fixtures are 256-SYNC preambles tiled from testdata/reference_preamble.bin on
+// the 998.4 MS/s WORK grid (where one SYNC is exactly 1016 samples), plus white
+// AWGN scaled to an IN-BAND SNR over the 500 MHz UWB channel inside the
+// 998.4 MHz work band.  That is the same convention as
+// tools/rx/proto_low_snr_signal.py, so these numbers are directly comparable
+// with docs/performance/data_low_snr_lock_20261117/fold_timing.json.
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr size_t kLowSnrSyncReps = 256;
+constexpr double kWorkBandHz = 998.4e6;
+constexpr double kInBandHz = 500.0e6;
+
+struct LowSnrFrame {
+    std::vector<gr_complex> rx;
+    int64_t start = 0;
+    size_t reps = 0;
+};
+
+LowSnrFrame make_low_snr_frame(const std::vector<gr_complex>& sync,
+                               size_t reps,
+                               int64_t pre,
+                               int64_t tail,
+                               double snr_db,
+                               uint32_t seed)
+{
+    LowSnrFrame f;
+    f.reps = reps;
+    f.start = pre;
+    const size_t sym = kQm35SamplesPerSymbol;
+    f.rx.assign(static_cast<size_t>(pre) + reps * sym +
+                    static_cast<size_t>(tail),
+                gr_complex(0.0f, 0.0f));
+    for (size_t i = 0; i < reps; ++i)
+        place_waveform(f.rx, pre + static_cast<int64_t>(i * sym), sync);
+
+    double p_sig = 0.0;
+    for (size_t i = 0; i < sym; ++i)
+        p_sig += std::norm(sync[i]);
+    p_sig /= static_cast<double>(sym);
+    const double snr_lin = std::pow(10.0, snr_db / 10.0);
+    const double p_noise = p_sig * (kWorkBandHz / kInBandHz) / snr_lin;
+    const float sigma = static_cast<float>(std::sqrt(p_noise / 2.0));
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> g(0.0f, 1.0f);
+    for (auto& v : f.rx)
+        v += gr_complex(sigma * g(rng), sigma * g(rng));
+    return f;
+}
+
+Qm35825Profile low_snr_profile(size_t margin, size_t narrow_radius)
+{
+    auto p = Qm35825Profile::Default();
+    p.preamble_repetitions = kLowSnrSyncReps;
+    p.sync_strategy = SyncStrategy::AcquireLegacy;
+    p.timing_search_margin = margin;
+    p.timing_seed_refine_radius = narrow_radius;
+    return p;
+}
+
+std::vector<gr_complex> load_normalized_sync()
+{
+    std::vector<gr_complex> raw;
+    BOOST_REQUIRE(load_cf32(testdata_path("reference_preamble.bin"), raw));
+    BOOST_REQUIRE_EQUAL(raw.size(), kQm35SamplesPerSymbol);
+    auto tmpl = raw;
+    gr::uwb::core::uwb_l2_normalize(tmpl);
+    return tmpl;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(test_low_snr_par_fallback_acquires_at_minus_4_and_8_db)
+{
+    // Task 1: the two NARROW legacy seed searches accept a sub-threshold SYNC
+    // peak through the PAR gate.  At -4/-8 dB in-band SNR every SYNC peak sits
+    // above 0.08 with PAR > 200 but only a handful of 256 clear the 0.25
+    // absolute threshold, so the absolute gate alone loses the packet.
+    std::vector<gr_complex> raw;
+    BOOST_REQUIRE(load_cf32(testdata_path("reference_preamble.bin"), raw));
+    const auto tmpl = load_normalized_sync();
+
+    const double snrs[] = { -4.0, -8.0 };
+    for (double snr : snrs) {
+        auto frame = make_low_snr_frame(raw, kLowSnrSyncReps, 8192, 2048, snr,
+                                        20261117u);
+        // Narrow radius 128 < the legacy 256 so the narrow path actually runs;
+        // the margin is kept small so the wide coarse scan cannot mask the
+        // narrow search's behaviour.
+        auto prof = low_snr_profile(/*margin=*/2048, /*narrow_radius=*/128);
+        DemodScratch scratch;
+        scratch.reserve(frame.rx.size());
+        TimingResult tr;
+        const bool ok = stage_timing(frame.rx.data(), frame.rx.size(), prof,
+                                     tmpl, frame.start, tr, scratch);
+        std::printf("low-snr PAR: snr=%.0f dB ok=%d metric=%.4f narrow=%u/%u "
+                    "start_err=%lld peaks=%zu ps=%zu\n",
+                    snr, ok ? 1 : 0, static_cast<double>(tr.metric),
+                    tr.seed_refine_narrow_success,
+                    tr.seed_refine_narrow_attempts,
+                    static_cast<long long>(tr.preamble_start_sample -
+                                           frame.start),
+                    tr.detected_peaks, tr.peak_samples.size());
+        BOOST_REQUIRE_MESSAGE(ok, "stage_timing failed at " << snr
+                                                            << " dB in-band");
+        BOOST_CHECK_EQUAL(tr.seed_refine_narrow_attempts, 1u);
+        BOOST_CHECK_EQUAL(tr.seed_refine_narrow_success, 1u);
+        BOOST_CHECK_EQUAL(tr.seed_refine_fallbacks, 0u);
+        // The accepted peak is BELOW the absolute threshold: the PAR gate, not
+        // the absolute gate, is what acquired it.
+        BOOST_CHECK_LT(tr.metric, prof.radar_verification_threshold);
+        BOOST_CHECK_LE(std::llabs(tr.preamble_start_sample - frame.start), 2);
+        // A sub-threshold train can lose a few SYNCs to the 0.06 floor; what
+        // matters is that it is long enough for fit_cfo and the CIR average.
+        BOOST_CHECK_GE(tr.detected_peaks, size_t(200));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_low_snr_fold_fallback_acquires_at_minus_12_and_14_db)
+{
+    // Task 2/3: at -12/-14 dB in-band SNR even the PAR gate cannot help (the
+    // per-SYNC metric falls below the 0.06 PAR floor), so acquisition depends
+    // on the K=64 periodic fold.
+    std::vector<gr_complex> raw;
+    BOOST_REQUIRE(load_cf32(testdata_path("reference_preamble.bin"), raw));
+    const auto tmpl = load_normalized_sync();
+
+    constexpr int kFrames = 50;
+    constexpr int kMinHits = 48;
+    // The live frontend seed is accurate to a few SYMBOLS, not samples
+    // (measured -6.5..+4.4 SYNC periods at -14 dB in-band on the native
+    // fixture).  Sweep that error so the test exercises the leading-edge
+    // disambiguation instead of handing the fold an oracle seed.
+    const int64_t seed_offsets[] = { 0, -5, -3, -1, 2, 4, 6, -6 };
+    const double snrs[] = { -12.0, -14.0 };
+    for (double snr : snrs) {
+        auto prof = low_snr_profile(/*margin=*/8192, /*narrow_radius=*/0);
+        int hits = 0;
+        int64_t worst_err = 0;
+        float best_metric = 0.0f;
+        for (int f = 0; f < kFrames; ++f) {
+            auto frame = make_low_snr_frame(raw, kLowSnrSyncReps, 8192, 2048,
+                                            snr, 1000u + static_cast<uint32_t>(f));
+            const int64_t off =
+                seed_offsets[f % (sizeof(seed_offsets) / sizeof(int64_t))] *
+                static_cast<int64_t>(kQm35SamplesPerSymbol);
+            DemodScratch scratch;
+            scratch.reserve(frame.rx.size());
+            TimingResult tr;
+            if (!stage_timing(frame.rx.data(), frame.rx.size(), prof, tmpl,
+                              frame.start + off, tr, scratch))
+                continue;
+            const int64_t err =
+                std::llabs(tr.preamble_start_sample - frame.start);
+            worst_err = std::max(worst_err, err);
+            best_metric = std::max(best_metric, tr.metric);
+            if (err <= 2)
+                ++hits;
+        }
+        std::printf("low-snr fold: snr=%.0f dB acquired %d/%d, worst "
+                    "|start err|=%lld, best metric=%.4f\n",
+                    snr, hits, kFrames, static_cast<long long>(worst_err),
+                    static_cast<double>(best_metric));
+        BOOST_CHECK_GE(hits, kMinHits);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_low_snr_fold_fallback_rejects_pure_noise)
+{
+    // Task 3: the 0.05 folded threshold must not fire on noise.  Measured
+    // reference: the maximum folded metric over 200 pure-noise positions is
+    // 0.0107, so 0.05 leaves ~5x of margin; this test is the production-side
+    // guard that the margin actually holds for the full search window.
+    const auto tmpl = load_normalized_sync();
+    auto prof = low_snr_profile(/*margin=*/1024, /*narrow_radius=*/0);
+
+    constexpr int kWindows = 100;
+    int false_alarms = 0;
+    float worst_metric = 0.0f;
+    for (int w = 0; w < kWindows; ++w) {
+        std::vector<gr_complex> noise(200000);
+        std::mt19937 rng(777000u + static_cast<uint32_t>(w));
+        std::normal_distribution<float> g(0.0f, 1.0f);
+        for (auto& v : noise)
+            v = gr_complex(g(rng), g(rng));
+        DemodScratch scratch;
+        scratch.reserve(noise.size());
+        TimingResult tr;
+        if (stage_timing(noise.data(), noise.size(), prof, tmpl, 8192, tr,
+                         scratch)) {
+            ++false_alarms;
+            worst_metric = std::max(worst_metric, tr.metric);
+        }
+    }
+    std::printf("low-snr fold noise: %d/%d false alarms (worst metric %.4f)\n",
+                false_alarms, kWindows, static_cast<double>(worst_metric));
+    BOOST_CHECK_EQUAL(false_alarms, 0);
+}
+
+BOOST_AUTO_TEST_CASE(test_low_snr_fold_fallback_not_used_at_high_snr)
+{
+    // Task 4: the fold is a FALLBACK.  At high SNR the legacy per-SYNC train
+    // must still produce the full peak train (256 peaks), not the 16
+    // super-anchors the fold path reports, and the origin must be exact.
+    std::vector<gr_complex> raw;
+    BOOST_REQUIRE(load_cf32(testdata_path("reference_preamble.bin"), raw));
+    const auto tmpl = load_normalized_sync();
+
+    auto frame = make_low_snr_frame(raw, kLowSnrSyncReps, 8192, 2048, 20.0,
+                                    4242u);
+    auto prof = low_snr_profile(/*margin=*/8192, /*narrow_radius=*/0);
+    DemodScratch scratch;
+    scratch.reserve(frame.rx.size());
+    TimingResult tr;
+    BOOST_REQUIRE(stage_timing(frame.rx.data(), frame.rx.size(), prof, tmpl,
+                               frame.start, tr, scratch));
+    std::printf("high-snr: start_err=%lld peaks=%zu period=%.6f metric=%.4f\n",
+                static_cast<long long>(tr.preamble_start_sample - frame.start),
+                tr.detected_peaks, tr.measured_period,
+                static_cast<double>(tr.metric));
+    BOOST_CHECK_EQUAL(tr.preamble_start_sample, frame.start);
+    BOOST_CHECK_EQUAL(tr.detected_peaks, kLowSnrSyncReps);
+    // 256 per-SYNC peaks == the legacy train ran; the fold path would leave 16.
+    BOOST_CHECK_EQUAL(tr.peak_samples.size(), kLowSnrSyncReps);
+    BOOST_CHECK_SMALL(std::abs(tr.measured_period - 1016.0), 0.05);
+    BOOST_CHECK_GE(tr.metric, 0.9f);
+    BOOST_CHECK_EQUAL(tr.backtrack_symbols, 0u);
+}
 
 BOOST_AUTO_TEST_CASE(test_radar_timing_nominal_arithmetic)
 {
