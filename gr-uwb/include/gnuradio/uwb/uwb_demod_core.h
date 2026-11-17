@@ -4855,8 +4855,17 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
     // try ±8 first and fall back to the legacy ±max(256,stride) search below.
     cfo_anchor_profile.timing_seed_refine_radius =
         profile.rx_seed_refine_tail ? 8 : 0;
-    // MATLAB's per-SYNC floor is 0.20 of the candidate energy.
-    cfo_anchor_profile.radar_verification_threshold = 0.20f;
+    // Tail tracking floor.  MATLAB's 0.20 of the candidate energy is an
+    // ABSOLUTE gate: at -3.5..-4 dB in-band SNR the tail SYNC peaks sit at
+    // 0.18..0.23, so a hard 0.20 rejects half of them and the refit dies with
+    // `detected_peaks < 4` (measured: 23/100 CFO_FAILED at -3.5 dB).  The tail
+    // origin is already pinned by bootstrap_sfd to +-8 samples, so the
+    // false-alarm risk that the absolute gate was protecting against does not
+    // apply here; use the same 0.08 floor LockedBounded uses for its bounded
+    // tail probe.  `stage_timing`'s narrow seed searches additionally enable
+    // the PAR gate (PAR >= 20, floor 0.06).
+    cfo_anchor_profile.radar_verification_threshold =
+        std::min(profile.radar_verification_threshold, 0.08f);
 
     const int64_t bootstrap_sfd_start = res.sfd.sfd_start_sample;
     const double period_hint = res.timing.measured_period;

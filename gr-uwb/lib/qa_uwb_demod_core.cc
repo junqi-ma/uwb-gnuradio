@@ -614,6 +614,49 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_cfo_skips_24_startup_syncs)
     BOOST_CHECK_CLOSE(cf.cfo_hz, kCfoHz, 0.1);
 }
 
+BOOST_AUTO_TEST_CASE(test_demod_core_low_snr_sparse_anchor_cfo)
+{
+    // The low-SNR fold path reports 16 super-anchors spaced 16 SYNC periods
+    // (16 * 1016 samples).  The legacy unwrap gate only accumulated pairs with
+    // dt <= 1.5 symbols, so it collected ZERO pairs and the slope silently
+    // stayed 0; the LS fit then ran on wrapped phases and happened to work
+    // only because |CFO| * 256 symbols stays inside +-2*pi for small offsets.
+    // The sparse gate (dt <= 20 symbols) must recover the true slope.
+    auto prof = Qm35825Profile::Default();
+    constexpr size_t kAnchors = 16;
+    constexpr size_t kGroup = 16;
+    const int64_t start = 4096;
+
+    for (double cfo : { 1900.0, 4000.0, -2500.0 }) {
+        TimingResult tr;
+        for (size_t g = 0; g < kAnchors; ++g) {
+            const int64_t sample =
+                start + static_cast<int64_t>(g * kGroup) *
+                            kQm35SamplesPerSymbol;
+            tr.peak_samples.push_back(sample);
+            const double phase =
+                2.0 * M_PI * cfo *
+                static_cast<double>(sample - start) / prof.sample_rate;
+            tr.peak_corr.emplace_back(static_cast<float>(std::cos(phase)),
+                                      static_cast<float>(std::sin(phase)));
+            tr.peak_metrics.push_back(0.56f);
+        }
+        tr.detected_peaks = prof.preamble_repetitions;
+        tr.measured_period = static_cast<double>(kQm35SamplesPerSymbol);
+
+        std::vector<gr_complex> iq(
+            static_cast<size_t>(tr.peak_samples.back()) + 1,
+            gr_complex(0.0f, 0.0f));
+        core::DemodScratch scratch;
+        scratch.reserve(iq.size());
+        CfoResult cf;
+        BOOST_REQUIRE(core::fit_cfo(iq.data(), iq.size(), prof, tr, cf,
+                                    scratch));
+        BOOST_CHECK_EQUAL(cf.peaks_used, kAnchors);
+        BOOST_CHECK_CLOSE(cf.cfo_hz, cfo, 0.1);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_matches_golden)
 {
     std::vector<gr_complex> iq, tmpl;
