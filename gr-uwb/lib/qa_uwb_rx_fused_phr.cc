@@ -749,7 +749,8 @@ BOOST_AUTO_TEST_CASE(phr_fused_payload_corruption_falls_back_once)
         Packet::seed + (64 + 8) * 1016 + 21 * 1024;
     const size_t corrupt_lo =
         std::min(packet.iq.size(), payload_start + 100);
-    const size_t corrupt_hi = std::min(packet.iq.size(), corrupt_lo + 4096);
+    // 8192 samples (~10.7 RS 6-bit symbols) exceeds RS(63,55)'s 8-erasure bound.
+    const size_t corrupt_hi = std::min(packet.iq.size(), corrupt_lo + 8192);
     for (size_t i = corrupt_lo; i < corrupt_hi; ++i)
         packet.iq[i] = cf(0.0f, 0.0f);
 

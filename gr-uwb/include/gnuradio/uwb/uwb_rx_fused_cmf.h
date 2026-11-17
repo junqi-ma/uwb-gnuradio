@@ -564,8 +564,13 @@ inline void decide_bpm(const Metrics& metrics,
 // half 0 wins a half tie, zero is non-negative), and the LLRs reproduce
 // bprf_demod_soft()'s convention exactly on the same four signed metrics:
 //
-//   llr0[s] = |half0| - |half1|   > 0 favours g0 = 0
-//   llr1[s] = selected half metric > 0 favours g1 = 0
+//   llr0[s] = |half0| - |half1|                  > 0 favours g0 = 0
+//   llr1[s] = max_c(+m[c]) - max_c(-m[c])        > 0 favours g1 = 0
+//
+// `llr1` is the exact max-log LLR over all four BPM/hop candidates (rather than
+// only the winning half's metric): when the two halves have similar magnitude
+// and a noisy half flips sign, taking the global +/- max prevents feeding a
+// high-confidence wrong polarity into the CL-3 Viterbi.
 //
 // Because the fused kernel returns unnormalized metrics (the legacy global
 // max|soft| scale cancels in the hard decision), the LLRs are on the same
@@ -604,9 +609,12 @@ inline void decide_bpm_soft(const Metrics& metrics,
             g0[s] = 1;
             best = best1;
         }
+        const float p_pos = std::max(std::max(m[0], m[1]), std::max(m[2], m[3]));
+        const float p_neg =
+            std::max(std::max(-m[0], -m[1]), std::max(-m[2], -m[3]));
         g1[s] = (best < 0.0f) ? 1 : 0;
         llr0[s] = b0 - b1;
-        llr1[s] = best;
+        llr1[s] = p_pos - p_neg;
     }
 }
 

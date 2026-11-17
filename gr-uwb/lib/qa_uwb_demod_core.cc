@@ -655,6 +655,40 @@ BOOST_AUTO_TEST_CASE(test_demod_core_low_snr_sparse_anchor_cfo)
         BOOST_CHECK_EQUAL(cf.peaks_used, kAnchors);
         BOOST_CHECK_CLOSE(cf.cfo_hz, cfo, 0.1);
     }
+
+    // With one missing super-anchor (32-symbol gap) at 18 kHz CFO, the gap
+    // rotates by > pi (~3.68 rad), so zero-slope unwrap fails while the
+    // dt <= 20*1016 slope estimator recovers the exact 18 kHz frequency.
+    {
+        constexpr double kGapCfo = 18000.0;
+        TimingResult tr;
+        for (size_t g = 0; g < kAnchors; ++g) {
+            if (g == 5)
+                continue;
+            const int64_t sample =
+                start + static_cast<int64_t>(g * kGroup) *
+                            kQm35SamplesPerSymbol;
+            tr.peak_samples.push_back(sample);
+            const double phase =
+                2.0 * M_PI * kGapCfo *
+                static_cast<double>(sample - start) / prof.sample_rate;
+            tr.peak_corr.emplace_back(static_cast<float>(std::cos(phase)),
+                                      static_cast<float>(std::sin(phase)));
+            tr.peak_metrics.push_back(0.56f);
+        }
+        tr.detected_peaks = prof.preamble_repetitions;
+        tr.measured_period = static_cast<double>(kQm35SamplesPerSymbol);
+        std::vector<gr_complex> iq(
+            static_cast<size_t>(tr.peak_samples.back()) + 1,
+            gr_complex(0.0f, 0.0f));
+        core::DemodScratch scratch;
+        scratch.reserve(iq.size());
+        CfoResult cf;
+        BOOST_REQUIRE(core::fit_cfo(iq.data(), iq.size(), prof, tr, cf,
+                                    scratch));
+        BOOST_CHECK_EQUAL(cf.peaks_used, kAnchors - 1);
+        BOOST_CHECK_CLOSE(cf.cfo_hz, kGapCfo, 0.1);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_matches_golden)

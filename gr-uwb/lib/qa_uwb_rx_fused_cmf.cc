@@ -357,14 +357,14 @@ BOOST_AUTO_TEST_CASE(fused_cmf_pipeline_decodes_same_psdu)
 BOOST_AUTO_TEST_CASE(fused_cmf_corrupt_payload_falls_back_without_commit)
 {
     Packet packet(127, 9);
-    // Payload starts after 64 SYNC + 8 SFD symbols and 21 PHR symbols.  Zero a
-    // long deterministic payload slice while leaving SFD/PHR intact, so the
-    // fused attempt runs and fails rather than failing earlier.
+    // Zero an uncorrectable 8192-sample (~64 symbols / >10 RS 6-bit symbols,
+    // beyond RS(63,55)'s 8-erasure bound) payload slice while leaving SFD/PHR
+    // intact, so the fused attempt runs and falls back to legacy once.
     const size_t payload_start = Packet::seed +
                                  (64 + 8) * 1016 +
                                  21 * 1024;
     const size_t corrupt_lo = std::min(packet.iq.size(), payload_start + 100);
-    const size_t corrupt_hi = std::min(packet.iq.size(), corrupt_lo + 4096);
+    const size_t corrupt_hi = std::min(packet.iq.size(), corrupt_lo + 8192);
     for (size_t i = corrupt_lo; i < corrupt_hi; ++i)
         packet.iq[i] = cf(0.0f, 0.0f);
 
@@ -650,10 +650,10 @@ BOOST_AUTO_TEST_CASE(fused_cmf_soft_decision_ties_match_legacy)
     BOOST_CHECK_EQUAL(int(sg1[3]), 1);
     BOOST_CHECK_EQUAL(int(sg0[5]), 1);
     BOOST_CHECK_EQUAL(int(sg1[5]), 1);
-    // llr0 is exactly b0 - b1, llr1 exactly the selected half metric.
+    // llr0 is exactly b0 - b1, llr1 exactly max(+m) - max(-m).
     BOOST_CHECK_EQUAL(llr0[0], 0.0f);
     BOOST_CHECK_EQUAL(llr0[3], 0.0f);
-    BOOST_CHECK_EQUAL(llr1[3], -2.0f);
+    BOOST_CHECK_EQUAL(llr1[3], -1.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -884,4 +884,90 @@ BOOST_AUTO_TEST_CASE(fused_cmf_soft_retry_decodes_without_stream_fallback)
     // The soft retry must not have made anything worse: every committed packet
     // is either a hard success or a genuine soft rescue.
     BOOST_CHECK_EQUAL(committed, hard_only_ok + rescued);
+}
+
+// ---------------------------------------------------------------------------
+// Step 2 — failure-only CL-3 Trellis-Merge Chase + RS(63,55) erasure rescue.
+// Injects 6 isolated coded-symbol perturbations into one RS block so that
+// single-pass vitdec_cl3_soft() leaves >4 symbol errors (uncorrectable by
+// standard RS), verifies decode_payload_soft() rescues the exact wire bytes
+// with CRC pass, and verifies 100 random noise LLR streams produce 0 false CRCs.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(fused_cmf_trellis_chase_and_rs_erasure_rescue)
+{
+    Packet packet(127, 9);
+    const int8_t* sfd = nullptr;
+    size_t n_sfd = 0;
+    BOOST_REQUIRE(mod::detail::sfd_lookup(packet.cfg.sfd_mode, sfd, n_sfd));
+    mod::HrpModScratch mod_scratch;
+    mod::detail::HrpCodedGeometry geom;
+    BOOST_REQUIRE(mod::detail::encode_hrp_packet(
+        packet.wire.data(), packet.wire.size(), packet.cfg, mod_scratch, sfd,
+        n_sfd, geom));
+
+    const size_t total = geom.n_enc_sym;
+    const size_t nsym = geom.nsym;
+    const size_t psdu_bits = packet.wire.size() * 8;
+    std::vector<float> llr0p(21), llr1p(21), llr0(nsym), llr1(nsym);
+    for (size_t s = 0; s < 21; ++s) {
+        llr0p[s] = mod_scratch.g0[s] ? -1.0f : 1.0f;
+        llr1p[s] = mod_scratch.g1[s] ? -1.0f : 1.0f;
+    }
+    for (size_t s = 0; s < nsym; ++s) {
+        llr0[s] = mod_scratch.g0[21 + s] ? -1.0f : 1.0f;
+        llr1[s] = mod_scratch.g1[21 + s] ? -1.0f : 1.0f;
+    }
+
+    // Perturb 6 isolated 2-symbol spans inside RS block 0 with low-confidence
+    // inverted LLRs: enough to force >4 decoded RS symbol errors in single-pass
+    // vitdec_cl3_soft() while keeping trellis Chase + RS erasure rescue within reach.
+    std::vector<float> mod0 = llr0, mod1 = llr1;
+    for (int k = 0; k < 6; ++k) {
+        const size_t base = 30 + size_t(k) * 48;
+        for (size_t d = 0; d < 3 && base + d < mod0.size(); ++d) {
+            mod0[base + d] = -mod0[base + d] * 0.55f;
+            mod1[base + d] = -mod1[base + d] * 0.55f;
+        }
+    }
+
+    // Baseline single-pass soft Viterbi + hard RS must not pass FCS on this block.
+    std::vector<float> j0(total), j1(total);
+    std::copy(llr0p.begin(), llr0p.end(), j0.begin());
+    std::copy(llr1p.begin(), llr1p.end(), j1.begin());
+    std::copy(mod0.begin(), mod0.end(), j0.begin() + 21);
+    std::copy(mod1.begin(), mod1.end(), j1.begin() + 21);
+    std::vector<int8_t> sp_dec;
+    demod::core::detail::vitdec_cl3_soft(j0.data(), j1.data(), total, sp_dec);
+    std::vector<int8_t> sp_cw(sp_dec.begin() + 19,
+                              sp_dec.begin() + (total - 2));
+    demod::PayloadResult sp_pay;
+    const bool sp_rs_ok =
+        demod::core::detail::finish_rs_crc_payload(sp_cw, psdu_bits, sp_pay);
+    BOOST_CHECK(!(sp_rs_ok && sp_pay.fcs_pass));
+
+    // decode_payload_soft() must rescue the exact wire bytes via Step 2.
+    demod::PayloadResult rescued;
+    BOOST_REQUIRE(demod::core::detail::decode_payload_soft(
+        llr0p, llr1p, mod0, mod1, psdu_bits, rescued));
+    BOOST_CHECK(rescued.fcs_pass);
+    BOOST_CHECK(rescued.bytes == packet.wire);
+
+    // Pure-noise LLRs must produce zero false CRC passes.
+    std::mt19937 rng(20261117);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    std::vector<float> nl0p(21), nl1p(21), nl0(nsym), nl1(nsym);
+    size_t false_crc = 0;
+    for (int trial = 0; trial < 100; ++trial) {
+        for (float& x : nl0p) x = nd(rng);
+        for (float& x : nl1p) x = nd(rng);
+        for (float& x : nl0) x = nd(rng);
+        for (float& x : nl1) x = nd(rng);
+        demod::PayloadResult nres;
+        if (demod::core::detail::decode_payload_soft(
+                nl0p, nl1p, nl0, nl1, psdu_bits, nres) &&
+            nres.fcs_pass) {
+            ++false_crc;
+        }
+    }
+    BOOST_CHECK_EQUAL(false_crc, size_t(0));
 }

@@ -1705,16 +1705,29 @@ inline bool stage_timing(const std::complex<float>* rx,
     // accept timing") is the existing contract for "this train is too short to
     // be a timing result"; it was declared but never enforced, and this is
     // where it belongs.
-    if (!bounded && !fold_used && !grid_applied &&
+    const bool allow_post_train_fold = !bounded || profile.locked_tail_probe;
+    if (allow_post_train_fold && !fold_used && !grid_applied &&
         out.peak_samples.size() <
             std::max<size_t>(4, profile.min_valid_peaks)) {
-        out.peak_samples.clear();
-        out.peak_metrics.clear();
-        out.peak_corr.clear();
-        try_fold_acquire(
-            acq_seed,
-            std::min<int64_t>(static_cast<int64_t>(profile.timing_search_margin),
-                              8192));
+        const int64_t fold_centre =
+            bounded ? static_cast<int64_t>(seed_start) : acq_seed;
+        const int64_t fold_radius = bounded
+            ? std::max<int64_t>(1, static_cast<int64_t>(profile.locked_roi_samples))
+            : std::min<int64_t>(static_cast<int64_t>(profile.timing_search_margin),
+                                8192);
+        if (fold_centre >= 0) {
+            std::vector<int64_t> saved_ps = std::move(out.peak_samples);
+            std::vector<float> saved_pm = std::move(out.peak_metrics);
+            std::vector<std::complex<float>> saved_pc = std::move(out.peak_corr);
+            out.peak_samples.clear();
+            out.peak_metrics.clear();
+            out.peak_corr.clear();
+            if (!try_fold_acquire(fold_centre, fold_radius)) {
+                out.peak_samples = std::move(saved_ps);
+                out.peak_metrics = std::move(saved_pm);
+                out.peak_corr = std::move(saved_pc);
+            }
+        }
     }
 
     // The fold path measures `groups` super-anchors rather than every SYNC, but
@@ -1833,27 +1846,46 @@ inline bool fit_cfo(const std::complex<float>* rx,
     // slope from adjacent 1-symbol pairs so multi-symbol gaps unwrap cleanly.
     double unwrap_slope_rad_per_sample = 0.0;
     {
-        std::complex<double> adj_sum(0.0, 0.0);
-        const double max_adj_dt = 1.5 * static_cast<double>(kQm35SamplesPerSymbol);
-        for (size_t k = 1; k < nfit; ++k) {
-            const size_t idx0 = skip + k - 1;
-            const size_t idx1 = skip + k;
-            const double dt = static_cast<double>(
-                timing.peak_samples[idx1] - timing.peak_samples[idx0]);
-            if (dt > 0.0 && dt <= max_adj_dt) {
-                if (have_corr) {
-                    const std::complex<double> c0(timing.peak_corr[idx0]);
-                    const std::complex<double> c1(timing.peak_corr[idx1]);
-                    adj_sum += c1 * std::conj(c0);
-                } else {
-                    const double dphi = static_cast<double>(scratch.metric[k] - scratch.metric[k - 1]);
-                    adj_sum += std::complex<double>(std::cos(dphi), std::sin(dphi));
+        auto collect_adj = [&](double max_dt, double& mean_dt) -> std::complex<double> {
+            std::complex<double> s(0.0, 0.0);
+            double dt_sum = 0.0;
+            size_t cnt = 0;
+            for (size_t k = 1; k < nfit; ++k) {
+                const size_t idx0 = skip + k - 1;
+                const size_t idx1 = skip + k;
+                const double dt = static_cast<double>(
+                    timing.peak_samples[idx1] - timing.peak_samples[idx0]);
+                if (dt > 0.0 && dt <= max_dt) {
+                    if (have_corr) {
+                        const std::complex<double> c0(timing.peak_corr[idx0]);
+                        const std::complex<double> c1(timing.peak_corr[idx1]);
+                        s += c1 * std::conj(c0);
+                    } else {
+                        const double dphi = static_cast<double>(scratch.metric[k] - scratch.metric[k - 1]);
+                        s += std::complex<double>(std::cos(dphi), std::sin(dphi));
+                    }
+                    dt_sum += dt;
+                    ++cnt;
                 }
             }
-        }
+            mean_dt = (cnt > 0) ? (dt_sum / static_cast<double>(cnt)) : 0.0;
+            return s;
+        };
+        double mean_dt = 0.0;
+        std::complex<double> adj_sum = collect_adj(
+            1.5 * static_cast<double>(kQm35SamplesPerSymbol), mean_dt);
         if (std::norm(adj_sum) > 1e-24) {
             unwrap_slope_rad_per_sample =
                 std::arg(adj_sum) / static_cast<double>(kQm35SamplesPerSymbol);
+        } else {
+            // Fallback for sparse trains (e.g. 16 super-anchors spaced
+            // 16*1016): recover the average per-sample slope across intervals up
+            // to 20 symbols so bridging gaps still unwraps cleanly.
+            adj_sum = collect_adj(
+                20.0 * static_cast<double>(kQm35SamplesPerSymbol), mean_dt);
+            if (std::norm(adj_sum) > 1e-24 && mean_dt > 0.0) {
+                unwrap_slope_rad_per_sample = std::arg(adj_sum) / mean_dt;
+            }
         }
     }
     for (size_t k = 1; k < nfit; ++k) {
@@ -3148,8 +3180,8 @@ inline bool bprf_demod(const std::vector<float>& soft, int64_t start,
 }
 
 // Soft-output variant of bprf_demod.  llr_g0 / llr_g1 > 0 favour bit value 0.
-//   llr_g0 = |metric_half0| - |metric_half1|   (BPM position)
-//   llr_g1 = chosen_half_metric                 (BPSK polarity; + => bit 0)
+//   llr_g0 = |metric_half0| - |metric_half1|         (BPM position)
+//   llr_g1 = max_c(+metric_c) - max_c(-metric_c)     (BPSK polarity; + => bit 0)
 // Hard decisions still written to g0/g1 for callers that need them.
 inline bool bprf_demod_soft(const std::vector<float>& soft, int64_t start,
                             size_t code_index, size_t nsym, size_t cpb, size_t cps,
@@ -3173,6 +3205,7 @@ inline bool bprf_demod_soft(const std::vector<float>& soft, int64_t start,
         const size_t base = static_cast<size_t>(start) + s * cps;
         const int8_t* sp = &spread[s * cpb];
         float b0 = -1e30f, b1 = -1e30f, m0 = 0.0f, m1 = 0.0f;
+        float mc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         for (size_t hop = 0; hop < 2; ++hop) {
             const size_t f0 = hop * cpb;
             float metric0 = 0.0f, metric1 = 0.0f;
@@ -3181,6 +3214,8 @@ inline bool bprf_demod_soft(const std::vector<float>& soft, int64_t start,
                 metric1 += pol * soft[base + third + f0 + c] *
                            static_cast<float>(sp[c]);
             }
+            mc[2 * hop + 0] = metric0;
+            mc[2 * hop + 1] = metric1;
             if (std::abs(metric0) > b0) {
                 b0 = std::abs(metric0);
                 m0 = metric0;
@@ -3198,9 +3233,13 @@ inline bool bprf_demod_soft(const std::vector<float>& soft, int64_t start,
             g0[s] = 1;
             best = m1;
         }
+        const float p_pos =
+            std::max(std::max(mc[0], mc[1]), std::max(mc[2], mc[3]));
+        const float p_neg =
+            std::max(std::max(-mc[0], -mc[1]), std::max(-mc[2], -mc[3]));
         g1[s] = (best < 0.0f) ? 1 : 0;
-        llr_g0[s] = b0 - b1; // >0 prefers g0=0
-        llr_g1[s] = best;    // >0 prefers g1=0
+        llr_g0[s] = b0 - b1;        // >0 prefers g0=0
+        llr_g1[s] = p_pos - p_neg;  // >0 prefers g1=0
     }
     return true;
 }
@@ -3358,18 +3397,19 @@ inline void rs_syndromes(const int* r63, int* S8)
     }
 }
 
-// Berlekamp-Massey on S1..S8.  Returns L; Lambda[0..L] with Lambda[0]=1.
-inline int rs_berlekamp_massey(const int* S8, int* Lambda /* len >= 9 */)
+// Berlekamp-Massey over GF(2^6) on `count` syndromes S[0..count-1].
+// Returns L; Lambda[0..L] with Lambda[0]=1.
+inline int rs_berlekamp_massey_len(const int* S, int count, int* Lambda /* len >= 9 */)
 {
     int C[9] = { 1, 0, 0, 0, 0, 0, 0, 0, 0 };
     int B[9] = { 1, 0, 0, 0, 0, 0, 0, 0, 0 };
     int L = 0;
     int m = 1;
     int b = 1;
-    for (int n = 0; n < 8; ++n) {
-        int delta = S8[n];
+    for (int n = 0; n < count; ++n) {
+        int delta = S[n];
         for (int i = 1; i <= L; ++i)
-            delta ^= rs_gf_mul(C[i], S8[n - i]);
+            delta ^= rs_gf_mul(C[i], S[n - i]);
         if (delta == 0) {
             ++m;
         } else {
@@ -3393,6 +3433,12 @@ inline int rs_berlekamp_massey(const int* S8, int* Lambda /* len >= 9 */)
     for (int i = 0; i < 9; ++i)
         Lambda[i] = C[i];
     return L;
+}
+
+// Berlekamp-Massey on S1..S8.  Returns L; Lambda[0..L] with Lambda[0]=1.
+inline int rs_berlekamp_massey(const int* S8, int* Lambda /* len >= 9 */)
+{
+    return rs_berlekamp_massey_len(S8, 8, Lambda);
 }
 
 // Chien search: roots of Lambda at alpha^{-j} => error at position j.
@@ -3627,6 +3673,437 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
     return finish_rs_crc_payload(rs_cw, psdu_bits, out, sub);
 }
 
+struct Cl3TrellisTrace {
+    std::vector<int8_t> bits;
+    std::vector<int8_t> states;
+    std::vector<float> margins;
+    std::vector<uint8_t> lose_u;
+};
+
+inline void cl3_trellis_tables(int o0[4][2], int o1[4][2], int nxt[4][2])
+{
+    for (int st = 0; st < 4; ++st) {
+        const int s1 = st >> 1, s0 = st & 1;
+        for (int u = 0; u < 2; ++u) {
+            o0[st][u] = s1;
+            o1[st][u] = u ^ s0;
+            nxt[st][u] = (u << 1) | s1;
+        }
+    }
+}
+
+// Soft CL-3 Viterbi recording per-step path metric margins and competing edges
+// (invoked only when single-pass soft decode + RS/CRC fails).
+inline void vitdec_cl3_soft_trace(const float* llr0,
+                                  const float* llr1,
+                                  size_t N,
+                                  Cl3TrellisTrace& tr)
+{
+    int o0[4][2], o1[4][2], nxt[4][2];
+    cl3_trellis_tables(o0, o1, nxt);
+    const float INF = 1e30f;
+    float surf[4] = { 0.0f, INF, INF, INF };
+    std::vector<int8_t> back(N * 4);
+    std::vector<float> diff(N * 4, INF);
+    std::vector<uint8_t> alt(N * 4, 0);
+    for (size_t t = 0; t < N; ++t) {
+        float ns[4] = { INF, INF, INF, INF };
+        float ns2[4] = { INF, INF, INF, INF };
+        uint8_t nalt[4] = { 0, 0, 0, 0 };
+        for (int st = 0; st < 4; ++st) {
+            for (int u = 0; u < 2; ++u) {
+                const float c0 =
+                    (2.0f * static_cast<float>(o0[st][u]) - 1.0f) * llr0[t];
+                const float c1 =
+                    (2.0f * static_cast<float>(o1[st][u]) - 1.0f) * llr1[t];
+                const float m = surf[st] + c0 + c1;
+                const int nst = nxt[st][u];
+                const uint8_t code = static_cast<uint8_t>((u << 2) | st);
+                if (m < ns[nst]) {
+                    ns2[nst] = ns[nst];
+                    nalt[nst] = static_cast<uint8_t>(back[t * 4 + nst]);
+                    ns[nst] = m;
+                    back[t * 4 + nst] = static_cast<int8_t>(code);
+                } else if (m < ns2[nst]) {
+                    ns2[nst] = m;
+                    nalt[nst] = code;
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            surf[i] = ns[i];
+            diff[t * 4 + i] = ns2[i] - ns[i];
+            alt[t * 4 + i] = nalt[i];
+        }
+    }
+    int best = 0;
+    for (int i = 1; i < 4; ++i)
+        if (surf[i] < surf[best])
+            best = i;
+    tr.bits.resize(N);
+    tr.states.resize(N + 1);
+    tr.margins.resize(N);
+    tr.lose_u.resize(N);
+    int cur = best;
+    tr.states[N] = static_cast<int8_t>(cur);
+    for (size_t t = N; t-- > 0;) {
+        const int v = back[t * 4 + cur];
+        tr.bits[t] = static_cast<int8_t>(v >> 2);
+        tr.margins[t] = diff[t * 4 + cur];
+        tr.lose_u[t] = static_cast<uint8_t>(alt[t * 4 + cur] >> 2);
+        cur = v & 3;
+        tr.states[t] = static_cast<int8_t>(cur);
+    }
+}
+
+// Re-solve a local CL-3 trellis window [lo, hi) between fixed endpoint states
+// while forcing the loser input bit at one or two target steps.
+inline void local_cl3_trellis_flip(const float* llr0,
+                                   const float* llr1,
+                                   size_t lo,
+                                   size_t hi,
+                                   int start_st,
+                                   int end_st,
+                                   const size_t* force_t,
+                                   const uint8_t* force_u,
+                                   size_t n_force,
+                                   std::vector<int8_t>& out_bits)
+{
+    int o0[4][2], o1[4][2], nxt[4][2];
+    cl3_trellis_tables(o0, o1, nxt);
+    const size_t len = hi - lo;
+    const float INF = 1e30f;
+    float surf[4] = { INF, INF, INF, INF };
+    surf[start_st] = 0.0f;
+    std::vector<int8_t> back(len * 4, 0);
+    for (size_t i = 0; i < len; ++i) {
+        const size_t t = lo + i;
+        int forced = -1;
+        for (size_t f = 0; f < n_force; ++f) {
+            if (force_t[f] == t) {
+                forced = static_cast<int>(force_u[f]);
+                break;
+            }
+        }
+        float ns[4] = { INF, INF, INF, INF };
+        for (int st = 0; st < 4; ++st) {
+            if (surf[st] > 1e20f)
+                continue;
+            for (int u = 0; u < 2; ++u) {
+                if (forced >= 0 && u != forced)
+                    continue;
+                const float c0 =
+                    (2.0f * static_cast<float>(o0[st][u]) - 1.0f) * llr0[t];
+                const float c1 =
+                    (2.0f * static_cast<float>(o1[st][u]) - 1.0f) * llr1[t];
+                const float m = surf[st] + c0 + c1;
+                const int nst = nxt[st][u];
+                if (m < ns[nst]) {
+                    ns[nst] = m;
+                    back[i * 4 + nst] = static_cast<int8_t>((u << 2) | st);
+                }
+            }
+        }
+        for (int s = 0; s < 4; ++s)
+            surf[s] = ns[s];
+    }
+    int cur = end_st;
+    if (surf[cur] > 1e20f) {
+        for (int s = 0; s < 4; ++s)
+            if (surf[s] < surf[cur])
+                cur = s;
+    }
+    for (size_t i = len; i-- > 0;) {
+        const int v = back[i * 4 + cur];
+        out_bits[lo + i] = static_cast<int8_t>(v >> 2);
+        cur = v & 3;
+    }
+}
+
+// RS(63,55) Errors-and-Erasures decoder (`v` erasures + `e` unknown errors,
+// 2*e + v <= 8, capped at v <= 6 so at least 2 residual parity checks remain).
+inline bool rs_decode_block_erasures(const int8_t* coded378,
+                                     const int* eras_pos,
+                                     int v,
+                                     int8_t* data330)
+{
+    if (v <= 0 || v > 6)
+        return rs_decode_block(coded378, data330);
+    int r[63];
+    rs_bits_to_syms(coded378, r);
+    int S[8];
+    rs_syndromes(r, S);
+    bool all0 = true;
+    for (int i = 0; i < 8; ++i)
+        if (S[i])
+            all0 = false;
+    if (all0) {
+        rs_syms_to_bits(r, 55, data330);
+        return true;
+    }
+
+    int Gamma[9] = { 1, 0, 0, 0, 0, 0, 0, 0, 0 };
+    for (int m = 0; m < v; ++m) {
+        const int a = rs_gf_pow(2, eras_pos[m]);
+        for (int d = m + 1; d >= 1; --d)
+            Gamma[d] ^= rs_gf_mul(Gamma[d - 1], a);
+    }
+    const int rem = 8 - v;
+    int T[8] = {};
+    for (int k = 0; k < rem; ++k) {
+        int val = 0;
+        for (int j = 0; j <= v; ++j)
+            val ^= rs_gf_mul(Gamma[j], S[v + k - j]);
+        T[k] = val;
+    }
+    int C[9] = {};
+    const int Le = rs_berlekamp_massey_len(T, rem, C);
+    if (2 * Le + v > 8)
+        return false;
+    int err_pos[4] = {};
+    int nerr = 0;
+    if (Le > 0) {
+        nerr = rs_chien_search(C, Le, err_pos);
+        if (nerr != Le)
+            return false;
+    }
+    int Psi[9] = {};
+    for (int i = 0; i <= v; ++i)
+        for (int j = 0; j <= Le; ++j)
+            if (i + j <= 8)
+                Psi[i + j] ^= rs_gf_mul(Gamma[i], C[j]);
+    int all_pos[8] = {};
+    int all_val[8] = {};
+    int n_tot = 0;
+    for (int i = 0; i < v; ++i)
+        all_pos[n_tot++] = eras_pos[i];
+    for (int i = 0; i < nerr; ++i) {
+        for (int j = 0; j < v; ++j)
+            if (err_pos[i] == eras_pos[j])
+                return false;
+        all_pos[n_tot++] = err_pos[i];
+    }
+    rs_forney(S, Psi, Le + v, all_pos, n_tot, all_val);
+    for (int k = 0; k < n_tot; ++k)
+        r[all_pos[k]] ^= all_val[k];
+    int S_chk[8];
+    rs_syndromes(r, S_chk);
+    for (int i = 0; i < 8; ++i)
+        if (S_chk[i])
+            return false;
+    rs_syms_to_bits(r, 55, data330);
+    return true;
+}
+
+// Failure-path-only per-RS-block rescue: tries 6 single and 15 pair local
+// trellis flips on the weakest merges in each failing RS block, followed by
+// RS errors-and-erasures (v = 2, 4, 6), and accepts only a full-frame CRC-16
+// match.  Never invoked when standard soft Viterbi + RS/CRC already passes.
+inline bool rescue_payload_soft(const float* llr0,
+                                const float* llr1,
+                                size_t total,
+                                size_t psdu_bits,
+                                PayloadResult& out,
+                                PayloadSubTimers* sub = nullptr)
+{
+    if (psdu_bits == 0 || (psdu_bits % 8) != 0)
+        return false;
+    Cl3TrellisTrace tr;
+    {
+        PayloadSubBucket vit_b(sub, &PayloadSubTimers::viterbi_us);
+        vitdec_cl3_soft_trace(llr0, llr1, total, tr);
+    }
+    const size_t num_blocks = (psdu_bits + 329) / 330;
+    struct BlockCands {
+        std::vector<std::array<int8_t, 330>> cands;
+    };
+    std::vector<BlockCands> bc(num_blocks);
+    size_t coded_off = 0;
+    size_t data_off = 0;
+
+    for (size_t b = 0; b < num_blocks; ++b) {
+        const size_t this_data = std::min<size_t>(330, psdu_bits - data_off);
+        const size_t this_coded = this_data + 48;
+        if (19 + coded_off + this_coded > total)
+            return false;
+        const size_t data_start = 330 - this_data;
+
+        auto extract_block = [&](const std::vector<int8_t>& dec,
+                                 int8_t* block378) {
+            std::fill(block378, block378 + 378, 0);
+            for (size_t i = 0; i < this_data; ++i)
+                block378[data_start + i] = dec[19 + coded_off + i] & 1;
+            for (size_t i = 0; i < 48; ++i)
+                block378[330 + i] = dec[19 + coded_off + this_data + i] & 1;
+        };
+
+        int8_t blk[378];
+        std::array<int8_t, 330> d330{};
+        extract_block(tr.bits, blk);
+        if (rs_decode_block(blk, d330.data())) {
+            bc[b].cands.push_back(d330);
+        } else {
+            const size_t t_b = 19 + coded_off;
+            const size_t t_e = t_b + this_coded;
+            struct StepM {
+                size_t t;
+                float m;
+            };
+            std::vector<StepM> sm;
+            sm.reserve(this_coded);
+            for (size_t t = t_b; t < t_e; ++t)
+                sm.push_back({ t, tr.margins[t] });
+            std::sort(sm.begin(), sm.end(),
+                      [](const StepM& a, const StepM& c) { return a.m < c.m; });
+            std::vector<size_t> weak;
+            for (const auto& s : sm) {
+                bool near = false;
+                for (size_t w : weak) {
+                    if (std::llabs(static_cast<int64_t>(s.t) -
+                                   static_cast<int64_t>(w)) < 3) {
+                        near = true;
+                        break;
+                    }
+                }
+                if (!near) {
+                    weak.push_back(s.t);
+                    if (weak.size() >= 6)
+                        break;
+                }
+            }
+            auto try_append = [&](const std::array<int8_t, 330>& cand) {
+                for (const auto& ex : bc[b].cands)
+                    if (ex == cand)
+                        return;
+                bc[b].cands.push_back(cand);
+            };
+            std::vector<int8_t> work_bits = tr.bits;
+            for (size_t i = 0; i < weak.size() && bc[b].cands.size() < 4; ++i) {
+                const size_t t = weak[i];
+                const size_t lo = (t > 12) ? (t - 12) : 0;
+                const size_t hi = std::min(total, t + 13);
+                std::copy(tr.bits.begin() + lo, tr.bits.begin() + hi,
+                          work_bits.begin() + lo);
+                const uint8_t fu = tr.lose_u[t];
+                local_cl3_trellis_flip(llr0, llr1, lo, hi, tr.states[lo],
+                                       tr.states[hi], &t, &fu, 1, work_bits);
+                extract_block(work_bits, blk);
+                if (rs_decode_block(blk, d330.data()))
+                    try_append(d330);
+            }
+            for (size_t i = 0; i < weak.size() && bc[b].cands.size() < 4; ++i) {
+                for (size_t j = i + 1;
+                     j < weak.size() && bc[b].cands.size() < 4; ++j) {
+                    const size_t t0 = std::min(weak[i], weak[j]);
+                    const size_t t1 = std::max(weak[i], weak[j]);
+                    const size_t lo = (t0 > 12) ? (t0 - 12) : 0;
+                    const size_t hi = std::min(total, t1 + 13);
+                    std::copy(tr.bits.begin() + lo, tr.bits.begin() + hi,
+                              work_bits.begin() + lo);
+                    const size_t ft[2] = { t0, t1 };
+                    const uint8_t fu[2] = { tr.lose_u[t0], tr.lose_u[t1] };
+                    local_cl3_trellis_flip(llr0, llr1, lo, hi, tr.states[lo],
+                                           tr.states[hi], ft, fu, 2, work_bits);
+                    extract_block(work_bits, blk);
+                    if (rs_decode_block(blk, d330.data()))
+                        try_append(d330);
+                }
+            }
+            if (bc[b].cands.empty()) {
+                extract_block(tr.bits, blk);
+                struct SymRel {
+                    int sym;
+                    float min_m;
+                };
+                std::vector<SymRel> srel;
+                const int first_sym = static_cast<int>(data_start / 6);
+                for (int sy = first_sym; sy < 63; ++sy) {
+                    float mm = 1e30f;
+                    for (int bit = 0; bit < 6; ++bit) {
+                        const size_t pos = static_cast<size_t>(sy * 6 + bit);
+                        size_t vt = 0;
+                        if (pos >= data_start && pos < 330)
+                            vt = t_b + (pos - data_start);
+                        else if (pos >= 330)
+                            vt = t_b + this_data + (pos - 330);
+                        else
+                            continue;
+                        mm = std::min(mm, tr.margins[vt]);
+                    }
+                    srel.push_back({ sy, mm });
+                }
+                std::sort(srel.begin(), srel.end(),
+                          [](const SymRel& a, const SymRel& c) {
+                              return a.min_m < c.min_m;
+                          });
+                for (int v : { 2, 4, 6 }) {
+                    if (static_cast<int>(srel.size()) < v)
+                        break;
+                    int ep[6];
+                    for (int k = 0; k < v; ++k)
+                        ep[k] = srel[k].sym;
+                    if (rs_decode_block_erasures(blk, ep, v, d330.data())) {
+                        try_append(d330);
+                        break;
+                    }
+                }
+            }
+            if (bc[b].cands.empty())
+                return false;
+        }
+        coded_off += this_coded;
+        data_off += this_data;
+    }
+
+    std::vector<size_t> idx(num_blocks, 0);
+    std::vector<int8_t> psdu_out(psdu_bits);
+    std::vector<uint8_t> bytes(psdu_bits / 8);
+    size_t iter = 0;
+    while (iter < 64) {
+        size_t doff = 0;
+        for (size_t b = 0; b < num_blocks; ++b) {
+            const size_t this_data = std::min<size_t>(330, psdu_bits - doff);
+            const size_t data_start = 330 - this_data;
+            const auto& c = bc[b].cands[idx[b]];
+            for (size_t i = 0; i < this_data; ++i)
+                psdu_out[doff + i] = c[data_start + i];
+            doff += this_data;
+        }
+        for (size_t i = 0; i < bytes.size(); ++i) {
+            uint8_t byte = 0;
+            for (int bit = 0; bit < 8; ++bit)
+                byte |= static_cast<uint8_t>(psdu_out[8 * i + bit]) << bit;
+            bytes[i] = byte;
+        }
+        if (bytes.size() >= 2) {
+            const uint16_t calc = crc16_802154(bytes.data(), bytes.size() - 2);
+            const uint16_t rx_fcs =
+                static_cast<uint16_t>(bytes[bytes.size() - 2]) |
+                (static_cast<uint16_t>(bytes[bytes.size() - 1]) << 8);
+            if (calc == rx_fcs) {
+                out = PayloadResult{};
+                out.ok = true;
+                out.fcs_pass = true;
+                out.bytes = std::move(bytes);
+                out.bits.assign(psdu_out.begin(), psdu_out.end());
+                out.calculated_fcs = calc;
+                out.received_fcs = rx_fcs;
+                return true;
+            }
+        }
+        ++iter;
+        size_t pos = num_blocks;
+        while (pos-- > 0) {
+            if (++idx[pos] < bc[pos].cands.size())
+                break;
+            idx[pos] = 0;
+        }
+        if (pos == static_cast<size_t>(-1))
+            break;
+    }
+    return false;
+}
+
 // Soft-decision twin of decode_payload_hard(): the same joint [21 PHR | payload]
 // symbol stream, but each of the two coded bits arrives as an LLR (positive
 // favours bit 0, the bprf_demod_soft()/rxfusion::decide_bpm_soft() convention)
@@ -3669,7 +4146,16 @@ inline bool decode_payload_soft(const std::vector<float>& llr0p,
                               decoded.begin() + (total - 2));
     if (rs_cw.size() != llr0.size())
         return false;
-    return finish_rs_crc_payload(rs_cw, psdu_bits, out, sub);
+    if (finish_rs_crc_payload(rs_cw, psdu_bits, out, sub) && out.fcs_pass)
+        return true;
+
+    PayloadResult rescued;
+    if (rescue_payload_soft(llr0j.data(), llr1j.data(), total, psdu_bits,
+                            rescued, sub)) {
+        out = std::move(rescued);
+        return true;
+    }
+    return out.ok;
 }
 
 } // namespace detail
@@ -5209,19 +5695,27 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
         // exclusion belongs to the initial acquisition fit; this SFD-anchored
         // tail is already the selected stable training interval.
         if (have_tail_peaks) {
-            Qm35825Profile tail_fit_profile = profile;
-            tail_fit_profile.cfo_skip_initial_repetitions = 0;
-            CfoResult tail_cfo;
-            const bool cfo_fit_ok =
-                fit_cfo(rx, n, tail_fit_profile, tail_timing, tail_cfo, scratch);
-            if (cfo_fit_ok) {
-                res.cfo = tail_cfo;
-                res.cfo.skipped_peaks += tail_first;
-                res.cfo_refit_hz = tail_cfo.cfo_hz;
-                res.cfo_refit_peaks = static_cast<uint32_t>(tail_cfo.peaks_used);
-                res.cfo_refit_fit_us = tail_cfo.fit_us;
+            // Avoid overwriting a well-sampled full-preamble Stage-2 CFO
+            // estimate (e.g. >=16 peaks spanning 256 symbols) with a high-
+            // variance short-baseline tail refit (<16 noisy peaks at ~-10 dB).
+            const bool refit_well_conditioned =
+                tail_timing.peak_samples.size() >= 16 ||
+                stage2_cfo.peaks_used < 16;
+            if (refit_well_conditioned) {
+                Qm35825Profile tail_fit_profile = profile;
+                tail_fit_profile.cfo_skip_initial_repetitions = 0;
+                CfoResult tail_cfo;
+                const bool cfo_fit_ok =
+                    fit_cfo(rx, n, tail_fit_profile, tail_timing, tail_cfo, scratch);
+                if (cfo_fit_ok) {
+                    res.cfo = tail_cfo;
+                    res.cfo.skipped_peaks += tail_first;
+                    res.cfo_refit_hz = tail_cfo.cfo_hz;
+                    res.cfo_refit_peaks = static_cast<uint32_t>(tail_cfo.peaks_used);
+                    res.cfo_refit_fit_us = tail_cfo.fit_us;
+                }
+                res.stage_cfo_fit_us += res.cfo.fit_us;
             }
-            res.stage_cfo_fit_us += res.cfo.fit_us;
         }
         res.stage_sfd_cfo_refit_us += static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
