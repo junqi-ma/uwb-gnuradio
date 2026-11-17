@@ -1,3 +1,52 @@
+# 低 SNR 解调计算耗时优化（2026-11-17）
+
+已按 `docs/performance/低SNR解调计算耗时优化方案_2026-11-17.md` 交付，
+报告 `docs/performance/低SNR解调计算耗时优化开发报告_2026-11-17.md`。基线
+`base-low-snr-speed`（`f5eadbb`），集成分支 `exp/low-snr-speed-integration`（`ea291ca`）。
+只做软件/文件回放，**未上板**。
+
+- **验收（ABBA 配对，A=基线 B=本轮，200 包/档，1 ms 周期，`--cir full --fused on --taps eq16`）**：
+  `comp` 全部下降——w1 `+4/−4/−10/−12/−12acq/−14` = `2029→1842 / 2003→1853 / 2429→2010 /
+  3740→2232 / 5626→4095 / 2908→1486`；w4 = `2839→2685 / 2775→2560 / 3125→2764 /
+  4643→3169 / 7021→4973 / 3381→1806`（µs）。`-12 dB w1 demod` **2839→1383（−51.3%）**，
+  `st_timing` **1675→482**。**PRR 零退化**：w4 `-12 locked` 因 `drop_q 16.5→0` 从
+  `179/200` 升到 `191/200`，`-12 acquire` 从 `141/200` 升到 `168/200`；其余档位不变。
+  全部 `raw_drop_samples=0`。纯噪 `acq_seeds=0`/`candidates=0`/`fe=99.6 ms` 不变。
+- **最大的单点收益是探针顺序，不是探针幅度**：`LockedBounded` 的宽尾部扫（32 符号 × 513 lag
+  = 16,416 次单符号相关 ≈ 1.2 ms）原本跑在折叠**之前**，`-12 dB` 200 包 `tail_hit=0` 全部由
+  折叠救回。现改为 窄扫 `±32` → 折叠（同一 `±roi`，64 符号相干增益，灵敏度高约 18 dB）→
+  宽扫（仅当折叠也失败）。**任务书 Task 2.2 的 `tier0_raw_max < 0.05` 门限实测永不触发**
+  （`-12 dB` 实测 `tail_raw=0.066…0.081`）：SYNC 相关峰只有约 1 chip 宽，残差在 `±32` 内时
+  窄扫看到满高峰，该值反映信号强度而非残差，判据在物理上不成立。
+- **采集粗扫是 `-12 dB acquire` 的主因**（占整条采集搜索 85%）：`(j-j_lo) % stride` 在
+  262,144 次迭代里做整数除法，且滑窗功率逐样点串行推进。改为计数器 + 按 stride 块用 8 个
+  累加器推进后 `initial_coarse_search_us` 2181…2311 → 1987…2082，`-12 acquire w1 comp`
+  −1531 µs（门限 −1500）。
+- **其他**：`fold_acquire` 窗口夹紧到 `centre ± P/2`（`AcquireLegacy` 16,384→1,016 lag，
+  `room/k_eff` 仍按原始 `w0` 算，折叠向量逐位不变）；`fold_anchor_fit` 17-lag 改 8-lag 批处理；
+  前导沿消歧单遍化；`local_best` 初始功率改 `window_power_8acc`；`stage_sfd` 离散网格按符号
+  分解（80 个 SIMD 单符号点积替代 73×8,128 标量复乘加，仅 `rx_fast_sfd && is_real` 时启用）；
+  payload 只跑一次 trace Viterbi（`tr.bits` 与 `vitdec_cl3_soft` 逐位一致，新增 QA）+
+  RS 擦除优先 + 组合 CRC 早退。
+- **三项未达门限，实测归因与任务书不符**：①`-12 dB w1 st_sfd=317`（门限 220）——
+  实测 `sfd_win=1`，离散网格与 `k=±1..±4` **从未执行**（`sfdmetric 0.022…0.043 ≥ 0.02`
+  已由低底线 PAR 判通）；剩余是 `sfd_tail`（SFD 锚定的 40-SYNC 重跟踪 = 又一次
+  `stage_timing`，400…560→103…262）+ `sfd_cforef`（第二次去旋转 279,467 样点）。
+  `--cfo-refit auto --cfo-refit-min-peaks 16` 实测可把 `st_sfd` 压到 180 且 PRR 不变，
+  **未改默认**（`auto` 在 27 ppm 未 trim 时钟下未验证）。②`st_payload=350`（门限 320）——
+  `pay_soft`(~180) + `pay_derot`(~78) 占 74%，Task 4 只省约 10 µs（trace Viterbi 并不比
+  普通版慢，`+4 dB` 实测 10.0 vs 10.8 µs）。③`-10 dB w4 comp=2764`（门限 2600）——
+  w1 2010 → w4 2764 的 +37% 全是 4 worker 访存竞争（`st_sfd/payload/cir/timing` 同时膨胀）。
+- **CTest**：`build-native`（AUTO→avx512）**52 项 51 通过 1 跳过 0 失败**；
+  `build-scalar` 89 项 87 通过 2 跳过 0 失败。`build-avx2` 有 1 项**既有**失败
+  （`uwb_qa_uwb_pdu_rational_resampler_65_32_workers.cc` 硬断言 `volk_macroblock`，
+  `UWB_SIMD=AVX2` 下默认是 `avx2_fma_macroblock`，本轮未触碰该文件）。
+- **未验证**：上板/UHD、paced、8 worker、负载下 P99、多径/AWGN+ISR、MATLAB 交叉验证、
+  CFO 扫频/SFO、`-16/-18 dB`、未 trim 的 27 ppm 时钟、`locked_roi != 256`、
+  5.2 m 实采"头部被干扰+残差>32 样点"分支（现只有折叠兜底，无实采证据）。
+
+---
+
 # 低 SNR 解调与进锁优化（2026-11-17）
 
 已按 `docs/performance/多Subagent并行开发方案_低SNR解调与进锁优化_2026-11-17.md` 交付，
