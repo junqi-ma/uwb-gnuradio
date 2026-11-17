@@ -1,0 +1,233 @@
+{
+ "date": "2026-11-17",
+ "binary": "./gr-uwb/build-native/apps/uwb_dw3000_live",
+ "simd": "AVX2 (UWB_SIMD=AUTO -> avx2 on this host)",
+ "host": "i7-12700, loadavg < 1 during the runs",
+ "note": "frontend_us split by frontend_copy_us/frontend_scan_us; acq_seeds is the continuous-mode autocorrelation seed count, completed is jobs finished before EOF",
+ "step2_frontend": [
+  {
+   "tone": "off",
+   "run": 1,
+   "frontend_us": 99520.183,
+   "frontend_copy_us": 220.34,
+   "frontend_scan_us": 99469.51,
+   "acq_seeds": 0,
+   "completed": 0,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "candidates": 0
+  },
+  {
+   "tone": "off",
+   "run": 2,
+   "frontend_us": 91387.828,
+   "frontend_copy_us": 141.765,
+   "frontend_scan_us": 91409.275,
+   "acq_seeds": 0,
+   "completed": 0,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "candidates": 0
+  },
+  {
+   "tone": "off",
+   "run": 3,
+   "frontend_us": 96503.866,
+   "frontend_copy_us": 168.945,
+   "frontend_scan_us": 96500.717,
+   "acq_seeds": 0,
+   "completed": 0,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "candidates": 0
+  },
+  {
+   "tone": "off",
+   "run": 4,
+   "frontend_us": 98669.575,
+   "frontend_copy_us": 134.801,
+   "frontend_scan_us": 98692.596,
+   "acq_seeds": 0,
+   "completed": 0,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "candidates": 0
+  },
+  {
+   "tone": "off",
+   "run": 5,
+   "frontend_us": 95163.259,
+   "frontend_copy_us": 147.657,
+   "frontend_scan_us": 95178.253,
+   "acq_seeds": 0,
+   "completed": 0,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "candidates": 0
+  },
+  {
+   "tone": "on",
+   "run": 1,
+   "frontend_us": 92248.44,
+   "frontend_copy_us": 158.414,
+   "frontend_scan_us": 92266.569,
+   "acq_seeds": 0,
+   "completed": 0,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "candidates": 0
+  },
+  {
+   "tone": "on",
+   "run": 2,
+   "frontend_us": 94690.542,
+   "frontend_copy_us": 147.405,
+   "frontend_scan_us": 94698.967,
+   "acq_seeds": 0,
+   "completed": 0,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "candidates": 0
+  },
+  {
+   "tone": "on",
+   "run": 3,
+   "frontend_us": 92609.377,
+   "frontend_copy_us": 152.365,
+   "frontend_scan_us": 92619.287,
+   "acq_seeds": 0,
+   "completed": 0,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "candidates": 0
+  },
+  {
+   "tone": "on",
+   "run": 4,
+   "frontend_us": 93244.703,
+   "frontend_copy_us": 154.166,
+   "frontend_scan_us": 93263.158,
+   "acq_seeds": 0,
+   "completed": 0,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "candidates": 0
+  },
+  {
+   "tone": "on",
+   "run": 5,
+   "frontend_us": 87887.501,
+   "frontend_copy_us": 156.547,
+   "frontend_scan_us": 87927.58,
+   "acq_seeds": 0,
+   "completed": 0,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "candidates": 0
+  }
+ ],
+ "step3_capture": [
+  {
+   "snr_db": 10.0,
+   "run": 1,
+   "acq_seeds": 100,
+   "completed": 56,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "statuses": {
+    "INCOMPLETE_WINDOW": 1,
+    "PAYLOAD_FAILED": 49,
+    "FCS_FAILED": 6
+   }
+  },
+  {
+   "snr_db": 10.0,
+   "run": 2,
+   "acq_seeds": 100,
+   "completed": 66,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "statuses": {
+    "INCOMPLETE_WINDOW": 1,
+    "PAYLOAD_FAILED": 58,
+    "FCS_FAILED": 7
+   }
+  },
+  {
+   "snr_db": 0.0,
+   "run": 1,
+   "acq_seeds": 100,
+   "completed": 89,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "statuses": {
+    "INCOMPLETE_WINDOW": 1,
+    "SFD_FAILED": 63,
+    "PAYLOAD_FAILED": 22,
+    "FCS_FAILED": 3
+   }
+  },
+  {
+   "snr_db": 0.0,
+   "run": 2,
+   "acq_seeds": 100,
+   "completed": 92,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "statuses": {
+    "INCOMPLETE_WINDOW": 1,
+    "PAYLOAD_FAILED": 24,
+    "SFD_FAILED": 64,
+    "FCS_FAILED": 3
+   }
+  },
+  {
+   "snr_db": -12.0,
+   "run": 1,
+   "acq_seeds": 100,
+   "completed": 100,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "statuses": {
+    "INCOMPLETE_WINDOW": 1,
+    "TIMING_FAILED": 99
+   }
+  },
+  {
+   "snr_db": -12.0,
+   "run": 2,
+   "acq_seeds": 100,
+   "completed": 100,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "statuses": {
+    "INCOMPLETE_WINDOW": 1,
+    "TIMING_FAILED": 99
+   }
+  },
+  {
+   "snr_db": -14.0,
+   "run": 1,
+   "acq_seeds": 100,
+   "completed": 100,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "statuses": {
+    "INCOMPLETE_WINDOW": 1,
+    "TIMING_FAILED": 99
+   }
+  },
+  {
+   "snr_db": -14.0,
+   "run": 2,
+   "acq_seeds": 100,
+   "completed": 100,
+   "raw_drop_samples": 0,
+   "gaps": 0,
+   "statuses": {
+    "INCOMPLETE_WINDOW": 1,
+    "TIMING_FAILED": 99
+   }
+  }
+ ]
+}

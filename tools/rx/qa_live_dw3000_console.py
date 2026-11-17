@@ -161,5 +161,35 @@ with tempfile.TemporaryDirectory(prefix='uwb-live-console-') as temporary:
         assert why in rejected.stderr, (extra, rejected.stderr)
         assert 'START ' not in rejected.stdout, rejected.stdout
 
+    # ------------------------------------------------------------------
+    # Triangle-peak acquisition trigger.
+    #
+    # The 0.3 ms DC burst is longer than the 192k window, so the delayed
+    # autocorrelation has a flat top over [burst_start, burst_start+len-span]
+    # and the reported seed must land inside that top plus half a lag.  The
+    # legacy leading-edge + span/2 seed would land ~96000 samples earlier.
+    burst_start = start
+    burst_len = length
+    seeds = {}
+    for step in (64, 3):
+        run = subprocess.run(
+            [binary, '--replay', str(path), '--summary', '1',
+             '--acq-step', str(step)],
+            capture_output=True, text=True, timeout=60)
+        assert run.returncode == 0, run.stdout + run.stderr
+        found = re.findall(r'^PACKET id=\d+ time_ms=([0-9.]+) status=(\S+)',
+                           run.stdout, re.M)
+        assert len(found) == 1, run.stdout
+        seeds[step] = round(float(found[0][0]) * 737.28e3)
+        assert found[0][1] == 'TIMING_FAILED', run.stdout
+        # Inside the flat top (plus half a lag for the centred seed).
+        assert burst_start - 750 <= seeds[step] <= burst_start + (burst_len - 192000) + 750, \
+            (step, seeds[step])
+        # Not the legacy leading-edge seed.
+        assert seeds[step] > burst_start - 60000, (step, seeds[step])
+    # The block kernel and the scalar tail must agree on one scale: any
+    # --acq-step (a multiple of 8 or not) reports the same seed within one step.
+    assert abs(seeds[64] - seeds[3]) <= 64, seeds
+
 print('live console: acquisition/rejection, batch summary, SIGINT, source failure, '
       'locked strategy, timed-burst plan and locked pre-guard PASS')

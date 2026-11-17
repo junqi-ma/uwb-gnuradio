@@ -1,3 +1,49 @@
+# 前端自相关 SIMD 化与 `-12 dB` 参数升级（2026-11-17）
+
+已按 `docs/performance/前端SIMD与-12dB自相关参数升级方案_2026-11-17.md` 交付，
+报告 `docs/performance/前端SIMD与-12dB自相关参数升级开发报告_2026-11-17.md`，
+数据 `docs/performance/data_frontend_simd_20261117/measurements.json`。
+只改 `gr-uwb/apps/uwb_dw3000_live.cc` 的流式前端捕获与
+`tools/rx/qa_live_dw3000_console.py`；后端解调/锁定/融合/SIC 未动。
+
+- **验收**：`--tone on` 0.5 s 纯 AWGN 回放 `frontend_us` **87.9–94.7 ms**
+  （5 次，中位 92.6；目标 `<=125`，任务书 `-12 dB` 标量调参版是 `310.6 ms`），
+  `--tone off` `91.4–99.5 ms`（中位 96.5，并发负载时见过 116.8 的尖峰）；`raw_drop_samples=0`、`gaps=0`、虚警 `0`。捕获率
+  `+10/0/-12/-14 dB` 全部 **`acq_seeds=100/100`**，`INCOMPLETE_WINDOW` 恰好 1
+  （第 0 包在样点 0），`OVERLAPPING_CANDIDATE=0`。CTest **52 项 51 通过 1 跳过**。
+- **默认参数**：`acq_span 64000→192000`（192k 全速率积分对，不是 24k 抽算）、
+  `acq_step 8→64`（只作环表粒度）、`acq_low 0.0015→0.00015`、
+  `acq_peak 0.0028→0.00030`；`acq_persist` 不变。
+- **触发改为三角形峰顶**：新增 `peak_at`，`fall_frac=0.6`、`fall_after=65536`；
+  提交判定放在 `metric>=low_thr` 之前，无噪突发从 1.0 直落 0.0 也能提交；
+  种子 `peak_at+lag/2`。旧的 leading-edge `+span/2` 在 192k 窗下随 SNR 漂移
+  十余万样点。
+- **两处偏离任务书（都是实测逼出来的）**：①累加核用整数 `vpmaddwd` 而非
+  float——Alder Lake 的 `int16→float` 加宽转换只走唯一 shuffle 端口，光转换
+  就 50 ms、float 版 92 ms，整数版 **66 ms**；输入先 `vpaddsw +4` 四舍五入再
+  `>>3`（13 位），int32 每 64 样点冲入 float，任意 `--acq-step` 上界 `2.7e8`，
+  且 `|x|<=4096` 使 `vpsignw` 取反精确，`-32768` 溢出不可能；度量是比值，
+  均匀缩放精确抵消，噪底偏差 **0.37%**（直接截断是 10.5%）。②接收**直写环形
+  缓冲**，取消整条流 staging 拷贝（实测拷贝 45–70 ms，任务书估 75–85 ms 偏高），
+  稳态 `frontend_copy_us=0.13–0.22 ms`；回绕块仍走 staging，gap 用 `memmove`
+  重定位，`INVALID_GAP`/`valid_begin`/`acq.reset` 语义不变。
+- **顺带修掉**：标量尾与环回绕回退曾按原始 int16 累加（与 SIMD 的 `>>3` 差
+  64 倍，`--acq-step` 非 8 倍数时直接产生虚警）；每块一次串行 double 除法
+  （19 ms）改为门限/峰值/回落全部交叉相乘，纯噪下 0 次除法。
+- **新增诊断**：`COST_TOTAL` 增加 `frontend_copy_us`、`frontend_scan_us`、
+  `acq_seeds`。`acq_seeds` 是前端产生的种子数，`completed` 只是 EOF 前跑完的
+  任务数（前导-only 夹具下 `+10 dB` 每包约 8 ms 后端重试，必然积压）。
+- **任务书预期不成立的两点**：`proto_low_snr_signal.py` 生成的是**纯前导**
+  （无 SFD/PHR/payload），`+10/0 dB` 的 `fcs=100/100` 不可能达成，可判读指标
+  只有 `acq_seeds`；`completed>=99` 只在 `-12/-14 dB`（后端快速 TIMING_FAILED）
+  成立。
+- **`SCALAR` 构建不再是实时配置**：全速率标量 `frontend_us≈462 ms/0.5 s`
+  （4.9× AVX2），非 paced 回放会丢样；只作可编译/可验证回退。实时必须 AVX2。
+- **未验证**：上板/UHD、paced 到达、8 worker、负载下 P99、多径/AWGN/ISR、
+  CFO 扫频与 SFO、MATLAB 交叉验证、`-16/-18 dB`、gap 与块回绕同时发生的组合。
+
+---
+
 # 当前版本：原生 UHD/C++ 与 GNU Radio 适配层已拆分（2026-11-16）
 
 主分支 `feature/sic-research`。`4ecb4f3` 保存原主路径源码/新文档；`5d5ba26`
