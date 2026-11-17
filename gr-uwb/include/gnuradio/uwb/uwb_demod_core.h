@@ -338,12 +338,16 @@ struct DemodScratch {
     // selected code (fixed 21 symbols, scrambler offset 0); the per-packet
     // channel templates live in kernel.templates.  The 21 raw g0/g1 decisions
     // are cached for the joint payload Viterbi, which must not re-run the
-    // soft-chip PHR demod when the PHR was produced by the fused kernel.
+    // soft-chip PHR demod when the PHR was produced by the fused kernel.  The
+    // per-symbol LLRs are cached alongside them so a soft-decision payload
+    // retry can reuse the PHR soft information instead of re-demodulating it.
     struct FusedPhrState {
         size_t code_index = 0;
         std::vector<int8_t> pn;
         std::vector<int8_t> g0;
         std::vector<int8_t> g1;
+        std::vector<float> llr0;
+        std::vector<float> llr1;
         bool decisions_valid = false;
         rxfusion::Metrics metrics;
         rxfusion::Scratch kernel;
@@ -353,6 +357,8 @@ struct DemodScratch {
             decisions_valid = false;
             g0.clear();
             g1.clear();
+            llr0.clear();
+            llr1.clear();
         }
     } fused_phr;
 
@@ -2930,6 +2936,53 @@ inline bool rs_decode_stream(const std::vector<int8_t>& coded,
     return data_out.size() == data_bits;
 }
 
+// Shared RS + PSDU assembly + FCS tail of the payload decoder.  Both the
+// hard-decision and the soft-decision front ends hand their RS codeword stream
+// here, so the RS(63,55) decode, the LSB-first bit packing, the IEEE 802.15.4
+// CRC-16 and the FCS comparison exist exactly once.  `out` is reset first;
+// `out.ok` is set only when the RS decode succeeded, and `out.fcs_pass` then
+// reports the CRC verdict (a false FCS is a decoded-but-rejected frame, not a
+// decoder failure).
+inline bool finish_rs_crc_payload(const std::vector<int8_t>& rs_cw,
+                                  size_t psdu_bits,
+                                  PayloadResult& out,
+                                  PayloadSubTimers* sub = nullptr)
+{
+    out = PayloadResult{};
+    std::vector<int8_t> psdu_bits_out;
+    const auto t_rs = std::chrono::steady_clock::now();
+    const bool rs_ok = rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out);
+    if (sub)
+        sub->rs_us += payload_elapsed_us(t_rs);
+    if (!rs_ok)
+        return false;
+
+    // PSDU assembly + FCS: bit packing, CRC-16 and the comparison.
+    const auto t_crc = std::chrono::steady_clock::now();
+    out.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
+    out.bytes.resize(psdu_bits_out.size() / 8);
+    for (size_t i = 0; i < out.bytes.size(); ++i) {
+        uint8_t b = 0;
+        for (int bit = 0; bit < 8; ++bit)
+            b |= static_cast<uint8_t>(psdu_bits_out[8 * i + bit]) << bit;
+        out.bytes[i] = b;
+    }
+    if (out.bytes.size() >= 2) {
+        out.calculated_fcs =
+            crc16_802154(out.bytes.data(), out.bytes.size() - 2);
+        out.received_fcs = static_cast<uint16_t>(
+                               out.bytes[out.bytes.size() - 2]) |
+                           (static_cast<uint16_t>(
+                                out.bytes[out.bytes.size() - 1])
+                            << 8);
+        out.fcs_pass = (out.received_fcs == out.calculated_fcs);
+    }
+    if (sub)
+        sub->crc_us += payload_elapsed_us(t_crc);
+    out.ok = true;
+    return true;
+}
+
 // Shared hard-decision payload backend: concatenate the 21 PHR symbols and the
 // payload symbols, run the truncated CL-3 Viterbi, remove the 19 systematic PHR
 // bits and the two tail bits, RS-decode, pack LSB-first and compute the FCS.
@@ -2972,38 +3025,52 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
                               decoded.begin() + (total - 2));
     if (rs_cw.size() != g0.size())
         return false;
-    std::vector<int8_t> psdu_bits_out;
-    const auto t_rs = std::chrono::steady_clock::now();
-    const bool rs_ok = rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out);
-    if (sub)
-        sub->rs_us += payload_elapsed_us(t_rs);
-    if (!rs_ok)
+    return finish_rs_crc_payload(rs_cw, psdu_bits, out, sub);
+}
+
+// Soft-decision twin of decode_payload_hard(): the same joint [21 PHR | payload]
+// symbol stream, but each of the two coded bits arrives as an LLR (positive
+// favours bit 0, the bprf_demod_soft()/rxfusion::decide_bpm_soft() convention)
+// instead of a hard bit.  Everything after the Viterbi is the shared
+// finish_rs_crc_payload(), so the RS/CRC/FCS contract cannot diverge, and the
+// diagnostic buckets are the same (viterbi_us / rs_us / crc_us).
+inline bool decode_payload_soft(const std::vector<float>& llr0p,
+                                const std::vector<float>& llr1p,
+                                const std::vector<float>& llr0,
+                                const std::vector<float>& llr1,
+                                size_t psdu_bits,
+                                PayloadResult& out,
+                                PayloadSubTimers* sub = nullptr)
+{
+    PayloadSubTimer sub_guard(sub);
+    out = PayloadResult{};
+    if (llr0p.size() != 21 || llr1p.size() != 21 || llr0.empty() ||
+        llr0.size() != llr1.size())
         return false;
 
-    // PSDU assembly + FCS: bit packing, CRC-16 and the comparison.
-    const auto t_crc = std::chrono::steady_clock::now();
-    out.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
-    out.bytes.resize(psdu_bits_out.size() / 8);
-    for (size_t i = 0; i < out.bytes.size(); ++i) {
-        uint8_t b = 0;
-        for (int bit = 0; bit < 8; ++bit)
-            b |= static_cast<uint8_t>(psdu_bits_out[8 * i + bit]) << bit;
-        out.bytes[i] = b;
+    const size_t total = 21 + llr0.size();
+    std::vector<float> llr0j(total), llr1j(total);
+    for (size_t s = 0; s < 21; ++s) {
+        llr0j[s] = llr0p[s];
+        llr1j[s] = llr1p[s];
     }
-    if (out.bytes.size() >= 2) {
-        out.calculated_fcs =
-            crc16_802154(out.bytes.data(), out.bytes.size() - 2);
-        out.received_fcs = static_cast<uint16_t>(
-                               out.bytes[out.bytes.size() - 2]) |
-                           (static_cast<uint16_t>(
-                                out.bytes[out.bytes.size() - 1])
-                            << 8);
-        out.fcs_pass = (out.received_fcs == out.calculated_fcs);
+    for (size_t s = 0; s < llr0.size(); ++s) {
+        llr0j[s + 21] = llr0[s];
+        llr1j[s + 21] = llr1[s];
     }
+    std::vector<int8_t> decoded;
+    const auto t_vit = std::chrono::steady_clock::now();
+    vitdec_cl3_soft(llr0j.data(), llr1j.data(), total, decoded);
     if (sub)
-        sub->crc_us += payload_elapsed_us(t_crc);
-    out.ok = true;
-    return true;
+        sub->viterbi_us += payload_elapsed_us(t_vit);
+    if (decoded.size() < total)
+        return false;
+
+    std::vector<int8_t> rs_cw(decoded.begin() + 19,
+                              decoded.begin() + (total - 2));
+    if (rs_cw.size() != llr0.size())
+        return false;
+    return finish_rs_crc_payload(rs_cw, psdu_bits, out, sub);
 }
 
 } // namespace detail
@@ -3153,30 +3220,22 @@ inline bool stage_ns_sfd(const std::vector<float>& soft_chips,
 //   * SECDED single-bit correction / double-bit detection -> PSDU length.
 // Golden: coded/decoded PHR match MATLAB, psdu_length=127, secded_pass=1.
 // ---------------------------------------------------------------------------
-// Shared PHR Viterbi/SECDED parser.  The legacy stage_phr() and the fused PHR
-// kernel both feed their 21 raw g0/g1 pairs here, so the FEC convention and the
-// SECDED tail-energy guard are identical.  `soft_chips` is only read by the
-// guard when a corrected length grows; callers with a short prefix therefore
-// keep the same conservative "return the corrected result and let the caller
-// retry the full stream once" behaviour as the existing on-demand path.
-inline bool decode_phr_decisions(const std::vector<int8_t>& g0,
-                                 const std::vector<int8_t>& g1,
-                                 const std::vector<float>& soft_chips,
-                                 const NsSfdResult& ns_sfd,
-                                 PhrResult& out)
+// Shared PHR SECDED/parser tail.  The legacy stage_phr(), the fused PHR kernel
+// and the soft-decision variants all feed their 21 decoded codeword bits here,
+// so the FEC convention and the SECDED tail-energy guard are identical and are
+// implemented exactly once.  `soft_chips` is only read by the guard when a
+// corrected length grows; callers with a short prefix therefore keep the same
+// conservative "return the corrected result and let the caller retry the full
+// stream once" behaviour as the existing on-demand path.
+// ---------------------------------------------------------------------------
+namespace detail {
+
+inline bool phr_secded_parse(const std::vector<int8_t>& decoded,
+                             const std::vector<float>& soft_chips,
+                             const NsSfdResult& ns_sfd,
+                             PhrResult& out)
 {
     out = PhrResult{};
-    const size_t nsym = 21;
-    if (g0.size() != nsym || g1.size() != nsym)
-        return false;
-
-    std::vector<int8_t> rx(2 * nsym);
-    for (size_t s = 0; s < nsym; ++s) {
-        rx[2 * s] = g0[s];
-        rx[2 * s + 1] = g1[s];
-    }
-    std::vector<int8_t> decoded;
-    detail::vitdec_cl3(rx.data(), nsym, decoded);
     if (decoded.size() < 19)
         return false;
 
@@ -3277,6 +3336,51 @@ inline bool decode_phr_decisions(const std::vector<int8_t>& g0,
     return true;
 }
 
+} // namespace detail
+
+// Hard-decision PHR entry point: 21 raw g0/g1 pairs -> CL-3 Viterbi -> the
+// shared SECDED/parser tail.
+inline bool decode_phr_decisions(const std::vector<int8_t>& g0,
+                                 const std::vector<int8_t>& g1,
+                                 const std::vector<float>& soft_chips,
+                                 const NsSfdResult& ns_sfd,
+                                 PhrResult& out)
+{
+    out = PhrResult{};
+    const size_t nsym = 21;
+    if (g0.size() != nsym || g1.size() != nsym)
+        return false;
+
+    std::vector<int8_t> rx(2 * nsym);
+    for (size_t s = 0; s < nsym; ++s) {
+        rx[2 * s] = g0[s];
+        rx[2 * s + 1] = g1[s];
+    }
+    std::vector<int8_t> decoded;
+    detail::vitdec_cl3(rx.data(), nsym, decoded);
+    return detail::phr_secded_parse(decoded, soft_chips, ns_sfd, out);
+}
+
+// Soft-decision PHR entry point: the same 21 codeword symbols as per-symbol
+// LLRs (positive favours bit 0, exactly the bprf_demod_soft()/
+// rxfusion::decide_bpm_soft() convention) -> soft CL-3 Viterbi -> the same
+// shared SECDED/parser tail.  Nothing else differs from the hard path.
+inline bool decode_phr_decisions_soft(const std::vector<float>& llr0,
+                                      const std::vector<float>& llr1,
+                                      const std::vector<float>& soft_chips,
+                                      const NsSfdResult& ns_sfd,
+                                      PhrResult& out)
+{
+    out = PhrResult{};
+    const size_t nsym = 21;
+    if (llr0.size() != nsym || llr1.size() != nsym)
+        return false;
+
+    std::vector<int8_t> decoded;
+    detail::vitdec_cl3_soft(llr0.data(), llr1.data(), nsym, decoded);
+    return detail::phr_secded_parse(decoded, soft_chips, ns_sfd, out);
+}
+
 inline bool stage_phr(const std::vector<float>& soft_chips,
                       const Qm35825Profile& profile,
                       const NsSfdResult& ns_sfd,
@@ -3295,11 +3399,16 @@ inline bool stage_phr(const std::vector<float>& soft_chips,
         return false;
     const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
 
+    // Soft-decision PHR: bprf_demod_soft() produces the same hard decisions as
+    // bprf_demod() plus the per-symbol LLRs, and the soft CL-3 Viterbi is
+    // strictly better informed than the hard one.  The SECDED/parse tail is
+    // shared, so the PHR bit/length/rate contract is unchanged.
     std::vector<int8_t> g0, g1;
-    if (!detail::bprf_demod(soft_chips, phr_start, profile.code_index, nsym,
-                            cpb, cps, 0, pol, g0, g1))
+    std::vector<float> llr0, llr1;
+    if (!detail::bprf_demod_soft(soft_chips, phr_start, profile.code_index,
+                                 nsym, cpb, cps, 0, pol, g0, g1, llr0, llr1))
         return false;
-    return decode_phr_decisions(g0, g1, soft_chips, ns_sfd, out);
+    return decode_phr_decisions_soft(llr0, llr1, soft_chips, ns_sfd, out);
 }
 
 // Build (or reuse) the PHR spreading stream.  The PN depends only on the code
@@ -3404,12 +3513,15 @@ inline bool stage_phr_fused_cmf(const std::complex<float>* rx,
     }
 
     const auto t_decode0 = std::chrono::steady_clock::now();
-    rxfusion::decide_bpm(scratch.fused_phr.metrics, scratch.fused_phr.g0,
-                         scratch.fused_phr.g1);
-    scratch.fused_phr.decisions_valid = true;
-    const bool decoded = decode_phr_decisions(
-        scratch.fused_phr.g0, scratch.fused_phr.g1, prefix_soft_chips,
+    rxfusion::decide_bpm_soft(scratch.fused_phr.metrics, scratch.fused_phr.g0,
+                              scratch.fused_phr.g1, scratch.fused_phr.llr0,
+                              scratch.fused_phr.llr1);
+    const bool decoded = decode_phr_decisions_soft(
+        scratch.fused_phr.llr0, scratch.fused_phr.llr1, prefix_soft_chips,
         ns_sfd, out);
+    // Only publish the cache once the decode succeeded: a failed PHR must not
+    // leave decisions/LLRs that a later stage could mistake for this packet's.
+    scratch.fused_phr.decisions_valid = decoded;
     decode_ns = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - t_decode0)
@@ -3630,13 +3742,16 @@ inline bool prepare_fused_payload_pn(DemodScratch& scratch,
     return true;
 }
 
-// Experimental fused payload metrics + hard FEC/FCS decode.  Reuses the PHR
+// Experimental fused payload metrics + FEC/FCS decode.  Reuses the PHR
 // decisions and the CIR/phase frozen by the prefix pass.  When `phr_g0`/
 // `phr_g1` are supplied by the fused PHR stage, the joint Viterbi consumes
 // those raw 21 decisions directly and the prefix does not need PHR soft chips;
-// otherwise it re-runs bprf_demod() from the legacy prefix.  Returns false on any unsupported
-// configuration, range/short-window violation, fused-decode failure or FCS
-// failure; the caller then retries the complete legacy stream once.
+// otherwise it re-runs bprf_demod() from the legacy prefix.  The optional
+// `phr_llr0`/`phr_llr1` pair carries the same 21 PHR symbols as soft LLRs and
+// is only consumed by the in-place soft retry (attempt 2).  Returns false on
+// any unsupported configuration, range/short-window violation, fused-decode
+// failure or FCS failure; the caller then retries the complete legacy stream
+// once.
 // `template_us`, `correlate_us` and `decode_us` are populated even when a later
 // stage fails so the attempted work is not hidden.
 inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
@@ -3656,7 +3771,9 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
                                     size_t& symbols_out,
                                     const std::vector<int8_t>* phr_g0 = nullptr,
                                     const std::vector<int8_t>* phr_g1 = nullptr,
-                                    PayloadSubTimers* sub = nullptr)
+                                    PayloadSubTimers* sub = nullptr,
+                                    const std::vector<float>* phr_llr0 = nullptr,
+                                    const std::vector<float>* phr_llr1 = nullptr)
 {
     // Diagnostic child timing of `stage_payload_us`; see stage_payload_fcs().
     detail::PayloadSubTimer sub_guard(sub);
@@ -3782,6 +3899,13 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
     }
 
     const auto t_decode0 = std::chrono::steady_clock::now();
+    auto stamp_decode = [&]() {
+        decode_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - t_decode0)
+                .count());
+        decode_us = decode_ns / 1000;
+    };
     std::vector<int8_t> local_g0p, local_g1p, g0, g1;
     const std::vector<int8_t>* g0p = phr_g0;
     const std::vector<int8_t>* g1p = phr_g1;
@@ -3791,22 +3915,14 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
         detail::PayloadSubBucket soft_bucket(sub, &PayloadSubTimers::soft_us);
         if (g0p || g1p) {
             if (!g0p || !g1p || g0p->size() != 21 || g1p->size() != 21) {
-                decode_ns = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - t_decode0)
-                        .count());
-                decode_us = decode_ns / 1000;
+                stamp_decode();
                 return false;
             }
         } else {
             if (!detail::bprf_demod(prefix_soft_chips, phr_start,
                                     profile.code_index, 21, 64, 512, 0, pol,
                                     local_g0p, local_g1p)) {
-                decode_ns = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - t_decode0)
-                        .count());
-                decode_us = decode_ns / 1000;
+                stamp_decode();
                 return false;
             }
             g0p = &local_g0p;
@@ -3814,16 +3930,53 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
         }
         rxfusion::decide_bpm(scratch.fused.metrics, g0, g1);
     }
+    // Attempt 1 — the unchanged hard-decision path.  On success this is the
+    // whole cost of a high-SNR packet: nothing below runs.
     const bool decoded = detail::decode_payload_hard(*g0p, *g1p, g0, g1,
                                                      psdu_bits, out, sub);
-    decode_ns = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - t_decode0)
-            .count());
-    decode_us = decode_ns / 1000;
-    if (!decoded)
-        return false;
-    return out.ok && out.fcs_pass;
+    if (decoded && out.fcs_pass) {
+        stamp_decode();
+        return true;
+    }
+
+    // Attempt 2 — in-place soft-decision retry on the SAME four signed metrics.
+    // No extra correlation and no extra derotation: the LLRs are a by-product
+    // of the metrics the fused kernel already produced.  The PHR LLRs come from
+    // the fused PHR cache when it is valid, otherwise from one bprf_demod_soft()
+    // pass over the legacy prefix.  This is what keeps a marginal packet out of
+    // the ~15 ms full-stream stage_softchip_fallbacks retry.
+    std::vector<int8_t> soft_g0, soft_g1;
+    std::vector<float> llr0, llr1;
+    std::vector<int8_t> local_soft_g0p, local_soft_g1p;
+    std::vector<float> local_llr0p, local_llr1p;
+    const std::vector<float>* llr0p = phr_llr0;
+    const std::vector<float>* llr1p = phr_llr1;
+    {
+        detail::PayloadSubBucket soft_bucket(sub, &PayloadSubTimers::soft_us);
+        rxfusion::decide_bpm_soft(scratch.fused.metrics, soft_g0, soft_g1,
+                                  llr0, llr1);
+        if (!llr0p || !llr1p || llr0p->size() != 21 || llr1p->size() != 21) {
+            llr0p = nullptr;
+            llr1p = nullptr;
+            if (detail::bprf_demod_soft(prefix_soft_chips, phr_start,
+                                        profile.code_index, 21, 64, 512, 0,
+                                        pol, local_soft_g0p, local_soft_g1p,
+                                        local_llr0p, local_llr1p)) {
+                llr0p = &local_llr0p;
+                llr1p = &local_llr1p;
+            }
+        }
+    }
+    if (llr0p && llr1p) {
+        const bool soft_decoded = detail::decode_payload_soft(
+            *llr0p, *llr1p, llr0, llr1, psdu_bits, out, sub);
+        if (soft_decoded && out.fcs_pass) {
+            stamp_decode();
+            return true;
+        }
+    }
+    stamp_decode();
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -4830,12 +4983,23 @@ inline DemodResult demodulate_one(const std::complex<float>* rx,
                     (phr_fused_used && scratch.fused_phr.decisions_valid)
                         ? &scratch.fused_phr.g1
                         : nullptr;
+                // Same cache, soft form: the fused PHR LLRs feed the payload
+                // soft retry without re-demodulating the PHR field.
+                const std::vector<float>* cached_llr0 =
+                    (phr_fused_used && scratch.fused_phr.decisions_valid)
+                        ? &scratch.fused_phr.llr0
+                        : nullptr;
+                const std::vector<float>* cached_llr1 =
+                    (phr_fused_used && scratch.fused_phr.decisions_valid)
+                        ? &scratch.fused_phr.llr1
+                        : nullptr;
                 const bool fused_ok = stage_payload_fused_cmf(
                     scratch.derotated.data(), n, profile, res.timing, res.cir,
                     scratch.soft_chips, res.ns_sfd, res.phr, res.payload,
                     scratch, fused_template_us, fused_correlate_us,
                     fused_decode_us, fused_decode_ns, fused_symbols,
-                    cached_g0, cached_g1, &payload_sub);
+                    cached_g0, cached_g1, &payload_sub, cached_llr0,
+                    cached_llr1);
                 res.stage_fused_template_us += fused_template_us;
                 res.stage_fused_correlate_us += fused_correlate_us;
                 res.stage_fused_decode_us += fused_decode_us;

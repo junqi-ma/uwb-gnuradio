@@ -559,6 +559,57 @@ inline void decide_bpm(const Metrics& metrics,
     }
 }
 
+// Soft-output twin of decide_bpm().  The hard decisions written to g0/g1 are
+// bit-identical to decide_bpm() (same tie rules: hop 0 wins a hop tie, BPM
+// half 0 wins a half tie, zero is non-negative), and the LLRs reproduce
+// bprf_demod_soft()'s convention exactly on the same four signed metrics:
+//
+//   llr0[s] = |half0| - |half1|   > 0 favours g0 = 0
+//   llr1[s] = selected half metric > 0 favours g1 = 0
+//
+// Because the fused kernel returns unnormalized metrics (the legacy global
+// max|soft| scale cancels in the hard decision), the LLRs are on the same
+// arbitrary positive scale as the metrics.  A soft-decision Viterbi only
+// needs a consistent scale per packet, so no renormalization is applied here.
+inline void decide_bpm_soft(const Metrics& metrics,
+                            std::vector<int8_t>& g0, std::vector<int8_t>& g1,
+                            std::vector<float>& llr0,
+                            std::vector<float>& llr1)
+{
+    g0.resize(metrics.symbols);
+    g1.resize(metrics.symbols);
+    llr0.resize(metrics.symbols);
+    llr1.resize(metrics.symbols);
+    for (size_t s = 0; s < metrics.symbols; ++s) {
+        const float* m = &metrics.signed_value[kCandidateCount * s];
+        // Half 0: candidates 0 (hop 0) and 2 (hop 1).
+        float b0 = std::abs(m[0]);
+        float best0 = m[0];
+        if (std::abs(m[2]) > b0) {
+            b0 = std::abs(m[2]);
+            best0 = m[2];
+        }
+        // Half 1: candidates 1 (hop 0) and 3 (hop 1).
+        float b1 = std::abs(m[1]);
+        float best1 = m[1];
+        if (std::abs(m[3]) > b1) {
+            b1 = std::abs(m[3]);
+            best1 = m[3];
+        }
+        float best;
+        if (b0 >= b1) {
+            g0[s] = 0;
+            best = best0;
+        } else {
+            g0[s] = 1;
+            best = best1;
+        }
+        g1[s] = (best < 0.0f) ? 1 : 0;
+        llr0[s] = b0 - b1;
+        llr1[s] = best;
+    }
+}
+
 } // namespace rxfusion
 } // namespace demod
 } // namespace uwb
