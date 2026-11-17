@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
-#include <gnuradio/uwb/uwb_demod_core.h>
+#include <gnuradio/uwb/uwb_demod_pipeline.h>
 
 #include <stdexcept>
 

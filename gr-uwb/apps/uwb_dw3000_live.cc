@@ -21,7 +21,8 @@
 // The lock state machine lives in core::TargetLockCore (GNU Radio independent,
 // scheduler-thread only).  DSP workers never touch the USRP or the lock; they
 // push bounded observations back.
-#include <gnuradio/uwb/uwb_demod_core.h>
+#include "uwb_live_packet_processor.h"
+#include <gnuradio/uwb/uwb_demod_grid.h>
 #include <gnuradio/uwb/uwb_fixed_tone_cancel_source.h>
 #include <gnuradio/uwb/uwb_hrp_mod_core.h>
 #include <gnuradio/uwb/uwb_qm35_acquisition_tracker.h>
@@ -220,14 +221,9 @@ template<class T> std::vector<T> load(const std::string& path) {
     return v;
 }
 static bool crc_ok(const std::vector<uint8_t>& b) {
-    if (b.size() < 2) return false;
-    uint16_t crc = 0;
-    for (size_t i = 0; i + 2 < b.size(); ++i) {
-        crc ^= b[i];
-        for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ ((crc & 1) ? 0x8408 : 0);
-    }
-    return crc == uint16_t(b[b.size()-2] | uint16_t(b.back()) << 8);
+    return live::verify_packet_crc(b);
 }
+
 static const char* status_name(demod::DemodStatus s) {
     static const char* names[] = {"OK", "INVALID_INPUT", "TIMING_FAILED", "CFO_FAILED",
         "SFD_FAILED", "PHR_FAILED", "PAYLOAD_FAILED", "FCS_FAILED", "QUEUE_FULL",
@@ -488,34 +484,16 @@ struct Reporter {
     }
 };
 
-struct Job {
+struct Job : live::PacketRequest {
     std::vector<std::complex<int16_t>> iq;
     size_t count = 0;
-    uint64_t id = 0;
-    int64_t seed = 0;            // absolute native predicted/acquired origin
-    int64_t window_start = 0;    // absolute native window origin
-    int64_t predicted_rel_work = 0;
-    size_t guard = 0;            // effective pre-guard used to cut this window
-    uint64_t slot_index = std::numeric_limits<uint64_t>::max();
-    uint64_t generation = 0;
-    bool target_slot = false;
-    bool feeds_lock = false;
     Clock::time_point ready;
     Job() : iq(window) {}
 };
 
-struct PendingSubmit {
-    uint64_t id = 0;
-    int64_t seed = 0;
-    int64_t window_start = 0;
+struct PendingSubmit : live::PacketRequest {
     size_t count = 0;
-    int64_t predicted_rel_work = 0;
-    size_t guard = 0;
-    uint64_t slot_index = std::numeric_limits<uint64_t>::max();
-    uint64_t generation = 0;
     double metric = 0.0;
-    bool target_slot = false;
-    bool feeds_lock = false;
     bool is_candidate = false; // autocorrelation candidate, classify at submit
 };
 
@@ -548,11 +526,7 @@ struct Workers {
             for (size_t worker = 0; worker < o.workers; ++worker)
                 threads.emplace_back([&, worker] {
                     try {
-                        core::RationalResampler65_48Core rs(taps);
-                        rs.set_fixed_phase_schedule(true);
-                        std::vector<std::complex<float>> y(
-                            rs.expected_output_length(window));
-                        demod::core::DemodScratch scratch; scratch.reserve(y.size());
+                        live::PacketProcessor processor(taps, tmpl, window);
                         // Acquisition / interference profile: unchanged legacy
                         // wide acquisition.
                         demod::Qm35825Profile acq;
@@ -606,63 +580,22 @@ struct Workers {
                                     job.target_slot && o.sync == "locked";
                                 const demod::Qm35825Profile& p =
                                     bounded ? locked : acq;
-                                rs.reset();
-                                const size_t y_need =
-                                    rs.expected_output_length(job.count);
-                                size_t made = rs.process_sc16(job.iq.data(), job.count,
-                                                              1.f/32768, y.data(),
-                                                              y.size()).produced;
-                                while (made < y_need) {
-                                    const auto n = rs.flush(y.data()+made, y.size()-made);
-                                    if (!n) break;
-                                    made += n;
-                                }
-                                const auto resample_end = Clock::now();
+                                auto processed = processor.process(job, job.iq.data(),
+                                    job.count, p, o.cir == "auto");
+                                auto& r = processed.decoded;
+                                const bool retry = processed.retried;
+                                const auto resample_end = processed.resample_end;
+                                const auto demod_end = processed.demod_end;
+                                const auto compute_end = processed.compute_end;
                                 cost.resample_us = elapsed_us(compute_start, resample_end);
-                                auto r = demod::core::demodulate_one(y.data(), made, p,
-                                    job.id, job.predicted_rel_work, 0, tmpl, scratch);
-                                const bool retry = !p.rx_stop_after_sfd &&
-                                    o.cir == "auto" && r.timing.ok && r.sfd.ok &&
-                                    (r.status != demod::DemodStatus::Success ||
-                                     !r.payload.fcs_pass || !crc_ok(r.payload.bytes));
-                                const auto demod_end = Clock::now();
                                 cost.demod_us = elapsed_us(resample_end, demod_end);
-                                if (retry) {
-                                    auto full = p;
-                                    full.cir_soft_chip_mode = demod::CirSoftChipMode::Full;
-                                    r = demod::core::demodulate_one(y.data(), made, full,
-                                        job.id, job.predicted_rel_work, 0, tmpl, scratch);
-                                }
-                                const auto compute_end = Clock::now();
                                 cost.retry_us = retry ? elapsed_us(demod_end, compute_end) : 0;
                                 cost.compute_us = elapsed_us(compute_start, compute_end);
                                 cost.cpu_us = thread_cpu_us()-cpu_start;
 
                                 // ---- lock feedback ------------------------
-                                core::TargetObservation obs;
-                                obs.packet_id = job.id;
-                                obs.schedule_generation = job.generation;
-                                obs.slot_index = job.slot_index;
-                                obs.window_origin = job.window_start;
-                                obs.predicted_origin = job.seed;
-                                obs.timing_ok = r.timing.ok;
-                                obs.sfd_ok = r.sfd.ok;
-                                obs.phr_ok = r.phr.ok;
-                                obs.fcs_pass = r.payload.fcs_pass &&
-                                               crc_ok(r.payload.bytes);
-                                obs.code_index = 10;
-                                obs.preamble_repetitions = 256;
-                                obs.sfd_mode = "4z2";
-                                obs.quality = r.timing.metric;
-                                obs.from_target_window = job.target_slot;
-                                if (r.timing.ok) {
-                                    const int64_t native_rel =
-                                        core::map_obs_sample_to_native(
-                                            r.timing.preamble_start_sample,
-                                            work_fs, fs, resample_group_delay);
-                                    obs.observed_origin = job.window_start + native_rel;
-                                    obs.residual = obs.observed_origin - job.seed;
-                                }
+                                const auto obs = live::make_target_observation(
+                                    job, r, work_fs, fs, resample_group_delay);
                                 if (job.feeds_lock)
                                     lock.push_observation(obs);
 

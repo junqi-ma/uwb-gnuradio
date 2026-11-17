@@ -64,8 +64,8 @@ python3 tools/rx/print_dw3000_packets.py
 ```
 
 默认重新解码 `testdata/x410_fixed_tone_live_20261115/clean_1s.sc16`，使用同目录的
-`packet_starts_1s.txt`（200 个包窗）。首次运行自动编译当前源码的纯 C++ 解码程序；
-头文件变化后会重新编译。默认 CFO 配置，无 skip=216 临时参数。
+`packet_starts_1s.txt`（200 个包窗）。首次运行通过 CMake 构建原生 `uwb_dw3000_decode`（`build-offline-decoder`），
+关闭 GR/UHD/实验目标；后续增量构建会跟踪头文件和编译后的解调入口。默认 CFO 配置，无 skip=216 临时参数。
 
 逐包打印候选时间、检测到的 SYNC 数、SFD/PHR 状态、PHR 包长、CFO、CFO 拟合点数、
 FCS、独立 Python CRC 和失败阶段。首尾窗口不足也占一行并报告原因。最后汇总成功率。

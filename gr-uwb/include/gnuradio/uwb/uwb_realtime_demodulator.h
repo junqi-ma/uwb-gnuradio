@@ -31,7 +31,7 @@
 #include <gnuradio/block.h>
 #include <gnuradio/gr_complex.h>
 #include <gnuradio/uwb/api.h>
-#include <gnuradio/uwb/uwb_demod_core.h>
+#include <gnuradio/uwb/uwb_demod_pipeline.h>
 #include <gnuradio/uwb/uwb_demod_result.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
 #include <pmt/pmt.h>

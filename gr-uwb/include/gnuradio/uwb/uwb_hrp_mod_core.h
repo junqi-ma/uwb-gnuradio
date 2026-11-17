@@ -21,7 +21,7 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_demod_core.h>
+#include <gnuradio/uwb/uwb_hrp_codec.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
 #include <gnuradio/uwb/uwb_radar_meta_core.h>
 
@@ -489,7 +489,7 @@ inline bool sfd_mode_is_4z(const char* sfd_mode)
 inline void append_ieee_fcs(std::vector<uint8_t>& bytes)
 {
     const uint16_t crc =
-        demod::core::detail::crc16_802154(bytes.data(), bytes.size());
+        codec::crc16_802154(bytes.data(), bytes.size());
     bytes.push_back(static_cast<uint8_t>(crc & 0xff));
     bytes.push_back(static_cast<uint8_t>((crc >> 8) & 0xff));
 }
@@ -520,10 +520,10 @@ inline const int* rs_generator()
         g[0] = 1;
         int deg = 0;
         for (int i = 1; i <= 8; ++i) {
-            const int root = demod::core::detail::rs_gf_pow(2, i);
+            const int root = codec::rs_gf_pow(2, i);
             int ng[10] = {};
             for (int j = 0; j <= deg; ++j) {
-                ng[j] ^= demod::core::detail::rs_gf_mul(g[j], root);
+                ng[j] ^= codec::rs_gf_mul(g[j], root);
                 ng[j + 1] ^= g[j];
             }
             ++deg;
@@ -554,9 +554,9 @@ inline void rs_encode_330(const int8_t* data330, int8_t* coded378)
     for (int i = 54; i >= 0; --i) {
         const int fb = dsym[i] ^ reg[7];
         int nreg[8];
-        nreg[0] = demod::core::detail::rs_gf_mul(fb, g[0]);
+        nreg[0] = codec::rs_gf_mul(fb, g[0]);
         for (int k = 1; k < 8; ++k)
-            nreg[k] = reg[k - 1] ^ demod::core::detail::rs_gf_mul(fb, g[k]);
+            nreg[k] = reg[k - 1] ^ codec::rs_gf_mul(fb, g[k]);
         for (int k = 0; k < 8; ++k)
             reg[k] = nreg[k];
     }
@@ -565,7 +565,7 @@ inline void rs_encode_330(const int8_t* data330, int8_t* coded378)
         cw[i] = dsym[i];
     for (int i = 0; i < 8; ++i)
         cw[55 + i] = reg[i];
-    demod::core::detail::rs_syms_to_bits(cw, 63, coded378);
+    codec::rs_syms_to_bits(cw, 63, coded378);
 }
 
 inline bool rs_encode_stream(const int8_t* data_bits,
@@ -643,7 +643,7 @@ inline void encode_phr19(size_t psdu_bytes,
         idx = 0;
     sys13[11] = static_cast<int8_t>((idx >> 1) & 1);
     sys13[12] = static_cast<int8_t>(idx & 1);
-    demod::core::detail::hrp_secded(sys13, phr19);
+    codec::hrp_secded(sys13, phr19);
 }
 
 inline void bpm_place(float* chips,

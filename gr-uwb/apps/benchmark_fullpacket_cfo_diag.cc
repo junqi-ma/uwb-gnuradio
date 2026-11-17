@@ -1,3 +1,4 @@
+#include <gnuradio/uwb/uwb_demod_pipeline.h>
 // Isolated CFO-kernel replay. Unchecked variants are diagnostics only.
 #include "fullpacket_cfo_diagnostics.h"
 #include <gnuradio/uwb/uwb_fullpacket_sic_core.h>

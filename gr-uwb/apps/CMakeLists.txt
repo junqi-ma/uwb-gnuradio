@@ -517,6 +517,11 @@ endif()
 # time: --res-dir > $UWB_RESOURCE_DIR > $UWB_TESTDATA_DIR > the installed
 # resource dir (UWB_INSTALL_RESOURCE_DIR) > the build-tree testdata fallback,
 # so an installed binary never depends on a source checkout / old build tree.
+# Offline decoder shares the compiled packet entry point and ISA configuration.
+add_executable(uwb_dw3000_decode ${CMAKE_SOURCE_DIR}/../tools/rx/decode_dw3000_packets.cc)
+target_link_libraries(uwb_dw3000_decode uwb_core Threads::Threads)
+uwb_simd_apply(uwb_dw3000_decode)
+
 add_executable(uwb_dw3000_live uwb_dw3000_live.cc)
 target_link_libraries(uwb_dw3000_live uwb_native Threads::Threads)
 uwb_simd_apply(uwb_dw3000_live)

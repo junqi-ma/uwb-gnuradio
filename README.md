@@ -18,6 +18,8 @@ can build and run without GNU Radio or PMT. See the
 Low-SNR capture, soft decoding and compute-cost improvements are merged through
 `63c057f` (2026-11-17). These latest changes have software/replay evidence only.
 See [current status](开发状态.md) and the [reproducible evaluation tools](tools/rx/low_snr_eval/README.md).
+The packet decoder is compiled into `uwb_core`; TX/RX share a standalone codec.
+See the [DSP and window execution boundaries](docs/架构_解调与窗口执行.md).
 
 TWR includes offline protocol and native PHY work; hardware ranging remains
 outside the validated scope. See the [TWR development records](docs/twr/开发路线与验收矩阵.md).

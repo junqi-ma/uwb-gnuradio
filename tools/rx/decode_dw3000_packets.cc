@@ -1,6 +1,6 @@
 // Offline DW3000 SC16 windows -> existing 65/48 resampler -> full C++ demod.
 // No UHD device, GNU Radio scheduler, or CFO skip workaround.
-#include <gnuradio/uwb/uwb_demod_core.h>
+#include <gnuradio/uwb/uwb_demod_pipeline.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
 #include <fstream>
 #include <iomanip>

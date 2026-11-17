@@ -16,6 +16,8 @@
 
 ## 开发与验证
 
+- 完整包消费者使用 `uwb_demod_pipeline.h` 并链接 uwb_core；单阶段 QA 可用
+  `uwb_demod_core.h` 聚合入口。TX/RX 共用编码原语放 uwb_hrp_codec.h。
 - 修改前检查相关实现、测试和报告。保持逐位一致性约定，不放宽既有 QA 容差。
 - UWB 检测/解调算法参考 `UWB_demodulation/` MATLAB 实现；检测位置最终须逐样点/
   逐包交叉验证。未做的 MATLAB 验证明确列出。

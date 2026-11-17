@@ -1,3 +1,4 @@
+#include <gnuradio/uwb/uwb_demod_phr.h>
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
  * Independent QA for the experimental fused PHR CMF/PN-despread path.

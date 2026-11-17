@@ -9,28 +9,46 @@ import subprocess
 
 def build(root):
     work = Path('/tmp/uwb_window_diag')
-    header = work/'include/gnuradio/uwb/uwb_demod_core.h'
-    header.parent.mkdir(parents=True, exist_ok=True)
-    text = (root/'gr-uwb/include/gnuradio/uwb/uwb_demod_core.h').read_text()
+    private = work/'include/gnuradio/uwb'
+    private.mkdir(parents=True, exist_ok=True)
+    source_dir = root/'gr-uwb/include/gnuradio/uwb'
+    files = {name: (source_dir/name).read_text() for name in
+             ('uwb_demod_timing.h', 'uwb_demod_cfo.h', 'uwb_demod_sfd.h',
+              'uwb_demod_phr.h')}
+    files['uwb_demod_pipeline.cc'] = (root/'gr-uwb/lib/uwb_demod_pipeline.cc').read_text()
     patches = [
         ('    out = TimingResult{};', '    ++window_diag::timing_call;\n    out = TimingResult{};'),
         ('        if (bm < min_metric)', '        window_diag::local(want, radius, bm, bp, min_metric);\n        if (bm < min_metric)'),
         ('    out.cfo_hz = slope / (2.0 * M_PI);', '    out.cfo_hz = window_diag::force_cfo != 0 ? window_diag::force_cfo : slope / (2.0 * M_PI);'),
         ('    out = SfdResult{};', '    ++window_diag::sfd_call;\n    out = SfdResult{};'),
-        ('    constexpr size_t kSfdStride = 8;', '    const size_t kSfdStride = window_diag::dense_sfd ? 1 : 8;'),
-        ('    bool integer_grid_ok = true;', '    if (window_diag::nominal_period) res.timing.measured_period = 1016.0;\n    bool integer_grid_ok = true;'),
+        ('    const auto execution = plan_packet_execution(profile, res.timing);', '    if (window_diag::nominal_period) res.timing.measured_period = 1016.0;\n    const auto execution = plan_packet_execution(profile, res.timing);'),
         ('    if (best < profile.sfd_detection_threshold)\n        return false;\n\n    out.ok = true;\n    out.sfd_start_chip', '    window_diag::nsfds.push_back({best, profile.sfd_detection_threshold, best_k});\n    if (best < profile.sfd_detection_threshold)\n        return false;\n\n    out.ok = true;\n    out.sfd_start_chip'),
-        ('        return window_best >= profile.sfd_detection_threshold;', '        window_diag::sfd(expected, center, window_best, window_best_j, profile.sfd_detection_threshold);\n        return window_best >= profile.sfd_detection_threshold;')]
+        ('        return window_passed;', '        window_diag::sfd(expected, center, window_best, window_best_j, profile.sfd_detection_threshold);\n        return window_passed;')]
     for before, after in patches:
-        assert text.count(before) == 1, before
-        text = text.replace(before, after)
-    header.write_text(text)
+        matches = [name for name, text in files.items() if before in text]
+        assert len(matches) == 1, (before, matches)
+        name = matches[0]
+        assert files[name].count(before) == 1, before
+        files[name] = files[name].replace(before, after)
+    for name, text in files.items():
+        (private/name).write_text(text)
+    # The diagnostic entry has a distinct symbol, so the core archive cannot
+    # accidentally replace the instrumented implementation at link time.
+    build_dir = root/'gr-uwb/build-window-diag'
+    subprocess.run(['cmake', '-S', str(root/'gr-uwb'), '-B', str(build_dir),
+                    '-DCMAKE_BUILD_TYPE=Release', '-DUWB_BUILD_GNURADIO=OFF',
+                    '-DUWB_BUILD_EXPERIMENTS=OFF', '-DENABLE_UHD_BACKEND=OFF',
+                    '-DUWB_SIMD=AVX2'], check=True)
+    subprocess.run(['cmake', '--build', str(build_dir), '--target', 'uwb_core', '-j4'],
+                   check=True)
     command = ['c++', '-std=c++17', '-O3', '-mavx2', '-mfma', '-ffp-contract=off',
+               '-Ddemodulate_one=window_diagnostic_demodulate_one',
+               '-include', str(root/'tools/rx/window_diag_state.h'),
                '-Wno-deprecated-declarations', '-I'+str(work/'include'),
-               '-Igr-uwb/include', '-Iinclude', '-Igr-uwb/build-avx512-smtcheck/include',
-               'tools/rx/diagnose_failure_window.cc',
-               'gr-uwb/build-avx512-smtcheck/lib/libuwb_core.a', '-L/usr/local/lib',
-               '-lvolk', '-ldl', '-lm', '-pthread', '-Wl,-rpath,/usr/local/lib',
+               '-I'+str(root/'gr-uwb/include'), '-I'+str(build_dir/'include'),
+               str(root/'tools/rx/diagnose_failure_window.cc'),
+               str(private/'uwb_demod_pipeline.cc'),
+               str(build_dir/'lib/libuwb_core.a'), '-lvolk', '-ldl', '-lm', '-pthread',
                '-o', str(work/'diagnose')]
     subprocess.run(command, cwd=root, check=True)
     return work/'diagnose'

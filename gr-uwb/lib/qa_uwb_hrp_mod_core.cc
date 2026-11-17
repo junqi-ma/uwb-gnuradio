@@ -1,3 +1,4 @@
+#include <gnuradio/uwb/uwb_demod_core.h>
 /* -*- c++ -*- */
 /*
  * Copyright 2026

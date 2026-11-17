@@ -20,6 +20,8 @@
  * Exit 0 only when every check passes.
  */
 
+#include <gnuradio/uwb/uwb_demod_pipeline.h>
+#include <gnuradio/uwb/uwb_hrp_codec.h>
 #include <gnuradio/uwb/uwb_fixed_tone_cancel_core.h>
 #include <gnuradio/uwb/uwb_fixed_tone_cancel_source.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
@@ -164,6 +166,19 @@ int main()
         core::TargetLockCore lock(lc);
         check(lock.state() == core::TargetLockState::Acquire,
               "TargetLockCore starts in Acquire");
+    }
+
+    // The packet entry is now compiled into uwb_core; this checks both the
+    // installed header closure and the external symbol, without any stage header.
+    {
+        const uint8_t known[] = {'1','2','3','4','5','6','7','8','9'};
+        check(codec::crc16_802154(known, 9) == 0x2189, "shared codec known CRC");
+        demod::core::DemodScratch scratch;
+        const std::vector<std::complex<float>> input(64), tmpl(1016);
+        const auto decoded = demod::core::demodulate_one(input.data(), input.size(),
+            demod::Qm35825Profile::Default(), 1, 0, 0, tmpl, scratch);
+        check(decoded.status == demod::DemodStatus::TimingFailed,
+              "installed compiled packet API links and rejects short input");
     }
 
     // ---- replay source over temp file (ISc16StreamSource contract) -------

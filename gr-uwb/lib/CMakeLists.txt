@@ -34,6 +34,7 @@ include_directories(../include)
 # Pure core sources (no GNU Radio, no UHD)
 ########################################################################
 set(uwb_core_sources
+    uwb_demod_pipeline.cc
     uwb_discrete_cir_estimator.cc
     uwb_discrete_cir_reconstruct.cc
     uwb_fixed_tone_cancel_core.cc
@@ -114,6 +115,7 @@ find_package(Threads REQUIRED)
 add_library(uwb_core STATIC ${uwb_core_sources}
     $<TARGET_OBJECTS:uwb_simd_probe>)
 target_link_libraries(uwb_core PUBLIC Volk::volk Threads::Threads)
+target_compile_features(uwb_core PUBLIC cxx_std_17)
 target_include_directories(uwb_core
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
     PUBLIC $<INSTALL_INTERFACE:include>
@@ -282,6 +284,7 @@ list(APPEND uwb_core_qa_sources
     qa_uwb_fullpacket_payload_cache.cc
     qa_uwb_fullpacket_sic_core.cc
     qa_uwb_hrp_mod_core.cc
+    qa_uwb_refactor_contracts.cc
     qa_uwb_preamble_sic_core.cc
     qa_uwb_radar_cir_core.cc
     qa_uwb_radar_cir_estimator.cc

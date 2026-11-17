@@ -11,6 +11,7 @@
 #include <gnuradio/uwb/uwb_uhd_sc16_pipeline.h>
 #include <gnuradio/uwb/uwb_fixed_tone_cancel_source.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
+#include <gnuradio/uwb/uwb_resample_window.h>
 #include <gnuradio/uwb/uwb_defaults.h>
 #include <volk/volk.h>
 
@@ -1979,39 +1980,13 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
         if (need_resample) {
             auto t_resamp_start = std::chrono::steady_clock::now();
             if (resamp_65_48) {
-                resamp_65_48->reset();
-                size_t expected_len = core::RationalResampler65_48Core::expected_output_length(
-                    slot->native_count, resamp_65_48->tap_count());
-                if (cf32_work.size() < expected_len) {
-                    cf32_work.resize(expected_len);
-                }
-                auto r = resamp_65_48->process_sc16(slot->sc16_samples.data(), slot->native_count,
-                                                    scale, cf32_work.data(), cf32_work.size());
-                size_t produced = r.produced;
-                while (produced < expected_len) {
-                    size_t n = resamp_65_48->flush(cf32_work.data() + produced, cf32_work.size() - produced);
-                    if (n == 0) break;
-                    produced += n;
-                }
+                dsp_n = core::resample_sc16_window(*resamp_65_48,
+                    slot->sc16_samples.data(), slot->native_count, scale, cf32_work);
                 dsp_in = cf32_work.data();
-                dsp_n = produced;
             } else if (resamp_65_32) {
-                resamp_65_32->reset();
-                size_t expected_len = core::RationalResampler65_32Core::expected_output_length(
-                    slot->native_count, resamp_65_32->tap_count());
-                if (cf32_work.size() < expected_len) {
-                    cf32_work.resize(expected_len);
-                }
-                auto r = resamp_65_32->process_sc16(slot->sc16_samples.data(), slot->native_count,
-                                                    scale, cf32_work.data(), cf32_work.size());
-                size_t produced = r.produced;
-                while (produced < expected_len) {
-                    size_t n = resamp_65_32->flush(cf32_work.data() + produced, cf32_work.size() - produced);
-                    if (n == 0) break;
-                    produced += n;
-                }
+                dsp_n = core::resample_sc16_window(*resamp_65_32,
+                    slot->sc16_samples.data(), slot->native_count, scale, cf32_work);
                 dsp_in = cf32_work.data();
-                dsp_n = produced;
             } else {
                 if (cf32_native.size() < slot->native_count) {
                     cf32_native.resize(slot->native_count);

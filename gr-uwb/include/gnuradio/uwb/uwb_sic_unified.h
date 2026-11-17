@@ -81,7 +81,7 @@
 #include <gnuradio/uwb/uwb_preamble_sic_core.h>
 #include <gnuradio/uwb/uwb_discrete_cir_sic.h>
 #include <gnuradio/uwb/uwb_fullpacket_sic_core.h>
-#include <gnuradio/uwb/uwb_demod_core.h>
+#include <gnuradio/uwb/uwb_demod_pipeline.h>
 #include <gnuradio/uwb/uwb_hrp_mod_core.h>
 
 #include <algorithm>

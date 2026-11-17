@@ -54,3 +54,8 @@ SUMMARY（含结尾 SUMMARY_PARTIAL）的 compute/demod 均值是控制台批次
 
 历史结果和数据缺口见
 [归档说明](../../../docs/performance/data_low_snr_speed_20261117/README.md)。
+
+重构等价性可用 `compare_packets.py BASE_DECODER CURRENT_DECODER --fixtures DIR --out DIR`
+比较固定窗口 JSONL，忽略耗时，逐项比较状态、度量、CFO、FCS 和 PSDU hex。
+工具默认每个 +4/-12/-14 dB 文件 200 包；解码器编译目标为 uwb_dw3000_decode。
+这是一致性检查，不替代动态锁定调度的 ABBA 验收。

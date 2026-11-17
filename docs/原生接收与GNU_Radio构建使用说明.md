@@ -38,7 +38,9 @@ ctest --test-dir gr-uwb/build-gr --output-on-failure -j1
 ```
 
 原生模式减少 GR/绑定/实验目标的编译工作量；尚未做配对构建计时，不宣称具体加速比例。
-公共大头文件变化仍会触发多个目标重编译。
+完整包解调入口现编译进 uwb_core；生产调用者包含 `uwb_demod_pipeline.h`，
+单阶段 QA 可继续包含兼容聚合头 `uwb_demod_core.h`。依赖与状态边界见
+[解调与窗口执行](架构_解调与窗口执行.md)。
 
 ## 库与原生数据路径
 

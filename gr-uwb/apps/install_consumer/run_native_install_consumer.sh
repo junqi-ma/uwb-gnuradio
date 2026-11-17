@@ -52,7 +52,7 @@ if [ ! -d "$INCDIR/gnuradio/uwb" ] || [ -z "$LIBDIR" ]; then
 fi
 for h in uwb_rational_resampler_core.h uwb_uhd_sc16_pipeline.h \
          uwb_fixed_tone_cancel_source.h uwb_sc16_stream_source.h \
-         uwb_target_lock_core.h api.h; do
+         uwb_target_lock_core.h uwb_demod_pipeline.h uwb_hrp_codec.h api.h; do
     if [ ! -f "$INCDIR/gnuradio/uwb/$h" ]; then
         echo "FAIL: installed header missing: $INCDIR/gnuradio/uwb/$h" >&2
         exit 1

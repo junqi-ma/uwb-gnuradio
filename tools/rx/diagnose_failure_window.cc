@@ -7,23 +7,7 @@
 #include <string>
 #include <complex>
 #include <cmath>
-namespace window_diag {
-struct Local { int call; long long want, radius, pos; float metric, threshold; };
-struct Sfd { int call; long long expected, center, pos; float metric, threshold; };
-struct Nsfd { float metric, threshold; long long position; };
-inline int timing_call=0, sfd_call=0;
-inline double force_cfo=0;
-inline bool dense_sfd=false, nominal_period=false;
-inline std::vector<Local> locals;
-inline std::vector<Sfd> sfds;
-inline std::vector<Nsfd> nsfds;
-inline void local(long long w,long long r,float m,long long p,float t) {
-    locals.push_back({timing_call,w,r,p,m,t});
-}
-inline void sfd(long long e,long long c,float m,long long p,float t) {
-    sfds.push_back({sfd_call,e,c,p,m,t});
-}
-}
+#include "window_diag_state.h"
 #include <gnuradio/uwb/uwb_demod_core.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
 #include <gnuradio/uwb/uwb_fixed_tone_cancel_core.h>
@@ -80,7 +64,9 @@ int main(int argc,char**argv) try {
     if(mode=="sfd025") p.sfd_detection_threshold=.25f;
     if(mode=="both") {p.radar_verification_threshold=.20f;p.sfd_detection_threshold=.25f;}
     if(mode.rfind("cfo=",0)==0) window_diag::force_cfo=std::stod(mode.substr(4));
-    if(mode=="dense") window_diag::dense_sfd=true;
+    // Current SFD narrow search already evaluates every lag. Historical mode
+    // remains a compatibility alias, with no injected algorithm change.
+    if(mode=="dense") std::cerr << "dense: current SFD narrow scan is already dense\n";
     if(mode=="nominal") window_diag::nominal_period=true;
     const int64_t rel=std::llround((seed-ws)*65.0/48);
     demod::core::DemodScratch scratch;

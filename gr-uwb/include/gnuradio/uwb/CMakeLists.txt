@@ -57,6 +57,21 @@ install(FILES
     uwb_uhd_backend_config.h
     uwb_uhd_burst_backend.h
     uwb_hrp_mod_core.h
+    uwb_hrp_codec.h
+    uwb_resample_window.h
+    uwb_demod_scratch.h
+    uwb_demod_grid.h
+    uwb_demod_sync.h
+    uwb_demod_timing.h
+    uwb_demod_cfo.h
+    uwb_demod_sfd.h
+    uwb_demod_softchips.h
+    uwb_demod_fec.h
+    uwb_demod_phr.h
+    uwb_demod_payload.h
+    uwb_demod_pipeline.h
+    uwb_demod_execution.h
+    uwb_demod_finalize.h
     uwb_hrp_packet_source.h
     # TWR M0 contract layer.  These six headers ARE the public API for
     # configuring a TWR exchange from C++ (frame profile, timestamp/ToF
@@ -106,14 +121,8 @@ install(FILES
     # only (M1-B §5/§8).
     uwb_twr_protocol_time.h
     uwb_twr_core.h
-    # M2-A (review B2): the HRP modulator / resampler / demod cores are
-    # header-only and were ALREADY on this list, but their transitive includes
-    # were not.  uwb_hrp_mod_core.h includes uwb_demod_core.h, which includes
-    # uwb_demod_result.h, uwb_detector_core.h, uwb_phy_profile.h and
-    # uwb_cir_fir_simd.h.  Only uwb_detector_core.h (and uwb_defaults.h /
-    # uwb_radar_pdu_meta.h) were installed, so the installed uwb_hrp_mod_core.h
-    # could not compile against the prefix alone.  Install the four missing
-    # headers so an isolated consumer of the M2-A native PHY helper compiles.
+    # Public result/profile/SIMD dependencies of the packet API and legacy
+    # stage aggregate. The compiled entry point is supplied by uwb_core.
     uwb_demod_core.h
     uwb_demod_result.h
     uwb_phy_profile.h

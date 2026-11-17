@@ -1,3 +1,4 @@
+#include <gnuradio/uwb/uwb_demod_fec.h>
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <boost/test/unit_test.hpp>
 

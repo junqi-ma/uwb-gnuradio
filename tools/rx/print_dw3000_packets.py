@@ -7,7 +7,6 @@ from collections import Counter
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 
@@ -28,33 +27,16 @@ def independent_crc(data: bytes) -> int:
 
 
 def decoder() -> Path:
-    source = ROOT / 'tools/rx/decode_dw3000_packets.cc'
-    target = ROOT / 'gr-uwb/build-cfo-tail-fix/apps/print_dw3000_packets_decoder'
-    headers = ROOT / 'gr-uwb/include/gnuradio/uwb'
-    newest = max(source.stat().st_mtime_ns,
-                 *(h.stat().st_mtime_ns for h in headers.glob('*.h')))
-    if target.exists() and target.stat().st_mtime_ns >= newest:
-        return target
-    compiler = shutil.which('c++')
-    if compiler is None:
-        raise RuntimeError('缺少 C++ 编译器 c++')
-    print('编译当前源码的 C++ 解码程序（首次运行需要数秒）...', flush=True)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(target.name + f'.{os.getpid()}.tmp')
-    flags = ['-O3', '-std=c++17', '-I' + str(ROOT / 'gr-uwb/include')]
-    # These are the same optional kernels used in the previous offline test.
-    cpu = Path('/proc/cpuinfo')
-    if cpu.exists():
-        words = set(cpu.read_text().split())
-        if {'avx2', 'fma'} <= words:
-            flags += ['-mavx2', '-mfma']
-    try:
-        subprocess.run([compiler, *flags, str(source), '-o', str(temporary),
-                        '-lvolk', '-lpthread'], check=True)
-        temporary.replace(target)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return target
+    build = ROOT / 'gr-uwb/build-offline-decoder'
+    env = os.environ.copy()
+    env.pop('LD_LIBRARY_PATH', None)
+    subprocess.run(['cmake', '-S', str(ROOT / 'gr-uwb'), '-B', str(build),
+                    '-DCMAKE_BUILD_TYPE=Release', '-DUWB_BUILD_GNURADIO=OFF',
+                    '-DUWB_BUILD_EXPERIMENTS=OFF', '-DENABLE_UHD_BACKEND=OFF'],
+                   env=env, check=True, stdout=sys.stderr)
+    subprocess.run(['cmake', '--build', str(build), '--target',
+                    'uwb_dw3000_decode', '-j4'], env=env, check=True, stdout=sys.stderr)
+    return build / 'apps/uwb_dw3000_decode'
 
 
 def run(args: argparse.Namespace) -> int:
@@ -86,7 +68,9 @@ def run(args: argparse.Namespace) -> int:
     counts: Counter[str] = Counter()
     rows = []
     passed = 0
-    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, text=True)
+    env = os.environ.copy()
+    env.pop('LD_LIBRARY_PATH', None)
+    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, text=True, env=env)
     try:
         assert process.stdout is not None
         for line in process.stdout:

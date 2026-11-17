@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <gnuradio/uwb/uwb_hrp_codec.h>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -942,7 +943,7 @@ DiscreteCirResult fullpacket_cancel_discrete(
     const uint16_t crc_expected =
         static_cast<uint16_t>(wire_psdu[crc_len]) |
         static_cast<uint16_t>(static_cast<uint16_t>(wire_psdu[crc_len + 1]) << 8);
-    if (demod::core::detail::crc16_802154(wire_psdu.data(), crc_len) != crc_expected)
+    if (codec::crc16_802154(wire_psdu.data(), crc_len) != crc_expected)
         return fail("fcs_failed");
     mod::detail::encode_phr19(wire_psdu.size(),
                               profile.sync_repetitions,
