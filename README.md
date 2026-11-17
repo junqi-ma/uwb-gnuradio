@@ -15,6 +15,9 @@ windowed 65/48 resampling, DW3000 demodulation, target locking and SIC cores are
 available alongside the GNU Radio adapter. Since `5d5ba26`, native applications
 can build and run without GNU Radio or PMT. See the
 [current build and architecture guide](docs/原生接收与GNU_Radio构建使用说明.md).
+Low-SNR capture, soft decoding and compute-cost improvements are merged through
+`63c057f` (2026-11-17). These latest changes have software/replay evidence only.
+See [current status](开发状态.md) and the [reproducible evaluation tools](tools/rx/low_snr_eval/README.md).
 
 TWR includes offline protocol and native PHY work; hardware ranging remains
 outside the validated scope. See the [TWR development records](docs/twr/开发路线与验收矩阵.md).

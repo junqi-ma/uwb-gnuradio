@@ -327,6 +327,9 @@ endif()
 ########################################################################
 install(FILES
     ${CMAKE_SOURCE_DIR}/../testdata/resampler_65_48/taps_quality_minorder.txt
+    ${CMAKE_SOURCE_DIR}/../testdata/resampler_65_48/taps_quality_eq32.txt
+    ${CMAKE_SOURCE_DIR}/../testdata/resampler_65_48/taps_realtime_minorder.txt
+    ${CMAKE_SOURCE_DIR}/../testdata/resampler_65_48/taps_realtime_eq16.txt
     DESTINATION ${GR_PKG_DATA_DIR}/resampler_65_48
 )
 install(FILES

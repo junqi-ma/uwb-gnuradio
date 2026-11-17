@@ -12,7 +12,7 @@ Interpretation:
            go away with trimming; it is a floor set by the estimator, not the
            hardware.
 
-Exit code 0 always; this is a measurement tool, not a gate.
+No PASS/FAIL from the mean offset; receiver errors or no decoded packets exit nonzero.
 """
 import argparse
 import re
@@ -82,8 +82,10 @@ if cfos:
     print('cross-check    : %.2f ppm of LO   vs spc_ppm %+.2f ppm'
           % (cmean * 1e3 / LO_HZ * 1e6, mean))
     print()
-print('fused-CMF gate : |spc-2| <= 1e-9  =  0.0005 ppm')
-if abs(mean) <= 0.0005:
-    print('gate           : PASS')
-else:
-    print('gate           : FAIL (%.0fx over)' % (abs(mean) / 0.0005))
+# Admission is per packet and depends on the explicit profile tolerance.
+# A mean clock offset cannot establish whether individual frames were admitted.
+grid_flags = [int(m.group(1)) for line in ok
+              for m in [re.search(r'\bgrid_reject=([01])\b', line)] if m]
+print('grid diagnostic: %d rejected / %d decoded packets with grid_reject field'
+      % (sum(grid_flags), len(grid_flags)))
+print('fused admission: inspect per-packet grid_reject/st_fused and START configuration')

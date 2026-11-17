@@ -26,6 +26,7 @@
 #include <gnuradio/top_block.h>
 #include <gnuradio/uwb/uwb_pdu_rational_resampler_ccf_65_32.h>
 #include <pmt/pmt.h>
+#include <gnuradio/uwb/uwb_rational_resampler_core.h>
 
 #include <chrono>
 #include <cmath>
@@ -363,13 +364,18 @@ BOOST_AUTO_TEST_CASE(test_65_32_worker_accessors_and_set)
 
 BOOST_AUTO_TEST_CASE(test_65_32_worker_kernel_for_long_taps)
 {
-    // H = ceil((T + 64)/65).  H > 48 selects the VOLK kernel deterministically.
+    // H_pad=128 is outside the specialized AVX-512 profiles. The general
+    // AVX2 kernel remains supported when compiled; otherwise use VOLK.
     const auto long_taps = synth_taps(8192); // H = 128
     auto blk = UwbPduRationalResamplerCcf65_32::make_from_taps(
         long_taps, kOutRate, true,
         UwbPduRationalResamplerCcf65_32::EmitPolicy::FullWindow, kMaxIn, 2);
     BOOST_REQUIRE(blk->resampler_kernel() != nullptr);
+#if UWB_RESAMP_HAVE_AVX2
+    BOOST_CHECK_EQUAL(std::string(blk->resampler_kernel()), "avx2_fma_macroblock");
+#else
     BOOST_CHECK_EQUAL(std::string(blk->resampler_kernel()), "volk_macroblock");
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(test_65_32_worker_drops_malformed_and_oversize)

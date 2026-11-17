@@ -1,6 +1,7 @@
 # DW3000 接收工具
 
-更新：2026-11-16，主分支 `feature/sic-research`，解耦回合版本 `5d5ba26`。
+更新：2026-11-17，主分支 `feature/sic-research`，低 SNR 优化合入 `63c057f`。
+低 SNR 完整帧与 ABBA 实验见 [复现工具](low_snr_eval/README.md)。
 完整构建、安装资源与接口边界见
 [原生接收与 GNU Radio 构建使用说明](../../docs/原生接收与GNU_Radio构建使用说明.md)。
 
@@ -26,17 +27,15 @@ Full→Bypass；PACKET 的 `grid_reject` / `st_fused` 用于观察实际分支�
 
 `--mode timed` 仅支持 replay，且关闭单音消除；真实 UHD 定时 RX 尚未实现。
 安装程序可通过 `--res-dir DIR` 指定 taps/template；详见上面的构建使用说明。
-当前工作区正在新增 `--taps quality|eq32|realtime|eq16`（默认 quality），重建后可用；
-其余系数尚未纳入安装资源，需在所选资源根目录提供相应文件。
+`--taps quality|eq32|realtime|eq16` 默认 `eq16`；安装包含全部四套系数文件。
 
-**入口差异**：下面的 `live_dw3000_packets.py` 仍显式默认 `--cir auto`，不等同于
-直接 C++ 程序的 `full`。它自动构建时默认开启 GR，且只转发其 argparse 列出的参数，
-未开放 `--sync`、`--fused`、`--fused-gate-ppm`、`--res-dir` 等新参数。
-需原生构建或完整控制时，直接使用 C++ 程序。
+**入口差异**：`live_dw3000_packets.py` 是兼容入口，显式默认 `--cir auto`，
+使用 `build-live-wrapper` 构建原生程序。新增 C++ 参数放在 `--` 后透传：
 
-`capture_x410_sc16.py` 用于硬件采集，`check_clock_offset.py` 用于回放时钟统计。
-后者目前显式默认 `--fused off`，末尾 PASS/FAIL 仍按旧 `1e-9` 门限计算，不能用于
-判断当前融合准入；以 C++ live 的逐包诊断为准。
+```sh
+python3 tools/rx/live_dw3000_packets.py --replay capture.sc16 --cir full \
+  -- --sync locked --period-ms 1 --taps eq16
+```
 
 ## 接收信噪比与链路余量
 

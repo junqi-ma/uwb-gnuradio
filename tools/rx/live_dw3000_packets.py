@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-BUILD = ROOT / 'gr-uwb/build-cfo-tail-fix'
+BUILD = ROOT / 'gr-uwb/build-live-wrapper'
 
 
 def main() -> int:
@@ -26,6 +26,8 @@ def main() -> int:
     p.add_argument('--summary', type=int, default=50, help='每多少个完成的包汇总')
     p.add_argument('--cir', choices=['auto', 'bypass', 'full'], default='auto', help='默认快速解码，失败时完整 CIR 重试；也可固定 bypass/full')
     p.add_argument('--replay', type=Path, help='诊断：按采样率回放原始 SC16，替代 UHD')
+    p.add_argument('native_args', nargs=argparse.REMAINDER,
+                   help='在 -- 后传入 C++ live 参数，例如 -- --sync locked --taps eq16')
     a = p.parse_args()
     if a.channel < 0 or a.seconds < 0 or not 1 <= a.workers <= 32 or not 1 <= a.queue <= 1024 or a.summary < 1 or not 6 <= a.raw_blocks <= 4096:
         p.error('通道、时长、worker、队列或汇总间隔无效')
@@ -39,7 +41,7 @@ def main() -> int:
     log_path = BUILD / 'live-console-build.log'
     print('检查并构建当前源码的实时接收程序...', flush=True)
     commands = [
-        ['cmake', '-S', str(ROOT / 'gr-uwb'), '-B', str(BUILD), '-DCMAKE_BUILD_TYPE=Release', '-DENABLE_DOXYGEN=OFF'],
+        ['cmake', '-S', str(ROOT / 'gr-uwb'), '-B', str(BUILD), '-DCMAKE_BUILD_TYPE=Release', '-DENABLE_DOXYGEN=OFF', '-DUWB_BUILD_GNURADIO=OFF', '-DUWB_BUILD_EXPERIMENTS=OFF'],
         ['cmake', '--build', str(BUILD), '--target', 'uwb_dw3000_live', '-j', '4'],
     ]
     try:
@@ -57,8 +59,8 @@ def main() -> int:
         command += ['--' + key.replace('_', '-'), str(getattr(a, key))]
     if a.replay:
         command += ['--replay', str(a.replay)]
-    print('启动：code10 / 256 SYNC / 4z2 / 6.8 Mb/s / STS off；'
-          '单音消除开启；Ctrl+C 停止。', flush=True)
+    command += a.native_args[1:] if a.native_args[:1] == ['--'] else a.native_args
+    print('启动原生接收程序；实际配置以 C++ START 输出为准；Ctrl+C 停止。', flush=True)
     try:
         os.chdir(ROOT)
         os.execve(str(binary), command, env)

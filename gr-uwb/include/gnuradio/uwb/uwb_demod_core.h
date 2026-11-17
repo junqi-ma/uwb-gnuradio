@@ -44,6 +44,15 @@ namespace uwb {
 namespace demod {
 namespace core {
 
+// Low-SNR policy gates: normalized correlation metrics (not dB).
+// Validated with code10 / 256 SYNC / 4z2, 0 ppm AWGN replay. See
+// docs/performance/低SNR解调计算耗时优化开发报告_2026-11-17.md
+// and 低SNR解调与进锁优化开发报告_2026-11-17.md for QA and limits.
+inline constexpr float kLockedInnerNarrowRawGate = 0.045f;
+inline constexpr float kSfdSkipNarrowGate = 0.015f;
+inline constexpr float kSfdGridPeakFloor = 0.008f;
+inline constexpr double kSfdGridParFloor = 1.5;
+
 // ---------------------------------------------------------------------------
 // Integer chip-grid admission
 //
@@ -1093,7 +1102,7 @@ inline bool stage_timing(const std::complex<float>* rx,
             if (want + static_cast<int64_t>(L) >
                 static_cast<int64_t>(n))
                 break;
-            const bool narrow_inner = (m != 0) && (m0_raw_max < 0.045f);
+            const bool narrow_inner = (m != 0) && (m0_raw_max < kLockedInnerNarrowRawGate);
             const int64_t inner_rad =
                 narrow_inner ? std::min<int64_t>(roi, 32) : roi;
             float raw_max = 0.0f;
@@ -2423,7 +2432,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
     // high-SNR path, where a large seed error can produce a low k = 0 maximum
     // but a perfectly good offset window.
     const bool skip_symbol_offsets =
-        !sfd_passed && best < 0.015f &&
+        !sfd_passed && best < kSfdSkipNarrowGate &&
         timing.detected_peaks == profile.preamble_repetitions &&
         timing.metric < profile.radar_verification_threshold;
     for (int k = 1;
@@ -2603,7 +2612,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
                     std::max(bg_sum / static_cast<double>(bg_cnt), 1e-12);
                 const double par =
                     static_cast<double>(best_metric) / bg_mean;
-                if (best_metric >= 0.008f && par >= 1.5 &&
+                if (best_metric >= kSfdGridPeakFloor && par >= kSfdGridParFloor &&
                     polarity_ok(best_pos)) {
                     best = best_metric;
                     best_j = static_cast<size_t>(best_pos);

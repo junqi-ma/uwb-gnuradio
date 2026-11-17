@@ -5,7 +5,14 @@
 
 ## 当前主线：原生 UHD/C++ 与 GNU Radio 适配层
 
-更新：2026-11-16；分支 `feature/sic-research`，解耦回合提交 `5d5ba26`。
+更新：2026-11-17；分支 `feature/sic-research`，最新优化合入 `63c057f`。
+
+- [前端 SIMD 与低 SNR 捕获](performance/前端SIMD与-12dB自相关参数升级开发报告_2026-11-17.md)
+- [低 SNR 解调与进锁](performance/低SNR解调与进锁优化开发报告_2026-11-17.md)
+- [低 SNR 计算耗时优化](performance/低SNR解调计算耗时优化开发报告_2026-11-17.md)
+- [项目结构与文档整改](performance/项目结构与文档整改报告_2026-11-17.md)
+- [复现工具与统计口径](../tools/rx/low_snr_eval/README.md)
+
 
 - [现行构建、架构、安装和接收参数](原生接收与GNU_Radio构建使用说明.md)
 - [当前开发状态](../开发状态.md)

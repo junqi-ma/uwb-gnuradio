@@ -1,6 +1,6 @@
 # 原生接收与 GNU Radio 构建使用说明
 
-更新：2026-11-16；源码基线 `5d5ba26`，当前主分支 `feature/sic-research`。
+更新：2026-11-17；最新优化合入 `63c057f`，当前主分支 `feature/sic-research`。
 本页描述现行接口；按日期保存的实验报告描述当时配置，不自动代表当前默认值。
 
 ## 构建选择
@@ -20,6 +20,7 @@ ctest --test-dir gr-uwb/build-native --output-on-failure -j1
 | --- | --- | --- |
 | `UWB_BUILD_GNURADIO` | `ON` | `OFF` 不查找 GNU Radio，不构建 GR blocks、Python bindings 或 GRC |
 | `UWB_BUILD_EXPERIMENTS` | `ON` | `OFF` 不构建部分历史 benchmark/诊断目标，保留核心 QA |
+| `UWB_SIMD` | `AUTO` | `AUTO/AVX2/AVX512/SCALAR`，统一选择编译期 ISA；SCALAR 不作为实时配置 |
 | `ENABLE_UHD_BACKEND` | `AUTO` | `ON` 必须找到 UHD；`AUTO` 找到才启用；`OFF` 不构建硬件后端 |
 
 原生模式依赖 C++17、CMake、VOLK、Threads、Boost.Test；当前 CMake 会要求 Boost.Test。
@@ -84,6 +85,11 @@ gr-uwb/build-native/apps/uwb_dw3000_live \
 | `--ondemand` | `auto`，跟随 `--fused` |
 | `--tone` | `on`；20 ms 更新、0.5 ms 训练；只在连续模式启用 |
 | `--sync locked` | 锁定后使用局部 ROI，默认半宽 256 样点 |
+| `--taps` | `eq16`；可选 `quality/eq32/realtime/eq16` |
+| `--acq-span / --acq-step` | `192000 / 64`；积分对数 / 环表块粒度，不是抽取积分 |
+| `--acq-low / --acq-peak` | `0.00015 / 0.00030`；归一化延迟自相关门限 |
+| `--lock-fcs` | `on`；`off` 允许前导+SFD 身份用于进锁 |
+| `--stop-after-sfd` | `off`；`on` 跳过 PHR/payload 与 auto Full 重试，结果不能计作完整 FCS |
 | `--period-ms` | `5`；可按发送周期改为其他值 |
 | `--mode timed` | 仅 replay；无 replay 返回 2，单音消除关闭 |
 
@@ -94,20 +100,26 @@ gr-uwb/build-native/apps/uwb_dw3000_live \
 为 6.468 ppm，而 live 默认取物理上限常量；调用时显式容差决定实际准入。
 
 **Python 包装入口有区别**：`tools/rx/live_dw3000_packets.py` 仍显式传入默认
-`--cir auto`，且未开放 `--sync`、`--fused-gate-ppm`、`--res-dir` 等新参数；它的
-CMake 命令也未关闭 GR。需要无 GR 构建或完整参数时，使用上面的 C++ 入口。
-`tools/rx/check_clock_offset.py` 的末尾仍按旧 `1e-9` 门限打印 PASS/FAIL，该结论
-不适用于新门限；可用它汇总时钟统计，实际融合准入查看 PACKET 的 `grid_reject/st_fused`。
+`--cir auto`，构建使用独立的 `build-live-wrapper` 原生目录，关闭 GR 和实验目标。
+兼容入口之外的 C++ 参数通过 `--` 传入，例如：
 
-### 工作区新增的 taps 选择
+```sh
+python3 tools/rx/live_dw3000_packets.py --replay /path/to/capture.sc16 \
+  --cir full -- --sync locked --period-ms 1 --taps eq16
+```
 
-本次文档检查时，主工作区还有尚未包含在 `5d5ba26` 的 `--taps` 修改；源码支持
-`quality|eq32|realtime|eq16`，默认 `quality`，启动行新增 `taps/taps_n`。
-对应文件为 `taps_quality_minorder.txt`、`taps_quality_eq32.txt`、
-`taps_realtime_minorder.txt`、`taps_realtime_eq16.txt`，均在 `resampler_65_48/` 下。
-已编译旧二进制需重建才会有此选项。当前安装规则只包含默认 quality 文件；使用其他
-系数须确保 `--res-dir` 指向包含相应文件及模板的资源根目录。该工作区功能的应用层
-验证以对应实验报告为准，不改变本页列出的拆库验收范围。
+透传参数追加在兼容参数之后，同名参数最后一次取值生效。
+`tools/rx/check_clock_offset.py` 汇总时钟统计和逐包 `grid_reject` 计数；
+不再按旧 `1e-9` 门限对均值打印 PASS/FAIL。实际融合准入查看 PACKET 的
+`grid_reject/st_fused` 和启动配置。
+
+### 重采样系数与低 SNR 复现
+
+`--taps quality|eq32|realtime|eq16` 已提交，默认 `eq16`（Hpad 16）。
+安装包含全部四套系数和前导模板；`--res-dir` 可显式指定资源根目录。
+性能与滤波质量依据见[实采报告](performance/X410_2ms周期收包解调报告_2026-11-15.md)。
+低 SNR 完整帧夹具、ABBA runner 和统计说明见
+[复现工具](../tools/rx/low_snr_eval/README.md)。
 
 ## 安装、资源与消费者
 
