@@ -137,6 +137,17 @@ struct Options {
     std::string cfo_refit = "legacy";
     double cfo_refit_skip_rad = 0.10;
     size_t cfo_refit_min_peaks = 64;
+    // Streaming autocorrelation acquisition window & thresholds.
+    // Default spans 64000 samples (~85 SYNC symbols, 86.8 us) with step 8
+    // (8000 pairs): compresses the pure-noise floor to ~0.00013 (max 0.00166
+    // over 1e9 AWGN samples), allowing 500/500 detection down to -10 dB
+    // in-band SNR with a shorter 12000-sample (~16.3 us) persistence gate and
+    // comfortable RX-thread headroom.
+    size_t acq_span = 64000;
+    size_t acq_step = 8;
+    size_t acq_persist = 12000;
+    double acq_low = 0.0015;
+    double acq_peak = 0.0028;
     double timed_lead_us = 300.0;
     double timed_t0_ms = 0.0;
     size_t timed_lookahead = 4, timed_alignment = 4;
@@ -747,39 +758,67 @@ struct Workers {
     }
 };
 
-// Sparse streaming delayed autocorrelation, evaluated every 100 samples.
-// A 60-pair rolling statistic spans 6000 samples; it is intentionally NOT
-// advertised as numerically identical to the dense offline 6000-pair scan.
+// Sparse streaming delayed autocorrelation.
+// Accumulates delayed-conjugate products at 1-SYNC lag (750 samples @ 737.28 MS/s)
+// over a sliding window of `span` samples sampled every `step` samples.
 struct Acquisition {
-    static constexpr int64_t step = 100, lag = 750, span = 6000;
+    static constexpr int64_t lag = 750;
+    static constexpr int64_t gap_max = 30000, holdoff_len = 589824;
+    int64_t step = 8, span = 64000, min_persist = 12000, seed_shift = 32000;
+    double low_thr = 0.0015, peak_thr = 0.0028;
     struct Pair { double re=0, im=0, e1=0, e2=0; };
-    Pair pairs[60], sum;
+    std::vector<Pair> pairs;
+    Pair sum{};
     size_t index=0, count=0;
     int64_t probe=0, first=-1, last=-1, holdoff=0;
     double peak=0;
-    void reset(int64_t start) { *this = Acquisition{}; probe=start; }
+
+    Acquisition() { configure(span, step, min_persist, low_thr, peak_thr); }
+    void configure(int64_t new_span, int64_t new_step, int64_t new_persist,
+                   double new_low, double new_peak) {
+        span = new_span;
+        step = new_step;
+        min_persist = new_persist;
+        low_thr = new_low;
+        peak_thr = new_peak;
+        // Center the reported seed relative to the leading-edge crossing so
+        // |seed - true_start| remains well inside pre_guard (36864) across high
+        // and low SNR; preserve the exact legacy offset when span <= 6000.
+        seed_shift = (span > 6000) ? (span / 2) : 0;
+        const size_t n_pairs = size_t(span / step);
+        pairs.assign(n_pairs, Pair{});
+        reset(0);
+    }
+    void reset(int64_t start) {
+        std::fill(pairs.begin(), pairs.end(), Pair{});
+        sum = Pair{};
+        index = 0; count = 0;
+        probe = start; first = -1; last = -1; holdoff = 0;
+        peak = 0.0;
+    }
     int64_t scan(const std::vector<std::complex<int16_t>>& ring, double* out_metric = nullptr) {
         const auto a = ring[size_t(probe)&(history_size-1)];
         const auto b = ring[size_t(probe+lag)&(history_size-1)];
         const double ar=a.real(), ai=a.imag(), br=b.real(), bi=b.imag();
         Pair v{ar*br+ai*bi, ai*br-ar*bi, ar*ar+ai*ai, br*br+bi*bi};
+        const size_t n_pairs = pairs.size();
         auto& old = pairs[index];
         sum.re += v.re-old.re; sum.im += v.im-old.im;
         sum.e1 += v.e1-old.e1; sum.e2 += v.e2-old.e2;
-        old=v; index=(index+1)%60; count=std::min<size_t>(60,count+1);
+        old=v; index=(index+1==n_pairs)?0:(index+1); count=std::min(n_pairs,count+1);
         const int64_t at = probe-(span-step); probe += step;
-        if (count < 60 || at < holdoff) return -1;
+        if (count < n_pairs || at < holdoff) return -1;
         const double metric = (sum.re*sum.re+sum.im*sum.im) / std::max(1.0,sum.e1*sum.e2);
-        if (metric >= .15) {
-            if (first < 0 || at-last > 30000) { first=at; peak=0; }
+        if (metric >= low_thr) {
+            if (first < 0 || at-last > gap_max) { first=at; peak=0; }
             last=at; peak=std::max(peak,metric);
-            if (at-first >= 36864 && peak > .5) {
-                const auto seed=first;
-                holdoff=seed+589824; first=-1;
+            if (at-first >= min_persist && peak > peak_thr) {
+                const auto seed = std::max<int64_t>(0, first + seed_shift);
+                holdoff=seed+holdoff_len; first=-1;
                 if (out_metric) *out_metric = peak;
                 peak=0; return seed;
             }
-        } else if (first >= 0 && at-last > 30000) { first=-1; peak=0; }
+        } else if (first >= 0 && at-last > gap_max) { first=-1; peak=0; }
         return -1;
     }
 };
@@ -982,6 +1021,8 @@ try {
                 "  phase and the single-pass range covers the packet; skip forces it)\n"
                 "--cfo-refit-skip-rad 0.10 (auto threshold, rad over the rotated span)\n"
                 "--cfo-refit-min-peaks 64 (auto: minimum Stage-2 peaks)\n"
+                "--acq-span 64000 --acq-step 8 --acq-persist 12000 (autocorrelation window, stride & plateau span)\n"
+                "--acq-low 0.0015 --acq-peak 0.0028 (autocorrelation plateau & peak gates)\n"
                 "--timed-lead-us 300 --timed-lookahead 4 --timed-alignment 4\n"
                 "--timed-t0-ms 0 (first expected target time; timed_burst has no blind acquisition)\n"
                 "--taps eq16|quality|eq32|realtime (resampler Hpad 16|48|32|24, default eq16)\n"
@@ -1024,6 +1065,11 @@ try {
         else if (key=="--cfo-refit") o.cfo_refit=value();
         else if (key=="--cfo-refit-skip-rad") o.cfo_refit_skip_rad=std::stod(value());
         else if (key=="--cfo-refit-min-peaks") o.cfo_refit_min_peaks=std::stoul(value());
+        else if (key=="--acq-span") o.acq_span=std::stoul(value());
+        else if (key=="--acq-step") o.acq_step=std::stoul(value());
+        else if (key=="--acq-persist") o.acq_persist=std::stoul(value());
+        else if (key=="--acq-low") o.acq_low=std::stod(value());
+        else if (key=="--acq-peak") o.acq_peak=std::stod(value());
         else if (key=="--timed-lead-us") o.timed_lead_us=std::stod(value());
         else if (key=="--timed-lookahead") o.timed_lookahead=std::stoul(value());
         else if (key=="--timed-alignment") o.timed_alignment=std::stoul(value());
@@ -1055,6 +1101,13 @@ try {
         throw std::runtime_error("--cfo-refit must be legacy, auto or skip");
     if (!(o.cfo_refit_skip_rad > 0.0) || !std::isfinite(o.cfo_refit_skip_rad))
         throw std::runtime_error("--cfo-refit-skip-rad must be finite and > 0");
+    if (o.acq_step == 0 || o.acq_span < o.acq_step || (o.acq_span % o.acq_step) != 0)
+        throw std::runtime_error("--acq-span must be a positive multiple of --acq-step");
+    if (o.acq_persist == 0)
+        throw std::runtime_error("--acq-persist must be > 0");
+    if (!(o.acq_low > 0.0) || o.acq_low >= 1.0 || !std::isfinite(o.acq_low) ||
+        !(o.acq_peak >= o.acq_low) || o.acq_peak >= 1.0 || !std::isfinite(o.acq_peak))
+        throw std::runtime_error("--acq-low/--acq-peak must satisfy 0 < low <= peak < 1");
     // The gate is a drift budget: above the physical ceiling (1 sample over the
     // 127 B payload = 6.5 ppm) the integer grid cannot stay on the correlation
     // peak, so accepting it would produce silently wrong soft chips.
@@ -1159,7 +1212,12 @@ try {
             std::to_string(o.locked_pre_guard+lock_cfg.geometry.capture+post_guard)+
         " interference="+std::string(o.interference?"on":"off")+
         " fused="+std::string(o.fused?"on":"off")+
-        " ondemand="+std::string(o.ondemand_resolved?"on":"off"));
+        " ondemand="+std::string(o.ondemand_resolved?"on":"off")+
+        " acq_span="+std::to_string(o.acq_span)+
+        " acq_step="+std::to_string(o.acq_step)+
+        " acq_persist="+std::to_string(o.acq_persist)+
+        " acq_low="+std::to_string(o.acq_low)+
+        " acq_peak="+std::to_string(o.acq_peak));
     // Effective pre-guard for the next cut window.  It follows the lock state:
     // the blind acquisition platform needs the wide guard, the locked
     // predictor only needs the bounded ROI.  Every window cut (target,
@@ -1271,6 +1329,8 @@ try {
     std::vector<std::complex<int16_t>> ring(history_size);
     std::vector<std::complex<int16_t>> incoming(block);
     Acquisition acq;
+    acq.configure(int64_t(o.acq_span), int64_t(o.acq_step),
+                  int64_t(o.acq_persist), o.acq_low, o.acq_peak);
     if (!src->open()) throw std::runtime_error("cannot open UHD/replay or tone configuration");
     if (std::abs(src->actual_rx_rate()-fs)>.5) throw std::runtime_error("unexpected RX rate");
     if (!src->start_stream()) throw std::runtime_error("cannot start RX stream");

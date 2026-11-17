@@ -1,0 +1,228 @@
+{
+  "snr_inband_db": -11.0,
+  "n_slots_scanned": 200,
+  "n_detected": 185,
+  "theory_mean": 0.0027377748218527145,
+  "cases": [
+    {
+      "case": 1,
+      "slot": 3,
+      "status": "MISS",
+      "detected": false,
+      "seed_offset_samples": null,
+      "max_metric": 0.0026699372101575136,
+      "commit_peak": 0.0,
+      "max_contig_samples_ge_00015": 144920,
+      "max_contig_us_ge_00015": 196.56032986111111
+    },
+    {
+      "case": 2,
+      "slot": 11,
+      "status": "MISS",
+      "detected": false,
+      "seed_offset_samples": null,
+      "max_metric": 0.00274461368098855,
+      "commit_peak": 0.0,
+      "max_contig_samples_ge_00015": 43520,
+      "max_contig_us_ge_00015": 59.02777777777778
+    },
+    {
+      "case": 3,
+      "slot": 14,
+      "status": "MISS",
+      "detected": false,
+      "seed_offset_samples": null,
+      "max_metric": 0.0025181355886161327,
+      "commit_peak": 0.0,
+      "max_contig_samples_ge_00015": 17000,
+      "max_contig_us_ge_00015": 23.057725694444446
+    },
+    {
+      "case": 4,
+      "slot": 64,
+      "status": "MISS",
+      "detected": false,
+      "seed_offset_samples": null,
+      "max_metric": 0.002681278856471181,
+      "commit_peak": 0.0,
+      "max_contig_samples_ge_00015": 68600,
+      "max_contig_us_ge_00015": 93.04470486111111
+    },
+    {
+      "case": 5,
+      "slot": 73,
+      "status": "MISS",
+      "detected": false,
+      "seed_offset_samples": null,
+      "max_metric": 0.0025920176412910223,
+      "commit_peak": 0.0,
+      "max_contig_samples_ge_00015": 39920,
+      "max_contig_us_ge_00015": 54.14496527777778
+    },
+    {
+      "case": 6,
+      "slot": 88,
+      "status": "MISS",
+      "detected": false,
+      "seed_offset_samples": null,
+      "max_metric": 0.0027096965350210667,
+      "commit_peak": 0.0,
+      "max_contig_samples_ge_00015": 83720,
+      "max_contig_us_ge_00015": 113.55251736111111
+    },
+    {
+      "case": 7,
+      "slot": 90,
+      "status": "MISS",
+      "detected": false,
+      "seed_offset_samples": null,
+      "max_metric": 0.0026321986224502325,
+      "commit_peak": 0.0,
+      "max_contig_samples_ge_00015": 42520,
+      "max_contig_us_ge_00015": 57.67144097222222
+    },
+    {
+      "case": 8,
+      "slot": 96,
+      "status": "MISS",
+      "detected": false,
+      "seed_offset_samples": null,
+      "max_metric": 0.002683056751266122,
+      "commit_peak": 0.0,
+      "max_contig_samples_ge_00015": 72520,
+      "max_contig_us_ge_00015": 98.36154513888889
+    },
+    {
+      "case": 9,
+      "slot": 0,
+      "status": "OK",
+      "detected": true,
+      "seed_offset_samples": 16240,
+      "max_metric": 0.0036112358793616295,
+      "commit_peak": 0.00280823465436697,
+      "max_contig_samples_ge_00015": 95600,
+      "max_contig_us_ge_00015": 129.66579861111111
+    },
+    {
+      "case": 10,
+      "slot": 1,
+      "status": "OK",
+      "detected": true,
+      "seed_offset_samples": 20192,
+      "max_metric": 0.003736619371920824,
+      "commit_peak": 0.002804212737828493,
+      "max_contig_samples_ge_00015": 79960,
+      "max_contig_us_ge_00015": 108.45269097222223
+    },
+    {
+      "case": 11,
+      "slot": 2,
+      "status": "OK",
+      "detected": true,
+      "seed_offset_samples": 10872,
+      "max_metric": 0.004171842709183693,
+      "commit_peak": 0.0028055766597390175,
+      "max_contig_samples_ge_00015": 100480,
+      "max_contig_us_ge_00015": 136.28472222222223
+    },
+    {
+      "case": 12,
+      "slot": 4,
+      "status": "OK",
+      "detected": true,
+      "seed_offset_samples": 6856,
+      "max_metric": 0.005443084519356489,
+      "commit_peak": 0.002806972013786435,
+      "max_contig_samples_ge_00015": 170800,
+      "max_contig_us_ge_00015": 231.66232638888889
+    },
+    {
+      "case": 13,
+      "slot": 5,
+      "status": "OK",
+      "detected": true,
+      "seed_offset_samples": 28720,
+      "max_metric": 0.003096679924055934,
+      "commit_peak": 0.0028067920356988907,
+      "max_contig_samples_ge_00015": 73720,
+      "max_contig_us_ge_00015": 99.98914930555556
+    },
+    {
+      "case": 14,
+      "slot": 6,
+      "status": "OK",
+      "detected": true,
+      "seed_offset_samples": -1240,
+      "max_metric": 0.0037436606362462044,
+      "commit_peak": 0.002858856227248907,
+      "max_contig_samples_ge_00015": 77360,
+      "max_contig_us_ge_00015": 104.92621527777779
+    },
+    {
+      "case": 15,
+      "slot": 7,
+      "status": "OK",
+      "detected": true,
+      "seed_offset_samples": 20848,
+      "max_metric": 0.002903201151639223,
+      "commit_peak": 0.00282386876642704,
+      "max_contig_samples_ge_00015": 49200,
+      "max_contig_us_ge_00015": 66.73177083333334
+    },
+    {
+      "case": 16,
+      "slot": 17,
+      "status": "OK",
+      "detected": true,
+      "seed_offset_samples": 13864,
+      "max_metric": 0.002898214850574732,
+      "commit_peak": 0.002800333546474576,
+      "max_contig_samples_ge_00015": 110280,
+      "max_contig_us_ge_00015": 149.57682291666669
+    },
+    {
+      "case": 17,
+      "slot": 33,
+      "status": "OK",
+      "detected": true,
+      "seed_offset_samples": 18416,
+      "max_metric": 0.0028914068825542927,
+      "commit_peak": 0.002817325759679079,
+      "max_contig_samples_ge_00015": 80840,
+      "max_contig_us_ge_00015": 109.64626736111111
+    },
+    {
+      "case": 18,
+      "slot": 114,
+      "status": "OK",
+      "detected": true,
+      "seed_offset_samples": 20320,
+      "max_metric": 0.0029101893305778503,
+      "commit_peak": 0.002815446350723505,
+      "max_contig_samples_ge_00015": 97120,
+      "max_contig_us_ge_00015": 131.72743055555557
+    },
+    {
+      "case": 19,
+      "slot": 157,
+      "status": "LATE(+103432)",
+      "detected": true,
+      "seed_offset_samples": 103432,
+      "max_metric": 0.0028677331283688545,
+      "commit_peak": 0.0028051380068063736,
+      "max_contig_samples_ge_00015": 46960,
+      "max_contig_us_ge_00015": 63.69357638888889
+    },
+    {
+      "case": 20,
+      "slot": 193,
+      "status": "OK",
+      "detected": true,
+      "seed_offset_samples": 18288,
+      "max_metric": 0.0029026949778199196,
+      "commit_peak": 0.00280107744038105,
+      "max_contig_samples_ge_00015": 166000,
+      "max_contig_us_ge_00015": 225.15190972222223
+    }
+  ]
+}

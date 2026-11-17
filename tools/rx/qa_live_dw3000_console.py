@@ -147,5 +147,19 @@ with tempfile.TemporaryDirectory(prefix='uwb-live-console-') as temporary:
         assert why in rejected.stderr, (bad, rejected.stderr)
         assert 'START ' not in rejected.stdout, rejected.stdout
 
+    # Autocorrelation acquisition parameter validation.
+    for extra, why in [
+        (['--acq-span', '48000', '--acq-step', '7'], 'positive multiple'),
+        (['--acq-persist', '0'], 'must be > 0'),
+        (['--acq-low', '0.10', '--acq-peak', '0.05'], 'low <= peak'),
+        (['--acq-low', '0.0'], 'low <= peak'),
+    ]:
+        rejected = subprocess.run(
+            [binary, '--replay', str(path), '--summary', '1'] + extra,
+            capture_output=True, text=True, timeout=30)
+        assert rejected.returncode == 2, (extra, rejected.stdout + rejected.stderr)
+        assert why in rejected.stderr, (extra, rejected.stderr)
+        assert 'START ' not in rejected.stdout, rejected.stdout
+
 print('live console: acquisition/rejection, batch summary, SIGINT, source failure, '
       'locked strategy, timed-burst plan and locked pre-guard PASS')

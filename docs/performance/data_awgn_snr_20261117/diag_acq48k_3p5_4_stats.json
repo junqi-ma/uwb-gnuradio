@@ -1,0 +1,458 @@
+{
+  "minus3p5db": {
+    "snr_inband_db": -3.5,
+    "n_slots_scanned": 200,
+    "n_detected": 199,
+    "theory_mean": 0.054054908426114545,
+    "cases": [
+      {
+        "case": 1,
+        "slot": 11,
+        "status": "MISS",
+        "detected": false,
+        "seed_offset_samples": null,
+        "max_metric": 0.04945845156908035,
+        "commit_peak": 0.0,
+        "max_contig_samples_ge_002": 174850,
+        "max_contig_us_ge_002": 237.15549045138889
+      },
+      {
+        "case": 2,
+        "slot": 1,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 19842,
+        "max_metric": 0.08297461271286011,
+        "commit_peak": 0.0747610479593277,
+        "max_contig_samples_ge_002": 170750,
+        "max_contig_us_ge_002": 231.59450954861111
+      },
+      {
+        "case": 3,
+        "slot": 16,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 16992,
+        "max_metric": 0.06891538947820663,
+        "commit_peak": 0.06660730391740799,
+        "max_contig_samples_ge_002": 171800,
+        "max_contig_us_ge_002": 233.01866319444446
+      },
+      {
+        "case": 4,
+        "slot": 26,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 15592,
+        "max_metric": 0.0828981101512909,
+        "commit_peak": 0.06681378185749054,
+        "max_contig_samples_ge_002": 163150,
+        "max_contig_us_ge_002": 221.28634982638889
+      },
+      {
+        "case": 5,
+        "slot": 36,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 15642,
+        "max_metric": 0.06882325559854507,
+        "commit_peak": 0.0641993060708046,
+        "max_contig_samples_ge_002": 178550,
+        "max_contig_us_ge_002": 242.17393663194446
+      },
+      {
+        "case": 6,
+        "slot": 46,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 17192,
+        "max_metric": 0.07398096472024918,
+        "commit_peak": 0.06717443466186523,
+        "max_contig_samples_ge_002": 175750,
+        "max_contig_us_ge_002": 238.37619357638889
+      },
+      {
+        "case": 7,
+        "slot": 76,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 23992,
+        "max_metric": 0.06645189225673676,
+        "commit_peak": 0.05005164444446564,
+        "max_contig_samples_ge_002": 151100,
+        "max_contig_us_ge_002": 204.94249131944446
+      },
+      {
+        "case": 8,
+        "slot": 81,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 15692,
+        "max_metric": 0.09165146201848984,
+        "commit_peak": 0.08314572274684906,
+        "max_contig_samples_ge_002": 175800,
+        "max_contig_us_ge_002": 238.44401041666669
+      },
+      {
+        "case": 9,
+        "slot": 86,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 17842,
+        "max_metric": 0.06528746336698532,
+        "commit_peak": 0.05449642613530159,
+        "max_contig_samples_ge_002": 174350,
+        "max_contig_us_ge_002": 236.47732204861111
+      },
+      {
+        "case": 10,
+        "slot": 101,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 17842,
+        "max_metric": 0.06865665316581726,
+        "commit_peak": 0.06601379066705704,
+        "max_contig_samples_ge_002": 176100,
+        "max_contig_us_ge_002": 238.85091145833334
+      },
+      {
+        "case": 11,
+        "slot": 106,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 15792,
+        "max_metric": 0.0834919810295105,
+        "commit_peak": 0.07950180023908615,
+        "max_contig_samples_ge_002": 170000,
+        "max_contig_us_ge_002": 230.57725694444446
+      },
+      {
+        "case": 12,
+        "slot": 121,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 17242,
+        "max_metric": 0.07530304789543152,
+        "commit_peak": 0.061603739857673645,
+        "max_contig_samples_ge_002": 162800,
+        "max_contig_us_ge_002": 220.81163194444446
+      },
+      {
+        "case": 13,
+        "slot": 126,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 17042,
+        "max_metric": 0.0702068954706192,
+        "commit_peak": 0.06361405551433563,
+        "max_contig_samples_ge_002": 179750,
+        "max_contig_us_ge_002": 243.80154079861111
+      },
+      {
+        "case": 14,
+        "slot": 141,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 24092,
+        "max_metric": 0.07010915875434875,
+        "commit_peak": 0.06635760515928268,
+        "max_contig_samples_ge_002": 149400,
+        "max_contig_us_ge_002": 202.63671875
+      },
+      {
+        "case": 15,
+        "slot": 162,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 16162,
+        "max_metric": 0.0692790076136589,
+        "commit_peak": 0.050657130777835846,
+        "max_contig_samples_ge_002": 170250,
+        "max_contig_us_ge_002": 230.91634114583334
+      },
+      {
+        "case": 16,
+        "slot": 181,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 16342,
+        "max_metric": 0.07835575193166733,
+        "commit_peak": 0.06735960394144058,
+        "max_contig_samples_ge_002": 173550,
+        "max_contig_us_ge_002": 235.39225260416669
+      },
+      {
+        "case": 17,
+        "slot": 186,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 15792,
+        "max_metric": 0.07447351515293121,
+        "commit_peak": 0.06040532514452934,
+        "max_contig_samples_ge_002": 180250,
+        "max_contig_us_ge_002": 244.47970920138889
+      },
+      {
+        "case": 18,
+        "slot": 189,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 15452,
+        "max_metric": 0.07733102887868881,
+        "commit_peak": 0.05013132095336914,
+        "max_contig_samples_ge_002": 160200,
+        "max_contig_us_ge_002": 217.28515625
+      },
+      {
+        "case": 19,
+        "slot": 191,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 16542,
+        "max_metric": 0.07785343378782272,
+        "commit_peak": 0.06608156114816666,
+        "max_contig_samples_ge_002": 131750,
+        "max_contig_us_ge_002": 178.69737413194446
+      },
+      {
+        "case": 20,
+        "slot": 199,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 16352,
+        "max_metric": 0.07575447857379913,
+        "commit_peak": 0.05019095912575722,
+        "max_contig_samples_ge_002": 166650,
+        "max_contig_us_ge_002": 226.03352864583334
+      }
+    ]
+  },
+  "minus4db": {
+    "snr_inband_db": -4.0,
+    "n_slots_scanned": 100,
+    "n_detected": 95,
+    "theory_mean": 0.04519379444667312,
+    "cases": [
+      {
+        "case": 1,
+        "slot": 11,
+        "status": "MISS",
+        "detected": false,
+        "seed_offset_samples": null,
+        "max_metric": 0.04176861420273781,
+        "commit_peak": 0.0,
+        "max_contig_samples_ge_002": 139050,
+        "max_contig_us_ge_002": 188.5986328125
+      },
+      {
+        "case": 2,
+        "slot": 17,
+        "status": "MISS",
+        "detected": false,
+        "seed_offset_samples": null,
+        "max_metric": 0.04707382619380951,
+        "commit_peak": 0.0,
+        "max_contig_samples_ge_002": 172850,
+        "max_contig_us_ge_002": 234.4428168402778
+      },
+      {
+        "case": 3,
+        "slot": 19,
+        "status": "MISS",
+        "detected": false,
+        "seed_offset_samples": null,
+        "max_metric": 0.049470141530036926,
+        "commit_peak": 0.0,
+        "max_contig_samples_ge_002": 73300,
+        "max_contig_us_ge_002": 99.41948784722223
+      },
+      {
+        "case": 4,
+        "slot": 40,
+        "status": "MISS",
+        "detected": false,
+        "seed_offset_samples": null,
+        "max_metric": 0.049855660647153854,
+        "commit_peak": 0.0,
+        "max_contig_samples_ge_002": 173700,
+        "max_contig_us_ge_002": 235.595703125
+      },
+      {
+        "case": 5,
+        "slot": 75,
+        "status": "MISS",
+        "detected": false,
+        "seed_offset_samples": null,
+        "max_metric": 0.043420713394880295,
+        "commit_peak": 0.0,
+        "max_contig_samples_ge_002": 89750,
+        "max_contig_us_ge_002": 121.73122829861111
+      },
+      {
+        "case": 6,
+        "slot": 1,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 22592,
+        "max_metric": 0.07158117741346359,
+        "commit_peak": 0.06782491505146027,
+        "max_contig_samples_ge_002": 166450,
+        "max_contig_us_ge_002": 225.76226128472223
+      },
+      {
+        "case": 7,
+        "slot": 6,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 16442,
+        "max_metric": 0.07987558096647263,
+        "commit_peak": 0.0640740767121315,
+        "max_contig_samples_ge_002": 128100,
+        "max_contig_us_ge_002": 173.74674479166669
+      },
+      {
+        "case": 8,
+        "slot": 16,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 17892,
+        "max_metric": 0.05988312512636185,
+        "commit_peak": 0.05626342445611954,
+        "max_contig_samples_ge_002": 167950,
+        "max_contig_us_ge_002": 227.79676649305557
+      },
+      {
+        "case": 9,
+        "slot": 26,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 17842,
+        "max_metric": 0.07329130917787552,
+        "commit_peak": 0.05846308544278145,
+        "max_contig_samples_ge_002": 157450,
+        "max_contig_us_ge_002": 213.55523003472223
+      },
+      {
+        "case": 10,
+        "slot": 36,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 17992,
+        "max_metric": 0.058486539870500565,
+        "commit_peak": 0.05650816485285759,
+        "max_contig_samples_ge_002": 174200,
+        "max_contig_us_ge_002": 236.2738715277778
+      },
+      {
+        "case": 11,
+        "slot": 46,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 19892,
+        "max_metric": 0.0640033558011055,
+        "commit_peak": 0.06149371340870857,
+        "max_contig_samples_ge_002": 172100,
+        "max_contig_us_ge_002": 233.42556423611111
+      },
+      {
+        "case": 12,
+        "slot": 53,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 19482,
+        "max_metric": 0.05698859319090843,
+        "commit_peak": 0.05068238452076912,
+        "max_contig_samples_ge_002": 147550,
+        "max_contig_us_ge_002": 200.12749565972223
+      },
+      {
+        "case": 13,
+        "slot": 61,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 17692,
+        "max_metric": 0.09221719205379486,
+        "commit_peak": 0.07809323072433472,
+        "max_contig_samples_ge_002": 116650,
+        "max_contig_us_ge_002": 158.21668836805557
+      },
+      {
+        "case": 14,
+        "slot": 66,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 16742,
+        "max_metric": 0.06360386312007904,
+        "commit_peak": 0.05023621395230293,
+        "max_contig_samples_ge_002": 96950,
+        "max_contig_us_ge_002": 131.49685329861111
+      },
+      {
+        "case": 15,
+        "slot": 72,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 17562,
+        "max_metric": 0.0633503720164299,
+        "commit_peak": 0.05005702003836632,
+        "max_contig_samples_ge_002": 165350,
+        "max_contig_us_ge_002": 224.27029079861111
+      },
+      {
+        "case": 16,
+        "slot": 74,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 15502,
+        "max_metric": 0.06196717545390129,
+        "commit_peak": 0.05015578493475914,
+        "max_contig_samples_ge_002": 132450,
+        "max_contig_us_ge_002": 179.64680989583334
+      },
+      {
+        "case": 17,
+        "slot": 76,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 26692,
+        "max_metric": 0.057879429310560226,
+        "commit_peak": 0.05079425871372223,
+        "max_contig_samples_ge_002": 128050,
+        "max_contig_us_ge_002": 173.67892795138889
+      },
+      {
+        "case": 18,
+        "slot": 81,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 17192,
+        "max_metric": 0.08000873029232025,
+        "commit_peak": 0.07480889558792114,
+        "max_contig_samples_ge_002": 171750,
+        "max_contig_us_ge_002": 232.95084635416669
+      },
+      {
+        "case": 19,
+        "slot": 86,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 19342,
+        "max_metric": 0.056472744792699814,
+        "commit_peak": 0.05016012862324715,
+        "max_contig_samples_ge_002": 166100,
+        "max_contig_us_ge_002": 225.2875434027778
+      },
+      {
+        "case": 20,
+        "slot": 96,
+        "status": "OK",
+        "detected": true,
+        "seed_offset_samples": 17892,
+        "max_metric": 0.05301762372255325,
+        "commit_peak": 0.05030129849910736,
+        "max_contig_samples_ge_002": 132950,
+        "max_contig_us_ge_002": 180.32497829861111
+      }
+    ]
+  }
+}
