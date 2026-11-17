@@ -1,3 +1,46 @@
+# 低 SNR 解调与进锁优化（2026-11-17）
+
+已按 `docs/performance/多Subagent并行开发方案_低SNR解调与进锁优化_2026-11-17.md` 交付，
+报告 `docs/performance/低SNR解调与进锁优化开发报告_2026-11-17.md`。基线 `0cff03af`，
+集成分支 `exp/low-snr-integration`（Wave 1 tag `base-w1`）。只做软件/文件回放，**未上板**。
+
+- **验收（200 包/档，完整帧，1 ms 周期，4 worker）**：带内 SNR `+4 / −3.5 / −4.0 / −8.0 / −10.0 dB`
+  的 acquire PRR 由基线 `199/148/14/0/0` 提升到 **`199/197/198/199/179`**（`/200`），
+  `acq_seeds=200/200`、`raw_drop_samples=0`、`full_retry=0`；`+4 dB` 逐阶段耗时与基线在噪声内一致。
+- **`−12/−14 dB` 进锁闭环**（`--sync locked --lock-fcs off --stop-after-sfd on`）：
+  `acq_seeds=200/200`、`lock_entries=1`、`reacquire_entries=0`、`final_state=LOCKED`、`raw_drop=0`。
+- **纯 AWGN 0.5 s**：`acq_seeds=0`、`candidates=0`、`completed=0`、`frontend_us` 98.6/98.7 ms
+  （`--tone on/off`）、`raw_drop=0`。
+- **Timing**：`AcquireLegacy` 两个窄窗 `local_best` 开启既有 PAR 兜底；训练被绝对门限截断时按 `0.06`
+  底线二次跟踪；全部失败才走 `K=64` 周期折叠（门限 `0.05`）+ 16×16 超级锚点拟合。
+  QA：`−4/−8 dB` 亚门限获取；`−12/−14 dB` 带 ±6 符号种子扰动 **50/50**、起点误差 0；100 纯噪窗 0 虚警。
+- **两处任务书未覆盖的必须偏离**：①**折叠度量严格以 1016 为周期**（前导是 256 个相同 SYNC），
+  折叠本身给不出绝对符号号；实测前端种子在 −14 dB 下误差 −6.5…+4.4 符号，故新增"前导沿扫描"消歧
+  （真起点前是噪声 0.001、之后是 SYNC 0.038）。②`detected_peaks` 折叠路径填 `preamble_repetitions`
+  而非 16 个锚点数，否则 `stage_cir_softchips` 只平均 8 个 SYNC（约 −8 dB CIR SNR）。
+- **CFO**：`fit_cfo` 相邻对门限在密集对为空时退化到 `dt ≤ 20·1016`（16 锚点间隔 16×1016 原本收集 0 对、
+  斜率静默为 0）；Tail Retrack 写死的 `0.20f` 改为 `min(threshold, 0.08f)`（−3.5 dB 曾 23/100 `CFO_FAILED`）。
+- **SFD**：主路径逐位不变；失败时离散整数符号网格 `k ∈ [−36,+36]`（先 `δ=0` 全扫、只对最优格点精修 ±1），
+  判通 `peak ≥ 0.008` + `PAR ≥ 1.5` + 8 符号极性全匹配（抽为共用 lambda）。
+  **PAR 取 1.5 而非任务书 5.5**：背景格点落在 SYNC 上，`4z2`（和 −4）与纯 SYNC 只有 1/4 功率相关，
+  真峰仅约背景 2 倍；虚警由 0.008 底线（纯噪 200 窗最大 0.00053）与极性锁（2⁻⁸/候选）承担。
+  QA：`−10/−12/−14 dB` 各 50/50、定位误差 0（±10 符号扰动）；200 纯噪窗 0 虚警。
+- **PHR / Payload 软判决**：`rxfusion::decide_bpm_soft`（硬判决与 `decide_bpm` 逐位相同）；
+  `decode_phr_decisions`/`_soft` 共用 `phr_secded_parse`；`decode_payload_hard`/`_soft` 共用
+  `finish_rs_crc_payload`；`stage_payload_fused_cmf` 先硬判决，失败用**同一批四支路度量**原地软判决，
+  仅软判决仍败才退回 ~15 ms 全流重算。QA：LLR 扫描 1200 次硬 41 / 软 283 / **软救回 242**；
+  高 SNR PSDU 与纯硬判决基线逐字节一致。
+- **Live 开关**：`--lock-fcs on|off`（默认 on）→ `require_fcs`；`--stop-after-sfd on|off`（默认 off）→
+  `rx_stop_after_sfd`；非法值退出码 2。联动修复：`--cir auto` 的 Full 重试加 `!rx_stop_after_sfd`；
+  `identity_mismatch` 干扰统计仅在 `lock_fcs=on && stop_after_sfd=off` 时记录。默认行为不变。
+- **回归**：AVX2 与 `UWB_SIMD=SCALAR`（树内 `gr-uwb/build-scalar`）各 **52 项 51 通过 1 跳过 0 失败**。
+- **未验证**：上板/UHD、paced 到达、8 worker、负载下 P99、多径 / AWGN+ISR 混合、MATLAB 交叉验证、
+  CFO 扫频与 SFO（完整帧只在 CFO=0 跑过，CFO 精度只做 16 锚点合成单测）、`−16/−18 dB`。
+  `−12 dB` 的 `identity_rejects=68` 明显高于 `−14 dB` 的 2，机制未归因；`--sync locked` 在 `−10 dB`
+  反而低于 acquire（165 vs 179），未调参。
+
+---
+
 # 前端自相关 SIMD 化与 `-12 dB` 参数升级（2026-11-17）
 
 已按 `docs/performance/前端SIMD与-12dB自相关参数升级方案_2026-11-17.md` 交付，
