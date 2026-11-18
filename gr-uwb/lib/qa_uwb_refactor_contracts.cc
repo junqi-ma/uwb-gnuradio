@@ -231,3 +231,103 @@ BOOST_AUTO_TEST_CASE(live_submission_accounting_single_slot_deterministic)
     for (size_t i = 0; i < 8; ++i)
         BOOST_CHECK(copied_iq[i] == ring[(12 + i) & 15]);
 }
+
+BOOST_AUTO_TEST_CASE(demod_window_range_geometry_and_derotated_span)
+{
+    using namespace demod::core;
+
+    // Clamping at both window boundaries and empty intervals.
+    BOOST_CHECK(clamp_sample_range(-50, 0, 1000).empty());
+    BOOST_CHECK(clamp_sample_range(1200, 1400, 1000).empty());
+    BOOST_CHECK(clamp_sample_range(0, 100, 0).empty());
+    BOOST_CHECK((clamp_sample_range(-20, 1500, 1000) == SampleRange{0, 1000}));
+
+    // Same hi is never sufficient if lo does not cover the required start, and
+    // CFO / phase origin must also match.
+    const DerotatedSpan span{SampleRange{500, 2000}, 1250.0, 0, true};
+    BOOST_CHECK(span.covers_with_cfo(SampleRange{500, 2000}, 1250.0, 0));
+    BOOST_CHECK(span.covers_with_cfo(SampleRange{600, 1800}, 1250.0, 0));
+    BOOST_CHECK(!span.covers_with_cfo(SampleRange{499, 2000}, 1250.0, 0));
+    BOOST_CHECK(!span.covers_with_cfo(SampleRange{500, 2000}, 1250.5, 0));
+    BOOST_CHECK(!span.covers_with_cfo(SampleRange{500, 2000}, 1250.0, 10));
+    BOOST_CHECK(!span.covers_with_cfo(SampleRange{}, 1250.0, 0));
+
+    // SFD window range: narrow vs wide rescue, boundary clamping and out-of-window.
+    demod::TimingResult timing;
+    timing.measured_period = demod::kQm35SamplesPerSymbol;
+    timing.preamble_start_sample = 40000;
+    const size_t n = 608000;
+    const size_t sfd_len = 8 * demod::kQm35SamplesPerSymbol;
+    const SampleRange narrow_sfd = compute_sfd_window_range(
+        n, timing, 256, sfd_len, /*include_wide_grid=*/false);
+    const SampleRange wide_sfd = compute_sfd_window_range(
+        n, timing, 256, sfd_len, /*include_wide_grid=*/true);
+    BOOST_CHECK(!narrow_sfd.empty());
+    BOOST_CHECK(wide_sfd.covers(narrow_sfd));
+    BOOST_CHECK(wide_sfd.size() > narrow_sfd.size());
+    BOOST_CHECK(compute_sfd_window_range(0, timing, 256, sfd_len, false).empty());
+    BOOST_CHECK(compute_sfd_window_range(100000, timing, 256, sfd_len, false).empty());
+
+    // Predicted single-pass range vs anchored prefix range under SFD origin shift.
+    demod::Qm35825Profile profile;
+    profile.code_index = 10;
+    profile.preamble_repetitions = 256;
+    profile.cir_repetitions = 246;
+    profile.sfd_mode = "4z2";
+    profile.rx_softchip_on_demand = true;
+    profile.rx_fused_payload_cmf = true;
+    profile.rx_fused_phr_cmf = true;
+    profile.cfo_refit_mode = 0;
+    BOOST_CHECK(compute_predicted_single_pass_range(
+                    n, profile, timing, narrow_sfd).empty());
+
+    profile.cfo_refit_mode = 1;
+    const SampleRange predicted = compute_predicted_single_pass_range(
+        n, profile, timing, narrow_sfd);
+    BOOST_CHECK(!predicted.empty());
+
+    demod::TimingResult anchored_timing = timing;
+    anchored_timing.preamble_start_sample +=
+        static_cast<int64_t>(demod::kQm35SamplesPerSymbol) + 17;
+    const SampleRange final_sfd = compute_sfd_window_range(
+        n, anchored_timing, 256, sfd_len, false);
+    const SampleRange anchored_int = compute_anchored_prefix_range(
+        n, profile, /*integer_grid_ok=*/true, anchored_timing, final_sfd);
+    BOOST_CHECK(predicted.covers(anchored_int));
+    BOOST_CHECK(anchored_int.hi < n);
+
+    // Fractional grid widens the anchored range to the full window.
+    const SampleRange anchored_frac = compute_anchored_prefix_range(
+        n, profile, /*integer_grid_ok=*/false, anchored_timing, final_sfd);
+    BOOST_CHECK((anchored_frac == SampleRange{0, n}));
+    BOOST_CHECK(!predicted.covers(anchored_frac));
+
+    // SFD-only mode bounds the anchored range strictly to final_sfd.
+    profile.rx_stop_after_sfd = true;
+    const SampleRange anchored_sfd_only = compute_anchored_prefix_range(
+        n, profile, /*integer_grid_ok=*/true, anchored_timing, final_sfd);
+    BOOST_CHECK(anchored_sfd_only == final_sfd);
+
+    // Payload and on-demand extension rotation ranges clamp to n and skip covered prefixes.
+    profile.rx_stop_after_sfd = false;
+    demod::NsSfdResult ns_sfd;
+    ns_sfd.sfd_end_chip = 264 * 508 - 1;
+    demod::PhrResult phr;
+    phr.psdu_length = 127;
+    const SampleRange pay_range = compute_fused_payload_rotation_range(
+        n, profile, anchored_timing, 38, ns_sfd, phr, anchored_int.hi);
+    BOOST_CHECK(!pay_range.empty());
+    BOOST_CHECK(pay_range.hi < n);
+    const SampleRange pay_clamped = compute_fused_payload_rotation_range(
+        450000, profile, anchored_timing, 38, ns_sfd, phr, anchored_int.hi);
+    BOOST_CHECK_EQUAL(pay_clamped.hi, 450000u);
+    BOOST_CHECK(compute_fused_payload_rotation_range(
+                    200000, profile, anchored_timing, 38, ns_sfd, phr, 200000).empty());
+    const SampleRange ext_range = compute_ondemand_extension_rotation_range(
+        n, profile, anchored_timing, 38, 180000, anchored_int.hi);
+    BOOST_CHECK(!ext_range.empty());
+    BOOST_CHECK_EQUAL(ext_range.lo, anchored_int.hi);
+    BOOST_CHECK(ext_range.hi <= n);
+    BOOST_CHECK(compute_ondemand_extension_rotation_range(
+                    n, profile, anchored_timing, 38, 180000, n).empty());
+}

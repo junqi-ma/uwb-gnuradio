@@ -145,133 +145,36 @@ DemodResult demodulate_one(const std::complex<float>* rx,
     scratch.cached_seq.update(profile.code_index, profile.sfd_mode);
     const std::vector<int8_t>& sfd_seq = scratch.cached_seq.sfd_seq;
     const size_t sfd_len = sfd_seq.size() * kQm35SamplesPerSymbol;
-    const auto sfd1_range = rxopt::compute_sfd_search_range(
-        n, res.timing, profile.preamble_repetitions, sfd_len,
-        kQm35SamplesPerSymbol);
+    const SampleRange sfd1_range = compute_sfd_window_range(
+        n, res.timing, profile.preamble_repetitions, sfd_len);
     // Stage-2 CFO, kept so the single-pass rotation mode can restore it after
     // the SFD-anchored refit has been evaluated (see the refit lambda below).
     const CfoResult stage2_cfo = res.cfo;
     res.cfo_initial_hz = stage2_cfo.cfo_hz;
     res.cfo_initial_peaks = static_cast<uint32_t>(stage2_cfo.peaks_used);
-    // Highest sample index that any post-SFD consumer reads from
-    // `scratch.derotated`, given a frame origin.  Used twice: to predict the
-    // single-pass rotation range before the bootstrap SFD and to bound the
-    // actual second rotation afterwards.
-    //
-    // The bound is the real requirement, not the legacy 40-PHR-head budget:
-    //   * the soft-chip stage only generates the prefix the active decoder
-    //     needs (`fused_phr_prefix_budget` when the PHR is read from raw IQ,
-    //     else the full `initial_chip_budget`),
-    //   * the fused PHR kernel reads its 21 symbols straight from the
-    //     derotated IQ: 20*512 + max candidate offset (320) chips plus the
-    //     template length,
-    //   * the final SFD search range.
-    // Everything from the payload start onwards is derotated by the payload
-    // pass (`pay_lo = min(sec_hi, base0)`), so covering past that point here
-    // would derotate the payload region twice with the same CFO.
-    auto required_derotated_hi = [&](int64_t frame_start,
-                                     size_t sfd_search_hi) -> int64_t {
-        const size_t pre = profile.cir_pre_samples;
-        const size_t post = profile.cir_post_samples;
-        const size_t tap_count = pre + post;
-        const bool phr_fusion = profile.rx_fused_phr_cmf;
-        const size_t chip_prefix = phr_fusion
-            ? rxopt::fused_phr_prefix_budget(profile)
-            : rxopt::initial_chip_budget(profile);
-        const int64_t chip_start = frame_start + static_cast<int64_t>(post) - 1;
-        int64_t hi = chip_start + static_cast<int64_t>(chip_prefix) * 2 +
-                     static_cast<int64_t>(tap_count) + 128;
-        if (phr_fusion) {
-            // NS-SFD end is not known before stage_ns_sfd(); the nominal grid
-            // plus the +8-chip search covers it.
-            const int64_t sfd_end_chip_est =
-                static_cast<int64_t>(profile.preamble_repetitions +
-                                     rxopt::kSfdSymbols) *
-                    static_cast<int64_t>(kQm35ChipsPerSymbol) + 8;
-            const int64_t phr_start_est = sfd_end_chip_est + 1;
-            const int64_t phr_len =
-                static_cast<int64_t>(tap_count) +
-                2 * static_cast<int64_t>(rxfusion::kPhrChipsPerBurst - 1);
-            const int64_t phr_hi = chip_start +
-                (phr_start_est +
-                 static_cast<int64_t>((rxfusion::kPhrSymbols - 1) *
-                                      rxfusion::kPhrChipsPerSymbol) +
-                 static_cast<int64_t>(rxfusion::kPhrCandidateChipOffset[3])) * 2 +
-                phr_len + 64;
-            hi = std::max(hi, phr_hi);
-        }
-        return std::max<int64_t>(hi, static_cast<int64_t>(sfd_search_hi));
-    };
     // Predicted single-pass rotation range.  `scratch.derotated` is the only
     // CFO-compensated buffer that the downstream stages read, so one rotation
     // with the Stage-2 estimate can replace the SFD-anchored second pass only
     // if it already covers everything those stages will read.  The SFD anchor
     // is not known yet, so the range is predicted from the Stage-1 timing with
     // an explicit symbol/backtrack slack and re-validated against the actual
-    // [sec_lo, sec_hi) after the bootstrap SFD (a miss falls back to the legacy
-    // second rotation).
-    size_t union_lo = 0;
-    size_t union_hi = 0;
-    bool union_ok = false;
-    if (profile.cfo_refit_mode != 0) {
-        const bool u_on_demand = profile.rx_softchip_on_demand ||
-                                 profile.rx_fused_payload_cmf ||
-                                 profile.rx_fused_phr_cmf;
-        if (!profile.rx_stop_after_sfd && !u_on_demand) {
-            // The legacy path rotates the whole window, so there is nothing to
-            // predict: covering [0, n) is trivially conservative and the only
-            // saving is the redundant first pass.
-            union_lo = 0;
-            union_hi = n;
-            union_ok = n > 0;
-        } else {
-            const size_t u_pre = profile.cir_pre_samples;
-            const size_t u_first = profile.cir_skip_initial_repetitions;
-            const size_t u_full = profile.preamble_repetitions;
-            const size_t u_reps = (profile.cir_repetitions > 0)
-                ? std::min(profile.cir_repetitions,
-                           u_full > u_first ? u_full - u_first : 0)
-                : 0;
-            const double u_period = (res.timing.measured_period > 0.0)
-                ? res.timing.measured_period
-                : static_cast<double>(kQm35SamplesPerSymbol);
-            const int64_t u_start = res.timing.preamble_start_sample;
-            const int64_t u_cir_lo = (u_reps > 0)
-                ? u_start + static_cast<int64_t>(std::llround(
-                              static_cast<double>(u_first) * u_period)) -
-                      static_cast<int64_t>(u_pre)
-                : u_start;
-            // Mirror the actual sec_lo rule: the fused PHR+payload path skips
-            // the SYNC soft-chip FIR, so it does not need the preamble head.
-            const bool u_skip_sync_fir =
-                profile.rx_fused_phr_cmf && profile.rx_fused_payload_cmf;
-            int64_t u_lo = u_cir_lo;
-            if (!u_skip_sync_fir)
-                u_lo = std::min<int64_t>(u_lo,
-                                         u_start - static_cast<int64_t>(u_pre));
-            u_lo = std::min<int64_t>(u_lo,
-                                     static_cast<int64_t>(sfd1_range.first));
-            int64_t u_hi = required_derotated_hi(u_start, sfd1_range.second);
-            // Slack: the SFD anchor can move the frame origin by up to the
-            // search backtrack (4 symbols + 64 samples).
-            const int64_t u_slack =
-                static_cast<int64_t>(4 * kQm35SamplesPerSymbol + 64 + 128);
-            union_lo = static_cast<size_t>(std::max<int64_t>(0, u_lo - u_slack));
-            union_hi = static_cast<size_t>(
-                std::min<int64_t>(static_cast<int64_t>(n), u_hi + u_slack));
-            union_ok = union_hi > union_lo;
-        }
-    }
-    const size_t rot1_lo = union_ok ? union_lo : sfd1_range.first;
-    const size_t rot1_hi = union_ok ? union_hi : sfd1_range.second;
+    // [sec_range.lo, sec_range.hi) after the bootstrap SFD (a miss falls back
+    // to the legacy second rotation).
+    const SampleRange predicted_range = compute_predicted_single_pass_range(
+        n, profile, res.timing, sfd1_range);
+    const DerotatedSpan predicted_span{
+        predicted_range, stage2_cfo.cfo_hz, 0, !predicted_range.empty()};
+    const SampleRange rot1_range =
+        predicted_span.valid ? predicted_span.range : sfd1_range;
     uint64_t rot1_us = 0;
     uint32_t rk1 = 0;
-    derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, rot1_lo, rot1_hi,
-                       scratch, rot1_us, rk1);
+    derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, rot1_range.lo,
+                       rot1_range.hi, scratch, rot1_us, rk1);
+    DerotatedSpan derotated_span{
+        rot1_range, res.cfo.cfo_hz, 0, !rot1_range.empty()};
     res.cfo.rotate_us = rot1_us;
     res.cfo.rotation_kernel = rk1;
-    res.stage_cfo_rotated_samples +=
-        (rot1_hi > rot1_lo ? (rot1_hi - rot1_lo) : 0);
+    res.stage_cfo_rotated_samples += rot1_range.size();
     ++res.stage_cfo_rotation_passes;
     lap(res.stage_cfo_us);
     res.stage_cfo_fit_us += res.cfo.fit_us;
@@ -288,16 +191,16 @@ DemodResult demodulate_one(const std::complex<float>* rx,
         return stage_sfd(
             scratch.derotated.data(), n, profile, res.timing, sfd_seq, template_wf,
             res.sfd, scratch, [&]() {
-                const auto [lo, hi] = rxopt::compute_sfd_search_range(
-                    n, res.timing, profile.preamble_repetitions, sfd_len,
-                    kQm35SamplesPerSymbol, true);
+                const SampleRange wide_range = compute_sfd_window_range(
+                    n, res.timing, profile.preamble_repetitions, sfd_len, true);
                 uint64_t us = 0;
                 uint32_t kernel = 0;
-                derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, lo, hi,
-                                   scratch, us, kernel);
+                derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz,
+                                   wide_range.lo, wide_range.hi, scratch, us,
+                                   kernel);
                 res.stage_cfo_rotate_us += us;
                 res.stage_cfo_rotation_kernels |= kernel ? 2u : 0u;
-                res.stage_cfo_rotated_samples += hi - lo;
+                res.stage_cfo_rotated_samples += wide_range.size();
                 ++res.stage_cfo_rotation_passes;
             });
     };
@@ -366,8 +269,6 @@ DemodResult demodulate_one(const std::complex<float>* rx,
         static_cast<int64_t>(std::llround(
             static_cast<double>(tail_repetitions) * period_hint));
     const size_t template_len = template_wf.size();
-
-    size_t sec_derotated_hi = 0;
 
     // Tail re-track + CFO refit.  `seed_radius` is 0 for the legacy wide first
     // search or 8 for the SFD-anchored narrow experiment.  A failed narrow
@@ -630,61 +531,10 @@ DemodResult demodulate_one(const std::complex<float>* rx,
 
         // Second rotation (Task A1): covers final SFD, CIR (54 SYNCs starting
         // from 10th), phase estimation, and initial soft-chips / PHR.
-        const size_t sym = kQm35SamplesPerSymbol;
-        const auto final_sfd_range = rxopt::compute_sfd_search_range(
-            n, cfo_timing, full_repetitions, sfd_len, sym);
-        const size_t pre = profile.cir_pre_samples;
-        const size_t post = profile.cir_post_samples;
-        const size_t first_rep = profile.cir_skip_initial_repetitions;
-        const size_t rep_count = (profile.cir_repetitions > 0)
-            ? std::min(profile.cir_repetitions,
-                       full_repetitions > first_rep
-                           ? full_repetitions - first_rep
-                           : 0)
-            : 0;
-        const double period = cfo_timing.measured_period > 0.0
-            ? cfo_timing.measured_period
-            : static_cast<double>(sym);
-        const int64_t start = cfo_timing.preamble_start_sample;
-        const int64_t cir_lo = (rep_count > 0)
-            ? start + static_cast<int64_t>(std::llround(
-                          static_cast<double>(first_rep) * period)) -
-                  static_cast<int64_t>(pre)
-            : start;
-
-        const bool on_demand = profile.rx_softchip_on_demand ||
-                               profile.rx_fused_payload_cmf ||
-                               profile.rx_fused_phr_cmf;
-
-        const double nominal_spc = profile.sample_rate / 499.2e6;
-        const bool is_integer_grid = (std::abs(nominal_spc - 2.0) < 1e-6);
-
-        size_t sec_lo = 0;
-        size_t sec_hi = n;
-        if (profile.rx_stop_after_sfd) {
-            sec_lo = static_cast<size_t>(std::max<int64_t>(0, static_cast<int64_t>(final_sfd_range.first)));
-            sec_hi = static_cast<size_t>(std::min<int64_t>(static_cast<int64_t>(n), static_cast<int64_t>(final_sfd_range.second)));
-        } else if (on_demand && is_integer_grid && integer_grid_ok) {
-            // Second rotation covers the final SFD search, the CIR window, the
-            // phase estimation and the soft-chip prefix / fused PHR reads.
-            // `required_derotated_hi` bounds the real requirement (see its
-            // definition above): using the legacy 40-PHR-head budget here
-            // derotated ~35k samples past the payload start, which the payload
-            // pass then derotated a second time with the same CFO.
-            const bool skip_sync_fir =
-                profile.rx_fused_phr_cmf && profile.rx_fused_payload_cmf;
-
-            int64_t req_lo = cir_lo;
-            if (!skip_sync_fir)
-                req_lo = std::min(req_lo, start - static_cast<int64_t>(pre));
-            req_lo = std::min(req_lo, static_cast<int64_t>(final_sfd_range.first));
-            sec_lo = static_cast<size_t>(std::max<int64_t>(0, req_lo));
-
-            const int64_t req_hi =
-                required_derotated_hi(start, final_sfd_range.second);
-            sec_hi = static_cast<size_t>(
-                std::min<int64_t>(static_cast<int64_t>(n), req_hi));
-        }
+        const SampleRange final_sfd_range = compute_sfd_window_range(
+            n, cfo_timing, full_repetitions, sfd_len);
+        const SampleRange sec_range = compute_anchored_prefix_range(
+            n, profile, integer_grid_ok, cfo_timing, final_sfd_range);
 
         uint64_t rot2_us = 0;
         uint32_t rk2 = 0;
@@ -694,8 +544,7 @@ DemodResult demodulate_one(const std::complex<float>* rx,
         // rotation (already widened to the predicted union range) is the only
         // derotation the packet needs.  Every condition below is a hard
         // requirement; any miss keeps the legacy refit + second rotation.
-        const uint64_t refit_span =
-            (sec_hi > sec_lo) ? static_cast<uint64_t>(sec_hi - sec_lo) : 0;
+        const uint64_t refit_span = static_cast<uint64_t>(sec_range.size());
         const double refit_delta_hz = res.cfo.cfo_hz - stage2_cfo.cfo_hz;
         const double refit_drift_rad = std::abs(
             2.0 * M_PI * refit_delta_hz *
@@ -713,29 +562,29 @@ DemodResult demodulate_one(const std::complex<float>* rx,
                 refit_drift_rad <= profile.cfo_refit_skip_rad;
             skip_action = 1;
         }
-        const bool union_covers =
-            union_ok && sec_lo >= union_lo && sec_hi <= union_hi;
-        if (want_skip && union_covers) {
+        if (want_skip &&
+            predicted_span.covers_with_cfo(sec_range, stage2_cfo.cfo_hz, 0)) {
             // Keep the Stage-2 estimate: pass 1 already applied it to the whole
-            // predicted span, which provably contains [sec_lo, sec_hi).
+            // predicted span, which provably contains [sec_range.lo, sec_range.hi).
             res.cfo = stage2_cfo;
             res.cfo_refit_action = skip_action;
-            sec_derotated_hi = union_hi;
+            derotated_span = predicted_span;
             return true;
         }
         if (profile.cfo_refit_mode != 0)
             res.cfo_refit_action = 3; // requested skip, fell back (fail-closed)
-        derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, sec_lo, sec_hi,
-                           scratch, rot2_us, rk2);
+        derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, sec_range.lo,
+                           sec_range.hi, scratch, rot2_us, rk2);
         res.cfo.rotate_us = rot2_us;
         res.cfo.rotation_kernel = rk2;
         res.cfo_refit_rotate_us = rot2_us;
         res.stage_cfo_rotate_us += rot2_us;
         res.stage_cfo_rotation_kernels |= (rk2 ? 2u : 0u);
-        res.stage_cfo_rotated_samples += (sec_hi > sec_lo ? (sec_hi - sec_lo) : 0);
+        res.stage_cfo_rotated_samples += sec_range.size();
         ++res.stage_cfo_rotation_passes;
         res.stage_sfd_cfo_refit_us += rot2_us;
-        sec_derotated_hi = sec_hi;
+        derotated_span = DerotatedSpan{
+            sec_range, res.cfo.cfo_hz, 0, !sec_range.empty()};
         return true;
     };
 
@@ -929,30 +778,16 @@ DemodResult demodulate_one(const std::complex<float>* rx,
                 scratch.softchip.prepared;
             if (fused_supported) {
                 // Compensate payload interval with refit CFO (Task A1)
-                const size_t psdu_bits =
-                    static_cast<size_t>(res.phr.psdu_length) * 8;
-                const size_t num_blocks = (psdu_bits + 329) / 330;
-                const size_t nsym = psdu_bits + 48 * num_blocks;
-                const int64_t phr_start = res.ns_sfd.sfd_end_chip + 1;
-                const int64_t payload_start = phr_start + 21 * 512;
-                const int64_t chip_start =
-                    res.timing.preamble_start_sample +
-                    static_cast<int64_t>(res.cir.cir_filter_taps.size()) -
-                    static_cast<int64_t>(profile.cir_pre_samples) - 1;
-                const int64_t base0 = chip_start + payload_start * 2 -
-                    static_cast<int64_t>(res.cir.cir_filter_taps.size()) + 1;
-                const int64_t last_chip =
-                    static_cast<int64_t>(nsym - 1) * 64 + 40;
-                const size_t len =
-                    res.cir.cir_filter_taps.size() + 2 * (8 - 1);
-                const int64_t last_sample =
-                    base0 + last_chip * 2 + static_cast<int64_t>(len);
-                const size_t pay_lo = std::min(
-                    sec_derotated_hi,
-                    static_cast<size_t>(std::max<int64_t>(0, base0)));
-                const size_t pay_hi = static_cast<size_t>(
-                    std::min<int64_t>(static_cast<int64_t>(n), last_sample + 64));
-                if (pay_lo < pay_hi) {
+                const size_t covered_hi =
+                    derotated_span.covers_with_cfo(
+                        derotated_span.range, res.cfo.cfo_hz, 0)
+                        ? derotated_span.range.hi
+                        : 0;
+                const SampleRange pay_range =
+                    compute_fused_payload_rotation_range(
+                        n, profile, res.timing, res.cir.cir_filter_taps.size(),
+                        res.ns_sfd, res.phr, covered_hi);
+                if (!pay_range.empty()) {
                     // This payload-region CFO derotation runs inside the
                     // `stage_payload_us` lap but outside the payload decoder, so
                     // attribute it to the payload `other` bucket explicitly;
@@ -961,12 +796,22 @@ DemodResult demodulate_one(const std::complex<float>* rx,
                     const auto t_payrot = std::chrono::steady_clock::now();
                     uint64_t rot_pay_us = 0;
                     uint32_t rk_pay = 0;
-                    derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, pay_lo,
-                                       pay_hi, scratch, rot_pay_us, rk_pay);
+                    derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz,
+                                       pay_range.lo, pay_range.hi, scratch,
+                                       rot_pay_us, rk_pay);
                     res.stage_cfo_rotate_us += rot_pay_us;
-                    res.stage_cfo_rotated_samples += (pay_hi - pay_lo);
+                    res.stage_cfo_rotated_samples += pay_range.size();
                     ++res.stage_cfo_rotation_passes;
-                    sec_derotated_hi = std::max(sec_derotated_hi, pay_hi);
+                    if (!derotated_span.valid ||
+                        derotated_span.cfo_hz != res.cfo.cfo_hz) {
+                        derotated_span = DerotatedSpan{
+                            pay_range, res.cfo.cfo_hz, 0, true};
+                    } else {
+                        derotated_span.range.lo = std::min(
+                            derotated_span.range.lo, pay_range.lo);
+                        derotated_span.range.hi = std::max(
+                            derotated_span.range.hi, pay_range.hi);
+                    }
                     const uint64_t payrot_us =
                         detail::payload_elapsed_us(t_payrot);
                     payload_sub.other_us += payrot_us;
@@ -1025,25 +870,34 @@ DemodResult demodulate_one(const std::complex<float>* rx,
                 profile, res.ns_sfd.sfd_end_chip, res.phr.psdu_length);
             if (final_budget > prefix_chips) {
                 // Compensate extension interval with refit CFO (Task A1)
-                const int64_t chip_start =
-                    res.timing.preamble_start_sample +
-                    static_cast<int64_t>(res.cir.cir_filter_taps.size()) -
-                    static_cast<int64_t>(profile.cir_pre_samples) - 1;
-                const int64_t last_pos =
-                    chip_start + static_cast<int64_t>(final_budget) * 2 +
-                    static_cast<int64_t>(res.cir.cir_filter_taps.size()) + 64;
-                const size_t pay_lo = sec_derotated_hi;
-                const size_t pay_hi = static_cast<size_t>(
-                    std::min<int64_t>(static_cast<int64_t>(n), last_pos));
-                if (pay_lo < pay_hi) {
+                const size_t covered_hi =
+                    derotated_span.covers_with_cfo(
+                        derotated_span.range, res.cfo.cfo_hz, 0)
+                        ? derotated_span.range.hi
+                        : 0;
+                const SampleRange pay_range =
+                    compute_ondemand_extension_rotation_range(
+                        n, profile, res.timing, res.cir.cir_filter_taps.size(),
+                        final_budget, covered_hi);
+                if (!pay_range.empty()) {
                     uint64_t rot_pay_us = 0;
                     uint32_t rk_pay = 0;
-                    derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, pay_lo,
-                                       pay_hi, scratch, rot_pay_us, rk_pay);
+                    derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz,
+                                       pay_range.lo, pay_range.hi, scratch,
+                                       rot_pay_us, rk_pay);
                     res.stage_cfo_rotate_us += rot_pay_us;
-                    res.stage_cfo_rotated_samples += (pay_hi - pay_lo);
+                    res.stage_cfo_rotated_samples += pay_range.size();
                     ++res.stage_cfo_rotation_passes;
-                    sec_derotated_hi = std::max(sec_derotated_hi, pay_hi);
+                    if (!derotated_span.valid ||
+                        derotated_span.cfo_hz != res.cfo.cfo_hz) {
+                        derotated_span = DerotatedSpan{
+                            pay_range, res.cfo.cfo_hz, 0, true};
+                    } else {
+                        derotated_span.range.lo = std::min(
+                            derotated_span.range.lo, pay_range.lo);
+                        derotated_span.range.hi = std::max(
+                            derotated_span.range.hi, pay_range.hi);
+                    }
                 }
 
                 CirResult ext;
@@ -1092,7 +946,8 @@ DemodResult demodulate_one(const std::complex<float>* rx,
             res.stage_cfo_rotate_us += rot_fb_us;
             res.stage_cfo_rotated_samples += n;
             ++res.stage_cfo_rotation_passes;
-            sec_derotated_hi = n;
+            derotated_span = DerotatedSpan{
+                SampleRange{0, n}, res.cfo.cfo_hz, 0, n > 0};
             CirResult full_cir;
             NsSfdResult full_ns;
             PhrResult full_phr;
