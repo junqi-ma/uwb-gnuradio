@@ -1,0 +1,162 @@
+{
+  "batch": 2,
+  "title": "Decompose synchronization, SFD anchoring, tail retracking, CFO refit and window range geometry",
+  "commits": {
+    "baseline_a": "8a1eaa4d45df12c127bb8fa8bc03e6e6d500646a",
+    "step_2_1_geometry": "98fe9b05fe7dcbf8906c1c1b2c99c1f56565e586"
+  },
+  "environment": {
+    "cpu": "12th Gen Intel(R) Core(TM) i7-12700",
+    "compiler": "GCC 11.4.0",
+    "build_type": "Release",
+    "uhd_backend": "OFF",
+    "avx2_build_dir": "gr-uwb/build-refactor-b",
+    "avx2_install_prefix": "/tmp/uwb-refactor-b-install",
+    "scalar_build_dir": "gr-uwb/build-refactor-b-scalar"
+  },
+  "binaries_sha256": {
+    "baseline_a_decode": "c2f80a2a33bf2516b5eb70ab4ca05f4ee38fb5bc00bd4d37882fa6bf94ca3aa6",
+    "baseline_a_live": "03c9ed8b6943029f2120d4057487fc5796bf4f0d63e955b1a6b2ae8cb0cea2b8",
+    "refactor_b_avx2_decode": "b6542e136e64844cefa4a3bfabca4562aa4d7e525dd389e8dfc4d15d9b31e7cf",
+    "refactor_b_avx2_live": "5a38c19de4bb8af242216365a956da4e98dd7b336dd75a2398ca2149ae10f71d",
+    "refactor_b_scalar_decode": "2924e1f490beb1524bf87147c19c4cc1f555769779a94aaf4a8dd7ae3c97ce69",
+    "refactor_b_scalar_live": "8d4b82e6d19ed7b35b2044c668897e81c3d009fc2bbdde5c12c2be084d831797"
+  },
+  "ctest": {
+    "avx2": {
+      "total": 56,
+      "passed": 56,
+      "failed": 0,
+      "skipped": 0,
+      "real_time_sec": 35.09
+    },
+    "scalar": {
+      "total": 56,
+      "passed": 55,
+      "failed": 0,
+      "skipped": 1,
+      "skipped_tests": ["uwb_qa_native_install_consumer"],
+      "real_time_sec": 32.66
+    }
+  },
+  "fixed_window_200x3": {
+    "f4": {
+      "sha256": "238c300dc0d41f52bbf00611874efea38ab6a104464664b8b1795c8c2c143a5e",
+      "rows": 200,
+      "fcs": [199, 199],
+      "differences": []
+    },
+    "fm12_200": {
+      "sha256": "6b8e14cc2b4666bd364addf49d92503edddc94524d9c13236e2c7377aa2f46ad",
+      "rows": 200,
+      "fcs": [186, 186],
+      "differences": []
+    },
+    "fm14": {
+      "sha256": "8206af10952c94959b4ef45b62ee6df85b237d45968535b9b567a25d1cd52aba",
+      "rows": 200,
+      "fcs": [0, 0],
+      "differences": []
+    }
+  },
+  "fixed_window_6x40": {
+    "control": {"exact_a": 40, "exact_b": 40, "total": 40, "wrong": 0, "diff_count": 0},
+    "seed1729": {"exact_a": 38, "exact_b": 38, "total": 40, "wrong": 0, "diff_count": 0},
+    "seed2718": {"exact_a": 40, "exact_b": 40, "total": 40, "wrong": 0, "diff_count": 0},
+    "cfo10k": {"exact_a": 37, "exact_b": 37, "total": 40, "wrong": 0, "diff_count": 0},
+    "cfo40k": {"exact_a": 38, "exact_b": 38, "total": 40, "wrong": 0, "diff_count": 0},
+    "sfo27ppm": {"exact_a": 37, "exact_b": 37, "total": 40, "wrong": 0, "diff_count": 0}
+  },
+  "abba_benchmarks": {
+    "-12/locked/w1": {
+      "A": {
+        "compute_mean_us": 2382.9625,
+        "demod_mean_us": 1573.25,
+        "compute_p95_us": 4593.1625,
+        "demod_p95_us": 3745.7875,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 506.1934673366834,
+          "st_cfo": 17.58542713567839,
+          "st_sfd": 442.7286432160804,
+          "st_cir": 141.91959798994975,
+          "st_nssfd": 8.110552763819095,
+          "st_phr": 18.482412060301506,
+          "st_payload": 346.8969849246231,
+          "st_total": 1614.0603015075376
+        }
+      },
+      "B": {
+        "compute_mean_us": 2432.325,
+        "demod_mean_us": 1611.7375,
+        "compute_p95_us": 4899.8125,
+        "demod_p95_us": 3995.75,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 506.63819095477385,
+          "st_cfo": 20.449748743718594,
+          "st_sfd": 445.1532663316583,
+          "st_cir": 136.59798994974875,
+          "st_nssfd": 8.668341708542712,
+          "st_phr": 17.746231155778894,
+          "st_payload": 337.1281407035176,
+          "st_total": 1613.3668341708544
+        }
+      },
+      "delta_pct": {
+        "compute_mean": 2.0715,
+        "demod_mean": 2.4464,
+        "st_total": -0.0430
+      }
+    },
+    "-12/locked/w4": {
+      "A": {
+        "compute_mean_us": 3122.9875,
+        "demod_mean_us": 2177.525,
+        "compute_p95_us": 6185.075,
+        "demod_p95_us": 5096.0375,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 701.3366834170854,
+          "st_cfo": 51.391959798994975,
+          "st_sfd": 689.9321608040201,
+          "st_cir": 249.35929648241208,
+          "st_nssfd": 10.123115577889447,
+          "st_phr": 25.015075376884422,
+          "st_payload": 528.4346733668342,
+          "st_total": 2440.884422110553
+        }
+      },
+      "B": {
+        "compute_mean_us": 3100.3125,
+        "demod_mean_us": 2142.375,
+        "compute_p95_us": 6075.475,
+        "demod_p95_us": 4957.05,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 641.1256281407035,
+          "st_cfo": 50.570351758793976,
+          "st_sfd": 610.6457286432161,
+          "st_cir": 219.13316582914575,
+          "st_nssfd": 9.319095477386934,
+          "st_phr": 22.042713567839193,
+          "st_payload": 478.08040201005025,
+          "st_total": 2193.145728643216
+        }
+      },
+      "delta_pct": {
+        "compute_mean": -0.7261,
+        "demod_mean": -1.6142,
+        "st_total": -10.1495
+      }
+    }
+  }
+}
