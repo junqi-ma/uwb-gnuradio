@@ -45,7 +45,7 @@
 
 #include <boost/test/unit_test.hpp>
 
-// The one layer that appends the FCS (see uwb_hrp_packet_source.cc).
+// The one layer that appends the FCS (see uwb_twr_phy.cc).
 #include <gnuradio/uwb/uwb_hrp_mod_core.h>
 #include <gnuradio/uwb/uwb_radar_meta_core.h>
 #include <gnuradio/uwb/uwb_twr_frame.h>
@@ -1799,52 +1799,21 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_only_one_source_file_appends_the_fcs)
         }
     }
 
-    // Exactly the KNOWN production append sites, each of which must be an HRP
-    // modulation layer (never the frame codec):
-    //   * UwbHrpPacketSource  -- the GNU Radio packet source, gated on the
-    //     append_fcs parameter;
-    //   * m2a_modulate_to_work -- the M2-A radio-free HRP-layer consumer,
-    //     which must append exactly once per frame.
-    // A THIRD, unexpected site still fails this test.
-    // The definition itself and the core's own random-PSDU test helper are not
-    // append layers.
+    // The native HRP layer owns FCS insertion. The function definition and
+    // the modulator's random-PSDU helper do not count as production call sites.
     int defs = 0;
     int core_helper = 0;
-    int production_pkt = 0;
     int production_m2a = 0;
     for (const Hit& h : hits) {
         const bool in_core = h.file.find("uwb_hrp_mod_core.h") != std::string::npos;
-        const bool in_pkt = h.file.find("uwb_hrp_packet_source.cc") != std::string::npos;
         const bool in_m2a = h.file.find("uwb_twr_phy.cc") != std::string::npos;
         if (in_core && h.text.find("void append_ieee_fcs") != std::string::npos) {
             ++defs;
         } else if (in_core) {
             ++core_helper;
-        } else if (in_pkt && h.text.find("mod::append_ieee_fcs(") != std::string::npos) {
-            ++production_pkt;
-            // ... and it must be gated on the append_fcs parameter, so the FCS
-            // is never appended unless the layer was explicitly asked to.
-            std::string raw;
-            BOOST_REQUIRE(read_file(h.file, raw));
-            std::istringstream rs(raw);
-            std::string line;
-            int line_no = 0;
-            bool gated = false;
-            while (std::getline(rs, line)) {
-                ++line_no;
-                if (line_no < h.line && line_no + 8 >= h.line &&
-                    line.find("if (append_fcs)") != std::string::npos) {
-                    gated = true;
-                }
-            }
-            BOOST_CHECK_MESSAGE(gated,
-                                "the FCS append in uwb_hrp_packet_source.cc "
-                                "must be inside `if (append_fcs)`");
         } else if (in_m2a && h.text.find("mod::append_ieee_fcs(") != std::string::npos) {
             ++production_m2a;
-            // The M2-A helper is radio-free, so it cannot reuse the GNU Radio
-            // packet source; it must still be an HRP modulation layer and
-            // append exactly once, through ONE file-local helper.
+            // Require the single file-local HRP helper for native insertion.
             std::string raw;
             BOOST_REQUIRE(read_file(h.file, raw));
             BOOST_CHECK_MESSAGE(
@@ -1858,7 +1827,6 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_only_one_source_file_appends_the_fcs)
     }
     BOOST_CHECK_EQUAL(defs, 1);              // the definition
     BOOST_CHECK_EQUAL(core_helper, 1);       // make_random_psdu, a test helper
-    BOOST_CHECK_EQUAL(production_pkt, 1);    // UwbHrpPacketSource
     BOOST_CHECK_EQUAL(production_m2a, 1);    // m2a_modulate_to_work, once
 }
 

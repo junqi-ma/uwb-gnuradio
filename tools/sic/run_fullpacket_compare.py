@@ -21,7 +21,6 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-GENERATOR = ROOT / "gr-uwb/apps/sic_fullpacket_sim.py"
 VERIFIER = ROOT / "tools/sic/verify_fullpacket_compare.py"
 REPRESENTATIVE = ["sync_base", "payload_base", "payload_len16", "payload_len127",
                   "payload_snr8", "payload_isr0", "payload_isr20", "payload_cfo_m50k",
@@ -108,7 +107,7 @@ def provenance(binary, build, env, rx_pipeline, reconstruction):
         "gr-uwb/lib/uwb_preamble_sic_core.cc",
         "gr-uwb/include/gnuradio/uwb/uwb_hrp_mod_core.h",
         "gr-uwb/include/gnuradio/uwb/uwb_demod_core.h")]
-    sources.extend([GENERATOR, VERIFIER, Path(__file__).resolve()])
+    sources.extend([VERIFIER, Path(__file__).resolve()])
     return dict(schema="fullpacket-experiment-provenance/1",
                 created_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 repo=str(ROOT), git_head=git_output("rev-parse", "HEAD"),
@@ -120,8 +119,6 @@ def provenance(binary, build, env, rx_pipeline, reconstruction):
                 compile_flags=dict(path=str(flags_file), sha256=sha256(flags_file),
                                    content=flags_text),
                 libraries=libraries, ldd=ldd,
-                bindings=[{"path": str(p.resolve()), "sha256": sha256(p)}
-                          for p in sorted((build / "python/uwb/bindings").glob("uwb_python*.so"))],
                 sources={str(p.relative_to(ROOT)): sha256(p) for p in sources},
                 machine=dict(system=platform.platform(), cpu=cpu, cpu_count=os.cpu_count(),
                              affinity=sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None),
@@ -302,14 +299,9 @@ def main(argv=None):
     plans = []
     for cell in cells:
         case = case_directory(inputs, cell, len(cells))
-        if not (case / "public.json").exists():
-            if case.exists() and any(case.iterdir()):
-                raise RuntimeError(f"incomplete case exists; refusing overwrite: {case}")
-            command = [sys.executable, GENERATOR, "--build-dir", build, "--out", case,
-                       "--cell", cell, "--windows", str(source_count), "--seed", str(args.seed)]
-            rc = run_logged(command, out / f"generate_{cell}.log", env)
-            if rc:
-                raise RuntimeError(f"generator failed for {cell}; see {out}/generate_{cell}.log")
+        if not (case / "public.json").is_file():
+            raise RuntimeError(f"missing case {case}; supply existing fixtures "
+                               "or generate them on archive/gnuradio-adapter")
         pub, windows, hashes, templates = check_input(case)
         if len(windows) != source_count:
             print(f"reuse {cell}: {len(windows)} existing sources (requested generation size {source_count})", flush=True)

@@ -36,8 +36,7 @@ def build(root):
     # accidentally replace the instrumented implementation at link time.
     build_dir = root/'gr-uwb/build-window-diag'
     subprocess.run(['cmake', '-S', str(root/'gr-uwb'), '-B', str(build_dir),
-                    '-DCMAKE_BUILD_TYPE=Release', '-DUWB_BUILD_GNURADIO=OFF',
-                    '-DUWB_BUILD_EXPERIMENTS=OFF', '-DENABLE_UHD_BACKEND=OFF',
+                    '-DCMAKE_BUILD_TYPE=Release', '-DUWB_BUILD_EXPERIMENTS=OFF', '-DENABLE_UHD_BACKEND=OFF',
                     '-DUWB_SIMD=AVX2'], check=True)
     subprocess.run(['cmake', '--build', str(build_dir), '--target', 'uwb_core', '-j4'],
                    check=True)

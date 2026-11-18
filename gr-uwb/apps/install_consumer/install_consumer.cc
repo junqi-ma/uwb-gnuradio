@@ -1,46 +1,6 @@
-/* -*- c++ -*- */
 /*
- * External consumer for the INSTALLED gr-uwb TWR API.
- *
- * Purpose
- * -------
- * M0 review R8 / P2 proved that the TWR headers and the Python module were
- * never installed, so `ctest` passing said nothing about the installed API.
- * A test that compiles inside the source tree cannot detect that: it sees the
- * files where they already are.
- *
- * So this program is deliberately built OUTSIDE the project, against nothing
- * but the install prefix:
- *
- *   - its include path is the prefix's include directory only, never the
- *     source tree;
- *   - its Python path is the prefix's configured Python install directory
- *     only (dist-packages on a stock local install), never site-packages by
- *     assumption;
- *   - it does not link the OOT module's build directory, so the header-only
- *     API is exercised on its own, exactly as an external consumer would.
- *
- * It checks the things that were actually missing:
- *   1. every public TWR header is includable from the prefix, and the contract
- *      they describe is usable (build a config, look it up in the capability
- *      whitelist, encode a frame, do timestamp arithmetic);
- *   2. the ranging-admission entry point (`uwb_twr_tof_input.h`, review defect
- *      N05) is not merely includable but USABLE: the consumer builds a fully
- *      evidenced RMARKER pair, shows `admit_range_capable_time()` admits it,
- *      shows `admit_ranging_interval()` yields the exact interval, and shows
- *      the default admission context admits NOTHING (default deny);
- *   3. `import uwb.twr_config` works from the prefix and validates the same
- *      profile the C++ side does, against the CURRENT schema (`twr-config/2`).
- *
- * If a header is missing from install(FILES ...) or twr_config.py is missing
- * from GR_PYTHON_INSTALL(...), this fails to compile / fails at import, which
- * is the point.
- *
- * Build (see run_install_consumer.sh):
- *   c++ -std=c++17 -I<prefix>/include install_consumer.cc -o consumer
- *   PYTHONPATH=<prefix>/<configured python dir> python3 install_consumer.py
- * (the configured Python dir is dist-packages on a stock local install, not
- * the site-packages this comment used to hardcode -- review defect N05).
+ * Compile against an isolated native installation and exercise the public
+ * TWR configuration, frame, timestamp and ranging admission contracts.
  */
 
 #include <gnuradio/uwb/uwb_twr_capability_evidence.h>

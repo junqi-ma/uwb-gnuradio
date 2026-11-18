@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import ast
 import importlib
 import inspect
 import json
@@ -3668,28 +3669,13 @@ class TestModuleContract(TwrConfigTestBase):
             self.assertNotIn(name, sys.modules,
                              "importing uwb.twr_config pulled in %s" % name)
 
-    def test_orchestrator_owned_files_are_untouched(self):
-        """`uwb/__init__.py` and the pybind bindings belong to someone else.
-
-        This module must neither be imported by them nor wire itself into them:
-        the pybind exposure is deferred to M1, and taking it here would
-        collide with the binding work.
-        """
+    def test_package_does_not_import_native_runtime(self):
+        """The source-only package exposes configuration without a binding."""
         init_py = os.path.join(_PYTHON_DIR, "uwb", "__init__.py")
-        self.assertTrue(os.path.isfile(init_py))
         with open(init_py, "r", encoding="utf-8") as handle:
-            init_src = handle.read()
-        self.assertNotIn("twr_config", init_src,
-                         "uwb/__init__.py must not import twr_config (M1 owns "
-                         "the export surface)")
-        bindings = os.path.join(_PYTHON_DIR, "uwb", "bindings",
-                                "python_bindings.cc")
-        if os.path.isfile(bindings):
-            with open(bindings, "r", encoding="utf-8") as handle:
-                bindings_src = handle.read()
-            self.assertNotIn("twr_config", bindings_src,
-                             "the pybind bindings must not reference twr_config "
-                             "(M1 owns the binding surface)")
+            module = ast.parse(handle.read())
+        self.assertFalse(any(isinstance(node, (ast.Import, ast.ImportFrom))
+                             for node in ast.walk(module)))
 
     def test_public_api_is_complete_and_resolvable(self):
         """Every name in __all__ must exist, and must be usable by a caller."""

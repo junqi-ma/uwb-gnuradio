@@ -15,17 +15,9 @@ install(FILES
     uwb_sc16_stream_source.h
     uwb_defaults.h
     uwb_detector_core.h
-    uwb_detector.h
-    uwb_detector_sc16.h
-    uwb_energy_detector.h
-    uwb_packet_writer.h
-    uwb_preamble_detector.h
     uwb_scheduled_extractor_core.h
-    uwb_scheduled_extractor.h
-    uwb_scheduled_extractor_sc16.h
     uwb_preamble_verifier_sc16.h
     uwb_qm35_acquisition_tracker.h
-    uwb_auto_scheduled_extractor_sc16.h
     uwb_rational_resampler_core.h
     uwb_rational_resampler_avx512.h
     uwb_simd.h
@@ -33,12 +25,7 @@ install(FILES
     uwb_demod_sic_avx512.h
     uwb_sc16_scale.h
     uwb_discrete_cir_sic.h
-    uwb_rational_resampler_ccf_65_48.h
-    uwb_pdu_rational_resampler_ccf_65_48.h
-    uwb_pdu_rational_resampler_ccf_65_32.h
-    uwb_radar_pdu_meta.h
     uwb_window_crop_core.h
-    uwb_pdu_window_crop.h
     uwb_tone_canceller.h
     uwb_scheduled_dump_io.h
     uwb_radar_checked_math.h
@@ -46,14 +33,9 @@ install(FILES
     uwb_radar_cir_estimator.h
     uwb_radar_timing_core.h
     uwb_radar_cir_core.h
-    uwb_radar_packet_source.h
-    uwb_loopback_echo.h
-    uwb_radar_cir_estimator_block.h
-    uwb_cir_writer.h
     uwb_echo_scheduler_core.h
     uwb_echo_burst_backend.h
     uwb_fake_burst_backend.h
-    uwb_realtime_echo_timer.h
     uwb_uhd_backend_config.h
     uwb_uhd_burst_backend.h
     uwb_hrp_mod_core.h
@@ -72,7 +54,6 @@ install(FILES
     uwb_demod_pipeline.h
     uwb_demod_execution.h
     uwb_demod_finalize.h
-    uwb_hrp_packet_source.h
     # TWR M0 contract layer.  These six headers ARE the public API for
     # configuring a TWR exchange from C++ (frame profile, timestamp/ToF
     # arithmetic, typed configuration + capability whitelist) AND for

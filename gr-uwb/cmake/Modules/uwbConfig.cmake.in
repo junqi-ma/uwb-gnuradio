@@ -1,6 +1,6 @@
 # Native (GNU-Radio-free) package configuration for the gr-uwb core.
 #
-# Installed by a UWB_BUILD_GNURADIO=OFF build as
+# Installed as
 #   <prefix>/<libdir>/cmake/uwb/uwbConfig.cmake
 # and deliberately does NOT find_package(Gnuradio): the uwb::uwb_core /
 # uwb::uwb_native targets link only the C++ standard library, VOLK, Threads

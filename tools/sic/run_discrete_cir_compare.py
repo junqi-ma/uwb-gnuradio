@@ -29,7 +29,6 @@ import sys
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
-GENERATOR = ROOT / "gr-uwb/apps/sic_fullpacket_sim.py"
 VERIFIER = ROOT / "tools/sic/verify_discrete_cir_compare.py"
 QA = ROOT / "tools/sic/qa_discrete_cir_compare.py"
 LOCK = Path("/tmp/uwb-sic-benchmark.lock")
@@ -196,7 +195,7 @@ def source_inventory():
             missing.append(relative)
     for pattern in DISCOVERED_SOURCES:
         paths.extend(sorted(ROOT.glob(pattern)))
-    paths.extend([GENERATOR, VERIFIER, QA, Path(__file__).resolve()])
+    paths.extend([VERIFIER, QA, Path(__file__).resolve()])
     hashes = {}
     for path in sorted(set(path.resolve() for path in paths if path.is_file())):
         try:
@@ -352,24 +351,13 @@ def check_input(case):
     return public, windows, hashes, templates
 
 
-def prepare_cases(inputs, cells, source_count, seed, build, out, env, generate):
+def prepare_cases(inputs, cells, source_count):
     plans = []
     for cell in cells:
         case = case_directory(inputs, cell, len(cells))
         if not (case / "public.json").is_file():
-            if not generate:
-                raise RuntimeError(
-                    f"case is missing and generation is disabled: {case}")
-            if case.exists() and any(case.iterdir()):
-                raise RuntimeError(
-                    f"incomplete case exists; refusing overwrite: {case}")
-            command = [sys.executable, GENERATOR, "--build-dir", build,
-                       "--out", case, "--cell", cell,
-                       "--windows", str(source_count), "--seed", str(seed)]
-            rc = run_logged(command, out / f"generate_{cell}.log", env)
-            if rc:
-                raise RuntimeError(
-                    f"generator failed for {cell}; see {out}/generate_{cell}.log")
+            raise RuntimeError(f"missing case {case}; supply existing fixtures "
+                               "or generate them on archive/gnuradio-adapter")
         public, windows, hashes, templates = check_input(case)
         if public.get("cell") != cell:
             raise ValueError(f"input cell {public.get('cell')!r} does not "
@@ -565,8 +553,7 @@ def comparison_payload(path, cell_key):
 
 
 def run_functional(args, binary, env, out, prov):
-    plans = prepare_cases(args.inputs, args.cells, args.source_windows,
-                          args.seed, args.build_dir, out, env, generate=True)
+    plans = prepare_cases(args.inputs, args.cells, args.source_windows)
     results = []
     for plan in plans:
         cell = plan["cell"]
@@ -975,8 +962,7 @@ def run_timing(args, binary, env, out, prov):
     lib_hashes = [item["sha256"] for item in prov["libraries"]]
     quality = check_quality_summary(args.quality_summary, args.cells,
                                     prov["binary"]["sha256"], prov, lib_hashes)
-    plans = prepare_cases(args.inputs, args.cells, args.source_windows,
-                          args.seed, args.build_dir, out, env, generate=False)
+    plans = prepare_cases(args.inputs, args.cells, args.source_windows)
     for plan in plans:
         expected = quality["source_windows"].get(plan["cell"])
         if expected != len(plan["windows"]):

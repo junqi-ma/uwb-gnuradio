@@ -41,7 +41,7 @@ def main() -> int:
     log_path = BUILD / 'live-console-build.log'
     print('检查并构建当前源码的实时接收程序...', flush=True)
     commands = [
-        ['cmake', '-S', str(ROOT / 'gr-uwb'), '-B', str(BUILD), '-DCMAKE_BUILD_TYPE=Release', '-DENABLE_DOXYGEN=OFF', '-DUWB_BUILD_GNURADIO=OFF', '-DUWB_BUILD_EXPERIMENTS=OFF'],
+        ['cmake', '-S', str(ROOT / 'gr-uwb'), '-B', str(BUILD), '-DCMAKE_BUILD_TYPE=Release', '-DUWB_BUILD_EXPERIMENTS=OFF'],
         ['cmake', '--build', str(BUILD), '--target', 'uwb_dw3000_live', '-j', '4'],
     ]
     try:

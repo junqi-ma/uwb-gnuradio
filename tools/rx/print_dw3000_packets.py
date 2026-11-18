@@ -31,8 +31,7 @@ def decoder() -> Path:
     env = os.environ.copy()
     env.pop('LD_LIBRARY_PATH', None)
     subprocess.run(['cmake', '-S', str(ROOT / 'gr-uwb'), '-B', str(build),
-                    '-DCMAKE_BUILD_TYPE=Release', '-DUWB_BUILD_GNURADIO=OFF',
-                    '-DUWB_BUILD_EXPERIMENTS=OFF', '-DENABLE_UHD_BACKEND=OFF'],
+                    '-DCMAKE_BUILD_TYPE=Release', '-DUWB_BUILD_EXPERIMENTS=OFF', '-DENABLE_UHD_BACKEND=OFF'],
                    env=env, check=True, stdout=sys.stderr)
     subprocess.run(['cmake', '--build', str(build), '--target',
                     'uwb_dw3000_decode', '-j4'], env=env, check=True, stdout=sys.stderr)

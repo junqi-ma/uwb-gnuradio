@@ -11,30 +11,9 @@
 #ifndef INCLUDED_UWB_API_H
 #define INCLUDED_UWB_API_H
 
-/*
- * Self-contained symbol-visibility macros.
- *
- * Historically this header pulled in <gnuradio/attributes.h>, which made
- * every public gr-uwb header depend on the GNU Radio development headers
- * even when no GNU Radio code was used.  The definitions below replicate
- * <gnuradio/attributes.h> exactly (on GCC/Clang both __GR_ATTR_EXPORT and
- * __GR_ATTR_IMPORT are __attribute__((visibility("default"))), on MSVC
- * dllexport/dllimport driven by the per-target EXPORTS define), so the
- * adapter keeps its existing export semantics while the native core
- * (uwb_core / uwb_native) builds and installs without GNU Radio.
- *
- * A target that wants its UWB_API symbols exported defines one of
- * gnuradio_uwb_EXPORTS / uwb_core_EXPORTS / uwb_native_EXPORTS via
- * DEFINE_SYMBOL (shared builds) -- static archives need no define.
- */
-
+// Native libraries are static. Keep symbol visibility explicit on ELF/Mach-O.
 #if defined(_MSC_VER) || defined(__CYGWIN__)
-#    if defined(gnuradio_uwb_EXPORTS) || defined(uwb_core_EXPORTS) || \
-        defined(uwb_native_EXPORTS)
-#        define UWB_API __declspec(dllexport)
-#    else
-#        define UWB_API __declspec(dllimport)
-#    endif
+#    define UWB_API
 #elif defined(__GNUC__) || defined(__clang__)
 #    define UWB_API __attribute__((visibility("default")))
 #else

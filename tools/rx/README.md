@@ -3,19 +3,19 @@
 更新：2026-11-17，主分支 `feature/sic-research`，低 SNR 优化合入 `63c057f`。
 低 SNR 完整帧与 ABBA 实验见 [复现工具](low_snr_eval/README.md)。
 完整构建、安装资源与接口边界见
-[原生接收与 GNU Radio 构建使用说明](../../docs/原生接收与GNU_Radio构建使用说明.md)。
+[原生 UHD/C++ 构建使用说明](../../docs/原生UHD与C++构建使用说明.md)。
 
 ## 直接使用当前原生 C++ live
 
 在仓库根目录构建和运行：
 
 ```sh
-cmake -S gr-uwb -B gr-uwb/build-native \
+cmake -S gr-uwb -B gr-uwb/build-native-only \
   -DCMAKE_BUILD_TYPE=Release \
-  -DUWB_BUILD_GNURADIO=OFF -DUWB_BUILD_EXPERIMENTS=OFF \
+  -DUWB_BUILD_EXPERIMENTS=OFF \
   -DENABLE_UHD_BACKEND=ON
-cmake --build gr-uwb/build-native --target uwb_dw3000_live -j4
-gr-uwb/build-native/apps/uwb_dw3000_live \
+cmake --build gr-uwb/build-native-only --target uwb_dw3000_live -j4
+gr-uwb/build-native-only/apps/uwb_dw3000_live \
   --replay /path/to/capture.sc16 --workers 4 --sync locked --period-ms 5
 ```
 
@@ -65,7 +65,7 @@ python3 tools/rx/print_dw3000_packets.py
 
 默认重新解码 `testdata/x410_fixed_tone_live_20261115/clean_1s.sc16`，使用同目录的
 `packet_starts_1s.txt`（200 个包窗）。首次运行通过 CMake 构建原生 `uwb_dw3000_decode`（`build-offline-decoder`），
-关闭 GR/UHD/实验目标；后续增量构建会跟踪头文件和编译后的解调入口。默认 CFO 配置，无 skip=216 临时参数。
+关闭 UHD 和实验目标；后续增量构建会跟踪头文件和编译后的解调入口。默认 CFO 配置，无 skip=216 临时参数。
 
 逐包打印候选时间、检测到的 SYNC 数、SFD/PHR 状态、PHR 包长、CFO、CFO 拟合点数、
 FCS、独立 Python CRC 和失败阶段。首尾窗口不足也占一行并报告原因。最后汇总成功率。

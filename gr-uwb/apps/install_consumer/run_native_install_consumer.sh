@@ -34,7 +34,7 @@ done
 if [ -z "$PREFIX" ]; then
     echo "SKIP: no install prefix supplied (--prefix)."
     echo "      Install the native build and re-run, e.g."
-    echo "        cmake -S gr-uwb -B build-native -DUWB_BUILD_GNURADIO=OFF"
+    echo "        cmake -S gr-uwb -B build-native -DENABLE_UHD_BACKEND=OFF"
     echo "        cmake --build build-native && cmake --install build-native --prefix <prefix>"
     echo "        $0 --prefix <prefix>"
     exit 77
@@ -85,6 +85,10 @@ project(uwb_native_consumer_check CXX)
 find_package(uwb CONFIG REQUIRED)
 add_executable(uwb_native_consumer "$ROOT/uwb_native_consumer.cc")
 target_link_libraries(uwb_native_consumer PRIVATE uwb::uwb_native)
+add_executable(uwb_twr_config_consumer "$ROOT/install_consumer.cc")
+target_link_libraries(uwb_twr_config_consumer PRIVATE uwb::uwb_twr_core)
+add_executable(uwb_twr_core_consumer "$ROOT/twr_core_consumer.cc")
+target_link_libraries(uwb_twr_core_consumer PRIVATE uwb::uwb_twr_core)
 EOF
 
 echo "configuring consumer via find_package(uwb CONFIG) against prefix only: $PREFIX"
@@ -95,6 +99,8 @@ cmake --build "$WORK/build" >/dev/null
 BIN="$WORK/build/uwb_native_consumer"
 echo "running native consumer"
 "$BIN"
+"$WORK/build/uwb_twr_config_consumer"
+"$WORK/build/uwb_twr_core_consumer"
 
 # Dependency proof: no GNU Radio / PMT in the direct NEEDED set ...
 if command -v readelf >/dev/null 2>&1; then
