@@ -59,3 +59,21 @@ SUMMARY（含结尾 SUMMARY_PARTIAL）的 compute/demod 均值是控制台批次
 比较固定窗口 JSONL，忽略耗时，逐项比较状态、度量、CFO、FCS 和 PSDU hex。
 工具默认每个 +4/-12/-14 dB 文件 200 包；解码器编译目标为 uwb_dw3000_decode。
 这是一致性检查，不替代动态锁定调度的 ABBA 验收。
+
+### 6×40 固定窗口（含 CFO/SFO）生成与校验
+
+`fixed_scenarios.py` 用于生成和逐包比对六组各 40 帧固定窗口夹具（`control`、
+`seed1729`、`seed2718`、`cfo10k`、`cfo40k`、`sfo27ppm`；前两组零偏差，
+其余四组含不同种子、+10/+40 kHz CFO 与 +27 ppm SFO）：
+
+```sh
+env -u LD_LIBRARY_PATH python3 tools/rx/low_snr_eval/fixed_scenarios.py \
+  --generate --fixtures /tmp/uwb-low-snr-6x40 --build-dir gr-uwb/build-baseline-a
+env -u LD_LIBRARY_PATH python3 tools/rx/low_snr_eval/fixed_scenarios.py \
+  "$DECODER_A" "$DECODER_B" --fixtures /tmp/uwb-low-snr-6x40 --out /tmp/fixed_6x40.json
+```
+
+脚本会检查每组 40 帧（序号 1..40，`pre_guard=36864`、`window=450000`、`eq16`）除去
+`demod_us` 之外全部 JSONL 字段的逐包一致性，并对照 `truth-{1729,2718}.txt` 核对
+精确 PSDU 匹配数（基线预期：`40/40`、`38/40`、`40/40`、`37/40`、`38/40`、`37/40`，
+错误 FCS 必须为 `0`）。
