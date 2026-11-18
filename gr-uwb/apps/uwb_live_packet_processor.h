@@ -5,7 +5,15 @@
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
 #include <gnuradio/uwb/uwb_resample_window.h>
 #include <gnuradio/uwb/uwb_target_lock_core.h>
+#include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <vector>
 
 namespace gr::uwb::live {
 // Identity and coordinates carried from planning through completion. Native
@@ -117,4 +125,181 @@ inline core::TargetObservation make_target_observation(
     }
     return obs;
 }
+
+struct PacketJob : PacketRequest {
+    std::vector<std::complex<int16_t>> iq;
+    size_t count = 0;
+    std::chrono::steady_clock::time_point ready{};
+    explicit PacketJob(size_t max_window = 0) : iq(max_window) {}
+};
+
+// Bounded worker slot pool for PacketRequest submissions.
+// Slots are pre-allocated once; submit() copies only from the caller's
+// power-of-two ring buffer outside the queue mutex and returns false when all
+// slots are busy. Workers drain all admitted slots before stopping.
+class PacketSlotPool {
+public:
+    class WorkerLoop {
+    public:
+        template <class ProcessFn>
+        void run(ProcessFn&& process_fn)
+        {
+            pool_.mark_ready();
+            for (;;) {
+                size_t slot = 0;
+                if (!pool_.pop_pending(slot))
+                    return;
+                process_fn(pool_.jobs_[slot]);
+                pool_.release_slot(slot);
+            }
+        }
+
+    private:
+        friend class PacketSlotPool;
+        explicit WorkerLoop(PacketSlotPool& pool) : pool_(pool) {}
+        PacketSlotPool& pool_;
+    };
+
+    PacketSlotPool(size_t capacity, size_t max_window)
+        : max_window_(max_window)
+    {
+        jobs_.reserve(capacity);
+        for (size_t i = 0; i < capacity; ++i) {
+            jobs_.emplace_back(max_window);
+            free_.push_back(i);
+        }
+    }
+
+    ~PacketSlotPool() { stop(); }
+
+    PacketSlotPool(const PacketSlotPool&) = delete;
+    PacketSlotPool& operator=(const PacketSlotPool&) = delete;
+
+    template <class WorkerMain>
+    void start(size_t num_workers, WorkerMain&& worker_main)
+    {
+        stop();
+        {
+            std::lock_guard<std::mutex> l(mutex_);
+            stopping_ = false;
+            ready_ = 0;
+            error_.clear();
+        }
+        try {
+            for (size_t worker = 0; worker < num_workers; ++worker) {
+                threads_.emplace_back([this, worker, worker_main]() mutable {
+                    try {
+                        WorkerLoop loop(*this);
+                        worker_main(worker, loop);
+                    } catch (const std::exception& e) {
+                        std::lock_guard<std::mutex> l(mutex_);
+                        if (error_.empty())
+                            error_ = e.what();
+                        stopping_ = true;
+                        cv_.notify_all();
+                    }
+                });
+            }
+            std::unique_lock<std::mutex> l(mutex_);
+            cv_.wait(l, [&] { return ready_ == num_workers || !error_.empty(); });
+            if (!error_.empty())
+                throw std::runtime_error(error_);
+        } catch (...) {
+            stop();
+            throw;
+        }
+    }
+
+    void stop()
+    {
+        {
+            std::lock_guard<std::mutex> l(mutex_);
+            stopping_ = true;
+        }
+        cv_.notify_all();
+        for (auto& t : threads_) {
+            if (t.joinable())
+                t.join();
+        }
+        threads_.clear();
+    }
+
+    size_t backlog() const
+    {
+        std::lock_guard<std::mutex> l(mutex_);
+        return jobs_.size() - free_.size();
+    }
+
+    std::string failure() const
+    {
+        std::lock_guard<std::mutex> l(mutex_);
+        return error_;
+    }
+
+    [[nodiscard]] bool submit(const PacketRequest& req, size_t count,
+                              const std::vector<std::complex<int16_t>>& ring)
+    {
+        size_t slot = 0;
+        {
+            std::lock_guard<std::mutex> l(mutex_);
+            if (stopping_ || free_.empty())
+                return false;
+            slot = free_.front();
+            free_.pop_front();
+        }
+        auto& job = jobs_[slot];
+        static_cast<PacketRequest&>(job) = req;
+        job.count = std::min(count, max_window_);
+        job.ready = std::chrono::steady_clock::now();
+        if (job.count > 0 && !ring.empty()) {
+            const size_t mask = ring.size() - 1;
+            const size_t offset = static_cast<size_t>(req.window_start) & mask;
+            const size_t first = std::min(job.count, ring.size() - offset);
+            std::copy_n(ring.data() + offset, first, job.iq.data());
+            if (job.count > first)
+                std::copy_n(ring.data(), job.count - first, job.iq.data() + first);
+        }
+        {
+            std::lock_guard<std::mutex> l(mutex_);
+            pending_.push_back(slot);
+        }
+        cv_.notify_one();
+        return true;
+    }
+
+private:
+    void mark_ready()
+    {
+        std::lock_guard<std::mutex> l(mutex_);
+        ++ready_;
+        cv_.notify_all();
+    }
+
+    bool pop_pending(size_t& slot)
+    {
+        std::unique_lock<std::mutex> l(mutex_);
+        cv_.wait(l, [&] { return stopping_ || !pending_.empty(); });
+        if (pending_.empty())
+            return false;
+        slot = pending_.front();
+        pending_.pop_front();
+        return true;
+    }
+
+    void release_slot(size_t slot)
+    {
+        std::lock_guard<std::mutex> l(mutex_);
+        free_.push_back(slot);
+    }
+
+    size_t max_window_ = 0;
+    mutable std::mutex mutex_;
+    std::condition_variable cv_;
+    std::vector<PacketJob> jobs_;
+    std::deque<size_t> free_, pending_;
+    std::vector<std::thread> threads_;
+    size_t ready_ = 0;
+    bool stopping_ = false;
+    std::string error_;
+};
 } // namespace gr::uwb::live

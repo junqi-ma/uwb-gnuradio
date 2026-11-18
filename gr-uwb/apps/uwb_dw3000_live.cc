@@ -233,10 +233,17 @@ static const char* status_name(demod::DemodStatus s) {
 // Every completed attempt (including queue/gap drops) contributes to a batch.
 // Printing is isolated and bounded: a slow terminal cannot block the RX thread.
 struct Reporter {
+    struct SubmissionSummary {
+        uint64_t acq_seeds = 0;
+        uint64_t submit_attempts = 0;
+        uint64_t admitted = 0;
+        uint64_t dropped_queue = 0;
+    };
     std::mutex mutex;
     std::condition_variable cv;
     std::deque<std::string> lines;
     uint64_t count = 0, pass = 0, batch_pass = 0, omitted = 0;
+    uint64_t demod_completed = 0;
     uint64_t full_retries = 0, batch_retries = 0;
     uint64_t received = 0, source_errors = 0, raw_drops = 0, gaps = 0, models = 0;
     size_t queued = 0, queue_peak = 0, interval;
@@ -297,6 +304,7 @@ struct Reporter {
             && r->payload.fcs_pass && crc_ok(r->payload.bytes);
         std::lock_guard<std::mutex> l(mutex);
         ++count; pass += good; batch_pass += good;
+        if (r) ++demod_completed;
         full_retries += full_retry; batch_retries += full_retry;
         if (!good) ++batch_fail[state == "OK" ? "CRC_CHECK_FAILED" : state];
         std::ostringstream s;
@@ -443,7 +451,8 @@ struct Reporter {
         raw_drops = st.dropped_samples; models = st.model_updates; gaps = gap_count;
         queued = q; queue_peak = std::max(queue_peak, q);
     }
-    void finish() {
+    void finish() { finish(SubmissionSummary{}); }
+    void finish(const SubmissionSummary& sub) {
         {
             std::lock_guard<std::mutex> l(mutex);
             if (done) return;
@@ -452,8 +461,14 @@ struct Reporter {
             s << "FINAL completed=" << count << " fcs=" << pass << '/' << count
               << " raw_samples=" << received << " raw_drop_samples=" << raw_drops
               << " source_errors=" << source_errors << " gaps=" << gaps
-              << " models=" << models << " output_omitted=" << omitted;
-            s << " full_retry=" << full_retries;
+              << " models=" << models << " output_omitted=" << omitted
+              << " full_retry=" << full_retries
+              << " acq_seeds=" << sub.acq_seeds
+              << " submit_attempts=" << sub.submit_attempts
+              << " admitted=" << sub.admitted
+              << " dropped_queue=" << sub.dropped_queue
+              << " demod_completed=" << demod_completed
+              << " fcs_ok=" << pass;
             // Workers and RX are stopped here. Reserve one final line even if
             // normal packet output filled the bounded console queue.
             lines.push_back(s.str()); done = true;
@@ -483,12 +498,27 @@ struct Reporter {
     }
 };
 
-struct Job : live::PacketRequest {
-    std::vector<std::complex<int16_t>> iq;
-    size_t count = 0;
-    Clock::time_point ready;
-    Job() : iq(window) {}
-};
+static std::string format_request_tag(const live::PacketRequest& req,
+                                      bool include_residual = false,
+                                      int64_t residual = 0) {
+    std::ostringstream tag;
+    if (req.target_slot) {
+        tag << "path=target slot=" << req.slot_index
+            << " gen=" << req.generation
+            << " pred=" << req.seed
+            << " win=" << req.window_start
+            << " guard=" << req.guard;
+        if (include_residual)
+            tag << " residual=" << residual;
+    } else if (req.slot_index == std::numeric_limits<uint64_t>::max()) {
+        tag << "path=acquire guard=" << req.guard;
+    } else {
+        tag << "path=interference slot=" << req.slot_index
+            << " guard=" << req.guard
+            << " offset=" << (req.seed - req.window_start);
+    }
+    return tag.str();
+}
 
 struct PendingSubmit : live::PacketRequest {
     size_t count = 0;
@@ -499,14 +529,7 @@ struct PendingSubmit : live::PacketRequest {
 struct Workers {
     Reporter& report;
     core::TargetLockCore& lock;
-    std::mutex mutex;
-    std::condition_variable cv;
-    std::vector<Job> jobs;
-    std::deque<size_t> free, pending;
-    std::vector<std::thread> threads;
-    size_t ready = 0;
-    bool stopping = false;
-    std::string error;
+    live::PacketSlotPool pool;
     // Native <-> work coordinate conversion for lock feedback.  Both the
     // prediction and the observation go through the same function, so a
     // constant group delay cancels in the residual; the absolute t0 stays
@@ -518,211 +541,118 @@ struct Workers {
     Workers(Reporter& r, core::TargetLockCore& lk, const Options& o,
             const std::vector<float>& taps,
             const std::vector<std::complex<float>>& tmpl)
-        : report(r), lock(lk), jobs(o.capacity) {
+        : report(r), lock(lk), pool(o.capacity, window) {
         resample_group_delay = taps.empty() ? 0.0 : 0.5 * (double(taps.size()) - 1.0);
-        for (size_t i = 0; i < jobs.size(); ++i) free.push_back(i);
-        try {
-            for (size_t worker = 0; worker < o.workers; ++worker)
-                threads.emplace_back([&, worker] {
-                    try {
-                        live::PacketProcessor processor(taps, tmpl, window);
-                        // Acquisition / interference profile: unchanged legacy
-                        // wide acquisition.
-                        demod::Qm35825Profile acq;
-                        acq.code_index = 10; acq.preamble_repetitions = 256;
-                        acq.cir_repetitions = 246;
-                        acq.sfd_mode = "4z2";
-                        acq.cir_soft_chip_mode = o.cir == "full"
-                            ? demod::CirSoftChipMode::Full
-                            : demod::CirSoftChipMode::Bypass;
-                        acq.rx_fast_sfd = true; acq.rx_fast_cfo_rotation = true;
-                        acq.rx_seed_refine_tail = true;
-                        acq.rx_softchip_on_demand = o.ondemand_resolved;
-                        acq.rx_fused_payload_cmf = o.fused;
-                        acq.rx_fused_phr_cmf = o.fused;
-                        acq.fused_gate_ppm = o.fused_gate_ppm;
-                        acq.cfo_refit_mode = (o.cfo_refit == "auto") ? 1
-                                           : (o.cfo_refit == "skip") ? 2 : 0;
-                        acq.cfo_refit_skip_rad = o.cfo_refit_skip_rad;
-                        acq.cfo_refit_min_peaks = o.cfo_refit_min_peaks;
-                        // Capture-only mode: stop after the SFD.  Set before
-                        // the locked profile is copied from `acq`, so both the
-                        // acquisition and the locked slots carry it.
-                        acq.rx_stop_after_sfd = (o.stop_after_sfd == "on");
-                        // Blind sparse autocorrelation seeds can precede or
-                        // follow the true first SYNC by several symbols.
-                        acq.timing_search_margin = 131072;
-                        acq.timing_max_backtrack_symbols = 128;
-                        // Locked profile: same PHY, bounded first-SYNC ROI.
-                        demod::Qm35825Profile locked = acq;
-                        locked.sync_strategy = demod::SyncStrategy::LockedBounded;
-                        locked.locked_roi_samples = o.locked_roi;
-                        locked.locked_allow_backtrack = false;
-                        locked.locked_grid_timing = (o.locked_timing == "grid");
-                        locked.timing_search_margin = 0;
-                        locked.timing_max_backtrack_symbols = 0;
-                        { std::lock_guard<std::mutex> l(mutex); ++ready; cv.notify_all(); }
-                        for (;;) {
-                            size_t slot;
-                            { std::unique_lock<std::mutex> l(mutex);
-                              cv.wait(l, [&]{return stopping || !pending.empty();});
-                              if (pending.empty()) return;
-                              slot = pending.front(); pending.pop_front(); }
-                            auto& job = jobs[slot];
-                            try {
-                                const auto compute_start = Clock::now();
-                                const double cpu_start = thread_cpu_us();
-                                PacketCost cost;
-                                cost.worker = worker;
-                                cost.queue_us = elapsed_us(job.ready, compute_start);
-                                const bool bounded =
-                                    job.target_slot && o.sync == "locked";
-                                const demod::Qm35825Profile& p =
-                                    bounded ? locked : acq;
-                                auto processed = processor.process(job, job.iq.data(),
-                                    job.count, p, o.cir == "auto");
-                                auto& r = processed.decoded;
-                                const bool retry = processed.retried;
-                                const auto resample_end = processed.resample_end;
-                                const auto demod_end = processed.demod_end;
-                                const auto compute_end = processed.compute_end;
-                                cost.resample_us = elapsed_us(compute_start, resample_end);
-                                cost.demod_us = elapsed_us(resample_end, demod_end);
-                                cost.retry_us = retry ? elapsed_us(demod_end, compute_end) : 0;
-                                cost.compute_us = elapsed_us(compute_start, compute_end);
-                                cost.cpu_us = thread_cpu_us()-cpu_start;
+        pool.start(o.workers, [&, o, taps, tmpl](size_t worker, live::PacketSlotPool::WorkerLoop& loop) {
+            live::PacketProcessor processor(taps, tmpl, window);
+            // Acquisition / interference profile: unchanged legacy wide acquisition.
+            demod::Qm35825Profile acq;
+            acq.code_index = 10; acq.preamble_repetitions = 256;
+            acq.cir_repetitions = 246;
+            acq.sfd_mode = "4z2";
+            acq.cir_soft_chip_mode = o.cir == "full"
+                ? demod::CirSoftChipMode::Full
+                : demod::CirSoftChipMode::Bypass;
+            acq.rx_fast_sfd = true; acq.rx_fast_cfo_rotation = true;
+            acq.rx_seed_refine_tail = true;
+            acq.rx_softchip_on_demand = o.ondemand_resolved;
+            acq.rx_fused_payload_cmf = o.fused;
+            acq.rx_fused_phr_cmf = o.fused;
+            acq.fused_gate_ppm = o.fused_gate_ppm;
+            acq.cfo_refit_mode = (o.cfo_refit == "auto") ? 1
+                               : (o.cfo_refit == "skip") ? 2 : 0;
+            acq.cfo_refit_skip_rad = o.cfo_refit_skip_rad;
+            acq.cfo_refit_min_peaks = o.cfo_refit_min_peaks;
+            // Capture-only mode: stop after the SFD.  Set before the locked profile
+            // is copied from `acq`, so both the acquisition and the locked slots carry it.
+            acq.rx_stop_after_sfd = (o.stop_after_sfd == "on");
+            // Blind sparse autocorrelation seeds can precede or follow the true
+            // first SYNC by several symbols.
+            acq.timing_search_margin = 131072;
+            acq.timing_max_backtrack_symbols = 128;
+            // Locked profile: same PHY, bounded first-SYNC ROI.
+            demod::Qm35825Profile locked = acq;
+            locked.sync_strategy = demod::SyncStrategy::LockedBounded;
+            locked.locked_roi_samples = o.locked_roi;
+            locked.locked_allow_backtrack = false;
+            locked.locked_grid_timing = (o.locked_timing == "grid");
+            locked.timing_search_margin = 0;
+            locked.timing_max_backtrack_symbols = 0;
+            loop.run([&](live::PacketJob& job) {
+                try {
+                    const auto compute_start = Clock::now();
+                    const double cpu_start = thread_cpu_us();
+                    PacketCost cost;
+                    cost.worker = worker;
+                    cost.queue_us = elapsed_us(job.ready, compute_start);
+                    const bool bounded = job.target_slot && o.sync == "locked";
+                    const demod::Qm35825Profile& p = bounded ? locked : acq;
+                    auto processed = processor.process(job, job.iq.data(),
+                        job.count, p, o.cir == "auto");
+                    auto& r = processed.decoded;
+                    const bool retry = processed.retried;
+                    const auto resample_end = processed.resample_end;
+                    const auto demod_end = processed.demod_end;
+                    const auto compute_end = processed.compute_end;
+                    cost.resample_us = elapsed_us(compute_start, resample_end);
+                    cost.demod_us = elapsed_us(resample_end, demod_end);
+                    cost.retry_us = retry ? elapsed_us(demod_end, compute_end) : 0;
+                    cost.compute_us = elapsed_us(compute_start, compute_end);
+                    cost.cpu_us = thread_cpu_us() - cpu_start;
 
-                                // ---- lock feedback ------------------------
-                                const auto obs = live::make_target_observation(
-                                    job, r, work_fs, fs, resample_group_delay);
-                                if (job.feeds_lock)
-                                    lock.push_observation(obs);
+                    // ---- lock feedback ------------------------
+                    const auto obs = live::make_target_observation(
+                        job, r, work_fs, fs, resample_group_delay);
+                    if (job.feeds_lock)
+                        lock.push_observation(obs);
 
-                                std::ostringstream tag;
-                                if (r.timing.ok) {
-                                    tag << "start="
-                                        << (job.window_start +
-                                            core::map_obs_sample_to_native(
-                                                r.timing.preamble_start_sample,
-                                                work_fs, fs, resample_group_delay))
-                                        << ' ';
-                                }
-                                if (job.target_slot) {
-                                    tag << "path=target slot=" << job.slot_index
-                                        << " gen=" << job.generation
-                                        << " pred=" << job.seed
-                                        << " win=" << job.window_start
-                                        << " guard=" << job.guard
-                                        << " residual=" << obs.residual;
-                                } else if (job.slot_index ==
-                                           std::numeric_limits<uint64_t>::max()) {
-                                    tag << "path=acquire guard=" << job.guard;
-                                } else {
-                                    tag << "path=interference slot=" << job.slot_index
-                                        << " guard=" << job.guard
-                                        << " offset=" << (job.seed - job.window_start);
-                                }
-                                report.result(job.id, job.seed, status_name(r.status), &r,
-                                    elapsed_us(job.ready, compute_end)/1000, retry, &cost,
-                                    tag.str());
-                                // Interference / identity diagnostics.  A
-                                // decode that is not the locked target identity
-                                // is an interference event; a same-identity
-                                // decode far from the grid is reported as
-                                // ambiguous and never moves the lock.
-                                // With `--lock-fcs off`, or with
-                                // `--stop-after-sfd on`, there is no FCS to
-                                // compare against, so a preamble+SFD success is
-                                // not evidence of interference: TargetLockCore
-                                // discriminates by grid residual instead.
-                                if (o.lock_fcs == "on" && o.stop_after_sfd != "on" &&
-                                    !job.target_slot && r.timing.ok && r.sfd.ok) {
-                                    const bool identity = r.payload.fcs_pass &&
-                                        crc_ok(r.payload.bytes);
-                                    if (!identity) {
-                                        ++interference_events;
-                                        std::ostringstream s;
-                                        s << std::fixed << std::setprecision(3)
-                                          << "INTERFERENCE start="
-                                          << (obs.observed_origin >= 0 ? obs.observed_origin
-                                                                       : job.seed)
-                                          << " metric=" << r.timing.metric
-                                          << " sfd=" << r.sfd.ok
-                                          << " fcs=" << r.payload.fcs_pass
-                                          << " reason=identity_mismatch";
-                                        report.info(s.str());
-                                    }
-                                }
-                            } catch (const std::exception& e) {
-                                report.result(job.id, job.seed, "INTERNAL_ERROR");
-                                report.info(std::string("WORKER_ERROR ") + e.what());
-                            }
-                            { std::lock_guard<std::mutex> l(mutex); free.push_back(slot); }
-                        }
-                    } catch (const std::exception& e) {
-                        std::lock_guard<std::mutex> l(mutex);
-                        error = e.what(); stopping = true; cv.notify_all();
+                    std::ostringstream tag;
+                    if (r.timing.ok) {
+                        tag << "start="
+                            << (job.window_start +
+                                core::map_obs_sample_to_native(
+                                    r.timing.preamble_start_sample,
+                                    work_fs, fs, resample_group_delay))
+                            << ' ';
                     }
-                });
-            std::unique_lock<std::mutex> l(mutex);
-            cv.wait(l, [&]{return ready == o.workers || !error.empty();});
-            if (!error.empty()) throw std::runtime_error(error);
-        } catch (...) { stop(); throw; }
+                    tag << format_request_tag(job, true, obs.residual);
+                    report.result(job.id, job.seed, status_name(r.status), &r,
+                        elapsed_us(job.ready, compute_end) / 1000, retry, &cost,
+                        tag.str());
+                    if (o.lock_fcs == "on" && o.stop_after_sfd != "on" &&
+                        !job.target_slot && r.timing.ok && r.sfd.ok) {
+                        const bool identity = r.payload.fcs_pass &&
+                            crc_ok(r.payload.bytes);
+                        if (!identity) {
+                            ++interference_events;
+                            std::ostringstream s;
+                            s << std::fixed << std::setprecision(3)
+                              << "INTERFERENCE start="
+                              << (obs.observed_origin >= 0 ? obs.observed_origin
+                                                           : job.seed)
+                              << " metric=" << r.timing.metric
+                              << " sfd=" << r.sfd.ok
+                              << " fcs=" << r.payload.fcs_pass
+                              << " reason=identity_mismatch";
+                            report.info(s.str());
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    report.result(job.id, job.seed, "INTERNAL_ERROR", nullptr,
+                                  0, false, nullptr, format_request_tag(job));
+                    report.info(std::string("WORKER_ERROR ") + e.what());
+                }
+            });
+        });
     }
     ~Workers() { stop(); }
-    void stop() {
-        { std::lock_guard<std::mutex> l(mutex); stopping = true; }
-        cv.notify_all(); for (auto& t : threads) if (t.joinable()) t.join();
-    }
-    size_t backlog() { std::lock_guard<std::mutex> l(mutex); return jobs.size()-free.size(); }
-    std::string failure() { std::lock_guard<std::mutex> l(mutex); return error; }
-    /** Submit from the ring buffer at absolute native `window_start`. */
-    bool submit(uint64_t id, int64_t window_start, size_t count, int64_t seed,
-                int64_t predicted_rel_work, uint64_t slot_index, uint64_t generation,
-                bool target_slot, bool feeds_lock,
-                const std::vector<std::complex<int16_t>>& ring,
-                size_t guard = 0) {
-        size_t slot;
-        { std::lock_guard<std::mutex> l(mutex);
-          if (free.empty()) return false;
-          slot = free.front(); free.pop_front(); }
-        auto& job = jobs[slot];
-        job.id = id; job.seed = seed; job.window_start = window_start;
-        job.count = std::min(count, window);
-        job.predicted_rel_work = predicted_rel_work;
-        job.guard = guard;
-        job.slot_index = slot_index; job.generation = generation;
-        job.target_slot = target_slot; job.feeds_lock = feeds_lock;
-        job.ready = Clock::now();
-        const size_t offset = size_t(window_start) & (history_size-1);
-        const size_t first = std::min(job.count, history_size-offset);
-        std::copy_n(ring.data()+offset, first, job.iq.data());
-        std::copy_n(ring.data(), job.count-first, job.iq.data()+first);
-        { std::lock_guard<std::mutex> l(mutex); pending.push_back(slot); }
-        cv.notify_one();
-        return true;
-    }
-    /** Submit from an already assembled buffer (timed_burst path). */
-    bool submit_buffer(uint64_t id, int64_t window_start, const std::complex<int16_t>* src,
-                       size_t count, int64_t seed, int64_t predicted_rel_work,
-                       uint64_t slot_index, uint64_t generation, bool target_slot,
-                       bool feeds_lock, size_t guard = 0) {
-        size_t slot;
-        { std::lock_guard<std::mutex> l(mutex);
-          if (free.empty()) return false;
-          slot = free.front(); free.pop_front(); }
-        auto& job = jobs[slot];
-        job.id = id; job.seed = seed; job.window_start = window_start;
-        job.count = std::min(count, window);
-        job.predicted_rel_work = predicted_rel_work;
-        job.guard = guard;
-        job.slot_index = slot_index; job.generation = generation;
-        job.target_slot = target_slot; job.feeds_lock = feeds_lock;
-        job.ready = Clock::now();
-        std::copy_n(src, job.count, job.iq.data());
-        { std::lock_guard<std::mutex> l(mutex); pending.push_back(slot); }
-        cv.notify_one();
-        return true;
+    void stop() { pool.stop(); }
+    size_t backlog() { return pool.backlog(); }
+    std::string failure() { return pool.failure(); }
+    /** Submit from the ring buffer at absolute native `req.window_start`. */
+    [[nodiscard]] bool submit(const live::PacketRequest& req, size_t count,
+                              const std::vector<std::complex<int16_t>>& ring) {
+        return pool.submit(req, count, ring);
     }
 };
 
@@ -1266,8 +1196,11 @@ try {
     // Autocorrelation seeds produced by the streaming frontend (continuous
     // mode only).  `id` also counts timed windows, so the capture count the
     // acquisition acceptance is stated in needs its own counter.
-    uint64_t acq_seeds=0;
-    int64_t pending_seed=-1; uint64_t pending_id=0;
+    Reporter::SubmissionSummary sub_stats{};
+    uint64_t cand_submit_attempts = 0, cand_admitted = 0, cand_dropped_queue = 0;
+    uint64_t cand_incomplete = 0, cand_overrun = 0, cand_overlapping = 0;
+    uint64_t cand_invalid_gap = 0, autocorr_ignored = 0;
+    int64_t pending_seed=-1; uint64_t pending_id=0; size_t pending_guard=cur_pre_guard;
     std::deque<PendingSubmit> pending;
     core::TargetSlotPlan pending_plan;
     bool have_pending_plan = false;
@@ -1286,13 +1219,8 @@ try {
     // budget is decided by these two numbers.
     double frontend_copy_us=0, frontend_scan_us=0;
     uint64_t target_slots=0, target_dropped=0, target_expired=0, dedup=0, unknown=0;
-    struct TimedPending {
-        uint64_t slot_index;
-        uint64_t generation;
-        int64_t window_start;
-        size_t count;
-        int64_t predicted_origin;
-        size_t guard;
+    struct TimedPending : live::PacketRequest {
+        size_t count = 0;
     };
     std::deque<TimedPending> timed_pending;
     int64_t timed_cursor = std::llround(o.timed_t0_ms * 1e-3 * fs);
@@ -1314,12 +1242,17 @@ try {
                 if (timed->queue_window(plan.window_start, count,
                                         plan.generation)) {
                     TimedPending tp;
+                    tp.id = ++id;
+                    tp.seed = plan.predicted_origin;
+                    tp.window_start = plan.window_start;
+                    tp.predicted_rel_work =
+                        std::llround((plan.predicted_origin - plan.window_start) * 65.0 / 48);
+                    tp.guard = plan.pre_guard;
                     tp.slot_index = plan.slot_index;
                     tp.generation = plan.generation;
-                    tp.window_start = plan.window_start;
+                    tp.target_slot = true;
+                    tp.feeds_lock = true;
                     tp.count = count;
-                    tp.predicted_origin = plan.predicted_origin;
-                    tp.guard = plan.pre_guard;
                     timed_pending.push_back(tp);
                     lock.commit_plan(plan);
                     ++target_slots;
@@ -1333,16 +1266,21 @@ try {
                 // Blind grid: the packet is expected at `timed_cursor`, so the
                 // window starts one pre_guard earlier.
                 const int64_t ws = timed_cursor - int64_t(cur_pre_guard);
-                if (timed->queue_window(ws < 0 ? 0 : ws, window,
+                const int64_t win_start = ws < 0 ? 0 : ws;
+                if (timed->queue_window(win_start, window,
                                         lock.generation())) {
                     TimedPending tp;
+                    tp.id = ++id;
+                    tp.seed = ws < 0 ? int64_t(cur_pre_guard) : timed_cursor;
+                    tp.window_start = win_start;
+                    tp.predicted_rel_work =
+                        std::llround((tp.seed - tp.window_start) * 65.0 / 48);
+                    tp.guard = cur_pre_guard;
                     tp.slot_index = std::numeric_limits<uint64_t>::max();
                     tp.generation = lock.generation();
-                    tp.window_start = ws < 0 ? 0 : ws;
+                    tp.target_slot = false;
+                    tp.feeds_lock = true;
                     tp.count = window;
-                    tp.predicted_origin = ws < 0 ? int64_t(cur_pre_guard)
-                                                 : timed_cursor;
-                    tp.guard = cur_pre_guard;
                     timed_pending.push_back(tp);
                 }
                 timed_cursor += nominal_period_samples;
@@ -1373,10 +1311,18 @@ try {
                         " sample="+std::to_string(meta.start_sample_abs)+
                         " error_code="+std::to_string(meta.error_code)+
                         " gap_samples="+std::to_string(meta.gap_samples));
-            if (pending_seed>=0) report.result(pending_id,pending_seed,"INVALID_GAP");
+            if (pending_seed>=0) {
+                report.result(pending_id, pending_seed, "INVALID_GAP", nullptr,
+                              0, false, nullptr,
+                              "path=acquire guard=" + std::to_string(pending_guard));
+                ++cand_invalid_gap;
+            }
             pending_seed=-1;
-            for (const auto& ps : pending)
-                report.result(ps.id, ps.seed, "INVALID_GAP");
+            for (const auto& ps : pending) {
+                report.result(ps.id, ps.seed, "INVALID_GAP", nullptr, 0,
+                              false, nullptr, format_request_tag(ps));
+                ++cand_invalid_gap;
+            }
             pending.clear();
             have_pending_plan = false;
             end=meta.start_sample_abs; valid_begin=end; acq.reset(end);
@@ -1416,7 +1362,7 @@ try {
                     double metric = 0.0;
                     const auto seed=acq.scan(ring,&metric);
                     if (seed<0) continue;
-                    ++id; ++acq_seeds;
+                    ++sub_stats.acq_seeds;
                     if (lock.scheduled()) {
                         // Classification is deferred to submission time: the
                         // predicted target window for this slot is only
@@ -1424,44 +1370,84 @@ try {
                         // this 6 ms-window autocorrelation detection.
                         if (!o.interference) {
                             ++unknown;
-                        } else if (seed-int64_t(cur_pre_guard)<valid_begin) {
-                            report.result(id,seed,"INCOMPLETE_WINDOW");
+                            ++autocorr_ignored;
                         } else {
-                            PendingSubmit ps;
-                            ps.id = id;
-                            ps.seed = seed;
-                            ps.window_start = seed-int64_t(cur_pre_guard);
-                            ps.count = window;
-                            ps.predicted_rel_work = std::llround(cur_pre_guard*65.0/48);
-                            ps.guard = cur_pre_guard;
-                            ps.generation = lock.generation();
-                            ps.metric = metric;
-                            ps.is_candidate = true;
-                            if (pending.size() >= 8) {
-                                report.result(id,seed,"DROPPED_QUEUE");
+                            ++id;
+                            const std::string tag =
+                                "path=acquire guard=" + std::to_string(cur_pre_guard);
+                            if (seed-int64_t(cur_pre_guard)<valid_begin) {
+                                report.result(id, seed, "INCOMPLETE_WINDOW",
+                                              nullptr, 0, false, nullptr, tag);
+                                ++cand_incomplete;
                             } else {
-                                pending.push_back(ps);
-                                ++unknown;
+                                PendingSubmit ps;
+                                ps.id = id;
+                                ps.seed = seed;
+                                ps.window_start = seed-int64_t(cur_pre_guard);
+                                ps.count = window;
+                                ps.predicted_rel_work = std::llround(cur_pre_guard*65.0/48);
+                                ps.guard = cur_pre_guard;
+                                ps.generation = lock.generation();
+                                ps.metric = metric;
+                                ps.is_candidate = true;
+                                if (pending.size() >= 8) {
+                                    report.result(ps.id, ps.seed, "DROPPED_QUEUE",
+                                                  nullptr, 0, false, nullptr,
+                                                  format_request_tag(ps));
+                                    ++cand_dropped_queue;
+                                } else {
+                                    pending.push_back(ps);
+                                    ++unknown;
+                                }
                             }
                         }
                     } else if (pending_seed>=0) {
-                        report.result(id,seed,"OVERLAPPING_CANDIDATE");
+                        ++id;
+                        report.result(id, seed, "OVERLAPPING_CANDIDATE", nullptr,
+                                      0, false, nullptr,
+                                      "path=acquire guard=" + std::to_string(cur_pre_guard));
+                        ++cand_overlapping;
                     } else if (seed-int64_t(cur_pre_guard)<valid_begin) {
-                        report.result(id,seed,"INCOMPLETE_WINDOW");
+                        ++id;
+                        report.result(id, seed, "INCOMPLETE_WINDOW", nullptr,
+                                      0, false, nullptr,
+                                      "path=acquire guard=" + std::to_string(cur_pre_guard));
+                        ++cand_incomplete;
                     } else {
-                        pending_seed=seed; pending_id=id;
+                        ++id;
+                        pending_seed=seed; pending_id=id; pending_guard=cur_pre_guard;
                     }
                 }
-                if (pending_seed>=0 && end>=pending_seed-int64_t(cur_pre_guard)+int64_t(window)) {
-                    if (pending_seed-int64_t(cur_pre_guard)<valid_begin) {
-                        report.result(pending_id,pending_seed,"HISTORY_OVERRUN");
+                if (pending_seed>=0 && end>=pending_seed-int64_t(pending_guard)+int64_t(window)) {
+                    const int64_t ws = pending_seed-int64_t(pending_guard);
+                    live::PacketRequest req;
+                    req.id = pending_id;
+                    req.seed = pending_seed;
+                    req.window_start = ws;
+                    req.predicted_rel_work = std::llround(pending_guard*65.0/48);
+                    req.guard = pending_guard;
+                    req.slot_index = std::numeric_limits<uint64_t>::max();
+                    req.generation = lock.generation();
+                    req.target_slot = false;
+                    req.feeds_lock = true;
+                    if (ws<valid_begin) {
+                        report.result(req.id, req.seed, "HISTORY_OVERRUN",
+                                      nullptr, 0, false, nullptr,
+                                      format_request_tag(req));
+                        ++cand_overrun;
                     } else {
-                        const int64_t ws = pending_seed-int64_t(cur_pre_guard);
-                        workers.submit(pending_id, ws, window, pending_seed,
-                                       std::llround(cur_pre_guard*65.0/48),
-                                       std::numeric_limits<uint64_t>::max(),
-                                       lock.generation(), false, true, ring,
-                                       cur_pre_guard);
+                        ++sub_stats.submit_attempts;
+                        ++cand_submit_attempts;
+                        if (!workers.submit(req, window, ring)) {
+                            report.result(req.id, req.seed, "DROPPED_QUEUE",
+                                          nullptr, 0, false, nullptr,
+                                          format_request_tag(req));
+                            ++sub_stats.dropped_queue;
+                            ++cand_dropped_queue;
+                        } else {
+                            ++sub_stats.admitted;
+                            ++cand_admitted;
+                        }
                     }
                     pending_seed=-1;
                 }
@@ -1480,7 +1466,9 @@ try {
             std::deque<PendingSubmit> still;
             for (const auto& ps : pending) {
                 if (ps.window_start < valid_begin) {
-                    report.result(ps.id, ps.seed, "HISTORY_OVERRUN");
+                    report.result(ps.id, ps.seed, "HISTORY_OVERRUN", nullptr,
+                                  0, false, nullptr, format_request_tag(ps));
+                    ++cand_overrun;
                     continue;
                 }
                 if (ps.window_start + int64_t(ps.count) > end) {
@@ -1502,11 +1490,17 @@ try {
                         continue;
                     }
                 }
-                if (!workers.submit(ps.id, ps.window_start, ps.count, ps.seed,
-                                    ps.predicted_rel_work, ps.slot_index,
-                                    ps.generation, ps.target_slot, ps.feeds_lock,
-                                    ring, ps.guard))
-                    report.result(ps.id, ps.seed, "DROPPED_QUEUE");
+                ++sub_stats.submit_attempts;
+                ++cand_submit_attempts;
+                if (!workers.submit(ps, ps.count, ring)) {
+                    report.result(ps.id, ps.seed, "DROPPED_QUEUE", nullptr,
+                                  0, false, nullptr, format_request_tag(ps));
+                    ++sub_stats.dropped_queue;
+                    ++cand_dropped_queue;
+                } else {
+                    ++sub_stats.admitted;
+                    ++cand_admitted;
+                }
             }
             pending.swap(still);
         }
@@ -1537,24 +1531,36 @@ try {
                     break; // still filling
                 have_pending_plan = false;
                 const size_t count = size_t(plan.window_end - plan.window_start);
+                live::PacketRequest req;
+                req.id = ++id;
+                req.seed = plan.predicted_origin;
+                req.window_start = plan.window_start;
+                req.predicted_rel_work =
+                    std::llround((plan.predicted_origin - plan.window_start) * 65.0 / 48);
+                req.guard = plan.pre_guard;
+                req.slot_index = plan.slot_index;
+                req.generation = plan.generation;
+                req.target_slot = true;
+                req.feeds_lock = true;
                 if (plan.window_start < valid_begin) {
+                    report.result(req.id, req.seed, "HISTORY_OVERRUN", nullptr,
+                                  0, false, nullptr, format_request_tag(req));
                     lock.abandon_slot(plan.slot_index);
                     ++target_expired;
                 } else {
-                    ++id;
-                    const int64_t rel = plan.predicted_origin - plan.window_start;
-                    const bool ok = workers.submit(id, plan.window_start, count,
-                                                   plan.predicted_origin,
-                                                   std::llround(rel*65.0/48),
-                                                   plan.slot_index, plan.generation,
-                                                   true, true, ring, plan.pre_guard);
-                    if (!ok) {
+                    ++sub_stats.submit_attempts;
+                    if (!workers.submit(req, count, ring)) {
+                        report.result(req.id, req.seed, "DROPPED_QUEUE",
+                                      nullptr, 0, false, nullptr,
+                                      format_request_tag(req));
                         lock.note_slot_outcome(plan.slot_index,
                                                core::TargetSlotOutcome::DroppedQueue);
                         ++target_dropped;
+                        ++sub_stats.dropped_queue;
                     } else {
                         lock.commit_plan(plan);
                         ++target_slots;
+                        ++sub_stats.admitted;
                     }
                 }
                 have_pending_plan = lock.next_plan(end, pending_plan);
@@ -1571,23 +1577,24 @@ try {
                     break;
                 timed_pending.pop_front();
                 if (tp.window_start < valid_begin) {
-                    report.result(++id, tp.predicted_origin, "HISTORY_OVERRUN");
-                    if (tp.slot_index != std::numeric_limits<uint64_t>::max())
+                    report.result(tp.id, tp.seed, "HISTORY_OVERRUN", nullptr,
+                                  0, false, nullptr, format_request_tag(tp));
+                    if (tp.target_slot)
                         lock.abandon_slot(tp.slot_index);
                     continue;
                 }
-                const int64_t rel = tp.predicted_origin - tp.window_start;
-                const bool target_slot =
-                    tp.slot_index != std::numeric_limits<uint64_t>::max();
-                if (!workers.submit(++id, tp.window_start, tp.count,
-                                    tp.predicted_origin,
-                                    std::llround(rel*65.0/48), tp.slot_index,
-                                    tp.generation, target_slot, true, ring,
-                                    tp.guard)) {
-                    report.result(id, tp.predicted_origin, "DROPPED_QUEUE");
-                    if (target_slot)
+                ++sub_stats.submit_attempts;
+                if (!workers.submit(tp, tp.count, ring)) {
+                    report.result(tp.id, tp.seed, "DROPPED_QUEUE", nullptr,
+                                  0, false, nullptr, format_request_tag(tp));
+                    ++sub_stats.dropped_queue;
+                    if (tp.target_slot) {
                         lock.note_slot_outcome(tp.slot_index,
                                                core::TargetSlotOutcome::DroppedQueue);
+                        ++target_dropped;
+                    }
+                } else {
+                    ++sub_stats.admitted;
                 }
             }
             queue_timed_windows();
@@ -1637,7 +1644,26 @@ try {
     }
     src->close(); // Stop hardware before draining workers / printing.
     report.snapshot(source_stats(),gaps,workers.backlog());
-    if (pending_seed>=0) report.result(pending_id,pending_seed,"INCOMPLETE_WINDOW");
+    if (pending_seed>=0) {
+        report.result(pending_id, pending_seed, "INCOMPLETE_WINDOW", nullptr,
+                      0, false, nullptr,
+                      "path=acquire guard=" + std::to_string(pending_guard));
+        ++cand_incomplete;
+        pending_seed=-1;
+    }
+    for (const auto& ps : pending) {
+        report.result(ps.id, ps.seed, "INCOMPLETE_WINDOW", nullptr, 0,
+                      false, nullptr, format_request_tag(ps));
+        ++cand_incomplete;
+    }
+    pending.clear();
+    for (const auto& tp : timed_pending) {
+        report.result(tp.id, tp.seed, "INCOMPLETE_WINDOW", nullptr, 0,
+                      false, nullptr, format_request_tag(tp));
+        if (tp.target_slot)
+            lock.abandon_slot(tp.slot_index);
+    }
+    timed_pending.clear();
     workers.stop();
     // Workers stop only after every queued job finished, so the last batch of
     // observations must still be applied before the final statistics.
@@ -1650,7 +1676,7 @@ try {
           << " frontend_scan_us=" << frontend_scan_us
           // Acquisition capture count; `completed` is limited by how many jobs
           // the demod drained before EOF, not by detection.
-          << " acq_seeds=" << acq_seeds
+          << " acq_seeds=" << sub_stats.acq_seeds
           << " frontend_samples=" << frontend_samples << " estimate_us=" << st.estimate_us
           << " cancel_us=" << st.cancel_us << " cancelled_samples=" << st.cancelled_samples
           << " bypassed_samples=" << st.bypassed_samples
@@ -1698,7 +1724,15 @@ try {
           << " autocorr_dedup_confirmed=" << dedup_confirmed
           << " autocorr_dedup_ambiguous=" << dedup_ambiguous
           << " autocorr_unknown=" << unknown
-          << " interference_events=" << workers.interference_events.load();
+          << " interference_events=" << workers.interference_events.load()
+          << " cand_submit_attempts=" << cand_submit_attempts
+          << " cand_admitted=" << cand_admitted
+          << " cand_dropped_queue=" << cand_dropped_queue
+          << " cand_incomplete=" << cand_incomplete
+          << " cand_overrun=" << cand_overrun
+          << " cand_overlapping=" << cand_overlapping
+          << " cand_invalid_gap=" << cand_invalid_gap
+          << " autocorr_ignored=" << autocorr_ignored;
         report.info(s.str());
     }
     if (timed) {
@@ -1722,7 +1756,7 @@ try {
           << " alignment_expanded_samples=" << ts.alignment_expanded_samples;
         report.info(s.str());
     }
-    report.finish();
+    report.finish(sub_stats);
     return failed ? 2 : 0;
 } catch (const std::exception& e) {
     std::cerr << "ERROR " << e.what() << std::endl; return 2;

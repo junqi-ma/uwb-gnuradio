@@ -240,6 +240,53 @@ with tempfile.TemporaryDirectory(prefix='uwb-live-console-') as temporary:
     # --acq-step (a multiple of 8 or not) reports the same seed within one step.
     assert abs(seeds[64] - seeds[3]) <= 64, seeds
 
+    # ------------------------------------------------------------------
+    # Submission accounting invariants under queue overload.
+    #
+    # 10 bursts spaced by 1.1 ms (> 0.80 ms holdoff), processed with 1 worker,
+    # queue capacity 1, and --taps quality (resampling alone > 1.5 ms/window),
+    # guarantee queue saturation while fitting all 10 windows before EOF.
+    # Every candidate ID must reach a unique terminal state and balance.
+    # ------------------------------------------------------------------
+    overload_path = Path(temporary) / 'overload_10_bursts.sc16'
+    ov_count = round(737.28e6 * 0.016)
+    ov_iq = array('i', [0]) * ov_count
+    ov_len = round(737.28e6 * 0.00028)
+    burst_val = array('i', [1000]) * ov_len
+    for k in range(10):
+        b_start = round(737.28e6 * (0.001 + k * 0.0011))
+        ov_iq[b_start:b_start + ov_len] = burst_val
+    with overload_path.open('wb') as f:
+        ov_iq.tofile(f)
+
+    ov_run = subprocess.run(
+        [binary, '--replay', str(overload_path), '--workers', '1',
+         '--queue', '1', '--taps', 'quality', '--tone', 'off',
+         '--summary', '50', '--print', 'packets'],
+        capture_output=True, text=True, timeout=60)
+    assert ov_run.returncode == 0, ov_run.stderr + ov_run.stdout
+    ov_packets = re.findall(r'^PACKET .*$', ov_run.stdout, re.M)
+    ov_final_line = re.search(r'^FINAL .*$', ov_run.stdout, re.M)
+    assert ov_final_line is not None, ov_run.stdout
+    ov_final = dict(part.split('=', 1) for part in ov_final_line.group(0).split()[1:] if '=' in part)
+    assert int(ov_final['acq_seeds']) == 10, ov_final
+    assert int(ov_final['submit_attempts']) == 10, ov_final
+    assert int(ov_final['admitted']) + int(ov_final['dropped_queue']) == 10, ov_final
+    assert int(ov_final['dropped_queue']) > 0, ov_final
+    assert int(ov_final['demod_completed']) == int(ov_final['admitted']), ov_final
+    assert int(ov_final['completed']) == 10, ov_final
+    assert len(ov_packets) == 10, (len(ov_packets), ov_run.stdout)
+    seen_ids = []
+    dropped_lines = 0
+    for pkt in ov_packets:
+        pfields = dict(part.split('=', 1) for part in pkt.split()[1:] if '=' in part)
+        seen_ids.append(int(pfields['id']))
+        assert 'path=acquire' in pkt, pkt
+        if pfields['status'] == 'DROPPED_QUEUE':
+            dropped_lines += 1
+    assert sorted(seen_ids) == list(range(1, 11)), seen_ids
+    assert dropped_lines == int(ov_final['dropped_queue']), (dropped_lines, ov_final)
+
 print('live console: acquisition/rejection, batch summary, SIGINT, source failure, '
-      'locked strategy, timed-burst plan, locked pre-guard and low-SNR '
-      'lock/capture switches PASS')
+      'locked strategy, timed-burst plan, locked pre-guard, low-SNR '
+      'lock/capture switches and submission accounting PASS')
