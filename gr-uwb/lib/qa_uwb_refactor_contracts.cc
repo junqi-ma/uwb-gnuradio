@@ -2,6 +2,7 @@
 // Deliberately uses the packet API, not the stage aggregate.
 #include <boost/test/unit_test.hpp>
 #include <gnuradio/uwb/uwb_hrp_codec.h>
+#include <gnuradio/uwb/uwb_hrp_mod_core.h>
 #include <gnuradio/uwb/uwb_demod_execution.h>
 #include <gnuradio/uwb/uwb_demod_finalize.h>
 #include <gnuradio/uwb/uwb_demod_pipeline.h>
@@ -330,4 +331,124 @@ BOOST_AUTO_TEST_CASE(demod_window_range_geometry_and_derotated_span)
     BOOST_CHECK(ext_range.hi <= n);
     BOOST_CHECK(compute_ondemand_extension_rotation_range(
                     n, profile, anchored_timing, 38, 180000, n).empty());
+}
+
+BOOST_AUTO_TEST_CASE(demod_frame_decode_paths_and_fallback_publication)
+{
+    std::vector<uint8_t> wire(30);
+    for (size_t j = 0; j < wire.size(); ++j)
+        wire[j] = static_cast<uint8_t>(19 * j + 10);
+    mod::append_ieee_fcs(wire);
+
+    mod::HrpModConfig cfg;
+    cfg.code_index = 10;
+    cfg.sync_repetitions = 64;
+    cfg.sfd_mode = "4z2";
+    cfg.peak_amplitude = 0.8f;
+    const size_t count = mod::packet_samples_998p4(
+        64, 8, wire.size(), false, &cfg.pulse);
+    mod::HrpModScratch mod_scratch;
+    mod_scratch.reserve(127, count);
+    std::vector<std::complex<float>> wave(count);
+    size_t written = 0;
+    BOOST_REQUIRE(mod::modulate_one(wire.data(), wire.size(), cfg,
+                                    mod_scratch, wave.data(), wave.size(), written));
+    BOOST_REQUIRE_EQUAL(written, count);
+
+    constexpr size_t kSeed = 2048;
+    std::vector<std::complex<float>> sync(wave.begin(), wave.begin() + 1016);
+    std::vector<std::complex<float>> iq(kSeed + count + 2048, std::complex<float>(0.0f, 0.0f));
+    std::copy(wave.begin(), wave.end(), iq.begin() + kSeed);
+
+    auto base_profile = demod::Qm35825Profile::Default();
+    base_profile.code_index = 10;
+    base_profile.timing_search_margin = 256;
+    base_profile.timing_coarse_stride = 1;
+
+    demod::core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+
+    // 1. Fused fast path vs primary full-stream path.
+    auto fused_profile = base_profile;
+    fused_profile.rx_softchip_on_demand = true;
+    fused_profile.rx_fused_payload_cmf = true;
+    fused_profile.rx_fused_phr_cmf = true;
+    const auto fused_res = demod::core::demodulate_one(
+        iq.data(), iq.size(), fused_profile, 101, kSeed, 0, sync, scratch);
+    BOOST_REQUIRE_EQUAL(static_cast<int>(fused_res.status),
+                        static_cast<int>(demod::DemodStatus::Success));
+    BOOST_CHECK(fused_res.payload.fcs_pass);
+    BOOST_CHECK(fused_res.payload.bytes == wire);
+    BOOST_CHECK_EQUAL(fused_res.stage_fused_attempts, 1u);
+    BOOST_CHECK_EQUAL(fused_res.stage_phr_fused_attempts, 1u);
+    BOOST_CHECK_EQUAL(fused_res.stage_softchip_fallbacks, 0u);
+
+    auto full_profile = base_profile;
+    full_profile.rx_softchip_on_demand = false;
+    full_profile.rx_fused_payload_cmf = false;
+    full_profile.rx_fused_phr_cmf = false;
+    const auto full_res = demod::core::demodulate_one(
+        iq.data(), iq.size(), full_profile, 102, kSeed, 0, sync, scratch);
+    BOOST_REQUIRE_EQUAL(static_cast<int>(full_res.status),
+                        static_cast<int>(demod::DemodStatus::Success));
+    BOOST_CHECK(full_res.payload.fcs_pass);
+    BOOST_CHECK(full_res.payload.bytes == wire);
+    BOOST_CHECK_EQUAL(full_res.stage_fused_attempts, 0u);
+    BOOST_CHECK_EQUAL(full_res.stage_phr_fused_attempts, 0u);
+    BOOST_CHECK_EQUAL(full_res.stage_softchip_fallbacks, 0u);
+
+    // 2. On-demand extension path (without fused CMF).
+    auto ondemand_profile = base_profile;
+    ondemand_profile.rx_softchip_on_demand = true;
+    ondemand_profile.rx_fused_payload_cmf = false;
+    ondemand_profile.rx_fused_phr_cmf = false;
+    const auto ondemand_res = demod::core::demodulate_one(
+        iq.data(), iq.size(), ondemand_profile, 103, kSeed, 0, sync, scratch);
+    BOOST_REQUIRE_EQUAL(static_cast<int>(ondemand_res.status),
+                        static_cast<int>(demod::DemodStatus::Success));
+    BOOST_CHECK(ondemand_res.payload.fcs_pass);
+    BOOST_CHECK(ondemand_res.payload.bytes == wire);
+    BOOST_CHECK_EQUAL(ondemand_res.stage_fused_attempts, 0u);
+    BOOST_CHECK_EQUAL(ondemand_res.stage_softchip_fallbacks, 0u);
+    BOOST_CHECK_GT(ondemand_res.cir.on_demand_extended, 0u);
+
+    // 3. Full-stream fallback publication when RAKE rejects on-demand prefix.
+    auto fallback_profile = fused_profile;
+    fallback_profile.cir_soft_chip_mode = demod::CirSoftChipMode::Rake;
+    fallback_profile.cir_rake_top_k = 4;
+    const auto fb_res = demod::core::demodulate_one(
+        iq.data(), iq.size(), fallback_profile, 104, kSeed, 0, sync, scratch);
+    BOOST_REQUIRE_EQUAL(static_cast<int>(fb_res.status),
+                        static_cast<int>(demod::DemodStatus::Success));
+    BOOST_CHECK(fb_res.payload.fcs_pass);
+    BOOST_CHECK(fb_res.payload.bytes == wire);
+    BOOST_CHECK_EQUAL(fb_res.stage_softchip_fallbacks, 1u);
+    BOOST_CHECK_EQUAL(fb_res.cir.on_demand_fallbacks, 1u);
+
+    // 4. Fractional-grid rejection forces primary full-stream decode.
+    auto frac_profile = fused_profile;
+    frac_profile.fused_gate_ppm = -1.0;
+    const auto frac_res = demod::core::demodulate_one(
+        iq.data(), iq.size(), frac_profile, 105, kSeed, 0, sync, scratch);
+    BOOST_REQUIRE_EQUAL(static_cast<int>(frac_res.status),
+                        static_cast<int>(demod::DemodStatus::Success));
+    BOOST_CHECK(frac_res.payload.fcs_pass);
+    BOOST_CHECK(frac_res.payload.bytes == wire);
+    BOOST_CHECK_EQUAL(frac_res.stage_grid_rejects, 1u);
+    BOOST_CHECK_EQUAL(frac_res.stage_fused_attempts, 0u);
+    BOOST_CHECK_EQUAL(frac_res.stage_softchip_fallbacks, 0u);
+
+    // 5. SFD-only early exit.
+    auto sfd_only_profile = fused_profile;
+    sfd_only_profile.rx_stop_after_sfd = true;
+    const auto sfd_res = demod::core::demodulate_one(
+        iq.data(), iq.size(), sfd_only_profile, 106, kSeed, 1000, sync, scratch);
+    BOOST_REQUIRE_EQUAL(static_cast<int>(sfd_res.status),
+                        static_cast<int>(demod::DemodStatus::Success));
+    BOOST_CHECK(sfd_res.sfd.ok);
+    BOOST_CHECK(!sfd_res.cir.ok);
+    BOOST_CHECK_EQUAL(sfd_res.stage_cir_us, 0u);
+    BOOST_CHECK_EQUAL(sfd_res.stage_total_us,
+                      sfd_res.stage_timing_us + sfd_res.stage_cfo_us +
+                          sfd_res.stage_sfd_us);
 }

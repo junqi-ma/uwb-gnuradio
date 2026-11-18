@@ -1,0 +1,162 @@
+{
+  "batch": 3,
+  "title": "Decompose frame decode, fused/on-demand fast paths, full-stream fallback and result publication",
+  "commits": {
+    "baseline_a": "8a1eaa4d45df12c127bb8fa8bc03e6e6d500646a",
+    "parent_batch_2": "927f6f3a34003567b0974edee7c474c3fe808c42"
+  },
+  "environment": {
+    "cpu": "12th Gen Intel(R) Core(TM) i7-12700",
+    "compiler": "GCC 11.4.0",
+    "build_type": "Release",
+    "uhd_backend": "OFF",
+    "avx2_build_dir": "gr-uwb/build-refactor-b",
+    "avx2_install_prefix": "/tmp/uwb-refactor-b-install",
+    "scalar_build_dir": "gr-uwb/build-refactor-b-scalar"
+  },
+  "binaries_sha256": {
+    "baseline_a_decode": "c2f80a2a33bf2516b5eb70ab4ca05f4ee38fb5bc00bd4d37882fa6bf94ca3aa6",
+    "baseline_a_live": "03c9ed8b6943029f2120d4057487fc5796bf4f0d63e955b1a6b2ae8cb0cea2b8",
+    "refactor_b_avx2_decode": "06bf7c04e8f40c50dcce9b8ef3690f0d174c3d0c8db55a673695d270619bec12",
+    "refactor_b_avx2_live": "6b4bd2ad4d7f3e078e71762807368432e0fc5ccf85176dcdd53e4060215a9e68",
+    "refactor_b_scalar_decode": "e9013309ef0292e85a3a97f34670510463ac0cc7245bcd8af5e278aa8687db7e",
+    "refactor_b_scalar_live": "03b01db2f82dbd9c8ec4d77cc9c2f666c9a590cbc66f0ab95686bd67a521c085"
+  },
+  "ctest": {
+    "avx2": {
+      "total": 56,
+      "passed": 56,
+      "failed": 0,
+      "skipped": 0,
+      "real_time_sec": 36.81
+    },
+    "scalar": {
+      "total": 56,
+      "passed": 55,
+      "failed": 0,
+      "skipped": 1,
+      "skipped_tests": ["uwb_qa_native_install_consumer"],
+      "real_time_sec": 32.87
+    }
+  },
+  "fixed_window_200x3": {
+    "f4": {
+      "sha256": "238c300dc0d41f52bbf00611874efea38ab6a104464664b8b1795c8c2c143a5e",
+      "rows": 200,
+      "fcs": [199, 199],
+      "differences": []
+    },
+    "fm12_200": {
+      "sha256": "6b8e14cc2b4666bd364addf49d92503edddc94524d9c13236e2c7377aa2f46ad",
+      "rows": 200,
+      "fcs": [186, 186],
+      "differences": []
+    },
+    "fm14": {
+      "sha256": "8206af10952c94959b4ef45b62ee6df85b237d45968535b9b567a25d1cd52aba",
+      "rows": 200,
+      "fcs": [0, 0],
+      "differences": []
+    }
+  },
+  "fixed_window_6x40": {
+    "control": {"exact_a": 40, "exact_b": 40, "total": 40, "wrong": 0, "diff_count": 0},
+    "seed1729": {"exact_a": 38, "exact_b": 38, "total": 40, "wrong": 0, "diff_count": 0},
+    "seed2718": {"exact_a": 40, "exact_b": 40, "total": 40, "wrong": 0, "diff_count": 0},
+    "cfo10k": {"exact_a": 37, "exact_b": 37, "total": 40, "wrong": 0, "diff_count": 0},
+    "cfo40k": {"exact_a": 38, "exact_b": 38, "total": 40, "wrong": 0, "diff_count": 0},
+    "sfo27ppm": {"exact_a": 37, "exact_b": 37, "total": 40, "wrong": 0, "diff_count": 0}
+  },
+  "abba_benchmarks": {
+    "-12/locked/w1": {
+      "A": {
+        "compute_mean_us": 2493.35,
+        "demod_mean_us": 1647.4125,
+        "compute_p95_us": 5028.4625,
+        "demod_p95_us": 4117.0,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 520.462311557789,
+          "st_cfo": 21.105527638190956,
+          "st_sfd": 445.2110552763819,
+          "st_cir": 130.48743718592965,
+          "st_nssfd": 8.07286432160804,
+          "st_phr": 18.15829145728643,
+          "st_payload": 340.08793969849245,
+          "st_total": 1620.6582914572864
+        }
+      },
+      "B": {
+        "compute_mean_us": 2424.2125,
+        "demod_mean_us": 1563.3125,
+        "compute_p95_us": 5010.5375,
+        "demod_p95_us": 3903.2625,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 501.25125628140705,
+          "st_cfo": 15.469849246231156,
+          "st_sfd": 449.891959798995,
+          "st_cir": 132.0929648241206,
+          "st_nssfd": 8.306532663316583,
+          "st_phr": 16.324120603015075,
+          "st_payload": 345.31909547738695,
+          "st_total": 1613.859296482412
+        }
+      },
+      "delta_pct": {
+        "compute_mean": -2.7729,
+        "demod_mean": -5.1050,
+        "st_total": -0.4195
+      }
+    },
+    "-12/locked/w4": {
+      "A": {
+        "compute_mean_us": 3201.0375,
+        "demod_mean_us": 2241.4875,
+        "compute_p95_us": 6371.4,
+        "demod_p95_us": 5278.075,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 615.2311557788945,
+          "st_cfo": 50.366834170854275,
+          "st_sfd": 618.0251256281407,
+          "st_cir": 215.33668341708542,
+          "st_nssfd": 8.939698492462313,
+          "st_phr": 22.811557788944725,
+          "st_payload": 468.3819095477387,
+          "st_total": 2162.0100502512564
+        }
+      },
+      "B": {
+        "compute_mean_us": 3194.325,
+        "demod_mean_us": 2203.2375,
+        "compute_p95_us": 6256.325,
+        "demod_p95_us": 5124.525,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 636.1407035175879,
+          "st_cfo": 46.78391959798995,
+          "st_sfd": 627.7437185929648,
+          "st_cir": 222.29145728643215,
+          "st_nssfd": 8.71356783919598,
+          "st_phr": 20.78140703517588,
+          "st_payload": 476.8793969849246,
+          "st_total": 2205.0150753768844
+        }
+      },
+      "delta_pct": {
+        "compute_mean": -0.2097,
+        "demod_mean": -1.7065,
+        "st_total": 1.9891
+      }
+    }
+  }
+}
