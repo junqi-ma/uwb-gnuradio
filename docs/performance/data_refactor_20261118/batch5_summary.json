@@ -1,0 +1,162 @@
+{
+  "batch": 5,
+  "title": "Fixed-period runtime: callback-only mode, outside-lock single-publisher ordered commit, reorder bounds and backpressure",
+  "commits": {
+    "baseline_a": "8a1eaa4d45df12c127bb8fa8bc03e6e6d500646a",
+    "parent_batch_4": "77143fe"
+  },
+  "environment": {
+    "cpu": "12th Gen Intel(R) Core(TM) i7-12700",
+    "compiler": "GCC 11.4.0",
+    "build_type": "Release",
+    "uhd_backend": "OFF",
+    "avx2_build_dir": "gr-uwb/build-refactor-b",
+    "avx2_install_prefix": "/tmp/uwb-refactor-b-install",
+    "scalar_build_dir": "gr-uwb/build-refactor-b-scalar"
+  },
+  "binaries_sha256": {
+    "baseline_a_decode": "c2f80a2a33bf2516b5eb70ab4ca05f4ee38fb5bc00bd4d37882fa6bf94ca3aa6",
+    "baseline_a_live": "03c9ed8b6943029f2120d4057487fc5796bf4f0d63e955b1a6b2ae8cb0cea2b8",
+    "refactor_b_avx2_decode": "8f3e9bff91d23ce5c4804c9d544c9f50a9d785d967c976d7b47d3b1f9e1e0c51",
+    "refactor_b_avx2_live": "a99dcee2e6928b1e89258df890463eb9a5981fb6ed3c93585b58ae327bf521dc",
+    "refactor_b_scalar_decode": "f9ec6cb4380b2c44304103cc5b1d92ccb83dde95ae1b396ea62bc8e04a05d35f",
+    "refactor_b_scalar_live": "a8a41dffe16de06da4a7294d2915b10aa44a6731b183d310d48bb60063a0769a"
+  },
+  "ctest": {
+    "avx2": {
+      "total": 56,
+      "passed": 56,
+      "failed": 0,
+      "skipped": 0,
+      "real_time_sec": 35.45
+    },
+    "scalar": {
+      "total": 56,
+      "passed": 55,
+      "failed": 0,
+      "skipped": 1,
+      "skipped_tests": ["uwb_qa_native_install_consumer"],
+      "real_time_sec": 32.67
+    }
+  },
+  "fixed_window_200x3": {
+    "f4": {
+      "sha256": "238c300dc0d41f52bbf00611874efea38ab6a104464664b8b1795c8c2c143a5e",
+      "rows": 200,
+      "fcs": [199, 199],
+      "differences": []
+    },
+    "fm12_200": {
+      "sha256": "6b8e14cc2b4666bd364addf49d92503edddc94524d9c13236e2c7377aa2f46ad",
+      "rows": 200,
+      "fcs": [186, 186],
+      "differences": []
+    },
+    "fm14": {
+      "sha256": "8206af10952c94959b4ef45b62ee6df85b237d45968535b9b567a25d1cd52aba",
+      "rows": 200,
+      "fcs": [0, 0],
+      "differences": []
+    }
+  },
+  "fixed_window_6x40": {
+    "control": {"exact_a": 40, "exact_b": 40, "total": 40, "wrong": 0, "diff_count": 0},
+    "seed1729": {"exact_a": 38, "exact_b": 38, "total": 40, "wrong": 0, "diff_count": 0},
+    "seed2718": {"exact_a": 40, "exact_b": 40, "total": 40, "wrong": 0, "diff_count": 0},
+    "cfo10k": {"exact_a": 37, "exact_b": 37, "total": 40, "wrong": 0, "diff_count": 0},
+    "cfo40k": {"exact_a": 38, "exact_b": 38, "total": 40, "wrong": 0, "diff_count": 0},
+    "sfo27ppm": {"exact_a": 37, "exact_b": 37, "total": 40, "wrong": 0, "diff_count": 0}
+  },
+  "abba_benchmarks": {
+    "-12/locked/w1": {
+      "A": {
+        "compute_mean_us": 2470.25,
+        "demod_mean_us": 1610.5,
+        "compute_p95_us": 4806.15,
+        "demod_p95_us": 3859.0375,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 499.54020100502515,
+          "st_cfo": 16.404522613065325,
+          "st_sfd": 452.72361809045225,
+          "st_cir": 132.42964824120602,
+          "st_nssfd": 8.201005025125628,
+          "st_phr": 19.01256281407035,
+          "st_payload": 350.6256281407035,
+          "st_total": 1611.7035175879396
+        }
+      },
+      "B": {
+        "compute_mean_us": 2421.725,
+        "demod_mean_us": 1588.0,
+        "compute_p95_us": 4698.3375,
+        "demod_p95_us": 3786.7375,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 506.52010050251255,
+          "st_cfo": 15.919597989949748,
+          "st_sfd": 462.3316582914573,
+          "st_cir": 136.7386934673367,
+          "st_nssfd": 9.922110552763819,
+          "st_phr": 18.680904522613066,
+          "st_payload": 347.391959798995,
+          "st_total": 1630.0778894472362
+        }
+      },
+      "delta_pct": {
+        "compute_mean": -1.9644,
+        "demod_mean": -1.3971,
+        "st_total": 1.1401
+      }
+    },
+    "-12/locked/w4": {
+      "A": {
+        "compute_mean_us": 3348.3625,
+        "demod_mean_us": 2306.8875,
+        "compute_p95_us": 6656.3375,
+        "demod_p95_us": 5364.3,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 614.9522613065327,
+          "st_cfo": 47.92211055276382,
+          "st_sfd": 602.6155778894472,
+          "st_cir": 214.64824120603015,
+          "st_nssfd": 8.623115577889447,
+          "st_phr": 21.79145728643216,
+          "st_payload": 467.2939698492462,
+          "st_total": 2144.879396984925
+        }
+      },
+      "B": {
+        "compute_mean_us": 3090.525,
+        "demod_mean_us": 2161.275,
+        "compute_p95_us": 6199.0,
+        "demod_p95_us": 5099.75,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 633.0100502512562,
+          "st_cfo": 43.854271356783926,
+          "st_sfd": 611.9447236180905,
+          "st_cir": 218.8994974874372,
+          "st_nssfd": 10.36934673366834,
+          "st_phr": 22.597989949748744,
+          "st_payload": 477.5929648241206,
+          "st_total": 2181.7286432160804
+        }
+      },
+      "delta_pct": {
+        "compute_mean": -7.7004,
+        "demod_mean": -6.3121,
+        "st_total": 1.7180
+      }
+    }
+  }
+}

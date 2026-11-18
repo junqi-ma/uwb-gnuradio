@@ -837,7 +837,10 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
     {
         std::lock_guard<std::mutex> lk(commit_mutex_);
         next_commit_id_ = 0;
+        buffered_result_count_ = 0;
+        publish_in_progress_ = false;
         pending_results_.clear();
+        results_.clear();
     }
 
     // A2: a fresh ready epoch.  Nothing is started here -- initialize() only
@@ -956,6 +959,10 @@ void UhdSc16Pipeline::stop()
         stop_requested_.store(true, std::memory_order_relaxed);
     }
     ready_cv_.notify_all();
+    {
+        std::lock_guard<std::mutex> lk(commit_mutex_);
+    }
+    commit_cv_.notify_all();
     // Unblock a source that waits on its own condition variable (the
     // fixed-tone stage does) so wait() cannot deadlock behind a read.
     if (source_) {
@@ -1222,6 +1229,12 @@ const CommitDiagnostics& UhdSc16Pipeline::commit_diagnostics() const
     v.results_emitted = commit_acc_.results_emitted.load(std::memory_order_relaxed);
     v.max_out_of_order_span =
         commit_acc_.max_out_of_order_span.load(std::memory_order_relaxed);
+    v.max_pending_results =
+        commit_acc_.max_pending_results.load(std::memory_order_relaxed);
+    v.reorder_backpressure_waits =
+        commit_acc_.reorder_backpressure_waits.load(std::memory_order_relaxed);
+    v.reorder_overflow_drops =
+        commit_acc_.reorder_overflow_drops.load(std::memory_order_relaxed);
     v.lock_wait_us =
         1e-3 * static_cast<double>(commit_acc_.lock_wait_ns.load(std::memory_order_relaxed));
     v.reorder_us =
@@ -1254,6 +1267,9 @@ void UhdSc16Pipeline::reset_diagnostics()
     zero(commit_acc_.commit_calls);
     zero(commit_acc_.results_emitted);
     zero(commit_acc_.max_out_of_order_span);
+    zero(commit_acc_.max_pending_results);
+    zero(commit_acc_.reorder_backpressure_waits);
+    zero(commit_acc_.reorder_overflow_drops);
     zero(commit_acc_.lock_wait_ns);
     zero(commit_acc_.reorder_ns);
     zero(commit_acc_.callback_ns);
@@ -1615,6 +1631,64 @@ void UhdSc16Pipeline::rx_producer_loop()
         {
             ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
             ledger_.offered_windows++;
+        }
+
+        // Bounded reorder window & pre-admission backpressure / overflow drop:
+        // keep capacity reserved for the earliest unfinished window
+        // (next_commit_id_) when out-of-order span or buffered results reach
+        // max_reorder_pending_windows.
+        if (cfg_.max_reorder_pending_windows > 0) {
+            bool drop_for_reorder_limit = false;
+            {
+                std::unique_lock<std::mutex> lk(commit_mutex_);
+                auto limit_reached = [&]() {
+                    const uint64_t span =
+                        (k >= next_commit_id_) ? (k - next_commit_id_) : 0;
+                    return span >= cfg_.max_reorder_pending_windows ||
+                           buffered_result_count_ >= cfg_.max_reorder_pending_windows;
+                };
+                if (limit_reached()) {
+                    if (cfg_.backpressure_on_reorder_limit) {
+                        if (diag || cfg_.enable_commit_diagnostics) {
+                            commit_acc_.reorder_backpressure_waits.fetch_add(
+                                1, std::memory_order_relaxed);
+                        }
+                        commit_cv_.wait(lk, [&]() {
+                            return stop_requested_.load(std::memory_order_relaxed) ||
+                                   !limit_reached();
+                        });
+                    } else {
+                        drop_for_reorder_limit = true;
+                        if (diag || cfg_.enable_commit_diagnostics) {
+                            commit_acc_.reorder_overflow_drops.fetch_add(
+                                1, std::memory_order_relaxed);
+                        }
+                    }
+                }
+            }
+            if (stop_requested_.load(std::memory_order_relaxed)) {
+                ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
+                ledger_.cancelled_windows++;
+                break;
+            }
+            if (drop_for_reorder_limit) {
+                {
+                    ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
+                    ledger_.dropped_admission++;
+                }
+                if (diag) {
+                    rx_acc_.windows_dropped.fetch_add(1, std::memory_order_relaxed);
+                }
+                WindowResult drop_res;
+                drop_res.window_id = k;
+                drop_res.state = WindowTerminalState::DroppedAdmission;
+                drop_res.native_start_abs = win_start;
+                drop_res.native_sample_count = capacity;
+                drop_res.rx_push_time = std::chrono::steady_clock::now();
+                commit_result(-1, drop_res);
+                ++k;
+                continue;
+            }
         }
 
         // ------------------------------------------------------------------
@@ -2123,124 +2197,183 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
 }
 
 // ---------------------------------------------------------------------------
-// In-order result commit (reorder buffer)
+// In-order result commit (reorder buffer + outside-lock publication)
 // ---------------------------------------------------------------------------
-void UhdSc16Pipeline::commit_result(int worker_id, const WindowResult& res)
+void UhdSc16Pipeline::emit_batch_unlocked(
+    std::vector<std::unique_ptr<WindowResult>>& batch,
+    bool diag,
+    std::atomic<uint64_t>* lock_wait_ns)
 {
-    const bool diag = cfg_.enable_commit_diagnostics;
-
-    std::chrono::steady_clock::time_point t_lock{};
-    if (diag) {
-        t_lock = std::chrono::steady_clock::now();
-        commit_acc_.commit_calls.fetch_add(1, std::memory_order_relaxed);
-    }
-    std::lock_guard<std::mutex> lk(commit_mutex_);
-    std::chrono::steady_clock::time_point t_locked{};
-    if (diag) {
-        t_locked = std::chrono::steady_clock::now();
-        commit_acc_.lock_wait_ns.fetch_add(elapsed_ns(t_lock, t_locked),
-                                           std::memory_order_relaxed);
-    }
-
-    // pending_results_ is indexed relative to next_commit_id_, so index 0 is
-    // always the next window_id to emit and the buffer base never needs to be
-    // stored separately.  That keeps the ordering cursor and the buffer base
-    // identical, bounds memory to the worker skew, and preserves the
-    // invariant "next_commit_id_ == first uncommitted window_id".
-    if (res.window_id < next_commit_id_) {
-        // Already emitted (cannot happen: each window commits exactly once).
+    if (batch.empty()) {
         return;
     }
-    const size_t rel = static_cast<size_t>(res.window_id - next_commit_id_);
-    if (diag) {
-        // How far ahead of the ordering cursor this completion landed: the
-        // live out-of-order span the reorder buffer has to hold.
-        note_peak(commit_acc_.max_out_of_order_span, static_cast<uint64_t>(rel));
-    }
-    if (pending_results_.size() <= rel) {
-        pending_results_.resize(rel + 1);
-    }
-    auto stored = std::make_unique<WindowResult>(res);
-    stored->worker_id = worker_id;
-    pending_results_[rel] = std::move(stored);
-
-    // Flush every contiguous entry, strictly by ascending window_id.
-    size_t flushed = 0;
     uint64_t callback_ns = 0;
-    while (flushed < pending_results_.size() && pending_results_[flushed]) {
-        WindowResult copy = *pending_results_[flushed];
-        pending_results_[flushed].reset();
-        ++flushed;
-        ++next_commit_id_;
-        results_.push_back(std::move(copy));
+    for (auto& item : batch) {
+        if (!item) {
+            continue;
+        }
         if (diag) {
             commit_acc_.results_emitted.fetch_add(1, std::memory_order_relaxed);
         }
+        item->commit_time = std::chrono::steady_clock::now();
         if (result_cb_) {
-            // Invoked while commit_mutex_ is held so observers always see
-            // strict window_id order.  The callback must not re-enter the
-            // pipeline (set_result_callback / stop / wait / results / ledger).
+            // Invoked outside commit_mutex_ by the single active publisher so
+            // observers always see strict window_id order without blocking
+            // concurrent commit_result() insertions.  *item lives on the heap
+            // inside `batch` for the entire callback.
             const auto t_cb = diag ? std::chrono::steady_clock::now()
                                    : std::chrono::steady_clock::time_point{};
-            result_cb_(results_.back());
+            result_cb_(*item);
+            const auto t_cb_done = std::chrono::steady_clock::now();
             if (diag) {
-                callback_ns += elapsed_ns(t_cb, std::chrono::steady_clock::now());
+                callback_ns += elapsed_ns(t_cb, t_cb_done);
+            }
+            // Stamped after the callback returned so retained results record
+            // the full commit boundary (including callback duration).
+            item->commit_time = t_cb_done;
+        }
+    }
+    if (diag && callback_ns > 0) {
+        commit_acc_.callback_ns.fetch_add(callback_ns, std::memory_order_relaxed);
+    }
+    if (cfg_.retain_results) {
+        ScopedLockWait lk(commit_mutex_, lock_wait_ns);
+        const auto t_ret = diag ? std::chrono::steady_clock::now()
+                                : std::chrono::steady_clock::time_point{};
+        for (auto& item : batch) {
+            if (item) {
+                results_.push_back(std::move(*item));
             }
         }
-        // Stamped after the (optional) callback returned, still inside
-        // commit_result, so it also covers callback cost for this window.
-        results_.back().commit_time = std::chrono::steady_clock::now();
+        if (diag) {
+            commit_acc_.reorder_ns.fetch_add(
+                elapsed_ns(t_ret, std::chrono::steady_clock::now()),
+                std::memory_order_relaxed);
+        }
     }
+}
 
+void UhdSc16Pipeline::commit_result(int worker_id, const WindowResult& res)
+{
+    const bool diag = cfg_.enable_commit_diagnostics;
+    std::atomic<uint64_t>* lock_wait_ns = diag ? &commit_acc_.lock_wait_ns : nullptr;
     if (diag) {
-        const uint64_t total_ns = elapsed_ns(t_locked, std::chrono::steady_clock::now());
-        // Parent/child split: the locked section minus the callback time is
-        // the real insertion + in-order flush cost (never double counted).
-        commit_acc_.callback_ns.fetch_add(callback_ns, std::memory_order_relaxed);
-        commit_acc_.reorder_ns.fetch_add(total_ns > callback_ns ? total_ns - callback_ns : 0,
-                                         std::memory_order_relaxed);
+        commit_acc_.commit_calls.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // Drop the consumed prefix: it is all null by construction, so this only
-    // rebases the buffer index space and keeps memory proportional to the
-    // live out-of-order window rather than to the absolute window count.
-    if (flushed > 0) {
-        pending_results_.erase(pending_results_.begin(),
-                               pending_results_.begin() + static_cast<ptrdiff_t>(flushed));
+    auto stored = std::make_unique<WindowResult>(res);
+    stored->worker_id = worker_id;
+
+    {
+        ScopedLockWait lk(commit_mutex_, lock_wait_ns);
+        const auto t_reorder0 = diag ? std::chrono::steady_clock::now()
+                                     : std::chrono::steady_clock::time_point{};
+        // pending_results_ is indexed relative to next_commit_id_, so index 0
+        // is always the next window_id to emit.
+        if (res.window_id < next_commit_id_) {
+            return;
+        }
+        const size_t rel = static_cast<size_t>(res.window_id - next_commit_id_);
+        if (diag) {
+            note_peak(commit_acc_.max_out_of_order_span,
+                      static_cast<uint64_t>(rel));
+        }
+        if (pending_results_.size() <= rel) {
+            pending_results_.resize(rel + 1);
+        }
+        if (!pending_results_[rel]) {
+            ++buffered_result_count_;
+        }
+        pending_results_[rel] = std::move(stored);
+        if (diag) {
+            note_peak(commit_acc_.max_pending_results,
+                      static_cast<uint64_t>(buffered_result_count_));
+            commit_acc_.reorder_ns.fetch_add(
+                elapsed_ns(t_reorder0, std::chrono::steady_clock::now()),
+                std::memory_order_relaxed);
+        }
+        if (publish_in_progress_) {
+            return;
+        }
+        publish_in_progress_ = true;
+    }
+
+    std::vector<std::unique_ptr<WindowResult>> batch;
+    while (true) {
+        batch.clear();
+        {
+            ScopedLockWait lk(commit_mutex_, lock_wait_ns);
+            const auto t_reorder0 = diag ? std::chrono::steady_clock::now()
+                                         : std::chrono::steady_clock::time_point{};
+            size_t flushed = 0;
+            while (flushed < pending_results_.size() && pending_results_[flushed]) {
+                batch.push_back(std::move(pending_results_[flushed]));
+                ++flushed;
+            }
+            if (flushed > 0) {
+                pending_results_.erase(
+                    pending_results_.begin(),
+                    pending_results_.begin() + static_cast<ptrdiff_t>(flushed));
+                next_commit_id_ += flushed;
+                buffered_result_count_ =
+                    (buffered_result_count_ >= flushed)
+                        ? (buffered_result_count_ - flushed)
+                        : 0;
+            }
+            if (diag) {
+                commit_acc_.reorder_ns.fetch_add(
+                    elapsed_ns(t_reorder0, std::chrono::steady_clock::now()),
+                    std::memory_order_relaxed);
+            }
+            if (batch.empty()) {
+                publish_in_progress_ = false;
+                commit_cv_.notify_all();
+                return;
+            }
+        }
+        commit_cv_.notify_all();
+        emit_batch_unlocked(batch, diag, lock_wait_ns);
     }
 }
 
 void UhdSc16Pipeline::flush_pending_results()
 {
-    std::lock_guard<std::mutex> lk(commit_mutex_);
     const bool diag = cfg_.enable_commit_diagnostics;
-
-    // Contract §1.3: after all threads have joined, force out whatever is
-    // still buffered (max_windows tail / stop()) in ascending window_id order.
-    // Holes are windows that never produced a result (cancelled before
-    // admission); they are skipped without shifting later results.
-    size_t advanced = 0;
-    for (size_t i = 0; i < pending_results_.size(); ++i) {
-        if (!pending_results_[i]) {
-            continue;
+    std::atomic<uint64_t>* lock_wait_ns = diag ? &commit_acc_.lock_wait_ns : nullptr;
+    std::vector<std::unique_ptr<WindowResult>> batch;
+    {
+        ScopedLockWait lk(commit_mutex_, lock_wait_ns);
+        const auto t_reorder0 = diag ? std::chrono::steady_clock::now()
+                                     : std::chrono::steady_clock::time_point{};
+        // Contract §1.3: after all threads have joined, force out whatever is
+        // still buffered (max_windows tail / stop()) in ascending window_id
+        // order.  Holes are windows that never produced a result (cancelled
+        // before admission); they are skipped without shifting later results.
+        size_t advanced = 0;
+        for (size_t i = 0; i < pending_results_.size(); ++i) {
+            if (!pending_results_[i]) {
+                continue;
+            }
+            batch.push_back(std::move(pending_results_[i]));
+            advanced = i + 1;
         }
-        WindowResult copy = *pending_results_[i];
-        pending_results_[i].reset();
-        results_.push_back(std::move(copy));
+        if (advanced > 0) {
+            pending_results_.erase(
+                pending_results_.begin(),
+                pending_results_.begin() + static_cast<ptrdiff_t>(advanced));
+            next_commit_id_ += advanced;
+        }
+        pending_results_.clear();
+        buffered_result_count_ = 0;
+        publish_in_progress_ = false;
         if (diag) {
-            commit_acc_.results_emitted.fetch_add(1, std::memory_order_relaxed);
+            commit_acc_.reorder_ns.fetch_add(
+                elapsed_ns(t_reorder0, std::chrono::steady_clock::now()),
+                std::memory_order_relaxed);
         }
-        if (result_cb_) {
-            result_cb_(results_.back());
-        }
-        results_.back().commit_time = std::chrono::steady_clock::now();
-        advanced = i + 1;
     }
-    if (advanced > 0) {
-        pending_results_.erase(pending_results_.begin(),
-                               pending_results_.begin() + static_cast<ptrdiff_t>(advanced));
-        next_commit_id_ += advanced;
-    }
+    commit_cv_.notify_all();
+    emit_batch_unlocked(batch, diag, lock_wait_ns);
 }
 
 } // namespace pipeline

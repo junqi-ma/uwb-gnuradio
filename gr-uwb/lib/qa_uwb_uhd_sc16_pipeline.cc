@@ -2417,4 +2417,215 @@ BOOST_AUTO_TEST_CASE(test_pipeline_multicore_affinity_validation)
     std::remove(tmp_file.c_str());
 }
 
+// ---------------------------------------------------------------------------
+// Test Case 23: test_pipeline_callback_only_and_out_of_lock_slow_callback
+//   Verifies retain_results = false (callback-only mode) and outside-lock
+//   single-publisher callback execution under a slow callback.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_callback_only_and_out_of_lock_slow_callback)
+{
+    const int kWorkers = 4;
+    const size_t kCapture = 1000;
+    const uint64_t kWindows = 16;
+    const int64_t kTotal = static_cast<int64_t>(kCapture * (kWindows + 4));
+
+    auto source = std::make_unique<PredictiveSc16Source>(kTotal);
+    source->open_gate();
+
+    PipelineConfig cfg = make_qa_pipeline_cfg(kCapture, 0, 0, kWorkers,
+                                              /*pool*/ 8, kWindows,
+                                              static_cast<double>(kCapture));
+    cfg.retain_results = false;
+    cfg.enable_commit_diagnostics = true;
+
+    UhdSc16Pipeline pipeline(cfg);
+    std::vector<WindowResult> delivered;
+    std::atomic<bool> in_callback{ false };
+    std::atomic<int> concurrent_violations{ 0 };
+
+    pipeline.set_result_callback([&](const WindowResult& res) {
+        if (in_callback.exchange(true, std::memory_order_acq_rel)) {
+            concurrent_violations.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (res.window_id == 0 || res.window_id == 4) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        }
+        delivered.push_back(res);
+        in_callback.store(false, std::memory_order_release);
+    });
+
+    BOOST_REQUIRE(pipeline.initialize(std::move(source)));
+    pipeline.start();
+    BOOST_REQUIRE(pipeline.wait_ready(5000));
+    pipeline.wait();
+
+    BOOST_CHECK_EQUAL(concurrent_violations.load(), 0);
+    BOOST_CHECK(pipeline.results().empty());
+    BOOST_REQUIRE_EQUAL(delivered.size(), static_cast<size_t>(kWindows));
+    for (size_t i = 0; i < delivered.size(); ++i) {
+        BOOST_CHECK_EQUAL(delivered[i].window_id, i);
+        BOOST_CHECK_EQUAL(static_cast<int>(delivered[i].state),
+                          static_cast<int>(WindowTerminalState::Completed));
+        BOOST_CHECK(delivered[i].commit_time >= delivered[i].worker_end_time);
+    }
+
+    const CommitDiagnostics& cdiag = pipeline.commit_diagnostics();
+    BOOST_CHECK(cdiag.enabled);
+    BOOST_CHECK_EQUAL(cdiag.results_emitted, kWindows);
+    BOOST_CHECK_GT(cdiag.callback_us, 20000.0);
+    BOOST_CHECK_LT(cdiag.reorder_us, cdiag.callback_us);
+
+    std::string err;
+    BOOST_CHECK_MESSAGE(pipeline.ledger().verify_invariants(&err), err);
+    BOOST_CHECK_EQUAL(pipeline.ledger().completed_windows, kWindows);
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 24: test_pipeline_reorder_limit_backpressure_and_drop
+//   Verifies max_reorder_pending_windows under both backpressure_on_reorder_limit
+//   modes (true = producer waits without dropping; false = explicit overflow drop).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_reorder_limit_backpressure_and_drop)
+{
+    const size_t kCapture = 1000;
+    const uint64_t kWindows = 12;
+    const int64_t kTotal = static_cast<int64_t>(kCapture * (kWindows + 4));
+
+    // Mode A: backpressure_on_reorder_limit = true -> zero drops, waits > 0.
+    {
+        auto source = std::make_unique<PredictiveSc16Source>(kTotal);
+        source->open_gate();
+
+        PipelineConfig cfg = make_qa_pipeline_cfg(kCapture, 0, 0, /*workers*/ 2,
+                                                  /*pool*/ 16, kWindows,
+                                                  static_cast<double>(kCapture));
+        cfg.retain_results = false;
+        cfg.enable_commit_diagnostics = true;
+        cfg.max_reorder_pending_windows = 1;
+        cfg.backpressure_on_reorder_limit = true;
+
+        UhdSc16Pipeline pipeline(cfg);
+        std::vector<uint64_t> ids;
+        pipeline.set_result_callback([&](const WindowResult& res) {
+            if (res.window_id == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            ids.push_back(res.window_id);
+        });
+
+        BOOST_REQUIRE(pipeline.initialize(std::move(source)));
+        pipeline.start();
+        BOOST_REQUIRE(pipeline.wait_ready(5000));
+        pipeline.wait();
+
+        const CommitDiagnostics& cdiag = pipeline.commit_diagnostics();
+        BOOST_CHECK_GT(cdiag.reorder_backpressure_waits, 0u);
+        BOOST_CHECK_EQUAL(cdiag.reorder_overflow_drops, 0u);
+        BOOST_CHECK_EQUAL(pipeline.ledger().dropped_admission, 0u);
+        BOOST_CHECK_EQUAL(pipeline.ledger().completed_windows, kWindows);
+        BOOST_REQUIRE_EQUAL(ids.size(), static_cast<size_t>(kWindows));
+        for (size_t i = 0; i < ids.size(); ++i) {
+            BOOST_CHECK_EQUAL(ids[i], i);
+        }
+        std::string err;
+        BOOST_CHECK_MESSAGE(pipeline.ledger().verify_invariants(&err), err);
+    }
+
+    // Mode B: backpressure_on_reorder_limit = false -> explicit overflow drops > 0
+    // even when pool_capacity (16) is larger than kWindows (12).
+    {
+        auto source = std::make_unique<PredictiveSc16Source>(kTotal);
+        source->open_gate();
+
+        PipelineConfig cfg = make_qa_pipeline_cfg(kCapture, 0, 0, /*workers*/ 2,
+                                                  /*pool*/ 16, kWindows,
+                                                  static_cast<double>(kCapture));
+        cfg.retain_results = true;
+        cfg.enable_rx_diagnostics = true;
+        cfg.enable_commit_diagnostics = true;
+        cfg.max_reorder_pending_windows = 1;
+        cfg.backpressure_on_reorder_limit = false;
+
+        UhdSc16Pipeline pipeline(cfg);
+        pipeline.set_result_callback([&](const WindowResult& res) {
+            if (res.window_id == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            }
+        });
+
+        BOOST_REQUIRE(pipeline.initialize(std::move(source)));
+        pipeline.start();
+        BOOST_REQUIRE(pipeline.wait_ready(5000));
+        pipeline.wait();
+
+        const CommitDiagnostics& cdiag = pipeline.commit_diagnostics();
+        BOOST_CHECK_GT(cdiag.reorder_overflow_drops, 0u);
+        BOOST_CHECK_EQUAL(pipeline.ledger().dropped_admission,
+                          cdiag.reorder_overflow_drops);
+        BOOST_REQUIRE_EQUAL(pipeline.results().size(), static_cast<size_t>(kWindows));
+        for (size_t i = 0; i < pipeline.results().size(); ++i) {
+            BOOST_CHECK_EQUAL(pipeline.results()[i].window_id, i);
+        }
+        std::string err;
+        BOOST_CHECK_MESSAGE(pipeline.ledger().verify_invariants(&err), err);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test Case 25: test_pipeline_stop_holes_flush_callback_only
+//   Verifies mid-run stop() under callback-only mode drains all admitted
+//   windows in ascending window_id order without hanging.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(test_pipeline_stop_holes_flush_callback_only)
+{
+    const int kWorkers = 2;
+    const size_t kCapture = 1000;
+    const uint64_t kWindows = 64;
+    const int64_t kTotal = static_cast<int64_t>(kCapture * (kWindows + 4));
+
+    auto source = std::make_unique<PredictiveSc16Source>(kTotal);
+    source->open_gate();
+
+    PipelineConfig cfg = make_qa_pipeline_cfg(kCapture, 0, 0, kWorkers,
+                                              /*pool*/ 4, kWindows,
+                                              static_cast<double>(kCapture));
+    cfg.retain_results = false;
+    cfg.enable_commit_diagnostics = true;
+    cfg.max_reorder_pending_windows = 2;
+    cfg.backpressure_on_reorder_limit = true;
+
+    UhdSc16Pipeline pipeline(cfg);
+    std::vector<uint64_t> delivered_ids;
+    std::atomic<bool> stop_triggered{ false };
+    std::thread stopper;
+
+    pipeline.set_result_callback([&](const WindowResult& res) {
+        delivered_ids.push_back(res.window_id);
+        if (res.window_id >= 2 &&
+            !stop_triggered.exchange(true, std::memory_order_acq_rel)) {
+            stopper = std::thread([&]() { pipeline.stop(); });
+        }
+    });
+
+    BOOST_REQUIRE(pipeline.initialize(std::move(source)));
+    pipeline.start();
+    BOOST_REQUIRE(pipeline.wait_ready(5000));
+    pipeline.wait();
+    if (stopper.joinable()) {
+        stopper.join();
+    }
+
+    BOOST_CHECK(pipeline.results().empty());
+    BOOST_CHECK_GE(delivered_ids.size(), 3u);
+    for (size_t i = 1; i < delivered_ids.size(); ++i) {
+        BOOST_CHECK_LT(delivered_ids[i - 1], delivered_ids[i]);
+    }
+    const PipelineLedger& ledger = pipeline.ledger();
+    std::string err;
+    BOOST_CHECK_MESSAGE(ledger.verify_invariants(&err), err);
+    BOOST_CHECK_EQUAL(delivered_ids.size(),
+                      static_cast<size_t>(ledger.admitted_windows +
+                                          ledger.dropped_admission));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

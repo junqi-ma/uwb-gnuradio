@@ -126,6 +126,9 @@ struct CommitDiagnostics {
     uint64_t commit_calls = 0;
     uint64_t results_emitted = 0;
     uint64_t max_out_of_order_span = 0; // max(window_id - next_commit_id_) seen
+    uint64_t max_pending_results = 0;   // peak buffered out-of-order WindowResult count
+    uint64_t reorder_backpressure_waits = 0; // RX producer waits on reorder capacity
+    uint64_t reorder_overflow_drops = 0;     // RX producer drops due to reorder capacity
     double lock_wait_us = 0.0;          // waiting for commit_mutex_
     double reorder_us = 0.0;            // insertion + in-order flush, no callback
     double callback_us = 0.0;           // user result callback
@@ -301,6 +304,22 @@ struct PipelineConfig {
 
     uint64_t max_windows = 0; // 0 = unlimited
     uint64_t max_samples = 0; // 0 = unlimited
+
+    // Result retention & ordered commit bounds:
+    // - retain_results = true (default) keeps every emitted WindowResult in
+    //   results() for post-run inspection.  false enables callback-only mode
+    //   so results() stays empty and retention memory stays flat on long runs.
+    // - max_reorder_pending_windows == 0 disables the explicit reorder limit
+    //   (only pool_capacity bounds in-flight windows).  > 0 caps both the
+    //   live out-of-order span (window_id - next_commit_id_) and the number of
+    //   uncommitted buffered results before admitting a new window.
+    // - backpressure_on_reorder_limit = true makes rx_producer_loop() wait for
+    //   next_commit_id_ to advance; false explicitly drops the new window as
+    //   DroppedAdmission so worker/pool capacity remains reserved for the
+    //   earliest unfinished window.
+    bool retain_results = true;
+    size_t max_reorder_pending_windows = 0;
+    bool backpressure_on_reorder_limit = false;
 
     // ------------------------------------------------------------------
     // Fixed-frequency CW (tone) cancellation, applied to the raw SC16 stream
@@ -657,6 +676,9 @@ private:
         std::atomic<uint64_t> commit_calls{ 0 };
         std::atomic<uint64_t> results_emitted{ 0 };
         std::atomic<uint64_t> max_out_of_order_span{ 0 };
+        std::atomic<uint64_t> max_pending_results{ 0 };
+        std::atomic<uint64_t> reorder_backpressure_waits{ 0 };
+        std::atomic<uint64_t> reorder_overflow_drops{ 0 };
         std::atomic<uint64_t> lock_wait_ns{ 0 };
         std::atomic<uint64_t> reorder_ns{ 0 };
         std::atomic<uint64_t> callback_ns{ 0 };
@@ -683,12 +705,19 @@ private:
     ResultCallback result_cb_;
     // Guards multi-threaded ledger mutations (DSP workers run concurrently).
     std::mutex ledger_mutex_;
-    // Guards the reorder buffer, results_ and callback invocation so that
-    // external observers always see strictly increasing window_id order.
-    // The result callback must not re-enter the pipeline.
+    // Guards the reorder buffer, results_ and single-publisher handoff so that
+    // external observers always see strictly increasing window_id order while
+    // result_cb_ runs outside commit_mutex_.
     std::mutex commit_mutex_;
+    std::condition_variable commit_cv_;
     std::vector<std::unique_ptr<WindowResult>> pending_results_;
     uint64_t next_commit_id_ = 0;
+    size_t buffered_result_count_ = 0;
+    bool publish_in_progress_ = false;
+    void emit_batch_unlocked(
+        std::vector<std::unique_ptr<WindowResult>>& batch,
+        bool diag,
+        std::atomic<uint64_t>* lock_wait_ns);
     // Drain any still-buffered results after all threads have joined.
     void flush_pending_results();
 };
