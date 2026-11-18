@@ -121,6 +121,65 @@ struct FoldAcquireResult {
     size_t window_lags = 0;
 };
 
+struct FoldPhaseProbe {
+    const std::complex<float>* samples = nullptr;
+    size_t count = 0;
+    std::complex<float> corr{};
+
+    double phase() const { return std::arg(corr); }
+
+    bool coherent() const
+    {
+        if (count == 0)
+            return false;
+        const auto* delayed = samples + kQm35SamplesPerSymbol;
+        const float ea = timing_conjugate_dot(samples, samples, count).real();
+        const float eb = timing_conjugate_dot(delayed, delayed, count).real();
+        // Complex white noise has mean normalized squared correlation 1/count.
+        return std::norm(corr) > (12.0 / count) * ea * eb;
+    }
+};
+
+// A one-symbol lag has a wider unambiguous CFO range than the sparse anchors.
+// Integrate in the body of the preamble to avoid the uncertain leading edge.
+inline FoldPhaseProbe probe_fold_phase(const std::complex<float>* rx,
+                                       size_t n,
+                                       int64_t centre,
+                                       size_t repetitions)
+{
+    const size_t sym = kQm35SamplesPerSymbol;
+    if (repetitions < 32)
+        return {};
+    const int64_t lo = centre + static_cast<int64_t>((repetitions / 4) * sym);
+    if (lo < 0 || static_cast<size_t>(lo) >= n ||
+        n - static_cast<size_t>(lo) <= sym)
+        return {};
+    const size_t count = std::min(std::min<size_t>(repetitions / 2, 128) * sym,
+                                  n - static_cast<size_t>(lo) - sym);
+    if (count < 16 * sym)
+        return {};
+    const auto a = rx + lo;
+    return { a, count, timing_conjugate_dot(a + sym, a, count) };
+}
+
+inline void fold_accumulate(std::complex<float>* dst,
+                            const std::complex<float>* src,
+                            size_t count,
+                            double phase)
+{
+    if (phase == 0.0) {
+        rxopt::vector_accumulate_complex(dst, src, count);
+        return;
+    }
+    const float c = static_cast<float>(std::cos(phase));
+    const float s = static_cast<float>(std::sin(phase));
+    for (size_t j = 0; j < count; ++j) {
+        const auto v = src[j];
+        dst[j] += std::complex<float>(c * v.real() - s * v.imag(),
+                                      s * v.real() + c * v.imag());
+    }
+}
+
 // Fold `[w0, w1]` (a window of legal SYMBOL START positions) by up to
 // `max_symbols` periods and return the strongest normalized correlation lag
 // within +/-P/2 of `centre`.  Degrades K when the buffer cannot hold
@@ -137,7 +196,8 @@ inline FoldAcquireResult fold_acquire(const std::complex<float>* rx,
                                       const rxopt::RealSyncTemplate& real_tmpl,
                                       size_t max_symbols,
                                       size_t preamble_repetitions,
-                                      float threshold)
+                                      float threshold,
+                                      double phase_per_symbol = 0.0)
 {
     FoldAcquireResult res;
     const int64_t P = static_cast<int64_t>(kQm35SamplesPerSymbol);
@@ -189,8 +249,8 @@ inline FoldAcquireResult fold_acquire(const std::complex<float>* rx,
     std::vector<std::complex<float>> folded(fold_len,
                                            std::complex<float>(0.0f, 0.0f));
     for (int64_t k = 0; k < k_eff; ++k)
-        rxopt::vector_accumulate_complex(folded.data(), rx + w0 + k * P,
-                                         fold_len);
+        fold_accumulate(folded.data(), rx + w0 + k * P, fold_len,
+                        -k * phase_per_symbol);
 
     const bool use_real = real_tmpl.is_real && real_tmpl.length == L;
     const float* taps_dup = real_tmpl.taps_dup.data();
@@ -277,7 +337,8 @@ inline bool fold_anchor_fit(const std::complex<float>* rx,
                             int64_t* preamble_start_out,
                             std::vector<int64_t>& peak_samples,
                             std::vector<float>& peak_metrics,
-                            std::vector<std::complex<float>>& peak_corr)
+                            std::vector<std::complex<float>>& peak_corr,
+                            double phase_per_symbol = 0.0)
 {
     peak_samples.clear();
     peak_metrics.clear();
@@ -310,8 +371,8 @@ inline bool fold_anchor_fit(const std::complex<float>* rx,
         std::fill(sup.begin(), sup.end(), std::complex<float>(0.0f, 0.0f));
         for (int64_t j = 0; j < static_cast<int64_t>(kFoldAnchorGroupSymbols);
              ++j)
-            rxopt::vector_accumulate_complex(sup.data(), rx + base + j * P,
-                                             sup_len);
+            fold_accumulate(sup.data(), rx + base + j * P, sup_len,
+                            -j * phase_per_symbol);
         float pw = 0.0f;
         for (size_t m = 0; m < L; ++m)
             pw += std::norm(sup[m]);

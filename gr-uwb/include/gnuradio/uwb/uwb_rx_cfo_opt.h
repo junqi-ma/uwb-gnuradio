@@ -348,33 +348,31 @@ inline void derotate_range_reference(std::complex<float>* dst,
     }
 }
 
-// Computes the absolute sample range [lo, hi) covering all SFD search candidates,
-// ±4 symbol backtrack, ±64 search halo, and the full SFD template length.
+inline constexpr int64_t kSfdNarrowHalf = 64;
+inline constexpr int kSfdSymbolOffsets = 4;
+inline constexpr int64_t kSfdGridHalf = 36;
+
+// Computes the absolute sample range [lo, hi) covering the SFD candidates
+// and template. The wider discrete grid is only needed on a search miss.
 inline std::pair<size_t, size_t> compute_sfd_search_range(
     size_t n,
     const TimingResult& timing,
     size_t preamble_repetitions,
     size_t sfd_len,
-    size_t sym = kQm35SamplesPerSymbol)
+    size_t sym = kQm35SamplesPerSymbol,
+    bool include_grid = false)
 {
-    constexpr int64_t kSfdNarrowHalf = 64;
-    constexpr int kSfdSymbolOffsets = 4;
-    const int64_t period =
-        (timing.measured_period > 0.0)
-            ? static_cast<int64_t>(std::llround(timing.measured_period))
-            : static_cast<int64_t>(sym);
+    const double period = timing.measured_period > 0.0
+        ? timing.measured_period : static_cast<double>(sym);
     const int64_t expected = timing.preamble_start_sample +
-        static_cast<int64_t>(preamble_repetitions) * period;
-
-    const int64_t center_min = expected -
-        static_cast<int64_t>(kSfdSymbolOffsets) * static_cast<int64_t>(sym);
-    const int64_t center_max = expected +
-        static_cast<int64_t>(kSfdSymbolOffsets) * static_cast<int64_t>(sym);
-
-    const int64_t lo = std::max<int64_t>(0, center_min - kSfdNarrowHalf);
+        std::llround(static_cast<double>(preamble_repetitions) * period);
+    const int64_t half_span = include_grid
+        ? std::llround(kSfdGridHalf * period) + kSfdNarrowHalf
+        : std::llround(kSfdSymbolOffsets * period) + kSfdNarrowHalf;
+    const int64_t lo = std::max<int64_t>(0, expected - half_span);
     const int64_t hi = std::min<int64_t>(
         static_cast<int64_t>(n),
-        center_max + kSfdNarrowHalf + static_cast<int64_t>(sfd_len));
+        expected + half_span + static_cast<int64_t>(sfd_len));
     if (hi <= lo)
         return { 0, 0 };
     return { static_cast<size_t>(lo), static_cast<size_t>(hi) };

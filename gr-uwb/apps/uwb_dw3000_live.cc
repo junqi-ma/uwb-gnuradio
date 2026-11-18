@@ -78,8 +78,7 @@ struct Options {
     // Default is the measured-fastest pairing: the fused CMF requires non-Bypass
     // soft chips, so `full` is its prerequisite.  With `auto` (Bypass first) the
     // fused path is never admitted and demod is 1556 us instead of ~1100 us.
-    // A refused integer grid degrades Full->Bypass per packet in the demod
-    // core, so an untrimmed clock costs ~1.5 ms/packet, not ~15 ms.
+    // A refused integer grid uses the fractional full-stream matched filter.
     std::string cir = "full";
     // Resampler tap set.  The kernel cost is proportional to
     // Hpad = 8*ceil(ceil(T/65)/8), not to T, so only Hpad changes matter:
@@ -306,6 +305,8 @@ struct Reporter {
           << (state == "OK" && !good ? "CRC_CHECK_FAILED" : state);
         if (!tag.empty()) s << ' ' << tag;
         if (r) s << " sync=" << r->timing.detected_peaks
+                 << " sync_folded=" << r->timing.sync_peaks_folded
+                 << " sync_grid=" << r->timing.cir_grid_repetitions
                  << " sfd=" << r->sfd.ok << " phr=" << r->phr.ok
                  << " len=" << r->phr.psdu_length << " cfo_khz=" << r->cfo.cfo_hz / 1000
                  << " fit=" << r->cfo.peaks_used << " fcs=" << r->payload.fcs_pass
@@ -349,10 +350,8 @@ struct Reporter {
                  << " ondemand_ext=" << r->cir.on_demand_extended
                  << " ondemand_fb=" << r->cir.on_demand_fallbacks
                  << " chips=" << r->cir.soft_chip_count
-                 // Chip-grid offset in ppm.  The fused CMF requires an exact
-                 // integer grid (|spc-2| <= 1e-9, i.e. <= 0.0005 ppm); a real
-                 // X410 clock is tens of ppm off, so a nonzero value here is
-                 // exactly why the fused path is refused.
+                 // Measured chip-grid offset in ppm. The fused gate limits
+                 // the accumulated drift across a frame.
                  << " spc_ppm=" << (r->cir.samples_per_chip > 0.0
                                         ? (r->cir.samples_per_chip / 2.0 - 1.0) * 1e6
                                         : 0.0)

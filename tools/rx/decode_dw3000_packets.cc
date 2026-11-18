@@ -86,6 +86,8 @@ try {
                   << ",\"timing_ok\":" << r.timing.ok
                   << ",\"timing_metric\":" << r.timing.metric
                   << ",\"peaks\":" << r.timing.detected_peaks
+                  << ",\"peaks_folded\":" << r.timing.sync_peaks_folded
+                  << ",\"cir_grid_repetitions\":" << r.timing.cir_grid_repetitions
                   << ",\"cfo_hz\":" << r.cfo.cfo_hz
                   << ",\"cfo_points\":" << r.cfo.peaks_used
                   << ",\"sfd_ok\":" << r.sfd.ok

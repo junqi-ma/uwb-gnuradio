@@ -53,7 +53,10 @@ struct TimingResult {
     int64_t preamble_start_uncropped = -1; // before cropToFrame shift
     double measured_period = 0.0;          // mean SYNC period in samples
     float metric = 0.0f;                   // correlation metric at start
-    size_t detected_peaks = 0;             // SYNC repetitions actually found
+    size_t detected_peaks = 0;             // measured peaks, including folded anchors
+    bool sync_peaks_folded = false;        // measured peaks are multi-symbol anchors
+    size_t cir_grid_repetitions = 0;       // fitted SYNC grid extent for CIR (0: use detected_peaks)
+    double fold_phase_per_symbol = 0.0;    // coarse CFO reference for sparse phase unwrap
     size_t expected_peaks = 0;             // from profile
     std::vector<int64_t> peak_samples;    // absolute position of each SYNC peak
     std::vector<float> peak_metrics;       // per-peak correlation metric
@@ -313,8 +316,8 @@ struct DemodResult {
     uint64_t stage_total_us = 0;        // sum of parents + fallback bucket
     // Diagnostic child sub-timers for the CFO and soft-chip stages.
     // stage_cfo_fit_us/stage_cfo_rotate_us are already included in their parent
-    // stage above and must never be added to stage_total_us.  They sum BOTH CFO
-    // calls (initial + SFD-refit) unless noted otherwise.
+    // stage above and must never be added to stage_total_us. They include the
+    // initial and refit calls and any SFD grid rotation.
     // stage_softchip_fallback_us is different: it is NOT part of stage_cir_us;
     // it is a separate eighth bucket that is included in stage_total_us.
     uint64_t stage_cfo_fit_us = 0;
@@ -330,10 +333,8 @@ struct DemodResult {
     // the full legacy stream once; that retry's wall time is recorded in the
     // existing `stage_softchip_fallback_us` bucket (also not a child of CIR).
     // Integer chip-grid admission refused this packet (see
-    // Qm35825Profile::fused_gate_ppm).  When the fused path was requested the
-    // soft-chip mode is downgraded Full->Bypass for this packet: the full
-    // 38-tap FIR over the whole payload only exists to feed the fused CMF, so
-    // running it after the fusion was refused costs ~15 ms for nothing.
+    // Qm35825Profile::fused_gate_ppm). The packet uses the full-stream soft-chip
+    // path with the requested CIR mode on the fractional grid.
     uint32_t stage_grid_rejects = 0;
     uint32_t stage_fused_attempts = 0;   // kernels actually run
     uint32_t stage_fused_fallbacks = 0;  // fused attempt -> full legacy retry

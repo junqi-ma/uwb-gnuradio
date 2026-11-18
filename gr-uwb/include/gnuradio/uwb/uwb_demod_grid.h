@@ -13,7 +13,6 @@ namespace gr::uwb::demod::core {
 // docs/performance/低SNR解调计算耗时优化开发报告_2026-11-17.md
 // and 低SNR解调与进锁优化开发报告_2026-11-17.md for QA and limits.
 inline constexpr float kLockedInnerNarrowRawGate = 0.045f;
-inline constexpr float kSfdSkipNarrowGate = 0.015f;
 inline constexpr float kSfdGridPeakFloor = 0.008f;
 inline constexpr double kSfdGridParFloor = 1.5;
 

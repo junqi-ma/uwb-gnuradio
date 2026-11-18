@@ -116,8 +116,8 @@ DemodResult demodulate_one(const std::complex<float>* rx,
         rebase();
         return res;
     }
-    // Integer chip-grid admission: decide ONCE per packet, from the 256-peak
-    // period fit that Stage 1 already produced.  The decision must be made here
+    // Integer chip-grid admission: use the period fit that Stage 1 already
+    // produced. The decision must be made here
     // and not later, because it controls three coupled things:
     //   * the second CFO rotation range (a narrowed range is only valid when
     //     the on-demand prefix is actually used),
@@ -284,11 +284,25 @@ DemodResult demodulate_one(const std::complex<float>* rx,
     // origin by testing earlier hypotheses.  Use this first SFD only to anchor
     // the preamble; the final reported CFO is re-fitted below from that anchor.
     scratch.initial_timing = res.timing;
-    const std::complex<float>* sfd_rx =
-        scratch.derotated.empty() ? rx : scratch.derotated.data();
+    auto search_sfd = [&]() {
+        return stage_sfd(
+            scratch.derotated.data(), n, profile, res.timing, sfd_seq, template_wf,
+            res.sfd, scratch, [&]() {
+                const auto [lo, hi] = rxopt::compute_sfd_search_range(
+                    n, res.timing, profile.preamble_repetitions, sfd_len,
+                    kQm35SamplesPerSymbol, true);
+                uint64_t us = 0;
+                uint32_t kernel = 0;
+                derotate_cfo_range(rx, n, profile, res.cfo.cfo_hz, lo, hi,
+                                   scratch, us, kernel);
+                res.stage_cfo_rotate_us += us;
+                res.stage_cfo_rotation_kernels |= kernel ? 2u : 0u;
+                res.stage_cfo_rotated_samples += hi - lo;
+                ++res.stage_cfo_rotation_passes;
+            });
+    };
     const auto sfd_bootstrap_t0 = std::chrono::steady_clock::now();
-    const bool bootstrap_sfd_ok = stage_sfd(
-        sfd_rx, n, profile, res.timing, sfd_seq, template_wf, res.sfd, scratch);
+    const bool bootstrap_sfd_ok = search_sfd();
     res.stage_sfd_bootstrap_us = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - sfd_bootstrap_t0).count());
@@ -528,7 +542,9 @@ DemodResult demodulate_one(const std::complex<float>* rx,
         cfo_timing.measured_period = measured_period;
         cfo_timing.metric =
             have_tail_peaks ? tail_timing.metric : res.timing.metric;
-        cfo_timing.detected_peaks = full_repetitions;
+        cfo_timing.detected_peaks = scratch.initial_timing.detected_peaks;
+        cfo_timing.sync_peaks_folded = scratch.initial_timing.sync_peaks_folded;
+        cfo_timing.cir_grid_repetitions = full_repetitions;
         cfo_timing.expected_peaks = full_repetitions;
         cfo_timing.coarse_search_us = tail_timing.coarse_search_us;
         cfo_timing.fine_track_us = tail_timing.fine_track_us;
@@ -725,11 +741,8 @@ DemodResult demodulate_one(const std::complex<float>* rx,
 
     // Final full-rate SFD verification on the current CFO compensation.
     auto run_final_sfd = [&]() -> bool {
-        sfd_rx = scratch.derotated.empty() ? rx : scratch.derotated.data();
         const auto sfd_final_t0 = std::chrono::steady_clock::now();
-        const bool ok = stage_sfd(
-            sfd_rx, n, profile, res.timing, sfd_seq, template_wf,
-            res.sfd, scratch);
+        const bool ok = search_sfd();
         res.stage_sfd_final_us += static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - sfd_final_t0).count());
@@ -1140,8 +1153,7 @@ DemodResult demodulate_one(const std::complex<float>* rx,
         rebase();
         return res;
     }
-    // Legacy full-stream path (also the degraded path when the integer grid was
-    // refused).  Uses `eff` so the Full->Bypass downgrade applies here too.
+    // Full-stream path, including the requested CIR mode on a fractional grid.
     if (!stage_cir_softchips(scratch.derotated.data(), n, eff, res.timing,
                              pcode, res.cir, scratch)) {
         lap(res.stage_cir_us);

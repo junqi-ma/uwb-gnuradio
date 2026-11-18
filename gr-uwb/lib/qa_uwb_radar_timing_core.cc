@@ -415,6 +415,10 @@ BOOST_AUTO_TEST_CASE(test_low_snr_fold_fallback_acquires_at_minus_12_and_14_db)
             if (!stage_timing(frame.rx.data(), frame.rx.size(), prof, tmpl,
                               frame.start + off, tr, scratch))
                 continue;
+            BOOST_CHECK(tr.sync_peaks_folded);
+            BOOST_CHECK_EQUAL(tr.detected_peaks, tr.peak_samples.size());
+            BOOST_CHECK_LE(tr.detected_peaks, 16u);
+            BOOST_CHECK_EQUAL(tr.cir_grid_repetitions, kLowSnrSyncReps);
             const int64_t err =
                 std::llabs(tr.preamble_start_sample - frame.start);
             worst_err = std::max(worst_err, err);
@@ -427,6 +431,32 @@ BOOST_AUTO_TEST_CASE(test_low_snr_fold_fallback_acquires_at_minus_12_and_14_db)
                     snr, hits, kFrames, static_cast<long long>(worst_err),
                     static_cast<double>(best_metric));
         BOOST_CHECK_GE(hits, kMinHits);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_low_snr_fold_resolves_sparse_anchor_cfo_alias)
+{
+    std::vector<gr_complex> raw;
+    BOOST_REQUIRE(load_cf32(testdata_path("reference_preamble.bin"), raw));
+    const auto tmpl = load_normalized_sync();
+    const auto profile = low_snr_profile(8192, 0);
+    for (double cfo_hz : {-40000.0, 40000.0}) {
+        auto frame = make_low_snr_frame(raw, kLowSnrSyncReps, 8192, 2048,
+                                        -12.0, 14231u);
+        for (size_t i = 0; i < frame.rx.size(); ++i)
+            frame.rx[i] *= std::polar(1.0f, static_cast<float>(
+                2.0 * M_PI * cfo_hz * i / kWorkBandHz));
+        DemodScratch scratch;
+        TimingResult timing;
+        BOOST_REQUIRE(stage_timing(frame.rx.data(), frame.rx.size(), profile, tmpl,
+                                   frame.start + 2 * kQm35SamplesPerSymbol,
+                                   timing, scratch));
+        BOOST_CHECK(timing.sync_peaks_folded);
+        BOOST_CHECK_LE(std::llabs(timing.preamble_start_sample - frame.start), 2);
+        gr::uwb::demod::CfoResult cfo;
+        BOOST_REQUIRE(gr::uwb::demod::core::fit_cfo(
+            frame.rx.data(), frame.rx.size(), profile, timing, cfo, scratch));
+        BOOST_CHECK_SMALL(cfo.cfo_hz - cfo_hz, 150.0);
     }
 }
 

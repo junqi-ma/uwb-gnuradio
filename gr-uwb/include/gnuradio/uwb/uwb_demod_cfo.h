@@ -89,6 +89,9 @@ inline bool fit_cfo(const std::complex<float>* rx,
         if (std::norm(adj_sum) > 1e-24) {
             unwrap_slope_rad_per_sample =
                 std::arg(adj_sum) / static_cast<double>(kQm35SamplesPerSymbol);
+        } else if (timing.fold_phase_per_symbol != 0.0) {
+            unwrap_slope_rad_per_sample = timing.fold_phase_per_symbol /
+                static_cast<double>(kQm35SamplesPerSymbol);
         } else {
             // Fallback for sparse trains (e.g. 16 super-anchors spaced
             // 16*1016): recover the average per-sample slope across intervals up

@@ -1,0 +1,56 @@
+{
+ "-10/locked/w4": {
+  "A": {
+   "compute_mean": 3124.7875,
+   "demod_mean": 2121.525,
+   "compute_p95": 5197.825000000001,
+   "demod_p95": 3947.0875,
+   "fcs": "197/200",
+   "raw_drop": 0.0,
+   "dropped_queue": 0.0,
+   "lock_entries": 1.0,
+   "holdover": 0.0,
+   "reacquire": 0.0,
+   "final_state": "locked",
+   "acq_seeds": 200.0,
+   "candidates": 189.5,
+   "frontend_us": 44271.742,
+   "stages": {
+    "st_timing": 810.6281407035176,
+    "st_cfo": 50.46482412060301,
+    "st_sfd": 487.47738693467335,
+    "st_cir": 221.0251256281407,
+    "st_nssfd": 10.967336683417086,
+    "st_phr": 29.97236180904523,
+    "st_payload": 459.4145728643216,
+    "st_total": 2103.520100502513
+   }
+  },
+  "B": {
+   "compute_mean": 2763.625,
+   "demod_mean": 1794.7375000000002,
+   "compute_p95": 4579.6,
+   "demod_p95": 3301.55,
+   "fcs": "197/200",
+   "raw_drop": 0.0,
+   "dropped_queue": 0.0,
+   "lock_entries": 1.0,
+   "holdover": 0.0,
+   "reacquire": 0.0,
+   "final_state": "locked",
+   "acq_seeds": 200.0,
+   "candidates": 190.5,
+   "frontend_us": 41192.203,
+   "stages": {
+    "st_timing": 528.5879396984925,
+    "st_cfo": 48.44221105527638,
+    "st_sfd": 470.9924623115578,
+    "st_cir": 233.53768844221105,
+    "st_nssfd": 10.512562814070352,
+    "st_phr": 23.462311557788944,
+    "st_payload": 477.8115577889447,
+    "st_total": 1828.1934673366834
+   }
+  }
+ }
+}

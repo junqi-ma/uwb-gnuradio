@@ -4,7 +4,7 @@
 
 namespace gr::uwb::demod::core {
 // One admission decision shared by rotation, prefix generation and fused
-// decoding. The effective profile changes only Full -> Bypass on rejection.
+// decoding. Fractional-grid packets keep the requested CIR mode.
 struct PacketExecutionPlan {
     bool integer_grid_ok = true;
     Qm35825Profile effective_profile;
@@ -20,9 +20,11 @@ inline PacketExecutionPlan plan_packet_execution(
             ? timing.measured_period / static_cast<double>(kQm35ChipsPerSymbol)
             : 0.0;
         plan.integer_grid_ok = integer_chip_grid(spc_hat, profile.fused_gate_ppm * 1e-6);
-        if (!plan.integer_grid_ok &&
-            plan.effective_profile.cir_soft_chip_mode == CirSoftChipMode::Full)
-            plan.effective_profile.cir_soft_chip_mode = CirSoftChipMode::Bypass;
+        if (!plan.integer_grid_ok) {
+            plan.effective_profile.rx_softchip_on_demand = false;
+            plan.effective_profile.rx_fused_payload_cmf = false;
+            plan.effective_profile.rx_fused_phr_cmf = false;
+        }
     }
     return plan;
 }

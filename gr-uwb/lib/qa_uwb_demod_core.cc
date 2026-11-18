@@ -786,7 +786,7 @@ BOOST_AUTO_TEST_CASE(test_demod_core_low_snr_sfd_discrete_grid)
     // Low-SNR SFD acquisition.  The fast path (+-4 symbols, 0.02 floor) cannot
     // reach -10..-14 dB: the SFD peak is 0.008..0.05 and the origin can be
     // several SYMBOLS off after the low-SNR timing fold.  The discrete
-    // integer-symbol grid (+-36 symbols, 0.008 floor, PAR >= 5.5, shared
+    // integer-symbol grid (+-36 symbols, 0.008 floor, PAR >= 1.5, shared
     // 8-symbol polarity lock) must recover it without any pure-noise hit.
     std::vector<gr_complex> sync;
     BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", sync));
@@ -850,6 +850,16 @@ BOOST_AUTO_TEST_CASE(test_demod_core_low_snr_sfd_discrete_grid)
             std::normal_distribution<float> g(0.0f, 1.0f);
             for (auto& v : rx)
                 v += gr_complex(sigma * g(rng), sigma * g(rng));
+            if (snr == -12.0 && f == 0) {
+                auto shifted = make_tr(true_start - 4 * static_cast<int64_t>(sym) - 20);
+                shifted.metric = 0.04f;
+                core::DemodScratch shifted_scratch;
+                SfdResult shifted_sfd;
+                BOOST_REQUIRE(core::stage_sfd(rx.data(), rx.size(), prof, shifted,
+                                             sfd_seq, sync, shifted_sfd, shifted_scratch));
+                BOOST_CHECK_EQUAL(shifted_sfd.sfd_start_sample, true_sfd);
+                BOOST_CHECK_EQUAL(shifted_sfd.first_threshold_backtrack_symbols, 4);
+            }
             // +-10 SYMBOL origin error: outside the fast path's +-4 window.
             const int64_t off =
                 static_cast<int64_t>(static_cast<int>(f % 21) - 10) *
@@ -1728,8 +1738,7 @@ BOOST_AUTO_TEST_CASE(test_demod_core_p3_sfd_offset)
 
 BOOST_AUTO_TEST_CASE(test_demod_core_p3_sfd_sfo_adaptation)
 {
-    // measured_period 200 ppm high (1016.2): the search center uses
-    // last_start + round(measured_period), still inside the ±16-sample window.
+    // Apply the full preamble drift before rounding the SFD search centre.
     std::vector<gr_complex> iq, tmpl;
     BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
     BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
@@ -1746,6 +1755,8 @@ BOOST_AUTO_TEST_CASE(test_demod_core_p3_sfd_sfo_adaptation)
         scratch.derotated.empty() ? iq.data() : scratch.derotated.data();
     BOOST_REQUIRE(core::stage_sfd(sfd_rx, iq.size(), prof, tr, sfd_seq, tmpl, sr,
                                   scratch));
+    BOOST_CHECK_EQUAL(sr.expected_start_sample, tr.preamble_start_sample +
+        std::llround(prof.preamble_repetitions * tr.measured_period));
     BOOST_CHECK_CLOSE(static_cast<double>(sr.sfd_start_sample), 75008.0, 0.5);
     BOOST_CHECK_GE(sr.metric, 0.9f);
 }

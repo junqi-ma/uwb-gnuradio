@@ -5,11 +5,9 @@
 #
 # The option is a *compile-time* choice, not a runtime dispatcher:
 #
-#   UWB_SIMD=AUTO    detect the build machine's executable ISA (only when not
-#                    cross-compiling) and the compiler's capability, then pick
-#                    the fastest backend that has a validated kernel.  Today
-#                    that means AVX-512 when the machine + compiler support it,
-#                    otherwise AVX2/FMA, otherwise SCALAR.
+#   UWB_SIMD=AUTO    check the build machine's Linux CPU flags and compiler
+#                    capability, preferring AVX-512 with an AVX2/FMA baseline,
+#                    then AVX2/FMA, then SCALAR.
 #   UWB_SIMD=AVX2    generate the AVX2/FMA self-written kernels explicitly.
 #                    Never pass -march=native, so AVX-512 cannot sneak in.
 #   UWB_SIMD=AVX512  enable the AVX-512 kernel translation unit.  The rest of
@@ -74,22 +72,30 @@ if(UWB_CC_HAS_AVX512_TARGET)
 endif()
 
 # ---------------------------------------------------------------------------
-# Build-machine CPU probe for AUTO.  This only reads /proc/cpuinfo; it never
-# executes a target binary, so it is safe for a native (non-cross) build.
+# Build-machine CPU probe for AUTO.  Require the features on every reported
+# logical CPU because receiver threads can be scheduled on any of them.
 # ---------------------------------------------------------------------------
 set(UWB_BUILD_CPU_HAS_AVX2 FALSE)
 set(UWB_BUILD_CPU_HAS_AVX512 FALSE)
 if(NOT CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if(EXISTS "/proc/cpuinfo")
         file(READ "/proc/cpuinfo" _uwb_cpuinfo)
-        if(_uwb_cpuinfo MATCHES " avx2 " AND _uwb_cpuinfo MATCHES " fma ")
+        string(REGEX MATCHALL "(^|\n)flags[ \t]*:[^\r\n]*" _uwb_cpu_flags "${_uwb_cpuinfo}")
+        if(_uwb_cpu_flags)
             set(UWB_BUILD_CPU_HAS_AVX2 TRUE)
-        endif()
-        if(_uwb_cpuinfo MATCHES " avx512f " AND
-           _uwb_cpuinfo MATCHES " avx512bw " AND
-           _uwb_cpuinfo MATCHES " avx512dq " AND
-           _uwb_cpuinfo MATCHES " avx512vl ")
             set(UWB_BUILD_CPU_HAS_AVX512 TRUE)
+            foreach(_uwb_flags IN LISTS _uwb_cpu_flags)
+                if(NOT (_uwb_flags MATCHES "[ \t]avx2([ \t]|$)" AND
+                        _uwb_flags MATCHES "[ \t]fma([ \t]|$)"))
+                    set(UWB_BUILD_CPU_HAS_AVX2 FALSE)
+                endif()
+                if(NOT (_uwb_flags MATCHES "[ \t]avx512f([ \t]|$)" AND
+                        _uwb_flags MATCHES "[ \t]avx512bw([ \t]|$)" AND
+                        _uwb_flags MATCHES "[ \t]avx512dq([ \t]|$)" AND
+                        _uwb_flags MATCHES "[ \t]avx512vl([ \t]|$)"))
+                    set(UWB_BUILD_CPU_HAS_AVX512 FALSE)
+                endif()
+            endforeach()
         endif()
     endif()
 endif()
@@ -131,19 +137,18 @@ else() # AUTO
             "Pass -DUWB_SIMD=AVX2, -DUWB_SIMD=AVX512 or -DUWB_SIMD=SCALAR "
             "explicitly.")
     endif()
-    if(UWB_CC_HAS_AVX512_TARGET AND UWB_BUILD_CPU_HAS_AVX512)
-        set(UWB_SIMD_SELECTED "AVX512")
-    elseif(UWB_CC_HAS_MAVX2 AND UWB_CC_HAS_MFMA AND UWB_BUILD_CPU_HAS_AVX2)
+    if(UWB_CC_HAS_MAVX2 AND UWB_CC_HAS_MFMA AND UWB_BUILD_CPU_HAS_AVX2)
         set(UWB_SIMD_SELECTED "AVX2")
-    else()
-        set(UWB_SIMD_SELECTED "SCALAR")
+        if(UWB_CC_HAS_AVX512_TARGET AND UWB_BUILD_CPU_HAS_AVX512)
+            set(UWB_SIMD_SELECTED "AVX512")
+        endif()
     endif()
 endif()
 
 if(UWB_SIMD_SELECTED STREQUAL "AVX512")
     set(UWB_SIMD_LEVEL 2)
     set(UWB_SIMD_NAME "avx512")
-    set(UWB_SIMD_REQUIRED_ISA "avx512f+avx512bw+avx512dq+avx512vl")
+    set(UWB_SIMD_REQUIRED_ISA "avx2+fma+avx512f+avx512bw+avx512dq+avx512vl")
     set(UWB_SIMD_HAVE_AVX2 1)
     set(UWB_SIMD_HAVE_AVX512 1)
 elseif(UWB_SIMD_SELECTED STREQUAL "AVX2")

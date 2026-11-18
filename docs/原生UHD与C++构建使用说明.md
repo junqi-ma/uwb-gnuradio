@@ -16,11 +16,27 @@ env -u LD_LIBRARY_PATH ctest --test-dir gr-uwb/build-native-only --output-on-fai
 | 选项 | 默认 | 用途 |
 | --- | --- | --- |
 | `ENABLE_UHD_BACKEND` | `AUTO` | `ON` 要求 UHD 开发包。仅回放可用 `OFF`。 |
-| `UWB_SIMD` | `AUTO` | 按 CPU 选择指令集。也可指定 `AVX2`、`AVX512` 或 `SCALAR`。 |
+| `UWB_SIMD` | `AUTO` | 在 CMake 配置时选择 DSP 编译档位。也可指定 `AVX2`、`AVX512` 或 `SCALAR`。 |
 | `UWB_BUILD_EXPERIMENTS` | `ON` | 允许构建原生实验应用。生产部署可设 `OFF`。 |
 
 C++17、CMake、VOLK、Threads 和 Boost.Test 是构建依赖。Python 解释器用于
-辅助工具和 Python 测试。SCALAR 用于正确性检查和可移植回退。
+辅助工具和 Python 测试。
+
+### SIMD 自动选择
+
+同一分支包含 AVX2 和 AVX-512 内核。在目标 Linux 机器上直接运行上面的构建命令，
+默认 `AUTO` 会检查编译器能力与所有可见逻辑 CPU 的标志，并在 `UWB SIMD:` 日志中
+输出 `selected` 和 `required_isa`。
+
+| CPU 和编译器能力 | 选中的档位 |
+| --- | --- |
+| AVX2/FMA 和 AVX-512 F、BW、DQ、VL 均可用 | `AVX512`，已启用的宽内核使用 AVX-512，其余代码保留 AVX2/FMA 基线 |
+| AVX2/FMA 可用 | `AVX2` |
+| AVX2/FMA 不可用，或未检测到 Linux CPU 标志 | `SCALAR`（VOLK 仍可自行选择 SIMD） |
+
+产物的指令集要求在配置时固定。把产物复制到其他机器时，目标 CPU 和操作系统也要满足
+该要求。交叉编译时，使用 `-DUWB_SIMD=AVX2`、`-DUWB_SIMD=AVX512` 或
+`-DUWB_SIMD=SCALAR` 显式指定目标档位。
 
 ## 原生路径
 
@@ -61,8 +77,9 @@ gr-uwb/build-native-only/apps/uwb_dw3000_live \
 | `--mode timed` | 仅 replay；无 replay 返回 2，单音消除关闭 |
 
 每包用 timing 周期估计统一决定整数网格准入，同时控制 CFO 旋转范围、前缀及融合。
-拒绝准入时，该包请求的 Full soft-chip 路径降级到 Bypass，输出 `grid_reject` 诊断；
-保留分数网格/解调回退。`Qm35825Profile` 本身的融合标志仍默认关闭，不能将 live 的
+拒绝准入时输出 `grid_reject`，按请求的 CIR 模式走分数网格的完整 soft-chip 路径。
+`sync` 记录初始定时实测的峰数，`sync_folded=1` 表示峰来自多符号折叠锚点，
+`sync_grid` 记录 CIR 所用拟合网格覆盖的符号数。`Qm35825Profile` 本身的融合标志默认关闭，不能将 live 的
 默认配置推广到所有调用者。无参整数网格辅助函数的容差为 1.5 ppm，profile 默认门限
 为 6.468 ppm，而 live 默认取物理上限常量；调用时显式容差决定实际准入。
 

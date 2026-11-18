@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <gnuradio/uwb/uwb_demod_sync.h>
+#include <functional>
 
 namespace gr::uwb::demod::core {
 // ---------------------------------------------------------------------------
@@ -20,7 +21,8 @@ inline bool stage_sfd(const std::complex<float>* rx,
                       const std::vector<int8_t>& sfd_sequence,
                       const std::vector<std::complex<float>>& template_wf,
                       SfdResult& out,
-                      DemodScratch& scratch)
+                      DemodScratch& scratch,
+                      const std::function<void()>& prepare_grid = {})
 {
     out = SfdResult{};
     if (sfd_sequence.empty() || timing.peak_samples.empty() ||
@@ -105,12 +107,10 @@ inline bool stage_sfd(const std::complex<float>* rx,
     // and are not tracked (partial train).
     // Live search: ±64-sample narrow window at that center, then the same
     // narrow window at ±1..±4 symbol offsets if the nominal center misses.
-    const int64_t period =
-        (timing.measured_period > 0.0)
-            ? static_cast<int64_t>(std::llround(timing.measured_period))
-            : static_cast<int64_t>(sym);
+    const double period = timing.measured_period > 0.0
+        ? timing.measured_period : static_cast<double>(sym);
     const int64_t expected = timing.preamble_start_sample +
-        static_cast<int64_t>(profile.preamble_repetitions) * period;
+        std::llround(static_cast<double>(profile.preamble_repetitions) * period);
     out.expected_start_sample = expected;
     // Full-rate correlation (normalized) over the search window.
     // The signal is 2x oversampled and the SFD template is kron(sfd, preamble)
@@ -119,8 +119,8 @@ inline bool stage_sfd(const std::complex<float>* rx,
     // recovers the exact sample.  Window power is a sliding sum so the inner
     // loop only accumulates the correlation.  The result (best_j, metric) is
     // identical to the exhaustive search for a unique peak.
-    constexpr int64_t kSfdNarrowHalf = 64;
-    constexpr int kSfdSymbolOffsets = 4;
+    constexpr auto kSfdNarrowHalf = rxopt::kSfdNarrowHalf;
+    constexpr auto kSfdSymbolOffsets = rxopt::kSfdSymbolOffsets;
     float best = -1.0f;
     size_t best_j = 0;
 
@@ -295,7 +295,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
                 }
             }
         }
-        if (window_best > best) {
+        if (window_passed) {
             best = window_best;
             best_j = window_best_j;
         }
@@ -306,22 +306,10 @@ inline bool stage_sfd(const std::complex<float>* rx,
     };
 
     bool sfd_passed = scan_window(expected, kSfdNarrowHalf, 0);
-    // Low-SNR early stop for the +-1..+-4 symbol offsets.  `best` is now the
-    // k = 0 window's maximum.  When it cannot even reach 75% of the 0.02 low
-    // floor, the offsets cannot pass either: the SFD correlation peak is
-    // 0.008..0.05 at -10..-14 dB in-band, so the offsets are 8 x 129 = 1,032
-    // doomed lag correlations.  The discrete grid below covers the same
-    // +-4 symbols (and +-36) with a lower, polarity-locked acceptance gate, so
-    // nothing is lost.  The `detected_peaks`/`metric` terms keep this off the
-    // high-SNR path, where a large seed error can produce a low k = 0 maximum
-    // but a perfectly good offset window.
-    const bool skip_symbol_offsets =
-        !sfd_passed && best < kSfdSkipNarrowGate &&
-        timing.detected_peaks == profile.preamble_repetitions &&
-        timing.metric < profile.radar_verification_threshold;
-    for (int k = 1;
-         k <= kSfdSymbolOffsets && !sfd_passed && !skip_symbol_offsets; ++k) {
-        const int64_t step = static_cast<int64_t>(k) * static_cast<int64_t>(sym);
+    // A weak centre window says nothing about an offset window. Retain full
+    // sample resolution here for errors with both symbol and sample offsets.
+    for (int k = 1; k <= kSfdSymbolOffsets && !sfd_passed; ++k) {
+        const int64_t step = std::llround(static_cast<double>(k) * period);
         sfd_passed = scan_window(expected + step, kSfdNarrowHalf, k);
         if (sfd_passed)
             break;
@@ -347,7 +335,9 @@ inline bool stage_sfd(const std::complex<float>* rx,
     // (2^-8 per candidate) plus the 0.008 floor, which is 15x the pure-noise
     // maximum (0.00053) measured over 200 windows.
     if (!sfd_passed) {
-        constexpr int64_t kGridHalf = 36;
+        if (prepare_grid)
+            prepare_grid();
+        constexpr auto kGridHalf = rxopt::kSfdGridHalf;
         const int64_t max_pos =
             static_cast<int64_t>(n) - static_cast<int64_t>(sfd_len);
         // Per-SYMBOL decomposition of the SFD correlation.  SFD =
@@ -360,8 +350,8 @@ inline bool stage_sfd(const std::complex<float>* rx,
         // replaces 73 x 8128 scalar complex multiply-accumulates and 73 x 8128
         // scalar norms with 80 x 1016 SIMD dots, and turns each grid metric
         // into `len` complex adds plus `len` float adds.
-        const bool sym_decompose =
-            use_real_sfd_fast && (period == static_cast<int64_t>(sym));
+        const bool sym_decompose = use_real_sfd_fast &&
+            std::llround(kGridHalf * (period - static_cast<double>(sym))) == 0;
         const size_t n_sym_pos = static_cast<size_t>(2 * kGridHalf) + len;
         std::vector<std::complex<float>> sym_corr;
         std::vector<float> sym_pwr;
@@ -422,7 +412,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
         size_t nc = 0;
         if (max_pos >= 0) {
             for (int64_t k = -kGridHalf; k <= kGridHalf; ++k) {
-                const int64_t pos = expected + k * static_cast<int64_t>(period);
+            const int64_t pos = expected + std::llround(static_cast<double>(k) * period);
                 if (pos < 0 || pos > max_pos)
                     continue;
                 if (sym_decompose) {
@@ -463,11 +453,8 @@ inline bool stage_sfd(const std::complex<float>* rx,
             int64_t gpos = cands[bi].pos;
             // Refine around the best grid point.  Evaluating delta = 0 on all
             // 73 grid points first and refining only the winner keeps the noise
-            // maximum at 75 evaluations instead of 219.  When the +-1..+-4
-            // symbol offset windows were skipped, the winner can be several
-            // symbols off the nominal centre, so the sample refinement widens
-            // to +-4.
-            const int64_t refine_rad = skip_symbol_offsets ? 4 : 1;
+            // maximum at 75 evaluations instead of 219.
+            constexpr int64_t refine_rad = 1;
             int64_t best_pos = gpos;
             float best_metric = cands[bi].metric;
             for (int64_t d = -refine_rad; d <= refine_rad; ++d) {
@@ -486,7 +473,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
             size_t bg_cnt = 0;
             for (size_t i = 0; i < nc; ++i) {
                 if (std::llabs(cands[i].pos - gpos) <=
-                    2 * static_cast<int64_t>(period))
+                    std::llround(2.0 * period))
                     continue;
                 bg_sum += static_cast<double>(cands[i].metric);
                 ++bg_cnt;

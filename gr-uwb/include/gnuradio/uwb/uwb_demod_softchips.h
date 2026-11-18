@@ -77,8 +77,9 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     const size_t code_len = 2 * kQm35ChipsPerSymbol; // 1016
 
     // ---- Coherently average the aligned SYNC windows. ----
-    const size_t available =
-        std::min(timing.detected_peaks, profile.preamble_repetitions);
+    const size_t available = std::min(
+        timing.cir_grid_repetitions ? timing.cir_grid_repetitions : timing.detected_peaks,
+        profile.preamble_repetitions);
     if (available == 0 || profile.cir_skip_initial_repetitions >= available)
         return false;
     const size_t first_rep = profile.cir_skip_initial_repetitions;
@@ -272,8 +273,8 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     if (fractional_grid) {
         // MATLAB keeps measured_period/chips_per_symbol as a fractional
         // position and linearly interpolates the CIR-filtered stream.  Keep
-        // the optimized integer-grid kernels below for the common exact-2
-        // case; use the scalar interpolation path only when SFO is present.
+        // the integer positions as FIR inputs and interpolate the two outputs.
+        const bool sparse_rake = rake_k > 0 && rake_k < tap_count;
         auto dot_at = [&](int64_t p) {
             if (bypass_filter) {
                 const int64_t idx =
@@ -282,11 +283,17 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
                     ? rx[static_cast<size_t>(idx)]
                     : std::complex<float>(0.0f, 0.0f);
             }
+            if (p >= fwd && p < static_cast<int64_t>(n)) {
+                const auto* window = rx + (p - fwd);
+                if (sparse_rake)
+                    return cir_fir::dot_topk(window, rake_indices, rake_weights, rake_k);
+                return cir_fir::dot(cir_fir::kDefaultKernel, window, h_conj,
+                                    values_nat, tap_count);
+            }
             std::complex<float> acc(0.0f, 0.0f);
-            const size_t count =
-                (rake_k > 0 && rake_k < tap_count) ? rake_k : tap_count;
+            const size_t count = sparse_rake ? rake_k : tap_count;
             for (size_t j = 0; j < count; ++j) {
-                const size_t q = (count == tap_count) ? j : rake_indices[j];
+                const size_t q = sparse_rake ? rake_indices[j] : j;
                 const int64_t idx = p - fwd + static_cast<int64_t>(q);
                 if (idx >= 0 && idx < static_cast<int64_t>(n))
                     acc += h_conj[q] * rx[static_cast<size_t>(idx)];
@@ -297,7 +304,7 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
             const double pd = static_cast<double>(chip_start) +
                               static_cast<double>(i) * spc;
             const int64_t p0 = static_cast<int64_t>(std::floor(pd));
-            const float frac = static_cast<float>(pd - std::floor(pd));
+            const float frac = static_cast<float>(pd - static_cast<double>(p0));
             const std::complex<float> y0 = dot_at(p0);
             const std::complex<float> y1 = dot_at(p0 + 1);
             fir_out[i] = y0 + frac * (y1 - y0);

@@ -210,11 +210,29 @@ inline bool stage_timing(const std::complex<float>* rx,
     // can reuse the same window.
     int64_t acq_seed = seed_start;
     auto try_fold_acquire = [&](int64_t centre, int64_t radius) -> bool {
-        const detail::FoldAcquireResult fold = detail::fold_acquire(
-            rx, n, centre, centre - radius, centre + radius,
-            scratch.work.data(), L, Et, scratch.real_sync_template,
-            detail::kFoldMaxSymbols, profile.preamble_repetitions,
-            detail::kFoldThreshold);
+        const auto phase_probe = detail::probe_fold_phase(
+            rx, n, centre, profile.preamble_repetitions);
+        const double coarse_phase = phase_probe.phase();
+        auto acquire_fold = [&](double phase) {
+            return detail::fold_acquire(
+                rx, n, centre, centre - radius, centre + radius,
+                scratch.work.data(), L, Et, scratch.real_sync_template,
+                detail::kFoldMaxSymbols, profile.preamble_repetitions,
+                detail::kFoldThreshold, phase);
+        };
+        // Check energy only when the coarse phase can change the fold choice.
+        // A rejected large phase also rules out the phase-aligned retry.
+        const bool could_alias = std::abs(coarse_phase) >=
+            M_PI / detail::kFoldAnchorGroupSymbols;
+        double fold_phase = could_alias && phase_probe.coherent()
+            ? coarse_phase : 0.0;
+        auto fold = acquire_fold(fold_phase);
+        if (!fold.ok && !could_alias &&
+            std::abs(coarse_phase) >= M_PI / (2 * detail::kFoldMaxSymbols) &&
+            phase_probe.coherent()) {
+            fold_phase = coarse_phase;
+            fold = acquire_fold(fold_phase);
+        }
         if (!fold.ok)
             return false;
         // ---- Absolute-symbol disambiguation ------------------------------
@@ -295,7 +313,7 @@ inline bool stage_timing(const std::complex<float>* rx,
                     rx, n, fold_start, scratch.work.data(), L, Et,
                     scratch.real_sync_template, groups, &period_fit,
                     &origin_fit, out.peak_samples, out.peak_metrics,
-                    out.peak_corr)) {
+                    out.peak_corr, fold_phase)) {
                 out.peak_samples.clear();
                 out.peak_metrics.clear();
                 out.peak_corr.clear();
@@ -308,6 +326,7 @@ inline bool stage_timing(const std::complex<float>* rx,
             out.peak_corr.push_back(fold.corr);
         }
         out.measured_period = period_fit;
+        out.fold_phase_per_symbol = fold_phase;
         out.preamble_start_sample = origin_fit;
         out.metric = fold.metric;
         first_start = fold_start;
@@ -735,7 +754,7 @@ inline bool stage_timing(const std::complex<float>* rx,
     // measured_period MUST come from the anchor fit: it feeds
     // integer_chip_grid()/spc_ppm and the fused-CMF admission, so a period
     // that degenerates to the nominal 1016 would silently disable the
-    // Full->Bypass (grid_reject) protection for an untrimmed clock.
+    // fractional-grid fallback for an untrimmed clock.
     bool grid_applied = false;
     double grid_period = static_cast<double>(period);
     int64_t grid_start = start;
@@ -1128,13 +1147,10 @@ inline bool stage_timing(const std::complex<float>* rx,
         }
     }
 
-    // The fold path measures `groups` super-anchors rather than every SYNC, but
-    // stage_cir_softchips derives its coherent-averaging count from
-    // detected_peaks: reporting `groups` (8 for 128 SYNCs, 16 for 256) would
-    // average 8 SYNCs instead of 54 and lose ~8 dB of CIR SNR.  Report the
-    // number of SYNC symbols the fitted grid actually covers.
-    out.detected_peaks = fold_used ? profile.preamble_repetitions
-                                   : out.peak_samples.size();
+    out.detected_peaks = out.peak_samples.size();
+    out.sync_peaks_folded = fold_used;
+    if (fold_used)
+        out.cir_grid_repetitions = profile.preamble_repetitions;
     out.expected_peaks = profile.preamble_repetitions;
     out.metric = first_metric;
 

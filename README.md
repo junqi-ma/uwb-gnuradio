@@ -10,7 +10,7 @@ cmake --build gr-uwb/build-native-only -j4
 env -u LD_LIBRARY_PATH ctest --test-dir gr-uwb/build-native-only --output-on-failure -j1
 ```
 
-仅做文件回放时，配置 `-DENABLE_UHD_BACKEND=OFF`。默认 `AUTO` 会按机器上是否可用 UHD 开发包选择后端。实时接收建议使用默认 ISA 自动选择或明确指定受机器支持的 SIMD。以下示例从 737.28 MS/s SC16 文件解调。
+仅做文件回放时，配置 `-DENABLE_UHD_BACKEND=OFF`。默认 `ENABLE_UHD_BACKEND=AUTO` 会按机器上是否有 UHD 开发包选择后端。`UWB_SIMD=AUTO` 在目标 Linux 机器上配置时按 CPU 和编译器能力选择 AVX-512、AVX2/FMA 或标量档位。以下示例从 737.28 MS/s SC16 文件解调。
 
 ```sh
 gr-uwb/build-native-only/apps/uwb_dw3000_live --replay capture.sc16
