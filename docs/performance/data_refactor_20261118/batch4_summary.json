@@ -1,0 +1,162 @@
+{
+  "batch": 4,
+  "title": "Narrow public header dependencies and simplify live window submission and terminal accounting",
+  "commits": {
+    "baseline_a": "8a1eaa4d45df12c127bb8fa8bc03e6e6d500646a",
+    "parent_batch_3": "a334f6a7a67dba183271173ba22b53193b50219c"
+  },
+  "environment": {
+    "cpu": "12th Gen Intel(R) Core(TM) i7-12700",
+    "compiler": "GCC 11.4.0",
+    "build_type": "Release",
+    "uhd_backend": "OFF",
+    "avx2_build_dir": "gr-uwb/build-refactor-b",
+    "avx2_install_prefix": "/tmp/uwb-refactor-b-install",
+    "scalar_build_dir": "gr-uwb/build-refactor-b-scalar"
+  },
+  "binaries_sha256": {
+    "baseline_a_decode": "c2f80a2a33bf2516b5eb70ab4ca05f4ee38fb5bc00bd4d37882fa6bf94ca3aa6",
+    "baseline_a_live": "03c9ed8b6943029f2120d4057487fc5796bf4f0d63e955b1a6b2ae8cb0cea2b8",
+    "refactor_b_avx2_decode": "8f3e9bff91d23ce5c4804c9d544c9f50a9d785d967c976d7b47d3b1f9e1e0c51",
+    "refactor_b_avx2_live": "3e18d3af793660e8a3af6905080b17f01a41ecc9e5b86d84700fb355276e71e3",
+    "refactor_b_scalar_decode": "f9ec6cb4380b2c44304103cc5b1d92ccb83dde95ae1b396ea62bc8e04a05d35f",
+    "refactor_b_scalar_live": "67db00081d6e55d14da6ca1d207fcf75ee71e2c0af7a87ed97799adcf147718f"
+  },
+  "ctest": {
+    "avx2": {
+      "total": 56,
+      "passed": 56,
+      "failed": 0,
+      "skipped": 0,
+      "real_time_sec": 35.85
+    },
+    "scalar": {
+      "total": 56,
+      "passed": 55,
+      "failed": 0,
+      "skipped": 1,
+      "skipped_tests": ["uwb_qa_native_install_consumer"],
+      "real_time_sec": 32.53
+    }
+  },
+  "fixed_window_200x3": {
+    "f4": {
+      "sha256": "238c300dc0d41f52bbf00611874efea38ab6a104464664b8b1795c8c2c143a5e",
+      "rows": 200,
+      "fcs": [199, 199],
+      "differences": []
+    },
+    "fm12_200": {
+      "sha256": "6b8e14cc2b4666bd364addf49d92503edddc94524d9c13236e2c7377aa2f46ad",
+      "rows": 200,
+      "fcs": [186, 186],
+      "differences": []
+    },
+    "fm14": {
+      "sha256": "8206af10952c94959b4ef45b62ee6df85b237d45968535b9b567a25d1cd52aba",
+      "rows": 200,
+      "fcs": [0, 0],
+      "differences": []
+    }
+  },
+  "fixed_window_6x40": {
+    "control": {"exact_a": 40, "exact_b": 40, "total": 40, "wrong": 0, "diff_count": 0},
+    "seed1729": {"exact_a": 38, "exact_b": 38, "total": 40, "wrong": 0, "diff_count": 0},
+    "seed2718": {"exact_a": 40, "exact_b": 40, "total": 40, "wrong": 0, "diff_count": 0},
+    "cfo10k": {"exact_a": 37, "exact_b": 37, "total": 40, "wrong": 0, "diff_count": 0},
+    "cfo40k": {"exact_a": 38, "exact_b": 38, "total": 40, "wrong": 0, "diff_count": 0},
+    "sfo27ppm": {"exact_a": 37, "exact_b": 37, "total": 40, "wrong": 0, "diff_count": 0}
+  },
+  "abba_benchmarks": {
+    "-12/locked/w1": {
+      "A": {
+        "compute_mean_us": 2525.525,
+        "demod_mean_us": 1623.1125,
+        "compute_p95_us": 4924.1375,
+        "demod_p95_us": 3879.725,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 487.9547738693467,
+          "st_cfo": 15.515075376884422,
+          "st_sfd": 446.9346733668342,
+          "st_cir": 127.37939698492463,
+          "st_nssfd": 7.909547738693467,
+          "st_phr": 17.876884422110553,
+          "st_payload": 333.2537688442211,
+          "st_total": 1570.0527638190954
+        }
+      },
+      "B": {
+        "compute_mean_us": 2502.325,
+        "demod_mean_us": 1620.6,
+        "compute_p95_us": 4713.55,
+        "demod_p95_us": 3785.7375,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 495.01256281407035,
+          "st_cfo": 17.09045226130653,
+          "st_sfd": 443.51256281407035,
+          "st_cir": 125.84422110552764,
+          "st_nssfd": 7.864321608040201,
+          "st_phr": 16.030150753768844,
+          "st_payload": 324.30150753768845,
+          "st_total": 1562.5879396984924
+        }
+      },
+      "delta_pct": {
+        "compute_mean": -0.9186,
+        "demod_mean": -0.1548,
+        "st_total": -0.4755
+      }
+    },
+    "-12/locked/w4": {
+      "A": {
+        "compute_mean_us": 3041.8875,
+        "demod_mean_us": 2140.875,
+        "compute_p95_us": 6048.9,
+        "demod_p95_us": 4969.625,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 616.5628140703518,
+          "st_cfo": 46.065326633165824,
+          "st_sfd": 598.605527638191,
+          "st_cir": 218.9396984924623,
+          "st_nssfd": 8.585427135678392,
+          "st_phr": 21.859296482412063,
+          "st_payload": 479.48743718592965,
+          "st_total": 2148.3467336683416
+        }
+      },
+      "B": {
+        "compute_mean_us": 3184.2875,
+        "demod_mean_us": 2204.85,
+        "compute_p95_us": 6394.5,
+        "demod_p95_us": 5161.4125,
+        "fcs": "191/200",
+        "dropped_queue": 0.0,
+        "final_state": "locked",
+        "stages_us": {
+          "st_timing": 672.7336683417086,
+          "st_cfo": 45.5251256281407,
+          "st_sfd": 642.0175879396985,
+          "st_cir": 235.99748743718592,
+          "st_nssfd": 9.522613065326633,
+          "st_phr": 26.7035175879397,
+          "st_payload": 536.929648241206,
+          "st_total": 2363.6055276381912
+        }
+      },
+      "delta_pct": {
+        "compute_mean": 4.6813,
+        "demod_mean": 2.9883,
+        "st_total": 10.0197
+      }
+    }
+  }
+}

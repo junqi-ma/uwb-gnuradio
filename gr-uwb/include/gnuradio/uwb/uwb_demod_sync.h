@@ -2,6 +2,7 @@
 #pragma once
 #include <gnuradio/uwb/uwb_demod_scratch.h>
 #include <gnuradio/uwb/uwb_demod_grid.h>
+#include <gnuradio/uwb/uwb_detector_core.h>
 
 namespace gr::uwb::demod::core {
 // ---------------------------------------------------------------------------

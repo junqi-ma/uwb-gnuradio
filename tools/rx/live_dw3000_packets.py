@@ -37,22 +37,26 @@ def main() -> int:
             p.error(f'回放文件不存在：{a.replay}')
     env = os.environ.copy()
     env.pop('LD_LIBRARY_PATH', None)  # Use this build's RPATH, not an older libuwb.
-    BUILD.mkdir(parents=True, exist_ok=True)
-    log_path = BUILD / 'live-console-build.log'
-    print('检查并构建当前源码的实时接收程序...', flush=True)
-    commands = [
-        ['cmake', '-S', str(ROOT / 'gr-uwb'), '-B', str(BUILD), '-DCMAKE_BUILD_TYPE=Release', '-DUWB_BUILD_EXPERIMENTS=OFF'],
-        ['cmake', '--build', str(BUILD), '--target', 'uwb_dw3000_live', '-j', '4'],
-    ]
-    try:
-        with log_path.open('w') as log:
-            for command in commands:
-                subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
-    except (OSError, subprocess.CalledProcessError) as exc:
-        print(f'构建失败：{exc}\n日志：{log_path}', file=sys.stderr)
-        print('\n'.join(log_path.read_text().splitlines()[-30:]), file=sys.stderr)
-        return 2
-    binary = BUILD / 'apps/uwb_dw3000_live'
+    override_binary = env.pop('UWB_LIVE_BINARY', '').strip()
+    if override_binary:
+        binary = Path(override_binary).resolve()
+    else:
+        BUILD.mkdir(parents=True, exist_ok=True)
+        log_path = BUILD / 'live-console-build.log'
+        print('检查并构建当前源码的实时接收程序...', flush=True)
+        commands = [
+            ['cmake', '-S', str(ROOT / 'gr-uwb'), '-B', str(BUILD), '-DCMAKE_BUILD_TYPE=Release', '-DUWB_BUILD_EXPERIMENTS=OFF'],
+            ['cmake', '--build', str(BUILD), '--target', 'uwb_dw3000_live', '-j', '4'],
+        ]
+        try:
+            with log_path.open('w') as log:
+                for command in commands:
+                    subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            print(f'构建失败：{exc}\n日志：{log_path}', file=sys.stderr)
+            print('\n'.join(log_path.read_text().splitlines()[-30:]), file=sys.stderr)
+            return 2
+        binary = BUILD / 'apps/uwb_dw3000_live'
     command = [str(binary)]
     for key in ['args', 'channel', 'antenna', 'subdev', 'freq', 'gain', 'seconds',
                 'workers', 'queue', 'raw_blocks', 'summary', 'cir']:

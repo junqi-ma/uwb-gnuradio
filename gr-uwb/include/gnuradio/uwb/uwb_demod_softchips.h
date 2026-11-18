@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include <gnuradio/uwb/uwb_cir_fir_simd.h>
 #include <gnuradio/uwb/uwb_demod_scratch.h>
 #include <gnuradio/uwb/uwb_demod_grid.h>
+#include <gnuradio/uwb/uwb_rx_softchip_opt.h>
 
 namespace gr::uwb::demod::core {
 // ---------------------------------------------------------------------------

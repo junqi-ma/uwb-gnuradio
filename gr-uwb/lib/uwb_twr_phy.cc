@@ -61,7 +61,6 @@
 
 #include <gnuradio/uwb/uwb_twr_phy.h>
 
-#include <gnuradio/uwb/uwb_demod_core.h>
 #include <gnuradio/uwb/uwb_hrp_mod_core.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
 

@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
-#include <gnuradio/uwb/uwb_cir_fir_simd.h>
 #include <gnuradio/uwb/uwb_demod_result.h>
-#include <gnuradio/uwb/uwb_detector_core.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
 #include <gnuradio/uwb/uwb_rx_cfo_opt.h>
 #include <gnuradio/uwb/uwb_rx_sync_opt.h>
-#include <gnuradio/uwb/uwb_rx_softchip_opt.h>
 #include <gnuradio/uwb/uwb_rx_fused_cmf.h>
 
 #include <algorithm>
@@ -18,6 +15,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <limits>
+#include <string>
 #include <vector>
 
 

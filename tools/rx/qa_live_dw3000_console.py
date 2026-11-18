@@ -185,8 +185,40 @@ with tempfile.TemporaryDirectory(prefix='uwb-live-console-') as temporary:
         capture_output=True, text=True, timeout=30)
     assert baseline.returncode == 0, baseline.stderr + baseline.stdout
     fields = start_fields(baseline.stdout)
+    assert fields['fused'] == 'on', fields
+    assert fields['cir'] == 'full', fields
+    assert fields['taps'] == 'eq16', fields
+    assert fields['ondemand'] == 'on', fields
     assert fields['lock_fcs'] == 'on', fields
     assert fields['stop_after_sfd'] == 'off', fields
+
+    # Python wrapper default (--cir auto) and `--` passthrough to C++ live.
+    wrapper = Path(__file__).resolve().parent / 'live_dw3000_packets.py'
+    wrapper_env = dict(**subprocess.os.environ, UWB_LIVE_BINARY=binary)
+    wrap_default = subprocess.run(
+        [sys.executable, str(wrapper), '--replay', str(path), '--summary', '1'],
+        capture_output=True, text=True, timeout=30, env=wrapper_env)
+    assert wrap_default.returncode == 0, wrap_default.stderr + wrap_default.stdout
+    wfields = start_fields(wrap_default.stdout)
+    assert wfields['cir'] == 'auto', wfields
+    assert wfields['fused'] == 'on', wfields
+    assert wfields['taps'] == 'eq16', wfields
+
+    wrap_passthrough = subprocess.run(
+        [sys.executable, str(wrapper), '--replay', str(path), '--summary', '1',
+         '--', '--sync', 'locked', '--taps', 'quality'],
+        capture_output=True, text=True, timeout=30, env=wrapper_env)
+    assert wrap_passthrough.returncode == 0, wrap_passthrough.stderr + wrap_passthrough.stdout
+    wpfields = start_fields(wrap_passthrough.stdout)
+    assert wpfields['cir'] == 'auto', wpfields
+    assert wpfields['sync'] == 'locked', wpfields
+    assert wpfields['taps'] == 'quality', wpfields
+
+    wrap_timed_no_replay = subprocess.run(
+        [sys.executable, str(wrapper), '--', '--mode', 'timed'],
+        capture_output=True, text=True, timeout=15, env=wrapper_env)
+    assert wrap_timed_no_replay.returncode == 2, (
+        wrap_timed_no_replay.stdout + wrap_timed_no_replay.stderr)
 
     # Low-SNR capture-only smoke: FCS is dropped from lock identity and the
     # demodulator stops after the SFD.  The synthetic DC burst is still only a

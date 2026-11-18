@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <gnuradio/uwb/uwb_demod_sync.h>
+#include <gnuradio/uwb/uwb_rx_cfo_opt.h>
 
 namespace gr::uwb::demod::core {
 // ---------------------------------------------------------------------------

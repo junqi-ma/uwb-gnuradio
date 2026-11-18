@@ -656,6 +656,353 @@ struct Workers {
     }
 };
 
+struct WindowSubmissionTracker {
+    struct AssocPending {
+        uint64_t slot;
+        int64_t start;
+        double metric;
+    };
+    struct TimedPending : live::PacketRequest {
+        size_t count = 0;
+    };
+
+    Reporter::SubmissionSummary sub_stats{};
+    uint64_t cand_submit_attempts = 0, cand_admitted = 0, cand_dropped_queue = 0;
+    uint64_t cand_incomplete = 0, cand_overrun = 0, cand_overlapping = 0;
+    uint64_t cand_invalid_gap = 0, autocorr_ignored = 0;
+    int64_t pending_seed = -1;
+    uint64_t pending_id = 0;
+    size_t pending_guard = 0;
+    std::deque<PendingSubmit> pending;
+    core::TargetSlotPlan pending_plan;
+    bool have_pending_plan = false;
+    uint64_t pending_slot = 0;
+    std::vector<AssocPending> assoc;
+    uint64_t dedup_confirmed = 0, dedup_ambiguous = 0;
+    uint64_t target_slots = 0, target_dropped = 0, target_expired = 0, dedup = 0, unknown = 0;
+    std::deque<TimedPending> timed_pending;
+
+    explicit WindowSubmissionTracker(size_t initial_guard)
+        : pending_guard(initial_guard) {}
+
+    void record_candidate_incomplete(Reporter& report, uint64_t req_id,
+                                     int64_t seed, const std::string& tag) {
+        report.result(req_id, seed, "INCOMPLETE_WINDOW", nullptr, 0, false,
+                      nullptr, tag);
+        ++cand_incomplete;
+    }
+
+    void record_candidate_overlapping(Reporter& report, uint64_t req_id,
+                                      int64_t seed, size_t guard) {
+        report.result(req_id, seed, "OVERLAPPING_CANDIDATE", nullptr, 0, false,
+                      nullptr, "path=acquire guard=" + std::to_string(guard));
+        ++cand_overlapping;
+    }
+
+    void record_candidate_overrun(Reporter& report,
+                                  const live::PacketRequest& req) {
+        report.result(req.id, req.seed, "HISTORY_OVERRUN", nullptr, 0, false,
+                      nullptr, format_request_tag(req));
+        ++cand_overrun;
+    }
+
+    void record_candidate_queue_drop(Reporter& report,
+                                     const live::PacketRequest& req,
+                                     bool count_submit_attempt) {
+        report.result(req.id, req.seed, "DROPPED_QUEUE", nullptr, 0, false,
+                      nullptr, format_request_tag(req));
+        if (count_submit_attempt)
+            ++sub_stats.dropped_queue;
+        ++cand_dropped_queue;
+    }
+
+    void submit_candidate_window(Reporter& report, Workers& workers,
+                                 const live::PacketRequest& req, size_t count,
+                                 const std::vector<std::complex<int16_t>>& ring) {
+        ++sub_stats.submit_attempts;
+        ++cand_submit_attempts;
+        if (!workers.submit(req, count, ring)) {
+            record_candidate_queue_drop(report, req, /*count_submit_attempt=*/true);
+        } else {
+            ++sub_stats.admitted;
+            ++cand_admitted;
+        }
+    }
+
+    void flush_pending_on_gap(Reporter& report) {
+        if (pending_seed >= 0) {
+            report.result(pending_id, pending_seed, "INVALID_GAP", nullptr,
+                          0, false, nullptr,
+                          "path=acquire guard=" + std::to_string(pending_guard));
+            ++cand_invalid_gap;
+        }
+        pending_seed = -1;
+        for (const auto& ps : pending) {
+            report.result(ps.id, ps.seed, "INVALID_GAP", nullptr, 0,
+                          false, nullptr, format_request_tag(ps));
+            ++cand_invalid_gap;
+        }
+        pending.clear();
+        have_pending_plan = false;
+    }
+
+    void handle_autocorr_seed(int64_t seed, double metric, int64_t valid_begin,
+                              size_t cur_pre_guard, size_t window,
+                              bool interference_enabled, uint64_t& id,
+                              core::TargetLockCore& lock, Reporter& report) {
+        ++sub_stats.acq_seeds;
+        const std::string acq_tag =
+            "path=acquire guard=" + std::to_string(cur_pre_guard);
+        if (lock.scheduled()) {
+            // Classification is deferred to submission time: the predicted
+            // target window for this slot is only committed ~0.46 ms after the
+            // packet start, i.e. after this 6 ms-window autocorrelation
+            // detection.
+            if (!interference_enabled) {
+                ++unknown;
+                ++autocorr_ignored;
+                return;
+            }
+            ++id;
+            if (seed - int64_t(cur_pre_guard) < valid_begin) {
+                record_candidate_incomplete(report, id, seed, acq_tag);
+                return;
+            }
+            PendingSubmit ps;
+            ps.id = id;
+            ps.seed = seed;
+            ps.window_start = seed - int64_t(cur_pre_guard);
+            ps.count = window;
+            ps.predicted_rel_work = std::llround(cur_pre_guard * 65.0 / 48);
+            ps.guard = cur_pre_guard;
+            ps.generation = lock.generation();
+            ps.metric = metric;
+            ps.is_candidate = true;
+            if (pending.size() >= 8) {
+                record_candidate_queue_drop(
+                    report, ps, /*count_submit_attempt=*/false);
+            } else {
+                pending.push_back(ps);
+                ++unknown;
+            }
+            return;
+        }
+        if (pending_seed >= 0) {
+            ++id;
+            record_candidate_overlapping(report, id, seed, cur_pre_guard);
+        } else if (seed - int64_t(cur_pre_guard) < valid_begin) {
+            ++id;
+            record_candidate_incomplete(report, id, seed, acq_tag);
+        } else {
+            ++id;
+            pending_seed = seed;
+            pending_id = id;
+            pending_guard = cur_pre_guard;
+        }
+    }
+
+    void submit_ready_acquire_window(int64_t end, int64_t valid_begin,
+                                     size_t window,
+                                     const std::vector<std::complex<int16_t>>& ring,
+                                     core::TargetLockCore& lock,
+                                     Workers& workers, Reporter& report) {
+        if (pending_seed < 0 ||
+            end < pending_seed - int64_t(pending_guard) + int64_t(window)) {
+            return;
+        }
+        const int64_t ws = pending_seed - int64_t(pending_guard);
+        live::PacketRequest req;
+        req.id = pending_id;
+        req.seed = pending_seed;
+        req.window_start = ws;
+        req.predicted_rel_work = std::llround(pending_guard * 65.0 / 48);
+        req.guard = pending_guard;
+        req.slot_index = std::numeric_limits<uint64_t>::max();
+        req.generation = lock.generation();
+        req.target_slot = false;
+        req.feeds_lock = true;
+        if (ws < valid_begin) {
+            record_candidate_overrun(report, req);
+        } else {
+            submit_candidate_window(report, workers, req, window, ring);
+        }
+        pending_seed = -1;
+    }
+
+    void submit_ready_deferred_candidates(
+        int64_t end, int64_t valid_begin,
+        const std::vector<std::complex<int16_t>>& ring,
+        core::TargetLockCore& lock, Workers& workers, Reporter& report) {
+        if (pending.empty())
+            return;
+        std::deque<PendingSubmit> still;
+        for (const auto& ps : pending) {
+            if (ps.window_start < valid_begin) {
+                record_candidate_overrun(report, ps);
+                continue;
+            }
+            if (ps.window_start + int64_t(ps.count) > end) {
+                still.push_back(ps);
+                continue;
+            }
+            if (ps.is_candidate) {
+                // Now that the target plan for this slot exists, decide
+                // whether this autocorrelation response is the target's own.
+                // Association is confirmed from the slot result.
+                core::InterferenceCandidate c;
+                c.start_sample = ps.seed;
+                c.metric = ps.metric;
+                const auto v = lock.classify_candidate(c);
+                if (v.cls == core::CandidateClass::TargetAssociated) {
+                    ++dedup;
+                    if (assoc.size() < 256)
+                        assoc.push_back({ v.slot_index, ps.seed, ps.metric });
+                    continue;
+                }
+            }
+            submit_candidate_window(report, workers, ps, ps.count, ring);
+        }
+        pending.swap(still);
+    }
+
+    void submit_continuous_target_windows(
+        int64_t end, int64_t valid_begin,
+        const std::vector<std::complex<int16_t>>& ring,
+        uint64_t& id, core::TargetLockCore& lock,
+        Workers& workers, Reporter& report) {
+        if (have_pending_plan &&
+            pending_plan.generation != lock.generation()) {
+            // The grid changed under us; the old plan is void.
+            have_pending_plan = false;
+        }
+        if (!have_pending_plan) {
+            have_pending_plan = lock.next_plan(end, pending_plan);
+            if (have_pending_plan)
+                pending_slot = pending_plan.slot_index;
+        }
+        while (have_pending_plan) {
+            core::TargetSlotPlan plan = lock.plan_for_slot(pending_slot);
+            if (plan.window_end > end)
+                break; // still filling
+            have_pending_plan = false;
+            const size_t count = size_t(plan.window_end - plan.window_start);
+            live::PacketRequest req;
+            req.id = ++id;
+            req.seed = plan.predicted_origin;
+            req.window_start = plan.window_start;
+            req.predicted_rel_work =
+                std::llround((plan.predicted_origin - plan.window_start) * 65.0 / 48);
+            req.guard = plan.pre_guard;
+            req.slot_index = plan.slot_index;
+            req.generation = plan.generation;
+            req.target_slot = true;
+            req.feeds_lock = true;
+            if (plan.window_start < valid_begin) {
+                report.result(req.id, req.seed, "HISTORY_OVERRUN", nullptr,
+                              0, false, nullptr, format_request_tag(req));
+                lock.abandon_slot(plan.slot_index);
+                ++target_expired;
+            } else {
+                ++sub_stats.submit_attempts;
+                if (!workers.submit(req, count, ring)) {
+                    report.result(req.id, req.seed, "DROPPED_QUEUE",
+                                  nullptr, 0, false, nullptr,
+                                  format_request_tag(req));
+                    lock.note_slot_outcome(plan.slot_index,
+                                           core::TargetSlotOutcome::DroppedQueue);
+                    ++target_dropped;
+                    ++sub_stats.dropped_queue;
+                } else {
+                    lock.commit_plan(plan);
+                    ++target_slots;
+                    ++sub_stats.admitted;
+                }
+            }
+            have_pending_plan = lock.next_plan(end, pending_plan);
+            if (have_pending_plan)
+                pending_slot = pending_plan.slot_index;
+        }
+    }
+
+    void submit_timed_windows(
+        int64_t end, int64_t valid_begin,
+        const std::vector<std::complex<int16_t>>& ring,
+        core::TargetLockCore& lock, Workers& workers, Reporter& report) {
+        while (!timed_pending.empty()) {
+            const TimedPending tp = timed_pending.front();
+            if (tp.window_start + int64_t(tp.count) > end)
+                break;
+            timed_pending.pop_front();
+            if (tp.window_start < valid_begin) {
+                report.result(tp.id, tp.seed, "HISTORY_OVERRUN", nullptr,
+                              0, false, nullptr, format_request_tag(tp));
+                if (tp.target_slot)
+                    lock.abandon_slot(tp.slot_index);
+                continue;
+            }
+            ++sub_stats.submit_attempts;
+            if (!workers.submit(tp, tp.count, ring)) {
+                report.result(tp.id, tp.seed, "DROPPED_QUEUE", nullptr,
+                              0, false, nullptr, format_request_tag(tp));
+                ++sub_stats.dropped_queue;
+                if (tp.target_slot) {
+                    lock.note_slot_outcome(tp.slot_index,
+                                           core::TargetSlotOutcome::DroppedQueue);
+                    ++target_dropped;
+                }
+            } else {
+                ++sub_stats.admitted;
+            }
+        }
+    }
+
+    void resolve_deferred_associations(core::TargetLockCore& lock,
+                                       Reporter& report) {
+        if (assoc.empty())
+            return;
+        std::vector<AssocPending> still;
+        for (const auto& a : assoc) {
+            if (!lock.slot_terminal(a.slot)) {
+                still.push_back(a);
+                continue;
+            }
+            if (lock.slot_succeeded(a.slot)) {
+                ++dedup_confirmed;
+            } else {
+                ++dedup_ambiguous;
+                std::ostringstream s;
+                s << std::fixed << std::setprecision(3)
+                  << "INTERFERENCE_AMBIGUOUS slot=" << a.slot
+                  << " start=" << a.start << " metric=" << a.metric
+                  << " reason=target_slot_failed";
+                report.info(s.str());
+            }
+        }
+        assoc.swap(still);
+    }
+
+    void flush_pending_at_eof(core::TargetLockCore& lock, Reporter& report) {
+        if (pending_seed >= 0) {
+            record_candidate_incomplete(
+                report, pending_id, pending_seed,
+                "path=acquire guard=" + std::to_string(pending_guard));
+            pending_seed = -1;
+        }
+        for (const auto& ps : pending) {
+            record_candidate_incomplete(
+                report, ps.id, ps.seed, format_request_tag(ps));
+        }
+        pending.clear();
+        for (const auto& tp : timed_pending) {
+            report.result(tp.id, tp.seed, "INCOMPLETE_WINDOW", nullptr, 0,
+                          false, nullptr, format_request_tag(tp));
+            if (tp.target_slot)
+                lock.abandon_slot(tp.slot_index);
+        }
+        timed_pending.clear();
+    }
+};
+
 using gr::uwb::live::Acquisition;
 
 // ---------------------------------------------------------------------------
@@ -1196,33 +1543,31 @@ try {
     // Autocorrelation seeds produced by the streaming frontend (continuous
     // mode only).  `id` also counts timed windows, so the capture count the
     // acquisition acceptance is stated in needs its own counter.
-    Reporter::SubmissionSummary sub_stats{};
-    uint64_t cand_submit_attempts = 0, cand_admitted = 0, cand_dropped_queue = 0;
-    uint64_t cand_incomplete = 0, cand_overrun = 0, cand_overlapping = 0;
-    uint64_t cand_invalid_gap = 0, autocorr_ignored = 0;
-    int64_t pending_seed=-1; uint64_t pending_id=0; size_t pending_guard=cur_pre_guard;
-    std::deque<PendingSubmit> pending;
-    core::TargetSlotPlan pending_plan;
-    bool have_pending_plan = false;
-    uint64_t pending_slot = 0;
-    struct AssocPending {
-        uint64_t slot;
-        int64_t start;
-        double metric;
-    };
-    std::vector<AssocPending> assoc;
-    uint64_t dedup_confirmed = 0, dedup_ambiguous = 0;
+    WindowSubmissionTracker submissions(cur_pre_guard);
+    auto& sub_stats = submissions.sub_stats;
+    auto& target_slots = submissions.target_slots;
+    auto& target_dropped = submissions.target_dropped;
+    auto& target_expired = submissions.target_expired;
+    auto& dedup = submissions.dedup;
+    auto& dedup_confirmed = submissions.dedup_confirmed;
+    auto& dedup_ambiguous = submissions.dedup_ambiguous;
+    auto& unknown = submissions.unknown;
+    auto& cand_submit_attempts = submissions.cand_submit_attempts;
+    auto& cand_admitted = submissions.cand_admitted;
+    auto& cand_dropped_queue = submissions.cand_dropped_queue;
+    auto& cand_incomplete = submissions.cand_incomplete;
+    auto& cand_overrun = submissions.cand_overrun;
+    auto& cand_overlapping = submissions.cand_overlapping;
+    auto& cand_invalid_gap = submissions.cand_invalid_gap;
+    auto& autocorr_ignored = submissions.autocorr_ignored;
+    auto& timed_pending = submissions.timed_pending;
+    using TimedPending = WindowSubmissionTracker::TimedPending;
     bool failed=false;
     double frontend_us=0; uint64_t frontend_samples=0;
     // Split of frontend_us: the residual ring copy (wrap + gap blocks only) and
     // the acquisition scan.  Kept as separate diagnostics because the frontend
     // budget is decided by these two numbers.
     double frontend_copy_us=0, frontend_scan_us=0;
-    uint64_t target_slots=0, target_dropped=0, target_expired=0, dedup=0, unknown=0;
-    struct TimedPending : live::PacketRequest {
-        size_t count = 0;
-    };
-    std::deque<TimedPending> timed_pending;
     int64_t timed_cursor = std::llround(o.timed_t0_ms * 1e-3 * fs);
     const int64_t nominal_period_samples = std::llround(o.period_ms * 1e-3 * fs);
 
@@ -1311,20 +1656,7 @@ try {
                         " sample="+std::to_string(meta.start_sample_abs)+
                         " error_code="+std::to_string(meta.error_code)+
                         " gap_samples="+std::to_string(meta.gap_samples));
-            if (pending_seed>=0) {
-                report.result(pending_id, pending_seed, "INVALID_GAP", nullptr,
-                              0, false, nullptr,
-                              "path=acquire guard=" + std::to_string(pending_guard));
-                ++cand_invalid_gap;
-            }
-            pending_seed=-1;
-            for (const auto& ps : pending) {
-                report.result(ps.id, ps.seed, "INVALID_GAP", nullptr, 0,
-                              false, nullptr, format_request_tag(ps));
-                ++cand_invalid_gap;
-            }
-            pending.clear();
-            have_pending_plan = false;
+            submissions.flush_pending_on_gap(report);
             end=meta.start_sample_abs; valid_begin=end; acq.reset(end);
             // The block was read at the pre-gap origin; move it to the new one.
             // Gaps are rare, so the relocation cost never shows up in the
@@ -1362,95 +1694,12 @@ try {
                     double metric = 0.0;
                     const auto seed=acq.scan(ring,&metric);
                     if (seed<0) continue;
-                    ++sub_stats.acq_seeds;
-                    if (lock.scheduled()) {
-                        // Classification is deferred to submission time: the
-                        // predicted target window for this slot is only
-                        // committed ~0.46 ms after the packet start, i.e. after
-                        // this 6 ms-window autocorrelation detection.
-                        if (!o.interference) {
-                            ++unknown;
-                            ++autocorr_ignored;
-                        } else {
-                            ++id;
-                            const std::string tag =
-                                "path=acquire guard=" + std::to_string(cur_pre_guard);
-                            if (seed-int64_t(cur_pre_guard)<valid_begin) {
-                                report.result(id, seed, "INCOMPLETE_WINDOW",
-                                              nullptr, 0, false, nullptr, tag);
-                                ++cand_incomplete;
-                            } else {
-                                PendingSubmit ps;
-                                ps.id = id;
-                                ps.seed = seed;
-                                ps.window_start = seed-int64_t(cur_pre_guard);
-                                ps.count = window;
-                                ps.predicted_rel_work = std::llround(cur_pre_guard*65.0/48);
-                                ps.guard = cur_pre_guard;
-                                ps.generation = lock.generation();
-                                ps.metric = metric;
-                                ps.is_candidate = true;
-                                if (pending.size() >= 8) {
-                                    report.result(ps.id, ps.seed, "DROPPED_QUEUE",
-                                                  nullptr, 0, false, nullptr,
-                                                  format_request_tag(ps));
-                                    ++cand_dropped_queue;
-                                } else {
-                                    pending.push_back(ps);
-                                    ++unknown;
-                                }
-                            }
-                        }
-                    } else if (pending_seed>=0) {
-                        ++id;
-                        report.result(id, seed, "OVERLAPPING_CANDIDATE", nullptr,
-                                      0, false, nullptr,
-                                      "path=acquire guard=" + std::to_string(cur_pre_guard));
-                        ++cand_overlapping;
-                    } else if (seed-int64_t(cur_pre_guard)<valid_begin) {
-                        ++id;
-                        report.result(id, seed, "INCOMPLETE_WINDOW", nullptr,
-                                      0, false, nullptr,
-                                      "path=acquire guard=" + std::to_string(cur_pre_guard));
-                        ++cand_incomplete;
-                    } else {
-                        ++id;
-                        pending_seed=seed; pending_id=id; pending_guard=cur_pre_guard;
-                    }
+                    submissions.handle_autocorr_seed(
+                        seed, metric, valid_begin, cur_pre_guard, window,
+                        o.interference, id, lock, report);
                 }
-                if (pending_seed>=0 && end>=pending_seed-int64_t(pending_guard)+int64_t(window)) {
-                    const int64_t ws = pending_seed-int64_t(pending_guard);
-                    live::PacketRequest req;
-                    req.id = pending_id;
-                    req.seed = pending_seed;
-                    req.window_start = ws;
-                    req.predicted_rel_work = std::llround(pending_guard*65.0/48);
-                    req.guard = pending_guard;
-                    req.slot_index = std::numeric_limits<uint64_t>::max();
-                    req.generation = lock.generation();
-                    req.target_slot = false;
-                    req.feeds_lock = true;
-                    if (ws<valid_begin) {
-                        report.result(req.id, req.seed, "HISTORY_OVERRUN",
-                                      nullptr, 0, false, nullptr,
-                                      format_request_tag(req));
-                        ++cand_overrun;
-                    } else {
-                        ++sub_stats.submit_attempts;
-                        ++cand_submit_attempts;
-                        if (!workers.submit(req, window, ring)) {
-                            report.result(req.id, req.seed, "DROPPED_QUEUE",
-                                          nullptr, 0, false, nullptr,
-                                          format_request_tag(req));
-                            ++sub_stats.dropped_queue;
-                            ++cand_dropped_queue;
-                        } else {
-                            ++sub_stats.admitted;
-                            ++cand_admitted;
-                        }
-                    }
-                    pending_seed=-1;
-                }
+                submissions.submit_ready_acquire_window(
+                    end, valid_begin, window, ring, lock, workers, report);
             }
             frontend_us += elapsed_us(frontend_start, Clock::now());
             frontend_copy_us += elapsed_us(frontend_start, copy_done);
@@ -1462,48 +1711,8 @@ try {
         // becomes available once enough samples have arrived.  Waiting here
         // (rather than dropping it) is what keeps every autocorrelation
         // candidate accounted for.
-        if (!pending.empty()) {
-            std::deque<PendingSubmit> still;
-            for (const auto& ps : pending) {
-                if (ps.window_start < valid_begin) {
-                    report.result(ps.id, ps.seed, "HISTORY_OVERRUN", nullptr,
-                                  0, false, nullptr, format_request_tag(ps));
-                    ++cand_overrun;
-                    continue;
-                }
-                if (ps.window_start + int64_t(ps.count) > end) {
-                    still.push_back(ps);
-                    continue;
-                }
-                if (ps.is_candidate) {
-                    // Now that the target plan for this slot exists, decide
-                    // whether this autocorrelation response is the target's
-                    // own.  Association is confirmed from the slot result.
-                    core::InterferenceCandidate c;
-                    c.start_sample = ps.seed;
-                    c.metric = ps.metric;
-                    const auto v = lock.classify_candidate(c);
-                    if (v.cls == core::CandidateClass::TargetAssociated) {
-                        ++dedup;
-                        if (assoc.size() < 256)
-                            assoc.push_back({ v.slot_index, ps.seed, ps.metric });
-                        continue;
-                    }
-                }
-                ++sub_stats.submit_attempts;
-                ++cand_submit_attempts;
-                if (!workers.submit(ps, ps.count, ring)) {
-                    report.result(ps.id, ps.seed, "DROPPED_QUEUE", nullptr,
-                                  0, false, nullptr, format_request_tag(ps));
-                    ++sub_stats.dropped_queue;
-                    ++cand_dropped_queue;
-                } else {
-                    ++sub_stats.admitted;
-                    ++cand_admitted;
-                }
-            }
-            pending.swap(still);
-        }
+        submissions.submit_ready_deferred_candidates(
+            end, valid_begin, ring, lock, workers, report);
         // ---- target path (continuous) ------------------------------------
         // The chosen slot is remembered across iterations, but its window is
         // RE-COMPUTED from the current model every time: a plan that has not
@@ -1515,115 +1724,21 @@ try {
             // start); apply it before the next plan is chosen so the plan and
             // the cut window are always cut from the same geometry.
             sync_pre_guard();
-            if (have_pending_plan &&
-                pending_plan.generation != lock.generation()) {
-                // The grid changed under us; the old plan is void.
-                have_pending_plan = false;
-            }
-            if (!have_pending_plan) {
-                have_pending_plan = lock.next_plan(end, pending_plan);
-                if (have_pending_plan)
-                    pending_slot = pending_plan.slot_index;
-            }
-            while (have_pending_plan) {
-                core::TargetSlotPlan plan = lock.plan_for_slot(pending_slot);
-                if (plan.window_end > end)
-                    break; // still filling
-                have_pending_plan = false;
-                const size_t count = size_t(plan.window_end - plan.window_start);
-                live::PacketRequest req;
-                req.id = ++id;
-                req.seed = plan.predicted_origin;
-                req.window_start = plan.window_start;
-                req.predicted_rel_work =
-                    std::llround((plan.predicted_origin - plan.window_start) * 65.0 / 48);
-                req.guard = plan.pre_guard;
-                req.slot_index = plan.slot_index;
-                req.generation = plan.generation;
-                req.target_slot = true;
-                req.feeds_lock = true;
-                if (plan.window_start < valid_begin) {
-                    report.result(req.id, req.seed, "HISTORY_OVERRUN", nullptr,
-                                  0, false, nullptr, format_request_tag(req));
-                    lock.abandon_slot(plan.slot_index);
-                    ++target_expired;
-                } else {
-                    ++sub_stats.submit_attempts;
-                    if (!workers.submit(req, count, ring)) {
-                        report.result(req.id, req.seed, "DROPPED_QUEUE",
-                                      nullptr, 0, false, nullptr,
-                                      format_request_tag(req));
-                        lock.note_slot_outcome(plan.slot_index,
-                                               core::TargetSlotOutcome::DroppedQueue);
-                        ++target_dropped;
-                        ++sub_stats.dropped_queue;
-                    } else {
-                        lock.commit_plan(plan);
-                        ++target_slots;
-                        ++sub_stats.admitted;
-                    }
-                }
-                have_pending_plan = lock.next_plan(end, pending_plan);
-                if (have_pending_plan)
-                    pending_slot = pending_plan.slot_index;
-            }
+            submissions.submit_continuous_target_windows(
+                end, valid_begin, ring, id, lock, workers, report);
         }
         // ---- target path (timed) -----------------------------------------
         if (o.mode == "timed" && timed) {
             // Submit every planned window whose samples are now in the ring.
-            while (!timed_pending.empty()) {
-                const TimedPending tp = timed_pending.front();
-                if (tp.window_start + int64_t(tp.count) > end)
-                    break;
-                timed_pending.pop_front();
-                if (tp.window_start < valid_begin) {
-                    report.result(tp.id, tp.seed, "HISTORY_OVERRUN", nullptr,
-                                  0, false, nullptr, format_request_tag(tp));
-                    if (tp.target_slot)
-                        lock.abandon_slot(tp.slot_index);
-                    continue;
-                }
-                ++sub_stats.submit_attempts;
-                if (!workers.submit(tp, tp.count, ring)) {
-                    report.result(tp.id, tp.seed, "DROPPED_QUEUE", nullptr,
-                                  0, false, nullptr, format_request_tag(tp));
-                    ++sub_stats.dropped_queue;
-                    if (tp.target_slot) {
-                        lock.note_slot_outcome(tp.slot_index,
-                                               core::TargetSlotOutcome::DroppedQueue);
-                        ++target_dropped;
-                    }
-                } else {
-                    ++sub_stats.admitted;
-                }
-            }
+            submissions.submit_timed_windows(
+                end, valid_begin, ring, lock, workers, report);
             queue_timed_windows();
         }
         // ---- lock feedback ------------------------------------------------
         lock.drain_observations();
         // Resolve deferred autocorrelation associations now that the target
         // slot results are in.
-        if (!assoc.empty()) {
-            std::vector<AssocPending> still;
-            for (const auto& a : assoc) {
-                if (!lock.slot_terminal(a.slot)) {
-                    still.push_back(a);
-                    continue;
-                }
-                if (lock.slot_succeeded(a.slot)) {
-                    ++dedup_confirmed;
-                } else {
-                    ++dedup_ambiguous;
-                    std::ostringstream s;
-                    s << std::fixed << std::setprecision(3)
-                      << "INTERFERENCE_AMBIGUOUS slot=" << a.slot
-                      << " start=" << a.start << " metric=" << a.metric
-                      << " reason=target_slot_failed";
-                    report.info(s.str());
-                }
-            }
-            assoc.swap(still);
-        }
+        submissions.resolve_deferred_associations(lock, report);
         if (lock.state() != last_state) {
             emit_lock(lock.state() == core::TargetLockState::Locked ? "converged"
                      : lock.state() == core::TargetLockState::Holdover ? "target_miss"
@@ -1644,26 +1759,7 @@ try {
     }
     src->close(); // Stop hardware before draining workers / printing.
     report.snapshot(source_stats(),gaps,workers.backlog());
-    if (pending_seed>=0) {
-        report.result(pending_id, pending_seed, "INCOMPLETE_WINDOW", nullptr,
-                      0, false, nullptr,
-                      "path=acquire guard=" + std::to_string(pending_guard));
-        ++cand_incomplete;
-        pending_seed=-1;
-    }
-    for (const auto& ps : pending) {
-        report.result(ps.id, ps.seed, "INCOMPLETE_WINDOW", nullptr, 0,
-                      false, nullptr, format_request_tag(ps));
-        ++cand_incomplete;
-    }
-    pending.clear();
-    for (const auto& tp : timed_pending) {
-        report.result(tp.id, tp.seed, "INCOMPLETE_WINDOW", nullptr, 0,
-                      false, nullptr, format_request_tag(tp));
-        if (tp.target_slot)
-            lock.abandon_slot(tp.slot_index);
-    }
-    timed_pending.clear();
+    submissions.flush_pending_at_eof(lock, report);
     workers.stop();
     // Workers stop only after every queued job finished, so the last batch of
     // observations must still be applied before the final statistics.

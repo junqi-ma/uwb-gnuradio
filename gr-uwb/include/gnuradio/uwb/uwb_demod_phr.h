@@ -3,6 +3,7 @@
 #include <gnuradio/uwb/uwb_demod_fec.h>
 #include <gnuradio/uwb/uwb_demod_scratch.h>
 #include <gnuradio/uwb/uwb_demod_grid.h>
+#include <gnuradio/uwb/uwb_rx_softchip_opt.h>
 
 namespace gr::uwb::demod::core {
 // ---------------------------------------------------------------------------
