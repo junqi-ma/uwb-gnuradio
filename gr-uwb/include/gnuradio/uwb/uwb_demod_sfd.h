@@ -135,7 +135,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
         if (!(std::norm(coh_ref) > 1e-24))
             return false;
         for (size_t si = 0; si < n_check; ++si) {
-            if (par_only && sfd_sequence[si] == 0)
+            if (sfd_sequence[si] == 0)
                 continue;
             const double proj =
                 static_cast<double>(sym_corr[si].real()) * coh_ref.real() +
@@ -278,39 +278,55 @@ inline bool stage_sfd(const std::complex<float>* rx,
         // Per-SYMBOL decomposition of the SFD correlation.  SFD =
         // kron(sfd_seq, sync), so a window at `pos` is the sfd_seq-weighted sum
         // of `len` single-SYMBOL correlations, and its power is the sum of the
-        // same `len` single-SYMBOL powers.  The grid points are exactly
-        // `period` apart, so when period == sym the 73 grid windows share
-        // almost all of their symbols: 2*36 + len = 80 symbol positions cover
-        // every one of them.  Precomputing those 80 with the SIMD kernels
-        // replaces 73 x 8128 scalar complex multiply-accumulates and 73 x 8128
-        // scalar norms with 80 x 1016 SIMD dots, and turns each grid metric
-        // into `len` complex adds plus `len` float adds.
-        const bool sym_decompose = use_real_sfd_fast &&
-            std::llround(kGridHalf * (period - static_cast<double>(sym))) == 0;
-        const size_t n_sym_pos = static_cast<size_t>(2 * kGridHalf) + len;
-        std::vector<std::complex<float>> sym_corr;
-        std::vector<float> sym_pwr;
-        std::vector<uint8_t> sym_valid;
-        if (sym_decompose) {
-            sym_corr.assign(n_sym_pos, std::complex<float>(0.0f, 0.0f));
+        // same `len` single-SYMBOL powers.
+        //
+        // The grid spacing is `period`, which need not equal `sym`: with SFO
+        // pos = expected + round(k*period), so the symbol offset relative to
+        // the nominal k*sym grid differs by delta_k = round(k*period)-k*sym.
+        // delta_k takes only a handful of integer values (<= 2 for +27 ppm
+        // over +-36 symbols), so one symbol table per delta covers the whole
+        // grid.  The old code disabled this optimisation whenever
+        // round(kGridHalf*(period-sym)) != 0, i.e. exactly on an untrimmed
+        // clock; the per-delta cache keeps it enabled with identical numerics.
+        const size_t n_sym_slots = static_cast<size_t>(2 * kGridHalf) + len;
+        std::array<std::vector<std::complex<float>>, 8> sym_corr;
+        std::array<std::vector<float>, 8> sym_pwr;
+        std::array<std::vector<uint8_t>, 8> sym_valid;
+        std::array<int64_t, 8> delta_value{};
+        size_t n_delta = 0;
+        auto delta_index = [&](int64_t k) -> int {
+            const int64_t d = std::llround(static_cast<double>(k) * period) -
+                              k * static_cast<int64_t>(sym);
+            for (size_t i = 0; i < n_delta; ++i)
+                if (delta_value[i] == d)
+                    return static_cast<int>(i);
+            if (n_delta >= delta_value.size())
+                return -1;
+            delta_value[n_delta] = d;
+            return static_cast<int>(n_delta++);
+        };
+        auto ensure_sym_cache = [&](size_t d) {
+            if (!sym_valid[d].empty())
+                return;
+            sym_corr[d].assign(n_sym_slots, std::complex<float>(0.0f, 0.0f));
             if (!par_only)
-                sym_pwr.assign(n_sym_pos, 0.0f);
-            sym_valid.assign(n_sym_pos, 0);
-            for (size_t i = 0; i < n_sym_pos; ++i) {
+                sym_pwr[d].assign(n_sym_slots, 0.0f);
+            sym_valid[d].assign(n_sym_slots, 0);
+            for (size_t i = 0; i < n_sym_slots; ++i) {
                 const int64_t m = static_cast<int64_t>(i) -
                                   static_cast<int64_t>(kGridHalf);
-                const int64_t spos =
-                    expected + m * static_cast<int64_t>(sym);
+                const int64_t spos = expected + delta_value[d] +
+                                     m * static_cast<int64_t>(sym);
                 if (spos < 0 ||
                     spos + static_cast<int64_t>(sym) >
                         static_cast<int64_t>(n))
                     continue;
-                sym_corr[i] = sync_filter.dot(rx + spos);
+                sym_corr[d][i] = sync_filter.dot(rx + spos);
                 if (!par_only)
-                    sym_pwr[i] = window_power_8acc(rx + spos, sym);
-                sym_valid[i] = 1;
+                    sym_pwr[d][i] = window_power_8acc(rx + spos, sym);
+                sym_valid[d][i] = 1;
             }
-        }
+        };
         auto sfd_metric_at = [&](int64_t pos) -> float {
             if (pos < 0 || pos > max_pos)
                 return -1.0f;
@@ -349,43 +365,92 @@ inline bool stage_sfd(const std::complex<float>* rx,
             float metric;
         };
         std::array<GridCand, 2 * kGridHalf + 1> cands{};
+        std::array<int8_t, 2 * kGridHalf + 1> cand_delta{};
+        cand_delta.fill(-1);
         size_t nc = 0;
         if (max_pos >= 0) {
             for (int64_t k = -kGridHalf; k <= kGridHalf; ++k) {
                 const int64_t pos = expected + std::llround(static_cast<double>(k) * period);
                 if (pos < 0 || pos > max_pos)
                     continue;
-                if (sym_decompose) {
+                int d = -1;
+                if (use_real_sfd_fast) {
+                    d = delta_index(k);
+                }
+                if (d >= 0) {
+                    ensure_sym_cache(static_cast<size_t>(d));
                     const size_t base = static_cast<size_t>(k + kGridHalf);
                     bool ok = true;
                     float pwr = 0.0f;
                     std::complex<float> acc_unscaled(0.0f, 0.0f);
                     for (size_t s = 0; s < len; ++s) {
                         const size_t idx = base + s;
-                        if (!sym_valid[idx]) {
+                        if (!sym_valid[d][idx]) {
                             ok = false;
                             break;
                         }
                         if (!par_only)
-                            pwr += sym_pwr[idx];
+                            pwr += sym_pwr[d][idx];
                         const int8_t sg = sfd_sequence[s];
                         if (sg == 0)
                             continue;
                         if (sg > 0)
-                            acc_unscaled += sym_corr[idx];
+                            acc_unscaled += sym_corr[d][idx];
                         else
-                            acc_unscaled -= sym_corr[idx];
+                            acc_unscaled -= sym_corr[d][idx];
                     }
                     if (!ok)
                         continue;
                     const float metric = par_only ? std::norm(acc_unscaled)
                         : detail::normalized_correlation_power(acc_unscaled * sfd_scale, pwr);
+                    cand_delta[nc] = static_cast<int8_t>(d);
                     cands[nc++] = { pos, metric };
                 } else {
                     cands[nc++] = { pos, sfd_metric_at(pos) };
                 }
             }
         }
+        // Reuse the per-symbol cache for the polarity check: when the winner is
+        // exactly the best grid point, its `len` symbol correlations are already
+        // in sym_corr[d], so the 8-16 dot products of polarity_ok() are free.
+        auto cache_complete_for = [&](int d, int64_t k) -> bool {
+            if (d < 0)
+                return false;
+            const size_t n_check = std::min<size_t>(len, 16);
+            const int64_t base = k + kGridHalf;
+            if (base < 0 ||
+                static_cast<size_t>(base) + n_check > n_sym_slots)
+                return false;
+            for (size_t si = 0; si < n_check; ++si)
+                if (!sym_valid[d][static_cast<size_t>(base) + si])
+                    return false;
+            return true;
+        };
+        auto polarity_ok_cached = [&](int d, int64_t k) -> bool {
+            const size_t n_check = std::min<size_t>(len, 16);
+            const size_t base = static_cast<size_t>(k + kGridHalf);
+            std::complex<float> sym_corr_local[16];
+            std::complex<double> coh_ref(0.0, 0.0);
+            for (size_t si = 0; si < n_check; ++si) {
+                sym_corr_local[si] = sym_corr[d][base + si];
+                coh_ref += static_cast<double>(sfd_sequence[si]) *
+                           std::complex<double>(sym_corr_local[si]);
+            }
+            if (!(std::norm(coh_ref) > 1e-24))
+                return false;
+            for (size_t si = 0; si < n_check; ++si) {
+                if (sfd_sequence[si] == 0)
+                    continue;
+                const double proj =
+                    static_cast<double>(sym_corr_local[si].real()) *
+                        coh_ref.real() +
+                    static_cast<double>(sym_corr_local[si].imag()) *
+                        coh_ref.imag();
+                if (!(proj * static_cast<double>(sfd_sequence[si]) > 0.0))
+                    return false;
+            }
+            return true;
+        };
         if (nc >= 8) {
             ++out.search_windows;
             size_t bi = 0;
@@ -393,13 +458,15 @@ inline bool stage_sfd(const std::complex<float>* rx,
                 if (cands[i].metric > cands[bi].metric)
                     bi = i;
             int64_t gpos = cands[bi].pos;
-            // Refine around the best grid point.  Evaluating delta = 0 on all
-            // 73 grid points first and refining only the winner keeps the noise
-            // maximum at 75 evaluations instead of 219.
+            // Refine around the best grid point.  The grid already evaluated
+            // delta = 0, so only the two neighbours are scored; refining only
+            // the winner keeps the noise maximum at 75 evaluations.
             constexpr int64_t refine_rad = 1;
             int64_t best_pos = gpos;
             float best_metric = cands[bi].metric;
             for (int64_t d = -refine_rad; d <= refine_rad; ++d) {
+                if (d == 0)
+                    continue;
                 const int64_t pos = gpos + d;
                 if (pos < 0 || pos > max_pos)
                     continue;
@@ -432,10 +499,20 @@ inline bool stage_sfd(const std::complex<float>* rx,
                     // 4z2, so its PAR threshold must stay low. Confirm on
                     // off-peak sample lags to distinguish SFD from noise.
                     sfd_passed = scan_window(best_pos, kSfdNarrowHalf, -1, 20.0);
-                } else if (passes_gate && polarity_ok(best_pos)) {
-                    best = best_metric;
-                    best_j = static_cast<size_t>(best_pos);
-                    sfd_passed = true;
+                } else if (passes_gate) {
+                    const int64_t g_k = std::llround(
+                        static_cast<double>(gpos - expected) / period);
+                    const int g_delta = cand_delta[bi];
+                    const bool reuse = best_pos == gpos && g_delta >= 0 &&
+                                       cache_complete_for(g_delta, g_k);
+                    const bool pol_ok = reuse
+                        ? polarity_ok_cached(g_delta, g_k)
+                        : polarity_ok(best_pos);
+                    if (pol_ok) {
+                        best = best_metric;
+                        best_j = static_cast<size_t>(best_pos);
+                        sfd_passed = true;
+                    }
                 }
             }
         }

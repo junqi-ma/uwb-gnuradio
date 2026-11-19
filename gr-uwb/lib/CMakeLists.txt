@@ -29,6 +29,7 @@ set_target_properties(uwb_simd_probe PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # AVX2/FMA baseline; the wide functions carry target attributes.
 if(UWB_SIMD_HAVE_AVX512)
     list(APPEND uwb_core_sources uwb_rational_resampler_avx512.cc
+                                uwb_resampler_transposed_avx512.cc
                                 uwb_demod_sic_avx512.cc)
 endif()
 
@@ -149,6 +150,7 @@ list(APPEND uwb_core_qa_sources
     qa_uwb_rational_resampler_m2a.cc
     qa_uwb_resampler_avx512.cc
     qa_uwb_resampler_burst_opt.cc
+    qa_uwb_resampler_transposed.cc
     qa_uwb_rx_fused_cmf.cc
     qa_uwb_rx_fused_phr.cc
     qa_uwb_scheduled_dump_io.cc
@@ -239,6 +241,10 @@ target_compile_definitions(uwb_qa_uwb_rational_resampler_core_65_32.cc PRIVATE
 target_compile_definitions(uwb_qa_uwb_rational_resampler_m2a.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
 
+# RS-5: the transposed kernel QA reads the four 65/48 and two 65/32 taps files.
+target_compile_definitions(uwb_qa_uwb_resampler_transposed.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+
 # M2-A full-frame QA: reads the frozen TX taps under testdata/twr/m2a/taps/ and
 # the RX taps under testdata/resampler_65_48|65_32/.
 target_compile_definitions(uwb_qa_uwb_twr_native_phy.cc PRIVATE
@@ -304,6 +310,7 @@ uwb_simd_apply(uwb_qa_uwb_rx_fused_phr.cc)
 uwb_simd_apply(uwb_qa_uwb_uhd_sc16_pipeline.cc)
 uwb_simd_apply(uwb_qa_uwb_rational_resampler_core.cc)
 uwb_simd_apply(uwb_qa_uwb_resampler_burst_opt.cc)
+uwb_simd_apply(uwb_qa_uwb_resampler_transposed.cc)
 uwb_simd_apply(uwb_qa_uwb_rational_resampler_core_65_32.cc)
 # uwb_uhd_sc16_pipeline.cc / uwb_rational_resampler_*_ccf_65_48.cc are compiled
 # inside uwb_native, which already inherits the central flags

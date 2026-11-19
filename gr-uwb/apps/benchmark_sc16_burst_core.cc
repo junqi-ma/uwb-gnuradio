@@ -236,6 +236,7 @@ struct Options {
     size_t warmup = 20;
     uint32_t seed = 0x1234567u;
     bool fixed_phase = false;
+    bool window_mode = false;
 };
 
 void usage(const char* argv0)
@@ -254,6 +255,8 @@ void usage(const char* argv0)
         "  --kernel <name>        pass-through to set_kernel() "
         "(default avx2_fma_macroblock)\n"
         "  --fixed-phase <0|1>    C1 fixed-phase schedule (default 0)\n"
+        "  --window-mode <0|1>    0 = reset+process+flush (default), "
+        "1 = one-shot process_window_sc16 (zero-copy RS-1 path)\n"
         "  --input <mode>         random (default) | rails | impulse | zero\n"
         "  --seed <n>             LCG seed (default 0x1234567)\n"
         "  --json <path>          write the JSON result file\n"
@@ -295,10 +298,30 @@ WindowResult run_window(Core& core,
                         const std::vector<sc16>& in,
                         float scale,
                         std::vector<gr_complex>& out,
-                        size_t expect)
+                        size_t expect,
+                        bool window_mode)
 {
     using Clock = std::chrono::steady_clock;
     WindowResult w;
+
+    if (window_mode) {
+        // RS-1: one-shot zero-copy whole window.
+        const auto t0 = Clock::now();
+        size_t produced = 0;
+        if (!in.empty()) {
+            auto r = core.process_window_sc16(in.data(), in.size(), scale,
+                                              out.data(), out.size());
+            produced = r.produced;
+        }
+        const auto t1 = Clock::now();
+        w.produced = produced;
+        w.reset_us = 0.0;
+        w.process_us =
+            std::chrono::duration<double, std::micro>(t1 - t0).count();
+        w.flush_us = 0.0;
+        w.checksum = fnv1a64(out.data(), produced * sizeof(gr_complex));
+        return w;
+    }
 
     const auto t0 = Clock::now();
     core.reset();
@@ -362,7 +385,7 @@ int benchmark_core(const Options& opt,
     uint64_t warm_checksum = 0;
     size_t warm_produced = 0;
     for (size_t i = 0; i < opt.warmup; ++i) {
-        WindowResult w = run_window(core, in, scale, out, expect);
+        WindowResult w = run_window(core, in, scale, out, expect, opt.window_mode);
         warm_checksum = w.checksum;
         warm_produced = w.produced;
     }
@@ -387,7 +410,7 @@ int benchmark_core(const Options& opt,
 
     const auto t_meas0 = Clock::now();
     for (size_t i = 0; i < opt.reps; ++i) {
-        WindowResult w = run_window(core, in, scale, out, expect);
+        WindowResult w = run_window(core, in, scale, out, expect, opt.window_mode);
         reset_us.push_back(w.reset_us);
         process_us.push_back(w.process_us);
         core_us.push_back(w.reset_us + w.process_us);
@@ -446,8 +469,8 @@ int benchmark_core(const Options& opt,
                 core.arm_length(), core.arm_length_pad());
     std::printf("  kernel            : %s (%s)\n", core.kernel_name(),
                 core.sc16_kernel_variant());
-    std::printf("  switches          : fixed-phase=%d\n",
-                opt.fixed_phase ? 1 : 0);
+    std::printf("  switches          : fixed-phase=%d window-mode=%d\n",
+                opt.fixed_phase ? 1 : 0, opt.window_mode ? 1 : 0);
     std::printf("  scale             : %s (%.10g)\n", opt.scale_mode.c_str(),
                 static_cast<double>(scale));
     std::printf("  input             : %s seed=0x%08x\n", opt.input.c_str(),
@@ -511,6 +534,7 @@ int benchmark_core(const Options& opt,
         o << "  \"sc16_kernel_variant\": \"" << core.sc16_kernel_variant()
           << "\",\n";
         o << "  \"fixed_phase\": " << (opt.fixed_phase ? 1 : 0) << ",\n";
+        o << "  \"window_mode\": " << (opt.window_mode ? 1 : 0) << ",\n";
         o << "  \"scale_mode\": \"" << opt.scale_mode << "\",\n";
         o << "  \"scale\": " << static_cast<double>(scale) << ",\n";
         o << "  \"length\": " << opt.length << ",\n";
@@ -627,6 +651,12 @@ int main(int argc, char** argv)
             const std::string v = need("0|1");
             if (!parse_bool01(v, opt.fixed_phase)) {
                 std::cerr << "error: --fixed-phase expects 0 or 1\n";
+                return 2;
+            }
+        } else if (a == "--window-mode") {
+            const std::string v = need("0|1");
+            if (!parse_bool01(v, opt.window_mode)) {
+                std::cerr << "error: --window-mode expects 0 or 1\n";
                 return 2;
             }
         } else if (a == "--convert-cache") {

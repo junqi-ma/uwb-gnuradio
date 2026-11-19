@@ -34,17 +34,50 @@ inline bool stage_timing(const std::complex<float>* rx,
         return false;
     }
 
-    // Copy + L2-normalize the template (own copy so callers may pass raw).
-    scratch.work.assign(template_wf.begin(), template_wf.end());
-    gr::uwb::core::uwb_l2_normalize(scratch.work);
-    const float dense_Et = gr::uwb::core::uwb_template_energy(scratch.work);
-    rxopt::build_real_sync_template(scratch.work, scratch.real_sync_template);
-
+    // The sparse path never reads the dense template, so building it would be
+    // pure waste (copy + L2 normalize + duplicate real taps on every call).
+    // Only the dense path materializes the normalized template, and the real
+    // duplicate is reused when its content key matches.
     const auto* sparse_tmpl = detail::prepare_sparse_sync_template(profile, L, scratch);
-    const float Et = sparse_tmpl ? sparse_tmpl->code_energy : dense_Et;
+    // MF-4: factorize the dense template into (r * code) * p.  This replaces
+    // the dense matched filter (same metric scale, same lag convention, same
+    // pulse-matched gain) at a fraction of its cost; it does not change the
+    // sparse path's peak-sample convention.  The builder rejects any template
+    // that is not code*p, so a custom waveform silently keeps its old path.
+    // The code template is needed even when the sparse timing path is off.
+    const rxopt::ShapedSparseTemplate* shaped_tmpl = nullptr;
+    if (profile.rx_timing_shaped_sparse && L == 2 * kQm35ChipsPerSymbol) {
+        const rxopt::SparseCirTemplate* code_tmpl = sparse_tmpl;
+        if (!code_tmpl) {
+            if (scratch.cached_seq.code_index != profile.code_index ||
+                scratch.cached_seq.pcode.empty())
+                scratch.cached_seq.update(profile.code_index, profile.sfd_mode);
+            const auto& pcode = scratch.cached_seq.pcode;
+            rxopt::ensure_sparse_cir_template(pcode.data(), pcode.size(),
+                                              scratch.cir_template);
+            if (scratch.cir_template.code_energy > 0.0f)
+                code_tmpl = &scratch.cir_template;
+        }
+        if (code_tmpl)
+            shaped_tmpl = rxopt::ensure_shaped_sparse_template(
+                template_wf.data(), L, *code_tmpl,
+                scratch.shaped_sync_template);
+    }
+    float dense_Et = 0.0f;
+    if (!sparse_tmpl && !shaped_tmpl) {
+        scratch.work.assign(template_wf.begin(), template_wf.end());
+        gr::uwb::core::uwb_l2_normalize(scratch.work);
+        dense_Et = gr::uwb::core::uwb_template_energy(scratch.work);
+        rxopt::ensure_real_sync_template(scratch.work,
+                                         scratch.real_sync_template);
+    }
+    const float Et = shaped_tmpl
+        ? shaped_tmpl->energy
+        : (sparse_tmpl ? sparse_tmpl->code_energy : dense_Et);
     const auto& real = scratch.real_sync_template;
     const rxopt::SyncMatchedFilter filter(
-        scratch.work.data(), L, real.is_real ? real.taps_dup.data() : nullptr, sparse_tmpl);
+        scratch.work.data(), L, real.is_real ? real.taps_dup.data() : nullptr,
+        sparse_tmpl, true, shaped_tmpl);
 
     // Determine the ROI around the seed (absolute coordinates).
     size_t roi_start = 0;
@@ -176,7 +209,7 @@ inline bool stage_timing(const std::complex<float>* rx,
                 scratch.work.data(), L, Et, scratch.real_sync_template,
                 detail::kFoldMaxSymbols, profile.preamble_repetitions,
                 detail::kFoldThreshold, phase,
-                sparse_tmpl);
+                sparse_tmpl, &scratch.fold_buf, shaped_tmpl);
         };
         // Check energy only when the coarse phase can change the fold choice.
         // A rejected large phase also rules out the phase-aligned retry.
@@ -266,7 +299,7 @@ inline bool stage_timing(const std::complex<float>* rx,
                     scratch.real_sync_template, groups, &period_fit,
                     &origin_fit, out.peak_samples, out.peak_metrics,
                     out.peak_corr, fold_phase,
-                    sparse_tmpl)) {
+                    sparse_tmpl, &scratch.fold_sup_buf, shaped_tmpl)) {
                 out.peak_samples.clear();
                 out.peak_metrics.clear();
                 out.peak_corr.clear();
@@ -332,8 +365,27 @@ inline bool stage_timing(const std::complex<float>* rx,
             const int64_t inner_rad =
                 narrow_inner ? std::min<int64_t>(roi, 32) : roi;
             float raw_max = 0.0f;
-            if (local_best(want, inner_rad, thr, &pos, &met, &corr,
-                           /*allow_par_fallback=*/true, &raw_max)) {
+            bool inner_hit = false;
+            if (m == 0 && roi > 32) {
+                // Steady-state lock residual is a few samples.  Probe +/-32
+                // first (65 lags, the PAR background minimum) and only pay for
+                // the full +/-roi scan when that misses.  A miss keeps the old
+                // behaviour exactly, including m0_raw_max for the early-stop
+                // heuristic below.
+                inner_hit = local_best(want, 32, thr, &pos, &met, &corr,
+                                       /*allow_par_fallback=*/true, &raw_max);
+                if (!inner_hit) {
+                    float wide_raw = 0.0f;
+                    inner_hit = local_best(want, roi, thr, &pos, &met, &corr,
+                                           /*allow_par_fallback=*/true,
+                                           &wide_raw);
+                    raw_max = std::max(raw_max, wide_raw);
+                }
+            } else {
+                inner_hit = local_best(want, inner_rad, thr, &pos, &met, &corr,
+                                       /*allow_par_fallback=*/true, &raw_max);
+            }
+            if (inner_hit) {
                 used_inner = m;
                 found = true;
                 break;
@@ -562,6 +614,82 @@ inline bool stage_timing(const std::complex<float>* rx,
             }
         }
 
+        // ---- Phase probe + symbol-grid acquisition (TM-1) ------------------
+        // The preamble is N verbatim copies of one P=1016-sample SYNC symbol.
+        // A window of P consecutive lags therefore contains one code-phase
+        // match, so the exact sample phase can be recovered from a handful of
+        // probe windows instead of correlating all 2*margin lags.  A strict
+        // threshold keeps this zero-risk: if the probe does not see a solid
+        // SYNC (low SNR, packet outside the probes), everything below falls
+        // through to the original coarse scan unchanged.
+        //
+        // Cheap pre-gate: the frontend seed is accurate to a few SYMBOLS, so
+        // the code phase at the seed is preserved and one single-lag dot tells
+        // us whether this window is deep noise.  The 0.2 floor is close to the
+        // tracking threshold on purpose: at -12/-14 dB the single-SYNC metric
+        // is ~0.04-0.1, so the three P-length probes (which would all fail)
+        // are skipped and the fold path is not slowed down by them.
+        float probe_gate = -1.0f;
+        {
+            const int64_t gp = std::min(std::max(seed, j_lo), j_hi);
+            if (gp >= 0 && gp + static_cast<int64_t>(L) <=
+                               static_cast<int64_t>(n)) {
+                const auto acc = filter.dot(rx + gp);
+                probe_gate = detail::normalized_correlation_power(
+                    acc, window_power_8acc(rx + gp, L), Et);
+            }
+        }
+        if (probe_gate >= 0.2f && !seed_acquired && j_hi > j_lo &&
+            j_hi - j_lo >= 2 * static_cast<int64_t>(kQm35SamplesPerSymbol)) {
+            const int64_t P = static_cast<int64_t>(kQm35SamplesPerSymbol);
+            int64_t probes[3];
+            size_t nprobe = 0;
+            auto push_probe = [&](int64_t p) {
+                if (p < j_lo || p > j_hi)
+                    return;
+                if (p + static_cast<int64_t>(L) + 64 > static_cast<int64_t>(n))
+                    return;
+                if (nprobe < 3)
+                    probes[nprobe++] = p;
+            };
+            push_probe(std::min(std::max(seed, j_lo), j_hi));
+            if (margin >= 32 * P) {
+                push_probe(seed - 32 * P);
+                push_probe(seed + 32 * P);
+            }
+            float best_probe = -1.0f;
+            int64_t anchor = -1;
+            for (size_t i = 0; i < nprobe; ++i) {
+                const int64_t p = probes[i];
+                const int64_t avail =
+                    static_cast<int64_t>(n) - static_cast<int64_t>(L) - p + 1;
+                const size_t lags = static_cast<size_t>(
+                    std::min<int64_t>(P, std::max<int64_t>(0, avail)));
+                if (lags < 64)
+                    continue;
+                const auto pk = rxopt::scan_normalized_sync(
+                    filter, rx + p, lags, window_power_8acc(rx + p, L), Et);
+                if (pk.metric > best_probe) {
+                    best_probe = pk.metric;
+                    anchor = p + static_cast<int64_t>(pk.lag);
+                }
+            }
+            if (anchor >= 0 && best_probe >= thr) {
+                // Same phase modulo P for every SYNC, so only the symbol grid
+                // remains: ~2*margin/P grid points at +/-2 samples each.
+                const int64_t rem = ((anchor - j_lo) % P + P) % P;
+                for (int64_t want = j_lo + rem; want <= j_hi; want += P) {
+                    int64_t pos = -1;
+                    float met = 0.0f;
+                    std::complex<float> corr(0.0f, 0.0f);
+                    if (local_best(want, 2, thr, &pos, &met, &corr))
+                        consider(pos, met, corr);
+                }
+                if (first_start >= 0)
+                    seed_acquired = true;
+            }
+        }
+
         // (a) Coarse scan (fallback only) -- batched SIMD when stride is 1 or 2,
         // sliding power conjugate dots at stride otherwise.
         const auto coarse_begin = std::chrono::steady_clock::now();
@@ -577,7 +705,7 @@ inline bool stage_timing(const std::complex<float>* rx,
                 best_coarse_j = j_lo + static_cast<int64_t>(pk.lag);
                 best_coarse_m = pk.metric;
                 best_coarse_c = pk.corr;
-            } else if (stride == 2 && sparse_tmpl && (L % 2 == 0)) {
+            } else if (stride == 2 && sparse_tmpl && !shaped_tmpl && (L % 2 == 0)) {
                 const size_t half_lags =
                     static_cast<size_t>((j_hi - j_lo) / 2 + 1);
                 const size_t half_len = L / 2;
@@ -585,10 +713,10 @@ inline bool stage_timing(const std::complex<float>* rx,
                 scratch.corr.resize(even_count);
                 rxopt::pack_even_complex(rx + j_lo, even_count,
                                          scratch.corr.data());
-                rxopt::SparseCirTemplate half_tmpl;
-                rxopt::build_half_rate_sparse_template(*sparse_tmpl, half_tmpl);
+                rxopt::ensure_half_rate_sparse_template(
+                    *sparse_tmpl, scratch.half_cir_template);
                 const rxopt::SyncMatchedFilter half_filter(
-                    nullptr, half_len, nullptr, &half_tmpl);
+                    nullptr, half_len, nullptr, &scratch.half_cir_template);
                 const auto pk = rxopt::scan_normalized_sync(
                     half_filter, scratch.corr.data(), half_lags,
                     window_power_8acc(scratch.corr.data(), half_len), Et);

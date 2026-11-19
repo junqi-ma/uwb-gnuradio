@@ -13,7 +13,7 @@
  * uwb_kernel_backend.cc:
  *
  *   in : real-template 8-lag dot, element-wise complex add/sub/sub3/scale,
- *        batched SFD fold
+ *        batched SFD fold, sparse ternary 16/32-lag dot, even-sample pack
  *   out: fixed-38 CIR FIR and fused-52 payload CMF dots (the 512-bit complex
  *        MAC is slower on this host: +95% / +29%)
  *   out: 20-tap SIC pulse accumulation (store-forwarding bound: +1%)
@@ -72,6 +72,37 @@ bool available() noexcept;
  */
 void real_template_dot_8lag(const gr_complex* rx, const float* taps_dup,
                             size_t L, gr_complex out[8]);
+
+/**
+ * Sparse ternary-code dot product for sixteen / thirty-two consecutive lags.
+ *
+ *   rx          : rx[j .. j+lags-1+L-1] must be readable; the sparse template
+ *                 offsets are FLOAT offsets (2 * the complex sample index).
+ *   pos_offsets : uint16_t float offsets of the +1 code taps
+ *   neg_offsets : uint16_t float offsets of the -1 code taps
+ *   out[m]      : sum(pos) - sum(neg) over the template, for lag m.
+ *
+ * Each output lane accumulates its positive offsets in table order and its
+ * negative offsets in table order, then subtracts.  That is exactly the
+ * per-lane order of the AVX2 8-lag sparse kernel, so widening from 8 to 16/32
+ * lags does not change a single output bit.
+ */
+void sparse_ternary_dot_16lag(const gr_complex* rx,
+                              const uint16_t* pos_offsets, size_t pos_count,
+                              const uint16_t* neg_offsets, size_t neg_count,
+                              gr_complex out[16]);
+
+void sparse_ternary_dot_32lag(const gr_complex* rx,
+                              const uint16_t* pos_offsets, size_t pos_count,
+                              const uint16_t* neg_offsets, size_t neg_count,
+                              gr_complex out[32]);
+
+/**
+ * Keep every even-indexed complex sample: dst[i] = src[2*i], i < even_count.
+ * Bit-identical to the scalar loop (this is a select, not arithmetic).
+ */
+void pack_even_complex(const gr_complex* src, size_t even_count,
+                       gr_complex* dst);
 
 /** dst[i] += src[i] for count complex samples.  Bit-identical to AVX2. */
 void accumulate_cf32(gr_complex* dst, const gr_complex* src, size_t count);

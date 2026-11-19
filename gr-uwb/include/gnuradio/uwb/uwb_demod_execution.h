@@ -100,10 +100,17 @@ inline std::pair<int64_t, int64_t> compute_post_sfd_prefix_bounds(
     const bool skip_sync_fir =
         profile.rx_fused_phr_cmf && profile.rx_fused_payload_cmf;
     int64_t req_lo = cir_lo;
-    if (!skip_sync_fir)
+    if (!skip_sync_fir) {
         req_lo = std::min<int64_t>(req_lo,
                                    frame_start - static_cast<int64_t>(pre));
-    req_lo = std::min<int64_t>(req_lo, static_cast<int64_t>(sfd_range.lo));
+        req_lo = std::min<int64_t>(req_lo, static_cast<int64_t>(sfd_range.lo));
+    } else {
+        // `--fused on` keeps the CIR estimator on the raw frame (per-SYNC CFO
+        // scalar) and reuses its tail average for the SYNC phase.  Nothing
+        // below the SFD search window reads the preamble from `derotated`, so
+        // the whole ~250k-sample preamble no longer has to be rotated.
+        req_lo = static_cast<int64_t>(sfd_range.lo);
+    }
 
     const bool phr_fusion = profile.rx_fused_phr_cmf;
     const size_t chip_prefix = phr_fusion
@@ -160,35 +167,13 @@ inline SampleRange compute_cir_only_rotation_range(
     const TimingResult& cfo_timing,
     const SampleRange& final_sfd_range)
 {
-    const size_t pre = profile.cir_pre_samples;
-    const size_t post = profile.cir_post_samples;
-    const size_t tap_count = pre + post;
-    const size_t first_rep = profile.cir_skip_initial_repetitions;
-    const size_t full_reps = profile.preamble_repetitions;
-    const size_t rep_count = (profile.cir_repetitions > 0)
-        ? std::min(profile.cir_repetitions,
-                   full_reps > first_rep ? full_reps - first_rep : 0)
-        : 0;
-    const double period = (cfo_timing.measured_period > 0.0)
-        ? cfo_timing.measured_period
-        : static_cast<double>(kQm35SamplesPerSymbol);
-    const int64_t start = cfo_timing.preamble_start_sample;
-    int64_t lo = static_cast<int64_t>(final_sfd_range.lo);
-    int64_t hi = static_cast<int64_t>(final_sfd_range.hi);
-    if (rep_count > 0 && tap_count > 0) {
-        const size_t wlen = 2 * kQm35ChipsPerSymbol + tap_count - 1;
-        const int64_t cir_lo =
-            start + static_cast<int64_t>(std::llround(
-                        static_cast<double>(first_rep) * period)) -
-            static_cast<int64_t>(pre);
-        const int64_t cir_hi =
-            start + static_cast<int64_t>(std::llround(
-                        static_cast<double>(first_rep + rep_count - 1) * period)) -
-            static_cast<int64_t>(pre) + static_cast<int64_t>(wlen);
-        lo = std::min(lo, cir_lo);
-        hi = std::max(hi, cir_hi);
-    }
-    return clamp_sample_range(lo, hi, n);
+    // `--stop-after-cir on` calls estimate_cir() directly on the raw frame with
+    // the CFO applied per SYNC, so the CIR windows never read `derotated`.
+    // Only the SFD search window has to be rotated.
+    (void)profile;
+    (void)cfo_timing;
+    return clamp_sample_range(static_cast<int64_t>(final_sfd_range.lo),
+                              static_cast<int64_t>(final_sfd_range.hi), n);
 }
 
 inline SampleRange compute_anchored_prefix_range(

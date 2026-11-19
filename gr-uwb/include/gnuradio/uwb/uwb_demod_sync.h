@@ -14,6 +14,35 @@ namespace gr::uwb::demod::core {
 // SYNC waveform.
 // ---------------------------------------------------------------------------
 
+// Windowed |x|^2 with eight independent accumulators.  A single-accumulator
+// float reduction cannot be vectorised without -ffast-math, and the power
+// turned out to be HALF the cost of the single-point stage (measured 2x faster
+// with eight accumulators).  The summation order differs from a plain scalar
+// loop, but this value only normalises a correlation metric.
+inline float window_power_8acc(const std::complex<float>* x, size_t count)
+{
+    const float* f = reinterpret_cast<const float*>(x);
+    const size_t m = 2 * count;
+    float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
+    float a4 = 0.f, a5 = 0.f, a6 = 0.f, a7 = 0.f;
+    size_t i = 0;
+    const size_t bulk = m & ~size_t{7};
+    for (; i < bulk; i += 8) {
+        a0 += f[i + 0] * f[i + 0];
+        a1 += f[i + 1] * f[i + 1];
+        a2 += f[i + 2] * f[i + 2];
+        a3 += f[i + 3] * f[i + 3];
+        a4 += f[i + 4] * f[i + 4];
+        a5 += f[i + 5] * f[i + 5];
+        a6 += f[i + 6] * f[i + 6];
+        a7 += f[i + 7] * f[i + 7];
+    }
+    float s = ((a0 + a1) + (a2 + a3)) + ((a4 + a5) + (a6 + a7));
+    for (; i < m; ++i)
+        s += f[i] * f[i];
+    return s;
+}
+
 namespace detail {
 
 using gr::uwb::core::LinearFit;
@@ -130,6 +159,8 @@ struct FoldPhaseProbe {
     const std::complex<float>* samples = nullptr;
     size_t count = 0;
     std::complex<float> corr{};
+    float ea = 0.0f; // energy of [0, count)
+    float eb = 0.0f; // energy of [sym, sym + count)
 
     double phase() const { return std::arg(corr); }
 
@@ -137,16 +168,18 @@ struct FoldPhaseProbe {
     {
         if (count == 0)
             return false;
-        const auto* delayed = samples + kQm35SamplesPerSymbol;
-        const float ea = timing_conjugate_dot(samples, samples, count).real();
-        const float eb = timing_conjugate_dot(delayed, delayed, count).real();
         // Complex white noise has mean normalized squared correlation 1/count.
-        return std::norm(corr) > (12.0 / count) * ea * eb;
+        return std::norm(corr) > (12.0f / static_cast<float>(count)) * ea * eb;
     }
 };
 
 // A one-symbol lag has a wider unambiguous CFO range than the sparse anchors.
 // Integrate in the body of the preamble to avoid the uncertain leading edge.
+//
+// The two energies overlap by count - sym samples, so only the non-overlapping
+// head/tail need to be summed: eb = ea - head + tail.  That removes a second
+// full-window scan (~130k samples) without changing the gate.  The 128-symbol
+// cap is kept: 64 symbols measurably hurt the -14 dB fold acquisition.
 inline FoldPhaseProbe probe_fold_phase(const std::complex<float>* rx,
                                        size_t n,
                                        int64_t centre,
@@ -164,8 +197,52 @@ inline FoldPhaseProbe probe_fold_phase(const std::complex<float>* rx,
     if (count < 16 * sym)
         return {};
     const auto a = rx + lo;
-    return { a, count, timing_conjugate_dot(a + sym, a, count) };
+    FoldPhaseProbe probe;
+    probe.samples = a;
+    probe.count = count;
+    probe.corr = timing_conjugate_dot(a + sym, a, count);
+    probe.ea = timing_conjugate_dot(a, a, count).real();
+    float head = 0.0f;
+    float tail = 0.0f;
+    for (size_t i = 0; i < sym; ++i) {
+        head += std::norm(a[i]);
+        tail += std::norm(a[count + i]);
+    }
+    probe.eb = probe.ea - head + tail;
+    return probe;
 }
+
+#if UWB_RXOPT_HAVE_AVX2
+__attribute__((target("avx2")))
+inline void fold_accumulate_rotated_avx2(std::complex<float>* dst,
+                                         const std::complex<float>* src,
+                                         size_t count, float c, float s)
+{
+    // (re,im) * (c,s):  real = re*c - im*s, imag = im*c + re*s.
+    // addsub(a,b) subtracts on even lanes and adds on odd lanes, which is
+    // exactly the complex multiply; dst += product keeps the scalar order.
+    const __m256 vc = _mm256_set1_ps(c);
+    const __m256 vs = _mm256_set1_ps(s);
+    size_t j = 0;
+    const size_t limit = count & ~size_t(3);
+    for (; j < limit; j += 4) {
+        const __m256 v =
+            _mm256_loadu_ps(reinterpret_cast<const float*>(src + j));
+        const __m256 sw = _mm256_permute_ps(v, 0xB1);
+        const __m256 rot = _mm256_addsub_ps(_mm256_mul_ps(v, vc),
+                                            _mm256_mul_ps(sw, vs));
+        const __m256 d =
+            _mm256_loadu_ps(reinterpret_cast<const float*>(dst + j));
+        _mm256_storeu_ps(reinterpret_cast<float*>(dst + j),
+                         _mm256_add_ps(d, rot));
+    }
+    for (; j < count; ++j) {
+        const auto v = src[j];
+        dst[j] += std::complex<float>(c * v.real() - s * v.imag(),
+                                      s * v.real() + c * v.imag());
+    }
+}
+#endif
 
 inline void fold_accumulate(std::complex<float>* dst,
                             const std::complex<float>* src,
@@ -178,6 +255,12 @@ inline void fold_accumulate(std::complex<float>* dst,
     }
     const float c = static_cast<float>(std::cos(phase));
     const float s = static_cast<float>(std::sin(phase));
+#if UWB_RXOPT_HAVE_AVX2
+    if (count >= 4 && rxopt::has_avx2_fma()) {
+        fold_accumulate_rotated_avx2(dst, src, count, c, s);
+        return;
+    }
+#endif
     for (size_t j = 0; j < count; ++j) {
         const auto v = src[j];
         dst[j] += std::complex<float>(c * v.real() - s * v.imag(),
@@ -203,12 +286,16 @@ inline FoldAcquireResult fold_acquire(const std::complex<float>* rx,
                                       size_t preamble_repetitions,
                                       float threshold,
                                       double phase_per_symbol = 0.0,
-                                      const rxopt::SparseCirTemplate* sparse_tmpl = nullptr)
+                                      const rxopt::SparseCirTemplate* sparse_tmpl = nullptr,
+                                      std::vector<std::complex<float>>* fold_buf = nullptr,
+                                      const rxopt::ShapedSparseTemplate* shaped_tmpl = nullptr)
 {
     FoldAcquireResult res;
     const int64_t P = static_cast<int64_t>(kQm35SamplesPerSymbol);
     const int64_t Li = static_cast<int64_t>(L);
-    if (!rx || !tmpl || L == 0 || n < L)
+    const bool have_sparse = sparse_tmpl && sparse_tmpl->code_energy > 0.0f;
+    const bool have_shaped = shaped_tmpl && shaped_tmpl->valid;
+    if (!rx || L == 0 || n < L || (!tmpl && !have_sparse && !have_shaped))
         return res;
 
     int64_t w0 = std::max<int64_t>(0, w0_in);
@@ -250,22 +337,31 @@ inline FoldAcquireResult fold_acquire(const std::complex<float>* rx,
 
     const int64_t span = w1 - w0;
     const size_t fold_len = static_cast<size_t>(span + Li);
-    // Rare failure path: allocation here is acceptable (this runs at most once
-    // per packet, and only for packets the single-symbol search lost).
-    std::vector<std::complex<float>> folded(fold_len,
-                                           std::complex<float>(0.0f, 0.0f));
+    // Reuse the worker buffer when the caller provides one: the fold path runs
+    // at most once per packet, but it is also reached on retries, and a
+    // per-packet allocation is pure allocator traffic on the low-SNR path.
+    std::vector<std::complex<float>> local_folded;
+    std::vector<std::complex<float>>& folded =
+        fold_buf ? *fold_buf : local_folded;
+    if (folded.size() < fold_len)
+        folded.resize(fold_len);
+    std::fill(folded.begin(), folded.begin() + fold_len,
+              std::complex<float>(0.0f, 0.0f));
     for (int64_t k = 0; k < k_eff; ++k)
         fold_accumulate(folded.data(), rx + w0 + k * P, fold_len,
                         -k * phase_per_symbol);
 
     const float* real_taps = real_tmpl.is_real && real_tmpl.length == L
         ? real_tmpl.taps_dup.data() : nullptr;
-    const rxopt::SyncMatchedFilter filter(tmpl, L, real_taps, sparse_tmpl);
-    if (sparse_tmpl && sparse_tmpl->code_energy > 0.0f)
+    const rxopt::SyncMatchedFilter filter(tmpl, L, real_taps, sparse_tmpl,
+                                          true, shaped_tmpl);
+    if (shaped_tmpl && shaped_tmpl->valid)
+        Et = shaped_tmpl->energy;
+    else if (sparse_tmpl && sparse_tmpl->code_energy > 0.0f)
         Et = sparse_tmpl->code_energy;
     const size_t lags = static_cast<size_t>(span + 1);
     const auto peak = rxopt::scan_normalized_sync(
-        filter, folded.data(), lags, sample_power_sum(folded.data(), L), Et);
+        filter, folded.data(), lags, window_power_8acc(folded.data(), L), Et);
 
     res.symbols_folded = static_cast<size_t>(k_eff);
     res.window_lags = lags;
@@ -304,7 +400,9 @@ inline bool fold_anchor_fit(const std::complex<float>* rx,
                             std::vector<float>& peak_metrics,
                             std::vector<std::complex<float>>& peak_corr,
                             double phase_per_symbol = 0.0,
-                            const rxopt::SparseCirTemplate* sparse_tmpl = nullptr)
+                            const rxopt::SparseCirTemplate* sparse_tmpl = nullptr,
+                            std::vector<std::complex<float>>* sup_buf = nullptr,
+                            const rxopt::ShapedSparseTemplate* shaped_tmpl = nullptr)
 {
     peak_samples.clear();
     peak_metrics.clear();
@@ -313,15 +411,22 @@ inline bool fold_anchor_fit(const std::complex<float>* rx,
     const int64_t Li = static_cast<int64_t>(L);
     const int64_t refine = kFoldAnchorRefine;
     const size_t sup_len = L + 2 * static_cast<size_t>(refine);
-    if (groups < 2 || L == 0 || !rx || !tmpl)
+    if (groups < 2 || L == 0 || !rx ||
+        (!tmpl && !(sparse_tmpl && sparse_tmpl->code_energy > 0.0f) &&
+         !(shaped_tmpl && shaped_tmpl->valid)))
         return false;
 
-    std::vector<std::complex<float>> sup(sup_len,
-                                         std::complex<float>(0.0f, 0.0f));
+    std::vector<std::complex<float>> local_sup;
+    std::vector<std::complex<float>>& sup = sup_buf ? *sup_buf : local_sup;
+    if (sup.size() < sup_len)
+        sup.resize(sup_len);
     const float* real_taps = real_tmpl.is_real && real_tmpl.length == L
         ? real_tmpl.taps_dup.data() : nullptr;
-    const rxopt::SyncMatchedFilter filter(tmpl, L, real_taps, sparse_tmpl);
-    if (sparse_tmpl && sparse_tmpl->code_energy > 0.0f)
+    const rxopt::SyncMatchedFilter filter(tmpl, L, real_taps, sparse_tmpl,
+                                          true, shaped_tmpl);
+    if (shaped_tmpl && shaped_tmpl->valid)
+        Et = shaped_tmpl->energy;
+    else if (sparse_tmpl && sparse_tmpl->code_energy > 0.0f)
         Et = sparse_tmpl->code_energy;
 
     LinearFit fit;
@@ -344,7 +449,7 @@ inline bool fold_anchor_fit(const std::complex<float>* rx,
                             -j * phase_per_symbol);
         const auto peak = rxopt::scan_normalized_sync(
             filter, sup.data(), sup_len - L + 1,
-            sample_power_sum(sup.data(), L), Et);
+            window_power_8acc(sup.data(), L), Et);
         const int64_t pos = base + static_cast<int64_t>(peak.lag);
         const double x = static_cast<double>(
             static_cast<int64_t>(g) *
@@ -377,35 +482,5 @@ inline bool fold_anchor_fit(const std::complex<float>* rx,
 }
 
 } // namespace detail
-
-// Windowed |x|^2 with eight independent accumulators.  A single-accumulator
-// float reduction cannot be vectorised without -ffast-math, and the power
-// turned out to be HALF the cost of the single-point stage (measured 2x faster
-// with eight accumulators).  The summation order differs from a plain scalar
-// loop, but this value only normalises a correlation metric.
-inline float window_power_8acc(const std::complex<float>* x, size_t count)
-{
-    const float* f = reinterpret_cast<const float*>(x);
-    const size_t m = 2 * count;
-    float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
-    float a4 = 0.f, a5 = 0.f, a6 = 0.f, a7 = 0.f;
-    size_t i = 0;
-    const size_t bulk = m & ~size_t{7};
-    for (; i < bulk; i += 8) {
-        a0 += f[i + 0] * f[i + 0];
-        a1 += f[i + 1] * f[i + 1];
-        a2 += f[i + 2] * f[i + 2];
-        a3 += f[i + 3] * f[i + 3];
-        a4 += f[i + 4] * f[i + 4];
-        a5 += f[i + 5] * f[i + 5];
-        a6 += f[i + 6] * f[i + 6];
-        a7 += f[i + 7] * f[i + 7];
-    }
-    float s = ((a0 + a1) + (a2 + a3)) + ((a4 + a5) + (a6 + a7));
-    for (; i < m; ++i)
-        s += f[i] * f[i];
-    return s;
-}
-
 
 } // namespace gr::uwb::demod::core

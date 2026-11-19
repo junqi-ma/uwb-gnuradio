@@ -280,6 +280,15 @@ struct Qm35825Profile {
     // global switch or dense-path removal.
     bool rx_timing_sparse = false;
 
+    // MF-4: additionally replace the 64-entry sparse timing correlation with
+    // its exact (r * code) * p factorization (short real FIR). Recovers the
+    // dense pulse-matched gain (~2.7 dB over pure sparse) at the sparse
+    // kernel's throughput, on contiguous lag blocks. Rejected automatically
+    // (falls back to the sparse/dense path) when the supplied template is not
+    // code*p. Experimental: opt-in, not yet cross-checked against MATLAB
+    // detectRepeatedPreamble.m, so it must not replace the dense default.
+    bool rx_timing_shaped_sparse = false;
+
     static Qm35825Profile Default() { return Qm35825Profile{}; }
 };
 

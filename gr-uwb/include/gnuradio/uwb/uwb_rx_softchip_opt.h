@@ -100,6 +100,32 @@ inline bool sync_phase_gain(const std::complex<float>* rx, size_t n,
     return std::isfinite(gain.real()) && std::isfinite(gain.imag());
 }
 
+// Contract a pre-averaged SYNC tail with the CIR taps and the spreading code,
+// producing exactly the statistic sync_phase_gain() returns after its own
+// repetition sum.  The tail is the coherent average of the last
+// min(32, preamble_repetitions) SYNCs on the 2*508 integer grid, already
+// CFO-compensated, so the 32 symbol windows no longer have to be re-read.
+inline bool sync_phase_gain_from_tail(const std::complex<float>* tail,
+                                      const std::complex<float>* h,
+                                      size_t taps,
+                                      const std::vector<int8_t>& spread,
+                                      std::complex<float>& gain)
+{
+    gain = {};
+    if (!tail || !h || taps == 0 || taps > 64 || spread.empty() ||
+        spread.size() > 508)
+        return false;
+    for (size_t c = 0; c < spread.size(); ++c) {
+        if (!spread[c])
+            continue;
+        std::complex<float> v{};
+        for (size_t q = 0; q < taps; ++q)
+            v += h[q] * tail[2 * c + q];
+        gain += static_cast<float>(spread[c]) * v;
+    }
+    return std::isfinite(gain.real()) && std::isfinite(gain.imag());
+}
+
 // Project a chip range onto the recovered SYNC phase and return its peak
 // magnitude so the caller can normalize a prefix or update the full stream.
 inline float project_soft_chips(const std::complex<float>* fir,

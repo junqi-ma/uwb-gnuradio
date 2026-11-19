@@ -689,6 +689,50 @@ void check_reset_flush_cycles(const char* core_name)
     }
 }
 
+/**
+ * RS-1: AVX2 vs AVX-512 through the zero-copy whole-window entry point, for
+ * every shipped taps file and both C1 states.  This pins the batched RS-2
+ * macroblock entry (with leftover outputs) to the per-output AVX2 reference.
+ */
+template <typename Core>
+void check_window_entry_identity(const char* core_name)
+{
+    static const size_t lengths[] = { 1,   7,   47,  48,  49,
+                                      65,  128, 1024, 4096, 56000 };
+    for (const auto& tc : tap_cases()) {
+        const auto& taps = real_taps(tc.rel);
+        for (int fp_i = 0; fp_i < 2; ++fp_i) {
+            const bool fp = (fp_i == 1);
+            for (size_t n : lengths) {
+                const auto x = make_lcg(
+                    n, 0x1b873593u ^ static_cast<uint32_t>(n) ^
+                           (fp ? 0x9e3779b9u : 0u));
+                const size_t lout =
+                    Core::expected_output_length(n, taps.size());
+
+                Core ca(taps);
+                Core cb(taps);
+                ca.set_kernel("avx2");
+                cb.set_kernel("avx512");
+                ca.set_fixed_phase_schedule(fp);
+                cb.set_fixed_phase_schedule(fp);
+
+                std::vector<gr_complex> ya(lout), yb(lout);
+                const auto ra = ca.process_window_sc16(x.data(), n, kUnitScale,
+                                                       ya.data(), ya.size());
+                const auto rb = cb.process_window_sc16(x.data(), n, kUnitScale,
+                                                       yb.data(), yb.size());
+                BOOST_REQUIRE_EQUAL(ra.produced, lout);
+                BOOST_REQUIRE_EQUAL(rb.produced, lout);
+                BOOST_REQUIRE_EQUAL(ra.consumed, n);
+                BOOST_REQUIRE_EQUAL(rb.consumed, n);
+                require_bitwise(core_name, tc.rel, n, fp,
+                                "process_window_sc16 avx2 vs avx512", ya, yb);
+            }
+        }
+    }
+}
+
 // --------------------------------------------------------------- cases -----
 
 BOOST_AUTO_TEST_CASE(test_avx512_backend_report)
@@ -977,6 +1021,18 @@ BOOST_AUTO_TEST_CASE(test_avx512_fc32_path_bit_identity)
                             ya, yb);
         }
     }
+}
+
+/**
+ * RS-1/RS-2: the zero-copy whole-window entry must stay bit-identical between
+ * the AVX2 and AVX-512 backends, with and without the C1 schedule.
+ */
+BOOST_AUTO_TEST_CASE(test_avx512_window_entry_bit_identity)
+{
+    if (!avx512_ready("window entry"))
+        return;
+    check_window_entry_identity<RationalResampler65_48Core>("65_48");
+    check_window_entry_identity<RationalResampler32_65Core>("32_65");
 }
 
 } // namespace

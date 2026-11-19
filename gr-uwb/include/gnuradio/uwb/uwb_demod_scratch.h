@@ -55,6 +55,26 @@ struct DemodScratch {
 
     // Cached sparse ternary CIR template (Task A2).
     rxopt::SparseCirTemplate cir_template;
+    // Half-rate (stride=2 acquisition) sparse template, rebuilt only when the
+    // full template key changes instead of once per candidate.
+    rxopt::SparseCirTemplate half_cir_template;
+    // MF-4 (r * code) * p factorization of the dense SYNC template. Rebuilt on
+    // template change, valid only when the reconstruction gate passes.
+    rxopt::ShapedSparseTemplate shaped_sync_template;
+
+    // Reused fold buffers for the low-SNR fold acquisition path.
+    std::vector<std::complex<float>> fold_buf;
+    std::vector<std::complex<float>> fold_sup_buf;
+
+    // Coherent SYNC average tail (last 32 SYNCs) produced while estimating the
+    // CIR from the raw, unrotated rx.  `stage_softchips_from_cir`'s
+    // skip_sync_fir phase alignment consumes this instead of re-reading 32
+    // symbol windows from the derotated frame.
+    std::vector<std::complex<float>> cir_avg_tail;
+    bool cir_avg_tail_valid = false;
+    // Rotation ramp reused for the deferred per-sample phase of the fused CIR
+    // estimator (and the SIC Ipatov path).
+    std::vector<std::complex<float>> cir_phase_rot;
 
     // Cached pre-duplicated real SYNC template for AVX2 fast dot.
     rxopt::RealSyncTemplate real_sync_template;
@@ -205,6 +225,10 @@ struct DemodScratch {
         cir_taps.reserve(64);
         peaks.reserve(256);
         peak_values.reserve(256);
+        fold_buf.reserve(16384);
+        fold_sup_buf.reserve(2048);
+        cir_avg_tail.reserve(2048);
+        cir_phase_rot.reserve(2048);
         sfd_template.reserve(8 * kQm35SamplesPerSymbol);
         cached_seq.pcode.reserve(kQm35CodeLength);
         cached_seq.sfd_seq.reserve(64);

@@ -106,6 +106,37 @@ inline void build_real_sync_template(const std::vector<std::complex<float>>& tem
     }
 }
 
+// FNV-1a over the template's raw float words.  Only a content key is needed,
+// so hashing one 32-bit word per real/imag component (2 per complex) is
+// sufficient and much cheaper than a byte-wise hash on the hot path.  Letting
+// the caller skip a rebuild also avoids the L2 normalize + duplicate copy on
+// the sparse path entirely.
+inline uint64_t real_sync_template_key(
+    const std::vector<std::complex<float>>& template_wf)
+{
+    static_assert(sizeof(float) == 4, "template key assumes 32-bit float");
+    uint64_t h = 14695981039346656037ULL;
+    for (const std::complex<float>& v : template_wf) {
+        const float parts[2] = { v.real(), v.imag() };
+        uint32_t bits[2];
+        std::memcpy(bits, parts, sizeof(bits));
+        h = (h ^ static_cast<uint64_t>(bits[0])) * 1099511628211ULL;
+        h = (h ^ static_cast<uint64_t>(bits[1])) * 1099511628211ULL;
+    }
+    return h;
+}
+
+inline void ensure_real_sync_template(
+    const std::vector<std::complex<float>>& template_wf,
+    RealSyncTemplate& out)
+{
+    const uint64_t key = real_sync_template_key(template_wf);
+    if (key == out.key && out.length == template_wf.size())
+        return;
+    build_real_sync_template(template_wf, out);
+    out.key = key;
+}
+
 #if UWB_RXOPT_HAVE_AVX2
 inline bool has_avx2_fma()
 {
@@ -517,6 +548,76 @@ inline void vector_sub3_complex(std::complex<float>* dst,
         dst[m] = a[m] - b[m];
 }
 
+#if UWB_RXOPT_HAVE_AVX2
+__attribute__((target("avx2")))
+inline void fold_sfd_window_avx2(const std::complex<float>* rx_base,
+                                 size_t sym, const int8_t* sfd_seq,
+                                 size_t sfd_len, size_t fold_len,
+                                 std::complex<float>* out)
+{
+    // Single pass: load every non-zero SFD symbol for the current chunk, add
+    // them into one register pair in symbol order, store once.  The per-element
+    // association is the legacy one, hence bit-identical output.
+    size_t idx[8];
+    int8_t sg[8];
+    bool have_out = false;
+    for (size_t chunk = 0; chunk < sfd_len; chunk += 8) {
+        const size_t chunk_end = std::min(chunk + 8, sfd_len);
+        size_t cnt = 0;
+        for (size_t i = chunk; i < chunk_end; ++i) {
+            if (sfd_seq[i] == 0)
+                continue;
+            idx[cnt] = i;
+            sg[cnt] = sfd_seq[i];
+            ++cnt;
+        }
+        if (cnt == 0)
+            continue;
+        const bool first_chunk = !have_out;
+        size_t k = 0;
+        const size_t limit = fold_len & ~size_t(3);
+        for (; k < limit; k += 4) {
+            size_t j = 0;
+            __m256 acc;
+            if (first_chunk) {
+                const __m256 v = _mm256_loadu_ps(reinterpret_cast<const float*>(
+                    rx_base + idx[0] * sym + k));
+                acc = (sg[0] == 1) ? v : _mm256_sub_ps(_mm256_setzero_ps(), v);
+                j = 1;
+            } else {
+                acc = _mm256_loadu_ps(reinterpret_cast<const float*>(out + k));
+            }
+            for (; j < cnt; ++j) {
+                const __m256 v = _mm256_loadu_ps(reinterpret_cast<const float*>(
+                    rx_base + idx[j] * sym + k));
+                acc = (sg[j] == 1) ? _mm256_add_ps(acc, v)
+                                   : _mm256_sub_ps(acc, v);
+            }
+            _mm256_storeu_ps(reinterpret_cast<float*>(out + k), acc);
+        }
+        for (; k < fold_len; ++k) {
+            size_t j = 0;
+            std::complex<float> acc;
+            if (first_chunk) {
+                const std::complex<float> v = rx_base[idx[0] * sym + k];
+                acc = (sg[0] == 1) ? v : std::complex<float>(0.f, 0.f) - v;
+                j = 1;
+            } else {
+                acc = out[k];
+            }
+            for (; j < cnt; ++j) {
+                const std::complex<float> v = rx_base[idx[j] * sym + k];
+                acc = (sg[j] == 1) ? acc + v : acc - v;
+            }
+            out[k] = acc;
+        }
+        have_out = true;
+    }
+    if (!have_out)
+        std::fill(out, out + fold_len, std::complex<float>(0.0f, 0.0f));
+}
+#endif
+
 inline void fold_sfd_window(const std::complex<float>* rx_base,
                             size_t sym,
                             const int8_t* sfd_seq,
@@ -535,27 +636,168 @@ inline void fold_sfd_window(const std::complex<float>* rx_base,
         return;
     }
 #endif
-    size_t i = 0;
-    while (i < sfd_len && sfd_seq[i] == 0)
-        ++i;
-    if (i == sfd_len) {
-        std::fill(out, out + fold_len, std::complex<float>(0.0f, 0.0f));
+#if UWB_RXOPT_HAVE_AVX2
+    if (has_avx2_fma()) {
+        fold_sfd_window_avx2(rx_base, sym, sfd_seq, sfd_len, fold_len, out);
         return;
     }
-    const int8_t first_s = sfd_seq[i];
-    if (first_s == 1) {
-        std::memcpy(out, rx_base + i * sym, fold_len * sizeof(std::complex<float>));
-    } else {
-        std::fill(out, out + fold_len, std::complex<float>(0.0f, 0.0f));
-        vector_sub_complex(out, rx_base + i * sym, fold_len);
+#endif
+    size_t idx[8];
+    int8_t sg[8];
+    bool have_out = false;
+    for (size_t chunk = 0; chunk < sfd_len; chunk += 8) {
+        const size_t chunk_end = std::min(chunk + 8, sfd_len);
+        size_t cnt = 0;
+        for (size_t i = chunk; i < chunk_end; ++i) {
+            if (sfd_seq[i] == 0)
+                continue;
+            idx[cnt] = i;
+            sg[cnt] = sfd_seq[i];
+            ++cnt;
+        }
+        if (cnt == 0)
+            continue;
+        const bool first_chunk = !have_out;
+        for (size_t k = 0; k < fold_len; ++k) {
+            size_t j = 0;
+            std::complex<float> acc;
+            if (first_chunk) {
+                const std::complex<float> v = rx_base[idx[0] * sym + k];
+                acc = (sg[0] == 1) ? v : std::complex<float>(0.0f, 0.0f) - v;
+                j = 1;
+            } else {
+                acc = out[k];
+            }
+            for (; j < cnt; ++j) {
+                const std::complex<float> v = rx_base[idx[j] * sym + k];
+                acc = (sg[j] == 1) ? acc + v : acc - v;
+            }
+            out[k] = acc;
+        }
+        have_out = true;
     }
-    ++i;
-    for (; i < sfd_len; ++i) {
-        const int8_t s = sfd_seq[i];
-        if (s == 1) {
-            vector_accumulate_complex(out, rx_base + i * sym, fold_len);
-        } else if (s == -1) {
-            vector_sub_complex(out, rx_base + i * sym, fold_len);
+    if (!have_out)
+        std::fill(out, out + fold_len, std::complex<float>(0.0f, 0.0f));
+}
+
+#if UWB_RXOPT_HAVE_AVX2
+__attribute__((target("avx2")))
+inline void vector_accumulate_scaled_complex_avx2(std::complex<float>* dst,
+                                                  const std::complex<float>* src,
+                                                  float c, float s, size_t count)
+{
+    const __m256 vc = _mm256_set1_ps(c);
+    const __m256 vs = _mm256_set1_ps(s);
+    size_t j = 0;
+    const size_t limit = count & ~size_t(3);
+    for (; j < limit; j += 4) {
+        const __m256 v =
+            _mm256_loadu_ps(reinterpret_cast<const float*>(src + j));
+        const __m256 sw = _mm256_permute_ps(v, 0xB1);
+        const __m256 rot = _mm256_addsub_ps(_mm256_mul_ps(v, vc),
+                                            _mm256_mul_ps(sw, vs));
+        const __m256 d =
+            _mm256_loadu_ps(reinterpret_cast<const float*>(dst + j));
+        _mm256_storeu_ps(reinterpret_cast<float*>(dst + j),
+                         _mm256_add_ps(d, rot));
+    }
+    for (; j < count; ++j) {
+        const auto v = src[j];
+        dst[j] += std::complex<float>(c * v.real() - s * v.imag(),
+                                      s * v.real() + c * v.imag());
+    }
+}
+
+__attribute__((target("avx2")))
+inline void vector_mul_complex_avx2(std::complex<float>* dst,
+                                    const std::complex<float>* mul,
+                                    size_t count)
+{
+    size_t j = 0;
+    const size_t limit = count & ~size_t(3);
+    for (; j < limit; j += 4) {
+        const __m256 v =
+            _mm256_loadu_ps(reinterpret_cast<const float*>(dst + j));
+        const __m256 b =
+            _mm256_loadu_ps(reinterpret_cast<const float*>(mul + j));
+        const __m256 br = _mm256_moveldup_ps(b);
+        const __m256 bi = _mm256_movehdup_ps(b);
+        const __m256 prod = _mm256_addsub_ps(
+            _mm256_mul_ps(v, br), _mm256_mul_ps(_mm256_permute_ps(v, 0xB1), bi));
+        _mm256_storeu_ps(reinterpret_cast<float*>(dst + j), prod);
+    }
+    for (; j < count; ++j)
+        dst[j] *= mul[j];
+}
+#endif
+
+inline void vector_accumulate_scaled_complex(std::complex<float>* dst,
+                                             const std::complex<float>* src,
+                                             std::complex<float> alpha,
+                                             size_t count)
+{
+    if (count == 0)
+        return;
+#if UWB_RXOPT_HAVE_AVX2
+    if (has_avx2_fma()) {
+        vector_accumulate_scaled_complex_avx2(dst, src, alpha.real(),
+                                              alpha.imag(), count);
+        return;
+    }
+#endif
+    for (size_t j = 0; j < count; ++j)
+        dst[j] += alpha * src[j];
+}
+
+inline void vector_mul_complex(std::complex<float>* dst,
+                               const std::complex<float>* mul,
+                               size_t count)
+{
+    if (count == 0)
+        return;
+#if UWB_RXOPT_HAVE_AVX2
+    if (has_avx2_fma()) {
+        vector_mul_complex_avx2(dst, mul, count);
+        return;
+    }
+#endif
+    for (size_t j = 0; j < count; ++j)
+        dst[j] *= mul[j];
+}
+
+// dst[i] = exp(-j*w*i), i < count, using the same 4-chain / 1024-sample
+// re-anchoring as derotate_range_recurrence().  Used by the fused CIR
+// estimator, which applies the per-sample phase once outside the SYNC loop.
+inline void build_rotation_ramp(double w, size_t count,
+                                std::complex<float>* table)
+{
+    if (count == 0)
+        return;
+    constexpr size_t kB = 1024;
+    const float s4r = static_cast<float>(std::cos(-4.0 * w));
+    const float s4i = static_cast<float>(std::sin(-4.0 * w));
+    for (size_t b0 = 0; b0 < count; b0 += kB) {
+        const size_t b1 = std::min(count, b0 + kB);
+        float cr[4], ci[4];
+        for (int c = 0; c < 4; ++c) {
+            const double ph = -w * static_cast<double>(b0 + c);
+            cr[c] = static_cast<float>(std::cos(ph));
+            ci[c] = static_cast<float>(std::sin(ph));
+        }
+        size_t i = b0;
+        for (; i + 4 <= b1; i += 4) {
+            for (int c = 0; c < 4; ++c) {
+                table[i + c] = std::complex<float>(cr[c], ci[c]);
+                const float nr = cr[c] * s4r - ci[c] * s4i;
+                const float ni = cr[c] * s4i + ci[c] * s4r;
+                cr[c] = nr;
+                ci[c] = ni;
+            }
+        }
+        for (; i < b1; ++i) {
+            const double ph = -w * static_cast<double>(i);
+            table[i] = std::complex<float>(static_cast<float>(std::cos(ph)),
+                                           static_cast<float>(std::sin(ph)));
         }
     }
 }

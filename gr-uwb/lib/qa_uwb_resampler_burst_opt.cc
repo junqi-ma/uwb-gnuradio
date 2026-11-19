@@ -54,6 +54,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
+#include <gnuradio/uwb/uwb_resample_window.h>
 
 #include <algorithm>
 #include <complex>
@@ -1252,6 +1253,57 @@ void check_candidate_other_paths(const std::vector<float>& taps,
     }
 }
 
+// ===========================================================================
+//  RS-1: zero-copy whole-window entry
+//
+//  process_window_sc16() must reproduce reset + process_sc16 + flush exactly,
+//  including the leading-zero and trailing-zero boundary macroblocks and every
+//  short window.  Both the default schedule and the C1 fixed-phase variant
+//  are covered, so the batched macroblock entry (RS-2) is on the hook too.
+// ===========================================================================
+template <typename Core>
+void check_window_entry(const std::vector<float>& taps, const std::string& tag)
+{
+    static const size_t lens[] = { 0,   1,   7,   47,  48,   49,
+                                   65,  128, 1024, 4096, 56000 };
+    for (int fp_i = 0; fp_i < 2; ++fp_i) {
+        const bool fp = (fp_i == 1);
+        for (size_t n : lens) {
+            const std::string what =
+                tag + " N=" + std::to_string(n) +
+                (fp ? " C1" : " default");
+            auto in = make_sc16_input(n, 0x3c6ef372u + static_cast<uint32_t>(n));
+
+            Core ref(taps);
+            ref.set_fixed_phase_schedule(fp);
+            const std::vector<gr_complex> y_ref =
+                run_oneshot_sc16(ref, in, kUnitScale);
+
+            Core win(taps);
+            win.set_fixed_phase_schedule(fp);
+            std::vector<gr_complex> y(y_ref.size());
+            const auto r = win.process_window_sc16(
+                in.empty() ? nullptr : in.data(), n, kUnitScale, y.data(),
+                y.size());
+            BOOST_REQUIRE_EQUAL(r.produced, y.size());
+            BOOST_REQUIRE_EQUAL(r.consumed, n);
+            BOOST_CHECK(win.flush_complete());
+            BOOST_CHECK_EQUAL(win.input_items(), static_cast<uint64_t>(n));
+            BOOST_CHECK_EQUAL(win.output_items(),
+                              static_cast<uint64_t>(y.size()));
+            require_bit_identical_counted(y, y_ref, what + " window entry");
+
+            // resample_sc16_window() is the production wrapper around it.
+            std::vector<gr_complex> y2;
+            const size_t made = gr::uwb::core::resample_sc16_window(
+                win, in.empty() ? nullptr : in.data(), n, kUnitScale, y2);
+            BOOST_REQUIRE_EQUAL(made, y_ref.size());
+            BOOST_REQUIRE_EQUAL(y2.size(), y_ref.size());
+            require_bit_identical_counted(y2, y_ref, what + " resample_window");
+        }
+    }
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_CASE(test_candidate_api_and_geometry)
@@ -1405,4 +1457,17 @@ BOOST_AUTO_TEST_CASE(test_expected_length_contract)
                                                       "65/32 q");
     check_length_contract<RationalResampler48_65Core>(taps_48_65_tx(),
                                                       "48/65 tx");
+}
+
+BOOST_AUTO_TEST_CASE(test_process_window_zero_copy_bit_identity)
+{
+    check_window_entry<RationalResampler65_48Core>(taps_65_48_realtime(),
+                                                   "65/48 rt");
+    check_window_entry<RationalResampler65_48Core>(taps_65_48_quality(),
+                                                   "65/48 q");
+    check_window_entry<RationalResampler65_32Core>(taps_65_32_realtime(),
+                                                   "65/32 rt");
+    check_window_entry<RationalResampler65_32Core>(taps_65_32_quality(),
+                                                   "65/32 q");
+    check_window_entry<RationalResampler48_65Core>(taps_48_65_tx(), "48/65 tx");
 }

@@ -22,6 +22,7 @@ install(FILES
     uwb_qm35_acquisition_tracker.h
     uwb_rational_resampler_core.h
     uwb_rational_resampler_avx512.h
+    uwb_resampler_transposed.h
     uwb_simd.h
     uwb_kernel_backend.h
     uwb_demod_sic_avx512.h

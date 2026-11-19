@@ -27,6 +27,12 @@
  *   If a future kernel changes the summation tree, that QA must be replaced
  *   by an explicit tolerance contract plus an independent numeric reference,
  *   not silently relaxed.
+ *
+ * Alignment (RS-3): the core's coefficient tables are allocated with 64-byte
+ * alignment, and H_pad is always a multiple of 8, so every arm base
+ * (arm * 2 * H_pad floats) is also 64-byte aligned.  The batched entry points
+ * therefore use _mm512_load_ps for the taps; the public pointer-form entry
+ * points still accept arbitrary pointers and fall back to _mm512_loadu_ps.
  */
 #pragma once
 
@@ -135,6 +141,18 @@ struct C1GroupDesc {
 static_assert(sizeof(C1GroupDesc) == 20, "C1GroupDesc layout changed");
 
 /**
+ * One C1 leftover-output descriptor, byte-for-byte the layout of
+ * RationalResamplerLmCore::FixedPhaseTail (win, tap), see C1GroupDesc for the
+ * units.  kInterp % 4 == 1 for both 65/48 and 65/32, so a full macroblock has
+ * one such output.
+ */
+struct C1TailDesc {
+    uint16_t win;
+    uint16_t tap;
+};
+static_assert(sizeof(C1TailDesc) == 4, "C1TailDesc layout changed");
+
+/**
  * Batched C1 macroblock: compute `ngroups` 4-output groups in ONE call.
  *
  * This is the hot production entry point.  Calling the 4-output kernel once
@@ -164,6 +182,50 @@ void fir_sc16_macroblock_c1_generic(const float* h_base,
                                     const C1GroupDesc* groups, size_t ngroups,
                                     const sc16* base_win, size_t hpad,
                                     gr_complex* dest);
+
+/**
+ * RS-2 batched C1 entry point: compute `n_macroblocks` consecutive full
+ * macroblocks in ONE cross-TU call, including each macroblock's leftover
+ * (tail) outputs.
+ *
+ * All macroblocks share the same starting phase, so `groups`/`tails` are
+ * walked for every macroblock while the input window advances by `decim`
+ * complex samples and the destination by `nout` complex outputs.
+ *
+ *   groups/ngroups : C1 4-output descriptors for this phase
+ *   tails/ntails   : C1 leftover-output descriptors (1 for 65/48 and 65/32)
+ *   nout           : outputs per macroblock (kInterp)
+ *
+ * This removes the per-macroblock cross-TU call and the repeated
+ * current/have_current commit from the streaming loop.  Bit-identical to
+ * calling the single-macroblock entry point once per macroblock.
+ */
+void fir_sc16_macroblocks_c1_hp16(const float* h_base,
+                                  const C1GroupDesc* groups, size_t ngroups,
+                                  size_t n_macroblocks, size_t decim, size_t nout,
+                                  const C1TailDesc* tails, size_t ntails,
+                                  const sc16* base_win, gr_complex* dest);
+void fir_sc16_macroblocks_c1_hp24(const float* h_base,
+                                  const C1GroupDesc* groups, size_t ngroups,
+                                  size_t n_macroblocks, size_t decim, size_t nout,
+                                  const C1TailDesc* tails, size_t ntails,
+                                  const sc16* base_win, gr_complex* dest);
+void fir_sc16_macroblocks_c1_hp32(const float* h_base,
+                                  const C1GroupDesc* groups, size_t ngroups,
+                                  size_t n_macroblocks, size_t decim, size_t nout,
+                                  const C1TailDesc* tails, size_t ntails,
+                                  const sc16* base_win, gr_complex* dest);
+void fir_sc16_macroblocks_c1_hp48(const float* h_base,
+                                  const C1GroupDesc* groups, size_t ngroups,
+                                  size_t n_macroblocks, size_t decim, size_t nout,
+                                  const C1TailDesc* tails, size_t ntails,
+                                  const sc16* base_win, gr_complex* dest);
+void fir_sc16_macroblocks_c1_generic(const float* h_base,
+                                     const C1GroupDesc* groups, size_t ngroups,
+                                     size_t n_macroblocks, size_t decim,
+                                     size_t nout, const C1TailDesc* tails,
+                                     size_t ntails, const sc16* base_win,
+                                     size_t hpad, gr_complex* dest);
 
 /**
  * Batched DEFAULT (non-C1) macroblock: walk the production schedule arrays

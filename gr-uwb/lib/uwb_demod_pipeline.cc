@@ -181,86 +181,104 @@ bool try_reuse_initial_tail_timing(
     size_t seed_radius,
     TimingResult& tail_timing)
 {
-    const int64_t start1 =
-        (!initial_timing.peak_samples.empty() && cfg.template_len > 0)
-            ? initial_timing.peak_samples[0] -
-                  static_cast<int64_t>(cfg.template_len - 1)
-            : -1;
-    const int64_t expected_tail_start = (start1 >= 0)
-        ? start1 + static_cast<int64_t>(cfg.tail_first * kQm35SamplesPerSymbol)
-        : -2;
-    const int64_t actual_tail_first_start =
-        (cfg.tail_first < initial_timing.peak_samples.size() &&
-         cfg.template_len > 0)
-            ? initial_timing.peak_samples[cfg.tail_first] -
-                  static_cast<int64_t>(cfg.template_len - 1)
-            : -3;
-
-    if (seed_radius != 8 || !initial_timing.ok ||
-        initial_timing.detected_peaks != cfg.full_repetitions ||
-        initial_timing.peak_samples.size() != cfg.full_repetitions ||
-        initial_timing.peak_metrics.size() != cfg.full_repetitions ||
-        initial_timing.peak_corr.size() != cfg.full_repetitions ||
-        cfg.template_len == 0 ||
-        cfg.tail_repetitions == 0 ||
+    (void)seed_radius;
+    if (!initial_timing.ok || initial_timing.peak_samples.empty() ||
+        initial_timing.peak_metrics.size() != initial_timing.peak_samples.size() ||
+        initial_timing.peak_corr.size() != initial_timing.peak_samples.size() ||
+        cfg.template_len == 0 || cfg.tail_repetitions == 0 ||
         cfg.tail_repetitions > cfg.full_repetitions ||
         cfg.tail_first == 0 ||
         profile.timing_track_radius != 8 ||
         anchor.timing_track_radius != 8 ||
-        anchor.timing_max_backtrack_symbols != 0 ||
-        cfg.tail_start != expected_tail_start ||
-        actual_tail_first_start != cfg.tail_start) {
+        anchor.timing_max_backtrack_symbols != 0) {
         return false;
     }
 
+    // The SFD anchor predicts the whole tail grid to a few samples.  Match each
+    // expected tail SYNC against Stage 1's measured peaks with a +/-2 sample
+    // tolerance instead of requiring a complete, exactly aligned train.  This
+    // keeps the cheap path on packets where a leading SYNC was missed or the
+    // period fit is half a sample off, which used to force a second 40-SYNC
+    // stage_timing run.
+    const double period = (cfg.period_hint > 0.0)
+        ? cfg.period_hint
+        : static_cast<double>(kQm35SamplesPerSymbol);
+    const int64_t lm1 = static_cast<int64_t>(cfg.template_len) - 1;
+    const size_t npk = initial_timing.peak_samples.size();
+
+    std::vector<int64_t> samples;
+    std::vector<float> metrics;
+    std::vector<std::complex<float>> corrs;
+    std::vector<size_t> indices;
+    samples.reserve(cfg.tail_repetitions);
+    metrics.reserve(cfg.tail_repetitions);
+    corrs.reserve(cfg.tail_repetitions);
+    indices.reserve(cfg.tail_repetitions);
+
     for (size_t k = cfg.tail_first; k < cfg.full_repetitions; ++k) {
-        const float m = initial_timing.peak_metrics[k];
-        if (!std::isfinite(m) || m < anchor.radar_verification_threshold) {
-            return false;
+        const int64_t rel = static_cast<int64_t>(k - cfg.tail_first);
+        const int64_t expected_end =
+            cfg.tail_start + lm1 +
+            static_cast<int64_t>(std::llround(
+                static_cast<double>(rel) * period));
+        size_t best_idx = npk;
+        int64_t best_delta = 3;
+        for (size_t i = 0; i < npk; ++i) {
+            const int64_t delta =
+                std::llabs(initial_timing.peak_samples[i] - expected_end);
+            if (delta <= 2 && delta < best_delta) {
+                best_delta = delta;
+                best_idx = i;
+            }
         }
+        if (best_idx == npk)
+            continue;
+        const float m = initial_timing.peak_metrics[best_idx];
+        if (!std::isfinite(m) ||
+            m < anchor.radar_verification_threshold)
+            continue;
+        samples.push_back(initial_timing.peak_samples[best_idx]);
+        metrics.push_back(m);
+        corrs.push_back(initial_timing.peak_corr[best_idx]);
+        indices.push_back(k);
     }
 
-    tail_timing.peak_samples.assign(
-        initial_timing.peak_samples.begin() + cfg.tail_first,
-        initial_timing.peak_samples.end());
-    tail_timing.peak_metrics.assign(
-        initial_timing.peak_metrics.begin() + cfg.tail_first,
-        initial_timing.peak_metrics.end());
-    tail_timing.peak_corr.assign(
-        initial_timing.peak_corr.begin() + cfg.tail_first,
-        initial_timing.peak_corr.end());
-    tail_timing.detected_peaks = cfg.tail_repetitions;
+    const size_t matched = samples.size();
+    const size_t min_matched = cfg.tail_repetitions > 4
+        ? cfg.tail_repetitions - 4
+        : cfg.tail_repetitions;
+    if (matched < min_matched)
+        return false;
+
+    tail_timing = TimingResult{};
+    tail_timing.peak_samples = std::move(samples);
+    tail_timing.peak_metrics = std::move(metrics);
+    tail_timing.peak_corr = std::move(corrs);
+    tail_timing.detected_peaks = matched;
     tail_timing.expected_peaks = cfg.tail_repetitions;
     tail_timing.metric = tail_timing.peak_metrics[0];
-    tail_timing.coarse_search_us = 0;
-    tail_timing.fine_track_us = 0;
-    tail_timing.seed_search_us = 0;
-    tail_timing.seed_refine_narrow_attempts = 0;
-    tail_timing.seed_refine_narrow_success = 0;
-    tail_timing.seed_refine_fallbacks = 0;
 
-    const size_t np = cfg.tail_repetitions;
-    const int64_t period = static_cast<int64_t>(kQm35SamplesPerSymbol);
-    if (np >= 2) {
+    const size_t period_fit_n = matched;
+    if (period_fit_n >= 2) {
         detail::LinearFit fit;
-        for (size_t k = 0; k < np; ++k) {
-            const double x = static_cast<double>(k);
-            const double y = static_cast<double>(tail_timing.peak_samples[k]);
-            fit.add(x, y);
-        }
+        for (size_t i = 0; i < period_fit_n; ++i)
+            fit.add(static_cast<double>(indices[i]),
+                    static_cast<double>(tail_timing.peak_samples[i]));
         const double denom = fit.determinant();
         if (std::abs(denom) > 1e-12) {
             tail_timing.measured_period = fit.slope(denom);
-            const double intercept_end = fit.intercept(tail_timing.measured_period);
+            const double intercept_end =
+                fit.intercept(tail_timing.measured_period);
             tail_timing.preamble_start_sample = std::max<int64_t>(
-                0, static_cast<int64_t>(std::llround(intercept_end)) -
-                       (static_cast<int64_t>(cfg.template_len) - 1));
+                0, static_cast<int64_t>(std::llround(intercept_end)) - lm1);
         } else {
-            tail_timing.measured_period = static_cast<double>(period);
+            tail_timing.measured_period =
+                static_cast<double>(kQm35SamplesPerSymbol);
             tail_timing.preamble_start_sample = cfg.tail_start;
         }
     } else {
-        tail_timing.measured_period = static_cast<double>(period);
+        tail_timing.measured_period =
+            static_cast<double>(kQm35SamplesPerSymbol);
         tail_timing.preamble_start_sample = cfg.tail_start;
     }
     tail_timing.ok = true;
@@ -294,28 +312,42 @@ bool retrack_tail_timing(
         if ((!tail_timing_ok ||
              tail_timing.detected_peaks < 4) &&
             seed_radius != 0) {
-            const auto retry_t0 = std::chrono::steady_clock::now();
-            anchor.timing_seed_refine_radius = 0;
-            TimingResult retry_timing;
-            const bool retry_ok = stage_timing(
-                rx, n, anchor, template_wf, cfg.tail_start, retry_timing, scratch);
-            res.stage_sfd_tail_retrack_fallback_us += static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::steady_clock::now() - retry_t0).count());
-            ++res.stage_tail_retrack_fallbacks;
-            if (retry_ok &&
-                retry_timing.detected_peaks > tail_timing.detected_peaks) {
-                // Keep the narrow-attempt diagnostics visible even though the
-                // legacy retry (radius 0) produced the accepted timing.
-                retry_timing.seed_search_us += tail_timing.seed_search_us;
-                retry_timing.seed_refine_narrow_attempts +=
-                    tail_timing.seed_refine_narrow_attempts;
-                retry_timing.seed_refine_narrow_success +=
-                    tail_timing.seed_refine_narrow_success;
-                retry_timing.seed_refine_fallbacks +=
-                    tail_timing.seed_refine_fallbacks;
-                tail_timing = std::move(retry_timing);
-                tail_timing_ok = true;
+            // The narrow seed radius is clamped into locked_roi_samples for
+            // LockedBounded, but stage_timing's bounded branch only reads the
+            // ROI -- so a radius-0 retry with the SAME ROI is a provably
+            // identical second run.  Only retry when it actually widens the
+            // search, and restore the unclamped ROI when it does.
+            const bool bounded =
+                anchor.sync_strategy == SyncStrategy::LockedBounded;
+            const bool same_bounded_params =
+                bounded && anchor.locked_roi_samples >= profile.locked_roi_samples;
+            if (!same_bounded_params) {
+                const auto retry_t0 = std::chrono::steady_clock::now();
+                anchor.timing_seed_refine_radius = 0;
+                if (bounded)
+                    anchor.locked_roi_samples = profile.locked_roi_samples;
+                TimingResult retry_timing;
+                const bool retry_ok = stage_timing(
+                    rx, n, anchor, template_wf, cfg.tail_start, retry_timing,
+                    scratch);
+                res.stage_sfd_tail_retrack_fallback_us += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - retry_t0).count());
+                ++res.stage_tail_retrack_fallbacks;
+                if (retry_ok &&
+                    retry_timing.detected_peaks > tail_timing.detected_peaks) {
+                    // Keep the narrow-attempt diagnostics visible even though
+                    // the wider retry produced the accepted timing.
+                    retry_timing.seed_search_us += tail_timing.seed_search_us;
+                    retry_timing.seed_refine_narrow_attempts +=
+                        tail_timing.seed_refine_narrow_attempts;
+                    retry_timing.seed_refine_narrow_success +=
+                        tail_timing.seed_refine_narrow_success;
+                    retry_timing.seed_refine_fallbacks +=
+                        tail_timing.seed_refine_fallbacks;
+                    tail_timing = std::move(retry_timing);
+                    tail_timing_ok = true;
+                }
             }
         }
     }
@@ -539,9 +571,19 @@ bool run_tail_retrack_and_cfo_refit(
     TimingResult& tail_timing,
     TimingResult& cfo_timing)
 {
-    const bool have_tail_peaks = retrack_tail_timing(
-        rx, n, profile, template_wf, cfg, seed_radius, scratch, res,
-        tail_timing);
+    // A folded Stage 1 already measured >=16 coherent super-anchors, and the
+    // tail is only 40 SYMBOLS: re-tracking it could contribute at most two
+    // 16-symbol groups, which the conditional CFO refit discards anyway.  Skip
+    // the doomed second stage_timing run and keep the Stage-2 CFO.
+    const bool skip_tail_retrack =
+        scratch.initial_timing.sync_peaks_folded &&
+        sync_state.stage2_cfo.peaks_used >= 16;
+    bool have_tail_peaks = false;
+    if (!skip_tail_retrack) {
+        have_tail_peaks = retrack_tail_timing(
+            rx, n, profile, template_wf, cfg, seed_radius, scratch, res,
+            tail_timing);
+    }
     build_sfd_anchored_timing(
         cfg, res.timing, scratch.initial_timing, tail_timing,
         have_tail_peaks, cfo_timing);
@@ -640,7 +682,28 @@ bool anchor_and_verify_final_sfd(
     // Re-run SFD on the final MATLAB-aligned CFO compensation.  This removes
     // any bootstrap-CFO bias from the SFD/CIR path while retaining the same
     // full-rate refinement contract as MATLAB refineTimingWithNsSfd.
-    bool final_sfd_ok = run_final_sfd();
+    //
+    // When the refit reused the Stage-2 rotation (actions 1/2), or the refit
+    // CFO moved the 8-symbol SFD phase by less than 0.05 rad, the bootstrap SFD
+    // result is already the final one: the derotated bits did not change (or
+    // changed too little to move the peak by a sample).  Skipping the complete
+    // +/-64 + offset-window + grid search is a pure win on those packets.
+    bool final_sfd_ok = false;
+    const bool rotation_reused =
+        res.cfo_refit_action == 1 || res.cfo_refit_action == 2;
+    bool tiny_refit_delta = false;
+    if (!rotation_reused && res.cfo.ok) {
+        const double drift_rad = std::abs(
+            2.0 * M_PI * (res.cfo.cfo_hz - sync_state.stage2_cfo.cfo_hz) *
+            (8.0 * static_cast<double>(kQm35SamplesPerSymbol)) /
+            profile.sample_rate);
+        tiny_refit_delta = drift_rad < 0.05;
+    }
+    if (rotation_reused || tiny_refit_delta) {
+        final_sfd_ok = res.sfd.ok;
+    } else {
+        final_sfd_ok = run_final_sfd();
+    }
     if (!final_sfd_ok && profile.rx_seed_refine_tail) {
         // The narrow tail seed can pick a wrong local peak and still pass the
         // per-SYNC threshold.  On a final-SFD/period inconsistency, retry the
@@ -1313,8 +1376,12 @@ DemodResult demodulate_one(const std::complex<float>* rx,
     }
 
     // Standalone CIR estimation after SFD (independent of CMF / despreading).
-    if (!estimate_cir(scratch.derotated.data(), n, eff, res.timing,
-                      scratch.cached_seq.pcode, res.cir, scratch)) {
+    // The estimator folds the CFO rotation into the SYNC average, so it reads
+    // the raw frame and the rotation ranges above no longer need to cover the
+    // preamble for it.
+    if (!estimate_cir(rx, n, eff, res.timing,
+                      scratch.cached_seq.pcode, res.cir, scratch,
+                      res.cfo.cfo_hz)) {
         clock.lap(res.stage_cir_us, res.stage_total_us);
         res.status = DemodStatus::CirFailed;
         rebase();

@@ -134,6 +134,84 @@ UWB_DS_AVX512_TARGET void real_template_dot_8lag(const gr_complex* rx,
         out[m] = res[m];
 }
 
+UWB_DS_AVX512_TARGET void sparse_ternary_dot_16lag(
+    const gr_complex* rx, const uint16_t* pos_offsets, size_t pos_count,
+    const uint16_t* neg_offsets, size_t neg_count, gr_complex out[16])
+{
+    const float* rx_f = reinterpret_cast<const float*>(rx);
+    __m512 p0 = _mm512_setzero_ps();
+    __m512 p1 = _mm512_setzero_ps();
+    for (size_t i = 0; i < pos_count; ++i) {
+        const size_t off = pos_offsets[i];
+        p0 = _mm512_add_ps(p0, _mm512_loadu_ps(rx_f + off));
+        p1 = _mm512_add_ps(p1, _mm512_loadu_ps(rx_f + off + 16));
+    }
+    __m512 n0 = _mm512_setzero_ps();
+    __m512 n1 = _mm512_setzero_ps();
+    for (size_t i = 0; i < neg_count; ++i) {
+        const size_t off = neg_offsets[i];
+        n0 = _mm512_add_ps(n0, _mm512_loadu_ps(rx_f + off));
+        n1 = _mm512_add_ps(n1, _mm512_loadu_ps(rx_f + off + 16));
+    }
+    _mm512_storeu_ps(reinterpret_cast<float*>(out), _mm512_sub_ps(p0, n0));
+    _mm512_storeu_ps(reinterpret_cast<float*>(out + 8), _mm512_sub_ps(p1, n1));
+}
+
+UWB_DS_AVX512_TARGET void sparse_ternary_dot_32lag(
+    const gr_complex* rx, const uint16_t* pos_offsets, size_t pos_count,
+    const uint16_t* neg_offsets, size_t neg_count, gr_complex out[32])
+{
+    const float* rx_f = reinterpret_cast<const float*>(rx);
+    // Four independent accumulator pairs.  Thirty-two lags = four 512-bit
+    // registers (eight complex samples each), so each lane is one lag and its
+    // accumulation order is identical to the 8-lag kernel for that lag.
+    __m512 p0 = _mm512_setzero_ps();
+    __m512 p1 = _mm512_setzero_ps();
+    __m512 p2 = _mm512_setzero_ps();
+    __m512 p3 = _mm512_setzero_ps();
+    for (size_t i = 0; i < pos_count; ++i) {
+        const size_t off = pos_offsets[i];
+        p0 = _mm512_add_ps(p0, _mm512_loadu_ps(rx_f + off));
+        p1 = _mm512_add_ps(p1, _mm512_loadu_ps(rx_f + off + 16));
+        p2 = _mm512_add_ps(p2, _mm512_loadu_ps(rx_f + off + 32));
+        p3 = _mm512_add_ps(p3, _mm512_loadu_ps(rx_f + off + 48));
+    }
+    __m512 n0 = _mm512_setzero_ps();
+    __m512 n1 = _mm512_setzero_ps();
+    __m512 n2 = _mm512_setzero_ps();
+    __m512 n3 = _mm512_setzero_ps();
+    for (size_t i = 0; i < neg_count; ++i) {
+        const size_t off = neg_offsets[i];
+        n0 = _mm512_add_ps(n0, _mm512_loadu_ps(rx_f + off));
+        n1 = _mm512_add_ps(n1, _mm512_loadu_ps(rx_f + off + 16));
+        n2 = _mm512_add_ps(n2, _mm512_loadu_ps(rx_f + off + 32));
+        n3 = _mm512_add_ps(n3, _mm512_loadu_ps(rx_f + off + 48));
+    }
+    float* o = reinterpret_cast<float*>(out);
+    _mm512_storeu_ps(o + 0, _mm512_sub_ps(p0, n0));
+    _mm512_storeu_ps(o + 16, _mm512_sub_ps(p1, n1));
+    _mm512_storeu_ps(o + 32, _mm512_sub_ps(p2, n2));
+    _mm512_storeu_ps(o + 48, _mm512_sub_ps(p3, n3));
+}
+
+UWB_DS_AVX512_TARGET void pack_even_complex(const gr_complex* src,
+                                            size_t even_count,
+                                            gr_complex* dst)
+{
+    const __m512i idx = _mm512_set_epi64(14, 12, 10, 8, 6, 4, 2, 0);
+    size_t i = 0;
+    for (; i + 8 <= even_count; i += 8) {
+        const __m512i v0 =
+            _mm512_loadu_si512(reinterpret_cast<const void*>(src + 2 * i));
+        const __m512i v1 =
+            _mm512_loadu_si512(reinterpret_cast<const void*>(src + 2 * i + 8));
+        const __m512i ev = _mm512_permutex2var_epi64(v0, idx, v1);
+        _mm512_storeu_si512(reinterpret_cast<void*>(dst + i), ev);
+    }
+    for (; i < even_count; ++i)
+        dst[i] = src[2 * i];
+}
+
 UWB_DS_AVX512_TARGET void accumulate_cf32(gr_complex* dst,
                                           const gr_complex* src, size_t count)
 {
@@ -185,31 +263,70 @@ UWB_DS_AVX512_TARGET void fold_sfd_window(const gr_complex* rx_base,
     if (!rx_base || !sfd_seq || !out || sym == 0 || sfd_len == 0 ||
         fold_len == 0)
         return;
-    size_t i = 0;
-    while (i < sfd_len && sfd_seq[i] == 0)
-        ++i;
-    if (i == sfd_len) {
+
+    // Single-pass fold.  The legacy implementation rewrote `out` once per SFD
+    // symbol (one memcpy/sub, then seven read-modify-write passes).  Here every
+    // output element is produced by loading all non-zero symbols for the
+    // current chunk, accumulating them in symbol order in registers, and
+    // storing once.  The per-element association is unchanged, so the result
+    // stays bit-identical to the symbol-by-symbol reference.
+    bool have_out = false;
+    size_t idx[8];
+    int8_t sg[8];
+    for (size_t chunk = 0; chunk < sfd_len; chunk += 8) {
+        const size_t chunk_end = std::min(chunk + 8, sfd_len);
+        size_t cnt = 0;
+        for (size_t i = chunk; i < chunk_end; ++i) {
+            if (sfd_seq[i] == 0)
+                continue;
+            idx[cnt] = i;
+            sg[cnt] = sfd_seq[i];
+            ++cnt;
+        }
+        if (cnt == 0)
+            continue;
+        const bool first_chunk = !have_out;
+        size_t k = 0;
+        const size_t limit = fold_len & ~size_t(7);
+        for (; k < limit; k += 8) {
+            size_t j = 0;
+            __m512 acc;
+            if (first_chunk) {
+                const __m512 v = _mm512_loadu_ps(reinterpret_cast<const float*>(
+                    rx_base + idx[0] * sym + k));
+                acc = (sg[0] == 1) ? v : _mm512_sub_ps(_mm512_setzero_ps(), v);
+                j = 1;
+            } else {
+                acc = _mm512_loadu_ps(reinterpret_cast<const float*>(out + k));
+            }
+            for (; j < cnt; ++j) {
+                const __m512 v = _mm512_loadu_ps(reinterpret_cast<const float*>(
+                    rx_base + idx[j] * sym + k));
+                acc = (sg[j] == 1) ? _mm512_add_ps(acc, v)
+                                   : _mm512_sub_ps(acc, v);
+            }
+            _mm512_storeu_ps(reinterpret_cast<float*>(out + k), acc);
+        }
+        for (; k < fold_len; ++k) {
+            size_t j = 0;
+            gr_complex acc;
+            if (first_chunk) {
+                const gr_complex v = rx_base[idx[0] * sym + k];
+                acc = (sg[0] == 1) ? v : gr_complex(0.f, 0.f) - v;
+                j = 1;
+            } else {
+                acc = out[k];
+            }
+            for (; j < cnt; ++j) {
+                const gr_complex v = rx_base[idx[j] * sym + k];
+                acc = (sg[j] == 1) ? acc + v : acc - v;
+            }
+            out[k] = acc;
+        }
+        have_out = true;
+    }
+    if (!have_out)
         std::memset(out, 0, fold_len * sizeof(gr_complex));
-        return;
-    }
-    float* of = reinterpret_cast<float*>(out);
-    const size_t nf = 2 * fold_len;
-    if (sfd_seq[i] == 1) {
-        std::memcpy(out, rx_base + i * sym, fold_len * sizeof(gr_complex));
-    } else {
-        // 0 - src, element-wise; matches the AVX2 fill + sub sequence.
-        std::memset(out, 0, fold_len * sizeof(gr_complex));
-        sub_ps(of, reinterpret_cast<const float*>(rx_base + i * sym), nf);
-    }
-    ++i;
-    for (; i < sfd_len; ++i) {
-        const int8_t s = sfd_seq[i];
-        if (s == 1)
-            accumulate_ps(of, reinterpret_cast<const float*>(rx_base + i * sym),
-                          nf);
-        else if (s == -1)
-            sub_ps(of, reinterpret_cast<const float*>(rx_base + i * sym), nf);
-    }
 }
 
 } // namespace avx512

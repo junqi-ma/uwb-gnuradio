@@ -27,6 +27,7 @@
 
 #include <gnuradio/uwb/uwb_demod_sic_avx512.h>
 #include <gnuradio/uwb/uwb_kernel_backend.h>
+#include <gnuradio/uwb/uwb_rx_matched_filter.h>
 #include <gnuradio/uwb/uwb_rx_sync_opt.h>
 #include <gnuradio/uwb/uwb_simd.h>
 #include <gnuradio/uwb/uwb_simd_config.h>
@@ -581,6 +582,230 @@ BOOST_AUTO_TEST_CASE(avx512_kernel_entry_points_exist_when_built)
     // must not be referenced.
     BOOST_CHECK(UWB_SIMD_HAVE_AVX512 == 0);
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// Sparse ternary kernels: wider lag batches must be bit-identical to the
+// 8-lag reference they replace (same per-lane accumulation order).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(sparse_ternary_wide_batches_match_8lag_reference)
+{
+    for (size_t code_index : { 9, 10, 11, 12 }) {
+        const auto code = gr::uwb::demod::kPreambleCode9;
+        (void)code;
+        const int8_t* pc = gr::uwb::demod::GetPreambleCode(code_index);
+        rxopt::SparseCirTemplate tmpl;
+        rxopt::build_sparse_cir_template(pc, gr::uwb::demod::kQm35CodeLength,
+                                         tmpl);
+        BOOST_REQUIRE_GT(tmpl.entries.size(), 0u);
+        BOOST_CHECK_EQUAL(size_t(tmpl.pos_count + tmpl.neg_count),
+                          tmpl.entries.size());
+        BOOST_REQUIRE_LE(tmpl.pos_count, rxopt::kMaxSparseCirOffsets);
+        BOOST_REQUIRE_LE(tmpl.neg_count, rxopt::kMaxSparseCirOffsets);
+
+        const size_t len = 1016;
+        const size_t pad = len + 64;
+        std::vector<cf> rx = make_random(pad, 7000u + uint32_t(code_index));
+
+        cf ref8[32];
+        for (size_t m = 0; m < 32; m += 8)
+            rxopt::sparse_ternary_dot_8lag(rx.data() + m, tmpl, ref8 + m);
+        cf got32[32];
+        rxopt::sparse_ternary_dot_32lag(rx.data(), tmpl, got32);
+        BOOST_CHECK_MESSAGE(
+            std::memcmp(got32, ref8, sizeof(got32)) == 0,
+            "32-lag sparse dot differs from the 8-lag reference");
+
+        cf got16[16];
+        rxopt::sparse_ternary_dot_16lag(rx.data(), tmpl, got16);
+        BOOST_CHECK_MESSAGE(
+            std::memcmp(got16, ref8, sizeof(got16)) == 0,
+            "16-lag sparse dot differs from the 8-lag reference");
+
+        cf got4[4];
+        rxopt::sparse_ternary_dot_4lag(rx.data(), tmpl, got4);
+        BOOST_CHECK_MESSAGE(
+            std::memcmp(got4, ref8, sizeof(got4)) == 0,
+            "4-lag sparse dot differs from the 8-lag reference");
+
+        // Single lag keeps the legacy entry order.
+        for (size_t lag = 0; lag < 8; ++lag) {
+            const auto single =
+                rxopt::sparse_ternary_dot_single(rx.data() + lag, tmpl);
+            BOOST_CHECK_SMALL(std::abs(single - ref8[lag]), 1e-3f);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(pack_even_complex_matches_scalar)
+{
+    for (size_t n : { size_t(0), size_t(1), size_t(7), size_t(8), size_t(9),
+                      size_t(16), size_t(33), size_t(1016) }) {
+        const std::vector<cf> src = make_random(2 * n + 8, 31u + uint32_t(n));
+        std::vector<cf> got(n + 4, cf(9.f, 9.f));
+        rxopt::pack_even_complex(src.data(), n, got.data());
+        for (size_t i = 0; i < n; ++i)
+            BOOST_CHECK_MESSAGE(got[i] == src[2 * i],
+                                "pack_even n=" << n << " i=" << i);
+        for (size_t i = n; i < n + 4; ++i)
+            BOOST_CHECK(got[i] == cf(9.f, 9.f));
+    }
+}
+
+// The optional-metrics path and the plain search must return the same winner
+// and metric (they share the same metric expression; this pins that contract
+// after the fast-path experiments were reverted).
+BOOST_AUTO_TEST_CASE(scan_normalized_sync_fast_and_metrics_paths_agree)
+{
+    const size_t L = 1016;
+    std::vector<cf> taps_c(L);
+    for (size_t k = 0; k < L; ++k)
+        taps_c[k] = cf(std::cos(0.011f * float(k)), 0.0f);
+    rxopt::RealSyncTemplate real;
+    rxopt::build_real_sync_template(taps_c, real);
+    const rxopt::SyncMatchedFilter filter(taps_c.data(), L, real.taps_dup.data(),
+                                          nullptr);
+
+    const size_t lags = 257;
+    std::vector<cf> rx = make_random(L + lags + 8, 424242u, 0.5f);
+    std::vector<float> metrics(lags, -1.0f);
+    float p0 = 0.0f;
+    for (size_t k = 0; k < L; ++k)
+        p0 += std::norm(rx[k]);
+    const auto slow = rxopt::scan_normalized_sync(filter, rx.data(), lags, p0,
+                                                  real.energy, metrics.data());
+    const auto fast = rxopt::scan_normalized_sync(filter, rx.data(), lags, p0,
+                                                  real.energy, nullptr);
+    BOOST_CHECK_EQUAL(fast.lag, slow.lag);
+    BOOST_CHECK_SMALL(std::abs(fast.metric - slow.metric), 1e-6f);
+    // The metrics array really is the ratio the fast path cross-multiplied.
+    BOOST_CHECK_SMALL(std::abs(metrics[fast.lag] - fast.metric), 1e-6f);
+}
+
+BOOST_AUTO_TEST_CASE(fold_sfd_window_single_pass_tail_and_zeros)
+{
+    const size_t sym = 1016;
+    const size_t sfd_len = 8;
+    const std::vector<int8_t> seq = { 0, 1, -1, 0, 1, 1, -1, -1 };
+    // Deliberately not a multiple of the 8-complex vector width.
+    for (size_t fold_len : { size_t(1), size_t(7), size_t(9), size_t(699) }) {
+        std::vector<cf> rx = make_random(sfd_len * sym + fold_len + 8, 5150u);
+        std::vector<cf> got(fold_len, cf(9.f, 9.f));
+        std::vector<cf> ref(fold_len, cf(0.f, 0.f));
+        size_t first = 0;
+        while (first < sfd_len && seq[first] == 0)
+            ++first;
+        if (seq[first] == 1)
+            std::memcpy(ref.data(), rx.data() + first * sym,
+                        fold_len * sizeof(cf));
+        else
+            for (size_t k = 0; k < fold_len; ++k)
+                ref[k] = cf(0.f, 0.f) - rx[first * sym + k];
+        for (size_t i = first + 1; i < sfd_len; ++i) {
+            if (seq[i] == 1)
+                for (size_t k = 0; k < fold_len; ++k)
+                    ref[k] = ref[k] + rx[i * sym + k];
+            else if (seq[i] == -1)
+                for (size_t k = 0; k < fold_len; ++k)
+                    ref[k] = ref[k] - rx[i * sym + k];
+        }
+        rxopt::fold_sfd_window(rx.data(), sym, seq.data(), sfd_len, fold_len,
+                               got.data());
+        BOOST_CHECK_MESSAGE(
+            std::memcmp(got.data(), ref.data(), fold_len * sizeof(cf)) == 0,
+            "single-pass fold differs at fold_len=" << fold_len);
+    }
+}
+
+// MF-4: the (r * code) * p factorization must reproduce the dense template
+// correlation. The synthetic template here is exactly code*p with an 8-tap
+// pulse (chips are 8 samples apart, so the pulses do not overlap and the
+// factorization is exact); the reconstruction gate rejects anything else.
+BOOST_AUTO_TEST_CASE(shaped_sparse_factorization_matches_dense)
+{
+    using gr::uwb::demod::GetPreambleCode;
+    using gr::uwb::demod::kQm35CodeLength;
+    const size_t L = gr::uwb::demod::kQm35SamplesPerSymbol;
+
+    const float p[8] = { 0.10f, 0.35f, 0.55f, 0.40f, 0.20f, -0.10f, 0.05f,
+                         -0.02f };
+    const int8_t* pc = GetPreambleCode(10);
+    rxopt::SparseCirTemplate code;
+    rxopt::build_sparse_cir_template(pc, kQm35CodeLength, code);
+    BOOST_REQUIRE(!code.entries.empty());
+
+    std::vector<cf> tmpl(L, cf(0.f, 0.f));
+    for (const auto& e : code.entries)
+        for (size_t k = 0; k < 8; ++k)
+            if (e.pos + k < L)
+                tmpl[e.pos + k] += cf(static_cast<float>(e.sign) * p[k], 0.f);
+    float energy = 0.f;
+    for (const auto& v : tmpl)
+        energy += std::norm(v);
+    BOOST_REQUIRE(energy > 0.f);
+    for (auto& v : tmpl)
+        v /= std::sqrt(energy);
+
+    rxopt::ShapedSparseTemplate shaped;
+    BOOST_REQUIRE(rxopt::build_shaped_sparse_template(tmpl.data(), L, code,
+                                                      shaped));
+    BOOST_CHECK_EQUAL(static_cast<size_t>(shaped.nt), 8u);
+
+    rxopt::RealSyncTemplate real;
+    rxopt::build_real_sync_template(tmpl, real);
+    const rxopt::SyncMatchedFilter dense(tmpl.data(), L, real.taps_dup.data(),
+                                         nullptr);
+    const rxopt::SyncMatchedFilter fast(tmpl.data(), L, nullptr, &code, true,
+                                        &shaped);
+
+    const size_t lags = L;
+    const std::vector<cf> rx = make_random(L + lags + 8, 20261119u, 0.4f);
+    std::vector<cf> a(lags), b(lags);
+    size_t i = 0;
+    dense.for_each_lag(rx.data(), lags,
+                       [&](size_t, cf c, bool) { a[i++] = c; });
+    i = 0;
+    fast.for_each_lag(rx.data(), lags,
+                      [&](size_t, cf c, bool) { b[i++] = c; });
+
+    double num = 0.0, den = 0.0;
+    size_t peak_a = 0, peak_b = 0;
+    for (size_t k = 0; k < lags; ++k) {
+        const double d = std::abs(a[k] - b[k]);
+        num = std::max(num, d);
+        den += std::norm(a[k]);
+        if (std::norm(a[k]) > std::norm(a[peak_a]))
+            peak_a = k;
+        if (std::norm(b[k]) > std::norm(b[peak_b]))
+            peak_b = k;
+    }
+    const double rms = std::sqrt(den / static_cast<double>(lags));
+    BOOST_CHECK_LT(num, 1e-5 * rms);
+    BOOST_CHECK_EQUAL(peak_a, peak_b);
+
+    // Single-lag dot (the wide stride-scan path) must agree as well.
+    for (size_t k = 0; k < 64; ++k)
+        BOOST_CHECK_LT(std::abs(dense.dot(rx.data() + k) - fast.dot(rx.data() + k)),
+                       1e-5 * rms);
+
+    // Normalized metric and winner: the shaped path must not lower the peak.
+    const float pw = gr::uwb::core::sample_power_sum(rx.data(), L);
+    const float Et = shaped.energy;
+    const auto pd = rxopt::scan_normalized_sync(dense, rx.data(), lags, pw, Et);
+    const auto pf = rxopt::scan_normalized_sync(fast, rx.data(), lags, pw, Et);
+    BOOST_CHECK_EQUAL(pd.lag, pf.lag);
+    BOOST_CHECK_SMALL(std::abs(pd.metric - pf.metric), 1e-6f);
+
+    // A template that is not code*p must be rejected, so the caller keeps the
+    // legacy path instead of silently correlating with a wrong kernel.
+    std::vector<cf> not_factored(L);
+    for (size_t k = 0; k < L; ++k)
+        not_factored[k] = cf(0.01f * std::sin(0.37f * float(k)),
+                             0.01f * std::cos(0.11f * float(k)));
+    rxopt::ShapedSparseTemplate rejected;
+    BOOST_CHECK(!rxopt::build_shaped_sparse_template(not_factored.data(), L,
+                                                     code, rejected));
+    BOOST_CHECK(!rejected.valid);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

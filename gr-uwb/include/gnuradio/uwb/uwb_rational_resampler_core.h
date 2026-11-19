@@ -52,6 +52,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -62,7 +63,9 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -95,9 +98,54 @@
 #define UWB_RESAMP_HAVE_AVX512 0
 #endif
 
+#include <gnuradio/uwb/uwb_resampler_transposed.h>
+
 namespace gr {
 namespace uwb {
 namespace core {
+
+/**
+ * RS-3: 64-byte aligned allocator for the resampler coefficient tables.
+ *
+ * Only the duplicated/reversed SC16 tap tables need alignment: the AVX-512
+ * kernels load them with _mm512_load_ps.  The remaining float vectors keep
+ * std::vector's default allocator, so this stays a local, minimal helper.
+ */
+template <class T, size_t Align>
+struct AlignedAllocator {
+    using value_type = T;
+
+    AlignedAllocator() noexcept = default;
+    template <class U>
+    AlignedAllocator(const AlignedAllocator<U, Align>&) noexcept
+    {
+    }
+
+    T* allocate(size_t n)
+    {
+        return static_cast<T*>(
+            ::operator new(n * sizeof(T), std::align_val_t(Align)));
+    }
+
+    void deallocate(T* p, size_t) noexcept
+    {
+        ::operator delete(p, std::align_val_t(Align));
+    }
+
+    template <class U>
+    struct rebind {
+        using other = AlignedAllocator<U, Align>;
+    };
+};
+
+template <class T, size_t Align>
+bool operator==(const AlignedAllocator<T, Align>&,
+                const AlignedAllocator<T, Align>&) noexcept
+{
+    return true;
+}
+
+using AlignedFloatVector = std::vector<float, AlignedAllocator<float, 64>>;
 
 template <uint32_t Interp, uint32_t Decim>
 class RationalResamplerLmCore
@@ -109,6 +157,8 @@ public:
     static_assert(Interp <= 255, "interp must fit schedule_arm_ uint8_t");
 
     using gr_complex = std::complex<float>;
+    using TransposedKernel =
+        simd::transposed::TransposedResampler<Interp, Decim>;
 
     struct ProcessResult {
         size_t produced = 0;
@@ -155,6 +205,7 @@ public:
         }
 
         H_pad_ = (H_ + 7) & ~static_cast<size_t>(7);
+        taps_original_.assign(taps, taps + T);
         arms_.assign(static_cast<size_t>(kInterp) * H_, 0.0f);
         arms_rev_.assign(static_cast<size_t>(kInterp) * H_, 0.0f);
         arms_rev_pad_.assign(static_cast<size_t>(kInterp) * H_pad_, 0.0f);
@@ -184,9 +235,15 @@ public:
         hist_sc16_.assign(H_ > 0 ? H_ - 1 : 0, std::complex<int16_t>(0, 0));
         current_sc16_ = std::complex<int16_t>(0, 0);
 
-        work_.reserve(H_ + (1u << 20));
+        // RS-1: work_/work_sc16_ are sized lazily by the first streaming
+        // process()/process_sc16()/flush() entry (they already reserve
+        // `need` there).  Only the H_-sample history seed is materialised at
+        // construction; the old unconditional
+        //     work_.reserve(H_ + (1u << 20));
+        //     work_sc16_.reserve(H_ + (1u << 20));
+        // cost every worker ~12 MB it might never touch, because burst
+        // workers drive the one-shot process_window_sc16() path.
         work_.resize(H_);
-        work_sc16_.reserve(H_ + (1u << 20));
         work_sc16_.resize(H_);
 
         schedule_arm_.resize(static_cast<size_t>(kInterp) * kInterp);
@@ -264,6 +321,7 @@ public:
 
     void force_scalar_kernel()
     {
+        transposed_enabled_ = false;
         fir_kind_ = FirKind::Scalar;
         loop_kind_ = LoopKind::Macroblock;
         fc32_use_avx512_ = false;
@@ -272,6 +330,7 @@ public:
 
     void enable_volk_kernel()
     {
+        transposed_enabled_ = false;
         fir_kind_ = FirKind::Volk;
         loop_kind_ = LoopKind::Macroblock;
         fc32_use_avx512_ = false;
@@ -281,6 +340,28 @@ public:
     /** Force kernel for A/B: scalar|scalar_legacy|volk|volk_legacy|avx2|avx512|default */
     void set_kernel(const std::string& name)
     {
+        // RS-5 explicit transposed kernel selection.  It only changes the
+        // one-shot process_window_sc16() path (resample_sc16_window); the
+        // streaming process()/process_sc16() state machine keeps the selected
+        // macroblock kernel.  Any other name turns the transposed path off.
+        if (name == "transposed" || name == "transposed_auto") {
+            enable_transposed("auto");
+            return;
+        }
+        if (name == "transposed_avx2") {
+            enable_transposed("avx2");
+            return;
+        }
+        if (name == "transposed_avx512") {
+            enable_transposed("avx512");
+            return;
+        }
+        if (name == "transposed_scalar") {
+            enable_transposed("scalar");
+            return;
+        }
+        transposed_enabled_ = false;
+
         if (name == "scalar" || name == "scalar_macroblock") {
             force_scalar_kernel();
         } else if (name == "scalar_legacy") {
@@ -436,12 +517,21 @@ public:
      */
     const char* sc16_kernel_variant() const
     {
+        if (transposed_enabled_ && transposed_)
+            return transposed_->kernel_name();
 #if UWB_RESAMP_HAVE_AVX2 || UWB_RESAMP_HAVE_AVX512
         if ((fir_kind_ == FirKind::Avx2 || fir_kind_ == FirKind::Avx512) &&
             fixed_phase_)
             return "c1_fixed_phase";
 #endif
         return "default";
+    }
+
+    bool transposed_enabled() const { return transposed_enabled_; }
+
+    const char* transposed_kernel_name() const
+    {
+        return transposed_ ? transposed_->kernel_name() : "off";
     }
 
     ProcessResult process(const gr_complex* in,
@@ -671,6 +761,170 @@ public:
         return process_sc16(in_sc16, ninput, scale, out, SIZE_MAX / 4).produced;
     }
 
+    /**
+     * RS-1: one-shot whole-window SC16 -> CF32 resampling.
+     *
+     * Equivalent to reset() + process_sc16() + flush-to-completion, but the
+     * complete macroblocks in the middle of the window are consumed DIRECTLY
+     * from `in` (zero copy): only the leading macroblocks that read the
+     * implicit H-1 leading zeros, and the trailing macroblocks/remainder that
+     * read past the end, are assembled in small stack buffers.  That removes
+     * the whole-window work_sc16_ memcpy (224 KB for a 56k sample window,
+     * ~1.8 MB for the 450k production window) from the burst worker's hot
+     * path.
+     *
+     * The per-output arithmetic is the existing kernel: for the middle
+     * macroblocks it is the same macroblock schedule / C1 descriptor table and
+     * the same tap tables, so the result is BIT-IDENTICAL to the streaming
+     * sequence (the QA gate checks memcmp == 0).
+     *
+     * If `max_out` cannot hold the complete window (or the tap arm is so large
+     * that the fixed stack buffers would not fit), the call falls back to the
+     * normal reset + process_sc16 + flush sequence and keeps streaming
+     * semantics.  resample_sc16_window() always sizes output to the expected
+     * length, so production takes the zero-copy path.
+     */
+    ProcessResult process_window_sc16(const std::complex<int16_t>* in,
+                                      size_t ninput,
+                                      float scale,
+                                      gr_complex* out,
+                                      size_t max_out)
+    {
+        const size_t lout = expected_output_length(ninput, T_);
+
+        if (transposed_enabled_ && transposed_ && max_out >= lout) {
+            // RS-5: the transposed kernel is a complete one-shot window kernel
+            // and owns no stream state, so a core reset is all that is needed.
+            reset();
+            const size_t produced =
+                transposed_->process_window_sc16(in, ninput, scale, out, lout);
+            input_items_ = ninput;
+            finish_window_sc16(produced, ninput);
+            return ProcessResult{ produced, ninput };
+        }
+
+        if (max_out < lout || !window_scratch_fits()) {
+            reset();
+            ProcessResult r = process_sc16(in, ninput, scale, out, max_out);
+            while (r.produced < max_out) {
+                const size_t n = flush(out + r.produced, max_out - r.produced);
+                if (n == 0)
+                    break;
+                r.produced += n;
+            }
+            return r;
+        }
+
+        reset();
+        is_sc16_mode_ = true;
+        ensure_scaled_taps(scale);
+        input_items_ = ninput;
+        output_items_ = 0;
+
+        if (lout == 0) {
+            finish_window_sc16(0, ninput);
+            return ProcessResult{ 0, ninput };
+        }
+
+        // Full macroblocks from a reset start all begin at phase 0 (one
+        // macroblock consumes exactly kDecim inputs and returns to phase 0).
+        const size_t n_mb_total = lout / kInterp;
+        const size_t rem = lout - n_mb_total * kInterp;
+        const size_t max_win_off =
+            ((static_cast<size_t>(kInterp) - 1) * kDecim) / kInterp;
+        // The AVX-512 sliding kernel reads 8 complex samples past the last
+        // tap of win0, so reserve H_pad + 8 samples of readable room.
+        const size_t read_slack = H_pad_ + 8;
+
+        // Leading macroblocks whose window starts before `in`.
+        size_t m_head = 0;
+        while (m_head < n_mb_total && m_head * static_cast<size_t>(kDecim) < H_ - 1)
+            ++m_head;
+
+        // Interior run: every read (including the extra slide/reuse reads)
+        // stays inside [0, ninput).
+        size_t m_int_end = m_head;
+        while (m_int_end < n_mb_total &&
+               m_int_end * static_cast<size_t>(kDecim) + max_win_off +
+                       read_slack <=
+                   ninput)
+            ++m_int_end;
+
+        const int64_t head_span =
+            (m_head == 0)
+                ? 0
+                : static_cast<int64_t>((m_head - 1) * kDecim + max_win_off +
+                                       read_slack + (H_ - 1));
+        const int64_t tail_origin =
+            static_cast<int64_t>(m_int_end) * static_cast<int64_t>(kDecim) -
+            static_cast<int64_t>(H_ - 1);
+        const int64_t max_post =
+            static_cast<int64_t>((lout - 1) * kDecim / kInterp);
+        const int64_t tail_span =
+            max_post + static_cast<int64_t>(read_slack) - tail_origin;
+
+        // Guarded by window_scratch_fits().
+        std::array<std::complex<int16_t>, kWindowScratchSamples> head_buf{};
+        std::array<std::complex<int16_t>, kWindowScratchSamples> tail_buf{};
+
+        if (head_span > 0) {
+            for (int64_t i = 0; i < head_span; ++i) {
+                const int64_t v = i - static_cast<int64_t>(H_ - 1);
+                head_buf[static_cast<size_t>(i)] =
+                    (v >= 0 && v < static_cast<int64_t>(ninput))
+                        ? in[static_cast<size_t>(v)]
+                        : std::complex<int16_t>(0, 0);
+            }
+            for (size_t m = 0; m < m_head; ++m)
+                window_macroblock_sc16(head_buf.data() + m * kDecim,
+                                       out + m * kInterp);
+        }
+
+        if (m_int_end > m_head) {
+            const int64_t base_v =
+                static_cast<int64_t>(m_head) * static_cast<int64_t>(kDecim) -
+                static_cast<int64_t>(H_ - 1);
+            window_macroblocks_sc16(in + base_v, m_int_end - m_head,
+                                    out + m_head * kInterp);
+        }
+
+        if (m_int_end < n_mb_total || rem > 0) {
+            for (int64_t i = 0; i < tail_span; ++i) {
+                const int64_t v = tail_origin + i;
+                tail_buf[static_cast<size_t>(i)] =
+                    (v >= 0 && v < static_cast<int64_t>(ninput))
+                        ? in[static_cast<size_t>(v)]
+                        : std::complex<int16_t>(0, 0);
+            }
+        }
+
+        for (size_t m = m_int_end; m < n_mb_total; ++m) {
+            const int64_t idx = static_cast<int64_t>(m) *
+                                    static_cast<int64_t>(kDecim) -
+                                static_cast<int64_t>(H_ - 1) - tail_origin;
+            window_macroblock_sc16(tail_buf.data() + idx,
+                                   out + m * kInterp);
+        }
+
+        // Remainder outputs of the final partial macroblock.
+        const size_t rem_base = n_mb_total * kInterp;
+        for (size_t r = 0; r < rem; ++r) {
+            const uint32_t phase =
+                static_cast<uint32_t>((r * kDecim) % kInterp);
+            const int64_t post =
+                static_cast<int64_t>(n_mb_total) *
+                    static_cast<int64_t>(kDecim) +
+                static_cast<int64_t>((r * kDecim) / kInterp);
+            const int64_t idx =
+                post - static_cast<int64_t>(H_ - 1) - tail_origin;
+            out[rem_base + r] =
+                filter_window_sc16(phase, tail_buf.data() + idx);
+        }
+
+        finish_window_sc16(lout, ninput);
+        return ProcessResult{ lout, ninput };
+    }
+
     size_t flush(gr_complex* out, size_t max_out)
     {
         [[maybe_unused]] const bool first_flush = !flush_mode_;
@@ -823,8 +1077,11 @@ public:
     bool schedule_scratch_allocated() const { return !sched_arm_buf_.empty(); }
 
     const std::vector<float>& arms_rev_pad() const { return arms_rev_pad_; }
-    const std::vector<float>& arms_rev_dup() const { return arms_rev_dup_; }
-    const std::vector<float>& arms_rev_dup_scaled() const { return arms_rev_dup_scaled_; }
+    const AlignedFloatVector& arms_rev_dup() const { return arms_rev_dup_; }
+    const AlignedFloatVector& arms_rev_dup_scaled() const
+    {
+        return arms_rev_dup_scaled_;
+    }
     float last_scale() const { return last_scale_; }
     const std::vector<std::complex<int16_t>>& hist_sc16() const { return hist_sc16_; }
     std::complex<int16_t> current_sc16() const { return current_sc16_; }
@@ -918,11 +1175,16 @@ private:
     size_t T_;
     size_t H_;
     size_t H_pad_;
+    // Original polyphase taps (order used by the transposed kernel builder).
+    std::vector<float> taps_original_;
     std::vector<float> arms_;
     std::vector<float> arms_rev_;
     std::vector<float> arms_rev_pad_;
-    std::vector<float> arms_rev_dup_;
-    std::vector<float> arms_rev_dup_scaled_;
+    // RS-3: the SC16 tap tables are 64-byte aligned so the AVX-512 kernels can
+    // use _mm512_load_ps.  H_pad is always a multiple of 8, hence every arm
+    // base (arm * 2 * H_pad floats) keeps the 64-byte alignment.
+    AlignedFloatVector arms_rev_dup_;
+    AlignedFloatVector arms_rev_dup_scaled_;
     float last_scale_ = 0.0f;
     std::vector<gr_complex> hist_;
     std::vector<gr_complex> work_;
@@ -960,6 +1222,9 @@ private:
     // 16/32, so it stays on AVX2 unless the caller asks for the wide kernel.
     bool fc32_use_avx512_ = false;
     const char* kernel_name_ = "volk_macroblock";
+    // RS-5: optional one-shot transposed window kernel (explicit switch).
+    bool transposed_enabled_ = false;
+    std::unique_ptr<TransposedKernel> transposed_;
     int nworkers_;
     bool profile_enabled_;
     ProfileStats profile_;
@@ -1077,6 +1342,16 @@ private:
             });
             pool_job_ = nullptr;
         }
+    }
+
+    void enable_transposed(const std::string& kernel)
+    {
+        if (!transposed_) {
+            transposed_ = std::make_unique<TransposedKernel>(
+                taps_original_.data(), taps_original_.size());
+        }
+        transposed_->set_kernel(kernel);
+        transposed_enabled_ = true;
     }
 
     void select_default_kernel()
@@ -1351,6 +1626,13 @@ private:
         return gr_complex(re, im);
     }
 
+    // RS-4 note (2026-11-19): a compile-time reuse-mask specialisation and a
+    // branchless pointer-preselect variant of this AVX2 kernel were both
+    // measured on the i7-12700 AVX2 build and NOT retained: they regressed the
+    // 56k/450k realtime window by 7-23% (extra loads / code bloat) with no
+    // stable gain.  The pre-existing branchy form below is kept verbatim.
+    // The AVX-512 C1 path does implement the branchless sliding window (see
+    // fir_sc16_4x_slide_impl in uwb_rational_resampler_avx512.cc).
     static inline void fir_avx2_sc16_4x(const float* h_base,
                                         size_t h_stride,
                                         uint8_t arm0, const std::complex<int16_t>* win0,
@@ -1573,7 +1855,6 @@ private:
         _mm_storeu_ps(reinterpret_cast<float*>(dest4), out01);
         _mm_storeu_ps(reinterpret_cast<float*>(dest4 + 2), out23);
     }
-
 #endif
 
     gr_complex filter_window_sc16(uint32_t arm_idx,
@@ -1685,6 +1966,219 @@ private:
         const float* trev =
             arms_rev_.data() + static_cast<size_t>(arm_idx) * H_;
         return fir_scalar(trev, win_oldest, H_);
+    }
+
+    // ---------------------------------------------------------------------
+    // RS-1 zero-copy whole-window helpers
+    // ---------------------------------------------------------------------
+
+    // Small stack buffers for the leading/trailing macroblocks.  Guarded by
+    // window_scratch_fits(); profiles that would not fit fall back to the
+    // streaming path instead of overflowing.
+    static constexpr size_t kWindowScratchSamples = 1024;
+
+    bool window_scratch_fits() const
+    {
+        const size_t slack = H_pad_ + 8;
+        const size_t head = 3 * static_cast<size_t>(kDecim) + 2 * slack + H_;
+        const size_t tail =
+            6 * static_cast<size_t>(kDecim) + 2 * slack + H_ + 64;
+        return head <= kWindowScratchSamples &&
+               tail <= kWindowScratchSamples;
+    }
+
+    void finish_window_sc16(size_t produced, size_t /*ninput*/)
+    {
+        output_items_ = produced;
+        is_sc16_mode_ = true;
+        flush_mode_ = true;
+        have_current_ = false;
+        current_sc16_ = std::complex<int16_t>(0, 0);
+        ctr_ = static_cast<uint32_t>(
+            (static_cast<uint64_t>(produced) * kDecim) % kInterp);
+        std::fill(hist_sc16_.begin(), hist_sc16_.end(),
+                  std::complex<int16_t>(0, 0));
+    }
+
+#if UWB_RESAMP_HAVE_AVX2
+    template <size_t H_PAD>
+    void window_macroblocks_c1_avx2_hp(const std::complex<int16_t>* base_win,
+                                       size_t n_mb,
+                                       gr_complex* dest)
+    {
+        const float* const h_base = arms_rev_dup_scaled_.data();
+        const FixedPhaseGroup* const groups = fp_groups_.data();
+        const FixedPhaseTail* const tails = fp_tail_.data();
+        for (size_t mb = 0; mb < n_mb; ++mb) {
+            const std::complex<int16_t>* const base =
+                base_win + mb * static_cast<size_t>(kDecim);
+            gr_complex* const d = dest + mb * kInterp;
+            for (uint32_t g = 0; g < kMacroblockGroups; ++g) {
+                const FixedPhaseGroup& e = groups[g];
+                fir_sc16_4x_hp_any<H_PAD, false>(
+                    h_base + e.tap[0], h_base + e.tap[1],
+                    h_base + e.tap[2], h_base + e.tap[3],
+                    base + e.win[0], base + e.win[1], base + e.win[2],
+                    base + e.win[3], H_pad_, e.reuse, d + 4 * g);
+            }
+            for (uint32_t t = 0; t < kMacroblockTail; ++t) {
+                const size_t o =
+                    4 * static_cast<size_t>(kMacroblockGroups) + t;
+                d[o] = fir_sc16_any<false>(h_base + tails[t].tap,
+                                           base + tails[t].win, H_pad_);
+            }
+        }
+    }
+#endif
+
+#if UWB_RESAMP_HAVE_AVX512
+    template <size_t H_PAD>
+    void window_macroblocks_c1_avx512_hp(const std::complex<int16_t>* base_win,
+                                         size_t n_mb,
+                                         gr_complex* dest)
+    {
+        const auto* desc =
+            reinterpret_cast<const simd::avx512::C1GroupDesc*>(
+                fp_groups_.data());
+        const auto* tails =
+            reinterpret_cast<const simd::avx512::C1TailDesc*>(
+                fp_tail_.data());
+        if constexpr (H_PAD == 16)
+            simd::avx512::fir_sc16_macroblocks_c1_hp16(
+                arms_rev_dup_scaled_.data(), desc, kMacroblockGroups, n_mb,
+                kDecim, kInterp, tails, kMacroblockTail, base_win, dest);
+        else if constexpr (H_PAD == 24)
+            simd::avx512::fir_sc16_macroblocks_c1_hp24(
+                arms_rev_dup_scaled_.data(), desc, kMacroblockGroups, n_mb,
+                kDecim, kInterp, tails, kMacroblockTail, base_win, dest);
+        else if constexpr (H_PAD == 32)
+            simd::avx512::fir_sc16_macroblocks_c1_hp32(
+                arms_rev_dup_scaled_.data(), desc, kMacroblockGroups, n_mb,
+                kDecim, kInterp, tails, kMacroblockTail, base_win, dest);
+        else if constexpr (H_PAD == 48)
+            simd::avx512::fir_sc16_macroblocks_c1_hp48(
+                arms_rev_dup_scaled_.data(), desc, kMacroblockGroups, n_mb,
+                kDecim, kInterp, tails, kMacroblockTail, base_win, dest);
+        else
+            simd::avx512::fir_sc16_macroblocks_c1_generic(
+                arms_rev_dup_scaled_.data(), desc, kMacroblockGroups, n_mb,
+                kDecim, kInterp, tails, kMacroblockTail, base_win, H_pad_,
+                dest);
+    }
+#endif
+
+    void window_macroblocks_c1(const std::complex<int16_t>* base_win,
+                               size_t n_mb,
+                               gr_complex* dest)
+    {
+#if UWB_RESAMP_HAVE_AVX512
+        if (fir_kind_ == FirKind::Avx512) {
+            if (hp_class_ == 16)
+                window_macroblocks_c1_avx512_hp<16>(base_win, n_mb, dest);
+            else if (hp_class_ == 24)
+                window_macroblocks_c1_avx512_hp<24>(base_win, n_mb, dest);
+            else if (hp_class_ == 32)
+                window_macroblocks_c1_avx512_hp<32>(base_win, n_mb, dest);
+            else if (hp_class_ == 48)
+                window_macroblocks_c1_avx512_hp<48>(base_win, n_mb, dest);
+            else
+                window_macroblocks_c1_avx512_hp<0>(base_win, n_mb, dest);
+            return;
+        }
+#endif
+#if UWB_RESAMP_HAVE_AVX2
+        if (hp_class_ == 16)
+            window_macroblocks_c1_avx2_hp<16>(base_win, n_mb, dest);
+        else if (hp_class_ == 24)
+            window_macroblocks_c1_avx2_hp<24>(base_win, n_mb, dest);
+        else if (hp_class_ == 32)
+            window_macroblocks_c1_avx2_hp<32>(base_win, n_mb, dest);
+        else if (hp_class_ == 48)
+            window_macroblocks_c1_avx2_hp<48>(base_win, n_mb, dest);
+        else
+            window_macroblocks_c1_avx2_hp<0>(base_win, n_mb, dest);
+#else
+        (void)base_win;
+        (void)n_mb;
+        (void)dest;
+#endif
+    }
+
+    /**
+     * Compute n_mb consecutive full macroblocks, each starting at phase 0.
+     * `base_win` is the oldest-first window of macroblock 0 (virtual sample
+     * index m*kDecim - (H-1)); no state outside `dest` is touched.
+     */
+    void window_macroblocks_sc16(const std::complex<int16_t>* base_win,
+                                 size_t n_mb,
+                                 gr_complex* dest)
+    {
+        if (n_mb == 0)
+            return;
+
+        if ((fir_kind_ == FirKind::Avx2 || fir_kind_ == FirKind::Avx512) &&
+            fixed_phase_) {
+            window_macroblocks_c1(base_win, n_mb, dest);
+            return;
+        }
+
+        const uint8_t* const arms = schedule_arm_.data(); // phase 0
+        const uint8_t* const advs = schedule_adv_.data();
+
+#if UWB_RESAMP_HAVE_AVX512
+        if (fir_kind_ == FirKind::Avx512) {
+            simd::avx512::fir_sc16_macroblock(
+                arms_rev_dup_scaled_.data(), 2 * H_pad_, arms, advs, base_win,
+                kDecim, n_mb, kInterp, H_pad_, dest);
+            return;
+        }
+#endif
+#if UWB_RESAMP_HAVE_AVX2
+        if (fir_kind_ == FirKind::Avx2) {
+            for (size_t mb = 0; mb < n_mb; ++mb) {
+                const std::complex<int16_t>* const base =
+                    base_win + mb * static_cast<size_t>(kDecim);
+                gr_complex* const d = dest + mb * kInterp;
+                size_t cur = 0;
+                uint32_t o = 0;
+                for (; o + 4 <= kInterp; o += 4) {
+                    const std::complex<int16_t>* const w0 = base + cur;
+                    cur += advs[o];
+                    const std::complex<int16_t>* const w1 = base + cur;
+                    cur += advs[o + 1];
+                    const std::complex<int16_t>* const w2 = base + cur;
+                    cur += advs[o + 2];
+                    const std::complex<int16_t>* const w3 = base + cur;
+                    cur += advs[o + 3];
+                    fir_avx2_sc16_4x(arms_rev_dup_scaled_.data(), 2 * H_pad_,
+                                     arms[o], w0, arms[o + 1], w1,
+                                     arms[o + 2], w2, arms[o + 3], w3, H_pad_,
+                                     d + o);
+                }
+                for (; o < kInterp; ++o) {
+                    d[o] = filter_window_sc16(arms[o], base + cur);
+                    cur += advs[o];
+                }
+            }
+            return;
+        }
+#endif
+        for (size_t mb = 0; mb < n_mb; ++mb) {
+            const std::complex<int16_t>* const base =
+                base_win + mb * static_cast<size_t>(kDecim);
+            gr_complex* const d = dest + mb * kInterp;
+            size_t cur = 0;
+            for (uint32_t o = 0; o < kInterp; ++o) {
+                d[o] = filter_window_sc16(arms[o], base + cur);
+                cur += advs[o];
+            }
+        }
+    }
+
+    void window_macroblock_sc16(const std::complex<int16_t>* base_win,
+                                gr_complex* dest)
+    {
+        window_macroblocks_sc16(base_win, 1, dest);
     }
 
     /** Compute consumed from posts_taken and started_held. */
@@ -2431,47 +2925,72 @@ private:
         size_t produced = 0;
         const float* const h_base = arms_rev_dup_scaled_.data();
 
-        while (produced + kInterp <= max_out &&
-               post_i + static_cast<size_t>(kDecim) < post_n) {
-            const size_t base_idx = hist_n + post_i + 1 - H_;
-            gr_complex* const dest = out + produced;
+        // Number of consecutive full macroblocks this call can run under the
+        // exact same condition the per-macroblock loop used:
+        //   produced + (k+1)*Interp <= max_out
+        //   post_i  + (k+1)*Decim  <  post_n
+        size_t n_mb = 0;
+        while (produced + (n_mb + 1) * kInterp <= max_out &&
+               post_i + (n_mb + 1) * static_cast<size_t>(kDecim) < post_n)
+            ++n_mb;
+        if (n_mb == 0)
+            return 0;
 
-            if constexpr (FP) {
-                const FixedPhaseGroup* const groups =
-                    fp_groups_.data() +
-                    static_cast<size_t>(ctr_) * kMacroblockGroups;
+        if constexpr (FP) {
+            const FixedPhaseGroup* const groups =
+                fp_groups_.data() +
+                static_cast<size_t>(ctr_) * kMacroblockGroups;
 #if UWB_RESAMP_HAVE_AVX512
-                if constexpr (AVX512) {
-                    // One call per macroblock, not one per 4-output group.
-                    // The descriptor layout is shared with the AVX-512 header
-                    // (C1GroupDesc); the static_assert catches a drift.
-                    static_assert(sizeof(FixedPhaseGroup) ==
-                                      sizeof(simd::avx512::C1GroupDesc),
-                                  "C1 descriptor layout mismatch");
-                    const auto* desc =
-                        reinterpret_cast<const simd::avx512::C1GroupDesc*>(
-                            groups);
-                    const std::complex<int16_t>* const base_win =
-                        work_sc16_.data() + base_idx;
-                    if constexpr (H_PAD == 16)
-                        simd::avx512::fir_sc16_macroblock_c1_hp16(
-                            h_base, desc, kMacroblockGroups, base_win, dest);
-                    else if constexpr (H_PAD == 24)
-                        simd::avx512::fir_sc16_macroblock_c1_hp24(
-                            h_base, desc, kMacroblockGroups, base_win, dest);
-                    else if constexpr (H_PAD == 32)
-                        simd::avx512::fir_sc16_macroblock_c1_hp32(
-                            h_base, desc, kMacroblockGroups, base_win, dest);
-                    else if constexpr (H_PAD == 48)
-                        simd::avx512::fir_sc16_macroblock_c1_hp48(
-                            h_base, desc, kMacroblockGroups, base_win, dest);
-                    else
-                        simd::avx512::fir_sc16_macroblock_c1_generic(
-                            h_base, desc, kMacroblockGroups, base_win, H_pad_,
-                            dest);
-                } else
+            if constexpr (AVX512) {
+                // RS-2: one cross-TU call for ALL macroblocks of this batch,
+                // leftovers included.
+                static_assert(sizeof(FixedPhaseGroup) ==
+                                  sizeof(simd::avx512::C1GroupDesc),
+                              "C1 descriptor layout mismatch");
+                static_assert(sizeof(FixedPhaseTail) ==
+                                  sizeof(simd::avx512::C1TailDesc),
+                              "C1 tail layout mismatch");
+                const auto* desc =
+                    reinterpret_cast<const simd::avx512::C1GroupDesc*>(groups);
+                const auto* tails =
+                    reinterpret_cast<const simd::avx512::C1TailDesc*>(
+                        fp_tail_.data() +
+                        static_cast<size_t>(ctr_) * kTailStride);
+                const std::complex<int16_t>* const base_win =
+                    work_sc16_.data() + (hist_n + post_i + 1 - H_);
+                if constexpr (H_PAD == 16)
+                    simd::avx512::fir_sc16_macroblocks_c1_hp16(
+                        h_base, desc, kMacroblockGroups, n_mb, kDecim, kInterp,
+                        tails, kMacroblockTail, base_win,
+                        out + produced);
+                else if constexpr (H_PAD == 24)
+                    simd::avx512::fir_sc16_macroblocks_c1_hp24(
+                        h_base, desc, kMacroblockGroups, n_mb, kDecim, kInterp,
+                        tails, kMacroblockTail, base_win,
+                        out + produced);
+                else if constexpr (H_PAD == 32)
+                    simd::avx512::fir_sc16_macroblocks_c1_hp32(
+                        h_base, desc, kMacroblockGroups, n_mb, kDecim, kInterp,
+                        tails, kMacroblockTail, base_win,
+                        out + produced);
+                else if constexpr (H_PAD == 48)
+                    simd::avx512::fir_sc16_macroblocks_c1_hp48(
+                        h_base, desc, kMacroblockGroups, n_mb, kDecim, kInterp,
+                        tails, kMacroblockTail, base_win,
+                        out + produced);
+                else
+                    simd::avx512::fir_sc16_macroblocks_c1_generic(
+                        h_base, desc, kMacroblockGroups, n_mb, kDecim, kInterp,
+                        tails, kMacroblockTail, base_win, H_pad_,
+                        out + produced);
+            } else
 #endif
-                {
+            {
+                for (size_t mb = 0; mb < n_mb; ++mb) {
+                    const size_t base_idx =
+                        hist_n + post_i + mb * static_cast<size_t>(kDecim) +
+                        1 - H_;
+                    gr_complex* const dest = out + produced + mb * kInterp;
                     for (uint32_t g = 0; g < kMacroblockGroups; ++g) {
                         const FixedPhaseGroup& d = groups[g];
                         fir_sc16_4x_hp_any<H_PAD, false>(
@@ -2487,26 +3006,43 @@ private:
                                 static_cast<size_t>(d.win[3]),
                             H_pad_, d.reuse, dest + 4 * g);
                     }
-                }
-                const FixedPhaseTail* const tails =
-                    fp_tail_.data() +
-                    static_cast<size_t>(ctr_) * kTailStride;
-                for (uint32_t t = 0; t < kMacroblockTail; ++t) {
-                    const size_t o = 4 * static_cast<size_t>(kMacroblockGroups) + t;
-                    dest[o] = fir_sc16_any<AVX512>(
-                        h_base + tails[t].tap,
-                        work_sc16_.data() + base_idx +
-                            static_cast<size_t>(tails[t].win),
-                        H_pad_);
+                    const FixedPhaseTail* const tails =
+                        fp_tail_.data() +
+                        static_cast<size_t>(ctr_) * kTailStride;
+                    for (uint32_t t = 0; t < kMacroblockTail; ++t) {
+                        const size_t o =
+                            4 * static_cast<size_t>(kMacroblockGroups) + t;
+                        dest[o] = fir_sc16_any<false>(
+                            h_base + tails[t].tap,
+                            work_sc16_.data() + base_idx +
+                                static_cast<size_t>(tails[t].win),
+                            H_pad_);
+                    }
                 }
             }
-
-            produced += kInterp;
-            output_items_ += kInterp;
-            post_i += static_cast<size_t>(kDecim);
-            current_sc16_ = work_sc16_[hist_n + post_i];
-            have_current_ = true;
+        } else {
+            // Unreachable from run_macroblock_sc16(); kept for completeness.
+            for (size_t mb = 0; mb < n_mb; ++mb) {
+                const size_t base_idx =
+                    hist_n + post_i + mb * static_cast<size_t>(kDecim) + 1 - H_;
+                gr_complex* const dest = out + produced + mb * kInterp;
+                size_t cur = 0;
+                const uint32_t sched_base =
+                    static_cast<uint32_t>(ctr_) * kInterp;
+                for (uint32_t o = 0; o < kInterp; ++o) {
+                    dest[o] = filter_window_sc16(
+                        schedule_arm_[sched_base + o],
+                        work_sc16_.data() + base_idx + cur);
+                    cur += schedule_adv_[sched_base + o];
+                }
+            }
         }
+
+        produced += n_mb * kInterp;
+        output_items_ += n_mb * kInterp;
+        post_i += n_mb * static_cast<size_t>(kDecim);
+        current_sc16_ = work_sc16_[hist_n + post_i];
+        have_current_ = true;
         return produced;
     }
 

@@ -1127,10 +1127,12 @@ bool estimate_discrete_cir(const std::complex<float>* y,
         // wholly inside both the first fit_reps and the visible IQ prefix.
         const int64_t training_end = std::min(visible_end,
                               q + int64_t(cfg.fit_reps*sps));
-        const size_t rows_train = (training_end > q) ? size_t(training_end - q) : 0;
-        const size_t max_rot_len = std::max(rows_train, cfg.fit_reps * sps);
+        // Factor the rotation: per repetition only one scalar exp(-j*w*lo_k)
+        // is needed, and the per-sample ramp is applied once to the `width`
+        // coherent sum at the end.  The old table covered up to fit_reps*sps
+        // samples (~1 MB of doubles).
         if (cfo != 0.0) {
-            build_cfo_rotation(cfo, fs, max_rot_len, scratch.cfo_rot);
+            build_cfo_rotation(cfo, fs, width, scratch.cfo_rot);
         }
 
         for (size_t k = 1; k < cfg.fit_reps; ++k) {
@@ -1141,32 +1143,27 @@ bool estimate_discrete_cir(const std::complex<float>* y,
                 for (size_t j = 0; j < width; ++j) {
                     avg[j] += cd(y[size_t(lo) + j]);
                 }
-            } else if (rel_lo >= 0 && size_t(rel_lo + width) <= scratch.cfo_rot.size()) {
-                const cd* const rot_base = scratch.cfo_rot.data() + rel_lo;
+            } else {
+                const cd alpha = std::polar(1.0, -omega * double(rel_lo));
                 size_t j = 0;
                 const size_t lim = (width >= 4) ? (width - 3) : 0;
                 for (; j < lim; j += 4) {
-                    avg[j + 0] += cd(y[size_t(lo) + j + 0]) * rot_base[j + 0];
-                    avg[j + 1] += cd(y[size_t(lo) + j + 1]) * rot_base[j + 1];
-                    avg[j + 2] += cd(y[size_t(lo) + j + 2]) * rot_base[j + 2];
-                    avg[j + 3] += cd(y[size_t(lo) + j + 3]) * rot_base[j + 3];
+                    avg[j + 0] += cd(y[size_t(lo) + j + 0]) * alpha;
+                    avg[j + 1] += cd(y[size_t(lo) + j + 1]) * alpha;
+                    avg[j + 2] += cd(y[size_t(lo) + j + 2]) * alpha;
+                    avg[j + 3] += cd(y[size_t(lo) + j + 3]) * alpha;
                 }
                 for (; j < width; ++j) {
-                    avg[j] += cd(y[size_t(lo) + j]) * rot_base[j];
-                }
-            } else {
-                cd phase = std::polar(1.0, -omega * double(rel_lo));
-                const cd step = std::polar(1.0, -omega);
-                for (size_t j = 0; j < width; ++j) {
-                    if ((j & 1023u) == 0)
-                        phase = std::polar(1.0, -omega * double(rel_lo + int64_t(j)));
-                    avg[j] += cd(y[size_t(lo) + j]) * phase;
-                    phase *= step;
+                    avg[j] += cd(y[size_t(lo) + j]) * alpha;
                 }
             }
             ++valid;
         }
         if (!valid) return finish("failed", "short_correlation_prefix");
+        if (cfo != 0.0) {
+            for (size_t j = 0; j < width; ++j)
+                avg[j] *= scratch.cfo_rot[j];
+        }
         if (scratch.cir_sparse_tmpl.code_energy <= 0.0f)
             return finish("failed", "empty_impulse_code");
         const float inv_valid = 1.0f / static_cast<float>(valid);
@@ -1262,6 +1259,12 @@ bool estimate_discrete_cir(const std::complex<float>* y,
                     }
                 }
             }
+        }
+        if (cfo != 0.0) {
+            // The residual validation below indexes rot[m] over the whole
+            // training interval.  Re-expand the same table to that length; the
+            // averaging loop above only needed the width-length ramp.
+            build_cfo_rotation(cfo, fs, rows, scratch.cfo_rot);
         }
         if (cfo == 0.0) {
             double num0 = 0.0, num1 = 0.0, num2 = 0.0, num3 = 0.0;

@@ -956,7 +956,7 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_recovers_four_symbol_backward)
     BOOST_CHECK_GE(sr.metric, 0.95f);
 }
 
-BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_bounded_five_symbol_forward)
+BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_grid_rescues_five_symbol_forward)
 {
     std::vector<gr_complex> iq, tmpl;
     BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
@@ -975,11 +975,17 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_bounded_five_symbol_forward)
 
     const auto sfd_seq = GetSfdSequence("ieee");
     SfdResult sr;
-    BOOST_CHECK(!core::stage_sfd(iq.data(), iq.size(), prof, tr, sfd_seq, tmpl,
-                                 sr, scratch));
+    // The +/-4-symbol direct windows miss, but the +/-36-symbol discrete grid
+    // is the documented low-SNR rescue and must find the true SFD.  (The old
+    // `par_only &&` guard in polarity_ok made every ieee/decawave SFD fail
+    // that check, which is why this test used to expect a miss.)
+    BOOST_REQUIRE(core::stage_sfd(iq.data(), iq.size(), prof, tr, sfd_seq, tmpl,
+                                  sr, scratch));
+    BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(75008));
+    BOOST_CHECK_GE(sr.metric, 0.95f);
 }
 
-BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_bounded_five_symbol_backward)
+BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_grid_rescues_five_symbol_backward)
 {
     std::vector<gr_complex> iq, tmpl;
     BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
@@ -998,8 +1004,46 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r1_sfd_bounded_five_symbol_backward)
 
     const auto sfd_seq = GetSfdSequence("ieee");
     SfdResult sr;
-    BOOST_CHECK(!core::stage_sfd(iq.data(), iq.size(), prof, tr, sfd_seq, tmpl,
-                                 sr, scratch));
+    BOOST_REQUIRE(core::stage_sfd(iq.data(), iq.size(), prof, tr, sfd_seq, tmpl,
+                                  sr, scratch));
+    BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(75008));
+    BOOST_CHECK_GE(sr.metric, 0.95f);
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_sfd_sfo_grid_cache_equivalence)
+{
+    // The per-delta symbol cache must reproduce the direct per-symbol grid on
+    // an untrimmed clock (+27 ppm), where round(k*period) - k*sym is not zero
+    // and the old code disabled the decomposition entirely.
+    std::vector<gr_complex> iq, tmpl;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+
+    core::DemodScratch scratch;
+    scratch.reserve(iq.size());
+    auto prof = Qm35825Profile::Default();
+    TimingResult tr;
+    BOOST_REQUIRE(core::stage_timing(iq.data(), iq.size(), prof, tmpl, 9984, tr,
+                                     scratch));
+    tr.measured_period += 0.027; // +27 ppm on the 1016-sample SYNC period
+    const auto sfd_seq = GetSfdSequence("4z2");
+
+    Qm35825Profile dense = prof;
+    dense.rx_fast_sfd = false;
+    dense.rx_timing_sparse = false;
+    SfdResult direct;
+    BOOST_REQUIRE(core::stage_sfd(iq.data(), iq.size(), dense, tr, sfd_seq,
+                                  tmpl, direct, scratch));
+
+    Qm35825Profile cached = prof;
+    cached.rx_fast_sfd = true;
+    cached.rx_timing_sparse = false;
+    SfdResult fast;
+    BOOST_REQUIRE(core::stage_sfd(iq.data(), iq.size(), cached, tr, sfd_seq,
+                                  tmpl, fast, scratch));
+
+    BOOST_CHECK_EQUAL(fast.sfd_start_sample, direct.sfd_start_sample);
+    BOOST_CHECK_SMALL(std::abs(fast.metric - direct.metric), 1e-4f);
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r1_bad_input_fails_cleanly)
@@ -1079,6 +1123,82 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r2_cir_matches_golden)
         l2 += d * d;
     }
     BOOST_CHECK_SMALL(std::sqrt(l2), 0.01f); // actual ~6e-8
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_cir_fused_rotation_matches_derotated)
+{
+    // CIR-1: folding the CFO rotation into the SYNC average (raw rx + per-SYNC
+    // scalar + one per-sample ramp) must reproduce the legacy "derotate the
+    // whole preamble, then average" result, and the tail average must give the
+    // same sync_phase_gain statistic without re-reading 32 SYNC windows.
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    const double cfo_hz = 25000.0;
+    const double w = 2.0 * M_PI * cfo_hz / kQm35SampleRate;
+    std::vector<gr_complex> iqc(iq.size());
+    for (size_t i = 0; i < iq.size(); ++i) {
+        const double ph = w * static_cast<double>(i);
+        iqc[i] = iq[i] * gr_complex(static_cast<float>(std::cos(ph)),
+                                    static_cast<float>(std::sin(ph)));
+    }
+
+    core::DemodScratch scratch_a;
+    core::DemodScratch scratch_b;
+    scratch_a.reserve(iqc.size());
+    scratch_b.reserve(iqc.size());
+    auto prof = Qm35825Profile::Default();
+    std::vector<gr_complex> tmpl;
+    BOOST_REQUIRE(load_cf32("../../../testdata/reference_preamble.bin", tmpl));
+    TimingResult tr;
+    CfoResult cf;
+    BOOST_REQUIRE(core::stage_timing(iqc.data(), iqc.size(), prof, tmpl, 9984,
+                                     tr, scratch_a));
+    BOOST_REQUIRE(core::stage_cfo(iqc.data(), iqc.size(), prof, tr, cf, scratch_a));
+    BOOST_CHECK_CLOSE(cf.cfo_hz, cfo_hz, 10.0);
+    std::vector<int8_t> code9(kPreambleCode9.begin(), kPreambleCode9.end());
+
+    CirResult legacy;
+    CirResult fused;
+    BOOST_REQUIRE(core::estimate_cir(scratch_a.derotated.data(), iqc.size(), prof,
+                                     tr, code9, legacy, scratch_a));
+    BOOST_REQUIRE(core::estimate_cir(iqc.data(), iqc.size(), prof, tr, code9,
+                                     fused, scratch_b, cf.cfo_hz));
+    BOOST_REQUIRE_EQUAL(fused.cir_values.size(), legacy.cir_values.size());
+    BOOST_CHECK_EQUAL(fused.first_path_sample, legacy.first_path_sample);
+    BOOST_CHECK_SMALL(std::abs(fused.cir_peak_metric - legacy.cir_peak_metric),
+                      1e-4f);
+    double l2 = 0.0;
+    for (size_t i = 0; i < legacy.cir_values.size(); ++i) {
+        const double d = static_cast<double>(fused.cir_values[i] -
+                                             legacy.cir_values[i]);
+        l2 += d * d;
+    }
+    BOOST_CHECK_SMALL(std::sqrt(l2), 1e-4);
+
+    BOOST_REQUIRE(scratch_b.cir_avg_tail_valid);
+    const auto spread = BuildSampledCode(code9.data(), code9.size());
+    const size_t taps = fused.cir_filter_taps.size();
+    const int64_t chip_start = tr.preamble_start_sample +
+        static_cast<int64_t>(taps) -
+        static_cast<int64_t>(prof.cir_pre_samples) - 1;
+    const size_t phase_reps =
+        std::min<size_t>(32, prof.preamble_repetitions);
+    const size_t phase_first = (prof.preamble_repetitions - phase_reps) *
+                               kQm35ChipsPerSymbol;
+    const int64_t base = chip_start - static_cast<int64_t>(taps - 1) +
+                         static_cast<int64_t>(2 * phase_first);
+    std::vector<gr_complex> sum;
+    gr_complex gain_legacy{};
+    gr_complex gain_tail{};
+    BOOST_REQUIRE(rxopt::sync_phase_gain(
+        scratch_a.derotated.data(), iqc.size(), base,
+        fused.cir_filter_taps.data(), taps, spread, phase_reps, sum,
+        gain_legacy));
+    BOOST_REQUIRE(rxopt::sync_phase_gain_from_tail(
+        scratch_b.cir_avg_tail.data(), fused.cir_filter_taps.data(), taps,
+        spread, gain_tail));
+    BOOST_CHECK_SMALL(std::abs(gain_tail - gain_legacy) /
+                          std::max(1e-6f, std::abs(gain_legacy)), 1e-3f);
 }
 
 BOOST_AUTO_TEST_CASE(test_demod_core_r2_softchips_match_golden)
@@ -1298,7 +1418,13 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r3_sfd_child_subtimers_are_consistent)
     BOOST_CHECK_EQUAL(children_us + res.stage_sfd_anchor_other_us,
                       res.stage_sfd_us);
     BOOST_CHECK_GT(res.stage_sfd_bootstrap_us, uint64_t(0));
-    BOOST_CHECK_GT(res.stage_sfd_final_us, uint64_t(0));
+    // The final SFD is skipped when the refit reused the Stage-2 rotation or
+    // moved the 8-symbol phase by < 0.05 rad; otherwise it must have run.
+    const double drift8_rad = std::abs(
+        2.0 * M_PI * (res.cfo.cfo_hz - res.cfo_initial_hz) *
+        (8.0 * static_cast<double>(kQm35SamplesPerSymbol)) / prof.sample_rate);
+    BOOST_CHECK(res.stage_sfd_final_us > 0 || res.cfo_refit_action != 0 ||
+                drift8_rad < 0.05);
 
     // (b) `stage_total_us` is the sum of exactly the fields written by the
     // `lap()` lambda (timing, cfo, sfd, cir, ns_sfd, phr, payload) plus the

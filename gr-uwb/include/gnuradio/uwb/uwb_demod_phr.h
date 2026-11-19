@@ -93,7 +93,13 @@ inline bool stage_ns_sfd(const std::vector<float>& soft_chips,
             float corr = 0.0f;
             for (const auto& entry : scratch.cached_seq.ns_sfd_sparse) {
                 const float v = soft_chips[static_cast<size_t>(k + static_cast<int64_t>(entry.offset))];
-                corr += (entry.sign > 0) ? v : -v;
+                // The sparse sign pattern is fixed across the 17 lag trials, so
+                // the branch predictor learns it; add/sub is cheaper than the
+                // branchless `sign * v` multiply.
+                if (entry.sign > 0)
+                    corr += v;
+                else
+                    corr -= v;
             }
             const float m = std::abs(corr) / (spread_norm * seg_norm + 1e-12f);
             if (m > best) {
