@@ -148,10 +148,7 @@ inline bool refine_sync_origin(const std::complex<float>* rx,
             const size_t js = static_cast<size_t>(j);
             pwr += std::norm(rx[js + sync_len - 1]) - std::norm(rx[js - 1]);
         }
-        std::complex<float> acc(0.0f, 0.0f);
-        const size_t js = static_cast<size_t>(j);
-        for (size_t k = 0; k < sync_len; ++k)
-            acc += rx[js + k] * std::conj(sync_template[k]);
+        const auto acc = gr::uwb::core::conjugate_dot_scalar(rx + j, sync_template, sync_len);
         if (out.refine_correlations <
             std::numeric_limits<uint32_t>::max())
             ++out.refine_correlations;

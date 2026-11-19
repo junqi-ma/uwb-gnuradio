@@ -30,30 +30,16 @@ namespace gr::uwb::demod::core {
 // ~6e-8, soft-chip stream max diff ~6e-7 (stage_cir.mat / stage_softchips.mat).
 // ---------------------------------------------------------------------------
 
-inline bool stage_cir_softchips(const std::complex<float>* rx,
-                                size_t n,
-                                const Qm35825Profile& profile,
-                                const TimingResult& timing,
-                                const std::vector<int8_t>& preamble_code,
-                                CirResult& out,
-                                DemodScratch& scratch,
-                                size_t max_chips = 0,
-                                size_t begin_chip = 0)
+// Standalone CIR estimation stage (runs after SFD, independent of CMF/despreading).
+inline bool estimate_cir(const std::complex<float>* rx,
+                         size_t n,
+                         const Qm35825Profile& profile,
+                         const TimingResult& timing,
+                         const std::vector<int8_t>& preamble_code,
+                         CirResult& out,
+                         DemodScratch& scratch)
 {
     out = CirResult{};
-    // On-demand experiment: max_chips != 0 limits this call to a prefix or an
-    // extension.  begin_chip > 0 means the prefix [0, begin_chip) was already
-    // produced and normalized by an earlier call; only [begin_chip, num_chips)
-    // is computed here.  Defaults (0, 0) preserve the legacy full-stream path.
-    const bool on_demand =
-        (profile.rx_softchip_on_demand || profile.rx_fused_payload_cmf ||
-         profile.rx_fused_phr_cmf) &&
-        max_chips != 0;
-    const bool extending = on_demand && begin_chip != 0;
-    if (extending && !scratch.softchip.prepared)
-        return false;
-    if (on_demand && !extending)
-        scratch.softchip.reset();
     auto t_cir0 = std::chrono::steady_clock::now();
     const size_t pre = profile.cir_pre_samples;
     const size_t post = profile.cir_post_samples;
@@ -69,13 +55,8 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         scratch.cached_seq.sampled_pcode.empty()) {
         scratch.cached_seq.update(profile.code_index, profile.sfd_mode);
     }
-    const std::vector<int8_t>& spread = scratch.cached_seq.sampled_pcode;
-    const uint64_t ckey =
-        rxopt::cir_template_key(preamble_code.data(), preamble_code.size());
-    if (scratch.cir_template.key != ckey) {
-        rxopt::build_sparse_cir_template(
-            preamble_code.data(), preamble_code.size(), scratch.cir_template);
-    }
+    rxopt::ensure_sparse_cir_template(
+        preamble_code.data(), preamble_code.size(), scratch.cir_template);
     const size_t code_len = 2 * kQm35ChipsPerSymbol; // 1016
 
     // ---- Coherently average the aligned SYNC windows. ----
@@ -118,10 +99,8 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     std::vector<std::complex<float>> values;
     rxopt::correlate_cir_sparse(scratch.corr.data(), scratch.cir_template,
                                 tap_count, values);
-    float nrm = 0.0f;
-    for (size_t i = 0; i < tap_count; ++i)
-        nrm += std::norm(values[i]);
-    nrm = std::sqrt(nrm);
+    const float nrm = std::sqrt(
+        gr::uwb::core::sample_power_sum(values.data(), values.size()));
     if (!(nrm > 0.0f))
         return false;
     for (size_t i = 0; i < tap_count; ++i)
@@ -151,20 +130,44 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - t_cir0)
             .count());
+    out.ok = true;
+    return true;
+}
+
+// Soft-chip matched-filter FIR stage consuming a precomputed CIR.
+inline bool stage_softchips_from_cir(const std::complex<float>* rx,
+                                     size_t n,
+                                     const Qm35825Profile& profile,
+                                     const TimingResult& timing,
+                                     CirResult& out,
+                                     DemodScratch& scratch,
+                                     size_t max_chips = 0,
+                                     size_t begin_chip = 0)
+{
+    const bool on_demand =
+        (profile.rx_softchip_on_demand || profile.rx_fused_payload_cmf ||
+         profile.rx_fused_phr_cmf) &&
+        max_chips != 0;
+    const bool extending = on_demand && begin_chip != 0;
+    if (extending && !scratch.softchip.prepared)
+        return false;
+    if (on_demand && !extending)
+        scratch.softchip.reset();
+
+    const size_t pre = out.pre_samples;
+    const size_t post = out.post_samples;
+    const size_t tap_count = out.cir_filter_taps.size();
+    const double period = timing.measured_period;
+    const int64_t start = timing.preamble_start_sample;
+    if (!out.ok || period <= 0.0 || start < 0 || tap_count == 0 ||
+        tap_count != pre + post)
+        return false;
+
     auto t_fir0 = std::chrono::steady_clock::now();
 
     // ---- Soft-chip matched filter on the chip grid. ----
     const double spc = period / static_cast<double>(kQm35ChipsPerSymbol);
-    // Frame-span chip budget (estimateFrameSampleSpan): 4z2 SFD = 8 symbols.
-    const size_t sfd_symbols = 8;
-    const size_t n_shr = (profile.preamble_repetitions + sfd_symbols) * kQm35ChipsPerSymbol;
-    const size_t n_phr_head = 40 * kQm35ChipsPerSymbol;
-    const size_t extra_bytes =
-        (profile.max_psdu_bytes > 12) ? (profile.max_psdu_bytes - 12) : 0;
-    const size_t n_extra = static_cast<size_t>(std::ceil((double)extra_bytes * 1000.0));
-    const size_t n_guard = 8 * kQm35ChipsPerSymbol;
-    size_t n_chips = n_shr + n_phr_head + n_extra + n_guard;
-    n_chips = static_cast<size_t>(std::ceil((double)n_chips * 1.05));
+    size_t n_chips = rxopt::legacy_chip_budget(profile);
     if (on_demand) {
         if (max_chips < 2)
             return false;
@@ -224,9 +227,23 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     if (tap_count > 64)
         return false;
     for (size_t q = 0; q < tap_count; ++q) {
-        values_nat[q] = values[q];
-        h_conj[q] = std::conj(values[q]);
+        h_conj[q] = out.cir_filter_taps[q];
+        values_nat[q] = std::conj(h_conj[q]);
     }
+    size_t peak_idx = 0;
+    float peak_mag = -1.0f;
+    for (size_t q = 0; q < tap_count; ++q) {
+        const float m = std::abs(values_nat[q]);
+        if (m > peak_mag) {
+            peak_mag = m;
+            peak_idx = q;
+        }
+    }
+    if (scratch.cached_seq.code_index != profile.code_index ||
+        scratch.cached_seq.sampled_pcode.empty()) {
+        scratch.cached_seq.update(profile.code_index, profile.sfd_mode);
+    }
+    const std::vector<int8_t>& spread = scratch.cached_seq.sampled_pcode;
 
     // Optional sparse RAKE: choose the strongest complex CIR taps once per
     // packet. Keep indices in ascending delay order for predictable loads;
@@ -249,7 +266,7 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         std::partial_sort(order.begin(), order.begin() + rake_k,
                           order.begin() + tap_count,
                           [&](uint8_t a, uint8_t b) {
-                              return std::norm(values[a]) > std::norm(values[b]);
+                              return std::norm(values_nat[a]) > std::norm(values_nat[b]);
                           });
         std::sort(order.begin(), order.begin() + rake_k);
         for (size_t i = 0; i < rake_k; ++i) {
@@ -271,20 +288,26 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     const size_t fir_first = skip_sync_fir && sync_end > 8 ? sync_end - 8 : 0;
     if (fir_first >= num_chips)
         return false;
+    const bool sparse_rake = rake_k > 0 && rake_k < tap_count;
+    auto clipped_chip = [&](int64_t p) {
+        const int64_t window_start = p - fwd;
+        if (bypass_filter) {
+            const int64_t idx = window_start + static_cast<int64_t>(peak_idx);
+            return idx >= 0 && idx < static_cast<int64_t>(n)
+                ? rx[static_cast<size_t>(idx)] : std::complex<float>{};
+        }
+        return cir_fir::dot_clipped(rx, n, window_start, h_conj,
+                                    sparse_rake ? rake_k : tap_count,
+                                    sparse_rake ? rake_indices : nullptr);
+    };
     size_t checked = 0;
     if (fractional_grid) {
         // MATLAB keeps measured_period/chips_per_symbol as a fractional
         // position and linearly interpolates the CIR-filtered stream.  Keep
         // the integer positions as FIR inputs and interpolate the two outputs.
-        const bool sparse_rake = rake_k > 0 && rake_k < tap_count;
         auto dot_at = [&](int64_t p) {
-            if (bypass_filter) {
-                const int64_t idx =
-                    p - fwd + static_cast<int64_t>(peak_idx);
-                return idx >= 0 && idx < static_cast<int64_t>(n)
-                    ? rx[static_cast<size_t>(idx)]
-                    : std::complex<float>(0.0f, 0.0f);
-            }
+            if (bypass_filter)
+                return clipped_chip(p);
             if (p >= fwd && p < static_cast<int64_t>(n)) {
                 const auto* window = rx + (p - fwd);
                 if (sparse_rake)
@@ -292,15 +315,7 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
                 return cir_fir::dot(cir_fir::kDefaultKernel, window, h_conj,
                                     values_nat, tap_count);
             }
-            std::complex<float> acc(0.0f, 0.0f);
-            const size_t count = sparse_rake ? rake_k : tap_count;
-            for (size_t j = 0; j < count; ++j) {
-                const size_t q = sparse_rake ? rake_indices[j] : j;
-                const int64_t idx = p - fwd + static_cast<int64_t>(q);
-                if (idx >= 0 && idx < static_cast<int64_t>(n))
-                    acc += h_conj[q] * rx[static_cast<size_t>(idx)];
-            }
-            return acc;
+            return clipped_chip(p);
         };
         for (size_t i = 0; i < num_chips; ++i) {
             const double pd = static_cast<double>(chip_start) +
@@ -326,25 +341,7 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     for (size_t i = extending ? checked : 0;
          !fractional_grid && !skip_sync_fir && i < checked; ++i) {
         const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
-        if (bypass_filter) {
-            const int64_t idx =
-                p - fwd + static_cast<int64_t>(peak_idx);
-            fir_out[i] = idx >= 0 && idx < static_cast<int64_t>(n)
-                ? rx[static_cast<size_t>(idx)]
-                : std::complex<float>(0.0f, 0.0f);
-            continue;
-        }
-        std::complex<float> acc(0.0f, 0.0f);
-        const size_t edge_k =
-            (rake_k > 0 && rake_k < tap_count) ? rake_k : tap_count;
-        for (size_t j = 0; j < edge_k; ++j) {
-            const size_t q = (edge_k == tap_count) ? j : rake_indices[j];
-            const int64_t idx = p - fwd + static_cast<int64_t>(q);
-            if (idx < 0)
-                continue;
-            acc += h_conj[q] * rx[static_cast<size_t>(idx)];
-        }
-        fir_out[i] = acc;
+        fir_out[i] = clipped_chip(p);
     }
     if (skip_sync_fir)
         checked = std::max(checked, fir_first);
@@ -465,8 +462,6 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         if (on_demand)
             scratch.softchip.rot = rot;
     }
-    const float rr = rot.real();
-    const float ri = rot.imag();
 
     // Merged postprocess: compute only the rotated real component and track
     // max|real|, then normalize into soft_chips. No later stage consumes the
@@ -478,17 +473,9 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         const size_t post_first = skip_sync_fir ? fir_first : 0;
         std::fill(scratch.soft_chips.begin(),
                   scratch.soft_chips.begin() + post_first, 0.0f);
-        float mx = 0.0f;
-        for (size_t i = post_first; i < num_chips; ++i) {
-            // (cr+j ci)*(rr+j ri) → real = cr*rr - ci*ri
-            const float cr = fir_out[i].real();
-            const float ci = fir_out[i].imag();
-            const float r = cr * rr - ci * ri;
-            scratch.soft_chips[i] = r;                // temp; normalized below
-            const float ar = (r >= 0.0f) ? r : -r;
-            if (ar > mx)
-                mx = ar;
-        }
+        const float mx = rxopt::project_soft_chips(
+            fir_out.data() + post_first, scratch.soft_chips.data() + post_first,
+            num_chips - post_first, rot);
         const float inv_denom = 1.0f / (mx + 1e-12f);
         for (size_t i = post_first; i < num_chips; ++i)
             scratch.soft_chips[i] *= inv_denom;
@@ -506,16 +493,9 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
         // prefix by (prefix_max+eps)/(final_max+eps); the new tail is scaled by
         // 1/(final_max+eps).  This equals the one-shot raw/final_max result up
         // to one float rounding on the prefix.
-        float ext_mx = 0.0f;
-        for (size_t i = begin_chip; i < num_chips; ++i) {
-            const float cr = fir_out[i].real();
-            const float ci = fir_out[i].imag();
-            const float r = cr * rr - ci * ri;
-            scratch.soft_chips[i] = r;
-            const float ar = (r >= 0.0f) ? r : -r;
-            if (ar > ext_mx)
-                ext_mx = ar;
-        }
+        const float ext_mx = rxopt::project_soft_chips(
+            fir_out.data() + begin_chip, scratch.soft_chips.data() + begin_chip,
+            num_chips - begin_chip, rot);
         const float final_max = std::max(scratch.softchip.prefix_max, ext_mx);
         rxopt::rescale_prefix(scratch.soft_chips, begin_chip,
                               scratch.softchip.prefix_max, final_max);
@@ -537,6 +517,22 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
     out.samples_per_chip = spc;
     out.ok = true;
     return true;
+}
+
+inline bool stage_cir_softchips(const std::complex<float>* rx,
+                                size_t n,
+                                const Qm35825Profile& profile,
+                                const TimingResult& timing,
+                                const std::vector<int8_t>& preamble_code,
+                                CirResult& out,
+                                DemodScratch& scratch,
+                                size_t max_chips = 0,
+                                size_t begin_chip = 0)
+{
+    if (!estimate_cir(rx, n, profile, timing, preamble_code, out, scratch))
+        return false;
+    return stage_softchips_from_cir(rx, n, profile, timing, out, scratch,
+                                    max_chips, begin_chip);
 }
 
 

@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <random>
 #include <string>
 #include <vector>
@@ -24,6 +25,7 @@ int main(int argc, char** argv)
     std::string sfd = "4z2";
     uint32_t seed = 1;
     std::string out = "frames.cf32";
+    std::string truth_path;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -41,6 +43,7 @@ int main(int argc, char** argv)
         else if (a == "--sfd") sfd = next();
         else if (a == "--seed") seed = std::stoul(next());
         else if (a == "--out") out = next();
+        else if (a == "--truth") truth_path = next();
         else {
             std::fprintf(stderr, "unknown arg %s\n", a.c_str());
             return 2;
@@ -69,12 +72,26 @@ int main(int argc, char** argv)
 
     std::vector<cf> wave(count);
     std::vector<cf> stream(kSlot * packets, cf(0.0f, 0.0f));
+    std::ofstream truth;
+    if (!truth_path.empty()) {
+        truth.open(truth_path);
+        if (!truth) {
+            std::fprintf(stderr, "cannot open truth output %s\n", truth_path.c_str());
+            return 1;
+        }
+    }
 
     for (size_t p = 0; p < packets; ++p) {
         std::vector<uint8_t> wire(psdu_bytes - 2);
         for (auto& b : wire)
             b = static_cast<uint8_t>(byte_dist(rng));
         gr::uwb::mod::append_ieee_fcs(wire);
+        if (truth.is_open()) {
+            constexpr char hex[] = "0123456789abcdef";
+            for (const auto b : wire)
+                truth << hex[b >> 4] << hex[b & 15];
+            truth << '\n';
+        }
         size_t written = 0;
         if (!gr::uwb::mod::modulate_one(wire.data(), wire.size(), cfg,
                                        scratch, wave.data(), wave.size(),
@@ -91,6 +108,11 @@ int main(int argc, char** argv)
                     written * sizeof(cf));
     }
 
+    if (truth.is_open()) {
+        truth.close();
+        if (!truth)
+            return 1;
+    }
     FILE* f = std::fopen(out.c_str(), "wb");
     if (!f) {
         std::perror(out.c_str());

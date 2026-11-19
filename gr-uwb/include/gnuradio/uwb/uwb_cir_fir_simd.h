@@ -35,7 +35,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include <volk/volk.h>
+#include <gnuradio/uwb/uwb_matched_filter.h>
 
 #if defined(__AVX2__) && defined(__FMA__)
 #include <immintrin.h>
@@ -175,12 +175,25 @@ dot_volk(const std::complex<float>* rx_win,
          const std::complex<float>* values_natural,
          size_t tap_count)
 {
-    std::complex<float> acc(0.0f, 0.0f);
-    volk_32fc_x2_conjugate_dot_prod_32fc(
-        &acc,
-        reinterpret_cast<const lv_32fc_t*>(rx_win),
-        reinterpret_cast<const lv_32fc_t*>(values_natural),
-        static_cast<unsigned int>(tap_count));
+    return gr::uwb::core::conjugate_dot(rx_win, values_natural, tap_count);
+}
+
+// Zero-padded edge of a forward FIR window. Sparse tap indices, when
+// supplied, are sorted in natural tap order just like the dense traversal.
+inline std::complex<float> dot_clipped(const std::complex<float>* rx,
+                                      size_t n,
+                                      int64_t window_start,
+                                      const std::complex<float>* h,
+                                      size_t count,
+                                      const uint8_t* indices)
+{
+    std::complex<float> acc{};
+    for (size_t i = 0; i < count; ++i) {
+        const size_t q = indices ? indices[i] : i;
+        const int64_t index = window_start + static_cast<int64_t>(q);
+        if (index >= 0 && static_cast<size_t>(index) < n)
+            acc += h[q] * rx[static_cast<size_t>(index)];
+    }
     return acc;
 }
 

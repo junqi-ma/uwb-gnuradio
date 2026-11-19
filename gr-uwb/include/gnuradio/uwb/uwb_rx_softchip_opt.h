@@ -100,6 +100,26 @@ inline bool sync_phase_gain(const std::complex<float>* rx, size_t n,
     return std::isfinite(gain.real()) && std::isfinite(gain.imag());
 }
 
+// Project a chip range onto the recovered SYNC phase and return its peak
+// magnitude so the caller can normalize a prefix or update the full stream.
+inline float project_soft_chips(const std::complex<float>* fir,
+                                float* chips,
+                                size_t count,
+                                std::complex<float> rotation)
+{
+    const float rr = rotation.real();
+    const float ri = rotation.imag();
+    float peak = 0.0f;
+    for (size_t i = 0; i < count; ++i) {
+        const float chip = fir[i].real() * rr - fir[i].imag() * ri;
+        chips[i] = chip;
+        const float mag = chip >= 0.0f ? chip : -chip;
+        if (mag > peak)
+            peak = mag;
+    }
+    return peak;
+}
+
 // Geometry used by stage_phr()/stage_payload_fcs() (6.81 Mb/s payload).
 inline constexpr size_t kPhrSymbols = 21;
 inline constexpr size_t kPhrChipsPerSymbol = 512;
@@ -127,7 +147,7 @@ inline constexpr float kNormalizationEps = 1e-12f;
 
 // ---------------------------------------------------------------------------
 // Chips from the PHR start (SFD end + 1) through the last payload symbol.
-// This is a verbatim copy of the `chips_needed` lambda in stage_phr():
+// Used by PHR length validation and the final soft-chip budget:
 //   psdu_bits = psdu_len*8
 //   num_blocks = (psdu_bits + 329) / 330   // RS(63,55) blocks of 330 bits
 //   nsym = psdu_bits + 48*num_blocks
@@ -142,10 +162,8 @@ inline size_t payload_chips_needed(uint32_t psdu_len)
 }
 
 // ---------------------------------------------------------------------------
-// The current production chip budget from stage_cir_softchips().  This is the
-// cross-check baseline: the on-demand path must never generate more chips than
-// this, and initial/final budgets are capped by it.  Keep this byte-for-byte
-// identical to the n_chips block in stage_cir_softchips():
+// Full-stream chip budget. It also caps the initial and final on-demand
+// budgets:
 //
 //   n_shr     = (preamble_repetitions + 8) * 508
 //   n_phr_head= 40 * 508

@@ -211,20 +211,13 @@ inline bool phr_secded_parse(const std::vector<int8_t>& decoded,
             psdu |= (static_cast<uint32_t>(b[2 + i]) << (6 - i));
         return psdu;
     };
-    auto chips_needed = [](uint32_t psdu_len) -> size_t {
-        const size_t psdu_bits = static_cast<size_t>(psdu_len) * 8;
-        const size_t num_blocks = (psdu_bits + 329) / 330;
-        const size_t nsym = psdu_bits + 48 * num_blocks;
-        // PHR 21*512 + payload nsym*64 (6.81 Mb/s) chips after SFD end.
-        return 21 * 512 + nsym * 64;
-    };
     const uint32_t len_uncorr = length_of(sys13); // sys13 is never flipped
     const uint32_t len_corr = length_of(phr19);
     if (out.secded_corrected && len_corr > len_uncorr &&
         ns_sfd.sfd_end_chip >= 0) {
         const int64_t phr_start = ns_sfd.sfd_end_chip + 1;
-        const size_t need_c = chips_needed(len_corr);
-        const size_t need_u = chips_needed(len_uncorr);
+        const size_t need_c = rxopt::payload_chips_needed(len_corr);
+        const size_t need_u = rxopt::payload_chips_needed(len_uncorr);
         if (phr_start >= 0 && need_c > need_u + 64) {
             const size_t base = static_cast<size_t>(phr_start);
             const size_t end_u = base + need_u;
@@ -256,10 +249,7 @@ inline bool phr_secded_parse(const std::vector<int8_t>& decoded,
     const int dr = (phr19[0] << 1) | phr19[1];
     static const float kDataRates[4] = { 0.11f, 0.85f, 6.81f, 27.24f };
     out.data_rate_mbps = kDataRates[dr & 3];
-    uint32_t psdu = 0;
-    for (int i = 0; i < 7; ++i)
-        psdu |= (static_cast<uint32_t>(phr19[2 + i]) << (6 - i)); // MSB-first
-    out.psdu_length = psdu;
+    out.psdu_length = length_of(phr19);
     out.phr_bits.reserve(19);
     for (int i = 0; i < 19; ++i)
         out.phr_bits.push_back(static_cast<uint8_t>(phr19[i]));

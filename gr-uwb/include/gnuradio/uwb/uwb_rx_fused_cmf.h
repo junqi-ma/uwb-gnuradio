@@ -57,6 +57,8 @@
 
 #pragma once
 
+#include <gnuradio/uwb/uwb_rx_bpm.h>
+
 #include <gnuradio/uwb/uwb_cir_fir_simd.h>
 
 #include <algorithm>
@@ -525,38 +527,33 @@ inline bool correlate_phr(const std::complex<float>* rx,
 // Reproduce bprf_demod()'s hard decision exactly from the four signed
 // metrics.  Hop 0 wins a tie against hop 1; BPM half 0 wins a tie against
 // half 1.  g1 is the sign of the selected metric (negative -> 1).
+inline void decide_bpm_impl(const Metrics& metrics,
+                            std::vector<int8_t>& g0, std::vector<int8_t>& g1,
+                            std::vector<float>* llr0, std::vector<float>* llr1)
+{
+    g0.resize(metrics.symbols);
+    g1.resize(metrics.symbols);
+    if (llr0) {
+        llr0->resize(metrics.symbols);
+        llr1->resize(metrics.symbols);
+    }
+    for (size_t s = 0; s < metrics.symbols; ++s) {
+        const float* m = &metrics.signed_value[kCandidateCount * s];
+        const auto decision = rxopt::decide_bpm_symbol(m, false);
+        g0[s] = decision.position;
+        g1[s] = decision.polarity;
+        if (llr0) {
+            (*llr0)[s] = decision.position_llr;
+            (*llr1)[s] = rxopt::bpm_polarity_llr(m);
+        }
+    }
+}
+
 inline void decide_bpm(const Metrics& metrics,
                        std::vector<int8_t>& g0,
                        std::vector<int8_t>& g1)
 {
-    g0.resize(metrics.symbols);
-    g1.resize(metrics.symbols);
-    for (size_t s = 0; s < metrics.symbols; ++s) {
-        const float* m = &metrics.signed_value[kCandidateCount * s];
-        // Half 0: candidates 0 (hop 0) and 2 (hop 1).
-        float b0 = std::abs(m[0]);
-        float best0 = m[0];
-        if (std::abs(m[2]) > b0) {
-            b0 = std::abs(m[2]);
-            best0 = m[2];
-        }
-        // Half 1: candidates 1 (hop 0) and 3 (hop 1).
-        float b1 = std::abs(m[1]);
-        float best1 = m[1];
-        if (std::abs(m[3]) > b1) {
-            b1 = std::abs(m[3]);
-            best1 = m[3];
-        }
-        float best;
-        if (b0 >= b1) {
-            g0[s] = 0;
-            best = best0;
-        } else {
-            g0[s] = 1;
-            best = best1;
-        }
-        g1[s] = (best < 0.0f) ? 1 : 0;
-    }
+    decide_bpm_impl(metrics, g0, g1, nullptr, nullptr);
 }
 
 // Soft-output twin of decide_bpm().  The hard decisions written to g0/g1 are
@@ -578,44 +575,9 @@ inline void decide_bpm(const Metrics& metrics,
 // needs a consistent scale per packet, so no renormalization is applied here.
 inline void decide_bpm_soft(const Metrics& metrics,
                             std::vector<int8_t>& g0, std::vector<int8_t>& g1,
-                            std::vector<float>& llr0,
-                            std::vector<float>& llr1)
+                            std::vector<float>& llr0, std::vector<float>& llr1)
 {
-    g0.resize(metrics.symbols);
-    g1.resize(metrics.symbols);
-    llr0.resize(metrics.symbols);
-    llr1.resize(metrics.symbols);
-    for (size_t s = 0; s < metrics.symbols; ++s) {
-        const float* m = &metrics.signed_value[kCandidateCount * s];
-        // Half 0: candidates 0 (hop 0) and 2 (hop 1).
-        float b0 = std::abs(m[0]);
-        float best0 = m[0];
-        if (std::abs(m[2]) > b0) {
-            b0 = std::abs(m[2]);
-            best0 = m[2];
-        }
-        // Half 1: candidates 1 (hop 0) and 3 (hop 1).
-        float b1 = std::abs(m[1]);
-        float best1 = m[1];
-        if (std::abs(m[3]) > b1) {
-            b1 = std::abs(m[3]);
-            best1 = m[3];
-        }
-        float best;
-        if (b0 >= b1) {
-            g0[s] = 0;
-            best = best0;
-        } else {
-            g0[s] = 1;
-            best = best1;
-        }
-        const float p_pos = std::max(std::max(m[0], m[1]), std::max(m[2], m[3]));
-        const float p_neg =
-            std::max(std::max(-m[0], -m[1]), std::max(-m[2], -m[3]));
-        g1[s] = (best < 0.0f) ? 1 : 0;
-        llr0[s] = b0 - b1;
-        llr1[s] = p_pos - p_neg;
-    }
+    decide_bpm_impl(metrics, g0, g1, &llr0, &llr1);
 }
 
 } // namespace rxfusion

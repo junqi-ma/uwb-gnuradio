@@ -161,10 +161,7 @@ inline bool search_sfd(const std::complex<float>* rx,
             const size_t js = static_cast<size_t>(j);
             pwr += std::norm(rx[js + sfd_len - 1]) - std::norm(rx[js - 1]);
         }
-        std::complex<float> acc(0.0f, 0.0f);
-        const size_t js = static_cast<size_t>(j);
-        for (size_t k = 0; k < sfd_len; ++k)
-            acc += rx[js + k] * std::conj(tmpl[k]);
+        const auto acc = gr::uwb::core::conjugate_dot_scalar(rx + j, tmpl, sfd_len);
         if (out.fine_correlations < std::numeric_limits<uint32_t>::max())
             ++out.fine_correlations;
         const float m = std::norm(acc) / (pwr + gr::uwb::core::kUwbEpsilon);

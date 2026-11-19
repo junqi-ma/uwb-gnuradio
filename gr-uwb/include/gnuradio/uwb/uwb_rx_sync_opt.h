@@ -52,31 +52,7 @@ namespace uwb {
 namespace demod {
 namespace rxopt {
 
-// ---------------------------------------------------------------------------
-// Long complex conjugate dot product, identical math to
-// demod::core::detail::timing_conjugate_dot:
-//
-//   returns sum_{k < count} input[k] * conj(taps[k])
-//
-// VOLK runtime-dispatches to the fastest kernel on the host.  The SFD search
-// evaluates 8128-point dots, so dispatch overhead is amortized.  Reduction
-// order differs from the scalar loop, so the fast path is only enabled
-// explicitly and its output is verified against the legacy search.
-// ---------------------------------------------------------------------------
-inline std::complex<float> conjugate_dot(const std::complex<float>* input,
-                                         const std::complex<float>* taps,
-                                         size_t count)
-{
-    std::complex<float> acc(0.0f, 0.0f);
-    if (count == 0)
-        return acc;
-    volk_32fc_x2_conjugate_dot_prod_32fc(
-        &acc,
-        reinterpret_cast<const lv_32fc_t*>(input),
-        reinterpret_cast<const lv_32fc_t*>(taps),
-        static_cast<unsigned int>(count));
-    return acc;
-}
+using gr::uwb::core::conjugate_dot;
 
 // ---------------------------------------------------------------------------
 // Pre-duplicated real-valued SYNC template for AVX2 fast dot product.

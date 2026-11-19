@@ -42,6 +42,7 @@
 
 #include <gnuradio/uwb/api.h>
 #include <gnuradio/uwb/uwb_hrp_mod_core.h>
+#include <gnuradio/uwb/uwb_rx_matched_filter.h>
 #include <gnuradio/uwb/uwb_rx_sync_opt.h>
 
 #include <array>
@@ -109,6 +110,12 @@ struct DiscreteCirConfig {
     // remodulated waveform and is derived when zero.
     size_t max_window_samples = 0;
     size_t max_packet_samples = 0;
+
+    // Optional per-packet origin/CFO supplied by standard demodulation so
+    // Ipatov CIR estimation can skip duplicate detection and CFO stages.
+    int64_t known_q = -1;
+    double known_cfo_hz = 0.0;
+    bool has_known_cfo = false;
 };
 
 // Both templates are public.  `sync` is ONE shaped SYNC symbol.  `train` is
@@ -181,6 +188,9 @@ struct DiscreteCirScratch {
     bool sparse_pulse_reconstruct = false;
     std::vector<std::complex<float>> impulse_sync;
     mod::HrpModConfig impulse_profile;
+    demod::rxopt::SparseCirTemplate cir_sparse_tmpl;
+    std::vector<std::complex<float>> cir_avg_cf;
+    std::vector<std::complex<float>> cir_corr_vals;
 
     UWB_API void reserve(size_t max_window_samples);
 };

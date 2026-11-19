@@ -11,11 +11,6 @@ namespace gr::uwb::demod::core {
 // model to get measured_period.  Peak positions are symbol-END convention
 // (first peak = start + (L-1)), matching the detector / MATLAB.
 // ---------------------------------------------------------------------------
-// Windowed |x|^2 with eight independent accumulators.  A single-accumulator
-// float reduction cannot be vectorised without -ffast-math, and the power
-// turned out to be HALF the cost of the single-point stage (measured 2x faster
-// with eight accumulators).  The summation order differs from a plain scalar
-// loop, but this value only normalises a correlation metric.
 inline bool stage_timing(const std::complex<float>* rx,
                          size_t n,
                          const Qm35825Profile& profile,
@@ -42,8 +37,14 @@ inline bool stage_timing(const std::complex<float>* rx,
     // Copy + L2-normalize the template (own copy so callers may pass raw).
     scratch.work.assign(template_wf.begin(), template_wf.end());
     gr::uwb::core::uwb_l2_normalize(scratch.work);
-    const float Et = gr::uwb::core::uwb_template_energy(scratch.work);
+    const float dense_Et = gr::uwb::core::uwb_template_energy(scratch.work);
     rxopt::build_real_sync_template(scratch.work, scratch.real_sync_template);
+
+    const auto* sparse_tmpl = detail::prepare_sparse_sync_template(profile, L, scratch);
+    const float Et = sparse_tmpl ? sparse_tmpl->code_energy : dense_Et;
+    const auto& real = scratch.real_sync_template;
+    const rxopt::SyncMatchedFilter filter(
+        scratch.work.data(), L, real.is_real ? real.taps_dup.data() : nullptr, sparse_tmpl);
 
     // Determine the ROI around the seed (absolute coordinates).
     size_t roi_start = 0;
@@ -62,6 +63,7 @@ inline bool stage_timing(const std::complex<float>* rx,
     // finds the SYNC START that best matches the template, returns position,
     // metric, and the complex matched-filter value at the best position (the
     // CFO stage uses its phase).
+    bool raw_par_hit = false;
     auto local_best = [&](int64_t want, int64_t radius, float min_metric,
                           int64_t* pos, float* met,
                           std::complex<float>* corr_out,
@@ -76,89 +78,44 @@ inline bool stage_timing(const std::complex<float>* rx,
         const int64_t count = w1 - w0;
         const bool track_par =
             allow_par_fallback && count >= 64 && count <= 1024;
+        constexpr float kSyncParFloor = 0.06f;
+        constexpr float kSyncParMin = 20.0f;
+        constexpr int64_t kSyncParGuard = 12;
         float lag_metrics[1024];
-        float bm = -1.0f;
-        int64_t bp = w0;
-        std::complex<float> best_acc(0.0f, 0.0f);
-        // Adjacent candidate windows overlap by L-1 samples.  Compute power
-        // once, then update it in O(1); correlation remains an exact long dot
-        // product handled by VOLK or AVX2.  No allocation occurs in this hot loop.
-        // The initial power uses the 8-accumulator reduction: for the narrow
-        // windows (17 lags) this 1016-sample sum is a large fraction of the
-        // whole call, and the legacy per-SYNC path keeps its own O(1) sliding
-        // update untouched.
-        float pw = window_power_8acc(rx + w0, L);
-
-        const bool use_real_opt = scratch.real_sync_template.is_real;
-        const float* taps_dup = scratch.real_sync_template.taps_dup.data();
-
-        int64_t j = w0;
-        if (use_real_opt) {
-            // Eight lags per call: the AVX-512 backend pairs lag m with lag
-            // m+4 in one 512-bit register (-37% per lag, bit-identical).  The
-            // metric/power update order below is unchanged, so the selected
-            // peak is identical to the four-lag loop it replaces.
-            for (; j + 7 < w1; j += 8) {
-                std::complex<float> acc[8];
-                rxopt::real_template_dot_8lag(rx + j, taps_dup, L, acc);
-                for (int m = 0; m < 8; ++m) {
-                    const float metric = std::norm(acc[m]) / (pw * Et + 1e-12f);
-                    if (track_par)
-                        lag_metrics[(j + m) - w0] = metric;
-                    if (metric > bm) {
-                        bm = metric;
-                        bp = j + m;
-                        best_acc = acc[m];
-                    }
-                    if (j + m + 1 < w1) {
-                        pw += std::norm(rx[j + m + static_cast<int64_t>(L)]) -
-                              std::norm(rx[j + m]);
-                    }
-                }
-            }
-            for (; j < w1; ++j) {
-                const std::complex<float> acc =
-                    rxopt::real_template_dot_single(rx + j, taps_dup, L);
-                const float metric = std::norm(acc) / (pw * Et + 1e-12f);
-                if (track_par)
-                    lag_metrics[j - w0] = metric;
-                if (metric > bm) {
-                    bm = metric;
-                    bp = j;
-                    best_acc = acc;
-                }
-                if (j + 1 < w1) {
-                    pw += std::norm(rx[j + static_cast<int64_t>(L)]) -
-                          std::norm(rx[j]);
-                }
-            }
-        } else {
-            for (; j < w1; ++j) {
-                const std::complex<float> acc =
-                    detail::timing_conjugate_dot(rx + j, scratch.work.data(), L);
-                const float metric = std::norm(acc) / (pw * Et + 1e-12f);
-                if (track_par)
-                    lag_metrics[j - w0] = metric;
-                if (metric > bm) {
-                    bm = metric;
-                    bp = j;
-                    best_acc = acc;
-                }
-                if (j + 1 < w1) {
-                    pw += std::norm(rx[j + static_cast<int64_t>(L)]) -
-                          std::norm(rx[j]);
-                }
-            }
+        if (track_par && profile.rx_sync_par_only) {
+            const auto peak = rxopt::scan_raw_sync(
+                filter, rx + w0, static_cast<size_t>(count), lag_metrics);
+            const bool accepted = rxopt::raw_lag_par_passes(
+                lag_metrics, static_cast<size_t>(count), peak, kSyncParGuard, 1,
+                kSyncParMin, profile.rx_sync_par_three_samples);
+            const int64_t bp = w0 + static_cast<int64_t>(peak.lag);
+            // Keep the normalized metric for downstream tracking and the
+            // locked probe-width heuristic. Only score the winner.
+            float normalized = 0.0f;
+            if (accepted || raw_max_out)
+                normalized = detail::normalized_correlation_power(
+                    peak.corr, window_power_8acc(rx + bp, L), Et);
+            if (raw_max_out)
+                *raw_max_out = normalized;
+            if (!accepted)
+                return false;
+            raw_par_hit = true;
+            *pos = bp;
+            *met = normalized;
+            *corr_out = peak.corr;
+            return true;
         }
+        const auto peak = rxopt::scan_normalized_sync(
+            filter, rx + w0, static_cast<size_t>(count),
+            window_power_8acc(rx + w0, L), Et, track_par ? lag_metrics : nullptr);
+        const float bm = peak.metric;
+        const int64_t bp = w0 + static_cast<int64_t>(peak.lag);
         // Report the window's raw maximum before the acceptance gate: the
         // low-SNR early-stop decisions below need to know how far the best
         // candidate was from the threshold, not just whether it passed.
         if (raw_max_out)
             *raw_max_out = bm;
         if (bm < min_metric) {
-            constexpr float kSyncParFloor = 0.06f;
-            constexpr float kSyncParMin = 20.0f;
-            constexpr int64_t kSyncParGuard = 12;
             bool par_accept = false;
             if (track_par && bm >= kSyncParFloor) {
                 double bg_sum = 0.0;
@@ -182,7 +139,7 @@ inline bool stage_timing(const std::complex<float>* rx,
         }
         *pos = bp;
         *met = bm;
-        *corr_out = best_acc;
+        *corr_out = peak.corr;
         return true;
     };
 
@@ -218,7 +175,8 @@ inline bool stage_timing(const std::complex<float>* rx,
                 rx, n, centre, centre - radius, centre + radius,
                 scratch.work.data(), L, Et, scratch.real_sync_template,
                 detail::kFoldMaxSymbols, profile.preamble_repetitions,
-                detail::kFoldThreshold, phase);
+                detail::kFoldThreshold, phase,
+                sparse_tmpl);
         };
         // Check energy only when the coarse phase can change the fold choice.
         // A rejected large phase also rules out the phase-aligned retry.
@@ -255,14 +213,8 @@ inline bool stage_timing(const std::complex<float>* rx,
                     pos + static_cast<int64_t>(L) > static_cast<int64_t>(n))
                     return -1.0f;
                 const float pw = window_power_8acc(rx + pos, L);
-                const std::complex<float> acc =
-                    scratch.real_sync_template.is_real
-                        ? rxopt::real_template_dot_single(
-                              rx + pos,
-                              scratch.real_sync_template.taps_dup.data(), L)
-                        : detail::timing_conjugate_dot(rx + pos,
-                                                       scratch.work.data(), L);
-                return std::norm(acc) / (pw * Et + 1e-12f);
+                const auto acc = filter.dot(rx + pos);
+                return detail::normalized_correlation_power(acc, pw, Et);
             };
             // One pass over the candidate grid: the same metrics are needed
             // twice (once for the strongest slot, once for the first crossing
@@ -313,7 +265,8 @@ inline bool stage_timing(const std::complex<float>* rx,
                     rx, n, fold_start, scratch.work.data(), L, Et,
                     scratch.real_sync_template, groups, &period_fit,
                     &origin_fit, out.peak_samples, out.peak_metrics,
-                    out.peak_corr, fold_phase)) {
+                    out.peak_corr, fold_phase,
+                    sparse_tmpl)) {
                 out.peak_samples.clear();
                 out.peak_metrics.clear();
                 out.peak_corr.clear();
@@ -609,60 +562,84 @@ inline bool stage_timing(const std::complex<float>* rx,
             }
         }
 
-        // (a) Coarse scan (fallback only) -- sliding power, VOLK-grade
-        // conjugate dots at stride.
+        // (a) Coarse scan (fallback only) -- batched SIMD when stride is 1 or 2,
+        // sliding power conjugate dots at stride otherwise.
         const auto coarse_begin = std::chrono::steady_clock::now();
         if (!seed_acquired && j_hi > j_lo) {
-            float pw = window_power_8acc(rx + j_lo, L);
             float best_coarse_m = -1.0f;
             int64_t best_coarse_j = j_lo;
             std::complex<float> best_coarse_c(0.0f, 0.0f);
-            // Slide the window power forward by `cnt` samples with eight
-            // independent accumulators, so the two |x|^2 streams vectorise and
-            // only ONE serial float add per stride block remains.  The
-            // per-sample form of this update was the single most expensive loop
-            // in low-SNR acquisition: 262,144 iterations (the live search
-            // margin is +-131,072 samples) at ~8 cycles each = ~2.2 ms/packet,
-            // 85% of the whole acquisition search.  The sum is mathematically
-            // identical; only the float association order changes.
-            auto advance_power = [&](int64_t j, int64_t cnt) {
-                const float* a =
-                    reinterpret_cast<const float*>(rx + j + static_cast<int64_t>(L));
-                const float* b = reinterpret_cast<const float*>(rx + j);
-                const size_t m = static_cast<size_t>(2 * cnt);
-                float s0 = 0.f, s1 = 0.f, s2 = 0.f, s3 = 0.f;
-                float s4 = 0.f, s5 = 0.f, s6 = 0.f, s7 = 0.f;
-                size_t i = 0;
-                for (; i + 8 <= m; i += 8) {
-                    s0 += a[i + 0] * a[i + 0] - b[i + 0] * b[i + 0];
-                    s1 += a[i + 1] * a[i + 1] - b[i + 1] * b[i + 1];
-                    s2 += a[i + 2] * a[i + 2] - b[i + 2] * b[i + 2];
-                    s3 += a[i + 3] * a[i + 3] - b[i + 3] * b[i + 3];
-                    s4 += a[i + 4] * a[i + 4] - b[i + 4] * b[i + 4];
-                    s5 += a[i + 5] * a[i + 5] - b[i + 5] * b[i + 5];
-                    s6 += a[i + 6] * a[i + 6] - b[i + 6] * b[i + 6];
-                    s7 += a[i + 7] * a[i + 7] - b[i + 7] * b[i + 7];
+            if (stride == 1) {
+                const size_t lag_count = static_cast<size_t>(j_hi - j_lo + 1);
+                const auto pk = rxopt::scan_normalized_sync(
+                    filter, rx + j_lo, lag_count,
+                    window_power_8acc(rx + j_lo, L), Et);
+                best_coarse_j = j_lo + static_cast<int64_t>(pk.lag);
+                best_coarse_m = pk.metric;
+                best_coarse_c = pk.corr;
+            } else if (stride == 2 && sparse_tmpl && (L % 2 == 0)) {
+                const size_t half_lags =
+                    static_cast<size_t>((j_hi - j_lo) / 2 + 1);
+                const size_t half_len = L / 2;
+                const size_t even_count = (half_lags - 1) + half_len;
+                scratch.corr.resize(even_count);
+                rxopt::pack_even_complex(rx + j_lo, even_count,
+                                         scratch.corr.data());
+                rxopt::SparseCirTemplate half_tmpl;
+                rxopt::build_half_rate_sparse_template(*sparse_tmpl, half_tmpl);
+                const rxopt::SyncMatchedFilter half_filter(
+                    nullptr, half_len, nullptr, &half_tmpl);
+                const auto pk = rxopt::scan_normalized_sync(
+                    half_filter, scratch.corr.data(), half_lags,
+                    window_power_8acc(scratch.corr.data(), half_len), Et);
+                best_coarse_j = j_lo + static_cast<int64_t>(pk.lag) * 2;
+                best_coarse_c = pk.corr;
+                best_coarse_m = detail::normalized_correlation_power(
+                    pk.corr, window_power_8acc(rx + best_coarse_j, L), Et);
+            } else {
+                float pw = window_power_8acc(rx + j_lo, L);
+                // Slide the window power forward by `cnt` samples with eight
+                // independent accumulators, so the two |x|^2 streams vectorise and
+                // only ONE serial float add per stride block remains.  The
+                // per-sample form of this update was the single most expensive loop
+                // in low-SNR acquisition: 262,144 iterations (the live search
+                // margin is +-131,072 samples) at ~8 cycles each = ~2.2 ms/packet,
+                // 85% of the whole acquisition search.  The sum is mathematically
+                // identical; only the float association order changes.
+                auto advance_power = [&](int64_t j, int64_t cnt) {
+                    const float* a =
+                        reinterpret_cast<const float*>(rx + j + static_cast<int64_t>(L));
+                    const float* b = reinterpret_cast<const float*>(rx + j);
+                    const size_t m = static_cast<size_t>(2 * cnt);
+                    float s0 = 0.f, s1 = 0.f, s2 = 0.f, s3 = 0.f;
+                    float s4 = 0.f, s5 = 0.f, s6 = 0.f, s7 = 0.f;
+                    size_t i = 0;
+                    for (; i + 8 <= m; i += 8) {
+                        s0 += a[i + 0] * a[i + 0] - b[i + 0] * b[i + 0];
+                        s1 += a[i + 1] * a[i + 1] - b[i + 1] * b[i + 1];
+                        s2 += a[i + 2] * a[i + 2] - b[i + 2] * b[i + 2];
+                        s3 += a[i + 3] * a[i + 3] - b[i + 3] * b[i + 3];
+                        s4 += a[i + 4] * a[i + 4] - b[i + 4] * b[i + 4];
+                        s5 += a[i + 5] * a[i + 5] - b[i + 5] * b[i + 5];
+                        s6 += a[i + 6] * a[i + 6] - b[i + 6] * b[i + 6];
+                        s7 += a[i + 7] * a[i + 7] - b[i + 7] * b[i + 7];
+                    }
+                    float s = ((s0 + s1) + (s2 + s3)) + ((s4 + s5) + (s6 + s7));
+                    for (; i < m; ++i)
+                        s += a[i] * a[i] - b[i] * b[i];
+                    pw += s;
+                };
+                for (int64_t j = j_lo; j <= j_hi; j += stride) {
+                    const auto acc = filter.dot(rx + j);
+                    const float m = detail::normalized_correlation_power(acc, pw, Et);
+                    if (m > best_coarse_m) {
+                        best_coarse_m = m;
+                        best_coarse_j = j;
+                        best_coarse_c = acc;
+                    }
+                    const int64_t cnt = std::min<int64_t>(stride, j_hi + 1 - j);
+                    advance_power(j, cnt);
                 }
-                float s = ((s0 + s1) + (s2 + s3)) + ((s4 + s5) + (s6 + s7));
-                for (; i < m; ++i)
-                    s += a[i] * a[i] - b[i] * b[i];
-                pw += s;
-            };
-            for (int64_t j = j_lo; j <= j_hi; j += stride) {
-                const std::complex<float> acc =
-                    scratch.real_sync_template.is_real
-                        ? rxopt::real_template_dot_single(
-                              rx + j, scratch.real_sync_template.taps_dup.data(), L)
-                        : detail::timing_conjugate_dot(
-                              rx + j, scratch.work.data(), L);
-                const float m = std::norm(acc) / (pw * Et + 1e-12f);
-                if (m > best_coarse_m) {
-                    best_coarse_m = m;
-                    best_coarse_j = j;
-                    best_coarse_c = acc;
-                }
-                const int64_t cnt = std::min<int64_t>(stride, j_hi + 1 - j);
-                advance_power(j, cnt);
             }
             out.coarse_search_us = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
@@ -794,7 +771,7 @@ inline bool stage_timing(const std::complex<float>* rx,
                                int64_t radius, double* period_out,
                                int64_t* start_out, float* median_out,
                                size_t* hits_out) -> bool {
-            double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+            detail::LinearFit fit;
             std::array<float, 32> mets{};
             size_t hits = 0;
             size_t kmin = 0, kmax = 0;
@@ -813,10 +790,7 @@ inline bool stage_timing(const std::complex<float>* rx,
                     continue;
                 const double x = static_cast<double>(k);
                 const double y = static_cast<double>(pos + (int64_t)(L - 1));
-                sx += x;
-                sy += y;
-                sxx += x * x;
-                sxy += x * y;
+                fit.add(x, y);
                 if (hits == 0) {
                     kmin = k;
                     kmax = k;
@@ -831,15 +805,13 @@ inline bool stage_timing(const std::complex<float>* rx,
                 return false;
             if (kmax - kmin < 8)
                 return false; // anchors too bunched to measure a slope
-            const double denom = static_cast<double>(hits) * sxx - sx * sx;
+            const double denom = fit.determinant();
             if (!(std::abs(denom) > 1e-9))
                 return false;
-            const double p =
-                (static_cast<double>(hits) * sxy - sx * sy) / denom;
+            const double p = fit.slope(denom);
             if (!std::isfinite(p) || !(p > 0.0))
                 return false;
-            const double intercept_end =
-                (sy - p * sx) / static_cast<double>(hits);
+            const double intercept_end = fit.intercept(p);
             *period_out = p;
             *start_out = std::max<int64_t>(
                 0, static_cast<int64_t>(std::llround(intercept_end)) -
@@ -882,13 +854,11 @@ inline bool stage_timing(const std::complex<float>* rx,
         // more than one -- and taking the argmax keeps the peak positions and
         // the CFO phases identical to the legacy per-SYNC search instead of
         // pinning them to the fitted grid.
-        const bool use_real = scratch.real_sync_template.is_real;
-        const float* taps_dup = scratch.real_sync_template.taps_dup.data();
         scratch.metric.assign(reps, 0.0f);
         size_t valid = 0;
         // Least-squares accumulators over every refined peak (see the final
         // fit note after the loop).
-        double fsx = 0.0, fsy = 0.0, fsxx = 0.0, fsxy = 0.0;
+        detail::LinearFit final_fit;
         size_t fn = 0;
         for (size_t k = 0; k < reps; ++k) {
             if (k == first_hit_k) {
@@ -904,10 +874,7 @@ inline bool stage_timing(const std::complex<float>* rx,
                     out.peak_corr.push_back(first_corr);
                     const double x = static_cast<double>(k);
                     const double y = static_cast<double>(start + (int64_t)(L - 1));
-                    fsx += x;
-                    fsy += y;
-                    fsxx += x * x;
-                    fsxy += x * y;
+                    final_fit.add(x, y);
                     ++fn;
                 }
                 continue;
@@ -928,27 +895,18 @@ inline bool stage_timing(const std::complex<float>* rx,
             if (base < 0)
                 continue;
             float pw = window_power_8acc(rx + base, L);
-            std::complex<float> acc[8];
-            if (use_real) {
-                rxopt::real_template_dot_8lag(rx + base, taps_dup, L, acc);
-            } else {
-                for (int m = 0; m < nl; ++m)
-                    acc[m] = detail::timing_conjugate_dot(
-                        rx + base + m, scratch.work.data(), L);
-            }
-            int best_m = 0;
-            float best = std::norm(acc[0]) / (pw * Et + 1e-12f);
-            for (int m = 1; m < nl; ++m) {
-                pw += std::norm(rx[base + m - 1 + static_cast<int64_t>(L)]) -
-                      std::norm(rx[base + m - 1]);
-                const float met = std::norm(acc[m]) / (pw * Et + 1e-12f);
-                if (met > best) {
-                    best = met;
-                    best_m = m;
-                }
-            }
-            const int64_t want = base + best_m;
-            const float m = best;
+            rxopt::MatchedFilterPeak peak;
+            filter.for_each_lag(rx + base, static_cast<size_t>(nl),
+                                [&](size_t lag, std::complex<float> corr, bool) {
+                if (lag != 0)
+                    pw += std::norm(rx[base + lag - 1 + L]) -
+                          std::norm(rx[base + lag - 1]);
+                const float metric = detail::normalized_correlation_power(corr, pw, Et);
+                if (lag == 0 || metric > peak.metric)
+                    peak = { lag, metric, corr };
+            });
+            const int64_t want = base + static_cast<int64_t>(peak.lag);
+            const float m = peak.metric;
             scratch.metric[k] = m;
             ++out.grid_single_points;
             if (m < gthr)
@@ -956,13 +914,10 @@ inline bool stage_timing(const std::complex<float>* rx,
             ++valid;
             out.peak_samples.push_back(want + static_cast<int64_t>(L - 1));
             out.peak_metrics.push_back(m);
-            out.peak_corr.push_back(acc[best_m]);
+            out.peak_corr.push_back(peak.corr);
             const double x = static_cast<double>(k);
             const double y = static_cast<double>(want + (int64_t)(L - 1));
-            fsx += x;
-            fsy += y;
-            fsxx += x * x;
-            fsxy += x * y;
+            final_fit.add(x, y);
             ++fn;
         }
         out.grid_single_valid = static_cast<uint32_t>(valid);
@@ -991,12 +946,10 @@ inline bool stage_timing(const std::complex<float>* rx,
         // argmax measurements, NOT the quantised grid, so measured_period stays
         // a genuine measurement and integer_chip_grid()/spc_ppm keeps working.
         if (fn >= 8) {
-            const double denom = static_cast<double>(fn) * fsxx - fsx * fsx;
+            const double denom = final_fit.determinant();
             if (std::abs(denom) > 1e-9) {
-                const double pr =
-                    (static_cast<double>(fn) * fsxy - fsx * fsy) / denom;
-                const double intercept_end =
-                    (fsy - pr * fsx) / static_cast<double>(fn);
+                const double pr = final_fit.slope(denom);
+                const double intercept_end = final_fit.intercept(pr);
                 if (std::isfinite(pr) && pr > 0.0 &&
                     std::abs(pr - p2) <= 0.01) { // 10 ppm sanity vs anchors
                     p2 = pr;
@@ -1123,9 +1076,17 @@ inline bool stage_timing(const std::complex<float>* rx,
     // be a timing result"; it was declared but never enforced, and this is
     // where it belongs.
     const bool allow_post_train_fold = !bounded || profile.locked_tail_probe;
+    size_t min_train_peaks = std::max<size_t>(4, profile.min_valid_peaks);
+    if (raw_par_hit && profile.rx_par_confirm) {
+        // A weak single-SYNC PAR hit may start tracking with too few phase
+        // points for a stable CFO estimate. Give the existing fold a chance
+        // to build its coherent anchors in that case.
+        min_train_peaks = std::max(
+            min_train_peaks,
+            std::min(profile.cfo_min_fit_repetitions, profile.preamble_repetitions));
+    }
     if (allow_post_train_fold && !fold_used && !grid_applied &&
-        out.peak_samples.size() <
-            std::max<size_t>(4, profile.min_valid_peaks)) {
+        out.peak_samples.size() < min_train_peaks) {
         const int64_t fold_centre =
             bounded ? static_cast<int64_t>(seed_start) : acq_seed;
         const int64_t fold_radius = bounded
@@ -1173,22 +1134,18 @@ inline bool stage_timing(const std::complex<float>* rx,
         out.measured_period = grid_period;
         out.preamble_start_sample = grid_start;
     } else if (np >= 2) {
-        double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+        detail::LinearFit fit;
         for (size_t k = 0; k < np; ++k) {
             const double x = static_cast<double>(peak_indices[k]);
             const double y = static_cast<double>(out.peak_samples[k]);
-            sx += x;
-            sy += y;
-            sxx += x * x;
-            sxy += x * y;
+            fit.add(x, y);
         }
-        const double denom = static_cast<double>(np) * sxx - sx * sx;
+        const double denom = fit.determinant();
         if (std::abs(denom) > 1e-12) {
-            out.measured_period = (static_cast<double>(np) * sxy - sx * sy) /
-                                  denom;
+            out.measured_period = fit.slope(denom);
             // peak_samples use the symbol-END convention (start + L - 1), so
             // the intercept is also symbol-END; convert back to the SYNC start.
-            const double intercept_end = (sy - out.measured_period * sx) / np;
+            const double intercept_end = fit.intercept(out.measured_period);
             out.preamble_start_sample = std::max<int64_t>(
                 0, static_cast<int64_t>(std::llround(intercept_end)) -
                        (static_cast<int64_t>(L) - 1));

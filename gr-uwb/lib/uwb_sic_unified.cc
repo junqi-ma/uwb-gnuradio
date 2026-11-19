@@ -887,31 +887,28 @@ bool sic_process_unified(
         return false;
     }
 
-    // 1. Strict-prefix Channel Estimation
-    SicUnifiedChannel channel;
-    const bool est_ok = estimate_channel_unified(
-        y, n, cfg.observed_end_sample, templates, cfg, scratch,
-        channel, &result.timings);
-    result.channel = channel;
-
-    if (!est_ok || !channel.valid) {
+    auto fail_closed_before_recon = [&](const char* reason) {
         if (result.out != y) {
             std::copy(y, y + n, result.out);
         }
         if (result.i_hat) {
             std::fill(result.i_hat, result.i_hat + n, std::complex<float>(0.f, 0.f));
         }
-        result.reason = channel.reason ? channel.reason : channel.status;
+        result.reason = reason;
+        result.level = SicCancellationLevel::L0_Bypass;
+        result.cancelled_fields = SicKnownFields::None;
         result.timings.core_total_us = us(t_core_start);
         return true;
-    }
+    };
 
-    // 2. Cancellation Policy & Comm RX Demodulation (SYNC + SFD for both PreambleOnly and FullPacket)
+    const int64_t obs = (cfg.observed_end_sample <= 0)
+                            ? static_cast<int64_t>(n)
+                            : std::min<int64_t>(static_cast<int64_t>(n), cfg.observed_end_sample);
+
     SicCancellationLevel target_level = SicCancellationLevel::L0_Bypass;
     SicKnownFields target_fields = SicKnownFields::None;
     const std::complex<float>* s_known_ptr = templates.preamble;
     size_t s_known_len = templates.preamble_len;
-
     const std::vector<std::complex<float>>& sync_vec = scratch.cached_sync_vec;
 
     auto demod_prof = demod::Qm35825Profile::Default();
@@ -919,8 +916,6 @@ bool sic_process_unified(
     demod_prof.preamble_repetitions = cfg.sync_reps;
     if (cfg.sync_reps > demod_prof.cir_skip_initial_repetitions)
         demod_prof.cir_repetitions = cfg.sync_reps - demod_prof.cir_skip_initial_repetitions;
-    demod_prof.timing_search_margin = 256;
-    demod_prof.timing_coarse_stride = 1;
     demod_prof.sfd_mode = cfg.sfd_mode;
     demod_prof.rx_fast_sfd = cfg.rx_fast_sfd;
     demod_prof.rx_fast_cfo_rotation = cfg.rx_fast_cfo;
@@ -928,29 +923,83 @@ bool sic_process_unified(
     demod_prof.rx_softchip_on_demand = cfg.rx_softchip_on_demand;
     demod_prof.rx_fused_payload_cmf = cfg.rx_fused_payload_cmf;
     demod_prof.rx_fused_phr_cmf = cfg.rx_fused_phr_cmf;
-    demod_prof.timing_seed_refine_radius = 16;
 
-    if (cfg.policy == SicPolicy::PreambleOnly) {
-        // Preamble-only: run the exact same SYNC + SFD detection flow as full packet!
-        // Early terminate right after Final SFD verification to avoid CIR/PHR/payload overhead.
-        demod_prof.rx_stop_after_sfd = true;
+    SicUnifiedChannel channel;
+
+    if (cfg.backend == SicEstimatorBackend::Ipatov) {
+        // Unified Ipatov path: run standard demodulate_one FIRST for blind
+        // timing (AVX-512 16-lag), CFO, SFD and optional PHR/payload, then
+        // run only the strict-prefix Ipatov CIR + physical residual gate.
+        int64_t predicted_start = -1;
+        if (cfg.roi_hi > cfg.roi_lo) {
+            predicted_start = cfg.roi_lo + (cfg.roi_hi - cfg.roi_lo) / 2;
+            const size_t half_roi = static_cast<size_t>((cfg.roi_hi - cfg.roi_lo + 1) / 2);
+            demod_prof.timing_search_margin = std::max<size_t>(256, half_roi + 64);
+        }
+
+        const bool preamble_only = (cfg.policy == SicPolicy::PreambleOnly);
+        demod_prof.rx_stop_after_sfd = preamble_only;
+        const size_t demod_len = preamble_only ? static_cast<size_t>(obs) : n;
+
         const auto t_rx = Clock::now();
         demod::DemodResult decoded = demod::core::demodulate_one(
-            y, n, demod_prof, 0, channel.q, 0, sync_vec, scratch.demod);
+            y, demod_len, demod_prof, 0, predicted_start, 0, sync_vec, scratch.demod);
         result.timings.comm_rx_us = us(t_rx);
         result.timings.rx_timing_us = static_cast<double>(decoded.stage_timing_us);
         result.timings.rx_cfo_us = static_cast<double>(decoded.stage_cfo_us);
         result.timings.rx_sfd_us = static_cast<double>(decoded.stage_sfd_us);
+        if (!preamble_only) {
+            result.timings.rx_cir_us = static_cast<double>(decoded.stage_cir_us);
+            result.timings.rx_phr_us = static_cast<double>(decoded.stage_phr_us);
+            result.timings.rx_payload_us = static_cast<double>(decoded.stage_payload_us);
+        }
 
         result.comm_detected = (decoded.status != demod::DemodStatus::TimingFailed &&
                                 decoded.status != demod::DemodStatus::InvalidInput);
+        const bool sfd_ok = decoded.sfd.ok && result.comm_detected;
 
-        const bool sfd_ok = (decoded.status == demod::DemodStatus::Success && decoded.sfd.ok);
-        if (sfd_ok) {
-            // High-precision SYNC+SFD preamble model
+        if (preamble_only) {
+            if (!(decoded.status == demod::DemodStatus::Success && decoded.sfd.ok)) {
+                return fail_closed_before_recon("sfd_detect_failed");
+            }
             target_level = SicCancellationLevel::L1_Preamble;
             target_fields = SicKnownFields::PreambleSfd;
+        } else {
+            result.comm_phr_pass = (decoded.phr.psdu_length > 0 && !decoded.phr.secded_uncorrectable);
+            result.comm_fcs_pass = decoded.payload.fcs_pass;
+            result.phr_secded_corrected = decoded.phr.secded_corrected;
+            result.phr_secded_uncorrectable = decoded.phr.secded_uncorrectable;
+            result.comm_phr_length = decoded.phr.psdu_length;
+            result.comm_phr_rate_mbps = decoded.phr.data_rate_mbps;
 
+            if (decoded.payload.bytes.size() <= 127) {
+                result.wire_psdu_len = decoded.payload.bytes.size();
+                std::copy(decoded.payload.bytes.begin(), decoded.payload.bytes.end(), result.wire_psdu);
+                scratch.work_wire_psdu = decoded.payload.bytes;
+            }
+            scratch.work_phr_bits = decoded.phr.phr_bits;
+
+            const bool demod_success = (decoded.status == demod::DemodStatus::Success &&
+                                        decoded.payload.fcs_pass &&
+                                        decoded.phr.phr_bits.size() == 19);
+            if (demod_success) {
+                target_level = SicCancellationLevel::L2_FullPacket;
+                target_fields = SicKnownFields::FullPacket;
+            } else {
+                const char* fb = !result.comm_detected ? "comm_detect_failed"
+                               : (!result.comm_phr_pass ? "comm_phr_failed"
+                               : (!result.comm_fcs_pass ? "comm_fcs_failed"
+                               : "comm_demod_failed"));
+                if (cfg.policy == SicPolicy::FullPacket || !sfd_ok) {
+                    return fail_closed_before_recon(fb);
+                }
+                result.fallback_reason = fb;
+                target_level = SicCancellationLevel::L1_Preamble;
+                target_fields = SicKnownFields::PreambleSfd;
+            }
+        }
+
+        if (target_level == SicCancellationLevel::L1_Preamble) {
             if (scratch.preamble_cache_valid && !scratch.cached_preamble_waveform.empty()) {
                 s_known_ptr = scratch.cached_preamble_waveform.data();
                 s_known_len = scratch.cached_preamble_waveform.size();
@@ -965,79 +1014,61 @@ bool sic_process_unified(
                     s_known_len = n_prefix;
                 }
             }
-        } else {
-            // SFD detection failed on preamble-only
-            if (result.out != y) {
-                std::copy(y, y + n, result.out);
-            }
-            if (result.i_hat) {
-                std::fill(result.i_hat, result.i_hat + n, std::complex<float>(0.f, 0.f));
-            }
-            result.reason = "sfd_detect_failed";
-            result.level = SicCancellationLevel::L0_Bypass;
-            result.cancelled_fields = SicKnownFields::None;
-            result.timings.core_total_us = us(t_core_start);
-            return true;
+        }
+
+        const auto t_est = Clock::now();
+        DiscreteCirModel dm;
+        DiscreteCirTimings dt;
+        DiscreteCirConfig dc = cfg.to_discrete_cir_config();
+        dc.known_q = decoded.timing.preamble_start_sample;
+        dc.known_cfo_hz = decoded.cfo.cfo_hz;
+        dc.has_known_cfo = true;
+        DiscreteCirTemplates dtemp = templates.to_discrete_cir_templates();
+        const bool est_ok = estimate_discrete_cir(
+            y, n, obs, dtemp, dc, scratch.discrete, dm, &dt);
+        channel.from_discrete_cir(dm);
+        result.channel = channel;
+        result.timings.estimate_us = us(t_est);
+        result.timings.est_detect_us = dt.detect_us;
+        result.timings.est_cfo_us = dt.cfo_us;
+        result.timings.est_cir_us = dt.support_us;
+        result.timings.est_solve_us = dt.projection_us + dt.solve_us;
+        result.timings.est_fit_check_us = dt.fit_check_us;
+
+        if (!est_ok || !channel.valid) {
+            return fail_closed_before_recon(channel.reason ? channel.reason : channel.status);
         }
     } else {
-        // FullPacket or AutoFallback: attempt fast comm demodulation
-        demod_prof.rx_stop_after_sfd = false;
-        const auto t_rx = Clock::now();
-        demod::DemodResult decoded = demod::core::demodulate_one(
-            y, n, demod_prof, 0, channel.q, 0, sync_vec, scratch.demod);
-        result.timings.comm_rx_us = us(t_rx);
-        result.timings.rx_timing_us = static_cast<double>(decoded.stage_timing_us);
-        result.timings.rx_cfo_us = static_cast<double>(decoded.stage_cfo_us);
-        result.timings.rx_sfd_us = static_cast<double>(decoded.stage_sfd_us);
-        result.timings.rx_cir_us = static_cast<double>(decoded.stage_cir_us);
-        result.timings.rx_phr_us = static_cast<double>(decoded.stage_phr_us);
-        result.timings.rx_payload_us = static_cast<double>(decoded.stage_payload_us);
+        // 1. Strict-prefix Channel Estimation (DiscreteCir / PathFractional)
+        const bool est_ok = estimate_channel_unified(
+            y, n, cfg.observed_end_sample, templates, cfg, scratch,
+            channel, &result.timings);
+        result.channel = channel;
 
-        result.comm_detected = (decoded.status != demod::DemodStatus::TimingFailed &&
-                                decoded.status != demod::DemodStatus::InvalidInput);
-        result.comm_phr_pass = (decoded.phr.psdu_length > 0 && !decoded.phr.secded_uncorrectable);
-        result.comm_fcs_pass = decoded.payload.fcs_pass;
-        result.phr_secded_corrected = decoded.phr.secded_corrected;
-        result.phr_secded_uncorrectable = decoded.phr.secded_uncorrectable;
-        result.comm_phr_length = decoded.phr.psdu_length;
-        result.comm_phr_rate_mbps = decoded.phr.data_rate_mbps;
-
-        if (decoded.payload.bytes.size() <= 127) {
-            result.wire_psdu_len = decoded.payload.bytes.size();
-            std::copy(decoded.payload.bytes.begin(), decoded.payload.bytes.end(), result.wire_psdu);
-            scratch.work_wire_psdu = decoded.payload.bytes;
+        if (!est_ok || !channel.valid) {
+            return fail_closed_before_recon(channel.reason ? channel.reason : channel.status);
         }
-        scratch.work_phr_bits = decoded.phr.phr_bits;
 
-        const bool demod_success = (decoded.status == demod::DemodStatus::Success &&
-                                    decoded.payload.fcs_pass &&
-                                     decoded.phr.phr_bits.size() == 19);
+        // 2. Cancellation Policy & Comm RX Demodulation
+        demod_prof.timing_search_margin = 256;
+        demod_prof.timing_coarse_stride = 1;
+        demod_prof.timing_seed_refine_radius = 16;
 
-        if (demod_success) {
-            target_level = SicCancellationLevel::L2_FullPacket;
-            target_fields = SicKnownFields::FullPacket;
-        } else {
-            const char* fb = !result.comm_detected ? "comm_detect_failed"
-                           : (!result.comm_phr_pass ? "comm_phr_failed"
-                           : (!result.comm_fcs_pass ? "comm_fcs_failed"
-                           : "comm_demod_failed"));
+        if (cfg.policy == SicPolicy::PreambleOnly) {
+            demod_prof.rx_stop_after_sfd = true;
+            const auto t_rx = Clock::now();
+            demod::DemodResult decoded = demod::core::demodulate_one(
+                y, n, demod_prof, 0, channel.q, 0, sync_vec, scratch.demod);
+            result.timings.comm_rx_us = us(t_rx);
+            result.timings.rx_timing_us = static_cast<double>(decoded.stage_timing_us);
+            result.timings.rx_cfo_us = static_cast<double>(decoded.stage_cfo_us);
+            result.timings.rx_sfd_us = static_cast<double>(decoded.stage_sfd_us);
 
-            if (cfg.policy == SicPolicy::FullPacket) {
-                // Strict full-packet: abort to L0 Bypass
-                if (result.out != y) {
-                    std::copy(y, y + n, result.out);
-                }
-                if (result.i_hat) {
-                    std::fill(result.i_hat, result.i_hat + n, std::complex<float>(0.f, 0.f));
-                }
-                result.reason = fb;
-                result.level = SicCancellationLevel::L0_Bypass;
-                result.cancelled_fields = SicKnownFields::None;
-                result.timings.core_total_us = us(t_core_start);
-                return true;
-            } else {
-                // AutoFallback: gracefully degrade to L1 Preamble!
-                result.fallback_reason = fb;
+            result.comm_detected = (decoded.status != demod::DemodStatus::TimingFailed &&
+                                    decoded.status != demod::DemodStatus::InvalidInput);
+
+            const bool sfd_ok = (decoded.status == demod::DemodStatus::Success && decoded.sfd.ok);
+            if (sfd_ok) {
                 target_level = SicCancellationLevel::L1_Preamble;
                 target_fields = SicKnownFields::PreambleSfd;
 
@@ -1053,6 +1084,73 @@ bool sic_process_unified(
                                                       n_prefix) && n_prefix > 0) {
                         s_known_ptr = scratch.work_waveform.data();
                         s_known_len = n_prefix;
+                    }
+                }
+            } else {
+                return fail_closed_before_recon("sfd_detect_failed");
+            }
+        } else {
+            demod_prof.rx_stop_after_sfd = false;
+            const auto t_rx = Clock::now();
+            demod::DemodResult decoded = demod::core::demodulate_one(
+                y, n, demod_prof, 0, channel.q, 0, sync_vec, scratch.demod);
+            result.timings.comm_rx_us = us(t_rx);
+            result.timings.rx_timing_us = static_cast<double>(decoded.stage_timing_us);
+            result.timings.rx_cfo_us = static_cast<double>(decoded.stage_cfo_us);
+            result.timings.rx_sfd_us = static_cast<double>(decoded.stage_sfd_us);
+            result.timings.rx_cir_us = static_cast<double>(decoded.stage_cir_us);
+            result.timings.rx_phr_us = static_cast<double>(decoded.stage_phr_us);
+            result.timings.rx_payload_us = static_cast<double>(decoded.stage_payload_us);
+
+            result.comm_detected = (decoded.status != demod::DemodStatus::TimingFailed &&
+                                    decoded.status != demod::DemodStatus::InvalidInput);
+            result.comm_phr_pass = (decoded.phr.psdu_length > 0 && !decoded.phr.secded_uncorrectable);
+            result.comm_fcs_pass = decoded.payload.fcs_pass;
+            result.phr_secded_corrected = decoded.phr.secded_corrected;
+            result.phr_secded_uncorrectable = decoded.phr.secded_uncorrectable;
+            result.comm_phr_length = decoded.phr.psdu_length;
+            result.comm_phr_rate_mbps = decoded.phr.data_rate_mbps;
+
+            if (decoded.payload.bytes.size() <= 127) {
+                result.wire_psdu_len = decoded.payload.bytes.size();
+                std::copy(decoded.payload.bytes.begin(), decoded.payload.bytes.end(), result.wire_psdu);
+                scratch.work_wire_psdu = decoded.payload.bytes;
+            }
+            scratch.work_phr_bits = decoded.phr.phr_bits;
+
+            const bool demod_success = (decoded.status == demod::DemodStatus::Success &&
+                                        decoded.payload.fcs_pass &&
+                                        decoded.phr.phr_bits.size() == 19);
+
+            if (demod_success) {
+                target_level = SicCancellationLevel::L2_FullPacket;
+                target_fields = SicKnownFields::FullPacket;
+            } else {
+                const char* fb = !result.comm_detected ? "comm_detect_failed"
+                               : (!result.comm_phr_pass ? "comm_phr_failed"
+                               : (!result.comm_fcs_pass ? "comm_fcs_failed"
+                               : "comm_demod_failed"));
+
+                if (cfg.policy == SicPolicy::FullPacket) {
+                    return fail_closed_before_recon(fb);
+                } else {
+                    result.fallback_reason = fb;
+                    target_level = SicCancellationLevel::L1_Preamble;
+                    target_fields = SicKnownFields::PreambleSfd;
+
+                    if (scratch.preamble_cache_valid && !scratch.cached_preamble_waveform.empty()) {
+                        s_known_ptr = scratch.cached_preamble_waveform.data();
+                        s_known_len = scratch.cached_preamble_waveform.size();
+                    } else {
+                        mod::HrpModConfig modcfg = cfg.to_hrp_mod_config();
+                        size_t n_prefix = 0;
+                        if (mod::modulate_prefix_waveform(modcfg, scratch.modulator,
+                                                          scratch.work_waveform.data(),
+                                                          scratch.work_waveform.size(),
+                                                          n_prefix) && n_prefix > 0) {
+                            s_known_ptr = scratch.work_waveform.data();
+                            s_known_len = n_prefix;
+                        }
                     }
                 }
             }

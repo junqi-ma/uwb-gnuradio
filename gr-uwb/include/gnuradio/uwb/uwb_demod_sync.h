@@ -2,6 +2,8 @@
 #pragma once
 #include <gnuradio/uwb/uwb_demod_scratch.h>
 #include <gnuradio/uwb/uwb_demod_grid.h>
+#include <gnuradio/uwb/uwb_linear_fit.h>
+#include <gnuradio/uwb/uwb_rx_matched_filter.h>
 #include <gnuradio/uwb/uwb_detector_core.h>
 
 namespace gr::uwb::demod::core {
@@ -14,22 +16,29 @@ namespace gr::uwb::demod::core {
 
 namespace detail {
 
-// Long complex matched-filter dot product used by timing acquisition/tracking.
-// VOLK computes sum(input[k] * conj(taps[k])) and runtime-dispatches to the
-// fastest implementation available on the host.  Timing uses 1016-point dots,
-// so dispatch overhead is amortized (unlike the 38-tap CIR hot loop).
-inline std::complex<float>
-timing_conjugate_dot(const std::complex<float>* input,
-                     const std::complex<float>* taps,
-                     size_t count)
+using gr::uwb::core::LinearFit;
+using gr::uwb::core::normalized_correlation_power;
+using gr::uwb::core::sample_power_sum;
+using gr::uwb::core::conjugate_dot_scalar;
+
+inline std::complex<float> timing_conjugate_dot(const std::complex<float>* input,
+                                                const std::complex<float>* taps,
+                                                size_t count)
 {
-    std::complex<float> acc(0.0f, 0.0f);
-    volk_32fc_x2_conjugate_dot_prod_32fc(
-        &acc,
-        reinterpret_cast<const lv_32fc_t*>(input),
-        reinterpret_cast<const lv_32fc_t*>(taps),
-        static_cast<unsigned int>(count));
-    return acc;
+    return gr::uwb::core::conjugate_dot(input, taps, count);
+}
+
+inline const rxopt::SparseCirTemplate* prepare_sparse_sync_template(
+    const Qm35825Profile& profile, size_t length, DemodScratch& scratch)
+{
+    if (!profile.rx_timing_sparse || length != 2 * kQm35ChipsPerSymbol)
+        return nullptr;
+    if (scratch.cached_seq.code_index != profile.code_index ||
+        scratch.cached_seq.pcode.empty())
+        scratch.cached_seq.update(profile.code_index, profile.sfd_mode);
+    const auto& code = scratch.cached_seq.pcode;
+    rxopt::ensure_sparse_cir_template(code.data(), code.size(), scratch.cir_template);
+    return scratch.cir_template.code_energy > 0.0f ? &scratch.cir_template : nullptr;
 }
 
 // Full-rate normalized matched filter over [roi_start, roi_end).  Fills
@@ -53,15 +62,10 @@ normalized_mf(const std::complex<float>* rx,
     if (jmax <= roi_start)
         return best;
     // window power of rx over the same L-length window (running sum)
-    float wsum = 0.0f;
-    for (size_t k = 0; k < L; ++k)
-        wsum += std::norm(rx[roi_start + k]);
+    float wsum = sample_power_sum(rx + roi_start, L);
     for (size_t j = roi_start; j < jmax; ++j) {
-        std::complex<float> corr(0.0f, 0.0f);
-        for (size_t k = 0; k < L; ++k)
-            corr += rx[j + k] * std::conj(tmpl[k]);
-        const float d = wsum * tmpl_energy + 1e-12f;
-        const float m = std::norm(corr) / d;
+        const auto corr = conjugate_dot_scalar(rx + j, tmpl, L);
+        const float m = normalized_correlation_power(corr, wsum, tmpl_energy);
         metric[j] = m;
         if (m > bm) {
             bm = m;
@@ -198,7 +202,8 @@ inline FoldAcquireResult fold_acquire(const std::complex<float>* rx,
                                       size_t max_symbols,
                                       size_t preamble_repetitions,
                                       float threshold,
-                                      double phase_per_symbol = 0.0)
+                                      double phase_per_symbol = 0.0,
+                                      const rxopt::SparseCirTemplate* sparse_tmpl = nullptr)
 {
     FoldAcquireResult res;
     const int64_t P = static_cast<int64_t>(kQm35SamplesPerSymbol);
@@ -253,64 +258,23 @@ inline FoldAcquireResult fold_acquire(const std::complex<float>* rx,
         fold_accumulate(folded.data(), rx + w0 + k * P, fold_len,
                         -k * phase_per_symbol);
 
-    const bool use_real = real_tmpl.is_real && real_tmpl.length == L;
-    const float* taps_dup = real_tmpl.taps_dup.data();
-    float pw = 0.0f;
-    for (size_t m = 0; m < L; ++m)
-        pw += std::norm(folded[m]);
-
-    // Position ambiguity: only lags inside +/-P/2 of the seed can be told apart
-    // (see the note above).  The window was already clamped to exactly that
-    // sub-window, so the argmax range below normally covers all of it; the
-    // general expressions are kept because a buffer-edge clamp can still cut
-    // one side short.
-    const int64_t lo_lag = std::max<int64_t>(0, (centre - w0) - half_period);
-    const int64_t hi_lag = std::min<int64_t>(span, (centre - w0) + half_period);
-
-    float bm = -1.0f;
-    int64_t bj = lo_lag;
-    std::complex<float> bacc(0.0f, 0.0f);
-    int64_t j = 0;
-    if (use_real) {
-        for (; j + 7 <= span; j += 8) {
-            std::complex<float> acc[8];
-            rxopt::real_template_dot_8lag(folded.data() + j, taps_dup, L, acc);
-            for (int m = 0; m < 8; ++m) {
-                const float met = std::norm(acc[m]) / (pw * Et + 1e-12f);
-                const int64_t lag = j + m;
-                if (lag >= lo_lag && lag <= hi_lag && met > bm) {
-                    bm = met;
-                    bj = lag;
-                    bacc = acc[m];
-                }
-                if (lag < span)
-                    pw += std::norm(folded[lag + Li]) - std::norm(folded[lag]);
-            }
-        }
-    }
-    for (; j <= span; ++j) {
-        const std::complex<float> acc =
-            use_real ? rxopt::real_template_dot_single(folded.data() + j,
-                                                       taps_dup, L)
-                     : timing_conjugate_dot(folded.data() + j, tmpl, L);
-        const float met = std::norm(acc) / (pw * Et + 1e-12f);
-        if (j >= lo_lag && j <= hi_lag && met > bm) {
-            bm = met;
-            bj = j;
-            bacc = acc;
-        }
-        if (j < span)
-            pw += std::norm(folded[j + Li]) - std::norm(folded[j]);
-    }
+    const float* real_taps = real_tmpl.is_real && real_tmpl.length == L
+        ? real_tmpl.taps_dup.data() : nullptr;
+    const rxopt::SyncMatchedFilter filter(tmpl, L, real_taps, sparse_tmpl);
+    if (sparse_tmpl && sparse_tmpl->code_energy > 0.0f)
+        Et = sparse_tmpl->code_energy;
+    const size_t lags = static_cast<size_t>(span + 1);
+    const auto peak = rxopt::scan_normalized_sync(
+        filter, folded.data(), lags, sample_power_sum(folded.data(), L), Et);
 
     res.symbols_folded = static_cast<size_t>(k_eff);
-    res.window_lags = static_cast<size_t>(span + 1);
-    if (!(bm >= threshold) || hi_lag < lo_lag)
+    res.window_lags = lags;
+    if (!(peak.metric >= threshold))
         return res;
     res.ok = true;
-    res.start = w0 + bj;
-    res.metric = bm;
-    res.corr = bacc;
+    res.start = w0 + static_cast<int64_t>(peak.lag);
+    res.metric = peak.metric;
+    res.corr = peak.corr;
     return res;
 }
 
@@ -339,7 +303,8 @@ inline bool fold_anchor_fit(const std::complex<float>* rx,
                             std::vector<int64_t>& peak_samples,
                             std::vector<float>& peak_metrics,
                             std::vector<std::complex<float>>& peak_corr,
-                            double phase_per_symbol = 0.0)
+                            double phase_per_symbol = 0.0,
+                            const rxopt::SparseCirTemplate* sparse_tmpl = nullptr)
 {
     peak_samples.clear();
     peak_metrics.clear();
@@ -353,10 +318,13 @@ inline bool fold_anchor_fit(const std::complex<float>* rx,
 
     std::vector<std::complex<float>> sup(sup_len,
                                          std::complex<float>(0.0f, 0.0f));
-    const bool use_real = real_tmpl.is_real && real_tmpl.length == L;
-    const float* taps_dup = real_tmpl.taps_dup.data();
+    const float* real_taps = real_tmpl.is_real && real_tmpl.length == L
+        ? real_tmpl.taps_dup.data() : nullptr;
+    const rxopt::SyncMatchedFilter filter(tmpl, L, real_taps, sparse_tmpl);
+    if (sparse_tmpl && sparse_tmpl->code_energy > 0.0f)
+        Et = sparse_tmpl->code_energy;
 
-    double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    LinearFit fit;
     size_t used = 0;
     for (size_t g = 0; g < groups; ++g) {
         const int64_t base =
@@ -374,70 +342,26 @@ inline bool fold_anchor_fit(const std::complex<float>* rx,
              ++j)
             fold_accumulate(sup.data(), rx + base + j * P, sup_len,
                             -j * phase_per_symbol);
-        float pw = 0.0f;
-        for (size_t m = 0; m < L; ++m)
-            pw += std::norm(sup[m]);
-        float bm = -1.0f;
-        int64_t bl = 0;
-        std::complex<float> bacc(0.0f, 0.0f);
-        int64_t lag = 0;
-        if (use_real) {
-            // Eight lags per call: the 8-lag kernel keeps eight independent
-            // accumulators, so it costs barely more than one long FMA chain and
-            // is bit-identical per lag to real_template_dot_single().  The
-            // metric/power update order is unchanged, so the selected anchor is
-            // identical to the single-lag loop it replaces.
-            for (; lag + 7 <= 2 * refine; lag += 8) {
-                std::complex<float> acc8[8];
-                rxopt::real_template_dot_8lag(sup.data() + lag, taps_dup, L,
-                                              acc8);
-                for (int m = 0; m < 8; ++m) {
-                    const int64_t cur = lag + m;
-                    const float met = std::norm(acc8[m]) / (pw * Et + 1e-12f);
-                    if (met > bm) {
-                        bm = met;
-                        bl = cur;
-                        bacc = acc8[m];
-                    }
-                    if (cur < 2 * refine)
-                        pw += std::norm(sup[cur + Li]) - std::norm(sup[cur]);
-                }
-            }
-        }
-        for (; lag <= 2 * refine; ++lag) {
-            const std::complex<float> acc =
-                use_real ? rxopt::real_template_dot_single(sup.data() + lag,
-                                                           taps_dup, L)
-                         : timing_conjugate_dot(sup.data() + lag, tmpl, L);
-            const float met = std::norm(acc) / (pw * Et + 1e-12f);
-            if (met > bm) {
-                bm = met;
-                bl = lag;
-                bacc = acc;
-            }
-            if (lag < 2 * refine)
-                pw += std::norm(sup[lag + Li]) - std::norm(sup[lag]);
-        }
-        const int64_t pos = base + bl;
+        const auto peak = rxopt::scan_normalized_sync(
+            filter, sup.data(), sup_len - L + 1,
+            sample_power_sum(sup.data(), L), Et);
+        const int64_t pos = base + static_cast<int64_t>(peak.lag);
         const double x = static_cast<double>(
             static_cast<int64_t>(g) *
             static_cast<int64_t>(kFoldAnchorGroupSymbols));
         const double y = static_cast<double>(pos + Li - 1);
-        sx += x;
-        sy += y;
-        sxx += x * x;
-        sxy += x * y;
+        fit.add(x, y);
         peak_samples.push_back(pos + Li - 1);
-        peak_metrics.push_back(bm);
-        peak_corr.push_back(bacc);
+        peak_metrics.push_back(peak.metric);
+        peak_corr.push_back(peak.corr);
         ++used;
     }
     if (used < 2)
         return false;
-    const double denom = static_cast<double>(used) * sxx - sx * sx;
+    const double denom = fit.determinant();
     if (!(std::abs(denom) > 1e-9))
         return false;
-    const double p = (static_cast<double>(used) * sxy - sx * sy) / denom;
+    const double p = fit.slope(denom);
     if (!std::isfinite(p) || !(p > 0.0))
         return false;
     // Same 0.5% sanity gate the LockedBounded anchor fit uses: a period that
@@ -445,7 +369,7 @@ inline bool fold_anchor_fit(const std::complex<float>* rx,
     // symbol indices at all.
     if (std::abs(p - static_cast<double>(P)) > 0.005 * static_cast<double>(P))
         return false;
-    const double intercept_end = (sy - p * sx) / static_cast<double>(used);
+    const double intercept_end = fit.intercept(p);
     *period_out = p;
     *preamble_start_out = std::max<int64_t>(
         0, static_cast<int64_t>(std::llround(intercept_end)) - (Li - 1));
@@ -454,6 +378,11 @@ inline bool fold_anchor_fit(const std::complex<float>* rx,
 
 } // namespace detail
 
+// Windowed |x|^2 with eight independent accumulators.  A single-accumulator
+// float reduction cannot be vectorised without -ffast-math, and the power
+// turned out to be HALF the cost of the single-point stage (measured 2x faster
+// with eight accumulators).  The summation order differs from a plain scalar
+// loop, but this value only normalises a correlation metric.
 inline float window_power_8acc(const std::complex<float>* x, size_t count)
 {
     const float* f = reinterpret_cast<const float*>(x);
@@ -461,7 +390,8 @@ inline float window_power_8acc(const std::complex<float>* x, size_t count)
     float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
     float a4 = 0.f, a5 = 0.f, a6 = 0.f, a7 = 0.f;
     size_t i = 0;
-    for (; i + 8 <= m; i += 8) {
+    const size_t bulk = m & ~size_t{7};
+    for (; i < bulk; i += 8) {
         a0 += f[i + 0] * f[i + 0];
         a1 += f[i + 1] * f[i + 1];
         a2 += f[i + 2] * f[i + 2];

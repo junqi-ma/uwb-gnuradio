@@ -10,6 +10,7 @@
 #include "window_diag_state.h"
 #include <gnuradio/uwb/uwb_demod_core.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
+#include <gnuradio/uwb/uwb_resample_window.h>
 #include <gnuradio/uwb/uwb_fixed_tone_cancel_core.h>
 using namespace gr::uwb;
 template<class T> std::vector<T> load(const std::string& path) {
@@ -50,8 +51,7 @@ int main(int argc,char**argv) try {
     auto tmpl=load<std::complex<float>>(res+"/reference_preamble_code10_998p4.cf32");
     core::RationalResampler65_48Core rs(taps);rs.set_fixed_phase_schedule(true);
     std::vector<std::complex<float>> y(rs.expected_output_length(count));
-    size_t made=rs.process_sc16(x.data(),count,1.f/32768,y.data(),y.size()).produced;
-    while(made<y.size()) {size_t n=rs.flush(y.data()+made,y.size()-made);if(!n)break;made+=n;}
+    const size_t made = core::resample_sc16_window(rs, x.data(), count, 1.f / 32768, y);
     demod::Qm35825Profile p;p.code_index=10;p.preamble_repetitions=256;p.cir_repetitions=246;
     p.sfd_mode="4z2";p.cir_soft_chip_mode=demod::CirSoftChipMode::Full;
     p.rx_fast_sfd=true;p.rx_fast_cfo_rotation=true;p.rx_seed_refine_tail=true;

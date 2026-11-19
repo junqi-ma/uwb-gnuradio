@@ -66,5 +66,15 @@ docs/performance/data_65_48_equiripple*/raw/
 docs/performance/data_65_48_equiripple_g3/*_base/
 docs/performance/data_65_48_equiripple_g3/*_cand/
 
+# Per-window benchmark dumps stay local; commit only the aggregate
+# runs.csv / summary.csv and the report. The 2026-11-11 round-2 raw
+# directory is ~1.1 GiB of JSON (57 MiB packed) and is regenerable.
+docs/performance/data_sc16_round2/*/raw/
+docs/performance/data_chain_workers*/raw/
+docs/performance/data_single_worker_task_detail*/raw/
+
+# Local capture dumps under testdata/ (real X410/DW3000 recordings).
+testdata/**/*.sc16
+
 # Local delegated sessions and independent verification artifacts
 .opencode-task/

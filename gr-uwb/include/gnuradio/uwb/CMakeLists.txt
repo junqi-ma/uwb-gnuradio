@@ -14,6 +14,8 @@ install(FILES
     uwb_radar_meta_core.h
     uwb_sc16_stream_source.h
     uwb_defaults.h
+    uwb_linear_fit.h
+    uwb_matched_filter.h
     uwb_detector_core.h
     uwb_scheduled_extractor_core.h
     uwb_preamble_verifier_sc16.h
@@ -112,9 +114,11 @@ install(FILES
     # They are header-only and must ship with the core header so an isolated
     # installed consumer still compiles.
     uwb_rx_sync_opt.h
+    uwb_rx_matched_filter.h
     uwb_rx_cfo_opt.h
     uwb_rx_softchip_opt.h
     uwb_rx_fused_cmf.h
+    uwb_rx_bpm.h
     uwb_softchip_fir_diag.h
     # M2-A: the offline native-rate PHY closed loop.  Header-only entry that
     # reuses the hrp_mod / resampler / demod cores above, so it installs and an

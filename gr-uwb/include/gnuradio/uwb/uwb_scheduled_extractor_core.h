@@ -22,6 +22,7 @@
 #pragma once
 
 #include <gnuradio/uwb/uwb_defaults.h>
+#include <gnuradio/uwb/uwb_matched_filter.h>
 
 #include <algorithm>
 #include <array>
@@ -1259,10 +1260,7 @@ inline bool verify_template_in_window(const std::complex<float>* window_iq,
     if (!window_iq || !template_iq || L == 0 || n < L)
         return false;
 
-    // Template energy
-    float t_energy = 0.0f;
-    for (size_t i = 0; i < L; ++i)
-        t_energy += std::norm(template_iq[i]);
+    const float t_energy = gr::uwb::core::sample_power_sum(template_iq, L);
     if (t_energy < 1e-20f)
         return false;
 
@@ -1276,16 +1274,19 @@ inline bool verify_template_in_window(const std::complex<float>* window_iq,
 
     float best = 0.0f;
     size_t best_j = search_start;
+    auto score_at = [&](size_t j) {
+        std::complex<float> corr{};
+        float power = 0.0f;
+        for (size_t k = 0; k < L; ++k) {
+            const auto sample = window_iq[j + k];
+            corr += sample * std::conj(template_iq[k]);
+            power += std::norm(sample);
+        }
+        return gr::uwb::core::normalized_correlation_power(corr, power, t_energy);
+    };
     // Coarse (or full-rate when stride==1).
     for (size_t j = search_start; j < end; j += stride) {
-        std::complex<float> corr(0.0f, 0.0f);
-        float pwr = 0.0f;
-        for (size_t k = 0; k < L; ++k) {
-            corr += window_iq[j + k] * std::conj(template_iq[k]);
-            pwr += std::norm(window_iq[j + k]);
-        }
-        const float denom = pwr * t_energy + 1e-12f;
-        const float m = std::norm(corr) / denom;
+        const float m = score_at(j);
         if (m > best) {
             best = m;
             best_j = j;
@@ -1297,14 +1298,7 @@ inline bool verify_template_in_window(const std::complex<float>* window_iq,
             best_j > search_start + stride ? best_j - stride : search_start;
         const size_t fine_hi = std::min(best_j + stride + 1, end);
         for (size_t j = fine_lo; j < fine_hi; ++j) {
-            std::complex<float> corr(0.0f, 0.0f);
-            float pwr = 0.0f;
-            for (size_t k = 0; k < L; ++k) {
-                corr += window_iq[j + k] * std::conj(template_iq[k]);
-                pwr += std::norm(window_iq[j + k]);
-            }
-            const float denom = pwr * t_energy + 1e-12f;
-            const float m = std::norm(corr) / denom;
+            const float m = score_at(j);
             if (m > best) {
                 best = m;
                 best_j = j;

@@ -1870,6 +1870,32 @@ BOOST_AUTO_TEST_CASE(test_demod_core_timing_volk_dot_agrees_with_scalar)
     }
 }
 
+BOOST_AUTO_TEST_CASE(test_sync_matched_filter_exact_window_edges)
+{
+    const std::vector<std::complex<float>> taps{ { 1.0f, 0.0f }, { -1.0f, 0.0f } };
+    rxopt::RealSyncTemplate real;
+    rxopt::build_real_sync_template(taps, real);
+    const rxopt::SyncMatchedFilter filter(taps.data(), taps.size(),
+                                          real.taps_dup.data(), nullptr);
+    const std::vector<std::complex<float>> single{ { 1.0f, 0.0f }, { -1.0f, 0.0f } };
+    filter.for_each_lag(single.data(), 1, [](size_t lag, std::complex<float> value,
+                                             bool batch) {
+        BOOST_CHECK_EQUAL(lag, 0u);
+        BOOST_CHECK_EQUAL(value, std::complex<float>(2.0f, 0.0f));
+        BOOST_CHECK(!batch);
+    });
+
+    // A complete batch followed by the last legal lag in an exact-size buffer.
+    std::vector<std::complex<float>> samples(10);
+    samples[8] = single[0];
+    samples[9] = single[1];
+    const auto peak = rxopt::scan_normalized_sync(
+        filter, samples.data(), 9, 0.0f, real.energy);
+    BOOST_CHECK_EQUAL(peak.lag, 8u);
+    BOOST_CHECK_EQUAL(peak.metric, 1.0f);
+    BOOST_CHECK_EQUAL(peak.corr, std::complex<float>(2.0f, 0.0f));
+}
+
 BOOST_AUTO_TEST_CASE(test_demod_core_topk_rake_kernel_agrees_with_scalar)
 {
     constexpr size_t N = 48;

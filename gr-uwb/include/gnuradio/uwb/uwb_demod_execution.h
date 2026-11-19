@@ -154,6 +154,43 @@ inline SampleRange compute_predicted_single_pass_range(
     return clamp_sample_range(u_lo - slack, u_hi + slack, n);
 }
 
+inline SampleRange compute_cir_only_rotation_range(
+    size_t n,
+    const Qm35825Profile& profile,
+    const TimingResult& cfo_timing,
+    const SampleRange& final_sfd_range)
+{
+    const size_t pre = profile.cir_pre_samples;
+    const size_t post = profile.cir_post_samples;
+    const size_t tap_count = pre + post;
+    const size_t first_rep = profile.cir_skip_initial_repetitions;
+    const size_t full_reps = profile.preamble_repetitions;
+    const size_t rep_count = (profile.cir_repetitions > 0)
+        ? std::min(profile.cir_repetitions,
+                   full_reps > first_rep ? full_reps - first_rep : 0)
+        : 0;
+    const double period = (cfo_timing.measured_period > 0.0)
+        ? cfo_timing.measured_period
+        : static_cast<double>(kQm35SamplesPerSymbol);
+    const int64_t start = cfo_timing.preamble_start_sample;
+    int64_t lo = static_cast<int64_t>(final_sfd_range.lo);
+    int64_t hi = static_cast<int64_t>(final_sfd_range.hi);
+    if (rep_count > 0 && tap_count > 0) {
+        const size_t wlen = 2 * kQm35ChipsPerSymbol + tap_count - 1;
+        const int64_t cir_lo =
+            start + static_cast<int64_t>(std::llround(
+                        static_cast<double>(first_rep) * period)) -
+            static_cast<int64_t>(pre);
+        const int64_t cir_hi =
+            start + static_cast<int64_t>(std::llround(
+                        static_cast<double>(first_rep + rep_count - 1) * period)) -
+            static_cast<int64_t>(pre) + static_cast<int64_t>(wlen);
+        lo = std::min(lo, cir_lo);
+        hi = std::max(hi, cir_hi);
+    }
+    return clamp_sample_range(lo, hi, n);
+}
+
 inline SampleRange compute_anchored_prefix_range(
     size_t n,
     const Qm35825Profile& profile,
@@ -165,6 +202,10 @@ inline SampleRange compute_anchored_prefix_range(
         return clamp_sample_range(
             static_cast<int64_t>(final_sfd_range.lo),
             static_cast<int64_t>(final_sfd_range.hi), n);
+    }
+    if (profile.rx_stop_after_cir) {
+        return compute_cir_only_rotation_range(
+            n, profile, cfo_timing, final_sfd_range);
     }
     const bool on_demand = profile.rx_softchip_on_demand ||
                            profile.rx_fused_payload_cmf ||

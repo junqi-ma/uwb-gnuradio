@@ -72,7 +72,10 @@ gr-uwb/build-native-only/apps/uwb_dw3000_live \
 | `--acq-span / --acq-step` | `192000 / 64`；积分对数 / 环表块粒度，不是抽取积分 |
 | `--acq-low / --acq-peak` | `0.00015 / 0.00030`；归一化延迟自相关门限 |
 | `--lock-fcs` | `on`；`off` 允许前导+SFD 身份用于进锁 |
-| `--stop-after-sfd` | `off`；`on` 跳过 PHR/payload 与 auto Full 重试，结果不能计作完整 FCS |
+| `--stop-after-sfd` | `off`；`on` 跳过 CIR/PHR/payload 与 auto Full 重试，结果不能计作完整 FCS |
+| `--stop-after-cir` | `off`；`on` 在 SFD+独立 CIR 估计后返回，跳过 CMF/PHR/payload（Sensing 模式） |
+| `--timing-sparse` | `on`；使用 64 点稀疏三元码做 timing/SFD/fold 匹配滤波，`off` 切回稠密脉冲成形模板 |
+| `--lock-residual-limit` | `0`（自动取 `max(512, locked_roi_native)`）；显式指定网格残差异常门限（原生样点） |
 | `--period-ms` | `5`；可按发送周期改为其他值 |
 | `--mode timed` | 仅 replay；无 replay 返回 2，单音消除关闭 |
 

@@ -51,6 +51,7 @@
 
 #include <gnuradio/uwb/uwb_demod_result.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
+#include <gnuradio/uwb/uwb_rx_matched_filter.h> // legacy sparse CIR API
 #include <volk/volk.h>
 
 #include <algorithm>
@@ -376,75 +377,6 @@ inline std::pair<size_t, size_t> compute_sfd_search_range(
     if (hi <= lo)
         return { 0, 0 };
     return { static_cast<size_t>(lo), static_cast<size_t>(hi) };
-}
-
-// Sparse ternary code template for CIR estimation (Task A2).
-// Iterates only non-zero positions (+-1) against accumulated IQ, preserving
-// tap order, position, and energy normalization.
-struct SparseCirEntry {
-    size_t pos = 0;      // sample index in [0, 1016), always even: 2 * j
-    int8_t sign = 0;     // +1 or -1
-};
-
-struct SparseCirTemplate {
-    uint64_t key = 0;
-    std::vector<SparseCirEntry> entries;
-    float code_energy = 0.0f;
-
-    void reset()
-    {
-        key = 0;
-        entries.clear();
-        code_energy = 0.0f;
-    }
-};
-
-inline uint64_t cir_template_key(const int8_t* code, size_t code_len)
-{
-    uint64_t h = 14695981039346656037ULL;
-    for (size_t i = 0; i < code_len; ++i) {
-        h ^= static_cast<uint8_t>(code[i]);
-        h *= 1099511628211ULL;
-    }
-    return h;
-}
-
-inline void build_sparse_cir_template(const int8_t* code,
-                                      size_t code_len,
-                                      SparseCirTemplate& tmpl)
-{
-    tmpl.reset();
-    tmpl.key = cir_template_key(code, code_len);
-    const std::vector<int8_t> spread = BuildSampledCode(code, code_len);
-    tmpl.entries.reserve(code_len);
-    for (size_t j = 0; j < spread.size(); ++j) {
-        if (spread[j] != 0) {
-            tmpl.entries.push_back({ 2 * j, spread[j] });
-        }
-    }
-    tmpl.code_energy = static_cast<float>(tmpl.entries.size());
-}
-
-inline void correlate_cir_sparse(const std::complex<float>* corr,
-                                 const SparseCirTemplate& tmpl,
-                                 size_t tap_count,
-                                 std::vector<std::complex<float>>& values)
-{
-    values.resize(tap_count);
-    if (tmpl.code_energy <= 0.0f)
-        return;
-    for (size_t nn = 0; nn < tap_count; ++nn) {
-        std::complex<float> acc(0.0f, 0.0f);
-        const std::complex<float>* pcorr = corr + nn;
-        for (const auto& e : tmpl.entries) {
-            const std::complex<float>& s = pcorr[e.pos];
-            if (e.sign > 0)
-                acc += s;
-            else
-                acc -= s;
-        }
-        values[nn] = acc / tmpl.code_energy;
-    }
 }
 
 } // namespace rxopt

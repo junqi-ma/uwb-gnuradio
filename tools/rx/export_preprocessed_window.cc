@@ -1,6 +1,7 @@
 // Export a known raw window through production tone and resampler cores.
 #include <gnuradio/uwb/uwb_fixed_tone_cancel_core.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
+#include <gnuradio/uwb/uwb_resample_window.h>
 #include <complex>
 #include <fstream>
 #include <iostream>
@@ -53,8 +54,7 @@ int main(int argc,char**argv)try {
     auto taps=load<float>(res+"/resampler_65_48/taps_realtime_eq16.txt");
     core::RationalResampler65_48Core rs(taps);rs.set_fixed_phase_schedule(true);
     std::vector<std::complex<float>> y(rs.expected_output_length(count));
-    size_t made=rs.process_sc16(x.data(),count,1.f/32768,y.data(),y.size()).produced;
-    while(made<y.size()) {size_t n=rs.flush(y.data()+made,y.size()-made);if(!n)break;made+=n;}
+    const size_t made = core::resample_sc16_window(rs, x.data(), count, 1.f / 32768, y);
     std::ofstream work(prefix+"_tone_cancelled_resampled.cf32",std::ios::binary);
     work.write(reinterpret_cast<char*>(y.data()),made*8);
     if(!native||!work)throw std::runtime_error("write");

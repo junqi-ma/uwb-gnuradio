@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <gnuradio/uwb/uwb_demod_result.h>
+#include <gnuradio/uwb/uwb_rx_bpm.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -110,30 +111,34 @@ private:
 // PHR active chips (21 symbols x 64 chips/burst = 1344).
 using gr::uwb::codec::bprf_spreading;
 
-// Rate-1/2 constraint-length-3 Viterbi decoder for poly2trellis(3,[2 5])
-// (IEEE 802.15.4a PHR).  Hard decision, 'trunc' mode.  `rx` is the interleaved
-// received code bits (length 2*N); output is the N decoded systematic bits.
-inline void vitdec_cl3(const int8_t* rx, size_t N, std::vector<int8_t>& out)
+inline void cl3_trellis_tables(int o0[4][2], int o1[4][2], int nxt[4][2])
+{
+    for (int st = 0; st < 4; ++st) {
+        for (int u = 0; u < 2; ++u) {
+            const auto step = gr::uwb::codec::cl3_transition(st, u);
+            o0[st][u] = step.g0;
+            o1[st][u] = step.g1;
+            nxt[st][u] = step.next_state;
+        }
+    }
+}
+
+// CL-3 Viterbi for poly2trellis(3,[2 5]) in truncated mode. The hard
+// and soft paths share path selection and traceback; metric types differ.
+template <typename Metric, typename ExtendPath>
+inline void vitdec_cl3_truncated(size_t N, Metric inf,
+                                ExtendPath extend, std::vector<int8_t>& out)
 {
     // octal 2 = 010 -> g0 = [0 1 0]; octal 5 = 101 -> g1 = [1 0 1].
     int o0[4][2], o1[4][2], nxt[4][2];
-    for (int st = 0; st < 4; ++st) {
-        const int s1 = st >> 1, s0 = st & 1;
-        for (int u = 0; u < 2; ++u) {
-            o0[st][u] = s1;
-            o1[st][u] = u ^ s0;
-            nxt[st][u] = (u << 1) | s1;
-        }
-    }
-    const int INF = 1000000;
-    int surf[4] = { 0, INF, INF, INF };
+    cl3_trellis_tables(o0, o1, nxt);
+    Metric surf[4] = { Metric{0}, inf, inf, inf };
     std::vector<int8_t> back(N * 4);
     for (size_t t = 0; t < N; ++t) {
-        int ns[4] = { INF, INF, INF, INF };
+        Metric ns[4] = { inf, inf, inf, inf };
         for (int st = 0; st < 4; ++st) {
             for (int u = 0; u < 2; ++u) {
-                const int d = (rx[2 * t] ^ o0[st][u]) + (rx[2 * t + 1] ^ o1[st][u]);
-                const int m = surf[st] + d;
+                const Metric m = extend(t, surf[st], o0[st][u], o1[st][u]);
                 const int nst = nxt[st][u];
                 if (m < ns[nst]) {
                     ns[nst] = m;
@@ -155,6 +160,14 @@ inline void vitdec_cl3(const int8_t* rx, size_t N, std::vector<int8_t>& out)
         out[t] = static_cast<int8_t>(v >> 2);
         cur = v & 3;
     }
+}
+
+inline void vitdec_cl3(const int8_t* rx, size_t N, std::vector<int8_t>& out)
+{
+    vitdec_cl3_truncated(N, 1000000, [&](size_t t, int path, int g0, int g1) {
+        const int distance = (rx[2 * t] ^ g0) + (rx[2 * t + 1] ^ g1);
+        return path + distance;
+    }, out);
 }
 
 // SECDED encode: 13 systematic bits -> 19-bit codeword (13 data + 6 parity).
@@ -169,10 +182,11 @@ using gr::uwb::codec::hrp_secded;
 // (PHR=0, payload=1344).  pol: sfd polarity.  Fills g0 (BPM position bit) and
 // g1 (BPSK polarity bit), each nsym entries.  Mirrors helperUWBBPRFDemodKernel.
 // ---------------------------------------------------------------------------
-inline bool bprf_demod(const std::vector<float>& soft, int64_t start,
-                       size_t code_index, size_t nsym, size_t cpb, size_t cps,
-                       size_t scram_offset, int8_t pol, std::vector<int8_t>& g0,
-                       std::vector<int8_t>& g1)
+inline bool bprf_demod_impl(const std::vector<float>& soft, int64_t start,
+                            size_t code_index, size_t nsym, size_t cpb, size_t cps,
+                            size_t scram_offset, int8_t pol, std::vector<int8_t>& g0,
+                            std::vector<int8_t>& g1, std::vector<float>* llr_g0,
+                            std::vector<float>* llr_g1)
 {
     if (start < 0 ||
         static_cast<size_t>(start + static_cast<int64_t>(cps * nsym)) >
@@ -183,104 +197,63 @@ inline bool bprf_demod(const std::vector<float>& soft, int64_t start,
         return false;
     g0.resize(nsym);
     g1.resize(nsym);
-    const size_t third = cps / 2;
+    if (llr_g0) {
+        llr_g0->resize(nsym);
+        llr_g1->resize(nsym);
+    }
+    const size_t half = cps / 2;
     for (size_t s = 0; s < nsym; ++s) {
         const size_t base = static_cast<size_t>(start) + s * cps;
         const int8_t* sp = &spread[s * cpb];
-        float b0 = -1e30f, b1 = -1e30f, m0 = 0.0f, m1 = 0.0f;
+        float metrics[4] = {};
         for (size_t hop = 0; hop < 2; ++hop) {
-            const size_t f0 = hop * cpb;
+            const size_t offset = hop * cpb;
             float metric0 = 0.0f, metric1 = 0.0f;
             for (size_t c = 0; c < cpb; ++c) {
-                metric0 += pol * soft[base + f0 + c] * static_cast<float>(sp[c]);
-                metric1 += pol * soft[base + third + f0 + c] *
+                metric0 += pol * soft[base + offset + c] * static_cast<float>(sp[c]);
+                metric1 += pol * soft[base + half + offset + c] *
                            static_cast<float>(sp[c]);
             }
-            if (std::abs(metric0) > b0) {
-                b0 = std::abs(metric0);
-                m0 = metric0;
-            }
-            if (std::abs(metric1) > b1) {
-                b1 = std::abs(metric1);
-                m1 = metric1;
-            }
+            metrics[2 * hop] = metric0;
+            metrics[2 * hop + 1] = metric1;
         }
-        float best;
-        if (b0 >= b1) {
-            g0[s] = 0;
-            best = m0;
-        } else {
-            g0[s] = 1;
-            best = m1;
+        const auto decision = rxopt::decide_bpm_symbol(metrics, true);
+        g0[s] = decision.position;
+        g1[s] = decision.polarity;
+        if (llr_g0) {
+            (*llr_g0)[s] = decision.position_llr;
+            (*llr_g1)[s] = rxopt::bpm_polarity_llr(metrics);
         }
-        g1[s] = (best < 0.0f) ? 1 : 0;
     }
     return true;
 }
 
-// Soft-output variant of bprf_demod.  llr_g0 / llr_g1 > 0 favour bit value 0.
-//   llr_g0 = |metric_half0| - |metric_half1|         (BPM position)
-//   llr_g1 = max_c(+metric_c) - max_c(-metric_c)     (BPSK polarity; + => bit 0)
-// Hard decisions still written to g0/g1 for callers that need them.
+inline bool bprf_demod(const std::vector<float>& soft, int64_t start,
+                       size_t code_index, size_t nsym, size_t cpb, size_t cps,
+                       size_t scram_offset, int8_t pol, std::vector<int8_t>& g0,
+                       std::vector<int8_t>& g1)
+{
+    return bprf_demod_impl(soft, start, code_index, nsym, cpb, cps,
+                           scram_offset, pol, g0, g1, nullptr, nullptr);
+}
+
+// Positive LLRs favour bit 0 for BPM position and BPSK polarity.
 inline bool bprf_demod_soft(const std::vector<float>& soft, int64_t start,
                             size_t code_index, size_t nsym, size_t cpb, size_t cps,
                             size_t scram_offset, int8_t pol,
                             std::vector<int8_t>& g0, std::vector<int8_t>& g1,
                             std::vector<float>& llr_g0, std::vector<float>& llr_g1)
 {
-    if (start < 0 ||
-        static_cast<size_t>(start + static_cast<int64_t>(cps * nsym)) >
-            soft.size())
-        return false;
-    std::vector<int8_t> spread;
-    if (!bprf_spreading(spread, code_index, scram_offset, cpb * nsym))
-        return false;
-    g0.resize(nsym);
-    g1.resize(nsym);
-    llr_g0.resize(nsym);
-    llr_g1.resize(nsym);
-    const size_t third = cps / 2;
-    for (size_t s = 0; s < nsym; ++s) {
-        const size_t base = static_cast<size_t>(start) + s * cps;
-        const int8_t* sp = &spread[s * cpb];
-        float b0 = -1e30f, b1 = -1e30f, m0 = 0.0f, m1 = 0.0f;
-        float mc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        for (size_t hop = 0; hop < 2; ++hop) {
-            const size_t f0 = hop * cpb;
-            float metric0 = 0.0f, metric1 = 0.0f;
-            for (size_t c = 0; c < cpb; ++c) {
-                metric0 += pol * soft[base + f0 + c] * static_cast<float>(sp[c]);
-                metric1 += pol * soft[base + third + f0 + c] *
-                           static_cast<float>(sp[c]);
-            }
-            mc[2 * hop + 0] = metric0;
-            mc[2 * hop + 1] = metric1;
-            if (std::abs(metric0) > b0) {
-                b0 = std::abs(metric0);
-                m0 = metric0;
-            }
-            if (std::abs(metric1) > b1) {
-                b1 = std::abs(metric1);
-                m1 = metric1;
-            }
-        }
-        float best;
-        if (b0 >= b1) {
-            g0[s] = 0;
-            best = m0;
-        } else {
-            g0[s] = 1;
-            best = m1;
-        }
-        const float p_pos =
-            std::max(std::max(mc[0], mc[1]), std::max(mc[2], mc[3]));
-        const float p_neg =
-            std::max(std::max(-mc[0], -mc[1]), std::max(-mc[2], -mc[3]));
-        g1[s] = (best < 0.0f) ? 1 : 0;
-        llr_g0[s] = b0 - b1;        // >0 prefers g0=0
-        llr_g1[s] = p_pos - p_neg;  // >0 prefers g1=0
-    }
-    return true;
+    return bprf_demod_impl(soft, start, code_index, nsym, cpb, cps,
+                           scram_offset, pol, g0, g1, &llr_g0, &llr_g1);
+}
+
+inline float cl3_soft_path_metric(float path, int o0, int o1,
+                                  float llr0, float llr1)
+{
+    const float c0 = (2.0f * static_cast<float>(o0) - 1.0f) * llr0;
+    const float c1 = (2.0f * static_cast<float>(o1) - 1.0f) * llr1;
+    return path + c0 + c1;
 }
 
 // Soft-decision rate-1/2 CL-3 Viterbi (same trellis as vitdec_cl3).
@@ -288,49 +261,9 @@ inline bool bprf_demod_soft(const std::vector<float>& soft, int64_t start,
 inline void vitdec_cl3_soft(const float* llr0, const float* llr1, size_t N,
                             std::vector<int8_t>& out)
 {
-    int o0[4][2], o1[4][2], nxt[4][2];
-    for (int st = 0; st < 4; ++st) {
-        const int s1 = st >> 1, s0 = st & 1;
-        for (int u = 0; u < 2; ++u) {
-            o0[st][u] = s1;
-            o1[st][u] = u ^ s0;
-            nxt[st][u] = (u << 1) | s1;
-        }
-    }
-    const float INF = 1e30f;
-    float surf[4] = { 0.0f, INF, INF, INF };
-    std::vector<int8_t> back(N * 4);
-    for (size_t t = 0; t < N; ++t) {
-        float ns[4] = { INF, INF, INF, INF };
-        for (int st = 0; st < 4; ++st) {
-            for (int u = 0; u < 2; ++u) {
-                // cost = (2*o-1)*llr : o=0 gets -llr, o=1 gets +llr
-                const float c0 =
-                    (2.0f * static_cast<float>(o0[st][u]) - 1.0f) * llr0[t];
-                const float c1 =
-                    (2.0f * static_cast<float>(o1[st][u]) - 1.0f) * llr1[t];
-                const float m = surf[st] + c0 + c1;
-                const int nst = nxt[st][u];
-                if (m < ns[nst]) {
-                    ns[nst] = m;
-                    back[t * 4 + nst] = static_cast<int8_t>((u << 2) | st);
-                }
-            }
-        }
-        for (int i = 0; i < 4; ++i)
-            surf[i] = ns[i];
-    }
-    int best = 0;
-    for (int i = 1; i < 4; ++i)
-        if (surf[i] < surf[best])
-            best = i;
-    out.resize(N);
-    int cur = best;
-    for (size_t t = N; t-- > 0;) {
-        const int v = back[t * 4 + cur];
-        out[t] = static_cast<int8_t>(v >> 2);
-        cur = v & 3;
-    }
+    vitdec_cl3_truncated(N, 1e30f, [&](size_t t, float path, int g0, int g1) {
+        return cl3_soft_path_metric(path, g0, g1, llr0[t], llr1[t]);
+    }, out);
 }
 
 // IEEE 802.15.4 CRC-16 (reflected polynomial 0x8408, init 0).  FCS algorithm
@@ -472,6 +405,36 @@ inline void rs_forney(const int* S8, const int* Lambda, int L,
     }
 }
 
+inline bool rs_zero_syndromes(const int* syndromes)
+{
+    for (int i = 0; i < 8; ++i)
+        if (syndromes[i] != 0)
+            return false;
+    return true;
+}
+
+inline bool rs_apply_corrections(int* symbols, const int* syndromes,
+                                 const int* locator, int degree,
+                                 const int* positions, int count)
+{
+    int corrections[8] = {};
+    rs_forney(syndromes, locator, degree, positions, count, corrections);
+    for (int i = 0; i < count; ++i)
+        symbols[positions[i]] ^= corrections[i];
+    int check[8];
+    rs_syndromes(symbols, check);
+    return rs_zero_syndromes(check);
+}
+
+// Reinsert the leading zero bits removed from shortened systematic blocks.
+inline void expand_rs_codeword(const int8_t* coded, size_t data_bits, int8_t* block)
+{
+    const size_t pad = 330 - data_bits;
+    std::fill_n(block, pad, int8_t{0});
+    for (size_t i = 0; i < data_bits + 48; ++i)
+        block[pad + i] = static_cast<int8_t>(coded[i] & 1);
+}
+
 // Decode one RS(63,55) block: 378 coded bits -> 330 data bits (MSB-first).
 // Returns false if the block is uncorrectable (more than t=4 symbol errors).
 inline bool rs_decode_block(const int8_t* coded378, int8_t* data330)
@@ -481,12 +444,7 @@ inline bool rs_decode_block(const int8_t* coded378, int8_t* data330)
 
     int S[8];
     rs_syndromes(r, S);
-    bool all0 = true;
-    for (int i = 0; i < 8; ++i)
-        if (S[i])
-            all0 = false;
-
-    if (!all0) {
+    if (!rs_zero_syndromes(S)) {
         int Lambda[9] = {};
         const int L = rs_berlekamp_massey(S, Lambda);
         if (L <= 0 || L > 4)
@@ -495,15 +453,8 @@ inline bool rs_decode_block(const int8_t* coded378, int8_t* data330)
         const int nerr = rs_chien_search(Lambda, L, err_pos);
         if (nerr != L)
             return false;
-        int err_val[4] = {};
-        rs_forney(S, Lambda, L, err_pos, nerr, err_val);
-        for (int k = 0; k < nerr; ++k)
-            r[err_pos[k]] ^= err_val[k];
-        // Verify correction
-        rs_syndromes(r, S);
-        for (int i = 0; i < 8; ++i)
-            if (S[i])
-                return false;
+        if (!rs_apply_corrections(r, S, Lambda, L, err_pos, nerr))
+            return false;
     }
 
     rs_syms_to_bits(r, 55, data330);
@@ -534,18 +485,8 @@ inline bool rs_decode_stream(const std::vector<int8_t>& coded,
             return false;
 
         int8_t block378[378];
-        for (int i = 0; i < 378; ++i)
-            block378[i] = 0;
-        // Leading-zero pad: real data occupies the last this_data bits of
-        // the 330-bit systematic data field (MATLAB hrpRS convention).
+        expand_rs_codeword(coded.data() + coded_off, this_data, block378);
         const size_t data_start = 330 - this_data;
-        for (size_t i = 0; i < this_data; ++i)
-            block378[data_start + i] =
-                static_cast<int8_t>(coded[coded_off + i] & 1);
-        for (size_t i = 0; i < 48; ++i)
-            block378[330 + i] = static_cast<int8_t>(
-                coded[coded_off + this_data + i] & 1);
-
         int8_t data330[330];
         if (!rs_decode_block(block378, data330))
             return false;
@@ -559,10 +500,31 @@ inline bool rs_decode_stream(const std::vector<int8_t>& coded,
     return data_out.size() == data_bits;
 }
 
-// Shared RS + PSDU assembly + FCS tail of the payload decoder.  Both the
-// hard-decision and the soft-decision front ends hand their RS codeword stream
-// here, so the RS(63,55) decode, the LSB-first bit packing, the IEEE 802.15.4
-// CRC-16 and the FCS comparison exist exactly once.  `out` is reset first;
+inline void pack_psdu_bytes(const std::vector<int8_t>& bits, std::vector<uint8_t>& bytes)
+{
+    bytes.resize(bits.size() / 8);
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        uint8_t byte = 0;
+        for (int bit = 0; bit < 8; ++bit)
+            byte |= static_cast<uint8_t>(bits[8 * i + bit]) << bit;
+        bytes[i] = byte;
+    }
+}
+
+inline bool check_psdu_fcs(const std::vector<uint8_t>& bytes,
+                           uint16_t& calculated, uint16_t& received)
+{
+    if (bytes.size() < 2)
+        return false;
+    const size_t fcs_offset = bytes.size() - 2;
+    calculated = crc16_802154(bytes.data(), fcs_offset);
+    received = static_cast<uint16_t>(bytes[fcs_offset]) |
+               (static_cast<uint16_t>(bytes[fcs_offset + 1]) << 8);
+    return received == calculated;
+}
+
+// Shared RS + PSDU assembly + FCS tail for the ordinary hard and soft
+// decoder paths.  `out` is reset first;
 // `out.ok` is set only when the RS decode succeeded, and `out.fcs_pass` then
 // reports the CRC verdict (a false FCS is a decoded-but-rejected frame, not a
 // decoder failure).
@@ -583,23 +545,8 @@ inline bool finish_rs_crc_payload(const std::vector<int8_t>& rs_cw,
     // PSDU assembly + FCS: bit packing, CRC-16 and the comparison.
     const auto t_crc = std::chrono::steady_clock::now();
     out.bits.assign(psdu_bits_out.begin(), psdu_bits_out.end());
-    out.bytes.resize(psdu_bits_out.size() / 8);
-    for (size_t i = 0; i < out.bytes.size(); ++i) {
-        uint8_t b = 0;
-        for (int bit = 0; bit < 8; ++bit)
-            b |= static_cast<uint8_t>(psdu_bits_out[8 * i + bit]) << bit;
-        out.bytes[i] = b;
-    }
-    if (out.bytes.size() >= 2) {
-        out.calculated_fcs =
-            crc16_802154(out.bytes.data(), out.bytes.size() - 2);
-        out.received_fcs = static_cast<uint16_t>(
-                               out.bytes[out.bytes.size() - 2]) |
-                           (static_cast<uint16_t>(
-                                out.bytes[out.bytes.size() - 1])
-                            << 8);
-        out.fcs_pass = (out.received_fcs == out.calculated_fcs);
-    }
+    pack_psdu_bytes(psdu_bits_out, out.bytes);
+    out.fcs_pass = check_psdu_fcs(out.bytes, out.calculated_fcs, out.received_fcs);
     if (sub)
         sub->crc_us += payload_elapsed_us(t_crc);
     out.ok = true;
@@ -658,18 +605,6 @@ struct Cl3TrellisTrace {
     std::vector<uint8_t> lose_u;
 };
 
-inline void cl3_trellis_tables(int o0[4][2], int o1[4][2], int nxt[4][2])
-{
-    for (int st = 0; st < 4; ++st) {
-        const int s1 = st >> 1, s0 = st & 1;
-        for (int u = 0; u < 2; ++u) {
-            o0[st][u] = s1;
-            o1[st][u] = u ^ s0;
-            nxt[st][u] = (u << 1) | s1;
-        }
-    }
-}
-
 // Soft CL-3 Viterbi recording per-step path metric margins and competing edges
 // (invoked only when single-pass soft decode + RS/CRC fails).
 inline void vitdec_cl3_soft_trace(const float* llr0,
@@ -690,11 +625,8 @@ inline void vitdec_cl3_soft_trace(const float* llr0,
         uint8_t nalt[4] = { 0, 0, 0, 0 };
         for (int st = 0; st < 4; ++st) {
             for (int u = 0; u < 2; ++u) {
-                const float c0 =
-                    (2.0f * static_cast<float>(o0[st][u]) - 1.0f) * llr0[t];
-                const float c1 =
-                    (2.0f * static_cast<float>(o1[st][u]) - 1.0f) * llr1[t];
-                const float m = surf[st] + c0 + c1;
+                const float m = cl3_soft_path_metric(
+                    surf[st], o0[st][u], o1[st][u], llr0[t], llr1[t]);
                 const int nst = nxt[st][u];
                 const uint8_t code = static_cast<uint8_t>((u << 2) | st);
                 if (m < ns[nst]) {
@@ -770,11 +702,8 @@ inline void local_cl3_trellis_flip(const float* llr0,
             for (int u = 0; u < 2; ++u) {
                 if (forced >= 0 && u != forced)
                     continue;
-                const float c0 =
-                    (2.0f * static_cast<float>(o0[st][u]) - 1.0f) * llr0[t];
-                const float c1 =
-                    (2.0f * static_cast<float>(o1[st][u]) - 1.0f) * llr1[t];
-                const float m = surf[st] + c0 + c1;
+                const float m = cl3_soft_path_metric(
+                    surf[st], o0[st][u], o1[st][u], llr0[t], llr1[t]);
                 const int nst = nxt[st][u];
                 if (m < ns[nst]) {
                     ns[nst] = m;
@@ -811,11 +740,7 @@ inline bool rs_decode_block_erasures(const int8_t* coded378,
     rs_bits_to_syms(coded378, r);
     int S[8];
     rs_syndromes(r, S);
-    bool all0 = true;
-    for (int i = 0; i < 8; ++i)
-        if (S[i])
-            all0 = false;
-    if (all0) {
+    if (rs_zero_syndromes(S)) {
         rs_syms_to_bits(r, 55, data330);
         return true;
     }
@@ -851,7 +776,6 @@ inline bool rs_decode_block_erasures(const int8_t* coded378,
             if (i + j <= 8)
                 Psi[i + j] ^= rs_gf_mul(Gamma[i], C[j]);
     int all_pos[8] = {};
-    int all_val[8] = {};
     int n_tot = 0;
     for (int i = 0; i < v; ++i)
         all_pos[n_tot++] = eras_pos[i];
@@ -861,14 +785,8 @@ inline bool rs_decode_block_erasures(const int8_t* coded378,
                 return false;
         all_pos[n_tot++] = err_pos[i];
     }
-    rs_forney(S, Psi, Le + v, all_pos, n_tot, all_val);
-    for (int k = 0; k < n_tot; ++k)
-        r[all_pos[k]] ^= all_val[k];
-    int S_chk[8];
-    rs_syndromes(r, S_chk);
-    for (int i = 0; i < 8; ++i)
-        if (S_chk[i])
-            return false;
+    if (!rs_apply_corrections(r, S, Psi, Le + v, all_pos, n_tot))
+        return false;
     rs_syms_to_bits(r, 55, data330);
     return true;
 }
@@ -933,14 +851,7 @@ inline bool rescue_payload_soft(const float* llr0,
 
     auto extract_block = [&](size_t b, const std::vector<int8_t>& dec,
                              int8_t* block378) {
-        std::fill(block378, block378 + 378, 0);
-        const size_t data_start = blk_data_start[b];
-        const size_t this_data = blk_this_data[b];
-        const size_t coded_start = blk_coded_start[b];
-        for (size_t i = 0; i < this_data; ++i)
-            block378[data_start + i] = dec[coded_start + i] & 1;
-        for (size_t i = 0; i < 48; ++i)
-            block378[330 + i] = dec[coded_start + this_data + i] & 1;
+        expand_rs_codeword(dec.data() + blk_coded_start[b], blk_this_data[b], block378);
     };
     auto try_append = [&](size_t b, const std::array<int8_t, 330>& cand) {
         for (const auto& ex : bc[b].cands)
@@ -1020,28 +931,17 @@ inline bool rescue_payload_soft(const float* llr0,
                     psdu_out[doff + i] = c[data_start + i];
                 doff += this_data;
             }
-            for (size_t i = 0; i < bytes.size(); ++i) {
-                uint8_t byte = 0;
-                for (int bit = 0; bit < 8; ++bit)
-                    byte |= static_cast<uint8_t>(psdu_out[8 * i + bit]) << bit;
-                bytes[i] = byte;
-            }
-            if (bytes.size() >= 2) {
-                const uint16_t calc =
-                    crc16_802154(bytes.data(), bytes.size() - 2);
-                const uint16_t rx_fcs =
-                    static_cast<uint16_t>(bytes[bytes.size() - 2]) |
-                    (static_cast<uint16_t>(bytes[bytes.size() - 1]) << 8);
-                if (calc == rx_fcs) {
-                    out = PayloadResult{};
-                    out.ok = true;
-                    out.fcs_pass = true;
-                    out.bytes = bytes;
-                    out.bits.assign(psdu_out.begin(), psdu_out.end());
-                    out.calculated_fcs = calc;
-                    out.received_fcs = rx_fcs;
-                    return true;
-                }
+            pack_psdu_bytes(psdu_out, bytes);
+            uint16_t calculated = 0, received = 0;
+            if (check_psdu_fcs(bytes, calculated, received)) {
+                out = PayloadResult{};
+                out.ok = true;
+                out.fcs_pass = true;
+                out.bytes = bytes;
+                out.bits.assign(psdu_out.begin(), psdu_out.end());
+                out.calculated_fcs = calculated;
+                out.received_fcs = received;
+                return true;
             }
             ++iter;
             size_t pos = num_blocks;

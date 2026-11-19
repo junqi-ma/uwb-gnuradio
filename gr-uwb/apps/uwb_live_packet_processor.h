@@ -45,7 +45,8 @@ inline bool verify_packet_crc(const std::vector<uint8_t>& b) {
 
 inline bool should_retry_full_cir(const demod::DemodResult& decoded,
     const demod::Qm35825Profile& profile, bool auto_cir) {
-    return !profile.rx_stop_after_sfd && auto_cir &&
+    return !profile.rx_stop_after_sfd && !profile.rx_stop_after_cir &&
+        auto_cir &&
         decoded.timing.ok && decoded.sfd.ok &&
         (decoded.status != demod::DemodStatus::Success ||
          !decoded.payload.fcs_pass || !verify_packet_crc(decoded.payload.bytes));

@@ -242,21 +242,16 @@ bool try_reuse_initial_tail_timing(
     const size_t np = cfg.tail_repetitions;
     const int64_t period = static_cast<int64_t>(kQm35SamplesPerSymbol);
     if (np >= 2) {
-        double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+        detail::LinearFit fit;
         for (size_t k = 0; k < np; ++k) {
             const double x = static_cast<double>(k);
             const double y = static_cast<double>(tail_timing.peak_samples[k]);
-            sx += x;
-            sy += y;
-            sxx += x * x;
-            sxy += x * y;
+            fit.add(x, y);
         }
-        const double denom = static_cast<double>(np) * sxx - sx * sx;
+        const double denom = fit.determinant();
         if (std::abs(denom) > 1e-12) {
-            tail_timing.measured_period =
-                (static_cast<double>(np) * sxy - sx * sy) / denom;
-            const double intercept_end =
-                (sy - tail_timing.measured_period * sx) / np;
+            tail_timing.measured_period = fit.slope(denom);
+            const double intercept_end = fit.intercept(tail_timing.measured_period);
             tail_timing.preamble_start_sample = std::max<int64_t>(
                 0, static_cast<int64_t>(std::llround(intercept_end)) -
                        (static_cast<int64_t>(cfg.template_len) - 1));
@@ -285,6 +280,10 @@ bool retrack_tail_timing(
 {
     Qm35825Profile anchor = cfg.cfo_anchor_profile;
     anchor.timing_seed_refine_radius = seed_radius;
+    if (anchor.sync_strategy == SyncStrategy::LockedBounded && seed_radius > 0) {
+        anchor.locked_roi_samples = std::min(
+            anchor.locked_roi_samples, std::max<size_t>(64, seed_radius));
+    }
     const auto sfd_tail_t0 = std::chrono::steady_clock::now();
 
     bool tail_timing_ok = try_reuse_initial_tail_timing(
@@ -771,13 +770,24 @@ bool run_full_softchip_decode_stages(
             clock->lap(dst, res.stage_total_us);
     };
 
-    if (!stage_cir_softchips(scratch.derotated.data(), n, cir_profile, timing,
-                             pcode, out.cir, scratch)) {
+    if (out.cir.ok) {
+        if (!stage_softchips_from_cir(scratch.derotated.data(), n, cir_profile,
+                                      timing, out.cir, scratch)) {
+            if (clock != nullptr)
+                clock->add_elapsed(res.stage_cir_us, res.stage_total_us);
+            status_out = DemodStatus::CirFailed;
+            return false;
+        }
+        if (clock != nullptr)
+            clock->add_elapsed(res.stage_cir_us, res.stage_total_us);
+    } else if (!stage_cir_softchips(scratch.derotated.data(), n, cir_profile,
+                                    timing, pcode, out.cir, scratch)) {
         lap_if(res.stage_cir_us);
         status_out = DemodStatus::CirFailed;
         return false;
+    } else {
+        lap_if(res.stage_cir_us);
     }
-    lap_if(res.stage_cir_us);
 
     if (!stage_ns_sfd(scratch.soft_chips, decode_profile, nsfd_seq,
                       kQm35ChipsPerSymbol, out.ns_sfd, scratch)) {
@@ -944,10 +954,10 @@ bool run_prefix_cir_ns_sfd_and_phr(
     const size_t prefix_budget =
         phr_fusion_requested ? rxopt::fused_phr_prefix_budget(profile)
                              : rxopt::initial_chip_budget(profile);
-    bool ok = stage_cir_softchips(scratch.derotated.data(), n, eff,
-                                  res.timing, pcode, res.cir, scratch,
-                                  prefix_budget, 0);
-    clock.lap(res.stage_cir_us, res.stage_total_us);
+    bool ok = stage_softchips_from_cir(scratch.derotated.data(), n, eff,
+                                       res.timing, res.cir, scratch,
+                                       prefix_budget, 0);
+    clock.add_elapsed(res.stage_cir_us, res.stage_total_us);
     out.prefix_chips = res.cir.soft_chip_count;
     if (ok) {
         ok = stage_ns_sfd(scratch.soft_chips, profile, nsfd_seq,
@@ -1147,11 +1157,10 @@ bool try_ondemand_extension_and_payload_decode(
                 rx, n, profile, pay_range, derotated_span, scratch, res);
         }
 
-        CirResult ext;
-        const bool ext_ok = stage_cir_softchips(
+        CirResult ext = res.cir;
+        const bool ext_ok = stage_softchips_from_cir(
             scratch.derotated.data(), n, eff, res.timing,
-            scratch.cached_seq.pcode, ext, scratch,
-            final_budget, prefix_chips);
+            ext, scratch, final_budget, prefix_chips);
         clock.add_elapsed(res.stage_cir_us, res.stage_total_us);
         if (!ext_ok)
             return false;
@@ -1160,9 +1169,6 @@ bool try_ondemand_extension_and_payload_decode(
             ext.soft_fir_us + ext.postprocess_us;
         res.cir.soft_fir_us += ext.soft_fir_us;
         res.cir.postprocess_us += ext.postprocess_us;
-        // The extension re-runs the deterministic CIR estimate;
-        // count it so cir_estimate_us is the true total.
-        res.cir.cir_estimate_us += ext.cir_estimate_us;
         res.cir.soft_chip_count = ext.soft_chip_count;
         res.cir.extended_chip_count = ext.extended_chip_count;
         res.cir.on_demand_extended = ext.on_demand_extended;
@@ -1306,7 +1312,23 @@ DemodResult demodulate_one(const std::complex<float>* rx,
         return res;
     }
 
-    // Stage 4: CIR + soft chips + PHR + payload/FCS on the CFO-compensated frame.
+    // Standalone CIR estimation after SFD (independent of CMF / despreading).
+    if (!estimate_cir(scratch.derotated.data(), n, eff, res.timing,
+                      scratch.cached_seq.pcode, res.cir, scratch)) {
+        clock.lap(res.stage_cir_us, res.stage_total_us);
+        res.status = DemodStatus::CirFailed;
+        rebase();
+        return res;
+    }
+    clock.lap(res.stage_cir_us, res.stage_total_us);
+
+    if (profile.rx_stop_after_cir) {
+        res.status = DemodStatus::Success;
+        rebase();
+        return res;
+    }
+
+    // Stage 4: soft-chip CMF + PHR + payload/FCS on the CFO-compensated frame.
     const bool on_demand_path = integer_grid_ok &&
                                 (profile.rx_softchip_on_demand ||
                                  profile.rx_fused_payload_cmf ||

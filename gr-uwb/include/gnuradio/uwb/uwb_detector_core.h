@@ -26,7 +26,7 @@
 #pragma once
 
 #include <gnuradio/uwb/uwb_defaults.h>
-#include <volk/volk.h>
+#include <gnuradio/uwb/uwb_matched_filter.h>
 
 #include <algorithm>
 #include <array>
@@ -59,10 +59,6 @@ inline constexpr size_t kUwbSamplesPerSymbol = 1016;
 inline constexpr size_t kUwbSyncSymbols = 64;
 inline constexpr size_t kUwbSfdSymbols = 8;
 
-// Small epsilon used to keep the normalized metric stable when both signal and
-// template energy are ~0 (silence / leading zeros).
-inline constexpr float kUwbEpsilon = 1e-12f;
-
 /**
  * L2-normalize a template waveform in place.
  *
@@ -72,13 +68,35 @@ inline void uwb_l2_normalize(std::vector<std::complex<float>>& t)
 {
     if (t.empty())
         return;
-    float e = 0.0f;
-    for (const auto& v : t)
-        e += std::norm(v);
-    float n = std::sqrt(e);
+    const float n = std::sqrt(sample_power_sum(t.data(), t.size()));
     if (n > 0.0f) {
         for (auto& v : t)
             v /= n;
+    }
+}
+
+/**
+ * Sliding-window power (un-normalized) over a length-L window:
+ *
+ *   pow[j] = sum_{m=0}^{L-1} |in[j+m]|^2,  j in [0, n)
+ *
+ * This is the denominator energy used by the normalized correlation metric.
+ * Same history contract as uwb_window_energy.
+ */
+inline void uwb_window_power(const std::complex<float>* in,
+                             size_t n,
+                             size_t L,
+                             float* pow)
+{
+    if (n == 0 || L == 0)
+        return;
+    float acc = sample_power_sum(in, L);
+    for (size_t j = 0; j < n; ++j) {
+        pow[j] = acc;
+        if (j + 1 < n) {
+            acc -= std::norm(in[j]);
+            acc += std::norm(in[j + L]);
+        }
     }
 }
 
@@ -99,43 +117,9 @@ inline void uwb_window_energy(const std::complex<float>* in,
 {
     if (n == 0 || window == 0)
         return;
-    float acc = 0.0f;
-    for (size_t m = 0; m < window; ++m)
-        acc += std::norm(in[m]);
-    for (size_t j = 0; j < n; ++j) {
-        out[j] = acc / static_cast<float>(window);
-        if (j + 1 < n) { // slide the window forward (guarded: in[n+window-1] is last valid)
-            acc -= std::norm(in[j]);
-            acc += std::norm(in[j + window]);
-        }
-    }
-}
-
-/**
- * Sliding-window power (un-normalized) over a length-L window:
- *
- *   pow[j] = sum_{m=0}^{L-1} |in[j+m]|^2,  j in [0, n)
- *
- * This is the denominator energy used by the normalized correlation metric.
- * Same history contract as uwb_window_energy.
- */
-inline void uwb_window_power(const std::complex<float>* in,
-                             size_t n,
-                             size_t L,
-                             float* pow)
-{
-    if (n == 0 || L == 0)
-        return;
-    float acc = 0.0f;
-    for (size_t m = 0; m < L; ++m)
-        acc += std::norm(in[m]);
-    for (size_t j = 0; j < n; ++j) {
-        pow[j] = acc;
-        if (j + 1 < n) {
-            acc -= std::norm(in[j]);
-            acc += std::norm(in[j + L]);
-        }
-    }
+    uwb_window_power(in, n, window, out);
+    for (size_t j = 0; j < n; ++j)
+        out[j] /= static_cast<float>(window);
 }
 
 /**
@@ -154,8 +138,7 @@ inline void uwb_normalized_score(const std::complex<float>* corr,
                                  float* metric)
 {
     for (size_t j = 0; j < n; ++j) {
-        float d = winpow[j] * template_energy + kUwbEpsilon;
-        float m = std::norm(corr[j]) / d;
+        const float m = normalized_correlation_power(corr[j], winpow[j], template_energy);
         metric[j] = (m < 0.0f) ? 0.0f : ((m > 1.0f) ? 1.0f : m);
     }
 }
@@ -183,10 +166,8 @@ inline bool uwb_full_rate_peak(const std::complex<float>* in,
         return false;
     const size_t len = j1 - j0 + 1;
     uwb_window_power(in + j0, len, L, winpow);
-    for (size_t k = 0; k < len; ++k) {
-        volk_32fc_x2_conjugate_dot_prod_32fc(
-            corr + k, in + j0 + k, tmpl, static_cast<unsigned int>(L));
-    }
+    for (size_t k = 0; k < len; ++k)
+        conjugate_dot_into(corr[k], in + j0 + k, tmpl, L);
     uwb_normalized_score(corr, winpow, len, template_energy, metric);
     size_t best = 0;
     for (size_t k = 1; k < len; ++k) {
@@ -204,10 +185,7 @@ inline bool uwb_full_rate_peak(const std::complex<float>* in,
  */
 inline float uwb_template_energy(const std::vector<std::complex<float>>& t)
 {
-    float e = 0.0f;
-    for (const auto& v : t)
-        e += std::norm(v);
-    return e;
+    return sample_power_sum(t.data(), t.size());
 }
 
 /**
@@ -365,16 +343,12 @@ inline void uwb_coarse_peaks(const std::complex<float>* in,
     for (size_t j = 0; j < nd; ++j)
         sig_ds[j] = in[scan_start + j * D];
 
-    float etd = 0.0f;
-    for (size_t k = 0; k < Ld; ++k)
-        etd += std::norm(tmpl_ds[k]);
+    const float etd = sample_power_sum(tmpl_ds, Ld);
     if (etd <= 0.0f)
         return;
 
     // trailing window power on the decimated grid
-    float psum = 0.0f;
-    for (size_t k = 0; k < Ld; ++k)
-        psum += std::norm(sig_ds[k]);
+    float psum = sample_power_sum(sig_ds.data(), Ld);
     pow_ds[0] = psum;
     for (size_t j = 1; j + Ld <= nd; ++j) {
         psum += std::norm(sig_ds[j + Ld - 1]) - std::norm(sig_ds[j - 1]);
@@ -395,9 +369,7 @@ inline void uwb_coarse_peaks(const std::complex<float>* in,
     // VOLK conjugate dot product helper: score[j] = |Σ sig_ds[j+k]·conj(tmpl_ds[k])|
     // / sqrt(pow·etd).  (VOLK vectorizes the decimated matched filter.)
     auto compute_score = [&](size_t j) {
-        std::complex<float> acc(0.0f, 0.0f);
-        volk_32fc_x2_conjugate_dot_prod_32fc(
-            &acc, sig_ds.data() + j, tmpl_ds, static_cast<unsigned int>(Ld));
+        const auto acc = conjugate_dot(sig_ds.data() + j, tmpl_ds, Ld);
         score_ds[j] = std::abs(acc) / (std::sqrt(pow_ds[j] * etd + kUwbEpsilon));
     };
 

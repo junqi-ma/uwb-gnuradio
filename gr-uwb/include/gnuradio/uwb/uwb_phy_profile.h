@@ -107,6 +107,14 @@ struct Qm35825Profile {
     float cir_detection_threshold = 0.3f;
     float sfd_detection_threshold = 0.3f;
     float radar_verification_threshold = 0.25f;
+    // Experimental raw correlation PAR gates for the dual-metric searches.
+    bool rx_sync_par_only = false;
+    bool rx_sfd_par_only = false;
+    // Validate short PAR-acquired SYNC trains and discrete-grid SFD candidates.
+    bool rx_par_confirm = false;
+    // Integrate the peak and its two adjacent sample lags for raw PAR.
+    bool rx_sync_par_three_samples = false;
+    bool rx_sfd_par_three_samples = false;
 
     // timing
     // Seed (schedule t0+kT or detector) can sit hundreds–thousands of samples
@@ -255,6 +263,22 @@ struct Qm35825Profile {
     // Early termination: stop receiver processing right after Final SFD is verified
     // and preamble_start_sample / CFO are anchored. Skips CIR, PHR, and Payload.
     bool rx_stop_after_sfd = false;
+
+    // Early termination: stop receiver processing right after standalone CIR
+    // estimation completes (after Final SFD). Skips soft-chip CMF, PHR, and Payload.
+    bool rx_stop_after_cir = false;
+
+    // Use the 64-entry sparse ternary preamble code (same template as CIR
+    // estimation) for timing/SFD/fold matched filtering instead of the dense
+    // pulse-shaped template (~7x faster demod on wide ROIs).
+    // TODO(matlab-verify): UWB_demodulation/+uwbdecoder/detectRepeatedPreamble.m
+    // uses the pulse-shaped dense preamble_waveform for low-SNR (-12/-14 dB)
+    // detection and MATLAB golden QA expects dense metric >= 0.95 and its
+    // 2-sample group-delay alignment, so Qm35825Profile keeps false by default
+    // while uwb_dw3000_live defaults --timing-sparse on. Cross-check sparse
+    // vs dense SNR threshold and group-delay offset in MATLAB before any
+    // global switch or dense-path removal.
+    bool rx_timing_sparse = false;
 
     static Qm35825Profile Default() { return Qm35825Profile{}; }
 };

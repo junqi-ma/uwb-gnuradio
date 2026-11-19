@@ -678,6 +678,10 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
         scratch.impulse_sync.assign(sps, cf{});
         for (size_t c = 0; c < demod::kQm35CodeLength; ++c)
             scratch.impulse_sync[8*c] = cf(float(code[c]), 0.f);
+        demod::rxopt::build_sparse_cir_template(
+            code, demod::kQm35CodeLength, scratch.cir_sparse_tmpl);
+        scratch.cir_avg_cf.assign(sps + max_taps, cf{});
+        scratch.cir_corr_vals.assign(max_taps, cf{});
         scratch.impulse_profile = mod::HrpModConfig{};
         auto& raw = scratch.impulse_profile;
         raw.code_index = cfg.comm_code;
@@ -854,239 +858,261 @@ bool estimate_discrete_cir(const std::complex<float>* y,
     if (!scan_finite(y, static_cast<size_t>(visible_end)))
         return finish("failed", "nonfinite_input");
 
-    // ---- 1. public ROI clipped to the visible prefix ----------------------
-    int64_t roi_lo = cfg.roi_lo;
-    int64_t roi_hi = cfg.roi_hi;
-    if (roi_hi <= roi_lo) {
-        roi_lo = 0;
-        roi_hi = visible_end;
-    }
-    roi_hi = std::min<int64_t>(
-        roi_hi, visible_end - static_cast<int64_t>(Ls) + 1);
-    roi_lo = std::max<int64_t>(roi_lo, 0);
-    if (roi_hi <= roi_lo)
-        return finish("failed", "invalid_roi");
-    const int64_t stride =
-        std::max<int64_t>(1, static_cast<int64_t>(cfg.coarse_stride));
+    int64_t q = -1;
+    double cfo = 0.0;
+    const bool use_known_origin =
+        (cfg.ipatov_correlation && cfg.known_q >= 0 && cfg.has_known_cfo);
 
-    // ---- localized self-energy prefix sum covering ROI and confirmation ---
-    const int64_t energy_base = roi_lo;
-    const int64_t max_confirm_end =
-        roi_hi + static_cast<int64_t>((confirm_reps - 1) * sps + Ls);
-    const int64_t energy_end =
-        std::max(energy_base, std::min<int64_t>(visible_end, max_confirm_end));
-    const size_t local_energy_len =
-        static_cast<size_t>(energy_end - energy_base);
-
-    double acc = 0.0;
-    energy[0] = 0.0;
-    for (size_t i = 0; i < local_energy_len; ++i) {
-        const cf v = y[static_cast<size_t>(energy_base) + i];
-        acc += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
-               static_cast<double>(v.imag()) * static_cast<double>(v.imag());
-        energy[i + 1] = acc;
-    }
-    if (!std::isfinite(acc))
-        return finish("failed", "nonfinite_energy");
-
-    auto get_energy = [&](int64_t d, size_t L) -> double {
-        if (d >= energy_base &&
-            d + static_cast<int64_t>(L) <= energy_end) {
-            const size_t lo = static_cast<size_t>(d - energy_base);
-            const size_t hi =
-                static_cast<size_t>(d + static_cast<int64_t>(L) - energy_base);
-            return std::sqrt(std::max(0.0, energy[hi] - energy[lo]));
+    if (use_known_origin) {
+        if (cfg.known_q + static_cast<int64_t>(Ls) > visible_end ||
+            !std::isfinite(cfg.known_cfo_hz)) {
+            return finish("failed", "invalid_known_origin_or_cfo");
         }
-        if (d < 0 || d + static_cast<int64_t>(L) > visible_end)
-            return 0.0;
-        double sum = 0.0;
-        for (size_t k = 0; k < L; ++k) {
-            const cf v = y[static_cast<size_t>(d) + k];
-            sum += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
+        q = cfg.known_q;
+        cfo = cfg.known_cfo_hz;
+        model.q = q;
+        model.phase_reference_sample = q;
+        model.cfo_hz = cfo;
+        model.coarse_peak = 1.0;
+        model.detection_metric = 1.0;
+        const int64_t avail_reps =
+            (visible_end > q) ? ((visible_end - q) / static_cast<int64_t>(sps)) : 0;
+        model.repeats_confirmed =
+            static_cast<size_t>(std::min<int64_t>(confirm_reps, avail_reps));
+    } else {
+        // ---- 1. public ROI clipped to the visible prefix ------------------
+        int64_t roi_lo = cfg.roi_lo;
+        int64_t roi_hi = cfg.roi_hi;
+        if (roi_hi <= roi_lo) {
+            roi_lo = 0;
+            roi_hi = visible_end;
+        }
+        roi_hi = std::min<int64_t>(
+            roi_hi, visible_end - static_cast<int64_t>(Ls) + 1);
+        roi_lo = std::max<int64_t>(roi_lo, 0);
+        if (roi_hi <= roi_lo)
+            return finish("failed", "invalid_roi");
+        const int64_t stride =
+            std::max<int64_t>(1, static_cast<int64_t>(cfg.coarse_stride));
+
+        // ---- localized self-energy prefix sum covering ROI and confirmation
+        const int64_t energy_base = roi_lo;
+        const int64_t max_confirm_end =
+            roi_hi + static_cast<int64_t>((confirm_reps - 1) * sps + Ls);
+        const int64_t energy_end =
+            std::max(energy_base, std::min<int64_t>(visible_end, max_confirm_end));
+        const size_t local_energy_len =
+            static_cast<size_t>(energy_end - energy_base);
+
+        double acc = 0.0;
+        energy[0] = 0.0;
+        for (size_t i = 0; i < local_energy_len; ++i) {
+            const cf v = y[static_cast<size_t>(energy_base) + i];
+            acc += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
                    static_cast<double>(v.imag()) * static_cast<double>(v.imag());
+            energy[i + 1] = acc;
         }
-        return std::sqrt(std::max(0.0, sum));
-    };
+        if (!std::isfinite(acc))
+            return finish("failed", "nonfinite_energy");
 
-    int64_t last_norm_d = -1;
-    double last_norm_val = 0.0;
-    cf last_norm_corr(0.f, 0.f);
-    bool last_norm_valid = false;
+        auto get_energy = [&](int64_t d, size_t L) -> double {
+            if (d >= energy_base &&
+                d + static_cast<int64_t>(L) <= energy_end) {
+                const size_t lo = static_cast<size_t>(d - energy_base);
+                const size_t hi =
+                    static_cast<size_t>(d + static_cast<int64_t>(L) - energy_base);
+                return std::sqrt(std::max(0.0, energy[hi] - energy[lo]));
+            }
+            if (d < 0 || d + static_cast<int64_t>(L) > visible_end)
+                return 0.0;
+            double sum = 0.0;
+            for (size_t k = 0; k < L; ++k) {
+                const cf v = y[static_cast<size_t>(d) + k];
+                sum += static_cast<double>(v.real()) * static_cast<double>(v.real()) +
+                       static_cast<double>(v.imag()) * static_cast<double>(v.imag());
+            }
+            return std::sqrt(std::max(0.0, sum));
+        };
 
-    auto norm_at = [&](int64_t d, cf* corr_out) -> double {
-        if (last_norm_valid && d == last_norm_d) {
+        int64_t last_norm_d = -1;
+        double last_norm_val = 0.0;
+        cf last_norm_corr(0.f, 0.f);
+        bool last_norm_valid = false;
+
+        auto norm_at = [&](int64_t d, cf* corr_out) -> double {
+            if (last_norm_valid && d == last_norm_d) {
+                if (corr_out)
+                    *corr_out = last_norm_corr;
+                return last_norm_val;
+            }
+            // STRICT PREFIX: the whole correlation row must be visible.
+            if (d < 0 || d + static_cast<int64_t>(Ls) > visible_end) {
+                if (corr_out)
+                    *corr_out = cf(0.f, 0.f);
+                return 0.0;
+            }
+            const cf* const seg = y + d;
+            cf dot(0.f, 0.f);
+            if (scratch.sync_real.is_real) {
+                dot = demod::rxopt::real_template_dot_single(
+                    seg, scratch.sync_real.taps_dup.data(), Ls);
+            } else {
+                volk_32fc_x2_conjugate_dot_prod_32fc_u(
+                    &dot, seg, syncn, static_cast<unsigned>(Ls));
+            }
+            const double e = get_energy(d, Ls);
+            const double nrm = (e > 0.0) ? static_cast<double>(std::abs(dot)) / e : 0.0;
             if (corr_out)
-                *corr_out = last_norm_corr;
-            return last_norm_val;
-        }
-        // STRICT PREFIX: the whole correlation row must be visible.
-        if (d < 0 || d + static_cast<int64_t>(Ls) > visible_end) {
-            if (corr_out)
-                *corr_out = cf(0.f, 0.f);
-            return 0.0;
-        }
-        const cf* const seg = y + d;
-        cf dot(0.f, 0.f);
-        if (scratch.sync_real.is_real) {
-            dot = demod::rxopt::real_template_dot_single(
-                seg, scratch.sync_real.taps_dup.data(), Ls);
-        } else {
-            volk_32fc_x2_conjugate_dot_prod_32fc_u(
-                &dot, seg, syncn, static_cast<unsigned>(Ls));
-        }
-        const double e = get_energy(d, Ls);
-        const double nrm = (e > 0.0) ? static_cast<double>(std::abs(dot)) / e : 0.0;
-        if (corr_out)
-            *corr_out = dot;
-        last_norm_d = d;
-        last_norm_val = nrm;
-        last_norm_corr = dot;
-        last_norm_valid = true;
-        return nrm;
-    };
+                *corr_out = dot;
+            last_norm_d = d;
+            last_norm_val = nrm;
+            last_norm_corr = dot;
+            last_norm_valid = true;
+            return nrm;
+        };
 
-    // ---- 2. detection (independent copy of the frozen profile semantics) -
-    int64_t coarse_pos = -1;
-    double coarse_nrm = 0.0;
-    int64_t detected_start = -1;
-    double peak_norm = 0.0;
-    {
-        const auto t0 = Clock::now();
-        if (stride == 1 && scratch.sync_real.is_real) {
-            int64_t d = roi_lo;
-            const float* const taps_dup = scratch.sync_real.taps_dup.data();
-            for (; d + 4 <= roi_hi; d += 4) {
-                if (d < 0 || d + 3 + static_cast<int64_t>(Ls) > visible_end) {
-                    break;
+        // ---- 2. detection (independent copy of the frozen profile semantics)
+        int64_t coarse_pos = -1;
+        double coarse_nrm = 0.0;
+        int64_t detected_start = -1;
+        double peak_norm = 0.0;
+        {
+            const auto t0 = Clock::now();
+            if (stride == 1 && scratch.sync_real.is_real) {
+                int64_t d = roi_lo;
+                const float* const taps_dup = scratch.sync_real.taps_dup.data();
+                for (; d + 4 <= roi_hi; d += 4) {
+                    if (d < 0 || d + 3 + static_cast<int64_t>(Ls) > visible_end) {
+                        break;
+                    }
+                    cf dots[4];
+                    demod::rxopt::real_template_dot_4lag(y + d, taps_dup, Ls, dots);
+                    for (int j = 0; j < 4; ++j) {
+                        const int64_t cur_d = d + j;
+                        const double e = get_energy(cur_d, Ls);
+                        const double nrm =
+                            (e > 0.0) ? static_cast<double>(std::abs(dots[j])) / e : 0.0;
+                        if (nrm > coarse_nrm) {
+                            coarse_nrm = nrm;
+                            coarse_pos = cur_d;
+                        }
+                    }
                 }
-                cf dots[4];
-                demod::rxopt::real_template_dot_4lag(y + d, taps_dup, Ls, dots);
-                for (int j = 0; j < 4; ++j) {
-                    const int64_t cur_d = d + j;
-                    const double e = get_energy(cur_d, Ls);
-                    const double nrm =
-                        (e > 0.0) ? static_cast<double>(std::abs(dots[j])) / e : 0.0;
+                for (; d < roi_hi; ++d) {
+                    const double nrm = norm_at(d, nullptr);
                     if (nrm > coarse_nrm) {
                         coarse_nrm = nrm;
-                        coarse_pos = cur_d;
+                        coarse_pos = d;
+                    }
+                }
+            } else {
+                for (int64_t d = roi_lo; d < roi_hi; d += stride) {
+                    const double nrm = norm_at(d, nullptr);
+                    if (nrm > coarse_nrm) {
+                        coarse_nrm = nrm;
+                        coarse_pos = d;
                     }
                 }
             }
-            for (; d < roi_hi; ++d) {
-                const double nrm = norm_at(d, nullptr);
-                if (nrm > coarse_nrm) {
-                    coarse_nrm = nrm;
-                    coarse_pos = d;
+
+            detected_start = coarse_pos;
+            peak_norm = coarse_nrm;
+            if (coarse_pos >= 0) {
+                const int64_t lo = std::max(roi_lo, coarse_pos - stride);
+                const int64_t hi = std::min(roi_hi, coarse_pos + stride + 1);
+                for (int64_t d = lo; d < hi; ++d) {
+                    const double nrm = norm_at(d, nullptr);
+                    if (nrm > peak_norm) {
+                        peak_norm = nrm;
+                        detected_start = d;
+                    }
                 }
             }
-        } else {
-            for (int64_t d = roi_lo; d < roi_hi; d += stride) {
-                const double nrm = norm_at(d, nullptr);
-                if (nrm > coarse_nrm) {
-                    coarse_nrm = nrm;
-                    coarse_pos = d;
+
+            if (detected_start >= 0) {
+                int64_t origin = detected_start;
+                const int64_t floor_lo = std::max<int64_t>(roi_lo, 0);
+                while (origin - static_cast<int64_t>(sps) >= floor_lo) {
+                    const int64_t d = origin - static_cast<int64_t>(sps);
+                    const double nrm = norm_at(d, nullptr);
+                    if (nrm >= detect_thr)
+                        origin = d;
+                    else
+                        break;
                 }
+                const int64_t lo = std::max(roi_lo, origin - stride);
+                const int64_t hi = std::min(roi_hi, origin + stride + 1);
+                for (int64_t d = lo; d < hi; ++d) {
+                    const double nrm = norm_at(d, nullptr);
+                    if (nrm > peak_norm) {
+                        origin = d;
+                        peak_norm = nrm;
+                    }
+                }
+                detected_start = origin;
             }
+
+            model.coarse_peak = coarse_nrm;
+            model.detection_metric = peak_norm;
+            if (timings)
+                timings->detect_us = us_since(t0);
         }
 
-        detected_start = coarse_pos;
-        peak_norm = coarse_nrm;
-        if (coarse_pos >= 0) {
-            const int64_t lo = std::max(roi_lo, coarse_pos - stride);
-            const int64_t hi = std::min(roi_hi, coarse_pos + stride + 1);
-            for (int64_t d = lo; d < hi; ++d) {
-                const double nrm = norm_at(d, nullptr);
-                if (nrm > peak_norm) {
-                    peak_norm = nrm;
-                    detected_start = d;
+        if (detected_start < 0 || peak_norm < detect_thr)
+            return finish("bypassed", "below_detect_threshold");
+
+        q = detected_start;
+        model.q = q;
+        model.phase_reference_sample = q;
+
+        // ---- 3. repetition confirmation ----------------------------------
+        cf rep_corr[kMaxFitReps];
+        double rep_norms[kMaxFitReps];
+        size_t confirmed = 0;
+        for (size_t k = 0; k < confirm_reps; ++k) {
+            const int64_t d = q + static_cast<int64_t>(k * sps);
+            cf c(0.f, 0.f);
+            const double nrm =
+                (d + static_cast<int64_t>(Ls) <= visible_end)
+                    ? norm_at(d, &c)
+                    : 0.0;
+            rep_corr[k] = c;
+            rep_norms[k] = nrm;
+            if (nrm >= detect_thr)
+                ++confirmed;
+        }
+        model.repeats_confirmed = confirmed;
+        if (confirmed < 2)
+            return finish("bypassed", "repetition_not_confirmed");
+
+        // ---- 4. CFO from adjacent training-peak phases -------------------
+        {
+            const auto t0 = Clock::now();
+            cd sum(0.0, 0.0);
+            size_t cnt = 0;
+            const size_t k_lo = (fit_reps >= 3) ? 1 : 0;
+            for (size_t k = k_lo; k + 1 < fit_reps; ++k) {
+                if (rep_norms[k] >= detect_thr &&
+                    rep_norms[k + 1] >= detect_thr) {
+                    cd t = cd(rep_corr[k + 1]) * std::conj(cd(rep_corr[k]));
+                    const double a = std::abs(t);
+                    if (a > 0.0) {
+                        sum += t / a;
+                        ++cnt;
+                    }
                 }
             }
-        }
-
-        if (detected_start >= 0) {
-            int64_t origin = detected_start;
-            const int64_t floor_lo = std::max<int64_t>(roi_lo, 0);
-            while (origin - static_cast<int64_t>(sps) >= floor_lo) {
-                const int64_t d = origin - static_cast<int64_t>(sps);
-                const double nrm = norm_at(d, nullptr);
-                if (nrm >= detect_thr)
-                    origin = d;
-                else
-                    break;
+            if (cnt > 0) {
+                const double dphi = std::arg(sum);
+                cfo = dphi / (2.0 * kPi * static_cast<double>(sps) / fs);
             }
-            const int64_t lo = std::max(roi_lo, origin - stride);
-            const int64_t hi = std::min(roi_hi, origin + stride + 1);
-            for (int64_t d = lo; d < hi; ++d) {
-                const double nrm = norm_at(d, nullptr);
-                if (nrm > peak_norm) {
-                    origin = d;
-                    peak_norm = nrm;
-                }
-            }
-            detected_start = origin;
+            if (timings)
+                timings->cfo_us = us_since(t0);
         }
-
-        model.coarse_peak = coarse_nrm;
-        model.detection_metric = peak_norm;
-        if (timings)
-            timings->detect_us = us_since(t0);
+        if (!std::isfinite(cfo))
+            return finish("failed", "nonfinite_cfo");
+        model.cfo_hz = cfo;
     }
-
-    if (detected_start < 0 || peak_norm < detect_thr)
-        return finish("bypassed", "below_detect_threshold");
-
-    const int64_t q = detected_start;
-    model.q = q;
-    model.phase_reference_sample = q;
-
-    // ---- 3. repetition confirmation --------------------------------------
-    cf rep_corr[kMaxFitReps];
-    double rep_norms[kMaxFitReps];
-    size_t confirmed = 0;
-    for (size_t k = 0; k < confirm_reps; ++k) {
-        const int64_t d = q + static_cast<int64_t>(k * sps);
-        cf c(0.f, 0.f);
-        const double nrm =
-            (d + static_cast<int64_t>(Ls) <= visible_end)
-                ? norm_at(d, &c)
-                : 0.0;
-        rep_corr[k] = c;
-        rep_norms[k] = nrm;
-        if (nrm >= detect_thr)
-            ++confirmed;
-    }
-    model.repeats_confirmed = confirmed;
-    if (confirmed < 2)
-        return finish("bypassed", "repetition_not_confirmed");
-
-    // ---- 4. CFO from adjacent training-peak phases -----------------------
-    double cfo = 0.0;
-    {
-        const auto t0 = Clock::now();
-        cd sum(0.0, 0.0);
-        size_t cnt = 0;
-        const size_t k_lo = (fit_reps >= 3) ? 1 : 0;
-        for (size_t k = k_lo; k + 1 < fit_reps; ++k) {
-            if (rep_norms[k] >= detect_thr &&
-                rep_norms[k + 1] >= detect_thr) {
-                cd t = cd(rep_corr[k + 1]) * std::conj(cd(rep_corr[k]));
-                const double a = std::abs(t);
-                if (a > 0.0) {
-                    sum += t / a;
-                    ++cnt;
-                }
-            }
-        }
-        if (cnt > 0) {
-            const double dphi = std::arg(sum);
-            cfo = dphi / (2.0 * kPi * static_cast<double>(sps) / fs);
-        }
-        if (timings)
-            timings->cfo_us = us_since(t0);
-    }
-    if (!std::isfinite(cfo))
-        return finish("failed", "nonfinite_cfo");
-    model.cfo_hz = cfo;
 
     if (cfg.ipatov_correlation) {
         const auto t_support = Clock::now();
@@ -1141,19 +1167,18 @@ bool estimate_discrete_cir(const std::complex<float>* y,
             ++valid;
         }
         if (!valid) return finish("failed", "short_correlation_prefix");
-        double code_energy=0;
-        for (const auto v:scratch.impulse_sync) code_energy+=std::norm(v);
-        if (!(code_energy>0)) return finish("failed", "empty_impulse_code");
-        for (size_t d=0;d<taps;++d) {
-            cd acc{};
-            for (size_t c=0;c<demod::kQm35CodeLength;++c) {
-                const float sign=scratch.impulse_sync[8*c].real();
-                if (sign!=0) acc+=double(sign)*avg[d+8*c];
-            }
-            model.taps[d]=cf(acc/(code_energy*valid));
+        if (scratch.cir_sparse_tmpl.code_energy <= 0.0f)
+            return finish("failed", "empty_impulse_code");
+        const float inv_valid = 1.0f / static_cast<float>(valid);
+        for (size_t j = 0; j < width; ++j)
+            scratch.cir_avg_cf[j] = cf(avg[j]);
+        demod::rxopt::correlate_cir_sparse(
+            scratch.cir_avg_cf.data(), scratch.cir_sparse_tmpl, taps, scratch.cir_corr_vals);
+        for (size_t d = 0; d < taps; ++d) {
+            model.taps[d] = scratch.cir_corr_vals[d] * inv_valid;
             if (!finite_cf(model.taps[d]))
                 return finish("failed", "nonfinite_correlation");
-            model.active_lags[d]=int16_t(cfg.lag_lo+int64_t(d));
+            model.active_lags[d] = int16_t(cfg.lag_lo + int64_t(d));
         }
         model.impulse_template=true;
         model.cir_repetitions=valid;

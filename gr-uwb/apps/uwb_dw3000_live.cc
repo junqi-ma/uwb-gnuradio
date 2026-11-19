@@ -102,12 +102,14 @@ struct Options {
     std::string print = "packets";
     std::string mode = "continuous";   // continuous | timed
     std::string sync = "acquire";      // acquire | locked
+    std::string par_only = "off";     // raw correlation PAR experiment
     double freq = 6489.6e6, gain = 60, seconds = 0;
     double period_ms = 5.0;
     size_t workers = 2, capacity = 24, raw_blocks = 128, summary = 50;
     size_t lock_observations = defaults::kLockObservations;
     size_t holdover = defaults::kHoldoverMissCount;
     size_t reacquire = defaults::kReacquireMissCount;
+    double lock_residual_limit = 0.0; // 0 = auto: max(512, locked_roi_native)
     size_t locked_roi = 256;
     // LockedBounded SYNC-train tracking: grid (sparse anchors + single-point
     // correlation on the fitted grid) or legacy (per-SYNC +/-8 search).
@@ -124,6 +126,14 @@ struct Options {
     // reported as SFD-only, so the `--cir auto` 15 ms Full retry must not run
     // and an FCS-less SFD success is not an interference event.
     std::string stop_after_sfd = "off";
+    // Stop the demodulator right after standalone CIR estimation (after SFD).
+    std::string stop_after_cir = "off";
+    // Use 64-entry sparse ternary code for timing/SFD/fold matched filtering.
+    // TODO(matlab-verify): Live/sensing defaults to "on" (~7x faster on wide
+    // ROIs); UWB_demodulation/+uwbdecoder/detectRepeatedPreamble.m uses the
+    // dense pulse-shaped template ("off") for low-SNR (-12/-14 dB) sensitivity.
+    // Verify low-SNR crossover point in MATLAB before removing the dense path.
+    std::string timing_sparse = "on";
     size_t post_guard = 8192;
     // Pre-guard used while LOCKED.  The wide 36864 guard exists for the blind
     // autocorrelation seed (Acquisition::scan needs a 36864-sample platform
@@ -566,6 +576,16 @@ struct Workers {
             // Capture-only mode: stop after the SFD.  Set before the locked profile
             // is copied from `acq`, so both the acquisition and the locked slots carry it.
             acq.rx_stop_after_sfd = (o.stop_after_sfd == "on");
+            acq.rx_stop_after_cir = (o.stop_after_cir == "on");
+            acq.rx_timing_sparse = (o.timing_sparse == "on");
+            acq.rx_sync_par_three_samples = o.par_only == "window3";
+            acq.rx_sfd_par_three_samples = acq.rx_sync_par_three_samples ||
+                                           o.par_only == "window3-sfd";
+            acq.rx_par_confirm = o.par_only == "guarded" || acq.rx_sfd_par_three_samples;
+            acq.rx_sync_par_only = o.par_only == "sync" || o.par_only == "both" ||
+                                   acq.rx_par_confirm;
+            acq.rx_sfd_par_only = o.par_only == "sfd" || o.par_only == "both" ||
+                                  acq.rx_par_confirm;
             // Blind sparse autocorrelation seeds can precede or follow the true
             // first SYNC by several symbols.
             acq.timing_search_margin = 131072;
@@ -620,6 +640,7 @@ struct Workers {
                         elapsed_us(job.ready, compute_end) / 1000, retry, &cost,
                         tag.str());
                     if (o.lock_fcs == "on" && o.stop_after_sfd != "on" &&
+                        o.stop_after_cir != "on" &&
                         !job.target_slot && r.timing.ok && r.sfd.ok) {
                         const bool identity = r.payload.fcs_pass &&
                             crc_ok(r.payload.bytes);
@@ -1183,6 +1204,8 @@ try {
                 "--replay FILE (paced diagnostic, no hardware)\n"
                 "--mode continuous|timed (default continuous; timed needs --replay)\n"
                 "--sync acquire|locked (default acquire; locked uses a bounded target ROI)\n"
+                "--par-only off|sync|sfd|both|guarded|window3|window3-sfd\n"
+                "  (experimental raw correlation PAR gates)\n"
                 "--period-ms 5 --pre-guard N --post-guard N (native samples)\n"
                 "--locked-pre-guard N (pre-guard while LOCKED, default 8192; the\n"
                 "  acquire/holdover/reacquire states keep the wide --pre-guard)\n"
@@ -1191,12 +1214,18 @@ try {
                 "  single-point correlation on the fitted grid, or the per-SYNC +/-8\n"
                 "  search; default grid.  measured_period always comes from the anchor fit)\n"
                 "--lock-observations 3 --holdover 3 --reacquire 8\n"
+                "--lock-residual-limit N (grid residual outlier limit in native samples;\n"
+                "  0 = auto max(512, locked_roi_native))\n"
                 "--lock-fcs on|off (default on; off drops the FCS requirement from\n"
                 "  target identity, for low-SNR runs where the payload never decodes.\n"
                 "  The lock then discriminates by grid residual)\n"
                 "--stop-after-sfd on|off (default off; on stops demod after the SFD,\n"
                 "  skipping PHR/payload, the --cir auto Full retry and the\n"
                 "  FCS-based interference diagnostic)\n"
+                "--stop-after-cir on|off (default off; on stops demod after\n"
+                "  standalone CIR estimation, skipping CMF/PHR/payload)\n"
+                "--timing-sparse on|off (default on; uses 64-entry sparse\n"
+                "  ternary code for timing matched filtering; off uses dense template)\n"
                 "--interference on|off (default on)\n"
                 "--tone on|off (fixed-tone cancellation, default on)\n"
                 "--tone-period-ms 20 --tone-training-ms 0.5 (model cadence)\n"
@@ -1235,6 +1264,7 @@ try {
         else if (key=="--replay") o.replay=value();
         else if (key=="--mode") o.mode=value();
         else if (key=="--sync") o.sync=value();
+        else if (key=="--par-only") o.par_only=value();
         else if (key=="--period-ms") o.period_ms=std::stod(value());
         else if (key=="--post-guard") o.post_guard=std::stoul(value());
         else if (key=="--locked-pre-guard") o.locked_pre_guard=std::stoul(value());
@@ -1242,9 +1272,12 @@ try {
         else if (key=="--locked-timing") o.locked_timing=value();
         else if (key=="--lock-fcs") o.lock_fcs=value();
         else if (key=="--stop-after-sfd") o.stop_after_sfd=value();
+        else if (key=="--stop-after-cir") o.stop_after_cir=value();
+        else if (key=="--timing-sparse") o.timing_sparse=value();
         else if (key=="--lock-observations") o.lock_observations=std::stoul(value());
         else if (key=="--holdover") o.holdover=std::stoul(value());
         else if (key=="--reacquire") o.reacquire=std::stoul(value());
+        else if (key=="--lock-residual-limit") o.lock_residual_limit=std::stod(value());
         else if (key=="--interference") o.interference=(value()!="off");
         else if (key=="--tone") o.tone=(value()!="off");
         else if (key=="--tone-period-ms") o.tone_period_ms=std::stod(value());
@@ -1280,6 +1313,11 @@ try {
         throw std::runtime_error("--taps must be quality, eq32, realtime or eq16");
     if (o.sync!="acquire" && o.sync!="locked")
         throw std::runtime_error("--sync must be acquire or locked");
+    if (o.par_only!="off" && o.par_only!="sync" && o.par_only!="sfd" &&
+        o.par_only!="both" && o.par_only!="guarded" && o.par_only!="window3" &&
+        o.par_only!="window3-sfd")
+        throw std::runtime_error(
+            "--par-only must be off, sync, sfd, both, guarded, window3, or window3-sfd");
     if (o.locked_timing!="grid" && o.locked_timing!="legacy")
         throw std::runtime_error("--locked-timing must be grid or legacy");
     // Strict on|off: unlike --tone/--fused (which treat anything but "off" as
@@ -1289,6 +1327,10 @@ try {
         throw std::runtime_error("--lock-fcs must be on or off");
     if (o.stop_after_sfd!="on" && o.stop_after_sfd!="off")
         throw std::runtime_error("--stop-after-sfd must be on or off");
+    if (o.stop_after_cir!="on" && o.stop_after_cir!="off")
+        throw std::runtime_error("--stop-after-cir must be on or off");
+    if (o.timing_sparse!="on" && o.timing_sparse!="off")
+        throw std::runtime_error("--timing-sparse must be on or off");
     if (!(o.tone_period_ms > 0.0) || !(o.tone_training_ms > 0.0) ||
         o.tone_training_ms >= o.tone_period_ms)
         throw std::runtime_error("invalid --tone-period-ms/--tone-training-ms");
@@ -1317,8 +1359,10 @@ try {
     if (!(o.period_ms>0.0) || !std::isfinite(o.period_ms))
         throw std::runtime_error("invalid --period-ms");
     if (o.locked_roi==0 || o.lock_observations<2 || o.holdover==0 ||
-        o.reacquire<=o.holdover || o.timed_lookahead==0 || o.timed_alignment==0 ||
-        o.timed_t0_ms<0.0 || !std::isfinite(o.timed_t0_ms))
+        o.reacquire<=o.holdover || o.lock_residual_limit<0.0 ||
+        !std::isfinite(o.lock_residual_limit) || o.timed_lookahead==0 ||
+        o.timed_alignment==0 || o.timed_t0_ms<0.0 ||
+        !std::isfinite(o.timed_t0_ms))
         throw std::runtime_error("invalid lock/timed configuration");
     if (o.locked_pre_guard == 0)
         throw std::runtime_error("--locked-pre-guard must be > 0");
@@ -1379,6 +1423,14 @@ try {
     lock_cfg.verify_observations = o.lock_observations;
     lock_cfg.holdover_miss_count = o.holdover;
     lock_cfg.reacquire_miss_count = o.reacquire;
+    // Scale the grid-residual outlier gate with the requested locked ROI when
+    // no explicit limit is given so wide-ROI jittery emitters (e.g. QM35825)
+    // do not trip grid_invalid reacquire loops.
+    lock_cfg.residual_limit_samples =
+        o.lock_residual_limit > 0.0
+            ? o.lock_residual_limit
+            : std::max(lock_cfg.residual_limit_samples,
+                       double(locked_roi_native));
     lock_cfg.code_index = 10;
     lock_cfg.preamble_repetitions = 256;
     lock_cfg.sfd_mode = "4z2";
@@ -1399,6 +1451,7 @@ try {
     core::TargetLockState last_state = lock.state();
     Reporter report(o.summary, o.print == "packets");
     report.info("START mode="+o.mode+" sync="+o.sync+
+        " par_only="+o.par_only+
         " channel="+o.channel+" antenna="+o.antenna+" cir="+o.cir+
         " workers="+std::to_string(o.workers)+" summary="+std::to_string(o.summary)+
         " period_ms="+std::to_string(o.period_ms)+

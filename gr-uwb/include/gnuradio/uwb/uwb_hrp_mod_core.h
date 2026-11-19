@@ -537,12 +537,7 @@ inline const int* rs_generator()
 
 inline void bits_to_nsyms(const int8_t* bits, int nsym, int* syms)
 {
-    for (int i = 0; i < nsym; ++i) {
-        int s = 0;
-        for (int b = 0; b < 6; ++b)
-            s = (s << 1) | (bits[i * 6 + b] & 1);
-        syms[i] = s;
-    }
+    codec::rs_bits_to_syms(bits, nsym, syms);
 }
 
 inline void rs_encode_330(const int8_t* data330, int8_t* coded378)
@@ -598,16 +593,13 @@ inline bool rs_encode_stream(const int8_t* data_bits,
 
 inline void convenc_cl3(const int8_t* bits, size_t n, std::vector<int8_t>& coded)
 {
-    int s1 = 0, s0 = 0;
+    int state = 0;
     coded.resize(2 * n);
     for (size_t t = 0; t < n; ++t) {
-        const int u = bits[t] & 1;
-        coded[2 * t] = static_cast<int8_t>(s1);
-        coded[2 * t + 1] = static_cast<int8_t>(u ^ s0);
-        const int ns1 = u;
-        const int ns0 = s1;
-        s1 = ns1;
-        s0 = ns0;
+        const auto step = codec::cl3_transition(state, bits[t] & 1);
+        coded[2 * t] = static_cast<int8_t>(step.g0);
+        coded[2 * t + 1] = static_cast<int8_t>(step.g1);
+        state = step.next_state;
     }
 }
 
@@ -751,52 +743,7 @@ inline void copy_sfd_key(char* dst, size_t dst_n, const char* src)
     dst[n] = 0;
 }
 
-inline bool fill_bprf_spread(int8_t* out,
-                             size_t nbits,
-                             size_t code_index,
-                             size_t start_bit)
-{
-    static const int8_t kInit9[15] = {
-        0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1
-    };
-    static const int8_t kInit10[15] = {
-        0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1
-    };
-    static const int8_t kInit11[15] = {
-        1, 1, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1
-    };
-    static const int8_t kInit12[15] = {
-        1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0
-    };
-    const int8_t* init = nullptr;
-    if (code_index == 9)
-        init = kInit9;
-    else if (code_index == 10)
-        init = kInit10;
-    else if (code_index == 11)
-        init = kInit11;
-    else if (code_index == 12)
-        init = kInit12;
-    else
-        return false;
-    int8_t r[15];
-    std::memcpy(r, init, 15);
-    size_t t = 0;
-    auto next_bit = [&]() -> int8_t {
-        if (t < 15)
-            return r[t++];
-        const int8_t b = static_cast<int8_t>(r[1] ^ r[0]);
-        std::memmove(r, r + 1, 14);
-        r[14] = b;
-        ++t;
-        return b;
-    };
-    for (size_t i = 0; i < start_bit; ++i)
-        (void)next_bit();
-    for (size_t i = 0; i < nbits; ++i)
-        out[i] = next_bit() ? int8_t(-1) : int8_t(1);
-    return true;
-}
+using codec::fill_bprf_spread;
 
 inline bool ensure_pn(HrpModScratch& scratch, size_t code_index, size_t min_len)
 {

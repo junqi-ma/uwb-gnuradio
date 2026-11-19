@@ -42,6 +42,13 @@ list(INSERT CMAKE_MODULE_PATH 0 ${CMAKE_SOURCE_DIR}/cmake/Modules)
 # docs/performance/AVX512内核与编译期CPU选择开发规划_2026-11-16.md.
 ########################################################################
 include(UwbSimd)
+set(_uwb_sparse_mf_avx512_default OFF)
+if(UWB_SIMD_HAVE_AVX512)
+    set(_uwb_sparse_mf_avx512_default ON)
+endif()
+option(UWB_SPARSE_MF_AVX512_16LAG
+    "Use AVX-512 16-lag batching for sparse ternary matched filtering when AVX-512 is enabled"
+    ${_uwb_sparse_mf_avx512_default})
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/gnuradio/uwb/uwb_simd_config.h.in
     ${CMAKE_CURRENT_BINARY_DIR}/include/gnuradio/uwb/uwb_simd_config.h

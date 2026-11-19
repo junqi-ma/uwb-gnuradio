@@ -39,20 +39,26 @@ inline bool stage_sfd(const std::complex<float>* rx,
     size_t sfd_len = len * sym;
     float sfd_scale = 1.0f;
 
-    if (profile.rx_fast_sfd) {
-        if (!scratch.real_sync_template.is_real ||
-            scratch.real_sync_template.length != sym) {
-            rxopt::build_real_sync_template(template_wf, scratch.real_sync_template);
-        }
+    const auto* sparse_tmpl = detail::prepare_sparse_sync_template(profile, sym, scratch);
+    if (!sparse_tmpl && template_wf.size() < sym)
+        return false;
+    if (!sparse_tmpl && profile.rx_fast_sfd &&
+        (!scratch.real_sync_template.is_real || scratch.real_sync_template.length != sym)) {
+        rxopt::build_real_sync_template(template_wf, scratch.real_sync_template);
+    }
+    const bool use_real_sfd_fast =
+        sparse_tmpl || (profile.rx_fast_sfd && scratch.real_sync_template.is_real);
+    if (sparse_tmpl || profile.rx_fast_sfd) {
         float sfd_norm_sq = 0.0f;
         for (int8_t s : sfd_sequence)
             sfd_norm_sq += static_cast<float>(s * s);
-        if (sfd_norm_sq > 0.0f && scratch.real_sync_template.energy > 0.0f) {
-            sfd_scale = 1.0f / std::sqrt(sfd_norm_sq * scratch.real_sync_template.energy);
-        }
+        const float energy = sparse_tmpl ? sparse_tmpl->code_energy
+                                         : scratch.real_sync_template.energy;
+        if (sfd_norm_sq > 0.0f && energy > 0.0f)
+            sfd_scale = 1.0f / std::sqrt(sfd_norm_sq * energy);
     }
 
-    if (!profile.rx_fast_sfd || !scratch.real_sync_template.is_real) {
+    if (!use_real_sfd_fast) {
         if (profile.rx_fast_sfd) {
             const uint64_t key =
                 rxopt::sfd_template_key(template_wf, sfd_sequence);
@@ -66,18 +72,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
             sfd_tmpl = scratch.sfd_template.data();
             sfd_len = scratch.sfd_template.size();
         } else {
-            scratch.corr.clear();
-            scratch.corr.reserve(len * sym);
-            for (size_t i = 0; i < len; ++i) {
-                const int8_t s = sfd_sequence[i];
-                for (size_t k = 0; k < sym; ++k)
-                    scratch.corr.push_back(
-                        std::complex<float>(static_cast<float>(s) *
-                                                template_wf[k].real(),
-                                            static_cast<float>(s) *
-                                                template_wf[k].imag()));
-            }
-            gr::uwb::core::uwb_l2_normalize(scratch.corr);
+            rxopt::build_sfd_template(template_wf, sfd_sequence, scratch.corr);
             sfd_tmpl = scratch.corr.data();
             sfd_len = scratch.corr.size();
         }
@@ -85,20 +80,12 @@ inline bool stage_sfd(const std::complex<float>* rx,
             return false;
     }
 
-    // Candidate correlation: legacy scalar loop by default, VOLK dot when the
-    // explicit fast path is enabled.  Candidate set/threshold/order unchanged.
-    auto sfd_dot = [&](size_t j) -> std::complex<float> {
-        if (profile.rx_fast_sfd && scratch.real_sync_template.is_real) {
-            return rxopt::sfd_real_dot_single(
-                rx + j, scratch.real_sync_template.taps_dup.data(),
-                sym, sfd_sequence.data(), len, sfd_scale);
-        }
-        if (profile.rx_fast_sfd)
-            return rxopt::conjugate_dot(rx + j, sfd_tmpl, sfd_len);
-        std::complex<float> acc(0.0f, 0.0f);
-        for (size_t k = 0; k < sfd_len; ++k)
-            acc += rx[j + k] * std::conj(sfd_tmpl[k]);
-        return acc;
+    // The fallback uses the full complex SFD template. The fast search
+    // correlates a folded window against a single SYNC symbol instead.
+    auto sfd_dot = [&](size_t j) {
+        return profile.rx_fast_sfd
+            ? rxopt::conjugate_dot(rx + j, sfd_tmpl, sfd_len)
+            : detail::conjugate_dot_scalar(rx + j, sfd_tmpl, sfd_len);
     };
 
     // MATLAB strategy (refineTimingWithNsSfd): SFD start = preamble start +
@@ -112,26 +99,18 @@ inline bool stage_sfd(const std::complex<float>* rx,
     const int64_t expected = timing.preamble_start_sample +
         std::llround(static_cast<double>(profile.preamble_repetitions) * period);
     out.expected_start_sample = expected;
-    // Full-rate correlation (normalized) over the search window.
-    // The signal is 2x oversampled and the SFD template is kron(sfd, preamble)
-    // (8 symbols), so the correlation peak is broad: a decimated coarse pass
-    // (stride D) localizes the region, then a small full-rate refinement
-    // recovers the exact sample.  Window power is a sliding sum so the inner
-    // loop only accumulates the correlation.  The result (best_j, metric) is
-    // identical to the exhaustive search for a unique peak.
+    // Score every sample in each candidate window. The fast path folds
+    // the signed SFD symbols before the dot, while power covers the raw SFD.
     constexpr auto kSfdNarrowHalf = rxopt::kSfdNarrowHalf;
     constexpr auto kSfdSymbolOffsets = rxopt::kSfdSymbolOffsets;
     float best = -1.0f;
     size_t best_j = 0;
+    const bool par_only = profile.rx_sfd_par_only;
 
-    // Shared per-symbol SFD primitive.  `use_real_sfd_fast` / `taps_dup` are
-    // hoisted out of scan_window so the low-SNR discrete-grid fallback below
-    // can reuse the exact same kernels.
-    const bool use_real_sfd_fast =
-        profile.rx_fast_sfd && scratch.real_sync_template.is_real;
-    const float* taps_dup =
-        use_real_sfd_fast ? scratch.real_sync_template.taps_dup.data()
-                          : nullptr;
+    const float* real_taps = use_real_sfd_fast && !sparse_tmpl
+        ? scratch.real_sync_template.taps_dup.data() : nullptr;
+    const rxopt::SyncMatchedFilter sync_filter(
+        template_wf.data(), sym, real_taps, sparse_tmpl, /*volk_complex=*/false);
 
     // Coherent sign check over the first min(len,16) SFD symbols.  This is the
     // hard lock that keeps a low-floor / discrete-grid hit from being a
@@ -148,32 +127,27 @@ inline bool stage_sfd(const std::complex<float>* rx,
         std::complex<double> coh_ref(0.0, 0.0);
         for (size_t si = 0; si < n_check; ++si) {
             const size_t p = static_cast<size_t>(pos) + si * sym;
-            std::complex<float> c(0.0f, 0.0f);
-            if (use_real_sfd_fast) {
-                c = rxopt::real_template_dot_single(rx + p, taps_dup, sym);
-            } else {
-                for (size_t k = 0; k < sym; ++k)
-                    c += rx[p + k] * std::conj(template_wf[k]);
-            }
+            const auto c = sync_filter.dot(rx + p);
             sym_corr[si] = c;
             coh_ref += static_cast<double>(sfd_sequence[si]) *
                        std::complex<double>(c);
         }
         if (!(std::norm(coh_ref) > 1e-24))
             return false;
-        size_t sign_ok = 0;
         for (size_t si = 0; si < n_check; ++si) {
+            if (par_only && sfd_sequence[si] == 0)
+                continue;
             const double proj =
                 static_cast<double>(sym_corr[si].real()) * coh_ref.real() +
                 static_cast<double>(sym_corr[si].imag()) * coh_ref.imag();
-            if (proj * static_cast<double>(sfd_sequence[si]) > 0.0)
-                ++sign_ok;
+            if (!(proj * static_cast<double>(sfd_sequence[si]) > 0.0))
+                return false;
         }
-        return sign_ok == n_check;
+        return true;
     };
 
     auto scan_window = [&](int64_t center, int64_t half_width,
-                           int64_t backtrack_symbols) {
+                           int64_t backtrack_symbols, double raw_par_min = 25.0) {
         if (center < 0 || n < sfd_len)
             return false;
         const int64_t lo = std::max<int64_t>(0, center - half_width);
@@ -186,90 +160,51 @@ inline bool stage_sfd(const std::complex<float>* rx,
         const size_t j_end = static_cast<size_t>(hi);
         float window_best = -1.0f;
         size_t window_best_j = j_lo;
-        float pwr = 0.0f;
-        for (size_t k = 0; k < sfd_len; ++k)
-            pwr += std::norm(rx[j_lo + k]);
-
-        const size_t fold_len = (j_end - j_lo) + sym;
+        float pwr = par_only ? 0.0f : detail::sample_power_sum(rx + j_lo, sfd_len);
+        const size_t lag_count = j_end - j_lo + 1;
+        scratch.metric.resize(lag_count);
+        auto score_lag = [&](size_t lag, std::complex<float> corr, bool coarse) {
+            const size_t j = j_lo + lag;
+            if (!par_only && lag > 0)
+                pwr += std::norm(rx[j + sfd_len - 1]) - std::norm(rx[j - 1]);
+            if (coarse)
+                ++out.coarse_correlations;
+            else
+                ++out.fine_correlations;
+            const float metric = par_only ? std::norm(corr)
+                : detail::normalized_correlation_power(corr, pwr);
+            scratch.metric[lag] = metric;
+            if (metric > window_best) {
+                window_best = metric;
+                window_best_j = j;
+            }
+        };
         if (use_real_sfd_fast) {
+            const size_t fold_len = lag_count - 1 + sym;
             if (scratch.sfd_folded.size() < fold_len)
                 scratch.sfd_folded.resize(fold_len);
-            rxopt::fold_sfd_window(rx + j_lo, sym, sfd_sequence.data(), len, fold_len, scratch.sfd_folded.data());
-        }
-
-        if (use_real_sfd_fast) {
-            // Full-rate single pass using the 8-lag AVX-512 kernel: avoids
-            // stride-8 peak-straddling misses on narrow SFD correlation peaks
-            // while eliminating the second window-power initialization.
-            scratch.metric.resize(j_end - j_lo + 1);
-            for (size_t j = j_lo; j <= j_end;) {
-                if (j + 7 <= j_end) {
-                    std::complex<float> acc8[8];
-                    rxopt::real_template_dot_8lag(
-                        scratch.sfd_folded.data() + (j - j_lo), taps_dup, sym,
-                        acc8);
-                    for (int m = 0; m < 8; ++m) {
-                        const size_t cur_j = j + static_cast<size_t>(m);
-                        if (cur_j > j_lo)
-                            pwr += std::norm(rx[cur_j + sfd_len - 1]) -
-                                   std::norm(rx[cur_j - 1]);
-                        ++out.coarse_correlations;
-                        const float metric =
-                            std::norm(acc8[m] * sfd_scale) / (pwr + 1e-12f);
-                        scratch.metric[cur_j - j_lo] = metric;
-                        if (metric > window_best) {
-                            window_best = metric;
-                            window_best_j = cur_j;
-                        }
-                    }
-                    j += 8;
-                } else {
-                    if (j > j_lo)
-                        pwr += std::norm(rx[j + sfd_len - 1]) -
-                               std::norm(rx[j - 1]);
-                    ++out.fine_correlations;
-                    const std::complex<float> acc =
-                        rxopt::real_template_dot_single(
-                            scratch.sfd_folded.data() + (j - j_lo), taps_dup,
-                            sym) *
-                        sfd_scale;
-                    const float m = std::norm(acc) / (pwr + 1e-12f);
-                    scratch.metric[j - j_lo] = m;
-                    if (m > window_best) {
-                        window_best = m;
-                        window_best_j = j;
-                    }
-                    ++j;
-                }
-            }
-            if (out.fine_correlations == 0)
-                ++out.fine_correlations;
+            rxopt::fold_sfd_window(rx + j_lo, sym, sfd_sequence.data(), len,
+                                   fold_len, scratch.sfd_folded.data());
+            sync_filter.for_each_lag(
+                scratch.sfd_folded.data(), lag_count,
+                [&](size_t lag, std::complex<float> corr, bool batch) {
+                    score_lag(lag, par_only ? corr : corr * sfd_scale, batch);
+                });
         } else {
-            // Fallback non-fast path: full-rate pass so metric vector & PAR
-            // match the fast path identically.
-            scratch.metric.resize(j_end - j_lo + 1);
-            for (size_t j = j_lo; j <= j_end; ++j) {
-                if (j > j_lo)
-                    pwr += std::norm(rx[j + sfd_len - 1]) -
-                           std::norm(rx[j - 1]);
-                if (((j - j_lo) & 1u) == 0u)
-                    ++out.coarse_correlations;
-                else
-                    ++out.fine_correlations;
-                const std::complex<float> acc = sfd_dot(j);
-                const float m = std::norm(acc) / (pwr + 1e-12f);
-                scratch.metric[j - j_lo] = m;
-                if (m > window_best) {
-                    window_best = m;
-                    window_best_j = j;
-                }
-            }
-            if (out.fine_correlations == 0)
-                ++out.fine_correlations;
+            for (size_t lag = 0; lag < lag_count; ++lag)
+                score_lag(lag, sfd_dot(j_lo + lag), (lag & 1u) == 0u);
         }
-        bool window_passed = (window_best >= profile.sfd_detection_threshold);
-        if (!window_passed && window_best >= 0.02f &&
-            scratch.metric.size() == (j_end - j_lo + 1)) {
+        if (out.fine_correlations == 0)
+            ++out.fine_correlations;
+        bool window_passed = !par_only && (window_best >= profile.sfd_detection_threshold);
+        if (par_only) {
+            const rxopt::MatchedFilterPeak peak{window_best_j - j_lo, window_best, {}};
+            window_passed = rxopt::raw_lag_par_passes(
+                scratch.metric.data(), lag_count, peak, 12, 16, raw_par_min,
+                profile.rx_sfd_par_three_samples) &&
+                polarity_ok(static_cast<int64_t>(window_best_j));
+        } else if (!window_passed && window_best >= 0.02f &&
+                   scratch.metric.size() == (j_end - j_lo + 1)) {
             const size_t best_off = window_best_j - j_lo;
             double bg_sum = 0.0;
             size_t bg_cnt = 0;
@@ -358,7 +293,8 @@ inline bool stage_sfd(const std::complex<float>* rx,
         std::vector<uint8_t> sym_valid;
         if (sym_decompose) {
             sym_corr.assign(n_sym_pos, std::complex<float>(0.0f, 0.0f));
-            sym_pwr.assign(n_sym_pos, 0.0f);
+            if (!par_only)
+                sym_pwr.assign(n_sym_pos, 0.0f);
             sym_valid.assign(n_sym_pos, 0);
             for (size_t i = 0; i < n_sym_pos; ++i) {
                 const int64_t m = static_cast<int64_t>(i) -
@@ -369,9 +305,9 @@ inline bool stage_sfd(const std::complex<float>* rx,
                     spos + static_cast<int64_t>(sym) >
                         static_cast<int64_t>(n))
                     continue;
-                sym_corr[i] =
-                    rxopt::real_template_dot_single(rx + spos, taps_dup, sym);
-                sym_pwr[i] = window_power_8acc(rx + spos, sym);
+                sym_corr[i] = sync_filter.dot(rx + spos);
+                if (!par_only)
+                    sym_pwr[i] = window_power_8acc(rx + spos, sym);
                 sym_valid[i] = 1;
             }
         }
@@ -386,23 +322,27 @@ inline bool stage_sfd(const std::complex<float>* rx,
                 for (size_t s = 0; s < len; ++s) {
                     const int64_t p = pos + static_cast<int64_t>(s) *
                                                 static_cast<int64_t>(sym);
-                    pwr += window_power_8acc(rx + p, sym);
+                    if (!par_only)
+                        pwr += window_power_8acc(rx + p, sym);
                     const int8_t sg = sfd_sequence[s];
                     if (sg == 0)
                         continue;
-                    const std::complex<float> d =
-                        rxopt::real_template_dot_single(rx + p, taps_dup, sym);
+                    const auto d = sync_filter.dot(rx + p);
                     if (sg > 0)
                         acc += d;
                     else
                         acc -= d;
                 }
+                if (par_only)
+                    return std::norm(acc);
                 acc *= sfd_scale;
-                return std::norm(acc) / (pwr + 1e-12f);
+                return detail::normalized_correlation_power(acc, pwr);
             }
-            const float pwr = window_power_8acc(rx + pos, sfd_len);
             const std::complex<float> acc = sfd_dot(static_cast<size_t>(pos));
-            return std::norm(acc) / (pwr + 1e-12f);
+            if (par_only)
+                return std::norm(acc);
+            const float pwr = window_power_8acc(rx + pos, sfd_len);
+            return detail::normalized_correlation_power(acc, pwr);
         };
         struct GridCand {
             int64_t pos;
@@ -412,7 +352,7 @@ inline bool stage_sfd(const std::complex<float>* rx,
         size_t nc = 0;
         if (max_pos >= 0) {
             for (int64_t k = -kGridHalf; k <= kGridHalf; ++k) {
-            const int64_t pos = expected + std::llround(static_cast<double>(k) * period);
+                const int64_t pos = expected + std::llround(static_cast<double>(k) * period);
                 if (pos < 0 || pos > max_pos)
                     continue;
                 if (sym_decompose) {
@@ -426,7 +366,8 @@ inline bool stage_sfd(const std::complex<float>* rx,
                             ok = false;
                             break;
                         }
-                        pwr += sym_pwr[idx];
+                        if (!par_only)
+                            pwr += sym_pwr[idx];
                         const int8_t sg = sfd_sequence[s];
                         if (sg == 0)
                             continue;
@@ -437,8 +378,9 @@ inline bool stage_sfd(const std::complex<float>* rx,
                     }
                     if (!ok)
                         continue;
-                    const std::complex<float> acc = acc_unscaled * sfd_scale;
-                    cands[nc++] = { pos, std::norm(acc) / (pwr + 1e-12f) };
+                    const float metric = par_only ? std::norm(acc_unscaled)
+                        : detail::normalized_correlation_power(acc_unscaled * sfd_scale, pwr);
+                    cands[nc++] = { pos, metric };
                 } else {
                     cands[nc++] = { pos, sfd_metric_at(pos) };
                 }
@@ -479,12 +421,18 @@ inline bool stage_sfd(const std::complex<float>* rx,
                 ++bg_cnt;
             }
             if (bg_cnt >= 16) {
-                const double bg_mean =
-                    std::max(bg_sum / static_cast<double>(bg_cnt), 1e-12);
-                const double par =
-                    static_cast<double>(best_metric) / bg_mean;
-                if (best_metric >= kSfdGridPeakFloor && par >= kSfdGridParFloor &&
-                    polarity_ok(best_pos)) {
+                const bool passes_gate = par_only
+                    ? rxopt::raw_par_passes(best_metric, bg_sum, bg_cnt, kSfdGridParFloor)
+                    : best_metric >= kSfdGridPeakFloor &&
+                          static_cast<double>(best_metric) /
+                              std::max(bg_sum / static_cast<double>(bg_cnt), 1e-12) >=
+                              kSfdGridParFloor;
+                if (passes_gate && par_only && profile.rx_par_confirm) {
+                    // On the symbol grid an ordinary SYNC correlates with
+                    // 4z2, so its PAR threshold must stay low. Confirm on
+                    // off-peak sample lags to distinguish SFD from noise.
+                    sfd_passed = scan_window(best_pos, kSfdNarrowHalf, -1, 20.0);
+                } else if (passes_gate && polarity_ok(best_pos)) {
                     best = best_metric;
                     best_j = static_cast<size_t>(best_pos);
                     sfd_passed = true;
@@ -500,6 +448,13 @@ inline bool stage_sfd(const std::complex<float>* rx,
     out.sfd_start_sample = static_cast<int64_t>(best_j);
     out.sfd_end_sample = static_cast<int64_t>(best_j) +
                          static_cast<int64_t>(sfd_len) - 1;
+    // Keep the reported metric in normalized power units.
+    if (par_only) {
+        if (use_real_sfd_fast)
+            best *= sfd_scale * sfd_scale;
+        const float power = window_power_8acc(rx + best_j, sfd_len);
+        best /= power + gr::uwb::core::kUwbEpsilon;
+    }
     out.metric = best;
     out.polarity = 1;
     return true;

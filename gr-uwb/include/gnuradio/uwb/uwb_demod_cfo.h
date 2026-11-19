@@ -120,21 +120,18 @@ inline bool fit_cfo(const std::complex<float>* rx,
     // Linear fit of phase vs RELATIVE time (the slope is offset-invariant, so
     // subtracting t0 only improves conditioning).
     const double t0 = (double)timing.peak_samples[skip] / profile.sample_rate;
-    double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    detail::LinearFit fit;
     for (size_t k = 0; k < nfit; ++k) {
         const size_t idx = skip + k;
         const double t =
             (double)timing.peak_samples[idx] / profile.sample_rate - t0;
         const double ph = (double)scratch.metric[k];
-        sx += t;
-        sy += ph;
-        sxx += t * t;
-        sxy += t * ph;
+        fit.add(t, ph);
     }
-    const double denom = (double)nfit * sxx - sx * sx;
+    const double denom = fit.determinant();
     if (std::abs(denom) < 1e-30)
         return false;
-    const double slope = ((double)nfit * sxy - sx * sy) / denom;
+    const double slope = fit.slope(denom);
     out.cfo_hz = slope / (2.0 * M_PI);
     out.peaks_used = nfit;
     out.ok = true;

@@ -5,41 +5,66 @@
 #include <cstdint>
 #include <vector>
 namespace gr::uwb::codec {
+// Bit 0 is the next chip; bit 14 is the newest bit of the 15-bit LFSR.
+// Initial states are the IEEE HRP BPRF sequences for preamble codes 9–12.
+inline uint16_t bprf_spreading_seed(size_t code_index)
+{
+    constexpr uint16_t initial[] = {
+        0b101111001000010,
+        0b111100001001100,
+        0b110011001001111,
+        0b001110011111001
+    };
+    return code_index >= 9 && code_index <= 12 ? initial[code_index - 9] : 0;
+}
+
+inline void generate_bprf_spreading(int8_t* out, size_t nbits,
+                                    size_t start_bit, uint16_t state)
+{
+    auto next_bit = [&]() {
+        const unsigned bit = state & 1u;
+        const unsigned feedback = (state ^ (state >> 1)) & 1u;
+        state = static_cast<uint16_t>((state >> 1) | (feedback << 14));
+        return bit;
+    };
+    for (size_t i = 0; i < start_bit; ++i)
+        (void)next_bit();
+    for (size_t i = 0; i < nbits; ++i)
+        out[i] = next_bit() ? int8_t(-1) : int8_t(1);
+}
+
+inline bool fill_bprf_spread(int8_t* out, size_t nbits, size_t code_index,
+                             size_t start_bit)
+{
+    const uint16_t seed = bprf_spreading_seed(code_index);
+    if (seed == 0)
+        return false;
+    generate_bprf_spreading(out, nbits, start_bit, seed);
+    return true;
+}
+
 inline bool bprf_spreading(std::vector<int8_t>& out, size_t code_index,
                            size_t start_bit, size_t nbits)
 {
-    static const int8_t kInit9[15] = {
-        0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1
-    };
-    static const int8_t kInit10[15] = {
-        0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1
-    };
-    static const int8_t kInit11[15] = {
-        1, 1, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1
-    };
-    static const int8_t kInit12[15] = {
-        1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0
-    };
-    const int8_t* init = nullptr;
-    if (code_index == 9)
-        init = kInit9;
-    else if (code_index == 10)
-        init = kInit10;
-    else if (code_index == 11)
-        init = kInit11;
-    else if (code_index == 12)
-        init = kInit12;
-    else
+    const uint16_t seed = bprf_spreading_seed(code_index);
+    if (seed == 0)
         return false;
-    std::vector<int8_t> s(start_bit + nbits);
-    for (size_t i = 0; i < 15 && i < s.size(); ++i)
-        s[i] = init[i];
-    for (size_t i = 15; i < s.size(); ++i)
-        s[i] = static_cast<int8_t>(s[i - 14] ^ s[i - 15]);
     out.resize(nbits);
-    for (size_t i = 0; i < nbits; ++i)
-        out[i] = s[start_bit + i] ? int8_t(-1) : int8_t(1); // bit 1 -> -1
+    generate_bprf_spreading(out.data(), nbits, start_bit, seed);
     return true;
+}
+
+struct Cl3Transition {
+    int g0;
+    int g1;
+    int next_state;
+};
+
+inline constexpr Cl3Transition cl3_transition(int state, int input)
+{
+    const int s1 = state >> 1;
+    const int s0 = state & 1;
+    return { s1, input ^ s0, (input << 1) | s1 };
 }
 
 inline void hrp_secded(const std::vector<int8_t>& sys13,
@@ -119,14 +144,19 @@ inline int rs_gf_inv(int a)
     return a ? rs_gf_pow(a, 62) : 0;
 }
 
-inline void rs_bits_to_syms(const int8_t* bits378, int* syms63)
+inline void rs_bits_to_syms(const int8_t* bits, int count, int* symbols)
 {
-    for (int i = 0; i < 63; ++i) {
+    for (int i = 0; i < count; ++i) {
         int s = 0;
         for (int b = 0; b < 6; ++b)
-            s = (s << 1) | (bits378[i * 6 + b] & 1);
-        syms63[i] = s;
+            s = (s << 1) | (bits[i * 6 + b] & 1);
+        symbols[i] = s;
     }
+}
+
+inline void rs_bits_to_syms(const int8_t* bits378, int* syms63)
+{
+    rs_bits_to_syms(bits378, 63, syms63);
 }
 
 inline void rs_syms_to_bits(const int* syms, int nsym, int8_t* bits)
