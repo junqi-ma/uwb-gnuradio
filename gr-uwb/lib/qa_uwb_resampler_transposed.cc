@@ -68,6 +68,10 @@ constexpr float kUnitScale = 1.0f / 32768.0f;
 /** The explicit kernel under test in this build. */
 const char* primary_kernel()
 {
+#if UWB_SIMD_HAVE_AVX512
+    if (gr::uwb::core::simd::runtime_supported())
+        return "avx512";
+#endif
 #if UWB_SIMD_LEVEL >= 1
     return "avx2";
 #else

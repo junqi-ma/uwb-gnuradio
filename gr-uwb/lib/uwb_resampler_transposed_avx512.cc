@@ -140,6 +140,58 @@ phase_accum_8x(const float* const* tp8, const float* const* x8, size_t h_rt,
     out8[4] = a4; out8[5] = a5; out8[6] = a6; out8[7] = a7;
 }
 
+UWB_TRANSPOSED_AVX512_TARGET inline void
+transpose_8x8_store(const __m512* out8, gr_complex* out, size_t mb0,
+                    size_t Interp, size_t j)
+{
+    const __m512d r0 = _mm512_castps_pd(out8[0]);
+    const __m512d r1 = _mm512_castps_pd(out8[1]);
+    const __m512d r2 = _mm512_castps_pd(out8[2]);
+    const __m512d r3 = _mm512_castps_pd(out8[3]);
+    const __m512d r4 = _mm512_castps_pd(out8[4]);
+    const __m512d r5 = _mm512_castps_pd(out8[5]);
+    const __m512d r6 = _mm512_castps_pd(out8[6]);
+    const __m512d r7 = _mm512_castps_pd(out8[7]);
+
+    const __m512d t0 = _mm512_unpacklo_pd(r0, r1);
+    const __m512d t1 = _mm512_unpackhi_pd(r0, r1);
+    const __m512d t2 = _mm512_unpacklo_pd(r2, r3);
+    const __m512d t3 = _mm512_unpackhi_pd(r2, r3);
+    const __m512d t4 = _mm512_unpacklo_pd(r4, r5);
+    const __m512d t5 = _mm512_unpackhi_pd(r4, r5);
+    const __m512d t6 = _mm512_unpacklo_pd(r6, r7);
+    const __m512d t7 = _mm512_unpackhi_pd(r6, r7);
+
+    const __m512d u0 = _mm512_shuffle_f64x2(t0, t2, 0x44);
+    const __m512d u2 = _mm512_shuffle_f64x2(t0, t2, 0xEE);
+    const __m512d u4 = _mm512_shuffle_f64x2(t4, t6, 0x44);
+    const __m512d u6 = _mm512_shuffle_f64x2(t4, t6, 0xEE);
+
+    const __m512d u1 = _mm512_shuffle_f64x2(t1, t3, 0x44);
+    const __m512d u3 = _mm512_shuffle_f64x2(t1, t3, 0xEE);
+    const __m512d u5 = _mm512_shuffle_f64x2(t5, t7, 0x44);
+    const __m512d u7 = _mm512_shuffle_f64x2(t5, t7, 0xEE);
+
+    const __m512d row0 = _mm512_shuffle_f64x2(u0, u4, 0x88);
+    const __m512d row2 = _mm512_shuffle_f64x2(u0, u4, 0xDD);
+    const __m512d row4 = _mm512_shuffle_f64x2(u2, u6, 0x88);
+    const __m512d row6 = _mm512_shuffle_f64x2(u2, u6, 0xDD);
+
+    const __m512d row1 = _mm512_shuffle_f64x2(u1, u5, 0x88);
+    const __m512d row3 = _mm512_shuffle_f64x2(u1, u5, 0xDD);
+    const __m512d row5 = _mm512_shuffle_f64x2(u3, u7, 0x88);
+    const __m512d row7 = _mm512_shuffle_f64x2(u3, u7, 0xDD);
+
+    _mm512_storeu_ps(reinterpret_cast<float*>(out + (mb0 + 0) * Interp + j), _mm512_castpd_ps(row0));
+    _mm512_storeu_ps(reinterpret_cast<float*>(out + (mb0 + 1) * Interp + j), _mm512_castpd_ps(row1));
+    _mm512_storeu_ps(reinterpret_cast<float*>(out + (mb0 + 2) * Interp + j), _mm512_castpd_ps(row2));
+    _mm512_storeu_ps(reinterpret_cast<float*>(out + (mb0 + 3) * Interp + j), _mm512_castpd_ps(row3));
+    _mm512_storeu_ps(reinterpret_cast<float*>(out + (mb0 + 4) * Interp + j), _mm512_castpd_ps(row4));
+    _mm512_storeu_ps(reinterpret_cast<float*>(out + (mb0 + 5) * Interp + j), _mm512_castpd_ps(row5));
+    _mm512_storeu_ps(reinterpret_cast<float*>(out + (mb0 + 6) * Interp + j), _mm512_castpd_ps(row6));
+    _mm512_storeu_ps(reinterpret_cast<float*>(out + (mb0 + 7) * Interp + j), _mm512_castpd_ps(row7));
+}
+
 template <size_t H_VAL>
 UWB_TRANSPOSED_AVX512_TARGET inline void
 transposed_process_window_hp(const float* taps, size_t h_rt, size_t Interp,
@@ -148,11 +200,6 @@ transposed_process_window_hp(const float* taps, size_t h_rt, size_t Interp,
 {
     const size_t H = (H_VAL != 0) ? H_VAL : h_rt;
     const size_t slots = Decim + H - 1;
-    const __m512i idx = _mm512_setr_epi64(
-        0 * static_cast<long long>(Interp), 1 * static_cast<long long>(Interp),
-        2 * static_cast<long long>(Interp), 3 * static_cast<long long>(Interp),
-        4 * static_cast<long long>(Interp), 5 * static_cast<long long>(Interp),
-        6 * static_cast<long long>(Interp), 7 * static_cast<long long>(Interp));
 
     for (size_t mb0 = 0; mb0 + 8 <= n_mb_full; mb0 += 8) {
         const int64_t base0 = static_cast<int64_t>(mb0) * Decim -
@@ -191,19 +238,16 @@ transposed_process_window_hp(const float* taps, size_t h_rt, size_t Interp,
             }
             __m512 out8[8];
             phase_accum_8x<H_VAL>(tp8, x8, H, out8);
-            for (size_t p = 0; p < 8; ++p) {
-                _mm512_i64scatter_pd(
-                    reinterpret_cast<double*>(out + mb0 * Interp + j + p), idx,
-                    _mm512_castps_pd(out8[p]), 8);
-            }
+            transpose_8x8_store(out8, out, mb0, Interp, j);
         }
         for (; j < Interp; ++j) {
             const size_t arm = (j * Decim) % Interp;
             const size_t w = (j * Decim) / Interp;
             const __m512 acc = phase_accum(taps + arm * H, tile + w * 16, H);
-            _mm512_i64scatter_pd(
-                reinterpret_cast<double*>(out + mb0 * Interp + j), idx,
-                _mm512_castps_pd(acc), 8);
+            alignas(64) gr_complex tmp[8];
+            _mm512_store_ps(reinterpret_cast<float*>(tmp), acc);
+            for (size_t m = 0; m < 8; ++m)
+                out[(mb0 + m) * Interp + j] = tmp[m];
         }
     }
 }
