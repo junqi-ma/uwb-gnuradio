@@ -1927,6 +1927,9 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
                 resamp_65_48->set_num_workers(1);
                 // Phase-C experiment switch (default "none" => no call).
                 apply_resampler_experiment(*resamp_65_48, exp_fixed_phase);
+                if (exp_fixed_phase) {
+                    resamp_65_48->set_kernel("transposed");
+                }
                 experiment_applied_to_core = true;
                 work_capacity = core::RationalResampler65_48Core::expected_output_length(
                     native_capacity, taps.size()) + 256;
@@ -1939,6 +1942,9 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
                 resamp_65_32->set_num_workers(1);
                 // Phase-C experiment switch (default "none" => no call).
                 apply_resampler_experiment(*resamp_65_32, exp_fixed_phase);
+                if (exp_fixed_phase) {
+                    resamp_65_32->set_kernel("transposed");
+                }
                 experiment_applied_to_core = true;
                 work_capacity = core::RationalResampler65_32Core::expected_output_length(
                     native_capacity, taps.size()) + 256;

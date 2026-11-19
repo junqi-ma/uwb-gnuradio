@@ -139,7 +139,7 @@ struct Options {
     // pulse-matched sensitivity at sparse-kernel throughput. Opt-in: it is not
     // yet cross-checked against MATLAB detectRepeatedPreamble.m, and the
     // shipped profile default stays on the dense path.
-    std::string timing_shaped = "off";
+    std::string timing_shaped = "auto";
     size_t post_guard = 8192;
     // Pre-guard used while LOCKED.  The wide 36864 guard exists for the blind
     // autocorrelation seed (Acquisition::scan needs a 36864-sample platform
@@ -584,7 +584,9 @@ struct Workers {
             acq.rx_stop_after_sfd = (o.stop_after_sfd == "on");
             acq.rx_stop_after_cir = (o.stop_after_cir == "on");
             acq.rx_timing_sparse = (o.timing_sparse == "on");
-            acq.rx_timing_shaped_sparse = (o.timing_shaped == "on");
+            acq.rx_timing_shaped_sparse =
+                (o.timing_shaped == "on") ||
+                (o.timing_shaped == "auto" && o.timing_sparse == "off");
             acq.rx_sync_par_three_samples = o.par_only == "window3";
             acq.rx_sfd_par_three_samples = acq.rx_sync_par_three_samples ||
                                            o.par_only == "window3-sfd";
@@ -1344,8 +1346,8 @@ try {
         throw std::runtime_error("--stop-after-cir must be on or off");
     if (o.timing_sparse!="on" && o.timing_sparse!="off")
         throw std::runtime_error("--timing-sparse must be on or off");
-    if (o.timing_shaped!="on" && o.timing_shaped!="off")
-        throw std::runtime_error("--timing-shaped must be on or off");
+    if (o.timing_shaped!="auto" && o.timing_shaped!="on" && o.timing_shaped!="off")
+        throw std::runtime_error("--timing-shaped must be auto, on or off");
     // The shaped path reproduces the DENSE metric scale and lag convention; it
     // is not a drop-in for the sparse peak-sample convention, so combining the
     // two would silently mix conventions. Make the intended mode explicit.

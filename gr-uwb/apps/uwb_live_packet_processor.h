@@ -67,7 +67,7 @@ public:
                     size_t max_native_samples)
         : rs_(taps), template_(tmpl),
           work_(rs_.expected_output_length(max_native_samples)) {
-        rs_.set_fixed_phase_schedule(true);
+        rs_.set_kernel("transposed");
         scratch_.reserve(work_.size());
     }
 
