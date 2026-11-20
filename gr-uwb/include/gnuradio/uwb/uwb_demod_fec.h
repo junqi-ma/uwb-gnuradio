@@ -123,8 +123,10 @@ inline void cl3_trellis_tables(int o0[4][2], int o1[4][2], int nxt[4][2])
     }
 }
 
-// CL-3 Viterbi for poly2trellis(3,[2 5]) in truncated mode. The hard
-// and soft paths share path selection and traceback; metric types differ.
+// CL-3 Viterbi reference implementation (truncated mode): the double
+// `for (st) for (u)` ACS loop kept as the bit-exact reference for the
+// unrolled kernels below (and for cl3_trellis_tables users).  The hard and
+// soft paths share path selection and traceback; metric types differ.
 template <typename Metric, typename ExtendPath>
 inline void vitdec_cl3_truncated(size_t N, Metric inf,
                                 ExtendPath extend, std::vector<int8_t>& out)
@@ -162,12 +164,114 @@ inline void vitdec_cl3_truncated(size_t N, Metric inf,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Unrolled 4-state CL-3 ACS (poly2trellis(3,[2 5])).
+//
+// next = (u << 1) | (st >> 1), g0 = st >> 1, g1 = u ^ (st & 1).  Each target
+// state therefore has exactly two predecessor edges, and both share the same
+// u (so the old `for (st) for (u)` nested loop visited them in ascending st
+// order):
+//
+//   nst = 0: (st=0,u=0) code 0, (st=1,u=0) code 1
+//   nst = 1: (st=2,u=0) code 2, (st=3,u=0) code 3
+//   nst = 2: (st=0,u=1) code 4, (st=1,u=1) code 5
+//   nst = 3: (st=2,u=1) code 6, (st=3,u=1) code 7
+//
+// `code = (u << 2) | st` is exactly the survivor byte the reference loop
+// stored.  The eight edges below are emitted as explicit statements with the
+// same comparison (`strictly less`, i.e. the smaller (st, u) keeps an exact
+// tie) and the same per-target order as the reference, so the decoded bits are
+// bit-identical.  Targets that receive no improving edge keep the
+// zero-initialised back pointer, exactly like the reference.
+// ---------------------------------------------------------------------------
+inline constexpr size_t kCl3StackTraceMax = 2048;
+
+inline void cl3_acs_update(int m, int nst, int8_t code, int8_t* bslot, int* ns)
+{
+    if (m < ns[nst]) {
+        ns[nst] = m;
+        *bslot = code;
+    }
+}
+
+inline void cl3_acs_update_soft(float m, int nst, int8_t code, int8_t* bslot,
+                                float* ns)
+{
+    if (m < ns[nst]) {
+        ns[nst] = m;
+        *bslot = code;
+    }
+}
+
+// Tracing-ACS update: keeps the runner-up metric (`ns2`) and the competing
+// edge (`nalt`) alongside the survivor, matching the reference loop exactly.
+inline void cl3_trace_update(float m, int nst, int8_t code, int8_t* bslot,
+                             float* ns, float* ns2, uint8_t* nalt)
+{
+    if (m < ns[nst]) {
+        ns2[nst] = ns[nst];
+        nalt[nst] = static_cast<uint8_t>(*bslot);
+        ns[nst] = m;
+        *bslot = code;
+    } else if (m < ns2[nst]) {
+        ns2[nst] = m;
+        nalt[nst] = static_cast<uint8_t>(code);
+    }
+}
+
+// Traceback buffer: 8 KiB of stack covers every PSDU length used in practice
+// (N <= 2048); longer inputs fall back to a heap vector.  Both are
+// zero-filled, matching std::vector's value initialisation.
+struct Cl3BackBuffer {
+    int8_t stack[kCl3StackTraceMax * 4];
+    std::vector<int8_t> heap;
+    int8_t* get(size_t N)
+    {
+        const size_t n = N * 4;
+        if (n > sizeof(stack)) {
+            heap.assign(n, int8_t{0});
+            return heap.data();
+        }
+        std::fill_n(stack, n, int8_t{0});
+        return stack;
+    }
+};
+
 inline void vitdec_cl3(const int8_t* rx, size_t N, std::vector<int8_t>& out)
 {
-    vitdec_cl3_truncated(N, 1000000, [&](size_t t, int path, int g0, int g1) {
-        const int distance = (rx[2 * t] ^ g0) + (rx[2 * t + 1] ^ g1);
-        return path + distance;
-    }, out);
+    const int INF = 1000000;
+    int surf[4] = { 0, INF, INF, INF };
+    Cl3BackBuffer storage;
+    int8_t* back = storage.get(N);
+    for (size_t t = 0; t < N; ++t) {
+        const int r0 = rx[2 * t];
+        const int r1 = rx[2 * t + 1];
+        int8_t* bt = back + t * 4;
+        int ns[4] = { INF, INF, INF, INF };
+        cl3_acs_update(surf[0] + ((r0 ^ 0) + (r1 ^ 0)), 0, 0, bt + 0, ns);
+        cl3_acs_update(surf[1] + ((r0 ^ 0) + (r1 ^ 1)), 0, 1, bt + 0, ns);
+        cl3_acs_update(surf[2] + ((r0 ^ 1) + (r1 ^ 0)), 1, 2, bt + 1, ns);
+        cl3_acs_update(surf[3] + ((r0 ^ 1) + (r1 ^ 1)), 1, 3, bt + 1, ns);
+        cl3_acs_update(surf[0] + ((r0 ^ 0) + (r1 ^ 1)), 2, 4, bt + 2, ns);
+        cl3_acs_update(surf[1] + ((r0 ^ 0) + (r1 ^ 0)), 2, 5, bt + 2, ns);
+        cl3_acs_update(surf[2] + ((r0 ^ 1) + (r1 ^ 1)), 3, 6, bt + 3, ns);
+        cl3_acs_update(surf[3] + ((r0 ^ 1) + (r1 ^ 0)), 3, 7, bt + 3, ns);
+        surf[0] = ns[0];
+        surf[1] = ns[1];
+        surf[2] = ns[2];
+        surf[3] = ns[3];
+    }
+    int best = 0;
+    for (int i = 1; i < 4; ++i)
+        if (surf[i] < surf[best])
+            best = i;
+    out.resize(N);
+    int cur = best;
+    for (size_t t = N; t-- > 0;) {
+        const int v = back[t * 4 + cur];
+        out[t] = static_cast<int8_t>(v >> 2);
+        cur = v & 3;
+    }
 }
 
 // SECDED encode: 13 systematic bits -> 19-bit codeword (13 data + 6 parity).
@@ -261,9 +365,39 @@ inline float cl3_soft_path_metric(float path, int o0, int o1,
 inline void vitdec_cl3_soft(const float* llr0, const float* llr1, size_t N,
                             std::vector<int8_t>& out)
 {
-    vitdec_cl3_truncated(N, 1e30f, [&](size_t t, float path, int g0, int g1) {
-        return cl3_soft_path_metric(path, g0, g1, llr0[t], llr1[t]);
-    }, out);
+    const float INF = 1e30f;
+    float surf[4] = { 0.0f, INF, INF, INF };
+    Cl3BackBuffer storage;
+    int8_t* back = storage.get(N);
+    for (size_t t = 0; t < N; ++t) {
+        const float l0 = llr0[t];
+        const float l1 = llr1[t];
+        int8_t* bt = back + t * 4;
+        float ns[4] = { INF, INF, INF, INF };
+        // Eight explicit edges; per target state the two predecessors keep the
+        // reference's ascending `st` order (see cl3_acs_update above).
+        cl3_acs_update_soft(cl3_soft_path_metric(surf[0], 0, 0, l0, l1), 0, 0, bt + 0, ns);
+        cl3_acs_update_soft(cl3_soft_path_metric(surf[1], 0, 1, l0, l1), 0, 1, bt + 0, ns);
+        cl3_acs_update_soft(cl3_soft_path_metric(surf[2], 1, 0, l0, l1), 1, 2, bt + 1, ns);
+        cl3_acs_update_soft(cl3_soft_path_metric(surf[3], 1, 1, l0, l1), 1, 3, bt + 1, ns);
+        cl3_acs_update_soft(cl3_soft_path_metric(surf[0], 0, 1, l0, l1), 2, 4, bt + 2, ns);
+        cl3_acs_update_soft(cl3_soft_path_metric(surf[1], 0, 0, l0, l1), 2, 5, bt + 2, ns);
+        cl3_acs_update_soft(cl3_soft_path_metric(surf[2], 1, 1, l0, l1), 3, 6, bt + 3, ns);
+        cl3_acs_update_soft(cl3_soft_path_metric(surf[3], 1, 0, l0, l1), 3, 7, bt + 3, ns);
+        for (int i = 0; i < 4; ++i)
+            surf[i] = ns[i];
+    }
+    int best = 0;
+    for (int i = 1; i < 4; ++i)
+        if (surf[i] < surf[best])
+            best = i;
+    out.resize(N);
+    int cur = best;
+    for (size_t t = N; t-- > 0;) {
+        const int v = back[t * 4 + cur];
+        out[t] = static_cast<int8_t>(v >> 2);
+        cur = v & 3;
+    }
 }
 
 // IEEE 802.15.4 CRC-16 (reflected polynomial 0x8408, init 0).  FCS algorithm
@@ -287,6 +421,10 @@ using gr::uwb::codec::rs_gf_pow;
 
 using gr::uwb::codec::rs_gf_inv;
 
+// Precomputed alpha^i / alpha^{-j} kernel lookups (GF(2^6), alpha = 2).
+using gr::uwb::codec::rs_gf_alpha_inv_pow;
+using gr::uwb::codec::rs_gf_alpha_pow;
+
 // Pack 378 MSB-first bits -> 63 GF(2^6) symbols.
 using gr::uwb::codec::rs_bits_to_syms;
 
@@ -294,16 +432,16 @@ using gr::uwb::codec::rs_bits_to_syms;
 using gr::uwb::codec::rs_syms_to_bits;
 
 // Syndromes S_i = r(alpha^i), i=1..8.  Low-first: r(x) = sum_j r[j] x^j.
+// Horner: s = (((r62 * ai) ^ r61) * ai ^ ...) ^ r0, one table multiply per
+// coefficient (the old loop maintained alpha^j separately with a second
+// multiply per coefficient).
 inline void rs_syndromes(const int* r63, int* S8)
 {
     for (int i = 1; i <= 8; ++i) {
-        const int ai = rs_gf_pow(2, i);
+        const int ai = rs_gf_alpha_pow(i);
         int s = 0;
-        int ap = 1;
-        for (int j = 0; j < 63; ++j) {
-            s ^= rs_gf_mul(r63[j], ap);
-            ap = rs_gf_mul(ap, ai);
-        }
+        for (int j = 62; j >= 0; --j)
+            s = rs_gf_mul(s, ai) ^ (r63[j] & 0x3f);
         S8[i - 1] = s;
     }
 }
@@ -354,17 +492,16 @@ inline int rs_berlekamp_massey(const int* S8, int* Lambda /* len >= 9 */)
 
 // Chien search: roots of Lambda at alpha^{-j} => error at position j.
 // Returns number of roots (may exceed L if uncorrectable).
+// alpha^{-j} comes from the precomputed table and Lambda(alpha^{-j}) is
+// evaluated by Horner from the highest coefficient.
 inline int rs_chien_search(const int* Lambda, int L, int* err_pos /* <=4 */)
 {
     int nerr = 0;
     for (int j = 0; j < 63; ++j) {
-        const int xinv = rs_gf_pow(2, (63 - j) % 63); // alpha^{-j}
-        int v = 0;
-        int xp = 1;
-        for (int i = 0; i <= L; ++i) {
-            v ^= rs_gf_mul(Lambda[i], xp);
-            xp = rs_gf_mul(xp, xinv);
-        }
+        const int xinv = rs_gf_alpha_inv_pow(j); // alpha^{-j}
+        int v = Lambda[L] & 0x3f;
+        for (int i = L - 1; i >= 0; --i)
+            v = rs_gf_mul(v, xinv) ^ (Lambda[i] & 0x3f);
         if (v == 0) {
             if (nerr < 4)
                 err_pos[nerr] = j;
@@ -387,20 +524,18 @@ inline void rs_forney(const int* S8, const int* Lambda, int L,
     }
     for (int k = 0; k < nerr; ++k) {
         const int j = err_pos[k];
-        const int Xinv = rs_gf_pow(2, (63 - j) % 63);
-        int num = 0;
-        int xp = 1;
-        for (int i = 0; i < 8; ++i) {
-            num ^= rs_gf_mul(Omega[i], xp);
-            xp = rs_gf_mul(xp, Xinv);
-        }
+        const int Xinv = rs_gf_alpha_inv_pow(j);
+        // num = Omega(X^{-1}) by Horner over Omega[0..7].
+        int num = Omega[7] & 0x3f;
+        for (int i = 6; i >= 0; --i)
+            num = rs_gf_mul(num, Xinv) ^ (Omega[i] & 0x3f);
         // Lambda' in char 2: only odd powers, Lambda_i * x^{i-1}
+        // = sum_k Lambda_{1+2k} (X^{-2})^k, evaluated by Horner in X^{-2}.
+        const int x2 = rs_gf_mul(Xinv, Xinv);
+        const int last_odd = (L & 1) ? L : L - 1;
         int den = 0;
-        xp = 1; // Xinv^0 for i=1
-        for (int i = 1; i <= L; i += 2) {
-            den ^= rs_gf_mul(Lambda[i], xp);
-            xp = rs_gf_mul(xp, rs_gf_mul(Xinv, Xinv));
-        }
+        for (int i = last_odd; i >= 1; i -= 2)
+            den = rs_gf_mul(den, x2) ^ (Lambda[i] & 0x3f);
         err_val[k] = den ? rs_gf_mul(num, rs_gf_inv(den)) : 0;
     }
 }
@@ -504,9 +639,18 @@ inline void pack_psdu_bytes(const std::vector<int8_t>& bits, std::vector<uint8_t
 {
     bytes.resize(bits.size() / 8);
     for (size_t i = 0; i < bytes.size(); ++i) {
-        uint8_t byte = 0;
-        for (int bit = 0; bit < 8; ++bit)
-            byte |= static_cast<uint8_t>(bits[8 * i + bit]) << bit;
+        const int8_t* b = bits.data() + 8 * i;
+        // LSB-first packing: byte bit k = bits[8*i + k] (unchanged semantics,
+        // including the uint8_t truncation of each shifted term).
+        const uint8_t byte =
+            static_cast<uint8_t>(static_cast<uint8_t>(b[0]) |
+                                 (static_cast<uint8_t>(b[1]) << 1) |
+                                 (static_cast<uint8_t>(b[2]) << 2) |
+                                 (static_cast<uint8_t>(b[3]) << 3) |
+                                 (static_cast<uint8_t>(b[4]) << 4) |
+                                 (static_cast<uint8_t>(b[5]) << 5) |
+                                 (static_cast<uint8_t>(b[6]) << 6) |
+                                 (static_cast<uint8_t>(b[7]) << 7));
         bytes[i] = byte;
     }
 }
@@ -612,34 +756,30 @@ inline void vitdec_cl3_soft_trace(const float* llr0,
                                   size_t N,
                                   Cl3TrellisTrace& tr)
 {
-    int o0[4][2], o1[4][2], nxt[4][2];
-    cl3_trellis_tables(o0, o1, nxt);
     const float INF = 1e30f;
     float surf[4] = { 0.0f, INF, INF, INF };
     std::vector<int8_t> back(N * 4);
     std::vector<float> diff(N * 4, INF);
     std::vector<uint8_t> alt(N * 4, 0);
     for (size_t t = 0; t < N; ++t) {
+        const float l0 = llr0[t];
+        const float l1 = llr1[t];
+        int8_t* bt = back.data() + t * 4;
         float ns[4] = { INF, INF, INF, INF };
         float ns2[4] = { INF, INF, INF, INF };
         uint8_t nalt[4] = { 0, 0, 0, 0 };
-        for (int st = 0; st < 4; ++st) {
-            for (int u = 0; u < 2; ++u) {
-                const float m = cl3_soft_path_metric(
-                    surf[st], o0[st][u], o1[st][u], llr0[t], llr1[t]);
-                const int nst = nxt[st][u];
-                const uint8_t code = static_cast<uint8_t>((u << 2) | st);
-                if (m < ns[nst]) {
-                    ns2[nst] = ns[nst];
-                    nalt[nst] = static_cast<uint8_t>(back[t * 4 + nst]);
-                    ns[nst] = m;
-                    back[t * 4 + nst] = static_cast<int8_t>(code);
-                } else if (m < ns2[nst]) {
-                    ns2[nst] = m;
-                    nalt[nst] = code;
-                }
-            }
-        }
+        // Same eight edges in the same (st, u) global order as the reference
+        // nested loop; per target state the two predecessors stay in
+        // ascending st order, so the runner-up (`ns2`/`nalt`) selection and
+        // every strict-comparison tie break are unchanged.
+        cl3_trace_update(cl3_soft_path_metric(surf[0], 0, 0, l0, l1), 0, 0, bt + 0, ns, ns2, nalt);
+        cl3_trace_update(cl3_soft_path_metric(surf[0], 0, 1, l0, l1), 2, 4, bt + 2, ns, ns2, nalt);
+        cl3_trace_update(cl3_soft_path_metric(surf[1], 0, 1, l0, l1), 0, 1, bt + 0, ns, ns2, nalt);
+        cl3_trace_update(cl3_soft_path_metric(surf[1], 0, 0, l0, l1), 2, 5, bt + 2, ns, ns2, nalt);
+        cl3_trace_update(cl3_soft_path_metric(surf[2], 1, 0, l0, l1), 1, 2, bt + 1, ns, ns2, nalt);
+        cl3_trace_update(cl3_soft_path_metric(surf[2], 1, 1, l0, l1), 3, 6, bt + 3, ns, ns2, nalt);
+        cl3_trace_update(cl3_soft_path_metric(surf[3], 1, 1, l0, l1), 1, 3, bt + 1, ns, ns2, nalt);
+        cl3_trace_update(cl3_soft_path_metric(surf[3], 1, 0, l0, l1), 3, 7, bt + 3, ns, ns2, nalt);
         for (int i = 0; i < 4; ++i) {
             surf[i] = ns[i];
             diff[t * 4 + i] = ns2[i] - ns[i];
