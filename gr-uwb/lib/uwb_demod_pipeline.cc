@@ -109,6 +109,16 @@ bool run_initial_cfo_and_bootstrap_sfd(
         res.status = DemodStatus::CfoFailed;
         return false;
     }
+    if (profile.rx_sfo_from_cfo &&
+        profile.carrier_freq_hz > 0.0 &&
+        std::isfinite(profile.carrier_freq_hz) &&
+        std::isfinite(res.cfo.cfo_hz)) {
+        const double nominal_period = static_cast<double>(kQm35SamplesPerSymbol);
+        const double denom = 1.0 + res.cfo.cfo_hz / profile.carrier_freq_hz;
+        if (denom > 0.0 && std::isfinite(denom)) {
+            res.timing.measured_period = nominal_period / denom;
+        }
+    }
     scratch.cached_seq.update(profile.code_index, profile.sfd_mode);
     const std::vector<int8_t>& sfd_seq = scratch.cached_seq.sfd_seq;
     sync_state.sfd_len = sfd_seq.size() * kQm35SamplesPerSymbol;
@@ -1322,9 +1332,17 @@ DemodResult demodulate_one(const std::complex<float>* rx,
         rebase();
         return res;
     }
-    // Integer chip-grid admission: use the period fit that Stage 1 already
-    // produced. The decision must be made here
-    // and not later, because it controls three coupled things:
+    SyncBootstrapState sync_state;
+    if (!run_initial_cfo_and_bootstrap_sfd(
+            rx, n, profile, template_wf, clock, scratch, res, sync_state)) {
+        rebase();
+        return res;
+    }
+
+    // Integer chip-grid admission: use the period estimate (derived from Stage-2
+    // CFO when rx_sfo_from_cfo is enabled, or Stage-1 timing OLS otherwise).
+    // The decision must be made here and not later, because it controls three
+    // coupled things:
     //   * the second CFO rotation range (a narrowed range is only valid when
     //     the on-demand prefix is actually used),
     //   * whether the on-demand prefix is generated at all,
@@ -1339,13 +1357,6 @@ DemodResult demodulate_one(const std::complex<float>* rx,
     const auto& eff = execution.effective_profile;
     if (!integer_grid_ok)
         ++res.stage_grid_rejects;
-
-    SyncBootstrapState sync_state;
-    if (!run_initial_cfo_and_bootstrap_sfd(
-            rx, n, profile, template_wf, clock, scratch, res, sync_state)) {
-        rebase();
-        return res;
-    }
 
     if (!anchor_and_verify_final_sfd(
             rx, n, profile, template_wf, integer_grid_ok,

@@ -1,0 +1,4212 @@
+{
+  "schema": "uwb-autocorr-suspend-abba/1",
+  "status": "ok",
+  "timestamp_utc": "2026-11-20T08:54:27+00:00",
+  "tool": {
+    "path": "/home/oi/Desktop/uwb-gnuradio/tools/rx/autocorr_suspend_ab.py",
+    "sha256": "92d4a513867b2a32e37e10d4ebda0c446c6b147eb141237ce8f590d65ac2ff78",
+    "python": "3.10.12"
+  },
+  "git": {
+    "commit": "5ce858aac9ebf736dd59bba738dcb62e6530a874",
+    "branch": "feature/sic-research",
+    "status_porcelain": "M docs/README.md\n M \"docs/\\345\\216\\237\\347\\224\\237UHD\\344\\270\\216C++\\346\\236\\204\\345\\273\\272\\344\\275\\277\\347\\224\\250\\350\\257\\264\\346\\230\\216.md\"\n M gr-uwb/apps/uwb_dw3000_live.cc\n M gr-uwb/apps/uwb_uhd_sc16_capture.cc\n M gr-uwb/include/gnuradio/uwb/uwb_phy_profile.h\n M gr-uwb/lib/CMakeLists.txt\n M gr-uwb/lib/qa_uwb_demod_core.cc\n M gr-uwb/lib/uwb_demod_pipeline.cc\n M tools/rx/qa_live_dw3000_console.py\n M \"\\345\\274\\200\\345\\217\\221\\347\\212\\266\\346\\200\\201.md\"\n?? \"docs/performance/DW3000_1ms\\345\\256\\236\\346\\235\\277\\351\\207\\207\\351\\233\\206_Payload\\345\\244\\261\\350\\264\\245\\345\\210\\206\\346\\236\\220_2026-11-20.md\"\n?? \"docs/performance/Locked\\346\\250\\241\\345\\274\\217\\345\\200\\231\\351\\200\\211\\347\\252\\227\\345\\217\\243\\344\\270\\216\\347\\233\\256\\346\\240\\207PRR\\345\\210\\206\\346\\236\\220_2026-11-20.md\"\n?? \"docs/performance/OpenCode\\346\\217\\220\\347\\244\\272\\350\\257\\215_\\346\\227\\240\\345\\271\\262\\346\\211\\260\\351\\224\\201\\345\\256\\232\\345\\220\\216\\346\\232\\202\\345\\201\\234\\350\\207\\252\\347\\233\\270\\345\\205\\263_2026-11-20.md\"\n?? docs/performance/data_autocorr_suspend_20261120/\n?? docs/performance/data_dw3000_1ms_payload_20261120/\n?? docs/performance/data_locked_candidates_20261120/\n?? \"docs/performance/\\345\\274\\200\\345\\217\\221\\350\\247\\204\\345\\210\\222_\\346\\227\\240\\345\\271\\262\\346\\211\\260\\351\\224\\201\\345\\256\\232\\345\\220\\216\\346\\232\\202\\345\\201\\234\\350\\207\\252\\347\\233\\270\\345\\205\\263_2026-11-20.md\"\n?? \"docs/performance/\\351\\224\\201\\345\\256\\232\\345\\220\\216\\346\\232\\202\\345\\201\\234\\350\\207\\252\\347\\233\\270\\345\\205\\263_\\345\\256\\236\\347\\216\\260\\344\\270\\216\\345\\233\\236\\346\\224\\276\\351\\252\\214\\350\\257\\201_2026-11-20.md\"\n?? \"docs/\\345\\274\\200\\345\\217\\221\\345\\273\\272\\350\\256\\256_\\347\\273\\237\\344\\270\\200\\346\\227\\245\\345\\277\\227\\344\\270\\216\\350\\260\\203\\350\\257\\225\\346\\216\\245\\345\\217\\243_2026-11-20.md\"\n?? gr-uwb/include/gnuradio/uwb/uwb_autocorr_gate.h\n?? gr-uwb/lib/qa_uwb_autocorr_gate.cc\n?? tools/rx/autocorr_suspend_ab.py\n?? tools/rx/make_lock_loss_fixture.py"
+  },
+  "binary": {
+    "path": "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-native-only/apps/uwb_dw3000_live",
+    "size": 1487296,
+    "mtime": "2026-11-20T08:54:08.897+00:00",
+    "mtime_epoch": 1795164848.8977666,
+    "sha256": "ea3bd39b7e030e0257ca488a57b9fc75762212b43b2a837e30390d14d01908f8"
+  },
+  "replay": {
+    "path": "/tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16",
+    "size": 2949120000,
+    "mtime": "2026-11-20T06:45:18.735+00:00",
+    "mtime_epoch": 1795157118.735083,
+    "sha256": "66b2a0d51669305d828548c8e3fb32d9e475c5a22fa7c2f2fe8220f519b4bfb4"
+  },
+  "host": {
+    "model": "AMD Ryzen 7 9700X 8-Core Processor",
+    "logical_cpus": 8,
+    "nproc": 8,
+    "affinity_cpus": 5,
+    "isa": {
+      "avx": true,
+      "avx2": true,
+      "fma": true,
+      "avx512f": true,
+      "avx512bw": true,
+      "avx512vl": true,
+      "avx512dq": true
+    },
+    "isa_flags_subset": [
+      "avx",
+      "avx2",
+      "fma",
+      "avx512f",
+      "avx512bw",
+      "avx512vl",
+      "avx512dq"
+    ],
+    "kernel": "6.8.0-149-generic",
+    "os": "Linux-6.8.0-149-generic-x86_64-with-glibc2.35",
+    "machine": "x86_64"
+  },
+  "build": {
+    "build_dir": "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-native-only",
+    "cache_file": "/home/oi/Desktop/uwb-gnuradio/gr-uwb/build-native-only/CMakeCache.txt",
+    "cmake_entries": {
+      "CMAKE_BUILD_TYPE": "Release",
+      "CMAKE_CXX_COMPILER": "/home/oi/.local/bin/c++",
+      "CMAKE_CXX_FLAGS": "",
+      "CMAKE_CXX_FLAGS_RELEASE": "-O3 -DNDEBUG",
+      "ENABLE_UHD_BACKEND": "ON"
+    },
+    "reproduction": "cmake -S gr-uwb -B gr-uwb/build-native-only -DCMAKE_BUILD_TYPE=Release -DENABLE_UHD_BACKEND=ON && cmake --build gr-uwb/build-native-only -j4; every run used env -u LD_LIBRARY_PATH"
+  },
+  "run_config": {
+    "rounds_pairs": 4,
+    "rounds_requested": 4,
+    "abba_blocks": 2,
+    "order": "A/B/B/A (scan/suspend)",
+    "workers": 2,
+    "queue": 24,
+    "seconds": 0.0,
+    "timeout_s": 1800.0,
+    "base_args": [
+      "--sync",
+      "locked",
+      "--interference",
+      "off",
+      "--fused",
+      "on",
+      "--cir",
+      "full",
+      "--taps",
+      "eq16",
+      "--print",
+      "summary",
+      "--summary",
+      "100000"
+    ],
+    "extra_args": [
+      "--period-ms",
+      "1"
+    ],
+    "scan_argv": [
+      "gr-uwb/build-native-only/apps/uwb_dw3000_live",
+      "--period-ms",
+      "1",
+      "--sync",
+      "locked",
+      "--interference",
+      "off",
+      "--fused",
+      "on",
+      "--cir",
+      "full",
+      "--taps",
+      "eq16",
+      "--print",
+      "summary",
+      "--summary",
+      "100000",
+      "--workers",
+      "2",
+      "--queue",
+      "24",
+      "--replay",
+      "/tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16",
+      "--autocorr-when-locked",
+      "scan"
+    ],
+    "suspend_argv": [
+      "gr-uwb/build-native-only/apps/uwb_dw3000_live",
+      "--period-ms",
+      "1",
+      "--sync",
+      "locked",
+      "--interference",
+      "off",
+      "--fused",
+      "on",
+      "--cir",
+      "full",
+      "--taps",
+      "eq16",
+      "--print",
+      "summary",
+      "--summary",
+      "100000",
+      "--workers",
+      "2",
+      "--queue",
+      "24",
+      "--replay",
+      "/tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16",
+      "--autocorr-when-locked",
+      "suspend"
+    ],
+    "env_note": "child env = os.environ without LD_LIBRARY_PATH"
+  },
+  "runs": [
+    {
+      "index": 1,
+      "arm": "scan",
+      "argv": [
+        "gr-uwb/build-native-only/apps/uwb_dw3000_live",
+        "--period-ms",
+        "1",
+        "--sync",
+        "locked",
+        "--interference",
+        "off",
+        "--fused",
+        "on",
+        "--cir",
+        "full",
+        "--taps",
+        "eq16",
+        "--print",
+        "summary",
+        "--summary",
+        "100000",
+        "--workers",
+        "2",
+        "--queue",
+        "24",
+        "--replay",
+        "/tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16",
+        "--autocorr-when-locked",
+        "scan"
+      ],
+      "shell": "env -u LD_LIBRARY_PATH gr-uwb/build-native-only/apps/uwb_dw3000_live --period-ms 1 --sync locked --interference off --fused on --cir full --taps eq16 --print summary --summary 100000 --workers 2 --queue 24 --replay /tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16 --autocorr-when-locked scan",
+      "start_wall": "2026-11-20T08:54:28.842+00:00",
+      "end_wall": "2026-11-20T08:54:29.867+00:00",
+      "start_epoch": 1795164868.8429267,
+      "end_epoch": 1795164869.8671706,
+      "wall_s": 1.0242424390162341,
+      "returncode": 0,
+      "timed_out": false,
+      "log": "/home/oi/Desktop/uwb-gnuradio/docs/performance/data_autocorr_suspend_20261120/abba_logs/run_01_scan.log",
+      "stdout_bytes": 2841,
+      "stderr_bytes": 0,
+      "stderr_tail": "",
+      "pair": 1,
+      "parsed": {
+        "start": {
+          "mode": "continuous",
+          "sync": "locked",
+          "par_only": "off",
+          "channel": 3,
+          "antenna": "RX1",
+          "cir": "full",
+          "workers": 2,
+          "summary": 100000,
+          "period_ms": 1.0,
+          "taps": "eq16",
+          "taps_n": 1039,
+          "print": "summary",
+          "pre_guard": 36864,
+          "locked_pre_guard": 8192,
+          "capture": 329161,
+          "post_guard": 8192,
+          "window_capacity": 374217,
+          "locked_window_capacity": 345545,
+          "interference": "off",
+          "fused": "on",
+          "ondemand": "on",
+          "acq_span": 192000,
+          "acq_step": 64,
+          "acq_persist": 12000,
+          "acq_low": 0.00015,
+          "acq_peak": 0.0003,
+          "lock_fcs": "on",
+          "stop_after_sfd": "off",
+          "autocorr_when_locked": "scan"
+        },
+        "lock_stats": {
+          "final_state": "locked",
+          "expected_slots": 993,
+          "submitted": 993,
+          "dropped_queue": 0,
+          "expired": 0,
+          "not_detected": 0,
+          "decode_failed": 0,
+          "fcs_ok": 997,
+          "fcs_failed": 2,
+          "observations": 999,
+          "stale": 0,
+          "duplicate": 0,
+          "identity_rejects": 2,
+          "out_of_grid": 0,
+          "queue_full": 0,
+          "residual_outliers": 0,
+          "lock_entries": 1,
+          "holdover_entries": 0,
+          "reacquire_entries": 0,
+          "discontinuities": 0,
+          "candidates": 0,
+          "cand_target": 0,
+          "cand_interference": 0,
+          "cand_unknown": 0,
+          "period_updates": 996,
+          "pre_guard_updates": 1,
+          "lock_slots": 3,
+          "period_samples": 737279,
+          "period_ppm": -0.833748,
+          "scheduler_target_slots": 993,
+          "scheduler_target_dropped": 0,
+          "scheduler_target_expired": 0,
+          "autocorr_dedup": 0,
+          "autocorr_dedup_confirmed": 0,
+          "autocorr_dedup_ambiguous": 0,
+          "autocorr_unknown": 995,
+          "interference_events": 0,
+          "cand_submit_attempts": 6,
+          "cand_admitted": 6,
+          "cand_dropped_queue": 0,
+          "cand_incomplete": 1,
+          "cand_overrun": 0,
+          "cand_overlapping": 0,
+          "cand_invalid_gap": 0,
+          "autocorr_ignored": 995,
+          "autocorr_suspend_events": 0,
+          "autocorr_resume_events": 0,
+          "autocorr_suspended_samples": 0,
+          "autocorr_resume_backlog_samples": 0
+        },
+        "cost_total": {
+          "frontend_us": 125978.371,
+          "frontend_copy_us": 211.553,
+          "frontend_scan_us": 126019.296,
+          "acq_seeds": 1002,
+          "frontend_samples": 737280000,
+          "estimate_us": 1944.581,
+          "cancel_us": 97250.175,
+          "cancelled_samples": 737280000,
+          "bypassed_samples": 0,
+          "model_updates": 50,
+          "model_rejects": 0,
+          "training_windows": 50,
+          "reader_us": 995327.16
+        },
+        "final": {
+          "completed": 1000,
+          "fcs": "997/1000",
+          "raw_samples": 737280000,
+          "raw_drop_samples": 0,
+          "source_errors": 0,
+          "gaps": 0,
+          "models": 50,
+          "output_omitted": 0,
+          "full_retry": 0,
+          "acq_seeds": 1002,
+          "submit_attempts": 999,
+          "admitted": 999,
+          "dropped_queue": 0,
+          "demod_completed": 999,
+          "fcs_ok": 997
+        },
+        "summary_lines": [
+          {
+            "completed": 1000,
+            "batch": 1000,
+            "batch_fcs": "997/1000",
+            "batch_pct": 99.7,
+            "total_fcs": "997/1000",
+            "total_pct": 99.7,
+            "full_retry": 0,
+            "raw_drop_samples": 0,
+            "source_errors": 0,
+            "gaps": 0,
+            "models": 50,
+            "queued": 0,
+            "queue_peak": 1,
+            "output_omitted": 0,
+            "compute_mean": 550.1,
+            "compute_p95": 620.3,
+            "resample_mean": 307.6,
+            "resample_p95": 354.8,
+            "demod_mean": 242.5,
+            "demod_p95": 269.9,
+            "INCOMPLETE_WINDOW": 1,
+            "SFD_FAILED": 2,
+            "_kind": "SUMMARY_PARTIAL"
+          }
+        ],
+        "summary_failures": {
+          "incomplete_window": 1,
+          "sfd_failed": 2
+        },
+        "lock_events": {
+          "verify": 1,
+          "locked": 1
+        },
+        "line_counts": {
+          "START": 1,
+          "LOCK_STATS": 1,
+          "COST_TOTAL": 1,
+          "FINAL": 1,
+          "SUMMARY": 0,
+          "SUMMARY_PARTIAL": 1,
+          "LOCK": 2
+        }
+      },
+      "metrics": {
+        "fcs_ok": 997,
+        "not_detected": 0,
+        "fcs_failed": 2,
+        "identity_rejects": 2,
+        "lock_entries": 1,
+        "holdover_entries": 0,
+        "reacquire_entries": 0,
+        "expected_slots": 993,
+        "submitted": 993,
+        "dropped_queue": 0,
+        "expired": 0,
+        "candidates": 0,
+        "cand_target": 0,
+        "cand_unknown": 0,
+        "autocorr_ignored": 995,
+        "decode_failed": 0,
+        "out_of_grid": 0,
+        "stale": 0,
+        "duplicate": 0,
+        "discontinuities": 0,
+        "cand_submit_attempts": 6,
+        "cand_admitted": 6,
+        "cand_dropped_queue": 0,
+        "cand_incomplete": 1,
+        "autocorr_suspend_events": 0,
+        "autocorr_resume_events": 0,
+        "autocorr_suspended_samples": 0,
+        "autocorr_resume_backlog_samples": 0,
+        "frontend_scan_us": 126019.296,
+        "frontend_us": 125978.371,
+        "frontend_copy_us": 211.553,
+        "acq_seeds": 1002,
+        "frontend_samples": 737280000,
+        "reader_us": 995327.16,
+        "final_completed": 1000,
+        "final_fcs_ok": 997,
+        "final_demod_completed": 999,
+        "final_raw_drop_samples": 0,
+        "final_gaps": 0,
+        "final_fcs_total": 1000,
+        "frontend_scan_fraction": 1.0003248573519021,
+        "scan_us_per_sample": 0.000170924609375,
+        "target_fcs_pct": 100.40281973816717,
+        "summary_dropped_queue_failures": 0,
+        "summary_incomplete_window": 1,
+        "summary_invalid_gap": 0,
+        "summary_payload_failed": 0,
+        "summary_sfd_failed": 2,
+        "summary_timing_failed": 0
+      }
+    },
+    {
+      "index": 2,
+      "arm": "suspend",
+      "argv": [
+        "gr-uwb/build-native-only/apps/uwb_dw3000_live",
+        "--period-ms",
+        "1",
+        "--sync",
+        "locked",
+        "--interference",
+        "off",
+        "--fused",
+        "on",
+        "--cir",
+        "full",
+        "--taps",
+        "eq16",
+        "--print",
+        "summary",
+        "--summary",
+        "100000",
+        "--workers",
+        "2",
+        "--queue",
+        "24",
+        "--replay",
+        "/tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16",
+        "--autocorr-when-locked",
+        "suspend"
+      ],
+      "shell": "env -u LD_LIBRARY_PATH gr-uwb/build-native-only/apps/uwb_dw3000_live --period-ms 1 --sync locked --interference off --fused on --cir full --taps eq16 --print summary --summary 100000 --workers 2 --queue 24 --replay /tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16 --autocorr-when-locked suspend",
+      "start_wall": "2026-11-20T08:54:29.867+00:00",
+      "end_wall": "2026-11-20T08:54:30.891+00:00",
+      "start_epoch": 1795164869.86758,
+      "end_epoch": 1795164870.8916247,
+      "wall_s": 1.0240439979825169,
+      "returncode": 0,
+      "timed_out": false,
+      "log": "/home/oi/Desktop/uwb-gnuradio/docs/performance/data_autocorr_suspend_20261120/abba_logs/run_02_suspend.log",
+      "stdout_bytes": 2833,
+      "stderr_bytes": 0,
+      "stderr_tail": "",
+      "pair": 1,
+      "parsed": {
+        "start": {
+          "mode": "continuous",
+          "sync": "locked",
+          "par_only": "off",
+          "channel": 3,
+          "antenna": "RX1",
+          "cir": "full",
+          "workers": 2,
+          "summary": 100000,
+          "period_ms": 1.0,
+          "taps": "eq16",
+          "taps_n": 1039,
+          "print": "summary",
+          "pre_guard": 36864,
+          "locked_pre_guard": 8192,
+          "capture": 329161,
+          "post_guard": 8192,
+          "window_capacity": 374217,
+          "locked_window_capacity": 345545,
+          "interference": "off",
+          "fused": "on",
+          "ondemand": "on",
+          "acq_span": 192000,
+          "acq_step": 64,
+          "acq_persist": 12000,
+          "acq_low": 0.00015,
+          "acq_peak": 0.0003,
+          "lock_fcs": "on",
+          "stop_after_sfd": "off",
+          "autocorr_when_locked": "suspend"
+        },
+        "lock_stats": {
+          "final_state": "locked",
+          "expected_slots": 993,
+          "submitted": 993,
+          "dropped_queue": 0,
+          "expired": 0,
+          "not_detected": 0,
+          "decode_failed": 0,
+          "fcs_ok": 996,
+          "fcs_failed": 2,
+          "observations": 998,
+          "stale": 0,
+          "duplicate": 0,
+          "identity_rejects": 2,
+          "out_of_grid": 0,
+          "queue_full": 0,
+          "residual_outliers": 0,
+          "lock_entries": 1,
+          "holdover_entries": 0,
+          "reacquire_entries": 0,
+          "discontinuities": 0,
+          "candidates": 0,
+          "cand_target": 0,
+          "cand_interference": 0,
+          "cand_unknown": 0,
+          "period_updates": 995,
+          "pre_guard_updates": 1,
+          "lock_slots": 3,
+          "period_samples": 737279,
+          "period_ppm": -0.833748,
+          "scheduler_target_slots": 993,
+          "scheduler_target_dropped": 0,
+          "scheduler_target_expired": 0,
+          "autocorr_dedup": 0,
+          "autocorr_dedup_confirmed": 0,
+          "autocorr_dedup_ambiguous": 0,
+          "autocorr_unknown": 0,
+          "interference_events": 0,
+          "cand_submit_attempts": 5,
+          "cand_admitted": 5,
+          "cand_dropped_queue": 0,
+          "cand_incomplete": 1,
+          "cand_overrun": 0,
+          "cand_overlapping": 0,
+          "cand_invalid_gap": 0,
+          "autocorr_ignored": 0,
+          "autocorr_suspend_events": 1,
+          "autocorr_resume_events": 0,
+          "autocorr_suspended_samples": 732954624,
+          "autocorr_resume_backlog_samples": 0
+        },
+        "cost_total": {
+          "frontend_us": 1596.873,
+          "frontend_copy_us": 216.497,
+          "frontend_scan_us": 1643.366,
+          "acq_seeds": 6,
+          "frontend_samples": 737280000,
+          "estimate_us": 1905.26,
+          "cancel_us": 100420.94,
+          "cancelled_samples": 737280000,
+          "bypassed_samples": 0,
+          "model_updates": 50,
+          "model_rejects": 0,
+          "training_windows": 50,
+          "reader_us": 996000.82
+        },
+        "final": {
+          "completed": 999,
+          "fcs": "996/999",
+          "raw_samples": 737280000,
+          "raw_drop_samples": 0,
+          "source_errors": 0,
+          "gaps": 0,
+          "models": 50,
+          "output_omitted": 0,
+          "full_retry": 0,
+          "acq_seeds": 6,
+          "submit_attempts": 998,
+          "admitted": 998,
+          "dropped_queue": 0,
+          "demod_completed": 998,
+          "fcs_ok": 996
+        },
+        "summary_lines": [
+          {
+            "completed": 999,
+            "batch": 999,
+            "batch_fcs": "996/999",
+            "batch_pct": 99.7,
+            "total_fcs": "996/999",
+            "total_pct": 99.7,
+            "full_retry": 0,
+            "raw_drop_samples": 0,
+            "source_errors": 0,
+            "gaps": 0,
+            "models": 50,
+            "queued": 0,
+            "queue_peak": 1,
+            "output_omitted": 0,
+            "compute_mean": 546.5,
+            "compute_p95": 611.7,
+            "resample_mean": 308.8,
+            "resample_p95": 353.6,
+            "demod_mean": 237.7,
+            "demod_p95": 268.4,
+            "INCOMPLETE_WINDOW": 1,
+            "SFD_FAILED": 2,
+            "_kind": "SUMMARY_PARTIAL"
+          }
+        ],
+        "summary_failures": {
+          "incomplete_window": 1,
+          "sfd_failed": 2
+        },
+        "lock_events": {
+          "verify": 1,
+          "locked": 1
+        },
+        "line_counts": {
+          "START": 1,
+          "LOCK_STATS": 1,
+          "COST_TOTAL": 1,
+          "FINAL": 1,
+          "SUMMARY": 0,
+          "SUMMARY_PARTIAL": 1,
+          "LOCK": 2
+        }
+      },
+      "metrics": {
+        "fcs_ok": 996,
+        "not_detected": 0,
+        "fcs_failed": 2,
+        "identity_rejects": 2,
+        "lock_entries": 1,
+        "holdover_entries": 0,
+        "reacquire_entries": 0,
+        "expected_slots": 993,
+        "submitted": 993,
+        "dropped_queue": 0,
+        "expired": 0,
+        "candidates": 0,
+        "cand_target": 0,
+        "cand_unknown": 0,
+        "autocorr_ignored": 0,
+        "decode_failed": 0,
+        "out_of_grid": 0,
+        "stale": 0,
+        "duplicate": 0,
+        "discontinuities": 0,
+        "cand_submit_attempts": 5,
+        "cand_admitted": 5,
+        "cand_dropped_queue": 0,
+        "cand_incomplete": 1,
+        "autocorr_suspend_events": 1,
+        "autocorr_resume_events": 0,
+        "autocorr_suspended_samples": 732954624,
+        "autocorr_resume_backlog_samples": 0,
+        "frontend_scan_us": 1643.366,
+        "frontend_us": 1596.873,
+        "frontend_copy_us": 216.497,
+        "acq_seeds": 6,
+        "frontend_samples": 737280000,
+        "reader_us": 996000.82,
+        "final_completed": 999,
+        "final_fcs_ok": 996,
+        "final_demod_completed": 998,
+        "final_raw_drop_samples": 0,
+        "final_gaps": 0,
+        "final_fcs_total": 999,
+        "frontend_scan_fraction": 1.0291150266802682,
+        "scan_us_per_sample": 2.228957790798611e-06,
+        "target_fcs_pct": 100.30211480362537,
+        "summary_dropped_queue_failures": 0,
+        "summary_incomplete_window": 1,
+        "summary_invalid_gap": 0,
+        "summary_payload_failed": 0,
+        "summary_sfd_failed": 2,
+        "summary_timing_failed": 0
+      }
+    },
+    {
+      "index": 3,
+      "arm": "suspend",
+      "argv": [
+        "gr-uwb/build-native-only/apps/uwb_dw3000_live",
+        "--period-ms",
+        "1",
+        "--sync",
+        "locked",
+        "--interference",
+        "off",
+        "--fused",
+        "on",
+        "--cir",
+        "full",
+        "--taps",
+        "eq16",
+        "--print",
+        "summary",
+        "--summary",
+        "100000",
+        "--workers",
+        "2",
+        "--queue",
+        "24",
+        "--replay",
+        "/tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16",
+        "--autocorr-when-locked",
+        "suspend"
+      ],
+      "shell": "env -u LD_LIBRARY_PATH gr-uwb/build-native-only/apps/uwb_dw3000_live --period-ms 1 --sync locked --interference off --fused on --cir full --taps eq16 --print summary --summary 100000 --workers 2 --queue 24 --replay /tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16 --autocorr-when-locked suspend",
+      "start_wall": "2026-11-20T08:54:30.891+00:00",
+      "end_wall": "2026-11-20T08:54:31.915+00:00",
+      "start_epoch": 1795164870.8919346,
+      "end_epoch": 1795164871.915742,
+      "wall_s": 1.0238062539719976,
+      "returncode": 0,
+      "timed_out": false,
+      "log": "/home/oi/Desktop/uwb-gnuradio/docs/performance/data_autocorr_suspend_20261120/abba_logs/run_03_suspend.log",
+      "stdout_bytes": 2839,
+      "stderr_bytes": 0,
+      "stderr_tail": "",
+      "pair": 2,
+      "parsed": {
+        "start": {
+          "mode": "continuous",
+          "sync": "locked",
+          "par_only": "off",
+          "channel": 3,
+          "antenna": "RX1",
+          "cir": "full",
+          "workers": 2,
+          "summary": 100000,
+          "period_ms": 1.0,
+          "taps": "eq16",
+          "taps_n": 1039,
+          "print": "summary",
+          "pre_guard": 36864,
+          "locked_pre_guard": 8192,
+          "capture": 329161,
+          "post_guard": 8192,
+          "window_capacity": 374217,
+          "locked_window_capacity": 345545,
+          "interference": "off",
+          "fused": "on",
+          "ondemand": "on",
+          "acq_span": 192000,
+          "acq_step": 64,
+          "acq_persist": 12000,
+          "acq_low": 0.00015,
+          "acq_peak": 0.0003,
+          "lock_fcs": "on",
+          "stop_after_sfd": "off",
+          "autocorr_when_locked": "suspend"
+        },
+        "lock_stats": {
+          "final_state": "locked",
+          "expected_slots": 992,
+          "submitted": 992,
+          "dropped_queue": 0,
+          "expired": 0,
+          "not_detected": 0,
+          "decode_failed": 0,
+          "fcs_ok": 997,
+          "fcs_failed": 2,
+          "observations": 999,
+          "stale": 0,
+          "duplicate": 0,
+          "identity_rejects": 2,
+          "out_of_grid": 0,
+          "queue_full": 0,
+          "residual_outliers": 0,
+          "lock_entries": 1,
+          "holdover_entries": 0,
+          "reacquire_entries": 0,
+          "discontinuities": 0,
+          "candidates": 0,
+          "cand_target": 0,
+          "cand_interference": 0,
+          "cand_unknown": 0,
+          "period_updates": 996,
+          "pre_guard_updates": 1,
+          "lock_slots": 3,
+          "period_samples": 737279,
+          "period_ppm": -0.833748,
+          "scheduler_target_slots": 992,
+          "scheduler_target_dropped": 0,
+          "scheduler_target_expired": 0,
+          "autocorr_dedup": 0,
+          "autocorr_dedup_confirmed": 0,
+          "autocorr_dedup_ambiguous": 0,
+          "autocorr_unknown": 0,
+          "interference_events": 0,
+          "cand_submit_attempts": 7,
+          "cand_admitted": 7,
+          "cand_dropped_queue": 0,
+          "cand_incomplete": 1,
+          "cand_overrun": 0,
+          "cand_overlapping": 0,
+          "cand_invalid_gap": 0,
+          "autocorr_ignored": 0,
+          "autocorr_suspend_events": 1,
+          "autocorr_resume_events": 0,
+          "autocorr_suspended_samples": 731971584,
+          "autocorr_resume_backlog_samples": 0
+        },
+        "cost_total": {
+          "frontend_us": 2188.02,
+          "frontend_copy_us": 209.466,
+          "frontend_scan_us": 2237.781,
+          "acq_seeds": 8,
+          "frontend_samples": 737280000,
+          "estimate_us": 2093.607,
+          "cancel_us": 104959.452,
+          "cancelled_samples": 737280000,
+          "bypassed_samples": 0,
+          "model_updates": 50,
+          "model_rejects": 0,
+          "training_windows": 50,
+          "reader_us": 995822.723
+        },
+        "final": {
+          "completed": 1000,
+          "fcs": "997/1000",
+          "raw_samples": 737280000,
+          "raw_drop_samples": 0,
+          "source_errors": 0,
+          "gaps": 0,
+          "models": 50,
+          "output_omitted": 0,
+          "full_retry": 0,
+          "acq_seeds": 8,
+          "submit_attempts": 999,
+          "admitted": 999,
+          "dropped_queue": 0,
+          "demod_completed": 999,
+          "fcs_ok": 997
+        },
+        "summary_lines": [
+          {
+            "completed": 1000,
+            "batch": 1000,
+            "batch_fcs": "997/1000",
+            "batch_pct": 99.7,
+            "total_fcs": "997/1000",
+            "total_pct": 99.7,
+            "full_retry": 0,
+            "raw_drop_samples": 0,
+            "source_errors": 0,
+            "gaps": 0,
+            "models": 50,
+            "queued": 0,
+            "queue_peak": 1,
+            "output_omitted": 0,
+            "compute_mean": 550.7,
+            "compute_p95": 615.9,
+            "resample_mean": 309.0,
+            "resample_p95": 350.8,
+            "demod_mean": 241.7,
+            "demod_p95": 268.5,
+            "INCOMPLETE_WINDOW": 1,
+            "SFD_FAILED": 2,
+            "_kind": "SUMMARY_PARTIAL"
+          }
+        ],
+        "summary_failures": {
+          "incomplete_window": 1,
+          "sfd_failed": 2
+        },
+        "lock_events": {
+          "verify": 1,
+          "locked": 1
+        },
+        "line_counts": {
+          "START": 1,
+          "LOCK_STATS": 1,
+          "COST_TOTAL": 1,
+          "FINAL": 1,
+          "SUMMARY": 0,
+          "SUMMARY_PARTIAL": 1,
+          "LOCK": 2
+        }
+      },
+      "metrics": {
+        "fcs_ok": 997,
+        "not_detected": 0,
+        "fcs_failed": 2,
+        "identity_rejects": 2,
+        "lock_entries": 1,
+        "holdover_entries": 0,
+        "reacquire_entries": 0,
+        "expected_slots": 992,
+        "submitted": 992,
+        "dropped_queue": 0,
+        "expired": 0,
+        "candidates": 0,
+        "cand_target": 0,
+        "cand_unknown": 0,
+        "autocorr_ignored": 0,
+        "decode_failed": 0,
+        "out_of_grid": 0,
+        "stale": 0,
+        "duplicate": 0,
+        "discontinuities": 0,
+        "cand_submit_attempts": 7,
+        "cand_admitted": 7,
+        "cand_dropped_queue": 0,
+        "cand_incomplete": 1,
+        "autocorr_suspend_events": 1,
+        "autocorr_resume_events": 0,
+        "autocorr_suspended_samples": 731971584,
+        "autocorr_resume_backlog_samples": 0,
+        "frontend_scan_us": 2237.781,
+        "frontend_us": 2188.02,
+        "frontend_copy_us": 209.466,
+        "acq_seeds": 8,
+        "frontend_samples": 737280000,
+        "reader_us": 995822.723,
+        "final_completed": 1000,
+        "final_fcs_ok": 997,
+        "final_demod_completed": 999,
+        "final_raw_drop_samples": 0,
+        "final_gaps": 0,
+        "final_fcs_total": 1000,
+        "frontend_scan_fraction": 1.0227424795020155,
+        "scan_us_per_sample": 3.0351847330729166e-06,
+        "target_fcs_pct": 100.50403225806451,
+        "summary_dropped_queue_failures": 0,
+        "summary_incomplete_window": 1,
+        "summary_invalid_gap": 0,
+        "summary_payload_failed": 0,
+        "summary_sfd_failed": 2,
+        "summary_timing_failed": 0
+      }
+    },
+    {
+      "index": 4,
+      "arm": "scan",
+      "argv": [
+        "gr-uwb/build-native-only/apps/uwb_dw3000_live",
+        "--period-ms",
+        "1",
+        "--sync",
+        "locked",
+        "--interference",
+        "off",
+        "--fused",
+        "on",
+        "--cir",
+        "full",
+        "--taps",
+        "eq16",
+        "--print",
+        "summary",
+        "--summary",
+        "100000",
+        "--workers",
+        "2",
+        "--queue",
+        "24",
+        "--replay",
+        "/tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16",
+        "--autocorr-when-locked",
+        "scan"
+      ],
+      "shell": "env -u LD_LIBRARY_PATH gr-uwb/build-native-only/apps/uwb_dw3000_live --period-ms 1 --sync locked --interference off --fused on --cir full --taps eq16 --print summary --summary 100000 --workers 2 --queue 24 --replay /tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16 --autocorr-when-locked scan",
+      "start_wall": "2026-11-20T08:54:31.916+00:00",
+      "end_wall": "2026-11-20T08:54:32.941+00:00",
+      "start_epoch": 1795164871.9160526,
+      "end_epoch": 1795164872.9414277,
+      "wall_s": 1.025374200020451,
+      "returncode": 0,
+      "timed_out": false,
+      "log": "/home/oi/Desktop/uwb-gnuradio/docs/performance/data_autocorr_suspend_20261120/abba_logs/run_04_scan.log",
+      "stdout_bytes": 2841,
+      "stderr_bytes": 0,
+      "stderr_tail": "",
+      "pair": 2,
+      "parsed": {
+        "start": {
+          "mode": "continuous",
+          "sync": "locked",
+          "par_only": "off",
+          "channel": 3,
+          "antenna": "RX1",
+          "cir": "full",
+          "workers": 2,
+          "summary": 100000,
+          "period_ms": 1.0,
+          "taps": "eq16",
+          "taps_n": 1039,
+          "print": "summary",
+          "pre_guard": 36864,
+          "locked_pre_guard": 8192,
+          "capture": 329161,
+          "post_guard": 8192,
+          "window_capacity": 374217,
+          "locked_window_capacity": 345545,
+          "interference": "off",
+          "fused": "on",
+          "ondemand": "on",
+          "acq_span": 192000,
+          "acq_step": 64,
+          "acq_persist": 12000,
+          "acq_low": 0.00015,
+          "acq_peak": 0.0003,
+          "lock_fcs": "on",
+          "stop_after_sfd": "off",
+          "autocorr_when_locked": "scan"
+        },
+        "lock_stats": {
+          "final_state": "locked",
+          "expected_slots": 993,
+          "submitted": 993,
+          "dropped_queue": 0,
+          "expired": 0,
+          "not_detected": 0,
+          "decode_failed": 0,
+          "fcs_ok": 997,
+          "fcs_failed": 2,
+          "observations": 999,
+          "stale": 0,
+          "duplicate": 0,
+          "identity_rejects": 2,
+          "out_of_grid": 0,
+          "queue_full": 0,
+          "residual_outliers": 0,
+          "lock_entries": 1,
+          "holdover_entries": 0,
+          "reacquire_entries": 0,
+          "discontinuities": 0,
+          "candidates": 0,
+          "cand_target": 0,
+          "cand_interference": 0,
+          "cand_unknown": 0,
+          "period_updates": 996,
+          "pre_guard_updates": 1,
+          "lock_slots": 3,
+          "period_samples": 737279,
+          "period_ppm": -0.833748,
+          "scheduler_target_slots": 993,
+          "scheduler_target_dropped": 0,
+          "scheduler_target_expired": 0,
+          "autocorr_dedup": 0,
+          "autocorr_dedup_confirmed": 0,
+          "autocorr_dedup_ambiguous": 0,
+          "autocorr_unknown": 995,
+          "interference_events": 0,
+          "cand_submit_attempts": 6,
+          "cand_admitted": 6,
+          "cand_dropped_queue": 0,
+          "cand_incomplete": 1,
+          "cand_overrun": 0,
+          "cand_overlapping": 0,
+          "cand_invalid_gap": 0,
+          "autocorr_ignored": 995,
+          "autocorr_suspend_events": 0,
+          "autocorr_resume_events": 0,
+          "autocorr_suspended_samples": 0,
+          "autocorr_resume_backlog_samples": 0
+        },
+        "cost_total": {
+          "frontend_us": 126619.006,
+          "frontend_copy_us": 214.833,
+          "frontend_scan_us": 126656.466,
+          "acq_seeds": 1002,
+          "frontend_samples": 737280000,
+          "estimate_us": 1935.768,
+          "cancel_us": 98254.683,
+          "cancelled_samples": 737280000,
+          "bypassed_samples": 0,
+          "model_updates": 50,
+          "model_rejects": 0,
+          "training_windows": 50,
+          "reader_us": 995836.491
+        },
+        "final": {
+          "completed": 1000,
+          "fcs": "997/1000",
+          "raw_samples": 737280000,
+          "raw_drop_samples": 0,
+          "source_errors": 0,
+          "gaps": 0,
+          "models": 50,
+          "output_omitted": 0,
+          "full_retry": 0,
+          "acq_seeds": 1002,
+          "submit_attempts": 999,
+          "admitted": 999,
+          "dropped_queue": 0,
+          "demod_completed": 999,
+          "fcs_ok": 997
+        },
+        "summary_lines": [
+          {
+            "completed": 1000,
+            "batch": 1000,
+            "batch_fcs": "997/1000",
+            "batch_pct": 99.7,
+            "total_fcs": "997/1000",
+            "total_pct": 99.7,
+            "full_retry": 0,
+            "raw_drop_samples": 0,
+            "source_errors": 0,
+            "gaps": 0,
+            "models": 50,
+            "queued": 0,
+            "queue_peak": 2,
+            "output_omitted": 0,
+            "compute_mean": 547.3,
+            "compute_p95": 617.6,
+            "resample_mean": 311.5,
+            "resample_p95": 353.9,
+            "demod_mean": 235.8,
+            "demod_p95": 264.9,
+            "INCOMPLETE_WINDOW": 1,
+            "SFD_FAILED": 2,
+            "_kind": "SUMMARY_PARTIAL"
+          }
+        ],
+        "summary_failures": {
+          "incomplete_window": 1,
+          "sfd_failed": 2
+        },
+        "lock_events": {
+          "verify": 1,
+          "locked": 1
+        },
+        "line_counts": {
+          "START": 1,
+          "LOCK_STATS": 1,
+          "COST_TOTAL": 1,
+          "FINAL": 1,
+          "SUMMARY": 0,
+          "SUMMARY_PARTIAL": 1,
+          "LOCK": 2
+        }
+      },
+      "metrics": {
+        "fcs_ok": 997,
+        "not_detected": 0,
+        "fcs_failed": 2,
+        "identity_rejects": 2,
+        "lock_entries": 1,
+        "holdover_entries": 0,
+        "reacquire_entries": 0,
+        "expected_slots": 993,
+        "submitted": 993,
+        "dropped_queue": 0,
+        "expired": 0,
+        "candidates": 0,
+        "cand_target": 0,
+        "cand_unknown": 0,
+        "autocorr_ignored": 995,
+        "decode_failed": 0,
+        "out_of_grid": 0,
+        "stale": 0,
+        "duplicate": 0,
+        "discontinuities": 0,
+        "cand_submit_attempts": 6,
+        "cand_admitted": 6,
+        "cand_dropped_queue": 0,
+        "cand_incomplete": 1,
+        "autocorr_suspend_events": 0,
+        "autocorr_resume_events": 0,
+        "autocorr_suspended_samples": 0,
+        "autocorr_resume_backlog_samples": 0,
+        "frontend_scan_us": 126656.466,
+        "frontend_us": 126619.006,
+        "frontend_copy_us": 214.833,
+        "acq_seeds": 1002,
+        "frontend_samples": 737280000,
+        "reader_us": 995836.491,
+        "final_completed": 1000,
+        "final_fcs_ok": 997,
+        "final_demod_completed": 999,
+        "final_raw_drop_samples": 0,
+        "final_gaps": 0,
+        "final_fcs_total": 1000,
+        "frontend_scan_fraction": 1.0002958481604256,
+        "scan_us_per_sample": 0.00017178882649739583,
+        "target_fcs_pct": 100.40281973816717,
+        "summary_dropped_queue_failures": 0,
+        "summary_incomplete_window": 1,
+        "summary_invalid_gap": 0,
+        "summary_payload_failed": 0,
+        "summary_sfd_failed": 2,
+        "summary_timing_failed": 0
+      }
+    },
+    {
+      "index": 5,
+      "arm": "scan",
+      "argv": [
+        "gr-uwb/build-native-only/apps/uwb_dw3000_live",
+        "--period-ms",
+        "1",
+        "--sync",
+        "locked",
+        "--interference",
+        "off",
+        "--fused",
+        "on",
+        "--cir",
+        "full",
+        "--taps",
+        "eq16",
+        "--print",
+        "summary",
+        "--summary",
+        "100000",
+        "--workers",
+        "2",
+        "--queue",
+        "24",
+        "--replay",
+        "/tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16",
+        "--autocorr-when-locked",
+        "scan"
+      ],
+      "shell": "env -u LD_LIBRARY_PATH gr-uwb/build-native-only/apps/uwb_dw3000_live --period-ms 1 --sync locked --interference off --fused on --cir full --taps eq16 --print summary --summary 100000 --workers 2 --queue 24 --replay /tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16 --autocorr-when-locked scan",
+      "start_wall": "2026-11-20T08:54:32.941+00:00",
+      "end_wall": "2026-11-20T08:54:33.964+00:00",
+      "start_epoch": 1795164872.941743,
+      "end_epoch": 1795164873.9642847,
+      "wall_s": 1.0225407159887254,
+      "returncode": 0,
+      "timed_out": false,
+      "log": "/home/oi/Desktop/uwb-gnuradio/docs/performance/data_autocorr_suspend_20261120/abba_logs/run_05_scan.log",
+      "stdout_bytes": 2835,
+      "stderr_bytes": 0,
+      "stderr_tail": "",
+      "pair": 3,
+      "parsed": {
+        "start": {
+          "mode": "continuous",
+          "sync": "locked",
+          "par_only": "off",
+          "channel": 3,
+          "antenna": "RX1",
+          "cir": "full",
+          "workers": 2,
+          "summary": 100000,
+          "period_ms": 1.0,
+          "taps": "eq16",
+          "taps_n": 1039,
+          "print": "summary",
+          "pre_guard": 36864,
+          "locked_pre_guard": 8192,
+          "capture": 329161,
+          "post_guard": 8192,
+          "window_capacity": 374217,
+          "locked_window_capacity": 345545,
+          "interference": "off",
+          "fused": "on",
+          "ondemand": "on",
+          "acq_span": 192000,
+          "acq_step": 64,
+          "acq_persist": 12000,
+          "acq_low": 0.00015,
+          "acq_peak": 0.0003,
+          "lock_fcs": "on",
+          "stop_after_sfd": "off",
+          "autocorr_when_locked": "scan"
+        },
+        "lock_stats": {
+          "final_state": "locked",
+          "expected_slots": 993,
+          "submitted": 993,
+          "dropped_queue": 0,
+          "expired": 0,
+          "not_detected": 0,
+          "decode_failed": 0,
+          "fcs_ok": 996,
+          "fcs_failed": 2,
+          "observations": 998,
+          "stale": 0,
+          "duplicate": 0,
+          "identity_rejects": 2,
+          "out_of_grid": 0,
+          "queue_full": 0,
+          "residual_outliers": 0,
+          "lock_entries": 1,
+          "holdover_entries": 0,
+          "reacquire_entries": 0,
+          "discontinuities": 0,
+          "candidates": 0,
+          "cand_target": 0,
+          "cand_interference": 0,
+          "cand_unknown": 0,
+          "period_updates": 995,
+          "pre_guard_updates": 1,
+          "lock_slots": 3,
+          "period_samples": 737279,
+          "period_ppm": -0.833748,
+          "scheduler_target_slots": 993,
+          "scheduler_target_dropped": 0,
+          "scheduler_target_expired": 0,
+          "autocorr_dedup": 0,
+          "autocorr_dedup_confirmed": 0,
+          "autocorr_dedup_ambiguous": 0,
+          "autocorr_unknown": 996,
+          "interference_events": 0,
+          "cand_submit_attempts": 5,
+          "cand_admitted": 5,
+          "cand_dropped_queue": 0,
+          "cand_incomplete": 1,
+          "cand_overrun": 0,
+          "cand_overlapping": 0,
+          "cand_invalid_gap": 0,
+          "autocorr_ignored": 996,
+          "autocorr_suspend_events": 0,
+          "autocorr_resume_events": 0,
+          "autocorr_suspended_samples": 0,
+          "autocorr_resume_backlog_samples": 0
+        },
+        "cost_total": {
+          "frontend_us": 124646.96,
+          "frontend_copy_us": 212.477,
+          "frontend_scan_us": 124687.419,
+          "acq_seeds": 1002,
+          "frontend_samples": 737280000,
+          "estimate_us": 1856.482,
+          "cancel_us": 96346.186,
+          "cancelled_samples": 737280000,
+          "bypassed_samples": 0,
+          "model_updates": 50,
+          "model_rejects": 0,
+          "training_windows": 50,
+          "reader_us": 995707.57
+        },
+        "final": {
+          "completed": 999,
+          "fcs": "996/999",
+          "raw_samples": 737280000,
+          "raw_drop_samples": 0,
+          "source_errors": 0,
+          "gaps": 0,
+          "models": 50,
+          "output_omitted": 0,
+          "full_retry": 0,
+          "acq_seeds": 1002,
+          "submit_attempts": 998,
+          "admitted": 998,
+          "dropped_queue": 0,
+          "demod_completed": 998,
+          "fcs_ok": 996
+        },
+        "summary_lines": [
+          {
+            "completed": 999,
+            "batch": 999,
+            "batch_fcs": "996/999",
+            "batch_pct": 99.7,
+            "total_fcs": "996/999",
+            "total_pct": 99.7,
+            "full_retry": 0,
+            "raw_drop_samples": 0,
+            "source_errors": 0,
+            "gaps": 0,
+            "models": 50,
+            "queued": 0,
+            "queue_peak": 1,
+            "output_omitted": 0,
+            "compute_mean": 546.2,
+            "compute_p95": 613.7,
+            "resample_mean": 306.2,
+            "resample_p95": 349.2,
+            "demod_mean": 240.0,
+            "demod_p95": 274.1,
+            "INCOMPLETE_WINDOW": 1,
+            "SFD_FAILED": 2,
+            "_kind": "SUMMARY_PARTIAL"
+          }
+        ],
+        "summary_failures": {
+          "incomplete_window": 1,
+          "sfd_failed": 2
+        },
+        "lock_events": {
+          "verify": 1,
+          "locked": 1
+        },
+        "line_counts": {
+          "START": 1,
+          "LOCK_STATS": 1,
+          "COST_TOTAL": 1,
+          "FINAL": 1,
+          "SUMMARY": 0,
+          "SUMMARY_PARTIAL": 1,
+          "LOCK": 2
+        }
+      },
+      "metrics": {
+        "fcs_ok": 996,
+        "not_detected": 0,
+        "fcs_failed": 2,
+        "identity_rejects": 2,
+        "lock_entries": 1,
+        "holdover_entries": 0,
+        "reacquire_entries": 0,
+        "expected_slots": 993,
+        "submitted": 993,
+        "dropped_queue": 0,
+        "expired": 0,
+        "candidates": 0,
+        "cand_target": 0,
+        "cand_unknown": 0,
+        "autocorr_ignored": 996,
+        "decode_failed": 0,
+        "out_of_grid": 0,
+        "stale": 0,
+        "duplicate": 0,
+        "discontinuities": 0,
+        "cand_submit_attempts": 5,
+        "cand_admitted": 5,
+        "cand_dropped_queue": 0,
+        "cand_incomplete": 1,
+        "autocorr_suspend_events": 0,
+        "autocorr_resume_events": 0,
+        "autocorr_suspended_samples": 0,
+        "autocorr_resume_backlog_samples": 0,
+        "frontend_scan_us": 124687.419,
+        "frontend_us": 124646.96,
+        "frontend_copy_us": 212.477,
+        "acq_seeds": 1002,
+        "frontend_samples": 737280000,
+        "reader_us": 995707.57,
+        "final_completed": 999,
+        "final_fcs_ok": 996,
+        "final_demod_completed": 998,
+        "final_raw_drop_samples": 0,
+        "final_gaps": 0,
+        "final_fcs_total": 999,
+        "frontend_scan_fraction": 1.000324588742477,
+        "scan_us_per_sample": 0.00016911813557942708,
+        "target_fcs_pct": 100.30211480362537,
+        "summary_dropped_queue_failures": 0,
+        "summary_incomplete_window": 1,
+        "summary_invalid_gap": 0,
+        "summary_payload_failed": 0,
+        "summary_sfd_failed": 2,
+        "summary_timing_failed": 0
+      }
+    },
+    {
+      "index": 6,
+      "arm": "suspend",
+      "argv": [
+        "gr-uwb/build-native-only/apps/uwb_dw3000_live",
+        "--period-ms",
+        "1",
+        "--sync",
+        "locked",
+        "--interference",
+        "off",
+        "--fused",
+        "on",
+        "--cir",
+        "full",
+        "--taps",
+        "eq16",
+        "--print",
+        "summary",
+        "--summary",
+        "100000",
+        "--workers",
+        "2",
+        "--queue",
+        "24",
+        "--replay",
+        "/tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16",
+        "--autocorr-when-locked",
+        "suspend"
+      ],
+      "shell": "env -u LD_LIBRARY_PATH gr-uwb/build-native-only/apps/uwb_dw3000_live --period-ms 1 --sync locked --interference off --fused on --cir full --taps eq16 --print summary --summary 100000 --workers 2 --queue 24 --replay /tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16 --autocorr-when-locked suspend",
+      "start_wall": "2026-11-20T08:54:33.964+00:00",
+      "end_wall": "2026-11-20T08:54:34.988+00:00",
+      "start_epoch": 1795164873.9646273,
+      "end_epoch": 1795164874.9880447,
+      "wall_s": 1.0234167340095155,
+      "returncode": 0,
+      "timed_out": false,
+      "log": "/home/oi/Desktop/uwb-gnuradio/docs/performance/data_autocorr_suspend_20261120/abba_logs/run_06_suspend.log",
+      "stdout_bytes": 2833,
+      "stderr_bytes": 0,
+      "stderr_tail": "",
+      "pair": 3,
+      "parsed": {
+        "start": {
+          "mode": "continuous",
+          "sync": "locked",
+          "par_only": "off",
+          "channel": 3,
+          "antenna": "RX1",
+          "cir": "full",
+          "workers": 2,
+          "summary": 100000,
+          "period_ms": 1.0,
+          "taps": "eq16",
+          "taps_n": 1039,
+          "print": "summary",
+          "pre_guard": 36864,
+          "locked_pre_guard": 8192,
+          "capture": 329161,
+          "post_guard": 8192,
+          "window_capacity": 374217,
+          "locked_window_capacity": 345545,
+          "interference": "off",
+          "fused": "on",
+          "ondemand": "on",
+          "acq_span": 192000,
+          "acq_step": 64,
+          "acq_persist": 12000,
+          "acq_low": 0.00015,
+          "acq_peak": 0.0003,
+          "lock_fcs": "on",
+          "stop_after_sfd": "off",
+          "autocorr_when_locked": "suspend"
+        },
+        "lock_stats": {
+          "final_state": "locked",
+          "expected_slots": 993,
+          "submitted": 993,
+          "dropped_queue": 0,
+          "expired": 0,
+          "not_detected": 0,
+          "decode_failed": 0,
+          "fcs_ok": 996,
+          "fcs_failed": 2,
+          "observations": 998,
+          "stale": 0,
+          "duplicate": 0,
+          "identity_rejects": 2,
+          "out_of_grid": 0,
+          "queue_full": 0,
+          "residual_outliers": 0,
+          "lock_entries": 1,
+          "holdover_entries": 0,
+          "reacquire_entries": 0,
+          "discontinuities": 0,
+          "candidates": 0,
+          "cand_target": 0,
+          "cand_interference": 0,
+          "cand_unknown": 0,
+          "period_updates": 995,
+          "pre_guard_updates": 1,
+          "lock_slots": 3,
+          "period_samples": 737279,
+          "period_ppm": -0.833748,
+          "scheduler_target_slots": 993,
+          "scheduler_target_dropped": 0,
+          "scheduler_target_expired": 0,
+          "autocorr_dedup": 0,
+          "autocorr_dedup_confirmed": 0,
+          "autocorr_dedup_ambiguous": 0,
+          "autocorr_unknown": 0,
+          "interference_events": 0,
+          "cand_submit_attempts": 5,
+          "cand_admitted": 5,
+          "cand_dropped_queue": 0,
+          "cand_incomplete": 1,
+          "cand_overrun": 0,
+          "cand_overlapping": 0,
+          "cand_invalid_gap": 0,
+          "autocorr_ignored": 0,
+          "autocorr_suspend_events": 1,
+          "autocorr_resume_events": 0,
+          "autocorr_suspended_samples": 732954624,
+          "autocorr_resume_backlog_samples": 0
+        },
+        "cost_total": {
+          "frontend_us": 1728.134,
+          "frontend_copy_us": 206.78,
+          "frontend_scan_us": 1783.022,
+          "acq_seeds": 6,
+          "frontend_samples": 737280000,
+          "estimate_us": 1985.109,
+          "cancel_us": 102946.67,
+          "cancelled_samples": 737280000,
+          "bypassed_samples": 0,
+          "model_updates": 50,
+          "model_rejects": 0,
+          "training_windows": 50,
+          "reader_us": 995898.28
+        },
+        "final": {
+          "completed": 999,
+          "fcs": "996/999",
+          "raw_samples": 737280000,
+          "raw_drop_samples": 0,
+          "source_errors": 0,
+          "gaps": 0,
+          "models": 50,
+          "output_omitted": 0,
+          "full_retry": 0,
+          "acq_seeds": 6,
+          "submit_attempts": 998,
+          "admitted": 998,
+          "dropped_queue": 0,
+          "demod_completed": 998,
+          "fcs_ok": 996
+        },
+        "summary_lines": [
+          {
+            "completed": 999,
+            "batch": 999,
+            "batch_fcs": "996/999",
+            "batch_pct": 99.7,
+            "total_fcs": "996/999",
+            "total_pct": 99.7,
+            "full_retry": 0,
+            "raw_drop_samples": 0,
+            "source_errors": 0,
+            "gaps": 0,
+            "models": 50,
+            "queued": 0,
+            "queue_peak": 1,
+            "output_omitted": 0,
+            "compute_mean": 550.6,
+            "compute_p95": 618.3,
+            "resample_mean": 312.0,
+            "resample_p95": 351.5,
+            "demod_mean": 238.6,
+            "demod_p95": 268.5,
+            "INCOMPLETE_WINDOW": 1,
+            "SFD_FAILED": 2,
+            "_kind": "SUMMARY_PARTIAL"
+          }
+        ],
+        "summary_failures": {
+          "incomplete_window": 1,
+          "sfd_failed": 2
+        },
+        "lock_events": {
+          "verify": 1,
+          "locked": 1
+        },
+        "line_counts": {
+          "START": 1,
+          "LOCK_STATS": 1,
+          "COST_TOTAL": 1,
+          "FINAL": 1,
+          "SUMMARY": 0,
+          "SUMMARY_PARTIAL": 1,
+          "LOCK": 2
+        }
+      },
+      "metrics": {
+        "fcs_ok": 996,
+        "not_detected": 0,
+        "fcs_failed": 2,
+        "identity_rejects": 2,
+        "lock_entries": 1,
+        "holdover_entries": 0,
+        "reacquire_entries": 0,
+        "expected_slots": 993,
+        "submitted": 993,
+        "dropped_queue": 0,
+        "expired": 0,
+        "candidates": 0,
+        "cand_target": 0,
+        "cand_unknown": 0,
+        "autocorr_ignored": 0,
+        "decode_failed": 0,
+        "out_of_grid": 0,
+        "stale": 0,
+        "duplicate": 0,
+        "discontinuities": 0,
+        "cand_submit_attempts": 5,
+        "cand_admitted": 5,
+        "cand_dropped_queue": 0,
+        "cand_incomplete": 1,
+        "autocorr_suspend_events": 1,
+        "autocorr_resume_events": 0,
+        "autocorr_suspended_samples": 732954624,
+        "autocorr_resume_backlog_samples": 0,
+        "frontend_scan_us": 1783.022,
+        "frontend_us": 1728.134,
+        "frontend_copy_us": 206.78,
+        "acq_seeds": 6,
+        "frontend_samples": 737280000,
+        "reader_us": 995898.28,
+        "final_completed": 999,
+        "final_fcs_ok": 996,
+        "final_demod_completed": 998,
+        "final_raw_drop_samples": 0,
+        "final_gaps": 0,
+        "final_fcs_total": 999,
+        "frontend_scan_fraction": 1.0317614259079446,
+        "scan_us_per_sample": 2.418378363715278e-06,
+        "target_fcs_pct": 100.30211480362537,
+        "summary_dropped_queue_failures": 0,
+        "summary_incomplete_window": 1,
+        "summary_invalid_gap": 0,
+        "summary_payload_failed": 0,
+        "summary_sfd_failed": 2,
+        "summary_timing_failed": 0
+      }
+    },
+    {
+      "index": 7,
+      "arm": "suspend",
+      "argv": [
+        "gr-uwb/build-native-only/apps/uwb_dw3000_live",
+        "--period-ms",
+        "1",
+        "--sync",
+        "locked",
+        "--interference",
+        "off",
+        "--fused",
+        "on",
+        "--cir",
+        "full",
+        "--taps",
+        "eq16",
+        "--print",
+        "summary",
+        "--summary",
+        "100000",
+        "--workers",
+        "2",
+        "--queue",
+        "24",
+        "--replay",
+        "/tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16",
+        "--autocorr-when-locked",
+        "suspend"
+      ],
+      "shell": "env -u LD_LIBRARY_PATH gr-uwb/build-native-only/apps/uwb_dw3000_live --period-ms 1 --sync locked --interference off --fused on --cir full --taps eq16 --print summary --summary 100000 --workers 2 --queue 24 --replay /tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16 --autocorr-when-locked suspend",
+      "start_wall": "2026-11-20T08:54:34.988+00:00",
+      "end_wall": "2026-11-20T08:54:36.012+00:00",
+      "start_epoch": 1795164874.9883833,
+      "end_epoch": 1795164876.0121057,
+      "wall_s": 1.023721800011117,
+      "returncode": 0,
+      "timed_out": false,
+      "log": "/home/oi/Desktop/uwb-gnuradio/docs/performance/data_autocorr_suspend_20261120/abba_logs/run_07_suspend.log",
+      "stdout_bytes": 2833,
+      "stderr_bytes": 0,
+      "stderr_tail": "",
+      "pair": 4,
+      "parsed": {
+        "start": {
+          "mode": "continuous",
+          "sync": "locked",
+          "par_only": "off",
+          "channel": 3,
+          "antenna": "RX1",
+          "cir": "full",
+          "workers": 2,
+          "summary": 100000,
+          "period_ms": 1.0,
+          "taps": "eq16",
+          "taps_n": 1039,
+          "print": "summary",
+          "pre_guard": 36864,
+          "locked_pre_guard": 8192,
+          "capture": 329161,
+          "post_guard": 8192,
+          "window_capacity": 374217,
+          "locked_window_capacity": 345545,
+          "interference": "off",
+          "fused": "on",
+          "ondemand": "on",
+          "acq_span": 192000,
+          "acq_step": 64,
+          "acq_persist": 12000,
+          "acq_low": 0.00015,
+          "acq_peak": 0.0003,
+          "lock_fcs": "on",
+          "stop_after_sfd": "off",
+          "autocorr_when_locked": "suspend"
+        },
+        "lock_stats": {
+          "final_state": "locked",
+          "expected_slots": 993,
+          "submitted": 993,
+          "dropped_queue": 0,
+          "expired": 0,
+          "not_detected": 0,
+          "decode_failed": 0,
+          "fcs_ok": 996,
+          "fcs_failed": 2,
+          "observations": 998,
+          "stale": 0,
+          "duplicate": 0,
+          "identity_rejects": 2,
+          "out_of_grid": 0,
+          "queue_full": 0,
+          "residual_outliers": 0,
+          "lock_entries": 1,
+          "holdover_entries": 0,
+          "reacquire_entries": 0,
+          "discontinuities": 0,
+          "candidates": 0,
+          "cand_target": 0,
+          "cand_interference": 0,
+          "cand_unknown": 0,
+          "period_updates": 995,
+          "pre_guard_updates": 1,
+          "lock_slots": 3,
+          "period_samples": 737279,
+          "period_ppm": -0.833748,
+          "scheduler_target_slots": 993,
+          "scheduler_target_dropped": 0,
+          "scheduler_target_expired": 0,
+          "autocorr_dedup": 0,
+          "autocorr_dedup_confirmed": 0,
+          "autocorr_dedup_ambiguous": 0,
+          "autocorr_unknown": 0,
+          "interference_events": 0,
+          "cand_submit_attempts": 5,
+          "cand_admitted": 5,
+          "cand_dropped_queue": 0,
+          "cand_incomplete": 1,
+          "cand_overrun": 0,
+          "cand_overlapping": 0,
+          "cand_invalid_gap": 0,
+          "autocorr_ignored": 0,
+          "autocorr_suspend_events": 1,
+          "autocorr_resume_events": 0,
+          "autocorr_suspended_samples": 733020160,
+          "autocorr_resume_backlog_samples": 0
+        },
+        "cost_total": {
+          "frontend_us": 1794.221,
+          "frontend_copy_us": 212.111,
+          "frontend_scan_us": 1842.926,
+          "acq_seeds": 6,
+          "frontend_samples": 737280000,
+          "estimate_us": 1975.008,
+          "cancel_us": 102326.784,
+          "cancelled_samples": 737280000,
+          "bypassed_samples": 0,
+          "model_updates": 50,
+          "model_rejects": 0,
+          "training_windows": 50,
+          "reader_us": 996136.818
+        },
+        "final": {
+          "completed": 999,
+          "fcs": "996/999",
+          "raw_samples": 737280000,
+          "raw_drop_samples": 0,
+          "source_errors": 0,
+          "gaps": 0,
+          "models": 50,
+          "output_omitted": 0,
+          "full_retry": 0,
+          "acq_seeds": 6,
+          "submit_attempts": 998,
+          "admitted": 998,
+          "dropped_queue": 0,
+          "demod_completed": 998,
+          "fcs_ok": 996
+        },
+        "summary_lines": [
+          {
+            "completed": 999,
+            "batch": 999,
+            "batch_fcs": "996/999",
+            "batch_pct": 99.7,
+            "total_fcs": "996/999",
+            "total_pct": 99.7,
+            "full_retry": 0,
+            "raw_drop_samples": 0,
+            "source_errors": 0,
+            "gaps": 0,
+            "models": 50,
+            "queued": 0,
+            "queue_peak": 1,
+            "output_omitted": 0,
+            "compute_mean": 541.5,
+            "compute_p95": 603.3,
+            "resample_mean": 302.5,
+            "resample_p95": 340.5,
+            "demod_mean": 239.0,
+            "demod_p95": 270.2,
+            "INCOMPLETE_WINDOW": 1,
+            "SFD_FAILED": 2,
+            "_kind": "SUMMARY_PARTIAL"
+          }
+        ],
+        "summary_failures": {
+          "incomplete_window": 1,
+          "sfd_failed": 2
+        },
+        "lock_events": {
+          "verify": 1,
+          "locked": 1
+        },
+        "line_counts": {
+          "START": 1,
+          "LOCK_STATS": 1,
+          "COST_TOTAL": 1,
+          "FINAL": 1,
+          "SUMMARY": 0,
+          "SUMMARY_PARTIAL": 1,
+          "LOCK": 2
+        }
+      },
+      "metrics": {
+        "fcs_ok": 996,
+        "not_detected": 0,
+        "fcs_failed": 2,
+        "identity_rejects": 2,
+        "lock_entries": 1,
+        "holdover_entries": 0,
+        "reacquire_entries": 0,
+        "expected_slots": 993,
+        "submitted": 993,
+        "dropped_queue": 0,
+        "expired": 0,
+        "candidates": 0,
+        "cand_target": 0,
+        "cand_unknown": 0,
+        "autocorr_ignored": 0,
+        "decode_failed": 0,
+        "out_of_grid": 0,
+        "stale": 0,
+        "duplicate": 0,
+        "discontinuities": 0,
+        "cand_submit_attempts": 5,
+        "cand_admitted": 5,
+        "cand_dropped_queue": 0,
+        "cand_incomplete": 1,
+        "autocorr_suspend_events": 1,
+        "autocorr_resume_events": 0,
+        "autocorr_suspended_samples": 733020160,
+        "autocorr_resume_backlog_samples": 0,
+        "frontend_scan_us": 1842.926,
+        "frontend_us": 1794.221,
+        "frontend_copy_us": 212.111,
+        "acq_seeds": 6,
+        "frontend_samples": 737280000,
+        "reader_us": 996136.818,
+        "final_completed": 999,
+        "final_fcs_ok": 996,
+        "final_demod_completed": 998,
+        "final_raw_drop_samples": 0,
+        "final_gaps": 0,
+        "final_fcs_total": 999,
+        "frontend_scan_fraction": 1.0271454854223643,
+        "scan_us_per_sample": 2.4996283637152776e-06,
+        "target_fcs_pct": 100.30211480362537,
+        "summary_dropped_queue_failures": 0,
+        "summary_incomplete_window": 1,
+        "summary_invalid_gap": 0,
+        "summary_payload_failed": 0,
+        "summary_sfd_failed": 2,
+        "summary_timing_failed": 0
+      }
+    },
+    {
+      "index": 8,
+      "arm": "scan",
+      "argv": [
+        "gr-uwb/build-native-only/apps/uwb_dw3000_live",
+        "--period-ms",
+        "1",
+        "--sync",
+        "locked",
+        "--interference",
+        "off",
+        "--fused",
+        "on",
+        "--cir",
+        "full",
+        "--taps",
+        "eq16",
+        "--print",
+        "summary",
+        "--summary",
+        "100000",
+        "--workers",
+        "2",
+        "--queue",
+        "24",
+        "--replay",
+        "/tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16",
+        "--autocorr-when-locked",
+        "scan"
+      ],
+      "shell": "env -u LD_LIBRARY_PATH gr-uwb/build-native-only/apps/uwb_dw3000_live --period-ms 1 --sync locked --interference off --fused on --cir full --taps eq16 --print summary --summary 100000 --workers 2 --queue 24 --replay /tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16 --autocorr-when-locked scan",
+      "start_wall": "2026-11-20T08:54:36.012+00:00",
+      "end_wall": "2026-11-20T08:54:37.038+00:00",
+      "start_epoch": 1795164876.0124457,
+      "end_epoch": 1795164877.0381303,
+      "wall_s": 1.0256835279869847,
+      "returncode": 0,
+      "timed_out": false,
+      "log": "/home/oi/Desktop/uwb-gnuradio/docs/performance/data_autocorr_suspend_20261120/abba_logs/run_08_scan.log",
+      "stdout_bytes": 2835,
+      "stderr_bytes": 0,
+      "stderr_tail": "",
+      "pair": 4,
+      "parsed": {
+        "start": {
+          "mode": "continuous",
+          "sync": "locked",
+          "par_only": "off",
+          "channel": 3,
+          "antenna": "RX1",
+          "cir": "full",
+          "workers": 2,
+          "summary": 100000,
+          "period_ms": 1.0,
+          "taps": "eq16",
+          "taps_n": 1039,
+          "print": "summary",
+          "pre_guard": 36864,
+          "locked_pre_guard": 8192,
+          "capture": 329161,
+          "post_guard": 8192,
+          "window_capacity": 374217,
+          "locked_window_capacity": 345545,
+          "interference": "off",
+          "fused": "on",
+          "ondemand": "on",
+          "acq_span": 192000,
+          "acq_step": 64,
+          "acq_persist": 12000,
+          "acq_low": 0.00015,
+          "acq_peak": 0.0003,
+          "lock_fcs": "on",
+          "stop_after_sfd": "off",
+          "autocorr_when_locked": "scan"
+        },
+        "lock_stats": {
+          "final_state": "locked",
+          "expected_slots": 993,
+          "submitted": 993,
+          "dropped_queue": 0,
+          "expired": 0,
+          "not_detected": 0,
+          "decode_failed": 0,
+          "fcs_ok": 996,
+          "fcs_failed": 2,
+          "observations": 998,
+          "stale": 0,
+          "duplicate": 0,
+          "identity_rejects": 2,
+          "out_of_grid": 0,
+          "queue_full": 0,
+          "residual_outliers": 0,
+          "lock_entries": 1,
+          "holdover_entries": 0,
+          "reacquire_entries": 0,
+          "discontinuities": 0,
+          "candidates": 0,
+          "cand_target": 0,
+          "cand_interference": 0,
+          "cand_unknown": 0,
+          "period_updates": 995,
+          "pre_guard_updates": 1,
+          "lock_slots": 3,
+          "period_samples": 737279,
+          "period_ppm": -0.833748,
+          "scheduler_target_slots": 993,
+          "scheduler_target_dropped": 0,
+          "scheduler_target_expired": 0,
+          "autocorr_dedup": 0,
+          "autocorr_dedup_confirmed": 0,
+          "autocorr_dedup_ambiguous": 0,
+          "autocorr_unknown": 996,
+          "interference_events": 0,
+          "cand_submit_attempts": 5,
+          "cand_admitted": 5,
+          "cand_dropped_queue": 0,
+          "cand_incomplete": 1,
+          "cand_overrun": 0,
+          "cand_overlapping": 0,
+          "cand_invalid_gap": 0,
+          "autocorr_ignored": 996,
+          "autocorr_suspend_events": 0,
+          "autocorr_resume_events": 0,
+          "autocorr_suspended_samples": 0,
+          "autocorr_resume_backlog_samples": 0
+        },
+        "cost_total": {
+          "frontend_us": 124492.551,
+          "frontend_copy_us": 216.803,
+          "frontend_scan_us": 124528.84,
+          "acq_seeds": 1002,
+          "frontend_samples": 737280000,
+          "estimate_us": 1901.494,
+          "cancel_us": 97998.248,
+          "cancelled_samples": 737280000,
+          "bypassed_samples": 0,
+          "model_updates": 50,
+          "model_rejects": 0,
+          "training_windows": 50,
+          "reader_us": 995833.153
+        },
+        "final": {
+          "completed": 999,
+          "fcs": "996/999",
+          "raw_samples": 737280000,
+          "raw_drop_samples": 0,
+          "source_errors": 0,
+          "gaps": 0,
+          "models": 50,
+          "output_omitted": 0,
+          "full_retry": 0,
+          "acq_seeds": 1002,
+          "submit_attempts": 998,
+          "admitted": 998,
+          "dropped_queue": 0,
+          "demod_completed": 998,
+          "fcs_ok": 996
+        },
+        "summary_lines": [
+          {
+            "completed": 999,
+            "batch": 999,
+            "batch_fcs": "996/999",
+            "batch_pct": 99.7,
+            "total_fcs": "996/999",
+            "total_pct": 99.7,
+            "full_retry": 0,
+            "raw_drop_samples": 0,
+            "source_errors": 0,
+            "gaps": 0,
+            "models": 50,
+            "queued": 0,
+            "queue_peak": 1,
+            "output_omitted": 0,
+            "compute_mean": 546.0,
+            "compute_p95": 616.9,
+            "resample_mean": 306.6,
+            "resample_p95": 348.4,
+            "demod_mean": 239.3,
+            "demod_p95": 274.5,
+            "INCOMPLETE_WINDOW": 1,
+            "SFD_FAILED": 2,
+            "_kind": "SUMMARY_PARTIAL"
+          }
+        ],
+        "summary_failures": {
+          "incomplete_window": 1,
+          "sfd_failed": 2
+        },
+        "lock_events": {
+          "verify": 1,
+          "locked": 1
+        },
+        "line_counts": {
+          "START": 1,
+          "LOCK_STATS": 1,
+          "COST_TOTAL": 1,
+          "FINAL": 1,
+          "SUMMARY": 0,
+          "SUMMARY_PARTIAL": 1,
+          "LOCK": 2
+        }
+      },
+      "metrics": {
+        "fcs_ok": 996,
+        "not_detected": 0,
+        "fcs_failed": 2,
+        "identity_rejects": 2,
+        "lock_entries": 1,
+        "holdover_entries": 0,
+        "reacquire_entries": 0,
+        "expected_slots": 993,
+        "submitted": 993,
+        "dropped_queue": 0,
+        "expired": 0,
+        "candidates": 0,
+        "cand_target": 0,
+        "cand_unknown": 0,
+        "autocorr_ignored": 996,
+        "decode_failed": 0,
+        "out_of_grid": 0,
+        "stale": 0,
+        "duplicate": 0,
+        "discontinuities": 0,
+        "cand_submit_attempts": 5,
+        "cand_admitted": 5,
+        "cand_dropped_queue": 0,
+        "cand_incomplete": 1,
+        "autocorr_suspend_events": 0,
+        "autocorr_resume_events": 0,
+        "autocorr_suspended_samples": 0,
+        "autocorr_resume_backlog_samples": 0,
+        "frontend_scan_us": 124528.84,
+        "frontend_us": 124492.551,
+        "frontend_copy_us": 216.803,
+        "acq_seeds": 1002,
+        "frontend_samples": 737280000,
+        "reader_us": 995833.153,
+        "final_completed": 999,
+        "final_fcs_ok": 996,
+        "final_demod_completed": 998,
+        "final_raw_drop_samples": 0,
+        "final_gaps": 0,
+        "final_fcs_total": 999,
+        "frontend_scan_fraction": 1.0002914953521997,
+        "scan_us_per_sample": 0.0001689030490451389,
+        "target_fcs_pct": 100.30211480362537,
+        "summary_dropped_queue_failures": 0,
+        "summary_incomplete_window": 1,
+        "summary_invalid_gap": 0,
+        "summary_payload_failed": 0,
+        "summary_sfd_failed": 2,
+        "summary_timing_failed": 0
+      }
+    }
+  ],
+  "pairs": [
+    {
+      "round": 1,
+      "scan_run": 1,
+      "suspend_run": 2,
+      "scan_wall_s": 1.0242424390162341,
+      "suspend_wall_s": 1.0240439979825169,
+      "metrics": {
+        "fcs_ok": {
+          "scan": 997,
+          "suspend": 996
+        },
+        "not_detected": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "fcs_failed": {
+          "scan": 2,
+          "suspend": 2
+        },
+        "identity_rejects": {
+          "scan": 2,
+          "suspend": 2
+        },
+        "lock_entries": {
+          "scan": 1,
+          "suspend": 1
+        },
+        "holdover_entries": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "reacquire_entries": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "expected_slots": {
+          "scan": 993,
+          "suspend": 993
+        },
+        "submitted": {
+          "scan": 993,
+          "suspend": 993
+        },
+        "dropped_queue": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "expired": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "candidates": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_target": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_unknown": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "autocorr_ignored": {
+          "scan": 995,
+          "suspend": 0
+        },
+        "decode_failed": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "out_of_grid": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "stale": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "duplicate": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "discontinuities": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_submit_attempts": {
+          "scan": 6,
+          "suspend": 5
+        },
+        "cand_admitted": {
+          "scan": 6,
+          "suspend": 5
+        },
+        "cand_dropped_queue": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_incomplete": {
+          "scan": 1,
+          "suspend": 1
+        },
+        "autocorr_suspend_events": {
+          "scan": 0,
+          "suspend": 1
+        },
+        "autocorr_resume_events": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "autocorr_suspended_samples": {
+          "scan": 0,
+          "suspend": 732954624
+        },
+        "autocorr_resume_backlog_samples": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "frontend_scan_us": {
+          "scan": 126019.296,
+          "suspend": 1643.366
+        },
+        "frontend_us": {
+          "scan": 125978.371,
+          "suspend": 1596.873
+        },
+        "frontend_copy_us": {
+          "scan": 211.553,
+          "suspend": 216.497
+        },
+        "acq_seeds": {
+          "scan": 1002,
+          "suspend": 6
+        },
+        "frontend_samples": {
+          "scan": 737280000,
+          "suspend": 737280000
+        },
+        "reader_us": {
+          "scan": 995327.16,
+          "suspend": 996000.82
+        },
+        "final_completed": {
+          "scan": 1000,
+          "suspend": 999
+        },
+        "final_fcs_ok": {
+          "scan": 997,
+          "suspend": 996
+        },
+        "final_demod_completed": {
+          "scan": 999,
+          "suspend": 998
+        },
+        "final_raw_drop_samples": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "final_gaps": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "frontend_scan_fraction": {
+          "scan": 1.0003248573519021,
+          "suspend": 1.0291150266802682
+        },
+        "scan_us_per_sample": {
+          "scan": 0.000170924609375,
+          "suspend": 2.228957790798611e-06
+        },
+        "target_fcs_pct": {
+          "scan": 100.40281973816717,
+          "suspend": 100.30211480362537
+        }
+      }
+    },
+    {
+      "round": 2,
+      "scan_run": 4,
+      "suspend_run": 3,
+      "scan_wall_s": 1.025374200020451,
+      "suspend_wall_s": 1.0238062539719976,
+      "metrics": {
+        "fcs_ok": {
+          "scan": 997,
+          "suspend": 997
+        },
+        "not_detected": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "fcs_failed": {
+          "scan": 2,
+          "suspend": 2
+        },
+        "identity_rejects": {
+          "scan": 2,
+          "suspend": 2
+        },
+        "lock_entries": {
+          "scan": 1,
+          "suspend": 1
+        },
+        "holdover_entries": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "reacquire_entries": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "expected_slots": {
+          "scan": 993,
+          "suspend": 992
+        },
+        "submitted": {
+          "scan": 993,
+          "suspend": 992
+        },
+        "dropped_queue": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "expired": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "candidates": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_target": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_unknown": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "autocorr_ignored": {
+          "scan": 995,
+          "suspend": 0
+        },
+        "decode_failed": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "out_of_grid": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "stale": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "duplicate": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "discontinuities": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_submit_attempts": {
+          "scan": 6,
+          "suspend": 7
+        },
+        "cand_admitted": {
+          "scan": 6,
+          "suspend": 7
+        },
+        "cand_dropped_queue": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_incomplete": {
+          "scan": 1,
+          "suspend": 1
+        },
+        "autocorr_suspend_events": {
+          "scan": 0,
+          "suspend": 1
+        },
+        "autocorr_resume_events": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "autocorr_suspended_samples": {
+          "scan": 0,
+          "suspend": 731971584
+        },
+        "autocorr_resume_backlog_samples": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "frontend_scan_us": {
+          "scan": 126656.466,
+          "suspend": 2237.781
+        },
+        "frontend_us": {
+          "scan": 126619.006,
+          "suspend": 2188.02
+        },
+        "frontend_copy_us": {
+          "scan": 214.833,
+          "suspend": 209.466
+        },
+        "acq_seeds": {
+          "scan": 1002,
+          "suspend": 8
+        },
+        "frontend_samples": {
+          "scan": 737280000,
+          "suspend": 737280000
+        },
+        "reader_us": {
+          "scan": 995836.491,
+          "suspend": 995822.723
+        },
+        "final_completed": {
+          "scan": 1000,
+          "suspend": 1000
+        },
+        "final_fcs_ok": {
+          "scan": 997,
+          "suspend": 997
+        },
+        "final_demod_completed": {
+          "scan": 999,
+          "suspend": 999
+        },
+        "final_raw_drop_samples": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "final_gaps": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "frontend_scan_fraction": {
+          "scan": 1.0002958481604256,
+          "suspend": 1.0227424795020155
+        },
+        "scan_us_per_sample": {
+          "scan": 0.00017178882649739583,
+          "suspend": 3.0351847330729166e-06
+        },
+        "target_fcs_pct": {
+          "scan": 100.40281973816717,
+          "suspend": 100.50403225806451
+        }
+      }
+    },
+    {
+      "round": 3,
+      "scan_run": 5,
+      "suspend_run": 6,
+      "scan_wall_s": 1.0225407159887254,
+      "suspend_wall_s": 1.0234167340095155,
+      "metrics": {
+        "fcs_ok": {
+          "scan": 996,
+          "suspend": 996
+        },
+        "not_detected": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "fcs_failed": {
+          "scan": 2,
+          "suspend": 2
+        },
+        "identity_rejects": {
+          "scan": 2,
+          "suspend": 2
+        },
+        "lock_entries": {
+          "scan": 1,
+          "suspend": 1
+        },
+        "holdover_entries": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "reacquire_entries": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "expected_slots": {
+          "scan": 993,
+          "suspend": 993
+        },
+        "submitted": {
+          "scan": 993,
+          "suspend": 993
+        },
+        "dropped_queue": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "expired": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "candidates": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_target": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_unknown": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "autocorr_ignored": {
+          "scan": 996,
+          "suspend": 0
+        },
+        "decode_failed": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "out_of_grid": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "stale": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "duplicate": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "discontinuities": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_submit_attempts": {
+          "scan": 5,
+          "suspend": 5
+        },
+        "cand_admitted": {
+          "scan": 5,
+          "suspend": 5
+        },
+        "cand_dropped_queue": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_incomplete": {
+          "scan": 1,
+          "suspend": 1
+        },
+        "autocorr_suspend_events": {
+          "scan": 0,
+          "suspend": 1
+        },
+        "autocorr_resume_events": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "autocorr_suspended_samples": {
+          "scan": 0,
+          "suspend": 732954624
+        },
+        "autocorr_resume_backlog_samples": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "frontend_scan_us": {
+          "scan": 124687.419,
+          "suspend": 1783.022
+        },
+        "frontend_us": {
+          "scan": 124646.96,
+          "suspend": 1728.134
+        },
+        "frontend_copy_us": {
+          "scan": 212.477,
+          "suspend": 206.78
+        },
+        "acq_seeds": {
+          "scan": 1002,
+          "suspend": 6
+        },
+        "frontend_samples": {
+          "scan": 737280000,
+          "suspend": 737280000
+        },
+        "reader_us": {
+          "scan": 995707.57,
+          "suspend": 995898.28
+        },
+        "final_completed": {
+          "scan": 999,
+          "suspend": 999
+        },
+        "final_fcs_ok": {
+          "scan": 996,
+          "suspend": 996
+        },
+        "final_demod_completed": {
+          "scan": 998,
+          "suspend": 998
+        },
+        "final_raw_drop_samples": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "final_gaps": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "frontend_scan_fraction": {
+          "scan": 1.000324588742477,
+          "suspend": 1.0317614259079446
+        },
+        "scan_us_per_sample": {
+          "scan": 0.00016911813557942708,
+          "suspend": 2.418378363715278e-06
+        },
+        "target_fcs_pct": {
+          "scan": 100.30211480362537,
+          "suspend": 100.30211480362537
+        }
+      }
+    },
+    {
+      "round": 4,
+      "scan_run": 8,
+      "suspend_run": 7,
+      "scan_wall_s": 1.0256835279869847,
+      "suspend_wall_s": 1.023721800011117,
+      "metrics": {
+        "fcs_ok": {
+          "scan": 996,
+          "suspend": 996
+        },
+        "not_detected": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "fcs_failed": {
+          "scan": 2,
+          "suspend": 2
+        },
+        "identity_rejects": {
+          "scan": 2,
+          "suspend": 2
+        },
+        "lock_entries": {
+          "scan": 1,
+          "suspend": 1
+        },
+        "holdover_entries": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "reacquire_entries": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "expected_slots": {
+          "scan": 993,
+          "suspend": 993
+        },
+        "submitted": {
+          "scan": 993,
+          "suspend": 993
+        },
+        "dropped_queue": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "expired": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "candidates": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_target": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_unknown": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "autocorr_ignored": {
+          "scan": 996,
+          "suspend": 0
+        },
+        "decode_failed": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "out_of_grid": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "stale": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "duplicate": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "discontinuities": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_submit_attempts": {
+          "scan": 5,
+          "suspend": 5
+        },
+        "cand_admitted": {
+          "scan": 5,
+          "suspend": 5
+        },
+        "cand_dropped_queue": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "cand_incomplete": {
+          "scan": 1,
+          "suspend": 1
+        },
+        "autocorr_suspend_events": {
+          "scan": 0,
+          "suspend": 1
+        },
+        "autocorr_resume_events": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "autocorr_suspended_samples": {
+          "scan": 0,
+          "suspend": 733020160
+        },
+        "autocorr_resume_backlog_samples": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "frontend_scan_us": {
+          "scan": 124528.84,
+          "suspend": 1842.926
+        },
+        "frontend_us": {
+          "scan": 124492.551,
+          "suspend": 1794.221
+        },
+        "frontend_copy_us": {
+          "scan": 216.803,
+          "suspend": 212.111
+        },
+        "acq_seeds": {
+          "scan": 1002,
+          "suspend": 6
+        },
+        "frontend_samples": {
+          "scan": 737280000,
+          "suspend": 737280000
+        },
+        "reader_us": {
+          "scan": 995833.153,
+          "suspend": 996136.818
+        },
+        "final_completed": {
+          "scan": 999,
+          "suspend": 999
+        },
+        "final_fcs_ok": {
+          "scan": 996,
+          "suspend": 996
+        },
+        "final_demod_completed": {
+          "scan": 998,
+          "suspend": 998
+        },
+        "final_raw_drop_samples": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "final_gaps": {
+          "scan": 0,
+          "suspend": 0
+        },
+        "frontend_scan_fraction": {
+          "scan": 1.0002914953521997,
+          "suspend": 1.0271454854223643
+        },
+        "scan_us_per_sample": {
+          "scan": 0.0001689030490451389,
+          "suspend": 2.4996283637152776e-06
+        },
+        "target_fcs_pct": {
+          "scan": 100.30211480362537,
+          "suspend": 100.30211480362537
+        }
+      }
+    }
+  ],
+  "metric_summary": {
+    "fcs_ok": {
+      "scan_values": [
+        997,
+        997,
+        996,
+        996
+      ],
+      "suspend_values": [
+        996,
+        997,
+        996,
+        996
+      ],
+      "deltas": [
+        -1,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 996.5,
+      "suspend_mean": 996.25,
+      "scan_min": 996,
+      "scan_max": 997,
+      "suspend_min": 996,
+      "suspend_max": 997,
+      "delta_median": 0.0,
+      "delta_mean": -0.25,
+      "relative_change_pct": -0.025088,
+      "n": 4
+    },
+    "not_detected": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "fcs_failed": {
+      "scan_values": [
+        2,
+        2,
+        2,
+        2
+      ],
+      "suspend_values": [
+        2,
+        2,
+        2,
+        2
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 2.0,
+      "suspend_mean": 2.0,
+      "scan_min": 2,
+      "scan_max": 2,
+      "suspend_min": 2,
+      "suspend_max": 2,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": 0.0,
+      "n": 4
+    },
+    "identity_rejects": {
+      "scan_values": [
+        2,
+        2,
+        2,
+        2
+      ],
+      "suspend_values": [
+        2,
+        2,
+        2,
+        2
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 2.0,
+      "suspend_mean": 2.0,
+      "scan_min": 2,
+      "scan_max": 2,
+      "suspend_min": 2,
+      "suspend_max": 2,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": 0.0,
+      "n": 4
+    },
+    "lock_entries": {
+      "scan_values": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "suspend_values": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 1.0,
+      "suspend_mean": 1.0,
+      "scan_min": 1,
+      "scan_max": 1,
+      "suspend_min": 1,
+      "suspend_max": 1,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": 0.0,
+      "n": 4
+    },
+    "holdover_entries": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "reacquire_entries": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "expected_slots": {
+      "scan_values": [
+        993,
+        993,
+        993,
+        993
+      ],
+      "suspend_values": [
+        993,
+        992,
+        993,
+        993
+      ],
+      "deltas": [
+        0,
+        -1,
+        0,
+        0
+      ],
+      "scan_mean": 993.0,
+      "suspend_mean": 992.75,
+      "scan_min": 993,
+      "scan_max": 993,
+      "suspend_min": 992,
+      "suspend_max": 993,
+      "delta_median": 0.0,
+      "delta_mean": -0.25,
+      "relative_change_pct": -0.025176,
+      "n": 4
+    },
+    "submitted": {
+      "scan_values": [
+        993,
+        993,
+        993,
+        993
+      ],
+      "suspend_values": [
+        993,
+        992,
+        993,
+        993
+      ],
+      "deltas": [
+        0,
+        -1,
+        0,
+        0
+      ],
+      "scan_mean": 993.0,
+      "suspend_mean": 992.75,
+      "scan_min": 993,
+      "scan_max": 993,
+      "suspend_min": 992,
+      "suspend_max": 993,
+      "delta_median": 0.0,
+      "delta_mean": -0.25,
+      "relative_change_pct": -0.025176,
+      "n": 4
+    },
+    "dropped_queue": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "expired": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "candidates": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "cand_target": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "cand_unknown": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "autocorr_ignored": {
+      "scan_values": [
+        995,
+        995,
+        996,
+        996
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        -995,
+        -995,
+        -996,
+        -996
+      ],
+      "scan_mean": 995.5,
+      "suspend_mean": 0.0,
+      "scan_min": 995,
+      "scan_max": 996,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": -995.5,
+      "delta_mean": -995.5,
+      "relative_change_pct": -100.0,
+      "n": 4
+    },
+    "decode_failed": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "out_of_grid": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "stale": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "duplicate": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "discontinuities": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "cand_submit_attempts": {
+      "scan_values": [
+        6,
+        6,
+        5,
+        5
+      ],
+      "suspend_values": [
+        5,
+        7,
+        5,
+        5
+      ],
+      "deltas": [
+        -1,
+        1,
+        0,
+        0
+      ],
+      "scan_mean": 5.5,
+      "suspend_mean": 5.5,
+      "scan_min": 5,
+      "scan_max": 6,
+      "suspend_min": 5,
+      "suspend_max": 7,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": 0.0,
+      "n": 4
+    },
+    "cand_admitted": {
+      "scan_values": [
+        6,
+        6,
+        5,
+        5
+      ],
+      "suspend_values": [
+        5,
+        7,
+        5,
+        5
+      ],
+      "deltas": [
+        -1,
+        1,
+        0,
+        0
+      ],
+      "scan_mean": 5.5,
+      "suspend_mean": 5.5,
+      "scan_min": 5,
+      "scan_max": 6,
+      "suspend_min": 5,
+      "suspend_max": 7,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": 0.0,
+      "n": 4
+    },
+    "cand_dropped_queue": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "cand_incomplete": {
+      "scan_values": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "suspend_values": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 1.0,
+      "suspend_mean": 1.0,
+      "scan_min": 1,
+      "scan_max": 1,
+      "suspend_min": 1,
+      "suspend_max": 1,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": 0.0,
+      "n": 4
+    },
+    "autocorr_suspend_events": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "deltas": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 1.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 1,
+      "suspend_max": 1,
+      "delta_median": 1.0,
+      "delta_mean": 1.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "autocorr_resume_events": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "autocorr_suspended_samples": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        732954624,
+        731971584,
+        732954624,
+        733020160
+      ],
+      "deltas": [
+        732954624,
+        731971584,
+        732954624,
+        733020160
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 732725248.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 731971584,
+      "suspend_max": 733020160,
+      "delta_median": 732954624.0,
+      "delta_mean": 732725248.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "autocorr_resume_backlog_samples": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "frontend_scan_us": {
+      "scan_values": [
+        126019.296,
+        126656.466,
+        124687.419,
+        124528.84
+      ],
+      "suspend_values": [
+        1643.366,
+        2237.781,
+        1783.022,
+        1842.926
+      ],
+      "deltas": [
+        -124375.93000000001,
+        -124418.685,
+        -122904.397,
+        -122685.91399999999
+      ],
+      "scan_mean": 125473.00525,
+      "suspend_mean": 1876.77375,
+      "scan_min": 124528.84,
+      "scan_max": 126656.466,
+      "suspend_min": 1643.366,
+      "suspend_max": 2237.781,
+      "delta_median": -123640.1635,
+      "delta_mean": -123596.2315,
+      "relative_change_pct": -98.504241,
+      "n": 4
+    },
+    "frontend_us": {
+      "scan_values": [
+        125978.371,
+        126619.006,
+        124646.96,
+        124492.551
+      ],
+      "suspend_values": [
+        1596.873,
+        2188.02,
+        1728.134,
+        1794.221
+      ],
+      "deltas": [
+        -124381.49799999999,
+        -124430.98599999999,
+        -122918.826,
+        -122698.33
+      ],
+      "scan_mean": 125434.222,
+      "suspend_mean": 1826.812,
+      "scan_min": 124492.551,
+      "scan_max": 126619.006,
+      "suspend_min": 1596.873,
+      "suspend_max": 2188.02,
+      "delta_median": -123650.162,
+      "delta_mean": -123607.41,
+      "relative_change_pct": -98.54361,
+      "n": 4
+    },
+    "frontend_copy_us": {
+      "scan_values": [
+        211.553,
+        214.833,
+        212.477,
+        216.803
+      ],
+      "suspend_values": [
+        216.497,
+        209.466,
+        206.78,
+        212.111
+      ],
+      "deltas": [
+        4.944000000000017,
+        -5.36699999999999,
+        -5.697000000000003,
+        -4.692000000000007
+      ],
+      "scan_mean": 213.9165,
+      "suspend_mean": 211.2135,
+      "scan_min": 211.553,
+      "scan_max": 216.803,
+      "suspend_min": 206.78,
+      "suspend_max": 216.497,
+      "delta_median": -5.0295,
+      "delta_mean": -2.703,
+      "relative_change_pct": -1.263577,
+      "n": 4
+    },
+    "acq_seeds": {
+      "scan_values": [
+        1002,
+        1002,
+        1002,
+        1002
+      ],
+      "suspend_values": [
+        6,
+        8,
+        6,
+        6
+      ],
+      "deltas": [
+        -996,
+        -994,
+        -996,
+        -996
+      ],
+      "scan_mean": 1002.0,
+      "suspend_mean": 6.5,
+      "scan_min": 1002,
+      "scan_max": 1002,
+      "suspend_min": 6,
+      "suspend_max": 8,
+      "delta_median": -996.0,
+      "delta_mean": -995.5,
+      "relative_change_pct": -99.351297,
+      "n": 4
+    },
+    "frontend_samples": {
+      "scan_values": [
+        737280000,
+        737280000,
+        737280000,
+        737280000
+      ],
+      "suspend_values": [
+        737280000,
+        737280000,
+        737280000,
+        737280000
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 737280000.0,
+      "suspend_mean": 737280000.0,
+      "scan_min": 737280000,
+      "scan_max": 737280000,
+      "suspend_min": 737280000,
+      "suspend_max": 737280000,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": 0.0,
+      "n": 4
+    },
+    "reader_us": {
+      "scan_values": [
+        995327.16,
+        995836.491,
+        995707.57,
+        995833.153
+      ],
+      "suspend_values": [
+        996000.82,
+        995822.723,
+        995898.28,
+        996136.818
+      ],
+      "deltas": [
+        673.6599999999162,
+        -13.768000000040047,
+        190.71000000007916,
+        303.66499999992084
+      ],
+      "scan_mean": 995676.0935,
+      "suspend_mean": 995964.66025,
+      "scan_min": 995327.16,
+      "scan_max": 995836.491,
+      "suspend_min": 995822.723,
+      "suspend_max": 996136.818,
+      "delta_median": 247.1875,
+      "delta_mean": 288.56675,
+      "relative_change_pct": 0.028982,
+      "n": 4
+    },
+    "final_completed": {
+      "scan_values": [
+        1000,
+        1000,
+        999,
+        999
+      ],
+      "suspend_values": [
+        999,
+        1000,
+        999,
+        999
+      ],
+      "deltas": [
+        -1,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 999.5,
+      "suspend_mean": 999.25,
+      "scan_min": 999,
+      "scan_max": 1000,
+      "suspend_min": 999,
+      "suspend_max": 1000,
+      "delta_median": 0.0,
+      "delta_mean": -0.25,
+      "relative_change_pct": -0.025013,
+      "n": 4
+    },
+    "final_fcs_ok": {
+      "scan_values": [
+        997,
+        997,
+        996,
+        996
+      ],
+      "suspend_values": [
+        996,
+        997,
+        996,
+        996
+      ],
+      "deltas": [
+        -1,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 996.5,
+      "suspend_mean": 996.25,
+      "scan_min": 996,
+      "scan_max": 997,
+      "suspend_min": 996,
+      "suspend_max": 997,
+      "delta_median": 0.0,
+      "delta_mean": -0.25,
+      "relative_change_pct": -0.025088,
+      "n": 4
+    },
+    "final_demod_completed": {
+      "scan_values": [
+        999,
+        999,
+        998,
+        998
+      ],
+      "suspend_values": [
+        998,
+        999,
+        998,
+        998
+      ],
+      "deltas": [
+        -1,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 998.5,
+      "suspend_mean": 998.25,
+      "scan_min": 998,
+      "scan_max": 999,
+      "suspend_min": 998,
+      "suspend_max": 999,
+      "delta_median": 0.0,
+      "delta_mean": -0.25,
+      "relative_change_pct": -0.025038,
+      "n": 4
+    },
+    "final_raw_drop_samples": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "final_gaps": {
+      "scan_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "suspend_values": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deltas": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scan_mean": 0.0,
+      "suspend_mean": 0.0,
+      "scan_min": 0,
+      "scan_max": 0,
+      "suspend_min": 0,
+      "suspend_max": 0,
+      "delta_median": 0.0,
+      "delta_mean": 0.0,
+      "relative_change_pct": null,
+      "n": 4
+    },
+    "frontend_scan_fraction": {
+      "scan_values": [
+        1.0003248573519021,
+        1.0002958481604256,
+        1.000324588742477,
+        1.0002914953521997
+      ],
+      "suspend_values": [
+        1.0291150266802682,
+        1.0227424795020155,
+        1.0317614259079446,
+        1.0271454854223643
+      ],
+      "deltas": [
+        0.02879016932836609,
+        0.022446631341589862,
+        0.031436837165467635,
+        0.026853990070164535
+      ],
+      "scan_mean": 1.000309,
+      "suspend_mean": 1.027691,
+      "scan_min": 1.0002914953521997,
+      "scan_max": 1.0003248573519021,
+      "suspend_min": 1.0227424795020155,
+      "suspend_max": 1.0317614259079446,
+      "delta_median": 0.027822,
+      "delta_mean": 0.027382,
+      "relative_change_pct": 2.737354,
+      "n": 4
+    },
+    "scan_us_per_sample": {
+      "scan_values": [
+        0.000170924609375,
+        0.00017178882649739583,
+        0.00016911813557942708,
+        0.0001689030490451389
+      ],
+      "suspend_values": [
+        2.228957790798611e-06,
+        3.0351847330729166e-06,
+        2.418378363715278e-06,
+        2.4996283637152776e-06
+      ],
+      "deltas": [
+        -0.0001686956515842014,
+        -0.00016875364176432292,
+        -0.00016669975721571182,
+        -0.00016640342068142361
+      ],
+      "scan_mean": 0.00017,
+      "suspend_mean": 3e-06,
+      "scan_min": 0.0001689030490451389,
+      "scan_max": 0.00017178882649739583,
+      "suspend_min": 2.228957790798611e-06,
+      "suspend_max": 3.0351847330729166e-06,
+      "delta_median": -0.000168,
+      "delta_mean": -0.000168,
+      "relative_change_pct": -98.235294,
+      "n": 4
+    },
+    "target_fcs_pct": {
+      "scan_values": [
+        100.40281973816717,
+        100.40281973816717,
+        100.30211480362537,
+        100.30211480362537
+      ],
+      "suspend_values": [
+        100.30211480362537,
+        100.50403225806451,
+        100.30211480362537,
+        100.30211480362537
+      ],
+      "deltas": [
+        -0.10070493454179541,
+        0.10121251989734503,
+        0.0,
+        0.0
+      ],
+      "scan_mean": 100.352467,
+      "suspend_mean": 100.352594,
+      "scan_min": 100.30211480362537,
+      "scan_max": 100.40281973816717,
+      "suspend_min": 100.30211480362537,
+      "suspend_max": 100.50403225806451,
+      "delta_median": 0.0,
+      "delta_mean": 0.000127,
+      "relative_change_pct": 0.000127,
+      "n": 4
+    }
+  },
+  "target": {
+    "identical": false,
+    "differences": [
+      {
+        "round": 1,
+        "metric": "fcs_ok",
+        "scan": 997,
+        "suspend": 996,
+        "delta": -1
+      }
+    ],
+    "totals_across_runs": {
+      "scan": {
+        "fcs_ok": 3986,
+        "not_detected": 0,
+        "fcs_failed": 8,
+        "identity_rejects": 8,
+        "lock_entries": 4,
+        "holdover_entries": 0,
+        "reacquire_entries": 0
+      },
+      "suspend": {
+        "fcs_ok": 3985,
+        "not_detected": 0,
+        "fcs_failed": 8,
+        "identity_rejects": 8,
+        "lock_entries": 4,
+        "holdover_entries": 0,
+        "reacquire_entries": 0
+      }
+    }
+  },
+  "notes": [
+    "fcs_ok/not_detected/fcs_failed/identity_rejects and the lock entries come from LOCK_STATS (target-lock scheduler counters).",
+    "final_* comes from FINAL: it includes acquire/candidate windows, so it is not target PRR and must not be quoted as such.",
+    "FINAL has no timing/sfd/payload counters; those come from the SUMMARY_* fail tokens (summary_timing_failed etc.).",
+    "frontend_scan_fraction can exceed 1 by <1%: frontend_us and frontend_scan_us take separate clock reads.",
+    "ABBA pairing: per block (A1,B1,B2,A2) pair 1 = (A1,B1) and pair 2 = (B2,A2); delta = suspend - scan.",
+    "runs are serial and ordered; wall_s is dominated by replay pacing, frontend_scan_us is the metric of interest."
+  ],
+  "warnings": [
+    "LD_LIBRARY_PATH was removed from the child environment"
+  ],
+  "finished_utc": "2026-11-20T08:54:37+00:00",
+  "gate_counters_present": true
+}

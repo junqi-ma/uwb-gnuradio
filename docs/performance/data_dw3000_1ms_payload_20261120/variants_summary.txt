@@ -1,0 +1,84 @@
+logs/var-cfoauto.log.gz: target 986/992 (99.40%) submitted 1002/1047 target_fail={'SFD_FAILED': 3, 'PAYLOAD_FAILED': 3} acquire_fail={'INCOMPLETE_WINDOW': 2, 'SFD_FAILED': 9, 'TIMING_FAILED': 28}
+  slot 9: OK spc_ppm=-15.911 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 85: OK spc_ppm=-10.626 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 253: PAYLOAD_FAILED spc_ppm=-9.587 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 295: OK spc_ppm=-6.601 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 401: PAYLOAD_FAILED spc_ppm=-7.704 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 468: PAYLOAD_FAILED spc_ppm=-9.037 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+logs/var-cfoskip.log.gz: target 982/991 (99.09%) submitted 999/1047 target_fail={'PAYLOAD_FAILED': 6, 'SFD_FAILED': 3} acquire_fail={'INCOMPLETE_WINDOW': 2, 'SFD_FAILED': 9, 'TIMING_FAILED': 28}
+  slot 9: OK spc_ppm=-15.911 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 85: OK spc_ppm=-10.626 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 253: PAYLOAD_FAILED spc_ppm=-9.587 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 295: OK spc_ppm=-6.601 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 401: PAYLOAD_FAILED spc_ppm=-7.704 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 468: PAYLOAD_FAILED spc_ppm=-9.037 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+logs/var-eq32legacy.log.gz: target 990/994 (99.60%) submitted 1004/1047 target_fail={'SFD_FAILED': 3, 'PAYLOAD_FAILED': 1} acquire_fail={'INCOMPLETE_WINDOW': 2, 'SFD_FAILED': 8, 'TIMING_FAILED': 29}
+  slot 9: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 85: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 253: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 295: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 401: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 468: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+logs/var-eq32.log.gz: target 988/992 (99.60%) submitted 1004/1047 target_fail={'SFD_FAILED': 3, 'PAYLOAD_FAILED': 1} acquire_fail={'INCOMPLETE_WINDOW': 2, 'SFD_FAILED': 8, 'TIMING_FAILED': 29}
+  slot 9: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 85: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 253: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 295: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 401: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 468: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+logs/var-fusedoff.log.gz: target 520/991 (52.47%) submitted 598/1483 target_fail={'DROPPED_QUEUE': 471} acquire_fail={'INCOMPLETE_WINDOW': 2, 'SFD_FAILED': 5, 'TIMING_FAILED': 14, 'DROPPED_QUEUE': 393}
+  slot 9: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 85: DROPPED_QUEUE spc_ppm=None grid_reject=None st_fused=None pay_legacy=None pay_fused=None
+  slot 253: DROPPED_QUEUE spc_ppm=None grid_reject=None st_fused=None pay_legacy=None pay_fused=None
+  slot 295: DROPPED_QUEUE spc_ppm=None grid_reject=None st_fused=None pay_legacy=None pay_fused=None
+  slot 401: DROPPED_QUEUE spc_ppm=None grid_reject=None st_fused=None pay_legacy=None pay_fused=None
+  slot 468: DROPPED_QUEUE spc_ppm=None grid_reject=None st_fused=None pay_legacy=None pay_fused=None
+logs/var-legacy-acq.log.gz: target 986/992 (99.40%) submitted 1002/1047 target_fail={'SFD_FAILED': 3, 'PAYLOAD_FAILED': 3} acquire_fail={'INCOMPLETE_WINDOW': 2, 'SFD_FAILED': 9, 'TIMING_FAILED': 28}
+  slot 9: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 85: OK spc_ppm=-10.626 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 253: PAYLOAD_FAILED spc_ppm=-9.587 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 295: OK spc_ppm=-6.601 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 401: PAYLOAD_FAILED spc_ppm=-7.704 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 468: PAYLOAD_FAILED spc_ppm=-9.037 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+logs/var-legacy-locked.log.gz: target 990/990 (100.00%) submitted 1008/1047 target_fail={} acquire_fail={'INCOMPLETE_WINDOW': 2, 'SFD_FAILED': 9, 'TIMING_FAILED': 28}
+  slot 9: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 85: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 253: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 295: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 401: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 468: OK spc_ppm=-0.652 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+logs/var-locked.log.gz: target 991/991 (100.00%) submitted 1008/1047 target_fail={} acquire_fail={'INCOMPLETE_WINDOW': 2, 'SFD_FAILED': 9, 'TIMING_FAILED': 28}
+  slot 9: OK spc_ppm=-2.815 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 85: OK spc_ppm=-4.593 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 253: OK spc_ppm=-4.079 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 295: OK spc_ppm=-5.813 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 401: OK spc_ppm=-5.344 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 468: OK spc_ppm=-1.471 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+logs/var-nospatiallegacy.log.gz: target 990/992 (99.80%) submitted 1006/1047 target_fail={'PAYLOAD_FAILED': 2} acquire_fail={'INCOMPLETE_WINDOW': 2, 'SFD_FAILED': 8, 'TIMING_FAILED': 28, 'PAYLOAD_FAILED': 1}
+  slot 9: OK spc_ppm=-5.606 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 85: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 253: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 295: OK spc_ppm=-2.919 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 401: OK spc_ppm=0.000 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 468: OK spc_ppm=-5.675 grid_reject=0 st_fused=0 pay_legacy=1 pay_fused=0
+logs/var-nospatial.log.gz: target 991/993 (99.80%) submitted 1006/1047 target_fail={'PAYLOAD_FAILED': 2} acquire_fail={'INCOMPLETE_WINDOW': 2, 'SFD_FAILED': 8, 'TIMING_FAILED': 28, 'PAYLOAD_FAILED': 1}
+  slot 9: OK spc_ppm=-5.606 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 85: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 253: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 295: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 401: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 468: OK spc_ppm=-5.675 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+logs/var-ondemandoff.log.gz: target 985/991 (99.39%) submitted 1002/1047 target_fail={'SFD_FAILED': 3, 'PAYLOAD_FAILED': 3} acquire_fail={'INCOMPLETE_WINDOW': 2, 'SFD_FAILED': 9, 'TIMING_FAILED': 28}
+  slot 9: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 85: OK spc_ppm=-10.626 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 253: PAYLOAD_FAILED spc_ppm=-9.587 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 295: OK spc_ppm=-6.601 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 401: PAYLOAD_FAILED spc_ppm=-7.704 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 468: PAYLOAD_FAILED spc_ppm=-9.037 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+logs/var-quality.log.gz: target 989/992 (99.70%) submitted 1006/1047 target_fail={'PAYLOAD_FAILED': 1, 'SFD_FAILED': 2} acquire_fail={'INCOMPLETE_WINDOW': 2, 'SFD_FAILED': 8, 'TIMING_FAILED': 28}
+  slot 9: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 85: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 253: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 295: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 401: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1
+  slot 468: OK spc_ppm=0.000 grid_reject=0 st_fused=1 pay_legacy=0 pay_fused=1

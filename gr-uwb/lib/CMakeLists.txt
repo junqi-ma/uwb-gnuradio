@@ -126,6 +126,7 @@ install(EXPORT uwb-export FILE uwbTargets.cmake NAMESPACE uwb::
 
 # Native unit tests
 list(APPEND uwb_core_qa_sources
+    qa_uwb_autocorr_gate.cc
     qa_uwb_cfo_derotate.cc
     qa_uwb_defaults.cc
     qa_uwb_demod_core.cc

@@ -1,0 +1,94 @@
+[
+  {
+    "acquire": 55,
+    "acquire_fail": {
+      "INCOMPLETE_WINDOW": 2,
+      "SFD_FAILED": 9,
+      "TIMING_FAILED": 28
+    },
+    "acquire_ok": 16,
+    "focus": {
+      "253": {
+        "cfo_khz": "5.687",
+        "cirmetric": "0.5943",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3244",
+        "spc_ppm": "-9.587",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.2411"
+      },
+      "295": {
+        "cfo_khz": "5.892",
+        "cirmetric": "0.5939",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.0884",
+        "spc_ppm": "-6.601",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.0986"
+      },
+      "401": {
+        "cfo_khz": "4.706",
+        "cirmetric": "0.6032",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.2942",
+        "spc_ppm": "-7.704",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.2973"
+      },
+      "468": {
+        "cfo_khz": "5.816",
+        "cirmetric": "0.5799",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3235",
+        "spc_ppm": "-9.037",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.3310"
+      },
+      "85": {
+        "cfo_khz": "5.294",
+        "cirmetric": "0.6023",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.1784",
+        "spc_ppm": "-10.626",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.1633"
+      },
+      "9": {
+        "cfo_khz": "5.625",
+        "cirmetric": "0.5353",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3311",
+        "spc_ppm": "-15.911",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3234"
+      }
+    },
+    "log": "logs/offline-w1.log.gz",
+    "submitted": 1047,
+    "submitted_ok": 1002,
+    "target": 992,
+    "target_fail": {
+      "PAYLOAD_FAILED": 3,
+      "SFD_FAILED": 3
+    },
+    "target_ok": 986
+  }
+]

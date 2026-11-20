@@ -1,0 +1,451 @@
+{
+  "schema": 3,
+  "replay": {
+    "path": "/tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16",
+    "sha256": "66b2a0d51669305d828548c8e3fb32d9e475c5a22fa7c2f2fe8220f519b4bfb4"
+  },
+  "args": "--period-ms 1 --tone off --workers 1 --print packets --sync locked --interference off --fused on --cir full --taps eq16",
+  "method": {
+    "packet_key": "time_ms; packet IDs can shift by one when the startup acquire window differs, so IDs are not a stable key",
+    "decision_fields": [
+      "status",
+      "path",
+      "sfd",
+      "phr",
+      "fcs",
+      "crc",
+      "psdu",
+      "len"
+    ],
+    "noise_floor": "the same baseline binary is compared with itself twice; the threaded live receiver is not bit-reproducible run to run",
+    "lock_stats": "all pre-existing fields compared; the four new autocorr_* counters appear only as base=None vs candidate=0 and are separately required to be 0 on scan"
+  },
+  "comparisons": [
+    {
+      "label": "base/baseline pair 1",
+      "full_json_path": "/tmp/opencode/scan_base_vs_base_w1.json",
+      "full_json_sha256": "c7f6b4857dc64f05bfa040b845c294efb03bd92258b12c39b0744465e9d9ca65",
+      "packets_baseline": 998,
+      "packets_candidate": 998,
+      "times_only_baseline": [],
+      "times_only_candidate": [],
+      "period_ppm_baseline": "-0.793856",
+      "period_ppm_candidate": "-0.793856",
+      "final_baseline": "FINAL completed=998 fcs=998/998 raw_samples=0 raw_drop_samples=0 source_errors=0 gaps=0 models=0 output_omitted=0 full_retry=0 acq_seeds=1000 submit_attempts=998 admitted=998 dropped_queue=0 demod_completed=998 fcs_ok=998",
+      "final_candidate": "FINAL completed=998 fcs=998/998 raw_samples=0 raw_drop_samples=0 source_errors=0 gaps=0 models=0 output_omitted=0 full_retry=0 acq_seeds=1000 submit_attempts=998 admitted=998 dropped_queue=0 demod_completed=998 fcs_ok=998",
+      "final_equal": true,
+      "decision_field_differences": [],
+      "start_sample_differences": [],
+      "derived_numeric_packet_differences": [
+        {
+          "time_ms": 7.577,
+          "field": "cfo_khz"
+        }
+      ],
+      "lock_stats_differences": []
+    },
+    {
+      "label": "base/baseline pair 2",
+      "full_json_path": "/tmp/opencode/scan_base_vs_base_w1_b.json",
+      "full_json_sha256": "d685c0458daa7500201c44b4557870d5fa2c02f0f2d1356c7433f31752973aec",
+      "packets_baseline": 998,
+      "packets_candidate": 999,
+      "times_only_baseline": [],
+      "times_only_candidate": [
+        3.577
+      ],
+      "period_ppm_baseline": "-0.793856",
+      "period_ppm_candidate": "-0.793856",
+      "final_baseline": "FINAL completed=998 fcs=998/998 raw_samples=0 raw_drop_samples=0 source_errors=0 gaps=0 models=0 output_omitted=0 full_retry=0 acq_seeds=1000 submit_attempts=998 admitted=998 dropped_queue=0 demod_completed=998 fcs_ok=998",
+      "final_candidate": "FINAL completed=999 fcs=999/999 raw_samples=0 raw_drop_samples=0 source_errors=0 gaps=0 models=0 output_omitted=0 full_retry=0 acq_seeds=1000 submit_attempts=999 admitted=999 dropped_queue=0 demod_completed=999 fcs_ok=999",
+      "final_equal": false,
+      "decision_field_differences": [],
+      "start_sample_differences": [
+        {
+          "time_ms": 19.577,
+          "base": "14433971",
+          "cand": "14433970",
+          "delta": -1
+        }
+      ],
+      "derived_numeric_packet_differences": [
+        {
+          "time_ms": 6.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 7.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 8.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 19.577,
+          "field": "cfo_khz"
+        }
+      ],
+      "lock_stats_differences": [
+        {
+          "field": "autocorr_ignored",
+          "base": "997",
+          "cand": "996"
+        },
+        {
+          "field": "autocorr_unknown",
+          "base": "997",
+          "cand": "996"
+        },
+        {
+          "field": "cand_admitted",
+          "base": "3",
+          "cand": "4"
+        },
+        {
+          "field": "cand_submit_attempts",
+          "base": "3",
+          "cand": "4"
+        },
+        {
+          "field": "fcs_ok",
+          "base": "998",
+          "cand": "999"
+        },
+        {
+          "field": "observations",
+          "base": "998",
+          "cand": "999"
+        },
+        {
+          "field": "period_updates",
+          "base": "997",
+          "cand": "998"
+        }
+      ]
+    },
+    {
+      "label": "base/new scan",
+      "full_json_path": "/tmp/opencode/scan_candidate_vs_base_w1_final.json",
+      "full_json_sha256": "36086be9bf24dc30ac78171bd822b652daf016ff046412a3e1bd0c0b31292cf8",
+      "packets_baseline": 999,
+      "packets_candidate": 999,
+      "times_only_baseline": [],
+      "times_only_candidate": [],
+      "period_ppm_baseline": "-0.833748",
+      "period_ppm_candidate": "-0.793856",
+      "final_baseline": "FINAL completed=999 fcs=999/999 raw_samples=0 raw_drop_samples=0 source_errors=0 gaps=0 models=0 output_omitted=0 full_retry=0 acq_seeds=1000 submit_attempts=999 admitted=999 dropped_queue=0 demod_completed=999 fcs_ok=999",
+      "final_candidate": "FINAL completed=999 fcs=999/999 raw_samples=0 raw_drop_samples=0 source_errors=0 gaps=0 models=0 output_omitted=0 full_retry=0 acq_seeds=1000 submit_attempts=999 admitted=999 dropped_queue=0 demod_completed=999 fcs_ok=999",
+      "final_equal": true,
+      "decision_field_differences": [],
+      "start_sample_differences": [
+        {
+          "time_ms": 82.577,
+          "base": "60882572",
+          "cand": "60882573",
+          "delta": 1
+        },
+        {
+          "time_ms": 87.577,
+          "base": "64568970",
+          "cand": "64568969",
+          "delta": -1
+        },
+        {
+          "time_ms": 97.577,
+          "base": "71941763",
+          "cand": "71941764",
+          "delta": 1
+        },
+        {
+          "time_ms": 102.577,
+          "base": "75628161",
+          "cand": "75628160",
+          "delta": -1
+        },
+        {
+          "time_ms": 112.577,
+          "base": "83000954",
+          "cand": "83000955",
+          "delta": 1
+        },
+        {
+          "time_ms": 117.577,
+          "base": "86687352",
+          "cand": "86687351",
+          "delta": -1
+        },
+        {
+          "time_ms": 127.577,
+          "base": "94060145",
+          "cand": "94060146",
+          "delta": 1
+        },
+        {
+          "time_ms": 132.577,
+          "base": "97746543",
+          "cand": "97746542",
+          "delta": -1
+        },
+        {
+          "time_ms": 142.577,
+          "base": "105119336",
+          "cand": "105119337",
+          "delta": 1
+        },
+        {
+          "time_ms": 147.577,
+          "base": "108805734",
+          "cand": "108805733",
+          "delta": -1
+        },
+        {
+          "time_ms": 924.577,
+          "base": "681671826",
+          "cand": "681671827",
+          "delta": 1
+        },
+        {
+          "time_ms": 937.577,
+          "base": "691256458",
+          "cand": "691256459",
+          "delta": 1
+        },
+        {
+          "time_ms": 942.577,
+          "base": "694942856",
+          "cand": "694942855",
+          "delta": -1
+        },
+        {
+          "time_ms": 952.577,
+          "base": "702315649",
+          "cand": "702315650",
+          "delta": 1
+        },
+        {
+          "time_ms": 957.577,
+          "base": "706002047",
+          "cand": "706002046",
+          "delta": -1
+        },
+        {
+          "time_ms": 967.577,
+          "base": "713374840",
+          "cand": "713374841",
+          "delta": 1
+        },
+        {
+          "time_ms": 972.577,
+          "base": "717061238",
+          "cand": "717061237",
+          "delta": -1
+        },
+        {
+          "time_ms": 982.577,
+          "base": "724434031",
+          "cand": "724434032",
+          "delta": 1
+        },
+        {
+          "time_ms": 987.577,
+          "base": "728120429",
+          "cand": "728120428",
+          "delta": -1
+        },
+        {
+          "time_ms": 997.577,
+          "base": "735493222",
+          "cand": "735493223",
+          "delta": 1
+        }
+      ],
+      "derived_numeric_packet_differences": [
+        {
+          "time_ms": 82.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 87.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 97.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 102.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 112.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 117.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 127.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 132.577,
+          "field": "cfo_init_hz"
+        },
+        {
+          "time_ms": 142.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 147.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 924.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 937.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 942.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 952.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 957.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 967.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 972.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 982.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 987.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 997.577,
+          "field": "cfo_khz"
+        }
+      ],
+      "lock_stats_differences": [
+        {
+          "field": "autocorr_resume_backlog_samples",
+          "base": null,
+          "cand": "0"
+        },
+        {
+          "field": "autocorr_resume_events",
+          "base": null,
+          "cand": "0"
+        },
+        {
+          "field": "autocorr_suspend_events",
+          "base": null,
+          "cand": "0"
+        },
+        {
+          "field": "autocorr_suspended_samples",
+          "base": null,
+          "cand": "0"
+        },
+        {
+          "field": "period_ppm",
+          "base": "-0.833748",
+          "cand": "-0.793856"
+        }
+      ]
+    },
+    {
+      "label": "new/new scan",
+      "full_json_path": "/tmp/opencode/scan_cand_vs_cand_w1.json",
+      "full_json_sha256": "c5ae4df9afad2c561a568935fdf336d82da0572369b55932b86a4b3d431fd04a",
+      "packets_baseline": 998,
+      "packets_candidate": 999,
+      "times_only_baseline": [],
+      "times_only_candidate": [
+        3.577
+      ],
+      "period_ppm_baseline": "-0.793856",
+      "period_ppm_candidate": "-0.793856",
+      "final_baseline": "FINAL completed=998 fcs=998/998 raw_samples=0 raw_drop_samples=0 source_errors=0 gaps=0 models=0 output_omitted=0 full_retry=0 acq_seeds=1000 submit_attempts=998 admitted=998 dropped_queue=0 demod_completed=998 fcs_ok=998",
+      "final_candidate": "FINAL completed=999 fcs=999/999 raw_samples=0 raw_drop_samples=0 source_errors=0 gaps=0 models=0 output_omitted=0 full_retry=0 acq_seeds=1000 submit_attempts=999 admitted=999 dropped_queue=0 demod_completed=999 fcs_ok=999",
+      "final_equal": false,
+      "decision_field_differences": [],
+      "start_sample_differences": [
+        {
+          "time_ms": 19.577,
+          "base": "14433971",
+          "cand": "14433970",
+          "delta": -1
+        }
+      ],
+      "derived_numeric_packet_differences": [
+        {
+          "time_ms": 6.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 7.577,
+          "field": "cfo_khz"
+        },
+        {
+          "time_ms": 19.577,
+          "field": "cfo_khz"
+        }
+      ],
+      "lock_stats_differences": [
+        {
+          "field": "autocorr_ignored",
+          "base": "997",
+          "cand": "996"
+        },
+        {
+          "field": "autocorr_unknown",
+          "base": "997",
+          "cand": "996"
+        },
+        {
+          "field": "cand_admitted",
+          "base": "3",
+          "cand": "4"
+        },
+        {
+          "field": "cand_submit_attempts",
+          "base": "3",
+          "cand": "4"
+        },
+        {
+          "field": "fcs_ok",
+          "base": "998",
+          "cand": "999"
+        },
+        {
+          "field": "observations",
+          "base": "998",
+          "cand": "999"
+        },
+        {
+          "field": "period_updates",
+          "base": "997",
+          "cand": "998"
+        }
+      ]
+    }
+  ],
+  "interpretation": "Every comparison has 0 decision-field differences (status/path/SFD/PHR/FCS/CRC/PSDU). The 998 vs 999 completed count is one extra pre-lock acquire window in whichever run sees it; the same difference occurs between two runs of the unchanged baseline. Start-sample (-1/+1) and derived CFO/metric differences track the run-specific fitted period_ppm (-0.8337 or -0.7939), which also varies between same-binary runs. The scan path therefore adds no decode-decision change; exact byte identity is not achievable because the live feedback loop is timing-dependent."
+}

@@ -162,6 +162,54 @@ with tempfile.TemporaryDirectory(prefix='uwb-live-console-') as temporary:
         assert 'START ' not in rejected.stdout, rejected.stdout
 
     # ------------------------------------------------------------------
+    # Locked-state autocorrelation gate:
+    #   - default is scan and the four counters are present but zero;
+    #   - auto resolves by --interference;
+    #   - suspend + --interference on fails closed before START;
+    #   - bad mode/lookback fail closed.
+    # ------------------------------------------------------------------
+    gate_keys = ('autocorr_suspend_events', 'autocorr_resume_events',
+                 'autocorr_suspended_samples',
+                 'autocorr_resume_backlog_samples')
+    scan = subprocess.run(
+        [binary, '--replay', str(path), '--summary', '1'],
+        capture_output=True, text=True, timeout=30)
+    assert scan.returncode == 0, scan.stderr + scan.stdout
+    fields = start_fields(scan.stdout)
+    assert fields['autocorr_when_locked'] == 'scan', fields
+    lock_line = re.search(r'^LOCK_STATS .*$', scan.stdout, re.M)
+    assert lock_line is not None, scan.stdout
+    for key in gate_keys:
+        assert f' {key}=0 ' in lock_line.group(0) + ' ', lock_line.group(0)
+
+    auto_off = subprocess.run(
+        [binary, '--replay', str(path), '--summary', '1',
+         '--autocorr-when-locked', 'auto', '--interference', 'off'],
+        capture_output=True, text=True, timeout=30)
+    assert auto_off.returncode == 0, auto_off.stderr + auto_off.stdout
+    assert start_fields(auto_off.stdout)['autocorr_when_locked'] == 'suspend'
+    auto_on = subprocess.run(
+        [binary, '--replay', str(path), '--summary', '1',
+         '--autocorr-when-locked', 'auto', '--interference', 'on'],
+        capture_output=True, text=True, timeout=30)
+    assert auto_on.returncode == 0, auto_on.stderr + auto_on.stdout
+    assert start_fields(auto_on.stdout)['autocorr_when_locked'] == 'scan'
+
+    for extra, why in [
+        (['--autocorr-when-locked', 'suspend', '--interference', 'on'],
+         'requires --interference off'),
+        (['--autocorr-when-locked', 'on'], 'invalid --autocorr-when-locked'),
+        (['--autocorr-when-locked', 'SUSPEND'], 'invalid --autocorr-when-locked'),
+        (['--autocorr-resume-lookback', '-2'], 'must be >= -1'),
+    ]:
+        rejected = subprocess.run(
+            [binary, '--replay', str(path), '--summary', '1'] + extra,
+            capture_output=True, text=True, timeout=30)
+        assert rejected.returncode == 2, (extra, rejected.stdout + rejected.stderr)
+        assert why in rejected.stderr, (extra, rejected.stderr)
+        assert 'START ' not in rejected.stdout, (extra, rejected.stdout)
+
+    # ------------------------------------------------------------------
     # Low-SNR lock/capture switches.
     #
     # Both are strict on|off: they change what the lock and the demodulator

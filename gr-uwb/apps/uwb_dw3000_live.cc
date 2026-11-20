@@ -23,6 +23,7 @@
 // push bounded observations back.
 #include "uwb_live_packet_processor.h"
 #include "bpm_ablation_env.h"
+#include <gnuradio/uwb/uwb_autocorr_gate.h>
 #include <gnuradio/uwb/uwb_demod_grid.h>
 #include <gnuradio/uwb/uwb_fixed_tone_cancel_source.h>
 #include <gnuradio/uwb/uwb_hrp_mod_core.h>
@@ -153,6 +154,7 @@ struct Options {
     double tone_period_ms = 20.0;   // model update cadence (diagnostic sweep)
     double tone_training_ms = 0.5;  // training window at each period start
     bool fused = true;       // fused payload + PHR CMF/despread
+    bool sfo_from_cfo = true; // derive chip/symbol period from Stage-2 CFO (-cfo/freq)
     // Integer chip-grid admission tolerance in ppm.  Defaults to the physical
     // ceiling (1 sample of drift over the 127 B payload); see
     // Qm35825Profile::fused_gate_ppm for why a tighter gate is counterproductive.
@@ -183,6 +185,14 @@ struct Options {
     size_t acq_persist = 12000;
     double acq_low = 0.00015;
     double acq_peak = 0.00030;
+    // Locked-state autocorrelation policy.  "scan" (default) keeps the legacy
+    // behaviour: every RX block is scanned.  "suspend" stops the scan while
+    // the lock is tracking (Verify/Locked/Holdover) and requires
+    // --interference off; "auto" resolves to suspend only when interference
+    // monitoring is off.  A lookback of -1 means acq_span + window (one
+    // autocorrelation platform plus one packet window); 0 resumes at `end`.
+    std::string autocorr_when_locked = "scan";
+    long long autocorr_resume_lookback = -1;
     double timed_lead_us = 300.0;
     double timed_t0_ms = 0.0;
     size_t timed_lookahead = 4, timed_alignment = 4;
@@ -575,6 +585,8 @@ struct Workers {
             acq.rx_softchip_on_demand = o.ondemand_resolved;
             acq.rx_fused_payload_cmf = o.fused;
             acq.rx_fused_phr_cmf = o.fused;
+            acq.rx_sfo_from_cfo = o.sfo_from_cfo;
+            acq.carrier_freq_hz = o.freq;
             // Runtime ablation level (UWB_BPM_LEVEL=0..4); unset keeps --fused.
             apps::apply_bpm_ablation(acq, true);
             acq.fused_gate_ppm = o.fused_gate_ppm;
@@ -1244,9 +1256,16 @@ try {
                 "  ~3-6x lower correlation cost; falls back if the template is\n"
                 "  not code*p)\n"
                 "--interference on|off (default on)\n"
+                "--autocorr-when-locked scan|suspend|auto (default scan;\n"
+                "  suspend pauses the autocorrelation scan while the lock is\n"
+                "  tracking and requires --interference off;\n"
+                "  auto = suspend when --interference off, else scan)\n"
+                "--autocorr-resume-lookback N (default -1 = acq_span+window;\n"
+                "  0 = resume at current end; N is native samples)\n"
                 "--tone on|off (fixed-tone cancellation, default on)\n"
                 "--tone-period-ms 20 --tone-training-ms 0.5 (model cadence)\n"
                 "--fused on|off (fused payload+PHR CMF, default on)\n"
+                "--sfo-from-cfo on|off (derive SFO/period from Stage-2 CFO and --freq, default on)\n"
                 "--fused-gate-ppm 6.468 (integer chip-grid admission; ceiling = 1 sample of drift)\n"
                 "--ondemand auto|on|off (on-demand soft-chip prefix, default auto = follow --fused)\n"
                 "--cfo-refit legacy|auto|skip (SFD-anchored CFO refit + second full-frame\n"
@@ -1301,6 +1320,7 @@ try {
         else if (key=="--tone-period-ms") o.tone_period_ms=std::stod(value());
         else if (key=="--tone-training-ms") o.tone_training_ms=std::stod(value());
         else if (key=="--fused") o.fused=(value()!="off");
+        else if (key=="--sfo-from-cfo") o.sfo_from_cfo=(value()!="off");
         else if (key=="--fused-gate-ppm") o.fused_gate_ppm=std::stod(value());
         else if (key=="--ondemand") o.ondemand=value();
         else if (key=="--cfo-refit") o.cfo_refit=value();
@@ -1311,6 +1331,8 @@ try {
         else if (key=="--acq-persist") o.acq_persist=std::stoul(value());
         else if (key=="--acq-low") o.acq_low=std::stod(value());
         else if (key=="--acq-peak") o.acq_peak=std::stod(value());
+        else if (key=="--autocorr-when-locked") o.autocorr_when_locked=value();
+        else if (key=="--autocorr-resume-lookback") o.autocorr_resume_lookback=std::stoll(value());
         else if (key=="--timed-lead-us") o.timed_lead_us=std::stod(value());
         else if (key=="--timed-lookahead") o.timed_lookahead=std::stoul(value());
         else if (key=="--timed-alignment") o.timed_alignment=std::stoul(value());
@@ -1372,6 +1394,16 @@ try {
     if (!(o.acq_low > 0.0) || o.acq_low >= 1.0 || !std::isfinite(o.acq_low) ||
         !(o.acq_peak >= o.acq_low) || o.acq_peak >= 1.0 || !std::isfinite(o.acq_peak))
         throw std::runtime_error("--acq-low/--acq-peak must satisfy 0 < low <= peak < 1");
+    // Locked-state scan policy.  Resolve it here, BEFORE the device/replay
+    // source is opened: `suspend` with --interference on must fail closed at
+    // startup instead of silently disabling interference monitoring.
+    if (o.autocorr_resume_lookback < -1)
+        throw std::runtime_error("--autocorr-resume-lookback must be >= -1 "
+                                 "(-1 = acq_span + window)");
+    const auto autocorr_mode =
+        live::parse_autocorr_when_locked(o.autocorr_when_locked);
+    const bool autocorr_suspend =
+        live::resolve_autocorr_suspend(autocorr_mode, o.interference);
     // The gate is a drift budget: above the physical ceiling (1 sample over the
     // 127 B payload = 6.5 ppm) the integer grid cannot stay on the correlation
     // peak, so accepting it would produce silently wrong soft chips.
@@ -1498,7 +1530,8 @@ try {
         " acq_low="+std::to_string(o.acq_low)+
         " acq_peak="+std::to_string(o.acq_peak)+
         " lock_fcs="+o.lock_fcs+
-        " stop_after_sfd="+o.stop_after_sfd);
+        " stop_after_sfd="+o.stop_after_sfd+
+        " autocorr_when_locked="+std::string(autocorr_suspend?"suspend":"scan"));
     // Effective pre-guard for the next cut window.  It follows the lock state:
     // the blind acquisition platform needs the wide guard, the locked
     // predictor only needs the bounded ROI.  Every window cut (target,
@@ -1612,6 +1645,15 @@ try {
     Acquisition acq;
     acq.configure(int64_t(o.acq_span), int64_t(o.acq_step),
                   int64_t(o.acq_persist), o.acq_low, o.acq_peak);
+    // Locked-state autocorrelation gate.  The policy was resolved during CLI
+    // validation (before the source opened); only the -1 lookback default
+    // depends on the configured acq_span, so it is resolved here.
+    live::AutocorrGate autocorr_gate;
+    autocorr_gate.enabled = autocorr_suspend;
+    const int64_t autocorr_lookback =
+        (o.autocorr_resume_lookback == -1)
+            ? int64_t(o.acq_span) + int64_t(window)
+            : int64_t(o.autocorr_resume_lookback);
     if (!src->open()) throw std::runtime_error("cannot open UHD/replay or tone configuration");
     if (std::abs(src->actual_rx_rate()-fs)>.5) throw std::runtime_error("unexpected RX rate");
     if (!src->start_stream()) throw std::runtime_error("cannot start RX stream");
@@ -1765,16 +1807,26 @@ try {
             end+=n; valid_begin=std::max(valid_begin,end-int64_t(history_size));
             const auto copy_done = Clock::now();
             if (o.mode != "timed") {
+                // Locked-state scan gate: while the lock is tracking the scan
+                // may be suspended (see --autocorr-when-locked).  On resume the
+                // acquisition is reset into the backlog so packets that arrived
+                // during the teardown latency are still scanned.
+                const auto gate_action = autocorr_gate.update(
+                    lock.scheduled(), end, valid_begin, autocorr_lookback, n);
+                if (gate_action.reset)
+                    acq.reset(gate_action.reset_at);
                 // A block reads [probe, probe+step-1] and [probe+lag,
                 // probe+step-1+lag], so the tail of the block must already be
                 // inside the valid range.
-                while (acq.probe+acq.step-1+Acquisition::lag<end) {
-                    double metric = 0.0;
-                    const auto seed=acq.scan(ring,&metric);
-                    if (seed<0) continue;
-                    submissions.handle_autocorr_seed(
-                        seed, metric, valid_begin, cur_pre_guard, window,
-                        o.interference, id, lock, report);
+                if (gate_action.scan) {
+                    while (acq.probe+acq.step-1+Acquisition::lag<end) {
+                        double metric = 0.0;
+                        const auto seed=acq.scan(ring,&metric);
+                        if (seed<0) continue;
+                        submissions.handle_autocorr_seed(
+                            seed, metric, valid_begin, cur_pre_guard, window,
+                            o.interference, id, lock, report);
+                    }
                 }
                 submissions.submit_ready_acquire_window(
                     end, valid_begin, window, ring, lock, workers, report);
@@ -1906,7 +1958,11 @@ try {
           << " cand_overrun=" << cand_overrun
           << " cand_overlapping=" << cand_overlapping
           << " cand_invalid_gap=" << cand_invalid_gap
-          << " autocorr_ignored=" << autocorr_ignored;
+          << " autocorr_ignored=" << autocorr_ignored
+          << " autocorr_suspend_events=" << autocorr_gate.suspend_events
+          << " autocorr_resume_events=" << autocorr_gate.resume_events
+          << " autocorr_suspended_samples=" << autocorr_gate.suspended_samples
+          << " autocorr_resume_backlog_samples=" << autocorr_gate.resume_backlog_samples;
         report.info(s.str());
     }
     if (timed) {

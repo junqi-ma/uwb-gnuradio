@@ -1,0 +1,6 @@
+acq_seeds=14920 candidates=14912 target=12220 unknown=2692 admitted=2699
+target: 14534/14534 = 100.00% (not_detected=2 fcs_failed=1 identity_rejects=2)
+aggregate: 15003/17234 = 87.05%
+extra candidate windows≈2700, candidate_ok=469, candidate_fail≈2231
+failures=2231: {'TIMING_FAILED': 1827, 'SFD_FAILED': 402, 'INCOMPLETE_WINDOW': 1, 'PAYLOAD_FAILED': 1}
+first batch=79.1% best=92.8% worst=79.1%

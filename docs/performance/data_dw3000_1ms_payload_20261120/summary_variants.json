@@ -1,0 +1,1100 @@
+[
+  {
+    "acquire": 55,
+    "acquire_fail": {
+      "INCOMPLETE_WINDOW": 2,
+      "SFD_FAILED": 9,
+      "TIMING_FAILED": 28
+    },
+    "acquire_ok": 16,
+    "focus": {
+      "253": {
+        "cfo_khz": "5.687",
+        "cirmetric": "0.5943",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3244",
+        "spc_ppm": "-9.587",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.2411"
+      },
+      "295": {
+        "cfo_khz": "5.892",
+        "cirmetric": "0.5939",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.0884",
+        "spc_ppm": "-6.601",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.0986"
+      },
+      "401": {
+        "cfo_khz": "4.706",
+        "cirmetric": "0.6032",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.2942",
+        "spc_ppm": "-7.704",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.2973"
+      },
+      "468": {
+        "cfo_khz": "5.816",
+        "cirmetric": "0.5799",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3235",
+        "spc_ppm": "-9.037",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.3310"
+      },
+      "85": {
+        "cfo_khz": "5.294",
+        "cirmetric": "0.6023",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.1784",
+        "spc_ppm": "-10.626",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.1633"
+      },
+      "9": {
+        "cfo_khz": "5.625",
+        "cirmetric": "0.5353",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3311",
+        "spc_ppm": "-15.911",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3234"
+      }
+    },
+    "log": "logs/var-cfoauto.log.gz",
+    "submitted": 1047,
+    "submitted_ok": 1002,
+    "target": 992,
+    "target_fail": {
+      "PAYLOAD_FAILED": 3,
+      "SFD_FAILED": 3
+    },
+    "target_ok": 986
+  },
+  {
+    "acquire": 56,
+    "acquire_fail": {
+      "INCOMPLETE_WINDOW": 2,
+      "SFD_FAILED": 9,
+      "TIMING_FAILED": 28
+    },
+    "acquire_ok": 17,
+    "focus": {
+      "253": {
+        "cfo_khz": "5.687",
+        "cirmetric": "0.5943",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3244",
+        "spc_ppm": "-9.587",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.2411"
+      },
+      "295": {
+        "cfo_khz": "5.892",
+        "cirmetric": "0.5939",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.0884",
+        "spc_ppm": "-6.601",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.0986"
+      },
+      "401": {
+        "cfo_khz": "4.706",
+        "cirmetric": "0.6032",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.2942",
+        "spc_ppm": "-7.704",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.2973"
+      },
+      "468": {
+        "cfo_khz": "5.816",
+        "cirmetric": "0.5799",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3235",
+        "spc_ppm": "-9.037",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.3310"
+      },
+      "85": {
+        "cfo_khz": "5.294",
+        "cirmetric": "0.6023",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.1784",
+        "spc_ppm": "-10.626",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.1633"
+      },
+      "9": {
+        "cfo_khz": "5.625",
+        "cirmetric": "0.5353",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3311",
+        "spc_ppm": "-15.911",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3234"
+      }
+    },
+    "log": "logs/var-cfoskip.log.gz",
+    "submitted": 1047,
+    "submitted_ok": 999,
+    "target": 991,
+    "target_fail": {
+      "PAYLOAD_FAILED": 6,
+      "SFD_FAILED": 3
+    },
+    "target_ok": 982
+  },
+  {
+    "acquire": 53,
+    "acquire_fail": {
+      "INCOMPLETE_WINDOW": 2,
+      "SFD_FAILED": 8,
+      "TIMING_FAILED": 29
+    },
+    "acquire_ok": 14,
+    "focus": {
+      "253": {
+        "cfo_khz": "5.194",
+        "cirmetric": "0.6491",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3717",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3754"
+      },
+      "295": {
+        "cfo_khz": "5.447",
+        "cirmetric": "0.6411",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3358",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3501"
+      },
+      "401": {
+        "cfo_khz": "5.279",
+        "cirmetric": "0.6474",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3558",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3615"
+      },
+      "468": {
+        "cfo_khz": "5.100",
+        "cirmetric": "0.6302",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3182",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3060"
+      },
+      "85": {
+        "cfo_khz": "5.161",
+        "cirmetric": "0.6485",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3555",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3596"
+      },
+      "9": {
+        "cfo_khz": "5.004",
+        "cirmetric": "0.6152",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3380",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3385"
+      }
+    },
+    "log": "logs/var-eq32legacy.log.gz",
+    "submitted": 1047,
+    "submitted_ok": 1004,
+    "target": 994,
+    "target_fail": {
+      "PAYLOAD_FAILED": 1,
+      "SFD_FAILED": 3
+    },
+    "target_ok": 990
+  },
+  {
+    "acquire": 55,
+    "acquire_fail": {
+      "INCOMPLETE_WINDOW": 2,
+      "SFD_FAILED": 8,
+      "TIMING_FAILED": 29
+    },
+    "acquire_ok": 16,
+    "focus": {
+      "253": {
+        "cfo_khz": "5.194",
+        "cirmetric": "0.6491",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3717",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3754"
+      },
+      "295": {
+        "cfo_khz": "5.447",
+        "cirmetric": "0.6411",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3358",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3501"
+      },
+      "401": {
+        "cfo_khz": "5.279",
+        "cirmetric": "0.6474",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3558",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3615"
+      },
+      "468": {
+        "cfo_khz": "5.100",
+        "cirmetric": "0.6302",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3182",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3060"
+      },
+      "85": {
+        "cfo_khz": "5.161",
+        "cirmetric": "0.6485",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3555",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3596"
+      },
+      "9": {
+        "cfo_khz": "4.967",
+        "cirmetric": "0.6314",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3186",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3378"
+      }
+    },
+    "log": "logs/var-eq32.log.gz",
+    "submitted": 1047,
+    "submitted_ok": 1004,
+    "target": 992,
+    "target_fail": {
+      "PAYLOAD_FAILED": 1,
+      "SFD_FAILED": 3
+    },
+    "target_ok": 988
+  },
+  {
+    "acquire": 492,
+    "acquire_fail": {
+      "DROPPED_QUEUE": 393,
+      "INCOMPLETE_WINDOW": 2,
+      "SFD_FAILED": 5,
+      "TIMING_FAILED": 14
+    },
+    "acquire_ok": 78,
+    "focus": {
+      "253": {
+        "cfo_khz": null,
+        "cirmetric": null,
+        "grid_reject": null,
+        "pay_fused_calls": null,
+        "pay_legacy_calls": null,
+        "sfdmetric": null,
+        "spc_ppm": null,
+        "st_fused": null,
+        "status": "DROPPED_QUEUE",
+        "tmetric": null
+      },
+      "295": {
+        "cfo_khz": null,
+        "cirmetric": null,
+        "grid_reject": null,
+        "pay_fused_calls": null,
+        "pay_legacy_calls": null,
+        "sfdmetric": null,
+        "spc_ppm": null,
+        "st_fused": null,
+        "status": "DROPPED_QUEUE",
+        "tmetric": null
+      },
+      "401": {
+        "cfo_khz": null,
+        "cirmetric": null,
+        "grid_reject": null,
+        "pay_fused_calls": null,
+        "pay_legacy_calls": null,
+        "sfdmetric": null,
+        "spc_ppm": null,
+        "st_fused": null,
+        "status": "DROPPED_QUEUE",
+        "tmetric": null
+      },
+      "468": {
+        "cfo_khz": null,
+        "cirmetric": null,
+        "grid_reject": null,
+        "pay_fused_calls": null,
+        "pay_legacy_calls": null,
+        "sfdmetric": null,
+        "spc_ppm": null,
+        "st_fused": null,
+        "status": "DROPPED_QUEUE",
+        "tmetric": null
+      },
+      "85": {
+        "cfo_khz": null,
+        "cirmetric": null,
+        "grid_reject": null,
+        "pay_fused_calls": null,
+        "pay_legacy_calls": null,
+        "sfdmetric": null,
+        "spc_ppm": null,
+        "st_fused": null,
+        "status": "DROPPED_QUEUE",
+        "tmetric": null
+      },
+      "9": {
+        "cfo_khz": "5.608",
+        "cirmetric": "0.6474",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3619",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3596"
+      }
+    },
+    "log": "logs/var-fusedoff.log.gz",
+    "submitted": 1483,
+    "submitted_ok": 598,
+    "target": 991,
+    "target_fail": {
+      "DROPPED_QUEUE": 471
+    },
+    "target_ok": 520
+  },
+  {
+    "acquire": 55,
+    "acquire_fail": {
+      "INCOMPLETE_WINDOW": 2,
+      "SFD_FAILED": 9,
+      "TIMING_FAILED": 28
+    },
+    "acquire_ok": 16,
+    "focus": {
+      "253": {
+        "cfo_khz": "5.687",
+        "cirmetric": "0.5943",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3244",
+        "spc_ppm": "-9.587",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.2411"
+      },
+      "295": {
+        "cfo_khz": "5.892",
+        "cirmetric": "0.5939",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.0884",
+        "spc_ppm": "-6.601",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.0986"
+      },
+      "401": {
+        "cfo_khz": "4.706",
+        "cirmetric": "0.6032",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.2942",
+        "spc_ppm": "-7.704",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.2973"
+      },
+      "468": {
+        "cfo_khz": "5.816",
+        "cirmetric": "0.5799",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3235",
+        "spc_ppm": "-9.037",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.3310"
+      },
+      "85": {
+        "cfo_khz": "5.294",
+        "cirmetric": "0.6023",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.1784",
+        "spc_ppm": "-10.626",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.1633"
+      },
+      "9": {
+        "cfo_khz": "5.602",
+        "cirmetric": "0.6523",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3631",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3627"
+      }
+    },
+    "log": "logs/var-legacy-acq.log.gz",
+    "submitted": 1047,
+    "submitted_ok": 1002,
+    "target": 992,
+    "target_fail": {
+      "PAYLOAD_FAILED": 3,
+      "SFD_FAILED": 3
+    },
+    "target_ok": 986
+  },
+  {
+    "acquire": 57,
+    "acquire_fail": {
+      "INCOMPLETE_WINDOW": 2,
+      "SFD_FAILED": 9,
+      "TIMING_FAILED": 28
+    },
+    "acquire_ok": 18,
+    "focus": {
+      "253": {
+        "cfo_khz": "5.752",
+        "cirmetric": "0.6531",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3667",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3794"
+      },
+      "295": {
+        "cfo_khz": "5.381",
+        "cirmetric": "0.6240",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3183",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3325"
+      },
+      "401": {
+        "cfo_khz": "5.059",
+        "cirmetric": "0.6506",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3591",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3707"
+      },
+      "468": {
+        "cfo_khz": "5.248",
+        "cirmetric": "0.6096",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.2881",
+        "spc_ppm": "-0.652",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.2988"
+      },
+      "85": {
+        "cfo_khz": "4.836",
+        "cirmetric": "0.6503",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3538",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3573"
+      },
+      "9": {
+        "cfo_khz": "5.321",
+        "cirmetric": "0.6343",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3529",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.3468"
+      }
+    },
+    "log": "logs/var-legacy-locked.log.gz",
+    "submitted": 1047,
+    "submitted_ok": 1008,
+    "target": 990,
+    "target_fail": {},
+    "target_ok": 990
+  },
+  {
+    "acquire": 56,
+    "acquire_fail": {
+      "INCOMPLETE_WINDOW": 2,
+      "SFD_FAILED": 9,
+      "TIMING_FAILED": 28
+    },
+    "acquire_ok": 17,
+    "focus": {
+      "253": {
+        "cfo_khz": "5.687",
+        "cirmetric": "0.6316",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3244",
+        "spc_ppm": "-4.079",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.2411"
+      },
+      "295": {
+        "cfo_khz": "5.892",
+        "cirmetric": "0.6186",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.0884",
+        "spc_ppm": "-5.813",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.0986"
+      },
+      "401": {
+        "cfo_khz": "4.706",
+        "cirmetric": "0.6430",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.2942",
+        "spc_ppm": "-5.344",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.2973"
+      },
+      "468": {
+        "cfo_khz": "5.816",
+        "cirmetric": "0.6096",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3236",
+        "spc_ppm": "-1.471",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3310"
+      },
+      "85": {
+        "cfo_khz": "5.294",
+        "cirmetric": "0.6387",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.1785",
+        "spc_ppm": "-4.593",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.1633"
+      },
+      "9": {
+        "cfo_khz": "5.625",
+        "cirmetric": "0.6185",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3311",
+        "spc_ppm": "-2.815",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3234"
+      }
+    },
+    "log": "logs/var-locked.log.gz",
+    "submitted": 1047,
+    "submitted_ok": 1008,
+    "target": 991,
+    "target_fail": {},
+    "target_ok": 991
+  },
+  {
+    "acquire": 55,
+    "acquire_fail": {
+      "INCOMPLETE_WINDOW": 2,
+      "PAYLOAD_FAILED": 1,
+      "SFD_FAILED": 8,
+      "TIMING_FAILED": 28
+    },
+    "acquire_ok": 16,
+    "focus": {
+      "253": {
+        "cfo_khz": "5.190",
+        "cirmetric": "0.6152",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.7043",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.7130"
+      },
+      "295": {
+        "cfo_khz": "5.825",
+        "cirmetric": "0.6016",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.6020",
+        "spc_ppm": "-2.919",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.6126"
+      },
+      "401": {
+        "cfo_khz": "5.272",
+        "cirmetric": "0.6219",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.6789",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.6852"
+      },
+      "468": {
+        "cfo_khz": "5.079",
+        "cirmetric": "0.6424",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.6271",
+        "spc_ppm": "-5.675",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.5990"
+      },
+      "85": {
+        "cfo_khz": "5.155",
+        "cirmetric": "0.6168",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.6740",
+        "spc_ppm": "0.000",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.6867"
+      },
+      "9": {
+        "cfo_khz": "4.992",
+        "cirmetric": "0.6433",
+        "grid_reject": "0",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.6203",
+        "spc_ppm": "-5.606",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.6076"
+      }
+    },
+    "log": "logs/var-nospatiallegacy.log.gz",
+    "submitted": 1047,
+    "submitted_ok": 1006,
+    "target": 992,
+    "target_fail": {
+      "PAYLOAD_FAILED": 2
+    },
+    "target_ok": 990
+  },
+  {
+    "acquire": 54,
+    "acquire_fail": {
+      "INCOMPLETE_WINDOW": 2,
+      "PAYLOAD_FAILED": 1,
+      "SFD_FAILED": 8,
+      "TIMING_FAILED": 28
+    },
+    "acquire_ok": 15,
+    "focus": {
+      "253": {
+        "cfo_khz": "5.190",
+        "cirmetric": "0.6152",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.7043",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.7130"
+      },
+      "295": {
+        "cfo_khz": "5.465",
+        "cirmetric": "0.6239",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.6934",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.7214"
+      },
+      "401": {
+        "cfo_khz": "5.272",
+        "cirmetric": "0.6219",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.6789",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.6852"
+      },
+      "468": {
+        "cfo_khz": "5.079",
+        "cirmetric": "0.6424",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.6271",
+        "spc_ppm": "-5.675",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.5990"
+      },
+      "85": {
+        "cfo_khz": "5.155",
+        "cirmetric": "0.6168",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.6740",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.6867"
+      },
+      "9": {
+        "cfo_khz": "4.992",
+        "cirmetric": "0.6433",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.6203",
+        "spc_ppm": "-5.606",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.6076"
+      }
+    },
+    "log": "logs/var-nospatial.log.gz",
+    "submitted": 1047,
+    "submitted_ok": 1006,
+    "target": 993,
+    "target_fail": {
+      "PAYLOAD_FAILED": 2
+    },
+    "target_ok": 991
+  },
+  {
+    "acquire": 56,
+    "acquire_fail": {
+      "INCOMPLETE_WINDOW": 2,
+      "SFD_FAILED": 9,
+      "TIMING_FAILED": 28
+    },
+    "acquire_ok": 17,
+    "focus": {
+      "253": {
+        "cfo_khz": "5.687",
+        "cirmetric": "0.5943",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3244",
+        "spc_ppm": "-9.587",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.2411"
+      },
+      "295": {
+        "cfo_khz": "5.892",
+        "cirmetric": "0.5939",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.0884",
+        "spc_ppm": "-6.601",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.0986"
+      },
+      "401": {
+        "cfo_khz": "4.706",
+        "cirmetric": "0.6032",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.2942",
+        "spc_ppm": "-7.704",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.2973"
+      },
+      "468": {
+        "cfo_khz": "5.816",
+        "cirmetric": "0.5799",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.3235",
+        "spc_ppm": "-9.037",
+        "st_fused": "0",
+        "status": "PAYLOAD_FAILED",
+        "tmetric": "0.3310"
+      },
+      "85": {
+        "cfo_khz": "5.294",
+        "cirmetric": "0.6023",
+        "grid_reject": "1",
+        "pay_fused_calls": "0",
+        "pay_legacy_calls": "1",
+        "sfdmetric": "0.1784",
+        "spc_ppm": "-10.626",
+        "st_fused": "0",
+        "status": "OK",
+        "tmetric": "0.1633"
+      },
+      "9": {
+        "cfo_khz": "5.629",
+        "cirmetric": "0.5943",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3190",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3102"
+      }
+    },
+    "log": "logs/var-ondemandoff.log.gz",
+    "submitted": 1047,
+    "submitted_ok": 1002,
+    "target": 991,
+    "target_fail": {
+      "PAYLOAD_FAILED": 3,
+      "SFD_FAILED": 3
+    },
+    "target_ok": 985
+  },
+  {
+    "acquire": 55,
+    "acquire_fail": {
+      "INCOMPLETE_WINDOW": 2,
+      "SFD_FAILED": 8,
+      "TIMING_FAILED": 28
+    },
+    "acquire_ok": 17,
+    "focus": {
+      "253": {
+        "cfo_khz": "5.164",
+        "cirmetric": "0.6178",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3136",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3241"
+      },
+      "295": {
+        "cfo_khz": "5.482",
+        "cirmetric": "0.6249",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3459",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3492"
+      },
+      "401": {
+        "cfo_khz": "5.271",
+        "cirmetric": "0.6241",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3070",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3163"
+      },
+      "468": {
+        "cfo_khz": "5.090",
+        "cirmetric": "0.6335",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3523",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3389"
+      },
+      "85": {
+        "cfo_khz": "5.154",
+        "cirmetric": "0.6193",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3008",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3087"
+      },
+      "9": {
+        "cfo_khz": "4.979",
+        "cirmetric": "0.6493",
+        "grid_reject": "0",
+        "pay_fused_calls": "1",
+        "pay_legacy_calls": "0",
+        "sfdmetric": "0.3491",
+        "spc_ppm": "0.000",
+        "st_fused": "1",
+        "status": "OK",
+        "tmetric": "0.3638"
+      }
+    },
+    "log": "logs/var-quality.log.gz",
+    "submitted": 1047,
+    "submitted_ok": 1006,
+    "target": 992,
+    "target_fail": {
+      "PAYLOAD_FAILED": 1,
+      "SFD_FAILED": 2
+    },
+    "target_ok": 989
+  }
+]

@@ -299,6 +299,15 @@ struct Qm35825Profile {
     // detectRepeatedPreamble.m, so it must not replace the dense default.
     bool rx_timing_shaped_sparse = false;
 
+    // Derive the chip/symbol period (SFO) from the Stage-2 carrier frequency
+    // offset estimate (-cfo_hz / carrier_freq_hz) instead of the integer-peak
+    // OLS timing slope. On co-sourced crystal hardware (DW3000/QM35825 <-> X410),
+    // carrier phase rotation is orders of magnitude more precise than +/-1-sample
+    // SYNC peak quantization and eliminates 7-9 ppm outlier period fits.
+    // Disabled automatically if carrier_freq_hz <= 0 or non-finite.
+    bool rx_sfo_from_cfo = true;
+    double carrier_freq_hz = 6489.6e6; // IEEE 802.15.4a/z CH5 default (Hz)
+
     static Qm35825Profile Default() { return Qm35825Profile{}; }
 };
 

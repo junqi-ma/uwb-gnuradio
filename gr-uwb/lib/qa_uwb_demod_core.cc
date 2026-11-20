@@ -1744,19 +1744,55 @@ BOOST_AUTO_TEST_CASE(test_demod_core_r4_bad_input_fails_cleanly)
 
 namespace {
 
-// Inject a carrier rotation of +f Hz (e^{+j2π f n/fs}) into the golden window
-// and run the full demod chain (IEEE SFD, seeded at the golden preamble).
+// Apply co-sourced crystal CFO and matching SFO (rate = 1 + f_hz / carrier_freq_hz)
+// to a baseband signal at sample_rate. Preserves buffer length (zero-padded).
+std::vector<gr_complex> apply_cfo_sfo_constraint(
+    const std::vector<gr_complex>& iq,
+    double f_hz,
+    double sample_rate,
+    double carrier_freq_hz)
+{
+    std::vector<gr_complex> out(iq.size(), gr_complex(0.0f, 0.0f));
+    if (iq.empty())
+        return out;
+    const double rate = (carrier_freq_hz > 0.0)
+        ? (1.0 + f_hz / carrier_freq_hz)
+        : 1.0;
+    const double w = 2.0 * M_PI * f_hz / sample_rate;
+    for (size_t i = 0; i < iq.size(); ++i) {
+        gr_complex s(0.0f, 0.0f);
+        if (rate == 1.0) {
+            s = iq[i];
+        } else {
+            const double x = static_cast<double>(i) * rate;
+            const size_t i0 = static_cast<size_t>(x);
+            if (i0 + 1 < iq.size()) {
+                const double frac = x - static_cast<double>(i0);
+                s = iq[i0] * static_cast<float>(1.0 - frac) +
+                    iq[i0 + 1] * static_cast<float>(frac);
+            } else if (i0 < iq.size()) {
+                s = iq[i0];
+            }
+        }
+        if (f_hz != 0.0) {
+            const double ph = w * static_cast<double>(i);
+            s *= gr_complex(static_cast<float>(std::cos(ph)),
+                            static_cast<float>(std::sin(ph)));
+        }
+        out[i] = s;
+    }
+    return out;
+}
+
+// Inject a carrier rotation of +f Hz (e^{+j2π f n/fs}) together with its
+// co-sourced crystal SFO (1 + f/fc) into the golden window and run the full
+// demod chain (IEEE SFD, seeded at the golden preamble).
 DemodResult demod_window_with_cfo(const std::vector<gr_complex>& iq, double f_hz)
 {
     auto prof = Qm35825Profile::Default();
     prof.sfd_mode = "ieee";
-    const double w = 2.0 * M_PI * f_hz / prof.sample_rate;
-    std::vector<gr_complex> iqc(iq.size());
-    for (size_t i = 0; i < iq.size(); ++i) {
-        const double ph = w * static_cast<double>(i);
-        iqc[i] = iq[i] * gr_complex(static_cast<float>(std::cos(ph)),
-                                    static_cast<float>(std::sin(ph)));
-    }
+    auto iqc = apply_cfo_sfo_constraint(
+        iq, f_hz, prof.sample_rate, prof.carrier_freq_hz);
     core::DemodScratch scratch;
     scratch.reserve(iq.size());
     auto tmpl = load_reference_template();
@@ -1829,6 +1865,48 @@ BOOST_AUTO_TEST_CASE(test_demod_core_p0_cfo_sweep_awgn)
         BOOST_CHECK(res.payload.fcs_pass);
         BOOST_CHECK_EQUAL(res.payload.received_fcs, uint16_t(0x584b));
     }
+}
+
+BOOST_AUTO_TEST_CASE(test_demod_core_sfo_from_cfo_default_and_override)
+{
+    const auto def = Qm35825Profile::Default();
+    BOOST_CHECK(def.rx_sfo_from_cfo);
+    BOOST_CHECK_CLOSE(def.carrier_freq_hz, 6489.6e6, 1e-12);
+
+    std::vector<gr_complex> iq;
+    BOOST_REQUIRE(load_cf32(golden_dir() + "/window.cfile", iq));
+    const auto tmpl = load_reference_template();
+
+    // Coupled 27 ppm crystal offset: CFO = +175 kHz at 6489.6 MHz, SFO = +27 ppm.
+    constexpr double kCfoHz = 175000.0;
+    auto coupled = apply_cfo_sfo_constraint(
+        iq, kCfoHz, def.sample_rate, def.carrier_freq_hz);
+    auto p_on = Qm35825Profile::Default();
+    p_on.sfd_mode = "ieee";
+    core::DemodScratch scratch;
+    scratch.reserve(coupled.size());
+    const auto res_on = core::demodulate_one(
+        coupled.data(), coupled.size(), p_on, 1, 9984, 0, tmpl, scratch);
+    BOOST_CHECK(res_on.status == DemodStatus::Success);
+    BOOST_CHECK(res_on.payload.fcs_pass);
+    const double expected_period =
+        static_cast<double>(kQm35SamplesPerSymbol) /
+        (1.0 + res_on.cfo.cfo_hz / p_on.carrier_freq_hz);
+    BOOST_CHECK_CLOSE(res_on.timing.measured_period, expected_period, 1e-9);
+
+    // Explicit opt-out: decoupled CFO-only signal (0 ppm SFO) decodes cleanly
+    // when rx_sfo_from_cfo = false, using Stage-1 timing OLS period (~1016).
+    auto decoupled = apply_cfo_sfo_constraint(iq, kCfoHz, def.sample_rate, 0.0);
+    auto p_off = p_on;
+    p_off.rx_sfo_from_cfo = false;
+    const auto res_off = core::demodulate_one(
+        decoupled.data(), decoupled.size(), p_off, 2, 9984, 0, tmpl, scratch);
+    BOOST_CHECK(res_off.status == DemodStatus::Success);
+    BOOST_CHECK(res_off.payload.fcs_pass);
+    BOOST_CHECK_SMALL(
+        std::abs(res_off.timing.measured_period -
+                 static_cast<double>(kQm35SamplesPerSymbol)),
+        0.05);
 }
 
 // ---------------------------------------------------------------------------
@@ -3401,10 +3479,21 @@ BOOST_AUTO_TEST_CASE(test_demod_core_sfd_tail_cfo_uses_only_measured_peaks)
             base.insert(base.end(), golden.begin() + sfd - reps * sym, golden.end());
         }
         for (double hz : {0.0, -25000.0, 25000.0, -175000.0, 175000.0}) {
-            std::vector<gr_complex> rx(base.size());
+            const double rate = 1.0 + hz / Qm35825Profile::Default().carrier_freq_hz;
+            std::vector<gr_complex> rx(base.size(), gr_complex(0.0f, 0.0f));
             for (size_t k = 0; k < base.size(); ++k) {
+                const double x = static_cast<double>(k) * rate;
+                const size_t i0 = static_cast<size_t>(x);
+                gr_complex s(0.0f, 0.0f);
+                if (i0 + 1 < base.size()) {
+                    const double frac = x - static_cast<double>(i0);
+                    s = base[i0] * static_cast<float>(1.0 - frac) +
+                        base[i0 + 1] * static_cast<float>(frac);
+                } else if (i0 < base.size()) {
+                    s = base[i0];
+                }
                 const double phase = 2.0 * M_PI * hz * k / kQm35SampleRate;
-                rx[k] = base[k] * gr_complex(std::cos(phase), std::sin(phase));
+                rx[k] = s * gr_complex(std::cos(phase), std::sin(phase));
             }
             // Exercise both explicit tail re-tracking and the peak-reuse path.
             for (bool reuse : {false, true}) {

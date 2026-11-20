@@ -1,0 +1,158 @@
+{
+  "schema": 1,
+  "purpose": "Explain the ABBA fcs_ok +/-1 difference: locate it at the startup acquire/lock-entry boundary and show target slots decode identically.",
+  "fixture": "/tmp/opencode/uwb-live-1ms/dw3000_1ms_1s.sc16 sha256=66b2a0d51669305d828548c8e3fb32d9e475c5a22fa7c2f2fe8220f519b4bfb4",
+  "args": "--period-ms 1 --seconds 0 --sync locked --interference off --fused on --cir full --taps eq16 --workers 2 --queue 24 --print packets --summary 100000",
+  "runs": {
+    "scan_1": {
+      "log": "/tmp/opencode/entryjitter/scan_1.log",
+      "size": 1417821,
+      "sha256": "3e2c4f43585e1659f60a411678e1a9d905a2be1e8008cb004be3d3d2c6ea4015",
+      "expected_slots": "993",
+      "fcs_ok": "997",
+      "fcs_failed": "2",
+      "identity_rejects": "2",
+      "lock_entries": "1",
+      "target_packets": 993,
+      "target_first_ms": 6.577
+    },
+    "scan_2": {
+      "log": "/tmp/opencode/entryjitter/scan_2.log",
+      "size": 1416039,
+      "sha256": "ca1e72083b8eb4a6da7cdbd64509befd4651dd41abbb81d5974d876feee2bea8",
+      "expected_slots": "993",
+      "fcs_ok": "996",
+      "fcs_failed": "2",
+      "identity_rejects": "2",
+      "lock_entries": "1",
+      "target_packets": 993,
+      "target_first_ms": 6.577
+    },
+    "scan_3": {
+      "log": "/tmp/opencode/entryjitter/scan_3.log",
+      "size": 1416157,
+      "sha256": "b325935bc18d923d57ddf3942bd9b4c9629cc4b354dc403898135e126513659a",
+      "expected_slots": "993",
+      "fcs_ok": "996",
+      "fcs_failed": "2",
+      "identity_rejects": "2",
+      "lock_entries": "1",
+      "target_packets": 993,
+      "target_first_ms": 6.577
+    },
+    "scan_4": {
+      "log": "/tmp/opencode/entryjitter/scan_4.log",
+      "size": 1415944,
+      "sha256": "5ff1079772804db174f0f756e2e82f251b0c314582bc73e24f25e501a3c7c740",
+      "expected_slots": "993",
+      "fcs_ok": "996",
+      "fcs_failed": "2",
+      "identity_rejects": "2",
+      "lock_entries": "1",
+      "target_packets": 993,
+      "target_first_ms": 6.577
+    },
+    "suspend_1": {
+      "log": "/tmp/opencode/entryjitter/suspend_1.log",
+      "size": 1416021,
+      "sha256": "22fe94d23c61c70243accbe688aedc0f06e1e4e1999579d9068b8313b0e0e724",
+      "expected_slots": "993",
+      "fcs_ok": "996",
+      "fcs_failed": "2",
+      "identity_rejects": "2",
+      "lock_entries": "1",
+      "target_packets": 993,
+      "target_first_ms": 6.577
+    },
+    "suspend_2": {
+      "log": "/tmp/opencode/entryjitter/suspend_2.log",
+      "size": 1417416,
+      "sha256": "b2d8a7fa67687e61983e56e1142ca2f9ca0bc684112f932140fc0cff4af89b8d",
+      "expected_slots": "993",
+      "fcs_ok": "997",
+      "fcs_failed": "2",
+      "identity_rejects": "2",
+      "lock_entries": "1",
+      "target_packets": 993,
+      "target_first_ms": 6.577
+    },
+    "suspend_3": {
+      "log": "/tmp/opencode/entryjitter/suspend_3.log",
+      "size": 1417104,
+      "sha256": "a1a1b7f090466194721c64e66340abad1736b62a0da4b629b45b7c1e9a6a5a88",
+      "expected_slots": "993",
+      "fcs_ok": "997",
+      "fcs_failed": "2",
+      "identity_rejects": "2",
+      "lock_entries": "1",
+      "target_packets": 993,
+      "target_first_ms": 6.577
+    },
+    "suspend_4": {
+      "log": "/tmp/opencode/entryjitter/suspend_4.log",
+      "size": 1417024,
+      "sha256": "a454d0cf280c93467da9f2969f904c313159627f93b45742a1ccfbc57109b383",
+      "expected_slots": "993",
+      "fcs_ok": "997",
+      "fcs_failed": "2",
+      "identity_rejects": "2",
+      "lock_entries": "1",
+      "target_packets": 993,
+      "target_first_ms": 6.577
+    }
+  },
+  "pairs": [
+    {
+      "pair": 1,
+      "times_only_scan": [
+        5.577
+      ],
+      "times_only_suspend": [],
+      "decision_diffs": [],
+      "target_decision_diffs": [],
+      "scan_fcs_ok": "997",
+      "suspend_fcs_ok": "996",
+      "scan_expected_slots": "993",
+      "suspend_expected_slots": "993"
+    },
+    {
+      "pair": 2,
+      "times_only_scan": [],
+      "times_only_suspend": [
+        5.577
+      ],
+      "decision_diffs": [],
+      "target_decision_diffs": [],
+      "scan_fcs_ok": "996",
+      "suspend_fcs_ok": "997",
+      "scan_expected_slots": "993",
+      "suspend_expected_slots": "993"
+    },
+    {
+      "pair": 3,
+      "times_only_scan": [],
+      "times_only_suspend": [
+        5.577
+      ],
+      "decision_diffs": [],
+      "target_decision_diffs": [],
+      "scan_fcs_ok": "996",
+      "suspend_fcs_ok": "997",
+      "scan_expected_slots": "993",
+      "suspend_expected_slots": "993"
+    },
+    {
+      "pair": 4,
+      "times_only_scan": [],
+      "times_only_suspend": [
+        5.577
+      ],
+      "decision_diffs": [],
+      "target_decision_diffs": [],
+      "scan_fcs_ok": "996",
+      "suspend_fcs_ok": "997",
+      "scan_expected_slots": "993",
+      "suspend_expected_slots": "993"
+    }
+  ]
+}

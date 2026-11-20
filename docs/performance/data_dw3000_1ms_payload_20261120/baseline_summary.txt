@@ -1,0 +1,7 @@
+logs/offline-w1.log.gz: target 986/992 (99.40%) submitted 1002/1047 target_fail={'SFD_FAILED': 3, 'PAYLOAD_FAILED': 3} acquire_fail={'INCOMPLETE_WINDOW': 2, 'SFD_FAILED': 9, 'TIMING_FAILED': 28}
+  slot 9: OK spc_ppm=-15.911 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 85: OK spc_ppm=-10.626 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 253: PAYLOAD_FAILED spc_ppm=-9.587 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 295: OK spc_ppm=-6.601 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 401: PAYLOAD_FAILED spc_ppm=-7.704 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0
+  slot 468: PAYLOAD_FAILED spc_ppm=-9.037 grid_reject=1 st_fused=0 pay_legacy=1 pay_fused=0

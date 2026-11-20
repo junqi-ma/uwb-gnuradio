@@ -65,12 +65,15 @@ gr-uwb/build-native-only/apps/uwb_dw3000_live \
 | --- | --- |
 | `--fused` / `--cir` | `on` / `full`；Full 是融合 CMF 的前提 |
 | `--fused-gate-ppm` | 默认为物理漂移上限，约 6.468 ppm；必须正值且不超上限 |
+| `--sfo-from-cfo` | `on`；默认由 Stage-2 CFO 与 `--freq`（`carrier_freq_hz`）推导 `measured_period`（`-cfo_hz / carrier_freq_hz`），避免整数峰位量化离群；`off` 回退到 Stage-1 SYNC 峰位 OLS 拟合 |
 | `--ondemand` | `auto`，跟随 `--fused` |
 | `--tone` | `on`；20 ms 更新、0.5 ms 训练；只在连续模式启用 |
 | `--sync locked` | 锁定后使用局部 ROI，默认半宽 256 样点 |
 | `--taps` | `eq16`；可选 `quality/eq32/realtime/eq16` |
 | `--acq-span / --acq-step` | `192000 / 64`；积分对数 / 环表块粒度，不是抽取积分 |
 | `--acq-low / --acq-peak` | `0.00015 / 0.00030`；归一化延迟自相关门限 |
+| `--autocorr-when-locked` | `scan`；`suspend` 在锁跟踪（Verify/Locked/Holdover）期间暂停自相关扫描，失锁后回看积压再扫描；`auto` 在 `--interference off` 时等同 `suspend`，否则等同 `scan`。`suspend` 与 `--interference on` 同时使用会在启动时报错退出 |
+| `--autocorr-resume-lookback` | 默认 `192000+450000=642000` 原生样点；失锁恢复时从 `max(0, valid_begin, end-N)` 重新扫描，`0` 表示从当前 `end` 开始 |
 | `--lock-fcs` | `on`；`off` 允许前导+SFD 身份用于进锁 |
 | `--stop-after-sfd` | `off`；`on` 跳过 CIR/PHR/payload 与 auto Full 重试，结果不能计作完整 FCS |
 | `--stop-after-cir` | `off`；`on` 在 SFD+独立 CIR 估计后返回，跳过 CMF/PHR/payload（Sensing 模式） |
@@ -79,7 +82,19 @@ gr-uwb/build-native-only/apps/uwb_dw3000_live \
 | `--period-ms` | `5`；可按发送周期改为其他值 |
 | `--mode timed` | 仅 replay；无 replay 返回 2，单音消除关闭 |
 
-每包用 timing 周期估计统一决定整数网格准入，同时控制 CFO 旋转范围、前缀及融合。
+`--autocorr-when-locked` 的 `START` 输出解析后的
+`autocorr_when_locked=scan|suspend`；`LOCK_STATS` 末尾新增
+`autocorr_suspend_events/resume_events/suspended_samples/resume_backlog_samples`。
+`--interference off` 且锁定时 `suspend` 会停止 `acq.scan`，因此
+`acq_seeds`/`autocorr_ignored` 下降是统计口径变化，不代表检测能力变化。
+这两个参数只影响 continuous 模式；`--mode timed` 本就不跑自相关，门控
+计数恒为 0。`--autocorr-resume-lookback -1` 是默认哨兵，等同
+`acq_span+window`；除 `-1` 外的负值会被拒绝。
+当前默认仍为 `scan`；回放证据见
+[锁定后暂停自相关_实现与回放验证_2026-11-20](performance/锁定后暂停自相关_实现与回放验证_2026-11-20.md)，
+未上板。
+
+每包在 Stage-2 CFO 拟合之后统一计算周期估计（`--sfo-from-cfo on` 时由 `-cfo_hz / carrier_freq_hz` 推导，否则使用 Stage-1 timing 周期拟合），据此决定整数网格准入，同时控制 CFO 旋转范围、前缀及融合。
 拒绝准入时输出 `grid_reject`，按请求的 CIR 模式走分数网格的完整 soft-chip 路径。
 `sync` 记录初始定时实测的峰数，`sync_folded=1` 表示峰来自多符号折叠锚点，
 `sync_grid` 记录 CIR 所用拟合网格覆盖的符号数。`Qm35825Profile` 本身的融合标志默认关闭，不能将 live 的

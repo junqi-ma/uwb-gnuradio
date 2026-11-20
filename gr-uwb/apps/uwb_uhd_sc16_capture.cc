@@ -62,6 +62,7 @@ struct Options {
     std::string uhd_args;
     std::string uhd_subdev;
     std::string uhd_channel;
+    std::string uhd_antenna;
     double uhd_freq = 6489.6e6;
     double uhd_gain = 60.0;
     std::string template_file = "testdata/reference_preamble_code10_737p28.cf32";
@@ -89,6 +90,7 @@ void print_help(const char* prog)
         << "  --uhd-args <args>           UHD device args (e.g. addr=192.168.10.2)\n"
         << "  --uhd-subdev <spec>         RX subdev spec (e.g. B:1)\n"
         << "  --uhd-channel <n>           RX channel index\n"
+        << "  --uhd-antenna <name>        RX antenna (e.g. RX1; empty keeps device default)\n"
         << "  --freq <hz>                 Center frequency (default 6489.6e6)\n"
         << "  --gain <db>                 RX gain (default 60)\n"
         << "\nAnalysis:\n"
@@ -229,6 +231,8 @@ int main(int argc, char* argv[])
             opt.uhd_subdev = need("--uhd-subdev");
         } else if (arg == "--uhd-channel") {
             opt.uhd_channel = need("--uhd-channel");
+        } else if (arg == "--uhd-antenna") {
+            opt.uhd_antenna = need("--uhd-antenna");
         } else if (arg == "--freq") {
             opt.uhd_freq = std::stod(need("--freq"));
         } else if (arg == "--gain") {
@@ -290,6 +294,7 @@ int main(int argc, char* argv[])
     cfg.uhd_args = opt.uhd_args;
     cfg.uhd_subdev = opt.uhd_subdev;
     cfg.uhd_channel = opt.uhd_channel;
+    cfg.uhd_antenna = opt.uhd_antenna;
     cfg.uhd_center_freq = opt.uhd_freq;
     cfg.uhd_gain = opt.uhd_gain;
 
