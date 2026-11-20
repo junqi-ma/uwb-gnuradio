@@ -137,7 +137,7 @@ target_include_directories(twr_native_phy_demo PRIVATE
 target_link_libraries(twr_native_phy_demo PRIVATE
     uwb_twr_phy Volk::volk Threads::Threads)
 target_compile_definitions(twr_native_phy_demo PRIVATE
-    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/testdata\"")
 
 # The verifier re-derives the frame bytes / CRC / lengths / decode verdict from
 # the manifest WITHOUT calling the C++, so it needs no build tree.  It runs the
@@ -168,7 +168,7 @@ target_include_directories(twr_m2a_bench PRIVATE
 target_link_libraries(twr_m2a_bench PRIVATE
     uwb_twr_phy Volk::volk Threads::Threads)
 target_compile_definitions(twr_m2a_bench PRIVATE
-    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/testdata\"")
 
 ########################################################################
 # Historical benchmark / diagnostic EXPERIMENT apps (UWB_BUILD_EXPERIMENTS).
@@ -247,7 +247,7 @@ add_executable(uwb_uhd_sc16_pipeline_runner uwb_uhd_sc16_pipeline_runner.cc)
 target_link_libraries(uwb_uhd_sc16_pipeline_runner uwb_native Threads::Threads)
 uwb_simd_apply(uwb_uhd_sc16_pipeline_runner)
 target_compile_definitions(uwb_uhd_sc16_pipeline_runner PRIVATE
-    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/testdata\"")
 if(UWB_HAVE_UHD)
     target_link_libraries(uwb_uhd_sc16_pipeline_runner UHD::UHD)
 endif()
@@ -280,7 +280,7 @@ endif()
 add_test(NAME uwb_qa_sc16_pipeline_runner_exit
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/qa_uwb_uhd_sc16_pipeline_runner_exit.sh
             --runner $<TARGET_FILE:uwb_uhd_sc16_pipeline_runner>
-            --fixture ${CMAKE_SOURCE_DIR}/../testdata/uhd_sc16/sim_preamble_sc16_737m28_rate.bin
+            --fixture ${CMAKE_SOURCE_DIR}/testdata/uhd_sc16/sim_preamble_sc16_737m28_rate.bin
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(uwb_qa_sc16_pipeline_runner_exit PROPERTIES TIMEOUT 120)
 
@@ -289,7 +289,7 @@ add_executable(benchmark_sc16_burst_core benchmark_sc16_burst_core.cc)
 target_link_libraries(benchmark_sc16_burst_core uwb_native Threads::Threads)
 uwb_simd_apply(benchmark_sc16_burst_core)
 target_compile_definitions(benchmark_sc16_burst_core PRIVATE
-    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/testdata\"")
 
 # 2026-11-15: fixed-frequency CW cancellation.  The benchmark measures the
 # production core (two-pass vs fused, ABBA); the replay driver runs the real
@@ -308,7 +308,7 @@ add_executable(benchmark_sc16_pipeline_steady benchmark_sc16_pipeline_steady.cc)
 target_link_libraries(benchmark_sc16_pipeline_steady uwb_native Threads::Threads)
 uwb_simd_apply(benchmark_sc16_pipeline_steady)
 target_compile_definitions(benchmark_sc16_pipeline_steady PRIVATE
-    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\"")
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/testdata\"")
 if(UWB_HAVE_UHD)
     target_link_libraries(benchmark_sc16_pipeline_steady UHD::UHD)
 endif()
@@ -320,7 +320,7 @@ endif()
 # resource dir (UWB_INSTALL_RESOURCE_DIR) > the build-tree testdata fallback,
 # so an installed binary never depends on a source checkout / old build tree.
 # Offline decoder shares the compiled packet entry point and ISA configuration.
-add_executable(uwb_dw3000_decode ${CMAKE_SOURCE_DIR}/../tools/rx/decode_dw3000_packets.cc)
+add_executable(uwb_dw3000_decode ${CMAKE_SOURCE_DIR}/tools/rx/decode_dw3000_packets.cc)
 target_link_libraries(uwb_dw3000_decode uwb_core Threads::Threads)
 uwb_simd_apply(uwb_dw3000_decode)
 
@@ -328,14 +328,14 @@ add_executable(uwb_dw3000_live uwb_dw3000_live.cc)
 target_link_libraries(uwb_dw3000_live uwb_native Threads::Threads)
 uwb_simd_apply(uwb_dw3000_live)
 target_compile_definitions(uwb_dw3000_live PRIVATE
-    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/../testdata\""
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/testdata\""
     "UWB_INSTALL_RESOURCE_DIR=\"${CMAKE_INSTALL_PREFIX}/${UWB_DATA_DIR}\"")
 if(UWB_HAVE_UHD)
     target_link_libraries(uwb_dw3000_live UHD::UHD)
 endif()
 if(Python3_Interpreter_FOUND)
     add_test(NAME uwb_qa_dw3000_live_console
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/../tools/rx/qa_live_dw3000_console.py
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/rx/qa_live_dw3000_console.py
                 $<TARGET_FILE:uwb_dw3000_live>)
     set_tests_properties(uwb_qa_dw3000_live_console PROPERTIES TIMEOUT 90)
 endif()

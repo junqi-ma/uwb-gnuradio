@@ -1,0 +1,110 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "native-avx2",
+      "displayName": "Native release (AVX2/FMA)",
+      "description": "Release build of the native UHD/C++ chain with the AVX2/FMA DSP kernels and the UHD backend auto-detected.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "UWB_SIMD": "AVX2",
+        "ENABLE_UHD_BACKEND": "AUTO",
+        "UWB_BUILD_EXPERIMENTS": "ON"
+      }
+    },
+    {
+      "name": "native-avx512",
+      "displayName": "Native release (AVX-512)",
+      "description": "Release build enabling the AVX-512 DSP kernel translation unit on an AVX2/FMA baseline, with the UHD backend auto-detected.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "UWB_SIMD": "AVX512",
+        "ENABLE_UHD_BACKEND": "AUTO",
+        "UWB_BUILD_EXPERIMENTS": "ON"
+      }
+    },
+    {
+      "name": "scalar-debug",
+      "displayName": "Scalar debug",
+      "description": "Debug build with the self-written SIMD kernels disabled, for reference/step-through QA.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "UWB_SIMD": "SCALAR",
+        "ENABLE_UHD_BACKEND": "AUTO",
+        "UWB_BUILD_EXPERIMENTS": "ON"
+      }
+    },
+    {
+      "name": "no-uhd",
+      "displayName": "Native release (no UHD)",
+      "description": "Release build with the UHD device backends disabled; the replay/library/QA chain still builds and tests.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "UWB_SIMD": "AUTO",
+        "ENABLE_UHD_BACKEND": "OFF",
+        "UWB_BUILD_EXPERIMENTS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "native-avx2",
+      "configurePreset": "native-avx2"
+    },
+    {
+      "name": "native-avx512",
+      "configurePreset": "native-avx512"
+    },
+    {
+      "name": "scalar-debug",
+      "configurePreset": "scalar-debug"
+    },
+    {
+      "name": "no-uhd",
+      "configurePreset": "no-uhd"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "native-avx2",
+      "configurePreset": "native-avx2",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "native-avx512",
+      "configurePreset": "native-avx512",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "scalar-debug",
+      "configurePreset": "scalar-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "no-uhd",
+      "configurePreset": "no-uhd",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

@@ -34,7 +34,7 @@ option(UWB_BUILD_EXPERIMENTS
     "Build historical benchmark/diagnostic experiment apps" ON)
 
 # Make sure our local CMake Modules path comes first
-list(INSERT CMAKE_MODULE_PATH 0 ${CMAKE_SOURCE_DIR}/cmake/Modules)
+list(INSERT CMAKE_MODULE_PATH 0 ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules)
 
 ########################################################################
 # Compile-time ISA selection for the self-written DSP kernels
@@ -155,13 +155,13 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/uwbConfig.cmake
 # on a source checkout, an old build tree, RPATH or PYTHONPATH.
 ########################################################################
 install(FILES
-    ${CMAKE_SOURCE_DIR}/../testdata/resampler_65_48/taps_quality_minorder.txt
-    ${CMAKE_SOURCE_DIR}/../testdata/resampler_65_48/taps_quality_eq32.txt
-    ${CMAKE_SOURCE_DIR}/../testdata/resampler_65_48/taps_realtime_minorder.txt
-    ${CMAKE_SOURCE_DIR}/../testdata/resampler_65_48/taps_realtime_eq16.txt
+    ${CMAKE_SOURCE_DIR}/testdata/resampler_65_48/taps_quality_minorder.txt
+    ${CMAKE_SOURCE_DIR}/testdata/resampler_65_48/taps_quality_eq32.txt
+    ${CMAKE_SOURCE_DIR}/testdata/resampler_65_48/taps_realtime_minorder.txt
+    ${CMAKE_SOURCE_DIR}/testdata/resampler_65_48/taps_realtime_eq16.txt
     DESTINATION ${UWB_DATA_DIR}/resampler_65_48
 )
 install(FILES
-    ${CMAKE_SOURCE_DIR}/../testdata/reference_preamble_code10_998p4.cf32
+    ${CMAKE_SOURCE_DIR}/testdata/reference_preamble_code10_998p4.cf32
     DESTINATION ${UWB_DATA_DIR}
 )
