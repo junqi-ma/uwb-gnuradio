@@ -84,6 +84,23 @@ inline constexpr size_t kSamplesPerChip = 2;
 inline constexpr size_t kMaxTapCount = 64;
 inline constexpr size_t kBlockSymbols = 64;
 
+// Exact-CFO fused payload kernel (correlate_payload_fused_cfo below).
+//
+// The production CMF is 38 taps, which gives the verified 52-point payload
+// template.  Half of an 8-chip burst (4 chips, 2 samples/chip) spans
+// 2*(4-1) = 6 extra samples, so one half template covers 38 + 6 = 44 complex
+// values.  Only 2^3 = 8 base patterns exist because the first chip of each
+// half is factored out as a sign: pattern bit (c-1) flips chip c relative to
+// chip 0.  The upper half is the same 8 patterns multiplied by
+// exp(-j*w*8) and shifted by 8 samples.
+inline constexpr size_t kFusedFastTaps = 38;
+inline constexpr size_t kFusedFastLen = kFusedFastTaps + 14; // 52
+inline constexpr size_t kFusedHalfTemplates = 8;
+inline constexpr size_t kFusedHalfSpan =
+    kFusedFastTaps + 2 * (kChipsPerBurst / 2 - 1); // 44
+// Phase re-anchor interval for the exact-CFO symbol ramp (symbols).
+inline constexpr size_t kFusedPhaseAnchor = 32;
+
 // Candidate order is fixed and is also the layout of Metrics below:
 //   0: hop 0, BPM half 0
 //   1: hop 0, BPM half 1
@@ -128,10 +145,16 @@ struct Metrics {
     // quantity compared by bprf_demod() up to a common positive scale.
     std::vector<float> signed_value;
 
-    void reset(size_t count)
+    // `want_complex == false` keeps complex_value empty (capacity retained) so
+    // the production path never touches the 16 bytes/symbol diagnostic buffer.
+    // signed_value is always sized and written in full.
+    void reset(size_t count, bool want_complex = true)
     {
         symbols = count;
-        complex_value.resize(kCandidateCount * count);
+        if (want_complex)
+            complex_value.resize(kCandidateCount * count);
+        else
+            complex_value.clear();
         signed_value.resize(kCandidateCount * count);
     }
 };
@@ -147,12 +170,38 @@ struct Scratch {
     std::vector<std::complex<float>> templates;
     size_t template_len = 0;
 
+    // Exact-CFO payload kernel state.  `fused_lut_lo` holds the 8 four-chip
+    // half templates (kFusedHalfTemplates * kFusedHalfSpan) and
+    // `fused_lut_hi` the same patterns advanced by 8 samples and multiplied by
+    // exp(-j*w*8).  `fused_h_w` is h[q]*exp(-j*w*q) and `fused_tpl` is the one
+    // per-symbol template (52 for 38 taps, up to 78 for the generic path).
+    // All are grown by ensure_fused_cfo(), never inside the symbol loop.
+    std::vector<std::complex<float>> fused_lut_lo;
+    std::vector<std::complex<float>> fused_lut_hi;
+    std::vector<std::complex<float>> fused_h_w;
+    std::vector<std::complex<float>> fused_tpl;
+
     void ensure(size_t block_symbols, size_t len)
     {
         if (template_len != len || templates.size() < block_symbols * len) {
             template_len = len;
             templates.resize(block_symbols * len);
         }
+    }
+
+    void ensure_fused_cfo(size_t tap_count)
+    {
+        const size_t lut = kFusedHalfTemplates * kFusedHalfSpan;
+        if (fused_lut_lo.size() < lut)
+            fused_lut_lo.resize(lut);
+        if (fused_lut_hi.size() < lut)
+            fused_lut_hi.resize(lut);
+        if (fused_h_w.size() < tap_count)
+            fused_h_w.resize(tap_count);
+        const size_t tpl_len =
+            tap_count + kSamplesPerChip * (kChipsPerBurst - 1);
+        if (fused_tpl.size() < tpl_len)
+            fused_tpl.resize(tpl_len);
     }
 };
 
@@ -309,6 +358,347 @@ dot_template(const std::complex<float>* rx_win,
     return dot_generic(rx_win, taps, len);
 }
 
+// ---------------------------------------------------------------------------
+// Exact-CFO fused payload helpers.
+// ---------------------------------------------------------------------------
+
+// Reject any spreading chip outside {+1,-1}.  A zero must never be silently
+// treated as +1, so this check is kept even though production callers derive
+// the stream from prepare_fused_payload_pn().  Vectorised over 32 chips; the
+// scan is O(symbols*8) bytes and negligible next to the correlation.
+inline bool pn_stream_is_pm1(const int8_t* pn, size_t count)
+{
+#if UWB_CIR_FIR_HAVE_AVX2
+    const __m256i one = _mm256_set1_epi8(1);
+    const __m256i minus_one = _mm256_set1_epi8(-1);
+    size_t i = 0;
+    for (; i + 32 <= count; i += 32) {
+        const __m256i v =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(pn + i));
+        const __m256i ok = _mm256_or_si256(_mm256_cmpeq_epi8(v, one),
+                                           _mm256_cmpeq_epi8(v, minus_one));
+        if (_mm256_movemask_epi8(ok) != -1)
+            return false;
+    }
+    for (; i < count; ++i) {
+        if (pn[i] != 1 && pn[i] != -1)
+            return false;
+    }
+    return true;
+#else
+    for (size_t i = 0; i < count; ++i) {
+        if (pn[i] != 1 && pn[i] != -1)
+            return false;
+    }
+    return true;
+#endif
+}
+
+// dst[q] += (wr + j*wi) * src[q] for q < count.
+inline void accumulate_scaled_complex(std::complex<float>* dst,
+                                      const std::complex<float>* src,
+                                      size_t count,
+                                      float wr,
+                                      float wi)
+{
+#if UWB_CIR_FIR_HAVE_AVX2
+    const float* sp = reinterpret_cast<const float*>(src);
+    float* dp = reinterpret_cast<float*>(dst);
+    const __m256 wre = _mm256_set1_ps(wr);
+    const __m256 wim = _mm256_set1_ps(wi);
+    size_t q = 0;
+    for (; q + 4 <= count; q += 4) {
+        const __m256 h = _mm256_loadu_ps(sp + 2 * q);
+        // [wr*hr - wi*hi, wr*hi + wi*hr, ...]
+        const __m256 prod =
+            _mm256_fmaddsub_ps(wre, h,
+                               _mm256_mul_ps(wim, _mm256_permute_ps(h, 0xB1)));
+        _mm256_storeu_ps(dp + 2 * q,
+                         _mm256_add_ps(_mm256_loadu_ps(dp + 2 * q), prod));
+    }
+    for (; q < count; ++q) {
+        const float sr = src[q].real();
+        const float si = src[q].imag();
+        dst[q] += std::complex<float>(wr * sr - wi * si, wr * si + wi * sr);
+    }
+#else
+    for (size_t q = 0; q < count; ++q) {
+        const float sr = src[q].real();
+        const float si = src[q].imag();
+        dst[q] += std::complex<float>(wr * sr - wi * si, wr * si + wi * sr);
+    }
+#endif
+}
+
+// dst[q] = (wr + j*wi) * src[q] for q < count.  dst may not alias src.
+inline void scale_complex_copy(std::complex<float>* dst,
+                               const std::complex<float>* src,
+                               size_t count,
+                               float wr,
+                               float wi)
+{
+#if UWB_CIR_FIR_HAVE_AVX2
+    const float* sp = reinterpret_cast<const float*>(src);
+    float* dp = reinterpret_cast<float*>(dst);
+    const __m256 wre = _mm256_set1_ps(wr);
+    const __m256 wim = _mm256_set1_ps(wi);
+    size_t q = 0;
+    for (; q + 4 <= count; q += 4) {
+        const __m256 h = _mm256_loadu_ps(sp + 2 * q);
+        _mm256_storeu_ps(dp + 2 * q,
+                         _mm256_fmaddsub_ps(
+                             wre, h,
+                             _mm256_mul_ps(wim, _mm256_permute_ps(h, 0xB1))));
+    }
+    for (; q < count; ++q) {
+        const float sr = src[q].real();
+        const float si = src[q].imag();
+        dst[q] = std::complex<float>(wr * sr - wi * si, wr * si + wi * sr);
+    }
+#else
+    for (size_t q = 0; q < count; ++q) {
+        const float sr = src[q].real();
+        const float si = src[q].imag();
+        dst[q] = std::complex<float>(wr * sr - wi * si, wr * si + wi * sr);
+    }
+#endif
+}
+
+// h_w[q] = h[q] * exp(-j*w*q) and chip_phase[c] = exp(-j*w*2c), c = 0..7.
+// Both ramps are accumulated in double and rounded once to float.
+inline void build_fused_tap_ramp(std::complex<float>* h_w,
+                                 const std::complex<float>* h,
+                                 size_t tap_count,
+                                 double w,
+                                 std::complex<float>* chip_phase)
+{
+    if (w == 0.0) {
+        for (size_t q = 0; q < tap_count; ++q)
+            h_w[q] = h[q];
+        for (size_t c = 0; c < 8; ++c)
+            chip_phase[c] = std::complex<float>(1.0f, 0.0f);
+        return;
+    }
+    const std::complex<double> h_step(std::cos(w), -std::sin(w));
+    std::complex<double> hp(1.0, 0.0);
+    for (size_t q = 0; q < tap_count; ++q) {
+        const double re = static_cast<double>(h[q].real());
+        const double im = static_cast<double>(h[q].imag());
+        h_w[q] = std::complex<float>(
+            static_cast<float>(re * hp.real() - im * hp.imag()),
+            static_cast<float>(re * hp.imag() + im * hp.real()));
+        hp *= h_step;
+    }
+    const std::complex<double> c_step(std::cos(2.0 * w), -std::sin(2.0 * w));
+    std::complex<double> cp(1.0, 0.0);
+    for (size_t c = 0; c < 8; ++c) {
+        chip_phase[c] = std::complex<float>(static_cast<float>(cp.real()),
+                                            static_cast<float>(cp.imag()));
+        cp *= c_step;
+    }
+}
+
+// Build the 8 lo / 8 hi half templates.  Requires tap_count == kFusedFastTaps
+// and h_w/chip_phase from build_fused_tap_ramp().
+inline void build_fused_half_lut(std::complex<float>* lut_lo,
+                                 std::complex<float>* lut_hi,
+                                 const std::complex<float>* h_w,
+                                 const std::complex<float>* chip_phase)
+{
+    constexpr size_t kHalfChips = kChipsPerBurst / 2; // 4
+    for (size_t k = 0; k < kFusedHalfTemplates; ++k) {
+        std::complex<float>* bl = lut_lo + k * kFusedHalfSpan;
+        std::fill(bl, bl + kFusedHalfSpan, std::complex<float>(0.0f, 0.0f));
+        for (size_t c = 0; c < kHalfChips; ++c) {
+            // Pattern k: chip 0 is +1, bit (c-1) flips chip c.
+            const bool flip = (c != 0) && (((k >> (c - 1)) & 1u) != 0);
+            const float s = flip ? -1.0f : 1.0f;
+            accumulate_scaled_complex(bl + 2 * c, h_w, kFusedFastTaps,
+                                      s * chip_phase[c].real(),
+                                      s * chip_phase[c].imag());
+        }
+    }
+    // Upper half: same patterns, advanced 8 samples, phase exp(-j*w*8).
+    const std::complex<float> hi_phase = chip_phase[kHalfChips];
+    for (size_t k = 0; k < kFusedHalfTemplates; ++k) {
+        scale_complex_copy(lut_hi + k * kFusedHalfSpan,
+                           lut_lo + k * kFusedHalfSpan, kFusedHalfSpan,
+                           hi_phase.real(), hi_phase.imag());
+    }
+}
+
+// tpl[0..51] for one payload symbol from the two half-template indices.
+// Signs are exactly +/-1, so they are applied as a sign-bit XOR.
+inline void build_fused_symbol_template(std::complex<float>* tpl,
+                                        const std::complex<float>* lut_lo,
+                                        const std::complex<float>* lut_hi,
+                                        size_t idx_lo,
+                                        float sign_lo,
+                                        size_t idx_hi,
+                                        float sign_hi)
+{
+    const std::complex<float>* lo = lut_lo + idx_lo * kFusedHalfSpan;
+    const std::complex<float>* hi = lut_hi + idx_hi * kFusedHalfSpan;
+#if UWB_CIR_FIR_HAVE_AVX2
+    const __m256 mlo = (sign_lo < 0.0f) ? _mm256_set1_ps(-0.0f)
+                                        : _mm256_setzero_ps();
+    const __m256 mhi = (sign_hi < 0.0f) ? _mm256_set1_ps(-0.0f)
+                                        : _mm256_setzero_ps();
+    const float* lop = reinterpret_cast<const float*>(lo);
+    const float* hip = reinterpret_cast<const float*>(hi);
+    float* tp = reinterpret_cast<float*>(tpl);
+    // 0..7 from lo (2 vectors of 4 complex).
+    for (size_t v = 0; v < 2; ++v)
+        _mm256_storeu_ps(tp + 8 * v,
+                         _mm256_xor_ps(_mm256_loadu_ps(lop + 8 * v), mlo));
+    // 8..43: lo[8..43] + hi[0..35] (9 vectors).
+    for (size_t v = 0; v < 9; ++v)
+        _mm256_storeu_ps(
+            tp + 16 + 8 * v,
+            _mm256_add_ps(_mm256_xor_ps(_mm256_loadu_ps(lop + 16 + 8 * v), mlo),
+                          _mm256_xor_ps(_mm256_loadu_ps(hip + 8 * v), mhi)));
+    // 44..51 from hi[36..43] (2 vectors).
+    for (size_t v = 0; v < 2; ++v)
+        _mm256_storeu_ps(tp + 88 + 8 * v,
+                         _mm256_xor_ps(_mm256_loadu_ps(hip + 72 + 8 * v), mhi));
+#else
+    for (size_t u = 0; u < 8; ++u)
+        tpl[u] = lo[u] * sign_lo;
+    for (size_t u = 8; u < kFusedHalfSpan; ++u)
+        tpl[u] = lo[u] * sign_lo + hi[u - 8] * sign_hi;
+    for (size_t u = kFusedHalfSpan; u < kFusedFastLen; ++u)
+        tpl[u] = hi[u - 8] * sign_hi;
+#endif
+}
+
+#if UWB_CIR_FIR_HAVE_AVX2
+// One complex MAC of four samples against a shared template group.
+inline void fused_mac_group(const float* xp,
+                            int off,
+                            __m256 ht,
+                            __m256 hsw,
+                            __m256& acc)
+{
+    const __m256 x = _mm256_loadu_ps(xp + off);
+    const __m256 t = _mm256_mul_ps(_mm256_movehdup_ps(x), hsw);
+    acc = _mm256_add_ps(acc, _mm256_fmaddsub_ps(_mm256_moveldup_ps(x), ht, t));
+}
+
+inline std::complex<float> fused_hsum4(__m256 acc)
+{
+    const __m128 lo = _mm256_castps256_ps128(acc);
+    const __m128 hi = _mm256_extractf128_ps(acc, 1);
+    const __m128 s = _mm_add_ps(lo, hi);
+    const __m128 s2 = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    return std::complex<float>(_mm_cvtss_f32(s2),
+                               _mm_cvtss_f32(_mm_shuffle_ps(s2, s2, 1)));
+}
+#endif
+
+// Four candidates sharing one 52-point template.  52 complex = 13 groups of
+// four with no scalar tail; the template group is loaded once per iteration
+// and reused by all four windows (two accumulators each to hide FMA latency).
+inline void dot4_shared_fixed52(const std::complex<float>* x0,
+                                const std::complex<float>* x1,
+                                const std::complex<float>* x2,
+                                const std::complex<float>* x3,
+                                const std::complex<float>* tpl,
+                                std::complex<float>* m)
+{
+#if UWB_CIR_FIR_HAVE_AVX2
+    const float* hp = reinterpret_cast<const float*>(tpl);
+    const float* xp0 = reinterpret_cast<const float*>(x0);
+    const float* xp1 = reinterpret_cast<const float*>(x1);
+    const float* xp2 = reinterpret_cast<const float*>(x2);
+    const float* xp3 = reinterpret_cast<const float*>(x3);
+    const __m256 zero = _mm256_setzero_ps();
+    __m256 a0 = zero, a1 = zero, a2 = zero, a3 = zero;
+    __m256 b0 = zero, b1 = zero, b2 = zero, b3 = zero;
+    for (int g = 0; g < 12; g += 2) {
+        const int o0 = 8 * g;
+        const int o1 = o0 + 8;
+        const __m256 ht0 = _mm256_loadu_ps(hp + o0);
+        const __m256 hs0 = _mm256_permute_ps(ht0, 0xB1);
+        fused_mac_group(xp0, o0, ht0, hs0, a0);
+        fused_mac_group(xp1, o0, ht0, hs0, a1);
+        fused_mac_group(xp2, o0, ht0, hs0, a2);
+        fused_mac_group(xp3, o0, ht0, hs0, a3);
+        const __m256 ht1 = _mm256_loadu_ps(hp + o1);
+        const __m256 hs1 = _mm256_permute_ps(ht1, 0xB1);
+        fused_mac_group(xp0, o1, ht1, hs1, b0);
+        fused_mac_group(xp1, o1, ht1, hs1, b1);
+        fused_mac_group(xp2, o1, ht1, hs1, b2);
+        fused_mac_group(xp3, o1, ht1, hs1, b3);
+    }
+    {
+        const int o = 96; // group 12 of 13
+        const __m256 ht = _mm256_loadu_ps(hp + o);
+        const __m256 hs = _mm256_permute_ps(ht, 0xB1);
+        fused_mac_group(xp0, o, ht, hs, a0);
+        fused_mac_group(xp1, o, ht, hs, a1);
+        fused_mac_group(xp2, o, ht, hs, a2);
+        fused_mac_group(xp3, o, ht, hs, a3);
+    }
+    m[0] = fused_hsum4(_mm256_add_ps(a0, b0));
+    m[1] = fused_hsum4(_mm256_add_ps(a1, b1));
+    m[2] = fused_hsum4(_mm256_add_ps(a2, b2));
+    m[3] = fused_hsum4(_mm256_add_ps(a3, b3));
+#else
+    m[0] = cir_fir::dot_multi_acc8(x0, tpl, kFusedFastLen);
+    m[1] = cir_fir::dot_multi_acc8(x1, tpl, kFusedFastLen);
+    m[2] = cir_fir::dot_multi_acc8(x2, tpl, kFusedFastLen);
+    m[3] = cir_fir::dot_multi_acc8(x3, tpl, kFusedFastLen);
+#endif
+}
+
+// Window-origin and length validation shared by the payload kernels.  Mirrors
+// correlate_field()'s uint64 bounds logic exactly: symbol 0 starts at `base0`,
+// the furthest candidate window must end at or before sample n-1.
+inline bool payload_window_bounds(size_t n,
+                                  size_t tap_count,
+                                  int64_t chip_start,
+                                  size_t samples_per_chip,
+                                  int64_t payload_start,
+                                  size_t symbols,
+                                  int64_t& base0,
+                                  size_t& len)
+{
+    if (tap_count == 0 || tap_count > kMaxTapCount)
+        return false;
+    if (samples_per_chip != kSamplesPerChip)
+        return false;
+    if (chip_start < 0 || payload_start < 0 || symbols == 0)
+        return false;
+    if (symbols > (static_cast<size_t>(1) << 20))
+        return false;
+    const int64_t spc = static_cast<int64_t>(samples_per_chip);
+    if (payload_start >
+        (std::numeric_limits<int64_t>::max() - chip_start) / spc)
+        return false;
+    const int64_t window0 = chip_start + payload_start * spc;
+    base0 = window0 - static_cast<int64_t>(tap_count) + 1;
+    if (base0 < 0)
+        return false;
+    len = template_length(tap_count, samples_per_chip, kChipsPerBurst);
+    int64_t max_candidate_offset = 0;
+    for (size_t p = 0; p < kCandidateCount; ++p) {
+        if (static_cast<int64_t>(kCandidateChipOffset[p]) > max_candidate_offset)
+            max_candidate_offset =
+                static_cast<int64_t>(kCandidateChipOffset[p]);
+    }
+    const int64_t last_start_chip =
+        static_cast<int64_t>(symbols - 1) *
+            static_cast<int64_t>(kChipsPerSymbol) +
+        max_candidate_offset;
+    const uint64_t add = static_cast<uint64_t>(last_start_chip) *
+                             static_cast<uint64_t>(spc) +
+                         static_cast<uint64_t>(len) - 1;
+    const uint64_t last = static_cast<uint64_t>(base0) + add;
+    if (last < static_cast<uint64_t>(base0) || last >= static_cast<uint64_t>(n))
+        return false;
+    return true;
+}
+
 // Correlate all `symbols` symbols of one field against the fused templates.
 //
 // Inputs:
@@ -388,10 +778,8 @@ inline bool correlate_field(const std::complex<float>* rx,
     // The PN contract is a +/-1 sequence.  A zero would silently be treated
     // as +1 by build_template_geometry(), so reject it before producing
     // metrics.
-    for (size_t i = 0; i < symbols * geometry.chips_per_burst; ++i) {
-        if (pn[i] != 1 && pn[i] != -1)
-            return false;
-    }
+    if (!pn_stream_is_pm1(pn, symbols * geometry.chips_per_burst))
+        return false;
 
     const size_t len =
         template_length(tap_count, samples_per_chip, geometry.chips_per_burst);
@@ -428,18 +816,24 @@ inline bool correlate_field(const std::complex<float>* rx,
 
     auto t_template = std::chrono::steady_clock::duration::zero();
     auto t_correlate = std::chrono::steady_clock::duration::zero();
+    // No clock calls at all when the caller does not ask for timings.
+    const bool want_timings = (timings != nullptr);
+    std::chrono::steady_clock::time_point t0, t1, t2;
 
     for (size_t start = 0; start < symbols; start += kBlockSymbols) {
         const size_t count = std::min(kBlockSymbols, symbols - start);
-        auto t0 = std::chrono::steady_clock::now();
+        if (want_timings)
+            t0 = std::chrono::steady_clock::now();
         for (size_t i = 0; i < count; ++i) {
             build_template_geometry(
                 scratch.templates.data() + i * len, fir_taps, tap_count,
                 pn + (start + i) * geometry.chips_per_burst,
                 geometry.chips_per_burst, samples_per_chip);
         }
-        auto t1 = std::chrono::steady_clock::now();
-        t_template += t1 - t0;
+        if (want_timings) {
+            t1 = std::chrono::steady_clock::now();
+            t_template += t1 - t0;
+        }
 
         for (size_t i = 0; i < count; ++i) {
             const size_t s = start + i;
@@ -463,8 +857,10 @@ inline bool correlate_field(const std::complex<float>* rx,
                     (polarity < 0) ? -re : re;
             }
         }
-        auto t2 = std::chrono::steady_clock::now();
-        t_correlate += t2 - t1;
+        if (want_timings) {
+            t2 = std::chrono::steady_clock::now();
+            t_correlate += t2 - t1;
+        }
     }
 
     if (timings) {
@@ -522,6 +918,223 @@ inline bool correlate_phr(const std::complex<float>* rx,
     return correlate_field(rx, n, fir_taps, tap_count, chip_start,
                            samples_per_chip, phr_start, pn, kPhrSymbols,
                            kPhrGeometry, polarity, rot, out, scratch, timings);
+}
+
+// Exact-CFO fused payload correlation.
+//
+// Mathematical contract (no approximation): the result is identical to
+// derotating the raw buffer first,
+//     rx_derot[i] = rx_raw[i] * exp(-j*cfo_w_rad*i),
+// and then calling correlate_payload(rx_derot, ...).  Factoring the phase out
+// of each window,
+//     M(s,p) = exp(-j*w*win(s,p)) * sum_m tpl_w[m] * rx_raw[win(s,p) + m],
+// with tpl_w[m] = exp(-j*w*m) * t[m] = sum_c pn[c] * exp(-j*w*2c) * h_w[m-2c]
+// and h_w[q] = h[q]*exp(-j*w*q).  The window phase uses a double-precision
+// symbol ramp re-anchored every kFusedPhaseAnchor symbols; the four candidate
+// offsets contribute four per-packet constants.  38 taps take the 8+8
+// half-template LUT and the four-way shared-template AVX2 kernel; any other
+// tap count builds the exact per-symbol template and uses dot_generic().
+//
+// `cfo_w_rad == 0.0` means no derotation (no trig calls at all).  `write_complex
+// == false` skips the diagnostic complex buffer entirely; signed_value is
+// always written in full.  `validate_pn` keeps the explicit +/-1 check for QA
+// and debug callers; production may set it false because
+// prepare_fused_payload_pn() only ever emits +/-1.
+inline bool correlate_payload_fused_cfo_impl(
+    const std::complex<float>* rx_raw,
+    size_t n,
+    const std::complex<float>* fir_taps,
+    size_t tap_count,
+    int64_t chip_start,
+    size_t samples_per_chip,
+    int64_t payload_start,
+    const int8_t* pn,
+    size_t symbols,
+    int8_t polarity,
+    std::complex<float> rot,
+    double cfo_w_rad,
+    Metrics& out,
+    Scratch& scratch,
+    Timings* timings,
+    bool write_complex,
+    bool validate_pn)
+{
+    if (!rx_raw || !fir_taps || !pn)
+        return false;
+    if (polarity != 1 && polarity != -1)
+        return false;
+    if (!std::isfinite(cfo_w_rad) || !std::isfinite(rot.real()) ||
+        !std::isfinite(rot.imag()))
+        return false;
+    int64_t base0 = 0;
+    size_t len = 0;
+    if (!payload_window_bounds(n, tap_count, chip_start, samples_per_chip,
+                               payload_start, symbols, base0, len))
+        return false;
+    if (validate_pn && !pn_stream_is_pm1(pn, symbols * kChipsPerBurst))
+        return false;
+
+    const double w = cfo_w_rad;
+    const bool has_cfo = (w != 0.0);
+    const bool fast = (tap_count == kFusedFastTaps);
+
+    scratch.ensure_fused_cfo(tap_count);
+    std::complex<float>* h_w = scratch.fused_h_w.data();
+    std::complex<float>* tpl = scratch.fused_tpl.data();
+
+    using clock = std::chrono::steady_clock;
+    clock::time_point t_begin;
+    if (timings)
+        t_begin = clock::now();
+
+    std::complex<float> chip_phase[kChipsPerBurst];
+    build_fused_tap_ramp(h_w, fir_taps, tap_count, w, chip_phase);
+    if (fast) {
+        build_fused_half_lut(scratch.fused_lut_lo.data(),
+                             scratch.fused_lut_hi.data(), h_w, chip_phase);
+    }
+    clock::time_point t_templ;
+    if (timings)
+        t_templ = clock::now();
+
+    // Per-packet phase of each candidate window offset (chips -> samples).
+    std::complex<float> cand_phase[kCandidateCount];
+    for (size_t p = 0; p < kCandidateCount; ++p) {
+        if (!has_cfo) {
+            cand_phase[p] = std::complex<float>(1.0f, 0.0f);
+            continue;
+        }
+        const double ang = -w * static_cast<double>(
+                                   kCandidateChipOffset[p] * samples_per_chip);
+        cand_phase[p] = std::complex<float>(static_cast<float>(std::cos(ang)),
+                                           static_cast<float>(std::sin(ang)));
+    }
+
+    out.reset(symbols, write_complex);
+
+    const int64_t symbol_stride =
+        static_cast<int64_t>(kChipsPerSymbol) *
+        static_cast<int64_t>(samples_per_chip);
+    const double dphi = -w * static_cast<double>(symbol_stride);
+    const std::complex<double> step(std::cos(dphi), std::sin(dphi));
+    std::complex<double> ramp(1.0, 0.0);
+
+    const std::complex<float>* lut_lo = scratch.fused_lut_lo.data();
+    const std::complex<float>* lut_hi = scratch.fused_lut_hi.data();
+    const int64_t off_sample[kCandidateCount] = {
+        static_cast<int64_t>(kCandidateChipOffset[0]) *
+            static_cast<int64_t>(samples_per_chip),
+        static_cast<int64_t>(kCandidateChipOffset[1]) *
+            static_cast<int64_t>(samples_per_chip),
+        static_cast<int64_t>(kCandidateChipOffset[2]) *
+            static_cast<int64_t>(samples_per_chip),
+        static_cast<int64_t>(kCandidateChipOffset[3]) *
+            static_cast<int64_t>(samples_per_chip)
+    };
+
+    for (size_t s = 0; s < symbols; ++s) {
+        std::complex<float> phase(1.0f, 0.0f);
+        if (has_cfo) {
+            if ((s % kFusedPhaseAnchor) == 0) {
+                const double ang =
+                    -w * static_cast<double>(
+                             base0 + static_cast<int64_t>(s) * symbol_stride);
+                ramp = std::complex<double>(std::cos(ang), std::sin(ang));
+            }
+            phase = std::complex<float>(static_cast<float>(ramp.real()),
+                                        static_cast<float>(ramp.imag()));
+            ramp *= step;
+        }
+
+        if (fast) {
+            const int8_t* ps = pn + s * kChipsPerBurst;
+            const float sign_lo = (ps[0] < 0) ? -1.0f : 1.0f;
+            const float sign_hi = (ps[4] < 0) ? -1.0f : 1.0f;
+            size_t idx_lo = 0;
+            size_t idx_hi = 0;
+            for (size_t c = 1; c < 4; ++c) {
+                if (ps[c] != ps[0])
+                    idx_lo |= (static_cast<size_t>(1) << (c - 1));
+                if (ps[c + 4] != ps[4])
+                    idx_hi |= (static_cast<size_t>(1) << (c - 1));
+            }
+            build_fused_symbol_template(tpl, lut_lo, lut_hi, idx_lo, sign_lo,
+                                        idx_hi, sign_hi);
+        } else {
+            std::fill(tpl, tpl + len, std::complex<float>(0.0f, 0.0f));
+            for (size_t c = 0; c < kChipsPerBurst; ++c) {
+                const float sgn =
+                    (pn[s * kChipsPerBurst + c] < 0) ? -1.0f : 1.0f;
+                accumulate_scaled_complex(tpl + samples_per_chip * c, h_w,
+                                          tap_count,
+                                          sgn * chip_phase[c].real(),
+                                          sgn * chip_phase[c].imag());
+            }
+        }
+
+        const int64_t win0 =
+            base0 + static_cast<int64_t>(s) * symbol_stride;
+        std::complex<float> m[kCandidateCount];
+        if (fast) {
+            dot4_shared_fixed52(rx_raw + win0 + off_sample[0],
+                                rx_raw + win0 + off_sample[1],
+                                rx_raw + win0 + off_sample[2],
+                                rx_raw + win0 + off_sample[3], tpl, m);
+        } else {
+            for (size_t p = 0; p < kCandidateCount; ++p)
+                m[p] = dot_generic(rx_raw + win0 + off_sample[p], tpl, len);
+        }
+
+        for (size_t p = 0; p < kCandidateCount; ++p) {
+            std::complex<float> value = m[p];
+            if (has_cfo)
+                value = (phase * cand_phase[p]) * m[p];
+            if (write_complex)
+                out.complex_value[kCandidateCount * s + p] = value;
+            const float re = rot.real() * value.real() -
+                             rot.imag() * value.imag();
+            out.signed_value[kCandidateCount * s + p] =
+                (polarity < 0) ? -re : re;
+        }
+    }
+
+    if (timings) {
+        const clock::time_point t_end = clock::now();
+        timings->template_update_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(t_templ -
+                                                                 t_begin)
+                .count());
+        timings->correlate_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(t_end -
+                                                                 t_templ)
+                .count());
+    }
+    return true;
+}
+
+// Production entry: always validates the spreading stream.
+inline bool correlate_payload_fused_cfo(
+    const std::complex<float>* rx_raw,
+    size_t n,
+    const std::complex<float>* fir_taps,
+    size_t tap_count,
+    int64_t chip_start,
+    size_t samples_per_chip,
+    int64_t payload_start,
+    const int8_t* pn,
+    size_t symbols,
+    int8_t polarity,
+    std::complex<float> rot,
+    double cfo_w_rad,
+    Metrics& out,
+    Scratch& scratch,
+    Timings* timings = nullptr,
+    bool write_complex = false)
+{
+    return correlate_payload_fused_cfo_impl(
+        rx_raw, n, fir_taps, tap_count, chip_start, samples_per_chip,
+        payload_start, pn, symbols, polarity, rot, cfo_w_rad, out, scratch,
+        timings, write_complex, true);
 }
 
 // Reproduce bprf_demod()'s hard decision exactly from the four signed
