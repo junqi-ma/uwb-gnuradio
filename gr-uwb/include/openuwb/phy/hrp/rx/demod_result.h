@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_phy_profile.h>
+#include <openuwb/phy/hrp/common/profile.h>
 
 #include <complex>
 #include <cstddef>

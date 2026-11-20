@@ -40,8 +40,8 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_phy_profile.h>
-#include <gnuradio/uwb/uwb_rx_sync_opt.h>
+#include <openuwb/phy/hrp/common/profile.h>
+#include <openuwb/phy/hrp/rx/rx_sync_opt.h>
 
 #include <algorithm>
 #include <cmath>

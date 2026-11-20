@@ -70,10 +70,10 @@ except ModuleNotFoundError as exc:  # pragma: no cover - setup guard
 if "gnuradio" in sys.modules:  # pragma: no cover - setup guard
     raise SystemExit("twr_config must import with NO GNU Radio present")
 
-_CXX_HEADER = os.path.join(_REPO_ROOT, "gr-uwb", "include", "gnuradio", "uwb",
-                           "uwb_twr_config.h")
-_CXX_TYPES = os.path.join(_REPO_ROOT, "gr-uwb", "include", "gnuradio", "uwb",
-                          "uwb_twr_types.h")
+_CXX_HEADER = os.path.join(_REPO_ROOT, "gr-uwb", "include", "openuwb", "twr",
+                           "config.h")
+_CXX_TYPES = os.path.join(_REPO_ROOT, "gr-uwb", "include", "openuwb", "twr",
+                          "types.h")
 _WHITELIST_CSV = os.path.join(_REPO_ROOT, "testdata", "twr",
                              "phy_matrix_whitelist_737280000.csv")
 

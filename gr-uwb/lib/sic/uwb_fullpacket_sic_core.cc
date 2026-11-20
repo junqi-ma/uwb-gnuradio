@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#include <gnuradio/uwb/uwb_fullpacket_sic_core.h>
+#include <openuwb/sic/fullpacket_sic_core.h>
 #include <array>
 #include <volk/volk.h>
 #include <chrono>

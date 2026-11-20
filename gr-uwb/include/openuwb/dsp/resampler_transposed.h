@@ -50,7 +50,7 @@
 #include <string>
 #include <vector>
 
-#include <gnuradio/uwb/uwb_simd.h>
+#include <openuwb/support/simd.h>
 #include <gnuradio/uwb/uwb_simd_config.h>
 
 #if UWB_SIMD_LEVEL >= 1

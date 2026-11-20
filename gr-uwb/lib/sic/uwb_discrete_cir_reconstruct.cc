@@ -24,12 +24,12 @@
  * result.  Nothing here reads sidecar/truth data and there is no fallback to
  * the fractional-path backend.
  */
-#include <gnuradio/uwb/uwb_discrete_cir_sic.h>
+#include <openuwb/sic/discrete_cir_sic.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <gnuradio/uwb/uwb_hrp_codec.h>
+#include <openuwb/phy/hrp/common/hrp_codec.h>
 #include <chrono>
 #include <cmath>
 #include <complex>

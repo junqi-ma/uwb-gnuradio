@@ -57,9 +57,9 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_rx_bpm.h>
+#include <openuwb/phy/hrp/rx/rx_bpm.h>
 
-#include <gnuradio/uwb/uwb_cir_fir_simd.h>
+#include <openuwb/dsp/cir_fir_simd.h>
 
 #include <algorithm>
 #include <chrono>

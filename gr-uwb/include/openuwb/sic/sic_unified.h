@@ -77,12 +77,12 @@
 
 #pragma once
 
-#include <gnuradio/uwb/api.h>
-#include <gnuradio/uwb/uwb_preamble_sic_core.h>
-#include <gnuradio/uwb/uwb_discrete_cir_sic.h>
-#include <gnuradio/uwb/uwb_fullpacket_sic_core.h>
-#include <gnuradio/uwb/uwb_demod_pipeline.h>
-#include <gnuradio/uwb/uwb_hrp_mod_core.h>
+#include <openuwb/support/api.h>
+#include <openuwb/sic/preamble_sic_core.h>
+#include <openuwb/sic/discrete_cir_sic.h>
+#include <openuwb/sic/fullpacket_sic_core.h>
+#include <openuwb/phy/hrp/rx/demod_pipeline.h>
+#include <openuwb/phy/hrp/tx/hrp_mod_core.h>
 
 #include <algorithm>
 #include <array>

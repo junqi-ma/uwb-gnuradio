@@ -40,7 +40,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include <gnuradio/uwb/uwb_matched_filter.h>
+#include <openuwb/dsp/matched_filter.h>
 
 #if defined(__AVX2__) && defined(__FMA__)
 #include <immintrin.h>

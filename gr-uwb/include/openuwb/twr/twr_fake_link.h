@@ -71,8 +71,8 @@
 #ifndef INCLUDED_GNURADIO_UWB_UWB_TWR_FAKE_LINK_H
 #define INCLUDED_GNURADIO_UWB_UWB_TWR_FAKE_LINK_H
 
-#include <gnuradio/uwb/uwb_twr_frame.h>     // kMaxFrameBytes
-#include <gnuradio/uwb/uwb_twr_tof_input.h> // FirstPathQuality, ClockDomain
+#include <openuwb/twr/twr_frame.h>     // kMaxFrameBytes
+#include <openuwb/twr/twr_tof_input.h> // FirstPathQuality, ClockDomain
 
 #include <cstddef>
 #include <cstdint>

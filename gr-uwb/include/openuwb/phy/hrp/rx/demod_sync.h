@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
-#include <gnuradio/uwb/uwb_demod_scratch.h>
-#include <gnuradio/uwb/uwb_demod_grid.h>
-#include <gnuradio/uwb/uwb_linear_fit.h>
-#include <gnuradio/uwb/uwb_rx_matched_filter.h>
-#include <gnuradio/uwb/uwb_detector_core.h>
+#include <openuwb/phy/hrp/rx/demod_scratch.h>
+#include <openuwb/phy/hrp/rx/demod_grid.h>
+#include <openuwb/support/linear_fit.h>
+#include <openuwb/phy/hrp/rx/rx_matched_filter.h>
+#include <openuwb/dsp/detector_core.h>
 
 namespace gr::uwb::demod::core {
 // ---------------------------------------------------------------------------

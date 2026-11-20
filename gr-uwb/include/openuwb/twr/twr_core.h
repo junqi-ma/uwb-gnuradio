@@ -70,9 +70,9 @@
 #ifndef INCLUDED_GNURADIO_UWB_UWB_TWR_CORE_H
 #define INCLUDED_GNURADIO_UWB_UWB_TWR_CORE_H
 
-#include <gnuradio/uwb/uwb_twr_config.h>
-#include <gnuradio/uwb/uwb_twr_frame.h>
-#include <gnuradio/uwb/uwb_twr_protocol_time.h>
+#include <openuwb/twr/twr_config.h>
+#include <openuwb/twr/twr_frame.h>
+#include <openuwb/twr/twr_protocol_time.h>
 
 #include <cstddef>
 #include <cstdint>

@@ -21,9 +21,9 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_hrp_codec.h>
-#include <gnuradio/uwb/uwb_phy_profile.h>
-#include <gnuradio/uwb/uwb_radar_meta_core.h>
+#include <openuwb/phy/hrp/common/hrp_codec.h>
+#include <openuwb/phy/hrp/common/profile.h>
+#include <openuwb/sensing/radar_meta_core.h>
 
 #include <algorithm>
 #include <cmath>

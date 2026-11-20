@@ -52,9 +52,9 @@
  * fragment count (§6.3).
  */
 
-#include <gnuradio/uwb/uwb_echo_multitx.h>
-#include <gnuradio/uwb/uwb_echo_scheduler_core.h>
-#include <gnuradio/uwb/uwb_uhd_backend_config.h>
+#include <openuwb/radio/echo_multitx.h>
+#include <openuwb/runtime/echo_scheduler_core.h>
+#include <openuwb/radio/uhd_backend_config.h>
 
 #include <cmath>
 #include <cstdlib>

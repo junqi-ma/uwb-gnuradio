@@ -16,7 +16,7 @@
  * unsupported machine could then die on SIGILL before the runtime check.
  */
 
-#include <gnuradio/uwb/uwb_rational_resampler_avx512.h>
+#include <openuwb/dsp/rational_resampler_avx512.h>
 
 #include <immintrin.h>
 

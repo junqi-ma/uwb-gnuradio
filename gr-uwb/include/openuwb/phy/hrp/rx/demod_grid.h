@@ -2,8 +2,8 @@
 #pragma once
 #include <cmath>
 #include <algorithm>
-#include <gnuradio/uwb/uwb_demod_result.h>
-#include <gnuradio/uwb/uwb_phy_profile.h>
+#include <openuwb/phy/hrp/rx/demod_result.h>
+#include <openuwb/phy/hrp/common/profile.h>
 
 namespace gr::uwb::demod::core {
 

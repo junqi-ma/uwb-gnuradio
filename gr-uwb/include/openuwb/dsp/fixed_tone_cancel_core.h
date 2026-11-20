@@ -36,7 +36,7 @@
 
 #pragma once
 
-#include <gnuradio/uwb/api.h>
+#include <openuwb/support/api.h>
 
 #include <complex>
 #include <cstddef>

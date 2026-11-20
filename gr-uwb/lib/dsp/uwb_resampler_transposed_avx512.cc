@@ -18,7 +18,7 @@
  * macroblock kernels.
  */
 
-#include <gnuradio/uwb/uwb_resampler_transposed.h>
+#include <openuwb/dsp/resampler_transposed.h>
 
 #if UWB_SIMD_HAVE_AVX512
 

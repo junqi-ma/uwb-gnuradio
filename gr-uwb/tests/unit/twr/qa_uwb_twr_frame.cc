@@ -51,6 +51,7 @@
 #include <gnuradio/uwb/uwb_twr_frame.h>
 #include <gnuradio/uwb/uwb_twr_types.h>
 
+#include <sys/stat.h>
 #include <dirent.h>
 
 #include <cmath>
@@ -673,6 +674,12 @@ std::string strip_comments(const std::string& in)
     return out;
 }
 
+// Phase 2 moved the sources into domain subdirectories, so the structural
+// guards below must walk the tree instead of one flat directory.  The set of
+// files examined is unchanged: every production header/source under the tree.
+std::vector<std::string> list_files_recursive(const std::string& dir,
+                                              const char* suffix);
+
 std::vector<std::string> list_files(const std::string& dir, const char* suffix)
 {
     std::vector<std::string> out;
@@ -689,6 +696,31 @@ std::vector<std::string> list_files(const std::string& dir, const char* suffix)
         out.push_back(dir + "/" + n);
     }
     closedir(d);
+    return out;
+}
+
+std::vector<std::string> list_files_recursive(const std::string& dir,
+                                              const char* suffix)
+{
+    std::vector<std::string> out = list_files(dir, suffix);
+    DIR* d = opendir(dir.c_str());
+    if (d == nullptr)
+        return out;
+    std::vector<std::string> subdirs;
+    for (struct dirent* e = readdir(d); e != nullptr; e = readdir(d)) {
+        const std::string n(e->d_name);
+        if (n == "." || n == "..")
+            continue;
+        const std::string path = dir + "/" + n;
+        struct stat st {};
+        if (stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
+            subdirs.push_back(path);
+    }
+    closedir(d);
+    for (const std::string& sub : subdirs) {
+        const std::vector<std::string> nested = list_files_recursive(sub, suffix);
+        out.insert(out.end(), nested.begin(), nested.end());
+    }
     return out;
 }
 
@@ -1761,10 +1793,12 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_only_one_source_file_appends_the_fcs)
     const std::string root = repo_root();
     BOOST_REQUIRE_MESSAGE(!root.empty(),
                           "cannot locate the repository root from UWB_TESTDATA_DIR");
-    const std::string hdr_dir = root + "/gr-uwb/include/gnuradio/uwb";
+    const std::string hdr_dir = root + "/gr-uwb/include/openuwb";
     const std::string lib_dir = root + "/gr-uwb/lib";
-    BOOST_REQUIRE_MESSAGE(!list_files(hdr_dir, ".h").empty(), "no headers in " << hdr_dir);
-    BOOST_REQUIRE_MESSAGE(!list_files(lib_dir, ".cc").empty(), "no sources in " << lib_dir);
+    BOOST_REQUIRE_MESSAGE(!list_files_recursive(hdr_dir, ".h").empty(),
+                          "no headers in " << hdr_dir);
+    BOOST_REQUIRE_MESSAGE(!list_files_recursive(lib_dir, ".cc").empty(),
+                          "no sources in " << lib_dir);
 
     // Comment-stripped lines, so a mention in prose cannot be mistaken for a
     // call site (this file, for one, mentions the function in its header).
@@ -1774,8 +1808,8 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_only_one_source_file_appends_the_fcs)
         std::string text;
     };
     std::vector<Hit> hits;
-    std::vector<std::string> files = list_files(hdr_dir, ".h");
-    for (const std::string& s : list_files(lib_dir, ".cc"))
+    std::vector<std::string> files = list_files_recursive(hdr_dir, ".h");
+    for (const std::string& s : list_files_recursive(lib_dir, ".cc"))
         files.push_back(s);
 
     for (const std::string& f : files) {
@@ -1805,7 +1839,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_only_one_source_file_appends_the_fcs)
     int core_helper = 0;
     int production_m2a = 0;
     for (const Hit& h : hits) {
-        const bool in_core = h.file.find("uwb_hrp_mod_core.h") != std::string::npos;
+        const bool in_core = h.file.find("/tx/hrp_mod_core.h") != std::string::npos;
         const bool in_m2a = h.file.find("uwb_twr_phy.cc") != std::string::npos;
         if (in_core && h.text.find("void append_ieee_fcs") != std::string::npos) {
             ++defs;

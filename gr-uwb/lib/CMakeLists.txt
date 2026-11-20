@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 set(uwb_core_sources
-    uwb_demod_pipeline.cc
-    uwb_discrete_cir_estimator.cc
-    uwb_discrete_cir_reconstruct.cc
-    uwb_fixed_tone_cancel_core.cc
-    uwb_fullpacket_sic_core.cc
-    uwb_preamble_sic_core.cc
-    uwb_sic_unified.cc
+    phy/hrp/uwb_demod_pipeline.cc
+    sic/uwb_discrete_cir_estimator.cc
+    sic/uwb_discrete_cir_reconstruct.cc
+    dsp/uwb_fixed_tone_cancel_core.cc
+    sic/uwb_fullpacket_sic_core.cc
+    sic/uwb_preamble_sic_core.cc
+    sic/uwb_sic_unified.cc
 )
 
 # The runtime capability check MUST be compiled on the baseline ISA: it is the
@@ -17,7 +17,8 @@ set(uwb_core_sources
 # uwb_kernel_backend.cc lives here too: the per-group selector must be able to
 # answer before any wide instruction is reachable, and its override is what QA
 # uses to pin a backend.
-add_library(uwb_simd_probe OBJECT uwb_simd_runtime.cc uwb_kernel_backend.cc)
+add_library(uwb_simd_probe OBJECT
+    support/uwb_simd_runtime.cc support/uwb_kernel_backend.cc)
 target_include_directories(uwb_simd_probe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
     ${PROJECT_BINARY_DIR}/include)
@@ -28,9 +29,9 @@ set_target_properties(uwb_simd_probe PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # when CMake selected the AVX-512 backend.  The rest of the build stays on the
 # AVX2/FMA baseline; the wide functions carry target attributes.
 if(UWB_SIMD_HAVE_AVX512)
-    list(APPEND uwb_core_sources uwb_rational_resampler_avx512.cc
-                                uwb_resampler_transposed_avx512.cc
-                                uwb_demod_sic_avx512.cc)
+    list(APPEND uwb_core_sources dsp/uwb_rational_resampler_avx512.cc
+                                dsp/uwb_resampler_transposed_avx512.cc
+                                sic/uwb_demod_sic_avx512.cc)
 endif()
 
 ########################################################################
@@ -38,11 +39,11 @@ endif()
 # device backend)
 ########################################################################
 set(uwb_native_sources
-    uwb_uhd_sc16_pipeline.cc
-    uwb_fixed_tone_cancel_source.cc
+    runtime/uwb_uhd_sc16_pipeline.cc
+    radio/uwb_fixed_tone_cancel_source.cc
 )
 if(UWB_HAVE_UHD)
-    list(APPEND uwb_native_sources uwb_uhd_burst_backend.cc)
+    list(APPEND uwb_native_sources radio/uwb_uhd_burst_backend.cc)
 endif()
 
 ########################################################################
@@ -86,13 +87,13 @@ endif()
 # link it and PROVE (ldd/readelf) that it pulls in neither GNU Radio nor UHD
 # (M1-B §8).  The fake link is transport/QA support and is NOT installed.
 ########################################################################
-add_library(uwb_twr_core STATIC uwb_twr_core.cc)
+add_library(uwb_twr_core STATIC twr/uwb_twr_core.cc)
 target_include_directories(uwb_twr_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
     $<INSTALL_INTERFACE:include>)
 set_target_properties(uwb_twr_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-add_library(uwb_twr_fake_link STATIC uwb_twr_fake_link.cc)
+add_library(uwb_twr_fake_link STATIC twr/uwb_twr_fake_link.cc)
 target_include_directories(uwb_twr_fake_link PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>)
 target_link_libraries(uwb_twr_fake_link PUBLIC uwb_twr_core)
@@ -106,7 +107,7 @@ target_link_libraries(uwb_twr_fake_link PUBLIC uwb_twr_core)
 # proves that with ldd/readelf (G0 §14.1); if libgnuradio-* ever appears here,
 # the fallback is header-only + a consumer-only compile check.
 ########################################################################
-add_library(uwb_twr_phy STATIC uwb_twr_phy.cc uwb_twr_phy_impairment.cc)
+add_library(uwb_twr_phy STATIC twr/uwb_twr_phy.cc twr/uwb_twr_phy_impairment.cc)
 target_include_directories(uwb_twr_phy PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
     $<INSTALL_INTERFACE:include>)
@@ -130,7 +131,7 @@ install(EXPORT uwb-export FILE uwbTargets.cmake NAMESPACE uwb::
 # Pure-contract printer: includes no UHD header and opens no device. Registered
 # in CTest in both build configurations (UHD ON and OFF).
 ########################################################################
-add_executable(uwb_uhd_burst_dry_run uwb_uhd_dry_run.cc)
+add_executable(uwb_uhd_burst_dry_run radio/uwb_uhd_dry_run.cc)
 target_compile_definitions(uwb_uhd_burst_dry_run PRIVATE UWB_NO_UHD_LINK=1)
 target_link_libraries(uwb_uhd_burst_dry_run PRIVATE uwb_core)
 

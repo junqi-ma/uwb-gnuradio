@@ -90,7 +90,7 @@
 #ifndef INCLUDED_GNURADIO_UWB_UWB_TWR_MATH_H
 #define INCLUDED_GNURADIO_UWB_UWB_TWR_MATH_H
 
-#include <gnuradio/uwb/uwb_twr_tof_input.h>
+#include <openuwb/twr/twr_tof_input.h>
 
 #include <cmath>
 #include <cstdint>

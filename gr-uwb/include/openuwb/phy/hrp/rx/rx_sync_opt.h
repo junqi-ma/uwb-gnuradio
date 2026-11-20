@@ -17,10 +17,10 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_detector_core.h> // gr::uwb::core::uwb_l2_normalize
-#include <gnuradio/uwb/uwb_demod_sic_avx512.h> // phase-2 wide kernels
-#include <gnuradio/uwb/uwb_kernel_backend.h>   // per-group backend policy
-#include <gnuradio/uwb/uwb_phy_profile.h>      // kQm35SamplesPerSymbol
+#include <openuwb/dsp/detector_core.h> // gr::uwb::core::uwb_l2_normalize
+#include <openuwb/sic/demod_sic_avx512.h> // phase-2 wide kernels
+#include <openuwb/support/kernel_backend.h>   // per-group backend policy
+#include <openuwb/phy/hrp/common/profile.h>      // kQm35SamplesPerSymbol
 #include <gnuradio/uwb/uwb_simd_config.h>      // UWB_SIMD_HAVE_AVX2
 
 #include <volk/volk.h>

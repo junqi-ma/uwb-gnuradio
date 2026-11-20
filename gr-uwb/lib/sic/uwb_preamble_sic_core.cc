@@ -22,7 +22,7 @@
  * golden cross-check meaningful.
  */
 
-#include <gnuradio/uwb/uwb_preamble_sic_core.h>
+#include <openuwb/sic/preamble_sic_core.h>
 
 #include <volk/volk.h>
 

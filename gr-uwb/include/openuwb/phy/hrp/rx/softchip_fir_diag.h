@@ -21,9 +21,9 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_cir_fir_simd.h>
-#include <gnuradio/uwb/uwb_demod_result.h>
-#include <gnuradio/uwb/uwb_rx_fused_cmf.h>
+#include <openuwb/dsp/cir_fir_simd.h>
+#include <openuwb/phy/hrp/rx/demod_result.h>
+#include <openuwb/phy/hrp/rx/rx_fused_cmf.h>
 
 #include <algorithm>
 #include <chrono>

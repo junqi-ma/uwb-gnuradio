@@ -25,8 +25,8 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_defaults.h>
-#include <gnuradio/uwb/uwb_matched_filter.h>
+#include <openuwb/support/defaults.h>
+#include <openuwb/dsp/matched_filter.h>
 
 #include <algorithm>
 #include <array>

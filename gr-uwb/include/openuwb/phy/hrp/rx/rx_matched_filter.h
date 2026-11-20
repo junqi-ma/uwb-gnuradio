@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-#include <gnuradio/uwb/uwb_rx_sync_opt.h>
+#include <openuwb/phy/hrp/rx/rx_sync_opt.h>
 
 namespace gr::uwb::demod::rxopt {
 

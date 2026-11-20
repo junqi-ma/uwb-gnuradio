@@ -15,7 +15,7 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_radar_checked_math.h>
+#include <openuwb/support/checked_math.h>
 
 #include <algorithm>
 #include <cmath>

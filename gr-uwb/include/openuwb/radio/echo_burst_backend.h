@@ -38,7 +38,7 @@
 #include <cstdint>
 #include <string>
 
-#include <gnuradio/uwb/uwb_echo_multitx.h>
+#include <openuwb/radio/echo_multitx.h>
 
 namespace gr {
 namespace uwb {

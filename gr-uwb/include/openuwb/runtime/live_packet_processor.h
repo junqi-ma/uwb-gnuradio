@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
-#include <gnuradio/uwb/uwb_demod_pipeline.h>
-#include <gnuradio/uwb/uwb_qm35_acquisition_tracker.h>
-#include <gnuradio/uwb/uwb_rational_resampler_core.h>
-#include <gnuradio/uwb/uwb_resample_window.h>
-#include <gnuradio/uwb/uwb_target_lock_core.h>
+#include <openuwb/phy/hrp/rx/demod_pipeline.h>
+#include <openuwb/runtime/qm35_acquisition_tracker.h>
+#include <openuwb/dsp/rational_resampler_core.h>
+#include <openuwb/dsp/resample_window.h>
+#include <openuwb/runtime/target_lock_core.h>
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>

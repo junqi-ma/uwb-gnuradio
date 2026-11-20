@@ -32,7 +32,7 @@
  * repetition rows must be fully visible; the training target and the folded
  * coarse CIR use only visible samples.  No sidecar/truth parameter exists.
  */
-#include <gnuradio/uwb/uwb_discrete_cir_sic.h>
+#include <openuwb/sic/discrete_cir_sic.h>
 
 #include <volk/volk.h>
 #if defined(__x86_64__) || defined(_M_X64)

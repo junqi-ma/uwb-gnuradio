@@ -28,9 +28,9 @@
 
 // Self-containment regression guard (same pattern as qa_uwb_echo_timer):
 // this shared header must pull in its own size_t.
-#include <gnuradio/uwb/uwb_radar_checked_math.h>
-#include <gnuradio/uwb/uwb_echo_burst_backend.h>
-#include <gnuradio/uwb/uwb_echo_scheduler_core.h>
+#include <openuwb/support/checked_math.h>
+#include <openuwb/radio/echo_burst_backend.h>
+#include <openuwb/runtime/echo_scheduler_core.h>
 
 #include <cmath>
 #include <cstdint>

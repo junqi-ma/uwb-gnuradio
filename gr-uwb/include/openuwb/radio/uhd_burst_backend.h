@@ -57,9 +57,9 @@
 "ENABLE_UHD_BACKEND). The rest of gr-uwb builds and tests without UHD."
 #endif
 
-#include <gnuradio/uwb/api.h>
-#include <gnuradio/uwb/uwb_echo_burst_backend.h>
-#include <gnuradio/uwb/uwb_uhd_backend_config.h>
+#include <openuwb/support/api.h>
+#include <openuwb/radio/echo_burst_backend.h>
+#include <openuwb/radio/uhd_backend_config.h>
 
 #include <atomic>
 #include <cstddef>

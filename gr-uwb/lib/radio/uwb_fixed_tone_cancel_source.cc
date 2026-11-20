@@ -7,7 +7,7 @@
  * Bounded continuous fixed-frequency CW cancellation stage implementation.
  */
 
-#include <gnuradio/uwb/uwb_fixed_tone_cancel_source.h>
+#include <openuwb/radio/fixed_tone_cancel_source.h>
 
 #include <algorithm>
 #include <chrono>

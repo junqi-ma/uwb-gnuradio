@@ -29,8 +29,8 @@
 #include "config.h"
 #endif
 
-#include <gnuradio/uwb/uwb_uhd_burst_backend.h>
-#include <gnuradio/uwb/uwb_echo_multitx.h> // echo::kEchoMaxTxChannels (hot-path array bound)
+#include <openuwb/radio/uhd_burst_backend.h>
+#include <openuwb/radio/echo_multitx.h> // echo::kEchoMaxTxChannels (hot-path array bound)
 
 // UHD 4.1 header layout (pre-4.2): combined uhd/stream.hpp holds both
 // streamers, uhd/types/metadata.hpp holds rx_metadata_t/async_metadata_t.

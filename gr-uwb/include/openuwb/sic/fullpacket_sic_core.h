@@ -1,6 +1,6 @@
 #pragma once
-#include <gnuradio/uwb/uwb_preamble_sic_core.h>
-#include <gnuradio/uwb/uwb_hrp_mod_core.h>
+#include <openuwb/sic/preamble_sic_core.h>
+#include <openuwb/phy/hrp/tx/hrp_mod_core.h>
 namespace gr { namespace uwb { namespace sic {
 struct FullPacketScratch {
     mod::HrpModScratch modulator;

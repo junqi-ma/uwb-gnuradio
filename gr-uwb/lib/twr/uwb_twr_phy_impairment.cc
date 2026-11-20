@@ -107,7 +107,7 @@
  * UNCHANGED.  NaN/Inf is never passed through silently.
  */
 
-#include <gnuradio/uwb/uwb_twr_phy.h>
+#include <openuwb/twr/twr_phy.h>
 
 #include <array>
 #include <cmath>

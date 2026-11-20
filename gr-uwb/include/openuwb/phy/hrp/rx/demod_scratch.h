@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
-#include <gnuradio/uwb/uwb_demod_result.h>
-#include <gnuradio/uwb/uwb_demod_fec.h>
-#include <gnuradio/uwb/uwb_phy_profile.h>
-#include <gnuradio/uwb/uwb_rx_cfo_opt.h>
-#include <gnuradio/uwb/uwb_rx_sync_opt.h>
-#include <gnuradio/uwb/uwb_rx_fused_cmf.h>
-#include <gnuradio/uwb/uwb_rx_phase_sfo.h>
+#include <openuwb/phy/hrp/rx/demod_result.h>
+#include <openuwb/phy/hrp/rx/demod_fec.h>
+#include <openuwb/phy/hrp/common/profile.h>
+#include <openuwb/phy/hrp/rx/rx_cfo_opt.h>
+#include <openuwb/phy/hrp/rx/rx_sync_opt.h>
+#include <openuwb/phy/hrp/rx/rx_fused_cmf.h>
+#include <openuwb/phy/hrp/rx/rx_phase_sfo.h>
 
 #include <algorithm>
 #include <array>

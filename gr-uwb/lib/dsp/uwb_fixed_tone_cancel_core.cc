@@ -7,7 +7,7 @@
  * Fixed-frequency CW cancellation core implementation.
  */
 
-#include <gnuradio/uwb/uwb_fixed_tone_cancel_core.h>
+#include <openuwb/dsp/fixed_tone_cancel_core.h>
 
 #include <algorithm>
 #include <cmath>

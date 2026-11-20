@@ -10,11 +10,11 @@
 
 #pragma once
 
-#include <gnuradio/uwb/api.h>
-#include <gnuradio/uwb/uwb_radar_cir_core.h>
-#include <gnuradio/uwb/uwb_scheduled_extractor_core.h>
-#include <gnuradio/uwb/uwb_sc16_stream_source.h>
-#include <gnuradio/uwb/uwb_sic_unified.h>
+#include <openuwb/support/api.h>
+#include <openuwb/sensing/radar_cir_core.h>
+#include <openuwb/runtime/scheduled_extractor_core.h>
+#include <openuwb/radio/sc16_stream_source.h>
+#include <openuwb/sic/sic_unified.h>
 
 #include <atomic>
 #include <chrono>

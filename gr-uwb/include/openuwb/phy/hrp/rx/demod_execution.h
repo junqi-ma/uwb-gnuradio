@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
-#include <gnuradio/uwb/uwb_demod_grid.h>
-#include <gnuradio/uwb/uwb_rx_cfo_opt.h>
-#include <gnuradio/uwb/uwb_rx_fused_cmf.h>
-#include <gnuradio/uwb/uwb_rx_softchip_opt.h>
+#include <openuwb/phy/hrp/rx/demod_grid.h>
+#include <openuwb/phy/hrp/rx/rx_cfo_opt.h>
+#include <openuwb/phy/hrp/rx/rx_fused_cmf.h>
+#include <openuwb/phy/hrp/rx/rx_softchip_opt.h>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>

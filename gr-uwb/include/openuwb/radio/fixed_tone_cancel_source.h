@@ -28,12 +28,12 @@
 
 #pragma once
 
-#include <gnuradio/uwb/api.h>
-#include <gnuradio/uwb/uwb_fixed_tone_cancel_core.h>
+#include <openuwb/support/api.h>
+#include <openuwb/dsp/fixed_tone_cancel_core.h>
 // Minimal source contract only: including the whole pipeline header here
 // would force every tone-cancel consumer to pull in the SIC / radar / demod
 // consumer headers.
-#include <gnuradio/uwb/uwb_sc16_stream_source.h>
+#include <openuwb/radio/sc16_stream_source.h>
 
 #include <atomic>
 #include <condition_variable>

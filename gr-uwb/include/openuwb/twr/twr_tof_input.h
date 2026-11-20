@@ -95,8 +95,8 @@
 #ifndef INCLUDED_GNURADIO_UWB_UWB_TWR_TOF_INPUT_H
 #define INCLUDED_GNURADIO_UWB_UWB_TWR_TOF_INPUT_H
 
-#include <gnuradio/uwb/uwb_twr_types.h>
-#include <gnuradio/uwb/uwb_twr_timestamp.h>
+#include <openuwb/twr/twr_types.h>
+#include <openuwb/twr/twr_timestamp.h>
 
 #include <cmath>
 #include <cstdint>

@@ -12,9 +12,9 @@
  * AVX-512 kernel is reachable.
  */
 
-#include <gnuradio/uwb/uwb_kernel_backend.h>
+#include <openuwb/support/kernel_backend.h>
 
-#include <gnuradio/uwb/uwb_simd.h>
+#include <openuwb/support/simd.h>
 #include <gnuradio/uwb/uwb_simd_config.h>
 
 #include <array>

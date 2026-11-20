@@ -16,7 +16,7 @@
  * could then die on SIGILL before the runtime capability check.
  */
 
-#include <gnuradio/uwb/uwb_demod_sic_avx512.h>
+#include <openuwb/sic/demod_sic_avx512.h>
 
 #include <cstring>
 

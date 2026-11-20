@@ -9,7 +9,7 @@
  * sleep, no thread and no randomness.
  */
 
-#include <gnuradio/uwb/uwb_twr_fake_link.h>
+#include <openuwb/twr/twr_fake_link.h>
 
 #include <algorithm>
 #include <cmath>

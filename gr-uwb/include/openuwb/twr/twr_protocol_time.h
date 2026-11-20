@@ -52,8 +52,8 @@
 #ifndef INCLUDED_GNURADIO_UWB_UWB_TWR_PROTOCOL_TIME_H
 #define INCLUDED_GNURADIO_UWB_UWB_TWR_PROTOCOL_TIME_H
 
-#include <gnuradio/uwb/uwb_twr_frame.h>
-#include <gnuradio/uwb/uwb_twr_math.h>
+#include <openuwb/twr/twr_frame.h>
+#include <openuwb/twr/twr_math.h>
 
 #include <cstdint>
 #include <cstdio>

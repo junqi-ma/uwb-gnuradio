@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
-#include <gnuradio/uwb/uwb_demod_result.h>
+#include <openuwb/phy/hrp/rx/demod_result.h>
 namespace gr::uwb::demod::core {
 // Called exactly once on each pipeline exit. Stages use window-local sample
 // positions; only the fields historically published as absolute are rebased.

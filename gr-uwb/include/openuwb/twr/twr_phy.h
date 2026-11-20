@@ -70,10 +70,10 @@
 #ifndef INCLUDED_GNURADIO_UWB_UWB_TWR_PHY_H
 #define INCLUDED_GNURADIO_UWB_UWB_TWR_PHY_H
 
-#include <gnuradio/uwb/uwb_demod_result.h>
-#include <gnuradio/uwb/uwb_hrp_mod_core.h>
-#include <gnuradio/uwb/uwb_rational_resampler_core.h>
-#include <gnuradio/uwb/uwb_twr_frame.h>
+#include <openuwb/phy/hrp/rx/demod_result.h>
+#include <openuwb/phy/hrp/tx/hrp_mod_core.h>
+#include <openuwb/dsp/rational_resampler_core.h>
+#include <openuwb/twr/twr_frame.h>
 
 #include <cmath>
 #include <complex>

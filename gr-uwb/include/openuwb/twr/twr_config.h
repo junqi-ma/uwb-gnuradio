@@ -12,8 +12,8 @@
  * surface can be unit tested, fuzzed and imported from Python without a
  * radio, without a device and without the OOT module being built.  The
  * only project dependencies are the frozen vocabulary header
- * <gnuradio/uwb/uwb_twr_types.h> and the frame codec
- * <gnuradio/uwb/uwb_twr_frame.h>.  Both are themselves stdlib-only, and the
+ * <openuwb/twr/twr_types.h> and the frame codec
+ * <openuwb/twr/twr_frame.h>.  Both are themselves stdlib-only, and the
  * dependency runs ONE WAY: the codec does not know this file exists.
  *
  * ---------------------------------------------------------------------------
@@ -134,12 +134,12 @@
 
 // The frame codec: this file's geometry/session authority (M0.1 / R3).  It is
 // stdlib-only, so including it keeps the "no GNU Radio, no UHD" property.
-#include <gnuradio/uwb/uwb_twr_frame.h>
-#include <gnuradio/uwb/uwb_twr_timestamp.h>
-#include <gnuradio/uwb/uwb_twr_types.h>
+#include <openuwb/twr/twr_frame.h>
+#include <openuwb/twr/twr_timestamp.h>
+#include <openuwb/twr/twr_types.h>
 // M0.1 R7: the per-row evidence ladder.  uwb_twr_capability_evidence.h does
 // NOT include this file, so the dependency is one-way.
-#include <gnuradio/uwb/uwb_twr_capability_evidence.h>
+#include <openuwb/twr/twr_capability_evidence.h>
 
 // File-scope alias so the evidence vocabulary reads as `evidence::...` in the
 // capability tables below.  C++ forbids a namespace alias as a *member*, so it

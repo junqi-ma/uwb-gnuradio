@@ -12,9 +12,9 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_defaults.h>
-#include <gnuradio/uwb/uwb_gr_complex.h>
-#include <gnuradio/uwb/uwb_detector_core.h>
+#include <openuwb/support/defaults.h>
+#include <openuwb/support/gr_complex.h>
+#include <openuwb/dsp/detector_core.h>
 
 #include <algorithm>
 #include <complex>

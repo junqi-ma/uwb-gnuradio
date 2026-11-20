@@ -10,7 +10,7 @@
  * because an input event says so.  See uwb_twr_core.h for the contract.
  */
 
-#include <gnuradio/uwb/uwb_twr_core.h>
+#include <openuwb/twr/twr_core.h>
 
 #include <array>
 #include <cstdio>

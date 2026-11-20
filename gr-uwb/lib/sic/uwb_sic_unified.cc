@@ -8,7 +8,7 @@
  * Namespace gr::uwb::sic.
  */
 
-#include <gnuradio/uwb/uwb_sic_unified.h>
+#include <openuwb/sic/sic_unified.h>
 
 #include <chrono>
 #include <cmath>

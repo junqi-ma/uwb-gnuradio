@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
-#include <gnuradio/uwb/uwb_demod_result.h>
-#include <gnuradio/uwb/uwb_rx_bpm.h>
+#include <openuwb/phy/hrp/rx/demod_result.h>
+#include <openuwb/phy/hrp/rx/rx_bpm.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <limits>
 #include <utility>
-#include <gnuradio/uwb/uwb_hrp_codec.h>
+#include <openuwb/phy/hrp/common/hrp_codec.h>
 
 namespace gr::uwb::demod::core {
 // ---------------------------------------------------------------------------

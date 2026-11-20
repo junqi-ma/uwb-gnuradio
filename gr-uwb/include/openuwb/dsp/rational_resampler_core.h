@@ -73,7 +73,7 @@
 
 #include <volk/volk.h>
 
-#include <gnuradio/uwb/uwb_simd.h>
+#include <openuwb/support/simd.h>
 #include <gnuradio/uwb/uwb_simd_config.h>
 
 // The compile-time backend is chosen once by CMake (UWB_SIMD=...).  Guarding
@@ -92,13 +92,13 @@
 #endif
 
 #if UWB_SIMD_HAVE_AVX512
-#include <gnuradio/uwb/uwb_rational_resampler_avx512.h>
+#include <openuwb/dsp/rational_resampler_avx512.h>
 #define UWB_RESAMP_HAVE_AVX512 1
 #else
 #define UWB_RESAMP_HAVE_AVX512 0
 #endif
 
-#include <gnuradio/uwb/uwb_resampler_transposed.h>
+#include <openuwb/dsp/resampler_transposed.h>
 
 namespace gr {
 namespace uwb {

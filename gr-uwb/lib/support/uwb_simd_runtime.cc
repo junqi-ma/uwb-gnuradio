@@ -13,7 +13,7 @@
  * even on capable silicon).
  */
 
-#include <gnuradio/uwb/uwb_simd.h>
+#include <openuwb/support/simd.h>
 
 #include <stdexcept>
 #include <string>

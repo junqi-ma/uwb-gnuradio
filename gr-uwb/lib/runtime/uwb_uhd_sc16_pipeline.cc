@@ -8,12 +8,12 @@
  * Bypasses GNU Radio scheduler and PMT/PDU messaging overhead.
  */
 
-#include <gnuradio/uwb/uwb_uhd_sc16_pipeline.h>
-#include <gnuradio/uwb/uwb_fixed_tone_cancel_source.h>
-#include <gnuradio/uwb/uwb_rational_resampler_core.h>
-#include <gnuradio/uwb/uwb_resample_window.h>
-#include <gnuradio/uwb/uwb_defaults.h>
-#include <gnuradio/uwb/uwb_log.h>
+#include <openuwb/runtime/uhd_sc16_pipeline.h>
+#include <openuwb/radio/fixed_tone_cancel_source.h>
+#include <openuwb/dsp/rational_resampler_core.h>
+#include <openuwb/dsp/resample_window.h>
+#include <openuwb/support/defaults.h>
+#include <openuwb/support/log.h>
 #include <volk/volk.h>
 
 #include <algorithm>

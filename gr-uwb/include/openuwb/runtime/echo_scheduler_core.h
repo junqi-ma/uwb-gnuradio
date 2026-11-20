@@ -40,7 +40,7 @@
 #ifndef INCLUDED_GNURADIO_UWB_UWB_ECHO_SCHEDULER_CORE_H
 #define INCLUDED_GNURADIO_UWB_UWB_ECHO_SCHEDULER_CORE_H
 
-#include <gnuradio/uwb/uwb_radar_checked_math.h>
+#include <openuwb/support/checked_math.h>
 
 #include <cstddef>
 #include <cstdint>

@@ -47,8 +47,8 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_defaults.h>
-#include <gnuradio/uwb/uwb_scheduled_extractor_core.h>
+#include <openuwb/support/defaults.h>
+#include <openuwb/runtime/scheduled_extractor_core.h>
 
 #include <algorithm>
 #include <cmath>

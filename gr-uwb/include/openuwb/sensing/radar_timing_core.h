@@ -18,8 +18,8 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_detector_core.h>
-#include <gnuradio/uwb/uwb_radar_checked_math.h>
+#include <openuwb/dsp/detector_core.h>
+#include <openuwb/support/checked_math.h>
 
 #include <algorithm>
 #include <cmath>

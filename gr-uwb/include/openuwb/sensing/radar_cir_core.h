@@ -22,10 +22,10 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_radar_sfd_core.h>
-#include <gnuradio/uwb/uwb_radar_timing_core.h>
-#include <gnuradio/uwb/uwb_radar_cir_estimator.h>
-#include <gnuradio/uwb/uwb_phy_profile.h>
+#include <openuwb/sensing/radar_sfd_core.h>
+#include <openuwb/sensing/radar_timing_core.h>
+#include <openuwb/sensing/radar_cir_estimator.h>
+#include <openuwb/phy/hrp/common/profile.h>
 
 #include <algorithm>
 #include <cmath>

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-#include <gnuradio/uwb/uwb_demod_core.h>
-#include <gnuradio/uwb/uwb_softchip_fir_diag.h>
-#include <gnuradio/uwb/uwb_demod_execution.h>
-#include <gnuradio/uwb/uwb_demod_finalize.h>
+#include <openuwb/phy/hrp/rx/demod_core.h>
+#include <openuwb/phy/hrp/rx/softchip_fir_diag.h>
+#include <openuwb/phy/hrp/rx/demod_execution.h>
+#include <openuwb/phy/hrp/rx/demod_finalize.h>
 namespace gr::uwb::demod::core {
 namespace {
 

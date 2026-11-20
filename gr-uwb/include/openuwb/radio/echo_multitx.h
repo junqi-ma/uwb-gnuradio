@@ -26,7 +26,7 @@
 #ifndef INCLUDED_GNURADIO_UWB_UWB_ECHO_MULTITX_H
 #define INCLUDED_GNURADIO_UWB_UWB_ECHO_MULTITX_H
 
-#include <gnuradio/uwb/uwb_echo_scheduler_core.h>
+#include <openuwb/runtime/echo_scheduler_core.h>
 
 #include <array>
 #include <cstddef>

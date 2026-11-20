@@ -49,9 +49,9 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_demod_result.h>
-#include <gnuradio/uwb/uwb_phy_profile.h>
-#include <gnuradio/uwb/uwb_rx_matched_filter.h> // legacy sparse CIR API
+#include <openuwb/phy/hrp/rx/demod_result.h>
+#include <openuwb/phy/hrp/common/profile.h>
+#include <openuwb/phy/hrp/rx/rx_matched_filter.h> // legacy sparse CIR API
 #include <volk/volk.h>
 
 #include <algorithm>

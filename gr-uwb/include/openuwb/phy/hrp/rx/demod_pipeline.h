@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
-#include <gnuradio/uwb/uwb_demod_scratch.h>
+#include <openuwb/phy/hrp/rx/demod_scratch.h>
 
 namespace gr::uwb::demod::core {
 // Full-packet entry point. rx uses work-rate samples. predicted_start and

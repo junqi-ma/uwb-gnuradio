@@ -40,10 +40,10 @@
  */
 #pragma once
 
-#include <gnuradio/uwb/api.h>
-#include <gnuradio/uwb/uwb_hrp_mod_core.h>
-#include <gnuradio/uwb/uwb_rx_matched_filter.h>
-#include <gnuradio/uwb/uwb_rx_sync_opt.h>
+#include <openuwb/support/api.h>
+#include <openuwb/phy/hrp/tx/hrp_mod_core.h>
+#include <openuwb/phy/hrp/rx/rx_matched_filter.h>
+#include <openuwb/phy/hrp/rx/rx_sync_opt.h>
 
 #include <array>
 #include <complex>

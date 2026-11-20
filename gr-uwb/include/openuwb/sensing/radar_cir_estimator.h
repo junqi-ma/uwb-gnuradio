@@ -13,9 +13,9 @@
 
 #pragma once
 
-#include <gnuradio/uwb/uwb_phy_profile.h>
-#include <gnuradio/uwb/uwb_detector_core.h>
-#include <gnuradio/uwb/uwb_radar_timing_core.h>
+#include <openuwb/phy/hrp/common/profile.h>
+#include <openuwb/dsp/detector_core.h>
+#include <openuwb/sensing/radar_timing_core.h>
 
 #include <algorithm>
 #include <cmath>
